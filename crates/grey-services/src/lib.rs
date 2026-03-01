@@ -7,6 +7,8 @@
 //! - Balance
 //! - Preimage lookups
 
+pub mod accumulation;
+
 use grey_types::state::ServiceAccount;
 use grey_types::Balance;
 
