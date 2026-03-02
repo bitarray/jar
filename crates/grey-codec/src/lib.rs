@@ -11,6 +11,6 @@ pub mod decode;
 pub mod encode;
 pub mod error;
 
-pub use decode::Decode;
+pub use decode::{Decode, DecodeWithConfig};
 pub use encode::Encode;
 pub use error::CodecError;
