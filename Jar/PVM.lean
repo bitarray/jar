@@ -57,7 +57,7 @@ inductive PageAccess where
   | writable    -- W : page is readable and writable
   | readable    -- R : page is readable only
   | inaccessible -- ∅ : page is not accessible
-  deriving BEq
+  deriving BEq, Inhabited
 
 /-- μ : RAM state. GP eq (4.17).
     μ ≡ ⟨μ_v : 𝔹_{2^32}, μ_a : ⟦{W, R, ∅}⟧_p⟩ where p = 2^32 / Z_P. -/

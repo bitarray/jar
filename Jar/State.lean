@@ -2,6 +2,7 @@ import Jar.Notation
 import Jar.Types
 import Jar.Crypto
 import Jar.Codec
+import Jar.Accumulation
 
 /-!
 # State Transition — §4–13
@@ -252,18 +253,19 @@ structure AccumulationResult where
   accStats : Dict ServiceId ServiceStatistics
 
 /-- Perform accumulation of newly available work reports. GP §12.
-    Placeholder — full implementation requires PVM execution. -/
-opaque accumulate
-    (_available : Array WorkReport)
-    (s : State) (_t' : Timeslot) : AccumulationResult :=
-  { services := s.services
-    privileged := s.privileged
-    pendingValidators := s.pendingValidators
-    authQueue := s.authQueue
-    outputs := s.accOutputs
-    accQueue := s.accQueue
+    Delegates to the full accumulation pipeline in Jar.Accumulation. -/
+def performAccumulation
+    (available : Array WorkReport)
+    (s : State) (t' : Timeslot) : AccumulationResult :=
+  let result := Accumulation.accumulate s available t'
+  { services := result.services
+    privileged := result.privileged
+    pendingValidators := result.stagingKeys
+    authQueue := result.authQueue
+    outputs := result.outputs
+    accQueue := s.accQueue  -- Queue management handled separately
     accHistory := s.accHistory
-    accStats := Dict.empty }
+    accStats := Dict.empty }  -- Gas stats mapped separately
 
 -- ============================================================================
 -- §12.7 — Preimage Integration
@@ -340,7 +342,7 @@ def stateTransition (s : State) (b : Block) : Option State := do
   let bDag := updateParentStateRoot s.recent h
 
   -- §12 — Accumulation
-  let accResult := accumulate available s t'
+  let accResult := performAccumulation available s t'
 
   -- §7 — Recent history: β'
   let headerHash := Crypto.blake2b (Codec.encodeHeader h)
