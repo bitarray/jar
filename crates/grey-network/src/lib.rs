@@ -1,12 +1,11 @@
-//! P2P networking for JAM block, work-package, and vote propagation.
+//! P2P networking for JAM block propagation using libp2p gossipsub.
 //!
-//! This crate will handle:
-//! - Block announcement and propagation
-//! - Work-package distribution to guarantors
-//! - Erasure-coded chunk distribution for availability
-//! - Audit announcements and judgment exchange
-//! - GRANDPA vote propagation
-//! - Beefy commitment distribution
+//! This crate handles:
+//! - Block announcement and propagation via gossipsub
+//! - Peer discovery and connection management
+//! - GRANDPA-like finality vote propagation
+
+pub mod service;
 
 /// Signing context strings used in the JAM protocol (Appendix I.4.5).
 pub mod signing_contexts {

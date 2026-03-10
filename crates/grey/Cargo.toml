@@ -26,3 +26,9 @@ grey-services = { workspace = true }
 grey-network = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+libp2p = { workspace = true }
+futures = { workspace = true }

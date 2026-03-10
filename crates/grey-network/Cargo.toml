@@ -8,3 +8,10 @@ description = "P2P networking for JAM block, work-package, and vote propagation.
 [dependencies]
 grey-types = { workspace = true }
 grey-codec = { workspace = true }
+grey-crypto = { workspace = true }
+libp2p = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }

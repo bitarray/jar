@@ -6,6 +6,8 @@
 //! - Epoch-based key rotation
 //! - On-chain entropy accumulation
 
+pub mod authoring;
+pub mod genesis;
 pub mod safrole;
 
 pub use safrole::{
