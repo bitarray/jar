@@ -1200,6 +1200,7 @@ name = "grey-pvm"
 version = "0.1.0"
 dependencies = [
  "grey-types",
+ "libc",
  "thiserror 2.0.18",
  "tracing",
 ]

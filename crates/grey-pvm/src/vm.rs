@@ -1426,7 +1426,7 @@ fn smod_i64(a: i64, b: i64) -> i64 {
 }
 
 /// Compute the set of basic block start indices (ϖ, eq A.5).
-fn compute_basic_block_starts(code: &[u8], bitmask: &[u8]) -> Vec<bool> {
+pub fn compute_basic_block_starts(code: &[u8], bitmask: &[u8]) -> Vec<bool> {
     let len = code.len();
     if len == 0 {
         return vec![];
