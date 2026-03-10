@@ -139,56 +139,6 @@ def Memory.isWritable (m : Memory) (addr : Nat) : Bool :=
   else false
 
 -- ============================================================================
--- Core PVM Invocation — Appendix A
--- ============================================================================
-
-/-- Ψ(p, ω_7, g, regs, μ) : Core PVM invocation. GP §4.6, Appendix A.
-    Executes program p starting with entry value ω_7, gas limit g,
-    registers regs, and memory μ.
-    Returns (exit_reason × ω_7, ω_7, g', regs', μ'). -/
-opaque invoke
-    (program : ByteArray)
-    (entryValue : Reg)
-    (gasLimit : Gas)
-    (registers : Registers)
-    (memory : Memory) : InvocationResult :=
-  { exitReason := .panic
-    exitValue := 0
-    gas := 0
-    registers := registers
-    memory := memory }
-
--- ============================================================================
--- Standard Initialization — GP eq (A.37–A.43)
--- ============================================================================
-
-/-- Initialize PVM memory for standard invocation.
-    Sets up zero-initialized memory with program code, stack, and arguments. -/
-def initializeMemory (_programBlob : ByteArray) (_input : ByteArray) : Memory :=
-  -- Simplified: real implementation handles page allocation,
-  -- code placement, stack setup, and argument zone.
-  { value := ByteArray.mk (Array.mkArray memorySize 0)
-    access := Array.mkArray numPages .inaccessible }
-
-/-- Initialize registers: clear all to 0 except ω_7 (entry value). -/
-def initializeRegisters (entryValue : Reg) : Registers :=
-  let regs := Array.mkArray numRegisters (0 : Reg)
-  regs.set 7 entryValue
-
--- ============================================================================
--- Invocation Contexts — Appendix B (pvm_invocations.tex)
--- ============================================================================
-
-/-- Ψ_M : Standard PVM invocation with memory initialization. GP Appendix B.
-    Executes program blob with gas limit and input data.
-    Returns (gas_remaining, output_or_error). -/
-opaque invokeStandard
-    (programBlob : ByteArray)
-    (gasLimit : Gas)
-    (input : ByteArray) : Gas × (ByteArray ⊕ ExitReason) :=
-  (0, .inr .panic)
-
--- ============================================================================
 -- Host-Call Dispatch — GP eq (A.36)
 -- ============================================================================
 
@@ -197,21 +147,8 @@ opaque invokeStandard
 def HostCallHandler (ctx : Type) :=
   Reg → Gas → Registers → Memory → ctx → InvocationResult × ctx
 
-/-- Ψ_H : PVM invocation with host-call handling. GP eq (A.36).
-    Repeatedly invokes the PVM, dispatching host calls as they occur. -/
-opaque invokeWithHostCalls (ctx : Type)
-    (program : ByteArray)
-    (entryValue : Reg)
-    (gasLimit : Gas)
-    (registers : Registers)
-    (memory : Memory)
-    (handler : HostCallHandler ctx)
-    (context : ctx) : InvocationResult × ctx :=
-  ({ exitReason := .panic
-     exitValue := 0
-     gas := 0
-     registers := registers
-     memory := memory }, context)
+-- Core PVM invocation (Ψ), standard initialization (Y), host-call dispatch
+-- (Ψ_H), and standard invocation (Ψ_M) are implemented in Jar.PVM.Interpreter.
 
 -- ============================================================================
 -- Instruction Set Summary — Appendix A
@@ -228,8 +165,7 @@ inductive InstructionCategory where
   | twoReg       -- register-register ops
   | threeReg     -- three-register ALU ops
 
--- PVM opcodes are defined as natural numbers in the GP (~80 opcodes).
--- A full instruction decoder would map ByteArray → Instruction.
--- This is left abstract as the PVM executor is opaque.
+-- PVM opcodes (~141 instructions) are fully decoded and executed in
+-- Jar.PVM.Decode, Jar.PVM.Instructions, and Jar.PVM.Interpreter.
 
 end Jar.PVM

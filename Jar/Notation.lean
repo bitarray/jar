@@ -74,6 +74,13 @@ def values (d : Dict K V) : List V :=
 def insert (d : Dict K V) (k : K) (v : V) : Dict K V :=
   ⟨(k, v) :: d.entries.filter (fun p => !(p.1 == k))⟩
 
+/-- Remove a key from the dictionary. -/
+def erase (d : Dict K V) (k : K) : Dict K V :=
+  ⟨d.entries.filter (fun p => !(p.1 == k))⟩
+
+/-- Number of entries. -/
+def size (d : Dict K V) : Nat := d.entries.length
+
 /-- Dictionary subtraction: d ∖ s. GP §3.5. -/
 def subtract (d : Dict K V) (ks : List K) : Dict K V :=
   ⟨d.entries.filter (fun p => !ks.any (· == p.1))⟩

@@ -165,6 +165,46 @@ def writeU64 (m : Memory) (addr : UInt64) (val : UInt64) : MemResult Memory :=
   writeMemBytes m addr val 8
 
 -- ============================================================================
+-- Byte-Array Reads/Writes — for host-call data transfer
+-- ============================================================================
+
+/-- Read n raw bytes from memory starting at addr. Returns ByteArray or fault. -/
+def readByteArray (m : Memory) (addr : UInt64) (n : Nat) : MemResult ByteArray :=
+  if n == 0 then .ok ByteArray.empty
+  else
+    match checkReadable m addr n with
+    | .panic => .panic
+    | .fault a => .fault a
+    | .ok () =>
+      let base := addr.toNat % (2^32)
+      let bytes := Id.run do
+        let mut arr := ByteArray.mkEmpty n
+        for i in [:n] do
+          let idx := (base + i) % (2^32)
+          let b := if idx < m.value.size then m.value.get! idx else 0
+          arr := arr.push b
+        return arr
+      .ok bytes
+
+/-- Write a ByteArray into memory starting at addr. Returns updated memory or fault. -/
+def writeByteArray (m : Memory) (addr : UInt64) (data : ByteArray) : MemResult Memory :=
+  if data.size == 0 then .ok m
+  else
+    match checkWritable m addr data.size with
+    | .panic => .panic
+    | .fault a => .fault a
+    | .ok () =>
+      let base := addr.toNat % (2^32)
+      let mem' := Id.run do
+        let mut v := m.value
+        for i in [:data.size] do
+          let idx := (base + i) % (2^32)
+          if idx < v.size then
+            v := v.set! idx (data.get! i)
+        return v
+      .ok { m with value := mem' }
+
+-- ============================================================================
 -- sbrk — GP Appendix A
 -- ============================================================================
 

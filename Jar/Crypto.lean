@@ -24,11 +24,15 @@ namespace Jar.Crypto
 -- ============================================================================
 
 /-- ℋ(m) : Blake2b 256-bit hash. GP §3.8.1.
-    blake2b : 𝔹 → ℍ. RFC 7693. -/
+    blake2b : 𝔹 → ℍ. RFC 7693.
+    Deliberately left abstract — intended to be axiomatically specified
+    or linked via FFI to a concrete cryptographic implementation. -/
 opaque blake2b (m : ByteArray) : Hash := default
 
 /-- ℋ_K(m) : Keccak 256-bit hash. GP §3.8.1.
-    keccak256 : 𝔹 → ℍ. Bertoni et al. 2013, EYP. -/
+    keccak256 : 𝔹 → ℍ. Bertoni et al. 2013, EYP.
+    Deliberately left abstract — intended to be axiomatically specified
+    or linked via FFI to a concrete cryptographic implementation. -/
 opaque keccak256 (m : ByteArray) : Hash := default
 
 -- ============================================================================
@@ -37,14 +41,18 @@ opaque keccak256 (m : ByteArray) : Hash := default
 
 /-- V̄_k⟨m⟩ : Ed25519 signature verification. GP §3.8.2.
     Returns true iff sig is a valid Ed25519 signature of message m
-    under public key k. -/
+    under public key k.
+    Deliberately left abstract — intended to be axiomatically specified
+    or linked via FFI to a concrete cryptographic implementation. -/
 opaque ed25519Verify
   (key : Ed25519PublicKey)
   (message : ByteArray)
   (sig : Ed25519Signature) : Bool := false
 
 /-- V̄_k⟨m⟩ : Ed25519 signing (requires secret key knowledge). GP §3.8.2.
-    sign_k(m) ∈ V̄_k⟨m⟩ ⊂ 𝔹_64. -/
+    sign_k(m) ∈ V̄_k⟨m⟩ ⊂ 𝔹_64.
+    Deliberately left abstract — intended to be axiomatically specified
+    or linked via FFI to a concrete cryptographic implementation. -/
 opaque ed25519Sign
   (secretKey : ByteArray)
   (message : ByteArray) : Ed25519Signature := default
@@ -55,14 +63,18 @@ opaque ed25519Sign
 
 /-- Ṽ_k^x⟨m⟩ : Bandersnatch signature verification. GP §3.8.2, Appendix G eq (G.1).
     Singly-contextualized Schnorr-like signature under IETF VRF template.
-    verify(k, context, message, sig) = ⊤ iff valid. -/
+    verify(k, context, message, sig) = ⊤ iff valid.
+    Deliberately left abstract — intended to be axiomatically specified
+    or linked via FFI to a concrete cryptographic implementation. -/
 opaque bandersnatchVerify
   (key : BandersnatchPublicKey)
   (context : ByteArray)
   (message : ByteArray)
   (sig : BandersnatchSignature) : Bool := false
 
-/-- Ṽ_k^x⟨m⟩ : Bandersnatch signing (requires secret key). GP §3.8.2. -/
+/-- Ṽ_k^x⟨m⟩ : Bandersnatch signing (requires secret key). GP §3.8.2.
+    Deliberately left abstract — intended to be axiomatically specified
+    or linked via FFI to a concrete cryptographic implementation. -/
 opaque bandersnatchSign
   (secretKey : ByteArray)
   (context : ByteArray)
@@ -70,7 +82,9 @@ opaque bandersnatchSign
 
 /-- Y(s) : VRF output extraction. GP Appendix G eq (G.2).
     Extracts the first 32 bytes of the VRF output from a signature.
-    banderout(s) ∈ ℍ. Influenced by context but not by message. -/
+    banderout(s) ∈ ℍ. Influenced by context but not by message.
+    Deliberately left abstract — intended to be axiomatically specified
+    or linked via FFI to a concrete cryptographic implementation. -/
 opaque bandersnatchOutput
   (sig : BandersnatchSignature) : Hash := default
 
@@ -80,19 +94,25 @@ opaque bandersnatchOutput
 
 /-- R(keys) : Ring root generation. GP Appendix G eq (G.3).
     getringroot(⟦B̃⟧) ∈ B° ⊂ 𝔹_144.
-    Commits to a set of Bandersnatch public keys. -/
+    Commits to a set of Bandersnatch public keys.
+    Deliberately left abstract — intended to be axiomatically specified
+    or linked via FFI to a concrete cryptographic implementation. -/
 opaque bandersnatchRingRoot
   (keys : Array BandersnatchPublicKey) : BandersnatchRingRoot := default
 
 /-- V°_r^x⟨m⟩ : Ring VRF proof verification. GP Appendix G eq (G.4).
-    zk-SNARK-enabled anonymous proof of secret knowledge within a set. -/
+    zk-SNARK-enabled anonymous proof of secret knowledge within a set.
+    Deliberately left abstract — intended to be axiomatically specified
+    or linked via FFI to a concrete cryptographic implementation. -/
 opaque bandersnatchRingVerify
   (root : BandersnatchRingRoot)
   (context : ByteArray)
   (message : ByteArray)
   (proof : BandersnatchRingVrfProof) : Bool := false
 
-/-- V°_r^x⟨m⟩ : Ring VRF proof generation (requires secret key). -/
+/-- V°_r^x⟨m⟩ : Ring VRF proof generation (requires secret key).
+    Deliberately left abstract — intended to be axiomatically specified
+    or linked via FFI to a concrete cryptographic implementation. -/
 opaque bandersnatchRingSign
   (secretKey : ByteArray)
   (root : BandersnatchRingRoot)
@@ -100,7 +120,9 @@ opaque bandersnatchRingSign
   (message : ByteArray) : BandersnatchRingVrfProof := default
 
 /-- Y(p) : VRF output extraction from ring proof. GP Appendix G eq (G.5).
-    banderout(p) ∈ ℍ. Same VRF output semantics as regular signatures. -/
+    banderout(p) ∈ ℍ. Same VRF output semantics as regular signatures.
+    Deliberately left abstract — intended to be axiomatically specified
+    or linked via FFI to a concrete cryptographic implementation. -/
 opaque bandersnatchRingOutput
   (proof : BandersnatchRingVrfProof) : Hash := default
 
@@ -109,13 +131,17 @@ opaque bandersnatchRingOutput
 -- ============================================================================
 
 /-- BLS signature verification. GP §3.8.2.
-    Used for Beefy finality commitments. -/
+    Used for Beefy finality commitments.
+    Deliberately left abstract — intended to be axiomatically specified
+    or linked via FFI to a concrete cryptographic implementation. -/
 opaque blsVerify
   (key : BlsPublicKey)
   (message : ByteArray)
   (sig : BlsSignature) : Bool := false
 
-/-- BLS signing (requires secret key). GP §3.8.2. -/
+/-- BLS signing (requires secret key). GP §3.8.2.
+    Deliberately left abstract — intended to be axiomatically specified
+    or linked via FFI to a concrete cryptographic implementation. -/
 opaque blsSign
   (secretKey : ByteArray)
   (message : ByteArray) : BlsSignature := default

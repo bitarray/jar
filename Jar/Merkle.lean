@@ -1,5 +1,6 @@
 import Jar.Notation
 import Jar.Types.Numerics
+import Jar.Codec
 import Jar.Crypto
 
 /-!
@@ -36,30 +37,157 @@ inductive Node where
       31-byte key, 32-byte hash of value. -/
   | regularLeaf (key : OctetSeq 31) (valueHash : Hash) : Node
 
-/-- Encode a branch node to 64 bytes. GP Appendix D.
-    B(l, r) = 0 ∥ bits(l)[1:256] ∥ bits(r). -/
-opaque encodeBranch (left right : Hash) : OctetSeq 64 := default
+/-- Get a single bit from a byte array, treating it as a big-endian bit string.
+    Bit 0 is the MSB of byte 0. -/
+private def getBit (data : ByteArray) (bitIdx : Nat) : Bool :=
+  let byteIdx := bitIdx / 8
+  let bitPos := 7 - (bitIdx % 8)
+  if byteIdx < data.size then
+    (data.get! byteIdx).toNat >>> bitPos &&& 1 == 1
+  else false
 
-/-- Encode a leaf node to 64 bytes. GP Appendix D.
-    L(k, v) with embedded or hashed value. -/
-opaque encodeLeaf (key : OctetSeq 31) (value : ByteArray) : OctetSeq 64 := default
+/-- Set a single bit in a byte array (big-endian bit ordering). -/
+private def setBit (data : ByteArray) (bitIdx : Nat) (val : Bool) : ByteArray :=
+  let byteIdx := bitIdx / 8
+  let bitPos := 7 - (bitIdx % 8)
+  if byteIdx < data.size then
+    let old := data.get! byteIdx
+    let mask := UInt8.ofNat (1 <<< bitPos)
+    let new_ := if val then old ||| mask else old &&& (255 - mask)
+    data.set! byteIdx new_
+  else data
+
+/-- Encode a branch node to 64 bytes. GP Appendix D §D.3.
+    B(l, r) = [0] ∥ bits(l)[1..256] ∥ bits(r).
+    Bit 0 = 0 (branch marker). Bits 1-255 = left hash bits 1-255 (skip MSB).
+    Bits 256-511 = all 256 bits of right hash. -/
+def encodeBranch (left right : Hash) : OctetSeq 64 :=
+  let out := ByteArray.mk (Array.mkArray 64 0)
+  -- Bit 0 = 0 (already zero)
+  -- Copy left hash bits 1..255 into output bits 1..255
+  let out := Id.run do
+    let mut o := out
+    for i in [1:256] do
+      o := setBit o i (getBit left.data i)
+    return o
+  -- Copy right hash bits 0..255 into output bits 256..511
+  let out := Id.run do
+    let mut o := out
+    for i in [:256] do
+      o := setBit o (256 + i) (getBit right.data i)
+    return o
+  ⟨out, sorry⟩
+
+/-- Encode a leaf node to 64 bytes. GP Appendix D §D.4.
+    If |v| ≤ 32 (embedded): [1,0] ∥ |v|(6 bits) ∥ key(248 bits) ∥ v_padded(256 bits).
+    If |v| > 32 (regular):  [1,1,0,0,0,0,0,0] ∥ key(248 bits) ∥ H(v)(256 bits). -/
+def encodeLeaf (key : OctetSeq 31) (value : ByteArray) : OctetSeq 64 :=
+  let out := ByteArray.mk (Array.mkArray 64 0)
+  if value.size <= 32 then
+    -- Embedded leaf
+    -- Bit 0 = 1 (leaf), Bit 1 = 0 (embedded)
+    let out := setBit out 0 true
+    -- Bits 2-7: value length (6 bits, big-endian)
+    let len := value.size
+    let out := Id.run do
+      let mut o := out
+      for i in [:6] do
+        let bit := (len >>> (5 - i)) &&& 1 == 1
+        o := setBit o (2 + i) bit
+      return o
+    -- Bits 8-255: key (31 bytes = 248 bits)
+    let out := Id.run do
+      let mut o := out
+      for i in [:248] do
+        o := setBit o (8 + i) (getBit key.data i)
+      return o
+    -- Bits 256-511: value zero-padded to 32 bytes
+    let padded := value ++ ByteArray.mk (Array.mkArray (32 - value.size) 0)
+    let out := Id.run do
+      let mut o := out
+      for i in [:256] do
+        o := setBit o (256 + i) (getBit padded i)
+      return o
+    ⟨out, sorry⟩
+  else
+    -- Regular leaf
+    -- Byte 0 = 0b11000000 = 0xC0 (bits: [1,1,0,0,0,0,0,0])
+    let out := out.set! 0 0xC0
+    -- Bits 8-255: key (31 bytes = 248 bits)
+    let out := Id.run do
+      let mut o := out
+      for i in [:248] do
+        o := setBit o (8 + i) (getBit key.data i)
+      return o
+    -- Bits 256-511: H(value)
+    let vh := Crypto.blake2b value
+    let out := Id.run do
+      let mut o := out
+      for i in [:256] do
+        o := setBit o (256 + i) (getBit vh.data i)
+      return o
+    ⟨out, sorry⟩
 
 -- ============================================================================
--- Merkle Trie Root — Appendix D
+-- Merkle Trie Root — Appendix D §D.5
 -- ============================================================================
 
-/-- M(d) : Compute Merkle trie root from a dictionary of bitstring keys
-    to (key, value) pairs. GP Appendix D eq (D.3–D.5).
-    Returns ℍ_0 for empty, or blake2b(encode(root_node)). -/
-opaque trieRoot (entries : Array (OctetSeq 31 × ByteArray)) : Hash := Hash.zero
+/-- A bitstring key used during trie construction: the 248-bit key from a 31-byte OctetSeq. -/
+private structure BitKey where
+  data : ByteArray  -- 31 bytes
+  deriving BEq, Inhabited
+
+/-- Get bit at position in a BitKey (big-endian). -/
+private def BitKey.bit (k : BitKey) (pos : Nat) : Bool := getBit k.data pos
+
+/-- M(d) : Compute Merkle trie root. GP Appendix D eq (D.3–D.5).
+    d is a list of (key, value) pairs. Keys are 31 bytes (248 bits).
+    - Empty: return ℍ_0
+    - Single entry: return H(L(k, v))
+    - Multiple entries: split on the first distinguishing bit, recurse.
+    `depth` serves as fuel for recursion (max 248 bits). -/
+private def trieRootAux (entries : Array (BitKey × ByteArray)) (depth : Nat)
+    : Hash :=
+  match depth with
+  | 0 =>
+    -- Out of fuel; return hash of first entry if any
+    if entries.size > 0 then
+      let (k, v) := entries[0]!
+      Crypto.blake2b (encodeLeaf ⟨k.data, sorry⟩ v).data
+    else Hash.zero
+  | fuel + 1 =>
+    if entries.size == 0 then Hash.zero
+    else if entries.size == 1 then
+      let (k, v) := entries[0]!
+      Crypto.blake2b (encodeLeaf ⟨k.data, sorry⟩ v).data
+    else
+      -- Find the first bit position (starting from `248 - fuel`) that
+      -- distinguishes the entries. Split into left (bit=0) and right (bit=1).
+      let bitPos := 248 - fuel
+      let left := entries.filter fun (k, _) => !k.bit bitPos
+      let right := entries.filter fun (k, _) => k.bit bitPos
+      -- If all entries go one way, skip this bit level
+      if left.size == 0 then trieRootAux right fuel
+      else if right.size == 0 then trieRootAux left fuel
+      else
+        let lHash := trieRootAux left fuel
+        let rHash := trieRootAux right fuel
+        Crypto.blake2b (encodeBranch lHash rHash).data
+
+/-- M(d) : Compute Merkle trie root from key-value pairs. GP Appendix D.
+    Keys are 31-byte OctetSeqs. Returns ℍ_0 for empty. -/
+def trieRoot (entries : Array (OctetSeq 31 × ByteArray)) : Hash :=
+  let bitEntries := entries.map fun (k, v) => ({ data := k.data : BitKey }, v)
+  trieRootAux bitEntries 248
 
 -- ============================================================================
--- State Merklization — Appendix D
+-- State Merklization — Appendix D §D.2
 -- ============================================================================
 
 /-- M_σ(σ) : Compute the state Merkle root. GP Appendix D eq (D.2).
-    Serializes state into key-value pairs and computes the trie root. -/
-opaque stateRoot (entries : Array (OctetSeq 31 × ByteArray)) : Hash := Hash.zero
+    Delegates to the trie root computation on state key-value pairs. -/
+def stateRoot (entries : Array (OctetSeq 31 × ByteArray)) : Hash :=
+  trieRoot entries
 
 -- ============================================================================
 -- Well-Balanced Binary Merkle Tree — Appendix E

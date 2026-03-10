@@ -28,6 +28,7 @@ structure ValidatorKey where
   bls : BlsPublicKey
   /-- k_m : Metadata (hardware address etc). 𝔹_128. -/
   metadata : OctetSeq 128
+  deriving Inhabited
 
 -- ============================================================================
 -- §6.2 — Tickets (eq:ticket)

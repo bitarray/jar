@@ -2,6 +2,7 @@ import Jar.Notation
 import Jar.Types
 import Jar.Crypto
 import Jar.Codec
+import Jar.Consensus
 import Jar.Accumulation
 
 /-!
@@ -362,7 +363,8 @@ def stateTransition (s : State) (b : Block) : Option State := do
     authPool := alpha'
     recent := beta'
     accOutputs := accResult.outputs
-    safrole := s.safrole  -- TODO: full Safrole update (§6)
+    safrole := Consensus.updateSafrole s.safrole ext.tickets eta' kappa'
+                  (isEpochChange s.timeslot t') (epochSlot t')
     services := delta'
     entropy := eta'
     pendingValidators := accResult.pendingValidators
