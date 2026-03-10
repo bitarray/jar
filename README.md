@@ -1,5 +1,7 @@
 # JAR — JAM Axiomatic Reference
 
+[![Matrix](https://img.shields.io/matrix/jar%3Amatrix.org?logo=matrix&label=chat)](https://matrix.to/#/#jar:matrix.org)
+
 Lean 4 formalization of the JAM (Join-Accumulate Machine) protocol as specified
 in the [Gray Paper v0.7.2](https://github.com/gavofyork/graypaper/releases/download/v0.7.2/graypaper-0.7.2.pdf).
 
@@ -33,4 +35,4 @@ lake build
 
 ## Toolchain
 
-Lean 4.17.0 — pinned in `lean-toolchain`.
+Lean 4.27.0 — pinned in `lean-toolchain`.
