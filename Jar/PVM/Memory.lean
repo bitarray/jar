@@ -40,7 +40,6 @@ def pageAligned (addr : UInt64) : UInt64 :=
 def checkReadable (m : Memory) (addr : UInt64) (n : Nat) : MemResult Unit :=
   if addr.toNat < Z_Z then .panic
   else
-    -- Check all pages touched by [addr, addr+n)
     let startPage := pageOf addr
     let endPage := pageOf (UInt64.ofNat (addr.toNat + n - 1))
     let rec go (p : Nat) (fuel : Nat) : MemResult Unit :=
@@ -84,7 +83,7 @@ def readMemBytes (m : Memory) (addr : UInt64) (n : Nat) : MemResult UInt64 :=
       let mut acc : Nat := 0
       for i in [:n] do
         let idx := (base + i) % (2^32)
-        let b := if idx < m.value.size then m.value.get! idx |>.toNat else 0
+        let b := m.getByte idx |>.toNat
         acc := acc + b * 2 ^ (8 * i)
       return UInt64.ofNat acc
     .ok val
@@ -139,14 +138,13 @@ def writeMemBytes (m : Memory) (addr : UInt64) (val : UInt64) (n : Nat)
   | .ok () =>
     let base := addr.toNat % (2^32)
     let mem' := Id.run do
-      let mut v := m.value
+      let mut mem := m
       for i in [:n] do
         let idx := (base + i) % (2^32)
         let b := UInt8.ofNat ((val.toNat / 2 ^ (8 * i)) % 256)
-        if idx < v.size then
-          v := v.set! idx b
-      return v
-    .ok { m with value := mem' }
+        mem := mem.setByte idx b
+      return mem
+    .ok mem'
 
 /-- Write 1 byte. -/
 def writeU8 (m : Memory) (addr : UInt64) (val : UInt64) : MemResult Memory :=
@@ -181,8 +179,7 @@ def readByteArray (m : Memory) (addr : UInt64) (n : Nat) : MemResult ByteArray :
         let mut arr := ByteArray.emptyWithCapacity n
         for i in [:n] do
           let idx := (base + i) % (2^32)
-          let b := if idx < m.value.size then m.value.get! idx else 0
-          arr := arr.push b
+          arr := arr.push (m.getByte idx)
         return arr
       .ok bytes
 
@@ -196,13 +193,12 @@ def writeByteArray (m : Memory) (addr : UInt64) (data : ByteArray) : MemResult M
     | .ok () =>
       let base := addr.toNat % (2^32)
       let mem' := Id.run do
-        let mut v := m.value
+        let mut mem := m
         for i in [:data.size] do
           let idx := (base + i) % (2^32)
-          if idx < v.size then
-            v := v.set! idx (data.get! i)
-        return v
-      .ok { m with value := mem' }
+          mem := mem.setByte idx (data.get! i)
+        return mem
+      .ok mem'
 
 -- ============================================================================
 -- sbrk — GP Appendix A

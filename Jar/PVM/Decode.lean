@@ -57,7 +57,7 @@ structure ProgramBlob where
   /-- Jump table: maps dynamic jump indices to code positions. -/
   jumpTable : Array UInt32
 
-/-- Decode a variable-length natural from `n` LE bytes starting at offset. -/
+/-- Decode a fixed-width natural from `n` LE bytes starting at offset. -/
 def decodeLEn (data : ByteArray) (offset n : Nat) : Nat :=
   let rec go (i : Nat) (acc : Nat) (fuel : Nat) : Nat :=
     match fuel with
@@ -70,41 +70,83 @@ def decodeLEn (data : ByteArray) (offset n : Nat) : Nat :=
         go (i + 1) (acc + b * 2 ^ (8 * i)) fuel'
   go 0 0 n
 
+/-- Decode a JAM codec variable-length natural number. GP Appendix C.
+    Returns (value, bytes_consumed) or none. -/
+def decodeJamNatural (data : ByteArray) (offset : Nat) : Option (Nat × Nat) :=
+  if offset >= data.size then none
+  else
+    let first := data.get! offset |>.toNat
+    if first < 128 then
+      some (first, 1)
+    else if first < 192 then
+      if offset + 2 > data.size then none
+      else
+        let val := (first &&& 0x3F) * 256 + (data.get! (offset + 1)).toNat
+        some (val, 2)
+    else if first < 224 then
+      if offset + 3 > data.size then none
+      else
+        let val := (first &&& 0x1F) * 65536
+          + (data.get! (offset + 2)).toNat * 256
+          + (data.get! (offset + 1)).toNat
+        some (val, 3)
+    else
+      if offset + 4 > data.size then none
+      else
+        let val := (first &&& 0x0F) * 16777216
+          + (data.get! (offset + 3)).toNat * 65536
+          + (data.get! (offset + 2)).toNat * 256
+          + (data.get! (offset + 1)).toNat
+        some (val, 4)
+
 /-- Deblob: parse a program blob into (code, bitmask, jumpTable). GP Appendix A.
-    Format: encode[3](|j|) ‖ encode[1](z) ‖ encode[3](|c|) ‖ encode[z](j) ‖ c ‖ k
-    where z = jump table entry size (1-4), j = jump table, c = code, k = bitmask. -/
+    Format: E(|j|) ‖ E₁(z) ‖ E(|c|) ‖ E_z(j) ‖ c ‖ k
+    where z = jump table entry size (1-4), j = jump table, c = code, k = bitmask.
+    E() uses JAM codec variable-length natural encoding. -/
 def deblob (blob : ByteArray) : Option ProgramBlob := do
-  if blob.size < 7 then none
-  let jumpLen := decodeLEn blob 0 3     -- |j|: number of jump table entries
-  let z := decodeLEn blob 3 1           -- z: bytes per jump table entry
-  let codeLen := decodeLEn blob 4 3     -- |c|: code length
+  -- Decode |j| using variable-length natural
+  let (jumpLen, n1) ← decodeJamNatural blob 0
+  let mut offset := n1
+  -- Decode z: 1 byte (bytes per jump table entry)
+  if offset >= blob.size then none
+  let z := (blob.get! offset).toNat
+  offset := offset + 1
   if z == 0 || z > 4 then none
-  let jumpDataStart := 7
+  -- Decode |c| using variable-length natural
+  let (codeLen, n3) ← decodeJamNatural blob offset
+  offset := offset + n3
+  -- Read jump table: jumpLen entries of z bytes each
+  let jumpDataStart := offset
   let jumpDataLen := jumpLen * z
-  let codeStart := jumpDataStart + jumpDataLen
-  let bitmaskStart := codeStart + codeLen
-  -- Bitmask covers code bytes, packed 8 bits per byte, ceil division
-  let bitmaskLen := (codeLen + 7) / 8
-  if bitmaskStart + bitmaskLen > blob.size then none
-  -- Parse jump table
+  if jumpDataStart + jumpDataLen > blob.size then none
   let jumpTable := Array.ofFn (n := jumpLen) fun ⟨i, _⟩ =>
     UInt32.ofNat (decodeLEn blob (jumpDataStart + i * z) z)
-  -- Extract code
-  let code := blob.extract codeStart (codeStart + codeLen)
-  -- Extract bitmask
-  let bitmask := blob.extract bitmaskStart (bitmaskStart + bitmaskLen)
+  offset := jumpDataStart + jumpDataLen
+  -- Read code: codeLen bytes
+  if offset + codeLen > blob.size then none
+  let code := blob.extract offset (offset + codeLen)
+  offset := offset + codeLen
+  -- Read bitmask: packed bits, ceil(codeLen/8) bytes
+  let bitmaskLen := (codeLen + 7) / 8
+  if offset + bitmaskLen > blob.size then none
+  let packedBitmask := blob.extract offset (offset + bitmaskLen)
+  -- Unpack: each bit becomes one byte (LSB first per byte)
+  let bitmask := ByteArray.mk (Array.ofFn (n := codeLen) fun ⟨i, _⟩ =>
+    let byteIdx := i / 8
+    let bitIdx := i % 8
+    if byteIdx < packedBitmask.size then
+      UInt8.ofNat ((packedBitmask.get! byteIdx).toNat / (2 ^ bitIdx) % 2)
+    else 0)
   some { code, bitmask, jumpTable }
 
 -- ============================================================================
 -- Bitmask / Skip — GP Appendix A
 -- ============================================================================
 
-/-- Check if bit at position `i` is set in the bitmask. -/
+/-- Check if bit at position `i` is set in the (unpacked) bitmask.
+    After deblob, the bitmask has one byte per code byte (0 or 1). -/
 def bitmaskGet (bm : ByteArray) (i : Nat) : Bool :=
-  let byteIdx := i / 8
-  let bitIdx := i % 8
-  if byteIdx < bm.size then
-    (bm.get! byteIdx).toNat / (2 ^ bitIdx) % 2 == 1
+  if i < bm.size then bm.get! i != 0
   else true  -- beyond bitmask is treated as set (for termination)
 
 /-- Skip distance: number of bytes until the next opcode position. GP eq (77).
@@ -147,62 +189,116 @@ def regD (instrBytes : ByteArray) (pc : Nat) : Fin 13 :=
 def readImmBytes (code : ByteArray) (offset n : Nat) : UInt64 :=
   UInt64.ofNat (decodeLEn code offset n)
 
-/-- Extract a sign-extended immediate from instruction bytes.
-    Starts at `pc + startByte`, reads up to `skip + 1 - startByte` bytes.
-    The immediate is sign-extended based on the number of available bytes. -/
+/-- Read `n` bytes and sign-extend (matching Rust read_signed_at). -/
+def readSignedAt (code : ByteArray) (offset n : Nat) : UInt64 :=
+  if n == 0 then 0
+  else sext n (readImmBytes code offset n)
+
+/-- Zero-extended code read (ζ, eq A.4). -/
+def zeta (code : ByteArray) (i : Nat) : Nat :=
+  if i < code.size then code.get! i |>.toNat else 0
+
+-- ============================================================================
+-- Argument Extraction — GP Appendix A.5 (matching grey-pvm/src/args.rs)
+-- ============================================================================
+
+/-- A.5.2: OneImm — one immediate (ecalli).
+    lX = min(4, ℓ), νX = X_lX(E_lX⁻¹(ζ[ı+1..+lX])). -/
+def extractOneImm (code : ByteArray) (pc : Nat) (skip : Nat) : UInt64 :=
+  let lx := min 4 skip
+  readSignedAt code (pc + 1) lx
+
+/-- Generic immediate extraction: read sign-extended imm starting at byte `startByte`.
+    Available bytes = max(0, ℓ + 1 - startByte), capped at 4. -/
 def extractImm (code : ByteArray) (pc : Nat) (skip : Nat) (startByte : Nat) : UInt64 :=
-  let availBytes := if skip + 1 > startByte then skip + 1 - startByte else 0
-  let nBytes := min availBytes 4
-  if nBytes == 0 then 0
-  else
-    let raw := readImmBytes code (pc + startByte) nBytes
-    sext nBytes raw
+  let avail := if skip + 1 > startByte then skip + 1 - startByte else 0
+  let lx := min 4 avail
+  readSignedAt code (pc + startByte) lx
 
-/-- Extract a sign-extended 8-byte immediate (for load_imm_64). -/
-def extractImm64 (code : ByteArray) (pc : Nat) (skip : Nat) : UInt64 :=
-  let availBytes := if skip + 1 > 2 then skip + 1 - 2 else 0
-  let nBytes := min availBytes 8
-  if nBytes == 0 then 0
-  else
-    let raw := readImmBytes code (pc + 2) nBytes
-    sext nBytes raw
+/-- A.5.3: OneRegExtImm — register + 8-byte immediate (load_imm_64). -/
+def extractImm64 (code : ByteArray) (pc : Nat) (_skip : Nat) : UInt64 :=
+  readImmBytes code (pc + 2) 8  -- E₈⁻¹(ζ[ı+2..+8]), no sign extension
 
-/-- Extract two immediates for two-immediate format (opcodes 30-33, 70-73, 80-90, 180).
-    Byte 1 encodes lengths: lX in bits 0-1, lY in bits 2-3 (each 0-3 means 1-4 bytes).
-    Returns (immX, immY). -/
-def extractTwoImm (code : ByteArray) (pc : Nat) (_skip : Nat) : UInt64 × UInt64 :=
-  let b1 := if pc + 1 < code.size then code.get! (pc + 1) |>.toNat else 0
-  let lX := (b1 % 4) + 1  -- 1-4 bytes for first immediate
-  let lY := (b1 / 4 % 4) + 1  -- 1-4 bytes for second immediate
-  let immX := sext lX (readImmBytes code (pc + 2) lX)
-  let immY := sext lY (readImmBytes code (pc + 2 + lX) lY)
+/-- A.5.4: TwoImm — two immediates (store_imm_*).
+    lX = min(4, ζ[ı+1] mod 8). -/
+def extractTwoImm (code : ByteArray) (pc : Nat) (skip : Nat) : UInt64 × UInt64 :=
+  let lx := min 4 (zeta code (pc + 1) % 8)
+  let ly := if skip > lx + 1 then min 4 (skip - lx - 1) else 0
+  let immX := readSignedAt code (pc + 2) lx
+  let immY := readSignedAt code (pc + 2 + lx) ly
   (immX, immY)
 
-/-- Extract register + immediate + offset for branch-imm format (opcodes 80-90).
-    Byte 1 low 4 bits: register, rest: lX length encoding.
-    Returns (reg, imm, offset). -/
-def extractRegImmOffset (code : ByteArray) (pc : Nat) (skip : Nat) : Fin 13 × UInt64 × UInt64 :=
-  let b1 := if pc + 1 < code.size then code.get! (pc + 1) |>.toNat else 0
-  let reg : Fin 13 := ⟨min 12 (b1 % 16), by omega⟩
-  let lX := (b1 / 16 % 4) + 1
-  let immX := sext lX (readImmBytes code (pc + 2) lX)
-  -- Offset is the remaining bytes after immX
-  let offsetStart := pc + 2 + lX
-  let remainingBytes := if skip + 1 > (2 + lX) then skip + 1 - (2 + lX) else 0
-  let nOff := min remainingBytes 4
-  let offset := sext nOff (readImmBytes code offsetStart nOff)
-  (reg, immX, offset)
+/-- A.5.5: OneOffset — jump target.
+    lX = min(4, ℓ), target = ı + Z_lX(...). -/
+def extractOffset (code : ByteArray) (pc : Nat) (skip : Nat) : UInt64 :=
+  let lx := min 4 skip
+  let signedOffset := readSignedAt code (pc + 1) lx
+  -- target = pc + signed_offset (wrapping)
+  (UInt64.ofNat pc) + signedOffset
 
-/-- Extract two registers + two immediates for format 180. -/
-def extractTwoRegTwoImm (code : ByteArray) (pc : Nat) (_skip : Nat)
+/-- A.5.6: OneRegOneImm — register + one immediate.
+    rA = min(12, ζ[ı+1] mod 16), lX = min(4, max(0, ℓ-1)). -/
+def extractRegImm (code : ByteArray) (pc : Nat) (skip : Nat) : Fin 13 × UInt64 :=
+  let ra : Fin 13 := ⟨min 12 (zeta code (pc + 1) % 16), by omega⟩
+  let lx := if skip > 1 then min 4 (skip - 1) else 0
+  let imm := readSignedAt code (pc + 2) lx
+  (ra, imm)
+
+/-- A.5.7: OneRegTwoImm — register + two immediates (branch_eq_imm etc).
+    Byte 1: low 4 = reg, bits 4-6 = lX encoding. -/
+def extractRegTwoImm (code : ByteArray) (pc : Nat) (skip : Nat) : Fin 13 × UInt64 × UInt64 :=
+  let b1 := zeta code (pc + 1)
+  let ra : Fin 13 := ⟨min 12 (b1 % 16), by omega⟩
+  let lx := min 4 (b1 / 16 % 8)
+  let ly := if skip > lx + 1 then min 4 (skip - lx - 1) else 0
+  let immX := readSignedAt code (pc + 2) lx
+  let immY := readSignedAt code (pc + 2 + lx) ly
+  (ra, immX, immY)
+
+/-- A.5.8: OneRegImmOffset — register + immediate + offset (load_imm_jump, branches).
+    Same encoding as OneRegTwoImm but second value is pc-relative offset.
+    Returns (reg, imm, target). -/
+def extractRegImmOffset (code : ByteArray) (pc : Nat) (skip : Nat) : Fin 13 × UInt64 × UInt64 :=
+  let b1 := zeta code (pc + 1)
+  let reg : Fin 13 := ⟨min 12 (b1 % 16), by omega⟩
+  let lx := min 4 (b1 / 16 % 8)
+  let ly := if skip > lx + 1 then min 4 (skip - lx - 1) else 0
+  let imm := readSignedAt code (pc + 2) lx
+  let signedOffset := readSignedAt code (pc + 2 + lx) ly
+  let target := (UInt64.ofNat pc) + signedOffset
+  (reg, imm, target)
+
+/-- A.5.10: TwoRegOneImm — two registers + one immediate.
+    lX = min(4, max(0, ℓ-1)). Used for ALU ops, loads, stores. -/
+def extractTwoRegImm (code : ByteArray) (pc : Nat) (skip : Nat)
+    : Fin 13 × Fin 13 × UInt64 :=
+  let rA := regA code pc
+  let rB := regB code pc
+  let lx := if skip > 1 then min 4 (skip - 1) else 0
+  let imm := readSignedAt code (pc + 2) lx
+  (rA, rB, imm)
+
+/-- A.5.11: TwoRegOneOffset — two registers + offset.
+    Same as TwoRegOneImm but value is pc-relative. Returns (rA, rB, target). -/
+def extractTwoRegOffset (code : ByteArray) (pc : Nat) (skip : Nat)
+    : Fin 13 × Fin 13 × UInt64 :=
+  let rA := regA code pc
+  let rB := regB code pc
+  let lx := if skip > 1 then min 4 (skip - 1) else 0
+  let signedOffset := readSignedAt code (pc + 2) lx
+  let target := (UInt64.ofNat pc) + signedOffset
+  (rA, rB, target)
+
+/-- A.5.12: TwoRegTwoImm — two registers + two immediates.
+    lX from ζ[ı+2], uses separate encoding byte. -/
+def extractTwoRegTwoImm (code : ByteArray) (pc : Nat) (skip : Nat)
     : Fin 13 × Fin 13 × UInt64 × UInt64 :=
   let rA := regA code pc
   let rB := regB code pc
-  let b2 := if pc + 2 < code.size then code.get! (pc + 2) |>.toNat else 0
-  let lX := (b2 % 4) + 1
-  let lY := (b2 / 4 % 4) + 1
-  let immX := sext lX (readImmBytes code (pc + 3) lX)
-  let immY := sext lY (readImmBytes code (pc + 3 + lX) lY)
+  let lx := min 4 (zeta code (pc + 2) % 8)
+  let ly := if skip > lx + 2 then min 4 (skip - lx - 2) else 0
+  let immX := readSignedAt code (pc + 3) lx
+  let immY := readSignedAt code (pc + 3 + lx) ly
   (rA, rB, immX, immY)
 
 -- ============================================================================

@@ -25,8 +25,8 @@ inductive StepResult where
   | panic : StepResult
   /-- Page fault at address. -/
   | fault (addr : UInt64) : StepResult
-  /-- Host call with function ID. -/
-  | hostCall (id : UInt64) (regs : Registers) (mem : Memory) : StepResult
+  /-- Host call with function ID and next PC for resumption. -/
+  | hostCall (id : UInt64) (regs : Registers) (mem : Memory) (nextPC : Nat) : StepResult
 
 -- ============================================================================
 -- Helpers
@@ -232,6 +232,7 @@ def executeStep (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory
   let npc := nextPC pc skip
   -- Read opcode
   let opcode := if pc < code.size then code.get! pc |>.toNat else 0
+  -- (tracing removed)
   match opcode with
   -- ========== No-arg (0-1) ==========
   | 0 => .panic  -- trap
@@ -239,8 +240,8 @@ def executeStep (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory
 
   -- ========== One-immediate (10) ==========
   | 10 =>  -- ecalli: host call
-    let imm := extractImm code pc skip 1
-    .hostCall imm regs mem
+    let imm := extractOneImm code pc skip
+    .hostCall imm regs mem npc
 
   -- ========== Reg + Imm64 (20) ==========
   | 20 =>  -- load_imm_64
@@ -259,8 +260,7 @@ def executeStep (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory
 
   -- ========== Offset jump (40) ==========
   | 40 =>  -- jump
-    let offset := extractImm code pc skip 1
-    let target := (pc : Int) + offset.toNat
+    let target := extractOffset code pc skip
     .continue target.toNat regs mem
 
   -- ========== Reg + Imm (50-62) ==========
@@ -308,12 +308,7 @@ def executeStep (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory
 
   -- ========== Reg + 2-imm store (70-73) ==========
   | 70 | 71 | 72 | 73 =>  -- store_imm_ind_{u8,u16,u32,u64}
-    let r := regA code pc
-    let b2 := if pc + 2 < code.size then code.get! (pc + 2) |>.toNat else 0
-    let lX := (b2 % 4) + 1
-    let lY := (b2 / 4 % 4) + 1
-    let immOff := sext lX (readImmBytes code (pc + 3) lX)
-    let immVal := sext lY (readImmBytes code (pc + 3 + lX) lY)
+    let (r, immOff, immVal) := extractRegTwoImm code pc skip
     let addr := getReg regs r + immOff
     let n := match opcode with | 70 => 1 | 71 => 2 | 72 => 4 | _ => 8
     match writeMemBytes mem addr immVal n with
@@ -323,13 +318,12 @@ def executeStep (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory
 
   -- ========== Reg + Imm + Offset (80-90) ==========
   | 80 =>  -- load_imm_jump
-    let (r, imm, offset) := extractRegImmOffset code pc skip
-    let target := (pc : Int) + offset.toNat
+    let (r, imm, target) := extractRegImmOffset code pc skip
     .continue target.toNat (setReg regs r imm) mem
 
   | 81 | 82 | 83 | 84 | 85 | 86 | 87 | 88 | 89 | 90 =>
     -- branch_{eq,ne,lt_u,le_u,ge_u,gt_u,lt_s,le_s,ge_s,gt_s}_imm
-    let (r, imm, offset) := extractRegImmOffset code pc skip
+    let (r, imm, target) := extractRegImmOffset code pc skip
     let rv := getReg regs r
     let taken := match opcode with
       | 81 => rv == imm
@@ -342,15 +336,14 @@ def executeStep (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory
       | 88 => toSigned rv <= toSigned imm
       | 89 => signedGe rv imm
       | _  => toSigned rv > toSigned imm  -- 90
-    if taken then
-      let target := (pc : Int) + offset.toNat
-      .continue target.toNat regs mem
+    if taken then .continue target.toNat regs mem
     else .continue npc regs mem
 
   -- ========== Two-reg (100-111) ==========
   | 100 =>  -- move_reg
     let rD := regA code pc
     let rA := regB code pc
+    -- (move_reg tracing removed)
     .continue npc (setReg regs rD (getReg regs rA)) mem
 
   | 101 =>  -- sbrk
@@ -409,7 +402,8 @@ def executeStep (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory
       | 129 => readI32 mem addr
       | _   => readU64 mem addr  -- 130
     match result with
-    | .ok v => .continue npc (setReg regs rA v) mem
+    | .ok v =>
+      .continue npc (setReg regs rA v) mem
     | .panic => .panic
     | .fault a => .fault a
 
@@ -555,9 +549,7 @@ def executeStep (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory
 
   -- ========== Two-reg + offset branches (170-175) ==========
   | 170 | 171 | 172 | 173 | 174 | 175 =>
-    let rA := regA code pc
-    let rB := regB code pc
-    let offset := extractImm code pc skip 2
+    let (rA, rB, target) := extractTwoRegOffset code pc skip
     let a := getReg regs rA
     let b := getReg regs rB
     let taken := match opcode with
@@ -567,9 +559,7 @@ def executeStep (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory
       | 173 => signedLt a b
       | 174 => a >= b
       | _   => signedGe a b  -- 175
-    if taken then
-      let target := (pc : Int) + offset.toNat
-      .continue target.toNat regs mem
+    if taken then .continue target.toNat regs mem
     else .continue npc regs mem
 
   -- ========== Two-reg + two-imm (180) ==========
@@ -584,160 +574,160 @@ def executeStep (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory
 
   -- ========== Three-reg (190-230) ==========
   | 190 =>  -- add_32
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (sext32 (trunc32 (getReg regs rA + getReg regs rB')))) mem
   | 191 =>  -- sub_32
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (sext32 (trunc32 (getReg regs rA + (0 - getReg regs rB'))))) mem
   | 192 =>  -- mul_32
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (sext32 (trunc32 (getReg regs rA * getReg regs rB')))) mem
   | 193 =>  -- div_u_32
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     let a := (getReg regs rA).toNat % (2^32)
     let b := (getReg regs rB').toNat % (2^32)
     let v := if b == 0 then UInt64.ofNat (2^64 - 1) else sext32 (UInt64.ofNat (a / b))
     .continue npc (setReg regs rD v) mem
   | 194 =>  -- div_s_32
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (signedDiv32 (getReg regs rA) (getReg regs rB'))) mem
   | 195 =>  -- rem_u_32
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     let a := (getReg regs rA).toNat % (2^32)
     let b := (getReg regs rB').toNat % (2^32)
     let v := if b == 0 then sext32 (UInt64.ofNat a) else sext32 (UInt64.ofNat (a % b))
     .continue npc (setReg regs rD v) mem
   | 196 =>  -- rem_s_32
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (signedRem32 (getReg regs rA) (getReg regs rB'))) mem
   | 197 =>  -- shlo_l_32
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     let s := (getReg regs rB').toNat % 32
     .continue npc (setReg regs rD (sext32 (trunc32 (getReg regs rA <<< UInt64.ofNat s)))) mem
   | 198 =>  -- shlo_r_32
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     let s := (getReg regs rB').toNat % 32
     let v := (getReg regs rA).toNat % (2^32)
     .continue npc (setReg regs rD (sext32 (UInt64.ofNat (v / 2^s)))) mem
   | 199 =>  -- shar_r_32
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (ashr32 (getReg regs rA) ((getReg regs rB').toNat))) mem
 
   | 200 =>  -- add_64
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (getReg regs rA + getReg regs rB')) mem
   | 201 =>  -- sub_64
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (getReg regs rA + (0 - getReg regs rB'))) mem
   | 202 =>  -- mul_64
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (getReg regs rA * getReg regs rB')) mem
   | 203 =>  -- div_u_64
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     let b := getReg regs rB'
     let v := if b == 0 then UInt64.ofNat (2^64 - 1) else getReg regs rA / b
     .continue npc (setReg regs rD v) mem
   | 204 =>  -- div_s_64
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (signedDiv64 (getReg regs rA) (getReg regs rB'))) mem
   | 205 =>  -- rem_u_64
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     let b := getReg regs rB'
     let v := if b == 0 then getReg regs rA else getReg regs rA % b
     .continue npc (setReg regs rD v) mem
   | 206 =>  -- rem_s_64
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (signedRem64 (getReg regs rA) (getReg regs rB'))) mem
   | 207 =>  -- shlo_l_64
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (getReg regs rA <<< UInt64.ofNat ((getReg regs rB').toNat % 64))) mem
   | 208 =>  -- shlo_r_64
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (getReg regs rA >>> UInt64.ofNat ((getReg regs rB').toNat % 64))) mem
   | 209 =>  -- shar_r_64
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (ashr64 (getReg regs rA) ((getReg regs rB').toNat))) mem
 
   -- Bitwise (210-212)
   | 210 =>  -- and
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (getReg regs rA &&& getReg regs rB')) mem
   | 211 =>  -- xor
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (getReg regs rA ^^^ getReg regs rB')) mem
   | 212 =>  -- or
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (getReg regs rA ||| getReg regs rB')) mem
 
   -- Upper multiplication (213-215)
   | 213 =>  -- mul_upper_s_s
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (mulUpperSS (getReg regs rA) (getReg regs rB'))) mem
   | 214 =>  -- mul_upper_u_u
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (mulUpperUU (getReg regs rA) (getReg regs rB'))) mem
   | 215 =>  -- mul_upper_s_u
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (mulUpperSU (getReg regs rA) (getReg regs rB'))) mem
 
   -- Comparisons (216-217)
   | 216 =>  -- set_lt_u
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (if getReg regs rA < getReg regs rB' then 1 else 0)) mem
   | 217 =>  -- set_lt_s
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (if signedLt (getReg regs rA) (getReg regs rB') then 1 else 0)) mem
 
   -- Conditional moves (218-219)
   | 218 =>  -- cmov_iz: D = (B == 0) ? A : D
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     let v := if getReg regs rB' == 0 then getReg regs rA else getReg regs rD
     .continue npc (setReg regs rD v) mem
   | 219 =>  -- cmov_nz: D = (B != 0) ? A : D
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     let v := if getReg regs rB' != 0 then getReg regs rA else getReg regs rD
     .continue npc (setReg regs rD v) mem
 
   -- Rotations (220-223)
   | 220 =>  -- rot_l_64
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (rotLeft64 (getReg regs rA) (getReg regs rB'))) mem
   | 221 =>  -- rot_l_32
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (rotLeft32 (getReg regs rA) (getReg regs rB'))) mem
   | 222 =>  -- rot_r_64
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (rotRight64 (getReg regs rA) (getReg regs rB'))) mem
   | 223 =>  -- rot_r_32
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (rotRight32 (getReg regs rA) (getReg regs rB'))) mem
 
   -- Inverted bitwise (224-226)
   | 224 =>  -- and_inv: D = A & ~B
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (getReg regs rA &&& (UInt64.ofNat (2^64 - 1) ^^^ getReg regs rB'))) mem
   | 225 =>  -- or_inv: D = A | ~B
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (getReg regs rA ||| (UInt64.ofNat (2^64 - 1) ^^^ getReg regs rB'))) mem
   | 226 =>  -- xnor: D = ~(A ^ B)
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     .continue npc (setReg regs rD (UInt64.ofNat (2^64 - 1) ^^^ (getReg regs rA ^^^ getReg regs rB'))) mem
 
   -- Min/Max (227-230)
   | 227 =>  -- max (signed)
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     let a := getReg regs rA; let b := getReg regs rB'
     .continue npc (setReg regs rD (if signedGe a b then a else b)) mem
   | 228 =>  -- max_u
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     let a := getReg regs rA; let b := getReg regs rB'
     .continue npc (setReg regs rD (if a >= b then a else b)) mem
   | 229 =>  -- min (signed)
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     let a := getReg regs rA; let b := getReg regs rB'
     .continue npc (setReg regs rD (if signedLt a b then a else b)) mem
   | 230 =>  -- min_u
-    let rA := regB code pc; let rB' := regD code pc; let rD := regA code pc
+    let rA := regA code pc; let rB' := regB code pc; let rD := regD code pc
     let a := getReg regs rA; let b := getReg regs rB'
     .continue npc (setReg regs rD (if a <= b then a else b)) mem
 

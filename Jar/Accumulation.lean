@@ -123,6 +123,14 @@ structure AccContext where
   nextServiceId : ServiceId
   /-- "Regular" dimension state (for checkpoint). -/
   checkpoint : Option (Dict ServiceId ServiceAccount)
+  /-- Entropy η'₀ for fetch mode 1. -/
+  entropy : Hash
+  /-- Protocol configuration blob for fetch mode 0. -/
+  configBlob : ByteArray
+  /-- Encoded items blob for fetch mode 14. -/
+  itemsBlob : ByteArray
+  /-- Individual encoded items for fetch mode 15. -/
+  items : Array ByteArray
 
 instance : Inhabited AccContext where
   default := {
@@ -138,6 +146,10 @@ instance : Inhabited AccContext where
     timeslot := 0
     nextServiceId := 0
     checkpoint := none
+    entropy := default
+    configBlob := ByteArray.empty
+    itemsBlob := ByteArray.empty
+    items := #[]
   }
 
 -- ============================================================================
@@ -159,27 +171,34 @@ private def getReg (regs : PVM.Registers) (i : Nat) : UInt64 :=
 private def setReg (regs : PVM.Registers) (i : Nat) (v : UInt64) : PVM.Registers :=
   if i < regs.size then regs.set! i v else regs
 
-/-- Encode a ServiceAccount's key info into a 97-byte blob for info(5).
-    GP Appendix B: code_hash(32) ‖ balance(8) ‖ min_acc_gas(8) ‖
-    min_on_transfer_gas(8) ‖ created(4) ‖ gratis(8) ‖ preimage_count(4) ‖
-    preimage_size(4) ‖ items_count(4) ‖ parent(4) ‖ last_acc(4) ‖ code_len(8). -/
+/-- Encode a ServiceAccount's info structure for host_info(5). GP Appendix B.
+    v = E(a_c, E_8(a_b, a_t, a_g, a_m, a_o), E_4(a_i), E_8(a_f), E_4(a_r, a_a, a_p))
+    = code_hash(32) ‖ balance(8) ‖ threshold(8) ‖ min_item_gas(8) ‖
+      min_memo_gas(8) ‖ total_octets(8) ‖ items(4) ‖ deposit_offset(8) ‖
+      created(4) ‖ last_acc(4) ‖ parent(4) = 96 bytes -/
 private def encodeAccountInfo (acct : ServiceAccount) : ByteArray :=
-  let totalPreimageSize := acct.preimages.values.foldl (init := 0) fun acc v => acc + v.size
-  -- code_hash(32) ‖ balance(8) ‖ min_acc_gas(8) ‖ min_on_transfer_gas(8) ‖
-  -- created(4) ‖ gratis(8) ‖ preimage_count(4) ‖ preimage_size(4) ‖
-  -- items_count(4) ‖ parent(4) ‖ last_acc(4) ‖ code_len(8)
+  -- Compute items and bytes (storage + preimage entries)
+  let storageItems := acct.storage.size
+  let storageBytes := acct.storage.entries.foldl (init := 0) fun acc (k, v) => acc + k.size + v.size
+  let preimageItems := acct.preimages.size + acct.preimageInfo.size
+  let preimageBytes := acct.preimages.entries.foldl (init := 0) fun acc (k, v) => acc + 32 + v.size
+    + acct.preimageInfo.entries.foldl (init := 0) fun acc (_, v) => acc + 32 + 4 + v.size * 4
+  let totalItems := storageItems + preimageItems
+  let totalBytes := storageBytes + preimageBytes
+  -- Compute threshold: B_S + B_I * items + B_L * bytes - deposit_offset
+  let minBal := B_S + B_I * totalItems + B_L * totalBytes
+  let threshold := minBal - min acct.gratis.toNat minBal
   acct.codeHash.data
-    ++ Codec.encodeFixedNat 8 acct.balance.toNat
-    ++ Codec.encodeFixedNat 8 acct.minAccGas.toNat
-    ++ Codec.encodeFixedNat 8 acct.minOnTransferGas.toNat
-    ++ Codec.encodeFixedNat 4 acct.created.toNat
-    ++ Codec.encodeFixedNat 8 acct.gratis.toNat
-    ++ Codec.encodeFixedNat 4 acct.preimages.size
-    ++ Codec.encodeFixedNat 4 totalPreimageSize
-    ++ Codec.encodeFixedNat 4 acct.storage.size
-    ++ Codec.encodeFixedNat 4 acct.parent.toNat
-    ++ Codec.encodeFixedNat 4 acct.lastAccumulation.toNat
-    ++ Codec.encodeFixedNat 8 0
+    ++ Codec.encodeFixedNat 8 acct.balance.toNat       -- a_b
+    ++ Codec.encodeFixedNat 8 threshold                 -- a_t
+    ++ Codec.encodeFixedNat 8 acct.minAccGas.toNat      -- a_g
+    ++ Codec.encodeFixedNat 8 acct.minOnTransferGas.toNat -- a_m
+    ++ Codec.encodeFixedNat 8 totalBytes                -- a_o
+    ++ Codec.encodeFixedNat 4 totalItems                -- a_i
+    ++ Codec.encodeFixedNat 8 acct.gratis.toNat         -- a_f
+    ++ Codec.encodeFixedNat 4 acct.created.toNat        -- a_r
+    ++ Codec.encodeFixedNat 4 acct.lastAccumulation.toNat -- a_a
+    ++ Codec.encodeFixedNat 4 acct.parent.toNat         -- a_p
 
 /-- Dispatch a host call during accumulation. GP §12, Appendix B.
     Returns updated invocation result and context. -/
@@ -200,25 +219,45 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     let regs' := setR7 regs gas'
     (mkResult regs' mem gas', ctx)
 
-  -- ===== fetch (1): Retrieve operand context data =====
+  -- ===== fetch (1): ΩY — read protocol/context data =====
+  -- φ[7]=buf_ptr, φ[8]=offset, φ[9]=max_len, φ[10]=mode, φ[11]=sub1, φ[12]=sub2
+  -- Returns: φ'[7] = |v| (total data length) or NONE (u64::MAX)
   | 1 =>
-    -- reg[7] = operand index, reg[8] = output pointer
-    let idx := (getReg regs 7).toNat
-    if idx >= ctx.operands.size then
+    let bufPtr := getReg regs 7
+    let offset := (getReg regs 8).toNat
+    let maxLen := (getReg regs 9).toNat
+    let mode := (getReg regs 10).toNat
+    let sub1 := (getReg regs 11).toNat
+    -- Select data based on mode (accumulate context: modes 0, 1, 14, 15)
+    let data : Option ByteArray := match mode with
+      | 0 => some ctx.configBlob            -- Protocol configuration
+      | 1 => some ctx.entropy.data           -- Entropy η'₀
+      | 14 => some ctx.itemsBlob             -- All items encoded
+      | 15 =>                                 -- Single item at index sub1
+        if sub1 < ctx.items.size then some ctx.items[sub1]!
+        else none
+      | _ => none
+    match data with
+    | none =>
       let regs' := setR7 regs PVM.RESULT_NONE
       (mkResult regs' mem gas', ctx)
-    else
-      let op := ctx.operands[idx]!
-      -- Write operand data to memory at reg[8]: package_hash ‖ auth_output
-      let outPtr := getReg regs 8
-      let data := op.packageHash.data ++ op.authOutput
-      match PVM.writeByteArray mem outPtr data with
-      | .ok mem' =>
-        let regs' := setR7 regs PVM.RESULT_OK
-        let regs' := setReg regs' 8 (UInt64.ofNat data.size)
-        (mkResult regs' mem' gas', ctx)
-      | _ =>
-        let regs' := setR7 regs PVM.RESULT_OOB
+    | some d =>
+      let dataLen := d.size
+      let f := min offset dataLen
+      let l := min maxLen (dataLen - f)
+      -- Write data[f..f+l] to memory at bufPtr
+      if l > 0 then
+        let src := d.extract f (f + l)
+        match PVM.writeByteArray mem bufPtr src with
+        | .ok mem' =>
+          let regs' := setR7 regs (UInt64.ofNat dataLen)
+          (mkResult regs' mem' gas', ctx)
+        | _ =>
+          -- Page fault on write → panic (return false equivalent)
+          let regs' := setR7 regs PVM.RESULT_OOB
+          (mkResult regs' mem gas', ctx)
+      else
+        let regs' := setR7 regs (UInt64.ofNat dataLen)
         (mkResult regs' mem gas', ctx)
 
   -- ===== lookup (2): Preimage lookup by hash =====
@@ -343,23 +382,36 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
       (mkResult regs' mem gas', ctx)
 
   -- ===== info (5): Service account information =====
+  -- φ[7]=service_id (2^64-1=self), φ[8]=out_ptr, φ[9]=offset, φ[10]=max_len
+  -- Returns: φ'[7] = |v| (96) or NONE
   | 5 =>
-    -- reg[7] = service id (0 = self), reg[8] = output pointer
-    let sid := UInt32.ofNat (getReg regs 7).toNat
+    let rawSid := getReg regs 7
     let outPtr := getReg regs 8
-    let targetSid := if sid == 0 then ctx.serviceId else sid
+    let offset := (getReg regs 9).toNat
+    let maxLen := (getReg regs 10).toNat
+    let targetSid := if rawSid == UInt64.ofNat (2^64 - 1) then ctx.serviceId
+      else if rawSid.toNat <= UInt32.toNat (UInt32.ofNat (2^32 - 1)) then UInt32.ofNat rawSid.toNat
+      else 0  -- invalid → will return NONE
     match ctx.state.accounts.lookup targetSid with
     | none =>
       let regs' := setR7 regs PVM.RESULT_NONE
       (mkResult regs' mem gas', ctx)
     | some acct =>
       let info := encodeAccountInfo acct
-      match PVM.writeByteArray mem outPtr info with
-      | .ok mem' =>
-        let regs' := setR7 regs PVM.RESULT_OK
-        (mkResult regs' mem' gas', ctx)
-      | _ =>
-        let regs' := setR7 regs PVM.RESULT_OOB
+      let dataLen := info.size
+      let f := min offset dataLen
+      let l := min maxLen (dataLen - f)
+      if l > 0 then
+        let src := info.extract f (f + l)
+        match PVM.writeByteArray mem outPtr src with
+        | .ok mem' =>
+          let regs' := setR7 regs (UInt64.ofNat dataLen)
+          (mkResult regs' mem' gas', ctx)
+        | _ =>
+          let regs' := setR7 regs PVM.RESULT_OOB
+          (mkResult regs' mem gas', ctx)
+      else
+        let regs' := setR7 regs (UInt64.ofNat dataLen)
         (mkResult regs' mem gas', ctx)
 
   -- ===== historical_lookup (6) =====
@@ -572,7 +624,12 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     | none =>
       let regs' := setR7 regs PVM.RESULT_WHO
       (mkResult regs' mem gas', ctx)
-    | some _ =>
+    | some destAcct =>
+      -- Check dest min_memo_gas
+      if gasLimit < UInt64.ofNat destAcct.minOnTransferGas.toNat then
+        let regs' := setR7 regs PVM.RESULT_LOW
+        (mkResult regs' mem gas', ctx)
+      else
       -- Check source has enough balance
       match ctx.state.accounts.lookup ctx.serviceId with
       | none =>
@@ -580,7 +637,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
         (mkResult regs' mem gas', ctx)
       | some srcAcct =>
         if srcAcct.balance < amount then
-          let regs' := setR7 regs PVM.RESULT_LOW
+          let regs' := setR7 regs PVM.RESULT_CASH
           (mkResult regs' mem gas', ctx)
         else
           -- Read memo from memory (W_T = 128 bytes)
@@ -592,9 +649,9 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
             memo := memoSeq
             gas := gasLimit
           }
-          -- Deduct transfer gas: base + gasLimit
-          let transferGas := UInt64.ofNat hostCallGas + gasLimit
-          let gas'' := if gas'.toNat >= transferGas.toNat then gas' - transferGas else 0
+          -- Deduct transfer gas (gasLimit from PVM gas)
+          -- If insufficient gas, set to 0 (will cause OOG on next step)
+          let gas'' := if gas' >= gasLimit then gas' - gasLimit else 0
           -- Debit the source balance
           let srcAcct' := { srcAcct with balance := srcAcct.balance - amount }
           let accounts' := ctx.state.accounts.insert ctx.serviceId srcAcct'
@@ -603,24 +660,40 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           let regs' := setR7 regs PVM.RESULT_OK
           (mkResult regs' mem gas'', ctx')
 
-  -- ===== eject (21): Remove service account =====
+  -- ===== eject (21): Remove service account, transfer balance to caller =====
+  -- φ[7] = target service, φ[8] = hash_ptr (32 bytes read from memory)
   | 21 =>
-    -- reg[7] = service id to eject
     let sid := UInt32.ofNat (getReg regs 7).toNat
-    -- Only the registrar can eject
-    if ctx.serviceId != ctx.state.registrar then
-      let regs' := setR7 regs PVM.RESULT_CORE
-      (mkResult regs' mem gas', ctx)
-    else
-      match ctx.state.accounts.lookup sid with
-      | none =>
+    let hashPtr := getReg regs 8
+    -- Read hash from memory first (page fault → panic)
+    match PVM.readByteArray mem hashPtr 32 with
+    | .ok _ =>
+      -- Can't eject self
+      if sid == ctx.serviceId then
         let regs' := setR7 regs PVM.RESULT_WHO
         (mkResult regs' mem gas', ctx)
-      | some _ =>
-        let accounts' := ctx.state.accounts.erase sid
-        let state' := { ctx.state with accounts := accounts' }
-        let regs' := setR7 regs PVM.RESULT_OK
-        (mkResult regs' mem gas', { ctx with state := state' })
+      else
+        match ctx.state.accounts.lookup sid with
+        | none =>
+          let regs' := setR7 regs PVM.RESULT_WHO
+          (mkResult regs' mem gas', ctx)
+        | some ejected =>
+          -- Transfer ejected balance to caller
+          match ctx.state.accounts.lookup ctx.serviceId with
+          | none =>
+            let regs' := setR7 regs PVM.RESULT_NONE
+            (mkResult regs' mem gas', ctx)
+          | some callerAcct =>
+            let callerAcct' := { callerAcct with balance := callerAcct.balance + ejected.balance }
+            let accounts' := ctx.state.accounts.erase sid
+            let accounts' := accounts'.insert ctx.serviceId callerAcct'
+            let state' := { ctx.state with accounts := accounts' }
+            let regs' := setR7 regs PVM.RESULT_OK
+            (mkResult regs' mem gas', { ctx with state := state' })
+    | _ =>
+      -- Page fault → panic
+      let regs' := setR7 regs PVM.RESULT_OOB
+      (mkResult regs' mem gas', ctx)
 
   -- ===== query (22): Query preimage request status =====
   | 22 =>
@@ -771,12 +844,48 @@ private def encodeAccArgs (serviceId : ServiceId) (operands : Array OperandTuple
       ++ Codec.encodeFixedNat 8 t.gas.toNat
   header ++ opBytes ++ xferBytes
 
+/-- Encode a single operand item for fetch mode 14/15.
+    Format: 0x00 (discriminator) ‖ package_hash(32) ‖ segment_root(32) ‖
+    authorizer_hash(32) ‖ payload_hash(32) ‖ gas(varint) ‖ result_encoding -/
+private def encodeOperandItem (op : OperandTuple) : ByteArray :=
+  let buf := ByteArray.mk #[0]  -- operand discriminator
+  buf ++ op.packageHash.data ++ op.segmentRoot.data
+    ++ op.authorizerHash.data ++ op.payloadHash.data
+    ++ Codec.encodeNat op.gasLimit.toNat
+    ++ Codec.encodeWorkResult op.result
+    ++ Codec.encodeLengthPrefixed op.authOutput
+
+/-- Encode a single transfer item for fetch mode 14/15.
+    Format: 0x01 (discriminator) ‖ sender(4) ‖ dest(4) ‖ amount(8) ‖ memo(128) ‖ gas(8) -/
+private def encodeTransferItem (t : DeferredTransfer) : ByteArray :=
+  let buf := ByteArray.mk #[1]  -- transfer discriminator
+  let memo := t.memo.data ++ ByteArray.mk (Array.replicate (128 - min 128 t.memo.data.size) 0)
+  buf ++ Codec.encodeFixedNat 4 t.source.toNat
+    ++ Codec.encodeFixedNat 4 t.dest.toNat
+    ++ Codec.encodeFixedNat 8 t.amount.toNat
+    ++ memo
+    ++ Codec.encodeFixedNat 8 t.gas.toNat
+
+/-- Build items blob for fetch mode 14. Format: varint(count) ‖ item₀ ‖ item₁ ‖ ...
+    Order: transfers first, then operands (matching Rust). -/
+private def buildItemsBlob (operands : Array OperandTuple)
+    (transfers : Array DeferredTransfer) : ByteArray × Array ByteArray :=
+  -- Transfers first, then operands (matching Rust order)
+  let transferItems := transfers.map encodeTransferItem
+  let operandItems := operands.map encodeOperandItem
+  let items := transferItems ++ operandItems
+  let blob := Codec.encodeNat items.size
+    ++ items.foldl (init := ByteArray.empty) (· ++ ·)
+  (blob, items)
+
 /-- Accumulate a single service. GP §12 eq:accone.
     Gathers all operands and transfers for this service,
     invokes Ψ_A (PVM accumulate), and collects outputs. -/
 def accone (ps : PartialState) (serviceId : ServiceId)
     (operands : Array OperandTuple) (transfers : Array DeferredTransfer)
-    (freeGas : Gas) (timeslot : Timeslot) : AccOneOutput :=
+    (freeGas : Gas) (timeslot : Timeslot)
+    (entropy : Hash) (configBlob : ByteArray)
+    (itemsBlob : ByteArray) (items : Array ByteArray) : AccOneOutput :=
   -- Look up service account
   match ps.accounts.lookup serviceId with
   | none =>
@@ -788,6 +897,11 @@ def accone (ps : PartialState) (serviceId : ServiceId)
     let operandGas := operands.foldl (init := (0 : UInt64)) fun acc op => acc + op.gasLimit
     let transferGas := transfers.foldl (init := (0 : UInt64)) fun acc t => acc + t.gas
     let totalGas := freeGas + operandGas + transferGas
+
+    -- Credit incoming transfer amounts to service balance (GP eq B.9)
+    let transferBalance := transfers.foldl (init := (0 : UInt64)) fun acc t => acc + t.amount
+    let acct' := { acct with balance := acct.balance + transferBalance }
+    let ps := { ps with accounts := ps.accounts.insert serviceId acct' }
 
     -- Build accumulation context
     let ctx : AccContext := {
@@ -801,6 +915,10 @@ def accone (ps : PartialState) (serviceId : ServiceId)
       timeslot
       nextServiceId := UInt32.ofNat S_MIN
       checkpoint := none
+      entropy
+      configBlob
+      itemsBlob
+      items
     }
 
     -- Look up service code blob from preimage store using codeHash
@@ -821,7 +939,7 @@ def accone (ps : PartialState) (serviceId : ServiceId)
       | some (prog, regs, mem) =>
         -- Run PVM with host-call dispatch via handleHostCall
         let (result, ctx') := PVM.runWithHostCalls AccContext
-          prog 0 regs mem (Int64.ofUInt64 totalGas)
+          prog 5 regs mem (Int64.ofUInt64 totalGas)
           (fun callId gas regs' mem' c =>
             handleHostCall callId gas regs' mem' c)
           ctx
@@ -880,12 +998,13 @@ def groupTransfersByDest (transfers : Array DeferredTransfer) : Dict ServiceId (
     Returns (updated partial state, new deferred transfers, yield outputs, gas used). -/
 def accpar (ps : PartialState) (reports : Array WorkReport)
     (transfers : Array DeferredTransfer) (freeGasMap : Dict ServiceId Gas)
-    (timeslot : Timeslot) : PartialState × Array DeferredTransfer × Array (ServiceId × Hash) × Dict ServiceId Gas :=
+    (timeslot : Timeslot) (entropy : Hash) (configBlob : ByteArray)
+    : PartialState × Array DeferredTransfer × Array (ServiceId × Hash) × Dict ServiceId Gas :=
   let operandGroups := groupByService reports
   let transferGroups := groupTransfersByDest transfers
 
-  -- Collect all affected service IDs
-  let serviceIds := (operandGroups.keys ++ transferGroups.keys).eraseDups
+  -- Collect all affected service IDs (sorted ascending, matching Rust BTreeSet order)
+  let serviceIds := ((operandGroups.keys ++ transferGroups.keys).eraseDups).mergeSort (· < ·)
 
   -- Accumulate each service
   let (ps', allTransfers, allYields, gasMap) := serviceIds.foldl
@@ -894,7 +1013,9 @@ def accpar (ps : PartialState) (reports : Array WorkReport)
       let ops := match operandGroups.lookup sid with | some o => o | none => #[]
       let txs := match transferGroups.lookup sid with | some t => t | none => #[]
       let freeGas := match freeGasMap.lookup sid with | some g => g | none => 0
-      let result := accone ps sid ops txs freeGas timeslot
+      let (itemsBlob, items) := buildItemsBlob ops txs
+      let result := accone ps sid ops txs freeGas timeslot entropy configBlob
+        itemsBlob items
       let ps' := result.postState
       let xfers' := xfers ++ result.deferredTransfers
       let yields' := match result.yieldHash with
@@ -914,15 +1035,16 @@ def accpar (ps : PartialState) (reports : Array WorkReport)
 def accseq (_gasLimit : Gas) (reports : Array WorkReport)
     (initialTransfers : Array DeferredTransfer)
     (ps : PartialState) (freeGasMap : Dict ServiceId Gas)
-    (timeslot : Timeslot) : Nat × PartialState × Array (ServiceId × Hash) × Dict ServiceId Gas :=
+    (timeslot : Timeslot) (entropy : Hash) (configBlob : ByteArray)
+    : Nat × PartialState × Array (ServiceId × Hash) × Dict ServiceId Gas :=
   -- Round 1: accumulate work-report operands + initial deferred transfers
-  let (ps1, newXfers1, yields1, gasMap1) := accpar ps reports initialTransfers freeGasMap timeslot
+  let (ps1, newXfers1, yields1, gasMap1) := accpar ps reports initialTransfers freeGasMap timeslot entropy configBlob
 
   -- Round 2: process deferred transfers generated in round 1
   if newXfers1.size == 0 then
     (reports.size, ps1, yields1, gasMap1)
   else
-    let (ps2, newXfers2, yields2, gasMap2) := accpar ps1 #[] newXfers1 Dict.empty timeslot
+    let (ps2, newXfers2, yields2, gasMap2) := accpar ps1 #[] newXfers1 Dict.empty timeslot entropy configBlob
     let allYields := yields1 ++ yields2
     let gasMapFinal := gasMap2.entries.foldl (init := gasMap1) fun acc (k, v) =>
       acc.insert k v
@@ -931,7 +1053,7 @@ def accseq (_gasLimit : Gas) (reports : Array WorkReport)
     if newXfers2.size == 0 then
       (reports.size, ps2, allYields, gasMapFinal)
     else
-      let (ps3, _, yields3, gasMap3) := accpar ps2 #[] newXfers2 Dict.empty timeslot
+      let (ps3, _, yields3, gasMap3) := accpar ps2 #[] newXfers2 Dict.empty timeslot entropy configBlob
       let finalYields := allYields ++ yields3
       let gasMapFinal' := gasMap3.entries.foldl (init := gasMapFinal) fun acc (k, v) =>
         acc.insert k v
@@ -968,8 +1090,9 @@ def accumulate (state : State) (reports : Array WorkReport)
   let alwaysGas := freeGasMap.values.foldl (init := 0) fun acc g => acc + g.toNat
   let _totalGas := max G_T (G_A * C + alwaysGas)
 
+  -- TODO: pass real entropy and config blob from state
   let (_, ps', outputs, gasUsage) := accseq
-    (UInt64.ofNat G_T) reports #[] ps freeGasMap timeslot
+    (UInt64.ofNat G_T) reports #[] ps freeGasMap timeslot Hash.zero ByteArray.empty
 
   { services := ps'.accounts
     privileged := {

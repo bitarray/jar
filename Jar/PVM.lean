@@ -60,12 +60,35 @@ inductive PageAccess where
   deriving BEq, Inhabited
 
 /-- μ : RAM state. GP eq (4.17).
-    μ ≡ ⟨μ_v : 𝔹_{2^32}, μ_a : ⟦{W, R, ∅}⟧_p⟩ where p = 2^32 / Z_P. -/
+    μ ≡ ⟨μ_v : 𝔹_{2^32}, μ_a : ⟦{W, R, ∅}⟧_p⟩ where p = 2^32 / Z_P.
+    Uses sparse page storage: only materialized pages are stored. -/
 structure Memory where
-  /-- μ_v : Memory contents, 2^32 addressable bytes. -/
-  value : ByteArray
+  /-- μ_v : Memory contents, sparse by page. Dict from page index to page data. -/
+  pages : Dict Nat ByteArray
   /-- μ_a : Per-page access flags. -/
   access : Array PageAccess
+
+namespace Memory
+
+/-- Read a byte from sparse memory. Unmaterialized pages return 0. -/
+def getByte (m : Memory) (addr : Nat) : UInt8 :=
+  let page := addr / Z_P
+  let offset := addr % Z_P
+  match m.pages.lookup page with
+  | some pageData => if offset < pageData.size then pageData.get! offset else 0
+  | none => 0
+
+/-- Write a byte to sparse memory. Materializes page if needed. -/
+def setByte (m : Memory) (addr : Nat) (val : UInt8) : Memory :=
+  let page := addr / Z_P
+  let offset := addr % Z_P
+  let pageData := match m.pages.lookup page with
+    | some pd => pd
+    | none => ByteArray.mk (Array.replicate Z_P 0)
+  let pageData := pageData.set! offset val
+  { m with pages := m.pages.insert page pageData }
+
+end Memory
 
 /-- PVM exit reason. GP Appendix A. -/
 inductive ExitReason where
@@ -103,6 +126,8 @@ structure InvocationResult where
   registers : Registers
   /-- Final memory state. -/
   memory : Memory
+  /-- Next PC (valid after hostCall, for resumption). -/
+  nextPC : Nat := 0
 
 -- ============================================================================
 -- Program Blob — Appendix A
