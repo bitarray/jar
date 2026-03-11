@@ -27,12 +27,14 @@ namespace Jar.Crypto
     blake2b : 𝔹 → ℍ. RFC 7693.
     Deliberately left abstract — intended to be axiomatically specified
     or linked via FFI to a concrete cryptographic implementation. -/
+@[extern "jar_blake2b"]
 opaque blake2b (m : ByteArray) : Hash := default
 
 /-- ℋ_K(m) : Keccak 256-bit hash. GP §3.8.1.
     keccak256 : 𝔹 → ℍ. Bertoni et al. 2013, EYP.
     Deliberately left abstract — intended to be axiomatically specified
     or linked via FFI to a concrete cryptographic implementation. -/
+@[extern "jar_keccak256"]
 opaque keccak256 (m : ByteArray) : Hash := default
 
 -- ============================================================================
@@ -44,6 +46,7 @@ opaque keccak256 (m : ByteArray) : Hash := default
     under public key k.
     Deliberately left abstract — intended to be axiomatically specified
     or linked via FFI to a concrete cryptographic implementation. -/
+@[extern "jar_ed25519_verify"]
 opaque ed25519Verify
   (key : Ed25519PublicKey)
   (message : ByteArray)
@@ -53,6 +56,7 @@ opaque ed25519Verify
     sign_k(m) ∈ V̄_k⟨m⟩ ⊂ 𝔹_64.
     Deliberately left abstract — intended to be axiomatically specified
     or linked via FFI to a concrete cryptographic implementation. -/
+@[extern "jar_ed25519_sign"]
 opaque ed25519Sign
   (secretKey : ByteArray)
   (message : ByteArray) : Ed25519Signature := default
@@ -66,6 +70,7 @@ opaque ed25519Sign
     verify(k, context, message, sig) = ⊤ iff valid.
     Deliberately left abstract — intended to be axiomatically specified
     or linked via FFI to a concrete cryptographic implementation. -/
+@[extern "jar_bandersnatch_verify"]
 opaque bandersnatchVerify
   (key : BandersnatchPublicKey)
   (context : ByteArray)
@@ -75,6 +80,7 @@ opaque bandersnatchVerify
 /-- Ṽ_k^x⟨m⟩ : Bandersnatch signing (requires secret key). GP §3.8.2.
     Deliberately left abstract — intended to be axiomatically specified
     or linked via FFI to a concrete cryptographic implementation. -/
+@[extern "jar_bandersnatch_sign"]
 opaque bandersnatchSign
   (secretKey : ByteArray)
   (context : ByteArray)
@@ -85,6 +91,7 @@ opaque bandersnatchSign
     banderout(s) ∈ ℍ. Influenced by context but not by message.
     Deliberately left abstract — intended to be axiomatically specified
     or linked via FFI to a concrete cryptographic implementation. -/
+@[extern "jar_bandersnatch_output"]
 opaque bandersnatchOutput
   (sig : BandersnatchSignature) : Hash := default
 
@@ -97,6 +104,7 @@ opaque bandersnatchOutput
     Commits to a set of Bandersnatch public keys.
     Deliberately left abstract — intended to be axiomatically specified
     or linked via FFI to a concrete cryptographic implementation. -/
+@[extern "jar_bandersnatch_ring_root"]
 opaque bandersnatchRingRoot
   (keys : Array BandersnatchPublicKey) : BandersnatchRingRoot := default
 
@@ -104,6 +112,7 @@ opaque bandersnatchRingRoot
     zk-SNARK-enabled anonymous proof of secret knowledge within a set.
     Deliberately left abstract — intended to be axiomatically specified
     or linked via FFI to a concrete cryptographic implementation. -/
+@[extern "jar_bandersnatch_ring_verify"]
 opaque bandersnatchRingVerify
   (root : BandersnatchRingRoot)
   (context : ByteArray)
@@ -113,6 +122,7 @@ opaque bandersnatchRingVerify
 /-- V°_r^x⟨m⟩ : Ring VRF proof generation (requires secret key).
     Deliberately left abstract — intended to be axiomatically specified
     or linked via FFI to a concrete cryptographic implementation. -/
+@[extern "jar_bandersnatch_ring_sign"]
 opaque bandersnatchRingSign
   (secretKey : ByteArray)
   (root : BandersnatchRingRoot)
@@ -123,6 +133,7 @@ opaque bandersnatchRingSign
     banderout(p) ∈ ℍ. Same VRF output semantics as regular signatures.
     Deliberately left abstract — intended to be axiomatically specified
     or linked via FFI to a concrete cryptographic implementation. -/
+@[extern "jar_bandersnatch_ring_output"]
 opaque bandersnatchRingOutput
   (proof : BandersnatchRingVrfProof) : Hash := default
 
@@ -134,6 +145,7 @@ opaque bandersnatchRingOutput
     Used for Beefy finality commitments.
     Deliberately left abstract — intended to be axiomatically specified
     or linked via FFI to a concrete cryptographic implementation. -/
+@[extern "jar_bls_verify"]
 opaque blsVerify
   (key : BlsPublicKey)
   (message : ByteArray)
@@ -142,6 +154,7 @@ opaque blsVerify
 /-- BLS signing (requires secret key). GP §3.8.2.
     Deliberately left abstract — intended to be axiomatically specified
     or linked via FFI to a concrete cryptographic implementation. -/
+@[extern "jar_bls_sign"]
 opaque blsSign
   (secretKey : ByteArray)
   (message : ByteArray) : BlsSignature := default
