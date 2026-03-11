@@ -53,6 +53,11 @@ pub struct JitContext {
     /// Current PC when execution stopped (offset 172).
     /// Updated on ecalli/djump exits.
     pub pc: u32,
+    /// Dispatch table: PVM PC → native code offset (offset 176).
+    /// Array of i32 offsets indexed by PVM PC. -1 = invalid PC.
+    pub dispatch_table: *const i32,
+    /// Base address of native code (offset 184).
+    pub code_base: u64,
 }
 
 /// Compiled native code buffer (mmap'd as executable).
@@ -309,6 +314,10 @@ pub struct RecompiledPvm {
     basic_block_starts: Vec<bool>,
     /// Initial gas.
     initial_gas: Gas,
+    /// Dispatch table: PVM PC → native code offset (-1 = invalid).
+    dispatch_table: Vec<i32>,
+    /// Cached debug flag.
+    debug: bool,
 }
 
 impl RecompiledPvm {
@@ -321,6 +330,8 @@ impl RecompiledPvm {
         memory: Memory,
         gas: Gas,
     ) -> Result<Self, String> {
+        let debug = std::env::var("GREY_PVM_DEBUG").is_ok();
+
         // For the recompiler, treat every instruction start as a basic block start.
         // This allows re-entry at any PC (e.g., PC=5 for accumulate, PC=10 for on-transfer).
         // The cost is slightly more frequent gas checks (per-instruction rather than per-block).
@@ -346,30 +357,31 @@ impl RecompiledPvm {
             _pad1: 0,
             entry_pc: 0,
             pc: 0,
+            dispatch_table: std::ptr::null(),
+            code_base: 0,
         });
 
         // Set up pointers (will be updated after Box stabilizes)
         ctx.jt_ptr = jump_table.as_ptr();
         ctx.bb_starts = basic_block_starts.as_ptr() as *const u8;
 
-        // Debug helper addresses
-        if std::env::var("GREY_PVM_DEBUG").is_ok() {
-            eprintln!("  write_u8 fn=0x{:x}", mem_write_u8 as usize);
-            eprintln!("  write_u32 fn=0x{:x}", mem_write_u32 as usize);
-            eprintln!("  read_u8 fn=0x{:x}", mem_read_u8 as usize);
+        if debug {
+            eprintln!("  write_u8 fn=0x{:x}", mem_write_u8 as *const () as usize);
+            eprintln!("  write_u32 fn=0x{:x}", mem_write_u32 as *const () as usize);
+            eprintln!("  read_u8 fn=0x{:x}", mem_read_u8 as *const () as usize);
         }
 
         // Compile
         let helpers = HelperFns {
-            mem_read_u8: mem_read_u8 as usize as u64,
-            mem_read_u16: mem_read_u16 as usize as u64,
-            mem_read_u32: mem_read_u32 as usize as u64,
-            mem_read_u64: mem_read_u64_fn as usize as u64,
-            mem_write_u8: mem_write_u8 as usize as u64,
-            mem_write_u16: mem_write_u16 as usize as u64,
-            mem_write_u32: mem_write_u32 as usize as u64,
-            mem_write_u64: mem_write_u64_fn as usize as u64,
-            sbrk_helper: sbrk_helper as usize as u64,
+            mem_read_u8: mem_read_u8 as *const () as u64,
+            mem_read_u16: mem_read_u16 as *const () as u64,
+            mem_read_u32: mem_read_u32 as *const () as u64,
+            mem_read_u64: mem_read_u64_fn as *const () as u64,
+            mem_write_u8: mem_write_u8 as *const () as u64,
+            mem_write_u16: mem_write_u16 as *const () as u64,
+            mem_write_u32: mem_write_u32 as *const () as u64,
+            mem_write_u64: mem_write_u64_fn as *const () as u64,
+            sbrk_helper: sbrk_helper as *const () as u64,
         };
 
         let compiler = Compiler::new(
@@ -377,10 +389,9 @@ impl RecompiledPvm {
             jump_table.clone(),
             helpers,
         );
-        let native = compiler.compile(&code, &bitmask);
+        let (native, dispatch_table) = compiler.compile(&code, &bitmask);
 
-        // Dump native code for debugging if requested
-        if std::env::var("GREY_PVM_DEBUG").is_ok() {
+        if debug {
             let _ = std::fs::write("/tmp/pvm_native.bin", &native);
             eprintln!("Wrote {} bytes of native code to /tmp/pvm_native.bin", native.len());
             eprintln!("  basic_block_starts count: {}", basic_block_starts.iter().filter(|&&b| b).count());
@@ -388,7 +399,10 @@ impl RecompiledPvm {
 
         let native_code = NativeCode::new(&native)?;
 
-        Ok(Self {
+        // Set dispatch table pointer and code base in context
+        ctx.code_base = native_code.ptr as u64;
+
+        let mut result = Self {
             native_code,
             ctx,
             code,
@@ -396,7 +410,14 @@ impl RecompiledPvm {
             jump_table,
             basic_block_starts,
             initial_gas: gas,
-        })
+            dispatch_table,
+            debug,
+        };
+
+        // Set dispatch_table pointer (must point to the Vec's data in Self)
+        result.ctx.dispatch_table = result.dispatch_table.as_ptr();
+
+        Ok(result)
     }
 
     /// Run the compiled code until exit (halt, panic, OOG, page fault, or host call).
@@ -404,40 +425,23 @@ impl RecompiledPvm {
     /// modify registers/memory as needed, then call run() again (entry_pc is set
     /// automatically for re-entry).
     pub fn run(&mut self) -> ExitReason {
-        let debug = std::env::var("GREY_PVM_DEBUG").is_ok();
         loop {
-            if debug {
+            if self.debug {
                 eprintln!("recompiler::run() entry_pc={} gas={} heap_base=0x{:08x} heap_top=0x{:08x}",
                     self.ctx.entry_pc, self.ctx.gas, self.ctx.heap_base, self.ctx.heap_top);
                 eprintln!("  initial regs: {:?}", &self.ctx.regs);
-            }
-            // Execute native code
-            let entry = self.native_code.entry();
-            let ctx_ptr = &mut *self.ctx as *mut JitContext;
-
-            // Set sentinel to verify prologue clears it
-            if debug {
                 self.ctx.exit_reason = 0xDEAD;
             }
 
-            unsafe {
-                entry(ctx_ptr);
-            }
+            // Execute native code
+            let entry = self.native_code.entry();
+            let ctx_ptr = &mut *self.ctx as *mut JitContext;
+            unsafe { entry(ctx_ptr); }
 
-            if debug {
-                // Dump raw bytes around exit_reason to verify layout
-                let ctx_bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        ctx_ptr as *const u8,
-                        176, // size of JitContext
-                    )
-                };
+            if self.debug {
                 eprintln!("recompiler::run() exit_reason={} exit_arg={} gas={} pc={}",
                     self.ctx.exit_reason, self.ctx.exit_arg, self.ctx.gas, self.ctx.pc);
                 eprintln!("  regs: {:?}", &self.ctx.regs);
-                // Show bytes at offset 104-135 (gas through heap_top)
-                eprintln!("  ctx[104..136] = {:02x?}", &ctx_bytes[104..136]);
-                eprintln!("  ctx[120..128] = {:02x?} (exit_reason + exit_arg)", &ctx_bytes[120..128]);
             }
 
             // Read exit reason from context
@@ -445,7 +449,6 @@ impl RecompiledPvm {
                 0 => return ExitReason::Halt,
                 1 => return ExitReason::Panic,
                 2 => {
-                    // Set entry_pc for potential re-entry (e.g. compare mode)
                     self.ctx.entry_pc = self.ctx.pc;
                     return ExitReason::OutOfGas;
                 }
@@ -458,30 +461,10 @@ impl RecompiledPvm {
                 5 => {
                     // Dynamic jump — resolve and re-enter
                     let idx = self.ctx.exit_arg;
-                    if debug {
-                        eprintln!("recompiler::run() DJUMP idx={} jt_len={} pc={}",
-                            idx, self.jump_table.len(), self.ctx.pc);
-                    }
                     if let Some(target) = self.resolve_djump(idx) {
-                        if debug {
-                            eprintln!("  resolved to target PC={}", target);
-                        }
                         self.ctx.entry_pc = target;
-                        // Continue the loop to re-enter native code at target
                         continue;
                     } else {
-                        if debug {
-                            if (idx as usize) < self.jump_table.len() {
-                                let jt_target = self.jump_table[idx as usize];
-                                eprintln!("  DJUMP FAILED: idx={} jt[idx]={} bb_starts_len={} is_bb={}",
-                                    idx, jt_target, self.basic_block_starts.len(),
-                                    if (jt_target as usize) < self.basic_block_starts.len() {
-                                        self.basic_block_starts[jt_target as usize]
-                                    } else { false });
-                            } else {
-                                eprintln!("  DJUMP FAILED: idx={} out of bounds (jt_len={})", idx, self.jump_table.len());
-                            }
-                        }
                         return ExitReason::Panic;
                     }
                 }
@@ -584,7 +567,8 @@ pub fn initialize_program_recompiled(
 mod tests {
     use super::*;
     use crate::memory::PageAccess;
-    use codegen::{CTX_REGS, CTX_GAS, CTX_EXIT_REASON, CTX_EXIT_ARG, CTX_ENTRY_PC, CTX_PC};
+    use codegen::{CTX_REGS, CTX_GAS, CTX_EXIT_REASON, CTX_EXIT_ARG, CTX_ENTRY_PC, CTX_PC,
+                  CTX_DISPATCH_TABLE, CTX_CODE_BASE};
 
     #[test]
     fn test_jit_context_layout() {
@@ -605,6 +589,8 @@ mod tests {
             _pad1: 0,
             entry_pc: 0,
             pc: 0,
+            dispatch_table: std::ptr::null(),
+            code_base: 0,
         };
         let base = &ctx as *const JitContext as usize;
 
@@ -614,6 +600,8 @@ mod tests {
         assert_eq!(&ctx.exit_arg as *const _ as usize - base, CTX_EXIT_ARG as usize);
         assert_eq!(&ctx.entry_pc as *const _ as usize - base, CTX_ENTRY_PC as usize);
         assert_eq!(&ctx.pc as *const _ as usize - base, CTX_PC as usize);
+        assert_eq!(&ctx.dispatch_table as *const _ as usize - base, CTX_DISPATCH_TABLE as usize);
+        assert_eq!(&ctx.code_base as *const _ as usize - base, CTX_CODE_BASE as usize);
     }
 
     #[test]

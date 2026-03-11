@@ -248,6 +248,17 @@ impl Assembler {
         self.emit_i32(disp);
     }
 
+    /// movsxd r64, dword [base + index*4] — sign-extending load with SIB scale=4
+    pub fn movsxd_load_sib4(&mut self, dst: Reg, base: Reg, index: Reg) {
+        // REX.W prefix: 0x48 | (dst.hi << 2) | (index.hi << 1) | base.hi
+        self.emit(0x48 | (dst.hi() << 2) | (index.hi() << 1) | base.hi());
+        self.emit(0x63); // movsxd opcode
+        // ModR/M: mod=00, reg=dst, rm=100 (SIB follows)
+        self.emit((dst.lo() << 3) | 4);
+        // SIB: scale=10 (4), index, base
+        self.emit(0x80 | (index.lo() << 3) | base.lo());
+    }
+
     /// mov dword [base + disp32], r32 — 32-bit store
     pub fn mov_store32(&mut self, base: Reg, disp: i32, src: Reg) {
         self.rex_opt(src, base);
@@ -680,6 +691,11 @@ impl Assembler {
     }
 
     // === Finalization ===
+
+    /// Get the resolved native offset for a label (only valid after bind_label).
+    pub fn label_offset(&self, label: Label) -> Option<usize> {
+        self.labels.get(&label).copied()
+    }
 
     /// Resolve all label fixups and return the final machine code.
     /// Panics if any label is unbound.

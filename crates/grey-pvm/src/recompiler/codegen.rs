@@ -67,6 +67,8 @@ pub const CTX_BB_STARTS: i32 = 152; // *const u8 (basic block starts)
 pub const CTX_BB_LEN: i32 = 160;    // u32
 pub const CTX_ENTRY_PC: i32 = 168;  // u32 (entry PC for re-entry)
 pub const CTX_PC: i32 = 172;        // u32 (current PC on exit)
+pub const CTX_DISPATCH_TABLE: i32 = 176; // *const i32 (PVM PC → native offset)
+pub const CTX_CODE_BASE: i32 = 184; // u64 (base address of native code)
 
 /// Exit reason codes (matching ExitReason enum).
 pub const EXIT_HALT: u32 = 0;
@@ -146,7 +148,9 @@ impl Compiler {
     }
 
     /// Compile a full PVM program.
-    pub fn compile(mut self, code: &[u8], bitmask: &[u8]) -> Vec<u8> {
+    /// Returns (native_code, dispatch_table) where dispatch_table[pc] is the
+    /// native code offset for PVM PC, or -1 if not a valid entry point.
+    pub fn compile(mut self, code: &[u8], bitmask: &[u8]) -> (Vec<u8>, Vec<i32>) {
         // Emit prologue
         self.emit_prologue();
 
@@ -180,13 +184,6 @@ impl Compiler {
                 self.emit_gas_check(pc, code, bitmask);
             }
 
-            // Instruction trace for debugging: save regs and call trace helper
-            // Only enabled at compile time for debug builds
-            #[cfg(any())] // disabled by default
-            {
-                // ... trace code would go here
-            }
-
             // Decode instruction
             let opcode_byte = code[pc];
             let opcode = match Opcode::from_byte(opcode_byte) {
@@ -203,12 +200,6 @@ impl Compiler {
             let category = opcode.category();
             let args = args::decode_args(code, pc, skip, category);
 
-            // Debug: print compiled instructions in key ranges
-            if std::env::var("GREY_PVM_DEBUG").is_ok()
-                && ((18335..18400).contains(&pc) || (18290..18340).contains(&pc) || (13310..13320).contains(&pc))
-            {
-                eprintln!("  COMPILE pc={} opcode={:?} args={:?} next_pc={}", pc, opcode, args, next_pc);
-            }
             self.compile_instruction(opcode, &args, pc as u32, next_pc);
 
             pc += 1 + skip;
@@ -217,7 +208,18 @@ impl Compiler {
         // Emit epilogue and exit sequences
         self.emit_exit_sequences();
 
-        self.asm.finalize()
+        // Build dispatch table: PVM PC → native code offset
+        let table_len = code.len() + 1; // +1 so PC=code.len() is valid (maps to panic)
+        let mut dispatch_table = vec![-1i32; table_len];
+        for (&pvm_pc, &label) in &self.block_labels {
+            if let Some(offset) = self.asm.label_offset(label) {
+                dispatch_table[pvm_pc as usize] = offset as i32;
+            }
+        }
+        // PC=0 must always be valid (program start); if not already set, it'll be
+        // set by the first basic block at PC 0.
+
+        (self.asm.finalize(), dispatch_table)
     }
 
     /// Save caller-saved registers (PVM registers in caller-saved x86-64 regs).
@@ -1686,40 +1688,26 @@ impl Compiler {
         // Clear exit reason
         self.asm.mov_store32_imm(CTX, CTX_EXIT_REASON as i32, 0);
 
+        // --- O(1) dispatch via table lookup (before loading PVM regs) ---
+        // RAX = dispatch_table pointer, RDX = entry_pc (zero-extended)
+        self.asm.mov_load32(SCRATCH, CTX, CTX_ENTRY_PC);        // edx = entry_pc
+        self.asm.mov_load64(Reg::RAX, CTX, CTX_DISPATCH_TABLE); // rax = dispatch_table
+        // movsxd rax, dword [rax + rdx*4]  — load native code offset
+        self.asm.movsxd_load_sib4(Reg::RAX, Reg::RAX, SCRATCH);
+        // rax += code_base
+        self.asm.mov_load64(SCRATCH, CTX, CTX_CODE_BASE);
+        self.asm.add_rr(Reg::RAX, SCRATCH);
+        // Save dispatch target on stack (we'll jump to it after loading PVM regs)
+        self.asm.push(Reg::RAX);
+
         // Load PVM registers from context
         for i in 0..13 {
             self.asm.mov_load64(REG_MAP[i], CTX, CTX_REGS + (i as i32) * 8);
         }
 
-        // Load gas from context
-        self.asm.mov_load64(SCRATCH, CTX, CTX_GAS);
-        // Actually gas is tracked in context, not in a register. We load it on-demand.
-        // The gas check reads/writes directly from [CTX + CTX_GAS].
-
-        // Dispatch table: check entry_pc and jump to the right basic block
-        // Load entry_pc (32-bit) from context
-        self.asm.mov_load32(SCRATCH, CTX, CTX_ENTRY_PC);
-        // If entry_pc == 0, fall through to the start of the program
-        self.asm.test_rr(SCRATCH, SCRATCH);
-        let start_label = self.asm.new_label();
-        self.asm.jcc_label(Cc::E, start_label);
-
-        // Compare against each basic block start PC
-        let bb_pcs: Vec<u32> = self.basic_block_starts.iter().enumerate()
-            .filter(|&(_, s)| *s)
-            .map(|(i, _)| i as u32)
-            .collect();
-        for &pc in &bb_pcs {
-            let label = self.label_for_pc(pc);
-            self.asm.cmp_ri(SCRATCH, pc as i32);
-            self.asm.jcc_label(Cc::E, label);
-        }
-
-        // If entry_pc doesn't match any basic block, panic
-        self.asm.jmp_label(self.panic_label);
-
-        // Bind start label (entry_pc == 0 comes here)
-        self.asm.bind_label(start_label);
+        // Jump to the dispatch target (pop into SCRATCH, then indirect jump)
+        self.asm.pop(SCRATCH);
+        self.asm.jmp_reg(SCRATCH);
     }
 
     /// Emit exit sequences and epilogue.
