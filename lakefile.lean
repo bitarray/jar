@@ -36,6 +36,11 @@ lean_lib JarBook where
 
 lean_exe jarbook where
   root := `JarBookMain
+  moreLinkArgs := #[
+    "-L", "crypto-ffi/target/release",
+    "-ljar_crypto_ffi",
+    "-lpthread", "-ldl", "-lm"
+  ]
 
 lean_exe cryptotest where
   root := `Jar.CryptoTest
