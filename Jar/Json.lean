@@ -26,30 +26,39 @@ private def hexDigit (c : Char) : Option UInt8 :=
   else if 'A' ≤ c && c ≤ 'F' then some (c.toNat - 'A'.toNat + 10).toUInt8
   else none
 
+/-- Decode a hex digit from a raw UTF-8 byte (ASCII). -/
+@[inline] private def hexDigitByte (b : UInt8) : Option UInt8 :=
+  if 0x30 ≤ b && b ≤ 0x39 then some (b - 0x30)       -- '0'-'9'
+  else if 0x61 ≤ b && b ≤ 0x66 then some (b - 0x61 + 10) -- 'a'-'f'
+  else if 0x41 ≤ b && b ≤ 0x46 then some (b - 0x41 + 10) -- 'A'-'F'
+  else none
+
+@[inline] private def hexNibbleAscii (n : UInt8) : UInt8 :=
+  if n < 10 then 0x30 + n else 0x61 + n - 10
+
 private def hexNibble (n : UInt8) : Char :=
   if n < 10 then Char.ofNat (n.toNat + '0'.toNat)
   else Char.ofNat (n.toNat - 10 + 'a'.toNat)
 
 def bytesToHex (bs : ByteArray) : String :=
-  let chars := bs.foldl (init := #[]) fun acc b =>
+  let chars := bs.foldl (init := #['0', 'x']) fun acc b =>
     acc.push (hexNibble (b >>> 4)) |>.push (hexNibble (b &&& 0x0f))
-  "0x" ++ String.ofList chars.toList
+  String.ofList chars.toList
 
 def hexToBytes (s : String) : Except String ByteArray := do
-  let s : String := if s.startsWith "0x" || s.startsWith "0X" then (s.drop 2).toString else s
-  let chars := s.toList
-  if chars.length % 2 != 0 then
-    throw s!"hex string has odd length: {chars.length}"
+  let utf8 := s.toUTF8
+  let start : Nat := if utf8.size ≥ 2 && utf8.get! 0 == 0x30
+      && (utf8.get! 1 == 0x78 || utf8.get! 1 == 0x58) then 2 else 0
+  let len := utf8.size - start
+  if len % 2 != 0 then
+    throw s!"hex string has odd length: {len}"
+  let nBytes := len / 2
   let mut result := ByteArray.empty
-  let mut remaining := chars
-  while _h : remaining.length ≥ 2 do
-    match remaining with
-    | c0 :: c1 :: rest =>
-      let hi ← hexDigit c0 |>.elim (.error s!"invalid hex digit: {c0}") .ok
-      let lo ← hexDigit c1 |>.elim (.error s!"invalid hex digit: {c1}") .ok
-      result := result.push ((hi <<< 4) ||| lo)
-      remaining := rest
-    | _ => break
+  for i in [:nBytes] do
+    let pos := start + i * 2
+    let hi ← hexDigitByte (utf8.get! pos) |>.elim (.error "invalid hex digit") .ok
+    let lo ← hexDigitByte (utf8.get! (pos + 1)) |>.elim (.error "invalid hex digit") .ok
+    result := result.push ((hi <<< 4) ||| lo)
   return result
 
 -- ============================================================================
