@@ -179,9 +179,7 @@ pub fn apply_safrole(
             let filtered = filter_offenders(&state.pending_validators, &state.judgments);
 
             // z = O([k_b | k ← γP]) — ring root from pending keys' Bandersnatch components
-            // NOTE: Real implementation would compute the actual Bandersnatch ring root.
-            // For now, we derive a placeholder from the keys.
-            let ring_root = compute_ring_root_placeholder(&state.safrole.pending_keys);
+            let ring_root = compute_ring_root(&state.safrole.pending_keys);
 
             (
                 filtered,                           // γP' = Φ(ι)
@@ -357,18 +355,12 @@ pub struct SafroleOutput {
     pub winning_tickets_marker: Option<Vec<Ticket>>,
 }
 
-/// Placeholder ring root computation.
-///
-/// Real implementation would use Bandersnatch ring commitment O([k_b | k ← keys]).
-fn compute_ring_root_placeholder(keys: &[ValidatorKey]) -> grey_types::BandersnatchRingRoot {
-    let mut data = Vec::new();
-    for k in keys {
-        data.extend_from_slice(&k.bandersnatch.0);
-    }
-    let hash = grey_crypto::blake2b_256(&data);
-    let mut root = [0u8; 144];
-    root[..32].copy_from_slice(&hash.0);
-    grey_types::BandersnatchRingRoot(root)
+/// Compute ring root from validator Bandersnatch keys (eq 6.13: γZ' = O([k_b | k ← γP'])).
+fn compute_ring_root(keys: &[ValidatorKey]) -> grey_types::BandersnatchRingRoot {
+    let bandersnatch_keys: Vec<[u8; 32]> = keys.iter().map(|k| k.bandersnatch.0).collect();
+    grey_types::BandersnatchRingRoot(
+        grey_crypto::bandersnatch::compute_ring_commitment(&bandersnatch_keys),
+    )
 }
 
 /// Check if the current seal-key series uses tickets (T = 1) or fallback (T = 0).

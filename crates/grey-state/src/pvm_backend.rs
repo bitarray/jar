@@ -300,7 +300,10 @@ impl PvmInstance {
         match &mut self.inner {
             Backend::Interpreter(pvm) => pvm.tracing_enabled = true,
             Backend::Recompiler(_) => {
-                // Tracing not yet supported in recompiler
+                // Intentional: instruction tracing is interpreter-only.
+                // The recompiler compiles basic blocks to native x86-64 code,
+                // so per-instruction tracing is not available. Use the
+                // interpreter backend or compare mode for trace collection.
             }
             Backend::Compare { interp, .. } => {
                 interp.tracing_enabled = true;

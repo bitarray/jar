@@ -304,17 +304,25 @@ pub fn process_disputes(
         }
     }
 
-    // eq 10.15: Clear pending reports with non-good verdicts
-    // Note: simplified — proper implementation would hash the serialized report
-    for slot in pending_reports.iter_mut() {
-        let should_clear = if let Some(_pending) = slot.as_ref() {
-            // For now, skip detailed report hash matching
-            false
-        } else {
-            false
-        };
-        if should_clear {
-            *slot = None;
+    // eq removenonpositive: Clear pending reports with non-good verdicts
+    // For each core c: if H(E(ρ[c].r)) matches a verdict with t < ⌊2/3 V⌋ + 1, clear it
+    {
+        use grey_codec::Encode;
+        let non_good: std::collections::BTreeSet<Hash> = verdict_summary
+            .iter()
+            .filter(|&&(_, positive)| positive < super_majority)
+            .map(|&(ref h, _)| *h)
+            .collect();
+
+        if !non_good.is_empty() {
+            for slot in pending_reports.iter_mut() {
+                if let Some(pending) = slot.as_ref() {
+                    let report_hash = grey_crypto::blake2b_256(&pending.report.encode());
+                    if non_good.contains(&report_hash) {
+                        *slot = None;
+                    }
+                }
+            }
         }
     }
 

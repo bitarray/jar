@@ -2,6 +2,11 @@
 //!
 //! Implements the Δ+, Δ*, and Δ1 functions for processing available work-reports
 //! and applying their results to service state.
+//!
+//! **NOTE**: This module is superseded by `grey-state/src/accumulate.rs`, which has
+//! the full implementation with PVM execution (ΨA invocation), host-call dispatch,
+//! and checkpoint/rollback. This module is retained for reference but is not used
+//! at runtime.
 
 use grey_types::constants::*;
 use grey_types::state::{PrivilegedServices, ServiceAccount, State};

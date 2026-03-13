@@ -338,22 +338,6 @@ impl Compiler {
         self.asm.jcc_label(Cc::NE, self.exit_label);
     }
 
-    /// Emit a simpler memory write where address and value are immediates or
-    /// already computed. Uses a push-based approach.
-    fn emit_mem_write_from_scratch(&mut self, fn_addr: u64) {
-        // RDI = memory, RSI = addr (already in SCRATCH saved to stack),
-        // RDX = value (on stack too)
-        // Caller must have pushed: [addr] [value] onto native stack before this.
-        // We'll use a different approach: caller has set SCRATCH = addr,
-        // and pushed value separately.
-
-        // Actually let's simplify: provide addr in SCRATCH, value on top of stack.
-        // Save everything, load from known positions.
-        // This is too complex. Let's use a unified approach.
-        let _ = fn_addr;
-        unimplemented!("use emit_mem_write instead");
-    }
-
     /// Compile a single PVM instruction.
     fn compile_instruction(&mut self, opcode: Opcode, args: &Args, pc: u32, next_pc: u32) {
         match opcode {
