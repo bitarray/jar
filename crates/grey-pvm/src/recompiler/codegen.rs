@@ -323,8 +323,7 @@ impl Compiler {
     /// Emit inline memory read with explicit width.
     /// width_bytes: 1=u8, 2=u16, 4=u32, 8=u64. 0=auto (use fn_addr to detect).
     fn emit_mem_read_sized(&mut self, dst: Reg, fn_addr: u64, width_bytes: u32) {
-        let w = if width_bytes > 0 { width_bytes } else {
-            // Detect from helper function pointer
+        let _w = if width_bytes > 0 { width_bytes } else {
             if fn_addr == self.helpers.mem_read_u8 { 1 }
             else if fn_addr == self.helpers.mem_read_u16 { 2 }
             else if fn_addr == self.helpers.mem_read_u32 { 4 }
@@ -332,32 +331,23 @@ impl Compiler {
         };
 
         // SCRATCH (RDX) = guest address (32-bit clean)
-        let slow_label = self.asm.new_label();
         let done_label = self.asm.new_label();
         let fault_label = self.asm.new_label();
 
-        // Always push RAX (phi[11]) — we use it as scratch.
+        // Push RAX (phi[11]) — we use it as scratch for permission check + buf base.
         self.asm.push(Reg::RAX);
 
-        // Cross-page check (skip for single-byte accesses)
-        if w > 1 {
-            self.asm.mov_rr(Reg::RAX, SCRATCH);
-            self.asm.and_ri(Reg::RAX, 0xFFF);
-            self.asm.cmp_ri32(Reg::RAX, 4096 - w as i32 + 1);
-            self.asm.jcc_label(Cc::AE, slow_label);
-        }
-
-        // Permission check: page_index = addr >> 12
-        self.asm.mov_rr(Reg::RAX, SCRATCH);
-        self.asm.shr_ri32(Reg::RAX, 12);
-        self.asm.add_r64_mem(Reg::RAX, CTX, CTX_FLAT_PERMS);
-        self.asm.movzx_load8_deref(Reg::RAX, Reg::RAX);
-        self.asm.cmp_ri32(Reg::RAX, 1);
-        self.asm.jcc_label(Cc::B, fault_label);
+        // Permission check: page_index = addr >> 12, then compare byte in-memory.
+        // No cross-page check — flat buffer is contiguous so multi-byte loads work.
+        self.asm.mov_rr(Reg::RAX, SCRATCH);          // mov eax, edx (zero-extends)
+        self.asm.shr_ri32(Reg::RAX, 12);             // eax = page index
+        self.asm.add_r64_mem(Reg::RAX, CTX, CTX_FLAT_PERMS); // rax = &perms[page]
+        self.asm.cmp_byte_deref_imm(Reg::RAX, 1);   // cmp byte [rax], 1
+        self.asm.jcc_label(Cc::B, fault_label);      // inaccessible → fault
 
         // Direct load from flat buffer
         self.asm.mov_load64(Reg::RAX, CTX, CTX_FLAT_BUF);
-        match w {
+        match _w {
             1 => self.asm.movzx_load8_sib(Reg::RAX, Reg::RAX, SCRATCH),
             2 => self.asm.movzx_load16_sib(Reg::RAX, Reg::RAX, SCRATCH),
             4 => self.asm.mov_load32_sib(Reg::RAX, Reg::RAX, SCRATCH),
@@ -367,24 +357,14 @@ impl Compiler {
 
         // Move result to dst, restore RAX
         if dst == Reg::RAX {
-            // Result is already in RAX, but we need to "restore" the original RAX.
-            // Pop the saved value into SCRATCH, then swap: save result, restore original,
-            // but actually we DON'T need to restore the original because the PVM
-            // instruction is overwriting phi[11]. So just discard the saved value.
-            self.asm.add_ri(Reg::RSP, 8); // discard saved RAX
+            self.asm.add_ri(Reg::RSP, 8); // discard saved RAX (PVM overwrites phi[11])
         } else {
             self.asm.mov_rr(dst, Reg::RAX);
             self.asm.pop(Reg::RAX);
         }
         self.asm.jmp_label(done_label);
 
-        // === Slow path: cross-page or fallback ===
-        self.asm.bind_label(slow_label);
-        self.asm.pop(Reg::RAX);
-        self.emit_mem_read_helper(dst, SCRATCH, fn_addr);
-        self.asm.jmp_label(done_label);
-
-        // === Fault path: inaccessible page ===
+        // === Fault path ===
         self.asm.bind_label(fault_label);
         self.asm.pop(Reg::RAX);
         self.asm.mov_store32_imm(CTX, CTX_EXIT_REASON, EXIT_PAGE_FAULT as i32);
@@ -395,54 +375,30 @@ impl Compiler {
     }
 
     /// Emit memory write. Address in SCRATCH, value in val_reg.
-    /// Uses inline flat buffer store with helper fallback for cross-page.
     fn emit_mem_write(&mut self, _addr_in_scratch: bool, val_reg: Reg, fn_addr: u64) {
         let w = if fn_addr == self.helpers.mem_write_u8 { 1u32 }
             else if fn_addr == self.helpers.mem_write_u16 { 2 }
             else if fn_addr == self.helpers.mem_write_u32 { 4 }
             else { 8 };
 
-        let slow_label = self.asm.new_label();
         let done_label = self.asm.new_label();
         let fault_label = self.asm.new_label();
 
-        // Save RAX (phi[11]) — we use it as scratch for permission check
-        // and buffer base. If val_reg IS RAX, we must save it BEFORE clobbering.
         self.asm.push(Reg::RAX);
 
-        // If val_reg is RAX, also push the value so we can reload it after
-        // clobbering RAX with the buffer base.
-        let val_on_stack = val_reg == Reg::RAX;
-        if val_on_stack {
-            // The pushed RAX already has the value, it's on the stack.
-            // We'll reload it later via stack access.
-        }
-
-        // Cross-page check
-        if w > 1 {
-            self.asm.mov_rr(Reg::RAX, SCRATCH);
-            self.asm.and_ri(Reg::RAX, 0xFFF);
-            self.asm.cmp_ri32(Reg::RAX, 4096 - w as i32 + 1);
-            self.asm.jcc_label(Cc::AE, slow_label);
-        }
-
-        // Permission check (>= 2 for write)
+        // Permission check (>= 2 for write) — no cross-page check needed
         self.asm.mov_rr(Reg::RAX, SCRATCH);
         self.asm.shr_ri32(Reg::RAX, 12);
         self.asm.add_r64_mem(Reg::RAX, CTX, CTX_FLAT_PERMS);
-        self.asm.movzx_load8_deref(Reg::RAX, Reg::RAX);
-        self.asm.cmp_ri32(Reg::RAX, 2);
+        self.asm.cmp_byte_deref_imm(Reg::RAX, 2);   // cmp byte [rax], 2
         self.asm.jcc_label(Cc::B, fault_label);
 
         // Direct store to flat buffer
-        if val_on_stack {
-            // val_reg is RAX which we're about to clobber. Reload the original
-            // value from the stack into RAX, then use a different approach.
-            // Stack: [saved RAX (= phi[11] = value)]
-            // We need both the buffer base AND the value. Use RCX temporarily.
-            self.asm.push(Reg::RCX); // save phi[12]
-            self.asm.mov_load64(Reg::RCX, CTX, CTX_FLAT_BUF); // rcx = buf base
-            self.asm.mov_load64(Reg::RAX, Reg::RSP, 8); // rax = saved value (past pushed RCX)
+        if val_reg == Reg::RAX {
+            // val_reg is RAX which we clobbered. Use RCX as buf base instead.
+            self.asm.push(Reg::RCX);
+            self.asm.mov_load64(Reg::RCX, CTX, CTX_FLAT_BUF);
+            self.asm.mov_load64(Reg::RAX, Reg::RSP, 8); // reload saved RAX (value)
             match w {
                 1 => self.asm.mov_store8_sib(Reg::RCX, SCRATCH, Reg::RAX),
                 2 => self.asm.mov_store16_sib(Reg::RCX, SCRATCH, Reg::RAX),
@@ -450,7 +406,7 @@ impl Compiler {
                 8 => self.asm.mov_store64_sib(Reg::RCX, SCRATCH, Reg::RAX),
                 _ => unreachable!(),
             }
-            self.asm.pop(Reg::RCX); // restore phi[12]
+            self.asm.pop(Reg::RCX);
         } else {
             self.asm.mov_load64(Reg::RAX, CTX, CTX_FLAT_BUF);
             match w {
@@ -463,12 +419,6 @@ impl Compiler {
         }
 
         self.asm.pop(Reg::RAX);
-        self.asm.jmp_label(done_label);
-
-        // Slow path
-        self.asm.bind_label(slow_label);
-        self.asm.pop(Reg::RAX);
-        self.emit_mem_write_helper(val_reg, fn_addr);
         self.asm.jmp_label(done_label);
 
         // Fault path

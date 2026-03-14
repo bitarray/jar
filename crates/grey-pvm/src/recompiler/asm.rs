@@ -400,6 +400,28 @@ impl Assembler {
         }
     }
 
+    /// cmp byte [reg], imm8 — compare memory byte with immediate
+    pub fn cmp_byte_deref_imm(&mut self, base: Reg, imm: u8) {
+        // REX prefix needed for R8-R15 base
+        if base.needs_rex() {
+            self.emit(0x41 | base.hi());
+        }
+        self.emit(0x80); // ALU r/m8, imm8
+        // ModR/M: mod depends on base register
+        if base.lo() == 5 {
+            // RBP/R13: need mod=01, disp8=0
+            self.emit(0x78 | base.lo()); // /7 = CMP, mod=01
+            self.emit(0); // disp8
+        } else if base.lo() == 4 {
+            // RSP/R12: need SIB
+            self.emit(0x38 | 4); // /7 = CMP, mod=00, rm=100
+            self.emit(0x24); // SIB: base=RSP/R12
+        } else {
+            self.emit(0x38 | base.lo()); // /7 = CMP, mod=00
+        }
+        self.emit(imm);
+    }
+
     // -- ALU reg,reg (64-bit) --
 
     fn alu_rr64(&mut self, op: u8, dst: Reg, src: Reg) {
