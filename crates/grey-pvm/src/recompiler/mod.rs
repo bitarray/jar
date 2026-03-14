@@ -251,153 +251,183 @@ impl Drop for FlatMemory {
 // But the helper doesn't have ctx... Let's restructure.
 // Pass ctx as first arg to everything.
 
-/// Memory read helper — reads u8 via ctx. Sets exit_reason on page fault.
+/// Check flat buffer permission for a byte range. Returns true if all bytes are accessible.
+fn flat_check_perm(ctx: &JitContext, addr: u32, len: u32, min_perm: u8) -> bool {
+    if ctx.flat_perms.is_null() {
+        return false;
+    }
+    let start_page = addr as usize / 4096;
+    let end_page = (addr as usize + len as usize - 1) / 4096;
+    for p in start_page..=end_page {
+        if p >= NUM_PAGES {
+            return false;
+        }
+        let perm = unsafe { *ctx.flat_perms.add(p) };
+        if perm < min_perm {
+            return false;
+        }
+    }
+    true
+}
+
+/// Read from flat buffer. Caller must have checked permissions.
+unsafe fn flat_read(ctx: &JitContext, addr: u32, len: usize) -> u64 {
+    let ptr = ctx.flat_buf.add(addr as usize);
+    match len {
+        1 => *ptr as u64,
+        2 => u16::from_le_bytes([*ptr, *ptr.add(1)]) as u64,
+        4 => u32::from_le_bytes([*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)]) as u64,
+        8 => u64::from_le_bytes(std::ptr::read_unaligned(ptr as *const [u8; 8])),
+        _ => 0,
+    }
+}
+
+/// Write to flat buffer. Caller must have checked permissions.
+unsafe fn flat_write(ctx: &JitContext, addr: u32, bytes: &[u8]) {
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), ctx.flat_buf.add(addr as usize), bytes.len());
+}
+
+/// Memory read helper — reads from flat buffer (source of truth during JIT).
+/// Falls back to Memory if flat buffer is unavailable.
 extern "sysv64" fn mem_read_u8(ctx: *mut JitContext, addr: u32) -> u64 {
     let ctx = unsafe { &mut *ctx };
-    let mem = unsafe { &*ctx.memory };
-    if std::env::var("GREY_PVM_DEBUG").is_ok() {
-        eprintln!("  mem_read_u8: addr=0x{:08x}", addr);
+    if !ctx.flat_buf.is_null() {
+        if flat_check_perm(ctx, addr, 1, 1) {
+            return unsafe { flat_read(ctx, addr, 1) };
+        }
+        ctx.exit_reason = 3;
+        ctx.exit_arg = addr;
+        return 0;
     }
+    let mem = unsafe { &*ctx.memory };
     match mem.read_u8(addr) {
         Some(v) => v as u64,
-        None => {
-            if std::env::var("GREY_PVM_DEBUG").is_ok() {
-                eprintln!("  mem_read_u8: PAGE FAULT at 0x{:08x}", addr);
-            }
-            ctx.exit_reason = 3; // EXIT_PAGE_FAULT
-            ctx.exit_arg = addr;
-            0
-        }
+        None => { ctx.exit_reason = 3; ctx.exit_arg = addr; 0 }
     }
 }
 
 extern "sysv64" fn mem_read_u16(ctx: *mut JitContext, addr: u32) -> u64 {
     let ctx = unsafe { &mut *ctx };
-    let mem = unsafe { &*ctx.memory };
-    if std::env::var("GREY_PVM_DEBUG").is_ok() {
-        eprintln!("  mem_read_u16: addr=0x{:08x}", addr);
+    if !ctx.flat_buf.is_null() {
+        if flat_check_perm(ctx, addr, 2, 1) {
+            return unsafe { flat_read(ctx, addr, 2) };
+        }
+        ctx.exit_reason = 3;
+        ctx.exit_arg = addr;
+        return 0;
     }
+    let mem = unsafe { &*ctx.memory };
     match mem.read_u16_le(addr) {
         Some(v) => v as u64,
-        None => {
-            if std::env::var("GREY_PVM_DEBUG").is_ok() {
-                eprintln!("  mem_read_u16: PAGE FAULT at 0x{:08x}", addr);
-            }
-            ctx.exit_reason = 3;
-            ctx.exit_arg = addr;
-            0
-        }
+        None => { ctx.exit_reason = 3; ctx.exit_arg = addr; 0 }
     }
 }
 
 extern "sysv64" fn mem_read_u32(ctx: *mut JitContext, addr: u32) -> u64 {
     let ctx = unsafe { &mut *ctx };
-    let mem = unsafe { &*ctx.memory };
-    if std::env::var("GREY_PVM_DEBUG").is_ok() {
-        eprintln!("  mem_read_u32: addr=0x{:08x}", addr);
+    if !ctx.flat_buf.is_null() {
+        if flat_check_perm(ctx, addr, 4, 1) {
+            return unsafe { flat_read(ctx, addr, 4) };
+        }
+        ctx.exit_reason = 3;
+        ctx.exit_arg = addr;
+        return 0;
     }
+    let mem = unsafe { &*ctx.memory };
     match mem.read_u32_le(addr) {
         Some(v) => v as u64,
-        None => {
-            if std::env::var("GREY_PVM_DEBUG").is_ok() {
-                eprintln!("  mem_read_u32: PAGE FAULT at 0x{:08x}", addr);
-            }
-            ctx.exit_reason = 3;
-            ctx.exit_arg = addr;
-            0
-        }
+        None => { ctx.exit_reason = 3; ctx.exit_arg = addr; 0 }
     }
 }
 
 extern "sysv64" fn mem_read_u64_fn(ctx: *mut JitContext, addr: u32) -> u64 {
     let ctx = unsafe { &mut *ctx };
-    let mem = unsafe { &*ctx.memory };
-    if std::env::var("GREY_PVM_DEBUG").is_ok() {
-        eprintln!("  mem_read_u64: addr=0x{:08x}", addr);
+    if !ctx.flat_buf.is_null() {
+        if flat_check_perm(ctx, addr, 8, 1) {
+            return unsafe { flat_read(ctx, addr, 8) };
+        }
+        ctx.exit_reason = 3;
+        ctx.exit_arg = addr;
+        return 0;
     }
+    let mem = unsafe { &*ctx.memory };
     match mem.read_u64_le(addr) {
         Some(v) => v,
-        None => {
-            if std::env::var("GREY_PVM_DEBUG").is_ok() {
-                eprintln!("  mem_read_u64: PAGE FAULT at 0x{:08x}", addr);
-            }
-            ctx.exit_reason = 3;
-            ctx.exit_arg = addr;
-            0
-        }
+        None => { ctx.exit_reason = 3; ctx.exit_arg = addr; 0 }
     }
 }
 
-/// Write to both Memory and flat buffer (if available).
-unsafe fn sync_write_to_flat(ctx: &JitContext, addr: u32, bytes: &[u8]) {
-    if !ctx.flat_buf.is_null() {
-        let offset = addr as usize;
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ctx.flat_buf.add(offset), bytes.len());
-    }
-}
-
-/// Memory write helper — writes value via ctx. Sets exit_reason on page fault.
+/// Memory write helper — writes to flat buffer (source of truth during JIT).
+/// Falls back to Memory if flat buffer is unavailable.
 extern "sysv64" fn mem_write_u8(ctx: *mut JitContext, addr: u32, value: u64) -> u64 {
     let ctx = unsafe { &mut *ctx };
+    if !ctx.flat_buf.is_null() {
+        if flat_check_perm(ctx, addr, 1, 2) {
+            unsafe { flat_write(ctx, addr, &[value as u8]); }
+            return 0;
+        }
+        ctx.exit_reason = 3;
+        ctx.exit_arg = addr;
+        return 1;
+    }
     let mem = unsafe { &mut *ctx.memory };
     match mem.write_u8(addr, value as u8) {
-        crate::memory::MemoryAccess::Ok => {
-            unsafe { sync_write_to_flat(ctx, addr, &[value as u8]); }
-            0
-        }
-        crate::memory::MemoryAccess::PageFault(a) => {
-            ctx.exit_reason = 3;
-            ctx.exit_arg = a;
-            1
-        }
+        crate::memory::MemoryAccess::Ok => 0,
+        crate::memory::MemoryAccess::PageFault(a) => { ctx.exit_reason = 3; ctx.exit_arg = a; 1 }
     }
 }
 
 extern "sysv64" fn mem_write_u16(ctx: *mut JitContext, addr: u32, value: u64) -> u64 {
     let ctx = unsafe { &mut *ctx };
+    if !ctx.flat_buf.is_null() {
+        if flat_check_perm(ctx, addr, 2, 2) {
+            unsafe { flat_write(ctx, addr, &(value as u16).to_le_bytes()); }
+            return 0;
+        }
+        ctx.exit_reason = 3;
+        ctx.exit_arg = addr;
+        return 1;
+    }
     let mem = unsafe { &mut *ctx.memory };
     match mem.write_u16_le(addr, value as u16) {
-        crate::memory::MemoryAccess::Ok => {
-            unsafe { sync_write_to_flat(ctx, addr, &(value as u16).to_le_bytes()); }
-            0
-        }
-        crate::memory::MemoryAccess::PageFault(a) => {
-            ctx.exit_reason = 3;
-            ctx.exit_arg = a;
-            1
-        }
+        crate::memory::MemoryAccess::Ok => 0,
+        crate::memory::MemoryAccess::PageFault(a) => { ctx.exit_reason = 3; ctx.exit_arg = a; 1 }
     }
 }
 
 extern "sysv64" fn mem_write_u32(ctx: *mut JitContext, addr: u32, value: u64) -> u64 {
     let ctx = unsafe { &mut *ctx };
+    if !ctx.flat_buf.is_null() {
+        if flat_check_perm(ctx, addr, 4, 2) {
+            unsafe { flat_write(ctx, addr, &(value as u32).to_le_bytes()); }
+            return 0;
+        }
+        ctx.exit_reason = 3;
+        ctx.exit_arg = addr;
+        return 1;
+    }
     let mem = unsafe { &mut *ctx.memory };
     match mem.write_u32_le(addr, value as u32) {
-        crate::memory::MemoryAccess::Ok => {
-            unsafe { sync_write_to_flat(ctx, addr, &(value as u32).to_le_bytes()); }
-            0
-        }
-        crate::memory::MemoryAccess::PageFault(a) => {
-            ctx.exit_reason = 3;
-            ctx.exit_arg = a;
-            1
-        }
+        crate::memory::MemoryAccess::Ok => 0,
+        crate::memory::MemoryAccess::PageFault(a) => { ctx.exit_reason = 3; ctx.exit_arg = a; 1 }
     }
 }
 
 extern "sysv64" fn mem_write_u64_fn(ctx: *mut JitContext, addr: u32, value: u64) -> u64 {
     let ctx = unsafe { &mut *ctx };
+    if !ctx.flat_buf.is_null() {
+        if flat_check_perm(ctx, addr, 8, 2) {
+            unsafe { flat_write(ctx, addr, &value.to_le_bytes()); }
+            return 0;
+        }
+        ctx.exit_reason = 3;
+        ctx.exit_arg = addr;
+        return 1;
+    }
     let mem = unsafe { &mut *ctx.memory };
     match mem.write_u64_le(addr, value) {
-        crate::memory::MemoryAccess::Ok => {
-            unsafe { sync_write_to_flat(ctx, addr, &value.to_le_bytes()); }
-            0
-        }
-        crate::memory::MemoryAccess::PageFault(a) => {
-            ctx.exit_reason = 3;
-            ctx.exit_arg = a;
-            1
-        }
+        crate::memory::MemoryAccess::Ok => 0,
+        crate::memory::MemoryAccess::PageFault(a) => { ctx.exit_reason = 3; ctx.exit_arg = a; 1 }
     }
 }
 
@@ -468,6 +498,8 @@ pub struct RecompiledPvm {
     flat_memory: Option<FlatMemory>,
     /// Whether flat buffer needs re-sync from Memory on next run().
     needs_flat_sync: bool,
+    /// Whether Memory needs write_back from flat buffer (lazy, on memory() access).
+    needs_write_back: bool,
 }
 
 impl RecompiledPvm {
@@ -577,6 +609,7 @@ impl RecompiledPvm {
             debug,
             flat_memory,
             needs_flat_sync: false,
+            needs_write_back: false,
         };
 
         // Set dispatch_table pointer (must point to the Vec's data in Self)
@@ -630,10 +663,10 @@ impl RecompiledPvm {
                 }
                 3 => return ExitReason::PageFault(self.ctx.exit_arg),
                 4 => {
-                    // Host call — helpers write to both Memory and flat buffer,
-                    // so both are already in sync. No write_back needed.
-                    // The caller may modify Memory via memory_mut(), which
-                    // sets needs_flat_sync for the next run() call.
+                    // Host call — flat buffer is the source of truth.
+                    // Don't write_back eagerly — it's expensive for frequent host calls.
+                    // Instead, memory() and memory_mut() do lazy write_back when called.
+                    self.needs_write_back = self.flat_memory.is_some();
                     self.ctx.entry_pc = self.ctx.pc;
                     return ExitReason::HostCall(self.ctx.exit_arg);
                 }
@@ -686,10 +719,26 @@ impl RecompiledPvm {
     /// synced to Memory. Direct Memory modifications between run() calls are
     /// synced back to flat buffer at the start of the next run().
     pub fn memory(&self) -> &Memory {
+        // Lazy write_back: if flat buffer has unsync'd writes, flush to Memory.
+        // This is safe: we're the sole owner of both flat_memory and ctx.memory.
+        if self.needs_write_back {
+            if let Some(ref fm) = self.flat_memory {
+                fm.write_back(unsafe { &mut *self.ctx.memory });
+            }
+            // Can't set needs_write_back=false through &self, but the data is now synced.
+            // The next memory() call will redundantly write_back, which is correct if slow.
+            // In practice, memory() is rarely called in tight loops.
+        }
         unsafe { &*self.ctx.memory }
     }
 
     pub fn memory_mut(&mut self) -> &mut Memory {
+        if self.needs_write_back {
+            if let Some(ref fm) = self.flat_memory {
+                fm.write_back(unsafe { &mut *self.ctx.memory });
+            }
+            self.needs_write_back = false;
+        }
         self.needs_flat_sync = true;
         unsafe { &mut *self.ctx.memory }
     }

@@ -395,14 +395,8 @@ impl Compiler {
     }
 
     /// Emit memory write. Address in SCRATCH, value in val_reg.
+    /// Uses inline flat buffer store with helper fallback for cross-page.
     fn emit_mem_write(&mut self, _addr_in_scratch: bool, val_reg: Reg, fn_addr: u64) {
-        // Use helper path for writes — the inline write path has correctness issues
-        // with val_reg aliasing and sync. The helper functions write to both Memory
-        // AND the flat buffer, keeping them in sync.
-        self.emit_mem_write_helper(val_reg, fn_addr);
-        return;
-
-        #[allow(unreachable_code)]
         let w = if fn_addr == self.helpers.mem_write_u8 { 1u32 }
             else if fn_addr == self.helpers.mem_write_u16 { 2 }
             else if fn_addr == self.helpers.mem_write_u32 { 4 }
