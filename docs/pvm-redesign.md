@@ -430,6 +430,133 @@ These are all **format changes** — the computational semantics are
 identical. A conforming implementation produces the same results. The
 transpiler absorbs all the complexity of the format change.
 
+## Update: Empirical Results from Recompiler Optimization (March 2026)
+
+After implementing the inline memory optimization described above, we have
+concrete benchmark numbers comparing our recompiler to polkavm:
+
+| Benchmark | grey-recompiler | polkavm-compiler | ratio |
+|-----------|----------------|------------------|-------|
+| **fib** (1M iter, compute-only) | 438 µs | 407 µs | 1.07x |
+| **hostcall** (100K ecalli) | 626 µs | 3,192 µs | **0.20x** |
+| **sort** (1K u32, memory-heavy) | 846 µs | 436 µs | **1.94x** |
+
+The remaining 1.94x gap on memory-heavy code is almost entirely from the
+**software permission check** — 3 instructions per memory access (mov+shr+cmp)
+that polkavm avoids by using hardware page protection (mprotect + SIGSEGV).
+
+### What We Implemented (Change 3 Pragmatic Version)
+
+Instead of region annotations in the ISA, we implemented the flat buffer
+approach from the sandboxing doc:
+
+- **4GB contiguous mmap** (MAP_NORESERVE) as the guest memory backing buffer
+- **1MB permission table** (1 byte per 4KB page: 0=inaccessible, 1=RO, 2=RW)
+- **R15 = guest memory base** — guest address N is at `[R15 + N]`, single instruction
+- **Permission table at fixed negative offset** — `cmp byte [R15 + page_idx - offset], min_perm`
+- **RCX freed as second scratch** by spilling phi[12] to context memory
+
+The inline fast path per memory access is now 5-6 x86-64 instructions:
+```x86
+mov  ecx, edx                         ; copy guest addr
+shr  ecx, 12                          ; page index
+cmp  byte [r15 + rcx - 1052672], 2    ; permission check (SIB+disp32)
+jb   fault
+mov  [r15 + rdx], val_reg             ; direct store
+```
+
+vs polkavm's 1 instruction:
+```x86
+mov  [r15 + rdx], val_reg             ; direct store (hardware checks permissions)
+```
+
+### Key Insight: Code is NOT in Guest Memory
+
+A critical observation: **PVM code/bitmask are NOT mapped into the guest
+address space.** They exist as separate arrays accessed only by the instruction
+fetch mechanism (PC-indexed), not by guest load/store instructions.
+
+The guest memory contains only:
+- **RO data** (read-only) — the program's constant data
+- **RW data + heap** (read-write, contiguous) — globals, dynamic allocations
+- **Stack** (read-write, contiguous) — at top of address space
+- **Arguments** (read-only) — input data
+
+This means the read-only pages in guest memory are only the RO data and
+arguments sections. All load/store targets are overwhelmingly RW pages
+(stack, heap, RW data). The permission check is almost always checking
+"is this page mapped?" rather than "is this page writable?".
+
+### Memory Design Change: Contiguous Linear Memory
+
+The most impactful PVM design change for recompiler performance would be
+replacing the sparse paged address space with **contiguous linear memory**
+(similar to WebAssembly's model):
+
+```
+[0 ................ rw_data ... heap_top → .... ← SP ... mem_size)
+ |   RW data      |   heap              |  (gap)  | stack        |
+```
+
+One contiguous RW region. Stack grows down, heap grows up, within the
+same allocation. No per-page permissions, no permission table.
+
+**Permission check becomes a bounds check:**
+```x86
+cmp  edx, mem_size    ; 1 instruction
+jae  trap             ; out of bounds
+mov  eax, [r15+rdx]   ; direct access
+```
+
+Or with a guard page mapped after the region, **zero instructions** — the
+hardware MMU catches out-of-bounds accesses. Unlike per-page mprotect
+(which requires a SIGSEGV handler for every inaccessible page), a single
+guard region at the end is safe and simple.
+
+**Stack overflow handling:** With linear memory, stack overflow doesn't
+trigger a page fault — the stack silently overwrites the heap. This is
+acceptable because:
+1. Gas metering prevents infinite recursion (OOG catches runaway execution)
+2. PVM programs are sandboxed — memory corruption stays within the guest
+3. This is the same model as WebAssembly, which has proven it works at scale
+
+**What changes in the spec:**
+- Remove per-page access modes (PageAccess enum)
+- Memory is a single `[0, mem_size)` RW region
+- `sbrk` just bumps a counter (no page mapping)
+- Stack and heap share the region (collision = program bug, caught by gas)
+- RO data and arguments are loaded into the RW region at init (the transpiler
+  ensures the program doesn't write to them — or if it does, that's its own
+  problem, not a security issue)
+
+**Impact on recompiler:**
+- Permission check: 3 instructions → 0 instructions (with guard page)
+- Sort benchmark estimate: 846 µs → ~450 µs (matching polkavm)
+- No SIGSEGV handler needed for normal operation
+- mmap cost: same (one 4GB region with guard page at end)
+
+### Multi-Region Bounds Checking Doesn't Scale
+
+We considered keeping separate regions (RW data+heap, stack) and doing bounds
+checks per region instead of a permission table lookup. With two non-contiguous
+RW regions, a write check requires:
+
+```x86
+cmp  edx, rw_base        ; in RW+heap?
+jb   check_stack
+cmp  edx, heap_top
+jb   ok
+check_stack:
+cmp  edx, stack_bottom   ; in stack?
+jb   fault
+cmp  edx, stack_top
+jb   ok
+```
+
+That's 4 compares + 3 branches in the worst case — **worse** than the current
+3-instruction permission table lookup. Multi-region bounds checking only wins
+with a single contiguous region.
+
 ## Pragmatic Path Forward
 
 We can't change the Gray Paper, but we can implement these ideas as an
@@ -439,14 +566,22 @@ We can't change the Gray Paper, but we can implement these ideas as an
    struct in the interpreter). Extend this to the recompiler.
 2. **Block-structured compilation**: Already partially done (basic block
    starts array). Formalize it.
-3. **Region-annotated memory**: Implement Option A from the sandboxing
-   doc (flat buffer + inline permission check). This gets us most of the
-   memory access benefit.
+3. **Region-annotated memory**: ✅ **DONE** — Implemented flat buffer +
+   inline permission check (Option A from sandboxing doc). R15 points
+   directly to guest memory; permission table at fixed negative offset.
+   Sort benchmark improved 71x (60ms → 846µs). Remaining gap to polkavm
+   (1.94x) is from the software permission check.
 4. **Inline host calls**: Change `ecalli` from exit/re-entry to a function
-   call within native code. This is the biggest single win.
+   call within native code. This is the biggest remaining win for
+   host-call-heavy workloads. Currently grey is 5x faster than polkavm
+   on host calls due to in-process execution, but the overhead is still
+   ~30 instructions per ecalli.
 5. **Eliminate redundant sign-extension**: Peephole optimization in the
    recompiler — if a 32-bit op's result is only used as 64-bit, skip the
    `movsxd`.
+6. **Short backward jumps**: ✅ **DONE** — Single-pass rel8 encoding for
+   backward branches within ±127 bytes (matching polkavm's approach).
+   Zero compile-time overhead.
 
 These changes are compatible with the current PVM bytecode format. The
 recompiler's internal pipeline becomes:
