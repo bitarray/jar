@@ -12,6 +12,7 @@ References: `graypaper/text/overview.tex` eq:block, eq:extrinsic.
 -/
 
 namespace Jar
+variable [JamConfig]
 
 -- ============================================================================
 -- §6.6 — Epoch Marker (from header.tex line 66–70)

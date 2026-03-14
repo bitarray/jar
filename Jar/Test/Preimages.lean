@@ -13,6 +13,10 @@ namespace Jar.Test.Preimages
 
 open Jar Jar.Crypto
 
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
+
 -- ============================================================================
 -- Types
 -- ============================================================================

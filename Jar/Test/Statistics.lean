@@ -12,16 +12,9 @@ namespace Jar.Test.Statistics
 
 open Jar
 
--- ============================================================================
--- Tiny Config Constants
--- TODO: When expanding to full-spec tests, these should be parameterized
--- or selected based on the test vector's config field.
--- ============================================================================
-
-/-- Tiny: V = 6 validators. Full: V = 1023. -/
-def V_TINY : Nat := 6
-/-- Tiny: E = 12 epoch length. Full: E = 600. -/
-def E_TINY : Nat := 12
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
 
 -- ============================================================================
 -- Flattened Statistics State (matches test vector JSON shape)
@@ -77,9 +70,9 @@ def FlatValidatorRecord.zero : FlatValidatorRecord :=
     This implements §13.1 of the Gray Paper (validator-level statistics). -/
 def statisticsTransition
     (pre : FlatStatisticsState) (inp : StatsInput) : FlatStatisticsState :=
-  let epochChanged := pre.slot / E_TINY.toUInt32 != inp.slot / E_TINY.toUInt32
+  let epochChanged := pre.slot / E.toUInt32 != inp.slot / E.toUInt32
   let (cur, prev) := if epochChanged then
-      (Array.replicate V_TINY FlatValidatorRecord.zero, pre.valsCurrStats)
+      (Array.replicate V FlatValidatorRecord.zero, pre.valsCurrStats)
     else (pre.valsCurrStats, pre.valsLastStats)
 
   -- §13.1: Block author stats — increment blocks for author

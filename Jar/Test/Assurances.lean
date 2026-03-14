@@ -13,19 +13,12 @@ namespace Jar.Test.Assurances
 
 open Jar Jar.Crypto
 
--- ============================================================================
--- Tiny Config Constants
--- TODO: When expanding to full-spec tests, parameterize these.
--- ============================================================================
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
 
-/-- Tiny: V = 6 validators. Full: V = 1023. -/
-def V_TINY : Nat := 6
-/-- Tiny: C = 2 cores. Full: C = 341. -/
-def C_TINY : Nat := 2
 /-- Super-majority threshold: (V * 2 / 3) + 1 -/
-def ASSURANCE_THRESHOLD : Nat := (V_TINY * 2 / 3) + 1  -- = 5
-/-- Availability timeout U = 5 timeslots -/
-def AVAILABILITY_TIMEOUT : Nat := 5
+def ASSURANCE_THRESHOLD : Nat := (V * 2 / 3) + 1
 
 -- ============================================================================
 -- Types
@@ -114,22 +107,22 @@ def assurancesTransition
 
   -- Step 5: Bits may only be set for cores with pending reports
   for a in inp.assurances do
-    for c in [:C_TINY] do
+    for c in [:C] do
       if bitfieldBit a.bitfield c then
         match pre.availAssignments[c]! with
         | none => return (.err "core_not_engaged", pre.availAssignments)
         | some _ => pure ()
 
   -- Step 6: Count assurance bits per core
-  let mut counts : Array Nat := Array.replicate C_TINY 0
+  let mut counts : Array Nat := Array.replicate C 0
   for a in inp.assurances do
-    for c in [:C_TINY] do
+    for c in [:C] do
       if bitfieldBit a.bitfield c then
         counts := counts.set! c (counts[c]! + 1)
 
   -- Step 7: Determine reported cores (those with enough assurances)
   let mut reportedCores : Array Nat := #[]
-  for c in [:C_TINY] do
+  for c in [:C] do
     if counts[c]! >= ASSURANCE_THRESHOLD then
       match pre.availAssignments[c]! with
       | some assignment => reportedCores := reportedCores.push assignment.coreIndex
@@ -137,12 +130,12 @@ def assurancesTransition
 
   -- Step 8: Clear available and timed-out reports
   let mut avail := pre.availAssignments
-  for c in [:C_TINY] do
+  for c in [:C] do
     match avail[c]! with
     | none => pure ()
     | some assignment =>
       let isAvailable := counts[c]! >= ASSURANCE_THRESHOLD
-      let isTimedOut := inp.slot >= assignment.timeout + AVAILABILITY_TIMEOUT
+      let isTimedOut := inp.slot >= assignment.timeout + U_TIMEOUT
       if isAvailable || isTimedOut then
         avail := avail.set! c none
 

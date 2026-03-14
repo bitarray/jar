@@ -12,6 +12,10 @@ namespace Jar.Test.AuthorizationsJson
 open Lean (Json ToJson FromJson toJson fromJson?)
 open Jar Jar.Json Jar.Test.Authorizations
 
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
+
 -- ============================================================================
 -- JSON instances for authorization test types
 -- ============================================================================

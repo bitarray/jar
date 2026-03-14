@@ -12,18 +12,9 @@ namespace Jar.Test.Authorizations
 
 open Jar
 
--- ============================================================================
--- Tiny Config Constants
--- TODO: When expanding to full-spec tests, these should be parameterized
--- or selected based on the test vector's config field.
--- ============================================================================
-
-/-- Tiny: C = 2 cores. Full: C = 341. -/
-def C_TINY : Nat := 2
-/-- Tiny/Full: Q = 80 authorization queue size. -/
-def Q_TINY : Nat := 80
-/-- Tiny/Full: O = 8 authorization pool max size. -/
-def O_TINY : Nat := 8
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
 
 -- ============================================================================
 -- Flattened Authorization State (matches test vector JSON shape)
@@ -68,13 +59,13 @@ def authorizationTransition
     -- Step 2: append from queue
     let pool := if c < pre.authQueues.size then
       let queue := pre.authQueues[c]!
-      let idx := inp.slot % Q_TINY
+      let idx := inp.slot % Q_QUEUE
       if idx < queue.size then pool.push queue[idx]!
       else pool
     else pool
     -- Step 3: keep last O entries
-    if pool.size > O_TINY then
-      pool.extract (pool.size - O_TINY) pool.size
+    if pool.size > O_POOL then
+      pool.extract (pool.size - O_POOL) pool.size
     else pool
   { authPools := pools
     authQueues := pre.authQueues }

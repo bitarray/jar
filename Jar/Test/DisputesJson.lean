@@ -6,6 +6,10 @@ namespace Jar.Test.DisputesJson
 open Lean (Json ToJson FromJson toJson fromJson?)
 open Jar Jar.Json Jar.Test.Disputes
 
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
+
 -- ============================================================================
 -- JSON instances for disputes test types
 -- ============================================================================

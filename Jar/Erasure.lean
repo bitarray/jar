@@ -18,6 +18,7 @@ References: `graypaper/text/erasure_coding.tex`.
 -/
 
 namespace Jar.Erasure
+variable [JamConfig]
 
 -- ============================================================================
 -- GF(2^16) Field — Appendix H

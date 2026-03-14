@@ -12,6 +12,10 @@ namespace Jar.Test.HistoryJson
 open Lean (Json ToJson FromJson toJson fromJson?)
 open Jar Jar.Json Jar.Test.History
 
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
+
 -- ============================================================================
 -- JSON instances for history test types
 -- ============================================================================

@@ -23,6 +23,7 @@ References: `graypaper/text/safrole.tex`, `graypaper/text/best_chain.tex`.
 -/
 
 namespace Jar.Consensus
+variable [JamConfig]
 
 -- ============================================================================
 -- §6.3 — Outside-In Sequencer Z

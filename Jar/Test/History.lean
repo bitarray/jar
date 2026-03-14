@@ -13,13 +13,9 @@ namespace Jar.Test.History
 
 open Jar Jar.Crypto
 
--- ============================================================================
--- Constants
--- TODO: H is 8 for both tiny and full. Parameterize if needed.
--- ============================================================================
-
-/-- H = 8 recent history size (same for tiny and full). -/
-def H_SIZE : Nat := 8
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
 
 -- ============================================================================
 -- Flattened History State (matches test vector JSON shape)
@@ -123,8 +119,8 @@ def historyTransition
   let history := history.push entry
 
   -- Step 5: keep last H entries
-  let history := if history.size > H_SIZE then
-    history.extract (history.size - H_SIZE) history.size
+  let history := if history.size > H_RECENT then
+    history.extract (history.size - H_RECENT) history.size
   else history
 
   { history := history, mmrPeaks := peaks }

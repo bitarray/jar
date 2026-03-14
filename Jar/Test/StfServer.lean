@@ -23,6 +23,10 @@ namespace Jar.Test.StfServer
 open Lean (Json ToJson FromJson toJson fromJson?)
 open Jar Jar.Json
 
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
+
 -- ============================================================================
 -- Safrole
 -- ============================================================================

@@ -13,19 +13,14 @@ namespace Jar.Test.Disputes
 
 open Jar Jar.Crypto
 
--- ============================================================================
--- Tiny Config Constants
--- TODO: When expanding to full-spec tests, parameterize these.
--- ============================================================================
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
 
-/-- Tiny: V = 6 validators. Full: V = 1023. -/
-def V_TINY : Nat := 6
-/-- Tiny: E = 12 epoch length. Full: E = 600. -/
-def E_TINY : Nat := 12
 /-- Super-majority threshold: (V * 2 / 3) + 1 -/
-def SUPER_MAJORITY : Nat := (V_TINY * 2 / 3) + 1  -- = 5
+def SUPER_MAJORITY : Nat := (V * 2 / 3) + 1
 /-- One-third threshold: V / 3 -/
-def ONE_THIRD : Nat := V_TINY / 3  -- = 2
+def ONE_THIRD : Nat := V / 3
 
 -- ============================================================================
 -- Types matching test vector JSON (prefixed to avoid collision with Jar types)
@@ -121,7 +116,7 @@ def keyIn (k : Ed25519PublicKey) (arr : Array Ed25519PublicKey) : Bool := arr.an
 def disputesTransition
     (pre : TDState) (inp : TDInput)
     : (TDResult × TDJudgments) := Id.run do
-  let currentEpoch := pre.tau.toNat / E_TINY
+  let currentEpoch := pre.tau.toNat / E
 
   -- eq 10.10: Votes within each verdict sorted by index
   for v in inp.verdicts do

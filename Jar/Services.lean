@@ -24,6 +24,7 @@ References: `graypaper/text/accounts.tex`, `graypaper/text/accumulation.tex`,
 -/
 
 namespace Jar.Services
+variable [JamConfig]
 
 -- ============================================================================
 -- §9 — Minimum Balance

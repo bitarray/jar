@@ -1,9 +1,12 @@
 import Jar.Notation
+import Jar.Types.Config
 
 /-!
 # Protocol Constants — Gray Paper Appendix I.4.4
 
-All constant values from the GP specification.
+Constants that are **identical across all protocol variants** (full, tiny, custom).
+Variant-specific parameters (V, C, E, gas limits, etc.) are in `Config.lean`.
+
 References: `graypaper/text/definitions.tex` lines 240–290,
             `graypaper/preamble.tex` lines 248–289.
 -/
@@ -11,93 +14,21 @@ References: `graypaper/text/definitions.tex` lines 240–290,
 namespace Jar
 
 -- ============================================================================
--- Consensus & Validators
+-- Timing
 -- ============================================================================
-
-/-- V : Total number of validators. GP: 𝖵 = 1023. -/
-def V : Nat := 1023
-
-/-- C : Total number of cores. GP: 𝖢 = 341. -/
-def C : Nat := 341
-
-/-- E : Epoch length in timeslots. GP: 𝖤 = 600. -/
-def E : Nat := 600
 
 /-- P : Slot period in seconds. GP: 𝖯 = 6. -/
 def P : Nat := 6
 
-/-- H_RECENT : Recent history size in blocks. GP: 𝖧 = 8. -/
-def H_RECENT : Nat := 8
-
-/-- N : Ticket entries per validator. GP: 𝖭 = 2. -/
-def N_TICKETS : Nat := 2
-
-/-- Y : Ticket submission end slot. GP: 𝖸 = 500. -/
-def Y_TAIL : Nat := 500
-
-/-- R : Validator-core rotation period in timeslots. GP: 𝖱 = 10. -/
-def R_ROTATION : Nat := 10
+-- ============================================================================
+-- Auditing
+-- ============================================================================
 
 /-- A : Audit tranche period in seconds. GP: 𝖠 = 8. -/
 def A_TRANCHE : Nat := 8
 
 /-- F : Audit bias factor. GP: 𝖥 = 2. -/
 def F_BIAS : Nat := 2
-
--- ============================================================================
--- Work processing
--- ============================================================================
-
-/-- I : Max work items per package. GP: 𝖨 = 16. -/
-def I_MAX_ITEMS : Nat := 16
-
-/-- J : Max dependency items in a work-report. GP: 𝖩 = 8. -/
-def J_MAX_DEPS : Nat := 8
-
-/-- K : Max tickets per extrinsic. GP: 𝖪 = 16. -/
-def K_MAX_TICKETS : Nat := 16
-
-/-- T : Max extrinsics per work-package. GP: 𝖳 = 128. -/
-def T_MAX_EXTRINSICS : Nat := 128
-
-/-- U : Availability timeout in timeslots. GP: 𝖴 = 5. -/
-def U_TIMEOUT : Nat := 5
-
--- ============================================================================
--- Gas allocations
--- ============================================================================
-
-/-- G_A : Gas allocated per work-report accumulation. GP: 𝖦_A = 10,000,000. -/
-def G_A : Nat := 10_000_000
-
-/-- G_I : Gas allocated for Is-Authorized. GP: 𝖦_I = 50,000,000. -/
-def G_I : Nat := 50_000_000
-
-/-- G_R : Gas allocated for Refine. GP: 𝖦_R = 5,000,000,000. -/
-def G_R : Nat := 5_000_000_000
-
-/-- G_T : Total accumulation gas per block. GP: 𝖦_T = 3,500,000,000. -/
-def G_T : Nat := 3_500_000_000
-
--- ============================================================================
--- Authorization
--- ============================================================================
-
-/-- O : Authorization pool size per core. GP: 𝖮 = 8. -/
-def O_POOL : Nat := 8
-
-/-- Q : Authorization queue size per core. GP: 𝖰 = 80. -/
-def Q_QUEUE : Nat := 80
-
--- ============================================================================
--- Preimages and lookups
--- ============================================================================
-
-/-- D : Preimage expunge period in timeslots. GP: 𝖣 = 19,200. -/
-def D_EXPUNGE : Nat := 19_200
-
-/-- L : Max lookup anchor age in timeslots. GP: 𝖫 = 14,400 (= 24 hours). -/
-def L_MAX_ANCHOR : Nat := 14_400
 
 -- ============================================================================
 -- Size limits
@@ -115,14 +46,12 @@ def W_C : Nat := 4_000_000
 /-- W_E : Erasure coding piece size. GP: 𝖶_E = 684. -/
 def W_E : Nat := 684
 
-/-- W_G : Segment size (= W_P × W_E). GP: 𝖶_G = 4,104. -/
-def W_G : Nat := 4_104
+/-- W_G : Segment size. For full config: W_P × W_E = 6 × 684 = 4,104.
+    Note: W_P is in Config since it differs between full (6) and tiny (1026). -/
+def W_G [j : JamConfig] : Nat := j.config.W_P * W_E
 
 /-- W_M : Max segment imports. GP: 𝖶_M = 3,072. -/
 def W_M : Nat := 3_072
-
-/-- W_P : Erasure pieces per segment. GP: 𝖶_P = 6. -/
-def W_P : Nat := 6
 
 /-- W_R : Max work-report variable-size blob. GP: 𝖶_R = 49,152. -/
 def W_R : Nat := 49_152
@@ -153,22 +82,6 @@ def Z_A : Nat := 2
 def PVM_REGISTERS : Nat := 13
 
 -- ============================================================================
--- Economic constants (GP: B_I, B_L, B_S)
--- ============================================================================
-
-/-- B_I : Additional minimum balance per mapping item. GP: 𝖡_I.
-    Value TBD per GP §4.6. Using 10 as placeholder. -/
-def B_I : Nat := 10
-
-/-- B_L : Additional minimum balance per data octet. GP: 𝖡_L.
-    Value TBD. Using 1 as placeholder. -/
-def B_L : Nat := 1
-
-/-- B_S : Base minimum balance for a service. GP: 𝖡_S.
-    Value TBD. Using 100 as placeholder. -/
-def B_S : Nat := 100
-
--- ============================================================================
 -- Minimum public service index
 -- ============================================================================
 
@@ -182,5 +95,63 @@ def S_MIN : Nat := 256
 /-- JAM Common Era epoch: 1200 UTC on January 1, 2025.
     = 1,735,732,800 seconds after Unix Epoch. -/
 def JAM_EPOCH_UNIX : Nat := 1_735_732_800
+
+-- ============================================================================
+-- Backward-compatibility aliases (access config via JamConfig)
+-- ============================================================================
+
+section ConfigAliases
+variable [j : JamConfig]
+
+/-- V via JamConfig. -/
+abbrev V : Nat := j.config.V
+/-- C via JamConfig. -/
+abbrev C : Nat := j.config.C
+/-- E via JamConfig. -/
+abbrev E : Nat := j.config.E
+/-- N_TICKETS via JamConfig. -/
+abbrev N_TICKETS : Nat := j.config.N_TICKETS
+/-- Y_TAIL via JamConfig. -/
+abbrev Y_TAIL : Nat := j.config.Y_TAIL
+/-- K_MAX_TICKETS via JamConfig. -/
+abbrev K_MAX_TICKETS : Nat := j.config.K_MAX_TICKETS
+/-- R_ROTATION via JamConfig. -/
+abbrev R_ROTATION : Nat := j.config.R_ROTATION
+/-- H_RECENT via JamConfig. -/
+abbrev H_RECENT : Nat := j.config.H_RECENT
+/-- G_A via JamConfig. -/
+abbrev G_A : Nat := j.config.G_A
+/-- G_I via JamConfig. -/
+abbrev G_I : Nat := j.config.G_I
+/-- G_R via JamConfig. -/
+abbrev G_R : Nat := j.config.G_R
+/-- G_T via JamConfig. -/
+abbrev G_T : Nat := j.config.G_T
+/-- O_POOL via JamConfig. -/
+abbrev O_POOL : Nat := j.config.O_POOL
+/-- Q_QUEUE via JamConfig. -/
+abbrev Q_QUEUE : Nat := j.config.Q_QUEUE
+/-- I_MAX_ITEMS via JamConfig. -/
+abbrev I_MAX_ITEMS : Nat := j.config.I_MAX_ITEMS
+/-- J_MAX_DEPS via JamConfig. -/
+abbrev J_MAX_DEPS : Nat := j.config.J_MAX_DEPS
+/-- T_MAX_EXTRINSICS via JamConfig. -/
+abbrev T_MAX_EXTRINSICS : Nat := j.config.T_MAX_EXTRINSICS
+/-- U_TIMEOUT via JamConfig. -/
+abbrev U_TIMEOUT : Nat := j.config.U_TIMEOUT
+/-- D_EXPUNGE via JamConfig. -/
+abbrev D_EXPUNGE : Nat := j.config.D_EXPUNGE
+/-- L_MAX_ANCHOR via JamConfig. -/
+abbrev L_MAX_ANCHOR : Nat := j.config.L_MAX_ANCHOR
+/-- B_I via JamConfig. -/
+abbrev B_I : Nat := j.config.B_I
+/-- B_L via JamConfig. -/
+abbrev B_L : Nat := j.config.B_L
+/-- B_S via JamConfig. -/
+abbrev B_S : Nat := j.config.B_S
+/-- W_P via JamConfig. -/
+abbrev W_P : Nat := j.config.W_P
+
+end ConfigAliases
 
 end Jar

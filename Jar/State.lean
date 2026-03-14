@@ -34,6 +34,7 @@ The transition is organized to minimize dependency depth for parallelism:
 -/
 
 namespace Jar
+variable [JamConfig]
 
 -- ============================================================================
 -- §6.1 — Timekeeping

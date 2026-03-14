@@ -10,7 +10,12 @@ Random generators for property-based testing with Plausible.
 
 namespace Jar.Test.Arb
 
+open Jar
 open Plausible Plausible.Arbitrary Plausible.Gen
+
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
 
 -- ============================================================================
 -- ByteArray
@@ -71,7 +76,7 @@ instance {α β : Type} [BEq α] : Shrinkable (Dict α β) where
 instance : Arbitrary CoreIndex where
   arbitrary := do
     let n ← Gen.chooseNat
-    have : 0 < Jar.C := by simp [Jar.C]
+    have : 0 < Jar.C := by decide
     return ⟨n % Jar.C, Nat.mod_lt _ this⟩
 
 instance : Shrinkable CoreIndex where
@@ -80,7 +85,7 @@ instance : Shrinkable CoreIndex where
 instance : Arbitrary ValidatorIndex where
   arbitrary := do
     let n ← Gen.chooseNat
-    have : 0 < Jar.V := by simp [Jar.V]
+    have : 0 < Jar.V := by decide
     return ⟨n % Jar.V, Nat.mod_lt _ this⟩
 
 instance : Shrinkable ValidatorIndex where
@@ -194,7 +199,7 @@ instance : Arbitrary Ticket where
   arbitrary := do
     let id ← arbitrary
     let n ← (arbitrary : Gen UInt8)
-    have : 0 < Jar.N_TICKETS := by simp [Jar.N_TICKETS]
+    have : 0 < Jar.N_TICKETS := by decide
     return { id, attempt := ⟨n.toNat % Jar.N_TICKETS, Nat.mod_lt _ this⟩ }
 
 instance : Shrinkable Ticket where
@@ -272,7 +277,7 @@ instance : Shrinkable Fault where
 instance : Arbitrary TicketProof where
   arbitrary := do
     let n ← (arbitrary : Gen UInt8)
-    have : 0 < Jar.N_TICKETS := by simp [Jar.N_TICKETS]
+    have : 0 < Jar.N_TICKETS := by decide
     return {
       attempt := ⟨n.toNat % Jar.N_TICKETS, Nat.mod_lt _ this⟩
       proof := ← arbitrary

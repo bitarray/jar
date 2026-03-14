@@ -12,6 +12,10 @@ namespace Jar.Test.SafroleJson
 open Lean (Json ToJson FromJson toJson fromJson?)
 open Jar Jar.Json Jar.Test.Safrole
 
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
+
 -- ============================================================================
 -- JSON instances for safrole test types
 -- ============================================================================
@@ -19,7 +23,7 @@ open Jar Jar.Json Jar.Test.Safrole
 -- Unused helper removed — we use sorry directly like SafroleVectors.lean
 
 -- For TicketProof, attempt is TicketEntryIndex = Fin N_TICKETS = Fin 2
--- but tiny vectors use N_TINY = 3, so attempts can be 0..2.
+-- but tiny vectors use N_TICKETS = 3, so attempts can be 0..2.
 -- We deserialize to Nat, then construct Fin with sorry (matching SafroleVectors.lean pattern).
 private def ticketProofFromJson (j : Json) : Except String TicketProof := do
   let attempt ← (← j.getObjVal? "attempt").getNat?

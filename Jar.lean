@@ -13,6 +13,7 @@ import Jar.State
 import Jar.Consensus
 import Jar.Services
 import Jar.Accumulation
+import Jar.Variant
 
 /-!
 # JAR — JAM Axiomatic Reference
@@ -37,4 +38,5 @@ Gray Paper v0.7.2 (https://graypaper.com).
 - `Jar.PVM.Instructions` — Appendix A: All ~141 PVM opcodes
 - `Jar.PVM.Interpreter` — Appendix A: Execution loop Ψ and standard init
 - `Jar.Accumulation` — §12: Accumulation pipeline (accseq/accpar/accone)
+- `Jar.Variant`     — Protocol variant typeclass (JamVariant extends JamConfig)
 -/

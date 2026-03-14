@@ -20,14 +20,9 @@ namespace Jar.Test.Accumulate
 
 open Jar Jar.Crypto Jar.Accumulation
 
--- ============================================================================
--- Tiny Config Constants
--- ============================================================================
-
-def E_TINY : Nat := 12  -- epoch length
-def C_TINY : Nat := 2   -- core count
-def G_T_TINY : Nat := 3500000000  -- total accumulation gas
-def G_A_TINY : Nat := 10000000    -- per-core accumulation gas
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
 
 /-- Build config blob for tiny config, matching Rust Config::tiny().encode_config_blob().
     Format: B_I(8) B_L(8) B_S(8) C(2) D(4) E(4) G_A(8) G_I(8) G_R(8) G_T(8)
@@ -333,7 +328,7 @@ def updateStatistics (stats : Array TAServiceStats)
 /-- Run the full accumulate sub-transition. -/
 def accumulateTransition (pre : TAState) (inp : TAInput)
     : Hash × TAState := Id.run do
-  let epochLength := E_TINY
+  let epochLength := E
   let slotIndex := inp.slot % epochLength
 
   -- Step 1: Partition input reports
@@ -363,7 +358,7 @@ def accumulateTransition (pre : TAState) (inp : TAInput)
 
   -- Step 4: Compute gas budget
   let alwaysGas := pre.privileges.alwaysAcc.foldl (init := 0) fun acc (_, g) => acc + g
-  let _gasBudget := max G_T_TINY (G_A_TINY * C_TINY + alwaysGas)
+  let _gasBudget := max G_T (G_A * C + alwaysGas)
 
   -- Step 5: Build free gas map from always_acc
   let freeGasMap := pre.privileges.alwaysAcc.foldl (init := Dict.empty (K := ServiceId) (V := Gas))
@@ -372,7 +367,7 @@ def accumulateTransition (pre : TAState) (inp : TAInput)
   -- Step 6: Run accumulation pipeline
   -- Build tiny config blob matching Rust's Config::tiny().encode_config_blob()
   let tinyConfigBlob := buildTinyConfigBlob
-  let (n, ps', yields, gasMap) := accseq (UInt64.ofNat G_T_TINY)
+  let (n, ps', yields, gasMap) := accseq (UInt64.ofNat G_T)
     accumulatable #[] ps freeGasMap (UInt32.ofNat inp.slot) pre.entropy tinyConfigBlob
 
   -- Step 7: Compute output hash

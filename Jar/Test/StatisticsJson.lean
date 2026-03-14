@@ -12,6 +12,10 @@ namespace Jar.Test.StatisticsJson
 open Lean (Json ToJson FromJson toJson fromJson?)
 open Jar Jar.Json Jar.Test.Statistics
 
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
+
 -- ============================================================================
 -- JSON instances for statistics test types
 -- ============================================================================

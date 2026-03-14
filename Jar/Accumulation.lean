@@ -29,6 +29,7 @@ References: `graypaper/text/accumulation.tex`, `graypaper/text/pvm_invocations.t
 -/
 
 namespace Jar.Accumulation
+variable [JamConfig]
 
 -- ============================================================================
 -- Operand Tuple — GP eq:operandtuple

@@ -12,6 +12,10 @@ namespace Jar.Test.PreimagesJson
 open Lean (Json ToJson FromJson toJson fromJson?)
 open Jar Jar.Json Jar.Test.Preimages
 
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
+
 -- ============================================================================
 -- JSON instances for preimages test types
 -- ============================================================================

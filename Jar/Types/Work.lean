@@ -11,6 +11,7 @@ References: `graypaper/text/reporting_assurance.tex` eq:workreport, eq:workconte
 -/
 
 namespace Jar
+variable [JamConfig]
 
 -- ============================================================================
 -- §11.6 — Work Errors (eq:workerror)
@@ -179,6 +180,6 @@ structure WorkPackage where
 -- ============================================================================
 
 /-- 𝕁 : Data segment. GP eq (15.1). 𝕁 ≡ 𝔹_{W_G} = 𝔹_4104. -/
-abbrev Segment := OctetSeq Jar.W_G
+abbrev Segment := OctetSeq W_G
 
 end Jar

@@ -10,6 +10,7 @@ References: `graypaper/text/safrole.tex` eq:validatorkeys, eq:ticket,
 -/
 
 namespace Jar
+variable [JamConfig]
 
 -- ============================================================================
 -- §6.2 — Validator Keys (eq:validatorkeys)
@@ -43,7 +44,7 @@ structure Ticket where
   attempt : TicketEntryIndex
 
 instance : Inhabited Ticket where
-  default := { id := default, attempt := ⟨0, by simp [N_TICKETS]⟩ }
+  default := { id := default, attempt := ⟨0, JamConfig.valid.hN⟩ }
 
 -- ============================================================================
 -- §6.2 — Seal Key Series (eq:ticketaccumulatorsealticketsspec)

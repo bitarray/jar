@@ -13,6 +13,7 @@ Byte data is encoded as `0x`-prefixed hex strings.
 -/
 
 namespace Jar.Json
+variable [JamConfig]
 
 open Lean (Json ToJson FromJson toJson fromJson?)
 

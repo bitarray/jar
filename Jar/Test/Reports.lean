@@ -13,16 +13,11 @@ namespace Jar.Test.Reports
 
 open Jar Jar.Crypto
 
--- ============================================================================
--- Tiny Config Constants
--- TODO: When expanding to full-spec tests, parameterize these.
--- ============================================================================
+instance : JamConfig where
+  config := Config.tiny
+  valid := Config.tiny_valid
 
-def V_TINY : Nat := 6
-def C_TINY : Nat := 2
-def E_TINY : Nat := 12
-def R_TINY : Nat := 4   -- rotation period = E / 3
-def MAX_ACCUMULATE_GAS : Nat := 10000000
+def MAX_ACCUMULATE_GAS : Nat := G_A
 def MAX_OUTPUT_PER_ITEM : Nat := 18432
 def MAX_SEGMENT_LOOKUPS : Nat := 4
 
@@ -163,18 +158,18 @@ def keyIn (k : Ed25519PublicKey) (arr : Array Ed25519PublicKey) : Bool := arr.an
 /-- Compute core assignments P(e, t). -/
 def computeCoreAssignments (entropy : Hash) (slot : Nat) : Array Nat := Id.run do
   -- Step 1: initial[i] = floor(C * i / V)
-  let mut initial : Array Nat := Array.replicate V_TINY 0
-  for i in [:V_TINY] do
-    initial := initial.set! i (C_TINY * i / V_TINY)
+  let mut initial : Array Nat := Array.replicate V 0
+  for i in [:V] do
+    initial := initial.set! i (C * i / V)
 
   -- Step 2: Shuffle with entropy
   let shuffled := shuffle initial entropy
 
   -- Step 3: Apply rotation
-  let rotOffset := if R_TINY > 0 then ((slot % E_TINY) / R_TINY) else 0
+  let rotOffset := if R_ROTATION > 0 then ((slot % E) / R_ROTATION) else 0
   let mut result := shuffled
-  for i in [:V_TINY] do
-    result := result.set! i ((result[i]! + rotOffset) % C_TINY)
+  for i in [:V] do
+    result := result.set! i ((result[i]! + rotOffset) % C)
 
   result
 
@@ -193,8 +188,8 @@ def reportsTransition
 
   -- Compute core assignments
   let assignmentM := computeCoreAssignments pre.entropy[2]! inp.slot
-  let prevSlot := if inp.slot ≥ R_TINY then inp.slot - R_TINY else 0
-  let prevSameEpoch := prevSlot / E_TINY == inp.slot / E_TINY
+  let prevSlot := if inp.slot ≥ R_ROTATION then inp.slot - R_ROTATION else 0
+  let prevSameEpoch := prevSlot / E == inp.slot / E
   let prevEntropy := if prevSameEpoch then pre.entropy[2]! else pre.entropy[3]!
   let assignmentMStar := computeCoreAssignments prevEntropy prevSlot
 
@@ -206,7 +201,7 @@ def reportsTransition
     let core := report.coreIndex
 
     -- eq 11.25: Valid core index
-    if core ≥ C_TINY then
+    if core ≥ C then
       return (.err "bad_core_index", pre.availAssignments)
 
     -- Core not engaged
@@ -236,12 +231,12 @@ def reportsTransition
 
     -- Valid validator indices
     for sig in guarantee.signatures do
-      if sig.validatorIndex ≥ V_TINY then
+      if sig.validatorIndex ≥ V then
         return (.err "bad_validator_index", pre.availAssignments)
 
     -- Determine rotation
-    let currentRot := if R_TINY > 0 then inp.slot / R_TINY else 0
-    let guaranteeRot := if R_TINY > 0 then guarantee.slot / R_TINY else 0
+    let currentRot := if R_ROTATION > 0 then inp.slot / R_ROTATION else 0
+    let guaranteeRot := if R_ROTATION > 0 then guarantee.slot / R_ROTATION else 0
 
     -- Not future
     if guarantee.slot > inp.slot then

@@ -21,6 +21,7 @@ References: `graypaper/text/serialization.tex`.
 -/
 
 namespace Jar.Codec
+variable [JamConfig]
 
 -- ============================================================================
 -- §C.7 — Fixed-width Little-Endian Integer Encoding
