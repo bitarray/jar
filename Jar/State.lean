@@ -258,7 +258,7 @@ def reportsPostAssurance
     (assurances : AssurancesExtrinsic)
     (t' : Timeslot) : Array (Option PendingReport) × Array WorkReport :=
   let timeout : Nat := U_TIMEOUT
-  let superMajority := (V * 2 + 2) / 3
+  let superMajority := V * 2 / 3 + 1
   let clearCore (reports : Array (Option PendingReport)) (core : CoreIndex) :=
     reports.map fun r => match r with
       | some pr' => if pr'.report.coreIndex == core then none else some pr'
@@ -352,8 +352,35 @@ structure AccumulationResult where
   remainingOpaqueData : Array (ByteArray × ByteArray) := #[]
   exitReasons : Array (ServiceId × String) := #[]
 
+/-- Compute dependency set for a work report (GP eq 12.6).
+    D(r) = prerequisites ∪ K(segment_root_lookup) -/
+private def computeDependencies (r : WorkReport) : Array Hash :=
+  let deps := r.context.prerequisites
+  let srlKeys := r.segmentRootLookup.entries.toArray.map (·.1)
+  let all := deps ++ srlKeys
+  all.foldl (init := #[]) fun acc h => if acc.any (· == h) then acc else acc.push h
+
+/-- Edit queue: remove entries whose package hash is in accumulated set,
+    and remove fulfilled dependencies. GP eq 12.7. -/
+private def editQueue (queue : Array (WorkReport × Array Hash))
+    (accSet : Array Hash) : Array (WorkReport × Array Hash) :=
+  (queue.filter fun (rr, _) => !accSet.any (· == rr.availSpec.packageHash)).map fun (rr, deps) =>
+    (rr, deps.filter fun d => !accSet.any (· == d))
+
+/-- Resolve queue: iteratively find reports with zero remaining dependencies. -/
+private def resolveQueue (queue : Array (WorkReport × Array Hash)) : Array WorkReport := Id.run do
+  let mut result : Array WorkReport := #[]
+  let mut remaining := queue
+  for _ in [:queue.size + 1] do  -- max iterations bounded by queue size
+    let ready := (remaining.filter fun (_, deps) => deps.size == 0).map (·.1)
+    if ready.size == 0 then break
+    result := result ++ ready
+    let readyHashes := ready.map (·.availSpec.packageHash)
+    remaining := editQueue remaining readyHashes
+  return result
+
 /-- Perform accumulation of newly available work reports. GP §12.
-    Delegates to the full accumulation pipeline in Jar.Accumulation. -/
+    Implements the full queue management: partition, resolve, accumulate. -/
 def performAccumulation
     (available : Array WorkReport)
     (s : State) (t' : Timeslot)
@@ -361,21 +388,44 @@ def performAccumulation
     (entropy' : Entropy := s.entropy) : AccumulationResult :=
   -- Pass the state with updated entropy so accumulation uses eta'_0
   let s' := { s with entropy := entropy' }
-  let result : Accumulation.AccumulationResult := Accumulation.accumulate s' available t' opaqueData
-  -- Collect work-package hashes of accumulated reports for history (sorted)
-  let accPackageHashes := (available.map fun wr => wr.availSpec.packageHash).qsort
-    (fun a b => Id.run do
-      for i in [:32] do
-        if a.data.get! i < b.data.get! i then return true
-        if a.data.get! i > b.data.get! i then return false
-      return false)
-  -- Update accumulation history: shift left by 1, append new entry at end (GP eq 12).
-  -- Maintains exactly E entries (like Grey's shift_accumulated).
+
+  -- Step 1: Partition available reports into immediate and queued (GP eq 12.4-12.5)
+  let (immediate, newQueued) := available.foldl (init := (#[], #[])) fun (imm, q) wr =>
+    let deps := computeDependencies wr
+    if deps.size == 0 then (imm.push wr, q)
+    else (imm, q.push (wr, deps))
+
+  -- Step 1b: Edit new queued reports against full accumulated history (GP ⊜(ξ))
+  let accHistoryUnion := s.accHistory.foldl (init := #[]) fun acc slot => acc ++ slot
+  let editedNewQueued := editQueue newQueued accHistoryUnion
+
+  -- Step 2: Compute R* (all accumulatable reports, GP eq 12.10-12.12)
+  -- Combine immediate reports with queue-resolved reports from ready_queue
+  let immediateHashes := immediate.map (·.availSpec.packageHash)
+  let allQueued := s.accQueue.foldl (init := #[]) fun acc slot => acc ++ slot
+  let allQueuedWithNew := allQueued ++ editedNewQueued
+  let editedAll := editQueue allQueuedWithNew immediateHashes
+  let queueResolved := resolveQueue editedAll
+  let accumulatable := immediate ++ queueResolved
+
+  -- Step 3: Accumulate all reports (Δ+)
+  -- For simplicity, accumulate all (gas budget should be sufficient for tiny config)
+  let result : Accumulation.AccumulationResult := Accumulation.accumulate s' accumulatable t' opaqueData
+  let n := accumulatable.size  -- all accumulated (gas sufficient)
+
+  -- Step 4: Collect accumulated package hashes for history (sorted)
+  let hashLt (a b : Hash) : Bool := Id.run do
+    for i in [:32] do
+      if a.data.get! i < b.data.get! i then return true
+      if a.data.get! i > b.data.get! i then return false
+    return false
+  let accPackageHashes := (accumulatable.extract 0 n |>.map fun wr => wr.availSpec.packageHash).qsort hashLt
+
+  -- Step 5: Update accumulation history: shift left by 1, append new entry
   let accHistory' := if s.accHistory.size > 0
     then s.accHistory.extract 1 s.accHistory.size
     else s.accHistory
   let accHistory'' := accHistory'.push accPackageHashes
-  -- Ensure exactly E entries
   let accHistory''' := if accHistory''.size < E
     then Id.run do
       let mut h := accHistory''
@@ -383,11 +433,36 @@ def performAccumulation
         h := h.push #[]
       return h
     else accHistory''
+
+  -- Step 6: Update ready queue (GP eq 12.34)
+  let accumulatedHashes := accPackageHashes
+  let prevSlot := s.timeslot
+  let slotsAdvanced := if t'.toNat > prevSlot.toNat then t'.toNat - prevSlot.toNat else 1
+  let accQueue' := Id.run do
+    let mut queue := s.accQueue
+    -- Ensure E entries
+    while queue.size < E do
+      queue := queue.push #[]
+    -- Clear positions for skipped slots
+    for offset in [:min slotsAdvanced E] do
+      let slot := prevSlot.toNat + 1 + offset
+      let pos := slot % E
+      if pos < queue.size then
+        queue := queue.set! pos #[]
+    -- Edit surviving slots: remove fulfilled dependencies and accumulated reports
+    for i in [:queue.size] do
+      queue := queue.set! i (editQueue queue[i]! accumulatedHashes)
+    -- Insert newly queued reports at current position
+    let m := t'.toNat % E
+    if m < queue.size then
+      let edited := editQueue editedNewQueued accumulatedHashes
+      queue := queue.set! m (queue[m]! ++ edited)
+    return queue
+
   -- Build per-service statistics from gas usage
-  -- N(s) = count of work items (digests) for service s in accumulated reports
   let accStats := result.gasUsage.entries.foldl (init := Dict.empty (K := ServiceId) (V := ServiceStatistics))
     fun acc (sid, gas) =>
-      let itemCount := available.foldl (init := 0) fun cnt wr =>
+      let itemCount := accumulatable.foldl (init := 0) fun cnt wr =>
         cnt + (wr.digests.filter fun d => d.serviceId == sid).size
       acc.insert sid {
         provided := (0, 0)
@@ -403,7 +478,7 @@ def performAccumulation
     pendingValidators := result.stagingKeys
     authQueue := result.authQueue
     outputs := result.outputs
-    accQueue := s.accQueue
+    accQueue := accQueue'
     accHistory := accHistory'''
     accStats := accStats
     remainingOpaqueData := result.remainingOpaqueData

@@ -365,7 +365,7 @@ def accumulateTransition (pre : TAState) (inp : TAInput)
   -- Step 6: Run accumulation pipeline
   -- Build tiny config blob matching Rust's Config::tiny().encode_config_blob()
   let tinyConfigBlob := buildTinyConfigBlob
-  let (n, ps', yields, gasMap) := accseq (UInt64.ofNat G_T)
+  let (n, ps', yields, gasMap, _, _) := accseq (UInt64.ofNat G_T)
     accumulatable #[] ps freeGasMap (UInt32.ofNat inp.slot) pre.entropy tinyConfigBlob
 
   -- Step 7: Compute output hash

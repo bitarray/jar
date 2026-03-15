@@ -184,7 +184,7 @@ private def encodeWorkReportState (wr : WorkReport) : ByteArray :=
   ++ encodeFixedNat 8 wr.authGasUsed.toNat
   ++ encodeLengthPrefixed wr.authOutput
   ++ encodeCountPrefixedArray (fun (k, v) => k.data ++ v.data)
-      wr.segmentRootLookup.entries.toArray
+      (wr.segmentRootLookup.entries.toArray.qsort fun (a, _) (b, _) => byteArrayLt a.data b.data)
   ++ encodeCountPrefixedArray encodeWorkDigestState wr.digests
 
 -- ============================================================================
@@ -219,7 +219,7 @@ private def serializeRecentBlocks (recent : RecentHistory) : ByteArray := Id.run
     buf := buf ++ info.headerHash.data
     buf := buf ++ info.accOutputRoot.data
     buf := buf ++ info.stateRoot.data
-    let pkgs := info.reportedPackages.entries.toArray
+    let pkgs := info.reportedPackages.entries.toArray.qsort fun (a, _) (b, _) => byteArrayLt a.data b.data
     buf := buf ++ encodeNat pkgs.size
     for (k, v) in pkgs do
       buf := buf ++ k.data
@@ -305,7 +305,7 @@ private def serializePrivileged (priv : PrivilegedServices) : ByteArray := Id.ru
     buf := buf ++ encodeFixedNat 4 sid.toNat
   buf := buf ++ encodeFixedNat 4 priv.designator.toNat
   buf := buf ++ encodeFixedNat 4 priv.registrar.toNat
-  let zEntries := priv.alwaysAccumulate.entries.toArray
+  let zEntries := priv.alwaysAccumulate.entries.toArray.qsort fun (a, _) (b, _) => a.toNat < b.toNat
   buf := buf ++ encodeNat zEntries.size
   for (sid, gas) in zEntries do
     buf := buf ++ encodeFixedNat 4 sid.toNat
@@ -347,7 +347,7 @@ private def serializeStatistics (stats : ActivityStatistics) : ByteArray := Id.r
     buf := buf ++ encodeNat cs.exports
     buf := buf ++ encodeNat cs.bundleSize
     buf := buf ++ encodeNat cs.gasUsed.toNat
-  let sEntries := stats.serviceStats.entries.toArray
+  let sEntries := stats.serviceStats.entries.toArray.qsort fun (a, _) (b, _) => a.toNat < b.toNat
   buf := buf ++ encodeNat sEntries.size
   for (sid, ss) in sEntries do
     buf := buf ++ encodeFixedNat 4 sid.toNat

@@ -642,10 +642,6 @@ def runBlockTestDirSeq [JamConfig] (dir : String) : IO UInt32 := do
           for (sid, acct) in postState.services.entries.toArray do
             IO.println s!"    svc {sid}: storage={acct.storage.size} preimages={acct.preimages.size} preimageInfo={acct.preimageInfo.size} bal={acct.balance} parent={acct.parent} created={acct.created} footprint={acct.totalFootprint} lastAcc={acct.lastAccumulation} preimCount={acct.preimageCount} gratis={acct.gratis}"
           -- Debug: show serialized component sizes and hashes
-          let mut opaqueByIdx : Array (Nat × Nat) := #[]
-          for (k, _v) in filteredOpaque do
-            let idx := k.get! 0
-            opaqueByIdx := opaqueByIdx.push (idx.toNat, 0)
           for (k, v) in allPostKvs do
             let idx := k.get! 0
             if idx >= 1 && idx <= 16 || idx == 255 then

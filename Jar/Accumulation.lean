@@ -702,38 +702,86 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     (mkResult regs' mem gas', ctx')
 
   -- ===== new (18): Create new service account =====
+  -- φ[7]=o (code hash ptr), φ[8]=l (preimage length), φ[9]=g, φ[10]=m, φ[11]=f, φ[12]=i
   | 18 =>
-    -- reg[7] = code hash pointer (32 bytes), reg[8] = min_acc_gas,
-    -- reg[9] = min_on_transfer_gas
     let codeHashPtr := getReg regs 7
-    let minAccGas := getReg regs 8
-    let minOnTransferGas := getReg regs 9
+    let preimLen := getReg regs 8
+    let minAccGas := getReg regs 9
+    let minOnTransferGas := getReg regs 10
+    let gratis := getReg regs 11
+    let hintI := getReg regs 12
     match PVM.readByteArray mem codeHashPtr 32 with
     | .ok hashBytes =>
       let codeHash : Hash := ⟨hashBytes, sorry⟩
-      let newId := ctx.nextServiceId
-      let newAcct : ServiceAccount := {
-        storage := Dict.empty
-        preimages := Dict.empty
-        preimageInfo := Dict.empty
-        gratis := 0
-        codeHash
-        balance := 0
-        minAccGas
-        minOnTransferGas
-        -- Field mapping: created=a_i(items), lastAccumulation=a_r(creation slot),
-        -- parent=a_a(last acc slot), preimageCount=a_p(parent svc)
-        created := 0                               -- a_i: item count = 0
-        lastAccumulation := UInt32.ofNat ctx.timeslot.toNat  -- a_r: creation timeslot
-        parent := 0                                -- a_a: last acc slot = 0
-        preimageCount := ctx.serviceId.toNat        -- a_p: parent service ID
-      }
-      let accounts' := ctx.state.accounts.insert newId newAcct
-      let state' := { ctx.state with accounts := accounts' }
-      let ctx' := { ctx with state := state', nextServiceId := newId + 1 }
-      let regs' := setR7 regs PVM.RESULT_OK
-      let regs' := setReg regs' 8 (UInt64.ofNat newId.toNat)
-      (mkResult regs' mem gas', ctx')
+      -- Compute items/footprint for new account (preimage_info entry)
+      let newItems : Nat := 2  -- preimage_info entry counts as 2 items
+      let newFootprint : Nat := 81 + preimLen.toNat  -- per GP eq 9.4
+      -- Compute threshold balance for new account
+      let threshold : Nat := (B_S + B_I * newItems + B_L * newFootprint) - min gratis.toNat (B_S + B_I * newItems + B_L * newFootprint)
+      -- Check f ≠ 0 requires caller to be manager
+      if gratis != 0 && ctx.serviceId != ctx.state.manager then
+        let regs' := setR7 regs PVM.RESULT_HUH
+        (mkResult regs' mem gas', ctx)
+      else
+      -- Check caller has enough balance
+      match ctx.state.accounts.lookup ctx.serviceId with
+      | none =>
+        let regs' := setR7 regs PVM.RESULT_CASH
+        (mkResult regs' mem gas', ctx)
+      | some srcAcct =>
+        -- Caller's balance after deduction must still cover own threshold
+        if srcAcct.balance.toNat < threshold then
+          let regs' := setR7 regs PVM.RESULT_CASH
+          (mkResult regs' mem gas', ctx)
+        else
+        -- Find service ID
+        let sThreshold : Nat := 2^16  -- S per GP I.4.4
+        let (newId, idOk) : ServiceId × Bool :=
+          if ctx.serviceId == ctx.state.registrar &&
+             hintI.toNat < sThreshold && hintI.toNat < 2^32 then
+            let id := UInt32.ofNat hintI.toNat
+            if (ctx.state.accounts.lookup id).isSome then (id, false) else (id, true)
+          else
+            let id := ctx.nextServiceId
+            if (ctx.state.accounts.lookup id).isSome then (id, false) else (id, true)
+        if !idOk then
+          let regs' := setR7 regs PVM.RESULT_FULL
+          (mkResult regs' mem gas', ctx)
+        else
+        -- Debit caller by threshold amount
+        let srcAcct' := { srcAcct with balance := srcAcct.balance - UInt64.ofNat threshold }
+        let accounts' := ctx.state.accounts.insert ctx.serviceId srcAcct'
+        -- Create new account with preimage_info entry for code hash
+        let newAcct : ServiceAccount := {
+          storage := Dict.empty
+          preimages := Dict.empty
+          preimageInfo := Dict.empty.insert (codeHash, UInt32.ofNat preimLen.toNat) #[]
+          gratis := gratis
+          codeHash
+          balance := UInt64.ofNat threshold
+          minAccGas
+          minOnTransferGas
+          created := UInt32.ofNat newItems
+          lastAccumulation := UInt32.ofNat ctx.timeslot.toNat
+          parent := 0
+          totalFootprint := newFootprint
+          preimageCount := ctx.serviceId.toNat
+        }
+        let accounts'' := accounts'.insert newId newAcct
+        let state' := { ctx.state with accounts := accounts'' }
+        -- Advance next_service_id
+        let range := 2^32 - sThreshold - 2^8
+        let candidate := sThreshold + ((newId.toNat - sThreshold + 42) % range)
+        let nextId := Id.run do
+          let mut id := candidate
+          for _ in [:256] do
+            if (state'.accounts.lookup (UInt32.ofNat id)).isNone then return id
+            id := sThreshold + ((id - sThreshold + 1) % range)
+          return id
+        let ctx' := { ctx with state := state', nextServiceId := UInt32.ofNat nextId }
+        -- Return new service ID in r7 (GP spec)
+        let regs' := setR7 regs (UInt64.ofNat newId.toNat)
+        (mkResult regs' mem gas', ctx')
     | _ =>
       let regs' := setR7 regs PVM.RESULT_OOB
       (mkResult regs' mem gas', ctx)
@@ -1138,14 +1186,20 @@ def accone (ps : PartialState) (serviceId : ServiceId)
             handleHostCall callId gas regs' mem' c)
           ctx
         let _ := ()
-        -- On halt: use accumulated state; on panic: revert to checkpoint
-        let finalState := match result.exitReason with
-          | .halt => ctx'.state
+        -- On halt: use accumulated state; on panic/OOG: revert to checkpoint
+        -- GP: regular dimension (x) on halt, exceptional dimension (y) on panic/OOG/fault
+        let (finalState, finalTransfers, finalYield, finalProvisions) := match result.exitReason with
+          | .halt =>
+            (ctx'.state, ctx'.transfers, ctx'.yieldHash, ctx'.provisions)
           | .panic =>
-            match ctx'.checkpoint with
-            | some savedAccounts => { ctx'.state with accounts := savedAccounts }
-            | none => ps  -- revert entirely
-          | _ => ps  -- OOG/fault: revert
+            -- Revert to checkpoint accounts if available
+            let reverted := match ctx'.checkpoint with
+              | some savedAccounts => { ctx'.state with accounts := savedAccounts }
+              | none => ps
+            (reverted, (#[] : Array DeferredTransfer), (none : Option Hash), (#[] : Array (ServiceId × ByteArray)))
+          | _ =>
+            -- OOG/fault: revert entirely, discard transfers/yield/provisions
+            (ps, #[], none, #[])
         -- Update last accumulation timeslot (position a in serialized format)
         -- JAR's `parent` field maps to serialized position a = last accumulation timeslot
         let finalState := match finalState.accounts.lookup serviceId with
@@ -1153,7 +1207,7 @@ def accone (ps : PartialState) (serviceId : ServiceId)
             let a' := { a with parent := UInt32.ofNat timeslot.toNat }
             { finalState with accounts := finalState.accounts.insert serviceId a' }
           | none => finalState
-        let gasUsed := totalGas - result.gas.toUInt64
+        let gasUsed := totalGas - (if result.gas.toUInt64 > totalGas then 0 else result.gas.toUInt64)
         let traceStr := String.intercalate "," (tracePCs.toList.map toString)
         let exitStr := match result.exitReason with
           | .halt =>
@@ -1171,10 +1225,10 @@ def accone (ps : PartialState) (serviceId : ServiceId)
           | .hostCall n => s!"hostcall({n},steps={steps})"
           | .pageFault addr => s!"pageFault({addr},steps={steps},pcs=[{traceStr}])"
         { postState := finalState
-          deferredTransfers := ctx'.transfers
-          yieldHash := ctx'.yieldHash
+          deferredTransfers := finalTransfers
+          yieldHash := finalYield
           gasUsed
-          provisions := ctx'.provisions
+          provisions := finalProvisions
           opaqueData := ctx'.opaqueData
           exitReasonStr := exitStr
           hostCallLog := ctx'.hostCallLog }
