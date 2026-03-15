@@ -394,29 +394,41 @@ private def serializeAccumulationOutputs (outputs : AccumulationOutputs) : ByteA
     buf := buf ++ hash.data
   return buf
 
-/-- C(255, s): Service account metadata. -/
+/-- C(255, s): Service account metadata.
+    Field layout (matches Grey's serialize_service_account_with_id):
+    E(0) ++ a_c ++ E_8(b, g, m, o, f) ++ E_4(i, r, a, p)
+    where o = totalFootprint, f = gratis, i = created (item count),
+    a = parent (last_activity), p = preimageCount. -/
 private def serializeServiceAccount (account : ServiceAccount) (_sid : ServiceId)
     : ByteArray := Id.run do
   let mut buf := ByteArray.empty
+  -- Compute o and i from actual storage/preimage data when available,
+  -- fall back to preserved values when storage is opaque (empty after deser).
   let storageLen := account.storage.entries.length
   let preimageInfoLen := account.preimageInfo.entries.length
-  let computedI := 2 * preimageInfoLen + storageLen
-  let computedO : Nat :=
-    account.preimageInfo.entries.foldl (init := 0) (fun acc ((_, len), _) =>
-      acc + 81 + len.toNat)
-    + account.storage.entries.foldl (init := 0) (fun acc (k, v) =>
-      acc + 34 + k.size + v.size)
+  let preimagesLen := account.preimages.entries.length
+  let hasData := storageLen > 0 || preimageInfoLen > 0 || preimagesLen > 0
+  let footprint : Nat := if hasData then
+      account.preimageInfo.entries.foldl (init := 0) (fun acc ((_, len), _) =>
+        acc + 81 + len.toNat)
+      + account.storage.entries.foldl (init := 0) (fun acc (k, v) =>
+        acc + 34 + k.size + v.size)
+    else account.totalFootprint
+  let itemCount : Nat := if hasData then
+      2 * preimageInfoLen + storageLen
+    else account.created.toNat  -- preserved accumulation_counter
+  let preimCount : Nat := if hasData then preimagesLen
+    else account.preimageCount
   buf := buf ++ ByteArray.mk #[0]  -- version
   buf := buf ++ account.codeHash.data
   buf := buf ++ encodeFixedNat 8 account.balance.toNat
   buf := buf ++ encodeFixedNat 8 account.minAccGas.toNat
   buf := buf ++ encodeFixedNat 8 account.minOnTransferGas.toNat
-  buf := buf ++ encodeFixedNat 8 computedO
+  buf := buf ++ encodeFixedNat 8 footprint
   buf := buf ++ encodeFixedNat 8 account.gratis.toNat
-  buf := buf ++ encodeFixedNat 4 computedI
+  buf := buf ++ encodeFixedNat 4 itemCount
   buf := buf ++ encodeFixedNat 4 account.lastAccumulation.toNat
   buf := buf ++ encodeFixedNat 4 account.parent.toNat
-  let preimCount := account.preimages.entries.length
   buf := buf ++ encodeFixedNat 4 preimCount
   return buf
 
@@ -828,12 +840,12 @@ private def deserializeServiceAccountD : Decoder ServiceAccount := fun s => do
   let (balance, s) ← decodeFixedNatD 8 s
   let (minAccGas, s) ← decodeFixedNatD 8 s
   let (minOnTransferGas, s) ← decodeFixedNatD 8 s
-  let (_totalFootprint, s) ← decodeFixedNatD 8 s
+  let (totalFootprint, s) ← decodeFixedNatD 8 s
   let (gratis, s) ← decodeFixedNatD 8 s
   let (accumCounter, s) ← decodeFixedNatD 4 s
   let (lastAccumulation, s) ← decodeFixedNatD 4 s
   let (lastActivity, s) ← decodeFixedNatD 4 s
-  let (_preimageCount, s) ← decodeFixedNatD 4 s
+  let (preimageCount, s) ← decodeFixedNatD 4 s
   return ({
     storage := Dict.empty
     preimages := Dict.empty
@@ -846,6 +858,8 @@ private def deserializeServiceAccountD : Decoder ServiceAccount := fun s => do
     created := UInt32.ofNat accumCounter
     lastAccumulation := UInt32.ofNat lastAccumulation
     parent := UInt32.ofNat lastActivity
+    totalFootprint := totalFootprint
+    preimageCount := preimageCount
   }, s)
 
 -- ============================================================================

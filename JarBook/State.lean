@@ -29,7 +29,7 @@ The block-level state transition function `Υ(σ, B) = σ'` (GP eq 4.1).
 
 {docstring Jar.updateParentStateRoot}
 
-{docstring Jar.computeAccOutputRoot}
+{docstring Jar.computeAccumulateRoot}
 
 {docstring Jar.collectReportedPackages}
 

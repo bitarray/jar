@@ -41,6 +41,10 @@ structure ServiceAccount where
   lastAccumulation : Timeslot
   /-- a : Parent service index. ℕ_S. -/
   parent : ServiceId
+  /-- o : Total storage footprint (computed). Preserved from serialized state. -/
+  totalFootprint : Nat := 0
+  /-- p : Preimage request count (computed). Preserved from serialized state. -/
+  preimageCount : Nat := 0
 
 -- ============================================================================
 -- §9 — Service Accounts State (eq:serviceaccounts)

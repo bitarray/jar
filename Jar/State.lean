@@ -73,17 +73,63 @@ def updateParentStateRoot (bs : RecentHistory) (h : Header) : RecentHistory :=
     }
     { bs with blocks := bs.blocks.set idx last' }
 
-/-- Compute accumulation-output log super-peak. GP §E.7–E.10.
-    Builds an MMR from the accumulation output hashes produced this block,
-    then bags the peaks to get a single root hash. -/
-def computeAccOutputRoot (outputs : AccumulationOutputs) : Hash :=
+/-- Append a leaf to an MMR peaks array using Keccak-256. GP Appendix E eq (E.8).
+    Matches Grey's mmr_append in history.rs. -/
+def mmrAppend (peaks : Array (Option Hash)) (leaf : Hash) : Array (Option Hash) :=
+  let rec go (ps : Array (Option Hash)) (carry : Hash) (i : Nat) : Array (Option Hash) :=
+    if i >= ps.size then
+      ps.push (some carry)
+    else
+      match ps[i]! with
+      | none => ps.set! i (some carry)
+      | some existing =>
+        let combined := existing.data ++ carry.data
+        let merged : Hash := Crypto.keccak256 combined
+        go (ps.set! i none) merged (i + 1)
+  go peaks leaf 0
+
+/-- Compute MMR super-peak MR. GP Appendix E eq (E.10).
+    MR([]) = H_0, MR([h]) = h, MR(h) = H_K("peak" ++ MR(h[..n-1]) ++ h[n-1]) -/
+def mmrSuperPeak (peaks : Array (Option Hash)) : Hash :=
+  let nonNone := peaks.filterMap id
+  match nonNone.size with
+  | 0 => ⟨ByteArray.mk (Array.replicate 32 0), sorry⟩
+  | _ =>
+    let init : Hash := nonNone[0]!
+    nonNone.foldl (init := init) (start := 1) fun acc peak =>
+      let data := "peak".toUTF8 ++ acc.data ++ peak.data
+      Crypto.keccak256 data
+
+/-- Balanced Keccak-256 Merkle tree node N(v, H_K). GP eq (E.4). -/
+private partial def keccakMerkleNode (leaves : Array ByteArray) : ByteArray :=
+  match leaves.size with
+  | 0 => Hash.zero.data
+  | 1 => leaves[0]!
+  | n =>
+    let mid := (n + 1) / 2
+    let left := keccakMerkleNode (leaves.extract 0 mid)
+    let right := keccakMerkleNode (leaves.extract mid n)
+    let input := "node".toUTF8 ++ left ++ right
+    (Crypto.keccak256 input).data
+
+/-- Balanced Keccak-256 Merkle root M_B(v, H_K). GP eq (E.4).
+    Matches Grey's keccak_merkle_root / compute_output_hash. -/
+def keccakMerkleRoot (leaves : Array ByteArray) : Hash :=
+  if leaves.size == 1 then
+    Crypto.keccak256 leaves[0]!
+  else
+    ⟨keccakMerkleNode leaves, sorry⟩
+
+/-- Compute accumulate root hash from accumulation outputs.
+    Uses balanced Keccak-256 Merkle tree (GP eq 7.7 / E.4).
+    Matches Grey's compute_output_hash. -/
+def computeAccumulateRoot (outputs : AccumulationOutputs) : Hash :=
   if outputs.size == 0 then Hash.zero
   else
-    let hashes := outputs.map fun (sid, h) =>
-      Crypto.blake2b (Codec.encodeFixedNat 4 sid.toNat ++ h.data)
-    let mmr := hashes.foldl (init := Merkle.MerkleMountainRange.mk #[])
-      fun mmr leaf => mmr.append leaf
-    mmr.root
+    let sorted := outputs.qsort fun (a, _) (b, _) => a.toNat < b.toNat
+    let leaves := sorted.map fun (sid, h) =>
+      Codec.encodeFixedNat 4 sid.toNat ++ h.data
+    keccakMerkleRoot leaves
 
 /-- Collect reported work-package hashes from guarantees. GP §7.
     Maps package hash → erasure root for each guaranteed report. -/
@@ -92,25 +138,30 @@ def collectReportedPackages (guarantees : GuaranteesExtrinsic) : Dict Hash Hash 
     acc.insert g.report.availSpec.packageHash g.report.availSpec.erasureRoot
 
 /-- β' : Full recent history update. GP eq (37–43).
-    Appends new block info, truncates to max history length. -/
+    1. MMR-append the accumulate root to the belt
+    2. Compute beefy root as MMR super-peak
+    3. Append new block info, truncate to H entries -/
 def updateRecentHistory
     (bdag : RecentHistory) (headerHash : Hash)
     (accOutputs : AccumulationOutputs)
     (guarantees : GuaranteesExtrinsic) : RecentHistory :=
   let maxLen := 8  -- H_R : Maximum recent history length
+  -- Compute accumulate root (balanced Keccak Merkle tree of outputs)
+  let accRoot := computeAccumulateRoot accOutputs
+  -- MMR append to belt
+  let belt' := mmrAppend bdag.accOutputBelt accRoot
+  -- Compute beefy root (MMR super-peak) for block info
+  let beefyRoot := mmrSuperPeak belt'
   let newEntry : RecentBlockInfo := {
     headerHash := headerHash
     stateRoot := Hash.zero  -- will be filled by next block's β†
-    accOutputRoot := computeAccOutputRoot accOutputs
+    accOutputRoot := beefyRoot
     reportedPackages := collectReportedPackages guarantees
   }
   let blocks' := bdag.blocks.push newEntry
   let blocks'' := if blocks'.size > maxLen
     then blocks'.extract 1 blocks'.size
     else blocks'
-  -- Update accumulation-output belt: append new output hashes
-  let newBeltEntries := accOutputs.map fun (_, h) => some h
-  let belt' := bdag.accOutputBelt ++ newBeltEntries
   { blocks := blocks'', accOutputBelt := belt' }
 
 -- ============================================================================
@@ -247,20 +298,30 @@ def reportsPostGuarantees
 -- ============================================================================
 
 /-- α' : Updated authorization pool. GP eq (26–27).
-    Remove used authorizer, add from queue at current slot. -/
+    Remove used authorizer, add from queue at current slot, truncate to O. -/
 def updateAuthPool
     (alpha phi' : Array (Array Hash))
-    (h : Header) (guarantees : GuaranteesExtrinsic) : Array (Array Hash) :=
-  alpha.mapIdx fun c a =>
-    let a' := match guarantees.find? (fun g => g.report.coreIndex.val == c) with
+    (h : Header) (guarantees : GuaranteesExtrinsic) : Array (Array Hash) := Id.run do
+  let mut result : Array (Array Hash) := #[]
+  for coreIdx in [:alpha.size] do
+    let a := alpha[coreIdx]!
+    -- Remove the authorizer hash used by a guarantee for this core
+    let a' := match guarantees.find? (fun g => g.report.coreIndex.val == coreIdx) with
     | some g => a.filter (· != g.report.authorizerHash)
     | none => a
-    let m := epochSlot h.timeslot
-    if hc : c < phi'.size then
-      let queueEntry := phi'[c]
-      if hm : m < queueEntry.size then a'.push queueEntry[m]
+    -- Queue index: timeslot mod Q (not E). phi' is indexed [slot][core].
+    let queueSlot := h.timeslot.toNat % Q_QUEUE
+    let a'' := if queueSlot < phi'.size then
+      let slot := phi'[queueSlot]!
+      if coreIdx < slot.size then a'.push slot[coreIdx]!
       else a'
     else a'
+    -- Truncate to rightmost O_POOL entries
+    let a''' := if a''.size > O_POOL
+      then a''.extract (a''.size - O_POOL) a''.size
+      else a''
+    result := result.push a'''
+  return result
 
 -- ============================================================================
 -- §12 — Accumulation
@@ -283,14 +344,27 @@ def performAccumulation
     (available : Array WorkReport)
     (s : State) (t' : Timeslot) : AccumulationResult :=
   let result := Accumulation.accumulate s available t'
-  -- Collect work-package hashes of accumulated reports for history
-  let accPackageHashes := available.map fun wr => wr.availSpec.packageHash
-  -- Update accumulation history: append this timeslot's hashes
-  let accHistory' := s.accHistory.push accPackageHashes
-  -- Trim history to D_EXPUNGE entries
-  let accHistory'' := if accHistory'.size > D_EXPUNGE
-    then accHistory'.extract 1 accHistory'.size
-    else accHistory'
+  -- Collect work-package hashes of accumulated reports for history (sorted)
+  let accPackageHashes := (available.map fun wr => wr.availSpec.packageHash).qsort
+    (fun a b => Id.run do
+      for i in [:32] do
+        if a.data.get! i < b.data.get! i then return true
+        if a.data.get! i > b.data.get! i then return false
+      return false)
+  -- Update accumulation history: shift left by 1, append new entry at end (GP eq 12).
+  -- Maintains exactly E entries (like Grey's shift_accumulated).
+  let accHistory' := if s.accHistory.size > 0
+    then s.accHistory.extract 1 s.accHistory.size
+    else s.accHistory
+  let accHistory'' := accHistory'.push accPackageHashes
+  -- Ensure exactly E entries
+  let accHistory''' := if accHistory''.size < E
+    then Id.run do
+      let mut h := accHistory''
+      while h.size < E do
+        h := h.push #[]
+      return h
+    else accHistory''
   -- Build per-service statistics from gas usage
   let accStats := result.gasUsage.entries.foldl (init := Dict.empty (K := ServiceId) (V := ServiceStatistics))
     fun acc (sid, gas) =>
@@ -309,7 +383,7 @@ def performAccumulation
     authQueue := result.authQueue
     outputs := result.outputs
     accQueue := s.accQueue
-    accHistory := accHistory''
+    accHistory := accHistory'''
     accStats := accStats }
 
 -- ============================================================================
