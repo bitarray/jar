@@ -181,6 +181,53 @@ def trieRoot (entries : Array (OctetSeq 31 × ByteArray)) : Hash :=
   trieRootAux bitEntries 248
 
 -- ============================================================================
+-- Merkle Trie Root (32-byte keys) — for test vectors
+-- ============================================================================
+
+/-- A 32-byte key used during trie construction (256 bits for splitting). -/
+private structure BitKey32 where
+  data : ByteArray  -- 32 bytes
+  deriving BEq, Inhabited
+
+/-- Get bit at position in a BitKey32 (big-endian). -/
+private def BitKey32.bit (k : BitKey32) (pos : Nat) : Bool := getBit k.data pos
+
+/-- Compute Merkle trie root with 32-byte keys. GP Appendix D eq (D.3–D.5).
+    Keys are 32 bytes (256 bits) for partitioning, but leaf encoding
+    truncates to 31 bytes (matching the specification).
+    Unlike `trieRootAux`, this always creates branch nodes when splitting
+    (even if one side is empty), matching the reference implementation. -/
+private def trieRoot32Aux (entries : Array (BitKey32 × ByteArray)) (depth : Nat)
+    : Hash :=
+  match depth with
+  | 0 =>
+    if entries.size > 0 then
+      let (k, v) := entries[0]!
+      let key31 := ByteArray.mk (k.data.data.extract 0 31)
+      Crypto.blake2b (encodeLeaf ⟨key31, sorry⟩ v).data
+    else Hash.zero
+  | fuel + 1 =>
+    if entries.size == 0 then Hash.zero
+    else if entries.size == 1 then
+      let (k, v) := entries[0]!
+      let key31 := ByteArray.mk (k.data.data.extract 0 31)
+      Crypto.blake2b (encodeLeaf ⟨key31, sorry⟩ v).data
+    else
+      let bitPos := 256 - fuel - 1
+      let left := entries.filter fun (k, _) => !k.bit bitPos
+      let right := entries.filter fun (k, _) => k.bit bitPos
+      let lHash := trieRoot32Aux left fuel
+      let rHash := trieRoot32Aux right fuel
+      Crypto.blake2b (encodeBranch lHash rHash).data
+
+/-- Compute Merkle trie root from key-value pairs with 32-byte keys.
+    Keys are 32 bytes for splitting; leaf encoding truncates to 31 bytes.
+    Returns ℍ_0 for empty. -/
+def trieRoot32 (entries : Array (ByteArray × ByteArray)) : Hash :=
+  let bitEntries := entries.map fun (k, v) => ({ data := k : BitKey32 }, v)
+  trieRoot32Aux bitEntries 256
+
+-- ============================================================================
 -- State Merklization — Appendix D §D.2
 -- ============================================================================
 

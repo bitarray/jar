@@ -120,6 +120,22 @@ lean_exe propertytest where
     "-lpthread", "-ldl", "-lm"
   ]
 
+lean_exe trietest where
+  root := `Jar.Test.TrieTestMain
+  moreLinkArgs := #[
+    "-L", "crypto-ffi/target/release",
+    "-ljar_crypto_ffi",
+    "-lpthread", "-ldl", "-lm"
+  ]
+
+lean_exe shuffletest where
+  root := `Jar.Test.ShuffleTestMain
+  moreLinkArgs := #[
+    "-L", "crypto-ffi/target/release",
+    "-ljar_crypto_ffi",
+    "-lpthread", "-ldl", "-lm"
+  ]
+
 lean_exe jarstf where
   root := `Jar.Test.StfServerMain
   moreLinkArgs := #[
