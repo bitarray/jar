@@ -6,7 +6,7 @@ open Jar Jar.Test.BlockTest
 def testVariants : Array JamConfig := #[JamVariant.gp072_tiny.toJamConfig]
 
 /-- Traces where each block has full keyvals (independent per-block tests). -/
-def independentTraces : Array String := #["safrole", "fallback"]
+def independentTraces : Array String := #["safrole", "fallback", "storage_light", "storage"]
 
 /-- Traces where only the first block has keyvals (sequential state threading). -/
 def sequentialTraces : Array String := #["conformance_no_forks", "conformance_forks"]

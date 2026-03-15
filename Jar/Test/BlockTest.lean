@@ -386,8 +386,8 @@ def runBlockTest [JamConfig] (inputPath : System.FilePath) : IO TestResult := do
     | .error _ => false
 
   -- Run state transition, skipping seal/VRF verification for now
-  -- (validateHeader seal check is incorrect — uses wrong context)
-  let result := @stateTransitionNoSealCheck _ state block
+  -- Pass opaque data so PVM accumulation can access storage/preimage entries
+  let result := @stateTransitionNoSealCheck _ state block opaqueData
   -- If transition fails, diagnose which check failed
   if result.isNone then
     let h := block.header
@@ -415,7 +415,7 @@ def runBlockTest [JamConfig] (inputPath : System.FilePath) : IO TestResult := do
     IO.println s!"    header.slot={h.timeslot.toNat} state.timeslot={state.timeslot.toNat} authorIdx={h.authorIndex.val}"
 
   match result with
-  | some postState =>
+  | some (postState, _exitReasons, remainingOpaque) =>
     if isError then
       IO.println s!"  FAIL {name}: expected error but transition succeeded"
       return .fail
@@ -425,7 +425,9 @@ def runBlockTest [JamConfig] (inputPath : System.FilePath) : IO TestResult := do
       let expectedPostRoot ← IO.ofExcept (@fromJson? Hash _ (← IO.ofExcept (postStateJson.getObjVal? "state_root")))
 
       -- Compute Merkle root of posterior state
-      -- Include opaque service data entries (storage/preimages) that pass through unchanged
+      -- Include remaining opaque data entries (consumed entries already removed during accumulation).
+      -- Additionally filter out any entries whose keys now appear in serialized state
+      -- (e.g., storage entries promoted during accumulation).
       let postKvs := (@StateSerialization.serializeState _ postState).map fun (k, v) => (k.data, v)
       let byteArrayLt (a b : ByteArray) : Bool :=
         let len := min a.size b.size
@@ -434,7 +436,10 @@ def runBlockTest [JamConfig] (inputPath : System.FilePath) : IO TestResult := do
             if a.get! i < b.get! i then return true
             if a.get! i > b.get! i then return false
           return a.size < b.size
-      let allPostKvs := (postKvs ++ opaqueData).qsort fun (k1, _) (k2, _) => byteArrayLt k1 k2
+      let postKeys := postKvs.map Prod.fst
+      let filteredOpaque := remainingOpaque.filter fun (k, _) =>
+        !postKeys.any (· == k)
+      let allPostKvs := (postKvs ++ filteredOpaque).qsort fun (k1, _) (k2, _) => byteArrayLt k1 k2
       let computedRoot := Merkle.trieRoot (allPostKvs.map fun (k, v) => ((⟨k, sorry⟩ : OctetSeq 31), v))
 
       if computedRoot == expectedPostRoot then

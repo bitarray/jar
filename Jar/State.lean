@@ -1093,8 +1093,12 @@ def stateTransitionWithOpaque (s : State) (b : Block)
     accHistory := accResult.accHistory
   }, (available.size, accResult.exitReasons, accResult.remainingOpaqueData))
 
-/-- State transition without seal/VRF verification (for block-level testing). -/
-def stateTransitionNoSealCheck (s : State) (b : Block) : Option State := do
+/-- State transition without seal/VRF verification (for block-level testing).
+    Accepts opaque data for PVM accumulation host calls and returns remaining
+    opaque data with consumed entries removed. -/
+def stateTransitionNoSealCheck (s : State) (b : Block)
+    (opaqueData : Array (ByteArray × ByteArray) := #[])
+    : Option (State × Array (ServiceId × String) × Array (ByteArray × ByteArray)) := do
   let h := b.header
   let ext := b.extrinsic
   guard (validateHeaderNoSeal s h)
@@ -1108,13 +1112,13 @@ def stateTransitionNoSealCheck (s : State) (b : Block) : Option State := do
   let (rhoDDag, available) := reportsPostAssurance rhoDag ext.assurances t'
   let rho' := reportsPostGuarantees rhoDDag ext.guarantees t'
   let bDag := updateParentStateRoot s.recent h
-  let accResult := performAccumulation available s t' #[] eta'
+  let accResult := performAccumulation available s t' opaqueData eta'
   let headerHash := Crypto.blake2b (Codec.encodeHeader h)
   let beta' := updateRecentHistory bDag headerHash accResult.outputs ext.guarantees
   let delta' := integratePreimages accResult.services ext.preimages t'
   let alpha' := updateAuthPool s.authPool accResult.authQueue h ext.guarantees
   let pi' := updateStatistics s.statistics h ext s.timeslot t' kappa' available accResult.accStats
-  pure {
+  pure ({
     authPool := alpha'
     recent := beta'
     accOutputs := accResult.outputs.qsort fun (a, _) (b, _) => a.toNat < b.toNat
@@ -1135,6 +1139,6 @@ def stateTransitionNoSealCheck (s : State) (b : Block) : Option State := do
     statistics := pi'
     accQueue := accResult.accQueue
     accHistory := accResult.accHistory
-  }
+  }, accResult.exitReasons, accResult.remainingOpaqueData)
 
 end Jar
