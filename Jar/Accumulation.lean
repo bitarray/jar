@@ -129,8 +129,8 @@ structure AccContext where
   timeslot : Timeslot
   /-- Next service ID for new service creation. -/
   nextServiceId : ServiceId
-  /-- "Regular" dimension state (for checkpoint). -/
-  checkpoint : Option (Dict ServiceId ServiceAccount)
+  /-- "Regular" dimension state (for checkpoint): (accounts, opaqueData). -/
+  checkpoint : Option (Dict ServiceId ServiceAccount × Array (ByteArray × ByteArray))
   /-- Entropy η'₀ for fetch mode 1. -/
   entropy : Hash
   /-- Protocol configuration blob for fetch mode 0. -/
@@ -301,6 +301,13 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
       gas := Int64.ofUInt64 gas'
       registers := regs'
       memory := mem' }
+  -- GP: Memory read failure in host calls → PANIC (⚡) — terminates PVM
+  let mkPanic (regs' : PVM.Registers) (mem' : PVM.Memory) (gas' : Gas) : PVM.InvocationResult :=
+    { exitReason := .panic
+      exitValue := if 7 < regs'.size then regs'[7]! else 0
+      gas := Int64.ofUInt64 gas'
+      registers := regs'
+      memory := mem' }
   let setR7 (r : PVM.Registers) (v : UInt64) := setReg r 7 v
   let gas' := if gas.toNat >= hostCallGas then gas - UInt64.ofNat hostCallGas else 0
   let (result, ctx') : PVM.InvocationResult × AccContext := match callNum with
@@ -343,9 +350,8 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           let regs' := setR7 regs (UInt64.ofNat dataLen)
           (mkResult regs' mem' gas', ctx)
         | _ =>
-          -- Page fault on write → panic (return false equivalent)
-          let regs' := setR7 regs PVM.RESULT_OOB
-          (mkResult regs' mem gas', ctx)
+          -- Page fault on write → panic (GP: ⚡)
+          (mkPanic regs mem gas', ctx)
       else
         let regs' := setR7 regs (UInt64.ofNat dataLen)
         (mkResult regs' mem gas', ctx)
@@ -399,14 +405,14 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
               let regs' := setR7 regs (UInt64.ofNat vLen)
               (mkResult regs' mem' gas', ctx')
             | _ =>
-              let regs' := setR7 regs PVM.RESULT_OOB
-              (mkResult regs' mem gas', ctx')
+              -- Page fault on write → panic (GP: ⚡)
+              (mkPanic regs mem gas', ctx')
           else
             let regs' := setR7 regs (UInt64.ofNat vLen)
             (mkResult regs' mem gas', ctx')
     | _ =>
-      let regs' := setR7 regs PVM.RESULT_OOB
-      (mkResult regs' mem gas', ctx)
+      -- Page fault on hash read → panic (GP: ⚡)
+      (mkPanic regs mem gas', ctx)
 
   -- ===== read (3): Read from service storage =====
   -- φ[7]=service_id (u64::MAX=self), φ[8]=key_ptr, φ[9]=key_len,
@@ -455,14 +461,14 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
               let regs' := setR7 regs (UInt64.ofNat vLen)
               (mkResult regs' mem' gas', ctx')
             | _ =>
-              let regs' := setR7 regs PVM.RESULT_OOB
-              (mkResult regs' mem gas', ctx')
+              -- Page fault on write → panic (GP: ⚡)
+              (mkPanic regs mem gas', ctx')
           else
             let regs' := setR7 regs (UInt64.ofNat vLen)
             (mkResult regs' mem gas', ctx')
     | _ =>
-      let regs' := setR7 regs PVM.RESULT_OOB
-      (mkResult regs' mem gas', ctx)
+      -- Page fault on key read → panic (GP: ⚡)
+      (mkPanic regs mem gas', ctx)
 
   -- ===== write (4): Write to own storage =====
   -- φ[7]=key_ptr, φ[8]=key_len, φ[9]=val_ptr, φ[10]=val_len
@@ -517,6 +523,13 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
                 (acct.created, acct.totalFootprint - oldSize + newSize)
               | none =>
                 (acct.created + 1, acct.totalFootprint + newSize)
+            -- GP: Check threshold after write doesn't exceed balance
+            let newMinBal := B_S + B_I * items'.toNat + B_L * footprint'
+            let newThreshold := newMinBal - min acct.gratis.toNat newMinBal
+            if newThreshold > acct.balance.toNat then
+              let regs' := setR7 regs PVM.RESULT_FULL
+              (mkResult regs' mem gas', ctx)
+            else
             let acct' := { acct with
               storage := acct.storage.insert keyBytes valBytes
               created := items'
@@ -526,11 +539,11 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
             let regs' := setR7 regs oldLen
             (mkResult regs' mem gas', { ctx with state := state' })
           | _ =>
-            let regs' := setR7 regs PVM.RESULT_OOB
-            (mkResult regs' mem gas', ctx)
+            -- Page fault on value read → panic (GP: ⚡)
+            (mkPanic regs mem gas', ctx)
     | _ =>
-      let regs' := setR7 regs PVM.RESULT_OOB
-      (mkResult regs' mem gas', ctx)
+      -- Page fault on key read → panic (GP: ⚡)
+      (mkPanic regs mem gas', ctx)
 
   -- ===== info (5): Service account information =====
   -- φ[7]=service_id (2^64-1=self), φ[8]=out_ptr, φ[9]=offset, φ[10]=max_len
@@ -559,8 +572,8 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           let regs' := setR7 regs (UInt64.ofNat dataLen)
           (mkResult regs' mem' gas', ctx)
         | _ =>
-          let regs' := setR7 regs PVM.RESULT_OOB
-          (mkResult regs' mem gas', ctx)
+          -- Page fault on write → panic (GP: ⚡)
+          (mkPanic regs mem gas', ctx)
       else
         let regs' := setR7 regs (UInt64.ofNat dataLen)
         (mkResult regs' mem gas', ctx)
@@ -662,8 +675,8 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           let regs' := setR7 regs PVM.RESULT_OK
           (mkResult regs' mem gas', { ctx with state := state' })
         | _ =>
-          let regs' := setR7 regs PVM.RESULT_OOB
-          (mkResult regs' mem gas', ctx)
+          -- Page fault on hash read → panic (GP: ⚡)
+          (mkPanic regs mem gas', ctx)
 
   -- ===== designate (16): Set pending validator keys =====
   | 16 =>
@@ -697,7 +710,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
 
   -- ===== checkpoint (17): Save accumulation checkpoint =====
   | 17 =>
-    let ctx' := { ctx with checkpoint := some ctx.state.accounts }
+    let ctx' := { ctx with checkpoint := some (ctx.state.accounts, ctx.opaqueData) }
     let regs' := setR7 regs gas'
     (mkResult regs' mem gas', ctx')
 
@@ -723,14 +736,21 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
         let regs' := setR7 regs PVM.RESULT_HUH
         (mkResult regs' mem gas', ctx)
       else
-      -- Check caller has enough balance
+      -- Check caller has enough balance: balance - threshold >= callerThreshold
+      -- GP: let s = x_s except s_b = (x_s)_b - a_t; if s_b < (x_s)_t → CASH
       match ctx.state.accounts.lookup ctx.serviceId with
       | none =>
         let regs' := setR7 regs PVM.RESULT_CASH
         (mkResult regs' mem gas', ctx)
       | some srcAcct =>
-        -- Caller's balance after deduction must still cover own threshold
-        if srcAcct.balance.toNat < threshold then
+        -- Compute caller's own threshold
+        let callerItems := srcAcct.created.toNat
+        let callerBytes := srcAcct.totalFootprint
+        let callerMinBal := B_S + B_I * callerItems + B_L * callerBytes
+        let callerThreshold := callerMinBal - min srcAcct.gratis.toNat callerMinBal
+        -- Balance after deduction must still cover caller's own threshold
+        let balanceAfter := if srcAcct.balance.toNat >= threshold then srcAcct.balance.toNat - threshold else 0
+        if balanceAfter < callerThreshold then
           let regs' := setR7 regs PVM.RESULT_CASH
           (mkResult regs' mem gas', ctx)
         else
@@ -783,8 +803,8 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
         let regs' := setR7 regs (UInt64.ofNat newId.toNat)
         (mkResult regs' mem gas', ctx')
     | _ =>
-      let regs' := setR7 regs PVM.RESULT_OOB
-      (mkResult regs' mem gas', ctx)
+      -- Page fault on code hash read → panic (GP: ⚡)
+      (mkPanic regs mem gas', ctx)
 
   -- ===== upgrade (19): Upgrade service code hash =====
   | 19 =>
@@ -810,8 +830,8 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
         let regs' := setR7 regs PVM.RESULT_OK
         (mkResult regs' mem gas', { ctx with state := state' })
     | _ =>
-      let regs' := setR7 regs PVM.RESULT_OOB
-      (mkResult regs' mem gas', ctx)
+      -- Page fault on hash read → panic (GP: ⚡)
+      (mkPanic regs mem gas', ctx)
 
   -- ===== transfer (20): Create deferred transfer =====
   | 20 =>
@@ -821,46 +841,51 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     let amount := getReg regs 8
     let gasLimit := getReg regs 9
     let memoPtr := getReg regs 10
-    -- Check destination exists
-    match ctx.state.accounts.lookup dest with
-    | none =>
-      let regs' := setR7 regs PVM.RESULT_WHO
-      (mkResult regs' mem gas', ctx)
-    | some destAcct =>
-      -- Check dest min_memo_gas
-      if gasLimit < UInt64.ofNat destAcct.minOnTransferGas.toNat then
-        let regs' := setR7 regs PVM.RESULT_LOW
-        (mkResult regs' mem gas', ctx)
-      else
-      -- Check source has enough balance
-      match ctx.state.accounts.lookup ctx.serviceId with
+    -- GP: Read memo first — page fault → PANIC (⚡)
+    match PVM.readByteArray mem memoPtr W_T with
+    | .ok memoBytes =>
+      -- Check destination exists
+      match ctx.state.accounts.lookup dest with
       | none =>
-        let regs' := setR7 regs PVM.RESULT_NONE
+        let regs' := setR7 regs PVM.RESULT_WHO
         (mkResult regs' mem gas', ctx)
-      | some srcAcct =>
-        if srcAcct.balance < amount then
-          let regs' := setR7 regs PVM.RESULT_CASH
+      | some destAcct =>
+        -- Check dest min_memo_gas
+        if gasLimit < UInt64.ofNat destAcct.minOnTransferGas.toNat then
+          let regs' := setR7 regs PVM.RESULT_LOW
           (mkResult regs' mem gas', ctx)
         else
-          -- Read memo from memory (W_T = 128 bytes)
-          let memoBytes := match PVM.readByteArray mem memoPtr W_T with
-            | .ok m => m | _ => ByteArray.mk (Array.replicate W_T 0)
-          let memoSeq : OctetSeq W_T := ⟨memoBytes, sorry⟩  -- size proof elided
-          let xfer : DeferredTransfer := {
-            source := ctx.serviceId, dest, amount
-            memo := memoSeq
-            gas := gasLimit
-          }
-          -- Deduct transfer gas (gasLimit from PVM gas)
-          -- If insufficient gas, set to 0 (will cause OOG on next step)
-          let gas'' := if gas' >= gasLimit then gas' - gasLimit else 0
-          -- Debit the source balance
-          let srcAcct' := { srcAcct with balance := srcAcct.balance - amount }
-          let accounts' := ctx.state.accounts.insert ctx.serviceId srcAcct'
-          let state' := { ctx.state with accounts := accounts' }
-          let ctx' := { ctx with state := state', transfers := ctx.transfers.push xfer }
-          let regs' := setR7 regs PVM.RESULT_OK
-          (mkResult regs' mem gas'', ctx')
+        -- Check source has enough balance
+        match ctx.state.accounts.lookup ctx.serviceId with
+        | none =>
+          let regs' := setR7 regs PVM.RESULT_NONE
+          (mkResult regs' mem gas', ctx)
+        | some srcAcct =>
+          if srcAcct.balance < amount then
+            let regs' := setR7 regs PVM.RESULT_CASH
+            (mkResult regs' mem gas', ctx)
+          else
+            -- GP: Check gas_limit ≤ remaining gas, otherwise panic
+            if gas' < gasLimit then
+              (mkPanic regs mem 0, ctx)
+            else
+            let gas'' := gas' - gasLimit
+            let memoSeq : OctetSeq W_T := ⟨memoBytes, sorry⟩  -- size proof elided
+            let xfer : DeferredTransfer := {
+              source := ctx.serviceId, dest, amount
+              memo := memoSeq
+              gas := gasLimit
+            }
+            -- Debit the source balance
+            let srcAcct' := { srcAcct with balance := srcAcct.balance - amount }
+            let accounts' := ctx.state.accounts.insert ctx.serviceId srcAcct'
+            let state' := { ctx.state with accounts := accounts' }
+            let ctx' := { ctx with state := state', transfers := ctx.transfers.push xfer }
+            let regs' := setR7 regs PVM.RESULT_OK
+            (mkResult regs' mem gas'', ctx')
+    | _ =>
+      -- Page fault on memo read → panic (GP: ⚡)
+      (mkPanic regs mem gas', ctx)
 
   -- ===== eject (21): Remove service account, transfer balance to caller =====
   -- φ[7] = target service, φ[8] = hash_ptr (32 bytes read from memory)
@@ -893,9 +918,8 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
             let regs' := setR7 regs PVM.RESULT_OK
             (mkResult regs' mem gas', { ctx with state := state' })
     | _ =>
-      -- Page fault → panic
-      let regs' := setR7 regs PVM.RESULT_OOB
-      (mkResult regs' mem gas', ctx)
+      -- Page fault on hash read → panic (GP: ⚡)
+      (mkPanic regs mem gas', ctx)
 
   -- ===== query (22): Query preimage request status =====
   | 22 =>
@@ -921,8 +945,8 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           let regs' := setReg regs' 8 (UInt64.ofNat timeslots.size)
           (mkResult regs' mem gas', ctx)
     | _ =>
-      let regs' := setR7 regs PVM.RESULT_OOB
-      (mkResult regs' mem gas', ctx)
+      -- Page fault on hash read → panic (GP: ⚡)
+      (mkPanic regs mem gas', ctx)
 
   -- ===== solicit (23): Request preimage (GP ΩS) =====
   -- φ[7] = hash pointer, φ[8] = blob length
@@ -978,8 +1002,8 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
             let regs' := setR7 regs PVM.RESULT_OK
             (mkResult regs' mem gas', { ctx with state := state' })
     | _ =>
-      let regs' := setR7 regs PVM.RESULT_OOB
-      (mkResult regs' mem gas', ctx)
+      -- Page fault on hash read → panic (GP: ⚡)
+      (mkPanic regs mem gas', ctx)
 
   -- ===== forget (24): Forget preimage request (GP ΩF) =====
   -- φ[7] = hash pointer, φ[8] = blob length
@@ -1048,8 +1072,8 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
             let regs' := setR7 regs PVM.RESULT_HUH
             (mkResult regs' mem gas', ctx)
     | _ =>
-      let regs' := setR7 regs PVM.RESULT_OOB
-      (mkResult regs' mem gas', ctx)
+      -- Page fault on hash read → panic (GP: ⚡)
+      (mkPanic regs mem gas', ctx)
 
   -- ===== yield (25): Set accumulation output hash =====
   | 25 =>
@@ -1061,8 +1085,8 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
       let regs' := setR7 regs PVM.RESULT_OK
       (mkResult regs' mem gas', { ctx with yieldHash := some h })
     | _ =>
-      let regs' := setR7 regs PVM.RESULT_OOB
-      (mkResult regs' mem gas', ctx)
+      -- Page fault on hash read → panic (GP: ⚡)
+      (mkPanic regs mem gas', ctx)
 
   -- ===== provide (26): Provide preimage data =====
   | 26 =>
@@ -1087,8 +1111,8 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
       | none =>
         (mkResult regs' mem gas', { ctx with provisions := ctx.provisions.push provision })
     | _ =>
-      let regs' := setR7 regs PVM.RESULT_OOB
-      (mkResult regs' mem gas', ctx)
+      -- Page fault on data read → panic (GP: ⚡)
+      (mkPanic regs mem gas', ctx)
 
   -- ===== Unknown host call =====
   | _ =>
@@ -1265,7 +1289,7 @@ def accone (ps : PartialState) (serviceId : ServiceId)
         let _ := ()
         -- On halt: use accumulated state; on panic/OOG: revert to checkpoint
         -- GP: regular dimension (x) on halt, exceptional dimension (y) on panic/OOG/fault
-        let (finalState, finalTransfers, finalYield, finalProvisions) := match result.exitReason with
+        let (finalState, finalTransfers, finalYield, finalProvisions, revertedOpaque) := match result.exitReason with
           | .halt =>
             -- GP Ψ_M (eq A.36): On halt, o = μ'[φ'_7..φ'_7+φ'_8].
             -- If |o| = 32, the accumulation output hash is o.
@@ -1284,16 +1308,19 @@ def accone (ps : PartialState) (serviceId : ServiceId)
             let yield := match haltYield with
               | some h => some h
               | none => ctx'.yieldHash
-            (ctx'.state, ctx'.transfers, yield, ctx'.provisions)
+            (ctx'.state, ctx'.transfers, yield, ctx'.provisions, ctx'.opaqueData)
           | .panic =>
-            -- Revert to checkpoint accounts if available
-            let reverted := match ctx'.checkpoint with
-              | some savedAccounts => { ctx'.state with accounts := savedAccounts }
-              | none => ps
-            (reverted, (#[] : Array DeferredTransfer), (none : Option Hash), (#[] : Array (ServiceId × ByteArray)))
+            -- Revert to checkpoint (accounts + opaqueData) if available
+            match ctx'.checkpoint with
+            | some (savedAccounts, savedOpaque) =>
+              ({ ctx'.state with accounts := savedAccounts },
+               (#[] : Array DeferredTransfer), (none : Option Hash),
+               (#[] : Array (ServiceId × ByteArray)), savedOpaque)
+            | none =>
+              (ps, #[], none, #[], opaqueData')
           | _ =>
             -- OOG/fault: revert entirely, discard transfers/yield/provisions
-            (ps, #[], none, #[])
+            (ps, #[], none, #[], opaqueData')
         -- Update last accumulation timeslot (position a in serialized format)
         -- JAR's `parent` field maps to serialized position a = last accumulation timeslot
         let finalState := match finalState.accounts.lookup serviceId with
@@ -1318,12 +1345,15 @@ def accone (ps : PartialState) (serviceId : ServiceId)
           | .outOfGas => s!"oog(steps={steps},pcs=[{traceStr}])"
           | .hostCall n => s!"hostcall({n},steps={steps})"
           | .pageFault addr => s!"pageFault({addr},steps={steps},pcs=[{traceStr}])"
+        -- Opaque data is already set correctly in the tuple above:
+        -- halt → ctx'.opaqueData, panic → checkpoint opaque or pre-PVM, OOG → pre-PVM
+        let finalOpaqueData := revertedOpaque
         { postState := finalState
           deferredTransfers := finalTransfers
           yieldHash := finalYield
           gasUsed
           provisions := finalProvisions
-          opaqueData := ctx'.opaqueData
+          opaqueData := finalOpaqueData
           exitReasonStr := exitStr
           hostCallLog := ctx'.hostCallLog }
 
@@ -1368,7 +1398,8 @@ def accpar (ps : PartialState) (reports : Array WorkReport)
   let transferGroups := groupTransfersByDest transfers
 
   -- Collect all affected service IDs (sorted ascending, matching Rust BTreeSet order)
-  let serviceIds := ((operandGroups.keys ++ transferGroups.keys).eraseDups).mergeSort (· < ·)
+  -- Include always-accumulate services from freeGasMap (GP: f parameter in Δ*)
+  let serviceIds := ((operandGroups.keys ++ transferGroups.keys ++ freeGasMap.keys).eraseDups).mergeSort (· < ·)
 
   -- Accumulate each service
   let (ps', allTransfers, allYields, gasMap, exitReasons, opaqueData') := serviceIds.foldl

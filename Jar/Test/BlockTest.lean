@@ -582,6 +582,7 @@ def runBlockTestDirSeq [JamConfig] (dir : String) : IO UInt32 := do
 
     let block ← IO.ofExcept blockResult
 
+    -- Debug: show available reports for blocks near failures
     -- Run transition with opaque data for PVM accumulation
     let result := @stateTransitionWithOpaque _ state block opaqueData
     let exitReasons : Array (ServiceId × String) := match result with
@@ -628,6 +629,7 @@ def runBlockTestDirSeq [JamConfig] (dir : String) : IO UInt32 := do
               IO.println s!"    acc svc={sid}: {short}"
             for (sid, acct) in postState.services.entries.toArray do
               IO.println s!"    svc {sid}: storage={acct.storage.size} items={acct.created} footprint={acct.totalFootprint}"
+          pure ()
           passed := passed + 1
           currentState := some (postState, filteredOpaque)
         else
@@ -635,7 +637,7 @@ def runBlockTestDirSeq [JamConfig] (dir : String) : IO UInt32 := do
           IO.println s!"    expected: {bytesToHex expectedPostRoot.data}"
           IO.println s!"    got:      {bytesToHex computedRoot.data}"
           IO.println s!"    total KVs: {allPostKvs.size} (serialized={postKvs.size} opaque={filteredOpaque.size})"
-          pure () -- debug placeholder
+          pure ()
           for (sid, reason) in exitReasons do
             IO.println s!"    acc svc={sid}: {reason}"
           -- Debug: show service storage state
@@ -647,6 +649,15 @@ def runBlockTestDirSeq [JamConfig] (dir : String) : IO UInt32 := do
             if idx >= 1 && idx <= 16 || idx == 255 then
               let h := Crypto.blake2b v
               IO.println s!"    idx={idx} val_len={v.size} hash={bytesToHex h.data |>.take 16}.."
+          -- Debug: show queue state
+          let totalQ := postState.accQueue.foldl (init := 0) fun acc s => acc + s.size
+          if totalQ > 0 then
+            IO.println s!"    accQueue: {totalQ} entries"
+            for i in [:postState.accQueue.size] do
+              let slot := postState.accQueue[i]!
+              for (wr, deps) in slot do
+                let pkgHex := bytesToHex wr.availSpec.packageHash.data |>.take 12
+                IO.println s!"      [{i}] pkg={pkgHex}.. deps={deps.size} digests={wr.digests.size}"
           pure ()
           failed := failed + 1
           -- Continue threading to see if subsequent blocks also fail

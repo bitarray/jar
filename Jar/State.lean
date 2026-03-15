@@ -401,12 +401,21 @@ def performAccumulation
 
   -- Step 2: Compute R* (all accumulatable reports, GP eq 12.10-12.12)
   -- Combine immediate reports with queue-resolved reports from ready_queue
+  -- Grey rotates starting from slot_index (GP eq 12.11)
+  let slotIndex := t'.toNat % E
   let immediateHashes := immediate.map (·.availSpec.packageHash)
-  let allQueued := s.accQueue.foldl (init := #[]) fun acc slot => acc ++ slot
+  let allQueued := Id.run do
+    let mut q : Array (WorkReport × Array Hash) := #[]
+    for i in [:E] do
+      let idx := (slotIndex + i) % E
+      if idx < s.accQueue.size then
+        q := q ++ s.accQueue[idx]!
+    return q
   let allQueuedWithNew := allQueued ++ editedNewQueued
   let editedAll := editQueue allQueuedWithNew immediateHashes
   let queueResolved := resolveQueue editedAll
   let accumulatable := immediate ++ queueResolved
+  let _ := ()
 
   -- Step 3: Accumulate all reports (Δ+)
   -- For simplicity, accumulate all (gas budget should be sufficient for tiny config)
@@ -459,22 +468,38 @@ def performAccumulation
       queue := queue.set! m (queue[m]! ++ edited)
     return queue
 
-  -- Build per-service statistics from gas usage
-  -- GP: S ≡ { (s ↦ (G(s), N(s))) | G(s) + N(s) ≠ 0 }
-  -- Filter out entries where both gas and item count are zero.
-  let accStatsAll := result.gasUsage.entries.foldl (init := Dict.empty (K := ServiceId) (V := ServiceStatistics))
+  -- Build per-service statistics from gas usage and work report digests.
+  -- GP §13: collect refinement stats (gas, imports, extrinsics, exports) from digests,
+  -- plus accumulation stats (item count, gas used) from the accumulation result.
+  -- First: collect refinement statistics from accumulatable report digests
+  let refinementStats := accumulatable.foldl (init := Dict.empty (K := ServiceId) (V := ServiceStatistics))
+    fun acc wr =>
+      wr.digests.foldl (init := acc) fun acc' d =>
+        let existing := match acc'.lookup d.serviceId with
+          | some ss => ss
+          | none => { provided := (0, 0), refinement := (0, 0), imports := 0,
+                      extrinsicCount := 0, extrinsicSize := 0, exports := 0,
+                      accumulation := (0, 0) }
+        acc'.insert d.serviceId {
+          existing with
+          refinement := (existing.refinement.1 + 1, existing.refinement.2 + d.gasUsed)
+          imports := existing.imports + d.importsCount
+          extrinsicCount := existing.extrinsicCount + d.extrinsicsCount
+          extrinsicSize := existing.extrinsicSize + d.extrinsicsSize
+          exports := existing.exports + d.exportsCount
+        }
+  -- Second: merge in accumulation gas usage and item counts
+  let accStatsAll := result.gasUsage.entries.foldl (init := refinementStats)
     fun acc (sid, gas) =>
       let itemCount := accumulatable.foldl (init := 0) fun cnt wr =>
         cnt + (wr.digests.filter fun d => d.serviceId == sid).size
-      acc.insert sid {
-        provided := (0, 0)
-        refinement := (0, 0)
-        imports := 0
-        extrinsicCount := 0
-        extrinsicSize := 0
-        exports := 0
-        accumulation := (itemCount, gas)
-      }
+      let existing := match acc.lookup sid with
+        | some ss => ss
+        | none => { provided := (0, 0), refinement := (0, 0), imports := 0,
+                    extrinsicCount := 0, extrinsicSize := 0, exports := 0,
+                    accumulation := (0, 0) }
+      acc.insert sid { existing with accumulation := (itemCount, gas) }
+  -- Filter: G(s) + N(s) != 0
   let accStats := accStatsAll.entries.foldl (init := Dict.empty (K := ServiceId) (V := ServiceStatistics))
     fun acc (sid, ss) =>
       if ss.accumulation.1 + ss.accumulation.2.toNat != 0 then acc.insert sid ss
