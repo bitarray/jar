@@ -317,4 +317,11 @@ def RESULT_LOW  : UInt64 := UInt64.ofNat (2^64 - 8)
 def RESULT_HUH  : UInt64 := UInt64.ofNat (2^64 - 9)
 def RESULT_OK   : UInt64 := 0
 
+/-- Invoke (12) exit codes. GP §B.4. -/
+def INVOKE_HALT  : UInt64 := 0
+def INVOKE_PANIC : UInt64 := 1
+def INVOKE_FAULT : UInt64 := 2
+def INVOKE_HOST  : UInt64 := 3
+def INVOKE_OOG   : UInt64 := 4
+
 end Jar.PVM
