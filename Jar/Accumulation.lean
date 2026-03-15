@@ -924,9 +924,9 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
       let regs' := setR7 regs PVM.RESULT_OOB
       (mkResult regs' mem gas', ctx)
 
-  -- ===== solicit (23): Request preimage =====
+  -- ===== solicit (23): Request preimage (GP ΩS) =====
+  -- φ[7] = hash pointer, φ[8] = blob length
   | 23 =>
-    -- reg[7] = hash pointer, reg[8] = blob length
     let hashPtr := getReg regs 7
     let blobLen := UInt32.ofNat (getReg regs 8).toNat
     match PVM.readByteArray mem hashPtr 32 with
@@ -934,25 +934,56 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
       let h : Hash := ⟨hashBytes, sorry⟩
       match ctx.state.accounts.lookup ctx.serviceId with
       | none =>
-        let regs' := setR7 regs PVM.RESULT_NONE
+        let regs' := setR7 regs PVM.RESULT_HUH
         (mkResult regs' mem gas', ctx)
       | some acct =>
-        -- Add request with current timeslot
-        let existing := match acct.preimageInfo.lookup (h, blobLen) with
-          | some ts => ts | none => #[]
-        let acct' := { acct with
-          preimageInfo := acct.preimageInfo.insert (h, blobLen) (existing.push ctx.timeslot) }
-        let accounts' := ctx.state.accounts.insert ctx.serviceId acct'
-        let state' := { ctx.state with accounts := accounts' }
-        let regs' := setR7 regs PVM.RESULT_OK
-        (mkResult regs' mem gas', { ctx with state := state' })
+        -- Promote from opaque data if needed
+        let (acct, ctx) :=
+          if (acct.preimageInfo.lookup (h, blobLen)).isSome then (acct, ctx)
+          else match promotePreimageInfo acct ctx.opaqueData ctx.serviceId h blobLen with
+            | some (acct', opaqueData') => (acct', { ctx with opaqueData := opaqueData' })
+            | none => (acct, ctx)
+        match acct.preimageInfo.lookup (h, blobLen) with
+        | some ts =>
+          if ts.size == 2 then
+            -- Already has [x, y] — append timeslot to get [x, y, t]
+            let acct' := { acct with
+              preimageInfo := acct.preimageInfo.insert (h, blobLen) (ts.push ctx.timeslot) }
+            let accounts' := ctx.state.accounts.insert ctx.serviceId acct'
+            let state' := { ctx.state with accounts := accounts' }
+            let regs' := setR7 regs PVM.RESULT_OK
+            (mkResult regs' mem gas', { ctx with state := state' })
+          else
+            -- Already solicited with different state
+            let regs' := setR7 regs PVM.RESULT_HUH
+            (mkResult regs' mem gas', ctx)
+        | none =>
+          -- New solicitation: create entry with empty timeslots
+          let newItems := acct.created + 2
+          let newFootprint := acct.totalFootprint + 81 + blobLen.toNat
+          let acct' := { acct with
+            preimageInfo := acct.preimageInfo.insert (h, blobLen) #[]
+            created := newItems
+            totalFootprint := newFootprint }
+          -- Check minimum balance requirement
+          let minBal := B_S + B_I * newItems.toNat + B_L * newFootprint
+          let threshold := minBal - min acct'.gratis.toNat minBal
+          if threshold > acct'.balance.toNat then
+            -- Insufficient balance: undo and return FULL
+            let regs' := setR7 regs PVM.RESULT_FULL
+            (mkResult regs' mem gas', ctx)
+          else
+            let accounts' := ctx.state.accounts.insert ctx.serviceId acct'
+            let state' := { ctx.state with accounts := accounts' }
+            let regs' := setR7 regs PVM.RESULT_OK
+            (mkResult regs' mem gas', { ctx with state := state' })
     | _ =>
       let regs' := setR7 regs PVM.RESULT_OOB
       (mkResult regs' mem gas', ctx)
 
-  -- ===== forget (24): Forget preimage request =====
+  -- ===== forget (24): Forget preimage request (GP ΩF) =====
+  -- φ[7] = hash pointer, φ[8] = blob length
   | 24 =>
-    -- reg[7] = hash pointer, reg[8] = blob length
     let hashPtr := getReg regs 7
     let blobLen := UInt32.ofNat (getReg regs 8).toNat
     match PVM.readByteArray mem hashPtr 32 with
@@ -960,16 +991,62 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
       let h : Hash := ⟨hashBytes, sorry⟩
       match ctx.state.accounts.lookup ctx.serviceId with
       | none =>
-        let regs' := setR7 regs PVM.RESULT_NONE
+        let regs' := setR7 regs PVM.RESULT_HUH
         (mkResult regs' mem gas', ctx)
       | some acct =>
-        let acct' := { acct with
-          preimageInfo := acct.preimageInfo.erase (h, blobLen)
-          preimages := acct.preimages.erase h }
-        let accounts' := ctx.state.accounts.insert ctx.serviceId acct'
-        let state' := { ctx.state with accounts := accounts' }
-        let regs' := setR7 regs PVM.RESULT_OK
-        (mkResult regs' mem gas', { ctx with state := state' })
+        -- Promote from opaque data if needed
+        let (acct, ctx) :=
+          if (acct.preimageInfo.lookup (h, blobLen)).isSome then (acct, ctx)
+          else match promotePreimageInfo acct ctx.opaqueData ctx.serviceId h blobLen with
+            | some (acct', opaqueData') => (acct', { ctx with opaqueData := opaqueData' })
+            | none => (acct, ctx)
+        match acct.preimageInfo.lookup (h, blobLen) with
+        | none =>
+          let regs' := setR7 regs PVM.RESULT_HUH
+          (mkResult regs' mem gas', ctx)
+        | some ts =>
+          -- GP ΩF: behavior depends on timeslot count
+          if ts.size == 0 then
+            -- [] → remove entry entirely
+            let acct' := { acct with
+              preimageInfo := acct.preimageInfo.erase (h, blobLen)
+              preimages := acct.preimages.erase h
+              created := acct.created - 2
+              totalFootprint := acct.totalFootprint - (81 + blobLen.toNat) }
+            let accounts' := ctx.state.accounts.insert ctx.serviceId acct'
+            let state' := { ctx.state with accounts := accounts' }
+            let regs' := setR7 regs PVM.RESULT_OK
+            (mkResult regs' mem gas', { ctx with state := state' })
+          else if ts.size == 1 then
+            -- [x] → set forget time: [x, t]
+            let acct' := { acct with
+              preimageInfo := acct.preimageInfo.insert (h, blobLen) (ts.push ctx.timeslot) }
+            let accounts' := ctx.state.accounts.insert ctx.serviceId acct'
+            let state' := { ctx.state with accounts := accounts' }
+            let regs' := setR7 regs PVM.RESULT_OK
+            (mkResult regs' mem gas', { ctx with state := state' })
+          else if ts.size == 2 && ts[1]!.toNat + D_EXPUNGE < ctx.timeslot.toNat then
+            -- [x, y] with y < t - D → remove
+            let acct' := { acct with
+              preimageInfo := acct.preimageInfo.erase (h, blobLen)
+              preimages := acct.preimages.erase h
+              created := acct.created - 2
+              totalFootprint := acct.totalFootprint - (81 + blobLen.toNat) }
+            let accounts' := ctx.state.accounts.insert ctx.serviceId acct'
+            let state' := { ctx.state with accounts := accounts' }
+            let regs' := setR7 regs PVM.RESULT_OK
+            (mkResult regs' mem gas', { ctx with state := state' })
+          else if ts.size == 3 && ts[1]!.toNat + D_EXPUNGE < ctx.timeslot.toNat then
+            -- [x, y, w] with y < t - D → [w, t]
+            let acct' := { acct with
+              preimageInfo := acct.preimageInfo.insert (h, blobLen) #[ts[2]!, ctx.timeslot] }
+            let accounts' := ctx.state.accounts.insert ctx.serviceId acct'
+            let state' := { ctx.state with accounts := accounts' }
+            let regs' := setR7 regs PVM.RESULT_OK
+            (mkResult regs' mem gas', { ctx with state := state' })
+          else
+            let regs' := setR7 regs PVM.RESULT_HUH
+            (mkResult regs' mem gas', ctx)
     | _ =>
       let regs' := setR7 regs PVM.RESULT_OOB
       (mkResult regs' mem gas', ctx)
@@ -1153,10 +1230,10 @@ def accone (ps : PartialState) (serviceId : ServiceId)
     let _ := ()
     match codeOpt with
     | none =>
-      -- Code not available: service cannot accumulate
+      -- Code not available: skip PVM execution, credit transfers only (GP eq 12.24)
       let _ := ()
       { postState := ps, deferredTransfers := #[], yieldHash := none,
-        gasUsed := totalGas, provisions := #[], opaqueData := opaqueData' }
+        gasUsed := 0, provisions := #[], opaqueData := opaqueData' }
     | some codeBlob =>
       -- Encode accumulation arguments
       let itemCount := transfers.size + operands.size
@@ -1190,7 +1267,24 @@ def accone (ps : PartialState) (serviceId : ServiceId)
         -- GP: regular dimension (x) on halt, exceptional dimension (y) on panic/OOG/fault
         let (finalState, finalTransfers, finalYield, finalProvisions) := match result.exitReason with
           | .halt =>
-            (ctx'.state, ctx'.transfers, ctx'.yieldHash, ctx'.provisions)
+            -- GP Ψ_M (eq A.36): On halt, o = μ'[φ'_7..φ'_7+φ'_8].
+            -- If |o| = 32, the accumulation output hash is o.
+            -- The yield host call also sets yieldHash; halt output overrides/combines.
+            let haltYield :=
+              let outPtr := getReg result.registers 7
+              let outLen := getReg result.registers 8
+              -- GP: o = μ'[φ'_7..+φ'_8] if N_{φ'_7..+φ'_8} ⊆ V_μ'
+              -- Addresses are 32-bit, so full u64 range must fit in [0, 2^32)
+              if outLen == 32 && outPtr.toNat < 2^32 && outPtr.toNat + 32 <= 2^32 then
+                match PVM.readByteArray result.memory outPtr 32 with
+                | .ok bytes => some (⟨bytes, sorry⟩ : Hash)
+                | _ => none
+              else none
+            -- Use halt output if available, otherwise use yield host call result
+            let yield := match haltYield with
+              | some h => some h
+              | none => ctx'.yieldHash
+            (ctx'.state, ctx'.transfers, yield, ctx'.provisions)
           | .panic =>
             -- Revert to checkpoint accounts if available
             let reverted := match ctx'.checkpoint with

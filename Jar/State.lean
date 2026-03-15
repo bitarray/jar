@@ -460,7 +460,9 @@ def performAccumulation
     return queue
 
   -- Build per-service statistics from gas usage
-  let accStats := result.gasUsage.entries.foldl (init := Dict.empty (K := ServiceId) (V := ServiceStatistics))
+  -- GP: S ≡ { (s ↦ (G(s), N(s))) | G(s) + N(s) ≠ 0 }
+  -- Filter out entries where both gas and item count are zero.
+  let accStatsAll := result.gasUsage.entries.foldl (init := Dict.empty (K := ServiceId) (V := ServiceStatistics))
     fun acc (sid, gas) =>
       let itemCount := accumulatable.foldl (init := 0) fun cnt wr =>
         cnt + (wr.digests.filter fun d => d.serviceId == sid).size
@@ -473,6 +475,10 @@ def performAccumulation
         exports := 0
         accumulation := (itemCount, gas)
       }
+  let accStats := accStatsAll.entries.foldl (init := Dict.empty (K := ServiceId) (V := ServiceStatistics))
+    fun acc (sid, ss) =>
+      if ss.accumulation.1 + ss.accumulation.2.toNat != 0 then acc.insert sid ss
+      else acc
   { services := result.services
     privileged := result.privileged
     pendingValidators := result.stagingKeys
@@ -514,28 +520,9 @@ def integratePreimages
           preimageInfo := acct.preimageInfo.insert (h, blobLen)
             (timeslots.push t') }
         acc.insert sid acct'
-  -- Phase 2: Expunge old preimage solicitations past D_EXPUNGE
-  let delta'' := delta'.entries.foldl (init := delta') fun acc (sid, acct) =>
-    let expunged := acct.preimageInfo.entries.foldl (init := acct.preimageInfo)
-      fun info (key, timeslots) =>
-        -- Remove entries where all timeslots are older than D_EXPUNGE
-        let recent := timeslots.filter fun ts =>
-          t'.toNat - ts.toNat < D_EXPUNGE
-        if recent.size == 0 then
-          -- All timeslots expired: expunge the preimage and info
-          info.erase key
-        else
-          info.insert key recent
-    if expunged.size != acct.preimageInfo.size then
-      -- Also remove the actual preimage data for expunged hashes
-      let removedHashes := acct.preimageInfo.entries.foldl (init := #[]) fun removed (key, timeslots) =>
-        let recent := timeslots.filter fun ts => t'.toNat - ts.toNat < D_EXPUNGE
-        if recent.size == 0 then removed.push key.1 else removed
-      let preimages' := removedHashes.foldl (init := acct.preimages) fun pims h =>
-        pims.erase h
-      acc.insert sid { acct with preimageInfo := expunged, preimages := preimages' }
-    else acc
-  delta''
+  -- Note: Expunging of old preimage solicitations is NOT done here.
+  -- It happens via the `forget` host call (24) during accumulation.
+  delta'
 
 -- ============================================================================
 -- §13 — Statistics Update
@@ -672,6 +659,15 @@ def updateStatistics
         extrinsicCount := existing.extrinsicCount + d.extrinsicsCount
         extrinsicSize := existing.extrinsicSize + d.extrinsicsSize
         exports := existing.exports + d.exportsCount }
+  -- Add preimage provided stats (GP eq π_S: p = (count, size))
+  let serviceStats := e.preimages.foldl (init := serviceStats) fun ss (sid, data) =>
+    let existing := match ss.lookup sid with
+      | some s => s
+      | none => { provided := (0, 0), refinement := (0, 0), imports := 0,
+                  extrinsicCount := 0, extrinsicSize := 0, exports := 0,
+                  accumulation := (0, 0) }
+    ss.insert sid { existing with
+      provided := (existing.provided.1 + 1, existing.provided.2 + data.size) }
   -- Merge accumulation stats
   let serviceStats := accStats.entries.foldl (init := serviceStats) fun ss (sid, astats) =>
     let existing := match ss.lookup sid with
@@ -681,9 +677,7 @@ def updateStatistics
                   accumulation := (0, 0) }
     ss.insert sid { existing with
       accumulation := (existing.accumulation.1 + astats.accumulation.1,
-                       existing.accumulation.2 + astats.accumulation.2)
-      provided := (existing.provided.1 + astats.provided.1,
-                   existing.provided.2 + astats.provided.2) }
+                       existing.accumulation.2 + astats.accumulation.2) }
 
   { current := cur
     previous := prev
