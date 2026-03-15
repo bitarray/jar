@@ -14,6 +14,7 @@ import Jar.Consensus
 import Jar.Services
 import Jar.Accumulation
 import Jar.Variant
+import Jar.StateSerialization
 
 /-!
 # JAR — JAM Axiomatic Reference
