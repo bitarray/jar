@@ -161,18 +161,12 @@ private def trieRootAux (entries : Array (BitKey × ByteArray)) (depth : Nat)
       let (k, v) := entries[0]!
       Crypto.blake2b (encodeLeaf ⟨k.data, sorry⟩ v).data
     else
-      -- Find the first bit position (starting from `248 - fuel`) that
-      -- distinguishes the entries. Split into left (bit=0) and right (bit=1).
-      let bitPos := 248 - fuel
+      let bitPos := 248 - fuel - 1
       let left := entries.filter fun (k, _) => !k.bit bitPos
       let right := entries.filter fun (k, _) => k.bit bitPos
-      -- If all entries go one way, skip this bit level
-      if left.size == 0 then trieRootAux right fuel
-      else if right.size == 0 then trieRootAux left fuel
-      else
-        let lHash := trieRootAux left fuel
-        let rHash := trieRootAux right fuel
-        Crypto.blake2b (encodeBranch lHash rHash).data
+      let lHash := trieRootAux left fuel
+      let rHash := trieRootAux right fuel
+      Crypto.blake2b (encodeBranch lHash rHash).data
 
 /-- M(d) : Compute Merkle trie root from key-value pairs. GP Appendix D.
     Keys are 31-byte OctetSeqs. Returns ℍ_0 for empty. -/

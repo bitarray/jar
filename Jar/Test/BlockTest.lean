@@ -340,10 +340,19 @@ def runBlockTest [JamConfig] (inputPath : System.FilePath) : IO TestResult := do
       IO.println s!"  FAIL {name}: failed to deserialize pre_state from keyvals"
       return .fail
 
-  -- Verify pre_state root matches expected
+  -- First, verify raw keyvals produce the expected root (tests trieRoot only)
+  let rawEntries := keyvals.map fun (k, v) => ((⟨k, sorry⟩ : OctetSeq 31), v)
+  let rawRoot := Merkle.trieRoot rawEntries
+  if rawRoot != expectedPreRoot then
+    IO.println s!"  FAIL {name}: raw keyvals trieRoot mismatch (trie bug)"
+    IO.println s!"    expected: {bytesToHex expectedPreRoot.data}"
+    IO.println s!"    got:      {bytesToHex rawRoot.data}"
+    return .fail
+
+  -- Then verify serialize(deserialize(keyvals)) matches (tests serialization roundtrip)
   let preRoot := @StateSerialization.computeStateRoot _ state
   if preRoot != expectedPreRoot then
-    IO.println s!"  FAIL {name}: pre_state root mismatch"
+    IO.println s!"  FAIL {name}: pre_state root mismatch (serialization bug)"
     IO.println s!"    expected: {bytesToHex expectedPreRoot.data}"
     IO.println s!"    got:      {bytesToHex preRoot.data}"
     -- Continue anyway to also test the block transition
