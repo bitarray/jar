@@ -1,0 +1,1962 @@
+[
+  {
+    "number": 1,
+    "desc": "R: canonical-0 | A: canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000000",
+    "r": "0100000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 2,
+    "desc": "R: canonical-0 | A: canonical-1 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "r": "0100000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 3,
+    "desc": "R: canonical-0 | A: canonical-2 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000080",
+    "r": "0100000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 4,
+    "desc": "R: canonical-0 | A: canonical-3 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "r": "0100000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 5,
+    "desc": "R: canonical-0 | A: canonical-4 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "0100000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 6,
+    "desc": "R: canonical-0 | A: canonical-5 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "r": "0100000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 7,
+    "desc": "R: canonical-0 | A: canonical-6 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000000",
+    "r": "0100000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 8,
+    "desc": "R: canonical-0 | A: canonical-7 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "r": "0100000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 9,
+    "desc": "R: canonical-0 | A: non-canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000080",
+    "r": "0100000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 10,
+    "desc": "R: canonical-0 | A: non-canonical-1 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "0100000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 11,
+    "desc": "R: canonical-0 | A: non-canonical-2 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "0100000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 12,
+    "desc": "R: canonical-0 | A: non-canonical-3 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "0100000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 13,
+    "desc": "R: canonical-0 | A: non-canonical-4 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "0100000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 14,
+    "desc": "R: canonical-0 | A: non-canonical-5 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "0100000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 15,
+    "desc": "R: canonical-1 | A: canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000000",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 16,
+    "desc": "R: canonical-1 | A: canonical-1 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 17,
+    "desc": "R: canonical-1 | A: canonical-2 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000080",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 18,
+    "desc": "R: canonical-1 | A: canonical-3 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 19,
+    "desc": "R: canonical-1 | A: canonical-4 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 20,
+    "desc": "R: canonical-1 | A: canonical-5 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 21,
+    "desc": "R: canonical-1 | A: canonical-6 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000000",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 22,
+    "desc": "R: canonical-1 | A: canonical-7 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 23,
+    "desc": "R: canonical-1 | A: non-canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000080",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 24,
+    "desc": "R: canonical-1 | A: non-canonical-1 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 25,
+    "desc": "R: canonical-1 | A: non-canonical-2 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 26,
+    "desc": "R: canonical-1 | A: non-canonical-3 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 27,
+    "desc": "R: canonical-1 | A: non-canonical-4 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 28,
+    "desc": "R: canonical-1 | A: non-canonical-5 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 29,
+    "desc": "R: canonical-2 | A: canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000000",
+    "r": "0000000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 30,
+    "desc": "R: canonical-2 | A: canonical-1 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "r": "0000000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 31,
+    "desc": "R: canonical-2 | A: canonical-2 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000080",
+    "r": "0000000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 32,
+    "desc": "R: canonical-2 | A: canonical-3 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "r": "0000000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 33,
+    "desc": "R: canonical-2 | A: canonical-4 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "0000000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 34,
+    "desc": "R: canonical-2 | A: canonical-5 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "r": "0000000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 35,
+    "desc": "R: canonical-2 | A: canonical-6 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000000",
+    "r": "0000000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 36,
+    "desc": "R: canonical-2 | A: canonical-7 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "r": "0000000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 37,
+    "desc": "R: canonical-2 | A: non-canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000080",
+    "r": "0000000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 38,
+    "desc": "R: canonical-2 | A: non-canonical-1 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "0000000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 39,
+    "desc": "R: canonical-2 | A: non-canonical-2 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "0000000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 40,
+    "desc": "R: canonical-2 | A: non-canonical-3 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "0000000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 41,
+    "desc": "R: canonical-2 | A: non-canonical-4 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "0000000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 42,
+    "desc": "R: canonical-2 | A: non-canonical-5 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "0000000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 43,
+    "desc": "R: canonical-3 | A: canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000000",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 44,
+    "desc": "R: canonical-3 | A: canonical-1 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 45,
+    "desc": "R: canonical-3 | A: canonical-2 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000080",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 46,
+    "desc": "R: canonical-3 | A: canonical-3 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 47,
+    "desc": "R: canonical-3 | A: canonical-4 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 48,
+    "desc": "R: canonical-3 | A: canonical-5 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 49,
+    "desc": "R: canonical-3 | A: canonical-6 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000000",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 50,
+    "desc": "R: canonical-3 | A: canonical-7 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 51,
+    "desc": "R: canonical-3 | A: non-canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000080",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 52,
+    "desc": "R: canonical-3 | A: non-canonical-1 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 53,
+    "desc": "R: canonical-3 | A: non-canonical-2 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 54,
+    "desc": "R: canonical-3 | A: non-canonical-3 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 55,
+    "desc": "R: canonical-3 | A: non-canonical-4 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 56,
+    "desc": "R: canonical-3 | A: non-canonical-5 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 57,
+    "desc": "R: canonical-4 | A: canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000000",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 58,
+    "desc": "R: canonical-4 | A: canonical-1 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 59,
+    "desc": "R: canonical-4 | A: canonical-2 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000080",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 60,
+    "desc": "R: canonical-4 | A: canonical-3 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 61,
+    "desc": "R: canonical-4 | A: canonical-4 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 62,
+    "desc": "R: canonical-4 | A: canonical-5 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 63,
+    "desc": "R: canonical-4 | A: canonical-6 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000000",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 64,
+    "desc": "R: canonical-4 | A: canonical-7 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 65,
+    "desc": "R: canonical-4 | A: non-canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000080",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 66,
+    "desc": "R: canonical-4 | A: non-canonical-1 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 67,
+    "desc": "R: canonical-4 | A: non-canonical-2 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 68,
+    "desc": "R: canonical-4 | A: non-canonical-3 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 69,
+    "desc": "R: canonical-4 | A: non-canonical-4 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 70,
+    "desc": "R: canonical-4 | A: non-canonical-5 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 71,
+    "desc": "R: canonical-5 | A: canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000000",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 72,
+    "desc": "R: canonical-5 | A: canonical-1 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 73,
+    "desc": "R: canonical-5 | A: canonical-2 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000080",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 74,
+    "desc": "R: canonical-5 | A: canonical-3 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 75,
+    "desc": "R: canonical-5 | A: canonical-4 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 76,
+    "desc": "R: canonical-5 | A: canonical-5 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 77,
+    "desc": "R: canonical-5 | A: canonical-6 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000000",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 78,
+    "desc": "R: canonical-5 | A: canonical-7 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 79,
+    "desc": "R: canonical-5 | A: non-canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000080",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 80,
+    "desc": "R: canonical-5 | A: non-canonical-1 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 81,
+    "desc": "R: canonical-5 | A: non-canonical-2 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 82,
+    "desc": "R: canonical-5 | A: non-canonical-3 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 83,
+    "desc": "R: canonical-5 | A: non-canonical-4 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 84,
+    "desc": "R: canonical-5 | A: non-canonical-5 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 85,
+    "desc": "R: canonical-6 | A: canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000000",
+    "r": "0000000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 86,
+    "desc": "R: canonical-6 | A: canonical-1 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "r": "0000000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 87,
+    "desc": "R: canonical-6 | A: canonical-2 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000080",
+    "r": "0000000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 88,
+    "desc": "R: canonical-6 | A: canonical-3 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "r": "0000000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 89,
+    "desc": "R: canonical-6 | A: canonical-4 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "0000000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 90,
+    "desc": "R: canonical-6 | A: canonical-5 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "r": "0000000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 91,
+    "desc": "R: canonical-6 | A: canonical-6 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000000",
+    "r": "0000000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 92,
+    "desc": "R: canonical-6 | A: canonical-7 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "r": "0000000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 93,
+    "desc": "R: canonical-6 | A: non-canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000080",
+    "r": "0000000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 94,
+    "desc": "R: canonical-6 | A: non-canonical-1 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "0000000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 95,
+    "desc": "R: canonical-6 | A: non-canonical-2 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "0000000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 96,
+    "desc": "R: canonical-6 | A: non-canonical-3 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "0000000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 97,
+    "desc": "R: canonical-6 | A: non-canonical-4 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "0000000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 98,
+    "desc": "R: canonical-6 | A: non-canonical-5 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "0000000000000000000000000000000000000000000000000000000000000000",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 99,
+    "desc": "R: canonical-7 | A: canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000000",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 100,
+    "desc": "R: canonical-7 | A: canonical-1 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 101,
+    "desc": "R: canonical-7 | A: canonical-2 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000080",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 102,
+    "desc": "R: canonical-7 | A: canonical-3 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 103,
+    "desc": "R: canonical-7 | A: canonical-4 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 104,
+    "desc": "R: canonical-7 | A: canonical-5 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 105,
+    "desc": "R: canonical-7 | A: canonical-6 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000000",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 106,
+    "desc": "R: canonical-7 | A: canonical-7 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": true
+  },
+  {
+    "number": 107,
+    "desc": "R: canonical-7 | A: non-canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000080",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 108,
+    "desc": "R: canonical-7 | A: non-canonical-1 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 109,
+    "desc": "R: canonical-7 | A: non-canonical-2 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 110,
+    "desc": "R: canonical-7 | A: non-canonical-3 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 111,
+    "desc": "R: canonical-7 | A: non-canonical-4 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 112,
+    "desc": "R: canonical-7 | A: non-canonical-5 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": true
+  },
+  {
+    "number": 113,
+    "desc": "R: non-canonical-0 | A: canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000000",
+    "r": "0100000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 114,
+    "desc": "R: non-canonical-0 | A: canonical-1 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "r": "0100000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 115,
+    "desc": "R: non-canonical-0 | A: canonical-2 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000080",
+    "r": "0100000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 116,
+    "desc": "R: non-canonical-0 | A: canonical-3 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "r": "0100000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 117,
+    "desc": "R: non-canonical-0 | A: canonical-4 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "0100000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 118,
+    "desc": "R: non-canonical-0 | A: canonical-5 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "r": "0100000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 119,
+    "desc": "R: non-canonical-0 | A: canonical-6 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000000",
+    "r": "0100000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 120,
+    "desc": "R: non-canonical-0 | A: canonical-7 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "r": "0100000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 121,
+    "desc": "R: non-canonical-0 | A: non-canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000080",
+    "r": "0100000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 122,
+    "desc": "R: non-canonical-0 | A: non-canonical-1 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "0100000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 123,
+    "desc": "R: non-canonical-0 | A: non-canonical-2 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "0100000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 124,
+    "desc": "R: non-canonical-0 | A: non-canonical-3 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "0100000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 125,
+    "desc": "R: non-canonical-0 | A: non-canonical-4 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "0100000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 126,
+    "desc": "R: non-canonical-0 | A: non-canonical-5 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "0100000000000000000000000000000000000000000000000000000000000080",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 127,
+    "desc": "R: non-canonical-1 | A: canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000000",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 128,
+    "desc": "R: non-canonical-1 | A: canonical-1 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 129,
+    "desc": "R: non-canonical-1 | A: canonical-2 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000080",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 130,
+    "desc": "R: non-canonical-1 | A: canonical-3 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 131,
+    "desc": "R: non-canonical-1 | A: canonical-4 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 132,
+    "desc": "R: non-canonical-1 | A: canonical-5 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 133,
+    "desc": "R: non-canonical-1 | A: canonical-6 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000000",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 134,
+    "desc": "R: non-canonical-1 | A: canonical-7 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 135,
+    "desc": "R: non-canonical-1 | A: non-canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000080",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 136,
+    "desc": "R: non-canonical-1 | A: non-canonical-1 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 137,
+    "desc": "R: non-canonical-1 | A: non-canonical-2 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 138,
+    "desc": "R: non-canonical-1 | A: non-canonical-3 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 139,
+    "desc": "R: non-canonical-1 | A: non-canonical-4 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 140,
+    "desc": "R: non-canonical-1 | A: non-canonical-5 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 141,
+    "desc": "R: non-canonical-2 | A: canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000000",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 142,
+    "desc": "R: non-canonical-2 | A: canonical-1 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 143,
+    "desc": "R: non-canonical-2 | A: canonical-2 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000080",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 144,
+    "desc": "R: non-canonical-2 | A: canonical-3 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 145,
+    "desc": "R: non-canonical-2 | A: canonical-4 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 146,
+    "desc": "R: non-canonical-2 | A: canonical-5 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 147,
+    "desc": "R: non-canonical-2 | A: canonical-6 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000000",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 148,
+    "desc": "R: non-canonical-2 | A: canonical-7 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 149,
+    "desc": "R: non-canonical-2 | A: non-canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000080",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 150,
+    "desc": "R: non-canonical-2 | A: non-canonical-1 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 151,
+    "desc": "R: non-canonical-2 | A: non-canonical-2 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 152,
+    "desc": "R: non-canonical-2 | A: non-canonical-3 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 153,
+    "desc": "R: non-canonical-2 | A: non-canonical-4 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 154,
+    "desc": "R: non-canonical-2 | A: non-canonical-5 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 155,
+    "desc": "R: non-canonical-3 | A: canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000000",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 156,
+    "desc": "R: non-canonical-3 | A: canonical-1 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 157,
+    "desc": "R: non-canonical-3 | A: canonical-2 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000080",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 158,
+    "desc": "R: non-canonical-3 | A: canonical-3 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 159,
+    "desc": "R: non-canonical-3 | A: canonical-4 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 160,
+    "desc": "R: non-canonical-3 | A: canonical-5 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 161,
+    "desc": "R: non-canonical-3 | A: canonical-6 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000000",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 162,
+    "desc": "R: non-canonical-3 | A: canonical-7 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 163,
+    "desc": "R: non-canonical-3 | A: non-canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000080",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 164,
+    "desc": "R: non-canonical-3 | A: non-canonical-1 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 165,
+    "desc": "R: non-canonical-3 | A: non-canonical-2 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 166,
+    "desc": "R: non-canonical-3 | A: non-canonical-3 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 167,
+    "desc": "R: non-canonical-3 | A: non-canonical-4 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 168,
+    "desc": "R: non-canonical-3 | A: non-canonical-5 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 169,
+    "desc": "R: non-canonical-4 | A: canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000000",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 170,
+    "desc": "R: non-canonical-4 | A: canonical-1 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 171,
+    "desc": "R: non-canonical-4 | A: canonical-2 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000080",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 172,
+    "desc": "R: non-canonical-4 | A: canonical-3 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 173,
+    "desc": "R: non-canonical-4 | A: canonical-4 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 174,
+    "desc": "R: non-canonical-4 | A: canonical-5 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 175,
+    "desc": "R: non-canonical-4 | A: canonical-6 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000000",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 176,
+    "desc": "R: non-canonical-4 | A: canonical-7 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 177,
+    "desc": "R: non-canonical-4 | A: non-canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000080",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 178,
+    "desc": "R: non-canonical-4 | A: non-canonical-1 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 179,
+    "desc": "R: non-canonical-4 | A: non-canonical-2 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 180,
+    "desc": "R: non-canonical-4 | A: non-canonical-3 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 181,
+    "desc": "R: non-canonical-4 | A: non-canonical-4 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 182,
+    "desc": "R: non-canonical-4 | A: non-canonical-5 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 183,
+    "desc": "R: non-canonical-5 | A: canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000000",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 184,
+    "desc": "R: non-canonical-5 | A: canonical-1 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 185,
+    "desc": "R: non-canonical-5 | A: canonical-2 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000080",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 186,
+    "desc": "R: non-canonical-5 | A: canonical-3 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 187,
+    "desc": "R: non-canonical-5 | A: canonical-4 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 188,
+    "desc": "R: non-canonical-5 | A: canonical-5 | s=0",
+    "pk": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 189,
+    "desc": "R: non-canonical-5 | A: canonical-6 | s=0",
+    "pk": "0000000000000000000000000000000000000000000000000000000000000000",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 190,
+    "desc": "R: non-canonical-5 | A: canonical-7 | s=0",
+    "pk": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": true,
+    "r_canonical": false
+  },
+  {
+    "number": 191,
+    "desc": "R: non-canonical-5 | A: non-canonical-0 | s=0",
+    "pk": "0100000000000000000000000000000000000000000000000000000000000080",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 192,
+    "desc": "R: non-canonical-5 | A: non-canonical-1 | s=0",
+    "pk": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 193,
+    "desc": "R: non-canonical-5 | A: non-canonical-2 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 194,
+    "desc": "R: non-canonical-5 | A: non-canonical-3 | s=0",
+    "pk": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 195,
+    "desc": "R: non-canonical-5 | A: non-canonical-4 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  },
+  {
+    "number": 196,
+    "desc": "R: non-canonical-5 | A: non-canonical-5 | s=0",
+    "pk": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "r": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "s": "0000000000000000000000000000000000000000000000000000000000000000",
+    "msg": "64756d6d79",
+    "pk_canonical": false,
+    "r_canonical": false
+  }
+]

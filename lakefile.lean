@@ -159,3 +159,19 @@ lean_exe blocktest where
     "-ljar_crypto_ffi",
     "-lpthread", "-ldl", "-lm"
   ]
+
+lean_exe ed25519test where
+  root := `Jar.Test.Ed25519TestMain
+  moreLinkArgs := #[
+    "-L", "crypto-ffi/target/release",
+    "-ljar_crypto_ffi",
+    "-lpthread", "-ldl", "-lm"
+  ]
+
+lean_exe erasuretest where
+  root := `Jar.Test.ErasureTestMain
+  moreLinkArgs := #[
+    "-L", "crypto-ffi/target/release",
+    "-ljar_crypto_ffi",
+    "-lpthread", "-ldl", "-lm"
+  ]
