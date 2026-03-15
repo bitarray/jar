@@ -528,6 +528,9 @@ def runBlockTestDirSeq [JamConfig] (dir : String) : IO UInt32 := do
   let mut passed : Nat := 0
   let mut failed : Nat := 0
   let mut currentState : Option (State × Array (ByteArray × ByteArray)) := none
+  -- For fork handling: map from header hash -> (post_state, opaque_data)
+  -- When a new block has parent == a known header hash, use that post_state.
+  let mut stateMap : Array (Hash × State × Array (ByteArray × ByteArray)) := #[]
 
   for entry in sorted do
     let name := entry.fileName
@@ -549,6 +552,38 @@ def runBlockTestDirSeq [JamConfig] (dir : String) : IO UInt32 := do
           | none => pure currentState  -- fall back to threaded
         | .error _ => pure currentState
       | .error _ => pure currentState
+
+    -- Fork handling: parse the block parent hash and look up the matching
+    -- post-state from stateMap. This allows reverting to an earlier state
+    -- when a fork block shares the same parent as a previously-applied block.
+    let blockParentHash : Option Hash := match (do
+        let blockJson ← inputJson.getObjVal? "block"
+        let headerJson ← blockJson.getObjVal? "header"
+        @fromJson? Hash _ (← headerJson.getObjVal? "parent")) with
+      | .ok h => some h
+      | .error _ => none
+
+    let stateAndOpaque : Option (State × Array (ByteArray × ByteArray)) :=
+      match blockParentHash with
+      | some parentHash =>
+        -- Look up if we have a post-state for this parent hash
+        match stateMap.findRev? (fun (h, _, _) => h == parentHash) with
+        | some (_, s, od) => some (s, od)
+        | none => stateAndOpaque
+      | none => stateAndOpaque
+
+    -- If this is the first time we have a state (from keyvals), save it
+    -- keyed by the genesis block's header hash (from the recent history)
+    match stateAndOpaque with
+    | some (s, od) =>
+      if stateMap.size == 0 then
+        -- Save genesis/initial state keyed by the last recent block's header hash
+        if hn : s.recent.blocks.size > 0 then
+          let lastIdx := s.recent.blocks.size - 1
+          have : lastIdx < s.recent.blocks.size := by omega
+          let genesisHash := s.recent.blocks[lastIdx].headerHash
+          stateMap := stateMap.push (genesisHash, s, od)
+    | none => pure ()
 
     match stateAndOpaque with
     | none =>
@@ -576,15 +611,28 @@ def runBlockTestDirSeq [JamConfig] (dir : String) : IO UInt32 := do
       else
         IO.println s!"  FAIL {name}: block parse failed: {parseErr}"
         failed := failed + 1
-        currentState := none
         continue
     | .ok _ => pure ()
 
     let block ← IO.ofExcept blockResult
 
-    -- Debug: show available reports for blocks near failures
-    -- Run transition with opaque data for PVM accumulation
-    let result := @stateTransitionWithOpaque _ state block opaqueData
+    -- Block import validation: parent state root check
+    -- H_r must match the Merkle root of the pre-state (parent's posterior state)
+    let byteArrayLtForRoot (a b : ByteArray) : Bool :=
+      let len := min a.size b.size
+      Id.run do
+        for i in [:len] do
+          if a.get! i < b.get! i then return true
+          if a.get! i > b.get! i then return false
+        return a.size < b.size
+    let preKvs := (@StateSerialization.serializeState _ state).map fun (k, v) => (k.data, v)
+    let allPreKvs := (preKvs ++ opaqueData).qsort fun (k1, _) (k2, _) => byteArrayLtForRoot k1 k2
+    let preStateRoot := Merkle.trieRoot (allPreKvs.map fun (k, v) => ((⟨k, sorry⟩ : OctetSeq 31), v))
+    let stateRootOk := block.header.stateRoot == preStateRoot
+    -- If state root doesn't match, reject the block
+    let result := if !stateRootOk then none
+      else @stateTransitionWithOpaque _ state block opaqueData
+    -- (debug checks removed)
     let exitReasons : Array (ServiceId × String) := match result with
       | some r => r.2.2.1
       | none => #[]
@@ -598,7 +646,7 @@ def runBlockTestDirSeq [JamConfig] (dir : String) : IO UInt32 := do
       if isError then
         IO.println s!"  FAIL {name}: expected error but transition succeeded"
         failed := failed + 1
-        currentState := none
+        -- Keep original state: the invalid block shouldn't change state
       else
         -- Check post_state root
         let postStateJson ← IO.ofExcept (outputJson.getObjVal? "post_state")
@@ -632,6 +680,9 @@ def runBlockTestDirSeq [JamConfig] (dir : String) : IO UInt32 := do
           pure ()
           passed := passed + 1
           currentState := some (postState, filteredOpaque)
+          -- Save post-state keyed by header hash for fork handling
+          let headerHash := Crypto.blake2b (Codec.encodeHeader block.header)
+          stateMap := stateMap.push (headerHash, postState, filteredOpaque)
         else
           IO.println s!"  FAIL {name}: post_state root mismatch"
           IO.println s!"    expected: {bytesToHex expectedPostRoot.data}"
@@ -762,6 +813,8 @@ def runBlockTestDirSeq [JamConfig] (dir : String) : IO UInt32 := do
           failed := failed + 1
           -- Continue threading to see if subsequent blocks also fail
           currentState := some (postState, filteredOpaque)
+          let headerHash := Crypto.blake2b (Codec.encodeHeader block.header)
+          stateMap := stateMap.push (headerHash, postState, filteredOpaque)
     | none =>
       if isError then
         IO.println s!"  PASS {name} (expected error)"
@@ -770,7 +823,7 @@ def runBlockTestDirSeq [JamConfig] (dir : String) : IO UInt32 := do
       else
         IO.println s!"  FAIL {name}: transition returned none but expected success"
         failed := failed + 1
-        currentState := none
+        -- Keep original state for subsequent blocks to try
 
   IO.println s!"  Results: {passed} passed, {failed} failed (of {sorted.size})"
   if failed > 0 then return 1 else return 0

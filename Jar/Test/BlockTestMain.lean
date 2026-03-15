@@ -9,7 +9,7 @@ def testVariants : Array JamConfig := #[JamVariant.gp072_tiny.toJamConfig]
 def independentTraces : Array String := #["safrole", "fallback"]
 
 /-- Traces where only the first block has keyvals (sequential state threading). -/
-def sequentialTraces : Array String := #["conformance_no_forks"]
+def sequentialTraces : Array String := #["conformance_no_forks", "conformance_forks"]
 
 def main (args : List String) : IO UInt32 := do
   let mut exitCode : UInt32 := 0
