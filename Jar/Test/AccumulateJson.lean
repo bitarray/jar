@@ -142,14 +142,28 @@ private def parseGreyServiceAccount (dataJson : Json) : Except String ServiceAcc
     storage := storage
     preimages := preimages
     preimageInfo := preimageInfo
-    gratis := 0  -- not directly in Grey format; computed from storage data
+    gratis := match svc.getObjVal? "deposit_offset" with
+      | .ok v => match @fromJson? UInt64 _ v with | .ok n => n | .error _ => 0
+      | .error _ => 0
     codeHash := ← fromJson? (← svc.getObjVal? "code_hash")
     balance := ← fromJson? (← svc.getObjVal? "balance")
     minAccGas := ← fromJson? (← svc.getObjVal? "min_item_gas")
     minOnTransferGas := ← fromJson? (← svc.getObjVal? "min_memo_gas")
+    -- NOTE: JAR ServiceAccount field names are mismatched with GP semantics.
+    -- For the STF accumulate test harness, the JSON fields map as:
+    -- JSON "creation_slot" → JAR.created (internally used as a_i items for eject)
+    -- JSON "last_accumulation_slot" → JAR.lastAccumulation
+    -- JSON "parent_service" → JAR.parent
+    -- The real items/bytes/etc come from separate fields:
     created := ← fromJson? (← svc.getObjVal? "creation_slot")
     lastAccumulation := ← fromJson? (← svc.getObjVal? "last_accumulation_slot")
     parent := ← fromJson? (← svc.getObjVal? "parent_service")
+    totalFootprint := match svc.getObjVal? "bytes" with
+      | .ok v => match v.getNat? with | .ok n => n | .error _ => 0
+      | .error _ => 0
+    preimageCount := match svc.getObjVal? "items" with
+      | .ok v => match v.getNat? with | .ok n => n | .error _ => 0
+      | .error _ => 0
   }
 
 -- ============================================================================
@@ -283,7 +297,9 @@ private def toJsonGreyServiceAccount (sid : ServiceId) (acct : ServiceAccount) :
         ("min_memo_gas", toJson acct.minOnTransferGas),
         ("creation_slot", toJson acct.created),
         ("last_accumulation_slot", toJson acct.lastAccumulation),
-        ("parent_service", toJson acct.parent)]),
+        ("parent_service", toJson acct.parent),
+        ("bytes", Json.num (Lean.JsonNumber.fromNat acct.totalFootprint)),
+        ("items", Json.num (Lean.JsonNumber.fromNat acct.preimageCount))]),
       ("storage", Json.arr storageEntries.toArray),
       ("preimage_blobs", Json.arr blobEntries.toArray),
       ("preimage_requests", Json.arr reqEntries.toArray)])]

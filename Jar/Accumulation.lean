@@ -959,7 +959,12 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           let accounts' := ctx.state.accounts.insert sid ejected
           let ctx := { ctx with state := { ctx.state with accounts := accounts' } }
           -- GP: Check d.items == 2 AND (h, l) in d.requests
-          if ejected.created.toNat != 2 then
+          -- GP: d_i = 2  (items count)
+          -- Compute items from actual data: 2 * |preimage_info| + |storage|
+          -- This handles both STF tests (structured data) and block tests (created field)
+          let computedItems := 2 * ejected.preimageInfo.entries.length + ejected.storage.entries.length
+          let items := if computedItems > 0 then computedItems else ejected.created.toNat
+          if items != 2 then
             let regs' := setR7 regs PVM.RESULT_HUH
             (mkResult regs' mem gas', ctx)
           else
