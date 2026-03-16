@@ -424,10 +424,16 @@ def performAccumulation
   let accumulatable := immediate ++ queueResolved
 
   -- Step 3: Accumulate reports (Δ+)
-  -- GP deviation: should limit n reports by gas budget G_A * C. Currently accumulates
-  -- all reports, which is correct for tiny config (gas always sufficient).
-  let n := accumulatable.size
-  let result : Accumulation.AccumulationResult := Accumulation.accumulate s' accumulatable t' opaqueData
+  -- Gas budget: g = max(G_T, G_A × C + Σ(χZ)). GP eq 12.25.
+  let alwaysGas := s'.privileged.alwaysAccumulate.values.foldl (init := 0) fun acc g => acc + g.toNat
+  let gasBudget := max G_T (G_A * C + alwaysGas)
+  -- Limit reports to fit within gas budget (GP eq 12.13-12.16)
+  let (taken, _) := accumulatable.foldl (init := (#[], (0 : Nat))) fun (taken, gasUsed) wr =>
+    let reportGas := wr.digests.foldl (init := (0 : Nat)) fun acc d => acc + d.gasLimit.toNat
+    if gasUsed + reportGas <= gasBudget then (taken.push wr, gasUsed + reportGas)
+    else (taken, gasUsed)
+  let n := taken.size
+  let result : Accumulation.AccumulationResult := Accumulation.accumulate s' taken t' opaqueData
 
   -- Step 4: Collect accumulated package hashes for history (sorted)
   let hashLt (a b : Hash) : Bool := Id.run do

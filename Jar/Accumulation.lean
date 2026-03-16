@@ -1654,7 +1654,7 @@ def accpar (ps : PartialState) (reports : Array WorkReport)
 /-- Full sequential accumulation pipeline. GP §12 eq:accseq.
     Orchestrates multiple rounds of accpar, feeding deferred transfers
     from one round into the next. -/
-def accseq (_gasLimit : Gas) (reports : Array WorkReport)
+def accseq (gasLimit : Gas) (reports : Array WorkReport)
     (initialTransfers : Array DeferredTransfer)
     (ps : PartialState) (freeGasMap : Dict ServiceId Gas)
     (timeslot : Timeslot) (entropy : Hash) (configBlob : ByteArray)
@@ -1662,10 +1662,10 @@ def accseq (_gasLimit : Gas) (reports : Array WorkReport)
     : Nat × PartialState × Array (ServiceId × Hash) × Dict ServiceId Gas × Array (ServiceId × String) × Array (ByteArray × ByteArray) :=
   -- Round 1: accumulate work-report operands + initial deferred transfers
   let (ps1, newXfers1, yields1, gasMap1, exits1, od1) := accpar ps reports initialTransfers freeGasMap timeslot entropy configBlob opaqueData
+  let round1Gas := gasMap1.values.foldl (init := (0 : Nat)) fun acc g => acc + g.toNat
 
-  -- Subsequent rounds: process deferred transfers until none remain.
-  -- GP §12 eq:accseq: iterate until no more deferred transfers are produced.
-  -- Bound iterations to prevent infinite loops (transfers should converge).
+  -- Subsequent rounds: process deferred transfers until none remain or gas exhausted.
+  -- GP §12 eq:accseq: g* = g + Σ(t.gas) — augment budget with transfer gas each round.
   let maxRounds := 10
   let (psFinal, allYields, gasMapFinal, allExits, odFinal) := Id.run do
     let mut curPs := ps1
@@ -1674,10 +1674,17 @@ def accseq (_gasLimit : Gas) (reports : Array WorkReport)
     let mut curGasMap := gasMap1
     let mut curExits := exits1
     let mut curOd := od1
+    let mut remainingGas : Nat := gasLimit.toNat - min round1Gas gasLimit.toNat
     for _ in [:maxRounds] do
       if curXfers.size == 0 then break
+      -- Augment gas budget with transfer gas (GP eq 12.18-12.19)
+      let transferGas := curXfers.foldl (init := (0 : Nat)) fun acc t => acc + t.gas.toNat
+      remainingGas := remainingGas + transferGas
+      if remainingGas == 0 then break
       let (ps', xfers', yields', gasMap', exits', od') :=
         accpar curPs #[] curXfers Dict.empty timeslot entropy configBlob curOd
+      let roundGas := gasMap'.values.foldl (init := (0 : Nat)) fun acc g => acc + g.toNat
+      remainingGas := remainingGas - min roundGas remainingGas
       curPs := ps'
       curXfers := xfers'
       curYields := curYields ++ yields'
@@ -1769,14 +1776,14 @@ def accumulate (state : State) (reports : Array WorkReport)
   let ps := PartialState.fromState state
   let freeGasMap := state.privileged.alwaysAccumulate
 
-  -- Total gas budget: max(G_T, G_A × C + Σ alwaysAccumulate)
+  -- Total gas budget: g = max(G_T, G_A × C + Σ χZ). GP eq 12.25.
   let alwaysGas := freeGasMap.values.foldl (init := 0) fun acc g => acc + g.toNat
-  let _totalGas := max G_T (G_A * C + alwaysGas)
+  let totalGas := max G_T (G_A * C + alwaysGas)
 
   let configBlob := buildConfigBlob
 
   let (_, ps', outputs, gasUsage, exitReasons, remainingOpaque) := accseq
-    (UInt64.ofNat G_T) reports #[] ps freeGasMap timeslot
+    (UInt64.ofNat totalGas) reports #[] ps freeGasMap timeslot
     state.entropy.current configBlob opaqueData
 
   { services := ps'.accounts
