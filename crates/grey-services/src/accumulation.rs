@@ -3,10 +3,10 @@
 //! Implements the Δ+, Δ*, and Δ1 functions for processing available work-reports
 //! and applying their results to service state.
 //!
-//! **NOTE**: This module is superseded by `grey-state/src/accumulate.rs`, which has
-//! the full implementation with PVM execution (ΨA invocation), host-call dispatch,
-//! and checkpoint/rollback. This module is retained for reference but is not used
-//! at runtime.
+//! The full implementation with PVM execution (ΨA invocation), host-call dispatch,
+//! and checkpoint/rollback lives in `grey-state/src/accumulate.rs`. This module
+//! provides shared types (transfer structs, operand types) and utility functions
+//! (preimage integration, gas budget) used by that implementation.
 
 use grey_types::constants::*;
 use grey_types::state::{PrivilegedServices, ServiceAccount, State};
@@ -156,8 +156,8 @@ pub fn collect_operands_for_service(
 /// Single-service accumulation Δ1 (eq 12.24).
 ///
 /// Accumulates all work-items and transfers targeting a specific service.
-/// NOTE: This is a simplified version — full PVM invocation of ΨA is not yet implemented.
-/// Currently applies transfers and tracks gas without running the accumulate code.
+/// This is a simplified reference implementation — the full PVM-based accumulation
+/// with host-call dispatch lives in `grey-state/src/accumulate.rs`.
 pub fn accumulate_service(
     services: &BTreeMap<ServiceId, ServiceAccount>,
     service_id: ServiceId,
@@ -191,15 +191,8 @@ pub fn accumulate_service(
         account.accumulation_counter = account.accumulation_counter.saturating_add(1);
     }
 
-    // In a full implementation, we would:
-    // 1. Look up the service's code via code_hash
-    // 2. Invoke ΨA with the PVM (entry point 5 = accumulate)
-    // 3. Handle host calls (read, write, transfer, new, etc.)
-    // 4. Collapse the result (using checkpoint on panic/OOG)
-    //
-    // For now, we simulate accumulation:
-    // - Gas is consumed proportionally
-    // - No state mutations beyond transfer credits
+    // This simplified path only credits transfers and charges gas.
+    // See grey-state/src/accumulate.rs for the full PVM-based accumulation.
     let gas_used = total_gas.min(GAS_ACCUMULATE);
 
     ServiceAccumulationResult {
