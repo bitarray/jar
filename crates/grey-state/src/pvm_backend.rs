@@ -71,42 +71,34 @@ impl PvmInstance {
                 let s = *step;
 
                 // Run both with full gas.
-                let ig = interp.gas;
-                let rg = recomp.gas();
                 let (ie, _) = interp.run();
                 let re = recomp.run();
 
-                // Check for mismatch
+                // Check for register/PC mismatch
                 let mut mismatch = false;
                 for i in 0..13 {
                     if interp.registers[i] != recomp.registers()[i] {
-                        eprintln!(
-                            "COMPARE step {}: REG[{}] MISMATCH interp=0x{:x} recomp=0x{:x} pc_i={} pc_r={}",
-                            s, i, interp.registers[i], recomp.registers()[i], interp.pc, recomp.pc()
-                        );
                         mismatch = true;
                     }
                 }
-                if interp.pc != recomp.pc() {
-                    eprintln!(
-                        "COMPARE step {}: PC MISMATCH interp={} recomp={}",
-                        s, interp.pc, recomp.pc()
-                    );
+                if interp.pc != recomp.pc() || ie != re || interp.gas != recomp.gas() {
                     mismatch = true;
                 }
-                if ie != re {
+                if mismatch {
                     eprintln!(
-                        "COMPARE step {}: EXIT MISMATCH interp={:?} recomp={:?} pc_i={} pc_r={} gas_i={} gas_r={}",
+                        "COMPARE step {}: MISMATCH exit_i={:?} exit_r={:?} pc_i={} pc_r={} gas_i={} gas_r={}",
                         s, ie, re, interp.pc, recomp.pc(), interp.gas, recomp.gas()
                     );
-                    mismatch = true;
-                }
-                if interp.gas != recomp.gas() {
-                    eprintln!(
-                        "COMPARE step {}: GAS MISMATCH interp={} recomp={} (exit_i={:?} exit_r={:?})",
-                        s, interp.gas, recomp.gas(), ie, re
-                    );
-                    mismatch = true;
+                    for i in 0..13 {
+                        if interp.registers[i] != recomp.registers()[i] {
+                            eprintln!("  reg[{:2}]: interp={:#18x} recomp={:#18x}", i, interp.registers[i], recomp.registers()[i]);
+                        }
+                    }
+                    // Print opcode at the recompiler's exit PC to help identify the buggy instruction
+                    let rpc = recomp.pc() as usize;
+                    if rpc < interp.code.len() {
+                        eprintln!("  opcode at recomp_pc={}: {}", rpc, interp.code[rpc]);
+                    }
                 }
                 // Compare memory on host-call exits (when PVM wrote to memory)
                 if !mismatch {
