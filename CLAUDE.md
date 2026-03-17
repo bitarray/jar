@@ -238,17 +238,16 @@ crates/
 | conformance_no_forks | 100 | 100/100 |
 | conformance_forks | 100 | 32/32 non-error |
 
-**8/10 traces fully pass. 1184/1200 blocks pass (98.7%).**
+**8/10 traces fully pass. 1184/1200 blocks pass (98.7%).** Remaining 16 failures are in fuzzy traces.
 
 ### Known Issues
-- 16 fuzzy trace blocks fail (14 fuzzy + 2 fuzzy_light): PVM execution divergence where multi-digest reports for the same service produce different accumulation results. The service code calls `bless` with different register values than JAR expects.
-- PVM basic-block gas metering temporarily disabled (off-by-one when entering at non-zero PC). Uses per-instruction stepping mode instead.
+- 16 fuzzy trace blocks fail (14 fuzzy + 2 fuzzy_light): Privilege state diffs where the `bless` host call or privilege propagation through accseq multi-round accumulation produces different results. Root cause investigation ongoing.
+- PVM basic-block gas metering temporarily disabled (off-by-one when entering at non-zero PC). Uses per-instruction stepping mode.
 
 ### What's Next
 - Fix remaining 16 fuzzy trace failures
-- Re-enable optimized basic-block gas metering with correct mid-block entry
+- Re-enable optimized basic-block gas metering
 - P2P networking layer in `grey-network`
-- Node executable with genesis, block import, validator mode
 
 ## Development Guidelines
 
