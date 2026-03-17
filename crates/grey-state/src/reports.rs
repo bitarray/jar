@@ -5,7 +5,8 @@
 use grey_types::config::Config;
 use grey_types::validator::ValidatorKey;
 use grey_types::work::{WorkReport, WorkResult};
-use grey_types::{Ed25519PublicKey, Ed25519Signature, Gas, Hash, ServiceId, Timeslot};
+use grey_types::{Ed25519PublicKey, Ed25519Signature, Hash, ServiceId, Timeslot};
+use javm::Gas;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Maximum accumulate gas per work report (GA).

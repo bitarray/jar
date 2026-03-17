@@ -1,6 +1,6 @@
 # PVM Interpreter Optimization
 
-Lessons learned from optimizing the grey-pvm interpreter to match/beat the
+Lessons learned from optimizing the javm interpreter to match/beat the
 polkavm interpreter (March 2026).
 
 ## Benchmark Setup

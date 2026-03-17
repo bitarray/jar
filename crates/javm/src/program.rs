@@ -5,8 +5,7 @@
 
 use crate::memory::{Memory, PageAccess};
 use crate::vm::Pvm;
-use grey_types::constants::{PVM_INIT_INPUT_SIZE, PVM_PAGE_SIZE, PVM_ZONE_SIZE};
-use grey_types::Gas;
+use crate::{Gas, PVM_INIT_INPUT_SIZE, PVM_PAGE_SIZE, PVM_ZONE_SIZE};
 
 /// Parse a program blob into (code, bitmask, jump_table) (eq A.2).
 ///

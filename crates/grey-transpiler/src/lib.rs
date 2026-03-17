@@ -173,7 +173,7 @@ mod tests {
         let blob = transpile_elf_service(&elf_data).unwrap();
         assert!(!blob.is_empty());
 
-        let pvm = grey_pvm::program::initialize_program(&blob, &[], 10_000);
+        let pvm = javm::program::initialize_program(&blob, &[], 10_000);
         assert!(pvm.is_some(), "transpiled service blob should be loadable by PVM");
     }
 
@@ -182,11 +182,11 @@ mod tests {
         let elf_data = load_sample_elf();
         let blob = transpile_elf_service(&elf_data).unwrap();
 
-        let mut pvm = grey_pvm::program::initialize_program(&blob, &[], 10_000)
+        let mut pvm = javm::program::initialize_program(&blob, &[], 10_000)
             .expect("blob should be loadable");
 
         let (result, _gas) = pvm.run();
-        assert_eq!(result, grey_pvm::vm::ExitReason::Halt,
+        assert_eq!(result, javm::vm::ExitReason::Halt,
             "refine should halt; got {:?}", result);
     }
 
@@ -195,13 +195,13 @@ mod tests {
         let elf_data = load_sample_elf();
         let blob = transpile_elf_service(&elf_data).unwrap();
 
-        let mut pvm = grey_pvm::program::initialize_program(&blob, &[], 10_000)
+        let mut pvm = javm::program::initialize_program(&blob, &[], 10_000)
             .expect("blob should be loadable");
         pvm.pc = 5;
 
         let (result, _gas) = pvm.run();
         match result {
-            grey_pvm::vm::ExitReason::HostCall(id) => {
+            javm::vm::ExitReason::HostCall(id) => {
                 assert_eq!(id, 4, "expected host_write (ID=4), got ID={}", id);
             }
             other => panic!("expected HostCall(4), got {:?}", other),

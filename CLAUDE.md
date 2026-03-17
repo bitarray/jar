@@ -14,7 +14,7 @@ crates/
   grey-types/        # Core protocol types, constants, and data structures
   grey-codec/        # Serialization/deserialization (Appendix C)
   grey-crypto/       # Cryptographic primitives (Blake2b, Keccak, Ed25519, Bandersnatch, BLS)
-  grey-pvm/          # Polkadot Virtual Machine (Appendix A)
+  javm/          # Join-Accumulate VM (Appendix A)
   grey-merkle/       # State Merklization & Merkle tries (Appendix D & E)
   grey-erasure/      # Reed-Solomon erasure coding (Appendix H)
   grey-state/        # Chain state representation and transitions (Sections 4-13)
@@ -61,7 +61,7 @@ crates/
 
 ### Phase 2: Virtual Machine
 
-4. **`grey-pvm`** — Polkadot Virtual Machine (Appendix A):
+4. **`javm`** — Join-Accumulate VM (Appendix A):
    - RISC-V rv64em based ISA with 13 registers (64-bit each)
    - Pageable RAM: 32-bit addressable, 4096-byte pages, R/W/inaccessible
    - Instruction set: ~150 instructions across categories:
@@ -200,7 +200,7 @@ crates/
 | 1 | `grey-types` | Complete — all core types, constants, data structures | 0 |
 | 1 | `grey-codec` | Complete — JAM encode/decode with natural numbers, block decode | 32 |
 | 1 | `grey-crypto` | Complete — Blake2b, Keccak, Ed25519, Fisher-Yates, Bandersnatch Ring VRF | 15 |
-| 2 | `grey-pvm` | Complete — full ISA, arg decoding, VM execution, deblob, sbrk | 31 |
+| 2 | `javm` | Complete — full ISA, arg decoding, VM execution, deblob, sbrk | 31 |
 | 3 | `grey-merkle` | Complete — binary Patricia trie, balanced tree, MMR, state serialization | 14 |
 | 3 | `grey-erasure` | Complete — RS encode/decode with k-independent symbol coding | 24 |
 | 4 | `grey-state` | Complete — 8-step state transition + Safrole + accumulation with PVM | 171 STF + 10 block traces |

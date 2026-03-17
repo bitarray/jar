@@ -3,7 +3,7 @@
 //! Memory is a 32-bit addressable space organized into pages of ZP = 4096 bytes.
 //! Each page has an access mode: Read-only, Read-Write, or Inaccessible.
 
-use grey_types::constants::PVM_PAGE_SIZE;
+use crate::PVM_PAGE_SIZE;
 use std::collections::BTreeMap;
 
 /// Page access mode.

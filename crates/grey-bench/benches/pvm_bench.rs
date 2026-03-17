@@ -25,12 +25,12 @@ const GAS_LIMIT: u64 = 100_000_000;
 // ---------------------------------------------------------------------------
 
 fn run_grey_interpreter(blob: &[u8]) -> (u64, u64) {
-    let mut pvm = grey_pvm::program::initialize_program(blob, &[], GAS_LIMIT).unwrap();
+    let mut pvm = javm::program::initialize_program(blob, &[], GAS_LIMIT).unwrap();
     loop {
         let (exit, _) = pvm.run();
         match exit {
-            grey_pvm::ExitReason::Halt => break,
-            grey_pvm::ExitReason::HostCall(_) => continue,
+            javm::ExitReason::Halt => break,
+            javm::ExitReason::HostCall(_) => continue,
             other => panic!("unexpected exit: {:?}", other),
         }
     }
@@ -45,11 +45,11 @@ fn run_grey_interpreter(blob: &[u8]) -> (u64, u64) {
 
 fn run_grey_recompiler(blob: &[u8]) -> (u64, u64) {
     let mut pvm =
-        grey_pvm::recompiler::initialize_program_recompiled(blob, &[], GAS_LIMIT).unwrap();
+        javm::recompiler::initialize_program_recompiled(blob, &[], GAS_LIMIT).unwrap();
     loop {
         match pvm.run() {
-            grey_pvm::ExitReason::Halt => break,
-            grey_pvm::ExitReason::HostCall(_) => continue,
+            javm::ExitReason::Halt => break,
+            javm::ExitReason::HostCall(_) => continue,
             other => panic!("unexpected exit: {:?}", other),
         }
     }

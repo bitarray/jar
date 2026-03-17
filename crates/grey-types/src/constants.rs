@@ -114,21 +114,9 @@ pub const TICKET_SUBMISSION_END: u32 = 500;
 /// ZA = 2: PVM dynamic address alignment factor.
 pub const PVM_ADDRESS_ALIGNMENT: u32 = 2;
 
-/// ZI = 2^24: Standard PVM program initialization input data size.
-pub const PVM_INIT_INPUT_SIZE: u32 = 1 << 24;
-
-/// ZP = 2^12 = 4096: PVM memory page size.
-pub const PVM_PAGE_SIZE: u32 = 1 << 12;
-
-/// ZZ = 2^16 = 65536: Standard PVM program initialization zone size.
-pub const PVM_ZONE_SIZE: u32 = 1 << 16;
-
 /// Jam Common Era start: 1200 UTC on January 1, 2025.
 /// Expressed as seconds since Unix epoch.
 pub const JAM_EPOCH_UNIX: u64 = 1_735_732_800;
-
-/// Number of registers in the PVM.
-pub const PVM_REGISTER_COUNT: usize = 13;
 
 // ---------------------------------------------------------------------------
 // Host-call return sentinels (GP Section B.4)

@@ -26,7 +26,7 @@ pub fn update_statistics(
     extrinsic: &Extrinsic,
     incoming_reports: &[&WorkReport],
     available_reports: &[WorkReport],
-    accumulation_stats: &std::collections::BTreeMap<grey_types::ServiceId, (grey_types::Gas, u32)>,
+    accumulation_stats: &std::collections::BTreeMap<grey_types::ServiceId, (javm::Gas, u32)>,
 ) {
     let old_epoch = prior_timeslot / config.epoch_length;
     let new_epoch = new_timeslot / config.epoch_length;
@@ -165,7 +165,7 @@ fn compute_service_statistics(
     stats: &mut ValidatorStatistics,
     extrinsic: &Extrinsic,
     incoming_reports: &[&WorkReport],
-    accumulation_stats: &std::collections::BTreeMap<grey_types::ServiceId, (grey_types::Gas, u32)>,
+    accumulation_stats: &std::collections::BTreeMap<grey_types::ServiceId, (javm::Gas, u32)>,
 ) {
     let mut svc_stats: BTreeMap<grey_types::ServiceId, ServiceStatistics> = BTreeMap::new();
 

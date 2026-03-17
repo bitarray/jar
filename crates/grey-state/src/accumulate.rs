@@ -10,7 +10,8 @@ use grey_types::constants::{
     HOST_WHO,
 };
 use grey_types::work::{WorkReport, WorkResult};
-use grey_types::{Gas, Hash, ServiceId, Timeslot};
+use grey_types::{Hash, ServiceId, Timeslot};
+use javm::Gas;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Decode preimage_info timeslots from compact-encoded raw bytes.

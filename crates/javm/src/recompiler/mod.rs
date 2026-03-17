@@ -16,8 +16,7 @@ pub mod codegen;
 use crate::memory::Memory;
 use crate::vm::ExitReason;
 use codegen::{Compiler, HelperFns};
-use grey_types::constants::PVM_REGISTER_COUNT;
-use grey_types::Gas;
+use crate::{Gas, PVM_REGISTER_COUNT};
 
 /// JIT execution context passed to compiled code via R15.
 /// Must be #[repr(C)] with exact field ordering matching codegen offsets.
@@ -423,7 +422,7 @@ extern "sysv64" fn mem_write_u64_fn(ctx: *mut JitContext, addr: u32, value: u64)
 extern "sysv64" fn sbrk_helper(ctx: *mut JitContext, size: u64) -> u64 {
     let ctx = unsafe { &mut *ctx };
     let mem = unsafe { &mut *ctx.memory };
-    let ps = grey_types::constants::PVM_PAGE_SIZE;
+    let ps = crate::PVM_PAGE_SIZE;
 
     if size > u32::MAX as u64 {
         return 0;

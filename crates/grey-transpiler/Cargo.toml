@@ -6,7 +6,7 @@ license.workspace = true
 description = "RISC-V ELF to JAM PVM transpiler"
 
 [dependencies]
-grey-pvm = { workspace = true }
+javm = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

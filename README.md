@@ -120,7 +120,7 @@ Services are cross-compiled to RISC-V and transpiled to PVM bytecode by `grey-tr
 |----------|-------|------:|--------|
 | Codec (Appendix C) | `grey-codec` | 32 | All passing |
 | Cryptography (Section 3.8) | `grey-crypto` | 15 | All passing |
-| PVM — Polkadot Virtual Machine (Appendix A) | `grey-pvm` | 41 | All passing |
+| PVM — Join-Accumulate VM (Appendix A) | `javm` | 41 | All passing |
 | Merkle tries (Appendices D & E) | `grey-merkle` | 14 | All passing |
 | Erasure coding (Appendix H) | `grey-erasure` | 24 | All passing |
 | Safrole consensus (Section 6) | `grey-consensus` | 25 | All passing |
@@ -168,7 +168,7 @@ crates/
   grey-types/        # Core protocol types and constants
   grey-codec/        # JAM serialization (Appendix C)
   grey-crypto/       # Blake2b, Keccak, Ed25519, Bandersnatch, BLS
-  grey-pvm/          # Polkadot Virtual Machine (Appendix A)
+  javm/          # Join-Accumulate VM (Appendix A)
   grey-merkle/       # Binary Patricia trie, MMR, state serialization (Appendices D & E)
   grey-erasure/      # Reed-Solomon erasure coding (Appendix H)
   grey-state/        # Chain state transitions (Sections 4–13)

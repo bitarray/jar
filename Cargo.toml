@@ -5,7 +5,7 @@ members = [
     "crates/grey-types",
     "crates/grey-codec",
     "crates/grey-crypto",
-    "crates/grey-pvm",
+    "crates/javm",
     "crates/grey-merkle",
     "crates/grey-erasure",
     "crates/grey-state",
@@ -33,7 +33,7 @@ license = "Apache-2.0"
 grey-types = { path = "crates/grey-types" }
 grey-codec = { path = "crates/grey-codec" }
 grey-crypto = { path = "crates/grey-crypto" }
-grey-pvm = { path = "crates/grey-pvm" }
+javm = { path = "crates/javm" }
 grey-merkle = { path = "crates/grey-merkle" }
 grey-erasure = { path = "crates/grey-erasure" }
 grey-state = { path = "crates/grey-state" }

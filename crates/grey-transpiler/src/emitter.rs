@@ -185,7 +185,7 @@ mod tests {
         let blob = build_standard_program(&[], &[], 0, 4096, &code, &bitmask, &[]);
 
         // Should be loadable by PVM
-        let pvm = grey_pvm::program::initialize_program(&blob, &[], 1000);
+        let pvm = javm::program::initialize_program(&blob, &[], 1000);
         assert!(pvm.is_some(), "Standard program blob should be loadable");
     }
 }

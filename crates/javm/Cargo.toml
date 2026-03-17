@@ -1,12 +1,11 @@
 [package]
-name = "grey-pvm"
+name = "javm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Polkadot Virtual Machine (PVM) implementation for JAM."
+description = "Join-Accumulate VM (JAVM)."
 
 [dependencies]
-grey-types = { workspace = true }
 libc = "0.2"
 thiserror = { workspace = true }
 tracing = { workspace = true }

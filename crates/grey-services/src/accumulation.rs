@@ -11,7 +11,8 @@
 use grey_types::constants::*;
 use grey_types::state::{PrivilegedServices, ServiceAccount, State};
 use grey_types::work::WorkReport;
-use grey_types::{Balance, Gas, Hash, ServiceId, Timeslot};
+use grey_types::{Balance, Hash, ServiceId, Timeslot};
+use javm::Gas;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Errors during accumulation.

@@ -8,9 +8,9 @@
 //! - `recompiler`: AOT-compiled native x86-64 execution
 //! - `compare`: runs both and compares at each host-call boundary
 
-use grey_types::Gas;
+use javm::Gas;
 
-pub use grey_pvm::ExitReason;
+pub use javm::ExitReason;
 
 /// Check once whether the recompiler backend is requested.
 fn pvm_mode() -> &'static str {
@@ -22,11 +22,11 @@ fn pvm_mode() -> &'static str {
 
 /// Backend-agnostic PVM instance.
 enum Backend {
-    Interpreter(grey_pvm::vm::Pvm),
-    Recompiler(grey_pvm::RecompiledPvm),
+    Interpreter(javm::vm::Pvm),
+    Recompiler(javm::RecompiledPvm),
     Compare {
-        interp: grey_pvm::vm::Pvm,
-        recomp: grey_pvm::RecompiledPvm,
+        interp: javm::vm::Pvm,
+        recomp: javm::RecompiledPvm,
         step: u32,
     },
 }
@@ -41,18 +41,18 @@ impl PvmInstance {
     pub fn initialize(code_blob: &[u8], args: &[u8], gas: Gas) -> Option<Self> {
         match pvm_mode() {
             "recompiler" => {
-                grey_pvm::recompiler::initialize_program_recompiled(code_blob, args, gas)
+                javm::recompiler::initialize_program_recompiled(code_blob, args, gas)
                     .map(|pvm| PvmInstance { inner: Backend::Recompiler(pvm) })
             }
             "compare" => {
-                let interp = grey_pvm::program::initialize_program(code_blob, args, gas)?;
-                let recomp = grey_pvm::recompiler::initialize_program_recompiled(code_blob, args, gas)?;
+                let interp = javm::program::initialize_program(code_blob, args, gas)?;
+                let recomp = javm::recompiler::initialize_program_recompiled(code_blob, args, gas)?;
                 Some(PvmInstance {
                     inner: Backend::Compare { interp, recomp, step: 0 },
                 })
             }
             _ => {
-                grey_pvm::program::initialize_program(code_blob, args, gas)
+                javm::program::initialize_program(code_blob, args, gas)
                     .map(|pvm| PvmInstance { inner: Backend::Interpreter(pvm) })
             }
         }
@@ -262,7 +262,7 @@ impl PvmInstance {
 
     /// Try to write bytes; returns None on page fault (any non-writable byte).
     pub fn try_write_bytes(&mut self, addr: u32, data: &[u8]) -> Option<()> {
-        use grey_pvm::memory::MemoryAccess;
+        use javm::memory::MemoryAccess;
         match &mut self.inner {
             Backend::Interpreter(pvm) => {
                 for (i, &byte) in data.iter().enumerate() {

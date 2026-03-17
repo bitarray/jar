@@ -8,7 +8,8 @@ use grey_state::accumulate::{
     ReadyRecord, process_accumulate,
 };
 use grey_types::config::Config;
-use grey_types::{Gas, Hash, ServiceId, Timeslot};
+use grey_types::{Hash, ServiceId, Timeslot};
+use javm::Gas;
 use std::collections::BTreeMap;
 use tracing_test::traced_test;
 

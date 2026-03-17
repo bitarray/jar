@@ -1,6 +1,6 @@
 # PVM Recompiler Optimization
 
-Lessons learned from building and optimizing the grey-pvm x86-64 JIT recompiler
+Lessons learned from building and optimizing the javm x86-64 JIT recompiler
 to match/beat the polkavm v0.30.0 compiler backend (March 2026).
 
 ## Benchmark Setup

@@ -27,7 +27,7 @@ fn dump_polkavm(name: &str, blob: Vec<u8>) {
 }
 
 fn dump_grey(name: &str, blob: &[u8]) {
-    let pvm = grey_pvm::recompiler::initialize_program_recompiled(blob, &[], 100_000_000).unwrap();
+    let pvm = javm::recompiler::initialize_program_recompiled(blob, &[], 100_000_000).unwrap();
     let code = pvm.native_code_bytes();
     let path = format!("/tmp/grey_{name}.bin");
     std::fs::write(&path, code).unwrap();

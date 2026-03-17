@@ -41,8 +41,8 @@ pub fn is_solvent(account: &ServiceAccount) -> bool {
 pub fn new_service_account(
     code_hash: grey_types::Hash,
     balance: Balance,
-    min_accumulate_gas: grey_types::Gas,
-    min_on_transfer_gas: grey_types::Gas,
+    min_accumulate_gas: javm::Gas,
+    min_on_transfer_gas: javm::Gas,
 ) -> ServiceAccount {
     ServiceAccount {
         code_hash,

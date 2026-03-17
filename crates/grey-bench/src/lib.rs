@@ -439,17 +439,17 @@ mod tests_sort {
     #[test]
     fn test_grey_sort_small() {
         let blob = grey_sort_blob(5);
-        let mut pvm = grey_pvm::program::initialize_program(&blob, &[], 10_000_000).unwrap();
+        let mut pvm = javm::program::initialize_program(&blob, &[], 10_000_000).unwrap();
         pvm.tracing_enabled = true;
         loop {
             let (exit, _) = pvm.run();
             match exit {
-                grey_pvm::ExitReason::Halt => {
+                javm::ExitReason::Halt => {
                     eprintln!("HALT! result = {}", pvm.registers[7]);
                     assert_eq!(pvm.registers[7], 1, "arr[0] should be 1 after sorting");
                     return;
                 }
-                grey_pvm::ExitReason::HostCall(_) => continue,
+                javm::ExitReason::HostCall(_) => continue,
                 other => {
                     eprintln!("Exit: {:?} at PC={}", other, pvm.pc);
                     let len = pvm.pc_trace.len();

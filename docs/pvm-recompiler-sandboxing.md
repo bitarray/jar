@@ -354,7 +354,7 @@ memory-heavy workloads due to the inherent function call overhead.
 
 ### Implementation Status for Option A — ✅ DONE
 
-What was implemented (see `crates/grey-pvm/src/recompiler/`):
+What was implemented (see `crates/javm/src/recompiler/`):
 
 1. **`FlatMemory` struct** in `mod.rs`: contiguous mmap region containing
    permission table (1MB) + JitContext (4KB page) + guest memory (4GB).

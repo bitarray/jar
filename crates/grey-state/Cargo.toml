@@ -9,7 +9,7 @@ description = "Chain state representation and block-level state transitions for 
 grey-types = { workspace = true }
 grey-codec = { workspace = true }
 grey-crypto = { workspace = true }
-grey-pvm = { workspace = true }
+javm = { workspace = true }
 grey-merkle = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

@@ -9,7 +9,8 @@ use crate::pvm_backend::{ExitReason, PvmInstance};
 use grey_types::config::Config;
 use grey_types::constants::{GAS_IS_AUTHORIZED, HOST_OOB, HOST_WHAT};
 use grey_types::work::*;
-use grey_types::{Gas, Hash, ServiceId, Timeslot};
+use grey_types::{Hash, ServiceId, Timeslot};
+use javm::Gas;
 use std::collections::BTreeMap;
 
 /// Build an error RefineResult for a work item (non-Ok exit).

@@ -686,7 +686,7 @@ mod tests {
         let blob = build_sample_service();
         assert!(!blob.is_empty());
         // Verify it can be loaded by PVM
-        let pvm = grey_pvm::program::initialize_program(&blob, &[], 1_000_000);
+        let pvm = javm::program::initialize_program(&blob, &[], 1_000_000);
         assert!(pvm.is_some(), "Sample service blob should be loadable by PVM");
     }
 
@@ -694,11 +694,11 @@ mod tests {
     fn test_sample_service_refine_halts() {
         let blob = build_sample_service();
         let args = b"hello world";
-        let mut pvm = grey_pvm::program::initialize_program(&blob, args, 1_000_000)
+        let mut pvm = javm::program::initialize_program(&blob, args, 1_000_000)
             .expect("should initialize");
         // Refine starts at PC=0 (jump → refine body → halt)
         let (exit, _gas) = pvm.run();
-        assert_eq!(exit, grey_pvm::vm::ExitReason::Halt,
+        assert_eq!(exit, javm::vm::ExitReason::Halt,
             "Refine should halt cleanly, got {:?}", exit);
     }
 
@@ -706,7 +706,7 @@ mod tests {
     fn test_sample_service_accumulate_host_call() {
         let blob = build_sample_service();
         let args = b"test";
-        let mut pvm = grey_pvm::program::initialize_program(&blob, args, 1_000_000)
+        let mut pvm = javm::program::initialize_program(&blob, args, 1_000_000)
             .expect("should initialize");
         // Set PC to accumulate entry (byte 5)
         pvm.pc = 5;
@@ -718,7 +718,7 @@ mod tests {
         }
         eprintln!("  SP={:#x} regs={:?}", pvm.registers[1], &pvm.registers[..]);
         // Should reach a host call (ecalli 4 = host_write)
-        assert_eq!(exit, grey_pvm::vm::ExitReason::HostCall(4),
+        assert_eq!(exit, javm::vm::ExitReason::HostCall(4),
             "Accumulate should hit host_write call, got {:?}", exit);
     }
 }

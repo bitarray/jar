@@ -5,8 +5,7 @@
 use crate::args::{self, Args};
 use crate::instruction::Opcode;
 use crate::memory::{Memory, MemoryAccess};
-use grey_types::constants::PVM_REGISTER_COUNT;
-use grey_types::Gas;
+use crate::{Gas, PVM_REGISTER_COUNT};
 
 /// Exit reason for PVM execution (ε values, eq A.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -602,7 +601,7 @@ impl Pvm {
                     // - sbrk(n) returns old heap_top and advances heap_top by n,
                     //   mapping any needed pages along the way
                     let size = self.registers[ra];
-                    let ps = grey_types::constants::PVM_PAGE_SIZE;
+                    let ps = crate::PVM_PAGE_SIZE;
 
                     if size > u32::MAX as u64 {
                         self.registers[rd] = 0;

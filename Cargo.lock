@@ -1236,7 +1236,6 @@ dependencies = [
  "grey-erasure",
  "grey-merkle",
  "grey-network",
- "grey-pvm",
  "grey-rpc",
  "grey-services",
  "grey-state",
@@ -1244,6 +1243,7 @@ dependencies = [
  "grey-transpiler",
  "grey-types",
  "hex",
+ "javm",
  "libp2p",
  "serde",
  "serde_json",
@@ -1257,9 +1257,8 @@ name = "grey-bench"
 version = "0.1.0"
 dependencies = [
  "criterion",
- "grey-pvm",
  "grey-transpiler",
- "grey-types",
+ "javm",
  "polkavm",
  "polkavm-common",
 ]
@@ -1343,16 +1342,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "grey-pvm"
-version = "0.1.0"
-dependencies = [
- "grey-types",
- "libc",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
 name = "grey-rpc"
 version = "0.1.0"
 dependencies = [
@@ -1375,9 +1364,9 @@ name = "grey-services"
 version = "0.1.0"
 dependencies = [
  "grey-crypto",
- "grey-pvm",
  "grey-state",
  "grey-types",
+ "javm",
  "thiserror 2.0.18",
 ]
 
@@ -1388,9 +1377,9 @@ dependencies = [
  "grey-codec",
  "grey-crypto",
  "grey-merkle",
- "grey-pvm",
  "grey-types",
  "hex",
+ "javm",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1418,7 +1407,7 @@ dependencies = [
 name = "grey-transpiler"
 version = "0.1.0"
 dependencies = [
- "grey-pvm",
+ "javm",
  "thiserror 2.0.18",
  "tracing",
  "tracing-test",
@@ -1955,6 +1944,15 @@ name = "itoa"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
+
+[[package]]
+name = "javm"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "thiserror 2.0.18",
+ "tracing",
+]
 
 [[package]]
 name = "js-sys"
