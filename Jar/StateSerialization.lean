@@ -112,11 +112,13 @@ def preimageInfoHashArg (length : BlobLength) (hash : Hash) : ByteArray :=
 
 /-- Extract service ID from a C(s, h) key. Bytes at positions 0,2,4,6. -/
 def extractServiceIdFromDataKey (key : ByteArray) : ServiceId :=
-  let b0 := key.get! 0
-  let b1 := key.get! 2
-  let b2 := key.get! 4
-  let b3 := key.get! 6
-  UInt32.ofNat (b0.toNat + b1.toNat * 256 + b2.toNat * 65536 + b3.toNat * 16777216)
+  if key.size < 7 then 0
+  else
+    let b0 := key.get! 0
+    let b1 := key.get! 2
+    let b2 := key.get! 4
+    let b3 := key.get! 6
+    UInt32.ofNat (b0.toNat + b1.toNat * 256 + b2.toNat * 65536 + b3.toNat * 16777216)
 
 -- ============================================================================
 -- Serialization Helpers
@@ -475,7 +477,8 @@ private inductive KeyType where
 
 /-- Classify a 31-byte state key. -/
 private def classifyKey (key : ByteArray) : KeyType :=
-  if key.get! 0 == 255 then
+  if key.size < 31 then .serviceData  -- malformed key
+  else if key.get! 0 == 255 then
     if key.get! 2 == 0 && key.get! 4 == 0 && key.get! 6 == 0 &&
        (Id.run do
          let mut allZero := true
