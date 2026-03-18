@@ -125,7 +125,7 @@ pub fn parse_work_report(json: &serde_json::Value) -> WorkReport {
 /// and `{stem}.output.gp072_tiny.json` (containing `{output, post_state}`).
 /// Returns a Value with all four keys at top level, matching the W3F single-file format.
 pub fn load_jar_test(dir: &str, stem: &str) -> serde_json::Value {
-    let variant = "gp072_tiny";
+    let variant = "jar080_tiny";
     let input_path = format!("{dir}/{stem}.input.{variant}.json");
     let output_path = format!("{dir}/{stem}.output.{variant}.json");
 
@@ -150,7 +150,7 @@ pub fn load_jar_test(dir: &str, stem: &str) -> serde_json::Value {
 /// Discover all test stems for a given category directory (gp072_tiny variant).
 /// Returns stems sorted alphabetically.
 pub fn discover_test_stems(dir: &str) -> Vec<String> {
-    let variant = "gp072_tiny";
+    let variant = "jar080_tiny";
     let suffix = format!(".input.{variant}.json");
     let mut stems = Vec::new();
     for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("failed to read dir {dir}: {e}")) {
