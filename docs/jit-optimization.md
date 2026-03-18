@@ -2,49 +2,46 @@
 
 ## Current state (March 2026)
 
-The JAVM recompiler is a **single-pass, 1:1 instruction translator**. Each PVM
-instruction maps directly to 1-5 x86-64 instructions with no cross-instruction
-optimization. The JIT compiles PVM bytecode to native code as part of each
-program execution — compilation + execution time both matter.
+The JAVM recompiler is a **single-pass JIT** with peephole optimization.
+PVM bytecode is compiled to native x86-64 code as part of each program
+execution — compilation + execution time both matter.
 
-### Current benchmark results (vs polkavm generic-sandbox)
+### Benchmark results (vs polkavm generic-sandbox)
 
 | Benchmark | grey recompiler | polkavm compiler | Ratio |
 |-----------|----------------|-----------------|-------|
-| fib (compute, no memory) | 418 µs | 423 µs | **0.99x** |
-| hostcall (100K ecalli) | 618 µs | 3,233 µs | **5.2x faster** |
-| sort (compute + memory) | 585 µs | 454 µs | **1.29x slower** |
+| fib (compute, no memory) | 418 µs | 424 µs | **0.99x** |
+| hostcall (100K ecalli) | 698 µs | 3,211 µs | **4.6x faster** |
+| sort (compute + memory) | 549 µs | 454 µs | **1.21x slower** |
 
-The sort gap is entirely from the software bounds check (2 instructions per
-memory access: `cmp + jae`). polkavm uses mprotect + SIGSEGV (0 instructions).
-See `plans/sigsegv-safety.md` for why we chose software bounds checks.
+The sort gap is from the software bounds check (2 instructions per memory
+access: `cmp + jae`). polkavm uses mprotect + SIGSEGV (0 instructions).
+See `/workspaces/grey/plans/sigsegv-safety.md` for why we chose software
+bounds checks.
 
 ## Optimizations (one-pass, no IR)
 
 All optimizations below can be done in a single forward pass over the PVM
 instruction stream, with zero or near-zero compile-time overhead.
 
-### O1. Scaled-index addressing (sort: ~10-15% improvement)
+### O1. Scaled-index addressing ✅ IMPLEMENTED
 
 **Pattern:** Array element access `arr[i]` generates:
 ```
-PVM:  add t0,i,i / add t0,t0,t0 / add t0,base,t0 / load [t0]
-x86:  add rdx,rdx / add rdx,rdx / add rdx,rsi / cmp+jae+mov [r15+rdx]
+PVM:  add64 D,A,A / add64 D,D,D / add64 D2,BASE,D / load_ind [D2]
+x86:  mov+add+add+mov+add+movzx+cmp+jae+load (9 instructions)
 ```
 
-**Optimization:** Detect the shift-by-N + base-add + load pattern and emit
-x86 scaled-index addressing:
+**Optimization:** Lookahead peephole detects the 4-instruction pattern
+(add+add+add+load/store) and fuses into:
 ```
-x86:  lea edx,[esi+idx*4] / cmp+jae+mov [r15+rdx]
+x86:  lea edx,[base+idx*4] / cmp+jae+load (4 instructions)
 ```
 
-Saves 2 instructions per array access. The detection is a small window buffer
-(check if the last 2-3 emitted instructions are `add r,r` pairs targeting the
-same register).
+Saves 5 instructions per matched array access. The peephole scans ahead
+4 PVM instructions when it sees `add64 D,A,A`.
 
-**Applies to sort bench:** Yes — the inner loop computes `&arr[j]` via
-`add+add+add+load` on every iteration. This is the highest-impact single
-optimization for the sort benchmark.
+**Result:** sort 585µs → 549µs (6.2% improvement)
 
 ### O2. Fused compare-and-branch
 
@@ -98,19 +95,17 @@ bounds checks for addresses below it.
 **Applies to sort bench:** Partially — the initial array setup uses known
 stack offsets, but the inner loop uses dynamic indices.
 
-### O6. Basic-block-level address range check
+### O6. Basic-block-level address range check — NOT APPLICABLE to sort
 
 **Pattern:** Instead of checking bounds per load/store, check once at the
-start of a basic block that all addresses in the block are in range. If a
-block accesses `arr[j]` through `arr[j+3]`, emit one bounds check for the
-entire range `[min_addr, max_addr+width)`.
+start of a basic block that all addresses in the block are in range.
 
-This requires scanning the block for memory accesses during the first pass
-(which we already do for gas cost computation). For a block with N memory
-accesses, reduces bounds checks from N to 1.
-
-**Applies to sort bench:** Yes — the inner loop has 2 memory accesses
-(load arr[j], store arr[j+1]) that could share one bounds check.
+**Analysis:** In the sort benchmark, each basic block has at most ONE memory
+access (the store and load are in separate blocks, separated by gas checks
+and branches). O6 requires multiple memory accesses in the same block to
+merge bounds checks. This pattern would help programs with structure field
+access (`load a.x; load a.y; load a.z` in one block) but not array
+iteration where each access is in its own branch-separated block.
 
 ### O7. Dead move elimination
 
@@ -137,17 +132,31 @@ overhead.
 **Applies to sort bench:** Yes — reduces per-execution initialization cost
 (relevant for the "compile + execute" benchmark).
 
+## Sort benchmark progression
+
+| Change | Time | vs polkavm | Commit |
+|--------|------|-----------|--------|
+| Permission table lookup (baseline) | 918 µs | 2.04x | — |
+| Bounds check (replace perm table) | 665 µs | 1.47x | e98c5e7 |
+| Cold fault stubs (out-of-line) | 620 µs | 1.37x | 6932e3c |
+| 32-bit address arithmetic | 585 µs | 1.29x | 5e3132a |
+| **Scaled-index peephole (O1)** | **549 µs** | **1.21x** | 148d48e |
+
+Remaining gap is purely `cmp [heap_top], edx; jae fault` per memory access
+(2 instructions). Only eliminable via mprotect (see `plans/sigsegv-safety.md`)
+or full-4GB spec change.
+
 ## Priority order
 
-| # | Optimization | Impact | Effort | Workloads helped |
-|---|-------------|--------|--------|-----------------|
-| O8 | Permission table removal | Low | Low | All (init time) |
-| O1 | Scaled-index addressing | Medium | Medium | sort, any array code |
-| O3 | Immediate-address folding | Low | Low | Stack-heavy code |
-| O6 | Block-level bounds check | Medium | Medium | Memory-heavy loops |
-| O4 | Multiply-accumulate fusion | High | High | Crypto primitives |
-| O5 | Constant address elision | Low | Medium | Fixed-layout programs |
-| O7 | Dead move elimination | Low | Low | All |
+| # | Optimization | Impact | Effort | Status |
+|---|-------------|--------|--------|--------|
+| O1 | Scaled-index addressing | Medium | Medium | ✅ Done |
+| O8 | Permission table removal | Low | Low | Ready |
+| O3 | Immediate-address folding | Low | Low | Todo |
+| O6 | Block-level bounds check | N/A | Medium | Not applicable to sort |
+| O4 | Multiply-accumulate fusion | High | High | Todo (crypto) |
+| O5 | Constant address elision | Low | Medium | Todo |
+| O7 | Dead move elimination | Low | Low | Todo |
 
 ## What requires multi-pass (NOT recommended for now)
 
