@@ -19,10 +19,14 @@ pub struct PreDecodedInst {
     /// PVM byte offset of the next instruction.
     pub next_pc: u32,
     /// Gas cost if this is a gas block start (>0), 0 otherwise.
-    /// Set by predecode pass 3 or by single-pass codegen.
+    /// Set by single-pass codegen via placeholder + patch.
     pub gas_cost: u32,
     /// Whether this instruction starts a gas metering block.
     pub is_gas_block_start: bool,
+    /// Flat register fields for fast gas cost lookup (avoids Args enum match).
+    pub ra: u8,
+    pub rb: u8,
+    pub rd: u8,
 }
 
 /// Pre-decode all instructions from raw code+bitmask into a flat array.
@@ -49,13 +53,23 @@ pub fn predecode(code: &[u8], bitmask: &[u8], jump_table: &[u32]) -> Vec<PreDeco
         let category = opcode.category();
         let args = args::decode_args(code, pc, skip, category);
 
+        // Extract flat register fields for fast gas cost lookup
+        let (ra, rb, rd) = match args {
+            Args::ThreeReg { ra, rb, rd } => (ra as u8, rb as u8, rd as u8),
+            Args::TwoReg { rd: d, ra: a } => (a as u8, 0xFF, d as u8),
+            Args::TwoRegImm { ra, rb, .. } | Args::TwoRegOffset { ra, rb, .. }
+            | Args::TwoRegTwoImm { ra, rb, .. } => (ra as u8, rb as u8, 0xFF),
+            Args::RegImm { ra, .. } | Args::RegExtImm { ra, .. }
+            | Args::RegTwoImm { ra, .. } | Args::RegImmOffset { ra, .. } => (ra as u8, 0xFF, 0xFF),
+            _ => (0xFF, 0xFF, 0xFF),
+        };
         instrs.push(PreDecodedInst {
-            opcode,
-            args,
+            opcode, args,
             pc: pc as u32,
             next_pc: next_pc as u32,
             gas_cost: 0,
             is_gas_block_start: false,
+            ra, rb, rd,
         });
 
         pc = next_pc;

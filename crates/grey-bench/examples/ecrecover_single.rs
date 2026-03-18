@@ -91,9 +91,10 @@ fn main() {
                 match pvm.run() {
                     javm::ExitReason::Halt | javm::ExitReason::Panic => {
                         let exec_us = t_exec.elapsed().as_micros();
-                        eprintln!("{:20} {:>10.3} ms  (compile={:.1}ms exec={}µs) a0={}",
+                        let gas_used = GAS - pvm.gas() as u64;
+                        eprintln!("{:20} {:>10.3} ms  (compile={:.1}ms exec={}µs) a0={} gas={}",
                             "grey-recompiler", t.elapsed().as_secs_f64() * 1000.0,
-                            compile_ms, exec_us, pvm.registers()[7]);
+                            compile_ms, exec_us, pvm.registers()[7], gas_used);
                         return;
                     }
                     javm::ExitReason::HostCall(_) => continue,

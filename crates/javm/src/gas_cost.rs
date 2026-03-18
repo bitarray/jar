@@ -750,8 +750,8 @@ pub fn compute_block_gas_costs(code: &[u8], bitmask: &[u8]) -> Vec<u64> {
 // ============================================================================
 
 /// Compact instruction cost for the fast simulator.
-#[derive(Clone, Copy)]
-struct FastCost {
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FastCost {
     cycles: u8,
     decode_slots: u8,
     /// 0=none, 1=alu, 2=load(+alu), 3=store(+alu), 4=mul(+alu), 5=div(+alu)
@@ -775,19 +775,11 @@ fn reg_bit(r: u8) -> u16 {
 }
 
 /// Compute FastCost from a pre-decoded instruction.
-fn fast_cost(instr: &crate::recompiler::predecode::PreDecodedInst, code: &[u8], bitmask: &[u8]) -> FastCost {
+/// Uses flat (ra, rb, rd) fields from PreDecodedInst for zero-cost register access.
+#[inline(always)]
+pub fn fast_cost(instr: &crate::recompiler::predecode::PreDecodedInst, code: &[u8], bitmask: &[u8]) -> FastCost {
     use crate::args::Args;
-
-    // Extract register indices from decoded args
-    let (ra, rb, rd) = match instr.args {
-        Args::ThreeReg { ra, rb, rd } => (ra as u8, rb as u8, rd as u8),
-        Args::TwoReg { rd: d, ra: a } => (a as u8, 0xFF, d as u8),
-        Args::TwoRegImm { ra, rb, .. } | Args::TwoRegOffset { ra, rb, .. }
-        | Args::TwoRegTwoImm { ra, rb, .. } => (ra as u8, rb as u8, 0xFF),
-        Args::RegImm { ra, .. } | Args::RegExtImm { ra, .. }
-        | Args::RegTwoImm { ra, .. } | Args::RegImmOffset { ra, .. } => (ra as u8, 0xFF, 0xFF),
-        _ => (0xFF, 0xFF, 0xFF),
-    };
+    let (ra, rb, rd) = (instr.ra, instr.rb, instr.rd);
 
     let r1 = |r: u8| reg_bit(r);
     let r2 = |a: u8, b: u8| reg_bit(a) | reg_bit(b);
@@ -973,7 +965,8 @@ fn eu_consume(avail: &mut [u8; 5], eu: u8) {
 
 /// Fast pipeline simulation using bitmask-based SoA ROB.
 /// All state on the stack, zero heap allocation.
-fn gas_sim_fast(instrs: &[crate::recompiler::predecode::PreDecodedInst], code: &[u8], bitmask: &[u8]) -> u32 {
+/// Uses pre-computed FastCost from each instruction (no per-call match dispatch).
+fn gas_sim_fast(instrs: &[crate::recompiler::predecode::PreDecodedInst], _code: &[u8], _bitmask: &[u8]) -> u32 {
     // SoA ROB arrays (32 entries, stack-allocated)
     let mut state = [0u8; 32];        // 0=empty, 1=wait, 2=exe, 3=fin
     let mut cycles_left = [0u8; 32];
@@ -998,7 +991,7 @@ fn gas_sim_fast(instrs: &[crate::recompiler::predecode::PreDecodedInst], code: &
     for _safety in 0..100_000u32 {
         // Phase 1: Decode as many instructions as possible this cycle
         while instr_idx < instrs.len() && decode_slots > 0 && (next_slot as usize) < 32 {
-            let cost = fast_cost(&instrs[instr_idx], code, bitmask);
+            let cost = fast_cost(&instrs[instr_idx], _code, _bitmask);
 
             if cost.is_move_reg {
                 decode_slots = decode_slots.saturating_sub(cost.decode_slots);
