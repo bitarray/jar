@@ -201,7 +201,8 @@ impl Compiler {
     /// Compile from pre-decoded instructions.
     /// Returns (native_code, dispatch_table) where dispatch_table[pc] is the
     /// native code offset for PVM PC, or -1 if not a valid entry point.
-    pub fn compile(mut self, instrs: &[PreDecodedInst], code_len: usize) -> (Vec<u8>, Vec<i32>) {
+    pub fn compile(mut self, instrs: &[PreDecodedInst], code_len: usize,
+                   raw_code: &[u8], raw_bitmask: &[u8]) -> (Vec<u8>, Vec<i32>) {
         // Emit prologue
         self.emit_prologue();
 
@@ -210,7 +211,12 @@ impl Compiler {
             self.label_for_pc(instr.pc);
         }
 
-        // Main compilation loop: iterate pre-decoded instructions
+        // Single-pass compilation: decode → gas sim → codegen integrated.
+        // Gas costs are computed inline and patched into placeholders.
+
+        // Pending gas block: (oog_stub_label, block_start_pc, cost_patch_offset, block_start_idx)
+        let mut pending_gas: Option<(Label, u32, usize, usize)> = None;
+
         let mut i = 0;
         while i < instrs.len() {
             let instr = &instrs[i];
@@ -221,12 +227,22 @@ impl Compiler {
                 self.asm.bind_label(label);
             }
 
-            // Gas metering at gas block start (gas_cost > 0)
-            if instr.gas_cost > 0 {
+            // At gas block start: finalize previous block's cost, start new one
+            if instr.is_gas_block_start {
+                // Finalize previous block
+                if let Some((stub_label, block_pc, patch_offset, block_start)) = pending_gas.take() {
+                    let block_instrs = &instrs[block_start..i];
+                    let cost = crate::gas_cost::gas_cost_for_block_fast(block_instrs, raw_code, raw_bitmask) as u32;
+                    self.asm.patch_i32(patch_offset, cost as i32);
+                    self.oog_stubs.push((stub_label, block_pc, cost));
+                }
+
+                // Start new gas block: emit placeholder sub + jcc
                 let stub_label = self.asm.new_label();
-                self.asm.sub_mem64_imm32(CTX, CTX_GAS, instr.gas_cost as i32);
+                self.asm.sub_mem64_imm32(CTX, CTX_GAS, 0); // placeholder cost=0
+                let patch_offset = self.asm.offset() - 4; // offset of the imm32
                 self.asm.jcc_label(Cc::S, stub_label);
-                self.oog_stubs.push((stub_label, instr.pc, instr.gas_cost));
+                pending_gas = Some((stub_label, instr.pc, patch_offset, i));
             }
 
             // Peephole lookahead: try multi-instruction fusion patterns.
@@ -245,6 +261,14 @@ impl Compiler {
             self.update_reg_defs(instr.opcode, &instr.args);
 
             i += 1;
+        }
+
+        // Finalize last gas block
+        if let Some((stub_label, block_pc, patch_offset, block_start)) = pending_gas.take() {
+            let block_instrs = &instrs[block_start..instrs.len()];
+            let cost = crate::gas_cost::gas_cost_for_block_fast(block_instrs, raw_code, raw_bitmask) as u32;
+            self.asm.patch_i32(patch_offset, cost as i32);
+            self.oog_stubs.push((stub_label, block_pc, cost));
         }
         // Emit epilogue and exit sequences
         self.emit_exit_sequences();
@@ -412,17 +436,14 @@ impl Compiler {
         self.fault_stubs.push((fault_label, pvm_pc));
     }
 
-    /// Helper: bind label and emit gas check for a pre-decoded instruction in a fused pattern.
-    fn emit_label_and_gas_for(&mut self, instr: &PreDecodedInst) {
+    /// Helper: bind label for a pre-decoded instruction in a fused pattern.
+    /// Note: gas checks are handled by the single-pass gas simulator in compile(),
+    /// not here. Fused instructions that span gas block boundaries are rare;
+    /// the gas cost includes all fused instructions since they're in the same block.
+    fn emit_label_for(&mut self, instr: &PreDecodedInst) {
         let label = self.block_labels[instr.pc as usize];
         if label != NO_LABEL {
             self.asm.bind_label(label);
-        }
-        if instr.gas_cost > 0 {
-            let stub_label = self.asm.new_label();
-            self.asm.sub_mem64_imm32(CTX, CTX_GAS, instr.gas_cost as i32);
-            self.asm.jcc_label(Cc::S, stub_label);
-            self.oog_stubs.push((stub_label, instr.pc, instr.gas_cost));
         }
     }
 
@@ -467,7 +488,7 @@ impl Compiler {
                 let Args::TwoRegImm { ra, rb, imm } = i3.args else { return None; };
                 if rb != addr_reg || imm as i32 != 0 { return None; }
 
-                for j in 0..4 { self.emit_label_and_gas_for(&instrs[idx + j]); }
+                for j in 0..4 { self.emit_label_for(&instrs[idx + j]); }
 
                 self.asm.lea_sib_scaled_32(SCRATCH, REG_MAP[base_reg], REG_MAP[idx_reg], 2);
                 let fn_addr = self.read_fn_for(i3.opcode);
@@ -488,7 +509,7 @@ impl Compiler {
                 let Args::TwoRegImm { ra, rb, imm } = i3.args else { return None; };
                 if rb != addr_reg || imm as i32 != 0 { return None; }
 
-                for j in 0..4 { self.emit_label_and_gas_for(&instrs[idx + j]); }
+                for j in 0..4 { self.emit_label_for(&instrs[idx + j]); }
 
                 self.asm.lea_sib_scaled_32(SCRATCH, REG_MAP[base_reg], REG_MAP[idx_reg], 2);
                 let fn_addr = self.write_fn_for(i3.opcode);
@@ -520,7 +541,7 @@ impl Compiler {
         if u_ra != m_ra || u_rb != m_rb { return None; }
 
         // Pattern matched! Bind labels and gas checks.
-        for j in 0..2 { self.emit_label_and_gas_for(&instrs[idx + j]); }
+        for j in 0..2 { self.emit_label_for(&instrs[idx + j]); }
 
         let (a, b) = (REG_MAP[m_ra], REG_MAP[m_rb]);
         let (rd_lo, rd_hi) = (REG_MAP[m_rd], REG_MAP[u_rd]);

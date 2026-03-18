@@ -574,7 +574,7 @@ impl RecompiledPvm {
             helpers,
             code.len(),
         );
-        let (native, dispatch_table) = compiler.compile(&pre_decoded, code.len());
+        let (native, dispatch_table) = compiler.compile(&pre_decoded, code.len(), &code, &bitmask);
 
         if debug {
             let _ = std::fs::write("/tmp/pvm_native.bin", &native);

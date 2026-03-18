@@ -19,7 +19,10 @@ pub struct PreDecodedInst {
     /// PVM byte offset of the next instruction.
     pub next_pc: u32,
     /// Gas cost if this is a gas block start (>0), 0 otherwise.
+    /// Set by predecode pass 3 or by single-pass codegen.
     pub gas_cost: u32,
+    /// Whether this instruction starts a gas metering block.
+    pub is_gas_block_start: bool,
 }
 
 /// Pre-decode all instructions from raw code+bitmask into a flat array.
@@ -52,6 +55,7 @@ pub fn predecode(code: &[u8], bitmask: &[u8], jump_table: &[u32]) -> Vec<PreDeco
             pc: pc as u32,
             next_pc: next_pc as u32,
             gas_cost: 0,
+            is_gas_block_start: false,
         });
 
         pc = next_pc;
@@ -107,24 +111,12 @@ pub fn predecode(code: &[u8], bitmask: &[u8], jump_table: &[u32]) -> Vec<PreDeco
         }
     }
 
-    // --- Pass 3: Compute gas costs using pre-decoded instructions ---
-    // Find block boundaries (indices into instrs where is_gas_start is true)
-    let gas_block_count = is_gas_start.iter().filter(|&&b| b).count();
-    let mut block_starts: Vec<usize> = Vec::with_capacity(gas_block_count + 1);
+    // --- Mark gas block start flags on instructions ---
+    // Gas costs are computed inline during codegen (single-pass).
     for i in 0..instrs.len() {
         if is_gas_start[i] {
-            block_starts.push(i);
+            instrs[i].is_gas_block_start = true;
         }
-    }
-    block_starts.push(instrs.len()); // sentinel
-
-    // Simulate each block from pre-decoded instructions
-    for w in block_starts.windows(2) {
-        let start = w[0];
-        let end = w[1];
-        let block_instrs = &instrs[start..end];
-        let cost = crate::gas_cost::gas_cost_for_block_fast(block_instrs, code, bitmask);
-        instrs[start].gas_cost = cost as u32;
     }
 
     instrs

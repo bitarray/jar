@@ -120,6 +120,11 @@ impl Assembler {
         self.code.len()
     }
 
+    /// Patch an i32 value at a previously recorded offset.
+    pub fn patch_i32(&mut self, offset: usize, value: i32) {
+        self.code[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
     // === Raw byte emission ===
 
     fn emit(&mut self, b: u8) {
