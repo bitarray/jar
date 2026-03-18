@@ -355,7 +355,8 @@ fn rob_all_finished(rob: &[RobEntry]) -> bool {
 }
 
 /// Run the pipeline simulation for a basic block starting at `start_pc`.
-fn gas_sim(code: &[u8], bitmask: &[u8], start_pc: usize) -> u32 {
+/// If `trace` is true, print every action for debugging.
+fn gas_sim_traced(code: &[u8], bitmask: &[u8], start_pc: usize, trace: bool) -> u32 {
     let mut s = SimState {
         ip: Some(start_pc),
         cycles: 0,
@@ -365,22 +366,17 @@ fn gas_sim(code: &[u8], bitmask: &[u8], start_pc: usize) -> u32 {
         rob: Vec::new(),
     };
 
-    for _ in 0..100_000 {
-        // Priority 1: Decode (matching Lean: canDecode checks slots > 0, not >= cost)
+    for iter in 0..100_000 {
+        // Priority 1: Decode
         if s.ip.is_some() && s.decode_slots > 0 && s.rob.len() < 32 {
             let pc = s.ip.unwrap();
             let cost = instruction_cost(code, bitmask, pc);
-
-            // Compute dependencies
             let deps: Vec<usize> = s.rob.iter().enumerate()
                 .filter(|(_, e)| e.state != RobState::Fin
                     && e.dest_regs.iter().any(|dr| cost.src_regs.contains(dr)))
                 .map(|(i, _)| i)
                 .collect();
-
-            // Saturating subtract (Lean Nat semantics)
             s.decode_slots = s.decode_slots.saturating_sub(cost.decode_slots);
-
             let next_ip = if cost.is_terminator {
                 None
             } else {
@@ -388,7 +384,11 @@ fn gas_sim(code: &[u8], bitmask: &[u8], start_pc: usize) -> u32 {
                 let npc = pc + 1 + skip;
                 if npc < code.len() { Some(npc) } else { None }
             };
-
+            if trace {
+                let op = crate::instruction::Opcode::from_byte(code[pc]).map(|o| format!("{:?}", o)).unwrap_or("?".into());
+                eprintln!("  [{}] DECODE pc={} {} cy={} dec={} rob_idx={} deps={:?} move={} term={} slots_left={}",
+                    iter, pc, op, cost.cycles, cost.decode_slots, s.rob.len(), deps, cost.is_move_reg, cost.is_terminator, s.decode_slots);
+            }
             if cost.is_move_reg {
                 s.ip = next_ip;
             } else {
@@ -408,6 +408,9 @@ fn gas_sim(code: &[u8], bitmask: &[u8], start_pc: usize) -> u32 {
         if s.dispatch_slots > 0 {
             if let Some(idx) = find_ready_entry(&s.rob, s.exec_units) {
                 let eu = s.rob[idx].exec_units;
+                if trace {
+                    eprintln!("  [{}] DISPATCH rob[{}] cy={} dispatch_left={}", iter, idx, s.rob[idx].cycles_left, s.dispatch_slots - 1);
+                }
                 s.rob[idx].state = RobState::Exe;
                 s.dispatch_slots -= 1;
                 s.exec_units = s.exec_units.sub(eu);
@@ -417,10 +420,18 @@ fn gas_sim(code: &[u8], bitmask: &[u8], start_pc: usize) -> u32 {
 
         // Priority 3: Done
         if s.ip.is_none() && rob_all_finished(&s.rob) {
+            if trace { eprintln!("  [{}] DONE cycles={}", iter, s.cycles); }
             break;
         }
 
         // Priority 4: Advance cycle
+        if trace {
+            let states: Vec<String> = s.rob.iter().enumerate().map(|(i, e)| {
+                let st = match e.state { RobState::Wait => "W", RobState::Exe => "E", RobState::Fin => "F" };
+                format!("{}:{}{}", i, st, if e.state == RobState::Exe { format!("({})", e.cycles_left) } else { String::new() })
+            }).collect();
+            eprintln!("  [{}] ADVANCE cycle {} → {} rob=[{}]", iter, s.cycles, s.cycles + 1, states.join(", "));
+        }
         for entry in s.rob.iter_mut() {
             if entry.state == RobState::Exe {
                 if entry.cycles_left <= 1 {
@@ -438,6 +449,10 @@ fn gas_sim(code: &[u8], bitmask: &[u8], start_pc: usize) -> u32 {
     }
 
     s.cycles
+}
+
+fn gas_sim(code: &[u8], bitmask: &[u8], start_pc: usize) -> u32 {
+    gas_sim_traced(code, bitmask, start_pc, false)
 }
 
 /// Compute gas cost for a basic block starting at `start_pc`.
@@ -466,12 +481,45 @@ mod tests {
 
     #[test]
     fn test_single_trap() {
-        // Block: just trap (opcode 0)
         let code = vec![0u8];
         let bitmask = vec![1u8];
-        let cost = gas_cost_for_block(&code, &bitmask, 0);
-        // trap: 2 cycles, max(2-3, 1) = 1
-        assert_eq!(cost, 1);
+        let cycles = gas_sim_traced(&code, &bitmask, 0, false);
+        assert_eq!(cycles, 2);
+        assert_eq!(gas_cost_for_block(&code, &bitmask, 0), 1); // max(2-3,1)=1
+    }
+
+    #[test]
+    fn test_single_ecalli() {
+        // ecalli 0: opcode=10, imm=0
+        let code = vec![10u8, 0];
+        let bitmask = vec![1, 0];
+        let cycles = gas_sim_traced(&code, &bitmask, 0, true);
+        eprintln!("ecalli-only: cycles={} cost={}", cycles, gas_cost_for_block(&code, &bitmask, 0));
+        assert_eq!(cycles, 100, "ecalli should take 100 cycles");
+        assert_eq!(gas_cost_for_block(&code, &bitmask, 0), 97);
+    }
+
+    #[test]
+    fn test_single_jump() {
+        // jump offset=0: opcode=40
+        let code = vec![40u8, 0];
+        let bitmask = vec![1, 0];
+        let cycles = gas_sim_traced(&code, &bitmask, 0, false);
+        assert_eq!(cycles, 15);
+        assert_eq!(gas_cost_for_block(&code, &bitmask, 0), 12);
+    }
+
+    #[test]
+    fn test_single_fallthrough() {
+        let code = vec![1u8]; // fallthrough
+        let bitmask = vec![1];
+        let cycles = gas_sim_traced(&code, &bitmask, 0, false);
+        assert_eq!(cycles, 2);
+        assert_eq!(gas_cost_for_block(&code, &bitmask, 0), 1);
+    }
+
+    #[test]
+    fn test_loadimm_then_trap() {
     }
 
     #[test]
@@ -511,6 +559,34 @@ mod integration_tests {
             }
         }
         eprintln!("Total basic blocks: {}", block_count);
+    }
+
+    #[test]
+    fn trace_ecalli_block() {
+        let blob = match std::fs::read("/tmp/test_service_blob.bin") {
+            Ok(b) => b,
+            Err(_) => { eprintln!("Skipping: /tmp/test_service_blob.bin not found"); return; }
+        };
+        let pvm = crate::program::initialize_program(&blob, &[0,0,0,0], 100_000).unwrap();
+        let code = &pvm.code;
+        let bm = &pvm.bitmask;
+
+        // Trace ALL blocks that the test program executes
+        // (blocks from the gas trace: 5, 2055, 18927, 17372, 17429, ...)
+        for &pc in &[5usize, 2055, 18927, 17372, 17429, 17454, 17459, 17463, 17469, 17532, 17545] {
+            let cycles = gas_sim_traced(code, bm, pc, false);
+            let cost = if cycles > 3 { cycles - 3 } else { 1 };
+            eprintln!("BB[{}]: cycles={} cost={}", pc, cycles, cost);
+        }
+
+        // Verify pre-computed costs match dynamic costs for key PCs
+        let bb = crate::vm::compute_basic_block_starts(code, bm);
+        for &pc in &[5usize, 2055, 18927, 17372, 17429, 17454, 17532, 17545] {
+            let is_bb = pc < bb.len() && bb[pc];
+            assert!(is_bb, "PC={} should be BB start", pc);
+            assert_eq!(pvm.block_gas_costs[pc], gas_cost_for_block(code, bm, pc),
+                "pre-computed vs dynamic cost mismatch at PC={}", pc);
+        }
     }
 
     #[test]

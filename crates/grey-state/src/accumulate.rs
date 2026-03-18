@@ -622,7 +622,6 @@ fn run_accumulate_pvm(
 
     // Set entry point: ΨM(c, 5, ...) starts at instruction counter 5 for accumulate
     pvm.set_pc(5);
-    pvm.enable_tracing();
     let initial_gas = pvm.gas();
     let mut host_call_count = 0u32;
 
