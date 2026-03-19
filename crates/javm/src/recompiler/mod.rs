@@ -29,45 +29,37 @@ pub struct JitContext {
     pub regs: [u64; 13],
     /// Gas counter (offset 104). Signed to detect underflow.
     pub gas: i64,
-    /// Reserved (offset 112). Previously held a Memory pointer.
-    _reserved_112: u64,
-    /// Exit reason code (offset 120).
+    /// Exit reason code (offset 112).
     pub exit_reason: u32,
-    /// Exit argument (offset 124) — host call ID, page fault addr, etc.
+    /// Exit argument (offset 116) — host call ID, page fault addr, etc.
     pub exit_arg: u32,
-    /// Heap base address (offset 128).
+    /// Heap base address (offset 120).
     pub heap_base: u32,
-    /// Current heap top (offset 132).
+    /// Current heap top (offset 124).
     pub heap_top: u32,
-    /// Jump table pointer (offset 136).
+    /// Jump table pointer (offset 128).
     pub jt_ptr: *const u32,
-    /// Jump table length (offset 144).
+    /// Jump table length (offset 136).
     pub jt_len: u32,
     _pad0: u32,
-    /// Basic block starts pointer (offset 152).
+    /// Basic block starts pointer (offset 144).
     pub bb_starts: *const u8,
-    /// Basic block starts length (offset 160).
+    /// Basic block starts length (offset 152).
     pub bb_len: u32,
     _pad1: u32,
-    /// Entry PC for re-entry after host calls (offset 168).
-    /// 0 = start from beginning, otherwise jump to this basic block.
+    /// Entry PC for re-entry after host calls (offset 160).
     pub entry_pc: u32,
-    /// Current PC when execution stopped (offset 172).
-    /// Updated on ecalli/djump exits.
+    /// Current PC when execution stopped (offset 164).
     pub pc: u32,
-    /// Dispatch table: PVM PC → native code offset (offset 176).
-    /// Array of i32 offsets indexed by PVM PC. -1 = invalid PC.
+    /// Dispatch table: PVM PC → native code offset (offset 168).
     pub dispatch_table: *const i32,
-    /// Base address of native code (offset 184).
+    /// Base address of native code (offset 176).
     pub code_base: u64,
-    /// Flat guest memory buffer base pointer (offset 192).
+    /// Flat guest memory buffer base pointer (offset 184).
     pub flat_buf: *mut u8,
-    /// Permission table base pointer (offset 200).
-    /// 1 byte per 4KB page: 0=inaccessible, 1=read-only, 2=read-write.
+    /// Permission table base pointer (offset 192).
     pub flat_perms: *const u8,
-    /// Fast re-entry flag (offset 208). When non-zero, prologue skips loading
-    /// callee-saved PVM registers (φ[0]-φ[4]) since they're preserved in x86
-    /// callee-saved registers between calls.
+    /// Fast re-entry flag (offset 200).
     pub fast_reentry: u32,
     _pad2: u32,
 }
@@ -469,7 +461,7 @@ impl RecompiledPvm {
             ctx_raw.write(JitContext {
                 regs: registers,
                 gas: gas as i64,
-                _reserved_112: 0,
+
                 exit_reason: 0,
                 exit_arg: 0,
                 heap_base: 0,
@@ -870,7 +862,6 @@ mod tests {
         let ctx = JitContext {
             regs: [0; 13],
             gas: 0,
-            _reserved_112: 0,
             exit_reason: 0,
             exit_arg: 0,
             heap_base: 0,

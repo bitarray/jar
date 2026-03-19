@@ -89,20 +89,19 @@ pub const PERMS_OFFSET: i32 = CTX_OFFSET + (1 << 20); // perms at R15 - 1052672
 
 pub const CTX_REGS: i32 = -CTX_OFFSET;          // offset 0 in JitContext
 pub const CTX_GAS: i32 = -CTX_OFFSET + 104;
-pub const CTX_MEMORY: i32 = -CTX_OFFSET + 112;
-pub const CTX_EXIT_REASON: i32 = -CTX_OFFSET + 120;
-pub const CTX_EXIT_ARG: i32 = -CTX_OFFSET + 124;
-pub const CTX_HEAP_BASE: i32 = -CTX_OFFSET + 128;
-pub const CTX_HEAP_TOP: i32 = -CTX_OFFSET + 132;
-pub const CTX_JT_PTR: i32 = -CTX_OFFSET + 136;
-pub const CTX_JT_LEN: i32 = -CTX_OFFSET + 144;
-pub const CTX_BB_STARTS: i32 = -CTX_OFFSET + 152;
-pub const CTX_BB_LEN: i32 = -CTX_OFFSET + 160;
-pub const CTX_ENTRY_PC: i32 = -CTX_OFFSET + 168;
-pub const CTX_PC: i32 = -CTX_OFFSET + 172;
-pub const CTX_DISPATCH_TABLE: i32 = -CTX_OFFSET + 176;
-pub const CTX_CODE_BASE: i32 = -CTX_OFFSET + 184;
-pub const CTX_FAST_REENTRY: i32 = -CTX_OFFSET + 208;
+pub const CTX_EXIT_REASON: i32 = -CTX_OFFSET + 112;
+pub const CTX_EXIT_ARG: i32 = -CTX_OFFSET + 116;
+pub const CTX_HEAP_BASE: i32 = -CTX_OFFSET + 120;
+pub const CTX_HEAP_TOP: i32 = -CTX_OFFSET + 124;
+pub const CTX_JT_PTR: i32 = -CTX_OFFSET + 128;
+pub const CTX_JT_LEN: i32 = -CTX_OFFSET + 136;
+pub const CTX_BB_STARTS: i32 = -CTX_OFFSET + 144;
+pub const CTX_BB_LEN: i32 = -CTX_OFFSET + 152;
+pub const CTX_ENTRY_PC: i32 = -CTX_OFFSET + 160;
+pub const CTX_PC: i32 = -CTX_OFFSET + 164;
+pub const CTX_DISPATCH_TABLE: i32 = -CTX_OFFSET + 168;
+pub const CTX_CODE_BASE: i32 = -CTX_OFFSET + 176;
+pub const CTX_FAST_REENTRY: i32 = -CTX_OFFSET + 200;
 
 /// Exit reason codes (matching ExitReason enum).
 pub const EXIT_HALT: u32 = 0;
