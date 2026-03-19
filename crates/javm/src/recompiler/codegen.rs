@@ -170,10 +170,11 @@ pub struct Compiler {
     fault_stubs: Vec<(Label, u32)>,
     /// Helper function addresses.
     helpers: HelperFns,
-    /// Entry points: every instruction start (for dispatch table / re-entry).
-    basic_block_starts: Vec<bool>,
     /// Jump table.
     jump_table: Vec<u32>,
+    /// Bitmask reference (1 = instruction start). Stored as raw pointer for self-referential use.
+    bitmask_ptr: *const u8,
+    bitmask_len: usize,
     /// Peephole: tracks how each PVM register was last defined.
     reg_defs: [RegDef; 13],
     /// Trap table for signal-based bounds checking: (native_offset, pvm_pc).
@@ -186,7 +187,7 @@ const NO_LABEL: Label = Label(u32::MAX);
 
 impl Compiler {
     pub fn new(
-        basic_block_starts: Vec<bool>,
+        bitmask: &[u8],
         jump_table: Vec<u32>,
         helpers: HelperFns,
         code_len: usize,
@@ -194,7 +195,7 @@ impl Compiler {
         // Estimate native code size: ~8 bytes per PVM code byte (empirically ~5-6x).
         let estimated_native = code_len * 8;
         // Labels: basic blocks + ~1 per instruction for fault stubs + overhead.
-        let num_bbs = basic_block_starts.iter().filter(|&&b| b).count();
+        let num_bbs = bitmask.iter().filter(|&&b| b == 1).count();
         let estimated_labels = num_bbs * 2 + code_len / 3;
         let mut asm = Assembler::with_capacity(estimated_native, estimated_labels);
         let exit_label = asm.new_label();
@@ -212,8 +213,9 @@ impl Compiler {
             fault_stubs: Vec::with_capacity(num_bbs * 16),
             reg_defs: [RegDef::Unknown; 13],
             helpers,
-            basic_block_starts,
             jump_table,
+            bitmask_ptr: bitmask.as_ptr(),
+            bitmask_len: bitmask.len(),
             #[cfg(feature = "signals")]
             trap_entries: Vec::new(),
         }
@@ -233,23 +235,32 @@ impl Compiler {
     }
 
     fn is_basic_block_start(&self, idx: u32) -> bool {
-        (idx as usize) < self.basic_block_starts.len() && self.basic_block_starts[idx as usize]
+        let i = idx as usize;
+        i < self.bitmask_len && unsafe { *self.bitmask_ptr.add(i) } == 1
     }
 
-    /// Compile directly from raw code+bitmask. Single-pass: decode + gas sim + codegen.
-    pub fn compile(mut self, code: &[u8], bitmask: &[u8],
-                   gas_starts: &[bool]) -> CompileResult {
+    /// Compile directly from raw code+bitmask. Streaming single-pass:
+    /// gas block discovery + decode + gas sim + codegen in one loop.
+    pub fn compile(mut self, code: &[u8], bitmask: &[u8]) -> CompileResult {
         let code_len = code.len();
 
         // Emit prologue
         self.emit_prologue();
 
-        // Pre-create labels for all instruction-start PCs
-        for (pc, &b) in bitmask.iter().enumerate() {
-            if b == 1 { self.label_for_pc(pc as u32); }
+        // Gas block starts: pre-mark PC=0 and jump table targets, then discover
+        // branch targets inline during the compile loop.
+        let mut gas_starts = vec![false; code_len];
+        if code_len > 0 {
+            gas_starts[0] = true;
+        }
+        for &target in &self.jump_table {
+            let t = target as usize;
+            if t < code_len && t < bitmask.len() && bitmask[t] == 1 {
+                gas_starts[t] = true;
+            }
         }
 
-        // Single-pass: decode inline, feed gas sim, emit native code
+        // Single streaming pass: decode + gas blocks + codegen
         let mut gas_sim = GasSimulator::new();
         let mut pending_gas: Option<(Label, u32, usize)> = None;
 
@@ -272,19 +283,42 @@ impl Compiler {
             let skip = compute_skip(pc, bitmask);
             let next_pc = (pc + 1 + skip) as u32;
 
-            // Extract raw register fields BEFORE decode_args (for gas sim)
+            // Extract raw register fields (for gas sim)
             let raw_ra = if pc + 1 < code.len() { code[pc + 1] & 0x0F } else { 0xFF };
             let raw_rb = if pc + 1 < code.len() { (code[pc + 1] >> 4) & 0x0F } else { 0xFF };
             let raw_rd = if pc + 2 < code.len() { code[pc + 2] & 0x0F } else { 0xFF };
 
-            // Bind label
-            let label = self.block_labels[pc];
-            if label != NO_LABEL {
-                self.asm.bind_label(label);
+            // Bind label (on-demand creation — no pre-pass needed)
+            let label = self.label_for_pc(pc as u32);
+            self.asm.bind_label(label);
+
+            // Full decode
+            let category = opcode.category();
+            let decoded_args = args::decode_args(code, pc, skip, category);
+
+            // Discover gas block boundaries inline (reuses decoded_args):
+            // - Branch/jump targets mark future gas block starts
+            // - Post-terminator/ecalli mark next instruction as gas block start
+            let target = match decoded_args {
+                Args::Offset { offset } => Some(offset as usize),
+                Args::RegImmOffset { offset, .. } => Some(offset as usize),
+                Args::TwoRegOffset { offset, .. } => Some(offset as usize),
+                _ => None,
+            };
+            if let Some(t) = target {
+                if t < code_len && t < bitmask.len() && bitmask[t] == 1 {
+                    gas_starts[t] = true;
+                }
+            }
+            if opcode.is_terminator() && (next_pc as usize) < code_len {
+                gas_starts[next_pc as usize] = true;
+            }
+            if matches!(opcode, Opcode::Ecalli) && (next_pc as usize) < code_len {
+                gas_starts[next_pc as usize] = true;
             }
 
-            // Gas block boundary
-            if pc < gas_starts.len() && gas_starts[pc] {
+            // Gas block boundary check
+            if gas_starts[pc] {
                 if let Some((stub_label, block_pc, patch_offset)) = pending_gas.take() {
                     let cost = gas_sim.flush_and_get_cost();
                     self.asm.patch_i32(patch_offset, cost as i32);
@@ -299,17 +333,13 @@ impl Compiler {
                 pending_gas = Some((stub_label, pc as u32, patch_offset));
             }
 
-            // Feed gas simulator (uses raw register bytes, no Args enum needed)
+            // Feed gas simulator
             let fc = crate::gas_cost::fast_cost_from_raw(
                 opcode as u8, raw_ra, raw_rb, raw_rd, pc as u32, code, bitmask,
             );
             gas_sim.feed(&fc);
 
-            // Full decode (only needed for compile_instruction and peephole)
-            let category = opcode.category();
-            let decoded_args = args::decode_args(code, pc, skip, category);
-
-            // Peephole: inline raw-code peek (no pre-decoded array needed)
+            // Peephole fusions
             let fused = match opcode {
                 Opcode::Add64 => self.try_fuse_scaled_index_raw(code, bitmask, pc, &decoded_args, &mut gas_sim),
                 Opcode::Mul64 => self.try_fuse_mul_pair_raw(code, bitmask, pc, &decoded_args, &mut gas_sim),

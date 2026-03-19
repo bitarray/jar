@@ -558,8 +558,6 @@ pub struct RecompiledPvm {
     bitmask: Vec<u8>,
     /// Jump table.
     jump_table: Vec<u32>,
-    /// Basic block starts.
-    basic_block_starts: Vec<bool>,
     /// Initial gas.
     initial_gas: Gas,
     /// Dispatch table: PVM PC → native code offset (-1 = invalid).
@@ -586,14 +584,8 @@ impl RecompiledPvm {
     ) -> Result<Self, String> {
         let debug = std::env::var("GREY_PVM_DEBUG").is_ok();
 
-        // Every instruction start is a valid entry point (for dispatch table / re-entry
-        // at arbitrary PCs, e.g., PC=5 for accumulate, PC=10 for on-transfer).
-        let basic_block_starts: Vec<bool> = bitmask.iter().map(|&b| b == 1).collect();
-
-        // Fast gas-block bitmap (byte-level scan, no full instruction decoding).
-        let _t0 = std::time::Instant::now();
-        let gas_starts = predecode::compute_gas_blocks(&code, &bitmask, &jump_table);
-        let _t_gas_blocks = _t0.elapsed();
+        // Gas blocks and validation are now computed inline during the compile loop.
+        // No separate pre-passes needed.
 
         // Allocate memory on the heap so we have a stable pointer
         let memory = Box::new(memory);
@@ -620,7 +612,7 @@ impl RecompiledPvm {
                 jt_len: jump_table.len() as u32,
                 _pad0: 0,
                 bb_starts: std::ptr::null(),
-                bb_len: basic_block_starts.len() as u32,
+                bb_len: bitmask.len() as u32,
                 _pad1: 0,
                 entry_pc: 0,
                 pc: 0,
@@ -636,7 +628,7 @@ impl RecompiledPvm {
 
         // Set up pointers
         ctx.jt_ptr = jump_table.as_ptr();
-        ctx.bb_starts = basic_block_starts.as_ptr() as *const u8;
+        ctx.bb_starts = bitmask.as_ptr() as *const u8;
 
         if debug {
             tracing::debug!(
@@ -662,12 +654,12 @@ impl RecompiledPvm {
 
         let _t2 = std::time::Instant::now();
         let compiler = Compiler::new(
-            basic_block_starts.clone(),
+            &bitmask,
             jump_table.clone(),
             helpers,
             code.len(),
         );
-        let compile_result = compiler.compile(&code, &bitmask, &gas_starts);
+        let compile_result = compiler.compile(&code, &bitmask);
         let _t_compile = _t2.elapsed();
         let native = compile_result.native_code;
         let dispatch_table = compile_result.dispatch_table;
@@ -676,7 +668,7 @@ impl RecompiledPvm {
             let _ = std::fs::write("/tmp/pvm_native.bin", &native);
             tracing::debug!(
                 native_bytes = native.len(),
-                basic_blocks = basic_block_starts.iter().filter(|&&b| b).count(),
+                basic_blocks = bitmask.iter().filter(|&&b| b == 1).count(),
                 "wrote native code to /tmp/pvm_native.bin"
             );
         }
@@ -702,7 +694,6 @@ impl RecompiledPvm {
         };
 
         tracing::debug!(
-            gas_blocks_us = _t_gas_blocks.as_micros() as u64,
             flat_mem_us = _t_flat.as_micros() as u64,
             compile_us = _t_compile.as_micros() as u64,
             native_us = _t_native.as_micros() as u64,
@@ -720,7 +711,6 @@ impl RecompiledPvm {
             code,
             bitmask,
             jump_table,
-            basic_block_starts,
             initial_gas: gas,
             dispatch_table,
             debug,
@@ -819,8 +809,8 @@ impl RecompiledPvm {
             return None;
         }
         let target = self.jump_table[idx as usize];
-        if (target as usize) < self.basic_block_starts.len()
-            && self.basic_block_starts[target as usize]
+        if (target as usize) < self.bitmask.len()
+            && self.bitmask[target as usize] == 1
         {
             Some(target)
         } else {
