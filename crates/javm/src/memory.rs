@@ -192,22 +192,47 @@ impl Memory {
 
     /// Read a little-endian u16.
     pub fn read_u16_le(&self, addr: u32) -> Option<u16> {
-        let bytes = self.read_bytes(addr, 2)?;
-        Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+        let page = addr >> 12;
+        let offset = (addr & 0xFFF) as usize;
+        if offset + 2 <= PVM_PAGE_SIZE as usize {
+            let pd = self.pages.get(&page)?;
+            if pd.access == PageAccess::Inaccessible { return None; }
+            Some(u16::from_le_bytes(pd.data[offset..offset + 2].try_into().unwrap()))
+        } else {
+            let bytes = self.read_bytes(addr, 2)?;
+            Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+        }
     }
 
     /// Read a little-endian u32.
     pub fn read_u32_le(&self, addr: u32) -> Option<u32> {
-        let bytes = self.read_bytes(addr, 4)?;
-        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        let page = addr >> 12;
+        let offset = (addr & 0xFFF) as usize;
+        if offset + 4 <= PVM_PAGE_SIZE as usize {
+            let pd = self.pages.get(&page)?;
+            if pd.access == PageAccess::Inaccessible { return None; }
+            Some(u32::from_le_bytes(pd.data[offset..offset + 4].try_into().unwrap()))
+        } else {
+            let bytes = self.read_bytes(addr, 4)?;
+            Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        }
     }
 
     /// Read a little-endian u64.
     pub fn read_u64_le(&self, addr: u32) -> Option<u64> {
-        let bytes = self.read_bytes(addr, 8)?;
-        Some(u64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]))
+        let page = addr >> 12;
+        let offset = (addr & 0xFFF) as usize;
+        if offset + 8 <= PVM_PAGE_SIZE as usize {
+            let pd = self.pages.get(&page)?;
+            if pd.access == PageAccess::Inaccessible { return None; }
+            Some(u64::from_le_bytes(pd.data[offset..offset + 8].try_into().unwrap()))
+        } else {
+            let bytes = self.read_bytes(addr, 8)?;
+            Some(u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3],
+                bytes[4], bytes[5], bytes[6], bytes[7],
+            ]))
+        }
     }
 
     /// Write a single byte. Returns error on page fault or read-only.
@@ -236,17 +261,53 @@ impl Memory {
 
     /// Write a little-endian u16.
     pub fn write_u16_le(&mut self, addr: u32, value: u16) -> MemoryAccess {
-        self.write_bytes(addr, &value.to_le_bytes())
+        let page = addr >> 12;
+        let offset = (addr & 0xFFF) as usize;
+        if offset + 2 <= PVM_PAGE_SIZE as usize {
+            match self.pages.get_mut(&page) {
+                Some(pd) if pd.access == PageAccess::ReadWrite => {
+                    pd.data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+                    MemoryAccess::Ok
+                }
+                _ => MemoryAccess::PageFault(addr),
+            }
+        } else {
+            self.write_bytes(addr, &value.to_le_bytes())
+        }
     }
 
     /// Write a little-endian u32.
     pub fn write_u32_le(&mut self, addr: u32, value: u32) -> MemoryAccess {
-        self.write_bytes(addr, &value.to_le_bytes())
+        let page = addr >> 12;
+        let offset = (addr & 0xFFF) as usize;
+        if offset + 4 <= PVM_PAGE_SIZE as usize {
+            match self.pages.get_mut(&page) {
+                Some(pd) if pd.access == PageAccess::ReadWrite => {
+                    pd.data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+                    MemoryAccess::Ok
+                }
+                _ => MemoryAccess::PageFault(addr),
+            }
+        } else {
+            self.write_bytes(addr, &value.to_le_bytes())
+        }
     }
 
     /// Write a little-endian u64.
     pub fn write_u64_le(&mut self, addr: u32, value: u64) -> MemoryAccess {
-        self.write_bytes(addr, &value.to_le_bytes())
+        let page = addr >> 12;
+        let offset = (addr & 0xFFF) as usize;
+        if offset + 8 <= PVM_PAGE_SIZE as usize {
+            match self.pages.get_mut(&page) {
+                Some(pd) if pd.access == PageAccess::ReadWrite => {
+                    pd.data[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+                    MemoryAccess::Ok
+                }
+                _ => MemoryAccess::PageFault(addr),
+            }
+        } else {
+            self.write_bytes(addr, &value.to_le_bytes())
+        }
     }
 
     /// Iterate over all mapped pages: yields (page_index, access, data_slice).
