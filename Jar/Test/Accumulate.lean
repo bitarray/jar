@@ -282,29 +282,20 @@ def shiftAccumulated (accumulated : Array (Array Hash))
 -- Update statistics
 -- ============================================================================
 
-/-- Update service statistics with accumulation results. -/
+/-- Update service statistics with accumulation results.
+    gasUsage: (service_id, total_gas_used, accumulate_count) -/
 def updateStatistics (stats : Array TAServiceStats)
-    (gasUsage : Array (Nat × Nat))  -- (service_id, gas_used)
-    (accumulatable : Array WorkReport) (n : Nat)
+    (gasUsage : Array (Nat × Nat × Nat))
     : Array TAServiceStats := Id.run do
   let mut result := stats
-  -- For each service that was accumulated, update counters
-  for (sid, gas) in gasUsage do
-    -- Find or create stats entry
+  for (sid, gas, count) in gasUsage do
     match result.findIdx? (·.serviceId == sid) with
     | some idx =>
       let s := result[idx]!
       result := result.set! idx { s with
-        accumulateCount := s.accumulateCount + 1
+        accumulateCount := s.accumulateCount + count
         accumulateGasUsed := s.accumulateGasUsed + gas }
     | none =>
-      -- Count work items for this service
-      let reports := accumulatable.extract 0 n
-      let mut itemCount := 0
-      for r in reports do
-        for d in r.digests do
-          if d.serviceId.toNat == sid then
-            itemCount := itemCount + 1
       result := result.push {
         serviceId := sid
         providedCount := 0
@@ -315,7 +306,7 @@ def updateStatistics (stats : Array TAServiceStats)
         extrinsicCount := 0
         extrinsicSize := 0
         exports := 0
-        accumulateCount := 1
+        accumulateCount := count
         accumulateGasUsed := gas }
   result
 
@@ -365,8 +356,14 @@ def accumulateTransition (pre : TAState) (inp : TAInput)
   -- Step 6: Run accumulation pipeline
   -- Build tiny config blob matching Rust's Config::tiny().encode_config_blob()
   let tinyConfigBlob := buildTinyConfigBlob
-  let (n, ps', yields, gasMap, _, _) := accseq (UInt64.ofNat G_T)
+  let result := accseq (UInt64.ofNat G_T)
     accumulatable #[] ps freeGasMap (UInt32.ofNat inp.slot) pre.entropy tinyConfigBlob
+  let n := result.1
+  let ps' := result.2.1
+  let yields := result.2.2.1
+  let gasMap := result.2.2.2.1
+  let countMap := result.2.2.2.2.1
+
 
   -- Step 7: Compute output hash
   let outputHash := computeOutputHash yields
@@ -379,9 +376,11 @@ def accumulateTransition (pre : TAState) (inp : TAInput)
       accounts := accounts.insert sid { acct with lastAccumulation := UInt32.ofNat inp.slot }
     | none => pure ()
 
-  -- Step 9: Update statistics
-  let gasUsageArr := (gasMap.entries.map fun (sid, gas) => (sid.toNat, gas.toNat)).toArray
-  let newStats := updateStatistics pre.statistics gasUsageArr accumulatable n
+  -- Step 9: Update statistics using per-service counts from accseq
+  let gasUsageArr := (gasMap.entries.map fun (sid, gas) =>
+    let count := match countMap.lookup sid with | some n => n | none => 1
+    (sid.toNat, gas.toNat, count)).toArray
+  let newStats := updateStatistics pre.statistics gasUsageArr
 
   -- Step 10: Shift accumulated
   let newAccumulated := shiftAccumulated pre.accumulated accumulatable n
