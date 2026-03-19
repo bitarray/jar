@@ -12,7 +12,7 @@ versus the full model's O(n × k) priority-loop simulation.
 State: `regDone[13]` — the cycle at which each register's value becomes ready.
 
 For each instruction in the basic block:
-1. **Decode throughput**: if decode slots would exceed 4/cycle, advance cycle
+1. **Decode throughput**: if all 4 decode slots consumed, advance cycle
 2. **Data dependency**: `start = max(decode_cycle, max(regDone[src_regs]))`
 3. **Completion**: `done = start + latency`
 4. **Update**: `regDone[dst_regs] = done`
@@ -71,9 +71,11 @@ partial def gasSimSinglePass (code bitmask : ByteArray) (s : GasSimStateSP) : Ga
   | none => s
   | some pc =>
     let cost := instructionCost code bitmask pc
-    -- Advance cycle if decode slots would overflow
+    -- Advance cycle if all decode slots are consumed.
+    -- Matches the full model's canDecode: decode is allowed as long as at least
+    -- 1 slot remains, even if the instruction's decodeSlots exceeds what's left.
     let (cycle, decodeUsed) :=
-      if s.decodeUsed + cost.decodeSlots > 4
+      if s.decodeUsed >= 4
       then (s.cycle + 1, cost.decodeSlots)
       else (s.cycle, s.decodeUsed + cost.decodeSlots)
     let nextι := if cost.isTerminator then none
