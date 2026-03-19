@@ -31,9 +31,22 @@ register, the full model makes all subsequent readers wait for BOTH writers
 per register, implicitly modeling register renaming. This is closer to real
 out-of-order CPUs with physical register files.
 
-**EU contention**: the full model tracks per-cycle execution unit availability
-(4 ALU, 4 LOAD, 4 STORE, 1 MUL, 1 DIV). The single-pass model omits EU
-contention. For most blocks this is negligible since ALU slots rarely saturate.
+**EU contention** (`cost.execUnits` unused): the full model tracks per-cycle
+execution unit availability (4 ALU, 4 LOAD, 4 STORE, 1 MUL, 1 DIV). The
+single-pass model omits this entirely because:
+
+- **ALU/LOAD/STORE (4 each)**: decode throughput is 4 instructions/cycle.
+  Every instruction consumes 1 ALU slot (see `loadUnit`, `storeUnit`, etc.),
+  so you can never dispatch more ALU-consuming instructions per cycle than you
+  can decode. The decode constraint subsumes ALU/LOAD/STORE contention.
+- **MUL (1 unit)**: two independent multiplies in the same block could contend,
+  but multiply latency (3-4 cycles) means data dependencies usually serialize
+  them. Independent back-to-back multiplies in a single basic block are rare.
+- **DIV (1 unit)**: division latency is 60 cycles. Even if two independent divs
+  exist in one block, the first occupies the unit for 60 cycles — but the
+  single-pass model already models this via data dependencies (if they share
+  registers) or via the latency stacking (independent divs would complete at
+  cycle 60 and 61, a ~1.7% difference on a 60-cycle operation).
 
 **Dispatch width**: the full model limits dispatch to 5 instructions/cycle.
 The single-pass model omits this constraint.
