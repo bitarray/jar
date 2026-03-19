@@ -283,21 +283,28 @@ def shiftAccumulated (accumulated : Array (Array Hash))
 -- ============================================================================
 
 /-- Update service statistics with accumulation results.
-    gasUsage: (service_id, total_gas_used, accumulate_count) -/
+    GP eq:accumulationstatisticsdef:
+    - G(s) = total gas used for service s across all rounds
+    - N(s) = number of work-item digests with service_id=s in accumulated reports -/
 def updateStatistics (stats : Array TAServiceStats)
-    (gasUsage : Array (Nat × Nat × Nat))
+    (gasUsage : Dict ServiceId Gas) (accumulatable : Array WorkReport) (n : Nat)
     : Array TAServiceStats := Id.run do
   let mut result := stats
-  for (sid, gas, count) in gasUsage do
-    match result.findIdx? (·.serviceId == sid) with
+  -- Compute N(s) for each service: count work-item digests in first n reports
+  let reports := accumulatable.extract 0 n
+  for (sid, gas) in gasUsage.entries do
+    let itemCount := reports.foldl (init := 0) fun acc r =>
+      acc + r.digests.foldl (init := 0) fun acc2 d =>
+        acc2 + if d.serviceId == sid then 1 else 0
+    match result.findIdx? (·.serviceId == sid.toNat) with
     | some idx =>
       let s := result[idx]!
       result := result.set! idx { s with
-        accumulateCount := s.accumulateCount + count
-        accumulateGasUsed := s.accumulateGasUsed + gas }
+        accumulateCount := s.accumulateCount + itemCount
+        accumulateGasUsed := s.accumulateGasUsed + gas.toNat }
     | none =>
       result := result.push {
-        serviceId := sid
+        serviceId := sid.toNat
         providedCount := 0
         providedSize := 0
         refinementCount := 0
@@ -306,8 +313,8 @@ def updateStatistics (stats : Array TAServiceStats)
         extrinsicCount := 0
         extrinsicSize := 0
         exports := 0
-        accumulateCount := count
-        accumulateGasUsed := gas }
+        accumulateCount := itemCount
+        accumulateGasUsed := gas.toNat }
   result
 
 -- ============================================================================
@@ -362,7 +369,7 @@ def accumulateTransition (pre : TAState) (inp : TAInput)
   let ps' := result.2.1
   let yields := result.2.2.1
   let gasMap := result.2.2.2.1
-  let countMap := result.2.2.2.2.1
+  let _countMap := result.2.2.2.2.1
 
 
   -- Step 7: Compute output hash
@@ -376,11 +383,8 @@ def accumulateTransition (pre : TAState) (inp : TAInput)
       accounts := accounts.insert sid { acct with lastAccumulation := UInt32.ofNat inp.slot }
     | none => pure ()
 
-  -- Step 9: Update statistics using per-service counts from accseq
-  let gasUsageArr := (gasMap.entries.map fun (sid, gas) =>
-    let count := match countMap.lookup sid with | some n => n | none => 1
-    (sid.toNat, gas.toNat, count)).toArray
-  let newStats := updateStatistics pre.statistics gasUsageArr
+  -- Step 9: Update statistics — GP eq:accumulationstatisticsdef
+  let newStats := updateStatistics pre.statistics gasMap accumulatable n
 
   -- Step 10: Shift accumulated
   let newAccumulated := shiftAccumulated pre.accumulated accumulatable n
