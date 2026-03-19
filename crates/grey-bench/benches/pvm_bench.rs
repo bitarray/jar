@@ -302,6 +302,23 @@ fn bench_ecrecover(c: &mut Criterion) {
         })
     });
 
+    group.bench_function("grey-interpreter", |b| {
+        b.iter(|| {
+            let mut pvm = javm::program::initialize_program(
+                &grey_blob, &[], ecrecover_gas,
+            ).unwrap();
+            loop {
+                let (exit, _) = pvm.run();
+                match exit {
+                    javm::ExitReason::Halt | javm::ExitReason::Panic => break,
+                    javm::ExitReason::HostCall(_) => continue,
+                    other => panic!("unexpected exit: {:?}", other),
+                }
+            }
+            pvm.registers[7]
+        })
+    });
+
     group.bench_function("grey-recompiler", |b| {
         b.iter(|| {
             let mut pvm = javm::recompiler::initialize_program_recompiled(
@@ -317,6 +334,31 @@ fn bench_ecrecover(c: &mut Criterion) {
             pvm.registers()[7]
         })
     });
+
+    let pvm_interp = try_make_polkavm_module(&pvm_blob, BackendKind::Interpreter);
+    if let Some((_, ref pvm_interp_mod)) = pvm_interp {
+        group.bench_function("polkavm-interpreter", |b| {
+            b.iter(|| {
+                let mut inst = pvm_interp_mod.instantiate().unwrap();
+                inst.set_gas(ecrecover_gas as i64);
+                if let Some(export) = pvm_interp_mod.exports().next() {
+                    inst.set_next_program_counter(export.program_counter());
+                }
+                inst.set_reg(PReg::RA, 0xFFFF0000u64);
+                inst.set_reg(PReg::SP, pvm_interp_mod.default_sp());
+                loop {
+                    match inst.run().unwrap() {
+                        InterruptKind::Finished => break,
+                        InterruptKind::Ecalli(_) => continue,
+                        InterruptKind::Trap => break,
+                        InterruptKind::NotEnoughGas => panic!("polkavm out of gas"),
+                        other => panic!("polkavm unexpected: {:?}", other),
+                    }
+                }
+                inst.reg(PReg::A0)
+            })
+        });
+    }
 
     if let Some((ref engine, ref pvm_mod)) = pvm_compiler {
         group.bench_function("polkavm-compiler-exec", |b| {
