@@ -1,5 +1,7 @@
 # Grey
 
+[![Matrix](https://img.shields.io/matrix/jar%3Amatrix.org?logo=matrix&label=chat)](https://matrix.to/#/#jar:matrix.org)
+
 A JAM (Join-Accumulate Machine) blockchain node implementation in Rust, following the [JAR v0.8.0 specification](https://github.com/bitarray/jar).
 
 ## Highlights
