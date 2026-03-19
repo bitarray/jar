@@ -3,13 +3,43 @@ import Jar.PVM.GasCost
 /-!
 # PVM Gas Cost — Single-Pass Model
 
-O(n) single-pass gas cost computation. Tracks per-register completion cycles
-instead of a full ROB simulation. Implicitly models register renaming
-(only the last writer per register matters).
+Alternative to the full pipeline simulation (`GasCostFull.lean`). Computes
+per-basic-block gas cost in O(n) time with ~5 operations per instruction,
+versus the full model's O(n × k) priority-loop simulation.
 
-Cost = `max(maxDone - 3, 1)`.
+## Algorithm
 
-See `docs/gas-metering-design.md` for detailed comparison with the full pipeline model.
+State: `regDone[13]` — the cycle at which each register's value becomes ready.
+
+For each instruction in the basic block:
+1. **Decode throughput**: if decode slots would exceed 4/cycle, advance cycle
+2. **Data dependency**: `start = max(decode_cycle, max(regDone[src_regs]))`
+3. **Completion**: `done = start + latency`
+4. **Update**: `regDone[dst_regs] = done`
+5. **move_reg**: propagate `regDone[dst] = regDone[src]` (0-cycle frontend op)
+
+Block cost = `max(maxDone - 3, 1)`, same formula as the full model.
+
+## Differences from full pipeline simulation
+
+The full model (`GasCostFull.lean`) tracks a 32-entry reorder buffer with
+decode/dispatch/execute/finish states. Key semantic difference:
+
+**Register write shadowing**: when two in-flight instructions write the same
+register, the full model makes all subsequent readers wait for BOTH writers
+(no register renaming). The single-pass model only tracks the last writer
+per register, implicitly modeling register renaming. This is closer to real
+out-of-order CPUs with physical register files.
+
+**EU contention**: the full model tracks per-cycle execution unit availability
+(4 ALU, 4 LOAD, 4 STORE, 1 MUL, 1 DIV). The single-pass model omits EU
+contention. For most blocks this is negligible since ALU slots rarely saturate.
+
+**Dispatch width**: the full model limits dispatch to 5 instructions/cycle.
+The single-pass model omits this constraint.
+
+The single-pass model uses the same instruction cost tables (`instructionCost`),
+branch cost function (`branchCost`), and cost formula as the full model.
 -/
 
 namespace Jar.PVM
