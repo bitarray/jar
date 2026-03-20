@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 
 [target.'cfg(target_env = "polkavm")'.dependencies]
-polkavm-derive = { path = "../../../polkavm/crates/polkavm-derive" }
+polkavm-derive = "0.32.0"
 
 [profile.release]
 opt-level = "s"

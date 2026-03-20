@@ -196,6 +196,8 @@ dependencies = [
 [[package]]
 name = "polkavm-derive"
 version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92147c429bebe93187a5c6963636a1efdfb69734e83b5d9d9aa751775c1dd62f"
 dependencies = [
  "polkavm-derive-impl-macro",
 ]
@@ -203,6 +205,8 @@ dependencies = [
 [[package]]
 name = "polkavm-derive-impl"
 version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a396e7939ae0a723cabf639c23f0704423c8e470d01f52ad0cecf2dc283387f0"
 dependencies = [
  "polkavm-common",
  "proc-macro2",
@@ -213,6 +217,8 @@ dependencies = [
 [[package]]
 name = "polkavm-derive-impl-macro"
 version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19eb3426df09ad4820b9beecd5c6754c5249b8fc5c6e94f0f559fbf7ce082fc3"
 dependencies = [
  "polkavm-derive-impl",
  "syn",
