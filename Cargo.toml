@@ -70,10 +70,6 @@ async-trait = "0.1"
 jsonrpsee = { version = "0.24", features = ["server", "macros"] }
 
 
-[patch.crates-io]
-polkavm = { path = "../polkavm/crates/polkavm" }
-polkavm-common = { path = "../polkavm/crates/polkavm-common" }
-
 [profile.release]
 lto = "thin"
 codegen-units = 1

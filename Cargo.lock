@@ -3121,6 +3121,8 @@ dependencies = [
 [[package]]
 name = "polkavm-linker"
 version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89d3ca240b3185eb121ceea2816d8cd9c68b09ff91f3cc2f865e6ad2f259c156"
 dependencies = [
  "dirs",
  "gimli",
