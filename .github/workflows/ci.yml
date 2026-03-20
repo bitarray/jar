@@ -32,6 +32,13 @@ jobs:
             --target ../riscv64em-javm.json \
             -Zbuild-std=core,alloc -Zjson-target-spec
 
+      - name: Build sample-service ELF
+        working-directory: services/sample-service
+        run: |
+          cargo +nightly build --release \
+            --target ../riscv64em-javm.json \
+            -Zbuild-std=core -Zjson-target-spec
+
       - name: Build bench-ecrecover ELF (polkavm target)
         working-directory: services/bench-ecrecover
         run: |
