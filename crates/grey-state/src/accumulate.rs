@@ -2456,9 +2456,9 @@ fn update_statistics(
     accumulatable: &[WorkReport],
     n: usize,
 ) {
-    // Start with existing statistics, update with new data
+    // Statistics are computed fresh per block, not accumulated from pre-state.
     let reports = &accumulatable[..n];
-    let mut stat_map: BTreeMap<ServiceId, AccServiceStats> = stats.iter().cloned().collect();
+    let mut stat_map: BTreeMap<ServiceId, AccServiceStats> = BTreeMap::new();
 
     for report in reports {
         for digest in &report.results {
@@ -2472,13 +2472,19 @@ fn update_statistics(
         }
     }
 
-    // Add accumulation gas usage and count.
+    // N(s) = count of work-item digests for service s in accumulated reports
+    for report in reports {
+        for digest in &report.results {
+            stat_map
+                .entry(digest.service_id)
+                .or_default()
+                .accumulate_count += 1;
+        }
+    }
+
     // G(s) = Σ(u for (s,u) in u) — total gas used for service s
-    // N(s) = number of times service s was accumulated (gasUsage entries)
     for (sid, gas) in gas_usage {
-        let entry = stat_map.entry(*sid).or_default();
-        entry.accumulate_gas_used += *gas;
-        entry.accumulate_count += 1;
+        stat_map.entry(*sid).or_default().accumulate_gas_used += *gas;
     }
 
     // GP: S ≡ { (s ↦ (G(s), N(s))) | G(s) + N(s) ≠ 0 }
