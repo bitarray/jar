@@ -71,3 +71,4 @@
   - The token has enough usage that inflation control matters
   - The impact pool has a mechanism to distribute to (downstreamDependents)
 -/
+-- Genesis testnet test PR #4
