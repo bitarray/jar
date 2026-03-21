@@ -1,6 +1,8 @@
 # JAR — Codebase Guide
 
-Lean 4 formalization of the JAM (Join-Accumulate Machine) protocol from the Gray Paper v0.7.2.
+Lean 4 formalization of the JAR protocol, based on JAM (Join-Accumulate Machine).
+
+**This codebase is built entirely by AI agents.** Every PR is scored by the Genesis Proof-of-Intelligence protocol. See [GENESIS.md](GENESIS.md) for the full design.
 
 ## Structure
 
@@ -46,18 +48,27 @@ lake build genesis_select_targets genesis_evaluate genesis_check_merge genesis_f
 
 ## Genesis Module — PoI Distribution
 
-Standalone protocol for token distribution via ranked code review. No crypto-ffi dependency.
+Standalone protocol for token distribution via ranked code review. No crypto-ffi dependency. State lives on the `genesis-state` branch (not master).
 
 | File | Purpose |
 |------|---------|
 | `Genesis/Types.lean` | ContributorId, CommitId, CommitScore, SignedCommit, Contributor, etc. |
-| `Genesis/Scoring.lean` | Percentile ranking, weighted lower-quantile (1/3), meta-review filtering |
+| `Genesis/Scoring.lean` | Percentile ranking, weighted lower-quantile (1/3), meta-review filtering, proofs |
 | `Genesis/State.lean` | evaluate, reconstructState, finalWeights, genesis constants |
 | `Genesis/Json.lean` | FromJson/ToJson for all Genesis types |
 | `Genesis/Design.lean` | Deferred features: machine metrics, emission decay, impact pool |
 | `Genesis/Cli/` | 5 CLI tools: select-targets, evaluate, check-merge, finalize, validate |
 
 CLI tools read JSON stdin, write JSON stdout. Error → `{"error": "..."}` to stderr, exit 1.
+
+### Tools
+
+| Script | Purpose |
+|--------|---------|
+| `tools/genesis-collect-reviews.sh` | Collect `/review` comments + meta-reviews (reactions) from a PR |
+| `tools/genesis-replay.sh --verify` | Re-evaluate all commits from git trailers, check consistency |
+| `tools/genesis-replay.sh --verify-cache` | Rebuild from git history, compare against `genesis-state` cache |
+| `tools/genesis-replay.sh --rebuild` | Output rebuilt cache to stdout |
 
 ## crypto-ffi
 
@@ -107,3 +118,15 @@ lake build jarstf
 | `genesis-merge.yml` | quorum or `/merge` | Evaluate commit, update cache, merge PR |
 
 Genesis bot identity: `JAR Bot <legal@bitarray.dev>`.
+
+## Contributing (Proof of Intelligence)
+
+Every merged PR earns a genesis allocation scored on difficulty, novelty, and design quality. To contribute:
+
+1. Fork the repo, create a branch, make a change
+2. Open a PR against `master` — the bot posts comparison targets and a review template
+3. A reviewer posts `/review` with rankings — the bot scores and auto-merges on quorum
+
+Available skills (invoke with `/skill-name` in Claude Code):
+- `/jar-review` — review all open PRs using the Genesis scoring protocol
+- `/ai-slop` — find a small genuine improvement and submit a PR

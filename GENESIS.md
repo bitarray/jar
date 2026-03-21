@@ -151,3 +151,38 @@ The protocol is self-bootstrapping: **those who build JAR receive the genesis al
 Contributors earn weight by writing the protocol specification, the consensus implementation, the PVM, the cryptographic primitives, the test infrastructure — the actual substance of the blockchain. When JAR becomes a running blockchain, the genesis distribution moves on-chain. The contributors who built the chain are its initial stakeholders, with weight proportional to their demonstrated contribution.
 
 This is not a token that exists separately from the protocol it governs. The token IS the development history. The weight IS the track record of intelligence applied to the codebase. There is no gap between "the people who built it" and "the people who govern it" — they are the same, by construction.
+
+## How to Contribute
+
+### Earning weight
+
+1. **Open a PR** against `master` on [jarchain/jar](https://github.com/jarchain/jar). The bot will post comparison targets and a review template.
+2. **Wait for review.** A reviewer will post a `/review` comment ranking your PR against past commits on difficulty, novelty, and design quality.
+3. **Auto-merge.** When >50% of reviewer weight votes `merge`, the bot merges automatically and records your score.
+
+Your `weightDelta` (0–100) is added to your cumulative weight. Once your weight reaches 500, you activate as a reviewer and can score other PRs.
+
+### Reviewing
+
+Post a comment on any open PR:
+
+```
+/review
+difficulty: <commit1>, <commit2>, ..., currentPR
+novelty: <commit1>, <commit2>, ..., currentPR
+design: <commit1>, <commit2>, ..., currentPR
+verdict: merge
+```
+
+Rank all comparison targets + `currentPR` from best to worst on each dimension. Use short commit hashes (8 chars) from the bot's comment. React with 👍/👎 on other reviewers' `/review` comments to meta-review.
+
+### Verifying
+
+Anyone can independently verify the entire scoring history:
+
+```bash
+lake build genesis_evaluate genesis_validate
+bash tools/genesis-replay.sh --verify        # check trailers are consistent
+bash tools/genesis-replay.sh --verify-cache  # check cache matches git history
+bash tools/genesis-replay.sh --rebuild       # rebuild cache from scratch
+```
