@@ -52,7 +52,7 @@ jobs:
         run: |
           PR_AUTHOR=$(gh pr view ${{ steps.pr-info.outputs.pr_number }} --json author --jq '.author.login')
           CHANGED=$(gh pr diff ${{ steps.pr-info.outputs.pr_number }} --name-only)
-          if echo "$CHANGED" | grep -qE '^\.github/(workflows/genesis-|cache/genesis\.json)'; then
+          if echo "$CHANGED" | grep -qE '^\.github/workflows/genesis-'; then
             if [ "$PR_AUTHOR" != "sorpaas" ]; then
               gh pr comment ${{ steps.pr-info.outputs.pr_number }} --body \
                 "**JAR Bot:** Cannot merge — this PR modifies protected genesis files. Only the founder (sorpaas) may modify these."
@@ -80,7 +80,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_NUMBER=${{ steps.pr-info.outputs.pr_number }}
-          CACHE=$(cat .github/cache/genesis.json)
+
+          # Read cache from genesis-state branch
+          git fetch origin genesis-state
+          CACHE=$(git show origin/genesis-state:genesis.json)
 
           # Get PR details
           PR_JSON=$(gh pr view "$PR_NUMBER" --json headRefOid,author)
@@ -125,11 +128,20 @@ jobs:
 
           INDEX=$(echo "$INPUT" | .lake/build/bin/genesis_evaluate)
 
-          # Update cache
-          echo "$CACHE" | jq --argjson idx "$INDEX" '. + [$idx]' > .github/cache/genesis.json
+          # Update cache on genesis-state branch
+          UPDATED_CACHE=$(echo "$CACHE" | jq --argjson idx "$INDEX" '. + [$idx]')
+          git worktree add /tmp/genesis-state origin/genesis-state
+          echo "$UPDATED_CACHE" > /tmp/genesis-state/genesis.json
+          git -C /tmp/genesis-state config user.name "JAR Bot"
+          git -C /tmp/genesis-state config user.email "legal@bitarray.dev"
+          git -C /tmp/genesis-state add genesis.json
+          git -C /tmp/genesis-state commit -m "genesis: update state for PR #${PR_NUMBER}"
+          git -C /tmp/genesis-state push origin genesis-state
+          git worktree remove /tmp/genesis-state
 
-          # Save for commit message
+          # Save for merge commit trailers
           echo "$INDEX" > /tmp/genesis_index.json
+          echo "$COMMIT_JSON" > /tmp/genesis_commit.json
           echo "$AUTHOR" > /tmp/genesis_author.txt
 
       - name: Merge PR with genesis data
@@ -138,26 +150,15 @@ jobs:
         run: |
           PR_NUMBER=${{ steps.pr-info.outputs.pr_number }}
           INDEX=$(cat /tmp/genesis_index.json)
+          COMMIT_DATA=$(cat /tmp/genesis_commit.json)
           AUTHOR=$(cat /tmp/genesis_author.txt)
           SCORE=$(echo "$INDEX" | jq -c '.score')
           WEIGHT_DELTA=$(echo "$INDEX" | jq -r '.weightDelta')
 
-          # Commit the updated cache
-          git config user.name "JAR Bot"
-          git config user.email "legal@bitarray.dev"
-          git add .github/cache/genesis.json
-          git commit -m "genesis: update cache for PR #${PR_NUMBER}
-
-          Genesis-PR: #${PR_NUMBER}
-          Genesis-Author: ${AUTHOR}
-          Genesis-Score: ${SCORE}
-          Genesis-WeightDelta: ${WEIGHT_DELTA}"
-
-          git push
-
-          # Merge the PR
+          # Merge the PR with both SignedCommit and CommitIndex in trailers
           gh pr merge "$PR_NUMBER" --merge --subject "Merge PR #${PR_NUMBER}
 
+          Genesis-Commit: $(echo "$COMMIT_DATA" | jq -c .)
           Genesis-Index: $(echo "$INDEX" | jq -c .)
           Genesis-PR: #${PR_NUMBER}
           Genesis-Author: ${AUTHOR}"

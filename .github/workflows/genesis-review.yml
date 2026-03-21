@@ -22,7 +22,7 @@ jobs:
         run: |
           PR_AUTHOR=$(gh pr view ${{ github.event.issue.number }} --json author --jq '.author.login')
           CHANGED=$(gh pr diff ${{ github.event.issue.number }} --name-only)
-          if echo "$CHANGED" | grep -qE '^\.github/(workflows/genesis-|cache/genesis\.json)'; then
+          if echo "$CHANGED" | grep -qE '^\.github/workflows/genesis-'; then
             if [ "$PR_AUTHOR" != "sorpaas" ]; then
               echo "Protected files modified by non-founder — skipping genesis review"
               exit 0
@@ -50,7 +50,8 @@ jobs:
           COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
         run: |
           PR_NUMBER=${{ github.event.issue.number }}
-          CACHE=$(cat .github/cache/genesis.json)
+          git fetch origin genesis-state
+          CACHE=$(git show origin/genesis-state:genesis.json)
 
           # Get PR head SHA for replacing "currentPR" in rankings
           HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq '.headRefOid')
