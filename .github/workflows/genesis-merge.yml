@@ -19,16 +19,6 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Check base branch
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          BASE=$(gh pr view ${{ github.event.issue.number }} --repo ${{ github.repository }} --json baseRefName --jq '.baseRefName')
-          if [ "$BASE" != "master" ]; then
-            echo "Not targeting master — skipping"
-            exit 0
-          fi
-
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
