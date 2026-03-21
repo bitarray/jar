@@ -21,7 +21,7 @@ jobs:
         run: |
           AUTHOR=${{ github.event.pull_request.user.login }}
           CHANGED=$(gh pr diff ${{ github.event.pull_request.number }} --name-only)
-          if echo "$CHANGED" | grep -qE '^\.github/(workflows/genesis-|cache/genesis\.json)'; then
+          if echo "$CHANGED" | grep -qE '^\.github/workflows/genesis-'; then
             if [ "$AUTHOR" != "sorpaas" ]; then
               gh pr comment ${{ github.event.pull_request.number }} --body \
                 "**JAR Bot:** This PR modifies protected genesis files (workflows or cache). Only the founder (sorpaas) may modify these. Genesis scoring is disabled for this PR."
@@ -46,7 +46,8 @@ jobs:
 
       - name: Select comparison targets
         run: |
-          CACHE=$(cat .github/cache/genesis.json)
+          git fetch origin genesis-state
+          CACHE=$(git show origin/genesis-state:genesis.json)
           PR_ID=${{ github.event.pull_request.number }}
           echo "{\"prId\":${PR_ID},\"indices\":${CACHE}}" | \
             .lake/build/bin/genesis_select_targets > /tmp/targets.json
