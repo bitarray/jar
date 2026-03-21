@@ -118,5 +118,25 @@
       "novelty": 100
     },
     "weightDelta": 80
+  },
+  {
+    "commitHash": "5cdbb4b2812fe03f7e1bf2ab997d000d58b76d8f",
+    "contributor": "hitchhooker",
+    "epoch": 1774098759,
+    "founderOverride": false,
+    "mergeVotes": [
+      "sorpaas"
+    ],
+    "metaReviews": [],
+    "rejectVotes": [],
+    "reviewers": [
+      "sorpaas"
+    ],
+    "score": {
+      "designQuality": 100,
+      "difficulty": 100,
+      "novelty": 100
+    },
+    "weightDelta": 100
   }
 ]
