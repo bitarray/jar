@@ -3,21 +3,19 @@
 
   ## Execution
 
-  The spec is executed per-signed-commit, where each signed commit is
-  evaluated by the spec version at the PREVIOUS signed commit:
+  For commit N, any spec version ≥ the spec at commit N-1 must produce
+  the same CommitIndex. The spec is backward compatible (new handles old)
+  but not necessarily forward compatible (old may not handle new).
 
-  1. Gather all signed commits from git history.
-  2. Check out genesis commit. Feed it the first signed commit.
-     → produces CommitIndex (weight changes, score, reviewers).
-  3. Check out the first signed commit. Input = (genesis state, [index_0]).
-     Evaluate the second signed commit → produces index_1.
-  4. Continue: each step receives all past indices as input.
-  5. Finalization (future work): current master spec computes end balances.
+  The current spec on master is always a valid evaluator for all past
+  commits. This is enforced by CI (`genesis-replay.sh --verify`).
 
-  This ensures:
-  - A malicious spec change only affects the NEXT commit's evaluation.
-  - Each CommitIndex is produced by a specific, immutable spec version.
-  - The finalization step (summing balances) is trivially auditable.
+  Evaluation order:
+  1. Gather all signed commits from git history (merge commit trailers).
+  2. Evaluate the first signed commit with empty state → produces index_0.
+  3. Evaluate the second with [index_0] as past state → produces index_1.
+  4. Continue: each step receives all prior indices as input.
+  5. Finalization (future work): compute end balances from all indices.
 -/
 
 import Genesis.Types
@@ -42,7 +40,6 @@ def founderWeight : Nat := 1
 /-! ### CommitIndex — Output of evaluating one signed commit -/
 
 /-- The output of evaluating a single signed commit.
-    Produced by the spec version at the PREVIOUS signed commit.
 
     Contains only the raw facts needed for state reconstruction and
     future finalization. Token amounts are NOT stored here — they are
@@ -130,14 +127,11 @@ def EvalState.reviewerWeight (s : EvalState) (id : ContributorId) : Nat :=
 /-- Evaluate a single signed commit, producing a CommitIndex.
 
     This is THE core function. It takes:
-    - All past indices (produced by previous spec versions)
+    - All past indices (from prior evaluations)
     - The current signed commit to evaluate
 
     It reconstructs the evaluation state from past indices, then
-    runs the scoring algorithm to produce the new index.
-
-    In the actual execution, this function is run using the spec
-    checked out at the PREVIOUS signed commit. -/
+    runs the scoring algorithm to produce the new index. -/
 def evaluate
     (pastIndices : List CommitIndex)
     (commit : SignedCommit)

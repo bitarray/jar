@@ -108,6 +108,12 @@ lake build jarstf
 - **Maps**: `Dict K V` (sorted association lists)
 - **Lean toolchain**: v4.27.0 (pinned in `lean-toolchain`)
 
+## Spec Consistency Rule
+
+For commit N, any spec version ≥ the spec at commit N-1 must produce the same `CommitIndex`. The spec is backward compatible (new handles old) but not necessarily forward compatible (old may not handle new).
+
+**What this means for contributors**: if you change files in `Genesis/`, the current spec must still produce identical results for all past scored commits. CI enforces this via `genesis-replay.sh --verify`. If your change needs different behavior for new vs old commits, add explicit version logic (e.g., check `prCreatedAt` field presence, branch on epoch ranges).
+
 ## GitHub Workflows
 
 | Workflow | Trigger | Purpose |

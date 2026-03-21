@@ -8,9 +8,17 @@
   ## Reward Model
 
   Rewards are only calculated on signed commits (by GitHub merge or bot GPG key).
-  For each signed commit, the reward spec from the PREVIOUS signed commit is
-  checked out and applied to the current commit. This means a malicious spec
-  change cannot affect its own reward — only the next signed commit's evaluation.
+
+  ## Spec Consistency Rule
+
+  For commit N, any spec version ≥ the spec at commit N-1 must produce the
+  same CommitIndex. The spec is backward compatible but NOT necessarily
+  forward compatible — older spec versions may not handle newer commits
+  (e.g., they lack support for new fields like prCreatedAt).
+
+  In practice: the current spec on master evaluates ALL past commits correctly.
+  Spec changes MUST preserve results for all already-scored commits. This is
+  enforced by CI (`genesis-replay.sh --verify`).
 
   Each evaluation produces a list of non-negative, capped balance deltas:
     (+contributor_reward, +reviewer1_reward, +reviewer2_reward, ...)

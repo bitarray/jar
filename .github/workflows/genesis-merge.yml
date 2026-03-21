@@ -198,3 +198,8 @@ jobs:
             "**JAR Bot:** Merged (${MERGE_TYPE}).
             Score: ${SCORE}
             Weight delta: ${WEIGHT_DELTA}"
+
+      - name: Verify cache integrity
+        run: |
+          git pull origin master --ff-only
+          bash tools/genesis-replay.sh --verify-cache

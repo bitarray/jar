@@ -71,6 +71,4 @@ jobs:
           echo '{"reviews":[],"metaReviews":[],"indices":[]}' | .lake/build/bin/genesis_check_merge | jq -e '.ready == false'
 
       - name: Verify genesis history
-        run: |
-          bash tools/genesis-replay.sh --verify
-          bash tools/genesis-replay.sh --verify-cache
+        run: bash tools/genesis-replay.sh --verify

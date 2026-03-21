@@ -121,7 +121,7 @@ The protocol is specified in Lean 4 (`Genesis/` directory) and executed as a pur
 
 The state at any point is deterministically recomputable from these inputs. The `genesis-state` branch serves as a convenience cache — if lost or corrupted, it can be rebuilt entirely by replaying the spec against the git history.
 
-Each commit is evaluated by the spec version at the **previous** signed commit. A malicious spec change cannot affect its own scoring — it only takes effect for the next commit, and can be reverted before causing damage. Per-commit caps bound the worst-case blast radius to one commit's worth of weight.
+For commit N, any spec version ≥ the spec at commit N-1 must produce the same result. The spec is backward compatible (current spec handles all past commits) but not necessarily forward compatible (older specs may not handle newer commits). In practice, the current spec on master evaluates all history correctly — this is enforced by CI. Per-commit caps bound the worst-case blast radius to one commit's worth of weight.
 
 ## Current Status
 
