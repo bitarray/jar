@@ -19,8 +19,8 @@ MODE="${1:---verify}"
 GENESIS_COMMIT="8f124a276a81c4d429d2c2f6ef15823f4fb5c59d"
 
 # Load legacy commits (for PRs that predate Genesis-Commit trailer)
-git fetch origin genesis-state 2>/dev/null || true
-LEGACY_COMMITS=$(git show origin/genesis-state:legacy-commits.json 2>/dev/null || echo "[]")
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LEGACY_COMMITS=$(cat "$SCRIPT_DIR/legacy-commits.json" 2>/dev/null || echo "[]")
 
 # Collect all merge commits after genesis
 MERGE_COMMITS=$(git log --merges --reverse --format="%H" "${GENESIS_COMMIT}..HEAD")
