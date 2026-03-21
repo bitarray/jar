@@ -100,8 +100,10 @@ inductive MemoryModel where
 inductive GasModel where
   /-- GP v0.7.2: 1 gas per instruction. -/
   | perInstruction
-  /-- GP v0.8.0: per-basic-block pipeline simulation cost. -/
-  | basicBlock
+  /-- Per-basic-block cost via full pipeline simulation (ROB + EU contention). -/
+  | basicBlockFull
+  /-- Per-basic-block cost via single-pass O(n) model (register-done tracking). -/
+  | basicBlockSinglePass
   deriving BEq, Inhabited
 
 /-- PVM heap management model. -/

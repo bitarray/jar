@@ -2,7 +2,8 @@ import Jar.PVM
 import Jar.PVM.Decode
 import Jar.PVM.Memory
 import Jar.PVM.Instructions
-import Jar.PVM.GasCost
+import Jar.PVM.GasCostFull
+import Jar.PVM.GasCostSinglePass
 
 /-!
 # PVM Interpreter — Appendix A
@@ -88,7 +89,8 @@ private def isBlockTerminator (opcode : Nat) : Bool :=
 /-- Ψ : Core PVM execution loop with per-basic-block gas charging. GP v0.8.0.
     Gas is charged upfront on basic block entry using pipeline simulation cost.
     Instructions within a block execute without individual gas deduction. -/
-def runBlockGas (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory)
+def runBlockGasWith (costFn : ByteArray → ByteArray → Nat → Nat)
+    (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory)
     (gas : Int64) : InvocationResult :=
   let rec go (pc : Nat) (regs : Registers) (mem : Memory)
       (gas : Int64) (gasCharged : Bool) (fuel : Nat) : InvocationResult :=
@@ -101,7 +103,7 @@ def runBlockGas (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory
       let (gas', charged) :=
         if gasCharged then (gas, true)
         else
-          let blockCost := gasCostForBlock prog.code prog.bitmask pc
+          let blockCost := costFn prog.code prog.bitmask pc
           let gas' := gas - Int64.ofNat blockCost
           if gas' < 0 then (gas, false)  -- will OOG below
           else (gas', true)
@@ -128,6 +130,12 @@ def runBlockGas (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory
           let nextCharged := if isBlockTerminator opcode then false else true
           go pc' regs' mem' gas' nextCharged fuel'
   go pc regs mem gas false (gas.toUInt64.toNat + 1)
+
+/-- Per-basic-block execution with full pipeline simulation gas. -/
+def runBlockGas := runBlockGasWith gasCostForBlockFull
+
+/-- Per-basic-block execution with single-pass gas model. -/
+def runBlockGasSinglePass := runBlockGasWith gasCostForBlockSinglePass
 
 -- ============================================================================
 -- Metadata Skipping — PolkaVM blobs may have a metadata prefix
@@ -352,7 +360,8 @@ def runProgram [JamConfig] (prog : ProgramBlob) (pc : Nat) (regs : Registers)
     (mem : Memory) (gas : Int64) : InvocationResult :=
   match JamConfig.gasModel with
   | .perInstruction => run prog pc regs mem gas
-  | .basicBlock => runBlockGas prog pc regs mem gas
+  | .basicBlockFull => runBlockGas prog pc regs mem gas
+  | .basicBlockSinglePass => runBlockGasSinglePass prog pc regs mem gas
 
 -- ============================================================================
 -- Full PVM Invocation with Host Calls — GP Ψ_H

@@ -66,7 +66,7 @@ instance JamVariant.jar080_tiny : JamVariant where
     config := Params.tiny
     valid := Params.tiny_valid
     memoryModel := .linear
-    gasModel := .basicBlock
+    gasModel := .basicBlockSinglePass
     heapModel := .growHeap
     hostcallVersion := 1
   }

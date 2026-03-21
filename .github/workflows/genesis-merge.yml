@@ -1,0 +1,176 @@
+name: "Genesis: Merge"
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to merge"
+        required: true
+        type: number
+
+concurrency:
+  group: genesis-merge
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    if: >
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.issue.pull_request &&
+       github.event.comment.body == '/merge' &&
+       github.event.comment.user.login == 'sorpaas')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Get PR number and base branch
+        id: pr-info
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PR_NUMBER=${{ inputs.pr_number }}
+          else
+            PR_NUMBER=${{ github.event.issue.number }}
+          fi
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          BASE=$(gh pr view "$PR_NUMBER" --repo ${{ github.repository }} --json baseRefName --jq '.baseRefName')
+          echo "base=$BASE" >> $GITHUB_OUTPUT
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr-info.outputs.base }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for protected file changes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_AUTHOR=$(gh pr view ${{ steps.pr-info.outputs.pr_number }} --json author --jq '.author.login')
+          CHANGED=$(gh pr diff ${{ steps.pr-info.outputs.pr_number }} --name-only)
+          if echo "$CHANGED" | grep -qE '^\.github/workflows/genesis-'; then
+            if [ "$PR_AUTHOR" != "sorpaas" ]; then
+              gh pr comment ${{ steps.pr-info.outputs.pr_number }} --body \
+                "**JAR Bot:** Cannot merge — this PR modifies protected genesis files. Only the founder (sorpaas) may modify these."
+              exit 1
+            fi
+          fi
+
+      - name: Install elan
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+
+      - name: Cache Lake packages
+        uses: actions/cache@v4
+        with:
+          path: .lake
+          key: lake-genesis-${{ hashFiles('lean-toolchain', 'lake-manifest.json', 'lakefile.lean') }}
+          restore-keys: lake-genesis-
+
+      - name: Build genesis tools
+        run: lake build genesis_select_targets genesis_evaluate
+
+      - name: Collect reviews and evaluate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=${{ steps.pr-info.outputs.pr_number }}
+
+          # Read cache from genesis-state branch
+          git fetch origin genesis-state
+          CACHE=$(git show origin/genesis-state:genesis.json)
+
+          # Get PR details
+          PR_JSON=$(gh pr view "$PR_NUMBER" --json headRefOid,author)
+          HEAD_SHA=$(echo "$PR_JSON" | jq -r '.headRefOid')
+          AUTHOR=$(echo "$PR_JSON" | jq -r '.author.login')
+
+          # Collect reviews + meta-reviews (replace "currentPR" with actual SHA)
+          COLLECTED=$(bash tools/genesis-collect-reviews.sh "$PR_NUMBER" "$HEAD_SHA")
+          REVIEWS=$(echo "$COLLECTED" | jq '.reviews')
+          META_REVIEWS=$(echo "$COLLECTED" | jq '.metaReviews')
+
+          # Get comparison targets
+          TARGETS_JSON=$(echo "{\"prId\":${PR_NUMBER},\"indices\":${CACHE}}" | \
+            .lake/build/bin/genesis_select_targets)
+          TARGETS=$(echo "$TARGETS_JSON" | jq '.targets')
+
+          # Build signed commit
+          EPOCH=$(date +%s)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            FOUNDER_OVERRIDE=false
+          else
+            FOUNDER_OVERRIDE=true
+          fi
+          COMMIT_JSON=$(jq -n \
+            --arg id "$HEAD_SHA" \
+            --argjson prId "$PR_NUMBER" \
+            --arg author "$AUTHOR" \
+            --argjson mergeEpoch "$EPOCH" \
+            --argjson targets "$TARGETS" \
+            --argjson reviews "$REVIEWS" \
+            --argjson metaReviews "$META_REVIEWS" \
+            --argjson founderOverride "$FOUNDER_OVERRIDE" \
+            '{id: $id, prId: $prId, author: $author, mergeEpoch: $mergeEpoch,
+              comparisonTargets: $targets, reviews: $reviews,
+              metaReviews: $metaReviews, founderOverride: $founderOverride}')
+
+          # Evaluate
+          INPUT=$(jq -n \
+            --argjson commit "$COMMIT_JSON" \
+            --argjson pastIndices "$CACHE" \
+            '{commit: $commit, pastIndices: $pastIndices}')
+
+          INDEX=$(echo "$INPUT" | .lake/build/bin/genesis_evaluate)
+
+          # Update cache on genesis-state branch
+          UPDATED_CACHE=$(echo "$CACHE" | jq --argjson idx "$INDEX" '. + [$idx]')
+          git worktree add /tmp/genesis-state origin/genesis-state
+          git -C /tmp/genesis-state checkout -B genesis-state origin/genesis-state
+          echo "$UPDATED_CACHE" > /tmp/genesis-state/genesis.json
+          git -C /tmp/genesis-state config user.name "JAR Bot"
+          git -C /tmp/genesis-state config user.email "legal@bitarray.dev"
+          git -C /tmp/genesis-state add genesis.json
+          git -C /tmp/genesis-state commit -m "genesis: update state for PR #${PR_NUMBER}"
+          git -C /tmp/genesis-state push origin genesis-state
+          git worktree remove /tmp/genesis-state
+
+          # Save for merge commit trailers
+          echo "$INDEX" > /tmp/genesis_index.json
+          echo "$COMMIT_JSON" > /tmp/genesis_commit.json
+          echo "$AUTHOR" > /tmp/genesis_author.txt
+
+      - name: Merge PR with genesis data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=${{ steps.pr-info.outputs.pr_number }}
+          INDEX=$(cat /tmp/genesis_index.json)
+          COMMIT_DATA=$(cat /tmp/genesis_commit.json)
+          AUTHOR=$(cat /tmp/genesis_author.txt)
+          SCORE=$(echo "$INDEX" | jq -c '.score')
+          WEIGHT_DELTA=$(echo "$INDEX" | jq -r '.weightDelta')
+
+          # Merge the PR with both SignedCommit and CommitIndex in trailers
+          gh pr merge "$PR_NUMBER" --merge --subject "Merge PR #${PR_NUMBER}
+
+          Genesis-Commit: $(echo "$COMMIT_DATA" | jq -c .)
+          Genesis-Index: $(echo "$INDEX" | jq -c .)
+          Genesis-PR: #${PR_NUMBER}
+          Genesis-Author: ${AUTHOR}"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MERGE_TYPE="quorum reached"
+          else
+            MERGE_TYPE="founder override"
+          fi
+
+          gh pr comment "$PR_NUMBER" --body \
+            "**JAR Bot:** Merged (${MERGE_TYPE}).
+            Score: ${SCORE}
+            Weight delta: ${WEIGHT_DELTA}"

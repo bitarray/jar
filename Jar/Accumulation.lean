@@ -1468,7 +1468,8 @@ def accone (ps : PartialState) (serviceId : ServiceId)
         -- Run PVM with host-call dispatch via handleHostCall
         let runFn := match JamConfig.gasModel with
           | .perInstruction => PVM.run
-          | .basicBlock => PVM.runBlockGas
+          | .basicBlockFull => PVM.runBlockGas
+          | .basicBlockSinglePass => PVM.runBlockGasSinglePass
         let (result, ctx') := PVM.runWithHostCalls AccContext
           prog 5 regs mem (Int64.ofUInt64 totalGas)
           (fun callId gas regs' mem' c =>
@@ -1695,19 +1696,22 @@ def accseq (gasLimit : Gas) (reports : Array WorkReport)
     (ps : PartialState) (freeGasMap : Dict ServiceId Gas)
     (timeslot : Timeslot) (entropy : Hash) (configBlob : ByteArray)
     (opaqueData : Array (ByteArray × ByteArray) := #[])
-    : Nat × PartialState × Array (ServiceId × Hash) × Dict ServiceId Gas × Array (ServiceId × String) × Array (ByteArray × ByteArray) :=
+    : Nat × PartialState × Array (ServiceId × Hash) × Dict ServiceId Gas × Dict ServiceId Nat × Array (ServiceId × String) × Array (ByteArray × ByteArray) :=
   -- Round 1: accumulate work-report operands + initial deferred transfers
   let (ps1, newXfers1, yields1, gasMap1, exits1, od1) := accpar ps reports initialTransfers freeGasMap timeslot entropy configBlob opaqueData
   let round1Gas := gasMap1.values.foldl (init := (0 : Nat)) fun acc g => acc + g.toNat
-
+  -- Initialize count map from round 1
+  let countMap1 := gasMap1.entries.foldl (init := Dict.empty (K := ServiceId) (V := Nat))
+    fun acc (k, _) => acc.insert k 1
   -- Subsequent rounds: process deferred transfers until none remain or gas exhausted.
   -- GP §12 eq:accseq: g* = g + Σ(t.gas) — augment budget with transfer gas each round.
   let maxRounds := 10
-  let (psFinal, allYields, gasMapFinal, allExits, odFinal) := Id.run do
+  let (psFinal, allYields, gasMapFinal, countMapFinal, allExits, odFinal) := Id.run do
     let mut curPs := ps1
     let mut curXfers := newXfers1
     let mut curYields := yields1
     let mut curGasMap := gasMap1
+    let mut curCountMap := countMap1
     let mut curExits := exits1
     let mut curOd := od1
     let mut remainingGas : Nat := gasLimit.toNat - min round1Gas gasLimit.toNat
@@ -1727,11 +1731,14 @@ def accseq (gasLimit : Gas) (reports : Array WorkReport)
       curGasMap := gasMap'.entries.foldl (init := curGasMap) fun acc (k, v) =>
         let existing := match acc.lookup k with | some g => g | none => 0
         acc.insert k (existing + v)
+      curCountMap := gasMap'.entries.foldl (init := curCountMap) fun acc (k, _) =>
+        let existing := match acc.lookup k with | some n => n | none => 0
+        acc.insert k (existing + 1)
       curExits := curExits ++ exits'
       curOd := od'
-    return (curPs, curYields, curGasMap, curExits, curOd)
+    return (curPs, curYields, curGasMap, curCountMap, curExits, curOd)
 
-  (reports.size, psFinal, allYields, gasMapFinal, allExits, odFinal)
+  (reports.size, psFinal, allYields, gasMapFinal, countMapFinal, allExits, odFinal)
 
 -- ============================================================================
 -- Top-Level Accumulation — GP §12
@@ -1818,7 +1825,7 @@ def accumulate (state : State) (reports : Array WorkReport)
 
   let configBlob := buildConfigBlob
 
-  let (_, ps', outputs, gasUsage, exitReasons, remainingOpaque) := accseq
+  let (_, ps', outputs, gasUsage, _, exitReasons, remainingOpaque) := accseq
     (UInt64.ofNat totalGas) reports #[] ps freeGasMap timeslot
     state.entropy.current configBlob opaqueData
 

@@ -2,8 +2,7 @@
 
 [![Matrix](https://img.shields.io/matrix/jar%3Amatrix.org?logo=matrix&label=chat)](https://matrix.to/#/#jar:matrix.org)
 
-Lean 4 formalization of the JAR protocol, based on the JAM (Join-Accumulate Machine)
-[Gray Paper v0.7.2](https://github.com/gavofyork/graypaper/releases/download/v0.7.2/graypaper-0.7.2.pdf).
+Lean 4 formalization of the JAR protocol, based on JAM (Join-Accumulate Machine).
 
 ## About the name
 

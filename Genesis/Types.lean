@@ -1,0 +1,178 @@
+/-
+  Genesis Protocol — Core Types
+
+  ## Source of Truth
+
+  The sole input is the git commit history of master (force-push disabled).
+
+  ## Reward Model
+
+  Rewards are only calculated on signed commits (by GitHub merge or bot GPG key).
+  For each signed commit, the reward spec from the PREVIOUS signed commit is
+  checked out and applied to the current commit. This means a malicious spec
+  change cannot affect its own reward — only the next signed commit's evaluation.
+
+  Each evaluation produces a list of non-negative, capped balance deltas:
+    (+contributor_reward, +reviewer1_reward, +reviewer2_reward, ...)
+
+  Final balance for any contributor = Σ of all their deltas across history.
+
+  ## Scoring Model
+
+  Reviewers rank N past commits + the current PR on three dimensions
+  (difficulty, novelty, designQuality). Rankings are constrained —
+  inflating one requires deflating another, making bias visible.
+
+  Meta-reviews (thumbs up/down) filter low-quality reviews before scoring.
+  Score is derived from the weighted lower-quantile of implied scores,
+  providing BFT-like safety up to 66% honest weight.
+
+  Guardrails:
+  - No delta can be negative (no transfers/slashing).
+  - Contributor reward per commit is capped.
+  - Reviewer reward per commit is capped.
+  - Worst-case damage from a malicious spec = one commit's capped rewards.
+  - Comparison targets are validated at spec time — forged targets → zero reward.
+-/
+
+/-- GitHub username. -/
+abbrev ContributorId := String
+/-- Full git commit SHA (40 hex chars). -/
+abbrev CommitId := String
+abbrev PRId := Nat
+abbrev Epoch := Nat
+abbrev TokenAmount := Nat
+
+/-- Exact rational arithmetic. No floats. -/
+structure Ratio where
+  num : Nat
+  den : Nat
+  den_pos : den > 0 := by omega
+  deriving Repr
+
+instance : BEq Ratio where
+  beq a b := a.num * b.den == b.num * a.den
+
+/-- Normalize a ratio by dividing both num and den by their GCD. -/
+def Ratio.normalize (r : Ratio) : Ratio :=
+  let g := Nat.gcd r.num r.den
+  if hg : g ≤ 1 then r
+  else
+    have gpos : g > 0 := by omega
+    have h : r.den / g > 0 :=
+      Nat.div_pos (Nat.le_of_dvd r.den_pos (Nat.gcd_dvd_right r.num r.den)) gpos
+    { num := r.num / g, den := r.den / g, den_pos := h }
+
+def Ratio.mul (a b : Ratio) : Ratio :=
+  Ratio.normalize { num := a.num * b.num,
+                     den := a.den * b.den,
+                     den_pos := Nat.mul_pos a.den_pos b.den_pos }
+
+def Ratio.add (a b : Ratio) : Ratio :=
+  Ratio.normalize { num := a.num * b.den + b.num * a.den,
+                     den := a.den * b.den,
+                     den_pos := Nat.mul_pos a.den_pos b.den_pos }
+
+def Ratio.zero : Ratio where num := 0; den := 1
+def Ratio.one : Ratio where num := 1; den := 1
+def Ratio.ofNat (n : Nat) : Ratio where num := n; den := 1
+def Ratio.toNat (r : Ratio) : Nat := r.num / r.den
+
+instance : Inhabited Ratio where
+  default := Ratio.zero
+
+/-- Merge verdict from a reviewer. -/
+inductive Verdict where
+  | merge
+  | notMerge
+  deriving Repr, BEq
+
+/-- A ranking of commits on one dimension. The list is ordered from
+    best (rank 1) to worst (rank N). Each entry is a CommitId.
+    The current PR and all comparison targets must appear exactly once. -/
+abbrev Ranking := List CommitId
+
+/-- A review: rankings on three dimensions plus a merge verdict.
+
+    The reviewer ranks all N comparison targets + the current PR
+    from best to worst on each dimension. Rankings are constrained:
+    inflating one commit requires deflating another.
+
+    If a reviewer submits multiple reviews on a PR, only the last
+    one counts (the bot records only the final review per reviewer). -/
+structure EmbeddedReview where
+  reviewer : ContributorId
+  /-- Rankings from best to worst on each dimension.
+      Each list must contain exactly the comparison targets + the current PR. -/
+  difficultyRanking : Ranking
+  noveltyRanking : Ranking
+  designQualityRanking : Ranking
+  /-- Merge verdict. -/
+  verdict : Verdict
+  deriving Repr
+
+/-- A meta-review: thumbs up or down on another reviewer's review.
+    Low-quality or biased reviews accumulate thumbs down and get
+    excluded from scoring. -/
+structure MetaReview where
+  /-- Who submitted this meta-review. -/
+  metaReviewer : ContributorId
+  /-- Which reviewer's review is being evaluated. -/
+  targetReviewer : ContributorId
+  /-- Thumbs up (true) or thumbs down (false). -/
+  approve : Bool
+  deriving Repr
+
+
+/-- Score for a single commit, per dimension.
+    Each dimension is a percentile rank (0-100) of the current PR
+    among the ranked items. 100 = ranked first, 0 = ranked last. -/
+structure CommitScore where
+  difficulty : Nat
+  novelty : Nat
+  designQuality : Nat
+  deriving Repr, BEq
+
+/-- Number of scoring dimensions. Used to normalize the weighted total. -/
+def CommitScore.numWeightedDimensions : Nat := 5  -- 1 + 1 + 3
+
+/-- Combined weighted score from CommitScore. designQuality is 3x.
+    Result is 0-100 (normalized by number of weighted dimensions). -/
+def CommitScore.weighted (s : CommitScore) : Nat :=
+  (s.difficulty + s.novelty + 3 * s.designQuality) / CommitScore.numWeightedDimensions
+
+/-- weightDelta is at most 100 when all dimension scores are at most 100. -/
+theorem CommitScore.weighted_le_100 (s : CommitScore)
+    (hd : s.difficulty ≤ 100) (hn : s.novelty ≤ 100) (hq : s.designQuality ≤ 100) :
+    s.weighted ≤ 100 := by
+  unfold weighted numWeightedDimensions
+  omega
+
+/-- A signed commit and the data needed to compute its rewards. -/
+structure SignedCommit where
+  id : CommitId
+  prId : PRId
+  author : ContributorId
+  mergeEpoch : Epoch
+  /-- The comparison targets selected by the bot.
+      Validated against hash(prId) at spec time. -/
+  comparisonTargets : List CommitId
+  /-- Reviews: each reviewer's rankings and verdicts. -/
+  reviews : List EmbeddedReview
+  /-- Meta-reviews: thumbs up/down on reviews. -/
+  metaReviews : List MetaReview
+  /-- Whether the founder used the escape hatch to merge. -/
+  founderOverride : Bool
+  deriving Repr
+
+/-- Contributor state — derived from processing the full history. -/
+structure Contributor where
+  id : ContributorId
+  /-- Total tokens earned (monotonically increasing, capped per commit). -/
+  balance : TokenAmount
+  /-- Sum of weighted commit scores across all authored PRs.
+      Linear in individual scores → Sybil-neutral. -/
+  weight : Nat
+  /-- Whether this contributor has activated as a reviewer. -/
+  isReviewer : Bool
+  deriving Repr

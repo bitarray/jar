@@ -1,17 +1,5 @@
 {"post_state":
- {"statistics":
-  [{"record":
-    {"refinement_gas_used": 0,
-     "refinement_count": 0,
-     "provided_size": 0,
-     "provided_count": 0,
-     "imports": 0,
-     "extrinsic_size": 0,
-     "extrinsic_count": 0,
-     "exports": 0,
-     "accumulate_gas_used": 4364,
-     "accumulate_count": 1},
-    "id": 1729}],
+ {"statistics": [],
   "slot": 49,
   "ready_queue":
   [[],

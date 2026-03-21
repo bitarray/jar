@@ -167,3 +167,26 @@ lean_exe erasuretest where
     "-ljar_crypto_ffi",
     "-lpthread", "-ldl", "-lm"
   ]
+
+-- ============================================================================
+-- Genesis — Proof-of-Intelligence distribution protocol
+-- No crypto-ffi dependency — builds without Rust.
+-- ============================================================================
+
+lean_lib Genesis where
+  roots := #[`Genesis]
+
+lean_exe genesis_select_targets where
+  root := `Genesis.Cli.SelectTargets
+
+lean_exe genesis_evaluate where
+  root := `Genesis.Cli.Evaluate
+
+lean_exe genesis_check_merge where
+  root := `Genesis.Cli.CheckMerge
+
+lean_exe genesis_finalize where
+  root := `Genesis.Cli.Finalize
+
+lean_exe genesis_validate where
+  root := `Genesis.Cli.Validate

@@ -1,0 +1,96 @@
+name: "Genesis: Review Check"
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  check-review:
+    if: >
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/review')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for protected file changes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_AUTHOR=$(gh pr view ${{ github.event.issue.number }} --json author --jq '.author.login')
+          CHANGED=$(gh pr diff ${{ github.event.issue.number }} --name-only)
+          if echo "$CHANGED" | grep -qE '^\.github/workflows/genesis-'; then
+            if [ "$PR_AUTHOR" != "sorpaas" ]; then
+              echo "Protected files modified by non-founder — skipping genesis review"
+              exit 0
+            fi
+          fi
+
+      - name: Install elan
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+
+      - name: Cache Lake packages
+        uses: actions/cache@v4
+        with:
+          path: .lake
+          key: lake-genesis-${{ hashFiles('lean-toolchain', 'lake-manifest.json', 'lakefile.lean') }}
+          restore-keys: lake-genesis-
+
+      - name: Build genesis tools
+        run: lake build genesis_check_merge
+
+      - name: Collect all reviews and check merge readiness
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+        run: |
+          PR_NUMBER=${{ github.event.issue.number }}
+          git fetch origin genesis-state
+          CACHE=$(git show origin/genesis-state:genesis.json)
+
+          # Get PR head SHA for replacing "currentPR" in rankings
+          HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq '.headRefOid')
+
+          # Collect reviews + meta-reviews (replace "currentPR" with actual SHA)
+          COLLECTED=$(bash tools/genesis-collect-reviews.sh "$PR_NUMBER" "$HEAD_SHA")
+          REVIEWS=$(echo "$COLLECTED" | jq '.reviews')
+          META_REVIEWS=$(echo "$COLLECTED" | jq '.metaReviews')
+
+          REVIEW_COUNT=$(echo "$REVIEWS" | jq 'length')
+          META_COUNT=$(echo "$META_REVIEWS" | jq 'length')
+          if [ "$REVIEW_COUNT" -eq 0 ]; then
+            gh pr comment "$PR_NUMBER" --body "**JAR Bot:** Could not parse any reviews. Please check the format."
+            exit 0
+          fi
+
+          # Check merge readiness
+          INPUT=$(jq -n \
+            --argjson reviews "$REVIEWS" \
+            --argjson metaReviews "$META_REVIEWS" \
+            --argjson indices "$CACHE" \
+            '{reviews: $reviews, metaReviews: $metaReviews, indices: $indices}')
+
+          RESULT=$(echo "$INPUT" | .lake/build/bin/genesis_check_merge)
+
+          READY=$(echo "$RESULT" | jq -r '.ready')
+          MERGE_W=$(echo "$RESULT" | jq -r '.mergeWeight')
+          TOTAL_W=$(echo "$RESULT" | jq -r '.totalWeight')
+
+          if [ "$READY" = "true" ]; then
+            gh pr comment "$PR_NUMBER" --body \
+              "**JAR Bot:** Review recorded from @${COMMENT_AUTHOR} (${REVIEW_COUNT} reviews, ${META_COUNT} meta-reviews).
+              Merge weight: ${MERGE_W}/${TOTAL_W}. Quorum reached — merging."
+
+            # Trigger the merge workflow
+            gh workflow run genesis-merge.yml \
+              -f pr_number="$PR_NUMBER"
+          else
+            gh pr comment "$PR_NUMBER" --body \
+              "**JAR Bot:** Review recorded from @${COMMENT_AUTHOR} (${REVIEW_COUNT} reviews, ${META_COUNT} meta-reviews).
+              Merge weight: ${MERGE_W}/${TOTAL_W} (need >50%)."
+          fi

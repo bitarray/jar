@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install elan
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Lake packages
+        uses: actions/cache@v4
+        with:
+          path: .lake
+          key: lake-${{ hashFiles('lean-toolchain', 'lake-manifest.json', 'lakefile.lean') }}
+          restore-keys: lake-
+
+      - name: Cache crypto-ffi build
+        uses: actions/cache@v4
+        with:
+          path: crypto-ffi/target
+          key: crypto-ffi-${{ hashFiles('crypto-ffi/Cargo.toml', 'crypto-ffi/Cargo.lock', 'crypto-ffi/src/**') }}
+          restore-keys: crypto-ffi-
+
+      - name: Build crypto-ffi
+        run: cd crypto-ffi && cargo build --release
+
+      - name: Run tests
+        run: make test
