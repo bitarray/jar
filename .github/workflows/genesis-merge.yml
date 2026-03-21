@@ -137,8 +137,9 @@ jobs:
           # Save for merge step
           echo "$INDEX" > /tmp/genesis_index.json
           echo "$COMMIT_JSON" > /tmp/genesis_commit.json
+          echo "$CACHE" > /tmp/genesis_cache.json
 
-      - name: Queue merge with auto-merge
+      - name: Wait for checks, merge, and update cache
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -149,21 +150,51 @@ jobs:
           SCORE=$(echo "$INDEX" | jq -c '.score')
           WEIGHT_DELTA=$(echo "$INDEX" | jq -r '.weightDelta')
 
-          # Enable auto-merge — GitHub merges once required checks pass
-          gh pr merge "$PR_NUMBER" --auto --merge --subject "Merge PR #${PR_NUMBER}
-
-          Genesis-Commit: $(echo "$COMMIT_DATA" | jq -c .)
-          Genesis-Index: $(echo "$INDEX" | jq -c .)
-          Genesis-PR: #${PR_NUMBER}
-          Genesis-Author: ${AUTHOR}"
-
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             MERGE_TYPE="quorum reached"
           else
             MERGE_TYPE="founder override"
           fi
 
+          # Wait for required checks to pass
+          gh pr checks "$PR_NUMBER" --watch --fail-fast || {
+            gh pr comment "$PR_NUMBER" --body \
+              "**JAR Bot:** Checks failed — cannot merge (${MERGE_TYPE})."
+            exit 1
+          }
+
+          # Merge synchronously
+          gh pr merge "$PR_NUMBER" --merge --subject "Merge PR #${PR_NUMBER}
+
+          Genesis-Commit: $(echo "$COMMIT_DATA" | jq -c .)
+          Genesis-Index: $(echo "$INDEX" | jq -c .)
+          Genesis-PR: #${PR_NUMBER}
+          Genesis-Author: ${AUTHOR}"
+
+          # Confirm merge actually happened
+          STATE=$(gh pr view "$PR_NUMBER" --json state --jq '.state')
+          if [ "$STATE" != "MERGED" ]; then
+            echo "ERROR: PR #$PR_NUMBER not merged (state: $STATE)" >&2
+            gh pr comment "$PR_NUMBER" --body \
+              "**JAR Bot:** Merge failed unexpectedly (state: ${STATE})."
+            exit 1
+          fi
+
+          # Update genesis-state cache (only after confirmed merge)
+          CACHE=$(cat /tmp/genesis_cache.json 2>/dev/null || git show origin/genesis-state:genesis.json)
+          UPDATED_CACHE=$(echo "$CACHE" | jq --argjson idx "$INDEX" '. + [$idx]')
+          git fetch origin genesis-state
+          git worktree add /tmp/genesis-state origin/genesis-state
+          git -C /tmp/genesis-state checkout -B genesis-state origin/genesis-state
+          echo "$UPDATED_CACHE" > /tmp/genesis-state/genesis.json
+          git -C /tmp/genesis-state config user.name "JAR Bot"
+          git -C /tmp/genesis-state config user.email "legal@bitarray.dev"
+          git -C /tmp/genesis-state add genesis.json
+          git -C /tmp/genesis-state commit -m "genesis: update state for PR #${PR_NUMBER}"
+          git -C /tmp/genesis-state push origin genesis-state
+          git worktree remove /tmp/genesis-state
+
           gh pr comment "$PR_NUMBER" --body \
-            "**JAR Bot:** Auto-merge enabled (${MERGE_TYPE}). Will merge when checks pass.
+            "**JAR Bot:** Merged (${MERGE_TYPE}).
             Score: ${SCORE}
             Weight delta: ${WEIGHT_DELTA}"
