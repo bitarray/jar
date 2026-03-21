@@ -20,9 +20,7 @@ jobs:
           echo "$HOME/.elan/bin" >> $GITHUB_PATH
 
       - name: Install Rust
-        uses: dtolnay/rust-action/toolchain@v1
-        with:
-          toolchain: stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Lake packages
         uses: actions/cache@v4
