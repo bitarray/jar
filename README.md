@@ -134,6 +134,10 @@ cd fuzz && cargo build --release
 
 The implementation-under-test must accept the same CLI interface: `<binary> <sub-transition> <input.json>` and print result JSON to stdout.
 
+## Genesis — Proof of Intelligence
+
+JAR uses a Proof-of-Intelligence model for its genesis token distribution. Every merged PR is scored on difficulty, novelty, and design quality by ranked comparison against past commits. Contributors earn weight proportional to their demonstrated intelligence. See [GENESIS.md](GENESIS.md) for the full protocol design.
+
 ## Toolchain
 
 Lean 4.27.0 — pinned in `lean-toolchain`.

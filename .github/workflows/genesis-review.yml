@@ -42,7 +42,7 @@ jobs:
           restore-keys: lake-genesis-
 
       - name: Build genesis tools
-        run: lake build genesis_check_merge
+        run: lake build genesis_check_merge genesis_select_targets
 
       - name: Collect all reviews and check merge readiness
         env:
@@ -53,11 +53,13 @@ jobs:
           git fetch origin genesis-state
           CACHE=$(git show origin/genesis-state:genesis.json)
 
-          # Get PR head SHA for replacing "currentPR" in rankings
+          # Get PR head SHA and comparison targets
           HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq '.headRefOid')
+          TARGETS=$(echo "{\"prId\":${PR_NUMBER},\"indices\":${CACHE}}" | \
+            .lake/build/bin/genesis_select_targets | jq -c '.targets')
 
-          # Collect reviews + meta-reviews (replace "currentPR" with actual SHA)
-          COLLECTED=$(bash tools/genesis-collect-reviews.sh "$PR_NUMBER" "$HEAD_SHA")
+          # Collect reviews + meta-reviews (expand currentPR + short hashes)
+          COLLECTED=$(bash tools/genesis-collect-reviews.sh "$PR_NUMBER" "$HEAD_SHA" "$TARGETS")
           REVIEWS=$(echo "$COLLECTED" | jq '.reviews')
           META_REVIEWS=$(echo "$COLLECTED" | jq '.metaReviews')
 

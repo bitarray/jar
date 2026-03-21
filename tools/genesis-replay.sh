@@ -50,6 +50,21 @@ for MERGE_HASH in $MERGE_COMMITS; do
     continue
   fi
 
+  # Expand short hashes in review rankings to full hashes.
+  # Reviews may use 8-char short hashes; the Lean spec needs full 40-char SHAs.
+  COMMIT_LINE=$(echo "$COMMIT_LINE" | jq -c '
+    .id as $head |
+    .comparisonTargets as $targets |
+    ($targets + [$head]) as $all |
+    .reviews |= [.[] |
+      .difficultyRanking |= [.[] | . as $h |
+        if ($h | length) < 40 then ($all[] | select(startswith($h))) // $h else . end] |
+      .noveltyRanking |= [.[] | . as $h |
+        if ($h | length) < 40 then ($all[] | select(startswith($h))) // $h else . end] |
+      .designQualityRanking |= [.[] | . as $h |
+        if ($h | length) < 40 then ($all[] | select(startswith($h))) // $h else . end]
+    ]')
+
   SIGNED_COMMITS=$(echo "$SIGNED_COMMITS" | jq --argjson c "$COMMIT_LINE" '. + [$c]')
   STORED_INDICES=$(echo "$STORED_INDICES" | jq --argjson idx "$INDEX_LINE" '. + [$idx]')
 done

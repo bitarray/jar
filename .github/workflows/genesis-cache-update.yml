@@ -1,0 +1,58 @@
+name: "Genesis: Cache Update"
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  update-cache:
+    # Only run for merge commits with Genesis-Index trailers
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check for Genesis merge
+        id: check
+        run: |
+          MSG=$(git log -1 --format="%B")
+          if echo "$MSG" | grep -q "^Genesis-Index:"; then
+            INDEX=$(echo "$MSG" | grep '^Genesis-Index: ' | sed 's/^Genesis-Index: //')
+            PR=$(echo "$MSG" | grep '^Genesis-PR: ' | sed 's/^Genesis-PR: //')
+            echo "is_genesis=true" >> $GITHUB_OUTPUT
+            echo "index=$INDEX" >> $GITHUB_OUTPUT
+            echo "pr=$PR" >> $GITHUB_OUTPUT
+          else
+            echo "is_genesis=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update genesis-state cache
+        if: steps.check.outputs.is_genesis == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR="${{ steps.check.outputs.pr }}"
+          INDEX='${{ steps.check.outputs.index }}'
+
+          # Read current cache
+          git fetch origin genesis-state
+          CACHE=$(git show origin/genesis-state:genesis.json)
+
+          # Append new index
+          UPDATED_CACHE=$(echo "$CACHE" | jq --argjson idx "$INDEX" '. + [$idx]')
+
+          # Push to genesis-state branch
+          git worktree add /tmp/genesis-state origin/genesis-state
+          git -C /tmp/genesis-state checkout -B genesis-state origin/genesis-state
+          echo "$UPDATED_CACHE" > /tmp/genesis-state/genesis.json
+          git -C /tmp/genesis-state config user.name "JAR Bot"
+          git -C /tmp/genesis-state config user.email "legal@bitarray.dev"
+          git -C /tmp/genesis-state add genesis.json
+          git -C /tmp/genesis-state commit -m "genesis: update state for $PR"
+          git -C /tmp/genesis-state push origin genesis-state
+          git worktree remove /tmp/genesis-state
+
+          echo "Cache updated for $PR" >&2

@@ -2,10 +2,12 @@
 # Collect all /review comments and their meta-reviews (reactions)
 # from a GitHub PR.
 #
-# Usage: genesis-collect-reviews.sh <pr_number> [head_sha]
+# Usage: genesis-collect-reviews.sh <pr_number> [head_sha] [targets_json]
 # Requires: GH_TOKEN, gh cli, jq
 #
 # If head_sha is provided, "currentPR" in rankings is replaced with the SHA.
+# If targets_json is provided (JSON array of full commit hashes), short hashes
+# in rankings are expanded to full hashes by prefix matching.
 #
 # Output (JSON to stdout):
 #   {"reviews": [...], "metaReviews": [...]}
@@ -14,9 +16,37 @@ set -euo pipefail
 
 PR_NUMBER="$1"
 HEAD_SHA="${2:-}"
+TARGETS_JSON="${3:-[]}"
 REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner --jq '.nameWithOwner')}"
 
 to_json_array() { echo "$1" | tr ',' '\n' | jq -R . | jq -s .; }
+
+# Expand short hashes to full hashes using TARGETS_JSON and HEAD_SHA.
+expand_hashes() {
+  local CSV="$1"
+  local RESULT=""
+  local FIRST=true
+  for HASH in $(echo "$CSV" | tr ',' ' '); do
+    local EXPANDED="$HASH"
+    if [ "${#HASH}" -lt 40 ]; then
+      if [ -n "$HEAD_SHA" ] && [[ "$HEAD_SHA" == "$HASH"* ]]; then
+        EXPANDED="$HEAD_SHA"
+      else
+        local MATCH=$(echo "$TARGETS_JSON" | jq -r --arg h "$HASH" '.[] | select(startswith($h))' | head -1)
+        if [ -n "$MATCH" ]; then
+          EXPANDED="$MATCH"
+        fi
+      fi
+    fi
+    if [ "$FIRST" = true ]; then
+      RESULT="$EXPANDED"
+      FIRST=false
+    else
+      RESULT="${RESULT},${EXPANDED}"
+    fi
+  done
+  echo "$RESULT"
+}
 
 parse_review() {
   local BODY="$1"
@@ -35,6 +65,10 @@ parse_review() {
     local NOV="$RAW_NOV"
     local DES="$RAW_DES"
   fi
+  # Expand short hashes to full hashes
+  DIFF=$(expand_hashes "$DIFF")
+  NOV=$(expand_hashes "$NOV")
+  DES=$(expand_hashes "$DES")
   if [ -n "$DIFF" ] && [ -n "$NOV" ] && [ -n "$DES" ] && [ -n "$VERD" ]; then
     jq -n \
       --arg reviewer "$AUTHOR" \
