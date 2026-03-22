@@ -48,6 +48,7 @@ def founderWeight : Nat := 1
     2. PR B: add entry here with a future activation epoch. Must merge before that date. -/
 def genesisSchedule : List (Epoch × GenesisVariant) :=
   [ (0, GenesisVariant.v1)
+  , (1774188000, GenesisVariant.v2)  -- 2026-03-22 14:00 UTC: rank-based target selection
   ]
 
 /-- Resolve the active variant for a given epoch. -/

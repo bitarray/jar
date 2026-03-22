@@ -70,7 +70,7 @@ jobs:
       - name: Smoke test CLI tools
         working-directory: spec
         run: |
-          echo '{"prId":1,"prCreatedAt":9999999999,"indices":[]}' | .lake/build/bin/genesis_select_targets | jq -e '.targets == []'
+          echo '{"prId":1,"prCreatedAt":9999999999,"indices":[],"ranking":[]}' | .lake/build/bin/genesis_select_targets | jq -e '.targets == []'
           echo '{"indices":[]}' | .lake/build/bin/genesis_finalize | jq -e '.weights[0].id == "sorpaas"'
           echo '{"reviews":[],"metaReviews":[],"indices":[]}' | .lake/build/bin/genesis_check_merge | jq -e '.ready == false'
 
