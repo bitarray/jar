@@ -1,0 +1,78 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/grey",
+    "crates/grey-types",
+    "crates/grey-codec",
+    "crates/grey-crypto",
+    "crates/javm",
+    "crates/grey-merkle",
+    "crates/grey-erasure",
+    "crates/grey-state",
+    "crates/grey-consensus",
+    "crates/grey-services",
+    "crates/grey-network",
+    "crates/grey-transpiler",
+    "crates/grey-store",
+    "crates/grey-rpc",
+    "crates/grey-bench",
+]
+exclude = [
+    "services/sample-service",
+    "services/pixels-service",
+    "services/pixels-authorizer",
+    "services/bench-ecrecover",
+    "res/spec/crypto-ffi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = [ "Bitarray GmbH <legal@bitarray.dev>" ]
+
+[workspace.dependencies]
+# Internal crates
+grey-types = { path = "crates/grey-types" }
+grey-codec = { path = "crates/grey-codec" }
+grey-crypto = { path = "crates/grey-crypto" }
+javm = { path = "crates/javm" }
+grey-merkle = { path = "crates/grey-merkle" }
+grey-erasure = { path = "crates/grey-erasure" }
+grey-state = { path = "crates/grey-state" }
+grey-consensus = { path = "crates/grey-consensus" }
+grey-services = { path = "crates/grey-services" }
+grey-network = { path = "crates/grey-network" }
+grey-transpiler = { path = "crates/grey-transpiler" }
+grey-store = { path = "crates/grey-store" }
+grey-rpc = { path = "crates/grey-rpc" }
+
+# External dependencies
+blake2 = "0.10"
+sha3 = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+thiserror = "2"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ark-vrf = { version = "0.2", features = ["bandersnatch", "ring"] }
+blst = "0.3"
+reed-solomon-simd = "3.1"
+redb = "3.1"
+tracing = "0.1"
+tracing-test = "0.2"
+tokio = { version = "1", features = ["full"] }
+libp2p = { version = "0.54", features = ["gossipsub", "noise", "tcp", "yamux", "tokio", "macros", "identify", "request-response"] }
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+async-trait = "0.1"
+jsonrpsee = { version = "0.24", features = ["server", "macros"] }
+
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.release.package.polkavm-linux-raw]
+opt-level = 0

@@ -1,0 +1,13 @@
+[package]
+name = "grey-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core types, constants, and data structures for the JAM protocol."
+
+[dependencies]
+hex = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

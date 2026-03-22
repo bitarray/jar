@@ -1,0 +1,34 @@
+[package]
+name = "grey"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JAM (Join-Accumulate Machine) blockchain node implementation."
+
+[[bin]]
+name = "grey"
+path = "src/main.rs"
+
+[dependencies]
+grey-types = { workspace = true }
+grey-codec = { workspace = true }
+grey-crypto = { workspace = true }
+javm = { workspace = true }
+grey-merkle = { workspace = true }
+grey-erasure = { workspace = true }
+grey-state = { workspace = true }
+grey-consensus = { workspace = true }
+grey-services = { workspace = true }
+grey-network = { workspace = true }
+grey-store = { workspace = true }
+grey-rpc = { workspace = true }
+grey-transpiler = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+libp2p = { workspace = true }
+futures = { workspace = true }

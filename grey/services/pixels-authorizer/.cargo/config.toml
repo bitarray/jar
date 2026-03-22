@@ -1,0 +1,2 @@
+[build]
+target = "../../services/riscv64em-javm.json"

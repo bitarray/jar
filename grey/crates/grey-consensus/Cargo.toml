@@ -1,0 +1,13 @@
+[package]
+name = "grey-consensus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Safrole block production and GRANDPA finality for JAM."
+
+[dependencies]
+grey-types = { workspace = true }
+grey-codec = { workspace = true }
+grey-crypto = { workspace = true }
+grey-state = { workspace = true }
+thiserror = { workspace = true }

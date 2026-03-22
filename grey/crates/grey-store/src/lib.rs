@@ -1,0 +1,647 @@
+//! Persistent storage for Grey node.
+//!
+//! Uses `redb` as the embedded database backend. Stores:
+//! - Blocks keyed by header hash
+//! - Block hash index by timeslot
+//! - Chain state (as state_serial KV pairs) keyed by block hash
+//! - Metadata (head block, finalized block)
+//! - DA chunks keyed by (report_hash, chunk_index)
+
+use grey_codec::header_codec;
+use grey_types::config::Config;
+use grey_types::header::Block;
+use grey_types::state::State;
+use grey_types::Hash;
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use std::path::Path;
+
+/// Errors from the store.
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    #[error("database error: {0}")]
+    Db(#[from] redb::DatabaseError),
+    #[error("storage error: {0}")]
+    Storage(#[from] redb::StorageError),
+    #[error("table error: {0}")]
+    Table(#[from] redb::TableError),
+    #[error("transaction error: {0}")]
+    Transaction(#[from] redb::TransactionError),
+    #[error("commit error: {0}")]
+    Commit(#[from] redb::CommitError),
+    #[error("codec error: {0}")]
+    Codec(String),
+    #[error("not found")]
+    NotFound,
+}
+
+// Table definitions
+// Blocks: block_hash (32 bytes) -> encoded block bytes
+const BLOCKS: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("blocks");
+// Slot index: timeslot (u32 as 4 LE bytes) -> block_hash (32 bytes)
+const SLOT_INDEX: TableDefinition<u32, &[u8; 32]> = TableDefinition::new("slot_index");
+// State: block_hash (32 bytes) -> state KV pairs (serialized)
+const STATE: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("state");
+// Metadata: key string -> value bytes
+const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
+// DA chunks: (report_hash ++ chunk_index as u16 LE) = 34 bytes -> chunk data
+const CHUNKS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chunks");
+
+const META_HEAD_HASH: &str = "head_hash";
+const META_HEAD_SLOT: &str = "head_slot";
+const META_FINALIZED_HASH: &str = "finalized_hash";
+const META_FINALIZED_SLOT: &str = "finalized_slot";
+
+/// Persistent store backed by redb.
+pub struct Store {
+    db: Database,
+}
+
+impl Store {
+    /// Open or create a store at the given path.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let db = Database::create(path.as_ref())?;
+
+        // Create tables if they don't exist
+        let txn = db.begin_write()?;
+        {
+            let _ = txn.open_table(BLOCKS)?;
+            let _ = txn.open_table(SLOT_INDEX)?;
+            let _ = txn.open_table(STATE)?;
+            let _ = txn.open_table(META)?;
+            let _ = txn.open_table(CHUNKS)?;
+        }
+        txn.commit()?;
+
+        Ok(Self { db })
+    }
+
+    // ── Blocks ──────────────────────────────────────────────────────────
+
+    /// Store a block. Returns the header hash.
+    pub fn put_block(&self, block: &Block) -> Result<Hash, StoreError> {
+        let encoded = encode_block(block);
+        let hash = header_codec::compute_header_hash(&block.header);
+
+        let txn = self.db.begin_write()?;
+        {
+            let mut blocks = txn.open_table(BLOCKS)?;
+            blocks.insert(&hash.0, encoded.as_slice())?;
+
+            let mut idx = txn.open_table(SLOT_INDEX)?;
+            idx.insert(block.header.timeslot, &hash.0)?;
+        }
+        txn.commit()?;
+        Ok(hash)
+    }
+
+    /// Get a block by its header hash.
+    pub fn get_block(&self, hash: &Hash) -> Result<Block, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BLOCKS)?;
+        let val = table.get(&hash.0)?.ok_or(StoreError::NotFound)?;
+        decode_block(val.value()).ok_or_else(|| StoreError::Codec("invalid block".into()))
+    }
+
+    /// Get a block hash by timeslot.
+    pub fn get_block_hash_by_slot(&self, slot: u32) -> Result<Hash, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(SLOT_INDEX)?;
+        let val = table.get(slot)?.ok_or(StoreError::NotFound)?;
+        Ok(Hash(*val.value()))
+    }
+
+    /// Check if a block exists.
+    pub fn has_block(&self, hash: &Hash) -> Result<bool, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(BLOCKS)?;
+        Ok(table.get(&hash.0)?.is_some())
+    }
+
+    // ── State ───────────────────────────────────────────────────────────
+
+    /// Store chain state for a given block hash.
+    pub fn put_state(
+        &self,
+        block_hash: &Hash,
+        state: &State,
+        config: &Config,
+    ) -> Result<(), StoreError> {
+        let kvs = grey_merkle::state_serial::serialize_state(state, config);
+        let encoded = encode_state_kvs(&kvs);
+
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(STATE)?;
+            table.insert(&block_hash.0, encoded.as_slice())?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Load chain state for a given block hash.
+    pub fn get_state(&self, block_hash: &Hash, config: &Config) -> Result<State, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(STATE)?;
+        let val = table.get(&block_hash.0)?.ok_or(StoreError::NotFound)?;
+        let kvs = decode_state_kvs(val.value())
+            .ok_or_else(|| StoreError::Codec("invalid state KVs".into()))?;
+        let (state, _opaque) = grey_merkle::state_serial::deserialize_state(&kvs, config)
+            .map_err(|e| StoreError::Codec(e))?;
+        Ok(state)
+    }
+
+    /// Look up a specific service storage entry by computing the expected state key.
+    /// Returns None if the entry doesn't exist.
+    pub fn get_service_storage(
+        &self,
+        block_hash: &Hash,
+        service_id: u32,
+        storage_key: &[u8],
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(STATE)?;
+        let val = table.get(&block_hash.0)?.ok_or(StoreError::NotFound)?;
+        let kvs = decode_state_kvs(val.value())
+            .ok_or_else(|| StoreError::Codec("invalid state KVs".into()))?;
+
+        let expected_key =
+            grey_merkle::state_serial::compute_storage_state_key(service_id, storage_key);
+        for (key, value) in &kvs {
+            if *key == expected_key {
+                return Ok(Some(value.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Look up a service account's code hash directly from state KVs.
+    /// The service metadata is at key C(255, service_id), and code_hash is bytes [1..33].
+    pub fn get_service_code_hash(
+        &self,
+        block_hash: &Hash,
+        service_id: u32,
+    ) -> Result<Option<Hash>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(STATE)?;
+        let val = table.get(&block_hash.0)?.ok_or(StoreError::NotFound)?;
+        let kvs = decode_state_kvs(val.value())
+            .ok_or_else(|| StoreError::Codec("invalid state KVs".into()))?;
+
+        let expected_key =
+            grey_merkle::state_serial::key_for_service_pub(255, service_id);
+        for (key, value) in &kvs {
+            if *key == expected_key {
+                // Service account: version(1) + code_hash(32) + ...
+                if value.len() >= 33 {
+                    let mut h = [0u8; 32];
+                    h.copy_from_slice(&value[1..33]);
+                    return Ok(Some(Hash(h)));
+                }
+                return Ok(None);
+            }
+        }
+        Ok(None)
+    }
+
+    /// Look up a raw state KV by key from state KVs.
+    pub fn get_state_kv(
+        &self,
+        block_hash: &Hash,
+        state_key: &[u8; 31],
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(STATE)?;
+        let val = table.get(&block_hash.0)?.ok_or(StoreError::NotFound)?;
+        let kvs = decode_state_kvs(val.value())
+            .ok_or_else(|| StoreError::Codec("invalid state KVs".into()))?;
+
+        for (key, value) in &kvs {
+            if key == state_key {
+                return Ok(Some(value.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Delete state for a given block hash (for pruning).
+    pub fn delete_state(&self, block_hash: &Hash) -> Result<(), StoreError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(STATE)?;
+            table.remove(&block_hash.0)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    // ── Metadata ────────────────────────────────────────────────────────
+
+    /// Set head block (best/latest block).
+    pub fn set_head(&self, hash: &Hash, slot: u32) -> Result<(), StoreError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut meta = txn.open_table(META)?;
+            meta.insert(META_HEAD_HASH, hash.0.as_slice())?;
+            meta.insert(META_HEAD_SLOT, &slot.to_le_bytes() as &[u8])?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Get head block hash and timeslot.
+    pub fn get_head(&self) -> Result<(Hash, u32), StoreError> {
+        let txn = self.db.begin_read()?;
+        let meta = txn.open_table(META)?;
+
+        let hash_val = meta.get(META_HEAD_HASH)?.ok_or(StoreError::NotFound)?;
+        let slot_val = meta.get(META_HEAD_SLOT)?.ok_or(StoreError::NotFound)?;
+
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(hash_val.value());
+        let slot = u32::from_le_bytes(slot_val.value().try_into().unwrap());
+        Ok((Hash(hash), slot))
+    }
+
+    /// Set finalized block.
+    pub fn set_finalized(&self, hash: &Hash, slot: u32) -> Result<(), StoreError> {
+        let txn = self.db.begin_write()?;
+        {
+            let mut meta = txn.open_table(META)?;
+            meta.insert(META_FINALIZED_HASH, hash.0.as_slice())?;
+            meta.insert(META_FINALIZED_SLOT, &slot.to_le_bytes() as &[u8])?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Get finalized block hash and timeslot.
+    pub fn get_finalized(&self) -> Result<(Hash, u32), StoreError> {
+        let txn = self.db.begin_read()?;
+        let meta = txn.open_table(META)?;
+
+        let hash_val = meta
+            .get(META_FINALIZED_HASH)?
+            .ok_or(StoreError::NotFound)?;
+        let slot_val = meta
+            .get(META_FINALIZED_SLOT)?
+            .ok_or(StoreError::NotFound)?;
+
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(hash_val.value());
+        let slot = u32::from_le_bytes(slot_val.value().try_into().unwrap());
+        Ok((Hash(hash), slot))
+    }
+
+    // ── DA Chunks ───────────────────────────────────────────────────────
+
+    /// Store an erasure-coded chunk.
+    pub fn put_chunk(
+        &self,
+        report_hash: &Hash,
+        chunk_index: u16,
+        data: &[u8],
+    ) -> Result<(), StoreError> {
+        let key = chunk_key(report_hash, chunk_index);
+
+        let txn = self.db.begin_write()?;
+        {
+            let mut table = txn.open_table(CHUNKS)?;
+            table.insert(key.as_slice(), data)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Get an erasure-coded chunk.
+    pub fn get_chunk(&self, report_hash: &Hash, chunk_index: u16) -> Result<Vec<u8>, StoreError> {
+        let key = chunk_key(report_hash, chunk_index);
+
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(CHUNKS)?;
+        let val = table.get(key.as_slice())?.ok_or(StoreError::NotFound)?;
+        Ok(val.value().to_vec())
+    }
+
+    /// Delete all chunks for a work report (for garbage collection).
+    pub fn delete_chunks_for_report(&self, report_hash: &Hash) -> Result<u32, StoreError> {
+        let txn = self.db.begin_write()?;
+        let mut deleted = 0u32;
+        {
+            let mut table = txn.open_table(CHUNKS)?;
+            // Iterate chunk indices 0..max_validators and delete any that exist.
+            // In practice we'd use a range scan, but redb key ranges work on byte order.
+            let prefix_start = chunk_key(report_hash, 0);
+            let prefix_end = chunk_key(report_hash, u16::MAX);
+            // Collect keys to delete
+            let keys: Vec<Vec<u8>> = {
+                let range = table.range(prefix_start.as_slice()..=prefix_end.as_slice())?;
+                range
+                    .filter_map(|r| r.ok())
+                    .map(|(k, _)| k.value().to_vec())
+                    .collect()
+            };
+            for key in &keys {
+                table.remove(key.as_slice())?;
+                deleted += 1;
+            }
+        }
+        txn.commit()?;
+        Ok(deleted)
+    }
+
+    // ── Pruning ─────────────────────────────────────────────────────────
+
+    /// Prune state snapshots older than `keep_after_slot`, except finalized.
+    /// Returns number of states pruned.
+    pub fn prune_states(&self, keep_after_slot: u32) -> Result<u32, StoreError> {
+        // Collect block hashes for slots we want to prune
+        let txn = self.db.begin_read()?;
+        let slot_idx = txn.open_table(SLOT_INDEX)?;
+        let state_table = txn.open_table(STATE)?;
+
+        let mut to_delete = Vec::new();
+        let range = slot_idx.range(0u32..keep_after_slot)?;
+        for entry in range {
+            let entry = entry?;
+            let hash = *entry.1.value();
+            // Only prune if state exists
+            if state_table.get(&hash)?.is_some() {
+                to_delete.push(hash);
+            }
+        }
+        drop(state_table);
+        drop(slot_idx);
+        drop(txn);
+
+        if to_delete.is_empty() {
+            return Ok(0);
+        }
+
+        let txn = self.db.begin_write()?;
+        let count = to_delete.len() as u32;
+        {
+            let mut table = txn.open_table(STATE)?;
+            for hash in &to_delete {
+                table.remove(hash)?;
+            }
+        }
+        txn.commit()?;
+        Ok(count)
+    }
+}
+
+// ── Encoding helpers ────────────────────────────────────────────────────
+
+/// Encode a block to bytes for storage using JAM codec (header + extrinsic).
+fn encode_block(block: &Block) -> Vec<u8> {
+    use grey_codec::Encode;
+    block.encode()
+}
+
+/// Decode a block from storage bytes using JAM codec.
+fn decode_block(data: &[u8]) -> Option<Block> {
+    use grey_codec::decode::DecodeWithConfig;
+    // Use tiny config for storage decode — matches testnet parameters.
+    // For full config, the store would need to know the config.
+    let config = grey_types::config::Config::tiny();
+    let (block, _consumed) = Block::decode_with_config(data, &config).ok()?;
+    Some(block)
+}
+
+/// Encode state KV pairs for storage.
+/// Format: [count:u32] repeated [key:31 bytes][value_len:u32][value bytes]
+fn encode_state_kvs(kvs: &[([u8; 31], Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(kvs.len() as u32).to_le_bytes());
+    for (key, value) in kvs {
+        out.extend_from_slice(key);
+        out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        out.extend_from_slice(value);
+    }
+    out
+}
+
+/// Decode state KV pairs from storage.
+fn decode_state_kvs(data: &[u8]) -> Option<Vec<([u8; 31], Vec<u8>)>> {
+    if data.len() < 4 {
+        return None;
+    }
+    let count = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
+    let mut pos = 4;
+    let mut kvs = Vec::with_capacity(count);
+    for _ in 0..count {
+        if pos + 31 + 4 > data.len() {
+            return None;
+        }
+        let mut key = [0u8; 31];
+        key.copy_from_slice(&data[pos..pos + 31]);
+        pos += 31;
+        let vlen = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+        pos += 4;
+        if pos + vlen > data.len() {
+            return None;
+        }
+        kvs.push((key, data[pos..pos + vlen].to_vec()));
+        pos += vlen;
+    }
+    Some(kvs)
+}
+
+/// Build a DA chunk key: report_hash (32 bytes) ++ chunk_index (2 bytes LE).
+fn chunk_key(report_hash: &Hash, chunk_index: u16) -> Vec<u8> {
+    let mut key = Vec::with_capacity(34);
+    key.extend_from_slice(&report_hash.0);
+    key.extend_from_slice(&chunk_index.to_le_bytes());
+    key
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_store() -> (Store, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("test.redb")).unwrap();
+        (store, dir)
+    }
+
+    #[test]
+    fn test_metadata_round_trip() {
+        let (store, _dir) = temp_store();
+
+        let hash = Hash([42u8; 32]);
+        store.set_head(&hash, 100).unwrap();
+        let (got_hash, got_slot) = store.get_head().unwrap();
+        assert_eq!(got_hash.0, hash.0);
+        assert_eq!(got_slot, 100);
+
+        store.set_finalized(&hash, 90).unwrap();
+        let (got_hash, got_slot) = store.get_finalized().unwrap();
+        assert_eq!(got_hash.0, hash.0);
+        assert_eq!(got_slot, 90);
+    }
+
+    #[test]
+    fn test_chunk_round_trip() {
+        let (store, _dir) = temp_store();
+
+        let report_hash = Hash([1u8; 32]);
+        let chunk_data = vec![0xAB; 4104];
+
+        store.put_chunk(&report_hash, 0, &chunk_data).unwrap();
+        store.put_chunk(&report_hash, 1, &chunk_data).unwrap();
+        store.put_chunk(&report_hash, 5, &chunk_data).unwrap();
+
+        let got = store.get_chunk(&report_hash, 0).unwrap();
+        assert_eq!(got, chunk_data);
+
+        let got = store.get_chunk(&report_hash, 5).unwrap();
+        assert_eq!(got, chunk_data);
+
+        // Missing chunk
+        assert!(store.get_chunk(&report_hash, 99).is_err());
+
+        // Delete all chunks for report
+        let deleted = store.delete_chunks_for_report(&report_hash).unwrap();
+        assert_eq!(deleted, 3);
+        assert!(store.get_chunk(&report_hash, 0).is_err());
+    }
+
+    #[test]
+    fn test_state_kvs_encoding() {
+        let kvs = vec![
+            ([1u8; 31], vec![10, 20, 30]),
+            ([2u8; 31], vec![40, 50]),
+        ];
+        let encoded = encode_state_kvs(&kvs);
+        let decoded = decode_state_kvs(&encoded).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].0, [1u8; 31]);
+        assert_eq!(decoded[0].1, vec![10, 20, 30]);
+        assert_eq!(decoded[1].0, [2u8; 31]);
+        assert_eq!(decoded[1].1, vec![40, 50]);
+    }
+
+    #[test]
+    fn test_head_not_found() {
+        let (store, _dir) = temp_store();
+        assert!(matches!(store.get_head(), Err(StoreError::NotFound)));
+    }
+
+    #[test]
+    fn test_header_encode_decode_round_trip() {
+        use grey_types::*;
+
+        let header = header::Header {
+            parent_hash: Hash([1u8; 32]),
+            state_root: Hash([2u8; 32]),
+            extrinsic_hash: Hash([3u8; 32]),
+            timeslot: 42,
+            epoch_marker: None,
+            tickets_marker: None,
+            author_index: 5,
+            vrf_signature: BandersnatchSignature([7u8; 96]),
+            offenders_marker: vec![],
+            seal: BandersnatchSignature([8u8; 96]),
+        };
+
+        let encoded = header_codec::encode_header(&header);
+        let decoded = header_codec::decode_header(&encoded).expect("decode should succeed");
+
+        assert_eq!(decoded.parent_hash.0, header.parent_hash.0);
+        assert_eq!(decoded.state_root.0, header.state_root.0);
+        assert_eq!(decoded.extrinsic_hash.0, header.extrinsic_hash.0);
+        assert_eq!(decoded.timeslot, header.timeslot);
+        assert_eq!(decoded.author_index, header.author_index);
+        assert_eq!(decoded.vrf_signature.0, header.vrf_signature.0);
+        assert_eq!(decoded.seal.0, header.seal.0);
+        assert!(decoded.epoch_marker.is_none());
+        assert!(decoded.tickets_marker.is_none());
+        assert!(decoded.offenders_marker.is_empty());
+    }
+
+    #[test]
+    fn test_block_store_round_trip() {
+        use grey_types::*;
+
+        let (store, _dir) = temp_store();
+
+        let block = Block {
+            header: header::Header {
+                parent_hash: Hash([10u8; 32]),
+                state_root: Hash([20u8; 32]),
+                extrinsic_hash: Hash([30u8; 32]),
+                timeslot: 100,
+                epoch_marker: None,
+                tickets_marker: None,
+                author_index: 3,
+                vrf_signature: BandersnatchSignature([50u8; 96]),
+                offenders_marker: vec![],
+                seal: BandersnatchSignature([60u8; 96]),
+            },
+            extrinsic: header::Extrinsic::default(),
+        };
+
+        let hash = store.put_block(&block).unwrap();
+
+        // Get by hash
+        let got = store.get_block(&hash).unwrap();
+        assert_eq!(got.header.timeslot, 100);
+        assert_eq!(got.header.author_index, 3);
+        assert_eq!(got.header.parent_hash.0, [10u8; 32]);
+
+        // Get by slot
+        let got_hash = store.get_block_hash_by_slot(100).unwrap();
+        assert_eq!(got_hash.0, hash.0);
+
+        // Has block
+        assert!(store.has_block(&hash).unwrap());
+        assert!(!store.has_block(&Hash([0u8; 32])).unwrap());
+    }
+
+    #[test]
+    fn test_state_kvs_persist_and_load() {
+        let (store, _dir) = temp_store();
+
+        let config = Config::tiny();
+        let (genesis_state, _) = grey_consensus::genesis::create_genesis(&config);
+        let block_hash = Hash([99u8; 32]);
+
+        // Verify serialize_state produces KV pairs and our binary encoding round-trips
+        let kvs = grey_merkle::state_serial::serialize_state(&genesis_state, &config);
+        assert!(!kvs.is_empty(), "genesis state should produce KV pairs");
+
+        let encoded = encode_state_kvs(&kvs);
+        let decoded_kvs = decode_state_kvs(&encoded).unwrap();
+        assert_eq!(kvs.len(), decoded_kvs.len());
+        for (i, ((k1, v1), (k2, v2))) in kvs.iter().zip(decoded_kvs.iter()).enumerate() {
+            assert_eq!(k1, k2, "key mismatch at index {}", i);
+            assert_eq!(v1, v2, "value mismatch at index {}", i);
+        }
+
+        // Verify store put/get/delete for raw KV data (bypassing state_serial deserialize)
+        {
+            let txn = store.db.begin_write().unwrap();
+            {
+                let mut table = txn.open_table(STATE).unwrap();
+                table.insert(&block_hash.0, encoded.as_slice()).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        {
+            let txn = store.db.begin_read().unwrap();
+            let table = txn.open_table(STATE).unwrap();
+            let val = table.get(&block_hash.0).unwrap().unwrap();
+            let loaded_kvs = decode_state_kvs(val.value()).unwrap();
+            assert_eq!(loaded_kvs.len(), kvs.len());
+        }
+
+        // Delete
+        store.delete_state(&block_hash).unwrap();
+        {
+            let txn = store.db.begin_read().unwrap();
+            let table = txn.open_table(STATE).unwrap();
+            assert!(table.get(&block_hash.0).unwrap().is_none());
+        }
+    }
+}

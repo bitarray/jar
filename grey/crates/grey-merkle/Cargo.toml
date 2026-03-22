@@ -1,0 +1,16 @@
+[package]
+name = "grey-merkle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "State Merklization, Merkle tries, and Merkle Mountain Ranges for JAM."
+
+[dependencies]
+grey-types = { workspace = true }
+grey-codec = { workspace = true }
+grey-crypto = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

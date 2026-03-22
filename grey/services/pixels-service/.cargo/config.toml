@@ -1,0 +1,5 @@
+[build]
+target = "../../services/riscv64em-javm.json"
+
+[target.riscv64em-javm]
+rustflags = ["-C", "link-arg=-Tpvm.ld"]

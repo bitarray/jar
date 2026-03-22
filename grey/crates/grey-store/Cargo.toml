@@ -1,0 +1,20 @@
+[package]
+name = "grey-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Persistent storage for blocks, state, and DA chunks."
+
+[dependencies]
+grey-types = { workspace = true }
+grey-codec = { workspace = true }
+grey-crypto = { workspace = true }
+grey-merkle = { workspace = true }
+redb = "3.1"
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+grey-consensus = { workspace = true }
+tempfile = "3"

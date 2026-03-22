@@ -1,0 +1,3 @@
+[submodule "res/spec"]
+	path = res/spec
+	url = https://github.com/bitarray/jar

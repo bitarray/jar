@@ -1,0 +1,15 @@
+[package]
+name = "grey-erasure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reed-Solomon erasure coding in GF(2^16) for JAM data availability."
+
+[dependencies]
+grey-types = { workspace = true }
+reed-solomon-simd = { workspace = true }
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "grey-services"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Service accounts, accumulation, and refinement for JAM."
+
+[dependencies]
+grey-types = { workspace = true }
+grey-crypto = { workspace = true }
+javm = { workspace = true }
+grey-state = { workspace = true }
+thiserror = { workspace = true }
