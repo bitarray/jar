@@ -168,7 +168,7 @@ jobs:
           echo "$COMMIT_JSON" > /tmp/genesis_commit.json
           echo "$CACHE" > /tmp/genesis_cache.json
 
-      - name: Wait for checks, merge, and update cache
+      - name: Wait for checks and merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -209,7 +209,20 @@ jobs:
             exit 1
           fi
 
-          # Update genesis-state cache (only after confirmed merge)
+          gh pr comment "$PR_NUMBER" --body \
+            "**JAR Bot:** Merged (${MERGE_TYPE}).
+            Score: ${SCORE}
+            Weight delta: ${WEIGHT_DELTA}"
+
+      - name: Update genesis-state cache
+        working-directory: spec
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=${{ steps.pr-info.outputs.pr_number }}
+          INDEX=$(cat /tmp/genesis_index.json)
+
+          # Update genesis.json
           CACHE=$(cat /tmp/genesis_cache.json 2>/dev/null || git show origin/genesis-state:genesis.json)
           UPDATED_CACHE=$(echo "$CACHE" | jq --argjson idx "$INDEX" '. + [$idx]')
 
@@ -237,6 +250,7 @@ jobs:
           EXISTING_RANKING=$(git show origin/genesis-state:ranking.json 2>/dev/null || echo '{}')
           UPDATED_RANKING=$(echo "$EXISTING_RANKING" | jq --arg key "$NEW_COMMIT_HASH" --argjson val "$NEW_RANKING" '. + {($key): $val}')
 
+          # Push both to genesis-state
           git fetch origin genesis-state
           git worktree add /tmp/genesis-state origin/genesis-state
           git -C /tmp/genesis-state checkout -B genesis-state origin/genesis-state
@@ -248,11 +262,6 @@ jobs:
           git -C /tmp/genesis-state commit -m "genesis: update state for PR #${PR_NUMBER}"
           git -C /tmp/genesis-state push origin genesis-state
           git worktree remove /tmp/genesis-state
-
-          gh pr comment "$PR_NUMBER" --body \
-            "**JAR Bot:** Merged (${MERGE_TYPE}).
-            Score: ${SCORE}
-            Weight delta: ${WEIGHT_DELTA}"
 
       - name: Verify cache integrity
         working-directory: spec
