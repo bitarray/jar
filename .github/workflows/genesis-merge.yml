@@ -202,8 +202,13 @@ jobs:
           Genesis-PR: #${PR_NUMBER}
           Genesis-Author: ${AUTHOR}"
 
-          # Confirm merge actually happened
-          STATE=$(gh pr view "$PR_NUMBER" --json state --jq '.state')
+          # Confirm merge actually happened (retry up to 10s for API propagation)
+          for i in 1 2 3 4 5; do
+            STATE=$(gh pr view "$PR_NUMBER" --json state --jq '.state')
+            if [ "$STATE" = "MERGED" ]; then break; fi
+            echo "Waiting for merge state propagation (attempt $i, state: $STATE)..."
+            sleep 2
+          done
           if [ "$STATE" != "MERGED" ]; then
             echo "ERROR: PR #$PR_NUMBER not merged (state: $STATE)" >&2
             gh pr comment "$PR_NUMBER" --body \
