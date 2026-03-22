@@ -2,11 +2,16 @@
 name: jar-review
 description: Review open PRs in the jarchain/jar repository using the Genesis Proof-of-Intelligence scoring protocol
 user_invocable: true
+args: "[auto]"
 ---
 
 # JAR Genesis Review
 
 Review all open PRs in jarchain/jar that you haven't reviewed yet.
+
+**Modes:**
+- `/jar-review` — interactive: present ranking to user, wait for confirmation before submitting
+- `/jar-review auto` — autonomous: submit reviews automatically without asking, with conservative safety checks
 
 ## Prerequisites
 
@@ -77,7 +82,9 @@ Rank all items (comparison targets + `currentPR`) from **best to worst** on each
 
 If there are no comparison targets (first scored commit), the ranking is just `currentPR`.
 
-### 3. Present the review to the user
+### 3. Present the review / submit (depends on mode)
+
+**Interactive mode (default):**
 
 Show:
 - Summary of the PR's changes
@@ -87,9 +94,26 @@ Show:
 
 **Ask the user** whether they agree with the ranking and verdict. Let them adjust before submission.
 
+**Auto mode (`/jar-review auto`):**
+
+Do NOT ask the user. Submit the review automatically, but apply these safety checks first:
+
+1. **Wait for CI to pass.** Run `gh pr checks <PR_NUMBER> --watch --fail-fast`. If any check fails, skip this PR entirely (do not submit a review).
+
+2. **Check for modified tests.** Inspect the diff for changes to existing test files. Adding new test files is fine. But if the PR modifies existing test expectations, test assertions, or test data (e.g., changes to `tests/vectors/`, modifications to existing `#[test]` functions, changes to `*.output.json` files), verdict MUST be `notMerge`. Append a note: "Auto-review: existing tests modified — waiting for human review."
+
+3. **Be conservative on verdict.** Only verdict `merge` if:
+   - The change is clearly correct and well-scoped
+   - No suspicious patterns (unexplained deletions, changes to scoring/crypto/consensus logic without tests, modifications to Genesis workflows or security-sensitive files)
+   - All CI passes
+
+   If anything is unclear or suspicious, verdict `notMerge` with an explanation.
+
+4. **Submit immediately** after producing the ranking — do not wait for user confirmation.
+
 ### 4. Submit the review
 
-Once the user confirms, post the review comment. Include descriptive comments below the structured fields explaining the rationale:
+Post the review comment (after user confirms in interactive mode, or immediately in auto mode). Include descriptive comments below the structured fields explaining the rationale:
 
 ```bash
 gh pr comment <PR_NUMBER> --repo jarchain/jar --body '/review
