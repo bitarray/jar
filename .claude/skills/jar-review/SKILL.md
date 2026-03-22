@@ -89,17 +89,29 @@ Show:
 
 ### 4. Submit the review
 
-Once the user confirms, post the review comment:
+Once the user confirms, post the review comment. Include descriptive comments below the structured fields explaining the rationale:
 
 ```bash
 gh pr comment <PR_NUMBER> --repo jarchain/jar --body '/review
 difficulty: <rank1>, <rank2>, ..., <rankN>
 novelty: <rank1>, <rank2>, ..., <rankN>
 design: <rank1>, <rank2>, ..., <rankN>
-verdict: <merge|notMerge>'
+verdict: <merge|notMerge>
+
+<2-4 sentences explaining the ranking rationale. What makes this PR
+stand out or fall short on each dimension? Why this verdict?>'
 ```
 
-Each ranking line lists commit short hashes (8 chars) and `currentPR`, from best to worst.
+Each ranking line lists commit short hashes (8 chars) and `currentPR`, from best to worst. Everything below `verdict:` is free-form commentary — the parser ignores it, but it's valuable for the contributor and for future reviewers calibrating against past reviews.
+
+Good review comments:
+- "Critical soundness fix — the Fiat-Shamir binding prevents adaptive provers from cheating. Ranked highest on difficulty because finding this requires deep cryptographic understanding."
+- "Honest ai-slop: 7 warnings fixed, zero behavioral changes. Ranked last because this is mechanical work, but the protocol scores it correctly."
+- "Strong architectural contribution. The prCreatedAt anchor eliminates a class of concurrency bugs with a stateless solution."
+
+Bad review comments (don't do this):
+- "Looks good" (no rationale)
+- Empty (missing entirely)
 
 ### 5. Repeat for remaining PRs
 
