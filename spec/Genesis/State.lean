@@ -142,9 +142,9 @@ def EvalState.reviewerWeight (s : EvalState) (id : ContributorId) : Nat :=
 
 /-- Evaluate a single signed commit given pre-built state.
     Uses the current [GenesisVariant] for scoring parameters. -/
-def evaluateWithState (state : EvalState) (commit : SignedCommit) : CommitIndex :=
-  let score := commitScore commit
-    state.scoredCommits (state.reviewerWeight ·)
+def evaluateWithState (state : EvalState) (commit : SignedCommit)
+    (ranking : Option (List CommitId) := none) : CommitIndex :=
+  let score := commitScore commit state.scoredCommits ranking state.reviewerWeight
   let approved := filterReviews commit.reviews commit.metaReviews (state.reviewerWeight ·)
   let approvedReviewers := approved
     |>.filter (fun (r : EmbeddedReview) => state.reviewerWeight r.reviewer > 0)
@@ -181,10 +181,11 @@ def reconstructState (pastIndices : List CommitIndex) : EvalState :=
 /-- Evaluate a single signed commit.
     State reconstruction uses per-index variants.
     Scoring uses the variant active at commit.prCreatedAt. -/
-def evaluate (pastIndices : List CommitIndex) (commit : SignedCommit) : CommitIndex :=
+def evaluate (pastIndices : List CommitIndex) (commit : SignedCommit)
+    (ranking : Option (List CommitId) := none) : CommitIndex :=
   let state := reconstructState pastIndices
   letI := activeVariant commit.prCreatedAt
-  evaluateWithState state commit
+  evaluateWithState state commit ranking
 
 /-- Evaluate a full sequence of signed commits. -/
 def evaluateAll (signedCommits : List SignedCommit) : List CommitIndex :=

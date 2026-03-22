@@ -26,6 +26,8 @@ def main : IO UInt32 := runJsonPipe fun j => do
       let fn := (state.reviewerWeight ·)
       (fns ++ [fn], pastIndices ++ [idx])
     ) (([] : List (ContributorId → Nat)), ([] : List CommitIndex))
+  -- designWeight is the same across v1/v2; if it ever diverges,
+  -- computeRanking would need per-commit variant dispatch for aggregateReviewRanking
   letI := GenesisVariant.v1
   let ranking := computeRanking signedCommits weightFns
   return Json.mkObj [("ranking", toJson ranking)]

@@ -50,17 +50,6 @@ def selectComparisonTargets
         let idx := bucketStart + (hash + i * 7) % bucketSize
         pastCommitIds[idx]!
 
-/-- Validate comparison targets in a signed commit. -/
-def validateComparisonTargets [gv : GenesisVariant]
-    (commit : SignedCommit)
-    (scoredCommits : List (CommitId × Epoch)) : Bool :=
-  let eligible := scoredCommits.filter (fun (_, epoch) => epoch < commit.prCreatedAt)
-  if eligible.isEmpty then commit.comparisonTargets.isEmpty
-  else
-    let expected := selectComparisonTargets scoredCommits
-      (min gv.rankingSize eligible.length) commit.prId commit.prCreatedAt
-    commit.comparisonTargets == expected
-
 /-! ### Meta-Review Filtering
 
   Reviews are filtered by meta-reviews (thumbs up/down) before scoring.
@@ -188,38 +177,7 @@ def deriveScore [GenesisVariant]
       novelty := weightedQuantile nEntries
       designQuality := weightedQuantile qEntries }
 
-/-! ### Score Computation -/
-
-/-- Compute the score for a single signed commit.
-
-    Steps:
-    1. Validate comparison targets against hash(prId).
-    2. Filter reviews by meta-review (exclude thumbed-down reviews).
-    3. Check minimum approved reviews from weighted reviewers.
-    4. Derive score from rankings using weighted lower-quantile.
-
-    Returns the CommitScore (percentile-based, 0-100 per dimension).
-    Reward computation is deferred to finalization (see Design.lean). -/
-def commitScore [gv : GenesisVariant]
-    (commit : SignedCommit)
-    (scoredCommits : List (CommitId × Epoch))
-    (getWeight : ContributorId → Nat)
-    : CommitScore :=
-  let zeroScore : CommitScore := { difficulty := 0, novelty := 0, designQuality := 0 }
-  -- Step 1: Validate comparison targets (anchored to prCreatedAt)
-  if !validateComparisonTargets commit scoredCommits then
-    zeroScore
-  else
-    -- Step 2: Filter reviews by meta-review
-    let approvedReviews := filterReviews commit.reviews commit.metaReviews getWeight
-    -- Step 3: Check minimum approved reviews from weighted reviewers
-    let weightedReviews := approvedReviews.filter fun (r : EmbeddedReview) =>
-      getWeight r.reviewer > 0
-    if weightedReviews.length < gv.minReviews then
-      zeroScore
-    else
-      -- Step 4: Derive score (percentile-based)
-      deriveScore weightedReviews commit.id getWeight
+/-! ### Score Computation (defined after validateComparisonTargets below) -/
 
 /-! ### Global Ranking (v2 target selection)
 
@@ -364,3 +322,46 @@ def selectComparisonTargetsRanked
       else
         let idx := bucketStart + (hash + i * 7) % bucketSize
         rankedEligible[idx]!
+
+/-! ### Target Validation & Score Computation -/
+
+/-- Validate comparison targets in a signed commit.
+    For v1 (useRankedTargets=false): validates against time-based selection.
+    For v2 (useRankedTargets=true): validates against rank-based selection. -/
+def validateComparisonTargets [gv : GenesisVariant]
+    (commit : SignedCommit)
+    (scoredCommits : List (CommitId × Epoch))
+    (ranking : Option (List CommitId) := none) : Bool :=
+  let eligible := scoredCommits.filter (fun (_, epoch) => epoch < commit.prCreatedAt)
+  if eligible.isEmpty then commit.comparisonTargets.isEmpty
+  else if gv.useRankedTargets then
+    match ranking with
+    | some r =>
+      let expected := selectComparisonTargetsRanked r scoredCommits
+        (min gv.rankingSize eligible.length) commit.prId commit.prCreatedAt
+      commit.comparisonTargets == expected
+    | none => false  -- v2 requires ranking
+  else
+    let expected := selectComparisonTargets scoredCommits
+      (min gv.rankingSize eligible.length) commit.prId commit.prCreatedAt
+    commit.comparisonTargets == expected
+
+/-- Compute the score for a single signed commit.
+    For v2, ranking is required for target validation. -/
+def commitScore [gv : GenesisVariant]
+    (commit : SignedCommit)
+    (scoredCommits : List (CommitId × Epoch))
+    (ranking : Option (List CommitId))
+    (getWeight : ContributorId → Nat)
+    : CommitScore :=
+  let zeroScore : CommitScore := { difficulty := 0, novelty := 0, designQuality := 0 }
+  if !(validateComparisonTargets commit scoredCommits ranking) then
+    zeroScore
+  else
+    let approvedReviews := filterReviews commit.reviews commit.metaReviews getWeight
+    let weightedReviews := approvedReviews.filter fun (r : EmbeddedReview) =>
+      getWeight r.reviewer > 0
+    if weightedReviews.length < gv.minReviews then
+      zeroScore
+    else
+      deriveScore weightedReviews commit.id getWeight
