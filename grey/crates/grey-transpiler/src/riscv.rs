@@ -55,6 +55,8 @@ pub struct TranslationContext {
     fixups: Vec<(usize, u64, u8)>,
     /// Map from fixup imm offset → instruction PC (for PC-relative encoding)
     fixup_pcs: std::collections::HashMap<usize, u32>,
+    /// Pending absolute fixups: (pvm_imm_offset, target_rv_address) — patched with absolute PVM PC
+    abs_fixups: Vec<(usize, u64)>,
     /// Return-address fixups: (jump_table_index, risc-v return address).
     /// Resolved during `apply_fixups` to patch jump table entries.
     return_fixups: Vec<(usize, u64)>,
@@ -74,6 +76,7 @@ impl TranslationContext {
             address_map: std::collections::HashMap::new(),
             fixups: Vec::new(),
             fixup_pcs: std::collections::HashMap::new(),
+            abs_fixups: Vec::new(),
             return_fixups: Vec::new(),
             pending_auipc: None,
             last_t0_imm: None,
@@ -111,7 +114,7 @@ impl TranslationContext {
                 });
             }
 
-            self.translate_instruction(inst, rv_addr)?;
+            self.translate_one(inst, rv_addr)?;
             offset += 4;
         }
 
@@ -120,8 +123,17 @@ impl TranslationContext {
         Ok(())
     }
 
+    /// Translate one or more 32-bit RISC-V instructions starting at `offset`.
+    /// Returns the number of bytes consumed (always 4).
+    pub(crate) fn translate_instruction(&mut self, section: &[u8], offset: usize, base: u64) -> Result<usize, TranspileError> {
+        let inst = u32::from_le_bytes([section[offset], section[offset+1], section[offset+2], section[offset+3]]);
+        let addr = base + offset as u64;
+        self.translate_one(inst, addr)?;
+        Ok(4)
+    }
+
     /// Translate a single 32-bit RISC-V instruction.
-    pub(crate) fn translate_instruction(&mut self, inst: u32, _addr: u64) -> Result<(), TranspileError> {
+    fn translate_one(&mut self, inst: u32, _addr: u64) -> Result<(), TranspileError> {
         let opcode = inst & 0x7F;
         let rd = ((inst >> 7) & 0x1F) as u8;
         let funct3 = (inst >> 12) & 0x7;
@@ -783,6 +795,19 @@ impl TranslationContext {
         self.emit_load_imm(rd, jt_addr)
     }
 
+    /// Emit a load_imm for a return address (RISC-V addr → absolute PVM PC).
+    /// Used by the linker for CALL_PLT relocations.
+    pub(crate) fn emit_return_address(&mut self, rd: u8, rv_ret_addr: u64) -> Result<(), TranspileError> {
+        if rd == 0 { return Ok(()); }
+        let pvm_rd = self.require_reg(rd)?;
+        self.emit_inst(51); // load_imm
+        self.emit_data(pvm_rd);
+        let imm_offset = self.code.len();
+        self.emit_imm32(0); // placeholder — absolute fixup will patch
+        self.abs_fixups.push((imm_offset, rv_ret_addr));
+        Ok(())
+    }
+
     pub(crate) fn emit_ecalli(&mut self, id: u32) {
         self.emit_inst(10);
         self.emit_imm32(id as i32);
@@ -866,6 +891,16 @@ impl TranslationContext {
                 }
             } else {
                 tracing::warn!("unresolved fixup: rv_target={:#x}, pvm_offset={}", rv_target, pvm_offset);
+            }
+        }
+
+        // Absolute fixups (return addresses in load_imm, used by linker)
+        for (pvm_offset, rv_target) in self.abs_fixups.drain(..).collect::<Vec<_>>() {
+            if let Some(&pvm_target) = self.address_map.get(&rv_target) {
+                let bytes = (pvm_target as i32).to_le_bytes();
+                for i in 0..4 {
+                    self.code[pvm_offset + i] = bytes[i];
+                }
             }
         }
 

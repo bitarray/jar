@@ -86,16 +86,9 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
     }
     ctx.apply_fixups();
 
-    // Build function pointer map and patch data sections
-    let fn_map = ctx.build_function_pointer_map();
-    let mut ro_data = elf.ro_data;
-    let mut rw_data = elf.rw_data;
-    patch_function_pointers(&mut ro_data, &fn_map);
-    patch_function_pointers(&mut rw_data, &fn_map);
-
     Ok(emitter::build_standard_program(
-        &ro_data,
-        &rw_data,
+        &elf.ro_data,
+        &elf.rw_data,
         elf.heap_pages,
         elf.stack_size,
         &ctx.code,
@@ -166,43 +159,15 @@ pub fn link_elf_service(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
     let acc_rel = (accumulate_pvm as i32) - 5;
     ctx.code[6..10].copy_from_slice(&acc_rel.to_le_bytes());
 
-    // Build function pointer map and patch data sections
-    let fn_map = ctx.build_function_pointer_map();
-    let mut ro_data = elf.ro_data;
-    let mut rw_data = elf.rw_data;
-    patch_function_pointers(&mut ro_data, &fn_map);
-    patch_function_pointers(&mut rw_data, &fn_map);
-
     Ok(emitter::build_standard_program(
-        &ro_data,
-        &rw_data,
+        &elf.ro_data,
+        &elf.rw_data,
         elf.heap_pages,
         elf.stack_size,
         &ctx.code,
         &ctx.bitmask,
         &ctx.jump_table,
     ))
-}
-
-/// Scan a data section for u32 values matching RISC-V code addresses
-/// and replace them with PVM jump table addresses.
-fn patch_function_pointers(
-    data: &mut [u8],
-    fn_map: &std::collections::HashMap<u64, u32>,
-) -> usize {
-    let mut count = 0;
-    let mut offset = 0;
-    while offset + 4 <= data.len() {
-        let val = u32::from_le_bytes([
-            data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-        ]);
-        if let Some(&jt_addr) = fn_map.get(&(val as u64)) {
-            data[offset..offset + 4].copy_from_slice(&jt_addr.to_le_bytes());
-            count += 1;
-        }
-        offset += 4;
-    }
-    count
 }
 
 impl LinkedElf {
@@ -500,12 +465,7 @@ fn translate_section_linked(
 
         let opcode = inst & 0x7f;
 
-        // Flush pending auipc before handling relocations directly
-        // (since these paths skip translate_instruction which would normally flush)
-        if elf.call_targets.contains_key(&rv_addr) || elf.hi20_targets.contains_key(&rv_addr)
-            || elf.lo12_targets.contains_key(&rv_addr) {
-            ctx.flush_pending_auipc()?;
-        }
+
 
         // Check for relocation overrides
         if opcode == 0x17 { // AUIPC
@@ -521,8 +481,8 @@ fn translate_section_linked(
                     let jalr_rd = ((jalr >> 7) & 0x1f) as u8;
                     let ret_addr = rv_addr + 8;
 
-                    // Emit return address into link register via jump table
-                    ctx.emit_return_address_jt(jalr_rd, ret_addr)?;
+                    // Emit return address into link register
+                    ctx.emit_return_address(jalr_rd, ret_addr)?;
                     // Emit jump to target
                     ctx.emit_jump(target_addr);
                     // Map the JALR address too
@@ -606,8 +566,8 @@ fn translate_section_linked(
         }
 
         // Normal instruction translation
-        ctx.translate_instruction(inst, rv_addr)?;
-        offset += 4;
+        let consumed = ctx.translate_instruction(data, offset, base_addr)?;
+        offset += consumed;
     }
 
     Ok(())
