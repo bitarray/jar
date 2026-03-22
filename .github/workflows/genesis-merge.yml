@@ -74,7 +74,7 @@ jobs:
 
       - name: Build genesis tools
         working-directory: spec
-        run: lake build genesis_select_targets genesis_evaluate
+        run: lake build genesis_select_targets genesis_evaluate genesis_ranking
 
       - name: Collect reviews and evaluate
         env:
@@ -86,6 +86,7 @@ jobs:
           # Read cache from genesis-state branch
           git fetch origin genesis-state
           CACHE=$(git show origin/genesis-state:genesis.json)
+          RANKING=$(git show origin/genesis-state:ranking.json 2>/dev/null || echo '{}')
 
           # Get PR details (including immutable created_at for target anchoring)
           PR_JSON=$(gh pr view "$PR_NUMBER" --json headRefOid,author,createdAt,body)
@@ -108,8 +109,21 @@ jobs:
           fi
 
           # Get comparison targets anchored to PR creation time
-          TARGETS_JSON=$(echo "{\"prId\":${PR_NUMBER},\"prCreatedAt\":${PR_CREATED_EPOCH},\"indices\":${CACHE}}" | \
-            .lake/build/bin/genesis_select_targets)
+          RANKING_SNAPSHOT=$(echo "$CACHE" | jq -c --argjson epoch "$PR_CREATED_EPOCH" --argjson ranking "$RANKING" '
+            [.[] | select(.epoch < $epoch)] | last | .commitHash // empty |
+            . as $hash | $ranking[$hash] // empty
+          ')
+          if [ -z "$RANKING_SNAPSHOT" ] || [ "$RANKING_SNAPSHOT" = "null" ]; then
+            RANKING_SNAPSHOT="null"
+          fi
+          INPUT=$(jq -n \
+            --argjson prId "$PR_NUMBER" \
+            --argjson prCreatedAt "$PR_CREATED_EPOCH" \
+            --argjson indices "$CACHE" \
+            --argjson ranking "$RANKING_SNAPSHOT" \
+            'if $ranking == null then {prId: $prId, prCreatedAt: $prCreatedAt, indices: $indices}
+             else {prId: $prId, prCreatedAt: $prCreatedAt, indices: $indices, ranking: $ranking} end')
+          TARGETS_JSON=$(echo "$INPUT" | .lake/build/bin/genesis_select_targets)
           TARGETS=$(echo "$TARGETS_JSON" | jq -c '.targets')
 
           # Collect reviews + meta-reviews (expand currentPR + short hashes)
@@ -198,13 +212,39 @@ jobs:
           # Update genesis-state cache (only after confirmed merge)
           CACHE=$(cat /tmp/genesis_cache.json 2>/dev/null || git show origin/genesis-state:genesis.json)
           UPDATED_CACHE=$(echo "$CACHE" | jq --argjson idx "$INDEX" '. + [$idx]')
+
+          # Compute updated ranking from all SignedCommits in git history
+          GENESIS_COMMIT=$(grep 'def genesisCommit' Genesis/State.lean | grep -oP '"[0-9a-f]{40}"' | tr -d '"')
+          git pull origin master --ff-only
+          SIGNED_COMMITS="[]"
+          for MERGE_HASH in $(git log --merges --reverse --format="%H" "${GENESIS_COMMIT}..HEAD"); do
+            COMMIT_LINE=$(git log -1 --format="%B" "$MERGE_HASH" | grep '^Genesis-Commit: ' | sed 's/^Genesis-Commit: //' || true)
+            if [ -n "$COMMIT_LINE" ]; then
+              COMMIT_LINE=$(echo "$COMMIT_LINE" | jq -c '
+                .id as $head | .comparisonTargets as $targets | ($targets + [$head]) as $all |
+                .reviews |= [.[] |
+                  .difficultyRanking |= [.[] | . as $h | if ($h | length) < 40 then ($all[] | select(startswith($h))) // $h else . end] |
+                  .noveltyRanking |= [.[] | . as $h | if ($h | length) < 40 then ($all[] | select(startswith($h))) // $h else . end] |
+                  .designQualityRanking |= [.[] | . as $h | if ($h | length) < 40 then ($all[] | select(startswith($h))) // $h else . end]
+                ]')
+              SIGNED_COMMITS=$(echo "$SIGNED_COMMITS" | jq --argjson c "$COMMIT_LINE" '. + [$c]')
+            fi
+          done
+          NEW_RANKING=$(echo "{\"signedCommits\":$SIGNED_COMMITS}" | .lake/build/bin/genesis_ranking | jq -c '.ranking')
+          NEW_COMMIT_HASH=$(echo "$INDEX" | jq -r '.commitHash')
+
+          # Update ranking.json: add new entry keyed by the new commit hash
+          EXISTING_RANKING=$(git show origin/genesis-state:ranking.json 2>/dev/null || echo '{}')
+          UPDATED_RANKING=$(echo "$EXISTING_RANKING" | jq --arg key "$NEW_COMMIT_HASH" --argjson val "$NEW_RANKING" '. + {($key): $val}')
+
           git fetch origin genesis-state
           git worktree add /tmp/genesis-state origin/genesis-state
           git -C /tmp/genesis-state checkout -B genesis-state origin/genesis-state
           echo "$UPDATED_CACHE" > /tmp/genesis-state/genesis.json
+          echo "$UPDATED_RANKING" > /tmp/genesis-state/ranking.json
           git -C /tmp/genesis-state config user.name "JAR Bot"
           git -C /tmp/genesis-state config user.email "legal@bitarray.dev"
-          git -C /tmp/genesis-state add genesis.json
+          git -C /tmp/genesis-state add genesis.json ranking.json
           git -C /tmp/genesis-state commit -m "genesis: update state for PR #${PR_NUMBER}"
           git -C /tmp/genesis-state push origin genesis-state
           git worktree remove /tmp/genesis-state

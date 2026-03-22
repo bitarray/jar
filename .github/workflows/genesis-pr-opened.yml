@@ -50,11 +50,28 @@ jobs:
         run: |
           git fetch origin genesis-state
           CACHE=$(git show origin/genesis-state:genesis.json)
+          RANKING=$(git show origin/genesis-state:ranking.json 2>/dev/null || echo '{}')
           PR_ID=${{ github.event.pull_request.number }}
           PR_CREATED_AT="${{ github.event.pull_request.created_at }}"
           PR_CREATED_EPOCH=$(date -d "$PR_CREATED_AT" +%s)
-          echo "{\"prId\":${PR_ID},\"prCreatedAt\":${PR_CREATED_EPOCH},\"indices\":${CACHE}}" | \
-            .lake/build/bin/genesis_select_targets > /tmp/targets.json
+
+          # Find the ranking snapshot for the latest commit before prCreatedAt
+          RANKING_SNAPSHOT=$(echo "$CACHE" | jq -c --argjson epoch "$PR_CREATED_EPOCH" --argjson ranking "$RANKING" '
+            [.[] | select(.epoch < $epoch)] | last | .commitHash // empty |
+            . as $hash | $ranking[$hash] // empty
+          ')
+          if [ -z "$RANKING_SNAPSHOT" ] || [ "$RANKING_SNAPSHOT" = "null" ]; then
+            RANKING_SNAPSHOT="null"
+          fi
+
+          INPUT=$(jq -n \
+            --argjson prId "$PR_ID" \
+            --argjson prCreatedAt "$PR_CREATED_EPOCH" \
+            --argjson indices "$CACHE" \
+            --argjson ranking "$RANKING_SNAPSHOT" \
+            'if $ranking == null then {prId: $prId, prCreatedAt: $prCreatedAt, indices: $indices}
+             else {prId: $prId, prCreatedAt: $prCreatedAt, indices: $indices, ranking: $ranking} end')
+          echo "$INPUT" | .lake/build/bin/genesis_select_targets > /tmp/targets.json
 
       - name: Post review template
         env:

@@ -54,14 +54,31 @@ jobs:
           PR_NUMBER=${{ github.event.issue.number }}
           git fetch origin genesis-state
           CACHE=$(git show origin/genesis-state:genesis.json)
+          RANKING=$(git show origin/genesis-state:ranking.json 2>/dev/null || echo '{}')
 
           # Get PR head SHA and created_at for target anchoring
           PR_JSON=$(gh pr view "$PR_NUMBER" --json headRefOid,createdAt)
           HEAD_SHA=$(echo "$PR_JSON" | jq -r '.headRefOid')
           PR_CREATED_AT=$(echo "$PR_JSON" | jq -r '.createdAt')
           PR_CREATED_EPOCH=$(date -d "$PR_CREATED_AT" +%s)
-          TARGETS=$(echo "{\"prId\":${PR_NUMBER},\"prCreatedAt\":${PR_CREATED_EPOCH},\"indices\":${CACHE}}" | \
-            .lake/build/bin/genesis_select_targets | jq -c '.targets')
+
+          # Find the ranking snapshot for the latest commit before prCreatedAt
+          RANKING_SNAPSHOT=$(echo "$CACHE" | jq -c --argjson epoch "$PR_CREATED_EPOCH" --argjson ranking "$RANKING" '
+            [.[] | select(.epoch < $epoch)] | last | .commitHash // empty |
+            . as $hash | $ranking[$hash] // empty
+          ')
+          if [ -z "$RANKING_SNAPSHOT" ] || [ "$RANKING_SNAPSHOT" = "null" ]; then
+            RANKING_SNAPSHOT="null"
+          fi
+
+          INPUT=$(jq -n \
+            --argjson prId "$PR_NUMBER" \
+            --argjson prCreatedAt "$PR_CREATED_EPOCH" \
+            --argjson indices "$CACHE" \
+            --argjson ranking "$RANKING_SNAPSHOT" \
+            'if $ranking == null then {prId: $prId, prCreatedAt: $prCreatedAt, indices: $indices}
+             else {prId: $prId, prCreatedAt: $prCreatedAt, indices: $indices, ranking: $ranking} end')
+          TARGETS=$(echo "$INPUT" | .lake/build/bin/genesis_select_targets | jq -c '.targets')
 
           # Collect reviews + meta-reviews (expand currentPR + short hashes)
           COLLECTED=$(bash tools/genesis-collect-reviews.sh "$PR_NUMBER" "$HEAD_SHA" "$TARGETS")

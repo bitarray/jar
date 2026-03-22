@@ -190,3 +190,6 @@ lean_exe genesis_finalize where
 
 lean_exe genesis_validate where
   root := `Genesis.Cli.Validate
+
+lean_exe genesis_ranking where
+  root := `Genesis.Cli.Ranking

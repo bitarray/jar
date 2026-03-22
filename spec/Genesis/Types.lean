@@ -67,6 +67,9 @@ structure GenesisConfig where
   quantileDen : Nat
   designWeight : Nat
   numWeightedDimensions : Nat
+  /-- When true, comparison targets are selected by global quality ranking (v2)
+      instead of time-based buckets (v1). Requires ranking.json on genesis-state. -/
+  useRankedTargets : Bool
   deriving Repr
 
 /-- Protocol configuration typeclass. All configurable constants are
@@ -87,9 +90,24 @@ def GenesisConfig.v1 : GenesisConfig where
   quantileDen := 3
   designWeight := 3
   numWeightedDimensions := 5
+  useRankedTargets := false
 
 instance GenesisVariant.v1 : GenesisVariant where
   toGenesisConfig := .v1
+
+def GenesisConfig.v2 : GenesisConfig where
+  name := "genesis_v2"
+  reviewerThreshold := 500
+  minReviews := 1
+  rankingSize := 7
+  quantileNum := 1
+  quantileDen := 3
+  designWeight := 3
+  numWeightedDimensions := 5
+  useRankedTargets := true
+
+instance GenesisVariant.v2 : GenesisVariant where
+  toGenesisConfig := .v2
 
 /-! ### Core Types -/
 

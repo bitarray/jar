@@ -6,8 +6,8 @@
 #   --verify-cache  Rebuild from git history and compare against genesis-state branch cache
 #   --rebuild       Re-evaluate all SignedCommits and output rebuilt genesis.json to stdout
 #
-# Requires: jq, genesis_evaluate and genesis_validate built
-#   lake build genesis_evaluate genesis_validate
+# Requires: jq, genesis_evaluate, genesis_validate, and genesis_ranking built
+#   lake build genesis_evaluate genesis_validate genesis_ranking
 #
 # The script walks merge commits from genesisCommit forward, extracting
 # Genesis-Commit (SignedCommit) and Genesis-Index (CommitIndex) trailers.
@@ -74,14 +74,24 @@ REPLAYABLE=$(echo "$SIGNED_COMMITS" | jq 'length')
 
 if [ "$MODE" = "--rebuild" ]; then
   REBUILT="[]"
+  RANKING_MAP="{}"
+  COMMITS_SO_FAR="[]"
   for i in $(seq 0 $((REPLAYABLE - 1))); do
     COMMIT=$(echo "$SIGNED_COMMITS" | jq -c ".[$i]")
     INPUT=$(jq -n --argjson commit "$COMMIT" --argjson pastIndices "$REBUILT" \
       '{commit: $commit, pastIndices: $pastIndices}')
     INDEX=$(echo "$INPUT" | .lake/build/bin/genesis_evaluate)
     REBUILT=$(echo "$REBUILT" | jq --argjson idx "$INDEX" '. + [$idx]')
+    # Compute ranking snapshot at this point
+    COMMITS_SO_FAR=$(echo "$COMMITS_SO_FAR" | jq --argjson c "$COMMIT" '. + [$c]')
+    SNAPSHOT=$(echo "{\"signedCommits\":$COMMITS_SO_FAR}" | .lake/build/bin/genesis_ranking | jq -c '.ranking')
+    COMMIT_HASH=$(echo "$INDEX" | jq -r '.commitHash')
+    RANKING_MAP=$(echo "$RANKING_MAP" | jq --arg key "$COMMIT_HASH" --argjson val "$SNAPSHOT" '. + {($key): $val}')
   done
+  echo "=== genesis.json ===" >&2
   echo "$REBUILT" | jq .
+  echo "=== ranking.json ===" >&2
+  echo "$RANKING_MAP" | jq .
   echo "Rebuilt $REPLAYABLE of $TOTAL indices." >&2
 
 elif [ "$MODE" = "--verify" ]; then
@@ -103,12 +113,19 @@ elif [ "$MODE" = "--verify" ]; then
 elif [ "$MODE" = "--verify-cache" ]; then
   # Rebuild from git history, then compare against genesis-state branch cache
   REBUILT="[]"
+  RANKING_MAP="{}"
+  COMMITS_SO_FAR="[]"
   for i in $(seq 0 $((REPLAYABLE - 1))); do
     COMMIT=$(echo "$SIGNED_COMMITS" | jq -c ".[$i]")
     INPUT=$(jq -n --argjson commit "$COMMIT" --argjson pastIndices "$REBUILT" \
       '{commit: $commit, pastIndices: $pastIndices}')
     INDEX=$(echo "$INPUT" | .lake/build/bin/genesis_evaluate)
     REBUILT=$(echo "$REBUILT" | jq --argjson idx "$INDEX" '. + [$idx]')
+    # Compute ranking snapshot
+    COMMITS_SO_FAR=$(echo "$COMMITS_SO_FAR" | jq --argjson c "$COMMIT" '. + [$c]')
+    SNAPSHOT=$(echo "{\"signedCommits\":$COMMITS_SO_FAR}" | .lake/build/bin/genesis_ranking | jq -c '.ranking')
+    COMMIT_HASH=$(echo "$INDEX" | jq -r '.commitHash')
+    RANKING_MAP=$(echo "$RANKING_MAP" | jq --arg key "$COMMIT_HASH" --argjson val "$SNAPSHOT" '. + {($key): $val}')
   done
 
   # Fetch cache from genesis-state branch
@@ -136,10 +153,36 @@ elif [ "$MODE" = "--verify-cache" ]; then
     fi
   done
 
+  # Verify ranking.json
+  CACHED_RANKING=$(git show origin/genesis-state:ranking.json 2>/dev/null || echo '{}')
+  CACHED_RANKING_KEYS=$(echo "$CACHED_RANKING" | jq -r 'keys | length')
+  REBUILT_RANKING_KEYS=$(echo "$RANKING_MAP" | jq -r 'keys | length')
+
+  if [ "$CACHED_RANKING_KEYS" != "0" ]; then
+    # Only verify if ranking.json exists and is non-empty
+    if [ "$REBUILT_RANKING_KEYS" -ne "$CACHED_RANKING_KEYS" ]; then
+      echo "RANKING MISMATCH: rebuilt $REBUILT_RANKING_KEYS entries but cache has $CACHED_RANKING_KEYS." >&2
+      ERRORS=$((ERRORS + 1))
+    else
+      for KEY in $(echo "$RANKING_MAP" | jq -r 'keys[]'); do
+        R=$(echo "$RANKING_MAP" | jq -c --arg k "$KEY" '.[$k]')
+        C=$(echo "$CACHED_RANKING" | jq -c --arg k "$KEY" '.[$k]')
+        if [ "$R" != "$C" ]; then
+          echo "RANKING MISMATCH for commit ${KEY:0:8}:" >&2
+          echo "  rebuilt: $R" >&2
+          echo "  cache:   $C" >&2
+          ERRORS=$((ERRORS + 1))
+        fi
+      done
+    fi
+  else
+    echo "ranking.json not found or empty — skipping ranking verification." >&2
+  fi
+
   if [ "$ERRORS" -eq 0 ]; then
     echo "Cache verified: $REBUILT_LEN indices match rebuilt state." >&2
   else
-    echo "Cache verification failed: $ERRORS mismatches in $REBUILT_LEN indices." >&2
+    echo "Cache verification failed: $ERRORS mismatches." >&2
     exit 1
   fi
 
