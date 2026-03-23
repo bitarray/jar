@@ -12,3 +12,4 @@
 
 # Shared
 /.claude/settings.local.json
+.devcontainer/
