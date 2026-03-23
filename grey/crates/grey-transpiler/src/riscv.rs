@@ -183,7 +183,7 @@ impl TranslationContext {
                 self.translate_op_imm(funct3, funct7, rd, rs1, imm)?;
             }
             0x33 => { // OP (add, sub, mul, etc.)
-                self.translate_op(funct3, funct7, rd, rs1, rs2)?;
+                self.translate_op(funct3, funct7, rd, rs1, rs2, _addr)?;
             }
             0x1B => { // OP-IMM-32 (addiw, slliw, etc.) — RV64 only
                 let imm = ((inst as i32) >> 20) as i32;
@@ -470,7 +470,7 @@ impl TranslationContext {
         Ok(())
     }
 
-    fn translate_op(&mut self, funct3: u32, funct7: u32, rd: u8, rs1: u8, rs2: u8) -> Result<(), TranspileError> {
+    fn translate_op(&mut self, funct3: u32, funct7: u32, rd: u8, rs1: u8, rs2: u8, addr: u64) -> Result<(), TranspileError> {
         if rd == 0 { return Ok(()); } // Write to x0 is a no-op in RISC-V
 
         // Handle x0 as source: PVM reg 0 = RA, not zero.
@@ -532,7 +532,10 @@ impl TranslationContext {
                     return self.emit_load_imm(rd, 0);
                 }
                 _ => {
-                    tracing::warn!("unhandled x0-source op: funct7={funct7:#x} funct3={funct3}");
+                    return Err(TranspileError::UnsupportedInstruction {
+                        offset: addr as usize,
+                        detail: format!("unhandled x0-as-rs1 op: funct7={funct7:#x} funct3={funct3}"),
+                    });
                 }
             }
         }
@@ -569,7 +572,10 @@ impl TranslationContext {
                     return self.emit_load_imm(rd, 0);
                 }
                 _ => {
-                    tracing::warn!("unhandled x0-source op: funct7={funct7:#x} funct3={funct3}");
+                    return Err(TranspileError::UnsupportedInstruction {
+                        offset: addr as usize,
+                        detail: format!("unhandled x0-as-rs2 op: funct7={funct7:#x} funct3={funct3}"),
+                    });
                 }
             }
         }
