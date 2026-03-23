@@ -109,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 return Ok(());
             }
             Err(e) => {
-                eprintln!("SEQUENTIAL TEST FAILED: {}", e);
+                tracing::error!("SEQUENTIAL TEST FAILED: {}", e);
                 std::process::exit(1);
             }
         }
@@ -127,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 return Ok(());
             }
             Err(e) => {
-                eprintln!("TESTNET FAILED: {}", e);
+                tracing::error!("TESTNET FAILED: {}", e);
                 std::process::exit(1);
             }
         }
@@ -151,8 +151,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     if cli.validator_index >= config.validators_count {
-        eprintln!(
-            "Error: validator index {} >= V={}",
+        tracing::error!(
+            "Validator index {} >= V={}",
             cli.validator_index, config.validators_count
         );
         std::process::exit(1);
