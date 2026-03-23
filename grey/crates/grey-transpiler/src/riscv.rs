@@ -849,28 +849,27 @@ impl TranslationContext {
 
     /// Build a mapping from RISC-V code addresses to PVM jump table addresses.
     ///
-    /// For each RISC-V code address in the address_map, creates a jump table entry
-    /// pointing to the corresponding PVM code offset. Returns a map of
+    /// Only creates jump table entries for the given `targets` — the set of
+    /// RISC-V addresses actually referenced as function pointers (e.g. from
+    /// absolute relocations in data sections like vtables). Returns a map of
     /// RISC-V address → jump table address (= (index+1)*2).
     ///
     /// This is needed to fix indirect calls through function pointers stored in
     /// data sections (vtables, callbacks, etc.). The PVM's `jump_ind` instruction
     /// expects jump table addresses, not raw code offsets.
-    pub fn build_function_pointer_map(&mut self) -> std::collections::HashMap<u64, u32> {
+    pub fn build_function_pointer_map(
+        &mut self,
+        targets: &std::collections::HashSet<u64>,
+    ) -> std::collections::HashMap<u64, u32> {
         let mut rv_to_jt: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
 
-        let mut code_addrs: Vec<(u64, u32)> = self.address_map
-            .iter()
-            .map(|(&rv, &pvm)| (rv, pvm))
-            .collect();
-        code_addrs.sort_by_key(|(rv, _)| *rv);
+        let mut target_addrs: Vec<u64> = targets.iter().copied().collect();
+        target_addrs.sort();
 
-        for (rv_addr, pvm_offset) in &code_addrs {
-            if (*pvm_offset as usize) < self.bitmask.len()
-                && self.bitmask[*pvm_offset as usize] == 1
-            {
+        for rv_addr in &target_addrs {
+            if let Some(&pvm_offset) = self.address_map.get(rv_addr) {
                 let jt_idx = self.jump_table.len();
-                self.jump_table.push(*pvm_offset);
+                self.jump_table.push(pvm_offset);
                 let jt_addr = ((jt_idx + 1) * 2) as u32;
                 rv_to_jt.insert(*rv_addr, jt_addr);
             }
