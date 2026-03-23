@@ -114,10 +114,9 @@ pub fn grey_sort_blob(n: u32) -> Vec<u8> {
     let mut m = Vec::new();  // bitmask
 
     // Register assignments
-    // In JAR v0.8.0 linear memory: φ[0]=SP, φ[1]=stack_top
-    // We use φ[0] as SP and load the halt address into a dedicated register.
-    const SP: u8 = 0;  // stack pointer (φ[0] = s from init)
-    const RA: u8 = 10; // halt address (loaded explicitly)
+    // In JAR v0.8.0 linear memory: φ[0]=RA (halt addr), φ[1]=SP
+    const RA: u8 = 0;  // return address (φ[0] = 0xFFFF0000 from init)
+    const SP: u8 = 1;  // stack pointer (φ[1] = s from init)
     const S0: u8 = 5;  // array base
     const S1: u8 = 6;  // n
     const T0: u8 = 2;  // i (outer loop / init)
@@ -172,7 +171,7 @@ pub fn grey_sort_blob(n: u32) -> Vec<u8> {
         for b in offset.to_le_bytes() { c.push(b); m.push(0); }
     }
     // === INIT: set up array on stack ===
-    load_imm_64(&mut c, &mut m, RA, 0xFFFF0000u64); // halt address
+    // RA (φ[0]) is already 0xFFFF0000 from initialize_program
     load_imm_64(&mut c, &mut m, S1, n as u64);
     add_imm_64(&mut c, &mut m, SP, SP, -(array_bytes as i32));
     mov(&mut c, &mut m, S0, SP);

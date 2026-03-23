@@ -162,14 +162,15 @@ pub fn initialize_program(program_blob: &[u8], arguments: &[u8], gas: Gas) -> Op
 
     // Registers (JAR v0.8.0 linear)
     let mut registers = [0u64; 13];
-    registers[0] = s as u64;                  // φ[0]: SP (top of stack)
-    registers[1] = s as u64;                  // φ[1]: stack top
+    let halt_addr: u64 = (1u64 << 32) - (1u64 << 16); // 0xFFFF0000
+    registers[0] = halt_addr;                 // φ[0]: RA (halt address for top-level return)
+    registers[1] = s as u64;                  // φ[1]: SP (top of stack)
     registers[7] = arg_start as u64;          // φ[7]: argument base
     registers[8] = arguments.len() as u64;    // φ[8]: argument length
 
     tracing::info!(
-        "PVM init (linear): stack=[0,{:#x}), args={:#x}+{}, ro={:#x}+{}, rw={:#x}+{}, heap={:#x}..{:#x}, SP={:#x}",
-        s, arg_start, arguments.len(), ro_start, ro_size, rw_start, rw_size, heap_start, heap_end, registers[0]
+        "PVM init (linear): stack=[0,{:#x}), args={:#x}+{}, ro={:#x}+{}, rw={:#x}+{}, heap={:#x}..{:#x}, SP={:#x}, RA={:#x}",
+        s, arg_start, arguments.len(), ro_start, ro_size, rw_start, rw_size, heap_start, heap_end, registers[1], registers[0]
     );
 
     let mut pvm = Pvm::new(code, bitmask, jump_table, registers, flat_mem, gas);
@@ -258,8 +259,9 @@ pub fn parse_program_blob(program_blob: &[u8], arguments: &[u8], _gas: Gas) -> O
     };
 
     let mut registers = [0u64; crate::PVM_REGISTER_COUNT];
-    registers[0] = s as u64;
-    registers[1] = s as u64;
+    let halt_addr: u64 = (1u64 << 32) - (1u64 << 16); // 0xFFFF0000
+    registers[0] = halt_addr;                 // φ[0]: RA
+    registers[1] = s as u64;                  // φ[1]: SP
     registers[7] = arg_start as u64;
     registers[8] = arguments.len() as u64;
 
