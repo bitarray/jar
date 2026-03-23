@@ -17,7 +17,7 @@
   "singlethread": true,
   "exe-suffix": ".elf",
   "os": "none",
-  "env": "polkavm",
+  "env": "javm",
   "pre-link-args": {
     "ld": [
       "--emit-relocs",

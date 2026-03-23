@@ -189,6 +189,8 @@ checksum = "3f8cf1ae70818c6476eb2da0ac8f3f55ecdea41a7aa16824ea6efc4a31cccf41"
 [[package]]
 name = "polkavm-common"
 version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7be32b303518704bb6deda7ce5a02feedbdadccccfd03da5bd3fe8eb1cd30694"
 dependencies = [
  "picosimd",
 ]
@@ -332,7 +334,3 @@ name = "zeroize"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
-
-[[patch.unused]]
-name = "polkavm"
-version = "0.32.0"

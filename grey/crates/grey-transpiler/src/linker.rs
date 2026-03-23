@@ -482,7 +482,7 @@ fn translate_section_linked(
                     let ret_addr = rv_addr + 8;
 
                     // Emit return address into link register
-                    ctx.emit_return_address(jalr_rd, ret_addr)?;
+                    ctx.emit_return_address_jt(jalr_rd, ret_addr)?;
                     // Emit jump to target
                     ctx.emit_jump(target_addr);
                     // Map the JALR address too

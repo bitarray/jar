@@ -2044,12 +2044,25 @@ pub fn compute_basic_block_starts(code: &[u8], bitmask: &[u8]) -> Vec<bool> {
                 }
             }
             crate::instruction::InstructionCategory::OneRegImmOffset => {
-                // BranchImm: opcode + 1-byte reg + 4-byte imm + 4-byte offset
-                if i + 10 <= len {
-                    let off = i32::from_le_bytes([code[i+6], code[i+7], code[i+8], code[i+9]]);
-                    let target = (i as i64 + off as i64) as usize;
-                    if target < len && target < bitmask.len() && bitmask[target] == 1 {
-                        starts[target] = true;
+                // BranchImm: opcode(1) + reg|lx(1) + imm(lx bytes) + offset(ly bytes)
+                // lx is variable (0-4), so compute the actual offset position.
+                if i + 2 <= len {
+                    let reg_byte = code[i + 1];
+                    let lx = ((reg_byte as usize / 16) % 8).min(4);
+                    let ly = if skip > lx + 1 { (skip - lx - 1).min(4) } else { 0 };
+                    let off_start = i + 2 + lx;
+                    if ly > 0 && off_start + ly <= len {
+                        let mut buf = [0u8; 4];
+                        buf[..ly].copy_from_slice(&code[off_start..off_start + ly]);
+                        // Sign-extend from ly bytes
+                        if ly < 4 && buf[ly - 1] & 0x80 != 0 {
+                            for b in &mut buf[ly..4] { *b = 0xFF; }
+                        }
+                        let off = i32::from_le_bytes(buf);
+                        let target = (i as i64 + off as i64) as usize;
+                        if target < len && target < bitmask.len() && bitmask[target] == 1 {
+                            starts[target] = true;
+                        }
                     }
                 }
             }
