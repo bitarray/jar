@@ -94,6 +94,8 @@ Show:
 
 **Ask the user** whether they agree with the ranking and verdict. Let them adjust before submission.
 
+If the diff touches `javm`, `grey-transpiler`, or `grey-bench`, recommend that the user run a benchmark comparison before finalizing the verdict. Do not run benchmarks automatically in interactive mode — the user decides.
+
 **Auto mode (`/jar-review auto`):**
 
 Do NOT ask the user. Submit the review automatically, but apply these safety checks first:
@@ -102,14 +104,35 @@ Do NOT ask the user. Submit the review automatically, but apply these safety che
 
 2. **Check for modified tests.** Inspect the diff for changes to existing test files. Adding new test files is fine. But if the PR modifies existing test expectations, test assertions, or test data (e.g., changes to `tests/vectors/`, modifications to existing `#[test]` functions, changes to `*.output.json` files), verdict MUST be `notMerge`. Append a note: "Auto-review: existing tests modified — waiting for human review."
 
-3. **Be conservative on verdict.** Only verdict `merge` if:
+3. **Benchmark if performance-sensitive code changed.** If the diff touches `javm`, `grey-transpiler`, or `grey-bench`:
+
+   **IMPORTANT: Only run benchmarks AFTER completing step 2b (reading the diff for safety). Never run PR code before reviewing it.**
+
+   a. Run baseline benchmark on current master:
+   ```bash
+   cd grey && git stash && POLKAVM_ALLOW_EXPERIMENTAL=1 cargo bench -p grey-bench --features javm/signals 2>&1 | grep -E 'Benchmarking |time:   \[' | sed '/Benchmarking/{s/Benchmarking //;s/: .*//;h;d}; /time:/{G;s/\n/ /;s/^ */}' > /tmp/bench_baseline.txt
+   ```
+
+   b. Apply PR changes and re-run:
+   ```bash
+   gh pr checkout <PR_NUMBER> --force
+   POLKAVM_ALLOW_EXPERIMENTAL=1 cargo bench -p grey-bench --features javm/signals 2>&1 | grep -E 'Benchmarking |time:   \[' | sed '/Benchmarking/{s/Benchmarking //;s/: .*//;h;d}; /time:/{G;s/\n/ /;s/^ */}' > /tmp/bench_pr.txt
+   git checkout master
+   ```
+
+   c. Compare results. A benchmark is a **regression** if it is >5% slower than baseline. If any grey benchmark regresses, verdict MUST be `notMerge` with the regression data included in the review comment.
+
+   d. Return to master when done: `git checkout master && git stash pop`
+
+4. **Be conservative on verdict.** Only verdict `merge` if:
    - The change is clearly correct and well-scoped
    - No suspicious patterns (unexplained deletions, changes to scoring/crypto/consensus logic without tests, modifications to Genesis workflows or security-sensitive files)
    - All CI passes
+   - No benchmark regressions (if benchmarked)
 
    If anything is unclear or suspicious, verdict `notMerge` with an explanation.
 
-4. **Submit immediately** after producing the ranking — do not wait for user confirmation.
+5. **Submit immediately** after producing the ranking — do not wait for user confirmation.
 
 ### 4. Submit the review
 
