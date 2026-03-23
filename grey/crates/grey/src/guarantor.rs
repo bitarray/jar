@@ -401,7 +401,6 @@ impl<'a> RefineContext for StateRefineContext<'a> {
 /// Determine which core a work package should be assigned to.
 fn determine_core(config: &Config, state: &State, package: &WorkPackage) -> u16 {
     // Find a core whose authorization pool contains the package's auth code hash
-    let _auth_hash = grey_crypto::blake2b_256(&package.auth_code_hash.0);
     for (core_idx, pool) in state.auth_pool.iter().enumerate() {
         for hash in pool {
             if *hash == package.auth_code_hash {
