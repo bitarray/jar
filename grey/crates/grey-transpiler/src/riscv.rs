@@ -99,46 +99,6 @@ impl TranslationContext {
         }
     }
 
-    /// Translate a code section from RISC-V to PVM.
-    pub fn translate_section(&mut self, data: &[u8], base_address: u64) -> Result<(), TranspileError> {
-        let mut offset = 0;
-        while offset < data.len() {
-            let rv_addr = base_address + offset as u64;
-            self.address_map.insert(rv_addr, self.code.len() as u32);
-
-            if offset + 4 > data.len() {
-                // Check for compressed instruction
-                if offset + 2 <= data.len() {
-                    let inst16 = u16::from_le_bytes([data[offset], data[offset + 1]]);
-                    if inst16 & 0x3 != 0x3 {
-                        return Err(TranspileError::UnsupportedInstruction {
-                            offset: rv_addr as usize,
-                            detail: "compressed instructions are not supported".into(),
-                        });
-                    }
-                }
-                break;
-            }
-
-            let inst = u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
-
-            // Check if compressed (low 2 bits != 11)
-            if inst & 0x3 != 0x3 {
-                return Err(TranspileError::UnsupportedInstruction {
-                    offset: rv_addr as usize,
-                    detail: "compressed instructions are not supported".into(),
-                });
-            }
-
-            self.translate_one(inst, rv_addr)?;
-            offset += 4;
-        }
-
-        self.apply_fixups();
-
-        Ok(())
-    }
-
     /// Translate one or more 32-bit RISC-V instructions starting at `offset`.
     /// Returns the number of bytes consumed (always 4).
     pub(crate) fn translate_instruction(&mut self, section: &[u8], offset: usize, base: u64) -> Result<usize, TranspileError> {
