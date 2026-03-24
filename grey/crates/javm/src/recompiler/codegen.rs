@@ -1565,17 +1565,15 @@ impl Compiler {
             }
             Opcode::Sub64 => {
                 if let Args::ThreeReg { ra, rb, rd } = args {
-
                     let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
                     if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        self.asm.mov_rr(d, a);
-                        self.asm.sub_rr(d, SCRATCH);
+                        // d = a - d: neg d; add d, a (6 bytes vs 9 bytes)
+                        self.asm.neg64(d);
+                        self.asm.add_rr(d, a);
                     } else {
                         if *rd != *ra { self.asm.mov_rr(d, a); }
                         self.asm.sub_rr(d, b);
                     }
-
                 }
             }
             Opcode::Mul64 => {
@@ -2110,22 +2108,20 @@ impl Compiler {
 
     fn emit_alu3_32_sub(&mut self, args: &Args) {
         if let Args::ThreeReg { ra, rb, rd } = args {
-
             let d = REG_MAP[*rd];
             let a = REG_MAP[*ra];
             let b = REG_MAP[*rb];
             if *rd == *ra {
                 self.asm.sub_rr32(d, b);
             } else if *rd == *rb {
-                self.asm.mov_rr(SCRATCH, b);
-                self.asm.mov_rr(d, a);
-                self.asm.sub_rr32(d, SCRATCH);
+                // d = a - d: neg32 d; add32 d, a (6 bytes vs 9 bytes)
+                self.asm.neg32(d);
+                self.asm.add_rr32(d, a);
             } else {
                 self.asm.mov_rr(d, a);
                 self.asm.sub_rr32(d, b);
             }
             self.asm.movsxd(d, d);
-
         }
     }
 

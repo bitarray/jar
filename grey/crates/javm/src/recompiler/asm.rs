@@ -735,6 +735,12 @@ impl Assembler {
         self.emit(0xD8 | dst.lo()); // /3
     }
 
+    pub fn neg32(&mut self, dst: Reg) {
+        self.rex_opt_b(dst);
+        self.emit(0xF7);
+        self.emit(0xD8 | dst.lo()); // /3
+    }
+
     /// not r64
     pub fn not64(&mut self, dst: Reg) {
         self.rex_w_b(dst);
