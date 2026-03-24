@@ -2057,14 +2057,17 @@ impl Compiler {
     }
 
     /// Division/remainder.
+    ///
+    /// x86 DIV/IDIV: dividend in RDX:RAX, divisor in any GPR except RAX/RDX.
+    /// Quotient → RAX, remainder → RDX. Only RAX and RDX are clobbered.
+    ///
+    /// Key insight: RDX = SCRATCH (not mapped to any PVM register), so it never
+    /// needs saving/restoring. When b_reg != RAX (~92% of cases), we use b_reg
+    /// directly as the divisor — DIV/IDIV does not clobber the operand register,
+    /// so no save of RCX (φ[12]) is needed either. Only RAX (φ[11]) must be
+    /// preserved (unless d_reg == RAX).
     fn emit_div(&mut self, args: &Args, signed: bool, remainder: bool, is_32bit: bool) {
         if let Args::ThreeReg { ra, rb, rd } = args {
-            // Division uses RAX and RDX implicitly.
-            // RAX = φ[11], RDX = SCRATCH (not a PVM reg)
-            // We need to save φ[11] (RAX) around the operation.
-
-            // Load spilled register if ra or rb is phi[12]
-
             let a_reg = REG_MAP[*ra];
             let b_reg = REG_MAP[*rb];
             let d_reg = REG_MAP[*rd];
@@ -2088,102 +2091,152 @@ impl Compiler {
 
             self.asm.bind_label(nonzero);
 
-            // x86 DIV/IDIV: dividend in RDX:RAX, divisor in any GPR except RAX/RDX.
-            // Quotient → RAX, remainder → RDX. Both are always clobbered.
-            // RCX is used as divisor register and must be saved/restored (it's phi[12]).
-            //
-            // Strategy: save RAX, RDX, and RCX to stack, load operands from saved
-            // values if needed, perform division, then push result, restore all three,
-            // and load result into d_reg last.
-
-            // Save RAX, RDX, and RCX.
-            self.asm.push(Reg::RAX);
-            self.asm.push(SCRATCH); // SCRATCH = RDX
-            self.asm.push(Reg::RCX);
-            // Stack: [RSP+0]=old_RCX, [RSP+8]=old_RDX, [RSP+16]=old_RAX
-
-            // Load divisor into RCX.
-            if b_reg == Reg::RAX {
-                self.asm.mov_load64(Reg::RCX, Reg::RSP, 16); // original RAX
-            } else if b_reg == SCRATCH {
-                self.asm.mov_load64(Reg::RCX, Reg::RSP, 8); // original RDX
-            } else if b_reg == Reg::RCX {
-                self.asm.mov_load64(Reg::RCX, Reg::RSP, 0); // original RCX
+            if b_reg != Reg::RAX {
+                // Fast path: use b_reg directly as divisor (no extra register needed).
+                // Only save RAX (φ[11]) if the result doesn't go there.
+                self.emit_div_fast(a_reg, b_reg, d_reg, signed, remainder, is_32bit);
             } else {
-                self.asm.mov_rr(Reg::RCX, b_reg);
+                // b_reg == RAX: divisor is in RAX, but we need RAX for the dividend.
+                // Move divisor to RCX; save both RAX (φ[11]) and RCX (φ[12]).
+                self.emit_div_b_is_rax(a_reg, d_reg, signed, remainder, is_32bit);
             }
-
-            // Load dividend into RAX.
-            if a_reg == Reg::RAX {
-                self.asm.mov_load64(Reg::RAX, Reg::RSP, 16); // original RAX
-            } else if a_reg == SCRATCH {
-                self.asm.mov_load64(Reg::RAX, Reg::RSP, 8); // original RDX
-            } else if a_reg == Reg::RCX {
-                self.asm.mov_load64(Reg::RAX, Reg::RSP, 0); // original RCX
-            } else {
-                self.asm.mov_rr(Reg::RAX, a_reg);
-            }
-
-            // Perform the division.
-            if is_32bit {
-                if signed {
-                    self.asm.movsxd(Reg::RAX, Reg::RAX);
-                    self.asm.cdq();
-                    self.asm.idiv32(Reg::RCX);
-                } else {
-                    self.asm.movzx_32_64(Reg::RAX, Reg::RAX);
-                    self.asm.mov_ri64(SCRATCH, 0);
-                    self.asm.div32(Reg::RCX);
-                }
-            } else {
-                if signed {
-                    self.asm.cqo();
-                    self.asm.idiv64(Reg::RCX);
-                } else {
-                    self.asm.mov_ri64(SCRATCH, 0);
-                    self.asm.div64(Reg::RCX);
-                }
-            }
-
-            // Result: quotient in RAX, remainder in RDX (SCRATCH).
-            let result_reg = if remainder { SCRATCH } else { Reg::RAX };
-
-            // Push result, restore RAX/RDX/RCX, then load result into d_reg.
-            // This ordering ensures d_reg gets the correct value even when
-            // d_reg is RAX, RDX, or RCX (the load happens after the restore).
-            self.asm.push(result_reg);
-            // Stack: [RSP+0]=result, [RSP+8]=old_RCX, [RSP+16]=old_RDX, [RSP+24]=old_RAX
-            self.asm.mov_load64(Reg::RAX, Reg::RSP, 24); // restore original RAX
-            self.asm.mov_load64(SCRATCH, Reg::RSP, 16);   // restore original RDX
-            self.asm.mov_load64(Reg::RCX, Reg::RSP, 8);   // restore original RCX
-            self.asm.mov_load64(d_reg, Reg::RSP, 0);      // load result (last!)
-            self.asm.add_ri(Reg::RSP, 32);                 // clean up 4 stack slots
 
             if is_32bit {
                 self.asm.movsxd(d_reg, d_reg);
             }
 
             self.asm.bind_label(done);
+        }
+    }
 
+    /// Division fast path: b_reg is not RAX, so we use it directly as the divisor.
+    /// DIV/IDIV does not clobber the operand register, so only RAX needs saving.
+    fn emit_div_fast(
+        &mut self, a_reg: Reg, b_reg: Reg, d_reg: Reg,
+        signed: bool, remainder: bool, is_32bit: bool,
+    ) {
+        let save_rax = d_reg != Reg::RAX;
+
+        if save_rax {
+            self.asm.push(Reg::RAX);
+        }
+
+        // Load dividend into RAX (push doesn't modify RAX, so a_reg==RAX is fine).
+        if a_reg != Reg::RAX {
+            self.asm.mov_rr(Reg::RAX, a_reg);
+        }
+
+        // Set up RDX and divide.
+        self.emit_div_setup_and_exec(signed, is_32bit, b_reg);
+
+        if save_rax {
+            // d_reg != RAX: move result, then restore φ[11].
+            let result_reg = if remainder { SCRATCH } else { Reg::RAX };
+            self.asm.mov_rr(d_reg, result_reg);
+            self.asm.pop(Reg::RAX);
+        } else {
+            // d_reg == RAX: quotient is already there; for remainder, move RDX → RAX.
+            if remainder {
+                self.asm.mov_rr(Reg::RAX, SCRATCH);
+            }
+        }
+    }
+
+    /// Division slow path: b_reg == RAX (divisor is φ[11]).
+    /// We must move the divisor to RCX before loading the dividend into RAX.
+    fn emit_div_b_is_rax(
+        &mut self, a_reg: Reg, d_reg: Reg,
+        signed: bool, remainder: bool, is_32bit: bool,
+    ) {
+        // Always save RAX and RCX so we can restore both PVM registers.
+        self.asm.push(Reg::RAX);  // save φ[11]
+        self.asm.push(Reg::RCX);  // save φ[12]
+        // Stack: [RSP+0]=old_RCX, [RSP+8]=old_RAX
+
+        // Move divisor (currently in RAX) to RCX.
+        // (push doesn't modify RAX, so it still holds the divisor.)
+        self.asm.mov_rr(Reg::RCX, Reg::RAX);
+
+        // Load dividend into RAX.
+        if a_reg == Reg::RAX {
+            // Dividend is also φ[11] — RAX still holds it (mov_rr above
+            // copied RAX→RCX but didn't change RAX). Nothing to do.
+        } else if a_reg == Reg::RCX {
+            // We just overwrote RCX with the divisor; load original φ[12] from stack.
+            self.asm.mov_load64(Reg::RAX, Reg::RSP, 0); // old_RCX
+        } else {
+            self.asm.mov_rr(Reg::RAX, a_reg);
+        }
+
+        // Set up RDX and divide.
+        self.emit_div_setup_and_exec(signed, is_32bit, Reg::RCX);
+
+        // Place result and restore saved registers.
+        let result_reg = if remainder { SCRATCH } else { Reg::RAX };
+
+        if d_reg == Reg::RAX {
+            if remainder {
+                self.asm.mov_rr(Reg::RAX, SCRATCH);
+            }
+            self.asm.pop(Reg::RCX);     // restore φ[12]
+            self.asm.pop(SCRATCH);       // discard saved RAX (d_reg overwrites φ[11])
+        } else if d_reg == Reg::RCX {
+            self.asm.mov_rr(Reg::RCX, result_reg);
+            self.asm.pop(SCRATCH);       // discard saved RCX (d_reg overwrites φ[12])
+            self.asm.pop(Reg::RAX);      // restore φ[11]
+        } else {
+            self.asm.mov_rr(d_reg, result_reg);
+            self.asm.pop(Reg::RCX);      // restore φ[12]
+            self.asm.pop(Reg::RAX);       // restore φ[11]
+        }
+    }
+
+    /// Emit RDX setup (sign-extend or zero) and the DIV/IDIV instruction.
+    fn emit_div_setup_and_exec(&mut self, signed: bool, is_32bit: bool, divisor: Reg) {
+        if is_32bit {
+            if signed {
+                self.asm.movsxd(Reg::RAX, Reg::RAX);
+                self.asm.cdq();
+                self.asm.idiv32(divisor);
+            } else {
+                self.asm.movzx_32_64(Reg::RAX, Reg::RAX);
+                self.asm.mov_ri64(SCRATCH, 0);
+                self.asm.div32(divisor);
+            }
+        } else if signed {
+            self.asm.cqo();
+            self.asm.idiv64(divisor);
+        } else {
+            self.asm.mov_ri64(SCRATCH, 0);
+            self.asm.div64(divisor);
         }
     }
 
     /// Multiply upper (128-bit product, take high 64 bits).
+    ///
+    /// MUL/IMUL uses RAX (φ[11]) and RDX (SCRATCH) implicitly.
+    /// RDX = SCRATCH is not a PVM register, so only RAX needs saving.
     fn emit_mul_upper(&mut self, args: &Args, a_signed: bool, b_signed: bool) {
         if let Args::ThreeReg { ra, rb, rd } = args {
-            // MUL/IMUL uses RAX (φ[11]) and RDX (SCRATCH) implicitly.
-            // Save original RAX and RDX.
-            self.asm.push(Reg::RAX);  // save φ[11]
-            self.asm.push(SCRATCH);   // save RDX
-            // Stack: [RSP+0]=orig_RDX, [RSP+8]=orig_RAX
+            let d_reg = REG_MAP[*rd];
+            let rb_is_rax = REG_MAP[*rb] == Reg::RAX;
+            // We need to preserve φ[11] (RAX) unless d_reg is RAX AND rb != RAX
+            // (if rb == RAX, we always push so we can recover the original value).
+            let save_rax = d_reg != Reg::RAX || rb_is_rax;
 
-            // Load ra into RAX
-            self.asm.mov_rr(Reg::RAX, REG_MAP[*ra]);
+            if save_rax {
+                self.asm.push(Reg::RAX);  // save φ[11]
+            }
 
-            // Handle rb being RAX (φ[11], which we've overwritten with ra).
-            let mul_src = if REG_MAP[*rb] == Reg::RAX {
-                // rb is φ[11] = RAX; original value is on stack at [RSP+8]
-                self.asm.mov_load64(SCRATCH, Reg::RSP, 8);
+            // Load ra into RAX (push doesn't modify RAX).
+            if REG_MAP[*ra] != Reg::RAX {
+                self.asm.mov_rr(Reg::RAX, REG_MAP[*ra]);
+            }
+
+            // Determine mul_src: the register holding rb's value.
+            let mul_src = if rb_is_rax {
+                // rb is φ[11] = RAX; original value is on stack.
+                self.asm.mov_load64(SCRATCH, Reg::RSP, 0);
                 SCRATCH
             } else {
                 REG_MAP[*rb]
@@ -2196,14 +2249,12 @@ impl Compiler {
             } else {
                 // MulUpperSU: ra is signed, rb is unsigned
                 // result_hi = unsigned_mul_hi(ra, rb) - (ra < 0 ? rb : 0)
-                // Save rb and ra's sign for post-multiply adjustment
                 self.asm.push(mul_src); // save rb
                 self.asm.push(Reg::RAX); // save ra (for sign check)
-                // Now do unsigned multiply. mul_src might be SCRATCH which is
-                // clobbered by the pushes. Reload from stack if needed.
-                if REG_MAP[*rb] == Reg::RAX {
-                    // rb was in SCRATCH (loaded from stack). It's saved at [RSP+8].
-                    self.asm.mov_load64(SCRATCH, Reg::RSP, 8);
+                if rb_is_rax {
+                    // mul_src was SCRATCH (loaded from stack); reload after pushes.
+                    // orig_RAX is now at [RSP + 16] (ra push + rb push above it).
+                    self.asm.mov_load64(SCRATCH, Reg::RSP, 16);
                     self.asm.mul_rdx_rax(SCRATCH);
                 } else {
                     self.asm.mul_rdx_rax(mul_src);
@@ -2224,14 +2275,20 @@ impl Compiler {
             }
 
             // High 64 bits are in RDX (SCRATCH).
-            // Save result, restore original RAX and RDX, put result in rd.
-            self.asm.push(SCRATCH); // push result_hi
-            // Stack: [RSP+0]=result_hi, [RSP+8]=orig_RDX, [RSP+16]=orig_RAX
-            self.asm.mov_load64(SCRATCH, Reg::RSP, 8);  // restore original RDX
-            self.asm.mov_load64(Reg::RAX, Reg::RSP, 16); // restore original RAX
-            self.asm.pop(REG_MAP[*rd]); // rd = result_hi
-            self.asm.add_ri(Reg::RSP, 16); // discard orig_RDX and orig_RAX
-
+            if save_rax {
+                if d_reg == Reg::RAX {
+                    // rb_is_rax case: we saved RAX for rb recovery but d_reg is also RAX.
+                    // Discard the saved value and put result in RAX.
+                    self.asm.add_ri(Reg::RSP, 8);
+                    self.asm.mov_rr(Reg::RAX, SCRATCH);
+                } else {
+                    self.asm.mov_rr(d_reg, SCRATCH);
+                    self.asm.pop(Reg::RAX); // restore φ[11]
+                }
+            } else {
+                // d_reg == RAX and !rb_is_rax → didn't save RAX.
+                self.asm.mov_rr(Reg::RAX, SCRATCH);
+            }
         }
     }
 
