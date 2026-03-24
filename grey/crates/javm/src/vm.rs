@@ -134,57 +134,93 @@ impl Pvm {
     }
 
     // --- Flat memory accessors ---
+    //
+    // Use direct pointer access with a single bounds check for the hot path.
+    // On little-endian x86, read_unaligned/write_unaligned compile to single
+    // MOV instructions. The bounds check is a single comparison (no slice ops).
 
-    #[inline]
+    #[inline(always)]
     pub fn read_u8(&self, addr: u32) -> Option<u8> {
-        self.flat_mem.get(addr as usize).copied()
+        let a = addr as usize;
+        if a < self.flat_mem.len() {
+            Some(unsafe { *self.flat_mem.get_unchecked(a) })
+        } else {
+            None
+        }
     }
 
-    #[inline]
+    #[inline(always)]
     fn read_u16_le(&self, addr: u32) -> Option<u16> {
         let a = addr as usize;
-        self.flat_mem.get(a..a + 2).map(|s| u16::from_le_bytes(s.try_into().unwrap()))
+        if a + 2 <= self.flat_mem.len() {
+            Some(unsafe { self.flat_mem.as_ptr().add(a).cast::<u16>().read_unaligned() })
+        } else {
+            None
+        }
     }
 
-    #[inline]
+    #[inline(always)]
     fn read_u32_le(&self, addr: u32) -> Option<u32> {
         let a = addr as usize;
-        self.flat_mem.get(a..a + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+        if a + 4 <= self.flat_mem.len() {
+            Some(unsafe { self.flat_mem.as_ptr().add(a).cast::<u32>().read_unaligned() })
+        } else {
+            None
+        }
     }
 
-    #[inline]
+    #[inline(always)]
     fn read_u64_le(&self, addr: u32) -> Option<u64> {
         let a = addr as usize;
-        self.flat_mem.get(a..a + 8).map(|s| u64::from_le_bytes(s.try_into().unwrap()))
+        if a + 8 <= self.flat_mem.len() {
+            Some(unsafe { self.flat_mem.as_ptr().add(a).cast::<u64>().read_unaligned() })
+        } else {
+            None
+        }
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn write_u8(&mut self, addr: u32, val: u8) -> bool {
-        if let Some(b) = self.flat_mem.get_mut(addr as usize) { *b = val; true } else { false }
+        let a = addr as usize;
+        if a < self.flat_mem.len() {
+            unsafe { *self.flat_mem.get_unchecked_mut(a) = val; }
+            true
+        } else {
+            false
+        }
     }
 
-    #[inline]
+    #[inline(always)]
     fn write_u16_le(&mut self, addr: u32, val: u16) -> bool {
         let a = addr as usize;
-        if let Some(s) = self.flat_mem.get_mut(a..a + 2) {
-            s.copy_from_slice(&val.to_le_bytes()); true
-        } else { false }
+        if a + 2 <= self.flat_mem.len() {
+            unsafe { self.flat_mem.as_mut_ptr().add(a).cast::<u16>().write_unaligned(val); }
+            true
+        } else {
+            false
+        }
     }
 
-    #[inline]
+    #[inline(always)]
     fn write_u32_le(&mut self, addr: u32, val: u32) -> bool {
         let a = addr as usize;
-        if let Some(s) = self.flat_mem.get_mut(a..a + 4) {
-            s.copy_from_slice(&val.to_le_bytes()); true
-        } else { false }
+        if a + 4 <= self.flat_mem.len() {
+            unsafe { self.flat_mem.as_mut_ptr().add(a).cast::<u32>().write_unaligned(val); }
+            true
+        } else {
+            false
+        }
     }
 
-    #[inline]
+    #[inline(always)]
     fn write_u64_le(&mut self, addr: u32, val: u64) -> bool {
         let a = addr as usize;
-        if let Some(s) = self.flat_mem.get_mut(a..a + 8) {
-            s.copy_from_slice(&val.to_le_bytes()); true
-        } else { false }
+        if a + 8 <= self.flat_mem.len() {
+            unsafe { self.flat_mem.as_mut_ptr().add(a).cast::<u64>().write_unaligned(val); }
+            true
+        } else {
+            false
+        }
     }
 
     /// Compute skip(i) — distance to next instruction minus one (eq A.3).
