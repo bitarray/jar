@@ -656,9 +656,12 @@ impl Compiler {
             }
         }
         let rb_reg = REG_MAP[rb];
-        self.asm.movzx_32_64(SCRATCH, rb_reg);
         if imm != 0 {
-            self.asm.add_ri32(SCRATCH, imm);
+            // lea r32, [base + disp]: combines truncation to 32-bit and offset
+            // addition in one instruction (saves ~2 bytes vs movzx + add).
+            self.asm.lea_32(SCRATCH, rb_reg, imm);
+        } else {
+            self.asm.movzx_32_64(SCRATCH, rb_reg);
         }
     }
 

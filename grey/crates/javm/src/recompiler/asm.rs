@@ -951,6 +951,14 @@ impl Assembler {
         self.modrm_disp(dst.lo(), base, disp);
     }
 
+    /// lea r32, [base + disp] — 32-bit result, zero-extends to 64-bit.
+    /// Combines address truncation and offset addition in one instruction.
+    pub fn lea_32(&mut self, dst: Reg, base: Reg, disp: i32) {
+        self.rex_opt(dst, base);
+        self.emit(0x8D);
+        self.modrm_disp(dst.lo(), base, disp);
+    }
+
     /// lea r32, [base32 + index32 * 4]  (32-bit result, auto zero-extends to 64)
     /// lea dst32, [base32 + index32 * (1 << scale_log2)]
     /// scale_log2: 0=*1, 1=*2, 2=*4, 3=*8
