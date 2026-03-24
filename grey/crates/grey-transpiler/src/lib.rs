@@ -28,18 +28,6 @@ pub enum TranspileError {
     InvalidSection(String),
 }
 
-/// Path to the pre-compiled sample service ELF (built externally with nightly).
-pub const SAMPLE_SERVICE_ELF_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../services/sample-service/target/riscv64em-javm/release/sample-service.elf"
-);
-
-/// Path to the pre-compiled pixels service ELF (built externally with nightly).
-pub const PIXELS_SERVICE_ELF_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../services/pixels-service/target/riscv64em-javm/release/pixels-service.elf"
-);
-
 /// Link a RISC-V rv64em ELF binary into a PVM standard program blob.
 pub fn link_elf(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
     linker::link_elf(elf_data)

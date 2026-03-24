@@ -22,7 +22,6 @@ grey-services = { workspace = true }
 grey-network = { workspace = true }
 grey-store = { workspace = true }
 grey-rpc = { workspace = true }
-grey-transpiler = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { workspace = true }
@@ -32,3 +31,6 @@ serde_json = { workspace = true }
 hex = { workspace = true }
 libp2p = { workspace = true }
 futures = { workspace = true }
+
+[build-dependencies]
+build-javm = { path = "../build-javm" }

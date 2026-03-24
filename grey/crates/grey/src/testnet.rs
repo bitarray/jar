@@ -15,6 +15,8 @@ use grey_types::{Hash, ServiceId, Timeslot};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+include!(concat!(env!("OUT_DIR"), "/service_blobs.rs"));
+
 /// Run the local test network with work package processing demo.
 ///
 /// Launches V=6 validators with a pre-installed PVM service,
@@ -34,17 +36,7 @@ pub async fn run_testnet(
     let (mut genesis_state, _secrets) = grey_consensus::genesis::create_genesis(&config);
 
     let service_id: ServiceId = 1000;
-    let pvm_blob = match std::fs::read(grey_transpiler::SAMPLE_SERVICE_ELF_PATH) {
-        Ok(elf_data) => {
-            tracing::info!("Testnet: Using transpiled RISC-V service");
-            grey_transpiler::link_elf_service(&elf_data)
-                .expect("failed to transpile sample service ELF")
-        }
-        Err(_) => {
-            tracing::info!("Testnet: Using hand-assembled service");
-            grey_transpiler::assembler::build_sample_service_precise()
-        }
-    };
+    let pvm_blob = SAMPLE_SERVICE_BLOB.to_vec();
     let code_hash = grey_crypto::blake2b_256(&pvm_blob);
     let mut preimage_lookup = BTreeMap::new();
     preimage_lookup.insert(code_hash, pvm_blob);
@@ -65,11 +57,10 @@ pub async fn run_testnet(
         preimage_count: 0,
     });
 
-    // Install pixels service (ID 2000) if ELF available
+    // Install pixels service (ID 2000)
     let pixels_service_id: ServiceId = 2000;
-    if let Ok(elf_data) = std::fs::read(grey_transpiler::PIXELS_SERVICE_ELF_PATH) {
-        let pixels_blob = grey_transpiler::link_elf_service(&elf_data)
-            .expect("failed to transpile pixels service ELF");
+    {
+        let pixels_blob = PIXELS_SERVICE_BLOB.to_vec();
         let pixels_hash = grey_crypto::blake2b_256(&pixels_blob);
         let mut px_preimages = BTreeMap::new();
         px_preimages.insert(pixels_hash, pixels_blob);
@@ -240,18 +231,7 @@ pub fn run_sequential_test(num_blocks: u32) -> Result<SequentialTestResult, Stri
 
     // --- Install a PVM service into genesis state ---
     let service_id: ServiceId = 1000;
-    // Transpile the sample RISC-V service to PVM (or fall back to hand-assembled)
-    let pvm_blob = match std::fs::read(grey_transpiler::SAMPLE_SERVICE_ELF_PATH) {
-        Ok(elf_data) => {
-            tracing::info!("Using transpiled RISC-V service");
-            grey_transpiler::link_elf_service(&elf_data)
-                .expect("failed to transpile sample service ELF")
-        }
-        Err(_) => {
-            tracing::info!("Using hand-assembled service (ELF not found)");
-            grey_transpiler::assembler::build_sample_service_precise()
-        }
-    };
+    let pvm_blob = SAMPLE_SERVICE_BLOB.to_vec();
     let code_hash = grey_crypto::blake2b_256(&pvm_blob);
     let mut preimage_lookup = BTreeMap::new();
     preimage_lookup.insert(code_hash, pvm_blob);
@@ -279,19 +259,9 @@ pub fn run_sequential_test(num_blocks: u32) -> Result<SequentialTestResult, Stri
 
     // --- Install the pixels service (ID 2000) ---
     let pixels_service_id: ServiceId = 2000;
-    let pixels_pvm_blob = match std::fs::read(grey_transpiler::PIXELS_SERVICE_ELF_PATH) {
-        Ok(elf_data) => {
-            tracing::info!("Using transpiled pixels RISC-V service");
-            grey_transpiler::link_elf_service(&elf_data)
-                .expect("failed to transpile pixels service ELF")
-        }
-        Err(_) => {
-            tracing::warn!("Pixels service ELF not found — skipping pixels test");
-            Vec::new()
-        }
-    };
-    let pixels_installed = !pixels_pvm_blob.is_empty();
-    let pixels_code_hash = if pixels_installed {
+    let pixels_pvm_blob = PIXELS_SERVICE_BLOB.to_vec();
+    let pixels_installed = true;
+    let pixels_code_hash = {
         let h = grey_crypto::blake2b_256(&pixels_pvm_blob);
         let mut pixels_preimage_lookup = BTreeMap::new();
         pixels_preimage_lookup.insert(h, pixels_pvm_blob);
@@ -317,8 +287,6 @@ pub fn run_sequential_test(num_blocks: u32) -> Result<SequentialTestResult, Stri
             hex::encode(&h.0[..8])
         );
         h
-    } else {
-        Hash::ZERO
     };
 
     // Populate auth_pool so guarantees pass the authorizer check.
