@@ -302,14 +302,10 @@ impl Compiler {
                 Args::TwoRegOffset { offset, .. } => Some(offset as usize),
                 _ => None,
             };
-            if let Some(t) = target {
-                if t < code_len && t < bitmask.len() && bitmask[t] == 1 {
-                    gas_starts[t] = true;
-                }
-            }
-            if opcode.is_terminator() && (next_pc as usize) < code_len {
-                gas_starts[next_pc as usize] = true;
-            }
+            // Note: gas_starts is pre-computed by compute_basic_block_starts()
+            // which already includes all branch/jump targets and post-terminators.
+            // Post-ecalli boundaries need to be added here since they're not
+            // basic block boundaries per se but must be gas block boundaries.
             if matches!(opcode, Opcode::Ecalli) && (next_pc as usize) < code_len {
                 gas_starts[next_pc as usize] = true;
             }
