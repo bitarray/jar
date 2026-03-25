@@ -72,7 +72,7 @@ jobs:
 
       - name: Build tools
         run: |
-          cd spec && lake build genesis_select_targets genesis_evaluate genesis_ranking genesis_validate
+          cd spec && lake build genesis_select_targets genesis_evaluate genesis_check_merge genesis_ranking genesis_validate
           cargo build -p jar-genesis
 
       - name: Merge
