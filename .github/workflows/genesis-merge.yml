@@ -1,14 +1,17 @@
 name: "Genesis: Merge"
 
 on:
-  issue_comment:
-    types: [created]
   workflow_dispatch:
     inputs:
       pr_number:
         description: "PR number to merge"
         required: true
         type: number
+      founder_override:
+        description: "Founder override (skip quorum check)"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: genesis
@@ -16,26 +19,17 @@ concurrency:
 
 jobs:
   merge:
-    if: >
-      (github.event_name == 'workflow_dispatch') ||
-      (github.event.issue.pull_request &&
-       github.event.comment.body == '/merge' &&
-       github.event.comment.user.login == 'sorpaas')
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
     steps:
-      - name: Get PR number and base branch
+      - name: Get base branch
         id: pr-info
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            PR_NUMBER=${{ inputs.pr_number }}
-          else
-            PR_NUMBER=${{ github.event.issue.number }}
-          fi
+          PR_NUMBER=${{ inputs.pr_number }}
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
           BASE=$(gh pr view "$PR_NUMBER" --repo ${{ github.repository }} --json baseRefName --jq '.baseRefName')
           echo "base=$BASE" >> $GITHUB_OUTPUT
@@ -65,6 +59,10 @@ jobs:
           curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
           echo "$HOME/.elan/bin" >> $GITHUB_PATH
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
       - name: Cache Lake packages
         uses: actions/cache@v4
         with:
@@ -72,235 +70,17 @@ jobs:
           key: lake-genesis-${{ hashFiles('spec/lean-toolchain', 'spec/lake-manifest.json', 'spec/lakefile.lean') }}
           restore-keys: lake-genesis-
 
-      - name: Build genesis tools
-        working-directory: spec
-        run: lake build genesis_select_targets genesis_evaluate genesis_ranking
-
-      - name: Collect reviews and evaluate
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        working-directory: spec
+      - name: Build tools
         run: |
-          PR_NUMBER=${{ steps.pr-info.outputs.pr_number }}
+          cd spec && lake build genesis_select_targets genesis_evaluate genesis_ranking genesis_validate
+          cargo build -p jar-genesis
 
-          # Read cache from genesis-state branch (write to files to avoid ARG_MAX)
-          git fetch origin genesis-state
-          git show origin/genesis-state:genesis.json > /tmp/genesis_cache.json
-          git show origin/genesis-state:ranking.json 2>/dev/null > /tmp/genesis_ranking_cache.json || echo '{}' > /tmp/genesis_ranking_cache.json
-
-          # Verify cache is not stale
-          if ! bash tools/genesis-check-cache.sh /tmp/genesis_cache.json; then
-            gh pr comment "$PR_NUMBER" --body "**JAR Bot:** Genesis cache is stale — cannot merge. A prior merge may have failed to update the cache."
-            exit 1
-          fi
-
-          # Get PR details (including immutable created_at for target anchoring)
-          PR_JSON=$(gh pr view "$PR_NUMBER" --json headRefOid,author,createdAt,body)
-          HEAD_SHA=$(echo "$PR_JSON" | jq -r '.headRefOid')
-          AUTHOR=$(echo "$PR_JSON" | jq -r '.author.login')
-          PR_CREATED_AT=$(echo "$PR_JSON" | jq -r '.createdAt')
-          PR_CREATED_EPOCH=$(date -d "$PR_CREATED_AT" +%s)
-          PR_BODY=$(echo "$PR_JSON" | jq -r '.body // ""')
-
-          # Parse accepted flags from leading lines of PR body (before first blank line).
-          # To add new flags, add a new parse_flag call below.
-          parse_flag() {
-            local flag="$1"
-            echo "$PR_BODY" | awk '/^$/{exit} /^'"$flag"':/{print; exit}' | sed "s/^${flag}: *@\\{0,1\\}//"
-          }
-
-          GENESIS_AUTHOR=$(parse_flag "Set-Genesis-Author")
-          if [ -n "$GENESIS_AUTHOR" ]; then
-            AUTHOR="$GENESIS_AUTHOR"
-          fi
-
-          # Get comparison targets anchored to PR creation time
-          RANKING_SNAPSHOT=$(jq -c --argjson epoch "$PR_CREATED_EPOCH" --slurpfile ranking /tmp/genesis_ranking_cache.json '
-            [.[] | select(.epoch < $epoch)] | last | .commitHash // empty |
-            . as $hash | $ranking[0][$hash] // empty
-          ' /tmp/genesis_cache.json)
-          if [ -z "$RANKING_SNAPSHOT" ] || [ "$RANKING_SNAPSHOT" = "null" ]; then
-            RANKING_SNAPSHOT="null"
-          fi
-          INPUT=$(jq -n \
-            --argjson prId "$PR_NUMBER" \
-            --argjson prCreatedAt "$PR_CREATED_EPOCH" \
-            --slurpfile indices /tmp/genesis_cache.json \
-            --argjson ranking "$RANKING_SNAPSHOT" \
-            'if $ranking == null then {prId: $prId, prCreatedAt: $prCreatedAt, indices: $indices[0]}
-             else {prId: $prId, prCreatedAt: $prCreatedAt, indices: $indices[0], ranking: $ranking} end')
-          TARGETS_JSON=$(echo "$INPUT" | .lake/build/bin/genesis_select_targets)
-          TARGETS=$(echo "$TARGETS_JSON" | jq -c '.targets')
-
-          # Check that no commits were pushed after the last /review comment.
-          # Reviews are scored against the HEAD at the time they were posted;
-          # new commits invalidate them.
-          LAST_REVIEW_AT=$(gh pr view "$PR_NUMBER" --json comments --jq '
-            [.comments[] | select(.body | startswith("/review"))] | last | .createdAt // empty')
-          if [ -n "$LAST_REVIEW_AT" ]; then
-            LAST_COMMIT_AT=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" \
-              --jq 'last | .commit.committer.date')
-            if [ -n "$LAST_COMMIT_AT" ] && [[ "$LAST_COMMIT_AT" > "$LAST_REVIEW_AT" ]]; then
-              gh pr comment "$PR_NUMBER" --body \
-                "**JAR Bot:** New commits pushed after the last review (commit: ${LAST_COMMIT_AT}, review: ${LAST_REVIEW_AT}). Aborting merge — please re-review."
-              exit 1
-            fi
-          fi
-
-          # Collect reviews + meta-reviews (expand currentPR + short hashes)
-          COLLECTED=$(bash tools/genesis-collect-reviews.sh "$PR_NUMBER" "$HEAD_SHA" "$TARGETS")
-          REVIEWS=$(echo "$COLLECTED" | jq '.reviews')
-          META_REVIEWS=$(echo "$COLLECTED" | jq '.metaReviews')
-          COLLECT_WARNINGS=$(echo "$COLLECTED" | jq -r '.warnings[]' 2>/dev/null || true)
-
-          # Build signed commit
-          EPOCH=$(date +%s)
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            FOUNDER_OVERRIDE=false
-          else
-            FOUNDER_OVERRIDE=true
-          fi
-          COMMIT_JSON=$(jq -n \
-            --arg id "$HEAD_SHA" \
-            --argjson prId "$PR_NUMBER" \
-            --arg author "$AUTHOR" \
-            --argjson mergeEpoch "$EPOCH" \
-            --argjson prCreatedAt "$PR_CREATED_EPOCH" \
-            --argjson targets "$TARGETS" \
-            --argjson reviews "$REVIEWS" \
-            --argjson metaReviews "$META_REVIEWS" \
-            --argjson founderOverride "$FOUNDER_OVERRIDE" \
-            '{id: $id, prId: $prId, author: $author, mergeEpoch: $mergeEpoch,
-              prCreatedAt: $prCreatedAt, comparisonTargets: $targets, reviews: $reviews,
-              metaReviews: $metaReviews, founderOverride: $founderOverride}')
-
-          # Evaluate (pass ranking for v2 target validation)
-          INPUT=$(jq -n \
-            --argjson commit "$COMMIT_JSON" \
-            --slurpfile pastIndices /tmp/genesis_cache.json \
-            --argjson ranking "$RANKING_SNAPSHOT" \
-            'if $ranking == null then {commit: $commit, pastIndices: $pastIndices[0]}
-             else {commit: $commit, pastIndices: $pastIndices[0], ranking: $ranking} end')
-
-          INDEX=$(echo "$INPUT" | .lake/build/bin/genesis_evaluate)
-
-          SCORE=$(echo "$INDEX" | jq -c '.score')
-          WEIGHT_DELTA=$(echo "$INDEX" | jq -r '.weightDelta')
-          EVAL_WARNINGS=$(echo "$INDEX" | jq -r '.warnings[]' 2>/dev/null || true)
-
-          # Surface any warnings from collection or evaluation
-          ALL_WARNINGS="${COLLECT_WARNINGS}${COLLECT_WARNINGS:+$'\n'}${EVAL_WARNINGS}"
-          ALL_WARNINGS=$(echo "$ALL_WARNINGS" | sed '/^$/d')
-          if [ -n "$ALL_WARNINGS" ]; then
-            WARNING_BODY=$(echo "$ALL_WARNINGS" | sed 's/^/- /')
-            gh pr comment "$PR_NUMBER" --body "$(printf '**JAR Bot:** Evaluation warnings:\n%s' "$WARNING_BODY")"
-          fi
-
-          # Save for merge step (strip warnings from INDEX for trailer)
-          echo "$INDEX" | jq 'del(.warnings)' > /tmp/genesis_index.json
-          echo "$COMMIT_JSON" > /tmp/genesis_commit.json
-
-      - name: Wait for checks and merge
+      - name: Merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PR_NUMBER=${{ steps.pr-info.outputs.pr_number }}
-          INDEX=$(cat /tmp/genesis_index.json)
-          COMMIT_DATA=$(cat /tmp/genesis_commit.json)
-          AUTHOR=$(echo "$COMMIT_DATA" | jq -r '.author')
-          SCORE=$(echo "$INDEX" | jq -c '.score')
-          WEIGHT_DELTA=$(echo "$INDEX" | jq -r '.weightDelta')
-
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            MERGE_TYPE="quorum reached"
-          else
-            MERGE_TYPE="founder override"
+          ARGS="--pr ${{ steps.pr-info.outputs.pr_number }}"
+          if [ "${{ inputs.founder_override }}" = "true" ]; then
+            ARGS="$ARGS --founder-override"
           fi
-
-          # Wait for required checks to pass
-          gh pr checks "$PR_NUMBER" --watch --fail-fast || {
-            gh pr comment "$PR_NUMBER" --body \
-              "**JAR Bot:** Checks failed — cannot merge (${MERGE_TYPE})."
-            exit 1
-          }
-
-          # Merge synchronously (--match-head-commit ensures atomicity:
-          # GitHub rejects the merge if HEAD changed since we evaluated)
-          HEAD_SHA=$(cat /tmp/genesis_commit.json | jq -r '.id')
-          gh pr merge "$PR_NUMBER" --merge --match-head-commit "$HEAD_SHA" --subject "Merge PR #${PR_NUMBER}
-
-          Genesis-Commit: $(echo "$COMMIT_DATA" | jq -c .)
-          Genesis-Index: $(echo "$INDEX" | jq -c .)
-          Genesis-PR: #${PR_NUMBER}
-          Genesis-Author: ${AUTHOR}"
-
-          # Confirm merge actually happened (retry up to 10s for API propagation)
-          for i in 1 2 3 4 5; do
-            STATE=$(gh pr view "$PR_NUMBER" --json state --jq '.state')
-            if [ "$STATE" = "MERGED" ]; then break; fi
-            echo "Waiting for merge state propagation (attempt $i, state: $STATE)..."
-            sleep 2
-          done
-          if [ "$STATE" != "MERGED" ]; then
-            echo "ERROR: PR #$PR_NUMBER not merged (state: $STATE)" >&2
-            gh pr comment "$PR_NUMBER" --body \
-              "**JAR Bot:** Merge failed unexpectedly (state: ${STATE})."
-            exit 1
-          fi
-
-          gh pr comment "$PR_NUMBER" --body "$(printf '**JAR Bot:** Merged (%s).\nScore: %s\nWeight delta: %s' "$MERGE_TYPE" "$SCORE" "$WEIGHT_DELTA")"
-
-      - name: Update genesis-state cache
-        working-directory: spec
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          PR_NUMBER=${{ steps.pr-info.outputs.pr_number }}
-          INDEX=$(cat /tmp/genesis_index.json)
-
-          # Update genesis.json (use files to avoid ARG_MAX)
-          jq --argjson idx "$INDEX" '. + [$idx]' /tmp/genesis_cache.json > /tmp/genesis_updated.json
-
-          # Compute updated ranking from all SignedCommits in git history
-          GENESIS_COMMIT=$(grep 'def genesisCommit' Genesis/State.lean | grep -oP '"[0-9a-f]{40}"' | tr -d '"')
-          git pull origin master --ff-only
-          echo '[]' > /tmp/genesis_sc.json
-          for MERGE_HASH in $(git log --merges --reverse --format="%H" "${GENESIS_COMMIT}..HEAD"); do
-            COMMIT_LINE=$(git log -1 --format="%B" "$MERGE_HASH" | grep '^Genesis-Commit: ' | sed 's/^Genesis-Commit: //' || true)
-            if [ -n "$COMMIT_LINE" ]; then
-              COMMIT_LINE=$(echo "$COMMIT_LINE" | jq -c '
-                .id as $head | .comparisonTargets as $targets | ($targets + [$head]) as $all |
-                .reviews |= [.[] |
-                  .difficultyRanking |= [.[] | . as $h | if ($h | length) < 40 then ($all[] | select(startswith($h))) // $h else . end] |
-                  .noveltyRanking |= [.[] | . as $h | if ($h | length) < 40 then ($all[] | select(startswith($h))) // $h else . end] |
-                  .designQualityRanking |= [.[] | . as $h | if ($h | length) < 40 then ($all[] | select(startswith($h))) // $h else . end]
-                ]')
-              jq --argjson c "$COMMIT_LINE" '. + [$c]' /tmp/genesis_sc.json > /tmp/genesis_sc.tmp && mv /tmp/genesis_sc.tmp /tmp/genesis_sc.json
-            fi
-          done
-          NEW_RANKING=$(jq -n --slurpfile sc /tmp/genesis_sc.json --slurpfile idx /tmp/genesis_updated.json \
-            '{signedCommits: $sc[0], indices: $idx[0]}' | .lake/build/bin/genesis_ranking | jq -c '.ranking')
-          NEW_COMMIT_HASH=$(echo "$INDEX" | jq -r '.commitHash')
-
-          # Update ranking.json: add new entry keyed by the new commit hash
-          git show origin/genesis-state:ranking.json 2>/dev/null > /tmp/genesis_existing_ranking.json || echo '{}' > /tmp/genesis_existing_ranking.json
-          jq --arg key "$NEW_COMMIT_HASH" --argjson val "$NEW_RANKING" '. + {($key): $val}' /tmp/genesis_existing_ranking.json > /tmp/genesis_updated_ranking.json
-
-          # Push both to genesis-state
-          git fetch origin genesis-state
-          git worktree add /tmp/genesis-state origin/genesis-state
-          git -C /tmp/genesis-state checkout -B genesis-state origin/genesis-state
-          cp /tmp/genesis_updated.json /tmp/genesis-state/genesis.json
-          cp /tmp/genesis_updated_ranking.json /tmp/genesis-state/ranking.json
-          git -C /tmp/genesis-state config user.name "JAR Bot"
-          git -C /tmp/genesis-state config user.email "legal@bitarray.dev"
-          git -C /tmp/genesis-state add genesis.json ranking.json
-          git -C /tmp/genesis-state commit -m "genesis: update state for PR #${PR_NUMBER}"
-          git -C /tmp/genesis-state push origin genesis-state
-          git worktree remove /tmp/genesis-state
-
-      - name: Verify cache integrity
-        working-directory: spec
-        run: |
-          git pull origin master --ff-only
-          bash tools/genesis-replay.sh --verify-cache
+          cargo run -p jar-genesis -- workflow merge $ARGS

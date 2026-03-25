@@ -49,12 +49,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # full history needed for genesis-replay.sh
+          fetch-depth: 0  # full history needed for genesis replay
 
       - name: Install elan
         run: |
           curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
           echo "$HOME/.elan/bin" >> $GITHUB_PATH
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Cache Lake packages
         uses: actions/cache@v4
@@ -63,9 +67,10 @@ jobs:
           key: lake-genesis-${{ hashFiles('spec/lean-toolchain', 'spec/lake-manifest.json', 'spec/lakefile.lean') }}
           restore-keys: lake-genesis-
 
-      - name: Build genesis tools
-        working-directory: spec
-        run: lake build genesis_select_targets genesis_evaluate genesis_check_merge genesis_finalize genesis_validate genesis_ranking
+      - name: Build tools
+        run: |
+          cd spec && lake build genesis_select_targets genesis_evaluate genesis_check_merge genesis_finalize genesis_validate genesis_ranking
+          cargo build -p jar-genesis
 
       - name: Smoke test CLI tools
         working-directory: spec
@@ -75,5 +80,4 @@ jobs:
           echo '{"reviews":[],"metaReviews":[],"indices":[]}' | .lake/build/bin/genesis_check_merge | jq -e '.ready == false'
 
       - name: Verify genesis history
-        working-directory: spec
-        run: bash tools/genesis-replay.sh --verify
+        run: cargo run -p jar-genesis -- replay --mode verify

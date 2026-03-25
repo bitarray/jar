@@ -1,0 +1,84 @@
+[workspace]
+resolver = "3"
+members = [
+    "grey/crates/grey",
+    "grey/crates/grey-types",
+    "grey/crates/grey-codec",
+    "grey/crates/grey-crypto",
+    "grey/crates/javm",
+    "grey/crates/grey-merkle",
+    "grey/crates/grey-erasure",
+    "grey/crates/grey-state",
+    "grey/crates/grey-consensus",
+    "grey/crates/grey-services",
+    "grey/crates/grey-network",
+    "grey/crates/grey-transpiler",
+    "grey/crates/grey-store",
+    "grey/crates/grey-rpc",
+    "grey/crates/grey-bench",
+    "grey/crates/build-crate",
+    "grey/crates/build-javm",
+    "grey/crates/build-pvm",
+    "grey/harness",
+    "tools/jar-genesis",
+]
+exclude = [
+    "grey/services/sample-service",
+    "grey/services/pixels-service",
+    "grey/services/pixels-authorizer",
+    "grey/services/bench-ecrecover",
+    "spec/crypto-ffi",
+    "spec/fuzz",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = [ "Bitarray GmbH <legal@bitarray.dev>" ]
+
+[workspace.dependencies]
+# Internal crates
+grey-types = { path = "grey/crates/grey-types" }
+grey-codec = { path = "grey/crates/grey-codec" }
+grey-crypto = { path = "grey/crates/grey-crypto" }
+javm = { path = "grey/crates/javm" }
+grey-merkle = { path = "grey/crates/grey-merkle" }
+grey-erasure = { path = "grey/crates/grey-erasure" }
+grey-state = { path = "grey/crates/grey-state" }
+grey-consensus = { path = "grey/crates/grey-consensus" }
+grey-services = { path = "grey/crates/grey-services" }
+grey-network = { path = "grey/crates/grey-network" }
+grey-transpiler = { path = "grey/crates/grey-transpiler" }
+grey-store = { path = "grey/crates/grey-store" }
+grey-rpc = { path = "grey/crates/grey-rpc" }
+
+# External dependencies
+blake2 = "0.10"
+sha3 = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+thiserror = "2"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ark-vrf = { version = "0.2", features = ["bandersnatch", "ring"] }
+blst = "0.3"
+reed-solomon-simd = "3.1"
+redb = "3.1"
+tracing = "0.1"
+tracing-test = "0.2"
+tokio = { version = "1", features = ["full"] }
+libp2p = { version = "0.54", features = ["gossipsub", "noise", "tcp", "yamux", "tokio", "macros", "identify", "request-response"] }
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+async-trait = "0.1"
+jsonrpsee = { version = "0.24", features = ["server", "macros"] }
+
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.release.package.polkavm-linux-raw]
+opt-level = 0

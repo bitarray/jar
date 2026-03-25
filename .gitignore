@@ -5,8 +5,8 @@
 /spec/fuzz/target/
 /spec/tools/__pycache__/
 
-# Grey (Rust)
-/grey/target
+# Rust (workspace root)
+/target
 /grey/.cargo/
 /grey/services/*/target
 

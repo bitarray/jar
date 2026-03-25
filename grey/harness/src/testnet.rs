@@ -43,10 +43,11 @@ impl TestnetProcess {
 
     /// Find the grey binary. Checks target/debug first, then target/release.
     fn find_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        // Workspace root is the parent of the harness crate directory.
+        // Workspace root is two levels up from the harness crate directory (grey/harness/).
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let workspace_root = PathBuf::from(manifest_dir)
             .parent()
+            .and_then(|p| p.parent())
             .expect("harness must be inside workspace")
             .to_path_buf();
 

@@ -46,7 +46,7 @@ async fn main() {
         info!("building grey...");
         let status = std::process::Command::new("cargo")
             .args(["build", "-p", "grey"])
-            .current_dir(env!("CARGO_MANIFEST_DIR").to_string() + "/..")
+            .current_dir(env!("CARGO_MANIFEST_DIR").to_string() + "/../..")
             .status()
             .expect("failed to run cargo build");
         if !status.success() {
