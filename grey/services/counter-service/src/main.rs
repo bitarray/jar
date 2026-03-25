@@ -44,7 +44,7 @@ global_asm!(
     "li a1, 1",
     "addi a2, sp, 8",
     "li a3, 1",
-    "li t0, 4",              // host call ID = 4 (host_write)
+    "li t0, 5",              // host call ID = 5 (host_write, JAR v0.8.0)
     "ecall",
 
     // Write marker [0x42] to key [0x02]

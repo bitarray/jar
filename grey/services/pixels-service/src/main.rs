@@ -54,7 +54,7 @@ global_asm!(
 // Host-call wrappers (inline asm)
 // =========================================================================
 
-/// host_fetch (id=1): Fetch protocol/context data.
+/// host_fetch (id=2): Fetch protocol/context data.
 ///   a0 = buf_ptr, a1 = offset, a2 = max_len, a3 = mode, a4 = sub1, a5 = sub2
 /// Returns: a0 = total data length, or u32::MAX (NONE).
 #[inline(always)]
@@ -68,7 +68,7 @@ unsafe fn host_fetch(
 ) -> u32 {
     let result: u32;
     core::arch::asm!(
-        "li t0, 1",
+        "li t0, 2",
         "ecall",
         in("a0") buf_ptr as usize,
         in("a1") offset,
@@ -83,7 +83,7 @@ unsafe fn host_fetch(
     result
 }
 
-/// host_read (id=3): Read from service storage.
+/// host_read (id=4): Read from service storage.
 ///   a0 = service_id (u32::MAX = own service), a1 = key_ptr, a2 = key_len,
 ///   a3 = out_ptr, a4 = offset, a5 = max_len
 /// Returns: a0 = value length, or u32::MAX (NONE).
@@ -98,7 +98,7 @@ unsafe fn host_read(
 ) -> u32 {
     let result: u32;
     core::arch::asm!(
-        "li t0, 3",
+        "li t0, 4",
         "ecall",
         in("a0") service_id,
         in("a1") key_ptr as usize,
@@ -113,7 +113,7 @@ unsafe fn host_read(
     result
 }
 
-/// host_write (id=4): Write to current service's storage.
+/// host_write (id=5): Write to current service's storage.
 ///   a0 = key_ptr, a1 = key_len, a2 = val_ptr, a3 = val_len
 /// Returns: a0 = OK (0) or error.
 #[inline(always)]
@@ -125,7 +125,7 @@ unsafe fn host_write(
 ) -> u32 {
     let result: u32;
     core::arch::asm!(
-        "li t0, 4",
+        "li t0, 5",
         "ecall",
         in("a0") key_ptr as usize,
         in("a1") key_len,
