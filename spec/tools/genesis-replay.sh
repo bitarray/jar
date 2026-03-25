@@ -17,6 +17,13 @@ set -euo pipefail
 
 MODE="${1:---verify}"
 
+# Temp files for accumulating large JSON (avoids ARG_MAX limits with --argjson)
+TMPDIR_REPLAY=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_REPLAY"' EXIT
+TMP_COMMITS="$TMPDIR_REPLAY/commits.json"
+TMP_INDICES="$TMPDIR_REPLAY/indices.json"
+TMP_RANKING="$TMPDIR_REPLAY/ranking.json"
+
 # Read genesis commit from the Lean spec
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GENESIS_COMMIT=$(grep 'def genesisCommit' "$SCRIPT_DIR/../Genesis/State.lean" | grep -oP '"[0-9a-f]{40}"' | tr -d '"')
@@ -29,8 +36,10 @@ fi
 # Collect all merge commits after genesis
 MERGE_COMMITS=$(git log --merges --reverse --format="%H" "${GENESIS_COMMIT}..HEAD")
 
-SIGNED_COMMITS="[]"
-STORED_INDICES="[]"
+TMP_SIGNED="$TMPDIR_REPLAY/signed_commits.json"
+TMP_STORED="$TMPDIR_REPLAY/stored_indices.json"
+echo '[]' > "$TMP_SIGNED"
+echo '[]' > "$TMP_STORED"
 
 for MERGE_HASH in $MERGE_COMMITS; do
   MSG=$(git log -1 --format="%B" "$MERGE_HASH")
@@ -46,7 +55,7 @@ for MERGE_HASH in $MERGE_COMMITS; do
 
   if [ -z "$COMMIT_LINE" ]; then
     echo "WARNING: No Genesis-Commit trailer for merge $MERGE_HASH. Cannot replay." >&2
-    STORED_INDICES=$(echo "$STORED_INDICES" | jq --argjson idx "$INDEX_LINE" '. + [$idx]')
+    jq --argjson idx "$INDEX_LINE" '. + [$idx]' "$TMP_STORED" > "$TMP_STORED.tmp" && mv "$TMP_STORED.tmp" "$TMP_STORED"
     continue
   fi
 
@@ -65,82 +74,80 @@ for MERGE_HASH in $MERGE_COMMITS; do
         if ($h | length) < 40 then ($all[] | select(startswith($h))) // $h else . end]
     ]')
 
-  SIGNED_COMMITS=$(echo "$SIGNED_COMMITS" | jq --argjson c "$COMMIT_LINE" '. + [$c]')
-  STORED_INDICES=$(echo "$STORED_INDICES" | jq --argjson idx "$INDEX_LINE" '. + [$idx]')
+  jq --argjson c "$COMMIT_LINE" '. + [$c]' "$TMP_SIGNED" > "$TMP_SIGNED.tmp" && mv "$TMP_SIGNED.tmp" "$TMP_SIGNED"
+  jq --argjson idx "$INDEX_LINE" '. + [$idx]' "$TMP_STORED" > "$TMP_STORED.tmp" && mv "$TMP_STORED.tmp" "$TMP_STORED"
 done
 
+SIGNED_COMMITS=$(cat "$TMP_SIGNED")
+STORED_INDICES=$(cat "$TMP_STORED")
 TOTAL=$(echo "$STORED_INDICES" | jq 'length')
 REPLAYABLE=$(echo "$SIGNED_COMMITS" | jq 'length')
 
 if [ "$MODE" = "--rebuild" ]; then
-  REBUILT="[]"
-  RANKING_MAP="{}"
-  COMMITS_SO_FAR="[]"
+  echo '[]' > "$TMP_INDICES"
+  echo '{}' > "$TMP_RANKING"
+  echo '[]' > "$TMP_COMMITS"
   for i in $(seq 0 $((REPLAYABLE - 1))); do
     COMMIT=$(echo "$SIGNED_COMMITS" | jq -c ".[$i]")
-    # Look up ranking snapshot from the latest prior commit
     PR_CREATED_AT=$(echo "$COMMIT" | jq -r '.prCreatedAt // .mergeEpoch')
-    RANKING_SNAPSHOT=$(echo "$REBUILT" | jq -c --argjson epoch "$PR_CREATED_AT" --argjson ranking "$RANKING_MAP" '
+    RANKING_SNAPSHOT=$(jq -c --argjson epoch "$PR_CREATED_AT" --slurpfile ranking "$TMP_RANKING" '
       [.[] | select(.epoch < $epoch)] | last | .commitHash // empty |
-      . as $hash | $ranking[$hash] // empty
-    ')
+      . as $hash | $ranking[0][$hash] // empty
+    ' "$TMP_INDICES")
     if [ -z "$RANKING_SNAPSHOT" ] || [ "$RANKING_SNAPSHOT" = "null" ]; then
       RANKING_SNAPSHOT="null"
     fi
-    INPUT=$(jq -n --argjson commit "$COMMIT" --argjson pastIndices "$REBUILT" \
+    INPUT=$(jq -n --argjson commit "$COMMIT" --slurpfile pastIndices "$TMP_INDICES" \
       --argjson ranking "$RANKING_SNAPSHOT" \
-      'if $ranking == null then {commit: $commit, pastIndices: $pastIndices}
-       else {commit: $commit, pastIndices: $pastIndices, ranking: $ranking} end')
+      'if $ranking == null then {commit: $commit, pastIndices: $pastIndices[0]}
+       else {commit: $commit, pastIndices: $pastIndices[0], ranking: $ranking} end')
     INDEX=$(echo "$INPUT" | .lake/build/bin/genesis_evaluate)
-    REBUILT=$(echo "$REBUILT" | jq --argjson idx "$INDEX" '. + [$idx]')
-    # Compute ranking snapshot at this point
-    COMMITS_SO_FAR=$(echo "$COMMITS_SO_FAR" | jq --argjson c "$COMMIT" '. + [$c]')
-    SNAPSHOT=$(jq -n --argjson sc "$COMMITS_SO_FAR" --argjson idx "$REBUILT" \
-      '{signedCommits: $sc, indices: $idx}' | .lake/build/bin/genesis_ranking | jq -c '.ranking')
+    jq --argjson idx "$INDEX" '. + [$idx]' "$TMP_INDICES" > "$TMP_INDICES.tmp" && mv "$TMP_INDICES.tmp" "$TMP_INDICES"
+    jq --argjson c "$COMMIT" '. + [$c]' "$TMP_COMMITS" > "$TMP_COMMITS.tmp" && mv "$TMP_COMMITS.tmp" "$TMP_COMMITS"
+    SNAPSHOT=$(jq -n --slurpfile sc "$TMP_COMMITS" --slurpfile idx "$TMP_INDICES" \
+      '{signedCommits: $sc[0], indices: $idx[0]}' | .lake/build/bin/genesis_ranking | jq -c '.ranking')
     COMMIT_HASH=$(echo "$INDEX" | jq -r '.commitHash')
-    RANKING_MAP=$(echo "$RANKING_MAP" | jq --arg key "$COMMIT_HASH" --argjson val "$SNAPSHOT" '. + {($key): $val}')
+    jq --arg key "$COMMIT_HASH" --argjson val "$SNAPSHOT" '. + {($key): $val}' "$TMP_RANKING" > "$TMP_RANKING.tmp" && mv "$TMP_RANKING.tmp" "$TMP_RANKING"
   done
   echo "=== genesis.json ===" >&2
-  echo "$REBUILT" | jq .
+  jq . "$TMP_INDICES"
   echo "=== ranking.json ===" >&2
-  echo "$RANKING_MAP" | jq .
+  jq . "$TMP_RANKING"
   echo "Rebuilt $REPLAYABLE of $TOTAL indices." >&2
 
 elif [ "$MODE" = "--verify" ]; then
   # Compute ranking map incrementally for v2 target validation
-  RANKING_MAP="{}"
-  VERIFY_COMMITS_SO_FAR="[]"
-  VERIFY_REBUILT="[]"
+  echo '[]' > "$TMP_INDICES"
+  echo '{}' > "$TMP_RANKING"
+  echo '[]' > "$TMP_COMMITS"
   for i in $(seq 0 $((REPLAYABLE - 1))); do
     COMMIT=$(echo "$SIGNED_COMMITS" | jq -c ".[$i]")
-    # Look up ranking snapshot from the latest prior commit
     PR_CREATED_AT=$(echo "$COMMIT" | jq -r '.prCreatedAt // .mergeEpoch')
-    RANKING_SNAPSHOT=$(echo "$VERIFY_REBUILT" | jq -c --argjson epoch "$PR_CREATED_AT" --argjson ranking "$RANKING_MAP" '
+    RANKING_SNAPSHOT=$(jq -c --argjson epoch "$PR_CREATED_AT" --slurpfile ranking "$TMP_RANKING" '
       [.[] | select(.epoch < $epoch)] | last | .commitHash // empty |
-      . as $hash | $ranking[$hash] // empty
-    ')
+      . as $hash | $ranking[0][$hash] // empty
+    ' "$TMP_INDICES")
     if [ -z "$RANKING_SNAPSHOT" ] || [ "$RANKING_SNAPSHOT" = "null" ]; then
       RANKING_SNAPSHOT="null"
     fi
-    # Rebuild index for this commit (needed for ranking computation)
-    VERIFY_INPUT=$(jq -n --argjson commit "$COMMIT" --argjson pastIndices "$VERIFY_REBUILT" \
+    INPUT=$(jq -n --argjson commit "$COMMIT" --slurpfile pastIndices "$TMP_INDICES" \
       --argjson ranking "$RANKING_SNAPSHOT" \
-      'if $ranking == null then {commit: $commit, pastIndices: $pastIndices}
-       else {commit: $commit, pastIndices: $pastIndices, ranking: $ranking} end')
-    VERIFY_INDEX=$(echo "$VERIFY_INPUT" | .lake/build/bin/genesis_evaluate)
-    VERIFY_REBUILT=$(echo "$VERIFY_REBUILT" | jq --argjson idx "$VERIFY_INDEX" '. + [$idx]')
-    VERIFY_COMMITS_SO_FAR=$(echo "$VERIFY_COMMITS_SO_FAR" | jq --argjson c "$COMMIT" '. + [$c]')
-    SNAPSHOT=$(jq -n --argjson sc "$VERIFY_COMMITS_SO_FAR" --argjson idx "$VERIFY_REBUILT" \
-      '{signedCommits: $sc, indices: $idx}' | .lake/build/bin/genesis_ranking | jq -c '.ranking')
+      'if $ranking == null then {commit: $commit, pastIndices: $pastIndices[0]}
+       else {commit: $commit, pastIndices: $pastIndices[0], ranking: $ranking} end')
+    VERIFY_INDEX=$(echo "$INPUT" | .lake/build/bin/genesis_evaluate)
+    jq --argjson idx "$VERIFY_INDEX" '. + [$idx]' "$TMP_INDICES" > "$TMP_INDICES.tmp" && mv "$TMP_INDICES.tmp" "$TMP_INDICES"
+    jq --argjson c "$COMMIT" '. + [$c]' "$TMP_COMMITS" > "$TMP_COMMITS.tmp" && mv "$TMP_COMMITS.tmp" "$TMP_COMMITS"
+    SNAPSHOT=$(jq -n --slurpfile sc "$TMP_COMMITS" --slurpfile idx "$TMP_INDICES" \
+      '{signedCommits: $sc[0], indices: $idx[0]}' | .lake/build/bin/genesis_ranking | jq -c '.ranking')
     COMMIT_HASH=$(echo "$VERIFY_INDEX" | jq -r '.commitHash')
-    RANKING_MAP=$(echo "$RANKING_MAP" | jq --arg key "$COMMIT_HASH" --argjson val "$SNAPSHOT" '. + {($key): $val}')
+    jq --arg key "$COMMIT_HASH" --argjson val "$SNAPSHOT" '. + {($key): $val}' "$TMP_RANKING" > "$TMP_RANKING.tmp" && mv "$TMP_RANKING.tmp" "$TMP_RANKING"
   done
 
   INPUT=$(jq -n \
-    --argjson indices "$STORED_INDICES" \
-    --argjson signedCommits "$SIGNED_COMMITS" \
-    --argjson rankings "$RANKING_MAP" \
-    '{indices: $indices, signedCommits: $signedCommits, rankings: $rankings}')
+    --slurpfile indices "$TMP_STORED" \
+    --slurpfile signedCommits "$TMP_SIGNED" \
+    --slurpfile rankings "$TMP_RANKING" \
+    '{indices: $indices[0], signedCommits: $signedCommits[0], rankings: $rankings[0]}')
   RESULT=$(echo "$INPUT" | .lake/build/bin/genesis_validate)
   echo "$RESULT" | jq .
   VALID=$(echo "$RESULT" | jq -r '.valid')
@@ -154,32 +161,30 @@ elif [ "$MODE" = "--verify" ]; then
 
 elif [ "$MODE" = "--verify-cache" ]; then
   # Rebuild from git history, then compare against genesis-state branch cache
-  REBUILT="[]"
-  RANKING_MAP="{}"
-  COMMITS_SO_FAR="[]"
+  echo '[]' > "$TMP_INDICES"
+  echo '{}' > "$TMP_RANKING"
+  echo '[]' > "$TMP_COMMITS"
   for i in $(seq 0 $((REPLAYABLE - 1))); do
     COMMIT=$(echo "$SIGNED_COMMITS" | jq -c ".[$i]")
-    # Look up ranking snapshot from the latest prior commit
     PR_CREATED_AT=$(echo "$COMMIT" | jq -r '.prCreatedAt // .mergeEpoch')
-    RANKING_SNAPSHOT=$(echo "$REBUILT" | jq -c --argjson epoch "$PR_CREATED_AT" --argjson ranking "$RANKING_MAP" '
+    RANKING_SNAPSHOT=$(jq -c --argjson epoch "$PR_CREATED_AT" --slurpfile ranking "$TMP_RANKING" '
       [.[] | select(.epoch < $epoch)] | last | .commitHash // empty |
-      . as $hash | $ranking[$hash] // empty
-    ')
+      . as $hash | $ranking[0][$hash] // empty
+    ' "$TMP_INDICES")
     if [ -z "$RANKING_SNAPSHOT" ] || [ "$RANKING_SNAPSHOT" = "null" ]; then
       RANKING_SNAPSHOT="null"
     fi
-    INPUT=$(jq -n --argjson commit "$COMMIT" --argjson pastIndices "$REBUILT" \
+    INPUT=$(jq -n --argjson commit "$COMMIT" --slurpfile pastIndices "$TMP_INDICES" \
       --argjson ranking "$RANKING_SNAPSHOT" \
-      'if $ranking == null then {commit: $commit, pastIndices: $pastIndices}
-       else {commit: $commit, pastIndices: $pastIndices, ranking: $ranking} end')
+      'if $ranking == null then {commit: $commit, pastIndices: $pastIndices[0]}
+       else {commit: $commit, pastIndices: $pastIndices[0], ranking: $ranking} end')
     INDEX=$(echo "$INPUT" | .lake/build/bin/genesis_evaluate)
-    REBUILT=$(echo "$REBUILT" | jq --argjson idx "$INDEX" '. + [$idx]')
-    # Compute ranking snapshot
-    COMMITS_SO_FAR=$(echo "$COMMITS_SO_FAR" | jq --argjson c "$COMMIT" '. + [$c]')
-    SNAPSHOT=$(jq -n --argjson sc "$COMMITS_SO_FAR" --argjson idx "$REBUILT" \
-      '{signedCommits: $sc, indices: $idx}' | .lake/build/bin/genesis_ranking | jq -c '.ranking')
+    jq --argjson idx "$INDEX" '. + [$idx]' "$TMP_INDICES" > "$TMP_INDICES.tmp" && mv "$TMP_INDICES.tmp" "$TMP_INDICES"
+    jq --argjson c "$COMMIT" '. + [$c]' "$TMP_COMMITS" > "$TMP_COMMITS.tmp" && mv "$TMP_COMMITS.tmp" "$TMP_COMMITS"
+    SNAPSHOT=$(jq -n --slurpfile sc "$TMP_COMMITS" --slurpfile idx "$TMP_INDICES" \
+      '{signedCommits: $sc[0], indices: $idx[0]}' | .lake/build/bin/genesis_ranking | jq -c '.ranking')
     COMMIT_HASH=$(echo "$INDEX" | jq -r '.commitHash')
-    RANKING_MAP=$(echo "$RANKING_MAP" | jq --arg key "$COMMIT_HASH" --argjson val "$SNAPSHOT" '. + {($key): $val}')
+    jq --arg key "$COMMIT_HASH" --argjson val "$SNAPSHOT" '. + {($key): $val}' "$TMP_RANKING" > "$TMP_RANKING.tmp" && mv "$TMP_RANKING.tmp" "$TMP_RANKING"
   done
 
   # Fetch cache from genesis-state branch
@@ -187,7 +192,7 @@ elif [ "$MODE" = "--verify-cache" ]; then
   CACHE=$(git show origin/genesis-state:genesis.json 2>/dev/null || echo "[]")
 
   CACHE_LEN=$(echo "$CACHE" | jq 'length')
-  REBUILT_LEN=$(echo "$REBUILT" | jq 'length')
+  REBUILT_LEN=$(jq 'length' "$TMP_INDICES")
 
   if [ "$REBUILT_LEN" -ne "$CACHE_LEN" ]; then
     echo "MISMATCH: rebuilt $REBUILT_LEN indices but cache has $CACHE_LEN." >&2
@@ -196,7 +201,7 @@ elif [ "$MODE" = "--verify-cache" ]; then
 
   ERRORS=0
   for i in $(seq 0 $((REBUILT_LEN - 1))); do
-    R=$(echo "$REBUILT" | jq -c ".[$i]")
+    R=$(jq -c ".[$i]" "$TMP_INDICES")
     C=$(echo "$CACHE" | jq -c ".[$i]")
     if [ "$R" != "$C" ]; then
       R_HASH=$(echo "$R" | jq -r '.commitHash')
@@ -210,16 +215,15 @@ elif [ "$MODE" = "--verify-cache" ]; then
   # Verify ranking.json
   CACHED_RANKING=$(git show origin/genesis-state:ranking.json 2>/dev/null || echo '{}')
   CACHED_RANKING_KEYS=$(echo "$CACHED_RANKING" | jq -r 'keys | length')
-  REBUILT_RANKING_KEYS=$(echo "$RANKING_MAP" | jq -r 'keys | length')
+  REBUILT_RANKING_KEYS=$(jq -r 'keys | length' "$TMP_RANKING")
 
   if [ "$CACHED_RANKING_KEYS" != "0" ]; then
-    # Only verify if ranking.json exists and is non-empty
     if [ "$REBUILT_RANKING_KEYS" -ne "$CACHED_RANKING_KEYS" ]; then
       echo "RANKING MISMATCH: rebuilt $REBUILT_RANKING_KEYS entries but cache has $CACHED_RANKING_KEYS." >&2
       ERRORS=$((ERRORS + 1))
     else
-      for KEY in $(echo "$RANKING_MAP" | jq -r 'keys[]'); do
-        R=$(echo "$RANKING_MAP" | jq -c --arg k "$KEY" '.[$k]')
+      for KEY in $(jq -r 'keys[]' "$TMP_RANKING"); do
+        R=$(jq -c --arg k "$KEY" '.[$k]' "$TMP_RANKING")
         C=$(echo "$CACHED_RANKING" | jq -c --arg k "$KEY" '.[$k]')
         if [ "$R" != "$C" ]; then
           echo "RANKING MISMATCH for commit ${KEY:0:8}:" >&2
