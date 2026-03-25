@@ -136,6 +136,7 @@ jobs:
           COLLECTED=$(bash tools/genesis-collect-reviews.sh "$PR_NUMBER" "$HEAD_SHA" "$TARGETS")
           REVIEWS=$(echo "$COLLECTED" | jq '.reviews')
           META_REVIEWS=$(echo "$COLLECTED" | jq '.metaReviews')
+          COLLECT_WARNINGS=$(echo "$COLLECTED" | jq -r '.warnings[]' 2>/dev/null || true)
 
           # Build signed commit
           EPOCH=$(date +%s)
@@ -170,9 +171,19 @@ jobs:
 
           SCORE=$(echo "$INDEX" | jq -c '.score')
           WEIGHT_DELTA=$(echo "$INDEX" | jq -r '.weightDelta')
+          EVAL_WARNINGS=$(echo "$INDEX" | jq -r '.warnings[]' 2>/dev/null || true)
 
-          # Save for merge step
-          echo "$INDEX" > /tmp/genesis_index.json
+          # Surface any warnings from collection or evaluation
+          ALL_WARNINGS="${COLLECT_WARNINGS}${COLLECT_WARNINGS:+$'\n'}${EVAL_WARNINGS}"
+          ALL_WARNINGS=$(echo "$ALL_WARNINGS" | sed '/^$/d')
+          if [ -n "$ALL_WARNINGS" ]; then
+            WARNING_BODY=$(echo "$ALL_WARNINGS" | sed 's/^/- /')
+            gh pr comment "$PR_NUMBER" --body "**JAR Bot:** Evaluation warnings:
+          ${WARNING_BODY}"
+          fi
+
+          # Save for merge step (strip warnings from INDEX for trailer)
+          echo "$INDEX" | jq 'del(.warnings)' > /tmp/genesis_index.json
           echo "$COMMIT_JSON" > /tmp/genesis_commit.json
 
       - name: Wait for checks and merge

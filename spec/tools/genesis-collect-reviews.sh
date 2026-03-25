@@ -21,9 +21,17 @@ REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner --jq '.nameWithOw
 
 to_json_array() { echo "$1" | tr ',' '\n' | jq -R . | jq -s .; }
 
+WARNINGS="[]"
+add_warning() {
+  WARNINGS=$(echo "$WARNINGS" | jq --arg w "$1" '. + [$w]')
+}
+
 # Expand short hashes to full hashes using TARGETS_JSON and HEAD_SHA.
+# Warns if a short hash cannot be expanded.
 expand_hashes() {
   local CSV="$1"
+  local DIM="$2"      # dimension name for warnings
+  local REVIEWER="$3"  # reviewer name for warnings
   local RESULT=""
   local FIRST=true
   for HASH in $(echo "$CSV" | tr ',' ' '); do
@@ -35,6 +43,8 @@ expand_hashes() {
         local MATCH=$(echo "$TARGETS_JSON" | jq -r --arg h "$HASH" '.[] | select(startswith($h))' | head -1)
         if [ -n "$MATCH" ]; then
           EXPANDED="$MATCH"
+        else
+          add_warning "reviewer ${REVIEWER}: ${DIM} contains unexpanded hash '${HASH}' (not in comparison targets)"
         fi
       fi
     fi
@@ -66,9 +76,19 @@ parse_review() {
     local DES="$RAW_DES"
   fi
   # Expand short hashes to full hashes
-  DIFF=$(expand_hashes "$DIFF")
-  NOV=$(expand_hashes "$NOV")
-  DES=$(expand_hashes "$DES")
+  DIFF=$(expand_hashes "$DIFF" "difficulty" "$AUTHOR")
+  NOV=$(expand_hashes "$NOV" "novelty" "$AUTHOR")
+  DES=$(expand_hashes "$DES" "design" "$AUTHOR")
+  # Check ranking counts: should be len(targets) + 1 (for currentPR)
+  local EXPECTED_COUNT=$(echo "$TARGETS_JSON" | jq 'length + 1')
+  for DIM_NAME in difficulty novelty design; do
+    local DIM_VAL
+    case "$DIM_NAME" in difficulty) DIM_VAL="$DIFF";; novelty) DIM_VAL="$NOV";; design) DIM_VAL="$DES";; esac
+    local ACTUAL_COUNT=$(echo "$DIM_VAL" | tr ',' '\n' | grep -c '.')
+    if [ "$ACTUAL_COUNT" -ne "$EXPECTED_COUNT" ]; then
+      add_warning "reviewer ${AUTHOR}: ${DIM_NAME} ranking has ${ACTUAL_COUNT} entries, expected ${EXPECTED_COUNT}"
+    fi
+  done
   if [ -n "$DIFF" ] && [ -n "$NOV" ] && [ -n "$DES" ] && [ -n "$VERD" ]; then
     jq -n \
       --arg reviewer "$AUTHOR" \
@@ -146,4 +166,5 @@ done
 jq -n \
   --argjson reviews "$REVIEWS" \
   --argjson metaReviews "$META_REVIEWS" \
-  '{reviews: $reviews, metaReviews: $metaReviews}'
+  --argjson warnings "$WARNINGS" \
+  '{reviews: $reviews, metaReviews: $metaReviews, warnings: $warnings}'
