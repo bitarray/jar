@@ -158,6 +158,8 @@ pub struct Compiler {
     pub asm: Assembler,
     /// PVM PC → native code label (Label(0) = invalid/unset).
     block_labels: Vec<Label>,
+    /// PCs that have labels assigned (for fast dispatch table construction).
+    labeled_pcs: Vec<u32>,
     /// Label for the exit sequence.
     exit_label: Label,
     /// Label for the shared out-of-gas exit (sets EXIT_OOG + jumps to exit).
@@ -215,6 +217,7 @@ impl Compiler {
         let oog_pc_label = asm.new_label();
         Self {
             block_labels: vec![NO_LABEL; code_len + 1],
+            labeled_pcs: Vec::with_capacity(code_len / 4),
             asm,
             exit_label,
             oog_label,
@@ -243,6 +246,7 @@ impl Compiler {
         } else {
             let l = self.asm.new_label();
             self.block_labels[idx] = l;
+            self.labeled_pcs.push(pc);
             l
         }
     }
@@ -374,15 +378,13 @@ impl Compiler {
         self.emit_exit_sequences();
 
         // Build dispatch table: PVM PC → native code offset.
-        // Use 0 as invalid sentinel (zero-init via OS zeroed pages).
-        // Valid entries are always > 0 since the prologue precedes all basic blocks.
-        let table_len = code_len + 1; // +1 so PC=code.len() is valid (maps to panic)
+        // Only iterate PCs that have labels (tracked by labeled_pcs), not all code bytes.
+        let table_len = code_len + 1;
         let mut dispatch_table = vec![0i32; table_len];
-        for (pvm_pc, &label) in self.block_labels.iter().enumerate() {
-            if label != NO_LABEL {
-                if let Some(offset) = self.asm.label_offset(label) {
-                    dispatch_table[pvm_pc] = offset as i32;
-                }
+        for &pvm_pc in &self.labeled_pcs {
+            let label = self.block_labels[pvm_pc as usize];
+            if let Some(offset) = self.asm.label_offset(label) {
+                dispatch_table[pvm_pc as usize] = offset as i32;
             }
         }
         // PC=0 must always be valid (program start); if not already set, it'll be
