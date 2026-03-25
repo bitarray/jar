@@ -626,10 +626,7 @@ fn run_accumulate_pvm(
     let mut _host_call_count = 0u32;
 
     loop {
-        let gas_before = pvm.gas();
         let exit_reason = pvm.run();
-        let gas_after = pvm.gas();
-        eprintln!("exit={:?} pc={} gas_consumed={} remaining={}", exit_reason, pvm.pc(), gas_before - gas_after, gas_after);
 
         match exit_reason {
             ExitReason::Halt => {
@@ -766,8 +763,6 @@ fn host_grow_heap(pvm: &mut PvmInstance) -> bool {
     let desired = pvm.reg(7);
     let ps = javm::PVM_PAGE_SIZE;
     let current_pages = (pvm.heap_top() as u64 + ps as u64 - 1) / ps as u64;
-    eprintln!("grow_heap: desired={} current_pages={} heap_top={}", desired, current_pages, pvm.heap_top());
-
     if desired <= current_pages || desired > (1u64 << 32) / ps as u64 {
         // No-op: already at or beyond desired, or exceeds address space
         pvm.set_reg(7, current_pages);
@@ -2153,10 +2148,6 @@ fn accumulate_all(
 
     // GP: n = |t| + i + |f| — total items to process
     let n = transfers.len() + max_reports + privileges.always_acc.len();
-    if timeslot == 24 {
-        eprintln!("acc_all t=24: budget={gas_budget} reports={max_reports}/{} xfers={} always={} n={n}",
-            reports.len(), transfers.len(), privileges.always_acc.len());
-    }
     let _ = &transfers;
     if n == 0 {
         return (0, accounts.clone(), vec![], vec![], privileges.clone(), None, None);
@@ -2242,21 +2233,7 @@ pub fn process_accumulate(
         .iter()
         .flat_map(|slot_hashes| slot_hashes.iter().cloned())
         .collect();
-    eprintln!("accumulated_union: {} hashes", accumulated_union.len());
-    for h in accumulated_union.iter().take(5) {
-        eprintln!("  {}", hex::encode(&h.0[..8]));
-    }
     let edited_new_queued = edit_queue(&new_queued, &accumulated_union);
-    eprintln!("new_queued: {} entries, edited: {}", new_queued.len(), edited_new_queued.len());
-    for rr in &new_queued {
-        eprintln!("  new_queued deps: {}", rr.dependencies.len());
-        for d in &rr.dependencies {
-            eprintln!("    dep: {}", hex::encode(&d.0[..8]));
-        }
-    }
-    for rr in &edited_new_queued {
-        eprintln!("  edited_new deps: {}", rr.dependencies.len());
-    }
 
     // Step 2: Compute R* (all accumulatable reports)
     let accumulatable = compute_accumulatable_with_new(
