@@ -7,7 +7,7 @@ import Jar.PVM.Interpreter
 import Jar.PVM.Memory
 
 /-!
-# Services — §9, §12, §14
+# Services — §8, §9, §12, §14
 
 Service account model, accumulation, refinement, and the work pipeline.
 References: `graypaper/text/accounts.tex`, `graypaper/text/accumulation.tex`,

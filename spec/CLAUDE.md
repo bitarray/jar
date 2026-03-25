@@ -42,7 +42,7 @@ lake build genesis_select_targets genesis_evaluate genesis_check_merge genesis_f
 | `Jar.Merkle` | Appendix D–E | Merkle trees and tries for state commitment |
 | `Jar.Erasure` | Appendix H | Reed-Solomon erasure coding (GF(2^16), Cantor basis FFT) |
 | `Jar.Consensus` | §6, §19 | Safrole block production, GRANDPA finalization |
-| `Jar.Services` | §9, §12, §14 | Service accounts, authorization, refinement, work reports |
+| `Jar.Services` | §8, §9, §12, §14 | Service accounts, authorization, refinement, work reports |
 | `Jar.Accumulation` | §12 | On-chain accumulation: host calls Ω_0–Ω_26, gas tracking |
 | `Jar.State` | §4–13 | Block-level state transition Υ(σ, B) = σ' |
 | `Jar.Json` | — | ToJson/FromJson instances for all types (hex-encoded byte data) |
