@@ -345,13 +345,13 @@ impl TranslationContext {
             let pvm_rs1 = self.require_reg(rs1)?;
             self.emit_inst(50); // jump_ind
             self.emit_data(pvm_rs1);
-            self.emit_imm32(0);
+            self.emit_var_imm(0);
         } else {
             // General JALR — uncommon without auipc pairing
             let pvm_rs1 = self.require_reg(rs1)?;
             self.emit_inst(50); // jump_ind
             self.emit_data(pvm_rs1);
-            self.emit_imm32(imm);
+            self.emit_var_imm(imm);
         }
         Ok(())
     }
@@ -653,7 +653,7 @@ impl TranslationContext {
             let neg_op = if self.is_64bit { 154 } else { 141 }; // neg_add_imm_64/32
             self.emit_inst(neg_op);
             self.emit_data(pvm_rd | (pvm_rs2 << 4));
-            self.emit_imm32(0);
+            self.emit_var_imm(0);
             return Ok(());
         }
         // Handle remaining x0 source cases
@@ -684,7 +684,7 @@ impl TranslationContext {
                     }
                     self.emit_inst(148); // cmov_nz_imm: if rs2 != 0 then rd = imm
                     self.emit_data(pvm_rd | (pvm_rs2 << 4));
-                    self.emit_imm32(1);
+                    self.emit_var_imm(1);
                     return Ok(());
                 }
                 (1, _) => {
@@ -708,7 +708,7 @@ impl TranslationContext {
                     let pvm_opcode = if funct3 == 2 { 137 } else { 136 };
                     self.emit_inst(pvm_opcode);
                     self.emit_data(pvm_rd | (pvm_rs1 << 4));
-                    self.emit_imm32(0);
+                    self.emit_var_imm(0);
                     return Ok(());
                 }
                 (0x20, 0) | (0, 4) | (0, 6) => {
@@ -964,7 +964,7 @@ impl TranslationContext {
             // load_imm (opcode 51)
             self.emit_inst(51);
             self.emit_data(pvm_rd);
-            self.emit_imm32(imm as i32);
+            self.emit_var_imm(imm as i32);
         } else {
             // load_imm_64 (opcode 20)
             self.emit_inst(20);
@@ -1002,7 +1002,7 @@ impl TranslationContext {
 
     pub(crate) fn emit_ecalli(&mut self, id: u32) {
         self.emit_inst(10);
-        self.emit_imm32(id as i32);
+        self.emit_var_imm(id as i32);
     }
 
     /// Emit a OneRegImmOffset instruction (used by branch_*_imm opcodes).
