@@ -25,6 +25,29 @@ fn git(args: &[&str]) -> Result<String, GitError> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Run a git command (public wrapper). Returns stdout.
+pub fn git_cmd(args: &[&str]) -> Result<String, GitError> {
+    git(args)
+}
+
+/// Run a git command in a specific directory. Returns stdout.
+pub fn git_cmd_in(dir: &str, args: &[&str]) -> Result<String, GitError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(GitError::CommandFailed(format!(
+            "git -C {dir} {} failed: {}",
+            args.join(" "),
+            stderr.trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 /// Get merge commits from genesis_commit..HEAD, oldest first.
 /// Returns (hash, full commit message) pairs.
 pub fn log_merge_commits(genesis_commit: &str) -> Result<Vec<(String, String)>, GitError> {
