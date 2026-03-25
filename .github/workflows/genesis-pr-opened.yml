@@ -51,6 +51,10 @@ jobs:
           git fetch origin genesis-state
           git show origin/genesis-state:genesis.json > /tmp/genesis_cache.json
           git show origin/genesis-state:ranking.json 2>/dev/null > /tmp/genesis_ranking.json || echo '{}' > /tmp/genesis_ranking.json
+
+          # Verify cache is not stale
+          bash tools/genesis-check-cache.sh /tmp/genesis_cache.json
+
           PR_ID=${{ github.event.pull_request.number }}
           PR_CREATED_AT="${{ github.event.pull_request.created_at }}"
           PR_CREATED_EPOCH=$(date -d "$PR_CREATED_AT" +%s)

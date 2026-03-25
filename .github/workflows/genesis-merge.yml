@@ -88,6 +88,12 @@ jobs:
           git show origin/genesis-state:genesis.json > /tmp/genesis_cache.json
           git show origin/genesis-state:ranking.json 2>/dev/null > /tmp/genesis_ranking_cache.json || echo '{}' > /tmp/genesis_ranking_cache.json
 
+          # Verify cache is not stale
+          if ! bash tools/genesis-check-cache.sh /tmp/genesis_cache.json; then
+            gh pr comment "$PR_NUMBER" --body "**JAR Bot:** Genesis cache is stale — cannot merge. A prior merge may have failed to update the cache."
+            exit 1
+          fi
+
           # Get PR details (including immutable created_at for target anchoring)
           PR_JSON=$(gh pr view "$PR_NUMBER" --json headRefOid,author,createdAt,body)
           HEAD_SHA=$(echo "$PR_JSON" | jq -r '.headRefOid')
