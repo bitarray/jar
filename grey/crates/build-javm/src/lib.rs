@@ -51,12 +51,15 @@ pub fn build_service(manifest_dir: &str, bin_name: &str) -> PathBuf {
     let resolved = build_crate::resolve_manifest_dir(manifest_dir);
     let target_json_path = build_crate::write_target_json("riscv64em-javm.json", TARGET_JSON);
 
+    let extra_rustflags = vec![
+        "-Cllvm-args=--inline-threshold=275".to_string(),
+    ];
     let guest = GuestBuild {
         manifest_dir: resolved,
         target_json_path,
         target_dir_name: TARGET_NAME.to_string(),
         build_kind: BuildKind::Bin(bin_name.to_string()),
-        extra_rustflags: vec![],
+        extra_rustflags,
         env_overrides: vec![],
         rustc_bootstrap: true,
     };
