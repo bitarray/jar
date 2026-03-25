@@ -23,15 +23,11 @@ jobs:
           components: rust-src
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: grey
 
       - name: Workspace tests (interpreter)
-        working-directory: grey
         run: cargo test --workspace
 
       - name: Workspace tests (recompiler)
-        working-directory: grey
         run: cargo test --workspace
         env:
           GREY_PVM: recompiler
@@ -47,9 +43,6 @@ jobs:
           components: rust-src
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: grey
 
       - name: Run harness
-        working-directory: grey
         run: cargo run -p harness
