@@ -541,7 +541,7 @@ fn translate_section_linked(
                 };
                 ctx.emit_inst(pvm_load_opcode);
                 ctx.emit_data(pvm_dst | (pvm_base << 4));
-                ctx.emit_imm32(0); // offset 0: address already resolved
+                ctx.emit_var_imm(0); // offset 0: address already resolved
                 offset += 4;
                 continue;
             } else if opcode == 0x23 {
@@ -558,7 +558,7 @@ fn translate_section_linked(
                 };
                 ctx.emit_inst(pvm_store_opcode);
                 ctx.emit_data(pvm_data | (pvm_base << 4));
-                ctx.emit_imm32(0);
+                ctx.emit_var_imm(0);
                 offset += 4;
                 continue;
             }
