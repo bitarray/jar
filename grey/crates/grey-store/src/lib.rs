@@ -258,7 +258,9 @@ impl Store {
 
         let mut hash = [0u8; 32];
         hash.copy_from_slice(hash_val.value());
-        let slot = u32::from_le_bytes(slot_val.value().try_into().unwrap());
+        let slot = u32::from_le_bytes(
+            slot_val.value().try_into().map_err(|_| StoreError::Codec("invalid head slot bytes".into()))?
+        );
         Ok((Hash(hash), slot))
     }
 
@@ -288,7 +290,9 @@ impl Store {
 
         let mut hash = [0u8; 32];
         hash.copy_from_slice(hash_val.value());
-        let slot = u32::from_le_bytes(slot_val.value().try_into().unwrap());
+        let slot = u32::from_le_bytes(
+            slot_val.value().try_into().map_err(|_| StoreError::Codec("invalid finalized slot bytes".into()))?
+        );
         Ok((Hash(hash), slot))
     }
 
