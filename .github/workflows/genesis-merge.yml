@@ -132,6 +132,21 @@ jobs:
           TARGETS_JSON=$(echo "$INPUT" | .lake/build/bin/genesis_select_targets)
           TARGETS=$(echo "$TARGETS_JSON" | jq -c '.targets')
 
+          # Check that no commits were pushed after the last /review comment.
+          # Reviews are scored against the HEAD at the time they were posted;
+          # new commits invalidate them.
+          LAST_REVIEW_AT=$(gh pr view "$PR_NUMBER" --json comments --jq '
+            [.comments[] | select(.body | startswith("/review"))] | last | .createdAt // empty')
+          if [ -n "$LAST_REVIEW_AT" ]; then
+            LAST_COMMIT_AT=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" \
+              --jq 'last | .commit.committer.date')
+            if [ -n "$LAST_COMMIT_AT" ] && [[ "$LAST_COMMIT_AT" > "$LAST_REVIEW_AT" ]]; then
+              gh pr comment "$PR_NUMBER" --body \
+                "**JAR Bot:** New commits pushed after the last review (commit: ${LAST_COMMIT_AT}, review: ${LAST_REVIEW_AT}). Aborting merge — please re-review."
+              exit 1
+            fi
+          fi
+
           # Collect reviews + meta-reviews (expand currentPR + short hashes)
           COLLECTED=$(bash tools/genesis-collect-reviews.sh "$PR_NUMBER" "$HEAD_SHA" "$TARGETS")
           REVIEWS=$(echo "$COLLECTED" | jq '.reviews')
@@ -209,8 +224,10 @@ jobs:
             exit 1
           }
 
-          # Merge synchronously
-          gh pr merge "$PR_NUMBER" --merge --subject "Merge PR #${PR_NUMBER}
+          # Merge synchronously (--match-head-commit ensures atomicity:
+          # GitHub rejects the merge if HEAD changed since we evaluated)
+          HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq '.headRefOid')
+          gh pr merge "$PR_NUMBER" --merge --match-head-commit "$HEAD_SHA" --subject "Merge PR #${PR_NUMBER}
 
           Genesis-Commit: $(echo "$COMMIT_DATA" | jq -c .)
           Genesis-Index: $(echo "$INDEX" | jq -c .)
