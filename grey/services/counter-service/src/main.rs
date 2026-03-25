@@ -56,7 +56,7 @@ global_asm!(
     "li a1, 1",
     "addi a2, sp, 8",
     "li a3, 1",
-    "li t0, 4",
+    "li t0, 5",              // host call ID = 5 (host_write, JAR v0.8.0)
     "ecall",
 
     "ld ra, 8(sp)",
