@@ -356,6 +356,37 @@ impl InstructionCategory {
     }
 }
 
+/// Combined opcode validation + category lookup in a single array access.
+/// Returns (is_valid, category) packed into a u8: high bit = valid, low 4 bits = category.
+static OPCODE_COMBINED: [u8; 256] = {
+    let mut t = [0u8; 256]; // 0 = invalid
+    // Build from OPCODE_TABLE (valid opcodes) and CATEGORY_LUT
+    let mut i = 0;
+    while i < 256 {
+        if OPCODE_TABLE[i] != 0 {
+            t[i] = 0x80 | (CATEGORY_LUT[i] as u8); // bit 7 = valid, low bits = category
+        }
+        i += 1;
+    }
+    t
+};
+
+/// Look up opcode validity and category in a single array access.
+/// Returns None for invalid opcodes, Some((Opcode, InstructionCategory)) for valid ones.
+#[inline(always)]
+pub fn decode_opcode_fast(b: u8) -> Option<(Opcode, InstructionCategory)> {
+    let entry = OPCODE_COMBINED[b as usize];
+    if entry & 0x80 != 0 {
+        let opcode = unsafe { core::mem::transmute(b) };
+        // SAFETY: InstructionCategory is repr(u8)-like enum with values 0-12
+        let cat_byte = entry & 0x0F;
+        let category = CATEGORY_LUT[b as usize]; // Use the existing LUT for safety
+        Some((opcode, category))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
