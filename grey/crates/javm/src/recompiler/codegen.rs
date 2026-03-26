@@ -307,9 +307,10 @@ impl Compiler {
             // this check is almost always false (no branch misprediction).
             self.asm.ensure_capacity(512);
 
-            // Decode instruction inline
-            let opcode = match Opcode::from_byte(code[pc]) {
-                Some(op) => op,
+            // Combined opcode validation + category lookup in a single array access.
+            // Eliminates the separate Opcode::from_byte and category LUT lookups.
+            let (opcode, category) = match crate::instruction::decode_opcode_fast(code[pc]) {
+                Some(oc) => oc,
                 None => {
                     self.asm.mov_store32_imm(CTX, CTX_PC as i32, pc as i32);
                     self.emit_exit(EXIT_PANIC, 0);
@@ -319,12 +320,6 @@ impl Compiler {
             };
             let skip = skip_table[pc] as usize;
             let next_pc = (pc + 1 + skip) as u32;
-
-            // Decode args. ThreeReg and TwoReg categories are inlined here to
-            // skip the decode_args function call (which has a 13-arm match on
-            // category). These categories make up ~40-50% of instructions in
-            // crypto code and their decode is trivial (just 1-2 byte reads).
-            let category = crate::instruction::InstructionCategory::from_opcode_byte(code[pc]);
             let decoded_args = match category {
                 crate::instruction::InstructionCategory::ThreeReg => {
                     let reg_byte = if pc + 1 < code.len() { code[pc + 1] } else { 0 };
