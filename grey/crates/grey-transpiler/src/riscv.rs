@@ -152,8 +152,9 @@ impl TranslationContext {
         }
 
         // Clear pending_load_imm if this isn't an instruction that can consume it.
-        // OP (0x33), OP-32 (0x3B), and Branch (0x63) handlers check and potentially fuse.
-        if opcode != 0x33 && opcode != 0x3B && opcode != 0x63 {
+        // OP (0x33), OP-32 (0x3B), Branch (0x63), and Store (0x23) handlers
+        // check and potentially fuse.
+        if opcode != 0x33 && opcode != 0x3B && opcode != 0x63 && opcode != 0x23 {
             self.pending_load_imm = None; // already emitted, just clear tracking
         }
 
@@ -488,6 +489,41 @@ impl TranslationContext {
     }
 
     fn translate_store(&mut self, funct3: u32, rs1: u8, rs2: u8, imm: i32) -> Result<(), TranspileError> {
+        // Fuse load_imm + store: when the stored value was just loaded as a
+        // constant, use store_imm_ind_* instead of load_imm + store_ind_*.
+        // This eliminates one instruction per constant store.
+        if let Some((load_rd, load_val, undo_pos)) = self.pending_load_imm.take() {
+            if rs2 == load_rd && rs1 != load_rd
+                && load_val >= i32::MIN as i64 && load_val <= i32::MAX as i64
+            {
+                let store_val = load_val as i32;
+                let pvm_rs1 = self.require_reg(rs1)?;
+                let pvm_opcode = match funct3 {
+                    0 => 70,  // store_imm_ind_u8
+                    1 => 71,  // store_imm_ind_u16
+                    2 => 72,  // store_imm_ind_u32
+                    3 => 73,  // store_imm_ind_u64
+                    _ => 0,   // can't fuse
+                };
+                if pvm_opcode != 0 {
+                    // Undo the load_imm and emit store_imm_ind instead.
+                    self.code.truncate(undo_pos);
+                    self.bitmask.truncate(undo_pos);
+                    // Format: OneRegTwoImm — base_reg + offset(imm_x) + value(imm_y)
+                    let (lx, offset_bytes) = encode_var_imm(imm);
+                    let (ly, value_bytes) = encode_var_imm(store_val);
+                    // The skip = lx + ly + 1 (for the lx/ly encoding byte after reg_byte)
+                    // reg_byte = ra | (lx << 4), then lx bytes of offset, then ly bytes of value
+                    self.emit_inst(pvm_opcode);
+                    self.emit_data(pvm_rs1 | (lx << 4));
+                    for b in &offset_bytes { self.emit_data(*b); }
+                    for b in &value_bytes { self.emit_data(*b); }
+                    return Ok(());
+                }
+            }
+            // Couldn't fuse — load_imm was already emitted, just clear tracking
+        }
+
         // x0 (zero register) has no PVM equivalent — PVM reg 0 is RA, not zero.
         // Use store_imm_ind_* to store a literal zero instead.
         if rs2 == 0 {
