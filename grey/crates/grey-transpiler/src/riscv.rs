@@ -628,6 +628,9 @@ impl TranslationContext {
                         (0, 7) => Some(132), // AND → and_imm
                         (0, 6) => Some(134), // OR → or_imm
                         (0, 4) => Some(133), // XOR → xor_imm
+                        (1, 0) => Some(if self.is_64bit { 150 } else { 135 }), // MUL → mul_imm
+                        (0, 2) => Some(137), // SLT → set_lt_s_imm
+                        (0, 3) => Some(136), // SLTU → set_lt_u_imm
                         _ => None,
                     };
 
@@ -645,6 +648,24 @@ impl TranslationContext {
                         self.emit_var_imm(imm);
                         return Ok(());
                     }
+                }
+
+                // Special case: SUB rd, rs1, load_rd → neg_add_imm rd, rs1, -imm
+                // SUB is not commutative, but if rs2 is the loaded register:
+                // rd = rs1 - imm = rs1 + (-imm)
+                if (funct7, funct3) == (0x20, 0) && rs2 == load_rd && rs1 != load_rd {
+                    let neg_imm = (-(load_val as i32) as i64) as i32;
+                    // Use add_imm with negated immediate (avoids neg_add_imm)
+                    let pvm_opcode = if self.is_64bit { 149 } else { 131 }; // add_imm
+                    self.code.truncate(undo_pos);
+                    self.bitmask.truncate(undo_pos);
+                    self.address_map.insert(addr, undo_pos as u32);
+                    let pvm_rd = self.require_reg(rd)?;
+                    let pvm_rs1 = self.require_reg(rs1)?;
+                    self.emit_inst(pvm_opcode);
+                    self.emit_data(pvm_rd | (pvm_rs1 << 4));
+                    self.emit_var_imm(neg_imm);
+                    return Ok(());
                 }
             }
             // Couldn't fuse — load_imm is already emitted, just proceed normally
