@@ -378,9 +378,7 @@ pub fn decode_opcode_fast(b: u8) -> Option<(Opcode, InstructionCategory)> {
     let entry = OPCODE_COMBINED[b as usize];
     if entry & 0x80 != 0 {
         let opcode = unsafe { core::mem::transmute(b) };
-        // SAFETY: InstructionCategory is repr(u8)-like enum with values 0-12
-        let cat_byte = entry & 0x0F;
-        let category = CATEGORY_LUT[b as usize]; // Use the existing LUT for safety
+        let category = CATEGORY_LUT[b as usize];
         Some((opcode, category))
     } else {
         None
