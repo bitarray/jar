@@ -65,7 +65,7 @@ pub fn pr_merge(pr: u64, head_sha: &str, subject: &str) -> Result<(), GhError> {
 
 /// Trigger a workflow via workflow_dispatch.
 pub fn workflow_run(workflow: &str, inputs: &[(&str, &str)]) -> Result<(), GhError> {
-    let mut args = vec!["workflow", "run", workflow];
+    let mut args = vec!["workflow", "run", workflow, "--ref", "master"];
     for (key, value) in inputs {
         args.push("-f");
         let kv = format!("{key}={value}");
