@@ -352,6 +352,17 @@ impl Compiler {
                     let imm = args::read_signed_imm(code, pc + 2, lx);
                     Args::TwoRegImm { ra, rb, imm }
                 }
+                crate::instruction::InstructionCategory::NoArgs => Args::None,
+                crate::instruction::InstructionCategory::OneImm => {
+                    let lx = skip.min(4);
+                    Args::Imm { imm: args::read_signed_imm(code, pc + 1, lx) }
+                }
+                crate::instruction::InstructionCategory::OneRegOneImm => {
+                    let reg_byte = if pc + 1 < code.len() { code[pc + 1] } else { 0 };
+                    let ra = (reg_byte & 0x0F).min(12) as usize;
+                    let lx = if skip > 1 { (skip - 1).min(4) } else { 0 };
+                    Args::RegImm { ra, imm: args::read_signed_imm(code, pc + 2, lx) }
+                }
                 _ => args::decode_args(code, pc, skip, category),
             };
 
