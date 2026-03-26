@@ -900,6 +900,22 @@ impl Compiler {
                     self.invalidate_dependents(*ra);
                 }
             }
+            // Track shift-left-immediate as Shifted for LEA-based scaled indexing.
+            // sll_imm_64 rd, rb, shift → Shifted{src:rb, shift} if shift ∈ 1..=3.
+            // This enables the peephole: sll + add + load → LEA + load with SIB scaling.
+            Opcode::ShloLImm64 => {
+                if let Args::TwoRegImm { ra, rb, imm } = args {
+                    let shift = (*imm as u32 % 64) as u8;
+                    if shift >= 1 && shift <= 3 {
+                        self.reg_defs[*ra] = RegDef::Shifted { src: *rb, shift };
+                        self.reg_defs_active |= 1u16 << *ra;
+                    } else {
+                        self.reg_defs[*ra] = RegDef::Unknown;
+                        self.reg_defs_active &= !(1u16 << *ra);
+                    }
+                    self.invalidate_dependents(*ra);
+                }
+            }
             Opcode::MoveReg => {
                 if let Args::TwoReg { rd, ra } = args {
                     if *rd != *ra {
