@@ -26,19 +26,6 @@ use crate::gas_sim::GasSimulator;
 use crate::args::{self, Args};
 use crate::instruction::Opcode;
 
-/// Extract flat (ra, rb, rd) from Args enum.
-fn extract_regs(args: &Args) -> (u8, u8, u8) {
-    match args {
-        Args::ThreeReg { ra, rb, rd } => (*ra as u8, *rb as u8, *rd as u8),
-        Args::TwoReg { rd: d, ra: a } => (*a as u8, 0xFF, *d as u8),
-        Args::TwoRegImm { ra, rb, .. } | Args::TwoRegOffset { ra, rb, .. }
-        | Args::TwoRegTwoImm { ra, rb, .. } => (*ra as u8, *rb as u8, 0xFF),
-        Args::RegImm { ra, .. } | Args::RegExtImm { ra, .. }
-        | Args::RegTwoImm { ra, .. } | Args::RegImmOffset { ra, .. } => (*ra as u8, 0xFF, 0xFF),
-        _ => (0xFF, 0xFF, 0xFF),
-    }
-}
-
 /// Compute skip(i) — distance to next instruction start.
 fn compute_skip(pc: usize, bitmask: &[u8]) -> usize {
     for j in 0..25 {
@@ -264,9 +251,10 @@ impl Compiler {
         // Emit prologue
         self.emit_prologue();
 
-        // Gas block starts + precomputed skip table (avoids repeated bitmask scanning).
+        // Gas block starts as compact bitset (1.75KB vs 112KB Vec<bool>)
+        // + precomputed skip table (avoids repeated bitmask scanning).
         let (mut gas_starts, skip_table) =
-            crate::vm::compute_basic_block_starts_with_skips(code, bitmask);
+            crate::vm::compute_basic_block_starts_bitset(code, bitmask);
 
         // Ensure jump table target PCs are marked as gas block starts.
         // Dynamic jumps (jump_ind) dispatch through the dispatch table,
@@ -274,7 +262,7 @@ impl Compiler {
         for i in 0..self.jump_table.len() {
             let target_pc = self.jump_table[i] as usize;
             if target_pc < code_len {
-                gas_starts[target_pc] = true;
+                gas_starts.set(target_pc);
             }
         }
 
@@ -301,51 +289,35 @@ impl Compiler {
             let skip = skip_table[pc] as usize;
             let next_pc = (pc + 1 + skip) as u32;
 
-            // Extract raw register fields (for gas sim)
-            let raw_ra = if pc + 1 < code.len() { code[pc + 1] & 0x0F } else { 0xFF };
-            let raw_rb = if pc + 1 < code.len() { (code[pc + 1] >> 4) & 0x0F } else { 0xFF };
-            let raw_rd = if pc + 2 < code.len() { code[pc + 2] & 0x0F } else { 0xFF };
-
             // Only create and bind labels for PCs that need dispatch table entries:
             // gas block starts (branch targets, post-terminators, post-ecalli,
             // jump table targets) for OOG/ecalli re-entry and branch dispatch.
             // Other instruction PCs don't need labels — they're only reached by
             // native code fallthrough, never by dispatch table lookup.
-            if gas_starts[pc] {
+            if gas_starts.get(pc) {
                 let label = self.label_for_pc(pc as u32);
                 self.asm.bind_label(label);
             }
 
-            // Full decode
+            // Full decode — done once, reused for both gas cost and codegen.
             let category = opcode.category();
             let decoded_args = args::decode_args(code, pc, skip, category);
 
-            // Discover gas block boundaries inline (reuses decoded_args):
-            // - Branch/jump targets mark future gas block starts
-            // - Post-terminator/ecalli mark next instruction as gas block start
-            let target = match decoded_args {
-                Args::Offset { offset } => Some(offset as usize),
-                Args::RegImmOffset { offset, .. } => Some(offset as usize),
-                Args::TwoRegOffset { offset, .. } => Some(offset as usize),
-                _ => None,
-            };
-            // Note: gas_starts is pre-computed by compute_basic_block_starts()
-            // which already includes all branch/jump targets and post-terminators.
             // Post-ecalli boundaries need to be added here since they're not
             // basic block boundaries per se but must be gas block boundaries.
             if matches!(opcode, Opcode::Ecalli) && (next_pc as usize) < code_len {
-                gas_starts[next_pc as usize] = true;
+                gas_starts.set(next_pc as usize);
             }
 
             // At basic block boundaries (branch targets, post-terminators),
             // invalidate all reg_defs since registers may have different values
             // when entered from different paths (e.g., loop back-edges).
-            if gas_starts[pc] {
+            if gas_starts.get(pc) {
                 self.invalidate_all_regs();
             }
 
             // Gas block boundary check
-            if gas_starts[pc] {
+            if gas_starts.get(pc) {
                 if let Some((stub_label, block_pc, patch_offset)) = pending_gas.take() {
                     let cost = gas_sim.flush_and_get_cost();
                     self.asm.patch_i32(patch_offset, cost as i32);
@@ -360,9 +332,11 @@ impl Compiler {
                 pending_gas = Some((stub_label, pc as u32, patch_offset));
             }
 
-            // Feed gas simulator
-            let fc = crate::gas_cost::fast_cost_from_raw(
-                opcode as u8, raw_ra, raw_rb, raw_rd, pc as u32, code, bitmask,
+            // Feed gas simulator — uses decoded args directly, avoiding:
+            // 1. Redundant raw register byte extraction
+            // 2. Redundant args re-decoding for branch target extraction
+            let fc = crate::gas_cost::fast_cost_from_decoded(
+                opcode as u8, &decoded_args, pc as u32, code, bitmask,
             );
             gas_sim.feed(&fc);
 
@@ -482,10 +456,9 @@ impl Compiler {
         let skip4 = compute_skip(pc4, bitmask);
         let args4 = args::decode_args(code, pc4, skip4, op4.category());
 
-        // Feed instructions 2-4 to gas sim
+        // Feed instructions 2-4 to gas sim (using decoded args, no redundant decode)
         for &(opc, ref a, p) in &[(op2, &args2, pc2), (op3, &args3, pc3), (op4, &args4, pc4)] {
-            let (ra, rb, rd) = extract_regs(a);
-            let fc = crate::gas_cost::fast_cost_from_raw(opc as u8, ra, rb, rd, p as u32, code, bitmask);
+            let fc = crate::gas_cost::fast_cost_from_decoded(opc as u8, a, p as u32, code, bitmask);
             gas_sim.feed(&fc);
         }
 
@@ -547,9 +520,8 @@ impl Compiler {
         let Args::ThreeReg { ra: u_ra, rb: u_rb, rd: u_rd } = args2 else { return None; };
         if u_ra != *m_ra || u_rb != *m_rb { return None; }
 
-        // Feed instruction 2 to gas sim
-        let (ra2, rb2, rd2) = extract_regs(&args2);
-        let fc = crate::gas_cost::fast_cost_from_raw(op2 as u8, ra2, rb2, rd2, pc2 as u32, code, bitmask);
+        // Feed instruction 2 to gas sim (using decoded args, no redundant decode)
+        let fc = crate::gas_cost::fast_cost_from_decoded(op2 as u8, &args2, pc2 as u32, code, bitmask);
         gas_sim.feed(&fc);
 
         // Bind labels
