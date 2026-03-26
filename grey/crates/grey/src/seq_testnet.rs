@@ -208,10 +208,10 @@ pub async fn run_seq_testnet(
                     Ok((new_state, _)) => {
                         let header_hash = compute_header_hash(&block.header);
 
-                        // Update store for RPC
+                        // Update store for RPC (order matters: block+state first, then head)
                         let _ = store.put_block(&block);
-                        let _ = store.set_head(&header_hash, slot);
                         let _ = store.put_state(&header_hash, &new_state, &config);
+                        let _ = store.set_head(&header_hash, slot);
 
                         // Simple depth-based finalization
                         let finalized_slot = if slot > finality_depth {
