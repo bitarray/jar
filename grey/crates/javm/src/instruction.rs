@@ -306,6 +306,56 @@ pub enum InstructionCategory {
     ThreeReg,
 }
 
+/// Pre-computed lookup table: opcode byte → InstructionCategory.
+/// Eliminates the match in `Opcode::category()` from the hot compilation loop.
+/// Invalid opcodes map to NoArgs (same as the fallback in category()).
+static CATEGORY_LUT: [InstructionCategory; 256] = {
+    let mut t = [InstructionCategory::NoArgs; 256];
+    // OneImm
+    t[10] = InstructionCategory::OneImm;
+    // OneRegExtImm
+    t[20] = InstructionCategory::OneRegExtImm;
+    // TwoImm
+    t[30] = InstructionCategory::TwoImm;
+    t[31] = InstructionCategory::TwoImm;
+    t[32] = InstructionCategory::TwoImm;
+    t[33] = InstructionCategory::TwoImm;
+    // OneOffset
+    t[40] = InstructionCategory::OneOffset;
+    // OneRegOneImm
+    let mut i = 50;
+    while i <= 62 { t[i] = InstructionCategory::OneRegOneImm; i += 1; }
+    // OneRegTwoImm
+    i = 70;
+    while i <= 73 { t[i] = InstructionCategory::OneRegTwoImm; i += 1; }
+    // OneRegImmOffset
+    i = 80;
+    while i <= 90 { t[i] = InstructionCategory::OneRegImmOffset; i += 1; }
+    // TwoReg
+    i = 100;
+    while i <= 111 { t[i] = InstructionCategory::TwoReg; i += 1; }
+    // TwoRegOneImm
+    i = 120;
+    while i <= 161 { t[i] = InstructionCategory::TwoRegOneImm; i += 1; }
+    // TwoRegOneOffset
+    i = 170;
+    while i <= 175 { t[i] = InstructionCategory::TwoRegOneOffset; i += 1; }
+    // TwoRegTwoImm
+    t[180] = InstructionCategory::TwoRegTwoImm;
+    // ThreeReg
+    i = 190;
+    while i <= 230 { t[i] = InstructionCategory::ThreeReg; i += 1; }
+    t
+};
+
+impl InstructionCategory {
+    /// Look up category from raw opcode byte via static table (O(1), no branching).
+    #[inline(always)]
+    pub fn from_opcode_byte(b: u8) -> Self {
+        CATEGORY_LUT[b as usize]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2084,6 +2084,15 @@ pub fn compute_basic_block_starts_bitset(code: &[u8], bitmask: &[u8]) -> (BitSet
             }
         }
 
+        // Mark post-ecalli PCs as gas block starts (so gas_starts is
+        // complete after the pre-pass and immutable during compilation).
+        if matches!(op, Opcode::Ecalli) {
+            let next = i + 1 + skip;
+            if next < len && next < bitmask.len() && bitmask[next] == 1 {
+                starts.set(next);
+            }
+        }
+
         let cat = op.category();
         match cat {
             crate::instruction::InstructionCategory::OneOffset => {

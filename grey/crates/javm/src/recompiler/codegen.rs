@@ -254,21 +254,20 @@ impl Compiler {
         // Emit prologue
         self.emit_prologue();
 
-        // Gas block starts as compact bitset (1.75KB vs 112KB Vec<bool>)
-        // + precomputed skip table (avoids repeated bitmask scanning).
-        let (mut gas_starts, skip_table) =
-            crate::vm::compute_basic_block_starts_bitset(code, bitmask);
-
-        // Ensure jump table target PCs are marked as gas block starts.
-        // Dynamic jumps (jump_ind) dispatch through the dispatch table,
-        // so these PCs need labels and dispatch table entries.
-        let jt_len = self.jump_table_len;
-        for i in 0..jt_len {
-            let target_pc = unsafe { *self.jump_table_ptr.add(i) } as usize;
-            if target_pc < code_len {
-                gas_starts.set(target_pc);
+        // Gas block starts as compact bitset (1.75KB). Ecalli post-PCs are
+        // included from the pre-pass so gas_starts is immutable during compilation.
+        let (gas_starts, skip_table) = {
+            let (mut gs, st) = crate::vm::compute_basic_block_starts_bitset(code, bitmask);
+            // Ensure jump table target PCs are marked as gas block starts.
+            let jt_len = self.jump_table_len;
+            for i in 0..jt_len {
+                let target_pc = unsafe { *self.jump_table_ptr.add(i) } as usize;
+                if target_pc < code_len {
+                    gs.set(target_pc);
+                }
             }
-        }
+            (gs, st) // gas_starts is now immutable
+        };
 
         // Single streaming pass: decode + gas blocks + codegen
         let mut gas_sim = GasSimulator::new();
@@ -294,14 +293,9 @@ impl Compiler {
             let next_pc = (pc + 1 + skip) as u32;
 
             // Full decode — done once, reused for both gas cost and codegen.
-            let category = opcode.category();
+            // Use static lookup table for category (eliminates match dispatch).
+            let category = crate::instruction::InstructionCategory::from_opcode_byte(code[pc]);
             let decoded_args = args::decode_args(code, pc, skip, category);
-
-            // Post-ecalli boundaries need to be added here since they're not
-            // basic block boundaries per se but must be gas block boundaries.
-            if matches!(opcode, Opcode::Ecalli) && (next_pc as usize) < code_len {
-                gas_starts.set(next_pc as usize);
-            }
 
             // Gas block boundary: consolidated check (was 3 separate checks).
             // Handles label binding, reg invalidation, and gas metering in one branch.
