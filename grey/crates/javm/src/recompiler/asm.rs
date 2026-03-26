@@ -290,11 +290,22 @@ impl Assembler {
         self.write_pos += 4;
     }
 
-    /// Emit a 4-byte placeholder for a label fixup, recording the fixup.
+    /// Emit a label reference (4-byte rel32). For backward references (label
+    /// already bound), resolves immediately without creating a fixup entry.
+    /// For forward references, emits a placeholder and records a fixup.
     fn emit_label_fixup(&mut self, label: Label) {
-        let offset = self.write_pos;
-        self.fixups.push(Fixup { offset, label });
-        self.emit_u32(0); // placeholder
+        let bound = self.labels[label.0 as usize];
+        if bound != LABEL_UNBOUND {
+            // Backward reference — resolve immediately, no fixup needed.
+            // rel32 = target - (current_offset + 4)
+            let rel = bound as i64 - (self.write_pos as i64 + 4);
+            self.emit_i32(rel as i32);
+        } else {
+            // Forward reference — defer to finalization.
+            let offset = self.write_pos;
+            self.fixups.push(Fixup { offset, label });
+            self.emit_u32(0); // placeholder
+        }
     }
 
     // === REX prefix helpers ===
