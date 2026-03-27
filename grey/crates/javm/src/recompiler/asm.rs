@@ -142,7 +142,10 @@ pub struct Assembler {
     fixups: Vec<Fixup>,
 }
 
-const LABEL_UNBOUND: usize = usize::MAX;
+/// Unbound label sentinel. We use 0 so that bulk label allocation can use
+/// zeroed memory (calloc / zero-page COW) instead of writing 0xFF to every byte.
+/// Bound labels store `native_offset + 1` to avoid collision with the sentinel.
+const LABEL_UNBOUND: usize = 0;
 
 impl Assembler {
     pub fn new() -> Self {
@@ -248,9 +251,21 @@ impl Assembler {
         Label(id)
     }
 
+    /// Current number of labels allocated.
+    pub fn labels_len(&self) -> usize {
+        self.labels.len()
+    }
+
+    /// Bulk-allocate `count` unbound labels. Uses zeroed memory (calloc/mmap
+    /// zero-page COW) since LABEL_UNBOUND = 0. Only pages that are later
+    /// bound via bind_label() trigger page faults — unbound labels are free.
+    pub fn bulk_create_labels(&mut self, count: usize) {
+        self.labels.resize(self.labels.len() + count, LABEL_UNBOUND);
+    }
+
     /// Bind a label to the current write position.
     pub fn bind_label(&mut self, label: Label) {
-        self.labels[label.0 as usize] = self.write_pos;
+        self.labels[label.0 as usize] = self.write_pos + 1; // +1: 0 is LABEL_UNBOUND
     }
 
     /// Current code offset (write position).
@@ -344,8 +359,9 @@ impl Assembler {
         let bound = self.labels[label.0 as usize];
         if bound != LABEL_UNBOUND {
             // Backward reference — resolve immediately, no fixup needed.
-            // rel32 = target - (current_offset + 4)
-            let rel = bound as i64 - (self.write_pos as i64 + 4);
+            // rel32 = target - (current_offset + 4). Stored value is offset+1.
+            let target = (bound - 1) as i64;
+            let rel = target - (self.write_pos as i64 + 4);
             self.emit_i32(rel as i32);
         } else {
             // Forward reference — defer to finalization.
@@ -1230,10 +1246,9 @@ impl Assembler {
     pub fn jmp_label(&mut self, label: Label) {
         let bound = self.labels[label.0 as usize];
         if bound != LABEL_UNBOUND {
-            let target = bound;
+            let target = (bound - 1) as isize; // stored as offset+1
             // Backward jump — label already bound, try rel8.
-            // rel8 offset = target - (current + 2), where 2 = size of jmp rel8
-            let rel = target as isize - (self.write_pos as isize + 2);
+            let rel = target - (self.write_pos as isize + 2);
             if rel >= i8::MIN as isize && rel <= i8::MAX as isize {
                 self.emit(0xEB);
                 self.emit(rel as u8);
@@ -1249,10 +1264,9 @@ impl Assembler {
     pub fn jcc_label(&mut self, cc: Cc, label: Label) {
         let bound = self.labels[label.0 as usize];
         if bound != LABEL_UNBOUND {
-            let target = bound;
+            let target = (bound - 1) as isize; // stored as offset+1
             // Backward jump — label already bound, try rel8.
-            // rel8 offset = target - (current + 2), where 2 = size of jcc rel8
-            let rel = target as isize - (self.write_pos as isize + 2);
+            let rel = target - (self.write_pos as isize + 2);
             if rel >= i8::MIN as isize && rel <= i8::MAX as isize {
                 self.emit(0x70 + cc as u8);
                 self.emit(rel as u8);
@@ -1354,7 +1368,7 @@ impl Assembler {
     /// Get the resolved native offset for a label (only valid after bind_label).
     pub fn label_offset(&self, label: Label) -> Option<usize> {
         let off = self.labels[label.0 as usize];
-        if off == LABEL_UNBOUND { None } else { Some(off) }
+        if off == LABEL_UNBOUND { None } else { Some(off - 1) }
     }
 
     /// Sync Vec length with the write cursor. Call before accessing `self.code` directly.
@@ -1367,8 +1381,10 @@ impl Assembler {
     /// Resolve all label fixups in-place (works for both Vec and mmap buffers).
     fn resolve_fixups(&mut self) {
         for fixup in &self.fixups {
-            let target = self.labels[fixup.label.0 as usize];
-            assert!(target != LABEL_UNBOUND, "unbound label {:?}", fixup.label);
+            let stored = self.labels[fixup.label.0 as usize];
+            // All labels must be bound by finalization time.
+            assert!(stored != LABEL_UNBOUND, "unbound label {:?}", fixup.label);
+            let target = stored - 1; // stored as offset+1
             let rel = (target as i64) - (fixup.offset as i64 + 4);
             let rel32 = rel as i32;
             unsafe {

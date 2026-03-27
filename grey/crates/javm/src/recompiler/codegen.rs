@@ -149,9 +149,9 @@ enum RegDef {
 /// PVM-to-x86-64 compiler.
 pub struct Compiler {
     pub asm: Assembler,
-    /// Dense label array: one pre-created label per PVM PC.
-    /// label_for_pc(pc) = all_labels[pc] — O(1) array index, no rank query.
-    all_labels: Vec<Label>,
+    /// Base label ID for PC labels. label_for_pc(pc) = Label(label_base + pc).
+    /// Labels are bulk-allocated in the assembler with LABEL_UNBOUND=0 (zeroed pages).
+    label_base: u32,
     /// Gas block start PCs discovered during compilation (for dispatch table).
     gas_block_pcs: Vec<u32>,
     /// Label for the exit sequence.
@@ -212,12 +212,13 @@ impl Compiler {
         let fault_exit_label = asm.new_label();
         let oog_pc_label = asm.new_label();
         // Pre-create one label per PC for O(1) lookup in label_for_pc.
-        let mut all_labels = Vec::with_capacity(code_len + 1);
-        for _ in 0..=code_len {
-            all_labels.push(asm.new_label());
-        }
+        // With LABEL_UNBOUND=0, bulk allocation uses zeroed pages (calloc/COW).
+        // Only the ~640 labels that get bound trigger page faults — the other
+        // ~110K labels stay on zero pages and cost nothing.
+        let label_base = asm.labels_len() as u32;
+        asm.bulk_create_labels(code_len + 1);
         Self {
-            all_labels,
+            label_base,
             gas_block_pcs: Vec::new(), // populated in compile()
             asm,
             exit_label,
@@ -239,10 +240,10 @@ impl Compiler {
         }
     }
 
-    /// Look up the pre-created label for a PVM PC. O(1) dense array index.
+    /// Look up the pre-created label for a PVM PC. O(1) arithmetic.
     #[inline]
     fn label_for_pc(&self, pc: u32) -> Label {
-        self.all_labels[pc as usize]
+        Label(self.label_base + pc)
     }
 
     fn is_basic_block_start(&self, idx: u32) -> bool {
@@ -283,7 +284,7 @@ impl Compiler {
             if raw_byte == 1 || raw_byte == 2 { // Fallthrough=1, Unlikely=2
                 let skip = crate::vm::skip_for_bitmask(bitmask, pc);
                 if is_gas_start {
-                    let label = self.all_labels[pc];
+                    let label = Label(self.label_base + pc as u32);
                     self.asm.bind_label(label);
                     self.gas_block_pcs.push(pc as u32);
                     self.invalidate_all_regs();
@@ -422,7 +423,7 @@ impl Compiler {
 
             // Gas block boundary: discovered inline via next_is_gas_start flag.
             if is_gas_start {
-                let label = self.all_labels[pc];
+                let label = Label(self.label_base + pc as u32);
                 self.asm.bind_label(label);
                 self.gas_block_pcs.push(pc as u32);
                 self.invalidate_all_regs();
@@ -530,7 +531,7 @@ impl Compiler {
         let table_len = code_len + 1;
         let mut dispatch_table = vec![0i32; table_len];
         for &pvm_pc in self.gas_block_pcs.iter() {
-            let label = self.all_labels[pvm_pc as usize];
+            let label = Label(self.label_base + pvm_pc);
             if let Some(offset) = self.asm.label_offset(label) {
                 dispatch_table[pvm_pc as usize] = offset as i32;
             }
