@@ -10,6 +10,14 @@ use crate::types::{MergeReadiness, SelectTargetsOutput};
 
 /// Run the merge workflow for a PR.
 pub fn run(pr: u64, founder_override: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // --- Step 0: Guard against already-merged PRs ---
+    let state_json = github::pr_view(pr, "state")?;
+    let state = state_json["state"].as_str().unwrap_or("");
+    if state == "MERGED" {
+        eprintln!("PR #{pr} is already merged — skipping.");
+        return Ok(());
+    }
+
     let repo_root = git::repo_root()?;
     let spec_dir = Path::new(&repo_root).join("spec");
 
