@@ -13,7 +13,7 @@ use crate::{Gas, PVM_PAGE_SIZE};
 ///
 /// deblob(p) = (c, k, j) where:
 ///   p = E(|j|) ⌢ E₁(z) ⌢ E(|c|) ⌢ E_z(j) ⌢ E(c) ⌢ E(k), |k| = |c|
-pub fn deblob(blob: &[u8]) -> Option<(Vec<u8>, Vec<u8>, Vec<u32>)> {
+pub fn deblob(blob: &[u8]) -> Option<(&[u8], Vec<u8>, Vec<u32>)> {
     let mut offset = 0;
 
     // Read |j| (jump table length) as variable-length natural
@@ -49,7 +49,7 @@ pub fn deblob(blob: &[u8]) -> Option<(Vec<u8>, Vec<u8>, Vec<u32>)> {
     if offset + code_len > blob.len() {
         return None;
     }
-    let code = blob[offset..offset + code_len].to_vec();
+    let code = &blob[offset..offset + code_len];
     offset += code_len;
 
     // Read bitmask: packed bitfield, ceil(code_len/8) bytes (eq C.9)
@@ -173,7 +173,7 @@ pub fn initialize_program(program_blob: &[u8], arguments: &[u8], gas: Gas) -> Op
         s, arg_start, arguments.len(), ro_start, ro_size, rw_start, rw_size, heap_start, heap_end, registers[1], registers[0]
     );
 
-    let mut pvm = Pvm::new(code, bitmask, jump_table, registers, flat_mem, gas);
+    let mut pvm = Pvm::new(code.to_vec(), bitmask, jump_table, registers, flat_mem, gas);
     pvm.heap_base = heap_start;
     pvm.heap_top = heap_end;
 
@@ -192,8 +192,9 @@ pub struct DataLayout {
 }
 
 /// Parsed program data without interpreter pre-decoding.
-pub struct ParsedProgram {
-    pub code: Vec<u8>,
+/// Code borrows from the program blob to avoid a 110KB copy.
+pub struct ParsedProgram<'a> {
+    pub code: &'a [u8],
     pub bitmask: Vec<u8>,
     pub jump_table: Vec<u32>,
     pub registers: [u64; crate::PVM_REGISTER_COUNT],
@@ -204,7 +205,7 @@ pub struct ParsedProgram {
 }
 
 /// Parse a program blob into raw components without building a full Pvm.
-pub fn parse_program_blob(program_blob: &[u8], arguments: &[u8], _gas: Gas) -> Option<ParsedProgram> {
+pub fn parse_program_blob<'a>(program_blob: &'a [u8], arguments: &[u8], _gas: Gas) -> Option<ParsedProgram<'a>> {
     let blob = skip_metadata(program_blob);
 
     if blob.len() < 15 {
