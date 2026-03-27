@@ -84,13 +84,6 @@ pub struct TranslationContext {
     pending_load_imm: Option<(u8, i64, usize)>,
     /// Last immediate loaded into t0 (x5) — used for ecall → ecalli translation.
     last_t0_imm: Option<i32>,
-    /// RISC-V addresses that are branch targets. Populated by a pre-scan.
-    /// At each branch target, a fallthrough is inserted if the previous PVM
-    /// instruction wasn't a terminator — ensuring all branch targets are basic
-    /// block starts per the JAM spec (ϖ).
-    pub(crate) branch_targets: std::collections::HashSet<u64>,
-    /// Whether the last emitted PVM instruction was a terminator.
-    pub(crate) last_was_terminator: bool,
 }
 
 impl TranslationContext {
@@ -108,8 +101,6 @@ impl TranslationContext {
             pending_lui: None,
             pending_load_imm: None,
             last_t0_imm: None,
-            branch_targets: std::collections::HashSet::new(),
-            last_was_terminator: false,
         }
     }
 
@@ -1191,10 +1182,6 @@ impl TranslationContext {
     pub(crate) fn emit_inst(&mut self, opcode: u8) {
         self.code.push(opcode);
         self.bitmask.push(1);
-        // Track whether this instruction is a PVM terminator.
-        self.last_was_terminator = matches!(opcode,
-            0 | 1 | 2 | 10 | 40 | 50 | 80 | 180 | 81..=90 | 170..=175
-        );
     }
 
     pub(crate) fn emit_data(&mut self, byte: u8) {
