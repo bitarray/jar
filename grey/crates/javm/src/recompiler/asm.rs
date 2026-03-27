@@ -3,6 +3,49 @@
 //! Emits native x86-64 machine code with label-based jump resolution.
 //! All jumps use 32-bit relative offsets (no short-jump optimization).
 
+/// Instruction buffer: accumulates x86 bytes in a u128 register, then flushes
+/// with a single bulk write. Avoids per-byte memory stores.
+#[derive(Clone, Copy)]
+pub struct InstBuf {
+    out: u128,
+    length: u32, // in bits
+}
+
+impl InstBuf {
+    #[inline(always)]
+    pub fn new() -> Self {
+        Self { out: 0, length: 0 }
+    }
+
+    #[inline(always)]
+    pub fn push(&mut self, byte: u8) {
+        self.out |= (byte as u128) << self.length;
+        self.length += 8;
+    }
+
+    #[inline(always)]
+    pub fn push_u32(&mut self, v: u32) {
+        self.out |= (v as u128) << self.length;
+        self.length += 32;
+    }
+
+    #[inline(always)]
+    pub fn push_u64(&mut self, v: u64) {
+        self.out |= (v as u128) << self.length;
+        self.length += 64;
+    }
+
+    #[inline(always)]
+    pub fn push_i32(&mut self, v: i32) {
+        self.push_u32(v as u32);
+    }
+
+    #[inline(always)]
+    pub fn len(&self) -> usize {
+        (self.length >> 3) as usize
+    }
+}
+
 /// x86-64 register encoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -94,12 +137,20 @@ pub struct Assembler {
     buf: *mut u8,
     write_pos: usize,
     capacity: usize,
-    /// Label ID → bound offset (usize::MAX = unbound).
+    /// Label ID → bound offset+1 (0 = unbound).
+    /// Pre-sized via `vec![0; capacity]` which uses calloc (zero-page COW).
+    /// Only pages containing bound labels trigger page faults.
     labels: Vec<usize>,
+    /// Number of labels allocated via new_label/bulk_create_labels.
+    /// The Vec is pre-sized but labels_len tracks the logical length.
+    labels_len: usize,
     fixups: Vec<Fixup>,
 }
 
-const LABEL_UNBOUND: usize = usize::MAX;
+/// Unbound label sentinel. We use 0 so that bulk label allocation can use
+/// zeroed memory (calloc / zero-page COW) instead of writing 0xFF to every byte.
+/// Bound labels store `native_offset + 1` to avoid collision with the sentinel.
+const LABEL_UNBOUND: usize = 0;
 
 impl Assembler {
     pub fn new() -> Self {
@@ -112,6 +163,7 @@ impl Assembler {
             write_pos: 0,
             capacity,
             labels: Vec::new(),
+            labels_len: 0,
             fixups: Vec::new(),
         }
     }
@@ -127,7 +179,9 @@ impl Assembler {
             buf,
             write_pos: 0,
             capacity,
-            labels: Vec::with_capacity(label_capacity),
+            // vec![0; n] uses calloc — zero pages via COW, no page faults for untouched entries
+            labels: vec![0usize; label_capacity],
+            labels_len: 0,
             fixups: Vec::with_capacity(label_capacity),
         }
     }
@@ -155,7 +209,8 @@ impl Assembler {
             buf: ptr,
             write_pos: 0,
             capacity: code_capacity,
-            labels: Vec::with_capacity(label_capacity),
+            labels: vec![0usize; label_capacity],
+            labels_len: 0,
             fixups: Vec::with_capacity(label_capacity),
         })
     }
@@ -200,14 +255,33 @@ impl Assembler {
 
     /// Allocate a new label.
     pub fn new_label(&mut self) -> Label {
-        let id = self.labels.len() as u32;
-        self.labels.push(LABEL_UNBOUND);
+        let id = self.labels_len as u32;
+        self.labels_len += 1;
+        // Grow if needed (rare — labels Vec is pre-sized in with_capacity/with_mmap)
+        if self.labels_len > self.labels.len() {
+            self.labels.push(LABEL_UNBOUND);
+        }
         Label(id)
+    }
+
+    /// Current number of labels allocated.
+    pub fn labels_len(&self) -> usize {
+        self.labels_len
+    }
+
+    /// Bulk-allocate `count` unbound labels. The labels Vec is already pre-sized
+    /// via calloc (zero pages). This just advances the logical length counter.
+    pub fn bulk_create_labels(&mut self, count: usize) {
+        self.labels_len += count;
+        // Grow if pre-sized Vec wasn't large enough (shouldn't happen normally)
+        if self.labels_len > self.labels.len() {
+            self.labels.resize(self.labels_len, LABEL_UNBOUND);
+        }
     }
 
     /// Bind a label to the current write position.
     pub fn bind_label(&mut self, label: Label) {
-        self.labels[label.0 as usize] = self.write_pos;
+        self.labels[label.0 as usize] = self.write_pos + 1; // +1: 0 is LABEL_UNBOUND
     }
 
     /// Current code offset (write position).
@@ -251,15 +325,27 @@ impl Assembler {
         self.write_pos += 3;
     }
 
+    /// Flush an InstBuf to the code buffer in one bulk write.
+    #[inline(always)]
+    fn flush_instbuf(&mut self, ib: InstBuf) {
+        let len = ib.len();
+        debug_assert!(self.write_pos + len <= self.capacity);
+        unsafe {
+            let p = self.buf.add(self.write_pos);
+            // Two u64 writes cover up to 16 bytes (max x86 instruction length).
+            std::ptr::write_unaligned(p as *mut u64, ib.out as u64);
+            if len > 8 {
+                std::ptr::write_unaligned(p.add(8) as *mut u64, (ib.out >> 64) as u64);
+            }
+        }
+        self.write_pos += len;
+    }
+
     #[inline(always)]
     fn emit_u32(&mut self, v: u32) {
         debug_assert!(self.write_pos + 4 <= self.capacity);
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                v.to_le_bytes().as_ptr(),
-                self.buf.add(self.write_pos),
-                4,
-            );
+            std::ptr::write_unaligned(self.buf.add(self.write_pos) as *mut u32, v.to_le());
         }
         self.write_pos += 4;
     }
@@ -268,11 +354,7 @@ impl Assembler {
     fn emit_u64(&mut self, v: u64) {
         debug_assert!(self.write_pos + 8 <= self.capacity);
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                v.to_le_bytes().as_ptr(),
-                self.buf.add(self.write_pos),
-                8,
-            );
+            std::ptr::write_unaligned(self.buf.add(self.write_pos) as *mut u64, v.to_le());
         }
         self.write_pos += 8;
     }
@@ -281,11 +363,7 @@ impl Assembler {
     fn emit_i32(&mut self, v: i32) {
         debug_assert!(self.write_pos + 4 <= self.capacity);
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                v.to_le_bytes().as_ptr(),
-                self.buf.add(self.write_pos),
-                4,
-            );
+            std::ptr::write_unaligned(self.buf.add(self.write_pos) as *mut u32, v.to_le_bytes().as_ptr().cast::<u32>().read());
         }
         self.write_pos += 4;
     }
@@ -297,8 +375,9 @@ impl Assembler {
         let bound = self.labels[label.0 as usize];
         if bound != LABEL_UNBOUND {
             // Backward reference — resolve immediately, no fixup needed.
-            // rel32 = target - (current_offset + 4)
-            let rel = bound as i64 - (self.write_pos as i64 + 4);
+            // rel32 = target - (current_offset + 4). Stored value is offset+1.
+            let target = (bound - 1) as i64;
+            let rel = target - (self.write_pos as i64 + 4);
             self.emit_i32(rel as i32);
         } else {
             // Forward reference — defer to finalization.
@@ -340,39 +419,56 @@ impl Assembler {
         self.emit(0xC0 | (reg.lo() << 3) | rm.lo());
     }
 
-    /// ModR/M byte: mod=2 (register + disp32), reg field, base.
-    /// Emit ModR/M (+ optional SIB) + displacement for [base + disp] addressing.
-    /// Automatically picks disp0 (mod=00), disp8 (mod=01), or disp32 (mod=10).
-    fn modrm_disp(&mut self, reg: u8, base: Reg, disp: i32) {
+    /// ModR/M (+ optional SIB) + displacement for [base + disp] addressing.
+    /// Pushes into an InstBuf instead of emitting directly.
+    #[inline(always)]
+    fn modrm_disp_ib(ib: &mut InstBuf, reg: u8, base: Reg, disp: i32) {
         let bl = base.lo();
-        let needs_sib = bl == 4; // RSP/R12 need SIB byte
+        let needs_sib = bl == 4;
 
         if disp == 0 && bl != 5 {
-            // mod=00: no displacement (RBP/R13 can't use mod=00, it means RIP-relative)
             if needs_sib {
-                self.emit((reg << 3) | 4);
-                self.emit(0x24);
+                ib.push((reg << 3) | 4);
+                ib.push(0x24);
             } else {
-                self.emit((reg << 3) | bl);
+                ib.push((reg << 3) | bl);
             }
         } else if disp >= -128 && disp <= 127 {
-            // mod=01: disp8
             if needs_sib {
-                self.emit(0x40 | (reg << 3) | 4);
-                self.emit(0x24);
+                ib.push(0x40 | (reg << 3) | 4);
+                ib.push(0x24);
             } else {
-                self.emit(0x40 | (reg << 3) | bl);
+                ib.push(0x40 | (reg << 3) | bl);
             }
-            self.emit(disp as u8);
+            ib.push(disp as u8);
         } else {
-            // mod=10: disp32
             if needs_sib {
-                self.emit(0x80 | (reg << 3) | 4);
-                self.emit(0x24);
+                ib.push(0x80 | (reg << 3) | 4);
+                ib.push(0x24);
             } else {
-                self.emit(0x80 | (reg << 3) | bl);
+                ib.push(0x80 | (reg << 3) | bl);
             }
-            self.emit_i32(disp);
+            ib.push_i32(disp);
+        }
+    }
+
+    /// Legacy wrapper — delegates to InstBuf-based version.
+    fn modrm_disp(&mut self, reg: u8, base: Reg, disp: i32) {
+        let mut ib = InstBuf::new();
+        Self::modrm_disp_ib(&mut ib, reg, base, disp);
+        self.flush_instbuf(ib);
+    }
+
+    /// ModR/M + SIB for [base + index] addressing, into InstBuf.
+    #[inline(always)]
+    fn modrm_sib_base_index_ib(ib: &mut InstBuf, reg: u8, base: Reg, index: Reg) {
+        if base.lo() == 5 {
+            ib.push(0x44 | (reg << 3));
+            ib.push((index.lo() << 3) | base.lo());
+            ib.push(0);
+        } else {
+            ib.push((reg << 3) | 4);
+            ib.push((index.lo() << 3) | base.lo());
         }
     }
 
@@ -380,13 +476,15 @@ impl Assembler {
     /// Used when the immediate after the displacement must be at a fixed offset
     /// (e.g., for patch-based gas metering where the imm32 is written later).
     fn modrm_disp32(&mut self, reg: u8, base: Reg, disp: i32) {
+        let mut ib = InstBuf::new();
         if base.lo() == 4 {
-            self.emit(0x80 | (reg << 3) | 4);
-            self.emit(0x24);
+            ib.push(0x80 | (reg << 3) | 4);
+            ib.push(0x24);
         } else {
-            self.emit(0x80 | (reg << 3) | base.lo());
+            ib.push(0x80 | (reg << 3) | base.lo());
         }
-        self.emit_i32(disp);
+        ib.push_i32(disp);
+        self.flush_instbuf(ib);
     }
 
     // === Instruction emission ===
@@ -405,282 +503,327 @@ impl Assembler {
 
     /// mov r64, imm64
     pub fn mov_ri64(&mut self, dst: Reg, imm: u64) {
+        let mut ib = InstBuf::new();
         if imm == 0 {
             // xor r32, r32 (clears full r64)
-            self.rex_opt(dst, dst);
-            self.emit(0x31);
-            self.modrm_rr(dst, dst);
+            let r = dst.hi();
+            if r != 0 { ib.push(0x40 | (r << 2) | r); }
+            ib.push(0x31);
+            ib.push(0xC0 | (dst.lo() << 3) | dst.lo());
         } else if imm <= u32::MAX as u64 {
             // mov r32, imm32 (zero-extends to 64)
-            self.rex_opt_b(dst);
-            self.emit(0xB8 + dst.lo());
-            self.emit_u32(imm as u32);
+            if dst.needs_rex() { ib.push(0x40 | dst.hi()); }
+            ib.push(0xB8 + dst.lo());
+            ib.push_u32(imm as u32);
         } else if imm as i64 >= i32::MIN as i64 && imm as i64 <= i32::MAX as i64 {
             // mov r64, sign-extended imm32
-            self.rex_w_b(dst);
-            self.emit(0xC7);
-            self.emit(0xC0 | dst.lo());
-            self.emit_i32(imm as i32);
+            ib.push(0x48 | dst.hi());
+            ib.push(0xC7);
+            ib.push(0xC0 | dst.lo());
+            ib.push_i32(imm as i32);
         } else {
             // mov r64, imm64
-            self.rex_w_b(dst);
-            self.emit(0xB8 + dst.lo());
-            self.emit_u64(imm);
+            ib.push(0x48 | dst.hi());
+            ib.push(0xB8 + dst.lo());
+            ib.push_u64(imm);
         }
+        self.flush_instbuf(ib);
     }
 
     /// mov r32, imm32 (zero-extends to 64-bit)
     pub fn mov_ri32(&mut self, dst: Reg, imm: u32) {
-        self.rex_opt_b(dst);
-        self.emit(0xB8 + dst.lo());
-        self.emit_u32(imm);
+        let mut ib = InstBuf::new();
+        if dst.needs_rex() { ib.push(0x40 | dst.hi()); }
+        ib.push(0xB8 + dst.lo());
+        ib.push_u32(imm);
+        self.flush_instbuf(ib);
     }
 
     /// mov r32, [base + disp] — zero-extending 32-bit load
     pub fn mov_load32(&mut self, dst: Reg, base: Reg, disp: i32) {
-        self.rex_opt(dst, base);
-        self.emit(0x8B);
-        self.modrm_disp(dst.lo(), base, disp);
+        let mut ib = InstBuf::new();
+        let r = dst.hi(); let b = base.hi();
+        if r != 0 || b != 0 { ib.push(0x40 | (r << 2) | b); }
+        ib.push(0x8B);
+        Self::modrm_disp_ib(&mut ib, dst.lo(), base, disp);
+        self.flush_instbuf(ib);
     }
 
     /// mov r64, [base + disp]
     pub fn mov_load64(&mut self, dst: Reg, base: Reg, disp: i32) {
-        self.rex_w(dst, base);
-        self.emit(0x8B);
-        self.modrm_disp(dst.lo(), base, disp);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (dst.hi() << 2) | base.hi());
+        ib.push(0x8B);
+        Self::modrm_disp_ib(&mut ib, dst.lo(), base, disp);
+        self.flush_instbuf(ib);
     }
 
     /// movsxd r64, dword [base + index*4] — sign-extending load with SIB scale=4
     pub fn movsxd_load_sib4(&mut self, dst: Reg, base: Reg, index: Reg) {
-        // REX.W prefix: 0x48 | (dst.hi << 2) | (index.hi << 1) | base.hi
-        self.emit(0x48 | (dst.hi() << 2) | (index.hi() << 1) | base.hi());
-        self.emit(0x63); // movsxd opcode
-        // ModR/M: mod=00, reg=dst, rm=100 (SIB follows)
-        self.emit((dst.lo() << 3) | 4);
-        // SIB: scale=10 (4), index, base
-        self.emit(0x80 | (index.lo() << 3) | base.lo());
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (dst.hi() << 2) | (index.hi() << 1) | base.hi());
+        ib.push(0x63);
+        ib.push((dst.lo() << 3) | 4);
+        ib.push(0x80 | (index.lo() << 3) | base.lo());
+        self.flush_instbuf(ib);
     }
 
     /// mov dword [base + disp], r32 — 32-bit store
     pub fn mov_store32(&mut self, base: Reg, disp: i32, src: Reg) {
-        self.rex_opt(src, base);
-        self.emit(0x89);
-        self.modrm_disp(src.lo(), base, disp);
+        let mut ib = InstBuf::new();
+        let r = src.hi(); let b = base.hi();
+        if r != 0 || b != 0 { ib.push(0x40 | (r << 2) | b); }
+        ib.push(0x89);
+        Self::modrm_disp_ib(&mut ib, src.lo(), base, disp);
+        self.flush_instbuf(ib);
     }
 
     /// mov [base + disp], r64
     pub fn mov_store64(&mut self, base: Reg, disp: i32, src: Reg) {
-        self.rex_w(src, base);
-        self.emit(0x89);
-        self.modrm_disp(src.lo(), base, disp);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (src.hi() << 2) | base.hi());
+        ib.push(0x89);
+        Self::modrm_disp_ib(&mut ib, src.lo(), base, disp);
+        self.flush_instbuf(ib);
     }
 
     /// mov dword [base + disp], imm32
     pub fn mov_store32_imm(&mut self, base: Reg, disp: i32, imm: i32) {
-        self.rex_opt_b(base);
-        self.emit(0xC7);
-        self.modrm_disp(0, base, disp);
-        self.emit_i32(imm);
+        let mut ib = InstBuf::new();
+        if base.needs_rex() { ib.push(0x40 | base.hi()); }
+        ib.push(0xC7);
+        Self::modrm_disp_ib(&mut ib, 0, base, disp);
+        ib.push_i32(imm);
+        self.flush_instbuf(ib);
     }
 
     /// mov qword [base + disp], sign-extended imm32
     pub fn mov_store64_imm(&mut self, base: Reg, disp: i32, imm: i32) {
-        self.rex_w_b(base);
-        self.emit(0xC7);
-        self.modrm_disp(0, base, disp);
-        self.emit_i32(imm);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | base.hi());
+        ib.push(0xC7);
+        Self::modrm_disp_ib(&mut ib, 0, base, disp);
+        ib.push_i32(imm);
+        self.flush_instbuf(ib);
     }
 
     // -- SIB-based memory access [base + index] --
 
     /// Emit ModR/M + SIB for [base + index] addressing (scale=1, no displacement).
     /// Special case: base=RBP/R13 requires mod=01 with disp8=0.
+    /// Legacy wrapper — used by methods not yet converted to InstBuf.
     fn modrm_sib_base_index(&mut self, reg: u8, base: Reg, index: Reg) {
-        if base.lo() == 5 {
-            // RBP/R13: mod=01, rm=100 (SIB), disp8=0
-            self.emit(0x44 | (reg << 3)); // ModR/M: mod=01, reg, rm=100
-            self.emit((index.lo() << 3) | base.lo()); // SIB: scale=00, index, base
-            self.emit(0); // disp8 = 0
-        } else {
-            // mod=00, rm=100 (SIB)
-            self.emit((reg << 3) | 4); // ModR/M
-            self.emit((index.lo() << 3) | base.lo()); // SIB: scale=00, index, base
-        }
+        let mut ib = InstBuf::new();
+        Self::modrm_sib_base_index_ib(&mut ib, reg, base, index);
+        self.flush_instbuf(ib);
     }
 
     /// movzx r64, byte [base + index] — zero-extending u8 load
     pub fn movzx_load8_sib(&mut self, dst: Reg, base: Reg, index: Reg) {
-        self.emit(0x48 | (dst.hi() << 2) | (index.hi() << 1) | base.hi());
-        self.emit(0x0F);
-        self.emit(0xB6);
-        self.modrm_sib_base_index(dst.lo(), base, index);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (dst.hi() << 2) | (index.hi() << 1) | base.hi());
+        ib.push(0x0F);
+        ib.push(0xB6);
+        Self::modrm_sib_base_index_ib(&mut ib, dst.lo(), base, index);
+        self.flush_instbuf(ib);
     }
 
     /// movzx r32, word [base + index] — zero-extending u16 load
     pub fn movzx_load16_sib(&mut self, dst: Reg, base: Reg, index: Reg) {
+        let mut ib = InstBuf::new();
         let rex = 0x40 | (dst.hi() << 2) | (index.hi() << 1) | base.hi();
-        if rex != 0x40 { self.emit(rex); }
-        self.emit(0x0F);
-        self.emit(0xB7);
-        self.modrm_sib_base_index(dst.lo(), base, index);
+        if rex != 0x40 { ib.push(rex); }
+        ib.push(0x0F);
+        ib.push(0xB7);
+        Self::modrm_sib_base_index_ib(&mut ib, dst.lo(), base, index);
+        self.flush_instbuf(ib);
     }
 
     /// mov r32, dword [base + index] — zero-extending u32 load
     pub fn mov_load32_sib(&mut self, dst: Reg, base: Reg, index: Reg) {
+        let mut ib = InstBuf::new();
         let rex = 0x40 | (dst.hi() << 2) | (index.hi() << 1) | base.hi();
-        if rex != 0x40 { self.emit(rex); }
-        self.emit(0x8B);
-        self.modrm_sib_base_index(dst.lo(), base, index);
+        if rex != 0x40 { ib.push(rex); }
+        ib.push(0x8B);
+        Self::modrm_sib_base_index_ib(&mut ib, dst.lo(), base, index);
+        self.flush_instbuf(ib);
     }
 
     /// mov r64, qword [base + index]
     pub fn mov_load64_sib(&mut self, dst: Reg, base: Reg, index: Reg) {
-        self.emit(0x48 | (dst.hi() << 2) | (index.hi() << 1) | base.hi());
-        self.emit(0x8B);
-        self.modrm_sib_base_index(dst.lo(), base, index);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (dst.hi() << 2) | (index.hi() << 1) | base.hi());
+        ib.push(0x8B);
+        Self::modrm_sib_base_index_ib(&mut ib, dst.lo(), base, index);
+        self.flush_instbuf(ib);
     }
 
     /// mov byte [base + index], r8
     pub fn mov_store8_sib(&mut self, base: Reg, index: Reg, src: Reg) {
-        // Need REX for uniform byte reg access (SPL etc)
-        self.emit(0x40 | (src.hi() << 2) | (index.hi() << 1) | base.hi());
-        self.emit(0x88);
-        self.modrm_sib_base_index(src.lo(), base, index);
+        let mut ib = InstBuf::new();
+        ib.push(0x40 | (src.hi() << 2) | (index.hi() << 1) | base.hi());
+        ib.push(0x88);
+        Self::modrm_sib_base_index_ib(&mut ib, src.lo(), base, index);
+        self.flush_instbuf(ib);
     }
 
     /// mov word [base + index], r16
     pub fn mov_store16_sib(&mut self, base: Reg, index: Reg, src: Reg) {
-        self.emit(0x66); // operand size prefix
+        let mut ib = InstBuf::new();
+        ib.push(0x66);
         let rex = 0x40 | (src.hi() << 2) | (index.hi() << 1) | base.hi();
-        if rex != 0x40 { self.emit(rex); }
-        self.emit(0x89);
-        self.modrm_sib_base_index(src.lo(), base, index);
+        if rex != 0x40 { ib.push(rex); }
+        ib.push(0x89);
+        Self::modrm_sib_base_index_ib(&mut ib, src.lo(), base, index);
+        self.flush_instbuf(ib);
     }
 
     /// mov dword [base + index], r32
     pub fn mov_store32_sib(&mut self, base: Reg, index: Reg, src: Reg) {
+        let mut ib = InstBuf::new();
         let rex = 0x40 | (src.hi() << 2) | (index.hi() << 1) | base.hi();
-        if rex != 0x40 { self.emit(rex); }
-        self.emit(0x89);
-        self.modrm_sib_base_index(src.lo(), base, index);
+        if rex != 0x40 { ib.push(rex); }
+        ib.push(0x89);
+        Self::modrm_sib_base_index_ib(&mut ib, src.lo(), base, index);
+        self.flush_instbuf(ib);
     }
 
     /// mov qword [base + index], r64
     pub fn mov_store64_sib(&mut self, base: Reg, index: Reg, src: Reg) {
-        self.emit(0x48 | (src.hi() << 2) | (index.hi() << 1) | base.hi());
-        self.emit(0x89);
-        self.modrm_sib_base_index(src.lo(), base, index);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (src.hi() << 2) | (index.hi() << 1) | base.hi());
+        ib.push(0x89);
+        Self::modrm_sib_base_index_ib(&mut ib, src.lo(), base, index);
+        self.flush_instbuf(ib);
     }
 
     /// mov dword [base + index], imm32
     pub fn mov_store32_sib_imm(&mut self, base: Reg, index: Reg, imm: i32) {
+        let mut ib = InstBuf::new();
         let rex = 0x40 | (index.hi() << 1) | base.hi();
-        if rex != 0x40 { self.emit(rex); }
-        self.emit(0xC7); // MOV r/m32, imm32
-        self.modrm_sib_base_index(0, base, index);
-        self.emit_i32(imm);
+        if rex != 0x40 { ib.push(rex); }
+        ib.push(0xC7);
+        Self::modrm_sib_base_index_ib(&mut ib, 0, base, index);
+        ib.push_i32(imm);
+        self.flush_instbuf(ib);
     }
 
     /// mov qword [base + index], sign-extended imm32
     pub fn mov_store64_sib_imm(&mut self, base: Reg, index: Reg, imm: i32) {
-        self.emit(0x48 | (index.hi() << 1) | base.hi()); // REX.W
-        self.emit(0xC7); // MOV r/m64, imm32
-        self.modrm_sib_base_index(0, base, index);
-        self.emit_i32(imm);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (index.hi() << 1) | base.hi());
+        ib.push(0xC7);
+        Self::modrm_sib_base_index_ib(&mut ib, 0, base, index);
+        ib.push_i32(imm);
+        self.flush_instbuf(ib);
     }
 
     /// mov byte [base + index], imm8
     pub fn mov_store8_sib_imm(&mut self, base: Reg, index: Reg, imm: u8) {
-        self.emit(0x40 | (index.hi() << 1) | base.hi()); // REX for uniform byte access
-        self.emit(0xC6); // MOV r/m8, imm8
-        self.modrm_sib_base_index(0, base, index);
-        self.emit(imm);
+        let mut ib = InstBuf::new();
+        ib.push(0x40 | (index.hi() << 1) | base.hi());
+        ib.push(0xC6);
+        Self::modrm_sib_base_index_ib(&mut ib, 0, base, index);
+        ib.push(imm);
+        self.flush_instbuf(ib);
     }
 
     /// mov word [base + index], imm16
     pub fn mov_store16_sib_imm(&mut self, base: Reg, index: Reg, imm: u16) {
-        self.emit(0x66); // operand size prefix
+        let mut ib = InstBuf::new();
+        ib.push(0x66);
         let rex = 0x40 | (index.hi() << 1) | base.hi();
-        if rex != 0x40 { self.emit(rex); }
-        self.emit(0xC7); // MOV r/m16, imm16
-        self.modrm_sib_base_index(0, base, index);
-        self.emit(imm as u8);
-        self.emit((imm >> 8) as u8);
+        if rex != 0x40 { ib.push(rex); }
+        ib.push(0xC7);
+        Self::modrm_sib_base_index_ib(&mut ib, 0, base, index);
+        ib.push(imm as u8);
+        ib.push((imm >> 8) as u8);
+        self.flush_instbuf(ib);
     }
 
     /// add r64, qword [base + disp32]
     pub fn add_r64_mem(&mut self, dst: Reg, base: Reg, disp: i32) {
-        self.rex_w(dst, base);
-        self.emit(0x03);
-        self.modrm_disp(dst.lo(), base, disp);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (dst.hi() << 2) | base.hi());
+        ib.push(0x03);
+        Self::modrm_disp_ib(&mut ib, dst.lo(), base, disp);
+        self.flush_instbuf(ib);
     }
 
     /// movzx r64, byte [rax] (simple deref, no SIB needed) — for perm table lookup
     pub fn movzx_load8_deref(&mut self, dst: Reg, base: Reg) {
-        self.emit(0x48 | (dst.hi() << 2) | base.hi());
-        self.emit(0x0F);
-        self.emit(0xB6);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (dst.hi() << 2) | base.hi());
+        ib.push(0x0F);
+        ib.push(0xB6);
         if base.lo() == 5 {
-            // RBP/R13: need mod=01, disp8=0
-            self.emit((dst.lo() << 3) | base.lo() | 0x40);
-            self.emit(0);
+            ib.push((dst.lo() << 3) | base.lo() | 0x40);
+            ib.push(0);
         } else if base.lo() == 4 {
-            // RSP/R12: need SIB
-            self.emit((dst.lo() << 3) | 4);
-            self.emit(0x24);
+            ib.push((dst.lo() << 3) | 4);
+            ib.push(0x24);
         } else {
-            self.emit((dst.lo() << 3) | base.lo());
+            ib.push((dst.lo() << 3) | base.lo());
         }
+        self.flush_instbuf(ib);
     }
 
     /// cmp byte [base + index + disp32], imm8 — compare memory byte with SIB+displacement
     pub fn cmp_byte_sib_disp32(&mut self, base: Reg, index: Reg, disp: i32, imm: u8) {
-        // REX prefix for extended registers
+        let mut ib = InstBuf::new();
         let rex = 0x40 | (index.hi() << 1) | base.hi();
-        if rex != 0x40 { self.emit(rex); }
-        self.emit(0x80); // ALU r/m8, imm8
-        // ModR/M: mod=10 (disp32), reg=/7 (CMP), rm=100 (SIB)
-        self.emit(0xBC); // 10_111_100
-        // SIB: scale=00, index, base
-        self.emit((index.lo() << 3) | base.lo());
-        self.emit_i32(disp);
-        self.emit(imm);
+        if rex != 0x40 { ib.push(rex); }
+        ib.push(0x80);
+        ib.push(0xBC); // mod=10, reg=/7(CMP), rm=100(SIB)
+        ib.push((index.lo() << 3) | base.lo());
+        ib.push_i32(disp);
+        ib.push(imm);
+        self.flush_instbuf(ib);
     }
 
     /// cmp byte [reg], imm8 — compare memory byte with immediate
     pub fn cmp_byte_deref_imm(&mut self, base: Reg, imm: u8) {
-        // REX prefix needed for R8-R15 base
-        if base.needs_rex() {
-            self.emit(0x41 | base.hi());
-        }
-        self.emit(0x80); // ALU r/m8, imm8
-        // ModR/M: mod depends on base register
+        let mut ib = InstBuf::new();
+        if base.needs_rex() { ib.push(0x41 | base.hi()); }
+        ib.push(0x80);
         if base.lo() == 5 {
-            // RBP/R13: need mod=01, disp8=0
-            self.emit(0x78 | base.lo()); // /7 = CMP, mod=01
-            self.emit(0); // disp8
+            ib.push(0x78 | base.lo());
+            ib.push(0);
         } else if base.lo() == 4 {
-            // RSP/R12: need SIB
-            self.emit(0x38 | 4); // /7 = CMP, mod=00, rm=100
-            self.emit(0x24); // SIB: base=RSP/R12
+            ib.push(0x38 | 4);
+            ib.push(0x24);
         } else {
-            self.emit(0x38 | base.lo()); // /7 = CMP, mod=00
+            ib.push(0x38 | base.lo());
         }
-        self.emit(imm);
+        ib.push(imm);
+        self.flush_instbuf(ib);
     }
 
     // -- ALU reg,reg (64-bit) --
 
     fn alu_rr64(&mut self, op: u8, dst: Reg, src: Reg) {
-        self.rex_w(src, dst);
-        self.emit(op);
-        self.modrm_rr(src, dst);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (src.hi() << 2) | dst.hi());
+        ib.push(op);
+        ib.push(0xC0 | (src.lo() << 3) | dst.lo());
+        self.flush_instbuf(ib);
     }
 
     fn alu_rr32(&mut self, op: u8, dst: Reg, src: Reg) {
-        self.rex_opt(src, dst);
-        self.emit(op);
-        self.modrm_rr(src, dst);
+        let r = src.hi();
+        let b = dst.hi();
+        if r != 0 || b != 0 {
+            let mut ib = InstBuf::new();
+            ib.push(0x40 | (r << 2) | b);
+            ib.push(op);
+            ib.push(0xC0 | (src.lo() << 3) | dst.lo());
+            self.flush_instbuf(ib);
+        } else {
+            let mut ib = InstBuf::new();
+            ib.push(op);
+            ib.push(0xC0 | (src.lo() << 3) | dst.lo());
+            self.flush_instbuf(ib);
+        }
     }
 
     pub fn add_rr(&mut self, dst: Reg, src: Reg) { self.alu_rr64(0x01, dst, src); }
@@ -698,29 +841,33 @@ impl Assembler {
     // Uses imm8 (opcode 0x83) when immediate fits in -128..127, saving 3 bytes.
 
     fn alu_ri64(&mut self, ext: u8, dst: Reg, imm: i32) {
-        self.rex_w_b(dst);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | dst.hi());
         if imm >= -128 && imm <= 127 {
-            self.emit(0x83);
-            self.emit(0xC0 | (ext << 3) | dst.lo());
-            self.emit(imm as u8);
+            ib.push(0x83);
+            ib.push(0xC0 | (ext << 3) | dst.lo());
+            ib.push(imm as u8);
         } else {
-            self.emit(0x81);
-            self.emit(0xC0 | (ext << 3) | dst.lo());
-            self.emit_i32(imm);
+            ib.push(0x81);
+            ib.push(0xC0 | (ext << 3) | dst.lo());
+            ib.push_i32(imm);
         }
+        self.flush_instbuf(ib);
     }
 
     fn alu_ri32(&mut self, ext: u8, dst: Reg, imm: i32) {
-        self.rex_opt_b(dst);
+        let mut ib = InstBuf::new();
+        if dst.needs_rex() { ib.push(0x40 | dst.hi()); }
         if imm >= -128 && imm <= 127 {
-            self.emit(0x83);
-            self.emit(0xC0 | (ext << 3) | dst.lo());
-            self.emit(imm as u8);
+            ib.push(0x83);
+            ib.push(0xC0 | (ext << 3) | dst.lo());
+            ib.push(imm as u8);
         } else {
-            self.emit(0x81);
-            self.emit(0xC0 | (ext << 3) | dst.lo());
-            self.emit_i32(imm);
+            ib.push(0x81);
+            ib.push(0xC0 | (ext << 3) | dst.lo());
+            ib.push_i32(imm);
         }
+        self.flush_instbuf(ib);
     }
 
     pub fn add_ri(&mut self, dst: Reg, imm: i32) { self.alu_ri64(0, dst, imm); }
@@ -736,36 +883,41 @@ impl Assembler {
 
     /// cmp dword [base + disp], imm32
     pub fn cmp_mem32_imm(&mut self, base: Reg, disp: i32, imm: i32) {
-        if base.hi() != 0 {
-            self.emit(0x41);             // REX.B for extended base register
-        }
-        self.emit(0x81);                 // ALU r/m32, imm32
-        self.modrm_disp(7, base, disp);
-        self.emit_i32(imm);
+        let mut ib = InstBuf::new();
+        if base.hi() != 0 { ib.push(0x41); }
+        ib.push(0x81);
+        Self::modrm_disp_ib(&mut ib, 7, base, disp);
+        ib.push_i32(imm);
+        self.flush_instbuf(ib);
     }
 
     /// cmp dword [base + disp], reg32  (sets flags: mem vs reg)
     pub fn cmp_mem32_r(&mut self, base: Reg, disp: i32, src: Reg) {
+        let mut ib = InstBuf::new();
         if base.hi() != 0 || src.hi() != 0 {
-            self.emit(0x40 | src.hi() << 2 | base.hi()); // REX
+            ib.push(0x40 | src.hi() << 2 | base.hi());
         }
-        self.emit(0x39);                 // CMP r/m32, r32
-        self.modrm_disp(src.lo(), base, disp);
+        ib.push(0x39);
+        Self::modrm_disp_ib(&mut ib, src.lo(), base, disp);
+        self.flush_instbuf(ib);
     }
 
     /// sub qword [base + disp32], sign-extended imm32.
     /// Always uses disp32 encoding (the imm32 is patched after emission for gas metering).
     pub fn sub_mem64_imm32(&mut self, base: Reg, disp: i32, imm: i32) {
-        self.rex_w_b(base);          // REX.W (+ REX.B if base is R8-R15)
-        self.emit(0x81);             // ALU r/m64, imm32
+        // NOTE: Cannot use InstBuf here — caller reads offset() for gas patching.
+        // The offset must be at the exact position of the imm32 field.
+        self.rex_w_b(base);
+        self.emit(0x81);
         self.modrm_disp32(5, base, disp);
         self.emit_i32(imm);
     }
 
     /// add qword [base + disp32], imm32
     pub fn add_mem64_imm32(&mut self, base: Reg, disp: i32, imm: i32) {
-        self.rex_w_b(base);          // REX.W (+ REX.B if base is R8-R15)
-        self.emit(0x81);             // ALU r/m64, imm32
+        // Same as sub_mem64_imm32 — offset() must be accurate for patching.
+        self.rex_w_b(base);
+        self.emit(0x81);
         self.modrm_disp32(0, base, disp);
         self.emit_i32(imm);
     }
@@ -774,80 +926,92 @@ impl Assembler {
 
     /// imul r64, r64
     pub fn imul_rr(&mut self, dst: Reg, src: Reg) {
-        self.rex_w(dst, src);
-        self.emit(0x0F);
-        self.emit(0xAF);
-        self.modrm_rr(dst, src);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (dst.hi() << 2) | src.hi());
+        ib.push(0x0F);
+        ib.push(0xAF);
+        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
+        self.flush_instbuf(ib);
     }
 
     /// imul r32, r32
     pub fn imul_rr32(&mut self, dst: Reg, src: Reg) {
-        self.rex_opt(dst, src);
-        self.emit(0x0F);
-        self.emit(0xAF);
-        self.modrm_rr(dst, src);
+        let mut ib = InstBuf::new();
+        let r = dst.hi(); let b = src.hi();
+        if r != 0 || b != 0 { ib.push(0x40 | (r << 2) | b); }
+        ib.push(0x0F);
+        ib.push(0xAF);
+        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
+        self.flush_instbuf(ib);
     }
 
     /// imul r64, r64, imm32
     pub fn imul_rri(&mut self, dst: Reg, src: Reg, imm: i32) {
-        self.rex_w(dst, src);
-        self.emit(0x69);
-        self.modrm_rr(dst, src);
-        self.emit_i32(imm);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (dst.hi() << 2) | src.hi());
+        ib.push(0x69);
+        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
+        ib.push_i32(imm);
+        self.flush_instbuf(ib);
     }
 
     /// imul r32, r32, imm32
     pub fn imul_rri32(&mut self, dst: Reg, src: Reg, imm: i32) {
-        self.rex_opt(dst, src);
-        self.emit(0x69);
-        self.modrm_rr(dst, src);
-        self.emit_i32(imm);
+        let mut ib = InstBuf::new();
+        let r = dst.hi(); let b = src.hi();
+        if r != 0 || b != 0 { ib.push(0x40 | (r << 2) | b); }
+        ib.push(0x69);
+        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
+        ib.push_i32(imm);
+        self.flush_instbuf(ib);
     }
 
     // -- MUL/IMUL widening (RDX:RAX = RAX * src) --
 
     /// mul r64 (unsigned RDX:RAX = RAX * src)
     pub fn mul_rdx_rax(&mut self, src: Reg) {
-        self.rex_w_b(src);
-        self.emit(0xF7);
-        self.emit(0xE0 | src.lo()); // /4
+        self.emit3(0x48 | src.hi(), 0xF7, 0xE0 | src.lo());
     }
 
     /// imul r64 (signed RDX:RAX = RAX * src)
     pub fn imul_rdx_rax(&mut self, src: Reg) {
-        self.rex_w_b(src);
-        self.emit(0xF7);
-        self.emit(0xE8 | src.lo()); // /5
+        self.emit3(0x48 | src.hi(), 0xF7, 0xE8 | src.lo());
     }
 
     // -- DIV/IDIV --
 
     /// div r64 (unsigned RAX = RDX:RAX / src, RDX = remainder)
     pub fn div64(&mut self, src: Reg) {
-        self.rex_w_b(src);
-        self.emit(0xF7);
-        self.emit(0xF0 | src.lo()); // /6
+        self.emit3(0x48 | src.hi(), 0xF7, 0xF0 | src.lo());
     }
 
     /// idiv r64 (signed)
     pub fn idiv64(&mut self, src: Reg) {
-        self.rex_w_b(src);
-        self.emit(0xF7);
-        self.emit(0xF8 | src.lo()); // /7
+        self.emit3(0x48 | src.hi(), 0xF7, 0xF8 | src.lo());
     }
 
     /// div r32
     pub fn div32(&mut self, src: Reg) {
-        self.rex_opt_b(src);
-        self.emit(0xF7);
-        self.emit(0xF0 | src.lo());
+        if src.needs_rex() {
+            self.emit3(0x41, 0xF7, 0xF0 | src.lo());
+        } else {
+            let mut ib = InstBuf::new();
+            ib.push(0xF7);
+            ib.push(0xF0 | src.lo());
+            self.flush_instbuf(ib);
+        }
     }
 
     /// idiv r32
     pub fn idiv32(&mut self, src: Reg) {
-        self.rex_opt_b(src);
-        self.emit(0xF7);
-        self.emit(0xF8 | src.lo());
+        if src.needs_rex() {
+            self.emit3(0x41, 0xF7, 0xF8 | src.lo());
+        } else {
+            let mut ib = InstBuf::new();
+            ib.push(0xF7);
+            ib.push(0xF8 | src.lo());
+            self.flush_instbuf(ib);
+        }
     }
 
     /// cqo (sign-extend RAX into RDX:RAX, 64-bit)
@@ -865,66 +1029,71 @@ impl Assembler {
 
     /// inc r64
     pub fn inc64(&mut self, dst: Reg) {
-        self.rex_w_b(dst);
-        self.emit(0xFF);
-        self.emit(0xC0 | dst.lo()); // /0
+        self.emit3(0x48 | dst.hi(), 0xFF, 0xC0 | dst.lo());
     }
 
     /// dec r64
     pub fn dec64(&mut self, dst: Reg) {
-        self.rex_w_b(dst);
-        self.emit(0xFF);
-        self.emit(0xC8 | dst.lo()); // /1
+        self.emit3(0x48 | dst.hi(), 0xFF, 0xC8 | dst.lo());
     }
 
     // -- NEG/NOT --
 
     /// neg r64
     pub fn neg64(&mut self, dst: Reg) {
-        self.rex_w_b(dst);
-        self.emit(0xF7);
-        self.emit(0xD8 | dst.lo()); // /3
+        self.emit3(0x48 | dst.hi(), 0xF7, 0xD8 | dst.lo());
     }
 
     pub fn neg32(&mut self, dst: Reg) {
-        self.rex_opt_b(dst);
-        self.emit(0xF7);
-        self.emit(0xD8 | dst.lo()); // /3
+        if dst.needs_rex() {
+            self.emit3(0x41, 0xF7, 0xD8 | dst.lo());
+        } else {
+            let mut ib = InstBuf::new();
+            ib.push(0xF7);
+            ib.push(0xD8 | dst.lo());
+            self.flush_instbuf(ib);
+        }
     }
 
     /// not r64
     pub fn not64(&mut self, dst: Reg) {
-        self.rex_w_b(dst);
-        self.emit(0xF7);
-        self.emit(0xD0 | dst.lo()); // /2
+        self.emit3(0x48 | dst.hi(), 0xF7, 0xD0 | dst.lo());
     }
 
     // -- Shifts --
 
     fn shift_ri64(&mut self, ext: u8, dst: Reg, imm: u8) {
-        self.rex_w_b(dst);
-        self.emit(0xC1);
-        self.emit(0xC0 | (ext << 3) | dst.lo());
-        self.emit(imm);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | dst.hi());
+        ib.push(0xC1);
+        ib.push(0xC0 | (ext << 3) | dst.lo());
+        ib.push(imm);
+        self.flush_instbuf(ib);
     }
 
     pub fn shift_cl64(&mut self, ext: u8, dst: Reg) {
-        self.rex_w_b(dst);
-        self.emit(0xD3);
-        self.emit(0xC0 | (ext << 3) | dst.lo());
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | dst.hi());
+        ib.push(0xD3);
+        ib.push(0xC0 | (ext << 3) | dst.lo());
+        self.flush_instbuf(ib);
     }
 
     fn shift_ri32(&mut self, ext: u8, dst: Reg, imm: u8) {
-        self.rex_opt_b(dst);
-        self.emit(0xC1);
-        self.emit(0xC0 | (ext << 3) | dst.lo());
-        self.emit(imm);
+        let mut ib = InstBuf::new();
+        if dst.needs_rex() { ib.push(0x40 | dst.hi()); }
+        ib.push(0xC1);
+        ib.push(0xC0 | (ext << 3) | dst.lo());
+        ib.push(imm);
+        self.flush_instbuf(ib);
     }
 
     pub fn shift_cl32(&mut self, ext: u8, dst: Reg) {
-        self.rex_opt_b(dst);
-        self.emit(0xD3);
-        self.emit(0xC0 | (ext << 3) | dst.lo());
+        let mut ib = InstBuf::new();
+        if dst.needs_rex() { ib.push(0x40 | dst.hi()); }
+        ib.push(0xD3);
+        ib.push(0xC0 | (ext << 3) | dst.lo());
+        self.flush_instbuf(ib);
     }
 
     pub fn shl_ri64(&mut self, dst: Reg, imm: u8) { self.shift_ri64(4, dst, imm); }
@@ -953,108 +1122,126 @@ impl Assembler {
 
     /// movsxd r64, r32 (sign-extend 32→64)
     pub fn movsxd(&mut self, dst: Reg, src: Reg) {
-        self.rex_w(dst, src);
-        self.emit(0x63);
-        self.modrm_rr(dst, src);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (dst.hi() << 2) | src.hi());
+        ib.push(0x63);
+        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
+        self.flush_instbuf(ib);
     }
 
     /// movsx r64, r8 (sign-extend 8→64)
     pub fn movsx_8_64(&mut self, dst: Reg, src: Reg) {
-        self.rex_w(dst, src);
-        self.emit(0x0F);
-        self.emit(0xBE);
-        self.modrm_rr(dst, src);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (dst.hi() << 2) | src.hi());
+        ib.push(0x0F);
+        ib.push(0xBE);
+        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
+        self.flush_instbuf(ib);
     }
 
     /// movsx r64, r16 (sign-extend 16→64)
     pub fn movsx_16_64(&mut self, dst: Reg, src: Reg) {
-        self.rex_w(dst, src);
-        self.emit(0x0F);
-        self.emit(0xBF);
-        self.modrm_rr(dst, src);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (dst.hi() << 2) | src.hi());
+        ib.push(0x0F);
+        ib.push(0xBF);
+        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
+        self.flush_instbuf(ib);
     }
 
     /// movzx r64, r8 (zero-extend 8→64)
     pub fn movzx_8_64(&mut self, dst: Reg, src: Reg) {
-        // REX.W not strictly needed since movzx r32,r8 zero-extends, but it's
-        // needed for R8-R15 access and consistency.
-        self.rex_w(dst, src);
-        self.emit(0x0F);
-        self.emit(0xB6);
-        self.modrm_rr(dst, src);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (dst.hi() << 2) | src.hi());
+        ib.push(0x0F);
+        ib.push(0xB6);
+        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
+        self.flush_instbuf(ib);
     }
 
     /// movzx r32, r16 (zero-extends to 64 due to 32-bit operation)
     pub fn movzx_16_64(&mut self, dst: Reg, src: Reg) {
-        self.rex_opt(dst, src);
-        self.emit(0x0F);
-        self.emit(0xB7);
-        self.modrm_rr(dst, src);
+        let mut ib = InstBuf::new();
+        let r = dst.hi(); let b = src.hi();
+        if r != 0 || b != 0 { ib.push(0x40 | (r << 2) | b); }
+        ib.push(0x0F);
+        ib.push(0xB7);
+        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
+        self.flush_instbuf(ib);
     }
 
     /// Zero-extend 32→64: mov r32, r32 (implicit zero-extend)
     pub fn movzx_32_64(&mut self, dst: Reg, src: Reg) {
-        // mov r32, r32 zero-extends into the full 64-bit register
-        self.rex_opt(src, dst);
-        self.emit(0x89);
-        self.modrm_rr(src, dst);
+        let mut ib = InstBuf::new();
+        let r = src.hi(); let b = dst.hi();
+        if r != 0 || b != 0 { ib.push(0x40 | (r << 2) | b); }
+        ib.push(0x89);
+        ib.push(0xC0 | (src.lo() << 3) | dst.lo());
+        self.flush_instbuf(ib);
     }
 
     // -- Conditional set --
 
     /// setcc r8 (sets low byte, need to movzx after)
     pub fn setcc(&mut self, cc: Cc, dst: Reg) {
-        // REX prefix needed for R8-R15 (and to access SPL/BPL/SIL/DIL)
+        let mut ib = InstBuf::new();
         if dst.needs_rex() || matches!(dst, Reg::RSP | Reg::RBP | Reg::RSI | Reg::RDI) {
-            self.emit(0x40 | dst.hi());
+            ib.push(0x40 | dst.hi());
         }
-        self.emit(0x0F);
-        self.emit(0x90 + cc as u8);
-        self.emit(0xC0 | dst.lo());
+        ib.push(0x0F);
+        ib.push(0x90 + cc as u8);
+        ib.push(0xC0 | dst.lo());
+        self.flush_instbuf(ib);
     }
 
     /// cmovcc r64, r64
     pub fn cmovcc(&mut self, cc: Cc, dst: Reg, src: Reg) {
-        self.rex_w(dst, src);
-        self.emit(0x0F);
-        self.emit(0x40 + cc as u8);
-        self.modrm_rr(dst, src);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (dst.hi() << 2) | src.hi());
+        ib.push(0x0F);
+        ib.push(0x40 + cc as u8);
+        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
+        self.flush_instbuf(ib);
     }
 
     // -- Bit manipulation (require BMI/POPCNT support) --
 
     /// popcnt r64, r64
     pub fn popcnt64(&mut self, dst: Reg, src: Reg) {
-        self.emit(0xF3);
-        self.rex_w(dst, src);
-        self.emit(0x0F);
-        self.emit(0xB8);
-        self.modrm_rr(dst, src);
+        let mut ib = InstBuf::new();
+        ib.push(0xF3);
+        ib.push(0x48 | (dst.hi() << 2) | src.hi());
+        ib.push(0x0F);
+        ib.push(0xB8);
+        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
+        self.flush_instbuf(ib);
     }
 
     /// lzcnt r64, r64
     pub fn lzcnt64(&mut self, dst: Reg, src: Reg) {
-        self.emit(0xF3);
-        self.rex_w(dst, src);
-        self.emit(0x0F);
-        self.emit(0xBD);
-        self.modrm_rr(dst, src);
+        let mut ib = InstBuf::new();
+        ib.push(0xF3);
+        ib.push(0x48 | (dst.hi() << 2) | src.hi());
+        ib.push(0x0F);
+        ib.push(0xBD);
+        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
+        self.flush_instbuf(ib);
     }
 
     /// tzcnt r64, r64
     pub fn tzcnt64(&mut self, dst: Reg, src: Reg) {
-        self.emit(0xF3);
-        self.rex_w(dst, src);
-        self.emit(0x0F);
-        self.emit(0xBC);
-        self.modrm_rr(dst, src);
+        let mut ib = InstBuf::new();
+        ib.push(0xF3);
+        ib.push(0x48 | (dst.hi() << 2) | src.hi());
+        ib.push(0x0F);
+        ib.push(0xBC);
+        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
+        self.flush_instbuf(ib);
     }
 
     /// bswap r64
     pub fn bswap64(&mut self, dst: Reg) {
-        self.rex_w_b(dst);
-        self.emit(0x0F);
-        self.emit(0xC8 + dst.lo());
+        self.emit3(0x48 | dst.hi(), 0x0F, 0xC8 + dst.lo());
     }
 
     // -- Stack --
@@ -1075,10 +1262,9 @@ impl Assembler {
     pub fn jmp_label(&mut self, label: Label) {
         let bound = self.labels[label.0 as usize];
         if bound != LABEL_UNBOUND {
-            let target = bound;
+            let target = (bound - 1) as isize; // stored as offset+1
             // Backward jump — label already bound, try rel8.
-            // rel8 offset = target - (current + 2), where 2 = size of jmp rel8
-            let rel = target as isize - (self.write_pos as isize + 2);
+            let rel = target - (self.write_pos as isize + 2);
             if rel >= i8::MIN as isize && rel <= i8::MAX as isize {
                 self.emit(0xEB);
                 self.emit(rel as u8);
@@ -1094,10 +1280,9 @@ impl Assembler {
     pub fn jcc_label(&mut self, cc: Cc, label: Label) {
         let bound = self.labels[label.0 as usize];
         if bound != LABEL_UNBOUND {
-            let target = bound;
+            let target = (bound - 1) as isize; // stored as offset+1
             // Backward jump — label already bound, try rel8.
-            // rel8 offset = target - (current + 2), where 2 = size of jcc rel8
-            let rel = target as isize - (self.write_pos as isize + 2);
+            let rel = target - (self.write_pos as isize + 2);
             if rel >= i8::MIN as isize && rel <= i8::MAX as isize {
                 self.emit(0x70 + cc as u8);
                 self.emit(rel as u8);
@@ -1139,37 +1324,41 @@ impl Assembler {
 
     /// lea r64, [base + disp]
     pub fn lea(&mut self, dst: Reg, base: Reg, disp: i32) {
-        self.rex_w(dst, base);
-        self.emit(0x8D);
-        self.modrm_disp(dst.lo(), base, disp);
+        let mut ib = InstBuf::new();
+        ib.push(0x48 | (dst.hi() << 2) | base.hi());
+        ib.push(0x8D);
+        Self::modrm_disp_ib(&mut ib, dst.lo(), base, disp);
+        self.flush_instbuf(ib);
     }
 
     /// lea r32, [base + disp] — 32-bit result, zero-extends to 64-bit.
-    /// Combines address truncation and offset addition in one instruction.
     pub fn lea_32(&mut self, dst: Reg, base: Reg, disp: i32) {
-        self.rex_opt(dst, base);
-        self.emit(0x8D);
-        self.modrm_disp(dst.lo(), base, disp);
+        let mut ib = InstBuf::new();
+        let r = dst.hi(); let b = base.hi();
+        if r != 0 || b != 0 { ib.push(0x40 | (r << 2) | b); }
+        ib.push(0x8D);
+        Self::modrm_disp_ib(&mut ib, dst.lo(), base, disp);
+        self.flush_instbuf(ib);
     }
 
-    /// lea r32, [base32 + index32 * 4]  (32-bit result, auto zero-extends to 64)
-    /// lea dst32, [base32 + index32 * (1 << scale_log2)]
+    /// lea r32, [base32 + index32 * (1 << scale_log2)]
     /// scale_log2: 0=*1, 1=*2, 2=*4, 3=*8
     pub fn lea_sib_scaled_32(&mut self, dst: Reg, base: Reg, index: Reg, scale_log2: u8) {
         debug_assert!(scale_log2 <= 3);
+        let mut ib = InstBuf::new();
         let rex = 0x40 | (dst.hi() << 2) | (index.hi() << 1) | base.hi();
-        if rex != 0x40 { self.emit(rex); }
-        self.emit(0x8D); // LEA
+        if rex != 0x40 { ib.push(rex); }
+        ib.push(0x8D);
         let scale_bits = scale_log2 << 6;
         if base.lo() == 5 {
-            // RBP/R13 as base: need mod=01 with disp8=0 (mod=00 means [disp32])
-            self.emit(0x44 | (dst.lo() << 3)); // mod=01, reg=dst, rm=100(SIB)
-            self.emit(scale_bits | (index.lo() << 3) | base.lo());
-            self.emit(0x00); // disp8 = 0
+            ib.push(0x44 | (dst.lo() << 3));
+            ib.push(scale_bits | (index.lo() << 3) | base.lo());
+            ib.push(0x00);
         } else {
-            self.emit((dst.lo() << 3) | 0x04); // mod=00, reg=dst, rm=100(SIB)
-            self.emit(scale_bits | (index.lo() << 3) | base.lo());
+            ib.push((dst.lo() << 3) | 0x04);
+            ib.push(scale_bits | (index.lo() << 3) | base.lo());
         }
+        self.flush_instbuf(ib);
     }
 
     // -- Misc --
@@ -1195,7 +1384,7 @@ impl Assembler {
     /// Get the resolved native offset for a label (only valid after bind_label).
     pub fn label_offset(&self, label: Label) -> Option<usize> {
         let off = self.labels[label.0 as usize];
-        if off == LABEL_UNBOUND { None } else { Some(off) }
+        if off == LABEL_UNBOUND { None } else { Some(off - 1) }
     }
 
     /// Sync Vec length with the write cursor. Call before accessing `self.code` directly.
@@ -1208,8 +1397,10 @@ impl Assembler {
     /// Resolve all label fixups in-place (works for both Vec and mmap buffers).
     fn resolve_fixups(&mut self) {
         for fixup in &self.fixups {
-            let target = self.labels[fixup.label.0 as usize];
-            assert!(target != LABEL_UNBOUND, "unbound label {:?}", fixup.label);
+            let stored = self.labels[fixup.label.0 as usize];
+            // All labels must be bound by finalization time.
+            assert!(stored != LABEL_UNBOUND, "unbound label {:?}", fixup.label);
+            let target = stored - 1; // stored as offset+1
             let rel = (target as i64) - (fixup.offset as i64 + 4);
             let rel32 = rel as i32;
             unsafe {

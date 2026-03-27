@@ -166,10 +166,15 @@ impl FlatMemory {
         let perms = region;
         let buf = unsafe { region.add(HEADER_SIZE) };
 
-        // Set all pages in [0, mem_size) as read-write
-        let num_pages = (layout.mem_size as usize + 4095) / 4096;
-        unsafe {
-            std::ptr::write_bytes(perms, 2u8, num_pages.min(NUM_PAGES));
+        // Set all pages in [0, mem_size) as read-write in the permission table.
+        // With signals feature, bounds checking uses guard pages instead of the
+        // permission table, so we skip the 1MB write.
+        #[cfg(not(feature = "signals"))]
+        {
+            let num_pages = (layout.mem_size as usize + 4095) / 4096;
+            unsafe {
+                std::ptr::write_bytes(perms, 2u8, num_pages.min(NUM_PAGES));
+            }
         }
         // Copy data directly into flat buffer
         unsafe {
@@ -415,8 +420,6 @@ pub struct RecompiledPvm {
     native_code: NativeCode,
     /// JIT context — lives inside the flat_memory mmap region, NOT heap-allocated.
     ctx: *mut JitContext,
-    /// PVM code (for fallback/debugging).
-    code: Vec<u8>,
     /// Bitmask.
     bitmask: Vec<u8>,
     /// Jump table.
@@ -437,14 +440,26 @@ pub struct RecompiledPvm {
 impl RecompiledPvm {
     /// Create a new recompiled PVM from parsed program components.
     pub fn new(
-        code: Vec<u8>,
+        code: &[u8],
         bitmask: Vec<u8>,
         jump_table: Vec<u32>,
         registers: [u64; PVM_REGISTER_COUNT],
         gas: Gas,
         data_layout: Option<crate::program::DataLayout>,
     ) -> Result<Self, String> {
-        let debug = std::env::var("GREY_PVM_DEBUG").is_ok();
+        let debug = {
+            use std::sync::atomic::{AtomicU8, Ordering};
+            static CACHED: AtomicU8 = AtomicU8::new(0); // 0=unchecked, 1=false, 2=true
+            match CACHED.load(Ordering::Relaxed) {
+                2 => true,
+                1 => false,
+                _ => {
+                    let val = std::env::var("GREY_PVM_DEBUG").is_ok();
+                    CACHED.store(if val { 2 } else { 1 }, Ordering::Relaxed);
+                    val
+                }
+            }
+        };
 
         // Gas blocks and validation are now computed inline during the compile loop.
         // No separate pre-passes needed.
@@ -581,7 +596,6 @@ impl RecompiledPvm {
         let mut result = Self {
             native_code,
             ctx: ctx_raw,
-            code,
             bitmask,
             jump_table,
             _initial_gas: gas,
@@ -929,7 +943,7 @@ mod tests {
         let bitmask = vec![1u8];
         let registers = [0u64; 13];
 
-        let mut pvm = RecompiledPvm::new(code, bitmask, vec![], registers, 1000, Some(test_layout()))
+        let mut pvm = RecompiledPvm::new(&code, bitmask, vec![], registers, 1000, Some(test_layout()))
             .expect("compilation should succeed");
         let exit = pvm.run();
         assert_eq!(exit, ExitReason::Panic);
@@ -941,7 +955,7 @@ mod tests {
         let bitmask = vec![1, 0];
         let registers = [0u64; 13];
 
-        let mut pvm = RecompiledPvm::new(code, bitmask, vec![], registers, 1000, Some(test_layout()))
+        let mut pvm = RecompiledPvm::new(&code, bitmask, vec![], registers, 1000, Some(test_layout()))
             .expect("compilation should succeed");
         let exit = pvm.run();
         assert_eq!(exit, ExitReason::HostCall(42));
@@ -953,7 +967,7 @@ mod tests {
         let bitmask = vec![1, 0, 0, 1];
         let registers = [0u64; 13];
 
-        let mut pvm = RecompiledPvm::new(code, bitmask, vec![], registers, 1000, Some(test_layout()))
+        let mut pvm = RecompiledPvm::new(&code, bitmask, vec![], registers, 1000, Some(test_layout()))
             .expect("compilation should succeed");
         let exit = pvm.run();
         assert_eq!(pvm.registers()[0], 123);
@@ -971,7 +985,7 @@ mod tests {
         let bitmask = vec![1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0];
         let registers = [0u64; 13];
 
-        let mut pvm = RecompiledPvm::new(code, bitmask, vec![], registers, 1000, Some(test_layout()))
+        let mut pvm = RecompiledPvm::new(&code, bitmask, vec![], registers, 1000, Some(test_layout()))
             .expect("compilation should succeed");
         let exit = pvm.run();
         assert_eq!(pvm.registers()[2], 30);
@@ -984,7 +998,7 @@ mod tests {
         let bitmask = vec![1, 0, 0];
         let registers = [0u64; 13];
 
-        let mut pvm = RecompiledPvm::new(code, bitmask, vec![], registers, 0, Some(test_layout()))
+        let mut pvm = RecompiledPvm::new(&code, bitmask, vec![], registers, 0, Some(test_layout()))
             .expect("compilation should succeed");
         let exit = pvm.run();
         assert_eq!(exit, ExitReason::OutOfGas);

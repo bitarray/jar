@@ -1298,33 +1298,65 @@ static GAS_COST_LUT: [GasCostEntry; 256] = {
 /// with a single array access + lightweight mask computation.
 #[inline(always)]
 pub fn fast_cost_lut(opcode_byte: u8, args: &crate::args::Args, pc: u32, code: &[u8], bitmask: &[u8]) -> FastCost {
-    use crate::args::Args;
-
+    // Accept raw register bytes extracted from the code during argument decoding.
+    // This avoids re-reading code[pc+1] and code[pc+2].
     let pcu = pc as usize;
-    let ra = if pcu + 1 < code.len() { code[pcu + 1] & 0x0F } else { 0xFF };
-    let rb = if pcu + 1 < code.len() { (code[pcu + 1] >> 4) & 0x0F } else { 0xFF };
+    let reg_byte1 = if pcu + 1 < code.len() { code[pcu + 1] } else { 0xFF };
+    let ra = reg_byte1 & 0x0F;
+    let rb = (reg_byte1 >> 4) & 0x0F;
     let rd = if pcu + 2 < code.len() { code[pcu + 2] & 0x0F } else { 0xFF };
 
+    fast_cost_lut_inner(opcode_byte, args, pcu, code, bitmask, ra, rb, rd)
+}
+
+/// Inner implementation — separated to allow the compiler to inline the
+/// caller-side register extraction and keep the complex logic out-of-line.
+#[inline(always)]
+fn fast_cost_lut_inner(
+    opcode_byte: u8, args: &crate::args::Args, pcu: usize,
+    code: &[u8], bitmask: &[u8], ra: u8, rb: u8, rd: u8,
+) -> FastCost {
+    use crate::args::Args;
+
     let entry = &GAS_COST_LUT[opcode_byte as usize];
+    let flags = entry.flags;
 
-    // Compute source mask from pattern
+    // Fast path: most instructions are non-branch, non-overlap.
+    // Skip the expensive branch cost and overlap calculations.
+    if flags & (F_BRANCH | F_BRANCH2 | F_OVERLAP) == 0 {
+        // Compute masks inline (branchless via LUT could be even faster,
+        // but the match is well-predicted for the common patterns).
+        let ra_bit = 1u16 << ra.min(12);
+        let rb_bit = 1u16 << rb.min(12);
+        let rd_bit = 1u16 << rd.min(12);
+        let src_mask: u16 = match entry.src_pat {
+            0 => 0, 1 => ra_bit, 2 => rb_bit,
+            3 => ra_bit | rb_bit, 4 => rb_bit | rd_bit, _ => 0,
+        };
+        let dst_mask: u16 = if entry.dst_pat == 1 { ra_bit } else { 0 };
+        return FastCost {
+            cycles: entry.cycles,
+            decode_slots: entry.decode_slots,
+            exec_unit: entry.exec_unit,
+            src_mask,
+            dst_mask,
+            is_terminator: flags & F_TERM != 0,
+            is_move_reg: flags & F_MOVE != 0,
+        };
+    }
+
+    // Slow path: branch or overlap instructions
+    let ra_bit = 1u16 << ra.min(12);
+    let rb_bit = 1u16 << rb.min(12);
+    let rd_bit = 1u16 << rd.min(12);
+
     let src_mask: u16 = match entry.src_pat {
-        0 => 0,
-        1 => reg_bit(ra),
-        2 => reg_bit(rb),
-        3 => reg_bit(ra) | reg_bit(rb),
-        4 => reg_bit(rb) | reg_bit(rd),
-        _ => 0,
+        0 => 0, 1 => ra_bit, 2 => rb_bit,
+        3 => ra_bit | rb_bit, 4 => rb_bit | rd_bit, _ => 0,
     };
-    // Compute destination mask from pattern
-    let dst_mask: u16 = match entry.dst_pat {
-        0 => 0,
-        1 => reg_bit(ra),
-        _ => 0,
-    };
+    let dst_mask: u16 = if entry.dst_pat == 1 { ra_bit } else { 0 };
 
-    // Handle branch cost (dynamic cycles based on target)
-    let cycles = if entry.flags & (F_BRANCH | F_BRANCH2) != 0 {
+    let cycles = if flags & (F_BRANCH | F_BRANCH2) != 0 {
         let branch_target = match args {
             Args::RegImmOffset { offset, .. } => *offset as usize,
             Args::TwoRegOffset { offset, .. } => *offset as usize,
@@ -1336,18 +1368,13 @@ pub fn fast_cost_lut(opcode_byte: u8, args: &crate::args::Args, pc: u32, code: &
         entry.cycles
     };
 
-    // Compute decode_slots with optional overlap adjustment
-    let decode_slots = if entry.flags & F_OVERLAP != 0 {
-        let overlap = if entry.flags & F_SHIFT_OVERLAP != 0 {
-            rb == ra // shift overlap: check if rb==ra (raw byte comparison)
+    let decode_slots = if flags & F_OVERLAP != 0 {
+        let overlap = if flags & F_SHIFT_OVERLAP != 0 {
+            rb == ra
         } else {
-            (dst_mask & src_mask) != 0 // general overlap: dst ∩ src
+            (dst_mask & src_mask) != 0
         };
-        if overlap {
-            entry.overlap_slots & 0x0F
-        } else {
-            entry.overlap_slots >> 4
-        }
+        if overlap { entry.overlap_slots & 0x0F } else { entry.overlap_slots >> 4 }
     } else {
         entry.decode_slots
     };
@@ -1358,8 +1385,8 @@ pub fn fast_cost_lut(opcode_byte: u8, args: &crate::args::Args, pc: u32, code: &
         exec_unit: entry.exec_unit,
         src_mask,
         dst_mask,
-        is_terminator: entry.flags & F_TERM != 0,
-        is_move_reg: entry.flags & F_MOVE != 0,
+        is_terminator: flags & F_TERM != 0,
+        is_move_reg: flags & F_MOVE != 0,
     }
 }
 

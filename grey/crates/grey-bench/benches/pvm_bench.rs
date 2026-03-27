@@ -335,6 +335,17 @@ fn bench_ecrecover(c: &mut Criterion) {
         })
     });
 
+    // Compile-only: measure only JIT compilation time (no execution).
+    group.bench_function("grey-recompiler-compile", |b| {
+        b.iter(|| {
+            std::hint::black_box(
+                javm::recompiler::initialize_program_recompiled(
+                    &grey_blob, &[], ecrecover_gas,
+                ).unwrap()
+            );
+        })
+    });
+
     // Execution-only: compile in setup (not timed), measure only execution.
     // Separates JIT compilation time from execution time.
     group.bench_function("grey-recompiler-exec", |b| {
@@ -401,6 +412,17 @@ fn bench_ecrecover(c: &mut Criterion) {
                     }
                 }
                 inst.reg(PReg::A0)
+            })
+        });
+        let pvm_config = polkavm_config(BackendKind::Compiler);
+        group.bench_function("polkavm-compiler-compile", |b| {
+            b.iter(|| {
+                // Include Engine::new to match grey's FlatMemory + assembler mmap.
+                // In JAM, each work-package is compiled from scratch.
+                let engine = Engine::new(&pvm_config).unwrap();
+                let mut mc = ModuleConfig::new();
+                mc.set_gas_metering(Some(GasMeteringKind::Sync));
+                std::hint::black_box(Module::new(&engine, &mc, pvm_blob.clone().into()).unwrap());
             })
         });
         group.bench_function("polkavm-compiler-full", |b| {

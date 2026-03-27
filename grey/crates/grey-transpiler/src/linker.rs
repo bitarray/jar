@@ -86,6 +86,12 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
     }
     ctx.apply_fixups();
 
+    // Post-pass: ensure all PVM branch targets are basic block starts (ϖ).
+    // Insert fallthrough (opcode 1) before any branch target that isn't
+    // preceded by a terminator. This is done on the final PVM code after
+    // fixup resolution, so all branch offsets are resolved.
+    crate::ensure_branch_targets_are_block_starts(&mut ctx.code, &mut ctx.bitmask, &mut ctx.jump_table);
+
     Ok(emitter::build_standard_program(
         &elf.ro_data,
         &elf.rw_data,
@@ -136,6 +142,7 @@ pub fn link_elf_service(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
         translate_section_linked(&mut ctx, data, *vaddr, &elf)?;
     }
     ctx.apply_fixups();
+    crate::ensure_branch_targets_are_block_starts(&mut ctx.code, &mut ctx.bitmask, &mut ctx.jump_table);
 
     // Resolve entry points to PVM offsets
     let refine_pvm = ctx.address_map.get(&refine_addr)

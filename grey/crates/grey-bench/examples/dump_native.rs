@@ -44,4 +44,8 @@ fn main() {
     let blob = grey_sort_blob(SORT_N);
     dump_grey("sort", &blob);
     dump_polkavm("sort", polkavm_sort_blob(SORT_N));
+
+    // Ecrecover
+    dump_grey("ecrecover", grey_ecrecover_blob());
+    dump_polkavm("ecrecover", polkavm_ecrecover_blob().to_vec());
 }
