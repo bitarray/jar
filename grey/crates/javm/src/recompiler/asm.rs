@@ -198,7 +198,7 @@ impl Assembler {
             // vec![0; n] uses calloc — zero pages via COW, no page faults for untouched entries
             labels: vec![0usize; label_capacity],
             labels_len: 0,
-            fixups: Vec::with_capacity(label_capacity),
+            fixups: Vec::with_capacity(2048),
         }
     }
 
@@ -230,7 +230,10 @@ impl Assembler {
             capacity: code_capacity,
             labels: vec![0usize; label_capacity],
             labels_len: 0,
-            fixups: Vec::with_capacity(label_capacity),
+            // Fixups are far fewer than labels — typically ~2K for large programs
+            // (one per forward branch + one per OOG stub jcc). Over-allocating to
+            // label_capacity wastes ~1.5MB for ecrecover.
+            fixups: Vec::with_capacity(2048),
         })
     }
 
