@@ -238,14 +238,14 @@ impl Compiler {
         asm.bulk_create_labels(code_len + 1);
         Self {
             label_base,
-            gas_block_pcs: Vec::new(), // populated in compile()
+            gas_block_pcs: Vec::with_capacity(1024),
             asm,
             exit_label,
             oog_label,
             panic_label,
             fault_exit_label,
             oog_pc_label,
-            oog_stubs: Vec::new(),
+            oog_stubs: Vec::with_capacity(1024),
             fault_stubs: Vec::with_capacity(256),
             reg_defs: [RegDef::Unknown; 13],
             reg_defs_active: 0,
@@ -256,7 +256,7 @@ impl Compiler {
             bitmask_ptr: bitmask.as_ptr(),
             bitmask_len: bitmask.len(),
             #[cfg(feature = "signals")]
-            trap_entries: Vec::new(),
+            trap_entries: Vec::with_capacity(2048),
         }
     }
 
