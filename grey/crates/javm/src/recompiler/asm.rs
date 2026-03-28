@@ -147,10 +147,10 @@ pub struct Assembler {
     buf: *mut u8,
     write_pos: usize,
     capacity: usize,
-    /// Label ID → bound offset+1 (0 = unbound).
-    /// Pre-sized via `vec![0; capacity]` which uses calloc (zero-page COW).
-    /// Only pages containing bound labels trigger page faults.
-    labels: Vec<usize>,
+    /// Label ID → bound offset+1 as u32 (0 = unbound). Uses u32 to halve
+    /// memory vs usize (native code always fits in 4GB).
+    /// Pre-sized via `vec![0u32; capacity]` which uses calloc (zero-page COW).
+    labels: Vec<u32>,
     /// Number of labels allocated via new_label/bulk_create_labels.
     /// The Vec is pre-sized but labels_len tracks the logical length.
     labels_len: usize,
@@ -160,7 +160,7 @@ pub struct Assembler {
 /// Unbound label sentinel. We use 0 so that bulk label allocation can use
 /// zeroed memory (calloc / zero-page COW) instead of writing 0xFF to every byte.
 /// Bound labels store `native_offset + 1` to avoid collision with the sentinel.
-const LABEL_UNBOUND: usize = 0;
+const LABEL_UNBOUND: u32 = 0;
 
 impl Default for Assembler {
     fn default() -> Self {
@@ -196,9 +196,9 @@ impl Assembler {
             write_pos: 0,
             capacity,
             // vec![0; n] uses calloc — zero pages via COW, no page faults for untouched entries
-            labels: vec![0usize; label_capacity],
+            labels: vec![0u32; label_capacity],
             labels_len: 0,
-            fixups: Vec::with_capacity(label_capacity),
+            fixups: Vec::with_capacity(2048),
         }
     }
 
@@ -228,9 +228,12 @@ impl Assembler {
             buf: ptr,
             write_pos: 0,
             capacity: code_capacity,
-            labels: vec![0usize; label_capacity],
+            labels: vec![0u32; label_capacity],
             labels_len: 0,
-            fixups: Vec::with_capacity(label_capacity),
+            // Fixups are far fewer than labels — typically ~2K for large programs
+            // (one per forward branch + one per OOG stub jcc). Over-allocating to
+            // label_capacity wastes ~1.5MB for ecrecover.
+            fixups: Vec::with_capacity(2048),
         })
     }
 
@@ -309,7 +312,7 @@ impl Assembler {
 
     /// Bind a label to the current write position.
     pub fn bind_label(&mut self, label: Label) {
-        self.labels[label.0 as usize] = self.write_pos + 1; // +1: 0 is LABEL_UNBOUND
+        self.labels[label.0 as usize] = (self.write_pos + 1) as u32; // +1: 0 is LABEL_UNBOUND
     }
 
     /// Current code offset (write position).
@@ -358,11 +361,11 @@ impl Assembler {
         debug_assert!(self.write_pos + len <= self.capacity);
         unsafe {
             let p = self.buf.add(self.write_pos);
-            // Two u64 writes cover up to 16 bytes (max x86 instruction length).
+            // Always write both halves — the second write may go past the
+            // instruction boundary but the buffer has ample capacity (ensured
+            // by ensure_capacity(512)). Eliminates a branch per emission.
             std::ptr::write_unaligned(p as *mut u64, ib.out as u64);
-            if len > 8 {
-                std::ptr::write_unaligned(p.add(8) as *mut u64, (ib.out >> 64) as u64);
-            }
+            std::ptr::write_unaligned(p.add(8) as *mut u64, (ib.out >> 64) as u64);
         }
         self.write_pos += len;
     }
@@ -526,6 +529,7 @@ impl Assembler {
     // -- MOV --
 
     /// mov r64, r64
+    #[inline(always)]
     pub fn mov_rr(&mut self, dst: Reg, src: Reg) {
         if dst == src {
             return;
@@ -538,6 +542,7 @@ impl Assembler {
     }
 
     /// mov r64, imm64
+    #[inline(always)]
     pub fn mov_ri64(&mut self, dst: Reg, imm: u64) {
         let mut ib = InstBuf::new();
         if imm == 0 {
@@ -571,6 +576,7 @@ impl Assembler {
     }
 
     /// mov r32, imm32 (zero-extends to 64-bit)
+    #[inline(always)]
     pub fn mov_ri32(&mut self, dst: Reg, imm: u32) {
         let mut ib = InstBuf::new();
         if dst.needs_rex() {
@@ -582,6 +588,7 @@ impl Assembler {
     }
 
     /// mov r32, [base + disp] — zero-extending 32-bit load
+    #[inline(always)]
     pub fn mov_load32(&mut self, dst: Reg, base: Reg, disp: i32) {
         let mut ib = InstBuf::new();
         let r = dst.hi();
@@ -595,6 +602,7 @@ impl Assembler {
     }
 
     /// mov r64, [base + disp]
+    #[inline(always)]
     pub fn mov_load64(&mut self, dst: Reg, base: Reg, disp: i32) {
         let mut ib = InstBuf::new();
         ib.push(0x48 | (dst.hi() << 2) | base.hi());
@@ -614,6 +622,7 @@ impl Assembler {
     }
 
     /// mov dword [base + disp], r32 — 32-bit store
+    #[inline(always)]
     pub fn mov_store32(&mut self, base: Reg, disp: i32, src: Reg) {
         let mut ib = InstBuf::new();
         let r = src.hi();
@@ -627,6 +636,7 @@ impl Assembler {
     }
 
     /// mov [base + disp], r64
+    #[inline(always)]
     pub fn mov_store64(&mut self, base: Reg, disp: i32, src: Reg) {
         let mut ib = InstBuf::new();
         ib.push(0x48 | (src.hi() << 2) | base.hi());
@@ -636,6 +646,7 @@ impl Assembler {
     }
 
     /// mov dword [base + disp], imm32
+    #[inline(always)]
     pub fn mov_store32_imm(&mut self, base: Reg, disp: i32, imm: i32) {
         let mut ib = InstBuf::new();
         if base.needs_rex() {
@@ -893,31 +904,40 @@ impl Assembler {
         }
     }
 
+    #[inline(always)]
     pub fn add_rr(&mut self, dst: Reg, src: Reg) {
         self.alu_rr64(0x01, dst, src);
     }
+    #[inline(always)]
     pub fn sub_rr(&mut self, dst: Reg, src: Reg) {
         self.alu_rr64(0x29, dst, src);
     }
+    #[inline(always)]
     pub fn and_rr(&mut self, dst: Reg, src: Reg) {
         self.alu_rr64(0x21, dst, src);
     }
+    #[inline(always)]
     pub fn or_rr(&mut self, dst: Reg, src: Reg) {
         self.alu_rr64(0x09, dst, src);
     }
+    #[inline(always)]
     pub fn xor_rr(&mut self, dst: Reg, src: Reg) {
         self.alu_rr64(0x31, dst, src);
     }
+    #[inline(always)]
     pub fn cmp_rr(&mut self, a: Reg, b: Reg) {
         self.alu_rr64(0x39, a, b);
     }
+    #[inline(always)]
     pub fn test_rr(&mut self, a: Reg, b: Reg) {
         self.alu_rr64(0x85, a, b);
     }
 
+    #[inline(always)]
     pub fn add_rr32(&mut self, dst: Reg, src: Reg) {
         self.alu_rr32(0x01, dst, src);
     }
+    #[inline(always)]
     pub fn sub_rr32(&mut self, dst: Reg, src: Reg) {
         self.alu_rr32(0x29, dst, src);
     }
@@ -925,6 +945,7 @@ impl Assembler {
     // -- ALU reg,imm (64-bit) --
     // Uses imm8 (opcode 0x83) when immediate fits in -128..127, saving 3 bytes.
 
+    #[inline(always)]
     fn alu_ri64(&mut self, ext: u8, dst: Reg, imm: i32) {
         let mut ib = InstBuf::new();
         ib.push(0x48 | dst.hi());
@@ -940,6 +961,7 @@ impl Assembler {
         self.flush_instbuf(ib);
     }
 
+    #[inline(always)]
     fn alu_ri32(&mut self, ext: u8, dst: Reg, imm: i32) {
         let mut ib = InstBuf::new();
         if dst.needs_rex() {
@@ -957,31 +979,40 @@ impl Assembler {
         self.flush_instbuf(ib);
     }
 
+    #[inline(always)]
     pub fn add_ri(&mut self, dst: Reg, imm: i32) {
         self.alu_ri64(0, dst, imm);
     }
+    #[inline(always)]
     pub fn sub_ri(&mut self, dst: Reg, imm: i32) {
         self.alu_ri64(5, dst, imm);
     }
+    #[inline(always)]
     pub fn and_ri(&mut self, dst: Reg, imm: i32) {
         self.alu_ri64(4, dst, imm);
     }
+    #[inline(always)]
     pub fn or_ri(&mut self, dst: Reg, imm: i32) {
         self.alu_ri64(1, dst, imm);
     }
+    #[inline(always)]
     pub fn xor_ri(&mut self, dst: Reg, imm: i32) {
         self.alu_ri64(6, dst, imm);
     }
+    #[inline(always)]
     pub fn cmp_ri(&mut self, a: Reg, imm: i32) {
         self.alu_ri64(7, a, imm);
     }
 
+    #[inline(always)]
     pub fn add_ri32(&mut self, dst: Reg, imm: i32) {
         self.alu_ri32(0, dst, imm);
     }
+    #[inline(always)]
     pub fn sub_ri32(&mut self, dst: Reg, imm: i32) {
         self.alu_ri32(5, dst, imm);
     }
+    #[inline(always)]
     pub fn cmp_ri32(&mut self, a: Reg, imm: i32) {
         self.alu_ri32(7, a, imm);
     }
@@ -1278,6 +1309,7 @@ impl Assembler {
     // -- Extensions --
 
     /// movsxd r64, r32 (sign-extend 32→64)
+    #[inline(always)]
     pub fn movsxd(&mut self, dst: Reg, src: Reg) {
         let mut ib = InstBuf::new();
         ib.push(0x48 | (dst.hi() << 2) | src.hi());
@@ -1331,6 +1363,7 @@ impl Assembler {
     }
 
     /// Zero-extend 32→64: mov r32, r32 (implicit zero-extend)
+    #[inline(always)]
     pub fn movzx_32_64(&mut self, dst: Reg, src: Reg) {
         let mut ib = InstBuf::new();
         let r = src.hi();
@@ -1346,6 +1379,7 @@ impl Assembler {
     // -- Conditional set --
 
     /// setcc r8 (sets low byte, need to movzx after)
+    #[inline(always)]
     pub fn setcc(&mut self, cc: Cc, dst: Reg) {
         let mut ib = InstBuf::new();
         if dst.needs_rex() || matches!(dst, Reg::RSP | Reg::RBP | Reg::RSI | Reg::RDI) {
@@ -1358,6 +1392,7 @@ impl Assembler {
     }
 
     /// cmovcc r64, r64
+    #[inline(always)]
     pub fn cmovcc(&mut self, cc: Cc, dst: Reg, src: Reg) {
         let mut ib = InstBuf::new();
         ib.push(0x48 | (dst.hi() << 2) | src.hi());
@@ -1409,11 +1444,13 @@ impl Assembler {
 
     // -- Stack --
 
+    #[inline(always)]
     pub fn push(&mut self, reg: Reg) {
         self.rex_opt_b(reg);
         self.emit(0x50 + reg.lo());
     }
 
+    #[inline(always)]
     pub fn pop(&mut self, reg: Reg) {
         self.rex_opt_b(reg);
         self.emit(0x58 + reg.lo());
@@ -1428,6 +1465,7 @@ impl Assembler {
     // -- Branches and jumps --
 
     /// jmp to label — uses rel8 for backward jumps within ±127 bytes.
+    #[inline(always)]
     pub fn jmp_label(&mut self, label: Label) {
         let bound = self.labels[label.0 as usize];
         if bound != LABEL_UNBOUND {
@@ -1446,6 +1484,7 @@ impl Assembler {
     }
 
     /// jcc to label — uses rel8 for backward jumps within ±127 bytes.
+    #[inline(always)]
     pub fn jcc_label(&mut self, cc: Cc, label: Label) {
         let bound = self.labels[label.0 as usize];
         if bound != LABEL_UNBOUND {
@@ -1501,6 +1540,7 @@ impl Assembler {
     }
 
     /// lea r32, [base + disp] — 32-bit result, zero-extends to 64-bit.
+    #[inline(always)]
     pub fn lea_32(&mut self, dst: Reg, base: Reg, disp: i32) {
         let mut ib = InstBuf::new();
         let r = dst.hi();
@@ -1515,6 +1555,7 @@ impl Assembler {
 
     /// lea r32, [base32 + index32 * (1 << scale_log2)]
     /// scale_log2: 0=*1, 1=*2, 2=*4, 3=*8
+    #[inline(always)]
     pub fn lea_sib_scaled_32(&mut self, dst: Reg, base: Reg, index: Reg, scale_log2: u8) {
         debug_assert!(scale_log2 <= 3);
         let mut ib = InstBuf::new();
@@ -1561,7 +1602,7 @@ impl Assembler {
         if off == LABEL_UNBOUND {
             None
         } else {
-            Some(off - 1)
+            Some((off - 1) as usize)
         }
     }
 

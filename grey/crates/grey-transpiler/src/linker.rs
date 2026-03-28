@@ -85,6 +85,9 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
     }
     ctx.apply_fixups();
 
+    // Peephole: fuse load_imm + ALU pairs into immediate ALU forms.
+    crate::peephole_fuse_load_imm_alu(&mut ctx.code, &mut ctx.bitmask, &ctx.jump_table);
+
     // Post-pass: ensure all PVM branch targets are basic block starts (ϖ).
     // Insert fallthrough (opcode 1) before any branch target that isn't
     // preceded by a terminator. This is done on the final PVM code after
@@ -145,6 +148,7 @@ pub fn link_elf_service(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
         translate_section_linked(&mut ctx, data, *vaddr, &elf)?;
     }
     ctx.apply_fixups();
+    crate::peephole_fuse_load_imm_alu(&mut ctx.code, &mut ctx.bitmask, &ctx.jump_table);
     crate::ensure_branch_targets_are_block_starts(
         &mut ctx.code,
         &mut ctx.bitmask,
@@ -556,10 +560,8 @@ fn translate_section_linked(
                     let jalr_rd = ((jalr >> 7) & 0x1f) as u8;
                     let ret_addr = rv_addr + 8;
 
-                    // Emit return address into link register
-                    ctx.emit_return_address_jt(jalr_rd, ret_addr)?;
-                    // Emit jump to target
-                    ctx.emit_jump(target_addr);
+                    // Fused load_imm_jump: set return address and jump in one instruction
+                    ctx.emit_call(jalr_rd, ret_addr, target_addr)?;
                     // Map the JALR address too
                     ctx.address_map.insert(rv_addr + 4, ctx.code.len() as u32);
                     offset += 8; // skip both AUIPC and JALR

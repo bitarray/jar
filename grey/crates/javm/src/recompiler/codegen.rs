@@ -170,9 +170,6 @@ pub struct Compiler {
     oog_label: Label,
     /// Label for panic exit.
     panic_label: Label,
-    /// Label for shared page fault exit (sets PAGE_FAULT + jumps to exit).
-    #[allow(dead_code)]
-    fault_exit_label: Label,
     /// Label for OOG handler that reads PC from SCRATCH: stores PC, then falls through to oog_label.
     oog_pc_label: Label,
     /// Per-gas-block OOG stubs: (label, pvm_pc) — emitted as cold code after main body.
@@ -181,11 +178,6 @@ pub struct Compiler {
     fault_stubs: Vec<(Label, u32)>,
     /// Helper function addresses.
     helpers: HelperFns,
-    /// Jump table (borrowed, read-only during compilation).
-    #[allow(dead_code)]
-    jump_table_ptr: *const u32,
-    #[allow(dead_code)]
-    jump_table_len: usize,
     /// Bitmask reference (1 = instruction start). Stored as raw pointer for self-referential use.
     bitmask_ptr: *const u8,
     bitmask_len: usize,
@@ -207,7 +199,7 @@ pub struct Compiler {
 impl Compiler {
     pub fn new(
         bitmask: &[u8],
-        jump_table: &[u32],
+        _jump_table: &[u32],
         helpers: HelperFns,
         code_len: usize,
         use_mmap: bool,
@@ -228,7 +220,6 @@ impl Compiler {
         let exit_label = asm.new_label();
         let oog_label = asm.new_label();
         let panic_label = asm.new_label();
-        let fault_exit_label = asm.new_label();
         let oog_pc_label = asm.new_label();
         // Pre-create one label per PC for O(1) lookup in label_for_pc.
         // With LABEL_UNBOUND=0, bulk allocation uses zeroed pages (calloc/COW).
@@ -238,25 +229,22 @@ impl Compiler {
         asm.bulk_create_labels(code_len + 1);
         Self {
             label_base,
-            gas_block_pcs: Vec::new(), // populated in compile()
+            gas_block_pcs: Vec::with_capacity(1024),
             asm,
             exit_label,
             oog_label,
             panic_label,
-            fault_exit_label,
             oog_pc_label,
-            oog_stubs: Vec::new(),
+            oog_stubs: Vec::with_capacity(1024),
             fault_stubs: Vec::with_capacity(256),
             reg_defs: [RegDef::Unknown; 13],
             reg_defs_active: 0,
             last_add_cf: None,
             helpers,
-            jump_table_ptr: jump_table.as_ptr(),
-            jump_table_len: jump_table.len(),
             bitmask_ptr: bitmask.as_ptr(),
             bitmask_len: bitmask.len(),
             #[cfg(feature = "signals")]
-            trap_entries: Vec::new(),
+            trap_entries: Vec::with_capacity(2048),
         }
     }
 
@@ -294,10 +282,13 @@ impl Compiler {
             pc += 1;
         }
 
+        let code_ptr = code.as_ptr();
+
         while pc < code.len() {
             self.asm.ensure_capacity(512);
 
-            let raw_byte = code[pc];
+            // SAFETY: pc < code_len is guaranteed by the loop condition.
+            let raw_byte = unsafe { *code_ptr.add(pc) };
             let is_gas_start = next_is_gas_start;
             next_is_gas_start = false;
 
@@ -349,33 +340,36 @@ impl Compiler {
             };
             let skip = crate::vm::skip_for_bitmask(bitmask, pc);
             let next_pc = (pc + 1 + skip) as u32;
+
+            // Read register bytes once — used by both arg decoding and gas cost.
+            // SAFETY: pc < code.len(). pc+1/pc+2 may be out of bounds for
+            // instructions at the end, so we bounds-check those.
+            let reg_byte1 = if pc + 1 < code.len() {
+                unsafe { *code_ptr.add(pc + 1) }
+            } else {
+                0
+            };
+            let reg_byte2 = if pc + 2 < code.len() {
+                unsafe { *code_ptr.add(pc + 2) }
+            } else {
+                0
+            };
+            let raw_ra = reg_byte1 & 0x0F;
+            let raw_rb = reg_byte1 >> 4;
+
             let decoded_args = match category {
-                crate::instruction::InstructionCategory::ThreeReg => {
-                    let reg_byte = if pc + 1 < code.len() { code[pc + 1] } else { 0 };
-                    Args::ThreeReg {
-                        ra: (reg_byte & 0x0F).min(12) as usize,
-                        rb: (reg_byte >> 4).min(12) as usize,
-                        rd: if pc + 2 < code.len() {
-                            code[pc + 2].min(12) as usize
-                        } else {
-                            0
-                        },
-                    }
-                }
-                crate::instruction::InstructionCategory::TwoReg => {
-                    let reg_byte = if pc + 1 < code.len() { code[pc + 1] } else { 0 };
-                    Args::TwoReg {
-                        rd: (reg_byte & 0x0F).min(12) as usize,
-                        ra: (reg_byte >> 4).min(12) as usize,
-                    }
-                }
+                crate::instruction::InstructionCategory::ThreeReg => Args::ThreeReg {
+                    ra: raw_ra.min(12) as usize,
+                    rb: raw_rb.min(12) as usize,
+                    rd: reg_byte2.min(12) as usize,
+                },
+                crate::instruction::InstructionCategory::TwoReg => Args::TwoReg {
+                    rd: raw_ra.min(12) as usize,
+                    ra: raw_rb.min(12) as usize,
+                },
                 crate::instruction::InstructionCategory::TwoRegOneImm => {
-                    // Inline decode for the ~30% of instructions that are TwoRegImm
-                    // (load/store indirect, immediate ALU ops). Avoids the decode_args
-                    // function call and its 13-arm category match.
-                    let reg_byte = if pc + 1 < code.len() { code[pc + 1] } else { 0 };
-                    let ra = (reg_byte & 0x0F).min(12) as usize;
-                    let rb = (reg_byte >> 4).min(12) as usize;
+                    let ra = raw_ra.min(12) as usize;
+                    let rb = raw_rb.min(12) as usize;
                     let lx = if skip > 1 { (skip - 1).min(4) } else { 0 };
                     let imm = args::read_signed_imm(code, pc + 2, lx);
                     Args::TwoRegImm { ra, rb, imm }
@@ -388,8 +382,7 @@ impl Compiler {
                     }
                 }
                 crate::instruction::InstructionCategory::OneRegOneImm => {
-                    let reg_byte = if pc + 1 < code.len() { code[pc + 1] } else { 0 };
-                    let ra = (reg_byte & 0x0F).min(12) as usize;
+                    let ra = raw_ra.min(12) as usize;
                     let lx = if skip > 1 { (skip - 1).min(4) } else { 0 };
                     Args::RegImm {
                         ra,
@@ -397,16 +390,14 @@ impl Compiler {
                     }
                 }
                 crate::instruction::InstructionCategory::OneRegExtImm => {
-                    let reg_byte = if pc + 1 < code.len() { code[pc + 1] } else { 0 };
-                    let ra = (reg_byte & 0x0F).min(12) as usize;
+                    let ra = raw_ra.min(12) as usize;
                     Args::RegExtImm {
                         ra,
                         imm: args::read_le_imm(code, pc + 2, 8),
                     }
                 }
                 crate::instruction::InstructionCategory::TwoImm => {
-                    let first = if pc + 1 < code.len() { code[pc + 1] } else { 0 };
-                    let lx = (first as usize % 8).min(4);
+                    let lx = (reg_byte1 as usize % 8).min(4);
                     let ly = if skip > lx + 1 {
                         (skip - lx - 1).min(4)
                     } else {
@@ -425,9 +416,8 @@ impl Compiler {
                     }
                 }
                 crate::instruction::InstructionCategory::OneRegTwoImm => {
-                    let reg_byte = if pc + 1 < code.len() { code[pc + 1] } else { 0 };
-                    let ra = (reg_byte & 0x0F).min(12) as usize;
-                    let lx = ((reg_byte as usize / 16) % 8).min(4);
+                    let ra = raw_ra.min(12) as usize;
+                    let lx = ((reg_byte1 as usize / 16) % 8).min(4);
                     let ly = if skip > lx + 1 {
                         (skip - lx - 1).min(4)
                     } else {
@@ -440,9 +430,8 @@ impl Compiler {
                     }
                 }
                 crate::instruction::InstructionCategory::OneRegImmOffset => {
-                    let reg_byte = if pc + 1 < code.len() { code[pc + 1] } else { 0 };
-                    let ra = (reg_byte & 0x0F).min(12) as usize;
-                    let lx = ((reg_byte as usize / 16) % 8).min(4);
+                    let ra = raw_ra.min(12) as usize;
+                    let lx = ((reg_byte1 as usize / 16) % 8).min(4);
                     let ly = if skip > lx + 1 {
                         (skip - lx - 1).min(4)
                     } else {
@@ -457,9 +446,8 @@ impl Compiler {
                     }
                 }
                 crate::instruction::InstructionCategory::TwoRegOneOffset => {
-                    let reg_byte = if pc + 1 < code.len() { code[pc + 1] } else { 0 };
-                    let ra = (reg_byte & 0x0F).min(12) as usize;
-                    let rb = (reg_byte >> 4).min(12) as usize;
+                    let ra = raw_ra.min(12) as usize;
+                    let rb = raw_rb.min(12) as usize;
                     let lx = if skip > 1 { (skip - 1).min(4) } else { 0 };
                     let signed_off = args::read_signed_imm(code, pc + 2, lx) as i64;
                     Args::TwoRegOffset {
@@ -469,11 +457,9 @@ impl Compiler {
                     }
                 }
                 crate::instruction::InstructionCategory::TwoRegTwoImm => {
-                    let reg_byte = if pc + 1 < code.len() { code[pc + 1] } else { 0 };
-                    let ra = (reg_byte & 0x0F).min(12) as usize;
-                    let rb = (reg_byte >> 4).min(12) as usize;
-                    let lx_byte = if pc + 2 < code.len() { code[pc + 2] } else { 0 };
-                    let lx = (lx_byte as usize % 8).min(4);
+                    let ra = raw_ra.min(12) as usize;
+                    let rb = raw_rb.min(12) as usize;
+                    let lx = (reg_byte2 as usize % 8).min(4);
                     let ly = if skip > lx + 2 {
                         (skip - lx - 2).min(4)
                     } else {
@@ -511,14 +497,19 @@ impl Compiler {
             }
 
             // Feed gas simulator via lookup table (single array access + mask
-            // computation, replaces the 256-arm match in fast_cost_from_decoded).
-            let fc = crate::gas_cost::fast_cost_lut(
+            // computation). Uses pre-extracted register bytes to avoid re-reading
+            // code[pc+1] and code[pc+2].
+            let fc = crate::gas_cost::fast_cost_lut_regs(
                 opcode as u8,
                 &decoded_args,
-                pc as u32,
+                pc,
                 code,
                 bitmask,
+                raw_ra,
+                raw_rb,
+                reg_byte2 & 0x0F,
             );
+            let is_terminator = fc.is_terminator;
             gas_sim.feed(&fc);
 
             // Peephole fusions
@@ -579,18 +570,13 @@ impl Compiler {
                         | crate::instruction::InstructionCategory::OneRegTwoImm
                         | crate::instruction::InstructionCategory::OneRegImmOffset => {
                             // Destination = first register (ra in raw byte low nibble)
-                            let ra = if pc + 1 < code.len() {
-                                (code[pc + 1] & 0x0F).min(12) as usize
-                            } else {
-                                0
-                            };
-                            self.invalidate_reg(ra);
+                            self.invalidate_reg(raw_ra.min(12) as usize);
                         }
                         _ => {
                             // NoArgs, OneImm, OneOffset, TwoRegOneOffset, TwoRegTwoImm:
                             // These either don't write to a register or are terminators
                             // (which invalidate_all_regs at the next gas block boundary).
-                            if opcode.is_terminator() {
+                            if is_terminator {
                                 self.invalidate_all_regs();
                             }
                         }
@@ -599,7 +585,7 @@ impl Compiler {
             }
 
             // After a terminator, the next instruction starts a new gas block.
-            if opcode.is_terminator() {
+            if is_terminator {
                 next_is_gas_start = true;
             }
 
@@ -1260,6 +1246,7 @@ impl Compiler {
 
     /// Compile a single PVM instruction.
     /// Caller must ensure the assembler has sufficient capacity (at least 256 bytes).
+    #[inline(always)]
     fn compile_instruction(&mut self, opcode: Opcode, args: &Args, pc: u32, next_pc: u32) {
         match opcode {
             // === A.5.1: No arguments ===

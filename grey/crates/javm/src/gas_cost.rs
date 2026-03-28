@@ -2470,8 +2470,6 @@ pub fn fast_cost_lut(
     code: &[u8],
     bitmask: &[u8],
 ) -> FastCost {
-    // Accept raw register bytes extracted from the code during argument decoding.
-    // This avoids re-reading code[pc+1] and code[pc+2].
     let pcu = pc as usize;
     let reg_byte1 = if pcu + 1 < code.len() {
         code[pcu + 1]
@@ -2487,6 +2485,23 @@ pub fn fast_cost_lut(
     };
 
     fast_cost_lut_inner(opcode_byte, args, pcu, code, bitmask, ra, rb, rd)
+}
+
+/// Like `fast_cost_lut` but takes pre-extracted register bytes to avoid
+/// re-reading code[pc+1] and code[pc+2] (already decoded by the caller).
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub fn fast_cost_lut_regs(
+    opcode_byte: u8,
+    args: &crate::args::Args,
+    pc: usize,
+    code: &[u8],
+    bitmask: &[u8],
+    ra: u8,
+    rb: u8,
+    rd: u8,
+) -> FastCost {
+    fast_cost_lut_inner(opcode_byte, args, pc, code, bitmask, ra, rb, rd)
 }
 
 /// Inner implementation — separated to allow the compiler to inline the

@@ -38,6 +38,197 @@ pub fn link_elf_service(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
     linker::link_elf_service(elf_data)
 }
 
+/// Peephole pass: fuse `load_imm(51) + ThreeReg ALU` into `TwoRegOneImm` immediate form.
+///
+/// Scans the PVM code for consecutive pairs where:
+/// 1. First instruction is `load_imm` (opcode 51)
+/// 2. Second instruction is a ThreeReg ALU op with an immediate-form equivalent
+/// 3. The load destination register equals the ALU output register (dead after ALU)
+/// 4. The load value fits in i32 (4-byte immediate)
+/// 5. Neither instruction is a branch target
+///
+/// When fusable, rewrites the pair in-place: the first instruction becomes the
+/// TwoRegOneImm form with a 4-byte immediate, and all remaining bytes through
+/// the end of the second instruction become bitmask=0 continuation bytes.
+pub fn peephole_fuse_load_imm_alu(
+    code: &mut [u8],
+    bitmask: &mut [u8],
+    jump_table: &[u32],
+) -> usize {
+    let len = code.len();
+    if len < 4 {
+        return 0;
+    }
+
+    // Helper: compute skip from bitmask
+    let skip_for = |bm: &[u8], pc: usize| -> usize {
+        for j in 0..25 {
+            let idx = pc + 1 + j;
+            if idx >= bm.len() || bm[idx] == 1 {
+                return j;
+            }
+        }
+        0
+    };
+
+    // Collect all branch targets and jump table entries (cannot fuse these)
+    let mut targets = std::collections::HashSet::new();
+    {
+        let mut i = 0;
+        while i < len {
+            if i >= bitmask.len() || bitmask[i] != 1 {
+                i += 1;
+                continue;
+            }
+            let op = code[i];
+            let s = skip_for(bitmask, i);
+            // jump (40): 4-byte offset
+            if op == 40 && i + 5 <= len {
+                let off = i32::from_le_bytes([code[i + 1], code[i + 2], code[i + 3], code[i + 4]]);
+                let t = (i as i64 + off as i64) as usize;
+                if t < len {
+                    targets.insert(t);
+                }
+            }
+            // branch_eq..branch_ge_u (170-175): 4-byte offset at +2
+            if (170..=175).contains(&op) && i + 6 <= len {
+                let off = i32::from_le_bytes([code[i + 2], code[i + 3], code[i + 4], code[i + 5]]);
+                let t = (i as i64 + off as i64) as usize;
+                if t < len {
+                    targets.insert(t);
+                }
+            }
+            // branch_*_imm (81-90): variable-length offset
+            if (80..=90).contains(&op) && i + 2 <= len {
+                let reg_byte = code[i + 1];
+                let lx = ((reg_byte as usize / 16) % 8).min(4);
+                let ly = if s > lx + 1 { (s - lx - 1).min(4) } else { 0 };
+                let off_start = i + 2 + lx;
+                if ly > 0 && off_start + ly <= len {
+                    let mut buf = [0u8; 4];
+                    buf[..ly].copy_from_slice(&code[off_start..off_start + ly]);
+                    if ly < 4 && buf[ly - 1] & 0x80 != 0 {
+                        for b in &mut buf[ly..4] {
+                            *b = 0xFF;
+                        }
+                    }
+                    let off = i32::from_le_bytes(buf);
+                    let t = (i as i64 + off as i64) as usize;
+                    if t < len {
+                        targets.insert(t);
+                    }
+                }
+            }
+            i += 1 + s;
+        }
+    }
+    for &jt in jump_table {
+        targets.insert(jt as usize);
+    }
+
+    // ThreeReg ALU → TwoRegOneImm immediate form mapping
+    let imm_opcode = |three_reg_op: u8| -> Option<u8> {
+        match three_reg_op {
+            200 => Some(149), // add_64 → add_imm_64
+            210 => Some(132), // and → and_imm
+            211 => Some(133), // xor → xor_imm
+            212 => Some(134), // or → or_imm
+            202 => Some(150), // mul_64 → mul_imm_64
+            _ => None,
+        }
+    };
+
+    let mut fused = 0;
+    let mut i = 0;
+    while i < len {
+        if i >= bitmask.len() || bitmask[i] != 1 {
+            i += 1;
+            continue;
+        }
+        let op = code[i];
+        let s = skip_for(bitmask, i);
+        let next_i = i + 1 + s;
+
+        // Look for load_imm (51) followed by a ThreeReg ALU
+        if op == 51 && next_i < len && bitmask[next_i] == 1 && !targets.contains(&next_i) {
+            let alu_op = code[next_i];
+            let alu_s = skip_for(bitmask, next_i);
+            if let Some(imm_op) = imm_opcode(alu_op) {
+                // Parse load_imm: [51, reg_byte, imm...] — OneRegOneImm
+                // lx = skip - 1 (from bitmask)
+                if i + 1 < len {
+                    let load_reg_byte = code[i + 1];
+                    let load_rd = load_reg_byte & 0x0F;
+                    let lx = s.saturating_sub(1);
+                    let mut imm_buf = [0u8; 8];
+                    for k in 0..lx.min(8) {
+                        if i + 2 + k < len {
+                            imm_buf[k] = code[i + 2 + k];
+                        }
+                    }
+                    if lx > 0 && lx <= 8 && imm_buf[lx.min(8) - 1] & 0x80 != 0 {
+                        for b in &mut imm_buf[lx.min(8)..8] {
+                            *b = 0xFF;
+                        }
+                    }
+                    let load_val = i64::from_le_bytes(imm_buf);
+
+                    // Parse ThreeReg ALU: [op, ra|(rb<<4), rd]
+                    if next_i + 2 < len {
+                        let alu_reg1 = code[next_i + 1];
+                        let alu_ra = alu_reg1 & 0x0F;
+                        let alu_rb = (alu_reg1 >> 4) & 0x0F;
+                        let alu_rd = code[next_i + 2].min(12);
+
+                        // Fusable if: load_rd == alu_rd, load_val fits i32,
+                        // and load_rd matches one of the ALU sources
+                        let fits_i32 = load_val >= i32::MIN as i64 && load_val <= i32::MAX as i64;
+                        let matches_ra = load_rd == alu_ra;
+                        let matches_rb = load_rd == alu_rb;
+
+                        if fits_i32 && load_rd == alu_rd && (matches_ra || matches_rb) {
+                            // The "base" register is whichever ALU source is NOT load_rd
+                            let base = if matches_ra { alu_rb } else { alu_ra };
+                            let imm32 = load_val as i32;
+
+                            // Write fused TwoRegOneImm: [imm_op, alu_rd|(base<<4), imm0..imm3]
+                            // alu_rd goes in rA position (dest), base goes in rB position
+                            let end_of_pair = next_i + 1 + alu_s;
+
+                            // Need at least 6 bytes for opcode + reg + 4-byte imm
+                            if end_of_pair >= i + 6 {
+                                code[i] = imm_op;
+                                code[i + 1] = (alu_rd & 0x0F) | ((base & 0x0F) << 4);
+                                let imm_bytes = imm32.to_le_bytes();
+                                code[i + 2] = imm_bytes[0];
+                                code[i + 3] = imm_bytes[1];
+                                code[i + 4] = imm_bytes[2];
+                                code[i + 5] = imm_bytes[3];
+
+                                // Zero out remaining bytes and clear bitmask
+                                for k in 6..(end_of_pair - i) {
+                                    code[i + k] = 0;
+                                }
+                                // bitmask[i] stays 1 (instruction start)
+                                // Clear bitmask for all continuation bytes including old ALU start
+                                for b in &mut bitmask[(i + 1)..end_of_pair] {
+                                    *b = 0;
+                                }
+
+                                fused += 1;
+                                i = end_of_pair;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i += 1 + s;
+    }
+    fused
+}
+
 /// Post-pass: ensure all PVM branch targets are basic block starts (ϖ).
 ///
 /// Scans the PVM code for branch/jump instructions, extracts their targets,

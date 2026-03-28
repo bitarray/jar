@@ -1722,23 +1722,6 @@ impl TranslationContext {
         self.emit_load_imm_jump(rd, jt_addr, target)
     }
 
-    /// Emit a return address via jump table entry (without jump).
-    /// Used when the jump is emitted separately (e.g., for indirect calls).
-    pub(crate) fn emit_return_address_jt(
-        &mut self,
-        rd: u8,
-        rv_ret_addr: u64,
-    ) -> Result<(), TranspileError> {
-        if rd == 0 {
-            return Ok(());
-        }
-        let jt_idx = self.jump_table.len();
-        self.jump_table.push(0); // placeholder
-        self.return_fixups.push((jt_idx, rv_ret_addr));
-        let jt_addr = ((jt_idx + 1) * 2) as i64;
-        self.emit_load_imm(rd, jt_addr)
-    }
-
     pub(crate) fn emit_ecalli(&mut self, id: u32) {
         self.emit_inst(10);
         self.emit_var_imm(id as i32);
