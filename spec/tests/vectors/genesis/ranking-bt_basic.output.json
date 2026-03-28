@@ -1,1 +1,1 @@
-{"ranking":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"variances":[["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",25000000],["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",25000000]]}
+{"ranking":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"scores":[{"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","mu":753089,"sigma2":23129314},{"commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","mu":-821990,"sigma2":23074105}]}

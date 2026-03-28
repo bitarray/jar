@@ -95,9 +95,15 @@ structure RankingInput where
   signedCommits : List SignedCommit
   indices : List CommitIndex
 
+structure BTScore where
+  commit : CommitId
+  mu : Int
+  sigma2 : Nat
+  deriving Repr, BEq
+
 structure RankingOutput where
   ranking : List CommitId
-  variances : Option (List (CommitId × Nat)) := none
+  scores : Option (List BTScore) := none
 
 def runRankingTest (input : RankingInput) : RankingOutput :=
   let contexts := input.signedCommits.zip input.indices |>.map fun (commit, _) =>
@@ -107,8 +113,10 @@ def runRankingTest (input : RankingInput) : RankingOutput :=
   let useBT := contexts.getLast?.map (·.variant.useBradleyTerry) |>.getD false
   if useBT then
     let (ranking, btState) := computeRankingBTWithState input.signedCommits contexts
-    let variances := btState.map fun (c, e) => (c, e.sigma2)
-    { ranking, variances := some variances }
+    let scores := ranking.map fun c =>
+      let entry := btLookup btState c
+      { commit := c, mu := entry.mu, sigma2 := entry.sigma2 : BTScore }
+    { ranking, scores := some scores }
   else
     { ranking := computeRanking input.signedCommits contexts }
 

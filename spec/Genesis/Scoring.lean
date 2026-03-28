@@ -401,11 +401,12 @@ def btUpdate (state : BTState) (winner loser : CommitId) : BTState :=
     let delta_l : Int := (el.sigma2 * surprise / gamma : Nat)
     let mu_w' := ew.mu + delta_w
     let mu_l' := el.mu - delta_l
-    -- σ² updates: Δσ² = (σ²/γ)² × p × surprise / BT_SCALE²
-    let s2g_w := ew.sigma2 / gamma  -- σ²_w / γ (unscaled ratio)
-    let s2g_l := el.sigma2 / gamma
-    let var_reduction_w := s2g_w * s2g_w * p / BT_SCALE * surprise / BT_SCALE
-    let var_reduction_l := s2g_l * s2g_l * p / BT_SCALE * surprise / BT_SCALE
+    -- σ² updates: Δσ²_scaled = σ²_s² × p_s × surprise_s / (γ_s² × SCALE)
+    -- All values are ×SCALE. The extra SCALE in denominator corrects for
+    -- p and surprise each contributing a SCALE factor (p_s × surprise_s = p×(1-p)×SCALE²).
+    let gamma2 := gamma * gamma
+    let var_reduction_w := ew.sigma2 * ew.sigma2 * p * surprise / (gamma2 * BT_SCALE)
+    let var_reduction_l := el.sigma2 * el.sigma2 * p * surprise / (gamma2 * BT_SCALE)
     let sigma2_w' := if ew.sigma2 > var_reduction_w + BT_VARIANCE_FLOOR
       then ew.sigma2 - var_reduction_w else BT_VARIANCE_FLOOR
     let sigma2_l' := if el.sigma2 > var_reduction_l + BT_VARIANCE_FLOOR

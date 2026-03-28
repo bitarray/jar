@@ -69,21 +69,31 @@ instance : FromJson RankingInput where
     let indices ← j.getObjValAs? (List CommitIndex) "indices"
     return { signedCommits, indices }
 
+instance : ToJson BTScore where
+  toJson s := Json.mkObj [("commit", toJson s.commit), ("mu", toJson s.mu), ("sigma2", toJson s.sigma2)]
+
+instance : FromJson BTScore where
+  fromJson? j := do
+    let commit ← j.getObjValAs? CommitId "commit"
+    let mu ← j.getObjValAs? Int "mu"
+    let sigma2 ← j.getObjValAs? Nat "sigma2"
+    return { commit, mu, sigma2 }
+
 instance : ToJson RankingOutput where
   toJson o :=
     let fields := [("ranking", toJson o.ranking)]
-    let fields := match o.variances with
-      | some v => fields ++ [("variances", toJson v)]
+    let fields := match o.scores with
+      | some s => fields ++ [("scores", toJson s)]
       | none => fields
     Json.mkObj fields
 
 instance : FromJson RankingOutput where
   fromJson? j := do
     let ranking ← j.getObjValAs? (List CommitId) "ranking"
-    let variances ← match j.getObjVal? "variances" with
-      | .ok v => some <$> @fromJson? (List (CommitId × Nat)) _ v
+    let scores ← match j.getObjVal? "scores" with
+      | .ok v => some <$> @fromJson? (List BTScore) _ v
       | .error _ => pure none
-    return { ranking, variances }
+    return { ranking, scores }
 
 instance : FromJson FinalizeInput where
   fromJson? j := do
