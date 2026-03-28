@@ -14,6 +14,16 @@ const TARGET_NAME: &str = "riscv64em-javm";
 ///
 /// The blob is ready to use with `javm::program::initialize_program()`.
 pub fn build(manifest_dir: &str, bin_name: &str) -> PathBuf {
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
+    let blob_path = PathBuf::from(&out_dir).join(format!("{bin_name}.pvm"));
+
+    if std::env::var("SKIP_GUEST_BUILD").is_ok() {
+        if !blob_path.exists() {
+            std::fs::write(&blob_path, b"").ok();
+        }
+        return blob_path;
+    }
+
     let resolved = build_crate::resolve_manifest_dir(manifest_dir);
     let target_json_path = build_crate::write_target_json("riscv64em-javm.json", TARGET_JSON);
 
@@ -35,8 +45,6 @@ pub fn build(manifest_dir: &str, bin_name: &str) -> PathBuf {
     let elf_data = std::fs::read(&elf_path).expect("failed to read ELF");
     let blob = grey_transpiler::link_elf(&elf_data).expect("failed to transpile ELF to PVM blob");
 
-    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
-    let blob_path = PathBuf::from(&out_dir).join(format!("{bin_name}.pvm"));
     std::fs::write(&blob_path, &blob).expect("failed to write PVM blob");
     blob_path
 }
@@ -46,6 +54,16 @@ pub fn build(manifest_dir: &str, bin_name: &str) -> PathBuf {
 /// Same as [`build`] but uses `link_elf_service` which produces a blob with
 /// dual entry points (refine at PC=0, accumulate at PC=5).
 pub fn build_service(manifest_dir: &str, bin_name: &str) -> PathBuf {
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
+    let blob_path = PathBuf::from(&out_dir).join(format!("{bin_name}.pvm"));
+
+    if std::env::var("SKIP_GUEST_BUILD").is_ok() {
+        if !blob_path.exists() {
+            std::fs::write(&blob_path, b"").ok();
+        }
+        return blob_path;
+    }
+
     let resolved = build_crate::resolve_manifest_dir(manifest_dir);
     let target_json_path = build_crate::write_target_json("riscv64em-javm.json", TARGET_JSON);
 
@@ -65,8 +83,6 @@ pub fn build_service(manifest_dir: &str, bin_name: &str) -> PathBuf {
     let blob = grey_transpiler::link_elf_service(&elf_data)
         .expect("failed to transpile ELF to PVM service blob");
 
-    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
-    let blob_path = PathBuf::from(&out_dir).join(format!("{bin_name}.pvm"));
     std::fs::write(&blob_path, &blob).expect("failed to write PVM blob");
     blob_path
 }
