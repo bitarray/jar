@@ -412,7 +412,6 @@ impl Assembler {
             let target = (bound - 1) as i64;
             let rel = target - (self.write_pos as i64 + 4);
             self.emit_i32(rel as i32);
-
         } else {
             // Forward reference — defer to finalization.
             let offset = self.write_pos;

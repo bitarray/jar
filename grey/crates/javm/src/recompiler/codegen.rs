@@ -358,19 +358,15 @@ impl Compiler {
             let raw_rb = reg_byte1 >> 4;
 
             let decoded_args = match category {
-                crate::instruction::InstructionCategory::ThreeReg => {
-                    Args::ThreeReg {
-                        ra: raw_ra.min(12) as usize,
-                        rb: raw_rb.min(12) as usize,
-                        rd: reg_byte2.min(12) as usize,
-                    }
-                }
-                crate::instruction::InstructionCategory::TwoReg => {
-                    Args::TwoReg {
-                        rd: raw_ra.min(12) as usize,
-                        ra: raw_rb.min(12) as usize,
-                    }
-                }
+                crate::instruction::InstructionCategory::ThreeReg => Args::ThreeReg {
+                    ra: raw_ra.min(12) as usize,
+                    rb: raw_rb.min(12) as usize,
+                    rd: reg_byte2.min(12) as usize,
+                },
+                crate::instruction::InstructionCategory::TwoReg => Args::TwoReg {
+                    rd: raw_ra.min(12) as usize,
+                    ra: raw_rb.min(12) as usize,
+                },
                 crate::instruction::InstructionCategory::TwoRegOneImm => {
                     let ra = raw_ra.min(12) as usize;
                     let rb = raw_rb.min(12) as usize;
