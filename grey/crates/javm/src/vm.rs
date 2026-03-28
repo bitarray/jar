@@ -74,7 +74,8 @@ pub struct Pvm {
     pub heap_base: u32,
     /// Current heap top pointer for sbrk (heap_base + total_allocated).
     pub heap_top: u32,
-    /// Set of basic block start indices (ϖ).
+    /// Set of valid branch/jump landing targets (post-terminator PCs + static branch targets).
+    /// Used for branch validation, not for gas block boundaries.
     pub(crate) basic_block_starts: Vec<bool>,
     /// Gas cost for each gas block (indexed by block start PC).
     /// Only entries at gas block starts are meaningful. Gas blocks are
@@ -2757,12 +2758,11 @@ mod tests {
     }
 
     #[test]
-    fn test_step_and_run_same_gas_consumption() {
-        // Verify that step() and run() consume the same gas on a program
-        // with a branch target mid-block.
-        //
-        // Use a simple linear program (no actual branching) so both paths
-        // execute the same instructions deterministically.
+    fn test_step_and_run_same_gas_on_linear_program() {
+        // Verify that step() and run() consume the same gas on a simple
+        // linear program. This is a generic parity check between the two
+        // execution paths (step uses need_gas_charge + block_gas_costs,
+        // run uses predecoded bb_gas_cost).
         // Layout:
         //   PC 0: Fallthrough (1)  — terminator
         //   PC 1: MoveReg (100)    — NOT terminator
