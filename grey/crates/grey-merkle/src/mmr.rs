@@ -57,18 +57,28 @@ impl MerkleMountainRange {
             0 => Hash::ZERO,
             1 => *non_empty[0],
             _ => {
-                // Bag from right to left with $peak prefix
-                let last = non_empty.len() - 1;
-                let mut acc = *non_empty[last];
-                for i in (0..last).rev() {
-                    let mut input = Vec::new();
-                    input.extend_from_slice(b"$peak");
-                    input.extend_from_slice(&acc.0);
-                    input.extend_from_slice(&non_empty[i].0);
-                    acc = hash_fn(&input);
-                }
-                acc
+                // MR(h) = H_K("peak" || MR(h[..n-1]) || h[n-1]) (eq E.10)
+                mr_recursive(&non_empty, hash_fn)
             }
+        }
+    }
+}
+
+/// Recursive super-peak computation matching the spec (eq E.10).
+///
+/// MR([]) = H_0, MR([h]) = h, MR(h) = H_K("peak" || MR(h[..n-1]) || h[n-1])
+fn mr_recursive(peaks: &[&Hash], hash_fn: fn(&[u8]) -> Hash) -> Hash {
+    match peaks.len() {
+        0 => Hash::ZERO,
+        1 => *peaks[0],
+        n => {
+            let last = *peaks[n - 1];
+            let rest = mr_recursive(&peaks[..n - 1], hash_fn);
+            let mut data = Vec::with_capacity(4 + 32 + 32);
+            data.extend_from_slice(b"peak");
+            data.extend_from_slice(&rest.0);
+            data.extend_from_slice(&last.0);
+            hash_fn(&data)
         }
     }
 }
@@ -114,5 +124,32 @@ mod tests {
         // Three items: peaks[0] = Some, peaks[1] = Some
         assert!(mmr.peaks[0].is_some());
         assert!(mmr.peaks[1].is_some());
+    }
+
+    #[test]
+    fn test_mmr_root_uses_peak_prefix() {
+        // Verify the super-peak computation uses "peak" (not "$peak")
+        // and the correct argument order: H("peak" || MR(rest) || last)
+        let mut mmr = MerkleMountainRange::new();
+        mmr.append(Hash([1u8; 32]), test_hash);
+        mmr.append(Hash([2u8; 32]), test_hash);
+        mmr.append(Hash([3u8; 32]), test_hash);
+        // Two peaks: peaks[0] = [3u8;32], peaks[1] = H([1;32] || [2;32])
+        let peak0 = Hash([3u8; 32]);
+        let peak1 = test_hash(&{
+            let mut v = Vec::new();
+            v.extend_from_slice(&[1u8; 32]);
+            v.extend_from_slice(&[2u8; 32]);
+            v
+        });
+        // MR([peak0, peak1]) = H("peak" || peak0 || peak1)
+        let expected = test_hash(&{
+            let mut v = Vec::new();
+            v.extend_from_slice(b"peak");
+            v.extend_from_slice(&peak0.0);
+            v.extend_from_slice(&peak1.0);
+            v
+        });
+        assert_eq!(mmr.root(test_hash), expected);
     }
 }
