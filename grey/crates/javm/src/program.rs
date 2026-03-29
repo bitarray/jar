@@ -1084,8 +1084,8 @@ mod tests {
     fn test_parse_polkavm_all_versions() {
         for v in 0..=3u8 {
             let blob = build_pvm_blob_with_sections(v, &[], &[0, 1, 0], &[0x07], &[]);
-            let prog = parse_polkavm_blob(&blob)
-                .unwrap_or_else(|| panic!("version {} should parse", v));
+            let prog =
+                parse_polkavm_blob(&blob).unwrap_or_else(|| panic!("version {} should parse", v));
             assert_eq!(prog.version, v);
         }
     }
