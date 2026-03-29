@@ -2905,5 +2905,25 @@
       "novelty": 100
     },
     "weightDelta": 97
+  },
+  {
+    "commitHash": "5d22f2705a7778ed6d0d3ea4377bb5f793003ffc",
+    "contributor": "monsieurbulb",
+    "epoch": 1774825404,
+    "founderOverride": false,
+    "mergeVotes": [
+      "sorpaas"
+    ],
+    "metaReviews": [],
+    "rejectVotes": [],
+    "reviewers": [
+      "sorpaas"
+    ],
+    "score": {
+      "designQuality": 42,
+      "difficulty": 0,
+      "novelty": 42
+    },
+    "weightDelta": 33
   }
 ]
