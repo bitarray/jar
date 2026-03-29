@@ -632,8 +632,7 @@ mod tests_sort {
     }
 
     /// Run blob on both interpreter and recompiler, assert a0 and gas match.
-    /// If `expected_a0` is Some, also verify the interpreter produces that value.
-    fn assert_interp_recomp(blob: &[u8], expected_a0: Option<u64>, min_gas: u64, name: &str) {
+    fn assert_interp_recomp(blob: &[u8], expected_a0: u64, min_gas: u64, name: &str) {
         let gas = 100_000_000_000u64;
 
         // Run interpreter
@@ -651,9 +650,7 @@ mod tests_sort {
         let interp_gas = gas - interp.gas;
         let interp_a0 = interp.registers[7];
 
-        if let Some(expected) = expected_a0 {
-            assert_eq!(interp_a0, expected, "{name}: interpreter a0 mismatch");
-        }
+        assert_eq!(interp_a0, expected_a0, "{name}: interpreter a0 mismatch");
 
         // Run recompiler
         let mut recomp = javm::recompiler::initialize_program_recompiled(blob, &[], gas).unwrap();
@@ -681,27 +678,29 @@ mod tests_sort {
 
     #[test]
     fn test_grey_ecrecover_recompiler() {
-        assert_interp_recomp(grey_ecrecover_blob(), Some(1), 100_000, "ecrecover");
+        assert_interp_recomp(grey_ecrecover_blob(), 1, 100_000, "ecrecover");
     }
 
     #[test]
     fn test_grey_prime_sieve_recompiler() {
-        assert_interp_recomp(grey_sieve_blob(), Some(9592), 100_000, "prime_sieve");
+        assert_interp_recomp(grey_sieve_blob(), 9592, 100_000, "prime_sieve");
     }
 
     #[test]
     fn test_grey_ed25519_recompiler() {
-        assert_interp_recomp(grey_ed25519_blob(), Some(1), 1_000, "ed25519");
+        assert_interp_recomp(grey_ed25519_blob(), 1, 1_000, "ed25519");
     }
 
     #[test]
     fn test_grey_blake2b_recompiler() {
-        assert_interp_recomp(grey_blake2b_blob(), None, 10_000, "blake2b");
+        // blake2b-256 of [0x00..0xFF]*4: first 4 bytes LE = 0xEE1F55F1, sign-extended on rv64
+        assert_interp_recomp(grey_blake2b_blob(), 0xFFFFFFFFEE1F55F1, 10_000, "blake2b");
     }
 
     #[test]
     fn test_grey_keccak_recompiler() {
-        assert_interp_recomp(grey_keccak_blob(), None, 10_000, "keccak");
+        // keccak-256 of [0x00..0xFF]*4: first 4 bytes LE = 0x39E50259
+        assert_interp_recomp(grey_keccak_blob(), 0x39E50259, 10_000, "keccak");
     }
 
     #[test]
