@@ -86,7 +86,7 @@ Remember the comment URL/ID so you can edit it later if needed.
 3. Read relevant source code. Understand the current behavior before making changes.
 
 4. Implement the fix/improvement:
-   - Follow the project's coding conventions (see CLAUDE.md)
+   - Follow the project's coding conventions (see AGENTS.md)
    - Commit early, commit often
    - Run tests to verify correctness: `cargo test` for grey, `make test` for spec
 
