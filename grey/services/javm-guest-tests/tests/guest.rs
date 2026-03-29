@@ -56,9 +56,13 @@ fn run_test(test_id: u32, args: &[u8]) {
     let mut recomp = javm::recompiler::initialize_program_recompiled(GUEST_TESTS_BLOB, &[], gas)
         .expect("recompiler should initialize");
     let arg_addr = interp.heap_base;
+    // Verify a single byte write works at heap_base to diagnose CI failures
+    let test_write = recomp.write_byte(arg_addr, 0xAA);
+    let test_read = recomp.read_byte(arg_addr);
     assert!(
         recomp.write_bytes(arg_addr, &input),
-        "test {test_id}: write_bytes failed at heap_base=0x{arg_addr:X} len={}",
+        "test {test_id}: write_bytes failed at heap_base=0x{arg_addr:X} len={}, \
+         single_write={test_write}, single_read={test_read:?}",
         input.len()
     );
     recomp.registers_mut()[7] = arg_addr as u64;
