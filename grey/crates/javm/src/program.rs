@@ -714,7 +714,7 @@ pub fn parse_polkavm_blob(blob: &[u8]) -> Option<PolkaVMProgram> {
 
                 // Remaining bytes are the packed bitmask
                 let bitmask_bytes = &section_data[coff..];
-                let expected_bitmask_len = (code_len + 7) / 8;
+                let expected_bitmask_len = code_len.div_ceil(8);
                 if bitmask_bytes.len() != expected_bitmask_len {
                     return None;
                 }
@@ -795,7 +795,7 @@ pub fn strip_corevm_wrapper(data: &[u8]) -> Option<&[u8]> {
 ///
 /// `heap_top` starts at `heap_base` (sbrk semantics — no pages allocated until requested).
 pub fn initialize_from_polkavm(prog: &PolkaVMProgram, arguments: &[u8], gas: Gas) -> Option<Pvm> {
-    let page_round = |x: u32| -> u32 { ((x + PVM_PAGE_SIZE - 1) / PVM_PAGE_SIZE) * PVM_PAGE_SIZE };
+    let page_round = |x: u32| -> u32 { x.div_ceil(PVM_PAGE_SIZE) * PVM_PAGE_SIZE };
 
     let s = page_round(prog.stack_size);
     let arg_start = s;
