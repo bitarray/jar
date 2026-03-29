@@ -275,11 +275,14 @@ def initStandard (blob' : ByteArray) (args : ByteArray)
     Same blob format as initStandard, but all data is packed into a single
     contiguous read-write region starting at address 0:
       [0, s)                     stack (SP = s, grows toward 0)
-      [s, s + |a|)               arguments
-      [s + |a|, s + |a| + |o|)  RO data
-      [s + |a| + |o|, ... + |w|) RW data
-      [... + |w|, heap_top)      heap (z pages)
-    No guard zone, no read-only pages, no zone alignment. -/
+      [s, s + P(|o|))            RO data
+      [s + P(|o|), ... + P(|w|)) RW data
+      [... + P(|w|), ... + P(|a|)) arguments
+      [... + P(|a|), heap_top)   heap (z pages)
+    No guard zone, no read-only pages, no zone alignment.
+    Arguments are placed after RW data so that RO/RW addresses are
+    independent of argument size (the transpiler bakes absolute data
+    addresses at compile time). -/
 def initLinear (blob' : ByteArray) (args : ByteArray)
     : Option (ProgramBlob × Registers × Memory) := do
   let blob := skipMetadata blob'
@@ -314,12 +317,12 @@ def initLinear (blob' : ByteArray) (args : ByteArray)
   -- v0.8.0: validate basic block structure
   if !validateBasicBlocks prog then none
 
-  -- Linear layout: stack | args | roData | rwData | heap
+  -- Linear layout: stack | roData | rwData | args | heap
   let s := pageRound stackSize         -- stack occupies [0, s)
-  let argStart := s
-  let roStart := argStart + pageRound args.size
+  let roStart := s
   let rwStart := roStart + pageRound roSize
-  let heapStart := rwStart + pageRound rwSize
+  let argStart := rwStart + pageRound rwSize
+  let heapStart := argStart + pageRound args.size
   let heapEnd := heapStart + heapPages * Z_P
   let memSize := heapEnd
 
@@ -333,9 +336,9 @@ def initLinear (blob' : ByteArray) (args : ByteArray)
 
   -- Build memory with guardZone = 0 (address 0 is valid)
   let mem : Memory := { pages := Dict.empty, access, heapTop := heapEnd, guardZone := 0 }
-  let mem := copyToMem mem argStart args
   let mem := copyToMem mem roStart roData
   let mem := copyToMem mem rwStart rwData
+  let mem := copyToMem mem argStart args
 
   -- Registers
   let regs := Array.replicate PVM_REGISTERS (0 : RegisterValue)

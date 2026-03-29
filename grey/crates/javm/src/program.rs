@@ -154,12 +154,12 @@ pub fn initialize_program(program_blob: &[u8], arguments: &[u8], gas: Gas) -> Op
 
     let page_round = |x: u32| -> u32 { x.div_ceil(PVM_PAGE_SIZE) * PVM_PAGE_SIZE };
 
-    // Linear layout: stack | args | roData | rwData | heap
+    // Linear layout: stack | roData | rwData | args | heap
     let s = page_round(stack_size); // stack: [0, s)
-    let arg_start = s; // args:  [s, s + P(|a|))
-    let ro_start = arg_start + page_round(arguments.len() as u32);
+    let ro_start = s;
     let rw_start = ro_start + page_round(ro_size);
-    let heap_start = rw_start + page_round(rw_size);
+    let arg_start = rw_start + page_round(rw_size);
+    let heap_start = arg_start + page_round(arguments.len() as u32);
     let heap_end = heap_start + heap_pages * PVM_PAGE_SIZE;
     let mem_size = heap_end;
 
@@ -170,15 +170,15 @@ pub fn initialize_program(program_blob: &[u8], arguments: &[u8], gas: Gas) -> Op
 
     // Build flat memory buffer
     let mut flat_mem = vec![0u8; mem_size as usize];
-    if !arguments.is_empty() {
-        flat_mem[arg_start as usize..arg_start as usize + arguments.len()]
-            .copy_from_slice(arguments);
-    }
     if !ro_data.is_empty() {
         flat_mem[ro_start as usize..ro_start as usize + ro_data.len()].copy_from_slice(ro_data);
     }
     if !rw_data.is_empty() {
         flat_mem[rw_start as usize..rw_start as usize + rw_data.len()].copy_from_slice(rw_data);
+    }
+    if !arguments.is_empty() {
+        flat_mem[arg_start as usize..arg_start as usize + arguments.len()]
+            .copy_from_slice(arguments);
     }
 
     // Registers (JAR v0.8.0 linear)
@@ -281,11 +281,12 @@ pub fn parse_program_blob<'a>(
 
     let page_round = |x: u32| -> u32 { x.div_ceil(PVM_PAGE_SIZE) * PVM_PAGE_SIZE };
 
+    // Linear layout: stack | roData | rwData | args | heap
     let s = page_round(stack_size);
-    let arg_start = s;
-    let ro_start = arg_start + page_round(arguments.len() as u32);
+    let ro_start = s;
     let rw_start = ro_start + page_round(ro_size);
-    let heap_start = rw_start + page_round(rw_size);
+    let arg_start = rw_start + page_round(rw_size);
+    let heap_start = arg_start + page_round(arguments.len() as u32);
     let heap_end = heap_start + heap_pages * PVM_PAGE_SIZE;
     let mem_size = heap_end;
 
@@ -797,13 +798,14 @@ pub fn strip_corevm_wrapper(data: &[u8]) -> Option<&[u8]> {
 pub fn initialize_from_polkavm(prog: &PolkaVMProgram, arguments: &[u8], gas: Gas) -> Option<Pvm> {
     let page_round = |x: u32| -> u32 { x.div_ceil(PVM_PAGE_SIZE) * PVM_PAGE_SIZE };
 
+    // Linear layout: stack | roData | rwData | args | heap
     let s = page_round(prog.stack_size);
-    let arg_start = s;
-    let ro_start = arg_start + page_round(arguments.len() as u32);
+    let ro_start = s;
     let rw_start = ro_start + page_round(prog.ro_data.len() as u32);
     // rw_data_size may be larger than rw_data payload (zero-filled)
     let rw_region = core::cmp::max(prog.rw_data_size, prog.rw_data.len() as u32);
-    let heap_start = rw_start + page_round(rw_region);
+    let arg_start = rw_start + page_round(rw_region);
+    let heap_start = arg_start + page_round(arguments.len() as u32);
     // Heap size is not stored in the blob (upstream computes it as leftover
     // address space).  Default to 32 MB — matches the prototype and gives
     // enough headroom for realistic guests like doom.corevm.
@@ -816,10 +818,6 @@ pub fn initialize_from_polkavm(prog: &PolkaVMProgram, arguments: &[u8], gas: Gas
     }
 
     let mut flat_mem = vec![0u8; mem_size as usize];
-    if !arguments.is_empty() {
-        flat_mem[arg_start as usize..arg_start as usize + arguments.len()]
-            .copy_from_slice(arguments);
-    }
     if !prog.ro_data.is_empty() {
         flat_mem[ro_start as usize..ro_start as usize + prog.ro_data.len()]
             .copy_from_slice(&prog.ro_data);
@@ -827,6 +825,10 @@ pub fn initialize_from_polkavm(prog: &PolkaVMProgram, arguments: &[u8], gas: Gas
     if !prog.rw_data.is_empty() {
         flat_mem[rw_start as usize..rw_start as usize + prog.rw_data.len()]
             .copy_from_slice(&prog.rw_data);
+    }
+    if !arguments.is_empty() {
+        flat_mem[arg_start as usize..arg_start as usize + arguments.len()]
+            .copy_from_slice(arguments);
     }
 
     let mut registers = [0u64; 13];

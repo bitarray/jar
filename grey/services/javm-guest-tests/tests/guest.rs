@@ -17,16 +17,9 @@ fn run_test(test_id: u32, args: &[u8]) {
     let host_output = unsafe { javm_guest_tests::read_output(host_len) }.to_vec();
 
     // --- Interpreter ---
-    // Initialize with empty args to keep rodata at the correct PVM address.
-    // Write input to the heap region (writable in both interpreter and recompiler).
-    // Parse blob header to find heap_start: stack + page_round(ro) + page_round(rw).
     let gas = 100_000_000_000u64;
-    let mut interp = javm::program::initialize_program(GUEST_TESTS_BLOB, &[], gas)
+    let mut interp = javm::program::initialize_program(GUEST_TESTS_BLOB, &input, gas)
         .expect("blob should be loadable");
-    let arg_addr = interp.heap_base as usize;
-    interp.flat_mem[arg_addr..arg_addr + input.len()].copy_from_slice(&input);
-    interp.registers[7] = arg_addr as u64;
-    interp.registers[8] = input.len() as u64;
     loop {
         match interp.run().0 {
             javm::ExitReason::Halt => break,
@@ -53,13 +46,8 @@ fn run_test(test_id: u32, args: &[u8]) {
     );
 
     // --- Recompiler ---
-    let mut recomp = javm::recompiler::initialize_program_recompiled(GUEST_TESTS_BLOB, &[], gas)
+    let mut recomp = javm::recompiler::initialize_program_recompiled(GUEST_TESTS_BLOB, &input, gas)
         .expect("recompiler should initialize");
-    let arg_addr = interp.heap_base;
-    recomp.write_bytes(arg_addr, &input);
-
-    recomp.registers_mut()[7] = arg_addr as u64;
-    recomp.registers_mut()[8] = input.len() as u64;
     loop {
         match recomp.run() {
             javm::ExitReason::Halt => break,
