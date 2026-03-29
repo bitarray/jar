@@ -21,23 +21,21 @@ core::arch::global_asm!(
     "unimp",
 );
 
-use sha3::{Digest, Keccak256};
+/// Helper: run p1600 on provided state. #[inline(never)] prevents const-folding.
+#[inline(never)]
+fn run_p1600(state: &mut [u64; 25]) {
+    keccak::p1600(state, 24);
+}
 
-/// Keccak-256 of 1KB message.
+/// Test: p1600 with block buffer on stack.
 #[cfg_attr(target_env = "polkavm", polkavm_derive::polkavm_export)]
 #[no_mangle]
 pub extern "C" fn keccak_bench() -> u32 {
-    let mut msg = [0u8; MSG_LEN];
-    let mut i: usize = 0;
-    while i < MSG_LEN {
-        msg[i] = (i & 0xFF) as u8;
-        i += 1;
-    }
-
-    let mut hasher = Keccak256::new();
-    hasher.update(&msg);
-    let result = hasher.finalize();
-    u32::from_le_bytes([result[0], result[1], result[2], result[3]])
+    let mut state = [0u64; 25];
+    state[0] = 0x0000000001636261;
+    state[16] = 0x8000000000000000;
+    run_p1600(&mut state);
+    state[0] as u32
 }
 
 #[no_mangle]

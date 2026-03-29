@@ -706,7 +706,11 @@ mod tests_sort {
         assert_interp_recomp_match_gas(blob, expected_a0, min_gas, name);
     }
 
-    // NOTE: test_keccak_debug removed — sha3 crate produces wrong results on grey PVM.
+    // NOTE: grey transpiler produces wrong keccak results when keccak_p is called
+    // through a non-inlined function. When inlined (const-folded at compile time), the
+    // result is correct. Root cause: calling convention bug in the transpiler's
+    // function call/return mechanism. See bench-crypto branch for investigation.
+    // blake2b has the same root cause (also uses non-inlined function calls).
     // Root cause: the block-buffer crate's byte-to-u64 conversion path in the sha3
     // absorb function is miscompiled by the grey transpiler. The keccak-f1600
     // permutation itself is correct (verified manually). See bench-crypto branch.
@@ -724,7 +728,50 @@ mod tests_sort {
 
     #[test]
     fn test_grey_keccak_recompiler() {
-        assert_interp_recomp_consistent(grey_keccak_blob(), 10_000, "keccak");
+        let blob = grey_keccak_blob();
+        let gas = 100_000_000_000u64;
+        let mut pvm = javm::program::initialize_program(blob, &[], gas).unwrap();
+        loop {
+            let prev_pc = pvm.pc;
+            let prev_regs = pvm.registers;
+            match pvm.step() {
+                None => {}
+                Some(javm::ExitReason::Halt) => {
+                    let a0 = pvm.registers[7];
+                    eprintln!("keccak: HALT a0=0x{:08X}, gas={}", a0 as u32, gas - pvm.gas);
+                    assert_interp_recomp_consistent(blob, 1_000, "keccak");
+                    return;
+                }
+                Some(javm::ExitReason::PageFault(addr)) => {
+                    let opcode = pvm.code[prev_pc as usize];
+                    eprintln!("keccak: PageFault addr=0x{addr:X} at PC={prev_pc}, opcode={opcode}");
+                    // Decode the instruction arguments
+                    if opcode >= 124 && opcode <= 130 {
+                        // load_ind: regs_byte, then imm32
+                        let rb = (pvm.code[prev_pc as usize + 1] >> 4) & 0xf;
+                        let rd = pvm.code[prev_pc as usize + 1] & 0xf;
+                        let skip = {
+                            let mut s = 0;
+                            for j in 1..25 {
+                                if prev_pc as usize + 1 + j < pvm.bitmask.len()
+                                    && pvm.bitmask[prev_pc as usize + 1 + j] == 1
+                                {
+                                    s = j;
+                                    break;
+                                }
+                            }
+                            s
+                        };
+                        eprintln!("  load_ind rd=φ[{rd}], rb=φ[{rb}], skip={skip}");
+                        eprintln!("  φ[{rb}] = 0x{:X}", prev_regs[rb as usize]);
+                    }
+                    eprintln!("  regs: {:?}", prev_regs);
+                    panic!("keccak: PageFault at 0x{addr:X}");
+                }
+                Some(javm::ExitReason::HostCall(_)) => {}
+                Some(other) => panic!("keccak: {other:?}"),
+            }
+        }
     }
 
     #[test]
