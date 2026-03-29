@@ -827,6 +827,9 @@ impl Compiler {
     }
 
     /// Peephole: fuse Mul64 + MulUpper from raw code.
+    /// Currently disabled: corrupts results when φ[11] (RAX) is both source and destination.
+    /// Kept for future fix (needs proper RAX aliasing handling in push/pop sequence).
+    #[allow(dead_code)]
     fn try_fuse_mul_pair_raw(
         &mut self,
         code: &[u8],
