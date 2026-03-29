@@ -3,8 +3,6 @@
 #![no_std]
 #![no_main]
 
-use sha3::{Digest, Keccak256};
-
 const MSG_LEN: usize = 1024;
 
 #[cfg(not(target_env = "polkavm"))]
@@ -23,7 +21,9 @@ core::arch::global_asm!(
     "unimp",
 );
 
-/// Hash a 1KB message with Keccak-256. Returns first 4 bytes of hash as u32.
+use sha3::{Digest, Keccak256};
+
+/// Keccak-256 of 1KB message.
 #[cfg_attr(target_env = "polkavm", polkavm_derive::polkavm_export)]
 #[no_mangle]
 pub extern "C" fn keccak_bench() -> u32 {
@@ -37,7 +37,6 @@ pub extern "C" fn keccak_bench() -> u32 {
     let mut hasher = Keccak256::new();
     hasher.update(&msg);
     let result = hasher.finalize();
-
     u32::from_le_bytes([result[0], result[1], result[2], result[3]])
 }
 

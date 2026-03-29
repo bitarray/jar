@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 sha3 = { version = "0.10", default-features = false }
+keccak = { version = "0.1", default-features = false }
 
 [target.'cfg(target_env = "polkavm")'.dependencies]
 polkavm-derive = "0.32.0"
