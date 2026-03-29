@@ -121,29 +121,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match cli.log_format {
         LogFormat::Json => {
             tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from(&env_filter)
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-                )
+                .with_env_filter(tracing_subscriber::EnvFilter::from(&env_filter))
                 .json()
                 .flatten_event(true)
                 .init();
         }
         LogFormat::Pretty => {
             tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from(&env_filter)
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-                )
+                .with_env_filter(tracing_subscriber::EnvFilter::from(&env_filter))
                 .pretty()
                 .init();
         }
         LogFormat::Plain => {
             tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from(&env_filter)
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-                )
+                .with_env_filter(tracing_subscriber::EnvFilter::from(&env_filter))
                 .init();
         }
     };
