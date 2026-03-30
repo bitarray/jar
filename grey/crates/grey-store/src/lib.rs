@@ -15,6 +15,10 @@ use grey_types::state::State;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use std::path::Path;
 
+/// Current schema version. Bump this when table layouts change.
+/// The store refuses to open a database with a different version.
+pub const SCHEMA_VERSION: u32 = 1;
+
 /// Errors from the store.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -32,6 +36,8 @@ pub enum StoreError {
     Codec(String),
     #[error("not found")]
     NotFound,
+    #[error("incompatible schema version: database has v{found}, expected v{expected}")]
+    IncompatibleSchema { found: u32, expected: u32 },
 }
 
 // Table definitions
@@ -46,6 +52,7 @@ const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 // DA chunks: (report_hash ++ chunk_index as u16 LE) = 34 bytes -> chunk data
 const CHUNKS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chunks");
 
+const META_SCHEMA_VERSION: &str = "schema_version";
 const META_HEAD_HASH: &str = "head_hash";
 const META_HEAD_SLOT: &str = "head_slot";
 const META_FINALIZED_HASH: &str = "finalized_hash";
@@ -58,6 +65,10 @@ pub struct Store {
 
 impl Store {
     /// Open or create a store at the given path.
+    ///
+    /// On first open (no schema version in META), writes the current
+    /// [`SCHEMA_VERSION`]. On subsequent opens, verifies the stored version
+    /// matches and returns [`StoreError::IncompatibleSchema`] if not.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let db = Database::create(path.as_ref())?;
 
@@ -67,12 +78,53 @@ impl Store {
             let _ = txn.open_table(BLOCKS)?;
             let _ = txn.open_table(SLOT_INDEX)?;
             let _ = txn.open_table(STATE)?;
-            let _ = txn.open_table(META)?;
+            let mut meta = txn.open_table(META)?;
             let _ = txn.open_table(CHUNKS)?;
+
+            // Check or initialize schema version.
+            // Read first, drop the guard, then write if needed.
+            let stored_version = meta.get(META_SCHEMA_VERSION)?.and_then(|val| {
+                let bytes = val.value();
+                if bytes.len() == 4 {
+                    Some(u32::from_le_bytes(bytes.try_into().unwrap()))
+                } else {
+                    None
+                }
+            });
+
+            match stored_version {
+                Some(v) if v != SCHEMA_VERSION => {
+                    return Err(StoreError::IncompatibleSchema {
+                        found: v,
+                        expected: SCHEMA_VERSION,
+                    });
+                }
+                None => {
+                    meta.insert(META_SCHEMA_VERSION, SCHEMA_VERSION.to_le_bytes().as_slice())?;
+                }
+                Some(_) => {} // version matches, proceed
+            }
         }
         txn.commit()?;
 
         Ok(Self { db })
+    }
+
+    /// Return the schema version stored in the database.
+    pub fn schema_version(&self) -> Result<u32, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(META)?;
+        match table.get(META_SCHEMA_VERSION)? {
+            Some(val) => {
+                let bytes = val.value();
+                if bytes.len() == 4 {
+                    Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+                } else {
+                    Err(StoreError::Codec("invalid schema version bytes".into()))
+                }
+            }
+            None => Err(StoreError::NotFound),
+        }
     }
 
     // ── Blocks ──────────────────────────────────────────────────────────
@@ -696,5 +748,59 @@ mod tests {
             .get_accumulation_root(&block_hash, &fake_anchor)
             .unwrap();
         assert!(result.is_none(), "non-existent anchor should return None");
+    }
+
+    #[test]
+    fn test_schema_version_written_on_create() {
+        let (store, _dir) = temp_store();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_schema_version_persists_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.redb");
+
+        // Create the store
+        {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        }
+
+        // Reopen — should succeed with same version
+        {
+            let store = Store::open(&path).unwrap();
+            assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        }
+    }
+
+    #[test]
+    fn test_schema_version_mismatch_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.redb");
+
+        // Create a DB with a different schema version
+        {
+            let db = Database::create(&path).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut meta = txn.open_table(META).unwrap();
+                // Write a future version
+                let future_version: u32 = SCHEMA_VERSION + 1;
+                meta.insert(META_SCHEMA_VERSION, future_version.to_le_bytes().as_slice())
+                    .unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        // Opening with current version should fail
+        let result = Store::open(&path);
+        let err = result.err().expect("expected IncompatibleSchema error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("incompatible schema version"),
+            "expected IncompatibleSchema error, got: {}",
+            msg
+        );
     }
 }
