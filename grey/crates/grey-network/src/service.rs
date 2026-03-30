@@ -242,22 +242,30 @@ impl request_response::Codec for JamProtocol {
 /// Channel capacity for network events (network → node).
 /// Sized for bursts: a full validator set can each send a block + vote + assurance
 /// in a single slot. 1024 provides headroom without unbounded growth.
-const EVENT_CHANNEL_CAPACITY: usize = 1024;
+pub const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 /// Channel capacity for network commands (node → network).
 /// Node sends at a controlled rate (one broadcast per event processed).
-const COMMAND_CHANNEL_CAPACITY: usize = 256;
+pub const COMMAND_CHANNEL_CAPACITY: usize = 256;
 
 /// Create and run the network service.
 ///
-/// Returns channels for communication with the network service.
+/// Returns:
+/// - `event_rx`: receiver for network events (network → node)
+/// - `cmd_tx`: sender for network commands (node → network)
+/// - `event_tx_monitor`: clone of the event sender for queue depth monitoring
 pub async fn start_network(
     config: NetworkConfig,
 ) -> Result<
-    (mpsc::Receiver<NetworkEvent>, mpsc::Sender<NetworkCommand>),
+    (
+        mpsc::Receiver<NetworkEvent>,
+        mpsc::Sender<NetworkCommand>,
+        mpsc::Sender<NetworkEvent>,
+    ),
     Box<dyn std::error::Error + Send + Sync>,
 > {
     let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+    let event_tx_monitor = event_tx.clone();
     let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
 
     // Build the swarm
@@ -346,7 +354,7 @@ pub async fn start_network(
         run_network_loop(swarm, event_tx, cmd_rx, topics, validator_index).await;
     });
 
-    Ok((event_rx, cmd_tx))
+    Ok((event_rx, cmd_tx, event_tx_monitor))
 }
 
 /// Behaviour combining gossipsub, identify, and request-response protocols.

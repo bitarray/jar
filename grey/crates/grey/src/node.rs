@@ -15,13 +15,19 @@ use crate::tickets::{self, TicketState};
 use grey_codec::header_codec::compute_header_hash;
 use grey_consensus::authoring;
 
-use grey_network::service::{NetworkCommand, NetworkConfig, NetworkEvent};
+use grey_network::service::{
+    COMMAND_CHANNEL_CAPACITY, EVENT_CHANNEL_CAPACITY, NetworkCommand, NetworkConfig, NetworkEvent,
+};
 use grey_store::Store;
 use grey_types::config::Config;
 use grey_types::header::{Assurance, Block};
 use grey_types::state::State;
 use grey_types::{BandersnatchPublicKey, Hash, Timeslot};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Maximum number of out-of-order blocks to buffer. Prevents memory
+/// exhaustion from peers sending blocks far ahead of our current state.
+const MAX_PENDING_BLOCKS: usize = 100;
 
 /// Node configuration.
 pub struct NodeConfig {
@@ -90,13 +96,14 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
         .filter_map(|s| s.parse().ok())
         .collect();
 
-    let (mut net_events, net_commands) = grey_network::service::start_network(NetworkConfig {
-        listen_addr: config.listen_addr.clone(),
-        listen_port: config.listen_port,
-        boot_peers,
-        validator_index: config.validator_index,
-    })
-    .await?;
+    let (mut net_events, net_commands, net_event_monitor) =
+        grey_network::service::start_network(NetworkConfig {
+            listen_addr: config.listen_addr.clone(),
+            listen_port: config.listen_port,
+            boot_peers,
+            validator_index: config.validator_index,
+        })
+        .await?;
 
     // Start RPC server
     let store = std::sync::Arc::new(store_raw);
@@ -139,9 +146,6 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
     // to apply it after the missing ones arrive.
     let mut pending_blocks: std::collections::BTreeMap<Timeslot, (Block, Hash)> =
         std::collections::BTreeMap::new();
-    /// Maximum number of out-of-order blocks to buffer. Prevents memory
-    /// exhaustion from peers sending blocks far ahead of our current state.
-    const MAX_PENDING_BLOCKS: usize = 100;
 
     tracing::info!(
         "Validator {} node started, genesis_time={}",
@@ -157,6 +161,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
     let mut interval = tokio::time::interval(Duration::from_millis(500));
     let mut last_authored_slot: Timeslot = 0;
     let mut last_assurance_slot: Timeslot = 0;
+    let mut monitor_tick: u64 = 0;
 
     loop {
         tokio::select! {
@@ -189,6 +194,18 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                     .as_secs();
                 // slot = (now - genesis_time) / slot_period
                 let current_slot = ((now - genesis_time) / 6) as Timeslot + 1; // +1 because genesis is slot 0
+
+                // Queue depth monitoring: check every 12 ticks (~6 seconds, once per slot).
+                monitor_tick += 1;
+                if monitor_tick.is_multiple_of(12) {
+                    check_queue_depths(
+                        config.validator_index,
+                        &net_event_monitor,
+                        &net_commands,
+                        rpc_state.as_ref(),
+                        pending_blocks.len(),
+                    );
+                }
 
                 // Only attempt authoring if this is a new slot we haven't authored yet
                 if current_slot > state.timeslot && current_slot > last_authored_slot {
@@ -1142,5 +1159,72 @@ fn create_demo_work_package(
             imports: vec![],
             extrinsics: vec![],
         }],
+    }
+}
+
+/// Check queue depths for all inter-component channels and the pending blocks buffer.
+/// Logs at debug level normally, warns when any queue exceeds 80% capacity.
+fn check_queue_depths(
+    validator_index: u16,
+    net_event_tx: &tokio::sync::mpsc::Sender<NetworkEvent>,
+    net_cmd_tx: &tokio::sync::mpsc::Sender<NetworkCommand>,
+    rpc_state: Option<&std::sync::Arc<grey_rpc::RpcState>>,
+    pending_blocks_len: usize,
+) {
+    const WARN_THRESHOLD: f64 = 0.8;
+
+    let event_depth = EVENT_CHANNEL_CAPACITY - net_event_tx.capacity();
+    let cmd_depth = COMMAND_CHANNEL_CAPACITY - net_cmd_tx.capacity();
+    let rpc_depth = rpc_state.map(|s| 256 - s.commands.capacity()).unwrap_or(0);
+    let rpc_capacity: usize = 256;
+
+    tracing::debug!(
+        "Validator {} queue depths: events={}/{}, commands={}/{}, rpc={}/{}, pending_blocks={}/{}",
+        validator_index,
+        event_depth,
+        EVENT_CHANNEL_CAPACITY,
+        cmd_depth,
+        COMMAND_CHANNEL_CAPACITY,
+        rpc_depth,
+        rpc_capacity,
+        pending_blocks_len,
+        MAX_PENDING_BLOCKS,
+    );
+
+    if event_depth as f64 > EVENT_CHANNEL_CAPACITY as f64 * WARN_THRESHOLD {
+        tracing::warn!(
+            "Validator {} network event queue at {:.0}% capacity ({}/{})",
+            validator_index,
+            event_depth as f64 / EVENT_CHANNEL_CAPACITY as f64 * 100.0,
+            event_depth,
+            EVENT_CHANNEL_CAPACITY,
+        );
+    }
+    if cmd_depth as f64 > COMMAND_CHANNEL_CAPACITY as f64 * WARN_THRESHOLD {
+        tracing::warn!(
+            "Validator {} network command queue at {:.0}% capacity ({}/{})",
+            validator_index,
+            cmd_depth as f64 / COMMAND_CHANNEL_CAPACITY as f64 * 100.0,
+            cmd_depth,
+            COMMAND_CHANNEL_CAPACITY,
+        );
+    }
+    if rpc_state.is_some() && rpc_depth as f64 > rpc_capacity as f64 * WARN_THRESHOLD {
+        tracing::warn!(
+            "Validator {} RPC command queue at {:.0}% capacity ({}/{})",
+            validator_index,
+            rpc_depth as f64 / rpc_capacity as f64 * 100.0,
+            rpc_depth,
+            rpc_capacity,
+        );
+    }
+    if pending_blocks_len as f64 > MAX_PENDING_BLOCKS as f64 * WARN_THRESHOLD {
+        tracing::warn!(
+            "Validator {} pending blocks buffer at {:.0}% capacity ({}/{})",
+            validator_index,
+            pending_blocks_len as f64 / MAX_PENDING_BLOCKS as f64 * 100.0,
+            pending_blocks_len,
+            MAX_PENDING_BLOCKS,
+        );
     }
 }
