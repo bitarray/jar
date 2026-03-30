@@ -10,6 +10,7 @@ grey-types = { workspace = true }
 grey-codec = { workspace = true }
 grey-crypto = { workspace = true }
 grey-merkle = { workspace = true }
+hex = { workspace = true }
 redb = "3.1"
 serde_json = { workspace = true }
 thiserror = { workspace = true }

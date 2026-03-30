@@ -38,6 +38,12 @@ pub enum StoreError {
     NotFound,
     #[error("incompatible schema version: database has v{found}, expected v{expected}")]
     IncompatibleSchema { found: u32, expected: u32 },
+    #[error("state integrity check failed for block 0x{}: stored checksum {stored}, computed {computed}", hex::encode(.block_hash))]
+    IntegrityError {
+        block_hash: [u8; 32],
+        stored: String,
+        computed: String,
+    },
 }
 
 // Table definitions
@@ -51,6 +57,9 @@ const STATE: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("state");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 // DA chunks: (report_hash ++ chunk_index as u16 LE) = 34 bytes -> chunk data
 const CHUNKS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("chunks");
+// State checksums: block_hash (32 bytes) -> blake2b_256 hash of the encoded state blob (32 bytes)
+const STATE_CHECKSUMS: TableDefinition<&[u8; 32], &[u8; 32]> =
+    TableDefinition::new("state_checksums");
 
 const META_SCHEMA_VERSION: &str = "schema_version";
 const META_HEAD_HASH: &str = "head_hash";
@@ -96,6 +105,7 @@ impl Store {
             let _ = txn.open_table(STATE)?;
             let mut meta = txn.open_table(META)?;
             let _ = txn.open_table(CHUNKS)?;
+            let _ = txn.open_table(STATE_CHECKSUMS)?;
 
             // Check or initialize schema version.
             // Read first, drop the guard, then write if needed.
@@ -196,11 +206,14 @@ impl Store {
     ) -> Result<(), StoreError> {
         let kvs = grey_merkle::state_serial::serialize_state(state, config);
         let encoded = encode_state_kvs(&kvs);
+        let checksum = grey_crypto::blake2b_256(&encoded);
 
         let txn = self.db.begin_write()?;
         {
             let mut table = txn.open_table(STATE)?;
             table.insert(&block_hash.0, encoded.as_slice())?;
+            let mut checksums = txn.open_table(STATE_CHECKSUMS)?;
+            checksums.insert(&block_hash.0, &checksum.0)?;
         }
         txn.commit()?;
         Ok(())
@@ -216,6 +229,42 @@ impl Store {
         let (state, _opaque) = grey_merkle::state_serial::deserialize_state(&kvs, config)
             .map_err(StoreError::Codec)?;
         Ok(state)
+    }
+
+    /// Verify the integrity of stored state data for a block.
+    ///
+    /// Recomputes the blake2b_256 hash of the state blob and compares it against
+    /// the stored checksum. Returns `Ok(true)` if the checksum matches,
+    /// `Ok(false)` if no checksum was stored (pre-checksum data), and
+    /// `Err(IntegrityError)` if the checksum does not match.
+    pub fn verify_state_integrity(&self, block_hash: &Hash) -> Result<bool, StoreError> {
+        let txn = self.db.begin_read()?;
+
+        // Read the state blob
+        let state_table = txn.open_table(STATE)?;
+        let state_val = state_table
+            .get(&block_hash.0)?
+            .ok_or(StoreError::NotFound)?;
+        let state_bytes = state_val.value();
+
+        // Read the stored checksum
+        let checksum_table = txn.open_table(STATE_CHECKSUMS)?;
+        let stored = match checksum_table.get(&block_hash.0)? {
+            Some(val) => *val.value(),
+            None => return Ok(false), // no checksum stored (legacy data)
+        };
+
+        // Recompute and compare
+        let computed = grey_crypto::blake2b_256(state_bytes);
+        if stored != computed.0 {
+            return Err(StoreError::IntegrityError {
+                block_hash: block_hash.0,
+                stored: hex::encode(stored),
+                computed: hex::encode(computed.0),
+            });
+        }
+
+        Ok(true)
     }
 
     /// Look up a specific service storage entry by computing the expected state key.
@@ -884,5 +933,84 @@ mod tests {
             "expected IncompatibleSchema error, got: {}",
             msg
         );
+    }
+
+    #[test]
+    fn test_state_integrity_checksum_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("test.redb")).unwrap();
+        let config = grey_types::config::Config::tiny();
+        let (genesis_state, _) = grey_consensus::genesis::create_genesis(&config);
+
+        let block_hash = Hash([42u8; 32]);
+        store
+            .put_state(&block_hash, &genesis_state, &config)
+            .unwrap();
+
+        // Integrity check should pass
+        assert!(store.verify_state_integrity(&block_hash).unwrap());
+    }
+
+    #[test]
+    fn test_state_integrity_detects_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.redb");
+        let block_hash = Hash([42u8; 32]);
+
+        // Store state with checksum
+        {
+            let store = Store::open(&path).unwrap();
+            let config = grey_types::config::Config::tiny();
+            let (genesis_state, _) = grey_consensus::genesis::create_genesis(&config);
+            store
+                .put_state(&block_hash, &genesis_state, &config)
+                .unwrap();
+
+            // Verify it passes first
+            assert!(store.verify_state_integrity(&block_hash).unwrap());
+
+            // Corrupt the state data by writing different bytes
+            let txn = store.db.begin_write().unwrap();
+            {
+                let mut table = txn.open_table(STATE).unwrap();
+                table
+                    .insert(&block_hash.0, b"corrupted data".as_slice())
+                    .unwrap();
+            }
+            txn.commit().unwrap();
+        }
+
+        // Reopen and verify corruption is detected
+        let store = Store::open(&path).unwrap();
+        let result = store.verify_state_integrity(&block_hash);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("integrity check failed"),
+            "expected IntegrityError, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_state_integrity_no_checksum_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.redb");
+        let block_hash = Hash([42u8; 32]);
+
+        let store = Store::open(&path).unwrap();
+
+        // Manually insert state without checksum (simulates legacy data)
+        let txn = store.db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(STATE).unwrap();
+            table
+                .insert(&block_hash.0, b"some state data".as_slice())
+                .unwrap();
+        }
+        txn.commit().unwrap();
+
+        // Should return false (no checksum), not error
+        assert!(!store.verify_state_integrity(&block_hash).unwrap());
     }
 }
