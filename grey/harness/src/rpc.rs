@@ -11,7 +11,14 @@ pub enum RpcError {
     JsonRpc(String),
     #[error("missing 'result' in response")]
     MissingResult,
+    #[error("RPC call timed out after {0:?}")]
+    #[allow(dead_code)] // Available for callers to match on; timeout produces Http variant
+    Timeout(std::time::Duration),
 }
+
+/// Default per-RPC-call timeout. Prevents individual calls from hanging
+/// indefinitely when the node is overloaded or unresponsive.
+const RPC_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -60,7 +67,10 @@ pub struct RpcClient {
 impl RpcClient {
     pub fn new(endpoint: &str) -> Self {
         Self {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(RPC_CALL_TIMEOUT)
+                .build()
+                .expect("failed to build HTTP client"),
             endpoint: endpoint.to_string(),
             next_id: AtomicU64::new(1),
         }
