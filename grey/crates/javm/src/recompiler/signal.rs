@@ -36,10 +36,16 @@ thread_local! {
 }
 
 static INIT: Once = Once::new();
+// SAFETY: sigaction is a POD struct — zero-initialized is a valid (SIG_DFL) state.
+// Accessed only inside Once::call_once (write) and from the signal handler (read)
+// after initialization is complete.
 static mut PREV_SIGSEGV: libc::sigaction = unsafe { std::mem::zeroed() };
 
 /// Ensure the SIGSEGV handler is installed (once per process).
 pub fn ensure_installed() {
+    // SAFETY: Both install functions use OS APIs (sigaction, sigaltstack, mmap)
+    // which are safe to call once at startup. Once::call_once guarantees this
+    // runs exactly once across all threads.
     INIT.call_once(|| unsafe {
         install_sigaltstack();
         install_handler();
@@ -47,6 +53,9 @@ pub fn ensure_installed() {
 }
 
 unsafe fn install_handler() {
+    // SAFETY: sigaction() is called with a properly initialized sigaction struct.
+    // The handler pointer is a valid extern "C" fn with the correct signature.
+    // PREV_SIGSEGV is written once here (protected by Once) and only read afterward.
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
         sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
@@ -63,6 +72,10 @@ unsafe fn install_handler() {
 }
 
 unsafe fn install_sigaltstack() {
+    // SAFETY: mmap allocates a fresh anonymous mapping with a guard page at the
+    // bottom (PROT_NONE) and stack space above (PROT_READ|PROT_WRITE).
+    // The allocation is intentionally leaked — it lives for the process lifetime.
+    // sigaltstack() is called with a valid stack pointer and size.
     unsafe {
         // Check if an adequate alternate stack already exists.
         let mut old: libc::stack_t = std::mem::zeroed();
@@ -104,11 +117,20 @@ unsafe fn install_sigaltstack() {
     }
 }
 
+/// SIGSEGV handler: intercepts page faults from JIT code and redirects to the
+/// exit sequence. Only handles faults at registered trap sites within our
+/// native code region; all others are delegated to the previous handler.
 unsafe extern "C" fn sigsegv_handler(
     signum: libc::c_int,
     _siginfo: *mut libc::siginfo_t,
     ucontext: *mut libc::c_void,
 ) {
+    // SAFETY: Called by the OS signal mechanism with valid siginfo/ucontext pointers.
+    // SIGNAL_STATE is thread-local and set by the calling thread before JIT entry.
+    // state_ptr is only non-null during JIT execution on this thread.
+    // The ucontext cast is valid on x86-64 Linux (ucontext_t layout).
+    // ctx_ptr points to a live JitContext owned by the same thread's call stack.
+    // Modifying REG_RIP redirects execution to exit_label (our code, not arbitrary).
     unsafe {
         let state_ptr = SIGNAL_STATE.with(|cell| cell.get());
         if state_ptr.is_null() {
@@ -160,6 +182,11 @@ unsafe fn delegate_to_previous(
     siginfo: *mut libc::siginfo_t,
     context: *mut libc::c_void,
 ) {
+    // SAFETY: PREV_SIGSEGV was initialized by install_handler (protected by Once).
+    // The transmute calls convert the sa_sigaction field to the appropriate function
+    // pointer type based on SA_SIGINFO flag — matching how the OS would call it.
+    // If the previous handler is SIG_DFL/SIG_IGN, we restore it and let the
+    // signal re-fire with default behavior (typically process termination).
     unsafe {
         let prev = PREV_SIGSEGV;
         if prev.sa_flags & libc::SA_SIGINFO != 0 {
