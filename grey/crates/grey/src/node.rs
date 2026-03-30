@@ -1180,6 +1180,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
             status.blocks_authored = blocks_authored;
             status.blocks_imported = blocks_imported;
             status.finalized_slot = grandpa.finalized_slot;
+            status.grandpa_round = grandpa.round;
             if let Ok((h, _)) = store.get_head() {
                 status.head_hash = hex::encode(h.0);
             }

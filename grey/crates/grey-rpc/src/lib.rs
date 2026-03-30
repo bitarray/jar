@@ -45,6 +45,7 @@ pub struct NodeStatus {
     pub blocks_authored: u64,
     pub blocks_imported: u64,
     pub validator_index: u16,
+    pub grandpa_round: u64,
 }
 
 /// Shared state accessible by the RPC server.
@@ -656,6 +657,7 @@ where
                 let blocks_authored = status.blocks_authored;
                 let blocks_imported = status.blocks_imported;
                 let validator_index = status.validator_index;
+                let grandpa_round = status.grandpa_round;
                 drop(status);
 
                 let stored_blocks = state.store.block_count().unwrap_or(0);
@@ -690,7 +692,10 @@ where
                      grey_stored_votes {stored_votes}\n\
                      # HELP grey_validator_index Validator index of this node.\n\
                      # TYPE grey_validator_index gauge\n\
-                     grey_validator_index {validator_index}\n"
+                     grey_validator_index {validator_index}\n\
+                     # HELP grey_grandpa_round Current GRANDPA finality round.\n\
+                     # TYPE grey_grandpa_round gauge\n\
+                     grey_grandpa_round {grandpa_round}\n"
                 );
 
                 Ok(http::Response::builder()
@@ -907,6 +912,7 @@ pub fn create_rpc_channel(
             blocks_authored: 0,
             blocks_imported: 0,
             validator_index,
+            grandpa_round: 0,
         }),
         commands: tx,
         block_notifications: block_tx,
