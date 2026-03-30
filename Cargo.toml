@@ -76,6 +76,7 @@ reed-solomon-simd = "3.1"
 redb = "3.1"
 tracing = "0.1"
 tracing-test = "0.2"
+proptest = "1"
 tokio = { version = "1", features = ["full"] }
 libp2p = { version = "0.54", features = ["gossipsub", "noise", "tcp", "yamux", "tokio", "macros", "identify", "request-response"] }
 clap = { version = "4", features = ["derive"] }

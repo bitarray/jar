@@ -749,4 +749,75 @@ mod tests {
         bad_vote.validator_index = 1; // Wrong key
         assert!(!verify_vote(&bad_vote, VoteType::Prevote, &chain_state));
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_vote_type() -> impl Strategy<Value = VoteType> {
+            prop_oneof![Just(VoteType::Prevote), Just(VoteType::Precommit),]
+        }
+
+        proptest! {
+            #[test]
+            fn vote_message_encode_decode_roundtrip(
+                block_hash in prop::array::uniform32(any::<u8>()),
+                block_slot in any::<u32>(),
+                round in any::<u64>(),
+                validator_index in any::<u16>(),
+                signature in prop::array::uniform32(any::<u8>())
+                    .prop_flat_map(|a| prop::array::uniform32(any::<u8>()).prop_map(move |b| {
+                        let mut sig = [0u8; 64];
+                        sig[..32].copy_from_slice(&a);
+                        sig[32..].copy_from_slice(&b);
+                        sig
+                    })),
+                vote_type in arb_vote_type(),
+            ) {
+                let msg = VoteMessage {
+                    vote_type,
+                    vote: Vote {
+                        block_hash: Hash(block_hash),
+                        block_slot,
+                        round,
+                        validator_index,
+                        signature: Ed25519Signature(signature),
+                    },
+                };
+
+                let encoded = encode_vote_message(&msg);
+                prop_assert_eq!(encoded.len(), 111, "encoded vote should be exactly 111 bytes");
+
+                let decoded = decode_vote_message(&encoded);
+                prop_assert!(decoded.is_some(), "decode should succeed for any valid encoding");
+
+                let decoded = decoded.unwrap();
+                prop_assert_eq!(decoded.vote_type, msg.vote_type);
+                prop_assert_eq!(decoded.vote.block_hash, msg.vote.block_hash);
+                prop_assert_eq!(decoded.vote.block_slot, msg.vote.block_slot);
+                prop_assert_eq!(decoded.vote.round, msg.vote.round);
+                prop_assert_eq!(decoded.vote.validator_index, msg.vote.validator_index);
+                prop_assert_eq!(decoded.vote.signature.0, msg.vote.signature.0);
+            }
+
+            #[test]
+            fn decode_rejects_short_messages(data in prop::collection::vec(any::<u8>(), 0..110)) {
+                // Any message shorter than 111 bytes should fail to decode
+                prop_assert!(decode_vote_message(&data).is_none());
+            }
+
+            #[test]
+            fn decode_rejects_invalid_vote_type(
+                rest in prop::collection::vec(any::<u8>(), 110..=110),
+            ) {
+                // Vote type byte must be 0x01 or 0x02; 0x00 and 0x03+ should fail
+                let mut data = vec![0x00];
+                data.extend_from_slice(&rest);
+                prop_assert!(decode_vote_message(&data).is_none());
+
+                data[0] = 0x03;
+                prop_assert!(decode_vote_message(&data).is_none());
+            }
+        }
+    }
 }
