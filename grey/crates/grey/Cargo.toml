@@ -30,11 +30,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 hex = { workspace = true }
+thiserror = { workspace = true }
 libp2p = { workspace = true }
 futures = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+tempfile = "3"
 
 [build-dependencies]
 build-javm = { path = "../build-javm" }
