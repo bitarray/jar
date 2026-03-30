@@ -104,6 +104,13 @@ pub trait JamRpc {
         &self,
         block_hash_hex: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Get the validator set. Optional `set` parameter: "current" (default), "pending", "previous".
+    #[method(name = "jam_getValidators")]
+    async fn get_validators(
+        &self,
+        set: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 }
 
 struct RpcImpl {
@@ -438,6 +445,72 @@ impl JamRpcServer for RpcImpl {
             "validator_count": validator_count,
             "core_count": self.state.config.core_count,
             "epoch_length": self.state.config.epoch_length,
+        }))
+    }
+
+    async fn get_validators(
+        &self,
+        set: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let set_name = set.as_deref().unwrap_or("current");
+
+        // Component indices: 7=pending (ι), 8=current (κ), 9=previous (λ)
+        let component_index: u8 = match set_name {
+            "current" => 8,
+            "pending" => 7,
+            "previous" => 9,
+            _ => {
+                return Err(internal_error(format!(
+                    "invalid set: {:?} (expected \"current\", \"pending\", or \"previous\")",
+                    set_name
+                )));
+            }
+        };
+
+        let (head_hash, head_slot) = self
+            .state
+            .store
+            .get_head()
+            .map_err(|e| internal_error(e.to_string()))?;
+
+        // State key C(index): index byte at position 0, rest zeroes.
+        let mut state_key = [0u8; 31];
+        state_key[0] = component_index;
+        let raw = self
+            .state
+            .store
+            .get_state_kv(&head_hash, &state_key)
+            .map_err(|e| internal_error(e.to_string()))?
+            .unwrap_or_default();
+
+        // Each validator is exactly 336 bytes: bandersnatch(32) + ed25519(32) + bls(144) + metadata(128)
+        if !raw.is_empty() && !raw.len().is_multiple_of(336) {
+            return Err(internal_error(format!(
+                "validator data length {} not a multiple of 336",
+                raw.len()
+            )));
+        }
+
+        let count = raw.len() / 336;
+        let mut entries = Vec::with_capacity(count);
+        for i in 0..count {
+            let v = grey_types::validator::ValidatorKey::from_bytes(
+                raw[i * 336..(i + 1) * 336].try_into().unwrap(),
+            );
+            entries.push(serde_json::json!({
+                "index": i,
+                "ed25519": hex::encode(v.ed25519.0),
+                "bandersnatch": hex::encode(v.bandersnatch.0),
+                "bls": hex::encode(v.bls.0),
+                "metadata": hex::encode(v.metadata),
+            }));
+        }
+
+        Ok(serde_json::json!({
+            "set": set_name,
+            "count": count,
+            "validators": entries,
+            "slot": head_slot,
         }))
     }
 }
@@ -1015,5 +1088,46 @@ mod tests {
             .unwrap();
         assert_eq!(result2["timeslot"], 1);
         assert_eq!(result2["block_hash"], hex::encode(hash.0));
+    }
+
+    #[tokio::test]
+    async fn test_get_validators() {
+        let (url, _state, _rx, store, _dir) = setup().await;
+        let config = Config::tiny();
+        let (genesis_state, _secrets) = grey_consensus::genesis::create_genesis(&config);
+
+        let block = test_block(1);
+        let hash = store.put_block(&block).unwrap();
+        store.put_state(&hash, &genesis_state, &config).unwrap();
+        store.set_head(&hash, 1).unwrap();
+
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+
+        // Default: current validators
+        let result: serde_json::Value = client
+            .request("jam_getValidators", rpc_params![Option::<String>::None])
+            .await
+            .unwrap();
+        assert_eq!(result["set"], "current");
+        assert_eq!(result["count"], config.validators_count);
+        let validators = result["validators"].as_array().unwrap();
+        assert_eq!(validators.len(), config.validators_count as usize);
+        // Each validator should have keys
+        assert!(validators[0]["ed25519"].is_string());
+        assert!(validators[0]["bandersnatch"].is_string());
+        assert_eq!(validators[0]["index"], 0);
+
+        // Explicit "pending"
+        let result: serde_json::Value = client
+            .request("jam_getValidators", rpc_params![Some("pending")])
+            .await
+            .unwrap();
+        assert_eq!(result["set"], "pending");
+
+        // Invalid set name
+        let err = client
+            .request::<serde_json::Value, _>("jam_getValidators", rpc_params![Some("invalid")])
+            .await;
+        assert!(err.is_err());
     }
 }
