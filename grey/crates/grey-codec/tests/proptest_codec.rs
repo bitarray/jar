@@ -77,4 +77,32 @@ proptest! {
         prop_assert_eq!(len, 2);
         prop_assert_eq!(encoded.len(), 2);
     }
+
+    #[test]
+    fn hash_roundtrip(bytes in prop::array::uniform32(any::<u8>())) {
+        let hash = grey_types::Hash(bytes);
+        let encoded = hash.encode();
+        prop_assert_eq!(encoded.len(), 32);
+        let (decoded, len) = grey_types::Hash::decode(&encoded).unwrap();
+        prop_assert_eq!(decoded.0, hash.0);
+        prop_assert_eq!(len, 32);
+    }
+
+    #[test]
+    fn bool_roundtrip(value in any::<bool>()) {
+        let encoded = value.encode();
+        prop_assert_eq!(encoded.len(), 1);
+        let (decoded, len) = bool::decode(&encoded).unwrap();
+        prop_assert_eq!(decoded, value);
+        prop_assert_eq!(len, 1);
+    }
+
+    #[test]
+    fn compact_encoding_length_bounds(value in any::<u64>()) {
+        let mut buf = Vec::new();
+        encode_compact(value, &mut buf);
+        // Compact encoding uses 1-9 bytes
+        prop_assert!(!buf.is_empty() && buf.len() <= 9,
+            "compact encoding of {} used {} bytes (expected 1-9)", value, buf.len());
+    }
 }
