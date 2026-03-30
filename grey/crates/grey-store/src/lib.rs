@@ -556,6 +556,53 @@ impl Store {
 
     // ── Pruning ─────────────────────────────────────────────────────────
 
+    /// Prune all data (blocks, state, checksums, slot index) for slots before
+    /// `keep_after_slot`. Slot 0 (genesis) is always preserved.
+    /// Returns the number of blocks pruned.
+    pub fn prune_before_slot(&self, keep_after_slot: u32) -> Result<u32, StoreError> {
+        if keep_after_slot == 0 {
+            return Ok(0);
+        }
+
+        // Collect (slot, block_hash) pairs to prune (skip slot 0 = genesis)
+        let txn = self.db.begin_read()?;
+        let slot_idx = txn.open_table(SLOT_INDEX)?;
+        let mut to_delete: Vec<(u32, [u8; 32])> = Vec::new();
+        let range = slot_idx.range(1u32..keep_after_slot)?;
+        for entry in range {
+            let entry = entry?;
+            let slot = entry.0.value();
+            let hash = *entry.1.value();
+            to_delete.push((slot, hash));
+        }
+        drop(slot_idx);
+        drop(txn);
+
+        if to_delete.is_empty() {
+            return Ok(0);
+        }
+
+        let count = to_delete.len() as u32;
+        let txn = self.db.begin_write()?;
+        {
+            let mut blocks = txn.open_table(BLOCKS)?;
+            let mut state = txn.open_table(STATE)?;
+            let mut checksums = txn.open_table(STATE_CHECKSUMS)?;
+            let mut slot_index = txn.open_table(SLOT_INDEX)?;
+
+            for (slot, hash) in &to_delete {
+                blocks.remove(hash)?;
+                state.remove(hash)?;
+                checksums.remove(hash)?;
+                slot_index.remove(slot)?;
+            }
+        }
+        txn.commit()?;
+
+        tracing::info!("Pruned {} blocks for slots 1..{}", count, keep_after_slot);
+        Ok(count)
+    }
+
     /// Prune state snapshots older than `keep_after_slot`, except finalized.
     /// Returns number of states pruned.
     pub fn prune_states(&self, keep_after_slot: u32) -> Result<u32, StoreError> {
@@ -1012,5 +1059,62 @@ mod tests {
 
         // Should return false (no checksum), not error
         assert!(!store.verify_state_integrity(&block_hash).unwrap());
+    }
+
+    fn make_block(slot: u32) -> Block {
+        use grey_types::*;
+        Block {
+            header: header::Header {
+                parent_hash: Hash([10u8; 32]),
+                state_root: Hash([20u8; 32]),
+                extrinsic_hash: Hash([30u8; 32]),
+                timeslot: slot,
+                epoch_marker: None,
+                tickets_marker: None,
+                author_index: 0,
+                vrf_signature: BandersnatchSignature([50u8; 96]),
+                offenders_marker: vec![],
+                seal: BandersnatchSignature([60u8; 96]),
+            },
+            extrinsic: header::Extrinsic::default(),
+        }
+    }
+
+    #[test]
+    fn test_prune_before_slot() {
+        let (store, _dir) = temp_store();
+        let config = grey_types::config::Config::tiny();
+        let (genesis_state, _) = grey_consensus::genesis::create_genesis(&config);
+
+        // Store blocks at slots 0 (genesis), 1, 2, 3, 4, 5
+        for slot in 0..=5u32 {
+            let block = make_block(slot);
+            let hash = store.put_block(&block).unwrap();
+            store.put_state(&hash, &genesis_state, &config).unwrap();
+        }
+
+        // Verify all 6 blocks exist
+        for slot in 0..=5u32 {
+            assert!(store.get_block_hash_by_slot(slot).is_ok());
+        }
+
+        // Prune slots < 3 (keep slots 3, 4, 5 + genesis slot 0)
+        let pruned = store.prune_before_slot(3).unwrap();
+        assert_eq!(pruned, 2, "should prune slots 1 and 2");
+
+        // Slot 0 (genesis) should still exist
+        assert!(store.get_block_hash_by_slot(0).is_ok(), "genesis preserved");
+
+        // Slots 1, 2 should be pruned
+        assert!(store.get_block_hash_by_slot(1).is_err(), "slot 1 pruned");
+        assert!(store.get_block_hash_by_slot(2).is_err(), "slot 2 pruned");
+
+        // Slots 3, 4, 5 should still exist
+        assert!(store.get_block_hash_by_slot(3).is_ok(), "slot 3 kept");
+        assert!(store.get_block_hash_by_slot(4).is_ok(), "slot 4 kept");
+        assert!(store.get_block_hash_by_slot(5).is_ok(), "slot 5 kept");
+
+        // Prune with 0 should be no-op
+        assert_eq!(store.prune_before_slot(0).unwrap(), 0);
     }
 }
