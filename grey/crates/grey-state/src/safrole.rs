@@ -339,9 +339,10 @@ pub fn outside_in_sequence<T: Clone>(items: &[T]) -> Vec<T> {
 }
 
 /// Merge new tickets into accumulator, keeping only the lowest E entries (eq 6.34).
-fn merge_tickets(existing: &[Ticket], new_tickets: &[Ticket], max_size: usize) -> Vec<Ticket> {
-    let mut all: Vec<Ticket> = existing.to_vec();
-    all.extend(new_tickets.iter().cloned());
+pub fn merge_tickets(existing: &[Ticket], new_tickets: &[Ticket], max_size: usize) -> Vec<Ticket> {
+    let mut all = Vec::with_capacity(existing.len() + new_tickets.len());
+    all.extend_from_slice(existing);
+    all.extend_from_slice(new_tickets);
     all.sort_by(|a, b| a.id.0.cmp(&b.id.0));
     all.truncate(max_size);
     all
@@ -381,7 +382,7 @@ fn extract_tickets(
 }
 
 /// Compute ring root from validator Bandersnatch keys (eq 6.13: γZ' = O([k_b | k ← γP'])).
-fn compute_ring_root(keys: &[ValidatorKey]) -> BandersnatchRingRoot {
+pub fn compute_ring_root(keys: &[ValidatorKey]) -> BandersnatchRingRoot {
     let bandersnatch_keys: Vec<[u8; 32]> = keys.iter().map(|k| k.bandersnatch.0).collect();
     BandersnatchRingRoot(grey_crypto::bandersnatch::compute_ring_commitment(
         &bandersnatch_keys,

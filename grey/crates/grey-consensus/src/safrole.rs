@@ -8,6 +8,7 @@
 //! - Key rotation on epoch boundaries (eq 6.13-6.14)
 //! - Ticket contest management (eq 6.29-6.35)
 
+pub use grey_state::safrole::{compute_ring_root, merge_tickets, outside_in_sequence};
 use grey_types::constants::*;
 use grey_types::header::{EpochMarker, Ticket, TicketProof};
 use grey_types::state::{Judgments, SafroleState, SealKeySeries, State};
@@ -31,28 +32,6 @@ pub enum SafroleError {
 
     #[error("submitted ticket not retained in accumulator (eq 6.35)")]
     TicketNotRetained,
-}
-
-/// Outside-in sequencer Z (eq 6.25).
-///
-/// Reorders a sequence [s₀, s₁, ..., s_{n-1}] as [s₀, s_{n-1}, s₁, s_{n-2}, ...].
-pub fn outside_in_sequence<T: Clone>(items: &[T]) -> Vec<T> {
-    let n = items.len();
-    let mut result = Vec::with_capacity(n);
-    let mut lo = 0;
-    let mut hi = n.wrapping_sub(1);
-
-    for i in 0..n {
-        if i % 2 == 0 {
-            result.push(items[lo].clone());
-            lo += 1;
-        } else {
-            result.push(items[hi].clone());
-            hi = hi.wrapping_sub(1);
-        }
-    }
-
-    result
 }
 
 /// Fallback key sequence F (eq 6.26).
@@ -85,21 +64,6 @@ pub fn fallback_key_sequence(
             validators[idx].bandersnatch
         })
         .collect()
-}
-
-/// Merge new tickets into the ticket accumulator, keeping only the lowest E entries (eq 6.34).
-///
-/// `gamma_a' = lowest E entries from (n ∪ existing)` sorted by ticket identifier.
-pub fn merge_tickets(existing: &[Ticket], new_tickets: &[Ticket], max_size: usize) -> Vec<Ticket> {
-    let mut all: Vec<Ticket> = existing.to_vec();
-    all.extend(new_tickets.iter().cloned());
-
-    // Sort by ticket identifier (ascending)
-    all.sort_by(|a, b| a.id.0.cmp(&b.id.0));
-
-    // Keep only the lowest max_size entries
-    all.truncate(max_size);
-    all
 }
 
 /// Filter offending validators from a key set (eq 6.14: Φ).
@@ -346,14 +310,6 @@ pub struct SafroleOutput {
     pub epoch_marker: Option<EpochMarker>,
     /// Winning tickets for header (None unless crossing Y boundary with full accumulator).
     pub winning_tickets_marker: Option<Vec<Ticket>>,
-}
-
-/// Compute ring root from validator Bandersnatch keys (eq 6.13: γZ' = O([k_b | k ← γP'])).
-fn compute_ring_root(keys: &[ValidatorKey]) -> grey_types::BandersnatchRingRoot {
-    let bandersnatch_keys: Vec<[u8; 32]> = keys.iter().map(|k| k.bandersnatch.0).collect();
-    grey_types::BandersnatchRingRoot(grey_crypto::bandersnatch::compute_ring_commitment(
-        &bandersnatch_keys,
-    ))
 }
 
 /// Check if the current seal-key series uses tickets (T = 1) or fallback (T = 0).
