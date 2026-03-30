@@ -881,6 +881,20 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                     NetworkEvent::FinalityVote { data, source } => {
                         if let Some(vote_msg) = finality::decode_vote_message(&data) {
                             if finality::verify_vote(&vote_msg.vote, vote_msg.vote_type, &state) {
+                                // Persist vote to store for crash recovery
+                                let vote_type_byte = match vote_msg.vote_type {
+                                    finality::VoteType::Prevote => 0x01,
+                                    finality::VoteType::Precommit => 0x02,
+                                };
+                                let _ = store.put_grandpa_vote(
+                                    vote_msg.vote.round,
+                                    vote_type_byte,
+                                    vote_msg.vote.validator_index,
+                                    &vote_msg.vote.block_hash,
+                                    vote_msg.vote.block_slot,
+                                    &vote_msg.vote.signature.0,
+                                );
+
                                 match vote_msg.vote_type {
                                     finality::VoteType::Prevote => {
                                         let threshold_reached = grandpa.add_prevote(vote_msg.vote);
@@ -911,6 +925,11 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                                 hex::encode(&fin_hash.0[..8])
                                             );
                                             let _ = store.set_finalized(&fin_hash, fin_slot);
+
+                                            // Prune finalized GRANDPA votes
+                                            if grandpa.round > 1 {
+                                                let _ = store.prune_grandpa_votes(grandpa.round - 1);
+                                            }
 
                                             // Prune old blocks/state if pruning is enabled
                                             if config.pruning_depth > 0 && fin_slot > config.pruning_depth {
