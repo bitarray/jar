@@ -1111,6 +1111,10 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                             peer_id,
                             vi
                         );
+                        // Increment peer count for metrics
+                        if let Some(ref rpc_st) = rpc_state {
+                            rpc_st.peer_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                 }
             }

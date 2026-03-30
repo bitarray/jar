@@ -58,6 +58,8 @@ pub struct RpcState {
     pub block_notifications: tokio::sync::broadcast::Sender<serde_json::Value>,
     /// Broadcast channel for finalization notifications (WebSocket subscriptions).
     pub finality_notifications: tokio::sync::broadcast::Sender<serde_json::Value>,
+    /// Connected peer count (updated by the node on PeerIdentified events).
+    pub peer_count: std::sync::atomic::AtomicU32,
 }
 
 #[rpc(server)]
@@ -699,6 +701,7 @@ where
                 let blocks_imported = status.blocks_imported;
                 let validator_index = status.validator_index;
                 let grandpa_round = status.grandpa_round;
+                let peer_count = state.peer_count.load(std::sync::atomic::Ordering::Relaxed);
                 drop(status);
 
                 let stored_blocks = state.store.block_count().unwrap_or(0);
@@ -736,7 +739,10 @@ where
                      grey_validator_index {validator_index}\n\
                      # HELP grey_grandpa_round Current GRANDPA finality round.\n\
                      # TYPE grey_grandpa_round gauge\n\
-                     grey_grandpa_round {grandpa_round}\n"
+                     grey_grandpa_round {grandpa_round}\n\
+                     # HELP grey_peer_count Number of connected peers.\n\
+                     # TYPE grey_peer_count gauge\n\
+                     grey_peer_count {peer_count}\n"
                 );
 
                 Ok(http::Response::builder()
@@ -958,6 +964,7 @@ pub fn create_rpc_channel(
         commands: tx,
         block_notifications: block_tx,
         finality_notifications: finality_tx,
+        peer_count: std::sync::atomic::AtomicU32::new(0),
     });
 
     (state, rx)
