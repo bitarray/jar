@@ -275,6 +275,95 @@ impl JamRpcServer for RpcImpl {
     }
 }
 
+// ── Health / readiness HTTP endpoints ─────────────────────────────────
+
+/// Tower layer that intercepts GET `/health` and `/ready` before they
+/// reach the JSON-RPC handler.
+///
+/// - `GET /health` — always 200 `{"status":"ok"}` (process is alive)
+/// - `GET /ready`  — 200 `{"status":"ready","head_slot":N}` if head is set,
+///   503 `{"status":"syncing"}` otherwise
+#[derive(Clone)]
+struct HealthLayer {
+    state: Arc<RpcState>,
+}
+
+impl<S> tower::Layer<S> for HealthLayer {
+    type Service = HealthService<S>;
+    fn layer(&self, inner: S) -> Self::Service {
+        HealthService {
+            inner,
+            state: self.state.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct HealthService<S> {
+    inner: S,
+    state: Arc<RpcState>,
+}
+
+type HttpBody = jsonrpsee::server::HttpBody;
+
+fn json_response(status: u16, body: String) -> http::Response<HttpBody> {
+    http::Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(HttpBody::from(body))
+        .unwrap()
+}
+
+impl<S, ReqBody> tower::Service<http::Request<ReqBody>> for HealthService<S>
+where
+    S: tower::Service<http::Request<ReqBody>, Response = http::Response<HttpBody>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send,
+    ReqBody: Send + 'static,
+{
+    type Response = http::Response<HttpBody>;
+    type Error = S::Error;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: http::Request<ReqBody>) -> Self::Future {
+        let is_get = req.method() == http::Method::GET;
+        let path = req.uri().path().to_owned();
+
+        if is_get && path == "/health" {
+            let body = serde_json::json!({"status": "ok"}).to_string();
+            Box::pin(async move { Ok(json_response(200, body)) })
+        } else if is_get && path == "/ready" {
+            let state = self.state.clone();
+            Box::pin(async move {
+                match state.store.get_head() {
+                    Ok((_, slot)) => Ok(json_response(
+                        200,
+                        serde_json::json!({"status": "ready", "head_slot": slot}).to_string(),
+                    )),
+                    Err(_) => Ok(json_response(
+                        503,
+                        serde_json::json!({"status": "syncing"}).to_string(),
+                    )),
+                }
+            })
+        } else {
+            let fut = self.inner.call(req);
+            Box::pin(fut)
+        }
+    }
+}
+
 /// Start the JSON-RPC server. Returns the command receiver for the node event loop.
 pub async fn start_rpc_server(
     port: u16,
@@ -288,7 +377,12 @@ pub async fn start_rpc_server(
     } else {
         tower_http::cors::CorsLayer::new()
     };
-    let middleware = tower::ServiceBuilder::new().layer(cors_layer);
+    let health_layer = HealthLayer {
+        state: state.clone(),
+    };
+    let middleware = tower::ServiceBuilder::new()
+        .layer(cors_layer)
+        .layer(health_layer);
     let server = Server::builder()
         .set_http_middleware(middleware)
         .build(&addr)
@@ -552,5 +646,46 @@ mod tests {
             .request("jam_submitWorkPackage", rpc_params![""])
             .await;
         assert!(result.is_err());
+    }
+
+    // ── Health / readiness endpoint tests ──
+
+    async fn http_get(url: &str) -> (u16, String) {
+        let resp = reqwest::get(url).await.unwrap();
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint() {
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let (status, body) = http_get(&format!("{}/health", url)).await;
+        assert_eq!(status, 200);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_ready_not_synced() {
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let (status, body) = http_get(&format!("{}/ready", url)).await;
+        assert_eq!(status, 503);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["status"], "syncing");
+    }
+
+    #[tokio::test]
+    async fn test_ready_with_head() {
+        let (url, _state, _rx, store, _dir) = setup().await;
+        let block = test_block(42);
+        let hash = store.put_block(&block).unwrap();
+        store.set_head(&hash, 42).unwrap();
+
+        let (status, body) = http_get(&format!("{}/ready", url)).await;
+        assert_eq!(status, 200);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["status"], "ready");
+        assert_eq!(json["head_slot"], 42);
     }
 }

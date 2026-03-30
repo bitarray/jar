@@ -13,6 +13,7 @@ grey-store = { workspace = true }
 jsonrpsee = { version = "0.24", features = ["server", "macros"] }
 tower-http = { version = "0.5", features = ["cors"] }
 tower = "0.4"
+http = "1"
 tokio = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
@@ -21,5 +22,6 @@ hex = { workspace = true }
 
 [dev-dependencies]
 jsonrpsee = { version = "0.24", features = ["client"] }
+reqwest = { version = "0.12", default-features = false }
 tempfile = "3"
 grey-consensus = { workspace = true }
