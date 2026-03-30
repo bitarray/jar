@@ -21,6 +21,14 @@ mod tickets;
 use clap::Parser;
 use grey_types::config::Config;
 
+/// Build a detailed version string for --version output.
+fn long_version() -> &'static str {
+    concat!(
+        env!("CARGO_PKG_VERSION"),
+        "\nProtocol: JAM (Gray Paper v0.7.2)",
+    )
+}
+
 /// Log output format.
 #[derive(clap::ValueEnum, Clone, Debug, Default)]
 enum LogFormat {
@@ -35,7 +43,12 @@ enum LogFormat {
 
 /// Grey — JAM blockchain node
 #[derive(Parser, Debug)]
-#[command(name = "grey", about = "JAM blockchain node implementation")]
+#[command(
+    name = "grey",
+    about = "JAM blockchain node implementation",
+    version = env!("CARGO_PKG_VERSION"),
+    long_version = long_version(),
+)]
 struct Cli {
     /// Path to a TOML configuration file. CLI flags override config file values.
     #[arg(long, value_name = "PATH")]
