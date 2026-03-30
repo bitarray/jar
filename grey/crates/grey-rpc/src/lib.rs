@@ -249,9 +249,13 @@ impl JamRpcServer for RpcImpl {
 
         let anchor = hex::encode(head_hash.0);
         let state_root = hex::encode(block.header.state_root.0);
-        // beefy_root (accumulation output root) — use zero for now;
-        // full lookup would require parsing the recent_blocks blob.
-        let beefy_root = hex::encode([0u8; 32]);
+        let beefy_root = self
+            .state
+            .store
+            .get_accumulation_root(&head_hash, &head_hash)
+            .map_err(|e| internal_error(e.to_string()))?
+            .map(|h| hex::encode(h.0))
+            .unwrap_or_else(|| hex::encode([0u8; 32]));
 
         // Direct lookup for service code hash (avoids full state deserialization)
         let code_hash = self

@@ -23,9 +23,54 @@ fn key_from_index(index: u8) -> [u8; 31] {
     key
 }
 
+/// Construct state key C(i) for a state component index (public alias).
+pub fn key_for_component(index: u8) -> [u8; 31] {
+    key_from_index(index)
+}
+
 /// Construct state key C(i, s) for a service-indexed state component (public alias).
 pub fn key_for_service_pub(index: u8, service_id: ServiceId) -> [u8; 31] {
     key_for_service(index, service_id)
+}
+
+/// Extract the accumulation root (beefy_root) for a given anchor block from the
+/// raw C(3) (recent_blocks) state KV blob. Scans the serialized header entries to
+/// find the one matching `anchor_hash` and returns its `accumulation_root` field.
+pub fn extract_accumulation_root(
+    recent_blocks_blob: &[u8],
+    anchor_hash: &Hash,
+) -> Result<Option<Hash>, String> {
+    let mut pos = 0;
+    let header_count =
+        decode_compact_at(recent_blocks_blob, &mut pos).map_err(|e| e.to_string())? as usize;
+
+    for _ in 0..header_count {
+        // Each header: header_hash(32) + accumulation_root(32) + state_root(32) + packages...
+        if pos + 96 > recent_blocks_blob.len() {
+            return Err("unexpected end in recent_blocks headers".into());
+        }
+        let mut header_hash = [0u8; 32];
+        header_hash.copy_from_slice(&recent_blocks_blob[pos..pos + 32]);
+        let mut acc_root = [0u8; 32];
+        acc_root.copy_from_slice(&recent_blocks_blob[pos + 32..pos + 64]);
+        // Skip state_root
+        pos += 96;
+
+        // Skip reported_packages map
+        let pkg_count =
+            decode_compact_at(recent_blocks_blob, &mut pos).map_err(|e| e.to_string())? as usize;
+        // Each package entry is 64 bytes (two hashes)
+        let skip = pkg_count * 64;
+        if pos + skip > recent_blocks_blob.len() {
+            return Err("unexpected end in reported_packages".into());
+        }
+        pos += skip;
+
+        if header_hash == anchor_hash.0 {
+            return Ok(Some(Hash(acc_root)));
+        }
+    }
+    Ok(None)
 }
 
 /// Construct state key C(i, s) for a service-indexed state component.

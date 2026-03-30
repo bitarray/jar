@@ -222,6 +222,23 @@ impl Store {
         Ok(None)
     }
 
+    /// Get the accumulation root (beefy_root) for a given anchor block.
+    /// Reads only the C(3) state KV (recent_blocks) and scans for the matching
+    /// header entry, avoiding full state deserialization.
+    pub fn get_accumulation_root(
+        &self,
+        block_hash: &Hash,
+        anchor_hash: &Hash,
+    ) -> Result<Option<Hash>, StoreError> {
+        let key = grey_merkle::state_serial::key_for_component(3);
+        let blob = match self.get_state_kv(block_hash, &key)? {
+            Some(blob) => blob,
+            None => return Ok(None),
+        };
+        grey_merkle::state_serial::extract_accumulation_root(&blob, anchor_hash)
+            .map_err(StoreError::Codec)
+    }
+
     /// Delete state for a given block hash (for pruning).
     pub fn delete_state(&self, block_hash: &Hash) -> Result<(), StoreError> {
         let txn = self.db.begin_write()?;
