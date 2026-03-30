@@ -10,6 +10,8 @@ mod config;
 #[allow(dead_code)]
 mod finality;
 mod guarantor;
+#[allow(dead_code)]
+mod keystore;
 mod node;
 mod seq_testnet;
 #[allow(dead_code)]
