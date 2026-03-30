@@ -91,23 +91,20 @@ impl Encode for bool {
     }
 }
 
-impl Encode for [u8; 32] {
-    fn encode_to(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(self);
-    }
+/// Implement Encode for fixed-size byte arrays by extending with all bytes.
+macro_rules! impl_encode_byte_array {
+    ($($size:expr),+ $(,)?) => {
+        $(
+            impl Encode for [u8; $size] {
+                fn encode_to(&self, buf: &mut Vec<u8>) {
+                    buf.extend_from_slice(self);
+                }
+            }
+        )+
+    };
 }
 
-impl Encode for [u8; 64] {
-    fn encode_to(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(self);
-    }
-}
-
-impl Encode for [u8; 96] {
-    fn encode_to(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(self);
-    }
-}
+impl_encode_byte_array!(32, 64, 96);
 
 /// Implement Encode for newtype wrappers around byte arrays.
 /// All these types are `Type([u8; N])` and encode by writing all bytes.
