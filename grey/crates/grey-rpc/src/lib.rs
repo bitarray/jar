@@ -86,6 +86,13 @@ pub trait JamRpc {
     /// Clients need this to build valid work packages.
     #[method(name = "jam_getContext")]
     async fn get_context(&self, service_id: u32) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Get a service account's metadata (balance, gas limits, code hash, etc.).
+    #[method(name = "jam_getServiceAccount")]
+    async fn get_service_account(
+        &self,
+        service_id: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 }
 
 struct RpcImpl {
@@ -289,6 +296,40 @@ impl JamRpcServer for RpcImpl {
             "beefy_root": beefy_root,
             "code_hash": code_hash,
         }))
+    }
+
+    async fn get_service_account(
+        &self,
+        service_id: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let (head_hash, head_slot) = self
+            .state
+            .store
+            .get_head()
+            .map_err(|e| internal_error(e.to_string()))?;
+
+        match self
+            .state
+            .store
+            .get_service_metadata(&head_hash, service_id)
+            .map_err(|e| internal_error(e.to_string()))?
+        {
+            Some(meta) => Ok(serde_json::json!({
+                "service_id": service_id,
+                "code_hash": hex::encode(meta.code_hash.0),
+                "balance": meta.balance,
+                "min_accumulate_gas": meta.min_accumulate_gas,
+                "min_on_transfer_gas": meta.min_on_transfer_gas,
+                "total_footprint": meta.total_footprint,
+                "free_storage_offset": meta.free_storage_offset,
+                "accumulation_counter": meta.accumulation_counter,
+                "last_accumulation": meta.last_accumulation,
+                "last_activity": meta.last_activity,
+                "preimage_count": meta.preimage_count,
+                "slot": head_slot,
+            })),
+            None => Err(not_found(format!("service {} not found", service_id))),
+        }
     }
 }
 
@@ -762,5 +803,56 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["status"], "ready");
         assert_eq!(json["head_slot"], 42);
+    }
+
+    #[tokio::test]
+    async fn test_get_service_account() {
+        let (url, _state, _rx, store, _dir) = setup().await;
+        let config = Config::tiny();
+        let (mut genesis_state, _secrets) = grey_consensus::genesis::create_genesis(&config);
+
+        // Insert a service account
+        let svc = grey_types::state::ServiceAccount {
+            code_hash: Hash([0xAA; 32]),
+            balance: 1000,
+            min_accumulate_gas: 500,
+            min_on_transfer_gas: 200,
+            storage: std::collections::BTreeMap::new(),
+            preimage_lookup: std::collections::BTreeMap::new(),
+            preimage_info: std::collections::BTreeMap::new(),
+            free_storage_offset: 0,
+            total_footprint: 0,
+            accumulation_counter: 0,
+            last_accumulation: 0,
+            last_activity: 0,
+            preimage_count: 0,
+        };
+        genesis_state.services.insert(42, svc);
+
+        // Store state and set head
+        let block = test_block(1);
+        let hash = store.put_block(&block).unwrap();
+        store.put_state(&hash, &genesis_state, &config).unwrap();
+        store.set_head(&hash, 1).unwrap();
+
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+
+        // Query existing service
+        let result: serde_json::Value = client
+            .request("jam_getServiceAccount", rpc_params![42u32])
+            .await
+            .unwrap();
+        assert_eq!(result["service_id"], 42);
+        assert_eq!(result["balance"], 1000);
+        assert_eq!(result["min_accumulate_gas"], 500);
+        assert_eq!(result["min_on_transfer_gas"], 200);
+        assert_eq!(result["code_hash"], hex::encode([0xAAu8; 32]));
+        assert_eq!(result["slot"], 1);
+
+        // Query non-existent service — should error
+        let err = client
+            .request::<serde_json::Value, _>("jam_getServiceAccount", rpc_params![9999u32])
+            .await;
+        assert!(err.is_err());
     }
 }
