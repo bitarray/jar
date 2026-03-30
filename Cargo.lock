@@ -1611,6 +1611,7 @@ dependencies = [
  "grey-crypto",
  "grey-types",
  "hex",
+ "proptest",
  "serde",
  "serde_json",
 ]
