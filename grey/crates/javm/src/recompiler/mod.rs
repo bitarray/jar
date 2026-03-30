@@ -79,6 +79,7 @@ impl NativeCode {
             return Err("empty code buffer".into());
         }
         let len = code.len();
+        // SAFETY: mmap with MAP_ANONYMOUS|MAP_PRIVATE allocates fresh pages. MAP_FAILED checked below.
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -93,6 +94,8 @@ impl NativeCode {
             return Err("mmap failed".into());
         }
         let ptr = ptr as *mut u8;
+        // SAFETY: ptr is a valid mmap'd region of `len` bytes; copy_nonoverlapping is in-bounds.
+        // mprotect/munmap operate on the same valid mmap region.
         unsafe {
             std::ptr::copy_nonoverlapping(code.as_ptr(), ptr, len);
             // Make executable (and read-only)
@@ -115,12 +118,15 @@ impl NativeCode {
 
     /// Get the function pointer for the compiled code entry.
     fn entry(&self) -> unsafe extern "sysv64" fn(*mut JitContext) {
+        // SAFETY: ptr contains valid x86-64 machine code from the assembler, and was
+        // mprotected to PROT_READ|PROT_EXEC. Transmute to fn pointer is valid.
         unsafe { std::mem::transmute(self.ptr) }
     }
 }
 
 impl Drop for NativeCode {
     fn drop(&mut self) {
+        // SAFETY: ptr and mmap_cap correspond to a valid mmap allocation from new().
         unsafe {
             libc::munmap(self.ptr as *mut libc::c_void, self.mmap_cap);
         }
@@ -158,6 +164,8 @@ impl FlatMemory {
     /// Create a flat memory from a data layout.
     fn new(layout: &crate::program::DataLayout) -> Option<Self> {
         let region_size = HEADER_SIZE + FLAT_BUF_SIZE;
+        // SAFETY: mmap with MAP_ANONYMOUS|MAP_PRIVATE|MAP_NORESERVE allocates virtual pages.
+        // MAP_FAILED checked below.
         let region = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -173,6 +181,7 @@ impl FlatMemory {
         }
         let region = region as *mut u8;
         let perms = region;
+        // SAFETY: HEADER_SIZE < region_size, so region + HEADER_SIZE is within the mmap.
         let buf = unsafe { region.add(HEADER_SIZE) };
 
         // Set all pages in [0, mem_size) as read-write in the permission table.
@@ -180,11 +189,13 @@ impl FlatMemory {
         // AND for write_bytes/read_bytes which always check the permission table.
         {
             let num_pages = layout.mem_size.div_ceil(4096) as usize;
+            // SAFETY: perms points to the start of the mmap region; num_pages is clamped to NUM_PAGES.
             unsafe {
                 std::ptr::write_bytes(perms, 2u8, num_pages.min(NUM_PAGES));
             }
         }
-        // Copy data directly into flat buffer
+        // SAFETY: buf points to guest memory base within the mmap. Data layout offsets and
+        // lengths are validated by parse_program_blob to fit within the allocated region.
         unsafe {
             if !layout.arg_data.is_empty() {
                 std::ptr::copy_nonoverlapping(
@@ -219,6 +230,7 @@ impl FlatMemory {
 
     /// Get the pointer where JitContext should be placed (buf - CTX_PAGE).
     fn ctx_ptr(&self) -> *mut u8 {
+        // SAFETY: buf = region + HEADER_SIZE and HEADER_SIZE >= CTX_PAGE, so sub is in-bounds.
         unsafe { self.buf.sub(CTX_PAGE) }
     }
 
@@ -227,9 +239,11 @@ impl FlatMemory {
     #[cfg(feature = "signals")]
     fn install_guard_pages(&self, heap_top: u32) {
         let heap_top_page = (heap_top as usize).div_ceil(4096);
+        // SAFETY: buf points to guest memory base; heap_top_page * 4096 <= FLAT_BUF_SIZE.
         let guard_start = unsafe { self.buf.add(heap_top_page * 4096) };
         let guard_len = FLAT_BUF_SIZE - heap_top_page * 4096;
         if guard_len > 0 {
+            // SAFETY: guard_start..+guard_len is within the mmap'd guest memory region.
             unsafe {
                 libc::mprotect(guard_start as *mut libc::c_void, guard_len, libc::PROT_NONE);
             }
@@ -242,8 +256,10 @@ impl FlatMemory {
         let old_page = (old_top as usize).div_ceil(4096);
         let new_page = (new_top as usize).div_ceil(4096);
         if new_page > old_page {
+            // SAFETY: buf + old_page..new_page page range is within the mmap'd guest region.
             let start = unsafe { self.buf.add(old_page * 4096) };
             let len = (new_page - old_page) * 4096;
+            // SAFETY: start..+len is within the mmap'd guest memory region.
             unsafe {
                 libc::mprotect(
                     start as *mut libc::c_void,
@@ -257,6 +273,7 @@ impl FlatMemory {
 
 impl Drop for FlatMemory {
     fn drop(&mut self) {
+        // SAFETY: region and region_size correspond to a valid mmap allocation from new().
         unsafe {
             libc::munmap(self.region as *mut libc::c_void, self.region_size);
         }
@@ -284,6 +301,7 @@ fn flat_check_perm(ctx: &JitContext, addr: u32, len: u32, min_perm: u8) -> bool 
         if p >= NUM_PAGES {
             return false;
         }
+        // SAFETY: p is bounds-checked against NUM_PAGES above; flat_perms is valid for NUM_PAGES.
         let perm = unsafe { *ctx.flat_perms.add(p) };
         if perm < min_perm {
             return false;
@@ -294,6 +312,7 @@ fn flat_check_perm(ctx: &JitContext, addr: u32, len: u32, min_perm: u8) -> bool 
 
 /// Read from flat buffer. Caller must have checked permissions.
 unsafe fn flat_read(ctx: &JitContext, addr: u32, len: usize) -> u64 {
+    // SAFETY: caller verified permissions via flat_check_perm; addr..+len is within flat_buf.
     unsafe {
         let ptr = ctx.flat_buf.add(addr as usize);
         match len {
@@ -308,15 +327,23 @@ unsafe fn flat_read(ctx: &JitContext, addr: u32, len: usize) -> u64 {
 
 /// Write to flat buffer. Caller must have checked permissions.
 unsafe fn flat_write(ctx: &JitContext, addr: u32, bytes: &[u8]) {
+    // SAFETY: caller verified permissions via flat_check_perm; addr..+len is within flat_buf.
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), ctx.flat_buf.add(addr as usize), bytes.len());
     }
 }
 
 /// Memory read helpers — read from flat buffer.
+///
+/// All extern "sysv64" helpers below are called from JIT-generated code with a valid
+/// JitContext pointer passed as the first argument via the sysv64 calling convention.
+/// The pointer is valid for the duration of JIT execution because JitContext lives in
+/// the FlatMemory mmap region which outlives the JIT call.
 extern "sysv64" fn mem_read_u8(ctx: *mut JitContext, addr: u32) -> u64 {
+    // SAFETY: ctx is a valid JitContext pointer from JIT code; see group comment above.
     let ctx = unsafe { &mut *ctx };
     if flat_check_perm(ctx, addr, 1, 1) {
+        // SAFETY: flat_check_perm confirmed the page is readable.
         return unsafe { flat_read(ctx, addr, 1) };
     }
     ctx.exit_reason = 3;
@@ -325,8 +352,10 @@ extern "sysv64" fn mem_read_u8(ctx: *mut JitContext, addr: u32) -> u64 {
 }
 
 extern "sysv64" fn mem_read_u16(ctx: *mut JitContext, addr: u32) -> u64 {
+    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
     let ctx = unsafe { &mut *ctx };
     if flat_check_perm(ctx, addr, 2, 1) {
+        // SAFETY: flat_check_perm confirmed the pages are readable.
         return unsafe { flat_read(ctx, addr, 2) };
     }
     ctx.exit_reason = 3;
@@ -335,8 +364,10 @@ extern "sysv64" fn mem_read_u16(ctx: *mut JitContext, addr: u32) -> u64 {
 }
 
 extern "sysv64" fn mem_read_u32(ctx: *mut JitContext, addr: u32) -> u64 {
+    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
     let ctx = unsafe { &mut *ctx };
     if flat_check_perm(ctx, addr, 4, 1) {
+        // SAFETY: flat_check_perm confirmed the pages are readable.
         return unsafe { flat_read(ctx, addr, 4) };
     }
     ctx.exit_reason = 3;
@@ -345,8 +376,10 @@ extern "sysv64" fn mem_read_u32(ctx: *mut JitContext, addr: u32) -> u64 {
 }
 
 extern "sysv64" fn mem_read_u64_fn(ctx: *mut JitContext, addr: u32) -> u64 {
+    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
     let ctx = unsafe { &mut *ctx };
     if flat_check_perm(ctx, addr, 8, 1) {
+        // SAFETY: flat_check_perm confirmed the pages are readable.
         return unsafe { flat_read(ctx, addr, 8) };
     }
     ctx.exit_reason = 3;
@@ -356,8 +389,10 @@ extern "sysv64" fn mem_read_u64_fn(ctx: *mut JitContext, addr: u32) -> u64 {
 
 /// Memory write helpers — write to flat buffer.
 extern "sysv64" fn mem_write_u8(ctx: *mut JitContext, addr: u32, value: u64) -> u64 {
+    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
     let ctx = unsafe { &mut *ctx };
     if flat_check_perm(ctx, addr, 1, 2) {
+        // SAFETY: flat_check_perm confirmed the page is writable.
         unsafe {
             flat_write(ctx, addr, &[value as u8]);
         }
@@ -369,8 +404,10 @@ extern "sysv64" fn mem_write_u8(ctx: *mut JitContext, addr: u32, value: u64) -> 
 }
 
 extern "sysv64" fn mem_write_u16(ctx: *mut JitContext, addr: u32, value: u64) -> u64 {
+    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
     let ctx = unsafe { &mut *ctx };
     if flat_check_perm(ctx, addr, 2, 2) {
+        // SAFETY: flat_check_perm confirmed the pages are writable.
         unsafe {
             flat_write(ctx, addr, &(value as u16).to_le_bytes());
         }
@@ -382,8 +419,10 @@ extern "sysv64" fn mem_write_u16(ctx: *mut JitContext, addr: u32, value: u64) ->
 }
 
 extern "sysv64" fn mem_write_u32(ctx: *mut JitContext, addr: u32, value: u64) -> u64 {
+    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
     let ctx = unsafe { &mut *ctx };
     if flat_check_perm(ctx, addr, 4, 2) {
+        // SAFETY: flat_check_perm confirmed the pages are writable.
         unsafe {
             flat_write(ctx, addr, &(value as u32).to_le_bytes());
         }
@@ -395,8 +434,10 @@ extern "sysv64" fn mem_write_u32(ctx: *mut JitContext, addr: u32, value: u64) ->
 }
 
 extern "sysv64" fn mem_write_u64_fn(ctx: *mut JitContext, addr: u32, value: u64) -> u64 {
+    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
     let ctx = unsafe { &mut *ctx };
     if flat_check_perm(ctx, addr, 8, 2) {
+        // SAFETY: flat_check_perm confirmed the pages are writable.
         unsafe {
             flat_write(ctx, addr, &value.to_le_bytes());
         }
@@ -409,6 +450,7 @@ extern "sysv64" fn mem_write_u64_fn(ctx: *mut JitContext, addr: u32, value: u64)
 
 /// Sbrk helper. ctx: *mut JitContext, size: u64 → result in return.
 extern "sysv64" fn sbrk_helper(ctx: *mut JitContext, size: u64) -> u64 {
+    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
     let ctx = unsafe { &mut *ctx };
     let ps = crate::PVM_PAGE_SIZE;
 
@@ -438,6 +480,7 @@ extern "sysv64" fn sbrk_helper(ctx: *mut JitContext, size: u64) -> u64 {
     };
     let perms = ctx.flat_perms as *mut u8;
     for p in start_page..=end_page {
+        // SAFETY: p is a valid page index within the permission table (bounded by address space).
         unsafe {
             if *perms.add(p as usize) == 0 {
                 *perms.add(p as usize) = 2; // read-write
@@ -451,6 +494,7 @@ extern "sysv64" fn sbrk_helper(ctx: *mut JitContext, size: u64) -> u64 {
         let old_page = (old_top as usize).div_ceil(4096);
         let new_page = (new_top_u32 as usize).div_ceil(4096);
         if new_page > old_page {
+            // SAFETY: flat_buf points to guest memory base; page range is within the mmap region.
             unsafe {
                 let start = ctx.flat_buf.add(old_page * 4096);
                 let len = (new_page - old_page) * 4096;
@@ -526,6 +570,8 @@ impl RecompiledPvm {
 
         // Place JitContext inside the flat memory region (at buf - CTX_PAGE)
         let ctx_raw = flat_memory.ctx_ptr() as *mut JitContext;
+        // SAFETY: ctx_raw points to a properly aligned CTX_PAGE region within the mmap.
+        // Writing the JitContext initializes the memory that JIT code will access via R15.
         unsafe {
             ctx_raw.write(JitContext {
                 regs: registers,
@@ -551,6 +597,7 @@ impl RecompiledPvm {
                 _pad2: 0,
             });
         }
+        // SAFETY: ctx_raw was just initialized above; valid for the lifetime of flat_memory.
         let ctx = unsafe { &mut *ctx_raw };
 
         // Set up pointers
@@ -600,6 +647,7 @@ impl RecompiledPvm {
                 mmap_cap: compile_result.mmap_cap,
             };
             if debug {
+                // SAFETY: mmap_ptr and mmap_len come from a valid mmap allocation in the assembler.
                 let code_slice =
                     unsafe { std::slice::from_raw_parts(mmap_ptr, compile_result.mmap_len) };
                 let _ = std::fs::write("/tmp/pvm_native.bin", code_slice);
@@ -672,10 +720,12 @@ impl RecompiledPvm {
 
     #[inline(always)]
     fn ctx(&self) -> &JitContext {
+        // SAFETY: self.ctx points into the FlatMemory mmap region, valid for Self's lifetime.
         unsafe { &*self.ctx }
     }
     #[inline(always)]
     fn ctx_mut(&mut self) -> &mut JitContext {
+        // SAFETY: self.ctx points into the FlatMemory mmap region, valid for Self's lifetime.
         unsafe { &mut *self.ctx }
     }
 
@@ -704,6 +754,8 @@ impl RecompiledPvm {
             }
 
             let entry = self.native_code.entry();
+            // SAFETY: entry points to valid JIT-compiled x86-64 code; self.ctx is a valid
+            // JitContext pointer. The native code follows the sysv64 calling convention.
             unsafe {
                 entry(self.ctx);
             }
@@ -809,8 +861,10 @@ impl RecompiledPvm {
         let fm = self.flat_memory.as_ref()?;
         let page = addr as usize / 4096;
         if page < NUM_PAGES {
+            // SAFETY: page is bounds-checked against NUM_PAGES above; perms is valid for NUM_PAGES.
             let perm = unsafe { *fm.perms.add(page) };
             if perm >= 1 {
+                // SAFETY: permission check passed; addr is within the mmap'd guest memory.
                 return Some(unsafe { *fm.buf.add(addr as usize) });
             }
         }
@@ -826,8 +880,10 @@ impl RecompiledPvm {
         };
         let page = addr as usize / 4096;
         if page < NUM_PAGES {
+            // SAFETY: page is bounds-checked against NUM_PAGES above; perms is valid for NUM_PAGES.
             let perm = unsafe { *fm.perms.add(page) };
             if perm >= 2 {
+                // SAFETY: permission check passed; addr is within the mmap'd guest memory.
                 unsafe {
                     *fm.buf.add(addr as usize) = value;
                 }
@@ -847,10 +903,12 @@ impl RecompiledPvm {
             if page >= NUM_PAGES {
                 return None;
             }
+            // SAFETY: page is bounds-checked against NUM_PAGES above.
             let perm = unsafe { *fm.perms.add(page) };
             if perm < 1 {
                 return None;
             }
+            // SAFETY: permission check passed; a is within the mmap'd guest memory.
             result.push(unsafe { *fm.buf.add(a as usize) });
         }
         Some(result)
@@ -868,10 +926,12 @@ impl RecompiledPvm {
             if page >= NUM_PAGES {
                 return false;
             }
+            // SAFETY: page is bounds-checked against NUM_PAGES above.
             let perm = unsafe { *fm.perms.add(page) };
             if perm < 2 {
                 return false;
             }
+            // SAFETY: permission check passed; a is within the mmap'd guest memory.
             unsafe {
                 *fm.buf.add(a as usize) = byte;
             }
@@ -916,6 +976,7 @@ impl RecompiledPvm {
 
     /// Get the native code bytes (for disassembly / debugging).
     pub fn native_code_bytes(&self) -> &[u8] {
+        // SAFETY: ptr and len describe a valid mmap allocation from NativeCode::new().
         unsafe { std::slice::from_raw_parts(self.native_code.ptr, self.native_code.len) }
     }
 }
