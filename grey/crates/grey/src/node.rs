@@ -576,6 +576,18 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                     hex::encode(&header_hash.0[..8])
                                 );
 
+                                // Push new block notification to WebSocket subscribers
+                                if let Some(ref rpc_st) = rpc_state {
+                                    let _ = rpc_st.block_notifications.send(serde_json::json!({
+                                        "hash": hex::encode(header_hash.0),
+                                        "slot": current_slot,
+                                        "author_index": block.header.author_index,
+                                        "parent_hash": hex::encode(block.header.parent_hash.0),
+                                        "guarantees": block.extrinsic.guarantees.len(),
+                                        "assurances": block.extrinsic.assurances.len(),
+                                    }));
+                                }
+
                                 // Register guarantees from this block for auditing
                                 // and mark cores as available for assurance generation
                                 for guarantee in &block.extrinsic.guarantees {
@@ -777,6 +789,18 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                         tracing::error!("Failed to update head: {}", e);
                                     }
 
+                                    // Push new block notification to WebSocket subscribers
+                                    if let Some(ref rpc_st) = rpc_state {
+                                        let _ = rpc_st.block_notifications.send(serde_json::json!({
+                                            "hash": hex::encode(import_hash.0),
+                                            "slot": slot,
+                                            "author_index": block.header.author_index,
+                                            "parent_hash": hex::encode(block.header.parent_hash.0),
+                                            "guarantees": block.extrinsic.guarantees.len(),
+                                            "assurances": block.extrinsic.assurances.len(),
+                                        }));
+                                    }
+
                                     // Register guarantees from imported block for auditing,
                                     // mark cores as available for assurance generation,
                                     // and remove matching guarantees from our pending list
@@ -925,6 +949,15 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                                 hex::encode(&fin_hash.0[..8])
                                             );
                                             let _ = store.set_finalized(&fin_hash, fin_slot);
+
+                                            // Push finality notification to WebSocket subscribers
+                                            if let Some(ref rpc_st) = rpc_state {
+                                                let _ = rpc_st.finality_notifications.send(serde_json::json!({
+                                                    "hash": hex::encode(fin_hash.0),
+                                                    "slot": fin_slot,
+                                                    "round": grandpa.round,
+                                                }));
+                                            }
 
                                             // Prune finalized GRANDPA votes
                                             if grandpa.round > 1 {

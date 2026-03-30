@@ -893,6 +893,8 @@ pub fn create_rpc_channel(
     validator_index: u16,
 ) -> (Arc<RpcState>, mpsc::Receiver<RpcCommand>) {
     let (tx, rx) = mpsc::channel(256);
+    let (block_tx, _) = tokio::sync::broadcast::channel(64);
+    let (finality_tx, _) = tokio::sync::broadcast::channel(64);
 
     let (block_tx, _) = tokio::sync::broadcast::channel(64);
     let (finality_tx, _) = tokio::sync::broadcast::channel(64);
