@@ -1135,4 +1135,67 @@ mod tests {
             .await;
         assert!(err.is_err());
     }
+
+    // ── Error handling tests (issue #225) ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_error_invalid_method() {
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let err = client
+            .request::<serde_json::Value, _>("jam_nonExistentMethod", rpc_params![])
+            .await;
+        assert!(err.is_err(), "non-existent method should return error");
+    }
+
+    #[tokio::test]
+    async fn test_error_get_block_non_hex() {
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let err = client
+            .request::<serde_json::Value, _>("jam_getBlock", rpc_params!["not-hex-data!!"])
+            .await;
+        assert!(err.is_err(), "non-hex hash should return error");
+    }
+
+    #[tokio::test]
+    async fn test_error_get_block_short_hash() {
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        // Valid hex but only 16 bytes (not 32)
+        let err = client
+            .request::<serde_json::Value, _>("jam_getBlock", rpc_params!["aabb"])
+            .await;
+        assert!(err.is_err(), "short hash should return error");
+    }
+
+    #[tokio::test]
+    async fn test_error_read_storage_invalid_hex_key() {
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let err = client
+            .request::<serde_json::Value, _>("jam_readStorage", rpc_params![42u32, "zzz-not-hex"])
+            .await;
+        assert!(err.is_err(), "invalid hex key should return error");
+    }
+
+    #[tokio::test]
+    async fn test_error_submit_invalid_hex_wp() {
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let err = client
+            .request::<serde_json::Value, _>("jam_submitWorkPackage", rpc_params!["xyz-not-hex"])
+            .await;
+        assert!(err.is_err(), "invalid hex work package should return error");
+    }
+
+    #[tokio::test]
+    async fn test_error_get_block_by_slot_not_stored() {
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let err = client
+            .request::<serde_json::Value, _>("jam_getBlockBySlot", rpc_params![99999u32])
+            .await;
+        assert!(err.is_err(), "non-existent slot should return error");
+    }
 }
