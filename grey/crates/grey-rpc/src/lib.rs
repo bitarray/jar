@@ -126,6 +126,15 @@ pub trait JamRpc {
         &self,
         set: Option<String>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Get block hashes for a range of slots. Returns an array of {slot, hash} objects.
+    /// Useful for block explorers and monitoring.
+    #[method(name = "jam_getBlockRange")]
+    async fn get_block_range(
+        &self,
+        from_slot: u32,
+        to_slot: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 }
 
 /// WebSocket subscription API.
@@ -537,6 +546,38 @@ impl JamRpcServer for RpcImpl {
             "count": count,
             "validators": entries,
             "slot": head_slot,
+        }))
+    }
+
+    async fn get_block_range(
+        &self,
+        from_slot: u32,
+        to_slot: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if to_slot < from_slot {
+            return Err(internal_error("to_slot must be >= from_slot"));
+        }
+        // Limit range to prevent DoS (max 1000 slots per request)
+        let range_size = to_slot.saturating_sub(from_slot);
+        if range_size > 1000 {
+            return Err(internal_error("range too large (max 1000 slots)"));
+        }
+
+        let mut blocks = Vec::new();
+        for slot in from_slot..=to_slot {
+            if let Ok(hash) = self.state.store.get_block_hash_by_slot(slot) {
+                blocks.push(serde_json::json!({
+                    "slot": slot,
+                    "hash": hex::encode(hash.0),
+                }));
+            }
+        }
+
+        Ok(serde_json::json!({
+            "from_slot": from_slot,
+            "to_slot": to_slot,
+            "blocks": blocks,
+            "count": blocks.len(),
         }))
     }
 }
