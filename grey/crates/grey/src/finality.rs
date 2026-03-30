@@ -200,6 +200,11 @@ impl GrandpaState {
     }
 
     /// Add a received precommit. Returns the finalized (hash, slot) if finality was just reached.
+    ///
+    /// Validates that the precommit target is an ancestor-or-equal of the prevote
+    /// GHOST target (i.e., precommit slot ≤ GHOST slot). Rejects precommits that
+    /// violate this relationship — in GRANDPA, a validator must not precommit to
+    /// a block that is not on the chain selected by prevotes.
     pub fn add_precommit(&mut self, vote: Vote) -> Option<(Hash, Timeslot)> {
         if vote.round != self.round {
             return None;
@@ -215,6 +220,21 @@ impl GrandpaState {
                     self.round
                 );
             }
+            return None;
+        }
+
+        // Validate ancestor relationship: precommit target must be at or below
+        // the prevote GHOST slot. A precommit for a block higher than the GHOST
+        // cannot be an ancestor of the GHOST and violates the GRANDPA protocol.
+        if let Some((_, ghost_slot)) = self.prevote_ghost()
+            && vote.block_slot > ghost_slot
+        {
+            tracing::warn!(
+                "GRANDPA rejecting precommit from validator {}: slot {} exceeds prevote GHOST slot {}",
+                vote.validator_index,
+                vote.block_slot,
+                ghost_slot,
+            );
             return None;
         }
 
@@ -577,6 +597,53 @@ mod tests {
         assert!(grandpa.precommits.is_empty());
         assert!(!grandpa.prevoted);
         assert!(!grandpa.precommitted);
+    }
+
+    #[test]
+    fn test_precommit_ancestor_validation() {
+        let config = Config::tiny(); // V=6
+        let (_, secrets) = grey_consensus::genesis::create_genesis(&config);
+
+        let mut grandpa = GrandpaState::new(config.validators_count);
+        let block_hash = Hash([42u8; 32]);
+        grandpa.update_best_block(block_hash, 5);
+
+        // All validators prevote for slot 5
+        for i in 0..config.validators_count {
+            let vote = sign_vote(
+                &block_hash,
+                5,
+                1,
+                i,
+                &secrets[i as usize],
+                VoteType::Prevote,
+            );
+            grandpa.add_prevote(vote);
+        }
+        assert!(grandpa.has_prevote_supermajority());
+
+        // Valid precommit: slot 5 == GHOST slot 5 (accepted)
+        let valid_precommit = sign_vote(&block_hash, 5, 1, 0, &secrets[0], VoteType::Precommit);
+        let result = grandpa.add_precommit(valid_precommit);
+        // Not finalized yet (only 1 precommit), but it was accepted
+        assert!(result.is_none());
+        assert!(grandpa.precommits.contains_key(&0));
+
+        // Valid precommit: slot 3 < GHOST slot 5 (ancestor, accepted)
+        let ancestor_hash = Hash([10u8; 32]);
+        let ancestor_precommit =
+            sign_vote(&ancestor_hash, 3, 1, 1, &secrets[1], VoteType::Precommit);
+        grandpa.add_precommit(ancestor_precommit);
+        assert!(grandpa.precommits.contains_key(&1));
+
+        // Invalid precommit: slot 8 > GHOST slot 5 (rejected)
+        let future_hash = Hash([99u8; 32]);
+        let invalid_precommit = sign_vote(&future_hash, 8, 1, 2, &secrets[2], VoteType::Precommit);
+        grandpa.add_precommit(invalid_precommit);
+        assert!(
+            !grandpa.precommits.contains_key(&2),
+            "precommit with slot > GHOST slot should be rejected"
+        );
     }
 
     #[test]
