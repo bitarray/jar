@@ -23,6 +23,11 @@ use tokio::sync::mpsc;
 /// Prevents slow or hanging queries from blocking the server indefinitely.
 const RPC_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Maximum RPC requests per IP per window. Returns HTTP 429 when exceeded.
+const RATE_LIMIT_MAX_REQUESTS: u64 = 1000;
+/// Rate limit window duration.
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+
 /// Commands sent from RPC to the node event loop.
 #[derive(Debug)]
 pub enum RpcCommand {
@@ -660,6 +665,110 @@ where
     }
 }
 
+// ── Per-IP rate limiting ─────────────────────────────────────────────
+
+/// Per-IP rate limiter using a fixed-window counter.
+/// Tracks request counts per source IP and returns HTTP 429 when exceeded.
+#[derive(Clone)]
+struct RateLimitLayer {
+    state: Arc<
+        std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, (u64, std::time::Instant)>>,
+    >,
+}
+
+impl RateLimitLayer {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+}
+
+impl<S> tower::Layer<S> for RateLimitLayer {
+    type Service = RateLimitService<S>;
+    fn layer(&self, inner: S) -> Self::Service {
+        RateLimitService {
+            inner,
+            state: self.state.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RateLimitService<S> {
+    inner: S,
+    state: Arc<
+        std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, (u64, std::time::Instant)>>,
+    >,
+}
+
+impl<S, ReqBody> tower::Service<http::Request<ReqBody>> for RateLimitService<S>
+where
+    S: tower::Service<http::Request<ReqBody>, Response = http::Response<HttpBody>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send,
+    ReqBody: Send + 'static,
+{
+    type Response = http::Response<HttpBody>;
+    type Error = S::Error;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: http::Request<ReqBody>) -> Self::Future {
+        // Extract client IP from X-Forwarded-For header or fall back to 127.0.0.1.
+        // In production, a reverse proxy should set X-Forwarded-For.
+        let ip: std::net::IpAddr = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+
+        {
+            let mut map = self.state.lock().unwrap();
+            let now = std::time::Instant::now();
+            let entry = map.entry(ip).or_insert((0, now));
+
+            // Reset window if expired
+            if now.duration_since(entry.1) >= RATE_LIMIT_WINDOW {
+                *entry = (0, now);
+            }
+
+            entry.0 += 1;
+            if entry.0 > RATE_LIMIT_MAX_REQUESTS {
+                tracing::warn!("Rate limit exceeded for IP {}: {}/min", ip, entry.0);
+                let body = serde_json::json!({
+                    "error": "rate limit exceeded",
+                    "retry_after_seconds": RATE_LIMIT_WINDOW.as_secs(),
+                })
+                .to_string();
+                return Box::pin(async move {
+                    Ok(http::Response::builder()
+                        .status(429)
+                        .header("content-type", "application/json")
+                        .header("retry-after", RATE_LIMIT_WINDOW.as_secs().to_string())
+                        .body(HttpBody::from(body))
+                        .unwrap())
+                });
+            }
+        }
+
+        let fut = self.inner.call(req);
+        Box::pin(fut)
+    }
+}
+
 /// Start the JSON-RPC server. Returns the command receiver for the node event loop.
 pub async fn start_rpc_server(
     port: u16,
@@ -676,8 +785,10 @@ pub async fn start_rpc_server(
     let health_layer = HealthLayer {
         state: state.clone(),
     };
+    let rate_limiter = RateLimitLayer::new();
     let middleware = tower::ServiceBuilder::new()
         .layer(cors_layer)
+        .layer(rate_limiter)
         .layer(tower::timeout::TimeoutLayer::new(RPC_QUERY_TIMEOUT))
         .layer(health_layer);
     // Work packages can be up to ~14MB (MAX_WORK_PACKAGE_BLOB_SIZE), and hex
