@@ -93,6 +93,10 @@ pub trait JamRpc {
         &self,
         service_id: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Get the chain specification: protocol constants and configuration.
+    #[method(name = "jam_getChainSpec")]
+    async fn get_chain_spec(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 }
 
 struct RpcImpl {
@@ -330,6 +334,28 @@ impl JamRpcServer for RpcImpl {
             })),
             None => Err(not_found(format!("service {} not found", service_id))),
         }
+    }
+
+    async fn get_chain_spec(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let c = &self.state.config;
+        Ok(serde_json::json!({
+            "validators_count": c.validators_count,
+            "core_count": c.core_count,
+            "epoch_length": c.epoch_length,
+            "max_tickets_per_block": c.max_tickets_per_block,
+            "tickets_per_validator": c.tickets_per_validator,
+            "recent_history_size": c.recent_history_size,
+            "auth_pool_size": c.auth_pool_size,
+            "auth_queue_size": c.auth_queue_size,
+            "availability_timeout": c.availability_timeout,
+            "preimage_expunge_period": c.preimage_expunge_period,
+            "rotation_period": c.rotation_period_val,
+            "ticket_submission_end": c.ticket_submission_end_val,
+            "erasure_pieces_per_segment": c.erasure_pieces_per_segment,
+            "gas_total_accumulation": c.gas_total_accumulation,
+            "gas_refine": c.gas_refine,
+            "slot_period": 6,
+        }))
     }
 }
 
@@ -854,5 +880,22 @@ mod tests {
             .request::<serde_json::Value, _>("jam_getServiceAccount", rpc_params![9999u32])
             .await;
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_chain_spec() {
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let result: serde_json::Value = client
+            .request("jam_getChainSpec", rpc_params![])
+            .await
+            .unwrap();
+
+        // Config::tiny() values
+        assert_eq!(result["validators_count"], 6);
+        assert_eq!(result["core_count"], 2);
+        assert_eq!(result["epoch_length"], 12);
+        assert_eq!(result["slot_period"], 6);
+        assert!(result["gas_total_accumulation"].as_u64().unwrap() > 0);
     }
 }
