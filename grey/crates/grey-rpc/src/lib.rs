@@ -130,6 +130,18 @@ fn not_found(msg: impl Into<String>) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(-32001, msg.into(), None::<()>)
 }
 
+/// Parse a hex-encoded 32-byte hash, stripping optional "0x" prefix.
+fn parse_hash_hex(hex_str: &str) -> Result<Hash, ErrorObjectOwned> {
+    let bytes =
+        hex::decode(hex_str.trim_start_matches("0x")).map_err(|e| internal_error(e.to_string()))?;
+    if bytes.len() != 32 {
+        return Err(internal_error("hash must be 32 bytes"));
+    }
+    let mut h = [0u8; 32];
+    h.copy_from_slice(&bytes);
+    Ok(Hash(h))
+}
+
 #[async_trait]
 impl JamRpcServer for RpcImpl {
     async fn get_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
@@ -151,15 +163,9 @@ impl JamRpcServer for RpcImpl {
     }
 
     async fn get_block(&self, hash_hex: String) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let hash_bytes = hex::decode(hash_hex.trim_start_matches("0x"))
-            .map_err(|e| internal_error(e.to_string()))?;
-        if hash_bytes.len() != 32 {
-            return Err(internal_error("hash must be 32 bytes"));
-        }
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&hash_bytes);
+        let hash = parse_hash_hex(&hash_hex)?;
 
-        match self.state.store.get_block(&Hash(hash)) {
+        match self.state.store.get_block(&hash) {
             Ok(block) => Ok(serde_json::json!({
                 "timeslot": block.header.timeslot,
                 "author_index": block.header.author_index,
@@ -383,14 +389,7 @@ impl JamRpcServer for RpcImpl {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         // Resolve block hash: use provided hash or default to head
         let (block_hash, slot) = if let Some(hex) = block_hash_hex {
-            let hash_bytes = hex::decode(hex.trim_start_matches("0x"))
-                .map_err(|e| internal_error(e.to_string()))?;
-            if hash_bytes.len() != 32 {
-                return Err(internal_error("hash must be 32 bytes"));
-            }
-            let mut h = [0u8; 32];
-            h.copy_from_slice(&hash_bytes);
-            let hash = Hash(h);
+            let hash = parse_hash_hex(&hex)?;
             // Look up the block to get the slot
             let block = self
                 .state
