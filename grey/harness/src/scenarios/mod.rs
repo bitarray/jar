@@ -2,6 +2,7 @@
 
 pub mod invalid_wp;
 pub mod liveness;
+pub mod recovery;
 pub mod repeat;
 pub mod serial;
 
