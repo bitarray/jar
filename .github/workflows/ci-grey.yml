@@ -48,7 +48,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --features javm/signals -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --features javm/signals -- -D warnings
         env:
           SKIP_GUEST_BUILD: 1
 
@@ -65,15 +65,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Workspace tests (interpreter)
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
       - name: Workspace tests (recompiler)
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
         env:
           GREY_PVM: recompiler
 
       - name: Workspace tests (recompiler + signals)
-        run: cargo test --workspace --features javm/signals
+        run: cargo test --locked --workspace --features javm/signals
         env:
           GREY_PVM: recompiler
 
@@ -90,4 +90,4 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run harness
-        run: cargo run -p harness -- --seq-testnet
+        run: cargo run --locked -p harness -- --seq-testnet
