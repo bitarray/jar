@@ -213,8 +213,8 @@ pub fn run(pr: u64, founder_override: bool) -> Result<(), Box<dyn std::error::Er
     )?;
 
     // --- Step 11: Verify cache integrity ---
-    // Pull latest master (now includes the merge), then verify
-    git::git_cmd(&["pull", "origin", "master", "--ff-only"])?;
+    // Fetch latest master (includes our merge) without touching the working tree.
+    git::git_cmd(&["fetch", "origin", "master"])?;
     replay::verify_cache()?;
 
     Ok(())
@@ -232,11 +232,13 @@ fn update_cache(
     let mut updated_indices = cache_indices.to_vec();
     updated_indices.push(new_index.clone());
 
-    // Compute updated ranking from all SignedCommits in git history
+    // Compute updated ranking from all SignedCommits in git history.
+    // Use `git fetch` + `origin/master` ref instead of `git pull` to avoid
+    // working tree conflicts (cargo build dirties Cargo.lock).
     let genesis_commit = git::read_genesis_commit_hash(spec_dir)?;
-    git::git_cmd(&["pull", "origin", "master", "--ff-only"])?;
+    git::git_cmd(&["fetch", "origin", "master"])?;
 
-    let merge_commits = git::log_merge_commits(&genesis_commit)?;
+    let merge_commits = git::log_merge_commits_ref(&genesis_commit, "origin/master")?;
     let mut signed_commits = Vec::new();
     for (_, message) in &merge_commits {
         if let Some(commit_line) = git::parse_trailer(message, "Genesis-Commit")

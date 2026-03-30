@@ -11,11 +11,12 @@ struct GenesisCommitEntry {
     stored_index: serde_json::Value,
 }
 
-/// Walk merge commits and collect genesis entries.
-fn collect_entries(
+/// Walk merge commits up to `end_ref` and collect genesis entries.
+fn collect_entries_ref(
     genesis_commit: &str,
+    end_ref: &str,
 ) -> Result<Vec<GenesisCommitEntry>, Box<dyn std::error::Error>> {
-    let merge_commits = git::log_merge_commits(genesis_commit)?;
+    let merge_commits = git::log_merge_commits_ref(genesis_commit, end_ref)?;
     let mut entries = Vec::new();
 
     for (hash, message) in &merge_commits {
@@ -183,7 +184,9 @@ pub fn verify() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let entries = collect_entries(&genesis_commit)?;
+    // Use origin/master to ensure we see all merge commits.
+    git::git_cmd(&["fetch", "origin", "master"])?;
+    let entries = collect_entries_ref(&genesis_commit, "origin/master")?;
     let signed_commits: Vec<serde_json::Value> =
         entries.iter().map(|e| e.signed_commit.clone()).collect();
     let stored_indices: Vec<serde_json::Value> =
@@ -239,7 +242,10 @@ pub fn verify_cache() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let entries = collect_entries(&genesis_commit)?;
+    // Use origin/master to read trailers — the working tree may be behind
+    // (e.g., during merge workflow where cargo build dirtied Cargo.lock).
+    git::git_cmd(&["fetch", "origin", "master"])?;
+    let entries = collect_entries_ref(&genesis_commit, "origin/master")?;
     let signed_commits: Vec<serde_json::Value> =
         entries.iter().map(|e| e.signed_commit.clone()).collect();
 
@@ -339,7 +345,10 @@ pub fn rebuild() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let entries = collect_entries(&genesis_commit)?;
+    // Use origin/master to ensure we see all merge commits, even if
+    // the working tree HEAD is behind (e.g., Cargo.lock dirty from cargo build).
+    git::git_cmd(&["fetch", "origin", "master"])?;
+    let entries = collect_entries_ref(&genesis_commit, "origin/master")?;
     let signed_commits: Vec<serde_json::Value> =
         entries.iter().map(|e| e.signed_commit.clone()).collect();
 

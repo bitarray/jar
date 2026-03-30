@@ -47,7 +47,15 @@ pub fn git_cmd_in(dir: &str, args: &[&str]) -> Result<String, GitError> {
 /// Get merge commits from genesis_commit..HEAD, oldest first.
 /// Returns (hash, full commit message) pairs.
 pub fn log_merge_commits(genesis_commit: &str) -> Result<Vec<(String, String)>, GitError> {
-    let range = format!("{genesis_commit}..HEAD");
+    log_merge_commits_ref(genesis_commit, "HEAD")
+}
+
+/// Walk merge commits between `genesis_commit` and `end_ref` (e.g. "origin/master").
+pub fn log_merge_commits_ref(
+    genesis_commit: &str,
+    end_ref: &str,
+) -> Result<Vec<(String, String)>, GitError> {
+    let range = format!("{genesis_commit}..{end_ref}");
     let hashes = git(&["log", "--merges", "--reverse", "--format=%H", &range])?;
     let mut result = Vec::new();
     for hash in hashes.lines() {
