@@ -100,7 +100,10 @@ pub fn parse_trailer(message: &str, key: &str) -> Option<String> {
 
 /// Count the number of Genesis-Index trailers in the merge history.
 pub fn count_genesis_trailers(genesis_commit: &str) -> Result<usize, GitError> {
-    let range = format!("{genesis_commit}..HEAD");
+    // Use origin/master to see all trailers even if HEAD is behind
+    // (e.g. during review workflow where checkout is stale).
+    let _ = git(&["fetch", "origin", "master"]);
+    let range = format!("{genesis_commit}..origin/master");
     let output = git(&["log", "--merges", "--format=%B", &range])?;
     let count = output
         .lines()
