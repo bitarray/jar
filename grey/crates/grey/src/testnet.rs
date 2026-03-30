@@ -169,8 +169,8 @@ pub async fn run_testnet(
                 protocol_config: config_clone,
                 genesis_time,
                 db_path: format!("/tmp/grey-testnet-{}", genesis_time),
-                rpc_port: if i == 0 { 9933 } else { 0 },
-                rpc_cors: if i == 0 { rpc_cors } else { false },
+                rpc_port: 9933 + i,
+                rpc_cors,
                 genesis_state: Some(genesis_clone),
                 pruning_depth: 0, // No pruning in testnet
                 keystore_path: None,
