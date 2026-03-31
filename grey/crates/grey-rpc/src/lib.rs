@@ -68,6 +68,8 @@ pub struct RpcState {
     pub queue_depth_rpc: std::sync::atomic::AtomicU32,
     /// Pending blocks buffer depth (updated by the node each tick).
     pub pending_blocks_depth: std::sync::atomic::AtomicU32,
+    /// Total work packages submitted via RPC.
+    pub work_packages_submitted: std::sync::atomic::AtomicU64,
 }
 
 #[rpc(server)]
@@ -272,6 +274,10 @@ impl JamRpcServer for RpcImpl {
             .send(RpcCommand::SubmitWorkPackage { data })
             .await
             .map_err(|_| internal_error("node channel closed"))?;
+
+        self.state
+            .work_packages_submitted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         Ok(serde_json::json!({
             "hash": hex::encode(hash.0),
@@ -736,6 +742,10 @@ where
                 let pending_blocks = state
                     .pending_blocks_depth
                     .load(std::sync::atomic::Ordering::Relaxed);
+                let finality_lag = head_slot.saturating_sub(finalized_slot);
+                let wp_submitted = state
+                    .work_packages_submitted
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 drop(status);
 
                 let stored_blocks = state.store.block_count().unwrap_or(0);
@@ -788,7 +798,13 @@ where
                      grey_queue_depth_rpc {queue_rpc}\n\
                      # HELP grey_pending_blocks Pending blocks buffer depth.\n\
                      # TYPE grey_pending_blocks gauge\n\
-                     grey_pending_blocks {pending_blocks}\n"
+                     grey_pending_blocks {pending_blocks}\n\
+                     # HELP grey_finality_lag Slots between head and last finalized block.\n\
+                     # TYPE grey_finality_lag gauge\n\
+                     grey_finality_lag {finality_lag}\n\
+                     # HELP grey_work_packages_submitted_total Work packages submitted via RPC.\n\
+                     # TYPE grey_work_packages_submitted_total counter\n\
+                     grey_work_packages_submitted_total {wp_submitted}\n"
                 );
 
                 Ok(http::Response::builder()
@@ -1033,6 +1049,7 @@ pub fn create_rpc_channel(
         queue_depth_commands: std::sync::atomic::AtomicU32::new(0),
         queue_depth_rpc: std::sync::atomic::AtomicU32::new(0),
         pending_blocks_depth: std::sync::atomic::AtomicU32::new(0),
+        work_packages_submitted: std::sync::atomic::AtomicU64::new(0),
     });
 
     (state, rx)
