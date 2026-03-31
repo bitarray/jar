@@ -194,6 +194,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         {
             cli.db_path = v.clone();
         }
+        // Storage section overrides for db_path and pruning_depth
+        if let Some(ref v) = cfg.storage.db_path
+            && cli.db_path == "./grey-db"
+        {
+            cli.db_path = v.clone();
+        }
+        if let Some(v) = cfg.storage.pruning_depth
+            && cli.pruning_depth == 0
+        {
+            cli.pruning_depth = v;
+        }
         if let Some(v) = cfg.rpc.port
             && cli.rpc_port == 9933
         {

@@ -14,6 +14,8 @@ pub struct ConfigFile {
     #[serde(default)]
     pub rpc: RpcConfig,
     #[serde(default)]
+    pub storage: StorageConfig,
+    #[serde(default)]
     pub network: NetworkConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -49,6 +51,13 @@ pub struct NetworkConfig {
     pub boot_peers: Option<Vec<String>>,
 }
 
+/// Storage configuration section.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct StorageConfig {
+    pub db_path: Option<String>,
+    pub pruning_depth: Option<u32>,
+}
+
 /// Logging configuration section.
 #[derive(Debug, Default, serde::Deserialize)]
 #[allow(dead_code)]
@@ -62,7 +71,33 @@ impl ConfigFile {
     pub fn load(path: &Path) -> Result<Self, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
-        toml::from_str(&content).map_err(|e| format!("failed to parse {}: {}", path.display(), e))
+        let config: Self = toml::from_str(&content)
+            .map_err(|e| format!("failed to parse {}: {}", path.display(), e))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate config values. Returns an error for any invalid settings.
+    fn validate(&self) -> Result<(), String> {
+        if let Some(ref chain) = self.node.chain
+            && !["tiny", "full"].contains(&chain.as_str())
+        {
+            return Err(format!(
+                "invalid chain preset: {:?} (expected \"tiny\" or \"full\")",
+                chain
+            ));
+        }
+
+        if let Some(ref fmt) = self.logging.format
+            && !["plain", "pretty", "json"].contains(&fmt.as_str())
+        {
+            return Err(format!(
+                "invalid log format: {:?} (expected \"plain\", \"pretty\", or \"json\")",
+                fmt
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -123,5 +158,60 @@ level = "warn"
         assert_eq!(config.node.validator_index, Some(1));
         assert!(config.node.port.is_none());
         assert_eq!(config.logging.level.as_deref(), Some("warn"));
+    }
+
+    #[test]
+    fn test_parse_storage_section() {
+        let toml_str = r#"
+[storage]
+db_path = "/var/lib/grey"
+pruning_depth = 1000
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.storage.db_path.as_deref(), Some("/var/lib/grey"));
+        assert_eq!(config.storage.pruning_depth, Some(1000));
+    }
+
+    #[test]
+    fn test_validate_invalid_chain_preset() {
+        let toml_str = r#"
+[node]
+chain = "mainnet"
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("invalid chain preset"),
+            "expected chain preset error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_invalid_log_format() {
+        let toml_str = r#"
+[logging]
+format = "xml"
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).unwrap();
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("invalid log format"),
+            "expected log format error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_valid_config() {
+        let toml_str = r#"
+[node]
+chain = "tiny"
+
+[logging]
+format = "json"
+"#;
+        let config: ConfigFile = toml::from_str(toml_str).unwrap();
+        assert!(config.validate().is_ok());
     }
 }
