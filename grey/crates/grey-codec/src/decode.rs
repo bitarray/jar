@@ -170,6 +170,14 @@ impl_decode_fixed_bytes!(
 impl<T: Decode> Decode for Vec<T> {
     fn decode(data: &[u8]) -> Result<(Self, usize), CodecError> {
         let (len, mut offset) = decode_natural(data)?;
+        // Sanity check: each element is at least 1 byte, so the declared
+        // length cannot exceed the remaining buffer.  Without this guard,
+        // a crafted length prefix can cause a multi-gigabyte allocation
+        // before we ever try to decode elements.
+        let remaining = data.len().saturating_sub(offset);
+        if len > remaining {
+            return Err(CodecError::SequenceTooLong(len, remaining));
+        }
         let mut items = Vec::with_capacity(len);
         for _ in 0..len {
             let (item, consumed) = T::decode(&data[offset..])?;
@@ -568,6 +576,10 @@ impl DecodeWithConfig for DisputesExtrinsic {
         // Verdicts: length-prefixed, each verdict needs config
         let (verdict_count, c) = decode_natural(&data[off..])?;
         off += c;
+        let remaining = data.len().saturating_sub(off);
+        if verdict_count > remaining {
+            return Err(CodecError::SequenceTooLong(verdict_count, remaining));
+        }
         let mut verdicts = Vec::with_capacity(verdict_count);
         for _ in 0..verdict_count {
             let (v, c) = Verdict::decode_with_config(&data[off..], config)?;
@@ -681,6 +693,10 @@ impl DecodeWithConfig for Extrinsic {
         // Assurances: length-prefixed, each needs config
         let (assurance_count, c) = decode_natural(&data[off..])?;
         off += c;
+        let remaining = data.len().saturating_sub(off);
+        if assurance_count > remaining {
+            return Err(CodecError::SequenceTooLong(assurance_count, remaining));
+        }
         let mut assurances = Vec::with_capacity(assurance_count);
         for _ in 0..assurance_count {
             let (a, c) = Assurance::decode_with_config(&data[off..], config)?;
