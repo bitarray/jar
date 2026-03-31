@@ -23,6 +23,15 @@ RUN cargo build --release --locked -p grey \
 # ── Runtime stage ────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
+# Build metadata labels (populated by CI or docker build --build-arg)
+ARG GIT_COMMIT=unknown
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.source="https://github.com/jarchain/jar"
+LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
+LABEL org.opencontainers.image.created="${BUILD_DATE}"
+LABEL org.opencontainers.image.title="grey"
+LABEL org.opencontainers.image.description="Grey — JAM blockchain node"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
@@ -50,4 +59,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 # Default: run grey with data in /data, listening on all interfaces
 ENTRYPOINT ["grey"]
-CMD ["--listen-addr", "0.0.0.0", "--db-path", "/data", "--rpc-port", "9933", "--rpc-cors"]
+CMD ["--listen-addr", "0.0.0.0", "--db-path", "/data", "--rpc-port", "9933", "--rpc-host", "0.0.0.0", "--rpc-cors"]
