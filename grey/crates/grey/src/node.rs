@@ -226,8 +226,15 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
         genesis_time
     );
 
-    // Graceful shutdown signal
-    let shutdown = tokio::signal::ctrl_c();
+    // Graceful shutdown on SIGINT (Ctrl+C) or SIGTERM (kill)
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to register SIGTERM handler");
+    let shutdown = async {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => "SIGINT",
+            _ = sigterm.recv() => "SIGTERM",
+        }
+    };
     tokio::pin!(shutdown);
 
     // SIGUSR1: dump debug state to log
@@ -242,10 +249,11 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
 
     loop {
         tokio::select! {
-            _ = &mut shutdown => {
+            signal_name = &mut shutdown => {
                 tracing::info!(
-                    "Validator {} received shutdown signal, flushing state...",
-                    config.validator_index
+                    "Validator {} received {}, flushing state...",
+                    config.validator_index,
+                    signal_name
                 );
                 // Persist final head state
                 let head_hash = state
