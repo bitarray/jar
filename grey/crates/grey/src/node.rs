@@ -215,6 +215,10 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
     let mut pending_blocks: std::collections::BTreeMap<Timeslot, (Block, Hash)> =
         std::collections::BTreeMap::new();
     let mut saturation_tracker = SaturationTracker::new();
+    // Recently-seen block hashes: skip re-processing blocks we already validated.
+    // Bounded to avoid unbounded growth; old entries are evicted when full.
+    let mut seen_block_hashes: std::collections::HashSet<Hash> =
+        std::collections::HashSet::with_capacity(256);
 
     tracing::info!(
         "Validator {} node started, genesis_time={}",
@@ -624,6 +628,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                 state = new_state;
                                 blocks_authored += 1;
                                 last_authored_slot = current_slot;
+                                seen_block_hashes.insert(header_hash);
 
                                 // Persist block, state, and metadata
                                 if let Err(e) = store.put_block(&block) {
@@ -784,14 +789,21 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                     NetworkEvent::BlockReceived { data, source } => {
                         match decode_block_message(&data, protocol) {
                             Some((block, _hash)) => {
-                                let slot = block.header.timeslot;
-                                if slot > state.timeslot {
+                                let block_hash = compute_header_hash(&block.header);
+                                // Skip blocks we've already seen (dedup)
+                                if seen_block_hashes.contains(&block_hash) {
+                                    tracing::trace!(
+                                        "Validator {} skipping duplicate block {}",
+                                        config.validator_index,
+                                        hex::encode(&block_hash.0[..4])
+                                    );
+                                } else if block.header.timeslot > state.timeslot {
+                                    let slot = block.header.timeslot;
                                     // Buffer this block for ordered import.
                                     // Only keep the first block per slot (no forks).
-                                    pending_blocks.entry(slot).or_insert_with(|| {
-                                        let h = compute_header_hash(&block.header);
-                                        (block, h)
-                                    });
+                                    pending_blocks
+                                        .entry(slot)
+                                        .or_insert((block, block_hash));
 
                                     // Evict the furthest-ahead block if buffer is full.
                                     // Keeps blocks closest to current state (most useful).
@@ -839,6 +851,17 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                 Ok((new_state, _)) => {
                                     state = new_state;
                                     blocks_imported += 1;
+
+                                    // Mark block as seen to skip duplicates
+                                    if seen_block_hashes.len() >= 256 {
+                                        // Evict a random entry to bound memory
+                                        if let Some(&old) =
+                                            seen_block_hashes.iter().next()
+                                        {
+                                            seen_block_hashes.remove(&old);
+                                        }
+                                    }
+                                    seen_block_hashes.insert(import_hash);
 
                                     // Persist imported block, state, and metadata
                                     if let Err(e) = store.put_block(&block) {
