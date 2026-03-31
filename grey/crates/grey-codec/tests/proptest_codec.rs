@@ -106,3 +106,46 @@ proptest! {
             "compact encoding of {} used {} bytes (expected 1-9)", value, buf.len());
     }
 }
+
+// ── Encoding determinism ─────────────────────────────────────────────
+
+proptest! {
+    /// Encoding the same value twice always produces identical bytes.
+    #[test]
+    fn u32_encoding_is_deterministic(value in any::<u32>()) {
+        let a = value.encode();
+        let b = value.encode();
+        prop_assert_eq!(&a, &b, "u32 encoding not deterministic for {}", value);
+    }
+
+    #[test]
+    fn u64_encoding_is_deterministic(value in any::<u64>()) {
+        let a = value.encode();
+        let b = value.encode();
+        prop_assert_eq!(&a, &b, "u64 encoding not deterministic for {}", value);
+    }
+
+    #[test]
+    fn compact_encoding_is_deterministic(value in any::<u64>()) {
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        encode_compact(value, &mut a);
+        encode_compact(value, &mut b);
+        prop_assert_eq!(&a, &b, "compact encoding not deterministic for {}", value);
+    }
+
+    #[test]
+    fn hash_encoding_is_deterministic(bytes in prop::array::uniform32(any::<u8>())) {
+        let hash = grey_types::Hash(bytes);
+        let a = hash.encode();
+        let b = hash.encode();
+        prop_assert_eq!(&a, &b, "Hash encoding not deterministic");
+    }
+
+    #[test]
+    fn bool_encoding_is_deterministic(value in any::<bool>()) {
+        let a = value.encode();
+        let b = value.encode();
+        prop_assert_eq!(&a, &b, "bool encoding not deterministic for {}", value);
+    }
+}
