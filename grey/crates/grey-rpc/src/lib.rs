@@ -60,6 +60,8 @@ pub struct RpcState {
     pub finality_notifications: tokio::sync::broadcast::Sender<serde_json::Value>,
     /// Connected peer count (updated by the node on PeerIdentified events).
     pub peer_count: std::sync::atomic::AtomicU32,
+    /// Total work packages submitted via RPC.
+    pub work_packages_submitted: std::sync::atomic::AtomicU64,
 }
 
 #[rpc(server)]
@@ -264,6 +266,10 @@ impl JamRpcServer for RpcImpl {
             .send(RpcCommand::SubmitWorkPackage { data })
             .await
             .map_err(|_| internal_error("node channel closed"))?;
+
+        self.state
+            .work_packages_submitted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         Ok(serde_json::json!({
             "hash": hex::encode(hash.0),
@@ -716,6 +722,10 @@ where
                 let validator_index = status.validator_index;
                 let grandpa_round = status.grandpa_round;
                 let peer_count = state.peer_count.load(std::sync::atomic::Ordering::Relaxed);
+                let finality_lag = head_slot.saturating_sub(finalized_slot);
+                let wp_submitted = state
+                    .work_packages_submitted
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 drop(status);
 
                 let stored_blocks = state.store.block_count().unwrap_or(0);
@@ -756,7 +766,13 @@ where
                      grey_grandpa_round {grandpa_round}\n\
                      # HELP grey_peer_count Number of connected peers.\n\
                      # TYPE grey_peer_count gauge\n\
-                     grey_peer_count {peer_count}\n"
+                     grey_peer_count {peer_count}\n\
+                     # HELP grey_finality_lag Slots between head and last finalized block.\n\
+                     # TYPE grey_finality_lag gauge\n\
+                     grey_finality_lag {finality_lag}\n\
+                     # HELP grey_work_packages_submitted_total Work packages submitted via RPC.\n\
+                     # TYPE grey_work_packages_submitted_total counter\n\
+                     grey_work_packages_submitted_total {wp_submitted}\n"
                 );
 
                 Ok(http::Response::builder()
@@ -989,6 +1005,7 @@ pub fn create_rpc_channel(
         block_notifications: block_tx,
         finality_notifications: finality_tx,
         peer_count: std::sync::atomic::AtomicU32::new(0),
+        work_packages_submitted: std::sync::atomic::AtomicU64::new(0),
     });
 
     (state, rx)
@@ -1572,5 +1589,9 @@ mod tests {
         assert!(body.contains("grey_stored_votes 0"));
         assert!(body.contains("# TYPE grey_block_height gauge"));
         assert!(body.contains("# TYPE grey_blocks_produced_total counter"));
+        // Finality lag: 50 - 45 = 5
+        assert!(body.contains("grey_finality_lag 5"));
+        // Work packages submitted counter starts at 0
+        assert!(body.contains("grey_work_packages_submitted_total 0"));
     }
 }
