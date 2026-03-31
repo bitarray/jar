@@ -176,4 +176,34 @@ proptest! {
         let config = Config::full();
         let _ = grey_types::header::Header::decode_with_config(&data, &config);
     }
+
+    #[test]
+    fn fuzz_decode_block_tiny(data in arb_bytes()) {
+        let config = Config::tiny();
+        let _ = grey_types::header::Block::decode_with_config(&data, &config);
+    }
+
+    #[test]
+    fn fuzz_decode_extrinsic_tiny(data in arb_bytes()) {
+        let config = Config::tiny();
+        let _ = grey_types::header::Extrinsic::decode_with_config(&data, &config);
+    }
+
+    #[test]
+    fn fuzz_decode_assurance_tiny(data in arb_bytes()) {
+        let config = Config::tiny();
+        let _ = grey_types::header::Assurance::decode_with_config(&data, &config);
+    }
+
+    #[test]
+    fn fuzz_decode_disputes_tiny(data in arb_bytes()) {
+        let config = Config::tiny();
+        let _ = grey_types::header::DisputesExtrinsic::decode_with_config(&data, &config);
+    }
+
+    #[test]
+    fn fuzz_decode_verdict_tiny(data in arb_bytes()) {
+        let config = Config::tiny();
+        let _ = grey_types::header::Verdict::decode_with_config(&data, &config);
+    }
 }
