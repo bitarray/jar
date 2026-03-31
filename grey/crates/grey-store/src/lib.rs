@@ -815,9 +815,11 @@ impl Store {
         let txn = self.db.begin_write()?;
         let count = to_delete.len() as u32;
         {
-            let mut table = txn.open_table(STATE)?;
+            let mut state_table = txn.open_table(STATE)?;
+            let mut checksum_table = txn.open_table(STATE_CHECKSUMS)?;
             for hash in &to_delete {
-                table.remove(hash)?;
+                state_table.remove(hash)?;
+                checksum_table.remove(hash)?;
             }
         }
         txn.commit()?;
