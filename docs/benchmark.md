@@ -46,22 +46,23 @@ Compilation performed in setup (untimed). Measures native code quality in isolat
 
 | Benchmark | Grey | PolkaVM | Speedup |
 |-----------|------|---------|---------|
-| fib | 408 us | 411 us | 1.01x |
-| hostcall | 792 us | 4,052 us | 5.12x |
-| sort | 403 us | 435 us | 1.08x |
-| sieve | 299 us | 317 us | 1.06x |
-| blake2b | 13.5 us | 25.9 us | 1.92x |
-| keccak | 15.5 us | 31.9 us | 2.06x |
-| ed25519 | 139 us | 156 us | 1.12x |
+| fib | 408 us | 409 us | 1.00x |
+| hostcall | 816 us | 3,213 us | 3.94x |
+| sort | 398 us | 436 us | 1.10x |
+| sieve | 304 us | 320 us | 1.05x |
+| blake2b | 13.2 us | 27.0 us | 2.05x |
+| keccak | 18.1 us | 35.9 us | 1.98x |
+| ed25519 | 140 us | 158 us | 1.13x |
 | ecrecover | 630 us | 579 us | 0.92x |
 
-Grey wins 7 of 8 benchmarks on exec-only. PolkaVM's only win is ecrecover (1.09x). Grey generates notably better native code for hash functions (blake2b 1.9x, keccak 2.1x) and host call dispatch (5.1x).
+Grey wins 7 of 8 benchmarks on exec-only. PolkaVM's only win is ecrecover (1.09x). Grey generates notably better native code for hash functions (blake2b 2.0x, keccak 2.0x) and host call dispatch (3.9x). The hostcall result is notable: PolkaVM's compiled code (3,213 us) is actually slower than its own interpreter (2,526 us) on this workload, suggesting high overhead in its compiler's host call dispatch path.
 
 ## Results: Interpreters
 
 | Benchmark | Grey | PolkaVM | Speedup |
 |-----------|------|---------|---------|
 | fib | 9.0 ms | 9.1 ms | 1.01x |
+| hostcall | 795 us | 2,526 us | 3.18x |
 | sort | 8.1 ms | 11.8 ms | 1.46x |
 | sieve | 2.7 ms | 3.0 ms | 1.14x |
 | blake2b | 194 us | 341 us | 1.76x |
@@ -69,7 +70,7 @@ Grey wins 7 of 8 benchmarks on exec-only. PolkaVM's only win is ecrecover (1.09x
 | ed25519 | 5.1 ms | 3.2 ms | 0.63x |
 | ecrecover | 21.0 ms | 19.3 ms | 0.92x |
 
-Grey's interpreter wins 5 of 7. PolkaVM wins ed25519 (1.6x) and ecrecover (1.1x).
+Grey's interpreter wins 6 of 8. PolkaVM wins ed25519 (1.6x) and ecrecover (1.1x).
 
 ## Workload Descriptions
 
