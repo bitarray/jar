@@ -5,15 +5,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RpcError {
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
-    #[error("JSON-RPC error: {0}")]
-    JsonRpc(String),
-    #[error("missing 'result' in response")]
-    MissingResult,
-    #[error("RPC call timed out after {0:?}")]
-    #[allow(dead_code)] // Available for callers to match on; timeout produces Http variant
-    Timeout(std::time::Duration),
+    #[error("HTTP error calling {method}: {source}")]
+    Http {
+        method: String,
+        source: reqwest::Error,
+    },
+    #[error("JSON-RPC error calling {method}: [{code}] {message}")]
+    JsonRpc {
+        method: String,
+        code: i64,
+        message: String,
+    },
+    #[error("missing 'result' in response to {method}")]
+    MissingResult { method: String },
+    #[error("failed to deserialize response for {method}: {detail}")]
+    Deserialize { method: String, detail: String },
 }
 
 /// Default per-RPC-call timeout. Prevents individual calls from hanging
@@ -93,18 +99,37 @@ impl RpcClient {
             .post(&self.endpoint)
             .json(&body)
             .send()
-            .await?
+            .await
+            .map_err(|e| RpcError::Http {
+                method: method.to_string(),
+                source: e,
+            })?
             .json()
-            .await?;
+            .await
+            .map_err(|e| RpcError::Http {
+                method: method.to_string(),
+                source: e,
+            })?;
         if let Some(err) = resp.get("error") {
-            let msg = err
+            let message = err
                 .get("message")
                 .and_then(|m| m.as_str())
-                .unwrap_or("unknown");
-            return Err(RpcError::JsonRpc(msg.to_string()));
+                .unwrap_or("unknown")
+                .to_string();
+            let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(-1);
+            return Err(RpcError::JsonRpc {
+                method: method.to_string(),
+                code,
+                message,
+            });
         }
-        let result = resp.get("result").ok_or(RpcError::MissingResult)?;
-        serde_json::from_value(result.clone()).map_err(|e| RpcError::JsonRpc(e.to_string()))
+        let result = resp.get("result").ok_or_else(|| RpcError::MissingResult {
+            method: method.to_string(),
+        })?;
+        serde_json::from_value(result.clone()).map_err(|e| RpcError::Deserialize {
+            method: method.to_string(),
+            detail: e.to_string(),
+        })
     }
 
     pub async fn get_status(&self) -> Result<NodeStatus, RpcError> {
@@ -135,7 +160,18 @@ impl RpcClient {
     pub async fn get_metrics(&self) -> Result<String, RpcError> {
         let url = self.endpoint.replace("http://", "");
         let metrics_url = format!("http://{}/metrics", url.trim_end_matches('/'));
-        let resp = self.http.get(&metrics_url).send().await?;
-        Ok(resp.text().await?)
+        let resp = self
+            .http
+            .get(&metrics_url)
+            .send()
+            .await
+            .map_err(|e| RpcError::Http {
+                method: "GET /metrics".to_string(),
+                source: e,
+            })?;
+        resp.text().await.map_err(|e| RpcError::Http {
+            method: "GET /metrics".to_string(),
+            source: e,
+        })
     }
 }
