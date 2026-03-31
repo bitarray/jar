@@ -101,6 +101,52 @@ impl GrandpaState {
         }
     }
 
+    /// Load persisted votes from a previous session into the current round.
+    ///
+    /// `persisted_votes` is a list of `(vote_type, validator_index, block_hash, block_slot, signature)`.
+    /// Vote type: 0 = prevote, 1 = precommit.
+    /// Only votes matching the current round are loaded; others are ignored.
+    /// Returns the number of votes loaded.
+    pub fn load_persisted_votes(
+        &mut self,
+        round: u64,
+        persisted_votes: &[(u8, u16, Hash, u32, [u8; 64])],
+    ) -> usize {
+        self.round = round;
+        let mut loaded = 0;
+        for &(vote_type, validator_index, block_hash, block_slot, signature) in persisted_votes {
+            let vote = Vote {
+                block_hash,
+                block_slot,
+                round,
+                validator_index,
+                signature: Ed25519Signature(signature),
+            };
+            match vote_type {
+                0 => {
+                    // Prevote
+                    self.prevotes.entry(validator_index).or_insert_with(|| {
+                        loaded += 1;
+                        self.prevote_archive
+                            .insert((round, validator_index), block_hash);
+                        vote.clone()
+                    });
+                }
+                1 => {
+                    // Precommit
+                    self.precommits.entry(validator_index).or_insert_with(|| {
+                        loaded += 1;
+                        self.precommit_archive
+                            .insert((round, validator_index), block_hash);
+                        vote.clone()
+                    });
+                }
+                _ => {} // Unknown vote type, skip
+            }
+        }
+        loaded
+    }
+
     /// Byzantine fault tolerance threshold: 2f+1 where f = (n-1)/3.
     /// Equivalent to ceil(2n/3) for supermajority.
     fn threshold(&self) -> usize {
@@ -819,5 +865,57 @@ mod tests {
                 prop_assert!(decode_vote_message(&data).is_none());
             }
         }
+    }
+
+    #[test]
+    fn test_load_persisted_votes() {
+        let mut grandpa = GrandpaState::new(6);
+        let hash_a = Hash([1u8; 32]);
+        let hash_b = Hash([2u8; 32]);
+
+        let votes = vec![
+            (0u8, 0u16, hash_a, 10u32, [0xAA; 64]), // prevote from v0
+            (0u8, 1u16, hash_a, 10u32, [0xBB; 64]), // prevote from v1
+            (1u8, 0u16, hash_a, 10u32, [0xCC; 64]), // precommit from v0
+            (1u8, 2u16, hash_b, 11u32, [0xDD; 64]), // precommit from v2
+            (2u8, 3u16, hash_a, 10u32, [0xEE; 64]), // unknown type, should be skipped
+        ];
+
+        let loaded = grandpa.load_persisted_votes(5, &votes);
+        assert_eq!(loaded, 4, "should load 4 valid votes (skip unknown type)");
+        assert_eq!(grandpa.round, 5);
+        assert_eq!(grandpa.prevotes.len(), 2);
+        assert_eq!(grandpa.precommits.len(), 2);
+
+        // Verify vote contents
+        assert_eq!(grandpa.prevotes[&0].block_hash, hash_a);
+        assert_eq!(grandpa.prevotes[&1].block_hash, hash_a);
+        assert_eq!(grandpa.precommits[&0].block_hash, hash_a);
+        assert_eq!(grandpa.precommits[&2].block_hash, hash_b);
+
+        // Archives should be populated
+        assert_eq!(grandpa.prevote_archive.len(), 2);
+        assert_eq!(grandpa.precommit_archive.len(), 2);
+    }
+
+    #[test]
+    fn test_load_persisted_votes_no_duplicates() {
+        let mut grandpa = GrandpaState::new(6);
+        let hash_a = Hash([1u8; 32]);
+        let hash_b = Hash([2u8; 32]);
+
+        // Load first batch
+        let votes1 = vec![(0u8, 0u16, hash_a, 10u32, [0xAA; 64])];
+        grandpa.load_persisted_votes(5, &votes1);
+        assert_eq!(grandpa.prevotes.len(), 1);
+
+        // Load second batch with duplicate — should not overwrite
+        let votes2 = vec![(0u8, 0u16, hash_b, 11u32, [0xBB; 64])];
+        let loaded = grandpa.load_persisted_votes(5, &votes2);
+        assert_eq!(loaded, 0, "duplicate should not be loaded");
+        assert_eq!(
+            grandpa.prevotes[&0].block_hash, hash_a,
+            "original vote preserved"
+        );
     }
 }

@@ -858,6 +858,26 @@ impl Store {
         Ok(votes)
     }
 
+    /// Get the highest round number from persisted GRANDPA votes.
+    /// Returns 0 if no votes are stored.
+    pub fn get_latest_grandpa_round(&self) -> Result<u64, StoreError> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(GRANDPA_VOTES)?;
+        // Keys are sorted by (round LE, vote_type, validator_index).
+        // The last entry has the highest round.
+        match table.last()? {
+            Some(entry) => {
+                let key = entry.0.value();
+                if key.len() >= 8 {
+                    Ok(u64::from_le_bytes(key[0..8].try_into().unwrap()))
+                } else {
+                    Ok(0)
+                }
+            }
+            None => Ok(0),
+        }
+    }
+
     /// Remove all GRANDPA votes for rounds ≤ `up_to_round`.
     pub fn prune_grandpa_votes(&self, up_to_round: u64) -> Result<u32, StoreError> {
         let txn = self.db.begin_read()?;
@@ -1409,6 +1429,31 @@ mod tests {
         // Round 2 should still have its vote
         let votes = store.get_grandpa_votes_for_round(2).unwrap();
         assert_eq!(votes.len(), 1);
+    }
+
+    #[test]
+    fn test_get_latest_grandpa_round() {
+        let (store, _dir) = temp_store();
+        let block_hash = Hash([42u8; 32]);
+        let sig = [7u8; 64];
+
+        // No votes yet
+        assert_eq!(store.get_latest_grandpa_round().unwrap(), 0);
+
+        // Store votes for rounds 1 and 3
+        store
+            .put_grandpa_vote(1, 0x01, 0, &block_hash, 10, &sig)
+            .unwrap();
+        store
+            .put_grandpa_vote(3, 0x01, 1, &block_hash, 12, &sig)
+            .unwrap();
+
+        assert_eq!(store.get_latest_grandpa_round().unwrap(), 3);
+
+        // Prune round 3 — should fall back to round 1
+        store.prune_grandpa_votes(3).unwrap();
+        // After pruning all rounds ≤ 3, no votes remain
+        assert_eq!(store.get_latest_grandpa_round().unwrap(), 0);
     }
 
     #[test]

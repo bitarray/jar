@@ -172,6 +172,25 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
     // Initialize state
     let mut state = genesis_state;
     let mut grandpa = GrandpaState::new(protocol.validators_count);
+
+    // Load persisted GRANDPA votes from previous session (if any).
+    match store.get_latest_grandpa_round() {
+        Ok(round) if round > 0 => match store.get_grandpa_votes_for_round(round) {
+            Ok(votes) if !votes.is_empty() => {
+                let loaded = grandpa.load_persisted_votes(round, &votes);
+                tracing::info!(
+                    "Loaded {} persisted GRANDPA votes for round {}",
+                    loaded,
+                    round
+                );
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Failed to load GRANDPA votes: {}", e),
+        },
+        Ok(_) => {} // No persisted votes
+        Err(e) => tracing::warn!("Failed to read GRANDPA round: {}", e),
+    }
+
     let mut blocks_authored = 0u64;
     let mut blocks_imported = 0u64;
     let genesis_time = config.genesis_time;
