@@ -239,6 +239,12 @@ impl Store {
         Ok(Hash(*val.value()))
     }
 
+    /// Get a block by timeslot (convenience: slot → hash → block).
+    pub fn get_block_by_slot(&self, slot: u32) -> Result<Block, StoreError> {
+        let hash = self.get_block_hash_by_slot(slot)?;
+        self.get_block(&hash)
+    }
+
     /// Check if a block exists.
     pub fn has_block(&self, hash: &Hash) -> Result<bool, StoreError> {
         let txn = self.db.begin_read()?;
@@ -1142,6 +1148,14 @@ mod tests {
         // Get by slot
         let got_hash = store.get_block_hash_by_slot(100).unwrap();
         assert_eq!(got_hash.0, hash.0);
+
+        // Get block by slot (convenience method)
+        let got_by_slot = store.get_block_by_slot(100).unwrap();
+        assert_eq!(got_by_slot.header.timeslot, 100);
+        assert_eq!(got_by_slot.header.author_index, 3);
+
+        // Non-existent slot
+        assert!(store.get_block_by_slot(999).is_err());
 
         // Has block
         assert!(store.has_block(&hash).unwrap());
