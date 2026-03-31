@@ -14,7 +14,6 @@ jobs:
       github.event.issue.pull_request &&
       startsWith(github.event.comment.body, '/review')
     runs-on: ubuntu-latest
-    environment: genesis
     permissions:
       pull-requests: write
       actions: write

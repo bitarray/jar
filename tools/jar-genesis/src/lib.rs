@@ -3,6 +3,7 @@ pub mod git;
 pub mod github;
 pub mod hash;
 pub mod lean;
+pub mod queue;
 pub mod replay;
 pub mod review;
 pub mod types;

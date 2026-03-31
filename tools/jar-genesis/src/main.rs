@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 
-use jar_genesis::{cache, replay, review, workflow};
+use jar_genesis::{cache, queue, replay, review, workflow};
 
 #[derive(Parser)]
 #[command(name = "jar-genesis", about = "JAR Genesis tooling")]
@@ -86,20 +86,30 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Command::Workflow { action } => match action {
-            WorkflowAction::Merge {
-                pr,
-                founder_override,
-            } => workflow::merge::run(pr, founder_override),
-            WorkflowAction::PrOpened { pr, created_at } => {
-                workflow::pr_opened::run(pr, &created_at)
+        Command::Workflow { action } => {
+            // In CI, wait for earlier genesis workflow runs to complete (FIFO queue).
+            // Skipped locally (GITHUB_RUN_ID not set).
+            if std::env::var("GITHUB_RUN_ID").is_ok() {
+                if let Err(e) = queue::wait_for_queue() {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
             }
-            WorkflowAction::Review {
-                pr,
-                comment_author,
-                comment_body,
-            } => workflow::review::run(pr, &comment_author, &comment_body),
-        },
+            match action {
+                WorkflowAction::Merge {
+                    pr,
+                    founder_override,
+                } => workflow::merge::run(pr, founder_override),
+                WorkflowAction::PrOpened { pr, created_at } => {
+                    workflow::pr_opened::run(pr, &created_at)
+                }
+                WorkflowAction::Review {
+                    pr,
+                    comment_author,
+                    comment_body,
+                } => workflow::review::run(pr, &comment_author, &comment_body),
+            }
+        }
         Command::Replay { mode } => match mode {
             ReplayMode::Verify => replay::verify(),
             ReplayMode::VerifyCache => replay::verify_cache(),

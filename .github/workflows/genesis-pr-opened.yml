@@ -8,7 +8,6 @@ on:
 jobs:
   select-targets:
     runs-on: ubuntu-latest
-    environment: genesis
     permissions:
       pull-requests: write
     steps:

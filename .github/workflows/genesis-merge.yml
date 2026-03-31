@@ -16,7 +16,6 @@ on:
 jobs:
   merge:
     runs-on: ubuntu-latest
-    environment: genesis
     permissions:
       actions: write
       contents: write
