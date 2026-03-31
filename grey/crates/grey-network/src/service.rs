@@ -431,52 +431,46 @@ async fn run_network_loop(
     //   Low:      guarantees, tickets (can be re-requested)
     const BACKPRESSURE_THRESHOLD: usize = EVENT_CHANNEL_CAPACITY / 5; // 20% remaining
 
+    /// Send an event with priority-based backpressure.
+    /// - `critical` / `high`: always attempt to send, warn if channel full.
+    /// - `normal` / `low`: drop early if channel is congested (below threshold).
     macro_rules! send_event {
+        // High-priority: always attempt to send regardless of congestion.
         ($event:expr, critical) => {
-            // Critical: always attempt to send
-            if let Err(mpsc::error::TrySendError::Full(_)) = event_tx.try_send($event) {
-                tracing::warn!(
-                    "Validator {} event channel full, dropping CRITICAL message",
-                    validator_index,
-                );
-            }
+            send_event!(@send $event, "CRITICAL");
         };
         ($event:expr, high) => {
-            if let Err(mpsc::error::TrySendError::Full(_)) = event_tx.try_send($event) {
-                tracing::warn!(
-                    "Validator {} event channel full, dropping high-priority message",
-                    validator_index,
-                );
-            }
+            send_event!(@send $event, "high-priority");
         };
+        // Lower-priority: drop proactively when channel is congested.
         ($event:expr, normal) => {
-            if event_tx.capacity() < BACKPRESSURE_THRESHOLD {
-                tracing::debug!(
-                    "Validator {} event channel congested ({}/{}), dropping normal-priority message",
-                    validator_index,
-                    EVENT_CHANNEL_CAPACITY - event_tx.capacity(),
-                    EVENT_CHANNEL_CAPACITY,
-                );
-            } else if let Err(mpsc::error::TrySendError::Full(_)) = event_tx.try_send($event) {
-                tracing::warn!(
-                    "Validator {} event channel full, dropping normal-priority message",
-                    validator_index,
-                );
-            }
+            send_event!(@backpressure $event, "normal-priority");
         };
         ($event:expr, low) => {
+            send_event!(@backpressure $event, "low-priority");
+        };
+        // Internal: unconditional send attempt.
+        (@send $event:expr, $label:expr) => {
+            if let Err(mpsc::error::TrySendError::Full(_)) = event_tx.try_send($event) {
+                tracing::warn!(
+                    "Validator {} event channel full, dropping {} message",
+                    validator_index,
+                    $label,
+                );
+            }
+        };
+        // Internal: backpressure-aware send (drop if congested).
+        (@backpressure $event:expr, $label:expr) => {
             if event_tx.capacity() < BACKPRESSURE_THRESHOLD {
                 tracing::debug!(
-                    "Validator {} event channel congested ({}/{}), dropping low-priority message",
+                    "Validator {} event channel congested ({}/{}), dropping {} message",
                     validator_index,
                     EVENT_CHANNEL_CAPACITY - event_tx.capacity(),
                     EVENT_CHANNEL_CAPACITY,
+                    $label,
                 );
-            } else if let Err(mpsc::error::TrySendError::Full(_)) = event_tx.try_send($event) {
-                tracing::warn!(
-                    "Validator {} event channel full, dropping low-priority message",
-                    validator_index,
-                );
+            } else {
+                send_event!(@send $event, $label);
             }
         };
     }
