@@ -120,6 +120,38 @@ impl Keystore {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Import a key from raw hex-encoded seeds.
+    ///
+    /// `ed25519_hex` and `bandersnatch_hex` should be 64-character hex strings
+    /// (32 bytes each). The Ed25519 public key is derived from the seed.
+    pub fn import_raw_hex(
+        &self,
+        validator_index: u16,
+        ed25519_hex: &str,
+        bandersnatch_hex: &str,
+    ) -> Result<PathBuf, KeystoreError> {
+        let ed25519_seed: [u8; 32] = hex::decode(ed25519_hex.trim_start_matches("0x"))
+            .map_err(|e| KeystoreError::Io(format!("invalid ed25519 hex: {e}")))?
+            .try_into()
+            .map_err(|_| KeystoreError::Io("ed25519 seed must be 32 bytes".into()))?;
+
+        let bandersnatch_seed: [u8; 32] = hex::decode(bandersnatch_hex.trim_start_matches("0x"))
+            .map_err(|e| KeystoreError::Io(format!("invalid bandersnatch hex: {e}")))?
+            .try_into()
+            .map_err(|_| KeystoreError::Io("bandersnatch seed must be 32 bytes".into()))?;
+
+        // Derive Ed25519 public key from seed
+        let ed25519_keypair = grey_crypto::ed25519::Ed25519Keypair::from_seed(&ed25519_seed);
+        let ed25519_public = ed25519_keypair.public_key().0;
+
+        self.save_seeds(
+            validator_index,
+            &ed25519_seed,
+            &bandersnatch_seed,
+            &ed25519_public,
+        )
+    }
 }
 
 /// Errors from the keystore.
@@ -200,5 +232,55 @@ mod tests {
         assert_eq!(key_file.ed25519_seed.len(), 64);
         assert_eq!(key_file.bandersnatch_seed.len(), 64);
         assert_eq!(key_file.ed25519_public.len(), 64);
+    }
+
+    #[test]
+    fn test_import_raw_hex() {
+        let dir = tempfile::tempdir().unwrap();
+        let ks = Keystore::open(dir.path().join("keys")).unwrap();
+
+        let ed_hex = "aa".repeat(32); // 64 hex chars = 32 bytes
+        let band_hex = "bb".repeat(32);
+
+        let path = ks.import_raw_hex(7, &ed_hex, &band_hex).unwrap();
+        assert!(path.exists());
+
+        // Load and verify seeds match
+        let (loaded_ed, loaded_band) = ks.load_seeds(7).unwrap();
+        assert_eq!(loaded_ed, [0xAA; 32]);
+        assert_eq!(loaded_band, [0xBB; 32]);
+
+        // Verify public key was derived (not zero)
+        let json = std::fs::read_to_string(&path).unwrap();
+        let key_file: KeyFile = serde_json::from_str(&json).unwrap();
+        assert_ne!(key_file.ed25519_public, "00".repeat(32));
+    }
+
+    #[test]
+    fn test_import_raw_hex_with_0x_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let ks = Keystore::open(dir.path().join("keys")).unwrap();
+
+        let ed_hex = format!("0x{}", "cc".repeat(32));
+        let band_hex = format!("0x{}", "dd".repeat(32));
+
+        ks.import_raw_hex(8, &ed_hex, &band_hex).unwrap();
+        let (loaded_ed, loaded_band) = ks.load_seeds(8).unwrap();
+        assert_eq!(loaded_ed, [0xCC; 32]);
+        assert_eq!(loaded_band, [0xDD; 32]);
+    }
+
+    #[test]
+    fn test_import_raw_hex_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let ks = Keystore::open(dir.path().join("keys")).unwrap();
+
+        // Too short
+        assert!(ks.import_raw_hex(0, "aabb", "ccdd").is_err());
+        // Invalid hex
+        assert!(
+            ks.import_raw_hex(0, "zz".repeat(32).as_str(), "aa".repeat(32).as_str())
+                .is_err()
+        );
     }
 }
