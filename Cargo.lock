@@ -1600,6 +1600,7 @@ version = "0.1.0"
 dependencies = [
  "grey-types",
  "hex",
+ "proptest",
  "reed-solomon-simd",
  "serde",
  "serde_json",
