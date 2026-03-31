@@ -105,9 +105,12 @@ pub fn count_genesis_trailers(genesis_commit: &str) -> Result<usize, GitError> {
     let _ = git(&["fetch", "origin", "master"]);
     let range = format!("{genesis_commit}..origin/master");
     let output = git(&["log", "--merges", "--format=%B", &range])?;
+    // Count Genesis-Commit (not Genesis-Index) because the cache only includes
+    // entries with signed commit data. Early PRs #6-9 have Genesis-Index but
+    // no Genesis-Commit — counting Genesis-Index would overcount by 4.
     let count = output
         .lines()
-        .filter(|line| line.starts_with("Genesis-Index: "))
+        .filter(|line| line.starts_with("Genesis-Commit: "))
         .count();
     Ok(count)
 }
