@@ -39,8 +39,8 @@ variable [JamConfig]
 private def econCanAfford (e : JamConfig.EconType) (items bytes : Nat) : Bool :=
   @EconModel.canAffordStorage JamConfig.EconType JamConfig.TransferType _ e items bytes B_I B_L B_S
 
-private def econDebitNew (e : JamConfig.EconType) (items bytes : Nat) : Option JamConfig.EconType :=
-  @EconModel.debitForNewService JamConfig.EconType JamConfig.TransferType _ e items bytes B_I B_L B_S
+private def econDebitNew (e : JamConfig.EconType) (newItems newBytes : Nat) (newGratis : UInt64) (callerItems callerBytes : Nat) : Option JamConfig.EconType :=
+  @EconModel.debitForNewService JamConfig.EconType JamConfig.TransferType _ e newItems newBytes newGratis callerItems callerBytes B_I B_L B_S
 
 private def econNewService (items bytes : Nat) (gratis : UInt64) : JamConfig.EconType :=
   @EconModel.newServiceEcon JamConfig.EconType JamConfig.TransferType _ items bytes gratis B_I B_L B_S
@@ -869,7 +869,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
         let regs' := setR7 regs PVM.RESULT_CASH
         (mkResult regs' mem gas', ctx)
       | some srcAcct =>
-        match econDebitNew srcAcct.econ newItems newFootprint with
+        match econDebitNew srcAcct.econ newItems newFootprint gratis srcAcct.itemCount.toNat srcAcct.totalFootprint with
         | none =>
           let regs' := setR7 regs PVM.RESULT_CASH
           (mkResult regs' mem gas', ctx)

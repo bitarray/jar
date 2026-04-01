@@ -74,12 +74,17 @@ instance : EconModel BalanceEcon BalanceTransfer where
     let threshold := minBal - min e.gratis.toNat minBal
     threshold ≤ e.balance.toNat
 
-  debitForNewService e items bytes bI bL bS :=
-    let minBal := bS + bI * items + bL * bytes
-    let threshold := minBal - min e.gratis.toNat minBal
-    if e.balance.toNat ≥ threshold
-    then some { e with balance := e.balance - UInt64.ofNat threshold }
-    else none
+  debitForNewService e newItems newBytes newGratis callerItems callerBytes bI bL bS :=
+    -- Compute threshold for the NEW account (using newGratis, NOT caller's gratis)
+    let newMinBal := bS + bI * newItems + bL * newBytes
+    let newThreshold := newMinBal - min newGratis.toNat newMinBal
+    -- Compute caller's own threshold (using caller's gratis from e)
+    let callerMinBal := bS + bI * callerItems + bL * callerBytes
+    let callerThreshold := callerMinBal - min e.gratis.toNat callerMinBal
+    -- After paying newThreshold, caller must still afford own threshold
+    let balanceAfter := if e.balance.toNat ≥ newThreshold then e.balance.toNat - newThreshold else 0
+    if balanceAfter < callerThreshold then none
+    else some { e with balance := e.balance - UInt64.ofNat newThreshold }
 
   newServiceEcon items bytes gratis bI bL bS :=
     let minBal := bS + bI * items + bL * bytes
@@ -144,7 +149,7 @@ instance : EconModel QuotaEcon QuotaTransfer where
   canAffordStorage e items bytes _bI _bL _bS :=
     items ≤ e.quotaItems.toNat && bytes ≤ e.quotaBytes.toNat
 
-  debitForNewService e _items _bytes _bI _bL _bS := some e  -- No debit in coinless
+  debitForNewService e _newItems _newBytes _newGratis _callerItems _callerBytes _bI _bL _bS := some e  -- No debit in coinless
 
   newServiceEcon _items _bytes _gratis _bI _bL _bS :=
     { quotaItems := 0, quotaBytes := 0 }  -- Quota service must grant later

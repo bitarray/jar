@@ -128,8 +128,10 @@ class EconModel (econ : Type) (xfer : Type) where
       bI, bL, bS are the storage deposit constants (from Params). -/
   canAffordStorage : econ → (items : Nat) → (bytes : Nat) → (bI bL bS : Nat) → Bool
   /-- Debit the creator's econ for new service creation.
+      `newGratis` is the new account's gratis value (from register).
+      `callerItems`/`callerBytes` are the caller's current storage footprint.
       Returns none if insufficient funds/quota. -/
-  debitForNewService : econ → (items : Nat) → (bytes : Nat) → (bI bL bS : Nat) → Option econ
+  debitForNewService : econ → (newItems newBytes : Nat) → (newGratis : UInt64) → (callerItems callerBytes : Nat) → (bI bL bS : Nat) → Option econ
   /-- Create initial econ state for a newly created service. -/
   newServiceEcon : (items : Nat) → (bytes : Nat) → (gratis : UInt64) → (bI bL bS : Nat) → econ
   /-- Credit an incoming transfer's economic payload. -/
