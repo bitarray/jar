@@ -730,7 +730,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
               (alwaysBytes.get! (offset + 11)).toNat * 72057594037927936
             d := d.insert (UInt32.ofNat sid) (UInt64.ofNat gasVal)
           return d
-        -- For jar080_tiny (coinless): read quotaService (4 bytes) after always-acc entries
+        -- For jar1 (coinless): read quotaService (4 bytes) after always-acc entries
         let quotaService : ServiceId :=
           if JamConfig.hostcallVersion == 1 then
             match PVM.readByteArray mem (alwaysPtr + UInt64.ofNat (alwaysCount * 12)) 4 with
@@ -1346,10 +1346,10 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
       -- Page fault on data read → panic (GP: ⚡)
       (mkPanic regs mem gas', ctx)
 
-  -- ===== set_quota (27): Set storage quota (jar080_tiny coinless, GP ΩQ) =====
+  -- ===== set_quota (27): Set storage quota (jar1 coinless, GP ΩQ) =====
   -- φ[7] = target service ID, φ[8] = max_items, φ[9] = max_bytes
-  -- Only callable by the quota service (χ_Q). Only functional in jar080_tiny.
-  -- Raw call number in jar080_tiny: 28 (27 + 1 grow_heap shift).
+  -- Only callable by the quota service (χ_Q). Only functional in jar1.
+  -- Raw call number in jar1: 28 (27 + 1 grow_heap shift).
   | 27 =>
     -- Only available in coinless variant
     if JamConfig.hostcallVersion != 1 then

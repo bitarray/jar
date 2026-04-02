@@ -2,7 +2,7 @@ import Jar.Types.Accounts
 import Jar.Proofs.Codec
 
 /-!
-# QuotaEcon Proofs — jar080_tiny coinless economic model
+# QuotaEcon Proofs — jar1 coinless economic model
 
 Properties of the `EconModel QuotaEcon QuotaTransfer` instance.
 These prove the key semantic property: the coinless model is a no-op
@@ -38,7 +38,7 @@ theorem quotaEcon_absorbEjected_id (e ejected : QuotaEcon) :
 
 /-- setQuota always succeeds, returning the new quota values.
     This means the set_quota hostcall never hits the RESULT_WHAT branch
-    from "EconModel doesn't support set_quota" when in jar080_tiny mode. -/
+    from "EconModel doesn't support set_quota" when in jar1 mode. -/
 theorem quotaEcon_setQuota_always_some (e : QuotaEcon) (mi mb : UInt64) :
     @EconModel.setQuota QuotaEcon QuotaTransfer _ e mi mb
     = some { quotaItems := mi, quotaBytes := mb } := by

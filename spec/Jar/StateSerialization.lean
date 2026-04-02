@@ -312,7 +312,7 @@ private def serializePrivileged (priv : PrivilegedServices) : ByteArray := Id.ru
   for (sid, gas) in zEntries do
     buf := buf ++ encodeFixedNat 4 sid.toNat
     buf := buf ++ encodeFixedNat 8 gas.toNat
-  -- jar080_tiny (coinless): serialize quotaService after always-accumulate entries
+  -- jar1 (coinless): serialize quotaService after always-accumulate entries
   if JamConfig.hostcallVersion == 1 then
     buf := buf ++ encodeFixedNat 4 priv.quotaService.toNat
   return buf
@@ -713,7 +713,7 @@ private def deserializePrivilegedD (coreCount : Nat) : Decoder PrivilegedService
   let (registrar, s) ← decodeFixedNatD 4 s
   let (zCount, s) ← decodeNatD s
   let (alwaysAccumulate, s) ← goZ zCount Dict.empty s
-  -- jar080_tiny (coinless): read quotaService after always-accumulate entries
+  -- jar1 (coinless): read quotaService after always-accumulate entries
   let (quotaService, s) ←
     if JamConfig.hostcallVersion == 1 then do
       let (qs, s) ← decodeFixedNatD 4 s

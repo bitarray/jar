@@ -72,9 +72,9 @@ instance JamVariant.gp072_tiny : JamVariant where
     PVM.runWithHostCalls ctx prog pc regs mem gas handler context
 
 /-- Tiny JAR v0.8.0 variant — contiguous linear memory, basic-block gas, grow_heap, coinless. -/
-instance JamVariant.jar080_tiny : JamVariant where
+instance JamVariant.jar1 : JamVariant where
   toJamConfig := {
-    name := "jar080_tiny"
+    name := "jar1"
     config := Params.tiny
     valid := Params.tiny_valid
     memoryModel := .linear

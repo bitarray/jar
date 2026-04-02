@@ -141,7 +141,7 @@ class EconModel (econ : Type) (xfer : Type) where
   debitTransfer : econ → (amount : UInt64) → Option econ
   /-- Absorb an ejected service's economic value. -/
   absorbEjected : econ → (ejected : econ) → econ
-  /-- Set storage quota (jar080_tiny only).
+  /-- Set storage quota (jar1 only).
       Returns none if not supported by this economic model. -/
   setQuota : econ → (maxItems : UInt64) → (maxBytes : UInt64) → Option econ
   /-- Create transfer payload from the amount register value. -/

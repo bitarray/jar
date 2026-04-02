@@ -3,7 +3,7 @@ import Jar.Variant
 
 open Jar Jar.Test.AuthorizationsJson
 
-private def testVariants : Array JamConfig := #[JamVariant.gp072_tiny.toJamConfig, JamVariant.gp072_full.toJamConfig, JamVariant.jar080_tiny.toJamConfig]
+private def testVariants : Array JamConfig := #[JamVariant.gp072_tiny.toJamConfig, JamVariant.gp072_full.toJamConfig, JamVariant.jar1.toJamConfig]
 
 def authorizationsJsonMain (args : List String) : IO UInt32 := do
   let dir := match args with

@@ -2,7 +2,7 @@ import Jar.Types.Accounts
 import Jar.Proofs.QuotaEcon
 
 /-!
-# Hostcall Proofs — jar080_tiny numbering shift and gas formula
+# Hostcall Proofs — jar1 numbering shift and gas formula
 
 Properties of the hostcall numbering logic and gas cost formula.
 The full `handleHostCall` function (1000+ lines) is impractical to prove
@@ -17,7 +17,7 @@ namespace Jar.Proofs
 
 /-- v0.8.0 shift: when hostcallVersion=1 and rawCallNum > 1,
     the translated callNum = rawCallNum - 1.
-    This is the core numbering invariant for jar080_tiny. -/
+    This is the core numbering invariant for jar1. -/
 theorem hostcall_shift_v1 (raw : Nat) (h : raw > 1) :
     (if (1 == 1 : Bool) && decide (raw > 1) then raw - 1 else raw) = raw - 1 := by
   simp [h]
@@ -38,7 +38,7 @@ theorem grow_heap_dispatch_iff (hv rc : Nat) :
 -- ============================================================================
 
 /-- In QuotaEcon mode, setQuota never returns none.
-    This means when jar080_tiny's set_quota hostcall reaches the
+    This means when jar1's set_quota hostcall reaches the
     `econSetQuota` call, the RESULT_WHAT "model doesn't support" branch
     is unreachable — the operation always succeeds. -/
 theorem quotaEcon_setQuota_reachable (e : QuotaEcon) (mi mb : UInt64) :

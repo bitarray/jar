@@ -46,7 +46,7 @@ lake build genesis
 | `Jar.Accumulation` | §12 | On-chain accumulation: host calls Ω_0–Ω_26, gas tracking |
 | `Jar.State` | §4–13 | Block-level state transition Υ(σ, B) = σ' |
 | `Jar.Json` | — | ToJson/FromJson instances for all types (hex-encoded byte data) |
-| `Jar.Variant` | — | Protocol variant typeclass: `gp072_full`, `gp072_tiny`, `jar080_tiny` |
+| `Jar.Variant` | — | Protocol variant typeclass: `gp072_full`, `gp072_tiny`, `jar1` |
 
 ## Genesis Module — PoI Distribution
 

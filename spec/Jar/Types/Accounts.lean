@@ -14,11 +14,11 @@ References: `graypaper/text/accounts.tex` eq:serviceaccounts, eq:serviceaccount.
 
 The protocol supports two economic models via the `EconModel` typeclass (defined in Config.lean):
 - **BalanceEcon** (gp072 variants): token-based storage rent with balance/gratis fields.
-- **QuotaEcon** (jar080_tiny coinless): quota-based storage limits set by a privileged service.
+- **QuotaEcon** (jar1 coinless): quota-based storage limits set by a privileged service.
 
 Similarly, deferred transfers are parameterized:
 - **BalanceTransfer** (gp072): carries a token amount.
-- **QuotaTransfer** (jar080_tiny): pure message-passing, no amount field.
+- **QuotaTransfer** (jar1): pure message-passing, no amount field.
 
 Encoding/serialization/JSON methods are NOT in the typeclass — they live in their
 respective files (Accumulation.lean, StateSerialization.lean, Json.lean) where the
@@ -43,7 +43,7 @@ structure BalanceEcon where
   gratis : Balance := 0
   deriving BEq, Inhabited, Repr
 
-/-- Quota-based economic model (jar080_tiny coinless).
+/-- Quota-based economic model (jar1 coinless).
     Storage limits set by a privileged quota service (χ_Q). -/
 structure QuotaEcon where
   /-- q_i : Maximum storage items allowed. -/
@@ -59,7 +59,7 @@ structure BalanceTransfer where
   amount : Balance := 0
   deriving BEq, Inhabited, Repr
 
-/-- Quota-based transfer payload (jar080_tiny coinless).
+/-- Quota-based transfer payload (jar1 coinless).
     Pure message-passing — no token amount. -/
 structure QuotaTransfer where
   deriving BEq, Inhabited, Repr
@@ -214,7 +214,7 @@ structure ServiceAccount [JamConfig] where
   preimages : Dict Hash ByteArray
   /-- l : Preimage request metadata. ⟨(ℍ, ℕ_L) → ⟦ℕ_T⟧_{:3}⟩. -/
   preimageInfo : Dict (Hash × BlobLength) (Array Timeslot)
-  /-- Economic model fields (balance+gratis for gp072, quotaItems+quotaBytes for jar080_tiny). -/
+  /-- Economic model fields (balance+gratis for gp072, quotaItems+quotaBytes for jar1). -/
   econ : JamConfig.EconType
   /-- c : Service code hash. ℍ. -/
   codeHash : Hash
@@ -257,7 +257,7 @@ structure PrivilegedServices where
   registrar : ServiceId
   /-- χ_Z : Always-accumulate services with gas limits. ⟨ℕ_S → ℕ_G⟩. -/
   alwaysAccumulate : Dict ServiceId Gas
-  /-- χ_Q : Quota manager service (jar080_tiny coinless). ℕ_S. -/
+  /-- χ_Q : Quota manager service (jar1 coinless). ℕ_S. -/
   quotaService : ServiceId := 0
 
 -- ============================================================================
@@ -272,7 +272,7 @@ structure DeferredTransfer [JamConfig] where
   source : ServiceId
   /-- d : Destination service. ℕ_S. -/
   dest : ServiceId
-  /-- Economic payload (amount for gp072, unit for jar080_tiny). -/
+  /-- Economic payload (amount for gp072, unit for jar1). -/
   payload : JamConfig.TransferType
   /-- m : Memo. 𝔹_{W_T} (128 bytes). -/
   memo : OctetSeq Jar.W_T

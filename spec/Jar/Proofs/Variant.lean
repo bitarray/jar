@@ -11,20 +11,20 @@ break at compile time — serving as a lightweight regression harness.
 namespace Jar.Proofs
 
 -- ============================================================================
--- jar080_tiny config assertions
+-- jar1 config assertions
 -- ============================================================================
 
-theorem jar080_tiny_memoryModel_linear :
-    @JamConfig.memoryModel JamVariant.jar080_tiny.toJamConfig = .linear := by rfl
+theorem jar1_memoryModel_linear :
+    @JamConfig.memoryModel JamVariant.jar1.toJamConfig = .linear := by rfl
 
-theorem jar080_tiny_gasModel_singlePass :
-    @JamConfig.gasModel JamVariant.jar080_tiny.toJamConfig = .basicBlockSinglePass := by rfl
+theorem jar1_gasModel_singlePass :
+    @JamConfig.gasModel JamVariant.jar1.toJamConfig = .basicBlockSinglePass := by rfl
 
-theorem jar080_tiny_heapModel_growHeap :
-    @JamConfig.heapModel JamVariant.jar080_tiny.toJamConfig = .growHeap := by rfl
+theorem jar1_heapModel_growHeap :
+    @JamConfig.heapModel JamVariant.jar1.toJamConfig = .growHeap := by rfl
 
-theorem jar080_tiny_hostcallVersion_1 :
-    @JamConfig.hostcallVersion JamVariant.jar080_tiny.toJamConfig = 1 := by rfl
+theorem jar1_hostcallVersion_1 :
+    @JamConfig.hostcallVersion JamVariant.jar1.toJamConfig = 1 := by rfl
 
 -- ============================================================================
 -- gp072_tiny config assertions (contrast)
