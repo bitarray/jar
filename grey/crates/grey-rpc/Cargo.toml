@@ -8,6 +8,7 @@ description = "JSON-RPC server for Grey node — work package submission and sta
 [dependencies]
 grey-types = { workspace = true }
 grey-codec = { workspace = true }
+scale = { workspace = true }
 grey-crypto = { workspace = true }
 grey-store = { workspace = true }
 jsonrpsee = { version = "0.24", features = ["server", "macros"] }

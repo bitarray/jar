@@ -8,6 +8,7 @@ description = "Persistent storage for blocks, state, and DA chunks."
 [dependencies]
 grey-types = { workspace = true }
 grey-codec = { workspace = true }
+scale = { workspace = true }
 grey-crypto = { workspace = true }
 grey-merkle = { workspace = true }
 hex = { workspace = true }
