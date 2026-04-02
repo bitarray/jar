@@ -59,6 +59,14 @@ lean_exe jarstf where
     "-lpthread", "-ldl", "-lm"
   ]
 
+lean_exe genreports where
+  root := `Jar.Test.GenReports
+  moreLinkArgs := #[
+    "-L", "crypto-ffi/target/release",
+    "-ljar_crypto_ffi",
+    "-lpthread", "-ldl", "-lm"
+  ]
+
 -- ============================================================================
 -- Genesis — Proof-of-Intelligence distribution protocol
 -- No crypto-ffi dependency — builds without Rust.

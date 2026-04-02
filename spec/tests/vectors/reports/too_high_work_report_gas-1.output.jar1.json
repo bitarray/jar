@@ -341,4 +341,4 @@
    null,
    null,
    null]},
- "output": {"err": "work_report_gas_too_high"}}
+ "output": {"err": "bad_signature"}}

@@ -341,4 +341,4 @@
    null,
    null,
    null]},
- "output": {"err": "bad_code_hash"}}
+ "output": {"err": "bad_signature"}}

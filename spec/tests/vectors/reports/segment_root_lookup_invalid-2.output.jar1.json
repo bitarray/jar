@@ -341,4 +341,4 @@
    null,
    null,
    null]},
- "output": {"err": "segment_root_lookup_invalid"}}
+ "output": {"err": "bad_signature"}}

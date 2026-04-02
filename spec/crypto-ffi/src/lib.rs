@@ -116,6 +116,24 @@ pub extern "C" fn jar_ffi_ed25519_sign(
     }
 }
 
+/// Derive Ed25519 public key from 32-byte seed.
+#[unsafe(no_mangle)]
+pub extern "C" fn jar_ffi_ed25519_public_from_seed(
+    seed_ptr: *const u8,
+    out_ptr: *mut u8, // 32 bytes
+) {
+    use ed25519_dalek::SigningKey;
+
+    let seed = unsafe { slice::from_raw_parts(seed_ptr, 32) };
+    let mut seed_arr = [0u8; 32];
+    seed_arr.copy_from_slice(seed);
+    let sk = SigningKey::from_bytes(&seed_arr);
+    let pk = sk.verifying_key();
+    unsafe {
+        std::ptr::copy_nonoverlapping(pk.as_bytes().as_ptr(), out_ptr, 32);
+    }
+}
+
 // ============================================================================
 // Bandersnatch VRF
 // ============================================================================

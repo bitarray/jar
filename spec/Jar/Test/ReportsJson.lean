@@ -1,6 +1,7 @@
 import Jar.Json
 import Jar.Codec
 import Jar.Crypto
+import Jar.Variant
 import Jar.Test.Reports
 
 /-!
@@ -14,13 +15,11 @@ namespace Jar.Test.ReportsJson
 open Lean (Json ToJson FromJson toJson fromJson?)
 open Jar Jar.Json Jar.Crypto Jar.Codec Jar.Test.Reports
 
-variable [JamConfig]
+variable [JamVariant]
 
 -- ============================================================================
 -- Work report encoding for reportHash computation
--- Matches the JAM codec as used by Grey test vectors:
---   core_index: compact, auth_gas_used: compact,
---   prerequisites/segment_root_lookup/results: count-prefixed (not byte-length)
+-- Dispatches between gp072 (compact) and jar1 (fixed-width) based on variant.
 -- ============================================================================
 
 /-- Encode TRWorkResult matching Codec.encodeWorkResult. -/
@@ -78,9 +77,62 @@ private def encodeTRWorkReport (wr : TRWorkReport) : ByteArray :=
     ++ encodeCountPrefixed (fun (k, v) => k.data ++ v.data) wr.segmentRootLookup
     ++ encodeCountPrefixed encodeTRWorkDigest wr.results
 
-/-- Compute reportHash = blake2b(encode(report)). -/
+-- ============================================================================
+-- jar1 encoding (no compact — all fixed-width)
+-- ============================================================================
+
+private def jar1EncodeTRWorkResult (r : TRWorkResult) : ByteArray :=
+  match r with
+  | .ok data => ByteArray.mk #[0] ++ encodeFixedNat 4 data.size ++ data
+  | .outOfGas => ByteArray.mk #[1]
+  | .panic => ByteArray.mk #[2]
+  | .badExports => ByteArray.mk #[3]
+  | .badCode => ByteArray.mk #[4]
+  | .codeOversize => ByteArray.mk #[5]
+
+private def jar1EncodeCountPrefixed (f : α → ByteArray) (xs : Array α) : ByteArray :=
+  encodeFixedNat 4 xs.size ++ concatBytes (xs.map f)
+
+private def jar1EncodeTRWorkDigest (d : TRWorkDigest) : ByteArray :=
+  encodeFixedNat 4 d.serviceId
+    ++ d.codeHash.data
+    ++ d.payloadHash.data
+    ++ encodeFixedNat 8 d.accumulateGas
+    ++ jar1EncodeTRWorkResult d.result
+    ++ encodeFixedNat 8 d.gasUsed
+    ++ encodeFixedNat 2 d.imports
+    ++ encodeFixedNat 2 d.extrinsicCount
+    ++ encodeFixedNat 4 d.extrinsicSize
+    ++ encodeFixedNat 2 d.exports
+
+private def jar1EncodeTRContext (c : TRContext) : ByteArray :=
+  c.anchor.data
+    ++ c.stateRoot.data
+    ++ c.beefyRoot.data
+    ++ c.lookupAnchor.data
+    ++ encodeFixedNat 4 c.lookupAnchorSlot
+    ++ jar1EncodeCountPrefixed (fun h => h.data) c.prerequisites
+
+private def jar1EncodeTRWorkReport (wr : TRWorkReport) : ByteArray :=
+  encodeTRAvailSpec wr.packageSpec
+    ++ jar1EncodeTRContext wr.context
+    ++ encodeFixedNat 2 wr.coreIndex
+    ++ wr.authorizerHash.data
+    ++ encodeFixedNat 8 wr.authGasUsed
+    ++ encodeFixedNat 4 wr.authOutput.size ++ wr.authOutput
+    ++ jar1EncodeCountPrefixed (fun (k, v) => k.data ++ v.data) wr.segmentRootLookup
+    ++ jar1EncodeCountPrefixed jar1EncodeTRWorkDigest wr.results
+
+-- ============================================================================
+-- Dispatch: use jar1 encoding when variant is jar1, gp072 otherwise
+-- ============================================================================
+
+/-- Compute reportHash = blake2b(encode(report)), using variant-appropriate codec. -/
 private def computeReportHash (wr : TRWorkReport) : Hash :=
-  blake2b (encodeTRWorkReport wr)
+  if JamConfig.variableValidators then
+    blake2b (jar1EncodeTRWorkReport wr)
+  else
+    blake2b (encodeTRWorkReport wr)
 
 -- ============================================================================
 -- FromJson instances for TRWorkResult

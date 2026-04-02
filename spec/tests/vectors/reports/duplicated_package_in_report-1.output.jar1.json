@@ -341,4 +341,4 @@
    null,
    null,
    null]},
- "output": {"err": "duplicate_package"}}
+ "output": {"err": "bad_signature"}}

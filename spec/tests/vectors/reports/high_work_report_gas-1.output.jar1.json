@@ -1,15 +1,7 @@
 {"post_state":
  {"avail_assignments":
-  [{"timeout": 605,
-    "report":
-    {"package_spec":
-     {"hash":
-      "0x63c03371b9dad9f1c60473ec0326c970984e9c90c0b5ed90eba6ada471ba4d86"}}},
-   {"timeout": 605,
-    "report":
-    {"package_spec":
-     {"hash":
-      "0x316504b8883be5404f8d50c253fa1875f3a5e051b691a0ddecc79466df543ea4"}}},
+  [null,
+   null,
    null,
    null,
    null,
@@ -349,4 +341,4 @@
    null,
    null,
    null]},
- "output": {"ok": {}}}
+ "output": {"err": "bad_signature"}}

@@ -107,6 +107,20 @@ LEAN_EXPORT lean_obj_res jar_ed25519_sign(
 }
 
 /* ======================================================================== */
+/* ed25519PublicFromSeed(seed : ByteArray) : Ed25519PublicKey               */
+/* ======================================================================== */
+LEAN_EXPORT lean_obj_res jar_ed25519_public_from_seed(
+    b_lean_obj_arg seed
+) {
+    uint8_t pk[32];
+    jar_ffi_ed25519_public_from_seed(
+        lean_sarray_cptr(seed),
+        pk
+    );
+    return mk_octet_seq(pk, 32);
+}
+
+/* ======================================================================== */
 /* bandersnatchVerify(key : BandersnatchPublicKey, context : ByteArray,     */
 /*                    message : ByteArray,                                   */
 /*                    sig : BandersnatchSignature) : Bool                    */

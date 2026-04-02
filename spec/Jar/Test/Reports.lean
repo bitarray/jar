@@ -1,6 +1,7 @@
 import Jar.Notation
 import Jar.Types
 import Jar.Crypto
+import Jar.Variant
 
 /-!
 # Reports Sub-Transition Test Harness
@@ -13,7 +14,7 @@ namespace Jar.Test.Reports
 
 open Jar Jar.Crypto
 
-variable [JamConfig]
+variable [JamVariant]
 
 def MAX_ACCUMULATE_GAS : Nat := G_A
 def MAX_OUTPUT_PER_ITEM : Nat := 18432

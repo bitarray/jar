@@ -341,4 +341,4 @@
    null,
    null,
    null]},
- "output": {"err": "bad_service_id"}}
+ "output": {"err": "bad_signature"}}

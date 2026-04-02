@@ -61,6 +61,11 @@ opaque ed25519Sign
   (secretKey : ByteArray)
   (message : ByteArray) : Ed25519Signature := default
 
+/-- Derive Ed25519 public key from a 32-byte seed. -/
+@[extern "jar_ed25519_public_from_seed"]
+opaque ed25519PublicFromSeed
+  (seed : ByteArray) : Ed25519PublicKey := default
+
 -- ============================================================================
 -- §3.8.2 / Appendix G — Bandersnatch VRF
 -- ============================================================================
