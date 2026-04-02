@@ -1,6 +1,8 @@
 import Jar.Notation
 import Jar.Types
 import Jar.Codec
+import Jar.Codec.Common
+import Jar.Codec.Jar1
 import Jar.Crypto
 import Jar.PVM
 import Jar.PVM.Decode
