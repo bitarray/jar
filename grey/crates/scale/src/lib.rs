@@ -198,6 +198,10 @@ impl<const N: usize> Decode for [u8; N] {
     }
 }
 
+// Note: Generic [T; N] Decode is not implemented because it conflicts
+// with [u8; N]. Use the derive macro or manual impl for specific types.
+// The derive macro handles fixed-size arrays of non-u8 types.
+
 // ============================================================================
 // Vec<T> — u32 LE count prefix + elements
 // ============================================================================

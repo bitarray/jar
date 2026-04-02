@@ -437,25 +437,12 @@ fn serialize_safrole(safrole: &SafroleState, config: &Config) -> Vec<u8> {
 
 /// C(5): ψ judgments — 4 sorted sets.
 fn serialize_judgments(judgments: &Judgments) -> Vec<u8> {
-    let mut buf = Vec::new();
-    encode_hash_set(&judgments.good, &mut buf);
-    encode_hash_set(&judgments.bad, &mut buf);
-    encode_hash_set(&judgments.wonky, &mut buf);
-    // ↕ψO — offenders are Ed25519PublicKey (also 32 bytes)
-    encode_u32_le(judgments.offenders.len() as u32, &mut buf);
-    for key in &judgments.offenders {
-        buf.extend_from_slice(&key.0);
-    }
-    buf
+    scale::Encode::encode(judgments)
 }
 
 /// C(6): η entropy — 4 × 32 raw bytes.
 fn serialize_entropy(entropy: &[Hash; 4]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(128);
-    for hash in entropy {
-        buf.extend_from_slice(&hash.0);
-    }
-    buf
+    scale::Encode::encode(entropy)
 }
 
 /// C(7,8,9): validator keys — V × 336 raw bytes (fixed-size, no prefix).
@@ -615,13 +602,7 @@ fn serialize_accumulation_history(history: &[Vec<Hash>], config: &Config) -> Vec
 
 /// C(16): θ accumulation_outputs — ↕ sorted (E_4(service_id), hash) pairs.
 fn serialize_accumulation_outputs(outputs: &[(ServiceId, Hash)]) -> Vec<u8> {
-    let mut buf = Vec::new();
-    encode_u32_le(outputs.len() as u32, &mut buf);
-    for &(service_id, ref hash) in outputs {
-        buf.extend_from_slice(&service_id.to_le_bytes());
-        buf.extend_from_slice(&hash.0);
-    }
-    buf
+    scale::Encode::encode(&outputs.to_vec())
 }
 
 /// E(0, a_c, E_8(a_b, a_g, a_m, a_o, a_f), E_4(a_i, a_r, a_a, a_p))
@@ -1082,31 +1063,9 @@ fn deserialize_safrole(data: &[u8], config: &Config) -> Result<SafroleState, Str
 }
 
 fn deserialize_judgments(data: &[u8]) -> Result<Judgments, String> {
-    let mut pos = 0;
-
-    let good = decode_hash_set(data, &mut pos)?;
-    let bad = decode_hash_set(data, &mut pos)?;
-    let wonky = decode_hash_set(data, &mut pos)?;
-
-    // Offenders are Ed25519PublicKey (also 32 bytes, but different type)
-    let offender_count = decode_u32_helper(data, &mut pos)? as u64 as usize;
-    let mut offenders = std::collections::BTreeSet::new();
-    for _ in 0..offender_count {
-        if pos + 32 > data.len() {
-            return Err("unexpected end reading offender key".into());
-        }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&data[pos..pos + 32]);
-        offenders.insert(grey_types::Ed25519PublicKey(key));
-        pos += 32;
-    }
-
-    Ok(Judgments {
-        good,
-        bad,
-        wonky,
-        offenders,
-    })
+    let (judgments, _) =
+        scale::Decode::decode(data).map_err(|e| format!("judgments decode: {e}"))?;
+    Ok(judgments)
 }
 
 fn deserialize_entropy(data: &[u8]) -> Result<[Hash; 4], String> {
@@ -1375,14 +1334,8 @@ fn deserialize_accumulation_history(
 }
 
 fn deserialize_accumulation_outputs(data: &[u8]) -> Result<Vec<(ServiceId, Hash)>, String> {
-    let mut pos = 0;
-    let count = decode_u32_helper(data, &mut pos)? as u64 as usize;
-    let mut outputs = Vec::with_capacity(count);
-    for _ in 0..count {
-        let service_id = read_u32(data, &mut pos)?;
-        let hash = read_hash(data, &mut pos)?;
-        outputs.push((service_id, hash));
-    }
+    let (outputs, _) = <Vec<(ServiceId, Hash)> as scale::Decode>::decode(data)
+        .map_err(|e| format!("accumulation_outputs decode: {e}"))?;
     Ok(outputs)
 }
 
