@@ -11,20 +11,9 @@ use scale::Encode;
 
 use crate::genesis::ValidatorSecrets;
 
-/// Encode a header WITHOUT the seal field (for seal signature computation).
+/// Encode the unsigned header EU(H) — for seal signature computation.
 fn encode_header_unsigned(header: &Header) -> Vec<u8> {
-    let mut buf = Vec::new();
-    header.parent_hash.encode_to(&mut buf);
-    header.state_root.encode_to(&mut buf);
-    header.extrinsic_hash.encode_to(&mut buf);
-    header.timeslot.encode_to(&mut buf);
-    header.epoch_marker.encode_to(&mut buf);
-    header.tickets_marker.encode_to(&mut buf);
-    header.author_index.encode_to(&mut buf);
-    header.vrf_signature.encode_to(&mut buf);
-    header.offenders_marker.encode_to(&mut buf);
-    // Note: seal is NOT included — this is the unsigned header for signing
-    buf
+    header.data.encode()
 }
 
 /// Entropy VRF context string (Appendix I.4.5: X_E = $jam_entropy).
@@ -217,15 +206,17 @@ pub fn author_block_with_extrinsics(
 
     // Build unsigned header
     let mut header = Header {
-        parent_hash,
-        state_root,
-        extrinsic_hash,
-        timeslot,
-        epoch_marker,
-        tickets_marker,
-        author_index,
-        vrf_signature,
-        offenders_marker: vec![],
+        data: UnsignedHeader {
+            parent_hash,
+            state_root,
+            extrinsic_hash,
+            timeslot,
+            epoch_marker,
+            tickets_marker,
+            author_index,
+            vrf_signature,
+            offenders_marker: vec![],
+        },
         seal: BandersnatchSignature([0u8; 96]), // placeholder
     };
 

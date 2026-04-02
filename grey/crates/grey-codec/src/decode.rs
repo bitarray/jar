@@ -784,15 +784,17 @@ impl DecodeWithConfig for Header {
 
         Ok((
             Header {
-                parent_hash,
-                state_root,
-                extrinsic_hash,
-                timeslot,
-                epoch_marker,
-                tickets_marker,
-                author_index,
-                vrf_signature,
-                offenders_marker,
+                data: grey_types::header::UnsignedHeader {
+                    parent_hash,
+                    state_root,
+                    extrinsic_hash,
+                    timeslot,
+                    epoch_marker,
+                    tickets_marker,
+                    author_index,
+                    vrf_signature,
+                    offenders_marker,
+                },
                 seal,
             },
             off,

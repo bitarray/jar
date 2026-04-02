@@ -18,7 +18,7 @@ pub fn derive_decode_impl(input: &DeriveInput) -> syn::Result<TokenStream> {
 
     Ok(quote! {
         impl #impl_generics scale::Decode for #name #ty_generics #where_clause {
-            fn decode(data: &[u8]) -> Result<(Self, usize), scale::DecodeError> {
+            fn decode(__data: &[u8]) -> Result<(Self, usize), scale::DecodeError> {
                 let mut off: usize = 0;
                 #body
             }
@@ -43,7 +43,7 @@ fn decode_struct_body(name: &syn::Ident, fields: &Fields) -> syn::Result<TokenSt
                     field_inits.push(quote! { #ident: Default::default() });
                 } else {
                     decode_stmts.push(quote! {
-                        let (#ident, #consumed) = <#ty as scale::Decode>::decode(&data[off..])?;
+                        let (#ident, #consumed) = <#ty as scale::Decode>::decode(&__data[off..])?;
                         off += #consumed;
                     });
                     field_inits.push(quote! { #ident });
@@ -70,7 +70,7 @@ fn decode_struct_body(name: &syn::Ident, fields: &Fields) -> syn::Result<TokenSt
                     field_bindings.push(quote! { Default::default() });
                 } else {
                     decode_stmts.push(quote! {
-                        let (#binding, #consumed) = <#ty as scale::Decode>::decode(&data[off..])?;
+                        let (#binding, #consumed) = <#ty as scale::Decode>::decode(&__data[off..])?;
                         off += #consumed;
                     });
                     field_bindings.push(quote! { #binding });
@@ -110,7 +110,7 @@ fn decode_enum_body(name: &syn::Ident, data: &syn::DataEnum) -> syn::Result<Toke
                     let consumed =
                         syn::Ident::new(&format!("__consumed_{i}"), proc_macro2::Span::call_site());
                     decode_stmts.push(quote! {
-                        let (#binding, #consumed) = <#ty as scale::Decode>::decode(&data[off..])?;
+                        let (#binding, #consumed) = <#ty as scale::Decode>::decode(&__data[off..])?;
                         off += #consumed;
                     });
                     field_bindings.push(quote! { #binding });
@@ -131,7 +131,7 @@ fn decode_enum_body(name: &syn::Ident, data: &syn::DataEnum) -> syn::Result<Toke
                     let consumed =
                         syn::Ident::new(&format!("__consumed_{i}"), proc_macro2::Span::call_site());
                     decode_stmts.push(quote! {
-                        let (#ident, #consumed) = <#ty as scale::Decode>::decode(&data[off..])?;
+                        let (#ident, #consumed) = <#ty as scale::Decode>::decode(&__data[off..])?;
                         off += #consumed;
                     });
                     field_inits.push(quote! { #ident });
@@ -148,10 +148,10 @@ fn decode_enum_body(name: &syn::Ident, data: &syn::DataEnum) -> syn::Result<Toke
     }
 
     Ok(quote! {
-        if data.is_empty() {
+        if __data.is_empty() {
             return Err(scale::DecodeError::UnexpectedEof);
         }
-        let discriminant = data[off];
+        let discriminant = __data[off];
         off += 1;
         match discriminant {
             #(#arms)*

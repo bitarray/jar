@@ -259,15 +259,17 @@ pub fn decode_header(data: &[u8]) -> Option<Header> {
     seal.copy_from_slice(read_bytes!(96));
 
     Some(Header {
-        parent_hash: Hash(parent_hash),
-        state_root: Hash(state_root),
-        extrinsic_hash: Hash(extrinsic_hash),
-        timeslot,
-        epoch_marker,
-        tickets_marker,
-        author_index,
-        vrf_signature: BandersnatchSignature(vrf_sig),
-        offenders_marker: offenders,
+        data: grey_types::header::UnsignedHeader {
+            parent_hash: Hash(parent_hash),
+            state_root: Hash(state_root),
+            extrinsic_hash: Hash(extrinsic_hash),
+            timeslot,
+            epoch_marker,
+            tickets_marker,
+            author_index,
+            vrf_signature: BandersnatchSignature(vrf_sig),
+            offenders_marker: offenders,
+        },
         seal: BandersnatchSignature(seal),
     })
 }

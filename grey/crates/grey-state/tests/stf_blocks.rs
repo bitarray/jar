@@ -76,15 +76,17 @@ fn parse_header(v: &serde_json::Value) -> Header {
         .collect();
 
     Header {
-        parent_hash: hash_from_hex(v["parent"].as_str().unwrap()),
-        state_root: hash_from_hex(v["parent_state_root"].as_str().unwrap()),
-        extrinsic_hash: hash_from_hex(v["extrinsic_hash"].as_str().unwrap()),
-        timeslot: v["slot"].as_u64().unwrap() as u32,
-        epoch_marker: parse_epoch_marker(&v["epoch_mark"]),
-        tickets_marker: parse_tickets_marker(&v["tickets_mark"]),
-        author_index: v["author_index"].as_u64().unwrap() as u16,
-        vrf_signature: bandersnatch_sig_from_hex(v["entropy_source"].as_str().unwrap()),
-        offenders_marker,
+        data: UnsignedHeader {
+            parent_hash: hash_from_hex(v["parent"].as_str().unwrap()),
+            state_root: hash_from_hex(v["parent_state_root"].as_str().unwrap()),
+            extrinsic_hash: hash_from_hex(v["extrinsic_hash"].as_str().unwrap()),
+            timeslot: v["slot"].as_u64().unwrap() as u32,
+            epoch_marker: parse_epoch_marker(&v["epoch_mark"]),
+            tickets_marker: parse_tickets_marker(&v["tickets_mark"]),
+            author_index: v["author_index"].as_u64().unwrap() as u16,
+            vrf_signature: bandersnatch_sig_from_hex(v["entropy_source"].as_str().unwrap()),
+            offenders_marker,
+        },
         seal: bandersnatch_sig_from_hex(v["seal"].as_str().unwrap()),
     }
 }

@@ -4,11 +4,11 @@ use crate::{
     BandersnatchPublicKey, BandersnatchSignature, Ed25519PublicKey, Hash, Timeslot, ValidatorIndex,
 };
 
-/// Block header H (eq 5.1).
+/// Unsigned header data EU(H) — everything except the seal (eq C.23).
 ///
-/// H ≡ (HP, HR, HX, HT, HE, HW, HO, HI, HV, HS)
+/// This is the data that gets signed by the block author.
 #[derive(Clone, Debug, scale::Encode, scale::Decode)]
-pub struct Header {
+pub struct UnsignedHeader {
     /// HP: Parent header hash.
     pub parent_hash: Hash,
 
@@ -35,9 +35,32 @@ pub struct Header {
 
     /// HO: Offenders marker — Ed25519 keys of misbehaving validators.
     pub offenders_marker: Vec<Ed25519PublicKey>,
+}
+
+/// Block header H (eq 5.1).
+///
+/// H ≡ (EU(H), HS) = unsigned header data + seal signature.
+#[derive(Clone, Debug, scale::Encode, scale::Decode)]
+pub struct Header {
+    /// Unsigned header data (all fields except seal).
+    pub data: UnsignedHeader,
 
     /// HS: Block seal signature.
     pub seal: BandersnatchSignature,
+}
+
+/// Deref to UnsignedHeader so `header.parent_hash` etc. work directly.
+impl std::ops::Deref for Header {
+    type Target = UnsignedHeader;
+    fn deref(&self) -> &UnsignedHeader {
+        &self.data
+    }
+}
+
+impl std::ops::DerefMut for Header {
+    fn deref_mut(&mut self) -> &mut UnsignedHeader {
+        &mut self.data
+    }
 }
 
 /// Epoch marker (eq 6.27).

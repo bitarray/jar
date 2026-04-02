@@ -1168,7 +1168,7 @@ pub fn create_rpc_channel(
 mod tests {
     use super::*;
     use grey_types::BandersnatchSignature;
-    use grey_types::header::{Block, Extrinsic, Header};
+    use grey_types::header::{Block, Extrinsic, Header, UnsignedHeader};
     use jsonrpsee::core::client::ClientT;
     use jsonrpsee::http_client::HttpClientBuilder;
     use jsonrpsee::rpc_params;
@@ -1194,15 +1194,17 @@ mod tests {
     fn test_block(slot: u32) -> Block {
         Block {
             header: Header {
-                parent_hash: Hash([1u8; 32]),
-                state_root: Hash([2u8; 32]),
-                extrinsic_hash: Hash([3u8; 32]),
-                timeslot: slot,
-                epoch_marker: None,
-                tickets_marker: None,
-                author_index: 5,
-                vrf_signature: BandersnatchSignature([7u8; 96]),
-                offenders_marker: vec![],
+                data: UnsignedHeader {
+                    parent_hash: Hash([1u8; 32]),
+                    state_root: Hash([2u8; 32]),
+                    extrinsic_hash: Hash([3u8; 32]),
+                    timeslot: slot,
+                    epoch_marker: None,
+                    tickets_marker: None,
+                    author_index: 5,
+                    vrf_signature: BandersnatchSignature([7u8; 96]),
+                    offenders_marker: vec![],
+                },
                 seal: BandersnatchSignature([8u8; 96]),
             },
             extrinsic: Extrinsic::default(),
