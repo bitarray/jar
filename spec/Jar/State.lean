@@ -263,9 +263,10 @@ def reportsPostJudgment
 def reportsPostAssurance
     (rhoDag : Array (Option PendingReport))
     (assurances : AssurancesExtrinsic)
-    (t' : Timeslot) : Array (Option PendingReport) × Array WorkReport :=
+    (t' : Timeslot)
+    (validatorCount : Nat := V) : Array (Option PendingReport) × Array WorkReport :=
   let timeout : Nat := U_TIMEOUT
-  let superMajority := V * 2 / 3 + 1
+  let superMajority := validatorCount * 2 / 3 + 1
   let clearCore (reports : Array (Option PendingReport)) (core : CoreIndex) :=
     reports.map fun r => match r with
       | some pr' => if pr'.report.coreIndex == core then none else some pr'
@@ -1014,7 +1015,7 @@ def stateTransition (s : State) (b : Block) : Option State := do
 
   -- §11 — Reports pipeline
   let rhoDag := reportsPostJudgment s.pendingReports psi'.bad
-  let (rhoDDag, available) := reportsPostAssurance rhoDag ext.assurances t'
+  let (rhoDDag, available) := reportsPostAssurance rhoDag ext.assurances t' (if JamConfig.variableValidators then s.currentValidators.size else V)
   let rho' := reportsPostGuarantees rhoDDag ext.guarantees t'
 
   -- §7 — Recent history: β†
@@ -1123,7 +1124,7 @@ def stateTransitionWithOpaque (s : State) (b : Block)
   let lambda' := updatePreviousValidators s.previousValidators s.currentValidators s.timeslot t'
   let psi' := updateJudgments s.judgments ext.disputes
   let rhoDag := reportsPostJudgment s.pendingReports psi'.bad
-  let (rhoDDag, available) := reportsPostAssurance rhoDag ext.assurances t'
+  let (rhoDDag, available) := reportsPostAssurance rhoDag ext.assurances t' (if JamConfig.variableValidators then s.currentValidators.size else V)
   -- GP §11: Guarantee validity — core must be free after assurance processing (ρ‡[c] = ∅)
   guard (ext.guarantees.all fun g =>
     let c := g.report.coreIndex.val
@@ -1183,7 +1184,7 @@ def stateTransitionNoSealCheck (s : State) (b : Block)
   let lambda' := updatePreviousValidators s.previousValidators s.currentValidators s.timeslot t'
   let psi' := updateJudgments s.judgments ext.disputes
   let rhoDag := reportsPostJudgment s.pendingReports psi'.bad
-  let (rhoDDag, available) := reportsPostAssurance rhoDag ext.assurances t'
+  let (rhoDDag, available) := reportsPostAssurance rhoDag ext.assurances t' (if JamConfig.variableValidators then s.currentValidators.size else V)
   let rho' := reportsPostGuarantees rhoDDag ext.guarantees t'
   let bDag := updateParentStateRoot s.recent h
   let accResult := performAccumulation available s t' opaqueData eta'

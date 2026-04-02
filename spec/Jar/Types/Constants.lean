@@ -154,4 +154,30 @@ abbrev W_P : Nat := j.config.W_P
 
 end ConfigAliases
 
+-- ============================================================================
+-- GP#514 — Variable Validator Set Helpers
+-- ============================================================================
+
+section VariableValidators
+variable [j : JamConfig]
+
+/-- Active core count: C for fixed validators, len(validators)/3 for variable.
+    GP#514: only the first len(κ)/3 cores are active. -/
+def activeCoreCount (validators : Array α) : Nat :=
+  if j.variableValidators then validators.size / 3 else j.config.C
+
+/-- Effective validator count: actual set size for variable, V for fixed. -/
+def effectiveValCount (validators : Array α) : Nat :=
+  if j.variableValidators then validators.size else j.config.V
+
+/-- Dynamic N_TICKETS: ceil(2*E / len(pendingset')) for variable validators.
+    More tickets per validator when fewer validators, to fill the accumulator.
+    GP#514 §safrole. -/
+def dynamicTicketsPerValidator (pendingValidatorCount : Nat) : Nat :=
+  if j.variableValidators && pendingValidatorCount > 0
+  then (2 * j.config.E + pendingValidatorCount - 1) / pendingValidatorCount
+  else j.config.N_TICKETS
+
+end VariableValidators
+
 end Jar
