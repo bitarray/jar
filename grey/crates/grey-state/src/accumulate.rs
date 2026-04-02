@@ -20,10 +20,11 @@ pub fn decode_preimage_info_timeslots(data: &[u8]) -> Vec<Timeslot> {
         return vec![];
     }
     let mut pos = 0;
-    let count = match grey_codec::decode_compact_at(data, &mut pos) {
-        Ok(n) => n as usize,
-        Err(_) => return vec![],
-    };
+    if pos + 4 > data.len() {
+        return vec![];
+    }
+    let count = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+    pos += 4;
     let mut timeslots = Vec::with_capacity(count);
     for _ in 0..count {
         if pos + 4 > data.len() {
@@ -505,9 +506,9 @@ fn accumulate_single_service(
 /// Items are accessed via fetch host call, NOT the argument blob.
 fn encode_accumulate_args(timeslot: Timeslot, service_id: ServiceId, item_count: u32) -> Vec<u8> {
     let mut args = Vec::new();
-    grey_codec::encode::encode_natural(timeslot as usize, &mut args);
-    grey_codec::encode::encode_natural(service_id as usize, &mut args);
-    grey_codec::encode::encode_natural(item_count as usize, &mut args);
+    args.extend_from_slice(&timeslot.to_le_bytes());
+    args.extend_from_slice(&service_id.to_le_bytes());
+    args.extend_from_slice(&item_count.to_le_bytes());
     args
 }
 
@@ -519,12 +520,12 @@ fn encode_operand(report: &WorkReport, digest: &grey_types::work::WorkDigest) ->
     buf.extend_from_slice(&report.package_spec.exports_root.0); // e: 32 bytes
     buf.extend_from_slice(&report.authorizer_hash.0); // a: 32 bytes
     buf.extend_from_slice(&digest.payload_hash.0); // y: 32 bytes
-    grey_codec::encode::encode_natural(digest.accumulate_gas as usize, &mut buf); // g: varint
+    buf.extend_from_slice(&digest.accumulate_gas.to_le_bytes()); // g: varint
     // O(xl) - result encoding (GP C.5: discriminated union)
     match &digest.result {
         WorkResult::Ok(data) => {
             buf.push(0);
-            grey_codec::encode::encode_natural(data.len(), &mut buf);
+            buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
             buf.extend_from_slice(data);
         }
         WorkResult::OutOfGas => buf.push(1),
@@ -534,7 +535,7 @@ fn encode_operand(report: &WorkReport, digest: &grey_types::work::WorkDigest) ->
         WorkResult::CodeOversize => buf.push(5),
     }
     // ↕xt - length-prefixed authorizer trace
-    grey_codec::encode::encode_natural(report.auth_output.len(), &mut buf);
+    buf.extend_from_slice(&(report.auth_output.len() as u32).to_le_bytes());
     buf.extend_from_slice(&report.auth_output);
     buf
 }
@@ -583,7 +584,7 @@ fn build_items_blob(
     }
     // Encode as length-prefixed sequence: varint(count) + item_0 + item_1 + ...
     let mut blob = Vec::new();
-    grey_codec::encode::encode_natural(items.len(), &mut blob);
+    blob.extend_from_slice(&(items.len() as u32).to_le_bytes());
     for item in &items {
         blob.extend(item);
     }
@@ -594,9 +595,9 @@ fn build_items_blob(
 fn encode_new_service_hash(service_id: ServiceId, entropy: &Hash, timeslot: Timeslot) -> Vec<u8> {
     // GP eq: E(s, η'_0, H_T) — uses JAM general encoding (compact naturals for numbers)
     let mut buf = Vec::new();
-    grey_codec::encode::encode_compact(service_id as u64, &mut buf);
+    buf.extend_from_slice(&service_id.to_le_bytes());
     buf.extend_from_slice(&entropy.0);
-    grey_codec::encode::encode_compact(timeslot as u64, &mut buf);
+    buf.extend_from_slice(&timeslot.to_le_bytes());
     buf
 }
 

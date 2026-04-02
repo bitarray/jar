@@ -7,7 +7,6 @@ description = "Chain state representation and block-level state transitions for 
 
 [dependencies]
 grey-types = { workspace = true }
-grey-codec = { workspace = true }
 scale = { workspace = true }
 grey-crypto = { workspace = true }
 javm = { workspace = true }

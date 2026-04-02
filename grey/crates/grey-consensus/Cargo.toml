@@ -7,7 +7,7 @@ description = "Safrole block production and GRANDPA finality for JAM."
 
 [dependencies]
 grey-types = { workspace = true }
-grey-codec = { workspace = true }
+scale = { workspace = true }
 grey-crypto = { workspace = true }
 grey-state = { workspace = true }
 thiserror = { workspace = true }

@@ -7,7 +7,6 @@
 //! - Metadata (head block, finalized block)
 //! - DA chunks keyed by (report_hash, chunk_index)
 
-use grey_codec::header_codec;
 use grey_types::Hash;
 use grey_types::config::Config;
 use grey_types::header::Block;
@@ -219,7 +218,7 @@ impl Store {
     /// Store a block. Returns the header hash.
     pub fn put_block(&self, block: &Block) -> Result<Hash, StoreError> {
         let encoded = encode_block(block);
-        let hash = header_codec::compute_header_hash(&block.header);
+        let hash = grey_crypto::blake2b_256(&scale::Encode::encode(&block.header));
 
         let txn = self.db.begin_write()?;
         {
@@ -1111,8 +1110,12 @@ mod tests {
             seal: BandersnatchSignature([8u8; 96]),
         };
 
-        let encoded = header_codec::encode_header(&header);
-        let decoded = header_codec::decode_header(&encoded).expect("decode should succeed");
+        let encoded = scale::Encode::encode(&header);
+        let decoded = {
+            let (h, _) = <Header as scale::Decode>::decode(&encoded).unwrap();
+            h
+        }
+        .expect("decode should succeed");
 
         assert_eq!(decoded.parent_hash.0, header.parent_hash.0);
         assert_eq!(decoded.state_root.0, header.state_root.0);

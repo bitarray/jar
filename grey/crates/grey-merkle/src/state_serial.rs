@@ -4,8 +4,24 @@
 //! variable-length byte values, suitable for Merklization via the binary
 //! Patricia Merkle trie.
 
-use grey_codec::decode_compact_at;
-use grey_codec::encode::encode_compact;
+// Fixed-width encoding helpers (no compact encoding)
+fn encode_u32_le(val: u32, buf: &mut Vec<u8>) {
+    buf.extend_from_slice(&val.to_le_bytes());
+}
+
+fn encode_u64_le(val: u64, buf: &mut Vec<u8>) {
+    buf.extend_from_slice(&val.to_le_bytes());
+}
+
+fn decode_u32_le_at(data: &[u8], pos: &mut usize) -> Result<u32, ()> {
+    if *pos + 4 > data.len() {
+        return Err(());
+    }
+    let val = u32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap());
+    *pos += 4;
+    Ok(val)
+}
+
 use grey_crypto::blake2b_256;
 use grey_types::config::Config;
 use grey_types::state::{
@@ -41,8 +57,8 @@ pub fn extract_accumulation_root(
     anchor_hash: &Hash,
 ) -> Result<Option<Hash>, String> {
     let mut pos = 0;
-    let header_count =
-        decode_compact_at(recent_blocks_blob, &mut pos).map_err(|e| e.to_string())? as usize;
+    let header_count = decode_u32_le_at(recent_blocks_blob, &mut pos)
+        .map_err(|_| "decode error".to_string())? as usize;
 
     for _ in 0..header_count {
         // Each header: header_hash(32) + accumulation_root(32) + state_root(32) + packages...
@@ -57,8 +73,8 @@ pub fn extract_accumulation_root(
         pos += 96;
 
         // Skip reported_packages map
-        let pkg_count =
-            decode_compact_at(recent_blocks_blob, &mut pos).map_err(|e| e.to_string())? as usize;
+        let pkg_count = decode_u32_le_at(recent_blocks_blob, &mut pos)
+            .map_err(|_| "decode error".to_string())? as usize;
         // Each package entry is 64 bytes (two hashes)
         let skip = pkg_count * 64;
         if pos + skip > recent_blocks_blob.len() {
@@ -264,7 +280,7 @@ pub fn serialize_state(state: &State, config: &Config) -> Vec<([u8; 31], Vec<u8>
         for (&(ref hash, length), timeslots) in &account.preimage_info {
             let h = preimage_info_hash_arg(length, hash);
             let mut val = Vec::new();
-            encode_compact(timeslots.len() as u64, &mut val);
+            encode_u32_le(timeslots.len() as u32, &mut val);
             for &t in timeslots {
                 val.extend_from_slice(&t.to_le_bytes());
             }
@@ -305,7 +321,7 @@ fn serialize_auth_pool(auth_pool: &[Vec<Hash>], config: &Config) -> Vec<u8> {
     // Fixed-size C array, no outer length prefix
     for core_idx in 0..config.core_count as usize {
         let hashes = auth_pool.get(core_idx).map(|v| v.as_slice()).unwrap_or(&[]);
-        encode_compact(hashes.len() as u64, &mut buf);
+        encode_u32_le(hashes.len() as u32, &mut buf);
         for hash in hashes {
             buf.extend_from_slice(&hash.0);
         }
@@ -337,14 +353,14 @@ fn serialize_recent_blocks(blocks: &RecentBlocks) -> Vec<u8> {
     let mut buf = Vec::new();
 
     // ↕ sorted headers (compact length prefix)
-    encode_compact(blocks.headers.len() as u64, &mut buf);
+    encode_u32_le(blocks.headers.len() as u32, &mut buf);
     for info in &blocks.headers {
         // (h, b, s, ↕p) — header_hash, accumulation_root, state_root, sorted packages
         buf.extend_from_slice(&info.header_hash.0);
         buf.extend_from_slice(&info.accumulation_root.0);
         buf.extend_from_slice(&info.state_root.0);
         // ↕p: sorted map of reported packages
-        encode_compact(info.reported_packages.len() as u64, &mut buf);
+        encode_u32_le(info.reported_packages.len() as u32, &mut buf);
         for (k, v) in &info.reported_packages {
             buf.extend_from_slice(&k.0);
             buf.extend_from_slice(&v.0);
@@ -352,7 +368,7 @@ fn serialize_recent_blocks(blocks: &RecentBlocks) -> Vec<u8> {
     }
 
     // E_M(β_B): accumulation log / MMR belt
-    encode_compact(blocks.accumulation_log.len() as u64, &mut buf);
+    encode_u32_le(blocks.accumulation_log.len() as u32, &mut buf);
     for entry in &blocks.accumulation_log {
         match entry {
             Some(hash) => {
@@ -410,7 +426,7 @@ fn serialize_safrole(safrole: &SafroleState, config: &Config) -> Vec<u8> {
     }
 
     // γA: ticket_accumulator — ↕ sorted sequence
-    encode_compact(safrole.ticket_accumulator.len() as u64, &mut buf);
+    encode_u32_le(safrole.ticket_accumulator.len() as u32, &mut buf);
     for ticket in &safrole.ticket_accumulator {
         buf.extend_from_slice(&ticket.id.0);
         buf.push(ticket.attempt);
@@ -426,7 +442,7 @@ fn serialize_judgments(judgments: &Judgments) -> Vec<u8> {
     encode_hash_set(&judgments.bad, &mut buf);
     encode_hash_set(&judgments.wonky, &mut buf);
     // ↕ψO — offenders are Ed25519PublicKey (also 32 bytes)
-    encode_compact(judgments.offenders.len() as u64, &mut buf);
+    encode_u32_le(judgments.offenders.len() as u32, &mut buf);
     for key in &judgments.offenders {
         buf.extend_from_slice(&key.0);
     }
@@ -485,7 +501,7 @@ fn serialize_privileged(priv_svc: &PrivilegedServices) -> Vec<u8> {
     buf.extend_from_slice(&priv_svc.registrar.to_le_bytes());
 
     // χZ: sorted map ↕[(E_4(s), E_8(g))]
-    encode_compact(priv_svc.always_accumulate.len() as u64, &mut buf);
+    encode_u32_le(priv_svc.always_accumulate.len() as u32, &mut buf);
     for (&service_id, &gas) in &priv_svc.always_accumulate {
         buf.extend_from_slice(&service_id.to_le_bytes());
         buf.extend_from_slice(&gas.to_le_bytes());
@@ -510,34 +526,34 @@ fn serialize_statistics(stats: &ValidatorStatistics, config: &Config) -> Vec<u8>
     // π_C: C core records, compact-encoded fields (GP field order: d, p, i, x, z, e, l, u)
     for core_idx in 0..config.core_count as usize {
         let cs = stats.core_stats.get(core_idx).cloned().unwrap_or_default();
-        encode_compact(cs.da_load, &mut buf);
-        encode_compact(cs.popularity, &mut buf);
-        encode_compact(cs.imports, &mut buf);
-        encode_compact(cs.extrinsic_count, &mut buf);
-        encode_compact(cs.extrinsic_size, &mut buf);
-        encode_compact(cs.exports, &mut buf);
-        encode_compact(cs.bundle_size, &mut buf);
-        encode_compact(cs.gas_used, &mut buf);
+        encode_u32_le(cs.da_load as u32, &mut buf);
+        encode_u32_le(cs.popularity as u32, &mut buf);
+        encode_u32_le(cs.imports as u32, &mut buf);
+        encode_u32_le(cs.extrinsic_count as u32, &mut buf);
+        encode_u32_le(cs.extrinsic_size as u32, &mut buf);
+        encode_u32_le(cs.exports as u32, &mut buf);
+        encode_u32_le(cs.bundle_size as u32, &mut buf);
+        encode_u64_le(cs.gas_used, &mut buf);
     }
 
     // π_S: sorted map of service stats (GP field order: p, r, i, x, z, e, a)
-    encode_compact(stats.service_stats.len() as u64, &mut buf);
+    encode_u32_le(stats.service_stats.len() as u32, &mut buf);
     for (&service_id, ss) in &stats.service_stats {
         buf.extend_from_slice(&service_id.to_le_bytes());
         // p: (provided_count, provided_size)
-        encode_compact(ss.provided_count, &mut buf);
-        encode_compact(ss.provided_size, &mut buf);
+        encode_u32_le(ss.provided_count as u32, &mut buf);
+        encode_u32_le(ss.provided_size as u32, &mut buf);
         // r: (refinement_count, refinement_gas_used)
-        encode_compact(ss.refinement_count, &mut buf);
-        encode_compact(ss.refinement_gas_used, &mut buf);
+        encode_u32_le(ss.refinement_count as u32, &mut buf);
+        encode_u64_le(ss.refinement_gas_used, &mut buf);
         // i, x, z, e
-        encode_compact(ss.imports, &mut buf);
-        encode_compact(ss.extrinsic_count, &mut buf);
-        encode_compact(ss.extrinsic_size, &mut buf);
-        encode_compact(ss.exports, &mut buf);
+        encode_u32_le(ss.imports as u32, &mut buf);
+        encode_u32_le(ss.extrinsic_count as u32, &mut buf);
+        encode_u32_le(ss.extrinsic_size as u32, &mut buf);
+        encode_u32_le(ss.exports as u32, &mut buf);
         // a: (accumulate_count, accumulate_gas_used)
-        encode_compact(ss.accumulate_count, &mut buf);
-        encode_compact(ss.accumulate_gas_used, &mut buf);
+        encode_u32_le(ss.accumulate_count as u32, &mut buf);
+        encode_u64_le(ss.accumulate_gas_used, &mut buf);
     }
 
     buf
@@ -565,12 +581,12 @@ fn serialize_accumulation_queue(
     use scale::Encode;
     let mut buf = Vec::new();
     for slot in queue {
-        encode_compact(slot.len() as u64, &mut buf);
+        encode_u32_le(slot.len() as u32, &mut buf);
         for (report, deps) in slot {
             // Use standard block encoding E(r ∈ R) for work reports
             report.encode_to(&mut buf);
             // ↕ sorted dependency hashes
-            encode_compact(deps.len() as u64, &mut buf);
+            encode_u32_le(deps.len() as u32, &mut buf);
             for hash in deps {
                 buf.extend_from_slice(&hash.0);
             }
@@ -583,7 +599,7 @@ fn serialize_accumulation_queue(
 fn serialize_accumulation_history(history: &[Vec<Hash>]) -> Vec<u8> {
     let mut buf = Vec::new();
     for slot in history {
-        encode_compact(slot.len() as u64, &mut buf);
+        encode_u32_le(slot.len() as u32, &mut buf);
         for hash in slot {
             buf.extend_from_slice(&hash.0);
         }
@@ -594,7 +610,7 @@ fn serialize_accumulation_history(history: &[Vec<Hash>]) -> Vec<u8> {
 /// C(16): θ accumulation_outputs — ↕ sorted (E_4(service_id), hash) pairs.
 fn serialize_accumulation_outputs(outputs: &[(ServiceId, Hash)]) -> Vec<u8> {
     let mut buf = Vec::new();
-    encode_compact(outputs.len() as u64, &mut buf);
+    encode_u32_le(outputs.len() as u32, &mut buf);
     for &(service_id, ref hash) in outputs {
         buf.extend_from_slice(&service_id.to_le_bytes());
         buf.extend_from_slice(&hash.0);
@@ -826,8 +842,8 @@ fn classify_key(key: &[u8; 31]) -> KeyType {
 
 // --- Component deserializers ---
 
-fn decode_compact(data: &[u8], pos: &mut usize) -> Result<u64, String> {
-    decode_compact_at(data, pos).map_err(|e| e.to_string())
+fn decode_u32_helper(data: &[u8], pos: &mut usize) -> Result<u32, String> {
+    decode_u32_le_at(data, pos).map_err(|_| "decode error".to_string())
 }
 
 fn read_hash(data: &[u8], pos: &mut usize) -> Result<Hash, String> {
@@ -842,7 +858,7 @@ fn read_hash(data: &[u8], pos: &mut usize) -> Result<Hash, String> {
 
 /// Encode a compact-length-prefixed collection of 32-byte hashes.
 fn encode_hash_set(hashes: &std::collections::BTreeSet<Hash>, buf: &mut Vec<u8>) {
-    encode_compact(hashes.len() as u64, buf);
+    encode_u32_le(hashes.len() as u32, buf);
     for hash in hashes {
         buf.extend_from_slice(&hash.0);
     }
@@ -853,7 +869,7 @@ fn decode_hash_set(
     data: &[u8],
     pos: &mut usize,
 ) -> Result<std::collections::BTreeSet<Hash>, String> {
-    let count = decode_compact(data, pos)? as usize;
+    let count = decode_u32_helper(data, pos)? as u64 as usize;
     let mut set = std::collections::BTreeSet::new();
     for _ in 0..count {
         set.insert(read_hash(data, pos)?);
@@ -887,7 +903,7 @@ fn deserialize_auth_pool(
 ) -> Result<(), String> {
     let mut pos = 0;
     for core_idx in 0..config.core_count as usize {
-        let count = decode_compact(data, &mut pos)? as usize;
+        let count = decode_u32_helper(data, &mut pos)? as u64 as usize;
         let mut hashes = Vec::with_capacity(count);
         for _ in 0..count {
             hashes.push(read_hash(data, &mut pos)?);
@@ -925,7 +941,7 @@ fn deserialize_recent_blocks(data: &[u8]) -> Result<RecentBlocks, String> {
     let mut pos = 0;
 
     // Headers: ↕ sorted
-    let header_count = decode_compact(data, &mut pos)? as usize;
+    let header_count = decode_u32_helper(data, &mut pos)? as u64 as usize;
     let mut headers = Vec::with_capacity(header_count);
     for _ in 0..header_count {
         let header_hash = read_hash(data, &mut pos)?;
@@ -933,7 +949,7 @@ fn deserialize_recent_blocks(data: &[u8]) -> Result<RecentBlocks, String> {
         let state_root = read_hash(data, &mut pos)?;
 
         // ↕ reported_packages map
-        let pkg_count = decode_compact(data, &mut pos)? as usize;
+        let pkg_count = decode_u32_helper(data, &mut pos)? as u64 as usize;
         let mut reported_packages = BTreeMap::new();
         for _ in 0..pkg_count {
             let k = read_hash(data, &mut pos)?;
@@ -950,7 +966,7 @@ fn deserialize_recent_blocks(data: &[u8]) -> Result<RecentBlocks, String> {
     }
 
     // Accumulation log (MMR belt)
-    let belt_count = decode_compact(data, &mut pos)? as usize;
+    let belt_count = decode_u32_helper(data, &mut pos)? as u64 as usize;
     let mut accumulation_log = Vec::with_capacity(belt_count);
     for _ in 0..belt_count {
         if pos >= data.len() {
@@ -1039,7 +1055,7 @@ fn deserialize_safrole(data: &[u8], config: &Config) -> Result<SafroleState, Str
     };
 
     // ticket_accumulator: ↕ sorted
-    let ta_count = decode_compact(data, &mut pos)? as usize;
+    let ta_count = decode_u32_helper(data, &mut pos)? as u64 as usize;
     let mut ticket_accumulator = Vec::with_capacity(ta_count);
     for _ in 0..ta_count {
         let id = read_hash(data, &mut pos)?;
@@ -1067,7 +1083,7 @@ fn deserialize_judgments(data: &[u8]) -> Result<Judgments, String> {
     let wonky = decode_hash_set(data, &mut pos)?;
 
     // Offenders are Ed25519PublicKey (also 32 bytes, but different type)
-    let offender_count = decode_compact(data, &mut pos)? as usize;
+    let offender_count = decode_u32_helper(data, &mut pos)? as u64 as usize;
     let mut offenders = std::collections::BTreeSet::new();
     for _ in 0..offender_count {
         if pos + 32 > data.len() {
@@ -1153,7 +1169,7 @@ fn deserialize_work_report(
     data: &[u8],
     pos: &mut usize,
 ) -> Result<grey_types::work::WorkReport, String> {
-    use grey_codec::Decode;
+    use scale::Decode;
 
     let remaining = &data[*pos..];
     let (report, consumed) = grey_types::work::WorkReport::decode(remaining)
@@ -1175,7 +1191,7 @@ fn deserialize_privileged(data: &[u8], config: &Config) -> Result<PrivilegedServ
     let registrar = read_u32(data, &mut pos)?;
 
     // χZ: sorted map
-    let z_count = decode_compact(data, &mut pos)? as usize;
+    let z_count = decode_u32_helper(data, &mut pos)? as u64 as usize;
     let mut always_accumulate = BTreeMap::new();
     for _ in 0..z_count {
         let service_id = read_u32(data, &mut pos)?;
@@ -1214,14 +1230,14 @@ fn deserialize_statistics(data: &[u8], config: &Config) -> Result<ValidatorStati
     // π_C: C core records, compact-encoded (GP field order: d, p, i, x, z, e, l, u)
     let mut core_stats = Vec::with_capacity(c);
     for _ in 0..c {
-        let da_load = decode_compact(data, &mut pos)?;
-        let popularity = decode_compact(data, &mut pos)?;
-        let imports = decode_compact(data, &mut pos)?;
-        let extrinsic_count = decode_compact(data, &mut pos)?;
-        let extrinsic_size = decode_compact(data, &mut pos)?;
-        let exports = decode_compact(data, &mut pos)?;
-        let bundle_size = decode_compact(data, &mut pos)?;
-        let gas_used = decode_compact(data, &mut pos)?;
+        let da_load = decode_u32_helper(data, &mut pos)? as u64;
+        let popularity = decode_u32_helper(data, &mut pos)? as u64;
+        let imports = decode_u32_helper(data, &mut pos)? as u64;
+        let extrinsic_count = decode_u32_helper(data, &mut pos)? as u64;
+        let extrinsic_size = decode_u32_helper(data, &mut pos)? as u64;
+        let exports = decode_u32_helper(data, &mut pos)? as u64;
+        let bundle_size = decode_u32_helper(data, &mut pos)? as u64;
+        let gas_used = decode_u32_helper(data, &mut pos)? as u64;
         core_stats.push(CoreStatistics {
             da_load,
             popularity,
@@ -1235,20 +1251,20 @@ fn deserialize_statistics(data: &[u8], config: &Config) -> Result<ValidatorStati
     }
 
     // π_S: sorted map (GP field order: p, r, i, x, z, e, a)
-    let s_count = decode_compact(data, &mut pos)? as usize;
+    let s_count = decode_u32_helper(data, &mut pos)? as u64 as usize;
     let mut service_stats = BTreeMap::new();
     for _ in 0..s_count {
         let service_id = read_u32(data, &mut pos)?;
-        let provided_count = decode_compact(data, &mut pos)?;
-        let provided_size = decode_compact(data, &mut pos)?;
-        let refinement_count = decode_compact(data, &mut pos)?;
-        let refinement_gas_used = decode_compact(data, &mut pos)?;
-        let imports = decode_compact(data, &mut pos)?;
-        let extrinsic_count = decode_compact(data, &mut pos)?;
-        let extrinsic_size = decode_compact(data, &mut pos)?;
-        let exports = decode_compact(data, &mut pos)?;
-        let accumulate_count = decode_compact(data, &mut pos)?;
-        let accumulate_gas_used = decode_compact(data, &mut pos)?;
+        let provided_count = decode_u32_helper(data, &mut pos)? as u64;
+        let provided_size = decode_u32_helper(data, &mut pos)? as u64;
+        let refinement_count = decode_u32_helper(data, &mut pos)? as u64;
+        let refinement_gas_used = decode_u32_helper(data, &mut pos)? as u64;
+        let imports = decode_u32_helper(data, &mut pos)? as u64;
+        let extrinsic_count = decode_u32_helper(data, &mut pos)? as u64;
+        let extrinsic_size = decode_u32_helper(data, &mut pos)? as u64;
+        let exports = decode_u32_helper(data, &mut pos)? as u64;
+        let accumulate_count = decode_u32_helper(data, &mut pos)? as u64;
+        let accumulate_gas_used = decode_u32_helper(data, &mut pos)? as u64;
         service_stats.insert(
             service_id,
             ServiceStatistics {
@@ -1309,11 +1325,11 @@ fn deserialize_accumulation_queue(
     let mut queue = Vec::with_capacity(e);
 
     for _ in 0..e {
-        let inner_count = decode_compact(data, &mut pos)? as usize;
+        let inner_count = decode_u32_helper(data, &mut pos)? as u64 as usize;
         let mut inner = Vec::with_capacity(inner_count);
         for _ in 0..inner_count {
             let report = deserialize_work_report(data, &mut pos)?;
-            let dep_count = decode_compact(data, &mut pos)? as usize;
+            let dep_count = decode_u32_helper(data, &mut pos)? as u64 as usize;
             let mut deps = Vec::with_capacity(dep_count);
             for _ in 0..dep_count {
                 deps.push(read_hash(data, &mut pos)?);
@@ -1335,7 +1351,7 @@ fn deserialize_accumulation_history(
     let mut history = Vec::with_capacity(e);
 
     for _ in 0..e {
-        let count = decode_compact(data, &mut pos)? as usize;
+        let count = decode_u32_helper(data, &mut pos)? as u64 as usize;
         let mut hashes = Vec::with_capacity(count);
         for _ in 0..count {
             hashes.push(read_hash(data, &mut pos)?);
@@ -1348,7 +1364,7 @@ fn deserialize_accumulation_history(
 
 fn deserialize_accumulation_outputs(data: &[u8]) -> Result<Vec<(ServiceId, Hash)>, String> {
     let mut pos = 0;
-    let count = decode_compact(data, &mut pos)? as usize;
+    let count = decode_u32_helper(data, &mut pos)? as u64 as usize;
     let mut outputs = Vec::with_capacity(count);
     for _ in 0..count {
         let service_id = read_u32(data, &mut pos)?;

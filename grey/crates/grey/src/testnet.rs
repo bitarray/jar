@@ -455,7 +455,7 @@ pub fn run_sequential_test(num_blocks: u32) -> Result<SequentialTestResult, Stri
                 match grey_state::transition::apply_with_config(&state, &block, &config, &[]) {
                     Ok((new_state, _)) => {
                         let header_hash =
-                            grey_codec::header_codec::compute_header_hash(&block.header);
+                            grey_crypto::blake2b_256(&scale::Encode::encode(&block.header));
 
                         // Check if accumulation happened (service storage changed)
                         if matches!(wp_phase, WpPhase::Done) {

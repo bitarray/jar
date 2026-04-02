@@ -7,7 +7,6 @@
 //! Invoked via `grey --seq-testnet`. Starts an RPC server on the configured port
 //! so the integration harness can interact with it identically to the real testnet.
 
-use grey_codec::header_codec::compute_header_hash;
 use grey_consensus::authoring;
 use grey_consensus::genesis::create_genesis;
 use grey_rpc::{self, RpcCommand};
@@ -221,7 +220,8 @@ pub async fn run_seq_testnet(
                     Ok((new_state, _)) => {
                         let transition_us = transition_start.elapsed().as_micros() as u64;
                         transition_times.push(transition_us);
-                        let header_hash = compute_header_hash(&block.header);
+                        let header_hash =
+                            grey_crypto::blake2b_256(&scale::Encode::encode(&block.header));
 
                         // Update store for RPC (order matters: block+state first, then head)
                         let _ = store.put_block(&block);

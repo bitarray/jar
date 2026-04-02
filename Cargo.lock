@@ -1515,7 +1515,6 @@ dependencies = [
  "build-javm",
  "clap",
  "futures",
- "grey-codec",
  "grey-consensus",
  "grey-crypto",
  "grey-erasure",
@@ -1572,10 +1571,10 @@ dependencies = [
 name = "grey-consensus"
 version = "0.1.0"
 dependencies = [
- "grey-codec",
  "grey-crypto",
  "grey-state",
  "grey-types",
+ "scale",
  "thiserror 2.0.18",
 ]
 
@@ -1611,7 +1610,6 @@ dependencies = [
 name = "grey-merkle"
 version = "0.1.0"
 dependencies = [
- "grey-codec",
  "grey-crypto",
  "grey-types",
  "hex",
@@ -1627,7 +1625,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
- "grey-codec",
  "grey-crypto",
  "grey-types",
  "libp2p",
@@ -1641,7 +1638,6 @@ dependencies = [
 name = "grey-rpc"
 version = "0.1.0"
 dependencies = [
- "grey-codec",
  "grey-consensus",
  "grey-crypto",
  "grey-store",
@@ -1676,7 +1672,6 @@ dependencies = [
 name = "grey-state"
 version = "0.1.0"
 dependencies = [
- "grey-codec",
  "grey-crypto",
  "grey-merkle",
  "grey-transpiler",
@@ -1695,7 +1690,6 @@ dependencies = [
 name = "grey-store"
 version = "0.1.0"
 dependencies = [
- "grey-codec",
  "grey-consensus",
  "grey-crypto",
  "grey-merkle",
@@ -1794,7 +1788,6 @@ name = "harness"
 version = "0.1.0"
 dependencies = [
  "clap",
- "grey-codec",
  "grey-types",
  "hex",
  "reqwest",

@@ -12,7 +12,7 @@ use crate::audit::{self, AuditState};
 use crate::finality::{self, GrandpaState};
 use crate::guarantor::{self, GuarantorState};
 use crate::tickets::{self, TicketState};
-use grey_codec::header_codec::compute_header_hash;
+
 use grey_consensus::authoring;
 
 use grey_network::service::{
@@ -680,7 +680,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                             &[],
                         ) {
                             Ok((new_state, _)) => {
-                                let header_hash = compute_header_hash(&block.header);
+                                let header_hash = grey_crypto::blake2b_256(&scale::Encode::encode(&block.header));
                                 state = new_state;
                                 blocks_authored += 1;
                                 last_authored_slot = current_slot;
@@ -721,7 +721,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                 // and mark cores as available for assurance generation
                                 for guarantee in &block.extrinsic.guarantees {
                                     let report_hash = grey_crypto::blake2b_256(
-                                        &grey_codec::header_codec::encode_header(&block.header),
+                                        &scale::Encode::encode(&block.header),
                                     );
                                     let our_tranche = audit::compute_audit_tranche(
                                         &state.entropy[0],
@@ -845,7 +845,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                     NetworkEvent::BlockReceived { data, source } => {
                         match decode_block_message(&data, protocol) {
                             Some((block, _hash)) => {
-                                let block_hash = compute_header_hash(&block.header);
+                                let block_hash = grey_crypto::blake2b_256(&scale::Encode::encode(&block.header));
                                 // Skip blocks we've already seen (dedup)
                                 if seen_block_hashes.contains(&block_hash) {
                                     tracing::trace!(
@@ -948,7 +948,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                     // (prevents zombie guarantees that block future work).
                                     for guarantee in &block.extrinsic.guarantees {
                                         let report_hash = grey_crypto::blake2b_256(
-                                            &grey_codec::header_codec::encode_header(&block.header),
+                                            &scale::Encode::encode(&block.header),
                                         );
                                         let our_tranche = audit::compute_audit_tranche(
                                             &state.entropy[0],
