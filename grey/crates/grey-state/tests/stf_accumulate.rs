@@ -57,20 +57,29 @@ fn parse_service_account(v: &serde_json::Value) -> (ServiceId, AccServiceAccount
         preimage_info.insert((hash, length), slots);
     }
 
+    // Parse economic fields: jar1 uses nested "econ" object or top-level quota_items/quota_bytes.
+    // gp072_full inputs have "balance"/"deposit_offset" which are NOT quota fields —
+    // in QuotaEcon mode, missing quota fields default to 0.
+    let (quota_items, quota_bytes) = if let Some(econ) = svc.get("econ") {
+        (
+            econ["quota_items"].as_u64().unwrap_or(0),
+            econ["quota_bytes"].as_u64().unwrap_or(0),
+        )
+    } else {
+        (
+            svc["quota_items"].as_u64().unwrap_or(0),
+            svc["quota_bytes"].as_u64().unwrap_or(0),
+        )
+    };
+
     let account = AccServiceAccount {
         version: svc["version"].as_u64().unwrap_or(0) as u8,
         code_hash: hash_from_hex(svc["code_hash"].as_str().unwrap()),
-        quota_items: svc["quota_items"]
-            .as_u64()
-            .or_else(|| svc["balance"].as_u64())
-            .unwrap_or(0),
+        quota_items,
         min_item_gas: svc["min_item_gas"].as_u64().unwrap() as Gas,
         min_memo_gas: svc["min_memo_gas"].as_u64().unwrap() as Gas,
         bytes: svc["bytes"].as_u64().unwrap(),
-        quota_bytes: svc["quota_bytes"]
-            .as_u64()
-            .or_else(|| svc["deposit_offset"].as_u64())
-            .unwrap_or(0),
+        quota_bytes,
         items: svc["items"].as_u64().unwrap(),
         creation_slot: svc["creation_slot"].as_u64().unwrap() as Timeslot,
         last_accumulation_slot: svc["last_accumulation_slot"].as_u64().unwrap_or(0) as Timeslot,
