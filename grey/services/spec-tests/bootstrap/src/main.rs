@@ -15,10 +15,6 @@ mod service {
     use core::arch::global_asm;
 
     global_asm!(
-        // Distinguishing byte in .rodata so the blob hash differs from minimal.
-        ".section .rodata",
-        ".byte 0x42",
-        ".text",
         ".global _start",
         ".type _start, @function",
         "_start:",
@@ -30,6 +26,8 @@ mod service {
         ".global accumulate",
         ".type accumulate, @function",
         "accumulate:",
+        // Load a distinguishing constant so the blob hash differs from minimal.
+        "li t0, 0x42",
         "ret",
     );
 
