@@ -438,8 +438,10 @@ impl GrandpaState {
             if *count >= self.threshold() && *slot > self.finalized_slot {
                 self.finalized_hash = *hash;
                 self.finalized_slot = *slot;
-                self.ancestry.retain(|_, &mut (_, slot, _)| slot > self.finalized_slot);
-                self.chain_equivocations.retain(|&slot| slot > self.finalized_slot);
+                self.ancestry
+                    .retain(|_, &mut (_, slot, _)| slot > self.finalized_slot);
+                self.chain_equivocations
+                    .retain(|&slot| slot > self.finalized_slot);
                 // Prune vote archives for finalized rounds to bound memory growth.
                 self.prune_archive(self.round.saturating_sub(1));
                 return Some((*hash, *slot));
