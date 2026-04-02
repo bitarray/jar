@@ -16,13 +16,12 @@ use crate::{Gas, PVM_PAGE_SIZE};
 /// Parse a program blob into (code, bitmask, jump_table) (eq A.2).
 ///
 /// deblob(p) = (c, k, j) where:
-///   p = E(|j|) ⌢ E₁(z) ⌢ E(|c|) ⌢ E_z(j) ⌢ E(c) ⌢ E(k), |k| = |c|
+///   p = E₄(|j|) ⌢ E₁(z) ⌢ E₄(|c|) ⌢ E_z(j) ⌢ E(c) ⌢ E(k), |k| = |c|
 pub fn deblob(blob: &[u8]) -> Option<(&[u8], Vec<u8>, Vec<u32>)> {
     let mut offset = 0;
 
-    // Read |j| (jump table length) as variable-length natural
-    let (jt_len, n) = decode_natural(blob, offset)?;
-    offset += n;
+    // Read |j| (jump table length) as u32 LE
+    let jt_len = read_le_u32(blob, &mut offset)? as usize;
 
     // Read z (encoding size for jump table entries) as 1 byte
     if offset >= blob.len() {
@@ -31,9 +30,8 @@ pub fn deblob(blob: &[u8]) -> Option<(&[u8], Vec<u8>, Vec<u32>)> {
     let z = blob[offset] as usize;
     offset += 1;
 
-    // Read |c| (code length) as variable-length natural
-    let (code_len, n) = decode_natural(blob, offset)?;
-    offset += n;
+    // Read |c| (code length) as u32 LE
+    let code_len = read_le_u32(blob, &mut offset)? as usize;
 
     // Read jump table: jt_len entries, each z bytes LE
     let mut jump_table = Vec::with_capacity(jt_len);
@@ -370,43 +368,6 @@ fn validate_basic_blocks(code: &[u8], bitmask: &[u8], jump_table: &[u32]) -> boo
     true
 }
 
-/// Decode a variable-length natural number (JAM compact encoding).
-/// Used in PVM blob header for |j| and |c|.
-/// TODO: Switch to u32 LE once test vectors are regenerated with new PVM blob format.
-fn decode_natural(data: &[u8], offset: usize) -> Option<(usize, usize)> {
-    if offset >= data.len() {
-        return None;
-    }
-
-    let first = data[offset];
-    if first < 128 {
-        Some((first as usize, 1))
-    } else if first < 192 {
-        if offset + 2 > data.len() {
-            return None;
-        }
-        let val = ((first as usize & 0x3F) << 8) | data[offset + 1] as usize;
-        Some((val, 2))
-    } else if first < 224 {
-        if offset + 3 > data.len() {
-            return None;
-        }
-        let val = ((first as usize & 0x1F) << 16)
-            | ((data[offset + 2] as usize) << 8)
-            | data[offset + 1] as usize;
-        Some((val, 3))
-    } else {
-        if offset + 4 > data.len() {
-            return None;
-        }
-        let val = ((first as usize & 0x0F) << 24)
-            | ((data[offset + 3] as usize) << 16)
-            | ((data[offset + 2] as usize) << 8)
-            | data[offset + 1] as usize;
-        Some((val, 4))
-    }
-}
-
 fn read_le_u16(data: &[u8], offset: &mut usize) -> Option<u16> {
     if *offset + 2 > data.len() {
         return None;
@@ -428,9 +389,10 @@ fn skip_metadata(blob: &[u8]) -> &[u8] {
         // Looks like a valid standard program header
         return blob;
     }
-    // Assume metadata: varint(length) prefix + metadata bytes
-    if let Some((meta_len, consumed)) = decode_natural(blob, 0) {
-        let skip = consumed + meta_len;
+    // Assume metadata: u32 LE length prefix + metadata bytes
+    let mut off = 0;
+    if let Some(meta_len) = read_le_u32(blob, &mut off) {
+        let skip = off + meta_len as usize;
         if skip < blob.len() {
             return &blob[skip..];
         }
@@ -889,9 +851,9 @@ mod tests {
     fn test_deblob_simple() {
         // Build a simple blob: |j|=0, z=1, |c|=3, code=[0,1,0], bitmask packed
         let mut blob = Vec::new();
-        blob.push(0); // |j| = 0 (single byte natural)
+        blob.extend_from_slice(&0u32.to_le_bytes()); // |j| = 0
         blob.push(1); // z = 1
-        blob.push(3); // |c| = 3
+        blob.extend_from_slice(&3u32.to_le_bytes()); // |c| = 3
         // no jump table entries
         blob.extend_from_slice(&[0, 1, 0]); // code: trap, fallthrough, trap
         blob.push(0x07); // packed bitmask: bits 0,1,2 set = 0b00000111
@@ -904,9 +866,9 @@ mod tests {
     #[test]
     fn test_deblob_with_jump_table() {
         let mut blob = Vec::new();
-        blob.push(2); // |j| = 2
+        blob.extend_from_slice(&2u32.to_le_bytes()); // |j| = 2
         blob.push(2); // z = 2 (2-byte entries)
-        blob.push(2); // |c| = 2
+        blob.extend_from_slice(&2u32.to_le_bytes()); // |c| = 2
         blob.extend_from_slice(&[0, 0]); // j[0] = 0
         blob.extend_from_slice(&[1, 0]); // j[1] = 1
         blob.extend_from_slice(&[0, 1]); // code: trap, fallthrough
@@ -920,7 +882,7 @@ mod tests {
     #[test]
     fn test_invalid_blob() {
         assert!(deblob(&[]).is_none());
-        assert!(deblob(&[0]).is_none()); // missing z
+        assert!(deblob(&[0, 0, 0, 0]).is_none()); // missing z
     }
 
     // -----------------------------------------------------------------------
@@ -1386,9 +1348,9 @@ mod tests {
         gp_blob.extend_from_slice(&[0x00, 0x10, 0x00]); // stack_size=4096
 
         let mut code_blob = Vec::new();
-        code_blob.push(0); // |j|=0
+        code_blob.extend_from_slice(&0u32.to_le_bytes()); // |j|=0
         code_blob.push(1); // z=1
-        code_blob.push(2); // |c|=2
+        code_blob.extend_from_slice(&2u32.to_le_bytes()); // |c|=2
         code_blob.extend_from_slice(&[0, 1]); // code: trap, fallthrough
         code_blob.push(0x03); // bitmask
 

@@ -3,30 +3,6 @@
 //! Implements the standard program format (GP eq A.38) and the
 //! inner deblob format (GP eq A.2).
 
-/// Encode a natural number using the JAM variable-length codec.
-/// Used in the deblob format for jump table length and code length.
-/// TODO: Switch to u32 LE once test vectors are regenerated with new PVM blob format.
-pub fn encode_natural(value: u64) -> Vec<u8> {
-    if value < 128 {
-        vec![value as u8]
-    } else if value < (1 << 14) {
-        vec![0x80 | ((value >> 8) as u8 & 0x3F), (value & 0xFF) as u8]
-    } else if value < (1 << 21) {
-        vec![
-            0xC0 | ((value >> 16) as u8 & 0x1F),
-            (value & 0xFF) as u8,
-            ((value >> 8) & 0xFF) as u8,
-        ]
-    } else {
-        vec![
-            0xE0 | ((value >> 24) as u8 & 0x0F),
-            (value & 0xFF) as u8,
-            ((value >> 8) & 0xFF) as u8,
-            ((value >> 16) & 0xFF) as u8,
-        ]
-    }
-}
-
 /// Pack a bitmask array (one byte per bit, 0 or 1) into packed bytes (LSB first).
 /// GP eq C.9: bit i is at byte i/8, position i%8.
 pub fn pack_bitmask(bitmask: &[u8]) -> Vec<u8> {
@@ -41,7 +17,7 @@ pub fn pack_bitmask(bitmask: &[u8]) -> Vec<u8> {
 }
 
 /// Build the inner code blob (deblob format, GP eq A.2):
-/// `E(|j|) ⌢ E₁(z) ⌢ E(|c|) ⌢ E_z(j) ⌢ E(c) ⌢ packed_bitmask`
+/// `E₄(|j|) ⌢ E₁(z) ⌢ E₄(|c|) ⌢ E_z(j) ⌢ E(c) ⌢ packed_bitmask`
 pub fn build_code_blob(code: &[u8], bitmask: &[u8], jump_table: &[u32]) -> Vec<u8> {
     assert_eq!(
         code.len(),
@@ -67,14 +43,14 @@ pub fn build_code_blob(code: &[u8], bitmask: &[u8], jump_table: &[u32]) -> Vec<u
 
     let mut blob = Vec::new();
 
-    // E(|j|) — jump table length
-    blob.extend_from_slice(&encode_natural(jump_table.len() as u64));
+    // E₄(|j|) — jump table length (4 bytes LE)
+    blob.extend_from_slice(&(jump_table.len() as u32).to_le_bytes());
 
     // E₁(z) — encoding size per entry
     blob.push(z);
 
-    // E(|c|) — code length
-    blob.extend_from_slice(&encode_natural(code.len() as u64));
+    // E₄(|c|) — code length (4 bytes LE)
+    blob.extend_from_slice(&(code.len() as u32).to_le_bytes());
 
     // E_z(j) — jump table entries, z bytes each, LE
     for &entry in jump_table {
@@ -150,14 +126,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_encode_natural() {
-        assert_eq!(encode_natural(0), vec![0]);
-        assert_eq!(encode_natural(127), vec![127]);
-        assert_eq!(encode_natural(128), vec![0x80, 128]);
-        assert_eq!(encode_natural(256), vec![0x81, 0]);
-    }
-
-    #[test]
     fn test_pack_bitmask() {
         // All ones for 3 bits
         assert_eq!(pack_bitmask(&[1, 1, 1]), vec![0x07]);
@@ -176,13 +144,12 @@ mod tests {
 
         let blob = build_code_blob(&code, &bitmask, &jump_table);
 
-        // Parse: E(0), E₁(1), E(3), [no jump entries], code, packed_bitmask
-        // E(0)=0, E₁(1)=1, E(3)=3
-        assert_eq!(blob[0], 0); // |j| = 0
-        assert_eq!(blob[1], 1); // z = 1
-        assert_eq!(blob[2], 3); // |c| = 3
-        assert_eq!(&blob[3..6], &[0, 1, 0]); // code
-        assert_eq!(blob[6], 0x07); // bitmask: 111 packed
+        // Parse: E₄(0), E₁(1), E₄(3), [no jump entries], code, packed_bitmask
+        assert_eq!(&blob[0..4], &[0, 0, 0, 0]); // |j| = 0 as u32 LE
+        assert_eq!(blob[4], 1); // z = 1
+        assert_eq!(&blob[5..9], &[3, 0, 0, 0]); // |c| = 3 as u32 LE
+        assert_eq!(&blob[9..12], &[0, 1, 0]); // code
+        assert_eq!(blob[12], 0x07); // bitmask: 111 packed
     }
 
     #[test]
