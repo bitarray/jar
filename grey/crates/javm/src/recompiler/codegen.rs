@@ -935,16 +935,14 @@ impl Compiler {
     fn emit_mem_read_sized(&mut self, dst: Reg, fn_addr: u64, width_bytes: u32, pvm_pc: u32) {
         let w = if width_bytes > 0 {
             width_bytes
+        } else if fn_addr == self.helpers.mem_read_u8 {
+            1
+        } else if fn_addr == self.helpers.mem_read_u16 {
+            2
+        } else if fn_addr == self.helpers.mem_read_u32 {
+            4
         } else {
-            if fn_addr == self.helpers.mem_read_u8 {
-                1
-            } else if fn_addr == self.helpers.mem_read_u16 {
-                2
-            } else if fn_addr == self.helpers.mem_read_u32 {
-                4
-            } else {
-                8
-            }
+            8
         };
 
         #[cfg(feature = "signals")]

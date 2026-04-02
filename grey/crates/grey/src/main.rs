@@ -30,7 +30,7 @@ fn long_version() -> &'static str {
 }
 
 /// Log output format.
-#[derive(clap::ValueEnum, Clone, Debug, Default)]
+#[derive(clap::ValueEnum, Clone, Debug, Default, PartialEq, Eq)]
 enum LogFormat {
     /// Human-readable single-line output (default).
     #[default]
@@ -166,6 +166,111 @@ struct Cli {
     log_level: Option<String>,
 }
 
+impl Cli {
+    /// Apply config file values as fallbacks for CLI fields that are still at
+    /// their default values.
+    fn apply_config_defaults(&mut self, cfg: &config::ConfigFile) {
+        let db_path_from_cli = self.db_path != "./grey-db";
+
+        if let Some(v) = cfg.node.validator_index
+            && self.validator_index == 0
+        {
+            self.validator_index = v;
+        }
+        if let Some(ref v) = cfg.node.listen_addr
+            && self.listen_addr == "127.0.0.1"
+        {
+            self.listen_addr = v.clone();
+        }
+        if let Some(v) = cfg.node.port
+            && self.port == 9000
+        {
+            self.port = v;
+        }
+        if let Some(ref v) = cfg.node.chain_spec
+            && self.chain_spec.is_none()
+        {
+            self.chain_spec = Some(v.clone());
+        }
+        if let Some(ref v) = cfg.node.chain
+            && self.chain.is_none()
+            && self.chain_spec.is_none()
+        {
+            self.chain = Some(v.clone());
+        }
+        if let Some(v) = cfg.node.tiny
+            && self.tiny
+            && self.chain.is_none()
+            && self.chain_spec.is_none()
+        {
+            self.tiny = v;
+        }
+        if let Some(v) = cfg.node.genesis_time
+            && self.genesis_time == 0
+        {
+            self.genesis_time = v;
+        }
+        if let Some(ref v) = cfg.node.db_path
+            && !db_path_from_cli
+        {
+            self.db_path = v.clone();
+        }
+        if let Some(ref v) = cfg.storage.db_path
+            && !db_path_from_cli
+        {
+            self.db_path = v.clone();
+        }
+        if let Some(v) = cfg.storage.pruning_depth
+            && self.pruning_depth == 0
+        {
+            self.pruning_depth = v;
+        }
+        if let Some(v) = cfg.rpc.port
+            && self.rpc_port == 9933
+        {
+            self.rpc_port = v;
+        }
+        if let Some(v) = cfg.rpc.cors
+            && !self.rpc_cors
+        {
+            self.rpc_cors = v;
+        }
+        if let Some(ref v) = cfg.rpc.host
+            && self.rpc_host == "127.0.0.1"
+        {
+            self.rpc_host = v.clone();
+        }
+        if let Some(v) = cfg.rpc.rate_limit
+            && self.rpc_rate_limit == 1000
+        {
+            self.rpc_rate_limit = v;
+        }
+        if let Some(v) = cfg.rpc.metrics_port
+            && self.metrics_port == 0
+        {
+            self.metrics_port = v;
+        }
+        if let Some(ref peers) = cfg.network.boot_peers
+            && self.peers.is_empty()
+        {
+            self.peers = peers.clone();
+        }
+        if self.log_level.is_none() {
+            self.log_level = cfg.logging.level.clone();
+        }
+        if matches!(self.log_format, LogFormat::Plain)
+            && let Some(ref fmt) = cfg.logging.format
+        {
+            match fmt.as_str() {
+                "json" => self.log_format = LogFormat::Json,
+                "pretty" => self.log_format = LogFormat::Pretty,
+                "plain" => {}
+                other => eprintln!("warning: unknown log format in config: {:?}", other),
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut cli = Cli::parse();
@@ -174,86 +279,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(ref config_path) = cli.config {
         let cfg = config::ConfigFile::load(std::path::Path::new(config_path))
             .map_err(|e| format!("config file error: {e}"))?;
-
-        // Apply config file values as fallbacks. CLI flags take precedence:
-        // for fields with defaults, config file applies only when the CLI
-        // value matches its default.
-        if let Some(v) = cfg.node.validator_index
-            && cli.validator_index == 0
-        {
-            cli.validator_index = v;
-        }
-        if let Some(ref v) = cfg.node.listen_addr
-            && cli.listen_addr == "127.0.0.1"
-        {
-            cli.listen_addr = v.clone();
-        }
-        if let Some(v) = cfg.node.port
-            && cli.port == 9000
-        {
-            cli.port = v;
-        }
-        if let Some(ref v) = cfg.node.db_path
-            && cli.db_path == "./grey-db"
-        {
-            cli.db_path = v.clone();
-        }
-        // Storage section overrides for db_path and pruning_depth
-        if let Some(ref v) = cfg.storage.db_path
-            && cli.db_path == "./grey-db"
-        {
-            cli.db_path = v.clone();
-        }
-        if let Some(v) = cfg.storage.pruning_depth
-            && cli.pruning_depth == 0
-        {
-            cli.pruning_depth = v;
-        }
-        if let Some(v) = cfg.rpc.port
-            && cli.rpc_port == 9933
-        {
-            cli.rpc_port = v;
-        }
-        if let Some(v) = cfg.rpc.cors
-            && !cli.rpc_cors
-        {
-            cli.rpc_cors = v;
-        }
-        if let Some(ref v) = cfg.rpc.host
-            && cli.rpc_host == "127.0.0.1"
-        {
-            cli.rpc_host = v.clone();
-        }
-        if let Some(v) = cfg.rpc.rate_limit
-            && cli.rpc_rate_limit == 1000
-        {
-            cli.rpc_rate_limit = v;
-        }
-        if let Some(v) = cfg.rpc.metrics_port
-            && cli.metrics_port == 0
-        {
-            cli.metrics_port = v;
-        }
-        if let Some(ref peers) = cfg.network.boot_peers
-            && cli.peers.is_empty()
-        {
-            cli.peers = peers.clone();
-        }
-        // Apply log level from config file if CLI flag not set
-        if cli.log_level.is_none() {
-            cli.log_level = cfg.logging.level;
-        }
-        // Apply log format from config file if CLI uses default (Plain)
-        if matches!(cli.log_format, LogFormat::Plain)
-            && let Some(ref fmt) = cfg.logging.format
-        {
-            match fmt.as_str() {
-                "json" => cli.log_format = LogFormat::Json,
-                "pretty" => cli.log_format = LogFormat::Pretty,
-                "plain" => {}
-                other => eprintln!("warning: unknown log format in config: {:?}", other),
-            }
-        }
+        cli.apply_config_defaults(&cfg);
     }
 
     // Build EnvFilter: CLI arg > config file > RUST_LOG env var > "info"
@@ -464,4 +490,159 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config_path: cli.config.clone(),
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_cli() -> Cli {
+        Cli {
+            config: Some("/tmp/grey.toml".to_string()),
+            validator_index: 0,
+            listen_addr: "127.0.0.1".to_string(),
+            port: 9000,
+            peers: vec![],
+            tiny: true,
+            chain: None,
+            chain_spec: None,
+            genesis_time: 0,
+            info: false,
+            export_chain_spec: None,
+            verify_state: false,
+            test: false,
+            test_blocks: 20,
+            testnet: None,
+            seq_testnet: false,
+            seq_testnet_blocks: None,
+            db_path: "./grey-db".to_string(),
+            keystore_path: None,
+            pruning_depth: 0,
+            rpc_port: 9933,
+            rpc_rate_limit: 1000,
+            rpc_cors: false,
+            rpc_host: "127.0.0.1".to_string(),
+            metrics_port: 0,
+            log_format: LogFormat::Plain,
+            log_level: None,
+        }
+    }
+
+    fn config_with_all_fields() -> config::ConfigFile {
+        config::ConfigFile {
+            node: config::NodeConfig {
+                validator_index: Some(5),
+                listen_addr: Some("0.0.0.0".to_string()),
+                port: Some(9001),
+                tiny: Some(false),
+                chain: Some("full".to_string()),
+                chain_spec: Some("/tmp/custom-spec.json".to_string()),
+                genesis_time: Some(1_700_000_000),
+                db_path: Some("/data/node-db".to_string()),
+            },
+            rpc: config::RpcConfig {
+                port: Some(9944),
+                host: Some("0.0.0.0".to_string()),
+                cors: Some(true),
+                rate_limit: Some(500),
+                metrics_port: Some(9100),
+            },
+            storage: config::StorageConfig {
+                db_path: Some("/data/storage-db".to_string()),
+                pruning_depth: Some(256),
+            },
+            network: config::NetworkConfig {
+                boot_peers: Some(vec!["/ip4/10.0.0.1/tcp/9000".to_string()]),
+            },
+            logging: config::LoggingConfig {
+                format: Some("json".to_string()),
+                level: Some("grey_network=debug,info".to_string()),
+            },
+        }
+    }
+
+    #[test]
+    fn test_apply_config_defaults_honors_declared_fields() {
+        let mut cli = default_cli();
+
+        cli.apply_config_defaults(&config_with_all_fields());
+
+        assert_eq!(cli.validator_index, 5);
+        assert_eq!(cli.listen_addr, "0.0.0.0");
+        assert_eq!(cli.port, 9001);
+        assert_eq!(cli.chain_spec.as_deref(), Some("/tmp/custom-spec.json"));
+        assert_eq!(
+            cli.chain, None,
+            "chain spec should take precedence over chain"
+        );
+        assert_eq!(cli.genesis_time, 1_700_000_000);
+        assert_eq!(cli.db_path, "/data/storage-db");
+        assert_eq!(cli.pruning_depth, 256);
+        assert_eq!(cli.rpc_port, 9944);
+        assert!(cli.rpc_cors);
+        assert_eq!(cli.rpc_host, "0.0.0.0");
+        assert_eq!(cli.rpc_rate_limit, 500);
+        assert_eq!(cli.metrics_port, 9100);
+        assert_eq!(cli.peers, vec!["/ip4/10.0.0.1/tcp/9000".to_string()]);
+        assert_eq!(cli.log_format, LogFormat::Json);
+        assert_eq!(cli.log_level.as_deref(), Some("grey_network=debug,info"));
+    }
+
+    #[test]
+    fn test_apply_config_defaults_uses_tiny_when_no_chain_is_set() {
+        let mut cli = default_cli();
+        let cfg = config::ConfigFile {
+            node: config::NodeConfig {
+                tiny: Some(false),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        cli.apply_config_defaults(&cfg);
+
+        assert!(!cli.tiny);
+    }
+
+    #[test]
+    fn test_apply_config_defaults_preserves_cli_overrides() {
+        let mut cli = default_cli();
+        cli.validator_index = 2;
+        cli.listen_addr = "192.0.2.1".to_string();
+        cli.port = 9101;
+        cli.peers = vec!["/ip4/192.0.2.10/tcp/9000".to_string()];
+        cli.tiny = false;
+        cli.chain = Some("tiny".to_string());
+        cli.chain_spec = Some("/tmp/cli-spec.json".to_string());
+        cli.genesis_time = 42;
+        cli.db_path = "/cli/db".to_string();
+        cli.pruning_depth = 64;
+        cli.rpc_port = 19444;
+        cli.rpc_rate_limit = 25;
+        cli.rpc_cors = true;
+        cli.rpc_host = "0.0.0.0".to_string();
+        cli.metrics_port = 9200;
+        cli.log_format = LogFormat::Pretty;
+        cli.log_level = Some("debug".to_string());
+
+        cli.apply_config_defaults(&config_with_all_fields());
+
+        assert_eq!(cli.validator_index, 2);
+        assert_eq!(cli.listen_addr, "192.0.2.1");
+        assert_eq!(cli.port, 9101);
+        assert_eq!(cli.peers, vec!["/ip4/192.0.2.10/tcp/9000".to_string()]);
+        assert!(!cli.tiny);
+        assert_eq!(cli.chain.as_deref(), Some("tiny"));
+        assert_eq!(cli.chain_spec.as_deref(), Some("/tmp/cli-spec.json"));
+        assert_eq!(cli.genesis_time, 42);
+        assert_eq!(cli.db_path, "/cli/db");
+        assert_eq!(cli.pruning_depth, 64);
+        assert_eq!(cli.rpc_port, 19444);
+        assert_eq!(cli.rpc_rate_limit, 25);
+        assert!(cli.rpc_cors);
+        assert_eq!(cli.rpc_host, "0.0.0.0");
+        assert_eq!(cli.metrics_port, 9200);
+        assert_eq!(cli.log_format, LogFormat::Pretty);
+        assert_eq!(cli.log_level.as_deref(), Some("debug"));
+    }
 }
