@@ -73,7 +73,7 @@ pub struct TranslationContext {
     fixup_pcs: std::collections::HashMap<usize, u32>,
     /// Return-address fixups: (jump_table_index, risc-v return address).
     /// Resolved during `apply_fixups` to patch jump table entries.
-    return_fixups: Vec<(usize, u64)>,
+    pub(crate) return_fixups: Vec<(usize, u64)>,
     /// Pending AUIPC: (rd, computed_address). Used to pair with the next JALR.
     pending_auipc: Option<(u8, u64)>,
     /// Pending LUI: (rd, upper_imm). Used to fuse LUI+ADDI into single load_imm.
@@ -373,17 +373,30 @@ impl TranslationContext {
         }
 
         // Plain JALR (no preceding auipc, or auipc was for different reg)
-        if rd == 0 && rs1 == 1 && imm == 0 {
-            // ret: jump_ind via RA (holds jump table addr or halt addr)
+        if rd == 0 {
+            // Tail call or return: jump_ind without saving return address.
+            // Handles ret (rs1=ra, imm=0) and tail calls through any register.
             let pvm_rs1 = self.require_reg(rs1)?;
             self.emit_inst(50); // jump_ind
             self.emit_data(pvm_rs1);
-            self.emit_var_imm(0);
+            self.emit_var_imm(imm);
         } else {
-            // General JALR — uncommon without auipc pairing
+            // Indirect call (e.g. vtable dispatch): save return address then jump.
+            // Use load_imm_jump_ind (opcode 180): rd = return_addr, jump via rs1+imm.
+            let rv_return_addr = addr + 4;
+            let jt_idx = self.jump_table.len();
+            self.jump_table.push(0); // placeholder
+            self.return_fixups.push((jt_idx, rv_return_addr));
+            let jt_addr = ((jt_idx + 1) * 2) as i32;
+
+            let pvm_rd = self.require_reg(rd)?;
             let pvm_rs1 = self.require_reg(rs1)?;
-            self.emit_inst(50); // jump_ind
-            self.emit_data(pvm_rs1);
+            let lx = Self::var_imm_byte_count(jt_addr);
+
+            self.emit_inst(180); // load_imm_jump_ind
+            self.emit_data(pvm_rd | (pvm_rs1 << 4));
+            self.emit_data(lx as u8);
+            self.emit_var_imm(jt_addr);
             self.emit_var_imm(imm);
         }
         Ok(())
