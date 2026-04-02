@@ -372,8 +372,7 @@ fn validate_basic_blocks(code: &[u8], bitmask: &[u8], jump_table: &[u32]) -> boo
 
 /// Decode a variable-length natural number (JAM compact encoding).
 /// Used in PVM blob header for |j| and |c|.
-/// NOTE: Kept as compact for now — PVM blob format change requires
-/// coordinated Lean spec + Rust + test vector update.
+/// TODO: Switch to u32 LE once test vectors are regenerated with new PVM blob format.
 fn decode_natural(data: &[u8], offset: usize) -> Option<(usize, usize)> {
     if offset >= data.len() {
         return None;

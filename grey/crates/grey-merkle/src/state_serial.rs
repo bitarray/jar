@@ -173,82 +173,26 @@ pub fn compute_preimage_info_state_key(
 
 /// Serialize the full state T(σ) into a sorted vector of (key, value) pairs.
 pub fn serialize_state(state: &State, config: &Config) -> Vec<([u8; 31], Vec<u8>)> {
-    let mut kvs = vec![(
-        key_from_index(1),
-        serialize_auth_pool(&state.auth_pool, config),
-    )];
+    use scale::Encode;
+    let _ = config; // Config no longer needed — all sizes encoded in Vecs
 
-    // C(2) → ϕ auth_queue
-    kvs.push((
-        key_from_index(2),
-        serialize_auth_queue(&state.auth_queue, config),
-    ));
-
-    // C(3) → β recent_blocks
-    kvs.push((
-        key_from_index(3),
-        serialize_recent_blocks(&state.recent_blocks),
-    ));
-
-    // C(4) → γ safrole
-    kvs.push((key_from_index(4), serialize_safrole(&state.safrole, config)));
-
-    // C(5) → ψ judgments
-    kvs.push((key_from_index(5), serialize_judgments(&state.judgments)));
-
-    // C(6) → η entropy
-    kvs.push((key_from_index(6), serialize_entropy(&state.entropy)));
-
-    // C(7) → ι pending_validators
-    kvs.push((
-        key_from_index(7),
-        serialize_validators(&state.pending_validators),
-    ));
-
-    // C(8) → κ current_validators
-    kvs.push((
-        key_from_index(8),
-        serialize_validators(&state.current_validators),
-    ));
-
-    // C(9) → λ previous_validators
-    kvs.push((
-        key_from_index(9),
-        serialize_validators(&state.previous_validators),
-    ));
-
-    // C(10) → ρ pending_reports
-    kvs.push((
-        key_from_index(10),
-        serialize_pending_reports(&state.pending_reports),
-    ));
-
-    // C(11) → τ timeslot
-    kvs.push((key_from_index(11), state.timeslot.to_le_bytes().to_vec()));
-
-    // C(12) → χ privileged_services
-    kvs.push((
-        key_from_index(12),
-        serialize_privileged(&state.privileged_services, config),
-    ));
-
-    // C(13) → π statistics
-    kvs.push((
-        key_from_index(13),
-        serialize_statistics(&state.statistics, config),
-    ));
-
-    // C(14) → ω accumulation_queue
-    kvs.push((
-        key_from_index(14),
-        serialize_accumulation_queue(&state.accumulation_queue, config),
-    ));
-
-    // C(15) → ξ accumulation_history
-    kvs.push((
-        key_from_index(15),
-        serialize_accumulation_history(&state.accumulation_history, config),
-    ));
+    let mut kvs = vec![
+        (key_from_index(1), state.auth_pool.encode()), // C(1) α
+        (key_from_index(2), state.auth_queue.encode()), // C(2) ϕ
+        (key_from_index(3), state.recent_blocks.encode()), // C(3) β
+        (key_from_index(4), state.safrole.encode()),   // C(4) γ
+        (key_from_index(5), state.judgments.encode()), // C(5) ψ
+        (key_from_index(6), serialize_entropy(&state.entropy)), // C(6) η (raw 128B)
+        (key_from_index(7), state.pending_validators.encode()), // C(7) ι
+        (key_from_index(8), state.current_validators.encode()), // C(8) κ
+        (key_from_index(9), state.previous_validators.encode()), // C(9) λ
+        (key_from_index(10), state.pending_reports.encode()), // C(10) ρ
+        (key_from_index(11), state.timeslot.to_le_bytes().to_vec()), // C(11) τ
+        (key_from_index(12), state.privileged_services.encode()), // C(12) χ
+        (key_from_index(13), state.statistics.encode()), // C(13) π
+        (key_from_index(14), state.accumulation_queue.encode()), // C(14) ω
+        (key_from_index(15), state.accumulation_history.encode()), // C(15) ξ
+    ];
 
     // C(16) → θ accumulation_outputs
     kvs.push((
@@ -719,34 +663,91 @@ pub fn deserialize_state(
 
     for (key, value) in kvs {
         match classify_key(key) {
-            KeyType::Component(idx) => match idx {
-                1 => deserialize_auth_pool(value, config, &mut state.auth_pool)?,
-                2 => deserialize_auth_queue(value, config, &mut state.auth_queue)?,
-                3 => state.recent_blocks = deserialize_recent_blocks(value)?,
-                4 => state.safrole = deserialize_safrole(value, config)?,
-                5 => state.judgments = deserialize_judgments(value)?,
-                6 => state.entropy = deserialize_entropy(value)?,
-                7 => state.pending_validators = deserialize_validators(value)?,
-                8 => state.current_validators = deserialize_validators(value)?,
-                9 => state.previous_validators = deserialize_validators(value)?,
-                10 => state.pending_reports = deserialize_pending_reports(value, config)?,
-                11 => {
-                    if value.len() < 4 {
-                        return Err("timeslot too short".into());
+            KeyType::Component(idx) => {
+                use scale::Decode;
+                let decode_err = |name: &str, e| format!("C({idx}) {name}: {e}");
+                match idx {
+                    1 => {
+                        state.auth_pool = Decode::decode(value)
+                            .map(|(v, _)| v)
+                            .map_err(|e| decode_err("auth_pool", e))?
                     }
-                    state.timeslot = u32::from_le_bytes([value[0], value[1], value[2], value[3]]);
+                    2 => {
+                        state.auth_queue = Decode::decode(value)
+                            .map(|(v, _)| v)
+                            .map_err(|e| decode_err("auth_queue", e))?
+                    }
+                    3 => {
+                        state.recent_blocks = Decode::decode(value)
+                            .map(|(v, _)| v)
+                            .map_err(|e| decode_err("recent_blocks", e))?
+                    }
+                    4 => {
+                        state.safrole = Decode::decode(value)
+                            .map(|(v, _)| v)
+                            .map_err(|e| decode_err("safrole", e))?
+                    }
+                    5 => {
+                        state.judgments = Decode::decode(value)
+                            .map(|(v, _)| v)
+                            .map_err(|e| decode_err("judgments", e))?
+                    }
+                    6 => state.entropy = deserialize_entropy(value)?,
+                    7 => {
+                        state.pending_validators = Decode::decode(value)
+                            .map(|(v, _)| v)
+                            .map_err(|e| decode_err("pending_validators", e))?
+                    }
+                    8 => {
+                        state.current_validators = Decode::decode(value)
+                            .map(|(v, _)| v)
+                            .map_err(|e| decode_err("current_validators", e))?
+                    }
+                    9 => {
+                        state.previous_validators = Decode::decode(value)
+                            .map(|(v, _)| v)
+                            .map_err(|e| decode_err("previous_validators", e))?
+                    }
+                    10 => {
+                        state.pending_reports = Decode::decode(value)
+                            .map(|(v, _)| v)
+                            .map_err(|e| decode_err("pending_reports", e))?
+                    }
+                    11 => {
+                        if value.len() < 4 {
+                            return Err("timeslot too short".into());
+                        }
+                        state.timeslot =
+                            u32::from_le_bytes([value[0], value[1], value[2], value[3]]);
+                    }
+                    12 => {
+                        state.privileged_services = Decode::decode(value)
+                            .map(|(v, _)| v)
+                            .map_err(|e| decode_err("privileged", e))?
+                    }
+                    13 => {
+                        state.statistics = Decode::decode(value)
+                            .map(|(v, _)| v)
+                            .map_err(|e| decode_err("statistics", e))?
+                    }
+                    14 => {
+                        state.accumulation_queue = Decode::decode(value)
+                            .map(|(v, _)| v)
+                            .map_err(|e| decode_err("accum_queue", e))?
+                    }
+                    15 => {
+                        state.accumulation_history = Decode::decode(value)
+                            .map(|(v, _)| v)
+                            .map_err(|e| decode_err("accum_history", e))?
+                    }
+                    16 => {
+                        state.accumulation_outputs = Decode::decode(value)
+                            .map(|(v, _)| v)
+                            .map_err(|e| decode_err("accum_outputs", e))?
+                    }
+                    _ => {} // unknown component index, ignore
                 }
-                12 => state.privileged_services = deserialize_privileged(value, config)?,
-                13 => state.statistics = deserialize_statistics(value, config)?,
-                14 => {
-                    state.accumulation_queue = deserialize_accumulation_queue(value, config)?;
-                }
-                15 => {
-                    state.accumulation_history = deserialize_accumulation_history(value, config)?;
-                }
-                16 => state.accumulation_outputs = deserialize_accumulation_outputs(value)?,
-                _ => {} // unknown component index, ignore
-            },
+            }
             KeyType::ServiceAccount(service_id) => {
                 let account = deserialize_service_account(value)?;
                 state.services.insert(service_id, account);

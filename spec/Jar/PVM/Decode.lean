@@ -102,7 +102,8 @@ def decodeJamNatural (data : ByteArray) (offset : Nat) : Option (Nat × Nat) :=
 /-- Deblob: parse a program blob into (code, bitmask, jumpTable). GP Appendix A.
     Format: E(|j|) ‖ E₁(z) ‖ E(|c|) ‖ E_z(j) ‖ c ‖ k
     where z = jump table entry size (1-4), j = jump table, c = code, k = bitmask.
-    E() uses JAM codec variable-length natural encoding. -/
+    E() uses JAM codec variable-length natural encoding.
+    TODO: jar1 should use u32 LE once test vectors are regenerated. -/
 def deblob (blob : ByteArray) : Option ProgramBlob := do
   -- Decode |j| using variable-length natural
   let (jumpLen, n1) ← decodeJamNatural blob 0

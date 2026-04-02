@@ -122,10 +122,10 @@ mod service {
         result
     }
 
-    // Offset to pixel data in the operand blob (after fixed-width encoding):
-    // item_discriminator(1) + package_hash(32) + exports_root(32) +
-    // authorizer_hash(32) + payload_hash(32) = 129
-    // + accumulate_gas(u64=8) + result_discriminator(1) + result_length(u32=4) = 142
+    // Offset to pixel data in the operand blob (fixed-width encoding):
+    // item_disc(1) + package_hash(32) + exports_root(32) +
+    // authorizer_hash(32) + payload_hash(32) + gas(u64=8) +
+    // result_disc(1) + result_len(u32=4) = 142
     const PIXEL_DATA_OFFSET: usize = 142;
 
     #[no_mangle]

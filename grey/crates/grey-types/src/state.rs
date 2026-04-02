@@ -205,7 +205,9 @@ pub struct ValidatorStatistics {
 }
 
 /// Per-validator performance record.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, scale::Encode, scale::Decode)]
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, scale::Encode, scale::Decode,
+)]
 pub struct ValidatorRecord {
     /// b: Blocks produced.
     #[serde(rename = "blocks")]

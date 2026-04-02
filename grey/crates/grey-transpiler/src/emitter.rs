@@ -5,8 +5,7 @@
 
 /// Encode a natural number using the JAM variable-length codec.
 /// Used in the deblob format for jump table length and code length.
-/// NOTE: Kept as compact for now — PVM blob format change requires
-/// coordinated Lean spec + Rust + test vector update.
+/// TODO: Switch to u32 LE once test vectors are regenerated with new PVM blob format.
 pub fn encode_natural(value: u64) -> Vec<u8> {
     if value < 128 {
         vec![value as u8]
