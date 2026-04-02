@@ -62,7 +62,7 @@ grey-network = { path = "grey/crates/grey-network" }
 grey-transpiler = { path = "grey/crates/grey-transpiler" }
 grey-store = { path = "grey/crates/grey-store" }
 grey-rpc = { path = "grey/crates/grey-rpc" }
-scale = { path = "grey/crates/scale" }
+scale = { path = "grey/crates/scale", default-features = false, features = ["std"] }
 scale-derive = { path = "grey/crates/scale-derive" }
 
 # External dependencies

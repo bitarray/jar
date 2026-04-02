@@ -3,6 +3,9 @@
 //! Implements the standard program format (GP eq A.38) and the
 //! inner deblob format (GP eq A.2).
 
+use javm::program::{CodeBlobHeader, ProgramHeader};
+use scale::{Encode, U24};
+
 /// Pack a bitmask array (one byte per bit, 0 or 1) into packed bytes (LSB first).
 /// GP eq C.9: bit i is at byte i/8, position i%8.
 pub fn pack_bitmask(bitmask: &[u8]) -> Vec<u8> {
@@ -41,16 +44,13 @@ pub fn build_code_blob(code: &[u8], bitmask: &[u8], jump_table: &[u32]) -> Vec<u
         }
     };
 
-    let mut blob = Vec::new();
+    let header = CodeBlobHeader {
+        jump_len: jump_table.len() as u32,
+        entry_size: z,
+        code_len: code.len() as u32,
+    };
 
-    // E₄(|j|) — jump table length (4 bytes LE)
-    blob.extend_from_slice(&(jump_table.len() as u32).to_le_bytes());
-
-    // E₁(z) — encoding size per entry
-    blob.push(z);
-
-    // E₄(|c|) — code length (4 bytes LE)
-    blob.extend_from_slice(&(code.len() as u32).to_le_bytes());
+    let mut blob = header.encode();
 
     // E_z(j) — jump table entries, z bytes each, LE
     for &entry in jump_table {
@@ -79,28 +79,15 @@ pub fn build_standard_program(
     jump_table: &[u32],
 ) -> Vec<u8> {
     let code_blob = build_code_blob(code, bitmask, jump_table);
-    let mut program = Vec::new();
 
-    // E₃(|o|) — read-only data size (3 bytes LE)
-    let ro_size = ro_data.len() as u32;
-    program.push(ro_size as u8);
-    program.push((ro_size >> 8) as u8);
-    program.push((ro_size >> 16) as u8);
+    let header = ProgramHeader {
+        ro_size: U24::new(ro_data.len() as u32),
+        rw_size: U24::new(rw_data.len() as u32),
+        heap_pages,
+        stack_size: U24::new(stack_size),
+    };
 
-    // E₃(|w|) — read-write data size (3 bytes LE)
-    let rw_size = rw_data.len() as u32;
-    program.push(rw_size as u8);
-    program.push((rw_size >> 8) as u8);
-    program.push((rw_size >> 16) as u8);
-
-    // E₂(z) — heap pages (2 bytes LE)
-    program.push(heap_pages as u8);
-    program.push((heap_pages >> 8) as u8);
-
-    // E₃(s) — stack size (3 bytes LE)
-    program.push(stack_size as u8);
-    program.push((stack_size >> 8) as u8);
-    program.push((stack_size >> 16) as u8);
+    let mut program = header.encode();
 
     // o — read-only data
     program.extend_from_slice(ro_data);
@@ -109,11 +96,7 @@ pub fn build_standard_program(
     program.extend_from_slice(rw_data);
 
     // E₄(|c|) — code blob length (4 bytes LE)
-    let blob_len = code_blob.len() as u32;
-    program.push(blob_len as u8);
-    program.push((blob_len >> 8) as u8);
-    program.push((blob_len >> 16) as u8);
-    program.push((blob_len >> 24) as u8);
+    (code_blob.len() as u32).encode_to(&mut program);
 
     // code blob (deblob format)
     program.extend_from_slice(&code_blob);

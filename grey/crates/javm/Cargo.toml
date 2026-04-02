@@ -14,5 +14,6 @@ signals = ["std"]
 [dependencies]
 libc = { version = "0.2", optional = true }
 memoffset = { version = "0.9", optional = true }
+scale = { workspace = true, default-features = false }
 thiserror = { workspace = true }
 tracing = { workspace = true }

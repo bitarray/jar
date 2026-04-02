@@ -12,26 +12,51 @@ use alloc::{vec, vec::Vec};
 use crate::instruction::Opcode;
 use crate::vm::Pvm;
 use crate::{Gas, PVM_PAGE_SIZE};
+use scale::{Decode as _, U24};
+
+/// Inner code blob header (deblob format, GP eq A.2).
+///
+/// `E₄(|j|) ⌢ E₁(z) ⌢ E₄(|c|) ⌢ E_z(j) ⌢ code ⌢ packed_bitmask`
+///
+/// This struct covers the fixed header portion. The variable-length
+/// jump table, code, and bitmask follow immediately after.
+#[derive(Clone, Debug, scale::Encode, scale::Decode)]
+pub struct CodeBlobHeader {
+    /// Number of jump table entries.
+    pub jump_len: u32,
+    /// Bytes per jump table entry (1–4).
+    pub entry_size: u8,
+    /// Code length in bytes.
+    pub code_len: u32,
+}
+
+/// Standard program blob header (GP eq A.38).
+///
+/// `E₃(|o|) ⌢ E₃(|w|) ⌢ E₂(z) ⌢ E₃(s) ⌢ o ⌢ w ⌢ E₄(|c|) ⌢ code_blob`
+///
+/// This struct covers the fixed 11-byte header. The data sections and
+/// code blob follow immediately after.
+#[derive(Clone, Debug, scale::Encode, scale::Decode)]
+pub struct ProgramHeader {
+    /// Read-only data size in bytes.
+    pub ro_size: U24,
+    /// Read-write data size in bytes.
+    pub rw_size: U24,
+    /// Additional heap pages.
+    pub heap_pages: u16,
+    /// Stack size in bytes.
+    pub stack_size: U24,
+}
 
 /// Parse a program blob into (code, bitmask, jump_table) (eq A.2).
 ///
 /// deblob(p) = (c, k, j) where:
 ///   p = E₄(|j|) ⌢ E₁(z) ⌢ E₄(|c|) ⌢ E_z(j) ⌢ E(c) ⌢ E(k), |k| = |c|
 pub fn deblob(blob: &[u8]) -> Option<(&[u8], Vec<u8>, Vec<u32>)> {
-    let mut offset = 0;
-
-    // Read |j| (jump table length) as u32 LE
-    let jt_len = read_le_u32(blob, &mut offset)? as usize;
-
-    // Read z (encoding size for jump table entries) as 1 byte
-    if offset >= blob.len() {
-        return None;
-    }
-    let z = blob[offset] as usize;
-    offset += 1;
-
-    // Read |c| (code length) as u32 LE
-    let code_len = read_le_u32(blob, &mut offset)? as usize;
+    let (header, mut offset) = CodeBlobHeader::decode(blob).ok()?;
+    let jt_len = header.jump_len as usize;
+    let z = header.entry_size as usize;
+    let code_len = header.code_len as usize;
 
     // Read jump table: jt_len entries, each z bytes LE
     let mut jump_table = Vec::with_capacity(jt_len);
@@ -112,16 +137,11 @@ pub fn initialize_program(program_blob: &[u8], arguments: &[u8], gas: Gas) -> Op
 
     // Parse the standard program blob header:
     // E₃(|o|) ⌢ E₃(|w|) ⌢ E₂(z) ⌢ E₃(s) ⌢ o ⌢ w ⌢ E₄(|c|) ⌢ c
-    if blob.len() < 15 {
-        return None;
-    }
-
-    let mut offset = 0;
-
-    let ro_size = read_le_u24(blob, &mut offset)? as u32;
-    let rw_size = read_le_u24(blob, &mut offset)? as u32;
-    let heap_pages = read_le_u16(blob, &mut offset)? as u32;
-    let stack_size = read_le_u24(blob, &mut offset)? as u32;
+    let (header, mut offset) = ProgramHeader::decode(blob).ok()?;
+    let ro_size = header.ro_size.as_u32();
+    let rw_size = header.rw_size.as_u32();
+    let heap_pages = header.heap_pages as u32;
+    let stack_size = header.stack_size.as_u32();
 
     // Read read-only data
     if offset + ro_size as usize > blob.len() {
@@ -262,15 +282,11 @@ pub fn parse_program_blob<'a>(
 ) -> Option<ParsedProgram<'a>> {
     let blob = skip_metadata(program_blob);
 
-    if blob.len() < 15 {
-        return None;
-    }
-
-    let mut offset = 0;
-    let ro_size = read_le_u24(blob, &mut offset)? as u32;
-    let rw_size = read_le_u24(blob, &mut offset)? as u32;
-    let heap_pages = read_le_u16(blob, &mut offset)? as u32;
-    let stack_size = read_le_u24(blob, &mut offset)? as u32;
+    let (header, mut offset) = ProgramHeader::decode(blob).ok()?;
+    let ro_size = header.ro_size.as_u32();
+    let rw_size = header.rw_size.as_u32();
+    let heap_pages = header.heap_pages as u32;
+    let stack_size = header.stack_size.as_u32();
 
     if offset + ro_size as usize > blob.len() {
         return None;
@@ -368,15 +384,6 @@ fn validate_basic_blocks(code: &[u8], bitmask: &[u8], jump_table: &[u32]) -> boo
     true
 }
 
-fn read_le_u16(data: &[u8], offset: &mut usize) -> Option<u16> {
-    if *offset + 2 > data.len() {
-        return None;
-    }
-    let val = u16::from_le_bytes([data[*offset], data[*offset + 1]]);
-    *offset += 2;
-    Some(val)
-}
-
 /// Skip metadata prefix from polkavm-linker output.
 /// Detects metadata by checking if the first 3 bytes as E3(ro_size) would be too large.
 fn skip_metadata(blob: &[u8]) -> &[u8] {
@@ -411,17 +418,6 @@ fn read_le_u32(data: &[u8], offset: &mut usize) -> Option<u32> {
         data[*offset + 3],
     ]);
     *offset += 4;
-    Some(val)
-}
-
-fn read_le_u24(data: &[u8], offset: &mut usize) -> Option<u32> {
-    if *offset + 3 > data.len() {
-        return None;
-    }
-    let val = data[*offset] as u32
-        | ((data[*offset + 1] as u32) << 8)
-        | ((data[*offset + 2] as u32) << 16);
-    *offset += 3;
     Some(val)
 }
 
