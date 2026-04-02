@@ -160,6 +160,7 @@ pub fn link_elf_service(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
         .ok_or_else(|| TranspileError::InvalidSection("no 'accumulate' symbol found".into()))?;
 
     let mut ctx = TranslationContext::new(elf.is_64bit);
+    ctx.code_ranges = elf.code_ranges.clone();
 
     // Reserve 10 bytes for dispatch header (2 x jump instructions)
     let header_size = 10u32;
@@ -347,7 +348,7 @@ fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError> {
                 s.addr,
                 data[s.file_off..s.file_off + s.size].to_vec(),
             ));
-        } else if !is_write && !is_exec && (name.starts_with(".rodata") || name == ".srodata") {
+        } else if !is_exec && (name.starts_with(".rodata") || name == ".srodata" || name.starts_with(".data.rel.ro")) {
             if s.file_off + s.size <= data.len() {
                 ro_sections.push((
                     s.addr,
@@ -803,8 +804,18 @@ fn translate_section_linked(
                         // and set pending_load_imm for cascading fusion.
                         let dest = if next_rd != 0 { next_rd } else { rd };
                         let pos = ctx.code.len();
-                        ctx.emit_load_imm(dest, target_addr as i64)?;
-                        ctx.pending_load_imm = Some((dest, target_addr as i64, pos));
+                        // If target is a code address (function pointer), load
+                        // a jump table address instead of the raw RISC-V address.
+                        let load_val = if ctx.is_code_addr(target_addr) {
+                            let jt_idx = ctx.jump_table.len();
+                            ctx.jump_table.push(0);
+                            ctx.return_fixups.push((jt_idx, target_addr));
+                            ((jt_idx + 1) * 2) as i64
+                        } else {
+                            target_addr as i64
+                        };
+                        ctx.emit_load_imm(dest, load_val)?;
+                        ctx.pending_load_imm = Some((dest, load_val, pos));
                         ctx.address_map.insert(next_addr, ctx.code.len() as u32);
                         offset += 8; // skip both AUIPC and ADDI
                         continue;
@@ -815,8 +826,17 @@ fn translate_section_linked(
                 // This enables fusion with the next load/store/ALU/branch via
                 // pending_load_imm even when the LO12 is a LOAD or STORE directly.
                 let pos = ctx.code.len();
-                ctx.emit_load_imm(rd, target_addr as i64)?;
-                ctx.pending_load_imm = Some((rd, target_addr as i64, pos));
+                // If target is a code address, use jump table address.
+                let load_val = if ctx.is_code_addr(target_addr) {
+                    let jt_idx = ctx.jump_table.len();
+                    ctx.jump_table.push(0);
+                    ctx.return_fixups.push((jt_idx, target_addr));
+                    ((jt_idx + 1) * 2) as i64
+                } else {
+                    target_addr as i64
+                };
+                ctx.emit_load_imm(rd, load_val)?;
+                ctx.pending_load_imm = Some((rd, load_val, pos));
                 offset += 4;
                 continue;
             }

@@ -84,6 +84,9 @@ pub struct TranslationContext {
     pub(crate) pending_load_imm: Option<(u8, i64, usize)>,
     /// Last immediate loaded into t0 (x5) — used for ecall → ecalli translation.
     last_t0_imm: Option<i32>,
+    /// RISC-V code address ranges (lo, hi) — used to detect function pointers
+    /// loaded via auipc+addi that need jump table entries.
+    pub code_ranges: Vec<(u64, u64)>,
 }
 
 impl TranslationContext {
@@ -101,6 +104,7 @@ impl TranslationContext {
             pending_lui: None,
             pending_load_imm: None,
             last_t0_imm: None,
+            code_ranges: Vec::new(),
         }
     }
 
@@ -147,8 +151,8 @@ impl TranslationContext {
         let rs2 = ((inst >> 20) & 0x1F) as u8;
         let funct7 = (inst >> 25) & 0x7F;
 
-        // Flush pending auipc if this isn't a JALR that consumes it.
-        if opcode != 0x67
+        // Flush pending auipc if this isn't a JALR or OP-IMM (ADDI) that consumes it.
+        if opcode != 0x67 && opcode != 0x13
             && let Some((auipc_rd, auipc_val)) = self.pending_auipc.take()
         {
             self.emit_load_imm(auipc_rd, auipc_val as i64)?;
@@ -394,10 +398,10 @@ impl TranslationContext {
             let lx = Self::var_imm_byte_count(jt_addr);
 
             self.emit_inst(180); // load_imm_jump_ind
-            self.emit_data(pvm_rd | (pvm_rs1 << 4));
-            self.emit_data(lx as u8);
-            self.emit_var_imm(jt_addr);
-            self.emit_var_imm(imm);
+            self.emit_data(pvm_rd | (pvm_rs1 << 4)); // reg_byte: ra=rd, rb=rs1
+            self.emit_data(lx as u8); // lx: byte count for imm_x (return addr)
+            self.emit_var_imm(jt_addr); // imm_x: jump table return address
+            self.emit_var_imm(imm); // imm_y: offset added to rs1
         }
         Ok(())
     }
@@ -712,6 +716,31 @@ impl TranslationContext {
         // Track `li t0, N` (ADDI x5, x0, N) for ecall ID translation
         if funct3 == 0 && rd == 5 && rs1 == 0 {
             self.last_t0_imm = Some(imm);
+        }
+
+        // AUIPC+ADDI fusion: compute full address. If it's a code address (function
+        // pointer), emit a jump table entry so indirect calls via djump work.
+        if let Some((auipc_rd, auipc_val)) = self.pending_auipc.take() {
+            if funct3 == 0 && rd == auipc_rd && rs1 == auipc_rd && rd != 0 {
+                let full_addr = (auipc_val as i64 + imm as i64) as u64;
+                if self.is_code_addr(full_addr) {
+                    let jt_idx = self.jump_table.len();
+                    self.jump_table.push(0); // placeholder, resolved by apply_fixups
+                    self.return_fixups.push((jt_idx, full_addr));
+                    let jt_addr = ((jt_idx + 1) * 2) as i64;
+                    let pos = self.code.len();
+                    self.emit_load_imm(rd, jt_addr)?;
+                    self.pending_load_imm = Some((rd, jt_addr, pos));
+                } else {
+                    let combined = auipc_val as i64 + imm as i64;
+                    let pos = self.code.len();
+                    self.emit_load_imm(rd, combined)?;
+                    self.pending_load_imm = Some((rd, combined, pos));
+                }
+                return Ok(());
+            }
+            // Not a matching ADDI — flush the pending AUIPC
+            self.emit_load_imm(auipc_rd, auipc_val as i64)?;
         }
 
         // LUI+ADDI fusion: if there's a pending LUI and this is ADDI rd, rd, imm
@@ -1768,6 +1797,11 @@ impl TranslationContext {
     ///
     /// Only creates jump table entries for the given `targets` — the set of
     /// RISC-V addresses actually referenced as function pointers (e.g. from
+    /// Check whether an address falls within any RISC-V code section.
+    pub fn is_code_addr(&self, addr: u64) -> bool {
+        self.code_ranges.iter().any(|(lo, hi)| addr >= *lo && addr < *hi)
+    }
+
     /// absolute relocations in data sections like vtables). Returns a map of
     /// RISC-V address → jump table address (= (index+1)*2).
     ///
