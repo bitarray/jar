@@ -64,10 +64,10 @@ struct LinkedElf {
     /// RW data blob and its PVM base address
     rw_data: Vec<u8>,
     _rw_base: u64,
-    /// Stack size (= ro_base, so RO data is at the right PVM address)
+    /// Stack size in bytes (= ro_base, so RO data is at the right PVM address)
     stack_size: u32,
     /// Heap pages
-    heap_pages: u16,
+    heap_pages: u32,
     /// PCREL_HI20: AUIPC instruction vaddr → resolved data address.
     /// The AUIPC itself should emit load_imm with this address.
     hi20_targets: HashMap<u64, u64>,
@@ -128,7 +128,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
         &ro_data,
         &rw_data,
         elf.heap_pages,
-        elf.stack_size,
+        elf.stack_size / 4096,
         &ctx.code,
         &ctx.bitmask,
         &ctx.jump_table,
@@ -231,7 +231,7 @@ pub fn link_elf_service(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
         &ro_data,
         &rw_data,
         elf.heap_pages,
-        elf.stack_size,
+        elf.stack_size / 4096,
         &ctx.code,
         &ctx.bitmask,
         &ctx.jump_table,
@@ -573,7 +573,7 @@ fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError> {
         }
     }
 
-    let heap_pages = 16u16; // 64KB heap
+    let heap_pages = 16u32; // 64KB heap
 
     Ok(LinkedElf {
         is_64bit,

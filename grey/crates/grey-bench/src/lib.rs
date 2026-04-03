@@ -68,7 +68,7 @@ pub const SORT_N: u32 = 1_000;
 ///   halt
 pub fn grey_fib_blob(n: u64) -> Vec<u8> {
     let mut asm = Assembler::new();
-    asm.set_stack_size(4096);
+    asm.set_stack_pages(1);
     asm.set_heap_pages(0);
 
     asm.load_imm_64(Reg::RA, 0xFFFF0000u64); // halt address (linear layout doesn't pre-set RA)
@@ -106,7 +106,7 @@ pub fn grey_fib_blob(n: u64) -> Vec<u8> {
 /// Repeatedly calls ecalli(0) N times, then halts.
 pub fn grey_hostcall_blob(n: u64) -> Vec<u8> {
     let mut asm = Assembler::new();
-    asm.set_stack_size(4096);
+    asm.set_stack_pages(1);
     asm.set_heap_pages(0);
 
     asm.load_imm_64(Reg::RA, 0xFFFF0000u64); // halt address
@@ -146,13 +146,14 @@ pub fn grey_hostcall_blob(n: u64) -> Vec<u8> {
 ///   - O(n²) comparisons and O(n²) memory moves for worst-case input
 pub fn grey_sort_blob(n: u32) -> Vec<u8> {
     let array_bytes = n * 4;
-    let stack_size = 4096 + array_bytes;
+    let stack_bytes = 4096 + array_bytes;
+    let stack_pages = stack_bytes.div_ceil(4096);
 
     let mut c = Vec::new(); // code bytes
     let mut m = Vec::new(); // bitmask
 
     // Register assignments
-    // In JAR v0.8.0 linear memory: φ[0]=RA (halt addr), φ[1]=SP
+    // In JAR v1 linear memory: φ[0]=RA (halt addr), φ[1]=SP
     const RA: u8 = 0; // return address (φ[0] = 0xFFFF0000 from init)
     const SP: u8 = 1; // stack pointer (φ[1] = s from init)
     const S0: u8 = 5; // array base
@@ -389,7 +390,7 @@ pub fn grey_sort_blob(n: u32) -> Vec<u8> {
     let offset = (insert_pc as i32) - (j_check_pc as i32);
     c[j_check_pc + 6..j_check_pc + 10].copy_from_slice(&offset.to_le_bytes());
 
-    grey_transpiler::emitter::build_standard_program(&[], &[], 0, stack_size, &c, &m, &[])
+    grey_transpiler::emitter::build_standard_program(&[], &[], 0, stack_pages, &c, &m, &[])
 }
 
 fn emit_branch_lt_u(asm: &mut Assembler, ra: Reg, rb: Reg, rel_offset: i32) {

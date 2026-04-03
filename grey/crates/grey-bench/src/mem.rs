@@ -10,7 +10,7 @@
 const SWEEPS: u32 = 15;
 
 /// Heap base address in the linear memory model.
-/// With stack_size=4096 and no ro/rw/args data:
+/// With stack_pages=1 and no ro/rw/args data:
 ///   heap_start = page_round(4096) + page_round(0) + page_round(0) + page_round(0) = 0x1000
 pub const HEAP_BASE: u64 = 0x1000;
 
@@ -181,9 +181,9 @@ fn pc(c: &[u8]) -> u32 {
     c.len() as u32
 }
 
-fn build_blob(c: Vec<u8>, m: Vec<u8>, stack_size: u32, heap_pages: u16) -> Vec<u8> {
+fn build_blob(c: Vec<u8>, m: Vec<u8>, stack_pages: u32, heap_pages: u32) -> Vec<u8> {
     use grey_transpiler::emitter;
-    emitter::build_standard_program(&[], &[], heap_pages, stack_size, &c, &m, &[])
+    emitter::build_standard_program(&[], &[], heap_pages, stack_pages, &c, &m, &[])
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +199,7 @@ fn build_blob(c: Vec<u8>, m: Vec<u8>, stack_size: u32, heap_pages: u16) -> Vec<u
 /// to expand the heap beyond the u16 heap_pages limit.
 pub fn grey_mem_seq_blob(size_bytes: u64) -> Vec<u8> {
     assert!(size_bytes >= 4096 && size_bytes % 4096 == 0);
-    let heap_pages = (size_bytes / 4096).min(u16::MAX as u64) as u32;
+    let heap_pages = (size_bytes / 4096) as u32;
 
     let mut c = Vec::new();
     let mut m = Vec::new();
@@ -273,7 +273,7 @@ pub fn grey_mem_seq_blob(size_bytes: u64) -> Vec<u8> {
     // Return checksum
     jump_ind(&mut c, &mut m, RA, 0);
 
-    build_blob(c, m, 4096, heap_pages as u16)
+    build_blob(c, m, 1, heap_pages)
 }
 
 // ---------------------------------------------------------------------------
@@ -287,7 +287,7 @@ pub fn grey_mem_seq_blob(size_bytes: u64) -> Vec<u8> {
 pub fn grey_mem_rand_blob(size_bytes: u64) -> Vec<u8> {
     assert!(size_bytes >= 4096 && size_bytes % 4096 == 0);
     let n_elems = size_bytes / 4;
-    let heap_pages = (size_bytes / 4096).min(u16::MAX as u64) as u32;
+    let heap_pages = (size_bytes / 4096) as u32;
     let total_loads = n_elems * SWEEPS as u64;
 
     let mut c = Vec::new();
@@ -353,7 +353,7 @@ pub fn grey_mem_rand_blob(size_bytes: u64) -> Vec<u8> {
     // Return checksum
     jump_ind(&mut c, &mut m, RA, 0);
 
-    build_blob(c, m, 4096, heap_pages as u16)
+    build_blob(c, m, 1, heap_pages)
 }
 
 #[cfg(test)]

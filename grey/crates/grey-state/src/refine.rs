@@ -1053,7 +1053,7 @@ mod tests {
     ) -> Vec<u8> {
         use grey_transpiler::assembler::{Assembler, Reg};
         let mut asm = Assembler::new();
-        asm.set_stack_size(4096);
+        asm.set_stack_pages(1);
         asm.set_heap_pages(4); // 4 pages = 16KB writable memory
 
         // Jump table entry 0 → refine entry
@@ -1231,7 +1231,7 @@ mod tests {
         // ecalli(10) = expunge: request preimage deletion
         // First grow heap so we have writable memory, then write a hash, then expunge it
         let mut asm = grey_transpiler::assembler::Assembler::new();
-        asm.set_stack_size(4096);
+        asm.set_stack_pages(1);
         asm.set_heap_pages(4);
         asm.add_jump_entry();
 
@@ -1274,7 +1274,7 @@ mod tests {
         // Build a simple "echo" sub-program that halts with input as output.
         // On entry: A0 = arg base, A1 = arg len. Halt returns these as output.
         let mut sub_asm = Assembler::new();
-        sub_asm.set_stack_size(4096);
+        sub_asm.set_stack_pages(1);
         sub_asm.set_heap_pages(1);
         sub_asm.add_jump_entry();
         // Just halt — A0/A1 already point to the arguments
@@ -1290,7 +1290,7 @@ mod tests {
         // 2. Write some input data to memory at 0x2100
         // 3. Call invoke(9) with the hash, input, gas budget, output buffer
         let mut caller_asm = Assembler::new();
-        caller_asm.set_stack_size(4096);
+        caller_asm.set_stack_pages(1);
         caller_asm.set_heap_pages(4);
         caller_asm.add_jump_entry();
 

@@ -126,61 +126,6 @@ impl Decode for bool {
 }
 
 // ============================================================================
-// U24 — 3-byte little-endian unsigned integer
-// ============================================================================
-
-/// A 3-byte (24-bit) unsigned integer, stored as u32 but encoded as 3 bytes LE.
-/// Used in PVM program headers for ro_size, rw_size, stack_size.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct U24(pub u32);
-
-impl U24 {
-    pub const MAX: u32 = 0xFF_FFFF;
-
-    pub fn new(val: u32) -> Self {
-        debug_assert!(val <= Self::MAX, "U24 overflow: {val}");
-        Self(val & Self::MAX)
-    }
-
-    pub fn as_u32(self) -> u32 {
-        self.0
-    }
-
-    pub fn as_usize(self) -> usize {
-        self.0 as usize
-    }
-}
-
-impl Encode for U24 {
-    fn encode_to(&self, buf: &mut Vec<u8>) {
-        let bytes = self.0.to_le_bytes();
-        buf.extend_from_slice(&bytes[..3]);
-    }
-}
-
-impl Decode for U24 {
-    fn decode(data: &[u8]) -> Result<(Self, usize), DecodeError> {
-        if data.len() < 3 {
-            return Err(DecodeError::UnexpectedEof);
-        }
-        let val = data[0] as u32 | ((data[1] as u32) << 8) | ((data[2] as u32) << 16);
-        Ok((U24(val), 3))
-    }
-}
-
-impl From<u32> for U24 {
-    fn from(val: u32) -> Self {
-        Self::new(val)
-    }
-}
-
-impl From<U24> for u32 {
-    fn from(val: U24) -> Self {
-        val.0
-    }
-}
-
-// ============================================================================
 // Fixed-size arrays — [T; N] (no length prefix)
 // ============================================================================
 
@@ -429,25 +374,6 @@ mod tests {
         let (decoded, consumed) = <[u8; 4]>::decode(&encoded).unwrap();
         assert_eq!(decoded, val);
         assert_eq!(consumed, 4);
-    }
-
-    #[test]
-    fn test_u24_roundtrip() {
-        let val = U24::new(0x123456);
-        let encoded = val.encode();
-        assert_eq!(encoded, [0x56, 0x34, 0x12]); // 3 bytes LE
-        let (decoded, consumed) = U24::decode(&encoded).unwrap();
-        assert_eq!(decoded, val);
-        assert_eq!(consumed, 3);
-    }
-
-    #[test]
-    fn test_u24_zero() {
-        let val = U24(0);
-        let encoded = val.encode();
-        assert_eq!(encoded, [0, 0, 0]);
-        let (decoded, _) = U24::decode(&encoded).unwrap();
-        assert_eq!(decoded.as_u32(), 0);
     }
 
     #[test]
