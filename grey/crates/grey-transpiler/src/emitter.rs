@@ -18,6 +18,7 @@ pub fn pack_bitmask(bitmask: &[u8]) -> Vec<u8> {
 /// Build a complete JAR v1 program blob.
 ///
 /// Layout: header | ro_data | rw_data | jump_table | code | packed_bitmask
+#[allow(clippy::too_many_arguments)]
 pub fn build_standard_program(
     ro_data: &[u8],
     rw_data: &[u8],
