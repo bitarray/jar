@@ -183,7 +183,7 @@ fn pc(c: &[u8]) -> u32 {
 
 fn build_blob(c: Vec<u8>, m: Vec<u8>, stack_pages: u32, heap_pages: u32) -> Vec<u8> {
     use grey_transpiler::emitter;
-    emitter::build_standard_program(&[], &[], heap_pages, stack_pages, &c, &m, &[])
+    emitter::build_standard_program(&[], &[], heap_pages, heap_pages, stack_pages, &c, &m, &[])
 }
 
 // ---------------------------------------------------------------------------

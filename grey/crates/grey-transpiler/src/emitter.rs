@@ -22,6 +22,7 @@ pub fn build_standard_program(
     ro_data: &[u8],
     rw_data: &[u8],
     heap_pages: u32,
+    max_heap_pages: u32,
     stack_pages: u32,
     code: &[u8],
     bitmask: &[u8],
@@ -54,7 +55,7 @@ pub fn build_standard_program(
         ro_size: ro_data.len() as u32,
         rw_size: rw_data.len() as u32,
         heap_pages,
-        max_heap_pages: heap_pages, // default: max = initial
+        max_heap_pages,
         stack_pages,
         jump_len: jump_table.len() as u32,
         entry_size,
@@ -99,7 +100,7 @@ mod tests {
     fn test_build_minimal() {
         let code = vec![0, 1, 0]; // trap, fallthrough, trap
         let bitmask = vec![1, 1, 1];
-        let blob = build_standard_program(&[], &[], 0, 1, &code, &bitmask, &[]);
+        let blob = build_standard_program(&[], &[], 0, 0, 1, &code, &bitmask, &[]);
 
         // Should be loadable by PVM
         let pvm = javm::program::initialize_program(&blob, &[], 100_000);
@@ -112,7 +113,7 @@ mod tests {
         let rw = vec![0xBE, 0xEF];
         let code = vec![0, 1, 0];
         let bitmask = vec![1, 1, 1];
-        let blob = build_standard_program(&ro, &rw, 1, 1, &code, &bitmask, &[]);
+        let blob = build_standard_program(&ro, &rw, 1, 1, 1, &code, &bitmask, &[]);
 
         let pvm = javm::program::initialize_program(&blob, &[], 100_000);
         assert!(pvm.is_some());

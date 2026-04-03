@@ -128,6 +128,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
         &ro_data,
         &rw_data,
         elf.heap_pages,
+        elf.heap_pages, // max_heap_pages = heap_pages (no grow_heap support by default)
         elf.stack_size / 4096,
         &ctx.code,
         &ctx.bitmask,
@@ -231,6 +232,7 @@ pub fn link_elf_service(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
         &ro_data,
         &rw_data,
         elf.heap_pages,
+        elf.heap_pages, // max_heap_pages = heap_pages (no grow_heap support by default)
         elf.stack_size / 4096,
         &ctx.code,
         &ctx.bitmask,

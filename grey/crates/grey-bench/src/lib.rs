@@ -390,7 +390,7 @@ pub fn grey_sort_blob(n: u32) -> Vec<u8> {
     let offset = (insert_pc as i32) - (j_check_pc as i32);
     c[j_check_pc + 6..j_check_pc + 10].copy_from_slice(&offset.to_le_bytes());
 
-    grey_transpiler::emitter::build_standard_program(&[], &[], 0, stack_pages, &c, &m, &[])
+    grey_transpiler::emitter::build_standard_program(&[], &[], 0, 0, stack_pages, &c, &m, &[])
 }
 
 fn emit_branch_lt_u(asm: &mut Assembler, ra: Reg, rb: Reg, rel_offset: i32) {

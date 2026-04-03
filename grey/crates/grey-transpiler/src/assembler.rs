@@ -32,6 +32,7 @@ pub struct Assembler {
     ro_data: Vec<u8>,
     rw_data: Vec<u8>,
     heap_pages: u32,
+    max_heap_pages: u32,
     stack_pages: u32,
     /// Labels: name → code offset
     labels: std::collections::HashMap<String, u32>,
@@ -54,6 +55,7 @@ impl Assembler {
             ro_data: Vec::new(),
             rw_data: Vec::new(),
             heap_pages: 0,
+            max_heap_pages: 0,
             stack_pages: 1, // 1 page = 4096 bytes default
             labels: std::collections::HashMap::new(),
             _fixups: Vec::new(),
@@ -72,6 +74,14 @@ impl Assembler {
 
     pub fn set_heap_pages(&mut self, pages: u32) -> &mut Self {
         self.heap_pages = pages;
+        if self.max_heap_pages < pages {
+            self.max_heap_pages = pages;
+        }
+        self
+    }
+
+    pub fn set_max_heap_pages(&mut self, pages: u32) -> &mut Self {
+        self.max_heap_pages = pages;
         self
     }
 
@@ -337,6 +347,7 @@ impl Assembler {
             &self.ro_data,
             &self.rw_data,
             self.heap_pages,
+            self.max_heap_pages,
             self.stack_pages,
             &self.code,
             &self.bitmask,
@@ -690,6 +701,7 @@ pub fn build_sample_service_precise() -> Vec<u8> {
         &[], // no ro_data
         &[], // no rw_data
         1,   // 1 heap page
+        1,   // max 1 heap page
         1,   // 1 stack page (4K)
         &code,
         &bitmask,
