@@ -156,7 +156,7 @@ impl Pvm {
         gas: Gas,
     ) -> Self {
         // Build a bitmask where every byte is marked as an instruction start
-        // This is a simplified mode; real programs use deblob.
+        // This is a simplified mode; real programs use parse_blob.
         let bitmask = vec![1u8; code.len()];
         Self::new(
             code,
