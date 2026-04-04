@@ -27,6 +27,9 @@ enum Backend {
         recomp: Box<javm::RecompiledPvm>,
         step: u32,
     },
+    /// Capability-based kernel (v2). Manages multi-VM internally.
+    /// Only exits to host for protocol cap calls.
+    Kernel(Box<javm::kernel::InvocationKernel>),
 }
 
 /// PVM instance backed by either the interpreter or recompiler.
@@ -35,6 +38,19 @@ pub struct PvmInstance {
 }
 
 impl PvmInstance {
+    /// Create a capability-based kernel from a JAR v2 blob.
+    pub fn initialize_v2(code_blob: &[u8], args: &[u8], gas: Gas) -> Option<Self> {
+        match javm::kernel::InvocationKernel::new(code_blob, args, gas) {
+            Ok(kernel) => Some(PvmInstance {
+                inner: Backend::Kernel(Box::new(kernel)),
+            }),
+            Err(e) => {
+                tracing::warn!("kernel init failed: {e}");
+                None
+            }
+        }
+    }
+
     /// Create a PVM from a code blob, arguments, and gas budget.
     pub fn initialize(code_blob: &[u8], args: &[u8], gas: Gas) -> Option<Self> {
         match pvm_mode() {
@@ -60,6 +76,7 @@ impl PvmInstance {
     }
 
     /// Run until exit (halt, panic, OOG, page fault, or host call).
+    /// Not supported for Kernel backend — use kernel API directly.
     pub fn run(&mut self) -> ExitReason {
         match &mut self.inner {
             Backend::Interpreter(pvm) => {
@@ -67,6 +84,7 @@ impl PvmInstance {
                 reason
             }
             Backend::Recompiler(pvm) => pvm.run(),
+            Backend::Kernel(_) => unimplemented!("kernel backend: use kernel API"),
             Backend::Compare {
                 interp,
                 recomp,
@@ -153,11 +171,33 @@ impl PvmInstance {
         }
     }
 
+    /// Check if this is a kernel (v2) backend.
+    pub fn is_kernel(&self) -> bool {
+        matches!(self.inner, Backend::Kernel(_))
+    }
+
+    /// Access the kernel (only for Kernel backend).
+    pub fn kernel(&self) -> Option<&javm::kernel::InvocationKernel> {
+        match &self.inner {
+            Backend::Kernel(k) => Some(k),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to the kernel (only for Kernel backend).
+    pub fn kernel_mut(&mut self) -> Option<&mut javm::kernel::InvocationKernel> {
+        match &mut self.inner {
+            Backend::Kernel(k) => Some(k),
+            _ => None,
+        }
+    }
+
     pub fn gas(&self) -> Gas {
         match &self.inner {
             Backend::Interpreter(pvm) => pvm.gas,
             Backend::Recompiler(pvm) => pvm.gas(),
             Backend::Compare { recomp, .. } => recomp.gas(),
+            Backend::Kernel(k) => k.vms.get(k.active_vm as usize).map(|v| v.gas).unwrap_or(0),
         }
     }
     pub fn set_gas(&mut self, gas: Gas) {
@@ -165,11 +205,14 @@ impl PvmInstance {
             Backend::Interpreter(pvm) => pvm.gas = gas,
             Backend::Recompiler(pvm) => pvm.set_gas(gas),
             Backend::Compare { interp, recomp, .. } => {
-                // Apply the same delta to both backends to preserve their
-                // independent gas tracking (they may differ due to gas metering).
                 let delta = gas as i64 - recomp.gas() as i64;
                 interp.gas = (interp.gas as i64 + delta) as u64;
                 recomp.set_gas(gas);
+            }
+            Backend::Kernel(k) => {
+                if let Some(vm) = k.vms.get_mut(k.active_vm as usize) {
+                    vm.gas = gas;
+                }
             }
         }
     }
@@ -179,6 +222,7 @@ impl PvmInstance {
             Backend::Interpreter(pvm) => pvm.pc,
             Backend::Recompiler(pvm) => pvm.pc(),
             Backend::Compare { recomp, .. } => recomp.pc(),
+            Backend::Kernel(k) => k.vms.get(k.active_vm as usize).map(|v| v.pc).unwrap_or(0),
         }
     }
     pub fn set_pc(&mut self, pc: u32) {
@@ -188,6 +232,11 @@ impl PvmInstance {
             Backend::Compare { interp, recomp, .. } => {
                 interp.pc = pc;
                 recomp.set_pc(pc);
+            }
+            Backend::Kernel(k) => {
+                if let Some(vm) = k.vms.get_mut(k.active_vm as usize) {
+                    vm.pc = pc;
+                }
             }
         }
     }
@@ -202,12 +251,8 @@ impl PvmInstance {
                 }
             }
             Backend::Recompiler(pvm) => {
-                // Recompiler: map in flat memory permission table
                 for p in start_page..end_page {
                     pvm.write_byte(p * javm::PVM_PAGE_SIZE, 0);
-                    // Also need to update the permission table — handled via write_byte
-                    // which goes through the flat buffer. But we need to ensure the page
-                    // is marked writable in the permission table.
                 }
             }
             Backend::Compare { interp, recomp, .. } => {
@@ -219,6 +264,7 @@ impl PvmInstance {
                     recomp.write_byte(p * javm::PVM_PAGE_SIZE, 0);
                 }
             }
+            Backend::Kernel(_) => {} // kernel uses DATA caps, not flat memory
         }
     }
 
@@ -227,6 +273,7 @@ impl PvmInstance {
             Backend::Interpreter(pvm) => pvm.heap_top,
             Backend::Recompiler(pvm) => pvm.heap_top(),
             Backend::Compare { recomp, .. } => recomp.heap_top(),
+            Backend::Kernel(_) => 0, // kernel uses DATA caps
         }
     }
     pub fn set_heap_top(&mut self, top: u32) {
@@ -237,6 +284,7 @@ impl PvmInstance {
                 interp.heap_top = top;
                 recomp.set_heap_top(top);
             }
+            Backend::Kernel(_) => {} // kernel uses DATA caps
         }
     }
 
@@ -245,6 +293,9 @@ impl PvmInstance {
             Backend::Interpreter(pvm) => pvm.registers[index],
             Backend::Recompiler(pvm) => pvm.registers()[index],
             Backend::Compare { recomp, .. } => recomp.registers()[index],
+            Backend::Kernel(k) => {
+                k.vms.get(k.active_vm as usize).map(|v| v.registers[index]).unwrap_or(0)
+            }
         }
     }
     pub fn set_reg(&mut self, index: usize, value: u64) {
@@ -255,6 +306,11 @@ impl PvmInstance {
                 interp.registers[index] = value;
                 recomp.registers_mut()[index] = value;
             }
+            Backend::Kernel(k) => {
+                if let Some(vm) = k.vms.get_mut(k.active_vm as usize) {
+                    vm.registers[index] = value;
+                }
+            }
         }
     }
 
@@ -263,6 +319,7 @@ impl PvmInstance {
             Backend::Interpreter(pvm) => pvm.read_u8(addr),
             Backend::Recompiler(pvm) => pvm.read_byte(addr),
             Backend::Compare { recomp, .. } => recomp.read_byte(addr),
+            Backend::Kernel(_) => None, // kernel uses DATA cap offsets
         }
     }
 
@@ -278,6 +335,7 @@ impl PvmInstance {
                 interp.write_u8(addr, value);
                 recomp.write_byte(addr, value);
             }
+            Backend::Kernel(_) => {} // kernel uses DATA cap offsets
         }
     }
 
@@ -292,6 +350,7 @@ impl PvmInstance {
             Backend::Compare { recomp, .. } => (0..len)
                 .map(|i| recomp.read_byte(addr + i).unwrap_or(0))
                 .collect(),
+            Backend::Kernel(_) => vec![0; len as usize], // kernel uses DATA cap offsets
         }
     }
 
@@ -305,6 +364,7 @@ impl PvmInstance {
             }
             Backend::Recompiler(pvm) => pvm.read_bytes(addr, len),
             Backend::Compare { recomp, .. } => recomp.read_bytes(addr, len),
+            Backend::Kernel(_) => None, // kernel uses DATA cap offsets
         }
     }
 
@@ -324,6 +384,7 @@ impl PvmInstance {
                 }
                 recomp.write_bytes(addr, data);
             }
+            Backend::Kernel(_) => {} // kernel uses DATA cap offsets
         }
     }
 
@@ -356,6 +417,7 @@ impl PvmInstance {
                 }
                 Some(())
             }
+            Backend::Kernel(_) => None, // kernel uses DATA cap offsets
         }
     }
 
@@ -363,12 +425,7 @@ impl PvmInstance {
     pub fn enable_tracing(&mut self) {
         match &mut self.inner {
             Backend::Interpreter(pvm) => pvm.tracing_enabled = true,
-            Backend::Recompiler(_) => {
-                // Intentional: instruction tracing is interpreter-only.
-                // The recompiler compiles basic blocks to native x86-64 code,
-                // so per-instruction tracing is not available. Use the
-                // interpreter backend or compare mode for trace collection.
-            }
+            Backend::Recompiler(_) | Backend::Kernel(_) => {}
             Backend::Compare { interp, .. } => {
                 interp.tracing_enabled = true;
             }
@@ -382,9 +439,7 @@ impl PvmInstance {
                 let _ = std::fs::write(code_path, &pvm.code);
                 let _ = std::fs::write(bitmask_path, &pvm.bitmask);
             }
-            Backend::Recompiler(_) => {
-                // Not easily accessible in recompiler
-            }
+            Backend::Recompiler(_) | Backend::Kernel(_) => {}
             Backend::Compare { interp, .. } => {
                 let _ = std::fs::write(code_path, &interp.code);
                 let _ = std::fs::write(bitmask_path, &interp.bitmask);
@@ -396,7 +451,7 @@ impl PvmInstance {
     pub fn take_trace(&mut self) -> Vec<(u32, u8)> {
         match &mut self.inner {
             Backend::Interpreter(pvm) => std::mem::take(&mut pvm.pc_trace),
-            Backend::Recompiler(_) => Vec::new(),
+            Backend::Recompiler(_) | Backend::Kernel(_) => Vec::new(),
             Backend::Compare { interp, .. } => std::mem::take(&mut interp.pc_trace),
         }
     }
