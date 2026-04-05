@@ -1449,8 +1449,8 @@ mod tests {
         assert_eq!(kernel.active_vm, 1);
         assert_eq!(kernel.vms[1].gas, 5000);
 
-        // Parent lost 5000 + 10 (overhead)
-        assert_eq!(kernel.vms[0].gas, parent_gas_before - 5010);
+        // Parent lost 10 (ecalli) + 10 (call overhead) + 5000 (transfer)
+        assert_eq!(kernel.vms[0].gas, parent_gas_before - 5020);
     }
 
     #[test]
