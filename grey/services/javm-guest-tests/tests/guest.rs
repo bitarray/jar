@@ -1,54 +1,64 @@
-//! Two-way comparison tests: host vs kernel (v2 blob).
+//! Three-way comparison tests: native host vs interpreter vs recompiler.
 //!
-//! Each test encodes `[test_id: u32 LE] [args...]`, runs on host and kernel,
-//! and asserts output matches.
+//! Each test encodes `[test_id: u32 LE] [args...]`, runs on native host,
+//! interpreter kernel, and recompiler kernel, then asserts all outputs match.
 
 include!(concat!(env!("OUT_DIR"), "/guest_blob.rs"));
 
-/// Run a guest test on host and v2 kernel. Assert outputs match.
-fn run_test(test_id: u32, args: &[u8]) {
+/// Run the kernel with a specific backend, return output bytes.
+fn run_kernel(backend: javm::PvmBackend, input: &[u8], test_id: u32) -> Vec<u8> {
     use javm::kernel::{InvocationKernel, KernelResult};
     use javm::vm_pool::VmState;
 
-    // Encode input
-    let mut input = test_id.to_le_bytes().to_vec();
-    input.extend_from_slice(args);
-
-    // --- Host ---
-    let host_output = javm_guest_tests::dispatch_to_vec(&input);
-
-    // --- Kernel (v2 blob) ---
     let gas = 100_000_000_000u64;
-    let mut kernel =
-        InvocationKernel::new(GUEST_TESTS_BLOB, &input, gas).expect("kernel should initialize");
+    let mut kernel = InvocationKernel::new_with_backend(GUEST_TESTS_BLOB, input, gas, backend)
+        .expect("kernel should initialize");
     let _ = kernel.vms[0].transition(VmState::Running);
 
     let result = kernel.run();
     let packed = kernel.vms[kernel.active_vm as usize].registers[7];
-    let kernel_ptr = (packed >> 32) as u32;
-    let kernel_len = (packed & 0xFFFFFFFF) as u32;
+    let ptr = (packed >> 32) as u32;
+    let len = (packed & 0xFFFFFFFF) as u32;
+
+    let label = match backend {
+        javm::PvmBackend::ForceInterpreter => "interpreter",
+        javm::PvmBackend::ForceRecompiler => "recompiler",
+        _ => "default",
+    };
 
     match result {
         KernelResult::Halt(_) => {}
-        KernelResult::Panic => panic!("test {test_id}: kernel panicked"),
-        KernelResult::OutOfGas => panic!("test {test_id}: kernel OOG"),
+        KernelResult::Panic => panic!("test {test_id}: {label} panicked"),
+        KernelResult::OutOfGas => panic!("test {test_id}: {label} OOG"),
         KernelResult::PageFault(addr) => {
-            panic!("test {test_id}: kernel page fault at 0x{addr:08x}")
+            panic!("test {test_id}: {label} page fault at 0x{addr:08x}")
         }
         KernelResult::ProtocolCall { slot, .. } => {
-            panic!("test {test_id}: unexpected protocol call to slot {slot}")
+            panic!("test {test_id}: {label} unexpected protocol call to slot {slot}")
         }
     }
 
-    let kernel_output = kernel
-        .read_data_cap_window(kernel_ptr, kernel_len)
-        .unwrap_or_else(|| {
-            panic!("test {test_id}: read failed at ptr=0x{kernel_ptr:X} len={kernel_len}")
-        });
+    kernel
+        .read_data_cap_window(ptr, len)
+        .unwrap_or_else(|| panic!("test {test_id}: {label} read failed at ptr=0x{ptr:X} len={len}"))
+}
+
+/// Run a guest test on native host, interpreter, and recompiler. Assert all outputs match.
+fn run_test(test_id: u32, args: &[u8]) {
+    let mut input = test_id.to_le_bytes().to_vec();
+    input.extend_from_slice(args);
+
+    let host_output = javm_guest_tests::dispatch_to_vec(&input);
+    let interp_output = run_kernel(javm::PvmBackend::ForceInterpreter, &input, test_id);
+    let recomp_output = run_kernel(javm::PvmBackend::ForceRecompiler, &input, test_id);
 
     assert_eq!(
-        host_output, kernel_output,
-        "test {test_id}: host vs kernel output mismatch"
+        host_output, interp_output,
+        "test {test_id}: host vs interpreter mismatch"
+    );
+    assert_eq!(
+        host_output, recomp_output,
+        "test {test_id}: host vs recompiler mismatch"
     );
 }
 
