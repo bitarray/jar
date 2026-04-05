@@ -403,6 +403,146 @@ fn validate_basic_blocks(code: &[u8], bitmask: &[u8], jump_table: &[u32]) -> boo
 // NOTE: PolkaVM blob format support was removed — Grey uses JAR format only.
 // PolkaVM benchmarks (grey-bench) use the polkavm crate's own parser.
 
+/// Convert a v1 (JAR\x01) blob to a v2 (JAR\x02) capability manifest blob.
+/// Used by the kernel to accept v1 blobs transparently.
+pub fn convert_v1_to_v2(blob: &[u8], _args: &[u8]) -> Option<Vec<u8>> {
+    let parsed = parse_blob(blob)?;
+
+    // Build the code sub-blob (header + jump_table + code + packed_bitmask)
+    let entry_size = parsed.header.entry_size as usize;
+    let mut code_sub = Vec::new();
+    // Sub-blob header: jump_len(4) + entry_size(1) + code_len(4)
+    code_sub.extend_from_slice(&(parsed.header.jump_len as u32).to_le_bytes());
+    code_sub.push(parsed.header.entry_size);
+    code_sub.extend_from_slice(&(parsed.header.code_len as u32).to_le_bytes());
+    // Jump table entries
+    for &entry in &parsed.jump_table {
+        code_sub.extend_from_slice(&entry.to_le_bytes()[..entry_size]);
+    }
+    // Code bytes
+    code_sub.extend_from_slice(parsed.code);
+    // Packed bitmask (re-pack from unpacked)
+    let bitmask_packed_len = parsed.code.len().div_ceil(8);
+    let mut packed = vec![0u8; bitmask_packed_len];
+    for (i, &b) in parsed.bitmask.iter().enumerate() {
+        if b != 0 {
+            packed[i / 8] |= 1 << (i % 8);
+        }
+    }
+    code_sub.extend_from_slice(&packed);
+
+    // Build data section: code_sub + ro_data + rw_data
+    let mut data_section = Vec::new();
+    let code_offset = 0u32;
+    let code_len = code_sub.len() as u32;
+    data_section.extend_from_slice(&code_sub);
+
+    let ro_offset = data_section.len() as u32;
+    let ro_len = parsed.ro_data.len() as u32;
+    data_section.extend_from_slice(parsed.ro_data);
+
+    let rw_offset = data_section.len() as u32;
+    let rw_len = parsed.rw_data.len() as u32;
+    data_section.extend_from_slice(parsed.rw_data);
+
+    // Build cap manifest
+    use crate::cap::Access;
+    use crate::program_v2::{CapEntryType, CapManifestEntry};
+
+    let stack_pages = parsed.header.stack_pages;
+    let mut caps = Vec::new();
+    let mut next_page = 0u32;
+
+    // CODE cap at slot 64
+    caps.push(CapManifestEntry {
+        cap_index: 64,
+        cap_type: CapEntryType::Code,
+        base_page: 0,
+        page_count: 0,
+        init_access: Access::RO,
+        data_offset: code_offset,
+        data_len: code_len,
+    });
+
+    // Stack DATA at slot 65
+    caps.push(CapManifestEntry {
+        cap_index: 65,
+        cap_type: CapEntryType::Data,
+        base_page: next_page,
+        page_count: stack_pages,
+        init_access: Access::RW,
+        data_offset: 0,
+        data_len: 0,
+    });
+    next_page += stack_pages;
+
+    // RO DATA at slot 66
+    if ro_len > 0 {
+        let ro_pages = (ro_len as u32).div_ceil(4096);
+        caps.push(CapManifestEntry {
+            cap_index: 66,
+            cap_type: CapEntryType::Data,
+            base_page: next_page,
+            page_count: ro_pages,
+            init_access: Access::RO,
+            data_offset: ro_offset,
+            data_len: ro_len,
+        });
+        next_page += ro_pages;
+    }
+
+    // RW DATA at slot 67
+    if rw_len > 0 {
+        let rw_pages = (rw_len as u32).div_ceil(4096);
+        caps.push(CapManifestEntry {
+            cap_index: 67,
+            cap_type: CapEntryType::Data,
+            base_page: next_page,
+            page_count: rw_pages,
+            init_access: Access::RW,
+            data_offset: rw_offset,
+            data_len: rw_len,
+        });
+        next_page += rw_pages;
+    }
+
+    // Heap DATA at slot 68
+    let heap_pages = parsed.header.heap_pages;
+    if heap_pages > 0 {
+        caps.push(CapManifestEntry {
+            cap_index: 68,
+            cap_type: CapEntryType::Data,
+            base_page: next_page,
+            page_count: heap_pages,
+            init_access: Access::RW,
+            data_offset: 0,
+            data_len: 0,
+        });
+        next_page += heap_pages;
+    }
+
+    // Args DATA at slot 69
+    if !_args.is_empty() {
+        let arg_pages = (_args.len() as u32).div_ceil(4096);
+        caps.push(CapManifestEntry {
+            cap_index: 69,
+            cap_type: CapEntryType::Data,
+            base_page: next_page,
+            page_count: arg_pages,
+            init_access: Access::RW,
+            data_offset: 0,
+            data_len: 0,
+        });
+        next_page += arg_pages;
+    }
+    let args_cap = if !_args.is_empty() { 69 } else { 0xFF };
+
+    let memory_pages = parsed.header.max_heap_pages.max(next_page);
+    Some(crate::program_v2::build_v2_blob(
+        memory_pages, 64, args_cap, &caps, &data_section,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

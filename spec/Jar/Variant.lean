@@ -93,16 +93,16 @@ instance JamVariant.gp072_tiny : JamVariant where
   codecEncodeExtrinsic := @Codec.encodeExtrinsic gp072TinyConfig
   codecEncodeBlock := @Codec.encodeBlock gp072TinyConfig
 
-/-- JAR v1 variant — contiguous linear memory, basic-block gas, grow_heap, coinless.
-    Uses Params.full with variable validator set support (GP#514). -/
+/-- JAR v2 variant — capability-based execution, basic-block gas, coinless.
+    Uses Params.full with variable validator set support (GP#514).
+    memoryModel = .linear retained for Lean spec test compatibility
+    (initLinear parses the JAR v1 blob format used in test vectors). -/
 private def jar1Config : JamConfig where
   name := "jar1"
   config := Params.full
   valid := Params.full_valid
   memoryModel := .linear
   gasModel := .basicBlockSinglePass
-  heapModel := .growHeap
-  hostcallVersion := 1
   useCompactDeblob := false
   variableValidators := true
   capabilityModel := .v2

@@ -29,7 +29,7 @@
         "payload_hash":
         "0xcfcd32108073504a4c664b876577ed5fd6a58244db338bc1fb8b9f7a07e2e583",
         "code_hash":
-        "0xd7ccd867a4747936873399e9b5981fd0c678ae3543aa00da0b5c68276e1d0ef0",
+        "0x27fc2c217ecba66348bfa6dad69c97f1f361a3d3342ceb428ffc8251e6268f1f",
         "accumulate_gas": 100000}],
       "package_spec":
       {"length": 4,
@@ -1836,7 +1836,7 @@
       "econ": {"quota_items": 0, "quota_bytes": 0},
       "creation_slot": 0,
       "code_hash":
-      "0xd7ccd867a4747936873399e9b5981fd0c678ae3543aa00da0b5c68276e1d0ef0",
+      "0x27fc2c217ecba66348bfa6dad69c97f1f361a3d3342ceb428ffc8251e6268f1f",
       "bytes": 35859},
      "preimage_requests":
      [{"value": [0],
@@ -1846,7 +1846,7 @@
         "0x65e537f16b30c01e1325535ab9a18c35c9382bb4dce37c6c3e37c9b76a85c2b7"}}],
      "preimage_blobs":
      [{"hash":
-       "0xd7ccd867a4747936873399e9b5981fd0c678ae3543aa00da0b5c68276e1d0ef0",
+       "0x27fc2c217ecba66348bfa6dad69c97f1f361a3d3342ceb428ffc8251e6268f1f",
        "blob":
        "0x4a4152010000000000000000100000001000000004000000000000000113000000280f000000280c000000280500000032003200218402"}]}}]},
  "output":

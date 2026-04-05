@@ -80,12 +80,18 @@ pub struct InvocationKernel {
 }
 
 impl InvocationKernel {
-    /// Create a new kernel from a parsed JAR v2 blob.
+    /// Create a new kernel from a JAR blob (v2 or v1 format).
     ///
-    /// Initializes the backing store, creates CODE and DATA caps from the
-    /// manifest, charges init gas, and creates VM 0.
+    /// Tries v2 capability manifest first. Falls back to v1 linear blob format
+    /// by converting it to a synthetic v2 manifest.
     pub fn new(blob: &[u8], _args: &[u8], gas: u64) -> Result<Self, KernelError> {
-        let parsed = program_v2::parse_v2_blob(blob).ok_or(KernelError::InvalidBlob)?;
+        let parsed = match program_v2::parse_v2_blob(blob) {
+            Some(p) => p,
+            None => {
+                // Fallback: parse v1 blob and convert to synthetic v2 manifest
+                return Self::new_from_v1(blob, _args, gas);
+            }
+        };
 
         let backing =
             BackingStore::new(parsed.header.memory_pages).ok_or(KernelError::MemoryError)?;
@@ -185,6 +191,15 @@ impl InvocationKernel {
         kernel.vms.push(vm0);
 
         Ok(kernel)
+    }
+
+    /// Create a kernel from a v1 (JAR\x01) blob by converting to v2 internally.
+    fn new_from_v1(blob: &[u8], args: &[u8], gas: u64) -> Result<Self, KernelError> {
+        // Use the v1 parser to extract components, then build a v2 blob
+        let v2_blob = crate::program::convert_v1_to_v2(blob, args)
+            .ok_or(KernelError::InvalidBlob)?;
+        // Re-enter with the converted blob
+        Self::new(&v2_blob, args, gas)
     }
 
     /// Create a capability from a manifest entry.
