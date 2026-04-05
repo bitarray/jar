@@ -36,9 +36,6 @@ theorem gp072_tiny_memoryModel_segmented :
 theorem gp072_tiny_gasModel_perInstruction :
     @JamConfig.gasModel JamVariant.gp072_tiny.toJamConfig = .perInstruction := by rfl
 
-theorem gp072_tiny_hostcallVersion_0 :
-    @JamConfig.hostcallVersion JamVariant.gp072_tiny.toJamConfig = 0 := by rfl
-
 theorem gp072_tiny_variableValidators_false :
     @JamConfig.variableValidators JamVariant.gp072_tiny.toJamConfig = false := by rfl
 

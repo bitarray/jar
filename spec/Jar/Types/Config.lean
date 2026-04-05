@@ -117,14 +117,6 @@ inductive GasModel where
   | basicBlockSinglePass
   deriving BEq, Inhabited
 
-/-- PVM heap management model. -/
-inductive HeapModel where
-  /-- GP v0.7.2: sbrk instruction (opcode 101). -/
-  | sbrk
-  /-- GP v0.8.0: grow_heap hostcall (hostcall 1). -/
-  | growHeap
-  deriving BEq, Inhabited
-
 /-- PVM capability model. -/
 inductive CapabilityModel where
   /-- No capability model (v0.7.2 / jar1 v1). -/
@@ -198,10 +190,6 @@ class JamConfig where
   memoryModel : MemoryModel := .segmented
   /-- PVM gas metering strategy. -/
   gasModel : GasModel := .perInstruction
-  /-- PVM heap management: sbrk instruction or grow_heap hostcall. -/
-  heapModel : HeapModel := .sbrk
-  /-- Hostcall numbering version: 0 = v0.7.2, 1 = v0.8.0 (+1 shift for grow_heap). -/
-  hostcallVersion : Nat := 0
   /-- PVM capability model: .none = flat memory, .v2 = capability-based. -/
   capabilityModel : CapabilityModel := .none
   /-- PVM blob deblob encoding: true = JAM compact natural, false = u32 LE (jar1). -/

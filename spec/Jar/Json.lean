@@ -505,7 +505,7 @@ instance : ToJson PrivilegedServices where
       ("designator", toJson ps.designator),
       ("registrar", toJson ps.registrar),
       ("always_accumulate", toJson ps.alwaysAccumulate)]
-    let extra := if JamConfig.hostcallVersion == 1
+    let extra := if JamConfig.capabilityModel == .v2
       then [("quota_service", toJson ps.quotaService)]
       else []
     Json.mkObj (base ++ extra)

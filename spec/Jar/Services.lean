@@ -79,8 +79,7 @@ structure RefineContext where
   deriving Inhabited
 
 /-- Handle a refine host call. GP §14 host calls:
-    0=gas, 1=grow_heap, 2=fetch, 3=historical_lookup, 4=export,
-    5=machine, 6=peek, 7=poke, 8=pages.
+    0=gas, 2=fetch, 3=historical_lookup, 4=export, 5=machine.
     Returns (result, updated context) where result.exitReason = .hostCall _
     means "continue execution" (the handler wrote return values into registers). -/
 private def handleRefineHostCall

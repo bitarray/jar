@@ -348,9 +348,7 @@ private def encodeAccountInfo (acct : ServiceAccount) : ByteArray :=
 def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     (mem : PVM.Memory) (ctx : AccContext) : PVM.InvocationResult × AccContext :=
   let rawCallNum := callId.toNat
-  -- v2 (jar1): ecalli immediates map directly to protocol cap slots.
-  -- gp072 (hostcallVersion == 0): no shift.
-  -- hostcallVersion == 1 (v0.8.0 grow_heap shift) is no longer used.
+  -- ecalli immediates map directly to host call numbers (no shift).
   let callNum := rawCallNum
   let inputLog := s!"hc({rawCallNum}) r7={getReg regs 7} r8={getReg regs 8} r9={getReg regs 9} r10={getReg regs 10} r11={getReg regs 11} r12={getReg regs 12}"
   let mkResult (regs' : PVM.Registers) (mem' : PVM.Memory) (gas' : Gas) : PVM.InvocationResult :=
