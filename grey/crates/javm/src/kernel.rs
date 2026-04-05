@@ -87,11 +87,21 @@ impl InvocationKernel {
     /// Tries v2 capability manifest first. Falls back to v1 linear blob format
     /// by converting it to a synthetic v2 manifest.
     pub fn new(blob: &[u8], _args: &[u8], gas: u64) -> Result<Self, KernelError> {
+        Self::new_with_backend(blob, _args, gas, crate::backend::PvmBackend::Default)
+    }
+
+    /// Create a new kernel with a specific backend selection.
+    pub fn new_with_backend(
+        blob: &[u8],
+        _args: &[u8],
+        gas: u64,
+        backend: crate::backend::PvmBackend,
+    ) -> Result<Self, KernelError> {
         let parsed = match program_v2::parse_v2_blob(blob) {
             Some(p) => p,
             None => {
                 // Fallback: parse v1 blob and convert to synthetic v2 manifest
-                return Self::new_from_v1(blob, _args, gas);
+                return Self::new_from_v1(blob, _args, gas, backend);
             }
         };
 
@@ -196,12 +206,17 @@ impl InvocationKernel {
     }
 
     /// Create a kernel from a v1 (JAR\x01) blob by converting to v2 internally.
-    fn new_from_v1(blob: &[u8], args: &[u8], gas: u64) -> Result<Self, KernelError> {
+    fn new_from_v1(
+        blob: &[u8],
+        args: &[u8],
+        gas: u64,
+        backend: crate::backend::PvmBackend,
+    ) -> Result<Self, KernelError> {
         // Use the v1 parser to extract components, then build a v2 blob
         let v2_blob = crate::program::convert_v1_to_v2(blob, args)
             .ok_or(KernelError::InvalidBlob)?;
         // Re-enter with the converted blob
-        Self::new(&v2_blob, args, gas)
+        Self::new_with_backend(&v2_blob, args, gas, backend)
     }
 
     /// Create a capability from a manifest entry.
@@ -885,6 +900,11 @@ impl InvocationKernel {
 
     fn set_active_reg(&mut self, idx: usize, val: u64) {
         self.vms[self.active_vm as usize].registers[idx] = val;
+    }
+
+    /// Get the active VM's remaining gas.
+    pub fn gas(&self) -> u64 {
+        self.vms[self.active_vm as usize].gas
     }
 
     /// Resume after a protocol call was handled by the host.
