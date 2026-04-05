@@ -180,62 +180,17 @@ fn pc(c: &[u8]) -> u32 {
 }
 
 fn build_blob(c: Vec<u8>, m: Vec<u8>, stack_pages: u32, heap_pages: u32) -> Vec<u8> {
-    use javm::cap::Access;
-    use javm::program::{CapEntryType, CapManifestEntry, build_blob};
-
-    // Code sub-blob: jump_len(4) + entry_size(1) + code_len(4) + code + packed_bitmask
-    let mut code_data = Vec::new();
-    code_data.extend_from_slice(&0u32.to_le_bytes()); // no jump table
-    code_data.push(1); // entry_size
-    code_data.extend_from_slice(&(c.len() as u32).to_le_bytes());
-    code_data.extend_from_slice(&c);
-    let packed_len = c.len().div_ceil(8);
-    let mut packed = vec![0u8; packed_len];
-    for (i, &b) in m.iter().enumerate() {
-        if b != 0 {
-            packed[i / 8] |= 1 << (i % 8);
-        }
-    }
-    code_data.extend_from_slice(&packed);
-
-    let mut caps = vec![CapManifestEntry {
-        cap_index: 64,
-        cap_type: CapEntryType::Code,
-        base_page: 0,
-        page_count: 0,
-        init_access: Access::RO,
-        data_offset: 0,
-        data_len: code_data.len() as u32,
-    }];
-    let mut next_page = 0u32;
-    // Stack DATA cap
-    if stack_pages > 0 {
-        caps.push(CapManifestEntry {
-            cap_index: 65,
-            cap_type: CapEntryType::Data,
-            base_page: next_page,
-            page_count: stack_pages,
-            init_access: Access::RW,
-            data_offset: 0,
-            data_len: 0,
-        });
-        next_page += stack_pages;
-    }
-    // Heap DATA cap (HEAP_BASE = next_page * 4096)
-    if heap_pages > 0 {
-        caps.push(CapManifestEntry {
-            cap_index: 66,
-            cap_type: CapEntryType::Data,
-            base_page: next_page,
-            page_count: heap_pages,
-            init_access: Access::RW,
-            data_offset: 0,
-            data_len: 0,
-        });
-        next_page += heap_pages;
-    }
-    let total_pages = next_page + 4; // headroom
-    build_blob(total_pages, 64, &caps, &code_data)
+    let total = stack_pages + heap_pages + 4;
+    grey_transpiler::emitter::build_service_program(
+        &c,
+        &m,
+        &[],
+        &[],
+        &[],
+        stack_pages,
+        heap_pages,
+        total,
+    )
 }
 
 // ---------------------------------------------------------------------------

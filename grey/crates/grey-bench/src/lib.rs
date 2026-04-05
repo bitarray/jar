@@ -394,47 +394,16 @@ pub fn grey_sort_blob(n: u32) -> Vec<u8> {
     let offset = (insert_pc as i32) - (j_check_pc as i32);
     c[j_check_pc + 6..j_check_pc + 10].copy_from_slice(&offset.to_le_bytes());
 
-    // Build v2 blob with CODE cap + stack DATA cap
-    use javm::cap::Access;
-    use javm::program::{CapEntryType, CapManifestEntry, build_blob};
-
-    // Code sub-blob: jump_len(4) + entry_size(1) + code_len(4) + code + packed_bitmask
-    let mut code_data = Vec::new();
-    code_data.extend_from_slice(&0u32.to_le_bytes()); // no jump table
-    code_data.push(1); // entry_size
-    code_data.extend_from_slice(&(c.len() as u32).to_le_bytes());
-    code_data.extend_from_slice(&c);
-    let packed_len = c.len().div_ceil(8);
-    let mut packed = vec![0u8; packed_len];
-    for (i, &b) in m.iter().enumerate() {
-        if b != 0 {
-            packed[i / 8] |= 1 << (i % 8);
-        }
-    }
-    code_data.extend_from_slice(&packed);
-
-    let caps = vec![
-        CapManifestEntry {
-            cap_index: 64,
-            cap_type: CapEntryType::Code,
-            base_page: 0,
-            page_count: 0,
-            init_access: Access::RO,
-            data_offset: 0,
-            data_len: code_data.len() as u32,
-        },
-        CapManifestEntry {
-            cap_index: 65,
-            cap_type: CapEntryType::Data,
-            base_page: 0,
-            page_count: stack_pages,
-            init_access: Access::RW,
-            data_offset: 0,
-            data_len: 0,
-        },
-    ];
-    let total_pages = stack_pages + 4; // stack + headroom
-    build_blob(total_pages, 64, &caps, &code_data)
+    grey_transpiler::emitter::build_service_program(
+        &c,
+        &m,
+        &[],
+        &[],
+        &[],
+        stack_pages,
+        0,
+        stack_pages + 4,
+    )
 }
 
 fn emit_branch_lt_u(asm: &mut Assembler, ra: Reg, rb: Reg, rel_offset: i32) {
