@@ -272,67 +272,75 @@ def initStandard (blob' : ByteArray) (args : ByteArray) (compact : Bool := true)
 
   some (prog, regs, mem)
 
-/-- Initialize PVM with contiguous linear memory layout (JAR v1 blob format).
-    Used by jar1 variant for Lean spec test vectors. -/
-def initLinear (blob : ByteArray) (args : ByteArray) (_compact : Bool := true)
+/-- Initialize PVM from a JAR v2 capability manifest blob.
+    Parses v2 header + cap entries. CODE cap → ProgramBlob.
+    DATA caps → mapped memory regions. -/
+def initV2 (blob : ByteArray) (args : ByteArray)
     : Option (ProgramBlob × Registers × Memory) := do
-  let (hdr, off0) ← parseJarHeader blob
-  if off0 + hdr.roSize > blob.size then none
-  let roData := blob.extract off0 (off0 + hdr.roSize)
-  let off1 := off0 + hdr.roSize
-  if off1 + hdr.rwSize > blob.size then none
-  let rwData := blob.extract off1 (off1 + hdr.rwSize)
-  let off2 := off1 + hdr.rwSize
-  if hdr.entrySize == 0 || hdr.entrySize > 4 then none
-  let jumpDataLen := hdr.jumpLen * hdr.entrySize
-  if off2 + jumpDataLen > blob.size then none
-  let jumpTable := Array.ofFn (n := hdr.jumpLen) fun ⟨i, _⟩ =>
-    UInt32.ofNat (decodeLEn blob (off2 + i * hdr.entrySize) hdr.entrySize)
-  let off3 := off2 + jumpDataLen
-  if off3 + hdr.codeLen > blob.size then none
-  let code := blob.extract off3 (off3 + hdr.codeLen)
-  let off4 := off3 + hdr.codeLen
-  let bitmaskLen := (hdr.codeLen + 7) / 8
-  if off4 + bitmaskLen > blob.size then none
-  let packedBitmask := blob.extract off4 (off4 + bitmaskLen)
-  let bitmask := ByteArray.mk (Array.ofFn (n := hdr.codeLen) fun ⟨i, _⟩ =>
-    let byteIdx := i / 8
-    let bitIdx := i % 8
-    if byteIdx < packedBitmask.size then
-      UInt8.ofNat ((packedBitmask.get! byteIdx).toNat / (2 ^ bitIdx) % 2)
-    else 0)
-  let prog : ProgramBlob := { code, bitmask, jumpTable }
-  if !validateBasicBlocks prog then none
-  let stackSize := hdr.stackPages * Z_P
-  let roStart := stackSize
-  let rwStart := roStart + pageRound hdr.roSize
-  let argStart := rwStart + pageRound hdr.rwSize
-  let heapStart := argStart + pageRound args.size
-  let heapEnd := heapStart + hdr.heapPages * Z_P
-  let total := heapEnd
-  if total > 2^32 then none
+  let (hdr, off0) ← parseJarV2Header blob
+
+  -- Parse cap entries
+  let mut caps : Array JarV2CapEntry := #[]
+  let mut off := off0
+  for _ in List.range hdr.capCount do
+    let (cap, nextOff) ← parseJarV2CapEntry blob off
+    caps := caps.push cap
+    off := nextOff
+
+  -- Data section starts after all cap entries
+  let dataStart := off
+
+  -- Find the CODE cap matching invoke_cap and parse its code sub-blob
+  let codeCap ← caps.find? fun c => c.isCode && c.capIndex == hdr.invokeCap
+  let prog ← parseCodeSubBlob blob (dataStart + codeCap.dataOffset) codeCap.dataLen
+
+  -- Build memory from DATA caps
   let totalPagesAll := 2^32 / Z_P
-  let access := Array.replicate totalPagesAll PageAccess.inaccessible
-  let access := mapRegionAccess access 0 total .writable
-  let mem : Memory := { pages := Dict.empty, access, heapTop := heapEnd, guardZone := 0 }
-  let mem := copyToMem mem roStart roData
-  let mem := copyToMem mem rwStart rwData
-  let mem := copyToMem mem argStart args
+  let mut access := Array.replicate totalPagesAll PageAccess.inaccessible
+  let mut mem : Memory := { pages := Dict.empty, access, heapTop := 0, guardZone := 0 }
+  let mut argsBase : Nat := 0
+
+  for cap in caps do
+    if !cap.isCode then
+      -- Map pages
+      let startAddr := cap.basePage * Z_P
+      let endAddr := startAddr + cap.pageCount * Z_P
+      let pageAccess := if cap.isRW then PageAccess.writable else PageAccess.readable
+      access := mapRegionAccess access startAddr endAddr pageAccess
+      -- Copy initial data if present
+      if cap.dataLen > 0 then
+        let dataOff := dataStart + cap.dataOffset
+        if dataOff + cap.dataLen <= blob.size then
+          let capData := blob.extract dataOff (dataOff + cap.dataLen)
+          mem := copyToMem { mem with access } startAddr capData
+      -- Track args cap base address
+      if cap.capIndex == hdr.argsCap then
+        argsBase := startAddr
+
+  -- Update memory access after all caps processed
+  mem := { mem with access }
+
+  -- Write arguments into args_cap region
+  if hdr.argsCap != 255 && args.size > 0 then
+    mem := copyToMem mem argsBase args
+
+  -- Registers: φ[0]=halt, φ[7]=args_base, φ[8]=args_len
+  -- SP is set by the program's preamble (load_imm_64 SP, stack_top)
   let regs := Array.replicate PVM_REGISTERS (0 : RegisterValue)
-  let regs := regs.set! 0 (UInt64.ofNat (2^32 - 2^16))
-  let regs := regs.set! 1 (UInt64.ofNat stackSize)
-  let regs := regs.set! 7 (UInt64.ofNat argStart)
+  let regs := regs.set! 0 (UInt64.ofNat (2^32 - 2^16))  -- halt address
+  let regs := regs.set! 7 (UInt64.ofNat argsBase)
   let regs := regs.set! 8 (UInt64.ofNat args.size)
+
   some (prog, regs, mem)
 
 /-- Y(p, a) : Program initialization dispatched by capability model.
-    - v2 (jar1): uses linear layout (JAR v1 blob format for Lean spec tests)
+    - v2 (jar1): capability manifest blob format
     - none (gp072): segmented (GP v0.7.2) memory layout -/
 def initProgram [JamConfig] (blob : ByteArray) (args : ByteArray)
     : Option (ProgramBlob × Registers × Memory) :=
   let compact := JamConfig.useCompactDeblob
   match JamConfig.capabilityModel with
-  | .v2 => initLinear blob args compact  -- jar1: linear layout
+  | .v2 => initV2 blob args
   | .none => initStandard blob args compact
 
 /-- Ψ : Core PVM run dispatched by gas model.

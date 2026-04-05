@@ -1,6 +1,6 @@
 fn main() {
-    let minimal = build_javm::build_service("minimal", "spec-minimal");
-    let bootstrap = build_javm::build_service("bootstrap", "spec-bootstrap");
+    let minimal = build_javm::build_service_v2("minimal", "spec-minimal");
+    let bootstrap = build_javm::build_service_v2("bootstrap", "spec-bootstrap");
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
     std::fs::write(
