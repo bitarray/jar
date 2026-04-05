@@ -49,3 +49,16 @@ pub const PVM_ZONE_SIZE: u32 = 1 << 16;
 
 /// Number of registers in the PVM.
 pub const PVM_REGISTER_COUNT: usize = 13;
+
+/// Gas cost per page for initial memory allocation and retype.
+pub const GAS_PER_PAGE: u64 = 1500;
+
+/// Compute memory tier load/store cycles based on total accessible pages.
+pub fn compute_mem_cycles(total_pages: u32) -> u8 {
+    match total_pages {
+        0..=2048 => 25,     // ≤ 8MB: L2 baseline
+        2049..=8192 => 50,  // ≤ 32MB: L3
+        8193..=65536 => 75, // ≤ 256MB: DRAM
+        _ => 100,           // > 256MB: DRAM saturated
+    }
+}

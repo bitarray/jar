@@ -16,7 +16,7 @@ use crate::backing::{BackingStore, CodeWindow};
 use crate::cap::{
     Access, CallableCap, Cap, CapTable, CodeCap, DataCap, HandleCap, IPC_SLOT, UntypedCap,
 };
-use crate::program::GAS_PER_PAGE;
+use crate::GAS_PER_PAGE;
 use crate::program_v2::{self, CapEntryType, CapManifestEntry, ParsedBlobV2};
 use crate::vm_pool::{CallFrame, VmInstance, VmState, MAX_CODE_CAPS, MAX_VMS};
 
@@ -90,7 +90,7 @@ impl InvocationKernel {
         let backing =
             BackingStore::new(parsed.header.memory_pages).ok_or(KernelError::MemoryError)?;
 
-        let mem_cycles = crate::program::compute_mem_cycles(parsed.header.memory_pages);
+        let mem_cycles = crate::compute_mem_cycles(parsed.header.memory_pages);
         let untyped = Arc::new(UntypedCap::new(parsed.header.memory_pages));
 
         let mut kernel = Self {

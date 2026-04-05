@@ -1055,7 +1055,7 @@ pub fn initialize_program_recompiled(
         .layout
         .as_ref()
         .map_or(0, |l| l.mem_size / crate::PVM_PAGE_SIZE);
-    let init_cost = init_pages as u64 * crate::program::GAS_PER_PAGE;
+    let init_cost = init_pages as u64 * crate::GAS_PER_PAGE;
     if gas < init_cost {
         return None;
     }
