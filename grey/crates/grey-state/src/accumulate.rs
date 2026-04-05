@@ -665,6 +665,11 @@ fn run_accumulate_pvm(
             KernelResult::Halt(exit_value) => {
                 let gas_used = initial_gas - pvm.gas();
                 tracing::info!(exit_value, gas_used, service_id, "accumulate PVM halted");
+
+                // Output hash is set via the OUTPUT protocol cap during execution
+                // (stored in regular.output by the OUTPUT handler).
+                // exit_value (φ[7]) is unused for output in the capability model.
+
                 return (regular, gas_used);
             }
             KernelResult::Panic => {
