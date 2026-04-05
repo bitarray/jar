@@ -40,6 +40,45 @@ cargo bench -p grey-bench --features javm/signals -- 'fib/|sort/'        # skip 
 cargo bench -p grey-bench --features javm/signals -- ecrecover           # ecrecover only
 ```
 
+## Integration Harness
+
+The integration harness (`harness/`) runs end-to-end scenarios against a local testnet node.
+
+**Running locally:**
+
+```bash
+# Step 1: Kill any stale node processes
+pkill -9 -f "grey.*testnet" 2>/dev/null; sleep 1
+
+# Step 2: Clean-build the grey node binary (ensures fresh guest blobs + dependencies)
+cargo clean -p grey-state && cargo build -p grey
+
+# Step 3: Run the harness with --skip-build --seq-testnet
+cargo run --release -p harness -- --skip-build --seq-testnet --scenario serial
+```
+
+**Why `--skip-build`:** The harness runs `cargo build -p grey` internally, but cargo fingerprinting doesn't always detect changes in dependency crates (grey-state, grey-transpiler, javm). This causes stale binaries. Always build yourself first (`cargo clean -p grey-state && cargo build -p grey`), then use `--skip-build`.
+
+**Why `cargo clean -p grey-state`:** Cargo may cache .rlib files even after editing source. Cleaning the specific crate forces a rebuild. For transpiler changes, also `cargo clean -p grey-transpiler`.
+
+**Why `--seq-testnet`:** CI uses the sequential (single-process) testnet. Without this flag, the harness spawns a multi-validator network which has a different WP processing path (guarantor + refine pipeline). Use `--seq-testnet` to match CI behavior.
+
+**Scenarios:** serial, repeat, liveness, invalid_wp, recovery, metrics, throughput, consistency
+
+**Reading node logs:**
+```bash
+# The node writes to /tmp/grey-harness-testnet.log
+# Parse it (strips ANSI codes):
+python3 -c "
+import re
+data = open('/tmp/grey-harness-testnet.log', 'rb').read()
+clean = re.sub(rb'\x1b\[[0-9;]*m', b'', data).decode('utf-8', errors='replace')
+for line in clean.split('\n'):
+    if any(k in line for k in ['YOUR_SEARCH_TERM']):
+        print(line.strip()[:200])
+"
+```
+
 ## Guidelines
 
 - `#[cfg(test)]` for unit tests

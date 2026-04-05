@@ -122,6 +122,7 @@ pub async fn run_seq_testnet(
             match cmd {
                 RpcCommand::SubmitWorkPackage { data } => {
                     // Decode work package and create a guarantee
+                    tracing::info!("RPC: received work package ({} bytes)", data.len());
                     match <WorkPackage as scale::Decode>::decode(&data) {
                         Ok((wp, _len)) => {
                             let service_id = wp.items.first().map(|i| i.service_id).unwrap_or(0);
@@ -182,6 +183,13 @@ pub async fn run_seq_testnet(
                 // Collect guarantees (from RPC submissions)
                 let mut guarantees = std::mem::take(&mut pending_guarantees);
                 guarantees.extend(node.guarantor_state.take_guarantees());
+                if !guarantees.is_empty() {
+                    tracing::info!(
+                        "Slot {}: including {} guarantee(s) in block",
+                        slot,
+                        guarantees.len()
+                    );
+                }
 
                 // Collect assurances from all nodes
                 let parent_hash = node

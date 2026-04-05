@@ -227,7 +227,7 @@ def ashr32 (x : UInt64) (s : Nat) : UInt64 :=
 /-- Execute one PVM instruction. GP Appendix A.
     Takes current state, returns step result. -/
 def executeStep (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory)
-    (heapModel : HeapModel := .sbrk) : StepResult :=
+    : StepResult :=
   let code := prog.code
   let skip := skipDistance prog.bitmask pc
   let npc := nextPC pc skip
@@ -351,9 +351,7 @@ def executeStep (prog : ProgramBlob) (pc : Nat) (regs : Registers) (mem : Memory
     -- (move_reg tracing removed)
     .continue npc (setReg regs rD (getReg regs rA)) mem
 
-  | 101 =>  -- sbrk (v0.7.2 only; removed in v0.8.0)
-    if heapModel == .growHeap then .panic
-    else
+  | 101 =>  -- sbrk
       let rD := regA code pc
       let rA := regB code pc
       let (mem', addr) := sbrk mem (getReg regs rA)

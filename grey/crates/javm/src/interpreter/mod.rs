@@ -1,27 +1,13 @@
-//! PVM execution engine (Appendix A of the Gray Paper v0.7.2).
+//! PVM interpreter — software execution of PVM bytecode.
 //!
 //! Implements the single-step state transition Ψ₁ and the full PVM Ψ.
+//! Used as a backend alongside the JIT recompiler.
 
 use alloc::{vec, vec::Vec};
 
 use crate::args::{self, Args};
 use crate::instruction::Opcode;
-use crate::{Gas, PVM_REGISTER_COUNT};
-
-/// Exit reason for PVM execution (ε values, eq A.1).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ExitReason {
-    /// ∎: Normal halt.
-    Halt,
-    /// ☇: Panic / unexpected termination.
-    Panic,
-    /// ∞: Out of gas.
-    OutOfGas,
-    /// ×: Page fault at the given page address.
-    PageFault(u32),
-    /// h̵: Host-call with the given identifier.
-    HostCall(u32),
-}
+use crate::{ExitReason, Gas, PVM_REGISTER_COUNT};
 
 /// Pre-decoded instruction for the fast interpreter path.
 ///
@@ -55,7 +41,7 @@ pub struct DecodedInst {
 
 /// PVM instance state (eq A.6).
 #[derive(Clone, Debug)]
-pub struct Pvm {
+pub struct Interpreter {
     /// ϱ: Gas counter (remaining gas).
     pub gas: Gas,
     /// φ: 13 general-purpose 64-bit registers.
@@ -98,7 +84,7 @@ pub struct Pvm {
     pub(crate) pc_to_idx: Vec<u32>,
 }
 
-impl Pvm {
+impl Interpreter {
     /// Create a new PVM from parsed program components.
     pub fn new(
         code: Vec<u8>,
@@ -139,6 +125,37 @@ impl Pvm {
             pc_trace: Vec::new(),
             decoded_insts,
             pc_to_idx,
+        }
+    }
+
+    /// Pre-decode code into an `InterpreterProgram` for storage in a CODE cap.
+    /// This performs the expensive one-time work (gas block computation, instruction
+    /// pre-decoding) without allocating runtime state (registers, memory, gas).
+    pub fn predecode(
+        code: &[u8],
+        bitmask: &[u8],
+        jump_table: &[u32],
+        mem_cycles: u8,
+    ) -> crate::backend::InterpreterProgram {
+        let basic_block_starts = compute_basic_block_starts(code, bitmask);
+        let gas_block_starts = compute_gas_block_starts(code, bitmask);
+        let block_gas_costs = compute_block_gas_costs(code, bitmask, &gas_block_starts, mem_cycles);
+        let (decoded_insts, pc_to_idx) = predecode_instructions(
+            code,
+            bitmask,
+            &basic_block_starts,
+            &gas_block_starts,
+            &block_gas_costs,
+        );
+        crate::backend::InterpreterProgram {
+            decoded_insts,
+            pc_to_idx,
+            basic_block_starts,
+            block_gas_costs,
+            code: code.to_vec(),
+            bitmask: bitmask.to_vec(),
+            jump_table: jump_table.to_vec(),
+            mem_cycles,
         }
     }
 
@@ -335,11 +352,7 @@ impl Pvm {
     /// Handle dynamic jump (eq A.18).
     fn djump(&self, a: u64) -> (Option<ExitReason>, u32) {
         const ZA: u64 = 2; // Jump alignment factor
-        let halt_addr = (1u64 << 32) - (1u64 << 16);
-
-        if a == halt_addr {
-            return (Some(ExitReason::Halt), self.pc);
-        }
+        // No halt address check — programs terminate via REPLY (ecalli 0xFF).
         if a == 0 || a > self.jump_table.len() as u64 * ZA || !a.is_multiple_of(ZA) {
             return (Some(ExitReason::Panic), self.pc);
         }
@@ -3010,8 +3023,8 @@ mod tests {
     use super::*;
 
     /// Helper to create a VM with simple bitmask (every byte is instruction start).
-    fn simple_vm(code: Vec<u8>, gas: Gas) -> Pvm {
-        Pvm::new_simple(code, [0; 13], Vec::new(), gas)
+    fn simple_vm(code: Vec<u8>, gas: Gas) -> Interpreter {
+        Interpreter::new_simple(code, [0; 13], Vec::new(), gas)
     }
 
     #[test]
@@ -3053,7 +3066,7 @@ mod tests {
         // Bitmask: [1, 0, 0, 0, 0, 0, 1] for the load_imm (6 bytes) + trap
         let code = vec![51, 0x00, 42, 0, 0, 0, 0]; // opcode + reg + 4-byte imm + trap
         let bitmask = vec![1, 0, 0, 0, 0, 0, 1];
-        let mut vm = Pvm::new(
+        let mut vm = Interpreter::new(
             code,
             bitmask,
             vec![],
@@ -3073,7 +3086,7 @@ mod tests {
         let bitmask = vec![1, 0, 0, 0, 0, 0, 1];
         let mut regs = [0u64; 13];
         regs[1] = 32;
-        let mut vm = Pvm::new(
+        let mut vm = Interpreter::new(
             code,
             bitmask,
             vec![],
@@ -3094,7 +3107,7 @@ mod tests {
         let mut regs = [0u64; 13];
         regs[0] = 100;
         regs[1] = 200;
-        let mut vm = Pvm::new(
+        let mut vm = Interpreter::new(
             code,
             bitmask,
             vec![],
@@ -3114,7 +3127,7 @@ mod tests {
         let mut regs = [0u64; 13];
         regs[0] = 300;
         regs[1] = 100;
-        let mut vm = Pvm::new(
+        let mut vm = Interpreter::new(
             code,
             bitmask,
             vec![],
@@ -3135,7 +3148,7 @@ mod tests {
         let mut regs = [0u64; 13];
         regs[0] = 0xFF00;
         regs[1] = 0x0FF0;
-        let mut vm = Pvm::new(
+        let mut vm = Interpreter::new(
             code,
             bitmask,
             vec![],
@@ -3155,7 +3168,7 @@ mod tests {
         let mut regs = [0u64; 13];
         regs[0] = 5;
         regs[1] = 10;
-        let mut vm = Pvm::new(
+        let mut vm = Interpreter::new(
             code,
             bitmask,
             vec![],
@@ -3173,7 +3186,7 @@ mod tests {
         // ecalli (10), immediate = 7 (1 byte)
         let code = vec![10, 7];
         let bitmask = vec![1, 0];
-        let mut vm = Pvm::new(
+        let mut vm = Interpreter::new(
             code,
             bitmask,
             vec![],
@@ -3192,7 +3205,7 @@ mod tests {
         let bitmask = vec![1, 0, 1];
         let mut regs = [0u64; 13];
         regs[1] = 42;
-        let mut vm = Pvm::new(
+        let mut vm = Interpreter::new(
             code,
             bitmask,
             vec![],
@@ -3211,7 +3224,7 @@ mod tests {
         let bitmask = vec![1, 0, 1];
         let mut regs = [0u64; 13];
         regs[1] = 0xFF; // 8 bits set
-        let mut vm = Pvm::new(
+        let mut vm = Interpreter::new(
             code,
             bitmask,
             vec![],
@@ -3231,7 +3244,7 @@ mod tests {
         let mut regs = [0u64; 13];
         regs[0] = 100;
         regs[1] = 0; // divide by zero
-        let mut vm = Pvm::new(
+        let mut vm = Interpreter::new(
             code,
             bitmask,
             vec![],
@@ -3250,7 +3263,7 @@ mod tests {
         let bitmask = vec![1, 0, 1];
         let mut regs = [0u64; 13];
         regs[1] = 0x80; // -128 as i8
-        let mut vm = Pvm::new(
+        let mut vm = Interpreter::new(
             code,
             bitmask,
             vec![],
@@ -3269,7 +3282,7 @@ mod tests {
         let bitmask = vec![1, 0, 1];
         let mut regs = [0u64; 13];
         regs[1] = 0x0123456789ABCDEF;
-        let mut vm = Pvm::new(
+        let mut vm = Interpreter::new(
             code,
             bitmask,
             vec![],
@@ -3416,7 +3429,7 @@ mod tests {
         let bitmask = vec![1, 1, 0, 1];
 
         // Run via step()
-        let mut vm_step = Pvm::new(
+        let mut vm_step = Interpreter::new(
             code.clone(),
             bitmask.clone(),
             vec![],
@@ -3434,7 +3447,7 @@ mod tests {
         let gas_used_step = initial_gas - vm_step.gas;
 
         // Run via run()
-        let mut vm_run = Pvm::new(
+        let mut vm_run = Interpreter::new(
             code,
             bitmask,
             vec![],
@@ -3459,7 +3472,7 @@ mod tests {
 
         // PC 3 is a branch target but NOT a gas start.
         // Verify is_basic_block_start accepts it (branch validation).
-        let vm = Pvm::new(
+        let vm = Interpreter::new(
             code,
             bitmask,
             vec![],

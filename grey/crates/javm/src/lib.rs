@@ -10,21 +10,41 @@
 extern crate alloc;
 
 pub mod args;
+pub mod backend;
+#[cfg(feature = "std")]
+pub mod backing;
+pub mod cap;
 pub mod gas_cost;
 pub mod gas_sim;
 pub mod instruction;
+pub mod interpreter;
+#[cfg(feature = "std")]
+pub mod kernel;
 pub mod program;
-// Real JIT recompiler on Linux x86-64; interpreter-backed shim everywhere else.
+pub mod vm_pool;
+// Real JIT recompiler on Linux x86-64.
 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
 pub mod recompiler;
-#[cfg(all(feature = "std", not(all(target_os = "linux", target_arch = "x86_64"))))]
-#[path = "recompiler_shim.rs"]
-pub mod recompiler;
-pub mod vm;
 
-#[cfg(feature = "std")]
-pub use recompiler::RecompiledPvm;
-pub use vm::{ExitReason, Pvm};
+pub use backend::PvmBackend;
+pub use interpreter::Interpreter;
+
+// --- PVM types ---
+
+/// Exit reason for PVM execution (ε values, eq A.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExitReason {
+    /// ∎: Normal halt.
+    Halt,
+    /// ☇: Panic / unexpected termination.
+    Panic,
+    /// ∞: Out of gas.
+    OutOfGas,
+    /// ×: Page fault at the given page address.
+    PageFault(u32),
+    /// h̵: Host-call with the given identifier.
+    HostCall(u32),
+}
 
 // --- PVM constants (Gray Paper Appendix A / I.4.4) ---
 
@@ -42,3 +62,16 @@ pub const PVM_ZONE_SIZE: u32 = 1 << 16;
 
 /// Number of registers in the PVM.
 pub const PVM_REGISTER_COUNT: usize = 13;
+
+/// Gas cost per page for initial memory allocation and retype.
+pub const GAS_PER_PAGE: u64 = 1500;
+
+/// Compute memory tier load/store cycles based on total accessible pages.
+pub fn compute_mem_cycles(total_pages: u32) -> u8 {
+    match total_pages {
+        0..=2048 => 25,     // ≤ 8MB: L2 baseline
+        2049..=8192 => 50,  // ≤ 32MB: L3
+        8193..=65536 => 75, // ≤ 256MB: DRAM
+        _ => 100,           // > 256MB: DRAM saturated
+    }
+}

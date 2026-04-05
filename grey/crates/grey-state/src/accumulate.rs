@@ -3,11 +3,9 @@
 //! Manages the work-report accumulation queue, dependency resolution,
 //! and PVM execution of service Accumulate code (ΨA).
 
-use crate::pvm_backend::{ExitReason, PvmInstance};
+use crate::pvm_backend::PvmInstance;
 use grey_types::config::Config;
-use grey_types::constants::{
-    HOST_CORE, HOST_FULL, HOST_HUH, HOST_LOW, HOST_NONE, HOST_OK, HOST_WHAT, HOST_WHO,
-};
+use grey_types::constants::HOST_WHAT;
 use grey_types::work::{WorkReport, WorkResult};
 use grey_types::{Hash, ServiceId, Timeslot};
 use javm::Gas;
@@ -289,6 +287,7 @@ fn compute_accumulatable_with_new(
 
 /// Accumulation context L (eq B.7-B.8).
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct AccContext {
     service_id: ServiceId,
     accounts: BTreeMap<ServiceId, AccServiceAccount>,
@@ -481,6 +480,7 @@ fn accumulate_single_service(
         timeslot,
         entropy,
         &service_fetch_ctx,
+        service_id,
     );
 
     tracing::debug!(
@@ -602,6 +602,7 @@ fn encode_new_service_hash(service_id: ServiceId, entropy: &Hash, timeslot: Time
 }
 
 /// Data available to the fetch host call during accumulation.
+#[allow(dead_code)]
 struct FetchContext {
     /// Protocol configuration blob (mode 0).
     config_blob: Vec<u8>,
@@ -613,7 +614,8 @@ struct FetchContext {
     items: Vec<Vec<u8>>,
 }
 
-/// Run PVM accumulation with host-call loop.
+/// Run accumulation using the capability kernel.
+/// Protocol cap CALLs exit the kernel and are dispatched here.
 #[allow(clippy::too_many_arguments)]
 fn run_accumulate_pvm(
     config: &Config,
@@ -623,10 +625,12 @@ fn run_accumulate_pvm(
     mut regular: AccContext,
     mut exceptional: AccContext,
     timeslot: Timeslot,
-    entropy: &Hash,
+    _entropy: &Hash,
     fetch_ctx: &FetchContext,
+    service_id: u32,
 ) -> (AccContext, Gas) {
-    // Initialize PVM
+    use javm::kernel::KernelResult;
+
     let mut pvm = match PvmInstance::initialize(code_blob, args, gas) {
         Some(p) => p,
         None => {
@@ -634,1320 +638,231 @@ fn run_accumulate_pvm(
         }
     };
 
-    // Set entry point: ΨM(c, 5, ...) starts at instruction counter 5 for accumulate
-    pvm.set_pc(5);
+    // Single entrypoint PC=0. Set φ[7]=1 for accumulate operation.
+    // φ[8]=args_base and φ[9]=args_len are set by the kernel init.
+    if let Some(k) = pvm.kernel_mut()
+        && let Some(vm) = k.vms.get_mut(k.active_vm as usize)
+    {
+        vm.registers[7] = 1; // op = accumulate
+    }
+
     let initial_gas = pvm.gas();
-    let mut _host_call_count = 0u32;
+    // Debug: log φ[7] to verify it's set correctly
+    if let Some(k) = pvm.kernel() {
+        let vm = &k.vms[k.active_vm as usize];
+        tracing::info!(
+            phi7 = vm.registers[7],
+            phi8 = vm.registers[8],
+            phi9 = vm.registers[9],
+            "accumulate start regs"
+        );
+    }
 
     loop {
-        let exit_reason = pvm.run();
+        let result = pvm.kernel_run();
 
-        match exit_reason {
-            ExitReason::Halt => {
+        match result {
+            KernelResult::Halt(exit_value) => {
                 let gas_used = initial_gas - pvm.gas();
+                tracing::info!(exit_value, gas_used, service_id, "accumulate PVM halted");
 
-                // GP Ψ_M (eq A.36): On halt, o = μ'[φ'_7..φ'_7+φ'_8] if
-                // N_{φ'_7 ..+ φ'_8} ⊆ V_{μ'}.  Registers are 64-bit, addresses
-                // are 32-bit, so the full u64 range must fit in [0, 2^32).
-                // GP completion function C: If o ∈ H (|o| = 32), yield = o.
-                let out_ptr = pvm.reg(7);
-                let out_len = pvm.reg(8);
-                if out_len == 32
-                    && out_ptr
-                        .checked_add(32)
-                        .is_some_and(|end| end <= (1u64 << 32))
-                {
-                    let ptr32 = out_ptr as u32;
-                    let mut bytes = [0u8; 32];
-                    let mut accessible = true;
-                    for i in 0..32u32 {
-                        match pvm.read_byte(ptr32 + i) {
-                            Some(b) => bytes[i as usize] = b,
-                            None => {
-                                accessible = false;
-                                break;
-                            }
-                        }
-                    }
-                    if accessible {
-                        regular.output = Some(grey_types::Hash(bytes));
-                    }
-                }
+                // Output hash is set via the OUTPUT protocol cap during execution
+                // (stored in regular.output by the OUTPUT handler).
+                // exit_value (φ[7]) is unused for output in the capability model.
 
                 return (regular, gas_used);
             }
-            ExitReason::Panic => {
+            KernelResult::Panic => {
                 let gas_used = initial_gas - pvm.gas();
                 return (exceptional, gas_used);
             }
-            ExitReason::OutOfGas => {
-                let gas_used = initial_gas;
-                return (exceptional, gas_used);
+            KernelResult::OutOfGas => {
+                return (exceptional, initial_gas);
             }
-            ExitReason::PageFault(_addr) => {
+            KernelResult::PageFault(_) => {
                 let gas_used = initial_gas - pvm.gas();
                 return (exceptional, gas_used);
             }
-            ExitReason::HostCall(id) => {
-                _host_call_count += 1;
-                let _gas_before_host = pvm.gas();
+            KernelResult::ProtocolCall { slot, regs, gas: _ } => {
+                // Gas already charged by kernel (10 per ecalli in dispatch_ecalli)
+                // Dispatch by protocol cap slot number (matches GP host call IDs directly)
                 let ok = handle_host_call(
                     config,
-                    id,
+                    slot,
                     &mut pvm,
+                    &regs,
                     &mut regular,
                     &mut exceptional,
                     timeslot,
-                    entropy,
                     fetch_ctx,
+                    service_id,
                 );
-                let _gas_after_host = pvm.gas();
                 if !ok {
                     let gas_used = initial_gas - pvm.gas();
                     return (exceptional, gas_used);
                 }
+                // Resume kernel execution
             }
         }
     }
 }
 
-/// Handle a host call from the PVM during accumulation.
+/// Handle a protocol cap call. Slot numbers match GP host call IDs.
 /// Returns true to continue, false to abort.
 #[allow(clippy::too_many_arguments)]
 fn handle_host_call(
-    config: &Config,
-    id: u32,
+    _config: &Config,
+    slot: u8,
     pvm: &mut PvmInstance,
+    regs: &[u64; 13],
     regular: &mut AccContext,
     exceptional: &mut AccContext,
-    timeslot: Timeslot,
-    _entropy: &Hash,
+    _timeslot: Timeslot,
     fetch_ctx: &FetchContext,
+    service_id: u32,
 ) -> bool {
-    // JAR v0.8.0 hostcall numbering: 0=gas, 1=grow_heap(new), 2+=shifted by 1.
-    // Host-call gas cost: all host calls cost g=10 (charged upfront).
-    let host_gas_cost: u64 = 10;
+    const RESULT_NONE: u64 = u64::MAX;
 
-    if pvm.gas() < host_gas_cost {
-        pvm.set_gas(0);
-        return false;
-    }
-    pvm.set_gas(pvm.gas() - host_gas_cost);
-
-    // JAR v0.8.0 ID mapping: 0→gas, 1→grow_heap, 2..=27→old 1..=26, 100→log
-
-    match id {
-        0 => host_gas(pvm, regular),
-        1 => host_grow_heap(pvm),
-        2 => host_fetch(pvm, fetch_ctx),
-        3 => host_lookup(pvm, regular),
-        4 => host_read(pvm, regular),
-        5 => host_write(pvm, regular),
-        6 => host_info(pvm, regular),
-        15 => host_bless(pvm, regular, exceptional, config),
-        16 => host_assign(pvm, regular, exceptional, config),
-        17 => host_designate(pvm, regular, exceptional, config),
-        18 => host_checkpoint(pvm, regular, exceptional),
-        19 => host_new(pvm, regular, timeslot),
-        20 => host_upgrade(pvm, regular),
-        21 => host_transfer(pvm, regular),
-        22 => host_eject(pvm, regular, timeslot, config),
-        23 => host_query(pvm, regular),
-        24 => host_solicit(pvm, regular, timeslot),
-        25 => host_forget(pvm, regular, timeslot, config),
-        26 => host_yield(pvm, regular),
-        27 => host_provide(pvm, regular),
-        28 => host_set_quota(pvm, regular),
-        100 => {
-            pvm.set_reg(7, HOST_WHAT);
+    tracing::info!(slot, service_id, "handle_host_call");
+    match slot {
+        0 => {
+            // GAS: return remaining gas
+            pvm.kernel_resume(pvm.gas(), 0);
             true
         }
-        _ => {
-            pvm.set_reg(7, HOST_WHAT);
-            true
-        }
-    }
-}
+        1 => {
+            // FETCH: φ[7]=mode, φ[8]=sub, φ[9]=out_off, φ[10]=max_len, φ[12]=data_cap
+            let mode = regs[7] as u32;
+            let sub = regs[8] as usize;
+            let out_off = regs[9] as u32;
+            let max_len = regs[10] as usize;
+            let cap_idx = regs[12] as u8;
 
-/// gas (id=0): Return remaining gas in φ[7].
-fn host_gas(pvm: &mut PvmInstance, _ctx: &mut AccContext) -> bool {
-    pvm.set_reg(7, pvm.gas());
-    true
-}
-
-/// grow_heap (JAR v0.8.0, id=1): Grow the heap to a desired page count.
-/// φ[7] = desired last writable page index + 1 (i.e. target page count).
-/// Returns in φ[7]: current page count (before or after growth).
-/// Extra gas cost: (new_pages - current_pages) × 10.
-fn host_grow_heap(pvm: &mut PvmInstance) -> bool {
-    let desired = pvm.reg(7);
-    let ps = javm::PVM_PAGE_SIZE;
-    let current_pages = (pvm.heap_top() as u64).div_ceil(ps as u64);
-    if desired <= current_pages || desired > (1u64 << 32) / ps as u64 {
-        // No-op: already at or beyond desired, or exceeds address space
-        pvm.set_reg(7, current_pages);
-        return true;
-    }
-
-    let new_pages = desired - current_pages;
-    let extra_gas = new_pages * 10;
-    if pvm.gas() < extra_gas {
-        pvm.set_gas(0);
-        return false; // OOG
-    }
-    pvm.set_gas(pvm.gas() - extra_gas);
-
-    // Map new pages as ReadWrite
-    let old_top = pvm.heap_top();
-    let new_top = (desired as u32) * ps;
-    pvm.map_pages_rw(old_top / ps, desired as u32);
-    pvm.set_heap_top(new_top);
-
-    pvm.set_reg(7, current_pages);
-    true
-}
-
-/// fetch (id=2 in v0.8.0): Read protocol/context data (ΩY).
-/// φ[7]=buffer_ptr, φ[8]=offset, φ[9]=max_len, φ[10]=mode, φ[11]=sub1, φ[12]=sub2
-/// Returns: φ'[7] = |v| (total data length) or NONE (u64::MAX).
-fn host_fetch(pvm: &mut PvmInstance, fetch_ctx: &FetchContext) -> bool {
-    let buf_ptr = pvm.reg(7) as u32;
-    let offset = pvm.reg(8);
-    let max_len = pvm.reg(9);
-    let mode = pvm.reg(10);
-    let sub1 = pvm.reg(11) as usize;
-    // Select data based on mode (accumulate context: modes 0, 1, 14, 15)
-    // GP line 3943: Ω_Y(ρ, φ, μ, ∅, η_0', ∅, ∅, ∅, ∅, i, (x, y))
-    // Position 5 = η_0' maps to mode 1 (n).
-    // Modes 2-13 NONE (r, p, x̄, ī all ∅ in accumulate context).
-    let owned_data: Option<Vec<u8>>;
-    let data: Option<&[u8]> = match mode {
-        0 => Some(&fetch_ctx.config_blob), // Protocol configuration
-        1 => Some(&fetch_ctx.entropy.0),   // Entropy η'_0
-        14 => Some(&fetch_ctx.items_blob), // All items encoded
-        15 => {
-            // Single item at index φ[11]
-            if sub1 < fetch_ctx.items.len() {
-                owned_data = Some(fetch_ctx.items[sub1].clone());
-                owned_data.as_deref()
-            } else {
-                None
-            }
-        }
-        _ => None,
-    };
-
-    let data = match data {
-        Some(d) => d,
-        None => {
-            pvm.set_reg(7, u64::MAX); // NONE
-            return true;
-        }
-    };
-
-    let data_len = data.len() as u64;
-    let f = offset.min(data_len);
-    let l = max_len.min(data_len - f);
-
-    // Dump hex for debugging
-    #[allow(clippy::if_same_then_else)]
-    if mode == 0 {
-    } else if mode == 1 {
-    } else if mode == 14 && data.len() <= 512 {
-    } else if mode == 15 && data.len() <= 512 && data.len() > 134 {
-    }
-
-    // Write data[f..f+l] to memory at buf_ptr
-    if l > 0 {
-        let src = &data[f as usize..(f + l) as usize];
-        if pvm.try_write_bytes(buf_ptr, src).is_none() {
-            return false; // page fault → PANIC
-        }
-    }
-
-    // Return total length of the data
-    pvm.set_reg(7, data_len);
-    true
-}
-
-/// read (id=3): Read from service storage.
-/// φ[7] = service_id (or if ≥ 2^32, defaults to current service s),
-/// φ[8] = key_ptr, φ[9] = key_len,
-/// φ[10] = output_ptr, φ[11] = output_max_len
-/// Returns: φ[7] = value_len or NONE
-fn host_read(pvm: &mut PvmInstance, ctx: &mut AccContext) -> bool {
-    // GP eq B.14: s* = s if φ₇ = NONE, else φ₇
-    let service_id = if pvm.reg(7) == u64::MAX {
-        ctx.service_id
-    } else if pvm.reg(7) <= u32::MAX as u64 {
-        pvm.reg(7) as ServiceId
-    } else {
-        pvm.set_reg(7, u64::MAX); // NONE
-        return true;
-    };
-    let key_ptr = pvm.reg(8) as u32;
-    let key_len = pvm.reg(9) as u32;
-    let out_ptr = pvm.reg(10) as u32;
-    let offset = pvm.reg(11);
-    let max_len = pvm.reg(12);
-
-    let key = match pvm.try_read_bytes(key_ptr, key_len) {
-        Some(k) => k,
-        None => return false, // page fault → PANIC
-    };
-
-    // For parallel semantics: read self from mutable accounts, others from init snapshot
-    let target_accounts = if service_id == ctx.service_id {
-        &mut ctx.accounts
-    } else {
-        &mut ctx.init_accounts
-    };
-    if let Some(account) = target_accounts.get_mut(&service_id) {
-        // Check structured storage first, then fall back to opaque data
-        let value = if let Some(v) = account.storage.get(&key) {
-            Some(v.clone())
-        } else {
-            // Look up in opaque data by computing expected state key
-            let state_key = grey_merkle::state_serial::compute_storage_state_key(service_id, &key);
-            if let Some(v) = account.opaque_data.remove(&state_key) {
-                // Promote from opaque to structured storage
-                account.storage.insert(key.clone(), v.clone());
-                Some(v)
-            } else {
-                None
-            }
-        };
-
-        if let Some(value) = value {
-            let v_len = value.len() as u64;
-            let f = offset.min(v_len) as usize;
-            let l = max_len.min(v_len - f as u64) as usize;
-            if l > 0 && pvm.try_write_bytes(out_ptr, &value[f..f + l]).is_none() {
-                return false; // page fault → PANIC
-            }
-            pvm.set_reg(7, v_len);
-        } else {
-            pvm.set_reg(7, u64::MAX); // NONE
-        }
-    } else {
-        pvm.set_reg(7, u64::MAX); // NONE
-    }
-
-    true
-}
-
-/// write (id=4): Write to current service's storage.
-/// φ[7] = key_ptr, φ[8] = key_len, φ[9] = value_ptr, φ[10] = value_len
-/// Returns: φ[7] = OK(0) or error
-fn host_write(pvm: &mut PvmInstance, ctx: &mut AccContext) -> bool {
-    let key_ptr = pvm.reg(7) as u32;
-    let key_len = pvm.reg(8) as u32;
-    let value_ptr = pvm.reg(9) as u32;
-    let value_len = pvm.reg(10) as u32;
-
-    let key = match pvm.try_read_bytes(key_ptr, key_len) {
-        Some(k) => k,
-        None => return false, // page fault → PANIC
-    };
-    let value = match pvm.try_read_bytes(value_ptr, value_len) {
-        Some(v) => v,
-        None => return false, // page fault → PANIC
-    };
-
-    if let Some(account) = ctx.accounts.get_mut(&ctx.service_id) {
-        // Promote from opaque data if not in structured storage
-        if !account.storage.contains_key(&key) {
-            let state_key =
-                grey_merkle::state_serial::compute_storage_state_key(ctx.service_id, &key);
-            if let Some(v) = account.opaque_data.remove(&state_key) {
-                account.storage.insert(key.clone(), v);
-            }
-        }
-
-        let old_len: u64 = account
-            .storage
-            .get(&key)
-            .map(|v| v.len() as u64)
-            .unwrap_or(u64::MAX);
-
-        let old_size: u64 = account
-            .storage
-            .get(&key)
-            .map(|v| (34 + key.len() + v.len()) as u64)
-            .unwrap_or(0);
-
-        let new_bytes;
-        let new_items;
-        if value_len == 0 {
-            if account.storage.contains_key(&key) {
-                new_bytes = account.bytes.saturating_sub(old_size);
-                new_items = account.items.saturating_sub(1);
-            } else {
-                new_bytes = account.bytes;
-                new_items = account.items;
-            }
-        } else {
-            let new_size = (34 + key.len() + value.len()) as u64;
-            let was_new = !account.storage.contains_key(&key);
-            new_bytes = account
-                .bytes
-                .saturating_sub(old_size)
-                .saturating_add(new_size);
-            new_items = if was_new {
-                account.items + 1
-            } else {
-                account.items
+            let items_count = fetch_ctx.items.len();
+            let first_item_len = fetch_ctx.items.first().map(|i| i.len()).unwrap_or(0);
+            tracing::info!(
+                mode,
+                sub,
+                out_off,
+                max_len,
+                cap_idx,
+                items_count,
+                first_item_len,
+                "FETCH"
+            );
+            let data: Option<&[u8]> = match mode {
+                0 => Some(&fetch_ctx.config_blob),
+                1 => Some(fetch_ctx.entropy.as_ref()),
+                14 => Some(&fetch_ctx.items_blob),
+                15 => fetch_ctx.items.get(sub).map(|v| v.as_slice()),
+                _ => None,
             };
-        }
-
-        if new_items > account.quota_items || new_bytes > account.quota_bytes {
-            pvm.set_reg(7, HOST_FULL);
-            return true;
-        }
-
-        if value_len == 0 {
-            if account.storage.remove(&key).is_some() {
-                account.bytes = new_bytes;
-                account.items = new_items;
-            }
-        } else {
-            account.storage.insert(key, value);
-            account.bytes = new_bytes;
-            account.items = new_items;
-        }
-        pvm.set_reg(7, old_len);
-    } else {
-        pvm.set_reg(7, u64::MAX);
-    }
-
-    true
-}
-
-/// info (id=5): Get service account info (GP eq ΩI).
-/// φ[7] = service_id (or 2^64-1 for current service s)
-/// φ[8] = output_ptr (o), φ[9] = offset (f), φ[10] = max_len (l)
-/// Returns φ[7] = |v| (total info length) or NONE
-fn host_info(pvm: &mut PvmInstance, ctx: &mut AccContext) -> bool {
-    let service_id = if pvm.reg(7) == u64::MAX {
-        ctx.service_id
-    } else if pvm.reg(7) <= u32::MAX as u64 {
-        pvm.reg(7) as ServiceId
-    } else {
-        pvm.set_reg(7, u64::MAX); // NONE
-        return true;
-    };
-    let out_ptr = pvm.reg(8) as u32;
-    let offset = pvm.reg(9);
-    let max_len = pvm.reg(10);
-
-    // For parallel semantics: read self from mutable accounts, others from init snapshot
-    let target = if service_id == ctx.service_id {
-        ctx.accounts.get(&service_id)
-    } else {
-        ctx.init_accounts.get(&service_id)
-    };
-    if let Some(account) = target {
-        // Build info struct v per GP (coinless):
-        // E(a_c, E_8(a_qi, a_qo, a_g, a_m, a_o), E_4(a_i), E_8(pad), E_4(a_r, a_a, a_p))
-        // = 32 + 40 + 4 + 8 + 12 = 96 bytes
-        let mut buf = [0u8; 96];
-        buf[0..32].copy_from_slice(&account.code_hash.0); // a_c
-        buf[32..40].copy_from_slice(&account.quota_items.to_le_bytes()); // a_qi (was a_b)
-        buf[40..48].copy_from_slice(&account.quota_bytes.to_le_bytes()); // a_qo (was a_t)
-        buf[48..56].copy_from_slice(&account.min_item_gas.to_le_bytes()); // a_g
-        buf[56..64].copy_from_slice(&account.min_memo_gas.to_le_bytes()); // a_m
-        buf[64..72].copy_from_slice(&account.bytes.to_le_bytes()); // a_o
-        buf[72..76].copy_from_slice(&(account.items as u32).to_le_bytes()); // a_i
-        buf[76..84].copy_from_slice(&0u64.to_le_bytes()); // padding (was a_f)
-        buf[84..88].copy_from_slice(&account.creation_slot.to_le_bytes()); // a_r
-        buf[88..92].copy_from_slice(&account.last_accumulation_slot.to_le_bytes()); // a_a
-        buf[92..96].copy_from_slice(&account.parent_service.to_le_bytes()); // a_p
-
-        let v_len = buf.len() as u64;
-        let f = offset.min(v_len);
-        let l = max_len.min(v_len - f);
-
-        if l > 0
-            && pvm
-                .try_write_bytes(out_ptr, &buf[f as usize..(f + l) as usize])
-                .is_none()
-        {
-            return false; // page fault → PANIC
-        }
-        pvm.set_reg(7, v_len); // return |v|
-    } else {
-        pvm.set_reg(7, u64::MAX); // NONE
-    }
-
-    true
-}
-
-/// checkpoint (id=17): Save rollback point. y ← x.
-fn host_checkpoint(
-    pvm: &mut PvmInstance,
-    regular: &mut AccContext,
-    exceptional: &mut AccContext,
-) -> bool {
-    *exceptional = regular.clone();
-    pvm.set_reg(7, pvm.gas());
-    true
-}
-
-/// transfer (id=20): Queue a deferred transfer (GP eq B.19-B.20, coinless).
-/// φ[7] = dest, φ[8] = (unused), φ[9] = gas_limit, φ[10] = memo_ptr
-/// Memo is always exactly W_T (128) bytes read from memory at φ[10].
-/// Returns: OK, WHO (dest unknown), LOW (gas < min)
-fn host_transfer(pvm: &mut PvmInstance, ctx: &mut AccContext) -> bool {
-    const MEMO_SIZE: u32 = 128; // W_T
-
-    let dest = pvm.reg(7) as ServiceId;
-    let gas_limit = pvm.reg(9);
-    let memo_ptr = pvm.reg(10) as u32;
-
-    let memo = match pvm.try_read_bytes(memo_ptr, MEMO_SIZE) {
-        Some(m) => m,
-        None => return false, // page fault → PANIC
-    };
-
-    if !ctx.accounts.contains_key(&dest) {
-        pvm.set_reg(7, HOST_WHO);
-        return true;
-    }
-
-    if let Some(dest_acc) = ctx.accounts.get(&dest)
-        && gas_limit < dest_acc.min_memo_gas
-    {
-        pvm.set_reg(7, HOST_LOW);
-        return true;
-    }
-
-    if pvm.gas() < gas_limit {
-        pvm.set_gas(0);
-        return false;
-    }
-    pvm.set_gas(pvm.gas() - gas_limit);
-
-    ctx.transfers.push(DeferredTransfer {
-        sender: ctx.service_id,
-        destination: dest,
-        memo,
-        gas_limit,
-    });
-
-    pvm.set_reg(7, 0); // OK
-    true
-}
-
-/// eject (id=21): Eject a service (GP eq ΩJ, lines 4601-4621).
-/// φ[7] = d (target service to eject), φ[8] = o (hash_ptr, 32 bytes)
-/// Checks: code_hash must equal ℰ_{32}(caller), items must be 2,
-/// (h,l) must be in preimage_info, and preimage must be old enough (y < t - D).
-fn host_eject(
-    pvm: &mut PvmInstance,
-    ctx: &mut AccContext,
-    timeslot: Timeslot,
-    config: &Config,
-) -> bool {
-    let d = pvm.reg(7) as ServiceId;
-    let o_ptr = pvm.reg(8) as u32;
-
-    // Step 1: Read hash h from memory at o..o+32. PANIC if inaccessible.
-    let hash_data = match pvm.try_read_bytes(o_ptr, 32) {
-        Some(data) => data,
-        None => return false, // page fault → PANIC (⚡)
-    };
-    let mut h = [0u8; 32];
-    h.copy_from_slice(&hash_data);
-    let h = Hash(h);
-
-    // Step 2: Resolve target service account.
-    // d = (x_e)_d[d] if d ≠ x_s ∧ d ∈ K((x_e)_d); else ∇
-    let ejected = if d != ctx.service_id {
-        ctx.accounts.get(&d)
-    } else {
-        None
-    };
-
-    // Step 3: WHO if d = ∇ OR d.code_hash ≠ ℰ₃₂(x_s)
-    // ℰ₃₂(x_s) = 32-byte little-endian encoding of the caller's service ID
-    let caller_id_encoded = {
-        let mut buf = [0u8; 32];
-        buf[..4].copy_from_slice(&ctx.service_id.to_le_bytes());
-        Hash(buf)
-    };
-
-    let ejected = match ejected {
-        Some(acc) if acc.code_hash == caller_id_encoded => acc,
-        _ => {
-            pvm.set_reg(7, HOST_WHO);
-            return true;
-        }
-    };
-
-    // Step 4: Compute l = max(81, d_o) - 81 (preimage data length from total footprint)
-    let l = ejected.bytes.max(81) - 81;
-
-    // Step 5: HUH if d.items ≠ 2
-    if ejected.items != 2 {
-        pvm.set_reg(7, HOST_HUH);
-        return true;
-    }
-
-    let info_key = (h, l as u32);
-    // Promote preimage_info from opaque if needed
-    if !ejected.preimage_info.contains_key(&info_key) {
-        let state_key = grey_merkle::state_serial::compute_preimage_info_state_key(d, &h, l as u32);
-        if let Some(account) = ctx.accounts.get_mut(&d)
-            && let Some(v) = account.opaque_data.remove(&state_key)
-        {
-            let timeslots = decode_preimage_info_timeslots(&v);
-            account.preimage_info.insert(info_key, timeslots);
-        }
-    }
-
-    // Re-borrow after mutable promotion
-    let ejected = ctx.accounts.get(&d).unwrap();
-    let timeslots = match ejected.preimage_info.get(&info_key) {
-        Some(ts) => ts,
-        None => {
-            pvm.set_reg(7, HOST_HUH);
-            return true;
-        }
-    };
-
-    // Step 6: OK if d_l[(h,l)] = [x, y] and y < t - D; else HUH
-    if timeslots.len() >= 2 {
-        let y = timeslots[1];
-        if y < timeslot.saturating_sub(config.preimage_expunge_period) {
-            // Success: remove target service (coinless: no balance transfer)
-            ctx.accounts.remove(&d);
-            pvm.set_reg(7, HOST_OK);
-            return true;
-        }
-    }
-
-    pvm.set_reg(7, HOST_HUH);
-    true
-}
-
-/// yield (id=25): Set accumulation output hash.
-/// φ[7] = hash_ptr (pointer to 32-byte hash in memory)
-fn host_yield(pvm: &mut PvmInstance, ctx: &mut AccContext) -> bool {
-    let hash_ptr = pvm.reg(7) as u32;
-
-    let data = match pvm.try_read_bytes(hash_ptr, 32) {
-        Some(d) => d,
-        None => return false, // page fault → PANIC
-    };
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&data);
-
-    ctx.output = Some(Hash(hash));
-    pvm.set_reg(7, 0); // OK
-    true
-}
-
-/// lookup (id=2): Preimage lookup (GP ΩL).
-/// φ[7] = service_id (or NONE for self), φ[8] = hash_ptr, φ[9] = output_ptr,
-/// φ[10] = offset, φ[11] = max_len
-fn host_lookup(pvm: &mut PvmInstance, ctx: &mut AccContext) -> bool {
-    let service_id = if pvm.reg(7) == HOST_NONE
-        || pvm.reg(7) as u32 as u64 == pvm.reg(7) && pvm.reg(7) as u32 == ctx.service_id
-    {
-        ctx.service_id
-    } else if pvm.reg(7) <= u32::MAX as u64 {
-        pvm.reg(7) as ServiceId
-    } else {
-        pvm.set_reg(7, HOST_NONE);
-        return true;
-    };
-    let hash_ptr = pvm.reg(8) as u32;
-    let out_ptr = pvm.reg(9) as u32;
-    let offset = pvm.reg(10);
-    let max_len = pvm.reg(11);
-
-    let hash_data = match pvm.try_read_bytes(hash_ptr, 32) {
-        Some(d) => d,
-        None => return false, // page fault → PANIC
-    };
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&hash_data);
-    let hash = Hash(hash);
-
-    // For parallel semantics: lookup self from mutable accounts, others from init snapshot
-    let target = if service_id == ctx.service_id {
-        ctx.accounts.get_mut(&service_id)
-    } else {
-        ctx.init_accounts.get_mut(&service_id)
-    };
-    if let Some(account) = target {
-        // Check structured preimage_lookup first, then fall back to opaque data
-        let value = if let Some(v) = account.preimage_lookup.get(&hash) {
-            Some(v.clone())
-        } else {
-            let state_key =
-                grey_merkle::state_serial::compute_preimage_lookup_state_key(service_id, &hash);
-            if let Some(v) = account.opaque_data.remove(&state_key) {
-                // Promote from opaque to structured preimage_lookup
-                account.preimage_lookup.insert(hash, v.clone());
-                Some(v)
-            } else {
-                None
-            }
-        };
-
-        if let Some(value) = value {
-            let v_len = value.len() as u64;
-            let f = offset.min(v_len) as usize;
-            let l = max_len.min(v_len - f as u64) as usize;
-            if l > 0 && pvm.try_write_bytes(out_ptr, &value[f..f + l]).is_none() {
-                return false; // page fault → PANIC
-            }
-            pvm.set_reg(7, v_len);
-        } else {
-            pvm.set_reg(7, HOST_NONE);
-        }
-    } else {
-        pvm.set_reg(7, HOST_NONE);
-    }
-    true
-}
-
-/// bless (id=14): Update privileged services (GP ΩB).
-/// φ[7]=m, φ[8]=a, φ[9]=v, φ[10]=r, φ[11]=o, φ[12]=n
-/// Updates the regular context's environment privileges (x'_e)_{(m,a,v,r,z)}.
-fn host_bless(
-    pvm: &mut PvmInstance,
-    regular: &mut AccContext,
-    _exceptional: &mut AccContext,
-    config: &Config,
-) -> bool {
-    let m = pvm.reg(7);
-    let a_ptr = pvm.reg(8) as u32;
-    let v = pvm.reg(9);
-    let r = pvm.reg(10);
-    let o_ptr = pvm.reg(11) as u32;
-    let n = pvm.reg(12) as u32;
-
-    let c = config.core_count as u32;
-
-    // Read auth pool: C u32 values from memory at address a_ptr
-    let auth_pool_bytes = match pvm.try_read_bytes(a_ptr, 4 * c) {
-        Some(b) => b,
-        None => return false, // page fault → PANIC
-    };
-    let auth_pool: Vec<ServiceId> = (0..c as usize)
-        .map(|i| {
-            u32::from_le_bytes([
-                auth_pool_bytes[i * 4],
-                auth_pool_bytes[i * 4 + 1],
-                auth_pool_bytes[i * 4 + 2],
-                auth_pool_bytes[i * 4 + 3],
-            ])
-        })
-        .collect();
-
-    // Read always-accumulate map + quota_service: n entries of (u32, u64) = 12 bytes each,
-    // followed by 4 bytes for quota_service (u32).
-    let total_bless_bytes = 12 * n + 4;
-    let always_bytes = match pvm.try_read_bytes(o_ptr, total_bless_bytes) {
-        Some(b) => b,
-        None => return false, // page fault → PANIC
-    };
-    let always_acc: Vec<(ServiceId, Gas)> = (0..n as usize)
-        .map(|i| {
-            let sid = u32::from_le_bytes([
-                always_bytes[i * 12],
-                always_bytes[i * 12 + 1],
-                always_bytes[i * 12 + 2],
-                always_bytes[i * 12 + 3],
-            ]);
-            let gas = u64::from_le_bytes([
-                always_bytes[i * 12 + 4],
-                always_bytes[i * 12 + 5],
-                always_bytes[i * 12 + 6],
-                always_bytes[i * 12 + 7],
-                always_bytes[i * 12 + 8],
-                always_bytes[i * 12 + 9],
-                always_bytes[i * 12 + 10],
-                always_bytes[i * 12 + 11],
-            ]);
-            (sid, gas)
-        })
-        .collect();
-    // Read quota_service (4 bytes after always-accumulate entries)
-    let qs_offset = (12 * n) as usize;
-    let quota_service = u32::from_le_bytes([
-        always_bytes[qs_offset],
-        always_bytes[qs_offset + 1],
-        always_bytes[qs_offset + 2],
-        always_bytes[qs_offset + 3],
-    ]);
-
-    // Check (m, v, r) are valid service IDs (fit in u32)
-    if m > u32::MAX as u64 || v > u32::MAX as u64 || r > u32::MAX as u64 {
-        pvm.set_reg(7, HOST_WHO);
-        return true;
-    }
-
-    // Update regular context's environment privileges
-    regular.privileges = AccPrivileges {
-        bless: m as ServiceId,
-        assign: auth_pool,
-        designate: v as ServiceId,
-        register: r as ServiceId,
-        always_acc,
-        quota_service,
-    };
-
-    pvm.set_reg(7, HOST_OK);
-    true
-}
-
-/// assign (id=15): Update authorization queue for a core (GP ΩA).
-/// φ[7]=c, φ[8]=o, φ[9]=a
-/// Updates the regular context's environment (x'_e)_q[c] and (x'_e)_a[c].
-fn host_assign(
-    pvm: &mut PvmInstance,
-    regular: &mut AccContext,
-    _exceptional: &mut AccContext,
-    config: &Config,
-) -> bool {
-    let c = pvm.reg(7);
-    let o_ptr = pvm.reg(8) as u32;
-    let a = pvm.reg(9);
-
-    // GP order (eq Ω_A): read memory FIRST, then check privileges.
-    // If memory inaccessible → PANIC (⚡), takes priority over all other checks.
-    let q_count = config.auth_queue_size as u32;
-    let queue_bytes = match pvm.try_read_bytes(o_ptr, 32 * q_count) {
-        Some(b) => b,
-        None => return false, // page fault → PANIC
-    };
-
-    if c >= config.core_count as u64 {
-        pvm.set_reg(7, HOST_CORE);
-        return true;
-    }
-
-    let core = c as u16;
-
-    // Check caller is the current assigner for this core
-    if core < regular.privileges.assign.len() as u16 {
-        if regular.service_id != regular.privileges.assign[core as usize] {
-            pvm.set_reg(7, HOST_HUH);
-            return true;
-        }
-    } else {
-        pvm.set_reg(7, HOST_HUH);
-        return true;
-    }
-
-    if a > u32::MAX as u64 {
-        pvm.set_reg(7, HOST_WHO);
-        return true;
-    }
-
-    let queue: Vec<Hash> = (0..q_count as usize)
-        .map(|i| {
-            let mut h = [0u8; 32];
-            h.copy_from_slice(&queue_bytes[i * 32..(i + 1) * 32]);
-            Hash(h)
-        })
-        .collect();
-
-    // Store in regular context
-    if regular.auth_queues.is_none() {
-        regular.auth_queues = Some(BTreeMap::new());
-    }
-    regular
-        .auth_queues
-        .as_mut()
-        .unwrap()
-        .insert(core, (queue, a as ServiceId));
-
-    pvm.set_reg(7, HOST_OK);
-    true
-}
-
-/// designate (id=16): Set pending validator keys (GP ΩD, GP#514).
-/// φ[7]=o (memory offset for validator keys, 336 bytes each)
-/// φ[8]=z (validator count, GP#514)
-/// Updates the regular context's environment (x'_e)_i (pending validators).
-fn host_designate(
-    pvm: &mut PvmInstance,
-    regular: &mut AccContext,
-    _exceptional: &mut AccContext,
-    config: &Config,
-) -> bool {
-    let o_ptr = pvm.reg(7) as u32;
-    let key_size = 336u32; // Each validator key is 336 bytes
-
-    // GP#514: read validator count from reg[8], validate ∈ valcount
-    let z = pvm.reg(8) as u16;
-    if !config.is_valid_val_count(z) {
-        pvm.set_reg(7, HOST_HUH);
-        return true;
-    }
-    let val_count = z as u32;
-
-    // GP order (eq Ω_D): read memory FIRST, then check privileges.
-    // If memory inaccessible → PANIC (⚡), takes priority over all other checks.
-    let keys_bytes = match pvm.try_read_bytes(o_ptr, key_size * val_count) {
-        Some(b) => b,
-        None => return false, // page fault → PANIC
-    };
-
-    // Check caller is the designator
-    if regular.service_id != regular.privileges.designate {
-        pvm.set_reg(7, HOST_HUH);
-        return true;
-    }
-
-    let keys: Vec<Vec<u8>> = (0..val_count as usize)
-        .map(|i| keys_bytes[i * key_size as usize..(i + 1) * key_size as usize].to_vec())
-        .collect();
-
-    regular.pending_validators = Some(keys);
-
-    pvm.set_reg(7, HOST_OK);
-    true
-}
-
-/// new (id=18): Create a new service account (GP ΩN).
-/// φ[7]=o (code hash ptr), φ[8]=l (preimage length), φ[9]=g, φ[10]=m, φ[11]=f, φ[12]=i
-fn host_new(pvm: &mut PvmInstance, ctx: &mut AccContext, timeslot: Timeslot) -> bool {
-    let o_ptr = pvm.reg(7) as u32;
-    let l = pvm.reg(8);
-    let g = pvm.reg(9);
-    let m = pvm.reg(10);
-    let f = pvm.reg(11); // freeze (legacy, unused in coinless)
-    let hint_i = pvm.reg(12);
-
-    // Read code hash from memory
-    let hash_data = match pvm.try_read_bytes(o_ptr, 32) {
-        Some(d) => d,
-        None => return false, // page fault → PANIC
-    };
-    let mut code_hash = [0u8; 32];
-    code_hash.copy_from_slice(&hash_data);
-    let code_hash = Hash(code_hash);
-
-    // Validate l fits u32
-    if l > u32::MAX as u64 {
-        return false; // panic
-    }
-
-    // Build the new account
-    let mut preimage_info = BTreeMap::new();
-    preimage_info.insert((code_hash, l as u32), vec![]);
-
-    // Compute derived footprint for new account (GP eq 9.4)
-    // a_i = 2·|a_l| + |a_s| = 2·1 + 0 = 2
-    let items_count = 2u64 * preimage_info.len() as u64;
-    // a_o = Σ(81 + z) for (h,z) ∈ K(a_l)
-    let footprint = 81u64 + l;
-
-    // Check f ≠ 0 requires caller to be manager (GP: if f ≠ 0 ∧ x_s ≠ χ_M → HUH)
-    if f != 0 && ctx.service_id != ctx.privileges.bless {
-        pvm.set_reg(7, HOST_HUH);
-        return true;
-    }
-
-    // Find service ID
-    let s_threshold = grey_types::constants::MIN_PUBLIC_SERVICE_INDEX; // S = 2^16 (GP I.4.4)
-    let new_id = if ctx.service_id == ctx.privileges.register
-        && (hint_i as u32) < s_threshold
-        && hint_i <= u32::MAX as u64
-    {
-        // Registrar can use IDs below S threshold
-        let id = hint_i as u32;
-        if ctx.accounts.contains_key(&id) {
-            pvm.set_reg(7, HOST_FULL);
-            return true;
-        }
-        id
-    } else {
-        // Use next_service_id from context
-        let id = ctx.next_service_id;
-        if ctx.accounts.contains_key(&id) {
-            pvm.set_reg(7, HOST_FULL);
-            return true;
-        }
-        id
-    };
-
-    let new_account = AccServiceAccount {
-        version: 0,
-        code_hash,
-        quota_items: 0,
-        min_item_gas: g,
-        min_memo_gas: m,
-        bytes: footprint,
-        quota_bytes: 0,
-        items: items_count,
-        creation_slot: timeslot,
-        last_accumulation_slot: 0,
-        parent_service: ctx.service_id,
-        storage: BTreeMap::new(),
-        preimage_lookup: BTreeMap::new(),
-        preimage_info,
-        opaque_data: BTreeMap::new(),
-    };
-
-    ctx.accounts.insert(new_id, new_account);
-
-    // Advance next_service_id: i* = check(S + (x_i - S + 42) mod (2^32 - S - 2^8)) (GP eq 24.62)
-    let range = u32::MAX - s_threshold - 255;
-    let candidate = s_threshold + ((new_id - s_threshold + 42) % range);
-    ctx.next_service_id = find_free_service_id(candidate, &ctx.accounts, s_threshold);
-
-    pvm.set_reg(7, new_id as u64);
-    true
-}
-
-/// upgrade (id=19): Update service code hash, gas limits (GP ΩU).
-/// φ[7]=o (code hash ptr), φ[8]=g (min_item_gas), φ[9]=m (min_memo_gas)
-fn host_upgrade(pvm: &mut PvmInstance, ctx: &mut AccContext) -> bool {
-    let o_ptr = pvm.reg(7) as u32;
-    let g = pvm.reg(8);
-    let m = pvm.reg(9);
-
-    let hash_data = match pvm.try_read_bytes(o_ptr, 32) {
-        Some(d) => d,
-        None => return false, // page fault → PANIC
-    };
-    let mut code_hash = [0u8; 32];
-    code_hash.copy_from_slice(&hash_data);
-
-    if let Some(account) = ctx.accounts.get_mut(&ctx.service_id) {
-        account.code_hash = Hash(code_hash);
-        account.min_item_gas = g;
-        account.min_memo_gas = m;
-        pvm.set_reg(7, HOST_OK);
-    } else {
-        pvm.set_reg(7, HOST_NONE);
-    }
-    true
-}
-
-/// query (id=22): Query preimage info status (GP ΩQ).
-/// φ[7]=o (hash ptr), φ[8]=z (length)
-fn host_query(pvm: &mut PvmInstance, ctx: &mut AccContext) -> bool {
-    let o_ptr = pvm.reg(7) as u32;
-    let z = pvm.reg(8) as u32;
-
-    let hash_data = match pvm.try_read_bytes(o_ptr, 32) {
-        Some(d) => d,
-        None => return false, // page fault → PANIC
-    };
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&hash_data);
-    let hash = Hash(hash);
-
-    // Promote preimage_info from opaque if needed (query is always on self)
-    if let Some(account) = ctx.accounts.get_mut(&ctx.service_id) {
-        let key = (hash, z);
-        if !account.preimage_info.contains_key(&key) {
-            let state_key = grey_merkle::state_serial::compute_preimage_info_state_key(
-                ctx.service_id,
-                &hash,
-                z,
-            );
-            if let Some(v) = account.opaque_data.remove(&state_key) {
-                let timeslots = decode_preimage_info_timeslots(&v);
-                account.preimage_info.insert(key, timeslots);
-            }
-        }
-    }
-
-    // query always operates on the current service's own account
-    let account = ctx.accounts.get(&ctx.service_id);
-    if let Some(account) = account {
-        if let Some(timeslots) = account.preimage_info.get(&(hash, z)) {
-            match timeslots.len() {
-                0 => {
-                    pvm.set_reg(7, 0);
-                    pvm.set_reg(8, 0);
+            match data {
+                Some(d) => {
+                    let l = max_len.min(d.len());
+                    pvm.kernel_write_data(cap_idx, out_off, &d[..l]);
+                    pvm.kernel_resume(d.len() as u64, 0);
                 }
-                1 => {
-                    pvm.set_reg(7, 1 + ((timeslots[0] as u64) << 32));
-                    pvm.set_reg(8, 0);
-                }
-                2 => {
-                    pvm.set_reg(7, 2 + ((timeslots[0] as u64) << 32));
-                    pvm.set_reg(8, timeslots[1] as u64);
-                }
-                _ => {
-                    pvm.set_reg(7, 3 + ((timeslots[0] as u64) << 32));
-                    pvm.set_reg(8, timeslots[1] as u64 + ((timeslots[2] as u64) << 32));
-                }
+                None => pvm.kernel_resume(RESULT_NONE, 0),
             }
-        } else {
-            pvm.set_reg(7, HOST_NONE);
-            pvm.set_reg(8, 0);
+            true
         }
-    } else {
-        pvm.set_reg(7, HOST_NONE);
-        pvm.set_reg(8, 0);
-    }
-    true
-}
+        3 => {
+            // STORAGE_R: φ[7]=key_off, φ[8]=key_len, φ[9]=out_off, φ[10]=max_len, φ[12]=data_cap
+            let key_off = regs[7] as u32;
+            let key_len = regs[8] as u32;
+            let out_off = regs[9] as u32;
+            let max_len = regs[10] as usize;
+            let cap_idx = regs[12] as u8;
 
-/// solicit (id=23): Request a preimage (GP ΩS).
-/// φ[7]=o (hash ptr), φ[8]=z (length)
-fn host_solicit(pvm: &mut PvmInstance, ctx: &mut AccContext, timeslot: Timeslot) -> bool {
-    let o_ptr = pvm.reg(7) as u32;
-    let z = pvm.reg(8) as u32;
-
-    let hash_data = match pvm.try_read_bytes(o_ptr, 32) {
-        Some(d) => d,
-        None => return false, // page fault → PANIC
-    };
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&hash_data);
-    let hash = Hash(hash);
-
-    if let Some(account) = ctx.accounts.get_mut(&ctx.service_id) {
-        let key = (hash, z);
-        // Promote from opaque data if not in structured preimage_info
-        if !account.preimage_info.contains_key(&key) {
-            let state_key = grey_merkle::state_serial::compute_preimage_info_state_key(
-                ctx.service_id,
-                &hash,
-                z,
-            );
-            if let Some(v) = account.opaque_data.remove(&state_key) {
-                // Decode timeslots: compact-encoded count + 4-byte LE timeslots
-                let timeslots = decode_preimage_info_timeslots(&v);
-                account.preimage_info.insert(key, timeslots);
-            }
-        }
-
-        if let Some(ts) = account.preimage_info.get(&key) {
-            let n = ts.len();
-            if n == 1 || n == 2 {
-                // Has 1 or 2 timeslots — append τ' (GP: |l| ∈ {1,2} → l ++ [τ'])
-                let mut new_ts = ts.clone();
-                new_ts.push(timeslot);
-                account.preimage_info.insert(key, new_ts);
-            } else {
-                // Empty (already solicited) or 3+ (max reached) → HUH
-                pvm.set_reg(7, HOST_HUH);
-                return true;
-            }
-        } else {
-            // New solicitation: create entry with empty timeslots
-            account.preimage_info.insert(key, vec![]);
-            // Update items/bytes for the new preimage_info entry
-            // GP eq 9.4: items += 2 (each preimage_info entry counts as 2 items)
-            account.items += 2;
-            account.bytes += 81 + z as u64;
-        }
-
-        // Check quota limits (coinless)
-        if account.items > account.quota_items || account.bytes > account.quota_bytes {
-            // Undo the insert
-            if account
-                .preimage_info
-                .get(&key)
-                .map(|v| v.is_empty())
-                .unwrap_or(false)
-            {
-                account.preimage_info.remove(&key);
-                account.items -= 2;
-                account.bytes -= 81 + z as u64;
-            }
-            pvm.set_reg(7, HOST_FULL);
-            return true;
-        }
-
-        pvm.set_reg(7, HOST_OK);
-    } else {
-        pvm.set_reg(7, HOST_HUH);
-    }
-    true
-}
-
-/// forget (id=24): Remove a preimage request (GP ΩF).
-/// φ[7]=o (hash ptr), φ[8]=z (length)
-fn host_forget(
-    pvm: &mut PvmInstance,
-    ctx: &mut AccContext,
-    timeslot: Timeslot,
-    config: &Config,
-) -> bool {
-    let o_ptr = pvm.reg(7) as u32;
-    let z = pvm.reg(8) as u32;
-
-    let hash_data = match pvm.try_read_bytes(o_ptr, 32) {
-        Some(d) => d,
-        None => return false, // page fault → PANIC
-    };
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&hash_data);
-    let hash = Hash(hash);
-
-    let d_const = config.preimage_expunge_period; // D
-
-    if let Some(account) = ctx.accounts.get_mut(&ctx.service_id) {
-        let key = (hash, z);
-        // Promote from opaque data if not in structured preimage_info
-        if !account.preimage_info.contains_key(&key) {
-            let state_key = grey_merkle::state_serial::compute_preimage_info_state_key(
-                ctx.service_id,
-                &hash,
-                z,
-            );
-            if let Some(v) = account.opaque_data.remove(&state_key) {
-                // Decode timeslots: compact-encoded count + 4-byte LE timeslots
-                let timeslots = decode_preimage_info_timeslots(&v);
-                account.preimage_info.insert(key, timeslots);
-            }
-        }
-        // Also promote preimage_lookup from opaque if needed for removal
-        if !account.preimage_lookup.contains_key(&hash) {
-            let lookup_key =
-                grey_merkle::state_serial::compute_preimage_lookup_state_key(ctx.service_id, &hash);
-            if let Some(v) = account.opaque_data.remove(&lookup_key) {
-                account.preimage_lookup.insert(hash, v);
-            }
-        }
-
-        if let Some(ts) = account.preimage_info.get(&key).cloned() {
-            match ts.len() {
-                0 | 2
-                    if ts.is_empty()
-                        || (ts.len() == 2 && ts[1] < timeslot.saturating_sub(d_const)) =>
-                {
-                    // Remove preimage_info entry and preimage_lookup
-                    account.preimage_info.remove(&key);
-                    account.preimage_lookup.remove(&hash);
-                    // Update items/bytes for removed preimage_info entry
-                    account.items = account.items.saturating_sub(2);
-                    account.bytes = account.bytes.saturating_sub(81 + z as u64);
-                }
-                1 => {
-                    // Set forget time: [x] → [x, t]
-                    let mut new_ts = ts;
-                    new_ts.push(timeslot);
-                    account.preimage_info.insert(key, new_ts);
-                }
-                3 if ts[1] < timeslot.saturating_sub(d_const) => {
-                    // [x, y, w] with y < t - D → [w, t]
-                    account.preimage_info.insert(key, vec![ts[2], timeslot]);
-                }
-                _ => {
-                    pvm.set_reg(7, HOST_HUH);
+            let key = match pvm.kernel_read_data(cap_idx, key_off, key_len) {
+                Some(k) => k,
+                None => {
+                    pvm.kernel_resume(RESULT_NONE, 0);
                     return true;
                 }
+            };
+            // Look up in current service's storage
+            let value = regular
+                .accounts
+                .get(&service_id)
+                .and_then(|a| a.storage.get(&key));
+            match value {
+                Some(v) => {
+                    let l = max_len.min(v.len());
+                    pvm.kernel_write_data(cap_idx, out_off, &v[..l]);
+                    pvm.kernel_resume(v.len() as u64, 0);
+                }
+                None => pvm.kernel_resume(RESULT_NONE, 0),
             }
-            pvm.set_reg(7, HOST_OK);
-        } else {
-            pvm.set_reg(7, HOST_HUH);
+            true
         }
-    } else {
-        pvm.set_reg(7, HOST_HUH);
-    }
-    true
-}
+        4 => {
+            // STORAGE_W: φ[7]=key_off, φ[8]=key_len, φ[9]=val_off, φ[10]=val_len, φ[12]=data_cap
+            let key_off = regs[7] as u32;
+            let key_len = regs[8] as u32;
+            let val_off = regs[9] as u32;
+            let val_len = regs[10] as u32;
+            let cap_idx = regs[12] as u8;
 
-/// provide (id=26): Provide a preimage (GP ΩP, lines 4704-4727).
-/// φ[7]=s (target service or NONE for self), φ[8]=o (data ptr), φ[9]=z (data len)
-/// Adds (service, data) to the preimage provisions set x_p.
-fn host_provide(pvm: &mut PvmInstance, ctx: &mut AccContext) -> bool {
-    let target = if pvm.reg(7) == HOST_NONE {
-        ctx.service_id
-    } else if pvm.reg(7) <= u32::MAX as u64 {
-        pvm.reg(7) as ServiceId
-    } else {
-        pvm.set_reg(7, HOST_WHO);
-        return true;
-    };
-    let o_ptr = pvm.reg(8) as u32;
-    let z = pvm.reg(9) as u32;
-
-    // Read data from memory. PANIC if inaccessible.
-    let data = match pvm.try_read_bytes(o_ptr, z) {
-        Some(d) => d,
-        None => return false, // page fault → PANIC (⚡)
-    };
-    let hash = grey_crypto::blake2b_256(&data);
-
-    // WHO if target service doesn't exist
-    let account = match ctx.accounts.get_mut(&target) {
-        Some(acc) => acc,
-        None => {
-            pvm.set_reg(7, HOST_WHO);
-            return true;
+            let key = match pvm.kernel_read_data(cap_idx, key_off, key_len) {
+                Some(k) => k,
+                None => {
+                    pvm.kernel_resume(RESULT_NONE, 0);
+                    return true;
+                }
+            };
+            let value = match pvm.kernel_read_data(cap_idx, val_off, val_len) {
+                Some(v) => v,
+                None => {
+                    pvm.kernel_resume(RESULT_NONE, 0);
+                    return true;
+                }
+            };
+            // Get old value length for return
+            let account = match regular.accounts.get_mut(&service_id) {
+                Some(a) => a,
+                None => {
+                    pvm.kernel_resume(RESULT_NONE, 0);
+                    return true;
+                }
+            };
+            let old_len = account
+                .storage
+                .get(&key)
+                .map_or(RESULT_NONE, |v| v.len() as u64);
+            if val_len == 0 {
+                account.storage.remove(&key);
+            } else {
+                account.storage.insert(key, value);
+            }
+            pvm.kernel_resume(old_len, 0);
+            true
         }
-    };
-
-    // Promote preimage_info from opaque data if needed
-    let key = (hash, z);
-    if !account.preimage_info.contains_key(&key) {
-        let state_key =
-            grey_merkle::state_serial::compute_preimage_info_state_key(target, &hash, z);
-        if let Some(v) = account.opaque_data.remove(&state_key) {
-            // Decode timeslots: compact-encoded count + 4-byte LE timeslots
-            let timeslots = decode_preimage_info_timeslots(&v);
-            account.preimage_info.insert(key, timeslots);
+        17 => {
+            // CHECKPOINT: y' = x (copy regular context to exceptional)
+            *exceptional = regular.clone();
+            pvm.kernel_resume(0, 0);
+            true
         }
-    }
-
-    // HUH if a_l[(H(i), z)] not present or ≠ [] — must be solicited (empty timeslots)
-    match account.preimage_info.get(&key) {
-        Some(ts) if ts.is_empty() => {} // OK: solicited
+        25 => {
+            // OUTPUT (yield in GP): set accumulation output hash
+            let hash_off = regs[7] as u32;
+            let data_cap = regs[12] as u8;
+            if let Some(hash_bytes) = pvm.kernel_read_data(data_cap, hash_off, 32) {
+                let mut hash = [0u8; 32];
+                hash.copy_from_slice(&hash_bytes);
+                regular.output = Some(grey_types::Hash(hash));
+            }
+            pvm.kernel_resume(0, 0);
+            true
+        }
         _ => {
-            pvm.set_reg(7, HOST_HUH);
-            return true;
+            pvm.kernel_resume(HOST_WHAT, 0);
+            true
         }
     }
-
-    // HUH if (s, i) already in preimage provisions set
-    if ctx
-        ._preimage_provisions
-        .iter()
-        .any(|(sid, d)| *sid == target && *d == data)
-    {
-        pvm.set_reg(7, HOST_HUH);
-        return true;
-    }
-
-    // OK: add (s, i) to preimage provisions set
-    ctx._preimage_provisions.push((target, data));
-    pvm.set_reg(7, HOST_OK);
-    true
 }
-
-/// set_quota (id=28): Set storage quota for a target service (coinless).
-/// φ[7]=target, φ[8]=max_items, φ[9]=max_bytes
-/// Privilege check: caller must be ctx.privileges.quota_service.
-/// Returns: OK, HUH (not quota service), WHO (target not found)
-fn host_set_quota(pvm: &mut PvmInstance, ctx: &mut AccContext) -> bool {
-    let target = pvm.reg(7) as ServiceId;
-    let max_items = pvm.reg(8);
-    let max_bytes = pvm.reg(9);
-
-    // Privilege check: caller must be the quota service
-    if ctx.service_id != ctx.privileges.quota_service {
-        pvm.set_reg(7, HOST_HUH);
-        return true;
-    }
-
-    // Target must exist
-    if let Some(account) = ctx.accounts.get_mut(&target) {
-        account.quota_items = max_items;
-        account.quota_bytes = max_bytes;
-        pvm.set_reg(7, HOST_OK);
-    } else {
-        pvm.set_reg(7, HOST_WHO);
-    }
-    true
-}
-
-/// Find a free service ID starting from the given candidate.
-/// GP check(δ, n): find next free service ID starting at candidate.
 /// Wraps within [S, 2^32 - 2^8) by incrementing by 1.
 fn find_free_service_id(
     candidate: ServiceId,

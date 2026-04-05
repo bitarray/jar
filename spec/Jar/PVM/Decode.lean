@@ -70,41 +70,7 @@ def decodeLEn (data : ByteArray) (offset n : Nat) : Nat :=
         go (i + 1) (acc + b * 2 ^ (8 * i)) fuel'
   go 0 0 n
 
--- ============================================================================
--- JAR v1 Program Header
--- ============================================================================
-
-/-- JAR v1 unified program header (all u32 LE fields + u8 entry_size). -/
-structure JarProgramHeader where
-  roSize : Nat
-  rwSize : Nat
-  heapPages : Nat
-  maxHeapPages : Nat
-  stackPages : Nat
-  jumpLen : Nat
-  entrySize : Nat
-  codeLen : Nat
-
-/-- JAR v1 magic value as u32 LE: 'J'=0x4A, 'A'=0x41, 'R'=0x52, 0x01. -/
-def jarMagic : Nat := decodeLEn ⟨#[0x4A, 0x41, 0x52, 0x01]⟩ 0 4
-
-/-- Parse a JAR v1 unified program header (33 bytes). -/
-def parseJarHeader (blob : ByteArray) : Option (JarProgramHeader × Nat) := do
-  if blob.size < 33 then none
-  let magic := decodeLEn blob 0 4
-  if magic != jarMagic then none
-  some ({
-    roSize := decodeLEn blob 4 4
-    rwSize := decodeLEn blob 8 4
-    heapPages := decodeLEn blob 12 4
-    maxHeapPages := decodeLEn blob 16 4
-    stackPages := decodeLEn blob 20 4
-    jumpLen := decodeLEn blob 24 4
-    entrySize := (blob.get! 28).toNat
-    codeLen := decodeLEn blob 29 4
-  }, 33)
-
-/-- Gas cost per page for memory allocation (init + grow_heap). -/
+/-- Gas cost per page for memory allocation. -/
 def gasPerPage : Nat := 1500
 
 /-- Compute memory tier load/store cycles based on total accessible pages. -/
@@ -403,11 +369,95 @@ def RESULT_LOW  : UInt64 := UInt64.ofNat (2^64 - 8)
 def RESULT_HUH  : UInt64 := UInt64.ofNat (2^64 - 9)
 def RESULT_OK   : UInt64 := 0
 
-/-- Invoke (12) exit codes. GP §B.4. -/
-def INVOKE_HALT  : UInt64 := 0
-def INVOKE_PANIC : UInt64 := 1
-def INVOKE_FAULT : UInt64 := 2
-def INVOKE_HOST  : UInt64 := 3
-def INVOKE_OOG   : UInt64 := 4
+-- ============================================================================
+-- JAR Program Blob Parser
+-- ============================================================================
+
+/-- JAR magic value: 'J'=0x4A, 'A'=0x41, 'R'=0x52, 0x02. -/
+def jarMagic : Nat := decodeLEn ⟨#[0x4A, 0x41, 0x52, 0x02]⟩ 0 4
+
+/-- JAR header (10 bytes). -/
+structure JarHeader where
+  memoryPages : Nat
+  capCount : Nat
+  invokeCap : Nat
+
+/-- JAR capability entry (19 bytes). -/
+structure JarCapEntry where
+  capIndex : Nat
+  isCode : Bool      -- true = CODE, false = DATA
+  basePage : Nat     -- DATA only
+  pageCount : Nat    -- DATA only
+  isRW : Bool        -- DATA only (true = RW, false = RO)
+  dataOffset : Nat   -- offset into data section
+  dataLen : Nat      -- bytes of initial data
+
+/-- Parse a JAR header (11 bytes). Returns header + offset after header. -/
+def parseJarHeader (blob : ByteArray) : Option (JarHeader × Nat) := do
+  if blob.size < 10 then none
+  let magic := decodeLEn blob 0 4
+  if magic != jarMagic then none
+  some ({
+    memoryPages := decodeLEn blob 4 4
+    capCount := (blob.get! 8).toNat
+    invokeCap := (blob.get! 9).toNat
+  }, 10)
+
+/-- Parse a JAR capability entry (19 bytes) at the given offset. -/
+def parseJarCapEntry (blob : ByteArray) (offset : Nat) : Option (JarCapEntry × Nat) := do
+  if offset + 19 > blob.size then none
+  let capType := (blob.get! (offset + 1)).toNat
+  if capType > 1 then none
+  let initAccess := (blob.get! (offset + 10)).toNat
+  if initAccess > 1 then none
+  some ({
+    capIndex := (blob.get! offset).toNat
+    isCode := capType == 0
+    basePage := decodeLEn blob (offset + 2) 4
+    pageCount := decodeLEn blob (offset + 6) 4
+    isRW := initAccess == 1
+    dataOffset := decodeLEn blob (offset + 11) 4
+    dataLen := decodeLEn blob (offset + 15) 4
+  }, offset + 19)
+
+/-- Parse a CODE cap's sub-blob into a ProgramBlob.
+    Format: jump_len(4) + entry_size(1) + code_len(4) + jt + code + bitmask. -/
+def parseCodeSubBlob (blob : ByteArray) (dataOffset dataLen : Nat)
+    : Option ProgramBlob := do
+  if dataLen < 9 then none
+  let off := dataOffset
+  if off + 9 > blob.size then none
+  let jumpLen := decodeLEn blob off 4
+  let entrySize := (blob.get! (off + 4)).toNat
+  let codeLen := decodeLEn blob (off + 5) 4
+  if entrySize == 0 || entrySize > 4 then none
+
+  let off := off + 9
+  -- Jump table
+  let jtBytes := jumpLen * entrySize
+  if off + jtBytes > blob.size then none
+  let jumpTable := Array.ofFn (n := jumpLen) fun ⟨i, _⟩ =>
+    UInt32.ofNat (decodeLEn blob (off + i * entrySize) entrySize)
+  let off := off + jtBytes
+
+  -- Code
+  if off + codeLen > blob.size then none
+  let code := blob.extract off (off + codeLen)
+  let off := off + codeLen
+
+  -- Packed bitmask
+  let bitmaskLen := (codeLen + 7) / 8
+  if off + bitmaskLen > blob.size then none
+  let packedBitmask := blob.extract off (off + bitmaskLen)
+  let bitmask := ByteArray.mk (Array.ofFn (n := codeLen) fun ⟨i, _⟩ =>
+    let byteIdx := i / 8
+    let bitIdx := i % 8
+    if byteIdx < packedBitmask.size then
+      UInt8.ofNat ((packedBitmask.get! byteIdx).toNat / (2 ^ bitIdx) % 2)
+    else 0)
+
+  let prog : ProgramBlob := { code, bitmask, jumpTable }
+  if !validateBasicBlocks prog then none
+  some prog
 
 end Jar.PVM

@@ -27,25 +27,38 @@ fn dump_polkavm(name: &str, blob: Vec<u8>) {
 }
 
 fn dump_grey(name: &str, blob: &[u8]) {
-    let pvm = javm::recompiler::initialize_program_recompiled(blob, &[], 100_000_000).unwrap();
-    let code = pvm.native_code_bytes();
-    let path = format!("/tmp/grey_{name}.bin");
-    std::fs::write(&path, code).unwrap();
-    eprintln!("grey {name}: {} bytes -> {path}", code.len());
+    let kernel = javm::kernel::InvocationKernel::new_with_backend(
+        blob,
+        &[],
+        100_000_000,
+        javm::PvmBackend::ForceRecompiler,
+    )
+    .unwrap();
+    // Access the first CODE cap's native code
+    if let Some(code_cap) = kernel.code_caps.first()
+        && let javm::backend::CompiledProgram::Recompiler(ref compiled) = code_cap.compiled
+    {
+        let native = unsafe {
+            std::slice::from_raw_parts(
+                compiled.native_code.ptr as *const u8,
+                compiled.native_code.len,
+            )
+        };
+        let path = format!("/tmp/grey_{name}.bin");
+        std::fs::write(&path, native).unwrap();
+        eprintln!("grey {name}: {} bytes -> {path}", native.len());
+    }
 }
 
 fn main() {
-    // Fib
     let blob = grey_fib_blob(FIB_N);
     dump_grey("fib", &blob);
     dump_polkavm("fib", polkavm_fib_blob(FIB_N));
 
-    // Sort
     let blob = grey_sort_blob(SORT_N);
     dump_grey("sort", &blob);
     dump_polkavm("sort", polkavm_sort_blob(SORT_N));
 
-    // Ecrecover
     dump_grey("ecrecover", grey_ecrecover_blob());
     dump_polkavm("ecrecover", polkavm_ecrecover_blob().to_vec());
 }

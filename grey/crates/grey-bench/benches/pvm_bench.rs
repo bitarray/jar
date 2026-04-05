@@ -16,9 +16,6 @@
 //! each iteration. This is the realistic scenario for JAM: each work-package
 //! arrives as a blob that must be compiled and executed. Caching compiled code
 //! across invocations is a separate optimization.
-//!
-//! The interpreter benchmarks also re-parse the blob each iteration for the same
-//! reason.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use grey_bench::*;
@@ -36,7 +33,6 @@ fn polkavm_config(backend: BackendKind) -> Config {
     let mut config = Config::from_env().unwrap_or_else(|_| Config::new());
     config.set_backend(Some(backend));
     config.set_allow_experimental(true);
-    // Don't override sandboxing if env explicitly set it
     if std::env::var_os("POLKAVM_SANDBOXING_ENABLED").is_none() {
         config.set_sandboxing_enabled(false);
     }
@@ -56,14 +52,12 @@ fn try_make_polkavm_module(blob: &[u8], backend: BackendKind) -> Option<(Engine,
             return None;
         }
     };
-
     let mut mc = ModuleConfig::new();
     mc.set_gas_metering(Some(GasMeteringKind::Sync));
     let module = Module::new(&engine, &mc, blob.to_vec().into()).ok()?;
     Some((engine, module))
 }
 
-/// Execute an already-compiled polkavm module (execution only, no compilation).
 fn run_polkavm_module(module: &Module) -> (u64, i64) {
     let mut inst = module.instantiate().unwrap();
     inst.set_gas(GAS_LIMIT as i64);
@@ -84,7 +78,6 @@ fn run_polkavm_module(module: &Module) -> (u64, i64) {
     (inst.reg(PReg::A0), inst.gas())
 }
 
-/// Compile + execute a polkavm blob from scratch (full pipeline, fair comparison).
 fn run_polkavm_compile_and_run(blob: &[u8], engine: &Engine) -> (u64, i64) {
     let mut mc = ModuleConfig::new();
     mc.set_gas_metering(Some(GasMeteringKind::Sync));
@@ -106,21 +99,16 @@ fn validate(name: &str, grey_blob: &[u8], pvm_blob: &[u8]) {
     eprintln!(
         "{name}: grey result={gi_result} gas={gi_gas}, polkavm result={pvm_result} gas={pvm_gas}"
     );
-    // Compare lower 32 bits only: RISC-V ABI sign-extends u32 returns to 64 bits
-    // on rv64, but polkavm may zero-extend. Both produce the same 32-bit result.
     assert_eq!(
         gi_result as u32, pvm_result as u32,
         "{name}: grey/polkavm result mismatch (grey=0x{gi_result:X}, polkavm=0x{pvm_result:X})"
     );
-    // Gas values differ: JAVM uses pipeline gas (JAR v0.8.0),
-    // polkavm uses per-instruction gas (GP v0.7.2).
 }
 
 // ---------------------------------------------------------------------------
 // Benchmarks
 // ---------------------------------------------------------------------------
 
-/// Standard benchmark group: grey interpreter + recompiler + polkavm interpreter + compiler.
 fn bench_standard(c: &mut Criterion, name: &str, grey_blob: &[u8], pvm_blob: &[u8]) {
     validate(name, grey_blob, pvm_blob);
 
@@ -138,19 +126,26 @@ fn bench_standard(c: &mut Criterion, name: &str, grey_blob: &[u8], pvm_blob: &[u
         b.iter(|| run_grey_recompiler(grey_blob, GAS_LIMIT))
     });
 
-    // Execution-only: compile in setup (not timed), measure only execution.
+    // Execution-only: compile in setup, measure only execution.
     group.bench_function("grey-recompiler-exec", |b| {
         b.iter_batched(
-            || javm::recompiler::initialize_program_recompiled(grey_blob, &[], GAS_LIMIT).unwrap(),
-            |mut pvm| {
+            || {
+                javm::kernel::InvocationKernel::new_with_backend(
+                    grey_blob,
+                    &[],
+                    GAS_LIMIT,
+                    javm::PvmBackend::ForceRecompiler,
+                )
+                .unwrap()
+            },
+            |mut kernel| {
                 loop {
-                    match pvm.run() {
-                        javm::ExitReason::Halt => break,
-                        javm::ExitReason::HostCall(_) => continue,
-                        other => panic!("unexpected exit: {:?}", other),
+                    match kernel.run() {
+                        javm::kernel::KernelResult::Halt(v) => break v,
+                        javm::kernel::KernelResult::ProtocolCall { .. } => continue,
+                        other => panic!("unexpected: {:?}", other),
                     }
                 }
-                pvm.registers()[7]
             },
             criterion::BatchSize::SmallInput,
         );
@@ -214,9 +209,9 @@ fn bench_ecrecover(c: &mut Criterion) {
     let pvm_compiler = try_make_polkavm_module(pvm_blob, BackendKind::Compiler);
 
     let mut group = c.benchmark_group("ecrecover");
-    group.sample_size(10); // ecrecover is slow — fewer samples
+    group.sample_size(10);
 
-    // Native baseline: run k256 ecrecover directly on the host CPU
+    // Native baseline
     group.bench_function("native", |b| {
         b.iter(|| {
             use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
@@ -241,62 +236,52 @@ fn bench_ecrecover(c: &mut Criterion) {
 
     group.bench_function("grey-interpreter", |b| {
         b.iter(|| {
-            let mut pvm = javm::program::initialize_program(grey_blob, &[], ecrecover_gas).unwrap();
-            loop {
-                let (exit, _) = pvm.run();
-                match exit {
-                    javm::ExitReason::Halt | javm::ExitReason::Panic => break,
-                    javm::ExitReason::HostCall(_) => continue,
-                    other => panic!("unexpected exit: {:?}", other),
-                }
-            }
-            pvm.registers[7]
+            run_kernel_with_backend(grey_blob, ecrecover_gas, javm::PvmBackend::ForceInterpreter)
         })
     });
 
     group.bench_function("grey-recompiler", |b| {
         b.iter(|| {
-            let mut pvm =
-                javm::recompiler::initialize_program_recompiled(grey_blob, &[], ecrecover_gas)
-                    .unwrap();
-            loop {
-                match pvm.run() {
-                    javm::ExitReason::Halt | javm::ExitReason::Panic => break,
-                    javm::ExitReason::HostCall(_) => continue,
-                    other => panic!("unexpected exit: {:?}", other),
-                }
-            }
-            pvm.registers()[7]
+            run_kernel_with_backend(grey_blob, ecrecover_gas, javm::PvmBackend::ForceRecompiler)
         })
     });
 
-    // Compile-only: measure only JIT compilation time (no execution).
+    // Compile-only: measure only kernel init (includes JIT compilation).
     group.bench_function("grey-recompiler-compile", |b| {
         b.iter(|| {
             std::hint::black_box(
-                javm::recompiler::initialize_program_recompiled(grey_blob, &[], ecrecover_gas)
-                    .unwrap(),
+                javm::kernel::InvocationKernel::new_with_backend(
+                    grey_blob,
+                    &[],
+                    ecrecover_gas,
+                    javm::PvmBackend::ForceRecompiler,
+                )
+                .unwrap(),
             );
         })
     });
 
-    // Execution-only: compile in setup (not timed), measure only execution.
-    // Separates JIT compilation time from execution time.
+    // Execution-only: compile in setup, measure only execution.
     group.bench_function("grey-recompiler-exec", |b| {
         b.iter_batched(
             || {
-                javm::recompiler::initialize_program_recompiled(grey_blob, &[], ecrecover_gas)
-                    .unwrap()
+                javm::kernel::InvocationKernel::new_with_backend(
+                    grey_blob,
+                    &[],
+                    ecrecover_gas,
+                    javm::PvmBackend::ForceRecompiler,
+                )
+                .unwrap()
             },
-            |mut pvm| {
+            |mut kernel| {
                 loop {
-                    match pvm.run() {
-                        javm::ExitReason::Halt | javm::ExitReason::Panic => break,
-                        javm::ExitReason::HostCall(_) => continue,
-                        other => panic!("unexpected exit: {:?}", other),
+                    match kernel.run() {
+                        javm::kernel::KernelResult::Halt(v) => break v,
+                        javm::kernel::KernelResult::Panic => break 0,
+                        javm::kernel::KernelResult::ProtocolCall { .. } => continue,
+                        other => panic!("unexpected: {:?}", other),
                     }
                 }
-                pvm.registers()[7]
             },
             criterion::BatchSize::SmallInput,
         );
@@ -341,7 +326,7 @@ fn bench_ecrecover(c: &mut Criterion) {
                     match inst.run().unwrap() {
                         InterruptKind::Finished => break,
                         InterruptKind::Ecalli(_) => continue,
-                        InterruptKind::Trap => break, // exported functions TRAP on return
+                        InterruptKind::Trap => break,
                         InterruptKind::NotEnoughGas => panic!("polkavm out of gas"),
                         other => panic!("polkavm unexpected: {:?}", other),
                     }
@@ -352,8 +337,6 @@ fn bench_ecrecover(c: &mut Criterion) {
         let pvm_config = polkavm_config(BackendKind::Compiler);
         group.bench_function("polkavm-compiler-compile", |b| {
             b.iter(|| {
-                // Include Engine::new to match grey's FlatMemory + assembler mmap.
-                // In JAM, each work-package is compiled from scratch.
                 let engine = Engine::new(&pvm_config).unwrap();
                 let mut mc = ModuleConfig::new();
                 mc.set_gas_metering(Some(GasMeteringKind::Sync));
@@ -376,7 +359,7 @@ fn bench_ecrecover(c: &mut Criterion) {
                     match inst.run().unwrap() {
                         InterruptKind::Finished => break,
                         InterruptKind::Ecalli(_) => continue,
-                        InterruptKind::Trap => break, // exported functions TRAP on return
+                        InterruptKind::Trap => break,
                         InterruptKind::NotEnoughGas => panic!("polkavm out of gas"),
                         other => panic!("polkavm unexpected: {:?}", other),
                     }

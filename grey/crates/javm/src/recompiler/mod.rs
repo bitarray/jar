@@ -13,10 +13,9 @@
 pub mod asm;
 pub mod codegen;
 pub mod predecode;
-#[cfg(feature = "signals")]
 pub mod signal;
 
-use crate::vm::ExitReason;
+use crate::ExitReason;
 use crate::{Gas, PVM_REGISTER_COUNT};
 use codegen::{Compiler, HelperFns};
 
@@ -40,12 +39,12 @@ pub struct JitContext {
     pub jt_ptr: *const u32,
     /// Jump table length (offset 136).
     pub jt_len: u32,
-    _pad0: u32,
+    pub _pad0: u32,
     /// Basic block starts pointer (offset 144).
     pub bb_starts: *const u8,
     /// Basic block starts length (offset 152).
     pub bb_len: u32,
-    _pad1: u32,
+    pub _pad1: u32,
     /// Entry PC for re-entry after host calls (offset 160).
     pub entry_pc: u32,
     /// Current PC when execution stopped (offset 164).
@@ -60,18 +59,18 @@ pub struct JitContext {
     pub flat_perms: *const u8,
     /// Fast re-entry flag (offset 200).
     pub fast_reentry: u32,
-    _pad2: u32,
+    pub _pad2: u32,
     /// Maximum heap pages — grow_heap refuses beyond this (offset 208).
     pub max_heap_pages: u32,
-    _pad3: u32,
+    pub _pad3: u32,
 }
 
 /// Compiled native code buffer (mmap'd as executable).
-struct NativeCode {
-    ptr: *mut u8,
-    len: usize,
+pub struct NativeCode {
+    pub ptr: *mut u8,
+    pub len: usize,
     /// The mmap region capacity (may be > len due to pre-allocation).
-    mmap_cap: usize,
+    pub mmap_cap: usize,
 }
 
 impl NativeCode {
@@ -120,7 +119,7 @@ impl NativeCode {
     }
 
     /// Get the function pointer for the compiled code entry.
-    fn entry(&self) -> unsafe extern "sysv64" fn(*mut JitContext) {
+    pub fn entry(&self) -> unsafe extern "sysv64" fn(*mut JitContext) {
         // SAFETY: ptr contains valid x86-64 machine code from the assembler, and was
         // mprotected to PROT_READ|PROT_EXEC. Transmute to fn pointer is valid.
         unsafe { std::mem::transmute(self.ptr) }
@@ -136,6 +135,61 @@ impl Drop for NativeCode {
     }
 }
 
+/// Result of standalone code compilation (no execution context).
+pub struct CompiledCode {
+    pub native_code: NativeCode,
+    pub dispatch_table: Vec<i32>,
+    pub trap_table: Vec<(u32, u32)>,
+    pub exit_label_offset: u32,
+}
+
+/// Compile PVM code to native x86-64 without creating an execution context.
+/// Returns the compiled artifacts that can be stored in a CodeCap.
+pub fn compile_code(
+    code: &[u8],
+    bitmask: &[u8],
+    jump_table: &[u32],
+    mem_cycles: u8,
+) -> Result<CompiledCode, String> {
+    let helpers = HelperFns {
+        mem_read_u8: mem_read_u8 as *const () as u64,
+        mem_read_u16: mem_read_u16 as *const () as u64,
+        mem_read_u32: mem_read_u32 as *const () as u64,
+        mem_read_u64: mem_read_u64_fn as *const () as u64,
+        mem_write_u8: mem_write_u8 as *const () as u64,
+        mem_write_u16: mem_write_u16 as *const () as u64,
+        mem_write_u32: mem_write_u32 as *const () as u64,
+        mem_write_u64: mem_write_u64_fn as *const () as u64,
+        sbrk_helper: sbrk_helper as *const () as u64,
+    };
+
+    let compiler = Compiler::new(bitmask, jump_table, helpers, code.len(), true, mem_cycles);
+    let result = compiler.compile(code, bitmask);
+    let dispatch_table = result.dispatch_table;
+
+    let native_code = if let Some(mmap_ptr) = result.mmap_ptr {
+        NativeCode {
+            ptr: mmap_ptr,
+            len: result.mmap_len,
+            mmap_cap: result.mmap_cap,
+        }
+    } else {
+        NativeCode::new(&result.native_code)?
+    };
+
+    Ok(CompiledCode {
+        native_code,
+        dispatch_table,
+        trap_table: result.trap_table,
+        exit_label_offset: result.exit_label_offset,
+    })
+}
+
+// SAFETY: NativeCode holds a raw pointer to mmap'd memory. It's only accessed from
+// the thread that owns the kernel (cooperative scheduling).
+unsafe impl Send for NativeCode {}
+unsafe impl Sync for NativeCode {}
+
 /// Flat memory backing buffer for inline JIT memory access.
 ///
 /// Contiguous mmap layout (R15 = guest memory base = region + HEADER_SIZE):
@@ -147,6 +201,17 @@ impl Drop for NativeCode {
 ///   perms:  R15 - CTX_PAGE - NUM_PAGES  = R15 - PERMS_OFFSET
 ///   ctx:    R15 - CTX_PAGE              = R15 - CTX_OFFSET
 ///   guest:  R15 + 0 .. R15 + 4GB
+/// Memory layout offsets for direct flat-buffer writes (standalone recompiler path).
+pub struct DataLayout {
+    pub mem_size: u32,
+    pub arg_start: u32,
+    pub arg_data: Vec<u8>,
+    pub ro_start: u32,
+    pub ro_data: Vec<u8>,
+    pub rw_start: u32,
+    pub rw_data: Vec<u8>,
+}
+
 struct FlatMemory {
     /// Base of the entire mmap'd region.
     region: *mut u8,
@@ -165,7 +230,7 @@ const HEADER_SIZE: usize = NUM_PAGES + CTX_PAGE; // perms + ctx page before gues
 
 impl FlatMemory {
     /// Create a flat memory from a data layout.
-    fn new(layout: &crate::program::DataLayout) -> Option<Self> {
+    fn new(layout: &DataLayout) -> Option<Self> {
         let region_size = HEADER_SIZE + FLAT_BUF_SIZE;
         // SAFETY: mmap with MAP_ANONYMOUS|MAP_PRIVATE|MAP_NORESERVE allocates virtual pages.
         // MAP_FAILED checked below.
@@ -239,7 +304,7 @@ impl FlatMemory {
 
     /// Mark pages beyond heap_top as PROT_NONE (guard pages).
     /// Pages [0, heap_top) remain PROT_READ|PROT_WRITE.
-    #[cfg(feature = "signals")]
+    #[allow(dead_code)]
     fn install_guard_pages(&self, heap_top: u32) {
         let heap_top_page = (heap_top as usize).div_ceil(4096);
         // SAFETY: buf points to guest memory base; heap_top_page * 4096 <= FLAT_BUF_SIZE.
@@ -254,7 +319,6 @@ impl FlatMemory {
     }
 
     /// Make pages in [old_top, new_top) accessible after heap growth.
-    #[cfg(feature = "signals")]
     fn update_guard_pages(&self, old_top: u32, new_top: u32) {
         let old_page = (old_top as usize).div_ceil(4096);
         let new_page = (new_top as usize).div_ceil(4096);
@@ -500,8 +564,7 @@ extern "sysv64" fn sbrk_helper(ctx: *mut JitContext, size: u64) -> u64 {
         }
     }
 
-    // With signals feature, make newly accessible pages PROT_READ|PROT_WRITE.
-    #[cfg(feature = "signals")]
+    // Make newly accessible pages PROT_READ|PROT_WRITE.
     if !ctx.flat_buf.is_null() {
         let old_page = (old_top as usize).div_ceil(4096);
         let new_page = (new_top_u32 as usize).div_ceil(4096);
@@ -542,7 +605,6 @@ pub struct RecompiledPvm {
     /// Flat memory for inline JIT access.
     flat_memory: Option<FlatMemory>,
     /// Signal-based bounds checking state.
-    #[cfg(feature = "signals")]
     signal_state: Option<Box<signal::SignalState>>,
 }
 
@@ -554,7 +616,7 @@ impl RecompiledPvm {
         jump_table: Vec<u32>,
         registers: [u64; PVM_REGISTER_COUNT],
         gas: Gas,
-        data_layout: Option<crate::program::DataLayout>,
+        data_layout: Option<DataLayout>,
         mem_cycles: u8,
     ) -> Result<Self, String> {
         let debug = {
@@ -687,7 +749,6 @@ impl RecompiledPvm {
         let _t_native = _t3.elapsed();
 
         // Signal-based bounds checking: build trap table and install guard pages.
-        #[cfg(feature = "signals")]
         let signal_state = {
             signal::ensure_installed();
             let ss = Box::new(signal::SignalState {
@@ -724,7 +785,6 @@ impl RecompiledPvm {
             dispatch_table,
             debug,
             flat_memory: Some(flat_memory),
-            #[cfg(feature = "signals")]
             signal_state,
         };
 
@@ -763,8 +823,7 @@ impl RecompiledPvm {
                 self.ctx_mut().exit_reason = 0xDEAD;
             }
 
-            // Execute native code
-            #[cfg(feature = "signals")]
+            // Execute native code — set up signal state for SIGSEGV handler
             if let Some(ref mut ss) = self.signal_state {
                 signal::SIGNAL_STATE.with(|cell| cell.set(&mut **ss as *mut _));
             }
@@ -776,7 +835,6 @@ impl RecompiledPvm {
                 entry(self.ctx);
             }
 
-            #[cfg(feature = "signals")]
             signal::SIGNAL_STATE.with(|cell| cell.set(std::ptr::null_mut()));
 
             if self.debug {
@@ -982,7 +1040,6 @@ impl RecompiledPvm {
     }
     /// Set heap top.
     pub fn set_heap_top(&mut self, top: u32) {
-        #[cfg(feature = "signals")]
         if let Some(ref fm) = self.flat_memory {
             let old = self.ctx().heap_top;
             fm.update_guard_pages(old, top);
@@ -995,48 +1052,6 @@ impl RecompiledPvm {
         // SAFETY: ptr and len describe a valid mmap allocation from NativeCode::new().
         unsafe { std::slice::from_raw_parts(self.native_code.ptr, self.native_code.len) }
     }
-}
-
-/// Initialize a recompiled PVM from a standard program blob.
-pub fn initialize_program_recompiled(
-    blob: &[u8],
-    arguments: &[u8],
-    gas: Gas,
-) -> Option<RecompiledPvm> {
-    let parsed = crate::program::parse_program_blob(blob, arguments, gas)?;
-
-    // Charge per-page allocation gas (same as interpreter path)
-    let init_pages = parsed
-        .layout
-        .as_ref()
-        .map_or(0, |l| l.mem_size / crate::PVM_PAGE_SIZE);
-    let init_cost = init_pages as u64 * crate::program::GAS_PER_PAGE;
-    if gas < init_cost {
-        return None;
-    }
-    let gas = gas - init_cost;
-
-    let mut rpvm = RecompiledPvm::new(
-        parsed.code,
-        parsed.bitmask,
-        parsed.jump_table,
-        parsed.registers,
-        gas,
-        parsed.layout,
-        parsed.mem_cycles,
-    )
-    .ok()?;
-
-    rpvm.ctx_mut().heap_base = parsed.heap_base;
-    rpvm.ctx_mut().heap_top = parsed.heap_top;
-    rpvm.ctx_mut().max_heap_pages = parsed.max_heap_pages;
-
-    #[cfg(feature = "signals")]
-    if let Some(ref fm) = rpvm.flat_memory {
-        fm.install_guard_pages(parsed.heap_top);
-    }
-
-    Some(rpvm)
 }
 
 #[cfg(test)]
@@ -1101,8 +1116,8 @@ mod tests {
         );
     }
 
-    fn test_layout() -> crate::program::DataLayout {
-        crate::program::DataLayout {
+    fn test_layout() -> DataLayout {
+        DataLayout {
             mem_size: 4096,
             arg_start: 0,
             arg_data: vec![],
@@ -1269,141 +1284,5 @@ mod tests {
         assert_eq!(exit2, ExitReason::HostCall(0));
         assert_eq!(pvm2.registers()[2], 8); // 5 + 3 = 8
         assert_eq!(pvm2.registers()[3], 0); // carry = 0 (no overflow)
-    }
-
-    #[test]
-    #[ignore] // Requires /tmp/test_code_blob.bin — used for manual debugging only
-    fn test_compare_interpreter_recompiler() {
-        // Load the test code blob
-        let blob = match std::fs::read("/tmp/test_code_blob.bin") {
-            Ok(b) => b,
-            Err(_) => {
-                eprintln!("Skipping comparison test: /tmp/test_code_blob.bin not found");
-                return;
-            }
-        };
-        let args = &[0u8, 0, 0, 0]; // 4-byte dummy args
-        let gas = 900_000u64;
-
-        // Initialize interpreter
-        let mut interp =
-            crate::program::initialize_program(&blob, args, gas).expect("interpreter init failed");
-        interp.pc = 5;
-
-        // Initialize recompiler
-        let mut recomp =
-            initialize_program_recompiled(&blob, args, gas).expect("recompiler init failed");
-        recomp.set_pc(5);
-
-        // Run both until first host call and compare
-        let mut step = 0;
-        loop {
-            step += 1;
-            let interp_exit = interp.run();
-            let recomp_exit = recomp.run();
-
-            let interp_exit_clone = interp_exit.0.clone();
-            let recomp_gas = recomp.gas();
-            let interp_gas = interp.gas;
-
-            eprintln!(
-                "Step {}: interp_exit={:?} recomp_exit={:?}",
-                step, interp_exit_clone, recomp_exit
-            );
-            eprintln!(
-                "  interp: gas={} pc={} regs={:?}",
-                interp_gas, interp.pc, &interp.registers
-            );
-            eprintln!(
-                "  recomp: gas={} pc={} regs={:?}",
-                recomp_gas,
-                recomp.pc(),
-                recomp.registers()
-            );
-
-            // Check for mismatch and print trace if found
-            let gas_match = interp_gas == recomp_gas;
-            let exit_match = interp_exit_clone == recomp_exit;
-            let reg_match = (0..13).all(|i| interp.registers[i] == recomp.registers()[i]);
-
-            if !gas_match || !exit_match || !reg_match {
-                // Print interpreter trace before panicking
-                let trace = &interp.pc_trace;
-                eprintln!("Interpreter trace (first 100 PCs from tracing start):");
-                for (i, &(pc, op)) in trace.iter().take(165).enumerate() {
-                    let opname = crate::instruction::Opcode::from_byte(op)
-                        .map(|o| format!("{:?}", o))
-                        .unwrap_or_else(|| format!("?{}", op));
-                    eprintln!("  [{:3}] pc={:5} op={}", i, pc, opname);
-                }
-                if !gas_match {
-                    panic!(
-                        "Gas mismatch at step {}: interp={} recomp={}",
-                        step, interp_gas, recomp_gas
-                    );
-                }
-                if !exit_match {
-                    panic!(
-                        "Exit mismatch at step {}: interp={:?} recomp={:?}",
-                        step, interp_exit_clone, recomp_exit
-                    );
-                }
-                for i in 0..13 {
-                    if interp.registers[i] != recomp.registers()[i] {
-                        panic!(
-                            "Register φ[{}] mismatch at step {}: interp=0x{:x} recomp=0x{:x}",
-                            i,
-                            step,
-                            interp.registers[i],
-                            recomp.registers()[i]
-                        );
-                    }
-                }
-            }
-
-            // After step 2, print interpreter trace
-            if step == 3 {
-                let trace = &interp.pc_trace;
-                eprintln!("Interpreter trace (first 50 PCs after step 2):");
-                for (i, &(pc, op)) in trace.iter().take(50).enumerate() {
-                    let opname = crate::instruction::Opcode::from_byte(op)
-                        .map(|o| format!("{:?}", o))
-                        .unwrap_or_else(|| format!("?{}", op));
-                    eprintln!("  [{:3}] pc={:5} op={}", i, pc, opname);
-                }
-            }
-
-            match interp_exit_clone {
-                ExitReason::Halt
-                | ExitReason::Panic
-                | ExitReason::OutOfGas
-                | ExitReason::PageFault(_) => {
-                    eprintln!(
-                        "Both exited with {:?} after {} steps",
-                        interp_exit_clone, step
-                    );
-                    break;
-                }
-                ExitReason::HostCall(id) => {
-                    // Simulate a simple host call: just set ω7 = WHAT (error)
-                    // and continue
-                    let what = u64::MAX - 2;
-                    interp.registers[7] = what;
-                    recomp.registers_mut()[7] = what;
-                    if id == 0 {
-                        // gas host call — return remaining gas
-                        interp.registers[7] = interp.gas;
-                        recomp.registers_mut()[7] = recomp.gas();
-                    }
-                    // Enable tracing to help debug divergences
-                    interp.tracing_enabled = true;
-                }
-            }
-
-            if step > 100 {
-                eprintln!("Reached 100 steps, stopping comparison");
-                break;
-            }
-        }
     }
 }

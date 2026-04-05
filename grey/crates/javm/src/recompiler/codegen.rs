@@ -115,9 +115,7 @@ pub struct CompileResult {
     /// Native code bytes (used when mmap_ptr is None).
     pub native_code: Vec<u8>,
     pub dispatch_table: Vec<i32>,
-    #[cfg(feature = "signals")]
     pub trap_table: Vec<(u32, u32)>,
-    #[cfg(feature = "signals")]
     pub exit_label_offset: u32,
     /// If set, code is already mmap'd and mprotected as PROT_READ|PROT_EXEC.
     /// Skips the copy in NativeCode::new.
@@ -174,8 +172,6 @@ pub struct Compiler {
     oog_pc_label: Label,
     /// Per-gas-block OOG stubs: (label, pvm_pc) — emitted as cold code after main body.
     oog_stubs: Vec<(Label, u32, u32)>, // (label, pvm_pc, block_cost)
-    /// Per-memory-access fault stubs: (label, pvm_pc) — stores PC, jumps to shared handler.
-    fault_stubs: Vec<(Label, u32)>,
     /// Helper function addresses.
     helpers: HelperFns,
     /// Bitmask reference (1 = instruction start). Stored as raw pointer for self-referential use.
@@ -192,7 +188,6 @@ pub struct Compiler {
     /// immediately following setLtU).
     last_add_cf: Option<(usize, usize, usize)>,
     /// Trap table for signal-based bounds checking: (native_offset, pvm_pc).
-    #[cfg(feature = "signals")]
     trap_entries: Vec<(u32, u32)>,
     /// Memory tier load/store cycles for gas simulation.
     mem_cycles: u8,
@@ -239,14 +234,12 @@ impl Compiler {
             panic_label,
             oog_pc_label,
             oog_stubs: Vec::with_capacity(1024),
-            fault_stubs: Vec::with_capacity(256),
             reg_defs: [RegDef::Unknown; 13],
             reg_defs_active: 0,
             last_add_cf: None,
             helpers,
             bitmask_ptr: bitmask.as_ptr(),
             bitmask_len: bitmask.len(),
-            #[cfg(feature = "signals")]
             trap_entries: Vec::with_capacity(2048),
             mem_cycles,
         }
@@ -302,7 +295,7 @@ impl Compiler {
             // but ARE terminators, so the next instruction starts a new gas block.
             if raw_byte == 1 || raw_byte == 2 {
                 // Fallthrough=1, Unlikely=2
-                let skip = crate::vm::skip_for_bitmask(bitmask, pc);
+                let skip = crate::interpreter::skip_for_bitmask(bitmask, pc);
                 if is_gas_start {
                     let label = Label(self.label_base + pc as u32);
                     self.asm.bind_label(label);
@@ -344,7 +337,7 @@ impl Compiler {
                     continue;
                 }
             };
-            let skip = crate::vm::skip_for_bitmask(bitmask, pc);
+            let skip = crate::interpreter::skip_for_bitmask(bitmask, pc);
             let next_pc = (pc + 1 + skip) as u32;
 
             // Read register bytes once — used by both arg decoding and gas cost.
@@ -640,9 +633,7 @@ impl Compiler {
         // PC=0 must always be valid (program start); if not already set, it'll be
         // set by the first basic block at PC 0.
 
-        #[cfg(feature = "signals")]
         let exit_label_offset = self.asm.label_offset(self.exit_label).unwrap_or(0) as u32;
-        #[cfg(feature = "signals")]
         let trap_table = self.trap_entries;
 
         // If the assembler uses mmap, finalize directly to executable memory
@@ -655,9 +646,7 @@ impl Compiler {
                 CompileResult {
                     native_code: Vec::new(), // not used when mmap_ptr is set
                     dispatch_table,
-                    #[cfg(feature = "signals")]
                     trap_table,
-                    #[cfg(feature = "signals")]
                     exit_label_offset,
                     mmap_ptr: Some(ptr),
                     mmap_len: code_len,
@@ -667,9 +656,7 @@ impl Compiler {
             Err(_) => CompileResult {
                 native_code: self.asm.finalize(),
                 dispatch_table,
-                #[cfg(feature = "signals")]
                 trap_table,
-                #[cfg(feature = "signals")]
                 exit_label_offset,
                 mmap_ptr: None,
                 mmap_len: 0,
@@ -964,30 +951,9 @@ impl Compiler {
             8
         };
 
-        #[cfg(feature = "signals")]
-        {
-            // Record trap entry before the load instruction.
-            self.trap_entries.push((self.asm.offset() as u32, pvm_pc));
-        }
-        #[cfg(not(feature = "signals"))]
-        {
-            let fault_label = self.asm.new_label();
-            self.asm.cmp_mem32_r(CTX, CTX_HEAP_TOP, SCRATCH);
-            self.asm.jcc_label(Cc::BE, fault_label);
-            // Load falls through; fault stub pushed below.
-            match w {
-                1 => self.asm.movzx_load8_sib(dst, CTX, SCRATCH),
-                2 => self.asm.movzx_load16_sib(dst, CTX, SCRATCH),
-                4 => self.asm.mov_load32_sib(dst, CTX, SCRATCH),
-                8 => self.asm.mov_load64_sib(dst, CTX, SCRATCH),
-                _ => unreachable!(),
-            }
-            self.fault_stubs.push((fault_label, pvm_pc));
-            #[allow(clippy::needless_return)]
-            return;
-        }
+        // Record trap entry before the load instruction (for SIGSEGV handler).
+        self.trap_entries.push((self.asm.offset() as u32, pvm_pc));
 
-        #[cfg(feature = "signals")]
         match w {
             1 => self.asm.movzx_load8_sib(dst, CTX, SCRATCH),
             2 => self.asm.movzx_load16_sib(dst, CTX, SCRATCH),
@@ -1010,28 +976,9 @@ impl Compiler {
             8
         };
 
-        #[cfg(feature = "signals")]
-        {
-            self.trap_entries.push((self.asm.offset() as u32, pvm_pc));
-        }
-        #[cfg(not(feature = "signals"))]
-        {
-            let fault_label = self.asm.new_label();
-            self.asm.cmp_mem32_r(CTX, CTX_HEAP_TOP, SCRATCH);
-            self.asm.jcc_label(Cc::BE, fault_label);
-            match w {
-                1 => self.asm.mov_store8_sib(CTX, SCRATCH, val_reg),
-                2 => self.asm.mov_store16_sib(CTX, SCRATCH, val_reg),
-                4 => self.asm.mov_store32_sib(CTX, SCRATCH, val_reg),
-                8 => self.asm.mov_store64_sib(CTX, SCRATCH, val_reg),
-                _ => unreachable!(),
-            }
-            self.fault_stubs.push((fault_label, pvm_pc));
-            #[allow(clippy::needless_return)]
-            return;
-        }
+        // Record trap entry before the store instruction (for SIGSEGV handler).
+        self.trap_entries.push((self.asm.offset() as u32, pvm_pc));
 
-        #[cfg(feature = "signals")]
         match w {
             1 => self.asm.mov_store8_sib(CTX, SCRATCH, val_reg),
             2 => self.asm.mov_store16_sib(CTX, SCRATCH, val_reg),
@@ -1055,68 +1002,36 @@ impl Compiler {
         // Compute address into SCRATCH
         self.emit_addr_to_scratch(ra, imm_x);
 
-        #[cfg(feature = "signals")]
         let fits_i32 = {
             let imm_i64 = imm_y as i64;
             imm_i64 >= i32::MIN as i64 && imm_i64 <= i32::MAX as i64
         };
 
-        #[cfg(feature = "signals")]
-        {
-            self.trap_entries.push((self.asm.offset() as u32, _pvm_pc));
+        // Record trap entry before the store instruction (for SIGSEGV handler).
+        self.trap_entries.push((self.asm.offset() as u32, _pvm_pc));
 
-            match opcode {
-                Opcode::StoreImmIndU8 => {
-                    self.asm.mov_store8_sib_imm(CTX, SCRATCH, imm_y as u8);
-                }
-                Opcode::StoreImmIndU16 => {
-                    self.asm.mov_store16_sib_imm(CTX, SCRATCH, imm_y as u16);
-                }
-                Opcode::StoreImmIndU32 => {
-                    self.asm.mov_store32_sib_imm(CTX, SCRATCH, imm_y as i32);
-                }
-                Opcode::StoreImmIndU64 if fits_i32 => {
-                    // mov qword [CTX + SCRATCH], sign-extended imm32
-                    self.asm.mov_store64_sib_imm(CTX, SCRATCH, imm_y as i32);
-                }
-                Opcode::StoreImmIndU64 => {
-                    // Value doesn't fit in sign-extended i32: use a temp register.
-                    self.asm.push(Reg::RCX);
-                    self.asm.mov_ri64(Reg::RCX, imm_y);
-                    self.asm.mov_store64_sib(CTX, SCRATCH, Reg::RCX);
-                    self.asm.pop(Reg::RCX);
-                }
-                _ => unreachable!(),
+        match opcode {
+            Opcode::StoreImmIndU8 => {
+                self.asm.mov_store8_sib_imm(CTX, SCRATCH, imm_y as u8);
             }
-        }
-
-        #[cfg(not(feature = "signals"))]
-        {
-            let fn_addr = match opcode {
-                Opcode::StoreImmIndU8 => self.helpers.mem_write_u8,
-                Opcode::StoreImmIndU16 => self.helpers.mem_write_u16,
-                Opcode::StoreImmIndU32 => self.helpers.mem_write_u32,
-                Opcode::StoreImmIndU64 => self.helpers.mem_write_u64,
-                _ => unreachable!(),
-            };
-            // Fallback: helper function call
-            self.asm.push(SCRATCH);
-            self.asm.mov_ri64(SCRATCH, imm_y);
-            self.asm.push(SCRATCH);
-            self.save_caller_saved();
-            self.asm.mov_load64(Reg::RDX, Reg::RSP, 64);
-            self.asm.mov_load64(Reg::RSI, Reg::RSP, 72);
-            self.emit_ctx_ptr(Reg::RDI);
-            self.asm.mov_ri64(Reg::RAX, fn_addr);
-            self.asm.call_reg(Reg::RAX);
-            self.restore_caller_saved();
-            self.asm.pop(SCRATCH);
-            self.asm.pop(SCRATCH);
-            self.asm.push(SCRATCH);
-            self.asm.mov_load32(SCRATCH, CTX, CTX_EXIT_REASON);
-            self.asm.cmp_ri(SCRATCH, 0);
-            self.asm.pop(SCRATCH);
-            self.asm.jcc_label(Cc::NE, self.exit_label);
+            Opcode::StoreImmIndU16 => {
+                self.asm.mov_store16_sib_imm(CTX, SCRATCH, imm_y as u16);
+            }
+            Opcode::StoreImmIndU32 => {
+                self.asm.mov_store32_sib_imm(CTX, SCRATCH, imm_y as i32);
+            }
+            Opcode::StoreImmIndU64 if fits_i32 => {
+                // mov qword [CTX + SCRATCH], sign-extended imm32
+                self.asm.mov_store64_sib_imm(CTX, SCRATCH, imm_y as i32);
+            }
+            Opcode::StoreImmIndU64 => {
+                // Value doesn't fit in sign-extended i32: use a temp register.
+                self.asm.push(Reg::RCX);
+                self.asm.mov_ri64(Reg::RCX, imm_y);
+                self.asm.mov_store64_sib(CTX, SCRATCH, Reg::RCX);
+                self.asm.pop(Reg::RCX);
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -1332,63 +1247,33 @@ impl Compiler {
                     self.asm.mov_ri32(SCRATCH, addr);
                     let imm_val = *imm_y;
 
-                    #[cfg(feature = "signals")]
                     let fits_i32 = {
                         let imm_i64 = imm_val as i64;
                         imm_i64 >= i32::MIN as i64 && imm_i64 <= i32::MAX as i64
                     };
 
-                    #[cfg(feature = "signals")]
-                    {
-                        self.trap_entries.push((self.asm.offset() as u32, pc));
-                        match opcode {
-                            Opcode::StoreImmU8 => {
-                                self.asm.mov_store8_sib_imm(CTX, SCRATCH, imm_val as u8);
-                            }
-                            Opcode::StoreImmU16 => {
-                                self.asm.mov_store16_sib_imm(CTX, SCRATCH, imm_val as u16);
-                            }
-                            Opcode::StoreImmU32 => {
-                                self.asm.mov_store32_sib_imm(CTX, SCRATCH, imm_val as i32);
-                            }
-                            Opcode::StoreImmU64 if fits_i32 => {
-                                self.asm.mov_store64_sib_imm(CTX, SCRATCH, imm_val as i32);
-                            }
-                            Opcode::StoreImmU64 => {
-                                self.asm.push(Reg::RCX);
-                                self.asm.mov_ri64(Reg::RCX, imm_val);
-                                self.asm.mov_store64_sib(CTX, SCRATCH, Reg::RCX);
-                                self.asm.pop(Reg::RCX);
-                            }
-                            _ => unreachable!(),
+                    // Record trap entry before the store instruction (for SIGSEGV handler).
+                    self.trap_entries.push((self.asm.offset() as u32, pc));
+                    match opcode {
+                        Opcode::StoreImmU8 => {
+                            self.asm.mov_store8_sib_imm(CTX, SCRATCH, imm_val as u8);
                         }
-                    }
-                    #[cfg(not(feature = "signals"))]
-                    {
-                        let fn_addr = match opcode {
-                            Opcode::StoreImmU8 => self.helpers.mem_write_u8,
-                            Opcode::StoreImmU16 => self.helpers.mem_write_u16,
-                            Opcode::StoreImmU32 => self.helpers.mem_write_u32,
-                            Opcode::StoreImmU64 => self.helpers.mem_write_u64,
-                            _ => unreachable!(),
-                        };
-                        self.asm.push(SCRATCH);
-                        self.asm.mov_ri64(SCRATCH, imm_val);
-                        self.asm.push(SCRATCH);
-                        self.save_caller_saved();
-                        self.asm.mov_load64(Reg::RDX, Reg::RSP, 64);
-                        self.asm.mov_load64(Reg::RSI, Reg::RSP, 72);
-                        self.emit_ctx_ptr(Reg::RDI);
-                        self.asm.mov_ri64(Reg::RAX, fn_addr);
-                        self.asm.call_reg(Reg::RAX);
-                        self.restore_caller_saved();
-                        self.asm.pop(SCRATCH);
-                        self.asm.pop(SCRATCH);
-                        self.asm.push(SCRATCH);
-                        self.asm.mov_load32(SCRATCH, CTX, CTX_EXIT_REASON);
-                        self.asm.cmp_ri(SCRATCH, 0);
-                        self.asm.pop(SCRATCH);
-                        self.asm.jcc_label(Cc::NE, self.exit_label);
+                        Opcode::StoreImmU16 => {
+                            self.asm.mov_store16_sib_imm(CTX, SCRATCH, imm_val as u16);
+                        }
+                        Opcode::StoreImmU32 => {
+                            self.asm.mov_store32_sib_imm(CTX, SCRATCH, imm_val as i32);
+                        }
+                        Opcode::StoreImmU64 if fits_i32 => {
+                            self.asm.mov_store64_sib_imm(CTX, SCRATCH, imm_val as i32);
+                        }
+                        Opcode::StoreImmU64 => {
+                            self.asm.push(Reg::RCX);
+                            self.asm.mov_ri64(Reg::RCX, imm_val);
+                            self.asm.mov_store64_sib(CTX, SCRATCH, Reg::RCX);
+                            self.asm.pop(Reg::RCX);
+                        }
+                        _ => unreachable!(),
                     }
                 }
             }
@@ -2491,14 +2376,7 @@ impl Compiler {
         }
         self.asm.movzx_32_64(SCRATCH, SCRATCH); // truncate to 32-bit
 
-        // Check halt address: 2^32 - 2^16 = 0xFFFF0000
-        // SCRATCH already has the 32-bit zero-extended address.
-        // Use a 32-bit CMP (without REX.W) so the immediate is not sign-extended to 64 bits.
-        self.asm.cmp_ri32(SCRATCH, 0xFFFF0000u32 as i32);
-        let not_halt = self.asm.new_label();
-        self.asm.jcc_label(Cc::NE, not_halt);
-        self.emit_exit(EXIT_HALT, 0);
-        self.asm.bind_label(not_halt);
+        // No halt address check — programs terminate via REPLY (ecalli 0xFF).
 
         // For dynamic jumps, we save state and return to the host to handle
         // (the host will validate and dispatch). This is simpler than inlining
@@ -3051,9 +2929,9 @@ impl Compiler {
 
     /// Emit exit sequences and epilogue.
     fn emit_exit_sequences(&mut self) {
-        // Reserve capacity for exit sequences + all OOG/fault stubs.
-        // Each OOG stub is ~12 bytes, each fault stub is ~10 bytes.
-        let needed = 512 + self.oog_stubs.len() * 16 + self.fault_stubs.len() * 16;
+        // Reserve capacity for exit sequences + all OOG stubs.
+        // Each OOG stub is ~12 bytes.
+        let needed = 512 + self.oog_stubs.len() * 16;
         self.asm.ensure_capacity(needed);
         // Shared OOG handler that reads PC from SCRATCH — emitted BEFORE OOG
         // stubs so backward jumps from stubs can use jmp rel8 (2 bytes).
@@ -3074,29 +2952,7 @@ impl Compiler {
             self.asm.jmp_label(self.oog_pc_label);
         }
 
-        // Shared page fault handler with PC from stack — emitted BEFORE
-        // per-stub code so backward jumps from stubs can use jmp rel8.
-        //
-        // Each stub pushes its PVM PC onto the stack, then jumps here.
-        // SCRATCH still holds the faulting address from the bounds check.
-        // Handler: save fault addr, pop PC, save PC, set exit reason, exit.
-        let fault_pc_label = self.asm.new_label();
-        self.asm.bind_label(fault_pc_label);
-        self.asm.mov_store32(CTX, CTX_EXIT_ARG, SCRATCH);
-        self.asm.pop(SCRATCH);
-        self.asm.mov_store32(CTX, CTX_PC, SCRATCH);
-        self.asm
-            .mov_store32_imm(CTX, CTX_EXIT_REASON, EXIT_PAGE_FAULT as i32);
-        self.asm.jmp_label(self.exit_label);
-
-        // Per-memory-access fault stubs: compact format — push PC, jump
-        // to shared handler. Saves ~7 bytes per stub vs inline PC store.
-        let fault_stubs = std::mem::take(&mut self.fault_stubs);
-        for (label, pvm_pc) in &fault_stubs {
-            self.asm.bind_label(*label);
-            self.asm.push_imm32(*pvm_pc as i32);
-            self.asm.jmp_label(fault_pc_label);
-        }
+        // Page faults are handled by the SIGSEGV handler (signal.rs).
 
         // Panic exit
         self.asm.bind_label(self.panic_label);

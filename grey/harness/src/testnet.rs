@@ -28,6 +28,9 @@ impl TestnetProcess {
         );
 
         let mut cmd = Command::new(&grey_bin);
+        // Propagate RUST_LOG to the node, defaulting to info
+        let rust_log = std::env::var("GREY_NODE_LOG").unwrap_or_else(|_| "info".to_string());
+        cmd.env("RUST_LOG", &rust_log);
         if seq {
             cmd.args(["--seq-testnet", "--rpc-cors"]);
         } else {

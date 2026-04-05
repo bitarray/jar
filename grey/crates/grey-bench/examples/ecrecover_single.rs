@@ -19,7 +19,6 @@ fn run_with_timeout<F: FnOnce() + Send + 'static>(name: &str, f: F) {
         }
         Err(_) => {
             eprintln!("{name:20} KILLED after {}s", TIMEOUT.as_secs());
-            // Thread will be abandoned (no safe way to kill it)
         }
     }
 }
@@ -52,39 +51,22 @@ fn main() {
         );
     });
 
-    // ---- Prepare blobs ----
     let grey_blob = grey_ecrecover_blob();
     let pvm_blob = polkavm_ecrecover_blob();
 
-    // ---- Grey interpreter (measure gas consumed in 10s) ----
+    // ---- Grey interpreter ----
     {
         let blob = grey_blob;
         run_with_timeout("grey-interpreter", move || {
             let t = Instant::now();
-            let mut pvm = javm::program::initialize_program(blob, &[], GAS).unwrap();
-            // Run for 1s, report gas consumed rate
-            loop {
-                let (exit, _) = pvm.run();
-                match exit {
-                    javm::ExitReason::Halt | javm::ExitReason::Panic => {
-                        let gas_used = GAS - pvm.gas;
-                        eprintln!(
-                            "{:20} {:>10.3} ms  a0={} gas_used={} ({:.1}M inst)",
-                            "grey-interpreter",
-                            t.elapsed().as_secs_f64() * 1000.0,
-                            pvm.registers[7],
-                            gas_used,
-                            gas_used as f64 / 1e6
-                        );
-                        return;
-                    }
-                    javm::ExitReason::HostCall(_) => continue,
-                    other => {
-                        eprintln!("grey-interpreter: {:?}", other);
-                        return;
-                    }
-                }
-            }
+            let (result, gas_used) =
+                run_kernel_with_backend(blob, GAS, javm::PvmBackend::ForceInterpreter);
+            eprintln!(
+                "{:20} {:>10.3} ms  a0={result} gas_used={gas_used} ({:.1}M inst)",
+                "grey-interpreter",
+                t.elapsed().as_secs_f64() * 1000.0,
+                gas_used as f64 / 1e6
+            );
         });
     }
 
@@ -93,32 +75,13 @@ fn main() {
         let blob = grey_blob;
         run_with_timeout("grey-recompiler", move || {
             let t = Instant::now();
-            let mut pvm = javm::recompiler::initialize_program_recompiled(blob, &[], GAS).unwrap();
-            let compile_ms = t.elapsed().as_secs_f64() * 1000.0;
-            let t_exec = Instant::now();
-            loop {
-                match pvm.run() {
-                    javm::ExitReason::Halt | javm::ExitReason::Panic => {
-                        let exec_us = t_exec.elapsed().as_micros();
-                        let gas_used = GAS - pvm.gas() as u64;
-                        eprintln!(
-                            "{:20} {:>10.3} ms  (compile={:.1}ms exec={}µs) a0={} gas={}",
-                            "grey-recompiler",
-                            t.elapsed().as_secs_f64() * 1000.0,
-                            compile_ms,
-                            exec_us,
-                            pvm.registers()[7],
-                            gas_used
-                        );
-                        return;
-                    }
-                    javm::ExitReason::HostCall(_) => continue,
-                    other => {
-                        eprintln!("grey-recompiler: {:?}", other);
-                        return;
-                    }
-                }
-            }
+            let (result, gas_used) =
+                run_kernel_with_backend(blob, GAS, javm::PvmBackend::ForceRecompiler);
+            eprintln!(
+                "{:20} {:>10.3} ms  a0={result} gas_used={gas_used}",
+                "grey-recompiler",
+                t.elapsed().as_secs_f64() * 1000.0
+            );
         });
     }
 
@@ -141,28 +104,19 @@ fn main() {
             let mut mc = ModuleConfig::new();
             mc.set_gas_metering(Some(GasMeteringKind::Sync));
             let module = Module::new(&engine, &mc, blob.into()).unwrap();
-            let compile_ms = t.elapsed().as_secs_f64() * 1000.0;
-
             let mut inst = module.instantiate().unwrap();
             inst.set_gas(GAS as i64);
             if let Some(export) = module.exports().next() {
                 inst.set_next_program_counter(export.program_counter());
-            } else {
-                eprintln!("polkavm: NO EXPORTS");
-                return;
             }
             inst.set_reg(PReg::SP, module.default_sp());
-            let t_exec = Instant::now();
             loop {
                 match inst.run().unwrap() {
                     InterruptKind::Finished | InterruptKind::Trap => {
-                        let exec_us = t_exec.elapsed().as_micros();
                         eprintln!(
-                            "{:20} {:>10.3} ms  (compile={:.1}ms exec={}µs) a0={}",
+                            "{:20} {:>10.3} ms  a0={}",
                             "polkavm",
                             t.elapsed().as_secs_f64() * 1000.0,
-                            compile_ms,
-                            exec_us,
                             inst.reg(PReg::A0)
                         );
                         return;
@@ -181,6 +135,5 @@ fn main() {
         });
     }
 
-    // Force exit (abandon any stuck threads)
     std::process::exit(0);
 }

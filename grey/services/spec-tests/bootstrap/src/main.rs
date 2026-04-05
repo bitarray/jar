@@ -14,21 +14,16 @@
 mod service {
     use core::arch::global_asm;
 
+    // Single entrypoint. φ[7]=op. Both are no-ops.
+    // Load a distinguishing constant so the blob hash differs from minimal.
     global_asm!(
         ".global _start",
         ".type _start, @function",
         "_start:",
-        "j refine",
-        ".global refine",
-        ".type refine, @function",
-        "refine:",
-        "ret",
-        ".global accumulate",
-        ".type accumulate, @function",
-        "accumulate:",
-        // Load a distinguishing constant so the blob hash differs from minimal.
-        "li t0, 0x42",
-        "ret",
+        "li t0, 0x42", // distinguish from minimal blob
+        "li t0, 255",  // ecalli(0xFF) = REPLY
+        "ecall",
+        "unimp", // trap if resumed
     );
 
     #[panic_handler]

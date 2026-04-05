@@ -1,77 +1,79 @@
-//! Three-way comparison tests: host vs interpreter vs recompiler.
+//! Three-way comparison tests: native host vs interpreter vs recompiler.
 //!
-//! Each test encodes `[test_id: u32 LE] [args...]`, runs on all three backends,
-//! and asserts output + gas match.
+//! Each test encodes `[test_id: u32 LE] [args...]`, runs on native host,
+//! interpreter kernel, and recompiler kernel, then asserts all outputs match.
 
 include!(concat!(env!("OUT_DIR"), "/guest_blob.rs"));
 
-/// Run a guest test on host, interpreter, and recompiler. Assert outputs match
-/// and interpreter/recompiler gas costs are equal.
+/// Result from running a guest test on a kernel backend.
+struct KernelRun {
+    output: Vec<u8>,
+    gas_used: u64,
+}
+
+/// Run the kernel with a specific backend, return output bytes and gas consumed.
+fn run_kernel(backend: javm::PvmBackend, input: &[u8], test_id: u32) -> KernelRun {
+    use javm::kernel::{InvocationKernel, KernelResult};
+    use javm::vm_pool::VmState;
+
+    let gas = 100_000_000_000u64;
+    let mut kernel = InvocationKernel::new_with_backend(GUEST_TESTS_BLOB, input, gas, backend)
+        .expect("kernel should initialize");
+    let _ = kernel.vms[0].transition(VmState::Running);
+
+    let result = kernel.run();
+    let packed = kernel.vms[kernel.active_vm as usize].registers[7];
+    let ptr = (packed >> 32) as u32;
+    let len = (packed & 0xFFFFFFFF) as u32;
+    let gas_used = gas - kernel.gas();
+
+    let label = match backend {
+        javm::PvmBackend::ForceInterpreter => "interpreter",
+        javm::PvmBackend::ForceRecompiler => "recompiler",
+        _ => "default",
+    };
+
+    match result {
+        KernelResult::Halt(_) => {}
+        KernelResult::Panic => panic!("test {test_id}: {label} panicked"),
+        KernelResult::OutOfGas => panic!("test {test_id}: {label} OOG"),
+        KernelResult::PageFault(addr) => {
+            panic!("test {test_id}: {label} page fault at 0x{addr:08x}")
+        }
+        KernelResult::ProtocolCall { slot, .. } => {
+            panic!("test {test_id}: {label} unexpected protocol call to slot {slot}")
+        }
+    }
+
+    let output = kernel.read_data_cap_window(ptr, len).unwrap_or_else(|| {
+        panic!("test {test_id}: {label} read failed at ptr=0x{ptr:X} len={len}")
+    });
+
+    KernelRun { output, gas_used }
+}
+
+/// Run a guest test on native host, interpreter, and recompiler.
+/// Assert all outputs match AND interpreter/recompiler consume identical gas.
 fn run_test(test_id: u32, args: &[u8]) {
-    // Encode input
     let mut input = test_id.to_le_bytes().to_vec();
     input.extend_from_slice(args);
 
-    // --- Host ---
     let host_output = javm_guest_tests::dispatch_to_vec(&input);
-
-    // --- Interpreter ---
-    let gas = 100_000_000_000u64;
-    let mut interp = javm::program::initialize_program(GUEST_TESTS_BLOB, &input, gas)
-        .expect("blob should be loadable");
-    loop {
-        match interp.run().0 {
-            javm::ExitReason::Halt => break,
-            javm::ExitReason::Panic => {
-                panic!("test {test_id}: interpreter panicked at PC={}", interp.pc)
-            }
-            javm::ExitReason::HostCall(_) => continue,
-            other => panic!("test {test_id}: interpreter unexpected exit: {other:?}"),
-        }
-    }
-    let interp_gas = gas - interp.gas;
-    let packed = interp.registers[7];
-    let interp_ptr = (packed >> 32) as usize;
-    let interp_len = (packed & 0xFFFFFFFF) as usize;
-    assert!(
-        interp_ptr + interp_len <= interp.flat_mem.len(),
-        "test {test_id}: interpreter output out of bounds: ptr={interp_ptr:#x} len={interp_len}"
-    );
-    let interp_output = interp.flat_mem[interp_ptr..interp_ptr + interp_len].to_vec();
+    let interp = run_kernel(javm::PvmBackend::ForceInterpreter, &input, test_id);
+    let recomp = run_kernel(javm::PvmBackend::ForceRecompiler, &input, test_id);
 
     assert_eq!(
-        host_output, interp_output,
+        host_output, interp.output,
         "test {test_id}: host vs interpreter output mismatch"
     );
-
-    // --- Recompiler ---
-    let mut recomp = javm::recompiler::initialize_program_recompiled(GUEST_TESTS_BLOB, &input, gas)
-        .expect("recompiler should initialize");
-    loop {
-        match recomp.run() {
-            javm::ExitReason::Halt => break,
-            javm::ExitReason::Panic => panic!("test {test_id}: recompiler panicked"),
-            javm::ExitReason::HostCall(_) => continue,
-            other => panic!("test {test_id}: recompiler unexpected exit: {other:?}"),
-        }
-    }
-    let recomp_gas = gas - recomp.gas();
-    let packed = recomp.registers()[7];
-    let recomp_ptr = (packed >> 32) as u32;
-    let recomp_len = (packed & 0xFFFFFFFF) as u32;
-    let recomp_output = recomp
-        .read_bytes(recomp_ptr, recomp_len)
-        .unwrap_or_else(|| {
-            panic!("test {test_id}: read_bytes failed at ptr=0x{recomp_ptr:X} len={recomp_len}")
-        });
-
     assert_eq!(
-        host_output, recomp_output,
+        host_output, recomp.output,
         "test {test_id}: host vs recompiler output mismatch"
     );
     assert_eq!(
-        interp_gas, recomp_gas,
-        "test {test_id}: gas mismatch: interpreter={interp_gas} recompiler={recomp_gas}"
+        interp.gas_used, recomp.gas_used,
+        "test {test_id}: gas mismatch: interpreter={} recompiler={}",
+        interp.gas_used, recomp.gas_used
     );
 }
 

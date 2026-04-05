@@ -265,105 +265,83 @@ def initStandard (blob' : ByteArray) (args : ByteArray) (compact : Bool := true)
 
   -- Registers (GP eq A.43): matching javm initialize_program
   let regs := Array.replicate PVM_REGISTERS (0 : RegisterValue)
-  let regs := regs.set! 0 (UInt64.ofNat (2^32 - 2^16))        -- ω[0]: RA (halt address)
+  let regs := regs.set! 0 (UInt64.ofNat (2^32 - 2^16))        -- ω[0]: RA (halt address, gp072)
   let regs := regs.set! 1 (UInt64.ofNat stackTop)               -- ω[1]: SP (stack top)
   let regs := regs.set! 7 (UInt64.ofNat argBase)                -- ω[7]: argument base
   let regs := regs.set! 8 (UInt64.ofNat args.size)              -- ω[8]: argument length
 
   some (prog, regs, mem)
 
-/-- Initialize PVM with contiguous linear memory layout.
-    Same blob format as initStandard, but all data is packed into a single
-    contiguous read-write region starting at address 0:
-      [0, s)                     stack (SP = s, grows toward 0)
-      [s, s + P(|o|))            RO data
-      [s + P(|o|), ... + P(|w|)) RW data
-      [... + P(|w|), ... + P(|a|)) arguments
-      [... + P(|a|), heap_top)   heap (z pages)
-    No guard zone, no read-only pages, no zone alignment.
-    Arguments are placed after RW data so that RO/RW addresses are
-    independent of argument size (the transpiler bakes absolute data
-    addresses at compile time).
-    JAR v1: parses unified header directly (no deblob, no metadata skip). -/
-def initLinear (blob : ByteArray) (args : ByteArray) (_compact : Bool := true)
+/-- Initialize PVM from a JAR capability manifest blob.
+    Parses header + cap entries. CODE cap → ProgramBlob.
+    DATA caps → mapped memory regions. -/
+def initCap (blob : ByteArray) (args : ByteArray)
     : Option (ProgramBlob × Registers × Memory) := do
-  -- JAR v1: parse unified header directly (no deblob, no metadata skip)
   let (hdr, off0) ← parseJarHeader blob
 
-  -- Read ro_data
-  if off0 + hdr.roSize > blob.size then none
-  let roData := blob.extract off0 (off0 + hdr.roSize)
-  let off1 := off0 + hdr.roSize
+  -- Parse cap entries
+  let mut caps : Array JarCapEntry := #[]
+  let mut off := off0
+  for _ in List.range hdr.capCount do
+    let (cap, nextOff) ← parseJarCapEntry blob off
+    caps := caps.push cap
+    off := nextOff
 
-  -- Read rw_data
-  if off1 + hdr.rwSize > blob.size then none
-  let rwData := blob.extract off1 (off1 + hdr.rwSize)
-  let off2 := off1 + hdr.rwSize
+  -- Data section starts after all cap entries
+  let dataStart := off
 
-  -- Read jump table
-  if hdr.entrySize == 0 || hdr.entrySize > 4 then none
-  let jumpDataLen := hdr.jumpLen * hdr.entrySize
-  if off2 + jumpDataLen > blob.size then none
-  let jumpTable := Array.ofFn (n := hdr.jumpLen) fun ⟨i, _⟩ =>
-    UInt32.ofNat (decodeLEn blob (off2 + i * hdr.entrySize) hdr.entrySize)
-  let off3 := off2 + jumpDataLen
+  -- Find the CODE cap matching invoke_cap and parse its code sub-blob
+  let codeCap ← caps.find? fun c => c.isCode && c.capIndex == hdr.invokeCap
+  let prog ← parseCodeSubBlob blob (dataStart + codeCap.dataOffset) codeCap.dataLen
 
-  -- Read code
-  if off3 + hdr.codeLen > blob.size then none
-  let code := blob.extract off3 (off3 + hdr.codeLen)
-  let off4 := off3 + hdr.codeLen
-
-  -- Read packed bitmask
-  let bitmaskLen := (hdr.codeLen + 7) / 8
-  if off4 + bitmaskLen > blob.size then none
-  let packedBitmask := blob.extract off4 (off4 + bitmaskLen)
-  let bitmask := ByteArray.mk (Array.ofFn (n := hdr.codeLen) fun ⟨i, _⟩ =>
-    let byteIdx := i / 8
-    let bitIdx := i % 8
-    if byteIdx < packedBitmask.size then
-      UInt8.ofNat ((packedBitmask.get! byteIdx).toNat / (2 ^ bitIdx) % 2)
-    else 0)
-
-  let prog : ProgramBlob := { code, bitmask, jumpTable }
-  if !validateBasicBlocks prog then none
-
-  -- Linear memory layout: stack | ro | rw | args | heap
-  let stackSize := hdr.stackPages * Z_P
-  let roStart := stackSize
-  let rwStart := roStart + pageRound hdr.roSize
-  let argStart := rwStart + pageRound hdr.rwSize
-  let heapStart := argStart + pageRound args.size
-  let heapEnd := heapStart + hdr.heapPages * Z_P
-  let total := heapEnd
-  if total > 2^32 then none
-
-  -- All pages writable up to heapEnd, rest inaccessible
+  -- Build memory from DATA caps
   let totalPagesAll := 2^32 / Z_P
-  let access := Array.replicate totalPagesAll PageAccess.inaccessible
-  let access := mapRegionAccess access 0 total .writable
+  let mut access := Array.replicate totalPagesAll PageAccess.inaccessible
+  let mut mem : Memory := { pages := Dict.empty, access, heapTop := 0, guardZone := 0 }
+  let mut argsBase : Nat := 0
 
-  let mem : Memory := { pages := Dict.empty, access, heapTop := heapEnd, guardZone := 0 }
-  let mem := copyToMem mem roStart roData
-  let mem := copyToMem mem rwStart rwData
-  let mem := copyToMem mem argStart args
+  for cap in caps do
+    if !cap.isCode then
+      -- Map pages
+      let startAddr := cap.basePage * Z_P
+      let endAddr := startAddr + cap.pageCount * Z_P
+      let pageAccess := if cap.isRW then PageAccess.writable else PageAccess.readable
+      access := mapRegionAccess access startAddr endAddr pageAccess
+      -- Copy initial data if present
+      if cap.dataLen > 0 then
+        let dataOff := dataStart + cap.dataOffset
+        if dataOff + cap.dataLen <= blob.size then
+          let capData := blob.extract dataOff (dataOff + cap.dataLen)
+          mem := copyToMem { mem with access } startAddr capData
+      -- Track args cap base address (cap_index=255 = IPC slot = args)
+      if cap.capIndex == 255 then
+        argsBase := startAddr
 
-  -- Registers
+  -- Update memory access after all caps processed
+  mem := { mem with access }
+
+  -- Write arguments into args cap (cap_index=255 = IPC slot)
+  if argsBase > 0 && args.size > 0 then
+    mem := copyToMem mem argsBase args
+
+  -- Registers: φ[7]=op (set by caller), φ[8]=args_base, φ[9]=args_len.
+  -- No halt address — programs terminate via REPLY (ecalli 0xFF).
+  -- SP is set by the program's preamble (load_imm_64 SP, stack_top).
   let regs := Array.replicate PVM_REGISTERS (0 : RegisterValue)
-  let regs := regs.set! 0 (UInt64.ofNat (2^32 - 2^16))  -- RA (halt addr)
-  let regs := regs.set! 1 (UInt64.ofNat stackSize)       -- SP
-  let regs := regs.set! 7 (UInt64.ofNat argStart)        -- arg base
-  let regs := regs.set! 8 (UInt64.ofNat args.size)       -- arg len
+  let regs := regs.set! 8 (UInt64.ofNat argsBase)
+  let regs := regs.set! 9 (UInt64.ofNat args.size)
 
   some (prog, regs, mem)
 
-/-- Y(p, a) : Program initialization dispatched by memory model.
-    Uses segmented (GP v0.7.2) or linear layout based on JamConfig. -/
+/-- Y(p, a) : Program initialization dispatched by capability model.
+    - v2 (jar1): capability manifest blob format
+    - none (gp072): segmented (GP v0.7.2) memory layout -/
 def initProgram [JamConfig] (blob : ByteArray) (args : ByteArray)
     : Option (ProgramBlob × Registers × Memory) :=
   let compact := JamConfig.useCompactDeblob
-  match JamConfig.memoryModel with
-  | .segmented => initStandard blob args compact
-  | .linear => initLinear blob args compact
+  match JamConfig.capabilityModel with
+  | .v2 => initCap blob args
+  | .none => initStandard blob args compact
 
 /-- Ψ : Core PVM run dispatched by gas model.
     Uses per-instruction (v0.7.2) or per-basic-block (v0.8.0) gas charging. -/

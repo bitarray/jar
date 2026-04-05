@@ -40,10 +40,14 @@ impl GasSimulator {
     /// `dst` is destination register index (0..12, or 0xFF for "none").
     #[inline(always)]
     pub fn feed_direct(&mut self, cycles: u8, decode_slots: u8, src1: u8, src2: u8, dst: u8) {
-        self.decode_used += decode_slots;
-        if self.decode_used > 4 {
+        // Match Lean semantics: advance cycle only if ALL 4 decode slots are
+        // already consumed. As long as ≥1 slot remains, the new instruction
+        // begins decoding this cycle regardless of how many slots it needs.
+        if self.decode_used >= 4 {
             self.cycle += 1;
             self.decode_used = decode_slots;
+        } else {
+            self.decode_used += decode_slots;
         }
         let mut start = self.cycle;
         if src1 < 13 {
@@ -62,11 +66,13 @@ impl GasSimulator {
     /// Process one instruction. O(1).
     #[inline]
     pub fn feed(&mut self, cost: &FastCost) {
-        // Decode throughput: 4 slots per cycle
-        self.decode_used += cost.decode_slots;
-        if self.decode_used > 4 {
+        // Decode throughput: 4 slots per cycle.
+        // Match Lean semantics: advance cycle only if ALL 4 slots consumed.
+        if self.decode_used >= 4 {
             self.cycle += 1;
             self.decode_used = cost.decode_slots;
+        } else {
+            self.decode_used += cost.decode_slots;
         }
 
         // move_reg: zero-cycle frontend-only op, propagate reg_done

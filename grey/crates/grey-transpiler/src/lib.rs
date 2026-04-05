@@ -28,14 +28,10 @@ pub enum TranspileError {
     InvalidSection(String),
 }
 
-/// Link a RISC-V rv64em ELF binary into a PVM standard program blob.
+/// Link a RISC-V rv64em ELF binary into a JAR capability manifest PVM blob.
+/// Single entrypoint (PC=0). Works for both standard and service programs.
 pub fn link_elf(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
     linker::link_elf(elf_data)
-}
-
-/// Link a RISC-V rv64em ELF binary into a JAM service PVM blob.
-pub fn link_elf_service(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
-    linker::link_elf_service(elf_data)
 }
 
 /// Peephole pass: fuse `load_imm(51) + ThreeReg ALU` into `TwoRegOneImm` immediate form.

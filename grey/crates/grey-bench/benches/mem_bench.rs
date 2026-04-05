@@ -28,24 +28,24 @@ const SIZES: &[(&str, u64)] = &[
     ("256M", 256 * 1024 * 1024),
     ("1G", 1024 * 1024 * 1024),
     ("2G", 2 * 1024 * 1024 * 1024),
-    ("3G", 3 * 1024 * 1024 * 1024), // ~3GB (leave room for stack + guard zones)
+    ("3G", 3 * 1024 * 1024 * 1024),
 ];
 
-/// Initialize a recompiler PVM for the given blob + size.
-/// For sizes > u16::MAX pages (256MB), expands heap_top after init.
-fn init_pvm(blob: &[u8], size_bytes: u64) -> javm::recompiler::RecompiledPvm {
-    let gas = gas_for_size(size_bytes);
-    let mut pvm = javm::recompiler::initialize_program_recompiled(blob, &[], gas).unwrap();
-    let desired_top = (HEAP_BASE + size_bytes) as u32;
-    if desired_top > pvm.heap_top() {
-        pvm.set_heap_top(desired_top);
-    }
-    pvm
+/// Initialize a kernel for the given blob.
+fn init_kernel(blob: &[u8], gas: u64) -> javm::kernel::InvocationKernel {
+    javm::kernel::InvocationKernel::new_with_backend(
+        blob,
+        &[],
+        gas,
+        javm::PvmBackend::ForceRecompiler,
+    )
+    .unwrap()
 }
 
 fn bench_mem_seq(c: &mut Criterion) {
     for &(label, size) in SIZES {
         let blob = grey_mem_seq_blob(size);
+        let gas = gas_for_size(size);
 
         let mut group = c.benchmark_group(format!("mem_seq/{label}"));
         if size >= 8 * 1024 * 1024 {
@@ -53,16 +53,15 @@ fn bench_mem_seq(c: &mut Criterion) {
         }
         group.bench_function("grey-recompiler-exec", |b| {
             b.iter_batched(
-                || init_pvm(&blob, size),
-                |mut pvm| {
+                || init_kernel(&blob, gas),
+                |mut kernel| {
                     loop {
-                        match pvm.run() {
-                            javm::ExitReason::Halt => break,
-                            javm::ExitReason::HostCall(_) => continue,
-                            other => panic!("unexpected exit: {:?}", other),
+                        match kernel.run() {
+                            javm::kernel::KernelResult::Halt(v) => break v,
+                            javm::kernel::KernelResult::ProtocolCall { .. } => continue,
+                            other => panic!("unexpected: {:?}", other),
                         }
                     }
-                    pvm.registers()[7]
                 },
                 criterion::BatchSize::LargeInput,
             );
@@ -74,6 +73,7 @@ fn bench_mem_seq(c: &mut Criterion) {
 fn bench_mem_rand(c: &mut Criterion) {
     for &(label, size) in SIZES {
         let blob = grey_mem_rand_blob(size);
+        let gas = gas_for_size(size);
 
         let mut group = c.benchmark_group(format!("mem_rand/{label}"));
         if size >= 8 * 1024 * 1024 {
@@ -81,16 +81,15 @@ fn bench_mem_rand(c: &mut Criterion) {
         }
         group.bench_function("grey-recompiler-exec", |b| {
             b.iter_batched(
-                || init_pvm(&blob, size),
-                |mut pvm| {
+                || init_kernel(&blob, gas),
+                |mut kernel| {
                     loop {
-                        match pvm.run() {
-                            javm::ExitReason::Halt => break,
-                            javm::ExitReason::HostCall(_) => continue,
-                            other => panic!("unexpected exit: {:?}", other),
+                        match kernel.run() {
+                            javm::kernel::KernelResult::Halt(v) => break v,
+                            javm::kernel::KernelResult::ProtocolCall { .. } => continue,
+                            other => panic!("unexpected: {:?}", other),
                         }
                     }
-                    pvm.registers()[7]
                 },
                 criterion::BatchSize::LargeInput,
             );

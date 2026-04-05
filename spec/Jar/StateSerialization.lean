@@ -314,7 +314,7 @@ private def serializePrivileged (priv : PrivilegedServices) : ByteArray := Id.ru
     buf := buf ++ encodeFixedNat 4 sid.toNat
     buf := buf ++ encodeFixedNat 8 gas.toNat
   -- jar1 (coinless): serialize quotaService after always-accumulate entries
-  if JamConfig.hostcallVersion == 1 then
+  if JamConfig.capabilityModel == .v2 then
     buf := buf ++ encodeFixedNat 4 priv.quotaService.toNat
   return buf
 
@@ -716,7 +716,7 @@ private def deserializePrivilegedD (coreCount : Nat) : Decoder PrivilegedService
   let (alwaysAccumulate, s) ← goZ zCount Dict.empty s
   -- jar1 (coinless): read quotaService after always-accumulate entries
   let (quotaService, s) ←
-    if JamConfig.hostcallVersion == 1 then do
+    if JamConfig.capabilityModel == .v2 then do
       let (qs, s) ← decodeFixedNatD 4 s
       pure (UInt32.ofNat qs, s)
     else pure (0, s)

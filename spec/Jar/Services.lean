@@ -79,13 +79,14 @@ structure RefineContext where
   deriving Inhabited
 
 /-- Handle a refine host call. GP §14 host calls:
-    0=gas, 1=grow_heap, 2=fetch, 3=historical_lookup, 4=export,
-    5=machine, 6=peek, 7=poke, 8=pages.
+    0=gas, 2=fetch, 3=historical_lookup, 4=export, 5=machine.
     Returns (result, updated context) where result.exitReason = .hostCall _
     means "continue execution" (the handler wrote return values into registers). -/
 private def handleRefineHostCall
     (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers) (mem : PVM.Memory)
     (ctx : RefineContext) : PVM.InvocationResult × RefineContext :=
+  -- gp072: callId maps directly to host call number (no shift).
+  -- jar1 (v2): dispatch handled by capability kernel, not this function.
   -- Host call gas cost: g=10
   let hostGasCost : Gas := 10
   if gas < hostGasCost then
@@ -96,6 +97,10 @@ private def handleRefineHostCall
     let gas' := gas - hostGasCost
     let regs' := regs -- will be modified per host call
     match callId with
+    | 255 =>
+      -- REPLY: program termination via ecalli(0xFF)
+      ({ exitReason := .halt, exitValue := if 7 < regs.size then regs[7]! else 0,
+         gas := Int64.ofUInt64 gas', registers := regs, memory := mem }, ctx)
     | 0 =>
       -- gas(): return remaining gas in φ[7]
       let regs' := regs.set! 7 gas'

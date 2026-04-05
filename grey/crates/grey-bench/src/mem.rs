@@ -166,11 +166,9 @@ fn branch_ne(c: &mut Vec<u8>, m: &mut Vec<u8>, ra: u8, rb: u8, offset: i32) {
     }
 }
 
-fn jump_ind(c: &mut Vec<u8>, m: &mut Vec<u8>, rd: u8, imm: u32) {
-    c.push(50); // JumpInd
+fn ecalli(c: &mut Vec<u8>, m: &mut Vec<u8>, imm: u32) {
+    c.push(10); // Ecalli
     m.push(1);
-    c.push(rd);
-    m.push(0);
     for b in imm.to_le_bytes() {
         c.push(b);
         m.push(0);
@@ -182,8 +180,17 @@ fn pc(c: &[u8]) -> u32 {
 }
 
 fn build_blob(c: Vec<u8>, m: Vec<u8>, stack_pages: u32, heap_pages: u32) -> Vec<u8> {
-    use grey_transpiler::emitter;
-    emitter::build_standard_program(&[], &[], heap_pages, heap_pages, stack_pages, &c, &m, &[])
+    let total = stack_pages + heap_pages + 4;
+    grey_transpiler::emitter::build_service_program(
+        &c,
+        &m,
+        &[],
+        &[],
+        &[],
+        stack_pages,
+        heap_pages,
+        total,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -271,7 +278,7 @@ pub fn grey_mem_seq_blob(size_bytes: u64) -> Vec<u8> {
     );
 
     // Return checksum
-    jump_ind(&mut c, &mut m, RA, 0);
+    ecalli(&mut c, &mut m, 0xFF); // REPLY (terminate)
 
     build_blob(c, m, 1, heap_pages)
 }
@@ -351,7 +358,7 @@ pub fn grey_mem_rand_blob(size_bytes: u64) -> Vec<u8> {
     );
 
     // Return checksum
-    jump_ind(&mut c, &mut m, RA, 0);
+    ecalli(&mut c, &mut m, 0xFF); // REPLY (terminate)
 
     build_blob(c, m, 1, heap_pages)
 }
@@ -363,14 +370,14 @@ mod tests {
     #[test]
     fn test_mem_seq_blob_halts() {
         let blob = grey_mem_seq_blob(4096u64);
-        let (result, _gas) = crate::run_grey_recompiler(&blob, 10_000_000);
+        let (result, _gas) = crate::run_kernel(&blob, 10_000_000);
         assert_ne!(result, 0, "seq checksum should be non-zero");
     }
 
     #[test]
     fn test_mem_rand_blob_halts() {
         let blob = grey_mem_rand_blob(4096u64);
-        let (result, _gas) = crate::run_grey_recompiler(&blob, 1_000_000);
+        let (result, _gas) = crate::run_kernel(&blob, 1_000_000);
         assert_ne!(result, 0, "rand checksum should be non-zero");
     }
 }

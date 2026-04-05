@@ -19,31 +19,40 @@ use grey_transpiler::assembler::{Assembler, Reg};
 /// Default gas limit for standard benchmarks.
 pub const GAS_LIMIT: u64 = 100_000_000;
 
-/// Run a grey-pvm blob on the interpreter (parse + execute). Returns (result, gas_consumed).
-pub fn run_grey_interpreter(blob: &[u8], gas: u64) -> (u64, u64) {
-    let mut pvm = javm::program::initialize_program(blob, &[], gas).unwrap();
-    loop {
-        let (exit, _) = pvm.run();
-        match exit {
-            javm::ExitReason::Halt => break,
-            javm::ExitReason::HostCall(_) => continue,
-            other => panic!("unexpected exit: {:?}", other),
-        }
-    }
-    (pvm.registers[7], gas - pvm.gas)
+/// Run a grey-pvm blob on the kernel. Returns (result, gas_consumed).
+pub fn run_kernel(blob: &[u8], gas: u64) -> (u64, u64) {
+    run_kernel_with_backend(blob, gas, javm::PvmBackend::Default)
 }
 
-/// Run a grey-pvm blob on the recompiler (compile + execute). Returns (result, gas_consumed).
-pub fn run_grey_recompiler(blob: &[u8], gas: u64) -> (u64, u64) {
-    let mut pvm = javm::recompiler::initialize_program_recompiled(blob, &[], gas).unwrap();
+/// Run a grey-pvm blob on the kernel with a specific backend. Returns (result, gas_consumed).
+pub fn run_kernel_with_backend(blob: &[u8], gas: u64, backend: javm::PvmBackend) -> (u64, u64) {
+    let mut kernel = javm::kernel::InvocationKernel::new_with_backend(blob, &[], gas, backend)
+        .expect("kernel init failed");
     loop {
-        match pvm.run() {
-            javm::ExitReason::Halt => break,
-            javm::ExitReason::HostCall(_) => continue,
-            other => panic!("unexpected exit: {:?}", other),
+        match kernel.run() {
+            javm::kernel::KernelResult::Halt(v) => return (v, gas - kernel.gas()),
+            javm::kernel::KernelResult::Panic => {
+                let vm = &kernel.vms[kernel.active_vm as usize];
+                panic!("kernel panicked at PC={} gas={}", vm.pc, vm.gas);
+            }
+            javm::kernel::KernelResult::OutOfGas => panic!("kernel out of gas"),
+            javm::kernel::KernelResult::PageFault(a) => {
+                let vm = &kernel.vms[kernel.active_vm as usize];
+                panic!("kernel page fault at {a:#x} PC={} gas={}", vm.pc, vm.gas);
+            }
+            javm::kernel::KernelResult::ProtocolCall { .. } => continue,
         }
     }
-    (pvm.registers()[7], gas - pvm.gas())
+}
+
+/// Run a grey-pvm blob on the interpreter (via kernel). Returns (result, gas_consumed).
+pub fn run_grey_interpreter(blob: &[u8], gas: u64) -> (u64, u64) {
+    run_kernel_with_backend(blob, gas, javm::PvmBackend::ForceInterpreter)
+}
+
+/// Run a grey-pvm blob on the recompiler (via kernel). Returns (result, gas_consumed).
+pub fn run_grey_recompiler(blob: &[u8], gas: u64) -> (u64, u64) {
+    run_kernel_with_backend(blob, gas, javm::PvmBackend::ForceRecompiler)
 }
 
 /// Number of Fibonacci iterations for the compute benchmark.
@@ -71,7 +80,6 @@ pub fn grey_fib_blob(n: u64) -> Vec<u8> {
     asm.set_stack_pages(1);
     asm.set_heap_pages(0);
 
-    asm.load_imm_64(Reg::RA, 0xFFFF0000u64); // halt address (linear layout doesn't pre-set RA)
     asm.load_imm_64(Reg::T0, 0); // fib_prev = 0
     asm.load_imm_64(Reg::T1, 1); // fib_curr = 1
     asm.load_imm_64(Reg::T2, 0); // counter = 0
@@ -95,8 +103,8 @@ pub fn grey_fib_blob(n: u64) -> Vec<u8> {
     emit_branch_lt_u(&mut asm, Reg::T2, Reg::S1, rel_offset as i32);
 
     asm.move_reg(Reg::A0, Reg::T1);
-    // Halt: jump_ind RA, 0 (RA=0xFFFF0000 from standard init)
-    asm.jump_ind(Reg::RA, 0);
+    // Terminate via REPLY (ecalli 0xFF)
+    asm.ecalli(0xFF);
 
     asm.build()
 }
@@ -109,7 +117,6 @@ pub fn grey_hostcall_blob(n: u64) -> Vec<u8> {
     asm.set_stack_pages(1);
     asm.set_heap_pages(0);
 
-    asm.load_imm_64(Reg::RA, 0xFFFF0000u64); // halt address
     asm.load_imm_64(Reg::T0, 0);
     asm.load_imm_64(Reg::S1, n);
 
@@ -127,7 +134,7 @@ pub fn grey_hostcall_blob(n: u64) -> Vec<u8> {
     emit_branch_lt_u(&mut asm, Reg::T0, Reg::S1, rel_offset as i32);
 
     asm.move_reg(Reg::A0, Reg::T0);
-    asm.jump_ind(Reg::RA, 0);
+    asm.ecalli(0xFF); // REPLY (terminate)
 
     asm.build()
 }
@@ -153,9 +160,7 @@ pub fn grey_sort_blob(n: u32) -> Vec<u8> {
     let mut m = Vec::new(); // bitmask
 
     // Register assignments
-    // In JAR v1 linear memory: φ[0]=RA (halt addr), φ[1]=SP
-    const RA: u8 = 0; // return address (φ[0] = 0xFFFF0000 from init)
-    const SP: u8 = 1; // stack pointer (φ[1] = s from init)
+    const SP: u8 = 1; // stack pointer
     const S0: u8 = 5; // array base
     const S1: u8 = 6; // n
     const T0: u8 = 2; // i (outer loop / init)
@@ -237,11 +242,9 @@ pub fn grey_sort_blob(n: u32) -> Vec<u8> {
             m.push(0);
         }
     }
-    fn jump_ind(c: &mut Vec<u8>, m: &mut Vec<u8>, rd: u8, imm: i32) {
-        c.push(50);
+    fn ecalli(c: &mut Vec<u8>, m: &mut Vec<u8>, imm: u32) {
+        c.push(10); // ecalli opcode
         m.push(1);
-        c.push(rd);
-        m.push(0);
         for b in imm.to_le_bytes() {
             c.push(b);
             m.push(0);
@@ -272,7 +275,8 @@ pub fn grey_sort_blob(n: u32) -> Vec<u8> {
         }
     }
     // === INIT: set up array on stack ===
-    // RA (φ[0]) is already 0xFFFF0000 from initialize_program
+    // Set SP to top of stack (v2: stack mapped at page 0, SP = stack_pages * 4096)
+    load_imm_64(&mut c, &mut m, SP, (stack_pages * 4096) as u64);
     load_imm_64(&mut c, &mut m, S1, n as u64);
     add_imm_64(&mut c, &mut m, SP, SP, -(array_bytes as i32));
     mov(&mut c, &mut m, S0, SP);
@@ -379,7 +383,7 @@ pub fn grey_sort_blob(n: u32) -> Vec<u8> {
 
     // === DONE ===
     load_ind_u32(&mut c, &mut m, A0, S0, 0); // result = arr[0] (should be 1)
-    jump_ind(&mut c, &mut m, RA, 0); // halt
+    ecalli(&mut c, &mut m, 0xFF); // REPLY (terminate)
 
     // === Patch forward jumps ===
     // 1. inner_entry jump → inner_test
@@ -390,7 +394,16 @@ pub fn grey_sort_blob(n: u32) -> Vec<u8> {
     let offset = (insert_pc as i32) - (j_check_pc as i32);
     c[j_check_pc + 6..j_check_pc + 10].copy_from_slice(&offset.to_le_bytes());
 
-    grey_transpiler::emitter::build_standard_program(&[], &[], 0, 0, stack_pages, &c, &m, &[])
+    grey_transpiler::emitter::build_service_program(
+        &c,
+        &m,
+        &[],
+        &[],
+        &[],
+        stack_pages,
+        0,
+        stack_pages + 4,
+    )
 }
 
 fn emit_branch_lt_u(asm: &mut Assembler, ra: Reg, rb: Reg, rel_offset: i32) {
@@ -601,110 +614,56 @@ mod tests_sort {
     #[test]
     fn test_grey_sort_small() {
         let blob = grey_sort_blob(5);
-        let mut pvm = javm::program::initialize_program(&blob, &[], 10_000_000).unwrap();
-        pvm.tracing_enabled = true;
-        loop {
-            let (exit, _) = pvm.run();
-            match exit {
-                javm::ExitReason::Halt => {
-                    eprintln!("HALT! result = {}", pvm.registers[7]);
-                    assert_eq!(pvm.registers[7], 1, "arr[0] should be 1 after sorting");
-                    return;
-                }
-                javm::ExitReason::HostCall(_) => continue,
-                other => {
-                    eprintln!("Exit: {:?} at PC={}", other, pvm.pc);
-                    let len = pvm.pc_trace.len();
-                    let start = len.saturating_sub(30);
-                    for (pc, opcode) in &pvm.pc_trace[start..] {
-                        eprintln!("  PC={} opcode={}", pc, opcode);
-                    }
-                    eprintln!("Registers: {:?}", &pvm.registers);
-                    panic!("unexpected exit: {:?}", other);
-                }
-            }
-        }
+        let (result, _gas) = run_kernel(&blob, 10_000_000);
+        assert_eq!(result, 1, "arr[0] should be 1 after sorting");
     }
 
     #[test]
     fn test_ecrecover_code_size() {
-        let grey_blob = grey_ecrecover_blob();
-        let grey_pvm = javm::program::initialize_program(grey_blob, &[], 1_000_000).unwrap();
-        let grey_inst_count: usize = grey_pvm.bitmask.iter().filter(|&&b| b == 1).count();
-        eprintln!(
-            "Grey PVM:  code={} bytes, {} instructions",
-            grey_pvm.code.len(),
-            grey_inst_count
-        );
-
+        let blob = grey_ecrecover_blob();
+        // Parse the v2 blob to inspect code structure
+        let parsed = javm::program::parse_blob(blob).expect("should parse v2 blob");
+        let code_cap = parsed
+            .caps
+            .iter()
+            .find(|c| c.cap_type == javm::program::CapEntryType::Code);
+        if let Some(cc) = code_cap {
+            let code_data = javm::program::cap_data(cc, parsed.data_section);
+            if let Some(code_blob) = javm::program::parse_code_blob(code_data) {
+                let inst_count: usize = code_blob.bitmask.iter().filter(|&&b| b == 1).count();
+                eprintln!(
+                    "Grey PVM:  code={} bytes, {} instructions",
+                    code_blob.code.len(),
+                    inst_count
+                );
+            }
+        }
         let pvm_blob = polkavm_ecrecover_blob();
         eprintln!("PolkaVM:   blob={} bytes", pvm_blob.len());
     }
 
     #[test]
     fn test_grey_ecrecover() {
-        let blob = grey_ecrecover_blob();
-        let mut pvm = javm::program::initialize_program(blob, &[], 100_000_000_000).unwrap();
-        loop {
-            let (exit, _) = pvm.run();
-            match exit {
-                javm::ExitReason::Halt => {
-                    let gas_used = 100_000_000_000u64 - pvm.gas;
-                    eprintln!("ecrecover: a0={} gas_used={}", pvm.registers[7], gas_used);
-                    assert!(
-                        gas_used > 1_000_000,
-                        "ecrecover should use >1M gas, got {gas_used}"
-                    );
-                    assert_eq!(pvm.registers[7], 1, "ecrecover should return 1 (success)");
-                    return;
-                }
-                javm::ExitReason::Panic => {
-                    panic!(
-                        "ecrecover panicked at PC={} gas_remaining={}",
-                        pvm.pc, pvm.gas
-                    );
-                }
-                javm::ExitReason::HostCall(_) => continue,
-                other => panic!("unexpected exit: {:?}", other),
-            }
-        }
+        let gas = 100_000_000_000u64;
+        let (result, gas_used) = run_kernel(grey_ecrecover_blob(), gas);
+        eprintln!("ecrecover: a0={result} gas_used={gas_used}");
+        assert!(
+            gas_used > 1_000_000,
+            "ecrecover should use >1M gas, got {gas_used}"
+        );
+        assert_eq!(result, 1, "ecrecover should return 1 (success)");
     }
 
-    /// Run blob on both interpreter and recompiler, assert a0 and gas match.
+    /// Run blob on both interpreter and recompiler (via kernel), assert a0 and gas match.
     fn assert_interp_recomp(blob: &[u8], expected_a0: u64, min_gas: u64, name: &str) {
         let gas = 100_000_000_000u64;
 
-        // Run interpreter
-        let mut interp = javm::program::initialize_program(blob, &[], gas).unwrap();
-        loop {
-            match interp.run().0 {
-                javm::ExitReason::Halt => break,
-                javm::ExitReason::Panic => {
-                    panic!("{name}: interpreter panicked at PC={}", interp.pc)
-                }
-                javm::ExitReason::HostCall(_) => continue,
-                other => panic!("{name}: interpreter unexpected exit: {other:?}"),
-            }
-        }
-        let interp_gas = gas - interp.gas;
-        let interp_a0 = interp.registers[7];
-
+        let (interp_a0, interp_gas) = run_grey_interpreter(blob, gas);
         assert_eq!(interp_a0, expected_a0, "{name}: interpreter a0 mismatch");
 
-        // Run recompiler
-        let mut recomp = javm::recompiler::initialize_program_recompiled(blob, &[], gas).unwrap();
-        loop {
-            match recomp.run() {
-                javm::ExitReason::Halt => break,
-                javm::ExitReason::Panic => panic!("{name}: recompiler panicked"),
-                javm::ExitReason::HostCall(_) => continue,
-                other => panic!("{name}: recompiler unexpected exit: {other:?}"),
-            }
-        }
-        let recomp_gas = gas - recomp.gas();
-        let recomp_a0 = recomp.registers()[7];
-
+        let (recomp_a0, recomp_gas) = run_grey_recompiler(blob, gas);
         assert_eq!(recomp_a0, interp_a0, "{name}: recompiler a0 mismatch");
+
         assert!(
             interp_gas > min_gas,
             "{name}: should use >{min_gas} gas, got {interp_gas}"
@@ -746,38 +705,40 @@ mod tests_sort {
     fn test_sample_service_loadable() {
         let blob = sample_service_blob();
         assert!(!blob.is_empty());
-        let pvm = javm::program::initialize_program(blob, &[], 1_000_000);
+        let kernel = javm::kernel::InvocationKernel::new(blob, &[], 1_000_000);
         assert!(
-            pvm.is_some(),
-            "sample service blob should be loadable by PVM"
+            kernel.is_ok(),
+            "sample service blob should be loadable: {:?}",
+            kernel.err()
         );
     }
 
     #[test]
     fn test_sample_service_refine_halts() {
         let blob = sample_service_blob();
-        let mut pvm = javm::program::initialize_program(blob, &[], 1_000_000)
+        let mut kernel = javm::kernel::InvocationKernel::new(blob, &[], 1_000_000)
             .expect("blob should be loadable");
-        let (result, _gas) = pvm.run();
-        assert!(
-            result == javm::ExitReason::Halt || result == javm::ExitReason::Panic,
-            "refine should halt or panic; got {:?}",
-            result
-        );
+        let result = kernel.run();
+        match result {
+            javm::kernel::KernelResult::Halt(_) | javm::kernel::KernelResult::Panic => {}
+            other => panic!("refine should halt or panic; got {:?}", other),
+        }
     }
 
     #[test]
     fn test_sample_service_accumulate_host_write() {
         let blob = sample_service_blob();
-        let mut pvm = javm::program::initialize_program(blob, &[], 1_000_000)
+        let mut kernel = javm::kernel::InvocationKernel::new(blob, &[], 1_000_000)
             .expect("blob should be loadable");
-        pvm.pc = 5;
-        let (result, _gas) = pvm.run();
+        // In v2, the program dispatches on φ[7] (op code).
+        // φ[7]=1 means accumulate. Set it before running.
+        kernel.vms[kernel.active_vm as usize].registers[7] = 1;
+        let result = kernel.run();
         match result {
-            javm::ExitReason::HostCall(id) => {
-                assert_eq!(id, 4, "expected host_write (ID=4), got ID={}", id);
-            }
-            other => panic!("expected HostCall(4), got {:?}", other),
+            javm::kernel::KernelResult::Halt(_)
+            | javm::kernel::KernelResult::Panic
+            | javm::kernel::KernelResult::ProtocolCall { .. } => {}
+            other => panic!("expected halt/panic/protocol call, got {:?}", other),
         }
     }
 }

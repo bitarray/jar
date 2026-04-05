@@ -10,19 +10,14 @@
 mod service {
     use core::arch::global_asm;
 
+    // Single entrypoint. φ[7]=op (0=refine, 1=accumulate). Both are no-ops.
     global_asm!(
         ".global _start",
         ".type _start, @function",
         "_start:",
-        "j refine",
-        ".global refine",
-        ".type refine, @function",
-        "refine:",
-        "ret",
-        ".global accumulate",
-        ".type accumulate, @function",
-        "accumulate:",
-        "ret",
+        "li t0, 255", // ecalli(0xFF) = REPLY
+        "ecall",
+        "unimp", // trap if resumed
     );
 
     #[panic_handler]

@@ -43,9 +43,8 @@ impl GuestBuild {
     /// # Panics
     /// Panics if the build fails or the output artifact is not found.
     pub fn build(&self) -> PathBuf {
-        // Emit rerun directives
-        let src_dir = self.manifest_dir.join("src");
-        println!("cargo:rerun-if-changed={}", src_dir.display());
+        // Emit rerun directives — watch all source files recursively
+        emit_rerun_for_dir(&self.manifest_dir.join("src"));
         println!(
             "cargo:rerun-if-changed={}",
             self.manifest_dir.join("Cargo.toml").display()
@@ -228,6 +227,20 @@ fn extract_toml_string_value(line: &str) -> Option<String> {
     let after_eq = line.split('=').nth(1)?.trim();
     let unquoted = after_eq.trim_matches('"').trim_matches('\'');
     Some(unquoted.to_string())
+}
+
+/// Recursively emit `cargo:rerun-if-changed` for all files in a directory.
+pub fn emit_rerun_for_dir(dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                emit_rerun_for_dir(&path);
+            } else {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+    }
 }
 
 /// Write a target JSON string to `OUT_DIR/targets/<filename>` and return the path.

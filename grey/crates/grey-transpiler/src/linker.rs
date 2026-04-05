@@ -85,92 +85,40 @@ struct LinkedElf {
     sub32_relocs: Vec<(u64, u64)>,
     /// Code section address ranges for detecting code pointers.
     code_ranges: Vec<(u64, u64)>,
-    /// Symbols
+    /// Symbols (used for service entry point resolution)
+    #[allow(dead_code)]
     symbols: Vec<(String, u64)>,
 }
 
 /// Transpile an rv64em ELF with relocation processing.
 ///
-/// This is the proper linker path for real programs. It handles:
-/// - AUIPC+load/add pairs (PCREL_HI20/LO12) for data references
-/// - AUIPC+JALR pairs (CALL_PLT) for function calls
+/// Emit `load_imm_64 reg, value` (PVM opcode 20, 10 bytes).
+fn emit_load_imm_64(code: &mut Vec<u8>, bitmask: &mut Vec<u8>, reg: u8, value: u64) {
+    let start = code.len();
+    code.push(20); // load_imm_64 opcode
+    code.push(reg);
+    code.extend_from_slice(&value.to_le_bytes());
+    bitmask.push(1);
+    for _ in 0..9 {
+        bitmask.push(0);
+    }
+    assert_eq!(code.len() - start, 10);
+}
+
+/// Emit a `load_imm_64 SP, stack_top` preamble.
+fn emit_sp_preamble(code: &mut Vec<u8>, bitmask: &mut Vec<u8>, stack_top: u64) {
+    emit_load_imm_64(code, bitmask, 1, stack_top); // SP = φ[1]
+}
+
+/// Transpile an rv64em ELF into a JAR capability manifest PVM blob.
 pub fn link_elf(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
     let elf = parse_linked_elf(elf_data)?;
     let mut ctx = TranslationContext::new(elf.is_64bit);
 
-    // Translate all code sections with relocation awareness.
-    // Fixups are applied once at the end (after all sections are translated)
-    // so that cross-section jumps resolve correctly.
-    for (_file_off, vaddr, data) in &elf.code_sections {
-        translate_section_linked(&mut ctx, data, *vaddr, &elf)?;
-    }
-    ctx.apply_fixups();
-
-    // Rewrite absolute code pointers in data sections (LLVM switch tables, vtables).
-    // Build PVM jump table entries for referenced code addresses, then replace
-    // the RISC-V addresses in data with PVM djump addresses.
-    let mut ro_data = elf.ro_data.clone();
-    let mut rw_data = elf.rw_data.clone();
-
-    rewrite_data_code_ptrs(&elf, &mut ctx, &mut ro_data, &mut rw_data);
-
-    // Peephole: fuse load_imm + ALU pairs into immediate ALU forms.
-    crate::peephole_fuse_load_imm_alu(&mut ctx.code, &mut ctx.bitmask, &ctx.jump_table);
-
-    // Post-pass: ensure all PVM branch targets are basic block starts (ϖ).
-    crate::ensure_branch_targets_are_block_starts(
-        &mut ctx.code,
-        &mut ctx.bitmask,
-        &mut ctx.jump_table,
-    );
-
-    Ok(emitter::build_standard_program(
-        &ro_data,
-        &rw_data,
-        elf.heap_pages,
-        elf.heap_pages, // max_heap_pages = heap_pages (no grow_heap support by default)
-        elf.stack_size / 4096,
-        &ctx.code,
-        &ctx.bitmask,
-        &ctx.jump_table,
-    ))
-}
-
-/// Transpile an rv64em ELF into a JAM service PVM blob.
-///
-/// A JAM service has two entry points:
-/// - PC=0: refine (called via `_start` / `refine` symbol)
-/// - PC=5: accumulate (called via `accumulate` symbol)
-///
-/// The generated PVM code has a dispatch header:
-/// - Bytes 0-4: `jump <refine_code>`
-/// - Bytes 5-9: `jump <accumulate_code>`
-/// - Bytes 10+: translated RISC-V code
-pub fn link_elf_service(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
-    let elf = parse_linked_elf(elf_data)?;
-
-    let refine_addr = elf
-        .symbol_address("refine")
-        .or_else(|| elf.symbol_address("_start"))
-        .ok_or_else(|| {
-            TranspileError::InvalidSection("no 'refine' or '_start' symbol found".into())
-        })?;
-
-    let accumulate_addr = elf
-        .symbol_address("accumulate")
-        .ok_or_else(|| TranspileError::InvalidSection("no 'accumulate' symbol found".into()))?;
-
-    let mut ctx = TranslationContext::new(elf.is_64bit);
-    ctx.code_ranges = elf.code_ranges.clone();
-
-    // Reserve 10 bytes for dispatch header (2 x jump instructions)
-    let header_size = 10u32;
-    for _ in 0..header_size {
-        ctx.code.push(0);
-        ctx.bitmask.push(0);
-    }
-    ctx.bitmask[0] = 1; // jump at byte 0
-    ctx.bitmask[5] = 1; // jump at byte 5
+    // Emit SP preamble: load_imm_64 SP, stack_top
+    let stack_pages = elf.stack_size / 4096;
+    let stack_top = stack_pages as u64 * 4096;
+    emit_sp_preamble(&mut ctx.code, &mut ctx.bitmask, stack_top);
 
     for (_file_off, vaddr, data) in &elf.code_sections {
         translate_section_linked(&mut ctx, data, *vaddr, &elf)?;
@@ -181,46 +129,6 @@ pub fn link_elf_service(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
     let mut rw_data = elf.rw_data.clone();
     rewrite_data_code_ptrs(&elf, &mut ctx, &mut ro_data, &mut rw_data);
 
-    // Resolve entry points to PVM offsets BEFORE peephole/branch passes,
-    // since ensure_branch_targets_are_block_starts inserts bytes and shifts
-    // all offsets (invalidating address_map entries).
-    let refine_pvm = ctx.address_map.get(&refine_addr).copied().ok_or_else(|| {
-        TranspileError::InvalidSection(format!(
-            "refine symbol at {:#x} not in translated code",
-            refine_addr
-        ))
-    })?;
-
-    let accumulate_pvm = ctx
-        .address_map
-        .get(&accumulate_addr)
-        .copied()
-        .ok_or_else(|| {
-            TranspileError::InvalidSection(format!(
-                "accumulate symbol at {:#x} not in translated code",
-                accumulate_addr
-            ))
-        })?;
-
-    // Patch dispatch header BEFORE the passes so the jumps are treated as
-    // normal branch instructions and their offsets get adjusted automatically
-    // by ensure_branch_targets_are_block_starts.
-    ctx.code[0] = 40; // jump opcode
-    let refine_rel = refine_pvm as i32;
-    ctx.code[1..5].copy_from_slice(&refine_rel.to_le_bytes());
-
-    ctx.code[5] = 40; // jump opcode
-    let acc_rel = (accumulate_pvm as i32) - 5;
-    ctx.code[6..10].copy_from_slice(&acc_rel.to_le_bytes());
-
-    // Mark dispatch targets as instruction starts so the passes see them.
-    if (refine_pvm as usize) < ctx.bitmask.len() {
-        ctx.bitmask[refine_pvm as usize] = 1;
-    }
-    if (accumulate_pvm as usize) < ctx.bitmask.len() {
-        ctx.bitmask[accumulate_pvm as usize] = 1;
-    }
-
     crate::peephole_fuse_load_imm_alu(&mut ctx.code, &mut ctx.bitmask, &ctx.jump_table);
     crate::ensure_branch_targets_are_block_starts(
         &mut ctx.code,
@@ -228,19 +136,20 @@ pub fn link_elf_service(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
         &mut ctx.jump_table,
     );
 
-    Ok(emitter::build_standard_program(
-        &ro_data,
-        &rw_data,
-        elf.heap_pages,
-        elf.heap_pages, // max_heap_pages = heap_pages (no grow_heap support by default)
-        elf.stack_size / 4096,
+    Ok(emitter::build_service_program(
         &ctx.code,
         &ctx.bitmask,
         &ctx.jump_table,
+        &ro_data,
+        &rw_data,
+        stack_pages,
+        elf.heap_pages,
+        elf.heap_pages,
     ))
 }
 
 impl LinkedElf {
+    #[allow(dead_code)]
     fn symbol_address(&self, name: &str) -> Option<u64> {
         self.symbols
             .iter()

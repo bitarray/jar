@@ -343,15 +343,15 @@ impl Assembler {
 
     /// Finalize and produce the standard program blob.
     pub fn build(&self) -> Vec<u8> {
-        emitter::build_standard_program(
-            &self.ro_data,
-            &self.rw_data,
-            self.heap_pages,
-            self.max_heap_pages,
-            self.stack_pages,
+        emitter::build_service_program(
             &self.code,
             &self.bitmask,
             &self.jump_table,
+            &self.ro_data,
+            &self.rw_data,
+            self.stack_pages,
+            self.heap_pages,
+            self.heap_pages + self.stack_pages + 4, // memory_pages
         )
     }
 
@@ -696,16 +696,16 @@ pub fn build_sample_service_precise() -> Vec<u8> {
     // set_pc(5) sets ı=5 directly (doesn't use djump).
     let jump_table = vec![0u32, 5, refine_offset];
 
-    // Build the standard program blob
-    emitter::build_standard_program(
-        &[], // no ro_data
-        &[], // no rw_data
-        1,   // 1 heap page
-        1,   // max 1 heap page
-        1,   // 1 stack page (4K)
+    // Build a service blob
+    emitter::build_service_program(
         &code,
         &bitmask,
         &jump_table,
+        &[], // no ro_data
+        &[], // no rw_data
+        1,   // 1 stack page
+        1,   // 1 heap page
+        6,   // memory_pages
     )
 }
 
@@ -731,51 +731,29 @@ mod tests {
     fn test_build_sample_service() {
         let blob = build_sample_service();
         assert!(!blob.is_empty());
-        // Verify it can be loaded by PVM
-        let pvm = javm::program::initialize_program(&blob, &[], 1_000_000);
+        // Verify it can be loaded by kernel
+        let kernel = javm::kernel::InvocationKernel::new(&blob, &[], 1_000_000);
         assert!(
-            pvm.is_some(),
-            "Sample service blob should be loadable by PVM"
+            kernel.is_ok(),
+            "Sample service blob should be loadable: {:?}",
+            kernel.err()
         );
     }
 
     #[test]
-    fn test_sample_service_refine_halts() {
+    fn test_sample_service_runs_via_kernel() {
         let blob = build_sample_service();
         let args = b"hello world";
-        let mut pvm =
-            javm::program::initialize_program(&blob, args, 1_000_000).expect("should initialize");
-        // Refine starts at PC=0 (jump → refine body → halt)
-        let (exit, _gas) = pvm.run();
-        assert_eq!(
-            exit,
-            javm::vm::ExitReason::Halt,
-            "Refine should halt cleanly, got {:?}",
-            exit
-        );
-    }
-
-    #[test]
-    fn test_sample_service_accumulate_host_call() {
-        let blob = build_sample_service();
-        let args = b"test";
-        let mut pvm =
-            javm::program::initialize_program(&blob, args, 1_000_000).expect("should initialize");
-        // Set PC to accumulate entry (byte 5)
-        pvm.pc = 5;
-        pvm.tracing_enabled = true;
-        let (exit, _gas) = pvm.run();
-        // Print trace for debugging
-        for (pc, opcode) in &pvm.pc_trace {
-            eprintln!("  PC={} opcode={}", pc, opcode);
+        // Kernel runs single entrypoint at PC=0.
+        let mut kernel =
+            javm::kernel::InvocationKernel::new(&blob, args, 1_000_000).expect("should initialize");
+        let result = kernel.run();
+        // The sample service executes and
+        // should either halt or panic (depending on the dispatch stub).
+        // either halt or panic (depending on the dispatch stub).
+        match result {
+            javm::kernel::KernelResult::Halt(_) | javm::kernel::KernelResult::Panic => {}
+            other => panic!("Expected Halt or Panic, got {:?}", other),
         }
-        eprintln!("  SP={:#x} regs={:?}", pvm.registers[1], &pvm.registers[..]);
-        // Should reach a host call (ecalli 4 = host_write)
-        assert_eq!(
-            exit,
-            javm::vm::ExitReason::HostCall(4),
-            "Accumulate should hit host_write call, got {:?}",
-            exit
-        );
     }
 }

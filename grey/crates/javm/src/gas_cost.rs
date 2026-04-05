@@ -1011,7 +1011,7 @@ fn instruction_cost_fast(
 /// Returns a Vec indexed by PC: `block_gas_costs[pc]` = cost if pc is a gas block start, 0 otherwise.
 pub fn compute_block_gas_costs(code: &[u8], bitmask: &[u8]) -> Vec<u64> {
     let mut costs = vec![0u64; code.len()];
-    let bb_starts = crate::vm::compute_gas_block_starts(code, bitmask);
+    let bb_starts = crate::interpreter::compute_gas_block_starts(code, bitmask);
     for (pc, &is_start) in bb_starts.iter().enumerate() {
         if is_start {
             costs[pc] = gas_cost_for_block(code, bitmask, pc);

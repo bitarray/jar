@@ -14,20 +14,25 @@ fn median(v: &mut [u128]) -> u128 {
 fn main() {
     let sort_blob = grey_sort_blob(500);
 
-    // --- Grey recompiler ---
+    // --- Grey recompiler (via kernel) ---
     let mut compile_us = Vec::new();
     let mut exec_us = Vec::new();
     for _ in 0..ITERS {
         let t0 = Instant::now();
-        let mut pvm =
-            javm::recompiler::initialize_program_recompiled(&sort_blob, &[], GAS_LIMIT).unwrap();
+        let mut kernel = javm::kernel::InvocationKernel::new_with_backend(
+            &sort_blob,
+            &[],
+            GAS_LIMIT,
+            javm::PvmBackend::ForceRecompiler,
+        )
+        .unwrap();
         compile_us.push(t0.elapsed().as_micros());
 
         let t1 = Instant::now();
         loop {
-            match pvm.run() {
-                javm::ExitReason::Halt => break,
-                javm::ExitReason::HostCall(_) => continue,
+            match kernel.run() {
+                javm::kernel::KernelResult::Halt(_) => break,
+                javm::kernel::KernelResult::ProtocolCall { .. } => continue,
                 other => panic!("grey: {:?}", other),
             }
         }

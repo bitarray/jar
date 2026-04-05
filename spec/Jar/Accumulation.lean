@@ -325,20 +325,17 @@ private def encodeAccountInfo (acct : ServiceAccount) : ByteArray :=
   -- during accumulation host calls.
   let totalItems := acct.itemCount.toNat  -- a_i: item count
   let totalBytes := acct.totalFootprint   -- a_o: total storage footprint
-  -- econEncodeInfo produces 24 bytes for positions: balance(8) + threshold(8) + gratis(8)
-  -- These are placed at their original offsets in the 96-byte structure.
   let econInfo := econEncodeInfo acct.econ totalItems totalBytes
-  let econBal := econInfo.extract 0 8        -- balance or quotaItems
-  let econThr := econInfo.extract 8 16       -- threshold or quotaBytes
-  let econGra := econInfo.extract 16 24      -- gratis or padding
+  let (balBytes, thrBytes, graBytes) :=
+    (econInfo.extract 0 8, econInfo.extract 8 16, econInfo.extract 16 24)
   acct.codeHash.data
-    ++ econBal                                          -- a_b (or quotaItems)
-    ++ econThr                                          -- a_t (or quotaBytes)
+    ++ balBytes                                          -- a_b
+    ++ thrBytes                                          -- a_t
     ++ Codec.encodeFixedNat 8 acct.minAccGas.toNat      -- a_g
     ++ Codec.encodeFixedNat 8 acct.minOnTransferGas.toNat -- a_m
     ++ Codec.encodeFixedNat 8 totalBytes                -- a_o
     ++ Codec.encodeFixedNat 4 totalItems                -- a_i
-    ++ econGra                                          -- a_f (or padding)
+    ++ graBytes                                          -- a_f
     ++ Codec.encodeFixedNat 4 acct.creationSlot.toNat   -- a_r
     ++ Codec.encodeFixedNat 4 acct.lastAccumulation.toNat -- a_a
     ++ Codec.encodeFixedNat 4 acct.parentServiceId      -- a_p
@@ -348,13 +345,8 @@ private def encodeAccountInfo (acct : ServiceAccount) : ByteArray :=
 def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     (mem : PVM.Memory) (ctx : AccContext) : PVM.InvocationResult × AccContext :=
   let rawCallNum := callId.toNat
-  -- v0.8.0 hostcall numbering: grow_heap inserted at 1, everything else shifts +1.
-  -- Translate back to v0.7.2 numbering for the existing match, except grow_heap (callNum = 1
-  -- in v0.8.0) which is handled separately before the match.
-  let isGrowHeap := JamConfig.hostcallVersion == 1 && rawCallNum == 1
-  let callNum := if JamConfig.hostcallVersion == 1 && rawCallNum > 1
-    then rawCallNum - 1
-    else rawCallNum
+  -- ecalli immediates map directly to host call numbers (no shift).
+  let callNum := rawCallNum
   let inputLog := s!"hc({rawCallNum}) r7={getReg regs 7} r8={getReg regs 8} r9={getReg regs 9} r10={getReg regs 10} r11={getReg regs 11} r12={getReg regs 12}"
   let mkResult (regs' : PVM.Registers) (mem' : PVM.Memory) (gas' : Gas) : PVM.InvocationResult :=
     { exitReason := .hostCall callId  -- signals "continue" to the loop
@@ -372,32 +364,12 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
   let setR7 (r : PVM.Registers) (v : UInt64) := setReg r 7 v
   let gas' := if gas.toNat >= hostCallGas then gas - UInt64.ofNat hostCallGas else 0
   let (result, ctx') : PVM.InvocationResult × AccContext :=
-  -- ===== grow_heap (v0.8.0 hostcall 1): Grow writable heap pages =====
-  -- reg[7] = desired number of writable pages from start of RW region
-  -- Returns in reg[7]: current number of writable pages
-  -- Uses PVM.sbrk to grow the heap.
-  if isGrowHeap then
-    let desiredPages := (getReg regs 7).toNat
-    -- Current writable page count: heapTop / Z_P (rounded up)
-    let currentPages := (mem.heapTop + Z_P - 1) / Z_P
-    if desiredPages <= currentPages || desiredPages > PVM.numPages then
-      -- No growth needed or impossible: cost=10, return current count
-      let regs' := setR7 regs (UInt64.ofNat currentPages)
-      (mkResult regs' mem gas', ctx)
-    else
-      let newPages := desiredPages - currentPages
-      let growCost := newPages * PVM.gasPerPage
-      if gas'.toNat < growCost then
-        -- Out of gas: return current count, don't grow
-        let regs' := setR7 regs (UInt64.ofNat currentPages)
-        (mkResult regs' mem 0, ctx)
-      else
-        let gas'' := gas' - UInt64.ofNat growCost
-        let growBytes := UInt64.ofNat (newPages * Z_P)
-        let (mem', _) := PVM.sbrk mem growBytes
-        let regs' := setR7 regs (UInt64.ofNat desiredPages)
-        (mkResult regs' mem' gas'', ctx)
-  else match callNum with
+  match callNum with
+  -- ===== REPLY (255): program termination via ecalli(0xFF) =====
+  | 255 =>
+    ({ exitReason := .halt, exitValue := if 7 < regs.size then regs[7]! else 0,
+       gas := Int64.ofUInt64 gas', registers := regs, memory := mem }, ctx)
+
   -- ===== gas (0): Return remaining gas in reg[7] =====
   | 0 =>
     let regs' := setR7 regs gas'
@@ -732,7 +704,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           return d
         -- For jar1 (coinless): read quotaService (4 bytes) after always-acc entries
         let quotaService : ServiceId :=
-          if JamConfig.hostcallVersion == 1 then
+          if JamConfig.capabilityModel == .v2 then
             match PVM.readByteArray mem (alwaysPtr + UInt64.ofNat (alwaysCount * 12)) 4 with
             | .ok qsBytes =>
               UInt32.ofNat ((qsBytes.get! 0).toNat +
@@ -1359,10 +1331,9 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
   -- ===== set_quota (27): Set storage quota (jar1 coinless, GP ΩQ) =====
   -- φ[7] = target service ID, φ[8] = max_items, φ[9] = max_bytes
   -- Only callable by the quota service (χ_Q). Only functional in jar1.
-  -- Raw call number in jar1: 28 (27 + 1 grow_heap shift).
+  -- set_quota (27): Only available in jar1 (v2 capability model).
   | 27 =>
-    -- Only available in coinless variant
-    if JamConfig.hostcallVersion != 1 then
+    if JamConfig.capabilityModel != .v2 then
       let regs' := setR7 regs PVM.RESULT_WHAT
       (mkResult regs' mem gas', ctx)
     else
@@ -1554,8 +1525,14 @@ def accone (ps : PartialState) (serviceId : ServiceId)
           | .perInstruction => PVM.run
           | .basicBlockFull => PVM.runBlockGas
           | .basicBlockSinglePass => PVM.runBlockGasSinglePass
+        -- Single entrypoint PC=0. φ[7]=1 for accumulate, φ[8]=args_base, φ[9]=args_len.
+        -- For gp072: PC=5 (standard dispatch, no single entrypoint).
+        let (entryPC, regs) := if JamConfig.capabilityModel == .v2 then
+          let regs := regs.set! 7 (UInt64.ofNat 1)  -- op = accumulate
+          (0, regs)
+        else (5, regs)
         let (result, ctx') := PVM.runWithHostCalls AccContext
-          prog 5 regs mem (Int64.ofUInt64 totalGas)
+          prog entryPC regs mem (Int64.ofUInt64 totalGas)
           (fun callId gas regs' mem' c =>
             handleHostCall callId gas regs' mem' c)
           ctx runFn
