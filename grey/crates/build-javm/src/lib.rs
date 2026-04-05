@@ -108,9 +108,8 @@ pub fn build_v2(manifest_dir: &str, bin_name: &str) -> PathBuf {
     blob_path
 }
 
-/// Build a JAR v2 PVM blob from a service crate (service program with refine + accumulate).
-///
-/// Same as [`build_service`] but produces a JAR v2 capability manifest blob.
+/// Build a JAR v2 PVM blob from a service crate.
+/// Single entrypoint (PC=0) — same as [`build_v2`] but with size-optimized profile.
 pub fn build_service_v2(manifest_dir: &str, bin_name: &str) -> PathBuf {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
     let blob_path = PathBuf::from(&out_dir).join(format!("{bin_name}.pvm"));
@@ -145,8 +144,8 @@ pub fn build_service_v2(manifest_dir: &str, bin_name: &str) -> PathBuf {
 
     let elf_path = guest.build();
     let elf_data = std::fs::read(&elf_path).expect("failed to read ELF");
-    let blob = grey_transpiler::link_elf_service_v2(&elf_data)
-        .expect("failed to transpile ELF to v2 service blob");
+    let blob = grey_transpiler::link_elf_v2(&elf_data)
+        .expect("failed to transpile ELF to v2 PVM blob");
 
     std::fs::write(&blob_path, &blob).expect("failed to write PVM blob");
     blob_path

@@ -74,6 +74,9 @@ macro_rules! javm_entry {
         core::arch::global_asm!(
             ".global _start",
             "_start:",
+            // Shift: φ[7]=op (ignored), φ[8]=args_base→a0, φ[9]=args_len→a1
+            "mv a0, a1",    // a0 (φ[7]) = args_base (was in φ[8])
+            "mv a1, a2",    // a1 (φ[8]) = args_len (was in φ[9])
             concat!("call ", stringify!($fn_name)),
             // REPLY to kernel: li t0, 255; ecall → transpiles to ecalli(0xFF)
             "li t0, 255",

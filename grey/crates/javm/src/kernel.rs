@@ -184,8 +184,9 @@ impl InvocationKernel {
             cap_table,
             remaining_gas,
         );
-        vm0.registers[7] = args_base;
-        vm0.registers[8] = args_len;
+        // φ[7]=op set by caller (refine/accumulate), φ[8]=args_base, φ[9]=args_len
+        vm0.registers[8] = args_base;
+        vm0.registers[9] = args_len;
         kernel.vms.push(vm0);
 
         Ok(kernel)

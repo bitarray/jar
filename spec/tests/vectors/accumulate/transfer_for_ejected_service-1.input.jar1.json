@@ -1727,7 +1727,7 @@
         "results": [
           {
             "service_id": 0,
-            "code_hash": "0xa34e8b0e74042ddc3de1677a6f193a8a284a2d1ae091f8af0a1743fafac660a1",
+            "code_hash": "0xbe6ef416517efda7c9b37d1cf35aedbd8975d42ee096bdc706a0cdbac28f719a",
             "payload_hash": "0x9a00110a56ecaf8954ecc77d17076b4260ffd6844e83b2f35ee42aa17effc89e",
             "accumulate_gas": 100000,
             "result": {
@@ -1767,7 +1767,7 @@
         "results": [
           {
             "service_id": 1,
-            "code_hash": "0xa34e8b0e74042ddc3de1677a6f193a8a284a2d1ae091f8af0a1743fafac660a1",
+            "code_hash": "0xbe6ef416517efda7c9b37d1cf35aedbd8975d42ee096bdc706a0cdbac28f719a",
             "payload_hash": "0xf544ac85166b6c54c757226eab7fd7b264e6893312c043ea29d02a7ae77b38e3",
             "accumulate_gas": 100000,
             "result": {

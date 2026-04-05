@@ -324,12 +324,12 @@ def initV2 (blob : ByteArray) (args : ByteArray)
   if argsBase > 0 && args.size > 0 then
     mem := copyToMem mem argsBase args
 
-  -- Registers: φ[7]=args_base, φ[8]=args_len
+  -- Registers: φ[7]=op (set by caller), φ[8]=args_base, φ[9]=args_len.
   -- No halt address — programs terminate via REPLY (ecalli 0xFF).
-  -- SP is set by the program's preamble (load_imm_64 SP, stack_top)
+  -- SP is set by the program's preamble (load_imm_64 SP, stack_top).
   let regs := Array.replicate PVM_REGISTERS (0 : RegisterValue)
-  let regs := regs.set! 7 (UInt64.ofNat argsBase)
-  let regs := regs.set! 8 (UInt64.ofNat args.size)
+  let regs := regs.set! 8 (UInt64.ofNat argsBase)
+  let regs := regs.set! 9 (UInt64.ofNat args.size)
 
   some (prog, regs, mem)
 

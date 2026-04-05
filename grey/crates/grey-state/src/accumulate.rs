@@ -639,23 +639,12 @@ fn run_accumulate_pvm_v2(
         }
     };
 
-    // Set accumulate entry point: PC=15 for v2 (after 10-byte SP preamble + 5-byte refine jump)
-    // Also set SP since we skip the SP preamble at PC=0
+    // Single entrypoint PC=0. Set φ[7]=1 for accumulate operation.
+    // φ[8]=args_base and φ[9]=args_len are set by the kernel init.
     if let Some(k) = pvm.kernel_mut()
         && let Some(vm) = k.vms.get_mut(k.active_vm as usize)
     {
-        vm.pc = 15; // accumulate dispatch jump (after 10-byte SP preamble)
-        // Set SP since we skip the SP preamble at PC=0
-        for i in 0..255u8 {
-            if let Some(javm::cap::Cap::Data(d)) = vm.cap_table.get(i)
-                && let Some((base_page, _)) = d.mapped
-            {
-                let stack_top = (base_page as u64 + d.page_count as u64)
-                    * javm::PVM_PAGE_SIZE as u64;
-                vm.registers[1] = stack_top; // SP
-                break;
-            }
-        }
+        vm.registers[7] = 1; // op = accumulate
     }
 
     let initial_gas = pvm.gas();
