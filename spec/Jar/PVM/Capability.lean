@@ -277,8 +277,8 @@ structure ProgramHeader where
 /-- Maximum CODE caps per invocation. -/
 def maxCodeCaps : Nat := 5
 
-/-- Maximum VMs (HANDLEs) per invocation. -/
-def maxVms : Nat := 1024
+/-- Maximum VMs (HANDLEs) per invocation (u16 VM IDs). -/
+def maxVms : Nat := 65535
 
 /-- Gas cost per page for RETYPE. -/
 def gasPerPage : Nat := 1500

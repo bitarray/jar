@@ -86,3 +86,11 @@ The PVM is a RISC-V rv64em-based virtual machine for executing service code
 {docstring Jar.PVM.runWithHostCalls}
 
 {docstring Jar.PVM.invokeStd}
+
+# Capability System
+
+The JAVM extends the base PVM with a capability-based execution model supporting
+multiple VMs, Harvard architecture (code not in data address space), and inter-VM
+communication via synchronous CALL/REPLY. See the **JAVM Capability System**
+section for the full specification of capability types, cap tables, VM lifecycle,
+ecalli dispatch, and the JAR v2 blob format.

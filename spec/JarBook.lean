@@ -10,6 +10,7 @@ import JarBook.Consensus
 import JarBook.State
 import JarBook.Services
 import JarBook.PVM
+import JarBook.Capability
 import JarBook.Accumulation
 import JarBook.Codec
 import JarBook.Merkle
@@ -19,16 +20,12 @@ open Verso.Genre Manual
 
 set_option pp.rawOnError true
 
-#doc (Manual) "JAR: JAM Axiomatic Reference" =>
+#doc (Manual) "JAR: Join-Accumulate Refine" =>
 %%%
 authors := ["JAR Contributors"]
 %%%
 
-JAR (JAM Axiomatic Reference) is a Lean 4 formalization of the JAM blockchain
-protocol as specified in the Gray Paper v0.7.2.
-
-Each chapter corresponds to a section of the Gray Paper, presenting the
-formal Lean definitions alongside explanatory prose.
+JAR is a blockchain protocol based on JAM (Join-Accumulate Machine). This document describes the `jar1` variant — the latest protocol version. The `jar1` variant extends the Gray Paper's PVM with a capability-based execution model (JAVM): Harvard architecture, multi-VM kernel with synchronous CALL/REPLY, and seL4-style capabilities for memory, code, and VM ownership. Earlier variants (`gp072_full`, `gp072_tiny`) use the Gray Paper's original flat-memory PVM model and are preserved for conformance testing but not documented here.
 
 {include 0 JarBook.Notation}
 
@@ -47,6 +44,8 @@ formal Lean definitions alongside explanatory prose.
 {include 0 JarBook.Services}
 
 {include 0 JarBook.PVM}
+
+{include 0 JarBook.Capability}
 
 {include 0 JarBook.Accumulation}
 
