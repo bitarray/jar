@@ -210,8 +210,8 @@ impl InvocationKernel {
             remaining_gas,
         );
         // φ[7]=op set by caller (refine/accumulate), φ[8]=args_base, φ[9]=args_len
-        vm0.registers[8] = args_base;
-        vm0.registers[9] = args_len;
+        vm0.set_reg(8, args_base);
+        vm0.set_reg(9, args_len);
         kernel.vms.push(vm0);
 
         Ok(kernel)
@@ -300,11 +300,13 @@ impl InvocationKernel {
         if let Some(ctx) = self.live_ctx {
             unsafe { (*ctx).gas -= ecalli_gas as i64 };
         } else {
-            self.vms[self.active_vm as usize].gas -= ecalli_gas;
+            let g = self.vms[self.active_vm as usize].gas();
+            self.vms[self.active_vm as usize].set_gas(g - ecalli_gas);
         }
         #[cfg(not(all(feature = "std", target_os = "linux", target_arch = "x86_64")))]
         {
-            self.vms[self.active_vm as usize].gas -= ecalli_gas;
+            let g = self.vms[self.active_vm as usize].gas();
+            self.vms[self.active_vm as usize].set_gas(g - ecalli_gas);
         }
 
         if imm < CALL_RANGE_END {
@@ -386,10 +388,10 @@ impl InvocationKernel {
         let gas_cost = 10 + n_pages as u64 * GAS_PER_PAGE;
 
         let vm = &mut self.vms[self.active_vm as usize];
-        if vm.gas < gas_cost {
+        if vm.gas() < gas_cost {
             return DispatchResult::Fault(FaultType::OutOfGas);
         }
-        vm.gas -= gas_cost;
+        vm.set_gas(vm.gas() - gas_cost);
 
         // Get the UNTYPED cap (it's an Arc, so we can clone the reference)
         let untyped = match vm.cap_table.get(
@@ -500,16 +502,16 @@ impl InvocationKernel {
         // Determine gas budget for callee
         let caller_vm = &mut self.vms[self.active_vm as usize];
         let call_overhead = 10u64;
-        if caller_vm.gas < call_overhead {
+        if caller_vm.gas() < call_overhead {
             return DispatchResult::Fault(FaultType::OutOfGas);
         }
-        caller_vm.gas -= call_overhead;
+        caller_vm.set_gas(caller_vm.gas() - call_overhead);
 
         let callee_gas = match max_gas {
-            Some(limit) => caller_vm.gas.min(limit),
-            None => caller_vm.gas,
+            Some(limit) => caller_vm.gas().min(limit),
+            None => caller_vm.gas(),
         };
-        caller_vm.gas -= callee_gas;
+        caller_vm.set_gas(caller_vm.gas() - callee_gas);
 
         // Save caller state
         let caller_id = self.active_vm;
@@ -544,16 +546,16 @@ impl InvocationKernel {
         });
 
         // Pass args: caller's φ[7]..φ[10] → callee's φ[7]..φ[10]
-        let caller_regs = self.vms[caller_id as usize].registers;
+        let caller_regs = *self.vms[caller_id as usize].regs();
 
         // Set up callee
         let callee = &mut self.vms[target_vm_id as usize];
-        callee.gas = callee_gas;
+        callee.set_gas(callee_gas);
         callee.caller = Some(caller_id);
-        callee.registers[7] = caller_regs[7];
-        callee.registers[8] = caller_regs[8];
-        callee.registers[9] = caller_regs[9];
-        callee.registers[10] = caller_regs[10];
+        callee.set_reg(7, caller_regs[7]);
+        callee.set_reg(8, caller_regs[8]);
+        callee.set_reg(9, caller_regs[9]);
+        callee.set_reg(10, caller_regs[10]);
 
         let _ = callee.transition(VmState::Running);
         self.active_vm = target_vm_id;
@@ -579,9 +581,10 @@ impl InvocationKernel {
         let _ = self.vms[callee_id as usize].transition(VmState::Idle);
 
         // Return unused gas to caller
-        let unused_gas = self.vms[callee_id as usize].gas;
-        self.vms[caller_id as usize].gas += unused_gas;
-        self.vms[callee_id as usize].gas = 0;
+        let unused_gas = self.vms[callee_id as usize].gas();
+        let cg = self.vms[caller_id as usize].gas();
+        self.vms[caller_id as usize].set_gas(cg + unused_gas);
+        self.vms[callee_id as usize].set_gas(0);
 
         // Return IPC cap
         if let Some(caller_slot) = frame.ipc_cap_idx
@@ -597,9 +600,9 @@ impl InvocationKernel {
         }
 
         // Pass results: callee's φ[7], φ[8] → caller's φ[7], φ[8]
-        let callee_regs = self.vms[callee_id as usize].registers;
-        self.vms[caller_id as usize].registers[7] = callee_regs[7];
-        self.vms[caller_id as usize].registers[8] = callee_regs[8];
+        let callee_regs = *self.vms[callee_id as usize].regs();
+        self.vms[caller_id as usize].set_reg(7, callee_regs[7]);
+        self.vms[caller_id as usize].set_reg(8, callee_regs[8]);
 
         // Caller → Running
         let _ = self.vms[caller_id as usize].transition(VmState::Running);
@@ -922,8 +925,8 @@ impl InvocationKernel {
         if let Some(ctx) = self.live_ctx.take() {
             let ctx = unsafe { &*ctx };
             let vm = &mut self.vms[self.active_vm as usize];
-            vm.registers = ctx.regs;
-            vm.gas = ctx.gas.max(0) as u64;
+            vm.set_regs(ctx.regs);
+            vm.set_gas(ctx.gas.max(0) as u64);
             vm.pc = ctx.pc;
         }
     }
@@ -935,7 +938,7 @@ impl InvocationKernel {
         if let Some(ctx) = self.live_ctx {
             return unsafe { (*ctx).regs[idx] };
         }
-        self.vms[self.active_vm as usize].registers[idx]
+        self.vms[self.active_vm as usize].reg(idx)
     }
 
     fn set_active_reg(&mut self, idx: usize, val: u64) {
@@ -944,7 +947,7 @@ impl InvocationKernel {
             unsafe { (*ctx).regs[idx] = val };
             return;
         }
-        self.vms[self.active_vm as usize].registers[idx] = val;
+        self.vms[self.active_vm as usize].set_reg(idx, val);
     }
 
     /// Get the active VM's remaining gas.
@@ -953,7 +956,7 @@ impl InvocationKernel {
         if let Some(ctx) = self.live_ctx {
             return unsafe { (*ctx).gas.max(0) as u64 };
         }
-        self.vms[self.active_vm as usize].gas
+        self.vms[self.active_vm as usize].gas()
     }
 
     /// Resume after a protocol call was handled by the host.
@@ -985,8 +988,8 @@ impl InvocationKernel {
         // SAFETY: ctx_ptr() returns a writable page allocated by CodeWindow::new().
         unsafe {
             ctx_raw.write(JitContext {
-                regs: vm.registers,
-                gas: vm.gas as i64,
+                regs: *vm.regs(),
+                gas: vm.gas() as i64,
                 exit_reason: 0,
                 exit_arg: 0,
                 heap_base: 0,
@@ -1056,8 +1059,8 @@ impl InvocationKernel {
         } else {
             // Non-ecalli: full sync, clear live_ctx
             let vm = &mut self.vms[self.active_vm as usize];
-            vm.registers = ctx.regs;
-            vm.gas = ctx.gas.max(0) as u64;
+            vm.set_regs(ctx.regs);
+            vm.set_gas(ctx.gas.max(0) as u64);
             vm.pc = ctx.pc;
             self.live_ctx = None;
             crate::recompiler::signal::SIGNAL_STATE.with(|cell| cell.set(std::ptr::null_mut()));
@@ -1112,8 +1115,8 @@ impl InvocationKernel {
         } else {
             // Non-ecalli: full sync to VmInstance, clear live_ctx.
             let vm = &mut self.vms[self.active_vm as usize];
-            vm.registers = ctx.regs;
-            vm.gas = ctx.gas.max(0) as u64;
+            vm.set_regs(ctx.regs);
+            vm.set_gas(ctx.gas.max(0) as u64);
             vm.pc = ctx.pc;
             self.live_ctx = None;
             signal::SIGNAL_STATE.with(|cell| cell.set(std::ptr::null_mut()));
@@ -1174,9 +1177,9 @@ impl InvocationKernel {
             prog.code.clone(),
             prog.bitmask.clone(),
             prog.jump_table.clone(),
-            vm.registers,
+            *vm.regs(),
             flat_mem,
-            vm.gas,
+            vm.gas(),
             prog.mem_cycles,
         );
         interp.pc = vm.pc;
@@ -1205,8 +1208,8 @@ impl InvocationKernel {
         }
 
         let vm = &mut self.vms[self.active_vm as usize];
-        vm.registers = interp.registers;
-        vm.gas = interp.gas;
+        vm.set_regs(interp.registers);
+        vm.set_gas(interp.gas);
         vm.pc = interp.pc;
 
         match exit {
@@ -1301,7 +1304,7 @@ impl InvocationKernel {
                 }
                 0 => {
                     // Halt
-                    let value = self.vms[self.active_vm as usize].registers[7];
+                    let value = self.vms[self.active_vm as usize].reg(7);
                     match self.handle_vm_halt(value) {
                         DispatchResult::RootHalt(v) => return KernelResult::Halt(v),
                         DispatchResult::Continue => continue,
@@ -1429,8 +1432,9 @@ impl InvocationKernel {
                 let caller_id = frame.caller_vm_id;
 
                 // Return unused gas
-                let unused_gas = self.vms[callee_id as usize].gas;
-                self.vms[caller_id as usize].gas += unused_gas;
+                let unused_gas = self.vms[callee_id as usize].gas();
+                let cg = self.vms[caller_id as usize].gas();
+                self.vms[caller_id as usize].set_gas(cg + unused_gas);
 
                 // Return IPC cap
                 if let Some(caller_slot) = frame.ipc_cap_idx
@@ -1445,7 +1449,7 @@ impl InvocationKernel {
                 }
 
                 // Return result
-                self.vms[caller_id as usize].registers[7] = exit_value;
+                self.vms[caller_id as usize].set_reg(7, exit_value);
 
                 let _ = self.vms[caller_id as usize].transition(VmState::Running);
                 self.active_vm = caller_id;
@@ -1468,12 +1472,13 @@ impl InvocationKernel {
                 let caller_id = frame.caller_vm_id;
 
                 // Return unused gas
-                let unused_gas = self.vms[callee_id as usize].gas;
-                self.vms[caller_id as usize].gas += unused_gas;
+                let unused_gas = self.vms[callee_id as usize].gas();
+                let cg = self.vms[caller_id as usize].gas();
+                self.vms[caller_id as usize].set_gas(cg + unused_gas);
 
                 // IPC cap is lost (callee faulted)
                 // Set error status in caller registers
-                self.vms[caller_id as usize].registers[7] = RESULT_WHAT;
+                self.vms[caller_id as usize].set_reg(7, RESULT_WHAT);
 
                 let _ = self.vms[caller_id as usize].transition(VmState::Running);
                 self.active_vm = caller_id;
@@ -1755,16 +1760,16 @@ mod tests {
         kernel.dispatch_ecalli((MGMT_SET_MAX_GAS << 8) | handle_idx as u32);
 
         // CALL child — gas should be capped at 5000
-        let parent_gas_before = kernel.vms[0].gas;
+        let parent_gas_before = kernel.vms[0].gas();
         kernel.set_active_reg(7, 0);
         kernel.set_active_reg(12, 0xFF);
         kernel.dispatch_ecalli(handle_idx as u32);
 
         assert_eq!(kernel.active_vm, 1);
-        assert_eq!(kernel.vms[1].gas, 5000);
+        assert_eq!(kernel.vms[1].gas(), 5000);
 
         // Parent lost 10 (ecalli) + 10 (call overhead) + 5000 (transfer)
-        assert_eq!(kernel.vms[0].gas, parent_gas_before - 5020);
+        assert_eq!(kernel.vms[0].gas(), parent_gas_before - 5020);
     }
 
     #[test]
