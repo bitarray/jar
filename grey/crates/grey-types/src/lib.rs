@@ -52,6 +52,17 @@ pub mod signing_contexts {
 
     /// GRANDPA precommit context.
     pub const PRECOMMIT: &[u8] = b"jam_precommit";
+
+    /// Build a judgment signing message: (X_⊺ or X_⊥) ⌢ report_hash.
+    ///
+    /// Used for both signing and verifying valid/invalid work-report judgments.
+    pub fn build_judgment_message(is_valid: bool, report_hash: &[u8; 32]) -> Vec<u8> {
+        let context: &[u8] = if is_valid { VALID } else { INVALID };
+        let mut message = Vec::with_capacity(context.len() + 32);
+        message.extend_from_slice(context);
+        message.extend_from_slice(report_hash);
+        message
+    }
 }
 
 use std::fmt;

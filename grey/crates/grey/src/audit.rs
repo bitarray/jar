@@ -252,15 +252,7 @@ pub fn create_announcement(
     secrets: &ValidatorSecrets,
 ) -> AuditAnnouncement {
     // Sign: X_⊺ or X_⊥ ++ report_hash
-    let context = if is_valid {
-        signing_contexts::VALID
-    } else {
-        signing_contexts::INVALID
-    };
-    let mut message = Vec::with_capacity(context.len() + 32);
-    message.extend_from_slice(context);
-    message.extend_from_slice(&report_hash.0);
-
+    let message = signing_contexts::build_judgment_message(is_valid, &report_hash.0);
     let signature = secrets.ed25519.sign(&message);
 
     AuditAnnouncement {
@@ -309,15 +301,10 @@ pub fn verify_announcement(announcement: &AuditAnnouncement, state: &State) -> b
     }
     let ed25519_key = &state.current_validators[idx].ed25519;
 
-    let context = if announcement.is_valid {
-        signing_contexts::VALID
-    } else {
-        signing_contexts::INVALID
-    };
-    let mut message = Vec::with_capacity(context.len() + 32);
-    message.extend_from_slice(context);
-    message.extend_from_slice(&announcement.report_hash.0);
-
+    let message = signing_contexts::build_judgment_message(
+        announcement.is_valid,
+        &announcement.report_hash.0,
+    );
     grey_crypto::ed25519_verify(ed25519_key, &message, &announcement.signature)
 }
 

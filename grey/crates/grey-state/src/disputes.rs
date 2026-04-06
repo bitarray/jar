@@ -133,16 +133,8 @@ pub fn process_disputes(
             }
 
             let ed25519_key = &validators[idx].ed25519;
-            let domain: &[u8] = if judgment.is_valid {
-                signing_contexts::VALID
-            } else {
-                signing_contexts::INVALID
-            };
-
-            let mut message = Vec::with_capacity(domain.len() + 32);
-            message.extend_from_slice(domain);
-            message.extend_from_slice(&verdict.report_hash.0);
-
+            let message =
+                signing_contexts::build_judgment_message(judgment.is_valid, &verdict.report_hash.0);
             if !grey_crypto::ed25519_verify(ed25519_key, &message, &judgment.signature) {
                 return Err(DisputeError::BadSignature);
             }
@@ -285,15 +277,8 @@ pub fn process_disputes(
         }
 
         // Verify judgment signature
-        let domain: &[u8] = if fault.is_valid {
-            signing_contexts::VALID
-        } else {
-            signing_contexts::INVALID
-        };
-        let mut message = Vec::with_capacity(domain.len() + 32);
-        message.extend_from_slice(domain);
-        message.extend_from_slice(&fault.report_hash.0);
-
+        let message =
+            signing_contexts::build_judgment_message(fault.is_valid, &fault.report_hash.0);
         if !grey_crypto::ed25519_verify(&fault.validator_key, &message, &fault.signature) {
             return Err(DisputeError::BadSignature);
         }
