@@ -341,12 +341,12 @@ private def encodeAccountInfo (acct : ServiceAccount) : ByteArray :=
     ++ Codec.encodeFixedNat 4 acct.lastAccumulation.toNat -- a_a
     ++ Codec.encodeFixedNat 4 acct.parentServiceId      -- a_p
 
-/-- Dispatch a host call during accumulation. GP §12, Appendix B.
-    Returns updated invocation result and context. -/
+/-- Dispatch a host call during accumulation (jar1 numbering).
+    Match arms: REPLY=0, GAS=1, FETCH=2, ..., QUOTA=28.
+    GP §12, Appendix B. Returns updated invocation result and context. -/
 def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     (mem : PVM.Memory) (ctx : AccContext) : PVM.InvocationResult × AccContext :=
   let rawCallNum := callId.toNat
-  -- ecalli immediates map directly to host call numbers (no shift).
   let callNum := rawCallNum
   let inputLog := s!"hc({rawCallNum}) r7={getReg regs 7} r8={getReg regs 8} r9={getReg regs 9} r10={getReg regs 10} r11={getReg regs 11} r12={getReg regs 12}"
   let mkResult (regs' : PVM.Registers) (mem' : PVM.Memory) (gas' : Gas) : PVM.InvocationResult :=
@@ -1373,6 +1373,16 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
   let ctx'' := { ctx' with hostCallLog := ctx'.hostCallLog.push s!"{inputLog}->r7={outR7} gas={gasAfter}{extra}", debugExtra := "" }
   (result, ctx'')
 
+/-- Dispatch a host call during accumulation (gp072 numbering).
+    Translates old GP host call IDs (gas=0, fetch=1, ..., quota=27) to
+    jar1 numbering (gas=1, fetch=2, ..., quota=28) and delegates to handleHostCall.
+    gp072 has no REPLY host call — termination is via halt address in φ[0]. -/
+def handleHostCallGp072 (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
+    (mem : PVM.Memory) (ctx : AccContext) : PVM.InvocationResult × AccContext :=
+  -- gp072 protocol caps: 0-27. Shift +1 to align with jar1 match arms (1-28).
+  let jar1CallId := UInt64.ofNat (callId.toNat + 1)
+  handleHostCall jar1CallId gas regs mem ctx
+
 -- ============================================================================
 -- accone — Single-Service Accumulation — GP eq:accone
 -- ============================================================================
@@ -1532,10 +1542,17 @@ def accone (ps : PartialState) (serviceId : ServiceId)
           let regs := regs.set! 7 (UInt64.ofNat 1)  -- op = accumulate
           (0, regs)
         else (5, regs)
+        -- Select host call handler based on capability model:
+        -- jar1 (v2): REPLY=0, protocol caps 1-28
+        -- gp072: no REPLY host call, protocol caps 0-27 (shifted +1 to jar1 numbering)
+        let hostCallHandler := if JamConfig.capabilityModel == .v2 then
+            handleHostCall
+          else
+            handleHostCallGp072
         let (result, ctx') := PVM.runWithHostCalls AccContext
           prog entryPC regs mem (Int64.ofUInt64 totalGas)
           (fun callId gas regs' mem' c =>
-            handleHostCall callId gas regs' mem' c)
+            hostCallHandler callId gas regs' mem' c)
           ctx runFn
         -- On halt: use accumulated state; on panic/OOG: revert to checkpoint
         -- GP: regular dimension (x) on halt, exceptional dimension (y) on panic/OOG/fault

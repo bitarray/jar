@@ -44,7 +44,7 @@ pub enum ExitReason {
     PageFault(u32),
     /// h̵: Host-call with the given identifier (ecalli).
     HostCall(u32),
-    /// Management op or dynamic CALL (ecall). φ[11]=op, φ[12]=subject|object.
+    /// Management op or dynamic CALL (ecall). φ\[11\]=op, φ\[12\]=subject|object.
     Ecall,
 }
 
