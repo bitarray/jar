@@ -28,8 +28,6 @@ pub struct DecodedInst {
     pub imm2: u64,
     /// Byte offset of this instruction in the code.
     pub pc: u32,
-    /// Byte offset of the next sequential instruction.
-    pub next_pc: u32,
     /// Pre-resolved instruction index for the next sequential instruction.
     pub next_idx: u32,
     /// Pre-resolved instruction index for the branch/jump target (u32::MAX = invalid).
@@ -1614,7 +1612,6 @@ impl Interpreter {
             let rb = inst.rb as usize;
             let rd = inst.rd as usize;
             let imm1 = inst.imm1;
-            let next_pc = inst.next_pc;
 
             // Most instructions advance sequentially. Branches/jumps set
             // branch_idx to the pre-resolved instruction index.
@@ -1630,7 +1627,8 @@ impl Interpreter {
 
                 // === One immediate ===
                 Opcode::Ecalli => {
-                    self.pc = next_pc;
+                    // Compute next_pc on demand (skip_distances avoids storing it per-instruction)
+                    self.pc = inst.pc + 1 + self.skip(inst.pc as usize) as u32;
                     return (ExitReason::HostCall(imm1 as u32), initial_gas - self.gas);
                 }
 
@@ -2875,6 +2873,7 @@ fn predecode_instructions(
 ) -> (Vec<DecodedInst>, Vec<u32>) {
     let len = code.len();
     let mut insts = Vec::new();
+    let mut next_pcs = Vec::new(); // next_pc per instruction, used only during second pass
     let mut pc_to_idx = vec![u32::MAX; len + 1]; // +1 for sentinel
 
     let skip_at = |i: usize| -> usize {
@@ -2908,6 +2907,7 @@ fn predecode_instructions(
 
                 let idx = insts.len() as u32;
                 pc_to_idx[pc] = idx;
+                next_pcs.push(next_pc);
                 insts.push(DecodedInst {
                     opcode,
                     ra,
@@ -2916,7 +2916,6 @@ fn predecode_instructions(
                     imm1,
                     imm2,
                     pc: pc as u32,
-                    next_pc,
                     next_idx: u32::MAX,   // resolved in second pass
                     target_idx: u32::MAX, // resolved in second pass
                     bb_gas_cost,
@@ -2933,6 +2932,7 @@ fn predecode_instructions(
 
     // Add a sentinel instruction at the end (trap) so sequential advance past
     // the last instruction doesn't index out of bounds.
+    next_pcs.push(len as u32 + 1);
     insts.push(DecodedInst {
         opcode: Opcode::Trap,
         ra: 0,
@@ -2941,7 +2941,6 @@ fn predecode_instructions(
         imm1: 0,
         imm2: 0,
         pc: len as u32,
-        next_pc: len as u32 + 1,
         next_idx: sentinel_idx, // self-loop (will trap anyway)
         target_idx: u32::MAX,
         bb_gas_cost: 1, // charge 1 gas for the trap
@@ -2952,7 +2951,7 @@ fn predecode_instructions(
     for i in 0..insts.len() {
         let inst = &insts[i];
         // Resolve next sequential instruction index
-        let np = inst.next_pc as usize;
+        let np = next_pcs[i] as usize;
         let next_idx = if np < pc_to_idx.len() {
             let ni = pc_to_idx[np];
             if ni != u32::MAX { ni } else { sentinel_idx }
