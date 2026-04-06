@@ -239,10 +239,7 @@ pub fn process_disputes(
         }
 
         // Verify guarantee signature: X_G = "jam_guarantee"
-        let mut message = Vec::with_capacity(13 + 32);
-        message.extend_from_slice(signing_contexts::GUARANTEE);
-        message.extend_from_slice(&culprit.report_hash.0);
-
+        let message = signing_contexts::build_guarantee_message(&culprit.report_hash.0);
         if !grey_crypto::ed25519_verify(&culprit.validator_key, &message, &culprit.signature) {
             return Err(DisputeError::BadSignature);
         }

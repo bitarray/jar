@@ -63,6 +63,16 @@ pub mod signing_contexts {
         message.extend_from_slice(report_hash);
         message
     }
+
+    /// Build a guarantee signing message: X_G ⌢ report_hash.
+    ///
+    /// Used for signing and verifying work-report guarantees (Section 11).
+    pub fn build_guarantee_message(report_hash: &[u8; 32]) -> Vec<u8> {
+        let mut message = Vec::with_capacity(GUARANTEE.len() + 32);
+        message.extend_from_slice(GUARANTEE);
+        message.extend_from_slice(report_hash);
+        message
+    }
 }
 
 use std::fmt;

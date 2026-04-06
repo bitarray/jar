@@ -24,9 +24,7 @@ use std::collections::{BTreeMap, HashSet};
 ///
 /// Constructs the signing payload per GP Section 11 and signs with Ed25519.
 pub fn sign_guarantee(report_hash: &Hash, secrets: &ValidatorSecrets) -> Ed25519Signature {
-    let mut message = Vec::with_capacity(13 + 32);
-    message.extend_from_slice(signing_contexts::GUARANTEE);
-    message.extend_from_slice(&report_hash.0);
+    let message = signing_contexts::build_guarantee_message(&report_hash.0);
     secrets.ed25519.sign(&message)
 }
 

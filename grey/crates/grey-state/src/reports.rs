@@ -320,9 +320,7 @@ pub fn process_reports(
         // Verify Ed25519 signatures
         let encoded_report = scale::Encode::encode(report);
         let report_hash = grey_crypto::blake2b_256(&encoded_report);
-        let mut message = Vec::with_capacity(13 + 32);
-        message.extend_from_slice(signing_contexts::GUARANTEE);
-        message.extend_from_slice(&report_hash.0);
+        let message = signing_contexts::build_guarantee_message(&report_hash.0);
 
         for (idx, sig) in &guarantee.signatures {
             let ed25519_key = &validators[*idx as usize].ed25519;
