@@ -417,3 +417,61 @@ mod tests {
         assert!(bool::decode(&[]).is_err());
     }
 }
+
+#[cfg(test)]
+mod proptest_roundtrips {
+    use super::*;
+    use alloc::collections::BTreeMap;
+    use proptest::prelude::*;
+
+    /// Helper: encode then decode, verify roundtrip.
+    fn roundtrip<T: Encode + Decode + PartialEq + core::fmt::Debug>(val: &T) {
+        let encoded = val.encode();
+        let (decoded, consumed) = T::decode(&encoded).expect("decode should succeed");
+        assert_eq!(&decoded, val, "roundtrip mismatch");
+        assert_eq!(consumed, encoded.len(), "should consume all bytes");
+    }
+
+    proptest! {
+        #[test]
+        fn u8_roundtrip(v: u8) { roundtrip(&v); }
+
+        #[test]
+        fn u16_roundtrip(v: u16) { roundtrip(&v); }
+
+        #[test]
+        fn u32_roundtrip(v: u32) { roundtrip(&v); }
+
+        #[test]
+        fn u64_roundtrip(v: u64) { roundtrip(&v); }
+
+        #[test]
+        fn bool_roundtrip(v: bool) { roundtrip(&v); }
+
+        #[test]
+        fn vec_u8_roundtrip(v: Vec<u8>) { roundtrip(&v); }
+
+        #[test]
+        fn vec_u32_roundtrip(v: Vec<u32>) { roundtrip(&v); }
+
+        #[test]
+        fn option_u64_roundtrip(v: Option<u64>) { roundtrip(&v); }
+
+        #[test]
+        fn tuple_u16_u32_roundtrip(a: u16, b: u32) { roundtrip(&(a, b)); }
+
+        #[test]
+        fn fixed_array_32_roundtrip(v: [u8; 32]) { roundtrip(&v); }
+
+        #[test]
+        fn btreemap_u16_u32_roundtrip(
+            entries in proptest::collection::vec((any::<u16>(), any::<u32>()), 0..20)
+        ) {
+            let map: BTreeMap<u16, u32> = entries.into_iter().collect();
+            roundtrip(&map);
+        }
+
+        #[test]
+        fn nested_vec_option_roundtrip(v: Vec<Option<u32>>) { roundtrip(&v); }
+    }
+}

@@ -4357,6 +4357,7 @@ version = "0.1.0"
 name = "scale"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "scale-derive",
  "thiserror 2.0.18",
 ]

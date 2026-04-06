@@ -12,3 +12,6 @@ std = []
 [dependencies]
 thiserror = { workspace = true }
 scale-derive = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
