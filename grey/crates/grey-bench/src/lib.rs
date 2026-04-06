@@ -813,27 +813,25 @@ pub fn run_fib_recur_with_backend(
     kernel.vms[0].set_reg(7, n);
     let _ = kernel.vms[0].transition(VmState::Running);
 
-    loop {
-        match kernel.run() {
-            KernelResult::Halt(v) => {
-                let gas_used = gas - kernel.active_gas();
-                let vm_count = kernel.vms.len();
-                return (v, gas_used, vm_count);
-            }
-            KernelResult::Panic => {
-                let vm = &kernel.vms[kernel.active_vm as usize];
-                panic!(
-                    "fib_recur panicked: vm={} pc={} gas={}",
-                    kernel.active_vm,
-                    vm.pc,
-                    vm.gas()
-                );
-            }
-            KernelResult::OutOfGas => panic!("fib_recur out of gas"),
-            KernelResult::PageFault(a) => panic!("fib_recur page fault at {a:#x}"),
-            KernelResult::ProtocolCall { slot } => {
-                panic!("fib_recur unexpected protocol call slot={slot}")
-            }
+    match kernel.run() {
+        KernelResult::Halt(v) => {
+            let gas_used = gas - kernel.active_gas();
+            let vm_count = kernel.vms.len();
+            (v, gas_used, vm_count)
+        }
+        KernelResult::Panic => {
+            let vm = &kernel.vms[kernel.active_vm as usize];
+            panic!(
+                "fib_recur panicked: vm={} pc={} gas={}",
+                kernel.active_vm,
+                vm.pc,
+                vm.gas()
+            );
+        }
+        KernelResult::OutOfGas => panic!("fib_recur out of gas"),
+        KernelResult::PageFault(a) => panic!("fib_recur page fault at {a:#x}"),
+        KernelResult::ProtocolCall { slot } => {
+            panic!("fib_recur unexpected protocol call slot={slot}")
         }
     }
 }
