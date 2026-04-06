@@ -51,12 +51,12 @@ pub fn fallback_key_sequence(
         return vec![BandersnatchPublicKey::default(); EPOCH_LENGTH as usize];
     }
 
+    let mut preimage = [0u8; 36];
+    preimage[..32].copy_from_slice(&entropy.0);
     (0..EPOCH_LENGTH)
         .map(|i| {
             // H(r ++ E4(i))
-            let mut preimage = Vec::with_capacity(36);
-            preimage.extend_from_slice(&entropy.0);
-            preimage.extend_from_slice(&i.to_le_bytes());
+            preimage[32..].copy_from_slice(&i.to_le_bytes());
             let hash = grey_crypto::blake2b_256(&preimage);
 
             // E4⁻¹(hash[0..4]) mod |k|
