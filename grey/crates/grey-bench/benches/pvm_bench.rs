@@ -122,11 +122,13 @@ fn bench_standard(c: &mut Criterion, name: &str, grey_blob: &[u8], pvm_blob: &[u
         b.iter(|| run_grey_interpreter(grey_blob, GAS_LIMIT))
     });
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     group.bench_function("grey-recompiler", |b| {
         b.iter(|| run_grey_recompiler(grey_blob, GAS_LIMIT))
     });
 
     // Execution-only: compile in setup, measure only execution.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     group.bench_function("grey-recompiler-exec", |b| {
         b.iter_batched(
             || {

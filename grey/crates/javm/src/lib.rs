@@ -25,6 +25,12 @@ pub mod vm_pool;
 // Real JIT recompiler on Linux x86-64.
 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
 pub mod recompiler;
+// On non-Linux/x86-64 only predecode is needed (used by gas_cost).
+// All JIT-specific types are behind cfg guards in backend.rs and kernel.rs.
+#[cfg(all(feature = "std", not(all(target_os = "linux", target_arch = "x86_64"))))]
+pub mod recompiler {
+    pub mod predecode;
+}
 
 pub use backend::PvmBackend;
 pub use interpreter::Interpreter;

@@ -51,6 +51,7 @@ pub fn run_grey_interpreter(blob: &[u8], gas: u64) -> (u64, u64) {
 }
 
 /// Run a grey-pvm blob on the recompiler (via kernel). Returns (result, gas_consumed).
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn run_grey_recompiler(blob: &[u8], gas: u64) -> (u64, u64) {
     run_kernel_with_backend(blob, gas, javm::PvmBackend::ForceRecompiler)
 }
@@ -911,6 +912,7 @@ mod tests_fib_recur {
     }
 
     #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn test_fib_recur_interpreter_recompiler_match() {
         let blob = grey_fib_recur_blob();
         let gas = 1_000_000_000u64;
@@ -974,6 +976,7 @@ mod tests_sort {
     }
 
     /// Run blob on both interpreter and recompiler (via kernel), assert a0 and gas match.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn assert_interp_recomp(blob: &[u8], expected_a0: u64, min_gas: u64, name: &str) {
         let gas = 100_000_000_000u64;
 
@@ -994,27 +997,32 @@ mod tests_sort {
     }
 
     #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn test_grey_ecrecover_recompiler() {
         assert_interp_recomp(grey_ecrecover_blob(), 1, 100_000, "ecrecover");
     }
 
     #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn test_grey_prime_sieve_recompiler() {
         assert_interp_recomp(grey_sieve_blob(), 9592, 100_000, "prime_sieve");
     }
 
     #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn test_grey_ed25519_recompiler() {
         assert_interp_recomp(grey_ed25519_blob(), 1, 1_000, "ed25519");
     }
 
     #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn test_grey_blake2b_recompiler() {
         // blake2b-256 of [0x00..0xFF]*4: first 4 bytes LE = 0xEE1F55F1, sign-extended on rv64
         assert_interp_recomp(grey_blake2b_blob(), 0xFFFFFFFFEE1F55F1, 10_000, "blake2b");
     }
 
     #[test]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn test_grey_keccak_recompiler() {
         // keccak-256 of [0x00..0xFF]*4: first 4 bytes LE = 0x39E50259
         assert_interp_recomp(grey_keccak_blob(), 0x39E50259, 10_000, "keccak");

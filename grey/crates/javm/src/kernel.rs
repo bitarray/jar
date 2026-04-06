@@ -278,6 +278,7 @@ impl InvocationKernel {
                     KernelError::CompileError
                 })?;
 
+
                 let code_cap = Arc::new(CodeCap {
                     id,
                     compiled,
@@ -1700,11 +1701,13 @@ impl InvocationKernel {
     /// written back after.
     fn run_interpreter_segment(&mut self, code_cap_id: usize) -> (u32, u32) {
         let code_cap = &self.code_caps[code_cap_id];
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         let prog = match &code_cap.compiled {
             crate::backend::CompiledProgram::Interpreter(p) => p,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             _ => unreachable!(),
         };
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        let crate::backend::CompiledProgram::Interpreter(prog) = &code_cap.compiled;
 
         // Determine memory size from mapped DATA caps. Find the highest mapped page.
         let vm = &self.vm_arena.vm(self.active_vm);
@@ -1844,6 +1847,7 @@ impl InvocationKernel {
             match exit_reason {
                 4 => {
                     // HostCall(imm) — ecalli (pc already synced by backend)
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     let prev_vm = self.active_vm;
                     match self.dispatch_ecalli(exit_arg) {
                         DispatchResult::Continue => {
