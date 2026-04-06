@@ -149,7 +149,7 @@ impl core::fmt::Display for VmStateError {
 pub const MAX_CODE_CAPS: usize = 5;
 
 /// Maximum number of VMs (HANDLEs) per invocation.
-pub const MAX_VMS: usize = 1024;
+pub const MAX_VMS: usize = u16::MAX as usize;
 
 #[cfg(test)]
 mod tests {

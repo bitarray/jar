@@ -37,3 +37,7 @@ harness = false
 [[bench]]
 name = "pagefault_bench"
 harness = false
+
+[[bench]]
+name = "subvm_bench"
+harness = false

@@ -178,11 +178,11 @@ impl InvocationKernel {
             }
         }
 
-        // Give VM 0 the UNTYPED cap at a free slot
-        let untyped_slot = (64..255u8)
-            .find(|i| cap_table.is_empty(*i))
-            .ok_or(KernelError::CapTableFull)?;
-        cap_table.set(untyped_slot, Cap::Untyped(Arc::clone(&kernel.untyped)));
+        // Give VM 0 the UNTYPED cap at slot 254 (fixed slot, just below IPC).
+        // Skip when memory_pages == 0 — no point creating an empty allocator.
+        if parsed.header.memory_pages > 0 {
+            cap_table.set(254, Cap::Untyped(Arc::clone(&kernel.untyped)));
+        }
 
         // Write arguments into args cap (cap_index=0xFF = IPC slot)
         let mut args_base: u64 = 0;
@@ -349,10 +349,11 @@ impl InvocationKernel {
                 self.flush_live_ctx();
                 self.handle_call_untyped()
             }
-            Cap::Code(_) => {
+            Cap::Code(c) => {
+                let code_id = c.id;
                 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
                 self.flush_live_ctx();
-                self.handle_call_code()
+                self.handle_call_code(code_id)
             }
             Cap::Handle(h) => {
                 let target_vm = h.vm_id;
@@ -427,7 +428,7 @@ impl InvocationKernel {
     }
 
     /// CALL on CODE → CREATE.
-    fn handle_call_code(&mut self) -> DispatchResult {
+    fn handle_call_code(&mut self, code_cap_id: u16) -> DispatchResult {
         let entry_idx = self.active_reg(7) as u32;
         let bitmask = self.active_reg(8);
 
@@ -458,7 +459,7 @@ impl InvocationKernel {
         }
 
         let child_vm_id = self.vms.len() as u16;
-        let child = VmInstance::new(0, entry_idx, child_table, 0);
+        let child = VmInstance::new(code_cap_id, entry_idx, child_table, 0);
         self.vms.push(child);
 
         // Create HANDLE for the parent
@@ -1258,16 +1259,19 @@ impl InvocationKernel {
             match exit_reason {
                 4 => {
                     // HostCall(imm) — ecalli (pc already synced by backend)
+                    let prev_vm = self.active_vm;
                     match self.dispatch_ecalli(exit_arg) {
                         DispatchResult::Continue => {
                             // Internal dispatch (RETYPE, CREATE, CALL VM, management ops).
-                            // May have changed active_vm or registers — use resume if
-                            // still on the same recompiler code cap.
+                            // Use resume only if BOTH code cap AND active VM are unchanged.
+                            // VM switches (CALL handle, REPLY) change registers/gas — stale
+                            // JitContext would produce wrong results.
                             #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                             {
                                 let new_code_cap_id =
                                     self.vms[self.active_vm as usize].code_cap_id as usize;
-                                if new_code_cap_id == code_cap_id
+                                if self.active_vm == prev_vm
+                                    && new_code_cap_id == code_cap_id
                                     && matches!(
                                         self.code_caps[code_cap_id].compiled,
                                         crate::backend::CompiledProgram::Recompiler(_)

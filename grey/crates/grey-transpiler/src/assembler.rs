@@ -246,6 +246,16 @@ impl Assembler {
         self
     }
 
+    /// Opcode 83: branch_lt_u_imm (branch if register < unsigned immediate)
+    pub fn branch_lt_u_imm(&mut self, rd: Reg, imm: i32, target: u32) -> &mut Self {
+        self.emit_byte(83, true);
+        let reg_byte = (rd as u8) | (4 << 4);
+        self.emit_byte(reg_byte, false);
+        self.emit_imm(imm as i64, 4);
+        self.emit_imm(target as i64, 4);
+        self
+    }
+
     // ===== Two register instructions =====
 
     /// Opcode 100: move_reg (copy register)

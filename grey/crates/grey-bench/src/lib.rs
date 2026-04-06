@@ -607,6 +607,308 @@ pub fn sample_service_blob() -> &'static [u8] {
     SAMPLE_SERVICE_BLOB
 }
 
+// ---------------------------------------------------------------------------
+// Sub-VM benchmark: recursive fibonacci via CALL(CODE) + CALL(HANDLE)
+// ---------------------------------------------------------------------------
+
+/// Default N for recursive fib benchmark. fib(20) = 6765, creates ~21890 VMs.
+pub const FIB_RECUR_N: u64 = 20;
+
+/// Build a recursive fibonacci PVM blob that exercises CALL(CODE) and CALL(HANDLE).
+///
+/// Each invocation reads N from φ\[7\]. If N < 2, REPLY(N). Otherwise:
+/// CREATE two child VMs (CALL CODE), CALL each with N-1 and N-2, REPLY(sum).
+///
+/// CODE cap is at slot 32 (within CREATE bitmask range). Children inherit it
+/// via the bitmask, so recursive creation works without COPY+GRANT.
+///
+/// memory_pages=0: no UNTYPED, no stack, no heap. Pure register computation.
+pub fn grey_fib_recur_blob() -> Vec<u8> {
+    use javm::cap::Access;
+    use javm::program::{CapEntryType, CapManifestEntry, build_blob};
+
+    // Build PVM code using raw byte emission (need precise control over offsets)
+    let mut code = Vec::new();
+    let mut bitmask = Vec::new();
+
+    let push_inst = |c: &mut Vec<u8>, m: &mut Vec<u8>, byte: u8| {
+        c.push(byte);
+        m.push(1);
+    };
+    let push_data = |c: &mut Vec<u8>, m: &mut Vec<u8>, byte: u8| {
+        c.push(byte);
+        m.push(0);
+    };
+
+    // PC 0: branch_lt_u_imm A0, 2, offset=82 (10 bytes)
+    // If N < 2, jump to reply at PC=82 (post-fallthrough = gas block start)
+    push_inst(&mut code, &mut bitmask, 83); // opcode: branch_lt_u_imm
+    let reg_byte = (Reg::A0 as u8) | (4 << 4); // rA=A0, lX=4
+    push_data(&mut code, &mut bitmask, reg_byte);
+    // imm = 2 (4 bytes LE)
+    for &b in &2i32.to_le_bytes() {
+        push_data(&mut code, &mut bitmask, b);
+    }
+    // offset = 82 (4 bytes LE, signed relative to PC=0)
+    for &b in &82i32.to_le_bytes() {
+        push_data(&mut code, &mut bitmask, b);
+    }
+
+    // PC 10: move_reg S0, A0 (2 bytes) — save N
+    push_inst(&mut code, &mut bitmask, 100); // opcode: move_reg
+    push_data(
+        &mut code,
+        &mut bitmask,
+        (Reg::S0 as u8) | ((Reg::A0 as u8) << 4),
+    );
+
+    // PC 12: load_imm A0, 0 (6 bytes) — entry_index = 0 for CREATE
+    push_inst(&mut code, &mut bitmask, 51); // opcode: load_imm
+    push_data(&mut code, &mut bitmask, Reg::A0 as u8);
+    for &b in &0i32.to_le_bytes() {
+        push_data(&mut code, &mut bitmask, b);
+    }
+
+    // PC 18: load_imm_64 A1, 1<<32 (10 bytes) — bitmask: bit 32 = CODE cap
+    push_inst(&mut code, &mut bitmask, 20); // opcode: load_imm_64
+    push_data(&mut code, &mut bitmask, Reg::A1 as u8);
+    for i in 0..8 {
+        push_data(&mut code, &mut bitmask, ((1u64 << 32) >> (i * 8)) as u8);
+    }
+
+    // PC 28: ecalli(32) (5 bytes) — CREATE child1 → handle at slot 64
+    push_inst(&mut code, &mut bitmask, 10); // opcode: ecalli
+    for &b in &32u32.to_le_bytes() {
+        push_data(&mut code, &mut bitmask, b);
+    }
+
+    // PC 33: load_imm A0, 0 (6 bytes) — entry_index = 0
+    push_inst(&mut code, &mut bitmask, 51);
+    push_data(&mut code, &mut bitmask, Reg::A0 as u8);
+    for &b in &0i32.to_le_bytes() {
+        push_data(&mut code, &mut bitmask, b);
+    }
+
+    // PC 39: load_imm_64 A1, 1<<32 (10 bytes) — bitmask: bit 32
+    push_inst(&mut code, &mut bitmask, 20);
+    push_data(&mut code, &mut bitmask, Reg::A1 as u8);
+    for i in 0..8 {
+        push_data(&mut code, &mut bitmask, ((1u64 << 32) >> (i * 8)) as u8);
+    }
+
+    // PC 49: ecalli(32) (5 bytes) — CREATE child2 → handle at slot 65
+    push_inst(&mut code, &mut bitmask, 10);
+    for &b in &32u32.to_le_bytes() {
+        push_data(&mut code, &mut bitmask, b);
+    }
+
+    // PC 54: add_imm_64 A0, S0, -1 (6 bytes) — A0 = N-1
+    push_inst(&mut code, &mut bitmask, 149); // opcode: add_imm_64
+    push_data(
+        &mut code,
+        &mut bitmask,
+        (Reg::A0 as u8) | ((Reg::S0 as u8) << 4),
+    );
+    for &b in &(-1i32).to_le_bytes() {
+        push_data(&mut code, &mut bitmask, b);
+    }
+
+    // PC 60: ecalli(64) (5 bytes) — CALL child1 with N-1
+    push_inst(&mut code, &mut bitmask, 10);
+    for &b in &64u32.to_le_bytes() {
+        push_data(&mut code, &mut bitmask, b);
+    }
+
+    // PC 65: move_reg S1, A0 (2 bytes) — save fib(N-1)
+    push_inst(&mut code, &mut bitmask, 100);
+    push_data(
+        &mut code,
+        &mut bitmask,
+        (Reg::S1 as u8) | ((Reg::A0 as u8) << 4),
+    );
+
+    // PC 67: add_imm_64 A0, S0, -2 (6 bytes) — A0 = N-2
+    push_inst(&mut code, &mut bitmask, 149);
+    push_data(
+        &mut code,
+        &mut bitmask,
+        (Reg::A0 as u8) | ((Reg::S0 as u8) << 4),
+    );
+    for &b in &(-2i32).to_le_bytes() {
+        push_data(&mut code, &mut bitmask, b);
+    }
+
+    // PC 73: ecalli(65) (5 bytes) — CALL child2 with N-2
+    push_inst(&mut code, &mut bitmask, 10);
+    for &b in &65u32.to_le_bytes() {
+        push_data(&mut code, &mut bitmask, b);
+    }
+
+    // PC 78: add_64 A0, S1, A0 (3 bytes) — fib(N-1) + fib(N-2)
+    push_inst(&mut code, &mut bitmask, 200); // opcode: add_64
+    push_data(
+        &mut code,
+        &mut bitmask,
+        (Reg::S1 as u8) | ((Reg::A0 as u8) << 4),
+    );
+    push_data(&mut code, &mut bitmask, Reg::A0 as u8);
+
+    // PC 81: fallthrough (1 byte) — terminator so PC 82 is a gas block start
+    // (the recompiler only binds labels at gas block starts)
+    push_inst(&mut code, &mut bitmask, 1); // opcode: fallthrough
+
+    // PC 82: ecalli(0xFF) (5 bytes) — REPLY(A0)
+    push_inst(&mut code, &mut bitmask, 10);
+    for &b in &0xFFu32.to_le_bytes() {
+        push_data(&mut code, &mut bitmask, b);
+    }
+
+    // PC 87: trap (1 byte) — sentinel for recompiler (never reached)
+    push_inst(&mut code, &mut bitmask, 0);
+
+    assert_eq!(code.len(), 88, "fib_recur code should be 88 bytes");
+
+    // Build code sub-blob: jump_len(4) + entry_size(1) + code_len(4) + code + packed_bitmask
+    let mut code_data = Vec::new();
+    code_data.extend_from_slice(&0u32.to_le_bytes()); // jump_len = 0 (no jump table)
+    code_data.push(1u8); // entry_size = 1
+    code_data.extend_from_slice(&(code.len() as u32).to_le_bytes());
+    code_data.extend_from_slice(&code);
+    // Pack bitmask (8 bits per byte, LSB first)
+    let packed_len = code.len().div_ceil(8);
+    let mut packed = vec![0u8; packed_len];
+    for (i, &b) in bitmask.iter().enumerate() {
+        if b != 0 {
+            packed[i / 8] |= 1 << (i % 8);
+        }
+    }
+    code_data.extend_from_slice(&packed);
+
+    // Build blob with CODE cap at slot 32, memory_pages=0
+    let caps = vec![CapManifestEntry {
+        cap_index: 32,
+        cap_type: CapEntryType::Code,
+        base_page: 0,
+        page_count: 0,
+        init_access: Access::RO,
+        data_offset: 0,
+        data_len: code_data.len() as u32,
+    }];
+    build_blob(0, 32, &caps, &code_data)
+}
+
+/// Run the fib_recur benchmark with a specific backend.
+/// Sets φ\[7\]=N after kernel init, runs until REPLY.
+pub fn run_fib_recur_with_backend(
+    blob: &[u8],
+    n: u64,
+    gas: u64,
+    backend: javm::PvmBackend,
+) -> (u64, u64, usize) {
+    use javm::kernel::{InvocationKernel, KernelResult};
+    use javm::vm_pool::VmState;
+
+    let mut kernel = InvocationKernel::new_with_backend(blob, &[], gas, backend)
+        .expect("fib_recur kernel init failed");
+    kernel.vms[0].set_reg(7, n);
+    let _ = kernel.vms[0].transition(VmState::Running);
+
+    match kernel.run() {
+        KernelResult::Halt(v) => {
+            let gas_used = gas - kernel.active_gas();
+            let vm_count = kernel.vms.len();
+            (v, gas_used, vm_count)
+        }
+        KernelResult::Panic => {
+            let vm = &kernel.vms[kernel.active_vm as usize];
+            panic!(
+                "fib_recur panicked: vm={} pc={} gas={}",
+                kernel.active_vm,
+                vm.pc,
+                vm.gas()
+            );
+        }
+        KernelResult::OutOfGas => panic!("fib_recur out of gas"),
+        KernelResult::PageFault(a) => panic!("fib_recur page fault at {a:#x}"),
+        KernelResult::ProtocolCall { slot } => {
+            panic!("fib_recur unexpected protocol call slot={slot}")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_fib_recur {
+    use super::*;
+
+    #[test]
+    fn test_fib_recur_base_cases() {
+        let blob = grey_fib_recur_blob();
+        let gas = 100_000_000u64;
+        let (r0, _, _) = run_fib_recur_with_backend(&blob, 0, gas, javm::PvmBackend::Default);
+        assert_eq!(r0, 0, "fib(0) should be 0");
+        let (r1, _, _) = run_fib_recur_with_backend(&blob, 1, gas, javm::PvmBackend::Default);
+        assert_eq!(r1, 1, "fib(1) should be 1");
+    }
+
+    #[test]
+    fn test_fib_recur_sequence() {
+        let blob = grey_fib_recur_blob();
+        let gas = 1_000_000_000u64;
+        let expected = [0u64, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144];
+        for (n, &expect) in expected.iter().enumerate() {
+            let (result, _, _) =
+                run_fib_recur_with_backend(&blob, n as u64, gas, javm::PvmBackend::Default);
+            assert_eq!(result, expect, "fib({n}) should be {expect}, got {result}");
+        }
+    }
+
+    #[test]
+    fn test_fib_recur_15() {
+        let blob = grey_fib_recur_blob();
+        let gas = 1_000_000_000u64;
+        let (result, gas_used, vm_count) =
+            run_fib_recur_with_backend(&blob, 15, gas, javm::PvmBackend::Default);
+        assert_eq!(result, 610, "fib(15) should be 610");
+        eprintln!("fib_recur(15): result={result} gas_used={gas_used} vms={vm_count}");
+    }
+
+    #[test]
+    fn test_fib_recur_20() {
+        let blob = grey_fib_recur_blob();
+        let gas = 10_000_000_000u64;
+        let (result, gas_used, vm_count) =
+            run_fib_recur_with_backend(&blob, 20, gas, javm::PvmBackend::Default);
+        assert_eq!(result, 6765, "fib(20) should be 6765");
+        eprintln!("fib_recur(20): result={result} gas_used={gas_used} vms={vm_count}");
+    }
+
+    #[test]
+    fn test_fib_recur_22() {
+        let blob = grey_fib_recur_blob();
+        let gas = 100_000_000_000u64;
+        // fib(22) = 17711, creates 57313 VMs — near MAX_VMS (u16::MAX = 65535)
+        let (result, gas_used, vm_count) =
+            run_fib_recur_with_backend(&blob, 22, gas, javm::PvmBackend::ForceInterpreter);
+        assert_eq!(result, 17711, "fib(22) should be 17711");
+        eprintln!("fib_recur(22): result={result} gas={gas_used} vms={vm_count}");
+    }
+
+    #[test]
+    fn test_fib_recur_interpreter_recompiler_match() {
+        let blob = grey_fib_recur_blob();
+        let gas = 1_000_000_000u64;
+        let (i_result, i_gas, i_vms) =
+            run_fib_recur_with_backend(&blob, 10, gas, javm::PvmBackend::ForceInterpreter);
+        let (r_result, r_gas, r_vms) =
+            run_fib_recur_with_backend(&blob, 10, gas, javm::PvmBackend::ForceRecompiler);
+        assert_eq!(i_result, 55, "fib(10) should be 55");
+        assert_eq!(i_result, r_result, "interpreter/recompiler result mismatch");
+        assert_eq!(i_gas, r_gas, "interpreter/recompiler gas mismatch");
+        assert_eq!(i_vms, r_vms, "interpreter/recompiler VM count mismatch");
+        eprintln!("fib_recur(10): result={i_result} gas={i_gas} vms={i_vms}");
+    }
+}
+
 #[cfg(test)]
 mod tests_sort {
     use super::*;
