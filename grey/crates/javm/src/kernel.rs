@@ -13,6 +13,16 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::GAS_PER_PAGE;
+
+/// Resolve a cap reference or return `DispatchResult::Continue` (WHAT already set).
+macro_rules! resolve {
+    ($self:expr, $ref:expr) => {
+        match $self.resolve_or_what($ref) {
+            Some(r) => r,
+            None => return DispatchResult::Continue,
+        }
+    };
+}
 use crate::backing::BackingStore;
 use crate::cap::{
     Access, CallableCap, Cap, CapTable, CodeCap, DataCap, HandleCap, IPC_SLOT, UntypedCap,
@@ -763,82 +773,46 @@ impl InvocationKernel {
             }
             0x02 => {
                 // MAP — resolve subject (DATA cap)
-                let (vm_idx, slot) = match self.resolve_or_what(subject_ref) {
-                    Some(r) => r,
-                    None => return DispatchResult::Continue,
-                };
+                let (vm_idx, slot) = resolve!(self, subject_ref);
                 self.ecall_map(vm_idx, slot)
             }
             0x03 => {
                 // UNMAP — resolve subject (DATA cap)
-                let (vm_idx, slot) = match self.resolve_or_what(subject_ref) {
-                    Some(r) => r,
-                    None => return DispatchResult::Continue,
-                };
+                let (vm_idx, slot) = resolve!(self, subject_ref);
                 self.ecall_unmap(vm_idx, slot)
             }
             0x04 => {
                 // SPLIT — resolve subject + object dst
-                let (s_vm, s_slot) = match self.resolve_or_what(subject_ref) {
-                    Some(r) => r,
-                    None => return DispatchResult::Continue,
-                };
-                let (o_vm, o_slot) = match self.resolve_or_what(object_ref) {
-                    Some(r) => r,
-                    None => return DispatchResult::Continue,
-                };
+                let (s_vm, s_slot) = resolve!(self, subject_ref);
+                let (o_vm, o_slot) = resolve!(self, object_ref);
                 self.ecall_split(s_vm, s_slot, o_vm, o_slot)
             }
             0x05 => {
                 // DROP — resolve subject
-                let (vm_idx, slot) = match self.resolve_or_what(subject_ref) {
-                    Some(r) => r,
-                    None => return DispatchResult::Continue,
-                };
+                let (vm_idx, slot) = resolve!(self, subject_ref);
                 self.ecall_drop(vm_idx, slot)
             }
             0x06 => {
                 // MOVE — resolve subject + object dst
-                let (s_vm, s_slot) = match self.resolve_or_what(subject_ref) {
-                    Some(r) => r,
-                    None => return DispatchResult::Continue,
-                };
-                let (o_vm, o_slot) = match self.resolve_or_what(object_ref) {
-                    Some(r) => r,
-                    None => return DispatchResult::Continue,
-                };
+                let (s_vm, s_slot) = resolve!(self, subject_ref);
+                let (o_vm, o_slot) = resolve!(self, object_ref);
                 self.ecall_move(s_vm, s_slot, o_vm, o_slot)
             }
             0x07 => {
                 // COPY — resolve subject + object dst
-                let (s_vm, s_slot) = match self.resolve_or_what(subject_ref) {
-                    Some(r) => r,
-                    None => return DispatchResult::Continue,
-                };
-                let (o_vm, o_slot) = match self.resolve_or_what(object_ref) {
-                    Some(r) => r,
-                    None => return DispatchResult::Continue,
-                };
+                let (s_vm, s_slot) = resolve!(self, subject_ref);
+                let (o_vm, o_slot) = resolve!(self, object_ref);
                 self.ecall_copy(s_vm, s_slot, o_vm, o_slot)
             }
             0x0A => {
                 // DOWNGRADE — resolve subject HANDLE + object dst
-                let (s_vm, s_slot) = match self.resolve_or_what(subject_ref) {
-                    Some(r) => r,
-                    None => return DispatchResult::Continue,
-                };
-                let (o_vm, o_slot) = match self.resolve_or_what(object_ref) {
-                    Some(r) => r,
-                    None => return DispatchResult::Continue,
-                };
+                let (s_vm, s_slot) = resolve!(self, subject_ref);
+                let (o_vm, o_slot) = resolve!(self, object_ref);
                 self.ecall_downgrade(s_vm, s_slot, o_vm, o_slot)
             }
             0x0B => {
                 // SET_MAX_GAS — resolve subject HANDLE
-                let (vm_idx, slot) = match self.resolve_or_what(subject_ref) {
-                    Some(r) => r,
-                    None => return DispatchResult::Continue,
-                };
+                let (vm_idx, slot) = resolve!(self, subject_ref);
                 self.ecall_set_max_gas(vm_idx, slot)
             }
             0x0C => {
@@ -848,10 +822,7 @@ impl InvocationKernel {
             }
             0x0D => {
                 // RESUME — resolve subject HANDLE
-                let (vm_idx, slot) = match self.resolve_or_what(subject_ref) {
-                    Some(r) => r,
-                    None => return DispatchResult::Continue,
-                };
+                let (vm_idx, slot) = resolve!(self, subject_ref);
                 // RESUME uses the HANDLE in the resolved VM's cap table
                 if vm_idx != self.active_vm as usize {
                     self.set_active_reg(7, RESULT_WHAT);
