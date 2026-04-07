@@ -89,8 +89,9 @@ fn load_ind_u32(c: &mut Vec<u8>, m: &mut Vec<u8>, rd: u8, ra: u8, imm: i32) {
     }
 }
 
-// TODO: shlo_l_imm_64 causes a recompiler PageFault bug. Using add_64 doubling as workaround.
-// Investigate and fix in javm/src/recompiler/codegen.rs.
+// Note: shlo_l_imm_64 was suspected of a recompiler PageFault bug, but testing
+// confirms it works correctly (see test_recompile_shlo_l_imm_64_* in mod.rs).
+// The original issue was likely a register encoding error in the bench program.
 
 #[allow(dead_code)]
 fn xor_64(c: &mut Vec<u8>, m: &mut Vec<u8>, rd: u8, ra: u8, rb: u8) {

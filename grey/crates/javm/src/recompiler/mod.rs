@@ -1298,4 +1298,134 @@ mod tests {
         assert_eq!(pvm2.registers()[2], 8); // 5 + 3 = 8
         assert_eq!(pvm2.registers()[3], 0); // carry = 0 (no overflow)
     }
+
+    #[test]
+    fn test_recompile_shlo_l_imm_64() {
+        // ShloLImm64 (opcode 151): φ[rd] = φ[rb] << imm
+        // TwoRegOneImm: [151, rd|(rb<<4), imm0, imm1, imm2, imm3]
+        let code = vec![
+            51, 0, 5, // load_imm φ[0], 5
+            151, 0x00, 3, 0, 0, 0, // shlo_l_imm_64 φ[0] = φ[0] << 3  (= 40)
+            10, 0, // ecalli 0
+        ];
+        let bitmask = vec![1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0];
+        let registers = [0u64; 13];
+
+        let mut pvm = RecompiledPvm::new(
+            &code,
+            bitmask,
+            vec![],
+            registers,
+            10000,
+            Some(test_layout()),
+            crate::gas_cost::DEFAULT_MEM_CYCLES,
+        )
+        .expect("compilation should succeed");
+        let exit = pvm.run();
+        assert_eq!(exit, ExitReason::HostCall(0));
+        assert_eq!(pvm.registers()[0], 40); // 5 << 3 = 40
+    }
+
+    #[test]
+    fn test_recompile_shlo_l_imm_64_different_regs() {
+        // ShloLImm64: φ[rd] = φ[rb] << imm where rd != rb
+        // rd=2 (T0), rb=0 (RA): [151, 2|(0<<4), 1, 0, 0, 0]
+        let code = vec![
+            51, 0, 10, // load_imm φ[0], 10
+            151, 0x02, 1, 0, 0, 0, // shlo_l_imm_64 φ[2] = φ[0] << 1  (= 20)
+            10, 0, // ecalli 0
+        ];
+        let bitmask = vec![1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0];
+        let registers = [0u64; 13];
+
+        let mut pvm = RecompiledPvm::new(
+            &code,
+            bitmask,
+            vec![],
+            registers,
+            10000,
+            Some(test_layout()),
+            crate::gas_cost::DEFAULT_MEM_CYCLES,
+        )
+        .expect("compilation should succeed");
+        let exit = pvm.run();
+        assert_eq!(exit, ExitReason::HostCall(0));
+        assert_eq!(pvm.registers()[2], 20); // 10 << 1 = 20
+        assert_eq!(pvm.registers()[0], 10); // source unchanged
+    }
+
+    #[test]
+    fn test_recompile_shlo_l_imm_64_as_address() {
+        // Test shift result used as memory address (the bench bug scenario).
+        // Compute addr = base << 2, then store/load via that address.
+        // DataLayout: rw_start=0, rw_data has 256 bytes.
+        let layout = DataLayout {
+            mem_size: 4096,
+            arg_start: 0,
+            arg_data: vec![],
+            ro_start: 0,
+            ro_data: vec![],
+            rw_start: 0,
+            rw_data: vec![0u8; 256],
+        };
+
+        let code = vec![
+            51, 0, 4, // load_imm φ[0], 4 (base index)
+            151, 0x00, 2, 0, 0, 0, // shlo_l_imm_64 φ[0] = φ[0] << 2  (= 16, byte offset)
+            // store_ind_u32 [φ[0] + 0] ← φ[1] (value 0xDEAD)
+            // opcode 122, rd=1|(ra=0<<4), imm=0
+            122, 0x01, 0, 0, 0, 0,
+            // load_ind_u32 φ[2] = [φ[0] + 0]
+            // opcode 128, rd=2|(ra=0<<4), imm=0
+            128, 0x02, 0, 0, 0, 0, 10, 0, // ecalli 0
+        ];
+        let bitmask = vec![
+            1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0,
+        ];
+        let mut registers = [0u64; 13];
+        registers[1] = 0xDEAD; // value to store
+
+        let mut pvm = RecompiledPvm::new(
+            &code,
+            bitmask,
+            vec![],
+            registers,
+            10000,
+            Some(layout),
+            crate::gas_cost::DEFAULT_MEM_CYCLES,
+        )
+        .expect("compilation should succeed");
+        let exit = pvm.run();
+        assert_eq!(exit, ExitReason::HostCall(0));
+        assert_eq!(pvm.registers()[0], 16); // 4 << 2 = 16
+        assert_eq!(pvm.registers()[2], 0xDEAD); // loaded back the stored value
+    }
+
+    #[test]
+    fn test_recompile_shlo_l_imm_64_then_add() {
+        // Shift then add — verifies the shift result persists across basic blocks.
+        let code = vec![
+            51, 0, 4, // load_imm φ[0], 4
+            151, 0x00, 2, 0, 0, 0, // shlo_l_imm_64 φ[0] = φ[0] << 2  (= 16)
+            149, 0x02, 1, 0, 0, 0, // add_imm_64 φ[2] = φ[0] + 1  (= 17)
+            10, 0, // ecalli 0
+        ];
+        let bitmask = vec![1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0];
+        let registers = [0u64; 13];
+
+        let mut pvm = RecompiledPvm::new(
+            &code,
+            bitmask,
+            vec![],
+            registers,
+            10000,
+            Some(test_layout()),
+            crate::gas_cost::DEFAULT_MEM_CYCLES,
+        )
+        .expect("compilation should succeed");
+        let exit = pvm.run();
+        assert_eq!(exit, ExitReason::HostCall(0));
+        assert_eq!(pvm.registers()[0], 16, "φ[0] should be 4 << 2 = 16");
+        assert_eq!(pvm.registers()[2], 17, "φ[2] should be 16 + 1 = 17");
+    }
 }
