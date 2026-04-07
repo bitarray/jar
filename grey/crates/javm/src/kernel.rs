@@ -190,6 +190,7 @@ impl InvocationKernel {
             kernel.active_window = assignment.window_idx;
             let window_base = kernel.window_pool.window(assignment.window_idx).base();
             for (base_page, backing_offset, page_count, access) in &data_caps_to_map {
+                // SAFETY: window_base is from CodeWindow::base() (valid 4GB mmap region).
                 unsafe {
                     if !kernel.backing.map_pages(
                         window_base,
@@ -328,6 +329,8 @@ impl InvocationKernel {
         // Deduct gas via live_ctx if available, else VmInstance
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         if let Some(ctx) = self.live_ctx {
+            // SAFETY: live_ctx is non-null only during JIT execution on this thread;
+            // ctx points to the JitContext in the active CodeWindow's CTX page.
             unsafe { (*ctx).gas -= ecalli_gas as i64 };
         } else {
             let g = self.vm_arena.vm(self.active_vm).gas();
@@ -911,11 +914,13 @@ impl InvocationKernel {
             Some(Cap::Data(d)) => {
                 // Unmap previous mapping if remapping
                 if let Some((old_base, _)) = d.map(base_page, access) {
+                    // SAFETY: wb is from active_window_base() (valid 4GB window).
                     unsafe {
                         BackingStore::unmap_pages(wb, old_base, d.page_count);
                     }
                 }
                 // Map new location
+                // SAFETY: wb is from active_window_base() (valid 4GB window).
                 unsafe {
                     self.backing
                         .map_pages(wb, base_page, d.backing_offset, d.page_count, access);
@@ -934,6 +939,7 @@ impl InvocationKernel {
         match vm.cap_table.get_mut(cap_idx) {
             Some(Cap::Data(d)) => {
                 if let Some((base_page, _)) = d.unmap() {
+                    // SAFETY: wb is from active_window_base() (valid 4GB window).
                     unsafe {
                         BackingStore::unmap_pages(wb, base_page, d.page_count);
                     }
@@ -1005,6 +1011,7 @@ impl InvocationKernel {
             && let Some(base_page) = d.base_offset
         {
             let page_count = d.page_count;
+            // SAFETY: wb is from active_window_base() (valid 4GB window).
             unsafe {
                 BackingStore::unmap_pages(wb, base_page, page_count);
             }
@@ -1167,6 +1174,7 @@ impl InvocationKernel {
                 // Map the pages in the VM's window (if it has one)
                 if let Some(wb) = window_base {
                     for p in page_offset..page_offset + page_count {
+                        // SAFETY: wb is from vm_window_base() (valid 4GB window).
                         unsafe {
                             self.backing.map_pages(
                                 wb,
@@ -1202,6 +1210,7 @@ impl InvocationKernel {
                             page_offset..page_offset.saturating_add(page_count).min(d.page_count)
                         {
                             if d.is_page_mapped(p) {
+                                // SAFETY: wb is from vm_window_base() (valid 4GB window).
                                 unsafe {
                                     BackingStore::unmap_pages(wb, base_offset + p, 1);
                                 }
@@ -1266,6 +1275,7 @@ impl InvocationKernel {
         {
             let page_count = d.page_count;
             if let Some(wb) = self.vm_window_base(vm_idx as u16) {
+                // SAFETY: wb is from vm_window_base() (valid 4GB window).
                 unsafe {
                     BackingStore::unmap_pages(wb, base_offset, page_count);
                 }
@@ -1300,6 +1310,7 @@ impl InvocationKernel {
             && let Some(base_offset) = d.base_offset
         {
             if let Some(wb) = self.vm_window_base(s_vm as u16) {
+                // SAFETY: wb is from vm_window_base() (valid 4GB window).
                 unsafe {
                     BackingStore::unmap_pages(wb, base_offset, d.page_count);
                 }
@@ -1382,6 +1393,8 @@ impl InvocationKernel {
     #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
     fn flush_live_ctx(&mut self) {
         if let Some(ctx) = self.live_ctx.take() {
+            // SAFETY: live_ctx points to the JitContext in the active CodeWindow's CTX page,
+            // valid for the duration of the JIT execution on this thread.
             let ctx = unsafe { &*ctx };
             let vm = &mut self.vm_arena.vm_mut(self.active_vm);
             vm.set_regs(ctx.regs);
@@ -1395,6 +1408,7 @@ impl InvocationKernel {
     pub fn active_reg(&self, idx: usize) -> u64 {
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         if let Some(ctx) = self.live_ctx {
+            // SAFETY: live_ctx is valid JitContext pointer (see flush_live_ctx).
             return unsafe { (*ctx).regs[idx] };
         }
         self.vm_arena.vm(self.active_vm).reg(idx)
@@ -1403,6 +1417,7 @@ impl InvocationKernel {
     pub fn set_active_reg(&mut self, idx: usize, val: u64) {
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         if let Some(ctx) = self.live_ctx {
+            // SAFETY: live_ctx is valid JitContext pointer (see flush_live_ctx).
             unsafe { (*ctx).regs[idx] = val };
             return;
         }
@@ -1413,6 +1428,7 @@ impl InvocationKernel {
     pub fn active_gas(&self) -> u64 {
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         if let Some(ctx) = self.live_ctx {
+            // SAFETY: live_ctx is valid JitContext pointer (see flush_live_ctx).
             return unsafe { (*ctx).gas.max(0) as u64 };
         }
         self.vm_arena.vm(self.active_vm).gas()
@@ -1488,6 +1504,7 @@ impl InvocationKernel {
                 && d.has_any_mapped()
                 && let Some(base_offset) = d.base_offset
             {
+                // SAFETY: wb is from window_pool (valid 4GB window).
                 unsafe {
                     BackingStore::unmap_pages(wb, base_offset, d.page_count);
                 }
@@ -1506,6 +1523,7 @@ impl InvocationKernel {
                 && let Some(base_offset) = d.base_offset
             {
                 let access = d.access.unwrap_or(Access::RO);
+                // SAFETY: wb is from window_pool (valid 4GB window).
                 unsafe {
                     self.backing
                         .map_pages(wb, base_offset, d.backing_offset, d.page_count, access);
@@ -1582,6 +1600,7 @@ impl InvocationKernel {
         // The live_ctx was set on the previous ecalli exit. kernel_resume()
         // wrote result regs via set_active_reg which updated JitContext directly.
         // Just set entry_pc and re-enter.
+        // SAFETY: ctx_raw points to the JitContext in the active CodeWindow's CTX page.
         let ctx = unsafe { &mut *ctx_raw };
         ctx.entry_pc = self.vm_arena.vm(self.active_vm).pc;
         ctx.exit_reason = 0;
@@ -1589,10 +1608,12 @@ impl InvocationKernel {
 
         // Signal state is already installed. Re-enter native.
         let entry = compiled.native_code.entry();
+        // SAFETY: entry is valid JIT code; ctx_raw is a valid JitContext.
         unsafe {
             entry(ctx_raw);
         }
 
+        // SAFETY: ctx_raw is still valid after JIT execution returns.
         let ctx = unsafe { &*ctx_raw };
         let exit_reason = ctx.exit_reason;
         let exit_arg = ctx.exit_arg;
@@ -1648,6 +1669,7 @@ impl InvocationKernel {
             entry(ctx_raw);
         }
 
+        // SAFETY: ctx_raw is still valid after JIT execution returns.
         let ctx = unsafe { &*ctx_raw };
         let exit_reason = ctx.exit_reason;
         let exit_arg = ctx.exit_arg;
@@ -1708,6 +1730,8 @@ impl InvocationKernel {
                 let addr = base_page as usize * crate::PVM_PAGE_SIZE as usize;
                 let len = d.page_count as usize * crate::PVM_PAGE_SIZE as usize;
                 if addr + len <= flat_mem.len() {
+                    // SAFETY: window_base is valid (active window); addr+len
+                    // is within both the window and flat_mem (checked above).
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             window_base.add(addr),
@@ -1745,6 +1769,8 @@ impl InvocationKernel {
                 let addr = base_page as usize * crate::PVM_PAGE_SIZE as usize;
                 let len = d.page_count as usize * crate::PVM_PAGE_SIZE as usize;
                 if addr + len <= interp.flat_mem.len() {
+                    // SAFETY: wb is the active window base; addr+len is within
+                    // both interp.flat_mem and the window (checked above).
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             interp.flat_mem.as_ptr().add(addr),
