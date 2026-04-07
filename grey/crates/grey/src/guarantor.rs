@@ -277,17 +277,13 @@ pub fn decode_assurance(data: &[u8]) -> Option<Assurance> {
     })
 }
 
-/// Handle a received guarantee from the network.
-/// Decode and store the guarantee for block inclusion.
-pub fn handle_received_guarantee(
-    data: &[u8],
-    guarantor_state: &mut GuarantorState,
-    _store: &Store,
-) {
-    // Decode: [report_hash(32)][timeslot(4)][cred_count(2)][creds...][report_len(4)][report...]
+/// Decode a guarantee from network bytes.
+///
+/// Format: `[report_hash(32)][timeslot(4)][cred_count(2)][creds...][report_len(4)][report...]`
+/// Returns `(guarantee, claimed_report_hash)` on success.
+pub fn decode_guarantee(data: &[u8]) -> Option<(Guarantee, [u8; 32])> {
     if data.len() < 32 + 4 + 2 {
-        tracing::warn!("Received guarantee too short");
-        return;
+        return None;
     }
 
     let mut pos = 0;
@@ -302,8 +298,7 @@ pub fn handle_received_guarantee(
     let mut credentials = Vec::with_capacity(cred_count);
     for _ in 0..cred_count {
         if pos + 2 + 64 > data.len() {
-            tracing::warn!("Received guarantee: truncated credentials");
-            return;
+            return None;
         }
         let idx = u16::from_le_bytes([data[pos], data[pos + 1]]);
         pos += 2;
@@ -313,31 +308,47 @@ pub fn handle_received_guarantee(
         credentials.push((idx, Ed25519Signature(sig)));
     }
 
-    // Decode the work report
     if pos + 4 > data.len() {
-        tracing::warn!("Received guarantee: missing report length");
-        return;
+        return None;
     }
     let report_len =
         u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
     pos += 4;
     if pos + report_len > data.len() {
-        tracing::warn!("Received guarantee: truncated report data");
-        return;
+        return None;
     }
     let report_data = &data[pos..pos + report_len];
 
     use scale::Decode;
-    let report = match WorkReport::decode(report_data) {
-        Ok((r, _)) => r,
-        Err(e) => {
-            tracing::warn!("Received guarantee: failed to decode report: {}", e);
+    let report = WorkReport::decode(report_data).ok()?.0;
+
+    Some((
+        Guarantee {
+            report,
+            timeslot,
+            credentials,
+        },
+        report_hash,
+    ))
+}
+
+/// Handle a received guarantee from the network.
+/// Decode and store the guarantee for block inclusion.
+pub fn handle_received_guarantee(
+    data: &[u8],
+    guarantor_state: &mut GuarantorState,
+    _store: &Store,
+) {
+    let (guarantee, report_hash) = match decode_guarantee(data) {
+        Some(g) => g,
+        None => {
+            tracing::warn!("Received guarantee: decode failed");
             return;
         }
     };
 
-    // Skip if we already have a pending guarantee for this report
-    let encoded = report.encode();
+    // Verify report hash matches
+    let encoded = guarantee.report.encode();
     let computed_hash = grey_crypto::blake2b_256(&encoded);
     if computed_hash.0 != report_hash {
         tracing::warn!(
@@ -360,17 +371,13 @@ pub fn handle_received_guarantee(
     tracing::info!(
         "Received guarantee: report_hash=0x{}, timeslot={}, creds={}, core={}",
         hex::encode(&report_hash[..8]),
-        timeslot,
-        credentials.len(),
-        report.core_index,
+        guarantee.timeslot,
+        guarantee.credentials.len(),
+        guarantee.report.core_index,
     );
 
     // Store for block inclusion
-    guarantor_state.pending_guarantees.push(Guarantee {
-        report,
-        timeslot,
-        credentials,
-    });
+    guarantor_state.pending_guarantees.push(guarantee);
 
     // Mark core as available for assurance generation
     guarantor_state.available_cores.insert(
@@ -584,6 +591,69 @@ mod tests {
         assert_eq!(decoded.bitfield, assurance.bitfield);
         assert_eq!(decoded.validator_index, assurance.validator_index);
         assert_eq!(decoded.signature.0, assurance.signature.0);
+    }
+
+    #[test]
+    fn test_guarantee_encode_decode() {
+        let report = WorkReport {
+            package_spec: AvailabilitySpec {
+                package_hash: Hash([10u8; 32]),
+                bundle_length: 100,
+                erasure_root: Hash([30u8; 32]),
+                exports_root: Hash([40u8; 32]),
+                exports_count: 2,
+                erasure_shards: 0,
+            },
+            context: RefinementContext {
+                anchor: Hash([50u8; 32]),
+                state_root: Hash([60u8; 32]),
+                beefy_root: Hash([70u8; 32]),
+                lookup_anchor: Hash([80u8; 32]),
+                lookup_anchor_timeslot: 5,
+                prerequisites: vec![],
+            },
+            core_index: 0,
+            authorizer_hash: Hash([90u8; 32]),
+            auth_gas_used: 100,
+            auth_output: vec![],
+            segment_root_lookup: std::collections::BTreeMap::new(),
+            results: vec![WorkDigest {
+                service_id: 1,
+                code_hash: Hash([1u8; 32]),
+                payload_hash: Hash([2u8; 32]),
+                accumulate_gas: 1000,
+                result: WorkResult::Ok(vec![0xAB]),
+                gas_used: 500,
+                imports_count: 0,
+                extrinsics_count: 0,
+                extrinsics_size: 0,
+                exports_count: 0,
+            }],
+        };
+
+        let guarantee = Guarantee {
+            report,
+            timeslot: 42,
+            credentials: vec![
+                (0, Ed25519Signature([11u8; 64])),
+                (1, Ed25519Signature([22u8; 64])),
+            ],
+        };
+
+        let encoded = encode_guarantee(&guarantee);
+        let (decoded, claimed_hash) = decode_guarantee(&encoded).expect("decode should succeed");
+
+        assert_eq!(decoded.timeslot, guarantee.timeslot);
+        assert_eq!(decoded.credentials.len(), 2);
+        assert_eq!(decoded.credentials[0].0, 0);
+        assert_eq!(decoded.credentials[1].0, 1);
+        assert_eq!(decoded.report.core_index, 0);
+        assert_eq!(decoded.report.results.len(), 1);
+
+        // Verify the claimed hash matches the actual report hash
+        let report_encoded = decoded.report.encode();
+        let computed_hash = grey_crypto::blake2b_256(&report_encoded);
+        assert_eq!(claimed_hash, computed_hash.0);
     }
 
     #[test]
