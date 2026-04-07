@@ -53,3 +53,90 @@ pub fn update_authorizations(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use grey_types::config::Config;
+
+    fn h(n: u8) -> Hash {
+        Hash([n; 32])
+    }
+
+    #[test]
+    fn test_append_from_queue() {
+        let config = Config::tiny(); // O=8, Q=80
+        let mut pools = vec![vec![h(1)]; 2];
+        let queues = vec![vec![h(10); 80], vec![h(20); 80]];
+        let input = AuthorizationInput {
+            slot: 0,
+            auths: vec![],
+        };
+        update_authorizations(&config, &mut pools, &queues, &input);
+        // Each pool should have original + new from queue
+        assert_eq!(pools[0].len(), 2);
+        assert_eq!(pools[0][1], h(10));
+        assert_eq!(pools[1][1], h(20));
+    }
+
+    #[test]
+    fn test_remove_used_auth() {
+        let config = Config::tiny();
+        let mut pools = vec![vec![h(1), h(2), h(3)]];
+        let queues = vec![vec![h(10); 80]];
+        let input = AuthorizationInput {
+            slot: 0,
+            auths: vec![(0, h(2))], // remove h(2) from core 0
+        };
+        update_authorizations(&config, &mut pools, &queues, &input);
+        // h(2) removed, h(10) appended: [h(1), h(3), h(10)]
+        assert!(!pools[0].contains(&h(2)));
+        assert!(pools[0].contains(&h(1)));
+        assert!(pools[0].contains(&h(3)));
+        assert!(pools[0].contains(&h(10)));
+    }
+
+    #[test]
+    fn test_pool_capped_at_o() {
+        let config = Config::tiny(); // O=8
+        let mut pools = vec![(0..8u8).map(h).collect::<Vec<_>>()]; // full pool
+        let queues = vec![vec![h(99); 80]];
+        let input = AuthorizationInput {
+            slot: 0,
+            auths: vec![],
+        };
+        update_authorizations(&config, &mut pools, &queues, &input);
+        // Pool was 8, added 1 = 9, trimmed to 8
+        assert_eq!(pools[0].len(), 8);
+        // Oldest removed, newest kept
+        assert_eq!(*pools[0].last().unwrap(), h(99));
+    }
+
+    #[test]
+    fn test_queue_index_wraps() {
+        let config = Config::tiny(); // Q=80
+        let mut pools = vec![vec![]];
+        let mut queue = vec![h(0); 80];
+        queue[5] = h(55); // slot 5 mod 80 = 5
+        let queues = vec![queue];
+        let input = AuthorizationInput {
+            slot: 5,
+            auths: vec![],
+        };
+        update_authorizations(&config, &mut pools, &queues, &input);
+        assert_eq!(pools[0], vec![h(55)]);
+    }
+
+    #[test]
+    fn test_empty_queues_no_append() {
+        let config = Config::tiny();
+        let mut pools = vec![vec![h(1)]];
+        let queues: Vec<Vec<Hash>> = vec![vec![]]; // empty queue
+        let input = AuthorizationInput {
+            slot: 0,
+            auths: vec![],
+        };
+        update_authorizations(&config, &mut pools, &queues, &input);
+        assert_eq!(pools[0], vec![h(1)]); // unchanged
+    }
+}
