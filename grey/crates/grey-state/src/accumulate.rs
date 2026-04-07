@@ -1395,16 +1395,8 @@ fn update_statistics(
             entry.extrinsic_count += digest.extrinsics_count as u32;
             entry.extrinsic_size += digest.extrinsics_size as u64;
             entry.exports += digest.exports_count as u32;
-        }
-    }
-
-    // N(s) = count of work-item digests for service s in accumulated reports
-    for report in reports {
-        for digest in &report.results {
-            stat_map
-                .entry(digest.service_id)
-                .or_default()
-                .accumulate_count += 1;
+            // N(s) = count of work-item digests for service s
+            entry.accumulate_count += 1;
         }
     }
 
