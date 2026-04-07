@@ -38,6 +38,14 @@ struct KeyFile {
     ed25519_public: String,
 }
 
+/// Decode a hex-encoded 32-byte seed, returning a descriptive error on failure.
+fn decode_hex_seed(hex_str: &str, name: &str) -> Result<[u8; 32], KeystoreError> {
+    hex::decode(hex_str)
+        .map_err(|e| KeystoreError::Io(format!("invalid {name} hex: {e}")))?
+        .try_into()
+        .map_err(|_| KeystoreError::Io(format!("{name} seed must be 32 bytes")))
+}
+
 fn derive_domain_separated_seed(
     master_seed: &[u8; 64],
     validator_index: u16,
@@ -122,23 +130,12 @@ impl Keystore {
         let key_file: KeyFile =
             serde_json::from_str(&json).map_err(|e| KeystoreError::Io(e.to_string()))?;
 
-        let ed25519_seed: [u8; 32] = hex::decode(&key_file.ed25519_seed)
-            .map_err(|e| KeystoreError::Io(e.to_string()))?
-            .try_into()
-            .map_err(|_| KeystoreError::Io("invalid ed25519 seed length".into()))?;
-
-        let bandersnatch_seed: [u8; 32] = hex::decode(&key_file.bandersnatch_seed)
-            .map_err(|e| KeystoreError::Io(e.to_string()))?
-            .try_into()
-            .map_err(|_| KeystoreError::Io("invalid bandersnatch seed length".into()))?;
-
-        let bls_seed: [u8; 32] = if key_file.bls_seed.is_empty() {
+        let ed25519_seed = decode_hex_seed(&key_file.ed25519_seed, "ed25519")?;
+        let bandersnatch_seed = decode_hex_seed(&key_file.bandersnatch_seed, "bandersnatch")?;
+        let bls_seed = if key_file.bls_seed.is_empty() {
             [0u8; 32] // Legacy files without BLS seed
         } else {
-            hex::decode(&key_file.bls_seed)
-                .map_err(|e| KeystoreError::Io(e.to_string()))?
-                .try_into()
-                .map_err(|_| KeystoreError::Io("invalid bls seed length".into()))?
+            decode_hex_seed(&key_file.bls_seed, "bls")?
         };
 
         Ok((ed25519_seed, bandersnatch_seed, bls_seed))
@@ -187,20 +184,10 @@ impl Keystore {
         bandersnatch_hex: &str,
         bls_hex: &str,
     ) -> Result<PathBuf, KeystoreError> {
-        let ed25519_seed: [u8; 32] = hex::decode(ed25519_hex.trim_start_matches("0x"))
-            .map_err(|e| KeystoreError::Io(format!("invalid ed25519 hex: {e}")))?
-            .try_into()
-            .map_err(|_| KeystoreError::Io("ed25519 seed must be 32 bytes".into()))?;
-
-        let bandersnatch_seed: [u8; 32] = hex::decode(bandersnatch_hex.trim_start_matches("0x"))
-            .map_err(|e| KeystoreError::Io(format!("invalid bandersnatch hex: {e}")))?
-            .try_into()
-            .map_err(|_| KeystoreError::Io("bandersnatch seed must be 32 bytes".into()))?;
-
-        let bls_seed: [u8; 32] = hex::decode(bls_hex.trim_start_matches("0x"))
-            .map_err(|e| KeystoreError::Io(format!("invalid bls hex: {e}")))?
-            .try_into()
-            .map_err(|_| KeystoreError::Io("bls seed must be 32 bytes".into()))?;
+        let ed25519_seed = decode_hex_seed(ed25519_hex.trim_start_matches("0x"), "ed25519")?;
+        let bandersnatch_seed =
+            decode_hex_seed(bandersnatch_hex.trim_start_matches("0x"), "bandersnatch")?;
+        let bls_seed = decode_hex_seed(bls_hex.trim_start_matches("0x"), "bls")?;
 
         // Derive Ed25519 public key from seed
         let ed25519_keypair = grey_crypto::ed25519::Ed25519Keypair::from_seed(&ed25519_seed);

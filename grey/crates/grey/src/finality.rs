@@ -303,45 +303,19 @@ impl GrandpaState {
 
     /// Add a received prevote. Returns true if the threshold was just reached.
     pub fn add_prevote(&mut self, vote: Vote) -> bool {
-        // Check cross-round equivocation via archive (catches votes from past rounds)
-        let archive_key = (vote.round, vote.validator_index);
-        if let Some(&archived_hash) = self.prevote_archive.get(&archive_key) {
-            if archived_hash != vote.block_hash {
-                self.equivocations.insert(vote.validator_index);
-                tracing::warn!(
-                    "GRANDPA cross-round equivocation: validator {} prevoted for conflicting blocks in round {}",
-                    vote.validator_index,
-                    vote.round
-                );
-            }
-            return false; // Already archived a prevote from this validator for this round
-        }
-
-        if vote.round != self.round {
-            // Archive the vote even though it's for a different round
-            self.prevote_archive.insert(archive_key, vote.block_hash);
-            // Buffer future-round votes for replay when we advance
-            if vote.round > self.round {
-                self.pending_future_prevotes.push(vote);
-            }
+        if !check_and_archive_vote(
+            &mut self.prevote_archive,
+            &mut self.pending_future_prevotes,
+            &self.prevotes,
+            &mut self.equivocations,
+            self.round,
+            &vote,
+            "prevoted",
+        ) {
             return false;
         }
-
-        // Check for equivocation within current round
-        if let Some(existing) = self.prevotes.get(&vote.validator_index) {
-            if existing.block_hash != vote.block_hash {
-                self.equivocations.insert(vote.validator_index);
-                tracing::warn!(
-                    "GRANDPA equivocation detected: validator {} prevoted for two blocks in round {}",
-                    vote.validator_index,
-                    self.round
-                );
-            }
-            return false; // Already have a prevote from this validator
-        }
-
-        // Archive and add to current round
-        self.prevote_archive.insert(archive_key, vote.block_hash);
+        self.prevote_archive
+            .insert((self.round, vote.validator_index), vote.block_hash);
         self.prevotes.insert(vote.validator_index, vote);
         self.prevote_count() == self.threshold()
     }
@@ -393,40 +367,15 @@ impl GrandpaState {
     /// violate this relationship — in GRANDPA, a validator must not precommit to
     /// a block that is not on the chain selected by prevotes.
     pub fn add_precommit(&mut self, vote: Vote) -> Option<(Hash, Timeslot)> {
-        // Check cross-round equivocation via archive
-        let archive_key = (vote.round, vote.validator_index);
-        if let Some(&archived_hash) = self.precommit_archive.get(&archive_key) {
-            if archived_hash != vote.block_hash {
-                self.equivocations.insert(vote.validator_index);
-                tracing::warn!(
-                    "GRANDPA cross-round equivocation: validator {} precommitted for conflicting blocks in round {}",
-                    vote.validator_index,
-                    vote.round
-                );
-            }
-            return None; // Already archived
-        }
-
-        if vote.round != self.round {
-            // Archive the vote even though it's for a different round
-            self.precommit_archive.insert(archive_key, vote.block_hash);
-            // Buffer future-round votes for replay when we advance
-            if vote.round > self.round {
-                self.pending_future_precommits.push(vote);
-            }
-            return None;
-        }
-
-        // Check for equivocation within current round
-        if let Some(existing) = self.precommits.get(&vote.validator_index) {
-            if existing.block_hash != vote.block_hash {
-                self.equivocations.insert(vote.validator_index);
-                tracing::warn!(
-                    "GRANDPA equivocation detected: validator {} precommitted for two blocks in round {}",
-                    vote.validator_index,
-                    self.round
-                );
-            }
+        if !check_and_archive_vote(
+            &mut self.precommit_archive,
+            &mut self.pending_future_precommits,
+            &self.precommits,
+            &mut self.equivocations,
+            self.round,
+            &vote,
+            "precommitted",
+        ) {
             return None;
         }
 
@@ -445,11 +394,9 @@ impl GrandpaState {
             return None;
         }
 
-        // Archive and add to current round
-        self.precommit_archive.insert(archive_key, vote.block_hash);
+        self.precommit_archive
+            .insert((self.round, vote.validator_index), vote.block_hash);
         self.precommits.insert(vote.validator_index, vote);
-
-        // Check if we've reached finality
         self.check_finality()
     }
 
@@ -525,41 +472,16 @@ impl GrandpaState {
         self.prevoted = false;
         self.precommitted = false;
 
-        // Replay buffered future prevotes that match the new round
-        let prevotes: Vec<Vote> = self.pending_future_prevotes.drain(..).collect();
-        let mut replayed_prevotes = 0u32;
-        let mut remaining_prevotes = Vec::new();
-        for vote in prevotes {
-            if vote.round == self.round {
-                // Re-add to current round (archive already has it)
-                use std::collections::btree_map::Entry;
-                if let Entry::Vacant(e) = self.prevotes.entry(vote.validator_index) {
-                    e.insert(vote);
-                    replayed_prevotes += 1;
-                }
-            } else if vote.round > self.round {
-                remaining_prevotes.push(vote);
-            }
-            // Drop votes for past rounds
-        }
-        self.pending_future_prevotes = remaining_prevotes;
-
-        // Replay buffered future precommits that match the new round
-        let precommits: Vec<Vote> = self.pending_future_precommits.drain(..).collect();
-        let mut replayed_precommits = 0u32;
-        let mut remaining_precommits = Vec::new();
-        for vote in precommits {
-            if vote.round == self.round {
-                use std::collections::btree_map::Entry;
-                if let Entry::Vacant(e) = self.precommits.entry(vote.validator_index) {
-                    e.insert(vote);
-                    replayed_precommits += 1;
-                }
-            } else if vote.round > self.round {
-                remaining_precommits.push(vote);
-            }
-        }
-        self.pending_future_precommits = remaining_precommits;
+        let replayed_prevotes = replay_buffered_votes(
+            &mut self.pending_future_prevotes,
+            &mut self.prevotes,
+            self.round,
+        );
+        let replayed_precommits = replay_buffered_votes(
+            &mut self.pending_future_precommits,
+            &mut self.precommits,
+            self.round,
+        );
 
         if replayed_prevotes > 0 || replayed_precommits > 0 {
             tracing::info!(
@@ -579,6 +501,86 @@ impl GrandpaState {
             .values()
             .any(|&(count, _)| count >= self.threshold())
     }
+}
+
+/// Common vote validation: archive equivocation check, round filtering, current-round
+/// equivocation check. Returns true if the vote passed all checks and should be added
+/// to the current round. The caller is responsible for inserting into the archive and
+/// current-round map after any additional vote-type-specific checks.
+fn check_and_archive_vote(
+    archive: &mut BTreeMap<(u64, ValidatorIndex), Hash>,
+    pending: &mut Vec<Vote>,
+    current: &BTreeMap<ValidatorIndex, Vote>,
+    equivocations: &mut BTreeSet<ValidatorIndex>,
+    current_round: u64,
+    vote: &Vote,
+    vote_type_name: &str,
+) -> bool {
+    let archive_key = (vote.round, vote.validator_index);
+
+    // Check cross-round equivocation via archive (catches votes from past rounds)
+    if let Some(&archived_hash) = archive.get(&archive_key) {
+        if archived_hash != vote.block_hash {
+            equivocations.insert(vote.validator_index);
+            tracing::warn!(
+                "GRANDPA cross-round equivocation: validator {} {} for conflicting blocks in round {}",
+                vote.validator_index,
+                vote_type_name,
+                vote.round
+            );
+        }
+        return false;
+    }
+
+    // Different round: archive and buffer for future replay
+    if vote.round != current_round {
+        archive.insert(archive_key, vote.block_hash);
+        if vote.round > current_round {
+            pending.push(vote.clone());
+        }
+        return false;
+    }
+
+    // Check for equivocation within current round
+    if let Some(existing) = current.get(&vote.validator_index) {
+        if existing.block_hash != vote.block_hash {
+            equivocations.insert(vote.validator_index);
+            tracing::warn!(
+                "GRANDPA equivocation detected: validator {} {} for two blocks in round {}",
+                vote.validator_index,
+                vote_type_name,
+                current_round
+            );
+        }
+        return false;
+    }
+
+    true
+}
+
+/// Replay buffered future-round votes that match the target round.
+/// Returns the number of votes replayed. Votes for later rounds are kept; past rounds are dropped.
+fn replay_buffered_votes(
+    pending: &mut Vec<Vote>,
+    current: &mut BTreeMap<ValidatorIndex, Vote>,
+    round: u64,
+) -> u32 {
+    let votes = std::mem::take(pending);
+    let mut replayed = 0u32;
+    let mut remaining = Vec::new();
+    for vote in votes {
+        if vote.round == round {
+            use std::collections::btree_map::Entry;
+            if let Entry::Vacant(e) = current.entry(vote.validator_index) {
+                e.insert(vote);
+                replayed += 1;
+            }
+        } else if vote.round > round {
+            remaining.push(vote);
+        }
+    }
+    *pending = remaining;
+    replayed
 }
 
 /// Sign a GRANDPA vote.
