@@ -1,12 +1,8 @@
-BOOK_BIN := .lake/build/bin/jarbook
-
 .PHONY: book clean test
 
-book: $(BOOK_BIN)
-	$(BOOK_BIN)
-
-$(BOOK_BIN):
+book:
 	lake build jarbook
+	.lake/build/bin/jarbook
 
 test:
 	lake build jartest

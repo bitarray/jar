@@ -10,7 +10,7 @@ set_option verso.docstring.allowMissing true
 The JAVM extends the base PVM with an seL4-style capability system. Code and data
 are separate (Harvard architecture) — a CODE cap is opaque, you cannot read its
 instructions as data. CALL is a synchronous function call between VMs, not a process
-spawn. Any protocol capability (FETCH, STORAGE_R, etc.) can be transparently
+spawn. Any protocol capability (FETCH, STORAGE\_R, etc.) can be transparently
 replaced with a CALLABLE to a wrapper VM for policy enforcement.
 
 Five program capability types govern memory, code, and VM ownership. Protocol
@@ -55,7 +55,7 @@ UNTYPED is a bump allocator for physical page allocation. Copyable — multiple 
 can hold copies and allocate independently. CALL on UNTYPED = RETYPE: carves pages
 from the pool and returns an unmapped DATA cap at a caller-specified destination
 slot. Pages are never returned (leaky by design). Placed at fixed slot 254; omitted
-when `memory_pages == 0`.
+when `memory\_pages == 0`.
 
 {docstring Jar.PVM.Cap.UntypedCap}
 
@@ -72,7 +72,7 @@ a new VM with a HANDLE. The CREATE bitmask copies caps from the CODE cap's CNode
 ## HANDLE and CALLABLE: VM References
 
 HANDLE is the unique owner of a VM — not copyable, provides CALL plus management
-operations via ecall (DOWNGRADE, SET_MAX_GAS, DIRTY, RESUME). CALLABLE is a
+operations via ecall (DOWNGRADE, SET\_MAX\_GAS, DIRTY, RESUME). CALLABLE is a
 copyable entry point — CALL only. DOWNGRADE(HANDLE) creates a CALLABLE with the
 HANDLE's current gas limit baked in. Different CALLABLEs to the same VM can have
 different gas ceilings.
@@ -100,10 +100,10 @@ The child code is identical either way.
 
 Cap slot references are u32 with byte-packed HANDLE chain indirection (3 levels max):
 
-- **byte 0**: target cap slot (0-255)
-- **byte 1**: indirection level 0 (0x00 = end of chain, 1-255 = HANDLE slot)
-- **byte 2**: indirection level 1
-- **byte 3**: indirection level 2
+- *byte 0*: target cap slot (0-255)
+- *byte 1*: indirection level 0 (0x00 = end of chain, 1-255 = HANDLE slot)
+- *byte 2*: indirection level 1
+- *byte 3*: indirection level 2
 
 Slot 0 (IPC) cannot be used for indirection (byte=0x00=end of chain).
 `(u8 as u32)` zero-extended = local slot, backward compatible. Each intermediate
@@ -118,17 +118,17 @@ RESUME).
 
 Each VM has a 256-slot cap table (u8 index), forming a CNode. Slot layout:
 
-- **\[0\]**: IPC slot — CALL on \[0\] = REPLY; caps passed via CALL arrive here
-- **\[1..28\]**: Protocol caps (GAS=1, FETCH=2, ..., QUOTA=28; gaps at 10-14 reserved)
-- **\[29..63\]**: Program caps (within CREATE bitmask range, u64 covers slots 0-63)
-- **\[64..253\]**: Program caps
-- **\[254\]**: UNTYPED (fixed slot, omitted when memory_pages == 0)
-- **\[255\]**: free
+- \[0\]: IPC slot — CALL on \[0\] = REPLY; caps passed via CALL arrive here
+- \[1..28\]: Protocol caps (GAS=1, FETCH=2, ..., QUOTA=28; gaps at 10-14 reserved)
+- \[29..63\]: Program caps (within CREATE bitmask range, u64 covers slots 0-63)
+- \[64..253\]: Program caps
+- \[254\]: UNTYPED (fixed slot, omitted when memory\_pages == 0)
+- \[255\]: free
 
 Child VMs receive caps from the parent: slots 0-63 via CREATE bitmask (from the
 CODE cap's CNode, copyable types only), slots 64-254 via MOVE after creation.
 
-The per-CNode **original bitmap** (256 bits) tracks which protocol cap slots are
+The per-CNode *original bitmap* (256 bits) tracks which protocol cap slots are
 unmodified. The compiler uses this for fast-path inlining of protocol calls.
 
 {docstring Jar.PVM.Cap.ipcSlot}
@@ -148,13 +148,13 @@ unmodified. The compiler uses this for fast-path inlining of protocol calls.
 # VM Lifecycle
 
 VMs follow a strict state machine: IDLE (can be CALLed) -> RUNNING (executing) ->
-WAITING_FOR_REPLY (blocked at CALL) or HALTED (terminal) or FAULTED (can be
+WAITING\_FOR\_REPLY (blocked at CALL) or HALTED (terminal) or FAULTED (can be
 RESUMEd). Only IDLE VMs can be CALLed — this prevents reentrancy by construction.
 Call graphs are acyclic at all times.
 
-CALL suspends the caller (RUNNING -> WAITING_FOR_REPLY), transfers gas to the
+CALL suspends the caller (RUNNING -> WAITING\_FOR\_REPLY), transfers gas to the
 callee, and starts the callee (IDLE -> RUNNING). REPLY pops the call frame, returns
-unused gas, and resumes the caller (WAITING_FOR_REPLY -> RUNNING).
+unused gas, and resumes the caller (WAITING\_FOR\_REPLY -> RUNNING).
 
 RESUME restarts a FAULTED VM (FAULTED -> RUNNING), transferring fresh gas. Registers
 and PC are preserved — the faulting instruction is retried. This enables demand
@@ -170,12 +170,12 @@ paging: the parent maps the missing page via indirection, then RESUMEs the child
 
 Two PVM instructions for all capability operations:
 
-**ecalli(imm)**: CALL a cap. The u32 immediate encodes the subject cap slot with
+*ecalli(imm)*: CALL a cap. The u32 immediate encodes the subject cap slot with
 indirection. phi\[7..11\] = 5 args, phi\[12\] = object cap (u32, indirection).
 The compiler can optimize local protocol cap calls via the original bitmap (inline
 the handler if the slot is unmodified, generic dispatch otherwise).
 
-**ecall**: management ops + dynamic CALL. phi\[11\] = operation code, phi\[12\] packs
+*ecall*: management ops + dynamic CALL. phi\[11\] = operation code, phi\[12\] packs
 subject (low u32) and object (high u32) with indirection. Always goes to kernel
 dispatch — compiler cannot inline.
 
@@ -191,8 +191,8 @@ phi\[7..10\] have the same meaning in both instructions.
 
 Protocol cap slots are numbered 1-28 (slot 0 is IPC/REPLY). Absent caps are empty
 slots (CALL returns WHAT). Services available in both refine and accumulate: GAS (1),
-FETCH (2), COMPILE (9), CHECKPOINT (18). Accumulate-only: STORAGE_R (4),
-STORAGE_W (5), INFO (6), SERVICE_NEW (19), TRANSFER (21), OUTPUT (26), and others.
+FETCH (2), COMPILE (9), CHECKPOINT (18). Accumulate-only: STORAGE\_R (4),
+STORAGE\_W (5), INFO (6), SERVICE\_NEW (19), TRANSFER (21), OUTPUT (26), and others.
 Refine-only: HISTORICAL (7), EXPORT (8).
 
 {docstring Jar.PVM.Cap.protocolGas}

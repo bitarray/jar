@@ -10,9 +10,9 @@ set_option verso.docstring.allowMissing true
 
 Service entry points that the protocol invokes via the PVM (GP §11, Appendix B).
 
-# Balance
+# Storage Affordability
 
-{docstring Jar.Services.minimumBalance}
+{docstring Jar.Services.canAffordStorage}
 
 # Is-Authorized
 
@@ -41,6 +41,3 @@ Invoked when a deferred transfer arrives at a service during accumulation.
 
 {docstring Jar.Services.onTransfer}
 
-# Auditing
-
-{docstring Jar.Services.auditWorkReport}
