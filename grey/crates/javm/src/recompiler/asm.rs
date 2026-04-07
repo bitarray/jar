@@ -963,6 +963,21 @@ impl Assembler {
         self.alu_rr64(0x85, a, b);
     }
 
+    /// `test byte [base + disp32], imm8` — test memory byte against immediate bitmask.
+    #[inline(always)]
+    pub fn test_byte_mem_disp32(&mut self, base: Reg, disp: i32, imm: u8) {
+        let mut ib = InstBuf::new();
+        if base.needs_rex() {
+            ib.push(0x41 | base.hi());
+        }
+        ib.push(0xF6); // TEST r/m8, imm8
+        // ModRM: mod=10 (disp32), reg=000 (/0 = TEST), rm=base.lo()
+        ib.push(0x80 | base.lo());
+        ib.push_i32(disp);
+        ib.push(imm);
+        self.flush_instbuf(ib);
+    }
+
     #[inline(always)]
     pub fn add_rr32(&mut self, dst: Reg, src: Reg) {
         self.alu_rr32(0x01, dst, src);

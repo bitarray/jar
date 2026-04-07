@@ -1576,6 +1576,7 @@ impl InvocationKernel {
                 _pad2: 0,
                 max_heap_pages: 0,
                 _pad3: 0,
+                original_bitmap: *vm.cap_table.original_bitmap(),
             });
         }
 

@@ -63,6 +63,10 @@ pub struct JitContext {
     /// Maximum heap pages — grow_heap refuses beyond this (offset 208).
     pub max_heap_pages: u32,
     pub _pad3: u32,
+    /// Original cap bitmap from the active VM's CapTable (offset 216, 32 bytes).
+    /// Bit N is set if cap slot N holds its original kernel-populated protocol cap.
+    /// Used by codegen to inline protocol cap handlers (e.g., GAS) on the fast path.
+    pub original_bitmap: [u8; 32],
 }
 
 /// Compiled native code buffer (mmap'd as executable).
@@ -674,6 +678,7 @@ impl RecompiledPvm {
                 _pad2: 0,
                 max_heap_pages: 0,
                 _pad3: 0,
+                original_bitmap: [0u8; 32],
             });
         }
         // SAFETY: ctx_raw was just initialized above; valid for the lifetime of flat_memory.
@@ -1061,8 +1066,8 @@ impl RecompiledPvm {
 mod tests {
     use super::*;
     use codegen::{
-        CTX_CODE_BASE, CTX_DISPATCH_TABLE, CTX_ENTRY_PC, CTX_EXIT_ARG, CTX_EXIT_REASON, CTX_GAS,
-        CTX_OFFSET, CTX_PC, CTX_REGS,
+        CTX_BITMAP, CTX_CODE_BASE, CTX_DISPATCH_TABLE, CTX_ENTRY_PC, CTX_EXIT_ARG, CTX_EXIT_REASON,
+        CTX_GAS, CTX_OFFSET, CTX_PC, CTX_REGS,
     };
 
     #[test]
@@ -1094,6 +1099,7 @@ mod tests {
             _pad2: 0,
             max_heap_pages: 0,
             _pad3: 0,
+            original_bitmap: [0u8; 32],
         };
         let base = &ctx as *const JitContext as usize;
         // Convert codegen offset (negative from R15) to struct offset:
@@ -1116,6 +1122,10 @@ mod tests {
         assert_eq!(
             &ctx.code_base as *const _ as usize - base,
             so(CTX_CODE_BASE)
+        );
+        assert_eq!(
+            &ctx.original_bitmap as *const _ as usize - base,
+            so(CTX_BITMAP)
         );
     }
 
