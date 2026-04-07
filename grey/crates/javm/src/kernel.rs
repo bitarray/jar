@@ -13,12 +13,14 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::GAS_PER_PAGE;
-use crate::backing::{BackingStore, CodeWindow};
+use crate::backing::BackingStore;
 use crate::cap::{
     Access, CallableCap, Cap, CapTable, CodeCap, DataCap, HandleCap, IPC_SLOT, UntypedCap,
 };
 use crate::program::{self, CapEntryType, CapManifestEntry, ParsedBlob};
 use crate::vm_pool::{CallFrame, MAX_CODE_CAPS, MAX_VMS, VmInstance, VmState};
+#[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+use crate::vm_pool::WindowPool;
 
 /// ecalli immediate ranges.
 const CALL_RANGE_END: u32 = 0x100;
@@ -88,6 +90,13 @@ pub struct InvocationKernel {
     /// the JitContext ↔ VmInstance register copy on each ecalli.
     #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
     live_ctx: Option<*mut crate::recompiler::JitContext>,
+    /// Window pool: N pre-allocated 4GB virtual windows with LRU eviction.
+    /// Windows are assigned to VMs on CALL/RESUME and evicted when full.
+    #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+    window_pool: WindowPool,
+    /// Index of the window currently assigned to the active VM.
+    #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+    active_window: usize,
 }
 
 impl InvocationKernel {
@@ -112,6 +121,10 @@ impl InvocationKernel {
         let mem_cycles = crate::compute_mem_cycles(parsed.header.memory_pages);
         let untyped = Arc::new(UntypedCap::new(parsed.header.memory_pages));
 
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        let window_pool =
+            WindowPool::new(crate::vm_pool::WINDOW_POOL_SIZE).ok_or(KernelError::MemoryError)?;
+
         let mut kernel = Self {
             backing,
             code_caps: Vec::with_capacity(MAX_CODE_CAPS),
@@ -125,6 +138,10 @@ impl InvocationKernel {
             recompiler_resume_cap: None,
             #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
             live_ctx: None,
+            #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+            window_pool,
+            #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+            active_window: 0,
         };
 
         // Build VM 0's cap table: protocol caps + manifest caps
@@ -166,20 +183,30 @@ impl InvocationKernel {
             _ => return Err(KernelError::InvalidBlob),
         };
 
-        // Map DATA caps into the invoke CODE cap's window
-        let invoke_code_cap = &kernel.code_caps[invoke_code_id as usize];
-        for (base_page, backing_offset, page_count, access) in &data_caps_to_map {
-            unsafe {
-                if !kernel.backing.map_pages(
-                    invoke_code_cap.window.base(),
-                    *base_page,
-                    *backing_offset,
-                    *page_count,
-                    *access,
-                ) {
-                    return Err(KernelError::MemoryError);
+        // Assign window 0 to VM 0 and map DATA caps into it.
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        {
+            let assignment = kernel.window_pool.assign_window(0, 0);
+            kernel.active_window = assignment.window_idx;
+            let window_base = kernel.window_pool.window(assignment.window_idx).base();
+            for (base_page, backing_offset, page_count, access) in &data_caps_to_map {
+                unsafe {
+                    if !kernel.backing.map_pages(
+                        window_base,
+                        *base_page,
+                        *backing_offset,
+                        *page_count,
+                        *access,
+                    ) {
+                        return Err(KernelError::MemoryError);
+                    }
                 }
             }
+        }
+        // Non-recompiler platforms: DATA cap mapping is handled at interpreter run time.
+        #[cfg(not(all(feature = "std", target_os = "linux", target_arch = "x86_64")))]
+        {
+            let _ = &data_caps_to_map;
         }
 
         // Give VM 0 the UNTYPED cap at slot 254 (fixed slot, just below IPC).
@@ -250,12 +277,8 @@ impl InvocationKernel {
                     KernelError::CompileError
                 })?;
 
-                // Allocate 4GB virtual window
-                let window = CodeWindow::new().ok_or(KernelError::MemoryError)?;
-
                 let code_cap = Arc::new(CodeCap {
                     id,
-                    window,
                     compiled,
                     jump_table: code_blob.jump_table,
                     bitmask: code_blob.bitmask,
@@ -868,28 +891,19 @@ impl InvocationKernel {
             }
         };
 
-        let vm = &self.vms[self.active_vm as usize];
-        let code_cap_id = vm.code_cap_id;
+        let wb = self.active_window_base();
         let vm = &mut self.vms[self.active_vm as usize];
         match vm.cap_table.get_mut(cap_idx) {
             Some(Cap::Data(d)) => {
                 // Unmap previous mapping if remapping
                 if let Some((old_base, _)) = d.map(base_page, access) {
-                    let code_cap = &self.code_caps[code_cap_id as usize];
                     unsafe {
-                        BackingStore::unmap_pages(code_cap.window.base(), old_base, d.page_count);
+                        BackingStore::unmap_pages(wb, old_base, d.page_count);
                     }
                 }
                 // Map new location
-                let code_cap = &self.code_caps[code_cap_id as usize];
                 unsafe {
-                    self.backing.map_pages(
-                        code_cap.window.base(),
-                        base_page,
-                        d.backing_offset,
-                        d.page_count,
-                        access,
-                    );
+                    self.backing.map_pages(wb, base_page, d.backing_offset, d.page_count, access);
                 }
             }
             _ => {
@@ -900,14 +914,13 @@ impl InvocationKernel {
     }
 
     fn mgmt_unmap(&mut self, cap_idx: u8) -> DispatchResult {
-        let code_cap_id = self.vms[self.active_vm as usize].code_cap_id;
+        let wb = self.active_window_base();
         let vm = &mut self.vms[self.active_vm as usize];
         match vm.cap_table.get_mut(cap_idx) {
             Some(Cap::Data(d)) => {
                 if let Some((base_page, _)) = d.unmap() {
-                    let code_cap = &self.code_caps[code_cap_id as usize];
                     unsafe {
-                        BackingStore::unmap_pages(code_cap.window.base(), base_page, d.page_count);
+                        BackingStore::unmap_pages(wb, base_page, d.page_count);
                     }
                 }
             }
@@ -956,7 +969,7 @@ impl InvocationKernel {
     }
 
     fn mgmt_drop(&mut self, cap_idx: u8) -> DispatchResult {
-        let code_cap_id = self.vms[self.active_vm as usize].code_cap_id;
+        let wb = self.active_window_base();
         let vm = &mut self.vms[self.active_vm as usize];
         // Unmap DATA caps before dropping
         if let Some(Cap::Data(d)) = vm.cap_table.get(cap_idx)
@@ -964,9 +977,8 @@ impl InvocationKernel {
             && let Some(base_page) = d.base_offset
         {
             let page_count = d.page_count;
-            let code_cap = &self.code_caps[code_cap_id as usize];
             unsafe {
-                BackingStore::unmap_pages(code_cap.window.base(), base_page, page_count);
+                BackingStore::unmap_pages(wb, base_page, page_count);
             }
         }
         vm.cap_table.drop_cap(cap_idx);
@@ -1114,7 +1126,7 @@ impl InvocationKernel {
             }
         };
 
-        let code_cap_id = self.vms[vm_idx].code_cap_id;
+        let window_base = self.vm_window_base(vm_idx as u16);
         let vm = &mut self.vms[vm_idx];
         match vm.cap_table.get_mut(slot) {
             Some(Cap::Data(d)) => {
@@ -1122,17 +1134,18 @@ impl InvocationKernel {
                     self.set_active_reg(7, RESULT_WHAT);
                     return DispatchResult::Continue;
                 }
-                // Map the pages in the CODE window
-                let code_cap = &self.code_caps[code_cap_id as usize];
-                for p in page_offset..page_offset + page_count {
-                    unsafe {
-                        self.backing.map_pages(
-                            code_cap.window.base(),
-                            base_offset + p,
-                            d.backing_offset + p,
-                            1,
-                            access,
-                        );
+                // Map the pages in the VM's window (if it has one)
+                if let Some(wb) = window_base {
+                    for p in page_offset..page_offset + page_count {
+                        unsafe {
+                            self.backing.map_pages(
+                                wb,
+                                base_offset + p,
+                                d.backing_offset + p,
+                                1,
+                                access,
+                            );
+                        }
                     }
                 }
             }
@@ -1149,20 +1162,17 @@ impl InvocationKernel {
         let page_offset = self.active_reg(7) as u32;
         let page_count = self.active_reg(8) as u32;
 
-        let code_cap_id = self.vms[vm_idx].code_cap_id;
+        let window_base = self.vm_window_base(vm_idx as u16);
         let vm = &mut self.vms[vm_idx];
         match vm.cap_table.get_mut(slot) {
             Some(Cap::Data(d)) => {
                 if let Some(base_offset) = d.base_offset {
-                    for p in page_offset..page_offset.saturating_add(page_count).min(d.page_count) {
-                        if d.is_page_mapped(p) {
-                            let code_cap = &self.code_caps[code_cap_id as usize];
-                            unsafe {
-                                BackingStore::unmap_pages(
-                                    code_cap.window.base(),
-                                    base_offset + p,
-                                    1,
-                                );
+                    if let Some(wb) = window_base {
+                        for p in page_offset..page_offset.saturating_add(page_count).min(d.page_count) {
+                            if d.is_page_mapped(p) {
+                                unsafe {
+                                    BackingStore::unmap_pages(wb, base_offset + p, 1);
+                                }
                             }
                         }
                     }
@@ -1203,15 +1213,15 @@ impl InvocationKernel {
 
     /// DROP a cap. Auto-unmaps DATA.
     fn ecall_drop(&mut self, vm_idx: usize, slot: u8) -> DispatchResult {
-        let code_cap_id = self.vms[vm_idx].code_cap_id;
         if let Some(Cap::Data(d)) = self.vms[vm_idx].cap_table.get(slot)
             && d.has_any_mapped()
             && let Some(base_offset) = d.base_offset
         {
             let page_count = d.page_count;
-            let code_cap = &self.code_caps[code_cap_id as usize];
-            unsafe {
-                BackingStore::unmap_pages(code_cap.window.base(), base_offset, page_count);
+            if let Some(wb) = self.vm_window_base(vm_idx as u16) {
+                unsafe {
+                    BackingStore::unmap_pages(wb, base_offset, page_count);
+                }
             }
         }
         self.vms[vm_idx].cap_table.drop_cap(slot);
@@ -1242,10 +1252,10 @@ impl InvocationKernel {
             && d.has_any_mapped()
             && let Some(base_offset) = d.base_offset
         {
-            let code_cap_id = self.vms[s_vm].code_cap_id;
-            let code_cap = &self.code_caps[code_cap_id as usize];
-            unsafe {
-                BackingStore::unmap_pages(code_cap.window.base(), base_offset, d.page_count);
+            if let Some(wb) = self.vm_window_base(s_vm as u16) {
+                unsafe {
+                    BackingStore::unmap_pages(wb, base_offset, d.page_count);
+                }
             }
             d.unmap_all();
         }
@@ -1364,6 +1374,28 @@ impl InvocationKernel {
         self.set_active_reg(8, result1);
     }
 
+    // --- Window helpers ---
+
+    /// Get the active window's base pointer (guest memory base, R15 in JIT code).
+    #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+    fn active_window_base(&self) -> *mut u8 {
+        self.window_pool.window(self.active_window).base()
+    }
+
+    /// Get the active window's JitContext pointer.
+    #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+    fn active_window_ctx_ptr(&self) -> *mut u8 {
+        self.window_pool.window(self.active_window).ctx_ptr()
+    }
+
+    /// Get window base for a specific VM, if it has an assigned window.
+    #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+    fn vm_window_base(&self, vm_idx: u16) -> Option<*mut u8> {
+        self.window_pool
+            .find_window(vm_idx)
+            .map(|idx| self.window_pool.window(idx).base())
+    }
+
     /// Execute one segment via the JIT recompiler backend.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     /// Execute via the JIT recompiler.
@@ -1382,7 +1414,7 @@ impl InvocationKernel {
             _ => unreachable!(),
         };
         let vm = &self.vms[self.active_vm as usize];
-        let ctx_raw = code_cap.window.ctx_ptr() as *mut JitContext;
+        let ctx_raw = self.active_window_ctx_ptr() as *mut JitContext;
         // SAFETY: ctx_ptr() returns a writable page allocated by CodeWindow::new().
         unsafe {
             ctx_raw.write(JitContext {
@@ -1402,7 +1434,7 @@ impl InvocationKernel {
                 pc: vm.pc,
                 dispatch_table: compiled.dispatch_table.as_ptr(),
                 code_base: compiled.native_code.ptr as u64,
-                flat_buf: code_cap.window.base(),
+                flat_buf: self.active_window_base(),
                 flat_perms: std::ptr::null(),
                 fast_reentry: 0,
                 _pad2: 0,
@@ -1414,10 +1446,6 @@ impl InvocationKernel {
         self.run_recompiler_inner(code_cap_id, ctx_raw)
     }
 
-    /// Resume recompiler execution after a protocol call, reusing the existing
-    /// JitContext. Only updates registers, gas, and entry_pc — avoids rebuilding
-    /// jump table pointers, dispatch table, code base, etc.
-    /// Also skips signal state setup since it's unchanged for the same code cap.
     /// Resume recompiler after a protocol call. The JitContext is still live —
     /// only update the result registers that kernel_resume() changed, then
     /// re-enter native code. No full register sync needed.
@@ -1431,7 +1459,7 @@ impl InvocationKernel {
             crate::backend::CompiledProgram::Recompiler(c) => c,
             _ => unreachable!(),
         };
-        let ctx_raw = code_cap.window.ctx_ptr() as *mut JitContext;
+        let ctx_raw = self.active_window_ctx_ptr() as *mut JitContext;
 
         // The live_ctx was set on the previous ecalli exit. kernel_resume()
         // wrote result regs via set_active_reg which updated JitContext directly.
@@ -1551,9 +1579,9 @@ impl InvocationKernel {
                 max_addr = max_addr.max(end);
             }
         }
-        // Allocate flat memory and copy in mapped pages from the CODE window
+        // Allocate flat memory and copy in mapped pages from the window
         let mut flat_mem = vec![0u8; max_addr];
-        let window_base = code_cap.window.base();
+        let window_base = self.active_window_base();
         for slot in 0..=255u8 {
             if let Some(Cap::Data(d)) = vm.cap_table.get(slot)
                 && d.has_any_mapped()
@@ -1587,9 +1615,9 @@ impl InvocationKernel {
 
         let (exit, _gas_used) = interp.run();
 
-        // Write back modified pages to the CODE window
-        let code_cap = &self.code_caps[code_cap_id];
+        // Write back modified pages to the window
         let vm_ref = &self.vms[self.active_vm as usize];
+        let wb = self.active_window_base();
         for slot in 0..=255u8 {
             if let Some(Cap::Data(d)) = vm_ref.cap_table.get(slot)
                 && d.has_any_mapped()
@@ -1602,7 +1630,7 @@ impl InvocationKernel {
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             interp.flat_mem.as_ptr().add(addr),
-                            code_cap.window.base().add(addr),
+                            wb.add(addr),
                             len,
                         );
                     }
@@ -1804,38 +1832,29 @@ impl InvocationKernel {
         if !d.has_any_mapped() {
             return None;
         }
-        let code_cap = &self.code_caps[vm.code_cap_id as usize];
+        let wb = self.active_window_base();
         let addr = base_page as usize * crate::PVM_PAGE_SIZE as usize + offset as usize;
         let mut buf = vec![0u8; len as usize];
-        // SAFETY: base_page was mmap'd into the CODE window by map_pages.
+        // SAFETY: base_page was mmap'd into the window by map_pages.
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                code_cap.window.base().add(addr),
-                buf.as_mut_ptr(),
-                len as usize,
-            );
+            std::ptr::copy_nonoverlapping(wb.add(addr), buf.as_mut_ptr(), len as usize);
         }
         Some(buf)
     }
 
-    /// Read bytes directly from the active VM's CODE window by address.
+    /// Read bytes directly from the active VM's window by address.
     /// Used for reading output from guest programs that return ptr+len in registers.
     pub fn read_data_cap_window(&self, addr: u32, len: u32) -> Option<Vec<u8>> {
-        let vm = &self.vms[self.active_vm as usize];
-        let code_cap = &self.code_caps[vm.code_cap_id as usize];
+        let wb = self.active_window_base();
         let mut buf = vec![0u8; len as usize];
-        // SAFETY: addr is within the CODE window's 4GB mmap region.
+        // SAFETY: addr is within the window's 4GB mmap region.
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                code_cap.window.base().add(addr as usize),
-                buf.as_mut_ptr(),
-                len as usize,
-            );
+            std::ptr::copy_nonoverlapping(wb.add(addr as usize), buf.as_mut_ptr(), len as usize);
         }
         Some(buf)
     }
 
-    /// Write bytes into a DATA cap's mapped region in the active VM's CODE window.
+    /// Write bytes into a DATA cap's mapped region in the active VM's window.
     pub fn write_data_cap(&self, cap_idx: u8, offset: u32, data: &[u8]) -> bool {
         let vm = &self.vms[self.active_vm as usize];
         let d = match vm.cap_table.get(cap_idx) {
@@ -1846,15 +1865,11 @@ impl InvocationKernel {
             Some(b) if d.has_any_mapped() => b,
             _ => return false,
         };
-        let code_cap = &self.code_caps[vm.code_cap_id as usize];
+        let wb = self.active_window_base();
         let addr = base_page as usize * crate::PVM_PAGE_SIZE as usize + offset as usize;
-        // SAFETY: base_page was mmap'd into the CODE window by map_pages.
+        // SAFETY: base_page was mmap'd into the window by map_pages.
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                code_cap.window.base().add(addr),
-                data.len(),
-            );
+            std::ptr::copy_nonoverlapping(data.as_ptr(), wb.add(addr), data.len());
         }
         true
     }

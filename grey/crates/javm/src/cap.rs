@@ -215,16 +215,13 @@ impl DataCap {
     }
 }
 
-/// Compiled PVM code. Copyable (via Arc). Owns a 4GB virtual window.
+/// Compiled PVM code. Copyable (via Arc).
 ///
-/// Multiple VMs can share the same CODE cap (same compiled native code,
-/// same 4GB window). Each VM maps its own DATA caps into the window
-/// before execution.
+/// Windows are managed by the kernel's WindowPool, not by CODE caps.
+/// Multiple VMs can share the same CODE cap (same compiled native code).
 pub struct CodeCap {
     /// Identifier for this CODE cap (unique within invocation).
     pub id: u16,
-    /// 4GB virtual window for memory-mapped execution.
-    pub window: crate::backing::CodeWindow,
     /// Compiled program — interpreter or recompiler backend.
     pub compiled: crate::backend::CompiledProgram,
     /// PVM jump table (for dynamic jump resolution).
@@ -600,7 +597,7 @@ mod tests {
         assert!(data.try_copy().is_none());
 
         // CodeCap copyability is tested via the Cap::Code branch in is_copyable/try_copy.
-        // CodeCap construction requires std (CodeWindow + CompiledCode).
+        // CodeCap construction requires std (CompiledCode).
         #[cfg(feature = "std")]
         {
             // Verified by type: Cap::Code(_) => true in is_copyable

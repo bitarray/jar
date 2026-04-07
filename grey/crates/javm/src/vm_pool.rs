@@ -192,6 +192,12 @@ pub struct VmArena {
     live_count: u16,
 }
 
+impl Default for VmArena {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VmArena {
     pub fn new() -> Self {
         Self {
@@ -277,6 +283,148 @@ impl VmArena {
     /// Check if empty.
     pub fn is_empty(&self) -> bool {
         self.live_count == 0
+    }
+}
+
+// ============================================================================
+// Window Pool — N pre-allocated 4GB windows with LRU eviction
+// ============================================================================
+
+/// Number of pre-allocated 4GB virtual windows.
+pub const WINDOW_POOL_SIZE: usize = 5;
+
+/// Window pool: N pre-allocated 4GB virtual windows with LRU eviction.
+///
+/// Each running VM needs a window for memory-mapped execution. Windows are
+/// assigned on CALL/RESUME and evicted (LRU by call_count) when all windows
+/// are occupied. The compiled native code is relocatable (R15-relative), so
+/// the same compiled code works with any window.
+#[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+pub struct WindowPool {
+    /// Pre-allocated 4GB windows.
+    windows: Vec<crate::backing::CodeWindow>,
+    /// Which VM owns each window (None = free).
+    owner: [Option<u16>; WINDOW_POOL_SIZE],
+    /// Per-VM-slot: (generation at last use, cumulative call count).
+    /// Resets when the arena slot's generation changes.
+    call_counts: Vec<(u16, u32)>,
+}
+
+#[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+impl WindowPool {
+    /// Create a new pool with N pre-allocated windows.
+    pub fn new(n: usize) -> Option<Self> {
+        let mut windows = Vec::with_capacity(n);
+        for _ in 0..n {
+            windows.push(crate::backing::CodeWindow::new()?);
+        }
+        Some(Self {
+            windows,
+            owner: [None; WINDOW_POOL_SIZE],
+            call_counts: Vec::new(),
+        })
+    }
+
+    /// Ensure call_counts covers at least `vm_count` slots.
+    pub fn ensure_capacity(&mut self, vm_count: usize) {
+        if self.call_counts.len() < vm_count {
+            self.call_counts.resize(vm_count, (0, 0));
+        }
+    }
+
+    /// Find the window index assigned to a VM, if any.
+    pub fn find_window(&self, vm_idx: u16) -> Option<usize> {
+        self.owner.iter().position(|o| *o == Some(vm_idx))
+    }
+
+    /// Assign a window to a VM. Returns assignment result with window index
+    /// and optional evicted VM (whose DATA caps need unmapping by the kernel).
+    ///
+    /// Bumps call_count. If the VM already owns a window, returns it (free).
+    /// Otherwise assigns a free window or evicts the lowest call_count owner.
+    pub fn assign_window(&mut self, vm_idx: u16, vm_generation: u16) -> WindowAssignment {
+        self.ensure_capacity(vm_idx as usize + 1);
+
+        // Reset call_count if generation changed (slot was reused)
+        let entry = &mut self.call_counts[vm_idx as usize];
+        if entry.0 != vm_generation {
+            entry.0 = vm_generation;
+            entry.1 = 0;
+        }
+        entry.1 = entry.1.saturating_add(1);
+
+        // Already owns a window? Return it (no eviction, no mapping needed).
+        if let Some(idx) = self.find_window(vm_idx) {
+            return WindowAssignment {
+                window_idx: idx,
+                evicted: None,
+                needs_map: false,
+            };
+        }
+
+        // Find a free window.
+        if let Some(idx) = self.owner.iter().position(|o| o.is_none()) {
+            self.owner[idx] = Some(vm_idx);
+            return WindowAssignment {
+                window_idx: idx,
+                evicted: None,
+                needs_map: true,
+            };
+        }
+
+        // Evict: pick the window whose owner has the lowest call_count.
+        let victim_idx = self
+            .owner
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| {
+                let owner_vm = (*o)?;
+                let (_, count) = self.call_counts.get(owner_vm as usize)?;
+                Some((i, *count))
+            })
+            .min_by_key(|(_, count)| *count)
+            .map(|(i, _)| i)
+            .expect("all windows occupied but no owner found");
+
+        let evicted = self.owner[victim_idx];
+        self.owner[victim_idx] = Some(vm_idx);
+        WindowAssignment {
+            window_idx: victim_idx,
+            evicted,
+            needs_map: true,
+        }
+    }
+
+    /// Release a VM's window (e.g., on DROP HANDLE).
+    pub fn release(&mut self, vm_idx: u16) {
+        if let Some(idx) = self.find_window(vm_idx) {
+            self.owner[idx] = None;
+        }
+    }
+
+    /// Get the window at a given index.
+    pub fn window(&self, idx: usize) -> &crate::backing::CodeWindow {
+        &self.windows[idx]
+    }
+}
+
+/// Result of a window assignment operation.
+#[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+pub struct WindowAssignment {
+    /// Index into the window pool.
+    pub window_idx: usize,
+    /// VM that was evicted from this window (needs DATA cap unmapping).
+    pub evicted: Option<u16>,
+    /// Whether the new VM's DATA caps need mapping into the window.
+    pub needs_map: bool,
+}
+
+#[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+impl core::fmt::Debug for WindowPool {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("WindowPool")
+            .field("owner", &self.owner)
+            .finish()
     }
 }
 
