@@ -1545,6 +1545,36 @@ impl InvocationKernel {
         }
     }
 
+    /// Sync VM state after JIT execution returns.
+    ///
+    /// For ecalli (exit_reason=4): keep live_ctx for fast resume, sync only pc.
+    /// For all other exits: full register/gas sync, clear live_ctx and signal state.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn sync_after_jit(&mut self, ctx_raw: *mut crate::recompiler::JitContext) -> (u32, u32) {
+        // SAFETY: ctx_raw is still valid after JIT execution returns — it points
+        // to the JitContext page in the active CodeWindow's mmap region.
+        let ctx = unsafe { &*ctx_raw };
+        let exit_reason = ctx.exit_reason;
+        let exit_arg = ctx.exit_arg;
+
+        if exit_reason == 4 {
+            // ecalli: keep live_ctx so dispatch reads JitContext directly.
+            // Sync only pc to VmInstance (needed for ProtocolCall metadata).
+            self.vm_arena.vm_mut(self.active_vm).pc = ctx.pc;
+            self.live_ctx = Some(ctx_raw);
+        } else {
+            // Non-ecalli: full sync to VmInstance, clear live_ctx.
+            let vm = &mut self.vm_arena.vm_mut(self.active_vm);
+            vm.set_regs(ctx.regs);
+            vm.set_gas(ctx.gas.max(0) as u64);
+            vm.pc = ctx.pc;
+            self.live_ctx = None;
+            crate::recompiler::signal::SIGNAL_STATE.with(|cell| cell.set(std::ptr::null_mut()));
+        }
+
+        (exit_reason, exit_arg)
+    }
+
     /// Execute one segment via the JIT recompiler backend.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     /// Execute via the JIT recompiler.
@@ -1627,26 +1657,7 @@ impl InvocationKernel {
             entry(ctx_raw);
         }
 
-        // SAFETY: ctx_raw is still valid after JIT execution returns.
-        let ctx = unsafe { &*ctx_raw };
-        let exit_reason = ctx.exit_reason;
-        let exit_arg = ctx.exit_arg;
-
-        if exit_reason == 4 {
-            // ecalli: keep live_ctx, sync only pc
-            self.vm_arena.vm_mut(self.active_vm).pc = ctx.pc;
-            self.live_ctx = Some(ctx_raw);
-        } else {
-            // Non-ecalli: full sync, clear live_ctx
-            let vm = &mut self.vm_arena.vm_mut(self.active_vm);
-            vm.set_regs(ctx.regs);
-            vm.set_gas(ctx.gas.max(0) as u64);
-            vm.pc = ctx.pc;
-            self.live_ctx = None;
-            crate::recompiler::signal::SIGNAL_STATE.with(|cell| cell.set(std::ptr::null_mut()));
-        }
-
-        (exit_reason, exit_arg)
+        self.sync_after_jit(ctx_raw)
     }
 
     /// Shared recompiler execution: set up signal handler, enter native code,
@@ -1683,27 +1694,7 @@ impl InvocationKernel {
             entry(ctx_raw);
         }
 
-        // SAFETY: ctx_raw is still valid after JIT execution returns.
-        let ctx = unsafe { &*ctx_raw };
-        let exit_reason = ctx.exit_reason;
-        let exit_arg = ctx.exit_arg;
-
-        if exit_reason == 4 {
-            // ecalli: set live_ctx so dispatch reads JitContext directly.
-            // Sync only pc to VmInstance (needed for ProtocolCall metadata).
-            self.vm_arena.vm_mut(self.active_vm).pc = ctx.pc;
-            self.live_ctx = Some(ctx_raw);
-        } else {
-            // Non-ecalli: full sync to VmInstance, clear live_ctx.
-            let vm = &mut self.vm_arena.vm_mut(self.active_vm);
-            vm.set_regs(ctx.regs);
-            vm.set_gas(ctx.gas.max(0) as u64);
-            vm.pc = ctx.pc;
-            self.live_ctx = None;
-            signal::SIGNAL_STATE.with(|cell| cell.set(std::ptr::null_mut()));
-        }
-
-        (exit_reason, exit_arg)
+        self.sync_after_jit(ctx_raw)
     }
 
     /// Execute one segment via the software interpreter backend.
