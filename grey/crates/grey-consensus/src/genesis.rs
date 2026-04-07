@@ -166,4 +166,93 @@ mod tests {
             s2.bandersnatch.public_key_bytes()
         );
     }
+
+    #[test]
+    fn test_genesis_creation_full() {
+        let config = Config::full();
+        let (state, secrets) = create_genesis(&config);
+
+        assert_eq!(state.current_validators.len(), 1023);
+        assert_eq!(secrets.len(), 1023);
+        assert_eq!(state.timeslot, 0);
+        assert_eq!(state.pending_reports.len(), 341); // C=341
+    }
+
+    #[test]
+    fn test_genesis_validator_key_consistency() {
+        let config = Config::tiny();
+        let (state, secrets) = create_genesis(&config);
+
+        // Each validator's public keys should match between state and secrets
+        for (i, (v, s)) in state
+            .current_validators
+            .iter()
+            .zip(secrets.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                v.ed25519.0,
+                s.ed25519.public_key().0,
+                "ed25519 mismatch at validator {i}"
+            );
+            assert_eq!(
+                v.bandersnatch.0,
+                s.bandersnatch.public_key_bytes(),
+                "bandersnatch mismatch at validator {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_genesis_entropy_is_zero() {
+        let config = Config::tiny();
+        let (state, _) = create_genesis(&config);
+
+        // At genesis, entropy is all zero (η₀ = η₁ = η₂ = η₃ = H₀)
+        for (i, e) in state.entropy.iter().enumerate() {
+            assert_eq!(*e, Hash::ZERO, "entropy[{i}] should be zero at genesis");
+        }
+    }
+
+    #[test]
+    fn test_genesis_validator_sets_match() {
+        let config = Config::tiny();
+        let (state, _) = create_genesis(&config);
+
+        // All three validator sets should be identical at genesis
+        assert_eq!(state.current_validators, state.pending_validators);
+        assert_eq!(state.current_validators, state.previous_validators);
+        assert_eq!(
+            state.current_validators.len(),
+            state.safrole.pending_keys.len()
+        );
+    }
+
+    #[test]
+    fn test_different_indices_different_keys() {
+        let s0 = make_validator_secrets(0);
+        let s1 = make_validator_secrets(1);
+        assert_ne!(
+            s0.ed25519.public_key().0,
+            s1.ed25519.public_key().0,
+            "different indices should produce different ed25519 keys"
+        );
+        assert_ne!(
+            s0.bandersnatch.public_key_bytes(),
+            s1.bandersnatch.public_key_bytes(),
+            "different indices should produce different bandersnatch keys"
+        );
+    }
+
+    #[test]
+    fn test_make_validator_key_roundtrip() {
+        let secrets = make_validator_secrets(42);
+        let key = make_validator_key(&secrets);
+
+        // Key fields should match secrets
+        assert_eq!(key.ed25519.0, secrets.ed25519.public_key().0);
+        assert_eq!(key.bandersnatch.0, secrets.bandersnatch.public_key_bytes());
+        // BLS key should be 144 bytes (48 compressed pk + 96 PoP)
+        assert_ne!(key.bls.0, [0u8; 144], "BLS key should be non-zero");
+    }
 }
