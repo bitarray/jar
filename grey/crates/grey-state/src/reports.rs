@@ -514,3 +514,91 @@ fn compute_core_assignments(
 
     cores
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_report_error_as_str_exhaustive() {
+        // Verify every variant has a non-empty string representation
+        let variants: Vec<ReportError> = vec![
+            ReportError::OutOfOrderGuarantee,
+            ReportError::BadCoreIndex,
+            ReportError::CoreEngaged,
+            ReportError::DuplicatePackage,
+            ReportError::MissingWorkResults,
+            ReportError::NotSortedOrUniqueGuarantors,
+            ReportError::BadValidatorIndex,
+            ReportError::BannedValidator,
+            ReportError::InsufficientGuarantees,
+            ReportError::WrongAssignment,
+            ReportError::BadSignature,
+            ReportError::AnchorNotRecent,
+            ReportError::BadStateRoot,
+            ReportError::BadBeefyMmrRoot,
+            ReportError::FutureReportSlot,
+            ReportError::ReportEpochBeforeLast,
+            ReportError::CoreUnauthorized,
+            ReportError::BadServiceId,
+            ReportError::BadCodeHash,
+            ReportError::ServiceItemGasTooLow,
+            ReportError::WorkReportGasTooHigh,
+            ReportError::WorkReportTooBig,
+            ReportError::TooManyDependencies,
+            ReportError::DependencyMissing,
+            ReportError::SegmentRootLookupInvalid,
+        ];
+        for v in &variants {
+            let s = v.as_str();
+            assert!(!s.is_empty(), "{:?} has empty as_str()", v);
+            assert!(
+                s.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{:?} has non-snake_case as_str: {}",
+                v,
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_core_assignments_basic() {
+        let config = Config::tiny(); // V=6, C=2
+        let entropy = Hash([42u8; 32]);
+        let v = config.validators_count as usize;
+        let assignments = compute_core_assignments(&config, &entropy, 0, v);
+        assert_eq!(assignments.len(), v);
+        for &core in &assignments {
+            assert!(core < config.core_count as usize);
+        }
+    }
+
+    #[test]
+    fn test_compute_core_assignments_deterministic() {
+        let config = Config::tiny();
+        let v = config.validators_count as usize;
+        let entropy = Hash([7u8; 32]);
+        let a1 = compute_core_assignments(&config, &entropy, 5, v);
+        let a2 = compute_core_assignments(&config, &entropy, 5, v);
+        assert_eq!(a1, a2);
+    }
+
+    #[test]
+    fn test_compute_core_assignments_different_entropy() {
+        let config = Config::tiny();
+        let v = config.validators_count as usize;
+        let a1 = compute_core_assignments(&config, &Hash([1u8; 32]), 0, v);
+        let a2 = compute_core_assignments(&config, &Hash([2u8; 32]), 0, v);
+        assert_ne!(a1, a2);
+    }
+
+    #[test]
+    fn test_compute_core_assignments_rotation() {
+        let config = Config::tiny(); // R=4
+        let v = config.validators_count as usize;
+        let entropy = Hash([42u8; 32]);
+        let a0 = compute_core_assignments(&config, &entropy, 0, v);
+        let a4 = compute_core_assignments(&config, &entropy, 4, v);
+        assert_ne!(a0, a4, "different rotation periods should differ");
+    }
+}
