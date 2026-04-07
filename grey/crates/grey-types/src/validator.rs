@@ -70,3 +70,60 @@ impl ValidatorKey {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_null_key_is_all_zeros() {
+        let k = ValidatorKey::null();
+        assert_eq!(k.bandersnatch.0, [0u8; 32]);
+        assert_eq!(k.ed25519.0, [0u8; 32]);
+        assert_eq!(k.bls.0, [0u8; 144]);
+        assert_eq!(k.metadata, [0u8; 128]);
+    }
+
+    #[test]
+    fn test_to_bytes_length() {
+        let k = ValidatorKey::null();
+        assert_eq!(k.to_bytes().len(), 336);
+    }
+
+    #[test]
+    fn test_to_from_bytes_roundtrip() {
+        let k = ValidatorKey {
+            bandersnatch: BandersnatchPublicKey([0xAA; 32]),
+            ed25519: Ed25519PublicKey([0xBB; 32]),
+            bls: BlsPublicKey([0xCC; 144]),
+            metadata: [0xDD; 128],
+        };
+        let bytes = k.to_bytes();
+        let k2 = ValidatorKey::from_bytes(&bytes);
+        assert_eq!(k2.bandersnatch.0, [0xAA; 32]);
+        assert_eq!(k2.ed25519.0, [0xBB; 32]);
+        assert_eq!(k2.bls.0, [0xCC; 144]);
+        assert_eq!(k2.metadata, [0xDD; 128]);
+    }
+
+    #[test]
+    fn test_to_bytes_field_layout() {
+        let k = ValidatorKey {
+            bandersnatch: BandersnatchPublicKey([1u8; 32]),
+            ed25519: Ed25519PublicKey([2u8; 32]),
+            bls: BlsPublicKey([3u8; 144]),
+            metadata: [4u8; 128],
+        };
+        let b = k.to_bytes();
+        // Verify field placement per spec: kb(0..32), ke(32..64), kl(64..208), km(208..336)
+        assert!(b[0..32].iter().all(|&x| x == 1));
+        assert!(b[32..64].iter().all(|&x| x == 2));
+        assert!(b[64..208].iter().all(|&x| x == 3));
+        assert!(b[208..336].iter().all(|&x| x == 4));
+    }
+
+    #[test]
+    fn test_default_equals_null() {
+        assert_eq!(ValidatorKey::default(), ValidatorKey::null());
+    }
+}
