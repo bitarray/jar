@@ -102,6 +102,10 @@ pub const CTX_PC: i32 = -CTX_OFFSET + offset_of!(JitContext, pc) as i32;
 pub const CTX_DISPATCH_TABLE: i32 = -CTX_OFFSET + offset_of!(JitContext, dispatch_table) as i32;
 pub const CTX_CODE_BASE: i32 = -CTX_OFFSET + offset_of!(JitContext, code_base) as i32;
 pub const CTX_FAST_REENTRY: i32 = -CTX_OFFSET + offset_of!(JitContext, fast_reentry) as i32;
+pub const CTX_BITMAP: i32 = -CTX_OFFSET + offset_of!(JitContext, original_bitmap) as i32;
+
+/// Ecalli gas cost charged inline on the fast path (matches kernel's ecalli_gas).
+const ECALLI_GAS_COST: i32 = 10;
 
 /// Exit reason codes (matching ExitReason enum).
 pub const EXIT_HALT: u32 = 0;
@@ -1231,9 +1235,39 @@ impl Compiler {
             // === A.5.2: One immediate ===
             Opcode::Ecalli => {
                 if let Args::Imm { imm } = args {
-                    // Save next_pc for resumption after host call
+                    let cap_slot = *imm as u32;
+                    // GAS protocol cap (slot 1): inline when original bitmap bit is set.
+                    if cap_slot == 1 {
+                        let slow_path = self.asm.new_label();
+                        let oog_path = self.asm.new_label();
+
+                        // Check original_bitmap bit 1: test byte [CTX + bitmap_byte0], 0x02
+                        self.asm.test_byte_mem_disp32(CTX, CTX_BITMAP, 1 << 1);
+                        self.asm.jcc_label(Cc::E, slow_path); // ZF=1 → bit clear → slow path
+
+                        // Fast path: charge ecalli gas cost (10)
+                        self.asm.sub_mem64_imm32(CTX, CTX_GAS, ECALLI_GAS_COST);
+                        self.asm.jcc_label(Cc::S, oog_path); // SF=1 → gas < 0 → OOG
+
+                        // GAS: φ[7] = remaining gas
+                        self.asm.mov_load64(REG_MAP[7], CTX, CTX_GAS);
+
+                        // Continue to next basic block (ecalli is a terminator,
+                        // so next_pc is always a gas block start).
+                        let next_label = self.label_for_pc(next_pc);
+                        self.asm.jmp_label(next_label);
+
+                        // OOG stub: save PC and exit
+                        self.asm.bind_label(oog_path);
+                        self.asm.mov_store32_imm(CTX, CTX_PC, pc as i32);
+                        self.asm.jmp_label(self.oog_label);
+
+                        // Slow path: cap was modified, fall through to kernel exit
+                        self.asm.bind_label(slow_path);
+                    }
+                    // Slow path (always emitted): exit to kernel for full dispatch
                     self.asm.mov_store32_imm(CTX, CTX_PC, next_pc as i32);
-                    self.emit_exit(EXIT_HOST_CALL, *imm as u32);
+                    self.emit_exit(EXIT_HOST_CALL, cap_slot);
                 }
             }
 
