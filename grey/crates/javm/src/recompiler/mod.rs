@@ -1428,4 +1428,101 @@ mod tests {
         assert_eq!(pvm.registers()[0], 16, "φ[0] should be 4 << 2 = 16");
         assert_eq!(pvm.registers()[2], 17, "φ[2] should be 16 + 1 = 17");
     }
+
+    /// Helper: build a program that loads a 64-bit immediate into r0 via LoadImm64,
+    /// applies a TwoReg instruction (opcode) with rd=1, ra=0, then ecalli 0.
+    fn run_two_reg_op(opcode: u8, input: u64) -> u64 {
+        let code = vec![
+            20,
+            0, // LoadImm64 φ[0], <8 bytes follow>
+            input as u8,
+            (input >> 8) as u8,
+            (input >> 16) as u8,
+            (input >> 24) as u8,
+            (input >> 32) as u8,
+            (input >> 40) as u8,
+            (input >> 48) as u8,
+            (input >> 56) as u8,
+            opcode,
+            0x01, // TwoReg: rd=1, ra=0
+            10,
+            0, // ecalli 0
+        ];
+        let bitmask = vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0];
+        let registers = [0u64; 13];
+
+        let mut pvm = RecompiledPvm::new(
+            &code,
+            bitmask,
+            vec![],
+            registers,
+            10000,
+            Some(test_layout()),
+            crate::gas_cost::DEFAULT_MEM_CYCLES,
+        )
+        .expect("compilation should succeed");
+        let exit = pvm.run();
+        assert_eq!(exit, ExitReason::HostCall(0));
+        pvm.registers()[1]
+    }
+
+    #[test]
+    fn test_recompile_count_set_bits_64() {
+        assert_eq!(run_two_reg_op(102, 0), 0);
+        assert_eq!(run_two_reg_op(102, 1), 1);
+        assert_eq!(run_two_reg_op(102, u64::MAX), 64);
+        assert_eq!(run_two_reg_op(102, 0xFF00FF00FF00FF00), 32);
+        assert_eq!(run_two_reg_op(102, 0x8000000000000001), 2);
+    }
+
+    #[test]
+    fn test_recompile_count_set_bits_32() {
+        assert_eq!(run_two_reg_op(103, 0), 0);
+        assert_eq!(run_two_reg_op(103, 1), 1);
+        assert_eq!(run_two_reg_op(103, 0xFFFFFFFF), 32);
+        assert_eq!(run_two_reg_op(103, 0xFF00FF00), 16);
+        // Upper 32 bits ignored
+        assert_eq!(run_two_reg_op(103, 0xFFFFFFFF00000000), 0);
+        assert_eq!(run_two_reg_op(103, 0xFFFFFFFF00000001), 1);
+    }
+
+    #[test]
+    fn test_recompile_leading_zero_bits_64() {
+        assert_eq!(run_two_reg_op(104, 0), 64);
+        assert_eq!(run_two_reg_op(104, 1), 63);
+        assert_eq!(run_two_reg_op(104, u64::MAX), 0);
+        assert_eq!(run_two_reg_op(104, 0x8000000000000000), 0);
+        assert_eq!(run_two_reg_op(104, 0x0000000100000000), 31);
+    }
+
+    #[test]
+    fn test_recompile_leading_zero_bits_32() {
+        assert_eq!(run_two_reg_op(105, 0), 32);
+        assert_eq!(run_two_reg_op(105, 1), 31);
+        assert_eq!(run_two_reg_op(105, 0xFFFFFFFF), 0);
+        assert_eq!(run_two_reg_op(105, 0x80000000), 0);
+        assert_eq!(run_two_reg_op(105, 0x00010000), 15);
+        // Upper 32 bits ignored
+        assert_eq!(run_two_reg_op(105, 0xFFFFFFFF00000000), 32);
+    }
+
+    #[test]
+    fn test_recompile_trailing_zero_bits_64() {
+        assert_eq!(run_two_reg_op(106, 0), 64);
+        assert_eq!(run_two_reg_op(106, 1), 0);
+        assert_eq!(run_two_reg_op(106, u64::MAX), 0);
+        assert_eq!(run_two_reg_op(106, 0x8000000000000000), 63);
+        assert_eq!(run_two_reg_op(106, 0x0000000000001000), 12);
+    }
+
+    #[test]
+    fn test_recompile_trailing_zero_bits_32() {
+        assert_eq!(run_two_reg_op(107, 0), 32);
+        assert_eq!(run_two_reg_op(107, 1), 0);
+        assert_eq!(run_two_reg_op(107, 0xFFFFFFFF), 0);
+        assert_eq!(run_two_reg_op(107, 0x80000000), 31);
+        assert_eq!(run_two_reg_op(107, 0x00001000), 12);
+        // Upper 32 bits ignored
+        assert_eq!(run_two_reg_op(107, 0x0000000100000000), 32);
+    }
 }
