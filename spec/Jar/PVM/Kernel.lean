@@ -290,6 +290,225 @@ def handleVmFault (state : KernelState) : KernelState × DispatchResult :=
     ({ state with activeVm := callerIdx }, .continue_)
 
 -- ============================================================================
+-- RETYPE (CALL on UNTYPED → create DATA cap)
+-- ============================================================================
+
+/-- CALL UNTYPED: φ[7]=n_pages, φ[12]=dst_slot (with indirection).
+    Bumps untyped allocator, creates DATA cap at dst_slot. -/
+def handleRetype (state : KernelState) : KernelState × DispatchResult :=
+  let nPages := (state.getActiveReg 7).toNat
+  let gasCost := ecalliGasCost + nPages * gasPerPage
+  let vm := state.activeInst
+  if vm.gas < gasCost then (state, .rootOutOfGas)
+  else
+    let state := state.updateVm state.activeVm fun vm => { vm with gas := vm.gas - gasCost }
+    -- Bump allocator
+    let offset := state.untyped.offset
+    let newOffset := offset + nPages
+    if newOffset > state.untyped.total then
+      (state.setActiveReg 7 RESULT_WHAT, .continue_)
+    else
+      let state := { state with untyped := { state.untyped with offset := newOffset } }
+      -- Resolve destination slot
+      let dstRef := UInt32.ofNat (state.getActiveReg 12).toNat
+      match resolveCapRef state dstRef with
+      | none => (state.setActiveReg 7 RESULT_WHAT, .continue_)
+      | some (dstVm, dstSlot) =>
+        if !state.vms[dstVm]!.capTable.isEmpty dstSlot then
+          (state.setActiveReg 7 RESULT_WHAT, .continue_)
+        else
+          let dataCap : DataCap := {
+            backingOffset := offset
+            pageCount := nPages
+          }
+          let state := state.updateVm dstVm fun vm =>
+            { vm with capTable := vm.capTable.set dstSlot (.data dataCap) }
+          (state.setActiveReg 7 (UInt64.ofNat dstSlot), .continue_)
+
+-- ============================================================================
+-- CREATE (CALL on CODE → create VM)
+-- ============================================================================
+
+/-- CALL CODE: φ[7]=bitmask (u64), φ[12]=dst_slot for HANDLE.
+    Bitmask copies caps from CODE's CNode. Creates new VM + HANDLE. -/
+def handleCreate (state : KernelState) (codeCapId : Nat) (codeCnodeVm : Nat)
+    : KernelState × DispatchResult :=
+  let bitmask := (state.getActiveReg 7).toNat
+  if state.vms.size >= maxVms then
+    (state.setActiveReg 7 RESULT_WHAT, .continue_)
+  else
+    -- Build child cap table from bitmask (copy from CODE's CNode)
+    let sourceTable := state.vms[codeCnodeVm]!.capTable
+    let childTable := Id.run do
+      let mut table := CapTable.empty
+      for bit in [:64] do
+        if bitmask &&& (1 <<< bit) != 0 then
+          match sourceTable.get bit with
+          | some cap =>
+            match cap.isCopyable with
+            | true =>
+              match cap.tryCopy with
+              | some copy => table := table.set bit copy
+              | none => pure () -- skip non-copyable
+            | false => pure ()
+          | none => pure ()
+      return table
+    let childVmId := state.vms.size
+    let child : VmInstance := {
+      state := .idle
+      codeCapId := codeCapId
+      registers := Array.replicate PVM.numRegisters 0
+      pc := 0
+      capTable := childTable
+      caller := none
+      entryIndex := 0
+      gas := 0
+    }
+    let state := { state with vms := state.vms.push child }
+    -- Place HANDLE at dst_slot
+    let dstRef := UInt32.ofNat (state.getActiveReg 12).toNat
+    match resolveCapRef state dstRef with
+    | none => (state.setActiveReg 7 RESULT_WHAT, .continue_)
+    | some (dstVm, dstSlot) =>
+      if !state.vms[dstVm]!.capTable.isEmpty dstSlot then
+        (state.setActiveReg 7 RESULT_WHAT, .continue_)
+      else
+        let handle : HandleCap := { vmId := childVmId, maxGas := none }
+        let state := state.updateVm dstVm fun vm =>
+          { vm with capTable := vm.capTable.set dstSlot (.handle handle) }
+        (state.setActiveReg 7 (UInt64.ofNat dstSlot), .continue_)
+
+-- ============================================================================
+-- Management Ops (ecall dispatch)
+-- ============================================================================
+
+/-- MAP pages of a DATA cap in its CNode.
+    φ[7]=base_offset, φ[8]=page_offset, φ[9]=page_count. -/
+def handleMap (state : KernelState) (vmIdx : Nat) (slot : Nat) : KernelState × DispatchResult :=
+  -- In the Lean spec, MAP copies backing store pages into the VM's flat memory.
+  -- TODO: implement when memory model is wired up
+  (state, .continue_)
+
+/-- UNMAP pages of a DATA cap. φ[7]=page_offset, φ[8]=page_count. -/
+def handleUnmap (state : KernelState) (vmIdx : Nat) (slot : Nat) : KernelState × DispatchResult :=
+  (state, .continue_) -- TODO
+
+/-- SPLIT a DATA cap. φ[7]=page_offset. Subject=DATA, object=dst slot for hi half. -/
+def handleSplit (state : KernelState) (sVm : Nat) (sSlot : Nat) (oVm : Nat) (oSlot : Nat)
+    : KernelState × DispatchResult :=
+  let pageOff := (state.getActiveReg 7).toNat
+  match state.vms[sVm]!.capTable.get sSlot with
+  | some (.data d) =>
+    if d.mappedBitmap.any (· == true) || pageOff == 0 || pageOff >= d.pageCount then
+      (state.setActiveReg 7 RESULT_WHAT, .continue_)
+    else if !state.vms[oVm]!.capTable.isEmpty oSlot then
+      (state.setActiveReg 7 RESULT_WHAT, .continue_)
+    else
+      let lo : DataCap := { backingOffset := d.backingOffset, pageCount := pageOff }
+      let hi : DataCap := { backingOffset := d.backingOffset + pageOff, pageCount := d.pageCount - pageOff }
+      let state := state.updateVm sVm fun vm =>
+        { vm with capTable := vm.capTable.set sSlot (.data lo) }
+      let state := state.updateVm oVm fun vm =>
+        { vm with capTable := vm.capTable.set oSlot (.data hi) }
+      (state, .continue_)
+  | _ => (state.setActiveReg 7 RESULT_WHAT, .continue_)
+
+/-- DROP a cap. Auto-unmaps DATA. -/
+def handleDrop (state : KernelState) (vmIdx : Nat) (slot : Nat) : KernelState × DispatchResult :=
+  let state := state.updateVm vmIdx fun vm =>
+    { vm with capTable := { vm.capTable with slots := vm.capTable.slots.set! slot none } }
+  (state, .continue_)
+
+/-- MOVE a cap between CNodes. Auto-unmaps DATA on CNode change. -/
+def handleMove (state : KernelState) (sVm : Nat) (sSlot : Nat) (oVm : Nat) (oSlot : Nat)
+    : KernelState × DispatchResult :=
+  if sVm == oVm && sSlot == oSlot then (state, .continue_)
+  else if !state.vms[oVm]!.capTable.isEmpty oSlot then
+    (state.setActiveReg 7 RESULT_WHAT, .continue_)
+  else
+    let (newSrcTable, cap) := state.vms[sVm]!.capTable.take sSlot
+    let state := state.updateVm sVm fun vm => { vm with capTable := newSrcTable }
+    match cap with
+    | none => (state.setActiveReg 7 RESULT_WHAT, .continue_)
+    | some c =>
+      -- Auto-unmap DATA on CNode change
+      let c := if sVm != oVm then
+        match c with
+        | .data d => .data { d with mappedBitmap := d.mappedBitmap.map (fun _ => false), baseOffset := none }
+        | other => other
+      else c
+      let state := state.updateVm oVm fun vm =>
+        { vm with capTable := vm.capTable.set oSlot c }
+      (state, .continue_)
+
+/-- COPY a cap between CNodes (copyable types only). -/
+def handleCopy (state : KernelState) (sVm : Nat) (sSlot : Nat) (oVm : Nat) (oSlot : Nat)
+    : KernelState × DispatchResult :=
+  if !state.vms[oVm]!.capTable.isEmpty oSlot then
+    (state.setActiveReg 7 RESULT_WHAT, .continue_)
+  else
+    match state.vms[sVm]!.capTable.get sSlot with
+    | some cap =>
+      match cap.tryCopy with
+      | some copy =>
+        let state := state.updateVm oVm fun vm =>
+          { vm with capTable := vm.capTable.set oSlot copy }
+        (state, .continue_)
+      | none => (state.setActiveReg 7 RESULT_WHAT, .continue_)
+    | none => (state.setActiveReg 7 RESULT_WHAT, .continue_)
+
+/-- ecall dispatch: φ[11]=op, φ[12]=subject|object. -/
+def dispatchEcall (state : KernelState) : KernelState × DispatchResult :=
+  match state.chargeGas ecalliGasCost with
+  | none => (state, .rootOutOfGas)
+  | some state =>
+    let op := (state.getActiveReg 11).toNat
+    let phi12 := (state.getActiveReg 12).toNat
+    let subjectRef := UInt32.ofNat (phi12 &&& 0xFFFFFFFF)
+    let objectRef := UInt32.ofNat (phi12 >>> 32)
+    match op with
+    | 0x00 => -- Dynamic CALL
+      match resolveCapRef state subjectRef with
+      | none => (state.setActiveReg 7 RESULT_WHAT, .continue_)
+      | some (vmIdx, slot) =>
+        match state.vms[vmIdx]!.capTable.get slot with
+        | some (.protocol p) => (state, .protocolCall p.id)
+        | some (.handle h) => handleCallVm state h.vmId h.maxGas
+        | some (.callable c) => handleCallVm state c.vmId c.maxGas
+        | _ => (state.setActiveReg 7 RESULT_WHAT, .continue_)
+    | 0x02 => -- MAP
+      match resolveCapRef state subjectRef with
+      | none => (state.setActiveReg 7 RESULT_WHAT, .continue_)
+      | some (vmIdx, slot) => handleMap state vmIdx slot
+    | 0x03 => -- UNMAP
+      match resolveCapRef state subjectRef with
+      | none => (state.setActiveReg 7 RESULT_WHAT, .continue_)
+      | some (vmIdx, slot) => handleUnmap state vmIdx slot
+    | 0x04 => -- SPLIT
+      match resolveCapRef state subjectRef, resolveCapRef state objectRef with
+      | some (sv, ss), some (ov, os) => handleSplit state sv ss ov os
+      | _, _ => (state.setActiveReg 7 RESULT_WHAT, .continue_)
+    | 0x05 => -- DROP
+      match resolveCapRef state subjectRef with
+      | none => (state.setActiveReg 7 RESULT_WHAT, .continue_)
+      | some (vmIdx, slot) => handleDrop state vmIdx slot
+    | 0x06 => -- MOVE
+      match resolveCapRef state subjectRef, resolveCapRef state objectRef with
+      | some (sv, ss), some (ov, os) => handleMove state sv ss ov os
+      | _, _ => (state.setActiveReg 7 RESULT_WHAT, .continue_)
+    | 0x07 => -- COPY
+      match resolveCapRef state subjectRef, resolveCapRef state objectRef with
+      | some (sv, ss), some (ov, os) => handleCopy state sv ss ov os
+      | _, _ => (state.setActiveReg 7 RESULT_WHAT, .continue_)
+    | 0x0A => -- DOWNGRADE: TODO (PR C)
+      (state.setActiveReg 7 RESULT_WHAT, .continue_)
+    | 0x0B => -- SET_MAX_GAS: TODO (PR C)
+      (state.setActiveReg 7 RESULT_WHAT, .continue_)
+    | 0x0D => -- RESUME: TODO (PR C)
+      (state.setActiveReg 7 RESULT_WHAT, .continue_)
+    | _ => (state.setActiveReg 7 RESULT_WHAT, .continue_)
+
+-- ============================================================================
 -- ecalli Dispatch (CALL a cap)
 -- ============================================================================
 
@@ -308,12 +527,8 @@ def dispatchEcalli (state : KernelState) (imm : UInt32) : KernelState × Dispatc
         | some (.protocol p) => (state, .protocolCall p.id)
         | some (.handle h) => handleCallVm state h.vmId h.maxGas
         | some (.callable c) => handleCallVm state c.vmId c.maxGas
-        | some (.untyped _) =>
-          -- RETYPE: TODO (PR B)
-          (state.setActiveReg 7 RESULT_WHAT, .continue_)
-        | some (.code _) =>
-          -- CREATE: TODO (PR B)
-          (state.setActiveReg 7 RESULT_WHAT, .continue_)
+        | some (.untyped _) => handleRetype state
+        | some (.code c) => handleCreate state c.id vmIdx
         | some (.data _) =>
           -- CALL(DATA) memcpy: TODO (PR C)
           (state.setActiveReg 7 RESULT_WHAT, .continue_)

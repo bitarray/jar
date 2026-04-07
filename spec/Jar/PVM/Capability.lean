@@ -106,6 +106,15 @@ def Cap.isCopyable : Cap → Bool
   | .data _ => false
   | .handle _ => false
 
+/-- Create a copy of this cap (only for copyable types). -/
+def Cap.tryCopy : Cap → Option Cap
+  | .untyped u => some (.untyped u)
+  | .code c => some (.code c)
+  | .callable c => some (.callable c)
+  | .protocol p => some (.protocol p)
+  | .data _ => none
+  | .handle _ => none
+
 -- ============================================================================
 -- Cap Table (CNode)
 -- ============================================================================
