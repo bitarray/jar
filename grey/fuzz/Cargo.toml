@@ -13,6 +13,7 @@ grey-codec = { path = "../crates/scale", package = "scale" }
 grey-types = { path = "../crates/grey-types" }
 grey-erasure = { path = "../crates/grey-erasure" }
 javm = { path = "../crates/javm" }
+grey-transpiler = { path = "../crates/grey-transpiler" }
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -41,4 +42,9 @@ doc = false
 [[bin]]
 name = "fuzz_pvm_execute"
 path = "fuzz_targets/fuzz_pvm_execute.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_pvm_differential"
+path = "fuzz_targets/fuzz_pvm_differential.rs"
 doc = false
