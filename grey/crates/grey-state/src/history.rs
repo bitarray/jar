@@ -118,3 +118,118 @@ fn mr_recursive(hashes: &[Hash]) -> Hash {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_update_history_appends_entry() {
+        let mut rb = RecentBlocks {
+            headers: vec![],
+            accumulation_log: vec![],
+        };
+        let input = HistoryInput {
+            header_hash: Hash([1u8; 32]),
+            parent_state_root: Hash([2u8; 32]),
+            accumulate_root: Hash([3u8; 32]),
+            work_packages: vec![],
+        };
+        update_history(&mut rb, &input);
+        assert_eq!(rb.headers.len(), 1);
+        assert_eq!(rb.headers[0].header_hash, Hash([1u8; 32]));
+        assert_eq!(rb.headers[0].state_root, Hash::ZERO); // not yet known
+    }
+
+    #[test]
+    fn test_update_history_fixes_previous_state_root() {
+        let mut rb = RecentBlocks {
+            headers: vec![RecentBlockInfo {
+                header_hash: Hash([1u8; 32]),
+                state_root: Hash::ZERO, // placeholder
+                accumulation_root: Hash::ZERO,
+                reported_packages: BTreeMap::new(),
+            }],
+            accumulation_log: vec![],
+        };
+        let input = HistoryInput {
+            header_hash: Hash([2u8; 32]),
+            parent_state_root: Hash([0xAA; 32]),
+            accumulate_root: Hash::ZERO,
+            work_packages: vec![],
+        };
+        update_history(&mut rb, &input);
+        // Previous entry's state_root should be fixed
+        assert_eq!(rb.headers[0].state_root, Hash([0xAA; 32]));
+    }
+
+    #[test]
+    fn test_update_history_caps_at_h() {
+        let mut rb = RecentBlocks {
+            headers: vec![],
+            accumulation_log: vec![],
+        };
+        // Add more than H entries
+        for i in 0..(RECENT_HISTORY_SIZE + 5) {
+            let mut h = [0u8; 32];
+            h[0] = i as u8;
+            let input = HistoryInput {
+                header_hash: Hash(h),
+                parent_state_root: Hash::ZERO,
+                accumulate_root: Hash::ZERO,
+                work_packages: vec![],
+            };
+            update_history(&mut rb, &input);
+        }
+        assert_eq!(rb.headers.len(), RECENT_HISTORY_SIZE);
+    }
+
+    #[test]
+    fn test_update_history_records_work_packages() {
+        let mut rb = RecentBlocks {
+            headers: vec![],
+            accumulation_log: vec![],
+        };
+        let input = HistoryInput {
+            header_hash: Hash([1u8; 32]),
+            parent_state_root: Hash::ZERO,
+            accumulate_root: Hash::ZERO,
+            work_packages: vec![(Hash([10u8; 32]), Hash([20u8; 32]))],
+        };
+        update_history(&mut rb, &input);
+        assert!(
+            rb.headers[0]
+                .reported_packages
+                .contains_key(&Hash([10u8; 32]))
+        );
+    }
+
+    #[test]
+    fn test_mmr_super_peak_empty() {
+        assert_eq!(mmr_super_peak(&[]), Hash::ZERO);
+    }
+
+    #[test]
+    fn test_mmr_super_peak_single() {
+        let h = Hash([42u8; 32]);
+        assert_eq!(mmr_super_peak(&[Some(h)]), h);
+    }
+
+    #[test]
+    fn test_mmr_super_peak_with_nones() {
+        let h = Hash([42u8; 32]);
+        // Only non-None peaks are used
+        assert_eq!(mmr_super_peak(&[None, Some(h)]), h);
+    }
+
+    #[test]
+    fn test_mmr_append_deterministic() {
+        let mut peaks1 = vec![];
+        let mut peaks2 = vec![];
+        for i in 0..5u8 {
+            mmr_append(&mut peaks1, Hash([i; 32]));
+            mmr_append(&mut peaks2, Hash([i; 32]));
+        }
+        assert_eq!(mmr_super_peak(&peaks1), mmr_super_peak(&peaks2),);
+    }
+}
