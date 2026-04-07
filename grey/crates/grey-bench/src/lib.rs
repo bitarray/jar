@@ -112,7 +112,7 @@ pub fn grey_fib_blob(n: u64) -> Vec<u8> {
 
 /// Build a host-call-heavy program as a grey-pvm standard blob.
 ///
-/// Repeatedly calls ecalli(0) N times, then halts.
+/// Repeatedly calls ecalli(1) (GAS) N times, then halts.
 pub fn grey_hostcall_blob(n: u64) -> Vec<u8> {
     let mut asm = Assembler::new();
     asm.set_stack_pages(1);
@@ -127,7 +127,7 @@ pub fn grey_hostcall_blob(n: u64) -> Vec<u8> {
 
     let loop_pc = asm.current_offset();
     assert_eq!(loop_pc, jump_pc + 5);
-    asm.ecalli(0);
+    asm.ecalli(1); // GAS (protocol cap slot 1, not IPC slot 0)
     asm.add_imm_64(Reg::T0, Reg::T0, 1);
 
     let branch_pc = asm.current_offset();
