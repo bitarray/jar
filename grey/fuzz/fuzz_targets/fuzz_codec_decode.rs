@@ -5,12 +5,11 @@
 
 #![no_main]
 
-use grey_codec::{Decode, DecodeWithConfig};
-use grey_types::config::Config;
+use grey_codec::Decode;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    // Try decoding as various fixed-size types (no config needed)
+    // Try decoding as various fixed-size types
     let _ = u8::decode(data);
     let _ = u16::decode(data);
     let _ = u32::decode(data);
@@ -24,11 +23,4 @@ fuzz_target!(|data: &[u8]| {
 
     // Try decoding as BandersnatchSignature (96 bytes)
     let _ = grey_types::BandersnatchSignature::decode(data);
-
-    // Try compact integer decoding
-    let _ = grey_codec::decode::decode_compact(data);
-
-    // Try decoding with config (tiny)
-    let config = Config::tiny();
-    let _ = grey_types::header::Header::decode_with_config(data, &config);
 });

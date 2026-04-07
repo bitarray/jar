@@ -9,9 +9,10 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-grey-codec = { path = "../crates/grey-codec" }
+grey-codec = { path = "../crates/scale", package = "scale" }
 grey-types = { path = "../crates/grey-types" }
 grey-erasure = { path = "../crates/grey-erasure" }
+javm = { path = "../crates/javm" }
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -35,4 +36,9 @@ doc = false
 [[bin]]
 name = "fuzz_erasure_recover"
 path = "fuzz_targets/fuzz_erasure_recover.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_pvm_execute"
+path = "fuzz_targets/fuzz_pvm_execute.rs"
 doc = false
