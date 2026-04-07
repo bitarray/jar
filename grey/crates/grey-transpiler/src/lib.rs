@@ -144,8 +144,7 @@ pub fn peephole_fuse_load_imm_alu(
             210 => Some(132), // and → and_imm
             211 => Some(133), // xor → xor_imm
             212 => Some(134), // or → or_imm
-            216 => Some(136), // set_lt_u → set_lt_u_imm
-            217 => Some(137), // set_lt_s → set_lt_s_imm
+            // set_lt_u (216) and set_lt_s (217) are non-commutative — handled below
             _ => None,
         }
     };
@@ -197,6 +196,44 @@ pub fn peephole_fuse_load_imm_alu(
                         let fits_i32 = load_val >= i32::MIN as i64 && load_val <= i32::MAX as i64;
                         let matches_ra = load_rd == alu_ra;
                         let matches_rb = load_rd == alu_rb;
+
+                        // Non-commutative: set_lt_u (216) and set_lt_s (217).
+                        // rd = ra < rb: constant as rb → set_lt_imm, constant as ra → set_gt_imm
+                        if (alu_op == 216 || alu_op == 217)
+                            && fits_i32
+                            && load_rd == alu_rd
+                            && (matches_ra != matches_rb)
+                        {
+                            let (cmp_imm_op, base) = if matches_rb {
+                                // rd = ra < K → set_lt_imm(rd, ra, K)
+                                let op = if alu_op == 216 { 136u8 } else { 137u8 };
+                                (op, alu_ra)
+                            } else {
+                                // rd = K < rb → rb > K → set_gt_imm(rd, rb, K)
+                                let op = if alu_op == 216 { 142u8 } else { 143u8 };
+                                (op, alu_rb)
+                            };
+                            let imm32 = load_val as i32;
+                            let end_of_pair = next_i + 1 + alu_s;
+                            if end_of_pair >= i + 6 {
+                                code[i] = cmp_imm_op;
+                                code[i + 1] = (alu_rd & 0x0F) | ((base & 0x0F) << 4);
+                                let imm_bytes = imm32.to_le_bytes();
+                                code[i + 2] = imm_bytes[0];
+                                code[i + 3] = imm_bytes[1];
+                                code[i + 4] = imm_bytes[2];
+                                code[i + 5] = imm_bytes[3];
+                                for k in 6..(end_of_pair - i) {
+                                    code[i + k] = 0;
+                                }
+                                for b in &mut bitmask[(i + 1)..end_of_pair] {
+                                    *b = 0;
+                                }
+                                fused += 1;
+                                i = end_of_pair;
+                                continue;
+                            }
+                        }
 
                         if fits_i32 && load_rd == alu_rd && (matches_ra || matches_rb) {
                             // The "base" register is whichever ALU source is NOT load_rd
