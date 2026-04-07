@@ -8,6 +8,7 @@ import Jar.PVM.Decode
 import Jar.PVM.Memory
 import Jar.PVM.Instructions
 import Jar.PVM.Interpreter
+import Jar.PVM.Kernel
 
 /-!
 # Accumulation — §12
@@ -1542,18 +1543,52 @@ def accone (ps : PartialState) (serviceId : ServiceId)
           let regs := regs.set! 7 (UInt64.ofNat 1)  -- op = accumulate
           (0, regs)
         else (5, regs)
-        -- Select host call handler based on capability model:
-        -- jar1 (v2): REPLY=0, protocol caps 1-28
-        -- gp072: no REPLY host call, protocol caps 0-27 (shifted +1 to jar1 numbering)
-        let hostCallHandler := if JamConfig.capabilityModel == .v2 then
-            handleHostCall
+        let (result, ctx') :=
+          if JamConfig.capabilityModel == .v2 then
+            -- jar1: use capability kernel
+            let kernelState := PVM.Kernel.initKernel prog regs mem totalGas.toNat 4
+            let rec kernelLoop (ks : PVM.Kernel.KernelState) (ctx : AccContext) (fuel : Nat)
+                : PVM.InvocationResult × AccContext :=
+              match fuel with
+              | 0 => ({ exitReason := .outOfGas, exitValue := 0, gas := 0,
+                        registers := ks.activeInst.registers, memory := mem }, ctx)
+              | fuel' + 1 =>
+                let (ks', kr) := PVM.Kernel.runKernel ks fuel'
+                match kr with
+                | .halt v =>
+                  ({ exitReason := .halt, exitValue := UInt64.ofNat v,
+                     gas := Int64.ofUInt64 (UInt64.ofNat ks'.activeGas),
+                     registers := ks'.activeInst.registers, memory := mem }, ctx)
+                | .panic =>
+                  ({ exitReason := .panic, exitValue := 0,
+                     gas := Int64.ofUInt64 (UInt64.ofNat ks'.activeGas),
+                     registers := ks'.activeInst.registers, memory := mem }, ctx)
+                | .outOfGas =>
+                  ({ exitReason := .outOfGas, exitValue := 0, gas := 0,
+                     registers := ks'.activeInst.registers, memory := mem }, ctx)
+                | .pageFault addr =>
+                  ({ exitReason := .pageFault (UInt64.ofNat addr), exitValue := 0,
+                     gas := Int64.ofUInt64 (UInt64.ofNat ks'.activeGas),
+                     registers := ks'.activeInst.registers, memory := mem }, ctx)
+                | .protocolCall slot =>
+                  let callId := UInt64.ofNat slot
+                  let gas' := UInt64.ofNat ks'.activeGas
+                  let (hostResult, ctx') := handleHostCall callId gas' ks'.activeInst.registers mem ctx
+                  match hostResult.exitReason with
+                  | .hostCall _ =>
+                    let ks'' := PVM.Kernel.resumeProtocolCall ks'
+                      (PVM.Kernel.getReg hostResult.registers 7)
+                      (PVM.Kernel.getReg hostResult.registers 8)
+                    kernelLoop ks'' ctx' fuel'
+                  | _ => (hostResult, ctx')
+            kernelLoop kernelState ctx (totalGas.toNat + 1)
           else
-            handleHostCallGp072
-        let (result, ctx') := PVM.runWithHostCalls AccContext
-          prog entryPC regs mem (Int64.ofUInt64 totalGas)
-          (fun callId gas regs' mem' c =>
-            hostCallHandler callId gas regs' mem' c)
-          ctx runFn
+            -- gp072: use flat host call handler
+            PVM.runWithHostCalls AccContext
+              prog entryPC regs mem (Int64.ofUInt64 totalGas)
+              (fun callId gas regs' mem' c =>
+                handleHostCallGp072 callId gas regs' mem' c)
+              ctx runFn
         -- On halt: use accumulated state; on panic/OOG: revert to checkpoint
         -- GP: regular dimension (x) on halt, exceptional dimension (y) on panic/OOG/fault
         let (finalState, finalTransfers, finalYield, finalProvisions, revertedOpaque) := match result.exitReason with

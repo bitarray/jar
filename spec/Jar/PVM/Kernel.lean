@@ -696,4 +696,51 @@ def resumeProtocolCall (state : KernelState) (result0 result1 : UInt64) : Kernel
   state.updateVm state.activeVm fun vm =>
     { vm with registers := setReg (setReg vm.registers 7 result0) 8 result1 }
 
+-- ============================================================================
+-- Kernel Initialization
+-- ============================================================================
+
+/-- Initialize a kernel from a parsed PVM program, arguments, and gas budget.
+    For jar1: creates VM 0 with protocol caps 1-28, manifest caps, UNTYPED at 254.
+    Sets φ[7]=op, φ[8]=args_base, φ[9]=args_len. PC=0. -/
+def initKernel (prog : PVM.ProgramBlob) (regs : PVM.Registers) (mem : PVM.Memory)
+    (gas : Nat) (memoryPages : Nat) : KernelState :=
+  -- Create code cap from program
+  let codeCap : CodeCapData := { id := 0, program := prog, jumpTable := #[] }
+  -- Build VM 0 cap table: protocol caps 1-28
+  let capTable := Id.run do
+    let mut table := CapTable.empty
+    for id in [1:29] do
+      table := table.setOriginal id (.protocol { id := id })
+    -- UNTYPED at slot 254 (if memoryPages > 0)
+    if memoryPages > 0 then
+      table := table.set 254 (.untyped { offset := 0, total := memoryPages })
+    return table
+  -- Create backing store
+  let backing : BackingStore := {
+    data := ByteArray.mk (Array.replicate (memoryPages * pageSize) 0)
+    totalPages := memoryPages
+  }
+  let vm0 : VmInstance := {
+    state := .running
+    codeCapId := 0
+    registers := regs
+    pc := 0
+    capTable := capTable
+    caller := none
+    entryIndex := 0
+    gas := gas
+  }
+  { vms := #[vm0]
+    callStack := #[]
+    codeCaps := #[codeCap]
+    activeVm := 0
+    untyped := { offset := 0, total := memoryPages }
+    backing := backing
+    memCycles := 25 }
+
+/-- Get remaining gas from the active VM. -/
+def KernelState.activeGas (state : KernelState) : Nat :=
+  state.activeInst.gas
+
 end Jar.PVM.Kernel

@@ -149,6 +149,14 @@ def set (t : CapTable) (idx : Nat) (c : Cap) : CapTable :=
                         else t.originalBitmap }
   else t
 
+/-- Set a cap and mark it as original (for kernel init of protocol caps). -/
+def setOriginal (t : CapTable) (idx : Nat) (c : Cap) : CapTable :=
+  if idx < t.slots.size then
+    { slots := t.slots.set! idx (some c)
+      originalBitmap := if idx < t.originalBitmap.size then t.originalBitmap.set! idx true
+                        else t.originalBitmap }
+  else t
+
 def take (t : CapTable) (idx : Nat) : CapTable × Option Cap :=
   if idx < t.slots.size then
     let c := t.slots[idx]!
