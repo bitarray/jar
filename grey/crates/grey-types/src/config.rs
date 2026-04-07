@@ -178,3 +178,90 @@ impl Config {
         buf
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tiny_config_values() {
+        let c = Config::tiny();
+        assert_eq!(c.validators_count, 6);
+        assert_eq!(c.core_count, 2);
+        assert_eq!(c.epoch_length, 12);
+    }
+
+    #[test]
+    fn test_full_config_values() {
+        let c = Config::full();
+        assert_eq!(c.validators_count, 1023);
+        assert_eq!(c.core_count, 341);
+        assert_eq!(c.epoch_length, 600);
+    }
+
+    #[test]
+    fn test_super_majority() {
+        // V=6: floor(2*6/3) + 1 = 4 + 1 = 5
+        assert_eq!(Config::tiny().super_majority(), 5);
+        // V=1023: floor(2*1023/3) + 1 = 682 + 1 = 683
+        assert_eq!(Config::full().super_majority(), 683);
+    }
+
+    #[test]
+    fn test_super_majority_of() {
+        assert_eq!(Config::super_majority_of(6), 5);
+        assert_eq!(Config::super_majority_of(1023), 683);
+        assert_eq!(Config::super_majority_of(3), 3);
+        assert_eq!(Config::super_majority_of(0), 1);
+    }
+
+    #[test]
+    fn test_is_valid_val_count() {
+        let c = Config::tiny(); // core_count=2 → max = 3*(2+1) = 9
+        assert!(c.is_valid_val_count(6));
+        assert!(c.is_valid_val_count(9));
+        assert!(!c.is_valid_val_count(5)); // not multiple of 3
+        assert!(!c.is_valid_val_count(3)); // below minimum 6
+        assert!(!c.is_valid_val_count(12)); // above max 9
+    }
+
+    #[test]
+    fn test_avail_bitfield_bytes() {
+        assert_eq!(Config::tiny().avail_bitfield_bytes(), 1); // ceil(2/8) = 1
+        assert_eq!(Config::full().avail_bitfield_bytes(), 43); // ceil(341/8) = 43
+    }
+
+    #[test]
+    fn test_guarantors_per_core() {
+        assert_eq!(Config::tiny().guarantors_per_core(), 3); // 6/2
+        assert_eq!(Config::full().guarantors_per_core(), 3); // 1023/341 = 2 (integer)
+    }
+
+    #[test]
+    fn test_rotations_per_epoch() {
+        let c = Config::tiny(); // E=12, R=4
+        assert_eq!(c.rotations_per_epoch(), 3);
+        let c = Config::full(); // E=600, R=10
+        assert_eq!(c.rotations_per_epoch(), 60);
+    }
+
+    #[test]
+    fn test_encode_config_blob_length() {
+        assert_eq!(Config::tiny().encode_config_blob().len(), 134);
+        assert_eq!(Config::full().encode_config_blob().len(), 134);
+    }
+
+    #[test]
+    fn test_encode_config_blob_deterministic() {
+        let blob1 = Config::tiny().encode_config_blob();
+        let blob2 = Config::tiny().encode_config_blob();
+        assert_eq!(blob1, blob2);
+    }
+
+    #[test]
+    fn test_encode_config_blob_different_configs() {
+        let tiny = Config::tiny().encode_config_blob();
+        let full = Config::full().encode_config_blob();
+        assert_ne!(tiny, full);
+    }
+}
