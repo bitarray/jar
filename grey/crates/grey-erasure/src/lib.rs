@@ -239,3 +239,197 @@ fn recover_data_shards(
 
     Ok(data_shards)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_erasure_params_recovery_shards() {
+        assert_eq!(ErasureParams::FULL.recovery_shards(), 1023 - 342);
+        assert_eq!(ErasureParams::TINY.recovery_shards(), 6 - 2);
+    }
+
+    #[test]
+    fn test_erasure_params_piece_size() {
+        assert_eq!(ErasureParams::FULL.piece_size(), 342 * 2);
+        assert_eq!(ErasureParams::TINY.piece_size(), 2 * 2);
+    }
+
+    #[test]
+    fn test_encode_tiny_basic() {
+        let params = ErasureParams::TINY;
+        let data = vec![0xAA; params.piece_size()]; // exactly one piece
+        let chunks = encode(&params, &data).expect("encode failed");
+        assert_eq!(chunks.len(), params.total_shards);
+        // All chunks should have the same size
+        let chunk_len = chunks[0].len();
+        for chunk in &chunks {
+            assert_eq!(chunk.len(), chunk_len);
+        }
+    }
+
+    #[test]
+    fn test_encode_recover_roundtrip_all_shards() {
+        let params = ErasureParams::TINY;
+        let data = b"Hello, erasure coding!".to_vec();
+        let chunks = encode(&params, &data).expect("encode failed");
+
+        // Recover using all shards
+        let indexed: Vec<(Vec<u8>, usize)> = chunks
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| (c, i))
+            .collect();
+        let recovered = recover(&params, &indexed, data.len()).expect("recover failed");
+        assert_eq!(recovered, data);
+    }
+
+    #[test]
+    fn test_encode_recover_with_only_data_shards() {
+        let params = ErasureParams::TINY;
+        let data = vec![0x42; params.piece_size() * 3]; // 3 pieces
+        let chunks = encode(&params, &data).expect("encode failed");
+
+        // Recover using only the first data_shards chunks (no parity needed)
+        let indexed: Vec<(Vec<u8>, usize)> = chunks
+            .into_iter()
+            .enumerate()
+            .take(params.data_shards)
+            .map(|(i, c)| (c, i))
+            .collect();
+        let recovered = recover(&params, &indexed, data.len()).expect("recover failed");
+        assert_eq!(recovered, data);
+    }
+
+    #[test]
+    fn test_encode_recover_with_parity_shards() {
+        let params = ErasureParams::TINY;
+        let data = vec![0xBE; params.piece_size() * 2]; // 2 pieces
+        let chunks = encode(&params, &data).expect("encode failed");
+
+        // Drop data shard 0, use data shard 1 + first parity shard
+        let indexed: Vec<(Vec<u8>, usize)> = vec![
+            (chunks[1].clone(), 1),                                   // data shard 1
+            (chunks[params.data_shards].clone(), params.data_shards), // first parity
+        ];
+        let recovered = recover(&params, &indexed, data.len()).expect("recover failed");
+        assert_eq!(recovered, data);
+    }
+
+    #[test]
+    fn test_encode_recover_all_parity_shards() {
+        let params = ErasureParams::TINY;
+        let data = vec![0xCD; params.piece_size()]; // 1 piece
+        let chunks = encode(&params, &data).expect("encode failed");
+
+        // Recover using only parity shards (drop all data shards)
+        let indexed: Vec<(Vec<u8>, usize)> = chunks
+            .into_iter()
+            .enumerate()
+            .skip(params.data_shards)
+            .take(params.data_shards) // need data_shards parity shards
+            .map(|(i, c)| (c, i))
+            .collect();
+        let recovered = recover(&params, &indexed, data.len()).expect("recover failed");
+        assert_eq!(recovered, data);
+    }
+
+    #[test]
+    fn test_recover_insufficient_chunks() {
+        let params = ErasureParams::TINY;
+        let data = vec![0x11; params.piece_size()];
+        let chunks = encode(&params, &data).expect("encode failed");
+
+        // Only 1 chunk, need 2
+        let indexed = vec![(chunks[0].clone(), 0)];
+        let result = recover(&params, &indexed, data.len());
+        assert!(matches!(
+            result,
+            Err(ErasureError::InsufficientChunks { have: 1, need: 2 })
+        ));
+    }
+
+    #[test]
+    fn test_recover_invalid_index() {
+        let params = ErasureParams::TINY;
+        let data = vec![0x22; params.piece_size()];
+        let chunks = encode(&params, &data).expect("encode failed");
+
+        let indexed = vec![
+            (chunks[0].clone(), 0),
+            (chunks[1].clone(), 999), // invalid index
+        ];
+        let result = recover(&params, &indexed, data.len());
+        assert!(matches!(result, Err(ErasureError::InvalidIndex(999))));
+    }
+
+    #[test]
+    fn test_encode_empty_data() {
+        let params = ErasureParams::TINY;
+        let chunks = encode(&params, &[]).expect("encode empty failed");
+        assert_eq!(chunks.len(), params.total_shards);
+    }
+
+    #[test]
+    fn test_recover_empty_chunks() {
+        let params = ErasureParams::TINY;
+        let result = recover(&params, &[], 0);
+        assert!(matches!(
+            result,
+            Err(ErasureError::InsufficientChunks { .. })
+        ));
+    }
+
+    #[test]
+    fn test_encode_non_aligned_data() {
+        // Data that doesn't perfectly fill piece_size multiples
+        let params = ErasureParams::TINY;
+        let data = vec![0xFF; params.piece_size() + 1]; // one byte over
+        let chunks = encode(&params, &data).expect("encode failed");
+
+        let indexed: Vec<(Vec<u8>, usize)> = chunks
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| (c, i))
+            .collect();
+        let recovered = recover(&params, &indexed, data.len()).expect("recover failed");
+        assert_eq!(recovered, data);
+    }
+
+    #[test]
+    fn test_encode_recover_large_data() {
+        let params = ErasureParams::TINY;
+        // 10 pieces worth of data
+        let data: Vec<u8> = (0..params.piece_size() * 10)
+            .map(|i| (i % 256) as u8)
+            .collect();
+        let chunks = encode(&params, &data).expect("encode failed");
+
+        // Recover using mixed data and parity shards
+        let indexed: Vec<(Vec<u8>, usize)> = vec![
+            (chunks[0].clone(), 0),                                   // data shard 0
+            (chunks[params.data_shards].clone(), params.data_shards), // parity shard 0
+        ];
+        let recovered = recover(&params, &indexed, data.len()).expect("recover failed");
+        assert_eq!(recovered, data);
+    }
+
+    #[test]
+    fn test_error_display() {
+        let e = ErasureError::InsufficientChunks { have: 1, need: 3 };
+        assert_eq!(e.to_string(), "insufficient chunks: have 1, need 3");
+
+        let e = ErasureError::InvalidIndex(42);
+        assert_eq!(e.to_string(), "invalid chunk index: 42");
+
+        let e = ErasureError::SizeMismatch;
+        assert_eq!(e.to_string(), "chunk size mismatch");
+
+        let e = ErasureError::EncodingFailed("oops".into());
+        assert_eq!(e.to_string(), "encoding failed: oops");
+
+        let e = ErasureError::RecoveryFailed("fail".into());
+        assert_eq!(e.to_string(), "recovery failed: fail");
+    }
+}
