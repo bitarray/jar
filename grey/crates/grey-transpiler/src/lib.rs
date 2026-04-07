@@ -12,6 +12,25 @@ pub mod riscv;
 
 use thiserror::Error;
 
+/// Parse a signed variable-length immediate from PVM bytecode.
+///
+/// Reads `lx` bytes starting at `code[start]`, sign-extends to i64.
+/// Used by peephole passes to extract load_imm values and memory offsets.
+fn parse_signed_imm(code: &[u8], start: usize, lx: usize) -> i64 {
+    let mut buf = [0u8; 8];
+    for k in 0..lx.min(8) {
+        if start + k < code.len() {
+            buf[k] = code[start + k];
+        }
+    }
+    if lx > 0 && lx <= 8 && buf[lx.min(8) - 1] & 0x80 != 0 {
+        for b in &mut buf[lx.min(8)..8] {
+            *b = 0xFF;
+        }
+    }
+    i64::from_le_bytes(buf)
+}
+
 #[derive(Error, Debug)]
 pub enum TranspileError {
     #[error("ELF parse error: {0}")]
@@ -171,18 +190,7 @@ pub fn peephole_fuse_load_imm_alu(
                     let load_reg_byte = code[i + 1];
                     let load_rd = load_reg_byte & 0x0F;
                     let lx = s.saturating_sub(1);
-                    let mut imm_buf = [0u8; 8];
-                    for k in 0..lx.min(8) {
-                        if i + 2 + k < len {
-                            imm_buf[k] = code[i + 2 + k];
-                        }
-                    }
-                    if lx > 0 && lx <= 8 && imm_buf[lx.min(8) - 1] & 0x80 != 0 {
-                        for b in &mut imm_buf[lx.min(8)..8] {
-                            *b = 0xFF;
-                        }
-                    }
-                    let load_val = i64::from_le_bytes(imm_buf);
+                    let load_val = parse_signed_imm(code, i + 2, lx);
 
                     // Parse ThreeReg ALU: [op, ra|(rb<<4), rd]
                     if next_i + 2 < len {
@@ -382,18 +390,7 @@ pub fn peephole_fuse_load_imm_memory(
                 if i + 1 < len {
                     let load_rd = code[i + 1] & 0x0F;
                     let lx = s.saturating_sub(1);
-                    let mut imm_buf = [0u8; 8];
-                    for k in 0..lx.min(8) {
-                        if i + 2 + k < len {
-                            imm_buf[k] = code[i + 2 + k];
-                        }
-                    }
-                    if lx > 0 && lx <= 8 && imm_buf[lx.min(8) - 1] & 0x80 != 0 {
-                        for b in &mut imm_buf[lx.min(8)..8] {
-                            *b = 0xFF;
-                        }
-                    }
-                    let load_val = i64::from_le_bytes(imm_buf);
+                    let load_val = parse_signed_imm(code, i + 2, lx);
 
                     // Parse memory op: [mem_op, rd|(ra<<4), imm0-3]
                     if next_i + 2 < len {
@@ -431,18 +428,7 @@ pub fn peephole_fuse_load_imm_memory(
 
                         // Parse memory op's offset
                         let ly = mem_s.saturating_sub(1);
-                        let mut off_buf = [0u8; 8];
-                        for k in 0..ly.min(8) {
-                            if next_i + 2 + k < len {
-                                off_buf[k] = code[next_i + 2 + k];
-                            }
-                        }
-                        if ly > 0 && ly <= 8 && off_buf[ly.min(8) - 1] & 0x80 != 0 {
-                            for b in &mut off_buf[ly.min(8)..8] {
-                                *b = 0xFF;
-                            }
-                        }
-                        let offset = i64::from_le_bytes(off_buf);
+                        let offset = parse_signed_imm(code, next_i + 2, ly);
 
                         let combined = load_val.wrapping_add(offset);
                         let fits_u32 = combined >= 0 && combined <= u32::MAX as i64;
