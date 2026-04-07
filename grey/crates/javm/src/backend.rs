@@ -30,7 +30,7 @@ pub struct InterpreterProgram {
     /// Valid branch/jump landing targets.
     pub basic_block_starts: Vec<bool>,
     /// Per-gas-block costs (indexed by block start PC).
-    pub block_gas_costs: Vec<u64>,
+    pub block_gas_costs: Vec<u32>,
     /// Instruction bytecode (kept for step/trace fallback).
     pub code: Vec<u8>,
     /// Opcode bitmask.

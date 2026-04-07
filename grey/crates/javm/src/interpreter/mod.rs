@@ -36,8 +36,11 @@ pub struct DecodedInst {
     pub target_idx: u32,
     /// Gas cost to charge at gas-block entry (0 for non-gas-block-start instructions).
     /// Gas blocks are {PC=0} ∪ {post-terminator PCs} — branch targets are NOT gas block starts.
-    pub bb_gas_cost: u64,
+    /// u32 suffices: per-block costs are bounded by ~25 instructions × ~100 cycles ≈ 2500.
+    pub bb_gas_cost: u32,
 }
+
+const _: () = assert!(core::mem::size_of::<DecodedInst>() == 40);
 
 /// PVM instance state (eq A.6).
 #[derive(Clone, Debug)]
@@ -70,7 +73,7 @@ pub struct Interpreter {
     /// Gas cost for each gas block (indexed by block start PC).
     /// Only entries at gas block starts are meaningful. Gas blocks are
     /// {PC=0} ∪ {post-terminator PCs}, NOT branch targets.
-    pub block_gas_costs: Vec<u64>,
+    pub block_gas_costs: Vec<u32>,
     /// JAR v0.8.0: true when the next instruction should be charged block gas.
     /// Set at initialization and after every terminator instruction.
     pub need_gas_charge: bool,
@@ -396,7 +399,7 @@ impl Interpreter {
         // terminators. Branch/jump targets are NOT gas block starts per spec
         // (Lean Interpreter.lean:130, GP PR #508).
         if self.need_gas_charge {
-            let block_cost = self.block_gas_costs[pc];
+            let block_cost = self.block_gas_costs[pc] as u64;
             if self.gas < block_cost {
                 return Some(ExitReason::OutOfGas);
             }
@@ -1610,11 +1613,11 @@ impl Interpreter {
 
             // Per-gas-block charging (JAR v0.8.0): only at PC=0 and post-terminator starts
             if inst.bb_gas_cost > 0 {
-                if self.gas < inst.bb_gas_cost {
+                if self.gas < inst.bb_gas_cost as u64 {
                     self.pc = inst.pc;
                     return (ExitReason::OutOfGas, initial_gas - self.gas);
                 }
-                self.gas -= inst.bb_gas_cost;
+                self.gas -= inst.bb_gas_cost as u64;
             }
 
             // Fast-path execution using flat operands (no Args enum matching).
@@ -2779,12 +2782,12 @@ fn compute_block_gas_costs(
     bitmask: &[u8],
     basic_block_starts: &[bool],
     mem_cycles: u8,
-) -> Vec<u64> {
+) -> Vec<u32> {
     use crate::gas_cost::{fast_cost_from_raw, skip_distance};
     use crate::gas_sim::GasSimulator;
 
     let len = code.len();
-    let mut costs = vec![0u64; len];
+    let mut costs = vec![0u32; len];
     let mut sim = GasSimulator::new();
     let mut block_start: usize = 0;
     let mut in_block = false;
@@ -2799,7 +2802,7 @@ fn compute_block_gas_costs(
         if basic_block_starts[pc] {
             if in_block {
                 // Finalize previous block
-                costs[block_start] = sim.flush_and_get_cost() as u64;
+                costs[block_start] = sim.flush_and_get_cost();
                 sim.reset();
             }
             block_start = pc;
@@ -2843,7 +2846,7 @@ fn compute_block_gas_costs(
 
     // Finalize last block
     if in_block {
-        costs[block_start] = sim.flush_and_get_cost() as u64;
+        costs[block_start] = sim.flush_and_get_cost();
     }
 
     costs
@@ -2883,7 +2886,7 @@ fn predecode_instructions(
     bitmask: &[u8],
     basic_block_starts: &[bool],
     gas_block_starts: &[bool],
-    block_gas_costs: &[u64],
+    block_gas_costs: &[u32],
 ) -> (Vec<DecodedInst>, Vec<u32>) {
     let len = code.len();
     let mut insts = Vec::new();
