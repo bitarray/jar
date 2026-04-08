@@ -1,14 +1,36 @@
 //! PVM recompiler — compiles PVM bytecode to native x86-64 machine code.
 //!
-//! This provides the same semantics as the interpreter in `vm.rs` but with
-//! significantly better performance by eliminating decode overhead and keeping
-//! PVM registers in native CPU registers.
+//! This provides the same semantics as the interpreter but with significantly
+//! better performance by eliminating decode overhead and keeping PVM registers
+//! in native CPU registers.
 //!
-//! Usage:
-//! ```ignore
-//! let pvm = RecompiledPvm::new(code, bitmask, jump_table, registers, gas, Some(layout));
-//! let (exit, gas_used) = pvm.run();
-//! ```
+//! # JIT Memory Model
+//!
+//! **Compilation** (`Compiler` in `codegen.rs`):
+//! - Emits x86-64 bytes into an `Assembler` buffer (`asm.rs`)
+//! - Buffer is either a `Vec<u8>` (tests) or an mmap'd region (production)
+//! - Production path: mmap with PROT_READ|PROT_WRITE during compilation,
+//!   then mremap + mprotect to PROT_READ|PROT_EXEC before execution
+//!
+//! **Execution context** (`JitContext`):
+//! - `#[repr(C)]` struct at fixed offsets, passed to JIT code via R15
+//! - Owned by the caller (kernel or standalone harness); JIT code reads/writes
+//!   fields at known offsets via `[r15 + OFFSET]` addressing
+//! - `regs[0..13]`: PVM registers, synced to/from `VmInstance` on context switch
+//! - `gas`: signed i64; JIT subtracts per-basic-block costs and exits on negative
+//! - `flat_buf` / `flat_perms`: pointers into the backing store's mmap'd 4GB
+//!   CODE window (Harvard architecture, shared across VMs using the same CODE cap)
+//! - `original_bitmap`: synced from the active VM's `CapTable` before each segment
+//!
+//! **Native code** (`NativeCode`):
+//! - Mmap'd executable region; one per CODE cap (shared across all VMs)
+//! - Compiled once on first use, then reused via `dispatch_table` (PVM PC → native offset)
+//! - Dropped when the CODE cap is dropped (munmap in `Drop` impl)
+//!
+//! **Signal handler** (`signal.rs`):
+//! - Installs a SIGSEGV handler that catches faults from JIT guest memory access
+//! - Uses the `trap_table` (sorted native PC → PVM PC pairs) to map faulting
+//!   address back to PVM state for page fault reporting
 
 pub mod asm;
 pub mod codegen;
