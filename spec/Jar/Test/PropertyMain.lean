@@ -5,9 +5,9 @@ import Jar.Variant
 open Jar Jar.Test.Arb
 
 def propertyMain : IO UInt32 := do
-  letI := JamVariant.gp072_tiny.toJamConfig
+  letI := JarVariant.gp072_tiny.toJarConfig
   -- Provide variant-specific Arbitrary instances for EconType/TransferType.
   -- gp072_tiny uses BalanceEcon/BalanceTransfer.
-  letI : Plausible.Arbitrary (JamConfig.EconType) := instArbitraryBalanceEcon
-  letI : Plausible.Arbitrary (JamConfig.TransferType) := instArbitraryBalanceTransfer
+  letI : Plausible.Arbitrary (JarConfig.EconType) := instArbitraryBalanceEcon
+  letI : Plausible.Arbitrary (JarConfig.TransferType) := instArbitraryBalanceTransfer
   Jar.Test.Properties.runAll

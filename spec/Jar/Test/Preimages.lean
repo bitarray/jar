@@ -13,7 +13,7 @@ namespace Jar.Test.Preimages
 
 open Jar Jar.Crypto
 
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- Types

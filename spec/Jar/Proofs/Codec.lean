@@ -10,7 +10,7 @@ Used by QuotaEcon/BalanceEcon serialization size proofs.
 namespace Jar.Proofs
 
 /-- 𝓔_l always produces exactly l bytes. -/
-theorem encodeFixedNat_size [JamConfig] (l x : Nat) :
+theorem encodeFixedNat_size [JarConfig] (l x : Nat) :
     (Codec.encodeFixedNat l x).size = l := by
   induction l generalizing x with
   | zero => rfl

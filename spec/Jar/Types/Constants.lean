@@ -48,7 +48,7 @@ def W_E : Nat := 684
 
 /-- W_G : Segment size. For full config: W_P × W_E = 6 × 684 = 4,104.
     Note: W_P is in Config since it differs between full (6) and tiny (1026). -/
-def W_G [j : JamConfig] : Nat := j.config.W_P * W_E
+def W_G [j : JarConfig] : Nat := j.config.W_P * W_E
 
 /-- W_M : Max segment imports. GP: 𝖶_M = 3,072. -/
 def W_M : Nat := 3_072
@@ -97,59 +97,59 @@ def S_MIN : Nat := 256
 def JAM_EPOCH_UNIX : Nat := 1_735_732_800
 
 -- ============================================================================
--- Backward-compatibility aliases (access config via JamConfig)
+-- Backward-compatibility aliases (access config via JarConfig)
 -- ============================================================================
 
 section ConfigAliases
-variable [j : JamConfig]
+variable [j : JarConfig]
 
-/-- V via JamConfig. -/
+/-- V via JarConfig. -/
 abbrev V : Nat := j.config.V
-/-- C via JamConfig. -/
+/-- C via JarConfig. -/
 abbrev C : Nat := j.config.C
-/-- E via JamConfig. -/
+/-- E via JarConfig. -/
 abbrev E : Nat := j.config.E
-/-- N_TICKETS via JamConfig. -/
+/-- N_TICKETS via JarConfig. -/
 abbrev N_TICKETS : Nat := j.config.N_TICKETS
-/-- Y_TAIL via JamConfig. -/
+/-- Y_TAIL via JarConfig. -/
 abbrev Y_TAIL : Nat := j.config.Y_TAIL
-/-- K_MAX_TICKETS via JamConfig. -/
+/-- K_MAX_TICKETS via JarConfig. -/
 abbrev K_MAX_TICKETS : Nat := j.config.K_MAX_TICKETS
-/-- R_ROTATION via JamConfig. -/
+/-- R_ROTATION via JarConfig. -/
 abbrev R_ROTATION : Nat := j.config.R_ROTATION
-/-- H_RECENT via JamConfig. -/
+/-- H_RECENT via JarConfig. -/
 abbrev H_RECENT : Nat := j.config.H_RECENT
-/-- G_A via JamConfig. -/
+/-- G_A via JarConfig. -/
 abbrev G_A : Nat := j.config.G_A
-/-- G_I via JamConfig. -/
+/-- G_I via JarConfig. -/
 abbrev G_I : Nat := j.config.G_I
-/-- G_R via JamConfig. -/
+/-- G_R via JarConfig. -/
 abbrev G_R : Nat := j.config.G_R
-/-- G_T via JamConfig. -/
+/-- G_T via JarConfig. -/
 abbrev G_T : Nat := j.config.G_T
-/-- O_POOL via JamConfig. -/
+/-- O_POOL via JarConfig. -/
 abbrev O_POOL : Nat := j.config.O_POOL
-/-- Q_QUEUE via JamConfig. -/
+/-- Q_QUEUE via JarConfig. -/
 abbrev Q_QUEUE : Nat := j.config.Q_QUEUE
-/-- I_MAX_ITEMS via JamConfig. -/
+/-- I_MAX_ITEMS via JarConfig. -/
 abbrev I_MAX_ITEMS : Nat := j.config.I_MAX_ITEMS
-/-- J_MAX_DEPS via JamConfig. -/
+/-- J_MAX_DEPS via JarConfig. -/
 abbrev J_MAX_DEPS : Nat := j.config.J_MAX_DEPS
-/-- T_MAX_EXTRINSICS via JamConfig. -/
+/-- T_MAX_EXTRINSICS via JarConfig. -/
 abbrev T_MAX_EXTRINSICS : Nat := j.config.T_MAX_EXTRINSICS
-/-- U_TIMEOUT via JamConfig. -/
+/-- U_TIMEOUT via JarConfig. -/
 abbrev U_TIMEOUT : Nat := j.config.U_TIMEOUT
-/-- D_EXPUNGE via JamConfig. -/
+/-- D_EXPUNGE via JarConfig. -/
 abbrev D_EXPUNGE : Nat := j.config.D_EXPUNGE
-/-- L_MAX_ANCHOR via JamConfig. -/
+/-- L_MAX_ANCHOR via JarConfig. -/
 abbrev L_MAX_ANCHOR : Nat := j.config.L_MAX_ANCHOR
-/-- B_I via JamConfig. -/
+/-- B_I via JarConfig. -/
 abbrev B_I : Nat := j.config.B_I
-/-- B_L via JamConfig. -/
+/-- B_L via JarConfig. -/
 abbrev B_L : Nat := j.config.B_L
-/-- B_S via JamConfig. -/
+/-- B_S via JarConfig. -/
 abbrev B_S : Nat := j.config.B_S
-/-- W_P via JamConfig. -/
+/-- W_P via JarConfig. -/
 abbrev W_P : Nat := j.config.W_P
 
 end ConfigAliases
@@ -159,7 +159,7 @@ end ConfigAliases
 -- ============================================================================
 
 section VariableValidators
-variable [j : JamConfig]
+variable [j : JarConfig]
 
 /-- Active core count: C for fixed validators, len(validators)/3 for variable.
     GP#514: only the first len(κ)/3 cores are active. -/

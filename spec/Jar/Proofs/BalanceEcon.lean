@@ -36,20 +36,20 @@ theorem balanceEcon_debitTransfer_can_fail :
 -- ============================================================================
 
 /-- serializeEcon produces exactly 16 bytes (8 for balance + 8 for gratis). -/
-theorem balanceEcon_serializeEcon_size [JamConfig] (e : BalanceEcon) :
+theorem balanceEcon_serializeEcon_size [JarConfig] (e : BalanceEcon) :
     (@EconModel.serializeEcon BalanceEcon BalanceTransfer _ e).size = 16 := by
   show (Codec.encodeFixedNat 8 e.balance.toNat
         ++ Codec.encodeFixedNat 8 e.gratis.toNat).size = 16
   rw [byteArray_append_size, encodeFixedNat_size, encodeFixedNat_size]
 
 /-- encodeTransferAmount always produces exactly 8 bytes for the transfer amount. -/
-theorem balanceEcon_encodeTransferAmount_size [JamConfig] (t : BalanceTransfer) :
+theorem balanceEcon_encodeTransferAmount_size [JarConfig] (t : BalanceTransfer) :
     (@EconModel.encodeTransferAmount BalanceEcon BalanceTransfer _ t).size = 8 := by
   show (Codec.encodeFixedNat 8 t.amount.toNat).size = 8
   rw [encodeFixedNat_size]
 
 /-- encodeInfo produces exactly 24 bytes (8 balance + 8 threshold + 8 gratis). -/
-theorem balanceEcon_encodeInfo_size [JamConfig] (e : BalanceEcon)
+theorem balanceEcon_encodeInfo_size [JarConfig] (e : BalanceEcon)
     (items bytes bI bL bS : Nat) :
     (@EconModel.encodeInfo BalanceEcon BalanceTransfer _ e items bytes bI bL bS).size = 24 := by
   show (Codec.encodeFixedNat 8 e.balance.toNat

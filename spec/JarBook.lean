@@ -9,7 +9,7 @@ import JarBook.Crypto
 import JarBook.Types
 import JarBook.Economics
 import JarBook.Consensus
-import JarBook.PVM
+import JarBook.JAVM
 import JarBook.Capability
 import JarBook.Kernel
 import JarBook.Services
@@ -47,7 +47,7 @@ JAR is a blockchain protocol based on JAM (Join-Accumulate Machine). This docume
 
 {include 0 JarBook.Consensus}
 
-{include 0 JarBook.PVM}
+{include 0 JarBook.JAVM}
 
 {include 0 JarBook.Capability}
 

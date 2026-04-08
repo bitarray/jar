@@ -1,19 +1,19 @@
-import Jar.PVM
-import Jar.PVM.Decode
-import Jar.PVM.Memory
-import Jar.PVM.Instructions
-import Jar.PVM.GasCostFull
-import Jar.PVM.GasCostSinglePass
+import Jar.JAVM
+import Jar.JAVM.Decode
+import Jar.JAVM.Memory
+import Jar.JAVM.Instructions
+import Jar.JAVM.GasCostFull
+import Jar.JAVM.GasCostSinglePass
 
 /-!
-# PVM Interpreter — Appendix A
+# JAVM Interpreter — Appendix A
 
 Top-level execution loop Ψ, standard initialization Y(p, a),
 and host-call dispatch Ψ_H.
 References: `graypaper/text/pvm.tex`, `graypaper/text/pvm_invocations.tex`.
 -/
 
-namespace Jar.PVM
+namespace Jar.JAVM
 
 -- ============================================================================
 -- Top-Level Execution Loop — GP Ψ
@@ -357,18 +357,18 @@ def initCap (blob : ByteArray) (args : ByteArray)
 /-- Y(p, a) : Program initialization dispatched by capability model.
     - v2 (jar1): capability manifest blob format
     - none (gp072): segmented (GP v0.7.2) memory layout -/
-def initProgram [JamConfig] (blob : ByteArray) (args : ByteArray)
+def initProgram [JarConfig] (blob : ByteArray) (args : ByteArray)
     : Option (ProgramBlob × Registers × Memory) :=
-  let compact := JamConfig.useCompactDeblob
-  match JamConfig.capabilityModel with
+  let compact := JarConfig.useCompactDeblob
+  match JarConfig.capabilityModel with
   | .v2 => initCap blob args
   | .none => initStandard blob args compact
 
 /-- Ψ : Core PVM run dispatched by gas model.
     Uses per-instruction (v0.7.2) or per-basic-block (v0.8.0) gas charging. -/
-def runProgram [JamConfig] (prog : ProgramBlob) (pc : Nat) (regs : Registers)
+def runProgram [JarConfig] (prog : ProgramBlob) (pc : Nat) (regs : Registers)
     (mem : Memory) (gas : Int64) : InvocationResult :=
-  match JamConfig.gasModel with
+  match JarConfig.gasModel with
   | .perInstruction => run prog pc regs mem gas
   | .basicBlockFull => runBlockGas prog pc regs mem gas
   | .basicBlockSinglePass => runBlockGasSinglePass prog pc regs mem gas
@@ -484,7 +484,7 @@ def InstrTraceEntry.toString (e : InstrTraceEntry) : String :=
       if i > 0 then s := s ++ " "
       s := s ++ s!"r{i}={e.regs[i]!}"
     return s
-  s!"pc={e.pc} op={e.opcode}({Jar.PVM.opcodeName e.opcode}) {regStr}"
+  s!"pc={e.pc} op={e.opcode}({Jar.JAVM.opcodeName e.opcode}) {regStr}"
 
 instance : ToString InstrTraceEntry := ⟨InstrTraceEntry.toString⟩
 
@@ -616,4 +616,4 @@ def invokeStd (blob : ByteArray) (gasLimit : Gas) (input : ByteArray)
       (result.gas.toUInt64, .inl output)
     | other => (result.gas.toUInt64, .inr other)
 
-end Jar.PVM
+end Jar.JAVM

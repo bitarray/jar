@@ -8,7 +8,7 @@ set_option verso.docstring.allowMissing true
 
 #doc (Manual) "The jar1 Variant" =>
 
-JAR defines multiple protocol variants via the `JamVariant` typeclass. This
+JAR defines multiple protocol variants via the `JarVariant` typeclass. This
 document describes *jar1* — the latest variant, which extends the Gray Paper's
 base protocol with a capability-based execution model (JAVM), a coinless
 quota-based economy, variable validator sets, and single-pass gas metering.
@@ -19,15 +19,15 @@ conformance testing but not documented here.
 
 # Variant Configuration
 
-Each variant is a `JamConfig` instance that selects protocol parameters,
+Each variant is a `JarConfig` instance that selects protocol parameters,
 memory model, gas model, economic types, and codec functions.
 
-{docstring JamConfig}
+{docstring JarConfig}
 
-The `JamVariant` class extends `JamConfig` with overridable PVM execution
+The `JarVariant` class extends `JarConfig` with overridable JAVM execution
 functions and codec implementations.
 
-{docstring JamVariant}
+{docstring JarVariant}
 
 # jar1 Settings
 

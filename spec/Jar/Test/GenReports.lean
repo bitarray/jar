@@ -21,7 +21,7 @@ open Lean (Json toJson fromJson?)
 open Jar Jar.Crypto Jar.Json
 
 -- Use jar1 variant for encoding
-instance : JamVariant := JamVariant.jar1
+instance : JarVariant := JarVariant.jar1
 
 -- ============================================================================
 -- Hex helpers

@@ -11,7 +11,7 @@ References: `graypaper/text/reporting_assurance.tex` eq:workreport, eq:workconte
 -/
 
 namespace Jar
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- §11.6 — Work Errors (eq:workerror)
@@ -68,7 +68,7 @@ structure WorkDigest where
 
 /-- 𝕐 : Availability specification for a work-package. GP eq (72–79).
     Y = ⟨p, l, u, e, n⟩ -/
-structure AvailabilitySpec [JamConfig] where
+structure AvailabilitySpec [JarConfig] where
   /-- p : Work-package hash. ℍ. -/
   packageHash : Hash
   /-- l : Auditable bundle length. ℕ_L. -/

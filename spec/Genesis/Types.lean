@@ -50,12 +50,12 @@
   PRs opened before the activation use the old config.
 
   GenesisVariant extends GenesisConfig with variant-specific functions
-  (like JamVariant extends JamConfig in the JAR spec).
+  (like JarVariant extends JarConfig in the JAR spec).
 -/
 
 /-! ### Genesis Config & Variant -/
 
-/-- Protocol parameters. Mirrors JamConfig's role in the JAR spec.
+/-- Protocol parameters. Mirrors JarConfig's role in the JAR spec.
     All configurable constants that affect scoring and state reconstruction
     are defined here. Changes take effect via the activation schedule. -/
 structure GenesisConfig where
@@ -80,9 +80,9 @@ structure GenesisConfig where
 
 /-- Protocol configuration typeclass. All configurable constants are
     direct fields, accessed as GenesisVariant.reviewerThreshold etc.
-    Mirrors JamConfig in the JAR spec.
+    Mirrors JarConfig in the JAR spec.
     Future variant-specific functions can be added as fields here
-    (like JamVariant.pvmRun extends JamConfig). -/
+    (like JarVariant.pvmRun extends JarConfig). -/
 class GenesisVariant extends GenesisConfig
 
 /-! ### Standard Variants -/

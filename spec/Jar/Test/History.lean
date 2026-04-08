@@ -13,7 +13,7 @@ namespace Jar.Test.History
 
 open Jar Jar.Crypto
 
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- Flattened History State (matches test vector JSON shape)

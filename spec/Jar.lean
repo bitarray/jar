@@ -4,11 +4,11 @@ import Jar.Codec
 import Jar.Codec.Common
 import Jar.Codec.Jar1
 import Jar.Crypto
-import Jar.PVM
-import Jar.PVM.Decode
-import Jar.PVM.Memory
-import Jar.PVM.Instructions
-import Jar.PVM.Interpreter
+import Jar.JAVM
+import Jar.JAVM.Decode
+import Jar.JAVM.Memory
+import Jar.JAVM.Instructions
+import Jar.JAVM.Interpreter
 import Jar.Merkle
 import Jar.Erasure
 import Jar.State
@@ -36,17 +36,17 @@ Gray Paper v0.7.2 (https://graypaper.com).
 - `Jar.Types`     — §3–4: Core types, constants, and data structures
 - `Jar.Codec`     — Appendix C: JAM serialization codec
 - `Jar.Crypto`    — §3.8, Appendices F–G: Cryptographic primitives
-- `Jar.PVM`       — Appendix A: Polkadot Virtual Machine
+- `Jar.JAVM`       — Appendix A: Polkadot Virtual Machine
 - `Jar.Merkle`    — Appendices D–E: Merklization and Merkle tries
 - `Jar.Erasure`   — Appendix H: Reed-Solomon erasure coding
 - `Jar.State`     — §4–13: State transition function
 - `Jar.Consensus` — §6, §19: Safrole and GRANDPA
 - `Jar.Services`  — §9, §12, §14: Service accounts and work pipeline
-- `Jar.PVM.Decode` — Appendix A: Instruction decoding and deblob
-- `Jar.PVM.Memory` — Appendix A: Memory read/write with fault detection
-- `Jar.PVM.Instructions` — Appendix A: All ~141 PVM opcodes
-- `Jar.PVM.Interpreter` — Appendix A: Execution loop Ψ and standard init
+- `Jar.JAVM.Decode` — Appendix A: Instruction decoding and deblob
+- `Jar.JAVM.Memory` — Appendix A: Memory read/write with fault detection
+- `Jar.JAVM.Instructions` — Appendix A: All ~141 PVM opcodes
+- `Jar.JAVM.Interpreter` — Appendix A: Execution loop Ψ and standard init
 - `Jar.Accumulation` — §12: Accumulation pipeline (accseq/accpar/accone)
-- `Jar.Variant`     — Protocol variant typeclass (JamVariant extends JamConfig)
+- `Jar.Variant`     — Protocol variant typeclass (JarVariant extends JarConfig)
 - `Jar.Commitment`  — Ligerito PCS + Accidental Computer (DA = polynomial commitment)
 -/

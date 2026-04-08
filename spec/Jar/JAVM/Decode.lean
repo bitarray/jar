@@ -3,14 +3,14 @@ import Jar.Types.Numerics
 import Jar.Types.Constants
 
 /-!
-# PVM Instruction Decoding — Appendix A
+# JAVM Instruction Decoding — Appendix A
 
 Instruction encoding, deblob function, register/immediate extraction,
 and sign extension helpers.
 References: `graypaper/text/pvm.tex`.
 -/
 
-namespace Jar.PVM
+namespace Jar.JAVM
 
 -- ============================================================================
 -- Sign Extension — GP eq (191)
@@ -461,4 +461,4 @@ def parseCodeSubBlob (blob : ByteArray) (dataOffset dataLen : Nat)
   if !validateBasicBlocks prog then none
   some prog
 
-end Jar.PVM
+end Jar.JAVM

@@ -11,7 +11,7 @@ Shared encoding/decoding utilities used by both gp072 and jar1 codecs.
 -/
 
 namespace Jar.Codec.Common
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- Fixed-width Little-Endian Integer Encoding — 𝓔_l

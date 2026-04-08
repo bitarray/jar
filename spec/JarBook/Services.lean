@@ -8,7 +8,7 @@ set_option verso.docstring.allowMissing true
 
 #doc (Manual) "Service Invocations" =>
 
-Service entry points that the protocol invokes via the PVM (GP §11, Appendix B).
+Service entry points that the protocol invokes via the JAVM (GP §11, Appendix B).
 
 In jar1, service code runs inside the capability kernel. Protocol capabilities
 (GAS, FETCH, STORAGE\_R, etc.) replace direct host-call numbers — the kernel
@@ -30,7 +30,7 @@ is accepted by the service's authorizer code.
 # Refinement
 
 Refinement transforms a work item into a work result by running the service's
-refine code in the PVM.
+refine code in the JAVM.
 
 {docstring Jar.Services.refine}
 

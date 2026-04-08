@@ -1,9 +1,9 @@
-import Jar.PVM
-import Jar.PVM.Capability
-import Jar.PVM.Interpreter
+import Jar.JAVM
+import Jar.JAVM.Capability
+import Jar.JAVM.Interpreter
 
 /-!
-# PVM Capability Kernel
+# JAVM Capability Kernel
 
 Execution engine for the jar1 capability model. Manages a pool of VMs,
 dispatches ecalli/ecall through capability resolution, and handles
@@ -13,9 +13,9 @@ This replaces the flat `handleHostCall` path for jar1. gp072 continues
 using the flat path unchanged.
 -/
 
-namespace Jar.PVM.Kernel
+namespace Jar.JAVM.Kernel
 
-open Jar.PVM.Cap
+open Jar.JAVM.Cap
 
 -- ============================================================================
 -- Core Types
@@ -24,7 +24,7 @@ open Jar.PVM.Cap
 /-- Compiled code data associated with a CODE cap. -/
 structure CodeCapData where
   id : Nat
-  program : PVM.ProgramBlob
+  program : JAVM.ProgramBlob
   jumpTable : Array Nat
 
 instance : Inhabited CodeCapData where
@@ -36,7 +36,7 @@ structure BackingStore where
   totalPages : Nat
 
 /-- PVM run function type (selects gas model). -/
-def PvmRunFn := PVM.ProgramBlob → Nat → PVM.Registers → PVM.Memory → Int64 → PVM.InvocationResult
+def PvmRunFn := JAVM.ProgramBlob → Nat → JAVM.Registers → JAVM.Memory → Int64 → JAVM.InvocationResult
 
 /-- Kernel state: VM pool + call stack + backing store + memory. -/
 structure KernelState where
@@ -47,7 +47,7 @@ structure KernelState where
   untyped : UntypedCap
   backing : BackingStore
   /-- Flat PVM memory shared by all VMs (simplified model). -/
-  memory : PVM.Memory
+  memory : JAVM.Memory
   /-- PVM execution function (gas model dependent). -/
   pvmRun : PvmRunFn
   memCycles : Nat
@@ -106,10 +106,10 @@ def BackingStore.write (bs : BackingStore) (pageOff byteOff : Nat) (src : ByteAr
 -- Register Helpers
 -- ============================================================================
 
-def getReg (regs : PVM.Registers) (i : Nat) : UInt64 :=
+def getReg (regs : JAVM.Registers) (i : Nat) : UInt64 :=
   if i < regs.size then regs[i]! else 0
 
-def setReg (regs : PVM.Registers) (i : Nat) (v : UInt64) : PVM.Registers :=
+def setReg (regs : JAVM.Registers) (i : Nat) (v : UInt64) : JAVM.Registers :=
   if i < regs.size then regs.set! i v else regs
 
 -- ============================================================================
@@ -386,7 +386,7 @@ def handleCreate (state : KernelState) (codeCapId : Nat) (codeCnodeVm : Nat)
     let child : VmInstance := {
       state := .idle
       codeCapId := codeCapId
-      registers := Array.replicate PVM.numRegisters 0
+      registers := Array.replicate JAVM.numRegisters 0
       pc := 0
       capTable := childTable
       caller := none
@@ -461,7 +461,7 @@ def handleMap (state : KernelState) (vmIdx : Nat) (slot : Nat) : KernelState × 
             let pageIdx := baseOffset + p
             let mut acc := mem.access
             while acc.size <= pageIdx do acc := acc.push .inaccessible
-            let pa := if access == .rw then PVM.PageAccess.writable else PVM.PageAccess.readable
+            let pa := if access == .rw then JAVM.PageAccess.writable else JAVM.PageAccess.readable
             acc := acc.set! pageIdx pa
             s := { s with memory := { mem with access := acc } }
           return s
@@ -836,8 +836,8 @@ def resumeProtocolCall (state : KernelState) (result0 result1 : UInt64) : Kernel
 /-- Initialize a kernel from a parsed PVM program, arguments, and gas budget.
     For jar1: creates VM 0 with protocol caps 1-28, manifest caps, UNTYPED at 254.
     Sets φ[7]=op, φ[8]=args_base, φ[9]=args_len. PC=0. -/
-def initKernel (prog : PVM.ProgramBlob) (regs : PVM.Registers) (mem : PVM.Memory)
-    (gas : Nat) (memoryPages : Nat) (pvmRun : PvmRunFn := PVM.run) : KernelState :=
+def initKernel (prog : JAVM.ProgramBlob) (regs : JAVM.Registers) (mem : JAVM.Memory)
+    (gas : Nat) (memoryPages : Nat) (pvmRun : PvmRunFn := JAVM.run) : KernelState :=
   -- Create code cap from program
   let codeCap : CodeCapData := { id := 0, program := prog, jumpTable := #[] }
   -- Build VM 0 cap table: protocol caps 1-28
@@ -878,4 +878,4 @@ def initKernel (prog : PVM.ProgramBlob) (regs : PVM.Registers) (mem : PVM.Memory
 def KernelState.activeGas (state : KernelState) : Nat :=
   state.activeInst.gas
 
-end Jar.PVM.Kernel
+end Jar.JAVM.Kernel

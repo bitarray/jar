@@ -2,9 +2,9 @@ import Jar.Notation
 import Jar.Types
 import Jar.Crypto
 import Jar.Codec
-import Jar.PVM
-import Jar.PVM.Interpreter
-import Jar.PVM.Memory
+import Jar.JAVM
+import Jar.JAVM.Interpreter
+import Jar.JAVM.Memory
 
 /-!
 # Services — §8, §9, §12, §14
@@ -24,7 +24,7 @@ References: `graypaper/text/accounts.tex`, `graypaper/text/accumulation.tex`,
 -/
 
 namespace Jar.Services
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- §9 — Minimum Balance
@@ -33,7 +33,7 @@ variable [JamConfig]
 /-- Check if a service can afford its current storage footprint.
     Delegates to EconModel.canAffordStorage. -/
 def canAffordStorage (acct : ServiceAccount) : Bool :=
-  @EconModel.canAffordStorage JamConfig.EconType JamConfig.TransferType _ acct.econ acct.itemCount.toNat acct.totalFootprint B_I B_L B_S
+  @EconModel.canAffordStorage JarConfig.EconType JarConfig.TransferType _ acct.econ acct.itemCount.toNat acct.totalFootprint B_I B_L B_S
 
 -- ============================================================================
 -- §8 — Authorization (Ψ_I)
@@ -47,10 +47,10 @@ def isAuthorized
     (authorizerCode : ByteArray)
     (authToken : ByteArray)
     (gasLimit : Gas) : Bool × Gas :=
-  match PVM.initProgram authorizerCode authToken with
+  match JAVM.initProgram authorizerCode authToken with
   | none => (false, 0)
   | some (prog, regs, mem) =>
-    let result := PVM.runProgram prog 0 regs mem (Int64.ofUInt64 gasLimit)
+    let result := JAVM.runProgram prog 0 regs mem (Int64.ofUInt64 gasLimit)
     match result.exitReason with
     | .halt => (result.exitValue == 0, result.gas.toUInt64)
     | _ => (false, result.gas.toUInt64)
@@ -83,8 +83,8 @@ structure RefineContext where
     Returns (result, updated context) where result.exitReason = .hostCall _
     means "continue execution" (the handler wrote return values into registers). -/
 private def handleRefineHostCall
-    (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers) (mem : PVM.Memory)
-    (ctx : RefineContext) : PVM.InvocationResult × RefineContext :=
+    (callId : JAVM.Reg) (gas : Gas) (regs : JAVM.Registers) (mem : JAVM.Memory)
+    (ctx : RefineContext) : JAVM.InvocationResult × RefineContext :=
   -- gp072: callId maps directly to host call number (no shift).
   -- jar1 (v2): dispatch handled by capability kernel, not this function.
   -- Host call gas cost: g=10
@@ -128,7 +128,7 @@ private def handleRefineHostCall
         let f := min offset d.size
         let l := min maxLen (d.size - f)
         let slice := d.extract f (f + l)
-        let mem' := match PVM.writeByteArray mem bufPtr slice with
+        let mem' := match JAVM.writeByteArray mem bufPtr slice with
           | .ok m => m
           | _ => mem -- page fault: silently ignore (will be caught by PVM)
         let regs' := regs.set! 7 (UInt64.ofNat d.size)
@@ -139,8 +139,8 @@ private def handleRefineHostCall
       -- φ[7] = pointer to segment data
       let ptr := if 7 < regs.size then regs[7]! else 0
       -- W_G = segment size (W_P × W_E, typically 6 × 684 = 4104)
-      let segmentSize := JamConfig.config.W_P * 684
-      match PVM.readByteArray mem ptr segmentSize with
+      let segmentSize := JarConfig.config.W_P * 684
+      match JAVM.readByteArray mem ptr segmentSize with
       | .ok segData =>
         let idx := ctx.exportOffset + ctx.exports.size
         let ctx' := { ctx with exports := ctx.exports.push segData }
@@ -166,17 +166,17 @@ def refine
     (gasLimit : Gas)
     (imports : Array ByteArray) : WorkResult × Gas :=
   let args := encodeRefineArgs payload imports
-  match PVM.initProgram serviceCode args with
+  match JAVM.initProgram serviceCode args with
   | none => (.err .panic, 0)
   | some (prog, regs, mem) =>
     let ctx : RefineContext := {
       payload := payload, imports := imports,
       exports := #[], exportOffset := 0 }
-    let runFn := match JamConfig.gasModel with
-      | .perInstruction => PVM.run
-      | .basicBlockFull => PVM.runBlockGas
-      | .basicBlockSinglePass => PVM.runBlockGasSinglePass
-    let (result, _ctx') := PVM.runWithHostCalls RefineContext
+    let runFn := match JarConfig.gasModel with
+      | .perInstruction => JAVM.run
+      | .basicBlockFull => JAVM.runBlockGas
+      | .basicBlockSinglePass => JAVM.runBlockGasSinglePass
+    let (result, _ctx') := JAVM.runWithHostCalls RefineContext
       prog 0 regs mem (Int64.ofUInt64 gasLimit)
       handleRefineHostCall ctx runFn
     let gasUsed := gasLimit - result.gas.toUInt64
@@ -185,7 +185,7 @@ def refine
       -- Output is in memory starting at address in reg[7], length reg[8]
       let outAddr := if 7 < result.registers.size then result.registers[7]! else 0
       let outLen := if 8 < result.registers.size then result.registers[8]! else 0
-      match PVM.readByteArray result.memory outAddr outLen.toNat with
+      match JAVM.readByteArray result.memory outAddr outLen.toNat with
       | .ok output => (.ok output, gasUsed)
       | _ => (.ok ByteArray.empty, gasUsed)
     | .panic => (.err .panic, gasUsed)
@@ -259,7 +259,7 @@ def computeWorkReport
           segmentCount := 0
         }
         context
-        coreIndex := ⟨0, JamConfig.valid.hC⟩
+        coreIndex := ⟨0, JarConfig.valid.hC⟩
         authorizerHash := pkg.authCodeHash
         authOutput := ByteArray.empty
         segmentRootLookup := Dict.empty
@@ -290,7 +290,7 @@ inductive AccumulationInput where
 private def encodeTransferArgs (t : DeferredTransfer) : ByteArray :=
   Codec.encodeFixedNat 4 t.source.toNat
     ++ Codec.encodeFixedNat 4 t.dest.toNat
-    ++ @EconModel.encodeTransferAmount JamConfig.EconType JamConfig.TransferType _ t.payload
+    ++ @EconModel.encodeTransferAmount JarConfig.EconType JarConfig.TransferType _ t.payload
     ++ t.memo.data
     ++ Codec.encodeFixedNat 8 t.gas.toNat
 
@@ -304,17 +304,17 @@ def onTransfer
     (transfer : DeferredTransfer)
     (acct : ServiceAccount) : ServiceAccount :=
   let args := encodeTransferArgs transfer
-  match PVM.initProgram serviceCode args with
+  match JAVM.initProgram serviceCode args with
   | none => acct
   | some (prog, regs, mem) =>
-    let result := PVM.runProgram prog 0 regs mem (Int64.ofUInt64 transfer.gas)
+    let result := JAVM.runProgram prog 0 regs mem (Int64.ofUInt64 transfer.gas)
     match result.exitReason with
     | .halt =>
       -- On-transfer completed successfully; credit the transfer payload
-      { acct with econ := @EconModel.creditTransfer JamConfig.EconType JamConfig.TransferType _ acct.econ transfer.payload }
+      { acct with econ := @EconModel.creditTransfer JarConfig.EconType JarConfig.TransferType _ acct.econ transfer.payload }
     | _ =>
       -- Panic/OOG/fault: still credit the payload but no side-effects
-      { acct with econ := @EconModel.creditTransfer JamConfig.EconType JamConfig.TransferType _ acct.econ transfer.payload }
+      { acct with econ := @EconModel.creditTransfer JarConfig.EconType JarConfig.TransferType _ acct.econ transfer.payload }
 
 -- ============================================================================
 -- §17 — Auditing (off-chain, left opaque)

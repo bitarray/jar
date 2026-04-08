@@ -30,7 +30,7 @@ private def mkFin (n : Nat) (val : Nat) (h : 0 < n) : Fin n :=
 -- tests (Json.lean). We define separate parsers here in a private section.
 -- ============================================================================
 
-variable [JamConfig]
+variable [JarConfig]
 
 namespace CodecJson
 
@@ -129,7 +129,7 @@ def parseWorkReport (j : Json) : Except String WorkReport := do
   let availSpec ← parseAvailSpec (← j.getObjVal? "package_spec")
   let context ← parseRefinementContext (← j.getObjVal? "context")
   let coreIndexNat ← (← j.getObjVal? "core_index").getNat?
-  let coreIndex : CoreIndex := mkFin C coreIndexNat JamConfig.valid.hC
+  let coreIndex : CoreIndex := mkFin C coreIndexNat JarConfig.valid.hC
   let authorizerHash ← fromJson? (← j.getObjVal? "authorizer_hash")
   let authGasUsed ← fromJson? (← j.getObjVal? "auth_gas_used")
   let authOutput ← fromJson? (← j.getObjVal? "auth_output")
@@ -157,7 +157,7 @@ def parseJudgment (j : Json) : Except String Judgment := do
     | Json.bool b => pure b
     | _ => .error "expected bool for vote"
   let indexNat ← (← j.getObjVal? "index").getNat?
-  let index : ValidatorIndex := mkFin V indexNat JamConfig.valid.hV
+  let index : ValidatorIndex := mkFin V indexNat JarConfig.valid.hV
   let signature ← fromJson? (← j.getObjVal? "signature")
   return { isValid := vote, validatorIndex := index, signature }
 
@@ -218,7 +218,7 @@ def parseDisputes (j : Json) : Except String DisputesExtrinsic := do
 
 def parseAssurance (j : Json) : Except String Assurance := do
   let viNat ← (← j.getObjVal? "validator_index").getNat?
-  let vi : ValidatorIndex := mkFin V viNat JamConfig.valid.hV
+  let vi : ValidatorIndex := mkFin V viNat JarConfig.valid.hV
   return {
     anchor := ← fromJson? (← j.getObjVal? "anchor")
     bitfield := ← fromJson? (← j.getObjVal? "bitfield")
@@ -236,7 +236,7 @@ def parseGuarantee (j : Json) : Except String Guarantee := do
   let credentials ← match sigsJson with
     | Json.arr items => items.mapM fun item => do
         let viNat ← (← item.getObjVal? "validator_index").getNat?
-        let vi : ValidatorIndex := mkFin V viNat JamConfig.valid.hV
+        let vi : ValidatorIndex := mkFin V viNat JarConfig.valid.hV
         let sig ← fromJson? (← item.getObjVal? "signature")
         return (vi, sig)
     | _ => .error "expected array for signatures"
@@ -265,7 +265,7 @@ def parseHeader (j : Json) : Except String Header := do
     | Json.arr items => some <$> items.mapM (fromJson? ·)
     | _ => .error "expected null or array for tickets_mark"
   let aiNat ← (← j.getObjVal? "author_index").getNat?
-  let ai : ValidatorIndex := mkFin V aiNat JamConfig.valid.hV
+  let ai : ValidatorIndex := mkFin V aiNat JarConfig.valid.hV
   return {
     parent := ← fromJson? (← j.getObjVal? "parent")
     stateRoot := ← fromJson? (← j.getObjVal? "parent_state_root")

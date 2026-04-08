@@ -13,7 +13,7 @@ namespace Jar.Test.Arb
 open Jar
 open Plausible Plausible.Arbitrary Plausible.Gen
 
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- ByteArray
@@ -74,7 +74,7 @@ instance {α β : Type} [BEq α] : Shrinkable (Dict α β) where
 instance : Arbitrary CoreIndex where
   arbitrary := do
     let n ← Gen.chooseNat
-    return ⟨n % Jar.C, Nat.mod_lt _ JamConfig.valid.hC⟩
+    return ⟨n % Jar.C, Nat.mod_lt _ JarConfig.valid.hC⟩
 
 instance : Shrinkable CoreIndex where
   shrink _ := []
@@ -82,7 +82,7 @@ instance : Shrinkable CoreIndex where
 instance : Arbitrary ValidatorIndex where
   arbitrary := do
     let n ← Gen.chooseNat
-    return ⟨n % Jar.V, Nat.mod_lt _ JamConfig.valid.hV⟩
+    return ⟨n % Jar.V, Nat.mod_lt _ JarConfig.valid.hV⟩
 
 instance : Shrinkable ValidatorIndex where
   shrink _ := []
@@ -340,7 +340,7 @@ instance : Arbitrary BalanceTransfer where
 instance : Arbitrary QuotaTransfer where
   arbitrary := return {}
 
-instance [Arbitrary JamConfig.EconType] : Arbitrary ServiceAccount where
+instance [Arbitrary JarConfig.EconType] : Arbitrary ServiceAccount where
   arbitrary := do
     return {
       storage := ← arbitrary
@@ -358,7 +358,7 @@ instance [Arbitrary JamConfig.EconType] : Arbitrary ServiceAccount where
 instance : Shrinkable ServiceAccount where
   shrink _ := []
 
-instance [Arbitrary JamConfig.TransferType] : Arbitrary DeferredTransfer where
+instance [Arbitrary JarConfig.TransferType] : Arbitrary DeferredTransfer where
   arbitrary := do
     return {
       source := ← arbitrary

@@ -12,7 +12,7 @@ namespace Jar.Test.Authorizations
 
 open Jar
 
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- Flattened Authorization State (matches test vector JSON shape)

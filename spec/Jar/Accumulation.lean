@@ -3,12 +3,12 @@ import Jar.Types
 import Jar.Codec
 import Jar.Crypto
 import Jar.StateSerialization
-import Jar.PVM
-import Jar.PVM.Decode
-import Jar.PVM.Memory
-import Jar.PVM.Instructions
-import Jar.PVM.Interpreter
-import Jar.PVM.Kernel
+import Jar.JAVM
+import Jar.JAVM.Decode
+import Jar.JAVM.Memory
+import Jar.JAVM.Instructions
+import Jar.JAVM.Interpreter
+import Jar.JAVM.Kernel
 
 /-!
 # Accumulation — §12
@@ -32,41 +32,41 @@ References: `graypaper/text/accumulation.tex`, `graypaper/text/pvm_invocations.t
 -/
 
 namespace Jar.Accumulation
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- EconModel Helpers — avoid verbose @ syntax throughout
 -- ============================================================================
 
-private def econCanAfford (e : JamConfig.EconType) (items bytes : Nat) : Bool :=
-  @EconModel.canAffordStorage JamConfig.EconType JamConfig.TransferType _ e items bytes B_I B_L B_S
+private def econCanAfford (e : JarConfig.EconType) (items bytes : Nat) : Bool :=
+  @EconModel.canAffordStorage JarConfig.EconType JarConfig.TransferType _ e items bytes B_I B_L B_S
 
-private def econDebitNew (e : JamConfig.EconType) (newItems newBytes : Nat) (newGratis : UInt64) (callerItems callerBytes : Nat) : Option JamConfig.EconType :=
-  @EconModel.debitForNewService JamConfig.EconType JamConfig.TransferType _ e newItems newBytes newGratis callerItems callerBytes B_I B_L B_S
+private def econDebitNew (e : JarConfig.EconType) (newItems newBytes : Nat) (newGratis : UInt64) (callerItems callerBytes : Nat) : Option JarConfig.EconType :=
+  @EconModel.debitForNewService JarConfig.EconType JarConfig.TransferType _ e newItems newBytes newGratis callerItems callerBytes B_I B_L B_S
 
-private def econNewService (items bytes : Nat) (gratis : UInt64) : JamConfig.EconType :=
-  @EconModel.newServiceEcon JamConfig.EconType JamConfig.TransferType _ items bytes gratis B_I B_L B_S
+private def econNewService (items bytes : Nat) (gratis : UInt64) : JarConfig.EconType :=
+  @EconModel.newServiceEcon JarConfig.EconType JarConfig.TransferType _ items bytes gratis B_I B_L B_S
 
-private def econCreditXfer (e : JamConfig.EconType) (x : JamConfig.TransferType) : JamConfig.EconType :=
-  @EconModel.creditTransfer JamConfig.EconType JamConfig.TransferType _ e x
+private def econCreditXfer (e : JarConfig.EconType) (x : JarConfig.TransferType) : JarConfig.EconType :=
+  @EconModel.creditTransfer JarConfig.EconType JarConfig.TransferType _ e x
 
-private def econDebitXfer (e : JamConfig.EconType) (amount : UInt64) : Option JamConfig.EconType :=
-  @EconModel.debitTransfer JamConfig.EconType JamConfig.TransferType _ e amount
+private def econDebitXfer (e : JarConfig.EconType) (amount : UInt64) : Option JarConfig.EconType :=
+  @EconModel.debitTransfer JarConfig.EconType JarConfig.TransferType _ e amount
 
-private def econAbsorb (e ejected : JamConfig.EconType) : JamConfig.EconType :=
-  @EconModel.absorbEjected JamConfig.EconType JamConfig.TransferType _ e ejected
+private def econAbsorb (e ejected : JarConfig.EconType) : JarConfig.EconType :=
+  @EconModel.absorbEjected JarConfig.EconType JarConfig.TransferType _ e ejected
 
-private def econSetQuota (e : JamConfig.EconType) (maxItems maxBytes : UInt64) : Option JamConfig.EconType :=
-  @EconModel.setQuota JamConfig.EconType JamConfig.TransferType _ e maxItems maxBytes
+private def econSetQuota (e : JarConfig.EconType) (maxItems maxBytes : UInt64) : Option JarConfig.EconType :=
+  @EconModel.setQuota JarConfig.EconType JarConfig.TransferType _ e maxItems maxBytes
 
-private def econMakeXfer (amount : UInt64) : JamConfig.TransferType :=
-  @EconModel.makeTransferPayload JamConfig.EconType JamConfig.TransferType _ amount
+private def econMakeXfer (amount : UInt64) : JarConfig.TransferType :=
+  @EconModel.makeTransferPayload JarConfig.EconType JarConfig.TransferType _ amount
 
-private def econEncodeXfer (x : JamConfig.TransferType) : ByteArray :=
-  @EconModel.encodeTransferAmount JamConfig.EconType JamConfig.TransferType _ x
+private def econEncodeXfer (x : JarConfig.TransferType) : ByteArray :=
+  @EconModel.encodeTransferAmount JarConfig.EconType JarConfig.TransferType _ x
 
-private def econEncodeInfo (e : JamConfig.EconType) (items bytes : Nat) : ByteArray :=
-  @EconModel.encodeInfo JamConfig.EconType JamConfig.TransferType _ e items bytes B_I B_L B_S
+private def econEncodeInfo (e : JarConfig.EconType) (items bytes : Nat) : ByteArray :=
+  @EconModel.encodeInfo JarConfig.EconType JarConfig.TransferType _ e items bytes B_I B_L B_S
 
 -- ============================================================================
 -- Operand Tuple — GP eq:operandtuple
@@ -310,11 +310,11 @@ private def dbgHex (ba : ByteArray) : String := Id.run do
     s := s ++ String.ofList [hexChar hi, hexChar lo]
   return s
 
-private def getReg (regs : PVM.Registers) (i : Nat) : UInt64 :=
+private def getReg (regs : JAVM.Registers) (i : Nat) : UInt64 :=
   if i < regs.size then regs[i]! else 0
 
 /-- Set register value safely. -/
-private def setReg (regs : PVM.Registers) (i : Nat) (v : UInt64) : PVM.Registers :=
+private def setReg (regs : JAVM.Registers) (i : Nat) (v : UInt64) : JAVM.Registers :=
   if i < regs.size then regs.set! i v else regs
 
 /-- Encode a ServiceAccount's info structure for host_info(5). GP Appendix B.
@@ -345,27 +345,27 @@ private def encodeAccountInfo (acct : ServiceAccount) : ByteArray :=
 /-- Dispatch a host call during accumulation (jar1 numbering).
     Match arms: REPLY=0, GAS=1, FETCH=2, ..., QUOTA=28.
     GP §12, Appendix B. Returns updated invocation result and context. -/
-def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
-    (mem : PVM.Memory) (ctx : AccContext) : PVM.InvocationResult × AccContext :=
+def handleHostCall (callId : JAVM.Reg) (gas : Gas) (regs : JAVM.Registers)
+    (mem : JAVM.Memory) (ctx : AccContext) : JAVM.InvocationResult × AccContext :=
   let rawCallNum := callId.toNat
   let callNum := rawCallNum
   let inputLog := s!"hc({rawCallNum}) r7={getReg regs 7} r8={getReg regs 8} r9={getReg regs 9} r10={getReg regs 10} r11={getReg regs 11} r12={getReg regs 12}"
-  let mkResult (regs' : PVM.Registers) (mem' : PVM.Memory) (gas' : Gas) : PVM.InvocationResult :=
+  let mkResult (regs' : JAVM.Registers) (mem' : JAVM.Memory) (gas' : Gas) : JAVM.InvocationResult :=
     { exitReason := .hostCall callId  -- signals "continue" to the loop
       exitValue := if 7 < regs'.size then regs'[7]! else 0
       gas := Int64.ofUInt64 gas'
       registers := regs'
       memory := mem' }
   -- GP: Memory read failure in host calls → PANIC (⚡) — terminates PVM
-  let mkPanic (regs' : PVM.Registers) (mem' : PVM.Memory) (gas' : Gas) : PVM.InvocationResult :=
+  let mkPanic (regs' : JAVM.Registers) (mem' : JAVM.Memory) (gas' : Gas) : JAVM.InvocationResult :=
     { exitReason := .panic
       exitValue := if 7 < regs'.size then regs'[7]! else 0
       gas := Int64.ofUInt64 gas'
       registers := regs'
       memory := mem' }
-  let setR7 (r : PVM.Registers) (v : UInt64) := setReg r 7 v
+  let setR7 (r : JAVM.Registers) (v : UInt64) := setReg r 7 v
   let gas' := if gas.toNat >= hostCallGas then gas - UInt64.ofNat hostCallGas else 0
-  let (result, ctx') : PVM.InvocationResult × AccContext :=
+  let (result, ctx') : JAVM.InvocationResult × AccContext :=
   match callNum with
   -- ===== REPLY (0): program termination via ecalli(0x00) =====
   | 0 =>
@@ -397,7 +397,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
       | _ => none
     match data with
     | none =>
-      let regs' := setR7 regs PVM.RESULT_NONE
+      let regs' := setR7 regs JAVM.RESULT_NONE
       (mkResult regs' mem gas', ctx)
     | some d =>
       let dataLen := d.size
@@ -406,7 +406,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
       -- Write data[f..f+l] to memory at bufPtr
       if l > 0 then
         let src := d.extract f (f + l)
-        match PVM.writeByteArray mem bufPtr src with
+        match JAVM.writeByteArray mem bufPtr src with
         | .ok mem' =>
           let regs' := setR7 regs (UInt64.ofNat dataLen)
           (mkResult regs' mem' gas', ctx)
@@ -428,7 +428,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     let offset := (getReg regs 10).toNat
     let maxLen := (getReg regs 11).toNat
     -- Read the 32-byte hash from memory
-    match PVM.readByteArray mem hashPtr 32 with
+    match JAVM.readByteArray mem hashPtr 32 with
     | .ok hashBytes =>
       let h : Hash := Hash.mk! hashBytes
       let targetSid := if rawSid == UInt64.ofNat (2^64 - 1) then ctx.serviceId
@@ -437,7 +437,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
       -- Look up the preimage in the target service's preimage store
       match ctx.state.accounts.lookup targetSid with
       | none =>
-        let regs' := setR7 regs PVM.RESULT_NONE
+        let regs' := setR7 regs JAVM.RESULT_NONE
         (mkResult regs' mem gas', ctx)
       | some acct =>
         -- Try structured preimages first, then promote from opaque data
@@ -449,7 +449,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
             | none => (acct, ctx)
         match acct.preimages.lookup h with
         | none =>
-          let regs' := setR7 regs PVM.RESULT_NONE
+          let regs' := setR7 regs JAVM.RESULT_NONE
           (mkResult regs' mem gas', ctx)
         | some preimage =>
           -- Update accounts with promoted preimage
@@ -461,7 +461,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           let l := min maxLen (vLen - f)
           if l > 0 then
             let toWrite := preimage.extract f (f + l)
-            match PVM.writeByteArray mem outPtr toWrite with
+            match JAVM.writeByteArray mem outPtr toWrite with
             | .ok mem' =>
               let regs' := setR7 regs (UInt64.ofNat vLen)
               (mkResult regs' mem' gas', ctx')
@@ -486,14 +486,14 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     let outPtr := getReg regs 10
     let offset := (getReg regs 11).toNat
     let maxLen := (getReg regs 12).toNat
-    match PVM.readByteArray mem keyPtr keyLen with
+    match JAVM.readByteArray mem keyPtr keyLen with
     | .ok keyBytes =>
       let targetSid := if rawSid == UInt64.ofNat (2^64 - 1) then ctx.serviceId
         else if rawSid.toNat < 2^32 then UInt32.ofNat rawSid.toNat
         else ctx.serviceId  -- out of range → NONE
       match ctx.state.accounts.lookup targetSid with
       | none =>
-        let regs' := setR7 regs PVM.RESULT_NONE
+        let regs' := setR7 regs JAVM.RESULT_NONE
         (mkResult regs' mem gas', ctx)
       | some acct =>
         -- Look up in structured storage first, then fall back to opaqueData
@@ -505,7 +505,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
             | none => (acct, ctx)
         match acct.storage.lookup keyBytes with
         | none =>
-          let regs' := setR7 regs PVM.RESULT_NONE
+          let regs' := setR7 regs JAVM.RESULT_NONE
           (mkResult regs' mem gas', ctx)
         | some val =>
           -- Update accounts with promoted storage
@@ -518,7 +518,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           let l := min maxLen (vLen - f)
           if l > 0 then
             let toWrite := val.extract f (f + l)
-            match PVM.writeByteArray mem outPtr toWrite with
+            match JAVM.writeByteArray mem outPtr toWrite with
             | .ok mem' =>
               let regs' := setR7 regs (UInt64.ofNat vLen)
               (mkResult regs' mem' gas', ctx')
@@ -540,11 +540,11 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     let keyLen := (getReg regs 8).toNat
     let valPtr := getReg regs 9
     let valLen := (getReg regs 10).toNat
-    match PVM.readByteArray mem keyPtr keyLen with
+    match JAVM.readByteArray mem keyPtr keyLen with
     | .ok keyBytes =>
       match ctx.state.accounts.lookup ctx.serviceId with
       | none =>
-        let regs' := setR7 regs PVM.RESULT_NONE
+        let regs' := setR7 regs JAVM.RESULT_NONE
         (mkResult regs' mem gas', ctx)
       | some acct =>
         -- Promote from opaque data if not in structured storage
@@ -557,7 +557,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
         let oldVal := acct.storage.lookup keyBytes
         let oldLen : UInt64 := match oldVal with
           | some v => UInt64.ofNat v.size
-          | none => PVM.RESULT_NONE
+          | none => JAVM.RESULT_NONE
         if valLen == 0 then
           -- Delete the key
           match oldVal with
@@ -576,7 +576,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
             let regs' := setR7 regs oldLen
             (mkResult regs' mem gas', ctx)
         else
-          match PVM.readByteArray mem valPtr valLen with
+          match JAVM.readByteArray mem valPtr valLen with
           | .ok valBytes =>
             let newSize := 34 + keyBytes.size + valBytes.size
             let (items', footprint') := match oldVal with
@@ -587,7 +587,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
                 (acct.itemCount + 1, acct.totalFootprint + newSize)
             -- GP: Check service can afford updated storage footprint
             if !econCanAfford acct.econ items'.toNat footprint' then
-              let regs' := setR7 regs PVM.RESULT_FULL
+              let regs' := setR7 regs JAVM.RESULT_FULL
               (mkResult regs' mem gas', ctx)
             else
             let acct' := { acct with
@@ -624,7 +624,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
       else ctx.initAccounts.lookup targetSid
     match acctLookup with
     | none =>
-      let regs' := setR7 regs PVM.RESULT_NONE
+      let regs' := setR7 regs JAVM.RESULT_NONE
       (mkResult regs' mem gas', ctx)
     | some acct =>
       let info := encodeAccountInfo acct
@@ -634,7 +634,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
       let l := min maxLen (dataLen - f)
       if l > 0 then
         let src := info.extract f (f + l)
-        match PVM.writeByteArray mem outPtr src with
+        match JAVM.writeByteArray mem outPtr src with
         | .ok mem' =>
           let regs' := setR7 regs (UInt64.ofNat dataLen)
           (mkResult regs' mem' gas', ctxD)
@@ -662,16 +662,16 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     let alwaysPtr := getReg regs 11
     let alwaysCount := (getReg regs 12).toNat
     -- Read C assigners (4 bytes each) from memory at assignPtr
-    match PVM.readByteArray mem assignPtr (C * 4) with
+    match JAVM.readByteArray mem assignPtr (C * 4) with
     | .ok assignBytes =>
       -- Read always-accumulate entries: n × (4 bytes sid + 8 bytes gas) = 12 bytes each
-      match PVM.readByteArray mem alwaysPtr (alwaysCount * 12) with
+      match JAVM.readByteArray mem alwaysPtr (alwaysCount * 12) with
       | .ok alwaysBytes =>
         -- Check (m, v, r) are valid service IDs (fit in u32)
         if newManager.toNat > UInt32.toNat (UInt32.ofNat (2^32 - 1)) ||
            newDesignator.toNat > UInt32.toNat (UInt32.ofNat (2^32 - 1)) ||
            newRegistrar.toNat > UInt32.toNat (UInt32.ofNat (2^32 - 1)) then
-          let regs' := setR7 regs PVM.RESULT_WHO
+          let regs' := setR7 regs JAVM.RESULT_WHO
           (mkResult regs' mem gas', ctx)
         else
         -- Parse assigners
@@ -706,8 +706,8 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           return d
         -- For jar1 (coinless): read quotaService (4 bytes) after always-acc entries
         let quotaService : ServiceId :=
-          if JamConfig.capabilityModel == .v2 then
-            match PVM.readByteArray mem (alwaysPtr + UInt64.ofNat (alwaysCount * 12)) 4 with
+          if JarConfig.capabilityModel == .v2 then
+            match JAVM.readByteArray mem (alwaysPtr + UInt64.ofNat (alwaysCount * 12)) 4 with
             | .ok qsBytes =>
               UInt32.ofNat ((qsBytes.get! 0).toNat +
                 (qsBytes.get! 1).toNat * 256 +
@@ -722,7 +722,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           registrar := UInt32.ofNat newRegistrar.toNat
           alwaysAccumulate := alwaysAcc
           quotaService := quotaService }
-        let regs' := setR7 regs PVM.RESULT_OK
+        let regs' := setR7 regs JAVM.RESULT_OK
         (mkResult regs' mem gas', { ctx with state := state' })
       | _ => (mkPanic regs mem gas', ctx)
     | _ => (mkPanic regs mem gas', ctx)
@@ -737,20 +737,20 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     let hashPtr := getReg regs 8
     let newAssigner := getReg regs 9
     -- GP: Read Q * 32 bytes from memory FIRST (page fault → PANIC)
-    match PVM.readByteArray mem hashPtr (Q_QUEUE * 32) with
+    match JAVM.readByteArray mem hashPtr (Q_QUEUE * 32) with
     | .ok queueBytes =>
       if coreIdx >= C then
-        let regs' := setR7 regs PVM.RESULT_CORE
+        let regs' := setR7 regs JAVM.RESULT_CORE
         (mkResult regs' mem gas', ctx)
       else
         -- Check caller is the assigner for this core
         let assigner := if coreIdx < ctx.state.assigners.size
           then ctx.state.assigners[coreIdx]! else 0
         if ctx.serviceId != assigner then
-          let regs' := setR7 regs PVM.RESULT_HUH
+          let regs' := setR7 regs JAVM.RESULT_HUH
           (mkResult regs' mem gas', ctx)
         else if newAssigner.toNat > UInt32.toNat (UInt32.ofNat (2^32 - 1)) then
-          let regs' := setR7 regs PVM.RESULT_WHO
+          let regs' := setR7 regs JAVM.RESULT_WHO
           (mkResult regs' mem gas', ctx)
         else
           -- Parse Q hashes from the read bytes
@@ -770,7 +770,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
             then ctx.state.assigners.set! coreIdx (UInt32.ofNat newAssigner.toNat)
             else ctx.state.assigners
           let state' := { ctx.state with authQueue := authQueue', assigners := assigners' }
-          let regs' := setR7 regs PVM.RESULT_OK
+          let regs' := setR7 regs JAVM.RESULT_OK
           (mkResult regs' mem gas', { ctx with state := state' })
     | _ =>
       -- Page fault on queue read → panic (GP: ⚡)
@@ -785,19 +785,19 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     let keySize := 336
     -- Determine validator count: fixed V or variable from reg[8]
     let valCount :=
-      if JamConfig.variableValidators then (getReg regs 8).toNat
+      if JarConfig.variableValidators then (getReg regs 8).toNat
       else V
     -- GP#514: validate count ∈ valcount (multiples of 3 in [6, 3*(C+1)])
-    if JamConfig.variableValidators && !JamConfig.config.isValidValCount valCount then
-      let regs' := setR7 regs PVM.RESULT_HUH
+    if JarConfig.variableValidators && !JarConfig.config.isValidValCount valCount then
+      let regs' := setR7 regs JAVM.RESULT_HUH
       (mkResult regs' mem gas', ctx)
     else
     -- Read valCount * 336 bytes from memory FIRST (page fault → PANIC)
-    match PVM.readByteArray mem keysPtr (valCount * keySize) with
+    match JAVM.readByteArray mem keysPtr (valCount * keySize) with
     | .ok keysBytes =>
       -- Check caller is the designator
       if ctx.serviceId != ctx.state.designator then
-        let regs' := setR7 regs PVM.RESULT_HUH
+        let regs' := setR7 regs JAVM.RESULT_HUH
         (mkResult regs' mem gas', ctx)
       else
         let keys := Id.run do
@@ -814,7 +814,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
             arr := arr.push vk
           return arr
         let state' := { ctx.state with stagingKeys := keys }
-        let regs' := setR7 regs PVM.RESULT_OK
+        let regs' := setR7 regs JAVM.RESULT_OK
         (mkResult regs' mem gas', { ctx with state := state' })
     | _ =>
       -- Page fault on keys read → panic (GP: ⚡)
@@ -836,7 +836,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     let minOnTransferGas := getReg regs 10
     let gratis := getReg regs 11
     let hintI := getReg regs 12
-    match PVM.readByteArray mem codeHashPtr 32 with
+    match JAVM.readByteArray mem codeHashPtr 32 with
     | .ok hashBytes =>
       let codeHash : Hash := Hash.mk! hashBytes
       -- Compute items/footprint for new account (preimage_info entry)
@@ -844,18 +844,18 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
       let newFootprint : Nat := 81 + preimLen.toNat  -- per GP eq 9.4
       -- Check f ≠ 0 requires caller to be manager
       if gratis != 0 && ctx.serviceId != ctx.state.manager then
-        let regs' := setR7 regs PVM.RESULT_HUH
+        let regs' := setR7 regs JAVM.RESULT_HUH
         (mkResult regs' mem gas', ctx)
       else
       -- Check caller can afford to create the new service (EconModel handles balance vs quota)
       match ctx.state.accounts.lookup ctx.serviceId with
       | none =>
-        let regs' := setR7 regs PVM.RESULT_CASH
+        let regs' := setR7 regs JAVM.RESULT_CASH
         (mkResult regs' mem gas', ctx)
       | some srcAcct =>
         match econDebitNew srcAcct.econ newItems newFootprint gratis srcAcct.itemCount.toNat srcAcct.totalFootprint with
         | none =>
-          let regs' := setR7 regs PVM.RESULT_CASH
+          let regs' := setR7 regs JAVM.RESULT_CASH
           (mkResult regs' mem gas', ctx)
         | some debitedEcon =>
         -- Find service ID
@@ -869,7 +869,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
             let id := ctx.nextServiceId
             if (ctx.state.accounts.lookup id).isSome then (id, false) else (id, true)
         if !idOk then
-          let regs' := setR7 regs PVM.RESULT_FULL
+          let regs' := setR7 regs JAVM.RESULT_FULL
           (mkResult regs' mem gas', ctx)
         else
         -- Debit caller's econ
@@ -916,12 +916,12 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     let hashPtr := getReg regs 7
     let newMinAccGas := getReg regs 8
     let newMinOnTransferGas := getReg regs 9
-    match PVM.readByteArray mem hashPtr 32 with
+    match JAVM.readByteArray mem hashPtr 32 with
     | .ok hashBytes =>
       let newCodeHash : Hash := Hash.mk! hashBytes
       match ctx.state.accounts.lookup ctx.serviceId with
       | none =>
-        let regs' := setR7 regs PVM.RESULT_NONE
+        let regs' := setR7 regs JAVM.RESULT_NONE
         (mkResult regs' mem gas', ctx)
       | some acct =>
         let acct' := { acct with
@@ -930,7 +930,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           minOnTransferGas := newMinOnTransferGas }
         let accounts' := ctx.state.accounts.insert ctx.serviceId acct'
         let state' := { ctx.state with accounts := accounts' }
-        let regs' := setR7 regs PVM.RESULT_OK
+        let regs' := setR7 regs JAVM.RESULT_OK
         (mkResult regs' mem gas', { ctx with state := state' })
     | _ =>
       -- Page fault on hash read → panic (GP: ⚡)
@@ -945,28 +945,28 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     let gasLimit := getReg regs 9
     let memoPtr := getReg regs 10
     -- GP: Read memo first — page fault → PANIC (⚡)
-    match PVM.readByteArray mem memoPtr W_T with
+    match JAVM.readByteArray mem memoPtr W_T with
     | .ok memoBytes =>
       -- Check destination exists
       match ctx.state.accounts.lookup dest with
       | none =>
-        let regs' := setR7 regs PVM.RESULT_WHO
+        let regs' := setR7 regs JAVM.RESULT_WHO
         (mkResult regs' mem gas', ctx)
       | some destAcct =>
         -- Check dest min_memo_gas
         if gasLimit < UInt64.ofNat destAcct.minOnTransferGas.toNat then
-          let regs' := setR7 regs PVM.RESULT_LOW
+          let regs' := setR7 regs JAVM.RESULT_LOW
           (mkResult regs' mem gas', ctx)
         else
         -- Check source can afford transfer
         match ctx.state.accounts.lookup ctx.serviceId with
         | none =>
-          let regs' := setR7 regs PVM.RESULT_NONE
+          let regs' := setR7 regs JAVM.RESULT_NONE
           (mkResult regs' mem gas', ctx)
         | some srcAcct =>
           match econDebitXfer srcAcct.econ amount with
           | none =>
-            let regs' := setR7 regs PVM.RESULT_CASH
+            let regs' := setR7 regs JAVM.RESULT_CASH
             (mkResult regs' mem gas', ctx)
           | some debitedEcon =>
             -- GP: Check gas_limit ≤ remaining gas, otherwise panic
@@ -986,7 +986,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
             let accounts' := ctx.state.accounts.insert ctx.serviceId srcAcct'
             let state' := { ctx.state with accounts := accounts' }
             let ctx' := { ctx with state := state', transfers := ctx.transfers.push xfer }
-            let regs' := setR7 regs PVM.RESULT_OK
+            let regs' := setR7 regs JAVM.RESULT_OK
             (mkResult regs' mem gas'', ctx')
     | _ =>
       -- Page fault on memo read → panic (GP: ⚡)
@@ -999,12 +999,12 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     let sid := UInt32.ofNat (getReg regs 7).toNat
     let hashPtr := getReg regs 8
     -- Read hash h from memory first (page fault → panic)
-    match PVM.readByteArray mem hashPtr 32 with
+    match JAVM.readByteArray mem hashPtr 32 with
     | .ok hashBytes =>
       let h : Hash := Hash.mk! hashBytes
       -- Check: d != self AND d exists in accounts
       if sid == ctx.serviceId then
-        let regs' := setR7 regs PVM.RESULT_WHO
+        let regs' := setR7 regs JAVM.RESULT_WHO
         (mkResult regs' mem gas', ctx)
       else
         -- Promote preimage info for the target from opaque data if needed
@@ -1013,14 +1013,14 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           | none => (none, ctx)
         match targetAcct with
         | none =>
-          let regs' := setR7 regs PVM.RESULT_WHO
+          let regs' := setR7 regs JAVM.RESULT_WHO
           (mkResult regs' mem gas', ctx)
         | some ejected =>
           -- GP: Check d.codehash == encode[32](self_id)
           let selfIdEncoded := Codec.encodeFixedNat 32 ctx.serviceId.toNat
           let selfIdHash : Hash := Hash.mk! selfIdEncoded
           if ejected.codeHash != selfIdHash then
-            let regs' := setR7 regs PVM.RESULT_WHO
+            let regs' := setR7 regs JAVM.RESULT_WHO
             (mkResult regs' mem gas', ctx)
           else
           -- GP: l = max(81, d.octets) - 81
@@ -1038,28 +1038,28 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           -- GP: d_i = 2 (item count must be exactly 2 for eject)
           let items := ejected.itemCount.toNat
           if items != 2 then
-            let regs' := setR7 regs PVM.RESULT_HUH
+            let regs' := setR7 regs JAVM.RESULT_HUH
             (mkResult regs' mem gas', ctx)
           else
           match ejected.preimageInfo.lookup (h, blobLen) with
           | none =>
-            let regs' := setR7 regs PVM.RESULT_HUH
+            let regs' := setR7 regs JAVM.RESULT_HUH
             (mkResult regs' mem gas', ctx)
           | some ts =>
             -- GP: Check requests[(h,l)] = [x, y] with y < t - D_EXPUNGE
             if ts.size != 2 then
-              let regs' := setR7 regs PVM.RESULT_HUH
+              let regs' := setR7 regs JAVM.RESULT_HUH
               (mkResult regs' mem gas', ctx)
             else
             let y := ts[1]!.toNat
             if !(y + D_EXPUNGE < ctx.timeslot.toNat) then
-              let regs' := setR7 regs PVM.RESULT_HUH
+              let regs' := setR7 regs JAVM.RESULT_HUH
               (mkResult regs' mem gas', ctx)
             else
             -- All checks passed: eject the service
             match ctx.state.accounts.lookup ctx.serviceId with
             | none =>
-              let regs' := setR7 regs PVM.RESULT_NONE
+              let regs' := setR7 regs JAVM.RESULT_NONE
               (mkResult regs' mem gas', ctx)
             | some callerAcct =>
               let callerAcct' := { callerAcct with econ := econAbsorb callerAcct.econ ejected.econ }
@@ -1069,7 +1069,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
               -- Remove all opaque data entries belonging to the ejected service
               let od := ctx.opaqueData.filter fun (k, _) =>
                 StateSerialization.extractServiceIdFromDataKey k != sid
-              let regs' := setR7 regs PVM.RESULT_OK
+              let regs' := setR7 regs JAVM.RESULT_OK
               (mkResult regs' mem gas', { ctx with state := state', opaqueData := od })
     | _ =>
       -- Page fault on hash read → panic (GP: ⚡)
@@ -1086,12 +1086,12 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
   | 23 =>
     let hashPtr := getReg regs 7
     let blobLen := UInt32.ofNat (getReg regs 8).toNat
-    match PVM.readByteArray mem hashPtr 32 with
+    match JAVM.readByteArray mem hashPtr 32 with
     | .ok hashBytes =>
       let h : Hash := Hash.mk! hashBytes
       match ctx.state.accounts.lookup ctx.serviceId with
       | none =>
-        let regs' := setR7 regs PVM.RESULT_NONE
+        let regs' := setR7 regs JAVM.RESULT_NONE
         let regs' := setReg regs' 8 0
         (mkResult regs' mem gas', ctx)
       | some acct =>
@@ -1107,7 +1107,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
         let ctx := { ctx with state := state' }
         match acct.preimageInfo.lookup (h, blobLen) with
         | none =>
-          let regs' := setR7 regs PVM.RESULT_NONE
+          let regs' := setR7 regs JAVM.RESULT_NONE
           let regs' := setReg regs' 8 0
           (mkResult regs' mem gas', ctx)
         | some timeslots =>
@@ -1137,12 +1137,12 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
   | 24 =>
     let hashPtr := getReg regs 7
     let blobLen := UInt32.ofNat (getReg regs 8).toNat
-    match PVM.readByteArray mem hashPtr 32 with
+    match JAVM.readByteArray mem hashPtr 32 with
     | .ok hashBytes =>
       let h : Hash := Hash.mk! hashBytes
       match ctx.state.accounts.lookup ctx.serviceId with
       | none =>
-        let regs' := setR7 regs PVM.RESULT_HUH
+        let regs' := setR7 regs JAVM.RESULT_HUH
         (mkResult regs' mem gas', ctx)
       | some acct =>
         -- Promote from opaque data if needed
@@ -1159,11 +1159,11 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
               preimageInfo := acct.preimageInfo.insert (h, blobLen) (ts.push ctx.timeslot) }
             let accounts' := ctx.state.accounts.insert ctx.serviceId acct'
             let state' := { ctx.state with accounts := accounts' }
-            let regs' := setR7 regs PVM.RESULT_OK
+            let regs' := setR7 regs JAVM.RESULT_OK
             (mkResult regs' mem gas', { ctx with state := state' })
           else
             -- Already solicited with different state
-            let regs' := setR7 regs PVM.RESULT_HUH
+            let regs' := setR7 regs JAVM.RESULT_HUH
             (mkResult regs' mem gas', ctx)
         | none =>
           -- New solicitation: create entry with empty timeslots
@@ -1176,12 +1176,12 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           -- Check service can afford updated storage footprint
           if !econCanAfford acct'.econ newItems.toNat newFootprint then
             -- Insufficient balance/quota: undo and return FULL
-            let regs' := setR7 regs PVM.RESULT_FULL
+            let regs' := setR7 regs JAVM.RESULT_FULL
             (mkResult regs' mem gas', ctx)
           else
             let accounts' := ctx.state.accounts.insert ctx.serviceId acct'
             let state' := { ctx.state with accounts := accounts' }
-            let regs' := setR7 regs PVM.RESULT_OK
+            let regs' := setR7 regs JAVM.RESULT_OK
             (mkResult regs' mem gas', { ctx with state := state' })
     | _ =>
       -- Page fault on hash read → panic (GP: ⚡)
@@ -1192,12 +1192,12 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
   | 25 =>
     let hashPtr := getReg regs 7
     let blobLen := UInt32.ofNat (getReg regs 8).toNat
-    match PVM.readByteArray mem hashPtr 32 with
+    match JAVM.readByteArray mem hashPtr 32 with
     | .ok hashBytes =>
       let h : Hash := Hash.mk! hashBytes
       match ctx.state.accounts.lookup ctx.serviceId with
       | none =>
-        let regs' := setR7 regs PVM.RESULT_HUH
+        let regs' := setR7 regs JAVM.RESULT_HUH
         (mkResult regs' mem gas', ctx)
       | some acct =>
         -- Promote from opaque data if needed
@@ -1208,7 +1208,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
             | none => (acct, ctx)
         match acct.preimageInfo.lookup (h, blobLen) with
         | none =>
-          let regs' := setR7 regs PVM.RESULT_HUH
+          let regs' := setR7 regs JAVM.RESULT_HUH
           (mkResult regs' mem gas', ctx)
         | some ts =>
           -- GP ΩF: behavior depends on timeslot count
@@ -1228,7 +1228,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
               k != preimageDataKey.data && k != preimageInfoKey.data
             let accounts' := ctx.state.accounts.insert ctx.serviceId acct'
             let state' := { ctx.state with accounts := accounts' }
-            let regs' := setR7 regs PVM.RESULT_OK
+            let regs' := setR7 regs JAVM.RESULT_OK
             (mkResult regs' mem gas', { ctx with state := state', opaqueData := od })
           else if ts.size == 1 then
             -- [x] → set forget time: [x, t]
@@ -1236,7 +1236,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
               preimageInfo := acct.preimageInfo.insert (h, blobLen) (ts.push ctx.timeslot) }
             let accounts' := ctx.state.accounts.insert ctx.serviceId acct'
             let state' := { ctx.state with accounts := accounts' }
-            let regs' := setR7 regs PVM.RESULT_OK
+            let regs' := setR7 regs JAVM.RESULT_OK
             (mkResult regs' mem gas', { ctx with state := state' })
           else if ts.size == 2 && ts[1]!.toNat + D_EXPUNGE < ctx.timeslot.toNat then
             -- [x, y] with y < t - D → remove
@@ -1254,7 +1254,7 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
               k != preimageDataKey.data && k != preimageInfoKey.data
             let accounts' := ctx.state.accounts.insert ctx.serviceId acct'
             let state' := { ctx.state with accounts := accounts' }
-            let regs' := setR7 regs PVM.RESULT_OK
+            let regs' := setR7 regs JAVM.RESULT_OK
             (mkResult regs' mem gas', { ctx with state := state', opaqueData := od })
           else if ts.size == 3 && ts[1]!.toNat + D_EXPUNGE < ctx.timeslot.toNat then
             -- [x, y, w] with y < t - D → [w, t]
@@ -1262,10 +1262,10 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
               preimageInfo := acct.preimageInfo.insert (h, blobLen) #[ts[2]!, ctx.timeslot] }
             let accounts' := ctx.state.accounts.insert ctx.serviceId acct'
             let state' := { ctx.state with accounts := accounts' }
-            let regs' := setR7 regs PVM.RESULT_OK
+            let regs' := setR7 regs JAVM.RESULT_OK
             (mkResult regs' mem gas', { ctx with state := state' })
           else
-            let regs' := setR7 regs PVM.RESULT_HUH
+            let regs' := setR7 regs JAVM.RESULT_HUH
             (mkResult regs' mem gas', ctx)
     | _ =>
       -- Page fault on hash read → panic (GP: ⚡)
@@ -1275,10 +1275,10 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
   | 26 =>
     -- reg[7] = hash pointer (32 bytes in memory)
     let hashPtr := getReg regs 7
-    match PVM.readByteArray mem hashPtr 32 with
+    match JAVM.readByteArray mem hashPtr 32 with
     | .ok hashBytes =>
       let h : Hash := Hash.mk! hashBytes
-      let regs' := setR7 regs PVM.RESULT_OK
+      let regs' := setR7 regs JAVM.RESULT_OK
       (mkResult regs' mem gas', { ctx with yieldHash := some h })
     | _ =>
       -- Page fault on hash read → panic (GP: ⚡)
@@ -1288,23 +1288,23 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
   -- φ[7] = s (target service, NONE = self), φ[8] = o (data ptr), φ[9] = z (data len)
   | 27 =>
     let rawTarget := getReg regs 7
-    let targetSid := if rawTarget == PVM.RESULT_NONE then ctx.serviceId
+    let targetSid := if rawTarget == JAVM.RESULT_NONE then ctx.serviceId
       else if rawTarget.toNat <= UInt32.toNat (UInt32.ofNat (2^32 - 1)) then UInt32.ofNat rawTarget.toNat
       else 0  -- invalid → will return WHO
     -- Check target validity first (but after determining target)
-    if rawTarget != PVM.RESULT_NONE && rawTarget.toNat > UInt32.toNat (UInt32.ofNat (2^32 - 1)) then
-      let regs' := setR7 regs PVM.RESULT_WHO
+    if rawTarget != JAVM.RESULT_NONE && rawTarget.toNat > UInt32.toNat (UInt32.ofNat (2^32 - 1)) then
+      let regs' := setR7 regs JAVM.RESULT_WHO
       (mkResult regs' mem gas', ctx)
     else
     let dataPtr := getReg regs 8
     let dataLen := (getReg regs 9).toNat
-    match PVM.readByteArray mem dataPtr dataLen with
+    match JAVM.readByteArray mem dataPtr dataLen with
     | .ok preimageData =>
       let h := Crypto.blake2b preimageData
       let blobLen := UInt32.ofNat dataLen
       match ctx.state.accounts.lookup targetSid with
       | none =>
-        let regs' := setR7 regs PVM.RESULT_WHO
+        let regs' := setR7 regs JAVM.RESULT_WHO
         (mkResult regs' mem gas', ctx)
       | some acct =>
         -- Promote preimage_info from opaque data if needed
@@ -1319,12 +1319,12 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
           let accounts' := ctx.state.accounts.insert targetSid acct'
           let state' := { ctx.state with accounts := accounts' }
           let provision := (targetSid, preimageData)
-          let regs' := setR7 regs PVM.RESULT_OK
+          let regs' := setR7 regs JAVM.RESULT_OK
           (mkResult regs' mem gas', { ctx with
             state := state'
             provisions := ctx.provisions.push provision })
         else
-          let regs' := setR7 regs PVM.RESULT_HUH
+          let regs' := setR7 regs JAVM.RESULT_HUH
           (mkResult regs' mem gas', ctx)
     | _ =>
       -- Page fault on data read → panic (GP: ⚡)
@@ -1335,8 +1335,8 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
   -- Only callable by the quota service (χ_Q). Only functional in jar1.
   -- set_quota (28): Only available in jar1 (v2 capability model).
   | 28 =>
-    if JamConfig.capabilityModel != .v2 then
-      let regs' := setR7 regs PVM.RESULT_WHAT
+    if JarConfig.capabilityModel != .v2 then
+      let regs' := setR7 regs JAVM.RESULT_WHAT
       (mkResult regs' mem gas', ctx)
     else
     let targetSid := UInt32.ofNat (getReg regs 7).toNat
@@ -1344,29 +1344,29 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     let maxBytes := getReg regs 9
     -- Privilege check: caller must be quota service (χ_Q)
     if ctx.serviceId != ctx.state.quotaService then
-      let regs' := setR7 regs PVM.RESULT_HUH
+      let regs' := setR7 regs JAVM.RESULT_HUH
       (mkResult regs' mem gas', ctx)
     else
     match ctx.state.accounts.lookup targetSid with
     | none =>
-      let regs' := setR7 regs PVM.RESULT_WHO
+      let regs' := setR7 regs JAVM.RESULT_WHO
       (mkResult regs' mem gas', ctx)
     | some acct =>
       match econSetQuota acct.econ maxItems maxBytes with
       | none =>
         -- EconModel doesn't support set_quota (e.g., BalanceEcon)
-        let regs' := setR7 regs PVM.RESULT_WHAT
+        let regs' := setR7 regs JAVM.RESULT_WHAT
         (mkResult regs' mem gas', ctx)
       | some econ' =>
         let acct' := { acct with econ := econ' }
         let accounts' := ctx.state.accounts.insert targetSid acct'
         let state' := { ctx.state with accounts := accounts' }
-        let regs' := setR7 regs PVM.RESULT_OK
+        let regs' := setR7 regs JAVM.RESULT_OK
         (mkResult regs' mem gas', { ctx with state := state' })
 
   -- ===== Unknown host call =====
   | _ =>
-    let regs' := setR7 regs PVM.RESULT_WHAT
+    let regs' := setR7 regs JAVM.RESULT_WHAT
     (mkResult regs' mem gas', ctx)
   let outR7 := if 7 < result.registers.size then result.registers[7]! else 0
   let extra := ctx'.debugExtra
@@ -1378,8 +1378,8 @@ def handleHostCall (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
     Translates old GP host call IDs (gas=0, fetch=1, ..., quota=27) to
     jar1 numbering (gas=1, fetch=2, ..., quota=28) and delegates to handleHostCall.
     gp072 has no REPLY host call — termination is via halt address in φ[0]. -/
-def handleHostCallGp072 (callId : PVM.Reg) (gas : Gas) (regs : PVM.Registers)
-    (mem : PVM.Memory) (ctx : AccContext) : PVM.InvocationResult × AccContext :=
+def handleHostCallGp072 (callId : JAVM.Reg) (gas : Gas) (regs : JAVM.Registers)
+    (mem : JAVM.Memory) (ctx : AccContext) : JAVM.InvocationResult × AccContext :=
   -- gp072 protocol caps: 0-27. Shift +1 to align with jar1 match arms (1-28).
   let jar1CallId := UInt64.ofNat (callId.toNat + 1)
   handleHostCall jar1CallId gas regs mem ctx
@@ -1526,34 +1526,34 @@ def accone (ps : PartialState) (serviceId : ServiceId)
       let itemCount := transfers.size + operands.size
       let args := encodeAccArgs timeslot serviceId itemCount
       -- Initialize PVM with service code and arguments
-      match PVM.initProgram codeBlob args with
+      match JAVM.initProgram codeBlob args with
       | none =>
         -- Invalid program blob: panic
         { postState := ps, deferredTransfers := #[], yieldHash := none,
           gasUsed := totalGas, provisions := #[], opaqueData := opaqueData' }
       | some (prog, regs, mem) =>
         -- Run PVM with host-call dispatch via handleHostCall
-        let runFn := match JamConfig.gasModel with
-          | .perInstruction => PVM.run
-          | .basicBlockFull => PVM.runBlockGas
-          | .basicBlockSinglePass => PVM.runBlockGasSinglePass
+        let runFn := match JarConfig.gasModel with
+          | .perInstruction => JAVM.run
+          | .basicBlockFull => JAVM.runBlockGas
+          | .basicBlockSinglePass => JAVM.runBlockGasSinglePass
         -- Single entrypoint PC=0. φ[7]=1 for accumulate, φ[8]=args_base, φ[9]=args_len.
         -- For gp072: PC=5 (standard dispatch, no single entrypoint).
-        let (entryPC, regs) := if JamConfig.capabilityModel == .v2 then
+        let (entryPC, regs) := if JarConfig.capabilityModel == .v2 then
           let regs := regs.set! 7 (UInt64.ofNat 1)  -- op = accumulate
           (0, regs)
         else (5, regs)
         let (result, ctx') :=
-          if JamConfig.capabilityModel == .v2 then
+          if JarConfig.capabilityModel == .v2 then
             -- jar1: use capability kernel
-            let kernelState := PVM.Kernel.initKernel prog regs mem totalGas.toNat 4 runFn
-            let rec kernelLoop (ks : PVM.Kernel.KernelState) (ctx : AccContext) (fuel : Nat)
-                : PVM.InvocationResult × AccContext :=
+            let kernelState := JAVM.Kernel.initKernel prog regs mem totalGas.toNat 4 runFn
+            let rec kernelLoop (ks : JAVM.Kernel.KernelState) (ctx : AccContext) (fuel : Nat)
+                : JAVM.InvocationResult × AccContext :=
               match fuel with
               | 0 => ({ exitReason := .outOfGas, exitValue := 0, gas := 0,
                         registers := ks.activeInst.registers, memory := ks.memory }, ctx)
               | fuel' + 1 =>
-                let (ks', kr) := PVM.Kernel.runKernel ks fuel'
+                let (ks', kr) := JAVM.Kernel.runKernel ks fuel'
                 match kr with
                 | .halt v =>
                   ({ exitReason := .halt, exitValue := UInt64.ofNat v,
@@ -1577,16 +1577,16 @@ def accone (ps : PartialState) (serviceId : ServiceId)
                   match hostResult.exitReason with
                   | .hostCall _ =>
                     -- Resume kernel with host result, sync memory back
-                    let ks'' := PVM.Kernel.resumeProtocolCall ks'
-                      (PVM.Kernel.getReg hostResult.registers 7)
-                      (PVM.Kernel.getReg hostResult.registers 8)
+                    let ks'' := JAVM.Kernel.resumeProtocolCall ks'
+                      (JAVM.Kernel.getReg hostResult.registers 7)
+                      (JAVM.Kernel.getReg hostResult.registers 8)
                     let ks'' := { ks'' with memory := hostResult.memory }
                     kernelLoop ks'' ctx' fuel'
                   | _ => (hostResult, ctx')
             kernelLoop kernelState ctx (totalGas.toNat + 1)
           else
             -- gp072: use flat host call handler
-            PVM.runWithHostCalls AccContext
+            JAVM.runWithHostCalls AccContext
               prog entryPC regs mem (Int64.ofUInt64 totalGas)
               (fun callId gas regs' mem' c =>
                 handleHostCallGp072 callId gas regs' mem' c)
@@ -1604,7 +1604,7 @@ def accone (ps : PartialState) (serviceId : ServiceId)
               -- GP: o = μ'[φ'_7..+φ'_8] if N_{φ'_7..+φ'_8} ⊆ V_μ'
               -- Addresses are 32-bit, so full u64 range must fit in [0, 2^32)
               if outLen == 32 && outPtr.toNat < 2^32 && outPtr.toNat + 32 <= 2^32 then
-                match PVM.readByteArray result.memory outPtr 32 with
+                match JAVM.readByteArray result.memory outPtr 32 with
                 | .ok bytes => some (Hash.mk! bytes)
                 | _ => none
               else none

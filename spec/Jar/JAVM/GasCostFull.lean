@@ -1,7 +1,7 @@
-import Jar.PVM.GasCost
+import Jar.JAVM.GasCost
 
 /-!
-# PVM Gas Cost — Full Pipeline Simulation
+# JAVM Gas Cost — Full Pipeline Simulation
 
 ROB-based pipeline simulation for per-basic-block gas metering.
 Cost = `max(cycles - 3, 1)`.
@@ -13,7 +13,7 @@ Pipeline model:
 - Execution units per cycle: ALU:4, LOAD:4, STORE:4, MUL:1, DIV:1
 -/
 
-namespace Jar.PVM
+namespace Jar.JAVM
 
 -- ============================================================================
 -- Data Structures
@@ -183,4 +183,4 @@ def gasCostForBlockFull (code bitmask : ByteArray) (startPC : Nat) : Nat :=
   let finalState := gasSim code bitmask initState
   if finalState.cycles > 3 then finalState.cycles - 3 else 1
 
-end Jar.PVM
+end Jar.JAVM

@@ -1,7 +1,7 @@
-import Jar.PVM.GasCost
+import Jar.JAVM.GasCost
 
 /-!
-# PVM Gas Cost — Single-Pass Model
+# JAVM Gas Cost — Single-Pass Model
 
 Alternative to the full pipeline simulation (`GasCostFull.lean`). Computes
 per-basic-block gas cost in O(n) time with ~5 operations per instruction,
@@ -55,7 +55,7 @@ The single-pass model uses the same instruction cost tables (`instructionCost`),
 branch cost function (`branchCost`), and cost formula as the full model.
 -/
 
-namespace Jar.PVM
+namespace Jar.JAVM
 
 /-- Single-pass simulation state. -/
 structure GasSimStateSP where
@@ -113,4 +113,4 @@ def gasCostForBlockSinglePass (code bitmask : ByteArray) (startPC : Nat) (memCyc
   let finalState := gasSimSinglePass code bitmask memCycles initState
   if finalState.maxDone > 3 then finalState.maxDone - 3 else 1
 
-end Jar.PVM
+end Jar.JAVM

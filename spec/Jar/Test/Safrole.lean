@@ -15,7 +15,7 @@ namespace Jar.Test.Safrole
 
 open Jar Jar.Crypto Jar.Consensus
 
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- Flattened Safrole State (matches test vector JSON shape)

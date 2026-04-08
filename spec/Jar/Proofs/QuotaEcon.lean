@@ -54,20 +54,20 @@ theorem quotaEcon_setQuota_never_none (e : QuotaEcon) (mi mb : UInt64) :
 -- ============================================================================
 
 /-- serializeEcon produces exactly 16 bytes (8 for quotaItems + 8 for quotaBytes). -/
-theorem quotaEcon_serializeEcon_size [JamConfig] (e : QuotaEcon) :
+theorem quotaEcon_serializeEcon_size [JarConfig] (e : QuotaEcon) :
     (@EconModel.serializeEcon QuotaEcon QuotaTransfer _ e).size = 16 := by
   show (Codec.encodeFixedNat 8 e.quotaItems.toNat
         ++ Codec.encodeFixedNat 8 e.quotaBytes.toNat).size = 16
   rw [byteArray_append_size, encodeFixedNat_size, encodeFixedNat_size]
 
 /-- encodeTransferAmount always produces exactly 8 bytes, even in coinless mode. -/
-theorem quotaEcon_encodeTransferAmount_size [JamConfig] (t : QuotaTransfer) :
+theorem quotaEcon_encodeTransferAmount_size [JarConfig] (t : QuotaTransfer) :
     (@EconModel.encodeTransferAmount QuotaEcon QuotaTransfer _ t).size = 8 := by
   show (Codec.encodeFixedNat 8 0).size = 8
   rw [encodeFixedNat_size]
 
 /-- encodeInfo produces exactly 24 bytes (8 + 8 + 8 padding). -/
-theorem quotaEcon_encodeInfo_size [JamConfig] (e : QuotaEcon)
+theorem quotaEcon_encodeInfo_size [JarConfig] (e : QuotaEcon)
     (items bytes bI bL bS : Nat) :
     (@EconModel.encodeInfo QuotaEcon QuotaTransfer _ e items bytes bI bL bS).size = 24 := by
   show (Codec.encodeFixedNat 8 e.quotaItems.toNat

@@ -12,7 +12,7 @@ namespace Jar.Test.Statistics
 
 open Jar
 
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- Flattened Statistics State (matches test vector JSON shape)

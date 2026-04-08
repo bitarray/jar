@@ -14,7 +14,7 @@ namespace Jar.Test.Reports
 
 open Jar Jar.Crypto
 
-variable [JamVariant]
+variable [JarVariant]
 
 def MAX_ACCUMULATE_GAS : Nat := G_A
 def MAX_OUTPUT_PER_ITEM : Nat := 18432

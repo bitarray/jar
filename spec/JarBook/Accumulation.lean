@@ -11,7 +11,7 @@ set_option verso.docstring.allowMissing true
 The accumulation pipeline integrates refined work results into on-chain state
 (GP §12). It proceeds in three stages: `accseq` orchestrates sequentially,
 `accpar` parallelizes across services, and `accone` handles a single service
-via PVM execution with 27 host calls.
+via JAVM execution with 27 host calls.
 
 In jar1, accumulation runs through the capability kernel. The kernel's
 `runKernel` function executes service code until a protocol cap is invoked,

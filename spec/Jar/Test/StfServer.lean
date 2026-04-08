@@ -23,7 +23,7 @@ namespace Jar.Test.StfServer
 open Lean (Json ToJson FromJson toJson fromJson?)
 open Jar Jar.Json
 
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- Safrole
@@ -175,13 +175,13 @@ private def blessFile (subTransition : String) (inputPath : System.FilePath) : I
   let baseDir := inputPath.parent.getD "."
   let result ← runSubTransition subTransition json baseDir
   -- Write computed output/post_state to the output file only
-  let outputPath := System.FilePath.mk (inputPath.toString.replace s!".input.{JamConfig.name}.json" s!".output.{JamConfig.name}.json")
+  let outputPath := System.FilePath.mk (inputPath.toString.replace s!".input.{JarConfig.name}.json" s!".output.{JarConfig.name}.json")
   IO.FS.writeFile outputPath (result.pretty ++ "\n")
   IO.println s!"  blessed: {inputPath.fileName.getD (toString inputPath)}"
 
 private def blessDir (subTransition : String) (dir : System.FilePath) : IO UInt32 := do
   let entries ← dir.readDir
-  let jsonFiles := entries.filter (fun e => e.fileName.endsWith s!".input.{JamConfig.name}.json")
+  let jsonFiles := entries.filter (fun e => e.fileName.endsWith s!".input.{JarConfig.name}.json")
   let sorted := jsonFiles.qsort (fun a b => a.fileName < b.fileName)
   IO.println s!"Blessing {sorted.size} test vectors in: {dir}"
   for entry in sorted do

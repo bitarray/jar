@@ -1,16 +1,16 @@
-import Jar.PVM
-import Jar.PVM.Decode
-import Jar.PVM.Memory
+import Jar.JAVM
+import Jar.JAVM.Decode
+import Jar.JAVM.Memory
 import Jar.Types.Config
 
 /-!
-# PVM Instruction Execution — Appendix A
+# JAVM Instruction Execution — Appendix A
 
 All ~141 PVM opcodes grouped by format category.
 Each instruction costs 1 gas. GP Appendix A.
 -/
 
-namespace Jar.PVM
+namespace Jar.JAVM
 
 -- ============================================================================
 -- Step Result
@@ -803,4 +803,4 @@ def opcodeName (op : Nat) : String :=
   | 227 => "max_s" | 228 => "max_u" | 229 => "min_s" | 230 => "min_u"
   | n => s!"op{n}"
 
-end Jar.PVM
+end Jar.JAVM

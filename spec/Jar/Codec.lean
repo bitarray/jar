@@ -21,7 +21,7 @@ References: `graypaper/text/serialization.tex`.
 -/
 
 namespace Jar.Codec
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- §C.7 — Fixed-width Little-Endian Integer Encoding
@@ -260,7 +260,7 @@ open Jar in
 def encodeEpochMarker (em : EpochMarker) : ByteArray :=
   em.entropy.data
     ++ em.entropyPrev.data
-    ++ (if JamConfig.variableValidators
+    ++ (if JarConfig.variableValidators
         then encodeNat em.validators.size  -- variable-length count prefix
         else ByteArray.empty)
     ++ encodeArray (fun (bk, ek) => bk.data ++ ek.data) em.validators
@@ -713,7 +713,7 @@ open Jar in
 def decodeEpochMarkerD : Decoder EpochMarker := do
   let entropy ← decodeHashD
   let entropyPrev ← decodeHashD
-  let count ← if JamConfig.variableValidators then decodeNatD else pure V
+  let count ← if JarConfig.variableValidators then decodeNatD else pure V
   let validators ← decodeArrayD count do
     let bk ← decodeOctetSeqD 32
     let ek ← decodeOctetSeqD 32

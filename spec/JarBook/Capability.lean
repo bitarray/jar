@@ -1,5 +1,5 @@
 import VersoManual
-import Jar.PVM.Capability
+import Jar.JAVM.Capability
 
 open Verso.Genre Manual
 
@@ -31,11 +31,11 @@ Six capability variants: five program types and one protocol type. Copyable type
 child VMs via CREATE bitmask. Move-only types (DATA, HANDLE) require MOVE for
 cross-CNode transfer.
 
-{docstring Jar.PVM.Cap.Cap}
+{docstring Jar.JAVM.Cap.Cap}
 
-{docstring Jar.PVM.Cap.Cap.isCopyable}
+{docstring Jar.JAVM.Cap.Cap.isCopyable}
 
-{docstring Jar.PVM.Cap.Access}
+{docstring Jar.JAVM.Cap.Access}
 
 ## DATA: Physical Pages (Move-Only, Partial Mapping)
 
@@ -47,7 +47,7 @@ demand paging: a parent VM maps pages one at a time through HANDLE indirection.
 
 MOVE to a different CNode auto-unmaps all pages. DROP auto-unmaps and leaks pages.
 
-{docstring Jar.PVM.Cap.DataCap}
+{docstring Jar.JAVM.Cap.DataCap}
 
 ## UNTYPED: Bump Allocator
 
@@ -57,7 +57,7 @@ from the pool and returns an unmapped DATA cap at a caller-specified destination
 slot. Pages are never returned (leaky by design). Placed at fixed slot 254; omitted
 when `memory\_pages == 0`.
 
-{docstring Jar.PVM.Cap.UntypedCap}
+{docstring Jar.JAVM.Cap.UntypedCap}
 
 ## CODE: Compiled PVM Code
 
@@ -67,7 +67,7 @@ virtual window shared by all VMs running that code. CALL on CODE = CREATE: produ
 a new VM with a HANDLE. The CREATE bitmask copies caps from the CODE cap's CNode
 (not the caller's), so cap replacements propagate automatically to children.
 
-{docstring Jar.PVM.Cap.CodeCap}
+{docstring Jar.JAVM.Cap.CodeCap}
 
 ## HANDLE and CALLABLE: VM References
 
@@ -81,9 +81,9 @@ RESUME (ecall op 0x0D) restarts a FAULTED VM with fresh gas, preserving register
 and PC. This enables the pager pattern: parent fixes the environment (maps missing
 pages via indirection), then RESUMEs the child transparently.
 
-{docstring Jar.PVM.Cap.HandleCap}
+{docstring Jar.JAVM.Cap.HandleCap}
 
-{docstring Jar.PVM.Cap.CallableCap}
+{docstring Jar.JAVM.Cap.CallableCap}
 
 ## Protocol Caps
 
@@ -92,9 +92,9 @@ invoked via CALL — identical interface to calling a VM. Any protocol cap can b
 replaced with a CALLABLE to a wrapper VM, enabling transparent policy enforcement.
 The child code is identical either way.
 
-{docstring Jar.PVM.Cap.ProtocolCap}
+{docstring Jar.JAVM.Cap.ProtocolCap}
 
-{docstring Jar.PVM.Cap.ManifestCapType}
+{docstring Jar.JAVM.Cap.ManifestCapType}
 
 # Capability Indirection
 
@@ -131,19 +131,19 @@ CODE cap's CNode, copyable types only), slots 64-254 via MOVE after creation.
 The per-CNode *original bitmap* (256 bits) tracks which protocol cap slots are
 unmodified. The compiler uses this for fast-path inlining of protocol calls.
 
-{docstring Jar.PVM.Cap.ipcSlot}
+{docstring Jar.JAVM.Cap.ipcSlot}
 
-{docstring Jar.PVM.Cap.CapTable}
+{docstring Jar.JAVM.Cap.CapTable}
 
-{docstring Jar.PVM.Cap.CapTable.empty}
+{docstring Jar.JAVM.Cap.CapTable.empty}
 
-{docstring Jar.PVM.Cap.CapTable.get}
+{docstring Jar.JAVM.Cap.CapTable.get}
 
-{docstring Jar.PVM.Cap.CapTable.set}
+{docstring Jar.JAVM.Cap.CapTable.set}
 
-{docstring Jar.PVM.Cap.CapTable.take}
+{docstring Jar.JAVM.Cap.CapTable.take}
 
-{docstring Jar.PVM.Cap.CapTable.isEmpty}
+{docstring Jar.JAVM.Cap.CapTable.isEmpty}
 
 # VM Lifecycle
 
@@ -160,11 +160,11 @@ RESUME restarts a FAULTED VM (FAULTED -> RUNNING), transferring fresh gas. Regis
 and PC are preserved — the faulting instruction is retried. This enables demand
 paging: the parent maps the missing page via indirection, then RESUMEs the child.
 
-{docstring Jar.PVM.Cap.VmState}
+{docstring Jar.JAVM.Cap.VmState}
 
-{docstring Jar.PVM.Cap.VmInstance}
+{docstring Jar.JAVM.Cap.VmInstance}
 
-{docstring Jar.PVM.Cap.CallFrame}
+{docstring Jar.JAVM.Cap.CallFrame}
 
 # ecalli / ecall Dispatch
 
@@ -181,11 +181,11 @@ dispatch — compiler cannot inline.
 
 phi\[7..10\] have the same meaning in both instructions.
 
-{docstring Jar.PVM.Cap.EcalliOp}
+{docstring Jar.JAVM.Cap.EcalliOp}
 
-{docstring Jar.PVM.Cap.decodeEcalli}
+{docstring Jar.JAVM.Cap.decodeEcalli}
 
-{docstring Jar.PVM.Cap.DispatchResult}
+{docstring Jar.JAVM.Cap.DispatchResult}
 
 # Protocol Cap Numbering
 
@@ -195,51 +195,51 @@ FETCH (2), COMPILE (9), CHECKPOINT (18). Accumulate-only: STORAGE\_R (4),
 STORAGE\_W (5), INFO (6), SERVICE\_NEW (19), TRANSFER (21), OUTPUT (26), and others.
 Refine-only: HISTORICAL (7), EXPORT (8).
 
-{docstring Jar.PVM.Cap.protocolGas}
+{docstring Jar.JAVM.Cap.protocolGas}
 
-{docstring Jar.PVM.Cap.protocolFetch}
+{docstring Jar.JAVM.Cap.protocolFetch}
 
-{docstring Jar.PVM.Cap.protocolPreimageLookup}
+{docstring Jar.JAVM.Cap.protocolPreimageLookup}
 
-{docstring Jar.PVM.Cap.protocolStorageR}
+{docstring Jar.JAVM.Cap.protocolStorageR}
 
-{docstring Jar.PVM.Cap.protocolStorageW}
+{docstring Jar.JAVM.Cap.protocolStorageW}
 
-{docstring Jar.PVM.Cap.protocolInfo}
+{docstring Jar.JAVM.Cap.protocolInfo}
 
-{docstring Jar.PVM.Cap.protocolHistorical}
+{docstring Jar.JAVM.Cap.protocolHistorical}
 
-{docstring Jar.PVM.Cap.protocolExport}
+{docstring Jar.JAVM.Cap.protocolExport}
 
-{docstring Jar.PVM.Cap.protocolCompile}
+{docstring Jar.JAVM.Cap.protocolCompile}
 
-{docstring Jar.PVM.Cap.protocolBless}
+{docstring Jar.JAVM.Cap.protocolBless}
 
-{docstring Jar.PVM.Cap.protocolAssign}
+{docstring Jar.JAVM.Cap.protocolAssign}
 
-{docstring Jar.PVM.Cap.protocolDesignate}
+{docstring Jar.JAVM.Cap.protocolDesignate}
 
-{docstring Jar.PVM.Cap.protocolCheckpoint}
+{docstring Jar.JAVM.Cap.protocolCheckpoint}
 
-{docstring Jar.PVM.Cap.protocolServiceNew}
+{docstring Jar.JAVM.Cap.protocolServiceNew}
 
-{docstring Jar.PVM.Cap.protocolServiceUpgrade}
+{docstring Jar.JAVM.Cap.protocolServiceUpgrade}
 
-{docstring Jar.PVM.Cap.protocolTransfer}
+{docstring Jar.JAVM.Cap.protocolTransfer}
 
-{docstring Jar.PVM.Cap.protocolServiceEject}
+{docstring Jar.JAVM.Cap.protocolServiceEject}
 
-{docstring Jar.PVM.Cap.protocolPreimageQuery}
+{docstring Jar.JAVM.Cap.protocolPreimageQuery}
 
-{docstring Jar.PVM.Cap.protocolPreimageSolicit}
+{docstring Jar.JAVM.Cap.protocolPreimageSolicit}
 
-{docstring Jar.PVM.Cap.protocolPreimageForget}
+{docstring Jar.JAVM.Cap.protocolPreimageForget}
 
-{docstring Jar.PVM.Cap.protocolOutput}
+{docstring Jar.JAVM.Cap.protocolOutput}
 
-{docstring Jar.PVM.Cap.protocolPreimageProvide}
+{docstring Jar.JAVM.Cap.protocolPreimageProvide}
 
-{docstring Jar.PVM.Cap.protocolQuota}
+{docstring Jar.JAVM.Cap.protocolQuota}
 
 # Program Blob Format (JAR v2)
 
@@ -248,11 +248,11 @@ the total memory budget and which CODE/DATA caps to create at init. The kernel
 parses the manifest, compiles CODE caps, maps DATA caps, writes arguments into
 the args cap (slot 0), and invokes the program at PC=0 via CALL.
 
-{docstring Jar.PVM.Cap.jarMagic}
+{docstring Jar.JAVM.Cap.jarMagic}
 
-{docstring Jar.PVM.Cap.ProgramHeader}
+{docstring Jar.JAVM.Cap.ProgramHeader}
 
-{docstring Jar.PVM.Cap.CapManifestEntry}
+{docstring Jar.JAVM.Cap.CapManifestEntry}
 
 # Limits
 
@@ -260,8 +260,8 @@ Capability indices are u8 (256 slots per VM). VM identifiers are u16 (max 65535
 per invocation). Memory pages are u32. Indirection depth is 3 levels (u32 encoding).
 These bounds define the resource envelope for a single PVM invocation.
 
-{docstring Jar.PVM.Cap.maxCodeCaps}
+{docstring Jar.JAVM.Cap.maxCodeCaps}
 
-{docstring Jar.PVM.Cap.maxVms}
+{docstring Jar.JAVM.Cap.maxVms}
 
-{docstring Jar.PVM.Cap.gasPerPage}
+{docstring Jar.JAVM.Cap.gasPerPage}

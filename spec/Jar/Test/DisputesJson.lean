@@ -6,7 +6,7 @@ namespace Jar.Test.DisputesJson
 open Lean (Json ToJson FromJson toJson fromJson?)
 open Jar Jar.Json Jar.Test.Disputes
 
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- JSON instances for disputes test types
@@ -107,7 +107,7 @@ instance : ToJson TDResult where
 def runJsonTest (inputPath : System.FilePath) : IO Bool := do
   let inputContent ← IO.FS.readFile inputPath
   let inputJson ← IO.ofExcept (Json.parse inputContent)
-  let outputPath := System.FilePath.mk (inputPath.toString.replace s!".input.{JamConfig.name}.json" s!".output.{JamConfig.name}.json")
+  let outputPath := System.FilePath.mk (inputPath.toString.replace s!".input.{JarConfig.name}.json" s!".output.{JarConfig.name}.json")
   let outputContent ← IO.FS.readFile outputPath
   let outputJson ← IO.ofExcept (Json.parse outputContent)
   let pre ← IO.ofExcept (@fromJson? TDState _ (← IO.ofExcept (inputJson.getObjVal? "pre_state")))
@@ -121,7 +121,7 @@ def runJsonTest (inputPath : System.FilePath) : IO Bool := do
 
 def runJsonTestDir (dir : System.FilePath) : IO UInt32 := do
   let entries ← dir.readDir
-  let jsonFiles := entries.filter (fun e => e.fileName.endsWith s!".input.{JamConfig.name}.json")
+  let jsonFiles := entries.filter (fun e => e.fileName.endsWith s!".input.{JarConfig.name}.json")
   let sorted := jsonFiles.qsort (fun a b => a.fileName < b.fileName)
   let mut passed := 0
   let mut failed := 0

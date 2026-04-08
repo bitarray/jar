@@ -15,7 +15,7 @@ namespace Jar.Test.AccumulateJson
 open Lean (Json ToJson FromJson toJson fromJson?)
 open Jar Jar.Json Jar.Test.Accumulate
 
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- Grey-format parsers for Work types (different field names from Jar.Json)
@@ -107,7 +107,7 @@ private def parseGreyWorkReport (j : Json) : Except String WorkReport := do
   return {
     availSpec := ← parseGreyAvailSpec availSpecJson
     context := ← parseGreyContext (← j.getObjVal? "context")
-    coreIndex := ⟨coreIndexNat % C, Nat.mod_lt _ JamConfig.valid.hC⟩
+    coreIndex := ⟨coreIndexNat % C, Nat.mod_lt _ JarConfig.valid.hC⟩
     authorizerHash := ← fromJson? (← j.getObjVal? "authorizer_hash")
     authOutput := ← fromJson? (← j.getObjVal? "auth_output")
     segmentRootLookup := ← parseGreySegmentRootLookup (← j.getObjVal? "segment_root_lookup")
@@ -179,7 +179,7 @@ private def parseGreyServiceAccount (dataJson : Json) : Except String ServiceAcc
     storage := storage
     preimages := preimages
     preimageInfo := preimageInfo
-    econ := match @EconModel.econFromJson? JamConfig.EconType JamConfig.TransferType _ svc with
+    econ := match @EconModel.econFromJson? JarConfig.EconType JarConfig.TransferType _ svc with
       | .ok e => e
       | .error _ => default
     codeHash := ← fromJson? (← svc.getObjVal? "code_hash")
@@ -318,7 +318,7 @@ private def toJsonGreyServiceAccount (sid : ServiceId) (acct : ServiceAccount) :
     ("data", Json.mkObj [
       ("service", Json.mkObj [
         ("code_hash", toJson acct.codeHash),
-        ("econ", Lean.Json.mkObj (@EconModel.econToJson JamConfig.EconType JamConfig.TransferType _ acct.econ)),
+        ("econ", Lean.Json.mkObj (@EconModel.econToJson JarConfig.EconType JarConfig.TransferType _ acct.econ)),
         ("min_item_gas", toJson acct.minAccGas),
         ("min_memo_gas", toJson acct.minOnTransferGas),
         ("creation_slot", toJson acct.creationSlot),
@@ -479,7 +479,7 @@ def runJsonTest (inputPath : System.FilePath) (verbose := false) : IO Bool := do
   -- Resolve blob_file / code_blob_file references (paths relative to input file dir)
   let baseDir := inputPath.parent.getD "."
   let inputJson ← resolveBlobFiles inputJsonRaw baseDir
-  let outputPath := System.FilePath.mk (inputPath.toString.replace s!".input.{JamConfig.name}.json" s!".output.{JamConfig.name}.json")
+  let outputPath := System.FilePath.mk (inputPath.toString.replace s!".input.{JarConfig.name}.json" s!".output.{JarConfig.name}.json")
   let outputContent ← IO.FS.readFile outputPath
   let outputJson ← IO.ofExcept (Json.parse outputContent)
   let t1 ← IO.monoMsNow
@@ -505,7 +505,7 @@ def runJsonTest (inputPath : System.FilePath) (verbose := false) : IO Bool := do
 /-- Run all JSON tests in a directory (in parallel). -/
 def runJsonTestDir (dir : System.FilePath) (verbose := false) : IO UInt32 := do
   let entries ← dir.readDir
-  let jsonFiles := entries.filter (fun e => e.fileName.endsWith s!".input.{JamConfig.name}.json")
+  let jsonFiles := entries.filter (fun e => e.fileName.endsWith s!".input.{JarConfig.name}.json")
   let sorted := jsonFiles.qsort (fun a b => a.fileName < b.fileName)
   -- Launch all tests in parallel
   let tasks ← sorted.mapM fun entry => IO.asTask (runJsonTest entry.path verbose)

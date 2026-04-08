@@ -13,7 +13,7 @@ namespace Jar.Test.Disputes
 
 open Jar Jar.Crypto
 
-variable [JamConfig]
+variable [JarConfig]
 
 /-- Super-majority threshold: (V * 2 / 3) + 1 -/
 def SUPER_MAJORITY : Nat := (V * 2 / 3) + 1

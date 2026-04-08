@@ -16,7 +16,7 @@ References: `graypaper/text/overview.tex` eq:statecomposition.
 -/
 
 namespace Jar
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- §10 — Judgments State (eq:disputesspec)

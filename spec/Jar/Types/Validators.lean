@@ -10,7 +10,7 @@ References: `graypaper/text/safrole.tex` eq:validatorkeys, eq:ticket,
 -/
 
 namespace Jar
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- §6.2 — Validator Keys (eq:validatorkeys)

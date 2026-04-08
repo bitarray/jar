@@ -13,7 +13,7 @@ Byte data is encoded as `0x`-prefixed hex strings.
 -/
 
 namespace Jar.Json
-variable [JamConfig]
+variable [JarConfig]
 
 open Lean (Json ToJson FromJson toJson fromJson?)
 
@@ -366,14 +366,14 @@ instance : ToJson AvailabilitySpec where
       ("erasure_root", toJson a.erasureRoot),
       ("segment_root", toJson a.segmentRoot),
       ("segment_count", Json.num a.segmentCount)]
-    let extra := if JamConfig.variableValidators
+    let extra := if JarConfig.variableValidators
       then [("erasure_shards", Json.num a.erasureShards)]
       else []
     Json.mkObj (base ++ extra)
 
 instance : FromJson AvailabilitySpec where
   fromJson? j := do
-    let erasureShards := if JamConfig.variableValidators then
+    let erasureShards := if JarConfig.variableValidators then
       match j.getObjVal? "erasure_shards" with
       | .ok v => match v.getNat? with | .ok n => n | .error _ => V
       | .error _ => V
@@ -445,7 +445,7 @@ instance : FromJson PendingReport where
 
 instance : ToJson ServiceAccount where
   toJson sa :=
-    let econFields := @EconModel.econToJson JamConfig.EconType JamConfig.TransferType _ sa.econ
+    let econFields := @EconModel.econToJson JarConfig.EconType JarConfig.TransferType _ sa.econ
     Json.mkObj ([
       ("storage", toJson sa.storage),
       ("preimages", toJson sa.preimages),
@@ -460,7 +460,7 @@ instance : ToJson ServiceAccount where
 
 instance : FromJson ServiceAccount where
   fromJson? j := do
-    let econ ← match @EconModel.econFromJson? JamConfig.EconType JamConfig.TransferType _ j with
+    let econ ← match @EconModel.econFromJson? JarConfig.EconType JarConfig.TransferType _ j with
       | .ok e => pure e
       | .error msg => throw msg
     return {
@@ -478,7 +478,7 @@ instance : FromJson ServiceAccount where
 
 instance : ToJson DeferredTransfer where
   toJson dt :=
-    let xferFields := @EconModel.xferToJson JamConfig.EconType JamConfig.TransferType _ dt.payload
+    let xferFields := @EconModel.xferToJson JarConfig.EconType JarConfig.TransferType _ dt.payload
     Json.mkObj ([
       ("source", toJson dt.source),
       ("dest", toJson dt.dest)] ++ xferFields ++ [
@@ -487,7 +487,7 @@ instance : ToJson DeferredTransfer where
 
 instance : FromJson DeferredTransfer where
   fromJson? j := do
-    let payload ← match @EconModel.xferFromJson? JamConfig.EconType JamConfig.TransferType _ j with
+    let payload ← match @EconModel.xferFromJson? JarConfig.EconType JarConfig.TransferType _ j with
       | .ok p => pure p
       | .error msg => throw msg
     return {
@@ -505,7 +505,7 @@ instance : ToJson PrivilegedServices where
       ("designator", toJson ps.designator),
       ("registrar", toJson ps.registrar),
       ("always_accumulate", toJson ps.alwaysAccumulate)]
-    let extra := if JamConfig.capabilityModel == .v2
+    let extra := if JarConfig.capabilityModel == .v2
       then [("quota_service", toJson ps.quotaService)]
       else []
     Json.mkObj (base ++ extra)

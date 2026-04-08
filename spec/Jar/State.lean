@@ -35,7 +35,7 @@ The transition is organized to minimize dependency depth for parallelism:
 -/
 
 namespace Jar
-variable [JamVariant]
+variable [JarVariant]
 
 /-- Stable sort for accumulation outputs by service ID. -/
 private def stableSortOutputs (outputs : Array (ServiceId × Hash)) : Array (ServiceId × Hash) :=
@@ -256,7 +256,7 @@ def updateJudgments (psi : JudgmentsState) (d : DisputesExtrinsic) : JudgmentsSt
 def reportsPostJudgment
     (rho : Array (Option PendingReport)) (badReports : Array Hash) : Array (Option PendingReport) :=
   rho.map fun opt => opt.bind fun pr =>
-    let reportHash := Crypto.blake2b (JamVariant.codecEncodeWorkReport pr.report)
+    let reportHash := Crypto.blake2b (JarVariant.codecEncodeWorkReport pr.report)
     if badReports.any (· == reportHash) then none else some pr
 
 /-- ρ‡ : Clear reports which have become available or timed out. GP eq (185–188).
@@ -616,7 +616,7 @@ def updateStatistics
     (available : Array WorkReport)
     (accStats : Dict ServiceId ServiceStatistics) : ActivityStatistics :=
   let epochChanged := isEpochChange t t'
-  let newValCount := if JamConfig.variableValidators then kappa'.size else V
+  let newValCount := if JarConfig.variableValidators then kappa'.size else V
   let (cur, prev) := if epochChanged
     then (Array.replicate newValCount ValidatorRecord.zero, pi.current)
     else (pi.current, pi.previous)
@@ -792,7 +792,7 @@ def validateHeader (s : State) (h : Header) : Bool :=
   let sealOk :=
     if h.authorIndex.val < s.currentValidators.size then
       let authorKey := s.currentValidators[h.authorIndex.val]!
-      let unsignedHeader := JamVariant.codecEncodeUnsignedHeader h
+      let unsignedHeader := JarVariant.codecEncodeUnsignedHeader h
       Crypto.bandersnatchVerify authorKey.bandersnatch
         Crypto.ctxTicketSeal unsignedHeader h.sealSig
     else false
@@ -854,7 +854,7 @@ def validateAuthor (h : Header) (eta' : Entropy) (sealKeys : SealKeySeries)
       if slotInEpoch < tickets.size then
         -- In ticket mode, verify seal with ticket context
         let ticket := tickets[slotInEpoch]!
-        let unsignedHeader := JamVariant.codecEncodeUnsignedHeader h
+        let unsignedHeader := JarVariant.codecEncodeUnsignedHeader h
         Consensus.verifySealTicketed authorKey eta'.threeBack ticket
           unsignedHeader h.sealSig
       else false
@@ -864,7 +864,7 @@ def validateAuthor (h : Header) (eta' : Entropy) (sealKeys : SealKeySeries)
         let expectedKey := keys[slotInEpoch]!
         if authorKey != expectedKey then false
         else
-          let unsignedHeader := JamVariant.codecEncodeUnsignedHeader h
+          let unsignedHeader := JarVariant.codecEncodeUnsignedHeader h
           Consensus.verifySealFallback authorKey eta'.threeBack
             unsignedHeader h.sealSig
       else false
@@ -948,7 +948,7 @@ def validateGuaranteeTimeslots (guarantees : GuaranteesExtrinsic)
 def validateGuaranteeSignatures (guarantees : GuaranteesExtrinsic)
     (validators : Array ValidatorKey) : Bool :=
   guarantees.all fun g =>
-    let reportEncoding := JamVariant.codecEncodeWorkReport g.report
+    let reportEncoding := JarVariant.codecEncodeWorkReport g.report
     let reportHash := Crypto.blake2b reportEncoding
     -- The message to sign is: "jam_guarantee" ++ H(encode(report))
     let message := Crypto.ctxGuarantee ++ reportHash.data
@@ -1021,7 +1021,7 @@ def stateTransition (s : State) (b : Block) : Option State := do
 
   -- §11 — Reports pipeline
   let rhoDag := reportsPostJudgment s.pendingReports psi'.bad
-  let (rhoDDag, available) := reportsPostAssurance rhoDag ext.assurances t' (if JamConfig.variableValidators then s.currentValidators.size else V)
+  let (rhoDDag, available) := reportsPostAssurance rhoDag ext.assurances t' (if JarConfig.variableValidators then s.currentValidators.size else V)
   let rho' := reportsPostGuarantees rhoDDag ext.guarantees t'
 
   -- §7 — Recent history: β†
@@ -1031,7 +1031,7 @@ def stateTransition (s : State) (b : Block) : Option State := do
   let accResult := performAccumulation available s t' #[] eta'
 
   -- §7 — Recent history: β'
-  let headerHash := Crypto.blake2b (JamVariant.codecEncodeHeader h)
+  let headerHash := Crypto.blake2b (JarVariant.codecEncodeHeader h)
   let beta' := updateRecentHistory bDag headerHash accResult.outputs ext.guarantees
 
   -- §12.7 — Preimage integration
@@ -1095,7 +1095,7 @@ def stateTransitionWithOpaque (s : State) (b : Block)
   -- Block import validation: assurance ordering (sorted, unique)
   guard (validateAssuranceOrder ext.assurances)
   -- Block import validation: assurance validator indices in range
-  let valCount := if JamConfig.variableValidators then s.currentValidators.size else V
+  let valCount := if JarConfig.variableValidators then s.currentValidators.size else V
   guard (validateAssuranceIndices ext.assurances valCount)
   -- Block import validation: guarantee credential validator indices in range
   guard (validateGuaranteeIndices ext.guarantees valCount)
@@ -1131,7 +1131,7 @@ def stateTransitionWithOpaque (s : State) (b : Block)
   let lambda' := updatePreviousValidators s.previousValidators s.currentValidators s.timeslot t'
   let psi' := updateJudgments s.judgments ext.disputes
   let rhoDag := reportsPostJudgment s.pendingReports psi'.bad
-  let (rhoDDag, available) := reportsPostAssurance rhoDag ext.assurances t' (if JamConfig.variableValidators then s.currentValidators.size else V)
+  let (rhoDDag, available) := reportsPostAssurance rhoDag ext.assurances t' (if JarConfig.variableValidators then s.currentValidators.size else V)
   -- GP §11: Guarantee validity — core must be free after assurance processing (ρ‡[c] = ∅)
   guard (ext.guarantees.all fun g =>
     let c := g.report.coreIndex.val
@@ -1147,7 +1147,7 @@ def stateTransitionWithOpaque (s : State) (b : Block)
   let rho' := reportsPostGuarantees rhoDDag ext.guarantees t'
   let bDag := updateParentStateRoot s.recent h
   let accResult := performAccumulation available s t' opaqueData eta'
-  let headerHash := Crypto.blake2b (JamVariant.codecEncodeHeader h)
+  let headerHash := Crypto.blake2b (JarVariant.codecEncodeHeader h)
   let beta' := updateRecentHistory bDag headerHash accResult.outputs ext.guarantees
   let (delta', remainingOpaque) := integratePreimages accResult.services ext.preimages t' accResult.remainingOpaqueData
   let alpha' := updateAuthPool s.authPool accResult.authQueue h ext.guarantees
@@ -1191,11 +1191,11 @@ def stateTransitionNoSealCheck (s : State) (b : Block)
   let lambda' := updatePreviousValidators s.previousValidators s.currentValidators s.timeslot t'
   let psi' := updateJudgments s.judgments ext.disputes
   let rhoDag := reportsPostJudgment s.pendingReports psi'.bad
-  let (rhoDDag, available) := reportsPostAssurance rhoDag ext.assurances t' (if JamConfig.variableValidators then s.currentValidators.size else V)
+  let (rhoDDag, available) := reportsPostAssurance rhoDag ext.assurances t' (if JarConfig.variableValidators then s.currentValidators.size else V)
   let rho' := reportsPostGuarantees rhoDDag ext.guarantees t'
   let bDag := updateParentStateRoot s.recent h
   let accResult := performAccumulation available s t' opaqueData eta'
-  let headerHash := Crypto.blake2b (JamVariant.codecEncodeHeader h)
+  let headerHash := Crypto.blake2b (JarVariant.codecEncodeHeader h)
   let beta' := updateRecentHistory bDag headerHash accResult.outputs ext.guarantees
   let (delta', remainingOpaque) := integratePreimages accResult.services ext.preimages t' accResult.remainingOpaqueData
   let alpha' := updateAuthPool s.authPool accResult.authQueue h ext.guarantees

@@ -1,14 +1,14 @@
-import Jar.PVM
-import Jar.PVM.Decode
+import Jar.JAVM
+import Jar.JAVM.Decode
 
 /-!
-# PVM Per-Basic-Block Gas Cost Model — Shared Definitions
+# JAVM Per-Basic-Block Gas Cost Model — Shared Definitions
 
 Per-instruction cost tables and helpers shared by both the full pipeline
 simulation (`GasCostFull.lean`) and the single-pass model (`GasCostSinglePass.lean`).
 -/
 
-namespace Jar.PVM
+namespace Jar.JAVM
 
 -- ============================================================================
 -- Data Structures
@@ -266,4 +266,4 @@ def nextInstrPC (bitmask : ByteArray) (pc : Nat) : Option Nat :=
   let npc := pc + 1 + skip
   if npc < bitmask.size then some npc else none
 
-end Jar.PVM
+end Jar.JAVM

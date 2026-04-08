@@ -2,11 +2,11 @@ import Jar.Notation
 import Jar.Types
 import Jar.Codec
 import Jar.Crypto
-import Jar.PVM
-import Jar.PVM.Decode
-import Jar.PVM.Memory
-import Jar.PVM.Instructions
-import Jar.PVM.Interpreter
+import Jar.JAVM
+import Jar.JAVM.Decode
+import Jar.JAVM.Memory
+import Jar.JAVM.Instructions
+import Jar.JAVM.Interpreter
 import Jar.Accumulation
 
 /-!
@@ -20,7 +20,7 @@ namespace Jar.Test.Accumulate
 
 open Jar Jar.Crypto Jar.Accumulation
 
-variable [JamConfig]
+variable [JarConfig]
 
 /-- Build config blob for tiny config, matching Rust Config::tiny().encode_config_blob().
     Format: B_I(8) B_L(8) B_S(8) C(2) D(4) E(4) G_A(8) G_I(8) G_R(8) G_T(8)

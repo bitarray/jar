@@ -3,7 +3,7 @@ import Jar.Types.Numerics
 import Jar.Types.Constants
 
 /-!
-# Polkadot Virtual Machine — Appendix A
+# Join-Accumulate Virtual Machine (JAVM) — based on PVM (Appendix A)
 
 RISC-V rv64em-based virtual machine for executing service code.
 References: `graypaper/text/pvm.tex`, `graypaper/text/pvm_invocations.tex`,
@@ -18,7 +18,7 @@ References: `graypaper/text/pvm.tex`, `graypaper/text/pvm_invocations.tex`,
 - Invocation contexts: Ψ_I (is-authorized), Ψ_R (refine), Ψ_A (accumulate)
 -/
 
-namespace Jar.PVM
+namespace Jar.JAVM
 
 -- ============================================================================
 -- Constants — Appendix A
@@ -184,7 +184,7 @@ def HostCallHandler (ctx : Type) :=
   Reg → Gas → Registers → Memory → ctx → InvocationResult × ctx
 
 -- Core PVM invocation (Ψ), standard initialization (Y), host-call dispatch
--- (Ψ_H), and standard invocation (Ψ_M) are implemented in Jar.PVM.Interpreter.
+-- (Ψ_H), and standard invocation (Ψ_M) are implemented in Jar.JAVM.Interpreter.
 
 -- ============================================================================
 -- Instruction Set Summary — Appendix A
@@ -202,6 +202,6 @@ inductive InstructionCategory where
   | threeReg     -- three-register ALU ops
 
 -- PVM opcodes (~141 instructions) are fully decoded and executed in
--- Jar.PVM.Decode, Jar.PVM.Instructions, and Jar.PVM.Interpreter.
+-- Jar.JAVM.Decode, Jar.JAVM.Instructions, and Jar.JAVM.Interpreter.
 
-end Jar.PVM
+end Jar.JAVM

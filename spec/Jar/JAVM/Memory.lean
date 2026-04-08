@@ -1,14 +1,14 @@
-import Jar.PVM
-import Jar.PVM.Decode
+import Jar.JAVM
+import Jar.JAVM.Decode
 
 /-!
-# PVM Memory Operations — Appendix A
+# JAVM Memory Operations — Appendix A
 
 Memory read/write with page-level access control and fault detection.
 References: `graypaper/text/pvm.tex`.
 -/
 
-namespace Jar.PVM
+namespace Jar.JAVM
 
 -- ============================================================================
 -- Memory Access Results
@@ -232,4 +232,4 @@ def sbrk (m : Memory) (sizeBytes : UInt64) : Memory × UInt64 :=
         return acc
       ({ m with access := access', heapTop := newTop }, UInt64.ofNat oldTop)
 
-end Jar.PVM
+end Jar.JAVM

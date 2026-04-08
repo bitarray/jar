@@ -75,7 +75,7 @@ private def parseTestVector (j : Json) : Except String TestVector := do
   return { data, shards }
 
 /-- Run erasure coding tests for a single file. Returns (passed, failed). -/
-private def runFile [JamConfig] (path : String) : IO (Nat × Nat) := do
+private def runFile [JarConfig] (path : String) : IO (Nat × Nat) := do
   let contents ← IO.FS.readFile path
   let json ← match Lean.Json.parse contents with
     | .ok j => pure j
@@ -123,7 +123,7 @@ private def runFile [JamConfig] (path : String) : IO (Nat × Nat) := do
       return (0, 1)
 
 /-- Run recovery tests for a single test vector file. Returns (passed, failed). -/
-private def runRecoveryFile [JamConfig] (path : String) : IO (Nat × Nat) := do
+private def runRecoveryFile [JarConfig] (path : String) : IO (Nat × Nat) := do
   let contents ← IO.FS.readFile path
   let json ← match Lean.Json.parse contents with
     | .ok j => pure j
@@ -204,7 +204,7 @@ private def runRecoveryFile [JamConfig] (path : String) : IO (Nat × Nat) := do
 private def testDataSizes : Array String := #["3", "32", "100", "4096", "4104", "10000"]
 
 /-- Run all erasure coding test vectors for a given config. Returns (passed, failed, skipped). -/
-def runAllForConfig [JamConfig] (configName : String) : IO (Nat × Nat × Nat) := do
+def runAllForConfig [JarConfig] (configName : String) : IO (Nat × Nat × Nat) := do
   let dir := "tests/vectors/erasure"
   IO.println s!"Running erasure coding tests ({configName}):"
   let mut passed := 0
@@ -234,23 +234,23 @@ def runAll : IO UInt32 := do
   IO.println "Running erasure coding test vectors"
   IO.println "==================================="
   -- Tiny config
-  let tinyJamConfig : JamConfig := {
+  let tinyJarConfig : JarConfig := {
     name := "gp072_tiny"
     config := Params.tiny
     valid := Params.tiny_valid
     EconType := Jar.BalanceEcon
     TransferType := Jar.BalanceTransfer
   }
-  let (tp, tf, ts) ← @runAllForConfig tinyJamConfig "gp072_tiny"
+  let (tp, tf, ts) ← @runAllForConfig tinyJarConfig "gp072_tiny"
   -- Full config
-  let fullJamConfig : JamConfig := {
+  let fullJarConfig : JarConfig := {
     name := "gp072_full"
     config := Params.full
     valid := Params.full_valid
     EconType := Jar.BalanceEcon
     TransferType := Jar.BalanceTransfer
   }
-  let (fp, ff, fs) ← @runAllForConfig fullJamConfig "gp072_full"
+  let (fp, ff, fs) ← @runAllForConfig fullJarConfig "gp072_full"
   -- Recovery tests (tiny only — full config recovery is slow for large data sizes)
   IO.println s!"Running erasure recovery tests (gp072_tiny):"
   let mut rp := 0
@@ -260,7 +260,7 @@ def runAll : IO UInt32 := do
     let exists_ ← do try let _ ← IO.FS.readFile path; pure true catch _ => pure false
     if exists_ then
       IO.print s!"  {path}: "
-      let (p, f) ← @runRecoveryFile tinyJamConfig path
+      let (p, f) ← @runRecoveryFile tinyJarConfig path
       rp := rp + p
       rf := rf + f
   IO.println s!"Recovery tests: {rp} passed, {rf} failed"

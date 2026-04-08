@@ -14,7 +14,7 @@ Convention:
 -/
 
 namespace Jar.Codec.Jar1
-variable [JamConfig]
+variable [JarConfig]
 
 open Jar.Codec.Common
 

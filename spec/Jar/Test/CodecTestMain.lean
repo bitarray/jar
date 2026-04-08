@@ -3,9 +3,9 @@ import Jar.Variant
 
 open Jar Jar.Test.CodecTest
 
-private def testVariants : Array JamConfig := #[
-  JamVariant.gp072_tiny.toJamConfig,
-  JamVariant.gp072_full.toJamConfig
+private def testVariants : Array JarConfig := #[
+  JarVariant.gp072_tiny.toJarConfig,
+  JarVariant.gp072_full.toJarConfig
 ]
 
 def codecTestMain (args : List String) : IO UInt32 := do

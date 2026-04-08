@@ -96,7 +96,7 @@ structure Params.Valid (cfg : Params) : Prop where
   hN : 0 < cfg.N_TICKETS
 
 -- ============================================================================
--- JamConfig Typeclass
+-- JarConfig Typeclass
 -- ============================================================================
 
 /-- PVM memory model. Controls program initialization layout. -/
@@ -126,7 +126,7 @@ inductive CapabilityModel where
   deriving BEq, Inhabited
 
 -- ============================================================================
--- Economic Model Typeclass (defined here so JamConfig can reference it)
+-- Economic Model Typeclass (defined here so JarConfig can reference it)
 -- ============================================================================
 
 /-- Abstraction over the economic model for service accounts.
@@ -175,13 +175,13 @@ class EconModel (econ : Type) (xfer : Type) where
   xferFromJson? : Lean.Json → Except String xfer
 
 -- ============================================================================
--- JamConfig Typeclass
+-- JarConfig Typeclass
 -- ============================================================================
 
-/-- JamConfig: provides protocol configuration and validity proofs.
+/-- JarConfig: provides protocol configuration and validity proofs.
     Used by struct types and Fin-based index aliases.
-    Extended by `JamVariant` (in `Jar/Variant.lean`) to add PVM function fields. -/
-class JamConfig where
+    Extended by `JarVariant` (in `Jar/Variant.lean`) to add JAVM function fields. -/
+class JarConfig where
   /-- Variant name, e.g. "gp072_tiny", "gp072_full". -/
   name : String
   config : Params
@@ -217,14 +217,14 @@ class JamConfig where
   /-- EconModel instance linking EconType and TransferType. -/
   [econModel : EconModel EconType TransferType]
 
--- Forward typeclass instances from JamConfig fields
-instance [j : JamConfig] : BEq j.EconType := j.econBEq
-instance [j : JamConfig] : Inhabited j.EconType := j.econInhabited
-instance [j : JamConfig] : BEq j.TransferType := j.xferBEq
-instance [j : JamConfig] : Inhabited j.TransferType := j.xferInhabited
-instance [j : JamConfig] : Repr j.EconType := j.econRepr
-instance [j : JamConfig] : Repr j.TransferType := j.xferRepr
-instance [j : JamConfig] : EconModel j.EconType j.TransferType := j.econModel
+-- Forward typeclass instances from JarConfig fields
+instance [j : JarConfig] : BEq j.EconType := j.econBEq
+instance [j : JarConfig] : Inhabited j.EconType := j.econInhabited
+instance [j : JarConfig] : BEq j.TransferType := j.xferBEq
+instance [j : JarConfig] : Inhabited j.TransferType := j.xferInhabited
+instance [j : JarConfig] : Repr j.EconType := j.econRepr
+instance [j : JarConfig] : Repr j.TransferType := j.xferRepr
+instance [j : JarConfig] : EconModel j.EconType j.TransferType := j.econModel
 
 -- ============================================================================
 -- Standard Configurations
@@ -273,7 +273,7 @@ theorem Params.tiny_valid : Params.Valid Params.tiny where
 -- Convenience Accessors
 -- ============================================================================
 
-/-- Access config field via JamConfig typeclass. -/
-abbrev cfg [j : JamConfig] : Params := j.config
+/-- Access config field via JarConfig typeclass. -/
+abbrev cfg [j : JarConfig] : Params := j.config
 
 end Jar

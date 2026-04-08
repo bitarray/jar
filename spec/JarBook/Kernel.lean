@@ -1,8 +1,8 @@
 import VersoManual
-import Jar.PVM.Kernel
+import Jar.JAVM.Kernel
 
 open Verso.Genre Manual
-open Jar.PVM.Kernel
+open Jar.JAVM.Kernel
 
 set_option verso.docstring.allowMissing true
 
@@ -10,7 +10,7 @@ set_option verso.docstring.allowMissing true
 
 The capability kernel is the execution engine that schedules VMs, dispatches
 capability operations, and mediates all inter-VM communication. It sits between
-the PVM instruction execution (which runs native code or interpreted bytecode)
+the JAVM instruction execution (which runs native code or interpreted bytecode)
 and the host (grey-state's refine/accumulate logic).
 
 In jar1, the kernel replaces gp072's flat host-call dispatch. Instead of a
@@ -41,7 +41,7 @@ Internal dispatch within the kernel produces a `DispatchResult` that determines
 whether execution continues, a protocol cap was invoked, or the root VM
 terminated.
 
-{docstring Jar.PVM.Cap.DispatchResult}
+{docstring Jar.JAVM.Cap.DispatchResult}
 
 # Capability Indirection Resolution
 

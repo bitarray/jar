@@ -207,7 +207,7 @@ instance : EconModel QuotaEcon QuotaTransfer where
 
     Contains code, storage, preimages, and gas configuration.
     The economic model (balance vs quota) is determined by the variant. -/
-structure ServiceAccount [JamConfig] where
+structure ServiceAccount [JarConfig] where
   /-- s : Key-value storage. ⟨𝔹→𝔹⟩. -/
   storage : Dict ByteArray ByteArray
   /-- p : Preimage lookup. ⟨ℍ→𝔹⟩. -/
@@ -215,7 +215,7 @@ structure ServiceAccount [JamConfig] where
   /-- l : Preimage request metadata. ⟨(ℍ, ℕ_L) → ⟦ℕ_T⟧_{:3}⟩. -/
   preimageInfo : Dict (Hash × BlobLength) (Array Timeslot)
   /-- Economic model fields (balance+gratis for gp072, quotaItems+quotaBytes for jar1). -/
-  econ : JamConfig.EconType
+  econ : JarConfig.EconType
   /-- c : Service code hash. ℍ. -/
   codeHash : Hash
   /-- g : Minimum accumulation gas. ℕ_G. -/
@@ -267,13 +267,13 @@ structure PrivilegedServices where
 /-- 𝕏 : Deferred transfer. GP eq (12.3).
     X = ⟨s, d, payload, m, g⟩
     The economic payload (token amount vs nothing) is determined by the variant. -/
-structure DeferredTransfer [JamConfig] where
+structure DeferredTransfer [JarConfig] where
   /-- s : Source service. ℕ_S. -/
   source : ServiceId
   /-- d : Destination service. ℕ_S. -/
   dest : ServiceId
   /-- Economic payload (amount for gp072, unit for jar1). -/
-  payload : JamConfig.TransferType
+  payload : JarConfig.TransferType
   /-- m : Memo. 𝔹_{W_T} (128 bytes). -/
   memo : OctetSeq Jar.W_T
   /-- g : Gas limit for on-transfer. ℕ_G. -/

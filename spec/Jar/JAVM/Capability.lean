@@ -1,7 +1,7 @@
-import Jar.PVM
+import Jar.JAVM
 
 /-!
-# PVM Capability Types
+# JAVM Capability Types
 
 Capability-based execution model for the jar1 variant. Defines five
 program capability types (UNTYPED, DATA, CODE, HANDLE, CALLABLE) and
@@ -9,10 +9,10 @@ the cap table, VM state machine, ecalli/ecall dispatch, and capability
 indirection.
 
 This module defines the data structures only. Execution logic is in
-`Jar.PVM.Kernel`.
+`Jar.JAVM.Kernel`.
 -/
 
-namespace Jar.PVM.Cap
+namespace Jar.JAVM.Cap
 
 -- ============================================================================
 -- Capability Types
@@ -209,7 +209,7 @@ inductive VmState where
 structure VmInstance where
   state : VmState
   codeCapId : Nat
-  registers : PVM.Registers
+  registers : JAVM.Registers
   pc : Nat
   capTable : CapTable
   caller : Option Nat           -- For REPLY routing
@@ -293,7 +293,7 @@ inductive DispatchResult where
   /-- Continue execution of active VM. -/
   | continue_ : DispatchResult
   /-- Protocol cap called — host should handle. -/
-  | protocolCall (slot : Nat) (regs : PVM.Registers) (gas : Nat) : DispatchResult
+  | protocolCall (slot : Nat) (regs : JAVM.Registers) (gas : Nat) : DispatchResult
   /-- Root VM halted normally. -/
   | rootHalt (value : Nat) : DispatchResult
   /-- Root VM panicked. -/
@@ -369,4 +369,4 @@ def maxVms : Nat := 65535
 /-- Gas cost per page for RETYPE. -/
 def gasPerPage : Nat := 1500
 
-end Jar.PVM.Cap
+end Jar.JAVM.Cap

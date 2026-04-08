@@ -52,24 +52,24 @@ abbrev ServiceId := UInt32
 abbrev BlobLength := UInt32
 
 -- ============================================================================
--- Index types (parameterized by JamConfig)
+-- Index types (parameterized by JarConfig)
 -- ============================================================================
 
 /-- Core index: ℕ_{C}. Bounded by config.C. -/
-abbrev CoreIndex [j : JamConfig] := Fin j.config.C
+abbrev CoreIndex [j : JarConfig] := Fin j.config.C
 
 /-- Validator index: ℕ_{V}. Bounded by config.V. -/
-abbrev ValidatorIndex [j : JamConfig] := Fin j.config.V
+abbrev ValidatorIndex [j : JarConfig] := Fin j.config.V
 
 /-- Ticket entry index: ℕ_{N}. Raw Nat — validation enforces bounds. -/
-abbrev TicketEntryIndex [JamConfig] := Nat
+abbrev TicketEntryIndex [JarConfig] := Nat
 
 /-- Epoch slot index: ℕ_{E}. Bounded by config.E. -/
-abbrev EpochIndex [j : JamConfig] := Fin j.config.E
+abbrev EpochIndex [j : JarConfig] := Fin j.config.E
 
 -- Inhabited instances for parameterized Fin types
-instance instInhabitedCoreIndex [j : JamConfig] : Inhabited (Fin j.config.C) := ⟨⟨0, j.valid.hC⟩⟩
-instance instInhabitedValidatorIndex [j : JamConfig] : Inhabited (Fin j.config.V) := ⟨⟨0, j.valid.hV⟩⟩
-instance instInhabitedEpochIndex [j : JamConfig] : Inhabited (Fin j.config.E) := ⟨⟨0, j.valid.hE⟩⟩
+instance instInhabitedCoreIndex [j : JarConfig] : Inhabited (Fin j.config.C) := ⟨⟨0, j.valid.hC⟩⟩
+instance instInhabitedValidatorIndex [j : JarConfig] : Inhabited (Fin j.config.V) := ⟨⟨0, j.valid.hV⟩⟩
+instance instInhabitedEpochIndex [j : JarConfig] : Inhabited (Fin j.config.E) := ⟨⟨0, j.valid.hE⟩⟩
 
 end Jar

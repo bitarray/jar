@@ -15,28 +15,28 @@ namespace Jar.Proofs
 -- ============================================================================
 
 theorem jar1_capabilityModel_v2 :
-    @JamConfig.capabilityModel JamVariant.jar1.toJamConfig = .v2 := by rfl
+    @JarConfig.capabilityModel JarVariant.jar1.toJarConfig = .v2 := by rfl
 
 theorem jar1_memoryModel_linear :
-    @JamConfig.memoryModel JamVariant.jar1.toJamConfig = .linear := by rfl
+    @JarConfig.memoryModel JarVariant.jar1.toJarConfig = .linear := by rfl
 
 theorem jar1_gasModel_singlePass :
-    @JamConfig.gasModel JamVariant.jar1.toJamConfig = .basicBlockSinglePass := by rfl
+    @JarConfig.gasModel JarVariant.jar1.toJarConfig = .basicBlockSinglePass := by rfl
 
 theorem jar1_variableValidators :
-    @JamConfig.variableValidators JamVariant.jar1.toJamConfig = true := by rfl
+    @JarConfig.variableValidators JarVariant.jar1.toJarConfig = true := by rfl
 
 -- ============================================================================
 -- gp072_tiny config assertions (contrast)
 -- ============================================================================
 
 theorem gp072_tiny_memoryModel_segmented :
-    @JamConfig.memoryModel JamVariant.gp072_tiny.toJamConfig = .segmented := by rfl
+    @JarConfig.memoryModel JarVariant.gp072_tiny.toJarConfig = .segmented := by rfl
 
 theorem gp072_tiny_gasModel_perInstruction :
-    @JamConfig.gasModel JamVariant.gp072_tiny.toJamConfig = .perInstruction := by rfl
+    @JarConfig.gasModel JarVariant.gp072_tiny.toJarConfig = .perInstruction := by rfl
 
 theorem gp072_tiny_variableValidators_false :
-    @JamConfig.variableValidators JamVariant.gp072_tiny.toJamConfig = false := by rfl
+    @JarConfig.variableValidators JarVariant.gp072_tiny.toJarConfig = false := by rfl
 
 end Jar.Proofs

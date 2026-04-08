@@ -10,7 +10,7 @@ def independentTraces : Array String := #["safrole", "fallback", "storage_light"
 def sequentialTraces : Array String := #["conformance_no_forks", "conformance_forks"]
 
 -- Block trace vectors only exist for gp072_tiny.
-instance : JamVariant := JamVariant.gp072_tiny
+instance : JarVariant := JarVariant.gp072_tiny
 
 def blockTestMain (_args : List String) : IO UInt32 := do
   let variantName := "gp072_tiny"

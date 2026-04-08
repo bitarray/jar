@@ -34,7 +34,7 @@ Matches the encoding in Grey's `crates/grey-merkle/src/state_serial.rs`.
 
 namespace Jar.StateSerialization
 open Jar.Codec
-variable [JamVariant]
+variable [JarVariant]
 
 -- Instances needed for this module
 instance : Inhabited CoreStatistics where
@@ -296,7 +296,7 @@ private def serializePendingReports (reports : Array (Option PendingReport)) : B
     | none => buf := buf ++ ByteArray.mk #[0]
     | some pr =>
       buf := buf ++ ByteArray.mk #[1]
-      buf := buf ++ JamVariant.codecEncodeWorkReport pr.report
+      buf := buf ++ JarVariant.codecEncodeWorkReport pr.report
       buf := buf ++ encodeFixedNat 4 pr.timeslot.toNat
   return buf
 
@@ -314,7 +314,7 @@ private def serializePrivileged (priv : PrivilegedServices) : ByteArray := Id.ru
     buf := buf ++ encodeFixedNat 4 sid.toNat
     buf := buf ++ encodeFixedNat 8 gas.toNat
   -- jar1 (coinless): serialize quotaService after always-accumulate entries
-  if JamConfig.capabilityModel == .v2 then
+  if JarConfig.capabilityModel == .v2 then
     buf := buf ++ encodeFixedNat 4 priv.quotaService.toNat
   return buf
 
@@ -376,7 +376,7 @@ private def serializeAccumulationQueue
   for slot in queue do
     buf := buf ++ encodeNat slot.size
     for (report, deps) in slot do
-      buf := buf ++ JamVariant.codecEncodeWorkReport report
+      buf := buf ++ JarVariant.codecEncodeWorkReport report
       buf := buf ++ encodeNat deps.size
       for h in deps do
         buf := buf ++ h.data
@@ -418,7 +418,7 @@ private def serializeServiceAccount (account : ServiceAccount) (_sid : ServiceId
   -- serializeEcon returns 16 bytes: [first_field(8) ++ second_field(8)]
   -- For BalanceEcon: first=balance, second=gratis
   -- For QuotaEcon: first=quotaItems, second=quotaBytes
-  let econBytes := @EconModel.serializeEcon JamConfig.EconType JamConfig.TransferType _ account.econ
+  let econBytes := @EconModel.serializeEcon JarConfig.EconType JarConfig.TransferType _ account.econ
   let econFirst := econBytes.extract 0 8    -- balance or quotaItems
   let econSecond := econBytes.extract 8 16  -- gratis or quotaBytes
   buf := buf ++ ByteArray.mk #[0]  -- version
@@ -716,7 +716,7 @@ private def deserializePrivilegedD (coreCount : Nat) : Decoder PrivilegedService
   let (alwaysAccumulate, s) ← goZ zCount Dict.empty s
   -- jar1 (coinless): read quotaService after always-accumulate entries
   let (quotaService, s) ←
-    if JamConfig.capabilityModel == .v2 then do
+    if JarConfig.capabilityModel == .v2 then do
       let (qs, s) ← decodeFixedNatD 4 s
       pure (UInt32.ofNat qs, s)
     else pure (0, s)
@@ -861,7 +861,7 @@ private def deserializeServiceAccountD : Decoder ServiceAccount := fun s => do
   let (preimageCount, s) ← decodeFixedNatD 4 s
   -- Reconstruct econ from the two fields via deserializeEcon
   let econBytes := Codec.encodeFixedNat 8 econFirst ++ Codec.encodeFixedNat 8 econSecond
-  let econ : JamConfig.EconType := match @EconModel.deserializeEcon JamConfig.EconType JamConfig.TransferType _ econBytes 0 with
+  let econ : JarConfig.EconType := match @EconModel.deserializeEcon JarConfig.EconType JarConfig.TransferType _ econBytes 0 with
     | some (e, _) => e
     | none => default  -- Should not happen with valid data
   return ({

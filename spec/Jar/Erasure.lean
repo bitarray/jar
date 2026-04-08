@@ -19,7 +19,7 @@ References: `graypaper/text/erasure_coding.tex`.
 -/
 
 namespace Jar.Erasure
-variable [JamConfig]
+variable [JarConfig]
 
 -- ============================================================================
 -- GF(2^16) Constants
