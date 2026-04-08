@@ -126,4 +126,70 @@ mod tests {
     fn test_default_equals_null() {
         assert_eq!(ValidatorKey::default(), ValidatorKey::null());
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+        use scale::{Decode, Encode};
+
+        fn assert_codec_roundtrip<T: Encode + Decode>(val: &T) {
+            let encoded = val.encode();
+            let (decoded, consumed) = T::decode(&encoded).expect("decode should succeed");
+            assert_eq!(consumed, encoded.len(), "should consume all bytes");
+            assert_eq!(decoded.encode(), encoded, "re-encode should match");
+        }
+
+        /// Generate a random ValidatorKey from fill bytes.
+        fn arb_validator_key() -> impl Strategy<Value = ValidatorKey> {
+            (
+                any::<[u8; 32]>(),
+                any::<[u8; 32]>(),
+                any::<u8>(),
+                any::<u8>(),
+            )
+                .prop_map(|(band, ed, bls_fill, meta_fill)| ValidatorKey {
+                    bandersnatch: BandersnatchPublicKey(band),
+                    ed25519: Ed25519PublicKey(ed),
+                    bls: BlsPublicKey([bls_fill; 144]),
+                    metadata: [meta_fill; 128],
+                })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(128))]
+
+            /// ValidatorKey codec encode→decode roundtrip.
+            #[test]
+            fn validator_key_codec_roundtrip(key in arb_validator_key()) {
+                assert_codec_roundtrip(&key);
+            }
+
+            /// ValidatorKey to_bytes→from_bytes roundtrip.
+            #[test]
+            fn validator_key_bytes_roundtrip(key in arb_validator_key()) {
+                let bytes = key.to_bytes();
+                let recovered = ValidatorKey::from_bytes(&bytes);
+                prop_assert_eq!(recovered, key);
+            }
+
+            /// to_bytes and codec encode produce consistent field layout.
+            /// The codec uses scale encoding (field-by-field), while to_bytes
+            /// uses manual concatenation. Both should agree on the content.
+            #[test]
+            fn validator_key_bytes_fields_match(key in arb_validator_key()) {
+                let bytes = key.to_bytes();
+                // Verify to_bytes places fields correctly
+                prop_assert_eq!(&bytes[0..32], &key.bandersnatch.0);
+                prop_assert_eq!(&bytes[32..64], &key.ed25519.0);
+                prop_assert_eq!(&bytes[64..208], &key.bls.0);
+                prop_assert_eq!(&bytes[208..336], &key.metadata);
+            }
+
+            /// BlsPublicKey codec roundtrip.
+            #[test]
+            fn bls_public_key_roundtrip(fill in any::<u8>()) {
+                assert_codec_roundtrip(&BlsPublicKey([fill; 144]));
+            }
+        }
+    }
 }
