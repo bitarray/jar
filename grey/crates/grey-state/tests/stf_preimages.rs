@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{decode_hex, discover_test_stems, hash_from_hex};
+use common::{decode_hex, hash_from_hex};
 use grey_state::preimages::{PreimageAccountData, PreimageServiceRecord, process_preimages};
 use grey_types::{Hash, ServiceId, Timeslot};
 use std::collections::{BTreeMap, BTreeSet};
@@ -175,10 +175,4 @@ preimage_test!(test_preimages_order_check_2, "preimages_order_check-2");
 preimage_test!(test_preimages_order_check_3, "preimages_order_check-3");
 preimage_test!(test_preimages_order_check_4, "preimages_order_check-4");
 
-#[test]
-fn test_preimages_discover_all() {
-    let stems = discover_test_stems(DIR);
-    for stem in &stems {
-        run_preimages_test(DIR, stem);
-    }
-}
+discover_all_test!(DIR, run_preimages_test);

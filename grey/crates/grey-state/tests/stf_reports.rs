@@ -2,10 +2,7 @@
 
 mod common;
 
-use common::{
-    discover_test_stems, ed25519_from_hex, hash_from_hex, parse_validator, parse_work_report,
-    sig_from_hex,
-};
+use common::{ed25519_from_hex, hash_from_hex, parse_validator, parse_work_report, sig_from_hex};
 use grey_state::reports::{
     AvailAssignment, CoreStats, GuaranteeInput, RecentBlockEntry, ReportsState, ServiceInfo,
     ServiceStats, process_reports,
@@ -473,10 +470,4 @@ report_test!(test_too_many_dependencies, "too_many_dependencies-1");
 report_test!(test_with_avail_assignments, "with_avail_assignments-1");
 report_test!(test_wrong_assignment, "wrong_assignment-1");
 
-#[test]
-fn test_reports_discover_all() {
-    let stems = discover_test_stems(DIR);
-    for stem in &stems {
-        run_reports_test(DIR, stem);
-    }
-}
+discover_all_test!(DIR, run_reports_test);

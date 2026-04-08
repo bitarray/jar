@@ -308,3 +308,20 @@ pub fn parse_pending_reports(json: &serde_json::Value) -> Vec<Option<PendingRepo
         })
         .collect()
 }
+
+/// Generate a `#[test]` that discovers all test vector stems in `$dir` and runs
+/// each through `$runner(dir, stem)`.  Replaces 8 identical `test_*_discover_all`
+/// functions across the STF test files.
+#[macro_export]
+macro_rules! discover_all_test {
+    ($dir:expr, $runner:path) => {
+        #[test]
+        fn discover_all() {
+            let stems = common::discover_test_stems($dir);
+            assert!(!stems.is_empty(), "no test vectors found in {}", $dir);
+            for stem in &stems {
+                $runner($dir, stem);
+            }
+        }
+    };
+}

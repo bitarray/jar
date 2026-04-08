@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{decode_hex, discover_test_stems, hash_from_hex, load_jar_test, parse_work_report};
+use common::{decode_hex, hash_from_hex, load_jar_test, parse_work_report};
 use grey_state::accumulate::{
     AccPrivileges, AccServiceAccount, AccServiceStats, AccumulateInput, AccumulateState,
     ReadyRecord, process_accumulate,
@@ -538,11 +538,4 @@ fn test_transfer_for_ejected_service_1() {
     run_accumulate_test(DIR, "transfer_for_ejected_service-1");
 }
 
-#[traced_test]
-#[test]
-fn test_accumulate_discover_all() {
-    let stems = discover_test_stems(DIR);
-    for stem in &stems {
-        run_accumulate_test(DIR, stem);
-    }
-}
+discover_all_test!(DIR, run_accumulate_test);

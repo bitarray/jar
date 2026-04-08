@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{decode_hex, discover_test_stems, hash_from_hex, parse_pending_reports, sig_from_hex};
+use common::{decode_hex, hash_from_hex, parse_pending_reports, sig_from_hex};
 use grey_state::assurances::process_assurances;
 use grey_types::config::Config;
 use grey_types::header::Assurance;
@@ -167,10 +167,4 @@ fn test_assurances_not_sorted_2() {
     run_assurances_test(DIR, "assurers_not_sorted_or_unique-2");
 }
 
-#[test]
-fn test_assurances_discover_all() {
-    let stems = discover_test_stems(DIR);
-    for stem in &stems {
-        run_assurances_test(DIR, stem);
-    }
-}
+discover_all_test!(DIR, run_assurances_test);

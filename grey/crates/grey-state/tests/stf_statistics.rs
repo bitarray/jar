@@ -2,10 +2,7 @@
 
 mod common;
 
-use common::{
-    decode_hex, discover_test_stems, ed25519_from_hex, hash_from_hex, parse_work_report,
-    sig_from_hex,
-};
+use common::{decode_hex, ed25519_from_hex, hash_from_hex, parse_work_report, sig_from_hex};
 use grey_state::statistics;
 use grey_types::header::*;
 use grey_types::state::{ValidatorRecord, ValidatorStatistics};
@@ -210,10 +207,4 @@ fn test_stf_statistics_epoch_change() {
     run_statistics_test(DIR, "stats_with_epoch_change-1");
 }
 
-#[test]
-fn test_statistics_discover_all() {
-    let stems = discover_test_stems(DIR);
-    for stem in &stems {
-        run_statistics_test(DIR, stem);
-    }
-}
+discover_all_test!(DIR, run_statistics_test);

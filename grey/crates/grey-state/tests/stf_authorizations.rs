@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{discover_test_stems, hash_from_hex};
+use common::hash_from_hex;
 use grey_state::authorizations::{AuthorizationInput, update_authorizations};
 use grey_types::Hash;
 use grey_types::config::Config;
@@ -105,10 +105,4 @@ fn test_stf_authorizations_3() {
     run_authorizations_test(DIR, "progress_authorizations-3");
 }
 
-#[test]
-fn test_authorizations_discover_all() {
-    let stems = discover_test_stems(DIR);
-    for stem in &stems {
-        run_authorizations_test(DIR, stem);
-    }
-}
+discover_all_test!(DIR, run_authorizations_test);

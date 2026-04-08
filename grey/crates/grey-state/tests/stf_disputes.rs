@@ -2,9 +2,7 @@
 
 mod common;
 
-use common::{
-    discover_test_stems, ed25519_from_hex, hash_from_hex, parse_pending_reports, sig_from_hex,
-};
+use common::{ed25519_from_hex, hash_from_hex, parse_pending_reports, sig_from_hex};
 use grey_state::disputes::process_disputes;
 use grey_types::Ed25519PublicKey;
 use grey_types::config::Config;
@@ -256,10 +254,4 @@ dispute_test!(
     "progress_invalidates_avail_assignments-1"
 );
 
-#[test]
-fn test_disputes_discover_all() {
-    let stems = discover_test_stems(DIR);
-    for stem in &stems {
-        run_disputes_test(DIR, stem);
-    }
-}
+discover_all_test!(DIR, run_disputes_test);

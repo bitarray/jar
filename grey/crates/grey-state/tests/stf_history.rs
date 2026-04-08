@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{discover_test_stems, hash_from_hex};
+use common::hash_from_hex;
 use grey_state::history::{HistoryInput, update_history};
 use grey_types::Hash;
 use grey_types::state::{RecentBlockInfo, RecentBlocks};
@@ -154,10 +154,4 @@ fn test_stf_history_4() {
     run_history_test(DIR, "progress_blocks_history-4");
 }
 
-#[test]
-fn test_history_discover_all() {
-    let stems = discover_test_stems(DIR);
-    for stem in &stems {
-        run_history_test(DIR, stem);
-    }
-}
+discover_all_test!(DIR, run_history_test);

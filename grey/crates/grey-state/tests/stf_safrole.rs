@@ -3,8 +3,8 @@
 mod common;
 
 use common::{
-    bandersnatch_from_hex, decode_hex, discover_test_stems, ed25519_from_hex, hash_from_hex,
-    load_jar_test, parse_validator,
+    bandersnatch_from_hex, decode_hex, ed25519_from_hex, hash_from_hex, load_jar_test,
+    parse_validator,
 };
 use grey_state::safrole::{self, SafroleInput, SafroleState};
 use grey_types::config::Config;
@@ -417,10 +417,4 @@ safrole_test!(test_safrole_with_mark_3, "publish-tickets-with-mark-3");
 safrole_test!(test_safrole_with_mark_4, "publish-tickets-with-mark-4");
 safrole_test!(test_safrole_with_mark_5, "publish-tickets-with-mark-5");
 
-#[test]
-fn test_safrole_discover_all() {
-    let stems = discover_test_stems(DIR);
-    for stem in &stems {
-        run_safrole_test(DIR, stem);
-    }
-}
+discover_all_test!(DIR, run_safrole_test);
