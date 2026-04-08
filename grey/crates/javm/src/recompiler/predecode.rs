@@ -237,3 +237,188 @@ fn compute_skip(pc: usize, bitmask: &[u8]) -> usize {
     }
     24
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // === predecode ===
+
+    #[test]
+    fn test_predecode_empty() {
+        let instrs = predecode(&[], &[], &[]);
+        assert!(instrs.is_empty());
+    }
+
+    #[test]
+    fn test_predecode_single_trap() {
+        // Trap = opcode 0, no arguments
+        let code = vec![0u8];
+        let bitmask = vec![1u8];
+        let instrs = predecode(&code, &bitmask, &[]);
+
+        assert_eq!(instrs.len(), 1);
+        assert_eq!(instrs[0].opcode, Opcode::Trap);
+        assert_eq!(instrs[0].pc, 0);
+        assert_eq!(instrs[0].next_pc, 1);
+        assert!(
+            instrs[0].is_gas_block_start,
+            "PC=0 is always a gas block start"
+        );
+    }
+
+    #[test]
+    fn test_predecode_sequence() {
+        // load_imm(51) r0, 42; ecalli(10) 0
+        let code = vec![51, 0, 42, 10, 0];
+        let bitmask = vec![1, 0, 0, 1, 0];
+
+        let instrs = predecode(&code, &bitmask, &[]);
+        assert_eq!(instrs.len(), 2);
+        assert_eq!(instrs[0].opcode, Opcode::LoadImm);
+        assert_eq!(instrs[0].pc, 0);
+        assert_eq!(instrs[0].next_pc, 3);
+        assert_eq!(instrs[1].opcode, Opcode::Ecalli);
+        assert_eq!(instrs[1].pc, 3);
+    }
+
+    #[test]
+    fn test_predecode_gas_block_after_terminator() {
+        // trap(0); load_imm(51) r0, 1
+        // Trap is a terminator, so load_imm starts a new gas block
+        let code = vec![0, 51, 0, 1];
+        let bitmask = vec![1, 1, 0, 0];
+
+        let instrs = predecode(&code, &bitmask, &[]);
+        assert_eq!(instrs.len(), 2);
+        assert!(instrs[0].is_gas_block_start, "PC=0 always");
+        assert!(
+            instrs[1].is_gas_block_start,
+            "post-terminator should be gas block start"
+        );
+    }
+
+    #[test]
+    fn test_predecode_gas_block_after_ecalli() {
+        // ecalli(10) 0; load_imm(51) r0, 1
+        let code = vec![10, 0, 51, 0, 1];
+        let bitmask = vec![1, 0, 1, 0, 0];
+
+        let instrs = predecode(&code, &bitmask, &[]);
+        assert_eq!(instrs.len(), 2);
+        assert!(
+            instrs[1].is_gas_block_start,
+            "post-ecalli should be gas block start"
+        );
+    }
+
+    #[test]
+    fn test_predecode_branch_target_is_gas_start() {
+        // jump(40) offset=-5 (targets PC=0); load_imm(51) r0, 1
+        // Jump at PC=0 targets PC=0 (self-loop)
+        let offset: i32 = 0; // targets self (PC + 0 = 0)
+        let code = vec![
+            40,
+            offset as u8,
+            (offset >> 8) as u8,
+            (offset >> 16) as u8,
+            (offset >> 24) as u8,
+            51,
+            0,
+            1, // load_imm after the jump
+        ];
+        let bitmask = vec![1, 0, 0, 0, 0, 1, 0, 0];
+
+        let instrs = predecode(&code, &bitmask, &[]);
+        assert_eq!(instrs.len(), 2);
+        // PC=0 is both the first instruction AND a branch target
+        assert!(instrs[0].is_gas_block_start);
+        // Post-terminator (jump is a terminator)
+        assert!(instrs[1].is_gas_block_start);
+    }
+
+    #[test]
+    fn test_predecode_jump_table_target_is_gas_start() {
+        // Two instructions: load_imm at PC=0, load_imm at PC=3
+        // Jump table says PC=3 is a target
+        let code = vec![51, 0, 1, 51, 1, 2];
+        let bitmask = vec![1, 0, 0, 1, 0, 0];
+
+        let instrs = predecode(&code, &bitmask, &[3]);
+        assert_eq!(instrs.len(), 2);
+        assert!(instrs[0].is_gas_block_start, "PC=0 always");
+        assert!(
+            instrs[1].is_gas_block_start,
+            "jump table target should be gas block start"
+        );
+    }
+
+    #[test]
+    fn test_predecode_non_target_not_gas_start() {
+        // Two consecutive load_imm instructions, no branches
+        let code = vec![51, 0, 1, 51, 1, 2];
+        let bitmask = vec![1, 0, 0, 1, 0, 0];
+
+        let instrs = predecode(&code, &bitmask, &[]);
+        assert_eq!(instrs.len(), 2);
+        assert!(instrs[0].is_gas_block_start, "PC=0 always");
+        assert!(
+            !instrs[1].is_gas_block_start,
+            "not a target, not post-terminator"
+        );
+    }
+
+    // === compute_gas_blocks ===
+
+    #[test]
+    fn test_gas_blocks_empty() {
+        let blocks = compute_gas_blocks(&[], &[], &[]);
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn test_gas_blocks_pc0_always_start() {
+        let code = vec![51, 0, 1];
+        let bitmask = vec![1, 0, 0];
+        let blocks = compute_gas_blocks(&code, &bitmask, &[]);
+        assert!(blocks[0], "PC=0 should always be a gas block start");
+    }
+
+    #[test]
+    fn test_gas_blocks_jump_table() {
+        let code = vec![51, 0, 1, 51, 1, 2];
+        let bitmask = vec![1, 0, 0, 1, 0, 0];
+        let blocks = compute_gas_blocks(&code, &bitmask, &[3]);
+        assert!(blocks[0]);
+        assert!(blocks[3], "jump table target should be gas block start");
+    }
+
+    #[test]
+    fn test_gas_blocks_post_terminator() {
+        let code = vec![0, 51, 0, 1]; // trap; load_imm
+        let bitmask = vec![1, 1, 0, 0];
+        let blocks = compute_gas_blocks(&code, &bitmask, &[]);
+        assert!(blocks[0]);
+        assert!(blocks[1], "post-terminator should be gas block start");
+    }
+
+    // === compute_skip ===
+
+    #[test]
+    fn test_skip_single_byte() {
+        // Next byte is an instruction start
+        assert_eq!(compute_skip(0, &[1, 1]), 0);
+    }
+
+    #[test]
+    fn test_skip_multi_byte() {
+        // Two continuation bytes before next instruction start
+        assert_eq!(compute_skip(0, &[1, 0, 0, 1]), 2);
+    }
+
+    #[test]
+    fn test_skip_at_end() {
+        // Past end of bitmask → treated as instruction start
+        assert_eq!(compute_skip(0, &[1]), 0);
+    }
+}
