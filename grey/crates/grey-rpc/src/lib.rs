@@ -87,6 +87,10 @@ pub struct RpcState {
     pub state_transition_last_us: std::sync::atomic::AtomicU64,
     /// Last block authoring duration in microseconds.
     pub block_author_last_us: std::sync::atomic::AtomicU64,
+    /// Duration of the last store write (put_block + put_state) in microseconds.
+    pub store_write_last_us: std::sync::atomic::AtomicU64,
+    /// Duration of the last store read (get_state) in microseconds.
+    pub store_read_last_us: std::sync::atomic::AtomicU64,
 }
 
 #[rpc(server)]
@@ -934,6 +938,12 @@ pub async fn format_metrics(state: &RpcState) -> String {
     let block_author_us = state
         .block_author_last_us
         .load(std::sync::atomic::Ordering::Relaxed);
+    let store_write_us = state
+        .store_write_last_us
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let store_read_us = state
+        .store_read_last_us
+        .load(std::sync::atomic::Ordering::Relaxed);
     drop(status);
 
     let stf_last_secs = stf_last_us as f64 / 1_000_000.0;
@@ -942,6 +952,9 @@ pub async fn format_metrics(state: &RpcState) -> String {
     let stored_states = state.store.state_count().unwrap_or(0);
     let stored_chunks = state.store.chunk_count().unwrap_or(0);
     let stored_votes = state.store.vote_count().unwrap_or(0);
+
+    let store_write_secs = store_write_us as f64 / 1_000_000.0;
+    let store_read_secs = store_read_us as f64 / 1_000_000.0;
 
     let mut base = format!(
         "# HELP grey_block_height Current head slot.\n\
@@ -1011,7 +1024,13 @@ pub async fn format_metrics(state: &RpcState) -> String {
          grey_state_transitions_total {stf_total}\n\
          # HELP grey_state_transition_last_seconds Duration of the last state transition.\n\
          # TYPE grey_state_transition_last_seconds gauge\n\
-         grey_state_transition_last_seconds {stf_last_secs}\n"
+         grey_state_transition_last_seconds {stf_last_secs}\n\
+         # HELP grey_store_write_last_seconds Duration of last store write (block+state) in seconds.\n\
+         # TYPE grey_store_write_last_seconds gauge\n\
+         grey_store_write_last_seconds {store_write_secs}\n\
+         # HELP grey_store_read_last_seconds Duration of last store read (get_state) in seconds.\n\
+         # TYPE grey_store_read_last_seconds gauge\n\
+         grey_store_read_last_seconds {store_read_secs}\n"
     );
 
     // Block authoring duration (only meaningful after at least one block authored)
@@ -1205,6 +1224,8 @@ pub fn create_rpc_channel(
         state_transitions_total: std::sync::atomic::AtomicU64::new(0),
         state_transition_last_us: std::sync::atomic::AtomicU64::new(0),
         block_author_last_us: std::sync::atomic::AtomicU64::new(0),
+        store_write_last_us: std::sync::atomic::AtomicU64::new(0),
+        store_read_last_us: std::sync::atomic::AtomicU64::new(0),
     });
 
     (state, rx)
@@ -2219,6 +2240,30 @@ mod tests {
             body.contains("grey_block_author_last_seconds 0.0015"),
             "expected 0.0015 seconds, got: {}",
             body
+        );
+    }
+
+    #[tokio::test]
+    async fn test_store_timing_metrics() {
+        let (_url, state, _rx, _store, _dir) = setup().await;
+
+        // Simulate a store write taking 1500 microseconds
+        state
+            .store_write_last_us
+            .store(1500, std::sync::atomic::Ordering::Relaxed);
+        // Simulate a store read taking 250 microseconds
+        state
+            .store_read_last_us
+            .store(250, std::sync::atomic::Ordering::Relaxed);
+
+        let body = format_metrics(&state).await;
+        assert!(
+            body.contains("grey_store_write_last_seconds 0.0015"),
+            "should contain store write timing"
+        );
+        assert!(
+            body.contains("grey_store_read_last_seconds 0.00025"),
+            "should contain store read timing"
         );
     }
 }

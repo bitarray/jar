@@ -88,6 +88,7 @@ fn persist_and_notify_block(
     protocol: &grey_types::config::Config,
     rpc_state: &Option<std::sync::Arc<grey_rpc::RpcState>>,
 ) {
+    let write_start = std::time::Instant::now();
     if let Err(e) = store.put_block(block) {
         tracing::error!("Failed to persist block: {}", e);
     }
@@ -96,6 +97,13 @@ fn persist_and_notify_block(
     }
     if let Err(e) = store.set_head(hash, slot) {
         tracing::error!("Failed to update head: {}", e);
+    }
+    let write_elapsed = write_start.elapsed();
+    if let Some(rpc_st) = rpc_state {
+        rpc_st.store_write_last_us.store(
+            write_elapsed.as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
     if let Some(rpc_st) = rpc_state {
         let _ = rpc_st.block_notifications.send(serde_json::json!({
@@ -1284,9 +1292,16 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                     NetworkEvent::BlockRequest { block_hash, response_tx } => {
                         let hash = grey_types::Hash(block_hash);
                         // Return encoded block if we have it
+                        let read_start = std::time::Instant::now();
                         let block_data = store.get_block(&hash).ok().map(|block| {
                             encode_block_message(&block, &hash)
                         });
+                        if let Some(ref rpc_st) = rpc_state {
+                            rpc_st.store_read_last_us.store(
+                                read_start.elapsed().as_micros() as u64,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
                         let _ = response_tx.send(block_data);
                     }
                     NetworkEvent::TicketReceived { data, source } => {
