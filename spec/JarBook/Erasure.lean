@@ -17,9 +17,9 @@ Ensures that any 342 of 1023 chunks suffice to reconstruct the original data.
 
 {docstring Jar.Erasure.CANTOR_BASIS}
 
-GF(2^16) arithmetic uses log/exp tables built from the Cantor basis.
+GF(2\^16) arithmetic uses log/exp tables built from the Cantor basis.
 Multiplication operates via log/exp table lookups; inversion uses
-Fermat's little theorem (a^{-1} = a^{65534}).
+Fermat's little theorem.
 
 {docstring Jar.Erasure.gfMul}
 
@@ -27,13 +27,13 @@ Fermat's little theorem (a^{-1} = a^{65534}).
 
 # Fast Fourier Transform
 
-The core of the erasure coding is an additive FFT over GF(2^16), following
+The core of the erasure coding is an additive FFT over GF(2\^16), following
 the Cantor basis construction. The FFT transforms data symbols into
 evaluation points; the IFFT inverts the transform for recovery.
 
-{docstring Jar.Erasure.fft}
+{docstring Jar.Erasure.fftInPlace}
 
-{docstring Jar.Erasure.ifft}
+{docstring Jar.Erasure.ifftInPlace}
 
 # Encoding and Recovery
 
