@@ -943,15 +943,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                     blocks_imported += 1;
 
                                     // Mark block as seen to skip duplicates
-                                    if seen_block_hashes.len() >= 256 {
-                                        // Evict a random entry to bound memory
-                                        if let Some(&old) =
-                                            seen_block_hashes.iter().next()
-                                        {
-                                            seen_block_hashes.remove(&old);
-                                        }
-                                    }
-                                    seen_block_hashes.insert(import_hash);
+                                    insert_bounded(&mut seen_block_hashes, import_hash, 256);
 
                                     persist_and_notify_block(
                                         &store, &block, &import_hash, slot,
@@ -1204,13 +1196,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                 );
                                 continue;
                             }
-                            // Evict oldest if at capacity
-                            if seen_report_hashes.len() >= 256
-                                && let Some(&old) = seen_report_hashes.iter().next()
-                            {
-                                seen_report_hashes.remove(&old);
-                            }
-                            seen_report_hashes.insert(report_hash);
+                            insert_bounded(&mut seen_report_hashes, report_hash, 256);
                         }
                         tracing::info!(
                             "Validator {} received guarantee from {}",
@@ -1365,6 +1351,16 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
     }
 
     Ok(())
+}
+
+/// Insert into a bounded `HashSet`, evicting an arbitrary entry if at capacity.
+fn insert_bounded(set: &mut std::collections::HashSet<Hash>, item: Hash, cap: usize) {
+    if set.len() >= cap
+        && let Some(&old) = set.iter().next()
+    {
+        set.remove(&old);
+    }
+    set.insert(item);
 }
 
 /// Compute a simplified state root.
