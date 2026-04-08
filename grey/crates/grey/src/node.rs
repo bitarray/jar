@@ -709,6 +709,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                         );
 
                         // Apply block to our state
+                        let stf_start = std::time::Instant::now();
                         match grey_state::transition::apply_with_config(
                             &state,
                             &block,
@@ -716,6 +717,11 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                             &[],
                         ) {
                             Ok((new_state, _)) => {
+                                let stf_elapsed = stf_start.elapsed();
+                                if let Some(ref rpc_st) = rpc_state {
+                                    rpc_st.state_transitions_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    rpc_st.state_transition_last_us.store(stf_elapsed.as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+                                }
                                 let header_hash = grey_crypto::header_hash(&block.header);
                                 // Capture pre-transition seal mode: the block was sealed under
                                 // the current epoch's key series, not the post-transition one.
@@ -942,6 +948,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                             }
                             let (block, import_hash) = pending_blocks.remove(&next_slot).unwrap();
                             let slot = block.header.timeslot;
+                            let stf_start = std::time::Instant::now();
                             match grey_state::transition::apply_with_config(
                                 &state,
                                 &block,
@@ -949,6 +956,11 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                 &[],
                             ) {
                                 Ok((new_state, _)) => {
+                                    let stf_elapsed = stf_start.elapsed();
+                                    if let Some(ref rpc_st) = rpc_state {
+                                        rpc_st.state_transitions_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        rpc_st.state_transition_last_us.store(stf_elapsed.as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+                                    }
                                     // Capture pre-transition seal mode: the block was sealed under
                                     // the current epoch's key series, not the post-transition one.
                                     let ticket_sealed = grey_consensus::safrole::is_ticket_sealed(

@@ -81,6 +81,10 @@ pub struct RpcState {
     pub gossip_assurances_received: std::sync::atomic::AtomicU64,
     pub gossip_announcements_received: std::sync::atomic::AtomicU64,
     pub gossip_tickets_received: std::sync::atomic::AtomicU64,
+    /// Number of state transitions applied (authored + imported blocks).
+    pub state_transitions_total: std::sync::atomic::AtomicU64,
+    /// Duration of the last state transition in microseconds.
+    pub state_transition_last_us: std::sync::atomic::AtomicU64,
 }
 
 #[rpc(server)]
@@ -919,7 +923,15 @@ pub async fn format_metrics(state: &RpcState) -> String {
     let gossip_tickets = state
         .gossip_tickets_received
         .load(std::sync::atomic::Ordering::Relaxed);
+    let stf_total = state
+        .state_transitions_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let stf_last_us = state
+        .state_transition_last_us
+        .load(std::sync::atomic::Ordering::Relaxed);
     drop(status);
+
+    let stf_last_secs = stf_last_us as f64 / 1_000_000.0;
 
     let stored_blocks = state.store.block_count().unwrap_or(0);
     let stored_states = state.store.state_count().unwrap_or(0);
@@ -988,7 +1000,13 @@ pub async fn format_metrics(state: &RpcState) -> String {
          grey_gossipsub_messages_total{{topic=\"guarantees\"}} {gossip_guarantees}\n\
          grey_gossipsub_messages_total{{topic=\"assurances\"}} {gossip_assurances}\n\
          grey_gossipsub_messages_total{{topic=\"announcements\"}} {gossip_announcements}\n\
-         grey_gossipsub_messages_total{{topic=\"tickets\"}} {gossip_tickets}\n"
+         grey_gossipsub_messages_total{{topic=\"tickets\"}} {gossip_tickets}\n\
+         # HELP grey_state_transitions_total Number of state transitions applied.\n\
+         # TYPE grey_state_transitions_total counter\n\
+         grey_state_transitions_total {stf_total}\n\
+         # HELP grey_state_transition_last_seconds Duration of the last state transition.\n\
+         # TYPE grey_state_transition_last_seconds gauge\n\
+         grey_state_transition_last_seconds {stf_last_secs}\n"
     );
 
     // Append per-method request counts
@@ -1171,6 +1189,8 @@ pub fn create_rpc_channel(
         gossip_assurances_received: std::sync::atomic::AtomicU64::new(0),
         gossip_announcements_received: std::sync::atomic::AtomicU64::new(0),
         gossip_tickets_received: std::sync::atomic::AtomicU64::new(0),
+        state_transitions_total: std::sync::atomic::AtomicU64::new(0),
+        state_transition_last_us: std::sync::atomic::AtomicU64::new(0),
     });
 
     (state, rx)
@@ -2056,6 +2076,27 @@ mod tests {
         assert!(body.contains("grey_gossipsub_messages_total{topic=\"guarantees\"} 0"));
         assert!(body.contains("grey_gossipsub_messages_total{topic=\"assurances\"} 0"));
         assert!(body.contains("grey_gossipsub_messages_total{topic=\"announcements\"} 0"));
+    }
+
+    #[tokio::test]
+    async fn test_state_transition_metrics() {
+        let (_url, state, _rx, _store, _dir) = setup().await;
+
+        // Simulate a state transition taking 1500 microseconds
+        state
+            .state_transitions_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        state
+            .state_transition_last_us
+            .store(1500, std::sync::atomic::Ordering::Relaxed);
+
+        let body = format_metrics(&state).await;
+        assert!(body.contains("# HELP grey_state_transitions_total"));
+        assert!(body.contains("# TYPE grey_state_transitions_total counter"));
+        assert!(body.contains("grey_state_transitions_total 1"));
+        assert!(body.contains("# HELP grey_state_transition_last_seconds"));
+        assert!(body.contains("# TYPE grey_state_transition_last_seconds gauge"));
+        assert!(body.contains("grey_state_transition_last_seconds 0.0015"));
     }
 
     #[tokio::test]
