@@ -13,6 +13,19 @@ use std::sync::OnceLock;
 
 type Suite = suite::BandersnatchSha512Ell2;
 
+/// Deserialize compressed Bandersnatch public keys to affine points.
+///
+/// Invalid keys are replaced with the padding point so that ring indices
+/// remain stable. Used by both ring VRF signing and ring commitment computation.
+fn deserialize_ring_points(keys: &[[u8; 32]]) -> Vec<AffinePoint> {
+    keys.iter()
+        .map(|key_bytes| {
+            AffinePoint::deserialize_compressed(&key_bytes[..])
+                .unwrap_or(RingProofParams::padding_point())
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Keypair generation and signing
 // ---------------------------------------------------------------------------
@@ -104,14 +117,7 @@ impl BandersnatchKeypair {
 
         let params = make_ring_params(ring_keys.len());
 
-        // Deserialize all public keys to affine points
-        let points: Vec<AffinePoint> = ring_keys
-            .iter()
-            .map(|key_bytes| {
-                AffinePoint::deserialize_compressed(&key_bytes[..])
-                    .unwrap_or(RingProofParams::padding_point())
-            })
-            .collect();
+        let points = deserialize_ring_points(ring_keys);
 
         // Create prover key and prover instance bound to our position
         let prover_key = params.prover_key(&points);
@@ -185,14 +191,7 @@ fn make_ring_params(ring_size: usize) -> RingProofParams {
 pub fn compute_ring_commitment(bandersnatch_keys: &[[u8; 32]]) -> [u8; 144] {
     let params = make_ring_params(bandersnatch_keys.len());
 
-    // Deserialize public keys to affine points, using padding point for invalid keys
-    let points: Vec<AffinePoint> = bandersnatch_keys
-        .iter()
-        .map(|key_bytes| {
-            AffinePoint::deserialize_compressed(&key_bytes[..])
-                .unwrap_or(RingProofParams::padding_point())
-        })
-        .collect();
+    let points = deserialize_ring_points(bandersnatch_keys);
 
     // Compute verifier key from the ring of public keys
     let verifier_key = params.verifier_key(&points);
