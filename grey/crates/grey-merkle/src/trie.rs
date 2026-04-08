@@ -159,6 +159,126 @@ mod tests {
     }
 
     #[test]
+    fn test_branch_encoding() {
+        let node = TrieNode::Branch {
+            left: Hash([0xFF; 32]),
+            right: Hash([0xAA; 32]),
+        };
+        let encoded = node.encode();
+        // First bit = 0 (branch), remaining 7 bits from left[0]
+        assert_eq!(encoded[0], 0x7F); // MSB cleared (branch discriminator = 0)
+        assert_eq!(&encoded[1..32], &[0xFF; 31]);
+        assert_eq!(&encoded[32..64], &[0xAA; 32]);
+    }
+
+    #[test]
+    fn test_branch_encoding_clears_msb() {
+        // When left hash has MSB set, branch encoding must clear it
+        let mut left_bytes = [0u8; 32];
+        left_bytes[0] = 0x80; // only MSB set
+        let node = TrieNode::Branch {
+            left: Hash(left_bytes),
+            right: Hash([0; 32]),
+        };
+        let encoded = node.encode();
+        // MSB must be 0 (branch discriminator)
+        assert_eq!(encoded[0] & 0x80, 0);
+    }
+
+    #[test]
+    fn test_node_hash_empty_is_zero() {
+        assert_eq!(TrieNode::Empty.hash(), Hash::ZERO);
+        assert_eq!(TrieNode::Empty.encode(), [0u8; 64]);
+    }
+
+    #[test]
+    fn test_node_hash_non_empty_is_blake2b() {
+        let node = TrieNode::EmbeddedLeaf {
+            key: [1; 31],
+            value: vec![42],
+        };
+        let encoded = node.encode();
+        assert_eq!(node.hash(), grey_crypto::blake2b_256(&encoded));
+    }
+
+    #[test]
+    fn test_bit_extraction() {
+        // 0x80 = 10000000 → bit 0 = true, bits 1-7 = false
+        assert!(bit(&[0x80], 0));
+        assert!(!bit(&[0x80], 1));
+        // 0x01 = 00000001 → bit 7 = true, bits 0-6 = false
+        assert!(bit(&[0x01], 7));
+        assert!(!bit(&[0x01], 0));
+        // Multi-byte: bit 8 is MSB of second byte
+        assert!(bit(&[0x00, 0x80], 8));
+        assert!(!bit(&[0x00, 0x80], 9));
+    }
+
+    #[test]
+    fn test_merkle_root_empty() {
+        assert_eq!(merkle_root(&[]), Hash::ZERO);
+    }
+
+    #[test]
+    fn test_merkle_root_single_embedded() {
+        let key = [0u8; 32];
+        let value = [1u8, 2, 3];
+        let root = merkle_root(&[(&key, &value)]);
+        // Single embedded leaf
+        let mut key31 = [0u8; 31];
+        key31.copy_from_slice(&key[..31]);
+        let expected = TrieNode::EmbeddedLeaf {
+            key: key31,
+            value: value.to_vec(),
+        }
+        .hash();
+        assert_eq!(root, expected);
+    }
+
+    #[test]
+    fn test_merkle_root_single_hashed() {
+        let key = [0u8; 32];
+        let value = [0xAA; 64]; // > 32 bytes → hashed leaf
+        let root = merkle_root(&[(&key, &value)]);
+        let mut key31 = [0u8; 31];
+        key31.copy_from_slice(&key[..31]);
+        let expected = TrieNode::HashedLeaf {
+            key: key31,
+            value_hash: grey_crypto::blake2b_256(&value),
+        }
+        .hash();
+        assert_eq!(root, expected);
+    }
+
+    #[test]
+    fn test_merkle_root_two_entries_deterministic() {
+        let key1 = [0u8; 32]; // bit 0 = 0 → left
+        let key2 = {
+            let mut k = [0u8; 32];
+            k[0] = 0x80; // bit 0 = 1 → right
+            k
+        };
+        let root1 = merkle_root(&[(&key1, b"a"), (&key2, b"b")]);
+        let root2 = merkle_root(&[(&key1, b"a"), (&key2, b"b")]);
+        assert_eq!(root1, root2);
+        assert_ne!(root1, Hash::ZERO);
+    }
+
+    #[test]
+    fn test_merkle_root_order_independent() {
+        // Trie structure depends on key bits, not insertion order
+        let key1 = [0u8; 32];
+        let key2 = {
+            let mut k = [0u8; 32];
+            k[0] = 0x80;
+            k
+        };
+        let root_ab = merkle_root(&[(&key1, b"a"), (&key2, b"b")]);
+        let root_ba = merkle_root(&[(&key2, b"b"), (&key1, b"a")]);
+        assert_eq!(root_ab, root_ba);
+    }
+
+    #[test]
     fn test_trie_vectors() {
         use std::collections::BTreeMap;
 
