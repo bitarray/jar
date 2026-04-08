@@ -422,15 +422,54 @@ impl GrandpaState {
         counts
     }
 
-    /// GHOST rule: find the block with the most prevotes.
-    /// In our simplified version, we pick the block with the most votes
-    /// at the highest slot.
+    /// GHOST rule: greedy heaviest-observed subtree from `finalized_hash` per GP §19.5.
     fn prevote_ghost(&self) -> Option<(Hash, Timeslot)> {
-        Self::count_votes(&self.prevotes)
-            .into_iter()
-            .filter(|(_, (count, _))| *count >= self.threshold())
-            .max_by_key(|(_, (count, slot))| (*count, *slot))
-            .map(|(hash, (_, slot))| (hash, slot))
+        // Build parent → children map from unfinalized ancestry
+        let mut children: HashMap<Hash, Vec<Hash>> = HashMap::new();
+        for (&hash, &(parent, _, _)) in &self.ancestry {
+            children.entry(parent).or_default().push(hash);
+        }
+
+        // Count total prevotes in the subtree rooted at `hash` (direct + all descendants).
+        fn subtree_votes(
+            hash: Hash,
+            children: &HashMap<Hash, Vec<Hash>>,
+            prevotes: &BTreeMap<ValidatorIndex, Vote>,
+        ) -> usize {
+            let direct = prevotes.values().filter(|v| v.block_hash == hash).count();
+            let child_sum: usize = children
+                .get(&hash)
+                .map(|cs| {
+                    cs.iter()
+                        .map(|&c| subtree_votes(c, children, prevotes))
+                        .sum()
+                })
+                .unwrap_or(0);
+            direct + child_sum
+        }
+
+        // Greedily descend: at each step pick the child with the most subtree votes.
+        // Stop when no child has any votes.
+        let mut current = self.finalized_hash;
+        loop {
+            let best_child = children.get(&current).and_then(|cs| {
+                cs.iter()
+                    .max_by_key(|&&c| subtree_votes(c, &children, &self.prevotes))
+            });
+
+            match best_child {
+                Some(&child) if subtree_votes(child, &children, &self.prevotes) > 0 => {
+                    current = child;
+                }
+                _ => break,
+            }
+        }
+
+        if current == self.finalized_hash {
+            return None;
+        }
+        let slot = self.ancestry.get(&current)?.1;
+        Some((current, slot))
     }
 
     /// Check if precommits have reached supermajority on any block.
@@ -1384,5 +1423,126 @@ mod tests {
             grandpa.best_block_hash, hash_c,
             "higher chain metric must win"
         );
+    }
+
+    fn make_prevote(block_hash: Hash, block_slot: Timeslot, validator_index: u16) -> Vote {
+        Vote {
+            block_hash,
+            block_slot,
+            round: 1,
+            validator_index,
+            signature: grey_types::Ed25519Signature([0u8; 64]),
+        }
+    }
+
+    #[test]
+    fn test_ghost_linear_chain() {
+        let mut grandpa = GrandpaState::new(6);
+        let hash_a = Hash([1u8; 32]);
+        let hash_b = Hash([2u8; 32]);
+        let hash_c = Hash([3u8; 32]);
+
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false);
+        grandpa.register_block(hash_b, hash_a, 2, false);
+        grandpa.register_block(hash_c, hash_b, 3, false);
+
+        // All 4 prevotes on hash_c (the tip)
+        for i in 0..4u16 {
+            grandpa.prevotes.insert(i, make_prevote(hash_c, 3, i));
+        }
+
+        // GHOST must walk A → B → C and return C
+        assert_eq!(grandpa.prevote_ghost(), Some((hash_c, 3)));
+    }
+
+    #[test]
+    fn test_ghost_fork_picks_heavier_subtree() {
+        let mut grandpa = GrandpaState::new(6);
+        let hash_a = Hash([1u8; 32]);
+        let hash_b = Hash([2u8; 32]); // fork 1: slot 2, will get 3 votes
+        let hash_c = Hash([3u8; 32]); // fork 2: slot 5 (higher!), will get 1 vote
+
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false);
+        grandpa.register_block(hash_b, hash_a, 2, false);
+        grandpa.register_block(hash_c, hash_a, 5, false);
+
+        // 3 prevotes on hash_b (lower slot), 1 on hash_c (higher slot)
+        grandpa.prevotes.insert(0, make_prevote(hash_b, 2, 0));
+        grandpa.prevotes.insert(1, make_prevote(hash_b, 2, 1));
+        grandpa.prevotes.insert(2, make_prevote(hash_b, 2, 2));
+        grandpa.prevotes.insert(3, make_prevote(hash_c, 5, 3));
+
+        // GHOST must pick hash_b (heavier subtree), not hash_c (higher slot)
+        // Old heuristic would return hash_c (higher slot wins on tie or higher count tie)
+        assert_eq!(grandpa.prevote_ghost(), Some((hash_b, 2)));
+    }
+
+    #[test]
+    fn test_ghost_no_prevotes_returns_none() {
+        let mut grandpa = GrandpaState::new(6);
+        let hash_a = Hash([1u8; 32]);
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false);
+
+        // No prevotes at all
+        assert_eq!(grandpa.prevote_ghost(), None);
+    }
+
+    #[test]
+    fn test_ghost_no_unfinalized_votes_returns_none() {
+        let mut grandpa = GrandpaState::new(6);
+        let hash_a = Hash([1u8; 32]);
+        let hash_b = Hash([2u8; 32]);
+
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false);
+        grandpa.register_block(hash_b, hash_a, 2, false);
+
+        // Finalize at hash_b slot 2 — ancestry is pruned
+        grandpa.finalized_hash = hash_b;
+        grandpa.finalized_slot = 2;
+        grandpa.ancestry.retain(|_, &mut (_, s, _)| s > 2);
+
+        // Prevote for hash_a (now pruned from ancestry, below finalized)
+        grandpa.prevotes.insert(0, make_prevote(hash_a, 1, 0));
+        grandpa.prevotes.insert(1, make_prevote(hash_a, 1, 1));
+        grandpa.prevotes.insert(2, make_prevote(hash_a, 1, 2));
+        grandpa.prevotes.insert(3, make_prevote(hash_a, 1, 3));
+
+        // No unfinalized blocks → GHOST can't move from finalized_hash → None
+        assert_eq!(grandpa.prevote_ghost(), None);
+    }
+
+    #[test]
+    fn test_ghost_subtree_beats_heuristic() {
+        // Scenario: split votes across a subtree vs. one branch
+        // V=6, threshold=4
+        // finalized=A
+        // A → B (slot 3): 2 direct prevotes
+        // A → C (slot 5): 2 direct prevotes
+        // B → D (slot 4): 2 direct prevotes
+        //
+        // Subtree votes: B-subtree = B(2) + D(2) = 4, C-subtree = C(2) = 2
+        // Old heuristic: no single block has ≥ 4 votes → returns None
+        // New GHOST: picks B (4 subtree votes > 2), then picks D → returns D
+
+        let mut grandpa = GrandpaState::new(6);
+        let hash_a = Hash([1u8; 32]);
+        let hash_b = Hash([2u8; 32]);
+        let hash_c = Hash([3u8; 32]);
+        let hash_d = Hash([4u8; 32]);
+
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false);
+        grandpa.register_block(hash_b, hash_a, 3, false);
+        grandpa.register_block(hash_c, hash_a, 5, false);
+        grandpa.register_block(hash_d, hash_b, 4, false);
+
+        grandpa.prevotes.insert(0, make_prevote(hash_b, 3, 0));
+        grandpa.prevotes.insert(1, make_prevote(hash_b, 3, 1));
+        grandpa.prevotes.insert(2, make_prevote(hash_c, 5, 2));
+        grandpa.prevotes.insert(3, make_prevote(hash_c, 5, 3));
+        grandpa.prevotes.insert(4, make_prevote(hash_d, 4, 4));
+        grandpa.prevotes.insert(5, make_prevote(hash_d, 4, 5));
+
+        // New GHOST: B-subtree has 4 votes → descends to B → D-subtree has 2 votes → D
+        assert_eq!(grandpa.prevote_ghost(), Some((hash_d, 4)));
     }
 }
