@@ -1962,4 +1962,97 @@ mod tests {
         // JAL x0, 4
         assert_eq!(decode_j_imm(0x0040006F), 4);
     }
+
+    #[test]
+    fn test_decode_j_imm_negative() {
+        // JAL with negative offset (backward jump)
+        // imm[20|10:1|11|19:12] = all 1s → -2
+        // Encoding: bit31=1, bits[30:21]=0x3FF, bit20=1, bits[19:12]=0xFF
+        let inst = 0xFFFFF06F; // JAL x0, -2 (the standard encoding for JAL x0, -2)
+        let imm = decode_j_imm(inst);
+        assert!(imm < 0, "negative offset should be negative");
+        assert_eq!(imm, -2);
+    }
+
+    #[test]
+    fn test_decode_j_imm_max_positive() {
+        // JAL with maximum positive offset: imm[20]=0, rest=max
+        // imm = 0x0FFFFE (1048574)
+        let inst = 0x7FFFF06F; // bit31=0, bits[30:21]=0x3FF, bit20=1, bits[19:12]=0xFF
+        let imm = decode_j_imm(inst);
+        assert!(imm > 0);
+    }
+
+    #[test]
+    fn test_decode_b_imm_zero() {
+        // BEQ x0, x0, 0
+        assert_eq!(decode_b_imm(0x00000063), 0);
+    }
+
+    #[test]
+    fn test_decode_b_imm_positive() {
+        // BEQ with offset +8: imm[12|10:5]=0, imm[4:1]=0100, imm[11]=0
+        // inst[11:8]=0100 → imm[4:1]=4, shift by 1 → offset=8
+        let inst = 0x00000463; // BEQ x0, x0, +8
+        let imm = decode_b_imm(inst);
+        assert_eq!(imm, 8);
+    }
+
+    #[test]
+    fn test_decode_b_imm_negative() {
+        // BEQ with negative offset
+        // All bits set → -2
+        let inst = 0xFE000FE3; // BEQ x0, x0, -2
+        let imm = decode_b_imm(inst);
+        assert_eq!(imm, -2);
+    }
+
+    #[test]
+    fn test_decode_s_imm_zero() {
+        // SD x0, 0(x0): imm=0
+        assert_eq!(decode_s_imm(0x00003023), 0);
+    }
+
+    #[test]
+    fn test_decode_s_imm_positive() {
+        // SD x0, 8(x0): imm[11:5]=0, imm[4:0]=01000
+        let inst = 0x00003423; // imm4_0 = 8 (at bits[11:7] = 01000)
+        let imm = decode_s_imm(inst);
+        assert_eq!(imm, 8);
+    }
+
+    #[test]
+    fn test_decode_s_imm_negative() {
+        // SD x0, -8(x0): imm = -8 = 0xFFF8
+        // imm[11:5] = 1111111, imm[4:0] = 11000
+        let inst = 0xFE003C23; // SD x0, -8(x0)
+        let imm = decode_s_imm(inst);
+        assert_eq!(imm, -8);
+    }
+
+    #[test]
+    fn test_register_mapping_all_a_regs() {
+        // a0-a5 map to PVM registers 7-12
+        for (rv, pvm) in [(10, 7), (11, 8), (12, 9), (13, 10), (14, 11), (15, 12)] {
+            assert_eq!(
+                map_register(rv).unwrap(),
+                Some(pvm),
+                "rv{rv} should map to φ[{pvm}]"
+            );
+        }
+    }
+
+    #[test]
+    fn test_register_mapping_s_regs() {
+        // s0-s1 map to PVM registers 5-6
+        assert_eq!(map_register(8).unwrap(), Some(5)); // s0
+        assert_eq!(map_register(9).unwrap(), Some(6)); // s1
+    }
+
+    #[test]
+    fn test_register_mapping_unmapped() {
+        // tp(4), t3-t6(28-31) are unmapped → error
+        assert!(map_register(4).is_err()); // tp
+        assert!(map_register(28).is_err()); // t3
+    }
 }
