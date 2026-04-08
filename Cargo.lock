@@ -1732,6 +1732,7 @@ name = "grey-types"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "proptest",
  "scale",
  "serde",
  "serde_json",

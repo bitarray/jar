@@ -350,4 +350,118 @@ mod tests {
     fn test_validator_statistics_roundtrip() {
         roundtrip::<state::ValidatorStatistics>();
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Verify encode→decode→re-encode roundtrip for random data.
+        /// Uses byte comparison (works even without PartialEq on the type).
+        fn check_roundtrip<T: Encode + Decode>(val: &T) {
+            let encoded = val.encode();
+            let (decoded, consumed) =
+                T::decode(&encoded).expect("decode should succeed for encoded data");
+            assert_eq!(consumed, encoded.len(), "should consume all bytes");
+            let re_encoded = decoded.encode();
+            assert_eq!(
+                encoded, re_encoded,
+                "re-encoded bytes should match original"
+            );
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(128))]
+
+            #[test]
+            fn hash_roundtrip(bytes in proptest::array::uniform32(0u8..)) {
+                check_roundtrip(&Hash(bytes));
+            }
+
+            #[test]
+            fn ed25519_pubkey_roundtrip(bytes in proptest::array::uniform32(0u8..)) {
+                check_roundtrip(&Ed25519PublicKey(bytes));
+            }
+
+            #[test]
+            fn bandersnatch_pubkey_roundtrip(bytes in proptest::array::uniform32(0u8..)) {
+                check_roundtrip(&BandersnatchPublicKey(bytes));
+            }
+
+            #[test]
+            fn ed25519_signature_roundtrip(bytes in proptest::collection::vec(0u8.., 64..=64)) {
+                let mut arr = [0u8; 64];
+                arr.copy_from_slice(&bytes);
+                check_roundtrip(&Ed25519Signature(arr));
+            }
+
+            #[test]
+            fn ticket_roundtrip(id in proptest::array::uniform32(0u8..), attempt in 0u8..4) {
+                check_roundtrip(&header::Ticket {
+                    id: Hash(id),
+                    attempt,
+                });
+            }
+
+            #[test]
+            fn judgment_roundtrip(
+                validator_index in 0u16..1023,
+                is_valid: bool,
+                sig in proptest::collection::vec(0u8.., 64..=64),
+            ) {
+                let mut sig_arr = [0u8; 64];
+                sig_arr.copy_from_slice(&sig);
+                check_roundtrip(&header::Judgment {
+                    validator_index,
+                    is_valid,
+                    signature: Ed25519Signature(sig_arr),
+                });
+            }
+
+            #[test]
+            fn verdict_roundtrip(
+                report_hash in proptest::array::uniform32(0u8..),
+                age in 0u32..100,
+                n_judgments in 0usize..5,
+            ) {
+                let judgments: Vec<header::Judgment> = (0..n_judgments)
+                    .map(|i| header::Judgment {
+                        validator_index: i as u16,
+                        is_valid: i % 2 == 0,
+                        signature: Ed25519Signature([i as u8; 64]),
+                    })
+                    .collect();
+                check_roundtrip(&header::Verdict {
+                    report_hash: Hash(report_hash),
+                    age,
+                    judgments,
+                });
+            }
+
+            #[test]
+            fn ticket_proof_roundtrip(
+                attempt in 0u8..4,
+                proof_len in 0usize..100,
+            ) {
+                let proof = vec![42u8; proof_len];
+                check_roundtrip(&header::TicketProof { attempt, proof });
+            }
+
+            #[test]
+            fn assurance_roundtrip(
+                anchor in proptest::array::uniform32(0u8..),
+                bitfield_len in 0usize..50,
+                validator_index in 0u16..1023,
+                sig in proptest::collection::vec(0u8.., 64..=64),
+            ) {
+                let mut sig_arr = [0u8; 64];
+                sig_arr.copy_from_slice(&sig);
+                check_roundtrip(&header::Assurance {
+                    anchor: Hash(anchor),
+                    bitfield: vec![0xAA; bitfield_len],
+                    validator_index,
+                    signature: Ed25519Signature(sig_arr),
+                });
+            }
+        }
+    }
 }
