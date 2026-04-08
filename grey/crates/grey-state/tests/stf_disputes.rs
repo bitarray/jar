@@ -2,87 +2,11 @@
 
 mod common;
 
-use common::{ed25519_from_hex, hash_from_hex, parse_pending_reports, sig_from_hex};
+use common::{ed25519_from_hex, parse_disputes_extrinsic, parse_judgments, parse_pending_reports};
 use grey_state::disputes::process_disputes;
 use grey_types::Ed25519PublicKey;
 use grey_types::config::Config;
-use grey_types::header::*;
-use grey_types::state::Judgments;
 use grey_types::validator::ValidatorKey;
-
-fn parse_judgments(json: &serde_json::Value) -> Judgments {
-    Judgments {
-        good: json["good"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| hash_from_hex(v.as_str().unwrap()))
-            .collect(),
-        bad: json["bad"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| hash_from_hex(v.as_str().unwrap()))
-            .collect(),
-        wonky: json["wonky"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| hash_from_hex(v.as_str().unwrap()))
-            .collect(),
-        offenders: json["offenders"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| ed25519_from_hex(v.as_str().unwrap()))
-            .collect(),
-    }
-}
-
-fn parse_disputes_extrinsic(json: &serde_json::Value) -> DisputesExtrinsic {
-    DisputesExtrinsic {
-        verdicts: json["verdicts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| Verdict {
-                report_hash: hash_from_hex(v["target"].as_str().unwrap()),
-                age: v["age"].as_u64().unwrap() as u32,
-                judgments: v["votes"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|j| Judgment {
-                        is_valid: j["vote"].as_bool().unwrap(),
-                        validator_index: j["index"].as_u64().unwrap() as u16,
-                        signature: sig_from_hex(j["signature"].as_str().unwrap()),
-                    })
-                    .collect(),
-            })
-            .collect(),
-        culprits: json["culprits"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|c| Culprit {
-                report_hash: hash_from_hex(c["target"].as_str().unwrap()),
-                validator_key: ed25519_from_hex(c["key"].as_str().unwrap()),
-                signature: sig_from_hex(c["signature"].as_str().unwrap()),
-            })
-            .collect(),
-        faults: json["faults"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|f| Fault {
-                report_hash: hash_from_hex(f["target"].as_str().unwrap()),
-                is_valid: f["vote"].as_bool().unwrap(),
-                validator_key: ed25519_from_hex(f["key"].as_str().unwrap()),
-                signature: sig_from_hex(f["signature"].as_str().unwrap()),
-            })
-            .collect(),
-    }
-}
 
 fn run_disputes_test(dir: &str, stem: &str) {
     let json = common::load_jar_test(dir, stem);

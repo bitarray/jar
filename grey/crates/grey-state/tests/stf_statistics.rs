@@ -2,7 +2,9 @@
 
 mod common;
 
-use common::{decode_hex, ed25519_from_hex, hash_from_hex, parse_work_report, sig_from_hex};
+use common::{
+    decode_hex, parse_assurance, parse_credentials, parse_disputes_extrinsic, parse_work_report,
+};
 use grey_state::statistics;
 use grey_types::header::*;
 use grey_types::state::{ValidatorRecord, ValidatorStatistics};
@@ -38,75 +40,16 @@ fn extrinsic_from_json(json: &serde_json::Value) -> Extrinsic {
             .map(|g| Guarantee {
                 report: parse_work_report(&g["report"]),
                 timeslot: g["slot"].as_u64().unwrap() as u32,
-                credentials: g["signatures"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|s| {
-                        (
-                            s["validator_index"].as_u64().unwrap() as u16,
-                            sig_from_hex(s["signature"].as_str().unwrap()),
-                        )
-                    })
-                    .collect(),
+                credentials: parse_credentials(&g["signatures"]),
             })
             .collect(),
         assurances: json["assurances"]
             .as_array()
             .unwrap()
             .iter()
-            .map(|a| Assurance {
-                anchor: hash_from_hex(a["anchor"].as_str().unwrap()),
-                bitfield: decode_hex(a["bitfield"].as_str().unwrap()),
-                validator_index: a["validator_index"].as_u64().unwrap() as u16,
-                signature: sig_from_hex(a["signature"].as_str().unwrap()),
-            })
+            .map(parse_assurance)
             .collect(),
-        disputes: {
-            let d = &json["disputes"];
-            DisputesExtrinsic {
-                verdicts: d["verdicts"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| Verdict {
-                        report_hash: hash_from_hex(v["target"].as_str().unwrap()),
-                        age: v["age"].as_u64().unwrap() as u32,
-                        judgments: v["votes"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .map(|j| Judgment {
-                                is_valid: j["vote"].as_bool().unwrap(),
-                                validator_index: j["index"].as_u64().unwrap() as u16,
-                                signature: sig_from_hex(j["signature"].as_str().unwrap()),
-                            })
-                            .collect(),
-                    })
-                    .collect(),
-                culprits: d["culprits"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|c| Culprit {
-                        report_hash: hash_from_hex(c["target"].as_str().unwrap()),
-                        validator_key: ed25519_from_hex(c["key"].as_str().unwrap()),
-                        signature: sig_from_hex(c["signature"].as_str().unwrap()),
-                    })
-                    .collect(),
-                faults: d["faults"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|f| Fault {
-                        report_hash: hash_from_hex(f["target"].as_str().unwrap()),
-                        is_valid: f["vote"].as_bool().unwrap(),
-                        validator_key: ed25519_from_hex(f["key"].as_str().unwrap()),
-                        signature: sig_from_hex(f["signature"].as_str().unwrap()),
-                    })
-                    .collect(),
-            }
-        },
+        disputes: parse_disputes_extrinsic(&json["disputes"]),
     }
 }
 

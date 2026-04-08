@@ -2,14 +2,17 @@
 
 mod common;
 
-use common::{ed25519_from_hex, hash_from_hex, parse_validator, parse_work_report, sig_from_hex};
+use common::{
+    ed25519_from_hex, hash_from_hex, parse_credentials, parse_hash_array, parse_nested_hash_vecs,
+    parse_validator, parse_work_report,
+};
 use grey_state::reports::{
     AvailAssignment, CoreStats, GuaranteeInput, RecentBlockEntry, ReportsState, ServiceInfo,
     ServiceStats, process_reports,
 };
 use grey_types::config::Config;
 use grey_types::validator::ValidatorKey;
-use grey_types::{Ed25519PublicKey, Ed25519Signature, Hash, ServiceId};
+use grey_types::{Ed25519PublicKey, Hash, ServiceId};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn parse_avail_assignment(v: &serde_json::Value) -> Option<AvailAssignment> {
@@ -82,36 +85,18 @@ fn run_reports_test(dir: &str, stem: &str) {
     // Parse input
     let current_slot = input_json["slot"].as_u64().unwrap() as u32;
 
-    let known_packages: BTreeSet<Hash> = input_json["known_packages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|h| hash_from_hex(h.as_str().unwrap()))
+    let known_packages: BTreeSet<Hash> = parse_hash_array(&input_json["known_packages"])
+        .into_iter()
         .collect();
 
     let guarantees: Vec<GuaranteeInput> = input_json["guarantees"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|g| {
-            let report = parse_work_report(&g["report"]);
-            let slot = g["slot"].as_u64().unwrap() as u32;
-            let signatures: Vec<(u16, Ed25519Signature)> = g["signatures"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|s| {
-                    (
-                        s["validator_index"].as_u64().unwrap() as u16,
-                        sig_from_hex(s["signature"].as_str().unwrap()),
-                    )
-                })
-                .collect();
-            GuaranteeInput {
-                report,
-                slot,
-                signatures,
-            }
+        .map(|g| GuaranteeInput {
+            report: parse_work_report(&g["report"]),
+            slot: g["slot"].as_u64().unwrap() as u32,
+            signatures: parse_credentials(&g["signatures"]),
         })
         .collect();
 
@@ -159,18 +144,7 @@ fn run_reports_test(dir: &str, stem: &str) {
         .map(parse_recent_block)
         .collect();
 
-    let auth_pools: Vec<Vec<Hash>> = pre["auth_pools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|pool| {
-            pool.as_array()
-                .unwrap()
-                .iter()
-                .map(|h| hash_from_hex(h.as_str().unwrap()))
-                .collect()
-        })
-        .collect();
+    let auth_pools: Vec<Vec<Hash>> = parse_nested_hash_vecs(&pre["auth_pools"]);
 
     let accounts: BTreeMap<ServiceId, ServiceInfo> = pre["accounts"]
         .as_array()

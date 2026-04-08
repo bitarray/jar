@@ -8,13 +8,13 @@
 mod common;
 
 use common::{
-    bandersnatch_from_hex, decode_hex, ed25519_from_hex, hash_from_hex, parse_work_report,
-    sig_from_hex,
+    bandersnatch_from_hex, bandersnatch_sig_from_hex, decode_hex, ed25519_from_hex, hash_from_hex,
+    parse_assurance, parse_credentials, parse_disputes_extrinsic, parse_work_report,
 };
 use grey_merkle::state_serial;
 use grey_types::config::Config;
 use grey_types::header::*;
-use grey_types::{BandersnatchPublicKey, BandersnatchSignature, Ed25519PublicKey};
+use grey_types::{BandersnatchPublicKey, Ed25519PublicKey};
 
 const BLOCKS_DIR: &str = "../../../spec/tests/vectors/blocks";
 
@@ -57,14 +57,6 @@ fn parse_tickets_marker(v: &serde_json::Value) -> Option<Vec<Ticket>> {
             })
             .collect(),
     )
-}
-
-fn bandersnatch_sig_from_hex(s: &str) -> BandersnatchSignature {
-    let bytes = decode_hex(s);
-    let mut sig = [0u8; 96];
-    let len = bytes.len().min(96);
-    sig[..len].copy_from_slice(&bytes[..len]);
-    BandersnatchSignature(sig)
 }
 
 fn parse_header(v: &serde_json::Value) -> Header {
@@ -120,16 +112,7 @@ fn parse_extrinsic(v: &serde_json::Value) -> Extrinsic {
         .map(|g| {
             let report = parse_work_report(&g["report"]);
             let timeslot = g["slot"].as_u64().unwrap() as u32;
-            let credentials: Vec<(u16, grey_types::Ed25519Signature)> = g["signatures"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|s| {
-                    let idx = s["validator_index"].as_u64().unwrap() as u16;
-                    let sig = sig_from_hex(s["signature"].as_str().unwrap());
-                    (idx, sig)
-                })
-                .collect();
+            let credentials = parse_credentials(&g["signatures"]);
             Guarantee {
                 report,
                 timeslot,
@@ -142,60 +125,10 @@ fn parse_extrinsic(v: &serde_json::Value) -> Extrinsic {
         .as_array()
         .unwrap()
         .iter()
-        .map(|a| Assurance {
-            anchor: hash_from_hex(a["anchor"].as_str().unwrap()),
-            bitfield: decode_hex(a["bitfield"].as_str().unwrap()),
-            validator_index: a["validator_index"].as_u64().unwrap() as u16,
-            signature: sig_from_hex(a["signature"].as_str().unwrap()),
-        })
+        .map(parse_assurance)
         .collect();
 
-    let d = &v["disputes"];
-    let disputes = DisputesExtrinsic {
-        verdicts: d["verdicts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|verd| {
-                let judgments: Vec<Judgment> = verd["votes"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|j| Judgment {
-                        is_valid: j["vote"].as_bool().unwrap(),
-                        validator_index: j["index"].as_u64().unwrap() as u16,
-                        signature: sig_from_hex(j["signature"].as_str().unwrap()),
-                    })
-                    .collect();
-                Verdict {
-                    report_hash: hash_from_hex(verd["target"].as_str().unwrap()),
-                    age: verd["age"].as_u64().unwrap() as u32,
-                    judgments,
-                }
-            })
-            .collect(),
-        culprits: d["culprits"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|c| Culprit {
-                report_hash: hash_from_hex(c["target"].as_str().unwrap()),
-                validator_key: ed25519_from_hex(c["key"].as_str().unwrap()),
-                signature: sig_from_hex(c["signature"].as_str().unwrap()),
-            })
-            .collect(),
-        faults: d["faults"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|f| Fault {
-                report_hash: hash_from_hex(f["target"].as_str().unwrap()),
-                is_valid: f["vote"].as_bool().unwrap(),
-                validator_key: ed25519_from_hex(f["key"].as_str().unwrap()),
-                signature: sig_from_hex(f["signature"].as_str().unwrap()),
-            })
-            .collect(),
-    };
+    let disputes = parse_disputes_extrinsic(&v["disputes"]);
 
     Extrinsic {
         tickets,

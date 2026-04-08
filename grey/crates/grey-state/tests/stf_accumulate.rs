@@ -2,7 +2,10 @@
 
 mod common;
 
-use common::{decode_hex, hash_from_hex, load_jar_test, parse_work_report};
+use common::{
+    decode_hex, hash_from_hex, load_jar_test, parse_hash_array, parse_nested_hash_vecs,
+    parse_work_report,
+};
 use grey_state::accumulate::{
     AccPrivileges, AccServiceAccount, AccServiceStats, AccumulateInput, AccumulateState,
     ReadyRecord, process_accumulate,
@@ -15,12 +18,7 @@ use std::collections::BTreeMap;
 fn parse_ready_record(v: &serde_json::Value) -> ReadyRecord {
     ReadyRecord {
         report: parse_work_report(&v["report"]),
-        dependencies: v["dependencies"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|h| hash_from_hex(h.as_str().unwrap()))
-            .collect(),
+        dependencies: parse_hash_array(&v["dependencies"]),
     }
 }
 
@@ -155,18 +153,7 @@ fn parse_state(v: &serde_json::Value) -> AccumulateState {
         })
         .collect();
 
-    let accumulated: Vec<Vec<Hash>> = v["accumulated"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|slot| {
-            slot.as_array()
-                .unwrap()
-                .iter()
-                .map(|h| hash_from_hex(h.as_str().unwrap()))
-                .collect()
-        })
-        .collect();
+    let accumulated: Vec<Vec<Hash>> = parse_nested_hash_vecs(&v["accumulated"]);
 
     let accounts: BTreeMap<ServiceId, AccServiceAccount> = v["accounts"]
         .as_array()

@@ -2,10 +2,9 @@
 
 mod common;
 
-use common::{decode_hex, hash_from_hex, parse_pending_reports, sig_from_hex};
+use common::{hash_from_hex, parse_assurance, parse_pending_reports};
 use grey_state::assurances::process_assurances;
 use grey_types::config::Config;
-use grey_types::header::Assurance;
 use grey_types::validator::ValidatorKey;
 
 fn run_assurances_test(dir: &str, stem: &str) {
@@ -17,16 +16,11 @@ fn run_assurances_test(dir: &str, stem: &str) {
     let output = &json["output"];
 
     // Parse input
-    let assurances: Vec<Assurance> = input["assurances"]
+    let assurances: Vec<_> = input["assurances"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|a| Assurance {
-            anchor: hash_from_hex(a["anchor"].as_str().unwrap()),
-            bitfield: decode_hex(a["bitfield"].as_str().unwrap()),
-            validator_index: a["validator_index"].as_u64().unwrap() as u16,
-            signature: sig_from_hex(a["signature"].as_str().unwrap()),
-        })
+        .map(parse_assurance)
         .collect();
 
     let current_timeslot = input["slot"].as_u64().unwrap() as u32;

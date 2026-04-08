@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::hash_from_hex;
+use common::{hash_from_hex, parse_nested_hash_vecs};
 use grey_state::authorizations::{AuthorizationInput, update_authorizations};
 use grey_types::Hash;
 use grey_types::config::Config;
@@ -30,32 +30,8 @@ fn run_authorizations_test(dir: &str, stem: &str) {
         .collect();
 
     // Parse pre-state pools and queues
-    let mut auth_pools: Vec<Vec<Hash>> = pre["auth_pools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|pool| {
-            pool.as_array()
-                .unwrap()
-                .iter()
-                .map(|h| hash_from_hex(h.as_str().unwrap()))
-                .collect()
-        })
-        .collect();
-
-    let auth_queues: Vec<Vec<Hash>> = pre["auth_queues"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|queue| {
-            queue
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|h| hash_from_hex(h.as_str().unwrap()))
-                .collect()
-        })
-        .collect();
+    let mut auth_pools: Vec<Vec<Hash>> = parse_nested_hash_vecs(&pre["auth_pools"]);
+    let auth_queues: Vec<Vec<Hash>> = parse_nested_hash_vecs(&pre["auth_queues"]);
 
     // Apply transition
     let config = Config::full();
@@ -63,18 +39,7 @@ fn run_authorizations_test(dir: &str, stem: &str) {
     update_authorizations(&config, &mut auth_pools, &auth_queues, &input);
 
     // Parse expected post-state
-    let expected_pools: Vec<Vec<Hash>> = post["auth_pools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|pool| {
-            pool.as_array()
-                .unwrap()
-                .iter()
-                .map(|h| hash_from_hex(h.as_str().unwrap()))
-                .collect()
-        })
-        .collect();
+    let expected_pools: Vec<Vec<Hash>> = parse_nested_hash_vecs(&post["auth_pools"]);
 
     // Compare
     assert_eq!(

@@ -2,11 +2,14 @@
 #![allow(dead_code)]
 
 use grey_types::config::Config;
+use grey_types::header::*;
+use grey_types::state::Judgments;
 use grey_types::state::PendingReport;
 use grey_types::validator::ValidatorKey;
 use grey_types::work::{AvailabilitySpec, RefinementContext, WorkDigest, WorkReport, WorkResult};
 use grey_types::{
-    BandersnatchPublicKey, BlsPublicKey, Ed25519PublicKey, Ed25519Signature, Hash, ServiceId,
+    BandersnatchPublicKey, BandersnatchSignature, BlsPublicKey, Ed25519PublicKey, Ed25519Signature,
+    Hash, ServiceId,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -118,6 +121,133 @@ pub fn resolve_blob_files(json: &mut serde_json::Value, base_dir: &Path) {
 /// Parse a BandersnatchPublicKey from a hex string.
 pub fn bandersnatch_from_hex(s: &str) -> BandersnatchPublicKey {
     BandersnatchPublicKey::from_hex(s)
+}
+
+/// Parse a BandersnatchSignature from a hex string.
+pub fn bandersnatch_sig_from_hex(s: &str) -> BandersnatchSignature {
+    let bytes = decode_hex(s);
+    let mut sig = [0u8; 96];
+    let len = bytes.len().min(96);
+    sig[..len].copy_from_slice(&bytes[..len]);
+    BandersnatchSignature(sig)
+}
+
+/// Parse a JSON array of hex strings into a `Vec<Hash>`.
+pub fn parse_hash_array(json: &serde_json::Value) -> Vec<Hash> {
+    json.as_array()
+        .unwrap()
+        .iter()
+        .map(|h| hash_from_hex(h.as_str().unwrap()))
+        .collect()
+}
+
+/// Parse a JSON array of arrays of hex strings into `Vec<Vec<Hash>>`.
+pub fn parse_nested_hash_vecs(json: &serde_json::Value) -> Vec<Vec<Hash>> {
+    json.as_array()
+        .unwrap()
+        .iter()
+        .map(parse_hash_array)
+        .collect()
+}
+
+/// Parse a JSON array of `{validator_index, signature}` objects into credentials.
+pub fn parse_credentials(json: &serde_json::Value) -> Vec<(u16, Ed25519Signature)> {
+    json.as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["validator_index"].as_u64().unwrap() as u16,
+                sig_from_hex(s["signature"].as_str().unwrap()),
+            )
+        })
+        .collect()
+}
+
+/// Parse an Assurance from a JSON value.
+pub fn parse_assurance(a: &serde_json::Value) -> Assurance {
+    Assurance {
+        anchor: hash_from_hex(a["anchor"].as_str().unwrap()),
+        bitfield: decode_hex(a["bitfield"].as_str().unwrap()),
+        validator_index: a["validator_index"].as_u64().unwrap() as u16,
+        signature: sig_from_hex(a["signature"].as_str().unwrap()),
+    }
+}
+
+/// Parse a Judgments struct from JSON.
+pub fn parse_judgments(json: &serde_json::Value) -> Judgments {
+    Judgments {
+        good: json["good"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| hash_from_hex(v.as_str().unwrap()))
+            .collect(),
+        bad: json["bad"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| hash_from_hex(v.as_str().unwrap()))
+            .collect(),
+        wonky: json["wonky"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| hash_from_hex(v.as_str().unwrap()))
+            .collect(),
+        offenders: json["offenders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| ed25519_from_hex(v.as_str().unwrap()))
+            .collect(),
+    }
+}
+
+/// Parse a DisputesExtrinsic from JSON.
+pub fn parse_disputes_extrinsic(json: &serde_json::Value) -> DisputesExtrinsic {
+    DisputesExtrinsic {
+        verdicts: json["verdicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| Verdict {
+                report_hash: hash_from_hex(v["target"].as_str().unwrap()),
+                age: v["age"].as_u64().unwrap() as u32,
+                judgments: v["votes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|j| Judgment {
+                        is_valid: j["vote"].as_bool().unwrap(),
+                        validator_index: j["index"].as_u64().unwrap() as u16,
+                        signature: sig_from_hex(j["signature"].as_str().unwrap()),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        culprits: json["culprits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| Culprit {
+                report_hash: hash_from_hex(c["target"].as_str().unwrap()),
+                validator_key: ed25519_from_hex(c["key"].as_str().unwrap()),
+                signature: sig_from_hex(c["signature"].as_str().unwrap()),
+            })
+            .collect(),
+        faults: json["faults"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| Fault {
+                report_hash: hash_from_hex(f["target"].as_str().unwrap()),
+                is_valid: f["vote"].as_bool().unwrap(),
+                validator_key: ed25519_from_hex(f["key"].as_str().unwrap()),
+                signature: sig_from_hex(f["signature"].as_str().unwrap()),
+            })
+            .collect(),
+    }
 }
 
 /// Parse a WorkResult from a JSON value.
