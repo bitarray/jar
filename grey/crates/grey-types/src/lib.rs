@@ -462,6 +462,287 @@ mod tests {
                     signature: Ed25519Signature(sig_arr),
                 });
             }
+
+            #[test]
+            fn header_roundtrip(
+                parent in proptest::array::uniform32(0u8..),
+                state_root in proptest::array::uniform32(0u8..),
+                extrinsic_hash in proptest::array::uniform32(0u8..),
+                timeslot in 0u32..100_000,
+                author_index in 0u16..1023,
+                fill_vrf in any::<u8>(),
+                fill_seal in any::<u8>(),
+                n_offenders in 0usize..3,
+            ) {
+                let offenders: Vec<Ed25519PublicKey> = (0..n_offenders)
+                    .map(|i| Ed25519PublicKey([i as u8; 32]))
+                    .collect();
+                check_roundtrip(&header::Header {
+                    data: header::UnsignedHeader {
+                        parent_hash: Hash(parent),
+                        state_root: Hash(state_root),
+                        extrinsic_hash: Hash(extrinsic_hash),
+                        timeslot,
+                        epoch_marker: None,
+                        tickets_marker: None,
+                        author_index,
+                        vrf_signature: BandersnatchSignature([fill_vrf; 96]),
+                        offenders_marker: offenders,
+                    },
+                    seal: BandersnatchSignature([fill_seal; 96]),
+                });
+            }
+
+            #[test]
+            fn header_with_epoch_marker_roundtrip(
+                parent in proptest::array::uniform32(0u8..),
+                entropy in proptest::array::uniform32(0u8..),
+                entropy_prev in proptest::array::uniform32(0u8..),
+                timeslot in 0u32..100_000,
+                n_validators in 0usize..5,
+            ) {
+                let validators: Vec<(BandersnatchPublicKey, Ed25519PublicKey)> = (0..n_validators)
+                    .map(|i| (BandersnatchPublicKey([i as u8; 32]), Ed25519PublicKey([(i + 100) as u8; 32])))
+                    .collect();
+                check_roundtrip(&header::Header {
+                    data: header::UnsignedHeader {
+                        parent_hash: Hash(parent),
+                        state_root: Hash::ZERO,
+                        extrinsic_hash: Hash::ZERO,
+                        timeslot,
+                        epoch_marker: Some(header::EpochMarker {
+                            entropy: Hash(entropy),
+                            entropy_previous: Hash(entropy_prev),
+                            validators,
+                        }),
+                        tickets_marker: None,
+                        author_index: 0,
+                        vrf_signature: BandersnatchSignature([0u8; 96]),
+                        offenders_marker: vec![],
+                    },
+                    seal: BandersnatchSignature([0u8; 96]),
+                });
+            }
+
+            #[test]
+            fn refinement_context_roundtrip(
+                anchor in proptest::array::uniform32(0u8..),
+                state_root in proptest::array::uniform32(0u8..),
+                beefy_root in proptest::array::uniform32(0u8..),
+                lookup in proptest::array::uniform32(0u8..),
+                lookup_ts in 0u32..100_000,
+                n_prereqs in 0usize..4,
+            ) {
+                let prerequisites: Vec<Hash> = (0..n_prereqs)
+                    .map(|i| Hash([i as u8; 32]))
+                    .collect();
+                check_roundtrip(&work::RefinementContext {
+                    anchor: Hash(anchor),
+                    state_root: Hash(state_root),
+                    beefy_root: Hash(beefy_root),
+                    lookup_anchor: Hash(lookup),
+                    lookup_anchor_timeslot: lookup_ts,
+                    prerequisites,
+                });
+            }
+
+            #[test]
+            fn work_item_roundtrip(
+                service_id in any::<u32>(),
+                code_hash in proptest::array::uniform32(0u8..),
+                gas_limit in any::<u64>(),
+                acc_gas in any::<u64>(),
+                exports_count in any::<u16>(),
+                payload_len in 0usize..50,
+                n_imports in 0usize..4,
+                n_extrinsics in 0usize..4,
+            ) {
+                let imports: Vec<work::ImportSegment> = (0..n_imports)
+                    .map(|i| work::ImportSegment {
+                        hash: Hash([i as u8; 32]),
+                        index: i as u16,
+                    })
+                    .collect();
+                let extrinsics: Vec<(Hash, u32)> = (0..n_extrinsics)
+                    .map(|i| (Hash([i as u8; 32]), i as u32))
+                    .collect();
+                check_roundtrip(&work::WorkItem {
+                    service_id,
+                    code_hash: Hash(code_hash),
+                    gas_limit,
+                    accumulate_gas_limit: acc_gas,
+                    exports_count,
+                    payload: vec![0xAB; payload_len],
+                    imports,
+                    extrinsics,
+                });
+            }
+
+            #[test]
+            fn work_report_roundtrip(
+                pkg_hash in proptest::array::uniform32(0u8..),
+                bundle_len in any::<u32>(),
+                erasure_root in proptest::array::uniform32(0u8..),
+                exports_root in proptest::array::uniform32(0u8..),
+                exports_count in any::<u16>(),
+                core_index in 0u16..341,
+                auth_hash in proptest::array::uniform32(0u8..),
+                auth_gas in any::<u64>(),
+                auth_out_len in 0usize..20,
+                n_results in 0usize..3,
+            ) {
+                let results: Vec<work::WorkDigest> = (0..n_results)
+                    .map(|i| work::WorkDigest {
+                        service_id: i as u32,
+                        code_hash: Hash([i as u8; 32]),
+                        payload_hash: Hash([(i + 1) as u8; 32]),
+                        accumulate_gas: 1000,
+                        result: work::WorkResult::Ok(vec![i as u8]),
+                        gas_used: 500,
+                        imports_count: 0,
+                        extrinsics_count: 0,
+                        extrinsics_size: 0,
+                        exports_count: 0,
+                    })
+                    .collect();
+                check_roundtrip(&work::WorkReport {
+                    package_spec: work::AvailabilitySpec {
+                        package_hash: Hash(pkg_hash),
+                        bundle_length: bundle_len,
+                        erasure_root: Hash(erasure_root),
+                        exports_root: Hash(exports_root),
+                        exports_count,
+                        erasure_shards: 0,
+                    },
+                    context: work::RefinementContext {
+                        anchor: Hash::ZERO,
+                        state_root: Hash::ZERO,
+                        beefy_root: Hash::ZERO,
+                        lookup_anchor: Hash::ZERO,
+                        lookup_anchor_timeslot: 0,
+                        prerequisites: vec![],
+                    },
+                    core_index,
+                    authorizer_hash: Hash(auth_hash),
+                    auth_gas_used: auth_gas,
+                    auth_output: vec![0xFF; auth_out_len],
+                    segment_root_lookup: std::collections::BTreeMap::new(),
+                    results,
+                });
+            }
+
+            #[test]
+            fn work_package_roundtrip(
+                auth_host in any::<u32>(),
+                auth_hash in proptest::array::uniform32(0u8..),
+                anchor in proptest::array::uniform32(0u8..),
+                auth_len in 0usize..20,
+                config_len in 0usize..20,
+                n_items in 0usize..3,
+            ) {
+                let items: Vec<work::WorkItem> = (0..n_items)
+                    .map(|i| work::WorkItem {
+                        service_id: i as u32,
+                        code_hash: Hash([i as u8; 32]),
+                        gas_limit: 10_000,
+                        accumulate_gas_limit: 5_000,
+                        exports_count: 0,
+                        payload: vec![i as u8; 10],
+                        imports: vec![],
+                        extrinsics: vec![],
+                    })
+                    .collect();
+                check_roundtrip(&work::WorkPackage {
+                    auth_code_host: auth_host,
+                    auth_code_hash: Hash(auth_hash),
+                    context: work::RefinementContext {
+                        anchor: Hash(anchor),
+                        state_root: Hash::ZERO,
+                        beefy_root: Hash::ZERO,
+                        lookup_anchor: Hash::ZERO,
+                        lookup_anchor_timeslot: 0,
+                        prerequisites: vec![],
+                    },
+                    authorization: vec![0xAA; auth_len],
+                    authorizer_config: vec![0xBB; config_len],
+                    items,
+                });
+            }
+
+            #[test]
+            fn guarantee_roundtrip(
+                pkg_hash in proptest::array::uniform32(0u8..),
+                core_index in 0u16..341,
+                timeslot in 0u32..100_000,
+                n_credentials in 0usize..5,
+            ) {
+                let credentials: Vec<(u16, Ed25519Signature)> = (0..n_credentials)
+                    .map(|i| (i as u16, Ed25519Signature([i as u8; 64])))
+                    .collect();
+                check_roundtrip(&header::Guarantee {
+                    report: work::WorkReport {
+                        package_spec: work::AvailabilitySpec {
+                            package_hash: Hash(pkg_hash),
+                            bundle_length: 256,
+                            erasure_root: Hash::ZERO,
+                            exports_root: Hash::ZERO,
+                            exports_count: 0,
+                            erasure_shards: 0,
+                        },
+                        context: work::RefinementContext {
+                            anchor: Hash::ZERO,
+                            state_root: Hash::ZERO,
+                            beefy_root: Hash::ZERO,
+                            lookup_anchor: Hash::ZERO,
+                            lookup_anchor_timeslot: 0,
+                            prerequisites: vec![],
+                        },
+                        core_index,
+                        authorizer_hash: Hash::ZERO,
+                        auth_gas_used: 0,
+                        auth_output: vec![],
+                        segment_root_lookup: std::collections::BTreeMap::new(),
+                        results: vec![],
+                    },
+                    timeslot,
+                    credentials,
+                });
+            }
+
+            #[test]
+            fn block_roundtrip(
+                parent in proptest::array::uniform32(0u8..),
+                timeslot in 1u32..100_000,
+                author_index in 0u16..1023,
+                n_preimages in 0usize..3,
+            ) {
+                let preimages: Vec<(ServiceId, Vec<u8>)> = (0..n_preimages)
+                    .map(|i| (i as u32, vec![i as u8; 10]))
+                    .collect();
+                check_roundtrip(&header::Block {
+                    header: header::Header {
+                        data: header::UnsignedHeader {
+                            parent_hash: Hash(parent),
+                            state_root: Hash::ZERO,
+                            extrinsic_hash: Hash::ZERO,
+                            timeslot,
+                            epoch_marker: None,
+                            tickets_marker: None,
+                            author_index,
+                            vrf_signature: BandersnatchSignature([0u8; 96]),
+                            offenders_marker: vec![],
+                        },
+                        seal: BandersnatchSignature([0u8; 96]),
+                    },
+                    extrinsic: header::Extrinsic {
+                        tickets: vec![],
+                        preimages,
+                        guarantees: vec![],
+                        assurances: vec![],
+                        disputes: header::DisputesExtrinsic::default(),
+                    },
+                });
+            }
         }
     }
 
