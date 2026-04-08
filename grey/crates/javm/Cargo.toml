@@ -16,3 +16,6 @@ memoffset = { version = "0.9", optional = true }
 scale = { workspace = true, default-features = false }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
