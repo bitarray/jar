@@ -464,4 +464,95 @@ mod tests {
             }
         }
     }
+
+    #[cfg(test)]
+    mod signing_context_tests {
+        use super::signing_contexts::*;
+
+        #[test]
+        fn test_build_judgment_message_valid() {
+            let hash = [0xAA; 32];
+            let msg = build_judgment_message(true, &hash);
+            assert!(msg.starts_with(b"jam_valid"));
+            assert_eq!(&msg[VALID.len()..], &hash);
+            assert_eq!(msg.len(), VALID.len() + 32);
+        }
+
+        #[test]
+        fn test_build_judgment_message_invalid() {
+            let hash = [0xBB; 32];
+            let msg = build_judgment_message(false, &hash);
+            assert!(msg.starts_with(b"jam_invalid"));
+            assert_eq!(&msg[INVALID.len()..], &hash);
+            assert_eq!(msg.len(), INVALID.len() + 32);
+        }
+
+        #[test]
+        fn test_build_guarantee_message() {
+            let hash = [0xCC; 32];
+            let msg = build_guarantee_message(&hash);
+            assert!(msg.starts_with(b"jam_guarantee"));
+            assert_eq!(&msg[GUARANTEE.len()..], &hash);
+            assert_eq!(msg.len(), GUARANTEE.len() + 32);
+        }
+
+        #[test]
+        fn test_signing_context_strings() {
+            assert_eq!(AVAILABLE, b"jam_available");
+            assert_eq!(BEEFY, b"jam_beefy");
+            assert_eq!(ENTROPY, b"jam_entropy");
+            assert_eq!(FALLBACK_SEAL, b"jam_fallback_seal");
+            assert_eq!(GUARANTEE, b"jam_guarantee");
+            assert_eq!(TICKET_SEAL, b"jam_ticket_seal");
+            assert_eq!(PREVOTE, b"jam_prevote");
+            assert_eq!(PRECOMMIT, b"jam_precommit");
+        }
+    }
+
+    #[cfg(test)]
+    mod hex_tests {
+        use super::*;
+
+        #[test]
+        fn test_decode_hex_with_prefix() {
+            let result = decode_hex("0xdeadbeef").unwrap();
+            assert_eq!(result, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        }
+
+        #[test]
+        fn test_decode_hex_without_prefix() {
+            let result = decode_hex("cafebabe").unwrap();
+            assert_eq!(result, vec![0xCA, 0xFE, 0xBA, 0xBE]);
+        }
+
+        #[test]
+        fn test_decode_hex_empty() {
+            assert_eq!(decode_hex("").unwrap(), vec![]);
+            assert_eq!(decode_hex("0x").unwrap(), vec![]);
+        }
+
+        #[test]
+        fn test_decode_hex_invalid() {
+            assert!(decode_hex("0xGG").is_err());
+            assert!(decode_hex("not_hex").is_err());
+        }
+
+        #[test]
+        fn test_decode_hex_fixed_32() {
+            let hex = "0x".to_string() + &"aa".repeat(32);
+            let result: [u8; 32] = decode_hex_fixed(&hex).unwrap();
+            assert_eq!(result, [0xAA; 32]);
+        }
+
+        #[test]
+        fn test_decode_hex_fixed_wrong_length() {
+            let err = decode_hex_fixed::<32>("0xaabb").unwrap_err();
+            assert!(err.contains("expected 32 bytes"));
+        }
+
+        #[test]
+        fn test_decode_hex_fixed_invalid_hex() {
+            assert!(decode_hex_fixed::<4>("0xZZZZ").is_err());
+        }
+    }
 }
