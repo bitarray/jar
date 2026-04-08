@@ -1023,4 +1023,119 @@ mod tests {
         let code = [42];
         assert_eq!(parse_signed_imm(&code, 0, 0), 0);
     }
+
+    mod proptests {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Generate random PVM-like bytecode: instruction starts at every 3rd byte
+        /// (simulating load_imm + ALU patterns).
+        fn random_pvm_program() -> impl Strategy<Value = (Vec<u8>, Vec<u8>)> {
+            // Generate 3-30 instructions, each 1-6 bytes
+            proptest::collection::vec(
+                (
+                    0u8..=255u8,                                // opcode
+                    proptest::collection::vec(0u8..=255, 0..5), // operand bytes
+                ),
+                3..30,
+            )
+            .prop_map(|instrs| {
+                let mut code = Vec::new();
+                let mut bitmask = Vec::new();
+                for (opcode, operands) in &instrs {
+                    code.push(*opcode);
+                    bitmask.push(1u8);
+                    for &b in operands {
+                        code.push(b);
+                        bitmask.push(0u8);
+                    }
+                }
+                (code, bitmask)
+            })
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+
+            /// Peephole ALU fusion is idempotent: applying twice produces the same
+            /// code as applying once.
+            #[test]
+            fn alu_fusion_idempotent((code, bitmask) in random_pvm_program()) {
+                let mut c1 = code.clone();
+                let mut b1 = bitmask.clone();
+                peephole_fuse_load_imm_alu(&mut c1, &mut b1, &[]);
+
+                let mut c2 = c1.clone();
+                let mut b2 = b1.clone();
+                peephole_fuse_load_imm_alu(&mut c2, &mut b2, &[]);
+
+                prop_assert_eq!(&c1, &c2, "code should not change on second pass");
+                prop_assert_eq!(&b1, &b2, "bitmask should not change on second pass");
+            }
+
+            /// Peephole memory fusion is idempotent.
+            #[test]
+            fn memory_fusion_idempotent((code, bitmask) in random_pvm_program()) {
+                let mut c1 = code.clone();
+                let mut b1 = bitmask.clone();
+                peephole_fuse_load_imm_memory(&mut c1, &mut b1, &[]);
+
+                let mut c2 = c1.clone();
+                let mut b2 = b1.clone();
+                peephole_fuse_load_imm_memory(&mut c2, &mut b2, &[]);
+
+                prop_assert_eq!(&c1, &c2);
+                prop_assert_eq!(&b1, &b2);
+            }
+
+            /// Dead load_imm elimination is idempotent.
+            #[test]
+            fn dead_load_imm_idempotent((code, bitmask) in random_pvm_program()) {
+                let mut c1 = code.clone();
+                let mut b1 = bitmask.clone();
+                peephole_eliminate_dead_load_imm(&mut c1, &mut b1, &[]);
+
+                let mut c2 = c1.clone();
+                let mut b2 = b1.clone();
+                peephole_eliminate_dead_load_imm(&mut c2, &mut b2, &[]);
+
+                prop_assert_eq!(&c1, &c2);
+                prop_assert_eq!(&b1, &b2);
+            }
+
+            /// Full peephole pipeline is idempotent.
+            #[test]
+            fn full_pipeline_idempotent((code, bitmask) in random_pvm_program()) {
+                let apply = |c: &mut Vec<u8>, b: &mut Vec<u8>| {
+                    peephole_fuse_load_imm_alu(c, b, &[]);
+                    peephole_fuse_load_imm_memory(c, b, &[]);
+                    peephole_eliminate_dead_load_imm(c, b, &[]);
+                };
+
+                let mut c1 = code.clone();
+                let mut b1 = bitmask.clone();
+                apply(&mut c1, &mut b1);
+
+                let mut c2 = c1.clone();
+                let mut b2 = b1.clone();
+                apply(&mut c2, &mut b2);
+
+                prop_assert_eq!(&c1, &c2, "full pipeline should be idempotent");
+                prop_assert_eq!(&b1, &b2);
+            }
+
+            /// Peephole passes never increase code/bitmask length.
+            #[test]
+            fn passes_never_grow((code, bitmask) in random_pvm_program()) {
+                let orig_len = code.len();
+                let mut c = code;
+                let mut b = bitmask;
+                peephole_fuse_load_imm_alu(&mut c, &mut b, &[]);
+                peephole_fuse_load_imm_memory(&mut c, &mut b, &[]);
+                peephole_eliminate_dead_load_imm(&mut c, &mut b, &[]);
+                prop_assert_eq!(c.len(), orig_len, "code length should not change");
+                prop_assert_eq!(b.len(), orig_len, "bitmask length should not change");
+            }
+        }
+    }
 }

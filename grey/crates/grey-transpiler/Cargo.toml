@@ -11,3 +11,6 @@ scale = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-test = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
