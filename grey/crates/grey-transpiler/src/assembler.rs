@@ -738,6 +738,128 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_trap_encoding() {
+        let mut asm = Assembler::new();
+        asm.trap();
+        assert_eq!(asm.code, vec![0]); // opcode 0
+        assert_eq!(asm.bitmask, vec![1]); // instruction start
+    }
+
+    #[test]
+    fn test_fallthrough_encoding() {
+        let mut asm = Assembler::new();
+        asm.fallthrough();
+        assert_eq!(asm.code, vec![1]);
+        assert_eq!(asm.bitmask, vec![1]);
+    }
+
+    #[test]
+    fn test_ecalli_encoding() {
+        let mut asm = Assembler::new();
+        asm.ecalli(0xFF);
+        assert_eq!(asm.code[0], 10); // opcode
+        // immediate = 0xFF as LE u32
+        assert_eq!(asm.code[1], 0xFF);
+        assert_eq!(asm.code.len(), 5); // 1 opcode + 4 imm
+        assert_eq!(asm.bitmask[0], 1);
+        assert!(asm.bitmask[1..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_load_imm_64_encoding() {
+        let mut asm = Assembler::new();
+        asm.load_imm_64(Reg::A0, 0x0102030405060708);
+        assert_eq!(asm.code[0], 20); // opcode
+        assert_eq!(asm.code[1], Reg::A0 as u8); // register
+        // 8 bytes LE immediate
+        assert_eq!(asm.code[2], 0x08);
+        assert_eq!(asm.code[3], 0x07);
+        assert_eq!(asm.code[9], 0x01);
+        assert_eq!(asm.code.len(), 10);
+    }
+
+    #[test]
+    fn test_jump_encoding() {
+        let mut asm = Assembler::new();
+        asm.jump(42);
+        assert_eq!(asm.code[0], 40); // opcode
+        assert_eq!(asm.code[1], 42); // target LE
+        assert_eq!(asm.code.len(), 5);
+    }
+
+    #[test]
+    fn test_load_imm_encoding() {
+        let mut asm = Assembler::new();
+        asm.load_imm(Reg::T0, -1);
+        assert_eq!(asm.code[0], 51); // opcode
+        assert_eq!(asm.code[1], Reg::T0 as u8);
+        // -1 as i32 LE = 0xFF 0xFF 0xFF 0xFF
+        assert_eq!(&asm.code[2..6], &[0xFF, 0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn test_move_reg_encoding() {
+        let mut asm = Assembler::new();
+        asm.move_reg(Reg::A0, Reg::T0);
+        assert_eq!(asm.code[0], 100); // opcode
+        // reg byte: rd=A0(7) in low nibble, ra=T0(2) in high nibble
+        assert_eq!(asm.code[1], (Reg::A0 as u8) | ((Reg::T0 as u8) << 4));
+        assert_eq!(asm.code.len(), 2);
+    }
+
+    #[test]
+    fn test_add_64_encoding() {
+        let mut asm = Assembler::new();
+        asm.add_64(Reg::A0, Reg::T0, Reg::T1);
+        assert_eq!(asm.code[0], 200); // opcode
+        // Three-reg: ra=T0(2) in low nibble, rb=T1(3) in high nibble
+        assert_eq!(asm.code[1], (Reg::T0 as u8) | ((Reg::T1 as u8) << 4));
+        assert_eq!(asm.code[2], Reg::A0 as u8); // rd
+        assert_eq!(asm.code.len(), 3);
+    }
+
+    #[test]
+    fn test_multiple_instructions_bitmask() {
+        let mut asm = Assembler::new();
+        asm.trap(); // 1 byte
+        asm.fallthrough(); // 1 byte
+        asm.load_imm(Reg::A0, 42); // 6 bytes
+        assert_eq!(asm.bitmask.len(), 8);
+        // Instruction starts at offsets 0, 1, 2
+        assert_eq!(asm.bitmask[0], 1);
+        assert_eq!(asm.bitmask[1], 1);
+        assert_eq!(asm.bitmask[2], 1);
+        // Remaining are non-starts
+        assert!(asm.bitmask[3..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_current_offset_tracks_position() {
+        let mut asm = Assembler::new();
+        assert_eq!(asm.current_offset(), 0);
+        asm.trap();
+        assert_eq!(asm.current_offset(), 1);
+        asm.load_imm_64(Reg::A0, 0);
+        assert_eq!(asm.current_offset(), 11); // 1 + 10
+    }
+
+    #[test]
+    fn test_label_records_offset() {
+        let mut asm = Assembler::new();
+        asm.trap();
+        asm.label("after_trap");
+        assert_eq!(asm.labels["after_trap"], 1);
+    }
+
+    #[test]
+    fn test_build_trivial_authorizer() {
+        let blob = build_trivial_authorizer();
+        assert!(!blob.is_empty());
+        // Should start with JAR magic
+        assert_eq!(&blob[..4], b"JAR\x02");
+    }
+
+    #[test]
     fn test_build_sample_service() {
         let blob = build_sample_service();
         assert!(!blob.is_empty());
