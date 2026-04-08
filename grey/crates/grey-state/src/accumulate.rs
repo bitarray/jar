@@ -1434,42 +1434,12 @@ fn compute_output_hash(outputs: &[(ServiceId, Hash)]) -> Hash {
     keccak_merkle_root(leaves)
 }
 
-/// GP node function N(v, H) (eq E.1) — returns raw bytes (blob or hash).
-///
-/// - |v| = 0: H_0 (32 zero bytes)
-/// - |v| = 1: v_0 (raw blob, NOT hashed)
-/// - |v| > 1: H("node" ⌢ N(left, H) ⌢ N(right, H))
-///
-/// Note: Reference implementations (Strawberry/Go) use "node" without '$' prefix.
-fn keccak_merkle_node(leaves: &[Vec<u8>]) -> Vec<u8> {
-    match leaves.len() {
-        0 => vec![0u8; 32],
-        1 => leaves[0].clone(),
-        n => {
-            let mid = n.div_ceil(2); // ceil(n/2)
-            let left = keccak_merkle_node(&leaves[..mid]);
-            let right = keccak_merkle_node(&leaves[mid..]);
-            let mut input = Vec::with_capacity(4 + left.len() + right.len());
-            input.extend_from_slice(b"node");
-            input.extend_from_slice(&left);
-            input.extend_from_slice(&right);
-            grey_crypto::keccak_256(&input).0.to_vec()
-        }
-    }
-}
-
 /// Well-balanced Keccak-256 Merkle tree M_B(v, H_K) (eq E.1).
 ///
-/// - |v| = 1: H_K(v_0) (hash the single item)
-/// - otherwise: N(v, H_K)
+/// Delegates to `grey_merkle::balanced_merkle_root` with keccak_256 as hash function.
 fn keccak_merkle_root(leaves: Vec<Vec<u8>>) -> Hash {
-    if leaves.len() == 1 {
-        return grey_crypto::keccak_256(&leaves[0]);
-    }
-    let result = keccak_merkle_node(&leaves);
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(&result);
-    Hash(hash)
+    let refs: Vec<&[u8]> = leaves.iter().map(|v| v.as_slice()).collect();
+    grey_merkle::balanced_merkle_root(&refs, grey_crypto::keccak_256)
 }
 
 // ---------------------------------------------------------------------------
@@ -1950,33 +1920,33 @@ mod tests {
         assert_eq!(u32::from_le_bytes(result[8..12].try_into().unwrap()), 3);
     }
 
-    // --- keccak_merkle_node ---
+    // --- keccak_merkle_root ---
 
     #[test]
-    fn test_keccak_merkle_node_empty() {
-        let result = keccak_merkle_node(&[]);
-        assert_eq!(result, vec![0u8; 32]);
+    fn test_keccak_merkle_root_empty() {
+        let result = keccak_merkle_root(vec![]);
+        assert_eq!(result, Hash([0u8; 32]));
     }
 
     #[test]
-    fn test_keccak_merkle_node_single() {
+    fn test_keccak_merkle_root_single() {
         let leaf = vec![1, 2, 3];
-        let result = keccak_merkle_node(std::slice::from_ref(&leaf));
-        // Single leaf is returned as-is (not hashed)
-        assert_eq!(result, leaf);
+        let result = keccak_merkle_root(vec![leaf.clone()]);
+        // Single leaf: H_K(leaf)
+        assert_eq!(result, grey_crypto::keccak_256(&leaf));
     }
 
     #[test]
-    fn test_keccak_merkle_node_two_leaves() {
+    fn test_keccak_merkle_root_two_leaves() {
         let leaves = vec![vec![1, 2, 3], vec![4, 5, 6]];
-        let result = keccak_merkle_node(&leaves);
-        // Should be keccak("node" ⌢ leaf0 ⌢ leaf1)
+        let result = keccak_merkle_root(leaves);
+        // Two leaves: keccak("node" ⌢ leaf0 ⌢ leaf1)
         let mut expected_input = Vec::new();
         expected_input.extend_from_slice(b"node");
         expected_input.extend_from_slice(&[1, 2, 3]);
         expected_input.extend_from_slice(&[4, 5, 6]);
         let expected = grey_crypto::keccak_256(&expected_input);
-        assert_eq!(result, expected.0.to_vec());
+        assert_eq!(result, expected);
     }
 
     // --- compute_output_hash ---
