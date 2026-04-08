@@ -662,6 +662,198 @@ mod tests {
         assert!(!is_ticket_sealed(&SealKeySeries::Fallback(vec![])));
     }
 
+    // === Edge case tests ===
+
+    #[test]
+    fn test_fallback_empty_validators() {
+        // Fallback with empty validator set returns default keys
+        let keys = fallback_key_sequence(&Hash([1u8; 32]), &[]);
+        assert_eq!(keys.len(), EPOCH_LENGTH as usize);
+        for key in &keys {
+            assert_eq!(*key, BandersnatchPublicKey::default());
+        }
+    }
+
+    #[test]
+    fn test_fallback_single_validator() {
+        // With one validator, all slots map to that validator
+        let v = make_validator(42);
+        let keys = fallback_key_sequence(&Hash([1u8; 32]), std::slice::from_ref(&v));
+        assert_eq!(keys.len(), EPOCH_LENGTH as usize);
+        for key in &keys {
+            assert_eq!(*key, v.bandersnatch);
+        }
+    }
+
+    #[test]
+    fn test_multi_epoch_jump_uses_fallback() {
+        // Advancing by 2+ epochs always falls back (not single_epoch_advance)
+        let mut state = make_test_state();
+        state.timeslot = 599;
+        // Fill accumulator so a single-epoch advance would use tickets
+        state.safrole.ticket_accumulator = (0..EPOCH_LENGTH)
+            .map(|i| Ticket {
+                id: Hash({
+                    let mut h = [0u8; 32];
+                    h[0..4].copy_from_slice(&i.to_le_bytes());
+                    h
+                }),
+                attempt: 0,
+            })
+            .collect();
+
+        // Jump 2 epochs (slot 599 → 1200)
+        let output = apply_safrole(&state, 1200, &[0u8; 32], &[]).unwrap();
+        assert!(
+            matches!(output.safrole.seal_key_series, SealKeySeries::Fallback(_)),
+            "multi-epoch jump should use fallback even with full accumulator"
+        );
+    }
+
+    #[test]
+    fn test_filter_offenders_all_offending() {
+        // When all validators are offenders, all become null
+        let validators: Vec<ValidatorKey> = (0..3).map(make_validator).collect();
+        let mut judgments = Judgments::default();
+        for v in &validators {
+            judgments.offenders.insert(v.ed25519);
+        }
+
+        let filtered = filter_offenders(&validators, &judgments);
+        for v in &filtered {
+            assert_eq!(*v, ValidatorKey::null());
+        }
+    }
+
+    #[test]
+    fn test_filter_offenders_none_offending() {
+        let validators: Vec<ValidatorKey> = (0..3).map(make_validator).collect();
+        let judgments = Judgments::default();
+        let filtered = filter_offenders(&validators, &judgments);
+        assert_eq!(filtered, validators);
+    }
+
+    #[test]
+    fn test_duplicate_ticket_rejected() {
+        let mut state = make_test_state();
+        state.timeslot = 0;
+
+        // Add a ticket to the accumulator
+        let existing_id = grey_crypto::blake2b_256(&[1u8]);
+        state.safrole.ticket_accumulator = vec![Ticket {
+            id: existing_id,
+            attempt: 0,
+        }];
+
+        // Try to submit the same ticket
+        let proof = TicketProof {
+            attempt: 0,
+            proof: vec![1u8],
+        };
+        let result = apply_safrole(&state, 1, &[0u8; 32], &[proof]);
+        assert!(matches!(result, Err(SafroleError::DuplicateTicket)));
+    }
+
+    #[test]
+    fn test_unsorted_tickets_rejected() {
+        let mut state = make_test_state();
+        state.timeslot = 0;
+
+        // Create tickets that are NOT sorted by ID
+        let p1 = TicketProof {
+            attempt: 0,
+            proof: vec![1],
+        };
+        let p2 = TicketProof {
+            attempt: 1,
+            proof: vec![2],
+        };
+        let id1 = grey_crypto::blake2b_256(&p1.proof);
+        let id2 = grey_crypto::blake2b_256(&p2.proof);
+
+        // Submit in wrong order
+        let proofs = if id1.0 < id2.0 {
+            vec![p2, p1] // reversed
+        } else {
+            vec![p1, p2] // reversed
+        };
+
+        let result = apply_safrole(&state, 1, &[0u8; 32], &proofs);
+        assert!(matches!(result, Err(SafroleError::TicketsNotSorted)));
+    }
+
+    #[test]
+    fn test_too_many_tickets_rejected() {
+        let mut state = make_test_state();
+        state.timeslot = 0;
+
+        // Submit more than MAX_TICKETS_PER_EXTRINSIC
+        let proofs: Vec<TicketProof> = (0..MAX_TICKETS_PER_EXTRINSIC + 1)
+            .map(|i| TicketProof {
+                attempt: 0,
+                proof: vec![i as u8],
+            })
+            .collect();
+
+        let result = apply_safrole(&state, 1, &[0u8; 32], &proofs);
+        assert!(matches!(result, Err(SafroleError::TooManyTickets(_, _))));
+    }
+
+    #[test]
+    fn test_winning_tickets_marker_on_closing_boundary() {
+        let mut state = make_test_state();
+        // Slot just before TICKET_SUBMISSION_END
+        state.timeslot = TICKET_SUBMISSION_END - 1;
+
+        // Fill accumulator
+        state.safrole.ticket_accumulator = (0..EPOCH_LENGTH)
+            .map(|i| Ticket {
+                id: Hash({
+                    let mut h = [0u8; 32];
+                    h[0..4].copy_from_slice(&i.to_le_bytes());
+                    h
+                }),
+                attempt: 0,
+            })
+            .collect();
+
+        // Advance to TICKET_SUBMISSION_END (crossing the Y boundary)
+        let output = apply_safrole(&state, TICKET_SUBMISSION_END, &[0u8; 32], &[]).unwrap();
+        assert!(
+            output.winning_tickets_marker.is_some(),
+            "should emit winning tickets marker when crossing Y boundary with full accumulator"
+        );
+    }
+
+    #[test]
+    fn test_no_winning_tickets_marker_partial_accumulator() {
+        let mut state = make_test_state();
+        state.timeslot = TICKET_SUBMISSION_END - 1;
+        // Partial accumulator (not full)
+        state.safrole.ticket_accumulator = vec![Ticket {
+            id: Hash([1u8; 32]),
+            attempt: 0,
+        }];
+
+        let output = apply_safrole(&state, TICKET_SUBMISSION_END, &[0u8; 32], &[]).unwrap();
+        assert!(
+            output.winning_tickets_marker.is_none(),
+            "no winning tickets marker with partial accumulator"
+        );
+    }
+
+    #[test]
+    fn test_entropy_all_zero() {
+        // Verify entropy accumulation works with all-zero state
+        let mut state = make_test_state();
+        state.timeslot = 0;
+        state.entropy = [Hash::ZERO; 4];
+
+        let output = apply_safrole(&state, 1, &[0u8; 32], &[]).unwrap();
+        // η₀' should be H(0...0 ++ 0...0), which is non-zero
+        assert_ne!(output.entropy[0], Hash::ZERO);
+    }
+
     #[test]
     fn test_merge_tickets_keeps_lowest() {
         let existing = vec![
