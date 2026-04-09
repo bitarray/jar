@@ -85,13 +85,33 @@ In jar1, the JAVM is configured differently from the base Gray Paper PVM specifi
 
 # Memory Operations (Appendix A.4)
 
+{docstring Jar.JAVM.MemResult}
+
+{docstring Jar.JAVM.pageOf}
+
+{docstring Jar.JAVM.pageAligned}
+
+{docstring Jar.JAVM.checkReadable}
+
+{docstring Jar.JAVM.checkWritable}
+
+{docstring Jar.JAVM.readMemBytes}
+
 {docstring Jar.JAVM.readU8}
+
+{docstring Jar.JAVM.readI8}
 
 {docstring Jar.JAVM.readU16}
 
+{docstring Jar.JAVM.readI16}
+
 {docstring Jar.JAVM.readU32}
 
+{docstring Jar.JAVM.readI32}
+
 {docstring Jar.JAVM.readU64}
+
+{docstring Jar.JAVM.writeMemBytes}
 
 {docstring Jar.JAVM.writeU8}
 
