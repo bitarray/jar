@@ -90,19 +90,23 @@ fn run_authorizations_test(dir: &str, stem: &str) {
 
 const DIR: &str = "../../../spec/tests/vectors/authorizations";
 
-#[test]
-fn test_stf_authorizations_1() {
-    run_authorizations_test(DIR, "progress_authorizations-1");
-}
-
-#[test]
-fn test_stf_authorizations_2() {
-    run_authorizations_test(DIR, "progress_authorizations-2");
-}
-
-#[test]
-fn test_stf_authorizations_3() {
-    run_authorizations_test(DIR, "progress_authorizations-3");
-}
+stf_test!(
+    test_stf_authorizations_1,
+    "progress_authorizations-1",
+    DIR,
+    run_authorizations_test
+);
+stf_test!(
+    test_stf_authorizations_2,
+    "progress_authorizations-2",
+    DIR,
+    run_authorizations_test
+);
+stf_test!(
+    test_stf_authorizations_3,
+    "progress_authorizations-3",
+    DIR,
+    run_authorizations_test
+);
 
 discover_all_test!(DIR, run_authorizations_test);

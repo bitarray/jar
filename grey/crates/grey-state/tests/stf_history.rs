@@ -134,24 +134,29 @@ fn run_history_test(dir: &str, stem: &str) {
 
 const DIR: &str = "../../../spec/tests/vectors/history";
 
-#[test]
-fn test_stf_history_1() {
-    run_history_test(DIR, "progress_blocks_history-1");
-}
-
-#[test]
-fn test_stf_history_2() {
-    run_history_test(DIR, "progress_blocks_history-2");
-}
-
-#[test]
-fn test_stf_history_3() {
-    run_history_test(DIR, "progress_blocks_history-3");
-}
-
-#[test]
-fn test_stf_history_4() {
-    run_history_test(DIR, "progress_blocks_history-4");
-}
+stf_test!(
+    test_stf_history_1,
+    "progress_blocks_history-1",
+    DIR,
+    run_history_test
+);
+stf_test!(
+    test_stf_history_2,
+    "progress_blocks_history-2",
+    DIR,
+    run_history_test
+);
+stf_test!(
+    test_stf_history_3,
+    "progress_blocks_history-3",
+    DIR,
+    run_history_test
+);
+stf_test!(
+    test_stf_history_4,
+    "progress_blocks_history-4",
+    DIR,
+    run_history_test
+);
 
 discover_all_test!(DIR, run_history_test);

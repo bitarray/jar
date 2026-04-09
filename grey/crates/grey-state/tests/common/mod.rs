@@ -338,3 +338,17 @@ macro_rules! stf_test {
         }
     };
 }
+
+/// Like `stf_test!` but also applies `#[traced_test]` for tracing-test log capture.
+///
+/// Usage: `stf_test_traced!(test_name, "vector-stem", DIR, run_my_test);`
+#[macro_export]
+macro_rules! stf_test_traced {
+    ($name:ident, $stem:expr, $dir:expr, $runner:path) => {
+        #[tracing_test::traced_test]
+        #[test]
+        fn $name() {
+            $runner($dir, $stem);
+        }
+    };
+}

@@ -455,7 +455,7 @@ mod tests {
                 let offenders: Vec<Ed25519PublicKey> = (0..n_offenders)
                     .map(|i| Ed25519PublicKey([i as u8; 32]))
                     .collect();
-                check_roundtrip(&header::Header {
+                assert_codec_roundtrip(&header::Header {
                     data: header::UnsignedHeader {
                         parent_hash: Hash(parent),
                         state_root: Hash(state_root),
@@ -482,7 +482,7 @@ mod tests {
                 let validators: Vec<(BandersnatchPublicKey, Ed25519PublicKey)> = (0..n_validators)
                     .map(|i| (BandersnatchPublicKey([i as u8; 32]), Ed25519PublicKey([(i + 100) as u8; 32])))
                     .collect();
-                check_roundtrip(&header::Header {
+                assert_codec_roundtrip(&header::Header {
                     data: header::UnsignedHeader {
                         parent_hash: Hash(parent),
                         state_root: Hash::ZERO,
@@ -514,7 +514,7 @@ mod tests {
                 let prerequisites: Vec<Hash> = (0..n_prereqs)
                     .map(|i| Hash([i as u8; 32]))
                     .collect();
-                check_roundtrip(&work::RefinementContext {
+                assert_codec_roundtrip(&work::RefinementContext {
                     anchor: Hash(anchor),
                     state_root: Hash(state_root),
                     beefy_root: Hash(beefy_root),
@@ -544,7 +544,7 @@ mod tests {
                 let extrinsics: Vec<(Hash, u32)> = (0..n_extrinsics)
                     .map(|i| (Hash([i as u8; 32]), i as u32))
                     .collect();
-                check_roundtrip(&work::WorkItem {
+                assert_codec_roundtrip(&work::WorkItem {
                     service_id,
                     code_hash: Hash(code_hash),
                     gas_limit,
@@ -583,7 +583,7 @@ mod tests {
                         exports_count: 0,
                     })
                     .collect();
-                check_roundtrip(&work::WorkReport {
+                assert_codec_roundtrip(&work::WorkReport {
                     package_spec: work::AvailabilitySpec {
                         package_hash: Hash(pkg_hash),
                         bundle_length: bundle_len,
@@ -630,7 +630,7 @@ mod tests {
                         extrinsics: vec![],
                     })
                     .collect();
-                check_roundtrip(&work::WorkPackage {
+                assert_codec_roundtrip(&work::WorkPackage {
                     auth_code_host: auth_host,
                     auth_code_hash: Hash(auth_hash),
                     context: work::RefinementContext {
@@ -657,7 +657,7 @@ mod tests {
                 let credentials: Vec<(u16, Ed25519Signature)> = (0..n_credentials)
                     .map(|i| (i as u16, Ed25519Signature([i as u8; 64])))
                     .collect();
-                check_roundtrip(&header::Guarantee {
+                assert_codec_roundtrip(&header::Guarantee {
                     report: work::WorkReport {
                         package_spec: work::AvailabilitySpec {
                             package_hash: Hash(pkg_hash),
@@ -697,7 +697,7 @@ mod tests {
                 let preimages: Vec<(ServiceId, Vec<u8>)> = (0..n_preimages)
                     .map(|i| (i as u32, vec![i as u8; 10]))
                     .collect();
-                check_roundtrip(&header::Block {
+                assert_codec_roundtrip(&header::Block {
                     header: header::Header {
                         data: header::UnsignedHeader {
                             parent_hash: Hash(parent),
@@ -786,8 +786,8 @@ mod tests {
 
         #[test]
         fn test_decode_hex_empty() {
-            assert_eq!(decode_hex("").unwrap(), vec![]);
-            assert_eq!(decode_hex("0x").unwrap(), vec![]);
+            assert_eq!(decode_hex("").unwrap(), Vec::<u8>::new());
+            assert_eq!(decode_hex("0x").unwrap(), Vec::<u8>::new());
         }
 
         #[test]

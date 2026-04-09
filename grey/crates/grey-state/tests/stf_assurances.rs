@@ -117,54 +117,65 @@ fn run_assurances_test(dir: &str, stem: &str) {
 
 const DIR: &str = "../../../spec/tests/vectors/assurances";
 
-#[test]
-fn test_assurances_no_assurances() {
-    run_assurances_test(DIR, "no_assurances-1");
-}
-
-#[test]
-fn test_assurances_some() {
-    run_assurances_test(DIR, "some_assurances-1");
-}
-
-#[test]
-fn test_assurances_stale_report() {
-    run_assurances_test(DIR, "no_assurances_with_stale_report-1");
-}
-
-#[test]
-fn test_assurances_for_stale() {
-    run_assurances_test(DIR, "assurances_for_stale_report-1");
-}
-
-#[test]
-fn test_assurances_bad_signature() {
-    run_assurances_test(DIR, "assurances_with_bad_signature-1");
-}
-
-#[test]
-fn test_assurances_bad_validator_index() {
-    run_assurances_test(DIR, "assurances_with_bad_validator_index-1");
-}
-
-#[test]
-fn test_assurances_not_engaged_core() {
-    run_assurances_test(DIR, "assurance_for_not_engaged_core-1");
-}
-
-#[test]
-fn test_assurances_bad_attestation_parent() {
-    run_assurances_test(DIR, "assurance_with_bad_attestation_parent-1");
-}
-
-#[test]
-fn test_assurances_not_sorted_1() {
-    run_assurances_test(DIR, "assurers_not_sorted_or_unique-1");
-}
-
-#[test]
-fn test_assurances_not_sorted_2() {
-    run_assurances_test(DIR, "assurers_not_sorted_or_unique-2");
-}
+stf_test!(
+    test_assurances_no_assurances,
+    "no_assurances-1",
+    DIR,
+    run_assurances_test
+);
+stf_test!(
+    test_assurances_some,
+    "some_assurances-1",
+    DIR,
+    run_assurances_test
+);
+stf_test!(
+    test_assurances_stale_report,
+    "no_assurances_with_stale_report-1",
+    DIR,
+    run_assurances_test
+);
+stf_test!(
+    test_assurances_for_stale,
+    "assurances_for_stale_report-1",
+    DIR,
+    run_assurances_test
+);
+stf_test!(
+    test_assurances_bad_signature,
+    "assurances_with_bad_signature-1",
+    DIR,
+    run_assurances_test
+);
+stf_test!(
+    test_assurances_bad_validator_index,
+    "assurances_with_bad_validator_index-1",
+    DIR,
+    run_assurances_test
+);
+stf_test!(
+    test_assurances_not_engaged_core,
+    "assurance_for_not_engaged_core-1",
+    DIR,
+    run_assurances_test
+);
+stf_test!(
+    test_assurances_bad_attestation_parent,
+    "assurance_with_bad_attestation_parent-1",
+    DIR,
+    run_assurances_test
+);
+stf_test!(
+    test_assurances_not_sorted_1,
+    "assurers_not_sorted_or_unique-1",
+    DIR,
+    run_assurances_test
+);
+stf_test!(
+    test_assurances_not_sorted_2,
+    "assurers_not_sorted_or_unique-2",
+    DIR,
+    run_assurances_test
+);
 
 discover_all_test!(DIR, run_assurances_test);

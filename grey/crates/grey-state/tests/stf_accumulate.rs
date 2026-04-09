@@ -11,7 +11,6 @@ use grey_types::config::Config;
 use grey_types::{Hash, ServiceId, Timeslot};
 use javm::Gas;
 use std::collections::BTreeMap;
-use tracing_test::traced_test;
 
 fn parse_ready_record(v: &serde_json::Value) -> ReadyRecord {
     ReadyRecord {
@@ -358,184 +357,185 @@ fn run_accumulate_test(dir: &str, stem: &str) {
 
 const DIR: &str = "../../../spec/tests/vectors/accumulate";
 
-#[traced_test]
-#[test]
-fn test_no_available_reports_1() {
-    run_accumulate_test(DIR, "no_available_reports-1");
-}
-
-#[traced_test]
-#[test]
-fn test_queues_are_shifted_1() {
-    run_accumulate_test(DIR, "queues_are_shifted-1");
-}
-
-#[traced_test]
-#[test]
-fn test_queues_are_shifted_2() {
-    run_accumulate_test(DIR, "queues_are_shifted-2");
-}
-
-#[traced_test]
-#[test]
-fn test_process_one_immediate_report_1() {
-    run_accumulate_test(DIR, "process_one_immediate_report-1");
-}
-
-#[traced_test]
-#[test]
-fn test_ready_queue_editing_1() {
-    run_accumulate_test(DIR, "ready_queue_editing-1");
-}
-
-#[traced_test]
-#[test]
-fn test_ready_queue_editing_2() {
-    run_accumulate_test(DIR, "ready_queue_editing-2");
-}
-
-#[traced_test]
-#[test]
-fn test_ready_queue_editing_3() {
-    run_accumulate_test(DIR, "ready_queue_editing-3");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_and_unlock_simple_1() {
-    run_accumulate_test(DIR, "enqueue_and_unlock_simple-1");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_and_unlock_simple_2() {
-    run_accumulate_test(DIR, "enqueue_and_unlock_simple-2");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_and_unlock_chain_1() {
-    run_accumulate_test(DIR, "enqueue_and_unlock_chain-1");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_and_unlock_chain_2() {
-    run_accumulate_test(DIR, "enqueue_and_unlock_chain-2");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_and_unlock_chain_3() {
-    run_accumulate_test(DIR, "enqueue_and_unlock_chain-3");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_and_unlock_chain_4() {
-    run_accumulate_test(DIR, "enqueue_and_unlock_chain-4");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_self_referential_1() {
-    run_accumulate_test(DIR, "enqueue_self_referential-1");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_self_referential_2() {
-    run_accumulate_test(DIR, "enqueue_self_referential-2");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_self_referential_3() {
-    run_accumulate_test(DIR, "enqueue_self_referential-3");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_self_referential_4() {
-    run_accumulate_test(DIR, "enqueue_self_referential-4");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_and_unlock_with_sr_lookup_1() {
-    run_accumulate_test(DIR, "enqueue_and_unlock_with_sr_lookup-1");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_and_unlock_with_sr_lookup_2() {
-    run_accumulate_test(DIR, "enqueue_and_unlock_with_sr_lookup-2");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_and_unlock_chain_wraps_1() {
-    run_accumulate_test(DIR, "enqueue_and_unlock_chain_wraps-1");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_and_unlock_chain_wraps_2() {
-    run_accumulate_test(DIR, "enqueue_and_unlock_chain_wraps-2");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_and_unlock_chain_wraps_3() {
-    run_accumulate_test(DIR, "enqueue_and_unlock_chain_wraps-3");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_and_unlock_chain_wraps_4() {
-    run_accumulate_test(DIR, "enqueue_and_unlock_chain_wraps-4");
-}
-
-#[traced_test]
-#[test]
-fn test_enqueue_and_unlock_chain_wraps_5() {
-    run_accumulate_test(DIR, "enqueue_and_unlock_chain_wraps-5");
-}
-
-#[traced_test]
-#[test]
-fn test_accumulate_ready_queued_reports_1() {
-    run_accumulate_test(DIR, "accumulate_ready_queued_reports-1");
-}
-
-#[traced_test]
-#[test]
-fn test_same_code_different_services_1() {
-    run_accumulate_test(DIR, "same_code_different_services-1");
-}
-
-#[traced_test]
-#[test]
-fn test_work_for_ejected_service_1() {
-    run_accumulate_test(DIR, "work_for_ejected_service-1");
-}
-
-#[traced_test]
-#[test]
-fn test_work_for_ejected_service_2() {
-    run_accumulate_test(DIR, "work_for_ejected_service-2");
-}
-
-#[traced_test]
-#[test]
-fn test_work_for_ejected_service_3() {
-    run_accumulate_test(DIR, "work_for_ejected_service-3");
-}
-
-#[traced_test]
-#[test]
-fn test_transfer_for_ejected_service_1() {
-    run_accumulate_test(DIR, "transfer_for_ejected_service-1");
-}
+stf_test_traced!(
+    test_no_available_reports_1,
+    "no_available_reports-1",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_queues_are_shifted_1,
+    "queues_are_shifted-1",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_queues_are_shifted_2,
+    "queues_are_shifted-2",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_process_one_immediate_report_1,
+    "process_one_immediate_report-1",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_ready_queue_editing_1,
+    "ready_queue_editing-1",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_ready_queue_editing_2,
+    "ready_queue_editing-2",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_ready_queue_editing_3,
+    "ready_queue_editing-3",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_and_unlock_simple_1,
+    "enqueue_and_unlock_simple-1",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_and_unlock_simple_2,
+    "enqueue_and_unlock_simple-2",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_and_unlock_chain_1,
+    "enqueue_and_unlock_chain-1",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_and_unlock_chain_2,
+    "enqueue_and_unlock_chain-2",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_and_unlock_chain_3,
+    "enqueue_and_unlock_chain-3",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_and_unlock_chain_4,
+    "enqueue_and_unlock_chain-4",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_self_referential_1,
+    "enqueue_self_referential-1",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_self_referential_2,
+    "enqueue_self_referential-2",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_self_referential_3,
+    "enqueue_self_referential-3",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_self_referential_4,
+    "enqueue_self_referential-4",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_and_unlock_with_sr_lookup_1,
+    "enqueue_and_unlock_with_sr_lookup-1",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_and_unlock_with_sr_lookup_2,
+    "enqueue_and_unlock_with_sr_lookup-2",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_and_unlock_chain_wraps_1,
+    "enqueue_and_unlock_chain_wraps-1",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_and_unlock_chain_wraps_2,
+    "enqueue_and_unlock_chain_wraps-2",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_and_unlock_chain_wraps_3,
+    "enqueue_and_unlock_chain_wraps-3",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_and_unlock_chain_wraps_4,
+    "enqueue_and_unlock_chain_wraps-4",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_enqueue_and_unlock_chain_wraps_5,
+    "enqueue_and_unlock_chain_wraps-5",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_accumulate_ready_queued_reports_1,
+    "accumulate_ready_queued_reports-1",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_same_code_different_services_1,
+    "same_code_different_services-1",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_work_for_ejected_service_1,
+    "work_for_ejected_service-1",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_work_for_ejected_service_2,
+    "work_for_ejected_service-2",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_work_for_ejected_service_3,
+    "work_for_ejected_service-3",
+    DIR,
+    run_accumulate_test
+);
+stf_test_traced!(
+    test_transfer_for_ejected_service_1,
+    "transfer_for_ejected_service-1",
+    DIR,
+    run_accumulate_test
+);
 
 discover_all_test!(DIR, run_accumulate_test);

@@ -192,19 +192,23 @@ fn run_statistics_test(dir: &str, stem: &str) {
 
 const DIR: &str = "../../../spec/tests/vectors/statistics";
 
-#[test]
-fn test_stf_statistics_empty_extrinsic() {
-    run_statistics_test(DIR, "stats_with_empty_extrinsic-1");
-}
-
-#[test]
-fn test_stf_statistics_some_extrinsic() {
-    run_statistics_test(DIR, "stats_with_some_extrinsic-1");
-}
-
-#[test]
-fn test_stf_statistics_epoch_change() {
-    run_statistics_test(DIR, "stats_with_epoch_change-1");
-}
+stf_test!(
+    test_stf_statistics_empty_extrinsic,
+    "stats_with_empty_extrinsic-1",
+    DIR,
+    run_statistics_test
+);
+stf_test!(
+    test_stf_statistics_some_extrinsic,
+    "stats_with_some_extrinsic-1",
+    DIR,
+    run_statistics_test
+);
+stf_test!(
+    test_stf_statistics_epoch_change,
+    "stats_with_epoch_change-1",
+    DIR,
+    run_statistics_test
+);
 
 discover_all_test!(DIR, run_statistics_test);
