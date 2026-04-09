@@ -86,6 +86,9 @@ pub struct GrandpaState {
     /// Slots at which two different blocks were produced (same-slot equivocation).
     /// Pruned on finalization.
     pub chain_equivocations: HashSet<Timeslot>,
+    /// Work report hashes contained in each unfinalized block.
+    /// Used by is_acceptable() check 2. Pruned on finalization.
+    pub block_reports: HashMap<Hash, Vec<Hash>>,
 }
 
 impl GrandpaState {
@@ -109,6 +112,7 @@ impl GrandpaState {
             pending_future_precommits: Vec::new(),
             ancestry: HashMap::new(),
             chain_equivocations: HashSet::new(),
+            block_reports: HashMap::new(),
         }
     }
 
@@ -185,6 +189,9 @@ impl GrandpaState {
 
     /// Record a new block in the ancestry map. Detects same-slot equivocations.
     ///
+    /// `report_hashes` are the work report hashes included in this block's guarantees
+    /// (used by is_acceptable() check 2). Pass an empty vec for blocks with no guarantees.
+    ///
     /// Call this for every block (authored or imported) just before update_best_block.
     pub fn register_block(
         &mut self,
@@ -192,6 +199,7 @@ impl GrandpaState {
         parent: Hash,
         slot: Timeslot,
         ticket_sealed: bool,
+        report_hashes: Vec<Hash>,
     ) {
         // Detect same-slot equivocation: a *different* block already registered at this slot
         let equivocation = self
@@ -202,14 +210,14 @@ impl GrandpaState {
             self.chain_equivocations.insert(slot);
         }
         self.ancestry.insert(hash, (parent, slot, ticket_sealed));
+        self.block_reports.insert(hash, report_hashes);
     }
 
-    /// Check GP §19.3 acceptability conditions for a block.
+    /// Check GP §19 acceptability conditions for a block.
     ///
     /// A block is acceptable as a voting candidate if:
     /// 1. The last finalized block is an ancestor of this block.
     /// 2. All work reports in the unfinalized suffix have completed audits.
-    ///    (Stubbed — full block→reports mapping deferred to a later PR.)
     /// 3. No same-slot block equivocations appear in this block's ancestry chain.
     fn is_acceptable(&self, hash: Hash, completed_audits: &BTreeSet<Hash>) -> bool {
         let chain = self.ancestors(hash);
@@ -219,8 +227,16 @@ impl GrandpaState {
             return false;
         }
 
-        // Check 2: all work reports in unfinalized suffix are audited — stubbed
-        let _ = completed_audits;
+        // Check 2: all work reports in unfinalized suffix are audited (GP §19.2)
+        for &h in chain.iter().filter(|&&h| h != self.finalized_hash) {
+            if let Some(reports) = self.block_reports.get(&h) {
+                for report_hash in reports {
+                    if !completed_audits.contains(report_hash) {
+                        return false;
+                    }
+                }
+            }
+        }
 
         // Check 3: no same-slot equivocations anywhere in this chain
         for &h in &chain {
@@ -422,15 +438,54 @@ impl GrandpaState {
         counts
     }
 
-    /// GHOST rule: find the block with the most prevotes.
-    /// In our simplified version, we pick the block with the most votes
-    /// at the highest slot.
+    /// GHOST rule: greedy heaviest-observed subtree from `finalized_hash` per GP §19.5.
     fn prevote_ghost(&self) -> Option<(Hash, Timeslot)> {
-        Self::count_votes(&self.prevotes)
-            .into_iter()
-            .filter(|(_, (count, _))| *count >= self.threshold())
-            .max_by_key(|(_, (count, slot))| (*count, *slot))
-            .map(|(hash, (_, slot))| (hash, slot))
+        // Build parent → children map from unfinalized ancestry
+        let mut children: HashMap<Hash, Vec<Hash>> = HashMap::new();
+        for (&hash, &(parent, _, _)) in &self.ancestry {
+            children.entry(parent).or_default().push(hash);
+        }
+
+        // Count total prevotes in the subtree rooted at `hash` (direct + all descendants).
+        fn subtree_votes(
+            hash: Hash,
+            children: &HashMap<Hash, Vec<Hash>>,
+            prevotes: &BTreeMap<ValidatorIndex, Vote>,
+        ) -> usize {
+            let direct = prevotes.values().filter(|v| v.block_hash == hash).count();
+            let child_sum: usize = children
+                .get(&hash)
+                .map(|cs| {
+                    cs.iter()
+                        .map(|&c| subtree_votes(c, children, prevotes))
+                        .sum()
+                })
+                .unwrap_or(0);
+            direct + child_sum
+        }
+
+        // Greedily descend: at each step pick the child with the most subtree votes.
+        // Stop when no child has any votes.
+        let mut current = self.finalized_hash;
+        loop {
+            let best_child = children.get(&current).and_then(|cs| {
+                cs.iter()
+                    .max_by_key(|&&c| subtree_votes(c, &children, &self.prevotes))
+            });
+
+            match best_child {
+                Some(&child) if subtree_votes(child, &children, &self.prevotes) > 0 => {
+                    current = child;
+                }
+                _ => break,
+            }
+        }
+
+        if current == self.finalized_hash {
+            return None;
+        }
+        let slot = self.ancestry.get(&current)?.1;
+        Some((current, slot))
     }
 
     /// Check if precommits have reached supermajority on any block.
@@ -443,6 +498,8 @@ impl GrandpaState {
                     .retain(|_, &mut (_, slot, _)| slot > self.finalized_slot);
                 self.chain_equivocations
                     .retain(|&slot| slot > self.finalized_slot);
+                self.block_reports
+                    .retain(|h, _| self.ancestry.contains_key(h));
                 // Prune vote archives for finalized rounds to bound memory growth.
                 self.prune_archive(self.round.saturating_sub(1));
                 return Some((*hash, *slot));
@@ -719,7 +776,7 @@ mod tests {
 
         let mut grandpa = GrandpaState::new(config.validators_count);
         let block_hash = Hash([42u8; 32]);
-        grandpa.register_block(block_hash, Hash::ZERO, 5, false);
+        grandpa.register_block(block_hash, Hash::ZERO, 5, false, vec![]);
         grandpa.update_best_block(block_hash, &BTreeSet::new());
 
         // Validator 0 prevotes
@@ -761,7 +818,7 @@ mod tests {
 
         let mut grandpa = GrandpaState::new(config.validators_count);
         let block_hash = Hash([42u8; 32]);
-        grandpa.register_block(block_hash, Hash::ZERO, 5, false);
+        grandpa.register_block(block_hash, Hash::ZERO, 5, false, vec![]);
         grandpa.update_best_block(block_hash, &BTreeSet::new());
 
         // All validators prevote
@@ -902,7 +959,7 @@ mod tests {
 
         let mut grandpa = GrandpaState::new(config.validators_count);
         let block_hash = Hash([42u8; 32]);
-        grandpa.register_block(block_hash, Hash::ZERO, 5, false);
+        grandpa.register_block(block_hash, Hash::ZERO, 5, false, vec![]);
         grandpa.update_best_block(block_hash, &BTreeSet::new());
 
         // All validators prevote for slot 5
@@ -1191,7 +1248,7 @@ mod tests {
         grandpa.finalized_hash = hashes[0]; // slot 1 is finalized start
         for (i, &h) in hashes.iter().enumerate() {
             let parent = if i == 0 { Hash::ZERO } else { hashes[i - 1] };
-            grandpa.register_block(h, parent, (i + 1) as u32, false);
+            grandpa.register_block(h, parent, (i + 1) as u32, false, vec![]);
         }
         // Mark slot 3 as having a chain equivocation
         grandpa.chain_equivocations.insert(3);
@@ -1225,9 +1282,9 @@ mod tests {
         // Set finalized_hash so the walk terminates
         grandpa.finalized_hash = hash_a;
         // Register A→B→C (A is finalized, B is child of A, C is child of B)
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false);
-        grandpa.register_block(hash_b, hash_a, 2, false);
-        grandpa.register_block(hash_c, hash_b, 3, false);
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![]);
+        grandpa.register_block(hash_c, hash_b, 3, false, vec![]);
         let chain = grandpa.ancestors(hash_c);
         // Should be [C, B, A] — from tip back to finalized_hash
         assert_eq!(chain, vec![hash_c, hash_b, hash_a]);
@@ -1238,7 +1295,7 @@ mod tests {
         let mut grandpa = GrandpaState::new(6);
         let hash_a = Hash([1u8; 32]);
         let parent = Hash::ZERO; // genesis parent
-        grandpa.register_block(hash_a, parent, 3, false);
+        grandpa.register_block(hash_a, parent, 3, false, vec![]);
         assert_eq!(grandpa.ancestry.get(&hash_a), Some(&(parent, 3, false)));
         assert!(grandpa.chain_equivocations.is_empty());
     }
@@ -1250,8 +1307,8 @@ mod tests {
         let hash_b = Hash([2u8; 32]);
         let parent = Hash::ZERO;
         // Two different blocks at slot 5 → equivocation
-        grandpa.register_block(hash_a, parent, 5, false);
-        grandpa.register_block(hash_b, parent, 5, true);
+        grandpa.register_block(hash_a, parent, 5, false, vec![]);
+        grandpa.register_block(hash_b, parent, 5, true, vec![]);
         assert!(grandpa.chain_equivocations.contains(&5));
         // Both blocks are still recorded
         assert!(grandpa.ancestry.contains_key(&hash_a));
@@ -1267,20 +1324,20 @@ mod tests {
 
         // finalized_hash starts as Hash::ZERO (set by GrandpaState::new)
         // Register a chain rooted at hash_a (parent = Hash::ZERO = finalized_hash)
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false);
-        grandpa.register_block(hash_b, hash_a, 2, false);
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![]);
 
         // hash_b's chain reaches Hash::ZERO (finalized) — acceptable
         assert!(grandpa.is_acceptable(hash_b, &BTreeSet::new()));
 
         // hash_c is registered with parent hash_b but finalized_hash is still Hash::ZERO
         // hash_c → hash_b → hash_a → Hash::ZERO: still acceptable
-        grandpa.register_block(hash_c, hash_b, 3, false);
+        grandpa.register_block(hash_c, hash_b, 3, false, vec![]);
         assert!(grandpa.is_acceptable(hash_c, &BTreeSet::new()));
 
         // A block with a parent not connected to finalized_hash fails check 1
         let orphan = Hash([99u8; 32]);
-        grandpa.register_block(orphan, Hash([55u8; 32]), 10, false);
+        grandpa.register_block(orphan, Hash([55u8; 32]), 10, false, vec![]);
         assert!(!grandpa.is_acceptable(orphan, &BTreeSet::new()));
     }
 
@@ -1293,12 +1350,12 @@ mod tests {
         let hash_d = Hash([4u8; 32]);
 
         // hash_a at slot 1, hash_b and hash_c both at slot 2 (equivocation)
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false);
-        grandpa.register_block(hash_b, hash_a, 2, false);
-        grandpa.register_block(hash_c, hash_a, 2, false); // equivocation at slot 2
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![]);
+        grandpa.register_block(hash_c, hash_a, 2, false, vec![]); // equivocation at slot 2
 
         // hash_d extends hash_b — but its chain passes through slot 2 (equivocated)
-        grandpa.register_block(hash_d, hash_b, 3, false);
+        grandpa.register_block(hash_d, hash_b, 3, false, vec![]);
 
         // hash_b is directly at the equivocated slot — not acceptable
         assert!(!grandpa.is_acceptable(hash_b, &BTreeSet::new()));
@@ -1316,9 +1373,9 @@ mod tests {
         let hash_c = Hash([3u8; 32]);
 
         // hash_a: ticket_sealed=false, hash_b: true, hash_c: true
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false);
-        grandpa.register_block(hash_b, hash_a, 2, true);
-        grandpa.register_block(hash_c, hash_b, 3, true);
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
+        grandpa.register_block(hash_b, hash_a, 2, true, vec![]);
+        grandpa.register_block(hash_c, hash_b, 3, true, vec![]);
 
         // chain of hash_c = [hash_c(true), hash_b(true), hash_a(false)] → metric = 2
         assert_eq!(grandpa.chain_metric(hash_c), 2);
@@ -1335,9 +1392,9 @@ mod tests {
         let hash_b = Hash([2u8; 32]); // fork 1: no ticket-sealed
         let hash_c = Hash([3u8; 32]); // fork 2: one ticket-sealed
 
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false);
-        grandpa.register_block(hash_b, hash_a, 2, false); // metric = 0
-        grandpa.register_block(hash_c, hash_a, 2, true); // metric = 1
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![]); // metric = 0
+        grandpa.register_block(hash_c, hash_a, 2, true, vec![]); // metric = 1
 
         assert!(grandpa.chain_metric(hash_c) > grandpa.chain_metric(hash_b));
     }
@@ -1349,12 +1406,12 @@ mod tests {
         let orphan = Hash([99u8; 32]);
 
         // hash_a is properly connected to finalized (Hash::ZERO)
-        grandpa.register_block(hash_a, Hash::ZERO, 5, false);
+        grandpa.register_block(hash_a, Hash::ZERO, 5, false, vec![]);
         grandpa.update_best_block(hash_a, &BTreeSet::new());
         assert_eq!(grandpa.best_block_hash, hash_a);
 
         // orphan has no path to finalized_hash — must be rejected
-        grandpa.register_block(orphan, Hash([55u8; 32]), 10, false);
+        grandpa.register_block(orphan, Hash([55u8; 32]), 10, false, vec![]);
         grandpa.update_best_block(orphan, &BTreeSet::new());
         // best block must NOT change to orphan
         assert_eq!(
@@ -1370,9 +1427,9 @@ mod tests {
         let hash_b = Hash([2u8; 32]); // slot 2, no ticket-sealed → metric 0
         let hash_c = Hash([3u8; 32]); // slot 3, ticket-sealed    → metric 1
 
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false);
-        grandpa.register_block(hash_b, hash_a, 2, false);
-        grandpa.register_block(hash_c, hash_a, 3, true);
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![]);
+        grandpa.register_block(hash_c, hash_a, 3, true, vec![]);
 
         // Register hash_b first — it becomes best (metric 0 >= initial 0)
         grandpa.update_best_block(hash_b, &BTreeSet::new());
@@ -1384,5 +1441,126 @@ mod tests {
             grandpa.best_block_hash, hash_c,
             "higher chain metric must win"
         );
+    }
+
+    fn make_prevote(block_hash: Hash, block_slot: Timeslot, validator_index: u16) -> Vote {
+        Vote {
+            block_hash,
+            block_slot,
+            round: 1,
+            validator_index,
+            signature: grey_types::Ed25519Signature([0u8; 64]),
+        }
+    }
+
+    #[test]
+    fn test_ghost_linear_chain() {
+        let mut grandpa = GrandpaState::new(6);
+        let hash_a = Hash([1u8; 32]);
+        let hash_b = Hash([2u8; 32]);
+        let hash_c = Hash([3u8; 32]);
+
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![]);
+        grandpa.register_block(hash_c, hash_b, 3, false, vec![]);
+
+        // All 4 prevotes on hash_c (the tip)
+        for i in 0..4u16 {
+            grandpa.prevotes.insert(i, make_prevote(hash_c, 3, i));
+        }
+
+        // GHOST must walk A → B → C and return C
+        assert_eq!(grandpa.prevote_ghost(), Some((hash_c, 3)));
+    }
+
+    #[test]
+    fn test_ghost_fork_picks_heavier_subtree() {
+        let mut grandpa = GrandpaState::new(6);
+        let hash_a = Hash([1u8; 32]);
+        let hash_b = Hash([2u8; 32]); // fork 1: slot 2, will get 3 votes
+        let hash_c = Hash([3u8; 32]); // fork 2: slot 5 (higher!), will get 1 vote
+
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![]);
+        grandpa.register_block(hash_c, hash_a, 5, false, vec![]);
+
+        // 3 prevotes on hash_b (lower slot), 1 on hash_c (higher slot)
+        grandpa.prevotes.insert(0, make_prevote(hash_b, 2, 0));
+        grandpa.prevotes.insert(1, make_prevote(hash_b, 2, 1));
+        grandpa.prevotes.insert(2, make_prevote(hash_b, 2, 2));
+        grandpa.prevotes.insert(3, make_prevote(hash_c, 5, 3));
+
+        // GHOST must pick hash_b (heavier subtree), not hash_c (higher slot)
+        // Old heuristic would return hash_c (higher slot wins on tie or higher count tie)
+        assert_eq!(grandpa.prevote_ghost(), Some((hash_b, 2)));
+    }
+
+    #[test]
+    fn test_ghost_no_prevotes_returns_none() {
+        let mut grandpa = GrandpaState::new(6);
+        let hash_a = Hash([1u8; 32]);
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
+
+        // No prevotes at all
+        assert_eq!(grandpa.prevote_ghost(), None);
+    }
+
+    #[test]
+    fn test_ghost_no_unfinalized_votes_returns_none() {
+        let mut grandpa = GrandpaState::new(6);
+        let hash_a = Hash([1u8; 32]);
+        let hash_b = Hash([2u8; 32]);
+
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![]);
+
+        // Finalize at hash_b slot 2 — ancestry is pruned
+        grandpa.finalized_hash = hash_b;
+        grandpa.finalized_slot = 2;
+        grandpa.ancestry.retain(|_, &mut (_, s, _)| s > 2);
+
+        // Prevote for hash_a (now pruned from ancestry, below finalized)
+        grandpa.prevotes.insert(0, make_prevote(hash_a, 1, 0));
+        grandpa.prevotes.insert(1, make_prevote(hash_a, 1, 1));
+        grandpa.prevotes.insert(2, make_prevote(hash_a, 1, 2));
+        grandpa.prevotes.insert(3, make_prevote(hash_a, 1, 3));
+
+        // No unfinalized blocks → GHOST can't move from finalized_hash → None
+        assert_eq!(grandpa.prevote_ghost(), None);
+    }
+
+    #[test]
+    fn test_ghost_subtree_beats_heuristic() {
+        // Scenario: split votes across a subtree vs. one branch
+        // V=6, threshold=4
+        // finalized=A
+        // A → B (slot 3): 2 direct prevotes
+        // A → C (slot 5): 2 direct prevotes
+        // B → D (slot 4): 2 direct prevotes
+        //
+        // Subtree votes: B-subtree = B(2) + D(2) = 4, C-subtree = C(2) = 2
+        // Old heuristic: no single block has ≥ 4 votes → returns None
+        // New GHOST: picks B (4 subtree votes > 2), then picks D → returns D
+
+        let mut grandpa = GrandpaState::new(6);
+        let hash_a = Hash([1u8; 32]);
+        let hash_b = Hash([2u8; 32]);
+        let hash_c = Hash([3u8; 32]);
+        let hash_d = Hash([4u8; 32]);
+
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
+        grandpa.register_block(hash_b, hash_a, 3, false, vec![]);
+        grandpa.register_block(hash_c, hash_a, 5, false, vec![]);
+        grandpa.register_block(hash_d, hash_b, 4, false, vec![]);
+
+        grandpa.prevotes.insert(0, make_prevote(hash_b, 3, 0));
+        grandpa.prevotes.insert(1, make_prevote(hash_b, 3, 1));
+        grandpa.prevotes.insert(2, make_prevote(hash_c, 5, 2));
+        grandpa.prevotes.insert(3, make_prevote(hash_c, 5, 3));
+        grandpa.prevotes.insert(4, make_prevote(hash_d, 4, 4));
+        grandpa.prevotes.insert(5, make_prevote(hash_d, 4, 5));
+
+        // New GHOST: B-subtree has 4 votes → descends to B → D-subtree has 2 votes → D
+        assert_eq!(grandpa.prevote_ghost(), Some((hash_d, 4)));
     }
 }

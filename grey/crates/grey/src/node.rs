@@ -773,11 +773,18 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                 });
 
                                 // Register block in ancestry map and update best block
+                                let authored_report_hashes: Vec<grey_types::Hash> = block
+                                    .extrinsic
+                                    .guarantees
+                                    .iter()
+                                    .map(|g| grey_crypto::blake2b_256(&scale::Encode::encode(&g.report)))
+                                    .collect();
                                 grandpa.register_block(
                                     header_hash,
                                     block.header.parent_hash,
                                     block.header.timeslot,
                                     ticket_sealed,
+                                    authored_report_hashes,
                                 );
                                 grandpa.update_best_block(header_hash, &audit_state.completed_audits);
 
@@ -1017,11 +1024,18 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                     );
 
                                     // Register block in ancestry map and update best block
+                                    let imported_report_hashes: Vec<grey_types::Hash> = block
+                                        .extrinsic
+                                        .guarantees
+                                        .iter()
+                                        .map(|g| grey_crypto::blake2b_256(&scale::Encode::encode(&g.report)))
+                                        .collect();
                                     grandpa.register_block(
                                         import_hash,
                                         block.header.parent_hash,
                                         block.header.timeslot,
                                         ticket_sealed,
+                                        imported_report_hashes,
                                     );
                                     grandpa.update_best_block(import_hash, &audit_state.completed_audits);
                                     if let Some(prevote_msg) = grandpa.create_prevote(
