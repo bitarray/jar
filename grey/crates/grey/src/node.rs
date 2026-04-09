@@ -766,9 +766,8 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                 // Register guarantees from this block for auditing
                                 // and mark cores as available for assurance generation
                                 for guarantee in &block.extrinsic.guarantees {
-                                    let report_hash = grey_crypto::blake2b_256(
-                                        &scale::Encode::encode(&block.header),
-                                    );
+                                    let report_hash =
+                                        grey_crypto::report_hash(&guarantee.report);
                                     let our_tranche = audit::compute_audit_tranche(
                                         &state.entropy[0],
                                         &report_hash,
@@ -999,9 +998,8 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                     // and remove matching guarantees from our pending list
                                     // (prevents zombie guarantees that block future work).
                                     for guarantee in &block.extrinsic.guarantees {
-                                        let report_hash = grey_crypto::blake2b_256(
-                                            &scale::Encode::encode(&block.header),
-                                        );
+                                        let report_hash =
+                                            grey_crypto::report_hash(&guarantee.report);
                                         let our_tranche = audit::compute_audit_tranche(
                                             &state.entropy[0],
                                             &report_hash,
