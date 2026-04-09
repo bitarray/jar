@@ -92,6 +92,20 @@ pub struct GrandpaState {
 }
 
 impl GrandpaState {
+    /// Insert a prevote into the current round's active votes and archive.
+    fn store_prevote(&mut self, vote: Vote) {
+        self.prevote_archive
+            .insert((self.round, vote.validator_index), vote.block_hash);
+        self.prevotes.insert(vote.validator_index, vote);
+    }
+
+    /// Insert a precommit into the current round's active votes and archive.
+    fn store_precommit(&mut self, vote: Vote) {
+        self.precommit_archive
+            .insert((self.round, vote.validator_index), vote.block_hash);
+        self.precommits.insert(vote.validator_index, vote);
+    }
+
     pub fn new(total_validators: u16) -> Self {
         Self {
             round: 1,
@@ -326,14 +340,13 @@ impl GrandpaState {
         );
 
         self.prevoted = true;
-        self.prevote_archive
-            .insert((self.round, validator_index), vote.block_hash);
-        self.prevotes.insert(validator_index, vote.clone());
-
-        Some(VoteMessage {
+        let msg = VoteMessage {
             vote_type: VoteType::Prevote,
-            vote,
-        })
+            vote: vote.clone(),
+        };
+        self.store_prevote(vote);
+
+        Some(msg)
     }
 
     /// Add a received prevote. Returns true if the threshold was just reached.
@@ -349,9 +362,7 @@ impl GrandpaState {
         ) {
             return false;
         }
-        self.prevote_archive
-            .insert((self.round, vote.validator_index), vote.block_hash);
-        self.prevotes.insert(vote.validator_index, vote);
+        self.store_prevote(vote);
         self.prevote_count() == self.threshold()
     }
 
@@ -385,14 +396,13 @@ impl GrandpaState {
         );
 
         self.precommitted = true;
-        self.precommit_archive
-            .insert((self.round, validator_index), vote.block_hash);
-        self.precommits.insert(validator_index, vote.clone());
-
-        Some(VoteMessage {
+        let msg = VoteMessage {
             vote_type: VoteType::Precommit,
-            vote,
-        })
+            vote: vote.clone(),
+        };
+        self.store_precommit(vote);
+
+        Some(msg)
     }
 
     /// Add a received precommit. Returns the finalized (hash, slot) if finality was just reached.
@@ -429,9 +439,7 @@ impl GrandpaState {
             return None;
         }
 
-        self.precommit_archive
-            .insert((self.round, vote.validator_index), vote.block_hash);
-        self.precommits.insert(vote.validator_index, vote);
+        self.store_precommit(vote);
         self.check_finality()
     }
 
