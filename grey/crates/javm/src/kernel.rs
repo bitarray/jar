@@ -256,6 +256,150 @@ impl InvocationKernel {
         Ok(kernel)
     }
 
+    /// Extract the current flat_mem snapshot from the kernel's DATA cap pages.
+    ///
+    /// Returns `(flat_mem, heap_base, heap_top)`. The flat_mem is a copy of all
+    /// mapped DATA cap pages assembled at their virtual addresses.
+    pub fn extract_flat_mem(&self) -> (Vec<u8>, u32, u32) {
+        let vm = &self.vm_arena.vm(self.active_vm);
+
+        // Determine memory size from mapped DATA caps.
+        let mut max_addr: usize = 0;
+        for slot in 0..=255u8 {
+            if let Some(Cap::Data(d)) = vm.cap_table.get(slot)
+                && d.has_any_mapped()
+                && let Some(base_page) = d.base_offset
+            {
+                let end =
+                    (base_page as usize + d.page_count as usize) * crate::PVM_PAGE_SIZE as usize;
+                max_addr = max_addr.max(end);
+            }
+        }
+
+        let mut flat_mem = vec![0u8; max_addr];
+
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            let wb = self.active_window_base();
+            for slot in 0..=255u8 {
+                if let Some(Cap::Data(d)) = vm.cap_table.get(slot)
+                    && d.has_any_mapped()
+                    && let Some(base_page) = d.base_offset
+                {
+                    let addr = base_page as usize * crate::PVM_PAGE_SIZE as usize;
+                    let len = d.page_count as usize * crate::PVM_PAGE_SIZE as usize;
+                    if addr + len <= flat_mem.len() {
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                wb.add(addr),
+                                flat_mem.as_mut_ptr().add(addr),
+                                len,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        {
+            for slot in 0..=255u8 {
+                if let Some(Cap::Data(d)) = vm.cap_table.get(slot)
+                    && d.has_any_mapped()
+                    && let Some(base_page) = d.base_offset
+                {
+                    let addr = base_page as usize * crate::PVM_PAGE_SIZE as usize;
+                    let len = d.page_count as usize * crate::PVM_PAGE_SIZE as usize;
+                    if addr + len <= flat_mem.len() {
+                        flat_mem[addr..addr + len].copy_from_slice(
+                            self.backing.read_page_slice(d.backing_offset, d.page_count),
+                        );
+                    }
+                }
+            }
+        }
+
+        (flat_mem, vm.heap_base(), vm.heap_top())
+    }
+
+    /// Create a warm-restart kernel: same as `new()` but overlays a saved
+    /// flat_mem snapshot onto the DATA cap pages after initialization.
+    ///
+    /// The kernel always starts at PC=0 (the guest's `_start` entry), but
+    /// the heap, statics, and actor instance survive from the previous tick
+    /// because the RW DATA pages are pre-populated.
+    pub fn new_warm(
+        blob: &[u8],
+        args: &[u8],
+        gas: u64,
+        flat_mem: &[u8],
+        heap_base: u32,
+        heap_top: u32,
+    ) -> Result<Self, KernelError> {
+        let mut kernel = Self::new(blob, args, gas)?;
+
+        // Overlay the saved flat_mem onto RW DATA cap pages.
+        let vm = &kernel.vm_arena.vm(0);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            let wb = kernel.active_window_base();
+            for slot in 0..=255u8 {
+                if let Some(Cap::Data(d)) = vm.cap_table.get(slot)
+                    && d.has_any_mapped()
+                    && d.access == Some(Access::RW)
+                    && let Some(base_page) = d.base_offset
+                {
+                    let addr = base_page as usize * crate::PVM_PAGE_SIZE as usize;
+                    let len = d.page_count as usize * crate::PVM_PAGE_SIZE as usize;
+                    if addr + len <= flat_mem.len() {
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                flat_mem.as_ptr().add(addr),
+                                wb.add(addr),
+                                len,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+        {
+            // Collect overlay info before taking &mut backing.
+            let overlays: Vec<(usize, u32, u32)> = (0..=255u8)
+                .filter_map(|slot| {
+                    let d = if let Some(Cap::Data(d)) = vm.cap_table.get(slot) {
+                        d
+                    } else {
+                        return None;
+                    };
+                    if !d.has_any_mapped() || d.access != Some(Access::RW) {
+                        return None;
+                    }
+                    let base_page = d.base_offset?;
+                    let addr = base_page as usize * crate::PVM_PAGE_SIZE as usize;
+                    let len = d.page_count as usize * crate::PVM_PAGE_SIZE as usize;
+                    if addr + len > flat_mem.len() {
+                        return None;
+                    }
+                    Some((addr, d.backing_offset, d.page_count))
+                })
+                .collect();
+            for (addr, backing_offset, page_count) in overlays {
+                let len = page_count as usize * crate::PVM_PAGE_SIZE as usize;
+                kernel
+                    .backing
+                    .write_page_slice(backing_offset, &flat_mem[addr..addr + len]);
+            }
+        }
+
+        // Set heap state on VM 0.
+        let vm = kernel.vm_arena.vm_mut(0);
+        vm.set_heap_base(heap_base);
+        vm.set_heap_top(heap_top);
+
+        Ok(kernel)
+    }
+
     /// Create a capability from a manifest entry.
     fn create_cap_from_manifest(
         &mut self,
