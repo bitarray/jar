@@ -68,202 +68,93 @@ fn run_recover_test(params: &ErasureParams, json_str: &str) {
     );
 }
 
-// === Tiny encode tests ===
+/// Generate an encode + recover test pair for a given variant and vector file.
+macro_rules! erasure_tests {
+    ($encode_name:ident, $recover_name:ident, $params:expr, $path:expr) => {
+        #[test]
+        fn $encode_name() {
+            run_encode_test(&$params, include_str!($path));
+        }
 
-#[test]
-fn test_tiny_ec_3_encode() {
-    run_encode_test(
-        &ErasureParams::TINY,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-3.gp072_tiny.json"),
-    );
+        #[test]
+        fn $recover_name() {
+            run_recover_test(&$params, include_str!($path));
+        }
+    };
 }
 
-#[test]
-fn test_tiny_ec_32_encode() {
-    run_encode_test(
-        &ErasureParams::TINY,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-32.gp072_tiny.json"),
-    );
-}
+// Tiny variant (6 shards)
+erasure_tests!(
+    test_tiny_ec_3_encode,
+    test_tiny_ec_3_recover,
+    ErasureParams::TINY,
+    "../../../../spec/tests/vectors/erasure/ec-3.gp072_tiny.json"
+);
+erasure_tests!(
+    test_tiny_ec_32_encode,
+    test_tiny_ec_32_recover,
+    ErasureParams::TINY,
+    "../../../../spec/tests/vectors/erasure/ec-32.gp072_tiny.json"
+);
+erasure_tests!(
+    test_tiny_ec_100_encode,
+    test_tiny_ec_100_recover,
+    ErasureParams::TINY,
+    "../../../../spec/tests/vectors/erasure/ec-100.gp072_tiny.json"
+);
+erasure_tests!(
+    test_tiny_ec_4096_encode,
+    test_tiny_ec_4096_recover,
+    ErasureParams::TINY,
+    "../../../../spec/tests/vectors/erasure/ec-4096.gp072_tiny.json"
+);
+erasure_tests!(
+    test_tiny_ec_4104_encode,
+    test_tiny_ec_4104_recover,
+    ErasureParams::TINY,
+    "../../../../spec/tests/vectors/erasure/ec-4104.gp072_tiny.json"
+);
+erasure_tests!(
+    test_tiny_ec_10000_encode,
+    test_tiny_ec_10000_recover,
+    ErasureParams::TINY,
+    "../../../../spec/tests/vectors/erasure/ec-10000.gp072_tiny.json"
+);
 
-#[test]
-fn test_tiny_ec_100_encode() {
-    run_encode_test(
-        &ErasureParams::TINY,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-100.gp072_tiny.json"),
-    );
-}
-
-#[test]
-fn test_tiny_ec_4096_encode() {
-    run_encode_test(
-        &ErasureParams::TINY,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-4096.gp072_tiny.json"),
-    );
-}
-
-#[test]
-fn test_tiny_ec_4104_encode() {
-    run_encode_test(
-        &ErasureParams::TINY,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-4104.gp072_tiny.json"),
-    );
-}
-
-#[test]
-fn test_tiny_ec_10000_encode() {
-    run_encode_test(
-        &ErasureParams::TINY,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-10000.gp072_tiny.json"),
-    );
-}
-
-// === Full encode tests ===
-
-#[test]
-fn test_full_ec_3_encode() {
-    run_encode_test(
-        &ErasureParams::FULL,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-3.gp072_full.json"),
-    );
-}
-
-#[test]
-fn test_full_ec_32_encode() {
-    run_encode_test(
-        &ErasureParams::FULL,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-32.gp072_full.json"),
-    );
-}
-
-#[test]
-fn test_full_ec_100_encode() {
-    run_encode_test(
-        &ErasureParams::FULL,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-100.gp072_full.json"),
-    );
-}
-
-#[test]
-fn test_full_ec_4096_encode() {
-    run_encode_test(
-        &ErasureParams::FULL,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-4096.gp072_full.json"),
-    );
-}
-
-#[test]
-fn test_full_ec_4104_encode() {
-    run_encode_test(
-        &ErasureParams::FULL,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-4104.gp072_full.json"),
-    );
-}
-
-#[test]
-fn test_full_ec_10000_encode() {
-    run_encode_test(
-        &ErasureParams::FULL,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-10000.gp072_full.json"),
-    );
-}
-
-// === Tiny recover tests ===
-
-#[test]
-fn test_tiny_ec_3_recover() {
-    run_recover_test(
-        &ErasureParams::TINY,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-3.gp072_tiny.json"),
-    );
-}
-
-#[test]
-fn test_tiny_ec_32_recover() {
-    run_recover_test(
-        &ErasureParams::TINY,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-32.gp072_tiny.json"),
-    );
-}
-
-#[test]
-fn test_tiny_ec_100_recover() {
-    run_recover_test(
-        &ErasureParams::TINY,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-100.gp072_tiny.json"),
-    );
-}
-
-#[test]
-fn test_tiny_ec_4096_recover() {
-    run_recover_test(
-        &ErasureParams::TINY,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-4096.gp072_tiny.json"),
-    );
-}
-
-#[test]
-fn test_tiny_ec_4104_recover() {
-    run_recover_test(
-        &ErasureParams::TINY,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-4104.gp072_tiny.json"),
-    );
-}
-
-#[test]
-fn test_tiny_ec_10000_recover() {
-    run_recover_test(
-        &ErasureParams::TINY,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-10000.gp072_tiny.json"),
-    );
-}
-
-// === Full recover tests ===
-
-#[test]
-fn test_full_ec_3_recover() {
-    run_recover_test(
-        &ErasureParams::FULL,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-3.gp072_full.json"),
-    );
-}
-
-#[test]
-fn test_full_ec_32_recover() {
-    run_recover_test(
-        &ErasureParams::FULL,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-32.gp072_full.json"),
-    );
-}
-
-#[test]
-fn test_full_ec_100_recover() {
-    run_recover_test(
-        &ErasureParams::FULL,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-100.gp072_full.json"),
-    );
-}
-
-#[test]
-fn test_full_ec_4096_recover() {
-    run_recover_test(
-        &ErasureParams::FULL,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-4096.gp072_full.json"),
-    );
-}
-
-#[test]
-fn test_full_ec_4104_recover() {
-    run_recover_test(
-        &ErasureParams::FULL,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-4104.gp072_full.json"),
-    );
-}
-
-#[test]
-fn test_full_ec_10000_recover() {
-    run_recover_test(
-        &ErasureParams::FULL,
-        include_str!("../../../../spec/tests/vectors/erasure/ec-10000.gp072_full.json"),
-    );
-}
+// Full variant (1023 shards)
+erasure_tests!(
+    test_full_ec_3_encode,
+    test_full_ec_3_recover,
+    ErasureParams::FULL,
+    "../../../../spec/tests/vectors/erasure/ec-3.gp072_full.json"
+);
+erasure_tests!(
+    test_full_ec_32_encode,
+    test_full_ec_32_recover,
+    ErasureParams::FULL,
+    "../../../../spec/tests/vectors/erasure/ec-32.gp072_full.json"
+);
+erasure_tests!(
+    test_full_ec_100_encode,
+    test_full_ec_100_recover,
+    ErasureParams::FULL,
+    "../../../../spec/tests/vectors/erasure/ec-100.gp072_full.json"
+);
+erasure_tests!(
+    test_full_ec_4096_encode,
+    test_full_ec_4096_recover,
+    ErasureParams::FULL,
+    "../../../../spec/tests/vectors/erasure/ec-4096.gp072_full.json"
+);
+erasure_tests!(
+    test_full_ec_4104_encode,
+    test_full_ec_4104_recover,
+    ErasureParams::FULL,
+    "../../../../spec/tests/vectors/erasure/ec-4104.gp072_full.json"
+);
+erasure_tests!(
+    test_full_ec_10000_encode,
+    test_full_ec_10000_recover,
+    ErasureParams::FULL,
+    "../../../../spec/tests/vectors/erasure/ec-10000.gp072_full.json"
+);
