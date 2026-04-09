@@ -701,8 +701,8 @@ mod tests {
 
 #[cfg(test)]
 mod proptests {
-    use super::*;
     use super::tests::{make_service, make_work_report};
+    use super::*;
     use proptest::prelude::*;
 
     proptest! {
