@@ -295,15 +295,7 @@ fn process_assurances(
     let mut available = Vec::new();
 
     let num_cores = state.pending_reports.len();
-    let mut assurance_counts = vec![0u32; num_cores];
-
-    for assurance in assurances {
-        for (core, count) in assurance_counts.iter_mut().enumerate() {
-            if assurance.has_bit(core) {
-                *count += 1;
-            }
-        }
-    }
+    let assurance_counts = crate::count_assurance_bits(assurances, num_cores);
 
     for (core, count) in assurance_counts.iter().enumerate() {
         if *count >= threshold

@@ -147,12 +147,9 @@ fn compute_core_statistics(
     }
 
     // p: popularity = count of assurance bitfield bits set per core
-    for assurance in assurances {
-        for (core, stat) in core_stats.iter_mut().enumerate() {
-            if assurance.has_bit(core) {
-                stat.popularity += 1;
-            }
-        }
+    let popularity = crate::count_assurance_bits(assurances, num_cores);
+    for (core, stat) in core_stats.iter_mut().enumerate() {
+        stat.popularity += popularity[core] as u64;
     }
 
     stats.core_stats = core_stats;

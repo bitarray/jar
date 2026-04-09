@@ -96,14 +96,7 @@ pub fn process_assurances(
     }
 
     // eq 11.16: Count assurances per core, determine available reports
-    let mut assurance_counts = vec![0u32; num_cores];
-    for a in assurances {
-        for (core, count) in assurance_counts.iter_mut().enumerate() {
-            if a.has_bit(core) {
-                *count += 1;
-            }
-        }
-    }
+    let assurance_counts = crate::count_assurance_bits(assurances, num_cores);
 
     let mut available: Vec<WorkReport> = Vec::new();
     for core in 0..num_cores.min(pending_reports.len()) {

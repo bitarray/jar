@@ -24,6 +24,25 @@ pub(crate) mod test_helpers {
     }
 }
 
+/// Count how many assurances have their bit set for each core.
+///
+/// Returns a vector of length `num_cores` where element `i` is the number of
+/// assurances that have bit `i` set in their bitfield.
+pub fn count_assurance_bits(
+    assurances: &[grey_types::header::Assurance],
+    num_cores: usize,
+) -> Vec<u32> {
+    let mut counts = vec![0u32; num_cores];
+    for a in assurances {
+        for (core, count) in counts.iter_mut().enumerate() {
+            if a.has_bit(core) {
+                *count += 1;
+            }
+        }
+    }
+    counts
+}
+
 /// Check that a slice is strictly sorted by the given key (no duplicates).
 ///
 /// Returns `true` if `key(items[i]) < key(items[i+1])` for all consecutive pairs.
