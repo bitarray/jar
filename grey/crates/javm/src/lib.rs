@@ -34,6 +34,8 @@ pub mod recompiler {
 
 pub use backend::PvmBackend;
 pub use interpreter::Interpreter;
+#[cfg(feature = "std")]
+pub use kernel::CodeCache;
 
 // --- PVM types ---
 

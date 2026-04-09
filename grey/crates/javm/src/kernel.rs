@@ -14,6 +14,45 @@ use alloc::vec::Vec;
 
 use crate::GAS_PER_PAGE;
 
+#[cfg(feature = "std")]
+use std::collections::HashMap;
+
+/// Cache for compiled CODE caps, keyed by code sub-blob content hash.
+///
+/// Avoids re-running JIT compilation when the same PVM blob is used
+/// repeatedly (e.g. child actor invocations). Callers pass `&mut CodeCache`
+/// and the cache shares compiled code via `Arc<CodeCap>`.
+#[cfg(feature = "std")]
+pub struct CodeCache {
+    entries: HashMap<u64, Arc<CodeCap>>,
+}
+
+#[cfg(feature = "std")]
+impl CodeCache {
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Simple FNV-1a hash of blob bytes (no crypto needed, just dedup).
+    fn hash_blob(blob: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &b in blob {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+}
+
+#[cfg(feature = "std")]
+impl Default for CodeCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Resolve a cap reference or return `DispatchResult::Continue` (WHAT already set).
 macro_rules! resolve {
     ($self:expr, $ref:expr) => {
@@ -116,12 +155,32 @@ impl InvocationKernel {
         Self::new_with_backend(blob, _args, gas, crate::backend::PvmBackend::Default)
     }
 
+    /// Create a new kernel, reusing cached JIT compilations when available.
+    pub fn new_cached(
+        blob: &[u8],
+        args: &[u8],
+        gas: u64,
+        cache: &mut CodeCache,
+    ) -> Result<Self, KernelError> {
+        Self::new_inner(blob, args, gas, crate::backend::PvmBackend::Default, Some(cache))
+    }
+
     /// Create a new kernel with a specific backend selection.
     pub fn new_with_backend(
         blob: &[u8],
         _args: &[u8],
         gas: u64,
         backend: crate::backend::PvmBackend,
+    ) -> Result<Self, KernelError> {
+        Self::new_inner(blob, _args, gas, backend, None)
+    }
+
+    fn new_inner(
+        blob: &[u8],
+        _args: &[u8],
+        gas: u64,
+        backend: crate::backend::PvmBackend,
+        mut code_cache: Option<&mut CodeCache>,
     ) -> Result<Self, KernelError> {
         let parsed = program::parse_blob(blob).ok_or(KernelError::InvalidBlob)?;
 
@@ -167,7 +226,7 @@ impl InvocationKernel {
         let mut data_caps_to_map: Vec<(u32, u32, u32, Access)> = Vec::new(); // (base_page, backing_offset, page_count, access)
 
         for entry in &parsed.caps {
-            let cap = kernel.create_cap_from_manifest(entry, &parsed)?;
+            let cap = kernel.create_cap_from_manifest(entry, &parsed, &mut code_cache)?;
             if let Cap::Data(ref d) = cap {
                 init_pages += d.page_count;
                 // Record DATA caps that need mapping into the CODE window
@@ -261,6 +320,7 @@ impl InvocationKernel {
         &mut self,
         entry: &CapManifestEntry,
         parsed: &ParsedBlob<'_>,
+        code_cache: &mut Option<&mut CodeCache>,
     ) -> Result<Cap, KernelError> {
         match entry.cap_type {
             CapEntryType::Code => {
@@ -269,6 +329,16 @@ impl InvocationKernel {
                 self.next_code_id += 1;
                 if self.code_caps.len() >= MAX_CODE_CAPS {
                     return Err(KernelError::TooManyCodeCaps);
+                }
+
+                // Check compile cache first.
+                let cache_key = CodeCache::hash_blob(code_data);
+                if let Some(cache) = &code_cache {
+                    if let Some(cached) = cache.entries.get(&cache_key) {
+                        let code_cap = Arc::clone(cached);
+                        self.code_caps.push(Arc::clone(&code_cap));
+                        return Ok(Cap::Code(code_cap));
+                    }
                 }
 
                 // Parse the code sub-blob (jump_table + code + bitmask)
@@ -295,6 +365,12 @@ impl InvocationKernel {
                     bitmask: code_blob.bitmask,
                 });
                 self.code_caps.push(Arc::clone(&code_cap));
+
+                // Insert into cache.
+                if let Some(cache) = &mut *code_cache {
+                    cache.entries.insert(cache_key, Arc::clone(&code_cap));
+                }
+
                 Ok(Cap::Code(code_cap))
             }
             CapEntryType::Data => {
