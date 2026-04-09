@@ -97,6 +97,22 @@ pub struct RpcState {
     pub work_packages_accumulated: std::sync::atomic::AtomicU64,
 }
 
+impl RpcState {
+    /// Record accumulation metrics from a block's guarantees.
+    pub fn record_accumulation_metrics(&self, guarantees: &[grey_types::header::Guarantee]) {
+        let wp_count = guarantees.len() as u64;
+        self.work_packages_accumulated
+            .fetch_add(wp_count, std::sync::atomic::Ordering::Relaxed);
+        let gas: u64 = guarantees
+            .iter()
+            .flat_map(|g| g.report.results.iter())
+            .map(|r| r.accumulate_gas)
+            .sum();
+        self.pvm_gas_used_total
+            .fetch_add(gas, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 #[rpc(server)]
 pub trait JamRpc {
     /// Get current node status.

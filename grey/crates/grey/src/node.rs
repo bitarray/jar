@@ -752,13 +752,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
 
                                 // Update accumulation metrics
                                 if let Some(rpc_st) = &rpc_state {
-                                    let wp_count = block.extrinsic.guarantees.len() as u64;
-                                    rpc_st.work_packages_accumulated.fetch_add(wp_count, std::sync::atomic::Ordering::Relaxed);
-                                    let gas: u64 = block.extrinsic.guarantees.iter()
-                                        .flat_map(|g| g.report.results.iter())
-                                        .map(|r| r.accumulate_gas)
-                                        .sum();
-                                    rpc_st.pvm_gas_used_total.fetch_add(gas, std::sync::atomic::Ordering::Relaxed);
+                                    rpc_st.record_accumulation_metrics(&block.extrinsic.guarantees);
                                 }
 
                                 persist_and_notify_block(
@@ -998,13 +992,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
 
                                     // Update accumulation metrics
                                     if let Some(rpc_st) = &rpc_state {
-                                        let wp_count = block.extrinsic.guarantees.len() as u64;
-                                        rpc_st.work_packages_accumulated.fetch_add(wp_count, std::sync::atomic::Ordering::Relaxed);
-                                        let gas: u64 = block.extrinsic.guarantees.iter()
-                                            .flat_map(|g| g.report.results.iter())
-                                            .map(|r| r.accumulate_gas)
-                                            .sum();
-                                        rpc_st.pvm_gas_used_total.fetch_add(gas, std::sync::atomic::Ordering::Relaxed);
+                                        rpc_st.record_accumulation_metrics(&block.extrinsic.guarantees);
                                     }
 
                                     // Mark block as seen to skip duplicates
