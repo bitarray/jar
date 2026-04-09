@@ -339,8 +339,7 @@ pub fn handle_received_guarantee(
     };
 
     // Verify report hash matches
-    let encoded = guarantee.report.encode();
-    let computed_hash = grey_crypto::blake2b_256(&encoded);
+    let computed_hash = grey_crypto::report_hash(&guarantee.report);
     if computed_hash.0 != report_hash {
         tracing::warn!(
             "Received guarantee: report hash mismatch (computed=0x{} vs claimed=0x{})",
@@ -352,9 +351,7 @@ pub fn handle_received_guarantee(
 
     // Check for duplicate
     for g in &guarantor_state.pending_guarantees {
-        let g_encoded = g.report.encode();
-        let g_hash = grey_crypto::blake2b_256(&g_encoded);
-        if g_hash == computed_hash {
+        if grey_crypto::report_hash(&g.report) == computed_hash {
             return; // Already have this guarantee
         }
     }
@@ -367,19 +364,15 @@ pub fn handle_received_guarantee(
         guarantee.report.core_index,
     );
 
+    let core_index = guarantee.report.core_index;
+
     // Store for block inclusion
     guarantor_state.pending_guarantees.push(guarantee);
 
     // Mark core as available for assurance generation
-    guarantor_state.available_cores.insert(
-        guarantor_state
-            .pending_guarantees
-            .last()
-            .unwrap()
-            .report
-            .core_index,
-        computed_hash,
-    );
+    guarantor_state
+        .available_cores
+        .insert(core_index, computed_hash);
 }
 
 /// Handle a received assurance from the network.
