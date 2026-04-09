@@ -826,6 +826,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                     block.header.timeslot,
                                     ticket_sealed,
                                     authored_report_hashes,
+                                    Some(my_secrets.ed25519.public_key()),
                                 ) {
                                     use scale::Encode;
                                     tracing::warn!(slot = evidence.slot, "equivocation detected: broadcasting evidence and countersig");
@@ -1089,12 +1090,17 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                         .iter()
                                         .map(|g| grey_crypto::report_hash(&g.report))
                                         .collect();
+                                    let import_author_key = state
+                                        .current_validators
+                                        .get(block.header.author_index as usize)
+                                        .map(|v| v.ed25519);
                                     if let Some(evidence) = grandpa.register_block(
                                         import_hash,
                                         block.header.parent_hash,
                                         block.header.timeslot,
                                         ticket_sealed,
                                         imported_report_hashes,
+                                        import_author_key,
                                     ) {
                                         use scale::Encode;
                                         tracing::warn!(slot = evidence.slot, "equivocation detected: broadcasting evidence and countersig");
