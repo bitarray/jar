@@ -85,6 +85,8 @@ pub struct RpcState {
     pub state_transitions_total: std::sync::atomic::AtomicU64,
     /// Duration of the last state transition in microseconds.
     pub state_transition_last_us: std::sync::atomic::AtomicU64,
+    /// Last block authoring duration in microseconds.
+    pub block_author_last_us: std::sync::atomic::AtomicU64,
 }
 
 #[rpc(server)]
@@ -929,6 +931,9 @@ pub async fn format_metrics(state: &RpcState) -> String {
     let stf_last_us = state
         .state_transition_last_us
         .load(std::sync::atomic::Ordering::Relaxed);
+    let block_author_us = state
+        .block_author_last_us
+        .load(std::sync::atomic::Ordering::Relaxed);
     drop(status);
 
     let stf_last_secs = stf_last_us as f64 / 1_000_000.0;
@@ -1008,6 +1013,14 @@ pub async fn format_metrics(state: &RpcState) -> String {
          # TYPE grey_state_transition_last_seconds gauge\n\
          grey_state_transition_last_seconds {stf_last_secs}\n"
     );
+
+    // Block authoring duration (only meaningful after at least one block authored)
+    let block_author_secs = block_author_us as f64 / 1_000_000.0;
+    base.push_str(&format!(
+        "# HELP grey_block_author_last_seconds Duration of last block authoring in seconds.\n\
+         # TYPE grey_block_author_last_seconds gauge\n\
+         grey_block_author_last_seconds {block_author_secs}\n"
+    ));
 
     // Append per-method request counts
     if let Ok(counts) = state.request_counts.lock()
@@ -1191,6 +1204,7 @@ pub fn create_rpc_channel(
         gossip_tickets_received: std::sync::atomic::AtomicU64::new(0),
         state_transitions_total: std::sync::atomic::AtomicU64::new(0),
         state_transition_last_us: std::sync::atomic::AtomicU64::new(0),
+        block_author_last_us: std::sync::atomic::AtomicU64::new(0),
     });
 
     (state, rx)
@@ -2181,6 +2195,30 @@ mod tests {
         assert!(
             result.is_err(),
             "getValidators with invalid set name should return error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_block_author_metric() {
+        let (_url, state, _rx, _store, _dir) = setup().await;
+
+        // Initially zero
+        let body = format_metrics(&state).await;
+        assert!(
+            body.contains("grey_block_author_last_seconds 0"),
+            "expected zero block author metric initially"
+        );
+
+        // Simulate a 1.5ms block authoring
+        state
+            .block_author_last_us
+            .store(1500, std::sync::atomic::Ordering::Relaxed);
+
+        let body = format_metrics(&state).await;
+        assert!(
+            body.contains("grey_block_author_last_seconds 0.0015"),
+            "expected 0.0015 seconds, got: {}",
+            body
         );
     }
 }

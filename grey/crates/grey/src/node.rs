@@ -696,6 +696,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                         }
 
                         // Author block with guarantees, assurances, and tickets
+                        let author_start = std::time::Instant::now();
                         let block = authoring::author_block_with_extrinsics(
                             &state,
                             protocol,
@@ -732,6 +733,14 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                 blocks_authored += 1;
                                 last_authored_slot = current_slot;
                                 seen_block_hashes.insert(header_hash);
+
+                                let author_elapsed = author_start.elapsed();
+                                if let Some(ref rpc_st) = rpc_state {
+                                    rpc_st.block_author_last_us.store(
+                                        author_elapsed.as_micros() as u64,
+                                        std::sync::atomic::Ordering::Relaxed,
+                                    );
+                                }
 
                                 persist_and_notify_block(
                                     &store, &block, &header_hash, current_slot,
