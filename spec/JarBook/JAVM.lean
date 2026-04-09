@@ -61,9 +61,9 @@ In jar1, the JAVM is configured differently from the base Gray Paper PVM specifi
 
 {docstring Jar.JAVM.Memory}
 
-{docstring Jar.JAVM.getByte}
+{docstring Jar.JAVM.Memory.getByte}
 
-{docstring Jar.JAVM.setByte}
+{docstring Jar.JAVM.Memory.setByte}
 
 {docstring Jar.JAVM.Memory.isReadable}
 
