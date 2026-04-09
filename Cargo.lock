@@ -1584,6 +1584,7 @@ dependencies = [
  "grey-crypto",
  "grey-state",
  "grey-types",
+ "proptest",
  "scale",
  "thiserror 2.0.18",
 ]
