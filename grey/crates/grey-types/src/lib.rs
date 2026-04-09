@@ -590,22 +590,14 @@ mod tests {
                         erasure_root: Hash(erasure_root),
                         exports_root: Hash(exports_root),
                         exports_count,
-                        erasure_shards: 0,
-                    },
-                    context: work::RefinementContext {
-                        anchor: Hash::ZERO,
-                        state_root: Hash::ZERO,
-                        beefy_root: Hash::ZERO,
-                        lookup_anchor: Hash::ZERO,
-                        lookup_anchor_timeslot: 0,
-                        prerequisites: vec![],
+                        ..Default::default()
                     },
                     core_index,
                     authorizer_hash: Hash(auth_hash),
                     auth_gas_used: auth_gas,
                     auth_output: vec![0xFF; auth_out_len],
-                    segment_root_lookup: std::collections::BTreeMap::new(),
                     results,
+                    ..Default::default()
                 });
             }
 
@@ -635,11 +627,7 @@ mod tests {
                     auth_code_hash: Hash(auth_hash),
                     context: work::RefinementContext {
                         anchor: Hash(anchor),
-                        state_root: Hash::ZERO,
-                        beefy_root: Hash::ZERO,
-                        lookup_anchor: Hash::ZERO,
-                        lookup_anchor_timeslot: 0,
-                        prerequisites: vec![],
+                        ..Default::default()
                     },
                     authorization: vec![0xAA; auth_len],
                     authorizer_config: vec![0xBB; config_len],
@@ -662,25 +650,10 @@ mod tests {
                         package_spec: work::AvailabilitySpec {
                             package_hash: Hash(pkg_hash),
                             bundle_length: 256,
-                            erasure_root: Hash::ZERO,
-                            exports_root: Hash::ZERO,
-                            exports_count: 0,
-                            erasure_shards: 0,
-                        },
-                        context: work::RefinementContext {
-                            anchor: Hash::ZERO,
-                            state_root: Hash::ZERO,
-                            beefy_root: Hash::ZERO,
-                            lookup_anchor: Hash::ZERO,
-                            lookup_anchor_timeslot: 0,
-                            prerequisites: vec![],
+                            ..Default::default()
                         },
                         core_index,
-                        authorizer_hash: Hash::ZERO,
-                        auth_gas_used: 0,
-                        auth_output: vec![],
-                        segment_root_lookup: std::collections::BTreeMap::new(),
-                        results: vec![],
+                        ..Default::default()
                     },
                     timeslot,
                     credentials,

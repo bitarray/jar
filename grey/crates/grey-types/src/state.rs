@@ -333,32 +333,8 @@ mod tests {
     #[test]
     fn test_pending_report_roundtrip() {
         use crate::work::*;
-        use std::collections::BTreeMap;
         let pr = PendingReport {
-            report: WorkReport {
-                package_spec: AvailabilitySpec {
-                    package_hash: Hash::ZERO,
-                    bundle_length: 0,
-                    erasure_root: Hash::ZERO,
-                    exports_root: Hash::ZERO,
-                    exports_count: 0,
-                    erasure_shards: 0,
-                },
-                context: RefinementContext {
-                    anchor: Hash::ZERO,
-                    state_root: Hash::ZERO,
-                    beefy_root: Hash::ZERO,
-                    lookup_anchor: Hash::ZERO,
-                    lookup_anchor_timeslot: 0,
-                    prerequisites: vec![],
-                },
-                core_index: 0,
-                authorizer_hash: Hash::ZERO,
-                auth_gas_used: 0,
-                auth_output: vec![],
-                segment_root_lookup: BTreeMap::new(),
-                results: vec![],
-            },
+            report: WorkReport::default(),
             timeslot: 42,
         };
         let encoded = pr.encode();

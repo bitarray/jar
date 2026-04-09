@@ -319,27 +319,11 @@ mod tests {
 
         let report = WorkReport {
             package_spec: grey_types::work::AvailabilitySpec {
-                package_hash: Hash::ZERO,
                 bundle_length: 100,
-                erasure_root: Hash::ZERO,
-                exports_root: Hash::ZERO,
-                exports_count: 0,
-                erasure_shards: 0,
+                ..Default::default()
             },
-            context: grey_types::work::RefinementContext {
-                anchor: Hash::ZERO,
-                state_root: Hash::ZERO,
-                beefy_root: Hash::ZERO,
-                lookup_anchor: Hash::ZERO,
-                lookup_anchor_timeslot: 0,
-                prerequisites: vec![],
-            },
-            core_index: 0,
-            authorizer_hash: Hash::ZERO,
             auth_gas_used: 100,
-            auth_output: vec![],
-            segment_root_lookup: BTreeMap::new(),
-            results: vec![],
+            ..Default::default()
         };
 
         state.add_pending(hash, report, 0, 10, Some(2));
@@ -351,30 +335,7 @@ mod tests {
         assert!(state.completed_audits.contains(&hash));
 
         // Re-adding completed should be a no-op
-        let report2 = WorkReport {
-            package_spec: grey_types::work::AvailabilitySpec {
-                package_hash: Hash::ZERO,
-                bundle_length: 0,
-                erasure_root: Hash::ZERO,
-                exports_root: Hash::ZERO,
-                exports_count: 0,
-                erasure_shards: 0,
-            },
-            context: grey_types::work::RefinementContext {
-                anchor: Hash::ZERO,
-                state_root: Hash::ZERO,
-                beefy_root: Hash::ZERO,
-                lookup_anchor: Hash::ZERO,
-                lookup_anchor_timeslot: 0,
-                prerequisites: vec![],
-            },
-            core_index: 0,
-            authorizer_hash: Hash::ZERO,
-            auth_gas_used: 0,
-            auth_output: vec![],
-            segment_root_lookup: BTreeMap::new(),
-            results: vec![],
-        };
+        let report2 = WorkReport::default();
         state.add_pending(hash, report2, 0, 10, Some(2));
         assert_eq!(state.pending_audits.len(), 0);
     }
@@ -481,30 +442,7 @@ mod tests {
         let old_hash = Hash([1u8; 32]);
         let new_hash = Hash([2u8; 32]);
 
-        let report = WorkReport {
-            package_spec: grey_types::work::AvailabilitySpec {
-                package_hash: Hash::ZERO,
-                bundle_length: 0,
-                erasure_root: Hash::ZERO,
-                exports_root: Hash::ZERO,
-                exports_count: 0,
-                erasure_shards: 0,
-            },
-            context: grey_types::work::RefinementContext {
-                anchor: Hash::ZERO,
-                state_root: Hash::ZERO,
-                beefy_root: Hash::ZERO,
-                lookup_anchor: Hash::ZERO,
-                lookup_anchor_timeslot: 0,
-                prerequisites: vec![],
-            },
-            core_index: 0,
-            authorizer_hash: Hash::ZERO,
-            auth_gas_used: 0,
-            auth_output: vec![],
-            segment_root_lookup: BTreeMap::new(),
-            results: vec![],
-        };
+        let report = WorkReport::default();
 
         state.add_pending(old_hash, report.clone(), 0, 5, Some(0));
         state.add_pending(new_hash, report, 0, 15, Some(1));

@@ -673,19 +673,13 @@ pub fn build_test_guarantee_with_payload(
     let report = WorkReport {
         package_spec: AvailabilitySpec {
             package_hash,
-            bundle_length: 0,
-            erasure_root: Hash::ZERO,
-            exports_root: Hash::ZERO,
-            exports_count: 0,
             erasure_shards: config.validators_count,
+            ..Default::default()
         },
         context,
         core_index: core,
-        authorizer_hash: Hash::ZERO, // matches auth_pool entry
-        auth_gas_used: 0,
-        auth_output: vec![],
-        segment_root_lookup: BTreeMap::new(),
         results: vec![work_digest],
+        ..Default::default()
     };
 
     // Sign the report with at least 2 guarantors (minimum required)

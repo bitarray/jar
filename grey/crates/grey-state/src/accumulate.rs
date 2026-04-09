@@ -1706,32 +1706,15 @@ pub fn run_accumulation(
 mod tests {
     use super::*;
     use crate::test_helpers::make_hash;
-    use grey_types::work::{AvailabilitySpec, RefinementContext, WorkReport};
+    use grey_types::work::{AvailabilitySpec, WorkReport};
 
     fn make_report(pkg_hash_byte: u8) -> WorkReport {
         WorkReport {
             package_spec: AvailabilitySpec {
                 package_hash: make_hash(pkg_hash_byte),
-                bundle_length: 0,
-                exports_root: Hash([0; 32]),
-                exports_count: 0,
-                erasure_root: Hash([0; 32]),
-                erasure_shards: 0,
+                ..Default::default()
             },
-            context: RefinementContext {
-                anchor: Hash([0; 32]),
-                state_root: Hash([0; 32]),
-                beefy_root: Hash([0; 32]),
-                lookup_anchor: Hash([0; 32]),
-                lookup_anchor_timeslot: 0,
-                prerequisites: vec![],
-            },
-            core_index: 0,
-            authorizer_hash: Hash([0; 32]),
-            auth_gas_used: 0,
-            auth_output: vec![],
-            segment_root_lookup: BTreeMap::new(),
-            results: vec![],
+            ..Default::default()
         }
     }
 

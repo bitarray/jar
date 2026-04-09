@@ -4,7 +4,7 @@ use crate::{CoreIndex, Gas, Hash, ServiceId, Timeslot};
 use std::collections::BTreeMap;
 
 /// Work report R (eq 11.2).
-#[derive(Clone, Debug, scale::Encode, scale::Decode)]
+#[derive(Clone, Debug, Default, scale::Encode, scale::Decode)]
 pub struct WorkReport {
     /// s: Availability specification (WorkPackageSpec in ASN).
     pub package_spec: AvailabilitySpec,
@@ -32,7 +32,7 @@ pub struct WorkReport {
 }
 
 /// Work-package availability specification (WorkPackageSpec in ASN, eq 11.5).
-#[derive(Clone, Debug, scale::Encode, scale::Decode)]
+#[derive(Clone, Debug, Default, scale::Encode, scale::Decode)]
 pub struct AvailabilitySpec {
     /// p: Work-package hash.
     pub package_hash: Hash,
@@ -55,7 +55,7 @@ pub struct AvailabilitySpec {
 }
 
 /// Refinement context C (eq 11.4).
-#[derive(Clone, Debug, scale::Encode, scale::Decode)]
+#[derive(Clone, Debug, Default, scale::Encode, scale::Decode)]
 pub struct RefinementContext {
     /// a: Anchor header hash.
     pub anchor: Hash,
@@ -200,7 +200,6 @@ mod tests {
     use super::*;
     use crate::Hash;
     use crate::test_helpers::assert_codec_roundtrip;
-    use std::collections::BTreeMap;
 
     fn make_work_item() -> WorkItem {
         WorkItem {
@@ -279,21 +278,11 @@ mod tests {
                 erasure_root: Hash([2u8; 32]),
                 exports_root: Hash([3u8; 32]),
                 exports_count: 1,
-                erasure_shards: 0,
+                ..Default::default()
             },
-            context: RefinementContext {
-                anchor: Hash::ZERO,
-                state_root: Hash::ZERO,
-                beefy_root: Hash::ZERO,
-                lookup_anchor: Hash::ZERO,
-                lookup_anchor_timeslot: 0,
-                prerequisites: vec![],
-            },
-            core_index: 0,
             authorizer_hash: Hash([4u8; 32]),
             auth_gas_used: 50,
             auth_output: vec![0xFF],
-            segment_root_lookup: BTreeMap::new(),
             results: vec![WorkDigest {
                 service_id: 42,
                 code_hash: Hash([5u8; 32]),
@@ -306,6 +295,7 @@ mod tests {
                 extrinsics_size: 0,
                 exports_count: 0,
             }],
+            ..Default::default()
         });
     }
 
@@ -314,14 +304,7 @@ mod tests {
         assert_codec_roundtrip(&WorkPackage {
             auth_code_host: 1,
             auth_code_hash: Hash([10u8; 32]),
-            context: RefinementContext {
-                anchor: Hash::ZERO,
-                state_root: Hash::ZERO,
-                beefy_root: Hash::ZERO,
-                lookup_anchor: Hash::ZERO,
-                lookup_anchor_timeslot: 0,
-                prerequisites: vec![],
-            },
+            context: RefinementContext::default(),
             authorization: vec![0xAA, 0xBB],
             authorizer_config: vec![],
             items: vec![make_work_item()],
