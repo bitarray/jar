@@ -147,7 +147,7 @@ pub fn process_disputes(
     // Build verdict summary: (report_hash, positive_count)
     let mut verdict_summary: Vec<(Hash, u16)> = Vec::new();
     for verdict in &disputes.verdicts {
-        let positive: u16 = verdict.judgments.iter().filter(|j| j.is_valid).count() as u16;
+        let positive: u16 = verdict.positive_count() as u16;
 
         if positive != super_majority && positive != 0 && positive != one_third {
             return Err(DisputeError::BadVoteSplit);

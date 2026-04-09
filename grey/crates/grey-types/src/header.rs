@@ -146,6 +146,13 @@ pub struct Verdict {
     pub judgments: Vec<Judgment>,
 }
 
+impl Verdict {
+    /// Count of judgments voting `is_valid == true`.
+    pub fn positive_count(&self) -> usize {
+        self.judgments.iter().filter(|j| j.is_valid).count()
+    }
+}
+
 /// A single judgment: (validator Ed25519 key, validator index, signature).
 #[derive(Clone, Debug, scale::Encode, scale::Decode)]
 pub struct Judgment {

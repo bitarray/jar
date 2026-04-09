@@ -172,7 +172,7 @@ fn apply_judgments(
 
     // Process verdicts (eq 10.12-10.19)
     for verdict in &disputes.verdicts {
-        let positive_count: usize = verdict.judgments.iter().filter(|j| j.is_valid).count();
+        let positive_count: usize = verdict.positive_count();
 
         if positive_count >= supermajority {
             state.judgments.good.insert(verdict.report_hash);
@@ -203,7 +203,7 @@ fn clear_disputed_reports(
     let supermajority = Config::super_majority_of(state.current_validators.len());
 
     for verdict in &disputes.verdicts {
-        let positive_count: usize = verdict.judgments.iter().filter(|j| j.is_valid).count();
+        let positive_count: usize = verdict.positive_count();
 
         // If not supermajority good, clear from pending
         if positive_count < supermajority {
