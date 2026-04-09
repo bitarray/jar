@@ -23,7 +23,29 @@ The block-level state transition function `Υ(σ, B) = σ'` (GP eq 4.1).
 
 {docstring Jar.validateHeader}
 
+{docstring Jar.validateHeaderNoSeal}
+
+{docstring Jar.validateAuthor}
+
+{docstring Jar.validateEpochMarkerContents}
+
 {docstring Jar.validateExtrinsic}
+
+{docstring Jar.validatePreimages}
+
+{docstring Jar.validateAssuranceOrder}
+
+{docstring Jar.validateAssuranceIndices}
+
+{docstring Jar.validateAssuranceAnchors}
+
+{docstring Jar.validateAssuranceSignatures}
+
+{docstring Jar.validateGuaranteeIndices}
+
+{docstring Jar.validateGuaranteeTimeslots}
+
+{docstring Jar.validateGuaranteeSignatures}
 
 # Recent History (§4.2)
 
@@ -58,6 +80,8 @@ in the *Work-Report Pipeline* chapter. The key functions — `updateJudgments`,
 
 # Accumulation (§12)
 
+{docstring Jar.AccumulationResult}
+
 {docstring Jar.performAccumulation}
 
 # Preimages (§12.7)
@@ -66,8 +90,16 @@ in the *Work-Report Pipeline* chapter. The key functions — `updateJudgments`,
 
 # Statistics (§13)
 
+{docstring Jar.ValidatorRecord.zero}
+
+{docstring Jar.CoreStatistics.zero}
+
 {docstring Jar.updateStatistics}
 
 # State Transition
 
 {docstring Jar.stateTransition}
+
+{docstring Jar.stateTransitionWithOpaque}
+
+{docstring Jar.stateTransitionNoSealCheck}
