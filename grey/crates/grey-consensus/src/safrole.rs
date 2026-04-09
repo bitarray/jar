@@ -867,3 +867,240 @@ mod tests {
         assert_eq!(result[2].id, Hash([3u8; 32]));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use grey_types::state::*;
+    use proptest::prelude::*;
+    use std::collections::BTreeMap;
+
+    fn make_validator(seed: u8) -> ValidatorKey {
+        ValidatorKey {
+            bandersnatch: BandersnatchPublicKey([seed; 32]),
+            ed25519: grey_types::Ed25519PublicKey([seed; 32]),
+            bls: grey_types::BlsPublicKey([seed; 144]),
+            metadata: [seed; 128],
+        }
+    }
+
+    fn make_test_state() -> State {
+        let validators: Vec<ValidatorKey> = (0..TOTAL_VALIDATORS)
+            .map(|i| make_validator(i as u8))
+            .collect();
+
+        State {
+            auth_pool: vec![vec![]; TOTAL_CORES as usize],
+            recent_blocks: RecentBlocks {
+                headers: vec![],
+                accumulation_log: vec![],
+            },
+            accumulation_outputs: vec![],
+            safrole: SafroleState {
+                pending_keys: validators.clone(),
+                ring_root: grey_types::BandersnatchRingRoot::default(),
+                seal_key_series: SealKeySeries::Fallback(vec![]),
+                ticket_accumulator: vec![],
+            },
+            services: BTreeMap::new(),
+            entropy: [Hash::ZERO; 4],
+            pending_validators: validators.clone(),
+            current_validators: validators.clone(),
+            previous_validators: validators,
+            pending_reports: vec![None; TOTAL_CORES as usize],
+            timeslot: 0,
+            auth_queue: vec![vec![]; TOTAL_CORES as usize],
+            privileged_services: PrivilegedServices::default(),
+            judgments: Judgments::default(),
+            statistics: ValidatorStatistics::default(),
+            accumulation_queue: vec![],
+            accumulation_history: vec![],
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// Fallback key sequence always produces exactly EPOCH_LENGTH keys.
+        #[test]
+        fn fallback_length_is_epoch(
+            entropy_seed in any::<[u8; 32]>(),
+            n_validators in 1usize..20,
+        ) {
+            let entropy = Hash(entropy_seed);
+            let validators: Vec<ValidatorKey> =
+                (0..n_validators).map(|i| make_validator(i as u8)).collect();
+            let keys = fallback_key_sequence(&entropy, &validators);
+            prop_assert_eq!(keys.len(), EPOCH_LENGTH as usize);
+        }
+
+        /// Fallback key sequence is deterministic: same inputs produce same output.
+        #[test]
+        fn fallback_deterministic(
+            entropy_seed in any::<[u8; 32]>(),
+            n_validators in 1usize..10,
+        ) {
+            let entropy = Hash(entropy_seed);
+            let validators: Vec<ValidatorKey> =
+                (0..n_validators).map(|i| make_validator(i as u8)).collect();
+            let keys1 = fallback_key_sequence(&entropy, &validators);
+            let keys2 = fallback_key_sequence(&entropy, &validators);
+            prop_assert_eq!(keys1, keys2);
+        }
+
+        /// Fallback keys are always drawn from the validator set.
+        #[test]
+        fn fallback_keys_from_validator_set(
+            entropy_seed in any::<[u8; 32]>(),
+            n_validators in 1usize..20,
+        ) {
+            let entropy = Hash(entropy_seed);
+            let validators: Vec<ValidatorKey> =
+                (0..n_validators).map(|i| make_validator(i as u8)).collect();
+            let keys = fallback_key_sequence(&entropy, &validators);
+            let valid_keys: std::collections::HashSet<_> =
+                validators.iter().map(|v| v.bandersnatch).collect();
+            for key in &keys {
+                prop_assert!(valid_keys.contains(key));
+            }
+        }
+
+        /// Different entropy values produce different fallback sequences (with high probability).
+        #[test]
+        fn fallback_different_entropy_different_keys(
+            seed_a in any::<[u8; 32]>(),
+            seed_b in any::<[u8; 32]>(),
+        ) {
+            prop_assume!(seed_a != seed_b);
+            let validators: Vec<ValidatorKey> =
+                (0..10).map(|i| make_validator(i as u8)).collect();
+            let keys_a = fallback_key_sequence(&Hash(seed_a), &validators);
+            let keys_b = fallback_key_sequence(&Hash(seed_b), &validators);
+            prop_assert_ne!(keys_a, keys_b);
+        }
+
+        /// Entropy accumulation is deterministic.
+        #[test]
+        fn entropy_accumulation_deterministic(
+            eta in any::<[u8; 32]>(),
+            vrf in any::<[u8; 32]>(),
+        ) {
+            let r1 = accumulate_entropy(&Hash(eta), &vrf);
+            let r2 = accumulate_entropy(&Hash(eta), &vrf);
+            prop_assert_eq!(r1, r2);
+        }
+
+        /// Entropy accumulation always changes the hash (different from input).
+        #[test]
+        fn entropy_accumulation_changes_value(
+            eta in any::<[u8; 32]>(),
+            vrf in any::<[u8; 32]>(),
+        ) {
+            let result = accumulate_entropy(&Hash(eta), &vrf);
+            // With overwhelming probability, H(eta || vrf) != eta
+            // Only fails if blake2b(eta || vrf) == eta which is negligible
+            prop_assert_ne!(result, Hash(eta));
+        }
+
+        /// filter_offenders preserves length and replaces only offending validators.
+        #[test]
+        fn filter_offenders_preserves_length(
+            n_validators in 1usize..20,
+            n_offenders in 0usize..5,
+        ) {
+            let validators: Vec<ValidatorKey> =
+                (0..n_validators).map(|i| make_validator(i as u8)).collect();
+            let mut judgments = Judgments::default();
+            for v in validators.iter().take(n_offenders.min(n_validators)) {
+                judgments.offenders.insert(v.ed25519);
+            }
+            let filtered = filter_offenders(&validators, &judgments);
+            prop_assert_eq!(filtered.len(), validators.len());
+            // Offending validators become null
+            for item in filtered.iter().take(n_offenders.min(n_validators)) {
+                prop_assert_eq!(item, &ValidatorKey::null());
+            }
+            // Non-offending validators are preserved
+            for (f, v) in filtered.iter().skip(n_offenders.min(n_validators)).zip(
+                validators.iter().skip(n_offenders.min(n_validators)),
+            ) {
+                prop_assert_eq!(f, v);
+            }
+        }
+
+        /// merge_tickets output is always sorted and bounded by capacity.
+        #[test]
+        fn merge_tickets_sorted_and_bounded(
+            n_existing in 0usize..10,
+            n_new in 0usize..10,
+            capacity in 1usize..20,
+        ) {
+            let existing: Vec<Ticket> = (0..n_existing)
+                .map(|i| Ticket {
+                    id: Hash({ let mut h = [0u8; 32]; h[0] = (2 * i) as u8; h }),
+                    attempt: 0,
+                })
+                .collect();
+            let new: Vec<Ticket> = (0..n_new)
+                .map(|i| Ticket {
+                    id: Hash({ let mut h = [0u8; 32]; h[0] = (2 * i + 1) as u8; h }),
+                    attempt: 0,
+                })
+                .collect();
+            let result = merge_tickets(&existing, &new, capacity);
+            prop_assert!(result.len() <= capacity);
+            // Verify sorted
+            for window in result.windows(2) {
+                prop_assert!(window[0].id.0 < window[1].id.0);
+            }
+        }
+
+    }
+
+    // Separate block with fewer cases for tests that construct full state (1023 validators).
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(8))]
+
+        /// apply_safrole within the same epoch preserves validators and seal-key series.
+        #[test]
+        fn same_epoch_preserves_validators(
+            slot_offset in 1u32..100,
+            vrf in any::<[u8; 32]>(),
+        ) {
+            let mut state = make_test_state();
+            state.timeslot = 100;
+            let new_slot = state.timeslot + slot_offset;
+            // Stay within same epoch
+            prop_assume!(new_slot / EPOCH_LENGTH == state.timeslot / EPOCH_LENGTH);
+
+            let output = apply_safrole(&state, new_slot, &vrf, &[]).unwrap();
+            prop_assert_eq!(output.current_validators, state.current_validators);
+            prop_assert_eq!(output.previous_validators, state.previous_validators);
+            prop_assert!(output.epoch_marker.is_none());
+        }
+
+        /// Epoch boundary always produces an epoch marker and rotates entropy.
+        #[test]
+        fn epoch_boundary_produces_marker(
+            epoch in 0u32..5,
+            vrf in any::<[u8; 32]>(),
+        ) {
+            let mut state = make_test_state();
+            state.timeslot = epoch * EPOCH_LENGTH + EPOCH_LENGTH - 1;
+            state.entropy = [
+                Hash([1u8; 32]),
+                Hash([2u8; 32]),
+                Hash([3u8; 32]),
+                Hash([4u8; 32]),
+            ];
+
+            let new_slot = (epoch + 1) * EPOCH_LENGTH;
+            let output = apply_safrole(&state, new_slot, &vrf, &[]).unwrap();
+            prop_assert!(output.epoch_marker.is_some());
+            // Entropy rotation: η₁' = η₀ (pre-update)
+            prop_assert_eq!(output.entropy[1], state.entropy[0]);
+            prop_assert_eq!(output.entropy[2], state.entropy[1]);
+            prop_assert_eq!(output.entropy[3], state.entropy[2]);
+        }
+    }
+}
