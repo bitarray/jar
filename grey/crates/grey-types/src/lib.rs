@@ -97,6 +97,12 @@ pub fn decode_hex_fixed<const N: usize>(s: &str) -> Result<[u8; N], String> {
 macro_rules! impl_crypto_type {
     // Fixed-size array with Copy — full hex in Debug
     ($name:ident, $size:expr, copy, $debug_name:expr) => {
+        impl $name {
+            /// Parse from a hex string (with optional 0x prefix). Panics on invalid input.
+            pub fn from_hex(s: &str) -> Self {
+                Self(decode_hex_fixed(s).expect(concat!("invalid hex for ", $debug_name)))
+            }
+        }
         impl fmt::Debug for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(f, "{}({})", $debug_name, hex::encode(self.0))
@@ -113,6 +119,12 @@ macro_rules! impl_crypto_type {
     };
     // Large array — truncated Debug, manual Default
     ($name:ident, $size:expr, large, $debug_name:expr) => {
+        impl $name {
+            /// Parse from a hex string (with optional 0x prefix). Panics on invalid input.
+            pub fn from_hex(s: &str) -> Self {
+                Self(decode_hex_fixed(s).expect(concat!("invalid hex for ", $debug_name)))
+            }
+        }
         impl Default for $name {
             fn default() -> Self {
                 Self([0u8; $size])
@@ -201,24 +213,10 @@ impl serde::Serialize for Hash {
 pub struct Ed25519PublicKey(pub [u8; 32]);
 impl_crypto_type!(Ed25519PublicKey, 32, copy, "Ed25519");
 
-impl Ed25519PublicKey {
-    /// Parse from a hex string (with optional 0x prefix). Panics on invalid input.
-    pub fn from_hex(s: &str) -> Self {
-        Self(decode_hex_fixed(s).expect("invalid hex for Ed25519PublicKey"))
-    }
-}
-
 /// A Bandersnatch public key (H̃ in the spec). Subset of B32.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, scale::Encode, scale::Decode)]
 pub struct BandersnatchPublicKey(pub [u8; 32]);
 impl_crypto_type!(BandersnatchPublicKey, 32, copy, "Bandersnatch");
-
-impl BandersnatchPublicKey {
-    /// Parse from a hex string (with optional 0x prefix). Panics on invalid input.
-    pub fn from_hex(s: &str) -> Self {
-        Self(decode_hex_fixed(s).expect("invalid hex for BandersnatchPublicKey"))
-    }
-}
 
 /// A BLS12-381 public key (B^BLS in the spec). Subset of B144.
 #[derive(Clone, PartialEq, Eq, Hash, scale::Encode, scale::Decode)]
@@ -230,24 +228,10 @@ impl_crypto_type!(BlsPublicKey, 144, large, "BLS");
 pub struct BandersnatchRingRoot(pub [u8; 144]);
 impl_crypto_type!(BandersnatchRingRoot, 144, large, "RingRoot");
 
-impl BandersnatchRingRoot {
-    /// Parse from a hex string (with optional 0x prefix). Panics on invalid input.
-    pub fn from_hex(s: &str) -> Self {
-        Self(decode_hex_fixed(s).expect("invalid hex for BandersnatchRingRoot"))
-    }
-}
-
 /// An Ed25519 signature. B64.
 #[derive(Clone, Copy, PartialEq, Eq, scale::Encode, scale::Decode)]
 pub struct Ed25519Signature(pub [u8; 64]);
 impl_crypto_type!(Ed25519Signature, 64, large, "Ed25519Sig");
-
-impl Ed25519Signature {
-    /// Parse from a hex string (with optional 0x prefix). Panics on invalid input.
-    pub fn from_hex(s: &str) -> Self {
-        Self(decode_hex_fixed(s).expect("invalid hex for Ed25519Signature"))
-    }
-}
 
 /// A Bandersnatch signature. B96.
 #[derive(Clone, PartialEq, Eq, scale::Encode, scale::Decode)]
