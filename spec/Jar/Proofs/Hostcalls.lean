@@ -41,4 +41,15 @@ theorem block_cost_formula_ge_1 (maxDone : Nat) :
     (if maxDone > 3 then maxDone - 3 else 1) ≥ 1 := by
   split <;> omega
 
+/-- Block cost monotonicity: if maxDone increases, cost does not decrease.
+    This ensures adding instructions to a basic block cannot reduce its gas cost. -/
+theorem block_cost_formula_mono (a b : Nat) (h : a ≤ b) :
+    (if a > 3 then a - 3 else 1) ≤ (if b > 3 then b - 3 else 1) := by
+  split <;> split <;> omega
+
+/-- Block cost formula never exceeds maxDone (upper bound). -/
+theorem block_cost_formula_le (maxDone : Nat) :
+    (if maxDone > 3 then maxDone - 3 else 1) ≤ maxDone ∨ maxDone = 0 := by
+  split <;> omega
+
 end Jar.Proofs
