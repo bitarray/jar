@@ -107,7 +107,15 @@ In jar1, the JAVM is configured differently from the base Gray Paper PVM specifi
 
 {docstring Jar.JAVM.sbrk}
 
-# Instruction Decoding (Appendix A.5)
+# Program Blob Decoding (Appendix A.5)
+
+{docstring Jar.JAVM.ProgramBlob}
+
+{docstring Jar.JAVM.deblob}
+
+{docstring Jar.JAVM.validateBasicBlocks}
+
+# Instruction Operand Decoding
 
 {docstring Jar.JAVM.sext}
 
@@ -116,6 +124,27 @@ In jar1, the JAVM is configured differently from the base Gray Paper PVM specifi
 {docstring Jar.JAVM.toUnsigned}
 
 {docstring Jar.JAVM.djump}
+
+# Host-Call Result Sentinels (Appendix B)
+
+{docstring Jar.JAVM.RESULT_NONE}
+
+# JAR Blob Format
+
+jar1 uses a custom blob format with a magic header, capability entries,
+and sub-blobs for CODE caps.
+
+{docstring Jar.JAVM.jarMagic}
+
+{docstring Jar.JAVM.JarHeader}
+
+{docstring Jar.JAVM.JarCapEntry}
+
+{docstring Jar.JAVM.parseJarHeader}
+
+{docstring Jar.JAVM.parseJarCapEntry}
+
+{docstring Jar.JAVM.parseCodeSubBlob}
 
 # Instruction Execution (Appendix A.6)
 
