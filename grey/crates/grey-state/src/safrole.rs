@@ -269,10 +269,7 @@ pub fn process_safrole(
 
 /// Entropy accumulation (eq 6.22): η₀' = H(η₀ ++ entropy).
 pub(crate) fn accumulate_entropy(eta0: &Hash, entropy: &Hash) -> Hash {
-    let mut data = Vec::with_capacity(64);
-    data.extend_from_slice(&eta0.0);
-    data.extend_from_slice(&entropy.0);
-    grey_crypto::blake2b_256(&data)
+    grey_crypto::accumulate_entropy(eta0, entropy)
 }
 
 /// Filter offenders from a validator key set (eq 6.14: Φ).

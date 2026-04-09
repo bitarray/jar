@@ -70,10 +70,7 @@ pub fn filter_offenders(keys: &[ValidatorKey], offenders: &Judgments) -> Vec<Val
 ///
 /// `vrf_output` is Y(H_V), the VRF output from the block header's entropy signature.
 pub fn accumulate_entropy(current_entropy: &Hash, vrf_output: &[u8; 32]) -> Hash {
-    let mut preimage = Vec::with_capacity(64);
-    preimage.extend_from_slice(&current_entropy.0);
-    preimage.extend_from_slice(vrf_output);
-    grey_crypto::blake2b_256(&preimage)
+    grey_crypto::accumulate_entropy(current_entropy, &Hash(*vrf_output))
 }
 
 /// Apply the full Safrole state transition for a block.

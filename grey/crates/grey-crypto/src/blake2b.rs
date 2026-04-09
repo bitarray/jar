@@ -31,6 +31,16 @@ pub fn build_assurance_message(parent_hash: &[u8; 32], bitfield: &[u8]) -> Vec<u
     message
 }
 
+/// Entropy accumulation (eq 6.22): η₀' = H(η₀ ++ entropy).
+///
+/// Concatenates two 32-byte hashes and produces their Blake2b-256 digest.
+pub fn accumulate_entropy(current: &Hash, entropy: &Hash) -> Hash {
+    let mut preimage = Vec::with_capacity(64);
+    preimage.extend_from_slice(&current.0);
+    preimage.extend_from_slice(&entropy.0);
+    blake2b_256(&preimage)
+}
+
 /// Compute the Blake2b-256 hash of the given data.
 ///
 /// H(m ∈ B) ∈ H
