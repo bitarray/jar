@@ -91,6 +91,10 @@ pub struct RpcState {
     pub store_write_last_us: std::sync::atomic::AtomicU64,
     /// Duration of the last store read (get_state) in microseconds.
     pub store_read_last_us: std::sync::atomic::AtomicU64,
+    /// Total PVM gas allocated for accumulation (sum of accumulate_gas from guarantees).
+    pub pvm_gas_used_total: std::sync::atomic::AtomicU64,
+    /// Total work packages accumulated (guarantees included in blocks).
+    pub work_packages_accumulated: std::sync::atomic::AtomicU64,
 }
 
 #[rpc(server)]
@@ -944,6 +948,12 @@ pub async fn format_metrics(state: &RpcState) -> String {
     let store_read_us = state
         .store_read_last_us
         .load(std::sync::atomic::Ordering::Relaxed);
+    let pvm_gas = state
+        .pvm_gas_used_total
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let wp_accumulated = state
+        .work_packages_accumulated
+        .load(std::sync::atomic::Ordering::Relaxed);
     drop(status);
 
     let stf_last_secs = stf_last_us as f64 / 1_000_000.0;
@@ -1030,7 +1040,13 @@ pub async fn format_metrics(state: &RpcState) -> String {
          grey_store_write_last_seconds {store_write_secs}\n\
          # HELP grey_store_read_last_seconds Duration of last store read (get_state) in seconds.\n\
          # TYPE grey_store_read_last_seconds gauge\n\
-         grey_store_read_last_seconds {store_read_secs}\n"
+         grey_store_read_last_seconds {store_read_secs}\n\
+         # HELP grey_pvm_gas_used_total Total PVM gas allocated for accumulation.\n\
+         # TYPE grey_pvm_gas_used_total counter\n\
+         grey_pvm_gas_used_total {pvm_gas}\n\
+         # HELP grey_work_packages_accumulated_total Work packages accumulated.\n\
+         # TYPE grey_work_packages_accumulated_total counter\n\
+         grey_work_packages_accumulated_total {wp_accumulated}\n"
     );
 
     // Block authoring duration (only meaningful after at least one block authored)
@@ -1226,6 +1242,8 @@ pub fn create_rpc_channel(
         block_author_last_us: std::sync::atomic::AtomicU64::new(0),
         store_write_last_us: std::sync::atomic::AtomicU64::new(0),
         store_read_last_us: std::sync::atomic::AtomicU64::new(0),
+        pvm_gas_used_total: std::sync::atomic::AtomicU64::new(0),
+        work_packages_accumulated: std::sync::atomic::AtomicU64::new(0),
     });
 
     (state, rx)
@@ -2265,5 +2283,19 @@ mod tests {
             body.contains("grey_store_read_last_seconds 0.00025"),
             "should contain store read timing"
         );
+    }
+
+    #[tokio::test]
+    async fn test_pvm_gas_and_accumulated_metrics() {
+        let (_url, state, _rx, _store, _dir) = setup().await;
+        state
+            .pvm_gas_used_total
+            .store(50000, std::sync::atomic::Ordering::Relaxed);
+        state
+            .work_packages_accumulated
+            .store(7, std::sync::atomic::Ordering::Relaxed);
+        let body = format_metrics(&state).await;
+        assert!(body.contains("grey_pvm_gas_used_total 50000"));
+        assert!(body.contains("grey_work_packages_accumulated_total 7"));
     }
 }
