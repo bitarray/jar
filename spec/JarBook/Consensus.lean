@@ -41,6 +41,8 @@ Blocks must pass acceptability checks before being considered.
 
 {docstring Jar.Consensus.ChainAncestry}
 
+{docstring Jar.Consensus.ancestors}
+
 {docstring Jar.Consensus.chainMetric}
 
 {docstring Jar.Consensus.isAcceptable}

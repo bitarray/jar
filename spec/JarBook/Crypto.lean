@@ -23,6 +23,8 @@ All primitives are declared `opaque` — their correctness is axiomatic.
 
 {docstring Jar.Crypto.ed25519Sign}
 
+{docstring Jar.Crypto.ed25519PublicFromSeed}
+
 # Bandersnatch
 
 {docstring Jar.Crypto.bandersnatchVerify}
@@ -74,5 +76,7 @@ Signing contexts ensure domain separation between different protocol operations.
 # Utility
 
 {docstring Jar.Crypto.seqFromHash}
+
+{docstring Jar.Crypto.fisherYatesShuffle}
 
 {docstring Jar.Crypto.shuffle}
