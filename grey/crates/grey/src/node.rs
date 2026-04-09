@@ -1126,10 +1126,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                         if let Some(vote_msg) = finality::decode_vote_message(&data) {
                             if finality::verify_vote(&vote_msg.vote, vote_msg.vote_type, &state) {
                                 // Persist vote to store for crash recovery
-                                let vote_type_byte = match vote_msg.vote_type {
-                                    finality::VoteType::Prevote => 0x01,
-                                    finality::VoteType::Precommit => 0x02,
-                                };
+                                let vote_type_byte = vote_msg.vote_type.as_byte();
                                 let _ = store.put_grandpa_vote(
                                     vote_msg.vote.round,
                                     vote_type_byte,

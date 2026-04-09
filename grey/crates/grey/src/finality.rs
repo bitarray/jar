@@ -38,6 +38,25 @@ pub enum VoteType {
     Precommit,
 }
 
+impl VoteType {
+    /// Serialize to wire byte: Prevote = 0x01, Precommit = 0x02.
+    pub fn as_byte(self) -> u8 {
+        match self {
+            VoteType::Prevote => 0x01,
+            VoteType::Precommit => 0x02,
+        }
+    }
+
+    /// Deserialize from wire byte. Returns `None` for unknown values.
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0x01 => Some(VoteType::Prevote),
+            0x02 => Some(VoteType::Precommit),
+            _ => None,
+        }
+    }
+}
+
 /// A finality vote message for network transmission.
 #[derive(Debug, Clone)]
 pub struct VoteMessage {
@@ -765,10 +784,7 @@ pub fn verify_vote(vote: &Vote, vote_type: VoteType, state: &grey_types::state::
 /// Format: `[type(1)][block_hash(32)][block_slot(4)][round(8)][validator_index(2)][signature(64)]`
 pub fn encode_vote_message(msg: &VoteMessage) -> Vec<u8> {
     let mut buf = Vec::with_capacity(1 + 32 + 4 + 8 + 2 + 64);
-    buf.push(match msg.vote_type {
-        VoteType::Prevote => 0x01,
-        VoteType::Precommit => 0x02,
-    });
+    buf.push(msg.vote_type.as_byte());
     buf.extend_from_slice(&msg.vote.block_hash.0);
     buf.extend_from_slice(&msg.vote.block_slot.to_le_bytes());
     buf.extend_from_slice(&msg.vote.round.to_le_bytes());
@@ -784,11 +800,7 @@ pub fn decode_vote_message(data: &[u8]) -> Option<VoteMessage> {
         return None;
     }
 
-    let vote_type = match data[0] {
-        0x01 => VoteType::Prevote,
-        0x02 => VoteType::Precommit,
-        _ => return None,
-    };
+    let vote_type = VoteType::from_byte(data[0])?;
 
     let mut block_hash = [0u8; 32];
     block_hash.copy_from_slice(&data[1..33]);
