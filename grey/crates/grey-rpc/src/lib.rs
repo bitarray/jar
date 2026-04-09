@@ -2057,4 +2057,89 @@ mod tests {
         assert!(body.contains("grey_gossipsub_messages_total{topic=\"assurances\"} 0"));
         assert!(body.contains("grey_gossipsub_messages_total{topic=\"announcements\"} 0"));
     }
+
+    #[tokio::test]
+    async fn test_invalid_rpc_method() {
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let result: Result<serde_json::Value, _> =
+            client.request("jam_nonExistentMethod", rpc_params![]).await;
+        assert!(result.is_err(), "non-existent method should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_storage_missing_params() {
+        let (url, _state, _rx, store, _dir) = setup().await;
+        // Need a head block for readStorage to work
+        let block = test_block(1);
+        let hash = store.put_block(&block).unwrap();
+        store.set_head(&hash, 1).unwrap();
+
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        // Missing key parameter (only service_id)
+        let result: Result<serde_json::Value, _> =
+            client.request("jam_readStorage", rpc_params![1000]).await;
+        assert!(
+            result.is_err(),
+            "readStorage with missing key should return error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_block_wrong_param_type() {
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        // Pass a number instead of a string
+        let result: Result<serde_json::Value, _> =
+            client.request("jam_getBlock", rpc_params![12345]).await;
+        assert!(
+            result.is_err(),
+            "getBlock with numeric param should return error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_block_by_slot_wrong_param_type() {
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        // Pass a string instead of a number
+        let result: Result<serde_json::Value, _> = client
+            .request("jam_getBlockBySlot", rpc_params!["not_a_number"])
+            .await;
+        assert!(
+            result.is_err(),
+            "getBlockBySlot with string param should return error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_service_account_nonexistent() {
+        let (url, _state, _rx, store, _dir) = setup().await;
+        let block = test_block(1);
+        let hash = store.put_block(&block).unwrap();
+        store.set_head(&hash, 1).unwrap();
+
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let result: Result<serde_json::Value, _> = client
+            .request("jam_getServiceAccount", rpc_params![99999])
+            .await;
+        assert!(result.is_err(), "non-existent service should return error");
+    }
+
+    #[tokio::test]
+    async fn test_get_validators_invalid_set() {
+        let (url, _state, _rx, store, _dir) = setup().await;
+        let block = test_block(1);
+        let hash = store.put_block(&block).unwrap();
+        store.set_head(&hash, 1).unwrap();
+
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let result: Result<serde_json::Value, _> = client
+            .request("jam_getValidators", rpc_params!["invalid_set_name"])
+            .await;
+        assert!(
+            result.is_err(),
+            "getValidators with invalid set name should return error"
+        );
+    }
 }
