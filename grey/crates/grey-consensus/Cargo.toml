@@ -11,3 +11,6 @@ scale = { workspace = true }
 grey-crypto = { workspace = true }
 grey-state = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

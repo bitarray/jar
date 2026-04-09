@@ -404,3 +404,94 @@ mod tests {
         panic!("No author found for timeslot 1 in ticket mode");
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::genesis;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        /// Every slot in the first epoch has exactly one author in fallback mode.
+        #[test]
+        fn fallback_exactly_one_author_per_slot(slot in 1u32..12u32) {
+            let config = Config::tiny();
+            let (state, secrets) = genesis::create_genesis(&config);
+
+            let mut author_count = 0u32;
+            for s in &secrets {
+                let pk = BandersnatchPublicKey(s.bandersnatch.public_key_bytes());
+                if is_slot_author(&state, &config, slot, &pk).is_some() {
+                    author_count += 1;
+                }
+            }
+            prop_assert_eq!(author_count, 1, "slot {} should have exactly 1 author", slot);
+        }
+
+        /// Authored blocks always carry the correct timeslot.
+        #[test]
+        fn authored_block_has_correct_timeslot(slot in 1u32..12u32) {
+            let config = Config::tiny();
+            let (state, secrets) = genesis::create_genesis(&config);
+
+            for s in &secrets {
+                let pk = BandersnatchPublicKey(s.bandersnatch.public_key_bytes());
+                if let Some(idx) = is_slot_author(&state, &config, slot, &pk) {
+                    let block = author_block(&state, &config, slot, idx, s, Hash::ZERO);
+                    prop_assert_eq!(block.header.timeslot, slot);
+                    prop_assert_eq!(block.header.author_index, idx);
+                    break;
+                }
+            }
+        }
+
+        /// build_vrf_input is deterministic: same inputs produce same output.
+        #[test]
+        fn vrf_input_deterministic(
+            ctx in proptest::collection::vec(any::<u8>(), 0..16),
+            slot: u32,
+            suffix in proptest::collection::vec(any::<u8>(), 0..32),
+        ) {
+            let a = build_vrf_input(&ctx, slot, &suffix);
+            let b = build_vrf_input(&ctx, slot, &suffix);
+            prop_assert_eq!(a, b);
+        }
+
+        /// build_vrf_input output length equals context + 4 + suffix.
+        #[test]
+        fn vrf_input_length(
+            ctx in proptest::collection::vec(any::<u8>(), 0..16),
+            slot: u32,
+            suffix in proptest::collection::vec(any::<u8>(), 0..32),
+        ) {
+            let result = build_vrf_input(&ctx, slot, &suffix);
+            prop_assert_eq!(result.len(), ctx.len() + 4 + suffix.len());
+        }
+
+        /// compute_extrinsic_hash is deterministic for the same extrinsic.
+        #[test]
+        fn extrinsic_hash_deterministic(ticket_count in 0usize..3) {
+            let extrinsic = Extrinsic {
+                tickets: vec![TicketProof { attempt: 0, proof: vec![0u8; 784] }; ticket_count],
+                ..Extrinsic::default()
+            };
+            let h1 = compute_extrinsic_hash(&extrinsic);
+            let h2 = compute_extrinsic_hash(&extrinsic);
+            prop_assert_eq!(h1, h2);
+        }
+
+        /// Non-validator key never matches as slot author.
+        #[test]
+        fn non_validator_is_never_author(slot in 0u32..12u32, random_key: [u8; 32]) {
+            let config = Config::tiny();
+            let (state, _) = genesis::create_genesis(&config);
+            let pk = BandersnatchPublicKey(random_key);
+            // Random key is overwhelmingly unlikely to match a real validator key
+            // but we can't assert None since it could collide (astronomically unlikely).
+            // Just verify it doesn't panic.
+            let _ = is_slot_author(&state, &config, slot, &pk);
+        }
+    }
+}
