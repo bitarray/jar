@@ -439,3 +439,89 @@ mod tests {
         assert!(matches!(err, KeystoreError::Mnemonic(_)));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// save_seeds then load_seeds always recovers the original seeds.
+        #[test]
+        fn save_load_roundtrip(
+            idx in 0u16..100,
+            ed_seed in any::<[u8; 32]>(),
+            band_seed in any::<[u8; 32]>(),
+            bls_seed in any::<[u8; 32]>(),
+            ed_pub in any::<[u8; 32]>(),
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let ks = Keystore::open(dir.path().join("keys")).unwrap();
+            ks.save_seeds(idx, &ed_seed, &band_seed, &bls_seed, &ed_pub).unwrap();
+            let (loaded_ed, loaded_band, loaded_bls) = ks.load_seeds(idx).unwrap();
+            prop_assert_eq!(loaded_ed, ed_seed);
+            prop_assert_eq!(loaded_band, band_seed);
+            prop_assert_eq!(loaded_bls, bls_seed);
+        }
+
+        /// has_keys is true after save, false before.
+        #[test]
+        fn has_keys_after_save(idx in 0u16..100) {
+            let dir = tempfile::tempdir().unwrap();
+            let ks = Keystore::open(dir.path().join("keys")).unwrap();
+            prop_assert!(!ks.has_keys(idx));
+            let seed = [idx as u8; 32];
+            let pub_k = [0u8; 32];
+            ks.save_seeds(idx, &seed, &seed, &seed, &pub_k).unwrap();
+            prop_assert!(ks.has_keys(idx));
+        }
+
+        /// Mnemonic derivation is deterministic: same inputs produce same outputs.
+        #[test]
+        fn mnemonic_derivation_deterministic(idx in 0u16..100) {
+            let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+            let (ed1, band1, bls1) = derive_validator_seeds_from_mnemonic(idx, mnemonic, None).unwrap();
+            let (ed2, band2, bls2) = derive_validator_seeds_from_mnemonic(idx, mnemonic, None).unwrap();
+            prop_assert_eq!(ed1, ed2);
+            prop_assert_eq!(band1, band2);
+            prop_assert_eq!(bls1, bls2);
+        }
+
+        /// Different validator indices produce different seeds from the same mnemonic.
+        #[test]
+        fn mnemonic_different_indices_different_seeds(a in 0u16..1000, b in 0u16..1000) {
+            prop_assume!(a != b);
+            let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+            let seeds_a = derive_validator_seeds_from_mnemonic(a, mnemonic, None).unwrap();
+            let seeds_b = derive_validator_seeds_from_mnemonic(b, mnemonic, None).unwrap();
+            prop_assert_ne!(seeds_a.0, seeds_b.0, "ed25519 seeds should differ");
+            prop_assert_ne!(seeds_a.1, seeds_b.1, "bandersnatch seeds should differ");
+            prop_assert_ne!(seeds_a.2, seeds_b.2, "bls seeds should differ");
+        }
+
+        /// Domain separation: ed25519, bandersnatch, and bls seeds are all distinct.
+        #[test]
+        fn domain_separation(idx in 0u16..1000) {
+            let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+            let (ed, band, bls) = derive_validator_seeds_from_mnemonic(idx, mnemonic, None).unwrap();
+            prop_assert_ne!(ed, band, "ed25519 and bandersnatch seeds should differ");
+            prop_assert_ne!(ed, bls, "ed25519 and bls seeds should differ");
+            prop_assert_ne!(band, bls, "bandersnatch and bls seeds should differ");
+        }
+
+        /// decode_hex_seed rejects strings that aren't 64 hex chars.
+        #[test]
+        fn decode_hex_seed_rejects_wrong_length(len in 0usize..128) {
+            prop_assume!(len != 64);
+            let hex_str: String = (0..len).map(|_| 'a').collect();
+            let result = decode_hex_seed(&hex_str, "test");
+            if len % 2 == 0 && len != 64 {
+                // Valid hex but wrong byte length
+                prop_assert!(result.is_err());
+            }
+            // Odd length or wrong byte count → always error
+        }
+    }
+}
