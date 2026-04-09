@@ -100,9 +100,10 @@ fn constancy_preprocess(leaves: &[&[u8]], hash_fn: fn(&[u8]) -> Hash) -> Vec<Has
     // Next power of 2
     let n = leaves.len().next_power_of_two();
     let mut result = Vec::with_capacity(n);
-    // Hash each leaf with "leaf" prefix
+    // Hash each leaf with "leaf" prefix — reuse buffer across iterations
+    let mut input = Vec::new();
     for leaf in leaves {
-        let mut input = Vec::with_capacity(4 + leaf.len());
+        input.clear();
         input.extend_from_slice(b"leaf");
         input.extend_from_slice(leaf);
         result.push(hash_fn(&input));
