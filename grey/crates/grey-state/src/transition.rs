@@ -209,8 +209,7 @@ fn clear_disputed_reports(
         if positive_count < supermajority {
             for slot in state.pending_reports.iter_mut() {
                 if let Some(pending) = slot {
-                    let report_hash =
-                        grey_crypto::blake2b_256(&pending.report.package_spec.package_hash.0);
+                    let report_hash = grey_crypto::report_hash(&pending.report);
                     if report_hash == verdict.report_hash {
                         *slot = None;
                     }
