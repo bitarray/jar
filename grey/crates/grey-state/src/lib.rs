@@ -43,6 +43,34 @@ pub fn count_assurance_bits(
     counts
 }
 
+/// Collect available work reports and clear resolved pending report slots.
+///
+/// A pending report is "available" if its assurance count meets the threshold.
+/// A pending report is cleared if it is available OR timed out.
+/// Returns the list of newly available work reports.
+pub fn collect_and_clear_available(
+    pending_reports: &mut [Option<grey_types::state::PendingReport>],
+    assurance_counts: &[u32],
+    threshold: u32,
+    current_timeslot: grey_types::Timeslot,
+    timeout: u32,
+) -> Vec<grey_types::work::WorkReport> {
+    let mut available = Vec::new();
+    for (core, slot) in pending_reports.iter_mut().enumerate() {
+        if let Some(pending) = slot {
+            let is_available = assurance_counts.get(core).copied().unwrap_or(0) >= threshold;
+            if is_available {
+                available.push(pending.report.clone());
+            }
+            let is_timed_out = current_timeslot >= pending.timeslot + timeout;
+            if is_available || is_timed_out {
+                *slot = None;
+            }
+        }
+    }
+    available
+}
+
 /// Check that a slice is strictly sorted by the given key (no duplicates).
 ///
 /// Returns `true` if `key(items[i]) < key(items[i+1])` for all consecutive pairs.

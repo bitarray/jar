@@ -292,31 +292,16 @@ fn process_assurances(
     config: &Config,
 ) -> Vec<grey_types::work::WorkReport> {
     let threshold = Config::super_majority_of(state.current_validators.len()) as u32;
-    let mut available = Vec::new();
-
     let num_cores = state.pending_reports.len();
     let assurance_counts = crate::count_assurance_bits(assurances, num_cores);
 
-    for (core, count) in assurance_counts.iter().enumerate() {
-        if *count >= threshold
-            && let Some(pending) = &state.pending_reports[core]
-        {
-            available.push(pending.report.clone());
-        }
-    }
-
-    for (core, slot) in state.pending_reports.iter_mut().enumerate() {
-        if let Some(pending) = slot {
-            let is_available = assurance_counts.get(core).copied().unwrap_or(0) >= threshold;
-            let is_timed_out = current_timeslot >= pending.timeslot + config.availability_timeout;
-
-            if is_available || is_timed_out {
-                *slot = None;
-            }
-        }
-    }
-
-    available
+    crate::collect_and_clear_available(
+        &mut state.pending_reports,
+        &assurance_counts,
+        threshold,
+        current_timeslot,
+        config.availability_timeout,
+    )
 }
 
 /// Process work report guarantees (Section 11.4, eq 11.23-11.42).

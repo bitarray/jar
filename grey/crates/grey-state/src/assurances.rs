@@ -98,28 +98,14 @@ pub fn process_assurances(
     // eq 11.16: Count assurances per core, determine available reports
     let assurance_counts = crate::count_assurance_bits(assurances, num_cores);
 
-    let mut available: Vec<WorkReport> = Vec::new();
-    for core in 0..num_cores.min(pending_reports.len()) {
-        if assurance_counts[core] >= super_majority as u32
-            && let Some(pending) = &pending_reports[core]
-        {
-            available.push(pending.report.clone());
-        }
-    }
-
-    // eq 11.17: Clear available and timed-out reports
-    let timeout = config.availability_timeout;
-    for (core, pending_report) in pending_reports.iter_mut().enumerate() {
-        if let Some(pending) = pending_report {
-            let is_available =
-                assurance_counts.get(core).copied().unwrap_or(0) >= super_majority as u32;
-            let is_timed_out = current_timeslot >= pending.timeslot + timeout;
-
-            if is_available || is_timed_out {
-                *pending_report = None;
-            }
-        }
-    }
+    // eq 11.17: Collect available reports and clear available/timed-out slots
+    let available = crate::collect_and_clear_available(
+        pending_reports,
+        &assurance_counts,
+        super_majority as u32,
+        current_timeslot,
+        config.availability_timeout,
+    );
 
     Ok(AssuranceOutput {
         reported: available,
