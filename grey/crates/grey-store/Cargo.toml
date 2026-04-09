@@ -18,4 +18,5 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 grey-consensus = { workspace = true }
+proptest = { workspace = true }
 tempfile = "3"

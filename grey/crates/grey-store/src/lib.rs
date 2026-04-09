@@ -1938,3 +1938,136 @@ mod tests {
         assert!(result.is_none());
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use grey_types::BandersnatchSignature;
+    use proptest::prelude::*;
+
+    fn temp_store() -> (Store, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("test.redb")).unwrap();
+        (store, dir)
+    }
+
+    fn make_block(slot: u32) -> grey_types::header::Block {
+        grey_types::header::Block {
+            header: grey_types::header::Header {
+                data: grey_types::header::UnsignedHeader {
+                    parent_hash: Hash([10u8; 32]),
+                    state_root: Hash([20u8; 32]),
+                    extrinsic_hash: Hash([30u8; 32]),
+                    timeslot: slot,
+                    epoch_marker: None,
+                    tickets_marker: None,
+                    author_index: 0,
+                    vrf_signature: BandersnatchSignature([50u8; 96]),
+                    offenders_marker: vec![],
+                },
+                seal: BandersnatchSignature([60u8; 96]),
+            },
+            extrinsic: grey_types::header::Extrinsic::default(),
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(16))]
+
+        /// Pruning preserves genesis (slot 0) regardless of the cutoff.
+        #[test]
+        fn prune_always_preserves_genesis(cutoff in 1u32..10) {
+            let (store, _dir) = temp_store();
+            for slot in 0..10u32 {
+                store.put_block(&make_block(slot)).unwrap();
+            }
+            store.prune_before_slot(cutoff).unwrap();
+            prop_assert!(
+                store.get_block_hash_by_slot(0).is_ok(),
+                "genesis block must survive pruning at cutoff {}",
+                cutoff
+            );
+        }
+
+        /// After pruning, blocks at slots >= cutoff still exist.
+        #[test]
+        fn prune_retains_recent_blocks(cutoff in 1u32..10) {
+            let (store, _dir) = temp_store();
+            for slot in 0..10u32 {
+                store.put_block(&make_block(slot)).unwrap();
+            }
+            store.prune_before_slot(cutoff).unwrap();
+            for slot in cutoff..10 {
+                prop_assert!(
+                    store.get_block_hash_by_slot(slot).is_ok(),
+                    "slot {} should be retained (cutoff={})",
+                    slot, cutoff
+                );
+            }
+        }
+
+        /// After pruning, blocks at slots 1..cutoff are removed.
+        #[test]
+        fn prune_removes_old_blocks(cutoff in 2u32..10) {
+            let (store, _dir) = temp_store();
+            for slot in 0..10u32 {
+                store.put_block(&make_block(slot)).unwrap();
+            }
+            store.prune_before_slot(cutoff).unwrap();
+            for slot in 1..cutoff {
+                prop_assert!(
+                    store.get_block_hash_by_slot(slot).is_err(),
+                    "slot {} should be pruned (cutoff={})",
+                    slot, cutoff
+                );
+            }
+        }
+
+        /// Pruning returns the correct count of pruned blocks.
+        #[test]
+        fn prune_returns_correct_count(cutoff in 1u32..10) {
+            let (store, _dir) = temp_store();
+            for slot in 0..10u32 {
+                store.put_block(&make_block(slot)).unwrap();
+            }
+            let pruned = store.prune_before_slot(cutoff).unwrap();
+            // Slot 0 (genesis) is preserved, so prune 1..cutoff
+            let expected = cutoff.saturating_sub(1);
+            prop_assert_eq!(pruned, expected,
+                "cutoff={}: expected {} pruned, got {}",
+                cutoff, expected, pruned);
+        }
+
+        /// Double prune is idempotent — second call prunes nothing.
+        #[test]
+        fn prune_idempotent(cutoff in 1u32..10) {
+            let (store, _dir) = temp_store();
+            for slot in 0..10u32 {
+                store.put_block(&make_block(slot)).unwrap();
+            }
+            store.prune_before_slot(cutoff).unwrap();
+            let second = store.prune_before_slot(cutoff).unwrap();
+            prop_assert_eq!(second, 0, "second prune should be a no-op");
+        }
+
+        /// Block roundtrip: put_block then get_block returns same timeslot.
+        #[test]
+        fn block_roundtrip_timeslot(slot in 0u32..1000) {
+            let (store, _dir) = temp_store();
+            let block = make_block(slot);
+            let hash = store.put_block(&block).unwrap();
+            let retrieved = store.get_block(&hash).unwrap();
+            prop_assert_eq!(retrieved.header.timeslot, slot);
+        }
+
+        /// Chunk roundtrip: put_chunk then get_chunk returns same data.
+        #[test]
+        fn chunk_roundtrip(data in prop::collection::vec(any::<u8>(), 1..256), idx in 0u16..10) {
+            let (store, _dir) = temp_store();
+            let report_hash = Hash([42u8; 32]);
+            store.put_chunk(&report_hash, idx, &data).unwrap();
+            let retrieved = store.get_chunk(&report_hash, idx).unwrap();
+            prop_assert_eq!(retrieved, data);
+        }
+    }
+}
