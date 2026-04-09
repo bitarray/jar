@@ -48,6 +48,33 @@ theorem readMemBytes_guard_zone_panics (m : Jar.JAVM.Memory) (addr : UInt64) (n 
   rw [checkReadable_guard_zone_panics m addr n h]
 
 -- ============================================================================
+-- Write guard zone panics
+-- ============================================================================
+
+/-- Writing to the guard zone propagates through writeMemBytes. -/
+theorem writeMemBytes_guard_zone_panics (m : Jar.JAVM.Memory) (addr : UInt64) (val : UInt64) (n : Nat)
+    (h : addr.toNat < m.guardZone) :
+    Jar.JAVM.writeMemBytes m addr val n = .panic := by
+  unfold Jar.JAVM.writeMemBytes
+  rw [checkWritable_guard_zone_panics m addr n h]
+
+-- ============================================================================
+-- Empty read/write operations
+-- ============================================================================
+
+/-- readByteArray with zero length always succeeds with empty ByteArray. -/
+theorem readByteArray_zero (m : Jar.JAVM.Memory) (addr : UInt64) :
+    Jar.JAVM.readByteArray m addr 0 = .ok ByteArray.empty := by
+  unfold Jar.JAVM.readByteArray
+  simp
+
+/-- writeByteArray with empty data always succeeds, preserving memory. -/
+theorem writeByteArray_empty (m : Jar.JAVM.Memory) (addr : UInt64) :
+    Jar.JAVM.writeByteArray m addr ByteArray.empty = .ok m := by
+  unfold Jar.JAVM.writeByteArray
+  simp
+
+-- ============================================================================
 -- sbrk query mode (size = 0)
 -- ============================================================================
 
