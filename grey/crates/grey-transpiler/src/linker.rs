@@ -88,6 +88,8 @@ struct LinkedElf {
     /// Symbols (used for service entry point resolution)
     #[allow(dead_code)]
     symbols: Vec<(String, u64)>,
+    /// ELF entry point (e_entry) — the RISC-V vaddr of _start.
+    entry_vaddr: u64,
 }
 
 /// Transpile an rv64em ELF with relocation processing.
@@ -114,11 +116,22 @@ fn emit_sp_preamble(code: &mut Vec<u8>, bitmask: &mut Vec<u8>, stack_top: u64) {
 pub fn link_elf(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
     let elf = parse_linked_elf(elf_data)?;
     let mut ctx = TranslationContext::new(elf.is_64bit);
+    ctx.code_ranges = elf.code_ranges.clone();
 
     // Emit SP preamble: load_imm_64 SP, stack_top
     let stack_pages = elf.stack_size / 4096;
     let stack_top = stack_pages as u64 * 4096;
     emit_sp_preamble(&mut ctx.code, &mut ctx.bitmask, stack_top);
+
+    // Emit an unconditional jump to the ELF entry point (e_entry) so
+    // PC=0 enters at _start rather than whatever function LLD placed
+    // first in .text. The fixup is resolved after translation in
+    // apply_fixups() (which maps RISC-V vaddrs → PVM PCs via jump_table).
+    // A gas-block boundary is required before the jump so the first
+    // instruction lives in its own basic block.
+    if elf.entry_vaddr != 0 {
+        ctx.emit_jump(elf.entry_vaddr);
+    }
 
     for (_file_off, vaddr, data) in &elf.code_sections {
         translate_section_linked(&mut ctx, data, *vaddr, &elf)?;
@@ -179,6 +192,7 @@ fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError> {
     }
 
     // ELF64 header fields
+    let e_entry = u64::from_le_bytes(data[24..32].try_into().unwrap());
     let e_shoff = u64::from_le_bytes(data[40..48].try_into().unwrap()) as usize;
     let e_shentsize = u16::from_le_bytes(data[58..60].try_into().unwrap()) as usize;
     let e_shnum = u16::from_le_bytes(data[60..62].try_into().unwrap()) as usize;
@@ -504,6 +518,7 @@ fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError> {
         sub32_relocs,
         code_ranges,
         symbols: named_symbols,
+        entry_vaddr: e_entry,
     })
 }
 

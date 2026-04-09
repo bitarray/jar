@@ -1892,11 +1892,20 @@ impl TranslationContext {
         }
 
         // Resolve return address fixups in the jump table
+        let mut unresolved = 0usize;
         for (jt_idx, rv_addr) in self.return_fixups.drain(..).collect::<Vec<_>>() {
             if let Some(&pvm_target) = self.address_map.get(&rv_addr) {
                 self.jump_table[jt_idx] = pvm_target;
+            } else {
+                unresolved += 1;
+                eprintln!(
+                    "grey: unresolved return_fixup jt_idx={jt_idx} rv_addr={:#x}",
+                    rv_addr
+                );
             }
-            // If not found, leave as 0 (will trap on return)
+        }
+        if unresolved > 0 {
+            eprintln!("grey: {unresolved} unresolved return_fixups (will panic on jump)");
         }
     }
 }
