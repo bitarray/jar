@@ -90,11 +90,7 @@ pub fn process_assurances(
     // eq 11.15: Bits may only be set for cores with pending reports
     for a in assurances {
         for core in 0..num_cores {
-            let byte_idx = core / 8;
-            let bit_idx = core % 8;
-            if byte_idx < a.bitfield.len()
-                && (a.bitfield[byte_idx] & (1 << bit_idx)) != 0
-                && (core >= pending_reports.len() || pending_reports[core].is_none())
+            if a.has_bit(core) && (core >= pending_reports.len() || pending_reports[core].is_none())
             {
                 return Err(AssuranceError::CoreNotEngaged);
             }
@@ -105,9 +101,7 @@ pub fn process_assurances(
     let mut assurance_counts = vec![0u32; num_cores];
     for a in assurances {
         for (core, count) in assurance_counts.iter_mut().enumerate() {
-            let byte_idx = core / 8;
-            let bit_idx = core % 8;
-            if byte_idx < a.bitfield.len() && (a.bitfield[byte_idx] & (1 << bit_idx)) != 0 {
+            if a.has_bit(core) {
                 *count += 1;
             }
         }

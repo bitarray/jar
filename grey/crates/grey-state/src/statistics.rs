@@ -149,11 +149,7 @@ fn compute_core_statistics(
     // p: popularity = count of assurance bitfield bits set per core
     for assurance in assurances {
         for (core, stat) in core_stats.iter_mut().enumerate() {
-            let byte_idx = core / 8;
-            let bit_idx = core % 8;
-            if byte_idx < assurance.bitfield.len()
-                && (assurance.bitfield[byte_idx] & (1 << bit_idx)) != 0
-            {
+            if assurance.has_bit(core) {
                 stat.popularity += 1;
             }
         }

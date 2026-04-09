@@ -299,11 +299,7 @@ fn process_assurances(
 
     for assurance in assurances {
         for (core, count) in assurance_counts.iter_mut().enumerate() {
-            let byte_idx = core / 8;
-            let bit_idx = core % 8;
-            if byte_idx < assurance.bitfield.len()
-                && (assurance.bitfield[byte_idx] & (1 << bit_idx)) != 0
-            {
+            if assurance.has_bit(core) {
                 *count += 1;
             }
         }

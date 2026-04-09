@@ -199,6 +199,15 @@ pub struct Assurance {
     pub signature: crate::Ed25519Signature,
 }
 
+impl Assurance {
+    /// Check if the bitfield has the bit set for a given core index.
+    pub fn has_bit(&self, core: usize) -> bool {
+        let byte_idx = core / 8;
+        let bit_idx = core % 8;
+        byte_idx < self.bitfield.len() && (self.bitfield[byte_idx] & (1 << bit_idx)) != 0
+    }
+}
+
 /// Guarantees extrinsic EG (eq 11.23).
 pub type GuaranteesExtrinsic = Vec<Guarantee>;
 
