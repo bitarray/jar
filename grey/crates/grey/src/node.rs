@@ -1009,14 +1009,13 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                     // imported block — otherwise they become zombies that
                                     // endlessly defer and block new work package processing.
                                     if !block.extrinsic.guarantees.is_empty() {
-                                        use scale::Encode;
                                         let included_hashes: std::collections::HashSet<_> =
                                             block.extrinsic.guarantees.iter().map(|g| {
-                                                grey_crypto::blake2b_256(&g.report.encode())
+                                                grey_crypto::report_hash(&g.report)
                                             }).collect();
                                         let before = guarantor_state.pending_guarantees.len();
                                         guarantor_state.pending_guarantees.retain(|g| {
-                                            let h = grey_crypto::blake2b_256(&g.report.encode());
+                                            let h = grey_crypto::report_hash(&g.report);
                                             !included_hashes.contains(&h)
                                         });
                                         let removed = before - guarantor_state.pending_guarantees.len();

@@ -170,8 +170,7 @@ pub fn process_work_package(
     report.package_spec.erasure_root = erasure_root;
 
     // 4. Store all chunks locally
-    let encoded_report = report.encode();
-    let report_hash = grey_crypto::blake2b_256(&encoded_report);
+    let report_hash = grey_crypto::report_hash(&report);
 
     for (i, chunk) in chunks.iter().enumerate() {
         if let Err(e) = store.put_chunk(&report_hash, i as u16, chunk) {
@@ -223,8 +222,8 @@ pub fn process_work_package(
 /// Encode a guarantee for network transmission.
 /// Format: `[report_hash (32)][timeslot (4)][credential_count (2)][credentials...]`
 pub fn encode_guarantee(guarantee: &Guarantee) -> Vec<u8> {
+    let report_hash = grey_crypto::report_hash(&guarantee.report);
     let encoded_report = guarantee.report.encode();
-    let report_hash = grey_crypto::blake2b_256(&encoded_report);
 
     let mut buf = Vec::new();
     buf.extend_from_slice(&report_hash.0);
@@ -651,8 +650,7 @@ mod tests {
         assert_eq!(decoded.report.results.len(), 1);
 
         // Verify the claimed hash matches the actual report hash
-        let report_encoded = decoded.report.encode();
-        let computed_hash = grey_crypto::blake2b_256(&report_encoded);
+        let computed_hash = grey_crypto::report_hash(&decoded.report);
         assert_eq!(claimed_hash, computed_hash.0);
     }
 

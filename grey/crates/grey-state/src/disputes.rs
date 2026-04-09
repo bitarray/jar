@@ -278,7 +278,6 @@ pub fn process_disputes(
     // eq removenonpositive: Clear pending reports with non-good verdicts
     // For each core c: if H(E(ρ[c].r)) matches a verdict with t < ⌊2/3 V⌋ + 1, clear it
     {
-        use scale::Encode;
         let non_good: std::collections::BTreeSet<Hash> = verdict_summary
             .iter()
             .filter(|&&(_, positive)| positive < super_majority)
@@ -288,7 +287,7 @@ pub fn process_disputes(
         if !non_good.is_empty() {
             for slot in pending_reports.iter_mut() {
                 if let Some(pending) = slot.as_ref() {
-                    let report_hash = grey_crypto::blake2b_256(&pending.report.encode());
+                    let report_hash = grey_crypto::report_hash(&pending.report);
                     if non_good.contains(&report_hash) {
                         *slot = None;
                     }

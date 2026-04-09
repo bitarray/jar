@@ -14,7 +14,7 @@ pub mod keccak;
 pub mod shuffle;
 
 pub use bandersnatch::BandersnatchKeypair;
-pub use blake2b::{blake2b_256, header_hash};
+pub use blake2b::{blake2b_256, header_hash, report_hash};
 pub use bls::BlsKeypair;
 pub use ed25519::{Ed25519Keypair, ed25519_verify};
 pub use keccak::keccak_256;

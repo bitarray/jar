@@ -4,10 +4,16 @@ use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
 use grey_types::Hash;
 use grey_types::header::Header;
+use grey_types::work::WorkReport;
 
 /// Compute the Blake2b-256 header hash: H(E(header)).
 pub fn header_hash(header: &Header) -> Hash {
     blake2b_256(&scale::Encode::encode(header))
+}
+
+/// Compute the Blake2b-256 work-report hash: H(E(report)).
+pub fn report_hash(report: &WorkReport) -> Hash {
+    blake2b_256(&scale::Encode::encode(report))
 }
 
 /// Compute the Blake2b-256 hash of the given data.
