@@ -114,4 +114,20 @@ theorem decodeFixedNat_encodeFixedNat [JarConfig] (l x : Nat) :
   rw [decodePair_encodeFixedNat]
   simp
 
+-- ============================================================================
+-- encodeNat size bounds
+-- ============================================================================
+
+/-- encodeNat 0 produces exactly 1 byte. -/
+theorem encodeNat_zero_size [JarConfig] :
+    (Codec.encodeNat 0).size = 1 := by decide
+
+/-- encodeNat for small values (< 128) produces 1 byte — l=0 path. -/
+theorem encodeNat_small_size [JarConfig] :
+    (Codec.encodeNat 127).size = 1 := by decide
+
+/-- encodeNat for 128 produces 2 bytes — l=1 path. -/
+theorem encodeNat_128_size [JarConfig] :
+    (Codec.encodeNat 128).size = 2 := by decide
+
 end Jar.Proofs
