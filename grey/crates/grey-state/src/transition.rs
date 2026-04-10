@@ -168,7 +168,7 @@ fn apply_judgments(
 ) {
     let val_count = state.current_validators.len();
     let supermajority = Config::super_majority_of(val_count);
-    let one_third = val_count / 3;
+    let one_third = Config::one_third_of(val_count);
 
     // Process verdicts (eq 10.12-10.19)
     for verdict in &disputes.verdicts {

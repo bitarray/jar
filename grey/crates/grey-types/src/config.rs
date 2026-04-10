@@ -92,6 +92,11 @@ impl Config {
         (count * 2 / 3) + 1
     }
 
+    /// One-third threshold for a given validator count. GP#514.
+    pub fn one_third_of(count: usize) -> usize {
+        count / 3
+    }
+
     /// Valid validator count: multiples of 3 in [6, 3*(C+1)]. GP#514.
     pub fn is_valid_val_count(&self, z: u16) -> bool {
         z >= 6 && z <= 3 * (self.core_count + 1) && z.is_multiple_of(3)
