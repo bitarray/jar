@@ -197,3 +197,103 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Empty preimages always succeed regardless of account state.
+        #[test]
+        fn empty_preimages_always_ok(timeslot in 0u32..10000) {
+            let mut accounts = BTreeMap::new();
+            let result = process_preimages(&mut accounts, &[], timeslot);
+            prop_assert!(result.is_ok());
+            prop_assert!(result.unwrap().is_empty());
+        }
+
+        /// Unknown service always returns PreimageUnneeded.
+        #[test]
+        fn unknown_service_rejected(
+            service_id in 0u32..1000,
+            blob in proptest::collection::vec(any::<u8>(), 1..50),
+            timeslot in 0u32..10000,
+        ) {
+            let mut accounts = BTreeMap::new();
+            // No accounts at all
+            let result = process_preimages(&mut accounts, &[(service_id, blob)], timeslot);
+            prop_assert_eq!(result, Err(PreimageError::PreimageUnneeded));
+        }
+
+        /// A valid preimage stores the blob and returns correct stats.
+        #[test]
+        fn valid_preimage_stored_and_counted(
+            service_id in 0u32..100,
+            blob in proptest::collection::vec(any::<u8>(), 1..100),
+            timeslot in 1u32..10000,
+        ) {
+            let hash = grey_crypto::blake2b_256(&blob);
+            let len = blob.len() as u32;
+            let mut requests = BTreeMap::new();
+            requests.insert((hash, len), vec![0]);
+            let account = PreimageAccountData {
+                blobs: BTreeMap::new(),
+                requests,
+            };
+            let mut accounts = BTreeMap::new();
+            accounts.insert(service_id, account);
+
+            let blob_len = blob.len() as u64;
+            let result = process_preimages(&mut accounts, &[(service_id, blob.clone())], timeslot);
+            prop_assert!(result.is_ok());
+
+            let stats = result.unwrap();
+            prop_assert_eq!(stats[&service_id].provided_count, 1);
+            prop_assert_eq!(stats[&service_id].provided_size, blob_len);
+
+            // Blob should be stored in account
+            prop_assert!(accounts[&service_id].blobs.contains_key(&hash));
+            prop_assert_eq!(&accounts[&service_id].blobs[&hash], &blob);
+        }
+
+        /// Already-stored blob returns PreimageUnneeded.
+        #[test]
+        fn already_stored_rejected(
+            service_id in 0u32..100,
+            blob in proptest::collection::vec(any::<u8>(), 1..50),
+            timeslot in 0u32..10000,
+        ) {
+            let hash = grey_crypto::blake2b_256(&blob);
+            let len = blob.len() as u32;
+            let mut requests = BTreeMap::new();
+            requests.insert((hash, len), vec![0]);
+            let mut blobs = BTreeMap::new();
+            blobs.insert(hash, blob.clone()); // already stored
+            let account = PreimageAccountData { blobs, requests };
+            let mut accounts = BTreeMap::new();
+            accounts.insert(service_id, account);
+
+            let result = process_preimages(&mut accounts, &[(service_id, blob)], timeslot);
+            prop_assert_eq!(result, Err(PreimageError::PreimageUnneeded));
+        }
+
+        /// No request for the blob's hash → PreimageUnneeded.
+        #[test]
+        fn no_request_rejected(
+            service_id in 0u32..100,
+            blob in proptest::collection::vec(any::<u8>(), 1..50),
+            timeslot in 0u32..10000,
+        ) {
+            let account = PreimageAccountData {
+                blobs: BTreeMap::new(),
+                requests: BTreeMap::new(), // no requests
+            };
+            let mut accounts = BTreeMap::new();
+            accounts.insert(service_id, account);
+
+            let result = process_preimages(&mut accounts, &[(service_id, blob)], timeslot);
+            prop_assert_eq!(result, Err(PreimageError::PreimageUnneeded));
+        }
+    }
+}
