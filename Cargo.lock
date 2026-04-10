@@ -1696,6 +1696,7 @@ dependencies = [
  "grey-types",
  "hex",
  "javm",
+ "proptest",
  "scale",
  "serde",
  "serde_json",
