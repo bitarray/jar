@@ -5993,6 +5993,3063 @@
       "sigma2": 4252883
     }
   ],
+  "1e9ba62e392bc15c0a4e999932943cf2dad975dd": [
+    {
+      "commit": "1aeac099f06b49c7cf53b3b672f146ec36e88c0e",
+      "mu": 15845001,
+      "sigma2": 1469804
+    },
+    {
+      "commit": "a651f5e621a8242bcb03b0a39d72a8a4ab216200",
+      "mu": 15519575,
+      "sigma2": 4284180
+    },
+    {
+      "commit": "204e93abf18ab00e339d92787c6f807269517cdf",
+      "mu": 15127844,
+      "sigma2": 2253347
+    },
+    {
+      "commit": "04b4e010cab91068b7943ffc80689093e522da31",
+      "mu": 14974542,
+      "sigma2": 3053233
+    },
+    {
+      "commit": "fca92fc2a1f37481ade58cccf9576eb7c608fa40",
+      "mu": 14956232,
+      "sigma2": 2734298
+    },
+    {
+      "commit": "53540a0592711ad8884070acf5e3f72a981a8cad",
+      "mu": 14584462,
+      "sigma2": 2862751
+    },
+    {
+      "commit": "25c798d8161147e2360e620feb86372f0d897f15",
+      "mu": 14185130,
+      "sigma2": 1978573
+    },
+    {
+      "commit": "6d327fcbe8655c49821f71a41ccc383fff5f95a7",
+      "mu": 14118199,
+      "sigma2": 2242606
+    },
+    {
+      "commit": "23dfa48760d698e7d7ed27d5d91e7b051e98de02",
+      "mu": 13872842,
+      "sigma2": 4233254
+    },
+    {
+      "commit": "297ab3c118c35c3e0ffc7591a2bdd429ccf1ce36",
+      "mu": 13808521,
+      "sigma2": 1701839
+    },
+    {
+      "commit": "01b11069102e8f4131967907d752dd307b6a5ccf",
+      "mu": 13784497,
+      "sigma2": 3874620
+    },
+    {
+      "commit": "313ee6bbc5dd0115f079da8a49e842c83b43ce4a",
+      "mu": 13350509,
+      "sigma2": 2197857
+    },
+    {
+      "commit": "7aa5a5577c5ad4671044ac5abd9c0d79bdd31660",
+      "mu": 13055438,
+      "sigma2": 6224228
+    },
+    {
+      "commit": "8a89b5057b905896ec4e4159537b9017b41676e0",
+      "mu": 13037967,
+      "sigma2": 1219796
+    },
+    {
+      "commit": "e2436b4c004df0b8d1105421df1ae9bb91b7b896",
+      "mu": 13035119,
+      "sigma2": 1861386
+    },
+    {
+      "commit": "22eedf8e642678d19e155bac0d6277fa47971f54",
+      "mu": 12507841,
+      "sigma2": 3582388
+    },
+    {
+      "commit": "d3a0a95bb313e4c5c46e63ada4c505e6d5fd2930",
+      "mu": 12255034,
+      "sigma2": 1372459
+    },
+    {
+      "commit": "07c69fb5b2549ae858b403baa39808d4ee3e093c",
+      "mu": 12115923,
+      "sigma2": 1575009
+    },
+    {
+      "commit": "666c640f490300fbbff22ed5379147db4c211dbf",
+      "mu": 11845995,
+      "sigma2": 6294689
+    },
+    {
+      "commit": "382f3e466dd926db09cda1e84cc16baf28d60ced",
+      "mu": 11792362,
+      "sigma2": 5629981
+    },
+    {
+      "commit": "67c50ff2bdbe8206e85f9e22aff7f5ca102b3c12",
+      "mu": 11358623,
+      "sigma2": 4881394
+    },
+    {
+      "commit": "72e0c9d85669070597319082dee11783027daa34",
+      "mu": 11340214,
+      "sigma2": 2088650
+    },
+    {
+      "commit": "4a4150c8de2d120df1959647b36ba41708571551",
+      "mu": 11306896,
+      "sigma2": 7376939
+    },
+    {
+      "commit": "da6ed09cae82d408d5950d9add272a39b2c87032",
+      "mu": 11253527,
+      "sigma2": 1469699
+    },
+    {
+      "commit": "f60ef1fda240791df8e099173a96a230756f5eaa",
+      "mu": 11252598,
+      "sigma2": 1391802
+    },
+    {
+      "commit": "40d598e9760c41f25d725894855118dcb91981ae",
+      "mu": 10993097,
+      "sigma2": 1983398
+    },
+    {
+      "commit": "c3335a9bf88cbe2c42f6e00f98f83bc473b4b8c4",
+      "mu": 10899830,
+      "sigma2": 4726387
+    },
+    {
+      "commit": "b158cf3793623f6b152824b1906c577339dd9fe1",
+      "mu": 10734240,
+      "sigma2": 3533579
+    },
+    {
+      "commit": "f1cb071eb7b8d5c22251034209b0ac96454025ae",
+      "mu": 10704444,
+      "sigma2": 2325744
+    },
+    {
+      "commit": "e8287b5bcc8df640ca5d2bd62e2c586854850405",
+      "mu": 10583125,
+      "sigma2": 2071492
+    },
+    {
+      "commit": "fcc0b6d0928b9d665c18956e396172e23f674660",
+      "mu": 10413418,
+      "sigma2": 4020576
+    },
+    {
+      "commit": "e2986811a097b51f940302819abe66cf27e36cc8",
+      "mu": 10352096,
+      "sigma2": 1289002
+    },
+    {
+      "commit": "b012110bedc7f0ffca3ae37f38915afbc229c26e",
+      "mu": 10246880,
+      "sigma2": 852227
+    },
+    {
+      "commit": "96aff8f2c666b8d750f0fe6d2da9a85768535b0b",
+      "mu": 10213045,
+      "sigma2": 848563
+    },
+    {
+      "commit": "695e406c20102606928b9d95206874b935c16d05",
+      "mu": 10125673,
+      "sigma2": 10444007
+    },
+    {
+      "commit": "221fd66ad672497afc6d6f4704f35e3da1d7149e",
+      "mu": 10046216,
+      "sigma2": 3597498
+    },
+    {
+      "commit": "daf82941cbd071bc7729c7cf1ebb4da5002cb98c",
+      "mu": 9911731,
+      "sigma2": 3081563
+    },
+    {
+      "commit": "97d8b6b0c7e2e4e3a4027de03d3a8f0141999eea",
+      "mu": 9761702,
+      "sigma2": 8528516
+    },
+    {
+      "commit": "1129ab3ec3c093877966f8eb9b0ee3ed7f24a4c9",
+      "mu": 9757433,
+      "sigma2": 1131998
+    },
+    {
+      "commit": "9df419e4b0e526acec8fc98a06c668fb3087d37d",
+      "mu": 9756627,
+      "sigma2": 1085148
+    },
+    {
+      "commit": "c40f72b872a04aeb85eeab133ebca2607ef14214",
+      "mu": 9743963,
+      "sigma2": 2700420
+    },
+    {
+      "commit": "e6568a1e015f29e31881db74f544329196210153",
+      "mu": 9720947,
+      "sigma2": 1054385
+    },
+    {
+      "commit": "ce24e1d8caa4f66fe9661ee1916b934de32d51c0",
+      "mu": 9619552,
+      "sigma2": 1641316
+    },
+    {
+      "commit": "25cd98361aa1c6d8a8b4327ecae75cb7dea153f0",
+      "mu": 9483514,
+      "sigma2": 6740282
+    },
+    {
+      "commit": "886f14977d9684bead90c6c4df1c20dcae2b03a9",
+      "mu": 9448172,
+      "sigma2": 5426762
+    },
+    {
+      "commit": "f8059edfc0a31764a0a6131b8752fca4f75d1656",
+      "mu": 9412506,
+      "sigma2": 2007455
+    },
+    {
+      "commit": "1e8d908b172d7cdd241be6e8e53ac3f0dc6b9da6",
+      "mu": 9326840,
+      "sigma2": 7003207
+    },
+    {
+      "commit": "30167575d4552f29ce36900220f9e357e21fbe7a",
+      "mu": 9311055,
+      "sigma2": 1718285
+    },
+    {
+      "commit": "fa3085a89cefff23449478b7699a6358bafe277d",
+      "mu": 9287174,
+      "sigma2": 1912749
+    },
+    {
+      "commit": "3c9c3a1e234cd09f8a8dc1e2672e2a5a8ea1c4a9",
+      "mu": 9233391,
+      "sigma2": 3904197
+    },
+    {
+      "commit": "91e55459aab15771c912ecc0ad51e81d197711f2",
+      "mu": 9223506,
+      "sigma2": 1468458
+    },
+    {
+      "commit": "c39a838b6717f43ea82652021ec71e97e665451c",
+      "mu": 9172989,
+      "sigma2": 3262499
+    },
+    {
+      "commit": "cf0eab60946319f24314274e461987b71b47e404",
+      "mu": 9085152,
+      "sigma2": 7081403
+    },
+    {
+      "commit": "925d92ba875301c896b5070ee03fac9792659bff",
+      "mu": 8986720,
+      "sigma2": 1162652
+    },
+    {
+      "commit": "9b713305ca8564d507291f4749dbf23e35670d2a",
+      "mu": 8960524,
+      "sigma2": 1852453
+    },
+    {
+      "commit": "921e9fc5ef034d7dbe63557effaa010195ba2cac",
+      "mu": 8893757,
+      "sigma2": 1115636
+    },
+    {
+      "commit": "88c8114317a0712c78ee5583cd21ee5b6a9b0827",
+      "mu": 8865348,
+      "sigma2": 2541446
+    },
+    {
+      "commit": "c80d510155b47d3f42900b148de04cf5ef29a3cc",
+      "mu": 8759991,
+      "sigma2": 1199196
+    },
+    {
+      "commit": "fdfce7080d2ad0b3752fd62066174151bb292417",
+      "mu": 8712535,
+      "sigma2": 10110120
+    },
+    {
+      "commit": "64817c3411dcf063f6f7a7d6fa0afcc530cc19fc",
+      "mu": 8670872,
+      "sigma2": 886743
+    },
+    {
+      "commit": "6aef521afb23424e6cd354bfea2efaeeb2301c30",
+      "mu": 8575858,
+      "sigma2": 2317845
+    },
+    {
+      "commit": "440fb06d014d5932f7dcf168967542a9bc518443",
+      "mu": 8461175,
+      "sigma2": 10599613
+    },
+    {
+      "commit": "28c8f2f637a0c22eb7f4baa6c43c2c6659a69cdf",
+      "mu": 8432945,
+      "sigma2": 9030040
+    },
+    {
+      "commit": "04a1fdb001c9cba29e2a59045f864f3965b6ed0d",
+      "mu": 8340584,
+      "sigma2": 1289209
+    },
+    {
+      "commit": "5cba92b0f26e2cb9f4e7c0512e59eb74277e519a",
+      "mu": 8324802,
+      "sigma2": 1007930
+    },
+    {
+      "commit": "532353dd6f15b7da8a4847738c78d490bacc2838",
+      "mu": 8242562,
+      "sigma2": 1067615
+    },
+    {
+      "commit": "0367d6a8772e4a7ac5ad46c83d7bdaeb8ddb12e4",
+      "mu": 8146093,
+      "sigma2": 1401532
+    },
+    {
+      "commit": "2b57a392fb3e070db1ec2fb63c61c98a47d46937",
+      "mu": 8084846,
+      "sigma2": 699874
+    },
+    {
+      "commit": "e37781255775708fac44e46e90c8105d5a902163",
+      "mu": 7975567,
+      "sigma2": 7120560
+    },
+    {
+      "commit": "6c3cfe35568475c0680349a49c2b2f42a80a65d6",
+      "mu": 7899381,
+      "sigma2": 5464547
+    },
+    {
+      "commit": "cf72229ea5117d93c2a2adebcdfa7598651fd1bf",
+      "mu": 7864259,
+      "sigma2": 2859723
+    },
+    {
+      "commit": "6d050e34d904426e58b6ca2a003ff7670f3232ab",
+      "mu": 7844189,
+      "sigma2": 2223446
+    },
+    {
+      "commit": "36d25a6a86c547b9d6b89971a501b966b89d5351",
+      "mu": 7806491,
+      "sigma2": 559961
+    },
+    {
+      "commit": "080838c10018e23fe43c801b1b82c2ff06493848",
+      "mu": 7791173,
+      "sigma2": 538206
+    },
+    {
+      "commit": "4b127bb66ed775a7ccb786bb9db3e7f747b5b2aa",
+      "mu": 7761424,
+      "sigma2": 6828304
+    },
+    {
+      "commit": "9720b49ff24195b680c9effbb035fd3714e94a59",
+      "mu": 7733600,
+      "sigma2": 4694194
+    },
+    {
+      "commit": "0fa18dec08b3313b70ad59545ba90ff4e1ad4c50",
+      "mu": 7681871,
+      "sigma2": 6307694
+    },
+    {
+      "commit": "a81871e3468e1a08fc9b97be81eaf85c62a393ae",
+      "mu": 7569255,
+      "sigma2": 2117369
+    },
+    {
+      "commit": "92fc365a8662713c3872cdb91f83b3eb8de87fe6",
+      "mu": 7470898,
+      "sigma2": 669998
+    },
+    {
+      "commit": "bbe20170c7ec454a65ebbf72f527223e273ce802",
+      "mu": 7433800,
+      "sigma2": 12251925
+    },
+    {
+      "commit": "0c6dcb86698a6157edb4212bfbe8a2d8653b331a",
+      "mu": 7415027,
+      "sigma2": 9599368
+    },
+    {
+      "commit": "e76e7f71ed4d83fb962cc00e68ba77227b9de99c",
+      "mu": 7401895,
+      "sigma2": 3977188
+    },
+    {
+      "commit": "74ae3c6e34979d9d4de5d8caf2ab6f1f9fbbdcb2",
+      "mu": 7355674,
+      "sigma2": 1127655
+    },
+    {
+      "commit": "8d1daa64bfaf9dfc7d46e8a82fccb7688ed63da7",
+      "mu": 7344222,
+      "sigma2": 12214069
+    },
+    {
+      "commit": "ce7d975b31715f8ada070f656b020ae5bcb8ec15",
+      "mu": 7303591,
+      "sigma2": 379946
+    },
+    {
+      "commit": "1b5586273ac22938fbf481801be07166826c3f66",
+      "mu": 7255466,
+      "sigma2": 8142803
+    },
+    {
+      "commit": "822a39807abfd8651b291d90872c2219912d7479",
+      "mu": 7251105,
+      "sigma2": 995579
+    },
+    {
+      "commit": "e74f4cb9607b4f02bf055a4d06e381de8e5069ce",
+      "mu": 7229506,
+      "sigma2": 6658044
+    },
+    {
+      "commit": "7dff8587fbd2b12277b8ab1d455e1977f7257af6",
+      "mu": 7161226,
+      "sigma2": 2220570
+    },
+    {
+      "commit": "dc0f542f62ca625e1d17172e692a3bcbba0ccba6",
+      "mu": 7154026,
+      "sigma2": 9101848
+    },
+    {
+      "commit": "c6315b6a9e131bbd4c681b5034923eba51330601",
+      "mu": 7141252,
+      "sigma2": 10269224
+    },
+    {
+      "commit": "ee5dab3acc079898e099fc68c1f3d697e102377c",
+      "mu": 7137586,
+      "sigma2": 603917
+    },
+    {
+      "commit": "74c48b0fc7bfe39d01798f4184afbe86e5668dea",
+      "mu": 7123822,
+      "sigma2": 7519425
+    },
+    {
+      "commit": "77e915feb1e5538bf1edba0acf78e73012024039",
+      "mu": 7122734,
+      "sigma2": 2485423
+    },
+    {
+      "commit": "4eb756160d8816faef9f3b32b4e041a9705ddecb",
+      "mu": 7080657,
+      "sigma2": 5946524
+    },
+    {
+      "commit": "1fb146be76ea09d3bc2e101fdd0ad226b1dfbe86",
+      "mu": 7045070,
+      "sigma2": 1955661
+    },
+    {
+      "commit": "5d0db41bbcffe9ebc0d85003affa0a69e377d860",
+      "mu": 7003123,
+      "sigma2": 5975214
+    },
+    {
+      "commit": "6ea885ce889ae33ecae31c04980f14ed9879b2f3",
+      "mu": 6960683,
+      "sigma2": 13251792
+    },
+    {
+      "commit": "5776cc662e791b586503bd25e3e7f6c2b2e91136",
+      "mu": 6937349,
+      "sigma2": 7618420
+    },
+    {
+      "commit": "e686a41f900ef8c0e6cb971a14a75abc79c1428c",
+      "mu": 6846944,
+      "sigma2": 8149069
+    },
+    {
+      "commit": "2da45c7a985c956a759ef34230bd52aed8e833d5",
+      "mu": 6839486,
+      "sigma2": 1439559
+    },
+    {
+      "commit": "bc6e157a572a438dfd6919d9817e4a56aedd3902",
+      "mu": 6825023,
+      "sigma2": 854870
+    },
+    {
+      "commit": "399dc8eabb59d05cd85e521cc5c11eb2d8c88e86",
+      "mu": 6797863,
+      "sigma2": 5464474
+    },
+    {
+      "commit": "568b452ddaf065009e2330cb751c2c49df954fe2",
+      "mu": 6780370,
+      "sigma2": 13918142
+    },
+    {
+      "commit": "9b74f920bb4b15f1263279ddb35c5de890a3c385",
+      "mu": 6756798,
+      "sigma2": 9343114
+    },
+    {
+      "commit": "539ef501ee51bcd133f0fbd5a73d6dc3a7fab04e",
+      "mu": 6755462,
+      "sigma2": 1462969
+    },
+    {
+      "commit": "66226fe980d3038310eee4e19b81aa69ef62e728",
+      "mu": 6665596,
+      "sigma2": 1594861
+    },
+    {
+      "commit": "e634c22f0824b480eb5011a2ca8e6c90a5be89ec",
+      "mu": 6622391,
+      "sigma2": 816817
+    },
+    {
+      "commit": "e45167a3a6966bc66d698810297968417d93b78e",
+      "mu": 6611226,
+      "sigma2": 13060949
+    },
+    {
+      "commit": "2226657a14fd8a10a6a85f53374f87c61269de4b",
+      "mu": 6597373,
+      "sigma2": 9964689
+    },
+    {
+      "commit": "377d69dd185095d76af13dd136467a38edde838f",
+      "mu": 6546482,
+      "sigma2": 1098513
+    },
+    {
+      "commit": "f72d1a87a37f75c3d63bb234db60ca453ffb1efe",
+      "mu": 6535215,
+      "sigma2": 3777999
+    },
+    {
+      "commit": "439d8825999935447d84448e99f879422520f035",
+      "mu": 6471166,
+      "sigma2": 3239569
+    },
+    {
+      "commit": "abb24b0c83d36362bd1b74569772ef72ac79b5d0",
+      "mu": 6462450,
+      "sigma2": 1169249
+    },
+    {
+      "commit": "a04fdcac499fe0e6c1de45ee0f74f9dad3bb698f",
+      "mu": 6459125,
+      "sigma2": 967873
+    },
+    {
+      "commit": "6b4d0f45f237c5553295fd29df52577f51cdaea5",
+      "mu": 6449711,
+      "sigma2": 8783445
+    },
+    {
+      "commit": "7afa589ac106913b2ab370d84807f901c5e391ab",
+      "mu": 6390021,
+      "sigma2": 1211148
+    },
+    {
+      "commit": "66a3bcec06a32095735014b11abaa7d68a88b015",
+      "mu": 6352445,
+      "sigma2": 2312733
+    },
+    {
+      "commit": "31bda0df79c3c2bb03e43456169510d01dc43159",
+      "mu": 6310652,
+      "sigma2": 5363963
+    },
+    {
+      "commit": "07ce1d19377debb694bae2fa9b023306f9af8db7",
+      "mu": 6218588,
+      "sigma2": 10108518
+    },
+    {
+      "commit": "48561f65493d5e86a031aa8268143549493518a8",
+      "mu": 6208707,
+      "sigma2": 7980904
+    },
+    {
+      "commit": "e8ab406a54ff202c80b50c7553fea57cd277ec37",
+      "mu": 6198946,
+      "sigma2": 4613406
+    },
+    {
+      "commit": "58285acdb863f44e8e39cdb3887955194dbbe454",
+      "mu": 6037737,
+      "sigma2": 7589474
+    },
+    {
+      "commit": "3cbfb1ef431faffbf098e8bc5611d1e55376eb57",
+      "mu": 5992988,
+      "sigma2": 2303138
+    },
+    {
+      "commit": "d07739b0357f0913d4d17932f57586a311baccad",
+      "mu": 5874692,
+      "sigma2": 7903151
+    },
+    {
+      "commit": "0cbdade9ce35e3210dc46039ca7d2c11f14adc51",
+      "mu": 5835257,
+      "sigma2": 3244309
+    },
+    {
+      "commit": "424a4e4d0d543b467a9950c48d716fbe7da1ab0a",
+      "mu": 5832529,
+      "sigma2": 9327730
+    },
+    {
+      "commit": "ca24d821d062fb1c998d6a991fdb32f4a0461121",
+      "mu": 5830885,
+      "sigma2": 817807
+    },
+    {
+      "commit": "b624f0ddecab7ec092315b77c720692b5c87b1ce",
+      "mu": 5775277,
+      "sigma2": 476646
+    },
+    {
+      "commit": "ceb4cd5f202b2476c98e24486c42ac42d860e7ef",
+      "mu": 5733419,
+      "sigma2": 1053925
+    },
+    {
+      "commit": "800197504f84c614a519ce9ae534f2a3fa93e08b",
+      "mu": 5715831,
+      "sigma2": 873434
+    },
+    {
+      "commit": "04594f0001c49d50f9ef9bf6c756298f7dc3c178",
+      "mu": 5698556,
+      "sigma2": 1452710
+    },
+    {
+      "commit": "8094f48bd6d0800cf352675d205c6474474aa60e",
+      "mu": 5692564,
+      "sigma2": 1045403
+    },
+    {
+      "commit": "84a62cd5ce1082ebe0d83884ee21b9dc1e6bd24d",
+      "mu": 5676810,
+      "sigma2": 2416041
+    },
+    {
+      "commit": "2e833634b01906c057d0172eecf0000ec64757fe",
+      "mu": 5639166,
+      "sigma2": 5156505
+    },
+    {
+      "commit": "de858b3932908998712ee23d01267d13300c072a",
+      "mu": 5619017,
+      "sigma2": 4934790
+    },
+    {
+      "commit": "2e03f64e5289d5f7597068327156f4ad6b938a80",
+      "mu": 5604596,
+      "sigma2": 8085899
+    },
+    {
+      "commit": "0f1e552672e50476d1aef441a61e53a66792e7d3",
+      "mu": 5595591,
+      "sigma2": 2197397
+    },
+    {
+      "commit": "45ff2c8169633dade2789f1ca37c1609109c7c47",
+      "mu": 5577705,
+      "sigma2": 5036118
+    },
+    {
+      "commit": "df09cbf232b9736dffb1309b69140891add06a9f",
+      "mu": 5569569,
+      "sigma2": 4456104
+    },
+    {
+      "commit": "bb364dffc5d1a2d079b392395c6284486fe4d6fe",
+      "mu": 5528951,
+      "sigma2": 8499531
+    },
+    {
+      "commit": "4fa27cff3dcad77a9fd4f78b35a3b3b6e9a76f71",
+      "mu": 5505433,
+      "sigma2": 12718498
+    },
+    {
+      "commit": "b141a6e15e6ae0ca938c49104551abc5e40d99d6",
+      "mu": 5499005,
+      "sigma2": 1441243
+    },
+    {
+      "commit": "f271ebafd947e9833304541a4af7acf6795a47b0",
+      "mu": 5399948,
+      "sigma2": 12149627
+    },
+    {
+      "commit": "93d212d6756174b1a978b2080d927a15cceaf9ca",
+      "mu": 5397815,
+      "sigma2": 12843704
+    },
+    {
+      "commit": "9dfb99638d28aa89ae1372e24232e53196ea418d",
+      "mu": 5292796,
+      "sigma2": 9522010
+    },
+    {
+      "commit": "23671044e43d6df40f930266525300b898b011b2",
+      "mu": 5285914,
+      "sigma2": 13174268
+    },
+    {
+      "commit": "24c4a1882a529eea6221349e20ba276969dd67db",
+      "mu": 5165525,
+      "sigma2": 2452662
+    },
+    {
+      "commit": "7ff56b0fdb79e3b687d4a0256ff66e3dc5be442f",
+      "mu": 5147413,
+      "sigma2": 12931694
+    },
+    {
+      "commit": "593716da714c7b40cc94efc4286cd5f58f6c46d4",
+      "mu": 5129328,
+      "sigma2": 956212
+    },
+    {
+      "commit": "859bb5a1c13165bf7e6eb02897e9fb77a7c367c1",
+      "mu": 5113726,
+      "sigma2": 13283405
+    },
+    {
+      "commit": "6698ea57d04fbac111fe8ad9f0b3f670f90a6096",
+      "mu": 5107685,
+      "sigma2": 595287
+    },
+    {
+      "commit": "82fd2fe819660e0a733202aeb809d058fda7aac1",
+      "mu": 5099725,
+      "sigma2": 1223243
+    },
+    {
+      "commit": "1a3931bab30e93f389377705fc7e3e24e5e71971",
+      "mu": 5083945,
+      "sigma2": 3751839
+    },
+    {
+      "commit": "92853708622a9b5e0ab29ed5e5056e506e9b63d5",
+      "mu": 5079548,
+      "sigma2": 2169615
+    },
+    {
+      "commit": "d2e320ffd28a80ee785f18753cb03852f62a2667",
+      "mu": 5078861,
+      "sigma2": 7484087
+    },
+    {
+      "commit": "ecaea856846be005e1100d7aebd00b2895f2b633",
+      "mu": 5072636,
+      "sigma2": 8494199
+    },
+    {
+      "commit": "5099f8c07c3d1a5343e6bab469c3d74e211d72a3",
+      "mu": 4999376,
+      "sigma2": 14084730
+    },
+    {
+      "commit": "a99ced4e721b3763f6fcbb7ce2a6ef8e50a8993f",
+      "mu": 4989939,
+      "sigma2": 7137344
+    },
+    {
+      "commit": "89fd45f0ae717b27de2012637d870b365c31002f",
+      "mu": 4964475,
+      "sigma2": 12878546
+    },
+    {
+      "commit": "762df649847c4b8f16aa275a6c157522a37142fa",
+      "mu": 4913772,
+      "sigma2": 740327
+    },
+    {
+      "commit": "def679ab46dfb21e7f3275e8581dc86c9450eb50",
+      "mu": 4903573,
+      "sigma2": 1401941
+    },
+    {
+      "commit": "a276fa1a93c5835c401d93fb599bc86b3cad7599",
+      "mu": 4899068,
+      "sigma2": 8643899
+    },
+    {
+      "commit": "2d8a16dcee484d8094a03a756a2f463cc5c9a9e8",
+      "mu": 4895844,
+      "sigma2": 14208493
+    },
+    {
+      "commit": "605696b89feb23062bc1716a27bc03438e2eebea",
+      "mu": 4865929,
+      "sigma2": 12747500
+    },
+    {
+      "commit": "13f3f841ff67a6bb0c3c1df08b99a29c6c86b056",
+      "mu": 4862453,
+      "sigma2": 1785482
+    },
+    {
+      "commit": "e70744e5401acdea11ef6f9bb2f371187d7c9fb7",
+      "mu": 4850725,
+      "sigma2": 1966358
+    },
+    {
+      "commit": "ca4b480da1ed301a96b6731cb8a884149b2bcc87",
+      "mu": 4812765,
+      "sigma2": 1663349
+    },
+    {
+      "commit": "aab97e3bb83be760154db75335b9d4752a33b4ed",
+      "mu": 4789639,
+      "sigma2": 4011053
+    },
+    {
+      "commit": "ead3eba782982a21eda7cbf30801d68d0af148db",
+      "mu": 4788100,
+      "sigma2": 4242387
+    },
+    {
+      "commit": "c0fb0cd996a315e12d9be65eed9e66645dc7bf3c",
+      "mu": 4769367,
+      "sigma2": 3377879
+    },
+    {
+      "commit": "c81ea25af0d9e7f27a09cb744aafc556d0826f90",
+      "mu": 4709247,
+      "sigma2": 2053124
+    },
+    {
+      "commit": "6cdf08c69c5e61a3b128dbb51f8ea741a1b24b4c",
+      "mu": 4678504,
+      "sigma2": 2071398
+    },
+    {
+      "commit": "cb48a6fe5a6bc65592fa3c8ee42732babfcc9d68",
+      "mu": 4674833,
+      "sigma2": 12675550
+    },
+    {
+      "commit": "8c0e14ae96bc80ea8612c580e0652cc37df3dae4",
+      "mu": 4670437,
+      "sigma2": 14654276
+    },
+    {
+      "commit": "56d61748375b45cad0b76c2877961ade7042b412",
+      "mu": 4636693,
+      "sigma2": 873281
+    },
+    {
+      "commit": "2aa2dea31d627624010478e4666bf1552b4af396",
+      "mu": 4590625,
+      "sigma2": 14647312
+    },
+    {
+      "commit": "2581a3cd5ad326b61b7485f3d0b711973b53d5b2",
+      "mu": 4583957,
+      "sigma2": 8787402
+    },
+    {
+      "commit": "106a6ea7216be26f17bd5d88be9f1aef03cea074",
+      "mu": 4490975,
+      "sigma2": 951139
+    },
+    {
+      "commit": "1b8b2e0afae33414a8c57ab54caca61f99f46ee6",
+      "mu": 4478904,
+      "sigma2": 2104532
+    },
+    {
+      "commit": "e2b5d06755f0b2dd5369d04406076eb5f7c7f861",
+      "mu": 4449601,
+      "sigma2": 571775
+    },
+    {
+      "commit": "a243fc9ade95caac2b90350ad4a9f3fa0a669e8a",
+      "mu": 4445273,
+      "sigma2": 8199455
+    },
+    {
+      "commit": "8fccc0c326ee2c2a16dc2ecf1fddd33765ddd1d9",
+      "mu": 4420951,
+      "sigma2": 2729612
+    },
+    {
+      "commit": "deac920ed61fd690679e664ad3958bedfaeceae8",
+      "mu": 4408848,
+      "sigma2": 1753835
+    },
+    {
+      "commit": "b2b570a6cd0a35efdd7a1a3ae3b1aaf017100599",
+      "mu": 4402381,
+      "sigma2": 3718872
+    },
+    {
+      "commit": "f69e82a644cb669b825ba09535f5ca74cb4363c8",
+      "mu": 4379554,
+      "sigma2": 5814748
+    },
+    {
+      "commit": "04a6722d30a881e45c90e68e9e98786e8dc3daed",
+      "mu": 4270307,
+      "sigma2": 2153666
+    },
+    {
+      "commit": "1b08faa7d9302f3ac94831437817d04ae572f655",
+      "mu": 4250004,
+      "sigma2": 829798
+    },
+    {
+      "commit": "5b5494422fe4704c0be9e87b56ebf677e9c691d3",
+      "mu": 4242233,
+      "sigma2": 2076857
+    },
+    {
+      "commit": "2fe265932044041196e38090cc8504d4505fe74f",
+      "mu": 4238621,
+      "sigma2": 12022263
+    },
+    {
+      "commit": "f26d7282ebd257f86d90a8c3bea304639a382fcb",
+      "mu": 4136131,
+      "sigma2": 1665698
+    },
+    {
+      "commit": "9775bf03cf6ac56d8a7f4752b56297a949fc6ad8",
+      "mu": 4101517,
+      "sigma2": 3517404
+    },
+    {
+      "commit": "5c014e0fbee518e22504441b1d8dc6c52a65b3a0",
+      "mu": 4074866,
+      "sigma2": 4728479
+    },
+    {
+      "commit": "c241e7bc0a5fa92d4cc0f8358e6773ddfd8942f0",
+      "mu": 4072112,
+      "sigma2": 1786603
+    },
+    {
+      "commit": "ecb53fe9164e58001036b0f59b9c9ea349d35d82",
+      "mu": 4069059,
+      "sigma2": 2039999
+    },
+    {
+      "commit": "f2a4e55a25da988a434e29123d2b3c093acda86e",
+      "mu": 4047829,
+      "sigma2": 10944118
+    },
+    {
+      "commit": "82cf20bf0d9600160ffdc45f2e3c70b8474c6895",
+      "mu": 4031756,
+      "sigma2": 508153
+    },
+    {
+      "commit": "d2d2805fca6fcb63df9b506ae665278af86a4cc4",
+      "mu": 3975872,
+      "sigma2": 12335717
+    },
+    {
+      "commit": "c1af41f74db2d2a940cfb488f0a80cee71308225",
+      "mu": 3961491,
+      "sigma2": 7702800
+    },
+    {
+      "commit": "320c49d249f95cc491826d2e6302c75970c895fd",
+      "mu": 3911510,
+      "sigma2": 4884557
+    },
+    {
+      "commit": "c80c727160ac49b57c653b877de78a2d95708581",
+      "mu": 3873362,
+      "sigma2": 7986829
+    },
+    {
+      "commit": "bb7b6d29b9fc6cce8f723746acf1c2ca5db9ae5a",
+      "mu": 3866683,
+      "sigma2": 8233122
+    },
+    {
+      "commit": "954ceaea85fc2f10ef63cdb99de21b830f105cc8",
+      "mu": 3820621,
+      "sigma2": 4809104
+    },
+    {
+      "commit": "d645a4ec083e385735022dc6f1941705758636a0",
+      "mu": 3799253,
+      "sigma2": 848771
+    },
+    {
+      "commit": "3c325b7cc84478d4a5a0042b53aa963306d44737",
+      "mu": 3754418,
+      "sigma2": 889334
+    },
+    {
+      "commit": "56963a702b5bfc54c3b557fc3ab3d51186ab6f1e",
+      "mu": 3664008,
+      "sigma2": 8640894
+    },
+    {
+      "commit": "49d54cff432f43898c72fb57a3d88d4d128b5f6e",
+      "mu": 3648948,
+      "sigma2": 809607
+    },
+    {
+      "commit": "7a8e5fbbb039b2a85ee4d78c529e976f353ff509",
+      "mu": 3634343,
+      "sigma2": 5452936
+    },
+    {
+      "commit": "9053d1ca4de87dfbcc58e146e6191fcf372381d1",
+      "mu": 3579993,
+      "sigma2": 9090401
+    },
+    {
+      "commit": "a1a8ae03d66177d9e6b005d3a47d1d4fba10ae09",
+      "mu": 3562108,
+      "sigma2": 12866953
+    },
+    {
+      "commit": "71edc1565058181965a0671b8fbcf18471e4e5b5",
+      "mu": 3551658,
+      "sigma2": 9152808
+    },
+    {
+      "commit": "0cc98f71153212c59cf2fb17c7d1cb5372abaa0f",
+      "mu": 3523478,
+      "sigma2": 3458065
+    },
+    {
+      "commit": "682bda33cd09cb940bdbc3cfe823f10a824a3e26",
+      "mu": 3482916,
+      "sigma2": 1711792
+    },
+    {
+      "commit": "8c441e07244fa866d0e9647ff5cbef50de9eb0cc",
+      "mu": 3447772,
+      "sigma2": 1004691
+    },
+    {
+      "commit": "b9e91d8b39835f0b962198d04c00f97268ff50ec",
+      "mu": 3437324,
+      "sigma2": 7090921
+    },
+    {
+      "commit": "824f7ac95941c50b3dca4e30ae4f15cd8dc5842c",
+      "mu": 3430687,
+      "sigma2": 2469481
+    },
+    {
+      "commit": "ff7433db1154f6d55de3f0a80132b0863b2a9457",
+      "mu": 3424528,
+      "sigma2": 3326958
+    },
+    {
+      "commit": "c5f24b04253478eeaaa89a61f4929ce044d44ad9",
+      "mu": 3384785,
+      "sigma2": 2481945
+    },
+    {
+      "commit": "4438943bc2d36f685572df9321021cce91607cea",
+      "mu": 3383510,
+      "sigma2": 3170776
+    },
+    {
+      "commit": "87afdf4026c3ced7315b31f91db74455cc79eed0",
+      "mu": 3380890,
+      "sigma2": 13880826
+    },
+    {
+      "commit": "c3efa051e0c8f36fd1b28b2990a155d7a0a1e41c",
+      "mu": 3373327,
+      "sigma2": 545582
+    },
+    {
+      "commit": "3bc51a2c70ff9b9e3ddfd21ef6eef377515ffcbd",
+      "mu": 3365817,
+      "sigma2": 2856317
+    },
+    {
+      "commit": "b9b76b1ff4224185b75bd1f4769ad5dc7ba1fd9b",
+      "mu": 3358184,
+      "sigma2": 7796827
+    },
+    {
+      "commit": "606640e04e7c265e722a64f8cf272458a771e669",
+      "mu": 3353201,
+      "sigma2": 4689308
+    },
+    {
+      "commit": "f6098d9ea9aa8cd5f23961d45c773665b48636e2",
+      "mu": 3317271,
+      "sigma2": 2800540
+    },
+    {
+      "commit": "5f7d27a4f71354888c0b6616768e45834d2f3d9d",
+      "mu": 3310097,
+      "sigma2": 506207
+    },
+    {
+      "commit": "0fa8e53cfbf2d7a1d313a827d5b60719ad1f2419",
+      "mu": 3255185,
+      "sigma2": 1341755
+    },
+    {
+      "commit": "cc9f75b674395569f0e7b8b86dc6b45ddd73f310",
+      "mu": 3087447,
+      "sigma2": 913543
+    },
+    {
+      "commit": "6ead66a356122676145cdb115fe8292ca40d3aee",
+      "mu": 3073450,
+      "sigma2": 4484760
+    },
+    {
+      "commit": "6e146cfbd618b35a0932fbca546a96f510106d82",
+      "mu": 3066404,
+      "sigma2": 423690
+    },
+    {
+      "commit": "f6af870123caed7db28782eda6fd18f8a793d68b",
+      "mu": 3051511,
+      "sigma2": 2401765
+    },
+    {
+      "commit": "b7aa7e80ebca8dafe407081c36c578d8dd2e338c",
+      "mu": 3043977,
+      "sigma2": 7515588
+    },
+    {
+      "commit": "66f55c02edd31667ca753c317be9d368b96c00e3",
+      "mu": 3043671,
+      "sigma2": 11810623
+    },
+    {
+      "commit": "34d3e3e388c0df97cc11b279209b5a4c4c8e891b",
+      "mu": 3034623,
+      "sigma2": 12192514
+    },
+    {
+      "commit": "1e9ba62e392bc15c0a4e999932943cf2dad975dd",
+      "mu": 3026411,
+      "sigma2": 14506137
+    },
+    {
+      "commit": "fb0cbdbd7bca713532f6b1084b654dc36a77d9e6",
+      "mu": 3022692,
+      "sigma2": 936484
+    },
+    {
+      "commit": "2b57ee5299bc76ab9d00f81f26f254f95d5cfacf",
+      "mu": 3017464,
+      "sigma2": 6279524
+    },
+    {
+      "commit": "c69e2a187f0a5065efb50a593d2aae31049f3742",
+      "mu": 3008900,
+      "sigma2": 8459381
+    },
+    {
+      "commit": "8e7129c8afc76a8c2bd8ea44949534aaa01d9186",
+      "mu": 2994318,
+      "sigma2": 8157718
+    },
+    {
+      "commit": "a6e9c4b854fd78aebc2e42880c63e971c69e31c7",
+      "mu": 2980825,
+      "sigma2": 8024488
+    },
+    {
+      "commit": "e57535bed2a7c76b78047d8fd8129c7ff7be614b",
+      "mu": 2967490,
+      "sigma2": 12699992
+    },
+    {
+      "commit": "b7e9587f74463fc4f2bd2a44184ff47d42c5a3fd",
+      "mu": 2966693,
+      "sigma2": 3220931
+    },
+    {
+      "commit": "d26a1c67bd7f74df25b2961fc1c14fe02d05b24f",
+      "mu": 2946143,
+      "sigma2": 2698287
+    },
+    {
+      "commit": "212403b4854cbfc234855230f04206f4c6f0ad63",
+      "mu": 2936842,
+      "sigma2": 1542323
+    },
+    {
+      "commit": "4180a7683240bc019248a7289af5c49bc28da590",
+      "mu": 2911059,
+      "sigma2": 1145411
+    },
+    {
+      "commit": "878f02f3feba27170aee47be0835d5a19a78d75c",
+      "mu": 2894933,
+      "sigma2": 2988986
+    },
+    {
+      "commit": "3aac207e8680bec9dfc0bdd3b44c9d66c0b38b14",
+      "mu": 2873857,
+      "sigma2": 4434181
+    },
+    {
+      "commit": "aa0435f1b4c07c30bc83e7005f44b16f0a68ea9e",
+      "mu": 2865458,
+      "sigma2": 2933194
+    },
+    {
+      "commit": "d2d08201429a6f11d5efd7735ac6b3f1217c351f",
+      "mu": 2812589,
+      "sigma2": 5090282
+    },
+    {
+      "commit": "ffd55ab6996ef72c4699894b515f8bc2215fd7f0",
+      "mu": 2789366,
+      "sigma2": 4034302
+    },
+    {
+      "commit": "4a8f17ffcee398d72abf5527861d570af17ffbc7",
+      "mu": 2762676,
+      "sigma2": 719360
+    },
+    {
+      "commit": "7eb4e7cad3d9fe43f6d6169a606fa492156c3682",
+      "mu": 2748226,
+      "sigma2": 2060934
+    },
+    {
+      "commit": "44762083cd6eaa42d388c783d502c5cc2af2f75e",
+      "mu": 2724389,
+      "sigma2": 3982375
+    },
+    {
+      "commit": "b04093d972db79209ca2c9a5f24da7a8b7f5952a",
+      "mu": 2704201,
+      "sigma2": 871576
+    },
+    {
+      "commit": "71062093c0f06353ff4b23a747e76102159f458f",
+      "mu": 2628274,
+      "sigma2": 1648589
+    },
+    {
+      "commit": "2cf80125734f6ba3d05a1fd2acf47c7ef7fcafee",
+      "mu": 2476460,
+      "sigma2": 2182646
+    },
+    {
+      "commit": "864a35ae7afb25c6f25baf4f793de176888ae733",
+      "mu": 2471220,
+      "sigma2": 4323743
+    },
+    {
+      "commit": "eb203849515be74579cfbce8ddd8a97203a9fdfd",
+      "mu": 2463211,
+      "sigma2": 8524468
+    },
+    {
+      "commit": "55e0195c18e0596afd925d8ebcfb3f90475c12da",
+      "mu": 2461283,
+      "sigma2": 1467671
+    },
+    {
+      "commit": "3478072d6362a530def8451ee676d6bc7b8a99c5",
+      "mu": 2437541,
+      "sigma2": 1806000
+    },
+    {
+      "commit": "7b9a2abcb2148b6317ec7f821f0fd844c0a3e24e",
+      "mu": 2417348,
+      "sigma2": 5134845
+    },
+    {
+      "commit": "c2d8eaa3fdb0c72ad2126a271c0c40854ecaac79",
+      "mu": 2391262,
+      "sigma2": 1572798
+    },
+    {
+      "commit": "fdc488c82b85e0b781560eab5c12857aacaf0ce5",
+      "mu": 2300446,
+      "sigma2": 1156781
+    },
+    {
+      "commit": "5eb0525bb8d20c46342ddbdde4fbd5ca2a3ec768",
+      "mu": 2296873,
+      "sigma2": 2161243
+    },
+    {
+      "commit": "5908921bc7d11aade58144888d9841c967836d3b",
+      "mu": 2277347,
+      "sigma2": 8412241
+    },
+    {
+      "commit": "d5ab12f18336928663b36012287e0bece7db3322",
+      "mu": 2203960,
+      "sigma2": 1316616
+    },
+    {
+      "commit": "ef44e24c0a7fabb1558be8d7de407e3694da2956",
+      "mu": 2127266,
+      "sigma2": 8444562
+    },
+    {
+      "commit": "c4b27585c6fd0e55823dd5fceb88d37ea9faa851",
+      "mu": 2090070,
+      "sigma2": 7952129
+    },
+    {
+      "commit": "835adfee995fbd0ee054e9bcc86448dc569a7c4a",
+      "mu": 2079317,
+      "sigma2": 3329167
+    },
+    {
+      "commit": "7c252edbc8ab1fae6cfa0c71d95950c92c650174",
+      "mu": 2072791,
+      "sigma2": 1881377
+    },
+    {
+      "commit": "e23cfed2431cf67e40aa3aa22343c51692e396b8",
+      "mu": 2057446,
+      "sigma2": 1344576
+    },
+    {
+      "commit": "1c45b1752cefcfba56ae07994e1b55425db09a47",
+      "mu": 2033460,
+      "sigma2": 6509288
+    },
+    {
+      "commit": "031335660ba59accf18ab4c1e3941070a784d96b",
+      "mu": 2009349,
+      "sigma2": 3958326
+    },
+    {
+      "commit": "59fa15db47a070cfe99c4e5c317dbec214dc0618",
+      "mu": 1957661,
+      "sigma2": 1314733
+    },
+    {
+      "commit": "a899517f3ba416f84308486154bc309fbcac07f2",
+      "mu": 1937562,
+      "sigma2": 1326059
+    },
+    {
+      "commit": "b6ac963a4f0879ca6501f268a30f60707b734e1a",
+      "mu": 1884637,
+      "sigma2": 969292
+    },
+    {
+      "commit": "6f3d614563b4edda6165f65585df65a815894335",
+      "mu": 1860318,
+      "sigma2": 612135
+    },
+    {
+      "commit": "225e6e60eb36aa69ccb9f3beb2d09f5b3696375d",
+      "mu": 1853970,
+      "sigma2": 1580211
+    },
+    {
+      "commit": "0a483d08c118be2a5a5baec2365d4a0f0d47c4a6",
+      "mu": 1853351,
+      "sigma2": 11908629
+    },
+    {
+      "commit": "d4cf73bee13c86b8dfd070ef5f007889fe0170c9",
+      "mu": 1847056,
+      "sigma2": 14395706
+    },
+    {
+      "commit": "8a8aa7e0d8b9f2ac8ec10b4d308fd876c34ec66d",
+      "mu": 1839097,
+      "sigma2": 7026890
+    },
+    {
+      "commit": "d3cdc4c26f61ae39a82e129859ca69f0f97d54e3",
+      "mu": 1835209,
+      "sigma2": 648129
+    },
+    {
+      "commit": "3c5fcb887132bd8bee62ce856d65bf994d98d7e9",
+      "mu": 1804034,
+      "sigma2": 3061330
+    },
+    {
+      "commit": "3092bbc03f359d7ef4368549fd330cf830abc072",
+      "mu": 1787505,
+      "sigma2": 1466312
+    },
+    {
+      "commit": "556827a5070156674cfd29d317671ea395b02f6b",
+      "mu": 1787458,
+      "sigma2": 538932
+    },
+    {
+      "commit": "332c2889b0afd984ff5193ec633d7cb3f0a34128",
+      "mu": 1778616,
+      "sigma2": 13638514
+    },
+    {
+      "commit": "401e66f27f602e599b392c98667c265c8a484bca",
+      "mu": 1772662,
+      "sigma2": 877011
+    },
+    {
+      "commit": "d11a39587be9030ca31e37e55ce67b61ec67a187",
+      "mu": 1742308,
+      "sigma2": 2704293
+    },
+    {
+      "commit": "1569d3ea7c2419866062139fd3fec0e16bbc2f96",
+      "mu": 1720675,
+      "sigma2": 3090850
+    },
+    {
+      "commit": "f32cb653cb2b46288c90b5959e1c06d5a9347475",
+      "mu": 1701421,
+      "sigma2": 12727017
+    },
+    {
+      "commit": "dbe67667831961ced0e8456583681ac79e5ba86a",
+      "mu": 1655905,
+      "sigma2": 3039015
+    },
+    {
+      "commit": "6b592bb81619fd4dd09045346a746fa5b4a02110",
+      "mu": 1648700,
+      "sigma2": 1577573
+    },
+    {
+      "commit": "4459e5eaf0b2368e4457e62041d3f8ae430f92f0",
+      "mu": 1643448,
+      "sigma2": 2470375
+    },
+    {
+      "commit": "af9563b573eefed61d3b76f37588b7bd8503fcf6",
+      "mu": 1572774,
+      "sigma2": 1822788
+    },
+    {
+      "commit": "99800917cc3ee94cfc909f543159b2db33d4176c",
+      "mu": 1566304,
+      "sigma2": 2867777
+    },
+    {
+      "commit": "a5d964fdb4b993c58bcaec4df434ade784a8de7d",
+      "mu": 1551707,
+      "sigma2": 3889504
+    },
+    {
+      "commit": "79e66dfe071450bc56bdfa5b45b9cbe3448b9ddb",
+      "mu": 1542228,
+      "sigma2": 1014268
+    },
+    {
+      "commit": "eaddc2cb3c99b34540e0a8234eb84e5a0895bc91",
+      "mu": 1502672,
+      "sigma2": 4511239
+    },
+    {
+      "commit": "7ad5539e82b2f084a63ae433b5bf763759484b5e",
+      "mu": 1493726,
+      "sigma2": 12295304
+    },
+    {
+      "commit": "5f97d84015ad96205dd60caaf0ab39fe37673479",
+      "mu": 1484553,
+      "sigma2": 12116713
+    },
+    {
+      "commit": "c259786285c3cee81744e53508db694b86ba953d",
+      "mu": 1456571,
+      "sigma2": 271630
+    },
+    {
+      "commit": "48898d7a9bd7a3a5b32f0f45f1109b11c58517b4",
+      "mu": 1434866,
+      "sigma2": 697724
+    },
+    {
+      "commit": "4d7479c6541a86234e78b5d627b5046c889ef071",
+      "mu": 1433834,
+      "sigma2": 14930932
+    },
+    {
+      "commit": "0658d858adde6755e0e397551f0f192a5955884d",
+      "mu": 1418626,
+      "sigma2": 13166164
+    },
+    {
+      "commit": "98ea39bca6124d2c5e0de536d161d505f29d9a50",
+      "mu": 1417374,
+      "sigma2": 850837
+    },
+    {
+      "commit": "db43357db48f2b3da454b3c81e4f9086f13bc7aa",
+      "mu": 1358291,
+      "sigma2": 6830944
+    },
+    {
+      "commit": "9787627ce9ef2584e3e375c0c83591debc524127",
+      "mu": 1331549,
+      "sigma2": 586116
+    },
+    {
+      "commit": "170d2f3ddf03133ea8f862b4a27bcb277721632a",
+      "mu": 1273332,
+      "sigma2": 4674278
+    },
+    {
+      "commit": "e74db872f9741d25567c9a8e4e4c2d5802c2b065",
+      "mu": 1269756,
+      "sigma2": 1347130
+    },
+    {
+      "commit": "690834743dbede6d5130864148829f8d2595b911",
+      "mu": 1263203,
+      "sigma2": 4106299
+    },
+    {
+      "commit": "0ab6b2541fc880c89334fe8f78c1aa8a738e3fc2",
+      "mu": 1255719,
+      "sigma2": 3392486
+    },
+    {
+      "commit": "4ba82ba810c5cffdd9cef39b5ed2a4e35652e407",
+      "mu": 1241867,
+      "sigma2": 1276410
+    },
+    {
+      "commit": "2bb63c74a363a9376005ca19228861d6cac96b97",
+      "mu": 1233133,
+      "sigma2": 1758244
+    },
+    {
+      "commit": "8d6afa4c43be01fed283d62d69d264565d1bb4d7",
+      "mu": 1220306,
+      "sigma2": 2057466
+    },
+    {
+      "commit": "a2acfba2648d0699b16f4397fc16ab4032ad58ec",
+      "mu": 1201461,
+      "sigma2": 491890
+    },
+    {
+      "commit": "29c511d1e7ea1d96c754de77568c239f1e48ed25",
+      "mu": 1199096,
+      "sigma2": 7526637
+    },
+    {
+      "commit": "b96a196e5cceb91cbd8b6bc1588d0aa1e92d442c",
+      "mu": 1191960,
+      "sigma2": 5534508
+    },
+    {
+      "commit": "a1fcfb41287c8ab3bf6313bdb0bd787b74142aa4",
+      "mu": 1147049,
+      "sigma2": 829137
+    },
+    {
+      "commit": "84f034e2231d906c7597867a9795392166ad438d",
+      "mu": 1129899,
+      "sigma2": 1705501
+    },
+    {
+      "commit": "33a5d48a496186a3c89c20734bf0b435ec1c02ca",
+      "mu": 1106310,
+      "sigma2": 1968371
+    },
+    {
+      "commit": "98047cdd0f7cecb0438747d07f3955b61d686f45",
+      "mu": 1070014,
+      "sigma2": 531814
+    },
+    {
+      "commit": "c0548e73dacce461bf5c26c2205cc534572cf714",
+      "mu": 1056882,
+      "sigma2": 957247
+    },
+    {
+      "commit": "7c1c9a5217fc22653a58e9119a4877a4d7e330a4",
+      "mu": 1050101,
+      "sigma2": 7438899
+    },
+    {
+      "commit": "90d91dca6c529bade416a1650a33af14530fee53",
+      "mu": 1046364,
+      "sigma2": 13914166
+    },
+    {
+      "commit": "27e699fb3425d4358d231bb7a89580bf9c932a86",
+      "mu": 1041354,
+      "sigma2": 5005999
+    },
+    {
+      "commit": "05ad7c221b2223929a220a02b5f506264bd57bb7",
+      "mu": 1030133,
+      "sigma2": 3061399
+    },
+    {
+      "commit": "222acc35cdacfe5033a781423961a58652a14f8a",
+      "mu": 1029636,
+      "sigma2": 8194301
+    },
+    {
+      "commit": "6bb73f704d65523644e0b5c4f469828d3e37311c",
+      "mu": 966235,
+      "sigma2": 487108
+    },
+    {
+      "commit": "a35553d49741bb60f58060ed4c0a5b5a00341037",
+      "mu": 964329,
+      "sigma2": 13507907
+    },
+    {
+      "commit": "c6a56ad65384232f21d6ddf2a605f41c45db6df0",
+      "mu": 948839,
+      "sigma2": 12515138
+    },
+    {
+      "commit": "3f5735d24ff95a0bf7e5f4f3f2b48777bfc4ce8c",
+      "mu": 931225,
+      "sigma2": 4781034
+    },
+    {
+      "commit": "fd572e5f650ac20b2ddc2a24f855dc3ea4df5868",
+      "mu": 917851,
+      "sigma2": 7188437
+    },
+    {
+      "commit": "601bf3b0b63baeb09fba6d70ae5856fd68b4631f",
+      "mu": 873008,
+      "sigma2": 1021861
+    },
+    {
+      "commit": "06c515cef3164136532a0a52db47c759e86a1f2d",
+      "mu": 780578,
+      "sigma2": 7292600
+    },
+    {
+      "commit": "232796f9cefe2d6aa71fd9fe53c83f245c873778",
+      "mu": 760576,
+      "sigma2": 4625495
+    },
+    {
+      "commit": "99f46ff59c23677ce1ff3db37b57d452beb7f170",
+      "mu": 719450,
+      "sigma2": 1544491
+    },
+    {
+      "commit": "253dd4672bf143125d17df44629bc35bff228fe1",
+      "mu": 693540,
+      "sigma2": 6335163
+    },
+    {
+      "commit": "4ba239b855b49f31f2355f93ad5fd15f0adcdae8",
+      "mu": 684567,
+      "sigma2": 4360072
+    },
+    {
+      "commit": "a2bf7abfc4918add4b756007c6b3c966e4c202d8",
+      "mu": 619232,
+      "sigma2": 1378261
+    },
+    {
+      "commit": "2034a4c8b727b92c7f901cad69056818faf3b47a",
+      "mu": 589915,
+      "sigma2": 7307732
+    },
+    {
+      "commit": "422ec1898c8aad70788b72352fa85491c156f4c8",
+      "mu": 552649,
+      "sigma2": 939874
+    },
+    {
+      "commit": "7eebfed07fcb6e4828b14aacc135e75ff3c84e33",
+      "mu": 551280,
+      "sigma2": 2032961
+    },
+    {
+      "commit": "f334ec72bec3b0f9c844ce9fd61cd96ad4c02414",
+      "mu": 545521,
+      "sigma2": 9320858
+    },
+    {
+      "commit": "7f3c6c034a80e1f9a9eef9e449155fe624694456",
+      "mu": 486899,
+      "sigma2": 5097635
+    },
+    {
+      "commit": "d665ec57aa30d8833adcbb46b7c7887bfa221e76",
+      "mu": 480894,
+      "sigma2": 2032255
+    },
+    {
+      "commit": "114b75a969f4f2e62fa20ad2d5adfedbfe077669",
+      "mu": 433163,
+      "sigma2": 1353348
+    },
+    {
+      "commit": "16c0a8d326adcf63bbcc1df856d3768cfa9b2967",
+      "mu": 419482,
+      "sigma2": 2096981
+    },
+    {
+      "commit": "4be464c2fb2add730f4e188b9a63010979588c03",
+      "mu": 417693,
+      "sigma2": 7594141
+    },
+    {
+      "commit": "c4139787bae8eb77dc17949dce6dd20c298f588b",
+      "mu": 413946,
+      "sigma2": 2383627
+    },
+    {
+      "commit": "607c7ae74471c3b102ab2d002bbcdd3bafe2567a",
+      "mu": 352801,
+      "sigma2": 1300564
+    },
+    {
+      "commit": "2b0a1516db845d08ea8a20b29432f909f2be67e9",
+      "mu": 326109,
+      "sigma2": 1764611
+    },
+    {
+      "commit": "50707918aefcc6cf00b948e210285ff7bed8b2dd",
+      "mu": 187135,
+      "sigma2": 354815
+    },
+    {
+      "commit": "f481578eb253180e975009ac7992811626b3c5fd",
+      "mu": 179262,
+      "sigma2": 1490705
+    },
+    {
+      "commit": "1284705d1ab81341a17f14bd47f9fe6368f94074",
+      "mu": 172013,
+      "sigma2": 3200482
+    },
+    {
+      "commit": "9710512d0b2b1ab9c7fc15c3cc7da57dd4e8f00a",
+      "mu": 153480,
+      "sigma2": 1256903
+    },
+    {
+      "commit": "03bd83e7bfdd7361409c4fb2acd8901f94387b50",
+      "mu": 134649,
+      "sigma2": 1794336
+    },
+    {
+      "commit": "a0e8a3c7281528de81cb83f14c964419b7c01268",
+      "mu": 121179,
+      "sigma2": 397438
+    },
+    {
+      "commit": "3060f32b93b41335bbec5be883ef1ed67c486f0f",
+      "mu": 109828,
+      "sigma2": 779640
+    },
+    {
+      "commit": "bf816b612b0881995a43f6ae0c88ac73011820f9",
+      "mu": 108905,
+      "sigma2": 7445442
+    },
+    {
+      "commit": "0ce60179a38028461b5a7f18767ee1562bcca6c4",
+      "mu": 71710,
+      "sigma2": 7546235
+    },
+    {
+      "commit": "29ba2794938117b27291dc7d85f2878329946f4d",
+      "mu": 8861,
+      "sigma2": 1315864
+    },
+    {
+      "commit": "6e7223a7c60917b6ea984b9a9785e41f148c7a78",
+      "mu": -5507,
+      "sigma2": 12424598
+    },
+    {
+      "commit": "af6658a64d914b58fc0d37fd85e2cd44e864aece",
+      "mu": -28013,
+      "sigma2": 358841
+    },
+    {
+      "commit": "8c50f27e8345ee775de5f1467c0b3cd94f0afdc4",
+      "mu": -36732,
+      "sigma2": 14297438
+    },
+    {
+      "commit": "86ee625a01b118ba433af1a86c5c515a3d6f6e89",
+      "mu": -46645,
+      "sigma2": 11998831
+    },
+    {
+      "commit": "fa14fc5d0372b473bc578a4e057917571ef9a350",
+      "mu": -75615,
+      "sigma2": 12628778
+    },
+    {
+      "commit": "9eb2037159ed14b712c930bfde48e628b725908c",
+      "mu": -83866,
+      "sigma2": 11704645
+    },
+    {
+      "commit": "2c192258361af36cce08972a97eeefc53e41ad51",
+      "mu": -84012,
+      "sigma2": 11954043
+    },
+    {
+      "commit": "1821c0e599b8e7415affd1ccdec4fd6d29a9e2df",
+      "mu": -110251,
+      "sigma2": 6624009
+    },
+    {
+      "commit": "f1fc17d3c62dfc1cc897ba7133d25f15c60b9089",
+      "mu": -112793,
+      "sigma2": 1186179
+    },
+    {
+      "commit": "b09b06fd8f1a7002c77863d26c3892af7791d82a",
+      "mu": -138669,
+      "sigma2": 1959418
+    },
+    {
+      "commit": "9b8aef76b6160c4b0291fadb49326bd51992fe67",
+      "mu": -152085,
+      "sigma2": 8701690
+    },
+    {
+      "commit": "43e1a8cb26e095a7d3f5b20d7c5d1a6e774e53d2",
+      "mu": -176334,
+      "sigma2": 11657741
+    },
+    {
+      "commit": "3eb8fd3d415db0a7e5092768142cccf3ca1cb89f",
+      "mu": -187027,
+      "sigma2": 7915685
+    },
+    {
+      "commit": "30e624bb962c1393273ddc10677f061b27daa413",
+      "mu": -195791,
+      "sigma2": 2851250
+    },
+    {
+      "commit": "78d0ede7c9e949e68bef830390e08ad9eab363e0",
+      "mu": -206034,
+      "sigma2": 13457773
+    },
+    {
+      "commit": "57321584595c2e620098cde34deeb75bbe512ce3",
+      "mu": -211733,
+      "sigma2": 2197928
+    },
+    {
+      "commit": "7db5d7bf13da16ce941a127b50f81a55f1b7557c",
+      "mu": -248086,
+      "sigma2": 508794
+    },
+    {
+      "commit": "46c026daab5c10e53557e5c92d1967bea5ef9a29",
+      "mu": -254884,
+      "sigma2": 9418459
+    },
+    {
+      "commit": "bed039cbd8f184d7a529f59d362ba3ac00e10e31",
+      "mu": -305483,
+      "sigma2": 3528711
+    },
+    {
+      "commit": "5a3d08fa8f438a34e4673d816e7fb5dde7937465",
+      "mu": -306070,
+      "sigma2": 3204420
+    },
+    {
+      "commit": "b2ebd4a42e2832e29da0d48f20cf8c311fe7892c",
+      "mu": -339202,
+      "sigma2": 2736030
+    },
+    {
+      "commit": "3c52feed8a51084f57f38d8f40a316b2cfcfcda4",
+      "mu": -360604,
+      "sigma2": 8413620
+    },
+    {
+      "commit": "0710c021b95a88142268c1df5ac117171e936c04",
+      "mu": -413772,
+      "sigma2": 2129677
+    },
+    {
+      "commit": "24600315a311b6fc5affc0537d237d1024b2e9c0",
+      "mu": -432606,
+      "sigma2": 3888831
+    },
+    {
+      "commit": "c30ea2504e2e8e990f195c44335a70e372c25539",
+      "mu": -439036,
+      "sigma2": 3291295
+    },
+    {
+      "commit": "0bd11afc56a8dba71f89598a573faf465c0f52c1",
+      "mu": -454559,
+      "sigma2": 14050629
+    },
+    {
+      "commit": "05b0f900614c2d08fffb4a638e96ec72f16928be",
+      "mu": -466716,
+      "sigma2": 8942966
+    },
+    {
+      "commit": "5f4dbc427a8291205fcb97b91c7bdba5689daa42",
+      "mu": -483723,
+      "sigma2": 545578
+    },
+    {
+      "commit": "34a4ee754c25e8af868a5f8045b3e0bb3fd71afd",
+      "mu": -574424,
+      "sigma2": 1113246
+    },
+    {
+      "commit": "4edf45be7efce8ad18bcf6ad52d9b00451864f4f",
+      "mu": -629583,
+      "sigma2": 1935770
+    },
+    {
+      "commit": "e729b08c763433fd2da80d0bb916a0cdf4d323dd",
+      "mu": -681371,
+      "sigma2": 11095891
+    },
+    {
+      "commit": "a2662526444f51d6d1defccc3644aaf8b3dde2cc",
+      "mu": -699545,
+      "sigma2": 1674592
+    },
+    {
+      "commit": "b051bdfd9a824fb119bce52d90f31e21595f4c6b",
+      "mu": -825699,
+      "sigma2": 803426
+    },
+    {
+      "commit": "48d4ed250e64c1c852033f49d281a32c5cdb7f1f",
+      "mu": -853099,
+      "sigma2": 4621430
+    },
+    {
+      "commit": "44a80b0429cd6133cc48d69249614a98444984f4",
+      "mu": -885001,
+      "sigma2": 8484250
+    },
+    {
+      "commit": "49aefc97431c0482249cd5727b70a556d59a1279",
+      "mu": -896313,
+      "sigma2": 8021863
+    },
+    {
+      "commit": "bae64da17149515258d9cf680683795475ff402d",
+      "mu": -902907,
+      "sigma2": 1485778
+    },
+    {
+      "commit": "661542ef19ab7e1548bd8d30592ca66d674f2ffa",
+      "mu": -903772,
+      "sigma2": 1804688
+    },
+    {
+      "commit": "afbc3e0d52ff7595aa7df3f8180dfba18697ead2",
+      "mu": -923985,
+      "sigma2": 12058674
+    },
+    {
+      "commit": "3ce314964ee73e1cde66ef39455803d0fa247a6d",
+      "mu": -967912,
+      "sigma2": 2829585
+    },
+    {
+      "commit": "b62d6747d7eb7cdfa5c377f597c7cc0820650144",
+      "mu": -985263,
+      "sigma2": 1122519
+    },
+    {
+      "commit": "c781debdc4ac9873b30916ce6b8413098b704923",
+      "mu": -1064777,
+      "sigma2": 1034480
+    },
+    {
+      "commit": "d9a2f8ccbdf84b33e9b9dd974378b52a6e391158",
+      "mu": -1078981,
+      "sigma2": 692219
+    },
+    {
+      "commit": "04901f280f4891d6b9f0bd659273500ea3a1da0f",
+      "mu": -1128884,
+      "sigma2": 923117
+    },
+    {
+      "commit": "08d7f3c5e83adc9b572187210e7026e961b1961f",
+      "mu": -1134008,
+      "sigma2": 8459345
+    },
+    {
+      "commit": "4018daea7dc9e5949a9fb17ce26dd0660ab5dcb8",
+      "mu": -1146337,
+      "sigma2": 2642028
+    },
+    {
+      "commit": "c1877a3ef02cec78b9766ab05a81ac0366d5495a",
+      "mu": -1159999,
+      "sigma2": 1110519
+    },
+    {
+      "commit": "483ec39c48a764933fa1b328714e840488119fe4",
+      "mu": -1171605,
+      "sigma2": 1281105
+    },
+    {
+      "commit": "db8a23a622850a9f304746d6d5f17f01c0044645",
+      "mu": -1208707,
+      "sigma2": 2438682
+    },
+    {
+      "commit": "dee0d28c952c1e1f0adc1322c2407d19f0d3ad8d",
+      "mu": -1233930,
+      "sigma2": 1967661
+    },
+    {
+      "commit": "b13c8730740d6f3050cfecb8ab641e4caab64b7a",
+      "mu": -1246493,
+      "sigma2": 8469359
+    },
+    {
+      "commit": "01d9f04fad5ecb60dce40410a380fae16d8af70e",
+      "mu": -1256577,
+      "sigma2": 1482832
+    },
+    {
+      "commit": "9a43cf9560388a22dd2519270c18d991deacfbf1",
+      "mu": -1264641,
+      "sigma2": 5624811
+    },
+    {
+      "commit": "d2e51c519eab691b9628e00e1723c775b57a7c9f",
+      "mu": -1269956,
+      "sigma2": 1340216
+    },
+    {
+      "commit": "6887a40d86031bac663b5241d9158d63b47a52d7",
+      "mu": -1347210,
+      "sigma2": 7348815
+    },
+    {
+      "commit": "fbe516438483be9ef3fb7d8477d4afcaab186f24",
+      "mu": -1350522,
+      "sigma2": 2510569
+    },
+    {
+      "commit": "460cfd47ff333ff46765c4359d5c258e1ae5d272",
+      "mu": -1353295,
+      "sigma2": 1771620
+    },
+    {
+      "commit": "24b28689e7c55fd362a9952e8203438e0ec24de1",
+      "mu": -1385721,
+      "sigma2": 2200948
+    },
+    {
+      "commit": "b33622ceb54ddc6d7f6639bd43fef6b2dd67dcbb",
+      "mu": -1390295,
+      "sigma2": 2422197
+    },
+    {
+      "commit": "9cccf24a3ba9476bf4f23577b08ec69dd819f6fe",
+      "mu": -1404358,
+      "sigma2": 1658290
+    },
+    {
+      "commit": "e33b4ff8a4ac42a31c9f3ca6c76ded4183f7da09",
+      "mu": -1429742,
+      "sigma2": 3050180
+    },
+    {
+      "commit": "635d48e693c83b031357edb8f6e88edffc9aee88",
+      "mu": -1432830,
+      "sigma2": 8919297
+    },
+    {
+      "commit": "3de0ddef28c4711f046c3fe9e37683cc1457229d",
+      "mu": -1475610,
+      "sigma2": 2384171
+    },
+    {
+      "commit": "601cd6790805c58737d646ae3f92a0276828886f",
+      "mu": -1515683,
+      "sigma2": 2971186
+    },
+    {
+      "commit": "cc9a163a9c6547e58bd9e768b317b0af3df90e7a",
+      "mu": -1532940,
+      "sigma2": 396876
+    },
+    {
+      "commit": "0e77bd1362027c7459c46dd8388227247350beba",
+      "mu": -1541209,
+      "sigma2": 748231
+    },
+    {
+      "commit": "b5cfa8713b193e8c205b48d6d171c4c6163f8065",
+      "mu": -1544213,
+      "sigma2": 531314
+    },
+    {
+      "commit": "b99ce94d88396625768c8e119a5fb0ca12c1e75a",
+      "mu": -1591948,
+      "sigma2": 1373477
+    },
+    {
+      "commit": "26f6a89e363c1db953929c9cc4fa603a11459ef2",
+      "mu": -1613106,
+      "sigma2": 990188
+    },
+    {
+      "commit": "568b7a118943b4a23c9b607817cdaa205735c2ed",
+      "mu": -1626493,
+      "sigma2": 790436
+    },
+    {
+      "commit": "7b69c8a8906d8e95e2474fc7763113922831b12b",
+      "mu": -1640006,
+      "sigma2": 1174690
+    },
+    {
+      "commit": "82f3cabf28d379e29b58468e7c660a63d3fbbe14",
+      "mu": -1661618,
+      "sigma2": 11676679
+    },
+    {
+      "commit": "84db25b5883b598c414135cd31391c436371d2c4",
+      "mu": -1663845,
+      "sigma2": 484677
+    },
+    {
+      "commit": "d8d11a70fa955ec8c629af46c57fa09557bce304",
+      "mu": -1682862,
+      "sigma2": 502464
+    },
+    {
+      "commit": "55e24ae47b4b7669c3bf961b214cd920394efaea",
+      "mu": -1695243,
+      "sigma2": 7756489
+    },
+    {
+      "commit": "39d075f2b72baa755d1be979d0c5800d0d28f059",
+      "mu": -1715969,
+      "sigma2": 982475
+    },
+    {
+      "commit": "d18aa4fbccea6d9949277c031a403df878ed3f2e",
+      "mu": -1752447,
+      "sigma2": 12620384
+    },
+    {
+      "commit": "71e54e91ccc42551dab65ea324e9ce5a69f33f51",
+      "mu": -1786435,
+      "sigma2": 2687715
+    },
+    {
+      "commit": "c038df72146428d66a1d4d9ccc57d47d0880c93c",
+      "mu": -1798982,
+      "sigma2": 1399967
+    },
+    {
+      "commit": "830c33935ed8c85b323e35a3df102ee0b612d70d",
+      "mu": -1867322,
+      "sigma2": 334431
+    },
+    {
+      "commit": "6a693c58441b8d8d27d6ef1730879ba0706ea686",
+      "mu": -1890805,
+      "sigma2": 3122258
+    },
+    {
+      "commit": "e719e1cf6bc667892004dce8709e12a42cc5ffb2",
+      "mu": -1902416,
+      "sigma2": 2355519
+    },
+    {
+      "commit": "d2daa572523f741b7e643f067192d99e905e7eac",
+      "mu": -1906595,
+      "sigma2": 11793311
+    },
+    {
+      "commit": "3daf433c06a8bc58ecdf5b66238253e4c8c3a6e6",
+      "mu": -1934003,
+      "sigma2": 3031028
+    },
+    {
+      "commit": "fb9bfb7fb0bd629a407d41c146bfa20b821d2802",
+      "mu": -1958398,
+      "sigma2": 8097426
+    },
+    {
+      "commit": "cb6c460cd3c5ff83536e66c821e08ce5c3dda2ba",
+      "mu": -1993793,
+      "sigma2": 13318481
+    },
+    {
+      "commit": "baf1c82c028bd0f09beebc2225c12260a75b3dfb",
+      "mu": -2045839,
+      "sigma2": 707228
+    },
+    {
+      "commit": "e14eeaf0f82a648d55779a85c0f587da02538ae0",
+      "mu": -2075047,
+      "sigma2": 7741998
+    },
+    {
+      "commit": "bb31f6e10eb51fdd9996d2b2ad4246d5bcfad476",
+      "mu": -2144484,
+      "sigma2": 1027610
+    },
+    {
+      "commit": "40ed3b6e1e32e091d1c16f38f399f4a62e52215f",
+      "mu": -2156492,
+      "sigma2": 1685590
+    },
+    {
+      "commit": "2917567d7ca7fd03a4a5589507671d08c41422c8",
+      "mu": -2158961,
+      "sigma2": 2163704
+    },
+    {
+      "commit": "2db0b411e78e0708333b3fe843f6c06816b69deb",
+      "mu": -2162614,
+      "sigma2": 7674575
+    },
+    {
+      "commit": "8519a174acc627cf5bf0503a55b11976715eea25",
+      "mu": -2186313,
+      "sigma2": 7181719
+    },
+    {
+      "commit": "011549cd6d9f1a761a10fbfa71209f61e984c148",
+      "mu": -2191902,
+      "sigma2": 13225545
+    },
+    {
+      "commit": "37ebb748022fd0f5e5e122727b37137d793d7c5e",
+      "mu": -2194131,
+      "sigma2": 7214343
+    },
+    {
+      "commit": "658bbb89db42f3347393f1b35fca2af53300ac99",
+      "mu": -2195435,
+      "sigma2": 333927
+    },
+    {
+      "commit": "d7be3e14ec4b97e786476724febabd1129b208d2",
+      "mu": -2252283,
+      "sigma2": 11933148
+    },
+    {
+      "commit": "84b39d092272517e4d7635c57f275c57d6a6dc96",
+      "mu": -2291036,
+      "sigma2": 7706478
+    },
+    {
+      "commit": "c7568bf6b0f07d90dd21447d968107705aeb7da3",
+      "mu": -2296295,
+      "sigma2": 1043637
+    },
+    {
+      "commit": "682ecb40157ec42ca897524d162b1d2281699958",
+      "mu": -2319872,
+      "sigma2": 12454006
+    },
+    {
+      "commit": "d253565f332c8ceefd234bae577470cdd79e095f",
+      "mu": -2337047,
+      "sigma2": 3878185
+    },
+    {
+      "commit": "f64f598978acf4bfce09cf07ebeb9259a1be36ad",
+      "mu": -2349058,
+      "sigma2": 6819621
+    },
+    {
+      "commit": "ab5e264b0dc6b58d8bbada0cf4d8d99169d07cd6",
+      "mu": -2392779,
+      "sigma2": 1802284
+    },
+    {
+      "commit": "8088260c81850c6eb028281a3c0bc51e95cd84b7",
+      "mu": -2400473,
+      "sigma2": 1162995
+    },
+    {
+      "commit": "5b9f18ff12d424f605fc2d756467f7ed325db29e",
+      "mu": -2408692,
+      "sigma2": 1121526
+    },
+    {
+      "commit": "2a6813e12748e40282e77c13b417134cd324bacc",
+      "mu": -2461995,
+      "sigma2": 6555940
+    },
+    {
+      "commit": "4b62216e1cd0377a8d53a295ef787a643f7729ca",
+      "mu": -2469820,
+      "sigma2": 7796898
+    },
+    {
+      "commit": "e2440f86ab3712a8973df7115ec1d649f95328d1",
+      "mu": -2485811,
+      "sigma2": 540869
+    },
+    {
+      "commit": "e1e49008eeb7c837e2dddb80b45d856a8b792cec",
+      "mu": -2492167,
+      "sigma2": 7443283
+    },
+    {
+      "commit": "5cdbb4b2812fe03f7e1bf2ab997d000d58b76d8f",
+      "mu": -2493290,
+      "sigma2": 426906
+    },
+    {
+      "commit": "9cca3d116583333e399ca5c169bbfa3595daf853",
+      "mu": -2514858,
+      "sigma2": 794574
+    },
+    {
+      "commit": "3524f60eb36d80b160c21d3609f47efebc0af28d",
+      "mu": -2533826,
+      "sigma2": 2305755
+    },
+    {
+      "commit": "88f4fc61a36dd2f8bc7c5129633dba89ff382cfc",
+      "mu": -2618520,
+      "sigma2": 2121092
+    },
+    {
+      "commit": "fa638bf9f6547b2e3fb7682908609981293f2f30",
+      "mu": -2640927,
+      "sigma2": 1972709
+    },
+    {
+      "commit": "887112d018235b74062e731480f629ad616854c8",
+      "mu": -2646374,
+      "sigma2": 1084717
+    },
+    {
+      "commit": "5dee974a845fdd20a7a2a436cad80fba7417ee60",
+      "mu": -2666840,
+      "sigma2": 5497264
+    },
+    {
+      "commit": "94a391239b7c5e5bd132ce149998e8413cead077",
+      "mu": -2676325,
+      "sigma2": 12148757
+    },
+    {
+      "commit": "40242cb2da7d7d58566a152459a51bae51cd0da1",
+      "mu": -2684253,
+      "sigma2": 11291144
+    },
+    {
+      "commit": "b4ce0ef7c1c82d2f397f5735281856cb31fd2faa",
+      "mu": -2704738,
+      "sigma2": 6946592
+    },
+    {
+      "commit": "796570bd3fe7ab1d2dbf6489ccadc7713d320326",
+      "mu": -2727637,
+      "sigma2": 646315
+    },
+    {
+      "commit": "1f49902a27eb8d0409699b45f51052bfab593b3a",
+      "mu": -2747892,
+      "sigma2": 1706801
+    },
+    {
+      "commit": "56a20b991a05d788c7977240b43d9847b0c8ef5a",
+      "mu": -2782077,
+      "sigma2": 913408
+    },
+    {
+      "commit": "8c6e4b72af3f1860acc73a54027d6a986f6178d7",
+      "mu": -2803317,
+      "sigma2": 1462760
+    },
+    {
+      "commit": "7d268070dd7b0fe4fa7e56c4afb927af48e6d69b",
+      "mu": -2830641,
+      "sigma2": 5037895
+    },
+    {
+      "commit": "5f6f09094f6b300f1ca750ca54e675df70731cfa",
+      "mu": -2892876,
+      "sigma2": 3328452
+    },
+    {
+      "commit": "f88c6e1c36fe13ed3f487c5d11f2049d710011b4",
+      "mu": -2934896,
+      "sigma2": 6367328
+    },
+    {
+      "commit": "9fbd4d0f54c527c085c9f9dcb6c2cf29b2b2b6ac",
+      "mu": -2971971,
+      "sigma2": 1121696
+    },
+    {
+      "commit": "bd3cd3610513bf4af186a61aa9e9579b8ecc45c8",
+      "mu": -2986484,
+      "sigma2": 1580708
+    },
+    {
+      "commit": "41eb8528672246f082e09e2ad36d133fdfeaf644",
+      "mu": -3014250,
+      "sigma2": 12014723
+    },
+    {
+      "commit": "8514b73b54e05e71c2815169a0578e36f63f8d15",
+      "mu": -3040573,
+      "sigma2": 1093367
+    },
+    {
+      "commit": "b1773f116f649f5b716ed0c0e319ebc1867b6c12",
+      "mu": -3075127,
+      "sigma2": 1446254
+    },
+    {
+      "commit": "08ab99e7b940e163870dfb4024df3194fad7d68e",
+      "mu": -3104616,
+      "sigma2": 798843
+    },
+    {
+      "commit": "474c063e37d28e3e0f72f30bdfa275a4287cc460",
+      "mu": -3132021,
+      "sigma2": 8682989
+    },
+    {
+      "commit": "9d4407db70abec95a85bc5cc719a0a6afaaeb942",
+      "mu": -3172853,
+      "sigma2": 2149528
+    },
+    {
+      "commit": "df2788d2591d13bdaa6c7baaad60c610081af2bb",
+      "mu": -3226136,
+      "sigma2": 1162612
+    },
+    {
+      "commit": "f79a1ec46a85e9ae16f32ce0e0e2f7ed0445f4d9",
+      "mu": -3230773,
+      "sigma2": 4227727
+    },
+    {
+      "commit": "cf7128c78db0bd276a9a70fd42db25b145ac1079",
+      "mu": -3298238,
+      "sigma2": 2068077
+    },
+    {
+      "commit": "8c12cd7181a8d3230c3d73b4dbaad5382a91f6dc",
+      "mu": -3333087,
+      "sigma2": 2835004
+    },
+    {
+      "commit": "5ade3094d8df56640e5ae1cad8d1f9a45397302b",
+      "mu": -3366559,
+      "sigma2": 2455069
+    },
+    {
+      "commit": "293bf0cdc36915952c353729048a87d763c3511f",
+      "mu": -3389725,
+      "sigma2": 505975
+    },
+    {
+      "commit": "3c8210229261f7cef5b43ecd9ddbdc2c39605047",
+      "mu": -3392102,
+      "sigma2": 1503586
+    },
+    {
+      "commit": "d96535fbcb68a78340baac8b18e810d973e7dccb",
+      "mu": -3420579,
+      "sigma2": 2162894
+    },
+    {
+      "commit": "385088d6fb6b72a9669abe9ba7ed143771a38c56",
+      "mu": -3420745,
+      "sigma2": 7312050
+    },
+    {
+      "commit": "f3dfcde1b55ac76a7ca98c697b6191c8293a225a",
+      "mu": -3447508,
+      "sigma2": 673900
+    },
+    {
+      "commit": "6e12681e93e49f6d29707fb486de9050796df1ab",
+      "mu": -3448930,
+      "sigma2": 3009389
+    },
+    {
+      "commit": "a72479944e16b826770064f286539fb2dc2f1280",
+      "mu": -3485130,
+      "sigma2": 2448600
+    },
+    {
+      "commit": "c1c67e689f10c876cea227cf496b1542ef203b7e",
+      "mu": -3498943,
+      "sigma2": 1311073
+    },
+    {
+      "commit": "ed0b08830c8de4e6bff491fa8a412d2ac5b8fc8d",
+      "mu": -3529923,
+      "sigma2": 1815344
+    },
+    {
+      "commit": "404c3a21f33b1398fd252bfb3b68f62706d65dc0",
+      "mu": -3554134,
+      "sigma2": 1085281
+    },
+    {
+      "commit": "66ce6a8ba421c02712d89f07e587ad5dce6d5753",
+      "mu": -3557554,
+      "sigma2": 1383502
+    },
+    {
+      "commit": "4fe3d31dbc2f4cb3321046876139046a28d9ff35",
+      "mu": -3586511,
+      "sigma2": 2227933
+    },
+    {
+      "commit": "91878cf097ee9e976414e3e1cda6d5df6db97f90",
+      "mu": -3626086,
+      "sigma2": 3031241
+    },
+    {
+      "commit": "fcd80813002b109077f5567fb16e676b7175fab5",
+      "mu": -3720616,
+      "sigma2": 522342
+    },
+    {
+      "commit": "3709b6fecff20c20b3ebb9dd599feec87b69b367",
+      "mu": -3764260,
+      "sigma2": 783861
+    },
+    {
+      "commit": "37939ba1f161df02e384dabbd8bb520c65dea9e4",
+      "mu": -3800800,
+      "sigma2": 8974514
+    },
+    {
+      "commit": "4437375ce7c22778c3c1527ec9fb84c6a9f2062e",
+      "mu": -3803268,
+      "sigma2": 951184
+    },
+    {
+      "commit": "b9997f221bfbdd3c9a7cf99311501c2a3c3e1cf2",
+      "mu": -3835043,
+      "sigma2": 1801057
+    },
+    {
+      "commit": "76d7830875de2c7d23e273c4c5d1e55e3b1ef6a4",
+      "mu": -3861092,
+      "sigma2": 6088592
+    },
+    {
+      "commit": "df365c837271f3bb000b2a72ece8ee7a387a9e1c",
+      "mu": -3887179,
+      "sigma2": 1762727
+    },
+    {
+      "commit": "aa999f44a058edbc8242b39bed03e104a7ae7503",
+      "mu": -3946062,
+      "sigma2": 2449007
+    },
+    {
+      "commit": "5e4b7694a57a3741222dff1d6ebc12aace084de8",
+      "mu": -4047147,
+      "sigma2": 335315
+    },
+    {
+      "commit": "c32c972a9258aaddef2009d92106713c3893c7db",
+      "mu": -4080793,
+      "sigma2": 3794170
+    },
+    {
+      "commit": "c308bd8c878508cc1b2cc74c209ac4f36a0b34bb",
+      "mu": -4112942,
+      "sigma2": 5972490
+    },
+    {
+      "commit": "1378f6a894c6bc6bc7f71b9e9b94231ba5b3a054",
+      "mu": -4189089,
+      "sigma2": 5991544
+    },
+    {
+      "commit": "a396047943552e8072941f8f82f76157c286384c",
+      "mu": -4223293,
+      "sigma2": 1014738
+    },
+    {
+      "commit": "9703fba05dc64778200b42b130ddf9d66291b749",
+      "mu": -4228929,
+      "sigma2": 531168
+    },
+    {
+      "commit": "e8ca1513fa150b8eb0b57b8f8b744eddf773eb51",
+      "mu": -4239956,
+      "sigma2": 2086148
+    },
+    {
+      "commit": "6178f54e4b418a0f4e00c640a7021c528c23b1a6",
+      "mu": -4263178,
+      "sigma2": 1119647
+    },
+    {
+      "commit": "abf9b214358c80def33905f8ca82de51562c08e6",
+      "mu": -4342789,
+      "sigma2": 1099188
+    },
+    {
+      "commit": "0d9f3a1a4a0a130bc5ffa5dfacfbea838f2eb7bb",
+      "mu": -4615917,
+      "sigma2": 1128784
+    },
+    {
+      "commit": "2820e722e26461fab7f1ef7154d180f3d6befdf9",
+      "mu": -4635016,
+      "sigma2": 1066552
+    },
+    {
+      "commit": "ab7917fc5642aa2bf04e32e89eb6ddeec0e62319",
+      "mu": -4667225,
+      "sigma2": 1101381
+    },
+    {
+      "commit": "020246900c6b01f8b8abc7bd0722c003a3eb044a",
+      "mu": -4675594,
+      "sigma2": 1257355
+    },
+    {
+      "commit": "fe34c648af7c7d379444f525c517c622f8dd8c08",
+      "mu": -4901363,
+      "sigma2": 1601444
+    },
+    {
+      "commit": "933c8532098c39446d7ca8ea92d703db79e2001d",
+      "mu": -4926912,
+      "sigma2": 1940616
+    },
+    {
+      "commit": "f8c0fbecd2d2f9b336d1efc81f7c9a1b9804d0be",
+      "mu": -4959783,
+      "sigma2": 540762
+    },
+    {
+      "commit": "ae0ced0bc3d3dafe8b1b72dafbbb57d5726df07a",
+      "mu": -5097703,
+      "sigma2": 1042693
+    },
+    {
+      "commit": "893afee63047f6d23c4c6e6754faef0e4d4770b5",
+      "mu": -5117320,
+      "sigma2": 9686141
+    },
+    {
+      "commit": "927ff866f5099d1f04a97b13ad0e027515df3a24",
+      "mu": -5129047,
+      "sigma2": 1470388
+    },
+    {
+      "commit": "7836478bfbf9056a67e5e1e789b9b5bfb4993319",
+      "mu": -5153616,
+      "sigma2": 8034573
+    },
+    {
+      "commit": "1d28143bc365f784a4d42613f326d88fd261a4c3",
+      "mu": -5155276,
+      "sigma2": 1187523
+    },
+    {
+      "commit": "1d1567f2e6d38ae26d4f6d15fe146d68b0af3625",
+      "mu": -5239286,
+      "sigma2": 1268789
+    },
+    {
+      "commit": "d7a1bab7b4591a8f0f56478a8fb0f701471d6ce1",
+      "mu": -5439674,
+      "sigma2": 9196841
+    },
+    {
+      "commit": "f2d141e00bed16dac424e4999ce4d5cc8c10cb66",
+      "mu": -5463144,
+      "sigma2": 5133449
+    },
+    {
+      "commit": "dd0d59a08af81f7fd541395d57f76601564e03cf",
+      "mu": -5474194,
+      "sigma2": 8699562
+    },
+    {
+      "commit": "53a79146e54fb4d4376c4ef2321cca8e710a32e4",
+      "mu": -5508640,
+      "sigma2": 854332
+    },
+    {
+      "commit": "7a3797d6042b2c270065f927b77e3d93c12e68ce",
+      "mu": -5578817,
+      "sigma2": 664245
+    },
+    {
+      "commit": "d7ed6ce4f2fc87489ca2582932b60f47f092333d",
+      "mu": -5606872,
+      "sigma2": 4501834
+    },
+    {
+      "commit": "809312da7ca75e3835b42163de3eb52859a463fe",
+      "mu": -5679910,
+      "sigma2": 1441020
+    },
+    {
+      "commit": "f7004d9aa540822981b8c0a71da80d586cf25a56",
+      "mu": -5829784,
+      "sigma2": 2348973
+    },
+    {
+      "commit": "6701f0e04a7d8ad9661b4c1d50b7ff3d125b5482",
+      "mu": -5893271,
+      "sigma2": 1452579
+    },
+    {
+      "commit": "1c87ed597ab5924916795daf5c34745308d2302d",
+      "mu": -5906312,
+      "sigma2": 3050535
+    },
+    {
+      "commit": "564cff347264d31c204721da5ea717a32050b39a",
+      "mu": -5921583,
+      "sigma2": 594073
+    },
+    {
+      "commit": "c86a2d08d68da99fae2f0872e8fd3ffd2035e0f7",
+      "mu": -5978275,
+      "sigma2": 4086337
+    },
+    {
+      "commit": "328badd69bd151e42c15f92ac328cbb19a912a0b",
+      "mu": -5986824,
+      "sigma2": 7884269
+    },
+    {
+      "commit": "5d22f2705a7778ed6d0d3ea4377bb5f793003ffc",
+      "mu": -6013659,
+      "sigma2": 1000555
+    },
+    {
+      "commit": "211ba94eca71c9c45f1cc28a457c5244b48f2295",
+      "mu": -6084757,
+      "sigma2": 3177590
+    },
+    {
+      "commit": "e28826c458d2ed5e79e090328e342a171a6bdd0f",
+      "mu": -6098962,
+      "sigma2": 3388520
+    },
+    {
+      "commit": "a8ca131ab0509f948ad49b0de21d9b43828daa75",
+      "mu": -6118661,
+      "sigma2": 1492861
+    },
+    {
+      "commit": "cf701ea84d9e1ab600c834e9d5bf7dee0829f2a1",
+      "mu": -6119694,
+      "sigma2": 2275903
+    },
+    {
+      "commit": "80f77f7622eec0701333097015f1962542435980",
+      "mu": -6184243,
+      "sigma2": 455855
+    },
+    {
+      "commit": "630ddc4c578939b313a356050927ed6e7e0a42b8",
+      "mu": -6243050,
+      "sigma2": 1427477
+    },
+    {
+      "commit": "1421e3dbbfd7ad671c05f790fc948e39bd09d8c7",
+      "mu": -6254848,
+      "sigma2": 11791721
+    },
+    {
+      "commit": "53ac63c45ba7a03258e13f2d789dfd93d5bc4ace",
+      "mu": -6439593,
+      "sigma2": 1478598
+    },
+    {
+      "commit": "32f7c2606b49b85be27d8c1da8babac3e5a9ad37",
+      "mu": -6455915,
+      "sigma2": 9441159
+    },
+    {
+      "commit": "8d28ce5e85f69c556e3883157f55db3aee51c23d",
+      "mu": -6488683,
+      "sigma2": 734244
+    },
+    {
+      "commit": "e8840c51a96f764ea4a44f78d6695ac30976dec6",
+      "mu": -6577186,
+      "sigma2": 975120
+    },
+    {
+      "commit": "c0ab02e7daf730c7ecbccbc8be7ac686c5d83a44",
+      "mu": -6598776,
+      "sigma2": 11787798
+    },
+    {
+      "commit": "be6bd5c1fda2bb5f824155f473b06e49d8118f61",
+      "mu": -6648750,
+      "sigma2": 3094723
+    },
+    {
+      "commit": "36fdbff927c15edb81e59662147c933685d45924",
+      "mu": -6657261,
+      "sigma2": 1448699
+    },
+    {
+      "commit": "a4726d351d45a015f6e5a8e2e131404c0c7a8afe",
+      "mu": -6705661,
+      "sigma2": 3754202
+    },
+    {
+      "commit": "f54eeadf1ba8bf685360820d729fd66c3a870cfb",
+      "mu": -6709317,
+      "sigma2": 599156
+    },
+    {
+      "commit": "1d18eb7b805fe8cf80501a1baf583bb04a38506f",
+      "mu": -6713668,
+      "sigma2": 1157509
+    },
+    {
+      "commit": "fa59b9ead42ebe0b093dce73718744346f248d29",
+      "mu": -6831472,
+      "sigma2": 2139103
+    },
+    {
+      "commit": "9e2b99c78154fc9e92a4fc2d6c6ba2bedc9bdbd8",
+      "mu": -6832918,
+      "sigma2": 2836346
+    },
+    {
+      "commit": "ccc0cbca29a8ab54374177e11aad07c56df4fa4d",
+      "mu": -7084374,
+      "sigma2": 925067
+    },
+    {
+      "commit": "b859d8f77584fe84b18eb36df2539a765ad758e1",
+      "mu": -7143004,
+      "sigma2": 5382765
+    },
+    {
+      "commit": "b266dcab6c9717cef17f8131394bd00906d5e8fe",
+      "mu": -7193067,
+      "sigma2": 845263
+    },
+    {
+      "commit": "8c87a4a6155cd383b311e45352feef1701f04ce1",
+      "mu": -7273716,
+      "sigma2": 477769
+    },
+    {
+      "commit": "704a82e44f46acecfac8e8b253af6721f5871de0",
+      "mu": -7381679,
+      "sigma2": 2509325
+    },
+    {
+      "commit": "50a2be19101a6ccab17543cc651b272bdbc86376",
+      "mu": -7588851,
+      "sigma2": 1480779
+    },
+    {
+      "commit": "72a0decb89a0cc5e6580b1512401a4df9ed1fe4b",
+      "mu": -7879799,
+      "sigma2": 1910740
+    },
+    {
+      "commit": "7416d2f4af375bb8e3377922e92a959606d3bf29",
+      "mu": -7889009,
+      "sigma2": 1231477
+    },
+    {
+      "commit": "8512480dd258da13ecedb708dd14d62830b3ddeb",
+      "mu": -7894486,
+      "sigma2": 2346737
+    },
+    {
+      "commit": "dd18eaa5e43a117537ced356800274b9dfc1f00f",
+      "mu": -7929219,
+      "sigma2": 2711270
+    },
+    {
+      "commit": "2e75da36dddca08c77580c8f17bc543c18711361",
+      "mu": -8130097,
+      "sigma2": 2148675
+    },
+    {
+      "commit": "8555cf6b33c829b88d80b32e07b8696657215a76",
+      "mu": -8176748,
+      "sigma2": 2674028
+    },
+    {
+      "commit": "66f26081e65270b0f9a69392719094a72b7c0255",
+      "mu": -8281443,
+      "sigma2": 1121123
+    },
+    {
+      "commit": "eef50a486d86ad522afbed0391c59d5e5bbe3ba2",
+      "mu": -8417207,
+      "sigma2": 2059314
+    },
+    {
+      "commit": "75f6d945a14a3637eb901ea469394130961d8039",
+      "mu": -8429323,
+      "sigma2": 6345235
+    },
+    {
+      "commit": "f7aaaa2b1d4d8ec3ebeaffd78a5ae14b996a056c",
+      "mu": -8531085,
+      "sigma2": 1501149
+    },
+    {
+      "commit": "00d665f0c03f926d7ba63e9bd824bb0259f8b11e",
+      "mu": -8560069,
+      "sigma2": 6663431
+    },
+    {
+      "commit": "8ba34fef78486b837a91f48b9f3020b09055e362",
+      "mu": -8567456,
+      "sigma2": 2010986
+    },
+    {
+      "commit": "11ab79fc17c788392259ef6591fe6eaef8961a49",
+      "mu": -8585097,
+      "sigma2": 830457
+    },
+    {
+      "commit": "a87cd9a0aa2b5e6a62deeb944a642af6d13a6f2c",
+      "mu": -8689803,
+      "sigma2": 1213370
+    },
+    {
+      "commit": "c539e5c5c0335bc204536b8f770c68e32689cbdd",
+      "mu": -8789217,
+      "sigma2": 4352139
+    },
+    {
+      "commit": "e7e67947c19d29d3ebd87449692006f3dd81d368",
+      "mu": -9029374,
+      "sigma2": 2844289
+    },
+    {
+      "commit": "81deabd381b2590d9aae8220304864ffe9ac65d6",
+      "mu": -9175604,
+      "sigma2": 2845362
+    },
+    {
+      "commit": "0f14f5c1708e04b628d065a98b24f49ce5aa45db",
+      "mu": -9253496,
+      "sigma2": 4102962
+    },
+    {
+      "commit": "986a90a5c25cb6e1fee7bb080dd9daceca6962a3",
+      "mu": -9263214,
+      "sigma2": 6494626
+    },
+    {
+      "commit": "063a78243d2d4e7e125fac481472943c9007dd22",
+      "mu": -9717836,
+      "sigma2": 1184700
+    },
+    {
+      "commit": "b8c27d3b7eb255e2e2e1920fe195bc853b71eec0",
+      "mu": -9884486,
+      "sigma2": 1792212
+    },
+    {
+      "commit": "5d1ec2c32c67737edb4990f7727bbcdce3c7f543",
+      "mu": -10212230,
+      "sigma2": 2138606
+    },
+    {
+      "commit": "7ddb6da11fd46307a109399fcd0ba45e44a13cb3",
+      "mu": -10250948,
+      "sigma2": 2498968
+    },
+    {
+      "commit": "21e41b05e40e02d475d89cf009f4449e47d5ed11",
+      "mu": -10653918,
+      "sigma2": 4610707
+    },
+    {
+      "commit": "0ed2f083ffc100939929bd1908ce5a4eb8c29940",
+      "mu": -10926655,
+      "sigma2": 3121406
+    },
+    {
+      "commit": "8bd9cad2904a57a200576a17f17616934f588e32",
+      "mu": -11698891,
+      "sigma2": 2329342
+    },
+    {
+      "commit": "c395102ceab5cdbf22b88f9a3d80175c2d76ce14",
+      "mu": -13059197,
+      "sigma2": 1957458
+    },
+    {
+      "commit": "af6bdf8b6e4194abec1a715f25c630fda28a77a9",
+      "mu": -14932201,
+      "sigma2": 2690503
+    },
+    {
+      "commit": "c1d7fdf4e62f89219f0e0f89bdb772a88914b6d9",
+      "mu": -17693317,
+      "sigma2": 4252883
+    }
+  ],
   "2aa2dea31d627624010478e4666bf1552b4af396": [
     {
       "commit": "1aeac099f06b49c7cf53b3b672f146ec36e88c0e",
