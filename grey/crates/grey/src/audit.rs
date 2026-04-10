@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const TRANCHE_PERIOD_SECS: u64 = 8;
 
 /// Number of initial audit tranches before timeout.
-const MAX_TRANCHES: u32 = 30;
+pub const MAX_TRANCHES: u32 = 30;
 
 /// Announcement of an audit result.
 #[derive(Debug, Clone)]
