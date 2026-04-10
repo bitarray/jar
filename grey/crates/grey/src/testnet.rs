@@ -11,7 +11,6 @@ use grey_types::config::Config;
 use grey_types::header::*;
 use grey_types::work::*;
 use grey_types::{Hash, ServiceId, Timeslot};
-use std::collections::BTreeMap;
 
 use crate::seq_testnet::make_test_service;
 use std::time::Duration;
