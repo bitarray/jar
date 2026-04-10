@@ -389,6 +389,12 @@ impl InvocationKernel {
     /// The kernel always starts at PC=0 (the guest's `_start` entry), but
     /// the heap, statics, and actor instance survive from the previous tick
     /// because the RW DATA pages are pre-populated.
+    /// Create a warm-restart kernel: same as [`new`](Self::new) but overlays
+    /// a saved flat_mem snapshot onto the RW DATA cap pages after init.
+    ///
+    /// If `cache` is provided, JIT compilations are reused via
+    /// [`CodeCache`] — important for the continuation hot path where the
+    /// same blob is re-entered every tick.
     pub fn new_warm(
         blob: &[u8],
         args: &[u8],
@@ -396,9 +402,12 @@ impl InvocationKernel {
         flat_mem: &[u8],
         heap_base: u32,
         heap_top: u32,
+        cache: Option<&mut CodeCache>,
     ) -> Result<Self, KernelError> {
-        let mut kernel = Self::new(blob, args, gas)?;
-
+        let mut kernel = match cache {
+            Some(c) => Self::new_cached(blob, args, gas, c)?,
+            None => Self::new(blob, args, gas)?,
+        };
         // Overlay the saved flat_mem onto RW DATA cap pages.
         let vm = &kernel.vm_arena.vm(0);
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -3046,5 +3055,40 @@ mod tests {
         let blob = make_simple_blob(10);
         let k = InvocationKernel::new(&blob, &[], 100_000).unwrap();
         assert_eq!(k.code_caps.len(), 1);
+    }
+
+    #[test]
+    fn test_new_warm_uses_cache() {
+        let blob = make_simple_blob(10);
+        let mut cache = CodeCache::new();
+
+        // Cold start populates the cache.
+        let k1 = InvocationKernel::new_cached(&blob, &[], 100_000, &mut cache).unwrap();
+        assert_eq!(cache.entries.len(), 1);
+        let first_arc = Arc::clone(&k1.code_caps[0]);
+
+        // Extract flat_mem for warm restart.
+        let (flat_mem, hb, ht) = k1.extract_flat_mem();
+        drop(k1);
+
+        // Warm restart with cache should reuse the compiled code.
+        let k2 =
+            InvocationKernel::new_warm(&blob, &[], 100_000, &flat_mem, hb, ht, Some(&mut cache))
+                .unwrap();
+        assert!(Arc::ptr_eq(&first_arc, &k2.code_caps[0]));
+        assert_eq!(cache.entries.len(), 1);
+    }
+
+    #[test]
+    fn test_new_warm_without_cache() {
+        let blob = make_simple_blob(10);
+
+        // new_warm with None still works.
+        let k1 = InvocationKernel::new(&blob, &[], 100_000).unwrap();
+        let (flat_mem, hb, ht) = k1.extract_flat_mem();
+        drop(k1);
+
+        let k2 = InvocationKernel::new_warm(&blob, &[], 100_000, &flat_mem, hb, ht, None).unwrap();
+        assert_eq!(k2.code_caps.len(), 1);
     }
 }
