@@ -1447,12 +1447,7 @@ fn broadcast_equivocation(
         data: evidence.encode(),
     });
     // Sign and broadcast our own countersig
-    let ctx = grey_types::signing_contexts::EQUIVOCATION_EVIDENCE;
-    let payload = evidence.sign_bytes();
-    let mut msg = Vec::with_capacity(ctx.len() + payload.len());
-    msg.extend_from_slice(ctx);
-    msg.extend_from_slice(&payload);
-    let sig = secrets.ed25519.sign(&msg);
+    let sig = secrets.ed25519.sign(&evidence.signing_message());
     let countersig = grey_types::EquivocationCountersig {
         evidence,
         validator_index,

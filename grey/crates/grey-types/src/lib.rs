@@ -303,6 +303,18 @@ impl EquivocationEvidence {
         bytes
     }
 
+    /// Build the full signing message: `EQUIVOCATION_EVIDENCE` context ⌢ `sign_bytes()`.
+    ///
+    /// Ready for ed25519 sign or verify — no need to manually prepend the context.
+    pub fn signing_message(&self) -> Vec<u8> {
+        let ctx = signing_contexts::EQUIVOCATION_EVIDENCE;
+        let payload = self.sign_bytes();
+        let mut msg = Vec::with_capacity(ctx.len() + payload.len());
+        msg.extend_from_slice(ctx);
+        msg.extend_from_slice(&payload);
+        msg
+    }
+
     /// Create evidence, normalising so block_a < block_b.
     pub fn new(slot: Timeslot, h1: Hash, h2: Hash) -> Self {
         let (block_a, block_b) = if h1 < h2 { (h1, h2) } else { (h2, h1) };

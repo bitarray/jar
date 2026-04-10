@@ -623,13 +623,8 @@ impl GrandpaState {
         // Validate validator index
         let key = validator_keys.get(usize::from(countersig.validator_index))?;
 
-        // Build signed message: context ⌢ sign_bytes (matching how sign_vote works)
-        let ctx = signing_contexts::EQUIVOCATION_EVIDENCE;
-        let payload = countersig.evidence.sign_bytes();
-        let mut msg = Vec::with_capacity(ctx.len() + payload.len());
-        msg.extend_from_slice(ctx);
-        msg.extend_from_slice(&payload);
-
+        // Verify signature over context-prefixed signing message
+        let msg = countersig.evidence.signing_message();
         if !grey_crypto::ed25519_verify(key, &msg, &countersig.signature) {
             tracing::warn!(
                 validator_index = countersig.validator_index,
