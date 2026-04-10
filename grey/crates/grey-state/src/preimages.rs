@@ -68,17 +68,14 @@ pub fn process_preimages(
     // eq 12.38: Apply changes — store blobs, update request timeslots, track stats.
     let mut stats: BTreeMap<ServiceId, PreimageServiceRecord> = BTreeMap::new();
 
-    for (sid, blob) in preimages {
-        let hash = grey_crypto::blake2b_256(blob);
-        let length = blob.len() as u32;
-
+    for ((sid, hash, length), (_, blob)) in hashed.iter().zip(preimages.iter()) {
         let account = accounts.get_mut(sid).unwrap();
 
         // Store blob
-        account.blobs.insert(hash, blob.clone());
+        account.blobs.insert(*hash, blob.clone());
 
         // Update request: record the timeslot when preimage was provided
-        if let Some(timeslots) = account.requests.get_mut(&(hash, length)) {
+        if let Some(timeslots) = account.requests.get_mut(&(*hash, *length)) {
             *timeslots = vec![current_timeslot];
         }
 
