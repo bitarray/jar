@@ -1004,6 +1004,67 @@ mod tests {
                     accumulation_log,
                 });
             }
+
+            #[test]
+            fn privileged_services_roundtrip(
+                manager in any::<u32>(),
+                designator in any::<u32>(),
+                registrar in any::<u32>(),
+                quota_service in any::<u32>(),
+                n_assigners in 0usize..5,
+                n_always in 0usize..4,
+            ) {
+                let assigner: Vec<u32> = (0..n_assigners).map(|i| 100 + i as u32).collect();
+                let always_accumulate: std::collections::BTreeMap<u32, u64> = (0..n_always)
+                    .map(|i| (200 + i as u32, 1000 * (i as u64 + 1)))
+                    .collect();
+                assert_codec_roundtrip(&state::PrivilegedServices {
+                    manager,
+                    assigner,
+                    designator,
+                    registrar,
+                    always_accumulate,
+                    quota_service,
+                });
+            }
+
+            #[test]
+            fn judgments_roundtrip(
+                n_good in 0usize..4,
+                n_bad in 0usize..4,
+                n_wonky in 0usize..4,
+                n_offenders in 0usize..4,
+            ) {
+                let good = (0..n_good).map(|i| Hash([i as u8; 32])).collect();
+                let bad = (0..n_bad).map(|i| Hash([(i + 50) as u8; 32])).collect();
+                let wonky = (0..n_wonky).map(|i| Hash([(i + 100) as u8; 32])).collect();
+                let offenders = (0..n_offenders)
+                    .map(|i| Ed25519PublicKey([(i + 150) as u8; 32]))
+                    .collect();
+                assert_codec_roundtrip(&state::Judgments {
+                    good,
+                    bad,
+                    wonky,
+                    offenders,
+                });
+            }
+
+            #[test]
+            fn pending_report_roundtrip(
+                timeslot in any::<u32>(),
+                core_index in any::<u16>(),
+                auth_hash in proptest::array::uniform32(0u8..),
+            ) {
+                use work::*;
+                assert_codec_roundtrip(&state::PendingReport {
+                    report: WorkReport {
+                        core_index,
+                        authorizer_hash: Hash(auth_hash),
+                        ..WorkReport::default()
+                    },
+                    timeslot,
+                });
+            }
         }
     }
 
