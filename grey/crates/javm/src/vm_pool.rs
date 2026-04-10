@@ -156,20 +156,11 @@ pub struct CallFrame {
 }
 
 /// Errors from VM state transitions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("invalid VM state transition: {from:?} -> {to:?}")]
 pub struct VmStateError {
     pub from: VmState,
     pub to: VmState,
-}
-
-impl core::fmt::Display for VmStateError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "invalid VM state transition: {:?} -> {:?}",
-            self.from, self.to
-        )
-    }
 }
 
 /// Maximum number of CODE caps per invocation.
