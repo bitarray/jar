@@ -4,7 +4,7 @@
 
 use crate::header::Ticket;
 use crate::validator::ValidatorKey;
-use crate::work::WorkReport;
+use crate::work::{WorkDigest, WorkReport};
 use crate::{
     BandersnatchPublicKey, BandersnatchRingRoot, Ed25519PublicKey, Gas, Hash, ServiceId, Timeslot,
 };
@@ -251,6 +251,17 @@ pub struct CoreStatistics {
     pub gas_used: Gas,
 }
 
+impl CoreStatistics {
+    /// Accumulate refine-load fields from a work digest.
+    pub fn add_digest(&mut self, digest: &WorkDigest) {
+        self.imports += digest.imports_count as u64;
+        self.extrinsic_count += digest.extrinsics_count as u64;
+        self.extrinsic_size += digest.extrinsics_size as u64;
+        self.exports += digest.exports_count as u64;
+        self.gas_used += digest.gas_used;
+    }
+}
+
 /// Per-service statistics for a single block (GP π_S, eq 13.1).
 /// Fields ordered per GP type definition: p, r, i, x, z, e, a.
 #[derive(Clone, Debug, Default, scale::Encode, scale::Decode)]
@@ -275,6 +286,18 @@ pub struct ServiceStatistics {
     pub accumulate_count: u64,
     /// a.1: Items accumulated — gas used.
     pub accumulate_gas_used: Gas,
+}
+
+impl ServiceStatistics {
+    /// Accumulate refinement fields from a work digest.
+    pub fn add_digest(&mut self, digest: &WorkDigest) {
+        self.refinement_count += 1;
+        self.refinement_gas_used += digest.gas_used;
+        self.imports += digest.imports_count as u64;
+        self.extrinsic_count += digest.extrinsics_count as u64;
+        self.extrinsic_size += digest.extrinsics_size as u64;
+        self.exports += digest.exports_count as u64;
+    }
 }
 
 #[cfg(test)]

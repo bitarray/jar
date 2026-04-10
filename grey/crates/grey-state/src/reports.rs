@@ -4,7 +4,7 @@
 
 use grey_types::config::Config;
 use grey_types::validator::ValidatorKey;
-use grey_types::work::{WorkReport, WorkResult};
+use grey_types::work::{WorkDigest, WorkReport, WorkResult};
 use grey_types::{Ed25519PublicKey, Ed25519Signature, Hash, ServiceId, Timeslot, signing_contexts};
 use javm::Gas;
 use std::collections::{BTreeMap, BTreeSet};
@@ -94,6 +94,17 @@ pub struct CoreStats {
     pub gas_used: u64,
 }
 
+impl CoreStats {
+    /// Accumulate refine-load fields from a work digest.
+    fn add_digest(&mut self, digest: &WorkDigest) {
+        self.imports += digest.imports_count as u64;
+        self.extrinsic_count += digest.extrinsics_count as u64;
+        self.extrinsic_size += digest.extrinsics_size as u64;
+        self.exports += digest.exports_count as u64;
+        self.gas_used += digest.gas_used;
+    }
+}
+
 /// Per-service statistics output from reports processing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ServiceStats {
@@ -107,6 +118,18 @@ pub struct ServiceStats {
     pub exports: u64,
     pub accumulate_count: u32,
     pub accumulate_gas_used: u64,
+}
+
+impl ServiceStats {
+    /// Accumulate refinement fields from a work digest.
+    fn add_digest(&mut self, digest: &WorkDigest) {
+        self.refinement_count += 1;
+        self.refinement_gas_used += digest.gas_used;
+        self.imports += digest.imports_count as u64;
+        self.extrinsic_count += digest.extrinsics_count as u64;
+        self.extrinsic_size += digest.extrinsics_size as u64;
+        self.exports += digest.exports_count as u64;
+    }
 }
 
 /// Reported package output.
@@ -413,23 +436,13 @@ pub fn process_reports(
         }
         for digest in &guarantee.report.results {
             if has_core {
-                let cs = &mut state.cores_statistics[core];
-                cs.gas_used += digest.gas_used;
-                cs.imports += digest.imports_count as u64;
-                cs.extrinsic_count += digest.extrinsics_count as u64;
-                cs.extrinsic_size += digest.extrinsics_size as u64;
-                cs.exports += digest.exports_count as u64;
+                state.cores_statistics[core].add_digest(digest);
             }
-            let ss = state
+            state
                 .services_statistics
                 .entry(digest.service_id)
-                .or_default();
-            ss.refinement_count += 1;
-            ss.refinement_gas_used += digest.gas_used;
-            ss.imports += digest.imports_count as u64;
-            ss.extrinsic_count += digest.extrinsics_count as u64;
-            ss.extrinsic_size += digest.extrinsics_size as u64;
-            ss.exports += digest.exports_count as u64;
+                .or_default()
+                .add_digest(digest);
         }
     }
 

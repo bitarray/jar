@@ -123,11 +123,7 @@ fn compute_core_statistics(
             continue;
         }
         for digest in &report.results {
-            core_stats[c].imports += digest.imports_count as u64;
-            core_stats[c].extrinsic_count += digest.extrinsics_count as u64;
-            core_stats[c].extrinsic_size += digest.extrinsics_size as u64;
-            core_stats[c].exports += digest.exports_count as u64;
-            core_stats[c].gas_used += digest.gas_used;
+            core_stats[c].add_digest(digest);
         }
         // L(c): bundle size from incoming reports
         core_stats[c].bundle_size += report.package_spec.bundle_length as u64;
@@ -173,12 +169,7 @@ fn compute_service_statistics(
     for report in incoming_reports {
         for digest in &report.results {
             let entry = svc_stats.entry(digest.service_id).or_default();
-            entry.refinement_count += 1;
-            entry.refinement_gas_used += digest.gas_used;
-            entry.imports += digest.imports_count as u64;
-            entry.extrinsic_count += digest.extrinsics_count as u64;
-            entry.extrinsic_size += digest.extrinsics_size as u64;
-            entry.exports += digest.exports_count as u64;
+            entry.add_digest(digest);
         }
     }
 
