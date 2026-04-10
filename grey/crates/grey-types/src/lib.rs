@@ -167,6 +167,11 @@ impl Hash {
         hex::encode(self.0)
     }
 
+    /// Encode the first 8 bytes as a hex string for log/debug output.
+    pub fn short_hex(&self) -> String {
+        hex::encode(&self.0[..8])
+    }
+
     /// Parse from a hex string (with optional 0x prefix). Panics on invalid input.
     pub fn from_hex(s: &str) -> Self {
         Self(decode_hex_fixed(s).expect("invalid hex for Hash"))
@@ -367,6 +372,20 @@ mod tests {
         let encoded = h.encode();
         let (decoded, _) = Hash::decode(&encoded).unwrap();
         assert_eq!(decoded, h);
+    }
+
+    #[test]
+    fn test_hash_short_hex() {
+        let h = Hash([
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ]);
+        assert_eq!(h.short_hex(), "0123456789abcdef");
+        assert_eq!(h.short_hex().len(), 16); // 8 bytes = 16 hex chars
+
+        // Zero hash
+        assert_eq!(Hash::ZERO.short_hex(), "0000000000000000");
     }
 
     #[test]

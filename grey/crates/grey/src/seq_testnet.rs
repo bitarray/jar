@@ -264,7 +264,7 @@ pub async fn run_seq_testnet(
                             let rss_mb = get_rss_mb();
                             tracing::info!(
                                 "Slot {slot}: block #{blocks_produced} by v{author_idx}, hash=0x{}, rss={rss_mb:.1}MB",
-                                hex::encode(&header_hash.0[..8])
+                                header_hash.short_hex()
                             );
                         }
 

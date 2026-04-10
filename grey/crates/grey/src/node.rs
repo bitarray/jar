@@ -80,10 +80,7 @@ fn handle_guarantee_result(
                 all_secrets,
             );
             broadcast_last_guarantee(guarantor_state, net_commands);
-            tracing::info!(
-                "{context}, report_hash=0x{}",
-                hex::encode(&report_hash.0[..8])
-            );
+            tracing::info!("{context}, report_hash=0x{}", report_hash.short_hex());
             Some(report_hash)
         }
         Err(e) => {
@@ -414,7 +411,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                     .recent_blocks
                     .headers
                     .last()
-                    .map(|h| hex::encode(&h.header_hash.0[..8]))
+                    .map(|h| h.header_hash.short_hex())
                     .unwrap_or_else(|| "none".into());
                 tracing::info!(
                     "=== SIGUSR1 debug dump (validator {}) ===\n\
@@ -653,7 +650,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                 if !fresh {
                                     tracing::warn!(
                                         "Pruning stale guarantee: anchor=0x{} not in recent blocks",
-                                        hex::encode(&g.report.context.anchor.0[..8])
+                                        g.report.context.anchor.short_hex()
                                     );
                                 }
                                 fresh
@@ -801,7 +798,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                     config.validator_index,
                                     blocks_authored,
                                     current_slot,
-                                    hex::encode(&header_hash.0[..8])
+                                    header_hash.short_hex()
                                 );
 
                                 // Register guarantees from this block for auditing
@@ -905,7 +902,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                 tracing::info!(
                                     "Validator {} audited report 0x{}: {}",
                                     config.validator_index,
-                                    hex::encode(&report_hash.0[..8]),
+                                    report_hash.short_hex(),
                                     if is_valid { "VALID" } else { "INVALID" }
                                 );
                                 let ann_data = audit::encode_announcement(&ann);
@@ -1157,7 +1154,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                                 "Validator {} GRANDPA FINALIZED slot {} hash=0x{}",
                                                 config.validator_index,
                                                 fin_slot,
-                                                hex::encode(&fin_hash.0[..8])
+                                                fin_hash.short_hex()
                                             );
                                             let _ = store.set_finalized(&fin_hash, fin_slot);
 
@@ -1223,7 +1220,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                     "Validator {} received valid audit announcement from {} for report 0x{}: {}",
                                     config.validator_index,
                                     source,
-                                    hex::encode(&ann.report_hash.0[..8]),
+                                    ann.report_hash.short_hex(),
                                     if ann.is_valid { "VALID" } else { "INVALID" }
                                 );
                                 audit_state.add_announcement(ann);
@@ -1235,7 +1232,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                     tracing::warn!(
                                         "Validator {} ESCALATION needed for report 0x{}",
                                         config.validator_index,
-                                        hex::encode(&hash.0[..8])
+                                        hash.short_hex()
                                     );
                                 }
                             } else {
@@ -1362,7 +1359,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                             tracing::info!(
                                 "Validator {} received work package via RPC, hash=0x{}",
                                 config.validator_index,
-                                hex::encode(&hash.0[..8])
+                                hash.short_hex()
                             );
 
                             // Decode work package from JAM codec and process it

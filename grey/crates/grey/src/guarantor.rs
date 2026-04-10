@@ -187,7 +187,7 @@ pub fn process_work_package(
         chunks.len(),
         chunks.first().map(|c| c.len()).unwrap_or(0),
         bundle_len,
-        hex::encode(&report_hash.0[..8])
+        report_hash.short_hex()
     );
 
     // 5. Sign the guarantee
@@ -205,7 +205,7 @@ pub fn process_work_package(
         "Validator {} created guarantee for core {}, report_hash=0x{}",
         validator_index,
         core_index,
-        hex::encode(&report_hash.0[..8])
+        report_hash.short_hex()
     );
 
     Ok(report_hash)
@@ -343,7 +343,7 @@ pub fn handle_received_guarantee(
     if computed_hash.0 != report_hash {
         tracing::warn!(
             "Received guarantee: report hash mismatch (computed=0x{} vs claimed=0x{})",
-            hex::encode(&computed_hash.0[..8]),
+            computed_hash.short_hex(),
             hex::encode(&report_hash[..8])
         );
         return;
@@ -382,7 +382,7 @@ pub fn handle_received_assurance(data: &[u8], collected_assurances: &mut Vec<Ass
         tracing::info!(
             "Received assurance from validator {}, anchor=0x{}",
             assurance.validator_index,
-            hex::encode(&assurance.anchor.0[..8])
+            assurance.anchor.short_hex()
         );
         collected_assurances.push(assurance);
     } else {

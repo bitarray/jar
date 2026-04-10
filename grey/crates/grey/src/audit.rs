@@ -195,7 +195,7 @@ pub fn audit_work_report(_config: &Config, report: &WorkReport, _ctx: &dyn Refin
                 // (the guarantor may have had access to code we don't)
                 tracing::warn!(
                     "Audit: code not found for hash 0x{}, skipping item",
-                    hex::encode(&digest.code_hash.0[..8])
+                    digest.code_hash.short_hex()
                 );
                 continue;
             }

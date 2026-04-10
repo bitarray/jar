@@ -47,7 +47,7 @@ pub async fn run_testnet(
     tracing::info!(
         "Testnet: installed pixels service {} (code_hash=0x{})",
         pixels_service_id,
-        hex::encode(&pixels_code_hash.0[..8])
+        pixels_code_hash.short_hex()
     );
 
     // Populate auth_pool and auth_queue so guarantees pass the authorizer check
@@ -219,7 +219,7 @@ pub fn run_sequential_test(num_blocks: u32) -> Result<SequentialTestResult, Stri
     tracing::info!(
         "Installed PVM service {} with code_hash=0x{}",
         service_id,
-        hex::encode(&code_hash.0[..8])
+        code_hash.short_hex()
     );
 
     // --- Install the pixels service (ID 2000) ---
@@ -231,7 +231,7 @@ pub fn run_sequential_test(num_blocks: u32) -> Result<SequentialTestResult, Stri
     tracing::info!(
         "Installed pixels service {} with code_hash=0x{}",
         pixels_service_id,
-        hex::encode(&pixels_code_hash.0[..8])
+        pixels_code_hash.short_hex()
     );
 
     // Populate auth_pool so guarantees pass the authorizer check.
@@ -321,7 +321,7 @@ pub fn run_sequential_test(num_blocks: u32) -> Result<SequentialTestResult, Stri
                             "  [WP] Submitting {} guarantee at slot {}, core=0, pkg=0x{}",
                             target_label,
                             slot,
-                            hex::encode(&pkg_hash.0[..8])
+                            pkg_hash.short_hex()
                         );
                         wp_phase = WpPhase::GuaranteeSubmitted {
                             slot,
@@ -427,7 +427,7 @@ pub fn run_sequential_test(num_blocks: u32) -> Result<SequentialTestResult, Stri
                             blocks_produced,
                             slot,
                             author_idx,
-                            hex::encode(&header_hash.0[..8]),
+                            header_hash.short_hex(),
                             state.services.len(),
                         );
 

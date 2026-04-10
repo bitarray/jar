@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 #[derive(Debug, thiserror::Error)]
 pub enum RefineError {
     /// Service code not found for the given code hash.
-    #[error("code not found: 0x{}", hex::encode(&.0.0[..8]))]
+    #[error("code not found: 0x{}", .0.short_hex())]
     CodeNotFound(Hash),
     /// Authorization failed.
     #[error("authorization failed: {0}")]
