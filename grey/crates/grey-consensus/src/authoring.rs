@@ -57,7 +57,7 @@ pub fn is_slot_author_with_keypair(
     bandersnatch_pubkey: &BandersnatchPublicKey,
     keypair: Option<&grey_crypto::BandersnatchKeypair>,
 ) -> Option<u16> {
-    let slot_in_epoch = timeslot % config.epoch_length;
+    let slot_in_epoch = config.slot_in_epoch(timeslot);
 
     match &state.safrole.seal_key_series {
         SealKeySeries::Fallback(keys) => {
@@ -152,8 +152,8 @@ pub fn author_block_with_extrinsics(
     let vrf_signature = BandersnatchSignature(vrf_sig_bytes);
 
     // Build epoch marker if crossing epoch boundary
-    let old_epoch = state.timeslot / config.epoch_length;
-    let new_epoch = timeslot / config.epoch_length;
+    let old_epoch = config.epoch_of(state.timeslot);
+    let new_epoch = config.epoch_of(timeslot);
     let epoch_marker = if new_epoch > old_epoch {
         Some(EpochMarker {
             entropy: state.entropy[0],
@@ -170,8 +170,8 @@ pub fn author_block_with_extrinsics(
     };
 
     // Build winning tickets marker if crossing Y boundary
-    let old_slot = state.timeslot % config.epoch_length;
-    let new_slot = timeslot % config.epoch_length;
+    let old_slot = config.slot_in_epoch(state.timeslot);
+    let new_slot = config.slot_in_epoch(timeslot);
     let y = config.ticket_submission_end();
     let tickets_marker = if new_epoch == old_epoch
         && old_slot < y

@@ -61,7 +61,7 @@ pub fn process_disputes(
 ) -> Result<DisputeOutput, DisputeError> {
     let super_majority = Config::super_majority_of(current_validators.len()) as u16;
     let one_third = Config::one_third_of(current_validators.len()) as u16;
-    let current_epoch = current_timeslot / config.epoch_length;
+    let current_epoch = config.epoch_of(current_timeslot);
 
     // eq 10.10: Judgments within each verdict must be sorted by validator index, no duplicates
     for verdict in &disputes.verdicts {

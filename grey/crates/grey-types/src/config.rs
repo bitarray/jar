@@ -97,6 +97,16 @@ impl Config {
         count / 3
     }
 
+    /// Epoch index for a given timeslot: floor(τ / E).
+    pub fn epoch_of(&self, timeslot: u32) -> u32 {
+        timeslot / self.epoch_length
+    }
+
+    /// Slot position within an epoch: τ mod E.
+    pub fn slot_in_epoch(&self, timeslot: u32) -> u32 {
+        timeslot % self.epoch_length
+    }
+
     /// Valid validator count: multiples of 3 in [6, 3*(C+1)]. GP#514.
     pub fn is_valid_val_count(&self, z: u16) -> bool {
         z >= 6 && z <= 3 * (self.core_count + 1) && z.is_multiple_of(3)
@@ -248,6 +258,29 @@ mod tests {
         assert_eq!(c.rotations_per_epoch(), 3);
         let c = Config::full(); // E=600, R=10
         assert_eq!(c.rotations_per_epoch(), 60);
+    }
+
+    #[test]
+    fn test_epoch_of() {
+        let c = Config::tiny(); // E=12
+        assert_eq!(c.epoch_of(0), 0);
+        assert_eq!(c.epoch_of(11), 0);
+        assert_eq!(c.epoch_of(12), 1);
+        assert_eq!(c.epoch_of(25), 2);
+        let c = Config::full(); // E=600
+        assert_eq!(c.epoch_of(599), 0);
+        assert_eq!(c.epoch_of(600), 1);
+    }
+
+    #[test]
+    fn test_slot_in_epoch() {
+        let c = Config::tiny(); // E=12
+        assert_eq!(c.slot_in_epoch(0), 0);
+        assert_eq!(c.slot_in_epoch(5), 5);
+        assert_eq!(c.slot_in_epoch(12), 0);
+        assert_eq!(c.slot_in_epoch(15), 3);
+        let c = Config::full(); // E=600
+        assert_eq!(c.slot_in_epoch(601), 1);
     }
 
     #[test]

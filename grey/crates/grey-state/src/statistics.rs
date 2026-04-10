@@ -29,8 +29,8 @@ pub fn update_statistics(
     available_reports: &[WorkReport],
     accumulation_stats: &std::collections::BTreeMap<grey_types::ServiceId, (javm::Gas, u32)>,
 ) {
-    let old_epoch = prior_timeslot / config.epoch_length;
-    let new_epoch = new_timeslot / config.epoch_length;
+    let old_epoch = config.epoch_of(prior_timeslot);
+    let new_epoch = config.epoch_of(new_timeslot);
 
     let num_validators = stats.current.len();
 

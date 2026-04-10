@@ -102,10 +102,10 @@ pub fn process_safrole(
     }
 
     // eq 6.2: Compute epoch indices
-    let old_epoch = pre.tau / e;
-    let new_epoch = input.slot / e;
-    let old_slot_in_epoch = pre.tau % e;
-    let new_slot_in_epoch = input.slot % e;
+    let old_epoch = config.epoch_of(pre.tau);
+    let new_epoch = config.epoch_of(input.slot);
+    let old_slot_in_epoch = config.slot_in_epoch(pre.tau);
+    let new_slot_in_epoch = config.slot_in_epoch(input.slot);
     let is_epoch_change = new_epoch > old_epoch;
 
     // Validate ticket extrinsic (eq 6.30)

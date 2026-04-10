@@ -171,7 +171,6 @@ pub fn process_reports(
     let num_cores = config.core_count as usize;
     let num_validators = state.curr_validators.len();
     let rotation_period = config.rotation_period();
-    let epoch_length = config.epoch_length;
 
     // eq 11.24: Guarantees must be sorted by core_index
     if !crate::is_strictly_sorted_by_key(guarantees, |g| g.report.core_index) {
@@ -188,7 +187,7 @@ pub fn process_reports(
     let assignment_m =
         compute_core_assignments(config, &state.entropy[2], current_slot, num_validators);
     let prev_timeslot = current_slot.saturating_sub(rotation_period);
-    let prev_same_epoch = prev_timeslot / epoch_length == current_slot / epoch_length;
+    let prev_same_epoch = config.epoch_of(prev_timeslot) == config.epoch_of(current_slot);
     let prev_entropy = if prev_same_epoch {
         &state.entropy[2]
     } else {
