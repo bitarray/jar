@@ -192,29 +192,29 @@ fn branch_cost(code: &[u8], bitmask: &[u8], target: usize) -> u32 {
     }
 }
 
-/// Extract register A (first register in instruction encoding).
-fn reg_a(code: &[u8], pc: usize) -> u8 {
-    if pc + 1 < code.len() {
-        code[pc + 1] & 0x0F
+/// Extract a 4-bit register nibble from an instruction encoding.
+///
+/// Reads the byte at `pc + byte_offset`, shifts right by `shift`, and masks to 4 bits.
+/// Returns 0 if the byte is out of bounds.
+fn extract_reg(code: &[u8], pc: usize, byte_offset: usize, shift: u8) -> u8 {
+    if pc + byte_offset < code.len() {
+        (code[pc + byte_offset] >> shift) & 0x0F
     } else {
         0
     }
+}
+
+/// Extract register A (first register, lower nibble of byte after opcode).
+fn reg_a(code: &[u8], pc: usize) -> u8 {
+    extract_reg(code, pc, 1, 0)
 }
 /// Extract register B (second register, upper nibble of byte after opcode).
 fn reg_b(code: &[u8], pc: usize) -> u8 {
-    if pc + 1 < code.len() {
-        (code[pc + 1] >> 4) & 0x0F
-    } else {
-        0
-    }
+    extract_reg(code, pc, 1, 4)
 }
-/// Extract register D (third register encoding for 3-reg instructions).
+/// Extract register D (third register, lower nibble of second byte after opcode).
 fn reg_d(code: &[u8], pc: usize) -> u8 {
-    if pc + 2 < code.len() {
-        code[pc + 2] & 0x0F
-    } else {
-        0
-    }
+    extract_reg(code, pc, 2, 0)
 }
 
 /// Compute skip distance (bytes to next instruction start).
