@@ -1229,9 +1229,8 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                 audit_state.add_announcement(ann);
 
                                 // Check for escalations
-                                let escalations = audit_state.reports_needing_escalation(
-                                    protocol.validators_count as usize / 3,
-                                );
+                                let escalations =
+                                    audit_state.reports_needing_escalation();
                                 for hash in &escalations {
                                     tracing::warn!(
                                         "Validator {} ESCALATION needed for report 0x{}",

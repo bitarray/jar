@@ -115,22 +115,23 @@ impl AuditState {
     }
 
     /// Check if any report has conflicting announcements (escalation needed).
-    pub fn reports_needing_escalation(&self, threshold: usize) -> Vec<Hash> {
+    pub fn reports_needing_escalation(&self) -> Vec<Hash> {
         let mut escalations = Vec::new();
         for (hash, announcements) in &self.announcements {
-            let valid_count = announcements.iter().filter(|a| a.is_valid).count();
-            let invalid_count = announcements.iter().filter(|a| !a.is_valid).count();
-            // Escalate if there are both valid and invalid announcements
-            if valid_count > 0 && invalid_count > 0 {
-                escalations.push(*hash);
-            }
-            // Also escalate if enough announcements to trigger it
-            if valid_count + invalid_count >= threshold && valid_count > 0 && invalid_count > 0 {
-                escalations.push(*hash);
+            let mut has_valid = false;
+            let mut has_invalid = false;
+            for a in announcements {
+                if a.is_valid {
+                    has_valid = true;
+                } else {
+                    has_invalid = true;
+                }
+                if has_valid && has_invalid {
+                    escalations.push(*hash);
+                    break;
+                }
             }
         }
-        escalations.sort();
-        escalations.dedup();
         escalations
     }
 
@@ -420,7 +421,7 @@ mod tests {
         });
 
         // No escalation with only valid announcements
-        assert!(state.reports_needing_escalation(3).is_empty());
+        assert!(state.reports_needing_escalation().is_empty());
 
         // Add conflicting invalid announcement
         state.add_announcement(AuditAnnouncement {
@@ -431,7 +432,7 @@ mod tests {
         });
 
         // Should now trigger escalation
-        let escalations = state.reports_needing_escalation(3);
+        let escalations = state.reports_needing_escalation();
         assert_eq!(escalations.len(), 1);
         assert_eq!(escalations[0], hash);
     }
