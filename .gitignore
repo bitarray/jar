@@ -12,8 +12,12 @@
 
 # Docs (Zensical build output)
 /site
+/docs/plans
 
 # Shared
 /.claude/settings.local.json
 .devcontainer/
 grey/fuzz/target/
+
+# IDE
+/.vscode

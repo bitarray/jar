@@ -53,6 +53,9 @@ pub mod signing_contexts {
     /// GRANDPA precommit context.
     pub const PRECOMMIT: &[u8] = b"jam_precommit";
 
+    /// §17 equivocation evidence countersignature context.
+    pub const EQUIVOCATION_EVIDENCE: &[u8] = b"jam:equivocation_evidence";
+
     /// Build a judgment signing message: (X_⊺ or X_⊥) ⌢ report_hash.
     ///
     /// Used for both signing and verifying valid/invalid work-report judgments.
@@ -274,6 +277,50 @@ pub type RegisterValue = u64;
 
 /// An opaque blob of bytes.
 pub type Blob = Vec<u8>;
+
+/// Evidence of a same-slot block equivocation, broadcast via §17.
+///
+/// Both `block_a` and `block_b` exist at `slot` — the same Safrole-designated
+/// author signed both. Validators countersign this to build quorum evidence.
+#[derive(Debug, Clone, PartialEq, Eq, scale::Encode, scale::Decode)]
+pub struct EquivocationEvidence {
+    /// The slot at which the equivocation occurred.
+    pub slot: Timeslot,
+    /// One of the two conflicting block hashes (the lesser hash).
+    pub block_a: Hash,
+    /// The other conflicting block hash (the greater hash).
+    pub block_b: Hash,
+}
+
+impl EquivocationEvidence {
+    /// Canonical bytes to sign: slot LE32 ++ block_a ++ block_b
+    /// block_a < block_b is enforced by the constructor.
+    pub fn sign_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(68);
+        bytes.extend_from_slice(&self.slot.to_le_bytes());
+        bytes.extend_from_slice(&self.block_a.0);
+        bytes.extend_from_slice(&self.block_b.0);
+        bytes
+    }
+
+    /// Create evidence, normalising so block_a < block_b.
+    pub fn new(slot: Timeslot, h1: Hash, h2: Hash) -> Self {
+        let (block_a, block_b) = if h1 < h2 { (h1, h2) } else { (h2, h1) };
+        Self {
+            slot,
+            block_a,
+            block_b,
+        }
+    }
+}
+
+/// A validator's countersignature on equivocation evidence.
+#[derive(Debug, Clone, PartialEq, Eq, scale::Encode, scale::Decode)]
+pub struct EquivocationCountersig {
+    pub evidence: EquivocationEvidence,
+    pub validator_index: ValidatorIndex,
+    pub signature: Ed25519Signature,
+}
 
 /// Shared test helpers for codec roundtrip verification.
 #[cfg(test)]

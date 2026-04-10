@@ -27,6 +27,8 @@ const ASSURANCES_TOPIC: &str = "/jam/assurances/1";
 const ANNOUNCEMENTS_TOPIC: &str = "/jam/announcements/1";
 /// Gossipsub topic for Safrole ticket submissions.
 const TICKETS_TOPIC: &str = "/jam/tickets/1";
+/// Gossipsub topic for §17 equivocation evidence and countersignatures.
+const EQUIVOCATION_TOPIC: &str = "/jam/equivocation/1";
 
 /// Messages that the network service can send to the node.
 #[derive(Debug)]
@@ -43,6 +45,8 @@ pub enum NetworkEvent {
     AnnouncementReceived { data: Vec<u8>, source: PeerId },
     /// A ticket proof was received from a peer.
     TicketReceived { data: Vec<u8>, source: PeerId },
+    /// Equivocation evidence or countersignature received from a peer.
+    EquivocationReceived { data: Vec<u8>, source: PeerId },
     /// A chunk fetch request was received.
     ChunkRequest {
         report_hash: [u8; 32],
@@ -76,6 +80,8 @@ pub enum NetworkCommand {
     BroadcastAnnouncement { data: Vec<u8> },
     /// Broadcast a ticket proof.
     BroadcastTicket { data: Vec<u8> },
+    /// Broadcast equivocation evidence or a countersignature.
+    BroadcastEquivocation { data: Vec<u8> },
     /// Request a chunk from a specific peer.
     FetchChunk {
         peer: PeerId,
@@ -172,6 +178,8 @@ impl PeerRateTracker {
         limits.insert(ANNOUNCEMENTS_TOPIC, 20);
         // Tickets: bounded by tickets_per_validator
         limits.insert(TICKETS_TOPIC, 50);
+        // Equivocation: rare event, allow some countersig accumulation headroom
+        limits.insert(EQUIVOCATION_TOPIC, 20);
 
         Self {
             counters: HashMap::new(),
@@ -340,6 +348,7 @@ pub async fn start_network(
     let assurances_topic = gossipsub::IdentTopic::new(ASSURANCES_TOPIC);
     let announcements_topic = gossipsub::IdentTopic::new(ANNOUNCEMENTS_TOPIC);
     let tickets_topic = gossipsub::IdentTopic::new(TICKETS_TOPIC);
+    let equivocation_topic = gossipsub::IdentTopic::new(EQUIVOCATION_TOPIC);
 
     for (topic, name) in [
         (&blocks_topic, "blocks"),
@@ -348,6 +357,7 @@ pub async fn start_network(
         (&assurances_topic, "assurances"),
         (&announcements_topic, "announcements"),
         (&tickets_topic, "tickets"),
+        (&equivocation_topic, "equivocation"),
     ] {
         swarm
             .behaviour_mut()
@@ -395,6 +405,7 @@ pub async fn start_network(
         assurances: assurances_topic,
         announcements: announcements_topic,
         tickets: tickets_topic,
+        equivocation: equivocation_topic,
     };
     tokio::spawn(async move {
         run_network_loop(swarm, event_tx, cmd_rx, topics, validator_index).await;
@@ -419,6 +430,7 @@ struct TopicSet {
     assurances: gossipsub::IdentTopic,
     announcements: gossipsub::IdentTopic,
     tickets: gossipsub::IdentTopic,
+    equivocation: gossipsub::IdentTopic,
 }
 
 fn build_swarm() -> Result<Swarm<JamBehaviour>, Box<dyn std::error::Error + Send + Sync>> {
@@ -586,6 +598,8 @@ async fn run_network_loop(
                             dispatch_topic!(ANNOUNCEMENTS_TOPIC, AnnouncementReceived, normal);
                         } else if topic == TICKETS_TOPIC {
                             dispatch_topic!(TICKETS_TOPIC, TicketReceived, low);
+                        } else if topic == EQUIVOCATION_TOPIC {
+                            dispatch_topic!(EQUIVOCATION_TOPIC, EquivocationReceived, normal);
                         }
                     }
                     // Handle request-response events
@@ -769,6 +783,9 @@ async fn run_network_loop(
                     }
                     NetworkCommand::BroadcastTicket { data } => {
                         publish!(topics.tickets, data, "ticket");
+                    }
+                    NetworkCommand::BroadcastEquivocation { data } => {
+                        publish!(topics.equivocation, data, "equivocation evidence");
                     }
                     NetworkCommand::FetchChunk { peer, report_hash, chunk_index, response_tx } => {
                         // Build request: [0x01][report_hash(32)][chunk_idx(2)]

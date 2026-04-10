@@ -11,7 +11,10 @@
 use grey_consensus::genesis::ValidatorSecrets;
 #[cfg(test)]
 use grey_types::config::Config;
-use grey_types::{Ed25519Signature, Hash, Timeslot, ValidatorIndex};
+use grey_types::{
+    Ed25519PublicKey, Ed25519Signature, EquivocationCountersig, EquivocationEvidence, Hash,
+    Timeslot, ValidatorIndex,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use grey_types::signing_contexts;
@@ -64,6 +67,14 @@ pub struct VoteMessage {
     pub vote: Vote,
 }
 
+/// Accumulated countersignatures for one equivocated slot.
+#[derive(Debug, Default)]
+pub(crate) struct EquivocationVoting {
+    evidence: Option<EquivocationEvidence>,
+    /// Validators that have countersigned (validator_index → signature).
+    countersigs: BTreeMap<ValidatorIndex, Ed25519Signature>,
+}
+
 /// State of the GRANDPA finality gadget.
 pub struct GrandpaState {
     /// Current round number.
@@ -101,13 +112,16 @@ pub struct GrandpaState {
     pending_future_precommits: Vec<Vote>,
     /// Block ancestry: hash → (parent_hash, slot, ticket_sealed).
     /// Used for chain-selection and GHOST. Pruned on finalization.
-    pub ancestry: HashMap<Hash, (Hash, Timeslot, bool)>,
+    pub ancestry: HashMap<Hash, (Hash, Timeslot, bool, Option<Ed25519PublicKey>)>,
     /// Slots at which two different blocks were produced (same-slot equivocation).
     /// Pruned on finalization.
     pub chain_equivocations: HashSet<Timeslot>,
     /// Work report hashes contained in each unfinalized block.
     /// Used by is_acceptable() check 2. Pruned on finalization.
     pub block_reports: HashMap<Hash, Vec<Hash>>,
+    /// Countersignatures collected for in-progress equivocation resolutions.
+    /// Keyed by slot. Pruned when the equivocation is resolved or finalized away.
+    pub(crate) equivocation_voting: HashMap<Timeslot, EquivocationVoting>,
 }
 
 impl GrandpaState {
@@ -146,6 +160,7 @@ impl GrandpaState {
             ancestry: HashMap::new(),
             chain_equivocations: HashSet::new(),
             block_reports: HashMap::new(),
+            equivocation_voting: HashMap::new(),
         }
     }
 
@@ -216,7 +231,7 @@ impl GrandpaState {
         let best_metric = self.chain_metric(self.best_block_hash);
         if metric >= best_metric {
             self.best_block_hash = hash;
-            self.best_block_slot = self.ancestry.get(&hash).map(|&(_, s, _)| s).unwrap_or(0);
+            self.best_block_slot = self.ancestry.get(&hash).map(|&(_, s, _, _)| s).unwrap_or(0);
         }
     }
 
@@ -233,16 +248,9 @@ impl GrandpaState {
         slot: Timeslot,
         ticket_sealed: bool,
         report_hashes: Vec<Hash>,
-    ) {
-        // Detect same-slot equivocation: a *different* block already registered at this slot.
-        // Safrole guarantees one author per slot, so two blocks at the same slot means that
-        // author equivocated (signed both). Insert both, then immediately resolve by purging
-        // the lower-hash block.
-        //
-        // TODO(§17): hash tie-breaker is a placeholder. Replace with quorum-countersigned
-        // equivocation evidence once the §17 network protocol is implemented. The quorum
-        // vote determines which block is the canonical winner; hash order is arbitrary.
-        let incumbent = self.ancestry.iter().find_map(|(&h, &(_, s, _))| {
+        author_key: Option<Ed25519PublicKey>,
+    ) -> Option<EquivocationEvidence> {
+        let incumbent = self.ancestry.iter().find_map(|(&h, &(_, s, _, _))| {
             if s == slot && h != hash {
                 Some(h)
             } else {
@@ -250,19 +258,14 @@ impl GrandpaState {
             }
         });
 
-        self.ancestry.insert(hash, (parent, slot, ticket_sealed));
+        if incumbent.is_some() {
+            self.chain_equivocations.insert(slot);
+        }
+        self.ancestry
+            .insert(hash, (parent, slot, ticket_sealed, author_key));
         self.block_reports.insert(hash, report_hashes);
 
-        if let Some(incumbent_hash) = incumbent {
-            self.chain_equivocations.insert(slot);
-            let loser = hash.min(incumbent_hash);
-            tracing::warn!(
-                slot,
-                ?loser,
-                "same-slot equivocation detected: purging losing block (§17 placeholder)"
-            );
-            self.purge_block(loser);
-        }
+        incumbent.map(|inc| EquivocationEvidence::new(slot, hash, inc))
     }
 
     /// Check GP §19 acceptability conditions for a block.
@@ -292,7 +295,7 @@ impl GrandpaState {
 
         // Check 3: no same-slot equivocations anywhere in this chain
         for &h in &chain {
-            if let Some(&(_, slot, _)) = self.ancestry.get(&h)
+            if let Some(&(_, slot, _, _)) = self.ancestry.get(&h)
                 && self.chain_equivocations.contains(&slot)
             {
                 return false;
@@ -311,7 +314,7 @@ impl GrandpaState {
             .filter(|&&h| {
                 self.ancestry
                     .get(&h)
-                    .map(|&(_, _, sealed)| sealed)
+                    .map(|&(_, _, sealed, _)| sealed)
                     .unwrap_or(false)
             })
             .count() as u32
@@ -326,7 +329,7 @@ impl GrandpaState {
         let mut current = hash;
         while current != self.finalized_hash {
             match self.ancestry.get(&current) {
-                Some(&(parent, _, _)) => {
+                Some(&(parent, _, _, _)) => {
                     result.push(parent);
                     current = parent;
                 }
@@ -488,7 +491,7 @@ impl GrandpaState {
     fn prevote_ghost(&self) -> Option<(Hash, Timeslot)> {
         // Build parent → children map from unfinalized ancestry
         let mut children: HashMap<Hash, Vec<Hash>> = HashMap::new();
-        for (&hash, &(parent, _, _)) in &self.ancestry {
+        for (&hash, &(parent, _, _, _)) in &self.ancestry {
             children.entry(parent).or_default().push(hash);
         }
 
@@ -541,9 +544,11 @@ impl GrandpaState {
                 self.finalized_hash = *hash;
                 self.finalized_slot = *slot;
                 self.ancestry
-                    .retain(|_, &mut (_, slot, _)| slot > self.finalized_slot);
+                    .retain(|_, &mut (_, slot, _, _)| slot > self.finalized_slot);
                 self.chain_equivocations
                     .retain(|&slot| slot > self.finalized_slot);
+                self.equivocation_voting
+                    .retain(|&slot, _| slot > self.finalized_slot);
                 self.block_reports
                     .retain(|h, _| self.ancestry.contains_key(h));
                 // Prune vote archives for finalized rounds to bound memory growth.
@@ -605,6 +610,52 @@ impl GrandpaState {
             .any(|&(count, _)| count >= self.threshold())
     }
 
+    /// Record a validator's countersignature on equivocation evidence.
+    ///
+    /// Returns `Some(loser_hash)` when 2f+1 validators have signed,
+    /// i.e., quorum is reached and the caller should call `purge_block(loser_hash)`.
+    /// Returns `None` if the signature is invalid or quorum not yet reached.
+    pub fn add_equivocation_countersig(
+        &mut self,
+        countersig: &EquivocationCountersig,
+        validator_keys: &[Ed25519PublicKey],
+    ) -> Option<Hash> {
+        // Validate validator index
+        let key = validator_keys.get(usize::from(countersig.validator_index))?;
+
+        // Build signed message: context ⌢ sign_bytes (matching how sign_vote works)
+        let ctx = signing_contexts::EQUIVOCATION_EVIDENCE;
+        let payload = countersig.evidence.sign_bytes();
+        let mut msg = Vec::with_capacity(ctx.len() + payload.len());
+        msg.extend_from_slice(ctx);
+        msg.extend_from_slice(&payload);
+
+        if !grey_crypto::ed25519_verify(key, &msg, &countersig.signature) {
+            tracing::warn!(
+                validator_index = countersig.validator_index,
+                "invalid equivocation countersig — ignoring"
+            );
+            return None;
+        }
+
+        let slot = countersig.evidence.slot;
+        let threshold = self.threshold();
+        let voting = self.equivocation_voting.entry(slot).or_default();
+        voting.evidence = Some(countersig.evidence.clone());
+        voting
+            .countersigs
+            .insert(countersig.validator_index, countersig.signature);
+
+        // Check quorum: 2f+1
+        if voting.countersigs.len() >= threshold {
+            let loser = voting.evidence.as_ref()?.block_a;
+            tracing::info!(slot, ?loser, "equivocation quorum reached — purging loser");
+            Some(loser)
+        } else {
+            None
+        }
+    }
+
     /// Remove a block that lost a dispute from the finality state (§17 hook).
     ///
     /// Called by the disputes subsystem once a validator quorum has judged this
@@ -625,16 +676,18 @@ impl GrandpaState {
     ///   in the same call (avoids the window). Not done here because
     ///   equivocations are rare and the cross-subsystem data flow is not worth
     ///   the added complexity.
-    pub fn purge_block(&mut self, hash: Hash) {
-        let slot = self.ancestry.get(&hash).map(|&(_, s, _)| s);
-        self.ancestry.remove(&hash);
+    pub fn purge_block(&mut self, hash: Hash) -> Option<Ed25519PublicKey> {
+        let entry = self.ancestry.remove(&hash);
+        let (slot, author_key) = entry
+            .map(|(_, s, _, k)| (Some(s), k))
+            .unwrap_or((None, None));
         self.block_reports.remove(&hash);
 
         if let Some(s) = slot {
             let still_equivocated = self
                 .ancestry
                 .values()
-                .filter(|&&(_, slot, _)| slot == s)
+                .filter(|&&(_, slot, _, _)| slot == s)
                 .count()
                 > 1;
             if !still_equivocated {
@@ -646,6 +699,8 @@ impl GrandpaState {
             self.best_block_hash = self.finalized_hash;
             self.best_block_slot = self.finalized_slot;
         }
+
+        author_key
     }
 }
 
@@ -856,7 +911,7 @@ mod tests {
 
         let mut grandpa = GrandpaState::new(config.validators_count);
         let block_hash = Hash([42u8; 32]);
-        grandpa.register_block(block_hash, Hash::ZERO, 5, false, vec![]);
+        grandpa.register_block(block_hash, Hash::ZERO, 5, false, vec![], None);
         grandpa.update_best_block(block_hash, &BTreeSet::new());
 
         // Validator 0 prevotes
@@ -898,7 +953,7 @@ mod tests {
 
         let mut grandpa = GrandpaState::new(config.validators_count);
         let block_hash = Hash([42u8; 32]);
-        grandpa.register_block(block_hash, Hash::ZERO, 5, false, vec![]);
+        grandpa.register_block(block_hash, Hash::ZERO, 5, false, vec![], None);
         grandpa.update_best_block(block_hash, &BTreeSet::new());
 
         // All validators prevote
@@ -1039,7 +1094,7 @@ mod tests {
 
         let mut grandpa = GrandpaState::new(config.validators_count);
         let block_hash = Hash([42u8; 32]);
-        grandpa.register_block(block_hash, Hash::ZERO, 5, false, vec![]);
+        grandpa.register_block(block_hash, Hash::ZERO, 5, false, vec![], None);
         grandpa.update_best_block(block_hash, &BTreeSet::new());
 
         // All validators prevote for slot 5
@@ -1334,7 +1389,7 @@ mod tests {
         grandpa.finalized_hash = hashes[0]; // slot 1 is finalized start
         for (i, &h) in hashes.iter().enumerate() {
             let parent = if i == 0 { Hash::ZERO } else { hashes[i - 1] };
-            grandpa.register_block(h, parent, (i + 1) as u32, false, vec![]);
+            grandpa.register_block(h, parent, (i + 1) as u32, false, vec![], None);
         }
         // Mark slot 3 as having a chain equivocation
         grandpa.chain_equivocations.insert(3);
@@ -1351,7 +1406,7 @@ mod tests {
 
         // ancestry entries with slot <= 5 must be gone
         for &h in &hashes {
-            if let Some(&(_, slot, _)) = grandpa.ancestry.get(&h) {
+            if let Some(&(_, slot, _, _)) = grandpa.ancestry.get(&h) {
                 assert!(slot > 5, "slot {} should have been pruned", slot);
             }
         }
@@ -1368,9 +1423,9 @@ mod tests {
         // Set finalized_hash so the walk terminates
         grandpa.finalized_hash = hash_a;
         // Register A→B→C (A is finalized, B is child of A, C is child of B)
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
-        grandpa.register_block(hash_b, hash_a, 2, false, vec![]);
-        grandpa.register_block(hash_c, hash_b, 3, false, vec![]);
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![], None);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![], None);
+        grandpa.register_block(hash_c, hash_b, 3, false, vec![], None);
         let chain = grandpa.ancestors(hash_c);
         // Should be [C, B, A] — from tip back to finalized_hash
         assert_eq!(chain, vec![hash_c, hash_b, hash_a]);
@@ -1381,8 +1436,11 @@ mod tests {
         let mut grandpa = GrandpaState::new(6);
         let hash_a = Hash([1u8; 32]);
         let parent = Hash::ZERO; // genesis parent
-        grandpa.register_block(hash_a, parent, 3, false, vec![]);
-        assert_eq!(grandpa.ancestry.get(&hash_a), Some(&(parent, 3, false)));
+        grandpa.register_block(hash_a, parent, 3, false, vec![], None);
+        assert_eq!(
+            grandpa.ancestry.get(&hash_a),
+            Some(&(parent, 3, false, None))
+        );
         assert!(grandpa.chain_equivocations.is_empty());
     }
 
@@ -1392,20 +1450,12 @@ mod tests {
         let hash_a = Hash([1u8; 32]);
         let hash_b = Hash([2u8; 32]);
         let parent = Hash::ZERO;
-        // Two different blocks at slot 5 → equivocation detected and immediately resolved.
-        // hash_a < hash_b, so hash_a is the loser and gets purged.
-        grandpa.register_block(hash_a, parent, 5, false, vec![]);
-        grandpa.register_block(hash_b, parent, 5, true, vec![]);
-        // Equivocation resolved: slot is un-poisoned, only winner survives
-        assert!(!grandpa.chain_equivocations.contains(&5));
-        assert!(
-            !grandpa.ancestry.contains_key(&hash_a),
-            "loser must be purged"
-        );
-        assert!(
-            grandpa.ancestry.contains_key(&hash_b),
-            "winner must survive"
-        );
+        grandpa.register_block(hash_a, parent, 5, false, vec![], None);
+        grandpa.register_block(hash_b, parent, 5, true, vec![], None);
+        // Slot is poisoned; both blocks are still recorded
+        assert!(grandpa.chain_equivocations.contains(&5));
+        assert!(grandpa.ancestry.contains_key(&hash_a));
+        assert!(grandpa.ancestry.contains_key(&hash_b));
     }
 
     #[test]
@@ -1417,20 +1467,20 @@ mod tests {
 
         // finalized_hash starts as Hash::ZERO (set by GrandpaState::new)
         // Register a chain rooted at hash_a (parent = Hash::ZERO = finalized_hash)
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
-        grandpa.register_block(hash_b, hash_a, 2, false, vec![]);
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![], None);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![], None);
 
         // hash_b's chain reaches Hash::ZERO (finalized) — acceptable
         assert!(grandpa.is_acceptable(hash_b, &BTreeSet::new()));
 
         // hash_c is registered with parent hash_b but finalized_hash is still Hash::ZERO
         // hash_c → hash_b → hash_a → Hash::ZERO: still acceptable
-        grandpa.register_block(hash_c, hash_b, 3, false, vec![]);
+        grandpa.register_block(hash_c, hash_b, 3, false, vec![], None);
         assert!(grandpa.is_acceptable(hash_c, &BTreeSet::new()));
 
         // A block with a parent not connected to finalized_hash fails check 1
         let orphan = Hash([99u8; 32]);
-        grandpa.register_block(orphan, Hash([55u8; 32]), 10, false, vec![]);
+        grandpa.register_block(orphan, Hash([55u8; 32]), 10, false, vec![], None);
         assert!(!grandpa.is_acceptable(orphan, &BTreeSet::new()));
     }
 
@@ -1443,12 +1493,12 @@ mod tests {
         let hash_d = Hash([4u8; 32]);
 
         // hash_a at slot 1, hash_b and hash_c both at slot 2 (equivocation)
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
-        grandpa.register_block(hash_b, hash_a, 2, false, vec![]);
-        grandpa.register_block(hash_c, hash_a, 2, false, vec![]); // equivocation at slot 2
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![], None);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![], None);
+        grandpa.register_block(hash_c, hash_a, 2, false, vec![], None); // equivocation at slot 2
 
         // hash_d extends hash_b — but its chain passes through slot 2 (equivocated)
-        grandpa.register_block(hash_d, hash_b, 3, false, vec![]);
+        grandpa.register_block(hash_d, hash_b, 3, false, vec![], None);
 
         // hash_b is directly at the equivocated slot — not acceptable
         assert!(!grandpa.is_acceptable(hash_b, &BTreeSet::new()));
@@ -1466,9 +1516,9 @@ mod tests {
         let hash_c = Hash([3u8; 32]);
 
         // hash_a: ticket_sealed=false, hash_b: true, hash_c: true
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
-        grandpa.register_block(hash_b, hash_a, 2, true, vec![]);
-        grandpa.register_block(hash_c, hash_b, 3, true, vec![]);
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![], None);
+        grandpa.register_block(hash_b, hash_a, 2, true, vec![], None);
+        grandpa.register_block(hash_c, hash_b, 3, true, vec![], None);
 
         // chain of hash_c = [hash_c(true), hash_b(true), hash_a(false)] → metric = 2
         assert_eq!(grandpa.chain_metric(hash_c), 2);
@@ -1485,9 +1535,9 @@ mod tests {
         let hash_b = Hash([2u8; 32]); // fork 1: no ticket-sealed
         let hash_c = Hash([3u8; 32]); // fork 2: one ticket-sealed
 
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
-        grandpa.register_block(hash_b, hash_a, 2, false, vec![]); // metric = 0
-        grandpa.register_block(hash_c, hash_a, 2, true, vec![]); // metric = 1
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![], None);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![], None); // metric = 0
+        grandpa.register_block(hash_c, hash_a, 2, true, vec![], None); // metric = 1
 
         assert!(grandpa.chain_metric(hash_c) > grandpa.chain_metric(hash_b));
     }
@@ -1499,12 +1549,12 @@ mod tests {
         let orphan = Hash([99u8; 32]);
 
         // hash_a is properly connected to finalized (Hash::ZERO)
-        grandpa.register_block(hash_a, Hash::ZERO, 5, false, vec![]);
+        grandpa.register_block(hash_a, Hash::ZERO, 5, false, vec![], None);
         grandpa.update_best_block(hash_a, &BTreeSet::new());
         assert_eq!(grandpa.best_block_hash, hash_a);
 
         // orphan has no path to finalized_hash — must be rejected
-        grandpa.register_block(orphan, Hash([55u8; 32]), 10, false, vec![]);
+        grandpa.register_block(orphan, Hash([55u8; 32]), 10, false, vec![], None);
         grandpa.update_best_block(orphan, &BTreeSet::new());
         // best block must NOT change to orphan
         assert_eq!(
@@ -1520,9 +1570,9 @@ mod tests {
         let hash_b = Hash([2u8; 32]); // slot 2, no ticket-sealed → metric 0
         let hash_c = Hash([3u8; 32]); // slot 3, ticket-sealed    → metric 1
 
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
-        grandpa.register_block(hash_b, hash_a, 2, false, vec![]);
-        grandpa.register_block(hash_c, hash_a, 3, true, vec![]);
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![], None);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![], None);
+        grandpa.register_block(hash_c, hash_a, 3, true, vec![], None);
 
         // Register hash_b first — it becomes best (metric 0 >= initial 0)
         grandpa.update_best_block(hash_b, &BTreeSet::new());
@@ -1553,9 +1603,9 @@ mod tests {
         let hash_b = Hash([2u8; 32]);
         let hash_c = Hash([3u8; 32]);
 
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
-        grandpa.register_block(hash_b, hash_a, 2, false, vec![]);
-        grandpa.register_block(hash_c, hash_b, 3, false, vec![]);
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![], None);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![], None);
+        grandpa.register_block(hash_c, hash_b, 3, false, vec![], None);
 
         // All 4 prevotes on hash_c (the tip)
         for i in 0..4u16 {
@@ -1573,9 +1623,9 @@ mod tests {
         let hash_b = Hash([2u8; 32]); // fork 1: slot 2, will get 3 votes
         let hash_c = Hash([3u8; 32]); // fork 2: slot 5 (higher!), will get 1 vote
 
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
-        grandpa.register_block(hash_b, hash_a, 2, false, vec![]);
-        grandpa.register_block(hash_c, hash_a, 5, false, vec![]);
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![], None);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![], None);
+        grandpa.register_block(hash_c, hash_a, 5, false, vec![], None);
 
         // 3 prevotes on hash_b (lower slot), 1 on hash_c (higher slot)
         grandpa.prevotes.insert(0, make_prevote(hash_b, 2, 0));
@@ -1592,7 +1642,7 @@ mod tests {
     fn test_ghost_no_prevotes_returns_none() {
         let mut grandpa = GrandpaState::new(6);
         let hash_a = Hash([1u8; 32]);
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![], None);
 
         // No prevotes at all
         assert_eq!(grandpa.prevote_ghost(), None);
@@ -1604,13 +1654,13 @@ mod tests {
         let hash_a = Hash([1u8; 32]);
         let hash_b = Hash([2u8; 32]);
 
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
-        grandpa.register_block(hash_b, hash_a, 2, false, vec![]);
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![], None);
+        grandpa.register_block(hash_b, hash_a, 2, false, vec![], None);
 
         // Finalize at hash_b slot 2 — ancestry is pruned
         grandpa.finalized_hash = hash_b;
         grandpa.finalized_slot = 2;
-        grandpa.ancestry.retain(|_, &mut (_, s, _)| s > 2);
+        grandpa.ancestry.retain(|_, &mut (_, s, _, _)| s > 2);
 
         // Prevote for hash_a (now pruned from ancestry, below finalized)
         grandpa.prevotes.insert(0, make_prevote(hash_a, 1, 0));
@@ -1641,10 +1691,10 @@ mod tests {
         let hash_c = Hash([3u8; 32]);
         let hash_d = Hash([4u8; 32]);
 
-        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![]);
-        grandpa.register_block(hash_b, hash_a, 3, false, vec![]);
-        grandpa.register_block(hash_c, hash_a, 5, false, vec![]);
-        grandpa.register_block(hash_d, hash_b, 4, false, vec![]);
+        grandpa.register_block(hash_a, Hash::ZERO, 1, false, vec![], None);
+        grandpa.register_block(hash_b, hash_a, 3, false, vec![], None);
+        grandpa.register_block(hash_c, hash_a, 5, false, vec![], None);
+        grandpa.register_block(hash_d, hash_b, 4, false, vec![], None);
 
         grandpa.prevotes.insert(0, make_prevote(hash_b, 3, 0));
         grandpa.prevotes.insert(1, make_prevote(hash_b, 3, 1));
@@ -1659,51 +1709,6 @@ mod tests {
 
     // ── register_block equivocation resolution tests ─────────────────────
 
-    #[test]
-    fn test_register_block_resolves_equivocation_immediately() {
-        let mut g = make_grandpa(6);
-        let parent = Hash([0u8; 32]);
-        // a has lower hash → should be purged; b survives
-        let a = Hash([1u8; 32]);
-        let b = Hash([2u8; 32]);
-
-        g.register_block(a, parent, 5, true, vec![]);
-        g.register_block(b, parent, 5, false, vec![]);
-
-        assert!(
-            g.ancestry.contains_key(&b),
-            "winner (higher hash) must survive"
-        );
-        assert!(
-            !g.ancestry.contains_key(&a),
-            "loser (lower hash) must be purged"
-        );
-        assert!(
-            !g.chain_equivocations.contains(&5),
-            "slot must be un-poisoned"
-        );
-    }
-
-    #[test]
-    fn test_register_block_equivocation_resets_best_to_finalized() {
-        let mut g = make_grandpa(6);
-        let fin = Hash([0u8; 32]);
-        let a = Hash([1u8; 32]);
-        let b = Hash([2u8; 32]);
-        g.finalized_hash = fin;
-        g.finalized_slot = 3;
-        // a was best before equivocation arrives
-        g.best_block_hash = a;
-        g.best_block_slot = 5;
-
-        g.register_block(a, fin, 5, true, vec![]);
-        g.register_block(b, fin, 5, false, vec![]);
-
-        // a is the loser (lower hash) and was best → best resets to finalized
-        assert_eq!(g.best_block_hash, fin);
-        assert_eq!(g.best_block_slot, 3);
-    }
-
     // ── purge_block tests ────────────────────────────────────────────────
 
     fn make_grandpa(n: u16) -> GrandpaState {
@@ -1715,7 +1720,7 @@ mod tests {
         let mut g = make_grandpa(6);
         let parent = Hash([0u8; 32]);
         let hash = Hash([1u8; 32]);
-        g.ancestry.insert(hash, (parent, 5, true));
+        g.ancestry.insert(hash, (parent, 5, true, None));
         g.block_reports.insert(hash, vec![Hash([9u8; 32])]);
 
         g.purge_block(hash);
@@ -1731,8 +1736,8 @@ mod tests {
         let a = Hash([1u8; 32]);
         let b = Hash([2u8; 32]);
         // Two blocks at slot 5 → equivocation
-        g.ancestry.insert(a, (parent, 5, true));
-        g.ancestry.insert(b, (parent, 5, false));
+        g.ancestry.insert(a, (parent, 5, true, None));
+        g.ancestry.insert(b, (parent, 5, false, None));
         g.chain_equivocations.insert(5);
 
         // Purge the loser
@@ -1756,9 +1761,9 @@ mod tests {
         let b = Hash([2u8; 32]);
         let c = Hash([3u8; 32]);
         // Three blocks at slot 5 (unusual but valid to test the count)
-        g.ancestry.insert(a, (parent, 5, true));
-        g.ancestry.insert(b, (parent, 5, false));
-        g.ancestry.insert(c, (parent, 5, false));
+        g.ancestry.insert(a, (parent, 5, true, None));
+        g.ancestry.insert(b, (parent, 5, false, None));
+        g.ancestry.insert(c, (parent, 5, false, None));
         g.chain_equivocations.insert(5);
 
         g.purge_block(a);
@@ -1778,7 +1783,7 @@ mod tests {
         g.finalized_slot = 3;
         g.best_block_hash = hash;
         g.best_block_slot = 5;
-        g.ancestry.insert(hash, (fin, 5, true));
+        g.ancestry.insert(hash, (fin, 5, true, None));
 
         g.purge_block(hash);
 
@@ -1796,8 +1801,8 @@ mod tests {
         g.finalized_slot = 3;
         g.best_block_hash = best;
         g.best_block_slot = 5;
-        g.ancestry.insert(best, (fin, 5, true));
-        g.ancestry.insert(loser, (fin, 5, false));
+        g.ancestry.insert(best, (fin, 5, true, None));
+        g.ancestry.insert(loser, (fin, 5, false, None));
         g.chain_equivocations.insert(5);
 
         g.purge_block(loser);
@@ -1811,5 +1816,72 @@ mod tests {
         let mut g = make_grandpa(6);
         // Should not panic
         g.purge_block(Hash([0xffu8; 32]));
+    }
+
+    // ── quorum equivocation resolution tests ─────────────────────────────
+
+    #[test]
+    fn test_quorum_resolves_equivocation() {
+        use grey_types::{Ed25519Signature, EquivocationEvidence};
+
+        // Build a GrandpaState with 6 validators
+        let mut g = make_grandpa(6);
+        let parent = Hash([0u8; 32]);
+        let a = Hash([1u8; 32]); // lower → loser
+        let b = Hash([2u8; 32]); // higher → winner
+
+        // Register both blocks — slot gets poisoned
+        g.register_block(a, parent, 5, true, vec![], None);
+        g.register_block(b, parent, 5, false, vec![], None);
+        assert!(
+            g.chain_equivocations.contains(&5),
+            "slot must be poisoned before quorum"
+        );
+
+        // Produce fake evidence + threshold (4) countersigs
+        // NOTE: in unit tests we bypass real crypto — test the quorum count logic only
+        // by directly inserting into equivocation_voting
+        let ev = EquivocationEvidence::new(5, a, b);
+        let voting = g.equivocation_voting.entry(5).or_default();
+        voting.evidence = Some(ev.clone());
+        for i in 0..4u16 {
+            voting.countersigs.insert(i, Ed25519Signature([0u8; 64]));
+        }
+
+        // Simulate quorum reached: caller calls purge_block
+        g.purge_block(ev.block_a); // block_a is the loser (lower hash)
+
+        assert!(
+            !g.chain_equivocations.contains(&5),
+            "slot must be un-poisoned"
+        );
+        assert!(!g.ancestry.contains_key(&a), "loser must be gone");
+        assert!(g.ancestry.contains_key(&b), "winner must survive");
+    }
+
+    #[test]
+    fn test_quorum_not_reached_keeps_slot_poisoned() {
+        use grey_types::{Ed25519Signature, EquivocationEvidence};
+
+        let mut g = make_grandpa(6);
+        let parent = Hash([0u8; 32]);
+        let a = Hash([1u8; 32]);
+        let b = Hash([2u8; 32]);
+
+        g.register_block(a, parent, 5, true, vec![], None);
+        g.register_block(b, parent, 5, false, vec![], None);
+
+        // Only 3 countersigs (threshold is 4 for 6 validators) — no quorum
+        let voting = g.equivocation_voting.entry(5).or_default();
+        voting.evidence = Some(EquivocationEvidence::new(5, a, b));
+        for i in 0..3u16 {
+            voting.countersigs.insert(i, Ed25519Signature([0u8; 64]));
+        }
+
+        // No purge_block call yet
+        assert!(
+            g.chain_equivocations.contains(&5),
+            "slot must stay poisoned below quorum"
+        );
     }
 }

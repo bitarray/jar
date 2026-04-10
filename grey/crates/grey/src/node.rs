@@ -811,19 +811,33 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                     .iter()
                                     .map(|g| grey_crypto::report_hash(&g.report))
                                     .collect();
-                                grandpa.register_block(
+                                if let Some(evidence) = grandpa.register_block(
                                     header_hash,
                                     block.header.parent_hash,
                                     block.header.timeslot,
                                     ticket_sealed,
                                     authored_report_hashes,
-                                );
+                                    Some(my_secrets.ed25519.public_key()),
+                                ) {
+                                    use scale::Encode;
+                                    tracing::warn!(slot = evidence.slot, "equivocation detected: broadcasting evidence and countersig");
+                                    // Broadcast raw evidence so peers learn about it
+                                    let _ = net_commands.try_send(NetworkCommand::BroadcastEquivocation { data: evidence.encode() });
+                                    // Sign and broadcast our own countersig
+                                    let ctx = grey_types::signing_contexts::EQUIVOCATION_EVIDENCE;
+                                    let payload = evidence.sign_bytes();
+                                    let mut msg = Vec::with_capacity(ctx.len() + payload.len());
+                                    msg.extend_from_slice(ctx);
+                                    msg.extend_from_slice(&payload);
+                                    let sig = my_secrets.ed25519.sign(&msg);
+                                    let countersig = grey_types::EquivocationCountersig {
+                                        evidence,
+                                        validator_index: config.validator_index,
+                                        signature: sig,
+                                    };
+                                    let _ = net_commands.try_send(NetworkCommand::BroadcastEquivocation { data: countersig.encode() });
+                                }
                                 grandpa.update_best_block(header_hash, &audit_state.completed_audits);
-
-                                // TODO(§17): when block equivocation evidence arrives from the
-                                // network and a quorum of validators has countersigned it, call:
-                                //   crate::disputes::report_loser(losing_block_hash, &mut grandpa);
-                                // This un-poisons the slot and lets the surviving fork finalize.
 
                                 // Send prevote for the new block
                                 if let Some(prevote_msg) = grandpa.create_prevote(
@@ -1067,16 +1081,37 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                         .iter()
                                         .map(|g| grey_crypto::report_hash(&g.report))
                                         .collect();
-                                    grandpa.register_block(
+                                    let import_author_key = state
+                                        .current_validators
+                                        .get(block.header.author_index as usize)
+                                        .map(|v| v.ed25519);
+                                    if let Some(evidence) = grandpa.register_block(
                                         import_hash,
                                         block.header.parent_hash,
                                         block.header.timeslot,
                                         ticket_sealed,
                                         imported_report_hashes,
-                                    );
+                                        import_author_key,
+                                    ) {
+                                        use scale::Encode;
+                                        tracing::warn!(slot = evidence.slot, "equivocation detected: broadcasting evidence and countersig");
+                                        // Broadcast raw evidence so peers learn about it
+                                        let _ = net_commands.try_send(NetworkCommand::BroadcastEquivocation { data: evidence.encode() });
+                                        // Sign and broadcast our own countersig
+                                        let ctx = grey_types::signing_contexts::EQUIVOCATION_EVIDENCE;
+                                        let payload = evidence.sign_bytes();
+                                        let mut msg = Vec::with_capacity(ctx.len() + payload.len());
+                                        msg.extend_from_slice(ctx);
+                                        msg.extend_from_slice(&payload);
+                                        let sig = my_secrets.ed25519.sign(&msg);
+                                        let countersig = grey_types::EquivocationCountersig {
+                                            evidence,
+                                            validator_index: config.validator_index,
+                                            signature: sig,
+                                        };
+                                        let _ = net_commands.try_send(NetworkCommand::BroadcastEquivocation { data: countersig.encode() });
+                                    }
                                     grandpa.update_best_block(import_hash, &audit_state.completed_audits);
-                                    // TODO(§17): same as above — wire crate::disputes::report_loser
-                                    // here once the block equivocation reporting protocol exists.
                                     if let Some(prevote_msg) = grandpa.create_prevote(
                                         config.validator_index,
                                         my_secrets,
@@ -1312,6 +1347,23 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                     source
                                 );
                             }
+                    }
+                    NetworkEvent::EquivocationReceived { data, source: _ } => {
+                        use scale::Decode;
+                        let Ok((countersig, _)) = grey_types::EquivocationCountersig::decode(data.as_slice()) else {
+                            tracing::warn!("failed to decode EquivocationCountersig");
+                            continue;
+                        };
+                        let validator_keys: Vec<_> = state
+                            .current_validators
+                            .iter()
+                            .map(|v| v.ed25519)
+                            .collect();
+                        if let Some(loser) =
+                            grandpa.add_equivocation_countersig(&countersig, &validator_keys)
+                        {
+                            crate::disputes::report_loser(loser, &mut grandpa);
+                        }
                     }
                     NetworkEvent::PeerIdentified { peer_id, validator_index: vi } => {
                         tracing::info!(
