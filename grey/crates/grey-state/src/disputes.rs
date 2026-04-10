@@ -60,7 +60,7 @@ pub fn process_disputes(
     previous_validators: &[ValidatorKey],
 ) -> Result<DisputeOutput, DisputeError> {
     let val_count = current_validators.len() as u16;
-    let super_majority = (val_count * 2 / 3) + 1;
+    let super_majority = Config::super_majority_of(current_validators.len()) as u16;
     let one_third = val_count / 3;
     let current_epoch = current_timeslot / config.epoch_length;
 
