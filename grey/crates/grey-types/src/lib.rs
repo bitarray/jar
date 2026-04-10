@@ -1127,7 +1127,7 @@ mod tests {
                     reports_guaranteed: (i * 4) as u32,
                     assurances_made: (i * 5) as u32,
                 };
-                let current: Vec<state::ValidatorRecord> = (0..n_validators).map(|i| make_record(i)).collect();
+                let current: Vec<state::ValidatorRecord> = (0..n_validators).map(make_record).collect();
                 let last: Vec<state::ValidatorRecord> = (0..n_validators).map(|i| make_record(i + 10)).collect();
                 let core_stats: Vec<state::CoreStatistics> = (0..n_cores)
                     .map(|i| state::CoreStatistics {
