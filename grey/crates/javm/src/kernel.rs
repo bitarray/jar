@@ -2510,29 +2510,22 @@ pub enum FaultType {
 }
 
 /// Kernel errors.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum KernelError {
+    #[error("invalid JAR blob")]
     InvalidBlob,
+    #[error("memory allocation failed")]
     MemoryError,
+    #[error("insufficient gas for initialization")]
     OutOfGas,
+    #[error("untyped pool exhausted")]
     OutOfMemory,
+    #[error("exceeded max CODE caps ({MAX_CODE_CAPS})")]
     TooManyCodeCaps,
+    #[error("cap table full")]
     CapTableFull,
+    #[error("JIT compilation failed")]
     CompileError,
-}
-
-impl core::fmt::Display for KernelError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::InvalidBlob => write!(f, "invalid JAR blob"),
-            Self::MemoryError => write!(f, "memory allocation failed"),
-            Self::OutOfGas => write!(f, "insufficient gas for initialization"),
-            Self::OutOfMemory => write!(f, "untyped pool exhausted"),
-            Self::TooManyCodeCaps => write!(f, "exceeded max CODE caps ({MAX_CODE_CAPS})"),
-            Self::CapTableFull => write!(f, "cap table full"),
-            Self::CompileError => write!(f, "JIT compilation failed"),
-        }
-    }
 }
 
 #[cfg(test)]
