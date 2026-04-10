@@ -390,17 +390,8 @@ pub fn compute_ring_root(keys: &[ValidatorKey]) -> BandersnatchRingRoot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::make_hash;
+    use crate::test_helpers::{make_hash, make_validator};
     use grey_types::header::Ticket;
-
-    fn make_validator(i: u8) -> ValidatorKey {
-        ValidatorKey {
-            ed25519: Ed25519PublicKey([i; 32]),
-            bandersnatch: BandersnatchPublicKey([i; 32]),
-            bls: grey_types::BlsPublicKey([i; 144]),
-            metadata: [i; 128],
-        }
-    }
 
     fn make_ticket(id_byte: u8, attempt: u8) -> Ticket {
         Ticket {

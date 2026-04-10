@@ -43,10 +43,24 @@ pub mod transition;
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
-    use grey_types::Hash;
+    use grey_types::validator::ValidatorKey;
+    use grey_types::{BandersnatchPublicKey, BlsPublicKey, Ed25519PublicKey, Hash};
 
     pub fn make_hash(byte: u8) -> Hash {
         Hash([byte; 32])
+    }
+
+    pub fn make_validator(byte: u8) -> ValidatorKey {
+        ValidatorKey {
+            ed25519: Ed25519PublicKey([byte; 32]),
+            bandersnatch: BandersnatchPublicKey([byte; 32]),
+            bls: BlsPublicKey([byte; 144]),
+            metadata: [byte; 128],
+        }
+    }
+
+    pub fn make_validators(n: usize) -> Vec<ValidatorKey> {
+        (0..n).map(|i| make_validator(i as u8)).collect()
     }
 }
 
