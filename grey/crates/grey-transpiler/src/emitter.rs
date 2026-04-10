@@ -5,6 +5,24 @@ use scale::Encode;
 /// JAR v1 magic: 'J','A','R', 0x01.
 const JAR_MAGIC: u32 = u32::from_le_bytes([b'J', b'A', b'R', 0x01]);
 
+/// Determine the minimum byte width needed to encode jump table entries.
+fn jump_table_entry_size(jump_table: &[u32]) -> u8 {
+    if jump_table.is_empty() {
+        1
+    } else {
+        let max_val = jump_table.iter().copied().max().unwrap_or(0);
+        if max_val <= 0xFF {
+            1
+        } else if max_val <= 0xFFFF {
+            2
+        } else if max_val <= 0xFFFFFF {
+            3
+        } else {
+            4
+        }
+    }
+}
+
 /// JAR v1 unified header (scale-encoded as sequential LE fields).
 #[derive(Clone, Debug, scale::Encode)]
 struct ProgramHeader {
@@ -52,20 +70,7 @@ pub fn build_standard_program(
     );
 
     // Determine jump table entry encoding size (z)
-    let entry_size: u8 = if jump_table.is_empty() {
-        1
-    } else {
-        let max_val = jump_table.iter().copied().max().unwrap_or(0);
-        if max_val <= 0xFF {
-            1
-        } else if max_val <= 0xFFFF {
-            2
-        } else if max_val <= 0xFFFFFF {
-            3
-        } else {
-            4
-        }
-    };
+    let entry_size = jump_table_entry_size(jump_table);
 
     let header = ProgramHeader {
         magic: JAR_MAGIC,
@@ -125,20 +130,7 @@ pub fn build_service_program(
 
     // Build the CODE blob (jump_table + code + packed_bitmask) as a sub-blob
     // that will be the data for the CODE cap.
-    let entry_size: u8 = if jump_table.is_empty() {
-        1
-    } else {
-        let max_val = jump_table.iter().copied().max().unwrap_or(0);
-        if max_val <= 0xFF {
-            1
-        } else if max_val <= 0xFFFF {
-            2
-        } else if max_val <= 0xFFFFFF {
-            3
-        } else {
-            4
-        }
-    };
+    let entry_size = jump_table_entry_size(jump_table);
 
     let mut code_blob = Vec::new();
     // Code sub-blob header: jump_len(4) + entry_size(1) + code_len(4) = 9 bytes
