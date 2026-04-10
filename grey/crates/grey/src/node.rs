@@ -38,6 +38,27 @@ fn broadcast_vote(
     let _ = net_commands.try_send(NetworkCommand::BroadcastFinalityVote { data });
 }
 
+/// Post-registration GRANDPA logic: update best block, prevote, and precommit.
+///
+/// Called after `grandpa.register_block()` in both the block-authoring and
+/// block-import paths.
+fn post_register_block(
+    grandpa: &mut GrandpaState,
+    block_hash: Hash,
+    audit_state: &AuditState,
+    validator_index: u16,
+    secrets: &grey_consensus::genesis::ValidatorSecrets,
+    net_commands: &tokio::sync::mpsc::Sender<NetworkCommand>,
+) {
+    grandpa.update_best_block(block_hash, &audit_state.completed_audits);
+    if let Some(prevote_msg) = grandpa.create_prevote(validator_index, secrets) {
+        broadcast_vote(net_commands, &prevote_msg);
+    }
+    if let Some(precommit_msg) = grandpa.create_precommit(validator_index, secrets) {
+        broadcast_vote(net_commands, &precommit_msg);
+    }
+}
+
 /// Broadcast the most recent pending guarantee to the network.
 fn broadcast_last_guarantee(
     guarantor_state: &GuarantorState,
@@ -806,23 +827,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                 ) {
                                     broadcast_equivocation(evidence, my_secrets, config.validator_index, &net_commands);
                                 }
-                                grandpa.update_best_block(header_hash, &audit_state.completed_audits);
-
-                                // Send prevote for the new block
-                                if let Some(prevote_msg) = grandpa.create_prevote(
-                                    config.validator_index,
-                                    my_secrets,
-                                ) {
-                                    broadcast_vote(&net_commands, &prevote_msg);
-                                }
-
-                                // Try to precommit if prevote threshold reached
-                                if let Some(precommit_msg) = grandpa.create_precommit(
-                                    config.validator_index,
-                                    my_secrets,
-                                ) {
-                                    broadcast_vote(&net_commands, &precommit_msg);
-                                }
+                                post_register_block(&mut grandpa, header_hash, &audit_state, config.validator_index, my_secrets, &net_commands);
                             }
                             Err(e) => {
                                 tracing::error!(
@@ -1064,19 +1069,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                     ) {
                                         broadcast_equivocation(evidence, my_secrets, config.validator_index, &net_commands);
                                     }
-                                    grandpa.update_best_block(import_hash, &audit_state.completed_audits);
-                                    if let Some(prevote_msg) = grandpa.create_prevote(
-                                        config.validator_index,
-                                        my_secrets,
-                                    ) {
-                                        broadcast_vote(&net_commands, &prevote_msg);
-                                    }
-                                    if let Some(precommit_msg) = grandpa.create_precommit(
-                                        config.validator_index,
-                                        my_secrets,
-                                    ) {
-                                        broadcast_vote(&net_commands, &precommit_msg);
-                                    }
+                                    post_register_block(&mut grandpa, import_hash, &audit_state, config.validator_index, my_secrets, &net_commands);
                                 }
                                 Err(e) => {
                                     tracing::warn!(
