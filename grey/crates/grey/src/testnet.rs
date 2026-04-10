@@ -285,12 +285,7 @@ pub fn run_sequential_test(num_blocks: u32) -> Result<SequentialTestResult, Stri
                 Some(&s.bandersnatch),
             ) {
                 // Compute state root
-                let state_root = {
-                    let mut data = Vec::new();
-                    data.extend_from_slice(&state.timeslot.to_le_bytes());
-                    data.extend_from_slice(&state.entropy[0].0);
-                    grey_crypto::blake2b_256(&data)
-                };
+                let state_root = crate::node::compute_state_root(&state);
 
                 // Determine extrinsics based on pipeline state
                 let (guarantees, assurances) = match &wp_phase {

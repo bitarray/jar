@@ -173,12 +173,7 @@ pub async fn run_seq_testnet(
                 let node = &mut nodes[i];
 
                 // Compute state root
-                let state_root = {
-                    let mut data = Vec::new();
-                    data.extend_from_slice(&node.state.timeslot.to_le_bytes());
-                    data.extend_from_slice(&node.state.entropy[0].0);
-                    grey_crypto::blake2b_256(&data)
-                };
+                let state_root = crate::node::compute_state_root(&node.state);
 
                 // Collect guarantees (from RPC submissions)
                 let mut guarantees = std::mem::take(&mut pending_guarantees);

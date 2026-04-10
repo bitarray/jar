@@ -1485,7 +1485,7 @@ fn insert_bounded(set: &mut std::collections::HashSet<Hash>, item: Hash, cap: us
 }
 
 /// Compute a simplified state root.
-fn compute_state_root(state: &State) -> Hash {
+pub(crate) fn compute_state_root(state: &State) -> Hash {
     let mut data = Vec::new();
     data.extend_from_slice(&state.timeslot.to_le_bytes());
     data.extend_from_slice(&state.entropy[0].0);
