@@ -124,19 +124,36 @@ pub struct GrandpaState {
     pub(crate) equivocation_voting: HashMap<Timeslot, EquivocationVoting>,
 }
 
+/// Insert a vote into the active map and archive.
+fn store_vote(
+    votes: &mut BTreeMap<u16, Vote>,
+    archive: &mut BTreeMap<(u64, u16), Hash>,
+    round: u64,
+    vote: Vote,
+) {
+    archive.insert((round, vote.validator_index), vote.block_hash);
+    votes.insert(vote.validator_index, vote);
+}
+
 impl GrandpaState {
     /// Insert a prevote into the current round's active votes and archive.
     fn store_prevote(&mut self, vote: Vote) {
-        self.prevote_archive
-            .insert((self.round, vote.validator_index), vote.block_hash);
-        self.prevotes.insert(vote.validator_index, vote);
+        store_vote(
+            &mut self.prevotes,
+            &mut self.prevote_archive,
+            self.round,
+            vote,
+        );
     }
 
     /// Insert a precommit into the current round's active votes and archive.
     fn store_precommit(&mut self, vote: Vote) {
-        self.precommit_archive
-            .insert((self.round, vote.validator_index), vote.block_hash);
-        self.precommits.insert(vote.validator_index, vote);
+        store_vote(
+            &mut self.precommits,
+            &mut self.precommit_archive,
+            self.round,
+            vote,
+        );
     }
 
     pub fn new(total_validators: u16) -> Self {
@@ -185,27 +202,16 @@ impl GrandpaState {
                 validator_index,
                 signature: Ed25519Signature(signature),
             };
-            match vote_type {
-                0 => {
-                    // Prevote
-                    self.prevotes.entry(validator_index).or_insert_with(|| {
-                        loaded += 1;
-                        self.prevote_archive
-                            .insert((round, validator_index), block_hash);
-                        vote.clone()
-                    });
-                }
-                1 => {
-                    // Precommit
-                    self.precommits.entry(validator_index).or_insert_with(|| {
-                        loaded += 1;
-                        self.precommit_archive
-                            .insert((round, validator_index), block_hash);
-                        vote.clone()
-                    });
-                }
-                _ => {} // Unknown vote type, skip
-            }
+            let (votes, archive) = match vote_type {
+                0 => (&mut self.prevotes, &mut self.prevote_archive),
+                1 => (&mut self.precommits, &mut self.precommit_archive),
+                _ => continue, // Unknown vote type, skip
+            };
+            votes.entry(validator_index).or_insert_with(|| {
+                loaded += 1;
+                archive.insert((round, validator_index), block_hash);
+                vote.clone()
+            });
         }
         loaded
     }
