@@ -233,3 +233,132 @@ mod tests {
         assert_eq!(mmr_super_peak(&peaks1), mmr_super_peak(&peaks2),);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use grey_types::Hash;
+    use grey_types::constants::RECENT_HISTORY_SIZE;
+    use grey_types::state::RecentBlocks;
+    use proptest::prelude::*;
+
+    fn arb_hash() -> impl Strategy<Value = Hash> {
+        prop::array::uniform32(any::<u8>()).prop_map(Hash)
+    }
+
+    proptest! {
+        /// Headers length never exceeds RECENT_HISTORY_SIZE.
+        #[test]
+        fn headers_capped_at_h(num_blocks in 1usize..30) {
+            let mut rb = RecentBlocks {
+                headers: vec![],
+                accumulation_log: vec![],
+            };
+            for i in 0..num_blocks {
+                let mut h = [0u8; 32];
+                h[0] = i as u8;
+                h[1] = (i >> 8) as u8;
+                let input = HistoryInput {
+                    header_hash: Hash(h),
+                    parent_state_root: Hash::ZERO,
+                    accumulate_root: Hash::ZERO,
+                    work_packages: vec![],
+                };
+                update_history(&mut rb, &input);
+            }
+            prop_assert!(
+                rb.headers.len() <= RECENT_HISTORY_SIZE,
+                "headers {} > H {RECENT_HISTORY_SIZE}",
+                rb.headers.len()
+            );
+            let expected = num_blocks.min(RECENT_HISTORY_SIZE);
+            prop_assert_eq!(rb.headers.len(), expected);
+        }
+
+        /// The previous entry's state_root is fixed to parent_state_root.
+        #[test]
+        fn previous_state_root_fixed(
+            first_hash in arb_hash(),
+            second_hash in arb_hash(),
+            parent_state_root in arb_hash(),
+        ) {
+            let mut rb = RecentBlocks {
+                headers: vec![],
+                accumulation_log: vec![],
+            };
+            // Add first block
+            update_history(&mut rb, &HistoryInput {
+                header_hash: first_hash,
+                parent_state_root: Hash::ZERO,
+                accumulate_root: Hash::ZERO,
+                work_packages: vec![],
+            });
+            prop_assert_eq!(rb.headers[0].state_root, Hash::ZERO);
+
+            // Add second block — should fix first entry's state_root
+            update_history(&mut rb, &HistoryInput {
+                header_hash: second_hash,
+                parent_state_root,
+                accumulate_root: Hash::ZERO,
+                work_packages: vec![],
+            });
+            prop_assert_eq!(rb.headers[0].state_root, parent_state_root);
+        }
+
+        /// MMR append is deterministic: same sequence → same super-peak.
+        #[test]
+        fn mmr_deterministic(
+            leaves in proptest::collection::vec(arb_hash(), 0..20),
+        ) {
+            let mut peaks1 = vec![];
+            let mut peaks2 = vec![];
+            for leaf in &leaves {
+                mmr_append(&mut peaks1, *leaf);
+                mmr_append(&mut peaks2, *leaf);
+            }
+            prop_assert_eq!(mmr_super_peak(&peaks1), mmr_super_peak(&peaks2));
+        }
+
+        /// After appending N leaves, the number of non-None peaks equals popcount(N).
+        #[test]
+        fn mmr_peak_count_is_popcount(num_leaves in 0usize..50) {
+            let mut peaks = vec![];
+            for i in 0..num_leaves {
+                let mut h = [0u8; 32];
+                h[0] = i as u8;
+                h[1] = (i >> 8) as u8;
+                mmr_append(&mut peaks, Hash(h));
+            }
+            let non_none = peaks.iter().filter(|p| p.is_some()).count();
+            let expected = (num_leaves as u32).count_ones() as usize;
+            prop_assert_eq!(non_none, expected);
+        }
+
+        /// Work packages in input appear in the new header's reported_packages.
+        #[test]
+        fn work_packages_recorded(
+            packages in proptest::collection::vec((arb_hash(), arb_hash()), 0..5),
+        ) {
+            let mut rb = RecentBlocks {
+                headers: vec![],
+                accumulation_log: vec![],
+            };
+            update_history(&mut rb, &HistoryInput {
+                header_hash: Hash::ZERO,
+                parent_state_root: Hash::ZERO,
+                accumulate_root: Hash::ZERO,
+                work_packages: packages.clone(),
+            });
+            for (hash, exports_root) in &packages {
+                prop_assert!(
+                    rb.headers[0].reported_packages.contains_key(hash),
+                    "package hash should be recorded"
+                );
+                prop_assert_eq!(
+                    rb.headers[0].reported_packages[hash],
+                    *exports_root
+                );
+            }
+        }
+    }
+}
