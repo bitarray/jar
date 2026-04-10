@@ -294,3 +294,132 @@ mod tests {
         assert_eq!(sim.flush_and_get_cost(), 1, "after reset, cost should be 1");
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// flush_and_get_cost always returns at least 1.
+        #[test]
+        fn cost_always_at_least_one(
+            instrs in proptest::collection::vec(
+                (1u8..20, 1u8..4, 0u8..13, 0u8..13),
+                0..10,
+            ),
+        ) {
+            let mut sim = GasSimulator::new();
+            for (cycles, slots, src, dst) in &instrs {
+                sim.feed_direct(*cycles, *slots, *src, 0xFF, *dst);
+            }
+            prop_assert!(sim.flush_and_get_cost() >= 1);
+        }
+
+        /// reset returns the simulator to the empty state (cost = 1).
+        #[test]
+        fn reset_restores_empty_state(
+            instrs in proptest::collection::vec(
+                (1u8..20, 1u8..4, 0u8..13, 0u8..13),
+                1..10,
+            ),
+        ) {
+            let mut sim = GasSimulator::new();
+            for (cycles, slots, src, dst) in &instrs {
+                sim.feed_direct(*cycles, *slots, *src, 0xFF, *dst);
+            }
+            sim.reset();
+            prop_assert_eq!(sim.flush_and_get_cost(), 1);
+        }
+
+        /// Independent instructions (no register deps) never cost more than
+        /// a dependency chain of the same length would.
+        #[test]
+        fn independent_no_more_than_chained(
+            count in 1usize..8,
+            cycles in 1u8..10,
+        ) {
+            // Independent: all use different dst, no src deps
+            let mut indep = GasSimulator::new();
+            for i in 0..count.min(13) {
+                indep.feed_direct(cycles, 1, 0xFF, 0xFF, i as u8);
+            }
+            // Chained: r0 -> r1 -> r2 -> ...
+            let mut chain = GasSimulator::new();
+            for i in 0..count.min(12) {
+                chain.feed_direct(cycles, 1, i as u8, 0xFF, (i + 1) as u8);
+            }
+            prop_assert!(indep.flush_and_get_cost() <= chain.flush_and_get_cost());
+        }
+
+        /// feed_direct with no sources and no dest (0xFF) is equivalent to
+        /// a no-dep instruction — cost grows only from decode throughput.
+        #[test]
+        fn no_reg_deps_bounded_by_decode(
+            count in 1usize..20,
+            cycles in 1u8..5,
+        ) {
+            let mut sim = GasSimulator::new();
+            for _ in 0..count {
+                sim.feed_direct(cycles, 1, 0xFF, 0xFF, 0xFF);
+            }
+            // max_done = (cycle_when_last_decoded) + cycles
+            // With 4 decode slots/cycle, last decode is at cycle floor((count-1)/4)
+            // So max_done <= floor((count-1)/4) + cycles
+            let expected_max = ((count - 1) / 4) as u32 + cycles as u32;
+            let cost = sim.flush_and_get_cost();
+            let expected_cost = if expected_max > 3 { expected_max - 3 } else { 1 };
+            prop_assert_eq!(cost, expected_cost);
+        }
+
+        /// feed and feed_direct produce the same cost for single-source,
+        /// single-dest instructions.
+        #[test]
+        fn feed_matches_feed_direct(
+            cycles in 1u8..20,
+            decode_slots in 1u8..4,
+            src in 0u8..13,
+            dst in 0u8..13,
+        ) {
+            let mut sim_direct = GasSimulator::new();
+            sim_direct.feed_direct(cycles, decode_slots, src, 0xFF, dst);
+
+            let mut sim_feed = GasSimulator::new();
+            sim_feed.feed(&FastCost {
+                cycles,
+                decode_slots,
+                exec_unit: 1,
+                src_mask: 1u16 << src,
+                dst_mask: 1u16 << dst,
+                is_terminator: false,
+                is_move_reg: false,
+            });
+
+            prop_assert_eq!(
+                sim_direct.flush_and_get_cost(),
+                sim_feed.flush_and_get_cost()
+            );
+        }
+
+        /// Adding more instructions never decreases the cost.
+        #[test]
+        fn cost_monotonic_with_instructions(
+            base_count in 1usize..6,
+            extra_count in 1usize..4,
+            cycles in 1u8..10,
+        ) {
+            let mut sim_base = GasSimulator::new();
+            let mut sim_more = GasSimulator::new();
+            for i in 0..base_count.min(12) {
+                sim_base.feed_direct(cycles, 1, i as u8, 0xFF, (i + 1) as u8);
+                sim_more.feed_direct(cycles, 1, i as u8, 0xFF, (i + 1) as u8);
+            }
+            let base_cost = sim_base.flush_and_get_cost();
+            let last = base_count.min(12);
+            for i in 0..extra_count.min(12 - last) {
+                sim_more.feed_direct(cycles, 1, (last + i) as u8, 0xFF, (last + i + 1).min(12) as u8);
+            }
+            prop_assert!(sim_more.flush_and_get_cost() >= base_cost);
+        }
+    }
+}
