@@ -432,24 +432,14 @@ impl Store {
     }
 
     /// Look up a service account's code hash directly from state KVs.
-    /// The service metadata is at key C(255, service_id), and code_hash is bytes [1..33].
     pub fn get_service_code_hash(
         &self,
         block_hash: &Hash,
         service_id: u32,
     ) -> Result<Option<Hash>, StoreError> {
-        let kvs = self.load_state_kvs(block_hash)?;
-        let expected_key = grey_merkle::state_key_for_service(255, service_id);
-        Ok(Self::find_in_kvs(&kvs, &expected_key).and_then(|value| {
-            // Service account: version(1) + code_hash(32) + ...
-            if value.len() >= 33 {
-                let mut h = [0u8; 32];
-                h.copy_from_slice(&value[1..33]);
-                Some(Hash(h))
-            } else {
-                None
-            }
-        }))
+        Ok(self
+            .get_service_metadata(block_hash, service_id)?
+            .map(|m| m.code_hash))
     }
 
     /// Look up a service account's metadata (all fixed-size header fields).
