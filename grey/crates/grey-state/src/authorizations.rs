@@ -140,3 +140,131 @@ mod tests {
         assert_eq!(pools[0], vec![h(1)]); // unchanged
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use grey_types::Hash;
+    use grey_types::config::Config;
+    use proptest::prelude::*;
+
+    fn arb_hash() -> impl Strategy<Value = Hash> {
+        prop::array::uniform32(any::<u8>()).prop_map(Hash)
+    }
+
+    proptest! {
+        /// Pool size never exceeds auth_pool_size (O) after any update.
+        #[test]
+        fn pool_size_bounded(
+            initial_pool_len in 0usize..12,
+            slot in any::<u32>(),
+            use_auth in any::<bool>(),
+        ) {
+            let config = Config::tiny(); // O=8, Q=80
+            let pool: Vec<Hash> = (0..initial_pool_len as u8).map(|i| Hash([i; 32])).collect();
+            let mut pools = vec![pool];
+            let queue = vec![Hash([0xAA; 32]); config.auth_queue_size];
+            let queues = vec![queue];
+
+            let auths = if use_auth && !pools[0].is_empty() {
+                vec![(0u16, pools[0][0])]
+            } else {
+                vec![]
+            };
+
+            let input = AuthorizationInput { slot, auths };
+            update_authorizations(&config, &mut pools, &queues, &input);
+
+            prop_assert!(
+                pools[0].len() <= config.auth_pool_size,
+                "pool len {} > auth_pool_size {}",
+                pools[0].len(),
+                config.auth_pool_size
+            );
+        }
+
+        /// Using an auth removes exactly that hash from the pool.
+        #[test]
+        fn used_auth_removed(
+            pool_hashes in proptest::collection::vec(arb_hash(), 1..8),
+            remove_idx in any::<prop::sample::Index>(),
+            slot in any::<u32>(),
+        ) {
+            let config = Config::tiny();
+            let mut pools = vec![pool_hashes.clone()];
+            let queues = vec![vec![Hash([0xFF; 32]); config.auth_queue_size]];
+
+            let idx = remove_idx.index(pool_hashes.len());
+            let target = pool_hashes[idx];
+
+            let input = AuthorizationInput {
+                slot,
+                auths: vec![(0, target)],
+            };
+            update_authorizations(&config, &mut pools, &queues, &input);
+
+            // The target hash should appear one fewer time than before
+            let before_count = pool_hashes.iter().filter(|h| **h == target).count();
+            let after_count = pools[0].iter().filter(|h| **h == target).count();
+            // Note: pool may be trimmed, so after_count could be less
+            // But at minimum, one instance was removed (before trimming added the queue entry)
+            prop_assert!(
+                after_count < before_count || pools[0].len() < pool_hashes.len(),
+                "target should have been removed"
+            );
+        }
+
+        /// The queue entry at slot % queue_size is the one appended.
+        #[test]
+        fn correct_queue_entry_appended(
+            slot in 0u32..1000,
+        ) {
+            let config = Config::tiny(); // Q=80
+            let mut pools = vec![vec![]]; // empty pool
+            let mut queue = vec![Hash::ZERO; config.auth_queue_size];
+            let expected_idx = slot as usize % config.auth_queue_size;
+            let expected_hash = Hash([expected_idx as u8; 32]);
+            queue[expected_idx] = expected_hash;
+            let queues = vec![queue];
+
+            let input = AuthorizationInput {
+                slot,
+                auths: vec![],
+            };
+            update_authorizations(&config, &mut pools, &queues, &input);
+
+            prop_assert_eq!(pools[0].len(), 1);
+            prop_assert_eq!(pools[0][0], expected_hash);
+        }
+
+        /// Multiple cores are updated independently.
+        #[test]
+        fn multi_core_independence(
+            num_cores in 2usize..6,
+            slot in any::<u32>(),
+        ) {
+            let config = Config::tiny();
+            let mut pools: Vec<Vec<Hash>> = (0..num_cores)
+                .map(|c| vec![Hash([c as u8; 32])])
+                .collect();
+            let queues: Vec<Vec<Hash>> = (0..num_cores)
+                .map(|c| vec![Hash([100 + c as u8; 32]); config.auth_queue_size])
+                .collect();
+
+            // Only remove from core 0
+            let input = AuthorizationInput {
+                slot,
+                auths: vec![(0, Hash([0; 32]))],
+            };
+            update_authorizations(&config, &mut pools, &queues, &input);
+
+            // Core 0: removed its hash, added queue entry → should have 1 entry (the queue one)
+            prop_assert!(pools[0].contains(&Hash([100; 32])));
+            // Core 1+: kept original + added queue entry → should have 2 entries
+            for (c, pool) in pools.iter().enumerate().skip(1) {
+                prop_assert!(pool.contains(&Hash([c as u8; 32])));
+                prop_assert!(pool.contains(&Hash([100 + c as u8; 32])));
+            }
+        }
+    }
+}
