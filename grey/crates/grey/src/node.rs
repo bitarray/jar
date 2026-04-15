@@ -1021,7 +1021,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                                             &state.entropy[0],
                                             &report_hash,
                                             config.validator_index,
-                                            30,
+                                            audit::MAX_TRANCHES,
                                         );
                                         audit_state.add_pending(
                                             report_hash,
