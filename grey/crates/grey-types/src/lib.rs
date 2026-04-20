@@ -1181,6 +1181,75 @@ mod tests {
                     service_stats,
                 });
             }
+
+            #[test]
+            fn work_result_all_variants_roundtrip(
+                payload_len in 0usize..50,
+                variant in 0u8..6,
+            ) {
+                let result = match variant {
+                    0 => work::WorkResult::Ok(vec![0xAB; payload_len]),
+                    1 => work::WorkResult::OutOfGas,
+                    2 => work::WorkResult::Panic,
+                    3 => work::WorkResult::BadExports,
+                    4 => work::WorkResult::BadCode,
+                    _ => work::WorkResult::CodeOversize,
+                };
+                assert_codec_roundtrip(&result);
+            }
+
+            #[test]
+            fn work_digest_roundtrip(
+                service_id in any::<u32>(),
+                code_hash in proptest::array::uniform32(0u8..),
+                payload_hash in proptest::array::uniform32(0u8..),
+                acc_gas in any::<u64>(),
+                gas_used in any::<u64>(),
+                imports in any::<u16>(),
+                ext_count in any::<u16>(),
+                ext_size in any::<u32>(),
+                exports in any::<u16>(),
+                result_variant in 0u8..6,
+            ) {
+                let result = match result_variant {
+                    0 => work::WorkResult::Ok(vec![0xFF; 10]),
+                    1 => work::WorkResult::OutOfGas,
+                    2 => work::WorkResult::Panic,
+                    3 => work::WorkResult::BadExports,
+                    4 => work::WorkResult::BadCode,
+                    _ => work::WorkResult::CodeOversize,
+                };
+                assert_codec_roundtrip(&work::WorkDigest {
+                    service_id,
+                    code_hash: Hash(code_hash),
+                    payload_hash: Hash(payload_hash),
+                    accumulate_gas: acc_gas,
+                    result,
+                    gas_used,
+                    imports_count: imports,
+                    extrinsics_count: ext_count,
+                    extrinsics_size: ext_size,
+                    exports_count: exports,
+                });
+            }
+
+            #[test]
+            fn availability_spec_roundtrip(
+                pkg_hash in proptest::array::uniform32(0u8..),
+                bundle_len in any::<u32>(),
+                erasure_root in proptest::array::uniform32(0u8..),
+                exports_root in proptest::array::uniform32(0u8..),
+                exports_count in any::<u16>(),
+            ) {
+                assert_codec_roundtrip(&work::AvailabilitySpec {
+                    package_hash: Hash(pkg_hash),
+                    bundle_length: bundle_len,
+                    erasure_root: Hash(erasure_root),
+                    exports_root: Hash(exports_root),
+                    exports_count,
+                    ..Default::default()
+                });
+            }
         }
     }
 
