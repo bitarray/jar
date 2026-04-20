@@ -20,6 +20,8 @@ const REQUIRED_METRICS: &[&str] = &[
     "grey_peer_count",
     "grey_stored_blocks",
     "grey_grandpa_round",
+    "grey_work_packages_submitted_total",
+    "grey_work_packages_accumulated_total",
 ];
 
 pub async fn run(client: &RpcClient) -> ScenarioResult {

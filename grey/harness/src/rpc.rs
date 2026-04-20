@@ -72,6 +72,35 @@ pub struct SubmitResult {
     pub status: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct BlockSummaryResult {
+    pub timeslot: u32,
+    pub author_index: u16,
+    pub parent_hash: String,
+    pub state_root: String,
+    pub extrinsic_hash: String,
+    pub tickets_count: u32,
+    pub guarantees_count: u32,
+    pub assurances_count: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct BlockRangeEntry {
+    pub slot: u32,
+    pub hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct BlockRangeResult {
+    pub from_slot: u32,
+    pub to_slot: u32,
+    pub count: usize,
+    pub blocks: Vec<BlockRangeEntry>,
+}
+
 pub struct RpcClient {
     http: reqwest::Client,
     endpoint: String,
@@ -204,6 +233,20 @@ impl RpcClient {
 
     pub async fn submit_work_package(&self, data_hex: &str) -> Result<SubmitResult, RpcError> {
         self.call("jam_submitWorkPackage", serde_json::json!([data_hex]))
+            .await
+    }
+
+    pub async fn get_block(&self, hash_hex: &str) -> Result<BlockSummaryResult, RpcError> {
+        self.call("jam_getBlock", serde_json::json!([hash_hex]))
+            .await
+    }
+
+    pub async fn get_block_range(
+        &self,
+        from_slot: u32,
+        to_slot: u32,
+    ) -> Result<BlockRangeResult, RpcError> {
+        self.call("jam_getBlockRange", serde_json::json!([from_slot, to_slot]))
             .await
     }
 
