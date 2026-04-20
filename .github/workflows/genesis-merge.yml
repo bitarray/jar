@@ -74,7 +74,12 @@ jobs:
 
       - name: Merge
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # MERGE_TOKEN is a PAT (fine-grained, contents:write + pull-requests:write
+          # on jarchain/jar). GITHUB_TOKEN cannot merge into master because the
+          # enterprise ruleset blocks github-actions[bot] regardless of workflow
+          # permissions. Falls back to GITHUB_TOKEN if MERGE_TOKEN is unset so the
+          # workflow still boots (merge will just fail with the same policy error).
+          GH_TOKEN: ${{ secrets.MERGE_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           ARGS="--pr ${{ steps.pr-info.outputs.pr_number }}"
           if [ "${{ inputs.founder_override }}" = "true" ]; then
