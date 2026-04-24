@@ -118,4 +118,84 @@ theorem sbrk_too_large_preserves (m : Jar.JAVM.Memory) (size : UInt64)
     (Jar.JAVM.sbrk m size).1 = m := by
   rw [sbrk_too_large m size h]
 
+-- ============================================================================
+-- sbrk successful growth (happy path)
+-- ============================================================================
+
+/-- sbrk success case: the returned address is the previous heap top,
+    matching the classic Unix `brk`/`sbrk` contract where the caller receives
+    the start of the newly allocated region. -/
+theorem sbrk_success_returns_old_top (m : Jar.JAVM.Memory) (size : UInt64)
+    (hpos : 0 < size.toNat)
+    (hfit : m.heapTop + size.toNat ≤ 2^32) :
+    (Jar.JAVM.sbrk m size).2 = UInt64.ofNat m.heapTop := by
+  unfold Jar.JAVM.sbrk
+  have h1 : ¬ size.toNat > 2^32 := by
+    have : size.toNat ≤ 2^32 := Nat.le_trans (Nat.le_add_left _ _) hfit
+    omega
+  have h2 : ¬ size.toNat = 0 := Nat.pos_iff_ne_zero.mp hpos
+  have h3 : ¬ m.heapTop + size.toNat > 2^32 := Nat.not_lt.mpr hfit
+  simp [h1, h2, h3]
+
+/-- sbrk success case: after a successful growth, the new heap top equals
+    the old heap top plus the requested size. -/
+theorem sbrk_success_heap_top (m : Jar.JAVM.Memory) (size : UInt64)
+    (hpos : 0 < size.toNat)
+    (hfit : m.heapTop + size.toNat ≤ 2^32) :
+    (Jar.JAVM.sbrk m size).1.heapTop = m.heapTop + size.toNat := by
+  unfold Jar.JAVM.sbrk
+  have h1 : ¬ size.toNat > 2^32 := by
+    have : size.toNat ≤ 2^32 := Nat.le_trans (Nat.le_add_left _ _) hfit
+    omega
+  have h2 : ¬ size.toNat = 0 := Nat.pos_iff_ne_zero.mp hpos
+  have h3 : ¬ m.heapTop + size.toNat > 2^32 := Nat.not_lt.mpr hfit
+  simp [h1, h2, h3]
+
+-- ============================================================================
+-- sbrk address-space overflow
+-- ============================================================================
+
+/-- sbrk rejects requests that would push the heap top past the 2^32 address
+    limit, returning (unchanged memory, 0). Distinct from `sbrk_too_large`,
+    which rejects the request size itself. -/
+theorem sbrk_overflow_fails (m : Jar.JAVM.Memory) (size : UInt64)
+    (hpos : 0 < size.toNat) (hsz : size.toNat ≤ 2^32)
+    (hoverflow : m.heapTop + size.toNat > 2^32) :
+    Jar.JAVM.sbrk m size = (m, 0) := by
+  unfold Jar.JAVM.sbrk
+  have h1 : ¬ size.toNat > 2^32 := Nat.not_lt.mpr hsz
+  have h2 : ¬ size.toNat = 0 := Nat.pos_iff_ne_zero.mp hpos
+  simp [h1, h2, hoverflow]
+
+-- ============================================================================
+-- sbrk invariants (hold for every input)
+-- ============================================================================
+
+/-- sbrk never shrinks the heap: the post-call heap top is always at least
+    the pre-call heap top. Corollary: stack addresses below the heap cannot
+    become reachable as a side effect of sbrk. -/
+theorem sbrk_monotonic (m : Jar.JAVM.Memory) (size : UInt64) :
+    m.heapTop ≤ (Jar.JAVM.sbrk m size).1.heapTop := by
+  unfold Jar.JAVM.sbrk
+  by_cases h1 : size.toNat > 2^32
+  · simp [h1]
+  · by_cases h2 : size.toNat = 0
+    · simp [h2]
+    · by_cases h3 : m.heapTop + size.toNat > 2^32
+      · simp [h1, h2, h3]
+      · simp [h1, h2, h3, Nat.le_add_right]
+
+/-- sbrk never changes the guard zone — low-address panic behavior is
+    invariant across heap growth. -/
+theorem sbrk_preserves_guardZone (m : Jar.JAVM.Memory) (size : UInt64) :
+    (Jar.JAVM.sbrk m size).1.guardZone = m.guardZone := by
+  unfold Jar.JAVM.sbrk
+  by_cases h1 : size.toNat > 2^32
+  · simp [h1]
+  · by_cases h2 : size.toNat = 0
+    · simp [h2]
+    · by_cases h3 : m.heapTop + size.toNat > 2^32
+      · simp [h1, h2, h3]
+      · simp [h1, h2, h3]
+
 end Jar.Proofs
