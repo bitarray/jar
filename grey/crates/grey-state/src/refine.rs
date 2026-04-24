@@ -142,6 +142,28 @@ pub struct RefineResult {
     pub expunge_requests: Vec<Hash>,
 }
 
+/// Handle a Ψ_R refine-context protocol call. jar1 slot numbering per
+/// `spec/Jar/Accumulation.lean:26-31`. Returns true to continue execution.
+///
+/// Spec: refine has access to gas (1), fetch (2), historical_lookup (7),
+/// export (8), machine (9) per `spec/Jar/Services.lean:84`. Anything else
+/// returns `WHAT`.
+fn handle_refine_host_call(slot: u8, pvm: &mut PvmInstance) -> bool {
+    const RESULT_WHAT: u64 = u64::MAX - 1;
+
+    tracing::trace!(slot, "handle_refine_host_call");
+    match slot {
+        1 => {
+            pvm.kernel_resume(pvm.gas(), 0);
+            true
+        }
+        _ => {
+            pvm.kernel_resume(RESULT_WHAT, 0);
+            true
+        }
+    }
+}
+
 /// Run the Refine invocation Ψ_R for a single work item.
 pub fn invoke_refine(
     _config: &Config,
@@ -199,8 +221,8 @@ pub fn invoke_refine(
                 let gas_used = initial_gas - pvm.gas();
                 return error_refine_result(item, WorkResult::Panic, gas_used);
             }
-            KernelResult::ProtocolCall { .. } => {
-                pvm.kernel_resume(u64::MAX - 1, 0);
+            KernelResult::ProtocolCall { slot } => {
+                handle_refine_host_call(slot, &mut pvm);
             }
         }
     }
