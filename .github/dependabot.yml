@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      rust-deps:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "ring"
+        versions: ["0.16.x"]
+        # RUSTSEC-2025-0009, RUSTSEC-2025-0010: ring 0.16.x issues
+        # blocked by libp2p-tls -> rcgen -> ring chain
