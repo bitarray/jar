@@ -23,7 +23,7 @@ hex = { workspace = true }
 
 [dev-dependencies]
 jsonrpsee = { version = "0.24", features = ["client"] }
-reqwest = { version = "0.12", default-features = false }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tempfile = "3"
 grey-consensus = { workspace = true }
 proptest = { workspace = true }
