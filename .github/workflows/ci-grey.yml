@@ -27,24 +27,16 @@ jobs:
         #     libp2p-tls -> rcgen -> ring. No upgrade path until libp2p
         #     updates to ring 0.17+.
         #   RUSTSEC-2025-0010: ring 0.16.x unmaintained — same root cause.
-              - name: cargo audit
+      - name: cargo audit
         # Ignored advisories:
         #   RUSTSEC-2025-0009: ring 0.16.x AES panic — transitive dep via
         #     libp2p-tls -> rcgen -> ring. No upgrade path until libp2p
         #     updates to ring 0.17+.
         #   RUSTSEC-2025-0010: ring 0.16.x unmaintained — same root cause.
-        #   RUSTSEC-2026-0098: rustls-webpki incorrect name constraints —
-        #     waiting for dependency update.
-        #   RUSTSEC-2026-0099: rustls-webpki wildcard name constraints —
-        #     waiting for dependency update.
         run: >
           cargo audit
           --ignore RUSTSEC-2025-0009
           --ignore RUSTSEC-2025-0010
-          --ignore RUSTSEC-2026-0098
-          --ignore RUSTSEC-2026-0099
-
-
   sbom:
     name: SBOM
     runs-on: ubuntu-latest
