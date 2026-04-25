@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["staticlib"]
 
 [dependencies]
-blake2 = "0.10"
-sha3 = "0.10"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-ark-vrf = { version = "0.2", features = ["bandersnatch", "ring"] }
+blake2 = "=0.10"
+sha3 = "=0.10"
+ed25519-dalek = { version = "=2", features = ["rand_core"] }
+ark-vrf = { version = "=0.2", features = ["bandersnatch", "ring"] }
