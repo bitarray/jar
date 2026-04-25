@@ -1,0 +1,36 @@
+# Monitoring overlay — run with:
+#   docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+#
+# Adds Prometheus + Grafana, pre-configured to scrape all 6 validators.
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: grey-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - testnet
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grey-grafana
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - testnet
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+volumes:
+  prom-data:
+  grafana-data:
