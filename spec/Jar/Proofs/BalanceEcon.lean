@@ -259,4 +259,46 @@ theorem balanceEcon_absorbEjected_comm_balance (e1 e2 : BalanceEcon) :
   show e1.balance + e2.balance = e2.balance + e1.balance
   rw [UInt64.add_comm]
 
+-- ============================================================================
+-- canAffordStorage monotonicity (higher balance ⟹ still affordable)
+-- ============================================================================
+
+/-- canAffordStorage monotonicity for BalanceEcon: if storage is affordable under
+    econ state e1, and e2 has at least as high balance (with same gratis),
+    then storage is affordable under e2. This is the key safety property —
+    increasing a service's balance never revokes previously affordable storage.
+
+    The proof works because `canAffordStorage` checks `threshold ≤ balance`,
+    and increasing the balance preserves the inequality. -/
+theorem balanceEcon_canAffordStorage_mono
+    (e1 e2 : BalanceEcon) (items bytes bI bL bS : Nat)
+    (hGratis : e1.gratis = e2.gratis)
+    (hBal : e1.balance.toNat ≤ e2.balance.toNat)
+    (h : @EconModel.canAffordStorage BalanceEcon BalanceTransfer _ e1 items bytes bI bL bS = true) :
+    @EconModel.canAffordStorage BalanceEcon BalanceTransfer _ e2 items bytes bI bL bS = true := by
+  simp only [EconModel.canAffordStorage, decide_eq_true_eq] at h ⊢
+  rw [hGratis] at h
+  exact Nat.le_trans h hBal
+
+/-- canAffordStorage is monotone in gratis: increasing gratis (which decreases
+    the threshold `minBal - min gratis minBal`) preserves affordability.
+    If e2 has greater or equal gratis than e1 (with same balance), then
+    storage affordable under e1 is also affordable under e2. -/
+theorem balanceEcon_canAffordStorage_mono_gratis
+    (e1 e2 : BalanceEcon) (items bytes bI bL bS : Nat)
+    (hBal : e1.balance = e2.balance)
+    (hGratis : e1.gratis.toNat ≤ e2.gratis.toNat)
+    (h : @EconModel.canAffordStorage BalanceEcon BalanceTransfer _ e1 items bytes bI bL bS = true) :
+    @EconModel.canAffordStorage BalanceEcon BalanceTransfer _ e2 items bytes bI bL bS = true := by
+  simp only [EconModel.canAffordStorage, decide_eq_true_eq] at h ⊢
+  -- threshold2 ≤ threshold1 (more gratis ⟹ smaller threshold)
+  calc bS + bI * items + bL * bytes - min e2.gratis.toNat (bS + bI * items + bL * bytes)
+      ≤ bS + bI * items + bL * bytes - min e1.gratis.toNat (bS + bI * items + bL * bytes) := by
+        -- min e2.gratis ≥ min e1.gratis since e2.gratis ≥ e1.gratis
+        have : min e1.gratis.toNat (bS + bI * items + bL * bytes)
+             ≤ min e2.gratis.toNat (bS + bI * items + bL * bytes) := by omega
+        omega
+    _ ≤ UInt64.toNat e1.balance := h
+    _ = UInt64.toNat e2.balance := by rw [hBal]
+
 end Jar.Proofs
