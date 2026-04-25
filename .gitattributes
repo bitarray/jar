@@ -1,0 +1,32 @@
+# Auto detect text files and perform LF normalization
+* text=auto eol=lf
+
+# Rust source
+*.rs text diff=rust
+
+# TOML/YAML/JSON
+*.toml text
+*.yaml text
+*.yml text
+*.json text
+
+# Lean 4
+*.lean text
+
+# Shell scripts
+*.sh text eol=lf
+
+# Makefile
+Makefile text eol=lf
+
+# Documentation
+*.md text
+*.txt text
+
+# Binary files
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
