@@ -932,9 +932,9 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                         }
                 }
 
-                // Prune old audits (older than 30 slots)
-                if state.timeslot > 30 {
-                    audit_state.prune_old_audits(state.timeslot - 30);
+                // Prune old audits (older than AUDIT_PRUNE_SLOTS)
+                if state.timeslot > audit::AUDIT_PRUNE_SLOTS {
+                    audit_state.prune_old_audits(state.timeslot - audit::AUDIT_PRUNE_SLOTS);
                 }
             }
 
