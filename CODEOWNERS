@@ -1,0 +1,39 @@
+# CODEOWNERS - Define code ownership for the JAR project
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# The following users will be automatically requested for review
+# when a pull request changes files in the matching paths.
+
+# Default - all files
+* @jarchain
+
+# Core protocol
+/spec/ @sorpaas
+/grey/crates/grey-state/ @sorpaas
+/grey/crates/grey-consensus/ @sorpaas
+/grey/crates/javm/ @sorpaas
+
+# Cryptography
+/grey/crates/grey-crypto/ @sorpaas
+
+# Networking
+/grey/crates/grey-network/ @sorpaas
+
+# Storage
+/grey/crates/grey-store/ @sorpaas
+
+# RPC
+/grey/crates/grey-rpc/ @sorpaas
+
+# Documentation
+/docs/ @sorpaas
+/README.md @sorpaas
+/grey/README.md @sorpaas
+/GENESIS.md @sorpaas
+
+# CI/CD
+/.github/ @sorpaas
+
+# Build configuration
+/Cargo.toml @sorpaas
+/Cargo.lock @sorpaas
