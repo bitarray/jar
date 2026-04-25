@@ -1,0 +1,27 @@
+version: "3.8"
+services:
+  grey:
+    build: .
+    container_name: grey-node
+    ports:
+      - "9000:9000"   # P2P
+      - "9933:9933"   # RPC
+      - "9615:9615"   # Metrics
+    volumes:
+      - grey-data:/data
+      - ./config:/config
+    command: ["--base-path", "/data", "--rpc-port", "9933"]
+
+  grey-validator:
+    build: .
+    container_name: grey-validator
+    ports:
+      - "9001:9000"
+      - "9934:9933"
+    volumes:
+      - grey-val-data:/data
+    command: ["--base-path", "/data", "--validator-index", "0", "--rpc-port", "9933"]
+
+volumes:
+  grey-data:
+  grey-val-data:
