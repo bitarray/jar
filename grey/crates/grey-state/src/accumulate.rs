@@ -618,6 +618,13 @@ fn run_accumulate_pvm(
 ) -> (AccContext, Gas) {
     use javm::kernel::KernelResult;
 
+    let pvm_span = tracing::info_span!(
+        "pvm_execution",
+        service_id = service_id,
+        timeslot = timeslot
+    );
+    let _pvm_guard = pvm_span.enter();
+
     let mut pvm = match PvmInstance::initialize(code_blob, args, gas) {
         Some(p) => p,
         None => {

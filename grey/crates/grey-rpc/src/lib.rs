@@ -259,14 +259,35 @@ struct RpcImpl {
     state: Arc<RpcState>,
 }
 
-/// Guard that records RPC request latency on drop.
-struct LatencyGuard {
+/// Guard that records RPC request latency and creates a tracing span.
+struct RpcSpan {
     method: String,
+    span: tracing::Span,
     start: std::time::Instant,
     latencies: Arc<std::sync::Mutex<std::collections::HashMap<String, LatencyHistogram>>>,
 }
 
-impl Drop for LatencyGuard {
+impl RpcSpan {
+    fn new(
+        method: &str,
+        latencies: Arc<std::sync::Mutex<std::collections::HashMap<String, LatencyHistogram>>>,
+        request_counts: &std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    ) -> Self {
+        if let Ok(mut counts) = request_counts.lock() {
+            *counts.entry(method.to_string()).or_insert(0) += 1;
+        }
+        let span = tracing::info_span!("rpc_request", method = method);
+        span.enter();
+        RpcSpan {
+            method: method.to_string(),
+            span,
+            start: std::time::Instant::now(),
+            latencies,
+        }
+    }
+}
+
+impl Drop for RpcSpan {
     fn drop(&mut self) {
         let seconds = self.start.elapsed().as_secs_f64();
         if let Ok(mut map) = self.latencies.lock() {
@@ -274,19 +295,17 @@ impl Drop for LatencyGuard {
                 .or_insert_with(LatencyHistogram::new)
                 .observe(seconds);
         }
+        self.span.record("duration_secs", seconds);
     }
 }
 
 impl RpcImpl {
-    fn track_request(&self, method: &str) -> LatencyGuard {
-        if let Ok(mut counts) = self.state.request_counts.lock() {
-            *counts.entry(method.to_string()).or_insert(0) += 1;
-        }
-        LatencyGuard {
-            method: method.to_string(),
-            start: std::time::Instant::now(),
-            latencies: Arc::clone(&self.state.request_latencies),
-        }
+    fn track_request(&self, method: &str) -> RpcSpan {
+        RpcSpan::new(
+            method,
+            Arc::clone(&self.state.request_latencies),
+            &self.state.request_counts,
+        )
     }
 }
 

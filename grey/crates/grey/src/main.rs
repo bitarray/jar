@@ -19,6 +19,7 @@ mod seq_testnet;
 #[allow(dead_code)]
 mod testnet;
 mod tickets;
+mod tracing;
 
 use clap::Parser;
 use grey_types::config::Config;

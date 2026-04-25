@@ -12,6 +12,7 @@ use crate::audit::{self, AuditState};
 use crate::finality::{self, GrandpaState};
 use crate::guarantor::{self, GuarantorState};
 use crate::tickets::{self, TicketState};
+use crate::tracing::spans::Spans;
 
 use grey_consensus::authoring;
 
@@ -775,6 +776,8 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
 
                         // Author block with guarantees, assurances, and tickets
                         let author_start = std::time::Instant::now();
+                        let author_span = Spans::block_authoring(current_slot);
+                        let _author_guard = author_span.enter();
                         let block = authoring::author_block_with_extrinsics(
                             &state,
                             protocol,
@@ -1000,6 +1003,8 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                             let (block, import_hash) = pending_blocks.remove(&next_slot).unwrap();
                             let slot = block.header.timeslot;
                             let stf_start = std::time::Instant::now();
+                            let block_span = Spans::block_processing(slot, &import_hash);
+                            let _guard = block_span.enter();
                             match grey_state::transition::apply_with_config(
                                 &state,
                                 &block,
