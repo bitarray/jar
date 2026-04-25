@@ -6,6 +6,7 @@ pub mod liveness;
 pub mod metrics;
 pub mod recovery;
 pub mod repeat;
+pub mod rpc_errors;
 pub mod serial;
 pub mod throughput;
 

@@ -121,6 +121,7 @@ async fn main() {
         "liveness",
         "invalid_wp",
         "recovery",
+        "rpc_errors",
         "metrics",
     ];
     let mut all_scenarios = vec![
@@ -129,6 +130,7 @@ async fn main() {
         "liveness",
         "invalid_wp",
         "recovery",
+        "rpc_errors",
         "metrics",
         "throughput",
     ];
@@ -165,6 +167,7 @@ async fn main() {
             "liveness" => scenarios::liveness::run(&client).await,
             "invalid_wp" => scenarios::invalid_wp::run(&client).await,
             "recovery" => scenarios::recovery::run(&client).await,
+            "rpc_errors" => scenarios::rpc_errors::run(&client).await,
             "metrics" => scenarios::metrics::run(&client).await,
             "consistency" => scenarios::consistency::run(&client).await,
             "throughput" => scenarios::throughput::run(&client).await,

@@ -207,6 +207,17 @@ impl RpcClient {
             .await
     }
 
+    /// Call an arbitrary RPC method with the given parameters.
+    /// Returns the raw JSON result value on success, or the RPC error on failure.
+    /// Useful for negative testing (invalid methods, bad params, etc.).
+    pub async fn call_raw(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcError> {
+        self.call(method, params).await
+    }
+
     /// Fetch the raw Prometheus metrics from the /metrics HTTP endpoint.
     /// The endpoint is on the same host/port as the RPC server.
     pub async fn get_metrics(&self) -> Result<String, RpcError> {
