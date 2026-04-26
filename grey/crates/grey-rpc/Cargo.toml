@@ -22,8 +22,9 @@ serde_json = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]
-jsonrpsee = { version = "0.24", features = ["client"] }
+jsonrpsee = { version = "0.24", features = ["client", "ws-client"] }
 reqwest = { version = "0.12", default-features = false }
 tempfile = "3"
 grey-consensus = { workspace = true }
 proptest = { workspace = true }
+futures-util = "0.3"

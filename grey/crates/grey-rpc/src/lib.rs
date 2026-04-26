@@ -1370,11 +1370,13 @@ pub fn create_rpc_channel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
     use grey_types::BandersnatchSignature;
     use grey_types::header::{Block, Extrinsic, Header, UnsignedHeader};
-    use jsonrpsee::core::client::ClientT;
+    use jsonrpsee::core::client::{ClientT, SubscriptionClientT};
     use jsonrpsee::http_client::HttpClientBuilder;
     use jsonrpsee::rpc_params;
+    use jsonrpsee::ws_client::WsClientBuilder;
 
     /// Create a temp store, RPC state, and start an ephemeral server.
     /// Returns (client_url, rpc_state, command_rx, store, _tempdir).
@@ -1392,6 +1394,10 @@ mod tests {
         let (addr, _handle) = start_rpc_server_ephemeral(state.clone()).await.unwrap();
         let url = format!("http://{}", addr);
         (url, state, rx, store, dir)
+    }
+
+    fn ws_url(http_url: &str) -> String {
+        http_url.replacen("http://", "ws://", 1)
     }
 
     fn test_block(slot: u32) -> Block {
@@ -1432,6 +1438,61 @@ mod tests {
         assert_eq!(result["head_hash"], "abc123");
         assert_eq!(result["blocks_authored"], 10);
         assert_eq!(result["validator_index"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_new_blocks_receives_notifications() {
+        let (url, state, _rx, _store, _dir) = setup().await;
+        let client = WsClientBuilder::default()
+            .build(&ws_url(&url))
+            .await
+            .unwrap();
+
+        let mut sub = client
+            .subscribe::<serde_json::Value, _>(
+                "subscribeNewBlocks",
+                rpc_params![],
+                "unsubscribeNewBlocks",
+            )
+            .await
+            .unwrap();
+
+        let expected = serde_json::json!({
+            "slot": 42,
+            "hash": "0xfeedbeef",
+        });
+        state.block_notifications.send(expected.clone()).unwrap();
+
+        let received = sub.next().await.unwrap().unwrap();
+        assert_eq!(received, expected);
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_finalized_receives_notifications() {
+        let (url, state, _rx, _store, _dir) = setup().await;
+        let client = WsClientBuilder::default()
+            .build(&ws_url(&url))
+            .await
+            .unwrap();
+
+        let mut sub = client
+            .subscribe::<serde_json::Value, _>(
+                "subscribeFinalized",
+                rpc_params![],
+                "unsubscribeFinalized",
+            )
+            .await
+            .unwrap();
+
+        let expected = serde_json::json!({
+            "slot": 40,
+            "hash": "0xdeadbeef",
+            "finalized": true,
+        });
+        state.finality_notifications.send(expected.clone()).unwrap();
+
+        let received = sub.next().await.unwrap().unwrap();
+        assert_eq!(received, expected);
     }
 
     #[tokio::test]

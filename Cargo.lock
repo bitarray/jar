@@ -1692,6 +1692,7 @@ dependencies = [
 name = "grey-rpc"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "grey-consensus",
  "grey-crypto",
  "grey-merkle",
