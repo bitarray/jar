@@ -860,6 +860,47 @@ mod tests {
     }
 
     #[test]
+    fn test_trivial_authorizer_blob_hash_stability() {
+        // Regression test: the trivial authorizer blob must produce
+        // a deterministic blake2b hash. If this changes, the blob
+        // format or encoding has been unintentionally modified.
+        let blob = build_trivial_authorizer();
+        let hash = blake2b_256(&blob);
+        let expected = "33656ec3682cc9c9229d030b7cc1aa7d58b08e4403770b90908d6a8ddf7741fc";
+        assert_eq!(
+            hex::encode(hash),
+            expected,
+            "trivial authorizer blob hash changed — blob format regression?"
+        );
+    }
+
+    #[test]
+    fn test_sample_service_blob_hash_stability() {
+        // Regression test: the sample service blob must produce
+        // a deterministic blake2b hash across builds.
+        let blob = build_sample_service();
+        let hash = blake2b_256(&blob);
+        let expected = "883c430768add6fdbe6c58411fe8bb506bafec2450dde14c2be0ef94bddf6534";
+        assert_eq!(
+            hex::encode(hash),
+            expected,
+            "sample service blob hash changed — blob format regression?"
+        );
+    }
+
+    /// Compute blake2b-256 hash of a byte slice.
+    fn blake2b_256(data: &[u8]) -> [u8; 32] {
+        use blake2::digest::{Digest, consts::U32};
+        type Blake2b256 = blake2::Blake2b<U32>;
+        let mut hasher = Blake2b256::new();
+        hasher.update(data);
+        let result = hasher.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&result);
+        out
+    }
+
+    #[test]
     fn test_build_sample_service() {
         let blob = build_sample_service();
         assert!(!blob.is_empty());

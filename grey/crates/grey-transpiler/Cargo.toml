@@ -13,4 +13,6 @@ tracing = { workspace = true }
 tracing-test = { workspace = true }
 
 [dev-dependencies]
+blake2 = { workspace = true }
+hex = { workspace = true }
 proptest = { workspace = true }
