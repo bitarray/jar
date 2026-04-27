@@ -52,4 +52,11 @@ theorem block_cost_formula_le (maxDone : Nat) :
     (if maxDone > 3 then maxDone - 3 else 1) ≤ maxDone ∨ maxDone = 0 := by
   split <;> omega
 
+/-- Block cost strict monotonicity: for maxDone > 3, increasing maxDone
+    strictly increases the gas cost. This means every additional instruction
+    beyond the 3-instruction minimum actually increases the block's gas cost. -/
+theorem block_cost_formula_strict_mono (a b : Nat) (h1 : 3 < a) (h2 : a < b) :
+    (if a > 3 then a - 3 else 1) < (if b > 3 then b - 3 else 1) := by
+  split <;> split <;> omega
+
 end Jar.Proofs
