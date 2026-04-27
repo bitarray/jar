@@ -90,9 +90,13 @@ def Params.isValidValCount (cfg : Params) (z : Nat) : Bool :=
 
 /-- Positivity proofs required for Fin types to be inhabited. -/
 structure Params.Valid (cfg : Params) : Prop where
+  /-- V > 0 : positive validator count. -/
   hV : 0 < cfg.V
+  /-- C > 0 : positive core count. -/
   hC : 0 < cfg.C
+  /-- E > 0 : positive epoch length. -/
   hE : 0 < cfg.E
+  /-- N_TICKETS > 0 : positive ticket count. -/
   hN : 0 < cfg.N_TICKETS
 
 -- ============================================================================
@@ -184,7 +188,9 @@ class EconModel (econ : Type) (xfer : Type) where
 class JarConfig where
   /-- Variant name, e.g. "gp072_tiny", "gp072_full". -/
   name : String
+  /-- Protocol parameter set. -/
   config : Params
+  /-- Proof that the parameter set is valid. -/
   valid : Params.Valid config
   /-- PVM memory layout for program initialization. -/
   memoryModel : MemoryModel := .segmented
@@ -218,12 +224,19 @@ class JarConfig where
   [econModel : EconModel EconType TransferType]
 
 -- Forward typeclass instances from JarConfig fields
+/-- Forward BEq for EconType from JarConfig. -/
 instance [j : JarConfig] : BEq j.EconType := j.econBEq
+/-- Forward Inhabited for EconType from JarConfig. -/
 instance [j : JarConfig] : Inhabited j.EconType := j.econInhabited
+/-- Forward BEq for TransferType from JarConfig. -/
 instance [j : JarConfig] : BEq j.TransferType := j.xferBEq
+/-- Forward Inhabited for TransferType from JarConfig. -/
 instance [j : JarConfig] : Inhabited j.TransferType := j.xferInhabited
+/-- Forward Repr for EconType from JarConfig. -/
 instance [j : JarConfig] : Repr j.EconType := j.econRepr
+/-- Forward Repr for TransferType from JarConfig. -/
 instance [j : JarConfig] : Repr j.TransferType := j.xferRepr
+/-- Forward EconModel instance from JarConfig. -/
 instance [j : JarConfig] : EconModel j.EconType j.TransferType := j.econModel
 
 -- ============================================================================
@@ -257,12 +270,14 @@ def Params.tiny : Params where
 -- Validity Proofs
 -- ============================================================================
 
+/-- Full configuration satisfies validity constraints. -/
 theorem Params.full_valid : Params.Valid Params.full where
   hV := by decide
   hC := by decide
   hE := by decide
   hN := by decide
 
+/-- Tiny configuration satisfies validity constraints. -/
 theorem Params.tiny_valid : Params.Valid Params.tiny where
   hV := by decide
   hC := by decide
