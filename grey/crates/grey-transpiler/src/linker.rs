@@ -16,6 +16,47 @@ use crate::emitter;
 use crate::riscv::TranslationContext;
 use std::collections::HashMap;
 
+/// Read a u16 from `data[off..off+2]` in little-endian order.
+/// Caller must ensure `off + 2 <= data.len()`.
+#[inline]
+fn read_u16_le(data: &[u8], off: usize) -> u16 {
+    u16::from_le_bytes([data[off], data[off + 1]])
+}
+
+/// Read a u32 from `data[off..off+4]` in little-endian order.
+/// Caller must ensure `off + 4 <= data.len()`.
+#[inline]
+fn read_u32_le(data: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+}
+
+/// Read a u64 from `data[off..off+8]` in little-endian order.
+/// Caller must ensure `off + 8 <= data.len()`.
+#[inline]
+fn read_u64_le(data: &[u8], off: usize) -> u64 {
+    u64::from_le_bytes([
+        data[off], data[off + 1], data[off + 2], data[off + 3],
+        data[off + 4], data[off + 5], data[off + 6], data[off + 7],
+    ])
+}
+
+/// Read an i32 from `data[off..off+4]` in little-endian order.
+/// Caller must ensure `off + 4 <= data.len()`.
+#[inline]
+fn read_i32_le(data: &[u8], off: usize) -> i32 {
+    i32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+}
+
+/// Read an i64 from `data[off..off+8]` in little-endian order.
+/// Caller must ensure `off + 8 <= data.len()`.
+#[inline]
+fn read_i64_le(data: &[u8], off: usize) -> i64 {
+    i64::from_le_bytes([
+        data[off], data[off + 1], data[off + 2], data[off + 3],
+        data[off + 4], data[off + 5], data[off + 6], data[off + 7],
+    ])
+}
+
 /// RISC-V relocation types we care about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RelocType {
@@ -179,17 +220,17 @@ fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError> {
     }
 
     // ELF64 header fields
-    let e_entry = u64::from_le_bytes(data[24..32].try_into().unwrap());
-    let e_shoff = u64::from_le_bytes(data[40..48].try_into().unwrap()) as usize;
-    let e_shentsize = u16::from_le_bytes(data[58..60].try_into().unwrap()) as usize;
-    let e_shnum = u16::from_le_bytes(data[60..62].try_into().unwrap()) as usize;
-    let e_shstrndx = u16::from_le_bytes(data[62..64].try_into().unwrap()) as usize;
+    let e_entry = read_u64_le(data, 24);
+    let e_shoff = read_u64_le(data, 40) as usize;
+    let e_shentsize = read_u16_le(data, 58) as usize;
+    let e_shnum = read_u16_le(data, 60) as usize;
+    let e_shstrndx = read_u16_le(data, 62) as usize;
 
     // Section name string table
     let strtab = {
         let sh = e_shoff + e_shstrndx * e_shentsize;
-        let off = u64::from_le_bytes(data[sh + 24..sh + 32].try_into().unwrap()) as usize;
-        let sz = u64::from_le_bytes(data[sh + 32..sh + 40].try_into().unwrap()) as usize;
+        let off = read_u64_le(data, sh + 24) as usize;
+        let sz = read_u64_le(data, sh + 32) as usize;
         &data[off..off + sz]
     };
 
@@ -220,14 +261,14 @@ fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError> {
             break;
         }
         sections.push(SectionInfo {
-            name_off: u32::from_le_bytes(data[sh..sh + 4].try_into().unwrap()) as usize,
-            sh_type: u32::from_le_bytes(data[sh + 4..sh + 8].try_into().unwrap()),
-            flags: u64::from_le_bytes(data[sh + 8..sh + 16].try_into().unwrap()),
-            addr: u64::from_le_bytes(data[sh + 16..sh + 24].try_into().unwrap()),
-            file_off: u64::from_le_bytes(data[sh + 24..sh + 32].try_into().unwrap()) as usize,
-            size: u64::from_le_bytes(data[sh + 32..sh + 40].try_into().unwrap()) as usize,
-            link: u32::from_le_bytes(data[sh + 40..sh + 44].try_into().unwrap()) as usize,
-            _info: u32::from_le_bytes(data[sh + 44..sh + 48].try_into().unwrap()) as usize,
+            name_off: read_u32_le(data, sh) as usize,
+            sh_type: read_u32_le(data, sh + 4),
+            flags: read_u64_le(data, sh + 8),
+            addr: read_u64_le(data, sh + 16),
+            file_off: read_u64_le(data, sh + 24) as usize,
+            size: read_u64_le(data, sh + 32) as usize,
+            link: read_u32_le(data, sh + 40) as usize,
+            _info: read_u32_le(data, sh + 44) as usize,
         });
     }
 
@@ -304,8 +345,8 @@ fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError> {
             if off + 24 > data.len() {
                 break;
             }
-            let st_name = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
-            let st_value = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap());
+            let st_name = read_u32_le(data, off) as usize;
+            let st_value = read_u64_le(data, off + 8);
 
             let name = {
                 if st_name < sym_strtab.len() {
@@ -404,9 +445,9 @@ fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError> {
             if off + 24 > data.len() {
                 break;
             }
-            let r_offset = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
-            let r_info = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap());
-            let r_addend = i64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap());
+            let r_offset = read_u64_le(data, off);
+            let r_info = read_u64_le(data, off + 8);
+            let r_addend = read_i64_le(data, off + 16);
             let r_type = (r_info & 0xFFFFFFFF) as u32;
             let r_sym = (r_info >> 32) as usize;
 
@@ -552,7 +593,7 @@ fn rewrite_data_code_ptrs(
         if data_vaddr >= ro_base {
             let off = (data_vaddr - ro_base) as usize;
             if off + 4 <= ro_data.len() {
-                let val = i32::from_le_bytes(ro_data[off..off + 4].try_into().unwrap());
+                let val = read_i32_le(ro_data, off);
                 let target = (base_addr as i64 + val as i64) as u64;
                 if is_code_addr(target) {
                     entries.push(Entry {
@@ -570,7 +611,7 @@ fn rewrite_data_code_ptrs(
     {
         let mut off = 0;
         while off + 8 <= ro_data.len() {
-            let val = u64::from_le_bytes(ro_data[off..off + 8].try_into().unwrap());
+            let val = read_u64_le(ro_data, off);
             if is_code_addr(val) {
                 let vaddr = ro_base + off as u64;
                 if !entries.iter().any(|e| e.data_vaddr == vaddr) {
