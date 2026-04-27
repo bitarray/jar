@@ -23,8 +23,11 @@ open Jar.JAVM.Cap
 
 /-- Compiled code data associated with a CODE cap. -/
 structure CodeCapData where
+  /-- Unique identifier for this code capability. -/
   id : Nat
+  /-- Compiled program blob (code + bitmask). -/
   program : JAVM.ProgramBlob
+  /-- Jump table for block-entry resolution. -/
   jumpTable : Array Nat
 
 instance : Inhabited CodeCapData where
@@ -32,7 +35,9 @@ instance : Inhabited CodeCapData where
 
 /-- Backing store: flat byte array representing all physical pages. -/
 structure BackingStore where
+  /-- Flat byte array representing all physical pages. -/
   data : ByteArray
+  /-- Total number of pages in the store. -/
   totalPages : Nat
 
 /-- PVM run function type (selects gas model). -/
@@ -40,57 +45,85 @@ def PvmRunFn := JAVM.ProgramBlob → Nat → JAVM.Registers → JAVM.Memory → 
 
 /-- Kernel state: VM pool + call stack + backing store + memory. -/
 structure KernelState where
+  /-- Pool of VM instances. -/
   vms : Array VmInstance
+  /-- Call stack for CALL/REPLY chains. -/
   callStack : Array CallFrame
+  /-- Code capability data indexed by codeCapId. -/
   codeCaps : Array CodeCapData
+  /-- Index of the currently active VM. -/
   activeVm : Nat
+  /-- Untyped capability for page allocation. -/
   untyped : UntypedCap
+  /-- Backing store for DATA cap pages. -/
   backing : BackingStore
   /-- Flat PVM memory shared by all VMs (simplified model). -/
   memory : JAVM.Memory
   /-- PVM execution function (gas model dependent). -/
   pvmRun : PvmRunFn
+  /-- Memory cycle counter for page accounting. -/
   memCycles : Nat
 
 /-- Result of running the kernel. -/
 inductive KernelResult where
+  /-- Normal termination with exit value. -/
   | halt (value : Nat)
+  /-- Unexpected runtime failure. -/
   | panic
+  /-- Gas exhausted. -/
   | outOfGas
+  /-- Memory access to unmapped page. -/
   | pageFault (addr : Nat)
+  /-- Needs host interaction at the given protocol slot. -/
   | protocolCall (slot : Nat)
 
 /-- Internal dispatch result. -/
 inductive DispatchResult where
+  /-- Continue kernel execution (ecalli handled internally). -/
   | continue_
+  /-- Needs host interaction at the given protocol slot. -/
   | protocolCall (slot : Nat)
+  /-- Root VM halted with exit value. -/
   | rootHalt (value : Nat)
+  /-- Root VM panicked. -/
   | rootPanic
+  /-- Root VM ran out of gas. -/
   | rootOutOfGas
+  /-- Root VM hit a page fault at addr. -/
   | rootPageFault (addr : Nat)
+  /-- A non-root VM fault was handled; continue execution. -/
   | faultHandled
 
 -- ============================================================================
 -- Constants
 -- ============================================================================
 
+/-- Sentinel: invalid capability reference (2^64 - 2). -/
 def RESULT_WHAT : UInt64 := UInt64.ofNat (2^64 - 2)
-def RESULT_LOW  : UInt64 := UInt64.ofNat (2^64 - 8)   -- gas limit too low
-def RESULT_HUH  : UInt64 := UInt64.ofNat (2^64 - 9)   -- invalid operation
+/-- Sentinel: gas limit too low (2^64 - 8). -/
+def RESULT_LOW  : UInt64 := UInt64.ofNat (2^64 - 8)
+/-- Sentinel: invalid operation (2^64 - 9). -/
+def RESULT_HUH  : UInt64 := UInt64.ofNat (2^64 - 9)
+/-- Gas cost for each ecalli instruction. -/
 def ecalliGasCost : Nat := 10
+/-- Gas overhead for CALL (caller → callee transition). -/
 def callOverheadGas : Nat := 10
+/-- Gas cost per mapped page. -/
 def gasPerPage : Nat := 1500
+/-- Page size in bytes. -/
 def pageSize : Nat := 4096
 
 -- ============================================================================
 -- Backing Store Operations
 -- ============================================================================
 
+/-- Read a byte range from the backing store at the given page and byte offset. -/
 def BackingStore.read (bs : BackingStore) (pageOff byteOff len : Nat) : ByteArray :=
   let start := pageOff * pageSize + byteOff
   if start + len ≤ bs.data.size then bs.data.extract start (start + len)
   else ByteArray.empty
 
+/-- Write bytes into the backing store at the given page and byte offset. -/
 def BackingStore.write (bs : BackingStore) (pageOff byteOff : Nat) (src : ByteArray) : BackingStore :=
   let start := pageOff * pageSize + byteOff
   if start + src.size ≤ bs.data.size then
@@ -106,9 +139,11 @@ def BackingStore.write (bs : BackingStore) (pageOff byteOff : Nat) (src : ByteAr
 -- Register Helpers
 -- ============================================================================
 
+/-- Safe register read: returns 0 for out-of-bounds index. -/
 def getReg (regs : JAVM.Registers) (i : Nat) : UInt64 :=
   if i < regs.size then regs[i]! else 0
 
+/-- Safe register write: no-op for out-of-bounds index. -/
 def setReg (regs : JAVM.Registers) (i : Nat) (v : UInt64) : JAVM.Registers :=
   if i < regs.size then regs.set! i v else regs
 
@@ -116,14 +151,18 @@ def setReg (regs : JAVM.Registers) (i : Nat) (v : UInt64) : JAVM.Registers :=
 -- State Helpers
 -- ============================================================================
 
+/-- Update a VM instance by index, no-op if out of bounds. -/
 def KernelState.updateVm (s : KernelState) (idx : Nat) (f : VmInstance → VmInstance) : KernelState :=
   if idx < s.vms.size then { s with vms := s.vms.set! idx (f s.vms[idx]!) } else s
 
+/-- Get the currently active VM instance. -/
 def KernelState.activeInst (s : KernelState) : VmInstance := s.vms[s.activeVm]!
 
+/-- Set a register in the active VM. -/
 def KernelState.setActiveReg (s : KernelState) (i : Nat) (v : UInt64) : KernelState :=
   s.updateVm s.activeVm fun vm => { vm with registers := setReg vm.registers i v }
 
+/-- Read a register from the active VM. -/
 def KernelState.getActiveReg (s : KernelState) (i : Nat) : UInt64 :=
   getReg s.activeInst.registers i
 
@@ -170,6 +209,8 @@ def resolveOrWhat (state : KernelState) (capRef : UInt32) : KernelState × Optio
 -- CALL VM (HANDLE/CALLABLE → run target VM)
 -- ============================================================================
 
+/-- CALL a HANDLE/CALLABLE: transition caller to waiting, start target VM.
+    Passes φ[7..10] to callee, handles IPC cap transfer, and pushes call frame. -/
 def handleCallVm (state : KernelState) (targetVmId : Nat) (maxGas : Option Nat) : KernelState × DispatchResult :=
   if targetVmId >= state.vms.size then
     (state.setActiveReg 7 RESULT_WHAT, .continue_)
@@ -266,6 +307,7 @@ private def resumeCaller (state : KernelState) (calleeIdx callerIdx : Nat)
         8 0 }
   { state with activeVm := callerIdx }
 
+/-- REPLY: pop call frame, resume caller with callee's φ[7] as result. -/
 def handleReply (state : KernelState) : KernelState × DispatchResult :=
   match state.callStack.back? with
   | none =>
@@ -283,6 +325,7 @@ def handleReply (state : KernelState) : KernelState × DispatchResult :=
 -- VM Halt/Fault Handling
 -- ============================================================================
 
+/-- Handle a non-root VM halt: return unused gas, signal HUH to caller. -/
 def handleVmHalt (state : KernelState) (exitValue : Nat) : KernelState × DispatchResult :=
   match state.callStack.back? with
   | none => (state, .rootHalt exitValue)
@@ -710,6 +753,7 @@ def dispatchEcall (state : KernelState) : KernelState × DispatchResult :=
 -- ecalli Dispatch (CALL a cap)
 -- ============================================================================
 
+/-- Dispatch an ecalli instruction: resolve capability and invoke the appropriate handler. -/
 def dispatchEcalli (state : KernelState) (imm : UInt32) : KernelState × DispatchResult :=
   -- Range check: ecalli only valid for 0-127. ≥128 faults the VM.
   if imm.toNat > 127 then
@@ -825,6 +869,7 @@ def runKernel (state : KernelState) (fuel : Nat) : KernelState × KernelResult :
 -- Protocol Call Resume
 -- ============================================================================
 
+/-- Resume after a protocol call by writing result0/result1 into φ[7]/φ[8]. -/
 def resumeProtocolCall (state : KernelState) (result0 result1 : UInt64) : KernelState :=
   state.updateVm state.activeVm fun vm =>
     { vm with registers := setReg (setReg vm.registers 7 result0) 8 result1 }
