@@ -220,7 +220,7 @@ fn partition_reports(reports: &[WorkReport]) -> (Vec<WorkReport>, Vec<ReadyRecor
 }
 
 /// Extract work-package hashes from reports (eq 12.9).
-fn package_hashes(reports: &[WorkReport]) -> BTreeSet<Hash> {
+pub fn package_hashes(reports: &[WorkReport]) -> BTreeSet<Hash> {
     reports
         .iter()
         .map(|r| r.package_spec.package_hash)

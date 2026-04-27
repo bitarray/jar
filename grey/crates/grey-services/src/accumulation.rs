@@ -382,13 +382,11 @@ pub fn integrate_preimages(
     }
 }
 
-/// Collect the set of work-package hashes from accumulated reports (P function).
+/// Collect the set of work-package hashes from the first `count` reports (P function).
+///
+/// Delegates to [`grey_state::accumulate::package_hashes`] after truncating to `count`.
 pub fn accumulated_package_hashes(reports: &[WorkReport], count: usize) -> BTreeSet<Hash> {
-    reports
-        .iter()
-        .take(count)
-        .map(|r| r.package_spec.package_hash)
-        .collect()
+    grey_state::accumulate::package_hashes(&reports[..count.min(reports.len())])
 }
 
 #[cfg(test)]
