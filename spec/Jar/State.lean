@@ -350,15 +350,25 @@ def updateAuthPool
 
 /-- Accumulation result: the combined outputs of processing available work reports. -/
 structure AccumulationResult where
+  /-- Updated service accounts after accumulation. -/
   services : Dict ServiceId ServiceAccount
+  /-- Updated privileged service assignments. -/
   privileged : PrivilegedServices
+  /-- Updated pending validator keys. -/
   pendingValidators : Array ValidatorKey
+  /-- Updated authorization queue per core. -/
   authQueue : Array (Array Hash)
+  /-- Accumulation outputs (yield hashes, deferred transfers). -/
   outputs : AccumulationOutputs
+  /-- Updated work-report queue per core. -/
   accQueue : Array (Array (WorkReport × Array Hash))
+  /-- History of accumulated work-report hashes per core. -/
   accHistory : Array (Array Hash)
+  /-- Per-service gas usage statistics. -/
   accStats : Dict ServiceId ServiceStatistics
+  /-- Opaque key-value data not consumed during accumulation. -/
   remainingOpaqueData : Array (ByteArray × ByteArray) := #[]
+  /-- Per-service exit reasons for debugging. -/
   exitReasons : Array (ServiceId × String) := #[]
 
 /-- Compute dependency set for a work report (GP eq 12.6).

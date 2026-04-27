@@ -74,12 +74,19 @@ private def econEncodeInfo (e : JarConfig.EconType) (items bytes : Nat) : ByteAr
 
 /-- Combined work-digest/report operand for accumulation. GP §12. -/
 structure OperandTuple where
+  /-- Work-package hash. -/
   packageHash : Hash
+  /-- Segment root hash. -/
   segmentRoot : Hash
+  /-- Authorizer code hash. -/
   authorizerHash : Hash
+  /-- Payload hash. -/
   payloadHash : Hash
+  /-- Gas limit for accumulation. -/
   gasLimit : Gas
+  /-- Authorization output blob. -/
   authOutput : ByteArray
+  /-- Refinement result (output or error). -/
   result : WorkResult
 
 instance : Inhabited OperandTuple where
@@ -94,7 +101,9 @@ instance : Inhabited OperandTuple where
 
 /-- Input to a single-service accumulation: either an operand or a deferred transfer. -/
 inductive AccInput where
+  /-- Operand from a work-report result. -/
   | operand : OperandTuple → AccInput
+  /-- Deferred transfer from another service. -/
   | transfer : DeferredTransfer → AccInput
 
 -- ============================================================================
@@ -103,14 +112,23 @@ inductive AccInput where
 
 /-- Partial state threaded through accumulation. GP §12. -/
 structure PartialState where
+  /-- Service account dictionary. -/
   accounts : Dict ServiceId ServiceAccount
+  /-- Pending validator keys for next epoch. -/
   stagingKeys : Array ValidatorKey
+  /-- Authorization queue per core. -/
   authQueue : Array (Array Hash)
+  /-- Manager service ID. -/
   manager : ServiceId
+  /-- Core assigner service IDs. -/
   assigners : Array ServiceId
+  /-- Designator service ID. -/
   designator : ServiceId
+  /-- Registrar service ID. -/
   registrar : ServiceId
+  /-- Services that always accumulate (gas-free). -/
   alwaysAccumulate : Dict ServiceId Gas
+  /-- Quota management service ID. -/
   quotaService : ServiceId := 0
 
 /-- Extract partial state from full state. -/
@@ -131,10 +149,15 @@ def PartialState.fromState (s : State) : PartialState :=
 
 /-- Output of a single-service accumulation. GP §12. -/
 structure AccOneOutput where
+  /-- Updated partial state after accumulation. -/
   postState : PartialState
+  /-- Deferred transfers generated during accumulation. -/
   deferredTransfers : Array DeferredTransfer
+  /-- Yield value (accumulation output hash). -/
   yieldHash : Option Hash
+  /-- Gas consumed during accumulation. -/
   gasUsed : Gas
+  /-- Preimage provisions (service, data). -/
   provisions : Array (ServiceId × ByteArray)
   /-- Updated opaque data (entries consumed during accumulation removed). -/
   opaqueData : Array (ByteArray × ByteArray) := #[]
@@ -1680,13 +1703,21 @@ private def privR (o a b : ServiceId) : ServiceId :=
 /-- Privilege snapshot: captures the privilege-related fields from a PartialState
     for the purpose of the GP R-merge after accumulation. -/
 private structure PrivSnapshot where
+  /-- Manager service ID. -/
   manager : ServiceId
+  /-- Core assigner service IDs. -/
   assigners : Array ServiceId
+  /-- Designator service ID. -/
   designator : ServiceId
+  /-- Registrar service ID. -/
   registrar : ServiceId
+  /-- Services that always accumulate. -/
   alwaysAccumulate : Dict ServiceId Gas
+  /-- Pending validator keys. -/
   stagingKeys : Array ValidatorKey
+  /-- Authorization queue per core. -/
   authQueue : Array (Array Hash)
+  /-- Quota management service ID. -/
   quotaService : ServiceId := 0
 
 private def privSnap (ps : PartialState) : PrivSnapshot :=
