@@ -41,8 +41,9 @@ def decodeFixedNat (bs : ByteArray) : Nat :=
 -- §C.1 — Variable-length Natural Encoding
 -- ============================================================================
 
-/-- Compute l such that 2^{7l} ≤ x < 2^{7(l+1)}, or 8 if x ≥ 2^{56}. -/
-private def lengthClass (x : Nat) : Nat :=
+/-- Compute l such that 2^{7l} ≤ x < 2^{7(l+1)}, or 8 if x ≥ 2^{56}.
+    Exposed for use in proof code (Jar.Proofs.Codec). -/
+def lengthClass (x : Nat) : Nat :=
   if x < 2^7  then 0
   else if x < 2^14 then 1
   else if x < 2^21 then 2

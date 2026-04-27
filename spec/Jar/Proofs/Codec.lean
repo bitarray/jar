@@ -130,4 +130,12 @@ theorem encodeNat_small_size [JarConfig] :
 theorem encodeNat_128_size [JarConfig] :
     (Codec.encodeNat 128).size = 2 := by decide
 
+/-- encodeNat for 2^56 - 1 produces 8 bytes — l=7 path (largest l < 8). -/
+theorem encodeNat_2p56m1_size [JarConfig] :
+    (Codec.encodeNat (2^56 - 1)).size = 8 := by decide
+
+/-- encodeNat for 2^56 produces 9 bytes — l=8 path (0xFF prefix mode). -/
+theorem encodeNat_2p56_size [JarConfig] :
+    (Codec.encodeNat (2^56)).size = 9 := by decide
+
 end Jar.Proofs
