@@ -162,21 +162,13 @@ impl Hash {
         &self.0
     }
 
-    /// Encode the inner bytes as a bare hex string (no `0x` prefix).
-    pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
-    }
-
     /// Encode the first 8 bytes as a hex string for log/debug output.
     pub fn short_hex(&self) -> String {
         hex::encode(&self.0[..8])
     }
-
-    /// Parse from a hex string (with optional 0x prefix). Panics on invalid input.
-    pub fn from_hex(s: &str) -> Self {
-        Self(decode_hex_fixed(s).expect("invalid hex for Hash"))
-    }
 }
+
+impl_crypto_common!(Hash, "Hash");
 
 impl fmt::Debug for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -199,15 +191,6 @@ impl From<[u8; 32]> for Hash {
 impl AsRef<[u8]> for Hash {
     fn as_ref(&self) -> &[u8] {
         &self.0
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Hash {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let s: String = serde::Deserialize::deserialize(d)?;
-        Ok(Hash(
-            decode_hex_fixed(&s).map_err(serde::de::Error::custom)?,
-        ))
     }
 }
 
