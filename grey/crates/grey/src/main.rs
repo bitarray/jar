@@ -3,20 +3,15 @@
 //! This is the main entry point for the Grey node implementation.
 //! See the Gray Paper v0.7.2 for the full specification.
 
-#[allow(dead_code)]
 mod audit;
 mod chainspec;
 mod config;
-#[allow(dead_code)]
 mod disputes;
-#[allow(dead_code)]
 mod finality;
 mod guarantor;
-#[allow(dead_code)]
 mod keystore;
 mod node;
 mod seq_testnet;
-#[allow(dead_code)]
 mod testnet;
 mod tickets;
 
