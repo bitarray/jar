@@ -20,13 +20,17 @@ namespace Jar.JAVM.Cap
 
 /-- Memory access mode, set at MAP time. -/
 inductive Access where
+  /-- Read-only. -/
   | ro : Access
+  /-- Read-write. -/
   | rw : Access
   deriving BEq, Inhabited, Repr
 
 /-- Cap entry type in the blob manifest. -/
 inductive ManifestCapType where
+  /-- Code capability entry. -/
   | code : ManifestCapType
+  /-- Data capability entry. -/
   | data : ManifestCapType
   deriving BEq, Inhabited
 
@@ -89,11 +93,17 @@ structure ProtocolCap where
 
 /-- A capability in the cap table. -/
 inductive Cap where
+  /-- UNTYPED: bump allocator for page allocation. -/
   | untyped (u : UntypedCap) : Cap
+  /-- DATA: physical pages with exclusive mapping. -/
   | data (d : DataCap) : Cap
+  /-- CODE: compiled PVM code. -/
   | code (c : CodeCap) : Cap
+  /-- HANDLE: VM owner, supports CALL and management. -/
   | handle (h : HandleCap) : Cap
+  /-- CALLABLE: VM entry point, copyable. -/
   | callable (c : CallableCap) : Cap
+  /-- PROTOCOL: kernel-handled host call slot. -/
   | protocol (p : ProtocolCap) : Cap
   deriving Inhabited
 
@@ -127,6 +137,7 @@ def ipcSlot : Nat := 0
 The original bitmap tracks which protocol cap slots are unmodified
 (for compiler fast-path inlining of ecalli on protocol caps). -/
 structure CapTable where
+  /-- 256 slots, each optionally holding a cap. -/
   slots : Array (Option Cap)
   /-- Per-slot original bitmap (256 bits). True = slot holds original
   kernel-populated protocol cap. Set to false on DROP, MOVE-in, or MOVE-out. -/
@@ -135,13 +146,16 @@ structure CapTable where
 
 namespace CapTable
 
+/-- Empty cap table with 256 empty slots. -/
 def empty : CapTable :=
   { slots := Array.replicate 256 none
     originalBitmap := Array.replicate 256 false }
 
+/-- Get the cap at a slot index. -/
 def get (t : CapTable) (idx : Nat) : Option Cap :=
   if idx < t.slots.size then t.slots[idx]! else none
 
+/-- Set a cap at a slot index. Clears original bitmap for protocol slots. -/
 def set (t : CapTable) (idx : Nat) (c : Cap) : CapTable :=
   if idx < t.slots.size then
     { slots := t.slots.set! idx (some c)
@@ -157,6 +171,7 @@ def setOriginal (t : CapTable) (idx : Nat) (c : Cap) : CapTable :=
                         else t.originalBitmap }
   else t
 
+/-- Take (remove) a cap from a slot, returning the cap table and the removed cap. -/
 def take (t : CapTable) (idx : Nat) : CapTable × Option Cap :=
   if idx < t.slots.size then
     let c := t.slots[idx]!
@@ -165,6 +180,7 @@ def take (t : CapTable) (idx : Nat) : CapTable × Option Cap :=
                          else t.originalBitmap }, c)
   else (t, none)
 
+/-- Check if a slot is empty. -/
 def isEmpty (t : CapTable) (idx : Nat) : Bool :=
   if idx < t.slots.size then t.slots[idx]!.isNone else true
 
@@ -198,29 +214,45 @@ def maxIndirectionDepth : Nat := 3
 FAULTED is non-terminal: RESUME can restart a faulted VM,
 preserving registers and PC (retries the faulting instruction). -/
 inductive VmState where
-  | idle : VmState              -- Can be CALLed
-  | running : VmState           -- Executing
-  | waitingForReply : VmState   -- Blocked at CALL
-  | halted : VmState            -- Clean exit (terminal)
-  | faulted : VmState           -- Panic/OOG/page fault (RESUMEable)
+  /-- Idle: can be CALLed. -/
+  | idle : VmState
+  /-- Executing. -/
+  | running : VmState
+  /-- Blocked at CALL, waiting for REPLY. -/
+  | waitingForReply : VmState
+  /-- Clean exit (terminal). -/
+  | halted : VmState
+  /-- Panic/OOG/page fault (RESUMEable). -/
+  | faulted : VmState
   deriving BEq, Inhabited, Repr
 
 /-- A single VM instance. -/
 structure VmInstance where
+  /-- Current lifecycle state. -/
   state : VmState
+  /-- Index into the kernel's codeCaps array. -/
   codeCapId : Nat
+  /-- Register file (13 registers). -/
   registers : JAVM.Registers
+  /-- Program counter. -/
   pc : Nat
+  /-- Capability table (CNode). -/
   capTable : CapTable
-  caller : Option Nat           -- For REPLY routing
+  /-- Caller VM index for REPLY routing. -/
+  caller : Option Nat
+  /-- Entry point index within the code cap. -/
   entryIndex : Nat
+  /-- Remaining gas. -/
   gas : Nat
   deriving Inhabited
 
 /-- Call frame saved on the kernel's call stack. -/
 structure CallFrame where
+  /-- VM index of the caller. -/
   callerVmId : Nat
+  /-- IPC cap slot index transferred during CALL. -/
   ipcCapIdx : Option Nat
+  /-- Whether the IPC DATA cap had a base_offset/access mapping. -/
   ipcWasMapped : Option (Nat × Access)
   deriving Inhabited
 
@@ -305,30 +337,53 @@ inductive DispatchResult where
 -- Protocol Cap Numbering (slots 1-28, IPC at slot 0)
 -- ============================================================================
 
-/-- Protocol cap IDs. Slot 0 = IPC (REPLY). Protocol caps at slots 1-28. -/
+-- Protocol cap IDs. Slot 0 = IPC (REPLY). Protocol caps at slots 1-28.
+/-- Slot 1: Ω_G query remaining gas. -/
 def protocolGas := 1
+/-- Slot 2: Ω_E fetch preimage data. -/
 def protocolFetch := 2
+/-- Slot 3: Ω_H historical state lookup. -/
 def protocolPreimageLookup := 3
+/-- Slot 4: Ω_R read from own storage. -/
 def protocolStorageR := 4
+/-- Slot 5: Ω_W write to own storage. -/
 def protocolStorageW := 5
+/-- Slot 6: Ω_I service info query. -/
 def protocolInfo := 6
+/-- Slot 7: Ω_H historical lookup (accumulation variant). -/
 def protocolHistorical := 7
+/-- Slot 8: Ω_E export segment data. -/
 def protocolExport := 8
+/-- Slot 9: Ω_compile compile code. -/
 def protocolCompile := 9
 -- 10-14 reserved (was peek/poke/pages/invoke/expunge)
+/-- Slot 15: Ω_B set privileged services. -/
 def protocolBless := 15
+/-- Slot 16: Ω_A assign core authorization. -/
 def protocolAssign := 16
+/-- Slot 17: Ω_D designate validator keys. -/
 def protocolDesignate := 17
+/-- Slot 18: Ω_C checkpoint gas. -/
 def protocolCheckpoint := 18
+/-- Slot 19: Ω_N create new service. -/
 def protocolServiceNew := 19
+/-- Slot 20: Ω_U upgrade service code. -/
 def protocolServiceUpgrade := 20
+/-- Slot 21: Ω_T transfer balance. -/
 def protocolTransfer := 21
+/-- Slot 22: Ω_Q remove service. -/
 def protocolServiceEject := 22
+/-- Slot 23: Ω preimage query. -/
 def protocolPreimageQuery := 23
+/-- Slot 24: Ω_S solicit preimage. -/
 def protocolPreimageSolicit := 24
+/-- Slot 25: Ω_F forget preimage. -/
 def protocolPreimageForget := 25
+/-- Slot 26: Ω_Y yield accumulation output. -/
 def protocolOutput := 26
+/-- Slot 27: Ω_P provide preimage data. -/
 def protocolPreimageProvide := 27
+/-- Slot 28: Ω_M quota management. -/
 def protocolQuota := 28
 
 -- ============================================================================
@@ -340,19 +395,29 @@ def jarMagic : UInt32 := 0x02524148
 
 /-- Capability manifest entry from the blob. -/
 structure CapManifestEntry where
+  /-- Capability slot index in the cap table. -/
   capIndex : Nat
+  /-- Type of capability (code or data). -/
   capType : ManifestCapType
+  /-- Starting page in the address space. -/
   basePage : Nat
+  /-- Number of pages. -/
   pageCount : Nat
+  /-- Initial access mode. -/
   initAccess : Access
+  /-- Byte offset into the blob data section. -/
   dataOffset : Nat
+  /-- Length of data in bytes. -/
   dataLen : Nat
   deriving Inhabited
 
 /-- Parsed JAR header. -/
 structure ProgramHeader where
+  /-- Number of memory pages requested. -/
   memoryPages : Nat
+  /-- Number of capabilities in the manifest. -/
   capCount : Nat
+  /-- Cap slot to invoke on start. -/
   invokeCap : Nat
   deriving Inhabited
 
