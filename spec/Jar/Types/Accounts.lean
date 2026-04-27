@@ -68,6 +68,7 @@ structure QuotaTransfer where
 -- EconModel Instances
 -- ============================================================================
 
+/-- EconModel instance for BalanceEcon: balance-based service accounting. -/
 instance : EconModel BalanceEcon BalanceTransfer where
   canAffordStorage e items bytes bI bL bS :=
     let minBal := bS + bI * items + bL * bytes
@@ -145,6 +146,7 @@ instance : EconModel BalanceEcon BalanceTransfer where
     let amtNat ← amtJson.getNat?
     return { amount := amtNat.toUInt64 }
 
+/-- EconModel instance for QuotaEcon: quota-based service accounting (coinless model). -/
 instance : EconModel QuotaEcon QuotaTransfer where
   canAffordStorage e items bytes _bI _bL _bS :=
     items ≤ e.quotaItems.toNat && bytes ≤ e.quotaBytes.toNat

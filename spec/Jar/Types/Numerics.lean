@@ -67,9 +67,11 @@ abbrev TicketEntryIndex [JarConfig] := Nat
 /-- Epoch slot index: ℕ_{E}. Bounded by config.E. -/
 abbrev EpochIndex [j : JarConfig] := Fin j.config.E
 
--- Inhabited instances for parameterized Fin types
+/-- Inhabited instance for CoreIndex: defaults to index 0. -/
 instance instInhabitedCoreIndex [j : JarConfig] : Inhabited (Fin j.config.C) := ⟨⟨0, j.valid.hC⟩⟩
+/-- Inhabited instance for ValidatorIndex: defaults to index 0. -/
 instance instInhabitedValidatorIndex [j : JarConfig] : Inhabited (Fin j.config.V) := ⟨⟨0, j.valid.hV⟩⟩
+/-- Inhabited instance for EpochIndex: defaults to index 0. -/
 instance instInhabitedEpochIndex [j : JarConfig] : Inhabited (Fin j.config.E) := ⟨⟨0, j.valid.hE⟩⟩
 
 end Jar

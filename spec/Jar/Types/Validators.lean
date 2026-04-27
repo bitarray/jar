@@ -43,6 +43,7 @@ structure Ticket where
   /-- a : Attempt/entry index ∈ {0, 1}. -/
   attempt : TicketEntryIndex
 
+/-- Default Ticket: zero hash, attempt 0. -/
 instance : Inhabited Ticket where
   default := { id := default, attempt := 0 }
 
