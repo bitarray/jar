@@ -259,4 +259,22 @@ theorem balanceEcon_absorbEjected_comm_balance (e1 e2 : BalanceEcon) :
   show e1.balance + e2.balance = e2.balance + e1.balance
   rw [UInt64.add_comm]
 
+-- ============================================================================
+-- gratis preservation under absorbEjected
+-- ============================================================================
+
+/-- absorbEjected preserves the gratis field — only balance is modified. -/
+theorem balanceEcon_absorbEjected_preserves_gratis (e ejected : BalanceEcon) :
+    (@EconModel.absorbEjected BalanceEcon BalanceTransfer _ e ejected).gratis = e.gratis := by
+  rfl
+
+-- ============================================================================
+-- newServiceEcon gratis assignment
+-- ============================================================================
+
+/-- newServiceEcon assigns the given gratis value directly. -/
+theorem balanceEcon_newServiceEcon_gratis (items bytes : Nat) (gratis : UInt64) (bI bL bS : Nat) :
+    (@EconModel.newServiceEcon BalanceEcon BalanceTransfer _ items bytes gratis bI bL bS).gratis = gratis := by
+  rfl
+
 end Jar.Proofs

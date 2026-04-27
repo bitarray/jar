@@ -49,6 +49,21 @@ theorem quotaEcon_setQuota_never_none (e : QuotaEcon) (mi mb : UInt64) :
     @EconModel.setQuota QuotaEcon QuotaTransfer _ e mi mb ≠ none := by
   simp [quotaEcon_setQuota_always_some]
 
+/-- setQuota is input-independent: the result depends only on (mi, mb), not on e.
+    This is the "const" property — setQuota unconditionally overwrites quotas. -/
+theorem quotaEcon_setQuota_const (e e' : QuotaEcon) (mi mb : UInt64) :
+    @EconModel.setQuota QuotaEcon QuotaTransfer _ e mi mb
+    = @EconModel.setQuota QuotaEcon QuotaTransfer _ e' mi mb := by
+  rfl
+
+/-- setQuota is idempotent: applying it to the result of setQuota with the same
+    arguments produces the same output. -/
+theorem quotaEcon_setQuota_idempotent (e : QuotaEcon) (mi mb : UInt64) :
+    @EconModel.setQuota QuotaEcon QuotaTransfer _
+      { quotaItems := mi, quotaBytes := mb } mi mb
+    = @EconModel.setQuota QuotaEcon QuotaTransfer _ e mi mb := by
+  rfl
+
 -- ============================================================================
 -- canAffordStorage monotonicity
 -- ============================================================================
