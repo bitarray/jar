@@ -1580,6 +1580,13 @@ impl Interpreter {
             return (ExitReason::Panic, initial_gas - self.gas);
         }
 
+        // Hoist loop-iteration state outside the loop so the compiler can keep
+        // them in registers across iterations rather than re-initialising stack
+        // slots every time around.  Both variables are unconditionally written
+        // at the top of every iteration before they are read.
+        let mut branch_idx: u32;
+        let mut exit: Option<ExitReason>;
+
         loop {
             // Copy the decoded instruction (avoids borrow conflict with &mut self)
             // SAFETY: idx is maintained within 0..decoded_insts.len() by the decoder
@@ -1604,8 +1611,8 @@ impl Interpreter {
 
             // Most instructions advance sequentially. Branches/jumps set
             // branch_idx to the pre-resolved instruction index.
-            let mut branch_idx: u32 = u32::MAX; // sentinel: means sequential
-            let mut exit: Option<ExitReason> = None;
+            branch_idx = u32::MAX; // sentinel: means sequential
+            exit = None;
 
             match inst.opcode {
                 // === No arguments ===
@@ -2643,13 +2650,18 @@ fn compute_bb_starts_inner(code: &[u8], bitmask: &[u8]) -> (Vec<bool>, Vec<u8>) 
 ///
 /// Uses the same GasSimulator as the recompiler — single code path.
 /// Gas is charged per basic block at block entry: max(max_done - 3, 1).
+///
+/// Performance: uses `feed_gas_direct` for the ~90% fast-path instructions that are
+/// non-branch, non-overlap, non-move — skipping FastCost struct construction and
+/// bitmask-based feed(). Falls back to the full `fast_cost_from_raw` + `sim.feed()`
+/// only for branch/overlap/move instructions.
 fn compute_block_gas_costs(
     code: &[u8],
     bitmask: &[u8],
     basic_block_starts: &[bool],
     mem_cycles: u8,
 ) -> Vec<u32> {
-    use crate::gas_cost::{fast_cost_from_raw, skip_distance};
+    use crate::gas_cost::{fast_cost_from_raw, feed_gas_direct, skip_distance};
     use crate::gas_sim::GasSimulator;
 
     let len = code.len();
@@ -2693,17 +2705,27 @@ fn compute_block_gas_costs(
             0xFF
         };
 
-        let fc = fast_cost_from_raw(
-            opcode_byte,
-            raw_ra,
-            raw_rb,
-            raw_rd,
-            pc as u32,
-            code,
-            bitmask,
-            mem_cycles,
-        );
-        sim.feed(&fc);
+        // Try the fast direct path first (~90% of instructions).
+        // feed_gas_direct handles non-branch, non-overlap, non-move instructions
+        // by feeding register indices directly to GasSimulator, avoiding FastCost
+        // struct construction and bitmask traversal.
+        let (_is_term, needs_full) =
+            feed_gas_direct(opcode_byte, raw_ra, raw_rb, raw_rd, &mut sim, mem_cycles);
+        if needs_full {
+            // Branch/overlap/move instructions need the full FastCost path
+            // for branch target distance calculation or overlap detection.
+            let fc = fast_cost_from_raw(
+                opcode_byte,
+                raw_ra,
+                raw_rb,
+                raw_rd,
+                pc as u32,
+                code,
+                bitmask,
+                mem_cycles,
+            );
+            sim.feed(&fc);
+        }
 
         // Advance to next instruction
         let skip = skip_distance(bitmask, pc);
@@ -3372,5 +3394,87 @@ mod tests {
             vm.block_gas_costs[3], 0,
             "PC 3 should not carry gas cost (not a gas block start)"
         );
+    }
+
+    /// Verify that feed_gas_direct optimization produces identical gas costs
+    /// to the original fast_cost_from_raw + sim.feed() path.
+    /// This tests the fallback correctness: instructions that hit the slow
+    /// path (branch/overlap/move) must still produce the same result.
+    #[test]
+    fn test_feed_gas_direct_matches_original_feed() {
+        use crate::gas_cost::{fast_cost_from_raw, skip_distance};
+        use crate::gas_sim::GasSimulator;
+
+        let mem_cycles = crate::gas_cost::DEFAULT_MEM_CYCLES;
+
+        // Use a real test program that includes various instruction types:
+        // branches, loads, stores, arithmetic, move_reg, etc.
+        let (code, bitmask) = branch_target_mid_block_program();
+        let gas_starts = compute_gas_block_starts(&code, &bitmask);
+        let optimized_costs = compute_block_gas_costs(&code, &bitmask, &gas_starts, mem_cycles);
+
+        // Compute reference costs using the original feed-only path
+        let len = code.len();
+        let mut costs_ref = vec![0u32; len];
+        let mut sim = GasSimulator::new();
+        let mut block_start: usize = 0;
+        let mut in_block = false;
+        let mut pc = 0;
+
+        while pc < len {
+            if !gas_starts[pc] && !in_block {
+                pc += 1;
+                continue;
+            }
+            if gas_starts[pc] {
+                if in_block {
+                    costs_ref[block_start] = sim.flush_and_get_cost();
+                    sim.reset();
+                }
+                block_start = pc;
+                in_block = true;
+            }
+            let opcode_byte = code[pc];
+            let raw_ra = if pc + 1 < len {
+                code[pc + 1] & 0x0F
+            } else {
+                0xFF
+            };
+            let raw_rb = if pc + 1 < len {
+                (code[pc + 1] >> 4) & 0x0F
+            } else {
+                0xFF
+            };
+            let raw_rd = if pc + 2 < len {
+                code[pc + 2] & 0x0F
+            } else {
+                0xFF
+            };
+            let fc = fast_cost_from_raw(
+                opcode_byte,
+                raw_ra,
+                raw_rb,
+                raw_rd,
+                pc as u32,
+                &code,
+                &bitmask,
+                mem_cycles,
+            );
+            sim.feed(&fc);
+            let skip = skip_distance(&bitmask, pc);
+            pc += 1 + skip;
+        }
+        if in_block {
+            costs_ref[block_start] = sim.flush_and_get_cost();
+        }
+
+        // The optimized path must produce identical costs
+        for i in 0..len {
+            assert_eq!(
+                optimized_costs[i], costs_ref[i],
+                "Gas cost mismatch at PC {}: optimized={}, reference={}",
+                i, optimized_costs[i], costs_ref[i]
+            );
+        }
     }
 }
