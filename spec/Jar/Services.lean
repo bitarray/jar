@@ -335,26 +335,46 @@ opaque auditWorkReport
 
 /-- Host-call identifiers available during accumulation. GP §12. -/
 inductive HostCall where
-  | gas          -- Ω_G : Query remaining gas
-  | lookup       -- Ω_L : Lookup value in service storage
-  | read         -- Ω_R : Read from own storage
-  | write        -- Ω_W : Write to own storage
-  | info         -- Ω_I : Service info query
-  | bless        -- Ω_B : Set privileged services (manager only)
-  | assign       -- Ω_A : Assign core authorization
-  | designate    -- Ω_D : Designate validator keys
-  | checkpoint   -- Ω_C : Checkpoint gas
-  | newService   -- Ω_N : Create new service
-  | upgrade      -- Ω_U : Upgrade service code
-  | transfer     -- Ω_T : Transfer balance
-  | quit         -- Ω_Q : Remove service
-  | solicit      -- Ω_S : Solicit preimage
-  | forget       -- Ω_F : Forget preimage
-  | historicalLookup -- Ω_H : Historical state lookup
-  | fetch        -- Ω_E : Fetch preimage data
-  | yield        -- Ω_Y : Yield accumulation output
-  | provide      -- Ω_P : Provide preimage data
-  | empower      -- Ω_M : Empower (privileged operations)
+  /-- Ω_G : Query remaining gas. -/
+  | gas
+  /-- Ω_L : Lookup value in service storage. -/
+  | lookup
+  /-- Ω_R : Read from own storage. -/
+  | read
+  /-- Ω_W : Write to own storage. -/
+  | write
+  /-- Ω_I : Service info query. -/
+  | info
+  /-- Ω_B : Set privileged services (manager only). -/
+  | bless
+  /-- Ω_A : Assign core authorization. -/
+  | assign
+  /-- Ω_D : Designate validator keys. -/
+  | designate
+  /-- Ω_C : Checkpoint gas. -/
+  | checkpoint
+  /-- Ω_N : Create new service. -/
+  | newService
+  /-- Ω_U : Upgrade service code. -/
+  | upgrade
+  /-- Ω_T : Transfer balance. -/
+  | transfer
+  /-- Ω_Q : Remove service. -/
+  | quit
+  /-- Ω_S : Solicit preimage. -/
+  | solicit
+  /-- Ω_F : Forget preimage. -/
+  | forget
+  /-- Ω_H : Historical state lookup. -/
+  | historicalLookup
+  /-- Ω_E : Fetch preimage data. -/
+  | fetch
+  /-- Ω_Y : Yield accumulation output. -/
+  | yield
+  /-- Ω_P : Provide preimage data. -/
+  | provide
+  /-- Ω_M : Empower (privileged operations). -/
+  | empower
   deriving BEq
 
 end Jar.Services
