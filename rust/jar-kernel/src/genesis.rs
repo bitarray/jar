@@ -4,9 +4,7 @@
 //! block_finalization_cap Vault, a registered Transact entrypoint, and a
 //! registered Dispatch entrypoint. Keys are simple `[u8; 32]` ids.
 
-use jar_types::{
-    CapId, Capability, Hash, KResult, KernelError, ResourceKind, State, VaultId, VaultRights,
-};
+use jar_types::{CapId, Capability, Hash, KResult, State, VaultId, VaultRights};
 
 use crate::cap_registry;
 use crate::cnode_ops;
@@ -153,5 +151,3 @@ impl GenesisBuilder {
     }
 }
 
-#[allow(dead_code)]
-fn _placate_unused(_: KernelError, _: ResourceKind) {}

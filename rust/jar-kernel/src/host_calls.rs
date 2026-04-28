@@ -8,9 +8,8 @@
 //! address guest memory windows.
 
 use jar_types::{
-    AttestationEntry, AttestationScope, CNodeId, Caller, CapId, CapRecord, Capability, Command,
-    KResult, KernelError, KernelRole, ResourceKind, ResultEntry, SlotContent, StorageMode,
-    StorageRights,
+    AttestationScope, CNodeId, Caller, CapId, CapRecord, Capability, Command, KResult, KernelError,
+    KernelRole, ResourceKind, ResultEntry, SlotContent,
 };
 
 use crate::attest;
@@ -683,9 +682,3 @@ fn host_slot_clear<V: VmExec, H: Hardware>(
     Ok((RC_OK, 0))
 }
 
-// -----------------------------------------------------------------------------
-// Marker function: silence unused-warning on AttestationEntry import.
-// -----------------------------------------------------------------------------
-
-#[allow(dead_code)]
-fn _phantom_use(_: AttestationEntry, _: StorageRights, _: StorageMode) {}

@@ -5,7 +5,7 @@
 //! slot monotonicity, trace exhaustion).
 
 use jar_types::{
-    Body, Command, Hash, Header, KResult, KernelError, KernelRole, MerkleProof, State,
+    Body, Command, Hash, Header, KResult, KernelRole, MerkleProof, State,
 };
 
 use crate::attest::AttestCursor;
@@ -215,5 +215,3 @@ fn run_policy_phase<H: Hardware>(
     }
 }
 
-#[allow(dead_code)]
-fn _placate_unused(_: KernelError) {}

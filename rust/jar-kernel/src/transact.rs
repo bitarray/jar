@@ -18,7 +18,6 @@ use jar_types::{
 use crate::attest::AttestCursor;
 use crate::cap_registry;
 use crate::frame::Frame;
-use crate::host_calls;
 use crate::invocation::{InvocationCtx, ScriptStep, VmExec, drive_invocation};
 use crate::reach::ReachSet;
 use crate::runtime::Hardware;
@@ -181,11 +180,3 @@ pub fn run_phase<H: Hardware>(
     Ok(all_commands)
 }
 
-// Keep the `host_calls` import live for downstream wiring.
-#[allow(dead_code)]
-fn _retain() {
-    let _ = host_calls::dispatch_host_call::<
-        crate::invocation::ScriptVm,
-        super::runtime::InMemoryHardware,
-    >;
-}
