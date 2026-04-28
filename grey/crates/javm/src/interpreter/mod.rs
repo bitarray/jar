@@ -2649,7 +2649,7 @@ fn compute_block_gas_costs(
     basic_block_starts: &[bool],
     mem_cycles: u8,
 ) -> Vec<u32> {
-    use crate::gas_cost::{fast_cost_from_raw, skip_distance};
+    use crate::gas_cost::{fast_cost_from_raw, feed_gas_direct, skip_distance};
     use crate::gas_sim::GasSimulator;
 
     let len = code.len();
@@ -2693,17 +2693,30 @@ fn compute_block_gas_costs(
             0xFF
         };
 
-        let fc = fast_cost_from_raw(
+        // Use feed_gas_direct for fast path (~90% of instructions)
+        let (_is_term, needs_slow) = feed_gas_direct(
             opcode_byte,
             raw_ra,
             raw_rb,
             raw_rd,
-            pc as u32,
-            code,
-            bitmask,
+            &mut sim,
             mem_cycles,
         );
-        sim.feed(&fc);
+
+        if needs_slow {
+            // Slow path for branches, overlaps, moves
+            let fc = fast_cost_from_raw(
+                opcode_byte,
+                raw_ra,
+                raw_rb,
+                raw_rd,
+                pc as u32,
+                code,
+                bitmask,
+                mem_cycles,
+            );
+            sim.feed(&fc);
+        }
 
         // Advance to next instruction
         let skip = skip_distance(bitmask, pc);
