@@ -387,24 +387,50 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
         genesis_time
     );
 
-    // Graceful shutdown on SIGINT (Ctrl+C) or SIGTERM (kill)
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("failed to register SIGTERM handler");
-    let shutdown = async {
+    // Graceful shutdown on SIGINT (Ctrl+C) or SIGTERM (kill).
+    // On Unix, also listen for SIGTERM. On Windows, only Ctrl+C is available.
+    #[cfg(unix)]
+    let shutdown_signal = async {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to register SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => "SIGINT",
             _ = sigterm.recv() => "SIGTERM",
         }
     };
-    tokio::pin!(shutdown);
+    #[cfg(not(unix))]
+    let shutdown_signal = async {
+        let _ = tokio::signal::ctrl_c().await;
+        "SIGINT"
+    };
+    tokio::pin!(shutdown_signal);
 
-    // SIGUSR1: dump debug state to log
-    let mut sigusr1 = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
-        .expect("failed to register SIGUSR1 handler");
+    // SIGUSR1: dump debug state to log (Unix only).
+    // On non-Unix platforms, the future is pending forever so this arm never fires.
+    #[cfg(unix)]
+    let sigusr1_signal = async {
+        let mut sigusr1 =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+                .expect("failed to register SIGUSR1 handler");
+        sigusr1.recv().await
+    };
+    #[cfg(not(unix))]
+    let sigusr1_signal = std::future::pending::<()>();
+    tokio::pin!(sigusr1_signal);
 
-    // SIGHUP: reload config file
-    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .expect("failed to register SIGHUP handler");
+    // SIGHUP: reload config file (Unix only).
+    // On non-Unix platforms, the future is pending forever so this arm never fires.
+    #[cfg(unix)]
+    let sighup_signal = async {
+        let mut sighup =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+                .expect("failed to register SIGHUP handler");
+        sighup.recv().await
+    };
+    #[cfg(not(unix))]
+    let sighup_signal = std::future::pending::<()>();
+    tokio::pin!(sighup_signal);
     let config_path = config.config_path.clone();
 
     // Main loop: check timeslots every 500ms
@@ -426,7 +452,7 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
 
     loop {
         tokio::select! {
-            signal_name = &mut shutdown => {
+            signal_name = &mut shutdown_signal => {
                 tracing::info!(
                     "Validator {} received {}, flushing state...",
                     config.validator_index,
@@ -444,8 +470,9 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                 );
                 break;
             }
-            // SIGUSR1: dump debug state snapshot to log
-            _ = sigusr1.recv() => {
+            // SIGUSR1: dump debug state snapshot to log.
+            // On non-Unix platforms sigusr1_signal is pending forever, so this arm never fires.
+            _ = sigusr1_signal.as_mut() => {
                 let head_hash = state
                     .recent_blocks
                     .headers
@@ -477,7 +504,8 @@ pub async fn run_node(config: NodeConfig) -> Result<(), Box<dyn std::error::Erro
                     blocks_imported,
                 );
             }
-            _ = sighup.recv() => {
+            // SIGHUP: reload config. On non-Unix platforms sighup_signal is pending forever.
+            _ = sighup_signal.as_mut() => {
                 if let Some(ref path) = config_path {
                     tracing::info!("SIGHUP received — reloading config from {}", path);
                     match crate::config::ConfigFile::load(std::path::Path::new(path)) {

@@ -8,8 +8,8 @@ fn main() {
         format!(
             "const MINIMAL_BLOB: &[u8] = include_bytes!(\"{}\");\n\
              const BOOTSTRAP_BLOB: &[u8] = include_bytes!(\"{}\");\n",
-            minimal.display(),
-            bootstrap.display(),
+            build_javm::include_path(&minimal),
+            build_javm::include_path(&bootstrap),
         ),
     )
     .unwrap();

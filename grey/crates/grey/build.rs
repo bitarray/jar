@@ -9,8 +9,8 @@ fn main() {
         format!(
             "const SAMPLE_SERVICE_BLOB: &[u8] = include_bytes!(\"{}\");\n\
              const PIXELS_SERVICE_BLOB: &[u8] = include_bytes!(\"{}\");\n",
-            sample.display(),
-            pixels.display(),
+            build_javm::include_path(&sample),
+            build_javm::include_path(&pixels),
         ),
     )
     .unwrap();

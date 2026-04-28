@@ -27,17 +27,17 @@ fn main() {
              const GREY_KECCAK_BLOB: &[u8] = include_bytes!(\"{}\");\n\
              const POLKAVM_KECCAK_BLOB: &[u8] = include_bytes!(\"{}\");\n\
              const SAMPLE_SERVICE_BLOB: &[u8] = include_bytes!(\"{}\");\n",
-            javm_ecrecover.display(),
-            pvm_ecrecover.display(),
-            javm_sieve.display(),
-            pvm_sieve.display(),
-            javm_ed25519.display(),
-            pvm_ed25519.display(),
-            javm_blake2b.display(),
-            pvm_blake2b.display(),
-            javm_keccak.display(),
-            pvm_keccak.display(),
-            service_blob.display(),
+            build_javm::include_path(&javm_ecrecover),
+            build_pvm::include_path(&pvm_ecrecover),
+            build_javm::include_path(&javm_sieve),
+            build_pvm::include_path(&pvm_sieve),
+            build_javm::include_path(&javm_ed25519),
+            build_pvm::include_path(&pvm_ed25519),
+            build_javm::include_path(&javm_blake2b),
+            build_pvm::include_path(&pvm_blake2b),
+            build_javm::include_path(&javm_keccak),
+            build_pvm::include_path(&pvm_keccak),
+            build_javm::include_path(&service_blob),
         ),
     )
     .unwrap();

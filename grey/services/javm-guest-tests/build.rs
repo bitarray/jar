@@ -10,7 +10,7 @@ fn main() {
         format!("{out_dir}/guest_blob.rs"),
         format!(
             "const GUEST_TESTS_BLOB: &[u8] = include_bytes!(\"{}\");\n",
-            blob.display(),
+            build_javm::include_path(&blob),
         ),
     )
     .unwrap();

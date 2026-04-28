@@ -2,6 +2,17 @@ use std::path::PathBuf;
 
 use build_crate::{BuildKind, GuestBuild};
 
+/// Convert a [`PathBuf`] to a string suitable for use inside `include_bytes!(…)`.
+///
+/// On Windows, `PathBuf::display()` emits backslash separators which the Rust
+/// lexer then interprets as escape sequences inside string literals (e.g. `\b`,
+/// `\j`, `\s`).  Replacing backslashes with forward slashes produces paths that
+/// are valid on every platform — the Rust compiler accepts forward slashes on
+/// Windows, and Unix paths never contain backslashes in the first place.
+pub fn include_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 const TARGET_JSON: &str = include_str!("riscv64em-javm.json");
 const TARGET_NAME: &str = "riscv64em-javm";
 
