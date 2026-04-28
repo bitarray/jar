@@ -6,6 +6,10 @@
 //! - Gas metering for bounded execution
 //! - Host-call interface for system interactions
 
+// Allow `core::intrinsics::unlikely` for branch-prediction hints in hot loops.
+// The project already requires nightly (rust-toolchain.toml: nightly edition 2024).
+#![feature(core_intrinsics)]
+#![allow(internal_features)]
 #![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;
 
