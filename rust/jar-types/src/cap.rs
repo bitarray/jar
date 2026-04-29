@@ -28,6 +28,13 @@ pub enum Capability {
     /// Persistent Transact entrypoint cap; pinned to `born_in`.
     Transact { vault_id: VaultId, born_in: CNodeId },
 
+    /// Persistent Schedule entrypoint cap; pinned to `born_in`. Kernel-fired
+    /// once per block at this slot's position in σ.transact_space_cnode,
+    /// with no body event input. Used for chain-author block_init /
+    /// block_final / consensus / cleanup hooks. Never `cap_call`'d by
+    /// userspace; not derivable to a callable ref.
+    Schedule { vault_id: VaultId, born_in: CNodeId },
+
     /// Ephemeral Dispatch reference, derived from a `Dispatch`. Frame-only.
     DispatchRef { vault_id: VaultId },
 
@@ -67,6 +74,7 @@ impl Capability {
             self,
             Capability::Dispatch { .. }
                 | Capability::Transact { .. }
+                | Capability::Schedule { .. }
                 | Capability::DispatchRef { .. }
                 | Capability::TransactRef { .. }
         )
@@ -85,6 +93,7 @@ impl Capability {
             | Capability::VaultRef { vault_id, .. }
             | Capability::Dispatch { vault_id, .. }
             | Capability::Transact { vault_id, .. }
+            | Capability::Schedule { vault_id, .. }
             | Capability::DispatchRef { vault_id }
             | Capability::TransactRef { vault_id }
             | Capability::Storage { vault_id, .. } => Some(*vault_id),

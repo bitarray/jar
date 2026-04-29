@@ -56,7 +56,7 @@ fn apply_block_rejects_unregistered_target() {
     let state = build_genesis();
     let parent = BlockHash::ZERO;
     let body = Body {
-        events: vec![(jar_types::VaultId(9999), jar_types::Event::default())],
+        events: vec![(jar_types::VaultId(9999), vec![jar_types::Event::default()])],
         ..Default::default()
     };
     let block = Block { parent, body };
@@ -71,8 +71,48 @@ fn apply_block_rejects_unregistered_target() {
 }
 
 #[test]
-fn state_root_is_stable_across_no_op_blocks() {
-    // With no events, σ is unchanged; state_root must match.
+fn body_events_order_must_match_transact_space_cnode() {
+    // Genesis layout: slot 0 Schedule, slot 1 Transact(t_vault), slot 2 Schedule.
+    // Body referencing the Transact slot's vault_id is fine.
+    let g = GenesisBuilder::default().build().unwrap();
+    let block = Block {
+        parent: BlockHash::ZERO,
+        body: Body {
+            events: vec![(g.transact_vault, vec![jar_types::Event::default()])],
+            ..Default::default()
+        },
+    };
+    let hw = no_op_hardware();
+    let out = apply_block(&g.state, BlockHash::ZERO, &block, &hw).unwrap();
+    assert!(matches!(out.block_outcome, BlockOutcome::Accepted));
+}
+
+#[test]
+fn body_events_referencing_schedule_slot_is_rejected() {
+    // body.events MUST NOT reference a Schedule slot's vault_id.
+    let g = GenesisBuilder::default().build().unwrap();
+    let block = Block {
+        parent: BlockHash::ZERO,
+        body: Body {
+            events: vec![(g.block_init_vault, vec![jar_types::Event::default()])],
+            ..Default::default()
+        },
+    };
+    let hw = no_op_hardware();
+    let res = apply_block(&g.state, BlockHash::ZERO, &block, &hw);
+    assert!(
+        res.is_err(),
+        "expected Err for Schedule-slot reference, got {:?}",
+        res.ok().map(|o| o.block_outcome)
+    );
+}
+
+#[test]
+fn state_root_advances_with_schedule_slots_firing() {
+    // Genesis includes Schedule(block_init) and Schedule(block_final) slots
+    // that fire once per block. Each invocation allocates a Frame Storage
+    // cap, advancing next_cap_id and therefore the state_root — even for
+    // a no-event body.
     let state = build_genesis();
     let pre_root = jar_kernel::state_root(&state);
     let block = Block {
@@ -82,6 +122,6 @@ fn state_root_is_stable_across_no_op_blocks() {
     let hw = no_op_hardware();
     let out = apply_block(&state, BlockHash::ZERO, &block, &hw).unwrap();
     let post_root = jar_kernel::state_root(&out.state_next);
-    assert_eq!(pre_root, post_root);
+    assert_ne!(pre_root, post_root);
     assert_eq!(out.state_root, post_root);
 }

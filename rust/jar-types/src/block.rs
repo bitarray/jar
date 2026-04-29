@@ -7,14 +7,20 @@
 
 use crate::{AttestationEntry, BlockHash, Event, MerkleProof, ReachEntry, ResultEntry, VaultId};
 
-/// Block body. Carries on-chain events plus all sidecar traces.
+/// Block body. Carries on-chain events grouped per Transact entrypoint plus
+/// all sidecar traces.
 #[derive(Clone, Eq, PartialEq, Debug, Default)]
 pub struct Body {
-    /// Flat ordered list of (target_vault_id, event). The proposer chooses
-    /// the order; conventionally `events[0]` is the chain's header-equivalent
-    /// gating Vault and `events[len-1]` is the finalization-equivalent
-    /// gating Vault, but the kernel doesn't single these out.
-    pub events: Vec<(VaultId, Event)>,
+    /// Per-Transact-target event lists. Each entry is
+    /// `(target_vault_id, Vec<Event>)`. The kernel walks
+    /// `σ.transact_space_cnode` in slot order; for each `Transact` slot, it
+    /// consumes the matching entry here. Body well-formedness:
+    /// - VaultIds appear in the same relative order as the Transact slots
+    ///   in `σ.transact_space_cnode`.
+    /// - No entry's VaultId may correspond to a Schedule slot (those run
+    ///   kernel-fired with no body input).
+    /// - No trailing unmatched entries.
+    pub events: Vec<(VaultId, Vec<Event>)>,
     pub attestation_trace: Vec<AttestationEntry>,
     pub result_trace: Vec<ResultEntry>,
     pub reach_trace: Vec<ReachEntry>,

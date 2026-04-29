@@ -1,10 +1,9 @@
 //! Minimal genesis builder.
 //!
-//! Builds an σ with: a registered Transact entrypoint and a registered
-//! Dispatch entrypoint. Chain authors compose their event[0]/event[-1]
-//! "header" / "finalization" handlers as ordinary additional Transact
-//! entrypoints; this builder only provides the bare-minimum surface for
-//! kernel-mechanics tests.
+//! Builds an σ with: a `Schedule(block_init)` slot, a `Transact` slot, a
+//! `Schedule(block_final)` slot — all in σ.transact_space_cnode in slot
+//! order — plus a registered Dispatch entrypoint. This is the minimum
+//! shape for kernel-mechanics tests; real chains add many more slots.
 
 use jar_types::{CapId, Capability, Hash, KResult, State, VaultId};
 
@@ -13,7 +12,9 @@ use crate::cnode_ops;
 
 /// Build a minimal σ for testing.
 pub struct GenesisBuilder {
+    pub block_init_code_hash: Hash,
     pub transact_code_hash: Hash,
+    pub block_final_code_hash: Hash,
     pub dispatch_code_hash: Hash,
     pub default_quota_items: u64,
     pub default_quota_bytes: u64,
@@ -22,8 +23,10 @@ pub struct GenesisBuilder {
 impl Default for GenesisBuilder {
     fn default() -> Self {
         Self {
-            transact_code_hash: Hash([1u8; 32]),
-            dispatch_code_hash: Hash([2u8; 32]),
+            block_init_code_hash: Hash([0xA0; 32]),
+            transact_code_hash: Hash([0xA1; 32]),
+            block_final_code_hash: Hash([0xA2; 32]),
+            dispatch_code_hash: Hash([0xB0; 32]),
             default_quota_items: 1024,
             default_quota_bytes: 1 << 20,
         }
@@ -32,8 +35,12 @@ impl Default for GenesisBuilder {
 
 pub struct GenesisOutput {
     pub state: State,
+    pub block_init_vault: VaultId,
+    pub block_init_cap: CapId,
     pub transact_vault: VaultId,
     pub transact_entrypoint_cap: CapId,
+    pub block_final_vault: VaultId,
+    pub block_final_cap: CapId,
     pub dispatch_vault: VaultId,
     pub dispatch_entrypoint_cap: CapId,
 }
@@ -70,7 +77,20 @@ impl GenesisBuilder {
         state.transact_space_cnode = tcn_cap;
         state.dispatch_space_cnode = dcn_cap;
 
-        // Transact entrypoint Vault and its registered Transact cap, born_in transact_cnode.
+        // Slot 0: Schedule(block_init).
+        let bi_vault = self.alloc_vault(&mut state, self.block_init_code_hash);
+        let bi_cap = cnode_ops::mint_and_place(
+            &mut state,
+            Capability::Schedule {
+                vault_id: bi_vault,
+                born_in: transact_cnode,
+            },
+            Vec::new(),
+            transact_cnode,
+            0,
+        )?;
+
+        // Slot 1: Transact(...).
         let t_vault = self.alloc_vault(&mut state, self.transact_code_hash);
         let t_cap = cnode_ops::mint_and_place(
             &mut state,
@@ -80,7 +100,20 @@ impl GenesisBuilder {
             },
             Vec::new(),
             transact_cnode,
-            0,
+            1,
+        )?;
+
+        // Slot 2: Schedule(block_final).
+        let bf_vault = self.alloc_vault(&mut state, self.block_final_code_hash);
+        let bf_cap = cnode_ops::mint_and_place(
+            &mut state,
+            Capability::Schedule {
+                vault_id: bf_vault,
+                born_in: transact_cnode,
+            },
+            Vec::new(),
+            transact_cnode,
+            2,
         )?;
 
         // Dispatch entrypoint Vault and its registered Dispatch cap, born_in dispatch_cnode.
@@ -98,8 +131,12 @@ impl GenesisBuilder {
 
         Ok(GenesisOutput {
             state,
+            block_init_vault: bi_vault,
+            block_init_cap: bi_cap,
             transact_vault: t_vault,
             transact_entrypoint_cap: t_cap,
+            block_final_vault: bf_vault,
+            block_final_cap: bf_cap,
             dispatch_vault: d_vault,
             dispatch_entrypoint_cap: d_cap,
         })

@@ -1,13 +1,15 @@
-//! Pinning rules: the three constraints the kernel enforces on Dispatch /
-//! Transact / DispatchRef / TransactRef caps.
+//! Pinning rules: the constraints the kernel enforces on Dispatch /
+//! Transact / Schedule / DispatchRef / TransactRef caps.
 //!
-//! 1. Dispatch / Transact stay in `born_in` CNode. `cnode_grant`, `cnode_move`,
-//!    `cap_derive` all reject placement in any other persistent CNode.
+//! 1. Dispatch / Transact / Schedule stay in `born_in` CNode. `cnode_grant`,
+//!    `cnode_move`, `cap_derive` all reject placement in any other persistent
+//!    CNode.
 //! 2. DispatchRef / TransactRef are Frame-only. Any persistent placement is
-//!    rejected.
+//!    rejected. (No ScheduleRef — Schedule is never derivable to a callable
+//!    form.)
 //! 3. At a top-level invocation boundary (`cap_call` to a Dispatch /
 //!    DispatchRef / Transact / TransactRef target), arg caps must not be any
-//!    of those four pinned/ephemeral variants.
+//!    pinned-or-ref variant (the four above plus Schedule).
 
 use jar_types::{CNodeId, CapId, Capability, KResult, KernelError, State};
 
@@ -17,10 +19,12 @@ use crate::cap_registry;
 /// is the CNodeId being granted into; for moves use the destination cnode.
 pub fn check_grant_or_move(cap: &Capability, target_cnode: CNodeId) -> KResult<()> {
     match cap {
-        Capability::Dispatch { born_in, .. } | Capability::Transact { born_in, .. } => {
+        Capability::Dispatch { born_in, .. }
+        | Capability::Transact { born_in, .. }
+        | Capability::Schedule { born_in, .. } => {
             if *born_in != target_cnode {
                 Err(KernelError::Pinning(format!(
-                    "Dispatch/Transact cap pinned to {:?}; cannot place in {:?}",
+                    "Dispatch/Transact/Schedule cap pinned to {:?}; cannot place in {:?}",
                     born_in, target_cnode
                 )))
             } else {
@@ -93,6 +97,15 @@ pub fn check_derive(
             if dest_persistent {
                 return Err(KernelError::Pinning(
                     "TransactRef derivation must target a Frame".into(),
+                ));
+            }
+            Ok(())
+        }
+        // Schedule → Schedule: persistent dest only. No SchedRef variant.
+        (Capability::Schedule { .. }, Capability::Schedule { .. }) => {
+            if !dest_persistent {
+                return Err(KernelError::Pinning(
+                    "Schedule derivation must target a persistent CNode".into(),
                 ));
             }
             Ok(())

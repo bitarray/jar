@@ -455,6 +455,8 @@ fn host_cap_call<V: VmExec, H: Hardware>(
             });
             Ok((RC_OK, 0))
         }
+        // Schedule caps are kernel-fired only; never `cap_call`'d by userspace.
+        Capability::Schedule { .. } => Ok((RC_BAD_CAP, 0)),
         _ => Ok((RC_BAD_CAP, 0)),
     }
 }
