@@ -81,8 +81,9 @@ const MGMT_SPLIT: u32 = 0x4;
 const MGMT_DROP: u32 = 0x5;
 const MGMT_MOVE: u32 = 0x6;
 const MGMT_COPY: u32 = 0x7;
-const MGMT_GRANT: u32 = 0x8;
-const MGMT_REVOKE: u32 = 0x9;
+// 0x8 / 0x9 (legacy GRANT / REVOKE) deliberately unused — cross-cap-table
+// transfers happen via dynamic-ecall MOVE / COPY (`dispatch_ecall` 0x06 /
+// 0x07) with cap-ref indirection through HandleCaps.
 const MGMT_DOWNGRADE: u32 = 0xA;
 const MGMT_SET_MAX_GAS: u32 = 0xB;
 const MGMT_DIRTY: u32 = 0xC;
@@ -730,7 +731,11 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             {
                 match cap.try_copy() {
                     Some(copy) => {
-                        child_table.set(bit, copy);
+                        if source_vm.cap_table.is_original(bit) {
+                            child_table.set_original(bit, copy);
+                        } else {
+                            child_table.set(bit, copy);
+                        }
                     }
                     None => {
                         // Non-copyable cap in bitmask → CREATE fails
@@ -1073,11 +1078,6 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             MGMT_DROP => self.mgmt_drop(cap_idx),
             MGMT_MOVE => self.mgmt_move(cap_idx),
             MGMT_COPY => self.mgmt_copy(cap_idx),
-            MGMT_GRANT | MGMT_REVOKE => {
-                // Removed: use MOVE with indirection via ecall instead
-                self.set_active_reg(7, RESULT_WHAT);
-                DispatchResult::Continue
-            }
             MGMT_DOWNGRADE => self.mgmt_downgrade(cap_idx),
             MGMT_SET_MAX_GAS => self.mgmt_set_max_gas(cap_idx),
             MGMT_DIRTY => {
