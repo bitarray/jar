@@ -1150,7 +1150,7 @@ pub async fn format_metrics(state: &RpcState) -> String {
         base.push_str("# HELP grey_rpc_requests_by_method RPC requests per method.\n");
         base.push_str("# TYPE grey_rpc_requests_by_method counter\n");
         let mut sorted: Vec<_> = counts.iter().collect();
-        sorted.sort_by_key(|(k, _)| (*k).clone());
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
         for (method, count) in sorted {
             base.push_str(&format!(
                 "grey_rpc_requests_by_method{{method=\"{method}\"}} {count}\n"
@@ -1165,7 +1165,7 @@ pub async fn format_metrics(state: &RpcState) -> String {
         base.push_str("# HELP grey_rpc_request_seconds RPC request latency per method.\n");
         base.push_str("# TYPE grey_rpc_request_seconds histogram\n");
         let mut sorted: Vec<_> = latencies.iter().collect();
-        sorted.sort_by_key(|(k, _)| (*k).clone());
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
         for (method, hist) in sorted {
             let mut cumulative = 0u64;
             for (i, &bound) in LATENCY_BUCKETS.iter().enumerate() {

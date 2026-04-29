@@ -15,11 +15,11 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Format: compact_len(count) + count × E_4(timeslot).
 pub fn decode_preimage_info_timeslots(data: &[u8]) -> Vec<Timeslot> {
     if data.is_empty() {
-        return vec![];
+        return Vec::new();
     }
     let mut pos = 0;
     if pos + 4 > data.len() {
-        return vec![];
+        return Vec::new();
     }
     let count = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
     pos += 4;
@@ -257,7 +257,7 @@ fn resolve_queue(queue: &[ReadyRecord]) -> Vec<WorkReport> {
         .collect();
 
     if ready.is_empty() {
-        return vec![];
+        return Vec::new();
     }
 
     // Remove ready reports and edit remaining
@@ -307,7 +307,7 @@ fn compute_accumulatable_with_new(
 
 /// Accumulation context L (eq B.7-B.8).
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
+#[allow(dead_code)] // fields used by future accumulation host-call implementations
 struct AccContext {
     service_id: ServiceId,
     accounts: BTreeMap<ServiceId, AccServiceAccount>,
@@ -589,7 +589,6 @@ fn encode_new_service_hash(service_id: ServiceId, entropy: &Hash, timeslot: Time
 }
 
 /// Data available to the fetch host call during accumulation.
-#[allow(dead_code)]
 struct FetchContext {
     /// Protocol configuration blob (mode 0).
     config_blob: Vec<u8>,

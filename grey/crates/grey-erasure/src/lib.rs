@@ -136,7 +136,7 @@ pub fn recover(
     }
 
     if chunks.is_empty() {
-        return Ok(vec![]);
+        return Ok(Vec::new());
     }
 
     let shard_bytes = chunks[0].0.len();

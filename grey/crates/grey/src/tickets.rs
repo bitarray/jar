@@ -61,7 +61,7 @@ impl TicketState {
         validator_index: u16,
     ) -> Vec<TicketProof> {
         if self.generated_this_epoch {
-            return vec![];
+            return Vec::new();
         }
 
         let timeslot = state.timeslot;
@@ -70,7 +70,7 @@ impl TicketState {
         // Only generate tickets in the submission window (first Y slots of epoch)
         let y = config.ticket_submission_end();
         if slot_in_epoch >= y {
-            return vec![];
+            return Vec::new();
         }
 
         self.generated_this_epoch = true;

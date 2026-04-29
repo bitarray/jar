@@ -2487,7 +2487,7 @@ pub fn compute_basic_block_starts(code: &[u8], bitmask: &[u8]) -> Vec<bool> {
 pub fn compute_gas_block_starts(code: &[u8], bitmask: &[u8]) -> Vec<bool> {
     let len = code.len();
     if len == 0 {
-        return vec![];
+        return Vec::new();
     }
 
     let mut starts = vec![false; len];

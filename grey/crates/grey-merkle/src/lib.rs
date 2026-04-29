@@ -95,7 +95,7 @@ pub fn constant_depth_merkle_root(leaves: &[&[u8]], hash_fn: fn(&[u8]) -> Hash) 
 /// Hashes each leaf with "leaf" prefix, pads to next power of 2 with H_0.
 fn constancy_preprocess(leaves: &[&[u8]], hash_fn: fn(&[u8]) -> Hash) -> Vec<Hash> {
     if leaves.is_empty() {
-        return vec![];
+        return Vec::new();
     }
     // Next power of 2
     let n = leaves.len().next_power_of_two();
