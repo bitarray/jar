@@ -47,7 +47,7 @@ pub fn load_json(path: &str) -> serde_json::Value {
 
 /// Decode a 0x-prefixed hex string to bytes. Panics on invalid input.
 pub fn decode_hex(s: &str) -> Vec<u8> {
-    hex::decode(s.strip_prefix("0x").unwrap_or(s)).expect("bad hex")
+    grey_types::decode_hex(s).expect("bad hex")
 }
 
 /// Parse a Hash from a hex string.

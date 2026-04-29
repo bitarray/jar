@@ -314,7 +314,7 @@ mod tests {
     use super::*;
 
     fn hex_to_bytes(s: &str) -> Vec<u8> {
-        hex::decode(s.strip_prefix("0x").unwrap_or(s)).unwrap()
+        grey_types::decode_hex(s).expect("bad hex")
     }
 
     #[test]
