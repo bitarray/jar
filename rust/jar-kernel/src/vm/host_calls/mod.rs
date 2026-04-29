@@ -8,11 +8,10 @@
 //! kernel errors.
 //!
 //! This module is the dispatcher; the per-concern handlers live in
-//! sibling files (`storage`, `cnode`, `cap`, `attest`, `slot`).
+//! sibling files (`storage`, `cap`, `attest`, `slot`).
 
 pub mod attest;
 pub mod cap;
-pub mod cnode;
 pub mod slot;
 pub mod storage;
 
@@ -49,9 +48,6 @@ pub fn dispatch_host_call<H: Hardware>(
         HostCall::StorageRead => storage::host_storage_read(vm, ctx),
         HostCall::StorageWrite => storage::host_storage_write(vm, ctx),
         HostCall::StorageDelete => storage::host_storage_delete(vm, ctx),
-        HostCall::CnodeGrant => cnode::host_cnode_grant(vm, ctx),
-        HostCall::CnodeRevoke => cnode::host_cnode_revoke(vm, ctx),
-        HostCall::CnodeMove => cnode::host_cnode_move(vm, ctx),
         HostCall::CapDerive => cap::host_cap_derive(vm, ctx),
         HostCall::VaultInitialize => cap::host_vault_initialize(vm, ctx),
         HostCall::CreateVault => cap::host_create_vault(vm, ctx),
