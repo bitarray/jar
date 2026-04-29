@@ -183,6 +183,14 @@ pub fn process_reports(
         .map(|g| g.report.package_spec.package_hash)
         .collect();
 
+    // Precompute all package hashes reported in recent blocks so the per-guarantee
+    // duplicate check below is O(log n) instead of O(B × R) per guarantee.
+    let recent_package_hashes: BTreeSet<Hash> = state
+        .recent_blocks
+        .iter()
+        .flat_map(|b| b.reported.iter().map(|(h, _)| *h))
+        .collect();
+
     // Compute the per-validator core assignment for M and M*
     let assignment_m =
         compute_core_assignments(config, &state.entropy[2], current_slot, num_validators);
@@ -224,12 +232,8 @@ pub fn process_reports(
         }
 
         // Package must not be in recent blocks
-        for block in &state.recent_blocks {
-            for (reported_hash, _) in &block.reported {
-                if *reported_hash == pkg_hash {
-                    return Err(ReportError::DuplicatePackage);
-                }
-            }
+        if recent_package_hashes.contains(&pkg_hash) {
+            return Err(ReportError::DuplicatePackage);
         }
 
         // Report must have at least one result
