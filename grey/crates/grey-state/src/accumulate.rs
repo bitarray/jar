@@ -1961,3 +1961,290 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::test_helpers::make_hash;
+    use grey_types::work::AvailabilitySpec;
+    use proptest::prelude::*;
+
+    /// Generate a WorkReport with a specific package hash byte and optional prerequisites.
+    fn make_report_with_deps(pkg_byte: u8, prereq_bytes: Vec<u8>) -> WorkReport {
+        WorkReport {
+            package_spec: AvailabilitySpec {
+                package_hash: make_hash(pkg_byte),
+                ..Default::default()
+            },
+            context: grey_types::work::WorkPackageContext {
+                prerequisites: prereq_bytes.iter().map(|&b| make_hash(b)).collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Generate a list of distinct package hash bytes.
+    fn arb_distinct_bytes(max: usize) -> impl Strategy<Value = Vec<u8>> {
+        proptest::collection::vec(any::<u8>(), 1..=max)
+            .prop_map(|mut v| {
+                v.sort();
+                v.dedup();
+                v
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        // --- decode_preimage_info_timeslots ---
+
+        /// Encoding valid timeslots then decoding returns the same values.
+        #[test]
+        fn preimage_info_timeslots_roundtrip(
+            slots in proptest::collection::vec(any::<u32>(), 0..20)
+        ) {
+            let mut data = Vec::new();
+            data.extend_from_slice(&(slots.len() as u32).to_le_bytes());
+            for &s in &slots {
+                data.extend_from_slice(&s.to_le_bytes());
+            }
+            let decoded = decode_preimage_info_timeslots(&data);
+            prop_assert_eq!(decoded, slots);
+        }
+
+        /// Arbitrary bytes never panic decode_preimage_info_timeslots.
+        #[test]
+        fn preimage_info_decode_no_panic(
+            data in proptest::collection::vec(any::<u8>(), 0..64)
+        ) {
+            let _ = decode_preimage_info_timeslots(&data);
+        }
+
+        // --- compute_dependencies ---
+
+        /// Dependencies are deduplicated (no hash appears twice).
+        #[test]
+        fn dependencies_no_duplicates(
+            prereqs in proptest::collection::vec(any::<u8>(), 0..10)
+        ) {
+            let report = make_report_with_deps(1, prereqs);
+            let deps = compute_dependencies(&report);
+            let dep_set: BTreeSet<Hash> = deps.iter().copied().collect();
+            prop_assert_eq!(deps.len(), dep_set.len(), "duplicates in deps");
+        }
+
+        /// All prerequisites appear in the dependency set.
+        #[test]
+        fn dependencies_include_all_prereqs(
+            prereqs in proptest::collection::vec(any::<u8>(), 0..10)
+        ) {
+            let report = make_report_with_deps(1, prereqs.clone());
+            let deps = compute_dependencies(&report);
+            for &b in &prereqs {
+                prop_assert!(deps.contains(&make_hash(b)),
+                    "prerequisite {} missing from deps", b);
+            }
+        }
+
+        // --- partition_reports ---
+
+        /// All reports are accounted for: |immediate| + |queued| == |reports|.
+        #[test]
+        fn partition_reports_total_count(
+            pkg_bytes in arb_distinct_bytes(10)
+        ) {
+            let reports: Vec<WorkReport> = pkg_bytes.iter().map(|&b| make_report_with_deps(b, vec![])).collect();
+            let (immediate, queued) = partition_reports(&reports);
+            prop_assert_eq!(immediate.len() + queued.len(), reports.len());
+        }
+
+        /// Reports with no prerequisites and no segment imports are immediate.
+        #[test]
+        fn partition_no_deps_means_immediate(
+            pkg_bytes in arb_distinct_bytes(5)
+        ) {
+            let reports: Vec<WorkReport> = pkg_bytes.iter().map(|&b| make_report_with_deps(b, vec![])).collect();
+            let (immediate, queued) = partition_reports(&reports);
+            prop_assert_eq!(immediate.len(), reports.len());
+            prop_assert!(queued.is_empty());
+        }
+
+        /// Reports with prerequisites are queued.
+        #[test]
+        fn partition_with_deps_means_queued(
+            pkg_byte in any::<u8>(),
+            dep_byte in any::<u8>()
+        ) {
+            prop_assume!(pkg_byte != dep_byte); // avoid self-dependency in test
+            let report = make_report_with_deps(pkg_byte, vec![dep_byte]);
+            let (immediate, queued) = partition_reports(&[report]);
+            prop_assert!(immediate.is_empty());
+            prop_assert_eq!(queued.len(), 1);
+        }
+
+        // --- edit_queue ---
+
+        /// After editing, no remaining entry has a package hash in the accumulated set.
+        #[test]
+        fn edit_queue_no_accumulated_remaining(
+            pkg_bytes in arb_distinct_bytes(5),
+            accumulated_bytes in proptest::collection::vec(any::<u8>(), 0..5)
+        ) {
+            let records: Vec<ReadyRecord> = pkg_bytes.iter().map(|&b| ReadyRecord {
+                report: make_report_with_deps(b, vec![]),
+                dependencies: vec![],
+            }).collect();
+            let accumulated: BTreeSet<Hash> = accumulated_bytes.iter().map(|&b| make_hash(b)).collect();
+            let edited = edit_queue(&records, &accumulated);
+            for rr in &edited {
+                prop_assert!(!accumulated.contains(&rr.report.package_spec.package_hash),
+                    "accumulated entry survived edit");
+            }
+        }
+
+        /// After editing, no remaining dependency is in the accumulated set.
+        #[test]
+        fn edit_queue_no_accumulated_deps(
+            prereqs in proptest::collection::vec(any::<u8>(), 1..5),
+            accumulated_bytes in proptest::collection::vec(any::<u8>(), 0..5)
+        ) {
+            let rr = ReadyRecord {
+                report: make_report_with_deps(200, prereqs.clone()),
+                dependencies: prereqs.iter().map(|&b| make_hash(b)).collect(),
+            };
+            let accumulated: BTreeSet<Hash> = accumulated_bytes.iter().map(|&b| make_hash(b)).collect();
+            let edited = edit_queue(&[rr], &accumulated);
+            for rr in &edited {
+                for dep in &rr.dependencies {
+                    prop_assert!(!accumulated.contains(dep),
+                        "accumulated dep survived edit");
+                }
+            }
+        }
+
+        // --- resolve_queue ---
+
+        /// Resolving an empty queue yields nothing.
+        #[test]
+        fn resolve_queue_empty() {
+            assert!(resolve_queue(&[]).is_empty());
+        }
+
+        /// All resolved reports have empty dependency sets.
+        #[test]
+        fn resolve_queue_all_zero_deps(
+            pkg_bytes in arb_distinct_bytes(5)
+        ) {
+            let records: Vec<ReadyRecord> = pkg_bytes.iter().map(|&b| ReadyRecord {
+                report: make_report_with_deps(b, vec![]),
+                dependencies: vec![],
+            }).collect();
+            let resolved = resolve_queue(&records);
+            for r in &resolved {
+                // All resolved reports came from records with no deps
+                prop_assert!(records.iter().any(|rr| rr.report.package_spec.package_hash == r.package_spec.package_hash));
+            }
+        }
+
+        // --- find_free_service_id ---
+
+        /// find_free_service_id returns a value not in the accounts map.
+        #[test]
+        fn find_free_id_not_in_accounts(
+            existing_ids in proptest::collection::vec(65536u32..u32::MAX, 0..20),
+            candidate in any::<u32>()
+        ) {
+            let accounts: BTreeMap<ServiceId, AccServiceAccount> = existing_ids
+                .iter()
+                .map(|&id| (id, AccServiceAccount {
+                    version: 0,
+                    code_hash: Hash::ZERO,
+                    quota_items: 0,
+                    min_item_gas: 0,
+                    min_memo_gas: 0,
+                    bytes: 0,
+                    quota_bytes: 0,
+                    items: 0,
+                    creation_slot: 0,
+                    last_accumulation_slot: 0,
+                    parent_service: 0,
+                    storage: BTreeMap::new(),
+                    preimage_lookup: BTreeMap::new(),
+                    preimage_info: BTreeMap::new(),
+                    opaque_data: BTreeMap::new(),
+                }))
+                .collect();
+            let s_threshold = 65536u32;
+            let found = find_free_service_id(candidate, &accounts, s_threshold);
+            prop_assert!(!accounts.contains_key(&found),
+                "found id {} is already in accounts", found);
+            prop_assert!(found >= s_threshold,
+                "found id {} below threshold {}", found, s_threshold);
+        }
+
+        // --- encode_accumulate_args ---
+
+        /// Encoding arguments produces exactly 12 bytes (3 × u32).
+        #[test]
+        fn encode_args_length(
+            slot in any::<u32>(),
+            sid in any::<u32>(),
+            count in any::<u32>()
+        ) {
+            let encoded = encode_accumulate_args(slot, sid, count);
+            prop_assert_eq!(encoded.len(), 12);
+        }
+
+        /// encode_accumulate_args is deterministic.
+        #[test]
+        fn encode_args_deterministic(
+            slot in any::<u32>(),
+            sid in any::<u32>(),
+            count in any::<u32>()
+        ) {
+            let a = encode_accumulate_args(slot, sid, count);
+            let b = encode_accumulate_args(slot, sid, count);
+            prop_assert_eq!(a, b);
+        }
+
+        // --- compute_output_hash ---
+
+        /// compute_output_hash is deterministic.
+        #[test]
+        fn output_hash_deterministic(
+            entries in proptest::collection::vec((any::<u32>(), any::<[u8; 32]>()), 0..10)
+        ) {
+            let outputs: Vec<(ServiceId, Hash)> = entries.iter()
+                .map(|&(sid, h)| (sid, Hash(h)))
+                .collect();
+            prop_assert_eq!(compute_output_hash(&outputs), compute_output_hash(&outputs));
+        }
+
+        /// compute_output_hash is order-independent (sorted internally).
+        #[test]
+        fn output_hash_order_independent(
+            entries in proptest::collection::vec((any::<u32>(), any::<[u8; 32]>()), 1..10)
+        ) {
+            let mut reversed = entries.clone();
+            reversed.reverse();
+            let out1: Vec<(ServiceId, Hash)> = entries.iter().map(|&(s, h)| (s, Hash(h))).collect();
+            let out2: Vec<(ServiceId, Hash)> = reversed.iter().map(|&(s, h)| (s, Hash(h))).collect();
+            prop_assert_eq!(compute_output_hash(&out1), compute_output_hash(&out2));
+        }
+
+        /// compute_output_hash changes when any entry changes.
+        #[test]
+        fn output_hash_sensitive(
+            entries in proptest::collection::vec((any::<u32>(), any::<[u8; 32]>()), 1..5),
+            flip_byte in any::<u8>()
+        ) {
+            let flip_byte = if flip_byte == 0 { 1 } else { flip_byte };
+            let out1: Vec<(ServiceId, Hash)> = entries.iter().map(|&(s, h)| (s, Hash(h))).collect();
+            let mut modified = entries.clone();
+            modified[0].1[0] ^= flip_byte;
+            let out2: Vec<(ServiceId, Hash)> = modified.iter().map(|&(s, h)| (s, Hash(h))).collect();
+            prop_assert_ne!(compute_output_hash(&out1), compute_output_hash(&out2));
+        }
+    }
+}
