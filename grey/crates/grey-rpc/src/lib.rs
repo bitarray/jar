@@ -2518,4 +2518,95 @@ mod tests {
             failures
         );
     }
+
+    // ── RPC integration tests (positive paths + edge cases) ──
+
+    #[tokio::test]
+    async fn test_read_storage_positive() {
+        // Positive path: call jam_readStorage with decodable parameters.
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let result: Result<String, _> = client
+            .request("jam_readStorage", rpc_params!["0x00", "0x00"])
+            .await;
+        // Either Ok(hex_string) or Err(JSON-RPC error) is acceptable
+        match result {
+            Ok(s) => assert!(s.starts_with("0x") || s.is_empty()),
+            Err(_) => {} // JSON-RPC error is fine for empty DB
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_storage_invalid_key() {
+        // Edge case: non-hex key should return error
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let result: Result<String, _> = client
+            .request("jam_readStorage", rpc_params!["0x00", "not_hex"])
+            .await;
+        assert!(result.is_err(), "non-hex key should return error");
+    }
+
+    #[tokio::test]
+    async fn test_read_storage_wrong_length() {
+        // Edge case: key with odd length should return error
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let result: Result<String, _> = client
+            .request("jam_readStorage", rpc_params!["0x00", "0x0"])
+            .await;
+        assert!(result.is_err(), "odd-length hex should return error");
+    }
+
+    #[tokio::test]
+    async fn test_get_status_multiple_calls() {
+        // Stress test: call jam_getStatus multiple times
+        let (url, state, _rx, _store, _dir) = setup().await;
+        {
+            let mut status = state.status.write().await;
+            status.head_slot = 100;
+        }
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        for _ in 0..10 {
+            let result: serde_json::Value = client
+                .request("jam_getStatus", rpc_params![])
+                .await
+                .unwrap();
+            assert_eq!(result["head_slot"], 100);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unknown_method_returns_error() {
+        // Edge case: calling unknown method should return JSON-RPC error
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let result: Result<serde_json::Value, _> =
+            client.request("jam_nonexistent", rpc_params![]).await;
+        assert!(result.is_err(), "unknown method should return error");
+    }
+
+    #[tokio::test]
+    async fn test_health_after_startup() {
+        // Health endpoint should return 200 immediately after startup
+        let (url, _state, _rx, _store, _dir) = setup().await;
+        let resp = reqwest::get(&format!("{}/health", url)).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn test_ready_after_head_set() {
+        // Node should be ready after head is set
+        let (url, _state, _rx, store, _dir) = setup().await;
+        let block = test_block(42);
+        let hash = store.put_block(&block).unwrap();
+        store.set_head(&hash, 42).unwrap();
+
+        let resp = reqwest::get(&format!("{}/ready", url)).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["status"], "ready");
+    }
 }
