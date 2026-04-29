@@ -14,6 +14,8 @@ grey-types = { path = "../crates/grey-types" }
 grey-erasure = { path = "../crates/grey-erasure" }
 javm = { path = "../crates/javm" }
 grey-transpiler = { path = "../crates/grey-transpiler" }
+grey-merkle = { path = "../crates/grey-merkle" }
+grey-crypto = { path = "../crates/grey-crypto" }
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -47,4 +49,9 @@ doc = false
 [[bin]]
 name = "fuzz_pvm_differential"
 path = "fuzz_targets/fuzz_pvm_differential.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_merkle_trie"
+path = "fuzz_targets/fuzz_merkle_trie.rs"
 doc = false
