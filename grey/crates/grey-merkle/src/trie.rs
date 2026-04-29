@@ -343,15 +343,11 @@ mod proptests {
 
     /// Generate a set of up to `max` unique key-value pairs.
     fn arb_kvs(max: usize) -> impl Strategy<Value = Vec<([u8; 32], Vec<u8>)>> {
-        proptest::collection::vec((arb_key(), arb_value()), 1..=max)
-            .prop_map(|pairs| {
-                // Deduplicate by key (keep first occurrence)
-                let mut seen = std::collections::HashSet::new();
-                pairs
-                    .into_iter()
-                    .filter(|(k, _)| seen.insert(*k))
-                    .collect()
-            })
+        proptest::collection::vec((arb_key(), arb_value()), 1..=max).prop_map(|pairs| {
+            // Deduplicate by key (keep first occurrence)
+            let mut seen = std::collections::HashSet::new();
+            pairs.into_iter().filter(|(k, _)| seen.insert(*k)).collect()
+        })
     }
 
     proptest! {
