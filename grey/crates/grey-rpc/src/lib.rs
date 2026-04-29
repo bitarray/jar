@@ -1394,6 +1394,28 @@ mod tests {
         (url, state, rx, store, dir)
     }
 
+    /// Create a temp store, RPC state, and start an ephemeral server with a
+    /// custom per-IP rate limit.
+    async fn setup_with_rate_limit(
+        rate_limit: u64,
+    ) -> (
+        String,
+        Arc<RpcState>,
+        mpsc::Receiver<RpcCommand>,
+        Arc<Store>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("test.redb")).unwrap());
+        let config = Config::tiny();
+        let (state, rx) = create_rpc_channel(store.clone(), config, 0);
+        let (addr, _handle) = start_rpc_server("127.0.0.1", 0, state.clone(), false, rate_limit)
+            .await
+            .unwrap();
+        let url = format!("http://{}", addr);
+        (url, state, rx, store, dir)
+    }
+
     fn test_block(slot: u32) -> Block {
         Block {
             header: Header {
@@ -2353,6 +2375,101 @@ mod tests {
             result.is_err(),
             "getValidators with invalid set name should return error"
         );
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_returns_429_and_retry_after_header() {
+        let (url, _state, _rx, _store, _dir) = setup_with_rate_limit(2).await;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        for _ in 0..2 {
+            let resp = client
+                .post(&url)
+                .header("content-type", "application/json")
+                .header("x-forwarded-for", "198.51.100.10")
+                .body(r#"{"jsonrpc":"2.0","id":1,"method":"jam_getStatus","params":[]}"#)
+                .send()
+                .await
+                .unwrap();
+            assert_ne!(resp.status().as_u16(), 429);
+        }
+
+        let resp = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("x-forwarded-for", "198.51.100.10")
+            .body(r#"{"jsonrpc":"2.0","id":3,"method":"jam_getStatus","params":[]}"#)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 429);
+        assert_eq!(
+            resp.headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            Some("60")
+        );
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "rate limit exceeded");
+        assert_eq!(body["retry_after_seconds"], 60);
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_isolated_by_forwarded_ip() {
+        let (url, _state, _rx, _store, _dir) = setup_with_rate_limit(1).await;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+
+        let first_ip = "198.51.100.20";
+        let second_ip = "198.51.100.21";
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"jam_getStatus","params":[]}"#;
+
+        let resp_a1 = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("x-forwarded-for", first_ip)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(resp_a1.status().as_u16(), 429);
+
+        let resp_b1 = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("x-forwarded-for", second_ip)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(resp_b1.status().as_u16(), 429);
+
+        let resp_a2 = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("x-forwarded-for", first_ip)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp_a2.status().as_u16(), 429);
+
+        let resp_b2 = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("x-forwarded-for", second_ip)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp_b2.status().as_u16(), 429);
     }
 
     #[tokio::test]
