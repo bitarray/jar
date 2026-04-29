@@ -98,3 +98,87 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Blake2b-256 is deterministic.
+        #[test]
+        fn blake2b_deterministic(data in proptest::collection::vec(any::<u8>(), 0..128)) {
+            prop_assert_eq!(blake2b_256(&data), blake2b_256(&data));
+        }
+
+        /// Blake2b-256 output is always 32 bytes (encoded in Hash).
+        #[test]
+        fn blake2b_output_size(data in proptest::collection::vec(any::<u8>(), 0..64)) {
+            let hash = blake2b_256(&data);
+            prop_assert_eq!(hash.0.len(), 32);
+        }
+
+        /// Different inputs produce different hashes (collision resistance sanity check).
+        #[test]
+        fn blake2b_different_inputs(
+            a in proptest::collection::vec(any::<u8>(), 1..64),
+            b in proptest::collection::vec(any::<u8>(), 1..64)
+        ) {
+            prop_assume!(a != b);
+            prop_assert_ne!(blake2b_256(&a), blake2b_256(&b));
+        }
+
+        /// Flipping any bit changes the hash (avalanche property).
+        #[test]
+        fn blake2b_avalanche(
+            data in proptest::collection::vec(any::<u8>(), 1..64),
+            flip_idx in 0usize..64,
+            flip_bit in 0u8..8
+        ) {
+            let flip_idx = flip_idx % data.len();
+            let mut modified = data.clone();
+            modified[flip_idx] ^= 1 << flip_bit;
+            prop_assert_ne!(blake2b_256(&data), blake2b_256(&modified));
+        }
+
+        /// Concatenation matters: H(a || b) != H(b || a) for non-trivial inputs.
+        #[test]
+        fn blake2b_concatenation_order(
+            a in proptest::collection::vec(any::<u8>(), 1..32),
+            b in proptest::collection::vec(any::<u8>(), 1..32)
+        ) {
+            prop_assume!(a != b);
+            let mut ab = a.clone();
+            ab.extend(&b);
+            let mut ba = b.clone();
+            ba.extend(&a);
+            prop_assert_ne!(blake2b_256(&ab), blake2b_256(&ba));
+        }
+
+        /// accumulate_entropy is deterministic.
+        #[test]
+        fn accumulate_entropy_deterministic(
+            current in any::<[u8; 32]>(),
+            entropy in any::<[u8; 32]>()
+        ) {
+            let h1 = accumulate_entropy(&Hash(current), &Hash(entropy));
+            let h2 = accumulate_entropy(&Hash(current), &Hash(entropy));
+            prop_assert_eq!(h1, h2);
+        }
+
+        /// accumulate_entropy is sensitive to both inputs.
+        #[test]
+        fn accumulate_entropy_sensitive(
+            current in any::<[u8; 32]>(),
+            entropy in any::<[u8; 32]>(),
+            flip in any::<u8>()
+        ) {
+            let flip = if flip == 0 { 1 } else { flip };
+            let h1 = accumulate_entropy(&Hash(current), &Hash(entropy));
+            let mut modified = entropy;
+            modified[0] ^= flip;
+            let h2 = accumulate_entropy(&Hash(current), &Hash(modified));
+            prop_assert_ne!(h1, h2);
+        }
+    }
+}
