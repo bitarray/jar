@@ -27,10 +27,19 @@ jobs:
         #     libp2p-tls -> rcgen -> ring. No upgrade path until libp2p
         #     updates to ring 0.17+.
         #   RUSTSEC-2025-0010: ring 0.16.x unmaintained — same root cause.
+        #   RUSTSEC-2026-0097: rand unsound with custom logger — transitive dep
+        #     via libp2p, jsonrpsee, ark. No fix available in rand 0.8.x/0.9.x.
+        #   RUSTSEC-2026-0105: core2 unmaintained — transitive dep via
+        #     libp2p -> multihash. No upgrade path until libp2p migrates.
+        #   RUSTSEC-2024-0436: paste unmaintained — transitive dep via
+        #     ark-ff and netlink. No upgrade path until upstream moves on.
         run: >
           cargo audit
           --ignore RUSTSEC-2025-0009
           --ignore RUSTSEC-2025-0010
+          --ignore RUSTSEC-2026-0097
+          --ignore RUSTSEC-2026-0105
+          --ignore RUSTSEC-2024-0436
 
   sbom:
     name: SBOM

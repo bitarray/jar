@@ -14,8 +14,8 @@ polkavm-generic-sandbox = ["polkavm/generic-sandbox"]
 # when running benchmarks.
 javm = { workspace = true }
 grey-transpiler = { workspace = true }
-polkavm = "0.32.0"
-polkavm-common = "0.32.0"
+polkavm = "0.33"
+polkavm-common = "0.33"
 
 [build-dependencies]
 build-javm = { path = "../build-javm" }
