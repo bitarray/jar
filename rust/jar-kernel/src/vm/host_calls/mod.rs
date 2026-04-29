@@ -8,10 +8,9 @@
 //! kernel errors.
 //!
 //! This module is the dispatcher; the per-concern handlers live in
-//! sibling files (`storage`, `cap`, `attest`, `slot`).
+//! sibling files (`storage`, `attest`, `slot`).
 
 pub mod attest;
-pub mod cap;
 pub mod slot;
 pub mod storage;
 
@@ -48,16 +47,10 @@ pub fn dispatch_host_call<H: Hardware>(
         HostCall::StorageRead => storage::host_storage_read(vm, ctx),
         HostCall::StorageWrite => storage::host_storage_write(vm, ctx),
         HostCall::StorageDelete => storage::host_storage_delete(vm, ctx),
-        HostCall::CapDerive => cap::host_cap_derive(vm, ctx),
-        HostCall::VaultInitialize => cap::host_vault_initialize(vm, ctx),
-        HostCall::CreateVault => cap::host_create_vault(vm, ctx),
-        HostCall::QuotaSet => cap::host_quota_set(vm, ctx),
         HostCall::Attest => attest::host_attest(vm, ctx),
         HostCall::AttestationKey => attest::host_attestation_key(vm, ctx),
-        HostCall::AttestationAggregate => Ok(HostCallOutcome::Resume(0, 0)),
         HostCall::ResultEqual => attest::host_result_equal(vm, ctx),
         HostCall::SlotClear => slot::host_slot_clear(vm, ctx),
-        HostCall::SlotEmit => Ok(HostCallOutcome::Resume(RC_UNIMPLEMENTED, 0)),
         HostCall::SlotRead => slot::host_slot_read(vm, ctx),
     }
 }

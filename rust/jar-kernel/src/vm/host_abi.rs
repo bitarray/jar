@@ -35,20 +35,25 @@ pub const RC_PINNING: u64 = u64::MAX - 4;
 /// Cap not found / slot empty.
 pub const RC_BAD_CAP: u64 = u64::MAX - 5;
 
-/// Host call is not yet implemented.
-pub const RC_UNIMPLEMENTED: u64 = u64::MAX - 6;
-
 /// The protocol slot numbers we assign to each kernel host call. javm reserves
-/// slots 1..=28 as ProtocolCaps; we use a subset, with reserved gaps at
-/// slots 7, 8, 9, and 11 — see below.
+/// slots 1..=28 as ProtocolCaps; we use a subset, with reserved gaps where
+/// host calls have retired — see below.
 ///
 /// Reserved gaps:
 /// - Slot 7 / 8 / 9 — formerly `CnodeGrant` / `CnodeRevoke` / `CnodeMove`,
 ///   retired in favour of javm management ecallis (`MGMT_DROP`, dynamic-ecall
 ///   `MOVE` / `COPY`) operating through cap-indirection on the unified
 ///   cap-table.
+/// - Slot 10 — formerly `CapDerive`, retired (replacement direction: javm
+///   `MGMT_DOWNGRADE`).
 /// - Slot 11 — formerly `CapCall`, retired in favour of plain javm CALL on
 ///   a Handle / Callable cap-table slot.
+/// - Slot 12 / 13 / 14 — formerly `VaultInitialize` / `CreateVault` /
+///   `QuotaSet`, retired (these are kernel-internal operations triggered by
+///   `Command::*` post-execution, not guest-visible host calls).
+/// - Slot 17 — formerly `AttestationAggregate`, retired (was a no-op stub
+///   returning success; BLS aggregation isn't wired yet).
+/// - Slot 20 — formerly `SlotEmit`, retired (step-3 emit is unimplemented).
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum HostCall {
@@ -58,20 +63,10 @@ pub enum HostCall {
     StorageRead = 4,
     StorageWrite = 5,
     StorageDelete = 6,
-    // 7 — formerly CnodeGrant, retired (use javm dynamic-ecall COPY).
-    // 8 — formerly CnodeRevoke, retired (use javm MGMT_DROP).
-    // 9 — formerly CnodeMove, retired (use javm dynamic-ecall MOVE).
-    CapDerive = 10,
-    // 11 — formerly CapCall, retired (use javm CALL instead).
-    VaultInitialize = 12,
-    CreateVault = 13,
-    QuotaSet = 14,
     Attest = 15,
     AttestationKey = 16,
-    AttestationAggregate = 17,
     ResultEqual = 18,
     SlotClear = 19,
-    SlotEmit = 20, // synthesized by step-3 dispatch when target is self-DispatchRef
     /// Read the prior-slot SCALE bytes into a guest memory window. Only valid
     /// during dispatch step-3 (`AggregateMerge`).
     SlotRead = 21,
@@ -86,16 +81,10 @@ impl HostCall {
             4 => Ok(HostCall::StorageRead),
             5 => Ok(HostCall::StorageWrite),
             6 => Ok(HostCall::StorageDelete),
-            10 => Ok(HostCall::CapDerive),
-            12 => Ok(HostCall::VaultInitialize),
-            13 => Ok(HostCall::CreateVault),
-            14 => Ok(HostCall::QuotaSet),
             15 => Ok(HostCall::Attest),
             16 => Ok(HostCall::AttestationKey),
-            17 => Ok(HostCall::AttestationAggregate),
             18 => Ok(HostCall::ResultEqual),
             19 => Ok(HostCall::SlotClear),
-            20 => Ok(HostCall::SlotEmit),
             21 => Ok(HostCall::SlotRead),
             _ => Err(KernelError::Internal(format!(
                 "unknown protocol slot {}",

@@ -174,12 +174,11 @@ pub fn run_one_invocation<H: Hardware>(
 /// to the host loop.
 pub(crate) fn populate_host_call_slots(vm: &mut Vm) {
     use crate::vm::host_abi::HostCall;
-    // The current host-call range — see `host_abi::HostCall`. Slot 1
-    // through SlotRead (21), with reserved gaps at 7/8/9 (formerly
-    // CnodeGrant/Revoke/Move, now javm MGMT_DROP and dynamic-ecall
-    // MOVE/COPY) and 11 (formerly CapCall, now plain javm CALL).
+    // Walk the full 1..=21 range and populate live host-call slots only.
+    // Retired slots (7/8/9/10/11/12/13/14/17/20) stay empty — see the
+    // `Reserved gaps` comment in `host_abi::HostCall`.
     for id in (HostCall::Gas as u8)..=(HostCall::SlotRead as u8) {
-        if matches!(id, 7 | 8 | 9 | 11) {
+        if HostCall::from_slot(id).is_err() {
             continue;
         }
         vm.cap_table_set_original(id, javm::cap::Cap::Protocol(KernelCap::HostCall(id)));
