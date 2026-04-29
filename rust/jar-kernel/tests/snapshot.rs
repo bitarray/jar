@@ -2,13 +2,12 @@
 
 use std::sync::Arc;
 
-use jar_crypto::Ed25519Blake;
 use jar_kernel::snapshot::StateSnapshot;
 use jar_types::{Hash, State, Vault, VaultId};
 
-fn state_with_one_vault() -> (State<Ed25519Blake>, VaultId) {
-    let mut s = State::<Ed25519Blake>::empty();
-    let mut v = Vault::<Ed25519Blake>::new(Hash::ZERO);
+fn state_with_one_vault() -> (State, VaultId) {
+    let mut s = State::empty();
+    let mut v = Vault::new(Hash::ZERO);
     v.quota_items = 16;
     v.quota_bytes = 4096;
     let id = s.next_vault_id();

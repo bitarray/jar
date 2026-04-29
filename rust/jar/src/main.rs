@@ -11,16 +11,10 @@
 //! ```
 
 use clap::{Parser, Subcommand};
-use jar_kernel::BlockOutcome;
-use jar_kernel::Kernel;
 use jar_kernel::genesis::GenesisBuilder;
 use jar_kernel::runtime::{InMemoryBus, InMemoryHardware, NodeOffchain};
+use jar_kernel::{BlockOutcome, Hardware, Kernel};
 use jar_types::{Block, BlockHash, Hash, State};
-
-/// Crypto suite + Hardware impl for the in-process testnet. Every parametric
-/// type (`State`, `NodeOffchain`, `BlockHash`, …) is instantiated against
-/// this.
-type Hw = InMemoryHardware;
 
 #[derive(Parser, Debug)]
 #[command(name = "jar")]
@@ -56,7 +50,7 @@ fn main() {
 }
 
 fn run_testnet(num_nodes: u32, num_slots: u32) {
-    let g = GenesisBuilder::<Hw>::default().build().expect("genesis ok");
+    let g = GenesisBuilder::default().build().expect("genesis ok");
 
     let bus = InMemoryBus::new();
     let mut nodes: Vec<NodeState> = Vec::new();
@@ -64,9 +58,9 @@ fn run_testnet(num_nodes: u32, num_slots: u32) {
         nodes.push(NodeState {
             id: i,
             state: g.state.clone(),
-            offchain: NodeOffchain::<Hw>::new(),
+            offchain: NodeOffchain::new(),
             kernel: Kernel::new(InMemoryHardware::new(bus.clone())),
-            prior_block: BlockHash::<Hw>::default(),
+            prior_block: BlockHash::ZERO,
         });
     }
 
@@ -74,11 +68,6 @@ fn run_testnet(num_nodes: u32, num_slots: u32) {
         let proposer_idx = (slot_n - 1) % num_nodes;
         let proposer = &mut nodes[proposer_idx as usize];
 
-        // Drain proposer's slots into a fresh body. In a real chain the
-        // proposer would prepend its event[0] (header gating) and append
-        // event[-1] (finalization gating); for this milestone we let the
-        // body be whatever the slot drain produced (zero events, in
-        // practice — guests don't yet emit AggregatedTransacts).
         let body = proposer
             .kernel
             .drain_for_body(&proposer.offchain, &proposer.state)
@@ -106,7 +95,12 @@ fn run_testnet(num_nodes: u32, num_slots: u32) {
             }
         }
 
-        // Apply the proposed block on every node (verifier mode).
+        // Hardware-side: tell the proposer's hardware about the block hash
+        // it produced + its score (placeholder: 1 per accepted block). In a
+        // real chain this comes from Schedule(block_final).
+        let block_hash = proposer.kernel.block_hash(&out.block);
+        proposer.kernel.hardware().score(block_hash, 1);
+
         let new_root = out.state_root;
         let proposed_block = out.block.clone();
         for node in &mut nodes {
@@ -122,6 +116,7 @@ fn run_testnet(num_nodes: u32, num_slots: u32) {
             );
             node.state = ver.state_next;
             node.prior_block = Hash::ZERO; // we don't yet hash headers
+            node.kernel.hardware().score(block_hash, 1);
         }
         tracing::info!(slot = slot_n, "all nodes converged on root {:?}", new_root);
     }
@@ -129,8 +124,8 @@ fn run_testnet(num_nodes: u32, num_slots: u32) {
 
 struct NodeState {
     id: u32,
-    state: State<Hw>,
-    offchain: NodeOffchain<Hw>,
-    kernel: Kernel<Hw>,
-    prior_block: BlockHash<Hw>,
+    state: State,
+    offchain: NodeOffchain,
+    kernel: Kernel<InMemoryHardware>,
+    prior_block: BlockHash,
 }

@@ -9,16 +9,16 @@
 
 use std::collections::VecDeque;
 
-use jar_types::{Caller, Command, KResult, KernelError, KernelRole, StorageMode, VaultId};
+use jar_types::{
+    AttestationEntry, Caller, Command, KResult, KernelError, KernelRole, ResultEntry, SlotContent,
+    State, VaultId,
+};
 
 use crate::attest::AttestCursor;
 use crate::frame::Frame;
 use crate::host_abi::HostCall;
 use crate::reach::ReachSet;
 use crate::runtime::Hardware;
-use jar_types::AttestationEntry;
-use jar_types::ResultEntry;
-use jar_types::SlotContent;
 
 /// Outcome of a single VM `run()` step.
 #[derive(Debug)]
@@ -42,21 +42,24 @@ pub trait VmExec {
 
 /// Per-invocation kernel-side context. Carried by reference into every
 /// host-call handler.
+///
+/// Storage authority is no longer a flag here — it's encoded in the
+/// `Frame`'s caps. Transact / Schedule frames carry `Storage` (overlay)
+/// caps; Dispatch step-2/3 frames carry `SnapshotStorage` caps.
 pub struct InvocationCtx<'a, H: Hardware> {
-    pub state: &'a mut jar_types::State<H>,
+    pub state: &'a mut State,
     pub role: KernelRole,
-    pub storage_mode: StorageMode,
     pub current_vault: VaultId,
     pub frame: Frame,
     pub caller: Caller,
-    pub commands: &'a mut Vec<Command<H>>,
+    pub commands: &'a mut Vec<Command>,
     pub reach: &'a mut ReachSet,
     pub attest_cursor: &'a mut AttestCursor,
-    pub attestation_trace: &'a mut Vec<AttestationEntry<H>>,
+    pub attestation_trace: &'a mut Vec<AttestationEntry>,
     pub result_trace: &'a mut Vec<ResultEntry>,
     /// Step-3-only: the slot emission, populated by `cap_call` or
     /// `slot_clear`. The kernel rejects if set twice.
-    pub slot_emission: &'a mut Option<SlotContent<H>>,
+    pub slot_emission: &'a mut Option<SlotContent>,
     pub hw: &'a H,
 }
 

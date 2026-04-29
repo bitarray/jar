@@ -1,13 +1,12 @@
 //! Cap-registry tests: alloc, derive, revoke (cascade), pinning.
 
-use jar_crypto::Ed25519Blake;
 use jar_kernel::cap_registry;
 use jar_kernel::cnode_ops;
 use jar_kernel::pinning;
 use jar_types::{CapRecord, Capability, KernelError, State, StorageRights, VaultId, VaultRights};
 
-fn empty_state() -> State<Ed25519Blake> {
-    State::<Ed25519Blake>::empty()
+fn empty_state() -> State {
+    State::empty()
 }
 
 #[test]

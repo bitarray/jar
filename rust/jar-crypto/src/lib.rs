@@ -1,41 +1,18 @@
-//! Cryptographic primitives used by jar-kernel.
+//! Cryptographic primitives for jar-kernel.
 //!
 //! Two surfaces:
 //! - `blake2b_256` — used for state-root hashing, container hashes, code-cache keys.
 //! - `ed25519` — `KeyPair`, `sign`, `verify` for AttestationCap (Direct + Sealing).
+//!
+//! These are leaf primitives. The kernel-static facade lives in
+//! `jar_kernel::crypto`; userspace never sees the bytes typed.
 //!
 //! BLS aggregate is stubbed; `AttestationAggregateCap` returns `false`.
 
 #![forbid(unsafe_code)]
 
 use blake2::digest::{Update, VariableOutput};
-use jar_types::{Crypto, Hash, KeyId, Signature};
-
-/// The v1 crypto suite: Ed25519 signatures over Blake2b-256 hashes.
-///
-/// Concrete suite that fixes `Crypto::Hash`/`Signature`/`KeyId` to the
-/// byte-array newtypes in `jar-types`. Used by `InMemoryHardware` and
-/// downstream as the default instantiation of all `<C: Crypto>` types.
-#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
-pub struct Ed25519Blake;
-
-impl Crypto for Ed25519Blake {
-    type Hash = Hash;
-    type Signature = Signature;
-    type KeyId = KeyId;
-
-    fn hash_from_bytes(b: &[u8]) -> Option<Hash> {
-        <[u8; 32]>::try_from(b).ok().map(Hash)
-    }
-
-    fn key_id_from_bytes(b: &[u8]) -> Option<KeyId> {
-        <[u8; 32]>::try_from(b).ok().map(KeyId)
-    }
-
-    fn signature_from_bytes(b: &[u8]) -> Option<Signature> {
-        <[u8; 64]>::try_from(b).ok().map(Signature)
-    }
-}
+use jar_types::{Hash, KeyId, Signature};
 
 /// 32-byte Blake2b digest of `data`.
 pub fn blake2b_256(data: &[u8]) -> Hash {
@@ -77,21 +54,26 @@ pub mod ed25519 {
 
         /// Public KeyId is the 32-byte ed25519 verifying-key bytes.
         pub fn key_id(&self) -> KeyId {
-            KeyId(self.signing.verifying_key().to_bytes())
+            KeyId(self.signing.verifying_key().to_bytes().to_vec())
         }
 
         pub fn sign(&self, msg: &[u8]) -> Signature {
             let sig: DalekSig = self.signing.sign(msg);
-            Signature(sig.to_bytes())
+            Signature(sig.to_bytes().to_vec())
         }
     }
 
     /// Verify a signature against the verifying-key bytes embedded in `key`.
-    pub fn verify(key: KeyId, msg: &[u8], sig: &Signature) -> bool {
-        let Ok(vk) = VerifyingKey::from_bytes(&key.0) else {
+    /// Returns false on any decode failure (wrong key width, malformed sig).
+    pub fn verify(key: &KeyId, msg: &[u8], sig: &Signature) -> bool {
+        let key_bytes: &[u8; 32] = match key.0.as_slice().try_into() {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+        let Ok(vk) = VerifyingKey::from_bytes(key_bytes) else {
             return false;
         };
-        let dalek = match DalekSig::try_from(&sig.0[..]) {
+        let dalek = match DalekSig::try_from(sig.0.as_slice()) {
             Ok(s) => s,
             Err(_) => return false,
         };
@@ -100,7 +82,7 @@ pub mod ed25519 {
 }
 
 /// BLS / threshold aggregate. Stubbed — returns `false` until BLS lands.
-pub fn aggregate_verify(_key: KeyId, _msg: &[u8]) -> bool {
+pub fn aggregate_verify(_key: &KeyId, _msg: &[u8]) -> bool {
     false
 }
 
@@ -120,7 +102,7 @@ mod tests {
         let key = kp.key_id();
         let msg = b"hello";
         let sig = kp.sign(msg);
-        assert!(ed25519::verify(key, msg, &sig));
-        assert!(!ed25519::verify(key, b"goodbye", &sig));
+        assert!(ed25519::verify(&key, msg, &sig));
+        assert!(!ed25519::verify(&key, b"goodbye", &sig));
     }
 }

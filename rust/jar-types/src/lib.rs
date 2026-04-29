@@ -9,7 +9,6 @@ pub(crate) use std::collections::BTreeMap;
 
 mod block;
 mod cap;
-mod crypto;
 mod runtime;
 mod slot;
 mod state;
@@ -17,13 +16,14 @@ mod trace;
 
 pub use block::*;
 pub use cap::*;
-pub use crypto::*;
 pub use runtime::*;
 pub use slot::*;
 pub use state::*;
 pub use trace::*;
 
-/// 32-byte hash. Used for state roots, blob hashes, and code hashes.
+/// 32-byte hash. Used for state roots, blob hashes, and code hashes. The
+/// chain commits to a single hash function (blake2b-256) at the protocol
+/// level — this width is a kernel constant, not a configurable.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 pub struct Hash(pub [u8; 32]);
 
@@ -47,8 +47,9 @@ impl AsRef<[u8]> for Hash {
     }
 }
 
-/// Block hash alias — generic over the crypto suite. Resolves to `C::Hash`.
-pub type BlockHash<C> = <C as Crypto>::Hash;
+/// Block hash alias. Same shape as `Hash`; computed by
+/// `jar_kernel::crypto::block_hash` over a canonical block encoding.
+pub type BlockHash = Hash;
 
 /// Globally unique vault identifier (allocated monotonically by the kernel).
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
@@ -62,9 +63,18 @@ pub struct CapId(pub u64);
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 pub struct CNodeId(pub u64);
 
-/// Identifier of a signing key. The kernel does not interpret the bytes.
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
-pub struct KeyId(pub [u8; 32]);
+/// Identifier of a signing key. Variable-width bytes — Ed25519 pubkeys are
+/// 32 bytes, BLS pubkeys are 48; the kernel stores the bytes opaquely and
+/// passes them through to `Hardware::sign` / `holds_key` and to
+/// `jar_kernel::crypto::verify`.
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
+pub struct KeyId(pub Vec<u8>);
+
+impl KeyId {
+    pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
+        KeyId(bytes.into())
+    }
+}
 
 impl AsRef<[u8]> for KeyId {
     fn as_ref(&self) -> &[u8] {
@@ -76,13 +86,22 @@ impl AsRef<[u8]> for KeyId {
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 pub struct Slot(pub u64);
 
-/// Ed25519 (or compatible) signature. Opaque to the kernel.
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub struct Signature(pub [u8; 64]);
+/// Cryptographic signature. Variable-width bytes — Ed25519 is 64, BLS is 96;
+/// kernel stores them opaquely and passes them through to
+/// `jar_kernel::crypto::verify` / `Hardware::sign`.
+#[derive(Clone, Eq, PartialEq, Debug, Default)]
+pub struct Signature(pub Vec<u8>);
 
-impl Default for Signature {
-    fn default() -> Self {
-        Signature([0u8; 64])
+impl Signature {
+    pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
+        Signature(bytes.into())
+    }
+
+    /// True iff this is the zero-length sentinel — the placeholder that
+    /// proposer-mode `attest()` writes for a Sealing entry before the
+    /// kernel back-fills the real signature post-execution.
+    pub fn is_reserved(&self) -> bool {
+        self.0.is_empty()
     }
 }
 

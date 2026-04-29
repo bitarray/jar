@@ -11,13 +11,13 @@
 //!    DispatchRef / Transact / TransactRef target), arg caps must not be any
 //!    pinned-or-ref variant (the four above plus Schedule).
 
-use jar_types::{CNodeId, CapId, Capability, Crypto, KResult, KernelError, State};
+use jar_types::{CNodeId, CapId, Capability, KResult, KernelError, State};
 
 use crate::cap_registry;
 
 /// Check that placing `cap` at `(target_cnode)` is permissible. `target_cnode`
 /// is the CNodeId being granted into; for moves use the destination cnode.
-pub fn check_grant_or_move<C: Crypto>(cap: &Capability<C>, target_cnode: CNodeId) -> KResult<()> {
+pub fn check_grant_or_move(cap: &Capability, target_cnode: CNodeId) -> KResult<()> {
     match cap {
         Capability::Dispatch { born_in, .. }
         | Capability::Transact { born_in, .. }
@@ -46,17 +46,15 @@ pub fn check_grant_or_move<C: Crypto>(cap: &Capability<C>, target_cnode: CNodeId
 
 /// Check that deriving from `source` to a new cap with `new_cap` is allowed,
 /// given whether the destination is persistent (CNode) or ephemeral (Frame).
-pub fn check_derive<C: Crypto>(
-    state: &State<C>,
+pub fn check_derive(
+    state: &State,
     source: CapId,
-    new_cap: &Capability<C>,
+    new_cap: &Capability,
     dest_persistent: bool,
 ) -> KResult<()> {
     let src = cap_registry::lookup(state, source)?;
     match (&src.cap, new_cap) {
-        // Dispatch → Dispatch: persistent dest only, born_in must equal dest CNode.
-        // (Caller passes new_cap with born_in pre-set to dest; we just verify
-        // it's a Dispatch and dest is persistent.)
+        // Dispatch → Dispatch: persistent dest only.
         (Capability::Dispatch { .. }, Capability::Dispatch { .. }) => {
             if !dest_persistent {
                 return Err(KernelError::Pinning(
@@ -65,7 +63,6 @@ pub fn check_derive<C: Crypto>(
             }
             Ok(())
         }
-        // Dispatch → DispatchRef: Frame only.
         (Capability::Dispatch { .. }, Capability::DispatchRef { .. }) => {
             if dest_persistent {
                 return Err(KernelError::Pinning(
@@ -74,7 +71,6 @@ pub fn check_derive<C: Crypto>(
             }
             Ok(())
         }
-        // DispatchRef → DispatchRef: Frame only (same constraint).
         (Capability::DispatchRef { .. }, Capability::DispatchRef { .. }) => {
             if dest_persistent {
                 return Err(KernelError::Pinning(
@@ -83,7 +79,6 @@ pub fn check_derive<C: Crypto>(
             }
             Ok(())
         }
-        // Transact → Transact / TransactRef: same rules as Dispatch.
         (Capability::Transact { .. }, Capability::Transact { .. }) => {
             if !dest_persistent {
                 return Err(KernelError::Pinning(
@@ -114,6 +109,12 @@ pub fn check_derive<C: Crypto>(
         (Capability::VaultRef { .. }, Capability::VaultRef { .. }) => Ok(()),
         // Storage → Storage: any dest OK.
         (Capability::Storage { .. }, Capability::Storage { .. }) => Ok(()),
+        // SnapshotStorage → SnapshotStorage: any dest OK (still RO).
+        (Capability::SnapshotStorage { .. }, Capability::SnapshotStorage { .. }) => Ok(()),
+        // Storage → SnapshotStorage: deriving an RO snapshot view from an
+        // overlay cap is allowed at any dest. Reverse direction (snapshot →
+        // overlay) is NOT — that would grant write rights.
+        (Capability::Storage { .. }, Capability::SnapshotStorage { .. }) => Ok(()),
         _ => Err(KernelError::Pinning(format!(
             "unsupported derive source/destination shape: {:?} → {:?}",
             std::mem::discriminant(&src.cap),
@@ -125,7 +126,7 @@ pub fn check_derive<C: Crypto>(
 /// Arg-scan: when `cap_call` exercises a Dispatch / DispatchRef / Transact /
 /// TransactRef target, the args must not contain any of those four cap types.
 /// This prevents cross-sibling dispatch via arg-passing.
-pub fn arg_scan<C: Crypto>(state: &State<C>, arg_caps: &[CapId]) -> KResult<()> {
+pub fn arg_scan(state: &State, arg_caps: &[CapId]) -> KResult<()> {
     for &c in arg_caps {
         let cap = &cap_registry::lookup(state, c)?.cap;
         if cap.is_pinned_or_ref() {

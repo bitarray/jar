@@ -2,51 +2,48 @@
 //!
 //! The kernel core is a pure function over σ. The runtime supplies the
 //! per-node concerns: signing keys, network outbox, off-chain aggregation
-//! slots, javm code cache.
+//! slots, javm code cache, fork-tree bookkeeping.
 
 pub mod hardware;
 pub mod in_memory;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::marker::PhantomData;
 
-use jar_types::{Crypto, SlotContent, VaultId};
+use jar_types::{SlotContent, VaultId};
 
 pub use hardware::{Hardware, HwError, TracingEvent};
-pub use in_memory::{InMemoryBus, InMemoryHardware, NetMessage};
+pub use in_memory::{ForkTree, InMemoryBus, InMemoryHardware, NetMessage};
 
 /// Per-node off-chain state, **not** in σ. Slots persist across blocks but
 /// are lost on restart. Bootstrap is chain-defined; we start with all slots
 /// `Empty`.
-pub struct NodeOffchain<C: Crypto> {
-    pub slots: BTreeMap<VaultId, SlotContent<C>>,
+pub struct NodeOffchain {
+    pub slots: BTreeMap<VaultId, SlotContent>,
     pub subscriptions: BTreeSet<VaultId>,
     /// javm code-cache; reused across handle_inbound_dispatch arrivals.
     pub code_cache: javm::CodeCache,
-    _phantom: PhantomData<fn() -> C>,
 }
 
-impl<C: Crypto> Default for NodeOffchain<C> {
+impl Default for NodeOffchain {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<C: Crypto> NodeOffchain<C> {
+impl NodeOffchain {
     pub fn new() -> Self {
         Self {
             slots: BTreeMap::new(),
             subscriptions: BTreeSet::new(),
             code_cache: javm::CodeCache::new(),
-            _phantom: PhantomData,
         }
     }
 
-    pub fn slot(&self, ep: VaultId) -> &SlotContent<C> {
+    pub fn slot(&self, ep: VaultId) -> &SlotContent {
         self.slots.get(&ep).unwrap_or(&SlotContent::Empty)
     }
 
-    pub fn set_slot(&mut self, ep: VaultId, content: SlotContent<C>) {
+    pub fn set_slot(&mut self, ep: VaultId, content: SlotContent) {
         if matches!(content, SlotContent::Empty) {
             self.slots.remove(&ep);
         } else {

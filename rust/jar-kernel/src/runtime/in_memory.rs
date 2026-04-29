@@ -3,18 +3,15 @@
 //! For tests and the `jar` binary's testnet driver. Networking is a fan-out
 //! `mpsc::Sender` set; each node has its own inbound `Receiver`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use jar_crypto::{Ed25519Blake, blake2b_256, ed25519::KeyPair};
-use jar_types::{Command, Crypto, Hash, KeyId, Signature, SlotContent, VaultId};
+use jar_crypto::ed25519::KeyPair;
+use jar_types::{BlockHash, Command, KeyId, Signature, SlotContent, VaultId};
 
 use super::hardware::{Hardware, HwError, TracingEvent};
 
-/// One inbound message arriving at a node. Carries `SlotContent` tagged with
-/// the Hardware impl (`InMemoryHardware`) — same fields as
-/// `SlotContent<Ed25519Blake>`, but Rust treats parametric types as distinct
-/// per-tag.
+/// One inbound message arriving at a node.
 #[derive(Clone, Debug)]
 pub enum NetMessage {
     /// A new Dispatch event for an entrypoint.
@@ -26,7 +23,7 @@ pub enum NetMessage {
     /// A lite-stream slot update.
     LiteUpdate {
         entrypoint: VaultId,
-        content: SlotContent<InMemoryHardware>,
+        content: SlotContent,
     },
 }
 
@@ -54,11 +51,23 @@ impl InMemoryBus {
     }
 }
 
-/// In-memory Hardware: holds a set of validator keys + bus reference.
+/// Hardware-side per-block bookkeeping. Tracks scores and finality flags
+/// keyed by the kernel-computed `block_hash`. Phase 1 is informational
+/// only — the testnet doesn't actually do fork choice.
+#[derive(Clone, Default, Debug)]
+pub struct ForkTree {
+    pub scores: BTreeMap<BlockHash, u64>,
+    pub finalized: BTreeSet<BlockHash>,
+    pub head: Option<BlockHash>,
+}
+
+/// In-memory Hardware: holds a set of validator keys + bus reference +
+/// fork-tree bookkeeping.
 pub struct InMemoryHardware {
     pub keys: BTreeMap<KeyId, KeyPair>,
     pub bus: Arc<InMemoryBus>,
     pub trace: Mutex<Vec<TracingEvent>>,
+    pub fork_tree: Mutex<ForkTree>,
 }
 
 impl InMemoryHardware {
@@ -67,6 +76,7 @@ impl InMemoryHardware {
             keys: BTreeMap::new(),
             bus,
             trace: Mutex::new(Vec::new()),
+            fork_tree: Mutex::new(ForkTree::default()),
         }
     }
 
@@ -76,41 +86,17 @@ impl InMemoryHardware {
     }
 }
 
-impl Crypto for InMemoryHardware {
-    type Hash = Hash;
-    type Signature = Signature;
-    type KeyId = KeyId;
-
-    fn hash_from_bytes(b: &[u8]) -> Option<Hash> {
-        <Ed25519Blake as Crypto>::hash_from_bytes(b)
-    }
-    fn key_id_from_bytes(b: &[u8]) -> Option<KeyId> {
-        <Ed25519Blake as Crypto>::key_id_from_bytes(b)
-    }
-    fn signature_from_bytes(b: &[u8]) -> Option<Signature> {
-        <Ed25519Blake as Crypto>::signature_from_bytes(b)
-    }
-}
-
 impl Hardware for InMemoryHardware {
-    fn hash(&self, blob: &[u8]) -> Hash {
-        blake2b_256(blob)
+    fn holds_key(&self, key: &KeyId) -> bool {
+        self.keys.contains_key(key)
     }
 
-    fn verify(&self, key: KeyId, msg: &[u8], sig: &Signature) -> bool {
-        jar_crypto::ed25519::verify(key, msg, sig)
-    }
-
-    fn holds_key(&self, key: KeyId) -> bool {
-        self.keys.contains_key(&key)
-    }
-
-    fn sign(&self, key: KeyId, blob: &[u8]) -> Result<Signature, HwError> {
-        let kp = self.keys.get(&key).ok_or(HwError::KeyAbsent)?;
+    fn sign(&self, key: &KeyId, blob: &[u8]) -> Result<Signature, HwError> {
+        let kp = self.keys.get(key).ok_or(HwError::KeyAbsent)?;
         Ok(kp.sign(blob))
     }
 
-    fn emit(&self, cmd: Command<Self>) {
+    fn emit(&self, cmd: Command) {
         match cmd {
             Command::Dispatch {
                 entrypoint,
@@ -128,7 +114,31 @@ impl Hardware for InMemoryHardware {
                 entrypoint,
                 content,
             }),
+            Command::Score { block_hash, score } => {
+                self.score(block_hash, score);
+            }
+            Command::Finalize { block_hash } => {
+                self.finalize(block_hash);
+            }
         }
+    }
+
+    fn score(&self, block_hash: BlockHash, score: u64) {
+        let mut t = self.fork_tree.lock().unwrap();
+        t.scores.insert(block_hash, score);
+        // Naive head choice: highest score wins. Phase 1 placeholder.
+        match t.head {
+            Some(head) if t.scores.get(&head).copied().unwrap_or(0) >= score => {}
+            _ => t.head = Some(block_hash),
+        }
+    }
+
+    fn finalize(&self, block_hash: BlockHash) {
+        self.fork_tree.lock().unwrap().finalized.insert(block_hash);
+    }
+
+    fn head(&self) -> Option<BlockHash> {
+        self.fork_tree.lock().unwrap().head
     }
 
     fn tracing_event(&self, ev: TracingEvent) {

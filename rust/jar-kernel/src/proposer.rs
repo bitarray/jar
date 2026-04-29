@@ -2,9 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use jar_types::{
-    Body, Capability, Crypto, Event, KResult, KernelError, SlotContent, State, VaultId,
-};
+use jar_types::{Body, Capability, Event, KResult, KernelError, SlotContent, State, VaultId};
 
 use crate::cap_registry;
 use crate::runtime::NodeOffchain;
@@ -20,8 +18,7 @@ use crate::runtime::NodeOffchain;
 /// body.result_trace) start empty here — they're populated only by
 /// Schedule invocations during apply_block (and by the block-seal
 /// reservation in proposer mode).
-pub fn drain_for_body<C: Crypto>(node: &NodeOffchain<C>, state: &State<C>) -> KResult<Body<C>> {
-    // Index Transact slots in transact_space_cnode by VaultId for ordering.
+pub fn drain_for_body(node: &NodeOffchain, state: &State) -> KResult<Body> {
     let transact_cnode_id = match &cap_registry::lookup(state, state.transact_space_cnode)?.cap {
         Capability::CNode { cnode_id } => *cnode_id,
         _ => {
@@ -38,7 +35,6 @@ pub fn drain_for_body<C: Crypto>(node: &NodeOffchain<C>, state: &State<C>) -> KR
         }
     }
 
-    // Walk dispatch_space_cnode; collect per-target event groups.
     let dispatch_cnode_id = match &cap_registry::lookup(state, state.dispatch_space_cnode)?.cap {
         Capability::CNode { cnode_id } => *cnode_id,
         _ => {
@@ -48,7 +44,7 @@ pub fn drain_for_body<C: Crypto>(node: &NodeOffchain<C>, state: &State<C>) -> KR
         }
     };
     let dcnode = state.cnode(dispatch_cnode_id)?;
-    let mut groups: BTreeMap<u8, Vec<Event<C>>> = BTreeMap::new();
+    let mut groups: BTreeMap<u8, Vec<Event>> = BTreeMap::new();
     let mut targets_in_slot_order: BTreeMap<u8, VaultId> = BTreeMap::new();
 
     for (_slot, cap_id) in dcnode.iter() {
@@ -70,9 +66,6 @@ pub fn drain_for_body<C: Crypto>(node: &NodeOffchain<C>, state: &State<C>) -> KR
                     )));
                 }
             };
-            // Body-side Event keeps the AggregatedTransact's bundled
-            // traces — they're per-event authoritative for the on-chain
-            // Transact handler (NOT spliced into body-level traces).
             groups.entry(slot_idx).or_default().push(Event {
                 payload: payload.clone(),
                 caps: caps.clone(),
@@ -83,16 +76,13 @@ pub fn drain_for_body<C: Crypto>(node: &NodeOffchain<C>, state: &State<C>) -> KR
         }
     }
 
-    // Build body.events in slot-index order.
-    let mut events: Vec<(VaultId, Vec<Event<C>>)> = Vec::new();
+    let mut events: Vec<(VaultId, Vec<Event>)> = Vec::new();
     for (slot_idx, target) in &targets_in_slot_order {
         if let Some(group_events) = groups.remove(slot_idx) {
             events.push((*target, group_events));
         }
     }
 
-    // Body-level traces start empty; Schedule invocations will populate
-    // them during apply_block (and proposer-side block-seal reservation).
     Ok(Body {
         events,
         attestation_trace: Vec::new(),

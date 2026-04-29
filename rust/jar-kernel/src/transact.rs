@@ -12,12 +12,9 @@
 //! - No body.events entry references a Schedule slot's vault_id.
 //! - No trailing unmatched body entries at end of walk.
 
-use std::sync::Arc;
-
-use jar_types::Crypto;
 use jar_types::{
     AttestationEntry, Body, Caller, Capability, Command, KResult, KernelError, KernelRole,
-    ReachEntry, ResultEntry, State, StorageMode, VaultId,
+    ReachEntry, ResultEntry, State, VaultId,
 };
 
 use crate::attest::AttestCursor;
@@ -38,7 +35,7 @@ pub enum SlotKind {
 
 /// Iterate Transact entrypoints in canonical order over σ.transact_space_cnode.
 /// (Schedule slots are not returned.)
-pub fn transact_entrypoints<C: Crypto>(state: &State<C>) -> KResult<Vec<VaultId>> {
+pub fn transact_entrypoints(state: &State) -> KResult<Vec<VaultId>> {
     let cnode_id = match &cap_registry::lookup(state, state.transact_space_cnode)?.cap {
         Capability::CNode { cnode_id } => *cnode_id,
         _ => {
@@ -59,7 +56,7 @@ pub fn transact_entrypoints<C: Crypto>(state: &State<C>) -> KResult<Vec<VaultId>
 
 /// Iterate the entrypoint schedule in canonical slot order. Returns
 /// `(slot_idx, kind, vault_id)` tuples.
-pub fn schedule_walk<C: Crypto>(state: &State<C>) -> KResult<Vec<(u8, SlotKind, VaultId)>> {
+pub fn schedule_walk(state: &State) -> KResult<Vec<(u8, SlotKind, VaultId)>> {
     let cnode_id = match &cap_registry::lookup(state, state.transact_space_cnode)?.cap {
         Capability::CNode { cnode_id } => *cnode_id,
         _ => {
@@ -101,18 +98,18 @@ pub fn schedule_walk<C: Crypto>(state: &State<C>) -> KResult<Vec<(u8, SlotKind, 
 /// across slots.
 #[allow(clippy::too_many_arguments)]
 pub fn run_one_invocation<H: Hardware>(
-    state: &mut State<H>,
+    state: &mut State,
     target: VaultId,
     kind: SlotKind,
     reach_idx: u32,
     payload: &[u8],
-    attestation_trace: &mut Vec<AttestationEntry<H>>,
+    attestation_trace: &mut Vec<AttestationEntry>,
     result_trace: &mut Vec<ResultEntry>,
     cursor: &mut AttestCursor,
     hw: &H,
-) -> KResult<(ReachEntry, Vec<Command<H>>)> {
+) -> KResult<(ReachEntry, Vec<Command>)> {
     let snapshot = StateSnapshot::take(state);
-    let mut commands: Vec<Command<H>> = Vec::new();
+    let mut commands: Vec<Command> = Vec::new();
     let mut reach = ReachSet::default();
     reach.note(target);
     let mut slot_emission = None;
@@ -121,7 +118,6 @@ pub fn run_one_invocation<H: Hardware>(
     let mut ctx = InvocationCtx {
         state,
         role: KernelRole::TransactEntry,
-        storage_mode: StorageMode::Rw,
         current_vault: target,
         frame,
         caller: Caller::Kernel(KernelRole::TransactEntry),
@@ -163,9 +159,9 @@ pub fn run_one_invocation<H: Hardware>(
 }
 
 /// Build the Frame for a Transact / Schedule invocation. Slot 0 holds an
-/// RW Storage cap to the entrypoint Vault's own storage. Real chain
-/// authors decide their own Frame layout via VaultRef.Initialize args.
-fn build_invocation_frame<C: Crypto>(state: &mut State<C>, vault_id: VaultId) -> KResult<Frame> {
+/// RW Storage cap to the entrypoint Vault's overlay. Real chain authors
+/// decide their own Frame layout via VaultRef.Initialize args.
+fn build_invocation_frame(state: &mut State, vault_id: VaultId) -> KResult<Frame> {
     use jar_types::{KeyRange, StorageRights};
 
     let mut frame = Frame::new();
@@ -199,15 +195,14 @@ fn build_smoke_vm(_payload: &[u8]) -> impl VmExec {
 /// against the block-level body.attestation_trace / body.result_trace.
 /// Body well-formedness is enforced in-line.
 pub fn run_phase<H: Hardware>(
-    state: &mut State<H>,
-    body: &mut Body<H>,
+    state: &mut State,
+    body: &mut Body,
     block_cursor: &mut AttestCursor,
     hw: &H,
     is_proposer: bool,
-) -> KResult<Vec<Command<H>>> {
+) -> KResult<Vec<Command>> {
     let _ = is_proposer; // determinism: same code path either way
-    let _ = Arc::new(()); // keep Arc import alive
-    let mut all_commands: Vec<Command<H>> = Vec::new();
+    let mut all_commands: Vec<Command> = Vec::new();
     let walk = schedule_walk(state)?;
 
     // Pointer into body.events — advanced by Transact slots that find
@@ -218,7 +213,6 @@ pub fn run_phase<H: Hardware>(
     for (slot_idx, kind, target) in walk {
         match kind {
             SlotKind::Schedule => {
-                // body.events must NOT contain any entry for a Schedule slot.
                 if let Some((vid, _)) = body.events.get(body_event_idx)
                     && *vid == target
                 {
@@ -243,7 +237,6 @@ pub fn run_phase<H: Hardware>(
                 all_commands.append(&mut commands);
             }
             SlotKind::Transact => {
-                // Consume the next body.events entry only if it matches.
                 let group_matches = body
                     .events
                     .get(body_event_idx)
@@ -252,21 +245,11 @@ pub fn run_phase<H: Hardware>(
                 if !group_matches {
                     continue;
                 }
-                // Run each event with PER-EVENT traces (cursor reset to 0
-                // for each invocation; per-event boundary check at HALT).
                 let group_len = body.events[body_event_idx].1.len();
                 for event_idx in 0..group_len {
                     let mut event_cursor = AttestCursor::default();
-                    // Snapshot the expected slice ends before running, so
-                    // we can verify boundary exhaustion after.
                     let (reach_entry, mut commands) = {
                         let (_target, ref mut events) = body.events[body_event_idx];
-                        // Take ownership of the event temporarily so we
-                        // can pass mutable borrows of its traces alongside
-                        // the run_one_invocation call. Replace with
-                        // default while running, then put back. payload
-                        // is cloned so we don't borrow event during the
-                        // call.
                         let mut event = std::mem::take(&mut events[event_idx]);
                         let payload = event.payload.clone();
                         let result = run_one_invocation(
@@ -284,8 +267,6 @@ pub fn run_phase<H: Hardware>(
                         let result_len = event.result_trace.len();
                         events[event_idx] = event;
                         let inner = result?;
-                        // Per-Transact-event boundary check: cursor must
-                        // have walked the entire event-level slice.
                         if event_cursor.attestation_pos != attestation_len
                             || event_cursor.result_pos != result_len
                         {
@@ -322,8 +303,8 @@ pub fn run_phase<H: Hardware>(
 
 /// On verifier side, compare against recorded reach; on proposer side,
 /// append.
-fn check_or_record_reach<C: Crypto>(
-    body: &mut Body<C>,
+fn check_or_record_reach(
+    body: &mut Body,
     reach_idx: usize,
     reach_entry: &ReachEntry,
 ) -> KResult<()> {

@@ -1,26 +1,6 @@
-//! Runtime-side types — `Caller`, `Command`, `StorageMode`, `KernelRole`.
+//! Runtime-side types — `Caller`, `Command`, `KernelRole`.
 
-use crate::{Crypto, SlotContent, VaultId};
-
-/// Three modes a Transact entrypoint can be invoked in. Off-chain Dispatch
-/// invocations only use `RO` (or `None` for cheap admission checks).
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub enum StorageMode {
-    /// No storage cap passed; pure-syntactic check only.
-    None,
-    /// Read-only: σ-read-with-merkle-proofs validation. Used during
-    /// block_validation_cap, block_finalization_cap, and Dispatch step-2/
-    /// step-3.
-    Ro,
-    /// Read-write: full σ-effect; only inside apply_block's transact phase.
-    Rw,
-}
-
-impl StorageMode {
-    pub fn is_writable(self) -> bool {
-        matches!(self, StorageMode::Rw)
-    }
-}
+use crate::{BlockHash, SlotContent, VaultId};
 
 /// Returned by the `caller()` host call. Discriminates between Vault-to-Vault
 /// sub-CALLs and kernel-fired top-level invocations.
@@ -49,9 +29,8 @@ pub enum KernelRole {
 /// Runtime-side commands the kernel emits during execution. The runtime
 /// applies these to hardware after `apply_block` (or `handle_inbound_dispatch`)
 /// returns.
-///
-/// Manual trait impls so bounds land on `SlotContent<C>` rather than `C`.
-pub enum Command<C: Crypto> {
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub enum Command {
     /// Send a Dispatch to peers (full stream).
     Dispatch {
         entrypoint: VaultId,
@@ -61,86 +40,12 @@ pub enum Command<C: Crypto> {
     /// Broadcast a slot update on the lite stream of `entrypoint`.
     BroadcastLite {
         entrypoint: VaultId,
-        content: SlotContent<C>,
+        content: SlotContent,
     },
-}
-
-impl<C: Crypto> Clone for Command<C> {
-    fn clone(&self) -> Self {
-        match self {
-            Command::Dispatch {
-                entrypoint,
-                payload,
-                caps,
-            } => Command::Dispatch {
-                entrypoint: *entrypoint,
-                payload: payload.clone(),
-                caps: caps.clone(),
-            },
-            Command::BroadcastLite {
-                entrypoint,
-                content,
-            } => Command::BroadcastLite {
-                entrypoint: *entrypoint,
-                content: content.clone(),
-            },
-        }
-    }
-}
-
-impl<C: Crypto> PartialEq for Command<C> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (
-                Command::Dispatch {
-                    entrypoint: e1,
-                    payload: p1,
-                    caps: c1,
-                },
-                Command::Dispatch {
-                    entrypoint: e2,
-                    payload: p2,
-                    caps: c2,
-                },
-            ) => e1 == e2 && p1 == p2 && c1 == c2,
-            (
-                Command::BroadcastLite {
-                    entrypoint: e1,
-                    content: c1,
-                },
-                Command::BroadcastLite {
-                    entrypoint: e2,
-                    content: c2,
-                },
-            ) => e1 == e2 && c1 == c2,
-            _ => false,
-        }
-    }
-}
-
-impl<C: Crypto> Eq for Command<C> {}
-
-impl<C: Crypto> core::fmt::Debug for Command<C> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Command::Dispatch {
-                entrypoint,
-                payload,
-                caps,
-            } => f
-                .debug_struct("Dispatch")
-                .field("entrypoint", entrypoint)
-                .field("payload", payload)
-                .field("caps", caps)
-                .finish(),
-            Command::BroadcastLite {
-                entrypoint,
-                content,
-            } => f
-                .debug_struct("BroadcastLite")
-                .field("entrypoint", entrypoint)
-                .field("content", content)
-                .finish(),
-        }
-    }
+    /// Inform hardware about the consensus score of a candidate block —
+    /// fork-choice input. Hardware stores it keyed by block_hash.
+    Score { block_hash: BlockHash, score: u64 },
+    /// Inform hardware that a block is finalized — its non-finalized
+    /// siblings can be pruned.
+    Finalize { block_hash: BlockHash },
 }

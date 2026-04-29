@@ -1,17 +1,17 @@
 //! State root: hash over canonically-encoded σ.
 //!
-//! Stub Merkle: not a tree, just a flat hash. Sufficient for "the chain's
-//! `block_finalization_cap` claims this root and checks it" semantics. Real
-//! Merkle-trie commitment is a follow-up.
+//! Stub Merkle: not a tree, just a flat hash via the kernel-static `crypto::hash`.
+//! Sufficient for "the chain's `Schedule(block_final)` claims this root and
+//! checks it" semantics. Real Merkle-trie commitment is a follow-up.
 
-use jar_types::State;
+use jar_types::{Hash, State};
 
-use crate::runtime::Hardware;
+use crate::crypto;
 
 /// Canonical hash digest over σ. Maps and structured data are walked in
 /// `BTreeMap` order, which is canonical because every map in `State` is
-/// `BTreeMap`. Hashing routes through `hw.hash`.
-pub fn state_root<H: Hardware>(state: &State<H>, hw: &H) -> H::Hash {
+/// `BTreeMap`. Hashing is kernel-static — no Hardware needed.
+pub fn state_root(state: &State) -> Hash {
     let mut buf = Vec::with_capacity(4096);
 
     push_u64(&mut buf, state.id_counters.next_vault_id);
@@ -63,7 +63,7 @@ pub fn state_root<H: Hardware>(state: &State<H>, hw: &H) -> H::Hash {
         buf.extend_from_slice(cap_dbg.as_bytes());
     }
 
-    hw.hash(&buf)
+    crypto::hash(&buf)
 }
 
 fn push_u64(buf: &mut Vec<u8>, x: u64) {
@@ -73,13 +73,11 @@ fn push_u64(buf: &mut Vec<u8>, x: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::{InMemoryBus, InMemoryHardware};
 
     #[test]
     fn empty_state_root_is_stable() {
-        let s1 = State::<InMemoryHardware>::empty();
-        let s2 = State::<InMemoryHardware>::empty();
-        let hw = InMemoryHardware::new(InMemoryBus::new());
-        assert_eq!(state_root(&s1, &hw), state_root(&s2, &hw));
+        let s1 = State::empty();
+        let s2 = State::empty();
+        assert_eq!(state_root(&s1), state_root(&s2));
     }
 }

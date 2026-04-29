@@ -6,10 +6,19 @@
 //!
 //! Argument convention: φ[7..12] carry up to 6 inputs. Pointer/length pairs
 //! address guest memory windows.
+//!
+//! There is no `StorageMode` flag. The authority for each operation comes
+//! from the caps in `ctx.frame`:
+//! - `storage_*` accept `Storage` (overlay) or `SnapshotStorage` (committed
+//!   prior view); the latter rejects writes/deletes.
+//! - `cnode_*`, `cap_derive`, `create_vault`, `quota_set` need specific cap
+//!   shapes in the frame to authorize the operation. Frames assembled for
+//!   read-only contexts (e.g., Dispatch step-2/step-3) simply don't include
+//!   those caps; the ops bounce on `RC_BAD_CAP`.
 
 use jar_types::{
-    AttestationScope, CNodeId, Caller, CapId, CapRecord, Capability, Command, Crypto, KResult,
-    KernelError, KernelRole, ResourceKind, ResultEntry, SlotContent,
+    AttestationScope, CNodeId, Caller, CapId, CapRecord, Capability, Command, KResult, KernelError,
+    KernelRole, ResourceKind, ResultEntry, SlotContent,
 };
 
 use crate::attest;
@@ -75,11 +84,8 @@ fn host_storage_read<V: VmExec, H: Hardware>(
     vm: &mut V,
     ctx: &mut InvocationCtx<'_, H>,
 ) -> KResult<(u64, u64)> {
-    // φ[7] = frame_slot for Storage cap
-    // φ[8] = key_ptr
-    // φ[9] = key_len
-    // φ[10] = out_ptr
-    // φ[11] = out_max
+    // φ[7] = frame_slot for Storage / SnapshotStorage cap
+    // φ[8] = key_ptr, φ[9] = key_len, φ[10] = out_ptr, φ[11] = out_max
     let frame_slot = vm.reg(7) as u8;
     let key_ptr = vm.reg(8) as u32;
     let key_len = vm.reg(9) as u32;
@@ -109,7 +115,6 @@ fn host_storage_write<V: VmExec, H: Hardware>(
     vm: &mut V,
     ctx: &mut InvocationCtx<'_, H>,
 ) -> KResult<(u64, u64)> {
-    // φ[7]=frame_slot, φ[8]=key_ptr, φ[9]=key_len, φ[10]=val_ptr, φ[11]=val_len
     let frame_slot = vm.reg(7) as u8;
     let key_ptr = vm.reg(8) as u32;
     let key_len = vm.reg(9) as u32;
@@ -127,7 +132,7 @@ fn host_storage_write<V: VmExec, H: Hardware>(
         .read_mem(val_ptr, val_len)
         .ok_or_else(|| KernelError::Internal("storage_write: bad val window".into()))?;
 
-    match storage::storage_write(ctx.state, ctx.storage_mode, cap_id, &key, &val) {
+    match storage::storage_write(ctx.state, cap_id, &key, &val) {
         Ok(()) => Ok((RC_OK, 0)),
         Err(KernelError::ReadOnly(_)) => Ok((RC_READONLY, 0)),
         Err(KernelError::QuotaExceeded { .. }) => Ok((RC_QUOTA, 0)),
@@ -151,7 +156,7 @@ fn host_storage_delete<V: VmExec, H: Hardware>(
         .read_mem(key_ptr, key_len)
         .ok_or_else(|| KernelError::Internal("storage_delete: bad key window".into()))?;
 
-    match storage::storage_delete(ctx.state, ctx.storage_mode, cap_id, &key) {
+    match storage::storage_delete(ctx.state, cap_id, &key) {
         Ok(()) => Ok((RC_OK, 0)),
         Err(KernelError::ReadOnly(_)) => Ok((RC_READONLY, 0)),
         Err(e) => Err(e),
@@ -167,9 +172,6 @@ fn host_cnode_grant<V: VmExec, H: Hardware>(
     ctx: &mut InvocationCtx<'_, H>,
 ) -> KResult<(u64, u64)> {
     // φ[7]=src_frame_slot, φ[8]=dest_cnode_frame_slot, φ[9]=dest_cnode_slot
-    if !ctx.storage_mode.is_writable() {
-        return Ok((RC_READONLY, 0));
-    }
     let src_slot = vm.reg(7) as u8;
     let dest_cnode_slot = vm.reg(8) as u8;
     let dest_slot = vm.reg(9) as u8;
@@ -196,9 +198,6 @@ fn host_cnode_revoke<V: VmExec, H: Hardware>(
     vm: &mut V,
     ctx: &mut InvocationCtx<'_, H>,
 ) -> KResult<(u64, u64)> {
-    if !ctx.storage_mode.is_writable() {
-        return Ok((RC_READONLY, 0));
-    }
     let cnode_frame_slot = vm.reg(7) as u8;
     let cnode_slot = vm.reg(8) as u8;
     let cnode_cap = match ctx.frame.get(cnode_frame_slot) {
@@ -217,9 +216,6 @@ fn host_cnode_move<V: VmExec, H: Hardware>(
     vm: &mut V,
     ctx: &mut InvocationCtx<'_, H>,
 ) -> KResult<(u64, u64)> {
-    if !ctx.storage_mode.is_writable() {
-        return Ok((RC_READONLY, 0));
-    }
     // φ[7]=src_cnode_frame_slot, φ[8]=src_slot, φ[9]=dest_cnode_frame_slot, φ[10]=dest_slot
     let src_cn_fs = vm.reg(7) as u8;
     let src_slot = vm.reg(8) as u8;
@@ -355,8 +351,6 @@ fn host_cap_call<V: VmExec, H: Hardware>(
     vm: &mut V,
     ctx: &mut InvocationCtx<'_, H>,
 ) -> KResult<(u64, u64)> {
-    // φ[7]=cap_frame_slot, φ[8]=args_ptr, φ[9]=args_len, φ[10]=caps_ptr (each 1-byte frame slot),
-    // φ[11]=caps_len
     let cap_fs = vm.reg(7) as u8;
     let args_ptr = vm.reg(8) as u32;
     let args_len = vm.reg(9) as u32;
@@ -390,33 +384,25 @@ fn host_cap_call<V: VmExec, H: Hardware>(
     }
 
     match cap {
-        // VaultRef (Initialize): sub-CALL is a future-feature — at this layer
-        // we acknowledge it but deliberately don't recurse into another VM.
-        // Real impl: spawn target Vault VM, run initialize(), CALL its manager.
         Capability::VaultRef { rights, .. } if rights.initialize => {
-            // No arg-scan for sub-CALLs.
+            // Sub-CALL stub. No arg-scan for sub-CALLs.
             Ok((RC_UNIMPLEMENTED, 0))
         }
-        // Dispatch / DispatchRef: emit dispatch command (or, in step-3,
-        // capture as the slot emission).
         Capability::Dispatch { vault_id, .. } | Capability::DispatchRef { vault_id } => {
             pinning::arg_scan(ctx.state, &arg_caps)?;
-            if matches!(ctx.role, KernelRole::AggregateMerge) {
-                // Self-target: emit AggregatedDispatch into the slot.
-                if vault_id == ctx.current_vault {
-                    if ctx.slot_emission.is_some() {
-                        return Err(KernelError::Internal(
-                            "step-3 emitted more than one slot replacement".into(),
-                        ));
-                    }
-                    *ctx.slot_emission = Some(SlotContent::AggregatedDispatch {
-                        payload: args,
-                        caps: caps_bytes_to_vec(&arg_caps),
-                        attestation_trace: ctx.attestation_trace.clone(),
-                        result_trace: ctx.result_trace.clone(),
-                    });
-                    return Ok((RC_OK, 0));
+            if matches!(ctx.role, KernelRole::AggregateMerge) && vault_id == ctx.current_vault {
+                if ctx.slot_emission.is_some() {
+                    return Err(KernelError::Internal(
+                        "step-3 emitted more than one slot replacement".into(),
+                    ));
                 }
+                *ctx.slot_emission = Some(SlotContent::AggregatedDispatch {
+                    payload: args,
+                    caps: caps_bytes_to_vec(&arg_caps),
+                    attestation_trace: ctx.attestation_trace.clone(),
+                    result_trace: ctx.result_trace.clone(),
+                });
+                return Ok((RC_OK, 0));
             }
             ctx.commands.push(Command::Dispatch {
                 entrypoint: vault_id,
@@ -425,9 +411,6 @@ fn host_cap_call<V: VmExec, H: Hardware>(
             });
             Ok((RC_OK, 0))
         }
-        // Transact / TransactRef: only meaningful in step-3 (slot emission)
-        // or top-level Dispatch step-2 (parks; here we just emit a Dispatch
-        // command upstream which the runtime can route).
         Capability::Transact { vault_id, .. } | Capability::TransactRef { vault_id } => {
             pinning::arg_scan(ctx.state, &arg_caps)?;
             if matches!(ctx.role, KernelRole::AggregateMerge) {
@@ -445,9 +428,6 @@ fn host_cap_call<V: VmExec, H: Hardware>(
                 });
                 return Ok((RC_OK, 0));
             }
-            // Outside step-3: park as an upstream Dispatch command targeting
-            // the transact entrypoint's vault. Proposers later lift it into
-            // body.events. For tests we just record the command.
             ctx.commands.push(Command::Dispatch {
                 entrypoint: vault_id,
                 payload: args,
@@ -455,7 +435,6 @@ fn host_cap_call<V: VmExec, H: Hardware>(
             });
             Ok((RC_OK, 0))
         }
-        // Schedule caps are kernel-fired only; never `cap_call`'d by userspace.
         Capability::Schedule { .. } => Ok((RC_BAD_CAP, 0)),
         _ => Ok((RC_BAD_CAP, 0)),
     }
@@ -488,10 +467,6 @@ fn host_create_vault<V: VmExec, H: Hardware>(
     vm: &mut V,
     ctx: &mut InvocationCtx<'_, H>,
 ) -> KResult<(u64, u64)> {
-    if !ctx.storage_mode.is_writable() {
-        return Ok((RC_READONLY, 0));
-    }
-    // φ[7]=resource_frame_slot, φ[8]=code_hash_ptr, φ[9]=dest_frame_slot
     let res_fs = vm.reg(7) as u8;
     let code_hash_ptr = vm.reg(8) as u32;
     let dest_fs = vm.reg(9) as u8;
@@ -510,11 +485,12 @@ fn host_create_vault<V: VmExec, H: Hardware>(
     let code_hash_bytes = vm
         .read_mem(code_hash_ptr, 32)
         .ok_or_else(|| KernelError::Internal("create_vault: bad code_hash window".into()))?;
-    let code_hash = <H as Crypto>::hash_from_bytes(&code_hash_bytes)
-        .ok_or_else(|| KernelError::Internal("create_vault: code_hash width mismatch".into()))?;
+    let mut buf = [0u8; 32];
+    buf.copy_from_slice(&code_hash_bytes);
+    let code_hash = jar_types::Hash(buf);
 
     let new_vault_id = ctx.state.next_vault_id();
-    let mut vault = jar_types::Vault::<H>::new(code_hash);
+    let mut vault = jar_types::Vault::new(code_hash);
     vault.quota_items = quota_items;
     vault.quota_bytes = quota_bytes;
     ctx.state
@@ -540,10 +516,6 @@ fn host_quota_set<V: VmExec, H: Hardware>(
     vm: &mut V,
     ctx: &mut InvocationCtx<'_, H>,
 ) -> KResult<(u64, u64)> {
-    if !ctx.storage_mode.is_writable() {
-        return Ok((RC_READONLY, 0));
-    }
-    // φ[7]=resource_frame_slot, φ[8]=quota_items, φ[9]=quota_bytes
     let res_fs = vm.reg(7) as u8;
     let new_items = vm.reg(8);
     let new_bytes = vm.reg(9);
@@ -561,7 +533,7 @@ fn host_quota_set<V: VmExec, H: Hardware>(
         .get(&target)
         .ok_or(KernelError::VaultNotFound(target))?
         .clone();
-    let mut vault: jar_types::Vault<H> = (*arc).clone();
+    let mut vault: jar_types::Vault = (*arc).clone();
     vault.quota_items = new_items;
     vault.quota_bytes = new_bytes;
     ctx.state.vaults.insert(target, std::sync::Arc::new(vault));
@@ -576,7 +548,6 @@ fn host_attest<V: VmExec, H: Hardware>(
     vm: &mut V,
     ctx: &mut InvocationCtx<'_, H>,
 ) -> KResult<(u64, u64)> {
-    // φ[7]=cap_frame_slot, φ[8]=blob_ptr, φ[9]=blob_len (0 = Sealing).
     let cap_fs = vm.reg(7) as u8;
     let blob_ptr = vm.reg(8) as u32;
     let blob_len = vm.reg(9) as u32;
@@ -621,7 +592,6 @@ fn host_attestation_key<V: VmExec, H: Hardware>(
     vm: &mut V,
     ctx: &mut InvocationCtx<'_, H>,
 ) -> KResult<(u64, u64)> {
-    // φ[7]=cap_frame_slot, φ[8]=out_ptr (32 bytes)
     let cap_fs = vm.reg(7) as u8;
     let out_ptr = vm.reg(8) as u32;
     let cap_id = match ctx.frame.get(cap_fs) {
@@ -631,14 +601,13 @@ fn host_attestation_key<V: VmExec, H: Hardware>(
     let cap = cap_registry::lookup(ctx.state, cap_id)?.cap.clone();
     let key = attest::key_of(&cap)?;
     vm.write_mem(out_ptr, key.as_ref());
-    Ok((RC_OK, 0))
+    Ok((key.0.len() as u64, 0))
 }
 
 fn host_result_equal<V: VmExec, H: Hardware>(
     vm: &mut V,
     ctx: &mut InvocationCtx<'_, H>,
 ) -> KResult<(u64, u64)> {
-    // φ[7]=blob_ptr, φ[8]=blob_len. Trace cursor is `ctx.attest_cursor.result_pos`.
     let blob_ptr = vm.reg(7) as u32;
     let blob_len = vm.reg(8) as u32;
     let blob = if blob_len > 0 {
@@ -648,13 +617,11 @@ fn host_result_equal<V: VmExec, H: Hardware>(
         Vec::new()
     };
     if ctx.attest_cursor.result_pos < ctx.result_trace.len() {
-        // Verifier mode: compare to recorded entry.
         let recorded = &ctx.result_trace[ctx.attest_cursor.result_pos];
         let eq = recorded.blob == blob;
         ctx.attest_cursor.result_pos += 1;
         return Ok((if eq { 1 } else { 0 }, 0));
     }
-    // Producer mode: append.
     ctx.result_trace.push(ResultEntry { blob });
     ctx.attest_cursor.result_pos += 1;
     Ok((1, 0))

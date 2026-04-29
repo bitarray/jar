@@ -1,10 +1,9 @@
 //! Operations on CNodes — grant, move, revoke, derive.
 //!
 //! All slot mutations on persistent CNodes go through these. Pinning checks
-//! happen here. Mutations rejected in read-only contexts (caller passes
-//! `mode_writable=false` and we error).
+//! happen here.
 
-use jar_types::{CNodeId, CapId, Capability, Crypto, KResult, KernelError, State};
+use jar_types::{CNodeId, CapId, Capability, KResult, KernelError, State};
 
 use crate::{cap_registry, pinning};
 
@@ -12,8 +11,8 @@ use crate::{cap_registry, pinning};
 /// source still references it (this is the kernel-level "grant a copy").
 /// Returns the granted CapId (the same as `source_cap` since granting doesn't
 /// re-allocate).
-pub fn cnode_grant<C: Crypto>(
-    state: &mut State<C>,
+pub fn cnode_grant(
+    state: &mut State,
     source_cap: CapId,
     dest_cnode: CNodeId,
     dest_slot: u8,
@@ -37,8 +36,8 @@ pub fn cnode_grant<C: Crypto>(
 
 /// Move a cap from `(src_cnode, src_slot)` to `(dest_cnode, dest_slot)`.
 /// Pinning rule: Dispatch/Transact may only be moved within their `born_in`.
-pub fn cnode_move<C: Crypto>(
-    state: &mut State<C>,
+pub fn cnode_move(
+    state: &mut State,
     src_cnode: CNodeId,
     src_slot: u8,
     dest_cnode: CNodeId,
@@ -82,7 +81,7 @@ pub fn cnode_move<C: Crypto>(
 
 /// Revoke whatever lives in `(cnode, slot)` (if anything). Cascade-revokes
 /// all caps derived from it.
-pub fn cnode_revoke<C: Crypto>(state: &mut State<C>, cnode: CNodeId, slot: u8) -> KResult<()> {
+pub fn cnode_revoke(state: &mut State, cnode: CNodeId, slot: u8) -> KResult<()> {
     let Some(cn) = state.cnodes.get(&cnode) else {
         return Err(KernelError::CNodeNotFound(cnode));
     };
@@ -94,7 +93,7 @@ pub fn cnode_revoke<C: Crypto>(state: &mut State<C>, cnode: CNodeId, slot: u8) -
 }
 
 /// Allocate a fresh empty CNode in σ; returns its id.
-pub fn cnode_create<C: Crypto>(state: &mut State<C>) -> CNodeId {
+pub fn cnode_create(state: &mut State) -> CNodeId {
     let id = state.next_cnode_id();
     state.cnodes.insert(id, jar_types::CNode::new());
     id
@@ -102,12 +101,7 @@ pub fn cnode_create<C: Crypto>(state: &mut State<C>) -> CNodeId {
 
 /// Place an already-allocated CapId at a CNode slot directly (used during
 /// genesis construction). Skips pinning checks — caller's responsibility.
-pub fn cnode_place_raw<C: Crypto>(
-    state: &mut State<C>,
-    cnode: CNodeId,
-    slot: u8,
-    cap: CapId,
-) -> KResult<()> {
+pub fn cnode_place_raw(state: &mut State, cnode: CNodeId, slot: u8, cap: CapId) -> KResult<()> {
     let cn = state
         .cnodes
         .get_mut(&cnode)
@@ -119,9 +113,9 @@ pub fn cnode_place_raw<C: Crypto>(
 
 /// Mint a fresh CapRecord ex nihilo (issuer = None) and place at `(cnode, slot)`.
 /// Used during genesis construction. Skips pinning checks.
-pub fn mint_and_place<C: Crypto>(
-    state: &mut State<C>,
-    cap: Capability<C>,
+pub fn mint_and_place(
+    state: &mut State,
+    cap: Capability,
     narrowing: Vec<u8>,
     cnode: CNodeId,
     slot: u8,

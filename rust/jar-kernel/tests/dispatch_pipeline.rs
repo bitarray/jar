@@ -12,15 +12,12 @@ use jar_kernel::runtime::{InMemoryBus, InMemoryHardware, NodeOffchain};
 use jar_kernel::{Kernel, SlotContent};
 use jar_types::Event;
 
-type Hw = InMemoryHardware;
-
 #[test]
 fn handle_inbound_dispatch_runs_step2_step3_then_settles_slot() {
-    let g = GenesisBuilder::<Hw>::default().build().unwrap();
-    let mut node = NodeOffchain::<Hw>::new();
+    let g = GenesisBuilder::default().build().unwrap();
+    let mut node = NodeOffchain::new();
     let kernel = Kernel::new(InMemoryHardware::new(InMemoryBus::new()));
 
-    // Pre-set the slot to a non-Empty value so we can detect the slot_clear.
     node.set_slot(
         g.dispatch_vault,
         SlotContent::AggregatedDispatch {
@@ -41,9 +38,7 @@ fn handle_inbound_dispatch_runs_step2_step3_then_settles_slot() {
         .handle_inbound_dispatch(&mut node, &g.state, g.dispatch_vault, &event)
         .expect("handle_inbound_dispatch ok");
 
-    // Smoke step-3 emitted slot_clear → SlotContent::Empty.
     assert!(matches!(node.slot(g.dispatch_vault), SlotContent::Empty));
-    // The slot changed, so a BroadcastLite command must have fired.
     assert!(outcome.slot_changed);
     assert_eq!(outcome.commands.len(), 1);
 }

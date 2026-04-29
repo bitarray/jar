@@ -9,7 +9,7 @@
 //! Structural backstop (kernel-enforced): parent linkage + global
 //! attestation/result trace exhaustion.
 
-use jar_types::{Block, BlockHash, Command, KResult, MerkleProof, State};
+use jar_types::{Block, BlockHash, Command, Hash, KResult, MerkleProof, State};
 
 use crate::attest::AttestCursor;
 use crate::runtime::Hardware;
@@ -18,13 +18,13 @@ use crate::transact;
 
 /// Outcome of apply_block.
 #[derive(Debug)]
-pub struct ApplyBlockOutcome<H: Hardware> {
-    pub state_next: State<H>,
-    pub block: Block<H>,
-    pub commands: Vec<Command<H>>,
+pub struct ApplyBlockOutcome {
+    pub state_next: State,
+    pub block: Block,
+    pub commands: Vec<Command>,
     pub block_outcome: BlockOutcome,
-    pub state_root: H::Hash,
-    pub merkle_traces: Vec<MerkleProof<H>>,
+    pub state_root: Hash,
+    pub merkle_traces: Vec<MerkleProof>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,15 +39,15 @@ pub enum BlockOutcome {
 /// populates attestation/result/reach traces. In verifier mode, the kernel
 /// consumes the populated traces and fails on divergence.
 pub fn apply_block<H: Hardware>(
-    state_in: &State<H>,
-    prior_block_hash: BlockHash<H>,
-    block_in: &Block<H>,
+    state_in: &State,
+    prior_block_hash: BlockHash,
+    block_in: &Block,
     hw: &H,
-) -> KResult<ApplyBlockOutcome<H>> {
+) -> KResult<ApplyBlockOutcome> {
     let mut state = state_in.clone();
     let mut block = block_in.clone();
     let mut cursor = AttestCursor::default();
-    let merkle_traces: Vec<MerkleProof<H>> = Vec::new();
+    let merkle_traces: Vec<MerkleProof> = Vec::new();
 
     // Structural backstop: parent linkage. Checked early — a block with the
     // wrong parent can't transition σ regardless of body contents.
@@ -60,7 +60,7 @@ pub fn apply_block<H: Hardware>(
                 "parent hash mismatch: header={:?} expected={:?}",
                 block_in.parent, prior_block_hash
             )),
-            state_root: state_root::state_root(state_in, hw),
+            state_root: state_root::state_root(state_in),
             merkle_traces,
         });
     }
@@ -79,7 +79,7 @@ pub fn apply_block<H: Hardware>(
                 cursor.attestation_pos,
                 block_in.body.attestation_trace.len()
             )),
-            state_root: state_root::state_root(state_in, hw),
+            state_root: state_root::state_root(state_in),
             merkle_traces,
         });
     }
@@ -93,12 +93,12 @@ pub fn apply_block<H: Hardware>(
                 cursor.result_pos,
                 block_in.body.result_trace.len()
             )),
-            state_root: state_root::state_root(state_in, hw),
+            state_root: state_root::state_root(state_in),
             merkle_traces,
         });
     }
 
-    let post_root = state_root::state_root(&state, hw);
+    let post_root = state_root::state_root(&state);
 
     Ok(ApplyBlockOutcome {
         state_next: state,
