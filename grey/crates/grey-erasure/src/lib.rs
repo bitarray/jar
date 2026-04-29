@@ -569,7 +569,7 @@ mod tests {
                 let chunks = encode(&params, &data).expect("encode");
 
                 // Build indexed chunks with one corrupted
-                let mut indexed: Vec<(Vec<u8>, usize)> = chunks
+                let indexed: Vec<(Vec<u8>, usize)> = chunks
                     .into_iter()
                     .enumerate()
                     .map(|(i, mut c)| {
