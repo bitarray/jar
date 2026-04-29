@@ -1,9 +1,9 @@
 [package]
-name = "grey-bench"
+name = "javm-bench"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "PVM benchmarks: grey interpreter vs recompiler vs polkavm"
+description = "PVM benchmarks: javm interpreter vs recompiler vs polkavm"
 
 [features]
 default = ["polkavm-generic-sandbox"]
@@ -18,7 +18,7 @@ polkavm = "0.32.0"
 polkavm-common = "0.32.0"
 
 [build-dependencies]
-build-javm = { path = "../../../rust/build-javm" }
+build-javm = { path = "../build-javm" }
 build-pvm = { path = "../build-pvm" }
 
 [dev-dependencies]

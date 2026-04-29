@@ -205,7 +205,7 @@ fn build_blob(c: Vec<u8>, m: Vec<u8>, stack_pages: u32, heap_pages: u32) -> Vec<
 ///
 /// For sizes > 256MB, the harness must call `set_heap_top` on the PVM after init
 /// to expand the heap beyond the u16 heap_pages limit.
-pub fn grey_mem_seq_blob(size_bytes: u64) -> Vec<u8> {
+pub fn javm_mem_seq_blob(size_bytes: u64) -> Vec<u8> {
     assert!(size_bytes >= 4096 && size_bytes.is_multiple_of(4096));
     let heap_pages = (size_bytes / 4096) as u32;
 
@@ -292,7 +292,7 @@ pub fn grey_mem_seq_blob(size_bytes: u64) -> Vec<u8> {
 ///
 /// Allocates `size_bytes` of heap, initializes with a pattern, then performs
 /// N_ELEMS * 16 random reads using xorshift32 for index generation.
-pub fn grey_mem_rand_blob(size_bytes: u64) -> Vec<u8> {
+pub fn javm_mem_rand_blob(size_bytes: u64) -> Vec<u8> {
     assert!(size_bytes >= 4096 && size_bytes.is_multiple_of(4096));
     let n_elems = size_bytes / 4;
     let heap_pages = (size_bytes / 4096) as u32;
@@ -370,14 +370,14 @@ mod tests {
 
     #[test]
     fn test_mem_seq_blob_halts() {
-        let blob = grey_mem_seq_blob(4096u64);
+        let blob = javm_mem_seq_blob(4096u64);
         let (result, _gas) = crate::run_kernel(&blob, 10_000_000);
         assert_ne!(result, 0, "seq checksum should be non-zero");
     }
 
     #[test]
     fn test_mem_rand_blob_halts() {
-        let blob = grey_mem_rand_blob(4096u64);
+        let blob = javm_mem_rand_blob(4096u64);
         let (result, _gas) = crate::run_kernel(&blob, 1_000_000);
         assert_ne!(result, 0, "rand checksum should be non-zero");
     }

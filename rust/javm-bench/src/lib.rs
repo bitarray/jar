@@ -6,7 +6,7 @@
 //! - `sort`: insertion sort (compute + memory interleaved)
 //! - `mem`: memory cache pressure (sequential + random access patterns)
 //!
-//! Each program is available in both grey-pvm blob format and polkavm blob format.
+//! Each program is available in both javm blob format and polkavm blob format.
 
 pub mod mem;
 
@@ -19,12 +19,12 @@ use javm_transpiler::assembler::{Assembler, Reg};
 /// Default gas limit for standard benchmarks.
 pub const GAS_LIMIT: u64 = 100_000_000;
 
-/// Run a grey-pvm blob on the kernel. Returns (result, gas_consumed).
+/// Run a javm blob on the kernel. Returns (result, gas_consumed).
 pub fn run_kernel(blob: &[u8], gas: u64) -> (u64, u64) {
     run_kernel_with_backend(blob, gas, javm::PvmBackend::Default)
 }
 
-/// Run a grey-pvm blob on the kernel with a specific backend. Returns (result, gas_consumed).
+/// Run a javm blob on the kernel with a specific backend. Returns (result, gas_consumed).
 pub fn run_kernel_with_backend(blob: &[u8], gas: u64, backend: javm::PvmBackend) -> (u64, u64) {
     let mut kernel = javm::kernel::InvocationKernel::new_with_backend(blob, &[], gas, backend)
         .expect("kernel init failed");
@@ -45,14 +45,14 @@ pub fn run_kernel_with_backend(blob: &[u8], gas: u64, backend: javm::PvmBackend)
     }
 }
 
-/// Run a grey-pvm blob on the interpreter (via kernel). Returns (result, gas_consumed).
-pub fn run_grey_interpreter(blob: &[u8], gas: u64) -> (u64, u64) {
+/// Run a javm blob on the interpreter (via kernel). Returns (result, gas_consumed).
+pub fn run_javm_interpreter(blob: &[u8], gas: u64) -> (u64, u64) {
     run_kernel_with_backend(blob, gas, javm::PvmBackend::ForceInterpreter)
 }
 
-/// Run a grey-pvm blob on the recompiler (via kernel). Returns (result, gas_consumed).
+/// Run a javm blob on the recompiler (via kernel). Returns (result, gas_consumed).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub fn run_grey_recompiler(blob: &[u8], gas: u64) -> (u64, u64) {
+pub fn run_javm_recompiler(blob: &[u8], gas: u64) -> (u64, u64) {
     run_kernel_with_backend(blob, gas, javm::PvmBackend::ForceRecompiler)
 }
 
@@ -66,17 +66,17 @@ pub const HOSTCALL_N: u64 = 100_000;
 pub const SORT_N: u32 = 1_000;
 
 // ---------------------------------------------------------------------------
-// Grey-PVM blob builders (using grey-transpiler assembler)
+// javm blob builders (using javm-transpiler assembler)
 // ---------------------------------------------------------------------------
 
-/// Build a compute-intensive Fibonacci program as a grey-pvm standard blob.
+/// Build a compute-intensive Fibonacci program as a javm standard blob.
 ///
 /// Computes fib(N) iteratively:
 ///   T0=0, T1=1, T2=counter
 ///   loop: S0 = T0+T1; T0=T1; T1=S0; T2++; if T2<N goto loop
 ///   result in A0 = T1
 ///   halt
-pub fn grey_fib_blob(n: u64) -> Vec<u8> {
+pub fn javm_fib_blob(n: u64) -> Vec<u8> {
     let mut asm = Assembler::new();
     asm.set_stack_pages(1);
     asm.set_heap_pages(0);
@@ -110,10 +110,10 @@ pub fn grey_fib_blob(n: u64) -> Vec<u8> {
     asm.build()
 }
 
-/// Build a host-call-heavy program as a grey-pvm standard blob.
+/// Build a host-call-heavy program as a javm standard blob.
 ///
 /// Repeatedly calls ecalli(1) (GAS) N times, then halts.
-pub fn grey_hostcall_blob(n: u64) -> Vec<u8> {
+pub fn javm_hostcall_blob(n: u64) -> Vec<u8> {
     let mut asm = Assembler::new();
     asm.set_stack_pages(1);
     asm.set_heap_pages(0);
@@ -140,7 +140,7 @@ pub fn grey_hostcall_blob(n: u64) -> Vec<u8> {
     asm.build()
 }
 
-/// Build an insertion-sort program as a grey-pvm standard blob.
+/// Build an insertion-sort program as a javm standard blob.
 ///
 /// Sorts an array of `n` u32 elements on the stack using insertion sort.
 /// The array is initialized with a descending sequence (worst case):
@@ -152,7 +152,7 @@ pub fn grey_hostcall_blob(n: u64) -> Vec<u8> {
 ///   - Inner loop: load, compare, store (memory) + index arithmetic (ALU)
 ///   - Outer loop: load key element, scan backwards, insert
 ///   - O(n²) comparisons and O(n²) memory moves for worst-case input
-pub fn grey_sort_blob(n: u32) -> Vec<u8> {
+pub fn javm_sort_blob(n: u32) -> Vec<u8> {
     let array_bytes = n * 4;
     let stack_bytes = 4096 + array_bytes;
     let stack_pages = stack_bytes.div_ceil(4096);
@@ -564,9 +564,9 @@ pub fn polkavm_hostcall_blob(n: u64) -> Vec<u8> {
 
 include!(concat!(env!("OUT_DIR"), "/guest_blobs.rs"));
 
-/// Grey PVM blob for ecrecover (pre-built and transpiled at compile time).
-pub fn grey_ecrecover_blob() -> &'static [u8] {
-    GREY_ECRECOVER_BLOB
+/// javm blob for ecrecover (pre-built and transpiled at compile time).
+pub fn javm_ecrecover_blob() -> &'static [u8] {
+    JAVM_ECRECOVER_BLOB
 }
 
 /// PolkaVM blob for ecrecover (pre-built and linked at compile time).
@@ -574,9 +574,9 @@ pub fn polkavm_ecrecover_blob() -> &'static [u8] {
     POLKAVM_ECRECOVER_BLOB
 }
 
-/// Grey PVM blob for prime sieve (pre-built and transpiled at compile time).
-pub fn grey_sieve_blob() -> &'static [u8] {
-    GREY_SIEVE_BLOB
+/// javm blob for prime sieve (pre-built and transpiled at compile time).
+pub fn javm_sieve_blob() -> &'static [u8] {
+    JAVM_SIEVE_BLOB
 }
 
 /// PolkaVM blob for prime sieve (pre-built and linked at compile time).
@@ -584,28 +584,23 @@ pub fn polkavm_sieve_blob() -> &'static [u8] {
     POLKAVM_SIEVE_BLOB
 }
 
-pub fn grey_ed25519_blob() -> &'static [u8] {
-    GREY_ED25519_BLOB
+pub fn javm_ed25519_blob() -> &'static [u8] {
+    JAVM_ED25519_BLOB
 }
 pub fn polkavm_ed25519_blob() -> &'static [u8] {
     POLKAVM_ED25519_BLOB
 }
-pub fn grey_blake2b_blob() -> &'static [u8] {
-    GREY_BLAKE2B_BLOB
+pub fn javm_blake2b_blob() -> &'static [u8] {
+    JAVM_BLAKE2B_BLOB
 }
 pub fn polkavm_blake2b_blob() -> &'static [u8] {
     POLKAVM_BLAKE2B_BLOB
 }
-pub fn grey_keccak_blob() -> &'static [u8] {
-    GREY_KECCAK_BLOB
+pub fn javm_keccak_blob() -> &'static [u8] {
+    JAVM_KECCAK_BLOB
 }
 pub fn polkavm_keccak_blob() -> &'static [u8] {
     POLKAVM_KECCAK_BLOB
-}
-
-/// Grey PVM service blob for sample-service (refine at PC=0, accumulate at PC=5).
-pub fn sample_service_blob() -> &'static [u8] {
-    SAMPLE_SERVICE_BLOB
 }
 
 // ---------------------------------------------------------------------------
@@ -624,7 +619,7 @@ pub const FIB_RECUR_N: u64 = 20;
 /// via the bitmask, so recursive creation works without COPY+GRANT.
 ///
 /// memory_pages=0: no UNTYPED, no stack, no heap. Pure register computation.
-pub fn grey_fib_recur_blob() -> Vec<u8> {
+pub fn javm_fib_recur_blob() -> Vec<u8> {
     use javm::cap::Access;
     use javm::program::{CapEntryType, CapManifestEntry, build_blob};
 
@@ -860,7 +855,7 @@ mod tests_fib_recur {
 
     #[test]
     fn test_fib_recur_base_cases() {
-        let blob = grey_fib_recur_blob();
+        let blob = javm_fib_recur_blob();
         let gas = 100_000_000u64;
         let (r0, _, _) = run_fib_recur_with_backend(&blob, 0, gas, javm::PvmBackend::Default);
         assert_eq!(r0, 0, "fib(0) should be 0");
@@ -870,7 +865,7 @@ mod tests_fib_recur {
 
     #[test]
     fn test_fib_recur_sequence() {
-        let blob = grey_fib_recur_blob();
+        let blob = javm_fib_recur_blob();
         let gas = 1_000_000_000u64;
         let expected = [0u64, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144];
         for (n, &expect) in expected.iter().enumerate() {
@@ -882,7 +877,7 @@ mod tests_fib_recur {
 
     #[test]
     fn test_fib_recur_15() {
-        let blob = grey_fib_recur_blob();
+        let blob = javm_fib_recur_blob();
         let gas = 1_000_000_000u64;
         let (result, gas_used, vm_count) =
             run_fib_recur_with_backend(&blob, 15, gas, javm::PvmBackend::Default);
@@ -892,7 +887,7 @@ mod tests_fib_recur {
 
     #[test]
     fn test_fib_recur_20() {
-        let blob = grey_fib_recur_blob();
+        let blob = javm_fib_recur_blob();
         let gas = 10_000_000_000u64;
         let (result, gas_used, vm_count) =
             run_fib_recur_with_backend(&blob, 20, gas, javm::PvmBackend::Default);
@@ -902,7 +897,7 @@ mod tests_fib_recur {
 
     #[test]
     fn test_fib_recur_22() {
-        let blob = grey_fib_recur_blob();
+        let blob = javm_fib_recur_blob();
         let gas = 100_000_000_000u64;
         // fib(22) = 17711, creates 57313 VMs — near MAX_VMS (u16::MAX = 65535)
         let (result, gas_used, vm_count) =
@@ -914,7 +909,7 @@ mod tests_fib_recur {
     #[test]
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     fn test_fib_recur_interpreter_recompiler_match() {
-        let blob = grey_fib_recur_blob();
+        let blob = javm_fib_recur_blob();
         let gas = 1_000_000_000u64;
         let (i_result, i_gas, i_vms) =
             run_fib_recur_with_backend(&blob, 10, gas, javm::PvmBackend::ForceInterpreter);
@@ -933,15 +928,15 @@ mod tests_sort {
     use super::*;
 
     #[test]
-    fn test_grey_sort_small() {
-        let blob = grey_sort_blob(5);
+    fn test_javm_sort_small() {
+        let blob = javm_sort_blob(5);
         let (result, _gas) = run_kernel(&blob, 10_000_000);
         assert_eq!(result, 1, "arr[0] should be 1 after sorting");
     }
 
     #[test]
     fn test_ecrecover_code_size() {
-        let blob = grey_ecrecover_blob();
+        let blob = javm_ecrecover_blob();
         // Parse the v2 blob to inspect code structure
         let parsed = javm::program::parse_blob(blob).expect("should parse v2 blob");
         let code_cap = parsed
@@ -953,7 +948,7 @@ mod tests_sort {
             if let Some(code_blob) = javm::program::parse_code_blob(code_data) {
                 let inst_count: usize = code_blob.bitmask.iter().filter(|&&b| b == 1).count();
                 eprintln!(
-                    "Grey PVM:  code={} bytes, {} instructions",
+                    "javm:  code={} bytes, {} instructions",
                     code_blob.code.len(),
                     inst_count
                 );
@@ -964,9 +959,9 @@ mod tests_sort {
     }
 
     #[test]
-    fn test_grey_ecrecover() {
+    fn test_javm_ecrecover() {
         let gas = 100_000_000_000u64;
-        let (result, gas_used) = run_kernel(grey_ecrecover_blob(), gas);
+        let (result, gas_used) = run_kernel(javm_ecrecover_blob(), gas);
         eprintln!("ecrecover: a0={result} gas_used={gas_used}");
         assert!(
             gas_used > 1_000_000,
@@ -980,10 +975,10 @@ mod tests_sort {
     fn assert_interp_recomp(blob: &[u8], expected_a0: u64, min_gas: u64, name: &str) {
         let gas = 100_000_000_000u64;
 
-        let (interp_a0, interp_gas) = run_grey_interpreter(blob, gas);
+        let (interp_a0, interp_gas) = run_javm_interpreter(blob, gas);
         assert_eq!(interp_a0, expected_a0, "{name}: interpreter a0 mismatch");
 
-        let (recomp_a0, recomp_gas) = run_grey_recompiler(blob, gas);
+        let (recomp_a0, recomp_gas) = run_javm_recompiler(blob, gas);
         assert_eq!(recomp_a0, interp_a0, "{name}: recompiler a0 mismatch");
 
         assert!(
@@ -998,74 +993,33 @@ mod tests_sort {
 
     #[test]
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn test_grey_ecrecover_recompiler() {
-        assert_interp_recomp(grey_ecrecover_blob(), 1, 100_000, "ecrecover");
+    fn test_javm_ecrecover_recompiler() {
+        assert_interp_recomp(javm_ecrecover_blob(), 1, 100_000, "ecrecover");
     }
 
     #[test]
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn test_grey_prime_sieve_recompiler() {
-        assert_interp_recomp(grey_sieve_blob(), 9592, 100_000, "prime_sieve");
+    fn test_javm_prime_sieve_recompiler() {
+        assert_interp_recomp(javm_sieve_blob(), 9592, 100_000, "prime_sieve");
     }
 
     #[test]
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn test_grey_ed25519_recompiler() {
-        assert_interp_recomp(grey_ed25519_blob(), 1, 1_000, "ed25519");
+    fn test_javm_ed25519_recompiler() {
+        assert_interp_recomp(javm_ed25519_blob(), 1, 1_000, "ed25519");
     }
 
     #[test]
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn test_grey_blake2b_recompiler() {
+    fn test_javm_blake2b_recompiler() {
         // blake2b-256 of [0x00..0xFF]*4: first 4 bytes LE = 0xEE1F55F1, sign-extended on rv64
-        assert_interp_recomp(grey_blake2b_blob(), 0xFFFFFFFFEE1F55F1, 10_000, "blake2b");
+        assert_interp_recomp(javm_blake2b_blob(), 0xFFFFFFFFEE1F55F1, 10_000, "blake2b");
     }
 
     #[test]
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    fn test_grey_keccak_recompiler() {
+    fn test_javm_keccak_recompiler() {
         // keccak-256 of [0x00..0xFF]*4: first 4 bytes LE = 0x39E50259
-        assert_interp_recomp(grey_keccak_blob(), 0x39E50259, 10_000, "keccak");
-    }
-
-    #[test]
-    fn test_sample_service_loadable() {
-        let blob = sample_service_blob();
-        assert!(!blob.is_empty());
-        let kernel = javm::kernel::InvocationKernel::new(blob, &[], 1_000_000);
-        assert!(
-            kernel.is_ok(),
-            "sample service blob should be loadable: {:?}",
-            kernel.err()
-        );
-    }
-
-    #[test]
-    fn test_sample_service_refine_halts() {
-        let blob = sample_service_blob();
-        let mut kernel = javm::kernel::InvocationKernel::new(blob, &[], 1_000_000)
-            .expect("blob should be loadable");
-        let result = kernel.run();
-        match result {
-            javm::kernel::KernelResult::Halt(_) | javm::kernel::KernelResult::Panic => {}
-            other => panic!("refine should halt or panic; got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_sample_service_accumulate_host_write() {
-        let blob = sample_service_blob();
-        let mut kernel = javm::kernel::InvocationKernel::new(blob, &[], 1_000_000)
-            .expect("blob should be loadable");
-        // In v2, the program dispatches on φ[7] (op code).
-        // φ[7]=1 means accumulate. Set it before running.
-        kernel.vm_arena.vm_mut(kernel.active_vm).set_reg(7, 1);
-        let result = kernel.run();
-        match result {
-            javm::kernel::KernelResult::Halt(_)
-            | javm::kernel::KernelResult::Panic
-            | javm::kernel::KernelResult::ProtocolCall { .. } => {}
-            other => panic!("expected halt/panic/protocol call, got {:?}", other),
-        }
+        assert_interp_recomp(javm_keccak_blob(), 0x39E50259, 10_000, "keccak");
     }
 }

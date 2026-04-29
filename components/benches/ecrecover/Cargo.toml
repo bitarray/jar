@@ -8,7 +8,7 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
-javm-builtins = { path = "../../../crates/javm-builtins" }
+javm-builtins = { path = "../../../rust/javm-builtins" }
 
 [target.'cfg(target_env = "polkavm")'.dependencies]
 polkavm-derive = "0.32.0"

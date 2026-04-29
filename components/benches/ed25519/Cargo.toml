@@ -1,5 +1,5 @@
 [package]
-name = "bench-keccak"
+name = "bench-ed25519"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,8 +7,8 @@ edition = "2021"
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-sha3 = { version = "0.10", default-features = false }
-javm-builtins = { path = "../../../crates/javm-builtins" }
+ed25519-compact = { version = "2", default-features = false }
+javm-builtins = { path = "../../../rust/javm-builtins" }
 
 [target.'cfg(target_env = "polkavm")'.dependencies]
 polkavm-derive = "0.32.0"

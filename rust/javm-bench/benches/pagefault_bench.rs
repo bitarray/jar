@@ -4,7 +4,7 @@
 //! MAP_NORESERVE (virtual only), then touch one byte per page to trigger
 //! kernel page faults. This calibrates the per-page gas fee for grow_heap.
 //!
-//! Run: `cargo bench -p grey-bench --bench pagefault_bench`
+//! Run: `cargo bench -p javm-bench --bench pagefault_bench`
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 

@@ -1,6 +1,6 @@
-/// Single-run ecrecover timing: native, grey interpreter, grey recompiler, polkavm.
+/// Single-run ecrecover timing: native, javm interpreter, javm recompiler, polkavm.
 /// Each backend is run in a child thread and killed after 10s if it doesn't finish.
-use grey_bench::*;
+use javm_bench::*;
 use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -51,35 +51,35 @@ fn main() {
         );
     });
 
-    let grey_blob = grey_ecrecover_blob();
+    let javm_blob = javm_ecrecover_blob();
     let pvm_blob = polkavm_ecrecover_blob();
 
-    // ---- Grey interpreter ----
+    // ---- javm interpreter ----
     {
-        let blob = grey_blob;
-        run_with_timeout("grey-interpreter", move || {
+        let blob = javm_blob;
+        run_with_timeout("javm-interpreter", move || {
             let t = Instant::now();
             let (result, gas_used) =
                 run_kernel_with_backend(blob, GAS, javm::PvmBackend::ForceInterpreter);
             eprintln!(
                 "{:20} {:>10.3} ms  a0={result} gas_used={gas_used} ({:.1}M inst)",
-                "grey-interpreter",
+                "javm-interpreter",
                 t.elapsed().as_secs_f64() * 1000.0,
                 gas_used as f64 / 1e6
             );
         });
     }
 
-    // ---- Grey recompiler ----
+    // ---- javm recompiler ----
     {
-        let blob = grey_blob;
-        run_with_timeout("grey-recompiler", move || {
+        let blob = javm_blob;
+        run_with_timeout("javm-recompiler", move || {
             let t = Instant::now();
             let (result, gas_used) =
                 run_kernel_with_backend(blob, GAS, javm::PvmBackend::ForceRecompiler);
             eprintln!(
                 "{:20} {:>10.3} ms  a0={result} gas_used={gas_used}",
-                "grey-recompiler",
+                "javm-recompiler",
                 t.elapsed().as_secs_f64() * 1000.0
             );
         });

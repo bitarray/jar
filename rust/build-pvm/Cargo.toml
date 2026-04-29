@@ -6,5 +6,5 @@ license.workspace = true
 description = "Build PolkaVM blobs from Rust service crates"
 
 [dependencies]
-build-crate = { path = "../../../rust/build-crate" }
+build-crate = { path = "../build-crate" }
 polkavm-linker = "0.32.0"

@@ -5,10 +5,10 @@
 //!   - `mem_seq`: sequential sweep (prefetch-friendly, best case)
 //!   - `mem_rand`: pseudo-random stride (cache-hostile, worst case)
 //!
-//! Run: `cargo bench -p grey-bench --bench mem_bench`
+//! Run: `cargo bench -p javm-bench --bench mem_bench`
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use grey_bench::mem::*;
+use javm_bench::mem::*;
 
 /// Compute gas limit proportional to working set size.
 ///
@@ -52,14 +52,14 @@ fn init_kernel(blob: &[u8], gas: u64) -> javm::kernel::InvocationKernel {
 
 fn bench_mem_seq(c: &mut Criterion) {
     for &(label, size) in SIZES {
-        let blob = grey_mem_seq_blob(size);
+        let blob = javm_mem_seq_blob(size);
         let gas = gas_for_size(size);
 
         let mut group = c.benchmark_group(format!("mem_seq/{label}"));
         if size >= 8 * 1024 * 1024 {
             group.sample_size(10);
         }
-        group.bench_function("grey-recompiler-exec", |b| {
+        group.bench_function("javm-recompiler-exec", |b| {
             b.iter_batched(
                 || init_kernel(&blob, gas),
                 |mut kernel| {
@@ -80,14 +80,14 @@ fn bench_mem_seq(c: &mut Criterion) {
 
 fn bench_mem_rand(c: &mut Criterion) {
     for &(label, size) in SIZES {
-        let blob = grey_mem_rand_blob(size);
+        let blob = javm_mem_rand_blob(size);
         let gas = gas_for_size(size);
 
         let mut group = c.benchmark_group(format!("mem_rand/{label}"));
         if size >= 8 * 1024 * 1024 {
             group.sample_size(10);
         }
-        group.bench_function("grey-recompiler-exec", |b| {
+        group.bench_function("javm-recompiler-exec", |b| {
             b.iter_batched(
                 || init_kernel(&blob, gas),
                 |mut kernel| {

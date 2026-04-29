@@ -1,10 +1,10 @@
-/// Dump native code for grey and polkavm programs for disassembly comparison.
+/// Dump native code for javm and polkavm programs for disassembly comparison.
 ///
 /// Usage:
-///   cargo run -p grey-bench --release --example dump_native
-///   objdump -D -b binary -m i386:x86-64 /tmp/grey_sort.bin | less
+///   cargo run -p javm-bench --release --example dump_native
+///   objdump -D -b binary -m i386:x86-64 /tmp/javm_sort.bin | less
 ///   objdump -D -b binary -m i386:x86-64 /tmp/polkavm_sort.bin | less
-use grey_bench::*;
+use javm_bench::*;
 
 fn dump_polkavm(name: &str, blob: Vec<u8>) {
     let mut config = polkavm::Config::new();
@@ -26,7 +26,7 @@ fn dump_polkavm(name: &str, blob: Vec<u8>) {
     }
 }
 
-fn dump_grey(name: &str, blob: &[u8]) {
+fn dump_javm(name: &str, blob: &[u8]) {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
         let kernel = javm::kernel::InvocationKernel::new_with_backend(
@@ -46,27 +46,27 @@ fn dump_grey(name: &str, blob: &[u8]) {
                     compiled.native_code.len,
                 )
             };
-            let path = format!("/tmp/grey_{name}.bin");
+            let path = format!("/tmp/javm_{name}.bin");
             std::fs::write(&path, native).unwrap();
-            eprintln!("grey {name}: {} bytes -> {path}", native.len());
+            eprintln!("javm {name}: {} bytes -> {path}", native.len());
         }
     }
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     {
         let _ = blob;
-        eprintln!("grey {name}: JIT recompiler not available on this platform");
+        eprintln!("javm {name}: JIT recompiler not available on this platform");
     }
 }
 
 fn main() {
-    let blob = grey_fib_blob(FIB_N);
-    dump_grey("fib", &blob);
+    let blob = javm_fib_blob(FIB_N);
+    dump_javm("fib", &blob);
     dump_polkavm("fib", polkavm_fib_blob(FIB_N));
 
-    let blob = grey_sort_blob(SORT_N);
-    dump_grey("sort", &blob);
+    let blob = javm_sort_blob(SORT_N);
+    dump_javm("sort", &blob);
     dump_polkavm("sort", polkavm_sort_blob(SORT_N));
 
-    dump_grey("ecrecover", grey_ecrecover_blob());
+    dump_javm("ecrecover", javm_ecrecover_blob());
     dump_polkavm("ecrecover", polkavm_ecrecover_blob().to_vec());
 }

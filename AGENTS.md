@@ -1,48 +1,30 @@
 @spec/AGENTS.md
-@grey/AGENTS.md
 
 ## Monorepo Layout
 
-- `spec/` — JAR formal specification (Lean 4)
-- `grey/` — Grey protocol node (Rust)
-- `spec/tests/vectors/` — Shared conformance test vectors (used by both)
+- `spec/` — JAR formal specification (Lean 4).
+- `rust/` — minimum-JAR kernel + javm (Rust workspace).
+- `components/` — guest crates (PVM blobs) consumed by `rust/` (today: bench guests).
+- `tools/jar-genesis` — Genesis Proof-of-Intelligence tooling.
+- `grey/` — legacy JAM-flavoured node. Excluded from the workspace; not built in CI.
 
-## Test Vectors
+## Build & test (rust workspace)
 
-Shared conformance test vectors live in `spec/tests/vectors/<subsystem>/`. Three variants: `gp072_tiny`, `gp072_full`, `jar1`. Grey only tests `jar1`.
-
-### Rebuild PVM blobs for test vectors
-
-The accumulate test vectors reference compiled PVM service blobs (`spec/tests/vectors/accumulate/blobs/`). When service source changes (e.g., host call numbers, REPLY convention), rebuild:
+All commands run from `~/jar`.
 
 ```bash
-cd grey
-cargo clean -p spec-tests && cargo build --release -p spec-tests
-cargo run --release -p spec-tests -- bless ../spec/tests/vectors/accumulate/blobs
+cargo build --workspace
+cargo test --workspace
+cargo run -p jar -- testnet --nodes 3 --slots 5     # 3-node in-process testnet
+cargo bench -p javm-bench                           # javm interp/recomp vs polkavm
 ```
 
-### Rebless jar1 test vectors
-
-After changing the Lean spec or rebuilding blobs, regenerate expected outputs:
+Useful single-crate runs:
 
 ```bash
-cd spec
-lake build jarstf
-.lake/build/bin/jarstf --variant jar1 --bless accumulate tests/vectors/accumulate
-```
-
-To bless a specific subsystem for a specific variant:
-```bash
-.lake/build/bin/jarstf --variant <variant> --bless <subsystem> tests/vectors/<subsystem>
-```
-
-**IMPORTANT**: `gp072_tiny` and `gp072_full` test vectors must remain unchanged unless the GP spec changes. Only rebless `jar1` for JAR-specific changes.
-
-### Verify all variants pass
-
-```bash
-cd spec && make test                           # Lean spec (all 3 variants)
-cd grey && cargo test -p grey-state            # Rust STF (jar1 only)
+cargo test -p jar-kernel                            # kernel unit + integration tests
+cargo test -p javm                                  # javm unit tests
+cargo test -p javm-guest-tests                      # javm guest conformance vectors
 ```
 
 ## Conventions

@@ -1,6 +1,6 @@
 /// Measure compile time vs execution time for sort benchmark.
 /// Helps identify whether compilation or execution is the bottleneck.
-use grey_bench::*;
+use javm_bench::*;
 use std::time::Instant;
 
 const GAS_LIMIT: u64 = 100_000_000;
@@ -12,9 +12,9 @@ fn median(v: &mut [u128]) -> u128 {
 }
 
 fn main() {
-    let sort_blob = grey_sort_blob(500);
+    let sort_blob = javm_sort_blob(500);
 
-    // --- Grey recompiler (via kernel) ---
+    // --- javm recompiler (via kernel) ---
     let mut compile_us = Vec::new();
     let mut exec_us = Vec::new();
     for _ in 0..ITERS {
@@ -33,7 +33,7 @@ fn main() {
             match kernel.run() {
                 javm::kernel::KernelResult::Halt(_) => break,
                 javm::kernel::KernelResult::ProtocolCall { .. } => continue,
-                other => panic!("grey: {:?}", other),
+                other => panic!("javm: {:?}", other),
             }
         }
         exec_us.push(t1.elapsed().as_micros());
@@ -41,7 +41,7 @@ fn main() {
     let gc = median(&mut compile_us);
     let ge = median(&mut exec_us);
     eprintln!(
-        "grey-recompiler  compile={gc:>6}µs  exec={ge:>6}µs  total={:>6}µs",
+        "javm-recompiler  compile={gc:>6}µs  exec={ge:>6}µs  total={:>6}µs",
         gc + ge
     );
 

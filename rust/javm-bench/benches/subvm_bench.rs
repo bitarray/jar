@@ -5,13 +5,13 @@
 //!   - CALL(HANDLE) → cross-VM invocation
 //!   - REPLY → return to caller
 //!
-//! Grey-only — polkavm has no multi-VM kernel model.
+//! javm-only — polkavm has no multi-VM kernel model.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use grey_bench::*;
+use javm_bench::*;
 
 fn bench_fib_recur(c: &mut Criterion) {
-    let blob = grey_fib_recur_blob();
+    let blob = javm_fib_recur_blob();
     let n = FIB_RECUR_N;
     let gas = 10_000_000_000u64;
 
@@ -24,11 +24,11 @@ fn bench_fib_recur(c: &mut Criterion) {
     let mut group = c.benchmark_group("fib_recur");
     group.sample_size(10);
 
-    group.bench_function("grey-interpreter", |b| {
+    group.bench_function("javm-interpreter", |b| {
         b.iter(|| run_fib_recur_with_backend(&blob, n, gas, javm::PvmBackend::ForceInterpreter))
     });
 
-    group.bench_function("grey-recompiler", |b| {
+    group.bench_function("javm-recompiler", |b| {
         b.iter(|| run_fib_recur_with_backend(&blob, n, gas, javm::PvmBackend::ForceRecompiler))
     });
 

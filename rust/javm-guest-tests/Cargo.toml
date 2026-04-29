@@ -7,15 +7,15 @@ edition = "2021"
 crate-type = ["lib"]
 
 [dependencies]
-javm-builtins = { path = "../../crates/javm-builtins" }
+javm-builtins = { path = "../javm-builtins" }
 blake2 = { version = "0.10", default-features = false }
 sha3 = { version = "0.10", default-features = false }
 
 [build-dependencies]
-build-javm = { path = "../../../rust/build-javm" }
+build-javm = { path = "../build-javm" }
 
 [dev-dependencies]
-javm = { path = "../../../rust/javm" }
+javm = { path = "../javm" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_env, values("javm", "polkavm"))', 'cfg(target_os, values("none"))'] }

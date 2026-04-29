@@ -1,5 +1,5 @@
 [package]
-name = "bench-ed25519"
+name = "bench-prime-sieve"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,8 +7,7 @@ edition = "2021"
 crate-type = ["lib", "cdylib"]
 
 [dependencies]
-ed25519-compact = { version = "2", default-features = false }
-javm-builtins = { path = "../../../crates/javm-builtins" }
+javm-builtins = { path = "../../../rust/javm-builtins" }
 
 [target.'cfg(target_env = "polkavm")'.dependencies]
 polkavm-derive = "0.32.0"
