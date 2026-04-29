@@ -70,6 +70,11 @@ pub struct State {
     pub cap_holders: BTreeMap<CapId, BTreeSet<(CNodeId, u8)>>,
     pub transact_space_cnode: CapId,
     pub dispatch_space_cnode: CapId,
+    /// Kernel-internal vault that owns the code-blob storage. Not exposed in
+    /// any cnode; only the kernel reads `state.vaults[code_vault].storage`,
+    /// keyed by `crypto::hash(blob_bytes)`. Genesis allocates this vault and
+    /// populates it with every blob a user vault's `code_hash` references.
+    pub code_vault: VaultId,
     pub id_counters: IdCounters,
 }
 
@@ -85,6 +90,7 @@ impl State {
             cap_holders: BTreeMap::new(),
             transact_space_cnode: CapId(0),
             dispatch_space_cnode: CapId(0),
+            code_vault: VaultId(0),
             id_counters: IdCounters::default(),
         }
     }

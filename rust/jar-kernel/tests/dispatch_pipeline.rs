@@ -1,14 +1,17 @@
-//! Off-chain Dispatch step-2/step-3 pipeline via Kernel::dispatch.
+//! Off-chain Dispatch step-2 / step-3 pipeline via `Kernel::dispatch`.
 //!
-//! The smoke step-3 VM emits `slot_clear()` — i.e., the slot is reset to
-//! `Empty` after every event. Real chains would emit `AggregatedTransact`;
-//! we'll exercise that once a real PVM step-3 guest lands. Until then this
-//! test verifies the pipeline mechanics: dispatch runs step-2/step-3,
-//! updates the slot, emits commands.
+//! Genesis defaults wire the `slot_clear` PVM blob as the dispatch
+//! entrypoint's code. The blob is phase-aware via `φ[7]`: step-2 (φ[7]=0)
+//! halts immediately; step-3 (φ[7]=1) issues `ecalli 19`
+//! (`HostCall::SlotClear`) then halts. The kernel runs both phases via real
+//! `javm::kernel::InvocationKernel` and resets the slot to `Empty`.
+//!
+//! Real chains would emit `AggregatedTransact` instead; the slot-clear path
+//! exercises the host-call dispatch loop end-to-end.
 
 use jar_kernel::Kernel;
 use jar_kernel::genesis::GenesisBuilder;
-use jar_kernel::runtime::{InMemoryBus, InMemoryHardware};
+use jar_kernel::runtime::{InMemoryBus, InMemoryHardware, NetMessage};
 use jar_types::Event;
 
 #[test]
@@ -36,10 +39,18 @@ fn dispatch_runs_step2_step3_and_subscribes_at_construction() {
     };
     k.dispatch(dispatch_vault, &event).expect("dispatch ok");
 
-    // Smoke step-3 emitted slot_clear → Empty; that's the no-change case
-    // (prev was Empty too) so no BroadcastLite should have fired. But we
-    // can verify by checking the bus inbox didn't receive a LiteUpdate.
-    drop(hw_inbox); // not asserting on contents; the kernel update side
-    // is observable through state, not through this inbox channel
-    // (LiteUpdate would have shown up only on a slot change).
+    // Step-3 slot_clear sets the slot to Empty. Initial slot was also Empty,
+    // so `slot_changed = false` and no BroadcastLite is emitted. Drain the
+    // inbox and assert nothing arrived — proves the kernel didn't accidentally
+    // emit a spurious BroadcastLite.
+    let mut got_lite = false;
+    while let Ok(msg) = hw_inbox.try_recv() {
+        if matches!(msg, NetMessage::LiteUpdate { .. }) {
+            got_lite = true;
+        }
+    }
+    assert!(
+        !got_lite,
+        "unexpected LiteUpdate emitted for no-change slot transition"
+    );
 }

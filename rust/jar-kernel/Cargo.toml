@@ -11,3 +11,6 @@ jar-crypto = { workspace = true }
 javm = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[build-dependencies]
+build-javm = { path = "../build-javm" }

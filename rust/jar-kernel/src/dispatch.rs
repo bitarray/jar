@@ -4,16 +4,21 @@
 //! 1. `vault_initialize(entrypoint, RO)` — fresh VM, run `initialize()`.
 //! 2. **Step 2** (`caller=Kernel(AggregateStandalone)`): per-event verification
 //!    on the standalone event. May cap_call downward Dispatches. May not
-//!    touch the slot.
-//! 3. **Step 3** (`caller=Kernel(AggregateMerge)`): same VM (memory persists),
-//!    args = current slot bytes. Folds verified-event data with current slot.
-//!    Emits exactly one slot replacement via `cap_call` on self / Transact /
-//!    `slot_clear()`.
+//!    touch the slot. Entered with φ[7]=0.
+//! 3. **Step 3** (`caller=Kernel(AggregateMerge)`): args = current slot bytes,
+//!    surfaced via the `slot_read` host call. Folds verified-event data with
+//!    current slot. Emits exactly one slot replacement via `cap_call` on self
+//!    / Transact / `slot_clear()`. Entered with φ[7]=1.
 //! 4. Slot is updated; if changed, `BroadcastLite` command emitted.
 //!
 //! Step-2/3 frames carry a `SnapshotStorage` cap rooted at the prior block's
 //! state — RO by construction. The kernel enforces RO via the cap variant;
 //! there is no `StorageMode` flag.
+//!
+//! Note: a single VM instance per phase. The spec docstring's "same VM
+//! (memory persists)" ideal needs javm cooperative-yield support to be
+//! truly literal; today step-2 and step-3 are separate `InvocationKernel`s
+//! built from the same blob, distinguished by the φ[7] phase tag.
 
 use jar_types::{
     AttestationEntry, Caller, Capability, Command, Event, KResult, KernelError, KernelRole,
@@ -22,8 +27,9 @@ use jar_types::{
 
 use crate::attest::AttestCursor;
 use crate::cap_registry;
+use crate::code_blobs;
 use crate::frame::Frame;
-use crate::invocation::{InvocationCtx, ScriptStep, VmExec, drive_invocation};
+use crate::invocation::{INVOCATION_GAS_BUDGET, InvocationCtx, drive_invocation};
 use crate::reach::ReachSet;
 use crate::runtime::{Hardware, NodeOffchain};
 
@@ -83,6 +89,11 @@ pub fn handle_inbound_dispatch<H: Hardware>(
     let mut cursor = AttestCursor::default();
     let frame = build_dispatch_frame(&mut state_clone, entrypoint, &event.caps, prior_root)?;
 
+    // Resolve the entrypoint blob (same blob runs both phases). Use
+    // `code_cache` so the second phase reuses the first phase's compile.
+    let code_hash = state_clone.vault(entrypoint)?.code_hash;
+    let blob = code_blobs::resolve_code_blob(&state_clone, &code_hash)?.to_vec();
+
     // Step 2.
     let attestation_target = attestation_trace.len();
     let result_target = result_trace.len();
@@ -100,9 +111,18 @@ pub fn handle_inbound_dispatch<H: Hardware>(
             attestation_trace: &mut attestation_trace,
             result_trace: &mut result_trace,
             slot_emission: &mut slot_emission,
+            prev_slot: None,
             hw,
         };
-        let _ = drive_invocation(&mut build_smoke_step2(event), &mut ctx)?;
+        let mut vm = javm::kernel::InvocationKernel::new_cached(
+            &blob,
+            &event.payload,
+            INVOCATION_GAS_BUDGET,
+            &mut node.code_cache,
+        )
+        .map_err(|e| KernelError::Internal(format!("javm init step-2: {:?}", e)))?;
+        vm.set_active_reg(7, 0);
+        let _ = drive_invocation(&mut vm, &mut ctx)?;
     }
     if cursor.attestation_pos != attestation_target || cursor.result_pos != result_target {
         return Err(KernelError::TraceDivergence(format!(
@@ -112,7 +132,7 @@ pub fn handle_inbound_dispatch<H: Hardware>(
     }
 
     // Step 3.
-    let prev_slot = node.slot(entrypoint).clone();
+    let prev_slot_owned = node.slot(entrypoint).clone();
     let mut slot_emission: Option<SlotContent> = None;
     {
         let mut ctx = InvocationCtx {
@@ -127,9 +147,18 @@ pub fn handle_inbound_dispatch<H: Hardware>(
             attestation_trace: &mut attestation_trace,
             result_trace: &mut result_trace,
             slot_emission: &mut slot_emission,
+            prev_slot: Some(&prev_slot_owned),
             hw,
         };
-        let _ = drive_invocation(&mut build_smoke_step3(event, &prev_slot), &mut ctx)?;
+        let mut vm = javm::kernel::InvocationKernel::new_cached(
+            &blob,
+            &event.payload,
+            INVOCATION_GAS_BUDGET,
+            &mut node.code_cache,
+        )
+        .map_err(|e| KernelError::Internal(format!("javm init step-3: {:?}", e)))?;
+        vm.set_active_reg(7, 1);
+        let _ = drive_invocation(&mut vm, &mut ctx)?;
     }
     if cursor.attestation_pos != attestation_trace.len() || cursor.result_pos != result_trace.len()
     {
@@ -142,6 +171,7 @@ pub fn handle_inbound_dispatch<H: Hardware>(
         )));
     }
 
+    let prev_slot = prev_slot_owned;
     let new_slot = slot_emission.unwrap_or(SlotContent::Empty);
     let changed = new_slot != prev_slot;
     node.set_slot(entrypoint, new_slot.clone());
@@ -182,21 +212,4 @@ fn build_dispatch_frame(
     );
     frame.set(0, storage_cap);
     Ok(frame)
-}
-
-/// Smoke step-2 VM: halts immediately, emits no downward dispatches.
-fn build_smoke_step2(_event: &Event) -> impl VmExec {
-    crate::invocation::ScriptVm::new(vec![ScriptStep::Halt { rv: 0 }])
-}
-
-/// Smoke step-3 VM: emits `slot_clear()` then halts. Real step-3 chains call
-/// the appropriate cap_call to set AggregatedDispatch / AggregatedTransact.
-fn build_smoke_step3(_event: &Event, _prev: &SlotContent) -> impl VmExec {
-    crate::invocation::ScriptVm::new(vec![
-        ScriptStep::ProtocolCall {
-            slot: crate::host_abi::HostCall::SlotClear as u8,
-            regs: [0u64; 13],
-        },
-        ScriptStep::Halt { rv: 0 },
-    ])
 }

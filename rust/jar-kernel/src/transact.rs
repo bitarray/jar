@@ -19,8 +19,9 @@ use jar_types::{
 
 use crate::attest::AttestCursor;
 use crate::cap_registry;
+use crate::code_blobs;
 use crate::frame::Frame;
-use crate::invocation::{InvocationCtx, ScriptStep, VmExec, drive_invocation};
+use crate::invocation::{INVOCATION_GAS_BUDGET, InvocationCtx, drive_invocation};
 use crate::reach::ReachSet;
 use crate::runtime::Hardware;
 use crate::snapshot::StateSnapshot;
@@ -109,6 +110,12 @@ pub fn run_one_invocation<H: Hardware>(
     hw: &H,
 ) -> KResult<(ReachEntry, Vec<Command>)> {
     let snapshot = StateSnapshot::take(state);
+    // Resolve the entrypoint blob from σ.code_vault before we hand `state`
+    // to the InvocationCtx as `&mut`.
+    let code_hash = state.vault(target)?.code_hash;
+    let blob = code_blobs::resolve_code_blob(state, &code_hash)?.to_vec();
+    let mut vm = javm::kernel::InvocationKernel::new(&blob, payload, INVOCATION_GAS_BUDGET)
+        .map_err(|e| KernelError::Internal(format!("javm init: {:?}", e)))?;
     let mut commands: Vec<Command> = Vec::new();
     let mut reach = ReachSet::default();
     reach.note(target);
@@ -127,10 +134,10 @@ pub fn run_one_invocation<H: Hardware>(
         attestation_trace,
         result_trace,
         slot_emission: &mut slot_emission,
+        prev_slot: None,
         hw,
     };
 
-    let mut vm = build_smoke_vm(payload);
     let outcome = drive_invocation(&mut vm, &mut ctx)?;
 
     let _ = kind; // currently unused — both kinds run the same way at
@@ -179,13 +186,6 @@ fn build_invocation_frame(state: &mut State, vault_id: VaultId) -> KResult<Frame
     );
     frame.set(0, storage_cap);
     Ok(frame)
-}
-
-/// Smoke VM: halts immediately. Replaced with a real PVM blob driver once
-/// guest services land. `_payload` is the event's bytes (or empty for
-/// Schedule invocations); future PVM driver will load it as args.
-fn build_smoke_vm(_payload: &[u8]) -> impl VmExec {
-    crate::invocation::ScriptVm::new(vec![ScriptStep::Halt { rv: 0 }])
 }
 
 /// Run the entire transact phase. Walks σ.transact_space_cnode in slot

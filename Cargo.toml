@@ -27,6 +27,8 @@ members = [
     "rust/jar-crypto",
     "rust/jar-kernel",
     "rust/jar",
+    "rust/jar-test-services/halt",
+    "rust/jar-test-services/slot_clear",
     "grey/services/benches/blake2b",
     "grey/services/benches/ecrecover",
     "grey/services/benches/ed25519",

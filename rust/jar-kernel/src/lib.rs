@@ -27,6 +27,7 @@ pub mod apply_block;
 pub mod attest;
 pub mod cap_registry;
 pub mod cnode_ops;
+pub mod code_blobs;
 pub mod crypto;
 pub mod dispatch;
 pub mod frame;

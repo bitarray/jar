@@ -62,6 +62,9 @@ pub enum HostCall {
     ResultEqual = 18,
     SlotClear = 19,
     SlotEmit = 20, // synthesized by step-3 cap_call when target is self-DispatchRef
+    /// Read the prior-slot SCALE bytes into a guest memory window. Only valid
+    /// during dispatch step-3 (`AggregateMerge`).
+    SlotRead = 21,
 }
 
 impl HostCall {
@@ -87,6 +90,7 @@ impl HostCall {
             18 => Ok(HostCall::ResultEqual),
             19 => Ok(HostCall::SlotClear),
             20 => Ok(HostCall::SlotEmit),
+            21 => Ok(HostCall::SlotRead),
             _ => Err(KernelError::Internal(format!(
                 "unknown protocol slot {}",
                 slot

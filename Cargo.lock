@@ -2381,12 +2381,21 @@ dependencies = [
 name = "jar-kernel"
 version = "0.1.0"
 dependencies = [
+ "build-javm",
  "jar-crypto",
  "jar-types",
  "javm",
  "thiserror 2.0.18",
  "tracing",
 ]
+
+[[package]]
+name = "jar-test-halt"
+version = "0.1.0"
+
+[[package]]
+name = "jar-test-slot-clear"
+version = "0.1.0"
 
 [[package]]
 name = "jar-types"

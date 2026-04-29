@@ -20,6 +20,7 @@ pub fn state_root(state: &State) -> Hash {
 
     push_u64(&mut buf, state.transact_space_cnode.0);
     push_u64(&mut buf, state.dispatch_space_cnode.0);
+    push_u64(&mut buf, state.code_vault.0);
 
     push_u64(&mut buf, state.vaults.len() as u64);
     for (vid, vault) in &state.vaults {
