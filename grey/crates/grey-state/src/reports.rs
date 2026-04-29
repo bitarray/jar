@@ -75,14 +75,14 @@ pub struct AvailAssignment {
 }
 
 /// Service account info needed for validation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct ServiceInfo {
     pub code_hash: Hash,
     pub min_item_gas: Gas,
 }
 
 /// Per-core statistics.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CoreStats {
     pub da_load: u64,
     pub popularity: u64,
@@ -133,7 +133,7 @@ impl ServiceStats {
 }
 
 /// Reported package output.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReportedPackage {
     pub work_package_hash: Hash,
     pub segment_tree_root: Hash,

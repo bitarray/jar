@@ -40,7 +40,7 @@ pub use kernel::CodeCache;
 // --- PVM types ---
 
 /// Exit reason for PVM execution (ε values, eq A.1).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExitReason {
     /// ∎: Normal halt.
     Halt,
