@@ -88,7 +88,9 @@ const MGMT_COPY: u32 = 0x7;
 // transfers happen via dynamic-ecall MOVE / COPY (`dispatch_ecall` 0x06 /
 // 0x07) with cap-ref indirection through HandleCaps.
 const MGMT_DOWNGRADE: u32 = 0xA;
-const MGMT_SET_MAX_GAS: u32 = 0xB;
+// 0xB (legacy SET_MAX_GAS) deliberately unused — per-call gas restriction
+// is achieved by the park pattern via `MGMT_GAS_DERIVE` / `MGMT_GAS_MERGE`
+// on the `Capability::Gas` cap at ephemeral sub-slot 3.
 const MGMT_DIRTY: u32 = 0xC;
 /// Gas-cap derive: split `amount` units off a Gas cap into a fresh Gas
 /// cap. Routes through `ProtocolCapT::gas_derive`. The protocol payload
@@ -674,17 +676,15 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             }
             Cap::Handle(h) => {
                 let target_vm = h.vm_id;
-                let max_gas = h.max_gas;
                 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
                 self.flush_live_ctx();
-                self.handle_call_vm(target_vm, max_gas)
+                self.handle_call_vm(target_vm)
             }
             Cap::Callable(c) => {
                 let target_vm = c.vm_id;
-                let max_gas = c.max_gas;
                 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
                 self.flush_live_ctx();
-                self.handle_call_vm(target_vm, max_gas)
+                self.handle_call_vm(target_vm)
             }
             Cap::Data(_) => {
                 // DATA is not callable
@@ -821,10 +821,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         };
 
         // Caller-picks: HANDLE destination from φ[12] with indirection
-        let handle = HandleCap {
-            vm_id: child_vm_id,
-            max_gas: None,
-        };
+        let handle = HandleCap { vm_id: child_vm_id };
 
         let dst_ref = self.active_reg(12) as u32;
         let (dst_frame, dst_slot) = match self.resolve_cap_ref(dst_ref) {
@@ -851,7 +848,16 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     }
 
     /// CALL on HANDLE/CALLABLE → suspend caller, run target VM.
-    fn handle_call_vm(&mut self, vm_id: VmId, max_gas: Option<u64>) -> DispatchResult {
+    ///
+    /// Gas is shared across the entire call tree via the `Capability::Gas`
+    /// cap at ephemeral sub-slot 3. There is no per-call ceiling (the old
+    /// `max_gas` retired); per-call restriction is the **park pattern**:
+    /// the caller `MGMT_GAS_DERIVE`s a portion off the live Gas cap into
+    /// a parked slot in its own Frame before calling, and `MGMT_GAS_MERGE`s
+    /// it back after REPLY. The kernel just transfers the active VM's
+    /// remaining gas to the callee on the way in and the callee's
+    /// remaining back to the caller on REPLY/HALT.
+    fn handle_call_vm(&mut self, vm_id: VmId) -> DispatchResult {
         let target_vm_id = vm_id.index();
 
         // Validate VmId (generation check for stale handles)
@@ -868,19 +874,17 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             Some(_) => {} // valid and idle
         }
 
-        // Determine gas budget for callee
+        // Charge CALL overhead and pass the caller's full residual gas to
+        // the callee. The shared-pool model means there's no split — the
+        // callee inherits everything the caller had left.
         let caller_vm = &mut self.vm_arena.vm_mut(self.active_vm);
         let call_overhead = 10u64;
         if caller_vm.gas() < call_overhead {
             return DispatchResult::Fault(FaultType::OutOfGas);
         }
         caller_vm.set_gas(caller_vm.gas() - call_overhead);
-
-        let callee_gas = match max_gas {
-            Some(limit) => caller_vm.gas().min(limit),
-            None => caller_vm.gas(),
-        };
-        caller_vm.set_gas(caller_vm.gas() - callee_gas);
+        let callee_gas = caller_vm.gas();
+        caller_vm.set_gas(0);
 
         // Save caller state
         let caller_id = self.active_vm;
@@ -1180,11 +1184,6 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                 let (o_frame, o_slot) = resolve!(self, object_ref);
                 self.ecall_downgrade(s_frame, s_slot, o_frame, o_slot)
             }
-            0x0B => {
-                // SET_MAX_GAS — resolve subject HANDLE
-                let (frame, slot) = resolve!(self, subject_ref);
-                self.ecall_set_max_gas(frame, slot)
-            }
             0x0C => {
                 // DIRTY — TODO
                 self.set_active_reg(7, RESULT_WHAT);
@@ -1217,7 +1216,6 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             MGMT_MOVE => self.mgmt_move(cap_idx),
             MGMT_COPY => self.mgmt_copy(cap_idx),
             MGMT_DOWNGRADE => self.mgmt_downgrade(cap_idx),
-            MGMT_SET_MAX_GAS => self.mgmt_set_max_gas(cap_idx),
             MGMT_DIRTY => {
                 // TODO: dirty bitmap query
                 self.set_active_reg(7, RESULT_WHAT);
@@ -1482,15 +1480,15 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
 
     fn mgmt_downgrade(&mut self, handle_idx: u8) -> DispatchResult {
         let vm = &self.vm_arena.vm(self.active_vm);
-        let (vm_id, max_gas) = match vm.cap_table.get(handle_idx) {
-            Some(Cap::Handle(h)) => (h.vm_id, h.max_gas),
+        let vm_id = match vm.cap_table.get(handle_idx) {
+            Some(Cap::Handle(h)) => h.vm_id,
             _ => {
                 self.set_active_reg(7, RESULT_WHAT);
                 return DispatchResult::Continue;
             }
         };
 
-        let callable = CallableCap { vm_id, max_gas };
+        let callable = CallableCap { vm_id };
 
         let vm = &mut self.vm_arena.vm_mut(self.active_vm);
         let free = match (64..255u8).find(|i| vm.cap_table.is_empty(*i)) {
@@ -1506,25 +1504,11 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         DispatchResult::Continue
     }
 
-    fn mgmt_set_max_gas(&mut self, handle_idx: u8) -> DispatchResult {
-        let gas_limit = self.active_reg(7);
-        let vm = &mut self.vm_arena.vm_mut(self.active_vm);
-        match vm.cap_table.get_mut(handle_idx) {
-            Some(Cap::Handle(h)) => {
-                h.max_gas = Some(gas_limit);
-            }
-            _ => {
-                self.set_active_reg(7, RESULT_WHAT);
-            }
-        }
-        DispatchResult::Continue
-    }
-
-    /// RESUME a FAULTED VM. Same gas model as CALL.
+    /// RESUME a FAULTED VM. Same shared-pool gas model as CALL.
     fn handle_resume(&mut self, handle_idx: u8) -> DispatchResult {
         let vm = self.vm_arena.vm(self.active_vm);
-        let (target_vm_vid, max_gas) = match vm.cap_table.get(handle_idx) {
-            Some(Cap::Handle(h)) => (h.vm_id, h.max_gas),
+        let target_vm_vid = match vm.cap_table.get(handle_idx) {
+            Some(Cap::Handle(h)) => h.vm_id,
             _ => {
                 self.set_active_reg(7, RESULT_WHAT);
                 return DispatchResult::Continue;
@@ -1541,19 +1525,16 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             }
         }
 
-        // Gas transfer (same as CALL)
+        // Charge CALL overhead and transfer the caller's residual gas to
+        // the callee (shared-pool model — no split).
         let caller_vm = &mut self.vm_arena.vm_mut(self.active_vm);
         let call_overhead = 10u64;
         if caller_vm.gas() < call_overhead {
             return DispatchResult::Fault(FaultType::OutOfGas);
         }
         caller_vm.set_gas(caller_vm.gas() - call_overhead);
-
-        let callee_gas = match max_gas {
-            Some(limit) => caller_vm.gas().min(limit),
-            None => caller_vm.gas(),
-        };
-        caller_vm.set_gas(caller_vm.gas() - callee_gas);
+        let callee_gas = caller_vm.gas();
+        caller_vm.set_gas(0);
 
         // Save caller state
         let caller_id = self.active_vm;
@@ -1886,8 +1867,8 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         o_frame: FrameRef,
         o_slot: u8,
     ) -> DispatchResult {
-        let (vm_id, max_gas) = match self.frame_table(s_frame).and_then(|t| t.get(s_slot)) {
-            Some(Cap::Handle(h)) => (h.vm_id, h.max_gas),
+        let vm_id = match self.frame_table(s_frame).and_then(|t| t.get(s_slot)) {
+            Some(Cap::Handle(h)) => h.vm_id,
             _ => {
                 self.set_active_reg(7, RESULT_WHAT);
                 return DispatchResult::Continue;
@@ -1902,21 +1883,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             return DispatchResult::Continue;
         }
         if let Some(t) = self.frame_table_mut(o_frame) {
-            t.set(o_slot, Cap::Callable(CallableCap { vm_id, max_gas }));
-        }
-        DispatchResult::Continue
-    }
-
-    /// SET_MAX_GAS on a HANDLE.
-    fn ecall_set_max_gas(&mut self, frame: FrameRef, slot: u8) -> DispatchResult {
-        let gas_limit = self.active_reg(7);
-        match self.frame_table_mut(frame).and_then(|t| t.get_mut(slot)) {
-            Some(Cap::Handle(h)) => {
-                h.max_gas = Some(gas_limit);
-            }
-            _ => {
-                self.set_active_reg(7, RESULT_WHAT);
-            }
+            t.set(o_slot, Cap::Callable(CallableCap { vm_id }));
         }
         DispatchResult::Continue
     }
@@ -2779,6 +2746,14 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                 let cg = self.vm_arena.vm(caller_id).gas();
                 self.vm_arena.vm_mut(caller_id).set_gas(cg + unused_gas);
 
+                // Kernel-default rollback: scan the resuming parent's
+                // persistent Frame for parked Gas caps and merge them
+                // back into the live ephemeral Gas cap. This guarantees
+                // the parent recovers the full budget it set aside via
+                // GAS_DERIVE before the failed CALL, regardless of what
+                // the (possibly-untrusted) child did with its share.
+                self.rollback_parked_gas(caller_id);
+
                 // Set φ[7]=aux_value, φ[8]=status
                 self.vm_arena.vm_mut(caller_id).set_reg(7, aux_value);
                 self.vm_arena.vm_mut(caller_id).set_reg(8, status);
@@ -2794,6 +2769,47 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                     FaultType::OutOfGas => DispatchResult::RootOutOfGas,
                     FaultType::PageFault(addr) => DispatchResult::RootPageFault(addr),
                 }
+            }
+        }
+    }
+
+    /// Scan `vm_idx`'s persistent Frame for parked `Cap::Protocol(P)` caps
+    /// (slots 1..=255, skipping the EphemeralTable handle at slot 0) and
+    /// attempt to merge each one into the live Gas cap at ephemeral
+    /// sub-slot 3 via `ProtocolCapT::gas_merge`. Caps where `gas_merge`
+    /// returns false (non-Gas-shaped payloads) are restored to their
+    /// slot; successful merges drop the donor.
+    fn rollback_parked_gas(&mut self, vm_idx: u16) {
+        let id = match self.ephemeral_id() {
+            Some(id) => id,
+            None => return,
+        };
+        for slot in 1..=255u8 {
+            // Take the cap so we can pass `&donor` to `gas_merge` while
+            // mutably borrowing the ephemeral table; restore on failure.
+            let taken = match self.vm_arena.vm_mut(vm_idx).cap_table.take(slot) {
+                Some(c) => c,
+                None => continue,
+            };
+            let donor = match taken {
+                Cap::Protocol(p) => p,
+                other => {
+                    self.vm_arena.vm_mut(vm_idx).cap_table.set(slot, other);
+                    continue;
+                }
+            };
+            let merged = match self.ephemeral_arena.get_mut(id) {
+                Some(table) => match table.get_mut(3) {
+                    Some(Cap::Protocol(dst)) => dst.gas_merge(&donor),
+                    _ => false,
+                },
+                None => false,
+            };
+            if !merged {
+                self.vm_arena
+                    .vm_mut(vm_idx)
+                    .cap_table
+                    .set(slot, Cap::Protocol(donor));
             }
         }
     }
@@ -3048,7 +3064,12 @@ mod tests {
     }
 
     #[test]
-    fn test_kernel_gas_bounding() {
+    fn test_kernel_call_transfers_full_gas() {
+        // Shared-pool gas model: CALL transfers caller's full residual
+        // gas to the callee (no max_gas split). Per-call restriction is
+        // achieved by the park pattern via MGMT_GAS_DERIVE / _MERGE,
+        // which is host-policy on top of `Capability::Gas` and not
+        // exercised by this javm-only test.
         let blob = make_simple_blob(10);
         let mut kernel: InvocationKernel = InvocationKernel::new(&blob, 100_000).unwrap();
         let _ = kernel.vm_arena.vm_mut(0).transition(VmState::Running);
@@ -3059,25 +3080,15 @@ mod tests {
         kernel.dispatch_ecalli(64);
         let handle_idx = kernel.active_reg(7) as u8;
 
-        // SET_MAX_GAS on handle via ecall: φ[7]=5000, φ[11]=0x0B, φ[12]=handle(high)
-        kernel.set_active_reg(7, 5000);
-        kernel.set_active_reg(11, 0x0B); // SET_MAX_GAS
-        kernel.set_active_reg(12, (handle_idx as u64) << 32); // subject=handle, object=0
-        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
-        kernel.flush_live_ctx();
-        kernel.dispatch_ecall(0x0B);
-
-        // CALL child — gas should be capped at 5000
+        // CALL child — callee gets caller's full residual gas, caller
+        // is left with 0 until REPLY restores the residual.
         let parent_gas_before = kernel.vm_arena.vm(0).gas();
-        kernel.set_active_reg(7, 0);
-        kernel.set_active_reg(12, 0); // no IPC cap (slot 0 = IPC itself)
         kernel.dispatch_ecalli(handle_idx as u32);
 
         assert_eq!(kernel.active_vm, 1);
-        assert_eq!(kernel.vm_arena.vm(1).gas(), 5000);
-
-        // Parent lost 10 (ecalli) + 10 (call overhead) + 5000 (transfer)
-        assert_eq!(kernel.vm_arena.vm(0).gas(), parent_gas_before - 5020);
+        // Callee inherits caller_gas - ecalli_charge (10) - call_overhead (10).
+        assert_eq!(kernel.vm_arena.vm(1).gas(), parent_gas_before - 20);
+        assert_eq!(kernel.vm_arena.vm(0).gas(), 0);
     }
 
     #[test]

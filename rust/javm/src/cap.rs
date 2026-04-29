@@ -329,12 +329,17 @@ impl core::fmt::Debug for CodeCap {
 }
 
 /// VM owner handle. Unique per VM, not copyable. Provides CALL + management ops.
+///
+/// There is no `max_gas` ceiling — gas is shared across the whole
+/// invocation via the `Capability::Gas` cap at ephemeral sub-slot 3.
+/// Per-call gas restriction is achieved with the **park pattern**:
+/// `MGMT_GAS_DERIVE` splits a portion off the live Gas cap into a
+/// parked slot in the caller's Frame, the callee runs against the
+/// reduced shared budget, and `MGMT_GAS_MERGE` recombines on return.
 #[derive(Debug)]
 pub struct HandleCap {
     /// VM ID in the kernel's arena (index + generation for stale detection).
     pub vm_id: crate::vm_pool::VmId,
-    /// Per-CALL gas ceiling (inherited by DOWNGRADEd CALLABLEs).
-    pub max_gas: Option<u64>,
 }
 
 /// VM entry point. Copyable. Provides CALL only (no management ops).
@@ -342,8 +347,6 @@ pub struct HandleCap {
 pub struct CallableCap {
     /// VM ID in the kernel's arena (index + generation for stale detection).
     pub vm_id: crate::vm_pool::VmId,
-    /// Per-CALL gas ceiling.
-    pub max_gas: Option<u64>,
 }
 
 /// Handle to the per-invocation ephemeral table — a 256-slot cap-table
@@ -751,14 +754,12 @@ mod tests {
 
         let handle: Cap = Cap::Handle(HandleCap {
             vm_id: crate::vm_pool::VmId::new(0, 0),
-            max_gas: None,
         });
         assert!(!handle.is_copyable());
         assert!(handle.try_copy().is_none());
 
         let callable: Cap = Cap::Callable(CallableCap {
             vm_id: crate::vm_pool::VmId::new(0, 0),
-            max_gas: None,
         });
         assert!(callable.is_copyable());
         assert!(callable.try_copy().is_some());
@@ -790,7 +791,6 @@ mod tests {
             10,
             Cap::Callable(CallableCap {
                 vm_id: crate::vm_pool::VmId::new(1, 0),
-                max_gas: Some(5000),
             }),
         );
 
@@ -810,7 +810,6 @@ mod tests {
             10,
             Cap::Callable(CallableCap {
                 vm_id: crate::vm_pool::VmId::new(1, 0),
-                max_gas: None,
             }),
         );
         table.set(20, Cap::Data(DataCap::new(0, 1)));
