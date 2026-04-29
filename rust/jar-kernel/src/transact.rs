@@ -131,9 +131,13 @@ fn build_smoke_vm(_event: &Event) -> impl VmExec {
     crate::invocation::ScriptVm::new(vec![ScriptStep::Halt { rv: 0 }])
 }
 
-/// Run the entire transact phase. Iterates entrypoints in canonical order,
-/// runs each event through its entrypoint Vault, and accumulates traces +
-/// commands.
+/// Run the entire transact phase. Walks `body.events` in proposer-supplied
+/// list order, runs each `(target, event)` through its target Vault's
+/// manager, and accumulates traces + commands.
+///
+/// Each event entry's `target_vault_id` must be present in
+/// `σ.transact_space_cnode`; mismatch faults the invocation (σ rolls back,
+/// next event runs).
 pub fn run_phase<H: Hardware>(
     state: &mut State,
     body: &mut Body,
@@ -144,39 +148,39 @@ pub fn run_phase<H: Hardware>(
     let _ = is_proposer; // determinism: same code path either way
     let _ = Arc::new(()); // keep Arc import alive
     let mut all_commands: Vec<Command> = Vec::new();
-    let entrypoints = transact_entrypoints(state)?;
-    for ep in entrypoints {
-        let events = body.events.get(&ep).cloned().unwrap_or_default();
-        for (i, event) in events.into_iter().enumerate() {
-            let event_idx = i as u32;
-            let (reach_entry, mut commands) = run_transact_event(
-                state,
-                ep,
-                event_idx,
-                &event,
-                &mut body.attestation_trace,
-                &mut body.result_trace,
-                cursor,
-                hw,
-            )?;
-            // Strict-equality check on verifier side.
-            if let Some(recorded) = body
-                .reach_trace
-                .iter()
-                .find(|r| r.entrypoint == ep && r.event_idx == event_idx)
-            {
-                if recorded.vaults != reach_entry.vaults {
-                    return Err(KernelError::TraceDivergence(format!(
-                        "reach mismatch on {:?}#{}: actual {:?}, recorded {:?}",
-                        ep, event_idx, reach_entry.vaults, recorded.vaults
-                    )));
-                }
-            } else {
-                body.reach_trace.push(reach_entry);
-            }
-            all_commands.append(&mut commands);
+    let registered: std::collections::BTreeSet<VaultId> =
+        transact_entrypoints(state)?.into_iter().collect();
+
+    for (event_idx_usize, (target, event)) in body.events.iter().cloned().enumerate() {
+        let event_idx = event_idx_usize as u32;
+        if !registered.contains(&target) {
+            return Err(KernelError::Internal(format!(
+                "event #{} target {:?} not in σ.transact_space_cnode",
+                event_idx, target
+            )));
         }
+        let (reach_entry, mut commands) = run_transact_event(
+            state,
+            target,
+            event_idx,
+            &event,
+            &mut body.attestation_trace,
+            &mut body.result_trace,
+            cursor,
+            hw,
+        )?;
+        // Strict-equality check on verifier side.
+        if let Some(recorded) = body.reach_trace.get(event_idx_usize) {
+            if recorded.vaults != reach_entry.vaults {
+                return Err(KernelError::TraceDivergence(format!(
+                    "reach mismatch at event #{}: actual {:?}, recorded {:?}",
+                    event_idx, reach_entry.vaults, recorded.vaults
+                )));
+            }
+        } else {
+            body.reach_trace.push(reach_entry);
+        }
+        all_commands.append(&mut commands);
     }
     Ok(all_commands)
 }
-

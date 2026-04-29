@@ -59,11 +59,9 @@ fn encode_caller(c: &Caller) -> (u64, u64) {
         Caller::Kernel(role) => (
             1,
             match role {
-                KernelRole::BlockValidation => 0,
-                KernelRole::BlockFinalization => 1,
-                KernelRole::TransactEntry => 2,
-                KernelRole::AggregateStandalone => 3,
-                KernelRole::AggregateMerge => 4,
+                KernelRole::TransactEntry => 0,
+                KernelRole::AggregateStandalone => 1,
+                KernelRole::AggregateMerge => 2,
             },
         ),
     }
@@ -681,4 +679,3 @@ fn host_slot_clear<V: VmExec, H: Hardware>(
     *ctx.slot_emission = Some(SlotContent::Empty);
     Ok((RC_OK, 0))
 }
-

@@ -16,7 +16,7 @@ use clap::{Parser, Subcommand};
 use jar_kernel::genesis::GenesisBuilder;
 use jar_kernel::runtime::{InMemoryBus, InMemoryHardware, NodeOffchain};
 use jar_kernel::{BlockOutcome, apply_block, drain_for_body};
-use jar_types::{BlockHash, Hash, Header, Slot, State};
+use jar_types::{Block, BlockHash, Hash, State};
 
 #[derive(Parser, Debug)]
 #[command(name = "jar")]
@@ -70,18 +70,20 @@ fn run_testnet(num_nodes: u32, num_slots: u32) {
         let proposer_idx = (slot_n - 1) % num_nodes;
         let proposer = &mut nodes[proposer_idx as usize];
 
-        // Drain proposer's slots into a fresh body.
+        // Drain proposer's slots into a fresh body. In a real chain the
+        // proposer would prepend its event[0] (header gating) and append
+        // event[-1] (finalization gating); for this milestone we let the
+        // body be whatever the slot drain produced (zero events, in
+        // practice — guests don't yet emit AggregatedTransacts).
         let body = drain_for_body(&proposer.offchain, &proposer.state).expect("drain ok");
-        let header = Header {
+        let block_in = Block {
             parent: proposer.prior_block,
-            slot: Slot(slot_n as u64),
-            ..Default::default()
+            body,
         };
         let out = apply_block(
             &proposer.state,
             proposer.prior_block,
-            &header,
-            &body,
+            &block_in,
             proposer.hw.as_ref(),
         )
         .expect("apply_block ok");
@@ -102,12 +104,12 @@ fn run_testnet(num_nodes: u32, num_slots: u32) {
 
         // Apply the proposed block on every node (verifier mode).
         let new_root = out.state_root;
+        let proposed_block = out.block.clone();
         for node in &mut nodes {
             let ver = apply_block(
                 &node.state,
                 node.prior_block,
-                &header,
-                &out.body,
+                &proposed_block,
                 node.hw.as_ref(),
             )
             .expect("verifier apply_block ok");

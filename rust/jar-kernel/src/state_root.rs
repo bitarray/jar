@@ -13,15 +13,12 @@ use jar_types::{Hash, State};
 pub fn state_root(state: &State) -> Hash {
     let mut buf = Vec::with_capacity(4096);
 
-    push_u64(&mut buf, state.bookkeeping.slot.0);
-    push_u64(&mut buf, state.bookkeeping.next_vault_id);
-    push_u64(&mut buf, state.bookkeeping.next_cnode_id);
-    push_u64(&mut buf, state.bookkeeping.next_cap_id);
+    push_u64(&mut buf, state.id_counters.next_vault_id);
+    push_u64(&mut buf, state.id_counters.next_cnode_id);
+    push_u64(&mut buf, state.id_counters.next_cap_id);
 
     push_u64(&mut buf, state.transact_space_cnode.0);
     push_u64(&mut buf, state.dispatch_space_cnode.0);
-    push_u64(&mut buf, state.block_validation_cap.0);
-    push_u64(&mut buf, state.block_finalization_cap.0);
 
     push_u64(&mut buf, state.vaults.len() as u64);
     for (vid, vault) in &state.vaults {

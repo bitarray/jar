@@ -77,7 +77,10 @@ pub fn handle_inbound_dispatch<H: Hardware>(
     let mut state_clone = state.clone(); // RO σ, never returned to caller
     let frame = build_dispatch_frame(&mut state_clone, entrypoint, &event.caps)?;
 
-    // Step 2.
+    // Step 2. Kernel asserts cursor == |trace| at HALT; mismatch faults
+    // the invocation. (Spec: per-invocation trace-exhaustion boundary.)
+    let attestation_target = attestation_trace.len();
+    let result_target = result_trace.len();
     {
         let mut slot_emission: Option<SlotContent> = None;
         let mut ctx = InvocationCtx {
@@ -95,8 +98,13 @@ pub fn handle_inbound_dispatch<H: Hardware>(
             slot_emission: &mut slot_emission,
             hw,
         };
-        let mut vm = build_smoke_step2(event);
-        let _ = drive_invocation(&mut vm, &mut ctx)?;
+        let _ = drive_invocation(&mut build_smoke_step2(event), &mut ctx)?;
+    }
+    if cursor.attestation_pos != attestation_target || cursor.result_pos != result_target {
+        return Err(KernelError::TraceDivergence(format!(
+            "step-2 trace exhaustion mismatch: attestation {}/{}, result {}/{}",
+            cursor.attestation_pos, attestation_target, cursor.result_pos, result_target
+        )));
     }
 
     // Step 3.
@@ -118,8 +126,17 @@ pub fn handle_inbound_dispatch<H: Hardware>(
             slot_emission: &mut slot_emission,
             hw,
         };
-        let mut vm = build_smoke_step3(event, &prev_slot);
-        let _ = drive_invocation(&mut vm, &mut ctx)?;
+        let _ = drive_invocation(&mut build_smoke_step3(event, &prev_slot), &mut ctx)?;
+    }
+    if cursor.attestation_pos != attestation_trace.len() || cursor.result_pos != result_trace.len()
+    {
+        return Err(KernelError::TraceDivergence(format!(
+            "step-3 trace exhaustion mismatch: attestation {}/{}, result {}/{}",
+            cursor.attestation_pos,
+            attestation_trace.len(),
+            cursor.result_pos,
+            result_trace.len()
+        )));
     }
 
     let new_slot = slot_emission.unwrap_or(SlotContent::Empty);

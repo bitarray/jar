@@ -5,7 +5,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+pub(crate) use std::collections::BTreeMap;
 
 mod block;
 mod cap;

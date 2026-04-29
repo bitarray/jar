@@ -35,10 +35,12 @@ pub enum Caller {
 }
 
 /// Where in apply_block / off-chain pipeline a top-level invocation runs.
+///
+/// Chain-author event[0] / event[-1] handlers run as `TransactEntry`;
+/// they're singled out only by their position in `body.events`, never
+/// by the kernel.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum KernelRole {
-    BlockValidation,
-    BlockFinalization,
     TransactEntry,
     AggregateStandalone, // Dispatch step-2
     AggregateMerge,      // Dispatch step-3

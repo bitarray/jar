@@ -5,12 +5,10 @@
 //! block_finalization), and bookkeeping (slot, recent_headers, monotonic
 //! id counters).
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::{
-    BlockHash, CNode, CNodeId, CapId, CapRecord, Hash, KResult, KernelError, Slot, VaultId,
-};
+use crate::{CNode, CNodeId, CapId, CapRecord, Hash, KResult, KernelError, VaultId};
 
 /// Persistent Vault unit. Contains code, slots, KV storage, quotas.
 ///
@@ -50,13 +48,11 @@ impl Vault {
     }
 }
 
-/// σ-bookkeeping data the kernel maintains directly (not chain-defined).
+/// Monotonic id counters maintained by the kernel directly. Slot,
+/// recent_headers, and any other chain-progression bookkeeping live in a
+/// chain-author ChainHead Vault, not in σ.
 #[derive(Clone, Eq, PartialEq, Debug, Default)]
-pub struct Bookkeeping {
-    pub slot: Slot,
-    /// Window of recent finalized (header_hash, state_root) pairs. Head is
-    /// the most recent.
-    pub recent_headers: VecDeque<(BlockHash, Hash)>,
+pub struct IdCounters {
     pub next_vault_id: u64,
     pub next_cnode_id: u64,
     pub next_cap_id: u64,
@@ -75,9 +71,7 @@ pub struct State {
     pub cap_holders: BTreeMap<CapId, BTreeSet<(CNodeId, u8)>>,
     pub transact_space_cnode: CapId,
     pub dispatch_space_cnode: CapId,
-    pub block_validation_cap: CapId,
-    pub block_finalization_cap: CapId,
-    pub bookkeeping: Bookkeeping,
+    pub id_counters: IdCounters,
 }
 
 impl State {
@@ -92,9 +86,7 @@ impl State {
             cap_holders: BTreeMap::new(),
             transact_space_cnode: CapId(0),
             dispatch_space_cnode: CapId(0),
-            block_validation_cap: CapId(0),
-            block_finalization_cap: CapId(0),
-            bookkeeping: Bookkeeping::default(),
+            id_counters: IdCounters::default(),
         }
     }
 
@@ -114,22 +106,22 @@ impl State {
 
     /// Allocate the next monotonic VaultId.
     pub fn next_vault_id(&mut self) -> VaultId {
-        let id = self.bookkeeping.next_vault_id;
-        self.bookkeeping.next_vault_id += 1;
+        let id = self.id_counters.next_vault_id;
+        self.id_counters.next_vault_id += 1;
         VaultId(id)
     }
 
     /// Allocate the next monotonic CNodeId.
     pub fn next_cnode_id(&mut self) -> CNodeId {
-        let id = self.bookkeeping.next_cnode_id;
-        self.bookkeeping.next_cnode_id += 1;
+        let id = self.id_counters.next_cnode_id;
+        self.id_counters.next_cnode_id += 1;
         CNodeId(id)
     }
 
     /// Allocate the next monotonic CapId.
     pub fn next_cap_id(&mut self) -> CapId {
-        let id = self.bookkeeping.next_cap_id;
-        self.bookkeeping.next_cap_id += 1;
+        let id = self.id_counters.next_cap_id;
+        self.id_counters.next_cap_id += 1;
         CapId(id)
     }
 }
