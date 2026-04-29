@@ -8,16 +8,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::{CNode, CNodeId, CapId, CapRecord, Hash, KResult, KernelError, VaultId};
+use crate::{CNode, CNodeId, CapId, CapRecord, Crypto, KResult, KernelError, VaultId};
 
 /// Persistent Vault unit. Contains code, slots, KV storage, quotas.
 ///
 /// Wrapped in `Arc` inside σ so that a per-event snapshot can be cheap (the
 /// outer `BTreeMap`s are cloned, but vault contents are only deep-cloned
 /// on a `make_mut` write).
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub struct Vault {
-    pub code_hash: Hash,
+///
+/// Manual trait impls so bounds are on `C::Hash` rather than on `C`.
+pub struct Vault<C: Crypto> {
+    pub code_hash: C::Hash,
     pub slots: CNode, // 256 cap slots
     pub storage: BTreeMap<Vec<u8>, Vec<u8>>,
     pub quota_items: u64,
@@ -25,8 +26,47 @@ pub struct Vault {
     pub total_footprint: u64,
 }
 
-impl Vault {
-    pub fn new(code_hash: Hash) -> Self {
+impl<C: Crypto> Clone for Vault<C> {
+    fn clone(&self) -> Self {
+        Self {
+            code_hash: self.code_hash,
+            slots: self.slots.clone(),
+            storage: self.storage.clone(),
+            quota_items: self.quota_items,
+            quota_bytes: self.quota_bytes,
+            total_footprint: self.total_footprint,
+        }
+    }
+}
+
+impl<C: Crypto> PartialEq for Vault<C> {
+    fn eq(&self, other: &Self) -> bool {
+        self.code_hash == other.code_hash
+            && self.slots == other.slots
+            && self.storage == other.storage
+            && self.quota_items == other.quota_items
+            && self.quota_bytes == other.quota_bytes
+            && self.total_footprint == other.total_footprint
+    }
+}
+
+impl<C: Crypto> Eq for Vault<C> {}
+
+impl<C: Crypto> core::fmt::Debug for Vault<C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Vault")
+            .field("code_hash", &self.code_hash)
+            .field("slots", &self.slots)
+            .field("storage", &self.storage)
+            .field("quota_items", &self.quota_items)
+            .field("quota_bytes", &self.quota_bytes)
+            .field("total_footprint", &self.total_footprint)
+            .finish()
+    }
+}
+
+impl<C: Crypto> Vault<C> {
+    pub fn new(code_hash: C::Hash) -> Self {
         Vault {
             code_hash,
             slots: CNode::new(),
@@ -59,11 +99,10 @@ pub struct IdCounters {
 }
 
 /// σ — the chain state.
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub struct State {
-    pub vaults: BTreeMap<VaultId, Arc<Vault>>,
+pub struct State<C: Crypto> {
+    pub vaults: BTreeMap<VaultId, Arc<Vault<C>>>,
     pub cnodes: BTreeMap<CNodeId, CNode>,
-    pub cap_registry: BTreeMap<CapId, CapRecord>,
+    pub cap_registry: BTreeMap<CapId, CapRecord<C>>,
     /// Inverse index: parent cap-id → children. Cascade revocation walks this.
     pub cap_children: BTreeMap<CapId, BTreeSet<CapId>>,
     /// Inverse index: cap-id → CNode slots that hold it. Used to clear slots
@@ -74,7 +113,52 @@ pub struct State {
     pub id_counters: IdCounters,
 }
 
-impl State {
+impl<C: Crypto> Clone for State<C> {
+    fn clone(&self) -> Self {
+        Self {
+            vaults: self.vaults.clone(),
+            cnodes: self.cnodes.clone(),
+            cap_registry: self.cap_registry.clone(),
+            cap_children: self.cap_children.clone(),
+            cap_holders: self.cap_holders.clone(),
+            transact_space_cnode: self.transact_space_cnode,
+            dispatch_space_cnode: self.dispatch_space_cnode,
+            id_counters: self.id_counters.clone(),
+        }
+    }
+}
+
+impl<C: Crypto> PartialEq for State<C> {
+    fn eq(&self, other: &Self) -> bool {
+        self.vaults == other.vaults
+            && self.cnodes == other.cnodes
+            && self.cap_registry == other.cap_registry
+            && self.cap_children == other.cap_children
+            && self.cap_holders == other.cap_holders
+            && self.transact_space_cnode == other.transact_space_cnode
+            && self.dispatch_space_cnode == other.dispatch_space_cnode
+            && self.id_counters == other.id_counters
+    }
+}
+
+impl<C: Crypto> Eq for State<C> {}
+
+impl<C: Crypto> core::fmt::Debug for State<C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("State")
+            .field("vaults", &self.vaults)
+            .field("cnodes", &self.cnodes)
+            .field("cap_registry", &self.cap_registry)
+            .field("cap_children", &self.cap_children)
+            .field("cap_holders", &self.cap_holders)
+            .field("transact_space_cnode", &self.transact_space_cnode)
+            .field("dispatch_space_cnode", &self.dispatch_space_cnode)
+            .field("id_counters", &self.id_counters)
+            .finish()
+    }
+}
+
+impl<C: Crypto> State<C> {
     /// Empty σ. Used as the starting point for genesis builders. Has no
     /// public-surface caps wired — the genesis builder must set them.
     pub fn empty() -> Self {
@@ -90,7 +174,7 @@ impl State {
         }
     }
 
-    pub fn vault(&self, id: VaultId) -> KResult<&Arc<Vault>> {
+    pub fn vault(&self, id: VaultId) -> KResult<&Arc<Vault<C>>> {
         self.vaults.get(&id).ok_or(KernelError::VaultNotFound(id))
     }
 
@@ -98,7 +182,7 @@ impl State {
         self.cnodes.get(&id).ok_or(KernelError::CNodeNotFound(id))
     }
 
-    pub fn cap_record(&self, id: CapId) -> KResult<&CapRecord> {
+    pub fn cap_record(&self, id: CapId) -> KResult<&CapRecord<C>> {
         self.cap_registry
             .get(&id)
             .ok_or(KernelError::CapNotFound(id))

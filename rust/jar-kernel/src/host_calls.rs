@@ -8,8 +8,8 @@
 //! address guest memory windows.
 
 use jar_types::{
-    AttestationScope, CNodeId, Caller, CapId, CapRecord, Capability, Command, KResult, KernelError,
-    KernelRole, ResourceKind, ResultEntry, SlotContent,
+    AttestationScope, CNodeId, Caller, CapId, CapRecord, Capability, Command, Crypto, KResult,
+    KernelError, KernelRole, ResourceKind, ResultEntry, SlotContent,
 };
 
 use crate::attest;
@@ -510,11 +510,11 @@ fn host_create_vault<V: VmExec, H: Hardware>(
     let code_hash_bytes = vm
         .read_mem(code_hash_ptr, 32)
         .ok_or_else(|| KernelError::Internal("create_vault: bad code_hash window".into()))?;
-    let mut code_hash = [0u8; 32];
-    code_hash.copy_from_slice(&code_hash_bytes);
+    let code_hash = <H as Crypto>::hash_from_bytes(&code_hash_bytes)
+        .ok_or_else(|| KernelError::Internal("create_vault: code_hash width mismatch".into()))?;
 
     let new_vault_id = ctx.state.next_vault_id();
-    let mut vault = jar_types::Vault::new(jar_types::Hash(code_hash));
+    let mut vault = jar_types::Vault::<H>::new(code_hash);
     vault.quota_items = quota_items;
     vault.quota_bytes = quota_bytes;
     ctx.state
@@ -561,7 +561,7 @@ fn host_quota_set<V: VmExec, H: Hardware>(
         .get(&target)
         .ok_or(KernelError::VaultNotFound(target))?
         .clone();
-    let mut vault: jar_types::Vault = (*arc).clone();
+    let mut vault: jar_types::Vault<H> = (*arc).clone();
     vault.quota_items = new_items;
     vault.quota_bytes = new_bytes;
     ctx.state.vaults.insert(target, std::sync::Arc::new(vault));
@@ -630,7 +630,7 @@ fn host_attestation_key<V: VmExec, H: Hardware>(
     };
     let cap = cap_registry::lookup(ctx.state, cap_id)?.cap.clone();
     let key = attest::key_of(&cap)?;
-    vm.write_mem(out_ptr, &key.0);
+    vm.write_mem(out_ptr, key.as_ref());
     Ok((RC_OK, 0))
 }
 

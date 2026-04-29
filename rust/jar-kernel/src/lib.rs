@@ -39,7 +39,7 @@ pub use runtime::{Hardware, HwError, NodeOffchain};
 pub use state_root::state_root;
 
 pub use jar_types::{
-    Block, Body, CNode, CNodeId, Caller, CapId, CapRecord, Capability, Command, Event, Hash,
-    KernelError, KernelRole, KeyId, MerkleProof, ResourceKind, Signature, Slot, SlotContent, State,
-    StorageMode, Vault, VaultId,
+    Block, Body, CNode, CNodeId, Caller, CapId, CapRecord, Capability, Command, Crypto, Event,
+    Hash, KernelError, KernelRole, KeyId, MerkleProof, ResourceKind, Signature, Slot, SlotContent,
+    State, StorageMode, Vault, VaultId,
 };

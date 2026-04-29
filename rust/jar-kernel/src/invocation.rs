@@ -43,20 +43,20 @@ pub trait VmExec {
 /// Per-invocation kernel-side context. Carried by reference into every
 /// host-call handler.
 pub struct InvocationCtx<'a, H: Hardware> {
-    pub state: &'a mut jar_types::State,
+    pub state: &'a mut jar_types::State<H>,
     pub role: KernelRole,
     pub storage_mode: StorageMode,
     pub current_vault: VaultId,
     pub frame: Frame,
     pub caller: Caller,
-    pub commands: &'a mut Vec<Command>,
+    pub commands: &'a mut Vec<Command<H>>,
     pub reach: &'a mut ReachSet,
     pub attest_cursor: &'a mut AttestCursor,
-    pub attestation_trace: &'a mut Vec<AttestationEntry>,
+    pub attestation_trace: &'a mut Vec<AttestationEntry<H>>,
     pub result_trace: &'a mut Vec<ResultEntry>,
     /// Step-3-only: the slot emission, populated by `cap_call` or
     /// `slot_clear`. The kernel rejects if set twice.
-    pub slot_emission: &'a mut Option<SlotContent>,
+    pub slot_emission: &'a mut Option<SlotContent<H>>,
     pub hw: &'a H,
 }
 

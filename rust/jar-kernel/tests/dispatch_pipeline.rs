@@ -14,8 +14,8 @@ use jar_types::Event;
 
 #[test]
 fn handle_inbound_dispatch_runs_step2_step3_then_settles_slot() {
-    let g = GenesisBuilder::default().build().unwrap();
-    let mut node = NodeOffchain::new();
+    let g = GenesisBuilder::<InMemoryHardware>::default().build().unwrap();
+    let mut node = NodeOffchain::<InMemoryHardware>::new();
     let bus = InMemoryBus::new();
     let hw = InMemoryHardware::new(bus);
 

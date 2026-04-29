@@ -6,8 +6,13 @@ use jar_kernel::runtime::{InMemoryBus, InMemoryHardware};
 use jar_kernel::{BlockOutcome, apply_block};
 use jar_types::{Block, BlockHash, Body, Hash};
 
-fn build_genesis() -> jar_types::State {
-    GenesisBuilder::default().build().expect("genesis ok").state
+type Suite = InMemoryHardware;
+
+fn build_genesis() -> jar_types::State<Suite> {
+    GenesisBuilder::<Suite>::default()
+        .build()
+        .expect("genesis ok")
+        .state
 }
 
 fn no_op_hardware() -> InMemoryHardware {
@@ -18,7 +23,7 @@ fn no_op_hardware() -> InMemoryHardware {
 #[test]
 fn apply_block_accepts_a_minimal_block() {
     let state = build_genesis();
-    let parent = BlockHash::ZERO;
+    let parent = BlockHash::<Suite>::default();
     let block = Block {
         parent,
         body: Body::default(),
@@ -35,7 +40,7 @@ fn apply_block_accepts_a_minimal_block() {
 #[test]
 fn apply_block_rejects_wrong_parent_hash() {
     let state = build_genesis();
-    let parent_actual = BlockHash::ZERO;
+    let parent_actual = BlockHash::<Suite>::default();
     let parent_claimed = Hash([7u8; 32]);
     let block = Block {
         parent: parent_claimed,
@@ -54,7 +59,7 @@ fn apply_block_rejects_wrong_parent_hash() {
 #[test]
 fn apply_block_rejects_unregistered_target() {
     let state = build_genesis();
-    let parent = BlockHash::ZERO;
+    let parent = BlockHash::<Suite>::default();
     let body = Body {
         events: vec![(jar_types::VaultId(9999), vec![jar_types::Event::default()])],
         ..Default::default()
@@ -74,32 +79,32 @@ fn apply_block_rejects_unregistered_target() {
 fn body_events_order_must_match_transact_space_cnode() {
     // Genesis layout: slot 0 Schedule, slot 1 Transact(t_vault), slot 2 Schedule.
     // Body referencing the Transact slot's vault_id is fine.
-    let g = GenesisBuilder::default().build().unwrap();
+    let g = GenesisBuilder::<Suite>::default().build().unwrap();
     let block = Block {
-        parent: BlockHash::ZERO,
+        parent: BlockHash::<Suite>::default(),
         body: Body {
             events: vec![(g.transact_vault, vec![jar_types::Event::default()])],
             ..Default::default()
         },
     };
     let hw = no_op_hardware();
-    let out = apply_block(&g.state, BlockHash::ZERO, &block, &hw).unwrap();
+    let out = apply_block(&g.state, BlockHash::<Suite>::default(), &block, &hw).unwrap();
     assert!(matches!(out.block_outcome, BlockOutcome::Accepted));
 }
 
 #[test]
 fn body_events_referencing_schedule_slot_is_rejected() {
     // body.events MUST NOT reference a Schedule slot's vault_id.
-    let g = GenesisBuilder::default().build().unwrap();
+    let g = GenesisBuilder::<Suite>::default().build().unwrap();
     let block = Block {
-        parent: BlockHash::ZERO,
+        parent: BlockHash::<Suite>::default(),
         body: Body {
             events: vec![(g.block_init_vault, vec![jar_types::Event::default()])],
             ..Default::default()
         },
     };
     let hw = no_op_hardware();
-    let res = apply_block(&g.state, BlockHash::ZERO, &block, &hw);
+    let res = apply_block(&g.state, BlockHash::<Suite>::default(), &block, &hw);
     assert!(
         res.is_err(),
         "expected Err for Schedule-slot reference, got {:?}",
@@ -112,9 +117,9 @@ fn transact_event_with_unconsumed_attestation_trace_faults() {
     // The smoke VM halts immediately without consuming any traces. If the
     // event ships with a non-empty attestation_trace, the per-event
     // boundary check at HALT must fault the apply_block.
-    let g = GenesisBuilder::default().build().unwrap();
+    let g = GenesisBuilder::<Suite>::default().build().unwrap();
     let block = Block {
-        parent: BlockHash::ZERO,
+        parent: BlockHash::<Suite>::default(),
         body: Body {
             events: vec![(
                 g.transact_vault,
@@ -129,7 +134,7 @@ fn transact_event_with_unconsumed_attestation_trace_faults() {
         },
     };
     let hw = no_op_hardware();
-    let res = apply_block(&g.state, BlockHash::ZERO, &block, &hw);
+    let res = apply_block(&g.state, BlockHash::<Suite>::default(), &block, &hw);
     assert!(
         res.is_err(),
         "expected per-event trace exhaustion fault, got {:?}",
@@ -144,14 +149,14 @@ fn state_root_advances_with_schedule_slots_firing() {
     // cap, advancing next_cap_id and therefore the state_root — even for
     // a no-event body.
     let state = build_genesis();
-    let pre_root = jar_kernel::state_root(&state);
+    let hw = no_op_hardware();
+    let pre_root = jar_kernel::state_root(&state, &hw);
     let block = Block {
-        parent: BlockHash::ZERO,
+        parent: BlockHash::<Suite>::default(),
         body: Body::default(),
     };
-    let hw = no_op_hardware();
-    let out = apply_block(&state, BlockHash::ZERO, &block, &hw).unwrap();
-    let post_root = jar_kernel::state_root(&out.state_next);
+    let out = apply_block(&state, BlockHash::<Suite>::default(), &block, &hw).unwrap();
+    let post_root = jar_kernel::state_root(&out.state_next, &hw);
     assert_ne!(pre_root, post_root);
     assert_eq!(out.state_root, post_root);
 }

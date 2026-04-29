@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use jar_types::{Capability, KResult, KernelError, State, StorageMode, StorageRights, VaultId};
+use jar_types::{
+    Capability, Crypto, KResult, KernelError, State, StorageMode, StorageRights, VaultId,
+};
 
 use crate::cap_registry;
 
@@ -16,8 +18,8 @@ pub fn require_writable(mode: StorageMode, host_call: &'static str) -> KResult<(
 }
 
 /// Resolve a Storage cap and check rights + key coverage.
-fn resolve_storage(
-    state: &State,
+fn resolve_storage<C: Crypto>(
+    state: &State<C>,
     storage_cap: jar_types::CapId,
     key: &[u8],
     need: StorageRights,
@@ -50,8 +52,8 @@ fn resolve_storage(
 }
 
 /// `storage_read(storage_cap, key) -> Option<Vec<u8>>`.
-pub fn storage_read(
-    state: &State,
+pub fn storage_read<C: Crypto>(
+    state: &State<C>,
     storage_cap: jar_types::CapId,
     key: &[u8],
 ) -> KResult<Option<Vec<u8>>> {
@@ -61,8 +63,8 @@ pub fn storage_read(
 }
 
 /// `storage_write(storage_cap, key, value)` — quota-checked.
-pub fn storage_write(
-    state: &mut State,
+pub fn storage_write<C: Crypto>(
+    state: &mut State<C>,
     mode: StorageMode,
     storage_cap: jar_types::CapId,
     key: &[u8],
@@ -75,7 +77,7 @@ pub fn storage_write(
         .get(&vault_id)
         .ok_or(KernelError::VaultNotFound(vault_id))?
         .clone();
-    let mut vault: jar_types::Vault = (*vault_arc).clone();
+    let mut vault: jar_types::Vault<C> = (*vault_arc).clone();
 
     let prev_len = vault
         .storage
@@ -114,8 +116,8 @@ pub fn storage_write(
 }
 
 /// `storage_delete(storage_cap, key)` — refunds quota.
-pub fn storage_delete(
-    state: &mut State,
+pub fn storage_delete<C: Crypto>(
+    state: &mut State<C>,
     mode: StorageMode,
     storage_cap: jar_types::CapId,
     key: &[u8],
@@ -127,7 +129,7 @@ pub fn storage_delete(
         .get(&vault_id)
         .ok_or(KernelError::VaultNotFound(vault_id))?
         .clone();
-    let mut vault: jar_types::Vault = (*vault_arc).clone();
+    let mut vault: jar_types::Vault<C> = (*vault_arc).clone();
     if let Some(prev) = vault.storage.remove(key) {
         let delta = (key.len() + prev.len()) as u64;
         vault.total_footprint = vault.total_footprint.saturating_sub(delta);

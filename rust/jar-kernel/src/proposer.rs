@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use jar_types::{Body, Capability, Event, KResult, KernelError, SlotContent, State, VaultId};
+use jar_types::{
+    Body, Capability, Crypto, Event, KResult, KernelError, SlotContent, State, VaultId,
+};
 
 use crate::cap_registry;
 use crate::runtime::NodeOffchain;
@@ -18,7 +20,10 @@ use crate::runtime::NodeOffchain;
 /// body.result_trace) start empty here — they're populated only by
 /// Schedule invocations during apply_block (and by the block-seal
 /// reservation in proposer mode).
-pub fn drain_for_body(node: &NodeOffchain, state: &State) -> KResult<Body> {
+pub fn drain_for_body<C: Crypto>(
+    node: &NodeOffchain<C>,
+    state: &State<C>,
+) -> KResult<Body<C>> {
     // Index Transact slots in transact_space_cnode by VaultId for ordering.
     let transact_cnode_id = match &cap_registry::lookup(state, state.transact_space_cnode)?.cap {
         Capability::CNode { cnode_id } => *cnode_id,
@@ -46,7 +51,7 @@ pub fn drain_for_body(node: &NodeOffchain, state: &State) -> KResult<Body> {
         }
     };
     let dcnode = state.cnode(dispatch_cnode_id)?;
-    let mut groups: BTreeMap<u8, Vec<Event>> = BTreeMap::new();
+    let mut groups: BTreeMap<u8, Vec<Event<C>>> = BTreeMap::new();
     let mut targets_in_slot_order: BTreeMap<u8, VaultId> = BTreeMap::new();
 
     for (_slot, cap_id) in dcnode.iter() {
@@ -82,7 +87,7 @@ pub fn drain_for_body(node: &NodeOffchain, state: &State) -> KResult<Body> {
     }
 
     // Build body.events in slot-index order.
-    let mut events: Vec<(VaultId, Vec<Event>)> = Vec::new();
+    let mut events: Vec<(VaultId, Vec<Event<C>>)> = Vec::new();
     for (slot_idx, target) in &targets_in_slot_order {
         if let Some(group_events) = groups.remove(slot_idx) {
             events.push((*target, group_events));

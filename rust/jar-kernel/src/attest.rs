@@ -7,10 +7,7 @@
 //!   to attestation_trace. Advance cursor.
 //! - Else: return false (userspace decides).
 
-use jar_crypto::{blake2b_256, ed25519};
-use jar_types::{
-    AttestationEntry, AttestationScope, Capability, KResult, KernelError, KeyId, Signature,
-};
+use jar_types::{AttestationEntry, AttestationScope, Capability, KResult, KernelError};
 
 use crate::runtime::Hardware;
 
@@ -52,10 +49,10 @@ impl AttestOutcome {
 /// `body_attestation_trace` — the trace; verifier sees populated, producer
 /// sees `None` for the slot at the cursor (we'll append).
 pub fn attest<H: Hardware>(
-    cap: &Capability,
+    cap: &Capability<H>,
     blob: Option<&[u8]>,
     cursor: &mut AttestCursor,
-    body_attestation_trace: &mut Vec<AttestationEntry>,
+    body_attestation_trace: &mut Vec<AttestationEntry<H>>,
     hw: &H,
 ) -> KResult<AttestOutcome> {
     let (key, scope) = match cap {
@@ -85,14 +82,14 @@ pub fn attest<H: Hardware>(
                 // For the kernel-pure layer we trust the proposer's recorded
                 // blob_hash and verify the signature against it. (A real impl
                 // would re-derive the canonical container hash here.)
-                entry.blob_hash.0.to_vec()
+                entry.blob_hash.as_ref().to_vec()
             }
         };
-        let blob_hash = blake2b_256(&blob_for_verify);
+        let blob_hash = hw.hash(&blob_for_verify);
         if blob_hash != entry.blob_hash {
             return Ok(AttestOutcome::VerifyFailed);
         }
-        let ok = ed25519::verify(key, &blob_for_verify, &entry.signature);
+        let ok = hw.verify(key, &blob_for_verify, &entry.signature);
         cursor.attestation_pos += 1;
         return Ok(if ok {
             AttestOutcome::Verified
@@ -111,7 +108,7 @@ pub fn attest<H: Hardware>(
             let b = blob.ok_or_else(|| {
                 KernelError::Internal("Direct attest needs userspace blob".into())
             })?;
-            let blob_hash = blake2b_256(b);
+            let blob_hash = hw.hash(b);
             let sig = hw
                 .sign(key, b)
                 .map_err(|_| KernelError::Internal("Hardware refused to sign".into()))?;
@@ -127,8 +124,8 @@ pub fn attest<H: Hardware>(
             // Reserve the position with a sentinel; kernel fills it post-execution.
             body_attestation_trace.push(AttestationEntry {
                 key,
-                blob_hash: jar_types::Hash::ZERO,
-                signature: Signature::default(),
+                blob_hash: H::Hash::default(),
+                signature: H::Signature::default(),
             });
             cursor.attestation_pos += 1;
             Ok(AttestOutcome::Reserved)
@@ -137,7 +134,7 @@ pub fn attest<H: Hardware>(
 }
 
 /// Inspect the public key of an AttestationCap.
-pub fn key_of(cap: &Capability) -> KResult<KeyId> {
+pub fn key_of<C: jar_types::Crypto>(cap: &Capability<C>) -> KResult<C::KeyId> {
     match cap {
         Capability::AttestationCap { key, .. } => Ok(*key),
         Capability::AttestationAggregateCap { key } => Ok(*key),

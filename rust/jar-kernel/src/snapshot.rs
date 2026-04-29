@@ -5,19 +5,19 @@
 //! kernel restores from the snapshot — modified vaults are dropped because
 //! `Arc::make_mut` had cloned the inner `Vault` on first write.
 
-use jar_types::State;
+use jar_types::{Crypto, State};
 
 /// Cheap-copy snapshot of σ. Backed by Arc-shared vault bodies.
 #[derive(Clone)]
-pub struct StateSnapshot(pub State);
+pub struct StateSnapshot<C: Crypto>(pub State<C>);
 
-impl StateSnapshot {
-    pub fn take(state: &State) -> Self {
+impl<C: Crypto> StateSnapshot<C> {
+    pub fn take(state: &State<C>) -> Self {
         StateSnapshot(state.clone())
     }
 
     /// Restore σ from snapshot. Mutates the live state in place.
-    pub fn restore(self, state: &mut State) {
+    pub fn restore(self, state: &mut State<C>) {
         *state = self.0;
     }
 }

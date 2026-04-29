@@ -18,6 +18,11 @@ use jar_kernel::runtime::{InMemoryBus, InMemoryHardware, NodeOffchain};
 use jar_kernel::{BlockOutcome, apply_block, drain_for_body};
 use jar_types::{Block, BlockHash, Hash, State};
 
+/// Crypto suite + Hardware impl for the in-process testnet. Every parametric
+/// type (`State`, `NodeOffchain`, `BlockHash`, …) is instantiated against
+/// this.
+type Hw = InMemoryHardware;
+
 #[derive(Parser, Debug)]
 #[command(name = "jar")]
 #[command(about = "JAR minimum-kernel runner")]
@@ -52,7 +57,7 @@ fn main() {
 }
 
 fn run_testnet(num_nodes: u32, num_slots: u32) {
-    let g = GenesisBuilder::default().build().expect("genesis ok");
+    let g = GenesisBuilder::<Hw>::default().build().expect("genesis ok");
 
     let bus = InMemoryBus::new();
     let mut nodes: Vec<NodeState> = Vec::new();
@@ -60,9 +65,9 @@ fn run_testnet(num_nodes: u32, num_slots: u32) {
         nodes.push(NodeState {
             id: i,
             state: g.state.clone(),
-            offchain: NodeOffchain::new(),
+            offchain: NodeOffchain::<Hw>::new(),
             hw: Arc::new(InMemoryHardware::new(bus.clone())),
-            prior_block: BlockHash::ZERO,
+            prior_block: BlockHash::<Hw>::default(),
         });
     }
 
@@ -128,8 +133,8 @@ fn run_testnet(num_nodes: u32, num_slots: u32) {
 
 struct NodeState {
     id: u32,
-    state: State,
-    offchain: NodeOffchain,
+    state: State<Hw>,
+    offchain: NodeOffchain<Hw>,
     hw: Arc<InMemoryHardware>,
-    prior_block: BlockHash,
+    prior_block: BlockHash<Hw>,
 }

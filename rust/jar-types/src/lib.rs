@@ -9,6 +9,7 @@ pub(crate) use std::collections::BTreeMap;
 
 mod block;
 mod cap;
+mod crypto;
 mod runtime;
 mod slot;
 mod state;
@@ -16,6 +17,7 @@ mod trace;
 
 pub use block::*;
 pub use cap::*;
+pub use crypto::*;
 pub use runtime::*;
 pub use slot::*;
 pub use state::*;
@@ -39,8 +41,14 @@ impl From<[u8; 32]> for Hash {
     }
 }
 
-/// Block hash alias.
-pub type BlockHash = Hash;
+impl AsRef<[u8]> for Hash {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Block hash alias — generic over the crypto suite. Resolves to `C::Hash`.
+pub type BlockHash<C> = <C as Crypto>::Hash;
 
 /// Globally unique vault identifier (allocated monotonically by the kernel).
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
@@ -58,6 +66,12 @@ pub struct CNodeId(pub u64);
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 pub struct KeyId(pub [u8; 32]);
 
+impl AsRef<[u8]> for KeyId {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 /// Block-time slot. Strictly monotone increasing block-by-block.
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 pub struct Slot(pub u64);
@@ -69,6 +83,12 @@ pub struct Signature(pub [u8; 64]);
 impl Default for Signature {
     fn default() -> Self {
         Signature([0u8; 64])
+    }
+}
+
+impl AsRef<[u8]> for Signature {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
     }
 }
 

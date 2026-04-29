@@ -12,7 +12,7 @@
 //! 4. Slot is updated; if changed, `BroadcastLite` command emitted.
 
 use jar_types::{
-    AttestationEntry, Caller, Capability, Command, Event, KResult, KernelError, KernelRole,
+    AttestationEntry, Caller, Capability, Command, Crypto, Event, KResult, KernelError, KernelRole,
     ResultEntry, SlotContent, State, StorageMode, VaultId,
 };
 
@@ -23,22 +23,31 @@ use crate::invocation::{InvocationCtx, ScriptStep, VmExec, drive_invocation};
 use crate::reach::ReachSet;
 use crate::runtime::{Hardware, NodeOffchain};
 
-#[derive(Debug, Default)]
-pub struct InboundOutcome {
-    pub commands: Vec<Command>,
+#[derive(Debug)]
+pub struct InboundOutcome<H: Hardware> {
+    pub commands: Vec<Command<H>>,
     pub slot_changed: bool,
+}
+
+impl<H: Hardware> Default for InboundOutcome<H> {
+    fn default() -> Self {
+        Self {
+            commands: Vec::new(),
+            slot_changed: false,
+        }
+    }
 }
 
 /// Process one inbound Dispatch event for `entrypoint`. Updates `node.slots`
 /// and produces the resulting commands (downward dispatches + lite-stream
 /// broadcast, if changed).
 pub fn handle_inbound_dispatch<H: Hardware>(
-    node: &mut NodeOffchain,
-    state: &State,
+    node: &mut NodeOffchain<H>,
+    state: &State<H>,
     entrypoint: VaultId,
-    event: &Event,
+    event: &Event<H>,
     hw: &H,
-) -> KResult<InboundOutcome> {
+) -> KResult<InboundOutcome<H>> {
     // Validate entrypoint is reachable via dispatch_space_cnode (top-level).
     let cnode_id = match &cap_registry::lookup(state, state.dispatch_space_cnode)?.cap {
         Capability::CNode { cnode_id } => *cnode_id,
@@ -65,13 +74,13 @@ pub fn handle_inbound_dispatch<H: Hardware>(
         )));
     }
 
-    let mut commands: Vec<Command> = Vec::new();
+    let mut commands: Vec<Command<H>> = Vec::new();
     let mut reach = ReachSet::default();
     reach.note(entrypoint);
 
     // Build a verifier-side mutable copy of the event traces (the dispatch
     // pipeline runs RO σ; traces flow within this invocation only).
-    let mut attestation_trace: Vec<AttestationEntry> = event.attestation_trace.clone();
+    let mut attestation_trace: Vec<AttestationEntry<H>> = event.attestation_trace.clone();
     let mut result_trace: Vec<ResultEntry> = event.result_trace.clone();
     let mut cursor = AttestCursor::default();
     let mut state_clone = state.clone(); // RO σ, never returned to caller
@@ -82,7 +91,7 @@ pub fn handle_inbound_dispatch<H: Hardware>(
     let attestation_target = attestation_trace.len();
     let result_target = result_trace.len();
     {
-        let mut slot_emission: Option<SlotContent> = None;
+        let mut slot_emission: Option<SlotContent<H>> = None;
         let mut ctx = InvocationCtx {
             state: &mut state_clone,
             role: KernelRole::AggregateStandalone,
@@ -109,7 +118,7 @@ pub fn handle_inbound_dispatch<H: Hardware>(
 
     // Step 3.
     let prev_slot = node.slot(entrypoint).clone();
-    let mut slot_emission: Option<SlotContent> = None;
+    let mut slot_emission: Option<SlotContent<H>> = None;
     {
         let mut ctx = InvocationCtx {
             state: &mut state_clone,
@@ -157,7 +166,11 @@ pub fn handle_inbound_dispatch<H: Hardware>(
 /// Frame for a Dispatch invocation. Slot 0: an RO Storage cap to the entry
 /// vault. Slot 1+: opaque caps from the inbound event (placeholder — wire-side
 /// caps are not yet de-serialized in this milestone).
-fn build_dispatch_frame(state: &mut State, vault_id: VaultId, _caps: &[u8]) -> KResult<Frame> {
+fn build_dispatch_frame<C: Crypto>(
+    state: &mut State<C>,
+    vault_id: VaultId,
+    _caps: &[u8],
+) -> KResult<Frame> {
     use jar_types::{KeyRange, StorageRights};
     let mut frame = Frame::new();
     let storage_cap = cap_registry::alloc(
@@ -177,13 +190,13 @@ fn build_dispatch_frame(state: &mut State, vault_id: VaultId, _caps: &[u8]) -> K
 }
 
 /// Smoke step-2 VM: halts immediately, emits no downward dispatches.
-fn build_smoke_step2(_event: &Event) -> impl VmExec {
+fn build_smoke_step2<C: Crypto>(_event: &Event<C>) -> impl VmExec {
     crate::invocation::ScriptVm::new(vec![ScriptStep::Halt { rv: 0 }])
 }
 
 /// Smoke step-3 VM: emits `slot_clear()` then halts. Real step-3 chains call
 /// the appropriate cap_call to set AggregatedDispatch / AggregatedTransact.
-fn build_smoke_step3(_event: &Event, _prev: &SlotContent) -> impl VmExec {
+fn build_smoke_step3<C: Crypto>(_event: &Event<C>, _prev: &SlotContent<C>) -> impl VmExec {
     let mut regs = [0u64; 13];
     let _ = &mut regs;
     crate::invocation::ScriptVm::new(vec![

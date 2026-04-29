@@ -6,12 +6,15 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use jar_crypto::ed25519::KeyPair;
-use jar_types::{Command, KeyId, Signature, VaultId};
+use jar_crypto::{Ed25519Blake, blake2b_256, ed25519::KeyPair};
+use jar_types::{Command, Crypto, Hash, KeyId, Signature, SlotContent, VaultId};
 
 use super::hardware::{Hardware, HwError, TracingEvent};
 
-/// One inbound message arriving at a node.
+/// One inbound message arriving at a node. Carries `SlotContent` tagged with
+/// the Hardware impl (`InMemoryHardware`) — same fields as
+/// `SlotContent<Ed25519Blake>`, but Rust treats parametric types as distinct
+/// per-tag.
 #[derive(Clone, Debug)]
 pub enum NetMessage {
     /// A new Dispatch event for an entrypoint.
@@ -23,7 +26,7 @@ pub enum NetMessage {
     /// A lite-stream slot update.
     LiteUpdate {
         entrypoint: VaultId,
-        content: jar_types::SlotContent,
+        content: SlotContent<InMemoryHardware>,
     },
 }
 
@@ -73,7 +76,31 @@ impl InMemoryHardware {
     }
 }
 
+impl Crypto for InMemoryHardware {
+    type Hash = Hash;
+    type Signature = Signature;
+    type KeyId = KeyId;
+
+    fn hash_from_bytes(b: &[u8]) -> Option<Hash> {
+        <Ed25519Blake as Crypto>::hash_from_bytes(b)
+    }
+    fn key_id_from_bytes(b: &[u8]) -> Option<KeyId> {
+        <Ed25519Blake as Crypto>::key_id_from_bytes(b)
+    }
+    fn signature_from_bytes(b: &[u8]) -> Option<Signature> {
+        <Ed25519Blake as Crypto>::signature_from_bytes(b)
+    }
+}
+
 impl Hardware for InMemoryHardware {
+    fn hash(&self, blob: &[u8]) -> Hash {
+        blake2b_256(blob)
+    }
+
+    fn verify(&self, key: KeyId, msg: &[u8], sig: &Signature) -> bool {
+        jar_crypto::ed25519::verify(key, msg, sig)
+    }
+
     fn holds_key(&self, key: KeyId) -> bool {
         self.keys.contains_key(&key)
     }
@@ -83,7 +110,7 @@ impl Hardware for InMemoryHardware {
         Ok(kp.sign(blob))
     }
 
-    fn emit(&self, cmd: Command) {
+    fn emit(&self, cmd: Command<Self>) {
         match cmd {
             Command::Dispatch {
                 entrypoint,

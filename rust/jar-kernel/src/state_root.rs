@@ -1,16 +1,17 @@
-//! State root: blake2b over canonically-encoded σ.
+//! State root: hash over canonically-encoded σ.
 //!
 //! Stub Merkle: not a tree, just a flat hash. Sufficient for "the chain's
 //! `block_finalization_cap` claims this root and checks it" semantics. Real
 //! Merkle-trie commitment is a follow-up.
 
-use jar_crypto::blake2b_256;
-use jar_types::{Hash, State};
+use jar_types::State;
 
-/// Canonical blake2b digest over σ. Maps and structured data are walked in
+use crate::runtime::Hardware;
+
+/// Canonical hash digest over σ. Maps and structured data are walked in
 /// `BTreeMap` order, which is canonical because every map in `State` is
-/// `BTreeMap`.
-pub fn state_root(state: &State) -> Hash {
+/// `BTreeMap`. Hashing routes through `hw.hash`.
+pub fn state_root<H: Hardware>(state: &State<H>, hw: &H) -> H::Hash {
     let mut buf = Vec::with_capacity(4096);
 
     push_u64(&mut buf, state.id_counters.next_vault_id);
@@ -23,7 +24,7 @@ pub fn state_root(state: &State) -> Hash {
     push_u64(&mut buf, state.vaults.len() as u64);
     for (vid, vault) in &state.vaults {
         push_u64(&mut buf, vid.0);
-        buf.extend_from_slice(&vault.code_hash.0);
+        buf.extend_from_slice(vault.code_hash.as_ref());
         push_u64(&mut buf, vault.quota_items);
         push_u64(&mut buf, vault.quota_bytes);
         push_u64(&mut buf, vault.total_footprint);
@@ -62,7 +63,7 @@ pub fn state_root(state: &State) -> Hash {
         buf.extend_from_slice(cap_dbg.as_bytes());
     }
 
-    blake2b_256(&buf)
+    hw.hash(&buf)
 }
 
 fn push_u64(buf: &mut Vec<u8>, x: u64) {
@@ -72,12 +73,13 @@ fn push_u64(buf: &mut Vec<u8>, x: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jar_types::State;
+    use crate::runtime::{InMemoryBus, InMemoryHardware};
 
     #[test]
     fn empty_state_root_is_stable() {
-        let s1 = State::empty();
-        let s2 = State::empty();
-        assert_eq!(state_root(&s1), state_root(&s2));
+        let s1 = State::<InMemoryHardware>::empty();
+        let s2 = State::<InMemoryHardware>::empty();
+        let hw = InMemoryHardware::new(InMemoryBus::new());
+        assert_eq!(state_root(&s1, &hw), state_root(&s2, &hw));
     }
 }

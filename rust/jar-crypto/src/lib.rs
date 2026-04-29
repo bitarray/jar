@@ -9,7 +9,33 @@
 #![forbid(unsafe_code)]
 
 use blake2::digest::{Update, VariableOutput};
-use jar_types::{Hash, KeyId, Signature};
+use jar_types::{Crypto, Hash, KeyId, Signature};
+
+/// The v1 crypto suite: Ed25519 signatures over Blake2b-256 hashes.
+///
+/// Concrete suite that fixes `Crypto::Hash`/`Signature`/`KeyId` to the
+/// byte-array newtypes in `jar-types`. Used by `InMemoryHardware` and
+/// downstream as the default instantiation of all `<C: Crypto>` types.
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
+pub struct Ed25519Blake;
+
+impl Crypto for Ed25519Blake {
+    type Hash = Hash;
+    type Signature = Signature;
+    type KeyId = KeyId;
+
+    fn hash_from_bytes(b: &[u8]) -> Option<Hash> {
+        <[u8; 32]>::try_from(b).ok().map(Hash)
+    }
+
+    fn key_id_from_bytes(b: &[u8]) -> Option<KeyId> {
+        <[u8; 32]>::try_from(b).ok().map(KeyId)
+    }
+
+    fn signature_from_bytes(b: &[u8]) -> Option<Signature> {
+        <[u8; 64]>::try_from(b).ok().map(Signature)
+    }
+}
 
 /// 32-byte Blake2b digest of `data`.
 pub fn blake2b_256(data: &[u8]) -> Hash {
