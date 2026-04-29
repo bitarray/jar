@@ -6,7 +6,7 @@
 //! CNodes; their ephemeral counterparts (DispatchRef / TransactRef) live only
 //! in Frames and are derived from a pinned source.
 
-use crate::{CNodeId, CapId, Hash, KeyId, VaultId};
+use super::{CNodeId, CapId, Hash, KeyId, VaultId};
 
 /// All capability variants. Persistent variants live in CNodes (and σ); the
 /// two `*Ref` variants are ephemeral and live only in Frames.

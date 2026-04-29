@@ -1,6 +1,6 @@
 //! Off-chain aggregation slot content. Per-(node, Dispatch entrypoint).
 
-use crate::{AttestationEntry, ResultEntry, VaultId};
+use super::{AttestationEntry, ResultEntry, VaultId};
 
 /// One Dispatch event arriving at an entrypoint, or one Transact event in
 /// a block body. Same shape; used for both surfaces.

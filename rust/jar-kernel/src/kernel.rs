@@ -32,7 +32,9 @@
 //! Hardware ownership: the kernel **owns** `H` directly (no `Arc<H>`).
 //! The runtime creates one `Kernel<H>` per node.
 
-use jar_types::{Block, BlockHash, Capability, Event, Hash, KResult, KernelError, State, VaultId};
+use crate::types::{
+    Block, BlockHash, Capability, Event, Hash, KResult, KernelError, State, VaultId,
+};
 
 use crate::apply_block::{ApplyBlockOutcome, BlockOutcome, apply_block};
 use crate::cap_registry;

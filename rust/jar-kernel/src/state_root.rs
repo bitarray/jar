@@ -4,7 +4,7 @@
 //! Sufficient for "the chain's `Schedule(block_final)` claims this root and
 //! checks it" semantics. Real Merkle-trie commitment is a follow-up.
 
-use jar_types::{Hash, State};
+use crate::types::{Hash, State};
 
 use crate::crypto;
 

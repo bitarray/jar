@@ -6,11 +6,11 @@
 use std::sync::Arc;
 
 use jar_kernel::storage;
-use jar_types::{
+use jar_kernel::{
     CapRecord, Capability, Hash, KernelError, KeyRange, State, StorageRights, Vault, VaultId,
 };
 
-fn setup() -> (State, VaultId, jar_types::CapId) {
+fn setup() -> (State, VaultId, jar_kernel::CapId) {
     let mut s = State::empty();
     let mut v = Vault::new(Hash::ZERO);
     v.quota_items = 4;

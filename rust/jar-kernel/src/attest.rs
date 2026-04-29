@@ -11,7 +11,7 @@
 //! `crypto::verify`); only key-custody operations (`sign`, `holds_key`)
 //! route through Hardware.
 
-use jar_types::{AttestationEntry, AttestationScope, Capability, KResult, KernelError, KeyId};
+use crate::types::{AttestationEntry, AttestationScope, Capability, KResult, KernelError, KeyId};
 
 use crate::crypto;
 use crate::runtime::Hardware;
@@ -129,8 +129,8 @@ pub fn attest<H: Hardware>(
             // Reserve the position with a sentinel; kernel fills it post-execution.
             body_attestation_trace.push(AttestationEntry {
                 key,
-                blob_hash: jar_types::Hash::ZERO,
-                signature: jar_types::Signature::default(),
+                blob_hash: crate::types::Hash::ZERO,
+                signature: crate::types::Signature::default(),
             });
             cursor.attestation_pos += 1;
             Ok(AttestOutcome::Reserved)

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use jar_types::{CNodeId, CapId, CapRecord, Capability, KResult, KernelError, State, VaultId};
+use crate::types::{CNodeId, CapId, CapRecord, Capability, KResult, KernelError, State, VaultId};
 
 use crate::pinning;
 

@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use jar_types::CapId;
+use crate::types::CapId;
 
 #[derive(Clone, Default)]
 pub struct Frame {

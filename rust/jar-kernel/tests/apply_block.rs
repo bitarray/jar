@@ -3,8 +3,8 @@
 
 use jar_kernel::genesis::GenesisBuilder;
 use jar_kernel::runtime::{InMemoryBus, InMemoryHardware};
+use jar_kernel::{Block, BlockHash, Body, Hash};
 use jar_kernel::{BlockOutcome, Kernel};
-use jar_types::{Block, BlockHash, Body, Hash};
 
 fn build_kernel() -> Kernel<InMemoryHardware> {
     let g = GenesisBuilder::default().build().expect("genesis ok");
@@ -53,7 +53,10 @@ fn advance_rejects_wrong_parent_hash() {
 fn advance_rejects_unregistered_target() {
     let mut k = build_kernel();
     let body = Body {
-        events: vec![(jar_types::VaultId(9999), vec![jar_types::Event::default()])],
+        events: vec![(
+            jar_kernel::VaultId(9999),
+            vec![jar_kernel::Event::default()],
+        )],
         ..Default::default()
     };
     let block = Block {
@@ -76,7 +79,7 @@ fn body_events_order_must_match_transact_space_cnode() {
     let block = Block {
         parent: BlockHash::ZERO,
         body: Body {
-            events: vec![(target, vec![jar_types::Event::default()])],
+            events: vec![(target, vec![jar_kernel::Event::default()])],
             ..Default::default()
         },
     };
@@ -92,7 +95,7 @@ fn body_events_referencing_schedule_slot_is_rejected() {
     let block = Block {
         parent: BlockHash::ZERO,
         body: Body {
-            events: vec![(target, vec![jar_types::Event::default()])],
+            events: vec![(target, vec![jar_kernel::Event::default()])],
             ..Default::default()
         },
     };
@@ -114,10 +117,10 @@ fn transact_event_with_unconsumed_attestation_trace_faults() {
         body: Body {
             events: vec![(
                 target,
-                vec![jar_types::Event {
+                vec![jar_kernel::Event {
                     payload: vec![],
                     caps: vec![],
-                    attestation_trace: vec![jar_types::AttestationEntry::default()],
+                    attestation_trace: vec![jar_kernel::AttestationEntry::default()],
                     result_trace: vec![],
                 }],
             )],

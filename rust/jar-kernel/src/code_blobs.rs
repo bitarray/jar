@@ -5,7 +5,7 @@
 //! populates the code vault; the kernel reads it whenever it needs to
 //! instantiate a `javm::kernel::InvocationKernel`.
 
-use jar_types::{Hash, KResult, KernelError, State};
+use crate::types::{Hash, KResult, KernelError, State};
 
 /// Default smoke fixture: a PVM blob that ecallis IPC-slot (REPLY) → halts
 /// immediately. Compiled at build time from `rust/jar-test-services/halt`.
@@ -44,7 +44,7 @@ pub fn register_blob(state: &mut State, blob: Vec<u8>) -> KResult<Hash> {
         .get(&code_vault_id)
         .ok_or(KernelError::VaultNotFound(code_vault_id))?
         .clone();
-    let mut vault: jar_types::Vault = (*vault_arc).clone();
+    let mut vault: crate::types::Vault = (*vault_arc).clone();
     vault.storage.insert(hash.as_ref().to_vec(), blob);
     vault.recompute_footprint();
     state.vaults.insert(code_vault_id, Arc::new(vault));

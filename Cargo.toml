@@ -12,8 +12,6 @@ members = [
     "rust/javm-transpiler",
     "rust/scale",
     "rust/scale-derive",
-    "rust/jar-types",
-    "rust/jar-crypto",
     "rust/jar-kernel",
     "rust/jar",
     "rust/jar-test-services/halt",
@@ -40,8 +38,6 @@ authors = [ "Bitarray GmbH <legal@bitarray.dev>" ]
 # Internal crates
 javm = { path = "rust/javm" }
 javm-transpiler = { path = "rust/javm-transpiler" }
-jar-types = { path = "rust/jar-types" }
-jar-crypto = { path = "rust/jar-crypto" }
 jar-kernel = { path = "rust/jar-kernel" }
 scale = { path = "rust/scale", default-features = false, features = ["std"] }
 scale-derive = { path = "rust/scale-derive" }

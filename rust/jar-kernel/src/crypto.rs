@@ -11,18 +11,18 @@
 //! kernel routes through `verify` here. Vault code that wants to hash data
 //! goes through a host call that calls `hash`.
 
-use jar_types::{Block, Hash, KeyId, Signature};
+use crate::types::{Block, Hash, KeyId, Signature};
 
 /// Hash a byte string. Always blake2b-256 in v1.
 pub fn hash(blob: &[u8]) -> Hash {
-    jar_crypto::blake2b_256(blob)
+    crate::crypto_primitives::blake2b_256(blob)
 }
 
 /// Verify `sig` against `(key, msg)`. Returns false on any malformed input
 /// (wrong key width, malformed signature, etc.). Curve is determined by the
 /// key/sig widths — Ed25519 today; future BLS impl would dispatch internally.
 pub fn verify(key: &KeyId, msg: &[u8], sig: &Signature) -> bool {
-    jar_crypto::ed25519::verify(key, msg, sig)
+    crate::crypto_primitives::ed25519::verify(key, msg, sig)
 }
 
 /// Canonical hash of a `Block`. Used by the chain's block-sealing
@@ -39,7 +39,7 @@ pub fn block_hash(block: &Block) -> Hash {
     hash(&buf)
 }
 
-fn encode_body(buf: &mut Vec<u8>, body: &jar_types::Body) {
+fn encode_body(buf: &mut Vec<u8>, body: &crate::types::Body) {
     push_u64(buf, body.events.len() as u64);
     for (vid, group) in &body.events {
         push_u64(buf, vid.0);
@@ -99,7 +99,7 @@ fn push_bytes(buf: &mut Vec<u8>, b: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jar_types::Block;
+    use crate::types::Block;
 
     #[test]
     fn hash_is_deterministic() {

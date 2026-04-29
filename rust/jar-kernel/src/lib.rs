@@ -29,6 +29,7 @@ pub mod cap_registry;
 pub mod cnode_ops;
 pub mod code_blobs;
 pub mod crypto;
+pub mod crypto_primitives;
 pub mod dispatch;
 pub mod frame;
 pub mod genesis;
@@ -44,13 +45,10 @@ pub mod snapshot;
 pub mod state_root;
 pub mod storage;
 pub mod transact;
+pub mod types;
 
 pub use apply_block::BlockOutcome;
 pub use kernel::{AdvanceOutcome, Kernel};
 pub use runtime::{Hardware, HwError};
 
-pub use jar_types::{
-    Block, Body, CNode, CNodeId, Caller, CapId, CapRecord, Capability, Command, Event, Hash,
-    KernelError, KernelRole, KeyId, MerkleProof, ResourceKind, Signature, Slot, SlotContent, State,
-    Vault, VaultId,
-};
+pub use crate::types::*;

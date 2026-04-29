@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use jar_types::{Capability, KResult, KernelError, State, StorageRights, VaultId};
+use crate::types::{Capability, KResult, KernelError, State, StorageRights, VaultId};
 
 use crate::cap_registry;
 
@@ -21,7 +21,7 @@ use crate::cap_registry;
 /// underlying `vault_id` if the cap is well-formed for `need`.
 fn resolve_storage(
     state: &State,
-    storage_cap: jar_types::CapId,
+    storage_cap: crate::types::CapId,
     key: &[u8],
     need: StorageRights,
 ) -> KResult<VaultId> {
@@ -71,7 +71,7 @@ fn resolve_storage(
 /// `storage_read(storage_cap, key) -> Option<Vec<u8>>`.
 pub fn storage_read(
     state: &State,
-    storage_cap: jar_types::CapId,
+    storage_cap: crate::types::CapId,
     key: &[u8],
 ) -> KResult<Option<Vec<u8>>> {
     let vault_id = resolve_storage(state, storage_cap, key, StorageRights::RO)?;
@@ -83,7 +83,7 @@ pub fn storage_read(
 /// `Storage` cap with write rights; rejects `SnapshotStorage`.
 pub fn storage_write(
     state: &mut State,
-    storage_cap: jar_types::CapId,
+    storage_cap: crate::types::CapId,
     key: &[u8],
     value: &[u8],
 ) -> KResult<()> {
@@ -93,7 +93,7 @@ pub fn storage_write(
         .get(&vault_id)
         .ok_or(KernelError::VaultNotFound(vault_id))?
         .clone();
-    let mut vault: jar_types::Vault = (*vault_arc).clone();
+    let mut vault: crate::types::Vault = (*vault_arc).clone();
 
     let prev_len = vault
         .storage
@@ -132,14 +132,18 @@ pub fn storage_write(
 }
 
 /// `storage_delete(storage_cap, key)` — refunds quota.
-pub fn storage_delete(state: &mut State, storage_cap: jar_types::CapId, key: &[u8]) -> KResult<()> {
+pub fn storage_delete(
+    state: &mut State,
+    storage_cap: crate::types::CapId,
+    key: &[u8],
+) -> KResult<()> {
     let vault_id = resolve_storage(state, storage_cap, key, StorageRights::RW)?;
     let vault_arc = state
         .vaults
         .get(&vault_id)
         .ok_or(KernelError::VaultNotFound(vault_id))?
         .clone();
-    let mut vault: jar_types::Vault = (*vault_arc).clone();
+    let mut vault: crate::types::Vault = (*vault_arc).clone();
     if let Some(prev) = vault.storage.remove(key) {
         let delta = (key.len() + prev.len()) as u64;
         vault.total_footprint = vault.total_footprint.saturating_sub(delta);

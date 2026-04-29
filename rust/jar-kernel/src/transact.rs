@@ -12,7 +12,7 @@
 //! - No body.events entry references a Schedule slot's vault_id.
 //! - No trailing unmatched body entries at end of walk.
 
-use jar_types::{
+use crate::types::{
     AttestationEntry, Body, Caller, Capability, Command, KResult, KernelError, KernelRole,
     ReachEntry, ResultEntry, State, VaultId,
 };
@@ -169,12 +169,12 @@ pub fn run_one_invocation<H: Hardware>(
 /// RW Storage cap to the entrypoint Vault's overlay. Real chain authors
 /// decide their own Frame layout via VaultRef.Initialize args.
 fn build_invocation_frame(state: &mut State, vault_id: VaultId) -> KResult<Frame> {
-    use jar_types::{KeyRange, StorageRights};
+    use crate::types::{KeyRange, StorageRights};
 
     let mut frame = Frame::new();
     let storage_cap = cap_registry::alloc(
         state,
-        jar_types::CapRecord {
+        crate::types::CapRecord {
             cap: Capability::Storage {
                 vault_id,
                 key_range: KeyRange::all(),

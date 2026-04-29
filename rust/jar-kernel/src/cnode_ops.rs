@@ -3,7 +3,7 @@
 //! All slot mutations on persistent CNodes go through these. Pinning checks
 //! happen here.
 
-use jar_types::{CNodeId, CapId, Capability, KResult, KernelError, State};
+use crate::types::{CNodeId, CapId, Capability, KResult, KernelError, State};
 
 use crate::{cap_registry, pinning};
 
@@ -95,7 +95,7 @@ pub fn cnode_revoke(state: &mut State, cnode: CNodeId, slot: u8) -> KResult<()> 
 /// Allocate a fresh empty CNode in σ; returns its id.
 pub fn cnode_create(state: &mut State) -> CNodeId {
     let id = state.next_cnode_id();
-    state.cnodes.insert(id, jar_types::CNode::new());
+    state.cnodes.insert(id, crate::types::CNode::new());
     id
 }
 
@@ -122,7 +122,7 @@ pub fn mint_and_place(
 ) -> KResult<CapId> {
     let id = cap_registry::alloc(
         state,
-        jar_types::CapRecord {
+        crate::types::CapRecord {
             cap,
             issuer: None,
             narrowing,

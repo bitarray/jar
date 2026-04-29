@@ -6,8 +6,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use jar_crypto::ed25519::KeyPair;
-use jar_types::{BlockHash, Command, Hash, KeyId, Signature, SlotContent, State, VaultId};
+use crate::crypto_primitives::ed25519::KeyPair;
+use crate::types::{BlockHash, Command, Hash, KeyId, Signature, SlotContent, State, VaultId};
 
 use super::hardware::{Hardware, HwError, TracingEvent};
 

@@ -18,7 +18,7 @@
 //! Crypto (hash, verify, block_hash) is kernel-static — see
 //! `jar_kernel::crypto`.
 
-use jar_types::{BlockHash, Command, Hash, KeyId, Signature, State, VaultId};
+use crate::types::{BlockHash, Command, Hash, KeyId, Signature, State, VaultId};
 
 #[derive(thiserror::Error, Debug, Clone, Eq, PartialEq)]
 pub enum HwError {

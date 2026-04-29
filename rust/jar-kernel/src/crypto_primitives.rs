@@ -11,8 +11,8 @@
 
 #![forbid(unsafe_code)]
 
+use crate::types::{Hash, KeyId, Signature};
 use blake2::digest::{Update, VariableOutput};
-use jar_types::{Hash, KeyId, Signature};
 
 /// 32-byte Blake2b digest of `data`.
 pub fn blake2b_256(data: &[u8]) -> Hash {

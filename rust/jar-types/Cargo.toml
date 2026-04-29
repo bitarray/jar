@@ -1,9 +1,0 @@
-[package]
-name = "jar-types"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-description = "Shared types for the JAR minimum kernel."
-
-[dependencies]
-thiserror = { workspace = true }

@@ -1,6 +1,6 @@
 //! Runtime-side types — `Caller`, `Command`, `KernelRole`.
 
-use crate::{BlockHash, SlotContent, VaultId};
+use super::{BlockHash, SlotContent, VaultId};
 
 /// Returned by the `caller()` host call. Discriminates between Vault-to-Vault
 /// sub-CALLs and kernel-fired top-level invocations.

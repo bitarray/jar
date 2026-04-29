@@ -10,7 +10,7 @@
 //! kernel-computed hash and attaches its own auxiliary metadata (fork-tree
 //! pointers, score, finality flags) in a separate store.
 
-use crate::{AttestationEntry, BlockHash, Event, MerkleProof, ReachEntry, ResultEntry, VaultId};
+use super::{AttestationEntry, BlockHash, Event, MerkleProof, ReachEntry, ResultEntry, VaultId};
 
 /// Block body. Carries on-chain events grouped per Transact entrypoint plus
 /// all sidecar traces.

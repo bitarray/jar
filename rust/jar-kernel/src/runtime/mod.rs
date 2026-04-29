@@ -9,7 +9,7 @@ pub mod in_memory;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use jar_types::{SlotContent, VaultId};
+use crate::types::{SlotContent, VaultId};
 
 pub use hardware::{Hardware, HwError, TracingEvent};
 pub use in_memory::{ForkTree, InMemoryBus, InMemoryHardware, NetMessage};

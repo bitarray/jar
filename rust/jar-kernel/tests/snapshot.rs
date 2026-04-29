@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use jar_kernel::snapshot::StateSnapshot;
-use jar_types::{Hash, State, Vault, VaultId};
+use jar_kernel::{Hash, State, Vault, VaultId};
 
 fn state_with_one_vault() -> (State, VaultId) {
     let mut s = State::empty();

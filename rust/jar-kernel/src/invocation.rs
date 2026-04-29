@@ -12,7 +12,7 @@
 //! `write_data_cap_window`; failures are guest-driven faults, not kernel
 //! errors.
 
-use jar_types::{
+use crate::types::{
     AttestationEntry, Caller, Command, KResult, KernelError, KernelRole, ResultEntry, SlotContent,
     State, VaultId,
 };

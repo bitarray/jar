@@ -5,7 +5,7 @@
 //! position-by-position by verifiers. The kernel enforces strict-equality
 //! and exhaustion at apply_block end.
 
-use crate::{Hash, KeyId, Signature, VaultId};
+use super::{Hash, KeyId, Signature, VaultId};
 
 /// One signature recorded by an `attest()` call.
 #[derive(Clone, Eq, PartialEq, Debug, Default)]

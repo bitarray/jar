@@ -794,22 +794,9 @@ name = "jar"
 version = "0.1.0"
 dependencies = [
  "clap",
- "jar-crypto",
  "jar-kernel",
- "jar-types",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "jar-crypto"
-version = "0.1.0"
-dependencies = [
- "blake2",
- "ed25519-dalek",
- "jar-types",
- "rand 0.8.5",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -828,10 +815,11 @@ dependencies = [
 name = "jar-kernel"
 version = "0.1.0"
 dependencies = [
+ "blake2",
  "build-javm",
- "jar-crypto",
- "jar-types",
+ "ed25519-dalek",
  "javm",
+ "rand 0.8.5",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -843,13 +831,6 @@ version = "0.1.0"
 [[package]]
 name = "jar-test-slot-clear"
 version = "0.1.0"
-
-[[package]]
-name = "jar-types"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.18",
-]
 
 [[package]]
 name = "javm"

@@ -11,7 +11,7 @@
 //!    DispatchRef / Transact / TransactRef target), arg caps must not be any
 //!    pinned-or-ref variant (the four above plus Schedule).
 
-use jar_types::{CNodeId, CapId, Capability, KResult, KernelError, State};
+use crate::types::{CNodeId, CapId, Capability, KResult, KernelError, State};
 
 use crate::cap_registry;
 

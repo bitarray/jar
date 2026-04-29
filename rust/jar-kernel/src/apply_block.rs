@@ -9,7 +9,7 @@
 //! Structural backstop (kernel-enforced): parent linkage + global
 //! attestation/result trace exhaustion.
 
-use jar_types::{Block, BlockHash, Command, Hash, KResult, MerkleProof, State};
+use crate::types::{Block, BlockHash, Command, Hash, KResult, MerkleProof, State};
 
 use crate::attest::AttestCursor;
 use crate::runtime::Hardware;

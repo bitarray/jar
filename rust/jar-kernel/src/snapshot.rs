@@ -5,7 +5,7 @@
 //! kernel restores from the snapshot — modified vaults are dropped because
 //! `Arc::make_mut` had cloned the inner `Vault` on first write.
 
-use jar_types::State;
+use crate::types::State;
 
 /// Cheap-copy snapshot of σ. Backed by Arc-shared vault bodies.
 #[derive(Clone)]

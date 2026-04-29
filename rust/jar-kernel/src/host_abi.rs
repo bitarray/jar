@@ -10,7 +10,7 @@
 //! - φ[7] carries the primary return value; φ[8] the secondary (when used).
 //! - Pointer/length pairs reference the guest's flat memory window.
 
-use jar_types::KernelError;
+use crate::types::KernelError;
 
 /// Sentinel returned from host calls signalling success when the call has no
 /// natural return value.

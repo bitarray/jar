@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use jar_types::{Body, Capability, Event, KResult, KernelError, SlotContent, State, VaultId};
+use crate::types::{Body, Capability, Event, KResult, KernelError, SlotContent, State, VaultId};
 
 use crate::cap_registry;
 use crate::runtime::NodeOffchain;

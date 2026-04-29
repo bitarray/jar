@@ -11,8 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 jar-kernel = { workspace = true }
-jar-types = { workspace = true }
-jar-crypto = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "std", "fmt"] }

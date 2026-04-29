@@ -15,7 +15,7 @@
 //!   read-only contexts (e.g., Dispatch step-2/step-3) simply don't include
 //!   those caps; the ops bounce on `RC_BAD_CAP`.
 
-use jar_types::{
+use crate::types::{
     AttestationScope, CNodeId, Caller, CapId, CapRecord, Capability, Command, KResult, KernelError,
     KernelRole, ResourceKind, ResultEntry, SlotContent,
 };
@@ -264,7 +264,7 @@ fn host_cnode_move<H: Hardware>(
     let src_slot = vm.active_reg(8) as u8;
     let dst_cn_fs = vm.active_reg(9) as u8;
     let dst_slot = vm.active_reg(10) as u8;
-    let resolve = |state: &jar_types::State, fs: u8| -> KResult<CNodeId> {
+    let resolve = |state: &crate::types::State, fs: u8| -> KResult<CNodeId> {
         let cap = ctx
             .frame
             .get(fs)
@@ -525,10 +525,10 @@ fn host_create_vault<H: Hardware>(
     };
     let mut buf = [0u8; 32];
     buf.copy_from_slice(&code_hash_bytes);
-    let code_hash = jar_types::Hash(buf);
+    let code_hash = crate::types::Hash(buf);
 
     let new_vault_id = ctx.state.next_vault_id();
-    let mut vault = jar_types::Vault::new(code_hash);
+    let mut vault = crate::types::Vault::new(code_hash);
     vault.quota_items = quota_items;
     vault.quota_bytes = quota_bytes;
     ctx.state
@@ -540,7 +540,7 @@ fn host_create_vault<H: Hardware>(
         CapRecord {
             cap: Capability::VaultRef {
                 vault_id: new_vault_id,
-                rights: jar_types::VaultRights::ALL,
+                rights: crate::types::VaultRights::ALL,
             },
             issuer: Some(res_cap_id),
             narrowing: Vec::new(),
@@ -571,7 +571,7 @@ fn host_quota_set<H: Hardware>(
         .get(&target)
         .ok_or(KernelError::VaultNotFound(target))?
         .clone();
-    let mut vault: jar_types::Vault = (*arc).clone();
+    let mut vault: crate::types::Vault = (*arc).clone();
     vault.quota_items = new_items;
     vault.quota_bytes = new_bytes;
     ctx.state.vaults.insert(target, std::sync::Arc::new(vault));

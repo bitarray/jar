@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use jar_types::{KResult, KernelError, ReachEntry, VaultId};
+use crate::types::{KResult, KernelError, ReachEntry, VaultId};
 
 /// Per-invocation reach: which Vaults were touched (initialized) during one
 /// top-level invocation.

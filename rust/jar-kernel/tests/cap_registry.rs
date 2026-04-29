@@ -3,7 +3,7 @@
 use jar_kernel::cap_registry;
 use jar_kernel::cnode_ops;
 use jar_kernel::pinning;
-use jar_types::{CapRecord, Capability, KernelError, State, StorageRights, VaultId, VaultRights};
+use jar_kernel::{CapRecord, Capability, KernelError, State, StorageRights, VaultId, VaultRights};
 
 fn empty_state() -> State {
     State::empty()

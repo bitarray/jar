@@ -9,10 +9,10 @@
 //! Real chains would emit `AggregatedTransact` instead; the slot-clear path
 //! exercises the host-call dispatch loop end-to-end.
 
+use jar_kernel::Event;
 use jar_kernel::Kernel;
 use jar_kernel::genesis::GenesisBuilder;
 use jar_kernel::runtime::{InMemoryBus, InMemoryHardware, NetMessage};
-use jar_types::Event;
 
 #[test]
 fn dispatch_runs_step2_step3_and_subscribes_at_construction() {

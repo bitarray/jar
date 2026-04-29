@@ -5,7 +5,7 @@
 //! order — plus a registered Dispatch entrypoint. This is the minimum
 //! shape for kernel-mechanics tests; real chains add many more slots.
 
-use jar_types::{CapId, Capability, Hash, KResult, State, VaultId};
+use crate::types::{CapId, Capability, Hash, KResult, State, VaultId};
 
 use crate::cap_registry;
 use crate::cnode_ops;
@@ -61,7 +61,7 @@ impl GenesisBuilder {
         // Allocate the kernel-internal code vault first (VaultId(0)). Holds
         // every blob a user vault's `code_hash` references; populated below.
         let code_vault_id = state.next_vault_id();
-        let mut code_vault = jar_types::Vault::new(Hash([0u8; 32]));
+        let mut code_vault = crate::types::Vault::new(Hash([0u8; 32]));
         code_vault.quota_items = u64::MAX;
         code_vault.quota_bytes = u64::MAX;
         state
@@ -82,7 +82,7 @@ impl GenesisBuilder {
         // Mint `CNode` reference caps for the two surfaces.
         let tcn_cap = cap_registry::alloc(
             &mut state,
-            jar_types::CapRecord {
+            crate::types::CapRecord {
                 cap: Capability::CNode {
                     cnode_id: transact_cnode,
                 },
@@ -92,7 +92,7 @@ impl GenesisBuilder {
         );
         let dcn_cap = cap_registry::alloc(
             &mut state,
-            jar_types::CapRecord {
+            crate::types::CapRecord {
                 cap: Capability::CNode {
                     cnode_id: dispatch_cnode,
                 },
@@ -191,7 +191,7 @@ impl GenesisBuilder {
 
 fn alloc_vault(state: &mut State, code_hash: Hash, quota_items: u64, quota_bytes: u64) -> VaultId {
     let id = state.next_vault_id();
-    let mut v = jar_types::Vault::new(code_hash);
+    let mut v = crate::types::Vault::new(code_hash);
     v.quota_items = quota_items;
     v.quota_bytes = quota_bytes;
     state.vaults.insert(id, std::sync::Arc::new(v));

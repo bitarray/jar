@@ -20,7 +20,7 @@
 //! truly literal; today step-2 and step-3 are separate `InvocationKernel`s
 //! built from the same blob, distinguished by the φ[7] phase tag.
 
-use jar_types::{
+use crate::types::{
     AttestationEntry, Caller, Capability, Command, Event, KResult, KernelError, KernelRole,
     ResultEntry, SlotContent, State, VaultId,
 };
@@ -194,13 +194,13 @@ fn build_dispatch_frame(
     state: &mut State,
     vault_id: VaultId,
     _caps: &[u8],
-    prior_root: jar_types::Hash,
+    prior_root: crate::types::Hash,
 ) -> KResult<Frame> {
-    use jar_types::KeyRange;
+    use crate::types::KeyRange;
     let mut frame = Frame::new();
     let storage_cap = cap_registry::alloc(
         state,
-        jar_types::CapRecord {
+        crate::types::CapRecord {
             cap: Capability::SnapshotStorage {
                 vault_id,
                 key_range: KeyRange::all(),
