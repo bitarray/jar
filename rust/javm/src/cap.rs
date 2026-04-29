@@ -257,6 +257,15 @@ pub struct CallableCap {
     pub max_gas: Option<u64>,
 }
 
+/// Handle to the per-invocation ephemeral table — a 256-slot cap-table
+/// shared by every VM in the call tree. Slot 0 of every VM's persistent
+/// Frame holds an `EphemeralTable` cap. Not copyable (single shared
+/// table per invocation), not movable (lifetime owned by the kernel).
+#[derive(Debug, Clone)]
+pub struct EphemeralTableCap {
+    pub table_id: crate::vm_pool::EphemeralTableId,
+}
+
 /// Per-variant policy for `Cap::Protocol(P)` payloads.
 ///
 /// javm consults these methods when handling cap-table mutation
@@ -297,6 +306,7 @@ pub enum Cap<P: ProtocolCapT = u8> {
     Code(Arc<CodeCap>),
     Handle(HandleCap),
     Callable(CallableCap),
+    EphemeralTable(EphemeralTableCap),
     Protocol(P),
 }
 
@@ -306,7 +316,7 @@ impl<P: ProtocolCapT> Cap<P> {
     pub fn is_copyable(&self) -> bool {
         match self {
             Cap::Untyped(_) | Cap::Code(_) | Cap::Callable(_) => true,
-            Cap::Data(_) | Cap::Handle(_) => false,
+            Cap::Data(_) | Cap::Handle(_) | Cap::EphemeralTable(_) => false,
             Cap::Protocol(p) => p.is_copyable(),
         }
     }
@@ -319,7 +329,7 @@ impl<P: ProtocolCapT> Cap<P> {
             Cap::Code(c) => Some(Cap::Code(Arc::clone(c))),
             Cap::Callable(c) => Some(Cap::Callable(c.clone())),
             Cap::Protocol(p) if p.is_copyable() => Some(Cap::Protocol(p.clone())),
-            Cap::Data(_) | Cap::Handle(_) | Cap::Protocol(_) => None,
+            Cap::Data(_) | Cap::Handle(_) | Cap::EphemeralTable(_) | Cap::Protocol(_) => None,
         }
     }
 }

@@ -329,6 +329,126 @@ impl<P: ProtocolCapT> VmArena<P> {
 }
 
 // ============================================================================
+// Ephemeral Table Arena
+// ============================================================================
+//
+// One ephemeral table per outermost javm invocation, allocated by the kernel
+// at invocation entry and freed at invocation exit. Every VM in the call tree
+// holds a `Cap::EphemeralTable` at slot 0 of its persistent Frame referring
+// to the same arena entry.
+//
+// Sub-slot conventions (when populated by the host):
+//   0     Reply Handle              (per-frame; kernel rewrites on CALL/REPLY)
+//   1     Caller cap (badge)        (per-frame; kernel rewrites)
+//   2     Self cap                  (per-frame; kernel rewrites)
+//   3     Gas cap                   (per-invocation; single shared budget)
+//   4..127  reserved kernel-managed
+//   128..255 guest cap-args
+
+/// Packed ephemeral-table ID: low 16 bits = arena index, high 16 bits = generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EphemeralTableId(u32);
+
+impl EphemeralTableId {
+    pub fn new(index: u16, generation: u16) -> Self {
+        Self((generation as u32) << 16 | index as u32)
+    }
+    pub fn index(self) -> u16 {
+        self.0 as u16
+    }
+    pub fn generation(self) -> u16 {
+        (self.0 >> 16) as u16
+    }
+}
+
+#[derive(Debug)]
+struct EphemeralTableEntry<P: ProtocolCapT> {
+    table: Option<CapTable<P>>,
+    generation: u16,
+}
+
+/// Generational arena of ephemeral tables. Today the kernel allocates one
+/// per invocation, but the arena is sized for future expansion.
+#[derive(Debug)]
+pub struct EphemeralTableArena<P: ProtocolCapT = u8> {
+    entries: Vec<EphemeralTableEntry<P>>,
+    free_list: Vec<u16>,
+    live_count: u16,
+}
+
+impl<P: ProtocolCapT> Default for EphemeralTableArena<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<P: ProtocolCapT> EphemeralTableArena<P> {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::with_capacity(2),
+            free_list: Vec::new(),
+            live_count: 0,
+        }
+    }
+
+    pub fn insert(&mut self, table: CapTable<P>) -> EphemeralTableId {
+        self.live_count += 1;
+        if let Some(index) = self.free_list.pop() {
+            let entry = &mut self.entries[index as usize];
+            let id = EphemeralTableId::new(index, entry.generation);
+            entry.table = Some(table);
+            id
+        } else {
+            let index = self.entries.len() as u16;
+            self.entries.push(EphemeralTableEntry {
+                table: Some(table),
+                generation: 0,
+            });
+            EphemeralTableId::new(index, 0)
+        }
+    }
+
+    pub fn get(&self, id: EphemeralTableId) -> Option<&CapTable<P>> {
+        let idx = id.index() as usize;
+        let entry = self.entries.get(idx)?;
+        if entry.generation != id.generation() {
+            return None;
+        }
+        entry.table.as_ref()
+    }
+
+    pub fn get_mut(&mut self, id: EphemeralTableId) -> Option<&mut CapTable<P>> {
+        let idx = id.index() as usize;
+        let entry = self.entries.get_mut(idx)?;
+        if entry.generation != id.generation() {
+            return None;
+        }
+        entry.table.as_mut()
+    }
+
+    pub fn remove(&mut self, id: EphemeralTableId) -> Option<CapTable<P>> {
+        let idx = id.index() as usize;
+        let entry = self.entries.get_mut(idx)?;
+        if entry.generation != id.generation() {
+            return None;
+        }
+        let table = entry.table.take()?;
+        entry.generation = entry.generation.wrapping_add(1);
+        self.free_list.push(id.index());
+        self.live_count -= 1;
+        Some(table)
+    }
+
+    pub fn len(&self) -> usize {
+        self.live_count as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.live_count == 0
+    }
+}
+
+// ============================================================================
 // Window Pool — N pre-allocated 4GB windows with LRU eviction
 // ============================================================================
 

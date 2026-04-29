@@ -120,6 +120,11 @@ pub struct InvocationKernel<P: crate::cap::ProtocolCapT = u8> {
     pub code_caps: Vec<Arc<CodeCap>>,
     /// VM instances (generational arena).
     pub vm_arena: VmArena<P>,
+    /// Per-invocation ephemeral tables. The kernel allocates one per
+    /// outermost javm invocation; every VM in the call tree references
+    /// it via `Cap::EphemeralTable` at slot 0 of its persistent Frame.
+    /// (Currently scaffolding — no entries are allocated yet.)
+    pub ephemeral_arena: crate::vm_pool::EphemeralTableArena<P>,
     /// Shared UNTYPED cap (bump allocator).
     pub untyped: Arc<UntypedCap>,
     /// Currently active VM index.
@@ -207,6 +212,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             backing,
             code_caps: Vec::with_capacity(MAX_CODE_CAPS),
             vm_arena: VmArena::new(),
+            ephemeral_arena: crate::vm_pool::EphemeralTableArena::new(),
             untyped,
             active_vm: 0,
             call_stack: Vec::with_capacity(8),
@@ -651,6 +657,14 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             }
             Cap::Data(_) => {
                 // DATA is not callable
+                self.set_active_reg(7, RESULT_WHAT);
+                DispatchResult::Continue
+            }
+            Cap::EphemeralTable(_) => {
+                // CALL on the ephemeral-table handle (slot 0) is REPLY.
+                // Reached only through `cap_idx == 0`; ecalli(0) is already
+                // special-cased upstream as REPLY, so this arm is dead in
+                // the normal flow but kept as a backstop.
                 self.set_active_reg(7, RESULT_WHAT);
                 DispatchResult::Continue
             }
