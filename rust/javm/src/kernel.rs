@@ -923,7 +923,8 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         DispatchResult::Continue
     }
 
-    /// Handle REPLY (ecalli(0xFF) = CALL on IPC slot).
+    /// Handle REPLY (`ecalli(0)` — CALL on slot 0, kernel-shorthand for
+    /// returning to the caller frame).
     fn handle_reply(&mut self) -> DispatchResult {
         let frame = match self.call_stack.pop() {
             Some(f) => f,
