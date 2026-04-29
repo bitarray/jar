@@ -325,3 +325,173 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Generate random 32-byte keys.
+    fn arb_key() -> impl Strategy<Value = [u8; 32]> {
+        any::<[u8; 32]>()
+    }
+
+    /// Generate random values (0–64 bytes, covering both embedded and hashed leaf paths).
+    fn arb_value() -> impl Strategy<Value = Vec<u8>> {
+        proptest::collection::vec(any::<u8>(), 0..64)
+    }
+
+    /// Generate a set of up to `max` unique key-value pairs.
+    fn arb_kvs(max: usize) -> impl Strategy<Value = Vec<([u8; 32], Vec<u8>)>> {
+        proptest::collection::vec((arb_key(), arb_value()), 1..=max).prop_map(|pairs| {
+            // Deduplicate by key (keep first occurrence)
+            let mut seen = std::collections::HashSet::new();
+            pairs.into_iter().filter(|(k, _)| seen.insert(*k)).collect()
+        })
+    }
+
+    proptest! {
+        /// Root is deterministic: same KVs always produce the same root.
+        #[test]
+        fn trie_root_deterministic(kvs in arb_kvs(20)) {
+            let refs1: Vec<(&[u8], &[u8])> =
+                kvs.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+            let refs2: Vec<(&[u8], &[u8])> =
+                kvs.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+            prop_assert_eq!(merkle_root(&refs1), merkle_root(&refs2));
+        }
+
+        /// Root is order-independent: shuffling KVs produces the same root.
+        #[test]
+        fn trie_root_order_independent(kvs in arb_kvs(10)) {
+            let refs_original: Vec<(&[u8], &[u8])> =
+                kvs.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+            let mut kvs_reversed = kvs.clone();
+            kvs_reversed.reverse();
+            let refs_reversed: Vec<(&[u8], &[u8])> =
+                kvs_reversed.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+            prop_assert_eq!(merkle_root(&refs_original), merkle_root(&refs_reversed));
+        }
+
+        /// Changing any value changes the root.
+        #[test]
+        fn trie_root_changes_on_value_change(
+            kvs in arb_kvs(10),
+            flip_idx in 0usize..10,
+            flip_byte in any::<u8>(),
+        ) {
+            prop_assume!(!kvs.is_empty());
+            let flip_idx = flip_idx % kvs.len();
+            let flip_byte = if flip_byte == 0 { 1 } else { flip_byte };
+
+            let refs_before: Vec<(&[u8], &[u8])> =
+                kvs.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+            let root_before = merkle_root(&refs_before);
+
+            let mut kvs_modified = kvs.clone();
+            if !kvs_modified[flip_idx].1.is_empty() {
+                kvs_modified[flip_idx].1[0] ^= flip_byte;
+            } else {
+                kvs_modified[flip_idx].1.push(flip_byte);
+            }
+            let refs_after: Vec<(&[u8], &[u8])> =
+                kvs_modified.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+            let root_after = merkle_root(&refs_after);
+
+            prop_assert_ne!(root_before, root_after,
+                "root should change when value at index {} changes", flip_idx);
+        }
+
+        /// Adding a new key changes the root.
+        #[test]
+        fn trie_root_changes_on_key_addition(
+            kvs in arb_kvs(10),
+            new_key in arb_key(),
+            new_val in arb_value(),
+        ) {
+            let refs_before: Vec<(&[u8], &[u8])> =
+                kvs.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+            let root_before = merkle_root(&refs_before);
+
+            // Only test when the new key is truly new
+            prop_assume!(!kvs.iter().any(|(k, _)| *k == new_key));
+
+            let mut kvs_extended = kvs.clone();
+            kvs_extended.push((new_key, new_val));
+            let refs_after: Vec<(&[u8], &[u8])> =
+                kvs_extended.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+            let root_after = merkle_root(&refs_after);
+
+            prop_assert_ne!(root_before, root_after,
+                "root should change when a new key is added");
+        }
+
+        /// Removing a key changes the root.
+        #[test]
+        fn trie_root_changes_on_key_removal(
+            kvs in arb_kvs(10),
+            remove_idx in 0usize..10,
+        ) {
+            prop_assume!(kvs.len() >= 2); // Need at least 2 to remove one
+            let remove_idx = remove_idx % kvs.len();
+
+            let refs_before: Vec<(&[u8], &[u8])> =
+                kvs.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+            let root_before = merkle_root(&refs_before);
+
+            let mut kvs_reduced = kvs.clone();
+            kvs_reduced.remove(remove_idx);
+            let refs_after: Vec<(&[u8], &[u8])> =
+                kvs_reduced.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+            let root_after = merkle_root(&refs_after);
+
+            prop_assert_ne!(root_before, root_after,
+                "root should change when a key is removed");
+        }
+
+        /// Root is never zero for non-empty trie with non-zero data.
+        #[test]
+        fn trie_root_nonzero(kvs in arb_kvs(5)) {
+            let refs: Vec<(&[u8], &[u8])> =
+                kvs.iter().map(|(k, v)| (k.as_slice(), v.as_slice())).collect();
+            let root = merkle_root(&refs);
+            prop_assert_ne!(root, Hash::ZERO,
+                "non-empty trie should have non-zero root");
+        }
+
+        /// Single-entry trie root matches the corresponding leaf node hash.
+        #[test]
+        fn trie_single_entry_matches_leaf(key in arb_key(), value in arb_value()) {
+            let refs: Vec<(&[u8], &[u8])> = vec![(&key, &value)];
+            let root = merkle_root(&refs);
+
+            let mut key31 = [0u8; 31];
+            key31.copy_from_slice(&key[..31]);
+            let expected = if value.len() <= 32 {
+                TrieNode::EmbeddedLeaf {
+                    key: key31,
+                    value: value.clone(),
+                }
+                .hash()
+            } else {
+                TrieNode::HashedLeaf {
+                    key: key31,
+                    value_hash: blake2b_256(&value),
+                }
+                .hash()
+            };
+
+            prop_assert_eq!(root, expected);
+        }
+
+        /// TrieNode encode is deterministic: encoding twice yields identical bytes.
+        #[test]
+        fn trie_node_encode_deterministic(
+            key in any::<[u8; 31]>(),
+            value in proptest::collection::vec(any::<u8>(), 0..32),
+        ) {
+            let node = TrieNode::EmbeddedLeaf { key, value };
+            prop_assert_eq!(node.encode(), node.encode());
+        }
+    }
+}
