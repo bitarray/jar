@@ -14,11 +14,11 @@
 
 use std::sync::Arc;
 
+use jar_types::Crypto;
 use jar_types::{
     AttestationEntry, Body, Caller, Capability, Command, KResult, KernelError, KernelRole,
     ReachEntry, ResultEntry, State, StorageMode, VaultId,
 };
-use jar_types::Crypto;
 
 use crate::attest::AttestCursor;
 use crate::cap_registry;

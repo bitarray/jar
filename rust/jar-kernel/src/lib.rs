@@ -23,6 +23,7 @@ pub mod genesis;
 pub mod host_abi;
 pub mod host_calls;
 pub mod invocation;
+pub mod kernel;
 pub mod pinning;
 pub mod proposer;
 pub mod reach;
@@ -32,11 +33,15 @@ pub mod state_root;
 pub mod storage;
 pub mod transact;
 
-pub use apply_block::{ApplyBlockOutcome, BlockOutcome, apply_block};
-pub use dispatch::{InboundOutcome, handle_inbound_dispatch};
-pub use proposer::drain_for_body;
+// The kernel surface is `Kernel<H>` — its methods are the way to invoke
+// `apply_block`, `handle_inbound_dispatch`, `drain_for_body`, and
+// `state_root`. The underlying free-standing functions remain accessible
+// via `apply_block::apply_block`, etc., for advanced callers that want
+// to skip the `Kernel<H>` wrapper, but they're not re-exported here.
+pub use apply_block::{ApplyBlockOutcome, BlockOutcome};
+pub use dispatch::InboundOutcome;
+pub use kernel::Kernel;
 pub use runtime::{Hardware, HwError, NodeOffchain};
-pub use state_root::state_root;
 
 pub use jar_types::{
     Block, Body, CNode, CNodeId, Caller, CapId, CapRecord, Capability, Command, Crypto, Event,

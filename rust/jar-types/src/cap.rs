@@ -174,14 +174,10 @@ impl<C: Crypto> PartialEq for Capability<C> {
                     born_in: b2,
                 },
             ) => a1 == b1 && a2 == b2,
-            (
-                Capability::DispatchRef { vault_id: a },
-                Capability::DispatchRef { vault_id: b },
-            )
-            | (
-                Capability::TransactRef { vault_id: a },
-                Capability::TransactRef { vault_id: b },
-            ) => a == b,
+            (Capability::DispatchRef { vault_id: a }, Capability::DispatchRef { vault_id: b })
+            | (Capability::TransactRef { vault_id: a }, Capability::TransactRef { vault_id: b }) => {
+                a == b
+            }
             (Capability::CNode { cnode_id: a }, Capability::CNode { cnode_id: b }) => a == b,
             (
                 Capability::Storage {
@@ -196,19 +192,12 @@ impl<C: Crypto> PartialEq for Capability<C> {
                 },
             ) => a1 == b1 && a2 == b2 && a3 == b3,
             (Capability::Resource(a), Capability::Resource(b)) => a == b,
+            (Capability::Meta { op: a1, over: a2 }, Capability::Meta { op: b1, over: b2 }) => {
+                a1 == b1 && a2 == b2
+            }
             (
-                Capability::Meta { op: a1, over: a2 },
-                Capability::Meta { op: b1, over: b2 },
-            ) => a1 == b1 && a2 == b2,
-            (
-                Capability::AttestationCap {
-                    key: a1,
-                    scope: a2,
-                },
-                Capability::AttestationCap {
-                    key: b1,
-                    scope: b2,
-                },
+                Capability::AttestationCap { key: a1, scope: a2 },
+                Capability::AttestationCap { key: b1, scope: b2 },
             ) => a1 == b1 && a2 == b2,
             (
                 Capability::AttestationAggregateCap { key: a },
@@ -225,10 +214,9 @@ impl<C: Crypto> Eq for Capability<C> {}
 impl<C: Crypto> core::fmt::Debug for Capability<C> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Capability::Vault { vault_id } => f
-                .debug_struct("Vault")
-                .field("vault_id", vault_id)
-                .finish(),
+            Capability::Vault { vault_id } => {
+                f.debug_struct("Vault").field("vault_id", vault_id).finish()
+            }
             Capability::VaultRef { vault_id, rights } => f
                 .debug_struct("VaultRef")
                 .field("vault_id", vault_id)
@@ -257,10 +245,9 @@ impl<C: Crypto> core::fmt::Debug for Capability<C> {
                 .debug_struct("TransactRef")
                 .field("vault_id", vault_id)
                 .finish(),
-            Capability::CNode { cnode_id } => f
-                .debug_struct("CNode")
-                .field("cnode_id", cnode_id)
-                .finish(),
+            Capability::CNode { cnode_id } => {
+                f.debug_struct("CNode").field("cnode_id", cnode_id).finish()
+            }
             Capability::Storage {
                 vault_id,
                 key_range,

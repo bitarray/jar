@@ -24,34 +24,9 @@ use core::hash::Hash;
 /// - `KeyId` mirrors `Hash`'s bounds (often the same width and used the
 ///   same way).
 pub trait Crypto: Send + Sync + Sized + 'static {
-    type Hash: Copy
-        + Eq
-        + Ord
-        + Hash
-        + Debug
-        + Default
-        + AsRef<[u8]>
-        + Send
-        + Sync
-        + 'static;
-    type Signature: Clone
-        + Eq
-        + Debug
-        + Default
-        + AsRef<[u8]>
-        + Send
-        + Sync
-        + 'static;
-    type KeyId: Copy
-        + Eq
-        + Ord
-        + Hash
-        + Debug
-        + Default
-        + AsRef<[u8]>
-        + Send
-        + Sync
-        + 'static;
+    type Hash: Copy + Eq + Ord + Hash + Debug + Default + AsRef<[u8]> + Send + Sync + 'static;
+    type Signature: Clone + Eq + Debug + Default + AsRef<[u8]> + Send + Sync + 'static;
+    type KeyId: Copy + Eq + Ord + Hash + Debug + Default + AsRef<[u8]> + Send + Sync + 'static;
 
     /// Construct a `Hash` from raw bytes. Returns `None` if the byte width
     /// does not match the suite's hash width. Host calls reading guest

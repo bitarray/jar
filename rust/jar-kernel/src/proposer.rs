@@ -20,10 +20,7 @@ use crate::runtime::NodeOffchain;
 /// body.result_trace) start empty here — they're populated only by
 /// Schedule invocations during apply_block (and by the block-seal
 /// reservation in proposer mode).
-pub fn drain_for_body<C: Crypto>(
-    node: &NodeOffchain<C>,
-    state: &State<C>,
-) -> KResult<Body<C>> {
+pub fn drain_for_body<C: Crypto>(node: &NodeOffchain<C>, state: &State<C>) -> KResult<Body<C>> {
     // Index Transact slots in transact_space_cnode by VaultId for ordering.
     let transact_cnode_id = match &cap_registry::lookup(state, state.transact_space_cnode)?.cap {
         Capability::CNode { cnode_id } => *cnode_id,

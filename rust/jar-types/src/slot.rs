@@ -62,6 +62,7 @@ impl<C: Crypto> Default for Event<C> {
 }
 
 /// Per-(node, Dispatch entrypoint) slot content. Updated by step-3 emissions.
+#[derive(Default)]
 pub enum SlotContent<C: Crypto> {
     /// Step-3 produced an aggregated dispatch — used for further aggregation
     /// upward (parent reads this child's slot).
@@ -80,6 +81,7 @@ pub enum SlotContent<C: Crypto> {
         attestation_trace: Vec<AttestationEntry<C>>,
         result_trace: Vec<ResultEntry>,
     },
+    #[default]
     Empty,
 }
 
@@ -187,11 +189,5 @@ impl<C: Crypto> core::fmt::Debug for SlotContent<C> {
                 .finish(),
             SlotContent::Empty => f.write_str("Empty"),
         }
-    }
-}
-
-impl<C: Crypto> Default for SlotContent<C> {
-    fn default() -> Self {
-        SlotContent::Empty
     }
 }

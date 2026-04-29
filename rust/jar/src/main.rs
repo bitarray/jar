@@ -1,8 +1,8 @@
 //! `jar` — in-process N-node testnet driver for the JAR minimum kernel.
 //!
 //! Spawns N nodes in one process. Each node has its own σ + NodeOffchain +
-//! InMemoryHardware. Networking is a same-process broadcast bus. Block
-//! production rotates round-robin per slot.
+//! `Kernel<InMemoryHardware>`. Networking is a same-process broadcast bus.
+//! Block production rotates round-robin per slot.
 //!
 //! Usage:
 //!
@@ -10,12 +10,11 @@
 //! cargo run -p jar -- testnet --nodes 3 --slots 10
 //! ```
 
-use std::sync::Arc;
-
 use clap::{Parser, Subcommand};
+use jar_kernel::BlockOutcome;
+use jar_kernel::Kernel;
 use jar_kernel::genesis::GenesisBuilder;
 use jar_kernel::runtime::{InMemoryBus, InMemoryHardware, NodeOffchain};
-use jar_kernel::{BlockOutcome, apply_block, drain_for_body};
 use jar_types::{Block, BlockHash, Hash, State};
 
 /// Crypto suite + Hardware impl for the in-process testnet. Every parametric
@@ -66,7 +65,7 @@ fn run_testnet(num_nodes: u32, num_slots: u32) {
             id: i,
             state: g.state.clone(),
             offchain: NodeOffchain::<Hw>::new(),
-            hw: Arc::new(InMemoryHardware::new(bus.clone())),
+            kernel: Kernel::new(InMemoryHardware::new(bus.clone())),
             prior_block: BlockHash::<Hw>::default(),
         });
     }
@@ -80,18 +79,18 @@ fn run_testnet(num_nodes: u32, num_slots: u32) {
         // event[-1] (finalization gating); for this milestone we let the
         // body be whatever the slot drain produced (zero events, in
         // practice — guests don't yet emit AggregatedTransacts).
-        let body = drain_for_body(&proposer.offchain, &proposer.state).expect("drain ok");
+        let body = proposer
+            .kernel
+            .drain_for_body(&proposer.offchain, &proposer.state)
+            .expect("drain ok");
         let block_in = Block {
             parent: proposer.prior_block,
             body,
         };
-        let out = apply_block(
-            &proposer.state,
-            proposer.prior_block,
-            &block_in,
-            proposer.hw.as_ref(),
-        )
-        .expect("apply_block ok");
+        let out = proposer
+            .kernel
+            .apply_block(&proposer.state, proposer.prior_block, &block_in)
+            .expect("apply_block ok");
         match &out.block_outcome {
             BlockOutcome::Accepted => {
                 tracing::info!(
@@ -111,13 +110,10 @@ fn run_testnet(num_nodes: u32, num_slots: u32) {
         let new_root = out.state_root;
         let proposed_block = out.block.clone();
         for node in &mut nodes {
-            let ver = apply_block(
-                &node.state,
-                node.prior_block,
-                &proposed_block,
-                node.hw.as_ref(),
-            )
-            .expect("verifier apply_block ok");
+            let ver = node
+                .kernel
+                .apply_block(&node.state, node.prior_block, &proposed_block)
+                .expect("verifier apply_block ok");
             assert!(matches!(ver.block_outcome, BlockOutcome::Accepted));
             assert_eq!(
                 ver.state_root, new_root,
@@ -135,6 +131,6 @@ struct NodeState {
     id: u32,
     state: State<Hw>,
     offchain: NodeOffchain<Hw>,
-    hw: Arc<InMemoryHardware>,
+    kernel: Kernel<Hw>,
     prior_block: BlockHash<Hw>,
 }
