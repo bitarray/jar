@@ -1,7 +1,7 @@
 # Grey — JAM blockchain node
 # Multi-stage Docker build: Rust builder + minimal Debian runtime.
 #
-# Build:  docker build -t grey grey/
+# Build:  docker build -t grey -f grey/Dockerfile .
 # Run:    docker run -p 9000:9000 -p 9933:9933 -v grey-data:/data grey
 # Info:   docker run grey --info
 
@@ -11,10 +11,11 @@ FROM rust:1.94-bookworm AS builder
 WORKDIR /build
 
 # Copy workspace manifests first for dependency caching
-COPY ../Cargo.toml ../Cargo.lock ./
-COPY ../grey/ ./grey/
-COPY ../tools/ ./tools/
-COPY ../spec/crypto-ffi/ ./spec/crypto-ffi/
+# Build context is the repo root (docker build -f grey/Dockerfile .)
+COPY Cargo.toml Cargo.lock ./
+COPY grey/ ./grey/
+COPY tools/ ./tools/
+COPY spec/crypto-ffi/ ./spec/crypto-ffi/
 
 # Build the grey binary in release mode
 RUN cargo build --release --locked -p grey \
