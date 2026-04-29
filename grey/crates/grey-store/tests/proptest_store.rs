@@ -1,6 +1,7 @@
 //! Property-based roundtrip tests for grey-store.
 
 use grey_types::header::{Block, Extrinsic, Header, UnsignedHeader};
+use grey_types::testing::arb_hash;
 use grey_types::{BandersnatchSignature, Hash};
 use proptest::prelude::*;
 
@@ -8,11 +9,6 @@ fn temp_store() -> (grey_store::Store, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = grey_store::Store::open(dir.path().join("test.redb")).unwrap();
     (store, dir)
-}
-
-/// Strategy for an arbitrary 32-byte Hash.
-fn arb_hash() -> impl Strategy<Value = Hash> {
-    prop::array::uniform32(any::<u8>()).prop_map(Hash)
 }
 
 /// Strategy for a minimal Block with arbitrary header fields.

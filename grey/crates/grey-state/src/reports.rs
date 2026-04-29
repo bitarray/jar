@@ -571,12 +571,9 @@ mod proptests {
     use super::*;
     use grey_types::Hash;
     use grey_types::config::Config;
+    use grey_types::testing::arb_hash;
     use grey_types::work::WorkReport;
     use proptest::prelude::*;
-
-    fn arb_hash() -> impl Strategy<Value = Hash> {
-        prop::array::uniform32(any::<u8>()).prop_map(Hash)
-    }
 
     fn make_reports_state(config: &Config) -> ReportsState {
         let v = config.validators_count as usize;

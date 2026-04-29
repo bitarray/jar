@@ -17,6 +17,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+grey-types = { workspace = true, features = ["testing"] }
 grey-consensus = { workspace = true }
 proptest = { workspace = true }
 tempfile = "3"

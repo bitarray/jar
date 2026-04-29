@@ -16,6 +16,7 @@ thiserror = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]
+grey-types = { workspace = true, features = ["testing"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

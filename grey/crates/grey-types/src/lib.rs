@@ -96,6 +96,27 @@ pub fn decode_hex_fixed<const N: usize>(s: &str) -> Result<[u8; N], String> {
     Ok(arr)
 }
 
+/// Proptest strategies and test utilities.
+///
+/// Enable with the `testing` feature flag. Other crates should add
+/// `grey-types = { workspace = true, features = ["testing"] }` to their
+/// **dev-dependencies** to use these helpers in tests.
+#[cfg(feature = "testing")]
+pub mod testing {
+    use crate::Hash;
+    use proptest::prop_compose;
+
+    // Strategy for generating an arbitrary Hash.
+    //
+    // Usage: `use grey_types::testing::arb_hash;`
+    //        `proptest! { | h in arb_hash() | { ... } }`
+    prop_compose! {
+        pub fn arb_hash()(bytes in proptest::array::uniform32(proptest::arbitrary::any::<u8>())) -> Hash {
+            Hash(bytes)
+        }
+    }
+}
+
 /// Shared to_hex, from_hex and Deserialize for all crypto types.
 macro_rules! impl_crypto_common {
     ($name:ident, $debug_name:expr) => {

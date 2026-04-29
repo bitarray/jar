@@ -545,11 +545,8 @@ mod proptests {
     use super::*;
     use crate::test_helpers::{make_hash, make_validator};
     use grey_types::header::Ticket;
+    use grey_types::testing::arb_hash;
     use proptest::prelude::*;
-
-    fn arb_hash() -> impl Strategy<Value = Hash> {
-        prop::array::uniform32(any::<u8>()).prop_map(Hash)
-    }
 
     proptest! {
         /// outside_in_sequence preserves length and all elements.

@@ -146,11 +146,8 @@ mod proptests {
     use super::*;
     use grey_types::Hash;
     use grey_types::config::Config;
+    use grey_types::testing::arb_hash;
     use proptest::prelude::*;
-
-    fn arb_hash() -> impl Strategy<Value = Hash> {
-        prop::array::uniform32(any::<u8>()).prop_map(Hash)
-    }
 
     proptest! {
         /// Pool size never exceeds auth_pool_size (O) after any update.
