@@ -2581,9 +2581,8 @@ mod tests {
         // Edge case: calling unknown method should return JSON-RPC error
         let (url, _state, _rx, _store, _dir) = setup().await;
         let client = HttpClientBuilder::default().build(&url).unwrap();
-        let result: Result<serde_json::Value, _> = client
-            .request("jam_nonexistent", rpc_params![])
-            .await;
+        let result: Result<serde_json::Value, _> =
+            client.request("jam_nonexistent", rpc_params![]).await;
         assert!(result.is_err(), "unknown method should return error");
     }
 
