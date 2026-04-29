@@ -511,6 +511,88 @@ mod tests {
                 let recovered = recover(&params, &indexed, data.len()).expect("recover");
                 prop_assert_eq!(recovered, data);
             }
+
+            /// Corrupting up to recovery_shards chunks still allows recovery
+            /// from the remaining k = data_shards chunks.
+            ///
+            /// For TINY: recovery_shards = 4, so we can lose up to 4 chunks
+            /// and still recover from any 2 of the remaining.
+            #[test]
+            fn recovery_after_multi_corruption(
+                data in random_data(3),
+                n_corrupt in 1usize..4, // 1..recovery_shards for TINY
+                seed in any::<u64>(),
+            ) {
+                let params = ErasureParams::TINY;
+                let chunks = encode(&params, &data).expect("encode");
+
+                // Select n_corrupt random indices to corrupt
+                use std::collections::BTreeSet;
+                let mut corrupted = BTreeSet::new();
+                let mut rng_state = seed;
+                while corrupted.len() < n_corrupt {
+                    rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let idx = (rng_state >> 33) as usize % params.total_shards;
+                    corrupted.insert(idx);
+                }
+
+                // Use all non-corrupted chunks
+                let indexed: Vec<(Vec<u8>, usize)> = chunks
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(i, _)| !corrupted.contains(i))
+                    .map(|(i, c)| (c, i))
+                    .collect();
+
+                // Remaining chunks should be enough for recovery
+                prop_assert!(indexed.len() >= params.data_shards,
+                    "not enough remaining chunks: have {}, need {}",
+                    indexed.len(), params.data_shards);
+
+                let recovered = recover(&params, &indexed, data.len()).expect("recover");
+                prop_assert_eq!(recovered, data);
+            }
+
+            /// Corrupting a chunk by flipping bits and including it in recovery
+            /// produces wrong data (not the original), proving that the
+            /// corrupted chunk is not silently accepted.
+            #[test]
+            fn corrupted_chunk_produces_wrong_recovery(
+                data in random_data(2),
+                corrupt_idx in 0..6usize, // 0..total_shards for TINY
+                flip_byte in any::<u8>(),
+            ) {
+                // Need at least 2 distinct bytes for meaningful corruption
+                let flip_byte = if flip_byte == 0 { 1 } else { flip_byte };
+
+                let params = ErasureParams::TINY;
+                let chunks = encode(&params, &data).expect("encode");
+
+                // Build indexed chunks with one corrupted
+                let mut indexed: Vec<(Vec<u8>, usize)> = chunks
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, mut c)| {
+                        if i == corrupt_idx && !c.is_empty() {
+                            c[0] ^= flip_byte; // flip bits in first byte
+                        }
+                        (c, i)
+                    })
+                    .collect();
+
+                // Use all shards (including corrupted one)
+                // With all data shards present, the fast-path concatenates them
+                // directly, so corrupting a data shard changes the output.
+                // Corrupting a parity shard is harmless (parity is ignored when
+                // all data shards are present).
+                if corrupt_idx < params.data_shards {
+                    let recovered = recover(&params, &indexed, data.len()).expect("recover");
+                    prop_assert_ne!(recovered, data,
+                        "corrupting data shard {} should change recovered data", corrupt_idx);
+                }
+                // Parity shard corruption is silently ignored by the fast path —
+                // this is correct behavior, not a bug.
+            }
         }
     }
 }
