@@ -1,0 +1,43 @@
+[package]
+name = "javm-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PVM benchmarks: javm interpreter vs recompiler vs polkavm"
+
+[features]
+default = ["polkavm-generic-sandbox"]
+polkavm-generic-sandbox = ["polkavm/generic-sandbox"]
+
+[dependencies]
+# for the entire workspace, preventing `cargo test --workspace` from testing
+# when running benchmarks.
+javm = { workspace = true }
+javm-transpiler = { workspace = true }
+polkavm = "0.32.0"
+polkavm-common = "0.32.0"
+
+[build-dependencies]
+build-javm = { path = "../build-javm" }
+build-pvm = { path = "../build-pvm" }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+k256 = { version = "0.13", features = ["ecdsa"] }
+libc = "0.2"
+
+[[bench]]
+name = "pvm_bench"
+harness = false
+
+[[bench]]
+name = "mem_bench"
+harness = false
+
+[[bench]]
+name = "pagefault_bench"
+harness = false
+
+[[bench]]
+name = "subvm_bench"
+harness = false

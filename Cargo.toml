@@ -1,43 +1,29 @@
 [workspace]
 resolver = "3"
 members = [
-    "grey/crates/grey",
-    "grey/crates/grey-types",
-    "grey/crates/grey-crypto",
-    "grey/crates/javm",
-    "grey/crates/grey-merkle",
-    "grey/crates/grey-erasure",
-    "grey/crates/grey-state",
-    "grey/crates/grey-consensus",
-    "grey/crates/grey-services",
-    "grey/crates/grey-network",
-    "grey/crates/grey-transpiler",
-    "grey/crates/grey-store",
-    "grey/crates/grey-rpc",
-    "grey/crates/grey-bench",
-    "grey/crates/build-crate",
-    "grey/crates/build-javm",
-    "grey/crates/build-pvm",
-    "grey/harness",
     "tools/jar-genesis",
-    "grey/crates/javm-builtins",
-    "grey/crates/scale",
-    "grey/crates/scale-derive",
-    "grey/services/benches/blake2b",
-    "grey/services/benches/ecrecover",
-    "grey/services/benches/ed25519",
-    "grey/services/benches/keccak",
-    "grey/services/benches/prime-sieve",
-    "grey/services/samples/counter-service",
-    "grey/services/samples/sample-service",
-    "grey/services/pixels-service",
-    "grey/services/pixels-authorizer",
-    "grey/services/javm-guest-tests",
-    "grey/services/spec-tests/minimal",
-    "grey/services/spec-tests/bootstrap",
-    "grey/services/spec-tests",
+    "rust/build-crate",
+    "rust/build-javm",
+    "rust/build-pvm",
+    "rust/javm",
+    "rust/javm-bench",
+    "rust/javm-builtins",
+    "rust/javm-guest-tests",
+    "rust/javm-transpiler",
+    "rust/scale",
+    "rust/scale-derive",
+    "rust/jar-kernel",
+    "rust/jar",
+    "rust/jar-test-services/halt",
+    "rust/jar-test-services/slot_clear",
+    "components/benches/blake2b",
+    "components/benches/ecrecover",
+    "components/benches/ed25519",
+    "components/benches/keccak",
+    "components/benches/prime-sieve",
 ]
 exclude = [
+    "grey",
     "spec/crypto-ffi",
     "spec/fuzz",
 ]
@@ -50,20 +36,11 @@ authors = [ "Bitarray GmbH <legal@bitarray.dev>" ]
 
 [workspace.dependencies]
 # Internal crates
-grey-types = { path = "grey/crates/grey-types" }
-grey-crypto = { path = "grey/crates/grey-crypto" }
-javm = { path = "grey/crates/javm" }
-grey-merkle = { path = "grey/crates/grey-merkle" }
-grey-erasure = { path = "grey/crates/grey-erasure" }
-grey-state = { path = "grey/crates/grey-state" }
-grey-consensus = { path = "grey/crates/grey-consensus" }
-grey-services = { path = "grey/crates/grey-services" }
-grey-network = { path = "grey/crates/grey-network" }
-grey-transpiler = { path = "grey/crates/grey-transpiler" }
-grey-store = { path = "grey/crates/grey-store" }
-grey-rpc = { path = "grey/crates/grey-rpc" }
-scale = { path = "grey/crates/scale", default-features = false, features = ["std"] }
-scale-derive = { path = "grey/crates/scale-derive" }
+javm = { path = "rust/javm" }
+javm-transpiler = { path = "rust/javm-transpiler" }
+jar-kernel = { path = "rust/jar-kernel" }
+scale = { path = "rust/scale", default-features = false, features = ["std"] }
+scale-derive = { path = "rust/scale-derive" }
 
 # External dependencies
 blake2 = "0.10"

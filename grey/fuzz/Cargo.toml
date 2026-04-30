@@ -12,8 +12,8 @@ libfuzzer-sys = "0.4"
 grey-codec = { path = "../crates/scale", package = "scale" }
 grey-types = { path = "../crates/grey-types" }
 grey-erasure = { path = "../crates/grey-erasure" }
-javm = { path = "../crates/javm" }
-grey-transpiler = { path = "../crates/grey-transpiler" }
+javm = { path = "../../rust/javm" }
+javm-transpiler = { path = "../../rust/javm-transpiler" }
 
 # Prevent this from interfering with workspaces
 [workspace]

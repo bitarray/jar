@@ -1,0 +1,22 @@
+[package]
+name = "javm-guest-tests"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+javm-builtins = { path = "../javm-builtins" }
+blake2 = { version = "0.10", default-features = false }
+sha3 = { version = "0.10", default-features = false }
+
+[build-dependencies]
+build-javm = { path = "../build-javm" }
+
+[dev-dependencies]
+javm = { path = "../javm" }
+javm-transpiler = { path = "../javm-transpiler" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_env, values("javm", "polkavm"))', 'cfg(target_os, values("none"))'] }

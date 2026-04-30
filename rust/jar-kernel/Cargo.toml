@@ -1,0 +1,17 @@
+[package]
+name = "jar-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JAR minimum-kernel: capability-based microkernel implementation."
+
+[dependencies]
+javm = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+blake2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+
+[build-dependencies]
+build-javm = { path = "../build-javm" }

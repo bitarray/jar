@@ -1,0 +1,16 @@
+[package]
+name = "jar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JAR minimum-kernel binary: in-process N-node testnet driver."
+
+[[bin]]
+name = "jar"
+path = "src/main.rs"
+
+[dependencies]
+jar-kernel = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "std", "fmt"] }

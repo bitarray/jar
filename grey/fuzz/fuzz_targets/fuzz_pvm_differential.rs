@@ -33,7 +33,7 @@ fuzz_target!(|data: &[u8]| {
     // Build a valid PVM service blob
     let stack_pages = 1u32;
     let total = stack_pages + heap_pages + 4;
-    let blob = grey_transpiler::emitter::build_service_program(
+    let blob = javm_transpiler::emitter::build_service_program(
         code,
         &bitmask,
         &[], // jump_table

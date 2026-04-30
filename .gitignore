@@ -16,6 +16,7 @@
 
 # Shared
 /.claude/settings.local.json
+/.claude/scheduled_tasks.lock
 .devcontainer/
 grey/fuzz/target/
 

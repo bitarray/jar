@@ -1,0 +1,10 @@
+[package]
+name = "build-javm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Build Grey PVM blobs from Rust service crates"
+
+[dependencies]
+build-crate = { path = "../build-crate" }
+javm-transpiler = { path = "../javm-transpiler" }

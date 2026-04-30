@@ -41,4 +41,4 @@ proptest = { workspace = true }
 tempfile = "3"
 
 [build-dependencies]
-build-javm = { path = "../build-javm" }
+build-javm = { path = "../../../rust/build-javm" }

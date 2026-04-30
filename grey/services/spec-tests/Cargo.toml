@@ -4,4 +4,4 @@ version = "0.1.0"
 edition.workspace = true
 
 [build-dependencies]
-build-javm = { path = "../../crates/build-javm" }
+build-javm = { path = "../../../rust/build-javm" }
