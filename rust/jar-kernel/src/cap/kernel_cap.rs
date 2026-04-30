@@ -143,6 +143,13 @@ impl ProtocolCapT for KernelCap {
         }
     }
 
+    /// True iff this cap is the FaultHandler authority. The kernel's
+    /// fault-walk consults this at `FAULT_HANDLER_SLOT` to decide
+    /// whether a frame catches.
+    fn is_fault_handler(&self) -> bool {
+        matches!(self, KernelCap::Ephemeral(Capability::FaultHandler(_)))
+    }
+
     /// A `VaultRef` with `rights.read` is a foreign-frame handle: javm's
     /// resolve walk crosses through it into the named Vault's CNode.
     /// Operation rights (Grant / Revoke / Derive / Initialize) are

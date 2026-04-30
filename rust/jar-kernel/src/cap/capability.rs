@@ -170,6 +170,31 @@ pub struct SelfCap {
     pub vault_id: VaultId,
 }
 
+/// Bitfield of recovery-rights granted by the FaultHandler. Today the
+/// kernel doesn't gate on individual bits — the cap's mere presence at
+/// the slot is the catch authority. Reserved for a future "if a
+/// hostcall failure isn't recoverable, fault hard" extension where
+/// individual fault classes become opt-in.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct FaultHandlerRights(pub u32);
+
+impl FaultHandlerRights {
+    pub const ALL: Self = Self(!0);
+    pub const NONE: Self = Self(0);
+}
+
+/// FaultHandler authority. There is exactly one of these per
+/// invocation. Default location is `B_FH` (BareFrame slot 10); a
+/// frame can claim exclusive recovery by MOVE-ing the cap to its
+/// own MainFrame `M_FH` (MainFrame slot 10) via `MGMT_FH_MOVE`. On
+/// fault, the kernel walks the call stack: B_FH non-empty ⇒
+/// immediate parent catches; otherwise the first ancestor whose
+/// M_FH is non-empty catches and intermediate frames cascade-fault.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct FaultHandlerCap {
+    pub rights: FaultHandlerRights,
+}
+
 /// Per-frame caller (vault → vault sub-CALL). Lives at ephemeral
 /// sub-slot 1 when the invocation came from another Vault VM.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -219,6 +244,10 @@ pub enum Capability {
     CallerVault(CallerVaultCap),
     /// Per-frame caller (kernel-initiated) — lives at ephemeral sub-slot 1.
     CallerKernel(CallerKernelCap),
+    /// Per-invocation FaultHandler authority — lives at `B_FH` /
+    /// `M_FH` (slot 10 in either cap-table). Exactly one per
+    /// invocation; MOVE-only between the two locations.
+    FaultHandler(FaultHandlerCap),
 }
 
 impl Capability {

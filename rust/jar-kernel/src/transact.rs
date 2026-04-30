@@ -234,22 +234,28 @@ pub(crate) fn populate_host_call_slots(vm: &mut Vm) {
     }
 }
 
-/// Populate the per-invocation kernel caps. Caller and Gas live in the
-/// shared BareFrame (cross-frame channel: BareFrame slot 1 = Caller,
-/// slot 3 = Gas). Self is per-VM identity, so it lives in the active
-/// VM's MainFrame at `SELF_SLOT` (= 2). Called at the start of every
-/// kernel-driven invocation (transact / dispatch step-2 / step-3).
-/// BareFrame sub-slot 0 (Reply) is left empty — root has no userspace
-/// caller; the kernel rewrites it on every internal CALL.
+/// Populate the per-invocation kernel caps:
+/// - BareFrame slot 1 = Caller (cross-frame channel)
+/// - BareFrame slot 3 = Gas (cross-frame channel)
+/// - BareFrame `FAULT_HANDLER_SLOT` (10) = FaultHandler authority
+///   (default location; a guest can claim exclusive recovery via
+///   `MGMT_FH_MOVE`)
+/// - MainFrame `SELF_SLOT` (2) = Self (per-VM identity)
+///
+/// Called at the start of every kernel-driven invocation (transact /
+/// dispatch step-2 / step-3). BareFrame sub-slot 0 (Reply) is left
+/// empty — root has no userspace caller; the kernel rewrites it on
+/// every internal CALL.
 pub(crate) fn populate_ephemeral_kernel_caps(
     vm: &mut Vm,
     self_vault: VaultId,
     caller: crate::types::Caller,
     invocation_gas: u64,
 ) {
+    use crate::cap::{FaultHandlerCap, FaultHandlerRights};
     use crate::types::{CallerKernelCap, CallerVaultCap, GasCap, SelfCap};
 
-    // BareFrame sub-slots 1 and 3 (Caller, Gas).
+    // BareFrame sub-slots 1, 3, and FAULT_HANDLER_SLOT.
     let bare_idx = vm.bare_frame_id.index();
     let table = &mut vm.vm_arena.vm_mut(bare_idx).cap_table;
 
@@ -271,6 +277,19 @@ pub(crate) fn populate_ephemeral_kernel_caps(
         javm::cap::Cap::Protocol(KernelCap::Ephemeral(Capability::Gas(GasCap {
             remaining: invocation_gas,
         }))),
+    );
+
+    // FAULT_HANDLER_SLOT (= 10): per-invocation FaultHandler. Default
+    // is `B_FH`; a frame can claim exclusive recovery via MGMT_FH_MOVE
+    // → its own `M_FH`. Cap is move-only between B_FH and M_FH; the
+    // walk in javm's handle_vm_fault consults both locations.
+    table.set(
+        javm::kernel::FAULT_HANDLER_SLOT,
+        javm::cap::Cap::Protocol(KernelCap::Ephemeral(Capability::FaultHandler(
+            FaultHandlerCap {
+                rights: FaultHandlerRights::ALL,
+            },
+        ))),
     );
 
     // MainFrame slot 2 (`SELF_SLOT`): Self cap. Per-VM identity.
@@ -444,4 +463,72 @@ fn check_or_record_reach(
         body.reach_trace.push(reach_entry.clone());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::genesis::GenesisBuilder;
+    use crate::types::Caller;
+    use javm::cap::Cap;
+
+    /// `populate_ephemeral_kernel_caps` places the per-invocation
+    /// FaultHandler at BareFrame `FAULT_HANDLER_SLOT` (= 10) by
+    /// default. A subsequent `MGMT_FH_MOVE` would shift it to a
+    /// frame's `M_FH`; without that, the cap stays at B_FH.
+    #[test]
+    fn populate_places_fault_handler_at_b_fh() {
+        let g = GenesisBuilder::default().build().expect("genesis ok");
+        let mut vm =
+            crate::vm::new_vm_from_vault(&g.state, g.transact_vault, 100_000_000, 256, None)
+                .expect("new_vm_from_vault");
+        populate_ephemeral_kernel_caps(
+            &mut vm,
+            g.transact_vault,
+            Caller::Kernel(crate::types::KernelRole::TransactEntry),
+            100_000_000,
+        );
+        let bare_idx = vm.bare_frame_id.index();
+        match vm
+            .vm_arena
+            .vm(bare_idx)
+            .cap_table
+            .get(javm::kernel::FAULT_HANDLER_SLOT)
+        {
+            Some(Cap::Protocol(KernelCap::Ephemeral(Capability::FaultHandler(fh)))) => {
+                assert_eq!(fh.rights, crate::cap::FaultHandlerRights::ALL);
+            }
+            other => panic!("expected FaultHandler at B_FH, got {:?}", other.is_some()),
+        }
+    }
+
+    /// SelfCap is pinned at the active VM's `MainFrame[SELF_SLOT]`
+    /// (= 2), not at BareFrame slot 2 (which is empty after the
+    /// pre-FaultHandler reorg).
+    #[test]
+    fn populate_pins_self_at_main_frame() {
+        let g = GenesisBuilder::default().build().expect("genesis ok");
+        let mut vm =
+            crate::vm::new_vm_from_vault(&g.state, g.transact_vault, 100_000_000, 256, None)
+                .expect("new_vm_from_vault");
+        populate_ephemeral_kernel_caps(
+            &mut vm,
+            g.transact_vault,
+            Caller::Kernel(crate::types::KernelRole::TransactEntry),
+            100_000_000,
+        );
+        // Active VM = VM 0: MainFrame slot SELF_SLOT holds SelfId.
+        match vm.vm_arena.vm(0).cap_table.get(crate::vm::SELF_SLOT) {
+            Some(Cap::Protocol(KernelCap::Ephemeral(Capability::SelfId(s)))) => {
+                assert_eq!(s.vault_id, g.transact_vault);
+            }
+            other => panic!(
+                "expected SelfCap at MainFrame SELF_SLOT, got {:?}",
+                other.is_some()
+            ),
+        }
+        // BareFrame slot 2 is empty (Self moved to MainFrame).
+        let bare_idx = vm.bare_frame_id.index();
+        assert!(vm.vm_arena.vm(bare_idx).cap_table.is_empty(2));
+    }
 }

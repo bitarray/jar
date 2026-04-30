@@ -127,6 +127,26 @@ pub const BARE_ARG_SLOT: u8 = 4;
 /// 9 is the next free sub-slot.
 pub const BARE_FRAME_UNTYPED_SLOT: u8 = 9;
 
+/// Slot in BOTH cap-tables that holds the per-invocation
+/// FaultHandler authority. Default is BareFrame `B_FH = slot 10`
+/// (single shared cap, every parent in the call stack catches its
+/// immediate child's fault). A frame can MOVE the cap to its own
+/// MainFrame `M_FH = slot 10` via `MGMT_FH_MOVE`, claiming
+/// exclusive recovery — intermediate frames between the holder
+/// and a faulting descendant cascade-fault. Auto-moves back to
+/// `B_FH` on the holder's REPLY/fault.
+pub const FAULT_HANDLER_SLOT: u8 = 10;
+
+/// Cross-frame move op for the FaultHandler cap (modern
+/// `dispatch_ecall` path). Toggles the cap between BareFrame
+/// `B_FH` (the default shared location) and the active VM's
+/// MainFrame `M_FH` (claimed exclusive recovery). Read φ[7] for
+/// the direction: `0` = claim (B_FH → M_FH), `1` = release
+/// (M_FH → B_FH). Returns `0` on success, `RESULT_WHAT` on any
+/// failure (slot empty, destination occupied, cap is not a
+/// FaultHandler, bad direction).
+pub const MGMT_FH_MOVE: u32 = 0x10;
+
 /// WHAT error code (2^64 - 2).
 const RESULT_WHAT: u64 = u64::MAX - 1;
 const RESULT_LOW: u64 = u64::MAX - 7; // gas limit too low
@@ -829,15 +849,20 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         // Callee → IDLE
         let _ = self.vm_arena.vm_mut(callee_id).transition(VmState::Idle);
 
+        // If the replying VM holds the FaultHandler in its M_FH, move
+        // it back to B_FH so the caller (and its descendants) regain
+        // the default catch authority once the holder is gone.
+        self.auto_release_fault_handler(callee_id);
+
         // Return unused gas to caller
         let unused_gas = self.vm_arena.vm(callee_id).gas();
         let cg = self.vm_arena.vm(caller_id).gas();
         self.vm_arena.vm_mut(caller_id).set_gas(cg + unused_gas);
         self.vm_arena.vm_mut(callee_id).set_gas(0);
 
-        // Restore the caller's ephemeral sub-slots 0/1/2 (Reply/Caller/Self).
-        // The host (jar-kernel) populates these on the way in; on REPLY javm
-        // just hands the previous values back.
+        // Restore the caller's BareFrame sub-slots 0/1 (Reply/Caller).
+        // The host (jar-kernel) populates these on the way in; on REPLY
+        // javm just hands the previous values back.
         self.restore_ephemeral_kernel_slots(frame.prev_kernel_slots);
 
         // Pass φ[7] only + set φ[8]=0 (status = REPLY success)
@@ -1202,11 +1227,94 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                 let (o_frame, o_slot, _) = resolve!(self, object_ref);
                 self.ecall_untyped_derive(s_frame, s_slot, o_frame, o_slot)
             }
+            MGMT_FH_MOVE => {
+                // FH_MOVE — toggle the FaultHandler cap between B_FH
+                // (BareFrame slot 10) and M_FH (active VM's MainFrame
+                // slot 10). Direction in φ[7]: 0 = claim, 1 = release.
+                self.ecall_fh_move()
+            }
             _ => {
                 self.set_active_reg(7, RESULT_WHAT);
                 DispatchResult::Continue
             }
         }
+    }
+
+    /// MGMT_FH_MOVE handler. Reads φ[7] for direction:
+    ///
+    /// - `0` = claim: move cap from BareFrame `B_FH` to the active
+    ///   VM's MainFrame `M_FH`. Requires `B_FH` non-empty and `M_FH`
+    ///   empty.
+    /// - `1` = release: move cap from active VM's MainFrame `M_FH`
+    ///   to BareFrame `B_FH`. Requires `M_FH` non-empty and `B_FH`
+    ///   empty.
+    ///
+    /// In either direction, the cap must satisfy `is_fault_handler()`
+    /// (via the `ProtocolCapT` trait) — the kernel refuses to move
+    /// arbitrary caps through this path. Sets φ[7] to 0 on success,
+    /// `RESULT_WHAT` on any failure.
+    fn ecall_fh_move(&mut self) -> DispatchResult {
+        let direction = self.active_reg(7);
+        let bare_idx = self.bare_frame_idx();
+        let active_idx = self.active_vm;
+
+        // Source / destination by direction.
+        let (src_idx, dst_idx) = match direction {
+            0 => (bare_idx, active_idx), // claim: B_FH → M_FH
+            1 => (active_idx, bare_idx), // release: M_FH → B_FH
+            _ => {
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
+        };
+
+        // Same-VM (active = bare) makes no sense; reject for safety.
+        if src_idx == dst_idx {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+
+        // Destination must be empty.
+        if !self
+            .vm_arena
+            .vm(dst_idx)
+            .cap_table
+            .is_empty(FAULT_HANDLER_SLOT)
+        {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+
+        // Take from source; verify it's a FaultHandler-shaped cap.
+        let cap = match self
+            .vm_arena
+            .vm_mut(src_idx)
+            .cap_table
+            .take(FAULT_HANDLER_SLOT)
+        {
+            Some(c) => c,
+            None => {
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
+        };
+        let is_fh = matches!(&cap, Cap::Protocol(p) if p.is_fault_handler());
+        if !is_fh {
+            // Restore and fail.
+            self.vm_arena
+                .vm_mut(src_idx)
+                .cap_table
+                .set(FAULT_HANDLER_SLOT, cap);
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+
+        self.vm_arena
+            .vm_mut(dst_idx)
+            .cap_table
+            .set(FAULT_HANDLER_SLOT, cap);
+        self.set_active_reg(7, 0);
+        DispatchResult::Continue
     }
 
     /// MGMT_UNTYPED_DERIVE handler (modern dispatch_ecall path).
@@ -2857,6 +2965,10 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         let callee_id = self.active_vm;
         let _ = self.vm_arena.vm_mut(callee_id).transition(VmState::Halted);
 
+        // Auto-release: if the halting VM held M_FH, move back to
+        // B_FH so the caller's recovery authority is restored.
+        self.auto_release_fault_handler(callee_id);
+
         match self.call_stack.pop() {
             Some(frame) => {
                 let caller_id = frame.caller_vm_id;
@@ -2866,7 +2978,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                 let cg = self.vm_arena.vm(caller_id).gas();
                 self.vm_arena.vm_mut(caller_id).set_gas(cg + unused_gas);
 
-                // Restore the caller's ephemeral sub-slots 0/1/2.
+                // Restore the caller's BareFrame sub-slots 0/1.
                 self.restore_ephemeral_kernel_slots(frame.prev_kernel_slots);
 
                 // Return result
@@ -2884,6 +2996,17 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     }
 
     /// Handle a callee fault with status code and aux value.
+    ///
+    /// **FaultHandler walk.** Default behavior (with `B_FH` non-empty in
+    /// the BareFrame): the immediate parent catches, exactly as the
+    /// pre-FaultHandler kernel did. When `B_FH` is empty (because some
+    /// frame claimed exclusive recovery via `MGMT_FH_MOVE` into its
+    /// `M_FH`), the walk continues up the call_stack until it finds an
+    /// ancestor whose `M_FH` is non-empty; intermediate frames between
+    /// the faulter and the catcher cascade-fault (their VMs are marked
+    /// Faulted, their gas is returned to their callers, their parked
+    /// Gas caps roll back). If no handler exists, the root invocation
+    /// faults with the original fault type.
     pub fn handle_vm_fault(&mut self, fault: FaultType) -> DispatchResult {
         // Determine status code and aux value based on fault type
         let (status, aux_value) = match fault {
@@ -2896,43 +3019,137 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             FaultType::PageFault(addr) => (4, addr as u64), // Status 4: page fault
         };
 
-        let callee_id = self.active_vm;
+        let mut callee_id = self.active_vm;
         let _ = self.vm_arena.vm_mut(callee_id).transition(VmState::Faulted);
 
-        match self.call_stack.pop() {
-            Some(frame) => {
-                let caller_id = frame.caller_vm_id;
+        // If the faulting VM happened to be the FaultHandler holder,
+        // move M_FH back to B_FH so ancestors can still catch. (Own
+        // M_FH never catches own fault.)
+        self.auto_release_fault_handler(callee_id);
 
-                // Return unused gas
-                let unused_gas = self.vm_arena.vm(callee_id).gas();
-                let cg = self.vm_arena.vm(caller_id).gas();
-                self.vm_arena.vm_mut(caller_id).set_gas(cg + unused_gas);
+        loop {
+            match self.call_stack.pop() {
+                Some(frame) => {
+                    let caller_id = frame.caller_vm_id;
 
-                // Kernel-default rollback: scan the resuming parent's
-                // persistent Frame for parked Gas caps and merge them
-                // back into the live ephemeral Gas cap. This guarantees
-                // the parent recovers the full budget it set aside via
-                // GAS_DERIVE before the failed CALL, regardless of what
-                // the (possibly-untrusted) child did with its share.
-                self.rollback_parked_gas(caller_id);
+                    // Return unused gas of the unwinding VM to its caller.
+                    let unused_gas = self.vm_arena.vm(callee_id).gas();
+                    let cg = self.vm_arena.vm(caller_id).gas();
+                    self.vm_arena.vm_mut(caller_id).set_gas(cg + unused_gas);
+                    self.vm_arena.vm_mut(callee_id).set_gas(0);
 
-                // Set φ[7]=aux_value, φ[8]=status
-                self.vm_arena.vm_mut(caller_id).set_reg(7, aux_value);
-                self.vm_arena.vm_mut(caller_id).set_reg(8, status);
+                    // Restore the caller's stashed BareFrame slots.
+                    self.restore_ephemeral_kernel_slots(frame.prev_kernel_slots);
 
-                let _ = self.vm_arena.vm_mut(caller_id).transition(VmState::Running);
-                self.active_vm = caller_id;
-                DispatchResult::Continue
-            }
-            None => {
-                // Root VM faulted
-                match fault {
-                    FaultType::Trap | FaultType::Panic => DispatchResult::RootPanic,
-                    FaultType::OutOfGas => DispatchResult::RootOutOfGas,
-                    FaultType::PageFault(addr) => DispatchResult::RootPageFault(addr),
+                    // Kernel-default rollback: scan the resuming parent's
+                    // persistent Frame for parked Gas caps and merge them
+                    // back into the live ephemeral Gas cap.
+                    self.rollback_parked_gas(caller_id);
+
+                    // Decide whether `caller_id` catches. B_FH non-empty
+                    // ⇒ immediate-parent catch (the default). Otherwise
+                    // check caller's M_FH.
+                    if self.fault_handler_visible_to(caller_id) {
+                        self.vm_arena.vm_mut(caller_id).set_reg(7, aux_value);
+                        self.vm_arena.vm_mut(caller_id).set_reg(8, status);
+                        let _ = self.vm_arena.vm_mut(caller_id).transition(VmState::Running);
+                        self.active_vm = caller_id;
+                        return DispatchResult::Continue;
+                    }
+
+                    // No catch — cascade. Mark the caller as Faulted, auto-
+                    // release any FH it might hold (shouldn't be the case
+                    // since it didn't catch, but keep the invariant), and
+                    // continue popping.
+                    let _ = self.vm_arena.vm_mut(caller_id).transition(VmState::Faulted);
+                    self.auto_release_fault_handler(caller_id);
+                    callee_id = caller_id;
+                }
+                None => {
+                    // Walked off the top of the call stack — no handler.
+                    return match fault {
+                        FaultType::Trap | FaultType::Panic => DispatchResult::RootPanic,
+                        FaultType::OutOfGas => DispatchResult::RootOutOfGas,
+                        FaultType::PageFault(addr) => DispatchResult::RootPageFault(addr),
+                    };
                 }
             }
         }
+    }
+
+    /// True iff the FaultHandler is reachable from `vm_idx`'s viewpoint:
+    /// either BareFrame `B_FH` is occupied (default case — every frame
+    /// in the call tree sees it via slot-0 indirection) or `vm_idx`'s
+    /// own MainFrame `M_FH` is occupied (the frame is the exclusive
+    /// holder).
+    fn fault_handler_visible_to(&self, vm_idx: u16) -> bool {
+        let bare_idx = self.bare_frame_idx();
+        let b_fh = self
+            .vm_arena
+            .vm(bare_idx)
+            .cap_table
+            .get(FAULT_HANDLER_SLOT)
+            .map(|c| matches!(c, Cap::Protocol(p) if p.is_fault_handler()))
+            .unwrap_or(false);
+        if b_fh {
+            return true;
+        }
+        self.vm_arena
+            .vm(vm_idx)
+            .cap_table
+            .get(FAULT_HANDLER_SLOT)
+            .map(|c| matches!(c, Cap::Protocol(p) if p.is_fault_handler()))
+            .unwrap_or(false)
+    }
+
+    /// If `vm_idx`'s MainFrame holds the FaultHandler, move it back to
+    /// BareFrame `B_FH`. Called when the holder's frame is unwound by
+    /// REPLY, own fault, or cascade-fault — keeps the invariant
+    /// "FaultHandler is always reachable somewhere" once any frame
+    /// holding it stops being on the call stack. No-op when `vm_idx`
+    /// is the BareFrame itself or holds no FH.
+    fn auto_release_fault_handler(&mut self, vm_idx: u16) {
+        let bare_idx = self.bare_frame_idx();
+        if vm_idx == bare_idx {
+            return;
+        }
+        let cap = match self
+            .vm_arena
+            .vm_mut(vm_idx)
+            .cap_table
+            .take(FAULT_HANDLER_SLOT)
+        {
+            Some(c) => c,
+            None => return,
+        };
+        let is_fh = matches!(&cap, Cap::Protocol(p) if p.is_fault_handler());
+        if !is_fh {
+            // Not a FaultHandler — restore in place.
+            self.vm_arena
+                .vm_mut(vm_idx)
+                .cap_table
+                .set(FAULT_HANDLER_SLOT, cap);
+            return;
+        }
+        if !self
+            .vm_arena
+            .vm(bare_idx)
+            .cap_table
+            .is_empty(FAULT_HANDLER_SLOT)
+        {
+            // Invariant violation: B_FH already populated. Restore at
+            // source rather than dropping (better to leak than to
+            // silently destroy state).
+            self.vm_arena
+                .vm_mut(vm_idx)
+                .cap_table
+                .set(FAULT_HANDLER_SLOT, cap);
+            return;
+        }
+        self.vm_arena
+            .vm_mut(bare_idx)
+            .cap_table
+            .set(FAULT_HANDLER_SLOT, cap);
     }
 
     /// Scan `vm_idx`'s persistent Frame for parked `Cap::Protocol(P)` caps

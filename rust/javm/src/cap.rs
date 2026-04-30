@@ -454,6 +454,13 @@ pub trait ProtocolCapT: Clone + core::fmt::Debug {
     fn gas_merge(&mut self, _donor: &Self) -> bool {
         false
     }
+    /// True if this cap is the per-invocation FaultHandler authority.
+    /// Consulted by the kernel's fault dispatch to identify the
+    /// catch-eligible cap at `FAULT_HANDLER_SLOT` in BareFrame /
+    /// MainFrame. Default is `false` (no FaultHandler-shaped caps).
+    fn is_fault_handler(&self) -> bool {
+        false
+    }
     /// If this cap is a handle into a foreign cap-table (e.g. a Vault
     /// CNode in jar-kernel), return the host's id for that frame plus
     /// the operation-rights bag the resolve walk should record at this
