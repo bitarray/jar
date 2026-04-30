@@ -14,21 +14,23 @@ pub mod cnode;
 pub mod code_blobs;
 pub mod snapshot;
 pub mod state_root;
-pub mod storage;
 
-/// Persistent Vault unit. After Step 1 of the unified-persistence
-/// refactor, the per-Vault `code_hash` field and the kernel-internal
-/// `state.code_vault` are gone — code lives as `Capability::Code(CodeCap)`
-/// at `CODE_CAP_SLOT` (currently slot 0) of the Vault's CNode. The
-/// `storage` KV map and other fields will be retired in subsequent steps.
+/// Persistent Vault unit. After the unified-persistence refactor, a
+/// Vault is a 256-slot CNode plus quotas. All persistent state — code,
+/// byte data, references to other Vaults — lives as caps in the CNode.
+/// There is no separate `code_hash` field, no `code_vault`, and no KV
+/// `storage` map.
 ///
 /// Wrapped in `Arc` inside σ so that copy-on-write of the outer
 /// `BTreeMap` is cheap; only the modified Vault is deep-cloned on a
 /// `make_mut` write.
-#[derive(Clone, Eq, PartialEq, Debug)]
+///
+/// `quota_items` / `quota_bytes` will be unified into `quota_pages` in
+/// Step 8; for now they remain as legacy bookkeeping that no operation
+/// increments since the storage path is gone.
+#[derive(Clone, Eq, PartialEq, Debug, Default)]
 pub struct Vault {
-    pub slots: CNode,                        // 256 cap slots
-    pub storage: BTreeMap<Vec<u8>, Vec<u8>>, // TODO(step-4): drop
+    pub slots: CNode, // 256 cap slots — the persistent CNode
     pub quota_items: u64,
     pub quota_bytes: u64,
     pub total_footprint: u64,
@@ -40,29 +42,7 @@ pub const CODE_CAP_SLOT: u8 = 0;
 
 impl Vault {
     pub fn new() -> Self {
-        Vault {
-            slots: CNode::new(),
-            storage: BTreeMap::new(),
-            quota_items: 0,
-            quota_bytes: 0,
-            total_footprint: 0,
-        }
-    }
-
-    /// Recompute footprint as the sum of (key_len + value_len) over all
-    /// storage entries.
-    pub fn recompute_footprint(&mut self) {
-        self.total_footprint = self
-            .storage
-            .iter()
-            .map(|(k, v)| (k.len() + v.len()) as u64)
-            .sum();
-    }
-}
-
-impl Default for Vault {
-    fn default() -> Self {
-        Self::new()
+        Self::default()
     }
 }
 

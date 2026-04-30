@@ -61,9 +61,6 @@ pub const RC_BAD_CAP: u64 = u64::MAX - 5;
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum HostCall {
-    StorageRead = 4,
-    StorageWrite = 5,
-    StorageDelete = 6,
     Attest = 15,
     AttestationKey = 16,
     ResultEqual = 18,
@@ -76,9 +73,6 @@ pub enum HostCall {
 impl HostCall {
     pub fn from_slot(slot: u8) -> Result<HostCall, KernelError> {
         match slot {
-            4 => Ok(HostCall::StorageRead),
-            5 => Ok(HostCall::StorageWrite),
-            6 => Ok(HostCall::StorageDelete),
             15 => Ok(HostCall::Attest),
             16 => Ok(HostCall::AttestationKey),
             18 => Ok(HostCall::ResultEqual),

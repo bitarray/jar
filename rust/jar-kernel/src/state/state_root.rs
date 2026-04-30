@@ -31,13 +31,6 @@ pub fn state_root(state: &State) -> Hash {
             buf.push(i as u8);
             push_u64(&mut buf, slot.map(|c| c.0).unwrap_or(0));
         }
-        push_u64(&mut buf, vault.storage.len() as u64);
-        for (k, v) in &vault.storage {
-            push_u64(&mut buf, k.len() as u64);
-            buf.extend_from_slice(k);
-            push_u64(&mut buf, v.len() as u64);
-            buf.extend_from_slice(v);
-        }
     }
 
     push_u64(&mut buf, state.cnodes.len() as u64);

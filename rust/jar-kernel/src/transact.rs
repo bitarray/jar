@@ -17,8 +17,8 @@ use crate::types::{
     ReachEntry, ResultEntry, State, VaultId,
 };
 
+use crate::cap::KernelCap;
 use crate::cap::attest::AttestCursor;
-use crate::cap::{KERNEL_CAP_SLOT, KernelCap};
 use crate::reach::ReachSet;
 use crate::runtime::Hardware;
 use crate::state::cap_registry;
@@ -122,9 +122,6 @@ pub fn run_one_invocation<H: Hardware>(
         .map_err(|e| KernelError::Internal(format!("javm init: {:?}", e)))?;
     populate_host_call_slots(&mut vm);
     populate_home_vault_ref(&mut vm, target);
-    populate_storage_slot(
-        &mut vm, target, /* writable */ true, /* snapshot */ None,
-    );
     populate_ephemeral_kernel_caps(
         &mut vm,
         target,
@@ -189,7 +186,10 @@ pub fn run_one_invocation<H: Hardware>(
 /// retired-gap ranges are documented in `host_abi::HostCall`.
 pub(crate) fn populate_host_call_slots(vm: &mut Vm) {
     use crate::vm::host_abi::HostCall;
-    for id in (HostCall::StorageRead as u8)..=(HostCall::SlotRead as u8) {
+    // Walk the full slot space; HostCall::from_slot identifies the live
+    // selectors (Attest=15, AttestationKey=16, ResultEqual=18, SlotClear=19,
+    // SlotRead=21). Retired ranges (storage 4-6, etc.) are skipped.
+    for id in 0u8..=31 {
         if HostCall::from_slot(id).is_err() {
             continue;
         }
@@ -269,44 +269,6 @@ pub(crate) fn populate_home_vault_ref(vm: &mut Vm, home: VaultId) {
             vault_id: home,
             rights: VaultRights::ALL,
         }))),
-    );
-}
-
-/// Populate the running VM's cap-table at `KERNEL_CAP_SLOT` with the
-/// per-invocation storage cap. Pass `snapshot = Some(root)` for
-/// SnapshotStorage (read-only at a prior root); `None` + `writable`
-/// for an in-progress overlay Storage cap.
-pub(crate) fn populate_storage_slot(
-    vm: &mut Vm,
-    vault_id: VaultId,
-    writable: bool,
-    snapshot: Option<crate::types::Hash>,
-) {
-    use crate::types::{KeyRange, SnapshotStorageCap, StorageCap, StorageRights};
-    let cap = if let Some(root) = snapshot {
-        Capability::SnapshotStorage(SnapshotStorageCap {
-            vault_id,
-            key_range: KeyRange::all(),
-            root,
-        })
-    } else {
-        Capability::Storage(StorageCap {
-            vault_id,
-            key_range: KeyRange::all(),
-            rights: if writable {
-                StorageRights::RW
-            } else {
-                StorageRights::RO
-            },
-        })
-    };
-    // The per-invocation Storage / SnapshotStorage cap is Ephemeral —
-    // it's kernel-injected for the duration of the invocation and not
-    // tracked in σ.cap_registry. Vault-side derived Storage caps
-    // granted explicitly will be Registered.
-    vm.cap_table_set(
-        KERNEL_CAP_SLOT,
-        javm::cap::Cap::Protocol(KernelCap::Ephemeral(cap)),
     );
 }
 

@@ -114,14 +114,6 @@ pub fn check_derive(
         // DataCap is immutable, so a derived child holding the same
         // Arc<Vec<u8>> is just an alias for refcount purposes.
         (Capability::Data(_), Capability::Data(_)) => Ok(()),
-        // Storage → Storage: any dest OK.
-        (Capability::Storage(_), Capability::Storage(_)) => Ok(()),
-        // SnapshotStorage → SnapshotStorage: any dest OK (still RO).
-        (Capability::SnapshotStorage(_), Capability::SnapshotStorage(_)) => Ok(()),
-        // Storage → SnapshotStorage: deriving an RO snapshot view from an
-        // overlay cap is allowed at any dest. Reverse direction (snapshot →
-        // overlay) is NOT — that would grant write rights.
-        (Capability::Storage(_), Capability::SnapshotStorage(_)) => Ok(()),
         _ => Err(KernelError::Pinning(format!(
             "unsupported derive source/destination shape: {:?} → {:?}",
             std::mem::discriminant(&src.cap),

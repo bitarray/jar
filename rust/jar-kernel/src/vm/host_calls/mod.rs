@@ -8,11 +8,10 @@
 //! kernel errors.
 //!
 //! This module is the dispatcher; the per-concern handlers live in
-//! sibling files (`storage`, `attest`, `slot`).
+//! sibling files (`attest`, `slot`).
 
 pub mod attest;
 pub mod slot;
-pub mod storage;
 
 use crate::runtime::Hardware;
 use crate::types::{Capability, KResult};
@@ -39,9 +38,6 @@ pub fn dispatch_host_call<H: Hardware>(
     ctx: &mut InvocationCtx<'_, H>,
 ) -> KResult<HostCallOutcome> {
     match call {
-        HostCall::StorageRead => storage::host_storage_read(vm, ctx),
-        HostCall::StorageWrite => storage::host_storage_write(vm, ctx),
-        HostCall::StorageDelete => storage::host_storage_delete(vm, ctx),
         HostCall::Attest => attest::host_attest(vm, ctx),
         HostCall::AttestationKey => attest::host_attestation_key(vm, ctx),
         HostCall::ResultEqual => attest::host_result_equal(vm, ctx),

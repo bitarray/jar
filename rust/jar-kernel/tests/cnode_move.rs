@@ -17,23 +17,21 @@ use jar_kernel::cap::KernelCap;
 use jar_kernel::state::cap_registry;
 use jar_kernel::vm::foreign_cnode::VaultCnodeView;
 use jar_kernel::{
-    CapRecord, Capability, DispatchCap, KeyRange, State, StorageCap, StorageRights, Vault, VaultId,
-    VaultRefCap, VaultRights,
+    CapRecord, Capability, DataCap, DispatchCap, State, Vault, VaultId, VaultRefCap, VaultRights,
 };
 
-/// Build a State with one Vault and a Storage cap registered + placed at
-/// `vault.slots[slot]`. Returns `(state, vault_id, storage_cap_id)`.
-fn state_with_one_storage_cap(slot: u8) -> (State, VaultId, jar_kernel::CapId) {
+/// Build a State with one Vault and a Data cap registered + placed at
+/// `vault.slots[slot]`. Returns `(state, vault_id, data_cap_id)`.
+fn state_with_one_data_cap(slot: u8) -> (State, VaultId, jar_kernel::CapId) {
     let mut state = State::empty();
     let vault_id = state.next_vault_id();
     state.vaults.insert(vault_id, Arc::new(Vault::new()));
     let cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
-            cap: Capability::Storage(StorageCap {
-                vault_id,
-                key_range: KeyRange::all(),
-                rights: StorageRights::RW,
+            cap: Capability::Data(DataCap {
+                content: Arc::new(b"sample data".to_vec()),
+                page_count: 1,
             }),
             issuer: None,
             narrowing: vec![],
@@ -48,7 +46,7 @@ fn state_with_one_storage_cap(slot: u8) -> (State, VaultId, jar_kernel::CapId) {
 
 #[test]
 fn fc_take_returns_registered_and_clears_slot() {
-    let (mut state, vault_id, cap_id) = state_with_one_storage_cap(7);
+    let (mut state, vault_id, cap_id) = state_with_one_data_cap(7);
     let mut view = VaultCnodeView::new(&mut state);
     let cap = view
         .fc_take(vault_id, 7, VaultRights::ALL)
@@ -56,7 +54,7 @@ fn fc_take_returns_registered_and_clears_slot() {
     match cap {
         Cap::Protocol(KernelCap::Registered { id, cap: c }) => {
             assert_eq!(id, cap_id);
-            assert!(matches!(c, Capability::Storage(_)));
+            assert!(matches!(c, Capability::Data(_)));
         }
         _ => panic!("expected Cap::Protocol(KernelCap::Registered{{..}})"),
     }
@@ -66,7 +64,7 @@ fn fc_take_returns_registered_and_clears_slot() {
 
 #[test]
 fn fc_take_requires_revoke_right() {
-    let (mut state, vault_id, _cap_id) = state_with_one_storage_cap(7);
+    let (mut state, vault_id, _cap_id) = state_with_one_data_cap(7);
     let mut view = VaultCnodeView::new(&mut state);
     // Read-only rights → fc_take refuses.
     assert!(view.fc_take(vault_id, 7, VaultRights::READ).is_none());
@@ -76,7 +74,7 @@ fn fc_take_requires_revoke_right() {
 
 #[test]
 fn fc_set_places_registered_into_empty_slot() {
-    let (mut state, vault_id, cap_id) = state_with_one_storage_cap(7);
+    let (mut state, vault_id, cap_id) = state_with_one_data_cap(7);
     // Take it.
     {
         let mut view = VaultCnodeView::new(&mut state);
@@ -85,10 +83,9 @@ fn fc_set_places_registered_into_empty_slot() {
     // Place it back at slot 8.
     let cap = Cap::Protocol(KernelCap::Registered {
         id: cap_id,
-        cap: Capability::Storage(StorageCap {
-            vault_id,
-            key_range: KeyRange::all(),
-            rights: StorageRights::RW,
+        cap: Capability::Data(DataCap {
+            content: Arc::new(b"sample data".to_vec()),
+            page_count: 1,
         }),
     });
     let mut view = VaultCnodeView::new(&mut state);
@@ -107,10 +104,12 @@ fn fc_set_rejects_non_registered() {
 
     // Ephemeral cap (kernel-injected per-frame, no σ identity) cannot
     // be placed into a Vault slot.
-    let ephemeral = Cap::Protocol(KernelCap::Ephemeral(Capability::Storage(StorageCap {
-        vault_id,
-        key_range: KeyRange::all(),
-        rights: StorageRights::RW,
+    // An Ephemeral persistent-shaped Capability — Data here, but any
+    // would do — must be rejected by fc_set since only Registered caps
+    // can persist in σ.
+    let ephemeral = Cap::Protocol(KernelCap::Ephemeral(Capability::Data(DataCap {
+        content: Arc::new(b"sample data".to_vec()),
+        page_count: 1,
     })));
     let result = view.fc_set(vault_id, 0, VaultRights::ALL, ephemeral);
     assert!(result.is_err());
@@ -124,10 +123,9 @@ fn fc_set_requires_grant_right() {
     let cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
-            cap: Capability::Storage(StorageCap {
-                vault_id,
-                key_range: KeyRange::all(),
-                rights: StorageRights::RW,
+            cap: Capability::Data(DataCap {
+                content: Arc::new(b"sample data".to_vec()),
+                page_count: 1,
             }),
             issuer: None,
             narrowing: vec![],
@@ -135,10 +133,9 @@ fn fc_set_requires_grant_right() {
     );
     let cap = Cap::Protocol(KernelCap::Registered {
         id: cap_id,
-        cap: Capability::Storage(StorageCap {
-            vault_id,
-            key_range: KeyRange::all(),
-            rights: StorageRights::RW,
+        cap: Capability::Data(DataCap {
+            content: Arc::new(b"sample data".to_vec()),
+            page_count: 1,
         }),
     });
     let mut view = VaultCnodeView::new(&mut state);
@@ -175,7 +172,7 @@ fn fc_set_rejects_pinned_cap() {
 
 #[test]
 fn fc_clone_allocates_child_capid() {
-    let (mut state, vault_id, parent_id) = state_with_one_storage_cap(7);
+    let (mut state, vault_id, parent_id) = state_with_one_data_cap(7);
     let pre_count = state.cap_registry.len();
     let mut view = VaultCnodeView::new(&mut state);
     let cap = view
@@ -188,7 +185,7 @@ fn fc_clone_allocates_child_capid() {
         _ => panic!("expected Registered cap"),
     };
     assert_ne!(child_id, parent_id);
-    assert!(matches!(kind, Capability::Storage(_)));
+    assert!(matches!(kind, Capability::Data(_)));
     // Source slot still occupied (clone doesn't take).
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(7),
@@ -207,7 +204,7 @@ fn fc_clone_allocates_child_capid() {
 
 #[test]
 fn fc_clone_requires_derive_right() {
-    let (mut state, vault_id, _) = state_with_one_storage_cap(7);
+    let (mut state, vault_id, _) = state_with_one_data_cap(7);
     let mut view = VaultCnodeView::new(&mut state);
     // Read-only rights — derive bit absent.
     assert!(view.fc_clone(vault_id, 7, VaultRights::READ).is_none());
@@ -215,7 +212,7 @@ fn fc_clone_requires_derive_right() {
 
 #[test]
 fn fc_drop_revokes_cap_and_clears_slot() {
-    let (mut state, vault_id, cap_id) = state_with_one_storage_cap(7);
+    let (mut state, vault_id, cap_id) = state_with_one_data_cap(7);
     let mut view = VaultCnodeView::new(&mut state);
     assert!(view.fc_drop(vault_id, 7, VaultRights::ALL));
     // Cap removed from registry.
@@ -226,7 +223,7 @@ fn fc_drop_revokes_cap_and_clears_slot() {
 
 #[test]
 fn fc_drop_cascade_removes_children() {
-    let (mut state, vault_id, parent_id) = state_with_one_storage_cap(7);
+    let (mut state, vault_id, parent_id) = state_with_one_data_cap(7);
     // Clone first → child registered.
     let _ = {
         let mut view = VaultCnodeView::new(&mut state);
@@ -247,7 +244,7 @@ fn fc_drop_cascade_removes_children() {
 
 #[test]
 fn fc_is_empty_reports_slot_state() {
-    let (mut state, vault_id, _) = state_with_one_storage_cap(7);
+    let (mut state, vault_id, _) = state_with_one_data_cap(7);
     let view = VaultCnodeView::new(&mut state);
     assert!(!view.fc_is_empty(vault_id, 7));
     assert!(view.fc_is_empty(vault_id, 8));

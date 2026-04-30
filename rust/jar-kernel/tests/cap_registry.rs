@@ -4,8 +4,8 @@ use jar_kernel::cap::pinning;
 use jar_kernel::state::cap_registry;
 use jar_kernel::state::cnode;
 use jar_kernel::{
-    CapRecord, Capability, DispatchCap, DispatchRefCap, KernelError, State, StorageRights,
-    VaultCap, VaultId, VaultRefCap, VaultRights,
+    CapRecord, Capability, DispatchCap, DispatchRefCap, KernelError, State, VaultCap, VaultId,
+    VaultRefCap, VaultRights,
 };
 
 fn empty_state() -> State {
@@ -218,13 +218,4 @@ fn vaultref_derive_into_frame_or_persistent_works() {
         true,
     )
     .unwrap();
-}
-
-#[test]
-fn storage_rights_constants_are_self_consistent() {
-    // Smoke check on the StorageRights constants used in tests.
-    let rw = StorageRights::RW;
-    let ro = StorageRights::RO;
-    assert!(rw.read && rw.write);
-    assert!(ro.read && !ro.write);
 }

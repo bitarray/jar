@@ -30,7 +30,7 @@ use crate::reach::ReachSet;
 use crate::runtime::{Hardware, NodeOffchain};
 use crate::state::cap_registry;
 use crate::state::code_blobs;
-use crate::transact::{populate_home_vault_ref, populate_host_call_slots, populate_storage_slot};
+use crate::transact::{populate_home_vault_ref, populate_host_call_slots};
 use crate::vm::{INVOCATION_GAS_BUDGET, InvocationCtx, Vm, drive_invocation};
 
 #[derive(Debug, Default)]
@@ -79,12 +79,13 @@ pub fn handle_inbound_dispatch<H: Hardware>(
     let mut reach = ReachSet::default();
     reach.note(entrypoint);
 
-    // The dispatch pipeline runs against a kernel-side clone of σ — RO at
-    // the protocol level; mutations are discarded after step-3. Each
-    // running VM gets a `SnapshotStorage` cap at `KERNEL_CAP_SLOT` rooted
-    // at the kernel's current state-root.
+    // The dispatch pipeline runs against a kernel-side clone of σ — RO
+    // by chain-author convention; the running VM's slot-1 home VaultRef
+    // would normally carry only `read_cap_indirection` rights. Today
+    // that narrowing is not yet implemented (slot-1 is full-rights);
+    // RO discipline is achieved by chain-author cap distribution within
+    // dispatch entrypoint Vaults.
     let mut state_clone = state.clone();
-    let prior_root = crate::state::state_root::state_root(state);
     let mut attestation_trace: Vec<AttestationEntry> = event.attestation_trace.clone();
     let mut result_trace: Vec<ResultEntry> = event.result_trace.clone();
     let mut cursor = AttestCursor::default();
@@ -119,7 +120,6 @@ pub fn handle_inbound_dispatch<H: Hardware>(
             .map_err(|e| KernelError::Internal(format!("javm init step-2: {:?}", e)))?;
         populate_host_call_slots(&mut vm);
         populate_home_vault_ref(&mut vm, entrypoint);
-        populate_storage_slot(&mut vm, entrypoint, false, Some(prior_root));
         crate::transact::populate_ephemeral_kernel_caps(
             &mut vm,
             entrypoint,
@@ -158,7 +158,6 @@ pub fn handle_inbound_dispatch<H: Hardware>(
             .map_err(|e| KernelError::Internal(format!("javm init step-3: {:?}", e)))?;
         populate_host_call_slots(&mut vm);
         populate_home_vault_ref(&mut vm, entrypoint);
-        populate_storage_slot(&mut vm, entrypoint, false, Some(prior_root));
         crate::transact::populate_ephemeral_kernel_caps(
             &mut vm,
             entrypoint,

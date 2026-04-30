@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use crate::types::{CNodeId, CapId, Hash, KernelRole, KeyId, VaultId};
+use crate::types::{CNodeId, CapId, KernelRole, KeyId, VaultId};
 
 // -----------------------------------------------------------------------------
 // Per-variant structs
@@ -73,29 +73,6 @@ pub struct TransactRefCap {
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct CNodeCap {
     pub cnode_id: CNodeId,
-}
-
-/// Authority over the **in-progress overlay** of a Vault's storage. Held
-/// inside Transact / Schedule frames. Reads see the current (this-block)
-/// overlay; writes / deletes apply to it. Kernel rejects the write half if
-/// `rights.write` is false.
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub struct StorageCap {
-    pub vault_id: VaultId,
-    pub key_range: KeyRange,
-    pub rights: StorageRights,
-}
-
-/// Authority over a Vault's storage at a **committed prior block's**
-/// state-root. Read-only by construction. Held inside Dispatch step-2/step-3
-/// frames and Schedule frames that need to inspect the parent block. The
-/// `root` field is the state-root the reads are against. Phase 1 stubs
-/// the merkle proof out; Phase 2 wires real proofs through hardware.
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub struct SnapshotStorageCap {
-    pub vault_id: VaultId,
-    pub key_range: KeyRange,
-    pub root: Hash,
 }
 
 /// Resource cap (e.g. allocate a Vault, set quota).
@@ -218,8 +195,6 @@ pub enum Capability {
     DispatchRef(DispatchRefCap),
     TransactRef(TransactRefCap),
     CNode(CNodeCap),
-    Storage(StorageCap),
-    SnapshotStorage(SnapshotStorageCap),
     Resource(ResourceCap),
     Meta(MetaCap),
     AttestationCap(AttestationCap),
@@ -263,8 +238,6 @@ impl Capability {
             Capability::Schedule(c) => Some(c.vault_id),
             Capability::DispatchRef(c) => Some(c.vault_id),
             Capability::TransactRef(c) => Some(c.vault_id),
-            Capability::Storage(c) => Some(c.vault_id),
-            Capability::SnapshotStorage(c) => Some(c.vault_id),
             _ => None,
         }
     }
@@ -319,41 +292,6 @@ impl VaultRights {
         revoke: false,
         derive: false,
     };
-}
-
-/// Storage rights.
-#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
-pub struct StorageRights {
-    pub read: bool,
-    pub write: bool,
-}
-
-impl StorageRights {
-    pub const RO: StorageRights = StorageRights {
-        read: true,
-        write: false,
-    };
-    pub const RW: StorageRights = StorageRights {
-        read: true,
-        write: true,
-    };
-}
-
-/// Inclusive key prefix for Storage caps. An empty prefix grants the entire
-/// vault's storage.
-#[derive(Clone, Eq, PartialEq, Debug, Default)]
-pub struct KeyRange {
-    pub prefix: Vec<u8>,
-}
-
-impl KeyRange {
-    pub fn all() -> Self {
-        Self { prefix: Vec::new() }
-    }
-
-    pub fn covers(&self, key: &[u8]) -> bool {
-        key.starts_with(&self.prefix)
-    }
 }
 
 /// Resource cap kinds. Quotas are kernel-tracked; placement/use is gated.
