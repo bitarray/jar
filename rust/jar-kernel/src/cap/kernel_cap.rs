@@ -120,4 +120,61 @@ impl ProtocolCapT for KernelCap {
             _ => None,
         }
     }
+
+    /// Produce a fresh `CallerCap` for an internal CALL transition.
+    /// Reads the caller VM's home VaultRef at MainFrame slot 1 and
+    /// wraps its `vault_id` as a `Capability::CallerVault`. Returns
+    /// `None` if slot 1 doesn't hold a VaultRef-shaped Ephemeral
+    /// cap — that should only happen on the bare Frame itself
+    /// (which never executes guest code), so the call is a no-op.
+    fn caller_cap_for(caller_table: &javm::cap::CapTable<Self>) -> Option<javm::cap::Cap<Self>> {
+        use crate::cap::CallerVaultCap;
+        let home_vault_id = match caller_table.get(1) {
+            Some(javm::cap::Cap::Protocol(KernelCap::Ephemeral(Capability::VaultRef(vr)))) => {
+                vr.vault_id
+            }
+            _ => return None,
+        };
+        Some(javm::cap::Cap::Protocol(KernelCap::Ephemeral(
+            Capability::CallerVault(CallerVaultCap {
+                vault_id: home_vault_id,
+            }),
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cap::{VaultRefCap, VaultRights};
+    use javm::cap::{Cap, CapTable, ProtocolCapT};
+
+    /// `caller_cap_for` reads the home VaultRef at MainFrame slot 1
+    /// and produces a `CallerVault` cap wrapping the same vault_id.
+    #[test]
+    fn caller_cap_for_reads_home_vault_ref() {
+        let mut t: CapTable<KernelCap> = CapTable::new();
+        let vault_id = VaultId(42);
+        t.set(
+            1,
+            Cap::Protocol(KernelCap::Ephemeral(Capability::VaultRef(VaultRefCap {
+                vault_id,
+                rights: VaultRights::ALL,
+            }))),
+        );
+        match KernelCap::caller_cap_for(&t) {
+            Some(Cap::Protocol(KernelCap::Ephemeral(Capability::CallerVault(cv)))) => {
+                assert_eq!(cv.vault_id, vault_id);
+            }
+            other => panic!("expected CallerVault cap, got {:?}", other.is_some()),
+        }
+    }
+
+    /// When slot 1 is empty (or doesn't hold a VaultRef), the hook
+    /// returns `None` so javm leaves `BARE_CALLER_SLOT` as-stashed.
+    #[test]
+    fn caller_cap_for_returns_none_when_slot_1_empty() {
+        let t: CapTable<KernelCap> = CapTable::new();
+        assert!(KernelCap::caller_cap_for(&t).is_none());
+    }
 }

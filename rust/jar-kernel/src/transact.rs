@@ -261,7 +261,10 @@ pub(crate) fn populate_ephemeral_kernel_caps(
     let bare_idx = vm.bare_frame_id.index();
     let table = &mut vm.vm_arena.vm_mut(bare_idx).cap_table;
 
-    // Sub-slot 1: Caller cap. Ephemeral — kernel-injected per-frame.
+    // BareFrame `BARE_CALLER_SLOT` (= 1): Caller cap. Ephemeral —
+    // kernel-injected per top-level invocation. javm refreshes this
+    // on every internal CALL/REPLY transition via the
+    // `ProtocolCapT::caller_cap_for` hook.
     let caller_cap = match caller {
         crate::types::Caller::Vault(vid) => {
             Capability::CallerVault(CallerVaultCap { vault_id: vid })
@@ -269,10 +272,10 @@ pub(crate) fn populate_ephemeral_kernel_caps(
         crate::types::Caller::Kernel(role) => Capability::CallerKernel(CallerKernelCap { role }),
     };
     table.set(
-        1,
+        javm::kernel::BARE_CALLER_SLOT,
         javm::cap::Cap::Protocol(KernelCap::Ephemeral(caller_cap)),
     );
-    table.pin(1);
+    table.pin(javm::kernel::BARE_CALLER_SLOT);
 
     // BareFrame `B_GAS = GAS_SLOT` (= 3): the slot is pinned but
     // physically empty. The kernel treats it as a *view* onto

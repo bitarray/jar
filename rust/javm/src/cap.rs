@@ -493,6 +493,18 @@ pub trait ProtocolCapT: Clone + core::fmt::Debug {
     fn is_droppable(&self) -> bool {
         true
     }
+    /// Produce the cap to write at BareFrame `BARE_CALLER_SLOT` when
+    /// a CALL transitions into a callee VM. javm calls this with the
+    /// *caller* VM's persistent cap-table; the host (e.g. jar-kernel)
+    /// uses it to read identifying state (the home VaultRef at
+    /// MainFrame slot 1) and produces the appropriate `CallerCap`
+    /// shape. Returning `None` leaves `BARE_CALLER_SLOT` untouched —
+    /// the default for protocol-cap implementations that don't model
+    /// callers (e.g. javm's own tests with `P = u8`).
+    fn caller_cap_for(_caller_table: &CapTable<Self>) -> Option<Cap<Self>> {
+        None
+    }
+
     /// If this cap is a handle into a foreign cap-table (e.g. a Vault
     /// CNode in jar-kernel), return the host's id for that frame plus
     /// the operation-rights bag the resolve walk should record at this

@@ -132,6 +132,16 @@ pub const BARE_ARG_SLOT: u8 = 4;
 /// 9 is the next free sub-slot.
 pub const BARE_FRAME_UNTYPED_SLOT: u8 = 9;
 
+/// BareFrame sub-slot holding the per-CALL Caller cap. Set by the
+/// host (jar-kernel) at top-level invocation entry via
+/// `populate_ephemeral_kernel_caps`. javm refreshes this slot on
+/// every internal CALL transition by calling
+/// `ProtocolCapT::caller_cap_for(caller_table)` so guests in a
+/// sub-CALL see their *immediate* caller, not the original
+/// invocation trigger; the prior value is restored on REPLY/halt/
+/// fault via `restore_ephemeral_kernel_slots`.
+pub const BARE_CALLER_SLOT: u8 = 1;
+
 /// Slot pinned in BOTH cap-tables for the Gas cap mirror.
 /// BareFrame `B_GAS = slot 3` holds the invocation tank (set by the
 /// host's `populate_ephemeral_kernel_caps`). Each VM's MainFrame
@@ -815,11 +825,29 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             .vm_mut(caller_id)
             .transition(VmState::WaitingForReply);
 
-        // Stash the caller's view of ephemeral sub-slots 0/1/2 (Reply/Caller/
-        // Self) so they can be rewritten with the callee's context. javm
-        // doesn't write content here; the host (jar-kernel) populates
-        // Caller/Self in Phase 10.
+        // Stash the caller's view of BareFrame sub-slots 0/1
+        // (Reply/Caller) so they can be rewritten with the callee's
+        // context and restored on REPLY.
         let prev_kernel_slots = self.take_ephemeral_kernel_slots(caller_id);
+
+        // Refresh BareFrame[BARE_CALLER_SLOT] with a fresh CallerCap
+        // identifying the calling VM. We compute this via
+        // `P::caller_cap_for(caller_table)` so jar-kernel can inspect
+        // the caller's home VaultRef and produce the right shape;
+        // protocol impls without a notion of caller (e.g. javm's
+        // u8 tests) return None and the slot is left as-stashed
+        // (will be restored to its pre-CALL value on REPLY).
+        let new_caller_cap = {
+            let caller_table = &self.vm_arena.vm(caller_id).cap_table;
+            P::caller_cap_for(caller_table)
+        };
+        if let Some(cap) = new_caller_cap {
+            let bare_idx = self.bare_frame_idx();
+            self.vm_arena
+                .vm_mut(bare_idx)
+                .cap_table
+                .set(BARE_CALLER_SLOT, cap);
+        }
 
         // Push call frame
         self.call_stack.push(CallFrame {
