@@ -101,9 +101,10 @@ pub fn handle_inbound_dispatch<H: Hardware>(
         // Build VM 0 from `state_clone` first (immutable borrow), then
         // hand `&mut state_clone` to the InvocationCtx. Walking
         // vault.slots only reads σ, so the borrow nests cleanly.
-        // TODO: payload bytes (event.payload) need to be written into a
-        // persistent DATA cap and placed at bare-Frame sub-slot 4 when
-        // dispatch guests start reading them. Today's fixtures halt.
+        // Dispatch step-2 / step-3 don't pass a payload; the step
+        // selector is set into φ[7] below for slot_clear's branch.
+        // (When dispatch starts passing payload bytes, route through
+        // `vm.set_args(payload)` like transact does.)
         let mut vm: Vm = crate::vm::new_vm_from_vault(
             &state_clone,
             entrypoint,

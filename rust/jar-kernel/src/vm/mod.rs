@@ -133,8 +133,10 @@ impl InvocationResult {
 /// programs are expected to place a `Cap::FrameRef` representing the
 /// public Callable produced by initialization. Read by the driver
 /// after a successful Halt; surfaced via
-/// `InvocationResult.initialize_callable`.
-pub const INITIALIZE_CALLABLE_SLOT: u8 = 4;
+/// `InvocationResult.initialize_callable`. Sits one past the
+/// kernel-reserved sub-slots: Caller=1, SelfId=2, Gas=3,
+/// args (`javm::kernel::BARE_FRAME_ARGS_SLOT`)=4.
+pub const INITIALIZE_CALLABLE_SLOT: u8 = 5;
 
 /// What a host-call handler tells the driver to do next.
 #[derive(Debug)]

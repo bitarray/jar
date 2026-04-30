@@ -116,7 +116,6 @@ pub fn run_one_invocation<H: Hardware>(
     // init replaces the legacy "fetch JAR blob, re-parse manifest"
     // path). vault_init walks vault.slots and translates persistent
     // caps to ephemeral counterparts at the same slot index.
-    let _ = payload; // wired through `vm.set_args(payload)` in a follow-up commit
     let mut vm: Vm = crate::vm::new_vm_from_vault(state, target, INVOCATION_GAS_BUDGET, None)?;
     populate_host_call_slots(&mut vm);
     populate_home_vault_ref(&mut vm, target);
@@ -126,6 +125,17 @@ pub fn run_one_invocation<H: Hardware>(
         crate::types::Caller::Kernel(crate::types::KernelRole::TransactEntry),
         INVOCATION_GAS_BUDGET,
     );
+    // Pass the event payload to the guest via the new args ABI:
+    // `set_args` allocates a fresh DATA cap, writes the payload bytes
+    // into its backing pages, places it at bare-Frame slot 4, and
+    // sets `φ[7] = payload.len()`. The guest opts into reading the
+    // bytes by calling `javm_builtins::map_args(args_len)`. Skip
+    // when the payload is empty — slot 4 stays unoccupied and
+    // `map_args(0)` returns `&[]`.
+    if !payload.is_empty() {
+        vm.set_args(payload)
+            .map_err(|e| KernelError::Internal(format!("vm.set_args: {:?}", e)))?;
+    }
 
     let mut commands: Vec<Command> = Vec::new();
     let mut reach = ReachSet::default();

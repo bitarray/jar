@@ -75,9 +75,10 @@ fn new_vm_from_vault_smoke_test() {
 
 #[test]
 fn initialize_callable_slot_read_returns_some_when_present() {
-    // Drop a FrameRef into bare-Frame slot 4 directly, then read it
-    // back via the new public helper. Mirrors what an init program
-    // would do at runtime via MGMT_MOVE before halting.
+    // Drop a FrameRef into bare-Frame INITIALIZE_CALLABLE_SLOT
+    // directly, then read it back via the new public helper.
+    // Mirrors what an init program would do at runtime via
+    // MGMT_MOVE before halting.
     let (state, vault_id) = vault_with_init_code();
     let mut vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, None).unwrap();
     let bare_idx = vm.bare_frame_id.index();
@@ -93,18 +94,72 @@ fn initialize_callable_slot_read_returns_some_when_present() {
     let read = vm.read_bare_frame_slot(jar_kernel::vm::INITIALIZE_CALLABLE_SLOT);
     match read {
         Some(javm::cap::Cap::FrameRef(f)) => assert_eq!(f.vm_id, bare_id),
-        other => panic!("expected FrameRef at slot 4, got {:?}", other),
+        other => panic!(
+            "expected FrameRef at INITIALIZE_CALLABLE_SLOT, got {:?}",
+            other
+        ),
     }
 }
 
 #[test]
-fn initialize_callable_none_when_slot_4_empty() {
+fn initialize_callable_none_when_slot_empty() {
     let (state, vault_id) = vault_with_init_code();
     let vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, None).unwrap();
     assert!(
         vm.read_bare_frame_slot(jar_kernel::vm::INITIALIZE_CALLABLE_SLOT)
             .is_none()
     );
+}
+
+#[test]
+fn set_args_places_data_cap_at_bare_frame_slot_4() {
+    // Verifies the Commit-2 wiring: after `kernel.set_args(payload)`,
+    // the args bytes land in a fresh DATA cap at bare-Frame slot 4
+    // (= `BARE_FRAME_ARGS_SLOT`), and `VM 0.φ[7]` holds the payload
+    // length. The kernel does *not* map the cap — the guest does
+    // that via `javm_builtins::map_args` at runtime.
+    let (state, vault_id) = vault_with_init_code();
+    let mut vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, None).unwrap();
+
+    let payload = b"hello world".to_vec();
+    vm.set_args(&payload).expect("set_args ok");
+
+    // φ[7] of VM 0 holds the args length.
+    assert_eq!(vm.vm_arena.vm(0).reg(7), payload.len() as u64);
+
+    // Bare-Frame slot 4 holds a Data cap covering one page (sufficient
+    // for "hello world" = 11 bytes).
+    let bare_idx = vm.bare_frame_id.index();
+    match vm
+        .vm_arena
+        .vm(bare_idx)
+        .cap_table
+        .get(javm::kernel::BARE_FRAME_ARGS_SLOT)
+    {
+        Some(javm::cap::Cap::Data(d)) => {
+            assert_eq!(d.page_count, 1, "11 bytes fits in 1 page");
+            assert!(
+                d.active_in.is_none(),
+                "args cap is unmapped — guest will MGMT_MAP it"
+            );
+        }
+        other => panic!(
+            "expected Data cap at bare-Frame slot 4, got {:?}",
+            other.is_some()
+        ),
+    }
+}
+
+#[test]
+fn set_args_rejects_double_call() {
+    // `set_args` must be called at most once per kernel; the second
+    // call should error because slot 4 is already populated.
+    let (state, vault_id) = vault_with_init_code();
+    let mut vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, None).unwrap();
+
+    vm.set_args(b"first").expect("first set_args ok");
+    let err = vm.set_args(b"second").expect_err("second set_args fails");
+    assert!(matches!(err, javm::kernel::KernelError::InvalidBlob));
 }
 
 #[test]
