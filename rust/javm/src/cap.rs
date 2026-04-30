@@ -1,11 +1,12 @@
 //! Capability types for the capability-based JAVM v2 execution model.
 //!
-//! Five program capability types:
+//! Program capability types:
 //! - UNTYPED: bump allocator page pool (copyable)
 //! - DATA: physical pages with exclusive mapping (move-only)
 //! - CODE: compiled PVM code with 4GB virtual window (copyable)
-//! - HANDLE: VM owner — unique, not copyable (CALL + management)
-//! - CALLABLE: VM entry point — copyable (CALL only)
+//! - FRAMEREF(rights): handle into a VM Frame; copyable. Rights bag
+//!   distinguishes owner-shaped (call+resume+drop+derive) from
+//!   callable-shaped (call only).
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -328,7 +329,67 @@ impl core::fmt::Debug for CodeCap {
     }
 }
 
-/// VM owner handle. Unique per VM, not copyable. Provides CALL + management ops.
+/// Rights bag carried by a [`FrameRefCap`]. Each bit gates one operation
+/// against the target Frame.
+///
+/// Encoding is a `u8` mask. A "full" / owner-shaped FrameRef has every
+/// bit set; a "callable-shaped" FrameRef has just `CALL` (plus the
+/// indirection rights so cap-ref walks still cross through it).
+///
+/// Bits:
+/// - `CALL` (0x01): may be CALLed (`ecalli slot`).
+/// - `DERIVE` (0x02): may be DOWNGRADEd (produce a copy with narrower rights).
+/// - `RESUME` (0x04): may be RESUMEd while target is `Faulted`.
+/// - `DROP` (0x08): MGMT_DROP / cross-frame DROP reclaims the target VM.
+///   Without this bit, dropping a FrameRef just removes the slot reference;
+///   the target VM survives if other (drop-rightful) FrameRefs still exist.
+/// - `READ_CAP_INDIRECTION` (0x10): may be traversed as an intermediate step
+///   in `resolve_cap_ref` cap-ref walks.
+/// - `CAP_INDIRECTION` (0x20): may be the final step in a cap-ref walk —
+///   i.e. the destination/source of MOVE / COPY / DROP via cap-ref.
+///   (Currently both indirection bits are set on every FrameRef javm
+///   produces; reserved for future host-side narrowing in jar-kernel.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FrameRefRights(pub u8);
+
+impl FrameRefRights {
+    pub const CALL: Self = Self(0x01);
+    pub const DERIVE: Self = Self(0x02);
+    pub const RESUME: Self = Self(0x04);
+    pub const DROP: Self = Self(0x08);
+    pub const READ_CAP_INDIRECTION: Self = Self(0x10);
+    pub const CAP_INDIRECTION: Self = Self(0x20);
+
+    /// Owner-shaped: every right set. The output of `handle_call_code`'s
+    /// CREATE; the cap that today would be a `HandleCap`.
+    pub const OWNER: Self = Self(0x3F);
+
+    /// Callable-shaped: CALL + indirection only. The output of `DOWNGRADE`;
+    /// the cap that today would be a `CallableCap`.
+    pub const CALLABLE: Self = Self(0x01 | 0x10 | 0x20);
+
+    #[inline]
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    #[inline]
+    pub fn intersect(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+
+/// Handle into a VM Frame. Always copyable; rights gate which operations
+/// the holder may perform. The cap-ref walk's intermediate / final steps,
+/// CALL / RESUME / DROP / DOWNGRADE all consult `rights`.
+///
+/// VM lifetime: a VM is reclaimed when MGMT_DROP / cross-frame DROP runs
+/// against a FrameRef whose `rights` includes [`FrameRefRights::DROP`].
+/// Other FrameRefs targeting the same VmId become stale (CALL / RESUME on
+/// a stale FrameRef yields RESULT_WHAT — generation numbers in `vm_id`
+/// detect the stale case). Managers handing out FrameRefs are responsible
+/// for narrowing rights before sharing if they want to retain unique
+/// reclamation authority.
 ///
 /// There is no `max_gas` ceiling — gas is shared across the whole
 /// invocation via the `Capability::Gas` cap at ephemeral sub-slot 3.
@@ -336,17 +397,12 @@ impl core::fmt::Debug for CodeCap {
 /// `MGMT_GAS_DERIVE` splits a portion off the live Gas cap into a
 /// parked slot in the caller's Frame, the callee runs against the
 /// reduced shared budget, and `MGMT_GAS_MERGE` recombines on return.
-#[derive(Debug)]
-pub struct HandleCap {
+#[derive(Debug, Clone, Copy)]
+pub struct FrameRefCap {
     /// VM ID in the kernel's arena (index + generation for stale detection).
     pub vm_id: crate::vm_pool::VmId,
-}
-
-/// VM entry point. Copyable. Provides CALL only (no management ops).
-#[derive(Debug, Clone)]
-pub struct CallableCap {
-    /// VM ID in the kernel's arena (index + generation for stale detection).
-    pub vm_id: crate::vm_pool::VmId,
+    /// Per-operation rights bag.
+    pub rights: FrameRefRights,
 }
 
 /// Handle to the per-invocation ephemeral table — a 256-slot cap-table
@@ -529,8 +585,7 @@ pub enum Cap<P: ProtocolCapT = u8> {
     Untyped(Arc<UntypedCap>),
     Data(DataCap),
     Code(Arc<CodeCap>),
-    Handle(HandleCap),
-    Callable(CallableCap),
+    FrameRef(FrameRefCap),
     EphemeralTable(EphemeralTableCap),
     Protocol(P),
 }
@@ -540,21 +595,23 @@ impl<P: ProtocolCapT> Cap<P> {
     /// `is_copyable` hook.
     pub fn is_copyable(&self) -> bool {
         match self {
-            Cap::Untyped(_) | Cap::Code(_) | Cap::Callable(_) => true,
-            Cap::Data(_) | Cap::Handle(_) | Cap::EphemeralTable(_) => false,
+            Cap::Untyped(_) | Cap::Code(_) | Cap::FrameRef(_) => true,
+            Cap::Data(_) | Cap::EphemeralTable(_) => false,
             Cap::Protocol(p) => p.is_copyable(),
         }
     }
 
     /// Create a copy of this cap (only for copyable types). Protocol
-    /// caps clone `P` only when `p.is_copyable()` is true.
+    /// caps clone `P` only when `p.is_copyable()` is true. FrameRef
+    /// copies preserve rights — managers wanting narrower rights on the
+    /// copy must use DOWNGRADE (cap_derive) instead.
     pub fn try_copy(&self) -> Option<Cap<P>> {
         match self {
             Cap::Untyped(u) => Some(Cap::Untyped(Arc::clone(u))),
             Cap::Code(c) => Some(Cap::Code(Arc::clone(c))),
-            Cap::Callable(c) => Some(Cap::Callable(c.clone())),
+            Cap::FrameRef(f) => Some(Cap::FrameRef(*f)),
             Cap::Protocol(p) if p.is_copyable() => Some(Cap::Protocol(p.clone())),
-            Cap::Data(_) | Cap::Handle(_) | Cap::EphemeralTable(_) | Cap::Protocol(_) => None,
+            Cap::Data(_) | Cap::EphemeralTable(_) | Cap::Protocol(_) => None,
         }
     }
 }
@@ -872,14 +929,15 @@ mod tests {
             // Verified by type: Cap::Code(_) => true in is_copyable
         }
 
-        let handle: Cap = Cap::Handle(HandleCap {
+        let owner: Cap = Cap::FrameRef(FrameRefCap {
             vm_id: crate::vm_pool::VmId::new(0, 0),
+            rights: FrameRefRights::OWNER,
         });
-        assert!(!handle.is_copyable());
-        assert!(handle.try_copy().is_none());
-
-        let callable: Cap = Cap::Callable(CallableCap {
+        assert!(owner.is_copyable());
+        assert!(owner.try_copy().is_some());
+        let callable: Cap = Cap::FrameRef(FrameRefCap {
             vm_id: crate::vm_pool::VmId::new(0, 0),
+            rights: FrameRefRights::CALLABLE,
         });
         assert!(callable.is_copyable());
         assert!(callable.try_copy().is_some());
@@ -909,8 +967,9 @@ mod tests {
         let mut table: CapTable = CapTable::new();
         table.set(
             10,
-            Cap::Callable(CallableCap {
+            Cap::FrameRef(FrameRefCap {
                 vm_id: crate::vm_pool::VmId::new(1, 0),
+                rights: FrameRefRights::CALLABLE,
             }),
         );
 
@@ -928,8 +987,9 @@ mod tests {
         let mut table: CapTable = CapTable::new();
         table.set(
             10,
-            Cap::Callable(CallableCap {
+            Cap::FrameRef(FrameRefCap {
                 vm_id: crate::vm_pool::VmId::new(1, 0),
+                rights: FrameRefRights::CALLABLE,
             }),
         );
         table.set(20, Cap::Data(DataCap::new(0, 1)));

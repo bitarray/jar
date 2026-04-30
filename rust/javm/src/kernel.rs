@@ -66,8 +66,8 @@ macro_rules! resolve {
 }
 use crate::backing::BackingStore;
 use crate::cap::{
-    Access, CallableCap, Cap, CapTable, CodeCap, DataCap, EPHEMERAL_TABLE_SLOT, ForeignCnode,
-    HandleCap, NoForeignCnode, ProtocolCapT, UntypedCap,
+    Access, Cap, CapTable, CodeCap, DataCap, EPHEMERAL_TABLE_SLOT, ForeignCnode, FrameRefCap,
+    FrameRefRights, NoForeignCnode, ProtocolCapT, UntypedCap,
 };
 use crate::program::{self, CapEntryType, CapManifestEntry, ParsedBlob};
 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
@@ -674,14 +674,12 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                 self.flush_live_ctx();
                 self.handle_call_code(code_id, code_cnode_vm)
             }
-            Cap::Handle(h) => {
-                let target_vm = h.vm_id;
-                #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
-                self.flush_live_ctx();
-                self.handle_call_vm(target_vm)
-            }
-            Cap::Callable(c) => {
-                let target_vm = c.vm_id;
+            Cap::FrameRef(f) => {
+                if !f.rights.contains(FrameRefRights::CALL) {
+                    self.set_active_reg(7, RESULT_WHAT);
+                    return DispatchResult::Continue;
+                }
+                let target_vm = f.vm_id;
                 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
                 self.flush_live_ctx();
                 self.handle_call_vm(target_vm)
@@ -820,8 +818,13 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             }
         };
 
-        // Caller-picks: HANDLE destination from φ[12] with indirection
-        let handle = HandleCap { vm_id: child_vm_id };
+        // Caller-picks: owner-shaped FrameRef destination from φ[12]
+        // with indirection. CREATE always returns a full-rights FrameRef;
+        // managers narrow before sharing.
+        let handle = FrameRefCap {
+            vm_id: child_vm_id,
+            rights: FrameRefRights::OWNER,
+        };
 
         let dst_ref = self.active_reg(12) as u32;
         let (dst_frame, dst_slot, _dst_rights) = match self.resolve_cap_ref(dst_ref) {
@@ -842,7 +845,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             self.set_active_reg(7, RESULT_WHAT);
             return DispatchResult::Continue;
         }
-        dst_table.set(dst_slot, Cap::Handle(handle));
+        dst_table.set(dst_slot, Cap::FrameRef(handle));
         self.set_active_reg(7, dst_slot as u64);
         DispatchResult::Continue
     }
@@ -977,9 +980,11 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     ///   crosses through that slot of the current frame; result is `target`
     ///   in the final frame.
     ///
-    /// Crossings consume `Cap::Handle` (cross to that VM's persistent
-    /// Frame) or `Cap::EphemeralTable` (enter the ephemeral table). Any
-    /// other cap shape fails.
+    /// Crossings consume `Cap::FrameRef` (cross to that VM's persistent
+    /// Frame; the cap must carry [`FrameRefRights::READ_CAP_INDIRECTION`]
+    /// for intermediate steps and [`FrameRefRights::CAP_INDIRECTION`] for
+    /// the final step) or `Cap::EphemeralTable` (enter the ephemeral
+    /// table). Any other cap shape fails.
     fn resolve_cap_ref(
         &self,
         cap_ref: u32,
@@ -1019,7 +1024,8 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     }
 
     /// Cross through `slot` of `frame` to the next frame in a cap-ref walk.
-    /// Slot must hold either `Cap::Handle` (→ that VM's persistent Frame),
+    /// Slot must hold either `Cap::FrameRef` (→ that VM's persistent
+    /// Frame; rights must include [`FrameRefRights::READ_CAP_INDIRECTION`]),
     /// `Cap::EphemeralTable` (→ the ephemeral table), or a `Cap::Protocol`
     /// whose `as_foreign_frame()` reports a host-managed frame id (→ the
     /// foreign frame). Any other cap shape fails.
@@ -1036,12 +1042,15 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     ) -> Option<(FrameId<P::ForeignFrameId>, Option<P::FinalStepRights>)> {
         let table = self.frame_table(frame)?;
         match table.get(slot)? {
-            Cap::Handle(h) => {
-                let target = self.vm_arena.get(h.vm_id)?;
+            Cap::FrameRef(f) => {
+                if !f.rights.contains(FrameRefRights::READ_CAP_INDIRECTION) {
+                    return None;
+                }
+                let target = self.vm_arena.get(f.vm_id)?;
                 if target.state == VmState::Running || target.state == VmState::WaitingForReply {
                     return None;
                 }
-                Some((FrameId::Vm(h.vm_id.index()), None))
+                Some((FrameId::Vm(f.vm_id.index()), None))
             }
             Cap::EphemeralTable(c) => Some((FrameId::Ephemeral(c.table_id), None)),
             Cap::Protocol(p) => p
@@ -1535,9 +1544,11 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     fn mgmt_drop(&mut self, cap_idx: u8) -> DispatchResult {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         let wb = self.active_window_base();
-        // DROP HANDLE → reclaim VM via arena.remove()
-        if let Some(Cap::Handle(h)) = self.vm_arena.vm(self.active_vm).cap_table.get(cap_idx) {
-            let vm_id = h.vm_id;
+        // DROP a FrameRef carrying DROP right → reclaim VM via arena.remove()
+        if let Some(Cap::FrameRef(f)) = self.vm_arena.vm(self.active_vm).cap_table.get(cap_idx)
+            && f.rights.contains(FrameRefRights::DROP)
+        {
+            let vm_id = f.vm_id;
             self.vm_arena
                 .vm_mut(self.active_vm)
                 .cap_table
@@ -1593,14 +1604,17 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     fn mgmt_downgrade(&mut self, handle_idx: u8) -> DispatchResult {
         let vm = &self.vm_arena.vm(self.active_vm);
         let vm_id = match vm.cap_table.get(handle_idx) {
-            Some(Cap::Handle(h)) => h.vm_id,
+            Some(Cap::FrameRef(f)) if f.rights.contains(FrameRefRights::DERIVE) => f.vm_id,
             _ => {
                 self.set_active_reg(7, RESULT_WHAT);
                 return DispatchResult::Continue;
             }
         };
 
-        let callable = CallableCap { vm_id };
+        let callable = FrameRefCap {
+            vm_id,
+            rights: FrameRefRights::CALLABLE,
+        };
 
         let vm = &mut self.vm_arena.vm_mut(self.active_vm);
         let free = match (64..255u8).find(|i| vm.cap_table.is_empty(*i)) {
@@ -1611,16 +1625,17 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             }
         };
 
-        vm.cap_table.set(free, Cap::Callable(callable));
+        vm.cap_table.set(free, Cap::FrameRef(callable));
         self.set_active_reg(7, free as u64);
         DispatchResult::Continue
     }
 
-    /// RESUME a FAULTED VM. Same shared-pool gas model as CALL.
+    /// RESUME a FAULTED VM. Same shared-pool gas model as CALL. Requires
+    /// the FrameRef's rights to include [`FrameRefRights::RESUME`].
     fn handle_resume(&mut self, handle_idx: u8) -> DispatchResult {
         let vm = self.vm_arena.vm(self.active_vm);
         let target_vm_vid = match vm.cap_table.get(handle_idx) {
-            Some(Cap::Handle(h)) => h.vm_id,
+            Some(Cap::FrameRef(f)) if f.rights.contains(FrameRefRights::RESUME) => f.vm_id,
             _ => {
                 self.set_active_reg(7, RESULT_WHAT);
                 return DispatchResult::Continue;
@@ -1846,11 +1861,14 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             return DispatchResult::Continue;
         }
 
-        // DROP HANDLE → reclaim VM (only meaningful for caps in a VM frame).
+        // DROP a FrameRef carrying DROP right → reclaim VM (only
+        // meaningful for caps in a VM frame). Without DROP right, the
+        // slot is just cleared like any other DROP.
         if let FrameId::Vm(vm_idx) = frame
-            && let Some(Cap::Handle(h)) = self.vm_arena.vm(vm_idx).cap_table.get(slot)
+            && let Some(Cap::FrameRef(f)) = self.vm_arena.vm(vm_idx).cap_table.get(slot)
+            && f.rights.contains(FrameRefRights::DROP)
         {
-            let vm_id = h.vm_id;
+            let vm_id = f.vm_id;
             self.vm_arena.vm_mut(vm_idx).cap_table.drop_cap(slot);
             #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
             self.window_pool.release(vm_id.index());
@@ -2020,9 +2038,10 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         DispatchResult::Continue
     }
 
-    /// DOWNGRADE a HANDLE to CALLABLE. Places CALLABLE at dst. HANDLE
-    /// caps don't live in foreign frames, and CALLABLE caps aren't
-    /// persistable to a Vault — so Foreign on either side fails.
+    /// DOWNGRADE a FrameRef. Source must carry [`FrameRefRights::DERIVE`];
+    /// produces a callable-shaped FrameRef ([`FrameRefRights::CALLABLE`])
+    /// at dst. FrameRef caps don't currently live in foreign frames —
+    /// Foreign on either side fails.
     fn ecall_downgrade(
         &mut self,
         s_frame: FrameId<P::ForeignFrameId>,
@@ -2035,7 +2054,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             return DispatchResult::Continue;
         }
         let vm_id = match self.frame_table(s_frame).and_then(|t| t.get(s_slot)) {
-            Some(Cap::Handle(h)) => h.vm_id,
+            Some(Cap::FrameRef(f)) if f.rights.contains(FrameRefRights::DERIVE) => f.vm_id,
             _ => {
                 self.set_active_reg(7, RESULT_WHAT);
                 return DispatchResult::Continue;
@@ -2050,7 +2069,13 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             return DispatchResult::Continue;
         }
         if let Some(t) = self.frame_table_mut(o_frame) {
-            t.set(o_slot, Cap::Callable(CallableCap { vm_id }));
+            t.set(
+                o_slot,
+                Cap::FrameRef(FrameRefCap {
+                    vm_id,
+                    rights: FrameRefRights::CALLABLE,
+                }),
+            );
         }
         DispatchResult::Continue
     }
@@ -3163,10 +3188,12 @@ mod tests {
         // φ[7] = dst_slot
         let handle_idx = kernel.active_reg(7) as u8;
         assert_eq!(handle_idx, 66);
-        assert!(matches!(
-            kernel.vm_arena.vm(0).cap_table.get(handle_idx),
-            Some(Cap::Handle(_))
-        ));
+        match kernel.vm_arena.vm(0).cap_table.get(handle_idx) {
+            Some(Cap::FrameRef(f)) => {
+                assert_eq!(f.rights, FrameRefRights::OWNER);
+            }
+            _ => panic!("expected FrameRef"),
+        }
     }
 
     #[test]
@@ -3334,16 +3361,116 @@ mod tests {
         kernel.dispatch_ecall(&mut NoForeignCnode, 0x0A);
         let callable_idx = 67u8;
 
-        // Handle still exists
-        assert!(matches!(
-            kernel.vm_arena.vm(0).cap_table.get(handle_idx),
-            Some(Cap::Handle(_))
-        ));
-        // Callable created
-        assert!(matches!(
-            kernel.vm_arena.vm(0).cap_table.get(callable_idx),
-            Some(Cap::Callable(_))
-        ));
+        // Owner-shaped FrameRef still exists
+        match kernel.vm_arena.vm(0).cap_table.get(handle_idx) {
+            Some(Cap::FrameRef(f)) => assert_eq!(f.rights, FrameRefRights::OWNER),
+            _ => panic!("expected owner FrameRef at source slot"),
+        }
+        // Callable-shaped FrameRef created
+        match kernel.vm_arena.vm(0).cap_table.get(callable_idx) {
+            Some(Cap::FrameRef(f)) => assert_eq!(f.rights, FrameRefRights::CALLABLE),
+            _ => panic!("expected callable FrameRef at dst slot"),
+        }
+    }
+
+    #[test]
+    fn test_frame_ref_call_without_resume_rights_is_legal() {
+        // A callable-shaped FrameRef (no RESUME / DROP / DERIVE) still
+        // routes CALL to the target VM. Mirrors the legacy "Callable"
+        // semantics now expressed as a rights mask.
+        let blob = make_simple_blob(10);
+        let mut kernel: InvocationKernel = InvocationKernel::new(&blob, 100_000).unwrap();
+        let _ = kernel.vm_arena.vm_mut(0).transition(VmState::Running);
+
+        // Spawn child + downgrade the handle (slot 67 = callable).
+        kernel.set_active_reg(7, 0);
+        kernel.set_active_reg(12, 66);
+        kernel.dispatch_ecalli(64);
+        let handle_idx = kernel.active_reg(7) as u8;
+        kernel.set_active_reg(11, 0x0A);
+        kernel.set_active_reg(12, 67 | ((handle_idx as u64) << 32));
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        kernel.flush_live_ctx();
+        kernel.dispatch_ecall(&mut NoForeignCnode, 0x0A);
+
+        // CALL on the callable: routes to child VM.
+        kernel.set_active_reg(12, 0); // no IPC cap
+        let result = kernel.dispatch_ecalli(67);
+        assert!(matches!(result, DispatchResult::Continue));
+        assert_eq!(kernel.active_vm, 1);
+    }
+
+    #[test]
+    fn test_frame_ref_resume_requires_resume_right() {
+        // A callable-shaped FrameRef cannot RESUME its target — even if
+        // the target is Faulted. Returns RESULT_WHAT.
+        let blob = make_simple_blob(10);
+        let mut kernel: InvocationKernel = InvocationKernel::new(&blob, 100_000).unwrap();
+        let _ = kernel.vm_arena.vm_mut(0).transition(VmState::Running);
+
+        // Spawn child + downgrade.
+        kernel.set_active_reg(7, 0);
+        kernel.set_active_reg(12, 66);
+        kernel.dispatch_ecalli(64);
+        let handle_idx = kernel.active_reg(7) as u8;
+        kernel.set_active_reg(11, 0x0A);
+        kernel.set_active_reg(12, 67 | ((handle_idx as u64) << 32));
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        kernel.flush_live_ctx();
+        kernel.dispatch_ecall(&mut NoForeignCnode, 0x0A);
+
+        // Force the child to Faulted so RESUME's target-state check would
+        // otherwise pass. RESUME via callable-shaped FrameRef should still
+        // be rejected on rights.
+        let target_vm_idx = match kernel.vm_arena.vm(0).cap_table.get(67) {
+            Some(Cap::FrameRef(f)) => f.vm_id.index(),
+            _ => panic!("expected callable FrameRef"),
+        };
+        let _ = kernel
+            .vm_arena
+            .vm_mut(target_vm_idx)
+            .transition(VmState::Running);
+        let _ = kernel
+            .vm_arena
+            .vm_mut(target_vm_idx)
+            .transition(VmState::Faulted);
+
+        // RESUME (ecalli 0x1): callable-shaped FrameRef rejected.
+        kernel.set_active_reg(7, RESULT_WHAT.wrapping_sub(1));
+        let result = kernel.dispatch_ecalli(0x10000 | 67); // not the right encoding
+        // Direct path: call mgmt-RESUME via the management slot range.
+        let _ = result;
+        // Use the explicit RESUME entry point.
+        let result = kernel.handle_resume(67);
+        assert!(matches!(result, DispatchResult::Continue));
+        assert_eq!(kernel.active_reg(7), RESULT_WHAT);
+        // Active VM unchanged — RESUME did not transfer control.
+        assert_eq!(kernel.active_vm, 0);
+    }
+
+    #[test]
+    fn test_frame_ref_downgrade_requires_derive_right() {
+        // A callable-shaped FrameRef cannot DOWNGRADE again — DERIVE is
+        // not in the CALLABLE rights mask.
+        let blob = make_simple_blob(10);
+        let mut kernel: InvocationKernel = InvocationKernel::new(&blob, 100_000).unwrap();
+        let _ = kernel.vm_arena.vm_mut(0).transition(VmState::Running);
+
+        // Spawn + downgrade once → slot 67 holds CALLABLE.
+        kernel.set_active_reg(7, 0);
+        kernel.set_active_reg(12, 66);
+        kernel.dispatch_ecalli(64);
+        let handle_idx = kernel.active_reg(7) as u8;
+        kernel.set_active_reg(11, 0x0A);
+        kernel.set_active_reg(12, 67 | ((handle_idx as u64) << 32));
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        kernel.flush_live_ctx();
+        kernel.dispatch_ecall(&mut NoForeignCnode, 0x0A);
+
+        // Try to downgrade *the callable-shaped* cap. Should fail.
+        let result = kernel.mgmt_downgrade(67);
+        assert!(matches!(result, DispatchResult::Continue));
+        assert_eq!(kernel.active_reg(7), RESULT_WHAT);
     }
 
     #[test]
