@@ -96,12 +96,13 @@ pub struct InvocationResult {
     pub halt_value: Option<u64>,
     pub fault: Option<String>,
     /// Public Callable produced by `Vault.initialize`: the FrameRef at
-    /// bare-Frame slot 4 after the init program halts. `None` if the
-    /// invocation faulted, slot 4 was empty, or the cap there was not
-    /// a `Cap::FrameRef`. Today's transact and dispatch consume
-    /// `halt_value` and ignore this field; it exists for a future
-    /// `vault_initialize` host call (or external `Vault.initialize`
-    /// API) to read the post-init Callable from.
+    /// `BARE_ARG_SLOT` (the synchronous arg-in / result-out channel)
+    /// after the init program halts. `None` if the invocation faulted,
+    /// the slot was empty, or the cap there was not a `Cap::FrameRef`.
+    /// Today's transact and dispatch consume `halt_value` and ignore
+    /// this field; it exists for a future `vault_initialize` host call
+    /// (or external `Vault.initialize` API) to read the post-init
+    /// Callable from.
     pub initialize_callable: Option<javm::vm_pool::VmId>,
 }
 
@@ -124,15 +125,6 @@ impl InvocationResult {
         self.fault.is_none()
     }
 }
-
-/// Slot in the per-invocation bare Frame where `Vault.initialize`
-/// programs are expected to place a `Cap::FrameRef` representing the
-/// public Callable produced by initialization. Read by the driver
-/// after a successful Halt; surfaced via
-/// `InvocationResult.initialize_callable`. Sits one past the
-/// kernel-reserved sub-slots: Caller=1, Gas=3,
-/// args (`javm::kernel::BARE_FRAME_ARGS_SLOT`)=4.
-pub const INITIALIZE_CALLABLE_SLOT: u8 = 5;
 
 /// MainFrame slot where the kernel pins the running VM's `SelfCap`.
 /// Per-VM identity: written once at invocation entry by
@@ -173,9 +165,10 @@ pub fn drive_invocation<H: Hardware>(
         match outcome {
             javm::kernel::KernelResult::Halt(rv) => {
                 // After the init program halts, recover any public
-                // Callable it placed at bare-Frame slot 4. Empty /
-                // non-FrameRef ⇒ `None`; not a fault.
-                let initialize_callable = match vm.read_bare_frame_slot(INITIALIZE_CALLABLE_SLOT) {
+                // Callable it placed at the BareFrame ARG/RESULT slot.
+                // Empty / non-FrameRef ⇒ `None`; not a fault.
+                let initialize_callable = match vm.read_bare_frame_slot(javm::kernel::BARE_ARG_SLOT)
+                {
                     Some(javm::cap::Cap::FrameRef(f)) => Some(f.vm_id),
                     _ => None,
                 };

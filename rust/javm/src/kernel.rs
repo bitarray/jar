@@ -108,14 +108,16 @@ const MGMT_GAS_MERGE: u32 = 0xE;
 /// advances it). Mirror of `MGMT_GAS_DERIVE`.
 pub const MGMT_UNTYPED_DERIVE: u32 = 0xF;
 
-/// Bare-Frame sub-slot where [`InvocationKernel::set_args`] places
-/// the args DATA cap. The host populates this; the guest MOVEs +
-/// MGMT_MAPs it into its own main-frame CapTable (the kernel's
-/// rule "MGMT_MAP only on caps in a VM's persistent Frame" stays).
-/// Slot 4 sits after the kernel-managed BareFrame slots Caller (1)
-/// and Gas (3). Self is pinned per-VM in MainFrame at `SELF_SLOT`
+/// Bare-Frame sub-slot used as the synchronous arg-in / result-out
+/// channel of the invocation: the host writes the args DATA cap here
+/// before the invocation runs (via [`InvocationKernel::set_args`]);
+/// the guest reads them, then writes back its return cap (e.g. a
+/// `FrameRef` to a public Callable produced by `Vault.initialize`)
+/// at this same slot before halting. The host reads the result on
+/// halt. Sits after the kernel-managed BareFrame slots Caller (1)
+/// and Gas (3); Self is pinned per-VM in MainFrame at `SELF_SLOT`
 /// (= 2) and has no BareFrame counterpart.
-pub const BARE_FRAME_ARGS_SLOT: u8 = 4;
+pub const BARE_ARG_SLOT: u8 = 4;
 
 /// Bare-Frame sub-slot where the kernel places the per-invocation
 /// `UntypedCap` quota. All VMs in the call tree access this single
@@ -379,7 +381,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         // Frame, so we operate on a single cap_table.
         let bare_idx = self.bare_frame_idx();
         let bare_table = &mut self.vm_arena.vm_mut(bare_idx).cap_table;
-        if bare_table.get(BARE_FRAME_ARGS_SLOT).is_some() {
+        if bare_table.get(BARE_ARG_SLOT).is_some() {
             return Err(KernelError::InvalidBlob);
         }
         let untyped = match bare_table.get_mut(BARE_FRAME_UNTYPED_SLOT) {
@@ -390,7 +392,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
 
         // Re-borrow bare_table after `&mut self.backing` was taken.
         let bare_table = &mut self.vm_arena.vm_mut(bare_idx).cap_table;
-        bare_table.set(BARE_FRAME_ARGS_SLOT, Cap::Data(data_cap));
+        bare_table.set(BARE_ARG_SLOT, Cap::Data(data_cap));
 
         self.vm_arena.vm_mut(0).set_reg(7, bytes.len() as u64);
         Ok(())
