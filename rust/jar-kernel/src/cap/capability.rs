@@ -111,9 +111,13 @@ pub struct AttestationAggregateCap {
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 pub struct ResultCap;
 
-/// Per-invocation gas budget. Lives at ephemeral sub-slot 3 by
-/// convention. `MGMT_GAS_DERIVE` splits off a child cap; `MGMT_GAS_MERGE`
-/// recombines. The JIT decrements `remaining` at safepoints (Phase 9).
+/// Per-invocation gas budget. Lives at `GAS_SLOT` (= 3) in BOTH
+/// cap-tables: BareFrame `B_GAS` is the invocation tank;
+/// MainFrame `M_GAS` is the per-VM parked sub-cap (where
+/// `MGMT_GAS_DERIVE` places a child cap). On a callee fault the
+/// kernel's `rollback_parked_gas` reads `M_GAS` of the resuming
+/// caller directly and merges into `B_GAS` — no scan.
+/// `MGMT_GAS_MERGE` recombines siblings within the same VM's table.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct GasCap {
     pub remaining: u64,

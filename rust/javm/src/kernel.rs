@@ -127,6 +127,16 @@ pub const BARE_ARG_SLOT: u8 = 4;
 /// 9 is the next free sub-slot.
 pub const BARE_FRAME_UNTYPED_SLOT: u8 = 9;
 
+/// Slot pinned in BOTH cap-tables for the Gas cap mirror.
+/// BareFrame `B_GAS = slot 3` holds the invocation tank (set by the
+/// host's `populate_ephemeral_kernel_caps`). Each VM's MainFrame
+/// `M_GAS = slot 3` is the canonical "parked Gas" slot — the kernel's
+/// rollback-on-fault path reads here directly instead of scanning
+/// the whole MainFrame. `MGMT_GAS_DERIVE` enforces this destination
+/// so guest code can't park gas at arbitrary slots and have it
+/// silently lost on fault.
+pub const GAS_SLOT: u8 = 3;
+
 /// Slot in BOTH cap-tables that holds the per-invocation
 /// FaultHandler authority. Default is BareFrame `B_FH = slot 10`
 /// (single shared cap, every parent in the call stack catches its
@@ -1401,14 +1411,22 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         }
     }
 
-    /// MGMT_GAS_DERIVE: split `amount` (φ[7]) units off the Gas cap at
-    /// `cap_idx` of the active VM into a fresh Gas cap at slot φ[8].
-    /// Routes through `ProtocolCapT::gas_derive`. Returns RC_OK on
-    /// success, RESULT_WHAT on any failure (non-Gas cap, insufficient
-    /// remaining, dst not empty).
+    /// MGMT_GAS_DERIVE: split `amount` (φ[7]) units off the Gas cap
+    /// at `cap_idx` of the active VM into a fresh child Gas cap at
+    /// `M_GAS = slot 3` (the kernel-pinned park slot). φ[8] must be
+    /// `GAS_SLOT`; any other destination is rejected. Routes through
+    /// `ProtocolCapT::gas_derive`. Returns 0 on success,
+    /// `RESULT_WHAT` on failure (non-Gas cap, insufficient remaining,
+    /// `M_GAS` already occupied, wrong destination).
     fn mgmt_gas_derive(&mut self, cap_idx: u8) -> DispatchResult {
         let amount = self.active_reg(7);
         let dst_slot = self.active_reg(8) as u8;
+        // Pin destination to GAS_SLOT so the rollback-on-fault path
+        // can find parked gas in O(1) instead of scanning.
+        if dst_slot != GAS_SLOT {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
         let vm = self.vm_arena.vm_mut(self.active_vm);
         if !vm.cap_table.is_empty(dst_slot) {
             self.set_active_reg(7, RESULT_WHAT);
@@ -3152,39 +3170,40 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             .set(FAULT_HANDLER_SLOT, cap);
     }
 
-    /// Scan `vm_idx`'s persistent Frame for parked `Cap::Protocol(P)` caps
-    /// (slots 1..=255, skipping the bare-Frame FrameRef at slot 0) and
-    /// attempt to merge each one into the live Gas cap at bare-Frame
-    /// sub-slot 3 via `ProtocolCapT::gas_merge`. Caps where `gas_merge`
-    /// returns false (non-Gas-shaped payloads) are restored to their
-    /// slot; successful merges drop the donor.
+    /// Merge `vm_idx`'s parked Gas cap at `M_GAS = GAS_SLOT` back into
+    /// the live invocation tank at bare-Frame `B_GAS = GAS_SLOT`. Used
+    /// on every callee fault to recover the budget the caller set
+    /// aside via `MGMT_GAS_DERIVE` before the failed CALL — regardless
+    /// of what the (possibly-untrusted) child did with its share.
+    ///
+    /// O(1): under the post-pinning convention, parked Gas always
+    /// lives at slot 3 of the caller's MainFrame, so a single
+    /// take-and-merge replaces the prior 256-slot scan. If the slot
+    /// is empty, holds a non-FaultHandler / non-Gas cap, or the
+    /// merge fails, the cap is restored in place (better to leak
+    /// than to silently drop).
     fn rollback_parked_gas(&mut self, vm_idx: u16) {
         let bare_idx = self.bare_frame_idx();
-        for slot in 1..=255u8 {
-            // Take the cap so we can pass `&donor` to `gas_merge` while
-            // mutably borrowing the bare Frame's cap-table; restore on
-            // failure.
-            let taken = match self.vm_arena.vm_mut(vm_idx).cap_table.take(slot) {
-                Some(c) => c,
-                None => continue,
-            };
-            let donor = match taken {
-                Cap::Protocol(p) => p,
-                other => {
-                    self.vm_arena.vm_mut(vm_idx).cap_table.set(slot, other);
-                    continue;
-                }
-            };
-            let merged = match self.vm_arena.vm_mut(bare_idx).cap_table.get_mut(3) {
-                Some(Cap::Protocol(dst)) => dst.gas_merge(&donor),
-                _ => false,
-            };
-            if !merged {
-                self.vm_arena
-                    .vm_mut(vm_idx)
-                    .cap_table
-                    .set(slot, Cap::Protocol(donor));
+        let donor_cap = match self.vm_arena.vm_mut(vm_idx).cap_table.take(GAS_SLOT) {
+            Some(c) => c,
+            None => return,
+        };
+        let donor = match donor_cap {
+            Cap::Protocol(p) => p,
+            other => {
+                self.vm_arena.vm_mut(vm_idx).cap_table.set(GAS_SLOT, other);
+                return;
             }
+        };
+        let merged = match self.vm_arena.vm_mut(bare_idx).cap_table.get_mut(GAS_SLOT) {
+            Some(Cap::Protocol(dst)) => dst.gas_merge(&donor),
+            _ => false,
+        };
+        if !merged {
+            self.vm_arena
+                .vm_mut(vm_idx)
+                .cap_table
+                .set(GAS_SLOT, Cap::Protocol(donor));
         }
     }
 }

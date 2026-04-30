@@ -271,9 +271,12 @@ pub(crate) fn populate_ephemeral_kernel_caps(
         javm::cap::Cap::Protocol(KernelCap::Ephemeral(caller_cap)),
     );
 
-    // Sub-slot 3: Gas cap. Ephemeral.
+    // BareFrame `B_GAS = GAS_SLOT` (= 3): per-invocation tank.
+    // `MGMT_GAS_DERIVE` splits parked sub-caps off this tank into
+    // the active VM's `M_GAS` slot; rollback-on-fault merges them
+    // back here in O(1).
     table.set(
-        3,
+        javm::kernel::GAS_SLOT,
         javm::cap::Cap::Protocol(KernelCap::Ephemeral(Capability::Gas(GasCap {
             remaining: invocation_gas,
         }))),
