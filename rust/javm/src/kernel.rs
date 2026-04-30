@@ -197,6 +197,33 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         Self::new_inner(blob, gas, backend, None)
     }
 
+    /// Construct a kernel from a pre-built [`InvocationArtifacts`].
+    /// Used by hosts (jar-kernel's vault_init, plus
+    /// [`cap_table_from_blob`] for legacy blob bootstrap) that have
+    /// already populated the CapTable, compiled all CODE caps, and
+    /// allocated the backing store + UntypedCap. The kernel takes
+    /// ownership and runs `finalize_kernel` to wire up VM 0 and the
+    /// bare Frame.
+    pub fn new_from_artifacts(
+        artifacts: InvocationArtifacts<P>,
+        gas: u64,
+        backend: crate::backend::PvmBackend,
+    ) -> Result<Self, KernelError> {
+        let InvocationArtifacts {
+            cap_table,
+            code_caps,
+            init_code_id,
+            untyped,
+            backing,
+            data_caps_to_map,
+        } = artifacts;
+
+        let mut kernel = Self::build_kernel_skeleton_with(untyped, backing, backend)?;
+        kernel.next_code_id = code_caps.len() as u16;
+        kernel.code_caps = code_caps;
+        kernel.finalize_kernel(cap_table, init_code_id, gas, data_caps_to_map)
+    }
+
     fn new_inner(
         blob: &[u8],
         gas: u64,
@@ -252,8 +279,21 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         backend: crate::backend::PvmBackend,
     ) -> Result<Self, KernelError> {
         let backing = BackingStore::new(memory_pages).ok_or(KernelError::MemoryError)?;
-        let mem_cycles = crate::compute_mem_cycles(memory_pages);
         let untyped = Arc::new(UntypedCap::new(memory_pages));
+        Self::build_kernel_skeleton_with(untyped, backing, backend)
+    }
+
+    /// Like [`Self::build_kernel_skeleton`] but takes a caller-allocated
+    /// `untyped` and `backing`. Used by [`Self::new_from_artifacts`]
+    /// when a host (e.g. jar-kernel's vault_init) has already
+    /// allocated the untyped pool and backing store and pre-populated
+    /// DataCaps from them.
+    fn build_kernel_skeleton_with(
+        untyped: Arc<UntypedCap>,
+        backing: BackingStore,
+        backend: crate::backend::PvmBackend,
+    ) -> Result<Self, KernelError> {
+        let mem_cycles = crate::compute_mem_cycles(untyped.total);
 
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         let window_pool =
@@ -3150,6 +3190,113 @@ pub fn allocate_data_cap(
     Ok(DataCap::new(backing_offset, page_count))
 }
 
+/// Pre-built input to [`InvocationKernel::new_from_artifacts`]. Holds
+/// the CapTable for VM 0, the kernel's `code_caps` Vec, the entry
+/// CodeCap's index, the per-invocation backing/untyped (the host
+/// allocates these because it needs them to populate DataCap caps in
+/// the table), and the optional list of pre-mapped DATA caps. The
+/// kernel takes ownership of every field on construction.
+///
+/// Two production paths produce this struct today:
+/// - [`cap_table_from_blob`]: parses a JAR blob and runs the manifest
+///   walk to produce mapped DATA caps + compiled CODE caps.
+/// - jar-kernel's `vault_init::build_init_cap_table` (separate crate):
+///   walks `vault.slots` and produces unmapped DATA caps + compiled
+///   CODE caps; `data_caps_to_map` is empty (the init program will
+///   `MGMT_MAP` at runtime).
+pub struct InvocationArtifacts<P: ProtocolCapT> {
+    pub cap_table: CapTable<P>,
+    pub code_caps: Vec<Arc<CodeCap>>,
+    pub init_code_id: u16,
+    pub untyped: Arc<UntypedCap>,
+    pub backing: BackingStore,
+    /// `(base_page, backing_offset, page_count, access)` per DATA cap
+    /// that should be pre-mmapped into VM 0's window before the init
+    /// program runs. Empty for CapTable-driven hosts that defer
+    /// mapping to the init program.
+    pub data_caps_to_map: Vec<(u32, u32, u32, Access)>,
+}
+
+/// Parse a JAR blob and produce the artifacts needed by
+/// [`InvocationKernel::new_from_artifacts`]. The artifacts include a
+/// pre-mapped DATA cap list so that legacy blob-driven invocations
+/// retain the same mmap-before-_start behavior.
+///
+/// `code_cache` is consulted for each CODE cap; on miss the cap is
+/// compiled and inserted into the cache.
+pub fn cap_table_from_blob<P: ProtocolCapT>(
+    blob: &[u8],
+    backend: crate::backend::PvmBackend,
+    mut code_cache: Option<&mut CodeCache>,
+) -> Result<InvocationArtifacts<P>, KernelError> {
+    let parsed = program::parse_blob(blob).ok_or(KernelError::InvalidBlob)?;
+    let memory_pages = parsed.header.memory_pages;
+
+    let mut backing = BackingStore::new(memory_pages).ok_or(KernelError::MemoryError)?;
+    let untyped = Arc::new(UntypedCap::new(memory_pages));
+    let mem_cycles = crate::compute_mem_cycles(memory_pages);
+
+    let mut cap_table: CapTable<P> = CapTable::new();
+    let mut code_caps: Vec<Arc<CodeCap>> = Vec::with_capacity(MAX_CODE_CAPS);
+    let mut data_caps_to_map: Vec<(u32, u32, u32, Access)> = Vec::new();
+
+    for entry in &parsed.caps {
+        match entry.cap_type {
+            CapEntryType::Code => {
+                if code_caps.len() >= MAX_CODE_CAPS {
+                    return Err(KernelError::TooManyCodeCaps);
+                }
+                let code_data = program::cap_data(entry, parsed.data_section);
+                let id = code_caps.len() as u16;
+                let code_cap = compile_code_blob(
+                    code_data,
+                    id,
+                    mem_cycles,
+                    backend,
+                    code_cache.as_deref_mut(),
+                )?;
+                code_caps.push(Arc::clone(&code_cap));
+                cap_table.set(entry.cap_index, Cap::Code(code_cap));
+            }
+            CapEntryType::Data => {
+                let initial = if entry.data_len > 0 {
+                    program::cap_data(entry, parsed.data_section)
+                } else {
+                    &[]
+                };
+                let mut data_cap =
+                    allocate_data_cap(initial, entry.page_count, &untyped, &mut backing)?;
+                data_cap.map(
+                    crate::vm_pool::VmId::ROOT,
+                    entry.base_page,
+                    entry.init_access,
+                );
+                data_caps_to_map.push((
+                    entry.base_page,
+                    data_cap.backing_offset,
+                    data_cap.page_count,
+                    entry.init_access,
+                ));
+                cap_table.set(entry.cap_index, Cap::Data(data_cap));
+            }
+        }
+    }
+
+    let init_code_id = match cap_table.get(parsed.header.init_cap) {
+        Some(Cap::Code(c)) => c.id,
+        _ => return Err(KernelError::InvalidBlob),
+    };
+
+    Ok(InvocationArtifacts {
+        cap_table,
+        code_caps,
+        init_code_id,
+        untyped,
+        backing,
+        data_caps_to_map,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3262,6 +3409,34 @@ mod tests {
         let cap = allocate_data_cap(&[], 1, &untyped, &mut backing).expect("allocate");
         assert_eq!(cap.page_count, 1);
         assert!(cap.mappings.is_empty());
+    }
+
+    #[test]
+    fn cap_table_from_blob_round_trip_to_kernel() {
+        let blob = make_simple_blob(10);
+        let artifacts: InvocationArtifacts<u8> =
+            cap_table_from_blob(&blob, crate::backend::PvmBackend::Default, None)
+                .expect("cap_table_from_blob ok");
+
+        // Manifest had 1 CodeCap (slot 64) and 1 DataCap (slot 65) with
+        // a (base_page, _, page_count, access) entry recorded for the
+        // root VM.
+        assert_eq!(artifacts.code_caps.len(), 1);
+        assert_eq!(artifacts.init_code_id, 0);
+        assert_eq!(artifacts.data_caps_to_map.len(), 1);
+        assert!(matches!(artifacts.cap_table.get(64), Some(Cap::Code(_))));
+        assert!(matches!(artifacts.cap_table.get(65), Some(Cap::Data(_))));
+
+        let kernel: InvocationKernel = InvocationKernel::new_from_artifacts(
+            artifacts,
+            100_000,
+            crate::backend::PvmBackend::Default,
+        )
+        .expect("new_from_artifacts ok");
+
+        // Same shape as `new_inner` produces from the same blob.
+        assert_eq!(kernel.code_caps.len(), 1);
+        assert_eq!(kernel.vm_arena.len(), 2); // VM 0 + bare Frame
     }
 
     #[test]
