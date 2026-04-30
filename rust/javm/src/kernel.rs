@@ -101,6 +101,12 @@ const MGMT_GAS_DERIVE: u32 = 0xD;
 /// Gas-cap merge: add donor's `remaining` to dst's `remaining`, donor
 /// is consumed. Routes through `ProtocolCapT::gas_merge`.
 const MGMT_GAS_MERGE: u32 = 0xE;
+/// Untyped-cap derive: split `n_pages` (φ[7]) off a parent
+/// `UntypedCap` into a fresh child cap at slot φ[8] of the active VM.
+/// Decrements the parent's `limit` by N; the child gets `limit = N`.
+/// The shared `BackingStore::bump` is unaffected (only retype
+/// advances it). Mirror of `MGMT_GAS_DERIVE`.
+pub const MGMT_UNTYPED_DERIVE: u32 = 0xF;
 
 /// Bare-Frame sub-slot where [`InvocationKernel::set_args`] places
 /// the args DATA cap. The host populates this; the guest MOVEs +
@@ -109,6 +115,14 @@ const MGMT_GAS_MERGE: u32 = 0xE;
 /// Slot 4 is the next free sub-slot after the kernel-managed
 /// Caller (1), SelfId (2), Gas (3) caps.
 pub const BARE_FRAME_ARGS_SLOT: u8 = 4;
+
+/// Bare-Frame sub-slot where the kernel places the per-invocation
+/// `UntypedCap` quota. All VMs in the call tree access this single
+/// cap via the bare-Frame indirection (slot 0 of their main-frame
+/// FrameRef), giving uniform allocation authority across the
+/// invocation. Slots 4–8 are reserved for cap-arg/result channels;
+/// 9 is the next free sub-slot.
+pub const BARE_FRAME_UNTYPED_SLOT: u8 = 9;
 
 /// WHAT error code (2^64 - 2).
 const RESULT_WHAT: u64 = u64::MAX - 1;
@@ -257,7 +271,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     /// cap-table with the bare-Frame FrameRef.
     fn finalize_kernel(
         mut self,
-        mut cap_table: CapTable<P>,
+        cap_table: CapTable<P>,
         untyped: UntypedCap,
         init_code_id: u16,
         gas: u64,
@@ -286,14 +300,6 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             self.active_window = assignment.window_idx;
         }
 
-        // Give VM 0 the UNTYPED cap at slot 254 (fixed slot, just below
-        // IPC). Skip when the budget is zero — no point exposing an
-        // empty allocator. The cap is moved (not cloned) — Untyped is
-        // move-only under the new quota model.
-        if untyped.limit > 0 {
-            cap_table.set(254, Cap::Untyped(untyped));
-        }
-
         // Create VM 0. Registers start zeroed. To pass byte payload to
         // the guest, the host calls [`Self::set_args`] which allocates
         // a DATA cap, writes the bytes into its backing pages, places
@@ -318,6 +324,19 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         let bare = VmInstance::new(init_code_id, 0, CapTable::new(), 0);
         let bare_id = self.vm_arena.insert(bare).ok_or(KernelError::InvalidBlob)?;
         self.bare_frame_id = bare_id;
+
+        // Place the per-invocation UNTYPED cap at bare-Frame slot 9.
+        // All VMs in the call tree share this single cap via the
+        // bare-Frame indirection (their main-frame slot 0 → bare
+        // Frame). Skip when the budget is zero. Untyped is move-only
+        // under the new quota model — the cap moves into the slot,
+        // not Arc-cloned.
+        if untyped.limit > 0 {
+            self.vm_arena
+                .vm_mut(bare_id.index())
+                .cap_table
+                .set(BARE_FRAME_UNTYPED_SLOT, Cap::Untyped(untyped));
+        }
 
         // Patch slot 0 of VM 0's cap-table now that we know the bare
         // Frame's VmId.
@@ -354,20 +373,22 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     pub fn set_args(&mut self, bytes: &[u8]) -> Result<(), KernelError> {
         let page_count = (bytes.len() as u32).div_ceil(crate::PVM_PAGE_SIZE);
 
-        // Read the kernel-managed Untyped cap (currently at VM 0
-        // slot 254) and consume `page_count` pages from its `limit`.
-        // The data cap is then allocated from the shared backing.
-        let untyped = match self.vm_arena.vm_mut(0).cap_table.get_mut(254) {
-            Some(Cap::Untyped(u)) => u,
-            _ => return Err(KernelError::InvalidBlob),
-        };
-        let data_cap = allocate_data_cap(bytes, page_count, untyped, &mut self.backing)?;
-
+        // Read the per-invocation Untyped cap at bare-Frame slot 9.
+        // Both the limit-debit and the args slot live on the bare
+        // Frame, so we operate on a single cap_table.
         let bare_idx = self.bare_frame_idx();
         let bare_table = &mut self.vm_arena.vm_mut(bare_idx).cap_table;
         if bare_table.get(BARE_FRAME_ARGS_SLOT).is_some() {
             return Err(KernelError::InvalidBlob);
         }
+        let untyped = match bare_table.get_mut(BARE_FRAME_UNTYPED_SLOT) {
+            Some(Cap::Untyped(u)) => u,
+            _ => return Err(KernelError::InvalidBlob),
+        };
+        let data_cap = allocate_data_cap(bytes, page_count, untyped, &mut self.backing)?;
+
+        // Re-borrow bare_table after `&mut self.backing` was taken.
+        let bare_table = &mut self.vm_arena.vm_mut(bare_idx).cap_table;
         bare_table.set(BARE_FRAME_ARGS_SLOT, Cap::Data(data_cap));
 
         self.vm_arena.vm_mut(0).set_reg(7, bytes.len() as u64);
@@ -509,7 +530,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             Cap::Untyped(_) => {
                 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
                 self.flush_live_ctx();
-                self.handle_call_untyped(cap_idx)
+                self.handle_call_untyped(FrameId::Vm(self.active_vm), cap_idx)
             }
             Cap::Code(c) => {
                 let code_id = c.id;
@@ -537,15 +558,28 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     }
 
     /// CALL on UNTYPED → RETYPE. Operates on the *called* Untyped at
-    /// `called_slot` of the active VM's CapTable. Decrements the cap's
-    /// `limit` by `n_pages` (φ[7]); allocates a fresh backing range
-    /// from the shared `BackingStore::bump`; places a `Cap::Data` at
-    /// the dst slot resolved from φ[12]. Returns the dst slot index in
-    /// φ[7] on success, `RESULT_WHAT` on any failure (insufficient
-    /// limit, invalid dst, occupied dst).
-    fn handle_call_untyped(&mut self, called_slot: u8) -> DispatchResult {
+    /// `(called_frame, called_slot)`. Decrements the cap's `limit` by
+    /// `n_pages` (φ[7]); allocates a fresh backing range from the
+    /// shared `BackingStore::bump`; places a `Cap::Data` at the dst
+    /// resolved from φ[12]. Returns the dst slot index in φ[7] on
+    /// success, `RESULT_WHAT` on any failure (insufficient limit,
+    /// invalid dst, occupied dst, foreign frame).
+    fn handle_call_untyped(
+        &mut self,
+        called_frame: FrameId<P::ForeignFrameId>,
+        called_slot: u8,
+    ) -> DispatchResult {
         let n_pages = self.active_reg(7) as u32;
         let gas_cost = 10 + n_pages as u64 * GAS_PER_PAGE;
+
+        // Untyped doesn't live in foreign frames — reject early.
+        let called_vm_idx = match called_frame {
+            FrameId::Vm(idx) => idx,
+            FrameId::Foreign(_) => {
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
+        };
 
         let vm = &mut self.vm_arena.vm_mut(self.active_vm);
         if vm.gas() < gas_cost {
@@ -572,10 +606,10 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             return DispatchResult::Continue;
         }
 
-        // Debit the called Untyped at `called_slot` of the active VM.
+        // Debit the called Untyped.
         let untyped = match self
             .vm_arena
-            .vm_mut(self.active_vm)
+            .vm_mut(called_vm_idx)
             .cap_table
             .get_mut(called_slot)
         {
@@ -596,7 +630,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         // Re-borrow because allocate_pages took &mut self.backing.
         let untyped = match self
             .vm_arena
-            .vm_mut(self.active_vm)
+            .vm_mut(called_vm_idx)
             .cap_table
             .get_mut(called_slot)
         {
@@ -1081,19 +1115,27 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                 if frame == FrameId::Vm(self.active_vm) {
                     self.handle_call(slot)
                 } else {
-                    // Remote cap — look up the cap in the resolved frame.
-                    // Foreign frames don't expose Cap<P> values directly; CALL
-                    // through them isn't supported (foreign caps are persistent
-                    // CNode entries, not callable workers).
-                    let is_protocol = matches!(
-                        self.frame_table(frame).and_then(|t| t.get(slot)),
-                        Some(Cap::Protocol(_))
-                    );
-                    if is_protocol {
-                        DispatchResult::ProtocolCall { slot }
-                    } else {
-                        self.set_active_reg(7, RESULT_WHAT);
-                        DispatchResult::Continue
+                    // Remote cap — look up the cap in the resolved
+                    // frame. Untyped (the per-invocation budget at
+                    // bare-Frame slot 9) and Protocol are the two
+                    // remote-callable shapes. Foreign frames hold
+                    // persistent CNode entries that are never directly
+                    // callable.
+                    match self.frame_table(frame).and_then(|t| t.get(slot)) {
+                        Some(Cap::Protocol(_)) => DispatchResult::ProtocolCall { slot },
+                        Some(Cap::Untyped(_)) => {
+                            #[cfg(all(
+                                feature = "std",
+                                target_os = "linux",
+                                target_arch = "x86_64"
+                            ))]
+                            self.flush_live_ctx();
+                            self.handle_call_untyped(frame, slot)
+                        }
+                        _ => {
+                            self.set_active_reg(7, RESULT_WHAT);
+                            DispatchResult::Continue
+                        }
                     }
                 }
             }
@@ -1151,11 +1193,79 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                 }
                 self.handle_resume(slot)
             }
+            0x0F => {
+                // UNTYPED_DERIVE — split N pages off the parent
+                // Untyped at subject_ref into a fresh child placed at
+                // dst (resolved from object_ref).
+                let (s_frame, s_slot, _) = resolve!(self, subject_ref);
+                let (o_frame, o_slot, _) = resolve!(self, object_ref);
+                self.ecall_untyped_derive(s_frame, s_slot, o_frame, o_slot)
+            }
             _ => {
                 self.set_active_reg(7, RESULT_WHAT);
                 DispatchResult::Continue
             }
         }
+    }
+
+    /// MGMT_UNTYPED_DERIVE handler (modern dispatch_ecall path).
+    /// Splits φ[7] pages off the parent Untyped at `(s_frame, s_slot)`
+    /// into a fresh child Untyped at `(o_frame, o_slot)`. Returns
+    /// 0 in φ[7] on success, RESULT_WHAT on any failure.
+    fn ecall_untyped_derive(
+        &mut self,
+        s_frame: FrameId<P::ForeignFrameId>,
+        s_slot: u8,
+        o_frame: FrameId<P::ForeignFrameId>,
+        o_slot: u8,
+    ) -> DispatchResult {
+        let n = self.active_reg(7) as u32;
+
+        // Untyped doesn't live in foreign frames — reject.
+        let s_vm_idx = match s_frame {
+            FrameId::Vm(idx) => idx,
+            FrameId::Foreign(_) => {
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
+        };
+
+        // Validate dst is empty before mutating source.
+        if !self
+            .frame_table_mut(o_frame)
+            .map(|t| t.is_empty(o_slot))
+            .unwrap_or(false)
+        {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+        // Reject same-slot derive (would alias the parent).
+        if s_frame == o_frame && s_slot == o_slot {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+
+        // Debit the parent.
+        let parent = match self.vm_arena.vm_mut(s_vm_idx).cap_table.get_mut(s_slot) {
+            Some(Cap::Untyped(u)) => u,
+            _ => {
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
+        };
+        if parent.limit < n {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+        parent.limit -= n;
+
+        // Place the child.
+        let dst_table = self
+            .frame_table_mut(o_frame)
+            .expect("dst frame validated above");
+        dst_table.set(o_slot, Cap::Untyped(UntypedCap::new(n)));
+        self.set_active_reg(7, 0);
+        DispatchResult::Continue
     }
 
     /// Handle a management op (legacy ecalli encoding, will be removed).
@@ -3399,18 +3509,28 @@ mod tests {
         // Set VM 0 to running
         let _ = kernel.vm_arena.vm_mut(0).transition(VmState::Running);
 
-        // UNTYPED is at fixed slot 254
-        let untyped_slot = 254u8;
+        // UNTYPED now lives at bare-Frame slot 9, reached via slot 0
+        // (the bare-Frame FrameRef) of VM 0. Verify shape directly
+        // before exercising the ecall path.
+        let bare_idx = kernel.bare_frame_id.index();
         assert!(matches!(
-            kernel.vm_arena.vm(0).cap_table.get(untyped_slot),
+            kernel
+                .vm_arena
+                .vm(bare_idx)
+                .cap_table
+                .get(BARE_FRAME_UNTYPED_SLOT),
             Some(Cap::Untyped(_))
         ));
 
-        // Use ecall (UNTYPED slot 254 > 127, can't use ecalli)
-        // φ[7]=4 pages, φ[11]=0 (CALL), φ[12]=dst_slot(low) | untyped_slot(high)
+        // Cap-ref encoding: indirect through VM 0's slot 0 (bare-Frame
+        // FrameRef) to bare-Frame's slot 9. The resolver crosses slot
+        // 0 when LSB is zero, so encoding is `(BARE_FRAME_UNTYPED_SLOT
+        // << 8)` = 0x900.
+        let untyped_ref: u32 = (BARE_FRAME_UNTYPED_SLOT as u32) << 8;
+        // φ[7]=4 pages, φ[11]=0 (CALL), φ[12]=dst_slot(low) | untyped_ref(high)
         kernel.set_active_reg(7, 4);
         kernel.set_active_reg(11, 0); // op = CALL
-        kernel.set_active_reg(12, 66 | ((untyped_slot as u64) << 32));
+        kernel.set_active_reg(12, 66 | ((untyped_ref as u64) << 32));
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
         let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0);
@@ -3423,6 +3543,147 @@ mod tests {
             kernel.vm_arena.vm(0).cap_table.get(new_cap_idx),
             Some(Cap::Data(_))
         ));
+    }
+
+    #[test]
+    fn untyped_derive_split_and_dst_placement() {
+        // DERIVE 5 pages off the bare-Frame Untyped into VM 0 slot 100.
+        // Subject = bare-Frame slot 9 (cap-ref 0x900); object = VM 0
+        // slot 100 (cap-ref 0x64).
+        let blob = make_simple_blob(20);
+        let mut kernel: InvocationKernel = kernel_from_blob(&blob, 100_000);
+        let _ = kernel.vm_arena.vm_mut(0).transition(VmState::Running);
+
+        let bare_idx = kernel.bare_frame_id.index();
+        let parent_limit_before = match kernel
+            .vm_arena
+            .vm(bare_idx)
+            .cap_table
+            .get(BARE_FRAME_UNTYPED_SLOT)
+        {
+            Some(Cap::Untyped(u)) => u.limit,
+            _ => panic!("expected Untyped at bare-Frame slot 9"),
+        };
+        assert!(parent_limit_before >= 5);
+
+        let subject_ref: u64 = (BARE_FRAME_UNTYPED_SLOT as u64) << 8; // 0x900
+        let object_ref: u64 = 100;
+        kernel.set_active_reg(7, 5);
+        kernel.set_active_reg(12, (subject_ref << 32) | object_ref);
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        kernel.flush_live_ctx();
+        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x0F);
+        assert!(matches!(result, DispatchResult::Continue));
+        assert_eq!(
+            kernel.active_reg(7),
+            0,
+            "MGMT_UNTYPED_DERIVE returns 0 on success"
+        );
+
+        // Parent (bare-Frame[9]) limit decreased by 5.
+        let parent_after = match kernel
+            .vm_arena
+            .vm(bare_idx)
+            .cap_table
+            .get(BARE_FRAME_UNTYPED_SLOT)
+        {
+            Some(Cap::Untyped(u)) => u.limit,
+            _ => panic!("parent missing"),
+        };
+        assert_eq!(parent_after, parent_limit_before - 5);
+        // Child placed at VM 0 slot 100 with limit 5.
+        let child = match kernel.vm_arena.vm(0).cap_table.get(100) {
+            Some(Cap::Untyped(u)) => u.limit,
+            _ => panic!("child missing"),
+        };
+        assert_eq!(child, 5);
+    }
+
+    #[test]
+    fn untyped_derive_insufficient_returns_what() {
+        let blob = make_simple_blob(2);
+        let mut kernel: InvocationKernel = kernel_from_blob(&blob, 100_000);
+        let _ = kernel.vm_arena.vm_mut(0).transition(VmState::Running);
+
+        let bare_idx = kernel.bare_frame_id.index();
+        let parent_before = match kernel
+            .vm_arena
+            .vm(bare_idx)
+            .cap_table
+            .get(BARE_FRAME_UNTYPED_SLOT)
+        {
+            Some(Cap::Untyped(u)) => u.limit,
+            _ => panic!("expected Untyped at bare-Frame slot 9"),
+        };
+
+        let subject_ref: u64 = (BARE_FRAME_UNTYPED_SLOT as u64) << 8;
+        let object_ref: u64 = 100;
+        kernel.set_active_reg(7, parent_before as u64 + 1);
+        kernel.set_active_reg(12, (subject_ref << 32) | object_ref);
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        kernel.flush_live_ctx();
+        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x0F);
+        assert!(matches!(result, DispatchResult::Continue));
+        assert_eq!(kernel.active_reg(7), RESULT_WHAT);
+
+        // Parent unchanged; dst untouched.
+        let parent_after = match kernel
+            .vm_arena
+            .vm(bare_idx)
+            .cap_table
+            .get(BARE_FRAME_UNTYPED_SLOT)
+        {
+            Some(Cap::Untyped(u)) => u.limit,
+            _ => panic!(),
+        };
+        assert_eq!(parent_after, parent_before);
+        assert!(kernel.vm_arena.vm(0).cap_table.get(100).is_none());
+    }
+
+    #[test]
+    fn untyped_derive_dst_occupied_returns_what() {
+        let blob = make_simple_blob(20);
+        let mut kernel: InvocationKernel = kernel_from_blob(&blob, 100_000);
+        let _ = kernel.vm_arena.vm_mut(0).transition(VmState::Running);
+
+        // Plant an unrelated cap at the dst slot.
+        kernel
+            .vm_arena
+            .vm_mut(0)
+            .cap_table
+            .set(100, Cap::Untyped(UntypedCap::new(0)));
+        let bare_idx = kernel.bare_frame_id.index();
+        let parent_before = match kernel
+            .vm_arena
+            .vm(bare_idx)
+            .cap_table
+            .get(BARE_FRAME_UNTYPED_SLOT)
+        {
+            Some(Cap::Untyped(u)) => u.limit,
+            _ => panic!(),
+        };
+
+        let subject_ref: u64 = (BARE_FRAME_UNTYPED_SLOT as u64) << 8;
+        let object_ref: u64 = 100;
+        kernel.set_active_reg(7, 5);
+        kernel.set_active_reg(12, (subject_ref << 32) | object_ref);
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        kernel.flush_live_ctx();
+        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x0F);
+        assert!(matches!(result, DispatchResult::Continue));
+        assert_eq!(kernel.active_reg(7), RESULT_WHAT);
+
+        // Parent unchanged (refund property).
+        let parent_after = match kernel
+            .vm_arena
+            .vm(bare_idx)
+            .cap_table
+            .get(BARE_FRAME_UNTYPED_SLOT)
+        {
+            Some(Cap::Untyped(u)) => u.limit,
+            _ => panic!(),
+        };
+        assert_eq!(parent_after, parent_before);
     }
 
     #[test]
