@@ -51,6 +51,8 @@ fn revoke_cascades_to_derived() {
             cap: Capability::Dispatch(DispatchCap {
                 vault_id: VaultId(0),
                 born_in: parent_cnode,
+                gas_budget: 0,
+                memory_budget: 0,
             }),
             issuer: None,
             narrowing: vec![],
@@ -85,6 +87,8 @@ fn pinning_rejects_dispatch_into_wrong_cnode() {
         Capability::Dispatch(DispatchCap {
             vault_id: VaultId(7),
             born_in: cn_a,
+            gas_budget: 0,
+            memory_budget: 0,
         }),
         vec![],
         cn_a,
@@ -111,6 +115,8 @@ fn pinning_rejects_dispatchref_to_persistent_cnode() {
         Capability::Dispatch(DispatchCap {
             vault_id: VaultId(0),
             born_in: cn,
+            gas_budget: 0,
+            memory_budget: 0,
         }),
         vec![],
         cn,
@@ -142,6 +148,8 @@ fn arg_scan_rejects_pinned_caps() {
             cap: Capability::Dispatch(DispatchCap {
                 vault_id: VaultId(0),
                 born_in: cn,
+                gas_budget: 0,
+                memory_budget: 0,
             }),
             issuer: None,
             narrowing: vec![],

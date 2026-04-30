@@ -26,29 +26,42 @@ pub struct VaultRefCap {
     pub rights: VaultRights,
 }
 
-/// Persistent Dispatch entrypoint cap; pinned to `born_in`.
+/// Persistent Dispatch entrypoint cap; pinned to `born_in`. Carries the
+/// per-invocation `gas_budget` / `memory_budget` the kernel uses when
+/// firing this entrypoint. The entrypoint is trusted-gateway code (the
+/// vault's own gatekeeper); user-supplied per-event budgets don't reach
+/// it directly — the entrypoint decodes the payload and derives sub-
+/// budgets via DERIVE before CALLing into untrusted logic.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct DispatchCap {
     pub vault_id: VaultId,
     pub born_in: CNodeId,
+    pub gas_budget: u64,
+    pub memory_budget: u32,
 }
 
-/// Persistent Transact entrypoint cap; pinned to `born_in`.
+/// Persistent Transact entrypoint cap; pinned to `born_in`. See
+/// [`DispatchCap`] for the budget rationale.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct TransactCap {
     pub vault_id: VaultId,
     pub born_in: CNodeId,
+    pub gas_budget: u64,
+    pub memory_budget: u32,
 }
 
 /// Persistent Schedule entrypoint cap; pinned to `born_in`. Kernel-fired
 /// once per block at this slot's position in σ.transact_space_cnode, with
 /// no body event input. Used for chain-author block_init / block_final /
 /// consensus / cleanup hooks. Never `cap_call`'d by userspace; not
-/// derivable to a callable ref.
+/// derivable to a callable ref. Carries its own budget (no user payload
+/// to decode, but still runs vault code that needs gas/memory).
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct ScheduleCap {
     pub vault_id: VaultId,
     pub born_in: CNodeId,
+    pub gas_budget: u64,
+    pub memory_budget: u32,
 }
 
 /// Ephemeral Dispatch reference, derived from a `Dispatch`. Frame-only.

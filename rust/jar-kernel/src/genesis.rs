@@ -108,6 +108,8 @@ impl GenesisBuilder {
             Capability::Schedule(ScheduleCap {
                 vault_id: bi_vault,
                 born_in: transact_cnode,
+                gas_budget: 100_000_000,
+                memory_budget: 256,
             }),
             Vec::new(),
             transact_cnode,
@@ -121,6 +123,8 @@ impl GenesisBuilder {
             Capability::Transact(TransactCap {
                 vault_id: t_vault,
                 born_in: transact_cnode,
+                gas_budget: 100_000_000,
+                memory_budget: 256,
             }),
             Vec::new(),
             transact_cnode,
@@ -134,6 +138,8 @@ impl GenesisBuilder {
             Capability::Schedule(ScheduleCap {
                 vault_id: bf_vault,
                 born_in: transact_cnode,
+                gas_budget: 100_000_000,
+                memory_budget: 256,
             }),
             Vec::new(),
             transact_cnode,
@@ -147,6 +153,8 @@ impl GenesisBuilder {
             Capability::Dispatch(DispatchCap {
                 vault_id: d_vault,
                 born_in: dispatch_cnode,
+                gas_budget: 100_000_000,
+                memory_budget: 256,
             }),
             Vec::new(),
             dispatch_cnode,

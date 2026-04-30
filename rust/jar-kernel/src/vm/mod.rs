@@ -32,18 +32,6 @@ use crate::reach::ReachSet;
 use crate::runtime::Hardware;
 use crate::vm::host_abi::HostCall;
 
-/// Default per-invocation gas budget. javm charges per instruction and per
-/// memory cycle; this matches the magnitude javm's own tests use.
-///
-// TODO(spec): per-event gas budget should come from Event/cap.
-pub const INVOCATION_GAS_BUDGET: u64 = 100_000_000;
-
-/// Default per-invocation memory budget (in pages, 4KB each). Used
-/// by kernel-driven invocations (dispatch step-2/step-3, system
-/// vaults) and as the fallback for `Event.memory_budget == 0`.
-/// Matches the legacy `Vault.quota_pages` default.
-pub const INVOCATION_MEMORY_BUDGET: u32 = 256;
-
 /// Convenience alias: the `InvocationKernel` parameterized over the
 /// kernel's protocol-cap payload.
 pub type Vm = javm::kernel::InvocationKernel<KernelCap>;

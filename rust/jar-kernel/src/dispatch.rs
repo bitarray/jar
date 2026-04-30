@@ -30,7 +30,7 @@ use crate::reach::ReachSet;
 use crate::runtime::{Hardware, NodeOffchain};
 use crate::state::cap_registry;
 use crate::transact::{populate_home_vault_ref, populate_host_call_slots};
-use crate::vm::{INVOCATION_GAS_BUDGET, InvocationCtx, Vm, drive_invocation};
+use crate::vm::{InvocationCtx, Vm, drive_invocation};
 
 #[derive(Debug, Default)]
 pub struct InboundOutcome {
@@ -58,21 +58,23 @@ pub fn handle_inbound_dispatch<H: Hardware>(
         }
     };
     let cn = state.cnode(cnode_id)?;
-    let mut found = false;
+    let mut entrypoint_cap: Option<crate::cap::DispatchCap> = None;
     for (_, cap_id) in cn.iter() {
         if let Capability::Dispatch(d) = cap_registry::lookup(state, cap_id)?.cap
             && d.vault_id == entrypoint
         {
-            found = true;
+            entrypoint_cap = Some(d);
             break;
         }
     }
-    if !found {
-        return Err(KernelError::Internal(format!(
+    let entrypoint_cap = entrypoint_cap.ok_or_else(|| {
+        KernelError::Internal(format!(
             "entrypoint {:?} not in dispatch_space_cnode",
             entrypoint
-        )));
-    }
+        ))
+    })?;
+    let gas_budget = entrypoint_cap.gas_budget;
+    let memory_budget = entrypoint_cap.memory_budget;
 
     let mut commands: Vec<Command> = Vec::new();
     let mut reach = ReachSet::default();
@@ -108,8 +110,8 @@ pub fn handle_inbound_dispatch<H: Hardware>(
         let mut vm: Vm = crate::vm::new_vm_from_vault(
             &state_clone,
             entrypoint,
-            INVOCATION_GAS_BUDGET,
-            crate::vm::INVOCATION_MEMORY_BUDGET,
+            gas_budget,
+            memory_budget,
             Some(&mut node.code_cache),
         )?;
         let mut slot_emission: Option<SlotContent> = None;
@@ -133,7 +135,7 @@ pub fn handle_inbound_dispatch<H: Hardware>(
             &mut vm,
             entrypoint,
             Caller::Kernel(KernelRole::AggregateStandalone),
-            INVOCATION_GAS_BUDGET,
+            gas_budget,
         );
         vm.set_active_reg(7, 0);
         let _ = drive_invocation(&mut vm, &mut ctx)?;
@@ -152,8 +154,8 @@ pub fn handle_inbound_dispatch<H: Hardware>(
         let mut vm: Vm = crate::vm::new_vm_from_vault(
             &state_clone,
             entrypoint,
-            INVOCATION_GAS_BUDGET,
-            crate::vm::INVOCATION_MEMORY_BUDGET,
+            gas_budget,
+            memory_budget,
             Some(&mut node.code_cache),
         )?;
         let mut ctx = InvocationCtx {
@@ -176,7 +178,7 @@ pub fn handle_inbound_dispatch<H: Hardware>(
             &mut vm,
             entrypoint,
             Caller::Kernel(KernelRole::AggregateMerge),
-            INVOCATION_GAS_BUDGET,
+            gas_budget,
         );
         vm.set_active_reg(7, 1);
         let _ = drive_invocation(&mut vm, &mut ctx)?;

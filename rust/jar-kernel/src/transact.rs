@@ -22,7 +22,7 @@ use crate::cap::attest::AttestCursor;
 use crate::reach::ReachSet;
 use crate::runtime::Hardware;
 use crate::state::cap_registry;
-use crate::vm::{INVOCATION_GAS_BUDGET, InvocationCtx, Vm, drive_invocation};
+use crate::vm::{InvocationCtx, Vm, drive_invocation};
 
 /// What kind of slot we're running for. Affects whether body events are
 /// consumed and how reach is recorded.
@@ -53,9 +53,21 @@ pub fn transact_entrypoints(state: &State) -> KResult<Vec<VaultId>> {
     Ok(entrypoints)
 }
 
-/// Iterate the entrypoint schedule in canonical slot order. Returns
-/// `(slot_idx, kind, vault_id)` tuples.
-pub fn schedule_walk(state: &State) -> KResult<Vec<(u8, SlotKind, VaultId)>> {
+/// One entrypoint slot's metadata as walked from σ.transact_space_cnode.
+/// Carries the budgets the kernel must use when firing this entrypoint
+/// (the entrypoint is trusted-gateway code; user-supplied per-event
+/// budgets don't reach it directly).
+#[derive(Copy, Clone, Debug)]
+pub struct WalkEntry {
+    pub slot_idx: u8,
+    pub kind: SlotKind,
+    pub vault_id: VaultId,
+    pub gas_budget: u64,
+    pub memory_budget: u32,
+}
+
+/// Iterate the entrypoint schedule in canonical slot order.
+pub fn schedule_walk(state: &State) -> KResult<Vec<WalkEntry>> {
     let cnode_id = match &cap_registry::lookup(state, state.transact_space_cnode)?.cap {
         Capability::CNode(c) => c.cnode_id,
         _ => {
@@ -69,10 +81,22 @@ pub fn schedule_walk(state: &State) -> KResult<Vec<(u8, SlotKind, VaultId)>> {
     for (slot_idx, cap_id) in cnode.iter() {
         match cap_registry::lookup(state, cap_id)?.cap {
             Capability::Transact(c) => {
-                walk.push((slot_idx, SlotKind::Transact, c.vault_id));
+                walk.push(WalkEntry {
+                    slot_idx,
+                    kind: SlotKind::Transact,
+                    vault_id: c.vault_id,
+                    gas_budget: c.gas_budget,
+                    memory_budget: c.memory_budget,
+                });
             }
             Capability::Schedule(c) => {
-                walk.push((slot_idx, SlotKind::Schedule, c.vault_id));
+                walk.push(WalkEntry {
+                    slot_idx,
+                    kind: SlotKind::Schedule,
+                    vault_id: c.vault_id,
+                    gas_budget: c.gas_budget,
+                    memory_budget: c.memory_budget,
+                });
             }
             _ => {
                 return Err(KernelError::Internal(format!(
@@ -102,17 +126,13 @@ pub fn run_one_invocation<H: Hardware>(
     kind: SlotKind,
     reach_idx: u32,
     payload: &[u8],
+    gas_budget: u64,
     memory_budget: u32,
     attestation_trace: &mut Vec<AttestationEntry>,
     result_trace: &mut Vec<ResultEntry>,
     cursor: &mut AttestCursor,
     hw: &H,
 ) -> KResult<(ReachEntry, Vec<Command>)> {
-    let memory_pages = if memory_budget > 0 {
-        memory_budget
-    } else {
-        crate::vm::INVOCATION_MEMORY_BUDGET
-    };
     // No StateSnapshot: faults discard the Frame; persistent caps in
     // Vaults are unchanged because reads are COPY (not MOVE) and
     // managers explicitly stage commits via MGMT_MOVE Frame → Vault.
@@ -122,15 +142,14 @@ pub fn run_one_invocation<H: Hardware>(
     // init replaces the legacy "fetch JAR blob, re-parse manifest"
     // path). vault_init walks vault.slots and translates persistent
     // caps to ephemeral counterparts at the same slot index.
-    let mut vm: Vm =
-        crate::vm::new_vm_from_vault(state, target, INVOCATION_GAS_BUDGET, memory_pages, None)?;
+    let mut vm: Vm = crate::vm::new_vm_from_vault(state, target, gas_budget, memory_budget, None)?;
     populate_host_call_slots(&mut vm);
     populate_home_vault_ref(&mut vm, target);
     populate_ephemeral_kernel_caps(
         &mut vm,
         target,
         crate::types::Caller::Kernel(crate::types::KernelRole::TransactEntry),
-        INVOCATION_GAS_BUDGET,
+        gas_budget,
     );
     // Pass the event payload to the guest via the new args ABI:
     // `set_args` allocates a fresh DATA cap, writes the payload bytes
@@ -305,7 +324,14 @@ pub fn run_phase<H: Hardware>(
     let mut body_event_idx: usize = 0;
     let mut reach_idx: u32 = 0;
 
-    for (slot_idx, kind, target) in walk {
+    for entry in walk {
+        let WalkEntry {
+            slot_idx,
+            kind,
+            vault_id: target,
+            gas_budget,
+            memory_budget,
+        } = entry;
         match kind {
             SlotKind::Schedule => {
                 if let Some((vid, _)) = body.events.get(body_event_idx)
@@ -322,7 +348,8 @@ pub fn run_phase<H: Hardware>(
                     SlotKind::Schedule,
                     reach_idx,
                     &[],
-                    0, // memory_budget = 0 → falls back to INVOCATION_MEMORY_BUDGET
+                    gas_budget,
+                    memory_budget,
                     &mut body.attestation_trace,
                     &mut body.result_trace,
                     block_cursor,
@@ -348,13 +375,13 @@ pub fn run_phase<H: Hardware>(
                         let (_target, ref mut events) = body.events[body_event_idx];
                         let mut event = std::mem::take(&mut events[event_idx]);
                         let payload = event.payload.clone();
-                        let memory_budget = event.memory_budget;
                         let result = run_one_invocation(
                             state,
                             target,
                             SlotKind::Transact,
                             reach_idx,
                             &payload,
+                            gas_budget,
                             memory_budget,
                             &mut event.attestation_trace,
                             &mut event.result_trace,

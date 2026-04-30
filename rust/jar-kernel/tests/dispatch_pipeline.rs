@@ -33,7 +33,6 @@ fn dispatch_runs_step2_step3_and_subscribes_at_construction() {
 
     let event = Event {
         payload: b"hello".to_vec(),
-        memory_budget: 0,
         caps: vec![],
         attestation_trace: vec![],
         result_trace: vec![],

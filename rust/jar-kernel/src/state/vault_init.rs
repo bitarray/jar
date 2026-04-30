@@ -412,6 +412,8 @@ mod tests {
             Capability::Dispatch(DispatchCap {
                 vault_id: VaultId(0),
                 born_in: cn,
+                gas_budget: 0,
+                memory_budget: 0,
             }),
         );
 

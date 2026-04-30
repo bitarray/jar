@@ -119,7 +119,6 @@ fn transact_event_with_unconsumed_attestation_trace_faults() {
                 target,
                 vec![jar_kernel::Event {
                     payload: vec![],
-                    memory_budget: 0,
                     caps: vec![],
                     attestation_trace: vec![jar_kernel::AttestationEntry::default()],
                     result_trace: vec![],

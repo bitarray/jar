@@ -3,16 +3,16 @@
 use super::{AttestationEntry, ResultEntry, VaultId};
 
 /// One Dispatch event arriving at an entrypoint, or one Transact event in
-/// a block body. Same shape; used for both surfaces.
+/// a block body. Same shape; used for both surfaces. The
+/// per-invocation gas / memory budget is *not* on the event — it's
+/// configured on the entrypoint cap (`TransactCap` / `DispatchCap` /
+/// `ScheduleCap`) the kernel runs against. The entrypoint is
+/// trusted-gateway code; user-supplied per-event budgets would be a
+/// griefing vector. The entrypoint may decode budget from `payload`
+/// and DERIVE sub-caps for downstream CALLs.
 #[derive(Clone, Eq, PartialEq, Debug, Default)]
 pub struct Event {
     pub payload: Vec<u8>,
-    /// Memory budget for the invocation, in pages. Sizes the
-    /// per-event `UntypedCap` quota at bare-Frame slot 9 of the
-    /// resulting kernel. A value of 0 falls back to
-    /// [`crate::vm::INVOCATION_MEMORY_BUDGET`] (the kernel-driven
-    /// default for system vaults / dispatch aggregation).
-    pub memory_budget: u32,
     /// Caps the sender attached. Wire-side caps are encoded as opaque bytes
     /// the receiver re-interprets; for in-process tests we just carry
     /// already-allocated cap-ids out-of-band.

@@ -153,14 +153,24 @@ fn fc_set_rejects_pinned_cap() {
     let cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
-            cap: Capability::Dispatch(DispatchCap { vault_id, born_in }),
+            cap: Capability::Dispatch(DispatchCap {
+                vault_id,
+                born_in,
+                gas_budget: 0,
+                memory_budget: 0,
+            }),
             issuer: None,
             narrowing: vec![],
         },
     );
     let cap = Cap::Protocol(KernelCap::Registered {
         id: cap_id,
-        cap: Capability::Dispatch(DispatchCap { vault_id, born_in }),
+        cap: Capability::Dispatch(DispatchCap {
+            vault_id,
+            born_in,
+            gas_budget: 0,
+            memory_budget: 0,
+        }),
     });
     let mut view = VaultCnodeView::new(&mut state);
     let result = view.fc_set(vault_id, 0, VaultRights::ALL, cap);
