@@ -368,6 +368,12 @@ impl FrameRefRights {
     /// the cap that today would be a `CallableCap`.
     pub const CALLABLE: Self = Self(0x01 | 0x10 | 0x20);
 
+    /// Bare-Frame slot-0 ref: indirection rights only. No CALL (so
+    /// copying or moving it elsewhere can't grant CALL authority over
+    /// the bare Frame), no DROP (so the bare Frame survives invocation
+    /// for the entire call tree), no DERIVE, no RESUME.
+    pub const BARE_FRAME: Self = Self(0x10 | 0x20);
+
     #[inline]
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -403,15 +409,6 @@ pub struct FrameRefCap {
     pub vm_id: crate::vm_pool::VmId,
     /// Per-operation rights bag.
     pub rights: FrameRefRights,
-}
-
-/// Handle to the per-invocation ephemeral table — a 256-slot cap-table
-/// shared by every VM in the call tree. Slot 0 of every VM's persistent
-/// Frame holds an `EphemeralTable` cap. Not copyable (single shared
-/// table per invocation), not movable (lifetime owned by the kernel).
-#[derive(Debug, Clone)]
-pub struct EphemeralTableCap {
-    pub table_id: crate::vm_pool::EphemeralTableId,
 }
 
 /// Per-variant policy for `Cap::Protocol(P)` payloads.
@@ -586,7 +583,6 @@ pub enum Cap<P: ProtocolCapT = u8> {
     Data(DataCap),
     Code(Arc<CodeCap>),
     FrameRef(FrameRefCap),
-    EphemeralTable(EphemeralTableCap),
     Protocol(P),
 }
 
@@ -596,7 +592,7 @@ impl<P: ProtocolCapT> Cap<P> {
     pub fn is_copyable(&self) -> bool {
         match self {
             Cap::Untyped(_) | Cap::Code(_) | Cap::FrameRef(_) => true,
-            Cap::Data(_) | Cap::EphemeralTable(_) => false,
+            Cap::Data(_) => false,
             Cap::Protocol(p) => p.is_copyable(),
         }
     }
@@ -611,16 +607,18 @@ impl<P: ProtocolCapT> Cap<P> {
             Cap::Code(c) => Some(Cap::Code(Arc::clone(c))),
             Cap::FrameRef(f) => Some(Cap::FrameRef(*f)),
             Cap::Protocol(p) if p.is_copyable() => Some(Cap::Protocol(p.clone())),
-            Cap::Data(_) | Cap::EphemeralTable(_) | Cap::Protocol(_) => None,
+            Cap::Data(_) | Cap::Protocol(_) => None,
         }
     }
 }
 
-/// Slot 0 of every VM's persistent Frame is reserved for the
-/// per-invocation `Cap::EphemeralTable` handle. `ecalli 0` (CALL on
-/// slot 0) is REPLY by convention — the kernel never actually invokes
-/// the EphemeralTable cap.
-pub const EPHEMERAL_TABLE_SLOT: u8 = 0;
+/// Slot 0 of every VM's persistent Frame is reserved for a
+/// `Cap::FrameRef` pointing at the per-invocation **bare Frame** — the
+/// shared cap-table that every VM in the call tree reaches via slot 0.
+/// `ecalli 0` (CALL on slot 0) is REPLY by convention — the kernel
+/// never actually invokes the bare-Frame FrameRef (its rights bag
+/// omits CALL anyway).
+pub const BARE_FRAME_SLOT: u8 = 0;
 
 /// Maximum cap table size (u8 index).
 pub const CAP_TABLE_SIZE: usize = 256;

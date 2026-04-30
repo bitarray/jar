@@ -339,15 +339,27 @@ impl<P: ProtocolCapT> VmArena<P> {
 }
 
 // ============================================================================
-// Ephemeral Table Arena
+// Bare Frame: per-invocation shared cap-table
 // ============================================================================
 //
-// One ephemeral table per outermost javm invocation, allocated by the kernel
-// at invocation entry and freed at invocation exit. Every VM in the call tree
-// holds a `Cap::EphemeralTable` at slot 0 of its persistent Frame referring
-// to the same arena entry.
+// One "bare Frame" per outermost javm invocation, allocated by the kernel
+// at invocation entry alongside the root VM. A bare Frame is just a
+// `VmInstance` whose code-cap is never executed; its sole role is to back
+// the per-invocation shared cap-table that every VM in the call tree
+// reaches via slot 0 of its own persistent Frame.
 //
-// Sub-slot conventions (when populated by the host):
+// Slot 0 of every VM holds a `Cap::FrameRef` pointing at the bare Frame's
+// VmId, with rights restricted to `READ_CAP_INDIRECTION | CAP_INDIRECTION`
+// (no CALL, no DROP, no DERIVE, no RESUME). cap-ref walks cross through
+// it like any other FrameRef; the special slot-0 redirect rule in
+// `resolve_cap_ref` lets a u32 cap-ref encode "address into the bare
+// Frame's slot N" by leaving the low byte zero.
+//
+// `ecalli(0)` is unconditionally REPLY (the kernel never CALLs the bare
+// Frame); the no-CALL right on the slot-0 FrameRef makes "CALL through a
+// copied bare-Frame ref" yield RESULT_WHAT.
+//
+// Bare-Frame slot conventions (when populated by the host):
 //   0     Reply Handle              (per-frame; kernel rewrites on CALL/REPLY)
 //   1     Caller cap (badge)        (per-frame; kernel rewrites)
 //   2     Self cap                  (per-frame; kernel rewrites)
@@ -356,8 +368,10 @@ impl<P: ProtocolCapT> VmArena<P> {
 //   128..255 guest cap-args
 
 /// Identifies a frame referenced by a cap-ref walk:
-/// - `Vm(idx)` — a VM's persistent Frame (its own cap-table).
-/// - `Ephemeral(id)` — the per-invocation ephemeral table.
+/// - `Vm(idx)` — a VM's persistent Frame (its own cap-table). The
+///   per-invocation bare Frame is just another VM in the arena;
+///   `slot 0` of every VM's Frame holds a [`crate::cap::FrameRefCap`]
+///   pointing at it.
 /// - `Foreign(id)` — a host-managed cap-table outside javm (e.g. a
 ///   jar-kernel Vault CNode). javm doesn't own these; slot operations
 ///   route through a [`crate::cap::ForeignCnode`] adapter the host
@@ -369,111 +383,7 @@ impl<P: ProtocolCapT> VmArena<P> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameId<F = ()> {
     Vm(u16),
-    Ephemeral(EphemeralTableId),
     Foreign(F),
-}
-
-/// Packed ephemeral-table ID: low 16 bits = arena index, high 16 bits = generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EphemeralTableId(u32);
-
-impl EphemeralTableId {
-    pub fn new(index: u16, generation: u16) -> Self {
-        Self((generation as u32) << 16 | index as u32)
-    }
-    pub fn index(self) -> u16 {
-        self.0 as u16
-    }
-    pub fn generation(self) -> u16 {
-        (self.0 >> 16) as u16
-    }
-}
-
-#[derive(Debug)]
-struct EphemeralTableEntry<P: ProtocolCapT> {
-    table: Option<CapTable<P>>,
-    generation: u16,
-}
-
-/// Generational arena of ephemeral tables. Today the kernel allocates one
-/// per invocation, but the arena is sized for future expansion.
-#[derive(Debug)]
-pub struct EphemeralTableArena<P: ProtocolCapT = u8> {
-    entries: Vec<EphemeralTableEntry<P>>,
-    free_list: Vec<u16>,
-    live_count: u16,
-}
-
-impl<P: ProtocolCapT> Default for EphemeralTableArena<P> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<P: ProtocolCapT> EphemeralTableArena<P> {
-    pub fn new() -> Self {
-        Self {
-            entries: Vec::with_capacity(2),
-            free_list: Vec::new(),
-            live_count: 0,
-        }
-    }
-
-    pub fn insert(&mut self, table: CapTable<P>) -> EphemeralTableId {
-        self.live_count += 1;
-        if let Some(index) = self.free_list.pop() {
-            let entry = &mut self.entries[index as usize];
-            let id = EphemeralTableId::new(index, entry.generation);
-            entry.table = Some(table);
-            id
-        } else {
-            let index = self.entries.len() as u16;
-            self.entries.push(EphemeralTableEntry {
-                table: Some(table),
-                generation: 0,
-            });
-            EphemeralTableId::new(index, 0)
-        }
-    }
-
-    pub fn get(&self, id: EphemeralTableId) -> Option<&CapTable<P>> {
-        let idx = id.index() as usize;
-        let entry = self.entries.get(idx)?;
-        if entry.generation != id.generation() {
-            return None;
-        }
-        entry.table.as_ref()
-    }
-
-    pub fn get_mut(&mut self, id: EphemeralTableId) -> Option<&mut CapTable<P>> {
-        let idx = id.index() as usize;
-        let entry = self.entries.get_mut(idx)?;
-        if entry.generation != id.generation() {
-            return None;
-        }
-        entry.table.as_mut()
-    }
-
-    pub fn remove(&mut self, id: EphemeralTableId) -> Option<CapTable<P>> {
-        let idx = id.index() as usize;
-        let entry = self.entries.get_mut(idx)?;
-        if entry.generation != id.generation() {
-            return None;
-        }
-        let table = entry.table.take()?;
-        entry.generation = entry.generation.wrapping_add(1);
-        self.free_list.push(id.index());
-        self.live_count -= 1;
-        Some(table)
-    }
-
-    pub fn len(&self) -> usize {
-        self.live_count as usize
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.live_count == 0
-    }
 }
 
 // ============================================================================

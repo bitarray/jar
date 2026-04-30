@@ -215,19 +215,12 @@ pub(crate) fn populate_ephemeral_kernel_caps(
     invocation_gas: u64,
 ) {
     use crate::types::{CallerKernelCap, CallerVaultCap, GasCap, SelfCap};
-    let id = match vm
-        .vm_arena
-        .vm(0)
-        .cap_table
-        .get(javm::cap::EPHEMERAL_TABLE_SLOT)
-    {
-        Some(javm::cap::Cap::EphemeralTable(c)) => c.table_id,
-        _ => return,
-    };
-    let table = match vm.ephemeral_arena.get_mut(id) {
-        Some(t) => t,
-        None => return,
-    };
+    // Bare-Frame sub-slots 1/2/3 carry the per-invocation Caller / Self
+    // / Gas caps. The bare Frame is just another `VmInstance` in the
+    // arena (after the EphemeralTable fold); reach its CapTable
+    // directly via the kernel-tracked id.
+    let bare_idx = vm.bare_frame_id.index();
+    let table = &mut vm.vm_arena.vm_mut(bare_idx).cap_table;
 
     // Sub-slot 1: Caller cap. Ephemeral — kernel-injected per-frame.
     let caller_cap = match caller {

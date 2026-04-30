@@ -66,15 +66,13 @@ macro_rules! resolve {
 }
 use crate::backing::BackingStore;
 use crate::cap::{
-    Access, Cap, CapTable, CodeCap, DataCap, EPHEMERAL_TABLE_SLOT, ForeignCnode, FrameRefCap,
+    Access, BARE_FRAME_SLOT, Cap, CapTable, CodeCap, DataCap, ForeignCnode, FrameRefCap,
     FrameRefRights, NoForeignCnode, ProtocolCapT, UntypedCap,
 };
 use crate::program::{self, CapEntryType, CapManifestEntry, ParsedBlob};
 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
 use crate::vm_pool::WindowPool;
-use crate::vm_pool::{
-    CallFrame, EphemeralTableId, FrameId, MAX_CODE_CAPS, VmArena, VmId, VmInstance, VmState,
-};
+use crate::vm_pool::{CallFrame, FrameId, MAX_CODE_CAPS, VmArena, VmId, VmInstance, VmState};
 
 /// ecalli immediate ranges.
 const CALL_RANGE_END: u32 = 0x100;
@@ -133,11 +131,13 @@ pub struct InvocationKernel<P: crate::cap::ProtocolCapT = u8> {
     pub code_caps: Vec<Arc<CodeCap>>,
     /// VM instances (generational arena).
     pub vm_arena: VmArena<P>,
-    /// Per-invocation ephemeral tables. The kernel allocates one per
-    /// outermost javm invocation; every VM in the call tree references
-    /// it via `Cap::EphemeralTable` at slot 0 of its persistent Frame.
-    /// (Currently scaffolding — no entries are allocated yet.)
-    pub ephemeral_arena: crate::vm_pool::EphemeralTableArena<P>,
+    /// VmId of the per-invocation **bare Frame** — a `VmInstance` with
+    /// an empty CodeCap that's never executed. Its CapTable is the
+    /// shared cap-table every VM in the call tree references via slot 0
+    /// of its own persistent Frame (a `Cap::FrameRef` with
+    /// [`FrameRefRights::BARE_FRAME`]). Allocated alongside the root
+    /// VM; its slot in the arena is held until the kernel drops.
+    pub bare_frame_id: VmId,
     /// Shared UNTYPED cap (bump allocator).
     pub untyped: Arc<UntypedCap>,
     /// Currently active VM index.
@@ -219,7 +219,8 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             backing,
             code_caps: Vec::with_capacity(MAX_CODE_CAPS),
             vm_arena: VmArena::new(),
-            ephemeral_arena: crate::vm_pool::EphemeralTableArena::new(),
+            // Placeholder; reassigned below once the bare Frame is allocated.
+            bare_frame_id: VmId::ROOT,
             untyped,
             active_vm: 0,
             call_stack: Vec::with_capacity(8),
@@ -235,22 +236,14 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             active_window: 0,
         };
 
-        // Allocate the per-invocation ephemeral table. Slot 0 of every VM's
-        // persistent Frame holds an `EphemeralTable` cap referring to it.
-        let ephemeral_id = kernel.ephemeral_arena.insert(CapTable::new());
-
-        // Build VM 0's cap table from the manifest. Protocol caps are NOT
+        // Build VM 0's cap table from the manifest. Slot 0 (the bare-Frame
+        // FrameRef) is patched in after both VMs are inserted into the
+        // arena, so we know the bare Frame's `VmId`. Protocol caps are NOT
         // auto-populated — the caller (kernel host) is responsible for
         // setting up whatever protocol slots it intends to expose, via
         // `cap_table_set` / `set_original`. This avoids baking JAR's old
         // 1..=28 host-call layout into javm itself.
         let mut cap_table: CapTable<P> = CapTable::new();
-        cap_table.set(
-            0,
-            Cap::EphemeralTable(crate::cap::EphemeralTableCap {
-                table_id: ephemeral_id,
-            }),
-        );
         let mut init_pages: u32 = 0;
         let mut data_caps_to_map: Vec<(u32, u32, u32, Access)> = Vec::new(); // (base_page, backing_offset, page_count, access)
 
@@ -324,6 +317,30 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             remaining_gas,
         );
         kernel.vm_arena.insert(vm0); // VM 0 gets VmId(0, 0)
+
+        // Allocate the per-invocation bare Frame: a VmInstance whose code
+        // is never executed. Its CapTable is the shared cap-table the
+        // call tree reaches via slot 0 of every VM. We pass `code_cap_id`
+        // = `invoke_code_id` purely as a placeholder; CALL on the
+        // bare-Frame FrameRef is gated off (no CALL right) so it's never
+        // dispatched. After insertion the bare Frame sits at the next
+        // free arena slot (idx 1 on a fresh kernel).
+        let bare = VmInstance::new(invoke_code_id, 0, CapTable::new(), 0);
+        let bare_id = kernel
+            .vm_arena
+            .insert(bare)
+            .ok_or(KernelError::InvalidBlob)?;
+        kernel.bare_frame_id = bare_id;
+
+        // Patch slot 0 of VM 0's cap-table now that we know the bare
+        // Frame's VmId.
+        kernel.vm_arena.vm_mut(0).cap_table.set(
+            BARE_FRAME_SLOT,
+            Cap::FrameRef(FrameRefCap {
+                vm_id: bare_id,
+                rights: FrameRefRights::BARE_FRAME,
+            }),
+        );
 
         Ok(kernel)
     }
@@ -627,7 +644,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         if imm < CALL_RANGE_END {
             // CALL cap[N]
             let cap_idx = imm as u8;
-            if cap_idx == EPHEMERAL_TABLE_SLOT {
+            if cap_idx == BARE_FRAME_SLOT {
                 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
                 self.flush_live_ctx();
                 return self.handle_reply();
@@ -686,14 +703,6 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             }
             Cap::Data(_) => {
                 // DATA is not callable
-                self.set_active_reg(7, RESULT_WHAT);
-                DispatchResult::Continue
-            }
-            Cap::EphemeralTable(_) => {
-                // CALL on the ephemeral-table handle (slot 0) is REPLY.
-                // Reached only through `cap_idx == 0`; ecalli(0) is already
-                // special-cased upstream as REPLY, so this arm is dead in
-                // the normal flow but kept as a backstop.
                 self.set_active_reg(7, RESULT_WHAT);
                 DispatchResult::Continue
             }
@@ -767,23 +776,17 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     fn handle_call_code(&mut self, code_cap_id: u16, code_cnode_vm: usize) -> DispatchResult {
         let bitmask = self.active_reg(7);
 
-        // Create child VM's cap table by copying bitmask-selected caps from
-        // CODE's CNode. Slot 0 of every VM's persistent Frame is reserved
-        // for the per-invocation EphemeralTable handle — pre-populate it
-        // before processing the bitmask. Bitmask bit 0 set is rejected
-        // here, since slot 0 is not the caller's to grant.
+        // Create child VM's cap table by copying bitmask-selected caps
+        // from CODE's CNode. Slot 0 of every VM's persistent Frame is
+        // reserved for the bare-Frame FrameRef — pre-populate it before
+        // processing the bitmask. Bitmask bit 0 set is rejected here,
+        // since slot 0 is not the caller's to grant.
         let mut child_table = CapTable::new();
-        let ephemeral_id = match self.ephemeral_id() {
-            Some(id) => id,
-            None => {
-                self.set_active_reg(7, RESULT_WHAT);
-                return DispatchResult::Continue;
-            }
-        };
         child_table.set(
-            0,
-            Cap::EphemeralTable(crate::cap::EphemeralTableCap {
-                table_id: ephemeral_id,
+            BARE_FRAME_SLOT,
+            Cap::FrameRef(FrameRefCap {
+                vm_id: self.bare_frame_id,
+                rights: FrameRefRights::BARE_FRAME,
             }),
         );
 
@@ -1025,10 +1028,14 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
 
     /// Cross through `slot` of `frame` to the next frame in a cap-ref walk.
     /// Slot must hold either `Cap::FrameRef` (→ that VM's persistent
-    /// Frame; rights must include [`FrameRefRights::READ_CAP_INDIRECTION`]),
-    /// `Cap::EphemeralTable` (→ the ephemeral table), or a `Cap::Protocol`
-    /// whose `as_foreign_frame()` reports a host-managed frame id (→ the
-    /// foreign frame). Any other cap shape fails.
+    /// Frame; rights must include [`FrameRefRights::READ_CAP_INDIRECTION`])
+    /// or a `Cap::Protocol` whose `as_foreign_frame()` reports a
+    /// host-managed frame id (→ the foreign frame). Any other cap shape
+    /// fails.
+    ///
+    /// Crossings into the bare Frame (the per-invocation shared
+    /// cap-table) are just FrameRef crossings: slot 0 of every VM holds
+    /// a `Cap::FrameRef` with [`FrameRefRights::BARE_FRAME`].
     ///
     /// Returns the next `FrameId` plus an optional rights bag captured at
     /// this step. The bag is `Some(_)` only for foreign-frame crossings —
@@ -1052,7 +1059,6 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                 }
                 Some((FrameId::Vm(f.vm_id.index()), None))
             }
-            Cap::EphemeralTable(c) => Some((FrameId::Ephemeral(c.table_id), None)),
             Cap::Protocol(p) => p
                 .as_foreign_frame()
                 .map(|(id, rights)| (FrameId::Foreign(id), Some(rights))),
@@ -1062,12 +1068,10 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
 
     /// Borrow the cap-table backing a `FrameId`. Returns `None` for a
     /// `Foreign` frame (those are not stored in javm — operations route
-    /// through the host's `ForeignCnode`) or an ephemeral-table id with
-    /// no live entry (stale generation).
+    /// through the host's `ForeignCnode`).
     fn frame_table(&self, fref: FrameId<P::ForeignFrameId>) -> Option<&CapTable<P>> {
         match fref {
             FrameId::Vm(idx) => Some(&self.vm_arena.vm(idx).cap_table),
-            FrameId::Ephemeral(id) => self.ephemeral_arena.get(id),
             FrameId::Foreign(_) => None,
         }
     }
@@ -1077,7 +1081,6 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     fn frame_table_mut(&mut self, fref: FrameId<P::ForeignFrameId>) -> Option<&mut CapTable<P>> {
         match fref {
             FrameId::Vm(idx) => Some(&mut self.vm_arena.vm_mut(idx).cap_table),
-            FrameId::Ephemeral(id) => self.ephemeral_arena.get_mut(id),
             FrameId::Foreign(_) => None,
         }
     }
@@ -1152,42 +1155,25 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         }
     }
 
-    /// The single ephemeral-table id allocated for this invocation. Found
-    /// by reading slot 0 of the active VM's persistent Frame (always a
-    /// `Cap::EphemeralTable` — kernel maintains this invariant).
-    fn ephemeral_id(&self) -> Option<EphemeralTableId> {
-        match self.vm_arena.vm(self.active_vm).cap_table.get(0)? {
-            Cap::EphemeralTable(c) => Some(c.table_id),
-            _ => None,
-        }
+    /// The bare-Frame's arena index. Cached from `bare_frame_id` for
+    /// direct borrow into `vm_arena`.
+    #[inline]
+    fn bare_frame_idx(&self) -> u16 {
+        self.bare_frame_id.index()
     }
 
-    /// Take the active VM's view of ephemeral sub-slots 0/1/2 (Reply,
-    /// Caller, Self) for stashing on the call-stack. These slots are the
-    /// per-frame kernel-managed area; the host (jar-kernel) populates them.
-    /// javm just preserves whatever was there.
+    /// Take the bare Frame's sub-slots 0/1/2 (Reply, Caller, Self) for
+    /// stashing on the call-stack. These slots are the per-frame
+    /// kernel-managed area; the host (jar-kernel) populates them. javm
+    /// just preserves whatever was there.
     fn take_ephemeral_kernel_slots(&mut self, _caller_vm: u16) -> [Option<Cap<P>>; 3] {
-        let id = match self.ephemeral_id() {
-            Some(id) => id,
-            None => return [None, None, None],
-        };
-        let table = match self.ephemeral_arena.get_mut(id) {
-            Some(t) => t,
-            None => return [None, None, None],
-        };
+        let table = &mut self.vm_arena.vm_mut(self.bare_frame_idx()).cap_table;
         [table.take(0), table.take(1), table.take(2)]
     }
 
-    /// Restore previously-stashed ephemeral sub-slots 0/1/2 on REPLY/HALT.
+    /// Restore previously-stashed bare-Frame sub-slots 0/1/2 on REPLY/HALT.
     fn restore_ephemeral_kernel_slots(&mut self, slots: [Option<Cap<P>>; 3]) {
-        let id = match self.ephemeral_id() {
-            Some(id) => id,
-            None => return,
-        };
-        let table = match self.ephemeral_arena.get_mut(id) {
-            Some(t) => t,
-            None => return,
-        };
+        let table = &mut self.vm_arena.vm_mut(self.bare_frame_idx()).cap_table;
         // Drop whatever the callee left in those slots, then write back the
         // caller's values (skipping None — the caller had nothing there).
         let [a, b, c] = slots;
@@ -1713,8 +1699,8 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
 
         let vm_idx = match frame {
             FrameId::Vm(idx) => idx,
-            FrameId::Ephemeral(_) | FrameId::Foreign(_) => {
-                // DATA caps don't live in ephemeral / foreign frames.
+            FrameId::Foreign(_) => {
+                // DATA caps don't live in foreign frames.
                 self.set_active_reg(7, RESULT_WHAT);
                 return DispatchResult::Continue;
             }
@@ -1761,9 +1747,8 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
 
         let vm_idx = match frame {
             FrameId::Vm(idx) => idx,
-            FrameId::Ephemeral(_) | FrameId::Foreign(_) => {
-                // Caps in the ephemeral / foreign frames aren't mapped;
-                // UNMAP is a no-op.
+            FrameId::Foreign(_) => {
+                // Caps in foreign frames aren't mapped; UNMAP is a no-op.
                 return DispatchResult::Continue;
             }
         };
@@ -2982,19 +2967,17 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     }
 
     /// Scan `vm_idx`'s persistent Frame for parked `Cap::Protocol(P)` caps
-    /// (slots 1..=255, skipping the EphemeralTable handle at slot 0) and
-    /// attempt to merge each one into the live Gas cap at ephemeral
+    /// (slots 1..=255, skipping the bare-Frame FrameRef at slot 0) and
+    /// attempt to merge each one into the live Gas cap at bare-Frame
     /// sub-slot 3 via `ProtocolCapT::gas_merge`. Caps where `gas_merge`
     /// returns false (non-Gas-shaped payloads) are restored to their
     /// slot; successful merges drop the donor.
     fn rollback_parked_gas(&mut self, vm_idx: u16) {
-        let id = match self.ephemeral_id() {
-            Some(id) => id,
-            None => return,
-        };
+        let bare_idx = self.bare_frame_idx();
         for slot in 1..=255u8 {
             // Take the cap so we can pass `&donor` to `gas_merge` while
-            // mutably borrowing the ephemeral table; restore on failure.
+            // mutably borrowing the bare Frame's cap-table; restore on
+            // failure.
             let taken = match self.vm_arena.vm_mut(vm_idx).cap_table.take(slot) {
                 Some(c) => c,
                 None => continue,
@@ -3006,12 +2989,9 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                     continue;
                 }
             };
-            let merged = match self.ephemeral_arena.get_mut(id) {
-                Some(table) => match table.get_mut(3) {
-                    Some(Cap::Protocol(dst)) => dst.gas_merge(&donor),
-                    _ => false,
-                },
-                None => false,
+            let merged = match self.vm_arena.vm_mut(bare_idx).cap_table.get_mut(3) {
+                Some(Cap::Protocol(dst)) => dst.gas_merge(&donor),
+                _ => false,
             };
             if !merged {
                 self.vm_arena
@@ -3126,7 +3106,9 @@ mod tests {
     fn test_kernel_create() {
         let blob = make_simple_blob(10);
         let kernel: InvocationKernel = InvocationKernel::new(&blob, 100_000).unwrap();
-        assert_eq!(kernel.vm_arena.len(), 1);
+        // Two arena entries on a fresh kernel: VM 0 (root) and the
+        // bare Frame at idx 1 (per-invocation shared cap-table backing).
+        assert_eq!(kernel.vm_arena.len(), 2);
         assert_eq!(kernel.code_caps.len(), 1);
         assert_eq!(kernel.mem_cycles, 25);
     }
@@ -3181,9 +3163,10 @@ mod tests {
         let result = kernel.dispatch_ecalli(code_slot as u32);
         assert!(matches!(result, DispatchResult::Continue));
 
-        // Should have created VM 1
-        assert_eq!(kernel.vm_arena.len(), 2);
-        assert_eq!(kernel.vm_arena.vm(1).state, VmState::Idle);
+        // Two pre-existing entries (root VM 0 + bare Frame); CREATE
+        // adds a third at idx 2.
+        assert_eq!(kernel.vm_arena.len(), 3);
+        assert_eq!(kernel.vm_arena.vm(2).state, VmState::Idle);
 
         // φ[7] = dst_slot
         let handle_idx = kernel.active_reg(7) as u8;
@@ -3191,6 +3174,7 @@ mod tests {
         match kernel.vm_arena.vm(0).cap_table.get(handle_idx) {
             Some(Cap::FrameRef(f)) => {
                 assert_eq!(f.rights, FrameRefRights::OWNER);
+                assert_eq!(f.vm_id.index(), 2);
             }
             _ => panic!("expected FrameRef"),
         }
@@ -3216,10 +3200,10 @@ mod tests {
         let result = kernel.dispatch_ecalli(handle_idx as u32);
         assert!(matches!(result, DispatchResult::Continue));
 
-        // Active VM should now be the child (VM 1)
-        assert_eq!(kernel.active_vm, 1);
+        // Child VM is at idx 2 (bare Frame is at idx 1).
+        assert_eq!(kernel.active_vm, 2);
         assert_eq!(kernel.vm_arena.vm(0).state, VmState::WaitingForReply);
-        assert_eq!(kernel.vm_arena.vm(1).state, VmState::Running);
+        assert_eq!(kernel.vm_arena.vm(2).state, VmState::Running);
 
         // Child received args
         assert_eq!(kernel.active_reg(7), 42);
@@ -3228,13 +3212,13 @@ mod tests {
         // Child REPLYs with results
         kernel.set_active_reg(7, 100);
         kernel.set_active_reg(8, 200);
-        let result = kernel.dispatch_ecalli(EPHEMERAL_TABLE_SLOT as u32); // REPLY
+        let result = kernel.dispatch_ecalli(BARE_FRAME_SLOT as u32); // REPLY
         assert!(matches!(result, DispatchResult::Continue));
 
         // Back to VM 0
         assert_eq!(kernel.active_vm, 0);
         assert_eq!(kernel.vm_arena.vm(0).state, VmState::Running);
-        assert_eq!(kernel.vm_arena.vm(1).state, VmState::Idle);
+        assert_eq!(kernel.vm_arena.vm(2).state, VmState::Idle);
 
         // Caller received results: φ[7]=child's return, φ[8]=0 (status=REPLY)
         assert_eq!(kernel.active_reg(7), 100);
@@ -3258,16 +3242,16 @@ mod tests {
         kernel.dispatch_ecalli(64); // CREATE VM 2, HANDLE at 67
         let _handle2 = kernel.active_reg(7) as u8;
 
-        // VM 0 calls VM 1
+        // VM 0 calls the first child (idx 2 — bare Frame at idx 1)
         kernel.set_active_reg(7, 0);
         kernel.set_active_reg(12, 0); // no IPC cap (slot 0 = IPC itself)
         kernel.dispatch_ecalli(handle1 as u32);
-        assert_eq!(kernel.active_vm, 1);
+        assert_eq!(kernel.active_vm, 2);
 
-        // Copy handle1 to VM 1 — but VM 0 is WaitingForReply,
-        // so calling VM 0 from VM 1 should fail.
-        // First we need a handle to VM 0 in VM 1's cap table.
-        // We can't actually create one (no HANDLE to VM 0 exists in VM 1).
+        // Copy handle1 to VM 2 — but VM 0 is WaitingForReply,
+        // so calling VM 0 from VM 2 should fail.
+        // First we need a handle to VM 0 in VM 2's cap table.
+        // We can't actually create one (no HANDLE to VM 0 exists in VM 2).
         // The reentrancy test is: VM 0 is in WaitingForReply, not IDLE.
         // If anyone tries to call VM 0, it fails.
         assert!(!kernel.vm_arena.vm(0).can_call());
@@ -3291,13 +3275,14 @@ mod tests {
         let handle_idx = kernel.active_reg(7) as u8;
 
         // CALL child — callee gets caller's full residual gas, caller
-        // is left with 0 until REPLY restores the residual.
+        // is left with 0 until REPLY restores the residual. Child VM
+        // sits at idx 2 (bare Frame at idx 1).
         let parent_gas_before = kernel.vm_arena.vm(0).gas();
         kernel.dispatch_ecalli(handle_idx as u32);
 
-        assert_eq!(kernel.active_vm, 1);
+        assert_eq!(kernel.active_vm, 2);
         // Callee inherits caller_gas - ecalli_charge (10) - call_overhead (10).
-        assert_eq!(kernel.vm_arena.vm(1).gas(), parent_gas_before - 20);
+        assert_eq!(kernel.vm_arena.vm(2).gas(), parent_gas_before - 20);
         assert_eq!(kernel.vm_arena.vm(0).gas(), 0);
     }
 
@@ -3393,11 +3378,11 @@ mod tests {
         kernel.flush_live_ctx();
         kernel.dispatch_ecall(&mut NoForeignCnode, 0x0A);
 
-        // CALL on the callable: routes to child VM.
+        // CALL on the callable: routes to child VM (idx 2, bare Frame at idx 1).
         kernel.set_active_reg(12, 0); // no IPC cap
         let result = kernel.dispatch_ecalli(67);
         assert!(matches!(result, DispatchResult::Continue));
-        assert_eq!(kernel.active_vm, 1);
+        assert_eq!(kernel.active_vm, 2);
     }
 
     #[test]
@@ -3511,18 +3496,19 @@ mod tests {
         kernel.set_active_reg(12, 66);
         kernel.dispatch_ecalli(64); // CALL CODE → CREATE
 
-        // The child (VM 1) should have caps at slots 1 and 2
+        // The child (VM at idx 2; bare Frame at idx 1) should have
+        // caps at slots 1 and 2.
         assert!(
-            kernel.vm_arena.vm(1).cap_table.get(1).is_some(),
+            kernel.vm_arena.vm(2).cap_table.get(1).is_some(),
             "child should inherit cap at slot 1"
         );
         assert!(
-            kernel.vm_arena.vm(1).cap_table.get(2).is_some(),
+            kernel.vm_arena.vm(2).cap_table.get(2).is_some(),
             "child should inherit cap at slot 2"
         );
         // Slot 3 was not in bitmask → should be empty
         assert!(
-            kernel.vm_arena.vm(1).cap_table.get(3).is_none(),
+            kernel.vm_arena.vm(2).cap_table.get(3).is_none(),
             "child should NOT have cap at slot 3"
         );
     }
@@ -3548,8 +3534,9 @@ mod tests {
         let result = kernel.dispatch_ecalli(handle_idx as u32);
         assert!(matches!(result, DispatchResult::Continue));
 
-        // Child should be running but with very little gas
-        assert_eq!(kernel.active_vm, 1);
+        // Child should be running but with very little gas. Child sits
+        // at idx 2 (bare Frame at idx 1).
+        assert_eq!(kernel.active_vm, 2);
     }
 
     #[test]
@@ -3567,47 +3554,48 @@ mod tests {
         kernel.dispatch_ecalli(64);
         let h1 = kernel.active_reg(7) as u8;
 
-        // VM 0 calls VM 1
+        // VM 0 calls the first child (idx 2 — bare Frame at idx 1)
         kernel.set_active_reg(7, 10);
         kernel.set_active_reg(8, 0);
         kernel.set_active_reg(12, 0);
         kernel.dispatch_ecalli(h1 as u32);
-        assert_eq!(kernel.active_vm, 1);
+        assert_eq!(kernel.active_vm, 2);
         assert_eq!(kernel.active_reg(7), 10);
 
-        // VM 1 creates VM 2 using the inherited CODE cap
+        // VM (idx 2) creates a nested child at idx 3 using inherited CODE
         kernel.set_active_reg(7, 0);
         kernel.set_active_reg(12, 66);
         kernel.dispatch_ecalli(64);
-        // If VM 1 doesn't have CODE cap at 64, CREATE fails silently.
-        // Check if VM 2 was created.
-        if kernel.vm_arena.len() < 3 {
+        // If the active VM doesn't have CODE cap at 64, CREATE fails
+        // silently. Check the nested child was created (arena now has
+        // root + bare + 2 children = 4 entries).
+        if kernel.vm_arena.len() < 4 {
             // CODE cap wasn't propagated — skip nested part, just test reply chain
             kernel.set_active_reg(7, 77);
-            kernel.dispatch_ecalli(EPHEMERAL_TABLE_SLOT as u32);
+            kernel.dispatch_ecalli(BARE_FRAME_SLOT as u32);
             assert_eq!(kernel.active_vm, 0);
             assert_eq!(kernel.active_reg(7), 77);
             return;
         }
         let h2 = kernel.active_reg(7) as u8;
 
-        // VM 1 calls VM 2
+        // Idx-2 VM calls the nested idx-3 VM
         kernel.set_active_reg(7, 20);
         kernel.set_active_reg(8, 0);
         kernel.set_active_reg(12, 0);
         kernel.dispatch_ecalli(h2 as u32);
-        assert_eq!(kernel.active_vm, 2);
+        assert_eq!(kernel.active_vm, 3);
         assert_eq!(kernel.active_reg(7), 20);
 
-        // VM 2 replies with 99
+        // Nested VM replies with 99
         kernel.set_active_reg(7, 99);
-        kernel.dispatch_ecalli(EPHEMERAL_TABLE_SLOT as u32);
-        assert_eq!(kernel.active_vm, 1);
+        kernel.dispatch_ecalli(BARE_FRAME_SLOT as u32);
+        assert_eq!(kernel.active_vm, 2);
         assert_eq!(kernel.active_reg(7), 99);
 
-        // VM 1 replies with 77
+        // Idx-2 VM replies with 77
         kernel.set_active_reg(7, 77);
-        kernel.dispatch_ecalli(EPHEMERAL_TABLE_SLOT as u32);
+        kernel.dispatch_ecalli(BARE_FRAME_SLOT as u32);
         assert_eq!(kernel.active_vm, 0);
         assert_eq!(kernel.active_reg(7), 77);
     }
