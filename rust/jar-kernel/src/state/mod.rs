@@ -13,6 +13,7 @@ pub mod cap_registry;
 pub mod cnode;
 pub mod code_blobs;
 pub mod state_root;
+pub mod vault_init;
 
 /// Persistent Vault unit. After the unified-persistence refactor a Vault
 /// is `{ slots, init_cap, quota_pages, total_pages }`. All persistent
