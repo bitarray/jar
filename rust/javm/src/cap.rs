@@ -629,6 +629,14 @@ pub const PROTOCOL_SLOT_COUNT: usize = 29;
 /// The `original_bitmap` tracks which protocol cap slots (0-28) hold their
 /// original kernel-populated protocol cap. The compiler uses this for
 /// fast-path inlining of ecalli on protocol caps.
+///
+/// The `pinned_bitmap` tracks slots the kernel has reserved for its own
+/// use (Self / Caller / Gas / FaultHandler / Untyped / HostCall
+/// selectors / BARE_FRAME ref / home VaultRef). Generic management ops
+/// (MGMT_DROP / MOVE / COPY / SPLIT / DOWNGRADE) refuse to operate on
+/// pinned slots; the kernel writes through `set_pinned` /
+/// `set_pinned_original`. Once pinned, a slot stays pinned for the
+/// lifetime of the cap-table.
 #[derive(Debug)]
 pub struct CapTable<P: ProtocolCapT = u8> {
     slots: [Option<Cap<P>>; CAP_TABLE_SIZE],
@@ -636,6 +644,9 @@ pub struct CapTable<P: ProtocolCapT = u8> {
     /// kernel-populated protocol cap. Only meaningful for slots < PROTOCOL_SLOT_COUNT.
     /// Set to false on DROP, MOVE-in, COPY-in, or MOVE-out. Never goes back to true.
     original_bitmap: [u8; 32],
+    /// Per-slot pinned bitmap (32 bytes = 256 bits). True = slot is
+    /// kernel-pinned and may not be mutated by guest mgmt ops.
+    pinned_bitmap: [u8; 32],
 }
 
 impl<P: ProtocolCapT> Default for CapTable<P> {
@@ -649,7 +660,24 @@ impl<P: ProtocolCapT> CapTable<P> {
         Self {
             slots: core::array::from_fn(|_| None),
             original_bitmap: [0u8; 32],
+            pinned_bitmap: [0u8; 32],
         }
+    }
+
+    /// Mark a slot as kernel-pinned. Generic mgmt ops (DROP / MOVE /
+    /// COPY / SPLIT / DOWNGRADE) refuse to operate on pinned slots
+    /// from then on. Once set, never cleared.
+    pub fn pin(&mut self, index: u8) {
+        let byte_idx = index as usize / 8;
+        let bit_idx = index as usize % 8;
+        self.pinned_bitmap[byte_idx] |= 1 << bit_idx;
+    }
+
+    /// Check whether a slot is kernel-pinned.
+    pub fn is_pinned(&self, index: u8) -> bool {
+        let byte_idx = index as usize / 8;
+        let bit_idx = index as usize % 8;
+        self.pinned_bitmap[byte_idx] & (1 << bit_idx) != 0
     }
 
     /// Mark a slot as original (kernel-populated protocol cap).

@@ -364,22 +364,29 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         // Frame). Skip when the budget is zero. Untyped is move-only
         // under the new quota model — the cap moves into the slot,
         // not Arc-cloned.
+        let bare_table = &mut self.vm_arena.vm_mut(bare_id.index()).cap_table;
         if untyped.limit > 0 {
-            self.vm_arena
-                .vm_mut(bare_id.index())
-                .cap_table
-                .set(BARE_FRAME_UNTYPED_SLOT, Cap::Untyped(untyped));
+            bare_table.set(BARE_FRAME_UNTYPED_SLOT, Cap::Untyped(untyped));
         }
+        // Pin the BareFrame's kernel-managed slot. The Untyped slot
+        // is pinned regardless of the limit-zero short-circuit so
+        // guests can't sneak a cap in when the kernel doesn't
+        // populate it.
+        bare_table.pin(BARE_FRAME_UNTYPED_SLOT);
 
         // Patch slot 0 of VM 0's cap-table now that we know the bare
         // Frame's VmId.
-        self.vm_arena.vm_mut(0).cap_table.set(
+        let vm0_table = &mut self.vm_arena.vm_mut(0).cap_table;
+        vm0_table.set(
             BARE_FRAME_SLOT,
             Cap::FrameRef(FrameRefCap {
                 vm_id: bare_id,
                 rights: FrameRefRights::BARE_FRAME,
             }),
         );
+        // The BARE_FRAME indirection is kernel-managed; pinning it
+        // protects the slot-0 walk every cap-ref relies on.
+        vm0_table.pin(BARE_FRAME_SLOT);
 
         Ok(self)
     }
@@ -1576,6 +1583,10 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         let page_off = self.active_reg(7) as u32;
 
         let vm = &mut self.vm_arena.vm_mut(self.active_vm);
+        if vm.cap_table.is_pinned(cap_idx) {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
 
         // Pre-validate: must be DATA, unmapped, valid offset
         let can_split = match vm.cap_table.get(cap_idx) {
@@ -1610,6 +1621,17 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     }
 
     fn mgmt_drop(&mut self, cap_idx: u8) -> DispatchResult {
+        // Refuse on kernel-pinned slots (Self / Caller / Gas / FaultHandler /
+        // Untyped / HostCall selectors / BARE_FRAME ref / home VaultRef).
+        if self
+            .vm_arena
+            .vm(self.active_vm)
+            .cap_table
+            .is_pinned(cap_idx)
+        {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         let wb = self.active_window_base();
         // DROP a FrameRef carrying DROP right → reclaim VM via arena.remove()
@@ -1646,6 +1668,10 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     fn mgmt_move(&mut self, cap_idx: u8) -> DispatchResult {
         let dst = self.active_reg(7) as u8;
         let vm = &mut self.vm_arena.vm_mut(self.active_vm);
+        if vm.cap_table.is_pinned(cap_idx) || vm.cap_table.is_pinned(dst) {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
         match vm.cap_table.move_cap(cap_idx, dst) {
             Ok(()) => {}
             Err(_) => {
@@ -1658,6 +1684,10 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     fn mgmt_copy(&mut self, cap_idx: u8) -> DispatchResult {
         let dst = self.active_reg(7) as u8;
         let vm = &mut self.vm_arena.vm_mut(self.active_vm);
+        if vm.cap_table.is_pinned(cap_idx) || vm.cap_table.is_pinned(dst) {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
         match vm.cap_table.copy_cap(cap_idx, dst) {
             Ok(()) => {}
             Err(_) => {
@@ -1671,6 +1701,10 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
 
     fn mgmt_downgrade(&mut self, handle_idx: u8) -> DispatchResult {
         let vm = &self.vm_arena.vm(self.active_vm);
+        if vm.cap_table.is_pinned(handle_idx) {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
         let vm_id = match vm.cap_table.get(handle_idx) {
             Some(Cap::FrameRef(f)) if f.rights.contains(FrameRefRights::DERIVE) => f.vm_id,
             _ => {
@@ -1879,6 +1913,19 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             self.set_active_reg(7, RESULT_WHAT);
             return DispatchResult::Continue;
         }
+        // Refuse on kernel-pinned slots.
+        if let FrameId::Vm(idx) = s_frame
+            && self.vm_arena.vm(idx).cap_table.is_pinned(s_slot)
+        {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+        if let FrameId::Vm(idx) = o_frame
+            && self.vm_arena.vm(idx).cap_table.is_pinned(o_slot)
+        {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
         let page_off = self.active_reg(7) as u32;
 
         // Validate
@@ -1919,6 +1966,13 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         slot: u8,
         rights: P::FinalStepRights,
     ) -> DispatchResult {
+        // Refuse on kernel-pinned slots inside any local VM frame.
+        if let FrameId::Vm(vm_idx) = frame
+            && self.vm_arena.vm(vm_idx).cap_table.is_pinned(slot)
+        {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
         // Foreign drop: host handles revoke + bookkeeping. No DATA / HANDLE
         // path applies (host-managed CNodes hold persistent caps only).
         if let FrameId::Foreign(id) = frame {
@@ -1980,6 +2034,19 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         o_rights: P::FinalStepRights,
     ) -> DispatchResult {
         if s_frame == o_frame && s_slot == o_slot {
+            return DispatchResult::Continue;
+        }
+        // Refuse on kernel-pinned slots in either endpoint (local VMs).
+        if let FrameId::Vm(idx) = s_frame
+            && self.vm_arena.vm(idx).cap_table.is_pinned(s_slot)
+        {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+        if let FrameId::Vm(idx) = o_frame
+            && self.vm_arena.vm(idx).cap_table.is_pinned(o_slot)
+        {
+            self.set_active_reg(7, RESULT_WHAT);
             return DispatchResult::Continue;
         }
         if !self.frame_is_empty(host, o_frame, o_slot) {
@@ -2081,6 +2148,19 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         o_slot: u8,
         o_rights: P::FinalStepRights,
     ) -> DispatchResult {
+        // Refuse on kernel-pinned slots in either endpoint (local VMs).
+        if let FrameId::Vm(idx) = s_frame
+            && self.vm_arena.vm(idx).cap_table.is_pinned(s_slot)
+        {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+        if let FrameId::Vm(idx) = o_frame
+            && self.vm_arena.vm(idx).cap_table.is_pinned(o_slot)
+        {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
         if !self.frame_is_empty(host, o_frame, o_slot) {
             self.set_active_reg(7, RESULT_WHAT);
             return DispatchResult::Continue;
@@ -2117,6 +2197,19 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         o_slot: u8,
     ) -> DispatchResult {
         if matches!(s_frame, FrameId::Foreign(_)) || matches!(o_frame, FrameId::Foreign(_)) {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+        // Refuse on kernel-pinned slots.
+        if let FrameId::Vm(idx) = s_frame
+            && self.vm_arena.vm(idx).cap_table.is_pinned(s_slot)
+        {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+        if let FrameId::Vm(idx) = o_frame
+            && self.vm_arena.vm(idx).cap_table.is_pinned(o_slot)
+        {
             self.set_active_reg(7, RESULT_WHAT);
             return DispatchResult::Continue;
         }
@@ -4098,6 +4191,59 @@ mod tests {
         let result = kernel.dispatch_ecalli(50);
         assert!(matches!(result, DispatchResult::Continue));
         assert_eq!(kernel.active_reg(7), RESULT_WHAT);
+    }
+
+    #[test]
+    fn pinned_slot_refuses_mgmt_ops() {
+        // BARE_FRAME_SLOT (0) and BARE_FRAME_UNTYPED_SLOT (9) are
+        // pinned by `finalize_kernel`. Modern dispatch_ecall mgmt ops
+        // (DROP/MOVE/COPY) should refuse to mutate either.
+        let blob = make_simple_blob(10);
+        let mut kernel: InvocationKernel = kernel_from_blob(&blob, 100_000);
+        let _ = kernel.vm_arena.vm_mut(0).transition(VmState::Running);
+
+        // DROP slot 0 (BARE_FRAME ref) — subject_ref = 0 means "slot 0
+        // of active VM, no indirection".
+        kernel.set_active_reg(12, 0); // subject_ref=0 (high), object_ref=0 (low)
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        kernel.flush_live_ctx();
+        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x05); // DROP
+        assert!(matches!(result, DispatchResult::Continue));
+        assert_eq!(kernel.active_reg(7), RESULT_WHAT);
+        assert!(
+            kernel.vm_arena.vm(0).cap_table.get(0).is_some(),
+            "BARE_FRAME ref dropped despite pinning"
+        );
+
+        // MOVE on a pinned source: subject = slot 0 (pinned), object = slot 50.
+        kernel.set_active_reg(12, 50);
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        kernel.flush_live_ctx();
+        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x06); // MOVE
+        assert!(matches!(result, DispatchResult::Continue));
+        assert_eq!(kernel.active_reg(7), RESULT_WHAT);
+        assert!(
+            kernel.vm_arena.vm(0).cap_table.get(0).is_some(),
+            "BARE_FRAME ref moved despite pinning"
+        );
+
+        // MOVE TO a pinned destination: place a cap at slot 50, try to
+        // move it to slot 0 (pinned). Should reject.
+        kernel
+            .vm_arena
+            .vm_mut(0)
+            .cap_table
+            .set(50, Cap::Protocol(7u8));
+        kernel.set_active_reg(12, 50u64 << 32);
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        kernel.flush_live_ctx();
+        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x06); // MOVE
+        assert!(matches!(result, DispatchResult::Continue));
+        assert_eq!(kernel.active_reg(7), RESULT_WHAT);
+        assert!(
+            kernel.vm_arena.vm(0).cap_table.get(50).is_some(),
+            "slot 50 cleared (move should have failed)"
+        );
     }
 
     #[test]

@@ -231,6 +231,10 @@ pub(crate) fn populate_host_call_slots(vm: &mut Vm) {
             continue;
         }
         vm.cap_table_set_original(id, javm::cap::Cap::Protocol(KernelCap::HostCall(id)));
+        // HostCall selectors are kernel infrastructure: pinning blocks
+        // guests from MOVing/COPYing them and accidentally bricking the
+        // host-call dispatch path.
+        vm.vm_arena.vm_mut(0).cap_table.pin(id);
     }
 }
 
@@ -270,6 +274,7 @@ pub(crate) fn populate_ephemeral_kernel_caps(
         1,
         javm::cap::Cap::Protocol(KernelCap::Ephemeral(caller_cap)),
     );
+    table.pin(1);
 
     // BareFrame `B_GAS = GAS_SLOT` (= 3): per-invocation tank.
     // `MGMT_GAS_DERIVE` splits parked sub-caps off this tank into
@@ -281,6 +286,7 @@ pub(crate) fn populate_ephemeral_kernel_caps(
             remaining: invocation_gas,
         }))),
     );
+    table.pin(javm::kernel::GAS_SLOT);
 
     // FAULT_HANDLER_SLOT (= 10): per-invocation FaultHandler. Default
     // is `B_FH`; a frame can claim exclusive recovery via MGMT_FH_MOVE
@@ -294,6 +300,7 @@ pub(crate) fn populate_ephemeral_kernel_caps(
             },
         ))),
     );
+    table.pin(javm::kernel::FAULT_HANDLER_SLOT);
 
     // MainFrame slot 2 (`SELF_SLOT`): Self cap. Per-VM identity.
     vm.cap_table_set(
@@ -302,6 +309,15 @@ pub(crate) fn populate_ephemeral_kernel_caps(
             vault_id: self_vault,
         }))),
     );
+    // Pin the active VM's MainFrame kernel slots. M_GAS and M_FH are
+    // empty by default but pinned so guests can't squat them; the
+    // kernel writes through `set` directly (via MGMT_GAS_DERIVE for
+    // M_GAS, MGMT_FH_MOVE for M_FH), bypassing the guest mgmt-op
+    // pinning checks.
+    let main_table = &mut vm.vm_arena.vm_mut(0).cap_table;
+    main_table.pin(crate::vm::SELF_SLOT);
+    main_table.pin(javm::kernel::GAS_SLOT);
+    main_table.pin(javm::kernel::FAULT_HANDLER_SLOT);
 }
 
 /// Place the per-invocation home `VaultRef` at slot 1 of the active
@@ -322,6 +338,10 @@ pub(crate) fn populate_home_vault_ref(vm: &mut Vm, home: VaultId) {
             rights: VaultRights::ALL,
         }))),
     );
+    // Pin slot 1 so the home VaultRef can't be MOVED/DROPPED by guest
+    // mgmt ops. javm's resolve walk crosses this cap on every Vault
+    // cap-ref; mutating it would let the guest hijack its own home.
+    vm.vm_arena.vm_mut(0).cap_table.pin(1);
 }
 
 /// Run the entire transact phase. Walks σ.transact_space_cnode in slot
@@ -533,5 +553,40 @@ mod tests {
         // BareFrame slot 2 is empty (Self moved to MainFrame).
         let bare_idx = vm.bare_frame_id.index();
         assert!(vm.vm_arena.vm(bare_idx).cap_table.is_empty(2));
+    }
+
+    /// After `populate_*`, the kernel-managed slots in MainFrame and
+    /// BareFrame are marked pinned. Generic mgmt ops should refuse
+    /// to mutate them; this test asserts the bitmap state directly.
+    #[test]
+    fn kernel_managed_slots_are_pinned() {
+        let g = GenesisBuilder::default().build().expect("genesis ok");
+        let mut vm =
+            crate::vm::new_vm_from_vault(&g.state, g.transact_vault, 100_000_000, 256, None)
+                .expect("new_vm_from_vault");
+        populate_host_call_slots(&mut vm);
+        populate_home_vault_ref(&mut vm, g.transact_vault);
+        populate_ephemeral_kernel_caps(
+            &mut vm,
+            g.transact_vault,
+            Caller::Kernel(crate::types::KernelRole::TransactEntry),
+            100_000_000,
+        );
+        // MainFrame: 0 (BARE_FRAME ref), 1 (home VaultRef), 2 (Self),
+        // 3 (M_GAS), 10 (M_FH), HostCalls 15/16/18/19/21.
+        let main = &vm.vm_arena.vm(0).cap_table;
+        for &s in &[0u8, 1, 2, 3, 10, 15, 16, 18, 19, 21] {
+            assert!(main.is_pinned(s), "MainFrame slot {} not pinned", s);
+        }
+        // BareFrame: 1 (Caller), 3 (B_GAS), 9 (Untyped), 10 (B_FH).
+        let bare_idx = vm.bare_frame_id.index();
+        let bare = &vm.vm_arena.vm(bare_idx).cap_table;
+        for &s in &[1u8, 3, 9, 10] {
+            assert!(bare.is_pinned(s), "BareFrame slot {} not pinned", s);
+        }
+        // Slot 4 (BARE_ARG_SLOT) is intentionally NOT pinned — guests
+        // legitimately MOVE the args DATA cap out into their own
+        // MainFrame before MGMT_MAP-ing it.
+        assert!(!bare.is_pinned(javm::kernel::BARE_ARG_SLOT));
     }
 }
