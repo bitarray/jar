@@ -29,7 +29,6 @@ use crate::cap::attest::AttestCursor;
 use crate::reach::ReachSet;
 use crate::runtime::{Hardware, NodeOffchain};
 use crate::state::cap_registry;
-use crate::state::code_blobs;
 use crate::transact::{populate_home_vault_ref, populate_host_call_slots};
 use crate::vm::{INVOCATION_GAS_BUDGET, InvocationCtx, Vm, drive_invocation};
 
@@ -90,14 +89,27 @@ pub fn handle_inbound_dispatch<H: Hardware>(
     let mut result_trace: Vec<ResultEntry> = event.result_trace.clone();
     let mut cursor = AttestCursor::default();
 
-    // Resolve the entrypoint blob (same blob runs both phases). Use
-    // `code_cache` so the second phase reuses the first phase's compile.
-    let blob = code_blobs::resolve_init_blob(&state_clone, entrypoint)?;
+    // Build VM 0 from the dispatch entrypoint Vault's CapTable on each
+    // phase. The kernel's `node.code_cache` reuses compilations across
+    // step-2 and step-3 (and across blocks) since persistent CodeCaps
+    // store identical sub-blob bytes.
 
     // Step 2.
     let attestation_target = attestation_trace.len();
     let result_target = result_trace.len();
     {
+        // Build VM 0 from `state_clone` first (immutable borrow), then
+        // hand `&mut state_clone` to the InvocationCtx. Walking
+        // vault.slots only reads σ, so the borrow nests cleanly.
+        // TODO: payload bytes (event.payload) need to be written into a
+        // persistent DATA cap and placed at bare-Frame sub-slot 4 when
+        // dispatch guests start reading them. Today's fixtures halt.
+        let mut vm: Vm = crate::vm::new_vm_from_vault(
+            &state_clone,
+            entrypoint,
+            INVOCATION_GAS_BUDGET,
+            Some(&mut node.code_cache),
+        )?;
         let mut slot_emission: Option<SlotContent> = None;
         let mut ctx = InvocationCtx {
             state: &mut state_clone,
@@ -113,11 +125,6 @@ pub fn handle_inbound_dispatch<H: Hardware>(
             prev_slot: None,
             hw,
         };
-        // TODO: payload bytes (event.payload) need to be written into a
-        // manifest-reserved DATA cap and placed at ephemeral sub-slot 4
-        // when dispatch guests start reading them. Today's fixtures halt.
-        let mut vm: Vm = Vm::new_cached(&blob, INVOCATION_GAS_BUDGET, &mut node.code_cache)
-            .map_err(|e| KernelError::Internal(format!("javm init step-2: {:?}", e)))?;
         populate_host_call_slots(&mut vm);
         populate_home_vault_ref(&mut vm, entrypoint);
         crate::transact::populate_ephemeral_kernel_caps(
@@ -140,6 +147,12 @@ pub fn handle_inbound_dispatch<H: Hardware>(
     let prev_slot_owned = node.slot(entrypoint).clone();
     let mut slot_emission: Option<SlotContent> = None;
     {
+        let mut vm: Vm = crate::vm::new_vm_from_vault(
+            &state_clone,
+            entrypoint,
+            INVOCATION_GAS_BUDGET,
+            Some(&mut node.code_cache),
+        )?;
         let mut ctx = InvocationCtx {
             state: &mut state_clone,
             role: KernelRole::AggregateMerge,
@@ -154,8 +167,6 @@ pub fn handle_inbound_dispatch<H: Hardware>(
             prev_slot: Some(&prev_slot_owned),
             hw,
         };
-        let mut vm: Vm = Vm::new_cached(&blob, INVOCATION_GAS_BUDGET, &mut node.code_cache)
-            .map_err(|e| KernelError::Internal(format!("javm init step-3: {:?}", e)))?;
         populate_host_call_slots(&mut vm);
         populate_home_vault_ref(&mut vm, entrypoint);
         crate::transact::populate_ephemeral_kernel_caps(

@@ -22,8 +22,15 @@ use crate::state::cnode;
 use crate::state::code_blobs;
 
 /// Default slot for the init CodeCap when genesis Vaults are constructed.
-/// Real chains may pick any slot per Vault; this is a fixture convention.
-const DEFAULT_INIT_CAP_SLOT: u8 = 0;
+///
+/// Slot 64 matches the convention emitted by the JAR-blob transpiler
+/// (manifest CODE entries land at cap_index 64). It also avoids slot 0,
+/// which javm reserves for the bare-Frame FrameRef in every VM
+/// CapTable; a slot-0 placement would be silently overwritten when
+/// `vm::new_vm_from_vault` walks `vault.slots` into VM 0's CapTable.
+/// Real chains may pick any non-zero slot per Vault; this is the
+/// fixture convention.
+const DEFAULT_INIT_CAP_SLOT: u8 = 64;
 
 /// Build a minimal σ for testing.
 pub struct GenesisBuilder {
@@ -163,25 +170,46 @@ impl GenesisBuilder {
     }
 }
 
-/// Allocate a Vault, register a CodeCap with the given blob, and place
-/// it at `DEFAULT_INIT_CAP_SLOT` of the Vault's CNode. The Vault's
-/// `init_cap` is set to that slot so `Vault.initialize` finds the blob.
+/// Allocate a Vault, register a CodeCap with the **raw code sub-blob**
+/// extracted from `jar_blob`'s manifest, and place it at
+/// `DEFAULT_INIT_CAP_SLOT` of the Vault's CNode. The Vault's `init_cap`
+/// is set to that slot so `Vault.initialize` finds the sub-blob.
 /// Returns the new VaultId.
-fn alloc_vault_with_code(state: &mut State, blob: Vec<u8>, quota_pages: u64) -> VaultId {
+///
+/// The JAR blob is parsed at Vault-creation time only; the on-chain
+/// representation is the persistent `Capability::Code` (the sub-blob
+/// alone). Manifest DATA entries are ignored — `vault_init` works
+/// against the persistent CapTable, not the JAR manifest, so any
+/// initial DATA shape must be expressed as persistent
+/// `Capability::Data` entries placed in `vault.slots` directly. The
+/// fixtures shipped today (halt, slot_clear) don't use DATA caps, so
+/// dropping the manifest's DATA entries is observably a no-op.
+fn alloc_vault_with_code(state: &mut State, jar_blob: Vec<u8>, quota_pages: u64) -> VaultId {
     use crate::state::cap_registry as reg;
     use crate::types::CapRecord;
+
+    // Extract the code sub-blob from the JAR manifest. Genesis fixtures
+    // always have exactly one CODE entry; assert that invariant.
+    let parsed =
+        javm::program::parse_blob(&jar_blob).expect("genesis blob is a well-formed JAR blob");
+    let code_entry = parsed
+        .caps
+        .iter()
+        .find(|e| matches!(e.cap_type, javm::program::CapEntryType::Code))
+        .expect("genesis blob has at least one CODE manifest entry");
+    let code_sub_blob = javm::program::cap_data(code_entry, parsed.data_section).to_vec();
 
     let vault_id = state.next_vault_id();
     let mut v = crate::types::Vault::new();
     v.init_cap = DEFAULT_INIT_CAP_SLOT;
     v.quota_pages = quota_pages;
 
-    // Register the CodeCap and place it at the init slot.
+    // Register the persistent CodeCap (raw code sub-blob) at the init slot.
     let code_cap_id = reg::alloc(
         state,
         CapRecord {
             cap: Capability::Code(CodeCap {
-                blob: Arc::new(blob),
+                blob: Arc::new(code_sub_blob),
             }),
             issuer: None,
             narrowing: Vec::new(),

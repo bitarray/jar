@@ -22,7 +22,6 @@ use crate::cap::attest::AttestCursor;
 use crate::reach::ReachSet;
 use crate::runtime::Hardware;
 use crate::state::cap_registry;
-use crate::state::code_blobs;
 use crate::vm::{INVOCATION_GAS_BUDGET, InvocationCtx, Vm, drive_invocation};
 
 /// What kind of slot we're running for. Affects whether body events are
@@ -113,16 +112,17 @@ pub fn run_one_invocation<H: Hardware>(
     // managers explicitly stage commits via MGMT_MOVE Frame → Vault.
     // See discussions/persistence-via-caps.md.
     //
-    // Resolve the entrypoint blob from the Vault's CodeCap slot before
-    // we hand `state` to the InvocationCtx as `&mut`.
-    let blob = code_blobs::resolve_init_blob(state, target)?;
+    // Build VM 0 from the Vault's persistent CapTable (CNode-driven
+    // init replaces the legacy "fetch JAR blob, re-parse manifest"
+    // path). vault_init walks vault.slots and translates persistent
+    // caps to ephemeral counterparts at the same slot index.
     // TODO: when transact guests start reading payload bytes, wire them
-    // through `vm.write_data_cap_init(slot, payload)` against a manifest-
-    // reserved DATA cap (and place at ephemeral sub-slot 4 per the new
-    // cap-arg convention). Today's halt-immediate fixtures don't need it.
+    // through `vm.write_data_cap_init(slot, payload)` against a
+    // persistent DATA cap (and place at bare-Frame sub-slot 4 per the
+    // new cap-arg convention). Today's halt-immediate fixtures don't
+    // need it.
     let _ = payload;
-    let mut vm: Vm = Vm::new(&blob, INVOCATION_GAS_BUDGET)
-        .map_err(|e| KernelError::Internal(format!("javm init: {:?}", e)))?;
+    let mut vm: Vm = crate::vm::new_vm_from_vault(state, target, INVOCATION_GAS_BUDGET, None)?;
     populate_host_call_slots(&mut vm);
     populate_home_vault_ref(&mut vm, target);
     populate_ephemeral_kernel_caps(
