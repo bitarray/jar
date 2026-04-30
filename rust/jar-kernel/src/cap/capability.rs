@@ -213,7 +213,7 @@ pub enum Capability {
     ResultCap(ResultCap),
     /// Per-invocation gas budget — lives at ephemeral sub-slot 3.
     Gas(GasCap),
-    /// Per-frame self-identity — lives at ephemeral sub-slot 2.
+    /// Per-VM self-identity — pinned at MainFrame slot 2 (`SELF_SLOT`).
     SelfId(SelfCap),
     /// Per-frame caller (sub-CALL) — lives at ephemeral sub-slot 1.
     CallerVault(CallerVaultCap),

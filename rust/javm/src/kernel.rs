@@ -112,8 +112,9 @@ pub const MGMT_UNTYPED_DERIVE: u32 = 0xF;
 /// the args DATA cap. The host populates this; the guest MOVEs +
 /// MGMT_MAPs it into its own main-frame CapTable (the kernel's
 /// rule "MGMT_MAP only on caps in a VM's persistent Frame" stays).
-/// Slot 4 is the next free sub-slot after the kernel-managed
-/// Caller (1), SelfId (2), Gas (3) caps.
+/// Slot 4 sits after the kernel-managed BareFrame slots Caller (1)
+/// and Gas (3). Self is pinned per-VM in MainFrame at `SELF_SLOT`
+/// (= 2) and has no BareFrame counterpart.
 pub const BARE_FRAME_ARGS_SLOT: u8 = 4;
 
 /// Bare-Frame sub-slot where the kernel places the per-invocation
@@ -1041,32 +1042,30 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         self.bare_frame_id.index()
     }
 
-    /// Take the bare Frame's sub-slots 0/1/2 (Reply, Caller, Self) for
+    /// Take the bare Frame's sub-slots 0/1 (Reply, Caller) for
     /// stashing on the call-stack. These slots are the per-frame
     /// kernel-managed area; the host (jar-kernel) populates them. javm
-    /// just preserves whatever was there.
-    fn take_ephemeral_kernel_slots(&mut self, _caller_vm: u16) -> [Option<Cap<P>>; 3] {
+    /// just preserves whatever was there. Self lives in each VM's
+    /// MainFrame at `SELF_SLOT` (= 2) and is per-VM, so it doesn't
+    /// need cross-CALL stashing.
+    fn take_ephemeral_kernel_slots(&mut self, _caller_vm: u16) -> [Option<Cap<P>>; 2] {
         let table = &mut self.vm_arena.vm_mut(self.bare_frame_idx()).cap_table;
-        [table.take(0), table.take(1), table.take(2)]
+        [table.take(0), table.take(1)]
     }
 
-    /// Restore previously-stashed bare-Frame sub-slots 0/1/2 on REPLY/HALT.
-    fn restore_ephemeral_kernel_slots(&mut self, slots: [Option<Cap<P>>; 3]) {
+    /// Restore previously-stashed bare-Frame sub-slots 0/1 on REPLY/HALT.
+    fn restore_ephemeral_kernel_slots(&mut self, slots: [Option<Cap<P>>; 2]) {
         let table = &mut self.vm_arena.vm_mut(self.bare_frame_idx()).cap_table;
         // Drop whatever the callee left in those slots, then write back the
         // caller's values (skipping None — the caller had nothing there).
-        let [a, b, c] = slots;
+        let [a, b] = slots;
         let _ = table.take(0);
         let _ = table.take(1);
-        let _ = table.take(2);
         if let Some(a) = a {
             table.set(0, a);
         }
         if let Some(b) = b {
             table.set(1, b);
-        }
-        if let Some(c) = c {
-            table.set(2, c);
         }
     }
 

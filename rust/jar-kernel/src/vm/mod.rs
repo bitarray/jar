@@ -130,9 +130,16 @@ impl InvocationResult {
 /// public Callable produced by initialization. Read by the driver
 /// after a successful Halt; surfaced via
 /// `InvocationResult.initialize_callable`. Sits one past the
-/// kernel-reserved sub-slots: Caller=1, SelfId=2, Gas=3,
+/// kernel-reserved sub-slots: Caller=1, Gas=3,
 /// args (`javm::kernel::BARE_FRAME_ARGS_SLOT`)=4.
 pub const INITIALIZE_CALLABLE_SLOT: u8 = 5;
+
+/// MainFrame slot where the kernel pins the running VM's `SelfCap`.
+/// Per-VM identity: written once at invocation entry by
+/// `populate_ephemeral_kernel_caps`, never mutates thereafter.
+/// Guests read it via cap-ref `0x002`. Sits next to the home
+/// VaultRef (slot 1) and the BARE_FRAME ref (slot 0) in MainFrame.
+pub const SELF_SLOT: u8 = 2;
 
 /// What a host-call handler tells the driver to do next.
 #[derive(Debug)]

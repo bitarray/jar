@@ -146,17 +146,18 @@ impl<P: ProtocolCapT> VmInstance<P> {
 
 /// Call frame saved on the kernel's call stack when a VM calls another.
 ///
-/// On CALL, the kernel stashes the active VM's ephemeral-table sub-slots
-/// 0/1/2 (Reply Handle, Caller cap, Self cap) here so the callee can rewrite
-/// them with its own context; REPLY restores. javm itself doesn't populate
-/// these — the host (jar-kernel) writes Caller/Self in Phase 10. javm just
-/// preserves whatever opaque `Cap<P>` was there.
+/// On CALL, the kernel stashes the active VM's BareFrame sub-slots 0/1
+/// (Reply Handle, Caller cap) here so the callee can rewrite them with
+/// its own context; REPLY restores. SelfCap lives in the per-VM
+/// MainFrame and doesn't need stashing — each VM has its own. javm
+/// itself doesn't populate these — the host (jar-kernel) writes
+/// Caller. javm just preserves whatever opaque `Cap<P>` was there.
 #[derive(Debug)]
 pub struct CallFrame<P: ProtocolCapT = u8> {
     /// VM that initiated the CALL.
     pub caller_vm_id: u16,
-    /// Saved ephemeral sub-slots 0/1/2 from before the CALL.
-    pub prev_kernel_slots: [Option<crate::cap::Cap<P>>; 3],
+    /// Saved BareFrame sub-slots 0/1 from before the CALL.
+    pub prev_kernel_slots: [Option<crate::cap::Cap<P>>; 2],
 }
 
 /// Errors from VM state transitions.

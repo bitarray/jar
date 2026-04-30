@@ -218,9 +218,9 @@ pub fn run_one_invocation<H: Hardware>(
 /// `KernelCap::HostCall(N)`, so the guest's `ecalli N` yields
 /// `KernelResult::ProtocolCall { slot: N }` to the host loop.
 ///
-/// The walk skips retired slots — slots 1/2/3 (Gas/SelfId/Caller) now
-/// live as `Capability::*` caps in the ephemeral table, and the other
-/// retired-gap ranges are documented in `host_abi::HostCall`.
+/// The walk skips kernel-pinned slots — slot 1 (home VaultRef), slot 2
+/// (`SELF_SLOT`), slot 3 (per-VM Gas) — and other retired-gap ranges
+/// are documented in `host_abi::HostCall`.
 pub(crate) fn populate_host_call_slots(vm: &mut Vm) {
     use crate::vm::host_abi::HostCall;
     // Walk the full slot space; HostCall::from_slot identifies the live
@@ -234,11 +234,13 @@ pub(crate) fn populate_host_call_slots(vm: &mut Vm) {
     }
 }
 
-/// Populate the per-invocation kernel caps in the ephemeral table:
-/// sub-slot 1 = Caller, sub-slot 2 = SelfId, sub-slot 3 = Gas. Called
-/// at the start of every kernel-driven invocation (transact / dispatch
-/// step-2 / step-3). Sub-slots 0 (Reply) is left empty — root has no
-/// userspace caller; the kernel rewrites it on every internal CALL.
+/// Populate the per-invocation kernel caps. Caller and Gas live in the
+/// shared BareFrame (cross-frame channel: BareFrame slot 1 = Caller,
+/// slot 3 = Gas). Self is per-VM identity, so it lives in the active
+/// VM's MainFrame at `SELF_SLOT` (= 2). Called at the start of every
+/// kernel-driven invocation (transact / dispatch step-2 / step-3).
+/// BareFrame sub-slot 0 (Reply) is left empty — root has no userspace
+/// caller; the kernel rewrites it on every internal CALL.
 pub(crate) fn populate_ephemeral_kernel_caps(
     vm: &mut Vm,
     self_vault: VaultId,
@@ -246,10 +248,8 @@ pub(crate) fn populate_ephemeral_kernel_caps(
     invocation_gas: u64,
 ) {
     use crate::types::{CallerKernelCap, CallerVaultCap, GasCap, SelfCap};
-    // Bare-Frame sub-slots 1/2/3 carry the per-invocation Caller / Self
-    // / Gas caps. The bare Frame is just another `VmInstance` in the
-    // arena (after the EphemeralTable fold); reach its CapTable
-    // directly via the kernel-tracked id.
+
+    // BareFrame sub-slots 1 and 3 (Caller, Gas).
     let bare_idx = vm.bare_frame_id.index();
     let table = &mut vm.vm_arena.vm_mut(bare_idx).cap_table;
 
@@ -265,19 +265,19 @@ pub(crate) fn populate_ephemeral_kernel_caps(
         javm::cap::Cap::Protocol(KernelCap::Ephemeral(caller_cap)),
     );
 
-    // Sub-slot 2: Self cap. Ephemeral.
-    table.set(
-        2,
-        javm::cap::Cap::Protocol(KernelCap::Ephemeral(Capability::SelfId(SelfCap {
-            vault_id: self_vault,
-        }))),
-    );
-
     // Sub-slot 3: Gas cap. Ephemeral.
     table.set(
         3,
         javm::cap::Cap::Protocol(KernelCap::Ephemeral(Capability::Gas(GasCap {
             remaining: invocation_gas,
+        }))),
+    );
+
+    // MainFrame slot 2 (`SELF_SLOT`): Self cap. Per-VM identity.
+    vm.cap_table_set(
+        crate::vm::SELF_SLOT,
+        javm::cap::Cap::Protocol(KernelCap::Ephemeral(Capability::SelfId(SelfCap {
+            vault_id: self_vault,
         }))),
     );
 }
