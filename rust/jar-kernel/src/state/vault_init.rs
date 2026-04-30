@@ -75,7 +75,7 @@ pub fn build_init_cap_table(
             memory_pages, vault_id
         ))
     })?;
-    let untyped = Arc::new(javm::cap::UntypedCap::new(memory_pages));
+    let mut untyped = javm::cap::UntypedCap::new(memory_pages);
 
     let mut cap_table: CapTable<KernelCap> = CapTable::new();
     let mut code_caps: Vec<Arc<javm::cap::CodeCap>> = Vec::new();
@@ -93,7 +93,7 @@ pub fn build_init_cap_table(
             mem_cycles,
             backend,
             code_cache.as_deref_mut(),
-            &untyped,
+            &mut untyped,
             &mut backing,
         )?;
         cap_table.set(slot, cap);
@@ -132,7 +132,7 @@ fn translate_persistent(
     mem_cycles: u8,
     backend: javm::PvmBackend,
     code_cache: Option<&mut javm::CodeCache>,
-    untyped: &Arc<javm::cap::UntypedCap>,
+    untyped: &mut javm::cap::UntypedCap,
     backing: &mut javm::backing::BackingStore,
 ) -> KResult<Cap<KernelCap>> {
     match cap {

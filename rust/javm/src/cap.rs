@@ -9,7 +9,6 @@
 //!   callable-shaped (call only).
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Memory access mode, set at MAP time (not at RETYPE).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,41 +17,33 @@ pub enum Access {
     RW,
 }
 
-/// Bump allocator for physical page allocation. Copyable (via Arc).
+/// Quota cap for physical page allocation. Move-only.
 ///
-/// All copies share the same atomic offset — allocation from any copy
-/// advances the same bump pointer. Safe under cooperative scheduling.
+/// Holds a single `limit`: the number of pages this cap-holder may
+/// still retype (via `CALL(untyped)`) or split off via
+/// `MGMT_UNTYPED_DERIVE`. The actual backing-memfd cursor lives on
+/// [`crate::backing::BackingStore`]; this cap is a pure authority
+/// counter.
+///
+/// **Invariant** (maintained by every operation): the sum of
+/// `limit` across all live `UntypedCap`s plus the count of pages
+/// already retyped into `DataCap`s equals the backing memfd's total
+/// page count. As a consequence, `cap.limit < n` is the only failure
+/// mode for a retype — the backing is guaranteed to have enough free
+/// pages whenever any cap's limit suffices.
+///
+/// Move-only (`try_copy` returns `None`); the only way to obtain a
+/// new `UntypedCap` is `MGMT_UNTYPED_DERIVE`, which carves
+/// `n` pages out of the parent's `limit` into a fresh child.
 #[derive(Debug)]
 pub struct UntypedCap {
-    /// Current bump offset (in pages). Atomic for Arc sharing.
-    offset: AtomicU32,
-    /// Total pages available.
-    pub total: u32,
+    /// Pages this cap-holder may still retype or DERIVE.
+    pub limit: u32,
 }
 
 impl UntypedCap {
-    pub fn new(total: u32) -> Self {
-        Self {
-            offset: AtomicU32::new(0),
-            total,
-        }
-    }
-
-    /// Allocate `n` pages from the bump allocator.
-    /// Returns the backing offset (in pages) or None if exhausted.
-    pub fn retype(&self, n: u32) -> Option<u32> {
-        let old = self.offset.load(Ordering::Relaxed);
-        let new = old.checked_add(n)?;
-        if new > self.total {
-            return None;
-        }
-        self.offset.store(new, Ordering::Relaxed);
-        Some(old)
-    }
-
-    /// Remaining pages.
-    pub fn remaining(&self) -> u32 {
-        self.total - self.offset.load(Ordering::Relaxed)
+    pub fn new(limit: u32) -> Self {
+        Self { limit }
     }
 }
 
@@ -579,7 +570,7 @@ where
 /// kernel cap data.
 #[derive(Debug)]
 pub enum Cap<P: ProtocolCapT = u8> {
-    Untyped(Arc<UntypedCap>),
+    Untyped(UntypedCap),
     Data(DataCap),
     Code(Arc<CodeCap>),
     FrameRef(FrameRefCap),
@@ -588,11 +579,12 @@ pub enum Cap<P: ProtocolCapT = u8> {
 
 impl<P: ProtocolCapT> Cap<P> {
     /// Whether this cap type supports COPY. Protocol caps consult `P`'s
-    /// `is_copyable` hook.
+    /// `is_copyable` hook. `Untyped` is move-only — its quota would
+    /// be unsafe to duplicate (DERIVE splits instead).
     pub fn is_copyable(&self) -> bool {
         match self {
-            Cap::Untyped(_) | Cap::Code(_) | Cap::FrameRef(_) => true,
-            Cap::Data(_) => false,
+            Cap::Code(_) | Cap::FrameRef(_) => true,
+            Cap::Untyped(_) | Cap::Data(_) => false,
             Cap::Protocol(p) => p.is_copyable(),
         }
     }
@@ -603,11 +595,10 @@ impl<P: ProtocolCapT> Cap<P> {
     /// copy must use DOWNGRADE (cap_derive) instead.
     pub fn try_copy(&self) -> Option<Cap<P>> {
         match self {
-            Cap::Untyped(u) => Some(Cap::Untyped(Arc::clone(u))),
             Cap::Code(c) => Some(Cap::Code(Arc::clone(c))),
             Cap::FrameRef(f) => Some(Cap::FrameRef(*f)),
             Cap::Protocol(p) if p.is_copyable() => Some(Cap::Protocol(p.clone())),
-            Cap::Data(_) | Cap::Protocol(_) => None,
+            Cap::Untyped(_) | Cap::Data(_) | Cap::Protocol(_) => None,
         }
     }
 }
@@ -781,34 +772,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_untyped_retype() {
-        let untyped = UntypedCap::new(100);
-        assert_eq!(untyped.remaining(), 100);
+    fn test_untyped_quota_basic() {
+        let mut untyped = UntypedCap::new(100);
+        assert_eq!(untyped.limit, 100);
 
-        let offset = untyped.retype(10).unwrap();
-        assert_eq!(offset, 0);
-        assert_eq!(untyped.remaining(), 90);
-
-        let offset = untyped.retype(90).unwrap();
-        assert_eq!(offset, 10);
-        assert_eq!(untyped.remaining(), 0);
-
-        assert!(untyped.retype(1).is_none());
-    }
-
-    #[test]
-    fn test_untyped_shared() {
-        let untyped = Arc::new(UntypedCap::new(100));
-        let copy = Arc::clone(&untyped);
-
-        let o1 = untyped.retype(30).unwrap();
-        assert_eq!(o1, 0);
-
-        let o2 = copy.retype(30).unwrap();
-        assert_eq!(o2, 30);
-
-        assert_eq!(untyped.remaining(), 40);
-        assert_eq!(copy.remaining(), 40);
+        // Spend down via direct mutation (mimicking allocate_data_cap).
+        untyped.limit -= 10;
+        assert_eq!(untyped.limit, 90);
     }
 
     #[test]
@@ -912,9 +882,10 @@ mod tests {
 
     #[test]
     fn test_cap_copyability() {
-        let untyped: Cap = Cap::Untyped(Arc::new(UntypedCap::new(10)));
-        assert!(untyped.is_copyable());
-        assert!(untyped.try_copy().is_some());
+        // Untyped is now move-only — DERIVE is the only way to split.
+        let untyped: Cap = Cap::Untyped(UntypedCap::new(10));
+        assert!(!untyped.is_copyable());
+        assert!(untyped.try_copy().is_none());
 
         let data: Cap = Cap::Data(DataCap::new(0, 1));
         assert!(!data.is_copyable());

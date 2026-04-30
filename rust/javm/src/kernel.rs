@@ -149,8 +149,6 @@ pub struct InvocationKernel<P: crate::cap::ProtocolCapT = u8> {
     /// [`FrameRefRights::BARE_FRAME`]). Allocated alongside the root
     /// VM; its slot in the arena is held until the kernel drops.
     pub bare_frame_id: VmId,
-    /// Shared UNTYPED cap (bump allocator).
-    pub untyped: Arc<UntypedCap>,
     /// Currently active VM index.
     pub active_vm: u16,
     /// Call stack for CALL/REPLY routing.
@@ -201,28 +199,22 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             backing,
         } = artifacts;
 
-        let mut kernel = Self::build_kernel_skeleton_with(untyped, backing, backend)?;
+        let mut kernel = Self::build_kernel_skeleton_with(backing, backend)?;
         kernel.next_code_id = code_caps.len() as u16;
         kernel.code_caps = code_caps;
-        kernel.finalize_kernel(cap_table, init_code_id, gas)
+        kernel.finalize_kernel(cap_table, untyped, init_code_id, gas)
     }
 
     /// Allocate the kernel's per-invocation infrastructure (mem_cycles,
-    /// WindowPool) on top of a caller-allocated `untyped` and `backing`,
-    /// and return a partially-initialized `Self` with empty `code_caps`,
+    /// WindowPool) on top of a caller-allocated `backing` store, and
+    /// return a partially-initialized `Self` with empty `code_caps`,
     /// an empty `vm_arena`, and `bare_frame_id = VmId::ROOT` as a
     /// placeholder. [`Self::finalize_kernel`] fills in the rest.
-    ///
-    /// Hosts construct `untyped` and `backing` outside javm because
-    /// they need them to allocate persistent → ephemeral DataCaps
-    /// before the kernel exists (see jar-kernel's `vault_init`); the
-    /// kernel takes ownership here.
     fn build_kernel_skeleton_with(
-        untyped: Arc<UntypedCap>,
         backing: BackingStore,
         backend: crate::backend::PvmBackend,
     ) -> Result<Self, KernelError> {
-        let mem_cycles = crate::compute_mem_cycles(untyped.total);
+        let mem_cycles = crate::compute_mem_cycles(backing.total_pages());
 
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         let window_pool =
@@ -234,7 +226,6 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             vm_arena: VmArena::new(),
             // Placeholder; reassigned in `finalize_kernel`.
             bare_frame_id: VmId::ROOT,
-            untyped,
             active_vm: 0,
             call_stack: Vec::with_capacity(8),
             mem_cycles,
@@ -267,6 +258,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     fn finalize_kernel(
         mut self,
         mut cap_table: CapTable<P>,
+        untyped: UntypedCap,
         init_code_id: u16,
         gas: u64,
     ) -> Result<Self, KernelError> {
@@ -295,10 +287,11 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         }
 
         // Give VM 0 the UNTYPED cap at slot 254 (fixed slot, just below
-        // IPC). Skip when the page budget is zero — no point exposing an
-        // empty allocator.
-        if self.untyped.total > 0 {
-            cap_table.set(254, Cap::Untyped(Arc::clone(&self.untyped)));
+        // IPC). Skip when the budget is zero — no point exposing an
+        // empty allocator. The cap is moved (not cloned) — Untyped is
+        // move-only under the new quota model.
+        if untyped.limit > 0 {
+            cap_table.set(254, Cap::Untyped(untyped));
         }
 
         // Create VM 0. Registers start zeroed. To pass byte payload to
@@ -360,7 +353,15 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     /// pages.
     pub fn set_args(&mut self, bytes: &[u8]) -> Result<(), KernelError> {
         let page_count = (bytes.len() as u32).div_ceil(crate::PVM_PAGE_SIZE);
-        let data_cap = allocate_data_cap(bytes, page_count, &self.untyped, &mut self.backing)?;
+
+        // Read the kernel-managed Untyped cap (currently at VM 0
+        // slot 254) and consume `page_count` pages from its `limit`.
+        // The data cap is then allocated from the shared backing.
+        let untyped = match self.vm_arena.vm_mut(0).cap_table.get_mut(254) {
+            Some(Cap::Untyped(u)) => u,
+            _ => return Err(KernelError::InvalidBlob),
+        };
+        let data_cap = allocate_data_cap(bytes, page_count, untyped, &mut self.backing)?;
 
         let bare_idx = self.bare_frame_idx();
         let bare_table = &mut self.vm_arena.vm_mut(bare_idx).cap_table;
@@ -508,7 +509,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             Cap::Untyped(_) => {
                 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
                 self.flush_live_ctx();
-                self.handle_call_untyped()
+                self.handle_call_untyped(cap_idx)
             }
             Cap::Code(c) => {
                 let code_id = c.id;
@@ -535,8 +536,14 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         }
     }
 
-    /// CALL on UNTYPED → RETYPE.
-    fn handle_call_untyped(&mut self) -> DispatchResult {
+    /// CALL on UNTYPED → RETYPE. Operates on the *called* Untyped at
+    /// `called_slot` of the active VM's CapTable. Decrements the cap's
+    /// `limit` by `n_pages` (φ[7]); allocates a fresh backing range
+    /// from the shared `BackingStore::bump`; places a `Cap::Data` at
+    /// the dst slot resolved from φ[12]. Returns the dst slot index in
+    /// φ[7] on success, `RESULT_WHAT` on any failure (insufficient
+    /// limit, invalid dst, occupied dst).
+    fn handle_call_untyped(&mut self, called_slot: u8) -> DispatchResult {
         let n_pages = self.active_reg(7) as u32;
         let gas_cost = 10 + n_pages as u64 * GAS_PER_PAGE;
 
@@ -546,31 +553,8 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         }
         vm.set_gas(vm.gas() - gas_cost);
 
-        // Get the UNTYPED cap (it's an Arc, so we can clone the reference)
-        let untyped = match vm.cap_table.get(
-            // Find the untyped slot — scan cap table
-            (0..=254)
-                .find(|i| matches!(vm.cap_table.get(*i), Some(Cap::Untyped(_))))
-                .unwrap_or(255),
-        ) {
-            Some(Cap::Untyped(u)) => Arc::clone(u),
-            _ => {
-                self.set_active_reg(7, RESULT_WHAT);
-                return DispatchResult::Continue;
-            }
-        };
-
-        let backing_offset = match untyped.retype(n_pages) {
-            Some(o) => o,
-            None => {
-                self.set_active_reg(7, RESULT_WHAT);
-                return DispatchResult::Continue;
-            }
-        };
-
-        let data_cap = DataCap::new(backing_offset, n_pages);
-
-        // Caller-picks: destination slot from φ[12] with indirection
+        // Resolve dst before mutating the source — if dst is invalid
+        // we don't want to debit the source.
         let dst_ref = self.active_reg(12) as u32;
         let (dst_frame, dst_slot, _dst_rights) = match self.resolve_cap_ref(dst_ref) {
             Some(r) => r,
@@ -579,17 +563,52 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                 return DispatchResult::Continue;
             }
         };
-        let dst_table = match self.frame_table_mut(dst_frame) {
-            Some(t) => t,
-            None => {
+        if !self
+            .frame_table_mut(dst_frame)
+            .map(|t| t.is_empty(dst_slot))
+            .unwrap_or(false)
+        {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+
+        // Debit the called Untyped at `called_slot` of the active VM.
+        let untyped = match self
+            .vm_arena
+            .vm_mut(self.active_vm)
+            .cap_table
+            .get_mut(called_slot)
+        {
+            Some(Cap::Untyped(u)) => u,
+            _ => {
                 self.set_active_reg(7, RESULT_WHAT);
                 return DispatchResult::Continue;
             }
         };
-        if !dst_table.is_empty(dst_slot) {
+        if untyped.limit < n_pages {
             self.set_active_reg(7, RESULT_WHAT);
             return DispatchResult::Continue;
         }
+        let backing_offset = self
+            .backing
+            .allocate_pages(n_pages)
+            .expect("invariant: cap.limit ≤ backing free pages");
+        // Re-borrow because allocate_pages took &mut self.backing.
+        let untyped = match self
+            .vm_arena
+            .vm_mut(self.active_vm)
+            .cap_table
+            .get_mut(called_slot)
+        {
+            Some(Cap::Untyped(u)) => u,
+            _ => unreachable!(),
+        };
+        untyped.limit -= n_pages;
+
+        let data_cap = DataCap::new(backing_offset, n_pages);
+        let dst_table = self
+            .frame_table_mut(dst_frame)
+            .expect("dst frame validated above");
         dst_table.set(dst_slot, Cap::Data(data_cap));
         self.set_active_reg(7, dst_slot as u64);
         DispatchResult::Continue
@@ -2970,10 +2989,16 @@ pub fn compile_code_blob(
 pub fn allocate_data_cap(
     content: &[u8],
     page_count: u32,
-    untyped: &Arc<UntypedCap>,
+    untyped: &mut UntypedCap,
     backing: &mut BackingStore,
 ) -> Result<DataCap, KernelError> {
-    let backing_offset = untyped.retype(page_count).ok_or(KernelError::OutOfMemory)?;
+    if untyped.limit < page_count {
+        return Err(KernelError::OutOfMemory);
+    }
+    let backing_offset = backing
+        .allocate_pages(page_count)
+        .expect("invariant: cap.limit ≤ backing free pages");
+    untyped.limit -= page_count;
     if !content.is_empty() && !backing.write_init_data(backing_offset, content) {
         return Err(KernelError::MemoryError);
     }
@@ -3003,7 +3028,12 @@ pub struct InvocationArtifacts<P: ProtocolCapT> {
     pub cap_table: CapTable<P>,
     pub code_caps: Vec<Arc<CodeCap>>,
     pub init_code_id: u16,
-    pub untyped: Arc<UntypedCap>,
+    /// The remaining Untyped quota for the invocation. After
+    /// `cap_table_from_blob`'s manifest walk has consumed pages for
+    /// the program's DataCaps, this carries whatever budget is left
+    /// for runtime allocations. The kernel takes ownership and
+    /// places it at VM 0 slot 254 (Commit-2 will move to bare-Frame).
+    pub untyped: UntypedCap,
     pub backing: BackingStore,
 }
 
@@ -3024,7 +3054,7 @@ pub fn cap_table_from_blob<P: ProtocolCapT>(
     let memory_pages = parsed.header.memory_pages;
 
     let mut backing = BackingStore::new(memory_pages).ok_or(KernelError::MemoryError)?;
-    let untyped = Arc::new(UntypedCap::new(memory_pages));
+    let mut untyped = UntypedCap::new(memory_pages);
     let mem_cycles = crate::compute_mem_cycles(memory_pages);
 
     let mut cap_table: CapTable<P> = CapTable::new();
@@ -3055,7 +3085,7 @@ pub fn cap_table_from_blob<P: ProtocolCapT>(
                     &[]
                 };
                 let data_cap =
-                    allocate_data_cap(initial, entry.page_count, &untyped, &mut backing)?;
+                    allocate_data_cap(initial, entry.page_count, &mut untyped, &mut backing)?;
                 // Cap is unmapped on purpose — the init prologue calls
                 // MGMT_MAP at runtime.
                 cap_table.set(entry.cap_index, Cap::Data(data_cap));
@@ -3235,11 +3265,11 @@ mod tests {
 
     #[test]
     fn allocate_data_cap_writes_content_unmapped() {
-        let untyped = Arc::new(UntypedCap::new(8));
+        let mut untyped = UntypedCap::new(8);
         let mut backing = BackingStore::new(8).expect("BackingStore::new");
 
         let content = b"hello world\n";
-        let data_cap = allocate_data_cap(content, 1, &untyped, &mut backing)
+        let data_cap = allocate_data_cap(content, 1, &mut untyped, &mut backing)
             .expect("allocate_data_cap succeeds");
 
         // Cap is unmapped: no recorded mappings, no active VM, bitmap empty.
@@ -3248,15 +3278,15 @@ mod tests {
         assert!(!data_cap.has_any_mapped());
         assert_eq!(data_cap.page_count, 1);
 
-        // Untyped consumed one page (offset 0 → 1).
-        assert_eq!(untyped.remaining(), 7);
+        // Untyped consumed one page (limit 8 → 7).
+        assert_eq!(untyped.limit, 7);
     }
 
     #[test]
     fn allocate_data_cap_zero_filled_when_content_empty() {
-        let untyped = Arc::new(UntypedCap::new(2));
+        let mut untyped = UntypedCap::new(2);
         let mut backing = BackingStore::new(2).expect("BackingStore::new");
-        let cap = allocate_data_cap(&[], 1, &untyped, &mut backing).expect("allocate");
+        let cap = allocate_data_cap(&[], 1, &mut untyped, &mut backing).expect("allocate");
         assert_eq!(cap.page_count, 1);
         assert!(cap.mappings.is_empty());
     }
@@ -3343,10 +3373,10 @@ mod tests {
 
     #[test]
     fn allocate_data_cap_exhausts_untyped() {
-        let untyped = Arc::new(UntypedCap::new(1));
+        let mut untyped = UntypedCap::new(1);
         let mut backing = BackingStore::new(1).expect("BackingStore::new");
-        let _first = allocate_data_cap(&[], 1, &untyped, &mut backing).expect("first ok");
-        let second = allocate_data_cap(&[], 1, &untyped, &mut backing);
+        let _first = allocate_data_cap(&[], 1, &mut untyped, &mut backing).expect("first ok");
+        let second = allocate_data_cap(&[], 1, &mut untyped, &mut backing);
         assert!(matches!(second, Err(KernelError::OutOfMemory)));
     }
 

@@ -27,6 +27,10 @@ pub struct BackingStore {
     fd: i32,
     /// Total pages in the pool.
     total_pages: u32,
+    /// Global next-free-page cursor. Advanced by every retype across
+    /// every live `UntypedCap`. Single-threaded inside an invocation;
+    /// no atomic needed.
+    bump: u32,
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -50,7 +54,11 @@ impl BackingStore {
             unsafe { libc::close(fd) };
             return None;
         }
-        Some(Self { fd, total_pages })
+        Some(Self {
+            fd,
+            total_pages,
+            bump: 0,
+        })
     }
 
     /// Total pages in the pool.
@@ -61,6 +69,23 @@ impl BackingStore {
     /// The raw file descriptor (for mmap calls).
     pub fn fd(&self) -> i32 {
         self.fd
+    }
+
+    /// Advance the global bump cursor by `n` pages. Returns the
+    /// pre-advance offset (= the start of the freshly-claimed range).
+    ///
+    /// Returns `None` only if `n` would push past `total_pages`. Under
+    /// the `Σ(UntypedCap.limit) + retyped = total_pages` invariant this
+    /// never happens for a caller that pre-checked some live cap's
+    /// limit ≥ n; the failure path is a defense-in-depth assertion.
+    pub fn allocate_pages(&mut self, n: u32) -> Option<u32> {
+        let new_bump = self.bump.checked_add(n)?;
+        if new_bump > self.total_pages {
+            return None;
+        }
+        let offset = self.bump;
+        self.bump = new_bump;
+        Some(offset)
     }
 
     /// Map pages from the backing store into a CODE cap's window.
@@ -170,6 +195,8 @@ impl Drop for BackingStore {
 pub struct BackingStore {
     data: Vec<u8>,
     total_pages: u32,
+    /// Global next-free-page cursor. See the Linux variant for docs.
+    bump: u32,
 }
 
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
@@ -179,11 +206,22 @@ impl BackingStore {
         Some(Self {
             data: vec![0u8; size],
             total_pages,
+            bump: 0,
         })
     }
 
     pub fn total_pages(&self) -> u32 {
         self.total_pages
+    }
+
+    pub fn allocate_pages(&mut self, n: u32) -> Option<u32> {
+        let new_bump = self.bump.checked_add(n)?;
+        if new_bump > self.total_pages {
+            return None;
+        }
+        let offset = self.bump;
+        self.bump = new_bump;
+        Some(offset)
     }
 
     /// No-op on non-Linux: the window is not used by the interpreter.
