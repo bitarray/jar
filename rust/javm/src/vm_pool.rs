@@ -367,7 +367,7 @@ impl<P: ProtocolCapT> VmArena<P> {
 /// Hosts with no foreign frames use `()` and the `Foreign(())` arm is
 /// unreachable in practice (because `as_foreign_frame` returns `None`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameRef<F = ()> {
+pub enum FrameId<F = ()> {
     Vm(u16),
     Ephemeral(EphemeralTableId),
     Foreign(F),

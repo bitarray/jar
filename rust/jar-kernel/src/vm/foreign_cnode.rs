@@ -3,7 +3,7 @@
 //!
 //! When a cap-ref crossing lands on a `Cap::Protocol(KernelCap)` whose
 //! `as_foreign_frame()` returns `Some(VaultId)`, javm packages that as
-//! `FrameRef::Foreign(VaultId)` and routes subsequent slot operations
+//! `FrameId::Foreign(VaultId)` and routes subsequent slot operations
 //! (`fc_take` / `fc_set` / `fc_clone` / `fc_drop` / `fc_is_empty`)
 //! through this adapter.
 //!

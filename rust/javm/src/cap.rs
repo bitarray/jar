@@ -373,7 +373,7 @@ pub struct EphemeralTableCap {
 /// (Vault CNodes). A protocol cap can announce itself as a handle into
 /// such a foreign frame by overriding [`ProtocolCapT::as_foreign_frame`];
 /// when javm's resolve walk crosses through that cap, the resulting
-/// `FrameRef::Foreign(id)` is fed to a host-provided
+/// `FrameId::Foreign(id)` is fed to a host-provided
 /// [`ForeignCnode`] implementation for slot-level operations.
 pub trait ProtocolCapT: Clone + core::fmt::Debug {
     /// Identifier the host uses to address one of its foreign frames.
@@ -441,7 +441,7 @@ impl ProtocolCapT for u8 {
 /// slot storage (which may indirect through a registry, enforce rights,
 /// etc.). javm calls these methods from `MGMT_MOVE` / `MGMT_COPY` /
 /// `MGMT_DROP` ecallis when the resolve walk lands on a
-/// `FrameRef::Foreign`.
+/// `FrameId::Foreign`.
 ///
 /// `id` identifies the host frame; `rights` carries the
 /// operation-rights bag captured at the final crossing step, so the
@@ -492,7 +492,7 @@ pub trait ForeignCnode<P: ProtocolCapT> {
 
 /// Zero-sized default `ForeignCnode` for hosts (and tests / benches)
 /// that don't expose any foreign frames. All methods fail silently —
-/// `MGMT_MOVE` / etc. against a `FrameRef::Foreign` simply report
+/// `MGMT_MOVE` / etc. against a `FrameId::Foreign` simply report
 /// `RESULT_WHAT` to the guest, since `as_foreign_frame()` defaults to
 /// `None` and so no `Foreign` ref will ever be produced.
 pub struct NoForeignCnode;

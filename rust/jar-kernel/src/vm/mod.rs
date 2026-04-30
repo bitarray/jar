@@ -106,7 +106,7 @@ pub enum HostCallOutcome {
 ///
 /// On every iteration of the run loop, we construct a fresh
 /// [`foreign_cnode::VaultCnodeView`] borrowing `ctx.state`. javm
-/// consults this adapter for slot operations on `FrameRef::Foreign`
+/// consults this adapter for slot operations on `FrameId::Foreign`
 /// frames produced by its resolve walk (i.e. when the guest does
 /// `MGMT_MOVE` / `MGMT_COPY` / `MGMT_DROP` against a cap-ref that
 /// crosses through a `VaultRef`). The adapter is rebuilt each
