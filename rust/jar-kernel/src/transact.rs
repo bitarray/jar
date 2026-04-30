@@ -102,11 +102,17 @@ pub fn run_one_invocation<H: Hardware>(
     kind: SlotKind,
     reach_idx: u32,
     payload: &[u8],
+    memory_budget: u32,
     attestation_trace: &mut Vec<AttestationEntry>,
     result_trace: &mut Vec<ResultEntry>,
     cursor: &mut AttestCursor,
     hw: &H,
 ) -> KResult<(ReachEntry, Vec<Command>)> {
+    let memory_pages = if memory_budget > 0 {
+        memory_budget
+    } else {
+        crate::vm::INVOCATION_MEMORY_BUDGET
+    };
     // No StateSnapshot: faults discard the Frame; persistent caps in
     // Vaults are unchanged because reads are COPY (not MOVE) and
     // managers explicitly stage commits via MGMT_MOVE Frame → Vault.
@@ -116,7 +122,8 @@ pub fn run_one_invocation<H: Hardware>(
     // init replaces the legacy "fetch JAR blob, re-parse manifest"
     // path). vault_init walks vault.slots and translates persistent
     // caps to ephemeral counterparts at the same slot index.
-    let mut vm: Vm = crate::vm::new_vm_from_vault(state, target, INVOCATION_GAS_BUDGET, None)?;
+    let mut vm: Vm =
+        crate::vm::new_vm_from_vault(state, target, INVOCATION_GAS_BUDGET, memory_pages, None)?;
     populate_host_call_slots(&mut vm);
     populate_home_vault_ref(&mut vm, target);
     populate_ephemeral_kernel_caps(
@@ -315,6 +322,7 @@ pub fn run_phase<H: Hardware>(
                     SlotKind::Schedule,
                     reach_idx,
                     &[],
+                    0, // memory_budget = 0 → falls back to INVOCATION_MEMORY_BUDGET
                     &mut body.attestation_trace,
                     &mut body.result_trace,
                     block_cursor,
@@ -340,12 +348,14 @@ pub fn run_phase<H: Hardware>(
                         let (_target, ref mut events) = body.events[body_event_idx];
                         let mut event = std::mem::take(&mut events[event_idx]);
                         let payload = event.payload.clone();
+                        let memory_budget = event.memory_budget;
                         let result = run_one_invocation(
                             state,
                             target,
                             SlotKind::Transact,
                             reach_idx,
                             &payload,
+                            memory_budget,
                             &mut event.attestation_trace,
                             &mut event.result_trace,
                             &mut event_cursor,

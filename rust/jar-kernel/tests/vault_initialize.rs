@@ -15,6 +15,7 @@ use jar_kernel::{CapRecord, Capability, State, Vault, VaultId};
 
 const INIT_SLOT: u8 = 64;
 const INVOCATION_GAS: u64 = 100_000_000;
+const TEST_MEM_PAGES: u32 = 16;
 
 /// Extract the raw code sub-blob (jump_table + code + bitmask) from
 /// the CODE manifest entry of jar-kernel's halt smoke fixture.
@@ -34,7 +35,6 @@ fn vault_with_init_code() -> (State, VaultId) {
     let vault_id = state.next_vault_id();
     let mut v = Vault::new();
     v.init_cap = INIT_SLOT;
-    v.quota_pages = 16;
     state.vaults.insert(vault_id, Arc::new(v));
 
     let code_cap_id = cap_registry::alloc(
@@ -59,7 +59,7 @@ fn vault_with_init_code() -> (State, VaultId) {
 fn new_vm_from_vault_smoke_test() {
     let (state, vault_id) = vault_with_init_code();
 
-    let vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, None)
+    let vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, TEST_MEM_PAGES, None)
         .expect("new_vm_from_vault succeeds");
 
     // Two arena entries: VM 0 (root) + bare Frame.
@@ -80,7 +80,7 @@ fn initialize_callable_slot_read_returns_some_when_present() {
     // Mirrors what an init program would do at runtime via
     // MGMT_MOVE before halting.
     let (state, vault_id) = vault_with_init_code();
-    let mut vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, None).unwrap();
+    let mut vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, TEST_MEM_PAGES, None).unwrap();
     let bare_idx = vm.bare_frame_id.index();
     let bare_id = vm.bare_frame_id;
     let frame_ref = javm::cap::FrameRefCap {
@@ -104,7 +104,7 @@ fn initialize_callable_slot_read_returns_some_when_present() {
 #[test]
 fn initialize_callable_none_when_slot_empty() {
     let (state, vault_id) = vault_with_init_code();
-    let vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, None).unwrap();
+    let vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, TEST_MEM_PAGES, None).unwrap();
     assert!(
         vm.read_bare_frame_slot(jar_kernel::vm::INITIALIZE_CALLABLE_SLOT)
             .is_none()
@@ -119,7 +119,7 @@ fn set_args_places_data_cap_at_bare_frame_slot_4() {
     // length. The kernel does *not* map the cap — the guest does
     // that via `javm_builtins::map_args` at runtime.
     let (state, vault_id) = vault_with_init_code();
-    let mut vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, None).unwrap();
+    let mut vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, TEST_MEM_PAGES, None).unwrap();
 
     let payload = b"hello world".to_vec();
     vm.set_args(&payload).expect("set_args ok");
@@ -155,7 +155,7 @@ fn set_args_rejects_double_call() {
     // `set_args` must be called at most once per kernel; the second
     // call should error because slot 4 is already populated.
     let (state, vault_id) = vault_with_init_code();
-    let mut vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, None).unwrap();
+    let mut vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, TEST_MEM_PAGES, None).unwrap();
 
     vm.set_args(b"first").expect("first set_args ok");
     let err = vm.set_args(b"second").expect_err("second set_args fails");
@@ -184,7 +184,7 @@ fn new_vm_from_vault_extra_persistent_cap_propagates() {
     v.slots.set(100, Some(vr_cap_id));
     state.vaults.insert(vault_id, Arc::new(v));
 
-    let vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, None)
+    let vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, TEST_MEM_PAGES, None)
         .expect("new_vm_from_vault succeeds");
 
     // Slot 100 should hold the registered VaultRef.

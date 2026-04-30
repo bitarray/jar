@@ -31,13 +31,12 @@ pub struct Vault {
     /// Slot in `slots` whose CodeCap is the **initialize program**.
     /// `Vault.initialize` runs the CodeCap at this slot to bootstrap a
     /// fresh Frame; the init program decides what becomes the public
-    /// Callable (returned via bare-Frame slot 4).
+    /// Callable (returned via bare-Frame slot 5).
     pub init_cap: u8,
-    /// Maximum total page footprint allowed for caps stored in `slots`.
-    /// Counts pages of every CodeCap and DataCap reachable from `slots`.
-    pub quota_pages: u64,
-    /// Currently consumed page footprint. `total_pages ≤ quota_pages`.
-    pub total_pages: u64,
+    // No `quota_pages` / `total_pages`: memory budget is now caller-
+    // specified per-event (`Event.memory_budget`) and lives entirely
+    // in the per-invocation `UntypedCap` at bare-Frame slot 9.
+    // Vault declares no budget.
 }
 
 impl Vault {

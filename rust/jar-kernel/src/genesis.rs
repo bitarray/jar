@@ -38,7 +38,6 @@ pub struct GenesisBuilder {
     pub transact_blob: Vec<u8>,
     pub block_final_blob: Vec<u8>,
     pub dispatch_blob: Vec<u8>,
-    pub default_quota_pages: u64,
 }
 
 impl Default for GenesisBuilder {
@@ -48,7 +47,6 @@ impl Default for GenesisBuilder {
             transact_blob: code_blobs::halt_blob().to_vec(),
             block_final_blob: code_blobs::halt_blob().to_vec(),
             dispatch_blob: code_blobs::slot_clear_blob().to_vec(),
-            default_quota_pages: 256,
         }
     }
 }
@@ -72,7 +70,6 @@ impl GenesisBuilder {
             transact_blob,
             block_final_blob,
             dispatch_blob,
-            default_quota_pages,
         } = self;
         let mut state = State::empty();
 
@@ -105,7 +102,7 @@ impl GenesisBuilder {
         state.dispatch_space_cnode = dcn_cap;
 
         // Slot 0: Schedule(block_init).
-        let bi_vault = alloc_vault_with_code(&mut state, block_init_blob, default_quota_pages);
+        let bi_vault = alloc_vault_with_code(&mut state, block_init_blob);
         let bi_cap = cnode::mint_and_place(
             &mut state,
             Capability::Schedule(ScheduleCap {
@@ -118,7 +115,7 @@ impl GenesisBuilder {
         )?;
 
         // Slot 1: Transact(...).
-        let t_vault = alloc_vault_with_code(&mut state, transact_blob, default_quota_pages);
+        let t_vault = alloc_vault_with_code(&mut state, transact_blob);
         let t_cap = cnode::mint_and_place(
             &mut state,
             Capability::Transact(TransactCap {
@@ -131,7 +128,7 @@ impl GenesisBuilder {
         )?;
 
         // Slot 2: Schedule(block_final).
-        let bf_vault = alloc_vault_with_code(&mut state, block_final_blob, default_quota_pages);
+        let bf_vault = alloc_vault_with_code(&mut state, block_final_blob);
         let bf_cap = cnode::mint_and_place(
             &mut state,
             Capability::Schedule(ScheduleCap {
@@ -144,7 +141,7 @@ impl GenesisBuilder {
         )?;
 
         // Dispatch entrypoint Vault and its registered Dispatch cap, born_in dispatch_cnode.
-        let d_vault = alloc_vault_with_code(&mut state, dispatch_blob, default_quota_pages);
+        let d_vault = alloc_vault_with_code(&mut state, dispatch_blob);
         let d_cap = cnode::mint_and_place(
             &mut state,
             Capability::Dispatch(DispatchCap {
@@ -184,7 +181,7 @@ impl GenesisBuilder {
 /// `Capability::Data` entries placed in `vault.slots` directly. The
 /// fixtures shipped today (halt, slot_clear) don't use DATA caps, so
 /// dropping the manifest's DATA entries is observably a no-op.
-fn alloc_vault_with_code(state: &mut State, jar_blob: Vec<u8>, quota_pages: u64) -> VaultId {
+fn alloc_vault_with_code(state: &mut State, jar_blob: Vec<u8>) -> VaultId {
     use crate::state::cap_registry as reg;
     use crate::types::CapRecord;
 
@@ -202,7 +199,6 @@ fn alloc_vault_with_code(state: &mut State, jar_blob: Vec<u8>, quota_pages: u64)
     let vault_id = state.next_vault_id();
     let mut v = crate::types::Vault::new();
     v.init_cap = DEFAULT_INIT_CAP_SLOT;
-    v.quota_pages = quota_pages;
 
     // Register the persistent CodeCap (raw code sub-blob) at the init slot.
     let code_cap_id = reg::alloc(

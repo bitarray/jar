@@ -41,8 +41,9 @@ pub type InitArtifacts = javm::kernel::InvocationArtifacts<KernelCap>;
 
 /// Walk `vault.slots` and produce the artifacts needed to construct
 /// an `InvocationKernel<KernelCap>` for `Vault.initialize`. The page
-/// budget for the kernel's UntypedCap and BackingStore is the home
-/// Vault's `quota_pages`, capped at `u32::MAX`.
+/// budget for the kernel's UntypedCap and BackingStore is the
+/// caller-supplied `memory_pages`. Vault no longer declares its
+/// own quota — memory budget is per-event (Event.memory_budget).
 ///
 /// Returns `KernelError::Pinning` if a pinned cap (Dispatch / Transact
 /// / Schedule + Refs) is encountered in `vault.slots` (defense in
@@ -54,12 +55,12 @@ pub type InitArtifacts = javm::kernel::InvocationArtifacts<KernelCap>;
 pub fn build_init_cap_table(
     state: &State,
     vault_id: VaultId,
+    memory_pages: u32,
     mut code_cache: Option<&mut javm::CodeCache>,
     backend: javm::PvmBackend,
 ) -> KResult<InitArtifacts> {
     let vault = state.vault(vault_id)?;
     let init_slot = vault.init_cap;
-    let memory_pages: u32 = vault.quota_pages.min(u32::MAX as u64) as u32;
     let mem_cycles = javm::compute_mem_cycles(memory_pages);
 
     if vault.slots.get(0).is_some() {
@@ -198,15 +199,19 @@ mod tests {
     use crate::state::cnode;
     use crate::types::{CapRecord, Vault};
 
-    fn empty_state_with_vault(init_cap: u8, quota_pages: u64) -> (State, VaultId) {
+    fn empty_state_with_vault(init_cap: u8) -> (State, VaultId) {
         let mut state = State::empty();
         let vault_id = state.next_vault_id();
         let mut v = Vault::new();
         v.init_cap = init_cap;
-        v.quota_pages = quota_pages;
         state.vaults.insert(vault_id, Arc::new(v));
         (state, vault_id)
     }
+
+    /// Per-test memory budget (matches Event::default's
+    /// memory_budget). Generous enough for the small fixtures used
+    /// in these tests.
+    const TEST_MEM_PAGES: u32 = 16;
 
     fn place(state: &mut State, vault_id: VaultId, slot: u8, cap: Capability) {
         let cap_id = cap_registry::alloc(
@@ -243,7 +248,7 @@ mod tests {
 
     #[test]
     fn single_codecap_at_slot_64() {
-        let (mut state, vault_id) = empty_state_with_vault(64, 16);
+        let (mut state, vault_id) = empty_state_with_vault(64);
         place(
             &mut state,
             vault_id,
@@ -253,8 +258,14 @@ mod tests {
             }),
         );
 
-        let artifacts =
-            build_init_cap_table(&state, vault_id, None, javm::PvmBackend::Default).unwrap();
+        let artifacts = build_init_cap_table(
+            &state,
+            vault_id,
+            TEST_MEM_PAGES,
+            None,
+            javm::PvmBackend::Default,
+        )
+        .unwrap();
 
         assert_eq!(artifacts.code_caps.len(), 1);
         assert_eq!(artifacts.init_code_id, 0);
@@ -263,7 +274,7 @@ mod tests {
 
     #[test]
     fn vaultref_passthrough() {
-        let (mut state, vault_id) = empty_state_with_vault(64, 16);
+        let (mut state, vault_id) = empty_state_with_vault(64);
         place(
             &mut state,
             vault_id,
@@ -282,8 +293,14 @@ mod tests {
             }),
         );
 
-        let artifacts =
-            build_init_cap_table(&state, vault_id, None, javm::PvmBackend::Default).unwrap();
+        let artifacts = build_init_cap_table(
+            &state,
+            vault_id,
+            TEST_MEM_PAGES,
+            None,
+            javm::PvmBackend::Default,
+        )
+        .unwrap();
         match artifacts.cap_table.get(100) {
             Some(Cap::Protocol(KernelCap::Registered {
                 cap: Capability::VaultRef(vr),
@@ -297,7 +314,7 @@ mod tests {
 
     #[test]
     fn datacap_propagated_unmapped() {
-        let (mut state, vault_id) = empty_state_with_vault(64, 16);
+        let (mut state, vault_id) = empty_state_with_vault(64);
         place(
             &mut state,
             vault_id,
@@ -316,8 +333,14 @@ mod tests {
             }),
         );
 
-        let artifacts =
-            build_init_cap_table(&state, vault_id, None, javm::PvmBackend::Default).unwrap();
+        let artifacts = build_init_cap_table(
+            &state,
+            vault_id,
+            TEST_MEM_PAGES,
+            None,
+            javm::PvmBackend::Default,
+        )
+        .unwrap();
         match artifacts.cap_table.get(65) {
             Some(Cap::Data(d)) => {
                 assert_eq!(d.page_count, 1);
@@ -331,16 +354,22 @@ mod tests {
 
     #[test]
     fn missing_init_cap_errors() {
-        let (state, vault_id) = empty_state_with_vault(64, 16); // no caps placed
-        let err = build_init_cap_table(&state, vault_id, None, javm::PvmBackend::Default)
-            .err()
-            .expect("error expected");
+        let (state, vault_id) = empty_state_with_vault(64); // no caps placed
+        let err = build_init_cap_table(
+            &state,
+            vault_id,
+            TEST_MEM_PAGES,
+            None,
+            javm::PvmBackend::Default,
+        )
+        .err()
+        .expect("error expected");
         assert!(matches!(err, KernelError::Internal(_)));
     }
 
     #[test]
     fn wrong_shape_at_init_cap_errors() {
-        let (mut state, vault_id) = empty_state_with_vault(64, 16);
+        let (mut state, vault_id) = empty_state_with_vault(64);
         place(
             &mut state,
             vault_id,
@@ -350,15 +379,21 @@ mod tests {
                 rights: VaultRights::ALL,
             }),
         );
-        let err = build_init_cap_table(&state, vault_id, None, javm::PvmBackend::Default)
-            .err()
-            .expect("error expected");
+        let err = build_init_cap_table(
+            &state,
+            vault_id,
+            TEST_MEM_PAGES,
+            None,
+            javm::PvmBackend::Default,
+        )
+        .err()
+        .expect("error expected");
         assert!(matches!(err, KernelError::Internal(_)));
     }
 
     #[test]
     fn pinned_cap_in_slot_rejected() {
-        let (mut state, vault_id) = empty_state_with_vault(64, 16);
+        let (mut state, vault_id) = empty_state_with_vault(64);
         place(
             &mut state,
             vault_id,
@@ -380,15 +415,21 @@ mod tests {
             }),
         );
 
-        let err = build_init_cap_table(&state, vault_id, None, javm::PvmBackend::Default)
-            .err()
-            .expect("Pinning expected");
+        let err = build_init_cap_table(
+            &state,
+            vault_id,
+            TEST_MEM_PAGES,
+            None,
+            javm::PvmBackend::Default,
+        )
+        .err()
+        .expect("Pinning expected");
         assert!(matches!(err, KernelError::Pinning(_)));
     }
 
     #[test]
     fn slot_zero_rejected() {
-        let (mut state, vault_id) = empty_state_with_vault(64, 16);
+        let (mut state, vault_id) = empty_state_with_vault(64);
         // Place a CodeCap at slot 0 (which is kernel-reserved). The
         // genesis builder migrated to slot 64; this is a test for
         // defense-in-depth against any caller that ignores the
@@ -402,9 +443,15 @@ mod tests {
             }),
         );
 
-        let err = build_init_cap_table(&state, vault_id, None, javm::PvmBackend::Default)
-            .err()
-            .expect("error expected");
+        let err = build_init_cap_table(
+            &state,
+            vault_id,
+            TEST_MEM_PAGES,
+            None,
+            javm::PvmBackend::Default,
+        )
+        .err()
+        .expect("error expected");
         assert!(matches!(err, KernelError::Internal(_)));
     }
 }

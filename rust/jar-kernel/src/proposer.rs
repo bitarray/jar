@@ -68,6 +68,7 @@ pub fn drain_for_body(node: &NodeOffchain, state: &State) -> KResult<Body> {
             };
             groups.entry(slot_idx).or_default().push(Event {
                 payload: payload.clone(),
+                memory_budget: 0, // proposer doesn't size; falls back to INVOCATION_MEMORY_BUDGET
                 caps: caps.clone(),
                 attestation_trace: attestation_trace.clone(),
                 result_trace: result_trace.clone(),

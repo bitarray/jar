@@ -38,6 +38,12 @@ use crate::vm::host_abi::HostCall;
 // TODO(spec): per-event gas budget should come from Event/cap.
 pub const INVOCATION_GAS_BUDGET: u64 = 100_000_000;
 
+/// Default per-invocation memory budget (in pages, 4KB each). Used
+/// by kernel-driven invocations (dispatch step-2/step-3, system
+/// vaults) and as the fallback for `Event.memory_budget == 0`.
+/// Matches the legacy `Vault.quota_pages` default.
+pub const INVOCATION_MEMORY_BUDGET: u32 = 256;
+
 /// Convenience alias: the `InvocationKernel` parameterized over the
 /// kernel's protocol-cap payload.
 pub type Vm = javm::kernel::InvocationKernel<KernelCap>;
@@ -57,11 +63,13 @@ pub fn new_vm_from_vault(
     state: &State,
     vault_id: VaultId,
     gas: u64,
+    memory_pages: u32,
     code_cache: Option<&mut javm::CodeCache>,
 ) -> KResult<Vm> {
     let artifacts = crate::state::vault_init::build_init_cap_table(
         state,
         vault_id,
+        memory_pages,
         code_cache,
         javm::PvmBackend::Default,
     )?;

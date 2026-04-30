@@ -25,8 +25,7 @@ pub fn state_root(state: &State) -> Hash {
     for (vid, vault) in &state.vaults {
         push_u64(&mut buf, vid.0);
         buf.push(vault.init_cap);
-        push_u64(&mut buf, vault.quota_pages);
-        push_u64(&mut buf, vault.total_pages);
+        // quota_pages / total_pages removed — memory budget is per-event.
         for (i, slot) in vault.slots.slots.iter().enumerate() {
             buf.push(i as u8);
             push_u64(&mut buf, slot.map(|c| c.0).unwrap_or(0));

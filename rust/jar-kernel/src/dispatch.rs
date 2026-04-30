@@ -109,6 +109,7 @@ pub fn handle_inbound_dispatch<H: Hardware>(
             &state_clone,
             entrypoint,
             INVOCATION_GAS_BUDGET,
+            crate::vm::INVOCATION_MEMORY_BUDGET,
             Some(&mut node.code_cache),
         )?;
         let mut slot_emission: Option<SlotContent> = None;
@@ -152,6 +153,7 @@ pub fn handle_inbound_dispatch<H: Hardware>(
             &state_clone,
             entrypoint,
             INVOCATION_GAS_BUDGET,
+            crate::vm::INVOCATION_MEMORY_BUDGET,
             Some(&mut node.code_cache),
         )?;
         let mut ctx = InvocationCtx {
