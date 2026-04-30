@@ -141,21 +141,13 @@ pub const GAS_SLOT: u8 = 3;
 /// FaultHandler authority. Default is BareFrame `B_FH = slot 10`
 /// (single shared cap, every parent in the call stack catches its
 /// immediate child's fault). A frame can MOVE the cap to its own
-/// MainFrame `M_FH = slot 10` via `MGMT_FH_MOVE`, claiming
-/// exclusive recovery — intermediate frames between the holder
-/// and a faulting descendant cascade-fault. Auto-moves back to
-/// `B_FH` on the holder's REPLY/fault.
+/// MainFrame `M_FH = slot 10` via the generic `MGMT_MOVE` op
+/// (`ecall_move` allows the mirror move under a narrow whitelist;
+/// arbitrary pinned-slot moves still refuse). Claiming exclusive
+/// recovery makes intermediate frames between the holder and a
+/// faulting descendant cascade-fault. The kernel auto-releases
+/// `M_FH → B_FH` on the holder's REPLY/halt/fault.
 pub const FAULT_HANDLER_SLOT: u8 = 10;
-
-/// Cross-frame move op for the FaultHandler cap (modern
-/// `dispatch_ecall` path). Toggles the cap between BareFrame
-/// `B_FH` (the default shared location) and the active VM's
-/// MainFrame `M_FH` (claimed exclusive recovery). Read φ[7] for
-/// the direction: `0` = claim (B_FH → M_FH), `1` = release
-/// (M_FH → B_FH). Returns `0` on success, `RESULT_WHAT` on any
-/// failure (slot empty, destination occupied, cap is not a
-/// FaultHandler, bad direction).
-pub const MGMT_FH_MOVE: u32 = 0x10;
 
 /// WHAT error code (2^64 - 2).
 const RESULT_WHAT: u64 = u64::MAX - 1;
@@ -589,8 +581,8 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                 self.flush_live_ctx();
                 self.handle_call_vm(target_vm)
             }
-            Cap::Data(_) => {
-                // DATA is not callable
+            Cap::Data(_) | Cap::FaultHandler(_) => {
+                // Neither DATA nor FaultHandler is callable.
                 self.set_active_reg(7, RESULT_WHAT);
                 DispatchResult::Continue
             }
@@ -1244,94 +1236,11 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                 let (o_frame, o_slot, _) = resolve!(self, object_ref);
                 self.ecall_untyped_derive(s_frame, s_slot, o_frame, o_slot)
             }
-            MGMT_FH_MOVE => {
-                // FH_MOVE — toggle the FaultHandler cap between B_FH
-                // (BareFrame slot 10) and M_FH (active VM's MainFrame
-                // slot 10). Direction in φ[7]: 0 = claim, 1 = release.
-                self.ecall_fh_move()
-            }
             _ => {
                 self.set_active_reg(7, RESULT_WHAT);
                 DispatchResult::Continue
             }
         }
-    }
-
-    /// MGMT_FH_MOVE handler. Reads φ[7] for direction:
-    ///
-    /// - `0` = claim: move cap from BareFrame `B_FH` to the active
-    ///   VM's MainFrame `M_FH`. Requires `B_FH` non-empty and `M_FH`
-    ///   empty.
-    /// - `1` = release: move cap from active VM's MainFrame `M_FH`
-    ///   to BareFrame `B_FH`. Requires `M_FH` non-empty and `B_FH`
-    ///   empty.
-    ///
-    /// In either direction, the cap must satisfy `is_fault_handler()`
-    /// (via the `ProtocolCapT` trait) — the kernel refuses to move
-    /// arbitrary caps through this path. Sets φ[7] to 0 on success,
-    /// `RESULT_WHAT` on any failure.
-    fn ecall_fh_move(&mut self) -> DispatchResult {
-        let direction = self.active_reg(7);
-        let bare_idx = self.bare_frame_idx();
-        let active_idx = self.active_vm;
-
-        // Source / destination by direction.
-        let (src_idx, dst_idx) = match direction {
-            0 => (bare_idx, active_idx), // claim: B_FH → M_FH
-            1 => (active_idx, bare_idx), // release: M_FH → B_FH
-            _ => {
-                self.set_active_reg(7, RESULT_WHAT);
-                return DispatchResult::Continue;
-            }
-        };
-
-        // Same-VM (active = bare) makes no sense; reject for safety.
-        if src_idx == dst_idx {
-            self.set_active_reg(7, RESULT_WHAT);
-            return DispatchResult::Continue;
-        }
-
-        // Destination must be empty.
-        if !self
-            .vm_arena
-            .vm(dst_idx)
-            .cap_table
-            .is_empty(FAULT_HANDLER_SLOT)
-        {
-            self.set_active_reg(7, RESULT_WHAT);
-            return DispatchResult::Continue;
-        }
-
-        // Take from source; verify it's a FaultHandler-shaped cap.
-        let cap = match self
-            .vm_arena
-            .vm_mut(src_idx)
-            .cap_table
-            .take(FAULT_HANDLER_SLOT)
-        {
-            Some(c) => c,
-            None => {
-                self.set_active_reg(7, RESULT_WHAT);
-                return DispatchResult::Continue;
-            }
-        };
-        let is_fh = matches!(&cap, Cap::Protocol(p) if p.is_fault_handler());
-        if !is_fh {
-            // Restore and fail.
-            self.vm_arena
-                .vm_mut(src_idx)
-                .cap_table
-                .set(FAULT_HANDLER_SLOT, cap);
-            self.set_active_reg(7, RESULT_WHAT);
-            return DispatchResult::Continue;
-        }
-
-        self.vm_arena
-            .vm_mut(dst_idx)
-            .cap_table
-            .set(FAULT_HANDLER_SLOT, cap);
-        self.set_active_reg(7, 0);
-        DispatchResult::Continue
     }
 
     /// MGMT_UNTYPED_DERIVE handler (modern dispatch_ecall path).
@@ -2018,6 +1927,38 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         DispatchResult::Continue
     }
 
+    /// True iff the move is the kernel-blessed FaultHandler mirror
+    /// move (B_FH ↔ active VM's M_FH). Pinned-slot enforcement
+    /// allows this single whitelist; everything else hitting a
+    /// pinned slot still rejects.
+    fn is_fault_handler_mirror_move(
+        &self,
+        s_frame: FrameId<P::ForeignFrameId>,
+        s_slot: u8,
+        o_frame: FrameId<P::ForeignFrameId>,
+        o_slot: u8,
+    ) -> bool {
+        if s_slot != FAULT_HANDLER_SLOT || o_slot != FAULT_HANDLER_SLOT {
+            return false;
+        }
+        let bare_idx = self.bare_frame_idx();
+        let active_idx = self.active_vm;
+        let pair_ok = match (s_frame, o_frame) {
+            (FrameId::Vm(s), FrameId::Vm(o)) => {
+                (s == bare_idx && o == active_idx) || (s == active_idx && o == bare_idx)
+            }
+            _ => false,
+        };
+        if !pair_ok {
+            return false;
+        }
+        // Source must currently hold a FaultHandler cap.
+        matches!(
+            self.frame_table(s_frame).and_then(|t| t.get(s_slot)),
+            Some(Cap::FaultHandler(_))
+        )
+    }
+
     /// MOVE a cap between Frames. Auto-unmaps DATA from source if cross-frame;
     /// auto-remaps in destination if `mappings[dst_vm]` is recorded.
     /// `Foreign` participation routes the take/set through the host's
@@ -2036,18 +1977,23 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         if s_frame == o_frame && s_slot == o_slot {
             return DispatchResult::Continue;
         }
-        // Refuse on kernel-pinned slots in either endpoint (local VMs).
-        if let FrameId::Vm(idx) = s_frame
-            && self.vm_arena.vm(idx).cap_table.is_pinned(s_slot)
-        {
-            self.set_active_reg(7, RESULT_WHAT);
-            return DispatchResult::Continue;
-        }
-        if let FrameId::Vm(idx) = o_frame
-            && self.vm_arena.vm(idx).cap_table.is_pinned(o_slot)
-        {
-            self.set_active_reg(7, RESULT_WHAT);
-            return DispatchResult::Continue;
+        // Pinned-slot enforcement, with one whitelisted pattern: the
+        // FaultHandler mirror move (B_FH ↔ active VM's M_FH). The cap
+        // at the source must already be a `Cap::FaultHandler` so a
+        // guest can't smuggle some other cap into the FH slot.
+        if !self.is_fault_handler_mirror_move(s_frame, s_slot, o_frame, o_slot) {
+            if let FrameId::Vm(idx) = s_frame
+                && self.vm_arena.vm(idx).cap_table.is_pinned(s_slot)
+            {
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
+            if let FrameId::Vm(idx) = o_frame
+                && self.vm_arena.vm(idx).cap_table.is_pinned(o_slot)
+            {
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
         }
         if !self.frame_is_empty(host, o_frame, o_slot) {
             self.set_active_reg(7, RESULT_WHAT);
@@ -3195,22 +3141,17 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     /// holder).
     fn fault_handler_visible_to(&self, vm_idx: u16) -> bool {
         let bare_idx = self.bare_frame_idx();
-        let b_fh = self
-            .vm_arena
-            .vm(bare_idx)
-            .cap_table
-            .get(FAULT_HANDLER_SLOT)
-            .map(|c| matches!(c, Cap::Protocol(p) if p.is_fault_handler()))
-            .unwrap_or(false);
+        let b_fh = matches!(
+            self.vm_arena.vm(bare_idx).cap_table.get(FAULT_HANDLER_SLOT),
+            Some(Cap::FaultHandler(_))
+        );
         if b_fh {
             return true;
         }
-        self.vm_arena
-            .vm(vm_idx)
-            .cap_table
-            .get(FAULT_HANDLER_SLOT)
-            .map(|c| matches!(c, Cap::Protocol(p) if p.is_fault_handler()))
-            .unwrap_or(false)
+        matches!(
+            self.vm_arena.vm(vm_idx).cap_table.get(FAULT_HANDLER_SLOT),
+            Some(Cap::FaultHandler(_))
+        )
     }
 
     /// If `vm_idx`'s MainFrame holds the FaultHandler, move it back to
@@ -3233,8 +3174,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             Some(c) => c,
             None => return,
         };
-        let is_fh = matches!(&cap, Cap::Protocol(p) if p.is_fault_handler());
-        if !is_fh {
+        if !matches!(&cap, Cap::FaultHandler(_)) {
             // Not a FaultHandler — restore in place.
             self.vm_arena
                 .vm_mut(vm_idx)
@@ -3551,6 +3491,7 @@ pub fn cap_table_from_blob<P: ProtocolCapT>(
 mod tests {
     use super::*;
     // (removed: ProtocolCap unwrapped into u8 directly)
+    use crate::cap::{FaultHandlerCap, FaultHandlerRights};
     use crate::program::{CapEntryType, CapManifestEntry, build_blob};
 
     /// Build a minimal code sub-blob (code_header + jump_table + code + bitmask).
@@ -4243,6 +4184,86 @@ mod tests {
         assert!(
             kernel.vm_arena.vm(0).cap_table.get(50).is_some(),
             "slot 50 cleared (move should have failed)"
+        );
+    }
+
+    #[test]
+    fn mgmt_move_allows_fault_handler_mirror_swap() {
+        // Even though FAULT_HANDLER_SLOT is pinned in both BareFrame
+        // and MainFrame, the kernel whitelists the FH-mirror move so
+        // a guest can claim/release exclusive recovery via the
+        // generic MGMT_MOVE op.
+        let blob = make_simple_blob(10);
+        let mut kernel: InvocationKernel = kernel_from_blob(&blob, 100_000);
+        let _ = kernel.vm_arena.vm_mut(0).transition(VmState::Running);
+
+        // Place a FaultHandler at B_FH (kernel-internal write — guest
+        // would normally see it placed by the host's
+        // populate_ephemeral_kernel_caps).
+        let bare_idx = kernel.bare_frame_idx();
+        kernel.vm_arena.vm_mut(bare_idx).cap_table.set(
+            FAULT_HANDLER_SLOT,
+            Cap::FaultHandler(FaultHandlerCap {
+                rights: FaultHandlerRights::ALL,
+            }),
+        );
+        // Pin both endpoints to mirror what populate_* would do.
+        kernel
+            .vm_arena
+            .vm_mut(bare_idx)
+            .cap_table
+            .pin(FAULT_HANDLER_SLOT);
+        kernel.vm_arena.vm_mut(0).cap_table.pin(FAULT_HANDLER_SLOT);
+
+        // Claim: MOVE B_FH (subject) → M_FH (object). cap-ref encoding:
+        //   subject_ref = 0x000A00 (slot 0 indirection then bare slot 10)
+        //   object_ref  = 0x00000A (slot 10 of active VM, no indirection)
+        let subject_ref: u64 = (FAULT_HANDLER_SLOT as u64) << 8; // 0x000A00
+        let object_ref: u64 = FAULT_HANDLER_SLOT as u64; // 0x00000A
+        kernel.set_active_reg(12, object_ref | (subject_ref << 32));
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        kernel.flush_live_ctx();
+        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x06); // MOVE
+        assert!(matches!(result, DispatchResult::Continue));
+        assert!(
+            kernel
+                .vm_arena
+                .vm(bare_idx)
+                .cap_table
+                .is_empty(FAULT_HANDLER_SLOT),
+            "B_FH should be empty after claim"
+        );
+        assert!(
+            matches!(
+                kernel.vm_arena.vm(0).cap_table.get(FAULT_HANDLER_SLOT),
+                Some(Cap::FaultHandler(_))
+            ),
+            "M_FH should hold the FaultHandler after claim"
+        );
+
+        // Release: MOVE M_FH (subject) → B_FH (object). Reverse
+        // direction; same whitelist applies.
+        let subject_ref: u64 = FAULT_HANDLER_SLOT as u64;
+        let object_ref: u64 = (FAULT_HANDLER_SLOT as u64) << 8;
+        kernel.set_active_reg(12, object_ref | (subject_ref << 32));
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        kernel.flush_live_ctx();
+        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x06);
+        assert!(matches!(result, DispatchResult::Continue));
+        assert!(
+            kernel.vm_arena.vm(0).cap_table.is_empty(FAULT_HANDLER_SLOT),
+            "M_FH should be empty after release"
+        );
+        assert!(
+            matches!(
+                kernel
+                    .vm_arena
+                    .vm(bare_idx)
+                    .cap_table
+                    .get(FAULT_HANDLER_SLOT),
+                Some(Cap::FaultHandler(_))
+            ),
+            "B_FH should hold the FaultHandler after release"
         );
     }
 

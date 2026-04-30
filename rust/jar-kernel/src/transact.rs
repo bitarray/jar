@@ -256,8 +256,8 @@ pub(crate) fn populate_ephemeral_kernel_caps(
     caller: crate::types::Caller,
     invocation_gas: u64,
 ) {
-    use crate::cap::{FaultHandlerCap, FaultHandlerRights};
     use crate::types::{CallerKernelCap, CallerVaultCap, GasCap, SelfCap};
+    use javm::cap::{FaultHandlerCap, FaultHandlerRights};
 
     // BareFrame sub-slots 1, 3, and FAULT_HANDLER_SLOT.
     let bare_idx = vm.bare_frame_id.index();
@@ -289,16 +289,15 @@ pub(crate) fn populate_ephemeral_kernel_caps(
     table.pin(javm::kernel::GAS_SLOT);
 
     // FAULT_HANDLER_SLOT (= 10): per-invocation FaultHandler. Default
-    // is `B_FH`; a frame can claim exclusive recovery via MGMT_FH_MOVE
-    // → its own `M_FH`. Cap is move-only between B_FH and M_FH; the
-    // walk in javm's handle_vm_fault consults both locations.
+    // is `B_FH`; a frame can claim exclusive recovery by MOVE-ing the
+    // cap to its own `M_FH` via the generic `MGMT_MOVE` op (which the
+    // kernel allows under a narrow whitelist for this mirror move).
+    // The walk in javm's handle_vm_fault consults both locations.
     table.set(
         javm::kernel::FAULT_HANDLER_SLOT,
-        javm::cap::Cap::Protocol(KernelCap::Ephemeral(Capability::FaultHandler(
-            FaultHandlerCap {
-                rights: FaultHandlerRights::ALL,
-            },
-        ))),
+        javm::cap::Cap::FaultHandler(FaultHandlerCap {
+            rights: FaultHandlerRights::ALL,
+        }),
     );
     table.pin(javm::kernel::FAULT_HANDLER_SLOT);
 
@@ -518,8 +517,8 @@ mod tests {
             .cap_table
             .get(javm::kernel::FAULT_HANDLER_SLOT)
         {
-            Some(Cap::Protocol(KernelCap::Ephemeral(Capability::FaultHandler(fh)))) => {
-                assert_eq!(fh.rights, crate::cap::FaultHandlerRights::ALL);
+            Some(Cap::FaultHandler(fh)) => {
+                assert_eq!(fh.rights, javm::cap::FaultHandlerRights::ALL);
             }
             other => panic!("expected FaultHandler at B_FH, got {:?}", other.is_some()),
         }

@@ -173,8 +173,7 @@ fn translate_persistent(
         Capability::Gas(_)
         | Capability::SelfId(_)
         | Capability::CallerVault(_)
-        | Capability::CallerKernel(_)
-        | Capability::FaultHandler(_) => Err(KernelError::Internal(format!(
+        | Capability::CallerKernel(_) => Err(KernelError::Internal(format!(
             "ephemeral-only cap {:?} found persistently in vault.slots",
             std::mem::discriminant(cap)
         ))),

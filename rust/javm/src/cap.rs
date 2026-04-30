@@ -47,6 +47,36 @@ impl UntypedCap {
     }
 }
 
+/// Bitfield of recovery rights granted by the FaultHandler. Today the
+/// kernel doesn't gate on individual bits — the cap's mere presence at
+/// the active frame's `FAULT_HANDLER_SLOT` is the catch authority.
+/// Reserved for a future "if a hostcall failure isn't recoverable,
+/// fault hard" extension where individual fault classes become opt-in.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct FaultHandlerRights(pub u32);
+
+impl FaultHandlerRights {
+    pub const ALL: Self = Self(!0);
+    pub const NONE: Self = Self(0);
+}
+
+/// Per-invocation FaultHandler authority. Exactly one of these exists
+/// per invocation, lifetime-managed by the kernel. Default location
+/// is BareFrame `B_FH` (slot 10): with the cap there, every parent
+/// in the call stack catches its immediate child's fault. A frame
+/// can claim exclusive recovery by MOVE-ing the cap into its own
+/// MainFrame `M_FH` (slot 10) via the generic `MGMT_MOVE` op (the
+/// kernel allows the mirror move under a narrow whitelist; arbitrary
+/// pinned-slot moves still refuse).
+///
+/// Move-only: `is_copyable() = false`, `is_droppable() = false`.
+/// Auto-released back to `B_FH` when the holder VM REPLYs / halts /
+/// faults so an ancestor can still catch later faults.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct FaultHandlerCap {
+    pub rights: FaultHandlerRights,
+}
+
 /// Physical pages with exclusive mapping. Move-only (not copyable).
 ///
 /// Each DataCap carries per-VM mapping memory: `mappings` records where the
@@ -454,13 +484,6 @@ pub trait ProtocolCapT: Clone + core::fmt::Debug {
     fn gas_merge(&mut self, _donor: &Self) -> bool {
         false
     }
-    /// True if this cap is the per-invocation FaultHandler authority.
-    /// Consulted by the kernel's fault dispatch to identify the
-    /// catch-eligible cap at `FAULT_HANDLER_SLOT` in BareFrame /
-    /// MainFrame. Default is `false` (no FaultHandler-shaped caps).
-    fn is_fault_handler(&self) -> bool {
-        false
-    }
     /// If this cap is a handle into a foreign cap-table (e.g. a Vault
     /// CNode in jar-kernel), return the host's id for that frame plus
     /// the operation-rights bag the resolve walk should record at this
@@ -581,17 +604,22 @@ pub enum Cap<P: ProtocolCapT = u8> {
     Data(DataCap),
     Code(Arc<CodeCap>),
     FrameRef(FrameRefCap),
+    /// Per-invocation FaultHandler authority. Move-only between
+    /// `B_FH` and `M_FH` (mirror slots at `FAULT_HANDLER_SLOT`).
+    FaultHandler(FaultHandlerCap),
     Protocol(P),
 }
 
 impl<P: ProtocolCapT> Cap<P> {
     /// Whether this cap type supports COPY. Protocol caps consult `P`'s
-    /// `is_copyable` hook. `Untyped` is move-only — its quota would
-    /// be unsafe to duplicate (DERIVE splits instead).
+    /// `is_copyable` hook. `Untyped` and `FaultHandler` are move-only —
+    /// duplicating an `Untyped` quota would let two holders retype the
+    /// same backing pages; duplicating a `FaultHandler` would violate
+    /// the "exactly one per invocation" invariant.
     pub fn is_copyable(&self) -> bool {
         match self {
             Cap::Code(_) | Cap::FrameRef(_) => true,
-            Cap::Untyped(_) | Cap::Data(_) => false,
+            Cap::Untyped(_) | Cap::Data(_) | Cap::FaultHandler(_) => false,
             Cap::Protocol(p) => p.is_copyable(),
         }
     }
@@ -605,7 +633,7 @@ impl<P: ProtocolCapT> Cap<P> {
             Cap::Code(c) => Some(Cap::Code(Arc::clone(c))),
             Cap::FrameRef(f) => Some(Cap::FrameRef(*f)),
             Cap::Protocol(p) if p.is_copyable() => Some(Cap::Protocol(p.clone())),
-            Cap::Untyped(_) | Cap::Data(_) | Cap::Protocol(_) => None,
+            Cap::Untyped(_) | Cap::Data(_) | Cap::FaultHandler(_) | Cap::Protocol(_) => None,
         }
     }
 }
