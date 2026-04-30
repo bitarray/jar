@@ -1,11 +1,50 @@
-//! Code-blob resolution.
+//! Code-blob content store + smoke fixtures.
 //!
-//! Vault code lives in σ as content-addressed values inside the kernel-internal
-//! `code_vault`'s storage. Each vault's `Vault.code_hash` is the key. Genesis
-//! populates the code vault; the kernel reads it whenever it needs to
-//! instantiate a `javm::kernel::InvocationKernel`.
+//! After the unified-persistence refactor, code blobs live as
+//! `Capability::Code(CodeCap)` entries inside Vault CNodes — one
+//! Vault holds its own code as a CodeCap in a designated slot. The
+//! per-Vault `code_hash` field and the kernel-internal `state.code_vault`
+//! are gone.
+//!
+//! `CodeCap` carries an `Arc<Vec<u8>>`, so multiple Vault slots holding
+//! the same blob share the same allocation in memory transparently.
+//! Content-addressed dedup at the σ level (so that re-inserting the
+//! same bytes coalesces to one allocation) is a node-side optimization
+//! and is not done here.
+//!
+//! Resolution of a Vault's entry CodeCap is via [`resolve_init_blob`],
+//! which reads `vault.slots[CODE_CAP_SLOT]` and looks up the CapRecord.
 
-use crate::types::{Hash, KResult, KernelError, State};
+use std::sync::Arc;
+
+use crate::cap::Capability;
+use crate::state::CODE_CAP_SLOT;
+use crate::state::cap_registry;
+use crate::types::{KResult, KernelError, State, VaultId};
+
+/// Resolve the init CodeCap blob for a Vault. Reads `slots[CODE_CAP_SLOT]`,
+/// looks up the CapRecord, and returns a clone of the `Arc<Vec<u8>>`
+/// blob. Cheap (just an Arc bump). Errors if the slot is empty or holds
+/// a non-Code cap.
+pub fn resolve_init_blob(state: &State, vault_id: VaultId) -> KResult<Arc<Vec<u8>>> {
+    let vault = state.vault(vault_id)?;
+    let cap_id = vault.slots.get(CODE_CAP_SLOT).ok_or_else(|| {
+        KernelError::Internal(format!(
+            "vault {:?} has no CodeCap at slot {}",
+            vault_id, CODE_CAP_SLOT
+        ))
+    })?;
+    let record = cap_registry::lookup(state, cap_id)?;
+    match &record.cap {
+        Capability::Code(c) => Ok(Arc::clone(&c.blob)),
+        other => Err(KernelError::Internal(format!(
+            "vault {:?} slot {} holds {:?}, expected Code",
+            vault_id,
+            CODE_CAP_SLOT,
+            std::mem::discriminant(other)
+        ))),
+    }
+}
 
 /// Default smoke fixture: a PVM blob that ecallis IPC-slot (REPLY) → halts
 /// immediately. Compiled at build time from `rust/jar-test-services/halt`.
@@ -18,35 +57,4 @@ pub fn halt_blob() -> &'static [u8] {
 /// `rust/jar-test-services/slot_clear`.
 pub fn slot_clear_blob() -> &'static [u8] {
     include_bytes!(env!("JAR_SLOT_CLEAR_BLOB_PATH"))
-}
-
-/// Resolve a `code_hash` to its blob bytes via `state.code_vault`'s storage.
-/// Errors if the code vault has no entry under `code_hash` — that's a genesis
-/// bug or a vault was created with a hash whose blob was never registered.
-pub fn resolve_code_blob<'s>(state: &'s State, code_hash: &Hash) -> KResult<&'s [u8]> {
-    let code_vault = state.vault(state.code_vault)?;
-    code_vault
-        .storage
-        .get(code_hash.as_ref())
-        .map(|v| v.as_slice())
-        .ok_or_else(|| KernelError::Internal(format!("no blob for {:?}", code_hash)))
-}
-
-/// Insert `blob` into `state.code_vault`'s storage under `crypto::hash(blob)`,
-/// returning that hash. Idempotent: re-inserting the same bytes is a no-op.
-/// Used by genesis and tests; no quota check.
-pub fn register_blob(state: &mut State, blob: Vec<u8>) -> KResult<Hash> {
-    use std::sync::Arc;
-    let hash = crate::crypto::hash(&blob);
-    let code_vault_id = state.code_vault;
-    let vault_arc = state
-        .vaults
-        .get(&code_vault_id)
-        .ok_or(KernelError::VaultNotFound(code_vault_id))?
-        .clone();
-    let mut vault: crate::types::Vault = (*vault_arc).clone();
-    vault.storage.insert(hash.as_ref().to_vec(), blob);
-    vault.recompute_footprint();
-    state.vaults.insert(code_vault_id, Arc::new(vault));
-    Ok(hash)
 }

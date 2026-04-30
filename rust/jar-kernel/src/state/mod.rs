@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::types::{CNode, CNodeId, CapId, CapRecord, Hash, KResult, KernelError, VaultId};
+use crate::types::{CNode, CNodeId, CapId, CapRecord, KResult, KernelError, VaultId};
 
 pub mod cap_registry;
 pub mod cnode;
@@ -16,25 +16,31 @@ pub mod snapshot;
 pub mod state_root;
 pub mod storage;
 
-/// Persistent Vault unit. Contains code, slots, KV storage, quotas.
+/// Persistent Vault unit. After Step 1 of the unified-persistence
+/// refactor, the per-Vault `code_hash` field and the kernel-internal
+/// `state.code_vault` are gone — code lives as `Capability::Code(CodeCap)`
+/// at `CODE_CAP_SLOT` (currently slot 0) of the Vault's CNode. The
+/// `storage` KV map and other fields will be retired in subsequent steps.
 ///
-/// Wrapped in `Arc` inside σ so that a per-event snapshot can be cheap (the
-/// outer `BTreeMap`s are cloned, but vault contents are only deep-cloned
-/// on a `make_mut` write).
+/// Wrapped in `Arc` inside σ so that copy-on-write of the outer
+/// `BTreeMap` is cheap; only the modified Vault is deep-cloned on a
+/// `make_mut` write.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Vault {
-    pub code_hash: Hash,
-    pub slots: CNode, // 256 cap slots
-    pub storage: BTreeMap<Vec<u8>, Vec<u8>>,
+    pub slots: CNode,                        // 256 cap slots
+    pub storage: BTreeMap<Vec<u8>, Vec<u8>>, // TODO(step-4): drop
     pub quota_items: u64,
     pub quota_bytes: u64,
     pub total_footprint: u64,
 }
 
+/// Slot in `Vault.slots` that holds the Vault's entry CodeCap.
+/// Step 8 will replace this with a per-Vault `init_cap: u8` field.
+pub const CODE_CAP_SLOT: u8 = 0;
+
 impl Vault {
-    pub fn new(code_hash: Hash) -> Self {
+    pub fn new() -> Self {
         Vault {
-            code_hash,
             slots: CNode::new(),
             storage: BTreeMap::new(),
             quota_items: 0,
@@ -51,6 +57,12 @@ impl Vault {
             .iter()
             .map(|(k, v)| (k.len() + v.len()) as u64)
             .sum();
+    }
+}
+
+impl Default for Vault {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -77,11 +89,6 @@ pub struct State {
     pub cap_holders: BTreeMap<CapId, BTreeSet<(CNodeId, u8)>>,
     pub transact_space_cnode: CapId,
     pub dispatch_space_cnode: CapId,
-    /// Kernel-internal vault that owns the code-blob storage. Not exposed in
-    /// any cnode; only the kernel reads `state.vaults[code_vault].storage`,
-    /// keyed by `crypto::hash(blob_bytes)`. Genesis allocates this vault and
-    /// populates it with every blob a user vault's `code_hash` references.
-    pub code_vault: VaultId,
     pub id_counters: IdCounters,
 }
 
@@ -97,7 +104,6 @@ impl State {
             cap_holders: BTreeMap::new(),
             transact_space_cnode: CapId(0),
             dispatch_space_cnode: CapId(0),
-            code_vault: VaultId(0),
             id_counters: IdCounters::default(),
         }
     }

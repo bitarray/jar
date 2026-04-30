@@ -10,6 +10,8 @@
 //! reference (e.g. `&DispatchCap`). The `Capability` enum wraps them as a
 //! sum type.
 
+use std::sync::Arc;
+
 use crate::types::{CNodeId, CapId, Hash, KernelRole, KeyId, VaultId};
 
 // -----------------------------------------------------------------------------
@@ -133,12 +135,29 @@ pub struct GasCap {
     pub remaining: u64,
 }
 
+/// Persistent code capability. Holds a PVM program blob shared across
+/// holders (multiple Vault slots, multiple invocations) via `Arc<[u8]>`.
+/// The blob is immutable; its content hash is computed lazily for
+/// state-root inclusion.
+#[derive(Clone, Debug)]
+pub struct CodeCap {
+    pub blob: Arc<Vec<u8>>,
+}
+
+impl PartialEq for CodeCap {
+    fn eq(&self, other: &Self) -> bool {
+        // Pointer-equal Arcs are trivially equal; otherwise compare bytes.
+        Arc::ptr_eq(&self.blob, &other.blob) || *self.blob == *other.blob
+    }
+}
+
+impl Eq for CodeCap {}
+
 /// Per-frame self identity. The kernel rewrites ephemeral sub-slot 2 on
 /// every CALL/REPLY so the active VM's "who am I" is correct.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct SelfCap {
     pub vault_id: VaultId,
-    pub code_hash: Hash,
 }
 
 /// Per-frame caller (vault → vault sub-CALL). Lives at ephemeral
@@ -165,6 +184,7 @@ pub struct CallerKernelCap {
 pub enum Capability {
     Vault(VaultCap),
     VaultRef(VaultRefCap),
+    Code(CodeCap),
     Dispatch(DispatchCap),
     Transact(TransactCap),
     Schedule(ScheduleCap),

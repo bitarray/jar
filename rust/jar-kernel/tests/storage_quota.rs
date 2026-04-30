@@ -13,7 +13,7 @@ use jar_kernel::{
 
 fn setup() -> (State, VaultId, Capability) {
     let mut s = State::empty();
-    let mut v = Vault::new(Hash::ZERO);
+    let mut v = Vault::new();
     v.quota_items = 4;
     v.quota_bytes = 64;
     let id = s.next_vault_id();
@@ -37,7 +37,7 @@ fn storage_read_write_round_trip() {
 #[test]
 fn snapshot_storage_blocks_writes() {
     let mut s = State::empty();
-    let mut v = Vault::new(Hash::ZERO);
+    let mut v = Vault::new();
     v.quota_items = 4;
     v.quota_bytes = 64;
     let id = s.next_vault_id();
@@ -60,7 +60,7 @@ fn snapshot_storage_blocks_writes() {
 #[test]
 fn read_only_storage_cap_blocks_writes() {
     let mut s = State::empty();
-    let mut v = Vault::new(Hash::ZERO);
+    let mut v = Vault::new();
     v.quota_items = 4;
     v.quota_bytes = 64;
     let id = s.next_vault_id();

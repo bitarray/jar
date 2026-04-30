@@ -26,9 +26,7 @@ use jar_kernel::{
 fn state_with_one_storage_cap(slot: u8) -> (State, VaultId, jar_kernel::CapId) {
     let mut state = State::empty();
     let vault_id = state.next_vault_id();
-    state
-        .vaults
-        .insert(vault_id, Arc::new(Vault::new(jar_kernel::Hash::default())));
+    state.vaults.insert(vault_id, Arc::new(Vault::new()));
     let cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
@@ -104,9 +102,7 @@ fn fc_set_places_registered_into_empty_slot() {
 fn fc_set_rejects_non_registered() {
     let mut state = State::empty();
     let vault_id = state.next_vault_id();
-    state
-        .vaults
-        .insert(vault_id, Arc::new(Vault::new(jar_kernel::Hash::default())));
+    state.vaults.insert(vault_id, Arc::new(Vault::new()));
     let mut view = VaultCnodeView::new(&mut state);
 
     // Ephemeral cap (kernel-injected per-frame, no σ identity) cannot
@@ -124,9 +120,7 @@ fn fc_set_rejects_non_registered() {
 fn fc_set_requires_grant_right() {
     let mut state = State::empty();
     let vault_id = state.next_vault_id();
-    state
-        .vaults
-        .insert(vault_id, Arc::new(Vault::new(jar_kernel::Hash::default())));
+    state.vaults.insert(vault_id, Arc::new(Vault::new()));
     let cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
@@ -157,9 +151,7 @@ fn fc_set_requires_grant_right() {
 fn fc_set_rejects_pinned_cap() {
     let mut state = State::empty();
     let vault_id = state.next_vault_id();
-    state
-        .vaults
-        .insert(vault_id, Arc::new(Vault::new(jar_kernel::Hash::default())));
+    state.vaults.insert(vault_id, Arc::new(Vault::new()));
     let born_in = jar_kernel::state::cnode::cnode_create(&mut state);
     let cap_id = cap_registry::alloc(
         &mut state,

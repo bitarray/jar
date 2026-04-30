@@ -91,8 +91,7 @@ pub fn handle_inbound_dispatch<H: Hardware>(
 
     // Resolve the entrypoint blob (same blob runs both phases). Use
     // `code_cache` so the second phase reuses the first phase's compile.
-    let code_hash = state_clone.vault(entrypoint)?.code_hash;
-    let blob = code_blobs::resolve_code_blob(&state_clone, &code_hash)?.to_vec();
+    let blob = code_blobs::resolve_init_blob(&state_clone, entrypoint)?;
 
     // Step 2.
     let attestation_target = attestation_trace.len();
@@ -124,7 +123,6 @@ pub fn handle_inbound_dispatch<H: Hardware>(
         crate::transact::populate_ephemeral_kernel_caps(
             &mut vm,
             entrypoint,
-            code_hash,
             Caller::Kernel(KernelRole::AggregateStandalone),
             INVOCATION_GAS_BUDGET,
         );
@@ -164,7 +162,6 @@ pub fn handle_inbound_dispatch<H: Hardware>(
         crate::transact::populate_ephemeral_kernel_caps(
             &mut vm,
             entrypoint,
-            code_hash,
             Caller::Kernel(KernelRole::AggregateMerge),
             INVOCATION_GAS_BUDGET,
         );

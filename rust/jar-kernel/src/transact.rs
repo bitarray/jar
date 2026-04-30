@@ -110,10 +110,9 @@ pub fn run_one_invocation<H: Hardware>(
     hw: &H,
 ) -> KResult<(ReachEntry, Vec<Command>)> {
     let snapshot = StateSnapshot::take(state);
-    // Resolve the entrypoint blob from σ.code_vault before we hand `state`
-    // to the InvocationCtx as `&mut`.
-    let code_hash = state.vault(target)?.code_hash;
-    let blob = code_blobs::resolve_code_blob(state, &code_hash)?.to_vec();
+    // Resolve the entrypoint blob from the Vault's CodeCap slot before we
+    // hand `state` to the InvocationCtx as `&mut`.
+    let blob = code_blobs::resolve_init_blob(state, target)?;
     // TODO: when transact guests start reading payload bytes, wire them
     // through `vm.write_data_cap_init(slot, payload)` against a manifest-
     // reserved DATA cap (and place at ephemeral sub-slot 4 per the new
@@ -129,7 +128,6 @@ pub fn run_one_invocation<H: Hardware>(
     populate_ephemeral_kernel_caps(
         &mut vm,
         target,
-        code_hash,
         crate::types::Caller::Kernel(crate::types::KernelRole::TransactEntry),
         INVOCATION_GAS_BUDGET,
     );
@@ -207,7 +205,6 @@ pub(crate) fn populate_host_call_slots(vm: &mut Vm) {
 pub(crate) fn populate_ephemeral_kernel_caps(
     vm: &mut Vm,
     self_vault: VaultId,
-    self_code_hash: crate::types::Hash,
     caller: crate::types::Caller,
     invocation_gas: u64,
 ) {
@@ -243,7 +240,6 @@ pub(crate) fn populate_ephemeral_kernel_caps(
         2,
         javm::cap::Cap::Protocol(KernelCap::Ephemeral(Capability::SelfId(SelfCap {
             vault_id: self_vault,
-            code_hash: self_code_hash,
         }))),
     );
 

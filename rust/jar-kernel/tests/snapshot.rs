@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use jar_kernel::state::snapshot::StateSnapshot;
-use jar_kernel::{Hash, State, Vault, VaultId};
+use jar_kernel::{State, Vault, VaultId};
 
 fn state_with_one_vault() -> (State, VaultId) {
     let mut s = State::empty();
-    let mut v = Vault::new(Hash::ZERO);
+    let mut v = Vault::new();
     v.quota_items = 16;
     v.quota_bytes = 4096;
     let id = s.next_vault_id();

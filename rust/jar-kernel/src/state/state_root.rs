@@ -20,12 +20,10 @@ pub fn state_root(state: &State) -> Hash {
 
     push_u64(&mut buf, state.transact_space_cnode.0);
     push_u64(&mut buf, state.dispatch_space_cnode.0);
-    push_u64(&mut buf, state.code_vault.0);
 
     push_u64(&mut buf, state.vaults.len() as u64);
     for (vid, vault) in &state.vaults {
         push_u64(&mut buf, vid.0);
-        buf.extend_from_slice(vault.code_hash.as_ref());
         push_u64(&mut buf, vault.quota_items);
         push_u64(&mut buf, vault.quota_bytes);
         push_u64(&mut buf, vault.total_footprint);
