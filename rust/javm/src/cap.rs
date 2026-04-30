@@ -77,6 +77,28 @@ pub struct FaultHandlerCap {
     pub rights: FaultHandlerRights,
 }
 
+/// Per-invocation gas budget cap. Conceptually two flavours by where
+/// the cap sits:
+///
+/// - `B_GAS` (BareFrame slot 3): a *view* onto the active VM's
+///   `vm.gas()` runtime counter — there is no separate storage.
+///   Reads and writes routed through the kernel resolve to
+///   `active.vm.gas()`. The slot is pinned and stays empty as a
+///   physical entry; `MGMT_GAS_DERIVE` / `MGMT_GAS_MERGE`
+///   special-case the B_GAS access path.
+/// - `M_GAS` (MainFrame slot 3 of a VM): a real, owned `Cap::Gas`
+///   — the parked sub-budget produced by `MGMT_GAS_DERIVE`. Its
+///   `remaining` is authoritative storage. On callee fault the
+///   kernel's `rollback_parked_gas` merges it back into the
+///   resuming caller's `vm.gas()` (i.e. into B_GAS, the view).
+///
+/// Move-only: `is_copyable() = false`. Splitting goes through
+/// `MGMT_GAS_DERIVE`; recombining through `MGMT_GAS_MERGE`.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct GasCap {
+    pub remaining: u64,
+}
+
 /// Physical pages with exclusive mapping. Move-only (not copyable).
 ///
 /// Each DataCap carries per-VM mapping memory: `mappings` records where the
@@ -471,19 +493,6 @@ pub trait ProtocolCapT: Clone + core::fmt::Debug {
     fn is_droppable(&self) -> bool {
         true
     }
-    /// Derive a child Gas cap with `amount` units split off. Returns
-    /// `None` if `self` is not a Gas-shaped cap or has insufficient
-    /// `remaining`. The payload type decides what counts as Gas; default
-    /// is "no Gas cap of this shape."
-    fn gas_derive(&mut self, _amount: u64) -> Option<Self> {
-        None
-    }
-    /// Merge `donor`'s gas into `self`. Returns `true` if both are
-    /// Gas-shaped and the merge succeeded. On success, the caller
-    /// should drop `donor`.
-    fn gas_merge(&mut self, _donor: &Self) -> bool {
-        false
-    }
     /// If this cap is a handle into a foreign cap-table (e.g. a Vault
     /// CNode in jar-kernel), return the host's id for that frame plus
     /// the operation-rights bag the resolve walk should record at this
@@ -607,19 +616,25 @@ pub enum Cap<P: ProtocolCapT = u8> {
     /// Per-invocation FaultHandler authority. Move-only between
     /// `B_FH` and `M_FH` (mirror slots at `FAULT_HANDLER_SLOT`).
     FaultHandler(FaultHandlerCap),
+    /// Parked gas sub-budget at `M_GAS = GAS_SLOT`. Move-only;
+    /// `MGMT_GAS_DERIVE` produces these (split from B_GAS, the view
+    /// onto `active.vm.gas()`); `MGMT_GAS_MERGE` consumes them.
+    Gas(GasCap),
     Protocol(P),
 }
 
 impl<P: ProtocolCapT> Cap<P> {
     /// Whether this cap type supports COPY. Protocol caps consult `P`'s
-    /// `is_copyable` hook. `Untyped` and `FaultHandler` are move-only —
-    /// duplicating an `Untyped` quota would let two holders retype the
-    /// same backing pages; duplicating a `FaultHandler` would violate
-    /// the "exactly one per invocation" invariant.
+    /// `is_copyable` hook. `Untyped` / `FaultHandler` / `Gas` are
+    /// move-only — duplicating an `Untyped` quota would let two
+    /// holders retype the same backing pages; duplicating a
+    /// `FaultHandler` would violate the "exactly one per invocation"
+    /// invariant; duplicating a `Gas` cap would let two holders
+    /// spend the same budget.
     pub fn is_copyable(&self) -> bool {
         match self {
             Cap::Code(_) | Cap::FrameRef(_) => true,
-            Cap::Untyped(_) | Cap::Data(_) | Cap::FaultHandler(_) => false,
+            Cap::Untyped(_) | Cap::Data(_) | Cap::FaultHandler(_) | Cap::Gas(_) => false,
             Cap::Protocol(p) => p.is_copyable(),
         }
     }
@@ -633,7 +648,11 @@ impl<P: ProtocolCapT> Cap<P> {
             Cap::Code(c) => Some(Cap::Code(Arc::clone(c))),
             Cap::FrameRef(f) => Some(Cap::FrameRef(*f)),
             Cap::Protocol(p) if p.is_copyable() => Some(Cap::Protocol(p.clone())),
-            Cap::Untyped(_) | Cap::Data(_) | Cap::FaultHandler(_) | Cap::Protocol(_) => None,
+            Cap::Untyped(_)
+            | Cap::Data(_)
+            | Cap::FaultHandler(_)
+            | Cap::Gas(_)
+            | Cap::Protocol(_) => None,
         }
     }
 }

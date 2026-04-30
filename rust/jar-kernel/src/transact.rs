@@ -149,7 +149,6 @@ pub fn run_one_invocation<H: Hardware>(
         &mut vm,
         target,
         crate::types::Caller::Kernel(crate::types::KernelRole::TransactEntry),
-        gas_budget,
     );
     // Pass the event payload to the guest via the new args ABI:
     // `set_args` allocates a fresh DATA cap, writes the payload bytes
@@ -254,9 +253,8 @@ pub(crate) fn populate_ephemeral_kernel_caps(
     vm: &mut Vm,
     self_vault: VaultId,
     caller: crate::types::Caller,
-    invocation_gas: u64,
 ) {
-    use crate::types::{CallerKernelCap, CallerVaultCap, GasCap, SelfCap};
+    use crate::types::{CallerKernelCap, CallerVaultCap, SelfCap};
     use javm::cap::{FaultHandlerCap, FaultHandlerRights};
 
     // BareFrame sub-slots 1, 3, and FAULT_HANDLER_SLOT.
@@ -276,16 +274,14 @@ pub(crate) fn populate_ephemeral_kernel_caps(
     );
     table.pin(1);
 
-    // BareFrame `B_GAS = GAS_SLOT` (= 3): per-invocation tank.
-    // `MGMT_GAS_DERIVE` splits parked sub-caps off this tank into
-    // the active VM's `M_GAS` slot; rollback-on-fault merges them
-    // back here in O(1).
-    table.set(
-        javm::kernel::GAS_SLOT,
-        javm::cap::Cap::Protocol(KernelCap::Ephemeral(Capability::Gas(GasCap {
-            remaining: invocation_gas,
-        }))),
-    );
+    // BareFrame `B_GAS = GAS_SLOT` (= 3): the slot is pinned but
+    // physically empty. The kernel treats it as a *view* onto
+    // `active.vm.gas()` — `MGMT_GAS_DERIVE` and `MGMT_GAS_MERGE`
+    // special-case the B_GAS access path to read/write the active
+    // VM's runtime counter directly. There's no separate cap-level
+    // `remaining` to drift out of sync. The invocation budget is
+    // already in `vm.gas()` (set at `VmInstance::new` and charged
+    // for init by `finalize_kernel`).
     table.pin(javm::kernel::GAS_SLOT);
 
     // FAULT_HANDLER_SLOT (= 10): per-invocation FaultHandler. Default
@@ -508,7 +504,6 @@ mod tests {
             &mut vm,
             g.transact_vault,
             Caller::Kernel(crate::types::KernelRole::TransactEntry),
-            100_000_000,
         );
         let bare_idx = vm.bare_frame_id.index();
         match vm
@@ -537,7 +532,6 @@ mod tests {
             &mut vm,
             g.transact_vault,
             Caller::Kernel(crate::types::KernelRole::TransactEntry),
-            100_000_000,
         );
         // Active VM = VM 0: MainFrame slot SELF_SLOT holds SelfId.
         match vm.vm_arena.vm(0).cap_table.get(crate::vm::SELF_SLOT) {
@@ -569,7 +563,6 @@ mod tests {
             &mut vm,
             g.transact_vault,
             Caller::Kernel(crate::types::KernelRole::TransactEntry),
-            100_000_000,
         );
         // MainFrame: 0 (BARE_FRAME ref), 1 (home VaultRef), 2 (Self),
         // 3 (M_GAS), 10 (M_FH), HostCalls 15/16/18/19/21.

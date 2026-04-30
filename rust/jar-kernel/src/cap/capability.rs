@@ -111,18 +111,6 @@ pub struct AttestationAggregateCap {
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 pub struct ResultCap;
 
-/// Per-invocation gas budget. Lives at `GAS_SLOT` (= 3) in BOTH
-/// cap-tables: BareFrame `B_GAS` is the invocation tank;
-/// MainFrame `M_GAS` is the per-VM parked sub-cap (where
-/// `MGMT_GAS_DERIVE` places a child cap). On a callee fault the
-/// kernel's `rollback_parked_gas` reads `M_GAS` of the resuming
-/// caller directly and merges into `B_GAS` — no scan.
-/// `MGMT_GAS_MERGE` recombines siblings within the same VM's table.
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub struct GasCap {
-    pub remaining: u64,
-}
-
 /// Persistent code capability. Holds a PVM program blob shared across
 /// holders (multiple Vault slots, multiple invocations) via `Arc<[u8]>`.
 /// The blob is immutable; its content hash is computed lazily for
@@ -215,8 +203,6 @@ pub enum Capability {
     AttestationCap(AttestationCap),
     AttestationAggregateCap(AttestationAggregateCap),
     ResultCap(ResultCap),
-    /// Per-invocation gas budget — lives at ephemeral sub-slot 3.
-    Gas(GasCap),
     /// Per-VM self-identity — pinned at MainFrame slot 2 (`SELF_SLOT`).
     SelfId(SelfCap),
     /// Per-frame caller (sub-CALL) — lives at ephemeral sub-slot 1.

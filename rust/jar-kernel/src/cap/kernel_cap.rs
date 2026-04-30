@@ -30,7 +30,7 @@
 //! announces VaultRef-shaped caps as foreign-frame handles so javm's
 //! resolve walk can cross into a Vault's CNode through them.
 
-use crate::cap::{Capability, GasCap, VaultRights};
+use crate::cap::{Capability, VaultRights};
 use crate::types::VaultId;
 use javm::cap::ProtocolCapT;
 
@@ -106,41 +106,6 @@ impl ProtocolCapT for KernelCap {
 
     fn is_droppable(&self) -> bool {
         true
-    }
-
-    /// Split `amount` units off a `Capability::Gas` into a fresh child
-    /// Gas cap. Returns `None` for any other payload shape (host-call
-    /// selector, non-Gas Capability) or insufficient `remaining`.
-    /// Gas caps are always Ephemeral (no σ presence).
-    fn gas_derive(&mut self, amount: u64) -> Option<Self> {
-        match self {
-            KernelCap::Ephemeral(Capability::Gas(g)) => {
-                if g.remaining < amount {
-                    return None;
-                }
-                g.remaining -= amount;
-                Some(KernelCap::Ephemeral(Capability::Gas(GasCap {
-                    remaining: amount,
-                })))
-            }
-            _ => None,
-        }
-    }
-
-    /// Merge a donor Gas cap's `remaining` into `self`. Returns `true`
-    /// only when both caps are `Capability::Gas`. The caller drops the
-    /// donor on success.
-    fn gas_merge(&mut self, donor: &Self) -> bool {
-        match (self, donor) {
-            (
-                KernelCap::Ephemeral(Capability::Gas(dst)),
-                KernelCap::Ephemeral(Capability::Gas(src)),
-            ) => {
-                dst.remaining = dst.remaining.saturating_add(src.remaining);
-                true
-            }
-            _ => false,
-        }
     }
 
     /// A `VaultRef` with `rights.read` is a foreign-frame handle: javm's

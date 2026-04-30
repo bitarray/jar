@@ -135,7 +135,6 @@ pub fn handle_inbound_dispatch<H: Hardware>(
             &mut vm,
             entrypoint,
             Caller::Kernel(KernelRole::AggregateStandalone),
-            gas_budget,
         );
         vm.set_active_reg(7, 0);
         let _ = drive_invocation(&mut vm, &mut ctx)?;
@@ -178,7 +177,6 @@ pub fn handle_inbound_dispatch<H: Hardware>(
             &mut vm,
             entrypoint,
             Caller::Kernel(KernelRole::AggregateMerge),
-            gas_budget,
         );
         vm.set_active_reg(7, 1);
         let _ = drive_invocation(&mut vm, &mut ctx)?;

@@ -170,13 +170,12 @@ fn translate_persistent(
         ))),
         // Ephemeral-only variants must never persist. Finding one here
         // is a kernel bug.
-        Capability::Gas(_)
-        | Capability::SelfId(_)
-        | Capability::CallerVault(_)
-        | Capability::CallerKernel(_) => Err(KernelError::Internal(format!(
-            "ephemeral-only cap {:?} found persistently in vault.slots",
-            std::mem::discriminant(cap)
-        ))),
+        Capability::SelfId(_) | Capability::CallerVault(_) | Capability::CallerKernel(_) => {
+            Err(KernelError::Internal(format!(
+                "ephemeral-only cap {:?} found persistently in vault.slots",
+                std::mem::discriminant(cap)
+            )))
+        }
         // All other Registered shapes round-trip unchanged.
         Capability::VaultRef(_)
         | Capability::CNode(_)

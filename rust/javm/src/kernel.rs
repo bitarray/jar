@@ -67,7 +67,7 @@ macro_rules! resolve {
 use crate::backing::BackingStore;
 use crate::cap::{
     Access, BARE_FRAME_SLOT, Cap, CapTable, CodeCap, DataCap, ForeignCnode, FrameRefCap,
-    FrameRefRights, NoForeignCnode, ProtocolCapT, UntypedCap,
+    FrameRefRights, GasCap, NoForeignCnode, ProtocolCapT, UntypedCap,
 };
 use crate::program::{self, CapEntryType};
 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
@@ -91,22 +91,27 @@ pub const MGMT_COPY: u32 = 0x7;
 const MGMT_DOWNGRADE: u32 = 0xA;
 // 0xB (legacy SET_MAX_GAS) deliberately unused — per-call gas restriction
 // is achieved by the park pattern via `MGMT_GAS_DERIVE` / `MGMT_GAS_MERGE`
-// on the `Capability::Gas` cap at ephemeral sub-slot 3.
+// on the per-VM `vm.gas()` runtime counter (B_GAS is just a view onto it).
 const MGMT_DIRTY: u32 = 0xC;
-/// Gas-cap derive: split `amount` units off a Gas cap into a fresh Gas
-/// cap. Routes through `ProtocolCapT::gas_derive`. The protocol payload
-/// type (`P`) decides what counts as a "Gas cap"; for plain `u8` it's
-/// always rejected.
-const MGMT_GAS_DERIVE: u32 = 0xD;
-/// Gas-cap merge: add donor's `remaining` to dst's `remaining`, donor
-/// is consumed. Routes through `ProtocolCapT::gas_merge`.
-const MGMT_GAS_MERGE: u32 = 0xE;
 /// Untyped-cap derive: split `n_pages` (φ[7]) off a parent
 /// `UntypedCap` into a fresh child cap at slot φ[8] of the active VM.
 /// Decrements the parent's `limit` by N; the child gets `limit = N`.
 /// The shared `BackingStore::bump` is unaffected (only retype
-/// advances it). Mirror of `MGMT_GAS_DERIVE`.
+/// advances it).
 pub const MGMT_UNTYPED_DERIVE: u32 = 0xF;
+
+/// Gas-cap derive (modern `dispatch_ecall` path): split `n` (φ[7])
+/// units off the Gas cap at `subject_ref` into a fresh `Cap::Gas` at
+/// `object_ref`. When `subject_ref` resolves to BareFrame `B_GAS`
+/// (slot `GAS_SLOT`), the split happens against `active.vm.gas()`
+/// directly — there's no separate cap-level storage at B_GAS.
+/// `object_ref` must resolve to `(active VM, GAS_SLOT)` (`M_GAS`).
+pub const MGMT_GAS_DERIVE: u32 = 0x10;
+/// Gas-cap merge (modern `dispatch_ecall` path): add donor's
+/// `remaining` to the destination Gas cap. Donor at `subject_ref`,
+/// destination at `object_ref`. When `object_ref` resolves to
+/// BareFrame `B_GAS`, the merge bumps `active.vm.gas()`.
+pub const MGMT_GAS_MERGE: u32 = 0x11;
 
 /// Bare-Frame sub-slot used as the synchronous arg-in / result-out
 /// channel of the invocation: the host writes the args DATA cap here
@@ -581,8 +586,8 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                 self.flush_live_ctx();
                 self.handle_call_vm(target_vm)
             }
-            Cap::Data(_) | Cap::FaultHandler(_) => {
-                // Neither DATA nor FaultHandler is callable.
+            Cap::Data(_) | Cap::FaultHandler(_) | Cap::Gas(_) => {
+                // None of DATA / FaultHandler / Gas is callable.
                 self.set_active_reg(7, RESULT_WHAT);
                 DispatchResult::Continue
             }
@@ -1236,6 +1241,20 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                 let (o_frame, o_slot, _) = resolve!(self, object_ref);
                 self.ecall_untyped_derive(s_frame, s_slot, o_frame, o_slot)
             }
+            MGMT_GAS_DERIVE => {
+                // GAS_DERIVE — split φ[7] units off the Gas cap at
+                // subject_ref into a fresh Cap::Gas at object_ref.
+                let (s_frame, s_slot, _) = resolve!(self, subject_ref);
+                let (o_frame, o_slot, _) = resolve!(self, object_ref);
+                self.ecall_gas_derive(s_frame, s_slot, o_frame, o_slot)
+            }
+            MGMT_GAS_MERGE => {
+                // GAS_MERGE — add donor Gas cap at subject_ref into
+                // the Gas cap at object_ref.
+                let (s_frame, s_slot, _) = resolve!(self, subject_ref);
+                let (o_frame, o_slot, _) = resolve!(self, object_ref);
+                self.ecall_gas_merge(s_frame, s_slot, o_frame, o_slot)
+            }
             _ => {
                 self.set_active_reg(7, RESULT_WHAT);
                 DispatchResult::Continue
@@ -1303,7 +1322,200 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         DispatchResult::Continue
     }
 
-    /// Handle a management op (legacy ecalli encoding, will be removed).
+    /// MGMT_GAS_DERIVE handler. Reads `n = φ[7]` and splits `n` gas
+    /// units off the source Gas cap into a fresh `Cap::Gas` at the
+    /// destination. The destination must be `(active VM, GAS_SLOT)`
+    /// (the M_GAS pin) so rollback-on-fault can find it in O(1).
+    ///
+    /// **B_GAS as view.** When the source resolves to `(bare_idx,
+    /// GAS_SLOT)`, the kernel reads from `active.vm.gas()` instead
+    /// of cap-table storage and decrements the runtime counter on
+    /// success. Otherwise the source is a regular `Cap::Gas` whose
+    /// `remaining` is decremented in place.
+    fn ecall_gas_derive(
+        &mut self,
+        s_frame: FrameId<P::ForeignFrameId>,
+        s_slot: u8,
+        o_frame: FrameId<P::ForeignFrameId>,
+        o_slot: u8,
+    ) -> DispatchResult {
+        let n = self.active_reg(7);
+        let bare_idx = self.bare_frame_idx();
+        let active_idx = self.active_vm;
+
+        // Destination must be (active VM, GAS_SLOT). Anything else
+        // would orphan parked gas from the rollback-merge path.
+        if o_frame != FrameId::Vm(active_idx) || o_slot != GAS_SLOT {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+        if !self.vm_arena.vm(active_idx).cap_table.is_empty(GAS_SLOT) {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+
+        // Two source flavours: B_GAS (view onto active.vm.gas()) or
+        // a regular Cap::Gas in some VM's MainFrame (e.g. a
+        // sibling-split scenario).
+        let b_gas_source = s_frame == FrameId::Vm(bare_idx) && s_slot == GAS_SLOT;
+        if b_gas_source {
+            // Read active.vm.gas(), verify, decrement, place child.
+            let cur = self.read_b_gas_remaining();
+            if cur < n {
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
+            self.write_b_gas_remaining(cur - n);
+            self.vm_arena
+                .vm_mut(active_idx)
+                .cap_table
+                .set(GAS_SLOT, Cap::Gas(GasCap { remaining: n }));
+            self.set_active_reg(7, 0);
+            return DispatchResult::Continue;
+        }
+
+        // Regular `Cap::Gas` source in a local VM frame.
+        let s_vm_idx = match s_frame {
+            FrameId::Vm(idx) => idx,
+            FrameId::Foreign(_) => {
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
+        };
+        let derived = match self.vm_arena.vm_mut(s_vm_idx).cap_table.get_mut(s_slot) {
+            Some(Cap::Gas(g)) => {
+                if g.remaining < n {
+                    None
+                } else {
+                    g.remaining -= n;
+                    Some(GasCap { remaining: n })
+                }
+            }
+            _ => None,
+        };
+        match derived {
+            Some(child) => {
+                self.vm_arena
+                    .vm_mut(active_idx)
+                    .cap_table
+                    .set(GAS_SLOT, Cap::Gas(child));
+                self.set_active_reg(7, 0);
+            }
+            None => self.set_active_reg(7, RESULT_WHAT),
+        }
+        DispatchResult::Continue
+    }
+
+    /// MGMT_GAS_MERGE handler. Take donor `Cap::Gas` from
+    /// `(s_frame, s_slot)` and add its `remaining` to the
+    /// destination Gas cap at `(o_frame, o_slot)`. When the
+    /// destination resolves to `(bare_idx, GAS_SLOT)` (i.e. B_GAS),
+    /// the merge bumps `active.vm.gas()` directly.
+    fn ecall_gas_merge(
+        &mut self,
+        s_frame: FrameId<P::ForeignFrameId>,
+        s_slot: u8,
+        o_frame: FrameId<P::ForeignFrameId>,
+        o_slot: u8,
+    ) -> DispatchResult {
+        if s_frame == o_frame && s_slot == o_slot {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+        let bare_idx = self.bare_frame_idx();
+
+        // Take donor (must be `Cap::Gas` in some local VM frame).
+        let s_vm_idx = match s_frame {
+            FrameId::Vm(idx) => idx,
+            FrameId::Foreign(_) => {
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
+        };
+        let donor = match self.vm_arena.vm_mut(s_vm_idx).cap_table.take(s_slot) {
+            Some(Cap::Gas(g)) => g,
+            Some(other) => {
+                self.vm_arena.vm_mut(s_vm_idx).cap_table.set(s_slot, other);
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
+            None => {
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
+        };
+
+        // Two destination flavours: B_GAS (bump active.vm.gas()) or
+        // a regular Cap::Gas in a local VM frame.
+        let b_gas_dst = o_frame == FrameId::Vm(bare_idx) && o_slot == GAS_SLOT;
+        if b_gas_dst {
+            let cur = self.read_b_gas_remaining();
+            self.write_b_gas_remaining(cur.saturating_add(donor.remaining));
+            self.set_active_reg(7, 0);
+            return DispatchResult::Continue;
+        }
+
+        let o_vm_idx = match o_frame {
+            FrameId::Vm(idx) => idx,
+            FrameId::Foreign(_) => {
+                // Restore donor and fail.
+                self.vm_arena
+                    .vm_mut(s_vm_idx)
+                    .cap_table
+                    .set(s_slot, Cap::Gas(donor));
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
+        };
+        let merged = match self.vm_arena.vm_mut(o_vm_idx).cap_table.get_mut(o_slot) {
+            Some(Cap::Gas(dst)) => {
+                dst.remaining = dst.remaining.saturating_add(donor.remaining);
+                true
+            }
+            _ => false,
+        };
+        if merged {
+            self.set_active_reg(7, 0);
+        } else {
+            // Restore donor at source.
+            self.vm_arena
+                .vm_mut(s_vm_idx)
+                .cap_table
+                .set(s_slot, Cap::Gas(donor));
+            self.set_active_reg(7, RESULT_WHAT);
+        }
+        DispatchResult::Continue
+    }
+
+    /// Read the BareFrame `B_GAS` view value: the active VM's
+    /// `vm.gas()` runtime counter. Routed through `active_gas()`
+    /// so JIT-resident gas (in `live_ctx`) is consulted when
+    /// available.
+    fn read_b_gas_remaining(&self) -> u64 {
+        self.active_gas()
+    }
+
+    /// Write the BareFrame `B_GAS` view: set the active VM's
+    /// `vm.gas()` to the given value. Flushes the JIT live-context
+    /// before touching the underlying VmInstance counter so the
+    /// next read sees the update.
+    fn write_b_gas_remaining(&mut self, value: u64) {
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        if let Some(ctx) = self.live_ctx {
+            // SAFETY: live_ctx is non-null only during JIT execution
+            // on this thread; ctx points to the JitContext in the
+            // active CodeWindow's CTX page.
+            unsafe { (*ctx).gas = value as i64 };
+            return;
+        }
+        self.vm_arena.vm_mut(self.active_vm).set_gas(value);
+    }
+
+    /// Handle a management op (legacy ecalli encoding, dead path —
+    /// `dispatch_ecalli` panics on `imm > 127` so this is only
+    /// reachable from javm-internal callers, none of which exercise
+    /// gas-cap mgmt ops). Modern guests use `dispatch_ecall`'s
+    /// `subject_ref` / `object_ref` ABI instead.
     fn handle_management_op(&mut self, op: u32, cap_idx: u8) -> DispatchResult {
         match op {
             MGMT_MAP => self.mgmt_map(cap_idx),
@@ -1318,86 +1530,11 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
                 self.set_active_reg(7, RESULT_WHAT);
                 DispatchResult::Continue
             }
-            MGMT_GAS_DERIVE => self.mgmt_gas_derive(cap_idx),
-            MGMT_GAS_MERGE => self.mgmt_gas_merge(cap_idx),
             _ => {
                 self.set_active_reg(7, RESULT_WHAT);
                 DispatchResult::Continue
             }
         }
-    }
-
-    /// MGMT_GAS_DERIVE: split `amount` (φ[7]) units off the Gas cap
-    /// at `cap_idx` of the active VM into a fresh child Gas cap at
-    /// `M_GAS = slot 3` (the kernel-pinned park slot). φ[8] must be
-    /// `GAS_SLOT`; any other destination is rejected. Routes through
-    /// `ProtocolCapT::gas_derive`. Returns 0 on success,
-    /// `RESULT_WHAT` on failure (non-Gas cap, insufficient remaining,
-    /// `M_GAS` already occupied, wrong destination).
-    fn mgmt_gas_derive(&mut self, cap_idx: u8) -> DispatchResult {
-        let amount = self.active_reg(7);
-        let dst_slot = self.active_reg(8) as u8;
-        // Pin destination to GAS_SLOT so the rollback-on-fault path
-        // can find parked gas in O(1) instead of scanning.
-        if dst_slot != GAS_SLOT {
-            self.set_active_reg(7, RESULT_WHAT);
-            return DispatchResult::Continue;
-        }
-        let vm = self.vm_arena.vm_mut(self.active_vm);
-        if !vm.cap_table.is_empty(dst_slot) {
-            self.set_active_reg(7, RESULT_WHAT);
-            return DispatchResult::Continue;
-        }
-        let derived = match vm.cap_table.get_mut(cap_idx) {
-            Some(Cap::Protocol(p)) => p.gas_derive(amount),
-            _ => None,
-        };
-        match derived {
-            Some(child) => {
-                vm.cap_table.set(dst_slot, Cap::Protocol(child));
-                self.set_active_reg(7, 0);
-            }
-            None => self.set_active_reg(7, RESULT_WHAT),
-        }
-        DispatchResult::Continue
-    }
-
-    /// MGMT_GAS_MERGE: merge donor Gas cap at `cap_idx` into dst Gas cap
-    /// at slot φ[7] of the active VM. Donor is consumed. Routes through
-    /// `ProtocolCapT::gas_merge`.
-    fn mgmt_gas_merge(&mut self, cap_idx: u8) -> DispatchResult {
-        let dst_slot = self.active_reg(7) as u8;
-        if dst_slot == cap_idx {
-            self.set_active_reg(7, RESULT_WHAT);
-            return DispatchResult::Continue;
-        }
-        let vm = self.vm_arena.vm_mut(self.active_vm);
-        // Take donor first (so we can hold &mut on dst freely).
-        let donor = match vm.cap_table.take(cap_idx) {
-            Some(Cap::Protocol(p)) => p,
-            Some(other) => {
-                vm.cap_table.set(cap_idx, other);
-                self.set_active_reg(7, RESULT_WHAT);
-                return DispatchResult::Continue;
-            }
-            None => {
-                self.set_active_reg(7, RESULT_WHAT);
-                return DispatchResult::Continue;
-            }
-        };
-        let ok = match vm.cap_table.get_mut(dst_slot) {
-            Some(Cap::Protocol(dst)) => dst.gas_merge(&donor),
-            _ => false,
-        };
-        if ok {
-            // Donor consumed; slot stays empty.
-            self.set_active_reg(7, 0);
-        } else {
-            // Restore donor.
-            vm.cap_table.set(cap_idx, Cap::Protocol(donor));
-            self.set_active_reg(7, RESULT_WHAT);
-        }
-        DispatchResult::Continue
     }
 
     // --- Management ops ---
@@ -3209,34 +3346,28 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     /// aside via `MGMT_GAS_DERIVE` before the failed CALL — regardless
     /// of what the (possibly-untrusted) child did with its share.
     ///
-    /// O(1): under the post-pinning convention, parked Gas always
-    /// lives at slot 3 of the caller's MainFrame, so a single
-    /// take-and-merge replaces the prior 256-slot scan. If the slot
-    /// is empty, holds a non-FaultHandler / non-Gas cap, or the
-    /// merge fails, the cap is restored in place (better to leak
-    /// than to silently drop).
+    /// O(1): take the parked `Cap::Gas` at `vm_idx`'s `GAS_SLOT` (if
+    /// any) and add its `remaining` to `vm_idx`'s runtime `vm.gas()`
+    /// counter — i.e. into B_GAS-as-view, since B_GAS reads as
+    /// `active.vm.gas()` once `vm_idx` becomes the active VM after
+    /// the caller-resume swap completes. Targeting the caller's
+    /// counter directly avoids a dependency on the swap's exact
+    /// timing. Non-Gas caps at the slot get restored.
     fn rollback_parked_gas(&mut self, vm_idx: u16) {
-        let bare_idx = self.bare_frame_idx();
         let donor_cap = match self.vm_arena.vm_mut(vm_idx).cap_table.take(GAS_SLOT) {
             Some(c) => c,
             None => return,
         };
-        let donor = match donor_cap {
-            Cap::Protocol(p) => p,
+        match donor_cap {
+            Cap::Gas(donor) => {
+                let cur = self.vm_arena.vm(vm_idx).gas();
+                self.vm_arena
+                    .vm_mut(vm_idx)
+                    .set_gas(cur.saturating_add(donor.remaining));
+            }
             other => {
                 self.vm_arena.vm_mut(vm_idx).cap_table.set(GAS_SLOT, other);
-                return;
             }
-        };
-        let merged = match self.vm_arena.vm_mut(bare_idx).cap_table.get_mut(GAS_SLOT) {
-            Some(Cap::Protocol(dst)) => dst.gas_merge(&donor),
-            _ => false,
-        };
-        if !merged {
-            self.vm_arena
-                .vm_mut(vm_idx)
-                .cap_table
-                .set(GAS_SLOT, Cap::Protocol(donor));
         }
     }
 }
@@ -4265,6 +4396,74 @@ mod tests {
             ),
             "B_FH should hold the FaultHandler after release"
         );
+    }
+
+    #[test]
+    fn gas_derive_from_b_gas_decrements_active_vm_gas() {
+        // B_GAS is a view onto active.vm.gas(). DERIVE-from-B_GAS
+        // decrements the active VM's runtime counter and parks the
+        // split amount as a Cap::Gas at M_GAS (active VM, GAS_SLOT).
+        let blob = make_simple_blob(10);
+        let mut kernel: InvocationKernel = kernel_from_blob(&blob, 100_000);
+        let _ = kernel.vm_arena.vm_mut(0).transition(VmState::Running);
+        // Pin GAS_SLOT in active VM's MainFrame so the M_GAS dst is
+        // empty-but-pinned (mirroring populate_ephemeral_kernel_caps).
+        kernel.vm_arena.vm_mut(0).cap_table.pin(GAS_SLOT);
+
+        let gas_before = kernel.vm_arena.vm(0).gas();
+        // DERIVE 1000 from B_GAS into M_GAS:
+        //   subject_ref = 0x000300 (slot 0 indirection, then bare slot 3)
+        //   object_ref  = 0x000003 (slot 3 of active VM)
+        let subject_ref: u64 = (GAS_SLOT as u64) << 8;
+        let object_ref: u64 = GAS_SLOT as u64;
+        kernel.set_active_reg(7, 1000);
+        kernel.set_active_reg(12, object_ref | (subject_ref << 32));
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        kernel.flush_live_ctx();
+        let result = kernel.dispatch_ecall(&mut NoForeignCnode, MGMT_GAS_DERIVE);
+        assert!(matches!(result, DispatchResult::Continue));
+        assert_eq!(kernel.active_reg(7), 0, "DERIVE should succeed");
+
+        // Active VM's gas decremented by 1000 (plus the ecall_gas
+        // overhead of 10 charged at dispatch_ecall entry).
+        assert_eq!(kernel.vm_arena.vm(0).gas(), gas_before - 1000 - 10);
+        // M_GAS holds Cap::Gas(GasCap { remaining: 1000 }).
+        match kernel.vm_arena.vm(0).cap_table.get(GAS_SLOT) {
+            Some(Cap::Gas(g)) => assert_eq!(g.remaining, 1000),
+            other => panic!("expected Cap::Gas at M_GAS, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn gas_merge_into_b_gas_increments_active_vm_gas() {
+        // Place a Cap::Gas at M_GAS, then MERGE it into B_GAS. The
+        // active VM's vm.gas() should bump by the donor amount and
+        // M_GAS should be empty afterward.
+        let blob = make_simple_blob(10);
+        let mut kernel: InvocationKernel = kernel_from_blob(&blob, 100_000);
+        let _ = kernel.vm_arena.vm_mut(0).transition(VmState::Running);
+        kernel.vm_arena.vm_mut(0).cap_table.pin(GAS_SLOT);
+        kernel
+            .vm_arena
+            .vm_mut(0)
+            .cap_table
+            .set(GAS_SLOT, Cap::Gas(GasCap { remaining: 500 }));
+
+        let gas_before = kernel.vm_arena.vm(0).gas();
+        // MERGE M_GAS (subject) into B_GAS (object).
+        let subject_ref: u64 = GAS_SLOT as u64;
+        let object_ref: u64 = (GAS_SLOT as u64) << 8;
+        kernel.set_active_reg(12, object_ref | (subject_ref << 32));
+        #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+        kernel.flush_live_ctx();
+        let result = kernel.dispatch_ecall(&mut NoForeignCnode, MGMT_GAS_MERGE);
+        assert!(matches!(result, DispatchResult::Continue));
+        assert_eq!(kernel.active_reg(7), 0, "MERGE should succeed");
+
+        // active.vm.gas() bumped by 500 (minus the 10 ecall overhead).
+        assert_eq!(kernel.vm_arena.vm(0).gas(), gas_before + 500 - 10);
+        // M_GAS empty.
+        assert!(kernel.vm_arena.vm(0).cap_table.is_empty(GAS_SLOT));
     }
 
     #[test]
