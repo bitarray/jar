@@ -12,7 +12,6 @@ use crate::types::{CNode, CNodeId, CapId, CapRecord, KResult, KernelError, Vault
 pub mod cap_registry;
 pub mod cnode;
 pub mod code_blobs;
-pub mod snapshot;
 pub mod state_root;
 
 /// Persistent Vault unit. After the unified-persistence refactor, a

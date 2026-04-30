@@ -23,7 +23,6 @@ use crate::reach::ReachSet;
 use crate::runtime::Hardware;
 use crate::state::cap_registry;
 use crate::state::code_blobs;
-use crate::state::snapshot::StateSnapshot;
 use crate::vm::{INVOCATION_GAS_BUDGET, InvocationCtx, Vm, drive_invocation};
 
 /// What kind of slot we're running for. Affects whether body events are
@@ -109,9 +108,13 @@ pub fn run_one_invocation<H: Hardware>(
     cursor: &mut AttestCursor,
     hw: &H,
 ) -> KResult<(ReachEntry, Vec<Command>)> {
-    let snapshot = StateSnapshot::take(state);
-    // Resolve the entrypoint blob from the Vault's CodeCap slot before we
-    // hand `state` to the InvocationCtx as `&mut`.
+    // No StateSnapshot: faults discard the Frame; persistent caps in
+    // Vaults are unchanged because reads are COPY (not MOVE) and
+    // managers explicitly stage commits via MGMT_MOVE Frame → Vault.
+    // See discussions/persistence-via-caps.md.
+    //
+    // Resolve the entrypoint blob from the Vault's CodeCap slot before
+    // we hand `state` to the InvocationCtx as `&mut`.
     let blob = code_blobs::resolve_init_blob(state, target)?;
     // TODO: when transact guests start reading payload bytes, wire them
     // through `vm.write_data_cap_init(slot, payload)` against a manifest-
@@ -164,7 +167,10 @@ pub fn run_one_invocation<H: Hardware>(
             commands,
         ))
     } else {
-        snapshot.restore(state);
+        // Frame is already discarded by drive_invocation's javm
+        // teardown; cap moves the manager committed before the fault
+        // remain in σ. Reach is empty because we don't trust the
+        // Frame's record once it faulted.
         Ok((
             ReachEntry {
                 entrypoint: target,
