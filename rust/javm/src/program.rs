@@ -13,7 +13,6 @@
 //!                            run by Vault.initialize. The init program
 //!                            is responsible for placing a callable-shaped
 //!                            FrameRef at bare-Frame slot 4 before halting.
-//!   args_cap: u8            cap_index of DATA cap for arguments (0xFF = none)
 //!
 //! Capabilities[cap_count]:
 //!   cap[i]: {
@@ -472,12 +471,6 @@ mod tests {
         }];
         let blob = build_blob(10, 64, &caps, &[]);
         assert!(parse_blob(&blob).is_none());
-    }
-
-    #[test]
-    fn test_no_args_cap() {
-        let blob = build_blob(5, 64, &[], &[]);
-        let _parsed = parse_blob(&blob).unwrap();
     }
 
     #[test]

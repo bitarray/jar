@@ -232,8 +232,8 @@ pub fn build_service_program(
         next_page += heap_pages;
     }
 
-    // Args DATA cap. javm has no built-in args concept — this slot is
-    // a transpiler-host convention: hosts populate it via
+    // Args DATA cap (slot 69). javm has no built-in args concept; the
+    // slot is a transpiler-host convention. Hosts populate it via
     // `kernel.write_data_cap_init(ARGS_CAP_INDEX, bytes)` post-init and
     // pass the resulting byte address to the guest in φ[8]. Slot 69
     // sits above the kernel host-call selector range and the standard
