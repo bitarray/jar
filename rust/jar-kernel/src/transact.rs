@@ -116,12 +116,7 @@ pub fn run_one_invocation<H: Hardware>(
     // init replaces the legacy "fetch JAR blob, re-parse manifest"
     // path). vault_init walks vault.slots and translates persistent
     // caps to ephemeral counterparts at the same slot index.
-    // TODO: when transact guests start reading payload bytes, wire them
-    // through `vm.write_data_cap_init(slot, payload)` against a
-    // persistent DATA cap (and place at bare-Frame sub-slot 4 per the
-    // new cap-arg convention). Today's halt-immediate fixtures don't
-    // need it.
-    let _ = payload;
+    let _ = payload; // wired through `vm.set_args(payload)` in a follow-up commit
     let mut vm: Vm = crate::vm::new_vm_from_vault(state, target, INVOCATION_GAS_BUDGET, None)?;
     populate_host_call_slots(&mut vm);
     populate_home_vault_ref(&mut vm, target);

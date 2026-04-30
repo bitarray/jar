@@ -331,31 +331,6 @@ fn write_u32_le(buf: &mut [u8], offset: &mut usize, v: u32) {
     *offset += 4;
 }
 
-/// Compute the in-window `base_page` of the DATA cap at `cap_index`,
-/// given the manifest's cap entries in declared order. Replicates the
-/// transpiler's `ProgramLayout::compute` linear-stack convention:
-/// every DATA cap occupies pages contiguously starting at page 0, in
-/// the order the manifest lists them. Returns `None` if no DATA cap
-/// with `cap_index` is present.
-///
-/// Hosts that need to populate a DATA cap before invocation (via
-/// [`crate::kernel::InvocationKernel::write_data_cap_init`]) call
-/// this on a parsed blob's `caps` slice to recover the address the
-/// init prologue will install.
-pub fn data_cap_base_page(caps: &[CapManifestEntry], cap_index: u8) -> Option<u32> {
-    let mut base = 0u32;
-    for cap in caps {
-        if cap.cap_type != CapEntryType::Data {
-            continue;
-        }
-        if cap.cap_index == cap_index {
-            return Some(base);
-        }
-        base = base.saturating_add(cap.page_count);
-    }
-    None
-}
-
 /// Get the data slice for a capability entry from the data section.
 pub fn cap_data<'a>(entry: &CapManifestEntry, data_section: &'a [u8]) -> &'a [u8] {
     if entry.data_len == 0 {

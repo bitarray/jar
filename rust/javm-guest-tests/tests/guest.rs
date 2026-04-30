@@ -19,31 +19,17 @@ fn run_kernel(backend: javm::PvmBackend, input: &[u8], test_id: u32) -> KernelRu
     use javm::vm_pool::VmState;
 
     let gas = 100_000_000_000u64;
-    // Compute the args cap's base_page from the parsed blob manifest;
-    // the manifest no longer carries (base_page, init_access) — those
-    // are baked into the prologue's MGMT_MAP. write_data_cap_init
-    // pre-records a mapping at the same (base_page, RW) so the
-    // prologue's MGMT_MAP succeeds idempotently.
-    let parsed = javm::program::parse_blob(GUEST_TESTS_BLOB).expect("parse blob");
-    let args_base_page =
-        javm::program::data_cap_base_page(&parsed.caps, javm_transpiler::ARGS_CAP_INDEX)
-            .expect("args cap should be present in the guest blob manifest");
-    drop(parsed);
     let artifacts =
         cap_table_from_blob::<u8>(GUEST_TESTS_BLOB, backend, None).expect("cap_table_from_blob ok");
     let mut kernel: InvocationKernel =
         InvocationKernel::new_from_artifacts(artifacts, gas, backend)
             .expect("kernel should initialize");
-    let args_base = kernel
-        .write_data_cap_init(
-            javm_transpiler::ARGS_CAP_INDEX,
-            args_base_page,
-            javm::cap::Access::RW,
-            input,
-        )
-        .expect("write args bytes");
-    kernel.vm_arena.vm_mut(0).set_reg(8, args_base);
-    kernel.vm_arena.vm_mut(0).set_reg(9, input.len() as u64);
+    // Hand the input bytes to the guest as args. `set_args` allocates
+    // a fresh DATA cap, writes the bytes into its backing pages,
+    // places it at bare-Frame slot 4, and sets `φ[7] = input.len()`.
+    // The guest's `_start` (via `javm_builtins::map_args`) MOVE+MAPs
+    // it into the active VM's window.
+    kernel.set_args(input).expect("set_args");
     let _ = kernel.vm_arena.vm_mut(0).transition(VmState::Running);
 
     let result = kernel.run();

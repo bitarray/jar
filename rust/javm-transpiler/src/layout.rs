@@ -14,9 +14,13 @@
 //!   responsibility.
 //!
 //! Cap-index convention: 64 = CODE, 65 = stack, 66 = ro, 67 = rw,
-//! 68 = heap, 69 = args. Address layout starts at page 0 and stacks
-//! linearly: stack lives at `[0, stack_pages)`, ro at
-//! `[stack_pages, stack_pages + ro_pages)`, etc.
+//! 68 = heap. Address layout starts at page 0 and stacks linearly:
+//! stack lives at `[0, stack_pages)`, ro at `[stack_pages,
+//! stack_pages + ro_pages)`, etc. Args bytes (when present) are
+//! delivered out-of-band: the kernel allocates and places the args
+//! DATA cap at bare-Frame slot 4; the guest MOVE+MGMT_MAPs it
+//! itself (see `javm_builtins::map_args`). Args is not in the
+//! manifest and not in `ProgramLayout`.
 
 use javm::cap::Access;
 
@@ -44,16 +48,17 @@ pub struct DataCapEntry {
     pub access: Access,
 }
 
-/// Full DATA-cap layout of a transpiler-emitted blob. `stack` and
-/// `args` are always present; `ro`, `rw`, `heap` are present only when
-/// their page count is non-zero.
+/// Full DATA-cap layout of a transpiler-emitted blob. `stack` is
+/// always present; `ro`, `rw`, `heap` are present only when their
+/// page count is non-zero. Args bytes are delivered separately
+/// (kernel-allocated cap at bare-Frame slot 4), so they are not part
+/// of the layout.
 #[derive(Debug, Clone)]
 pub struct ProgramLayout {
     pub stack: DataCapEntry,
     pub ro: Option<DataCapEntry>,
     pub rw: Option<DataCapEntry>,
     pub heap: Option<DataCapEntry>,
-    pub args: DataCapEntry,
 }
 
 impl ProgramLayout {
@@ -105,17 +110,9 @@ impl ProgramLayout {
                 page_count: heap_pages,
                 access: Access::RW,
             };
-            next_page += heap_pages;
             Some(e)
         } else {
             None
-        };
-
-        let args = DataCapEntry {
-            cap_index: crate::ARGS_CAP_INDEX,
-            base_page: next_page,
-            page_count: 1,
-            access: Access::RW,
         };
 
         Self {
@@ -123,18 +120,16 @@ impl ProgramLayout {
             ro,
             rw,
             heap,
-            args,
         }
     }
 
     /// Iterate every DATA cap entry in cap-index (and base-page) order:
-    /// stack, ro?, rw?, heap?, args.
+    /// stack, ro?, rw?, heap?.
     pub fn data_caps(&self) -> impl Iterator<Item = &DataCapEntry> + '_ {
         std::iter::once(&self.stack)
             .chain(self.ro.iter())
             .chain(self.rw.iter())
             .chain(self.heap.iter())
-            .chain(std::iter::once(&self.args))
     }
 
     /// Top-of-stack address (initial SP). RISC-V SP grows downward, so
@@ -309,7 +304,12 @@ fn emit_mgmt_map(code: &mut Vec<u8>, bitmask: &mut Vec<u8>, entry: &DataCapEntry
 /// 1. `MGMT_MAP` for the stack cap (so subsequent stack accesses work).
 /// 2. `load_imm_64 SP, stack_top` (RISC-V SP grows down).
 /// 3. `MGMT_MAP` for ro / rw / heap (skipping absent ones).
-/// 4. `MGMT_MAP` for args.
+///
+/// The prologue does **not** touch the args DATA cap. Args bytes (if
+/// any) sit at bare-Frame slot 4, placed there by
+/// [`javm::kernel::InvocationKernel::set_args`]. The guest is
+/// responsible for MOVE-ing the cap into its main-frame CapTable
+/// and MGMT_MAP-ing it (see `javm_builtins::map_args`).
 ///
 /// Caller must shift `jump_table` entries by `code.len()` after
 /// concatenating user code, since they encode absolute byte offsets
@@ -320,8 +320,8 @@ pub fn emit_prologue(layout: &ProgramLayout) -> (Vec<u8>, Vec<u8>) {
 
     // 1. Save host-set φ[7..=12] into scratch regs (φ[0] + φ[2..=6])
     //    so the prologue can clobber them for MGMT_MAP arg passing
-    //    without losing host-passed args (e.g. javm-guest-tests sets
-    //    φ[8] = args_addr, φ[9] = args_len before calling run()).
+    //    without losing host-passed args (φ[7] = args_len, set by
+    //    `kernel.set_args`).
     emit_save_arg_regs(&mut code, &mut bitmask);
 
     // 2. Map the stack first — the SP setup that follows must reference
@@ -342,10 +342,7 @@ pub fn emit_prologue(layout: &ProgramLayout) -> (Vec<u8>, Vec<u8>) {
         emit_mgmt_map(&mut code, &mut bitmask, opt);
     }
 
-    // 5. Map args.
-    emit_mgmt_map(&mut code, &mut bitmask, &layout.args);
-
-    // 6. Restore φ[7..=12] from scratch regs.
+    // 5. Restore φ[7..=12] from scratch regs.
     emit_restore_arg_regs(&mut code, &mut bitmask);
 
     debug_assert_eq!(code.len(), bitmask.len());
@@ -357,7 +354,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layout_minimal_stack_and_args() {
+    fn layout_minimal_stack_only() {
         let l = ProgramLayout::compute(1, 0, 0, 0);
         assert_eq!(l.stack.cap_index, STACK_CAP_INDEX);
         assert_eq!(l.stack.base_page, 0);
@@ -365,23 +362,19 @@ mod tests {
         assert!(l.ro.is_none());
         assert!(l.rw.is_none());
         assert!(l.heap.is_none());
-        assert_eq!(l.args.cap_index, crate::ARGS_CAP_INDEX);
-        assert_eq!(l.args.base_page, 1);
-        assert_eq!(l.args.page_count, 1);
         assert_eq!(l.stack_top(), 4096);
-        assert_eq!(l.total_data_pages(), 2);
+        assert_eq!(l.total_data_pages(), 1);
     }
 
     #[test]
-    fn layout_full_stack_ro_rw_heap_args() {
+    fn layout_full_stack_ro_rw_heap() {
         let l = ProgramLayout::compute(2, 1, 1, 4);
         assert_eq!(l.stack.base_page, 0);
         assert_eq!(l.ro.as_ref().unwrap().base_page, 2);
         assert_eq!(l.rw.as_ref().unwrap().base_page, 3);
         assert_eq!(l.heap.as_ref().unwrap().base_page, 4);
-        assert_eq!(l.args.base_page, 8);
         assert_eq!(l.stack_top(), 2 * 4096);
-        assert_eq!(l.total_data_pages(), 2 + 1 + 1 + 4 + 1);
+        assert_eq!(l.total_data_pages(), 2 + 1 + 1 + 4);
     }
 
     #[test]
@@ -389,8 +382,8 @@ mod tests {
         let l = ProgramLayout::compute(1, 0, 0, 0);
         let (code, bitmask) = emit_prologue(&l);
         assert_eq!(code.len(), bitmask.len());
-        // save (12) + stack MGMT_MAP (61) + SP setup (10) + args MGMT_MAP (61) + restore (12) = 156 bytes.
-        assert_eq!(code.len(), 12 + 61 + 10 + 61 + 12);
+        // save (12) + stack MGMT_MAP (61) + SP setup (10) + restore (12) = 95 bytes.
+        assert_eq!(code.len(), 12 + 61 + 10 + 12);
         // First instruction must be a basic-block start.
         assert_eq!(bitmask[0], 1);
         // First instruction is move_reg (opcode 100) — saving φ[7] to φ[0].
@@ -401,7 +394,7 @@ mod tests {
     fn prologue_with_all_regions() {
         let l = ProgramLayout::compute(2, 1, 1, 4);
         let (code, _bitmask) = emit_prologue(&l);
-        // save(12) + stack(61) + SP(10) + ro(61) + rw(61) + heap(61) + args(61) + restore(12) = 339 bytes.
-        assert_eq!(code.len(), 12 + 61 + 10 + 61 + 61 + 61 + 61 + 12);
+        // save(12) + stack(61) + SP(10) + ro(61) + rw(61) + heap(61) + restore(12) = 278 bytes.
+        assert_eq!(code.len(), 12 + 61 + 10 + 61 + 61 + 61 + 12);
     }
 }

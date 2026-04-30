@@ -13,15 +13,6 @@ pub mod riscv;
 
 use thiserror::Error;
 
-/// Slot in VM 0's persistent Frame where the transpiler-emitted manifest
-/// places the args DATA cap. This is purely a transpiler-host convention
-/// — javm itself has no notion of args. Hosts call
-/// `kernel.write_data_cap_init(ARGS_CAP_INDEX, bytes)` to populate it
-/// after invocation construction. Slot 69 sits above the kernel's
-/// host-call selector range (1..=21) and the standard program caps
-/// (64..=68 for code/stack/ro/rw/heap), so it doesn't collide.
-pub const ARGS_CAP_INDEX: u8 = 69;
-
 /// Parse a signed variable-length immediate from PVM bytecode.
 ///
 /// Reads `lx` bytes starting at `code[start]`, sign-extends to i64.

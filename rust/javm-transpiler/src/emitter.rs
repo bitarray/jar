@@ -225,20 +225,16 @@ pub fn build_service_program(
             data_len: 0,
         });
     }
-    // Args DATA cap (slot 69) — a transpiler-host convention. Hosts
-    // populate it via `kernel.write_data_cap_init(ARGS_CAP_INDEX, bytes)`
-    // post-init and pass the resulting byte address to the guest in φ[8].
-    caps.push(CapManifestEntry {
-        cap_index: layout.args.cap_index,
-        cap_type: CapEntryType::Data,
-        page_count: layout.args.page_count,
-        data_offset: 0,
-        data_len: 0,
-    });
+    // Note: no args entry here. Args bytes are delivered via
+    // `kernel.set_args(bytes)` at runtime, which allocates a fresh
+    // DATA cap and places it at bare-Frame slot 4 (a kernel-managed
+    // ephemeral sub-slot, not a manifest slot). The guest MOVE+MAPs
+    // it itself via `javm_builtins::map_args`.
 
     // Untyped budget: max of the caller's request and the layout's
     // total reserved data pages plus an extra heap headroom (legacy
-    // behavior preserved).
+    // behavior preserved). The kernel needs additional untyped slack
+    // for `set_args` to allocate the args DATA cap at runtime.
     let total = memory_pages.max(layout.total_data_pages() + heap_pages);
     build_blob(total, CODE_CAP_INDEX, &caps, &data_section)
 }

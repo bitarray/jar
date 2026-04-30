@@ -102,6 +102,14 @@ const MGMT_GAS_DERIVE: u32 = 0xD;
 /// is consumed. Routes through `ProtocolCapT::gas_merge`.
 const MGMT_GAS_MERGE: u32 = 0xE;
 
+/// Bare-Frame sub-slot where [`InvocationKernel::set_args`] places
+/// the args DATA cap. The host populates this; the guest MOVEs +
+/// MGMT_MAPs it into its own main-frame CapTable (the kernel's
+/// rule "MGMT_MAP only on caps in a VM's persistent Frame" stays).
+/// Slot 4 is the next free sub-slot after the kernel-managed
+/// Caller (1), SelfId (2), Gas (3) caps.
+pub const BARE_FRAME_ARGS_SLOT: u8 = 4;
+
 /// WHAT error code (2^64 - 2).
 const RESULT_WHAT: u64 = u64::MAX - 1;
 const RESULT_LOW: u64 = u64::MAX - 7; // gas limit too low
@@ -293,11 +301,12 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
             cap_table.set(254, Cap::Untyped(Arc::clone(&self.untyped)));
         }
 
-        // Create VM 0. Registers start zeroed; the host sets whatever
-        // scalar args (op code, etc.) it wants in φ[7..12] *after*
-        // construction, and writes any byte payloads into a DATA cap via
-        // `write_data_cap_init` (typically placed at ephemeral sub-slot 4
-        // by the conventional cap-arg pattern).
+        // Create VM 0. Registers start zeroed. To pass byte payload to
+        // the guest, the host calls [`Self::set_args`] which allocates
+        // a DATA cap, writes the bytes into its backing pages, places
+        // the cap at bare-Frame sub-slot 4, and sets `φ[7] = args_len`.
+        // The guest itself does the MOVE + MGMT_MAP — see
+        // `javm_builtins::map_args`.
         let vm0 = VmInstance::new(
             init_code_id,
             0, // entry_index (set by caller via CALL)
@@ -330,44 +339,38 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
         Ok(self)
     }
 
-    /// Write `bytes` into the backing pages of the DATA cap at `slot` of
-    /// VM 0's persistent Frame. Returns the mapped byte address
-    /// (`base_page * PAGE_SIZE`) so the host can pass it to the guest in
-    /// a register.
+    /// Pass byte-payload args to the invocation. Allocates a fresh
+    /// DATA cap from `self.untyped` (sized to fit `bytes`), writes
+    /// the bytes into its backing pages, and places the cap at
+    /// **bare-Frame slot 4** — the next free ephemeral sub-slot
+    /// after Caller (1), SelfId (2), Gas (3). Sets `VM 0.φ[7] =
+    /// bytes.len() as u64`. The cap is left *unmapped*: the kernel
+    /// rule "MGMT_MAP only on caps held in a VM's persistent Frame"
+    /// stays, and the guest is responsible for MOVE-ing the cap
+    /// from bare-Frame slot 4 into its own main-frame CapTable
+    /// before MGMT_MAP-ing. The `javm_builtins::map_args` helper
+    /// does both in one call.
     ///
-    /// The cap stays *unmapped*: the init prologue's `MGMT_MAP` (emitted
-    /// by [`javm-transpiler::layout::emit_prologue`]) installs the
-    /// window mapping at `base_page` with `access` before user code
-    /// reads the bytes. `base_page` and `access` are accepted here so
-    /// the host can compute the byte address, but they are not stored
-    /// on the cap. Use [`crate::program::data_cap_base_page`] to compute
-    /// `base_page` from a parsed blob's manifest.
-    ///
-    /// Returns `Err` if the slot is empty, holds a non-DATA cap, or
-    /// `bytes.len()` exceeds the cap's allocated pages.
-    pub fn write_data_cap_init(
-        &mut self,
-        slot: u8,
-        base_page: u32,
-        _access: Access,
-        bytes: &[u8],
-    ) -> Result<u64, KernelError> {
-        let backing_offset = match self.vm_arena.vm_mut(0).cap_table.get_mut(slot) {
-            Some(Cap::Data(d)) => {
-                let cap_bytes = d.page_count as usize * crate::PVM_PAGE_SIZE as usize;
-                if bytes.len() > cap_bytes {
-                    return Err(KernelError::InvalidBlob);
-                }
-                d.backing_offset
-            }
-            _ => return Err(KernelError::InvalidBlob),
-        };
-        // Write payload into the backing memfd. The cap stays unmapped:
-        // the init prologue's `MGMT_MAP` (emitted by the transpiler) is
-        // responsible for installing the window mapping at `base_page`
-        // before user code reads the bytes.
-        self.backing.write_init_data(backing_offset, bytes);
-        Ok(base_page as u64 * crate::PVM_PAGE_SIZE as u64)
+    /// Should be called at most once per kernel, after
+    /// [`Self::new_from_artifacts`] and before
+    /// [`VmInstance::transition`] to `Running`. Errors with
+    /// [`KernelError::InvalidBlob`] if bare-Frame slot 4 is already
+    /// occupied, with [`KernelError::OutOfMemory`] if the kernel's
+    /// untyped budget can't cover `bytes.len().div_ceil(PAGE_SIZE)`
+    /// pages.
+    pub fn set_args(&mut self, bytes: &[u8]) -> Result<(), KernelError> {
+        let page_count = (bytes.len() as u32).div_ceil(crate::PVM_PAGE_SIZE);
+        let data_cap = allocate_data_cap(bytes, page_count, &self.untyped, &mut self.backing)?;
+
+        let bare_idx = self.bare_frame_idx();
+        let bare_table = &mut self.vm_arena.vm_mut(bare_idx).cap_table;
+        if bare_table.get(BARE_FRAME_ARGS_SLOT).is_some() {
+            return Err(KernelError::InvalidBlob);
+        }
+        bare_table.set(BARE_FRAME_ARGS_SLOT, Cap::Data(data_cap));
+
+        self.vm_arena.vm_mut(0).set_reg(7, bytes.len() as u64);
+        Ok(())
     }
 
     /// Extract the current flat_mem snapshot from the kernel's DATA cap pages.
