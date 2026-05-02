@@ -1,7 +1,7 @@
 //! Cap shapes for the kernel.
 //!
 //! After the CapId-removal refactor, caps are pure value types stored
-//! inline. There's no cap_registry: `vault.slots` holds `VaultCap`
+//! inline. There's no cap_registry: `vault.slots` holds `RegCap`
 //! values directly, `σ.{transact,dispatch}_endpoints` hold
 //! `EventEndpointCap` values directly. Bulk content (CodeCap blob,
 //! DataCap content) shares storage via `Arc`.
@@ -151,14 +151,14 @@ pub fn is_identity_key(key: &KeyId) -> bool {
 }
 
 // -----------------------------------------------------------------------------
-// VaultCap — what occupies one slot of a Vault.slots CNode
+// RegCap — what occupies one slot of a Vault.slots CNode
 // -----------------------------------------------------------------------------
 
 /// Cap kinds eligible for placement in `vault.slots`. Pure value types
-/// — no `CapId` indirection. Granting a copy of a `VaultCap` transfers
+/// — no `CapId` indirection. Granting a copy of a `RegCap` transfers
 /// ownership of the copy; the source remains independent.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub enum VaultCap {
+pub enum RegCap {
     VaultRef(VaultRefCap),
     Code(CodeCap),
     Data(DataCap),
@@ -222,7 +222,7 @@ pub enum ResourceKind {
 /// A 256-slot capability table. Used for Vault.slots.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct CNode {
-    pub slots: [Option<VaultCap>; 256],
+    pub slots: [Option<RegCap>; 256],
 }
 
 impl Default for CNode {
@@ -233,21 +233,21 @@ impl Default for CNode {
 
 impl CNode {
     pub fn new() -> Self {
-        const EMPTY: Option<VaultCap> = None;
+        const EMPTY: Option<RegCap> = None;
         CNode {
             slots: [EMPTY; 256],
         }
     }
 
-    pub fn get(&self, slot: u8) -> Option<&VaultCap> {
+    pub fn get(&self, slot: u8) -> Option<&RegCap> {
         self.slots[slot as usize].as_ref()
     }
 
-    pub fn set(&mut self, slot: u8, cap: Option<VaultCap>) {
+    pub fn set(&mut self, slot: u8, cap: Option<RegCap>) {
         self.slots[slot as usize] = cap;
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (u8, &VaultCap)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (u8, &RegCap)> + '_ {
         self.slots
             .iter()
             .enumerate()

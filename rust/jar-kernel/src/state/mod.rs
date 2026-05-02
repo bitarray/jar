@@ -4,7 +4,7 @@
 //! `Vec<EventEndpointCap>` lists for the public surfaces
 //! (transact_endpoints, dispatch_endpoints).
 //!
-//! Caps live as values directly inside `vault.slots[N]: Option<VaultCap>`
+//! Caps live as values directly inside `vault.slots[N]: Option<RegCap>`
 //! and inside the endpoint lists. No cap_registry, no CapId — pure
 //! value-typed capability layer.
 

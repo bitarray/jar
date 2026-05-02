@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use jar_kernel::cap::{CodeCap, VaultRefCap, VaultRights};
 use jar_kernel::vm::new_vm_from_vault;
-use jar_kernel::{State, Vault, VaultCap, VaultId};
+use jar_kernel::{RegCap, State, Vault, VaultId};
 
 const INIT_SLOT: u8 = 64;
 const INVOCATION_GAS: u64 = 100_000_000;
@@ -36,7 +36,7 @@ fn vault_with_init_code() -> (State, VaultId) {
     v.init_cap = INIT_SLOT;
     v.slots.set(
         INIT_SLOT,
-        Some(VaultCap::Code(CodeCap {
+        Some(RegCap::Code(CodeCap {
             blob: Arc::new(halt_code_sub_blob()),
         })),
     );
@@ -154,13 +154,13 @@ fn set_args_rejects_double_call() {
 fn new_vm_from_vault_inline_vault_ref_propagates() {
     let (mut state, vault_id) = vault_with_init_code();
 
-    // VaultRef placed inline as a VaultCap::VaultRef value.
+    // VaultRef placed inline as a RegCap::VaultRef value.
     let target_vault = VaultId(99);
     let arc = state.vaults.get(&vault_id).unwrap().clone();
     let mut v: Vault = (*arc).clone();
     v.slots.set(
         100,
-        Some(VaultCap::VaultRef(VaultRefCap {
+        Some(RegCap::VaultRef(VaultRefCap {
             vault_id: target_vault,
             rights: VaultRights::ALL,
         })),

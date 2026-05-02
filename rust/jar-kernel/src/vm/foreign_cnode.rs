@@ -7,13 +7,13 @@
 //! (`fc_take` / `fc_set` / `fc_clone` / `fc_drop` / `fc_is_empty`)
 //! through this adapter.
 //!
-//! After CapId removal, `vault.slots[N]` holds `VaultCap` values
-//! directly. Translation between `VaultCap` and the Frame's `Cap`
+//! After CapId removal, `vault.slots[N]` holds `RegCap` values
+//! directly. Translation between `RegCap` and the Frame's `Cap`
 //! representation:
 //!
-//! - `VaultCap::VaultRef(vr)` ↔ `Cap::Protocol(ProtocolCap::VaultRef(vr))`.
-//! - `VaultCap::Resource(r)` ↔ `Cap::Protocol(ProtocolCap::Resource(r))`.
-//! - `VaultCap::Code(_)` / `VaultCap::Data(_)` are container-bound:
+//! - `RegCap::VaultRef(vr)` ↔ `Cap::Protocol(ProtocolCap::VaultRef(vr))`.
+//! - `RegCap::Resource(r)` ↔ `Cap::Protocol(ProtocolCap::Resource(r))`.
+//! - `RegCap::Code(_)` / `RegCap::Data(_)` are container-bound:
 //!   they're compiled / mapped at `vault_init` only, never moved between
 //!   Vault and Frame mid-VM. `fc_take` / `fc_clone` on those return
 //!   `None`.
@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use javm::cap::ForeignCnode;
 
-use crate::cap::{Cap, ProtocolCap, VaultCap, VaultRights};
+use crate::cap::{Cap, ProtocolCap, RegCap, VaultRights};
 use crate::types::{State, VaultId};
 
 /// Adapter implementing [`ForeignCnode<ProtocolCap>`] over `&mut State`.
@@ -42,13 +42,13 @@ impl<'a> VaultCnodeView<'a> {
     }
 }
 
-/// Read the `VaultCap` at `(vault, slot)`, if any.
-fn slot_cap(state: &State, vault: VaultId, slot: u8) -> Option<VaultCap> {
+/// Read the `RegCap` at `(vault, slot)`, if any.
+fn slot_cap(state: &State, vault: VaultId, slot: u8) -> Option<RegCap> {
     state.vaults.get(&vault)?.slots.get(slot).cloned()
 }
 
 /// Mutably set the slot to `value`, copy-on-write the Vault Arc.
-fn slot_set(state: &mut State, vault: VaultId, slot: u8, value: Option<VaultCap>) {
+fn slot_set(state: &mut State, vault: VaultId, slot: u8, value: Option<RegCap>) {
     let arc = match state.vaults.get(&vault) {
         Some(a) => a.clone(),
         None => return,
@@ -121,23 +121,23 @@ impl ForeignCnode<ProtocolCap> for VaultCnodeView<'_> {
     }
 }
 
-/// Translate a `VaultCap` into the Frame cap-table representation.
+/// Translate a `RegCap` into the Frame cap-table representation.
 /// Returns `None` for kinds that don't have a `ProtocolCap` variant
 /// (Code / Data are container-bound).
-fn vault_cap_to_frame(cap: &VaultCap) -> Option<Cap> {
+fn vault_cap_to_frame(cap: &RegCap) -> Option<Cap> {
     match cap {
-        VaultCap::VaultRef(vr) => Some(Cap::Protocol(ProtocolCap::VaultRef(*vr))),
-        VaultCap::Resource(r) => Some(Cap::Protocol(ProtocolCap::Resource(r.clone()))),
-        VaultCap::Code(_) | VaultCap::Data(_) => None,
+        RegCap::VaultRef(vr) => Some(Cap::Protocol(ProtocolCap::VaultRef(*vr))),
+        RegCap::Resource(r) => Some(Cap::Protocol(ProtocolCap::Resource(r.clone()))),
+        RegCap::Code(_) | RegCap::Data(_) => None,
     }
 }
 
-/// Translate a Frame cap back to a `VaultCap` for placement into
+/// Translate a Frame cap back to a `RegCap` for placement into
 /// `vault.slots`. Returns `None` if the cap can't legally live in σ.
-fn frame_to_vault_cap(cap: &Cap) -> Option<VaultCap> {
+fn frame_to_vault_cap(cap: &Cap) -> Option<RegCap> {
     match cap {
-        Cap::Protocol(ProtocolCap::VaultRef(vr)) => Some(VaultCap::VaultRef(*vr)),
-        Cap::Protocol(ProtocolCap::Resource(r)) => Some(VaultCap::Resource(r.clone())),
+        Cap::Protocol(ProtocolCap::VaultRef(vr)) => Some(RegCap::VaultRef(*vr)),
+        Cap::Protocol(ProtocolCap::Resource(r)) => Some(RegCap::Resource(r.clone())),
         // HostCall, Frame-only kinds (SelfId / Caller* / AttestationScope /
         // Attestation / AttestationAggregate), and javm-side first-class
         // arms (Cap::Code, Cap::Data, Cap::FrameRef, Cap::Empty) all

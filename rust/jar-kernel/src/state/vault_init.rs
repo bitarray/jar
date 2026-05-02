@@ -2,16 +2,16 @@
 //! persistent CNode slots.
 //!
 //! For every occupied slot in `vault.slots`, this module looks up the
-//! `CapRecord` and translates the persistent `VaultCap` shape into
+//! `CapRecord` and translates the persistent `RegCap` shape into
 //! the ephemeral `Cap` shape that lives in a running VM's
 //! Frame:
 //!
 //! | `vault.slots[N]`                                      | `cap_table[N]` |
 //! |-------------------------------------------------------|----------------|
 //! | empty                                                 | empty          |
-//! | `VaultCap::Code(CodeCap{blob})`                     | `Cap::Code(...)` (compile blob) |
-//! | `VaultCap::Data(DataCap{content, page_count})`      | `Cap::Data(...)` (fresh ephemeral pages, content-copied, **unmapped**) |
-//! | `VaultCap::VaultRef(...)` / other Registered shapes | `Cap::Protocol(ProtocolCap::Registered { id, cap })` |
+//! | `RegCap::Code(CodeCap{blob})`                     | `Cap::Code(...)` (compile blob) |
+//! | `RegCap::Data(DataCap{content, page_count})`      | `Cap::Data(...)` (fresh ephemeral pages, content-copied, **unmapped**) |
+//! | `RegCap::VaultRef(...)` / other Registered shapes | `Cap::Protocol(ProtocolCap::Registered { id, cap })` |
 //! | Pinned (Dispatch / Transact / Schedule + Refs)        | `KernelError::Pinning` (defense in depth — `fc_set` already rejects placement) |
 //! | Ephemeral-only (Gas / SelfId / Caller*)               | `KernelError::Internal` (kernel bug if such a cap lands here) |
 //!
@@ -31,7 +31,7 @@ use std::sync::Arc;
 use javm::cap::CapTable;
 
 use crate::cap::{Cap, ProtocolCap};
-use crate::types::{KResult, KernelError, State, VaultCap, VaultId};
+use crate::types::{KResult, KernelError, RegCap, State, VaultId};
 
 /// Pre-built input to `javm::kernel::InvocationKernel::new_from_artifacts`,
 /// produced by walking `vault.slots`. Mirrors
@@ -125,7 +125,7 @@ pub fn build_init_cap_table(
 
 #[allow(clippy::too_many_arguments)]
 fn translate_vault_cap(
-    cap: &VaultCap,
+    cap: &RegCap,
     code_caps: &mut Vec<Arc<javm::cap::CodeCap>>,
     mem_cycles: u8,
     backend: javm::PvmBackend,
@@ -134,8 +134,8 @@ fn translate_vault_cap(
     backing: &mut javm::backing::BackingStore,
 ) -> KResult<Cap> {
     match cap {
-        VaultCap::VaultRef(vr) => Ok(Cap::Protocol(ProtocolCap::VaultRef(*vr))),
-        VaultCap::Code(c) => {
+        RegCap::VaultRef(vr) => Ok(Cap::Protocol(ProtocolCap::VaultRef(*vr))),
+        RegCap::Code(c) => {
             if code_caps.len() >= javm::vm_pool::MAX_CODE_CAPS {
                 return Err(KernelError::Internal(format!(
                     "vault holds more than {} CodeCap entries",
@@ -149,14 +149,14 @@ fn translate_vault_cap(
             code_caps.push(Arc::clone(&code_cap));
             Ok(Cap::Code(code_cap))
         }
-        VaultCap::Data(d) => {
+        RegCap::Data(d) => {
             let data_cap =
                 javm::kernel::allocate_data_cap(&d.content, d.page_count, untyped, backing)
                     .map_err(|e| KernelError::Internal(format!("allocate_data_cap: {:?}", e)))?;
             // Cap is unmapped on purpose — the init program calls MGMT_MAP.
             Ok(Cap::Data(data_cap))
         }
-        VaultCap::Resource(r) => Ok(Cap::Protocol(ProtocolCap::Resource(r.clone()))),
+        RegCap::Resource(r) => Ok(Cap::Protocol(ProtocolCap::Resource(r.clone()))),
     }
 }
 
@@ -180,7 +180,7 @@ mod tests {
     /// in these tests.
     const TEST_MEM_PAGES: u32 = 16;
 
-    fn place(state: &mut State, vault_id: VaultId, slot: u8, cap: VaultCap) {
+    fn place(state: &mut State, vault_id: VaultId, slot: u8, cap: RegCap) {
         let arc = state.vaults.get(&vault_id).unwrap().clone();
         let mut v: Vault = (*arc).clone();
         v.slots.set(slot, Some(cap));
@@ -188,7 +188,7 @@ mod tests {
     }
 
     fn place_vault_ref(state: &mut State, vault_id: VaultId, slot: u8, vr: VaultRefCap) {
-        place(state, vault_id, slot, VaultCap::VaultRef(vr));
+        place(state, vault_id, slot, RegCap::VaultRef(vr));
     }
 
     /// Extract the raw code sub-blob (jump_table + code + bitmask) from
@@ -216,7 +216,7 @@ mod tests {
             &mut state,
             vault_id,
             64,
-            VaultCap::Code(CodeCap {
+            RegCap::Code(CodeCap {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
         );
@@ -242,7 +242,7 @@ mod tests {
             &mut state,
             vault_id,
             64,
-            VaultCap::Code(CodeCap {
+            RegCap::Code(CodeCap {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
         );
@@ -282,7 +282,7 @@ mod tests {
             &mut state,
             vault_id,
             64,
-            VaultCap::Code(CodeCap {
+            RegCap::Code(CodeCap {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
         );
@@ -290,7 +290,7 @@ mod tests {
             &mut state,
             vault_id,
             65,
-            VaultCap::Data(DataCap {
+            RegCap::Data(DataCap {
                 content: Arc::new(b"hello".to_vec()),
                 page_count: 1,
             }),
@@ -355,7 +355,7 @@ mod tests {
         assert!(matches!(err, KernelError::Internal(_)));
     }
 
-    // EventEndpoint is no longer in VaultCap, so the "EventEndpoint in
+    // EventEndpoint is no longer in RegCap, so the "EventEndpoint in
     // vault.slots" malformation is no longer expressible. The type
     // system makes that defense-in-depth check unreachable.
 
@@ -370,7 +370,7 @@ mod tests {
             &mut state,
             vault_id,
             0,
-            VaultCap::Code(CodeCap {
+            RegCap::Code(CodeCap {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
         );

@@ -1,4 +1,4 @@
-//! Capabilities — the `VaultCap` enum (cap shapes occupying
+//! Capabilities — the `RegCap` enum (cap shapes occupying
 //! `vault.slots`), the `ProtocolCap` enum (jar-kernel's impl of
 //! `javm::ProtocolCap`), and the `Cap` alias (the complete Frame cap
 //! type `javm::Cap<ProtocolCap>` — what's actually in a cap-table cell).

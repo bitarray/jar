@@ -20,7 +20,7 @@ pub use trace::*;
 // State + Vault + IdCounters live in `crate::state`.
 pub use crate::state::{IdCounters, State, Vault};
 
-// VaultCap variants + helper types live in `crate::cap`.
+// RegCap variants + helper types live in `crate::cap`.
 pub use crate::cap::regcap::*;
 
 /// 32-byte hash. Used for state roots, blob hashes, and code hashes. The

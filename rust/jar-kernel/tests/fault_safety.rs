@@ -11,13 +11,13 @@ use javm::cap::ForeignCnode;
 
 use jar_kernel::cap::Cap;
 use jar_kernel::vm::foreign_cnode::VaultCnodeView;
-use jar_kernel::{ResourceCap, ResourceKind, State, Vault, VaultCap, VaultId, VaultRights};
+use jar_kernel::{RegCap, ResourceCap, ResourceKind, State, Vault, VaultId, VaultRights};
 
 fn place_resource(state: &mut State, vault: VaultId, slot: u8) -> ResourceCap {
     let r = ResourceCap(ResourceKind::CreateVault { quota_pages: 16 });
     let arc = state.vaults.get(&vault).unwrap().clone();
     let mut v: Vault = (*arc).clone();
-    v.slots.set(slot, Some(VaultCap::Resource(r.clone())));
+    v.slots.set(slot, Some(RegCap::Resource(r.clone())));
     state.vaults.insert(vault, Arc::new(v));
     r
 }
@@ -38,7 +38,7 @@ fn fc_clone_leaves_source_intact_so_drop_is_safe() {
 
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(7),
-        Some(&VaultCap::Resource(r))
+        Some(&RegCap::Resource(r))
     );
 }
 
@@ -55,7 +55,7 @@ fn manager_pattern_no_commit_no_change() {
     };
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(0),
-        Some(&VaultCap::Resource(r))
+        Some(&RegCap::Resource(r))
     );
 }
 

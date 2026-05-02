@@ -1,7 +1,7 @@
 //! Tests for the host adapter that lets javm's MGMT_MOVE / COPY / DROP
 //! ecallis address Vault CNodes through cap-ref indirection.
 //!
-//! After CapId removal, caps live inline in `vault.slots` as `VaultCap`
+//! After CapId removal, caps live inline in `vault.slots` as `RegCap`
 //! values and project to/from Frame `Cap` representations:
 //!
 //! - VaultRef ↔ `ProtocolCap::VaultRef(_)`.
@@ -17,7 +17,7 @@ use javm::cap::ForeignCnode;
 use jar_kernel::cap::{Cap, ProtocolCap};
 use jar_kernel::vm::foreign_cnode::VaultCnodeView;
 use jar_kernel::{
-    DataCap, ResourceCap, ResourceKind, State, Vault, VaultCap, VaultId, VaultRefCap, VaultRights,
+    DataCap, RegCap, ResourceCap, ResourceKind, State, Vault, VaultId, VaultRefCap, VaultRights,
 };
 
 fn empty_vault() -> (State, VaultId) {
@@ -27,7 +27,7 @@ fn empty_vault() -> (State, VaultId) {
     (state, vault_id)
 }
 
-fn place(state: &mut State, vault: VaultId, slot: u8, cap: VaultCap) {
+fn place(state: &mut State, vault: VaultId, slot: u8, cap: RegCap) {
     let arc = state.vaults.get(&vault).unwrap().clone();
     let mut v: Vault = (*arc).clone();
     v.slots.set(slot, Some(cap));
@@ -36,7 +36,7 @@ fn place(state: &mut State, vault: VaultId, slot: u8, cap: VaultCap) {
 
 fn place_resource(state: &mut State, vault: VaultId, slot: u8) -> ResourceCap {
     let r = ResourceCap(ResourceKind::CreateVault { quota_pages: 16 });
-    place(state, vault, slot, VaultCap::Resource(r.clone()));
+    place(state, vault, slot, RegCap::Resource(r.clone()));
     r
 }
 
@@ -62,7 +62,7 @@ fn fc_take_vault_ref_returns_protocol_vault_ref() {
         vault_id: VaultId(99),
         rights: VaultRights::ALL,
     };
-    place(&mut state, vault_id, 5, VaultCap::VaultRef(vr));
+    place(&mut state, vault_id, 5, RegCap::VaultRef(vr));
     let mut view = VaultCnodeView::new(&mut state);
     let cap = view
         .fc_take(vault_id, 5, VaultRights::ALL)
@@ -89,7 +89,7 @@ fn fc_take_data_cap_returns_none() {
         &mut state,
         vault_id,
         7,
-        VaultCap::Data(DataCap {
+        RegCap::Data(DataCap {
             content: Arc::new(b"sample".to_vec()),
             page_count: 1,
         }),
@@ -108,7 +108,7 @@ fn fc_set_places_resource_into_empty_slot() {
         .expect("fc_set into empty slot 8");
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(8),
-        Some(&VaultCap::Resource(r))
+        Some(&RegCap::Resource(r))
     );
 }
 
@@ -125,7 +125,7 @@ fn fc_set_places_vault_ref_inline() {
         .expect("fc_set vault_ref");
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(0),
-        Some(&VaultCap::VaultRef(vr))
+        Some(&RegCap::VaultRef(vr))
     );
 }
 
@@ -165,7 +165,7 @@ fn fc_clone_resource_produces_independent_copy() {
     }
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(7),
-        Some(&VaultCap::Resource(r))
+        Some(&RegCap::Resource(r))
     );
 }
 
@@ -176,7 +176,7 @@ fn fc_clone_vault_ref_produces_inline_value() {
         vault_id: VaultId(42),
         rights: VaultRights::ALL,
     };
-    place(&mut state, vault_id, 3, VaultCap::VaultRef(vr));
+    place(&mut state, vault_id, 3, RegCap::VaultRef(vr));
     let mut view = VaultCnodeView::new(&mut state);
     let cap = view
         .fc_clone(vault_id, 3, VaultRights::ALL)
@@ -187,7 +187,7 @@ fn fc_clone_vault_ref_produces_inline_value() {
     }
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(3),
-        Some(&VaultCap::VaultRef(vr))
+        Some(&RegCap::VaultRef(vr))
     );
 }
 
@@ -207,7 +207,7 @@ fn fc_clone_code_cap_returns_none() {
         &mut state,
         vault_id,
         7,
-        VaultCap::Code(CodeCap {
+        RegCap::Code(CodeCap {
             blob: Arc::new(vec![0; 64]),
         }),
     );

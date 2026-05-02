@@ -4,7 +4,7 @@
 //! Sufficient for "the chain's `Schedule(block_final)` claims this root and
 //! checks it" semantics. Real Merkle-trie commitment is a follow-up.
 
-use crate::types::{Hash, State, VaultCap, VaultRights};
+use crate::types::{Hash, RegCap, State, VaultRights};
 
 use crate::crypto;
 
@@ -47,25 +47,25 @@ fn encode_endpoint(buf: &mut Vec<u8>, ep: &crate::types::EventEndpointCap) {
     push_u64(buf, ep.memory_budget as u64);
 }
 
-fn encode_vault_cap(buf: &mut Vec<u8>, cap: &VaultCap) {
+fn encode_vault_cap(buf: &mut Vec<u8>, cap: &RegCap) {
     match cap {
-        VaultCap::VaultRef(vr) => {
+        RegCap::VaultRef(vr) => {
             buf.push(1);
             push_u64(buf, vr.vault_id.0);
             buf.push(vault_rights_byte(&vr.rights));
         }
-        VaultCap::Code(c) => {
+        RegCap::Code(c) => {
             buf.push(2);
             push_u64(buf, c.blob.len() as u64);
             buf.extend_from_slice(&c.blob);
         }
-        VaultCap::Data(d) => {
+        RegCap::Data(d) => {
             buf.push(3);
             push_u64(buf, d.content.len() as u64);
             buf.extend_from_slice(&d.content);
             push_u64(buf, d.page_count as u64);
         }
-        VaultCap::Resource(r) => {
+        RegCap::Resource(r) => {
             buf.push(4);
             // ResourceKind discriminant + payload encoded by debug-form.
             // Cheap and canonical (small enum, deterministic Debug).

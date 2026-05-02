@@ -5,13 +5,13 @@
 //! slots) plus a dispatch endpoint in σ.dispatch_endpoints. Caps are
 //! stored inline by value — no cap_registry, no CapId.
 //!
-//! Each endpoint Vault gets a `VaultCap::Code(CodeCap)` placed at the
+//! Each endpoint Vault gets a `RegCap::Code(CodeCap)` placed at the
 //! Vault's `init_cap` slot.
 
 use std::sync::Arc;
 
 use crate::state::code_blobs;
-use crate::types::{CodeCap, EventEndpointCap, KResult, State, VaultCap, VaultId};
+use crate::types::{CodeCap, EventEndpointCap, KResult, RegCap, State, VaultId};
 
 /// Default slot for the init CodeCap.
 const DEFAULT_INIT_CAP_SLOT: u8 = 64;
@@ -111,7 +111,7 @@ fn alloc_vault_with_code(state: &mut State, jar_blob: Vec<u8>) -> VaultId {
     v.init_cap = DEFAULT_INIT_CAP_SLOT;
     v.slots.set(
         DEFAULT_INIT_CAP_SLOT,
-        Some(VaultCap::Code(CodeCap {
+        Some(RegCap::Code(CodeCap {
             blob: Arc::new(code_sub_blob),
         })),
     );
