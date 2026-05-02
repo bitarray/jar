@@ -1,13 +1,17 @@
 //! Tests for the host adapter that lets javm's MGMT_MOVE / COPY / DROP
 //! ecallis address Vault CNodes through cap-ref indirection.
 //!
-//! These tests drive the [`jar_kernel::vm::foreign_cnode::VaultCnodeView`]
-//! adapter directly. They cover the four operations (take, set, clone,
-//! drop), pinning rejection, and rights enforcement. A guest-driven
-//! end-to-end test (where a PVM blob does `MGMT_MOVE` against a cap-ref
-//! that crosses through the slot-1 home VaultRef) is deferred to a
-//! separate harness once the transpiler exposes ergonomic dynamic-ecall
-//! emission.
+//! The post-RegCap-narrowing model means:
+//!
+//! - VaultRef is a value cap stored inline as `SlotEntry::VaultRef(vr)`
+//!   and projected to `ProtocolCap::VaultRef(vr)` in a Frame. Round-trip
+//!   never touches `cap_registry`.
+//! - Resource caps round-trip through `cap_registry` with CapId
+//!   preservation, projecting to `ProtocolCap::Resource { id, cap }`.
+//! - Code / Data caps are container-bound: they're compiled / mapped at
+//!   `vault_init` only, never moved between Vault and Frame mid-VM.
+//!   `fc_take` / `fc_clone` on such slots return `None`.
+//! - EventEndpointCap doesn't legally live in vault.slots.
 
 use std::sync::Arc;
 
@@ -17,20 +21,94 @@ use jar_kernel::cap::{Cap, ProtocolCap};
 use jar_kernel::state::cap_registry;
 use jar_kernel::vm::foreign_cnode::VaultCnodeView;
 use jar_kernel::{
-    CapRecord, DataCap, EventEndpointCap, RegCap, State, Vault, VaultId, VaultRefCap, VaultRights,
+    CapRecord, DataCap, RegCap, ResourceCap, ResourceKind, SlotEntry, State, Vault, VaultId,
+    VaultRefCap, VaultRights,
 };
 
-/// Build a State with one Vault and a Data cap registered + placed at
-/// `vault.slots[slot]`. Returns `(state, vault_id, data_cap_id)`.
-fn state_with_one_data_cap(slot: u8) -> (State, VaultId, jar_kernel::CapId) {
+fn empty_vault() -> (State, VaultId) {
     let mut state = State::empty();
     let vault_id = state.next_vault_id();
     state.vaults.insert(vault_id, Arc::new(Vault::new()));
+    (state, vault_id)
+}
+
+fn place_resource(state: &mut State, vault: VaultId, slot: u8) -> jar_kernel::CapId {
+    let cap_id = cap_registry::alloc(
+        state,
+        CapRecord {
+            cap: RegCap::Resource(ResourceCap(ResourceKind::CreateVault { quota_pages: 16 })),
+            issuer: None,
+            narrowing: vec![],
+        },
+    );
+    let arc = state.vaults.get(&vault).unwrap().clone();
+    let mut v: Vault = (*arc).clone();
+    v.slots.set(slot, Some(SlotEntry::Cap(cap_id)));
+    state.vaults.insert(vault, Arc::new(v));
+    cap_id
+}
+
+fn place_vault_ref(state: &mut State, vault: VaultId, slot: u8, vr: VaultRefCap) {
+    let arc = state.vaults.get(&vault).unwrap().clone();
+    let mut v: Vault = (*arc).clone();
+    v.slots.set(slot, Some(SlotEntry::VaultRef(vr)));
+    state.vaults.insert(vault, Arc::new(v));
+}
+
+#[test]
+fn fc_take_resource_returns_protocol_resource_and_clears_slot() {
+    let (mut state, vault_id) = empty_vault();
+    let cap_id = place_resource(&mut state, vault_id, 7);
+    let mut view = VaultCnodeView::new(&mut state);
+    let cap = view
+        .fc_take(vault_id, 7, VaultRights::ALL)
+        .expect("fc_take with full rights");
+    match cap {
+        Cap::Protocol(ProtocolCap::Resource { id, .. }) => assert_eq!(id, cap_id),
+        _ => panic!("expected ProtocolCap::Resource"),
+    }
+    assert!(state.vaults.get(&vault_id).unwrap().slots.get(7).is_none());
+}
+
+#[test]
+fn fc_take_vault_ref_returns_protocol_vault_ref() {
+    let (mut state, vault_id) = empty_vault();
+    let vr = VaultRefCap {
+        vault_id: VaultId(99),
+        rights: VaultRights::ALL,
+    };
+    place_vault_ref(&mut state, vault_id, 5, vr);
+    let mut view = VaultCnodeView::new(&mut state);
+    let cap = view
+        .fc_take(vault_id, 5, VaultRights::ALL)
+        .expect("fc_take vault_ref");
+    match cap {
+        Cap::Protocol(ProtocolCap::VaultRef(out)) => {
+            assert_eq!(out.vault_id, VaultId(99));
+            assert_eq!(out.rights, VaultRights::ALL);
+        }
+        _ => panic!("expected ProtocolCap::VaultRef"),
+    }
+}
+
+#[test]
+fn fc_take_requires_revoke_right() {
+    let (mut state, vault_id) = empty_vault();
+    let _ = place_resource(&mut state, vault_id, 7);
+    let mut view = VaultCnodeView::new(&mut state);
+    assert!(view.fc_take(vault_id, 7, VaultRights::READ).is_none());
+    assert!(state.vaults.get(&vault_id).unwrap().slots.get(7).is_some());
+}
+
+#[test]
+fn fc_take_data_cap_returns_none() {
+    // Data caps are container-bound; fc_take on a Data slot is a no-op.
+    let (mut state, vault_id) = empty_vault();
     let cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
             cap: RegCap::Data(DataCap {
-                content: Arc::new(b"sample data".to_vec()),
+                content: Arc::new(b"sample".to_vec()),
                 page_count: 1,
             }),
             issuer: None,
@@ -39,195 +117,173 @@ fn state_with_one_data_cap(slot: u8) -> (State, VaultId, jar_kernel::CapId) {
     );
     let arc = state.vaults.get(&vault_id).unwrap().clone();
     let mut v: Vault = (*arc).clone();
-    v.slots.set(slot, Some(cap_id));
+    v.slots.set(7, Some(SlotEntry::Cap(cap_id)));
     state.vaults.insert(vault_id, Arc::new(v));
-    (state, vault_id, cap_id)
-}
 
-#[test]
-fn fc_take_returns_registered_and_clears_slot() {
-    let (mut state, vault_id, cap_id) = state_with_one_data_cap(7);
     let mut view = VaultCnodeView::new(&mut state);
-    let cap = view
-        .fc_take(vault_id, 7, VaultRights::ALL)
-        .expect("fc_take should succeed with full rights");
-    match cap {
-        Cap::Protocol(ProtocolCap::Registered { id, cap: c }) => {
-            assert_eq!(id, cap_id);
-            assert!(matches!(c, RegCap::Data(_)));
-        }
-        _ => panic!("expected Cap::Protocol(ProtocolCap::Registered{{..}})"),
-    }
-    // Slot must now be empty.
-    assert!(state.vaults.get(&vault_id).unwrap().slots.get(7).is_none());
+    assert!(view.fc_take(vault_id, 7, VaultRights::ALL).is_none());
 }
 
 #[test]
-fn fc_take_requires_revoke_right() {
-    let (mut state, vault_id, _cap_id) = state_with_one_data_cap(7);
-    let mut view = VaultCnodeView::new(&mut state);
-    // Read-only rights → fc_take refuses.
-    assert!(view.fc_take(vault_id, 7, VaultRights::READ).is_none());
-    // Slot still occupied.
-    assert!(state.vaults.get(&vault_id).unwrap().slots.get(7).is_some());
-}
-
-#[test]
-fn fc_set_places_registered_into_empty_slot() {
-    let (mut state, vault_id, cap_id) = state_with_one_data_cap(7);
+fn fc_set_places_resource_into_empty_slot() {
+    let (mut state, vault_id) = empty_vault();
+    let cap_id = place_resource(&mut state, vault_id, 7);
     // Take it.
     {
         let mut view = VaultCnodeView::new(&mut state);
         let _ = view.fc_take(vault_id, 7, VaultRights::ALL).unwrap();
     }
-    // Place it back at slot 8.
-    let cap = Cap::Protocol(ProtocolCap::Registered {
+    // Place into slot 8.
+    let cap = Cap::Protocol(ProtocolCap::Resource {
         id: cap_id,
-        cap: RegCap::Data(DataCap {
-            content: Arc::new(b"sample data".to_vec()),
-            page_count: 1,
-        }),
+        cap: ResourceCap(ResourceKind::CreateVault { quota_pages: 16 }),
     });
     let mut view = VaultCnodeView::new(&mut state);
     view.fc_set(vault_id, 8, VaultRights::ALL, cap)
         .expect("fc_set into empty slot 8");
     let v = state.vaults.get(&vault_id).unwrap();
-    assert_eq!(v.slots.get(8), Some(cap_id));
+    assert_eq!(v.slots.get(8), Some(&SlotEntry::Cap(cap_id)));
 }
 
 #[test]
-fn fc_set_rejects_non_registered() {
-    let mut state = State::empty();
-    let vault_id = state.next_vault_id();
-    state.vaults.insert(vault_id, Arc::new(Vault::new()));
+fn fc_set_places_vault_ref_inline() {
+    let (mut state, vault_id) = empty_vault();
+    let vr = VaultRefCap {
+        vault_id: VaultId(7),
+        rights: VaultRights::READ,
+    };
+    let cap = Cap::Protocol(ProtocolCap::VaultRef(vr));
     let mut view = VaultCnodeView::new(&mut state);
+    view.fc_set(vault_id, 0, VaultRights::ALL, cap)
+        .expect("fc_set vault_ref");
+    let v = state.vaults.get(&vault_id).unwrap();
+    assert_eq!(v.slots.get(0), Some(&SlotEntry::VaultRef(vr)));
+}
 
-    // Frame-only caps (kernel-injected per-frame, no σ identity) cannot
-    // be placed into a Vault slot. SelfId is the cleanest example:
-    // it has no CapId and no σ presence, so fc_set must reject it.
+#[test]
+fn fc_set_rejects_frame_only_caps() {
+    let (mut state, vault_id) = empty_vault();
+    let mut view = VaultCnodeView::new(&mut state);
     let ephemeral = Cap::Protocol(ProtocolCap::SelfId(jar_kernel::cap::SelfCap {
         vault_id: VaultId(0),
     }));
-    let result = view.fc_set(vault_id, 0, VaultRights::ALL, ephemeral);
-    assert!(result.is_err());
+    assert!(
+        view.fc_set(vault_id, 0, VaultRights::ALL, ephemeral)
+            .is_err()
+    );
 }
 
 #[test]
 fn fc_set_requires_grant_right() {
-    let mut state = State::empty();
-    let vault_id = state.next_vault_id();
-    state.vaults.insert(vault_id, Arc::new(Vault::new()));
-    let cap_id = cap_registry::alloc(
-        &mut state,
-        CapRecord {
-            cap: RegCap::Data(DataCap {
-                content: Arc::new(b"sample data".to_vec()),
-                page_count: 1,
-            }),
-            issuer: None,
-            narrowing: vec![],
-        },
-    );
-    let cap = Cap::Protocol(ProtocolCap::Registered {
+    let (mut state, vault_id) = empty_vault();
+    let cap_id = place_resource(&mut state, vault_id, 7);
+    // Take it.
+    {
+        let mut view = VaultCnodeView::new(&mut state);
+        let _ = view.fc_take(vault_id, 7, VaultRights::ALL).unwrap();
+    }
+    let cap = Cap::Protocol(ProtocolCap::Resource {
         id: cap_id,
-        cap: RegCap::Data(DataCap {
-            content: Arc::new(b"sample data".to_vec()),
-            page_count: 1,
-        }),
+        cap: ResourceCap(ResourceKind::CreateVault { quota_pages: 16 }),
     });
     let mut view = VaultCnodeView::new(&mut state);
-    // Read-only — no grant. Must reject.
-    let result = view.fc_set(vault_id, 0, VaultRights::READ, cap);
-    assert!(result.is_err());
+    assert!(view.fc_set(vault_id, 0, VaultRights::READ, cap).is_err());
 }
 
 #[test]
-fn fc_set_rejects_event_endpoint_cap() {
-    let mut state = State::empty();
-    let vault_id = state.next_vault_id();
-    state.vaults.insert(vault_id, Arc::new(Vault::new()));
-    let cap_id = cap_registry::alloc(
-        &mut state,
-        CapRecord {
-            cap: RegCap::EventEndpoint(EventEndpointCap {
-                vault_id,
-                gas_budget: 0,
-                memory_budget: 0,
-            }),
-            issuer: None,
-            narrowing: vec![],
-        },
-    );
-    let cap = Cap::Protocol(ProtocolCap::Registered {
-        id: cap_id,
-        cap: RegCap::EventEndpoint(EventEndpointCap {
-            vault_id,
-            gas_budget: 0,
-            memory_budget: 0,
-        }),
-    });
-    let mut view = VaultCnodeView::new(&mut state);
-    let result = view.fc_set(vault_id, 0, VaultRights::ALL, cap);
-    assert!(
-        result.is_err(),
-        "EventEndpointCap belongs in σ.{{transact,dispatch}}_endpoints, not vault.slots; fc_set must reject"
-    );
-}
-
-#[test]
-fn fc_clone_allocates_child_capid() {
-    let (mut state, vault_id, parent_id) = state_with_one_data_cap(7);
+fn fc_clone_resource_allocates_child_capid() {
+    let (mut state, vault_id) = empty_vault();
+    let parent_id = place_resource(&mut state, vault_id, 7);
     let pre_count = state.cap_registry.len();
     let mut view = VaultCnodeView::new(&mut state);
     let cap = view
         .fc_clone(vault_id, 7, VaultRights::ALL)
         .expect("fc_clone with derive right");
-    let post_count = state.cap_registry.len();
-    assert_eq!(post_count, pre_count + 1, "fc_clone must allocate a child");
-    let (child_id, kind) = match cap {
-        Cap::Protocol(ProtocolCap::Registered { id, cap }) => (id, cap),
-        _ => panic!("expected Registered cap"),
+    assert_eq!(state.cap_registry.len(), pre_count + 1);
+    let child_id = match cap {
+        Cap::Protocol(ProtocolCap::Resource { id, .. }) => id,
+        _ => panic!("expected ProtocolCap::Resource"),
     };
     assert_ne!(child_id, parent_id);
-    assert!(matches!(kind, RegCap::Data(_)));
-    // Source slot still occupied (clone doesn't take).
+    // Source slot still occupied.
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(7),
-        Some(parent_id)
+        Some(&SlotEntry::Cap(parent_id))
     );
-    // Children index records the linkage.
+    // cap_children records lineage.
     assert!(
         state
             .cap_children
             .get(&parent_id)
             .map(|s| s.contains(&child_id))
-            .unwrap_or(false),
-        "cap_children should record parent → child"
+            .unwrap_or(false)
+    );
+}
+
+#[test]
+fn fc_clone_vault_ref_returns_inline_value() {
+    let (mut state, vault_id) = empty_vault();
+    let vr = VaultRefCap {
+        vault_id: VaultId(42),
+        rights: VaultRights::ALL,
+    };
+    place_vault_ref(&mut state, vault_id, 3, vr);
+    let pre_count = state.cap_registry.len();
+    let mut view = VaultCnodeView::new(&mut state);
+    let cap = view
+        .fc_clone(vault_id, 3, VaultRights::ALL)
+        .expect("fc_clone vault_ref");
+    // VaultRef cloning doesn't touch cap_registry.
+    assert_eq!(state.cap_registry.len(), pre_count);
+    match cap {
+        Cap::Protocol(ProtocolCap::VaultRef(out)) => assert_eq!(out, vr),
+        _ => panic!("expected ProtocolCap::VaultRef"),
+    }
+    // Source slot still occupied with the same VaultRef.
+    assert_eq!(
+        state.vaults.get(&vault_id).unwrap().slots.get(3),
+        Some(&SlotEntry::VaultRef(vr))
     );
 }
 
 #[test]
 fn fc_clone_requires_derive_right() {
-    let (mut state, vault_id, _) = state_with_one_data_cap(7);
+    let (mut state, vault_id) = empty_vault();
+    let _ = place_resource(&mut state, vault_id, 7);
     let mut view = VaultCnodeView::new(&mut state);
-    // Read-only rights — derive bit absent.
     assert!(view.fc_clone(vault_id, 7, VaultRights::READ).is_none());
 }
 
 #[test]
-fn fc_drop_revokes_cap_and_clears_slot() {
-    let (mut state, vault_id, cap_id) = state_with_one_data_cap(7);
+fn fc_drop_resource_revokes_cap_and_clears_slot() {
+    let (mut state, vault_id) = empty_vault();
+    let cap_id = place_resource(&mut state, vault_id, 7);
     let mut view = VaultCnodeView::new(&mut state);
     assert!(view.fc_drop(vault_id, 7, VaultRights::ALL));
-    // Cap removed from registry.
     assert!(!state.cap_registry.contains_key(&cap_id));
-    // Slot cleared.
     assert!(state.vaults.get(&vault_id).unwrap().slots.get(7).is_none());
 }
 
 #[test]
-fn fc_drop_cascade_removes_children() {
-    let (mut state, vault_id, parent_id) = state_with_one_data_cap(7);
+fn fc_drop_vault_ref_just_clears_slot() {
+    let (mut state, vault_id) = empty_vault();
+    let vr = VaultRefCap {
+        vault_id: VaultId(42),
+        rights: VaultRights::READ,
+    };
+    place_vault_ref(&mut state, vault_id, 3, vr);
+    let pre_registry = state.cap_registry.len();
+    let mut view = VaultCnodeView::new(&mut state);
+    assert!(view.fc_drop(vault_id, 3, VaultRights::ALL));
+    // Slot cleared; cap_registry untouched (VaultRef has no σ entry).
+    assert!(state.vaults.get(&vault_id).unwrap().slots.get(3).is_none());
+    assert_eq!(state.cap_registry.len(), pre_registry);
+}
+
+#[test]
+fn fc_drop_resource_cascade_removes_children() {
+    let (mut state, vault_id) = empty_vault();
+    let parent_id = place_resource(&mut state, vault_id, 7);
     // Clone first → child registered.
     let _ = {
         let mut view = VaultCnodeView::new(&mut state);
@@ -238,28 +294,25 @@ fn fc_drop_cascade_removes_children() {
     assert!(pre >= 2);
     let mut view = VaultCnodeView::new(&mut state);
     assert!(view.fc_drop(vault_id, 7, VaultRights::ALL));
-    // Both parent and the derived child are revoked by the cascade.
     assert!(!state.cap_registry.contains_key(&parent_id));
-    // The derived child Storage was also issued from parent_id.
-    // (Don't bind to its specific id — just assert the registry shrunk
-    // by at least 2.)
+    // Both parent and the derived child are revoked.
     assert!(state.cap_registry.len() <= pre - 2);
 }
 
 #[test]
 fn fc_is_empty_reports_slot_state() {
-    let (mut state, vault_id, _) = state_with_one_data_cap(7);
+    let (mut state, vault_id) = empty_vault();
+    let _ = place_resource(&mut state, vault_id, 7);
     let view = VaultCnodeView::new(&mut state);
     assert!(!view.fc_is_empty(vault_id, 7));
     assert!(view.fc_is_empty(vault_id, 8));
-    // Unknown vault → treat as empty.
     assert!(view.fc_is_empty(VaultId(99_999), 0));
 }
 
 #[test]
 fn vault_ref_with_read_announces_foreign_frame() {
     use javm::cap::ProtocolCap as _;
-    let cap = ProtocolCap::HomeVaultRef(VaultRefCap {
+    let cap = ProtocolCap::VaultRef(VaultRefCap {
         vault_id: VaultId(42),
         rights: VaultRights::ALL,
     });
@@ -271,147 +324,9 @@ fn vault_ref_with_read_announces_foreign_frame() {
 #[test]
 fn vault_ref_without_read_does_not_announce_foreign_frame() {
     use javm::cap::ProtocolCap as _;
-    let cap = ProtocolCap::HomeVaultRef(VaultRefCap {
+    let cap = ProtocolCap::VaultRef(VaultRefCap {
         vault_id: VaultId(42),
         rights: VaultRights::INITIALIZE, // no `read`
     });
     assert!(cap.as_foreign_frame().is_none());
-}
-
-// ---------------------------------------------------------------------------
-// Persistent DataCap (Step 2): the cnode-cross machinery moves CapIds across
-// Vaults; persistent → ephemeral content materialization is deferred to
-// Step 8 (the Vault.initialize protocol). These tests cover ID-level
-// movement and refcount-shared content.
-// ---------------------------------------------------------------------------
-
-fn place_data_cap(
-    state: &mut State,
-    vault: VaultId,
-    slot: u8,
-    content: Vec<u8>,
-    page_count: u32,
-) -> jar_kernel::CapId {
-    use jar_kernel::DataCap;
-    let cap_id = cap_registry::alloc(
-        state,
-        CapRecord {
-            cap: RegCap::Data(DataCap {
-                content: Arc::new(content),
-                page_count,
-            }),
-            issuer: None,
-            narrowing: vec![],
-        },
-    );
-    let arc = state.vaults.get(&vault).unwrap().clone();
-    let mut v: Vault = (*arc).clone();
-    v.slots.set(slot, Some(cap_id));
-    state.vaults.insert(vault, Arc::new(v));
-    cap_id
-}
-
-#[test]
-fn data_cap_round_trips_via_vault_slot() {
-    let mut state = State::empty();
-    let vault_id = state.next_vault_id();
-    state.vaults.insert(vault_id, Arc::new(Vault::new()));
-    let cap_id = place_data_cap(&mut state, vault_id, 5, b"hello".to_vec(), 1);
-
-    // fc_take of a persistent DataCap returns the Registered cap.
-    let mut view = VaultCnodeView::new(&mut state);
-    let cap = view
-        .fc_take(vault_id, 5, VaultRights::ALL)
-        .expect("fc_take");
-    let (returned_id, returned_cap) = match cap {
-        Cap::Protocol(ProtocolCap::Registered { id, cap }) => (id, cap),
-        _ => panic!("expected Registered cap"),
-    };
-    assert_eq!(returned_id, cap_id);
-    match &returned_cap {
-        RegCap::Data(d) => {
-            assert_eq!(d.page_count, 1);
-            assert_eq!(d.content.as_slice(), b"hello");
-        }
-        _ => panic!("expected Data variant"),
-    }
-    // Slot now empty.
-    assert!(state.vaults.get(&vault_id).unwrap().slots.get(5).is_none());
-    // Place it back at a different slot.
-    let mut view = VaultCnodeView::new(&mut state);
-    view.fc_set(
-        vault_id,
-        9,
-        VaultRights::ALL,
-        Cap::Protocol(ProtocolCap::Registered {
-            id: returned_id,
-            cap: returned_cap,
-        }),
-    )
-    .expect("fc_set should accept persistent DataCap");
-    assert_eq!(
-        state.vaults.get(&vault_id).unwrap().slots.get(9),
-        Some(cap_id)
-    );
-}
-
-#[test]
-fn data_cap_clones_share_arc_content() {
-    let mut state = State::empty();
-    let vault_id = state.next_vault_id();
-    state.vaults.insert(vault_id, Arc::new(Vault::new()));
-    let _parent_id = place_data_cap(&mut state, vault_id, 3, b"abc".to_vec(), 1);
-
-    // fc_clone produces a child with derive-shared content (same Arc).
-    let mut view = VaultCnodeView::new(&mut state);
-    let cap = view
-        .fc_clone(vault_id, 3, VaultRights::ALL)
-        .expect("fc_clone");
-    let (parent_arc, child_arc) = match cap {
-        Cap::Protocol(ProtocolCap::Registered {
-            cap: RegCap::Data(d),
-            ..
-        }) => {
-            let parent = match &state.cap_registry.get(&_parent_id).unwrap().cap {
-                RegCap::Data(p) => Arc::clone(&p.content),
-                _ => unreachable!(),
-            };
-            (parent, d.content)
-        }
-        _ => panic!("expected Registered Data cap"),
-    };
-    assert!(
-        Arc::ptr_eq(&parent_arc, &child_arc),
-        "derived DataCap shares Arc<Vec<u8>> content"
-    );
-}
-
-#[test]
-fn data_cap_moves_between_vaults() {
-    // Vault A has a DataCap at slot 0; we MOVE it to Vault B's slot 1
-    // via fc_take + fc_set.
-    let mut state = State::empty();
-    let vault_a = state.next_vault_id();
-    state.vaults.insert(vault_a, Arc::new(Vault::new()));
-    let cap_id = place_data_cap(&mut state, vault_a, 0, b"shared".to_vec(), 2);
-    let vault_b = state.next_vault_id();
-    state.vaults.insert(vault_b, Arc::new(Vault::new()));
-
-    let cap = {
-        let mut view = VaultCnodeView::new(&mut state);
-        view.fc_take(vault_a, 0, VaultRights::ALL)
-            .expect("take from A")
-    };
-
-    {
-        let mut view = VaultCnodeView::new(&mut state);
-        view.fc_set(vault_b, 1, VaultRights::ALL, cap)
-            .expect("set into B");
-    }
-
-    assert!(state.vaults.get(&vault_a).unwrap().slots.get(0).is_none());
-    assert_eq!(
-        state.vaults.get(&vault_b).unwrap().slots.get(1),
-        Some(cap_id)
-    );
 }

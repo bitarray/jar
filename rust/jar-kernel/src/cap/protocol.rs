@@ -1,33 +1,28 @@
-//! `ProtocolCap` — the protocol-cap payload type jar-kernel substitutes
-//! into `javm::Cap::Protocol(P)`. The complete Frame cap type
+//! `ProtocolCap` — jar-kernel's impl of `javm::ProtocolCap`. The
+//! payload of `javm::Cap::Protocol(_)`. The complete Frame cap type
 //! (`javm::Cap<ProtocolCap>`) is exported as `crate::cap::Cap`.
 //!
-//! Each running VM's javm cap-table is the kernel's per-invocation
-//! Frame. The `Protocol` arm of each slot holds one of these variants:
+//! Each variant is one concrete kind that can occupy a Frame cap-table
+//! slot. There is no generic "registered" wrapper: the type system
+//! enumerates exactly what is valid as a Frame cap.
 //!
-//! - `ProtocolCap::HostCall(u8)` — host-call selector. `ecalli N` on a
-//!   slot holding `HostCall(N)` yields `KernelResult::ProtocolCall
-//!   { slot: N }` to the host; `drive_invocation` dispatches to the
-//!   matching handler.
+//! | What                                          | Where                                  |
+//! |-----------------------------------------------|----------------------------------------|
+//! | `Cap::Code(_)` / `Cap::Data(_)`               | first-class javm arms                  |
+//! | `Cap::Protocol(ProtocolCap::VaultRef(_))`     | inline value, no σ identity            |
+//! | `Cap::Protocol(ProtocolCap::Resource{id,…})`  | σ-registered, CapId preserves identity |
+//! | `Cap::Protocol(ProtocolCap::HostCall(_))`     | host-call selector                     |
+//! | `Cap::Protocol(ProtocolCap::SelfId(…))` etc.  | Frame-only kernel-injected markers     |
 //!
-//! - `ProtocolCap::Registered { id, cap }` — projection of a σ-resident
-//!   cap into the Frame. The `cap` is a `RegCap`; the `id`
-//!   stays valid across Frame ↔ Vault round-trips so cap_children
-//!   bookkeeping survives the bounce.
-//!
-//! - Frame-only kinds (`HomeVaultRef`, `SelfId`, `CallerVault`,
-//!   `CallerKernel`, `AttestationScope`, `Attestation`,
-//!   `AttestationAggregate`) — kernel-injected per-frame markers with
-//!   no σ presence and no `CapId`. They vanish at invocation teardown.
-//!
-//! The `ProtocolCap` impl announces VaultRef-shaped caps as
-//! foreign-frame handles so javm's resolve walk can cross into a
-//! Vault's CNode through them, and produces a fresh `CallerVault`
-//! at every CALL transition.
+//! Code / Data / EventEndpoint deliberately have no `ProtocolCap`
+//! variant: Code/Data project to first-class `Cap::Code` / `Cap::Data`
+//! during `vault_init` (they're never relocated mid-VM); EventEndpoint
+//! lives only in `σ.{transact,dispatch}_endpoints` and never enters a
+//! Frame as a guest-visible cap.
 
 use crate::cap::{
     AttestationAggregateCap, AttestationCap, AttestationScopeCap, CallerKernelCap, CallerVaultCap,
-    RegCap, SelfCap, VaultRefCap, VaultRights,
+    ResourceCap, SelfCap, VaultRefCap, VaultRights,
 };
 use crate::types::{CapId, VaultId};
 use javm::cap::ProtocolCap as ProtocolCapT;
@@ -37,24 +32,29 @@ use javm::cap::ProtocolCap as ProtocolCapT;
 /// it).
 pub const KERNEL_CAP_SLOT: u8 = 32;
 
-/// The protocol-cap payload type jar-kernel substitutes into javm's
-/// `Cap::Protocol(P)`. See module-level docs.
+/// The protocol-cap payload type jar-kernel substitutes into
+/// `javm::Cap::Protocol(_)`. See module-level docs.
 #[derive(Clone, Debug)]
 pub enum ProtocolCap {
     /// A host-call selector. `ecalli N` on a slot containing
     /// `HostCall(N)` yields `ProtocolCall { slot: N }` to the host.
     HostCall(u8),
-    /// A capability with persistent identity in `σ.cap_registry`.
-    /// Round-trips between Frame and a Vault preserve `id`.
-    Registered { id: CapId, cap: RegCap },
-    // ---- Frame-only kinds ----
+
+    /// A VaultRef. Inline value (no `CapId`). Same shape whether the
+    /// cap originated from a `vault.slots[…]` `SlotEntry::VaultRef` or
+    /// was kernel-injected (home VaultRef at MainFrame slot 1, sub-CALL
+    /// caller hookup, etc.). Identity is `(vault_id, rights)`.
+    VaultRef(VaultRefCap),
+
+    /// A registered Resource cap. Identity is `id: CapId` —
+    /// `cap_registry` holds the canonical record; the runtime carries
+    /// the value alongside so reads don't have to bounce through `σ`.
+    Resource { id: CapId, cap: ResourceCap },
+
+    // ---- Frame-only kernel-injected kinds ----
     //
-    // No `CapId`, no σ presence. Kernel-injected at invocation init or
-    // at CALL/REPLY transitions; reclaimed at frame teardown.
-    /// Home-vault reference placed at MainFrame slot 1 by the kernel
-    /// at invocation init. Same shape as `RegCap::VaultRef` but
-    /// with no CapId.
-    HomeVaultRef(VaultRefCap),
+    // No CapId, no σ presence. Placed at invocation init or at
+    // CALL/REPLY transitions; reclaimed at frame teardown.
     /// Per-VM self-identity — pinned at MainFrame slot 2 (`SELF_SLOT`).
     SelfId(SelfCap),
     /// Per-frame caller for vault → vault sub-CALLs.
@@ -72,19 +72,10 @@ pub enum ProtocolCap {
 }
 
 impl ProtocolCap {
-    /// Borrow the underlying `RegCap`, if this cap projects from
-    /// σ. Returns `None` for `HostCall` and any frame-only variant.
-    pub fn as_registered(&self) -> Option<&RegCap> {
-        match self {
-            ProtocolCap::Registered { cap, .. } => Some(cap),
-            _ => None,
-        }
-    }
-
-    /// CapId, if this cap is registered in σ.
+    /// CapId, if this cap is registered in σ. Today only `Resource`.
     pub fn cap_id(&self) -> Option<CapId> {
         match self {
-            ProtocolCap::Registered { id, .. } => Some(*id),
+            ProtocolCap::Resource { id, .. } => Some(*id),
             _ => None,
         }
     }
@@ -106,34 +97,26 @@ impl ProtocolCapT for ProtocolCap {
         true
     }
 
-    /// A `VaultRef`-shaped cap with `rights.read` is a foreign-frame
-    /// handle: javm's resolve walk crosses through it into the named
-    /// Vault's CNode. Both the σ-resident `Registered { cap:
-    /// VaultRef }` projection and the frame-only `HomeVaultRef` qualify.
+    /// A `VaultRef` with `rights.read` is a foreign-frame handle:
+    /// javm's resolve walk crosses through it into the named Vault's
+    /// CNode. Operation rights (Grant / Revoke / Derive / Initialize)
+    /// are recorded at this step and consulted by the host adapter at
+    /// the final step of the walk.
     fn as_foreign_frame(&self) -> Option<(VaultId, VaultRights)> {
-        let vr = match self {
-            ProtocolCap::HomeVaultRef(vr) => vr,
-            ProtocolCap::Registered {
-                cap: RegCap::VaultRef(vr),
-                ..
-            } => vr,
-            _ => return None,
-        };
-        if vr.rights.read {
-            Some((vr.vault_id, vr.rights))
-        } else {
-            None
+        match self {
+            ProtocolCap::VaultRef(vr) if vr.rights.read => Some((vr.vault_id, vr.rights)),
+            _ => None,
         }
     }
 
     /// Produce a fresh `CallerVault` cap for an internal CALL
     /// transition. Reads the caller VM's home VaultRef at MainFrame
     /// slot 1 and wraps its `vault_id`. Returns `None` if slot 1
-    /// doesn't hold a HomeVaultRef — that should only happen on the
+    /// doesn't hold a VaultRef — that should only happen on the
     /// bare Frame itself (which never executes guest code).
     fn caller_cap_for(caller_table: &javm::cap::CapTable<Self>) -> Option<javm::cap::Cap<Self>> {
         let home_vault_id = match caller_table.get(1) {
-            Some(javm::cap::Cap::Protocol(ProtocolCap::HomeVaultRef(vr))) => vr.vault_id,
+            Some(javm::cap::Cap::Protocol(ProtocolCap::VaultRef(vr))) => vr.vault_id,
             _ => return None,
         };
         Some(javm::cap::Cap::Protocol(ProtocolCap::CallerVault(
@@ -156,7 +139,7 @@ mod tests {
         let vault_id = VaultId(42);
         t.set(
             1,
-            Cap::Protocol(ProtocolCap::HomeVaultRef(VaultRefCap {
+            Cap::Protocol(ProtocolCap::VaultRef(VaultRefCap {
                 vault_id,
                 rights: VaultRights::ALL,
             })),

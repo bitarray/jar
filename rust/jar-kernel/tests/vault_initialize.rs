@@ -11,7 +11,7 @@ use std::sync::Arc;
 use jar_kernel::cap::{CodeCap, VaultRefCap, VaultRights};
 use jar_kernel::state::cap_registry;
 use jar_kernel::vm::new_vm_from_vault;
-use jar_kernel::{CapRecord, RegCap, State, Vault, VaultId};
+use jar_kernel::{CapRecord, RegCap, SlotEntry, State, Vault, VaultId};
 
 const INIT_SLOT: u8 = 64;
 const INVOCATION_GAS: u64 = 100_000_000;
@@ -49,7 +49,7 @@ fn vault_with_init_code() -> (State, VaultId) {
     );
     let arc = state.vaults.get(&vault_id).unwrap().clone();
     let mut v: Vault = (*arc).clone();
-    v.slots.set(INIT_SLOT, Some(code_cap_id));
+    v.slots.set(INIT_SLOT, Some(SlotEntry::Cap(code_cap_id)));
     state.vaults.insert(vault_id, Arc::new(v));
 
     (state, vault_id)
@@ -162,40 +162,35 @@ fn set_args_rejects_double_call() {
 }
 
 #[test]
-fn new_vm_from_vault_extra_persistent_cap_propagates() {
+fn new_vm_from_vault_inline_vault_ref_propagates() {
     let (mut state, vault_id) = vault_with_init_code();
 
-    // Add a VaultRef at slot 100.
+    // VaultRef is now an inline value cap — placed directly via SlotEntry::VaultRef.
     let target_vault = VaultId(99);
-    let vr_cap_id = cap_registry::alloc(
-        &mut state,
-        CapRecord {
-            cap: RegCap::VaultRef(VaultRefCap {
-                vault_id: target_vault,
-                rights: VaultRights::ALL,
-            }),
-            issuer: None,
-            narrowing: vec![],
-        },
-    );
     let arc = state.vaults.get(&vault_id).unwrap().clone();
     let mut v: Vault = (*arc).clone();
-    v.slots.set(100, Some(vr_cap_id));
+    v.slots.set(
+        100,
+        Some(SlotEntry::VaultRef(VaultRefCap {
+            vault_id: target_vault,
+            rights: VaultRights::ALL,
+        })),
+    );
     state.vaults.insert(vault_id, Arc::new(v));
 
     let vm = new_vm_from_vault(&state, vault_id, INVOCATION_GAS, TEST_MEM_PAGES, None)
         .expect("new_vm_from_vault succeeds");
 
-    // Slot 100 should hold the registered VaultRef.
+    // Slot 100 should hold ProtocolCap::VaultRef projecting the same shape.
     use jar_kernel::cap::{Cap, ProtocolCap};
     match vm.vm_arena.vm(0).cap_table.get(100) {
-        Some(Cap::Protocol(ProtocolCap::Registered {
-            id,
-            cap: RegCap::VaultRef(vr),
-        })) => {
-            assert_eq!(*id, vr_cap_id);
+        Some(Cap::Protocol(ProtocolCap::VaultRef(vr))) => {
             assert_eq!(vr.vault_id, target_vault);
+            assert_eq!(vr.rights, VaultRights::ALL);
         }
-        other => panic!("expected Registered VaultRef at slot 100, got {:?}", other),
+        other => panic!(
+            "expected ProtocolCap::VaultRef at slot 100, got {:?}",
+            other
+        ),
     }
 }

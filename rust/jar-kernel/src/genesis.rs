@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::state::cap_registry;
 use crate::state::code_blobs;
-use crate::types::{CapId, CodeCap, EventEndpointCap, KResult, RegCap, State, VaultId};
+use crate::types::{CapId, CodeCap, EventEndpointCap, KResult, RegCap, SlotEntry, State, VaultId};
 
 /// Default slot for the init CodeCap.
 const DEFAULT_INIT_CAP_SLOT: u8 = 64;
@@ -169,7 +169,8 @@ fn alloc_vault_with_code(state: &mut State, jar_blob: Vec<u8>) -> VaultId {
             narrowing: Vec::new(),
         },
     );
-    v.slots.set(DEFAULT_INIT_CAP_SLOT, Some(code_cap_id));
+    v.slots
+        .set(DEFAULT_INIT_CAP_SLOT, Some(SlotEntry::Cap(code_cap_id)));
     state.vaults.insert(vault_id, Arc::new(v));
     vault_id
 }

@@ -33,7 +33,20 @@ pub fn state_root(state: &State) -> Hash {
         // quota_pages / total_pages removed — memory budget is per-event.
         for (i, slot) in vault.slots.slots.iter().enumerate() {
             buf.push(i as u8);
-            push_u64(&mut buf, slot.map(|c| c.0).unwrap_or(0));
+            match slot {
+                None => {
+                    buf.push(0); // empty
+                }
+                Some(crate::types::SlotEntry::Cap(cid)) => {
+                    buf.push(1); // CapId reference
+                    push_u64(&mut buf, cid.0);
+                }
+                Some(crate::types::SlotEntry::VaultRef(vr)) => {
+                    buf.push(2); // inline VaultRef
+                    push_u64(&mut buf, vr.vault_id.0);
+                    buf.push(vault_rights_byte(&vr.rights));
+                }
+            }
         }
     }
 
@@ -55,6 +68,14 @@ pub fn state_root(state: &State) -> Hash {
 
 fn push_u64(buf: &mut Vec<u8>, x: u64) {
     buf.extend_from_slice(&x.to_le_bytes());
+}
+
+fn vault_rights_byte(r: &crate::types::VaultRights) -> u8 {
+    (r.read as u8)
+        | ((r.initialize as u8) << 1)
+        | ((r.grant as u8) << 2)
+        | ((r.revoke as u8) << 3)
+        | ((r.derive as u8) << 4)
 }
 
 #[cfg(test)]

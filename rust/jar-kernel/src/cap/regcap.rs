@@ -1,24 +1,27 @@
-//! RegCap variants.
+//! `RegCap` — σ-resident cap shapes that need `CapId`-based identity.
 //!
-//! Per spec §01 (event-redesign): capabilities are the kernel's authority
-//! primitive. They live in CNode slots (persistent) or Frames (ephemeral).
+//! Caps in this enum are stored in `σ.cap_registry` under a CapId. They
+//! participate in derive provenance (`cap_children`) and are subject to
+//! cascade revocation. A `Vault.slots[N]` entry of `SlotEntry::Cap(id)`
+//! points at a record here.
 //!
-//! In the event-redesign, the prior pinned `Dispatch` / `Transact` /
-//! `Schedule` caps with `born_in` CNode references collapse into a single
-//! `EventEndpointCap { vault_id, gas_budget, memory_budget }`. There is
-//! no hierarchical cap-graph; the chain's public surface is two flat lists
-//! `σ.transact_endpoints` and `σ.dispatch_endpoints` of EventEndpointCap
-//! entries.
+//! The set is intentionally narrow:
 //!
-//! AttestationCap is the proof itself — minted via `mint_attest_cap`
-//! inside verify (cap's existence is the evidence). ResultCap collapses
-//! into AttestationCap with the IDENTITY_KEY sentinel.
+//! - `Code` / `Data` — bulk resource grants whose blob/content is shared
+//!   via Arc; CapId tracks identity for revocation and (rarely) sharing.
+//! - `EventEndpoint` — referenced by `σ.transact_endpoints` /
+//!   `σ.dispatch_endpoints`. Never appears in `vault.slots`.
+//! - `Resource` — governance handle (CreateVault / SetQuota / ...).
 //!
-//! AttestationScope is a kernel-managed cap passed to verify; its
-//! variant determines which pubkeys mint_attest_cap may produce caps for.
+//! Notably **not** in RegCap:
 //!
-//! Each variant is a named struct so generic code can pass a variant by
-//! reference. The `RegCap` enum wraps them as a sum type.
+//! - `VaultRef` — value-type; identity is `(vault_id, rights)`. Stored
+//!   inline in `vault.slots` via `SlotEntry::VaultRef`. No CapId.
+//! - `Attestation` / `AttestationAggregate` — Frame-only; minted in
+//!   verify, vanish at frame teardown. Live as top-level
+//!   `ProtocolCap::Attestation` / `ProtocolCap::AttestationAggregate`.
+//! - Frame-only context kinds (SelfId, Caller*, AttestationScope) —
+//!   top-level `ProtocolCap` arms.
 
 use std::sync::Arc;
 
@@ -29,24 +32,20 @@ use crate::types::{CapId, Hash, KernelRole, KeyId, Signature, VaultId};
 // -----------------------------------------------------------------------------
 
 /// Callable handle for `vault_initialize`; may also gate slot mutation
-/// (Grant / Revoke) on the target Vault.
+/// (Grant / Revoke) on the target Vault. Value-type — identity is
+/// `(vault_id, rights)`. Stored inline via `SlotEntry::VaultRef` and
+/// projected into Frames as `ProtocolCap::VaultRef(_)`. Not in
+/// `RegCap`; not registered in `cap_registry`.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct VaultRefCap {
     pub vault_id: VaultId,
     pub rights: VaultRights,
 }
 
-/// EventEndpoint cap. Single shape replacing prior Transact / Dispatch /
-/// Schedule cap variants. Lives in `σ.transact_endpoints` (on-chain) or
-/// `σ.dispatch_endpoints` (off-chain). Position in σ determines firing
-/// context. The Vault's manager handles both verify and process phases,
-/// branching on `caller()` returning `Kernel(KernelRole::Verify)` or
-/// `Kernel(KernelRole::Process)`.
-///
-/// Schedule slots are EventEndpointCaps that the kernel fires with no
-/// body.events entry; identified by chain-author convention (typically
-/// slot 0 of σ.transact_endpoints for block_init, last slot for
-/// block_final, etc.).
+/// EventEndpoint cap. Lives in `σ.transact_endpoints` (on-chain) or
+/// `σ.dispatch_endpoints` (off-chain) — referenced by CapId, stored
+/// in `cap_registry`. Position in σ determines firing context; never
+/// appears in `vault.slots`.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct EventEndpointCap {
     pub vault_id: VaultId,
@@ -54,13 +53,13 @@ pub struct EventEndpointCap {
     pub memory_budget: u32,
 }
 
-/// Resource cap (e.g. allocate a Vault, set quota).
+/// Resource cap (governance handle: allocate Vault, set quota, etc.).
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct ResourceCap(pub ResourceKind);
 
-/// AttestationCap is the proof: existence means the kernel vouched that
-/// `key` signed `blob_hash`. Minted only via `mint_attest_cap` inside
-/// verify.
+/// AttestationCap is the proof: existence in a verify Frame means the
+/// kernel vouched that `key` signed `blob_hash`. Minted only inside
+/// verify. Frame-only — no σ presence, no CapId.
 ///
 /// `IDENTITY_KEY` (sentinel) collapses the prior ResultCap: an
 /// AttestationCap with `key = IDENTITY_KEY` represents a kernel-vouched
@@ -73,6 +72,7 @@ pub struct AttestationCap {
 
 /// Aggregate signature handle (BLS / threshold). Stubbed for now;
 /// preserved as a separate variant for future BLS-aggregate work.
+/// Frame-only.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct AttestationAggregateCap {
     pub key: KeyId,
@@ -87,8 +87,7 @@ pub struct AttestationAggregateCap {
 /// - emit_event from dispatch context: `Restricted` to the seen-set of
 ///   the source dispatch endpoint (tracked per (node, endpoint, cycle)).
 ///
-/// The cap is held in a Frame slot during verify; reclaimed at verify
-/// end.
+/// Held in a Frame slot during verify; reclaimed at verify end.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum AttestationScopeCap {
     /// Any pubkey may be minted for.
@@ -186,39 +185,23 @@ pub fn is_identity_key(key: &KeyId) -> bool {
 }
 
 // -----------------------------------------------------------------------------
-// RegCap sum type
+// RegCap sum type (σ-resident, CapId-keyed)
 // -----------------------------------------------------------------------------
 
-/// σ-resident capability shapes. Each variant has persistent identity
-/// in `σ.cap_registry` (a CapId); references from `vault.slots` resolve
-/// here via lookup. When a registered cap is projected into a Frame
-/// during invocation init, it becomes
-/// `ProtocolCap::Registered { id, cap: RegCap }`.
-///
-/// Frame-only kinds (SelfId, Caller*, AttestationScope, the home
-/// VaultRef projection) are NOT in `RegCap`; they live as
-/// top-level arms of `Cap` and never enter σ.
-///
-/// Vault lifetime is tracked by reachability — a Vault is alive iff its
-/// VaultId appears in `state.vaults` and at least one VaultRef in some
-/// reachable Vault references it. There is no separate `Vault(owner)`
-/// cap.
+/// σ-resident cap shapes — what `σ.cap_registry` stores under a CapId.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum RegCap {
-    VaultRef(VaultRefCap),
     Code(CodeCap),
     Data(DataCap),
     /// Single endpoint cap shape replacing prior Transact/Dispatch/Schedule.
+    /// Lives in `σ.{transact,dispatch}_endpoints`; never in `vault.slots`.
     EventEndpoint(EventEndpointCap),
     Resource(ResourceCap),
-    Attestation(AttestationCap),
-    AttestationAggregate(AttestationAggregateCap),
 }
 
 impl RegCap {
     pub fn vault_id(&self) -> Option<VaultId> {
         match self {
-            RegCap::VaultRef(c) => Some(c.vault_id),
             RegCap::EventEndpoint(c) => Some(c.vault_id),
             _ => None,
         }
@@ -276,7 +259,7 @@ pub enum ResourceKind {
 }
 
 // -----------------------------------------------------------------------------
-// CapRecord and CNode (cap-table)
+// CapRecord, SlotEntry, CNode
 // -----------------------------------------------------------------------------
 
 /// One entry in the kernel's cap registry.
@@ -287,10 +270,24 @@ pub struct CapRecord {
     pub narrowing: Vec<u8>,
 }
 
-/// A 256-slot capability table. Used for both Vault slots and ephemeral Frames.
+/// What occupies one slot of a `Vault.slots` CNode. Heterogeneous so
+/// that value-type caps (`VaultRef`) live inline alongside CapId
+/// references to `cap_registry` records (`Code`, `Data`, `Resource`).
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub enum SlotEntry {
+    /// Reference to a `cap_registry` record (Code / Data / Resource).
+    /// Lazily revoked: a CapId pointing at a removed record surfaces
+    /// `CapNotFound` on next access.
+    Cap(CapId),
+    /// Inline VaultRef value. Identity is `(vault_id, rights)`; not
+    /// registered, not subject to cascade revocation.
+    VaultRef(VaultRefCap),
+}
+
+/// A 256-slot capability table. Used for Vault.slots.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct CNode {
-    pub slots: [Option<CapId>; 256],
+    pub slots: [Option<SlotEntry>; 256],
 }
 
 impl Default for CNode {
@@ -301,24 +298,24 @@ impl Default for CNode {
 
 impl CNode {
     pub fn new() -> Self {
-        const EMPTY: Option<CapId> = None;
+        const EMPTY: Option<SlotEntry> = None;
         CNode {
             slots: [EMPTY; 256],
         }
     }
 
-    pub fn get(&self, slot: u8) -> Option<CapId> {
-        self.slots[slot as usize]
+    pub fn get(&self, slot: u8) -> Option<&SlotEntry> {
+        self.slots[slot as usize].as_ref()
     }
 
-    pub fn set(&mut self, slot: u8, cap: Option<CapId>) {
-        self.slots[slot as usize] = cap;
+    pub fn set(&mut self, slot: u8, entry: Option<SlotEntry>) {
+        self.slots[slot as usize] = entry;
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (u8, CapId)> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = (u8, &SlotEntry)> + '_ {
         self.slots
             .iter()
             .enumerate()
-            .filter_map(|(i, s)| s.map(|c| (i as u8, c)))
+            .filter_map(|(i, s)| s.as_ref().map(|e| (i as u8, e)))
     }
 }

@@ -31,7 +31,7 @@ use std::sync::Arc;
 use javm::cap::CapTable;
 
 use crate::cap::{Cap, ProtocolCap};
-use crate::types::{KResult, KernelError, RegCap, State, VaultId};
+use crate::types::{KResult, KernelError, RegCap, SlotEntry, State, VaultId};
 
 /// Pre-built input to `javm::kernel::InvocationKernel::new_from_artifacts`,
 /// produced by walking `vault.slots`. Mirrors
@@ -82,14 +82,13 @@ pub fn build_init_cap_table(
     let mut code_caps: Vec<Arc<javm::cap::CodeCap>> = Vec::new();
 
     for slot in 0u8..=255 {
-        let cap_id = match vault.slots.get(slot) {
-            Some(id) => id,
+        let entry = match vault.slots.get(slot) {
+            Some(e) => e,
             None => continue,
         };
-        let record = state.cap_record(cap_id)?;
-        let cap = translate_persistent(
-            &record.cap,
-            cap_id,
+        let cap = translate_slot_entry(
+            state,
+            entry,
             &mut code_caps,
             mem_cycles,
             backend,
@@ -126,9 +125,9 @@ pub fn build_init_cap_table(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn translate_persistent(
-    cap: &RegCap,
-    cap_id: crate::types::CapId,
+fn translate_slot_entry(
+    state: &State,
+    entry: &SlotEntry,
     code_caps: &mut Vec<Arc<javm::cap::CodeCap>>,
     mem_cycles: u8,
     backend: javm::PvmBackend,
@@ -136,44 +135,48 @@ fn translate_persistent(
     untyped: &mut javm::cap::UntypedCap,
     backing: &mut javm::backing::BackingStore,
 ) -> KResult<Cap> {
-    match cap {
-        RegCap::Code(c) => {
-            if code_caps.len() >= javm::vm_pool::MAX_CODE_CAPS {
-                return Err(KernelError::Internal(format!(
-                    "vault holds more than {} CodeCap entries",
-                    javm::vm_pool::MAX_CODE_CAPS
-                )));
-            }
-            let id = code_caps.len() as u16;
-            let code_cap =
-                javm::kernel::compile_code_blob(&c.blob, id, mem_cycles, backend, code_cache)
+    match entry {
+        // Inline VaultRef value — no σ identity. Project as-is.
+        SlotEntry::VaultRef(vr) => Ok(Cap::Protocol(ProtocolCap::VaultRef(*vr))),
+        // CapId reference — look up the cap_registry record.
+        SlotEntry::Cap(cap_id) => {
+            let record = state.cap_record(*cap_id)?;
+            match &record.cap {
+                RegCap::Code(c) => {
+                    if code_caps.len() >= javm::vm_pool::MAX_CODE_CAPS {
+                        return Err(KernelError::Internal(format!(
+                            "vault holds more than {} CodeCap entries",
+                            javm::vm_pool::MAX_CODE_CAPS
+                        )));
+                    }
+                    let id = code_caps.len() as u16;
+                    let code_cap = javm::kernel::compile_code_blob(
+                        &c.blob, id, mem_cycles, backend, code_cache,
+                    )
                     .map_err(|e| KernelError::Internal(format!("compile_code_blob: {:?}", e)))?;
-            code_caps.push(Arc::clone(&code_cap));
-            Ok(Cap::Code(code_cap))
+                    code_caps.push(Arc::clone(&code_cap));
+                    Ok(Cap::Code(code_cap))
+                }
+                RegCap::Data(d) => {
+                    let data_cap =
+                        javm::kernel::allocate_data_cap(&d.content, d.page_count, untyped, backing)
+                            .map_err(|e| {
+                                KernelError::Internal(format!("allocate_data_cap: {:?}", e))
+                            })?;
+                    // Cap is unmapped on purpose — the init program calls MGMT_MAP.
+                    Ok(Cap::Data(data_cap))
+                }
+                RegCap::Resource(r) => Ok(Cap::Protocol(ProtocolCap::Resource {
+                    id: *cap_id,
+                    cap: r.clone(),
+                })),
+                // EventEndpointCaps are placed in σ.transact_endpoints /
+                // dispatch_endpoints, never in vault.slots.
+                RegCap::EventEndpoint(_) => Err(KernelError::Internal(
+                    "EventEndpointCap found in vault.slots; should live in σ endpoint lists".into(),
+                )),
+            }
         }
-        RegCap::Data(d) => {
-            let data_cap =
-                javm::kernel::allocate_data_cap(&d.content, d.page_count, untyped, backing)
-                    .map_err(|e| KernelError::Internal(format!("allocate_data_cap: {:?}", e)))?;
-            // Cap is unmapped on purpose — the init program calls MGMT_MAP.
-            Ok(Cap::Data(data_cap))
-        }
-        // EventEndpointCaps are placed in σ.transact_endpoints /
-        // dispatch_endpoints, never in vault.slots. Reject if found here.
-        RegCap::EventEndpoint(_) => Err(KernelError::Internal(
-            "EventEndpointCap found in vault.slots; should live in σ endpoint lists".into(),
-        )),
-        // All other Registered shapes round-trip unchanged. (Frame-only
-        // variants — SelfId / Caller* / AttestationScope / Attestation —
-        // are no longer in `RegCap`, so the match is exhaustive
-        // without a defensive ephemeral-only arm.)
-        RegCap::VaultRef(_)
-        | RegCap::Resource(_)
-        | RegCap::Attestation(_)
-        | RegCap::AttestationAggregate(_) => Ok(Cap::Protocol(ProtocolCap::Registered {
-            id: cap_id,
-            cap: cap.clone(),
-        })),
     }
 }
 
@@ -209,7 +212,14 @@ mod tests {
         );
         let arc = state.vaults.get(&vault_id).unwrap().clone();
         let mut v: Vault = (*arc).clone();
-        v.slots.set(slot, Some(cap_id));
+        v.slots.set(slot, Some(SlotEntry::Cap(cap_id)));
+        state.vaults.insert(vault_id, Arc::new(v));
+    }
+
+    fn place_vault_ref(state: &mut State, vault_id: VaultId, slot: u8, vr: VaultRefCap) {
+        let arc = state.vaults.get(&vault_id).unwrap().clone();
+        let mut v: Vault = (*arc).clone();
+        v.slots.set(slot, Some(SlotEntry::VaultRef(vr)));
         state.vaults.insert(vault_id, Arc::new(v));
     }
 
@@ -268,14 +278,14 @@ mod tests {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
         );
-        place(
+        place_vault_ref(
             &mut state,
             vault_id,
             100,
-            RegCap::VaultRef(VaultRefCap {
+            VaultRefCap {
                 vault_id: VaultId(99),
                 rights: VaultRights::ALL,
-            }),
+            },
         );
 
         let artifacts = build_init_cap_table(
@@ -287,13 +297,13 @@ mod tests {
         )
         .unwrap();
         match artifacts.cap_table.get(100) {
-            Some(Cap::Protocol(ProtocolCap::Registered {
-                cap: RegCap::VaultRef(vr),
-                ..
-            })) => {
+            Some(Cap::Protocol(ProtocolCap::VaultRef(vr))) => {
                 assert_eq!(vr.vault_id, VaultId(99));
             }
-            other => panic!("expected Registered VaultRef at slot 100, got {:?}", other),
+            other => panic!(
+                "expected ProtocolCap::VaultRef at slot 100, got {:?}",
+                other
+            ),
         }
     }
 
@@ -355,14 +365,15 @@ mod tests {
     #[test]
     fn wrong_shape_at_init_cap_errors() {
         let (mut state, vault_id) = empty_state_with_vault(64);
-        place(
+        // VaultRef at the init slot — not a Code cap, so init fails.
+        place_vault_ref(
             &mut state,
             vault_id,
             64,
-            RegCap::VaultRef(VaultRefCap {
+            VaultRefCap {
                 vault_id: VaultId(99),
                 rights: VaultRights::ALL,
-            }),
+            },
         );
         let err = build_init_cap_table(
             &state,
