@@ -5,6 +5,16 @@
 //! `InMemoryBus` is the same-process broadcast wire. Block production
 //! rotates round-robin per slot.
 //!
+//! Per the event-redesign each `Kernel::advance` walks
+//! `σ.transact_endpoints` in slot order, running per-event verify
+//! (fresh `Vault.initialize`, ro-σ) and per-slot process (one
+//! `Vault.initialize`, rw-σ); pool winners from the prior cycle are
+//! drained into the new block's body. The genesis fixture wires three
+//! transact endpoints (block_init, event-receiving, block_final) plus
+//! one dispatch endpoint, all backed by the halt smoke blob, so the
+//! testnet exercises the apply_block walk end-to-end without needing
+//! a real chain-author manager.
+//!
 //! Usage:
 //!
 //! ```bash
