@@ -14,8 +14,8 @@
 //! inside verify (cap's existence is the evidence). ResultCap collapses
 //! into AttestationCap with the IDENTITY_KEY sentinel.
 //!
-//! AttestationAuthority is a kernel-managed cap passed to verify; its
-//! scope determines which pubkeys mint_attest_cap may produce caps for.
+//! AttestationScope is a kernel-managed cap passed to verify; its
+//! variant determines which pubkeys mint_attest_cap may produce caps for.
 //!
 //! Each variant is a named struct so generic code can pass a variant by
 //! reference. The `Capability` enum wraps them as a sum type.
@@ -78,32 +78,22 @@ pub struct AttestationAggregateCap {
     pub key: KeyId,
 }
 
-/// AttestationAuthority cap: kernel-managed; passed to verify as a host
-/// argument. Its scope determines which pubkeys mint_attest_cap may
+/// AttestationScope cap: kernel-managed; passed to verify in a Frame
+/// slot. Its variant determines which pubkeys `mint_attest_cap` may
 /// produce caps for.
 ///
-/// - Network-arrived event verify: scope is unlimited.
-/// - emit_event from apply_block (transact / Schedule context): unlimited.
-/// - emit_event from dispatch context: limited to seen-set of source
-///   dispatch endpoint (kernel-tracked per (node, endpoint, cycle)).
+/// - Network-arrived event verify: `Unlimited`.
+/// - emit_event from apply_block (transact / Schedule context): `Unlimited`.
+/// - emit_event from dispatch context: `Restricted` to the seen-set of
+///   the source dispatch endpoint (tracked per (node, endpoint, cycle)).
 ///
-/// The authority is held in a Frame slot during verify; reclaimed at
-/// verify end.
+/// The cap is held in a Frame slot during verify; reclaimed at verify
+/// end.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct AttestationAuthorityCap {
-    /// Authority scope. `None` = unlimited; `Some(set)` = restricted to
-    /// the listed pubkeys.
-    pub scope: AuthorityScope,
-}
-
-/// Scope of an AttestationAuthority cap.
-#[derive(Clone, Eq, PartialEq, Debug)]
-pub enum AuthorityScope {
-    /// Unlimited: any pubkey may be minted for. Used for network event
-    /// verify and apply_block-context emit verify.
+pub enum AttestationScopeCap {
+    /// Any pubkey may be minted for.
     Unlimited,
-    /// Restricted to the specified pubkeys. Used for dispatch-context
-    /// emit verify.
+    /// Restricted to the specified pubkeys.
     Restricted(Vec<KeyId>),
 }
 
@@ -218,7 +208,7 @@ pub enum Capability {
     Attestation(AttestationCap),
     AttestationAggregate(AttestationAggregateCap),
     /// Kernel-passed scope cap held in a Frame during verify.
-    AttestationAuthority(AttestationAuthorityCap),
+    AttestationScope(AttestationScopeCap),
     /// Per-VM self-identity — pinned at MainFrame slot 2 (`SELF_SLOT`).
     SelfId(SelfCap),
     /// Per-frame caller (sub-CALL) — lives at ephemeral sub-slot 1.

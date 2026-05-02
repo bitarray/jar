@@ -15,15 +15,15 @@
 //!
 //! - For dispatch-context emit_event: as events arrive at a dispatch
 //!   endpoint, the kernel records the originating signer key in the
-//!   per-(dispatch_endpoint, cycle) `AuthoritySeenSet`. The
-//!   `AttestationAuthority` cap passed to dispatch verify is scope-
-//!   restricted to that seen-set, so the chain-author can only mint
+//!   per-(dispatch_endpoint, cycle) `MintSeenSet`. The
+//!   `AttestationScopeCap::Restricted` cap passed to dispatch verify
+//!   is limited to that seen-set, so the chain-author can only mint
 //!   attestations for signers it has actually observed in the cycle.
 //!
 //! Cycle boundaries align with block boundaries (one cycle == one block
 //! window). At the end of a cycle, `roll_cycle` collects the winners
 //! (handed to the proposer), lifts the deferred entries into the next
-//! cycle's fresh pool, and resets authorities to empty.
+//! cycle's fresh pool, and resets mint seen-sets to empty.
 //!
 //! This module is self-contained and host-call-agnostic — Stage D wires
 //! the host calls (`setScore`, `mint_attest_cap`, `emit_event`) to
@@ -99,15 +99,15 @@ impl EndpointPool {
     }
 }
 
-/// Per-(dispatch endpoint, cycle) AttestationAuthority seen-key tracker.
-/// Mint attempts inside dispatch verify are scope-restricted to keys
-/// recorded here.
+/// Per-(dispatch endpoint, cycle) mint seen-key tracker. Mint attempts
+/// inside dispatch verify (with an `AttestationScopeCap::Restricted`
+/// scope cap) are limited to keys recorded here.
 #[derive(Default, Clone, Debug)]
-pub struct AuthoritySeenSet {
+pub struct MintSeenSet {
     pub keys: BTreeSet<KeyId>,
 }
 
-impl AuthoritySeenSet {
+impl MintSeenSet {
     pub fn record(&mut self, key: KeyId) {
         self.keys.insert(key);
     }
@@ -121,7 +121,7 @@ impl AuthoritySeenSet {
 #[derive(Default, Clone, Debug)]
 pub struct CyclePool {
     pub endpoints: BTreeMap<CapId, EndpointPool>,
-    pub authorities: BTreeMap<CapId, AuthoritySeenSet>,
+    pub mint_seen: BTreeMap<CapId, MintSeenSet>,
 }
 
 impl CyclePool {
@@ -129,13 +129,13 @@ impl CyclePool {
         self.endpoints.entry(endpoint).or_default()
     }
 
-    pub fn authority(&mut self, dispatch_endpoint: CapId) -> &mut AuthoritySeenSet {
-        self.authorities.entry(dispatch_endpoint).or_default()
+    pub fn mint_seen_set(&mut self, dispatch_endpoint: CapId) -> &mut MintSeenSet {
+        self.mint_seen.entry(dispatch_endpoint).or_default()
     }
 
     /// End of cycle. Returns the per-endpoint winners (drained from the
     /// finished cycle) and lifts deferred entries into a fresh pool that
-    /// becomes the next cycle's starting state. Authorities reset to
+    /// becomes the next cycle's starting state. Mint seen-sets reset to
     /// empty.
     pub fn roll_cycle(&mut self) -> CycleRoll {
         let mut winners: BTreeMap<CapId, Vec<PoolEntry>> = BTreeMap::new();
@@ -219,8 +219,8 @@ mod tests {
     }
 
     #[test]
-    fn authority_seen_set_records_and_checks() {
-        let mut a = AuthoritySeenSet::default();
+    fn mint_seen_set_records_and_checks() {
+        let mut a = MintSeenSet::default();
         let k1 = KeyId(b"key1".to_vec());
         let k2 = KeyId(b"key2".to_vec());
         a.record(k1.clone());

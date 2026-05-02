@@ -35,8 +35,8 @@ pub const RC_READONLY: u64 = u64::MAX - 2;
 /// Quota exceeded.
 pub const RC_QUOTA: u64 = u64::MAX - 3;
 
-/// Authority scope violation (mint_attest_cap for a key outside the
-/// AttestationAuthority's restricted seen-set).
+/// Scope violation (mint_attest_cap for a key outside the
+/// AttestationScope's restricted seen-set).
 pub const RC_AUTHORITY: u64 = u64::MAX - 4;
 
 /// Cap not found / slot empty / malformed input.
@@ -53,10 +53,10 @@ pub enum HostCall {
     /// the hardware short-circuit hook for self-only-subbed dispatch
     /// endpoints).
     EmitEvent = 4,
-    /// `mint_attest_cap(authority, key, blob, sig?)` — verify-only.
+    /// `mint_attest_cap(scope, key, blob, sig?)` — verify-only.
     /// Cap's existence is the proof; no separate exercise call. Scope
     /// is enforced by the kernel against the verify-context
-    /// `AttestationAuthority` cap.
+    /// `AttestationScopeCap`.
     MintAttestCap = 5,
     /// `setScore(identifier, score)` — verify-only. Buffers the
     /// verifying event into the per-(endpoint, cycle) max-register;

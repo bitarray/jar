@@ -6,13 +6,12 @@
 //! the kernel vouched for the computation directly). There is no
 //! separate `attest()` exercise call; the gate is mint-time.
 //!
-//! Mint authority comes from the `AttestationAuthority` cap the
-//! kernel injects into verify. Scope = `Unlimited` (apply_block-
-//! context verifies and network-arrived event verifies) or
-//! `Restricted(seen_keys)` (dispatch-context emits, where the
-//! authority is scoped to the per-(dispatch_endpoint, cycle) seen
-//! set). Mint attempts for a key outside the authority's scope
-//! return `RC_AUTHORITY`.
+//! Mint authority comes from the `AttestationScopeCap` the kernel
+//! injects into verify: `Unlimited` (apply_block-context verifies and
+//! network-arrived event verifies) or `Restricted(seen_keys)`
+//! (dispatch-context emits, where the scope is the per-
+//! (dispatch_endpoint, cycle) seen set). Mint attempts for a key
+//! outside the scope return `RC_AUTHORITY`.
 //!
 //! Concrete implementation is stubbed; Stage D wires the parameter
 //! decoding (authority cap-ref, key bytes, blob hash, optional sig

@@ -7,9 +7,9 @@
 //! `Hardware::is_self_only_subscribed`).
 //!
 //! In dispatch context the kernel additionally records the originating
-//! signer keys into the per-(dispatch_endpoint, cycle)
-//! `AuthoritySeenSet` so subsequent `mint_attest_cap` calls scoped to
-//! that authority can be checked. Recording is wired in Stage D when
+//! signer keys into the per-(dispatch_endpoint, cycle) `MintSeenSet`
+//! so subsequent `mint_attest_cap` calls with a `Restricted`
+//! AttestationScope can be checked. Recording is wired in Stage D when
 //! the parameter decoding lands.
 
 use crate::runtime::Hardware;

@@ -122,7 +122,7 @@ pub trait Hardware: Send + Sync {
 /// Per-node off-chain state, **not** in σ. Owned by `Kernel<H>`.
 ///
 /// The pool is the per-cycle (== per-block-window) max-register +
-/// AttestationAuthority seen-set tracker driven by `setScore` and
+/// AttestationScope seen-set tracker driven by `setScore` and
 /// `emit_event` host calls. Cycle boundaries align with block
 /// boundaries: at the end of each `Kernel::advance`, the kernel calls
 /// `pool.roll_cycle()` — winners flow to the proposer for next-block
@@ -135,7 +135,7 @@ pub struct NodeOffchain {
     /// javm code-cache; reused across handle_inbound arrivals.
     pub code_cache: javm::CodeCache,
     /// Per-cycle pool (setScore max-register + collision-defer +
-    /// AttestationAuthority seen-set per dispatch endpoint).
+    /// MintSeenSet per dispatch endpoint).
     pub pool: crate::pool::CyclePool,
 }
 
