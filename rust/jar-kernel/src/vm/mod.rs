@@ -26,11 +26,11 @@ use crate::types::{
 pub mod foreign_cnode;
 pub mod host_abi;
 pub mod host_calls;
+pub mod vault_init;
 
-use crate::cap::ProtocolCap;
-use crate::cap::attest::AttestCursor;
-use crate::reach::ReachSet;
+use crate::cap::{AttestCursor, ProtocolCap};
 use crate::runtime::Hardware;
+use crate::transact::ReachSet;
 use javm::cap::{CallOutcome, Cap, ProtocolCapHost};
 
 /// Convenience alias: the `InvocationKernel` parameterized over the
@@ -38,7 +38,7 @@ use javm::cap::{CallOutcome, Cap, ProtocolCapHost};
 pub type Vm = javm::kernel::InvocationKernel<ProtocolCap>;
 
 /// Construct a fresh `Vm` ready to run `Vault.initialize` on the given
-/// home Vault. Walks `vault.slots` via [`crate::state::vault_init::build_init_cap_table`],
+/// home Vault. Walks `vault.slots` via [`vault_init::build_init_cap_table`],
 /// then hands the resulting artifacts to javm's `new_from_artifacts`.
 ///
 /// `code_cache` is consulted for each persistent CodeCap; pass
@@ -51,7 +51,7 @@ pub fn new_vm_from_vault(
     memory_pages: u32,
     code_cache: Option<&mut javm::CodeCache>,
 ) -> KResult<Vm> {
-    let artifacts = crate::state::vault_init::build_init_cap_table(
+    let artifacts = vault_init::build_init_cap_table(
         state,
         vault_id,
         memory_pages,
@@ -89,11 +89,11 @@ pub struct InvocationHost<'a, H: Hardware> {
 
 impl<H: Hardware> ProtocolCapHost<ProtocolCap> for InvocationHost<'_, H> {
     fn call(&mut self, cap: ProtocolCap, vm: &mut Vm) -> CallOutcome {
-        use crate::vm::host_calls::{attest, emit, score};
+        use crate::vm::host_calls::{host_emit_event, host_mint_attest_cap, host_set_score};
         match cap {
-            ProtocolCap::EmitEvent => emit::host_emit_event(vm, self),
-            ProtocolCap::MintAttestCap => attest::host_mint_attest_cap(vm, self),
-            ProtocolCap::SetScore => score::host_set_score(vm, self),
+            ProtocolCap::EmitEvent => host_emit_event(vm, self),
+            ProtocolCap::MintAttestCap => host_mint_attest_cap(vm, self),
+            ProtocolCap::SetScore => host_set_score(vm, self),
             other => CallOutcome::Fault(format!("CALL on non-callable cap: {other:?}")),
         }
     }

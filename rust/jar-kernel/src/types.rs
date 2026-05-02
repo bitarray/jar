@@ -1,27 +1,27 @@
-//! Shared types for the JAR minimum kernel.
+//! Core kernel primitives + umbrella re-exports.
 //!
-//! Mirrors the spec at `~/docs/minimum/`. Every map is `BTreeMap` so iteration
-//! order is canonical (the spec's determinism contract requires this).
+//! Defines the small primitives (`Hash`, `KeyId`, `VaultId`, `Slot`,
+//! `Signature`, `KernelError`, `KResult`, `ByteMap`) and re-exports
+//! the larger shapes that live next to where they're consumed:
+//!
+//! - `Block` / `Body` / `BodyEvent` / sidecar trace types live in
+//!   [`crate::block`].
+//! - Kernel-loop runtime types (`Caller`, `Command`, `KernelRole`)
+//!   live in [`crate::kernel`].
+//! - `RegCap` and friends live in [`crate::cap`].
+//! - `State` / `Vault` / `IdCounters` live in [`crate::state`].
+//!
+//! Internal callers that want the flat `crate::types::{...}` import
+//! still get every symbol through this module.
 
 #![forbid(unsafe_code)]
 
 pub(crate) use std::collections::BTreeMap;
 
-mod block;
-mod runtime;
-mod slot;
-mod trace;
-
-pub use block::*;
-pub use runtime::*;
-pub use slot::*;
-pub use trace::*;
-
-// State + Vault + IdCounters live in `crate::state`.
-pub use crate::state::{IdCounters, State, Vault};
-
-// RegCap variants + helper types live in `crate::cap`.
+pub use crate::block::*;
 pub use crate::cap::regcap::*;
+pub use crate::kernel::{Caller, Command, KernelRole};
+pub use crate::state::{IdCounters, State, Vault};
 
 /// 32-byte hash. Used for state roots, blob hashes, and code hashes. The
 /// chain commits to a single hash function (blake2b-256) at the protocol

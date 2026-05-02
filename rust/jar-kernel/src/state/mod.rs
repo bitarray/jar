@@ -13,9 +13,7 @@ use std::sync::Arc;
 
 use crate::types::{CNode, EventEndpointCap, KResult, KernelError, VaultId};
 
-pub mod code_blobs;
 pub mod state_root;
-pub mod vault_init;
 
 /// Persistent Vault unit. After the unified-persistence refactor a Vault
 /// is `{ slots, init_cap }`. All persistent state — code, byte data,

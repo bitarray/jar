@@ -10,9 +10,9 @@
 //! endpoint with self-emit + collision-defer) lands in Stage E2 with
 //! the new guest fixtures.
 
+use jar_kernel::Kernel;
 use jar_kernel::genesis::GenesisBuilder;
 use jar_kernel::runtime::{InMemoryBus, InMemoryHardware};
-use jar_kernel::{Event, Kernel};
 
 #[test]
 fn kernel_dispatch_routes_to_dispatch_endpoint() {
@@ -29,13 +29,7 @@ fn kernel_dispatch_routes_to_dispatch_endpoint() {
         "kernel did not subscribe to the dispatch entrypoint"
     );
 
-    let event = Event {
-        payload: b"hello".to_vec(),
-        caps: vec![],
-        attestation_trace: vec![],
-        result_trace: vec![],
-    };
-    // VaultId-addressed dispatch path: kernel resolves the slot via
-    // σ.dispatch_endpoints scan.
-    k.dispatch(dispatch_vault, &event).expect("dispatch ok");
+    // Genesis places the dispatch endpoint at slot 0 of σ.dispatch_endpoints.
+    let target_path = 0u32.to_le_bytes();
+    k.dispatch(&target_path, b"hello").expect("dispatch ok");
 }

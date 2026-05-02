@@ -19,7 +19,7 @@ const TEST_MEM_PAGES: u32 = 16;
 /// Extract the raw code sub-blob (jump_table + code + bitmask) from
 /// the CODE manifest entry of jar-kernel's halt smoke fixture.
 fn halt_code_sub_blob() -> Vec<u8> {
-    let blob = jar_kernel::state::code_blobs::halt_blob();
+    let blob = jar_kernel::genesis::halt_blob();
     let parsed = javm::program::parse_blob(blob).expect("parse halt_blob");
     let code_entry = parsed
         .caps

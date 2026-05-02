@@ -27,6 +27,21 @@ use crate::cap::{
 use crate::types::VaultId;
 use javm::cap::ProtocolCap as ProtocolCapT;
 
+/// Cursor into a trace slice. Used for both per-event and block-level
+/// trace consumption during verify. Stage D wires it; today it is a
+/// placeholder field on `InvocationHost`.
+#[derive(Clone, Debug, Default)]
+pub struct AttestCursor {
+    pub attestation_pos: usize,
+    pub result_pos: usize,
+}
+
+impl AttestCursor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// Cap-table slot reserved for the kernel-cap payload at frame init
 /// (host-call selector range is 4..=21; slot 32 sits comfortably above
 /// it).

@@ -199,7 +199,7 @@ mod tests {
     /// actually does that extraction; here we mirror the same logic for
     /// the test fixture.
     fn halt_code_sub_blob() -> Vec<u8> {
-        let blob = crate::state::code_blobs::halt_blob();
+        let blob = crate::genesis::halt_blob();
         let parsed = javm::program::parse_blob(blob).expect("parse halt_blob");
         let code_entry = parsed
             .caps

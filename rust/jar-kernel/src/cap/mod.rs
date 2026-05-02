@@ -3,11 +3,10 @@
 //! `javm::ProtocolCap`), and the `Cap` alias (the complete Frame cap
 //! type `javm::Cap<ProtocolCap>` — what's actually in a cap-table cell).
 
-pub mod attest;
 pub mod protocol;
 pub mod regcap;
 
-pub use protocol::{KERNEL_CAP_SLOT, ProtocolCap};
+pub use protocol::{AttestCursor, KERNEL_CAP_SLOT, ProtocolCap};
 pub use regcap::*;
 
 /// The complete Frame cap type — a cap-table cell holding any of

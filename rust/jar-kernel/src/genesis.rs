@@ -10,8 +10,15 @@
 
 use std::sync::Arc;
 
-use crate::state::code_blobs;
 use crate::types::{CodeCap, EventEndpointCap, KResult, RegCap, State, VaultId};
+
+/// Default smoke fixture: a PVM blob that ecallis IPC-slot (REPLY) → halts
+/// immediately. Compiled at build time from `rust/jar-test-services/halt`.
+/// Used by genesis (every Vault gets the halt blob until host calls land)
+/// and by integration tests that need a well-formed CodeCap.
+pub fn halt_blob() -> &'static [u8] {
+    include_bytes!(env!("JAR_HALT_BLOB_PATH"))
+}
 
 /// Default slot for the init CodeCap.
 const DEFAULT_INIT_CAP_SLOT: u8 = 64;
@@ -27,13 +34,13 @@ pub struct GenesisBuilder {
 impl Default for GenesisBuilder {
     fn default() -> Self {
         Self {
-            block_init_blob: code_blobs::halt_blob().to_vec(),
-            transact_blob: code_blobs::halt_blob().to_vec(),
-            block_final_blob: code_blobs::halt_blob().to_vec(),
+            block_init_blob: halt_blob().to_vec(),
+            transact_blob: halt_blob().to_vec(),
+            block_final_blob: halt_blob().to_vec(),
             // The slot_clear fixture was retired with the event-redesign;
             // halt is the universal default until chain-specific fixtures
             // exercise emit_event / setScore / mint_attest_cap.
-            dispatch_blob: code_blobs::halt_blob().to_vec(),
+            dispatch_blob: halt_blob().to_vec(),
         }
     }
 }

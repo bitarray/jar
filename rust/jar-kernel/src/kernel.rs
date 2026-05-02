@@ -21,9 +21,9 @@
 //! - `Kernel::new(block_hash, hw)` — load state from hardware (genesis if
 //!   `block_hash` is `None`). Subscribe to all top-level Dispatch
 //!   entrypoints discovered in σ.
-//! - `Kernel::dispatch(entrypoint, event)` — handle one inbound Dispatch
+//! - `Kernel::dispatch(target_path, blob)` — handle one inbound Dispatch
 //!   event. Updates the in-memory dispatch list and emits any commands
-//!   the step-2/step-3 pipeline produces.
+//!   the verify-then-process pipeline produces.
 //! - `Kernel::advance(block)` — produce a new block (`block = None`,
 //!   draining the dispatch list into the body) or verify a received block
 //!   (`block = Some(b)`). Updates `last_state` / `last_block_hash` and
@@ -32,14 +32,65 @@
 //! Hardware ownership: the kernel **owns** `H` directly (no `Arc<H>`).
 //! The runtime creates one `Kernel<H>` per node.
 
-use crate::types::{Block, BlockHash, Event, Hash, KResult, KernelError, State, VaultId};
+use crate::pool::CycleRoll;
+use crate::types::{Block, BlockHash, Body, BodyEvent, Hash, KResult, KernelError, State, VaultId};
 
 use crate::apply_block::{ApplyBlockOutcome, BlockOutcome, apply_block};
 use crate::crypto;
-use crate::dispatch::handle_inbound_dispatch;
-use crate::proposer::assemble_body;
+use crate::dispatch::handle_inbound;
 use crate::runtime::{Hardware, NodeOffchain};
 use crate::state::state_root;
+
+// =============================================================================
+// Kernel-loop runtime types (Caller / Command / KernelRole)
+// =============================================================================
+
+/// Returned by the `caller()` host call. Discriminates between Vault-to-Vault
+/// sub-CALLs and kernel-fired top-level invocations.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum Caller {
+    /// Sub-CALL from another Vault VM.
+    Vault(VaultId),
+    /// Top-level invocation by the kernel — userspace branches on the role
+    /// to discriminate verify vs process.
+    Kernel(KernelRole),
+}
+
+/// Where in apply_block / off-chain pipeline a top-level invocation runs.
+///
+/// Per the event-redesign: every event-receiving endpoint is fired in
+/// two phases — `Verify` (fresh per event, ro-σ, may panic) and
+/// `Process` (one Vault per cycle, persistent state, rw-σ for
+/// transact endpoints / ro-σ for dispatch).
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum KernelRole {
+    /// Per-event verify phase. Fresh `Vault.initialize` each. ro-σ.
+    /// May panic. May call `mint_attest_cap` and `setScore`.
+    Verify,
+    /// Per-cycle process phase. One `Vault.initialize` per cycle.
+    /// Persistent state across calls. rw-σ for transact endpoints,
+    /// ro-σ for dispatch endpoints. Cannot fail logic-wise.
+    Process,
+}
+
+/// Runtime-side commands the kernel emits during execution. The runtime
+/// applies these to hardware after `apply_block` (or `handle_inbound`)
+/// returns.
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub enum Command {
+    /// Send a wire dispatch to peers.
+    Emit {
+        target_path: Vec<u8>,
+        blob: Vec<u8>,
+        attestation_traces: Vec<crate::cap::AttestationEntry>,
+    },
+    /// Inform hardware about the consensus score of a candidate block —
+    /// fork-choice input. Hardware stores it keyed by `block_hash`.
+    Score { block_hash: BlockHash, score: u64 },
+    /// Inform hardware that a block is finalized — its non-finalized
+    /// siblings can be pruned.
+    Finalize { block_hash: BlockHash },
+}
 
 pub struct Kernel<H: Hardware> {
     hw: H,
@@ -108,15 +159,16 @@ impl<H: Hardware> Kernel<H> {
         self.last_block_hash
     }
 
-    /// Handle one inbound dispatch event at `entrypoint`. Stub during
-    /// migration; concrete implementation lands in Stage D.
-    pub fn dispatch(&mut self, entrypoint: VaultId, event: &Event) -> KResult<()> {
-        let cmds = handle_inbound_dispatch(
+    /// Handle one inbound dispatch event. `target_path` resolves into
+    /// `σ.dispatch_endpoints` (4-byte LE u32 v1 wire format); `blob` is
+    /// the opaque payload the target's verify parses.
+    pub fn dispatch(&mut self, target_path: &[u8], blob: &[u8]) -> KResult<()> {
+        let cmds = handle_inbound(
             &self.last_state,
             &mut self.dispatches,
-            entrypoint,
-            event.payload.clone(),
-            event.caps.clone(),
+            target_path,
+            blob,
+            &[],
             &self.hw,
         )?;
         for cmd in cmds {
@@ -210,4 +262,36 @@ impl<H: Hardware> Kernel<H> {
         }
         Ok(())
     }
+}
+
+// =============================================================================
+// Proposer-side body assembly
+// =============================================================================
+
+/// Assemble a `Body` from a rolled pool. Walks `σ.transact_endpoints`
+/// in slot order; for each endpoint with rolled winners, emits one
+/// `BodyEvent` per winner. `target_path` encodes the slot index as
+/// 4-byte little-endian u32 (matches `apply_block::resolve_target_path`).
+///
+/// Schedule slots have no body events; their kernel-fed traces live in
+/// `body.schedule_attestation_traces` and are populated by the kernel
+/// at apply time (Stage D), not by the proposer.
+fn assemble_body(state: &State, roll: &CycleRoll) -> KResult<Body> {
+    let mut events: Vec<BodyEvent> = Vec::new();
+    for slot_idx in 0..state.transact_endpoints.len() {
+        if let Some(entries) = roll.winners.get(&slot_idx) {
+            let path = (slot_idx as u32).to_le_bytes().to_vec();
+            for entry in entries {
+                events.push(BodyEvent {
+                    target_path: path.clone(),
+                    blob: entry.blob.clone(),
+                    attestation_traces: entry.attestation_traces.clone(),
+                });
+            }
+        }
+    }
+    Ok(Body {
+        events,
+        ..Body::default()
+    })
 }

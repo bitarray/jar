@@ -25,7 +25,7 @@
 
 use crate::runtime::{Hardware, NodeOffchain};
 use crate::transact;
-use crate::types::{AttestationEntry, Command, KResult, KernelError, State, VaultId};
+use crate::types::{AttestationEntry, Command, KResult, KernelError, State};
 
 fn resolve_dispatch_path(path: &[u8]) -> Option<usize> {
     if path.len() != 4 {
@@ -82,26 +82,4 @@ pub fn handle_inbound<H: Hardware>(
         return Ok(commands);
     }
     Ok(commands)
-}
-
-/// Legacy entrypoint preserved for `Kernel::dispatch` callers that
-/// still address dispatch endpoints by VaultId. Resolves the VaultId to
-/// its slot in `σ.dispatch_endpoints` and forwards to `handle_inbound`.
-pub fn handle_inbound_dispatch<H: Hardware>(
-    state: &State,
-    node: &mut NodeOffchain,
-    entrypoint: VaultId,
-    payload: Vec<u8>,
-    _caps: Vec<u8>,
-    hw: &H,
-) -> KResult<Vec<Command>> {
-    for (slot_idx, ep) in state.dispatch_endpoints.iter().enumerate() {
-        if ep.vault_id == entrypoint {
-            let path = (slot_idx as u32).to_le_bytes().to_vec();
-            return handle_inbound(state, node, &path, &payload, &[], hw);
-        }
-    }
-    Err(KernelError::Internal(format!(
-        "no dispatch endpoint for vault {entrypoint:?}"
-    )))
 }

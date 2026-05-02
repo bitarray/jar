@@ -8,34 +8,36 @@
 //! the kernel via:
 //!
 //! - `Kernel::new(block_hash, hw)` — load tip from hardware.
-//! - `Kernel::dispatch(ep, event)` — handle inbound off-chain dispatch.
+//! - `Kernel::dispatch(target_path, blob)` — handle inbound off-chain
+//!   dispatch.
 //! - `Kernel::advance(block)` — build (proposer) or verify (verifier) a
 //!   new block; updates the tip and asks hardware to commit.
 //!
-//! Module map (struct + helpers grouped):
-//! - `crypto` — Hash/KeyId/Signature primitives + `hash`, `verify`, `block_hash`.
+//! Module map:
+//! - `types` — primitives (Hash/KeyId/VaultId/…) + umbrella re-exports.
+//! - `block` — Block / Body / BodyEvent + sidecar trace shapes.
+//! - `cap` — value-typed cap shapes (RegCap, ProtocolCap, …).
+//! - `state` — σ (`State`, `Vault`, `IdCounters`) and state-root.
+//! - `vm` — javm driver: `InvocationHost`, `vault_init`, foreign-frame
+//!   slot ops, host-call handlers, ABI sentinels.
 //! - `runtime` — `Hardware` trait, `InMemoryHardware`, `NodeOffchain`.
-//! - `state` — `State`, `Vault`, plus all σ mutators (cap_registry, cnode,
-//!   storage, snapshot, state_root, code_blobs).
-//! - `cap` — pinning rules + attest helpers.
-//! - `vm` — VM driver + host calls.
-//! - `apply_block`, `transact`, `dispatch`, `proposer`, `reach` — kernel
-//!   loop phases.
-//! - `genesis` — test fixture.
-//! - `types` — type definitions (RegCap enum, Block/Body, Event,
-//!   sidecar entries) shared everywhere.
+//! - `kernel` — `Kernel<H>` surface + `Caller` / `Command` /
+//!   `KernelRole`.
+//! - `apply_block`, `transact`, `dispatch` — kernel-loop phases.
+//! - `crypto` — `hash`, `verify`, `block_hash`.
+//! - `pool` — per-cycle setScore max-register + collision-defer.
+//! - `genesis` — test fixture + `halt_blob()`.
 
 #![forbid(unsafe_code)]
 
 pub mod apply_block;
+pub mod block;
 pub mod cap;
 pub mod crypto;
 pub mod dispatch;
 pub mod genesis;
 pub mod kernel;
 pub mod pool;
-pub mod proposer;
-pub mod reach;
 pub mod runtime;
 pub mod state;
 pub mod transact;

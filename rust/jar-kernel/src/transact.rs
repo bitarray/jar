@@ -15,11 +15,13 @@
 //! VM (Stage C/D). Today the host calls are stubbed, so the halt-blob
 //! genesis fixtures simply halt cleanly.
 
-use crate::cap::attest::AttestCursor;
-use crate::reach::ReachSet;
+use std::collections::BTreeSet;
+
+use crate::cap::AttestCursor;
 use crate::runtime::Hardware;
 use crate::types::{
-    AttestationEntry, Caller, Command, EventEndpointCap, KResult, KernelRole, ResultEntry, State,
+    AttestationEntry, Caller, Command, EventEndpointCap, KResult, KernelError, KernelRole,
+    ReachEntry, ResultEntry, State, VaultId,
 };
 use crate::vm::{InvocationHost, InvocationResult, drive_invocation, new_vm_from_vault};
 
@@ -79,4 +81,44 @@ fn run_one<H: Hardware>(
         hw,
     };
     drive_invocation(&mut vm, &mut host)
+}
+
+// =============================================================================
+// Reach tracking + verifier-mode strict-equality check
+// =============================================================================
+
+/// Per-invocation reach: which Vaults were touched (initialized) during one
+/// top-level invocation.
+#[derive(Clone, Default, Debug)]
+pub struct ReachSet {
+    pub vaults: BTreeSet<VaultId>,
+}
+
+impl ReachSet {
+    pub fn note(&mut self, v: VaultId) {
+        self.vaults.insert(v);
+    }
+
+    pub fn into_entry(self, entrypoint: VaultId, event_idx: u32) -> ReachEntry {
+        ReachEntry {
+            entrypoint,
+            event_idx,
+            vaults: self.vaults.into_iter().collect(),
+        }
+    }
+}
+
+/// Verifier-mode strict equality check. Order-insensitive (reach is a set);
+/// we compare sorted vectors.
+pub fn check_strict_equality(actual: &ReachSet, recorded: &ReachEntry) -> KResult<()> {
+    let actual_sorted: Vec<VaultId> = actual.vaults.iter().copied().collect();
+    let mut recorded_sorted = recorded.vaults.clone();
+    recorded_sorted.sort();
+    if actual_sorted != recorded_sorted {
+        return Err(KernelError::TraceDivergence(format!(
+            "reach mismatch: actual {:?} vs recorded {:?}",
+            actual_sorted, recorded_sorted
+        )));
+    }
+    Ok(())
 }
