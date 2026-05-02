@@ -467,11 +467,11 @@ pub struct FrameRefCap {
 /// table, hosts may expose a third frame kind: a "foreign" cap-table
 /// the host (jar-kernel) backs with its own σ-resident structure
 /// (Vault CNodes). A protocol cap can announce itself as a handle into
-/// such a foreign frame by overriding [`ProtocolCapT::as_foreign_frame`];
+/// such a foreign frame by overriding [`ProtocolCap::as_foreign_frame`];
 /// when javm's resolve walk crosses through that cap, the resulting
 /// `FrameId::Foreign(id)` is fed to a host-provided
 /// [`ForeignCnode`] implementation for slot-level operations.
-pub trait ProtocolCapT: Clone + core::fmt::Debug {
+pub trait ProtocolCap: Clone + core::fmt::Debug {
     /// Identifier the host uses to address one of its foreign frames.
     /// Implementors with no foreign frames use `()`.
     type ForeignFrameId: Copy + Eq + core::fmt::Debug;
@@ -521,7 +521,7 @@ pub trait ProtocolCapT: Clone + core::fmt::Debug {
 /// and javm-bench guests. The byte typically encodes the host-call
 /// selector (1..=N), and `ecalli N` on slot N yields
 /// `KernelResult::ProtocolCall { slot: N }`.
-impl ProtocolCapT for u8 {
+impl ProtocolCap for u8 {
     type ForeignFrameId = ();
     type FinalStepRights = ();
 }
@@ -543,7 +543,7 @@ impl ProtocolCapT for u8 {
 /// host can enforce op-specific authority (e.g. VaultRef Grant /
 /// Revoke / Derive). All methods may fail (return `None` / `Err`) and
 /// javm reports `RESULT_WHAT` to the guest when they do.
-pub trait ForeignCnode<P: ProtocolCapT> {
+pub trait ForeignCnode<P: ProtocolCap> {
     /// Take the cap at `(id, slot)`. Empty slots return `None`. On
     /// `Some(_)` the host must have removed the cap from its frame
     /// (and updated any registry bookkeeping).
@@ -594,7 +594,7 @@ pub struct NoForeignCnode;
 
 impl<P> ForeignCnode<P> for NoForeignCnode
 where
-    P: ProtocolCapT<ForeignFrameId = (), FinalStepRights = ()>,
+    P: ProtocolCap<ForeignFrameId = (), FinalStepRights = ()>,
 {
     fn fc_take(&mut self, _id: (), _slot: u8, _rights: ()) -> Option<Cap<P>> {
         None
@@ -620,7 +620,7 @@ where
 /// substitutes a richer type that wraps both host-call selectors and
 /// kernel cap data.
 #[derive(Debug)]
-pub enum Cap<P: ProtocolCapT = u8> {
+pub enum Cap<P: ProtocolCap = u8> {
     Untyped(UntypedCap),
     Data(DataCap),
     Code(Arc<CodeCap>),
@@ -635,7 +635,7 @@ pub enum Cap<P: ProtocolCapT = u8> {
     Protocol(P),
 }
 
-impl<P: ProtocolCapT> Cap<P> {
+impl<P: ProtocolCap> Cap<P> {
     /// Whether this cap type supports COPY. Protocol caps consult `P`'s
     /// `is_copyable` hook. `Untyped` / `FaultHandler` / `Gas` are
     /// move-only — duplicating an `Untyped` quota would let two
@@ -697,7 +697,7 @@ pub const PROTOCOL_SLOT_COUNT: usize = 29;
 /// `set_pinned_original`. Once pinned, a slot stays pinned for the
 /// lifetime of the cap-table.
 #[derive(Debug)]
-pub struct CapTable<P: ProtocolCapT = u8> {
+pub struct CapTable<P: ProtocolCap = u8> {
     slots: [Option<Cap<P>>; CAP_TABLE_SIZE],
     /// Per-slot original bitmap (32 bytes = 256 bits). True = slot holds original
     /// kernel-populated protocol cap. Only meaningful for slots < PROTOCOL_SLOT_COUNT.
@@ -708,13 +708,13 @@ pub struct CapTable<P: ProtocolCapT = u8> {
     pinned_bitmap: [u8; 32],
 }
 
-impl<P: ProtocolCapT> Default for CapTable<P> {
+impl<P: ProtocolCap> Default for CapTable<P> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<P: ProtocolCapT> CapTable<P> {
+impl<P: ProtocolCap> CapTable<P> {
     pub fn new() -> Self {
         Self {
             slots: core::array::from_fn(|_| None),

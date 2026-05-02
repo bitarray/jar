@@ -193,11 +193,11 @@ pub fn is_identity_key(key: &KeyId) -> bool {
 /// in `σ.cap_registry` (a CapId); references from `vault.slots` resolve
 /// here via lookup. When a registered cap is projected into a Frame
 /// during invocation init, it becomes
-/// `KernelCap::Registered { id, cap: RegisteredCap }`.
+/// `Cap::Registered { id, cap: RegisteredCap }`.
 ///
 /// Frame-only kinds (SelfId, Caller*, AttestationScope, the home
 /// VaultRef projection) are NOT in `RegisteredCap`; they live as
-/// top-level arms of `KernelCap` and never enter σ.
+/// top-level arms of `Cap` and never enter σ.
 ///
 /// Vault lifetime is tracked by reachability — a Vault is alive iff its
 /// VaultId appears in `state.vaults` and at least one VaultRef in some

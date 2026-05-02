@@ -9,9 +9,9 @@
 
 use std::sync::Arc;
 
-use javm::cap::{Cap, ForeignCnode};
+use javm::cap::{Cap as JavmCap, ForeignCnode};
 
-use jar_kernel::cap::KernelCap;
+use jar_kernel::cap::Cap;
 use jar_kernel::state::cap_registry;
 use jar_kernel::vm::foreign_cnode::VaultCnodeView;
 use jar_kernel::{CapRecord, DataCap, RegisteredCap, State, Vault, VaultRights};
@@ -138,7 +138,7 @@ fn fc_take_then_no_replace_leaves_slot_empty() {
     v.slots.set(0, Some(cap_id));
     state.vaults.insert(vault_id, Arc::new(v));
 
-    let _taken: Cap<KernelCap> = {
+    let _taken: JavmCap<Cap> = {
         let mut view = VaultCnodeView::new(&mut state);
         view.fc_take(vault_id, 0, VaultRights::ALL).unwrap()
     };

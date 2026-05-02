@@ -5,7 +5,7 @@
 //! Only IDLE VMs can be CALLed — this prevents reentrancy by construction.
 
 use crate::PVM_REGISTER_COUNT;
-use crate::cap::{CapTable, ProtocolCapT};
+use crate::cap::{CapTable, ProtocolCap};
 
 /// VM lifecycle states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +24,7 @@ pub enum VmState {
 
 /// A single VM instance in the pool.
 #[derive(Debug)]
-pub struct VmInstance<P: ProtocolCapT = u8> {
+pub struct VmInstance<P: ProtocolCap = u8> {
     /// Current lifecycle state.
     pub state: VmState,
     /// Index of the CODE cap this VM runs (in the kernel's code_caps list).
@@ -47,7 +47,7 @@ pub struct VmInstance<P: ProtocolCapT = u8> {
     heap_top: u32,
 }
 
-impl<P: ProtocolCapT> VmInstance<P> {
+impl<P: ProtocolCap> VmInstance<P> {
     /// Create a new VM in IDLE state.
     pub fn new(code_cap_id: u16, entry_index: u32, cap_table: CapTable<P>, gas: u64) -> Self {
         let registers = [0u64; PVM_REGISTER_COUNT];
@@ -153,7 +153,7 @@ impl<P: ProtocolCapT> VmInstance<P> {
 /// itself doesn't populate these — the host (jar-kernel) writes
 /// Caller. javm just preserves whatever opaque `Cap<P>` was there.
 #[derive(Debug)]
-pub struct CallFrame<P: ProtocolCapT = u8> {
+pub struct CallFrame<P: ProtocolCap = u8> {
     /// VM that initiated the CALL.
     pub caller_vm_id: u16,
     /// Saved BareFrame sub-slots 0/1 from before the CALL.
@@ -206,7 +206,7 @@ impl VmId {
 
 /// Arena entry: optional VM + generation counter.
 #[derive(Debug)]
-struct ArenaEntry<P: ProtocolCapT> {
+struct ArenaEntry<P: ProtocolCap> {
     vm: Option<VmInstance<P>>,
     generation: u16,
 }
@@ -214,19 +214,19 @@ struct ArenaEntry<P: ProtocolCapT> {
 /// Generational arena for VM instances. Supports O(1) create, lookup,
 /// and drop with slot reuse. Stale handles detected via generation mismatch.
 #[derive(Debug)]
-pub struct VmArena<P: ProtocolCapT = u8> {
+pub struct VmArena<P: ProtocolCap = u8> {
     entries: Vec<ArenaEntry<P>>,
     free_list: Vec<u16>,
     live_count: u16,
 }
 
-impl<P: ProtocolCapT> Default for VmArena<P> {
+impl<P: ProtocolCap> Default for VmArena<P> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<P: ProtocolCapT> VmArena<P> {
+impl<P: ProtocolCap> VmArena<P> {
     pub fn new() -> Self {
         Self {
             entries: Vec::with_capacity(16),
@@ -378,7 +378,7 @@ impl<P: ProtocolCapT> VmArena<P> {
 ///   route through a [`crate::cap::ForeignCnode`] adapter the host
 ///   threads in.
 ///
-/// `F` is the host's foreign-frame id type (`ProtocolCapT::ForeignFrameId`).
+/// `F` is the host's foreign-frame id type (`ProtocolCap::ForeignFrameId`).
 /// Hosts with no foreign frames use `()` and the `Foreign(())` arm is
 /// unreachable in practice (because `as_foreign_frame` returns `None`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

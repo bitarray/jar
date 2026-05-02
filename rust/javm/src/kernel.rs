@@ -67,7 +67,7 @@ macro_rules! resolve {
 use crate::backing::BackingStore;
 use crate::cap::{
     Access, BARE_FRAME_SLOT, Cap, CapTable, CodeCap, DataCap, ForeignCnode, FrameRefCap,
-    FrameRefRights, GasCap, NoForeignCnode, ProtocolCapT, UntypedCap,
+    FrameRefRights, GasCap, NoForeignCnode, ProtocolCap, UntypedCap,
 };
 use crate::program::{self, CapEntryType};
 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
@@ -136,7 +136,7 @@ pub const BARE_FRAME_UNTYPED_SLOT: u8 = 9;
 /// host (jar-kernel) at top-level invocation entry via
 /// `populate_ephemeral_kernel_caps`. javm refreshes this slot on
 /// every internal CALL transition by calling
-/// `ProtocolCapT::caller_cap_for(caller_table)` so guests in a
+/// `ProtocolCap::caller_cap_for(caller_table)` so guests in a
 /// sub-CALL see their *immediate* caller, not the original
 /// invocation trigger; the prior value is restored on REPLY/halt/
 /// fault via `restore_ephemeral_kernel_slots`.
@@ -189,7 +189,7 @@ pub enum KernelResult {
 }
 
 /// The invocation kernel.
-pub struct InvocationKernel<P: crate::cap::ProtocolCapT = u8> {
+pub struct InvocationKernel<P: crate::cap::ProtocolCap = u8> {
     /// Physical memory pool.
     pub backing: BackingStore,
     /// Compiled CODE caps (max 5).
@@ -232,7 +232,7 @@ pub struct InvocationKernel<P: crate::cap::ProtocolCapT = u8> {
     active_window: usize,
 }
 
-impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
+impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
     /// Construct a kernel from a pre-built [`InvocationArtifacts`].
     /// Used by hosts (jar-kernel's vault_init, plus
     /// [`cap_table_from_blob`] for legacy blob bootstrap) that have
@@ -2859,7 +2859,7 @@ impl<P: crate::cap::ProtocolCapT> InvocationKernel<P> {
     #[inline]
     pub fn run(&mut self) -> KernelResult
     where
-        P: ProtocolCapT<ForeignFrameId = (), FinalStepRights = ()>,
+        P: ProtocolCap<ForeignFrameId = (), FinalStepRights = ()>,
     {
         self.run_with_host(&mut NoForeignCnode)
     }
@@ -3563,7 +3563,7 @@ pub fn allocate_data_cap(
 ///   the runtime mapping.
 /// - jar-kernel's `vault_init::build_init_cap_table` (separate crate):
 ///   walks `vault.slots` and produces the same unmapped shape.
-pub struct InvocationArtifacts<P: ProtocolCapT> {
+pub struct InvocationArtifacts<P: ProtocolCap> {
     pub cap_table: CapTable<P>,
     pub code_caps: Vec<Arc<CodeCap>>,
     pub init_code_id: u16,
@@ -3584,7 +3584,7 @@ pub struct InvocationArtifacts<P: ProtocolCapT> {
 ///
 /// `code_cache` is consulted for each CODE cap; on miss the cap is
 /// compiled and inserted into the cache.
-pub fn cap_table_from_blob<P: ProtocolCapT>(
+pub fn cap_table_from_blob<P: ProtocolCap>(
     blob: &[u8],
     backend: crate::backend::PvmBackend,
     mut code_cache: Option<&mut CodeCache>,

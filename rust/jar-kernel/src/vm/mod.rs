@@ -1,4 +1,4 @@
-//! Invocation driver for `javm::kernel::InvocationKernel<KernelCap>`.
+//! Invocation driver for `javm::kernel::InvocationKernel<Cap>`.
 //!
 //! `drive_invocation` runs a real PVM VM until terminal (Halt / Panic /
 //! PageFault / OutOfGas), routing every `ProtocolCall(slot)` through
@@ -26,7 +26,7 @@ pub mod foreign_cnode;
 pub mod host_abi;
 pub mod host_calls;
 
-use crate::cap::KernelCap;
+use crate::cap::Cap;
 use crate::cap::attest::AttestCursor;
 use crate::reach::ReachSet;
 use crate::runtime::Hardware;
@@ -34,7 +34,7 @@ use crate::vm::host_abi::HostCall;
 
 /// Convenience alias: the `InvocationKernel` parameterized over the
 /// kernel's protocol-cap payload.
-pub type Vm = javm::kernel::InvocationKernel<KernelCap>;
+pub type Vm = javm::kernel::InvocationKernel<Cap>;
 
 /// Construct a fresh `Vm` ready to run `Vault.initialize` on the given
 /// home Vault. Walks `vault.slots` via [`crate::state::vault_init::build_init_cap_table`],

@@ -1,15 +1,15 @@
-//! `KernelCap` — the protocol-cap payload type jar-kernel substitutes
+//! `Cap` — the protocol-cap payload type jar-kernel substitutes
 //! into javm's `Cap::Protocol(P)`.
 //!
 //! Each running VM's javm cap-table is the kernel's per-invocation
 //! Frame. Slots hold one of these variants:
 //!
-//! - `KernelCap::HostCall(u8)` — host-call selector. `ecalli N` on a
+//! - `Cap::HostCall(u8)` — host-call selector. `ecalli N` on a
 //!   slot holding `HostCall(N)` yields `KernelResult::ProtocolCall
 //!   { slot: N }` to the host; `drive_invocation` dispatches to the
 //!   matching handler.
 //!
-//! - `KernelCap::Registered { id, cap }` — projection of a σ-resident
+//! - `Cap::Registered { id, cap }` — projection of a σ-resident
 //!   cap into the Frame. The `cap` is a `RegisteredCap`; the `id`
 //!   stays valid across Frame ↔ Vault round-trips so cap_children
 //!   bookkeeping survives the bounce.
@@ -19,7 +19,7 @@
 //!   `AttestationAggregate`) — kernel-injected per-frame markers with
 //!   no σ presence and no `CapId`. They vanish at invocation teardown.
 //!
-//! The `ProtocolCapT` impl announces VaultRef-shaped caps as
+//! The `ProtocolCap` impl announces VaultRef-shaped caps as
 //! foreign-frame handles so javm's resolve walk can cross into a
 //! Vault's CNode through them, and produces a fresh `CallerVault`
 //! at every CALL transition.
@@ -29,7 +29,7 @@ use crate::cap::{
     RegisteredCap, SelfCap, VaultRefCap, VaultRights,
 };
 use crate::types::{CapId, VaultId};
-use javm::cap::ProtocolCapT;
+use javm::cap::ProtocolCap;
 
 /// Cap-table slot reserved for the kernel-cap payload at frame init
 /// (host-call selector range is 4..=21; slot 32 sits comfortably above
@@ -39,7 +39,7 @@ pub const KERNEL_CAP_SLOT: u8 = 32;
 /// The protocol-cap payload type jar-kernel substitutes into javm's
 /// `Cap::Protocol(P)`. See module-level docs.
 #[derive(Clone, Debug)]
-pub enum KernelCap {
+pub enum Cap {
     /// A host-call selector. `ecalli N` on a slot containing
     /// `HostCall(N)` yields `ProtocolCall { slot: N }` to the host.
     HostCall(u8),
@@ -70,12 +70,12 @@ pub enum KernelCap {
     AttestationAggregate(AttestationAggregateCap),
 }
 
-impl KernelCap {
+impl Cap {
     /// Borrow the underlying `RegisteredCap`, if this cap projects from
     /// σ. Returns `None` for `HostCall` and any frame-only variant.
     pub fn as_registered(&self) -> Option<&RegisteredCap> {
         match self {
-            KernelCap::Registered { cap, .. } => Some(cap),
+            Cap::Registered { cap, .. } => Some(cap),
             _ => None,
         }
     }
@@ -83,13 +83,13 @@ impl KernelCap {
     /// CapId, if this cap is registered in σ.
     pub fn cap_id(&self) -> Option<CapId> {
         match self {
-            KernelCap::Registered { id, .. } => Some(*id),
+            Cap::Registered { id, .. } => Some(*id),
             _ => None,
         }
     }
 }
 
-impl ProtocolCapT for KernelCap {
+impl ProtocolCap for Cap {
     type ForeignFrameId = VaultId;
     type FinalStepRights = VaultRights;
 
@@ -111,8 +111,8 @@ impl ProtocolCapT for KernelCap {
     /// VaultRef }` projection and the frame-only `HomeVaultRef` qualify.
     fn as_foreign_frame(&self) -> Option<(VaultId, VaultRights)> {
         let vr = match self {
-            KernelCap::HomeVaultRef(vr) => vr,
-            KernelCap::Registered {
+            Cap::HomeVaultRef(vr) => vr,
+            Cap::Registered {
                 cap: RegisteredCap::VaultRef(vr),
                 ..
             } => vr,
@@ -132,14 +132,12 @@ impl ProtocolCapT for KernelCap {
     /// bare Frame itself (which never executes guest code).
     fn caller_cap_for(caller_table: &javm::cap::CapTable<Self>) -> Option<javm::cap::Cap<Self>> {
         let home_vault_id = match caller_table.get(1) {
-            Some(javm::cap::Cap::Protocol(KernelCap::HomeVaultRef(vr))) => vr.vault_id,
+            Some(javm::cap::Cap::Protocol(Cap::HomeVaultRef(vr))) => vr.vault_id,
             _ => return None,
         };
-        Some(javm::cap::Cap::Protocol(KernelCap::CallerVault(
-            CallerVaultCap {
-                vault_id: home_vault_id,
-            },
-        )))
+        Some(javm::cap::Cap::Protocol(Cap::CallerVault(CallerVaultCap {
+            vault_id: home_vault_id,
+        })))
     }
 }
 
@@ -147,21 +145,21 @@ impl ProtocolCapT for KernelCap {
 mod tests {
     use super::*;
     use crate::cap::{VaultRefCap, VaultRights};
-    use javm::cap::{Cap, CapTable, ProtocolCapT};
+    use javm::cap::{Cap as JavmCap, CapTable, ProtocolCap};
 
     #[test]
     fn caller_cap_for_reads_home_vault_ref() {
-        let mut t: CapTable<KernelCap> = CapTable::new();
+        let mut t: CapTable<Cap> = CapTable::new();
         let vault_id = VaultId(42);
         t.set(
             1,
-            Cap::Protocol(KernelCap::HomeVaultRef(VaultRefCap {
+            JavmCap::Protocol(Cap::HomeVaultRef(VaultRefCap {
                 vault_id,
                 rights: VaultRights::ALL,
             })),
         );
-        match KernelCap::caller_cap_for(&t) {
-            Some(Cap::Protocol(KernelCap::CallerVault(cv))) => {
+        match Cap::caller_cap_for(&t) {
+            Some(JavmCap::Protocol(Cap::CallerVault(cv))) => {
                 assert_eq!(cv.vault_id, vault_id);
             }
             other => panic!("expected CallerVault cap, got {:?}", other.is_some()),
@@ -170,7 +168,7 @@ mod tests {
 
     #[test]
     fn caller_cap_for_returns_none_when_slot_1_empty() {
-        let t: CapTable<KernelCap> = CapTable::new();
-        assert!(KernelCap::caller_cap_for(&t).is_none());
+        let t: CapTable<Cap> = CapTable::new();
+        assert!(Cap::caller_cap_for(&t).is_none());
     }
 }

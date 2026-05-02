@@ -2,9 +2,9 @@
 //! helpers (pinning rules + attestation dispatch).
 
 pub mod attest;
-pub mod kernel_cap;
 pub mod pinning;
+pub mod protocol;
 pub mod registered;
 
-pub use kernel_cap::{KERNEL_CAP_SLOT, KernelCap};
+pub use protocol::{Cap, KERNEL_CAP_SLOT};
 pub use registered::*;

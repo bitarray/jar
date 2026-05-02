@@ -187,9 +187,9 @@ fn new_vm_from_vault_extra_persistent_cap_propagates() {
         .expect("new_vm_from_vault succeeds");
 
     // Slot 100 should hold the registered VaultRef.
-    use jar_kernel::cap::KernelCap;
+    use jar_kernel::cap::Cap;
     match vm.vm_arena.vm(0).cap_table.get(100) {
-        Some(javm::cap::Cap::Protocol(KernelCap::Registered {
+        Some(javm::cap::Cap::Protocol(Cap::Registered {
             id,
             cap: RegisteredCap::VaultRef(vr),
         })) => {

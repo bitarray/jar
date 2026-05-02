@@ -3,15 +3,15 @@
 //!
 //! For every occupied slot in `vault.slots`, this module looks up the
 //! `CapRecord` and translates the persistent `RegisteredCap` shape into
-//! the ephemeral `Cap<KernelCap>` shape that lives in a running VM's
+//! the ephemeral `JavmCap<Cap>` shape that lives in a running VM's
 //! Frame:
 //!
 //! | `vault.slots[N]`                                      | `cap_table[N]` |
 //! |-------------------------------------------------------|----------------|
 //! | empty                                                 | empty          |
-//! | `RegisteredCap::Code(CodeCap{blob})`                     | `Cap::Code(...)` (compile blob) |
-//! | `RegisteredCap::Data(DataCap{content, page_count})`      | `Cap::Data(...)` (fresh ephemeral pages, content-copied, **unmapped**) |
-//! | `RegisteredCap::VaultRef(...)` / other Registered shapes | `Cap::Protocol(KernelCap::Registered { id, cap })` |
+//! | `RegisteredCap::Code(CodeCap{blob})`                     | `JavmCap::Code(...)` (compile blob) |
+//! | `RegisteredCap::Data(DataCap{content, page_count})`      | `JavmCap::Data(...)` (fresh ephemeral pages, content-copied, **unmapped**) |
+//! | `RegisteredCap::VaultRef(...)` / other Registered shapes | `JavmCap::Protocol(Cap::Registered { id, cap })` |
 //! | Pinned (Dispatch / Transact / Schedule + Refs)        | `KernelError::Pinning` (defense in depth — `fc_set` already rejects placement) |
 //! | Ephemeral-only (Gas / SelfId / Caller*)               | `KernelError::Internal` (kernel bug if such a cap lands here) |
 //!
@@ -28,19 +28,19 @@
 
 use std::sync::Arc;
 
-use javm::cap::{Cap, CapTable};
+use javm::cap::{Cap as JavmCap, CapTable};
 
-use crate::cap::KernelCap;
+use crate::cap::Cap;
 use crate::types::{KResult, KernelError, RegisteredCap, State, VaultId};
 
 /// Pre-built input to `javm::kernel::InvocationKernel::new_from_artifacts`,
 /// produced by walking `vault.slots`. Mirrors
-/// `javm::kernel::InvocationArtifacts<KernelCap>` but is constructed
+/// `javm::kernel::InvocationArtifacts<Cap>` but is constructed
 /// from σ rather than a JAR blob.
-pub type InitArtifacts = javm::kernel::InvocationArtifacts<KernelCap>;
+pub type InitArtifacts = javm::kernel::InvocationArtifacts<Cap>;
 
 /// Walk `vault.slots` and produce the artifacts needed to construct
-/// an `InvocationKernel<KernelCap>` for `Vault.initialize`. The page
+/// an `InvocationKernel<Cap>` for `Vault.initialize`. The page
 /// budget for the kernel's UntypedCap and BackingStore is the
 /// caller-supplied `memory_pages`. Vault no longer declares its
 /// own quota — memory budget is per-event (Event.memory_budget).
@@ -78,7 +78,7 @@ pub fn build_init_cap_table(
     })?;
     let mut untyped = javm::cap::UntypedCap::new(memory_pages);
 
-    let mut cap_table: CapTable<KernelCap> = CapTable::new();
+    let mut cap_table: CapTable<Cap> = CapTable::new();
     let mut code_caps: Vec<Arc<javm::cap::CodeCap>> = Vec::new();
 
     for slot in 0u8..=255 {
@@ -101,7 +101,7 @@ pub fn build_init_cap_table(
     }
 
     let init_code_id = match cap_table.get(init_slot) {
-        Some(Cap::Code(c)) => c.id,
+        Some(JavmCap::Code(c)) => c.id,
         Some(_) => {
             return Err(KernelError::Internal(format!(
                 "vault {:?} init slot {} does not hold a Code cap",
@@ -135,7 +135,7 @@ fn translate_persistent(
     code_cache: Option<&mut javm::CodeCache>,
     untyped: &mut javm::cap::UntypedCap,
     backing: &mut javm::backing::BackingStore,
-) -> KResult<Cap<KernelCap>> {
+) -> KResult<JavmCap<Cap>> {
     match cap {
         RegisteredCap::Code(c) => {
             if code_caps.len() >= javm::vm_pool::MAX_CODE_CAPS {
@@ -149,14 +149,14 @@ fn translate_persistent(
                 javm::kernel::compile_code_blob(&c.blob, id, mem_cycles, backend, code_cache)
                     .map_err(|e| KernelError::Internal(format!("compile_code_blob: {:?}", e)))?;
             code_caps.push(Arc::clone(&code_cap));
-            Ok(Cap::Code(code_cap))
+            Ok(JavmCap::Code(code_cap))
         }
         RegisteredCap::Data(d) => {
             let data_cap =
                 javm::kernel::allocate_data_cap(&d.content, d.page_count, untyped, backing)
                     .map_err(|e| KernelError::Internal(format!("allocate_data_cap: {:?}", e)))?;
             // Cap is unmapped on purpose — the init program calls MGMT_MAP.
-            Ok(Cap::Data(data_cap))
+            Ok(JavmCap::Data(data_cap))
         }
         // EventEndpointCaps are placed in σ.transact_endpoints /
         // dispatch_endpoints, never in vault.slots. Reject if found here.
@@ -170,7 +170,7 @@ fn translate_persistent(
         RegisteredCap::VaultRef(_)
         | RegisteredCap::Resource(_)
         | RegisteredCap::Attestation(_)
-        | RegisteredCap::AttestationAggregate(_) => Ok(Cap::Protocol(KernelCap::Registered {
+        | RegisteredCap::AttestationAggregate(_) => Ok(JavmCap::Protocol(Cap::Registered {
             id: cap_id,
             cap: cap.clone(),
         })),
@@ -254,7 +254,10 @@ mod tests {
 
         assert_eq!(artifacts.code_caps.len(), 1);
         assert_eq!(artifacts.init_code_id, 0);
-        assert!(matches!(artifacts.cap_table.get(64), Some(Cap::Code(_))));
+        assert!(matches!(
+            artifacts.cap_table.get(64),
+            Some(JavmCap::Code(_))
+        ));
     }
 
     #[test]
@@ -287,7 +290,7 @@ mod tests {
         )
         .unwrap();
         match artifacts.cap_table.get(100) {
-            Some(Cap::Protocol(KernelCap::Registered {
+            Some(JavmCap::Protocol(Cap::Registered {
                 cap: RegisteredCap::VaultRef(vr),
                 ..
             })) => {
@@ -327,13 +330,16 @@ mod tests {
         )
         .unwrap();
         match artifacts.cap_table.get(65) {
-            Some(Cap::Data(d)) => {
+            Some(JavmCap::Data(d)) => {
                 assert_eq!(d.page_count, 1);
                 assert!(d.mappings.is_empty());
                 assert!(d.active_in.is_none());
                 assert!(!d.has_any_mapped());
             }
-            other => panic!("expected unmapped Cap::Data at slot 65, got {:?}", other),
+            other => panic!(
+                "expected unmapped JavmCap::Data at slot 65, got {:?}",
+                other
+            ),
         }
     }
 

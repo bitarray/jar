@@ -15,7 +15,7 @@ pub mod attest;
 pub mod emit;
 pub mod score;
 
-use crate::cap::KernelCap;
+use crate::cap::Cap;
 use crate::runtime::Hardware;
 use crate::types::KResult;
 use crate::vm::host_abi::*;
@@ -24,7 +24,7 @@ use crate::vm::{HostCallOutcome, InvocationCtx, Vm};
 /// Fetch the kernel cap held at `slot` in the running VM's cap-table,
 /// if any. Returns `None` for empty slots and non-Protocol cells.
 #[allow(dead_code)] // stubbed during event-redesign migration; rewired in Stage D
-pub(crate) fn fetch_kernel_cap(vm: &Vm, slot: u8) -> Option<&KernelCap> {
+pub(crate) fn fetch_kernel_cap(vm: &Vm, slot: u8) -> Option<&Cap> {
     match vm.cap_table_get(slot) {
         Some(javm::cap::Cap::Protocol(kc)) => Some(kc),
         _ => None,
