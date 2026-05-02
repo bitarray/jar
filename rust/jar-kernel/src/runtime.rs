@@ -32,6 +32,25 @@ pub enum TracingEvent {
 }
 
 pub trait Hardware: Send + Sync {
+    // ---- broadcast routing ----
+
+    /// Hook used by the runtime to decide whether an `emit_event` to
+    /// `target_path` can short-circuit straight into local dispatch
+    /// (no network broadcast). The expected use case is the DA /
+    /// private-endpoint pattern: a dispatch endpoint that nobody else
+    /// subscribes to. The kernel emits to it; the runtime sees no
+    /// remote subscribers and feeds the event into local dispatch
+    /// instead of a wasted broadcast.
+    ///
+    /// Default: always `false` (broadcast normally). Concrete hardware
+    /// implementations can override this once subscription tracking
+    /// is wired through; full optimization is deferred —
+    /// chain-spec performance work, not protocol.
+    fn is_self_only_subscribed(&self, target_path: &[u8]) -> bool {
+        let _ = target_path;
+        false
+    }
+
     // ---- state custody ----
 
     /// The chain's genesis state. Hardware was configured with this at
