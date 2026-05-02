@@ -14,7 +14,7 @@ use javm::cap::{Cap, ForeignCnode};
 use jar_kernel::cap::KernelCap;
 use jar_kernel::state::cap_registry;
 use jar_kernel::vm::foreign_cnode::VaultCnodeView;
-use jar_kernel::{CapRecord, Capability, DataCap, State, Vault, VaultRights};
+use jar_kernel::{CapRecord, DataCap, RegisteredCap, State, Vault, VaultRights};
 
 #[test]
 fn fc_clone_leaves_source_intact_so_drop_is_safe() {
@@ -25,7 +25,7 @@ fn fc_clone_leaves_source_intact_so_drop_is_safe() {
     let parent_id = cap_registry::alloc(
         &mut state,
         CapRecord {
-            cap: Capability::Data(DataCap {
+            cap: RegisteredCap::Data(DataCap {
                 content: Arc::new(b"original".to_vec()),
                 page_count: 1,
             }),
@@ -62,7 +62,7 @@ fn fc_clone_leaves_source_intact_so_drop_is_safe() {
     );
     let parent_record = state.cap_registry.get(&parent_id).unwrap();
     match &parent_record.cap {
-        Capability::Data(d) => {
+        RegisteredCap::Data(d) => {
             assert_eq!(d.content.as_slice(), b"original");
             assert_eq!(d.page_count, 1);
         }
@@ -88,7 +88,7 @@ fn manager_pattern_no_commit_no_change() {
     let cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
-            cap: Capability::Data(DataCap {
+            cap: RegisteredCap::Data(DataCap {
                 content: Arc::new(b"v1".to_vec()),
                 page_count: 1,
             }),
@@ -125,7 +125,7 @@ fn fc_take_then_no_replace_leaves_slot_empty() {
     let cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
-            cap: Capability::Data(DataCap {
+            cap: RegisteredCap::Data(DataCap {
                 content: Arc::new(b"v1".to_vec()),
                 page_count: 1,
             }),

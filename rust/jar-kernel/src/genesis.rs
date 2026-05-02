@@ -5,14 +5,14 @@
 //! endpoint in σ.dispatch_endpoints. Per the event-redesign, σ surfaces
 //! are flat Vec<CapId>; no nested cap-graph.
 //!
-//! Each endpoint Vault gets a `Capability::Code(CodeCap)` placed at
+//! Each endpoint Vault gets a `RegisteredCap::Code(CodeCap)` placed at
 //! the Vault's `init_cap` slot.
 
 use std::sync::Arc;
 
 use crate::state::cap_registry;
 use crate::state::code_blobs;
-use crate::types::{CapId, Capability, CodeCap, EventEndpointCap, KResult, State, VaultId};
+use crate::types::{CapId, CodeCap, EventEndpointCap, KResult, RegisteredCap, State, VaultId};
 
 /// Default slot for the init CodeCap.
 const DEFAULT_INIT_CAP_SLOT: u8 = 64;
@@ -66,7 +66,7 @@ impl GenesisBuilder {
         let bi_cap = cap_registry::alloc(
             &mut state,
             crate::types::CapRecord {
-                cap: Capability::EventEndpoint(EventEndpointCap {
+                cap: RegisteredCap::EventEndpoint(EventEndpointCap {
                     vault_id: bi_vault,
                     gas_budget: 100_000_000,
                     memory_budget: 256,
@@ -82,7 +82,7 @@ impl GenesisBuilder {
         let t_cap = cap_registry::alloc(
             &mut state,
             crate::types::CapRecord {
-                cap: Capability::EventEndpoint(EventEndpointCap {
+                cap: RegisteredCap::EventEndpoint(EventEndpointCap {
                     vault_id: t_vault,
                     gas_budget: 100_000_000,
                     memory_budget: 256,
@@ -98,7 +98,7 @@ impl GenesisBuilder {
         let bf_cap = cap_registry::alloc(
             &mut state,
             crate::types::CapRecord {
-                cap: Capability::EventEndpoint(EventEndpointCap {
+                cap: RegisteredCap::EventEndpoint(EventEndpointCap {
                     vault_id: bf_vault,
                     gas_budget: 100_000_000,
                     memory_budget: 256,
@@ -114,7 +114,7 @@ impl GenesisBuilder {
         let d_cap = cap_registry::alloc(
             &mut state,
             crate::types::CapRecord {
-                cap: Capability::EventEndpoint(EventEndpointCap {
+                cap: RegisteredCap::EventEndpoint(EventEndpointCap {
                     vault_id: d_vault,
                     gas_budget: 100_000_000,
                     memory_budget: 256,
@@ -162,7 +162,7 @@ fn alloc_vault_with_code(state: &mut State, jar_blob: Vec<u8>) -> VaultId {
     let code_cap_id = reg::alloc(
         state,
         CapRecord {
-            cap: Capability::Code(CodeCap {
+            cap: RegisteredCap::Code(CodeCap {
                 blob: Arc::new(code_sub_blob),
             }),
             issuer: None,

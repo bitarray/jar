@@ -33,7 +33,7 @@ use crate::runtime::Hardware;
 use crate::state::state_root;
 use crate::transact;
 use crate::types::{
-    AttestationEntry, Block, BlockHash, Capability, Command, Hash, KResult, MerkleProof, State,
+    AttestationEntry, Block, BlockHash, Command, Hash, KResult, MerkleProof, RegisteredCap, State,
 };
 
 /// Outcome of apply_block.
@@ -128,7 +128,7 @@ pub fn apply_block<H: Hardware>(
     for slot_idx in 0..n {
         let cap_id = state.transact_endpoints[slot_idx];
         let endpoint = match state.cap_record(cap_id)?.cap.clone() {
-            Capability::EventEndpoint(e) => e,
+            RegisteredCap::EventEndpoint(e) => e,
             other => {
                 return Ok(panicked(
                     state_in,

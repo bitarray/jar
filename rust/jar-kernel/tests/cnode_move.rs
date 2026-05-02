@@ -17,7 +17,7 @@ use jar_kernel::cap::KernelCap;
 use jar_kernel::state::cap_registry;
 use jar_kernel::vm::foreign_cnode::VaultCnodeView;
 use jar_kernel::{
-    CapRecord, Capability, DataCap, EventEndpointCap, State, Vault, VaultId, VaultRefCap,
+    CapRecord, DataCap, EventEndpointCap, RegisteredCap, State, Vault, VaultId, VaultRefCap,
     VaultRights,
 };
 
@@ -30,7 +30,7 @@ fn state_with_one_data_cap(slot: u8) -> (State, VaultId, jar_kernel::CapId) {
     let cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
-            cap: Capability::Data(DataCap {
+            cap: RegisteredCap::Data(DataCap {
                 content: Arc::new(b"sample data".to_vec()),
                 page_count: 1,
             }),
@@ -55,7 +55,7 @@ fn fc_take_returns_registered_and_clears_slot() {
     match cap {
         Cap::Protocol(KernelCap::Registered { id, cap: c }) => {
             assert_eq!(id, cap_id);
-            assert!(matches!(c, Capability::Data(_)));
+            assert!(matches!(c, RegisteredCap::Data(_)));
         }
         _ => panic!("expected Cap::Protocol(KernelCap::Registered{{..}})"),
     }
@@ -84,7 +84,7 @@ fn fc_set_places_registered_into_empty_slot() {
     // Place it back at slot 8.
     let cap = Cap::Protocol(KernelCap::Registered {
         id: cap_id,
-        cap: Capability::Data(DataCap {
+        cap: RegisteredCap::Data(DataCap {
             content: Arc::new(b"sample data".to_vec()),
             page_count: 1,
         }),
@@ -105,10 +105,10 @@ fn fc_set_rejects_non_registered() {
 
     // Ephemeral cap (kernel-injected per-frame, no σ identity) cannot
     // be placed into a Vault slot.
-    // An Ephemeral persistent-shaped Capability — Data here, but any
+    // An Ephemeral persistent-shaped RegisteredCap — Data here, but any
     // would do — must be rejected by fc_set since only Registered caps
     // can persist in σ.
-    let ephemeral = Cap::Protocol(KernelCap::Ephemeral(Capability::Data(DataCap {
+    let ephemeral = Cap::Protocol(KernelCap::Ephemeral(RegisteredCap::Data(DataCap {
         content: Arc::new(b"sample data".to_vec()),
         page_count: 1,
     })));
@@ -124,7 +124,7 @@ fn fc_set_requires_grant_right() {
     let cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
-            cap: Capability::Data(DataCap {
+            cap: RegisteredCap::Data(DataCap {
                 content: Arc::new(b"sample data".to_vec()),
                 page_count: 1,
             }),
@@ -134,7 +134,7 @@ fn fc_set_requires_grant_right() {
     );
     let cap = Cap::Protocol(KernelCap::Registered {
         id: cap_id,
-        cap: Capability::Data(DataCap {
+        cap: RegisteredCap::Data(DataCap {
             content: Arc::new(b"sample data".to_vec()),
             page_count: 1,
         }),
@@ -153,7 +153,7 @@ fn fc_set_rejects_event_endpoint_cap() {
     let cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
-            cap: Capability::EventEndpoint(EventEndpointCap {
+            cap: RegisteredCap::EventEndpoint(EventEndpointCap {
                 vault_id,
                 gas_budget: 0,
                 memory_budget: 0,
@@ -164,7 +164,7 @@ fn fc_set_rejects_event_endpoint_cap() {
     );
     let cap = Cap::Protocol(KernelCap::Registered {
         id: cap_id,
-        cap: Capability::EventEndpoint(EventEndpointCap {
+        cap: RegisteredCap::EventEndpoint(EventEndpointCap {
             vault_id,
             gas_budget: 0,
             memory_budget: 0,
@@ -193,7 +193,7 @@ fn fc_clone_allocates_child_capid() {
         _ => panic!("expected Registered cap"),
     };
     assert_ne!(child_id, parent_id);
-    assert!(matches!(kind, Capability::Data(_)));
+    assert!(matches!(kind, RegisteredCap::Data(_)));
     // Source slot still occupied (clone doesn't take).
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(7),
@@ -263,7 +263,7 @@ fn fc_is_empty_reports_slot_state() {
 #[test]
 fn vault_ref_with_read_announces_foreign_frame() {
     use javm::cap::ProtocolCapT;
-    let cap = KernelCap::Ephemeral(Capability::VaultRef(VaultRefCap {
+    let cap = KernelCap::Ephemeral(RegisteredCap::VaultRef(VaultRefCap {
         vault_id: VaultId(42),
         rights: VaultRights::ALL,
     }));
@@ -275,7 +275,7 @@ fn vault_ref_with_read_announces_foreign_frame() {
 #[test]
 fn vault_ref_without_read_does_not_announce_foreign_frame() {
     use javm::cap::ProtocolCapT;
-    let cap = KernelCap::Ephemeral(Capability::VaultRef(VaultRefCap {
+    let cap = KernelCap::Ephemeral(RegisteredCap::VaultRef(VaultRefCap {
         vault_id: VaultId(42),
         rights: VaultRights::INITIALIZE, // no `read`
     }));
@@ -300,7 +300,7 @@ fn place_data_cap(
     let cap_id = cap_registry::alloc(
         state,
         CapRecord {
-            cap: Capability::Data(DataCap {
+            cap: RegisteredCap::Data(DataCap {
                 content: Arc::new(content),
                 page_count,
             }),
@@ -333,7 +333,7 @@ fn data_cap_round_trips_via_vault_slot() {
     };
     assert_eq!(returned_id, cap_id);
     match &returned_cap {
-        Capability::Data(d) => {
+        RegisteredCap::Data(d) => {
             assert_eq!(d.page_count, 1);
             assert_eq!(d.content.as_slice(), b"hello");
         }
@@ -373,11 +373,11 @@ fn data_cap_clones_share_arc_content() {
         .expect("fc_clone");
     let (parent_arc, child_arc) = match cap {
         Cap::Protocol(KernelCap::Registered {
-            cap: Capability::Data(d),
+            cap: RegisteredCap::Data(d),
             ..
         }) => {
             let parent = match &state.cap_registry.get(&_parent_id).unwrap().cap {
-                Capability::Data(p) => Arc::clone(&p.content),
+                RegisteredCap::Data(p) => Arc::clone(&p.content),
                 _ => unreachable!(),
             };
             (parent, d.content)

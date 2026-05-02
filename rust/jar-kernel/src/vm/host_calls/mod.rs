@@ -16,15 +16,15 @@ pub mod emit;
 pub mod score;
 
 use crate::runtime::Hardware;
-use crate::types::{Capability, KResult};
+use crate::types::{KResult, RegisteredCap};
 use crate::vm::host_abi::*;
 use crate::vm::{HostCallOutcome, InvocationCtx, Vm};
 
-/// Fetch the kernel `Capability` value held at `slot` in the running
+/// Fetch the kernel `RegisteredCap` value held at `slot` in the running
 /// VM's cap-table, if any. Returns `None` for empty slots, host-call
 /// selector slots (`KernelCap::HostCall`), or non-Protocol caps.
 #[allow(dead_code)] // stubbed during event-redesign migration; rewired in Stage D
-pub(crate) fn fetch_kernel_cap(vm: &Vm, slot: u8) -> Option<&Capability> {
+pub(crate) fn fetch_kernel_cap(vm: &Vm, slot: u8) -> Option<&RegisteredCap> {
     match vm.cap_table_get(slot) {
         Some(javm::cap::Cap::Protocol(kc)) => kc.as_capability(),
         _ => None,

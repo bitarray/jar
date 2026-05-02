@@ -1,4 +1,4 @@
-//! Capability variants.
+//! RegisteredCap variants.
 //!
 //! Per spec §01 (event-redesign): capabilities are the kernel's authority
 //! primitive. They live in CNode slots (persistent) or Frames (ephemeral).
@@ -18,7 +18,7 @@
 //! variant determines which pubkeys mint_attest_cap may produce caps for.
 //!
 //! Each variant is a named struct so generic code can pass a variant by
-//! reference. The `Capability` enum wraps them as a sum type.
+//! reference. The `RegisteredCap` enum wraps them as a sum type.
 
 use std::sync::Arc;
 
@@ -186,7 +186,7 @@ pub fn is_identity_key(key: &KeyId) -> bool {
 }
 
 // -----------------------------------------------------------------------------
-// Capability sum type
+// RegisteredCap sum type
 // -----------------------------------------------------------------------------
 
 /// All capability variants. Persistent variants live in σ.cap_registry
@@ -198,7 +198,7 @@ pub fn is_identity_key(key: &KeyId) -> bool {
 /// reachable Vault references it. There is no separate `Vault(owner)`
 /// cap.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub enum Capability {
+pub enum RegisteredCap {
     VaultRef(VaultRefCap),
     Code(CodeCap),
     Data(DataCap),
@@ -217,11 +217,11 @@ pub enum Capability {
     CallerKernel(CallerKernelCap),
 }
 
-impl Capability {
+impl RegisteredCap {
     pub fn vault_id(&self) -> Option<VaultId> {
         match self {
-            Capability::VaultRef(c) => Some(c.vault_id),
-            Capability::EventEndpoint(c) => Some(c.vault_id),
+            RegisteredCap::VaultRef(c) => Some(c.vault_id),
+            RegisteredCap::EventEndpoint(c) => Some(c.vault_id),
             _ => None,
         }
     }
@@ -284,7 +284,7 @@ pub enum ResourceKind {
 /// One entry in the kernel's cap registry.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct CapRecord {
-    pub cap: Capability,
+    pub cap: RegisteredCap,
     pub issuer: Option<CapId>,
     pub narrowing: Vec<u8>,
 }

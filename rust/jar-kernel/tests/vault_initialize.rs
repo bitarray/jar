@@ -11,7 +11,7 @@ use std::sync::Arc;
 use jar_kernel::cap::{CodeCap, VaultRefCap, VaultRights};
 use jar_kernel::state::cap_registry;
 use jar_kernel::vm::new_vm_from_vault;
-use jar_kernel::{CapRecord, Capability, State, Vault, VaultId};
+use jar_kernel::{CapRecord, RegisteredCap, State, Vault, VaultId};
 
 const INIT_SLOT: u8 = 64;
 const INVOCATION_GAS: u64 = 100_000_000;
@@ -40,7 +40,7 @@ fn vault_with_init_code() -> (State, VaultId) {
     let code_cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
-            cap: Capability::Code(CodeCap {
+            cap: RegisteredCap::Code(CodeCap {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
             issuer: None,
@@ -170,7 +170,7 @@ fn new_vm_from_vault_extra_persistent_cap_propagates() {
     let vr_cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
-            cap: Capability::VaultRef(VaultRefCap {
+            cap: RegisteredCap::VaultRef(VaultRefCap {
                 vault_id: target_vault,
                 rights: VaultRights::ALL,
             }),
@@ -191,7 +191,7 @@ fn new_vm_from_vault_extra_persistent_cap_propagates() {
     match vm.vm_arena.vm(0).cap_table.get(100) {
         Some(javm::cap::Cap::Protocol(KernelCap::Registered {
             id,
-            cap: Capability::VaultRef(vr),
+            cap: RegisteredCap::VaultRef(vr),
         })) => {
             assert_eq!(*id, vr_cap_id);
             assert_eq!(vr.vault_id, target_vault);

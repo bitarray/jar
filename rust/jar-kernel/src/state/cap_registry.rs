@@ -1,8 +1,8 @@
-//! Capability registry: alloc, lookup, derive, revoke (cascade).
+//! RegisteredCap registry: alloc, lookup, derive, revoke (cascade).
 
 use std::collections::BTreeSet;
 
-use crate::types::{CapId, CapRecord, Capability, KResult, KernelError, State, VaultId};
+use crate::types::{CapId, CapRecord, KResult, KernelError, RegisteredCap, State, VaultId};
 
 use crate::cap::pinning;
 
@@ -48,7 +48,7 @@ pub fn revoke_cascade(state: &mut State, root: CapId) -> usize {
 pub fn derive(
     state: &mut State,
     source: CapId,
-    new_cap: Capability,
+    new_cap: RegisteredCap,
     narrowing: Vec<u8>,
     dest_persistent: bool,
 ) -> KResult<CapId> {

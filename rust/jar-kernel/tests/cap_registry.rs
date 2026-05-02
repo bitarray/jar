@@ -7,7 +7,7 @@
 //! coverage for the new model.
 
 use jar_kernel::state::cap_registry;
-use jar_kernel::{CapRecord, Capability, State, VaultId, VaultRefCap, VaultRights};
+use jar_kernel::{CapRecord, RegisteredCap, State, VaultId, VaultRefCap, VaultRights};
 
 fn empty_state() -> State {
     State::empty()
@@ -19,7 +19,7 @@ fn alloc_assigns_monotonic_ids() {
     let a = cap_registry::alloc(
         &mut s,
         CapRecord {
-            cap: Capability::VaultRef(VaultRefCap {
+            cap: RegisteredCap::VaultRef(VaultRefCap {
                 vault_id: VaultId(0),
                 rights: VaultRights::ALL,
             }),
@@ -30,7 +30,7 @@ fn alloc_assigns_monotonic_ids() {
     let b = cap_registry::alloc(
         &mut s,
         CapRecord {
-            cap: Capability::VaultRef(VaultRefCap {
+            cap: RegisteredCap::VaultRef(VaultRefCap {
                 vault_id: VaultId(1),
                 rights: VaultRights::ALL,
             }),
@@ -48,7 +48,7 @@ fn derive_creates_child_record() {
     let parent = cap_registry::alloc(
         &mut s,
         CapRecord {
-            cap: Capability::VaultRef(VaultRefCap {
+            cap: RegisteredCap::VaultRef(VaultRefCap {
                 vault_id: VaultId(7),
                 rights: VaultRights::ALL,
             }),
@@ -59,7 +59,7 @@ fn derive_creates_child_record() {
     let child = cap_registry::derive(
         &mut s,
         parent,
-        Capability::VaultRef(VaultRefCap {
+        RegisteredCap::VaultRef(VaultRefCap {
             vault_id: VaultId(7),
             rights: VaultRights::READ,
         }),

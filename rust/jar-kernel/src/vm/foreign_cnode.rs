@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use javm::cap::{Cap, ForeignCnode};
 
-use crate::cap::{Capability, KernelCap, VaultRights};
+use crate::cap::{KernelCap, RegisteredCap, VaultRights};
 use crate::state::cap_registry;
 use crate::types::{State, VaultId};
 
@@ -109,7 +109,7 @@ impl ForeignCnode<KernelCap> for VaultCnodeView<'_> {
         // Pinning: Vault.slots are not σ-rooted CNodes, but Dispatch /
         // EventEndpointCap belongs in σ.transact_endpoints /
         // σ.dispatch_endpoints, not Vault.slots. Defense in depth.
-        if matches!(&capability, Capability::EventEndpoint(_)) {
+        if matches!(&capability, RegisteredCap::EventEndpoint(_)) {
             return Err(cap);
         }
         slot_set(self.state, vault, slot, Some(id));
@@ -171,6 +171,6 @@ impl ForeignCnode<KernelCap> for VaultCnodeView<'_> {
 /// `fc_clone`). In the event-redesign there are no pinned variants;
 /// every persistent cap shape is clone-eligible (modulo whether it
 /// makes semantic sense to clone, which the chain-author manages).
-fn is_clone_eligible(_cap: &Capability) -> bool {
+fn is_clone_eligible(_cap: &RegisteredCap) -> bool {
     true
 }

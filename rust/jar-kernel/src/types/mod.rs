@@ -20,8 +20,8 @@ pub use trace::*;
 // State + Vault + IdCounters live in `crate::state`.
 pub use crate::state::{IdCounters, State, Vault};
 
-// Capability variants + helper types live in `crate::cap`.
-pub use crate::cap::capability::*;
+// RegisteredCap variants + helper types live in `crate::cap`.
+pub use crate::cap::registered::*;
 
 /// 32-byte hash. Used for state roots, blob hashes, and code hashes. The
 /// chain commits to a single hash function (blake2b-256) at the protocol

@@ -11,7 +11,7 @@
 //!   `HostCall(N)`, and dispatches the corresponding `HostCall`
 //!   handler.
 //!
-//! - `KernelCap::Ephemeral(Capability)` — kernel-injected per-frame
+//! - `KernelCap::Ephemeral(RegisteredCap)` — kernel-injected per-frame
 //!   markers with no σ presence: `Gas`, `SelfId`, `CallerVault`,
 //!   `CallerKernel`, plus the slot-1 home `VaultRef` the kernel
 //!   places at VM init. These vanish at invocation teardown; they
@@ -30,7 +30,7 @@
 //! announces VaultRef-shaped caps as foreign-frame handles so javm's
 //! resolve walk can cross into a Vault's CNode through them.
 
-use crate::cap::{Capability, VaultRights};
+use crate::cap::{RegisteredCap, VaultRights};
 use crate::types::VaultId;
 use javm::cap::ProtocolCapT;
 
@@ -51,20 +51,20 @@ pub enum KernelCap {
     /// (slot-1 home VaultRef). Cannot be persisted to a Vault: any
     /// MOVE / COPY into a foreign frame is rejected by the host
     /// adapter (no `CapId` to register a holder under).
-    Ephemeral(Capability),
+    Ephemeral(RegisteredCap),
     /// A capability with persistent identity in `σ.cap_registry`.
     /// `id` stays valid across Frame / Vault round-trips so that
     /// children / holders bookkeeping survives the bounce.
     Registered {
         id: crate::types::CapId,
-        cap: Capability,
+        cap: RegisteredCap,
     },
 }
 
 impl KernelCap {
-    /// Borrow the underlying `Capability`, regardless of arm. Returns
-    /// `None` for `HostCall` (which has no `Capability` shape).
-    pub fn as_capability(&self) -> Option<&Capability> {
+    /// Borrow the underlying `RegisteredCap`, regardless of arm. Returns
+    /// `None` for `HostCall` (which has no `RegisteredCap` shape).
+    pub fn as_capability(&self) -> Option<&RegisteredCap> {
         match self {
             KernelCap::HostCall(_) => None,
             KernelCap::Ephemeral(c) | KernelCap::Registered { cap: c, .. } => Some(c),
@@ -121,27 +121,27 @@ impl ProtocolCapT for KernelCap {
     fn as_foreign_frame(&self) -> Option<(VaultId, VaultRights)> {
         let cap = self.as_capability()?;
         match cap {
-            Capability::VaultRef(c) if c.rights.read => Some((c.vault_id, c.rights)),
+            RegisteredCap::VaultRef(c) if c.rights.read => Some((c.vault_id, c.rights)),
             _ => None,
         }
     }
 
     /// Produce a fresh `CallerCap` for an internal CALL transition.
     /// Reads the caller VM's home VaultRef at MainFrame slot 1 and
-    /// wraps its `vault_id` as a `Capability::CallerVault`. Returns
+    /// wraps its `vault_id` as a `RegisteredCap::CallerVault`. Returns
     /// `None` if slot 1 doesn't hold a VaultRef-shaped Ephemeral
     /// cap — that should only happen on the bare Frame itself
     /// (which never executes guest code), so the call is a no-op.
     fn caller_cap_for(caller_table: &javm::cap::CapTable<Self>) -> Option<javm::cap::Cap<Self>> {
         use crate::cap::CallerVaultCap;
         let home_vault_id = match caller_table.get(1) {
-            Some(javm::cap::Cap::Protocol(KernelCap::Ephemeral(Capability::VaultRef(vr)))) => {
+            Some(javm::cap::Cap::Protocol(KernelCap::Ephemeral(RegisteredCap::VaultRef(vr)))) => {
                 vr.vault_id
             }
             _ => return None,
         };
         Some(javm::cap::Cap::Protocol(KernelCap::Ephemeral(
-            Capability::CallerVault(CallerVaultCap {
+            RegisteredCap::CallerVault(CallerVaultCap {
                 vault_id: home_vault_id,
             }),
         )))
@@ -162,13 +162,13 @@ mod tests {
         let vault_id = VaultId(42);
         t.set(
             1,
-            Cap::Protocol(KernelCap::Ephemeral(Capability::VaultRef(VaultRefCap {
+            Cap::Protocol(KernelCap::Ephemeral(RegisteredCap::VaultRef(VaultRefCap {
                 vault_id,
                 rights: VaultRights::ALL,
             }))),
         );
         match KernelCap::caller_cap_for(&t) {
-            Some(Cap::Protocol(KernelCap::Ephemeral(Capability::CallerVault(cv)))) => {
+            Some(Cap::Protocol(KernelCap::Ephemeral(RegisteredCap::CallerVault(cv)))) => {
                 assert_eq!(cv.vault_id, vault_id);
             }
             other => panic!("expected CallerVault cap, got {:?}", other.is_some()),

@@ -2,16 +2,16 @@
 //! persistent CNode slots.
 //!
 //! For every occupied slot in `vault.slots`, this module looks up the
-//! `CapRecord` and translates the persistent `Capability` shape into
+//! `CapRecord` and translates the persistent `RegisteredCap` shape into
 //! the ephemeral `Cap<KernelCap>` shape that lives in a running VM's
 //! Frame:
 //!
 //! | `vault.slots[N]`                                      | `cap_table[N]` |
 //! |-------------------------------------------------------|----------------|
 //! | empty                                                 | empty          |
-//! | `Capability::Code(CodeCap{blob})`                     | `Cap::Code(...)` (compile blob) |
-//! | `Capability::Data(DataCap{content, page_count})`      | `Cap::Data(...)` (fresh ephemeral pages, content-copied, **unmapped**) |
-//! | `Capability::VaultRef(...)` / other Registered shapes | `Cap::Protocol(KernelCap::Registered { id, cap })` |
+//! | `RegisteredCap::Code(CodeCap{blob})`                     | `Cap::Code(...)` (compile blob) |
+//! | `RegisteredCap::Data(DataCap{content, page_count})`      | `Cap::Data(...)` (fresh ephemeral pages, content-copied, **unmapped**) |
+//! | `RegisteredCap::VaultRef(...)` / other Registered shapes | `Cap::Protocol(KernelCap::Registered { id, cap })` |
 //! | Pinned (Dispatch / Transact / Schedule + Refs)        | `KernelError::Pinning` (defense in depth — `fc_set` already rejects placement) |
 //! | Ephemeral-only (Gas / SelfId / Caller*)               | `KernelError::Internal` (kernel bug if such a cap lands here) |
 //!
@@ -31,7 +31,7 @@ use std::sync::Arc;
 use javm::cap::{Cap, CapTable};
 
 use crate::cap::KernelCap;
-use crate::types::{Capability, KResult, KernelError, State, VaultId};
+use crate::types::{KResult, KernelError, RegisteredCap, State, VaultId};
 
 /// Pre-built input to `javm::kernel::InvocationKernel::new_from_artifacts`,
 /// produced by walking `vault.slots`. Mirrors
@@ -127,7 +127,7 @@ pub fn build_init_cap_table(
 
 #[allow(clippy::too_many_arguments)]
 fn translate_persistent(
-    cap: &Capability,
+    cap: &RegisteredCap,
     cap_id: crate::types::CapId,
     code_caps: &mut Vec<Arc<javm::cap::CodeCap>>,
     mem_cycles: u8,
@@ -137,7 +137,7 @@ fn translate_persistent(
     backing: &mut javm::backing::BackingStore,
 ) -> KResult<Cap<KernelCap>> {
     match cap {
-        Capability::Code(c) => {
+        RegisteredCap::Code(c) => {
             if code_caps.len() >= javm::vm_pool::MAX_CODE_CAPS {
                 return Err(KernelError::Internal(format!(
                     "vault holds more than {} CodeCap entries",
@@ -151,7 +151,7 @@ fn translate_persistent(
             code_caps.push(Arc::clone(&code_cap));
             Ok(Cap::Code(code_cap))
         }
-        Capability::Data(d) => {
+        RegisteredCap::Data(d) => {
             let data_cap =
                 javm::kernel::allocate_data_cap(&d.content, d.page_count, untyped, backing)
                     .map_err(|e| KernelError::Internal(format!("allocate_data_cap: {:?}", e)))?;
@@ -160,23 +160,23 @@ fn translate_persistent(
         }
         // EventEndpointCaps are placed in σ.transact_endpoints /
         // dispatch_endpoints, never in vault.slots. Reject if found here.
-        Capability::EventEndpoint(_) => Err(KernelError::Internal(
+        RegisteredCap::EventEndpoint(_) => Err(KernelError::Internal(
             "EventEndpointCap found in vault.slots; should live in σ endpoint lists".into(),
         )),
         // Ephemeral-only variants must never persist. Finding one here
         // is a kernel bug.
-        Capability::SelfId(_)
-        | Capability::CallerVault(_)
-        | Capability::CallerKernel(_)
-        | Capability::AttestationScope(_) => Err(KernelError::Internal(format!(
+        RegisteredCap::SelfId(_)
+        | RegisteredCap::CallerVault(_)
+        | RegisteredCap::CallerKernel(_)
+        | RegisteredCap::AttestationScope(_) => Err(KernelError::Internal(format!(
             "ephemeral-only cap {:?} found persistently in vault.slots",
             std::mem::discriminant(cap)
         ))),
         // All other Registered shapes round-trip unchanged.
-        Capability::VaultRef(_)
-        | Capability::Resource(_)
-        | Capability::Attestation(_)
-        | Capability::AttestationAggregate(_) => Ok(Cap::Protocol(KernelCap::Registered {
+        RegisteredCap::VaultRef(_)
+        | RegisteredCap::Resource(_)
+        | RegisteredCap::Attestation(_)
+        | RegisteredCap::AttestationAggregate(_) => Ok(Cap::Protocol(KernelCap::Registered {
             id: cap_id,
             cap: cap.clone(),
         })),
@@ -204,7 +204,7 @@ mod tests {
     /// in these tests.
     const TEST_MEM_PAGES: u32 = 16;
 
-    fn place(state: &mut State, vault_id: VaultId, slot: u8, cap: Capability) {
+    fn place(state: &mut State, vault_id: VaultId, slot: u8, cap: RegisteredCap) {
         let cap_id = cap_registry::alloc(
             state,
             CapRecord {
@@ -244,7 +244,7 @@ mod tests {
             &mut state,
             vault_id,
             64,
-            Capability::Code(CodeCap {
+            RegisteredCap::Code(CodeCap {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
         );
@@ -270,7 +270,7 @@ mod tests {
             &mut state,
             vault_id,
             64,
-            Capability::Code(CodeCap {
+            RegisteredCap::Code(CodeCap {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
         );
@@ -278,7 +278,7 @@ mod tests {
             &mut state,
             vault_id,
             100,
-            Capability::VaultRef(VaultRefCap {
+            RegisteredCap::VaultRef(VaultRefCap {
                 vault_id: VaultId(99),
                 rights: VaultRights::ALL,
             }),
@@ -294,7 +294,7 @@ mod tests {
         .unwrap();
         match artifacts.cap_table.get(100) {
             Some(Cap::Protocol(KernelCap::Registered {
-                cap: Capability::VaultRef(vr),
+                cap: RegisteredCap::VaultRef(vr),
                 ..
             })) => {
                 assert_eq!(vr.vault_id, VaultId(99));
@@ -310,7 +310,7 @@ mod tests {
             &mut state,
             vault_id,
             64,
-            Capability::Code(CodeCap {
+            RegisteredCap::Code(CodeCap {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
         );
@@ -318,7 +318,7 @@ mod tests {
             &mut state,
             vault_id,
             65,
-            Capability::Data(DataCap {
+            RegisteredCap::Data(DataCap {
                 content: Arc::new(b"hello".to_vec()),
                 page_count: 1,
             }),
@@ -365,7 +365,7 @@ mod tests {
             &mut state,
             vault_id,
             64,
-            Capability::VaultRef(VaultRefCap {
+            RegisteredCap::VaultRef(VaultRefCap {
                 vault_id: VaultId(99),
                 rights: VaultRights::ALL,
             }),
@@ -389,7 +389,7 @@ mod tests {
             &mut state,
             vault_id,
             64,
-            Capability::Code(CodeCap {
+            RegisteredCap::Code(CodeCap {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
         );
@@ -401,7 +401,7 @@ mod tests {
             &mut state,
             vault_id,
             100,
-            Capability::EventEndpoint(EventEndpointCap {
+            RegisteredCap::EventEndpoint(EventEndpointCap {
                 vault_id: VaultId(0),
                 gas_budget: 0,
                 memory_budget: 0,
@@ -431,7 +431,7 @@ mod tests {
             &mut state,
             vault_id,
             0,
-            Capability::Code(CodeCap {
+            RegisteredCap::Code(CodeCap {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
         );

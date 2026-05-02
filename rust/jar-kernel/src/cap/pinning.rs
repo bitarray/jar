@@ -8,14 +8,14 @@
 //! structural pinning. The remaining stub keeps `cap_registry::derive`'s
 //! signature; future cleanups may inline the no-op away.
 
-use crate::cap::Capability;
+use crate::cap::RegisteredCap;
 use crate::types::{CapId, KResult, State};
 
 /// Vestigial — always Ok in the new design.
 pub fn check_derive(
     _state: &State,
     _source: CapId,
-    _new_cap: &Capability,
+    _new_cap: &RegisteredCap,
     _dest_persistent: bool,
 ) -> KResult<()> {
     Ok(())
