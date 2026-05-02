@@ -33,6 +33,7 @@ pub mod crypto;
 pub mod dispatch;
 pub mod genesis;
 pub mod kernel;
+pub mod pool;
 pub mod proposer;
 pub mod reach;
 pub mod runtime;

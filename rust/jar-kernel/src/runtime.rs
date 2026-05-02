@@ -100,14 +100,24 @@ pub trait Hardware: Send + Sync {
 // NodeOffchain — per-node state outside σ
 // -----------------------------------------------------------------------------
 
-/// Per-node off-chain state, **not** in σ. Owned by `Kernel<H>`. Pool
-/// state per (endpoint, cycle) is rebuilt at block boundaries; deferred
-/// entries (collision-defer rule) carry over to the next cycle's pool.
-/// Concrete pool implementation lands in Stage C/D.
+/// Per-node off-chain state, **not** in σ. Owned by `Kernel<H>`.
+///
+/// The pool is the per-cycle (== per-block-window) max-register +
+/// AttestationAuthority seen-set tracker driven by `setScore` and
+/// `emit_event` host calls. Cycle boundaries align with block
+/// boundaries: at the end of each `Kernel::advance`, the kernel calls
+/// `pool.roll_cycle()` — winners flow to the proposer for next-block
+/// body assembly, and deferred entries (collision-defer) lift into the
+/// next cycle's fresh pool. Authorities reset to empty.
+///
+/// See [`crate::pool::CyclePool`] for semantics.
 pub struct NodeOffchain {
     pub subscriptions: BTreeSet<VaultId>,
     /// javm code-cache; reused across handle_inbound arrivals.
     pub code_cache: javm::CodeCache,
+    /// Per-cycle pool (setScore max-register + collision-defer +
+    /// AttestationAuthority seen-set per dispatch endpoint).
+    pub pool: crate::pool::CyclePool,
 }
 
 impl Default for NodeOffchain {
@@ -121,6 +131,7 @@ impl NodeOffchain {
         Self {
             subscriptions: BTreeSet::new(),
             code_cache: javm::CodeCache::new(),
+            pool: crate::pool::CyclePool::default(),
         }
     }
 }

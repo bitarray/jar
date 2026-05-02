@@ -39,7 +39,7 @@ use crate::types::{
 use crate::apply_block::{ApplyBlockOutcome, BlockOutcome, apply_block};
 use crate::crypto;
 use crate::dispatch::handle_inbound_dispatch;
-use crate::proposer::drain_for_body;
+use crate::proposer::assemble_body;
 use crate::runtime::{Hardware, NodeOffchain};
 use crate::state::cap_registry;
 use crate::state::state_root;
@@ -140,9 +140,15 @@ impl<H: Hardware> Kernel<H> {
     /// hardware to commit the new state. Emits a `Score` command (placeholder
     /// score = 1) so hardware knows about the new block.
     pub fn advance(&mut self, block: Option<Block>) -> KResult<AdvanceOutcome> {
+        // Cycle boundary: drain the just-completed cycle's winners and
+        // lift collision-deferred entries into the next cycle's pool.
+        // Verifiers run roll_cycle for the same reason — to keep their
+        // local pool aligned even when the rolled winners are discarded.
+        let roll = self.dispatches.pool.roll_cycle();
+
         let block_in = match block {
             None => {
-                let body = drain_for_body(&self.dispatches, &self.last_state)?;
+                let body = assemble_body(&self.last_state, &roll)?;
                 Block {
                     parent: self.last_block_hash,
                     body,
