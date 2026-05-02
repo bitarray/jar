@@ -11,9 +11,9 @@
 
 use std::sync::Arc;
 
-use javm::cap::{Cap as JavmCap, ForeignCnode};
+use javm::cap::ForeignCnode;
 
-use jar_kernel::cap::Cap;
+use jar_kernel::cap::{Cap, ProtocolCap};
 use jar_kernel::state::cap_registry;
 use jar_kernel::vm::foreign_cnode::VaultCnodeView;
 use jar_kernel::{
@@ -53,11 +53,11 @@ fn fc_take_returns_registered_and_clears_slot() {
         .fc_take(vault_id, 7, VaultRights::ALL)
         .expect("fc_take should succeed with full rights");
     match cap {
-        JavmCap::Protocol(Cap::Registered { id, cap: c }) => {
+        Cap::Protocol(ProtocolCap::Registered { id, cap: c }) => {
             assert_eq!(id, cap_id);
             assert!(matches!(c, RegisteredCap::Data(_)));
         }
-        _ => panic!("expected JavmCap::Protocol(Cap::Registered{{..}})"),
+        _ => panic!("expected Cap::Protocol(ProtocolCap::Registered{{..}})"),
     }
     // Slot must now be empty.
     assert!(state.vaults.get(&vault_id).unwrap().slots.get(7).is_none());
@@ -82,7 +82,7 @@ fn fc_set_places_registered_into_empty_slot() {
         let _ = view.fc_take(vault_id, 7, VaultRights::ALL).unwrap();
     }
     // Place it back at slot 8.
-    let cap = JavmCap::Protocol(Cap::Registered {
+    let cap = Cap::Protocol(ProtocolCap::Registered {
         id: cap_id,
         cap: RegisteredCap::Data(DataCap {
             content: Arc::new(b"sample data".to_vec()),
@@ -106,7 +106,7 @@ fn fc_set_rejects_non_registered() {
     // Frame-only caps (kernel-injected per-frame, no σ identity) cannot
     // be placed into a Vault slot. SelfId is the cleanest example:
     // it has no CapId and no σ presence, so fc_set must reject it.
-    let ephemeral = JavmCap::Protocol(Cap::SelfId(jar_kernel::cap::SelfCap {
+    let ephemeral = Cap::Protocol(ProtocolCap::SelfId(jar_kernel::cap::SelfCap {
         vault_id: VaultId(0),
     }));
     let result = view.fc_set(vault_id, 0, VaultRights::ALL, ephemeral);
@@ -129,7 +129,7 @@ fn fc_set_requires_grant_right() {
             narrowing: vec![],
         },
     );
-    let cap = JavmCap::Protocol(Cap::Registered {
+    let cap = Cap::Protocol(ProtocolCap::Registered {
         id: cap_id,
         cap: RegisteredCap::Data(DataCap {
             content: Arc::new(b"sample data".to_vec()),
@@ -159,7 +159,7 @@ fn fc_set_rejects_event_endpoint_cap() {
             narrowing: vec![],
         },
     );
-    let cap = JavmCap::Protocol(Cap::Registered {
+    let cap = Cap::Protocol(ProtocolCap::Registered {
         id: cap_id,
         cap: RegisteredCap::EventEndpoint(EventEndpointCap {
             vault_id,
@@ -186,7 +186,7 @@ fn fc_clone_allocates_child_capid() {
     let post_count = state.cap_registry.len();
     assert_eq!(post_count, pre_count + 1, "fc_clone must allocate a child");
     let (child_id, kind) = match cap {
-        JavmCap::Protocol(Cap::Registered { id, cap }) => (id, cap),
+        Cap::Protocol(ProtocolCap::Registered { id, cap }) => (id, cap),
         _ => panic!("expected Registered cap"),
     };
     assert_ne!(child_id, parent_id);
@@ -259,8 +259,8 @@ fn fc_is_empty_reports_slot_state() {
 
 #[test]
 fn vault_ref_with_read_announces_foreign_frame() {
-    use javm::cap::ProtocolCap;
-    let cap = Cap::HomeVaultRef(VaultRefCap {
+    use javm::cap::ProtocolCap as _;
+    let cap = ProtocolCap::HomeVaultRef(VaultRefCap {
         vault_id: VaultId(42),
         rights: VaultRights::ALL,
     });
@@ -271,8 +271,8 @@ fn vault_ref_with_read_announces_foreign_frame() {
 
 #[test]
 fn vault_ref_without_read_does_not_announce_foreign_frame() {
-    use javm::cap::ProtocolCap;
-    let cap = Cap::HomeVaultRef(VaultRefCap {
+    use javm::cap::ProtocolCap as _;
+    let cap = ProtocolCap::HomeVaultRef(VaultRefCap {
         vault_id: VaultId(42),
         rights: VaultRights::INITIALIZE, // no `read`
     });
@@ -325,7 +325,7 @@ fn data_cap_round_trips_via_vault_slot() {
         .fc_take(vault_id, 5, VaultRights::ALL)
         .expect("fc_take");
     let (returned_id, returned_cap) = match cap {
-        JavmCap::Protocol(Cap::Registered { id, cap }) => (id, cap),
+        Cap::Protocol(ProtocolCap::Registered { id, cap }) => (id, cap),
         _ => panic!("expected Registered cap"),
     };
     assert_eq!(returned_id, cap_id);
@@ -344,7 +344,7 @@ fn data_cap_round_trips_via_vault_slot() {
         vault_id,
         9,
         VaultRights::ALL,
-        JavmCap::Protocol(Cap::Registered {
+        Cap::Protocol(ProtocolCap::Registered {
             id: returned_id,
             cap: returned_cap,
         }),
@@ -369,7 +369,7 @@ fn data_cap_clones_share_arc_content() {
         .fc_clone(vault_id, 3, VaultRights::ALL)
         .expect("fc_clone");
     let (parent_arc, child_arc) = match cap {
-        JavmCap::Protocol(Cap::Registered {
+        Cap::Protocol(ProtocolCap::Registered {
             cap: RegisteredCap::Data(d),
             ..
         }) => {

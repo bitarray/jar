@@ -1,7 +1,7 @@
 //! Host adapter that lets javm's resolve walk address jar-kernel's
 //! σ-resident Vault CNodes as a third frame kind.
 //!
-//! When a cap-ref crossing lands on a `JavmCap::Protocol(Cap)` whose
+//! When a cap-ref crossing lands on a `Cap::Protocol(Cap)` whose
 //! `as_foreign_frame()` returns `Some(VaultId)`, javm packages that as
 //! `FrameId::Foreign(VaultId)` and routes subsequent slot operations
 //! (`fc_take` / `fc_set` / `fc_clone` / `fc_drop` / `fc_is_empty`)
@@ -10,20 +10,20 @@
 //! Each method maps to existing σ helpers:
 //!
 //! - `fc_take` reads the `CapId` at `vault.slots[slot]`, looks up the
-//!   `CapRecord`, returns the cap as `Cap::Registered { id, cap }`,
+//!   `CapRecord`, returns the cap as `ProtocolCap::Registered { id, cap }`,
 //!   and clears the slot. Bookkeeping: no `cap_holders` update because
 //!   `Vault.slots` is currently NOT mirrored in `state.cnodes` — caps
 //!   in Vault slots are tracked by VaultId, not CNodeId. (See the
 //!   note in `state/cnode.rs` — this is a pre-existing layout choice.)
 //!
-//! - `fc_set` accepts only `Cap::Registered { id, cap }` (caps
+//! - `fc_set` accepts only `ProtocolCap::Registered { id, cap }` (caps
 //!   without persistent identity cannot live in σ). It runs the
 //!   pinning rule (`pinning::check_grant_or_move`) and the
 //!   final-step VaultRights gate, then writes `id` into the slot.
 //!
 //! - `fc_clone` looks up the source CapId, calls
 //!   `cap_registry::derive` to allocate a child record, and returns
-//!   the child wrapped as `Cap::Registered`. Used by
+//!   the child wrapped as `ProtocolCap::Registered`. Used by
 //!   `MGMT_COPY` Vault → anywhere.
 //!
 //! - `fc_drop` invokes `cap_registry::revoke_cascade`, which removes
@@ -34,13 +34,13 @@
 
 use std::sync::Arc;
 
-use javm::cap::{Cap as JavmCap, ForeignCnode};
+use javm::cap::ForeignCnode;
 
-use crate::cap::{Cap, RegisteredCap, VaultRights};
+use crate::cap::{Cap, ProtocolCap, RegisteredCap, VaultRights};
 use crate::state::cap_registry;
 use crate::types::{State, VaultId};
 
-/// Adapter implementing [`ForeignCnode<Cap>`] over `&mut State`.
+/// Adapter implementing [`ForeignCnode<ProtocolCap>`] over `&mut State`.
 /// Rebuilt cheaply each iteration of `drive_invocation`'s run loop
 /// because it just wraps a borrow.
 pub struct VaultCnodeView<'a> {
@@ -69,8 +69,8 @@ fn slot_set(state: &mut State, vault: VaultId, slot: u8, value: Option<crate::ty
     state.vaults.insert(vault, Arc::new(v));
 }
 
-impl ForeignCnode<Cap> for VaultCnodeView<'_> {
-    fn fc_take(&mut self, vault: VaultId, slot: u8, rights: VaultRights) -> Option<JavmCap<Cap>> {
+impl ForeignCnode<ProtocolCap> for VaultCnodeView<'_> {
+    fn fc_take(&mut self, vault: VaultId, slot: u8, rights: VaultRights) -> Option<Cap> {
         if !rights.revoke {
             return None;
         }
@@ -79,7 +79,7 @@ impl ForeignCnode<Cap> for VaultCnodeView<'_> {
         // Clear the slot. (Vault.slots is not mirrored in state.cnodes,
         // so no cap_holders update needed today.)
         slot_set(self.state, vault, slot, None);
-        Some(JavmCap::Protocol(Cap::Registered {
+        Some(Cap::Protocol(ProtocolCap::Registered {
             id: cap_id,
             cap: record.cap,
         }))
@@ -90,8 +90,8 @@ impl ForeignCnode<Cap> for VaultCnodeView<'_> {
         vault: VaultId,
         slot: u8,
         rights: VaultRights,
-        cap: JavmCap<Cap>,
-    ) -> Result<(), JavmCap<Cap>> {
+        cap: Cap,
+    ) -> Result<(), Cap> {
         if !rights.grant {
             return Err(cap);
         }
@@ -103,7 +103,7 @@ impl ForeignCnode<Cap> for VaultCnodeView<'_> {
         // Only Registered caps can persist (Ephemeral / HostCall have no
         // CapId / no σ presence).
         let (id, capability) = match cap {
-            JavmCap::Protocol(Cap::Registered { id, ref cap }) => (id, cap.clone()),
+            Cap::Protocol(ProtocolCap::Registered { id, ref cap }) => (id, cap.clone()),
             _ => return Err(cap),
         };
         // Pinning: Vault.slots are not σ-rooted CNodes, but Dispatch /
@@ -116,7 +116,7 @@ impl ForeignCnode<Cap> for VaultCnodeView<'_> {
         Ok(())
     }
 
-    fn fc_clone(&mut self, vault: VaultId, slot: u8, rights: VaultRights) -> Option<JavmCap<Cap>> {
+    fn fc_clone(&mut self, vault: VaultId, slot: u8, rights: VaultRights) -> Option<Cap> {
         if !rights.derive {
             return None;
         }
@@ -131,7 +131,7 @@ impl ForeignCnode<Cap> for VaultCnodeView<'_> {
         let child_cap = record.cap.clone();
         let child_id =
             cap_registry::derive(self.state, cap_id, child_cap.clone(), Vec::new(), false).ok()?;
-        Some(JavmCap::Protocol(Cap::Registered {
+        Some(Cap::Protocol(ProtocolCap::Registered {
             id: child_id,
             cap: child_cap,
         }))

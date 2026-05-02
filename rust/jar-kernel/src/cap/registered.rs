@@ -193,7 +193,7 @@ pub fn is_identity_key(key: &KeyId) -> bool {
 /// in `σ.cap_registry` (a CapId); references from `vault.slots` resolve
 /// here via lookup. When a registered cap is projected into a Frame
 /// during invocation init, it becomes
-/// `Cap::Registered { id, cap: RegisteredCap }`.
+/// `ProtocolCap::Registered { id, cap: RegisteredCap }`.
 ///
 /// Frame-only kinds (SelfId, Caller*, AttestationScope, the home
 /// VaultRef projection) are NOT in `RegisteredCap`; they live as
