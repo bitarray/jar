@@ -1,10 +1,9 @@
-//! Capabilities — the `RegCap` enum (σ-resident shapes), the
-//! `ProtocolCap` enum (jar-kernel's impl of `javm::ProtocolCap`), and
-//! the `Cap` alias (the complete Frame cap type
-//! `javm::Cap<ProtocolCap>` — what's actually in a cap-table cell).
+//! Capabilities — the `VaultCap` enum (cap shapes occupying
+//! `vault.slots`), the `ProtocolCap` enum (jar-kernel's impl of
+//! `javm::ProtocolCap`), and the `Cap` alias (the complete Frame cap
+//! type `javm::Cap<ProtocolCap>` — what's actually in a cap-table cell).
 
 pub mod attest;
-pub mod pinning;
 pub mod protocol;
 pub mod regcap;
 

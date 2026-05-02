@@ -1,41 +1,25 @@
-//! Fault-safety in the post-StateSnapshot model.
+//! Fault-safety in the value-cap model.
 //!
-//! With reads-are-COPY persistent caps and no automatic σ rollback,
-//! fault safety is a property of the cap surface: a manager that hasn't
-//! committed via MGMT_MOVE Frame → Vault leaves the Vault unchanged
-//! when its Frame faults. This test exercises the property at the
-//! adapter level — fc_clone (Vault → Frame) leaves the source slot
-//! intact, and a "discarded ephemeral cap" results in no change to σ.
-//!
-//! Resource caps are used for these checks because, in the post-
-//! RegCap-narrowing model, they're the canonical registered cap that
-//! round-trips through Frame as `ProtocolCap::Resource`.
+//! Vault.slots holds caps inline; granting a copy via fc_clone produces
+//! an independent value. A manager that fc_clones a cap into a Frame
+//! and then faults leaves the source slot intact — the clone is just
+//! discarded.
 
 use std::sync::Arc;
 
 use javm::cap::ForeignCnode;
 
 use jar_kernel::cap::Cap;
-use jar_kernel::state::cap_registry;
 use jar_kernel::vm::foreign_cnode::VaultCnodeView;
-use jar_kernel::{
-    CapRecord, RegCap, ResourceCap, ResourceKind, SlotEntry, State, Vault, VaultRights,
-};
+use jar_kernel::{ResourceCap, ResourceKind, State, Vault, VaultCap, VaultId, VaultRights};
 
-fn place_resource(state: &mut State, vault: jar_kernel::VaultId, slot: u8) -> jar_kernel::CapId {
-    let cap_id = cap_registry::alloc(
-        state,
-        CapRecord {
-            cap: RegCap::Resource(ResourceCap(ResourceKind::CreateVault { quota_pages: 16 })),
-            issuer: None,
-            narrowing: vec![],
-        },
-    );
+fn place_resource(state: &mut State, vault: VaultId, slot: u8) -> ResourceCap {
+    let r = ResourceCap(ResourceKind::CreateVault { quota_pages: 16 });
     let arc = state.vaults.get(&vault).unwrap().clone();
     let mut v: Vault = (*arc).clone();
-    v.slots.set(slot, Some(SlotEntry::Cap(cap_id)));
+    v.slots.set(slot, Some(VaultCap::Resource(r.clone())));
     state.vaults.insert(vault, Arc::new(v));
-    cap_id
+    r
 }
 
 #[test]
@@ -43,36 +27,27 @@ fn fc_clone_leaves_source_intact_so_drop_is_safe() {
     let mut state = State::empty();
     let vault_id = state.next_vault_id();
     state.vaults.insert(vault_id, Arc::new(Vault::new()));
-    let parent_id = place_resource(&mut state, vault_id, 7);
+    let r = place_resource(&mut state, vault_id, 7);
 
-    // Manager-style "read" via fc_clone. The original remains.
     let _ephemeral = {
         let mut view = VaultCnodeView::new(&mut state);
         view.fc_clone(vault_id, 7, VaultRights::ALL)
             .expect("fc_clone")
     };
-
-    // Simulate fault: manager-Frame discarded.
     drop(_ephemeral);
 
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(7),
-        Some(&SlotEntry::Cap(parent_id))
+        Some(&VaultCap::Resource(r))
     );
-    assert!(matches!(
-        state.cap_registry.get(&parent_id).unwrap().cap,
-        RegCap::Resource(_)
-    ));
 }
 
 #[test]
 fn manager_pattern_no_commit_no_change() {
-    // Pure read, no MOVE-back: the Vault is unchanged. Baseline
-    // atomicity guarantee.
     let mut state = State::empty();
     let vault_id = state.next_vault_id();
     state.vaults.insert(vault_id, Arc::new(Vault::new()));
-    let cap_id = place_resource(&mut state, vault_id, 0);
+    let r = place_resource(&mut state, vault_id, 0);
 
     let _ = {
         let mut view = VaultCnodeView::new(&mut state);
@@ -80,25 +55,22 @@ fn manager_pattern_no_commit_no_change() {
     };
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(0),
-        Some(&SlotEntry::Cap(cap_id))
+        Some(&VaultCap::Resource(r))
     );
 }
 
 #[test]
 fn fc_take_then_no_replace_leaves_slot_empty() {
-    // If a manager takes a cap out of a Vault and faults before
-    // moving it back, the Vault slot is left empty. By design;
-    // managers wanting fault safety use COPY (fc_clone) for reads.
+    // Manager takes a cap and faults before moving it back: slot empty.
+    // For fault safety, managers use COPY (fc_clone) for reads.
     let mut state = State::empty();
     let vault_id = state.next_vault_id();
     state.vaults.insert(vault_id, Arc::new(Vault::new()));
-    let cap_id = place_resource(&mut state, vault_id, 0);
+    let _ = place_resource(&mut state, vault_id, 0);
 
     let _taken: Cap = {
         let mut view = VaultCnodeView::new(&mut state);
         view.fc_take(vault_id, 0, VaultRights::ALL).unwrap()
     };
-    // Slot is now empty. Cap is still in registry (held by `_taken`).
     assert!(state.vaults.get(&vault_id).unwrap().slots.get(0).is_none());
-    assert!(state.cap_registry.contains_key(&cap_id));
 }

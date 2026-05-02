@@ -20,7 +20,7 @@ pub use trace::*;
 // State + Vault + IdCounters live in `crate::state`.
 pub use crate::state::{IdCounters, State, Vault};
 
-// RegCap variants + helper types live in `crate::cap`.
+// VaultCap variants + helper types live in `crate::cap`.
 pub use crate::cap::regcap::*;
 
 /// 32-byte hash. Used for state roots, blob hashes, and code hashes. The
@@ -56,10 +56,6 @@ pub type BlockHash = Hash;
 /// Globally unique vault identifier (allocated monotonically by the kernel).
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 pub struct VaultId(pub u64);
-
-/// Globally unique capability-id (allocated monotonically by the kernel).
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
-pub struct CapId(pub u64);
 
 /// Identifier of a signing key. Variable-width bytes — Ed25519 pubkeys are
 /// 32 bytes, BLS pubkeys are 48; the kernel stores the bytes opaquely and
@@ -112,8 +108,6 @@ impl AsRef<[u8]> for Signature {
 /// Top-level kernel error type. Concrete cases are generated as the kernel grows.
 #[derive(thiserror::Error, Clone, Debug, Eq, PartialEq)]
 pub enum KernelError {
-    #[error("capability lookup miss for {0:?}")]
-    CapNotFound(CapId),
     #[error("vault not found: {0:?}")]
     VaultNotFound(VaultId),
     #[error("pinning violation: {0}")]

@@ -6,13 +6,13 @@
 //! slot. There is no generic "registered" wrapper: the type system
 //! enumerates exactly what is valid as a Frame cap.
 //!
-//! | What                                          | Where                                  |
-//! |-----------------------------------------------|----------------------------------------|
-//! | `Cap::Code(_)` / `Cap::Data(_)`               | first-class javm arms                  |
-//! | `Cap::Protocol(ProtocolCap::VaultRef(_))`     | inline value, no σ identity            |
-//! | `Cap::Protocol(ProtocolCap::Resource{id,…})`  | σ-registered, CapId preserves identity |
-//! | `Cap::Protocol(ProtocolCap::HostCall(_))`     | host-call selector                     |
-//! | `Cap::Protocol(ProtocolCap::SelfId(…))` etc.  | Frame-only kernel-injected markers     |
+//! | What                                          | Where                              |
+//! |-----------------------------------------------|------------------------------------|
+//! | `Cap::Code(_)` / `Cap::Data(_)`               | first-class javm arms              |
+//! | `Cap::Protocol(ProtocolCap::VaultRef(_))`     | value cap from `vault.slots`       |
+//! | `Cap::Protocol(ProtocolCap::Resource(_))`     | value cap from `vault.slots`       |
+//! | `Cap::Protocol(ProtocolCap::HostCall(_))`     | host-call selector                 |
+//! | `Cap::Protocol(ProtocolCap::SelfId(…))` etc.  | Frame-only kernel-injected markers |
 //!
 //! Code / Data / EventEndpoint deliberately have no `ProtocolCap`
 //! variant: Code/Data project to first-class `Cap::Code` / `Cap::Data`
@@ -24,7 +24,7 @@ use crate::cap::{
     AttestationAggregateCap, AttestationCap, AttestationScopeCap, CallerKernelCap, CallerVaultCap,
     ResourceCap, SelfCap, VaultRefCap, VaultRights,
 };
-use crate::types::{CapId, VaultId};
+use crate::types::VaultId;
 use javm::cap::ProtocolCap as ProtocolCapT;
 
 /// Cap-table slot reserved for the kernel-cap payload at frame init
@@ -41,15 +41,14 @@ pub enum ProtocolCap {
     HostCall(u8),
 
     /// A VaultRef. Inline value (no `CapId`). Same shape whether the
-    /// cap originated from a `vault.slots[…]` `SlotEntry::VaultRef` or
+    /// cap originated from a `vault.slots[…]` `SlotEntry_DELETED` or
     /// was kernel-injected (home VaultRef at MainFrame slot 1, sub-CALL
     /// caller hookup, etc.). Identity is `(vault_id, rights)`.
     VaultRef(VaultRefCap),
 
-    /// A registered Resource cap. Identity is `id: CapId` —
-    /// `cap_registry` holds the canonical record; the runtime carries
-    /// the value alongside so reads don't have to bounce through `σ`.
-    Resource { id: CapId, cap: ResourceCap },
+    /// A Resource cap projected from `vault.slots`. Pure value — no
+    /// CapId since Resource caps no longer go through cap_registry.
+    Resource(ResourceCap),
 
     // ---- Frame-only kernel-injected kinds ----
     //
@@ -69,16 +68,6 @@ pub enum ProtocolCap {
     Attestation(AttestationCap),
     /// Aggregate signature handle (BLS / threshold). Stubbed.
     AttestationAggregate(AttestationAggregateCap),
-}
-
-impl ProtocolCap {
-    /// CapId, if this cap is registered in σ. Today only `Resource`.
-    pub fn cap_id(&self) -> Option<CapId> {
-        match self {
-            ProtocolCap::Resource { id, .. } => Some(*id),
-            _ => None,
-        }
-    }
 }
 
 impl ProtocolCapT for ProtocolCap {

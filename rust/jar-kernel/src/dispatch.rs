@@ -1,8 +1,8 @@
 //! Off-chain dispatch processing for the event-redesign.
 //!
-//! Dispatch endpoints live in `σ.dispatch_endpoints` (flat `Vec<CapId>`).
-//! Off-chain events arriving at the node go through `Kernel::dispatch`,
-//! which routes them here.
+//! Dispatch endpoints live in `σ.dispatch_endpoints` (flat
+//! `Vec<EventEndpointCap>`, inline values). Off-chain events arriving
+//! at the node go through `Kernel::dispatch`, which routes them here.
 //!
 //! Per arriving event:
 //!
@@ -23,7 +23,6 @@
 //! index in `σ.dispatch_endpoints`. Mirrors apply_block's transact
 //! addressing.
 
-use crate::cap::RegCap;
 use crate::runtime::{Hardware, NodeOffchain};
 use crate::transact;
 use crate::types::{AttestationEntry, Command, KResult, KernelError, State, VaultId};
@@ -56,7 +55,7 @@ pub fn handle_inbound<H: Hardware>(
             target_path.len()
         ))
     })?;
-    let cap_id = state
+    let endpoint = state
         .dispatch_endpoints
         .get(slot_idx)
         .copied()
@@ -67,14 +66,6 @@ pub fn handle_inbound<H: Hardware>(
                 state.dispatch_endpoints.len()
             ))
         })?;
-    let endpoint = match state.cap_record(cap_id)?.cap.clone() {
-        RegCap::EventEndpoint(e) => e,
-        other => {
-            return Err(KernelError::Internal(format!(
-                "σ.dispatch_endpoints[{slot_idx}] is not EventEndpointCap: {other:?}"
-            )));
-        }
-    };
 
     // Verify: fresh, ro-σ. Faulting verify drops the event silently.
     let verify = transact::run_verify(state, &endpoint, &mut commands, hw)?;
@@ -104,11 +95,8 @@ pub fn handle_inbound_dispatch<H: Hardware>(
     _caps: Vec<u8>,
     hw: &H,
 ) -> KResult<Vec<Command>> {
-    for (slot_idx, cap_id) in state.dispatch_endpoints.iter().enumerate() {
-        let record = state.cap_record(*cap_id)?;
-        if let RegCap::EventEndpoint(e) = &record.cap
-            && e.vault_id == entrypoint
-        {
+    for (slot_idx, ep) in state.dispatch_endpoints.iter().enumerate() {
+        if ep.vault_id == entrypoint {
             let path = (slot_idx as u32).to_le_bytes().to_vec();
             return handle_inbound(state, node, &path, &payload, &[], hw);
         }

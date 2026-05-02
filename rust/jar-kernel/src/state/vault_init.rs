@@ -2,16 +2,16 @@
 //! persistent CNode slots.
 //!
 //! For every occupied slot in `vault.slots`, this module looks up the
-//! `CapRecord` and translates the persistent `RegCap` shape into
+//! `CapRecord` and translates the persistent `VaultCap` shape into
 //! the ephemeral `Cap` shape that lives in a running VM's
 //! Frame:
 //!
 //! | `vault.slots[N]`                                      | `cap_table[N]` |
 //! |-------------------------------------------------------|----------------|
 //! | empty                                                 | empty          |
-//! | `RegCap::Code(CodeCap{blob})`                     | `Cap::Code(...)` (compile blob) |
-//! | `RegCap::Data(DataCap{content, page_count})`      | `Cap::Data(...)` (fresh ephemeral pages, content-copied, **unmapped**) |
-//! | `RegCap::VaultRef(...)` / other Registered shapes | `Cap::Protocol(ProtocolCap::Registered { id, cap })` |
+//! | `VaultCap::Code(CodeCap{blob})`                     | `Cap::Code(...)` (compile blob) |
+//! | `VaultCap::Data(DataCap{content, page_count})`      | `Cap::Data(...)` (fresh ephemeral pages, content-copied, **unmapped**) |
+//! | `VaultCap::VaultRef(...)` / other Registered shapes | `Cap::Protocol(ProtocolCap::Registered { id, cap })` |
 //! | Pinned (Dispatch / Transact / Schedule + Refs)        | `KernelError::Pinning` (defense in depth — `fc_set` already rejects placement) |
 //! | Ephemeral-only (Gas / SelfId / Caller*)               | `KernelError::Internal` (kernel bug if such a cap lands here) |
 //!
@@ -31,7 +31,7 @@ use std::sync::Arc;
 use javm::cap::CapTable;
 
 use crate::cap::{Cap, ProtocolCap};
-use crate::types::{KResult, KernelError, RegCap, SlotEntry, State, VaultId};
+use crate::types::{KResult, KernelError, State, VaultCap, VaultId};
 
 /// Pre-built input to `javm::kernel::InvocationKernel::new_from_artifacts`,
 /// produced by walking `vault.slots`. Mirrors
@@ -82,13 +82,12 @@ pub fn build_init_cap_table(
     let mut code_caps: Vec<Arc<javm::cap::CodeCap>> = Vec::new();
 
     for slot in 0u8..=255 {
-        let entry = match vault.slots.get(slot) {
-            Some(e) => e,
+        let vc = match vault.slots.get(slot) {
+            Some(c) => c,
             None => continue,
         };
-        let cap = translate_slot_entry(
-            state,
-            entry,
+        let cap = translate_vault_cap(
+            vc,
             &mut code_caps,
             mem_cycles,
             backend,
@@ -125,9 +124,8 @@ pub fn build_init_cap_table(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn translate_slot_entry(
-    state: &State,
-    entry: &SlotEntry,
+fn translate_vault_cap(
+    cap: &VaultCap,
     code_caps: &mut Vec<Arc<javm::cap::CodeCap>>,
     mem_cycles: u8,
     backend: javm::PvmBackend,
@@ -135,57 +133,38 @@ fn translate_slot_entry(
     untyped: &mut javm::cap::UntypedCap,
     backing: &mut javm::backing::BackingStore,
 ) -> KResult<Cap> {
-    match entry {
-        // Inline VaultRef value — no σ identity. Project as-is.
-        SlotEntry::VaultRef(vr) => Ok(Cap::Protocol(ProtocolCap::VaultRef(*vr))),
-        // CapId reference — look up the cap_registry record.
-        SlotEntry::Cap(cap_id) => {
-            let record = state.cap_record(*cap_id)?;
-            match &record.cap {
-                RegCap::Code(c) => {
-                    if code_caps.len() >= javm::vm_pool::MAX_CODE_CAPS {
-                        return Err(KernelError::Internal(format!(
-                            "vault holds more than {} CodeCap entries",
-                            javm::vm_pool::MAX_CODE_CAPS
-                        )));
-                    }
-                    let id = code_caps.len() as u16;
-                    let code_cap = javm::kernel::compile_code_blob(
-                        &c.blob, id, mem_cycles, backend, code_cache,
-                    )
-                    .map_err(|e| KernelError::Internal(format!("compile_code_blob: {:?}", e)))?;
-                    code_caps.push(Arc::clone(&code_cap));
-                    Ok(Cap::Code(code_cap))
-                }
-                RegCap::Data(d) => {
-                    let data_cap =
-                        javm::kernel::allocate_data_cap(&d.content, d.page_count, untyped, backing)
-                            .map_err(|e| {
-                                KernelError::Internal(format!("allocate_data_cap: {:?}", e))
-                            })?;
-                    // Cap is unmapped on purpose — the init program calls MGMT_MAP.
-                    Ok(Cap::Data(data_cap))
-                }
-                RegCap::Resource(r) => Ok(Cap::Protocol(ProtocolCap::Resource {
-                    id: *cap_id,
-                    cap: r.clone(),
-                })),
-                // EventEndpointCaps are placed in σ.transact_endpoints /
-                // dispatch_endpoints, never in vault.slots.
-                RegCap::EventEndpoint(_) => Err(KernelError::Internal(
-                    "EventEndpointCap found in vault.slots; should live in σ endpoint lists".into(),
-                )),
+    match cap {
+        VaultCap::VaultRef(vr) => Ok(Cap::Protocol(ProtocolCap::VaultRef(*vr))),
+        VaultCap::Code(c) => {
+            if code_caps.len() >= javm::vm_pool::MAX_CODE_CAPS {
+                return Err(KernelError::Internal(format!(
+                    "vault holds more than {} CodeCap entries",
+                    javm::vm_pool::MAX_CODE_CAPS
+                )));
             }
+            let id = code_caps.len() as u16;
+            let code_cap =
+                javm::kernel::compile_code_blob(&c.blob, id, mem_cycles, backend, code_cache)
+                    .map_err(|e| KernelError::Internal(format!("compile_code_blob: {:?}", e)))?;
+            code_caps.push(Arc::clone(&code_cap));
+            Ok(Cap::Code(code_cap))
         }
+        VaultCap::Data(d) => {
+            let data_cap =
+                javm::kernel::allocate_data_cap(&d.content, d.page_count, untyped, backing)
+                    .map_err(|e| KernelError::Internal(format!("allocate_data_cap: {:?}", e)))?;
+            // Cap is unmapped on purpose — the init program calls MGMT_MAP.
+            Ok(Cap::Data(data_cap))
+        }
+        VaultCap::Resource(r) => Ok(Cap::Protocol(ProtocolCap::Resource(r.clone()))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cap::{CodeCap, DataCap, EventEndpointCap, VaultRefCap, VaultRights};
-    use crate::state::cap_registry;
-    use crate::types::{CapRecord, Vault};
+    use crate::cap::{CodeCap, DataCap, VaultRefCap, VaultRights};
+    use crate::types::Vault;
 
     fn empty_state_with_vault(init_cap: u8) -> (State, VaultId) {
         let mut state = State::empty();
@@ -201,26 +180,15 @@ mod tests {
     /// in these tests.
     const TEST_MEM_PAGES: u32 = 16;
 
-    fn place(state: &mut State, vault_id: VaultId, slot: u8, cap: RegCap) {
-        let cap_id = cap_registry::alloc(
-            state,
-            CapRecord {
-                cap,
-                issuer: None,
-                narrowing: vec![],
-            },
-        );
+    fn place(state: &mut State, vault_id: VaultId, slot: u8, cap: VaultCap) {
         let arc = state.vaults.get(&vault_id).unwrap().clone();
         let mut v: Vault = (*arc).clone();
-        v.slots.set(slot, Some(SlotEntry::Cap(cap_id)));
+        v.slots.set(slot, Some(cap));
         state.vaults.insert(vault_id, Arc::new(v));
     }
 
     fn place_vault_ref(state: &mut State, vault_id: VaultId, slot: u8, vr: VaultRefCap) {
-        let arc = state.vaults.get(&vault_id).unwrap().clone();
-        let mut v: Vault = (*arc).clone();
-        v.slots.set(slot, Some(SlotEntry::VaultRef(vr)));
-        state.vaults.insert(vault_id, Arc::new(v));
+        place(state, vault_id, slot, VaultCap::VaultRef(vr));
     }
 
     /// Extract the raw code sub-blob (jump_table + code + bitmask) from
@@ -248,7 +216,7 @@ mod tests {
             &mut state,
             vault_id,
             64,
-            RegCap::Code(CodeCap {
+            VaultCap::Code(CodeCap {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
         );
@@ -274,7 +242,7 @@ mod tests {
             &mut state,
             vault_id,
             64,
-            RegCap::Code(CodeCap {
+            VaultCap::Code(CodeCap {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
         );
@@ -314,7 +282,7 @@ mod tests {
             &mut state,
             vault_id,
             64,
-            RegCap::Code(CodeCap {
+            VaultCap::Code(CodeCap {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
         );
@@ -322,7 +290,7 @@ mod tests {
             &mut state,
             vault_id,
             65,
-            RegCap::Data(DataCap {
+            VaultCap::Data(DataCap {
                 content: Arc::new(b"hello".to_vec()),
                 page_count: 1,
             }),
@@ -387,43 +355,9 @@ mod tests {
         assert!(matches!(err, KernelError::Internal(_)));
     }
 
-    #[test]
-    fn endpoint_cap_in_slot_rejected() {
-        let (mut state, vault_id) = empty_state_with_vault(64);
-        place(
-            &mut state,
-            vault_id,
-            64,
-            RegCap::Code(CodeCap {
-                blob: Arc::new(halt_code_sub_blob()),
-            }),
-        );
-        // EventEndpointCaps belong in σ.transact_endpoints /
-        // σ.dispatch_endpoints, not vault.slots. Direct cap_registry
-        // placement bypasses fc_set's check; build_init_cap_table
-        // catches it as defense in depth.
-        place(
-            &mut state,
-            vault_id,
-            100,
-            RegCap::EventEndpoint(EventEndpointCap {
-                vault_id: VaultId(0),
-                gas_budget: 0,
-                memory_budget: 0,
-            }),
-        );
-
-        let err = build_init_cap_table(
-            &state,
-            vault_id,
-            TEST_MEM_PAGES,
-            None,
-            javm::PvmBackend::Default,
-        )
-        .err()
-        .expect("rejection expected");
-        assert!(matches!(err, KernelError::Internal(_)));
-    }
+    // EventEndpoint is no longer in VaultCap, so the "EventEndpoint in
+    // vault.slots" malformation is no longer expressible. The type
+    // system makes that defense-in-depth check unreachable.
 
     #[test]
     fn slot_zero_rejected() {
@@ -436,7 +370,7 @@ mod tests {
             &mut state,
             vault_id,
             0,
-            RegCap::Code(CodeCap {
+            VaultCap::Code(CodeCap {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
         );

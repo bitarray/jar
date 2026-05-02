@@ -33,7 +33,7 @@ use crate::runtime::Hardware;
 use crate::state::state_root;
 use crate::transact;
 use crate::types::{
-    AttestationEntry, Block, BlockHash, Command, Hash, KResult, MerkleProof, RegCap, State,
+    AttestationEntry, Block, BlockHash, Command, Hash, KResult, MerkleProof, State,
 };
 
 /// Outcome of apply_block.
@@ -126,20 +126,7 @@ pub fn apply_block<H: Hardware>(
     // Walk transact endpoints in slot order.
     let n = state.transact_endpoints.len();
     for slot_idx in 0..n {
-        let cap_id = state.transact_endpoints[slot_idx];
-        let endpoint = match state.cap_record(cap_id)?.cap.clone() {
-            RegCap::EventEndpoint(e) => e,
-            other => {
-                return Ok(panicked(
-                    state_in,
-                    block,
-                    format!(
-                        "σ.transact_endpoints[{slot_idx}] is not an EventEndpointCap: {other:?}"
-                    ),
-                    prior_state_root,
-                ));
-            }
-        };
+        let endpoint = state.transact_endpoints[slot_idx];
 
         let ev_indices = events_by_slot.remove(&slot_idx).unwrap_or_default();
         let has_schedule_traces = schedule_traces.remove(&slot_idx).is_some();

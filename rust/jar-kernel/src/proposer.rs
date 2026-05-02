@@ -16,13 +16,13 @@ use crate::pool::CycleRoll;
 use crate::types::{Body, BodyEvent, KResult, State};
 
 /// Assemble a `Body` from a rolled pool. Walks `σ.transact_endpoints`
-/// in slot order; for each endpoint cap-id with rolled winners, emits
-/// one `BodyEvent` per winner. `target_path` encodes the slot index as
+/// in slot order; for each endpoint with rolled winners, emits one
+/// `BodyEvent` per winner. `target_path` encodes the slot index as
 /// 4-byte little-endian u32 (matches `apply_block::resolve_target_path`).
 pub fn assemble_body(state: &State, roll: &CycleRoll) -> KResult<Body> {
     let mut events: Vec<BodyEvent> = Vec::new();
-    for (slot_idx, cap_id) in state.transact_endpoints.iter().enumerate() {
-        if let Some(entries) = roll.winners.get(cap_id) {
+    for slot_idx in 0..state.transact_endpoints.len() {
+        if let Some(entries) = roll.winners.get(&slot_idx) {
             let path = (slot_idx as u32).to_le_bytes().to_vec();
             for entry in entries {
                 events.push(BodyEvent {

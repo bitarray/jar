@@ -32,7 +32,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cap::AttestationEntry;
-use crate::types::{CapId, KeyId};
+use crate::types::KeyId;
+
+/// Endpoint index — slot position in `σ.transact_endpoints` or
+/// `σ.dispatch_endpoints`. Used as the per-endpoint pool key now that
+/// caps are inline (no CapId).
+pub type EndpointIdx = usize;
 
 /// One identifier-scoped entry in a per-endpoint pool. Carries the
 /// score the verify VM assigned, the blob it verified, and any
@@ -117,19 +122,19 @@ impl MintSeenSet {
     }
 }
 
-/// Aggregated per-cycle pool state. Indexed by endpoint `CapId`.
+/// Aggregated per-cycle pool state. Indexed by endpoint `EndpointIdx`.
 #[derive(Default, Clone, Debug)]
 pub struct CyclePool {
-    pub endpoints: BTreeMap<CapId, EndpointPool>,
-    pub mint_seen: BTreeMap<CapId, MintSeenSet>,
+    pub endpoints: BTreeMap<EndpointIdx, EndpointPool>,
+    pub mint_seen: BTreeMap<EndpointIdx, MintSeenSet>,
 }
 
 impl CyclePool {
-    pub fn entry(&mut self, endpoint: CapId) -> &mut EndpointPool {
+    pub fn entry(&mut self, endpoint: EndpointIdx) -> &mut EndpointPool {
         self.endpoints.entry(endpoint).or_default()
     }
 
-    pub fn mint_seen_set(&mut self, dispatch_endpoint: CapId) -> &mut MintSeenSet {
+    pub fn mint_seen_set(&mut self, dispatch_endpoint: EndpointIdx) -> &mut MintSeenSet {
         self.mint_seen.entry(dispatch_endpoint).or_default()
     }
 
@@ -138,7 +143,7 @@ impl CyclePool {
     /// becomes the next cycle's starting state. Mint seen-sets reset to
     /// empty.
     pub fn roll_cycle(&mut self) -> CycleRoll {
-        let mut winners: BTreeMap<CapId, Vec<PoolEntry>> = BTreeMap::new();
+        let mut winners: BTreeMap<EndpointIdx, Vec<PoolEntry>> = BTreeMap::new();
         let mut next = CyclePool::default();
         for (endpoint, mut pool) in std::mem::take(&mut self.endpoints) {
             let w = pool.drain_winners();
@@ -162,7 +167,7 @@ impl CyclePool {
 /// to assemble into the next block's body.
 #[derive(Default, Clone, Debug)]
 pub struct CycleRoll {
-    pub winners: BTreeMap<CapId, Vec<PoolEntry>>,
+    pub winners: BTreeMap<EndpointIdx, Vec<PoolEntry>>,
 }
 
 #[cfg(test)]
@@ -206,7 +211,7 @@ mod tests {
     #[test]
     fn roll_cycle_lifts_deferred_into_next() {
         let mut pool = CyclePool::default();
-        let cap = CapId(7);
+        let cap: EndpointIdx = 7;
         pool.entry(cap).insert(entry(b"id", 10, b"v1"));
         pool.entry(cap).insert(entry(b"id", 20, b"v2"));
 

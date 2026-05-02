@@ -1,7 +1,7 @@
 //! Smoke-fixture JAR blob used by genesis.
 //!
 //! After the CNode-driven `Vault.initialize` refactor, code blobs live
-//! as `RegCap::Code(CodeCap)` entries inside Vault CNodes — one
+//! as `VaultCap::Code(CodeCap)` entries inside Vault CNodes — one
 //! Vault holds its own code as a persistent CodeCap whose `blob` field
 //! is the **raw code sub-blob** (jump_table + code + bitmask) extracted
 //! from the source JAR blob at Vault-creation time. There is no

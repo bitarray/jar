@@ -4,7 +4,7 @@
 //! Sufficient for "the chain's `Schedule(block_final)` claims this root and
 //! checks it" semantics. Real Merkle-trie commitment is a follow-up.
 
-use crate::types::{Hash, State};
+use crate::types::{Hash, State, VaultCap, VaultRights};
 
 use crate::crypto;
 
@@ -15,62 +15,72 @@ pub fn state_root(state: &State) -> Hash {
     let mut buf = Vec::with_capacity(4096);
 
     push_u64(&mut buf, state.id_counters.next_vault_id);
-    push_u64(&mut buf, state.id_counters.next_cap_id);
 
     push_u64(&mut buf, state.transact_endpoints.len() as u64);
-    for cap in &state.transact_endpoints {
-        push_u64(&mut buf, cap.0);
+    for ep in &state.transact_endpoints {
+        encode_endpoint(&mut buf, ep);
     }
     push_u64(&mut buf, state.dispatch_endpoints.len() as u64);
-    for cap in &state.dispatch_endpoints {
-        push_u64(&mut buf, cap.0);
+    for ep in &state.dispatch_endpoints {
+        encode_endpoint(&mut buf, ep);
     }
 
     push_u64(&mut buf, state.vaults.len() as u64);
     for (vid, vault) in &state.vaults {
         push_u64(&mut buf, vid.0);
         buf.push(vault.init_cap);
-        // quota_pages / total_pages removed — memory budget is per-event.
         for (i, slot) in vault.slots.slots.iter().enumerate() {
             buf.push(i as u8);
             match slot {
-                None => {
-                    buf.push(0); // empty
-                }
-                Some(crate::types::SlotEntry::Cap(cid)) => {
-                    buf.push(1); // CapId reference
-                    push_u64(&mut buf, cid.0);
-                }
-                Some(crate::types::SlotEntry::VaultRef(vr)) => {
-                    buf.push(2); // inline VaultRef
-                    push_u64(&mut buf, vr.vault_id.0);
-                    buf.push(vault_rights_byte(&vr.rights));
-                }
+                None => buf.push(0),
+                Some(cap) => encode_vault_cap(&mut buf, cap),
             }
         }
     }
 
-    push_u64(&mut buf, state.cap_registry.len() as u64);
-    for (cap_id, record) in &state.cap_registry {
-        push_u64(&mut buf, cap_id.0);
-        push_u64(&mut buf, record.issuer.map(|c| c.0).unwrap_or(0));
-        push_u64(&mut buf, record.narrowing.len() as u64);
-        buf.extend_from_slice(&record.narrowing);
-        // The RegCap discriminant + payload encoded by debug-form. Cheap
-        // and canonical given the BTreeMap iteration order.
-        let cap_dbg = format!("{:?}", record.cap);
-        push_u64(&mut buf, cap_dbg.len() as u64);
-        buf.extend_from_slice(cap_dbg.as_bytes());
-    }
-
     crypto::hash(&buf)
+}
+
+fn encode_endpoint(buf: &mut Vec<u8>, ep: &crate::types::EventEndpointCap) {
+    push_u64(buf, ep.vault_id.0);
+    push_u64(buf, ep.gas_budget);
+    push_u64(buf, ep.memory_budget as u64);
+}
+
+fn encode_vault_cap(buf: &mut Vec<u8>, cap: &VaultCap) {
+    match cap {
+        VaultCap::VaultRef(vr) => {
+            buf.push(1);
+            push_u64(buf, vr.vault_id.0);
+            buf.push(vault_rights_byte(&vr.rights));
+        }
+        VaultCap::Code(c) => {
+            buf.push(2);
+            push_u64(buf, c.blob.len() as u64);
+            buf.extend_from_slice(&c.blob);
+        }
+        VaultCap::Data(d) => {
+            buf.push(3);
+            push_u64(buf, d.content.len() as u64);
+            buf.extend_from_slice(&d.content);
+            push_u64(buf, d.page_count as u64);
+        }
+        VaultCap::Resource(r) => {
+            buf.push(4);
+            // ResourceKind discriminant + payload encoded by debug-form.
+            // Cheap and canonical (small enum, deterministic Debug).
+            let dbg = format!("{:?}", r.0);
+            push_u64(buf, dbg.len() as u64);
+            buf.extend_from_slice(dbg.as_bytes());
+        }
+    }
 }
 
 fn push_u64(buf: &mut Vec<u8>, x: u64) {
     buf.extend_from_slice(&x.to_le_bytes());
 }
 
-fn vault_rights_byte(r: &crate::types::VaultRights) -> u8 {
+fn vault_rights_byte(r: &VaultRights) -> u8 {
     (r.read as u8)
         | ((r.initialize as u8) << 1)
         | ((r.grant as u8) << 2)

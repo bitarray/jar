@@ -7,35 +7,27 @@
 //! (`fc_take` / `fc_set` / `fc_clone` / `fc_drop` / `fc_is_empty`)
 //! through this adapter.
 //!
-//! Each method maps a `vault.slots[N]: SlotEntry` to/from a Frame cap:
+//! After CapId removal, `vault.slots[N]` holds `VaultCap` values
+//! directly. Translation between `VaultCap` and the Frame's `Cap`
+//! representation:
 //!
-//! - `SlotEntry::VaultRef(vr)` round-trips with
-//!   `Cap::Protocol(ProtocolCap::VaultRef(vr))` — pure value, no σ identity.
+//! - `VaultCap::VaultRef(vr)` ↔ `Cap::Protocol(ProtocolCap::VaultRef(vr))`.
+//! - `VaultCap::Resource(r)` ↔ `Cap::Protocol(ProtocolCap::Resource(r))`.
+//! - `VaultCap::Code(_)` / `VaultCap::Data(_)` are container-bound:
+//!   they're compiled / mapped at `vault_init` only, never moved between
+//!   Vault and Frame mid-VM. `fc_take` / `fc_clone` on those return
+//!   `None`.
 //!
-//! - `SlotEntry::Cap(id)` with a `RegCap::Resource(_)` record round-trips
-//!   with `Cap::Protocol(ProtocolCap::Resource { id, cap })`. The CapId
-//!   is preserved so derive-tree bookkeeping survives the bounce.
-//!
-//! - `SlotEntry::Cap(id)` with a `RegCap::Code(_)` / `RegCap::Data(_)`
-//!   record is rejected by `fc_take` / `fc_clone` — bulk caps don't
-//!   relocate mid-VM (they're compiled / mapped at vault_init only).
-//!
-//! - `SlotEntry::Cap(id)` with a `RegCap::EventEndpoint(_)` record is
-//!   rejected. EventEndpoints belong in `σ.{transact,dispatch}_endpoints`,
-//!   not `vault.slots`; finding one here is a kernel bug.
-//!
-//! - `fc_drop` on a `SlotEntry::Cap(id)` invokes
-//!   `cap_registry::revoke_cascade(id)` then clears the slot.
-//!   `fc_drop` on a `SlotEntry::VaultRef(_)` just clears the slot
-//!   (no registry to update).
+//! No cap_registry, no cascade revocation. `fc_drop` is just "clear the
+//! slot"; granting a copy via `fc_set` after `fc_clone` produces an
+//! independent owner of the value.
 
 use std::sync::Arc;
 
 use javm::cap::ForeignCnode;
 
-use crate::cap::{Cap, ProtocolCap, RegCap, VaultRights};
-use crate::state::cap_registry;
-use crate::types::{CapId, SlotEntry, State, VaultId};
+use crate::cap::{Cap, ProtocolCap, VaultCap, VaultRights};
+use crate::types::{State, VaultId};
 
 /// Adapter implementing [`ForeignCnode<ProtocolCap>`] over `&mut State`.
 /// Rebuilt cheaply each iteration of `drive_invocation`'s run loop
@@ -50,13 +42,13 @@ impl<'a> VaultCnodeView<'a> {
     }
 }
 
-/// Read the `SlotEntry` at `(vault, slot)`, if any.
-fn slot_entry(state: &State, vault: VaultId, slot: u8) -> Option<SlotEntry> {
+/// Read the `VaultCap` at `(vault, slot)`, if any.
+fn slot_cap(state: &State, vault: VaultId, slot: u8) -> Option<VaultCap> {
     state.vaults.get(&vault)?.slots.get(slot).cloned()
 }
 
 /// Mutably set the slot to `value`, copy-on-write the Vault Arc.
-fn slot_set(state: &mut State, vault: VaultId, slot: u8, value: Option<SlotEntry>) {
+fn slot_set(state: &mut State, vault: VaultId, slot: u8, value: Option<VaultCap>) {
     let arc = match state.vaults.get(&vault) {
         Some(a) => a.clone(),
         None => return,
@@ -71,10 +63,10 @@ impl ForeignCnode<ProtocolCap> for VaultCnodeView<'_> {
         if !rights.revoke {
             return None;
         }
-        let entry = slot_entry(self.state, vault, slot)?;
-        let cap = entry_to_frame_cap(self.state, &entry)?;
+        let cap = slot_cap(self.state, vault, slot)?;
+        let frame_cap = vault_cap_to_frame(&cap)?;
         slot_set(self.state, vault, slot, None);
-        Some(cap)
+        Some(frame_cap)
     }
 
     fn fc_set(
@@ -92,11 +84,11 @@ impl ForeignCnode<ProtocolCap> for VaultCnodeView<'_> {
             Some(v) if v.slots.get(slot).is_none() => {}
             _ => return Err(cap),
         }
-        let entry = match cap_to_slot_entry(&cap) {
-            Some(e) => e,
+        let vc = match frame_to_vault_cap(&cap) {
+            Some(v) => v,
             None => return Err(cap),
         };
-        slot_set(self.state, vault, slot, Some(entry));
+        slot_set(self.state, vault, slot, Some(vc));
         Ok(())
     }
 
@@ -104,25 +96,18 @@ impl ForeignCnode<ProtocolCap> for VaultCnodeView<'_> {
         if !rights.derive {
             return None;
         }
-        match slot_entry(self.state, vault, slot)? {
-            // VaultRefs are values: clone the value (with rights honored).
-            // Narrowing rights belongs to a separate MGMT_DOWNGRADE op;
-            // here we just produce an identical VaultRef.
-            SlotEntry::VaultRef(vr) => Some(Cap::Protocol(ProtocolCap::VaultRef(vr))),
-            SlotEntry::Cap(parent_id) => clone_registered_cap(self.state, parent_id),
-        }
+        let cap = slot_cap(self.state, vault, slot)?;
+        // Cloning is a pure-value operation: produce another Frame cap
+        // of the same shape. No cap_registry interaction.
+        vault_cap_to_frame(&cap)
     }
 
     fn fc_drop(&mut self, vault: VaultId, slot: u8, rights: VaultRights) -> bool {
         if !rights.revoke {
             return false;
         }
-        let entry = match slot_entry(self.state, vault, slot) {
-            Some(e) => e,
-            None => return false,
-        };
-        if let SlotEntry::Cap(cap_id) = &entry {
-            cap_registry::revoke_cascade(self.state, *cap_id);
+        if slot_cap(self.state, vault, slot).is_none() {
+            return false;
         }
         slot_set(self.state, vault, slot, None);
         true
@@ -136,59 +121,27 @@ impl ForeignCnode<ProtocolCap> for VaultCnodeView<'_> {
     }
 }
 
-/// Translate a `SlotEntry` into the Frame cap-table representation.
-/// Returns `None` for entries that can't be moved into a Frame as
-/// guest-visible caps (Code / Data are bulk and stay container-bound;
-/// EventEndpoint is malformed in vault.slots).
-fn entry_to_frame_cap(state: &State, entry: &SlotEntry) -> Option<Cap> {
-    match entry {
-        SlotEntry::VaultRef(vr) => Some(Cap::Protocol(ProtocolCap::VaultRef(*vr))),
-        SlotEntry::Cap(cap_id) => {
-            let record = cap_registry::lookup(state, *cap_id).ok()?;
-            match &record.cap {
-                RegCap::Resource(r) => Some(Cap::Protocol(ProtocolCap::Resource {
-                    id: *cap_id,
-                    cap: r.clone(),
-                })),
-                // Code / Data don't move mid-VM. EventEndpoint shouldn't be
-                // in vault.slots at all. Guests asking for these get None.
-                RegCap::Code(_) | RegCap::Data(_) | RegCap::EventEndpoint(_) => None,
-            }
-        }
+/// Translate a `VaultCap` into the Frame cap-table representation.
+/// Returns `None` for kinds that don't have a `ProtocolCap` variant
+/// (Code / Data are container-bound).
+fn vault_cap_to_frame(cap: &VaultCap) -> Option<Cap> {
+    match cap {
+        VaultCap::VaultRef(vr) => Some(Cap::Protocol(ProtocolCap::VaultRef(*vr))),
+        VaultCap::Resource(r) => Some(Cap::Protocol(ProtocolCap::Resource(r.clone()))),
+        VaultCap::Code(_) | VaultCap::Data(_) => None,
     }
 }
 
-/// Translate a Frame cap back to a `SlotEntry` for placement into
+/// Translate a Frame cap back to a `VaultCap` for placement into
 /// `vault.slots`. Returns `None` if the cap can't legally live in σ.
-fn cap_to_slot_entry(cap: &Cap) -> Option<SlotEntry> {
+fn frame_to_vault_cap(cap: &Cap) -> Option<VaultCap> {
     match cap {
-        Cap::Protocol(ProtocolCap::VaultRef(vr)) => Some(SlotEntry::VaultRef(*vr)),
-        Cap::Protocol(ProtocolCap::Resource { id, .. }) => Some(SlotEntry::Cap(*id)),
+        Cap::Protocol(ProtocolCap::VaultRef(vr)) => Some(VaultCap::VaultRef(*vr)),
+        Cap::Protocol(ProtocolCap::Resource(r)) => Some(VaultCap::Resource(r.clone())),
         // HostCall, Frame-only kinds (SelfId / Caller* / AttestationScope /
         // Attestation / AttestationAggregate), and javm-side first-class
         // arms (Cap::Code, Cap::Data, Cap::FrameRef, Cap::Empty) all
         // refuse persistence to vault.slots.
         _ => None,
     }
-}
-
-/// Clone a registered cap (for `MGMT_COPY` via `fc_clone`). Allocates a
-/// child cap_registry record with parent = source. Code / Data /
-/// EventEndpoint don't expose Frame projections, so cloning into a
-/// Frame is rejected.
-fn clone_registered_cap(state: &mut State, parent_id: CapId) -> Option<Cap> {
-    let record = cap_registry::lookup(state, parent_id).ok()?.clone();
-    let RegCap::Resource(r) = &record.cap else {
-        return None;
-    };
-    let child_cap = RegCap::Resource(r.clone());
-    let child_id =
-        cap_registry::derive(state, parent_id, child_cap.clone(), Vec::new(), false).ok()?;
-    let RegCap::Resource(r2) = child_cap else {
-        unreachable!()
-    };
-    Some(Cap::Protocol(ProtocolCap::Resource {
-        id: child_id,
-        cap: r2,
-    }))
 }
