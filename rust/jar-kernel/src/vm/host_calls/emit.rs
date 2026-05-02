@@ -13,15 +13,13 @@
 //! the parameter decoding lands.
 
 use crate::runtime::Hardware;
-use crate::types::KResult;
-use crate::vm::{HostCallOutcome, InvocationCtx, Vm};
+use crate::vm::{InvocationHost, Vm};
+use javm::cap::CallOutcome;
 
 /// Stub: emit_event not yet wired. Always faults.
 pub fn host_emit_event<H: Hardware>(
     _vm: &mut Vm,
-    _ctx: &mut InvocationCtx<'_, H>,
-) -> KResult<HostCallOutcome> {
-    Ok(HostCallOutcome::Fault(
-        "emit_event is stubbed; concrete handler lands in Stage D".into(),
-    ))
+    _host: &mut InvocationHost<'_, H>,
+) -> CallOutcome {
+    CallOutcome::Fault("emit_event is stubbed; concrete handler lands in Stage D".into())
 }

@@ -21,7 +21,7 @@ use crate::runtime::Hardware;
 use crate::types::{
     AttestationEntry, Caller, Command, EventEndpointCap, KResult, KernelRole, ResultEntry, State,
 };
-use crate::vm::{InvocationCtx, InvocationResult, drive_invocation, new_vm_from_vault};
+use crate::vm::{InvocationHost, InvocationResult, drive_invocation, new_vm_from_vault};
 
 /// Run one fresh `Vault.initialize` against a clone of σ for the verify
 /// phase. Returns the invocation result; the caller decides whether to
@@ -66,7 +66,7 @@ fn run_one<H: Hardware>(
     let mut cursor = AttestCursor::new();
     let mut attestation_trace: Vec<AttestationEntry> = Vec::new();
     let mut result_trace: Vec<ResultEntry> = Vec::new();
-    let mut ctx = InvocationCtx {
+    let mut host = InvocationHost {
         state,
         role,
         current_vault: endpoint.vault_id,
@@ -78,5 +78,5 @@ fn run_one<H: Hardware>(
         result_trace: &mut result_trace,
         hw,
     };
-    drive_invocation(&mut vm, &mut ctx)
+    drive_invocation(&mut vm, &mut host)
 }

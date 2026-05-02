@@ -18,15 +18,13 @@
 //! bytes), the scope check, and the cap-registry insert.
 
 use crate::runtime::Hardware;
-use crate::types::KResult;
-use crate::vm::{HostCallOutcome, InvocationCtx, Vm};
+use crate::vm::{InvocationHost, Vm};
+use javm::cap::CallOutcome;
 
 /// Stub: mint_attest_cap not yet wired. Always faults.
 pub fn host_mint_attest_cap<H: Hardware>(
     _vm: &mut Vm,
-    _ctx: &mut InvocationCtx<'_, H>,
-) -> KResult<HostCallOutcome> {
-    Ok(HostCallOutcome::Fault(
-        "mint_attest_cap is stubbed; concrete handler lands in Stage D".into(),
-    ))
+    _host: &mut InvocationHost<'_, H>,
+) -> CallOutcome {
+    CallOutcome::Fault("mint_attest_cap is stubbed; concrete handler lands in Stage D".into())
 }

@@ -1,21 +1,22 @@
-//! Invocation driver for `javm::kernel::InvocationKernel<Cap>`.
+//! Invocation driver for `javm::kernel::InvocationKernel<ProtocolCap>`.
 //!
 //! `drive_invocation` runs a real PVM VM until terminal (Halt / Panic /
-//! PageFault / OutOfGas), routing every `ProtocolCall(slot)` through
-//! `host_calls::dispatch_protocol_call`. Each handler returns a
-//! `HostCallOutcome` — either `Resume(r0, r1)` (the loop calls
-//! `vm.resume_protocol_call` and continues) or `Fault(reason)` (the
-//! invocation rolls back gracefully).
+//! PageFault / OutOfGas / host Fault). Host-call dispatch happens
+//! synchronously inside javm's run loop via
+//! `<InvocationHost as ProtocolCapHost<ProtocolCap>>::call`; there is
+//! no yield/resume protocol any more.
+//!
+//! [`InvocationHost`] bundles per-invocation kernel state — σ pointer,
+//! role, current vault, command queue, traces, hardware ref — into the
+//! single `ProtocolCapHost` adapter that javm calls. Both the
+//! foreign-frame slot ops (`get` / `take` / `set` / `clone` / `drop` /
+//! `is_empty`) and the CALL dispatch (`call`) share access to that
+//! state.
 //!
 //! Memory windows in the kernel are not flat: the guest reads/writes its
 //! own DATA caps. The kernel routes through `read_data_cap_window` /
 //! `write_data_cap_window`; failures are guest-driven faults, not kernel
 //! errors.
-//!
-//! Per-invocation kernel caps (Storage, SnapshotStorage) live in the
-//! running VM's javm cap-table at `KERNEL_CAP_SLOT`. Host calls fetch
-//! them via `vm.cap_table_get(slot)`. There is no separate kernel-side
-//! `Frame` struct any more.
 
 use crate::types::{
     AttestationEntry, Caller, Command, KResult, KernelError, KernelRole, ResultEntry, State,
@@ -30,6 +31,7 @@ use crate::cap::ProtocolCap;
 use crate::cap::attest::AttestCursor;
 use crate::reach::ReachSet;
 use crate::runtime::Hardware;
+use javm::cap::{CallOutcome, Cap, ProtocolCapHost};
 
 /// Convenience alias: the `InvocationKernel` parameterized over the
 /// kernel's protocol-cap payload.
@@ -38,10 +40,6 @@ pub type Vm = javm::kernel::InvocationKernel<ProtocolCap>;
 /// Construct a fresh `Vm` ready to run `Vault.initialize` on the given
 /// home Vault. Walks `vault.slots` via [`crate::state::vault_init::build_init_cap_table`],
 /// then hands the resulting artifacts to javm's `new_from_artifacts`.
-///
-/// The host typically follows up with `populate_host_call_slots`,
-/// `populate_home_vault_ref`, and `populate_ephemeral_kernel_caps` to
-/// layer kernel-managed slots on top of the persistent CapTable.
 ///
 /// `code_cache` is consulted for each persistent CodeCap; pass
 /// `Some(&mut node.code_cache)` from the dispatch / transact entry
@@ -64,13 +62,19 @@ pub fn new_vm_from_vault(
         .map_err(|e| KernelError::Internal(format!("javm init: {:?}", e)))
 }
 
-/// Per-invocation kernel-side context. Carried by reference into every
-/// host-call handler.
+/// Per-invocation kernel-side host. Implements
+/// `ProtocolCapHost<ProtocolCap>` — javm calls into this for:
 ///
-/// Storage authority is encoded in the running VM's cap-table:
-/// Transact / Schedule invocations place `Storage` (overlay) caps;
-/// Dispatch step-2/3 invocations place `SnapshotStorage` caps.
-pub struct InvocationCtx<'a, H: Hardware> {
+/// - foreign-frame slot ops (`get` / `take` / `set` / `clone` / `drop`
+///   / `is_empty`) on `vault.slots[…]` reachable via VaultRef cap-ref
+///   crossings;
+/// - synchronous CALL dispatch (`call`), which routes to the
+///   `host_calls::*` handlers based on the cap variant.
+///
+/// All borrows are explicit so the type can be reconstructed cheaply
+/// per invocation. Lives on the stack of `transact::run_one` /
+/// `dispatch::handle_inbound` and is dropped at invocation end.
+pub struct InvocationHost<'a, H: Hardware> {
     pub state: &'a mut State,
     pub role: KernelRole,
     pub current_vault: VaultId,
@@ -83,6 +87,92 @@ pub struct InvocationCtx<'a, H: Hardware> {
     pub hw: &'a H,
 }
 
+impl<H: Hardware> ProtocolCapHost<ProtocolCap> for InvocationHost<'_, H> {
+    fn call(&mut self, cap: ProtocolCap, vm: &mut Vm) -> CallOutcome {
+        use crate::vm::host_calls::{attest, emit, score};
+        match cap {
+            ProtocolCap::EmitEvent => emit::host_emit_event(vm, self),
+            ProtocolCap::MintAttestCap => attest::host_mint_attest_cap(vm, self),
+            ProtocolCap::SetScore => score::host_set_score(vm, self),
+            other => CallOutcome::Fault(format!("CALL on non-callable cap: {other:?}")),
+        }
+    }
+
+    fn get(&self, vault: VaultId, slot: u8) -> Option<Cap<ProtocolCap>> {
+        foreign_cnode::slot_cap(self.state, vault, slot)
+            .as_ref()
+            .and_then(foreign_cnode::vault_cap_to_frame)
+    }
+
+    fn take(
+        &mut self,
+        vault: VaultId,
+        slot: u8,
+        rights: crate::cap::VaultRights,
+    ) -> Option<Cap<ProtocolCap>> {
+        if !rights.revoke {
+            return None;
+        }
+        let cap = foreign_cnode::slot_cap(self.state, vault, slot)?;
+        let frame_cap = foreign_cnode::vault_cap_to_frame(&cap)?;
+        foreign_cnode::slot_set(self.state, vault, slot, None);
+        Some(frame_cap)
+    }
+
+    fn set(
+        &mut self,
+        vault: VaultId,
+        slot: u8,
+        rights: crate::cap::VaultRights,
+        cap: Cap<ProtocolCap>,
+    ) -> Result<(), Cap<ProtocolCap>> {
+        if !rights.grant {
+            return Err(cap);
+        }
+        match self.state.vaults.get(&vault) {
+            Some(v) if v.slots.get(slot).is_none() => {}
+            _ => return Err(cap),
+        }
+        let vc = match foreign_cnode::frame_to_vault_cap(&cap) {
+            Some(v) => v,
+            None => return Err(cap),
+        };
+        foreign_cnode::slot_set(self.state, vault, slot, Some(vc));
+        Ok(())
+    }
+
+    fn clone(
+        &mut self,
+        vault: VaultId,
+        slot: u8,
+        rights: crate::cap::VaultRights,
+    ) -> Option<Cap<ProtocolCap>> {
+        if !rights.derive {
+            return None;
+        }
+        let cap = foreign_cnode::slot_cap(self.state, vault, slot)?;
+        foreign_cnode::vault_cap_to_frame(&cap)
+    }
+
+    fn drop(&mut self, vault: VaultId, slot: u8, rights: crate::cap::VaultRights) -> bool {
+        if !rights.revoke {
+            return false;
+        }
+        if foreign_cnode::slot_cap(self.state, vault, slot).is_none() {
+            return false;
+        }
+        foreign_cnode::slot_set(self.state, vault, slot, None);
+        true
+    }
+
+    fn is_empty(&self, vault: VaultId, slot: u8) -> bool {
+        match self.state.vaults.get(&vault) {
+            Some(v) => v.slots.get(slot).is_none(),
+            None => true,
+        }
+    }
+}
+
 /// The result of running one top-level invocation.
 #[derive(Debug)]
 pub struct InvocationResult {
@@ -90,12 +180,7 @@ pub struct InvocationResult {
     pub fault: Option<String>,
     /// Public Callable produced by `Vault.initialize`: the FrameRef at
     /// `BARE_ARG_SLOT` (the synchronous arg-in / result-out channel)
-    /// after the init program halts. `None` if the invocation faulted,
-    /// the slot was empty, or the cap there was not a `Cap::FrameRef`.
-    /// Today's transact and dispatch consume `halt_value` and ignore
-    /// this field; it exists for a future `vault_initialize` host call
-    /// (or external `Vault.initialize` API) to read the post-init
-    /// Callable from.
+    /// after the init program halts.
     pub initialize_callable: Option<javm::vm_pool::VmId>,
 }
 
@@ -120,45 +205,21 @@ impl InvocationResult {
 }
 
 /// MainFrame slot where the kernel pins the running VM's `SelfCap`.
-/// Per-VM identity: written once at invocation entry by
-/// `populate_ephemeral_kernel_caps`, never mutates thereafter.
-/// Guests read it via cap-ref `0x002`. Sits next to the home
-/// VaultRef (slot 1) and the BARE_FRAME ref (slot 0) in MainFrame.
 pub const SELF_SLOT: u8 = 2;
 
-/// What a host-call handler tells the driver to do next.
-#[derive(Debug)]
-pub enum HostCallOutcome {
-    /// Resume the VM with these `(φ[7], φ[8])` values.
-    Resume(u64, u64),
-    /// Treat as a graceful invocation fault (rolls back σ at the caller).
-    Fault(String),
-}
-
-/// Drive a real javm VM to a terminal state, routing each ProtocolCall to
-/// the kernel's host-call dispatcher.
-///
-/// On every iteration of the run loop, we construct a fresh
-/// [`foreign_cnode::VaultCnodeView`] borrowing `ctx.state`. javm
-/// consults this adapter for slot operations on `FrameId::Foreign`
-/// frames produced by its resolve walk (i.e. when the guest does
-/// `MGMT_MOVE` / `MGMT_COPY` / `MGMT_DROP` against a cap-ref that
-/// crosses through a `VaultRef`). The adapter is rebuilt each
-/// iteration because borrowing `&mut State` consumes the borrow until
-/// the view drops.
+/// Drive a real javm VM to a terminal state. CALL dispatch happens
+/// inside javm via `InvocationHost::call`; this function just
+/// translates the run loop's terminal `KernelResult` into an
+/// `InvocationResult`.
 pub fn drive_invocation<H: Hardware>(
     vm: &mut Vm,
-    ctx: &mut InvocationCtx<'_, H>,
+    host: &mut InvocationHost<'_, H>,
 ) -> KResult<InvocationResult> {
-    let outcome = {
-        let mut view = foreign_cnode::VaultCnodeView::new(&mut *ctx.state);
-        vm.run_with_host(&mut view)
-    };
-    match outcome {
+    match vm.run_with_host(host) {
         javm::kernel::KernelResult::Halt(rv) => {
-            // After the init program halts, recover any public
-            // Callable it placed at the BareFrame ARG/RESULT slot.
-            // Empty / non-FrameRef ⇒ `None`; not a fault.
+            // After the init program halts, recover any public Callable
+            // it placed at the BareFrame ARG/RESULT slot. Empty /
+            // non-FrameRef ⇒ `None`; not a fault.
             let initialize_callable = match vm.read_bare_frame_slot(javm::kernel::BARE_ARG_SLOT) {
                 Some(javm::cap::Cap::FrameRef(f)) => Some(f.vm_id),
                 _ => None,

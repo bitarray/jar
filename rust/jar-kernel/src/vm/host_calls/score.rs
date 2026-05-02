@@ -9,18 +9,13 @@
 //! Process context: `setScore` returns `RC_READONLY` (verify-only).
 //!
 //! Concrete handler lands in Stage D once parameter decoding plus the
-//! `InvocationCtx → NodeOffchain.pool` plumbing is in place.
+//! `InvocationHost → NodeOffchain.pool` plumbing is in place.
 
 use crate::runtime::Hardware;
-use crate::types::KResult;
-use crate::vm::{HostCallOutcome, InvocationCtx, Vm};
+use crate::vm::{InvocationHost, Vm};
+use javm::cap::CallOutcome;
 
 /// Stub: setScore not yet wired. Always faults.
-pub fn host_set_score<H: Hardware>(
-    _vm: &mut Vm,
-    _ctx: &mut InvocationCtx<'_, H>,
-) -> KResult<HostCallOutcome> {
-    Ok(HostCallOutcome::Fault(
-        "setScore is stubbed; concrete handler lands in Stage D".into(),
-    ))
+pub fn host_set_score<H: Hardware>(_vm: &mut Vm, _host: &mut InvocationHost<'_, H>) -> CallOutcome {
+    CallOutcome::Fault("setScore is stubbed; concrete handler lands in Stage D".into())
 }
