@@ -1,14 +1,41 @@
-//! Dispatch pipeline tests.
+//! Off-chain dispatch coverage: target_path resolution and the
+//! verify-then-process arrival pipeline.
 //!
-//! Stub during the event-redesign migration. The old step-2/step-3
-//! framing (with `slot_clear`, `Empty` SlotContent, `LiteUpdate`
-//! broadcasts) is gone. The new model is a single `Vault.initialize`
-//! per cycle for verify (fresh, ro-σ) and one persistent
-//! `Vault.initialize` for process (rw-σ for transact, ro-σ for
-//! dispatch). Tests for that pipeline land in Stage E (E1).
+//! The genesis fixture wires one dispatch endpoint at slot 0 of
+//! σ.dispatch_endpoints, pointing at the halt smoke blob. With host
+//! calls still stubbed, verify and process both halt cleanly; this
+//! test exercises the routing layer (target_path → endpoint cap_id)
+//! and confirms `Kernel::dispatch` doesn't fault on a well-formed
+//! arrival. End-to-end coverage of the DA pattern (private dispatch
+//! endpoint with self-emit + collision-defer) lands in Stage E2 with
+//! the new guest fixtures.
+
+use jar_kernel::genesis::GenesisBuilder;
+use jar_kernel::runtime::{InMemoryBus, InMemoryHardware};
+use jar_kernel::{Event, Kernel};
 
 #[test]
-fn dispatch_pipeline_stub() {
-    // Placeholder so the test target keeps compiling. Real coverage
-    // lands with the dispatch.rs / pool rewrite.
+fn kernel_dispatch_routes_to_dispatch_endpoint() {
+    let g = GenesisBuilder::default().build().unwrap();
+    let dispatch_vault = g.dispatch_vault;
+    let hw = InMemoryHardware::new(g.state, InMemoryBus::new());
+    let mut k = Kernel::new(None, hw).expect("kernel new");
+
+    // Construction subscribed us to the dispatch endpoint vault.
+    assert!(
+        k.hardware()
+            .subscriptions_snapshot()
+            .contains(&dispatch_vault),
+        "kernel did not subscribe to the dispatch entrypoint"
+    );
+
+    let event = Event {
+        payload: b"hello".to_vec(),
+        caps: vec![],
+        attestation_trace: vec![],
+        result_trace: vec![],
+    };
+    // VaultId-addressed dispatch path: kernel resolves the slot via
+    // σ.dispatch_endpoints scan.
+    k.dispatch(dispatch_vault, &event).expect("dispatch ok");
 }
