@@ -415,3 +415,182 @@ mod tests {
         assert!(e3.to_string().contains("PVM initialization failed"));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use grey_types::Hash;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        // --- error_refine_result ---
+
+        /// error_refine_result preserves the work item's service_id and code_hash.
+        #[test]
+        fn error_result_preserves_identity(
+            service_id in any::<u32>(),
+            code_hash in any::<[u8; 32]>(),
+            gas_limit in 1u64..1_000_000,
+            gas_used in 0u64..1_000_000,
+            payload in proptest::collection::vec(any::<u8>(), 0..64)
+        ) {
+            let gas_used = gas_used.min(gas_limit);
+            let item = WorkItem {
+                service_id,
+                code_hash: Hash(code_hash),
+                gas_limit,
+                accumulate_gas_limit: gas_limit,
+                exports_count: 0,
+                payload,
+                imports: vec![],
+                extrinsics: vec![],
+            };
+            let result = error_refine_result(&item, WorkResult::Panic, gas_used);
+            prop_assert_eq!(result.digest.service_id, service_id);
+            prop_assert_eq!(result.digest.code_hash, Hash(code_hash));
+            prop_assert_eq!(result.digest.gas_used, gas_used);
+            prop_assert_eq!(result.digest.accumulate_gas, gas_limit.saturating_sub(gas_used));
+        }
+
+        /// error_refine_result computes correct payload_hash.
+        #[test]
+        fn error_result_payload_hash(
+            service_id in any::<u32>(),
+            code_hash in any::<[u8; 32]>(),
+            payload in proptest::collection::vec(any::<u8>(), 0..64)
+        ) {
+            let item = WorkItem {
+                service_id,
+                code_hash: Hash(code_hash),
+                gas_limit: 10_000,
+                accumulate_gas_limit: 5_000,
+                exports_count: 0,
+                payload: payload.clone(),
+                imports: vec![],
+                extrinsics: vec![],
+            };
+            let result = error_refine_result(&item, WorkResult::Panic, 0);
+            prop_assert_eq!(result.digest.payload_hash, grey_crypto::blake2b_256(&payload));
+        }
+
+        /// error_refine_result with OutOfGas has zero accumulate_gas when gas_used == gas_limit.
+        #[test]
+        fn error_result_out_of_gas_zero_accumulate(
+            service_id in any::<u32>(),
+            code_hash in any::<[u8; 32]>(),
+            gas_limit in 1u64..100_000
+        ) {
+            let item = WorkItem {
+                service_id,
+                code_hash: Hash(code_hash),
+                gas_limit,
+                accumulate_gas_limit: gas_limit,
+                exports_count: 0,
+                payload: vec![],
+                imports: vec![],
+                extrinsics: vec![],
+            };
+            let result = error_refine_result(&item, WorkResult::OutOfGas, gas_limit);
+            prop_assert_eq!(result.digest.accumulate_gas, 0);
+            prop_assert!(matches!(result.digest.result, WorkResult::OutOfGas));
+        }
+
+        // --- encode_work_package_simple ---
+
+        /// Encoding is deterministic.
+        #[test]
+        fn encode_work_package_deterministic(
+            auth in proptest::collection::vec(any::<u8>(), 0..32),
+            payloads in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..16), 0..5)
+        ) {
+            let pkg = build_package(auth, payloads.clone());
+            prop_assert_eq!(encode_work_package_simple(&pkg), encode_work_package_simple(&pkg));
+        }
+
+        /// Encoding concatenates authorization then each item's payload in order.
+        #[test]
+        fn encode_work_package_concatenation(
+            auth in proptest::collection::vec(any::<u8>(), 0..16),
+            payloads in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 1..8), 1..5)
+        ) {
+            let pkg = build_package(auth.clone(), payloads.clone());
+            let encoded = encode_work_package_simple(&pkg);
+            let mut expected = auth;
+            for p in &payloads {
+                expected.extend(p);
+            }
+            prop_assert_eq!(encoded, expected);
+        }
+
+        /// Encoding is sensitive to authorization changes.
+        #[test]
+        fn encode_work_package_sensitive_auth(
+            auth in proptest::collection::vec(any::<u8>(), 1..16),
+            payloads in proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..8), 0..3)
+        ) {
+            let pkg1 = build_package(auth.clone(), payloads.clone());
+            let mut modified = auth.clone();
+            modified[0] ^= 0xFF;
+            let pkg2 = build_package(modified, payloads);
+            prop_assert_ne!(encode_work_package_simple(&pkg1), encode_work_package_simple(&pkg2));
+        }
+
+        // --- RefineError display ---
+
+        /// CodeNotFound always contains "code not found".
+        #[test]
+        fn refine_error_code_not_found_display(hash in any::<[u8; 32]>()) {
+            let e = RefineError::CodeNotFound(Hash(hash));
+            prop_assert!(e.to_string().contains("code not found"));
+        }
+
+        /// AuthorizationFailed contains the provided message.
+        #[test]
+        fn refine_error_auth_failed_display(msg in ".*") {
+            let e = RefineError::AuthorizationFailed(msg.clone());
+            prop_assert!(e.to_string().contains(&msg) || msg.is_empty());
+        }
+
+        /// PvmInitFailed display contains "PVM".
+        #[test]
+        fn refine_error_pvm_init_display() {
+            let e = RefineError::PvmInitFailed;
+            prop_assert!(e.to_string().contains("PVM"));
+        }
+    }
+
+    /// Helper to build a WorkPackage from authorization bytes and item payloads.
+    fn build_package(authorization: Vec<u8>, item_payloads: Vec<Vec<u8>>) -> WorkPackage {
+        let items: Vec<WorkItem> = item_payloads
+            .into_iter()
+            .enumerate()
+            .map(|(i, payload)| WorkItem {
+                service_id: i as u32,
+                code_hash: Hash::ZERO,
+                gas_limit: 10_000,
+                accumulate_gas_limit: 5_000,
+                exports_count: 0,
+                payload,
+                imports: vec![],
+                extrinsics: vec![],
+            })
+            .collect();
+        WorkPackage {
+            auth_code_host: 0,
+            auth_code_hash: Hash::ZERO,
+            context: RefinementContext {
+                anchor: Hash::ZERO,
+                state_root: Hash::ZERO,
+                beefy_root: Hash::ZERO,
+                lookup_anchor: Hash::ZERO,
+                lookup_anchor_timeslot: 0,
+                prerequisites: vec![],
+            },
+            authorization,
+            authorizer_config: vec![],
+            items,
+        }
+    }
+}
