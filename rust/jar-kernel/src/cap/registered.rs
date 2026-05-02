@@ -189,9 +189,15 @@ pub fn is_identity_key(key: &KeyId) -> bool {
 // RegisteredCap sum type
 // -----------------------------------------------------------------------------
 
-/// All capability variants. Persistent variants live in σ.cap_registry
-/// (and may be referenced by Vault.slots); ephemeral variants live only
-/// in Frames.
+/// σ-resident capability shapes. Each variant has persistent identity
+/// in `σ.cap_registry` (a CapId); references from `vault.slots` resolve
+/// here via lookup. When a registered cap is projected into a Frame
+/// during invocation init, it becomes
+/// `KernelCap::Registered { id, cap: RegisteredCap }`.
+///
+/// Frame-only kinds (SelfId, Caller*, AttestationScope, the home
+/// VaultRef projection) are NOT in `RegisteredCap`; they live as
+/// top-level arms of `KernelCap` and never enter σ.
 ///
 /// Vault lifetime is tracked by reachability — a Vault is alive iff its
 /// VaultId appears in `state.vaults` and at least one VaultRef in some
@@ -207,14 +213,6 @@ pub enum RegisteredCap {
     Resource(ResourceCap),
     Attestation(AttestationCap),
     AttestationAggregate(AttestationAggregateCap),
-    /// Kernel-passed scope cap held in a Frame during verify.
-    AttestationScope(AttestationScopeCap),
-    /// Per-VM self-identity — pinned at MainFrame slot 2 (`SELF_SLOT`).
-    SelfId(SelfCap),
-    /// Per-frame caller (sub-CALL) — lives at ephemeral sub-slot 1.
-    CallerVault(CallerVaultCap),
-    /// Per-frame caller (kernel-initiated) — lives at ephemeral sub-slot 1.
-    CallerKernel(CallerKernelCap),
 }
 
 impl RegisteredCap {

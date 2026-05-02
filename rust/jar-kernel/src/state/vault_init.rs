@@ -163,16 +163,10 @@ fn translate_persistent(
         RegisteredCap::EventEndpoint(_) => Err(KernelError::Internal(
             "EventEndpointCap found in vault.slots; should live in σ endpoint lists".into(),
         )),
-        // Ephemeral-only variants must never persist. Finding one here
-        // is a kernel bug.
-        RegisteredCap::SelfId(_)
-        | RegisteredCap::CallerVault(_)
-        | RegisteredCap::CallerKernel(_)
-        | RegisteredCap::AttestationScope(_) => Err(KernelError::Internal(format!(
-            "ephemeral-only cap {:?} found persistently in vault.slots",
-            std::mem::discriminant(cap)
-        ))),
-        // All other Registered shapes round-trip unchanged.
+        // All other Registered shapes round-trip unchanged. (Frame-only
+        // variants — SelfId / Caller* / AttestationScope / Attestation —
+        // are no longer in `RegisteredCap`, so the match is exhaustive
+        // without a defensive ephemeral-only arm.)
         RegisteredCap::VaultRef(_)
         | RegisteredCap::Resource(_)
         | RegisteredCap::Attestation(_)

@@ -103,15 +103,12 @@ fn fc_set_rejects_non_registered() {
     state.vaults.insert(vault_id, Arc::new(Vault::new()));
     let mut view = VaultCnodeView::new(&mut state);
 
-    // Ephemeral cap (kernel-injected per-frame, no σ identity) cannot
-    // be placed into a Vault slot.
-    // An Ephemeral persistent-shaped RegisteredCap — Data here, but any
-    // would do — must be rejected by fc_set since only Registered caps
-    // can persist in σ.
-    let ephemeral = Cap::Protocol(KernelCap::Ephemeral(RegisteredCap::Data(DataCap {
-        content: Arc::new(b"sample data".to_vec()),
-        page_count: 1,
-    })));
+    // Frame-only caps (kernel-injected per-frame, no σ identity) cannot
+    // be placed into a Vault slot. SelfId is the cleanest example:
+    // it has no CapId and no σ presence, so fc_set must reject it.
+    let ephemeral = Cap::Protocol(KernelCap::SelfId(jar_kernel::cap::SelfCap {
+        vault_id: VaultId(0),
+    }));
     let result = view.fc_set(vault_id, 0, VaultRights::ALL, ephemeral);
     assert!(result.is_err());
 }
@@ -263,10 +260,10 @@ fn fc_is_empty_reports_slot_state() {
 #[test]
 fn vault_ref_with_read_announces_foreign_frame() {
     use javm::cap::ProtocolCapT;
-    let cap = KernelCap::Ephemeral(RegisteredCap::VaultRef(VaultRefCap {
+    let cap = KernelCap::HomeVaultRef(VaultRefCap {
         vault_id: VaultId(42),
         rights: VaultRights::ALL,
-    }));
+    });
     let (id, rights) = cap.as_foreign_frame().expect("VaultRef → foreign frame");
     assert_eq!(id, VaultId(42));
     assert_eq!(rights, VaultRights::ALL);
@@ -275,10 +272,10 @@ fn vault_ref_with_read_announces_foreign_frame() {
 #[test]
 fn vault_ref_without_read_does_not_announce_foreign_frame() {
     use javm::cap::ProtocolCapT;
-    let cap = KernelCap::Ephemeral(RegisteredCap::VaultRef(VaultRefCap {
+    let cap = KernelCap::HomeVaultRef(VaultRefCap {
         vault_id: VaultId(42),
         rights: VaultRights::INITIALIZE, // no `read`
-    }));
+    });
     assert!(cap.as_foreign_frame().is_none());
 }
 
