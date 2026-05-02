@@ -24,7 +24,8 @@ use crate::cap::{
     AttestationAggregateCap, AttestationCap, AttestationScopeCap, CallerKernelCap, CallerVaultCap,
     ResourceCap, SelfCap, VaultRefCap, VaultRights,
 };
-use crate::types::VaultId;
+use crate::runtime::Hardware;
+use crate::types::{KResult, VaultId};
 use javm::cap::ProtocolCap as ProtocolCapT;
 
 /// Cap-table slot reserved for the kernel-cap payload at frame init
@@ -80,6 +81,37 @@ pub enum ProtocolCap {
     Attestation(AttestationCap),
     /// Aggregate signature handle (BLS / threshold). Stubbed.
     AttestationAggregate(AttestationAggregateCap),
+}
+
+impl ProtocolCap {
+    /// Dispatch a CALL on this cap. The `drive_invocation` loop reads
+    /// the cap at the firing `slot` and invokes this method; each
+    /// variant defines what its CALL means. Variants that have no
+    /// CALL semantics (Frame-only context kinds: SelfId, Caller*,
+    /// Attestation, AttestationAggregate) return `Fault`.
+    ///
+    /// CALL semantics today:
+    ///   - `EmitEvent` / `MintAttestCap` / `SetScore` → host call.
+    ///   - everything else → fault. As more variants gain CALL meaning
+    ///     (e.g., `AttestationScope` minting an `Attestation`,
+    ///     `Resource` invoking a governance op, `VaultRef` initializing
+    ///     a sub-frame), they slot in here as additional arms.
+    pub fn call<H: Hardware>(
+        &self,
+        vm: &mut crate::vm::Vm,
+        ctx: &mut crate::vm::InvocationCtx<'_, H>,
+    ) -> KResult<crate::vm::HostCallOutcome> {
+        use crate::vm::HostCallOutcome;
+        use crate::vm::host_calls::{attest, emit, score};
+        match self {
+            ProtocolCap::EmitEvent => emit::host_emit_event(vm, ctx),
+            ProtocolCap::MintAttestCap => attest::host_mint_attest_cap(vm, ctx),
+            ProtocolCap::SetScore => score::host_set_score(vm, ctx),
+            other => Ok(HostCallOutcome::Fault(format!(
+                "CALL on cap with no CALL semantics: {other:?}"
+            ))),
+        }
+    }
 }
 
 impl ProtocolCapT for ProtocolCap {

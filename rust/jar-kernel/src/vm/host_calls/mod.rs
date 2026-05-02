@@ -1,5 +1,4 @@
-//! Kernel host-call handlers + the dispatcher that routes a
-//! `KernelResult::ProtocolCall { slot }` to the appropriate handler.
+//! Kernel host-call handlers.
 //!
 //! Each handler takes `&mut javm::kernel::InvocationKernel` directly —
 //! no VM-abstraction trait. Args flow in via `vm.active_reg(N)`; return
@@ -8,19 +7,16 @@
 //! `write_data_cap_window`; bad windows are guest-driven faults, not
 //! kernel errors.
 //!
-//! Dispatch flow: `drive_invocation` reads the cap at the firing
-//! `slot` and matches on the `ProtocolCap` variant — there is no slot
-//! number → host call mapping table; the cap value at the slot is the
-//! selector.
+//! Dispatch is `ProtocolCap::call`-driven: `drive_invocation` reads
+//! the cap at the firing slot and calls `cap.call(vm, ctx)`. The cap
+//! variant is the selector. See `cap::protocol::ProtocolCap::call`.
 
 pub mod attest;
 pub mod emit;
 pub mod score;
 
 use crate::cap::ProtocolCap;
-use crate::runtime::Hardware;
-use crate::types::KResult;
-use crate::vm::{HostCallOutcome, InvocationCtx, Vm};
+use crate::vm::Vm;
 
 /// Fetch the protocol-cap payload held at `slot` in the running VM's
 /// cap-table, if any. Returns `None` for empty slots and non-Protocol
@@ -29,32 +25,6 @@ pub(crate) fn fetch_protocol_cap(vm: &Vm, slot: u8) -> Option<ProtocolCap> {
     match vm.cap_table_get(slot) {
         Some(javm::cap::Cap::Protocol(kc)) => Some(kc.clone()),
         _ => None,
-    }
-}
-
-/// Dispatch a `ProtocolCall` to the matching host handler based on the
-/// cap variant at `slot`. An empty slot or a slot holding a non-host-
-/// call cap is a guest fault.
-pub fn dispatch_protocol_call<H: Hardware>(
-    slot: u8,
-    vm: &mut Vm,
-    ctx: &mut InvocationCtx<'_, H>,
-) -> KResult<HostCallOutcome> {
-    let cap = match fetch_protocol_cap(vm, slot) {
-        Some(c) => c,
-        None => {
-            return Ok(HostCallOutcome::Fault(format!(
-                "ProtocolCall: slot {slot} holds no protocol cap"
-            )));
-        }
-    };
-    match cap {
-        ProtocolCap::EmitEvent => emit::host_emit_event(vm, ctx),
-        ProtocolCap::MintAttestCap => attest::host_mint_attest_cap(vm, ctx),
-        ProtocolCap::SetScore => score::host_set_score(vm, ctx),
-        other => Ok(HostCallOutcome::Fault(format!(
-            "ProtocolCall: slot {slot} cap is not a host-call cap: {other:?}"
-        ))),
     }
 }
 

@@ -180,7 +180,15 @@ pub fn drive_invocation<H: Hardware>(
                 )));
             }
             javm::kernel::KernelResult::ProtocolCall { slot } => {
-                match crate::vm::host_calls::dispatch_protocol_call(slot, vm, ctx)? {
+                let cap = match crate::vm::host_calls::fetch_protocol_cap(vm, slot) {
+                    Some(c) => c,
+                    None => {
+                        return Ok(InvocationResult::fault(format!(
+                            "ProtocolCall: slot {slot} holds no protocol cap"
+                        )));
+                    }
+                };
+                match cap.call(vm, ctx)? {
                     HostCallOutcome::Resume(r0, r1) => vm.resume_protocol_call(r0, r1),
                     HostCallOutcome::Fault(reason) => return Ok(InvocationResult::fault(reason)),
                 }
