@@ -519,3 +519,112 @@ mod tests {
         assert_eq!(code_blob.bitmask, vec![1, 1, 1]);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// build_simple_blob → parse_blob always succeeds for valid inputs.
+        #[test]
+        fn simple_blob_parse_roundtrip(
+            code in proptest::collection::vec(any::<u8>(), 1..64),
+            jump_table in proptest::collection::vec(any::<u32>(), 0..8),
+        ) {
+            let bitmask: Vec<u8> = code.iter().map(|_| 1u8).collect();
+            let blob = build_simple_blob(&code, &bitmask, &jump_table);
+            let parsed = parse_blob(&blob);
+            prop_assert!(parsed.is_some(), "build_simple_blob output should always parse");
+        }
+
+        /// Code roundtrip: code bytes survive build → parse.
+        #[test]
+        fn code_roundtrip(
+            code in proptest::collection::vec(any::<u8>(), 1..32),
+            jump_table in proptest::collection::vec(any::<u32>(), 0..4),
+        ) {
+            let bitmask: Vec<u8> = code.iter().map(|_| 1u8).collect();
+            let blob = build_simple_blob(&code, &bitmask, &jump_table);
+            let parsed = parse_blob(&blob).unwrap();
+            let code_cap = &parsed.caps[0];
+            let code_blob = parse_code_blob(cap_data(code_cap, parsed.data_section)).unwrap();
+            prop_assert_eq!(code_blob.code, code);
+        }
+
+        /// Bitmask roundtrip: all-ones bitmask survives build → parse.
+        #[test]
+        fn bitmask_roundtrip_all_ones(
+            code in proptest::collection::vec(any::<u8>(), 1..32),
+        ) {
+            let bitmask: Vec<u8> = code.iter().map(|_| 1u8).collect();
+            let blob = build_simple_blob(&code, &bitmask, &[]);
+            let parsed = parse_blob(&blob).unwrap();
+            let code_cap = &parsed.caps[0];
+            let code_blob = parse_code_blob(cap_data(code_cap, parsed.data_section)).unwrap();
+            prop_assert_eq!(code_blob.bitmask, bitmask);
+        }
+
+        /// Bitmask roundtrip: arbitrary bitmask survives build → parse.
+        #[test]
+        fn bitmask_roundtrip_arbitrary(
+            code in proptest::collection::vec(any::<u8>(), 1..32),
+            raw_bitmask in proptest::collection::vec(0u8..=1, 1..32),
+        ) {
+            let bitmask: Vec<u8> = raw_bitmask[..code.len().min(raw_bitmask.len())].to_vec();
+            let code = &code[..bitmask.len()];
+            let blob = build_simple_blob(code, &bitmask, &[]);
+            let parsed = parse_blob(&blob).unwrap();
+            let code_cap = &parsed.caps[0];
+            let code_blob = parse_code_blob(cap_data(code_cap, parsed.data_section)).unwrap();
+            prop_assert_eq!(code_blob.bitmask, bitmask);
+        }
+
+        /// Jump table roundtrip: jump table entries survive build → parse.
+        #[test]
+        fn jump_table_roundtrip(
+            code in proptest::collection::vec(any::<u8>(), 4..32),
+            jump_table in proptest::collection::vec(0u32..256, 1..8),
+        ) {
+            let bitmask: Vec<u8> = code.iter().map(|_| 1u8).collect();
+            let blob = build_simple_blob(&code, &bitmask, &jump_table);
+            let parsed = parse_blob(&blob).unwrap();
+            let code_cap = &parsed.caps[0];
+            let code_blob = parse_code_blob(cap_data(code_cap, parsed.data_section)).unwrap();
+            prop_assert_eq!(code_blob.jump_table, jump_table);
+        }
+
+        /// parse_blob never panics on arbitrary input.
+        #[test]
+        fn parse_blob_no_panic(
+            data in proptest::collection::vec(any::<u8>(), 0..128)
+        ) {
+            let _ = parse_blob(&data);
+        }
+
+        /// parse_code_blob never panics on arbitrary input.
+        #[test]
+        fn parse_code_blob_no_panic(
+            data in proptest::collection::vec(any::<u8>(), 0..128)
+        ) {
+            let _ = parse_code_blob(&data);
+        }
+
+        /// Empty blob is rejected.
+        #[test]
+        fn empty_blob_rejected() {
+            prop_assert!(parse_blob(&[]).is_none());
+        }
+
+        /// Blob with wrong magic is rejected.
+        #[test]
+        fn wrong_magic_rejected(magic in any::<u32>()) {
+            prop_assume!(magic != JAR_MAGIC);
+            let mut blob = vec![0u8; HEADER_SIZE];
+            blob[0..4].copy_from_slice(&magic.to_le_bytes());
+            prop_assert!(parse_blob(&blob).is_none());
+        }
+    }
+}
