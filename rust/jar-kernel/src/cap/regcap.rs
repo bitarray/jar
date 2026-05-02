@@ -1,4 +1,4 @@
-//! RegisteredCap variants.
+//! RegCap variants.
 //!
 //! Per spec §01 (event-redesign): capabilities are the kernel's authority
 //! primitive. They live in CNode slots (persistent) or Frames (ephemeral).
@@ -18,7 +18,7 @@
 //! variant determines which pubkeys mint_attest_cap may produce caps for.
 //!
 //! Each variant is a named struct so generic code can pass a variant by
-//! reference. The `RegisteredCap` enum wraps them as a sum type.
+//! reference. The `RegCap` enum wraps them as a sum type.
 
 use std::sync::Arc;
 
@@ -186,17 +186,17 @@ pub fn is_identity_key(key: &KeyId) -> bool {
 }
 
 // -----------------------------------------------------------------------------
-// RegisteredCap sum type
+// RegCap sum type
 // -----------------------------------------------------------------------------
 
 /// σ-resident capability shapes. Each variant has persistent identity
 /// in `σ.cap_registry` (a CapId); references from `vault.slots` resolve
 /// here via lookup. When a registered cap is projected into a Frame
 /// during invocation init, it becomes
-/// `ProtocolCap::Registered { id, cap: RegisteredCap }`.
+/// `ProtocolCap::Registered { id, cap: RegCap }`.
 ///
 /// Frame-only kinds (SelfId, Caller*, AttestationScope, the home
-/// VaultRef projection) are NOT in `RegisteredCap`; they live as
+/// VaultRef projection) are NOT in `RegCap`; they live as
 /// top-level arms of `Cap` and never enter σ.
 ///
 /// Vault lifetime is tracked by reachability — a Vault is alive iff its
@@ -204,7 +204,7 @@ pub fn is_identity_key(key: &KeyId) -> bool {
 /// reachable Vault references it. There is no separate `Vault(owner)`
 /// cap.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub enum RegisteredCap {
+pub enum RegCap {
     VaultRef(VaultRefCap),
     Code(CodeCap),
     Data(DataCap),
@@ -215,11 +215,11 @@ pub enum RegisteredCap {
     AttestationAggregate(AttestationAggregateCap),
 }
 
-impl RegisteredCap {
+impl RegCap {
     pub fn vault_id(&self) -> Option<VaultId> {
         match self {
-            RegisteredCap::VaultRef(c) => Some(c.vault_id),
-            RegisteredCap::EventEndpoint(c) => Some(c.vault_id),
+            RegCap::VaultRef(c) => Some(c.vault_id),
+            RegCap::EventEndpoint(c) => Some(c.vault_id),
             _ => None,
         }
     }
@@ -282,7 +282,7 @@ pub enum ResourceKind {
 /// One entry in the kernel's cap registry.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct CapRecord {
-    pub cap: RegisteredCap,
+    pub cap: RegCap,
     pub issuer: Option<CapId>,
     pub narrowing: Vec<u8>,
 }

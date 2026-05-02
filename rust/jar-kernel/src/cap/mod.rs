@@ -1,4 +1,4 @@
-//! Capabilities — the `RegisteredCap` enum (σ-resident shapes), the
+//! Capabilities — the `RegCap` enum (σ-resident shapes), the
 //! `ProtocolCap` enum (jar-kernel's impl of `javm::ProtocolCap`), and
 //! the `Cap` alias (the complete Frame cap type
 //! `javm::Cap<ProtocolCap>` — what's actually in a cap-table cell).
@@ -6,10 +6,10 @@
 pub mod attest;
 pub mod pinning;
 pub mod protocol;
-pub mod registered;
+pub mod regcap;
 
 pub use protocol::{KERNEL_CAP_SLOT, ProtocolCap};
-pub use registered::*;
+pub use regcap::*;
 
 /// The complete Frame cap type — a cap-table cell holding any of
 /// `Empty`, `Code`, `Data`, `FrameRef`, or `Protocol(ProtocolCap)`.

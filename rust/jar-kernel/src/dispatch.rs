@@ -23,7 +23,7 @@
 //! index in `σ.dispatch_endpoints`. Mirrors apply_block's transact
 //! addressing.
 
-use crate::cap::RegisteredCap;
+use crate::cap::RegCap;
 use crate::runtime::{Hardware, NodeOffchain};
 use crate::transact;
 use crate::types::{AttestationEntry, Command, KResult, KernelError, State, VaultId};
@@ -68,7 +68,7 @@ pub fn handle_inbound<H: Hardware>(
             ))
         })?;
     let endpoint = match state.cap_record(cap_id)?.cap.clone() {
-        RegisteredCap::EventEndpoint(e) => e,
+        RegCap::EventEndpoint(e) => e,
         other => {
             return Err(KernelError::Internal(format!(
                 "σ.dispatch_endpoints[{slot_idx}] is not EventEndpointCap: {other:?}"
@@ -106,7 +106,7 @@ pub fn handle_inbound_dispatch<H: Hardware>(
 ) -> KResult<Vec<Command>> {
     for (slot_idx, cap_id) in state.dispatch_endpoints.iter().enumerate() {
         let record = state.cap_record(*cap_id)?;
-        if let RegisteredCap::EventEndpoint(e) = &record.cap
+        if let RegCap::EventEndpoint(e) = &record.cap
             && e.vault_id == entrypoint
         {
             let path = (slot_idx as u32).to_le_bytes().to_vec();

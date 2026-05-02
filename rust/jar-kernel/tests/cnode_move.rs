@@ -17,8 +17,7 @@ use jar_kernel::cap::{Cap, ProtocolCap};
 use jar_kernel::state::cap_registry;
 use jar_kernel::vm::foreign_cnode::VaultCnodeView;
 use jar_kernel::{
-    CapRecord, DataCap, EventEndpointCap, RegisteredCap, State, Vault, VaultId, VaultRefCap,
-    VaultRights,
+    CapRecord, DataCap, EventEndpointCap, RegCap, State, Vault, VaultId, VaultRefCap, VaultRights,
 };
 
 /// Build a State with one Vault and a Data cap registered + placed at
@@ -30,7 +29,7 @@ fn state_with_one_data_cap(slot: u8) -> (State, VaultId, jar_kernel::CapId) {
     let cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
-            cap: RegisteredCap::Data(DataCap {
+            cap: RegCap::Data(DataCap {
                 content: Arc::new(b"sample data".to_vec()),
                 page_count: 1,
             }),
@@ -55,7 +54,7 @@ fn fc_take_returns_registered_and_clears_slot() {
     match cap {
         Cap::Protocol(ProtocolCap::Registered { id, cap: c }) => {
             assert_eq!(id, cap_id);
-            assert!(matches!(c, RegisteredCap::Data(_)));
+            assert!(matches!(c, RegCap::Data(_)));
         }
         _ => panic!("expected Cap::Protocol(ProtocolCap::Registered{{..}})"),
     }
@@ -84,7 +83,7 @@ fn fc_set_places_registered_into_empty_slot() {
     // Place it back at slot 8.
     let cap = Cap::Protocol(ProtocolCap::Registered {
         id: cap_id,
-        cap: RegisteredCap::Data(DataCap {
+        cap: RegCap::Data(DataCap {
             content: Arc::new(b"sample data".to_vec()),
             page_count: 1,
         }),
@@ -121,7 +120,7 @@ fn fc_set_requires_grant_right() {
     let cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
-            cap: RegisteredCap::Data(DataCap {
+            cap: RegCap::Data(DataCap {
                 content: Arc::new(b"sample data".to_vec()),
                 page_count: 1,
             }),
@@ -131,7 +130,7 @@ fn fc_set_requires_grant_right() {
     );
     let cap = Cap::Protocol(ProtocolCap::Registered {
         id: cap_id,
-        cap: RegisteredCap::Data(DataCap {
+        cap: RegCap::Data(DataCap {
             content: Arc::new(b"sample data".to_vec()),
             page_count: 1,
         }),
@@ -150,7 +149,7 @@ fn fc_set_rejects_event_endpoint_cap() {
     let cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
-            cap: RegisteredCap::EventEndpoint(EventEndpointCap {
+            cap: RegCap::EventEndpoint(EventEndpointCap {
                 vault_id,
                 gas_budget: 0,
                 memory_budget: 0,
@@ -161,7 +160,7 @@ fn fc_set_rejects_event_endpoint_cap() {
     );
     let cap = Cap::Protocol(ProtocolCap::Registered {
         id: cap_id,
-        cap: RegisteredCap::EventEndpoint(EventEndpointCap {
+        cap: RegCap::EventEndpoint(EventEndpointCap {
             vault_id,
             gas_budget: 0,
             memory_budget: 0,
@@ -190,7 +189,7 @@ fn fc_clone_allocates_child_capid() {
         _ => panic!("expected Registered cap"),
     };
     assert_ne!(child_id, parent_id);
-    assert!(matches!(kind, RegisteredCap::Data(_)));
+    assert!(matches!(kind, RegCap::Data(_)));
     // Source slot still occupied (clone doesn't take).
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(7),
@@ -297,7 +296,7 @@ fn place_data_cap(
     let cap_id = cap_registry::alloc(
         state,
         CapRecord {
-            cap: RegisteredCap::Data(DataCap {
+            cap: RegCap::Data(DataCap {
                 content: Arc::new(content),
                 page_count,
             }),
@@ -330,7 +329,7 @@ fn data_cap_round_trips_via_vault_slot() {
     };
     assert_eq!(returned_id, cap_id);
     match &returned_cap {
-        RegisteredCap::Data(d) => {
+        RegCap::Data(d) => {
             assert_eq!(d.page_count, 1);
             assert_eq!(d.content.as_slice(), b"hello");
         }
@@ -370,11 +369,11 @@ fn data_cap_clones_share_arc_content() {
         .expect("fc_clone");
     let (parent_arc, child_arc) = match cap {
         Cap::Protocol(ProtocolCap::Registered {
-            cap: RegisteredCap::Data(d),
+            cap: RegCap::Data(d),
             ..
         }) => {
             let parent = match &state.cap_registry.get(&_parent_id).unwrap().cap {
-                RegisteredCap::Data(p) => Arc::clone(&p.content),
+                RegCap::Data(p) => Arc::clone(&p.content),
                 _ => unreachable!(),
             };
             (parent, d.content)

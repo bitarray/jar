@@ -11,7 +11,7 @@
 //!   matching handler.
 //!
 //! - `ProtocolCap::Registered { id, cap }` — projection of a σ-resident
-//!   cap into the Frame. The `cap` is a `RegisteredCap`; the `id`
+//!   cap into the Frame. The `cap` is a `RegCap`; the `id`
 //!   stays valid across Frame ↔ Vault round-trips so cap_children
 //!   bookkeeping survives the bounce.
 //!
@@ -27,7 +27,7 @@
 
 use crate::cap::{
     AttestationAggregateCap, AttestationCap, AttestationScopeCap, CallerKernelCap, CallerVaultCap,
-    RegisteredCap, SelfCap, VaultRefCap, VaultRights,
+    RegCap, SelfCap, VaultRefCap, VaultRights,
 };
 use crate::types::{CapId, VaultId};
 use javm::cap::ProtocolCap as ProtocolCapT;
@@ -46,13 +46,13 @@ pub enum ProtocolCap {
     HostCall(u8),
     /// A capability with persistent identity in `σ.cap_registry`.
     /// Round-trips between Frame and a Vault preserve `id`.
-    Registered { id: CapId, cap: RegisteredCap },
+    Registered { id: CapId, cap: RegCap },
     // ---- Frame-only kinds ----
     //
     // No `CapId`, no σ presence. Kernel-injected at invocation init or
     // at CALL/REPLY transitions; reclaimed at frame teardown.
     /// Home-vault reference placed at MainFrame slot 1 by the kernel
-    /// at invocation init. Same shape as `RegisteredCap::VaultRef` but
+    /// at invocation init. Same shape as `RegCap::VaultRef` but
     /// with no CapId.
     HomeVaultRef(VaultRefCap),
     /// Per-VM self-identity — pinned at MainFrame slot 2 (`SELF_SLOT`).
@@ -72,9 +72,9 @@ pub enum ProtocolCap {
 }
 
 impl ProtocolCap {
-    /// Borrow the underlying `RegisteredCap`, if this cap projects from
+    /// Borrow the underlying `RegCap`, if this cap projects from
     /// σ. Returns `None` for `HostCall` and any frame-only variant.
-    pub fn as_registered(&self) -> Option<&RegisteredCap> {
+    pub fn as_registered(&self) -> Option<&RegCap> {
         match self {
             ProtocolCap::Registered { cap, .. } => Some(cap),
             _ => None,
@@ -114,7 +114,7 @@ impl ProtocolCapT for ProtocolCap {
         let vr = match self {
             ProtocolCap::HomeVaultRef(vr) => vr,
             ProtocolCap::Registered {
-                cap: RegisteredCap::VaultRef(vr),
+                cap: RegCap::VaultRef(vr),
                 ..
             } => vr,
             _ => return None,

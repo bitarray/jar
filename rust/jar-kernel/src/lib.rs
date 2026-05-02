@@ -22,7 +22,7 @@
 //! - `apply_block`, `transact`, `dispatch`, `proposer`, `reach` — kernel
 //!   loop phases.
 //! - `genesis` — test fixture.
-//! - `types` — type definitions (RegisteredCap enum, Block/Body, Event,
+//! - `types` — type definitions (RegCap enum, Block/Body, Event,
 //!   sidecar entries) shared everywhere.
 
 #![forbid(unsafe_code)]

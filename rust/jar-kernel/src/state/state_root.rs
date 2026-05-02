@@ -43,7 +43,7 @@ pub fn state_root(state: &State) -> Hash {
         push_u64(&mut buf, record.issuer.map(|c| c.0).unwrap_or(0));
         push_u64(&mut buf, record.narrowing.len() as u64);
         buf.extend_from_slice(&record.narrowing);
-        // The RegisteredCap discriminant + payload encoded by debug-form. Cheap
+        // The RegCap discriminant + payload encoded by debug-form. Cheap
         // and canonical given the BTreeMap iteration order.
         let cap_dbg = format!("{:?}", record.cap);
         push_u64(&mut buf, cap_dbg.len() as u64);

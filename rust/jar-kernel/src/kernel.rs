@@ -32,9 +32,7 @@
 //! Hardware ownership: the kernel **owns** `H` directly (no `Arc<H>`).
 //! The runtime creates one `Kernel<H>` per node.
 
-use crate::types::{
-    Block, BlockHash, Event, Hash, KResult, KernelError, RegisteredCap, State, VaultId,
-};
+use crate::types::{Block, BlockHash, Event, Hash, KResult, KernelError, RegCap, State, VaultId};
 
 use crate::apply_block::{ApplyBlockOutcome, BlockOutcome, apply_block};
 use crate::crypto;
@@ -209,8 +207,7 @@ impl<H: Hardware> Kernel<H> {
     /// dispatch endpoint.
     fn subscribe_dispatch_entrypoints(&self) -> KResult<()> {
         for cap_id in &self.last_state.dispatch_endpoints {
-            if let RegisteredCap::EventEndpoint(c) =
-                &cap_registry::lookup(&self.last_state, *cap_id)?.cap
+            if let RegCap::EventEndpoint(c) = &cap_registry::lookup(&self.last_state, *cap_id)?.cap
             {
                 self.hw.subscribe(c.vault_id);
             }
