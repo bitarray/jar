@@ -99,9 +99,7 @@ impl<H: Hardware> ProtocolCapHost<ProtocolCap> for InvocationHost<'_, H> {
     }
 
     fn get(&self, vault: VaultId, slot: u8) -> Option<Cap<ProtocolCap>> {
-        foreign_cnode::slot_cap(self.state, vault, slot)
-            .as_ref()
-            .and_then(foreign_cnode::vault_cap_to_frame)
+        foreign_cnode::get(self.state, vault, slot)
     }
 
     fn take(
@@ -110,13 +108,7 @@ impl<H: Hardware> ProtocolCapHost<ProtocolCap> for InvocationHost<'_, H> {
         slot: u8,
         rights: crate::cap::VaultRights,
     ) -> Option<Cap<ProtocolCap>> {
-        if !rights.revoke {
-            return None;
-        }
-        let cap = foreign_cnode::slot_cap(self.state, vault, slot)?;
-        let frame_cap = foreign_cnode::vault_cap_to_frame(&cap)?;
-        foreign_cnode::slot_set(self.state, vault, slot, None);
-        Some(frame_cap)
+        foreign_cnode::take(self.state, vault, slot, rights)
     }
 
     fn set(
@@ -126,19 +118,7 @@ impl<H: Hardware> ProtocolCapHost<ProtocolCap> for InvocationHost<'_, H> {
         rights: crate::cap::VaultRights,
         cap: Cap<ProtocolCap>,
     ) -> Result<(), Cap<ProtocolCap>> {
-        if !rights.grant {
-            return Err(cap);
-        }
-        match self.state.vaults.get(&vault) {
-            Some(v) if v.slots.get(slot).is_none() => {}
-            _ => return Err(cap),
-        }
-        let vc = match foreign_cnode::frame_to_vault_cap(&cap) {
-            Some(v) => v,
-            None => return Err(cap),
-        };
-        foreign_cnode::slot_set(self.state, vault, slot, Some(vc));
-        Ok(())
+        foreign_cnode::set(self.state, vault, slot, rights, cap)
     }
 
     fn clone(
@@ -147,29 +127,15 @@ impl<H: Hardware> ProtocolCapHost<ProtocolCap> for InvocationHost<'_, H> {
         slot: u8,
         rights: crate::cap::VaultRights,
     ) -> Option<Cap<ProtocolCap>> {
-        if !rights.derive {
-            return None;
-        }
-        let cap = foreign_cnode::slot_cap(self.state, vault, slot)?;
-        foreign_cnode::vault_cap_to_frame(&cap)
+        foreign_cnode::clone(self.state, vault, slot, rights)
     }
 
     fn drop(&mut self, vault: VaultId, slot: u8, rights: crate::cap::VaultRights) -> bool {
-        if !rights.revoke {
-            return false;
-        }
-        if foreign_cnode::slot_cap(self.state, vault, slot).is_none() {
-            return false;
-        }
-        foreign_cnode::slot_set(self.state, vault, slot, None);
-        true
+        foreign_cnode::drop(self.state, vault, slot, rights)
     }
 
     fn is_empty(&self, vault: VaultId, slot: u8) -> bool {
-        match self.state.vaults.get(&vault) {
-            Some(v) => v.slots.get(slot).is_none(),
-            None => true,
-        }
+        foreign_cnode::is_empty(self.state, vault, slot)
     }
 }
 

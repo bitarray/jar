@@ -1,5 +1,5 @@
-//! Cap-table host adapter — `vault.slots` ↔ Frame `Cap` translation
-//! and ProtocolCapHost slot ops.
+//! Cap-table host adapter helpers — `vault.slots` ↔ Frame `Cap`
+//! translation and rights-checked slot operations.
 //!
 //! After CapId removal, `vault.slots[N]` holds `RegCap` values
 //! directly. Translation between `RegCap` and the Frame's `Cap`
@@ -12,25 +12,20 @@
 //!   between Vault and Frame mid-VM. `take` / `clone` on those return
 //!   `None`.
 //!
-//! Two `ProtocolCapHost` implementors live in this crate:
-//!
-//! - [`VaultCnodeView`] — the slim adapter; just `&mut State`. Used
-//!   by tests that exercise cap-table mutation in isolation. Its
-//!   `call` returns Fault (no kernel ctx).
-//! - [`crate::vm::InvocationHost`] — the production adapter; carries
-//!   the full per-invocation context (commands, role, traces, hw,
-//!   etc) and dispatches CALL into the host-call handlers.
-//!
-//! Both share the slot helpers (`slot_cap` / `slot_set`) and the
-//! cap-shape projection helpers (`vault_cap_to_frame` /
-//! `frame_to_vault_cap`).
+//! The rights-checked ops (`take` / `set` / `clone` / `drop` /
+//! `is_empty` / `get`) are exposed as free functions. The production
+//! `ProtocolCapHost` impl on [`crate::vm::InvocationHost`] delegates
+//! to them; tests that exercise cap-table semantics in isolation can
+//! call them directly without constructing a full host.
 
 use std::sync::Arc;
 
-use javm::cap::ProtocolCapHost;
-
 use crate::cap::{Cap, ProtocolCap, RegCap, VaultRights};
 use crate::types::{State, VaultId};
+
+// =============================================================================
+// Slot accessors (low-level, no rights checks)
+// =============================================================================
 
 /// Read the `RegCap` at `(vault, slot)`, if any.
 pub(crate) fn slot_cap(state: &State, vault: VaultId, slot: u8) -> Option<RegCap> {
@@ -48,10 +43,14 @@ pub(crate) fn slot_set(state: &mut State, vault: VaultId, slot: u8, value: Optio
     state.vaults.insert(vault, Arc::new(v));
 }
 
+// =============================================================================
+// Cap-shape projection
+// =============================================================================
+
 /// Translate a `RegCap` into the Frame cap-table representation.
 /// Returns `None` for kinds that don't have a `ProtocolCap` variant
 /// (Code / Data are container-bound).
-pub(crate) fn vault_cap_to_frame(cap: &RegCap) -> Option<Cap> {
+pub fn vault_cap_to_frame(cap: &RegCap) -> Option<Cap> {
     match cap {
         RegCap::VaultRef(vr) => Some(Cap::Protocol(ProtocolCap::VaultRef(*vr))),
         RegCap::Resource(r) => Some(Cap::Protocol(ProtocolCap::Resource(r.clone()))),
@@ -61,7 +60,7 @@ pub(crate) fn vault_cap_to_frame(cap: &RegCap) -> Option<Cap> {
 
 /// Translate a Frame cap back to a `RegCap` for placement into
 /// `vault.slots`. Returns `None` if the cap can't legally live in σ.
-pub(crate) fn frame_to_vault_cap(cap: &Cap) -> Option<RegCap> {
+pub fn frame_to_vault_cap(cap: &Cap) -> Option<RegCap> {
     match cap {
         Cap::Protocol(ProtocolCap::VaultRef(vr)) => Some(RegCap::VaultRef(*vr)),
         Cap::Protocol(ProtocolCap::Resource(r)) => Some(RegCap::Resource(r.clone())),
@@ -70,86 +69,76 @@ pub(crate) fn frame_to_vault_cap(cap: &Cap) -> Option<RegCap> {
 }
 
 // =============================================================================
-// VaultCnodeView — slim test-only adapter
+// Rights-checked slot operations
 // =============================================================================
 
-/// Test-only adapter: just `&mut State`, no kernel context. CALL on a
-/// protocol cap reached through this view returns `Fault` because there
-/// is no place to dispatch host-call work.
-pub struct VaultCnodeView<'a> {
-    pub state: &'a mut State,
+/// `ProtocolCapHost::get` — read-only fetch.
+pub fn get(state: &State, vault: VaultId, slot: u8) -> Option<Cap> {
+    slot_cap(state, vault, slot)
+        .as_ref()
+        .and_then(vault_cap_to_frame)
 }
 
-impl<'a> VaultCnodeView<'a> {
-    pub fn new(state: &'a mut State) -> Self {
-        Self { state }
+/// `ProtocolCapHost::take` — fetch and clear, gated by `rights.revoke`.
+pub fn take(state: &mut State, vault: VaultId, slot: u8, rights: VaultRights) -> Option<Cap> {
+    if !rights.revoke {
+        return None;
     }
+    let cap = slot_cap(state, vault, slot)?;
+    let frame_cap = vault_cap_to_frame(&cap)?;
+    slot_set(state, vault, slot, None);
+    Some(frame_cap)
 }
 
-impl ProtocolCapHost<ProtocolCap> for VaultCnodeView<'_> {
-    fn call(
-        &mut self,
-        cap: ProtocolCap,
-        _vm: &mut javm::kernel::InvocationKernel<ProtocolCap>,
-    ) -> javm::cap::CallOutcome {
-        javm::cap::CallOutcome::Fault(format!("CALL via VaultCnodeView (no kernel ctx): {cap:?}"))
+/// `ProtocolCapHost::set` — place into an empty slot, gated by
+/// `rights.grant`. Returns `Err(cap)` if the host rejects placement.
+pub fn set(
+    state: &mut State,
+    vault: VaultId,
+    slot: u8,
+    rights: VaultRights,
+    cap: Cap,
+) -> Result<(), Cap> {
+    if !rights.grant {
+        return Err(cap);
     }
-
-    fn get(&self, vault: VaultId, slot: u8) -> Option<Cap> {
-        slot_cap(self.state, vault, slot)
-            .as_ref()
-            .and_then(vault_cap_to_frame)
+    match state.vaults.get(&vault) {
+        Some(v) if v.slots.get(slot).is_none() => {}
+        _ => return Err(cap),
     }
+    let vc = match frame_to_vault_cap(&cap) {
+        Some(v) => v,
+        None => return Err(cap),
+    };
+    slot_set(state, vault, slot, Some(vc));
+    Ok(())
+}
 
-    fn take(&mut self, vault: VaultId, slot: u8, rights: VaultRights) -> Option<Cap> {
-        if !rights.revoke {
-            return None;
-        }
-        let cap = slot_cap(self.state, vault, slot)?;
-        let frame_cap = vault_cap_to_frame(&cap)?;
-        slot_set(self.state, vault, slot, None);
-        Some(frame_cap)
+/// `ProtocolCapHost::clone` — read-only copy, gated by `rights.derive`.
+pub fn clone(state: &State, vault: VaultId, slot: u8, rights: VaultRights) -> Option<Cap> {
+    if !rights.derive {
+        return None;
     }
+    let cap = slot_cap(state, vault, slot)?;
+    vault_cap_to_frame(&cap)
+}
 
-    fn set(&mut self, vault: VaultId, slot: u8, rights: VaultRights, cap: Cap) -> Result<(), Cap> {
-        if !rights.grant {
-            return Err(cap);
-        }
-        match self.state.vaults.get(&vault) {
-            Some(v) if v.slots.get(slot).is_none() => {}
-            _ => return Err(cap),
-        }
-        let vc = match frame_to_vault_cap(&cap) {
-            Some(v) => v,
-            None => return Err(cap),
-        };
-        slot_set(self.state, vault, slot, Some(vc));
-        Ok(())
+/// `ProtocolCapHost::drop` — clear the slot, gated by `rights.revoke`.
+pub fn drop(state: &mut State, vault: VaultId, slot: u8, rights: VaultRights) -> bool {
+    if !rights.revoke {
+        return false;
     }
-
-    fn clone(&mut self, vault: VaultId, slot: u8, rights: VaultRights) -> Option<Cap> {
-        if !rights.derive {
-            return None;
-        }
-        let cap = slot_cap(self.state, vault, slot)?;
-        vault_cap_to_frame(&cap)
+    if slot_cap(state, vault, slot).is_none() {
+        return false;
     }
+    slot_set(state, vault, slot, None);
+    true
+}
 
-    fn drop(&mut self, vault: VaultId, slot: u8, rights: VaultRights) -> bool {
-        if !rights.revoke {
-            return false;
-        }
-        if slot_cap(self.state, vault, slot).is_none() {
-            return false;
-        }
-        slot_set(self.state, vault, slot, None);
-        true
-    }
-
-    fn is_empty(&self, vault: VaultId, slot: u8) -> bool {
-        match self.state.vaults.get(&vault) {
-            Some(v) => v.slots.get(slot).is_none(),
-            None => true,
-        }
+/// `ProtocolCapHost::is_empty` — predicate.
+pub fn is_empty(state: &State, vault: VaultId, slot: u8) -> bool {
+    match state.vaults.get(&vault) {
+        Some(v) => v.slots.get(slot).is_none(),
+        None => true,
     }
 }
