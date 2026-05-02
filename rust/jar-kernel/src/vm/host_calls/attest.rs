@@ -1,44 +1,33 @@
-//! Attestation host calls — stub for the event-redesign migration.
+//! `mint_attest_cap` host call (verify-only).
 //!
-//! In the event-redesign:
-//! - `attest(cap, blob)` is retired (cap-as-proof; no exercise).
-//! - `attestation_key(cap)` is retired (key field public on the cap).
-//! - `result_equal(cap, blob)` is retired (ResultCap collapses into
-//!   AttestationCap with IDENTITY_KEY).
+//! In the event-redesign the AttestationCap is the proof itself —
+//! its existence in a Vault slot or Frame means the kernel vouched
+//! that `key` signed `blob_hash` (or that `key == IDENTITY_KEY` and
+//! the kernel vouched for the computation directly). There is no
+//! separate `attest()` exercise call; the gate is mint-time.
 //!
-//! Replacements (`mint_attest_cap`, `setScore`, `emit_event`) live in
-//! their own modules; concrete implementations land in Stage C/D.
+//! Mint authority comes from the `AttestationAuthority` cap the
+//! kernel injects into verify. Scope = `Unlimited` (apply_block-
+//! context verifies and network-arrived event verifies) or
+//! `Restricted(seen_keys)` (dispatch-context emits, where the
+//! authority is scoped to the per-(dispatch_endpoint, cycle) seen
+//! set). Mint attempts for a key outside the authority's scope
+//! return `RC_AUTHORITY`.
+//!
+//! Concrete implementation is stubbed; Stage D wires the parameter
+//! decoding (authority cap-ref, key bytes, blob hash, optional sig
+//! bytes), the scope check, and the cap-registry insert.
 
 use crate::runtime::Hardware;
 use crate::types::KResult;
 use crate::vm::{HostCallOutcome, InvocationCtx, Vm};
 
-/// Stub: attest is retired. Always faults.
-pub fn host_attest<H: Hardware>(
+/// Stub: mint_attest_cap not yet wired. Always faults.
+pub fn host_mint_attest_cap<H: Hardware>(
     _vm: &mut Vm,
     _ctx: &mut InvocationCtx<'_, H>,
 ) -> KResult<HostCallOutcome> {
     Ok(HostCallOutcome::Fault(
-        "attest is retired in event-redesign; use mint_attest_cap inside verify".into(),
-    ))
-}
-
-/// Stub: attestation_key is retired (cap.key is public). Always faults.
-pub fn host_attestation_key<H: Hardware>(
-    _vm: &mut Vm,
-    _ctx: &mut InvocationCtx<'_, H>,
-) -> KResult<HostCallOutcome> {
-    Ok(HostCallOutcome::Fault(
-        "attestation_key is retired in event-redesign; cap.key is directly accessible".into(),
-    ))
-}
-
-/// Stub: result_equal is retired. Always faults.
-pub fn host_result_equal<H: Hardware>(
-    _vm: &mut Vm,
-    _ctx: &mut InvocationCtx<'_, H>,
-) -> KResult<HostCallOutcome> {
-    Ok(HostCallOutcome::Fault(
-        "result_equal is retired in event-redesign; use mint_attest_cap with IDENTITY_KEY".into(),
+        "mint_attest_cap is stubbed; concrete handler lands in Stage D".into(),
     ))
 }

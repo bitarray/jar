@@ -1,19 +1,24 @@
-//! Host-call ABI: protocol slot numbers and register conventions.
+//! Host-call ABI for the event-redesign: protocol slot numbers and
+//! register conventions.
 //!
-//! javm's `KernelResult::ProtocolCall { slot }` carries the protocol slot
-//! number (1..=28). We assign one slot per kernel host call. Args + return
-//! values flow through registers φ[7..12] and through guest memory windows
-//! addressed by pointer arguments.
+//! javm's `KernelResult::ProtocolCall { slot }` carries the protocol
+//! slot number (1..=28). The event-redesign collapses the prior host
+//! surface into three calls — `emit_event`, `mint_attest_cap`, and
+//! `setScore`. Older slots (Attest / SlotClear / SlotRead /
+//! AttestationKey / ResultEqual) are retired; their slot numbers
+//! deliberately do not get re-used so any guest blob still compiled
+//! against the old ABI surfaces cleanly via `from_slot`'s "unknown
+//! protocol slot" error.
 //!
 //! Register conventions:
 //! - φ[7]..φ[12] carry up to 6 inputs.
-//! - φ[7] carries the primary return value; φ[8] the secondary (when used).
+//! - φ[7] carries the primary return value; φ[8] the secondary.
 //! - Pointer/length pairs reference the guest's flat memory window.
 
 use crate::types::KernelError;
 
-/// Sentinel returned from host calls signalling success when the call has no
-/// natural return value.
+/// Sentinel returned from host calls signalling success when the call
+/// has no natural return value.
 pub const RC_OK: u64 = 0;
 
 /// Generic error sentinel.
@@ -22,65 +27,51 @@ pub const RC_ERR: u64 = u64::MAX;
 /// "None" / "absent" sentinel for read-style host calls.
 pub const RC_NONE: u64 = u64::MAX - 1;
 
-/// Read-only context attempted a mutating host call.
+/// Read-only context attempted a mutating host call (e.g. process
+/// invocation calling `mint_attest_cap` or `setScore`, both of which
+/// are verify-only).
 pub const RC_READONLY: u64 = u64::MAX - 2;
 
-/// Quota exceeded (storage_write).
+/// Quota exceeded.
 pub const RC_QUOTA: u64 = u64::MAX - 3;
 
-/// Pinning violation (state-level cnode grant / move, or arg-scan at
-/// invocation entry).
-pub const RC_PINNING: u64 = u64::MAX - 4;
+/// Authority scope violation (mint_attest_cap for a key outside the
+/// AttestationAuthority's restricted seen-set).
+pub const RC_AUTHORITY: u64 = u64::MAX - 4;
 
-/// Cap not found / slot empty.
+/// Cap not found / slot empty / malformed input.
 pub const RC_BAD_CAP: u64 = u64::MAX - 5;
 
-/// The protocol slot numbers we assign to each kernel host call. javm reserves
-/// slots 1..=28 as ProtocolCaps; we use a subset, with reserved gaps where
-/// host calls have retired — see below.
-///
-/// Reserved gaps:
-/// - Slot 1 / 2 / 3 — formerly `Gas` / `SelfId` / `Caller`, retired in
-///   favour of `Capability::Gas` / `SelfId` / `CallerVault` / `CallerKernel`
-///   placed at ephemeral sub-slots 3 / 2 / 1 by the kernel at invocation
-///   entry. Guests read them via cap-ref into the ephemeral table.
-/// - Slot 7 / 8 / 9 — formerly `CnodeGrant` / `CnodeRevoke` / `CnodeMove`,
-///   retired in favour of javm management ecallis (`MGMT_DROP`, dynamic-ecall
-///   `MOVE` / `COPY`) operating through cap-indirection on the unified
-///   cap-table.
-/// - Slot 10 — formerly `CapDerive`, retired (replacement direction: javm
-///   `MGMT_DOWNGRADE`).
-/// - Slot 11 — formerly `CapCall`, retired in favour of plain javm CALL on
-///   a Handle / Callable cap-table slot.
-/// - Slot 12 / 13 / 14 — formerly `VaultInitialize` / `CreateVault` /
-///   `QuotaSet`, retired (these are kernel-internal operations triggered by
-///   `Command::*` post-execution, not guest-visible host calls).
-/// - Slot 17 — formerly `AttestationAggregate`, retired (was a no-op stub
-///   returning success; BLS aggregation isn't wired yet).
-/// - Slot 20 — formerly `SlotEmit`, retired (step-3 emit is unimplemented).
+/// Protocol slots assigned to the event-redesign host calls. Slot
+/// numbers are kept stable so guest blobs and on-chain code can pin
+/// them explicitly.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 #[repr(u8)]
 pub enum HostCall {
-    Attest = 15,
-    AttestationKey = 16,
-    ResultEqual = 18,
-    SlotClear = 19,
-    /// Read the prior-slot SCALE bytes into a guest memory window. Only valid
-    /// during dispatch step-3 (`AggregateMerge`).
-    SlotRead = 21,
+    /// `emit_event(target_path, blob)` — uniform void emit. Available
+    /// in both verify and process. Routes through `Command::Emit` (or
+    /// the hardware short-circuit hook for self-only-subbed dispatch
+    /// endpoints).
+    EmitEvent = 4,
+    /// `mint_attest_cap(authority, key, blob, sig?)` — verify-only.
+    /// Cap's existence is the proof; no separate exercise call. Scope
+    /// is enforced by the kernel against the verify-context
+    /// `AttestationAuthority` cap.
+    MintAttestCap = 5,
+    /// `setScore(identifier, score)` — verify-only. Buffers the
+    /// verifying event into the per-(endpoint, cycle) max-register;
+    /// collisions defer to next cycle.
+    SetScore = 6,
 }
 
 impl HostCall {
     pub fn from_slot(slot: u8) -> Result<HostCall, KernelError> {
         match slot {
-            15 => Ok(HostCall::Attest),
-            16 => Ok(HostCall::AttestationKey),
-            18 => Ok(HostCall::ResultEqual),
-            19 => Ok(HostCall::SlotClear),
-            21 => Ok(HostCall::SlotRead),
+            4 => Ok(HostCall::EmitEvent),
+            5 => Ok(HostCall::MintAttestCap),
+            6 => Ok(HostCall::SetScore),
             _ => Err(KernelError::Internal(format!(
-                "unknown protocol slot {}",
-                slot
+                "unknown protocol slot {slot}"
             ))),
         }
     }

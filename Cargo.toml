@@ -15,7 +15,6 @@ members = [
     "rust/jar-kernel",
     "rust/jar",
     "rust/jar-test-services/halt",
-    "rust/jar-test-services/slot_clear",
     "components/benches/blake2b",
     "components/benches/ecrecover",
     "components/benches/ed25519",

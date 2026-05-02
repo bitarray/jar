@@ -31,8 +31,9 @@ impl Default for GenesisBuilder {
             block_init_blob: code_blobs::halt_blob().to_vec(),
             transact_blob: code_blobs::halt_blob().to_vec(),
             block_final_blob: code_blobs::halt_blob().to_vec(),
-            // No more slot_clear fixture (host call retired). Halt blob
-            // is a placeholder until Stage E reworks fixtures.
+            // The slot_clear fixture was retired with the event-redesign;
+            // halt is the universal default until chain-specific fixtures
+            // exercise emit_event / setScore / mint_attest_cap.
             dispatch_blob: code_blobs::halt_blob().to_vec(),
         }
     }
