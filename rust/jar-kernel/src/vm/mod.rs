@@ -2,7 +2,7 @@
 //!
 //! `drive_invocation` runs a real PVM VM until terminal (Halt / Panic /
 //! PageFault / OutOfGas), routing every `ProtocolCall(slot)` through
-//! `host_calls::dispatch_host_call`. Each handler returns a
+//! `host_calls::dispatch_protocol_call`. Each handler returns a
 //! `HostCallOutcome` — either `Resume(r0, r1)` (the loop calls
 //! `vm.resume_protocol_call` and continues) or `Fault(reason)` (the
 //! invocation rolls back gracefully).
@@ -30,7 +30,6 @@ use crate::cap::ProtocolCap;
 use crate::cap::attest::AttestCursor;
 use crate::reach::ReachSet;
 use crate::runtime::Hardware;
-use crate::vm::host_abi::HostCall;
 
 /// Convenience alias: the `InvocationKernel` parameterized over the
 /// kernel's protocol-cap payload.
@@ -181,8 +180,7 @@ pub fn drive_invocation<H: Hardware>(
                 )));
             }
             javm::kernel::KernelResult::ProtocolCall { slot } => {
-                let call = HostCall::from_slot(slot)?;
-                match crate::vm::host_calls::dispatch_host_call(call, vm, ctx)? {
+                match crate::vm::host_calls::dispatch_protocol_call(slot, vm, ctx)? {
                     HostCallOutcome::Resume(r0, r1) => vm.resume_protocol_call(r0, r1),
                     HostCallOutcome::Fault(reason) => return Ok(InvocationResult::fault(reason)),
                 }

@@ -34,23 +34,35 @@ pub const KERNEL_CAP_SLOT: u8 = 32;
 
 /// The protocol-cap payload type jar-kernel substitutes into
 /// `javm::Cap::Protocol(_)`. See module-level docs.
+///
+/// Host-call variants (`EmitEvent`, `MintAttestCap`, `SetScore`) are
+/// placed in cap-table slots at invocation init. An `ecalli` from the
+/// guest yields `KernelResult::ProtocolCall { slot }`; the kernel reads
+/// the cap at that slot and dispatches on the variant. Slot numbers are
+/// placement convention; the cap value is the selector.
 #[derive(Clone, Debug)]
 pub enum ProtocolCap {
-    /// A host-call selector. `ecalli N` on a slot containing
-    /// `HostCall(N)` yields `ProtocolCall { slot: N }` to the host.
-    HostCall(u8),
+    // ---- Host-call caps. CALL on one of these yields to the host ----
+    //
+    // Frame-only, kernel-injected at invocation init (no σ presence).
+    /// `emit_event(target_path, blob)` — available in verify and process.
+    EmitEvent,
+    /// `mint_attest_cap(scope, key, blob, sig?)` — verify-only.
+    MintAttestCap,
+    /// `setScore(identifier, score)` — verify-only.
+    SetScore,
 
     /// A VaultRef. Inline value (no `CapId`). Same shape whether the
-    /// cap originated from a `vault.slots[…]` `SlotEntry_DELETED` or
-    /// was kernel-injected (home VaultRef at MainFrame slot 1, sub-CALL
-    /// caller hookup, etc.). Identity is `(vault_id, rights)`.
+    /// cap originated from a `vault.slots[…]` entry or was kernel-
+    /// injected (home VaultRef at MainFrame slot 1, sub-CALL caller
+    /// hookup, etc.). Identity is `(vault_id, rights)`.
     VaultRef(VaultRefCap),
 
     /// A Resource cap projected from `vault.slots`. Pure value — no
     /// CapId since Resource caps no longer go through cap_registry.
     Resource(ResourceCap),
 
-    // ---- Frame-only kernel-injected kinds ----
+    // ---- Frame-only kernel-injected context kinds ----
     //
     // No CapId, no σ presence. Placed at invocation init or at
     // CALL/REPLY transitions; reclaimed at frame teardown.
