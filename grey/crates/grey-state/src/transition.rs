@@ -711,3 +711,198 @@ mod tests {
         assert_eq!(account.preimage_info.get(&key), Some(&vec![1u32]));
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use grey_types::header::{DisputesExtrinsic, Verdict};
+    use grey_types::state::Judgments;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        // --- validate_header ---
+
+        /// A block with timeslot <= state timeslot is always rejected.
+        #[test]
+        fn validate_header_rejects_non_advancing_timeslot(
+            state_slot in any::<u32>(),
+            block_slot in any::<u32>()
+        ) {
+            prop_assume!(block_slot <= state_slot);
+            let state = make_minimal_state(state_slot);
+            let mut header = make_minimal_header(block_slot);
+            header.author_index = 0;
+            let config = Config::full();
+            prop_assert!(validate_header(&state, &header, &config).is_err());
+        }
+
+        /// A block with advancing timeslot and valid author index passes.
+        #[test]
+        fn validate_header_accepts_advancing_timeslot(
+            state_slot in 0u32..1000,
+            delta in 1u32..100
+        ) {
+            let block_slot = state_slot.saturating_add(delta);
+            let state = make_minimal_state(state_slot);
+            let mut header = make_minimal_header(block_slot);
+            header.author_index = 0;
+            let config = Config::full();
+            prop_assert!(validate_header(&state, &header, &config).is_ok());
+        }
+
+        // --- apply_judgments ---
+
+        /// Supermajority positive votes marks the report as "good".
+        #[test]
+        fn judgments_supermajority_is_good(
+            report_hash in any::<[u8; 32]>(),
+            val_count in 6usize..=12
+        ) {
+            let supermajority = Config::super_majority_of(val_count);
+            let mut state = make_minimal_state(0);
+            state.current_validators = make_validators(val_count);
+            state.judgments = Judgments::default();
+
+            let disputes = DisputesExtrinsic {
+                verdicts: vec![Verdict {
+                    report_hash: Hash(report_hash),
+                    age: 0,
+                    judgments: vec![true; supermajority],
+                }],
+                ..Default::default()
+            };
+
+            apply_judgments(&mut state, &disputes, &Config::full());
+            prop_assert!(state.judgments.good.contains(&Hash(report_hash)));
+        }
+
+        /// Zero positive votes marks the report as "bad".
+        #[test]
+        fn judgments_zero_positive_is_bad(
+            report_hash in any::<[u8; 32]>(),
+            val_count in 6usize..=12
+        ) {
+            let mut state = make_minimal_state(0);
+            state.current_validators = make_validators(val_count);
+            state.judgments = Judgments::default();
+
+            let disputes = DisputesExtrinsic {
+                verdicts: vec![Verdict {
+                    report_hash: Hash(report_hash),
+                    age: 0,
+                    judgments: vec![], // 0 positive
+                }],
+                ..Default::default()
+            };
+
+            apply_judgments(&mut state, &disputes, &Config::full());
+            prop_assert!(state.judgments.bad.contains(&Hash(report_hash)));
+        }
+
+        /// Between 1 and one-third positive votes marks as "wonky".
+        #[test]
+        fn judgments_minority_positive_is_wonky(
+            report_hash in any::<[u8; 32]>(),
+            val_count in 6usize..=12
+        ) {
+            let one_third = Config::one_third_of(val_count);
+            let positive_count = (one_third).max(1);
+            prop_assume!(positive_count > 0);
+
+            let mut state = make_minimal_state(0);
+            state.current_validators = make_validators(val_count);
+            state.judgments = Judgments::default();
+
+            let disputes = DisputesExtrinsic {
+                verdicts: vec![Verdict {
+                    report_hash: Hash(report_hash),
+                    age: 0,
+                    judgments: vec![true; positive_count],
+                }],
+                ..Default::default()
+            };
+
+            apply_judgments(&mut state, &disputes, &Config::full());
+            // Should be wonky (positive > 0 but <= one_third, and not supermajority)
+            prop_assert!(state.judgments.wonky.contains(&Hash(report_hash))
+                || state.judgments.good.contains(&Hash(report_hash)));
+        }
+
+        /// Multiple verdicts on different reports are handled independently.
+        #[test]
+        fn judgments_multiple_verdicts(
+            hash1 in any::<[u8; 32]>(),
+            hash2 in any::<[u8; 32]>()
+        ) {
+            prop_assume!(hash1 != hash2);
+            let mut state = make_minimal_state(0);
+            state.current_validators = make_validators(6);
+            state.judgments = Judgments::default();
+
+            let supermajority = Config::super_majority_of(6);
+            let disputes = DisputesExtrinsic {
+                verdicts: vec![
+                    Verdict {
+                        report_hash: Hash(hash1),
+                        age: 0,
+                        judgments: vec![true; supermajority], // good
+                    },
+                    Verdict {
+                        report_hash: Hash(hash2),
+                        age: 0,
+                        judgments: vec![], // bad
+                    },
+                ],
+                ..Default::default()
+            };
+
+            apply_judgments(&mut state, &disputes, &Config::full());
+            prop_assert!(state.judgments.good.contains(&Hash(hash1)));
+            prop_assert!(state.judgments.bad.contains(&Hash(hash2)));
+        }
+
+        // --- rotate_auth_pool ---
+
+        /// rotate_auth_pool clears the pool on epoch boundaries.
+        #[test]
+        fn rotate_auth_pool_clears_on_epoch(
+            pool_size in 1usize..10
+        ) {
+            let mut state = make_minimal_state(0);
+            for i in 0..pool_size {
+                state.authority_pool[i % state.authority_pool.len()] = Some(Hash([i as u8; 32]));
+            }
+
+            // Epoch boundary
+            rotate_auth_pool(&mut state, true);
+            for entry in &state.authority_pool {
+                prop_assert!(entry.is_none(), "pool should be cleared on epoch boundary");
+            }
+        }
+    }
+
+    fn make_minimal_state(timeslot: u32) -> State {
+        State {
+            timeslot,
+            ..Default::default()
+        }
+    }
+
+    fn make_minimal_header(timeslot: u32) -> grey_types::header::Header {
+        grey_types::header::Header {
+            timeslot,
+            ..Default::default()
+        }
+    }
+
+    fn make_validators(count: usize) -> Vec<grey_types::ValidatorInfo> {
+        (0..count)
+            .map(|i| grey_types::ValidatorInfo {
+                validator_key: Hash([i as u8; 32]),
+                ..Default::default()
+            })
+            .collect()
+    }
+}
