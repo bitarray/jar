@@ -87,13 +87,18 @@ impl ProtocolCapT for KernelCap {
     fn is_copyable(&self) -> bool {
         match self {
             // Host-call selectors are stateless ids; copying them is
-            // harmless (a guest that copies one just creates another
-            // way to invoke the same host call).
+            // harmless.
             KernelCap::HostCall(_) => true,
-            // Real caps inherit the pinning rules from `Capability`.
-            // Pinned variants (Dispatch / Transact / Schedule) and
-            // their refs must not be COPYed by the guest.
-            KernelCap::Ephemeral(c) | KernelCap::Registered { cap: c, .. } => !c.is_pinned_or_ref(),
+            // In the event-redesign, the prior pinned variants are gone.
+            // EventEndpointCaps are placed in σ.transact_endpoints /
+            // σ.dispatch_endpoints by governance and are conventionally
+            // not moved out, but the kernel does not enforce this
+            // structurally any more (chain-author concern).
+            //
+            // AttestationAuthority is kernel-passed and shouldn't be
+            // copied to a Vault; we'll handle that at the host-side
+            // adapter rather than via is_copyable.
+            KernelCap::Ephemeral(_) | KernelCap::Registered { .. } => true,
         }
     }
 

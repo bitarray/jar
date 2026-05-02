@@ -107,20 +107,9 @@ impl ForeignCnode<KernelCap> for VaultCnodeView<'_> {
             _ => return Err(cap),
         };
         // Pinning: Vault.slots are not σ-rooted CNodes, but Dispatch /
-        // Transact / Schedule pinning is a global rule independent of
-        // the CNode kind. We check pinning against the Vault's id by
-        // synthesising a CNodeId-shaped guard: pinned variants should
-        // not migrate to Frame, and from Frame they should only return
-        // to their born_in CNode (not a Vault). The conservative read:
-        // reject any pinned-or-ref placement to a Vault slot.
-        if matches!(
-            &capability,
-            Capability::Dispatch(_)
-                | Capability::Transact(_)
-                | Capability::Schedule(_)
-                | Capability::DispatchRef(_)
-                | Capability::TransactRef(_)
-        ) {
+        // EventEndpointCap belongs in σ.transact_endpoints /
+        // σ.dispatch_endpoints, not Vault.slots. Defense in depth.
+        if matches!(&capability, Capability::EventEndpoint(_)) {
             return Err(cap);
         }
         slot_set(self.state, vault, slot, Some(id));
@@ -179,9 +168,9 @@ impl ForeignCnode<KernelCap> for VaultCnodeView<'_> {
 }
 
 /// A cap is "clone-eligible" (allowed to be `MGMT_COPY`'d via
-/// `fc_clone`) iff it is not pinned and not an ephemeral Frame-only
-/// variant. Pinning is enforced separately on `fc_set`; this is a
-/// pre-flight check on the source.
-fn is_clone_eligible(cap: &Capability) -> bool {
-    !cap.is_pinned_or_ref()
+/// `fc_clone`). In the event-redesign there are no pinned variants;
+/// every persistent cap shape is clone-eligible (modulo whether it
+/// makes semantic sense to clone, which the chain-author manages).
+fn is_clone_eligible(_cap: &Capability) -> bool {
+    true
 }

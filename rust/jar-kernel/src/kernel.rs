@@ -111,19 +111,18 @@ impl<H: Hardware> Kernel<H> {
         self.last_block_hash
     }
 
-    /// Handle one inbound Dispatch event at `entrypoint`. Runs step-2 +
-    /// step-3 against `last_state` (RO via `SnapshotStorage`), updates the
-    /// kernel-local dispatch list, and emits any `Dispatch` /
-    /// `BroadcastLite` commands the pipeline produces.
+    /// Handle one inbound dispatch event at `entrypoint`. Stub during
+    /// migration; concrete implementation lands in Stage D.
     pub fn dispatch(&mut self, entrypoint: VaultId, event: &Event) -> KResult<()> {
-        let outcome = handle_inbound_dispatch(
-            &mut self.dispatches,
+        let cmds = handle_inbound_dispatch(
             &self.last_state,
+            &mut self.dispatches,
             entrypoint,
-            event,
+            event.payload.clone(),
+            event.caps.clone(),
             &self.hw,
         )?;
-        for cmd in outcome.commands {
+        for cmd in cmds {
             self.hw.emit(cmd);
         }
         Ok(())
@@ -200,25 +199,13 @@ impl<H: Hardware> Kernel<H> {
         crypto::block_hash(block)
     }
 
-    /// Walk σ.dispatch_space_cnode and tell hardware to subscribe to every
-    /// top-level Dispatch entrypoint's lite-stream.
+    /// Walk σ.dispatch_endpoints and tell hardware to subscribe to every
+    /// dispatch endpoint.
     fn subscribe_dispatch_entrypoints(&self) -> KResult<()> {
-        let cnode_id = match &cap_registry::lookup(
-            &self.last_state,
-            self.last_state.dispatch_space_cnode,
-        )?
-        .cap
-        {
-            Capability::CNode(c) => c.cnode_id,
-            _ => {
-                return Err(KernelError::Internal(
-                    "dispatch_space_cnode is not a CNode cap".into(),
-                ));
-            }
-        };
-        let cn = self.last_state.cnode(cnode_id)?;
-        for (_, cap_id) in cn.iter() {
-            if let Capability::Dispatch(c) = cap_registry::lookup(&self.last_state, cap_id)?.cap {
+        for cap_id in &self.last_state.dispatch_endpoints {
+            if let Capability::EventEndpoint(c) =
+                &cap_registry::lookup(&self.last_state, *cap_id)?.cap
+            {
                 self.hw.subscribe(c.vault_id);
             }
         }

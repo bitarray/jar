@@ -1,6 +1,6 @@
 //! Runtime-side types — `Caller`, `Command`, `KernelRole`.
 
-use super::{BlockHash, SlotContent, VaultId};
+use super::{BlockHash, VaultId};
 
 /// Returned by the `caller()` host call. Discriminates between Vault-to-Vault
 /// sub-CALLs and kernel-fired top-level invocations.
@@ -9,21 +9,25 @@ pub enum Caller {
     /// Sub-CALL from another Vault VM.
     Vault(VaultId),
     /// Top-level invocation by the kernel — userspace branches on the role
-    /// to discriminate Transact vs Dispatch step-2 vs Dispatch step-3 vs
-    /// the two block-policy hooks.
+    /// to discriminate verify vs process.
     Kernel(KernelRole),
 }
 
 /// Where in apply_block / off-chain pipeline a top-level invocation runs.
 ///
-/// Chain-author event[0] / event[-1] handlers run as `TransactEntry`;
-/// they're singled out only by their position in `body.events`, never
-/// by the kernel.
+/// Per the event-redesign: every event-receiving endpoint is fired in
+/// two phases — `Verify` (fresh per event, ro-σ, may panic) and
+/// `Process` (one Vault per cycle, persistent state, rw-σ for
+/// transact endpoints / ro-σ for dispatch).
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum KernelRole {
-    TransactEntry,
-    AggregateStandalone, // Dispatch step-2
-    AggregateMerge,      // Dispatch step-3
+    /// Per-event verify phase. Fresh Vault.initialize each. ro-σ.
+    /// May panic. May call mint_attest_cap and setScore.
+    Verify,
+    /// Per-cycle process phase. One Vault.initialize per cycle.
+    /// Persistent state across calls. rw-σ for transact endpoints,
+    /// ro-σ for dispatch endpoints. Cannot fail logic-wise.
+    Process,
 }
 
 /// Runtime-side commands the kernel emits during execution. The runtime
@@ -31,16 +35,11 @@ pub enum KernelRole {
 /// returns.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Command {
-    /// Send a Dispatch to peers (full stream).
-    Dispatch {
-        entrypoint: VaultId,
-        payload: Vec<u8>,
-        caps: Vec<u8>,
-    },
-    /// Broadcast a slot update on the lite stream of `entrypoint`.
-    BroadcastLite {
-        entrypoint: VaultId,
-        content: SlotContent,
+    /// Send a wire dispatch to peers.
+    Emit {
+        target_path: Vec<u8>,
+        blob: Vec<u8>,
+        attestation_traces: Vec<crate::cap::AttestationEntry>,
     },
     /// Inform hardware about the consensus score of a candidate block —
     /// fork-choice input. Hardware stores it keyed by block_hash.

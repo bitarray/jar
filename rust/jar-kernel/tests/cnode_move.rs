@@ -17,7 +17,8 @@ use jar_kernel::cap::KernelCap;
 use jar_kernel::state::cap_registry;
 use jar_kernel::vm::foreign_cnode::VaultCnodeView;
 use jar_kernel::{
-    CapRecord, Capability, DataCap, DispatchCap, State, Vault, VaultId, VaultRefCap, VaultRights,
+    CapRecord, Capability, DataCap, EventEndpointCap, State, Vault, VaultId, VaultRefCap,
+    VaultRights,
 };
 
 /// Build a State with one Vault and a Data cap registered + placed at
@@ -145,17 +146,15 @@ fn fc_set_requires_grant_right() {
 }
 
 #[test]
-fn fc_set_rejects_pinned_cap() {
+fn fc_set_rejects_event_endpoint_cap() {
     let mut state = State::empty();
     let vault_id = state.next_vault_id();
     state.vaults.insert(vault_id, Arc::new(Vault::new()));
-    let born_in = jar_kernel::state::cnode::cnode_create(&mut state);
     let cap_id = cap_registry::alloc(
         &mut state,
         CapRecord {
-            cap: Capability::Dispatch(DispatchCap {
+            cap: Capability::EventEndpoint(EventEndpointCap {
                 vault_id,
-                born_in,
                 gas_budget: 0,
                 memory_budget: 0,
             }),
@@ -165,9 +164,8 @@ fn fc_set_rejects_pinned_cap() {
     );
     let cap = Cap::Protocol(KernelCap::Registered {
         id: cap_id,
-        cap: Capability::Dispatch(DispatchCap {
+        cap: Capability::EventEndpoint(EventEndpointCap {
             vault_id,
-            born_in,
             gas_budget: 0,
             memory_budget: 0,
         }),
@@ -176,7 +174,7 @@ fn fc_set_rejects_pinned_cap() {
     let result = view.fc_set(vault_id, 0, VaultRights::ALL, cap);
     assert!(
         result.is_err(),
-        "Dispatch caps are pinned; fc_set must reject"
+        "EventEndpointCap belongs in σ.{{transact,dispatch}}_endpoints, not vault.slots; fc_set must reject"
     );
 }
 

@@ -18,8 +18,8 @@
 //! `Frame` struct any more.
 
 use crate::types::{
-    AttestationEntry, Caller, Command, KResult, KernelError, KernelRole, ResultEntry, SlotContent,
-    State, VaultId,
+    AttestationEntry, Caller, Command, KResult, KernelError, KernelRole, ResultEntry, State,
+    VaultId,
 };
 
 pub mod foreign_cnode;
@@ -81,12 +81,6 @@ pub struct InvocationCtx<'a, H: Hardware> {
     pub attest_cursor: &'a mut AttestCursor,
     pub attestation_trace: &'a mut Vec<AttestationEntry>,
     pub result_trace: &'a mut Vec<ResultEntry>,
-    /// Step-3-only: the slot emission, populated by `cap_call` or
-    /// `slot_clear`. The kernel rejects if set twice.
-    pub slot_emission: &'a mut Option<SlotContent>,
-    /// Step-3-only: prior-slot bytes for the entrypoint, surfaced to the
-    /// guest via `HostCall::SlotRead`. `None` outside step-3.
-    pub prev_slot: Option<&'a SlotContent>,
     pub hw: &'a H,
 }
 

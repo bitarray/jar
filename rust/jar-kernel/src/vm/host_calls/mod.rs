@@ -23,6 +23,7 @@ use crate::vm::{HostCallOutcome, InvocationCtx, Vm};
 /// selector slots (`KernelCap::HostCall`), or non-Protocol caps.
 /// Both `Ephemeral` and `Registered` arms surface the underlying
 /// `Capability` — the host-call handlers don't care which.
+#[allow(dead_code)] // stubbed during event-redesign migration; rewired in Stage C/D
 pub(crate) fn fetch_kernel_cap(vm: &Vm, slot: u8) -> Option<&Capability> {
     match vm.cap_table_get(slot) {
         Some(javm::cap::Cap::Protocol(kc)) => kc.as_capability(),
@@ -47,6 +48,7 @@ pub fn dispatch_host_call<H: Hardware>(
 }
 
 /// Read a guest memory window or return a guest fault outcome.
+#[allow(dead_code)] // stubbed during event-redesign migration; rewired in Stage C/D
 pub(crate) fn read_window(vm: &Vm, addr: u32, len: u32, what: &str) -> Result<Vec<u8>, String> {
     if len == 0 {
         return Ok(Vec::new());
@@ -56,6 +58,7 @@ pub(crate) fn read_window(vm: &Vm, addr: u32, len: u32, what: &str) -> Result<Ve
 }
 
 /// Write to a guest memory window or return a guest fault outcome.
+#[allow(dead_code)] // stubbed during event-redesign migration; rewired in Stage C/D
 pub(crate) fn write_window(vm: &mut Vm, addr: u32, data: &[u8], what: &str) -> Result<(), String> {
     if data.is_empty() {
         return Ok(());

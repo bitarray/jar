@@ -133,22 +133,24 @@ pub fn block_hash(block: &Block) -> Hash {
 
 fn encode_body(buf: &mut Vec<u8>, body: &crate::types::Body) {
     push_u64(buf, body.events.len() as u64);
-    for (vid, group) in &body.events {
-        push_u64(buf, vid.0);
-        push_u64(buf, group.len() as u64);
-        for ev in group {
-            push_bytes(buf, &ev.payload);
-            push_bytes(buf, &ev.caps);
-            push_u64(buf, ev.attestation_trace.len() as u64);
-            for a in &ev.attestation_trace {
-                push_bytes(buf, &a.key.0);
-                buf.extend_from_slice(a.blob_hash.as_ref());
-                push_bytes(buf, &a.signature.0);
-            }
-            push_u64(buf, ev.result_trace.len() as u64);
-            for r in &ev.result_trace {
-                push_bytes(buf, &r.blob);
-            }
+    for ev in &body.events {
+        push_bytes(buf, &ev.target_path);
+        push_bytes(buf, &ev.blob);
+        push_u64(buf, ev.attestation_traces.len() as u64);
+        for a in &ev.attestation_traces {
+            push_bytes(buf, &a.key.0);
+            buf.extend_from_slice(a.blob_hash.as_ref());
+            push_bytes(buf, &a.signature.0);
+        }
+    }
+    push_u64(buf, body.schedule_attestation_traces.len() as u64);
+    for sat in &body.schedule_attestation_traces {
+        push_u64(buf, sat.slot_index as u64);
+        push_u64(buf, sat.traces.len() as u64);
+        for a in &sat.traces {
+            push_bytes(buf, &a.key.0);
+            buf.extend_from_slice(a.blob_hash.as_ref());
+            push_bytes(buf, &a.signature.0);
         }
     }
     push_u64(buf, body.attestation_trace.len() as u64);

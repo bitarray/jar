@@ -1,18 +1,28 @@
 //! Capability variants.
 //!
-//! Per spec §01: capabilities are the kernel's authority primitive. They
-//! live in CNode slots (persistent) or Frames (ephemeral). Two pinned
-//! variants (Dispatch / Transact) carry a `born_in` CNode and may not move
-//! across CNodes; their ephemeral counterparts (DispatchRef / TransactRef)
-//! live only in Frames and are derived from a pinned source.
+//! Per spec §01 (event-redesign): capabilities are the kernel's authority
+//! primitive. They live in CNode slots (persistent) or Frames (ephemeral).
+//!
+//! In the event-redesign, the prior pinned `Dispatch` / `Transact` /
+//! `Schedule` caps with `born_in` CNode references collapse into a single
+//! `EventEndpointCap { vault_id, gas_budget, memory_budget }`. There is
+//! no hierarchical cap-graph; the chain's public surface is two flat lists
+//! `σ.transact_endpoints` and `σ.dispatch_endpoints` of EventEndpointCap
+//! entries.
+//!
+//! AttestationCap is the proof itself — minted via `mint_attest_cap`
+//! inside verify (cap's existence is the evidence). ResultCap collapses
+//! into AttestationCap with the IDENTITY_KEY sentinel.
+//!
+//! AttestationAuthority is a kernel-managed cap passed to verify; its
+//! scope determines which pubkeys mint_attest_cap may produce caps for.
 //!
 //! Each variant is a named struct so generic code can pass a variant by
-//! reference (e.g. `&DispatchCap`). The `Capability` enum wraps them as a
-//! sum type.
+//! reference. The `Capability` enum wraps them as a sum type.
 
 use std::sync::Arc;
 
-use crate::types::{CNodeId, CapId, KernelRole, KeyId, VaultId};
+use crate::types::{CNodeId, CapId, Hash, KernelRole, KeyId, Signature, VaultId};
 
 // -----------------------------------------------------------------------------
 // Per-variant structs
@@ -26,57 +36,25 @@ pub struct VaultRefCap {
     pub rights: VaultRights,
 }
 
-/// Persistent Dispatch entrypoint cap; pinned to `born_in`. Carries the
-/// per-invocation `gas_budget` / `memory_budget` the kernel uses when
-/// firing this entrypoint. The entrypoint is trusted-gateway code (the
-/// vault's own gatekeeper); user-supplied per-event budgets don't reach
-/// it directly — the entrypoint decodes the payload and derives sub-
-/// budgets via DERIVE before CALLing into untrusted logic.
+/// EventEndpoint cap. Single shape replacing prior Transact / Dispatch /
+/// Schedule cap variants. Lives in `σ.transact_endpoints` (on-chain) or
+/// `σ.dispatch_endpoints` (off-chain). Position in σ determines firing
+/// context. The Vault's manager handles both verify and process phases,
+/// branching on `caller()` returning `Kernel(KernelRole::Verify)` or
+/// `Kernel(KernelRole::Process)`.
+///
+/// Schedule slots are EventEndpointCaps that the kernel fires with no
+/// body.events entry; identified by chain-author convention (typically
+/// slot 0 of σ.transact_endpoints for block_init, last slot for
+/// block_final, etc.).
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub struct DispatchCap {
+pub struct EventEndpointCap {
     pub vault_id: VaultId,
-    pub born_in: CNodeId,
     pub gas_budget: u64,
     pub memory_budget: u32,
 }
 
-/// Persistent Transact entrypoint cap; pinned to `born_in`. See
-/// [`DispatchCap`] for the budget rationale.
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub struct TransactCap {
-    pub vault_id: VaultId,
-    pub born_in: CNodeId,
-    pub gas_budget: u64,
-    pub memory_budget: u32,
-}
-
-/// Persistent Schedule entrypoint cap; pinned to `born_in`. Kernel-fired
-/// once per block at this slot's position in σ.transact_space_cnode, with
-/// no body event input. Used for chain-author block_init / block_final /
-/// consensus / cleanup hooks. Never `cap_call`'d by userspace; not
-/// derivable to a callable ref. Carries its own budget (no user payload
-/// to decode, but still runs vault code that needs gas/memory).
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub struct ScheduleCap {
-    pub vault_id: VaultId,
-    pub born_in: CNodeId,
-    pub gas_budget: u64,
-    pub memory_budget: u32,
-}
-
-/// Ephemeral Dispatch reference, derived from a `Dispatch`. Frame-only.
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub struct DispatchRefCap {
-    pub vault_id: VaultId,
-}
-
-/// Ephemeral Transact reference, derived from a `Transact`. Frame-only.
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub struct TransactRefCap {
-    pub vault_id: VaultId,
-}
-
-/// Reference to a CNode (used to grant slot positions).
+/// Reference to a CNode (used to grant slot positions in Vault CNodes).
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct CNodeCap {
     pub cnode_id: CNodeId,
@@ -93,28 +71,73 @@ pub struct MetaCap {
     pub over: CapId,
 }
 
-/// Mode-blind attestation handle: kernel decides verify-vs-sign per call.
+/// AttestationCap is the proof: existence means the kernel vouched that
+/// `key` signed `blob_hash`. Minted only via `mint_attest_cap` inside
+/// verify.
+///
+/// `IDENTITY_KEY` (sentinel) collapses the prior ResultCap: an
+/// AttestationCap with `key = IDENTITY_KEY` represents a kernel-vouched
+/// computation output that needs no signature.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct AttestationCap {
     pub key: KeyId,
-    pub scope: AttestationScope,
+    pub blob_hash: Hash,
 }
 
-/// Aggregate signature handle (BLS / threshold). Stubbed for now.
+/// Aggregate signature handle (BLS / threshold). Stubbed for now;
+/// preserved as a separate variant for future BLS-aggregate work.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct AttestationAggregateCap {
     pub key: KeyId,
 }
 
-/// Result handle: produce mode writes blob to result_trace; verify mode
-/// checks blob against trace at the bound index.
-#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
-pub struct ResultCap;
+/// AttestationAuthority cap: kernel-managed; passed to verify as a host
+/// argument. Its scope determines which pubkeys mint_attest_cap may
+/// produce caps for.
+///
+/// - Network-arrived event verify: scope is unlimited.
+/// - emit_event from apply_block (transact / Schedule context): unlimited.
+/// - emit_event from dispatch context: limited to seen-set of source
+///   dispatch endpoint (kernel-tracked per (node, endpoint, cycle)).
+///
+/// The authority is held in a Frame slot during verify; reclaimed at
+/// verify end.
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct AttestationAuthorityCap {
+    /// Authority scope. `None` = unlimited; `Some(set)` = restricted to
+    /// the listed pubkeys.
+    pub scope: AuthorityScope,
+}
+
+/// Scope of an AttestationAuthority cap.
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub enum AuthorityScope {
+    /// Unlimited: any pubkey may be minted for. Used for network event
+    /// verify and apply_block-context emit verify.
+    Unlimited,
+    /// Restricted to the specified pubkeys. Used for dispatch-context
+    /// emit verify.
+    Restricted(Vec<KeyId>),
+}
+
+/// One signature entry in the attestation_trace. Stored per-event, per-
+/// Schedule slot, or block-level cumulative (depending on context).
+#[derive(Clone, Eq, PartialEq, Debug, Default)]
+pub struct AttestationEntry {
+    pub key: KeyId,
+    pub blob_hash: Hash,
+    pub signature: Signature,
+}
+
+impl AttestationEntry {
+    pub fn is_reserved(&self) -> bool {
+        self.signature.is_reserved()
+    }
+}
 
 /// Persistent code capability. Holds a PVM program blob shared across
-/// holders (multiple Vault slots, multiple invocations) via `Arc<[u8]>`.
-/// The blob is immutable; its content hash is computed lazily for
-/// state-root inclusion.
+/// holders via `Arc<[u8]>`. Immutable; content hash is computed lazily
+/// for state-root inclusion.
 #[derive(Clone, Debug)]
 pub struct CodeCap {
     pub blob: Arc<Vec<u8>>,
@@ -122,7 +145,6 @@ pub struct CodeCap {
 
 impl PartialEq for CodeCap {
     fn eq(&self, other: &Self) -> bool {
-        // Pointer-equal Arcs are trivially equal; otherwise compare bytes.
         Arc::ptr_eq(&self.blob, &other.blob) || *self.blob == *other.blob
     }
 }
@@ -130,16 +152,7 @@ impl PartialEq for CodeCap {
 impl Eq for CodeCap {}
 
 /// Persistent data capability. Holds a fixed-size byte payload at 4 KiB
-/// page granularity. Immutable + copyable + refcounted: COPY of a
-/// persistent DataCap (Vault → Frame, Vault → Vault) shares the same
-/// `Arc<Vec<u8>>` content; mutation requires creating a fresh DataCap
-/// with new content (typically by writing to an ephemeral mapped copy
-/// in a running Frame and MOVing the result back).
-///
-/// `page_count` is the logical size in 4 KiB pages; `content` may be
-/// shorter than `page_count * 4096` if trailing zero pages are
-/// implied — the kernel writes zero-padding when materializing into
-/// ephemeral pages.
+/// page granularity. Immutable + copyable + refcounted.
 #[derive(Clone, Debug)]
 pub struct DataCap {
     pub content: Arc<Vec<u8>>,
@@ -162,47 +175,64 @@ pub struct SelfCap {
     pub vault_id: VaultId,
 }
 
-/// Per-frame caller (vault → vault sub-CALL). Lives at ephemeral
-/// sub-slot 1 when the invocation came from another Vault VM.
+/// Per-frame caller (vault → vault sub-CALL).
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct CallerVaultCap {
     pub vault_id: VaultId,
 }
 
-/// Per-frame caller (kernel-fired top-level invocation). Lives at
-/// ephemeral sub-slot 1 when the invocation was kernel-initiated.
+/// Per-frame caller (kernel-fired top-level invocation).
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct CallerKernelCap {
     pub role: KernelRole,
 }
 
 // -----------------------------------------------------------------------------
+// Sentinel pubkey for IDENTITY_KEY
+// -----------------------------------------------------------------------------
+
+/// Reserved sentinel pubkey for kernel-vouched attestations (no signer).
+/// Used by `mint_attest_cap` to mint AttestationCaps that need no
+/// signature — e.g., block_init's prior state-root commitment, or
+/// any chain-author-defined "computation output the kernel vouches for"
+/// (collapsed from prior ResultCap).
+///
+/// Concretely: empty KeyId. Real keys are non-empty.
+pub fn identity_key() -> KeyId {
+    KeyId(Vec::new())
+}
+
+/// Returns true iff the given key is the IDENTITY_KEY sentinel
+/// (kernel-vouched, no signer).
+pub fn is_identity_key(key: &KeyId) -> bool {
+    key.0.is_empty()
+}
+
+// -----------------------------------------------------------------------------
 // Capability sum type
 // -----------------------------------------------------------------------------
 
-/// All capability variants. Persistent variants live in CNodes (and σ); the
-/// two `*Ref` variants are ephemeral and live only in Frames.
+/// All capability variants. Persistent variants live in CNodes (and σ);
+/// ephemeral variants live only in Frames.
 ///
 /// Vault lifetime is tracked by reachability — a Vault is alive iff its
 /// VaultId appears in `state.vaults` and at least one VaultRef in some
 /// reachable CNode references it. There is no separate `Vault(owner)`
-/// cap; reachability-GC (deferred) reclaims unreferenced Vaults.
+/// cap.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Capability {
     VaultRef(VaultRefCap),
     Code(CodeCap),
     Data(DataCap),
-    Dispatch(DispatchCap),
-    Transact(TransactCap),
-    Schedule(ScheduleCap),
-    DispatchRef(DispatchRefCap),
-    TransactRef(TransactRefCap),
+    /// Single endpoint cap shape replacing prior Transact/Dispatch/Schedule.
+    EventEndpoint(EventEndpointCap),
     CNode(CNodeCap),
     Resource(ResourceCap),
     Meta(MetaCap),
-    AttestationCap(AttestationCap),
-    AttestationAggregateCap(AttestationAggregateCap),
-    ResultCap(ResultCap),
+    Attestation(AttestationCap),
+    AttestationAggregate(AttestationAggregateCap),
+    /// Kernel-passed scope cap held in a Frame during verify.
+    AttestationAuthority(AttestationAuthorityCap),
     /// Per-VM self-identity — pinned at MainFrame slot 2 (`SELF_SLOT`).
     SelfId(SelfCap),
     /// Per-frame caller (sub-CALL) — lives at ephemeral sub-slot 1.
@@ -212,32 +242,10 @@ pub enum Capability {
 }
 
 impl Capability {
-    pub fn is_pinned_or_ref(&self) -> bool {
-        matches!(
-            self,
-            Capability::Dispatch(_)
-                | Capability::Transact(_)
-                | Capability::Schedule(_)
-                | Capability::DispatchRef(_)
-                | Capability::TransactRef(_)
-        )
-    }
-
-    pub fn is_ephemeral(&self) -> bool {
-        matches!(
-            self,
-            Capability::DispatchRef(_) | Capability::TransactRef(_)
-        )
-    }
-
     pub fn vault_id(&self) -> Option<VaultId> {
         match self {
             Capability::VaultRef(c) => Some(c.vault_id),
-            Capability::Dispatch(c) => Some(c.vault_id),
-            Capability::Transact(c) => Some(c.vault_id),
-            Capability::Schedule(c) => Some(c.vault_id),
-            Capability::DispatchRef(c) => Some(c.vault_id),
-            Capability::TransactRef(c) => Some(c.vault_id),
+            Capability::EventEndpoint(c) => Some(c.vault_id),
             _ => None,
         }
     }
@@ -247,18 +255,10 @@ impl Capability {
 // Variant-shape helpers
 // -----------------------------------------------------------------------------
 
-/// VaultRef rights. A bag of bits; uses a small struct rather than bitflags.
+/// VaultRef rights. A bag of bits.
 ///
-/// `read` gates *traversal* — a VaultRef without `read` cannot be used as a
-/// cap-ref crossing point in javm's resolve walk (javm only crosses through
-/// caps whose `as_foreign_frame()` returns `Some`, and for `KernelCap` that
-/// requires `rights.read`). The other bits gate the operation at the
-/// final-step VaultRef:
-///
-/// - `initialize` — `cap_call`-equivalent: spawn a VM running the Vault's manager.
-/// - `grant`      — place a cap into a target slot (Frame → Vault MOVE / COPY destination).
-/// - `revoke`     — remove a cap from a slot (Vault → Frame MOVE source, MGMT_DROP).
-/// - `derive`     — produce a narrowed copy (MGMT_COPY source from a Vault).
+/// `read` gates *traversal*. `cap_indirection` gates write access.
+/// `derive` gates narrowing; `initialize` gates spawning a Vault VM.
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 pub struct VaultRights {
     pub read: bool,
@@ -283,8 +283,7 @@ impl VaultRights {
         revoke: false,
         derive: false,
     };
-    /// Read-only traversal: lets a Vault's slots be reached for inspection
-    /// or chaining onward, but no slot mutation.
+    /// Read-only traversal.
     pub const READ: VaultRights = VaultRights {
         read: true,
         initialize: false,
@@ -297,30 +296,17 @@ impl VaultRights {
 /// Resource cap kinds. Quotas are kernel-tracked; placement/use is gated.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum ResourceKind {
-    /// Authorizes creating a fresh Vault, with the given page budget.
     CreateVault { quota_pages: u64 },
-    /// Authorizes setting quotas on the named Vault.
     SetQuota { target: VaultId },
-    /// Authorizes preimage-store for the given page budget.
     PreimageStore { pages: u64 },
 }
 
-/// Meta-op categories. Used for Meta caps that manage other caps.
+/// Meta-op categories.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum MetaOp {
     Grant,
     Revoke,
     Derive,
-}
-
-/// AttestationCap blob scope.
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub enum AttestationScope {
-    /// Userspace supplies the blob at `attest()` time.
-    Direct,
-    /// The blob is the surrounding container minus this trace entry; the
-    /// kernel reconstructs (verifier) or fills in (proposer) post-execution.
-    Sealing,
 }
 
 // -----------------------------------------------------------------------------
@@ -331,14 +317,11 @@ pub enum AttestationScope {
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct CapRecord {
     pub cap: Capability,
-    /// Issuer cap-id (for derived caps); None for caps minted ex nihilo
-    /// (e.g. genesis).
     pub issuer: Option<CapId>,
-    /// Opaque kernel-side narrowing data. Userspace doesn't see this.
     pub narrowing: Vec<u8>,
 }
 
-/// A 256-slot capability table. Used for both Vault slots and σ-rooted CNodes.
+/// A 256-slot capability table. Used for both Vault slots and ephemeral Frames.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct CNode {
     pub slots: [Option<CapId>; 256],

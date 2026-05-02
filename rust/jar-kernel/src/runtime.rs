@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use crate::crypto::ed25519::KeyPair;
-use crate::types::{BlockHash, Command, Hash, KeyId, Signature, SlotContent, State, VaultId};
+use crate::types::{BlockHash, Command, Hash, KeyId, Signature, State, VaultId};
 
 // -----------------------------------------------------------------------------
 // Hardware trait
@@ -100,13 +100,13 @@ pub trait Hardware: Send + Sync {
 // NodeOffchain — per-node state outside σ
 // -----------------------------------------------------------------------------
 
-/// Per-node off-chain state, **not** in σ. Owned by `Kernel<H>`. Slots
-/// persist across blocks but are lost on restart. Bootstrap is chain-
-/// defined; we start with all slots `Empty`.
+/// Per-node off-chain state, **not** in σ. Owned by `Kernel<H>`. Pool
+/// state per (endpoint, cycle) is rebuilt at block boundaries; deferred
+/// entries (collision-defer rule) carry over to the next cycle's pool.
+/// Concrete pool implementation lands in Stage C/D.
 pub struct NodeOffchain {
-    pub slots: BTreeMap<VaultId, SlotContent>,
     pub subscriptions: BTreeSet<VaultId>,
-    /// javm code-cache; reused across handle_inbound_dispatch arrivals.
+    /// javm code-cache; reused across handle_inbound arrivals.
     pub code_cache: javm::CodeCache,
 }
 
@@ -119,21 +119,8 @@ impl Default for NodeOffchain {
 impl NodeOffchain {
     pub fn new() -> Self {
         Self {
-            slots: BTreeMap::new(),
             subscriptions: BTreeSet::new(),
             code_cache: javm::CodeCache::new(),
-        }
-    }
-
-    pub fn slot(&self, ep: VaultId) -> &SlotContent {
-        self.slots.get(&ep).unwrap_or(&SlotContent::Empty)
-    }
-
-    pub fn set_slot(&mut self, ep: VaultId, content: SlotContent) {
-        if matches!(content, SlotContent::Empty) {
-            self.slots.remove(&ep);
-        } else {
-            self.slots.insert(ep, content);
         }
     }
 }
@@ -142,19 +129,15 @@ impl NodeOffchain {
 // In-memory Hardware impl + same-process broadcast bus
 // -----------------------------------------------------------------------------
 
-/// One inbound message arriving at a node.
+/// One inbound message arriving at a node. Wire format mirrors the
+/// event-redesign: target_path resolves to an EventEndpointCap;
+/// blob is opaque; attestation_traces consumed by target's verify.
 #[derive(Clone, Debug)]
 pub enum NetMessage {
-    /// A new Dispatch event for an entrypoint.
-    Dispatch {
-        entrypoint: VaultId,
-        payload: Vec<u8>,
-        caps: Vec<u8>,
-    },
-    /// A lite-stream slot update.
-    LiteUpdate {
-        entrypoint: VaultId,
-        content: SlotContent,
+    Emit {
+        target_path: Vec<u8>,
+        blob: Vec<u8>,
+        attestation_traces: Vec<crate::cap::AttestationEntry>,
     },
 }
 
@@ -260,21 +243,14 @@ impl Hardware for InMemoryHardware {
 
     fn emit(&self, cmd: Command) {
         match cmd {
-            Command::Dispatch {
-                entrypoint,
-                payload,
-                caps,
-            } => self.bus.broadcast(NetMessage::Dispatch {
-                entrypoint,
-                payload,
-                caps,
-            }),
-            Command::BroadcastLite {
-                entrypoint,
-                content,
-            } => self.bus.broadcast(NetMessage::LiteUpdate {
-                entrypoint,
-                content,
+            Command::Emit {
+                target_path,
+                blob,
+                attestation_traces,
+            } => self.bus.broadcast(NetMessage::Emit {
+                target_path,
+                blob,
+                attestation_traces,
             }),
             Command::Score { block_hash, score } => {
                 self.score(block_hash, score);

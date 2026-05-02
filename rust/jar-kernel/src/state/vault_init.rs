@@ -158,32 +158,27 @@ fn translate_persistent(
             // Cap is unmapped on purpose — the init program calls MGMT_MAP.
             Ok(Cap::Data(data_cap))
         }
-        // Pinned variants must not appear in vault.slots — fc_set rejects
-        // their placement. Defense in depth: reject here too.
-        Capability::Dispatch(_)
-        | Capability::Transact(_)
-        | Capability::Schedule(_)
-        | Capability::DispatchRef(_)
-        | Capability::TransactRef(_) => Err(KernelError::Pinning(format!(
-            "pinned cap {:?} found in vault.slots; cannot promote to Frame",
-            std::mem::discriminant(cap)
-        ))),
+        // EventEndpointCaps are placed in σ.transact_endpoints /
+        // dispatch_endpoints, never in vault.slots. Reject if found here.
+        Capability::EventEndpoint(_) => Err(KernelError::Internal(
+            "EventEndpointCap found in vault.slots; should live in σ endpoint lists".into(),
+        )),
         // Ephemeral-only variants must never persist. Finding one here
         // is a kernel bug.
-        Capability::SelfId(_) | Capability::CallerVault(_) | Capability::CallerKernel(_) => {
-            Err(KernelError::Internal(format!(
-                "ephemeral-only cap {:?} found persistently in vault.slots",
-                std::mem::discriminant(cap)
-            )))
-        }
+        Capability::SelfId(_)
+        | Capability::CallerVault(_)
+        | Capability::CallerKernel(_)
+        | Capability::AttestationAuthority(_) => Err(KernelError::Internal(format!(
+            "ephemeral-only cap {:?} found persistently in vault.slots",
+            std::mem::discriminant(cap)
+        ))),
         // All other Registered shapes round-trip unchanged.
         Capability::VaultRef(_)
         | Capability::CNode(_)
         | Capability::Resource(_)
         | Capability::Meta(_)
-        | Capability::AttestationCap(_)
-        | Capability::AttestationAggregateCap(_)
-        | Capability::ResultCap(_) => Ok(Cap::Protocol(KernelCap::Registered {
+        | Capability::Attestation(_)
+        | Capability::AttestationAggregate(_) => Ok(Cap::Protocol(KernelCap::Registered {
             id: cap_id,
             cap: cap.clone(),
         })),
@@ -193,9 +188,8 @@ fn translate_persistent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cap::{CodeCap, DataCap, DispatchCap, VaultRefCap, VaultRights};
+    use crate::cap::{CodeCap, DataCap, EventEndpointCap, VaultRefCap, VaultRights};
     use crate::state::cap_registry;
-    use crate::state::cnode;
     use crate::types::{CapRecord, Vault};
 
     fn empty_state_with_vault(init_cap: u8) -> (State, VaultId) {
@@ -391,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn pinned_cap_in_slot_rejected() {
+    fn endpoint_cap_in_slot_rejected() {
         let (mut state, vault_id) = empty_state_with_vault(64);
         place(
             &mut state,
@@ -401,16 +395,16 @@ mod tests {
                 blob: Arc::new(halt_code_sub_blob()),
             }),
         );
-        // Direct cap_registry placement bypasses fc_set's pinning check.
-        // Test that build_init_cap_table catches it as defense in depth.
-        let cn = cnode::cnode_create(&mut state);
+        // EventEndpointCaps belong in σ.transact_endpoints /
+        // σ.dispatch_endpoints, not vault.slots. Direct cap_registry
+        // placement bypasses fc_set's check; build_init_cap_table
+        // catches it as defense in depth.
         place(
             &mut state,
             vault_id,
             100,
-            Capability::Dispatch(DispatchCap {
+            Capability::EventEndpoint(EventEndpointCap {
                 vault_id: VaultId(0),
-                born_in: cn,
                 gas_budget: 0,
                 memory_budget: 0,
             }),
@@ -424,8 +418,8 @@ mod tests {
             javm::PvmBackend::Default,
         )
         .err()
-        .expect("Pinning expected");
-        assert!(matches!(err, KernelError::Pinning(_)));
+        .expect("rejection expected");
+        assert!(matches!(err, KernelError::Internal(_)));
     }
 
     #[test]

@@ -1,8 +1,12 @@
 //! Kernel state (σ).
 //!
-//! σ contains: vaults, cnodes, cap_registry, references for the public
-//! surfaces (transact_space_cnode, dispatch_space_cnode), and bookkeeping
+//! σ contains: vaults, cnodes, cap_registry, flat lists for the public
+//! surfaces (transact_endpoints, dispatch_endpoints), and bookkeeping
 //! (monotonic id counters).
+//!
+//! Per the event-redesign: the prior `transact_space_cnode` /
+//! `dispatch_space_cnode` (CNode CapIds) are replaced with flat
+//! `Vec<CapId>` lists. Each entry is an EventEndpointCap.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -16,27 +20,15 @@ pub mod state_root;
 pub mod vault_init;
 
 /// Persistent Vault unit. After the unified-persistence refactor a Vault
-/// is `{ slots, init_cap, quota_pages, total_pages }`. All persistent
-/// state — code, byte data, references to other Vaults — lives as caps
-/// in `slots`. There is no separate `code_hash` field, no `code_vault`,
-/// and no KV `storage` map.
-///
-/// Wrapped in `Arc` inside σ so that copy-on-write of the outer
-/// `BTreeMap` is cheap; only the modified Vault is deep-cloned on a
-/// `make_mut` write.
+/// is `{ slots, init_cap }`. All persistent state — code, byte data,
+/// references to other Vaults — lives as caps in `slots`. There is no
+/// separate `code_hash` field, no `code_vault`, and no KV `storage` map.
 #[derive(Clone, Eq, PartialEq, Debug, Default)]
 pub struct Vault {
     /// 256 cap slots — the persistent CNode.
     pub slots: CNode,
     /// Slot in `slots` whose CodeCap is the **initialize program**.
-    /// `Vault.initialize` runs the CodeCap at this slot to bootstrap a
-    /// fresh Frame; the init program decides what becomes the public
-    /// Callable (returned via bare-Frame slot 5).
     pub init_cap: u8,
-    // No `quota_pages` / `total_pages`: memory budget is now caller-
-    // specified per-event (`Event.memory_budget`) and lives entirely
-    // in the per-invocation `UntypedCap` at bare-Frame slot 9.
-    // Vault declares no budget.
 }
 
 impl Vault {
@@ -63,17 +55,21 @@ pub struct State {
     pub cap_registry: BTreeMap<CapId, CapRecord>,
     /// Inverse index: parent cap-id → children. Cascade revocation walks this.
     pub cap_children: BTreeMap<CapId, BTreeSet<CapId>>,
-    /// Inverse index: cap-id → CNode slots that hold it. Used to clear slots
-    /// on revocation.
+    /// Inverse index: cap-id → CNode slots that hold it.
     pub cap_holders: BTreeMap<CapId, BTreeSet<(CNodeId, u8)>>,
-    pub transact_space_cnode: CapId,
-    pub dispatch_space_cnode: CapId,
+    /// Flat list of EventEndpointCaps for on-chain endpoints (apply_block).
+    /// Slot order = apply_block execution order. Mix of event-receiving
+    /// and Schedule (kernel-fired) endpoints.
+    pub transact_endpoints: Vec<CapId>,
+    /// Flat list of EventEndpointCaps for off-chain endpoints (per-cycle).
+    pub dispatch_endpoints: Vec<CapId>,
     pub id_counters: IdCounters,
 }
 
 impl State {
     /// Empty σ. Used as the starting point for genesis builders. Has no
-    /// public-surface caps wired — the genesis builder must set them.
+    /// public-surface caps wired — the genesis builder must populate
+    /// transact_endpoints and dispatch_endpoints.
     pub fn empty() -> Self {
         State {
             vaults: BTreeMap::new(),
@@ -81,8 +77,8 @@ impl State {
             cap_registry: BTreeMap::new(),
             cap_children: BTreeMap::new(),
             cap_holders: BTreeMap::new(),
-            transact_space_cnode: CapId(0),
-            dispatch_space_cnode: CapId(0),
+            transact_endpoints: Vec::new(),
+            dispatch_endpoints: Vec::new(),
             id_counters: IdCounters::default(),
         }
     }

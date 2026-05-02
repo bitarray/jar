@@ -18,8 +18,14 @@ pub fn state_root(state: &State) -> Hash {
     push_u64(&mut buf, state.id_counters.next_cnode_id);
     push_u64(&mut buf, state.id_counters.next_cap_id);
 
-    push_u64(&mut buf, state.transact_space_cnode.0);
-    push_u64(&mut buf, state.dispatch_space_cnode.0);
+    push_u64(&mut buf, state.transact_endpoints.len() as u64);
+    for cap in &state.transact_endpoints {
+        push_u64(&mut buf, cap.0);
+    }
+    push_u64(&mut buf, state.dispatch_endpoints.len() as u64);
+    for cap in &state.dispatch_endpoints {
+        push_u64(&mut buf, cap.0);
+    }
 
     push_u64(&mut buf, state.vaults.len() as u64);
     for (vid, vault) in &state.vaults {
