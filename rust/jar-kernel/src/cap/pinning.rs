@@ -1,22 +1,15 @@
-//! Pinning rules — retired in the event-redesign.
+//! Pinning rules — vestigial in the event-redesign.
 //!
 //! The prior `Dispatch` / `Transact` / `Schedule` cap variants with
-//! `born_in` CNodeIds and the associated pinning rules (no cross-CNode
-//! placement, no cross-invocation arg-passing) are gone. The new
-//! `EventEndpointCap` is a flat cap with no born_in field; placement
-//! is governed by which σ list it's in (transact_endpoints vs
-//! dispatch_endpoints), not by structural pinning.
-//!
-//! This module is preserved as a stub for any callers still importing
-//! it; it will be removed entirely in a follow-up commit.
+//! `born_in` CNode parents and the associated pinning rules (no cross-
+//! CNode placement, no cross-invocation arg-passing) are gone. The
+//! `EventEndpointCap` is a flat cap; placement is governed by which σ
+//! list it's in (transact_endpoints vs dispatch_endpoints), not by
+//! structural pinning. The remaining stub keeps `cap_registry::derive`'s
+//! signature; future cleanups may inline the no-op away.
 
 use crate::cap::Capability;
-use crate::types::{CNodeId, CapId, KResult, State};
-
-/// Vestigial — always Ok in the new design.
-pub fn check_grant_or_move(_cap: &Capability, _target_cnode: CNodeId) -> KResult<()> {
-    Ok(())
-}
+use crate::types::{CapId, KResult, State};
 
 /// Vestigial — always Ok in the new design.
 pub fn check_derive(

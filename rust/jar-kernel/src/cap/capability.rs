@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use crate::types::{CNodeId, CapId, Hash, KernelRole, KeyId, Signature, VaultId};
+use crate::types::{CapId, Hash, KernelRole, KeyId, Signature, VaultId};
 
 // -----------------------------------------------------------------------------
 // Per-variant structs
@@ -54,22 +54,9 @@ pub struct EventEndpointCap {
     pub memory_budget: u32,
 }
 
-/// Reference to a CNode (used to grant slot positions in Vault CNodes).
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub struct CNodeCap {
-    pub cnode_id: CNodeId,
-}
-
 /// Resource cap (e.g. allocate a Vault, set quota).
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct ResourceCap(pub ResourceKind);
-
-/// Meta cap — manage another cap (Grant / Revoke / Derive permissions).
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub struct MetaCap {
-    pub op: MetaOp,
-    pub over: CapId,
-}
 
 /// AttestationCap is the proof: existence means the kernel vouched that
 /// `key` signed `blob_hash`. Minted only via `mint_attest_cap` inside
@@ -212,12 +199,13 @@ pub fn is_identity_key(key: &KeyId) -> bool {
 // Capability sum type
 // -----------------------------------------------------------------------------
 
-/// All capability variants. Persistent variants live in CNodes (and σ);
-/// ephemeral variants live only in Frames.
+/// All capability variants. Persistent variants live in σ.cap_registry
+/// (and may be referenced by Vault.slots); ephemeral variants live only
+/// in Frames.
 ///
 /// Vault lifetime is tracked by reachability — a Vault is alive iff its
 /// VaultId appears in `state.vaults` and at least one VaultRef in some
-/// reachable CNode references it. There is no separate `Vault(owner)`
+/// reachable Vault references it. There is no separate `Vault(owner)`
 /// cap.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Capability {
@@ -226,9 +214,7 @@ pub enum Capability {
     Data(DataCap),
     /// Single endpoint cap shape replacing prior Transact/Dispatch/Schedule.
     EventEndpoint(EventEndpointCap),
-    CNode(CNodeCap),
     Resource(ResourceCap),
-    Meta(MetaCap),
     Attestation(AttestationCap),
     AttestationAggregate(AttestationAggregateCap),
     /// Kernel-passed scope cap held in a Frame during verify.
@@ -299,14 +285,6 @@ pub enum ResourceKind {
     CreateVault { quota_pages: u64 },
     SetQuota { target: VaultId },
     PreimageStore { pages: u64 },
-}
-
-/// Meta-op categories.
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub enum MetaOp {
-    Grant,
-    Revoke,
-    Derive,
 }
 
 // -----------------------------------------------------------------------------

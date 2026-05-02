@@ -174,9 +174,7 @@ fn translate_persistent(
         ))),
         // All other Registered shapes round-trip unchanged.
         Capability::VaultRef(_)
-        | Capability::CNode(_)
         | Capability::Resource(_)
-        | Capability::Meta(_)
         | Capability::Attestation(_)
         | Capability::AttestationAggregate(_) => Ok(Cap::Protocol(KernelCap::Registered {
             id: cap_id,

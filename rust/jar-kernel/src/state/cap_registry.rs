@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::types::{CNodeId, CapId, CapRecord, Capability, KResult, KernelError, State, VaultId};
+use crate::types::{CapId, CapRecord, Capability, KResult, KernelError, State, VaultId};
 
 use crate::cap::pinning;
 
@@ -21,8 +21,13 @@ pub fn lookup(state: &State, id: CapId) -> KResult<&CapRecord> {
     state.cap_record(id)
 }
 
-/// Cascade-revoke `id` and all caps derived from it. Clears every CNode slot
-/// that referenced any of them. Returns the number of caps revoked.
+/// Cascade-revoke `id` and all caps derived from it. Returns the number
+/// of caps revoked.
+///
+/// The kernel does NOT track "which slots hold this cap-id" — Vault.slots
+/// is the only cap-bearing surface and isn't mirrored in σ.cap_holders
+/// (that index was retired alongside `state.cnodes`). Vault slots that
+/// reference a revoked cap surface the revocation lazily on next access.
 pub fn revoke_cascade(state: &mut State, root: CapId) -> usize {
     let mut to_visit = vec![root];
     let mut revoked = 0usize;
@@ -33,39 +38,13 @@ pub fn revoke_cascade(state: &mut State, root: CapId) -> usize {
         if state.cap_registry.remove(&id).is_some() {
             revoked += 1;
         }
-        if let Some(holders) = state.cap_holders.remove(&id) {
-            for (cn, slot) in holders {
-                if let Some(cnode) = state.cnodes.get_mut(&cn) {
-                    cnode.set(slot, None);
-                }
-            }
-        }
     }
     revoked
 }
 
-/// Record that `cap` is held in `(cnode, slot)`.
-pub fn note_holder(state: &mut State, cap: CapId, cnode: CNodeId, slot: u8) {
-    state
-        .cap_holders
-        .entry(cap)
-        .or_default()
-        .insert((cnode, slot));
-}
-
-/// Forget that `cap` is held in `(cnode, slot)`.
-pub fn unnote_holder(state: &mut State, cap: CapId, cnode: CNodeId, slot: u8) {
-    if let Some(set) = state.cap_holders.get_mut(&cap) {
-        set.remove(&(cnode, slot));
-        if set.is_empty() {
-            state.cap_holders.remove(&cap);
-        }
-    }
-}
-
 /// Derive a new CapRecord from `source` with kernel-provided narrowing data.
-/// `dest_persistent`: true iff destination is a persistent CNode (not a Frame).
-/// Pinning rules are enforced.
+/// `dest_persistent`: true iff destination is a persistent surface (Vault.slots
+/// vs Frame). Pinning rules are enforced.
 pub fn derive(
     state: &mut State,
     source: CapId,
@@ -88,10 +67,10 @@ pub fn all_cap_ids(state: &State) -> BTreeSet<CapId> {
     state.cap_registry.keys().copied().collect()
 }
 
-/// Look up the VaultId mapped by a callable cap (Vault, VaultRef, Dispatch,
-/// Transact, DispatchRef, TransactRef, Storage). Errors if `id` is none of those.
+/// Look up the VaultId mapped by a callable cap (VaultRef, EventEndpoint).
+/// Errors if `id` doesn't reference a Vault.
 pub fn cap_vault_id(state: &State, id: CapId) -> KResult<VaultId> {
     let cap = &lookup(state, id)?.cap;
     cap.vault_id()
-        .ok_or_else(|| KernelError::Internal(format!("cap {:?} has no vault id", id)))
+        .ok_or_else(|| KernelError::Internal(format!("cap {id:?} has no vault id")))
 }

@@ -61,10 +61,6 @@ pub struct VaultId(pub u64);
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 pub struct CapId(pub u64);
 
-/// Globally unique CNode identifier (allocated monotonically by the kernel).
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
-pub struct CNodeId(pub u64);
-
 /// Identifier of a signing key. Variable-width bytes — Ed25519 pubkeys are
 /// 32 bytes, BLS pubkeys are 48; the kernel stores the bytes opaquely and
 /// passes them through to `Hardware::sign` / `holds_key` and to
@@ -120,10 +116,6 @@ pub enum KernelError {
     CapNotFound(CapId),
     #[error("vault not found: {0:?}")]
     VaultNotFound(VaultId),
-    #[error("cnode not found: {0:?}")]
-    CNodeNotFound(CNodeId),
-    #[error("cnode slot {slot} of {cnode:?} is empty")]
-    CNodeSlotEmpty { cnode: CNodeId, slot: u8 },
     #[error("pinning violation: {0}")]
     Pinning(String),
     #[error("read-only context rejected mutating host call: {0}")]

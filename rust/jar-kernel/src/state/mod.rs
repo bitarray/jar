@@ -11,10 +11,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use crate::types::{CNode, CNodeId, CapId, CapRecord, KResult, KernelError, VaultId};
+use crate::types::{CNode, CapId, CapRecord, KResult, KernelError, VaultId};
 
 pub mod cap_registry;
-pub mod cnode;
 pub mod code_blobs;
 pub mod state_root;
 pub mod vault_init;
@@ -43,7 +42,6 @@ impl Vault {
 #[derive(Clone, Eq, PartialEq, Debug, Default)]
 pub struct IdCounters {
     pub next_vault_id: u64,
-    pub next_cnode_id: u64,
     pub next_cap_id: u64,
 }
 
@@ -51,12 +49,9 @@ pub struct IdCounters {
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct State {
     pub vaults: BTreeMap<VaultId, Arc<Vault>>,
-    pub cnodes: BTreeMap<CNodeId, CNode>,
     pub cap_registry: BTreeMap<CapId, CapRecord>,
     /// Inverse index: parent cap-id → children. Cascade revocation walks this.
     pub cap_children: BTreeMap<CapId, BTreeSet<CapId>>,
-    /// Inverse index: cap-id → CNode slots that hold it.
-    pub cap_holders: BTreeMap<CapId, BTreeSet<(CNodeId, u8)>>,
     /// Flat list of EventEndpointCaps for on-chain endpoints (apply_block).
     /// Slot order = apply_block execution order. Mix of event-receiving
     /// and Schedule (kernel-fired) endpoints.
@@ -73,10 +68,8 @@ impl State {
     pub fn empty() -> Self {
         State {
             vaults: BTreeMap::new(),
-            cnodes: BTreeMap::new(),
             cap_registry: BTreeMap::new(),
             cap_children: BTreeMap::new(),
-            cap_holders: BTreeMap::new(),
             transact_endpoints: Vec::new(),
             dispatch_endpoints: Vec::new(),
             id_counters: IdCounters::default(),
@@ -85,10 +78,6 @@ impl State {
 
     pub fn vault(&self, id: VaultId) -> KResult<&Arc<Vault>> {
         self.vaults.get(&id).ok_or(KernelError::VaultNotFound(id))
-    }
-
-    pub fn cnode(&self, id: CNodeId) -> KResult<&CNode> {
-        self.cnodes.get(&id).ok_or(KernelError::CNodeNotFound(id))
     }
 
     pub fn cap_record(&self, id: CapId) -> KResult<&CapRecord> {
@@ -102,13 +91,6 @@ impl State {
         let id = self.id_counters.next_vault_id;
         self.id_counters.next_vault_id += 1;
         VaultId(id)
-    }
-
-    /// Allocate the next monotonic CNodeId.
-    pub fn next_cnode_id(&mut self) -> CNodeId {
-        let id = self.id_counters.next_cnode_id;
-        self.id_counters.next_cnode_id += 1;
-        CNodeId(id)
     }
 
     /// Allocate the next monotonic CapId.

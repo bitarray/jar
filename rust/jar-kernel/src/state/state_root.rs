@@ -15,7 +15,6 @@ pub fn state_root(state: &State) -> Hash {
     let mut buf = Vec::with_capacity(4096);
 
     push_u64(&mut buf, state.id_counters.next_vault_id);
-    push_u64(&mut buf, state.id_counters.next_cnode_id);
     push_u64(&mut buf, state.id_counters.next_cap_id);
 
     push_u64(&mut buf, state.transact_endpoints.len() as u64);
@@ -33,15 +32,6 @@ pub fn state_root(state: &State) -> Hash {
         buf.push(vault.init_cap);
         // quota_pages / total_pages removed — memory budget is per-event.
         for (i, slot) in vault.slots.slots.iter().enumerate() {
-            buf.push(i as u8);
-            push_u64(&mut buf, slot.map(|c| c.0).unwrap_or(0));
-        }
-    }
-
-    push_u64(&mut buf, state.cnodes.len() as u64);
-    for (cid, cnode) in &state.cnodes {
-        push_u64(&mut buf, cid.0);
-        for (i, slot) in cnode.slots.iter().enumerate() {
             buf.push(i as u8);
             push_u64(&mut buf, slot.map(|c| c.0).unwrap_or(0));
         }
