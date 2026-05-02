@@ -15,18 +15,7 @@ pub mod attest;
 pub mod emit;
 pub mod score;
 
-use crate::cap::ProtocolCap;
 use crate::vm::Vm;
-
-/// Fetch the protocol-cap payload held at `slot` in the running VM's
-/// cap-table, if any. Returns `None` for empty slots and non-Protocol
-/// cells.
-pub(crate) fn fetch_protocol_cap(vm: &Vm, slot: u8) -> Option<ProtocolCap> {
-    match vm.cap_table_get(slot) {
-        Some(javm::cap::Cap::Protocol(kc)) => Some(kc.clone()),
-        _ => None,
-    }
-}
 
 /// Read a guest memory window or return a guest fault outcome.
 #[allow(dead_code)] // stubbed during event-redesign migration; rewired in Stage D

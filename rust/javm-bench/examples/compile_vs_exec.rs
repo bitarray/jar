@@ -30,7 +30,7 @@ fn main() {
         loop {
             match kernel.run() {
                 javm::kernel::KernelResult::Halt(_) => break,
-                javm::kernel::KernelResult::ProtocolCall { .. } => continue,
+                javm::kernel::KernelResult::Fault(_) => continue,
                 other => panic!("javm: {:?}", other),
             }
         }

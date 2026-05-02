@@ -51,8 +51,8 @@ fn run_kernel(backend: javm::PvmBackend, input: &[u8], test_id: u32) -> KernelRu
         KernelResult::PageFault(addr) => {
             panic!("test {test_id}: {label} page fault at 0x{addr:08x}")
         }
-        KernelResult::ProtocolCall { slot, .. } => {
-            panic!("test {test_id}: {label} unexpected protocol call to slot {slot}")
+        KernelResult::Fault(reason) => {
+            panic!("test {test_id}: {label} unexpected fault: {reason}")
         }
     }
 

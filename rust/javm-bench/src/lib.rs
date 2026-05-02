@@ -37,20 +37,18 @@ pub fn run_kernel_with_backend(blob: &[u8], gas: u64, backend: javm::PvmBackend)
     for id in 1..=28u8 {
         kernel.cap_table_set_original(id, javm::cap::Cap::Protocol(id));
     }
-    loop {
-        match kernel.run() {
-            javm::kernel::KernelResult::Halt(v) => return (v, gas - kernel.active_gas()),
-            javm::kernel::KernelResult::Panic => {
-                let vm = &kernel.vm_arena.vm(kernel.active_vm);
-                panic!("kernel panicked at PC={} gas={}", vm.pc, vm.gas());
-            }
-            javm::kernel::KernelResult::OutOfGas => panic!("kernel out of gas"),
-            javm::kernel::KernelResult::PageFault(a) => {
-                let vm = &kernel.vm_arena.vm(kernel.active_vm);
-                panic!("kernel page fault at {a:#x} PC={} gas={}", vm.pc, vm.gas());
-            }
-            javm::kernel::KernelResult::ProtocolCall { .. } => continue,
+    match kernel.run() {
+        javm::kernel::KernelResult::Halt(v) => (v, gas - kernel.active_gas()),
+        javm::kernel::KernelResult::Panic => {
+            let vm = &kernel.vm_arena.vm(kernel.active_vm);
+            panic!("kernel panicked at PC={} gas={}", vm.pc, vm.gas());
         }
+        javm::kernel::KernelResult::OutOfGas => panic!("kernel out of gas"),
+        javm::kernel::KernelResult::PageFault(a) => {
+            let vm = &kernel.vm_arena.vm(kernel.active_vm);
+            panic!("kernel page fault at {a:#x} PC={} gas={}", vm.pc, vm.gas());
+        }
+        javm::kernel::KernelResult::Fault(reason) => panic!("kernel fault: {reason}"),
     }
 }
 
@@ -852,9 +850,7 @@ pub fn run_fib_recur_with_backend(
         }
         KernelResult::OutOfGas => panic!("fib_recur out of gas"),
         KernelResult::PageFault(a) => panic!("fib_recur page fault at {a:#x}"),
-        KernelResult::ProtocolCall { slot } => {
-            panic!("fib_recur unexpected protocol call slot={slot}")
-        }
+        KernelResult::Fault(reason) => panic!("fib_recur fault: {reason}"),
     }
 }
 

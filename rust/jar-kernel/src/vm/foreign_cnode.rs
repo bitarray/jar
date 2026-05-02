@@ -59,6 +59,22 @@ fn slot_set(state: &mut State, vault: VaultId, slot: u8, value: Option<RegCap>) 
 }
 
 impl ProtocolCapHost<ProtocolCap> for VaultCnodeView<'_> {
+    fn call(
+        &mut self,
+        cap: ProtocolCap,
+        _vm: &mut javm::kernel::InvocationKernel<ProtocolCap>,
+    ) -> javm::cap::CallOutcome {
+        // VaultCnodeView is the slim adapter — no kernel ctx (commands,
+        // role, current_vault). The richer host (`InvocationHost`) does
+        // the real CALL dispatch. Hitting this path means a CALL on a
+        // protocol cap fired through a VaultCnodeView-only context,
+        // which today only happens during resolve-walk traversal where
+        // CALL shouldn't terminate. Treat it as a fault.
+        javm::cap::CallOutcome::Fault(format!(
+            "CALL on cap reached VaultCnodeView (no kernel ctx): {cap:?}"
+        ))
+    }
+
     fn get(&self, vault: VaultId, slot: u8) -> Option<Cap> {
         let vc = slot_cap(self.state, vault, slot)?;
         vault_cap_to_frame(&vc)

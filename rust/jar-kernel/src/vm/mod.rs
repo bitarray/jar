@@ -150,49 +150,31 @@ pub fn drive_invocation<H: Hardware>(
     vm: &mut Vm,
     ctx: &mut InvocationCtx<'_, H>,
 ) -> KResult<InvocationResult> {
-    loop {
-        let outcome = {
-            let mut view = foreign_cnode::VaultCnodeView::new(&mut *ctx.state);
-            vm.run_with_host(&mut view)
-        };
-        match outcome {
-            javm::kernel::KernelResult::Halt(rv) => {
-                // After the init program halts, recover any public
-                // Callable it placed at the BareFrame ARG/RESULT slot.
-                // Empty / non-FrameRef ⇒ `None`; not a fault.
-                let initialize_callable = match vm.read_bare_frame_slot(javm::kernel::BARE_ARG_SLOT)
-                {
-                    Some(javm::cap::Cap::FrameRef(f)) => Some(f.vm_id),
-                    _ => None,
-                };
-                return Ok(InvocationResult {
-                    halt_value: Some(rv),
-                    fault: None,
-                    initialize_callable,
-                });
-            }
-            javm::kernel::KernelResult::Panic => return Ok(InvocationResult::fault("guest panic")),
-            javm::kernel::KernelResult::OutOfGas => return Err(KernelError::OutOfGas),
-            javm::kernel::KernelResult::PageFault(addr) => {
-                return Ok(InvocationResult::fault(format!(
-                    "page fault at {:#x}",
-                    addr
-                )));
-            }
-            javm::kernel::KernelResult::ProtocolCall { slot } => {
-                let cap = match crate::vm::host_calls::fetch_protocol_cap(vm, slot) {
-                    Some(c) => c,
-                    None => {
-                        return Ok(InvocationResult::fault(format!(
-                            "ProtocolCall: slot {slot} holds no protocol cap"
-                        )));
-                    }
-                };
-                match cap.call(vm, ctx)? {
-                    HostCallOutcome::Resume(r0, r1) => vm.resume_protocol_call(r0, r1),
-                    HostCallOutcome::Fault(reason) => return Ok(InvocationResult::fault(reason)),
-                }
-            }
+    let outcome = {
+        let mut view = foreign_cnode::VaultCnodeView::new(&mut *ctx.state);
+        vm.run_with_host(&mut view)
+    };
+    match outcome {
+        javm::kernel::KernelResult::Halt(rv) => {
+            // After the init program halts, recover any public
+            // Callable it placed at the BareFrame ARG/RESULT slot.
+            // Empty / non-FrameRef ⇒ `None`; not a fault.
+            let initialize_callable = match vm.read_bare_frame_slot(javm::kernel::BARE_ARG_SLOT) {
+                Some(javm::cap::Cap::FrameRef(f)) => Some(f.vm_id),
+                _ => None,
+            };
+            Ok(InvocationResult {
+                halt_value: Some(rv),
+                fault: None,
+                initialize_callable,
+            })
         }
+        javm::kernel::KernelResult::Panic => Ok(InvocationResult::fault("guest panic")),
+        javm::kernel::KernelResult::OutOfGas => Err(KernelError::OutOfGas),
+        javm::kernel::KernelResult::PageFault(addr) => Ok(InvocationResult::fault(format!(
+            "page fault at {:#x}",
+            addr
+        ))),
+        javm::kernel::KernelResult::Fault(reason) => Ok(InvocationResult::fault(reason)),
     }
 }

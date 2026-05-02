@@ -454,6 +454,19 @@ pub struct FrameRefCap {
     pub rights: FrameRefRights,
 }
 
+/// Outcome of `ProtocolCap::call` — what the host wants the run loop to
+/// do after it dispatched a CALL into a protocol cap. The cap value is
+/// the selector (different `ProtocolCap` variants get different
+/// behavior); the outcome is how the run loop continues.
+#[derive(Debug)]
+pub enum CallOutcome {
+    /// Resume the active VM with `(φ[7], φ[8])` set to these values.
+    Resume { phi7: u64, phi8: u64 },
+    /// Treat as a graceful invocation fault. The run loop reports
+    /// `KernelResult::Panic` to the host caller.
+    Fault(alloc::string::String),
+}
+
 /// Per-variant policy for `Cap::Protocol(P)` payloads.
 ///
 /// javm consults these methods when handling cap-table mutation
@@ -549,6 +562,13 @@ impl ProtocolCap for u8 {
 /// Revoke / Derive). All methods may fail (return `None` / `Err`) and
 /// javm reports `RESULT_WHAT` to the guest when they do.
 pub trait ProtocolCapHost<P: ProtocolCap> {
+    /// Dispatch a CALL on a protocol cap. javm's run loop invokes this
+    /// whenever the resolve walk lands on `Cap::Protocol(_)` for a CALL
+    /// op (local or foreign). The host has full access to its own state
+    /// here, so `cap` is just the protocol-payload value as the
+    /// dispatch selector.
+    fn call(&mut self, cap: P, vm: &mut crate::kernel::InvocationKernel<P>) -> CallOutcome;
+
     /// Read-only fetch of the cap at `(id, slot)`. Used by the resolve
     /// walk to traverse cap-ref chains of any depth and by CALL
     /// dispatch when the target lands on a foreign slot. Empty slots
@@ -608,6 +628,11 @@ impl<P> ProtocolCapHost<P> for NoProtocolCapHost
 where
     P: ProtocolCap<ForeignFrameId = (), FinalStepRights = ()>,
 {
+    fn call(&mut self, cap: P, _vm: &mut crate::kernel::InvocationKernel<P>) -> CallOutcome {
+        CallOutcome::Fault(alloc::format!(
+            "CALL on cap with no host CALL semantics: {cap:?}"
+        ))
+    }
     fn get(&self, _id: (), _slot: u8) -> Option<Cap<P>> {
         None
     }

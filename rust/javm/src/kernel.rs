@@ -180,12 +180,10 @@ pub enum KernelResult {
     OutOfGas,
     /// Root VM page-faulted at address.
     PageFault(u32),
-    /// A protocol cap was invoked. Host should handle and call `resume_protocol_call`.
-    /// Read registers/gas via kernel accessors (active_reg, gas).
-    ProtocolCall {
-        /// Protocol cap slot number.
-        slot: u8,
-    },
+    /// A `ProtocolCap::call` returned `CallOutcome::Fault(reason)` and
+    /// the run loop translated that into a graceful invocation fault.
+    /// Reason text is host-defined.
+    Fault(alloc::string::String),
 }
 
 /// The invocation kernel.
@@ -508,7 +506,11 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
     ///
     /// Returns a `DispatchResult` indicating what the kernel should do next.
     #[inline(always)]
-    pub fn dispatch_ecalli(&mut self, imm: u32) -> DispatchResult {
+    pub fn dispatch_ecalli<H: ProtocolCapHost<P>>(
+        &mut self,
+        imm: u32,
+        host: &mut H,
+    ) -> DispatchResult {
         // Range check: ecalli only valid for 0-127. ≥128 faults the VM.
         if imm > 127 {
             self.set_active_reg(7, imm as u64);
@@ -544,7 +546,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
                 self.flush_live_ctx();
                 return self.handle_reply();
             }
-            self.handle_call(cap_idx)
+            self.handle_call(cap_idx, host)
         } else {
             // Management op: high byte = op, low byte = cap index
             let op = imm >> 8;
@@ -555,9 +557,28 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
         }
     }
 
+    /// Synchronously dispatch CALL on a protocol cap. Calls
+    /// `host.call(cap, self)` and translates `CallOutcome` into a
+    /// `DispatchResult` for the run loop.
+    #[inline(always)]
+    fn dispatch_protocol_call<H: ProtocolCapHost<P>>(
+        &mut self,
+        cap: P,
+        host: &mut H,
+    ) -> DispatchResult {
+        match host.call(cap, self) {
+            crate::cap::CallOutcome::Resume { phi7, phi8 } => {
+                self.set_active_reg(7, phi7);
+                self.set_active_reg(8, phi8);
+                DispatchResult::Continue
+            }
+            crate::cap::CallOutcome::Fault(reason) => DispatchResult::RootFault(reason),
+        }
+    }
+
     /// Handle CALL on a cap slot.
     #[inline(always)]
-    fn handle_call(&mut self, cap_idx: u8) -> DispatchResult {
+    fn handle_call<H: ProtocolCapHost<P>>(&mut self, cap_idx: u8, host: &mut H) -> DispatchResult {
         let vm = &self.vm_arena.vm(self.active_vm);
         let cap = match vm.cap_table.get(cap_idx) {
             Some(c) => c,
@@ -569,10 +590,12 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
         };
 
         match cap {
-            Cap::Protocol(_) => {
-                // Yield the cap-table slot index; host fetches the cap via
-                // `cap_table_get(slot)` and dispatches on the inner payload.
-                DispatchResult::ProtocolCall { slot: cap_idx }
+            Cap::Protocol(p) => {
+                // Synchronous CALL dispatch: clone the cap value (releasing
+                // the cap-table borrow), invoke `ProtocolCap::call`, and
+                // translate the outcome.
+                let p = p.clone();
+                self.dispatch_protocol_call(p, host)
             }
             Cap::Untyped(_) => {
                 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
@@ -1185,28 +1208,45 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
                 };
                 // For local VM, use existing handle_call
                 if frame == FrameId::Vm(self.active_vm) {
-                    self.handle_call(slot)
+                    self.handle_call(slot, host)
                 } else {
-                    // Remote cap — look up the cap in the resolved
-                    // frame. Untyped (the per-invocation budget at
-                    // bare-Frame slot 9) and Protocol are the two
-                    // remote-callable shapes. Foreign frames hold
-                    // persistent CNode entries that are never directly
-                    // callable.
-                    match self.frame_table(frame).and_then(|t| t.get(slot)) {
-                        Some(Cap::Protocol(_)) => DispatchResult::ProtocolCall { slot },
-                        Some(Cap::Untyped(_)) => {
-                            #[cfg(all(
-                                feature = "std",
-                                target_os = "linux",
-                                target_arch = "x86_64"
-                            ))]
-                            self.flush_live_ctx();
-                            self.handle_call_untyped(frame, slot)
+                    // Remote cap — Foreign frames go through the host
+                    // adapter's `get`; local frames have their cap-tables
+                    // accessible directly.
+                    if let FrameId::Foreign(id) = frame {
+                        match host.get(id, slot) {
+                            Some(Cap::Protocol(p)) => self.dispatch_protocol_call(p, host),
+                            _ => {
+                                self.set_active_reg(7, RESULT_WHAT);
+                                DispatchResult::Continue
+                            }
                         }
-                        _ => {
-                            self.set_active_reg(7, RESULT_WHAT);
-                            DispatchResult::Continue
+                    } else {
+                        // Local non-active frame (Bare or another VM):
+                        // Untyped / Protocol are the remote-callable shapes.
+                        let remote_p: Option<P> =
+                            match self.frame_table(frame).and_then(|t| t.get(slot)) {
+                                Some(Cap::Protocol(p)) => Some(p.clone()),
+                                _ => None,
+                            };
+                        if let Some(p) = remote_p {
+                            self.dispatch_protocol_call(p, host)
+                        } else {
+                            match self.frame_table(frame).and_then(|t| t.get(slot)) {
+                                Some(Cap::Untyped(_)) => {
+                                    #[cfg(all(
+                                        feature = "std",
+                                        target_os = "linux",
+                                        target_arch = "x86_64"
+                                    ))]
+                                    self.flush_live_ctx();
+                                    self.handle_call_untyped(frame, slot)
+                                }
+                                _ => {
+                                    self.set_active_reg(7, RESULT_WHAT);
+                                    DispatchResult::Continue
+                                }
+                            }
                         }
                     }
                 }
@@ -2439,13 +2479,6 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
         self.vm_arena.vm(self.active_vm).gas()
     }
 
-    /// Resume after a protocol call was handled by the host.
-    /// Sets return registers and continues execution.
-    pub fn resume_protocol_call(&mut self, result0: u64, result1: u64) {
-        self.set_active_reg(7, result0);
-        self.set_active_reg(8, result1);
-    }
-
     // --- Window helpers ---
 
     /// Get the active window's base pointer (guest memory base, R15 in JIT code).
@@ -2905,7 +2938,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
                     // HostCall(imm) — ecalli (pc already synced by backend)
                     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     let prev_vm = self.active_vm;
-                    match self.dispatch_ecalli(exit_arg) {
+                    match self.dispatch_ecalli(exit_arg, host) {
                         DispatchResult::Continue => {
                             // Internal dispatch (RETYPE, CREATE, CALL VM, management ops).
                             // Use resume only if BOTH code cap AND active VM are unchanged.
@@ -2927,22 +2960,11 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
                             }
                             continue;
                         }
-                        DispatchResult::ProtocolCall { slot } => {
-                            // Mark for fast resume on next run() call.
-                            // Leave signal state installed for the resume path.
-                            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-                            if matches!(
-                                self.code_caps[code_cap_id].compiled,
-                                crate::backend::CompiledProgram::Recompiler(_)
-                            ) {
-                                self.recompiler_resume_cap = Some(code_cap_id);
-                            }
-                            return KernelResult::ProtocolCall { slot };
-                        }
                         DispatchResult::RootHalt(v) => return KernelResult::Halt(v),
                         DispatchResult::RootPanic => return KernelResult::Panic,
                         DispatchResult::RootOutOfGas => return KernelResult::OutOfGas,
                         DispatchResult::RootPageFault(a) => return KernelResult::PageFault(a),
+                        DispatchResult::RootFault(reason) => return KernelResult::Fault(reason),
                         DispatchResult::Fault(_) => continue, // non-root fault handled
                     }
                 }
@@ -3014,13 +3036,11 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
                     self.flush_live_ctx();
                     match self.dispatch_ecall(host, op) {
                         DispatchResult::Continue => continue,
-                        DispatchResult::ProtocolCall { slot } => {
-                            return KernelResult::ProtocolCall { slot };
-                        }
                         DispatchResult::RootHalt(v) => return KernelResult::Halt(v),
                         DispatchResult::RootPanic => return KernelResult::Panic,
                         DispatchResult::RootOutOfGas => return KernelResult::OutOfGas,
                         DispatchResult::RootPageFault(a) => return KernelResult::PageFault(a),
+                        DispatchResult::RootFault(reason) => return KernelResult::Fault(reason),
                         DispatchResult::Fault(_) => continue,
                     }
                 }
@@ -3409,8 +3429,6 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
 pub enum DispatchResult {
     /// Continue execution of the active VM.
     Continue,
-    /// A protocol cap was called — host should handle.
-    ProtocolCall { slot: u8 },
     /// Root VM halted normally.
     RootHalt(u64),
     /// Root VM panicked.
@@ -3419,6 +3437,9 @@ pub enum DispatchResult {
     RootOutOfGas,
     /// Root VM page-faulted.
     RootPageFault(u32),
+    /// `ProtocolCap::call` returned `CallOutcome::Fault(reason)`. The
+    /// run loop translates this into `KernelResult::Fault(reason)`.
+    RootFault(alloc::string::String),
     /// A fault in a non-root VM (already handled, caller resumed).
     Fault(FaultType),
 }
@@ -4133,7 +4154,7 @@ mod tests {
         kernel.set_active_reg(7, 0); // no caps to copy
         kernel.set_active_reg(12, 66); // HANDLE at slot 66 (64=CODE, 65=DATA)
 
-        let result = kernel.dispatch_ecalli(code_slot as u32);
+        let result = kernel.dispatch_ecalli(code_slot as u32, &mut crate::cap::NoProtocolCapHost);
         assert!(matches!(result, DispatchResult::Continue));
 
         // Two pre-existing entries (root VM 0 + bare Frame); CREATE
@@ -4162,7 +4183,7 @@ mod tests {
         // Create child VM: φ[7]=bitmask, φ[12]=dst_slot for HANDLE
         kernel.set_active_reg(7, 0); // no caps copied
         kernel.set_active_reg(12, 66); // place HANDLE at slot 66 (64=CODE, 65=DATA)
-        kernel.dispatch_ecalli(64); // CALL CODE at slot 64 → CREATE
+        kernel.dispatch_ecalli(64, &mut crate::cap::NoProtocolCapHost); // CALL CODE at slot 64 → CREATE
         let handle_idx = kernel.active_reg(7) as u8;
 
         // CALL the child: φ[7]=arg0, φ[8]=arg1, φ[12]=0 (no IPC cap)
@@ -4170,7 +4191,7 @@ mod tests {
         kernel.set_active_reg(8, 99);
         kernel.set_active_reg(12, 0);
 
-        let result = kernel.dispatch_ecalli(handle_idx as u32);
+        let result = kernel.dispatch_ecalli(handle_idx as u32, &mut crate::cap::NoProtocolCapHost);
         assert!(matches!(result, DispatchResult::Continue));
 
         // Child VM is at idx 2 (bare Frame is at idx 1).
@@ -4185,7 +4206,8 @@ mod tests {
         // Child REPLYs with results
         kernel.set_active_reg(7, 100);
         kernel.set_active_reg(8, 200);
-        let result = kernel.dispatch_ecalli(BARE_FRAME_SLOT as u32); // REPLY
+        let result =
+            kernel.dispatch_ecalli(BARE_FRAME_SLOT as u32, &mut crate::cap::NoProtocolCapHost); // REPLY
         assert!(matches!(result, DispatchResult::Continue));
 
         // Back to VM 0
@@ -4207,18 +4229,18 @@ mod tests {
         // Create two child VMs: φ[7]=bitmask, φ[12]=dst_slot
         kernel.set_active_reg(7, 0);
         kernel.set_active_reg(12, 66);
-        kernel.dispatch_ecalli(64); // CREATE VM 1, HANDLE at 66
+        kernel.dispatch_ecalli(64, &mut crate::cap::NoProtocolCapHost); // CREATE VM 1, HANDLE at 66
         let handle1 = kernel.active_reg(7) as u8;
 
         kernel.set_active_reg(7, 0);
         kernel.set_active_reg(12, 67);
-        kernel.dispatch_ecalli(64); // CREATE VM 2, HANDLE at 67
+        kernel.dispatch_ecalli(64, &mut crate::cap::NoProtocolCapHost); // CREATE VM 2, HANDLE at 67
         let _handle2 = kernel.active_reg(7) as u8;
 
         // VM 0 calls the first child (idx 2 — bare Frame at idx 1)
         kernel.set_active_reg(7, 0);
         kernel.set_active_reg(12, 0); // no IPC cap (slot 0 = IPC itself)
-        kernel.dispatch_ecalli(handle1 as u32);
+        kernel.dispatch_ecalli(handle1 as u32, &mut crate::cap::NoProtocolCapHost);
         assert_eq!(kernel.active_vm, 2);
 
         // Copy handle1 to VM 2 — but VM 0 is WaitingForReply,
@@ -4244,14 +4266,14 @@ mod tests {
         // Create child VM: φ[7]=bitmask, φ[12]=dst_slot
         kernel.set_active_reg(7, 0);
         kernel.set_active_reg(12, 66);
-        kernel.dispatch_ecalli(64);
+        kernel.dispatch_ecalli(64, &mut crate::cap::NoProtocolCapHost);
         let handle_idx = kernel.active_reg(7) as u8;
 
         // CALL child — callee gets caller's full residual gas, caller
         // is left with 0 until REPLY restores the residual. Child VM
         // sits at idx 2 (bare Frame at idx 1).
         let parent_gas_before = kernel.vm_arena.vm(0).gas();
-        kernel.dispatch_ecalli(handle_idx as u32);
+        kernel.dispatch_ecalli(handle_idx as u32, &mut crate::cap::NoProtocolCapHost);
 
         assert_eq!(kernel.active_vm, 2);
         // Callee inherits caller_gas - ecalli_charge (10) - call_overhead (10).
@@ -4272,16 +4294,16 @@ mod tests {
             .cap_table
             .set(1, Cap::Protocol(1u8));
 
-        // CALL slot 1 → should return ProtocolCall
+        // CALL slot 1 → host.call(cap, vm). With NoProtocolCapHost the
+        // default impl returns CallOutcome::Fault, which the run loop
+        // translates into DispatchResult::RootFault.
         kernel.set_active_reg(7, 123);
-        let result = kernel.dispatch_ecalli(1);
+        let result = kernel.dispatch_ecalli(1, &mut crate::cap::NoProtocolCapHost);
         match result {
-            DispatchResult::ProtocolCall { slot } => {
-                assert_eq!(slot, 1);
-                // Registers accessible via kernel.active_reg(7)
+            DispatchResult::RootFault(_) => {
                 assert_eq!(kernel.active_reg(7), 123);
             }
-            _ => panic!("expected ProtocolCall"),
+            other => panic!("expected RootFault, got {other:?}"),
         }
     }
 
@@ -4292,7 +4314,7 @@ mod tests {
         let _ = kernel.vm_arena.vm_mut(0).transition(VmState::Running);
 
         // CALL empty slot → WHAT
-        let result = kernel.dispatch_ecalli(50);
+        let result = kernel.dispatch_ecalli(50, &mut crate::cap::NoProtocolCapHost);
         assert!(matches!(result, DispatchResult::Continue));
         assert_eq!(kernel.active_reg(7), RESULT_WHAT);
     }
@@ -4507,7 +4529,7 @@ mod tests {
         // Create child: φ[7]=bitmask, φ[12]=dst_slot
         kernel.set_active_reg(7, 0);
         kernel.set_active_reg(12, 66);
-        kernel.dispatch_ecalli(64);
+        kernel.dispatch_ecalli(64, &mut crate::cap::NoProtocolCapHost);
         let handle_idx = kernel.active_reg(7) as u8;
 
         // DOWNGRADE handle → callable via ecall
@@ -4544,7 +4566,7 @@ mod tests {
         // Spawn child + downgrade the handle (slot 67 = callable).
         kernel.set_active_reg(7, 0);
         kernel.set_active_reg(12, 66);
-        kernel.dispatch_ecalli(64);
+        kernel.dispatch_ecalli(64, &mut crate::cap::NoProtocolCapHost);
         let handle_idx = kernel.active_reg(7) as u8;
         kernel.set_active_reg(11, 0x0A);
         kernel.set_active_reg(12, 67 | ((handle_idx as u64) << 32));
@@ -4554,7 +4576,7 @@ mod tests {
 
         // CALL on the callable: routes to child VM (idx 2, bare Frame at idx 1).
         kernel.set_active_reg(12, 0); // no IPC cap
-        let result = kernel.dispatch_ecalli(67);
+        let result = kernel.dispatch_ecalli(67, &mut crate::cap::NoProtocolCapHost);
         assert!(matches!(result, DispatchResult::Continue));
         assert_eq!(kernel.active_vm, 2);
     }
@@ -4570,7 +4592,7 @@ mod tests {
         // Spawn child + downgrade.
         kernel.set_active_reg(7, 0);
         kernel.set_active_reg(12, 66);
-        kernel.dispatch_ecalli(64);
+        kernel.dispatch_ecalli(64, &mut crate::cap::NoProtocolCapHost);
         let handle_idx = kernel.active_reg(7) as u8;
         kernel.set_active_reg(11, 0x0A);
         kernel.set_active_reg(12, 67 | ((handle_idx as u64) << 32));
@@ -4596,7 +4618,7 @@ mod tests {
 
         // RESUME (ecalli 0x1): callable-shaped FrameRef rejected.
         kernel.set_active_reg(7, RESULT_WHAT.wrapping_sub(1));
-        let result = kernel.dispatch_ecalli(0x10000 | 67); // not the right encoding
+        let result = kernel.dispatch_ecalli(0x10000 | 67, &mut crate::cap::NoProtocolCapHost); // not the right encoding
         // Direct path: call mgmt-RESUME via the management slot range.
         let _ = result;
         // Use the explicit RESUME entry point.
@@ -4618,7 +4640,7 @@ mod tests {
         // Spawn + downgrade once → slot 67 holds CALLABLE.
         kernel.set_active_reg(7, 0);
         kernel.set_active_reg(12, 66);
-        kernel.dispatch_ecalli(64);
+        kernel.dispatch_ecalli(64, &mut crate::cap::NoProtocolCapHost);
         let handle_idx = kernel.active_reg(7) as u8;
         kernel.set_active_reg(11, 0x0A);
         kernel.set_active_reg(12, 67 | ((handle_idx as u64) << 32));
@@ -4668,7 +4690,7 @@ mod tests {
         // Create child VM with bitmask = 0b110 (copy caps at slots 1 and 2)
         kernel.set_active_reg(7, 0b110);
         kernel.set_active_reg(12, 66);
-        kernel.dispatch_ecalli(64); // CALL CODE → CREATE
+        kernel.dispatch_ecalli(64, &mut crate::cap::NoProtocolCapHost); // CALL CODE → CREATE
 
         // The child (VM at idx 2; bare Frame at idx 1) should have
         // caps at slots 1 and 2.
@@ -4696,7 +4718,7 @@ mod tests {
         // Create child VM
         kernel.set_active_reg(7, 0);
         kernel.set_active_reg(12, 66);
-        kernel.dispatch_ecalli(64);
+        kernel.dispatch_ecalli(64, &mut crate::cap::NoProtocolCapHost);
         let handle_idx = kernel.active_reg(7) as u8;
 
         // CALL with φ[9]=0 (zero gas transfer)
@@ -4705,7 +4727,7 @@ mod tests {
         kernel.set_active_reg(9, 0); // zero gas
         kernel.set_active_reg(12, 0);
 
-        let result = kernel.dispatch_ecalli(handle_idx as u32);
+        let result = kernel.dispatch_ecalli(handle_idx as u32, &mut crate::cap::NoProtocolCapHost);
         assert!(matches!(result, DispatchResult::Continue));
 
         // Child should be running but with very little gas. Child sits
@@ -4725,28 +4747,28 @@ mod tests {
         // bitmask bit 64 set means child inherits cap at slot 64
         kernel.set_active_reg(7, 1u64 << (64 % 64)); // bit 0 = slot 64's bitmap position
         kernel.set_active_reg(12, 66);
-        kernel.dispatch_ecalli(64);
+        kernel.dispatch_ecalli(64, &mut crate::cap::NoProtocolCapHost);
         let h1 = kernel.active_reg(7) as u8;
 
         // VM 0 calls the first child (idx 2 — bare Frame at idx 1)
         kernel.set_active_reg(7, 10);
         kernel.set_active_reg(8, 0);
         kernel.set_active_reg(12, 0);
-        kernel.dispatch_ecalli(h1 as u32);
+        kernel.dispatch_ecalli(h1 as u32, &mut crate::cap::NoProtocolCapHost);
         assert_eq!(kernel.active_vm, 2);
         assert_eq!(kernel.active_reg(7), 10);
 
         // VM (idx 2) creates a nested child at idx 3 using inherited CODE
         kernel.set_active_reg(7, 0);
         kernel.set_active_reg(12, 66);
-        kernel.dispatch_ecalli(64);
+        kernel.dispatch_ecalli(64, &mut crate::cap::NoProtocolCapHost);
         // If the active VM doesn't have CODE cap at 64, CREATE fails
         // silently. Check the nested child was created (arena now has
         // root + bare + 2 children = 4 entries).
         if kernel.vm_arena.len() < 4 {
             // CODE cap wasn't propagated — skip nested part, just test reply chain
             kernel.set_active_reg(7, 77);
-            kernel.dispatch_ecalli(BARE_FRAME_SLOT as u32);
+            kernel.dispatch_ecalli(BARE_FRAME_SLOT as u32, &mut crate::cap::NoProtocolCapHost);
             assert_eq!(kernel.active_vm, 0);
             assert_eq!(kernel.active_reg(7), 77);
             return;
@@ -4757,19 +4779,19 @@ mod tests {
         kernel.set_active_reg(7, 20);
         kernel.set_active_reg(8, 0);
         kernel.set_active_reg(12, 0);
-        kernel.dispatch_ecalli(h2 as u32);
+        kernel.dispatch_ecalli(h2 as u32, &mut crate::cap::NoProtocolCapHost);
         assert_eq!(kernel.active_vm, 3);
         assert_eq!(kernel.active_reg(7), 20);
 
         // Nested VM replies with 99
         kernel.set_active_reg(7, 99);
-        kernel.dispatch_ecalli(BARE_FRAME_SLOT as u32);
+        kernel.dispatch_ecalli(BARE_FRAME_SLOT as u32, &mut crate::cap::NoProtocolCapHost);
         assert_eq!(kernel.active_vm, 2);
         assert_eq!(kernel.active_reg(7), 99);
 
         // Idx-2 VM replies with 77
         kernel.set_active_reg(7, 77);
-        kernel.dispatch_ecalli(BARE_FRAME_SLOT as u32);
+        kernel.dispatch_ecalli(BARE_FRAME_SLOT as u32, &mut crate::cap::NoProtocolCapHost);
         assert_eq!(kernel.active_vm, 0);
         assert_eq!(kernel.active_reg(7), 77);
     }
