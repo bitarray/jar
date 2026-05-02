@@ -4,7 +4,7 @@
 //! When a cap-ref crossing lands on a `Cap::Protocol(_)` whose
 //! `as_foreign_frame()` returns `Some(VaultId)`, javm packages that as
 //! `FrameId::Foreign(VaultId)` and routes subsequent slot operations
-//! (`fc_take` / `fc_set` / `fc_clone` / `fc_drop` / `fc_is_empty`)
+//! (`take` / `set` / `clone` / `drop` / `is_empty`)
 //! through this adapter.
 //!
 //! After CapId removal, `vault.slots[N]` holds `RegCap` values
@@ -15,21 +15,21 @@
 //! - `RegCap::Resource(r)` ↔ `Cap::Protocol(ProtocolCap::Resource(r))`.
 //! - `RegCap::Code(_)` / `RegCap::Data(_)` are container-bound:
 //!   they're compiled / mapped at `vault_init` only, never moved between
-//!   Vault and Frame mid-VM. `fc_take` / `fc_clone` on those return
+//!   Vault and Frame mid-VM. `take` / `clone` on those return
 //!   `None`.
 //!
-//! No cap_registry, no cascade revocation. `fc_drop` is just "clear the
-//! slot"; granting a copy via `fc_set` after `fc_clone` produces an
+//! No cap_registry, no cascade revocation. `drop` is just "clear the
+//! slot"; granting a copy via `set` after `clone` produces an
 //! independent owner of the value.
 
 use std::sync::Arc;
 
-use javm::cap::ForeignCnode;
+use javm::cap::ProtocolCapHost;
 
 use crate::cap::{Cap, ProtocolCap, RegCap, VaultRights};
 use crate::types::{State, VaultId};
 
-/// Adapter implementing [`ForeignCnode<ProtocolCap>`] over `&mut State`.
+/// Adapter implementing [`ProtocolCapHost<ProtocolCap>`] over `&mut State`.
 /// Rebuilt cheaply each iteration of `drive_invocation`'s run loop
 /// because it just wraps a borrow.
 pub struct VaultCnodeView<'a> {
@@ -58,8 +58,13 @@ fn slot_set(state: &mut State, vault: VaultId, slot: u8, value: Option<RegCap>) 
     state.vaults.insert(vault, Arc::new(v));
 }
 
-impl ForeignCnode<ProtocolCap> for VaultCnodeView<'_> {
-    fn fc_take(&mut self, vault: VaultId, slot: u8, rights: VaultRights) -> Option<Cap> {
+impl ProtocolCapHost<ProtocolCap> for VaultCnodeView<'_> {
+    fn get(&self, vault: VaultId, slot: u8) -> Option<Cap> {
+        let vc = slot_cap(self.state, vault, slot)?;
+        vault_cap_to_frame(&vc)
+    }
+
+    fn take(&mut self, vault: VaultId, slot: u8, rights: VaultRights) -> Option<Cap> {
         if !rights.revoke {
             return None;
         }
@@ -69,13 +74,7 @@ impl ForeignCnode<ProtocolCap> for VaultCnodeView<'_> {
         Some(frame_cap)
     }
 
-    fn fc_set(
-        &mut self,
-        vault: VaultId,
-        slot: u8,
-        rights: VaultRights,
-        cap: Cap,
-    ) -> Result<(), Cap> {
+    fn set(&mut self, vault: VaultId, slot: u8, rights: VaultRights, cap: Cap) -> Result<(), Cap> {
         if !rights.grant {
             return Err(cap);
         }
@@ -92,7 +91,7 @@ impl ForeignCnode<ProtocolCap> for VaultCnodeView<'_> {
         Ok(())
     }
 
-    fn fc_clone(&mut self, vault: VaultId, slot: u8, rights: VaultRights) -> Option<Cap> {
+    fn clone(&mut self, vault: VaultId, slot: u8, rights: VaultRights) -> Option<Cap> {
         if !rights.derive {
             return None;
         }
@@ -102,7 +101,7 @@ impl ForeignCnode<ProtocolCap> for VaultCnodeView<'_> {
         vault_cap_to_frame(&cap)
     }
 
-    fn fc_drop(&mut self, vault: VaultId, slot: u8, rights: VaultRights) -> bool {
+    fn drop(&mut self, vault: VaultId, slot: u8, rights: VaultRights) -> bool {
         if !rights.revoke {
             return false;
         }
@@ -113,7 +112,7 @@ impl ForeignCnode<ProtocolCap> for VaultCnodeView<'_> {
         true
     }
 
-    fn fc_is_empty(&self, vault: VaultId, slot: u8) -> bool {
+    fn is_empty(&self, vault: VaultId, slot: u8) -> bool {
         match self.state.vaults.get(&vault) {
             Some(v) => v.slots.get(slot).is_none(),
             None => true,

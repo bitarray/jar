@@ -66,8 +66,8 @@ macro_rules! resolve {
 }
 use crate::backing::BackingStore;
 use crate::cap::{
-    Access, BARE_FRAME_SLOT, Cap, CapTable, CodeCap, DataCap, ForeignCnode, FrameRefCap,
-    FrameRefRights, GasCap, NoForeignCnode, ProtocolCap, UntypedCap,
+    Access, BARE_FRAME_SLOT, Cap, CapTable, CodeCap, DataCap, FrameRefCap, FrameRefRights, GasCap,
+    NoProtocolCapHost, ProtocolCap, ProtocolCapHost, UntypedCap,
 };
 use crate::program::{self, CapEntryType};
 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
@@ -1017,7 +1017,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
 
     /// Borrow the cap-table backing a `FrameId`. Returns `None` for a
     /// `Foreign` frame (those are not stored in javm — operations route
-    /// through the host's `ForeignCnode`).
+    /// through the host's `ProtocolCapHost`).
     fn frame_table(&self, fref: FrameId<P::ForeignFrameId>) -> Option<&CapTable<P>> {
         match fref {
             FrameId::Vm(idx) => Some(&self.vm_arena.vm(idx).cap_table),
@@ -1036,14 +1036,14 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
 
     /// Whether `slot` of `frame` is empty. Routes to the host for
     /// `Foreign` frames; uses the in-process cap-table otherwise.
-    fn frame_is_empty<H: ForeignCnode<P>>(
+    fn frame_is_empty<H: ProtocolCapHost<P>>(
         &self,
         host: &H,
         frame: FrameId<P::ForeignFrameId>,
         slot: u8,
     ) -> bool {
         match frame {
-            FrameId::Foreign(id) => host.fc_is_empty(id, slot),
+            FrameId::Foreign(id) => host.is_empty(id, slot),
             _ => self
                 .frame_table(frame)
                 .map(|t| t.is_empty(slot))
@@ -1052,7 +1052,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
     }
 
     /// Take the cap at `(frame, slot)`. Routes to the host for `Foreign`.
-    fn frame_take<H: ForeignCnode<P>>(
+    fn frame_take<H: ProtocolCapHost<P>>(
         &mut self,
         host: &mut H,
         frame: FrameId<P::ForeignFrameId>,
@@ -1060,13 +1060,13 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
         rights: P::FinalStepRights,
     ) -> Option<Cap<P>> {
         match frame {
-            FrameId::Foreign(id) => host.fc_take(id, slot, rights),
+            FrameId::Foreign(id) => host.take(id, slot, rights),
             _ => self.frame_table_mut(frame).and_then(|t| t.take(slot)),
         }
     }
 
     /// Place `cap` at `(frame, slot)`. Returns `Err(cap)` on rejection.
-    fn frame_set<H: ForeignCnode<P>>(
+    fn frame_set<H: ProtocolCapHost<P>>(
         &mut self,
         host: &mut H,
         frame: FrameId<P::ForeignFrameId>,
@@ -1075,7 +1075,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
         cap: Cap<P>,
     ) -> Result<(), Cap<P>> {
         match frame {
-            FrameId::Foreign(id) => host.fc_set(id, slot, rights, cap),
+            FrameId::Foreign(id) => host.set(id, slot, rights, cap),
             _ => match self.frame_table_mut(frame) {
                 Some(t) => {
                     t.set(slot, cap);
@@ -1088,7 +1088,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
 
     /// Clone the cap at `(frame, slot)`. Routes to the host for
     /// `Foreign` (which performs a host-side derive).
-    fn frame_clone<H: ForeignCnode<P>>(
+    fn frame_clone<H: ProtocolCapHost<P>>(
         &mut self,
         host: &mut H,
         frame: FrameId<P::ForeignFrameId>,
@@ -1096,7 +1096,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
         rights: P::FinalStepRights,
     ) -> Option<Cap<P>> {
         match frame {
-            FrameId::Foreign(id) => host.fc_clone(id, slot, rights),
+            FrameId::Foreign(id) => host.clone(id, slot, rights),
             _ => self
                 .frame_table(frame)
                 .and_then(|t| t.get(slot))
@@ -1157,8 +1157,12 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
     ///
     /// `host` is consulted whenever the resolve walk lands on a
     /// `FrameId::Foreign` (host-managed cap-table). For tests / benches
-    /// without foreign frames, pass `&mut NoForeignCnode`.
-    pub fn dispatch_ecall<H: ForeignCnode<P>>(&mut self, host: &mut H, op: u32) -> DispatchResult {
+    /// without foreign frames, pass `&mut NoProtocolCapHost`.
+    pub fn dispatch_ecall<H: ProtocolCapHost<P>>(
+        &mut self,
+        host: &mut H,
+        op: u32,
+    ) -> DispatchResult {
         // Charge ecall gas (same as ecalli)
         let ecall_gas: u64 = 10;
         let current_gas = self.active_gas();
@@ -2032,8 +2036,8 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
 
     /// DROP a cap. Auto-unmaps DATA. Reclaims VM on HANDLE drop. For
     /// `Foreign` slots the operation routes through the host's
-    /// `fc_drop` (host-side revoke).
-    fn ecall_drop<H: ForeignCnode<P>>(
+    /// `drop` (host-side revoke).
+    fn ecall_drop<H: ProtocolCapHost<P>>(
         &mut self,
         host: &mut H,
         frame: FrameId<P::ForeignFrameId>,
@@ -2050,7 +2054,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
         // Foreign drop: host handles revoke + bookkeeping. No DATA / HANDLE
         // path applies (host-managed CNodes hold persistent caps only).
         if let FrameId::Foreign(id) = frame {
-            if !host.fc_drop(id, slot, rights) {
+            if !host.drop(id, slot, rights) {
                 self.set_active_reg(7, RESULT_WHAT);
             }
             return DispatchResult::Continue;
@@ -2127,9 +2131,9 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
     /// MOVE a cap between Frames. Auto-unmaps DATA from source if cross-frame;
     /// auto-remaps in destination if `mappings[dst_vm]` is recorded.
     /// `Foreign` participation routes the take/set through the host's
-    /// `ForeignCnode`. Set rejection rolls back by restoring at source.
+    /// `ProtocolCapHost`. Set rejection rolls back by restoring at source.
     #[allow(clippy::too_many_arguments)]
-    fn ecall_move<H: ForeignCnode<P>>(
+    fn ecall_move<H: ProtocolCapHost<P>>(
         &mut self,
         host: &mut H,
         s_frame: FrameId<P::ForeignFrameId>,
@@ -2181,7 +2185,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
             // `mappings[dst_vm]` is recorded. Moves into the ephemeral
             // table preserve `mappings` but never remap (no window).
             // Foreign destinations don't accept DATA caps (host rejects on
-            // fc_set), so the remap is correct-by-omission for that case.
+            // set), so the remap is correct-by-omission for that case.
             self.cross_frame_unmap(d);
             if let FrameId::Vm(o_idx) = o_frame {
                 self.cross_frame_remap(d, o_idx);
@@ -2249,7 +2253,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
     /// performs a host-side derive (allocating a fresh registry entry);
     /// `Foreign` destination places via the host adapter.
     #[allow(clippy::too_many_arguments)]
-    fn ecall_copy<H: ForeignCnode<P>>(
+    fn ecall_copy<H: ProtocolCapHost<P>>(
         &mut self,
         host: &mut H,
         s_frame: FrameId<P::ForeignFrameId>,
@@ -2288,7 +2292,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
             .is_err()
         {
             // Destination rejected the placement; the COPY produces no
-            // visible side effect (host's fc_clone may have allocated a
+            // visible side effect (host's clone may have allocated a
             // child registry entry that's now orphan, but the host can
             // garbage-collect at its discretion).
             self.set_active_reg(7, RESULT_WHAT);
@@ -2852,7 +2856,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
 
     /// Run the kernel until it needs host interaction or terminates.
     ///
-    /// Convenience shim that uses [`NoForeignCnode`] — for callers
+    /// Convenience shim that uses [`NoProtocolCapHost`] — for callers
     /// (tests, benches, hosts with no foreign cap-tables) that don't
     /// expose any `FrameId::Foreign` frames. Hosts that do should call
     /// [`Self::run_with_host`].
@@ -2861,13 +2865,13 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
     where
         P: ProtocolCap<ForeignFrameId = (), FinalStepRights = ()>,
     {
-        self.run_with_host(&mut NoForeignCnode)
+        self.run_with_host(&mut NoProtocolCapHost)
     }
 
     /// Run the kernel until it needs host interaction or terminates.
     /// `host` is consulted for slot-level operations on `FrameId::Foreign`
     /// frames produced by the resolve walk.
-    pub fn run_with_host<H: ForeignCnode<P>>(&mut self, host: &mut H) -> KernelResult {
+    pub fn run_with_host<H: ProtocolCapHost<P>>(&mut self, host: &mut H) -> KernelResult {
         loop {
             // Ensure active VM has a window assigned (handles eviction + DATA cap mapping).
             #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
@@ -3963,7 +3967,7 @@ mod tests {
         kernel.set_active_reg(12, 66 | ((untyped_ref as u64) << 32));
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
-        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0);
+        let result = kernel.dispatch_ecall(&mut NoProtocolCapHost, 0);
         assert!(matches!(result, DispatchResult::Continue));
 
         // φ[7] should be the dst_slot
@@ -4002,7 +4006,7 @@ mod tests {
         kernel.set_active_reg(12, (subject_ref << 32) | object_ref);
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
-        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x0F);
+        let result = kernel.dispatch_ecall(&mut NoProtocolCapHost, 0x0F);
         assert!(matches!(result, DispatchResult::Continue));
         assert_eq!(
             kernel.active_reg(7),
@@ -4052,7 +4056,7 @@ mod tests {
         kernel.set_active_reg(12, (subject_ref << 32) | object_ref);
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
-        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x0F);
+        let result = kernel.dispatch_ecall(&mut NoProtocolCapHost, 0x0F);
         assert!(matches!(result, DispatchResult::Continue));
         assert_eq!(kernel.active_reg(7), RESULT_WHAT);
 
@@ -4099,7 +4103,7 @@ mod tests {
         kernel.set_active_reg(12, (subject_ref << 32) | object_ref);
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
-        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x0F);
+        let result = kernel.dispatch_ecall(&mut NoProtocolCapHost, 0x0F);
         assert!(matches!(result, DispatchResult::Continue));
         assert_eq!(kernel.active_reg(7), RESULT_WHAT);
 
@@ -4307,7 +4311,7 @@ mod tests {
         kernel.set_active_reg(12, 0); // subject_ref=0 (high), object_ref=0 (low)
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
-        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x05); // DROP
+        let result = kernel.dispatch_ecall(&mut NoProtocolCapHost, 0x05); // DROP
         assert!(matches!(result, DispatchResult::Continue));
         assert_eq!(kernel.active_reg(7), RESULT_WHAT);
         assert!(
@@ -4319,7 +4323,7 @@ mod tests {
         kernel.set_active_reg(12, 50);
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
-        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x06); // MOVE
+        let result = kernel.dispatch_ecall(&mut NoProtocolCapHost, 0x06); // MOVE
         assert!(matches!(result, DispatchResult::Continue));
         assert_eq!(kernel.active_reg(7), RESULT_WHAT);
         assert!(
@@ -4337,7 +4341,7 @@ mod tests {
         kernel.set_active_reg(12, 50u64 << 32);
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
-        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x06); // MOVE
+        let result = kernel.dispatch_ecall(&mut NoProtocolCapHost, 0x06); // MOVE
         assert!(matches!(result, DispatchResult::Continue));
         assert_eq!(kernel.active_reg(7), RESULT_WHAT);
         assert!(
@@ -4382,7 +4386,7 @@ mod tests {
         kernel.set_active_reg(12, object_ref | (subject_ref << 32));
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
-        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x06); // MOVE
+        let result = kernel.dispatch_ecall(&mut NoProtocolCapHost, 0x06); // MOVE
         assert!(matches!(result, DispatchResult::Continue));
         assert!(
             kernel
@@ -4407,7 +4411,7 @@ mod tests {
         kernel.set_active_reg(12, object_ref | (subject_ref << 32));
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
-        let result = kernel.dispatch_ecall(&mut NoForeignCnode, 0x06);
+        let result = kernel.dispatch_ecall(&mut NoProtocolCapHost, 0x06);
         assert!(matches!(result, DispatchResult::Continue));
         assert!(
             kernel.vm_arena.vm(0).cap_table.is_empty(FAULT_HANDLER_SLOT),
@@ -4448,7 +4452,7 @@ mod tests {
         kernel.set_active_reg(12, object_ref | (subject_ref << 32));
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
-        let result = kernel.dispatch_ecall(&mut NoForeignCnode, MGMT_GAS_DERIVE);
+        let result = kernel.dispatch_ecall(&mut NoProtocolCapHost, MGMT_GAS_DERIVE);
         assert!(matches!(result, DispatchResult::Continue));
         assert_eq!(kernel.active_reg(7), 0, "DERIVE should succeed");
 
@@ -4484,7 +4488,7 @@ mod tests {
         kernel.set_active_reg(12, object_ref | (subject_ref << 32));
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
-        let result = kernel.dispatch_ecall(&mut NoForeignCnode, MGMT_GAS_MERGE);
+        let result = kernel.dispatch_ecall(&mut NoProtocolCapHost, MGMT_GAS_MERGE);
         assert!(matches!(result, DispatchResult::Continue));
         assert_eq!(kernel.active_reg(7), 0, "MERGE should succeed");
 
@@ -4513,7 +4517,7 @@ mod tests {
         kernel.set_active_reg(12, 67 | ((handle_idx as u64) << 32));
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
-        kernel.dispatch_ecall(&mut NoForeignCnode, 0x0A);
+        kernel.dispatch_ecall(&mut NoProtocolCapHost, 0x0A);
         let callable_idx = 67u8;
 
         // Owner-shaped FrameRef still exists
@@ -4546,7 +4550,7 @@ mod tests {
         kernel.set_active_reg(12, 67 | ((handle_idx as u64) << 32));
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
-        kernel.dispatch_ecall(&mut NoForeignCnode, 0x0A);
+        kernel.dispatch_ecall(&mut NoProtocolCapHost, 0x0A);
 
         // CALL on the callable: routes to child VM (idx 2, bare Frame at idx 1).
         kernel.set_active_reg(12, 0); // no IPC cap
@@ -4572,7 +4576,7 @@ mod tests {
         kernel.set_active_reg(12, 67 | ((handle_idx as u64) << 32));
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
-        kernel.dispatch_ecall(&mut NoForeignCnode, 0x0A);
+        kernel.dispatch_ecall(&mut NoProtocolCapHost, 0x0A);
 
         // Force the child to Faulted so RESUME's target-state check would
         // otherwise pass. RESUME via callable-shaped FrameRef should still
@@ -4620,7 +4624,7 @@ mod tests {
         kernel.set_active_reg(12, 67 | ((handle_idx as u64) << 32));
         #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
         kernel.flush_live_ctx();
-        kernel.dispatch_ecall(&mut NoForeignCnode, 0x0A);
+        kernel.dispatch_ecall(&mut NoProtocolCapHost, 0x0A);
 
         // Try to downgrade *the callable-shaped* cap. Should fail.
         let result = kernel.mgmt_downgrade(67);

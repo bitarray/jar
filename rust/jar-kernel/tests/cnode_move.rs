@@ -6,13 +6,13 @@
 //!
 //! - VaultRef ↔ `ProtocolCap::VaultRef(_)`.
 //! - Resource ↔ `ProtocolCap::Resource(_)`.
-//! - Code / Data are container-bound (`fc_take` / `fc_clone` return `None`).
+//! - Code / Data are container-bound (`take` / `clone` return `None`).
 //!
-//! No cap_registry, no cascade revocation. `fc_drop` just clears the slot.
+//! No cap_registry, no cascade revocation. `drop` just clears the slot.
 
 use std::sync::Arc;
 
-use javm::cap::ForeignCnode;
+use javm::cap::ProtocolCapHost;
 
 use jar_kernel::cap::{Cap, ProtocolCap};
 use jar_kernel::vm::foreign_cnode::VaultCnodeView;
@@ -46,8 +46,8 @@ fn fc_take_resource_returns_protocol_resource_and_clears_slot() {
     let r = place_resource(&mut state, vault_id, 7);
     let mut view = VaultCnodeView::new(&mut state);
     let cap = view
-        .fc_take(vault_id, 7, VaultRights::ALL)
-        .expect("fc_take with full rights");
+        .take(vault_id, 7, VaultRights::ALL)
+        .expect("take with full rights");
     match cap {
         Cap::Protocol(ProtocolCap::Resource(out)) => assert_eq!(out, r),
         _ => panic!("expected ProtocolCap::Resource"),
@@ -65,8 +65,8 @@ fn fc_take_vault_ref_returns_protocol_vault_ref() {
     place(&mut state, vault_id, 5, RegCap::VaultRef(vr));
     let mut view = VaultCnodeView::new(&mut state);
     let cap = view
-        .fc_take(vault_id, 5, VaultRights::ALL)
-        .expect("fc_take vault_ref");
+        .take(vault_id, 5, VaultRights::ALL)
+        .expect("take vault_ref");
     match cap {
         Cap::Protocol(ProtocolCap::VaultRef(out)) => assert_eq!(out, vr),
         _ => panic!("expected ProtocolCap::VaultRef"),
@@ -78,7 +78,7 @@ fn fc_take_requires_revoke_right() {
     let (mut state, vault_id) = empty_vault();
     let _ = place_resource(&mut state, vault_id, 7);
     let mut view = VaultCnodeView::new(&mut state);
-    assert!(view.fc_take(vault_id, 7, VaultRights::READ).is_none());
+    assert!(view.take(vault_id, 7, VaultRights::READ).is_none());
     assert!(state.vaults.get(&vault_id).unwrap().slots.get(7).is_some());
 }
 
@@ -95,7 +95,7 @@ fn fc_take_data_cap_returns_none() {
         }),
     );
     let mut view = VaultCnodeView::new(&mut state);
-    assert!(view.fc_take(vault_id, 7, VaultRights::ALL).is_none());
+    assert!(view.take(vault_id, 7, VaultRights::ALL).is_none());
 }
 
 #[test]
@@ -104,8 +104,8 @@ fn fc_set_places_resource_into_empty_slot() {
     let r = ResourceCap(ResourceKind::CreateVault { quota_pages: 16 });
     let cap = Cap::Protocol(ProtocolCap::Resource(r.clone()));
     let mut view = VaultCnodeView::new(&mut state);
-    view.fc_set(vault_id, 8, VaultRights::ALL, cap)
-        .expect("fc_set into empty slot 8");
+    view.set(vault_id, 8, VaultRights::ALL, cap)
+        .expect("set into empty slot 8");
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(8),
         Some(&RegCap::Resource(r))
@@ -121,8 +121,8 @@ fn fc_set_places_vault_ref_inline() {
     };
     let cap = Cap::Protocol(ProtocolCap::VaultRef(vr));
     let mut view = VaultCnodeView::new(&mut state);
-    view.fc_set(vault_id, 0, VaultRights::ALL, cap)
-        .expect("fc_set vault_ref");
+    view.set(vault_id, 0, VaultRights::ALL, cap)
+        .expect("set vault_ref");
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(0),
         Some(&RegCap::VaultRef(vr))
@@ -136,10 +136,7 @@ fn fc_set_rejects_frame_only_caps() {
     let ephemeral = Cap::Protocol(ProtocolCap::SelfId(jar_kernel::cap::SelfCap {
         vault_id: VaultId(0),
     }));
-    assert!(
-        view.fc_set(vault_id, 0, VaultRights::ALL, ephemeral)
-            .is_err()
-    );
+    assert!(view.set(vault_id, 0, VaultRights::ALL, ephemeral).is_err());
 }
 
 #[test]
@@ -148,7 +145,7 @@ fn fc_set_requires_grant_right() {
     let r = ResourceCap(ResourceKind::CreateVault { quota_pages: 16 });
     let cap = Cap::Protocol(ProtocolCap::Resource(r));
     let mut view = VaultCnodeView::new(&mut state);
-    assert!(view.fc_set(vault_id, 0, VaultRights::READ, cap).is_err());
+    assert!(view.set(vault_id, 0, VaultRights::READ, cap).is_err());
 }
 
 #[test]
@@ -157,8 +154,8 @@ fn fc_clone_resource_produces_independent_copy() {
     let r = place_resource(&mut state, vault_id, 7);
     let mut view = VaultCnodeView::new(&mut state);
     let cap = view
-        .fc_clone(vault_id, 7, VaultRights::ALL)
-        .expect("fc_clone with derive right");
+        .clone(vault_id, 7, VaultRights::ALL)
+        .expect("clone with derive right");
     match cap {
         Cap::Protocol(ProtocolCap::Resource(out)) => assert_eq!(out, r),
         _ => panic!("expected ProtocolCap::Resource"),
@@ -179,8 +176,8 @@ fn fc_clone_vault_ref_produces_inline_value() {
     place(&mut state, vault_id, 3, RegCap::VaultRef(vr));
     let mut view = VaultCnodeView::new(&mut state);
     let cap = view
-        .fc_clone(vault_id, 3, VaultRights::ALL)
-        .expect("fc_clone vault_ref");
+        .clone(vault_id, 3, VaultRights::ALL)
+        .expect("clone vault_ref");
     match cap {
         Cap::Protocol(ProtocolCap::VaultRef(out)) => assert_eq!(out, vr),
         _ => panic!("expected ProtocolCap::VaultRef"),
@@ -196,7 +193,7 @@ fn fc_clone_requires_derive_right() {
     let (mut state, vault_id) = empty_vault();
     let _ = place_resource(&mut state, vault_id, 7);
     let mut view = VaultCnodeView::new(&mut state);
-    assert!(view.fc_clone(vault_id, 7, VaultRights::READ).is_none());
+    assert!(view.clone(vault_id, 7, VaultRights::READ).is_none());
 }
 
 #[test]
@@ -212,7 +209,7 @@ fn fc_clone_code_cap_returns_none() {
         }),
     );
     let mut view = VaultCnodeView::new(&mut state);
-    assert!(view.fc_clone(vault_id, 7, VaultRights::ALL).is_none());
+    assert!(view.clone(vault_id, 7, VaultRights::ALL).is_none());
 }
 
 #[test]
@@ -220,7 +217,7 @@ fn fc_drop_clears_slot() {
     let (mut state, vault_id) = empty_vault();
     let _ = place_resource(&mut state, vault_id, 7);
     let mut view = VaultCnodeView::new(&mut state);
-    assert!(view.fc_drop(vault_id, 7, VaultRights::ALL));
+    assert!(view.drop(vault_id, 7, VaultRights::ALL));
     assert!(state.vaults.get(&vault_id).unwrap().slots.get(7).is_none());
 }
 
@@ -228,7 +225,7 @@ fn fc_drop_clears_slot() {
 fn fc_drop_empty_slot_is_noop() {
     let (mut state, vault_id) = empty_vault();
     let mut view = VaultCnodeView::new(&mut state);
-    assert!(!view.fc_drop(vault_id, 7, VaultRights::ALL));
+    assert!(!view.drop(vault_id, 7, VaultRights::ALL));
 }
 
 #[test]
@@ -236,9 +233,9 @@ fn fc_is_empty_reports_slot_state() {
     let (mut state, vault_id) = empty_vault();
     let _ = place_resource(&mut state, vault_id, 7);
     let view = VaultCnodeView::new(&mut state);
-    assert!(!view.fc_is_empty(vault_id, 7));
-    assert!(view.fc_is_empty(vault_id, 8));
-    assert!(view.fc_is_empty(VaultId(99_999), 0));
+    assert!(!view.is_empty(vault_id, 7));
+    assert!(view.is_empty(vault_id, 8));
+    assert!(view.is_empty(VaultId(99_999), 0));
 }
 
 #[test]

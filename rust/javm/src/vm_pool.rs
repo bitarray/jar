@@ -375,7 +375,7 @@ impl<P: ProtocolCap> VmArena<P> {
 ///   pointing at it.
 /// - `Foreign(id)` — a host-managed cap-table outside javm (e.g. a
 ///   jar-kernel Vault CNode). javm doesn't own these; slot operations
-///   route through a [`crate::cap::ForeignCnode`] adapter the host
+///   route through a [`crate::cap::ProtocolCapHost`] adapter the host
 ///   threads in.
 ///
 /// `F` is the host's foreign-frame id type (`ProtocolCap::ForeignFrameId`).

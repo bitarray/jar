@@ -470,7 +470,7 @@ pub struct FrameRefCap {
 /// such a foreign frame by overriding [`ProtocolCap::as_foreign_frame`];
 /// when javm's resolve walk crosses through that cap, the resulting
 /// `FrameId::Foreign(id)` is fed to a host-provided
-/// [`ForeignCnode`] implementation for slot-level operations.
+/// [`ProtocolCapHost`] implementation for slot-level operations.
 pub trait ProtocolCap: Clone + core::fmt::Debug {
     /// Identifier the host uses to address one of its foreign frames.
     /// Implementors with no foreign frames use `()`.
@@ -527,27 +527,39 @@ impl ProtocolCap for u8 {
 }
 
 // =============================================================================
-// Foreign cnode trait — host-side hook for slot-level operations on a frame
+// ProtocolCapHost trait — host-side hook for slot-level operations on a frame
 // kind javm doesn't own (e.g. jar-kernel Vault CNodes).
 // =============================================================================
 
-/// Host adapter for foreign cap-tables. A type implementing this trait
-/// translates between javm's `Cap<P>` value model and the host's own
-/// slot storage (which may indirect through a registry, enforce rights,
-/// etc.). javm calls these methods from `MGMT_MOVE` / `MGMT_COPY` /
-/// `MGMT_DROP` ecallis when the resolve walk lands on a
-/// `FrameId::Foreign`.
+/// Host adapter for foreign cap-tables and the broader protocol-cap
+/// host context. A type implementing this trait translates between
+/// javm's `Cap<P>` value model and the host's own slot storage (which
+/// may indirect through a registry, enforce rights, etc.) and provides
+/// the host-side resources that `ProtocolCap::call` may need.
+///
+/// javm calls `take` / `set` / `clone` / `drop` from `MGMT_MOVE` /
+/// `MGMT_COPY` / `MGMT_DROP` ecallis when the resolve walk lands on a
+/// `FrameId::Foreign`. `get` is read-only and is used by the resolve
+/// walk to traverse arbitrarily deep cap-ref chains and by CALL
+/// dispatch on a foreign slot.
 ///
 /// `id` identifies the host frame; `rights` carries the
 /// operation-rights bag captured at the final crossing step, so the
 /// host can enforce op-specific authority (e.g. VaultRef Grant /
 /// Revoke / Derive). All methods may fail (return `None` / `Err`) and
 /// javm reports `RESULT_WHAT` to the guest when they do.
-pub trait ForeignCnode<P: ProtocolCap> {
+pub trait ProtocolCapHost<P: ProtocolCap> {
+    /// Read-only fetch of the cap at `(id, slot)`. Used by the resolve
+    /// walk to traverse cap-ref chains of any depth and by CALL
+    /// dispatch when the target lands on a foreign slot. Empty slots
+    /// or shapes the host can't project mid-VM (e.g. bulk Code/Data
+    /// caps) return `None`.
+    fn get(&self, id: P::ForeignFrameId, slot: u8) -> Option<Cap<P>>;
+
     /// Take the cap at `(id, slot)`. Empty slots return `None`. On
     /// `Some(_)` the host must have removed the cap from its frame
     /// (and updated any registry bookkeeping).
-    fn fc_take(
+    fn take(
         &mut self,
         id: P::ForeignFrameId,
         slot: u8,
@@ -558,7 +570,7 @@ pub trait ForeignCnode<P: ProtocolCap> {
     /// rejects placement (slot occupied, pinning violation, missing
     /// rights, non-persistable cap shape) — javm uses the returned
     /// cap to roll back the source slot.
-    fn fc_set(
+    fn set(
         &mut self,
         id: P::ForeignFrameId,
         slot: u8,
@@ -568,7 +580,7 @@ pub trait ForeignCnode<P: ProtocolCap> {
 
     /// Produce a copy (host-side derive) of the cap at `(id, slot)`.
     /// Empty slots / non-copyable caps return `None`.
-    fn fc_clone(
+    fn clone(
         &mut self,
         id: P::ForeignFrameId,
         slot: u8,
@@ -579,36 +591,39 @@ pub trait ForeignCnode<P: ProtocolCap> {
     /// `false` if the slot is empty or the host refused (pinning,
     /// rights). Used for `MGMT_DROP` against a foreign slot, where
     /// the cap is destroyed rather than handed back to the guest.
-    fn fc_drop(&mut self, id: P::ForeignFrameId, slot: u8, rights: P::FinalStepRights) -> bool;
+    fn drop(&mut self, id: P::ForeignFrameId, slot: u8, rights: P::FinalStepRights) -> bool;
 
     /// Whether the slot is empty (no cap held).
-    fn fc_is_empty(&self, id: P::ForeignFrameId, slot: u8) -> bool;
+    fn is_empty(&self, id: P::ForeignFrameId, slot: u8) -> bool;
 }
 
-/// Zero-sized default `ForeignCnode` for hosts (and tests / benches)
-/// that don't expose any foreign frames. All methods fail silently —
-/// `MGMT_MOVE` / etc. against a `FrameId::Foreign` simply report
-/// `RESULT_WHAT` to the guest, since `as_foreign_frame()` defaults to
-/// `None` and so no `Foreign` ref will ever be produced.
-pub struct NoForeignCnode;
+/// Zero-sized default `ProtocolCapHost` for hosts (and tests /
+/// benches) that don't expose any foreign frames. All methods fail
+/// silently — `MGMT_MOVE` / etc. against a `FrameId::Foreign` simply
+/// report `RESULT_WHAT` to the guest, since `as_foreign_frame()`
+/// defaults to `None` and so no `Foreign` ref will ever be produced.
+pub struct NoProtocolCapHost;
 
-impl<P> ForeignCnode<P> for NoForeignCnode
+impl<P> ProtocolCapHost<P> for NoProtocolCapHost
 where
     P: ProtocolCap<ForeignFrameId = (), FinalStepRights = ()>,
 {
-    fn fc_take(&mut self, _id: (), _slot: u8, _rights: ()) -> Option<Cap<P>> {
+    fn get(&self, _id: (), _slot: u8) -> Option<Cap<P>> {
         None
     }
-    fn fc_set(&mut self, _id: (), _slot: u8, _rights: (), cap: Cap<P>) -> Result<(), Cap<P>> {
+    fn take(&mut self, _id: (), _slot: u8, _rights: ()) -> Option<Cap<P>> {
+        None
+    }
+    fn set(&mut self, _id: (), _slot: u8, _rights: (), cap: Cap<P>) -> Result<(), Cap<P>> {
         Err(cap)
     }
-    fn fc_clone(&mut self, _id: (), _slot: u8, _rights: ()) -> Option<Cap<P>> {
+    fn clone(&mut self, _id: (), _slot: u8, _rights: ()) -> Option<Cap<P>> {
         None
     }
-    fn fc_drop(&mut self, _id: (), _slot: u8, _rights: ()) -> bool {
+    fn drop(&mut self, _id: (), _slot: u8, _rights: ()) -> bool {
         false
     }
-    fn fc_is_empty(&self, _id: (), _slot: u8) -> bool {
+    fn is_empty(&self, _id: (), _slot: u8) -> bool {
         true
     }
 }

@@ -12,7 +12,7 @@
 //! | `RegCap::Code(CodeCap{blob})`                     | `Cap::Code(...)` (compile blob) |
 //! | `RegCap::Data(DataCap{content, page_count})`      | `Cap::Data(...)` (fresh ephemeral pages, content-copied, **unmapped**) |
 //! | `RegCap::VaultRef(...)` / other Registered shapes | `Cap::Protocol(ProtocolCap::Registered { id, cap })` |
-//! | Pinned (Dispatch / Transact / Schedule + Refs)        | `KernelError::Pinning` (defense in depth — `fc_set` already rejects placement) |
+//! | Pinned (Dispatch / Transact / Schedule + Refs)        | `KernelError::Pinning` (defense in depth — `set` already rejects placement) |
 //! | Ephemeral-only (Gas / SelfId / Caller*)               | `KernelError::Internal` (kernel bug if such a cap lands here) |
 //!
 //! The DataCap path leaves the cap **unmapped**: the init program is
@@ -47,7 +47,7 @@ pub type InitArtifacts = javm::kernel::InvocationArtifacts<ProtocolCap>;
 ///
 /// Returns `KernelError::Pinning` if a pinned cap (Dispatch / Transact
 /// / Schedule + Refs) is encountered in `vault.slots` (defense in
-/// depth — `fc_set` already rejects this placement). Returns
+/// depth — `set` already rejects this placement). Returns
 /// `KernelError::Internal` if an ephemeral-only cap (Gas / SelfId /
 /// Caller*) is encountered (kernel bug if this happens). Returns
 /// `KernelError::Internal` if `vault.slots[0]` is occupied (slot 0 is
