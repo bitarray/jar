@@ -25,7 +25,9 @@ use crate::types::{
     AttestationEntry, Caller, Command, EventEndpointCap, KResult, KernelError, KernelRole,
     ReachEntry, ResultEntry, State, VaultId,
 };
-use crate::vm::{InvocationHost, InvocationResult, drive_invocation, new_vm_from_vault};
+use crate::vm::{
+    InvocationHost, InvocationResult, drive_invocation, new_vm_from_vault, snapshot_data_caps,
+};
 
 /// One fresh `Vault.initialize` against a clone of σ for the verify
 /// phase. Returns the invocation result; the caller decides whether to
@@ -123,23 +125,32 @@ fn run_one<H: Hardware>(
     let mut cursor = AttestCursor::new();
     let mut attestation_trace: Vec<AttestationEntry> = attestation_traces.to_vec();
     let mut result_trace: Vec<ResultEntry> = Vec::new();
-    let mut host = InvocationHost {
-        state,
-        role,
-        current_vault: endpoint.vault_id,
-        caller: Caller::Kernel(role),
-        endpoint_idx,
-        dispatch_context,
-        event_blob,
-        commands,
-        reach: &mut reach,
-        attest_cursor: &mut cursor,
-        attestation_trace: &mut attestation_trace,
-        result_trace: &mut result_trace,
-        pool,
-        hw,
+    let result = {
+        let mut host = InvocationHost {
+            state,
+            role,
+            current_vault: endpoint.vault_id,
+            caller: Caller::Kernel(role),
+            endpoint_idx,
+            dispatch_context,
+            event_blob,
+            commands,
+            reach: &mut reach,
+            attest_cursor: &mut cursor,
+            attestation_trace: &mut attestation_trace,
+            result_trace: &mut result_trace,
+            pool,
+            hw,
+        };
+        drive_invocation(&mut vm, &mut host)?
     };
-    drive_invocation(&mut vm, &mut host)
+    // Process invocations may mutate persistent DataCaps; snapshot the
+    // post-execution page contents back into σ. Verify is ro-σ — no
+    // snapshot. A faulting process leaves σ unchanged.
+    if matches!(role, KernelRole::Process) && result.fault.is_none() {
+        snapshot_data_caps(&vm, endpoint.vault_id, state);
+    }
+    Ok(result)
 }
 
 // =============================================================================
