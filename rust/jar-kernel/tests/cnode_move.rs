@@ -13,7 +13,7 @@ use std::sync::Arc;
 use jar_kernel::cap::{Cap, ProtocolCap};
 use jar_kernel::vm::foreign_cnode;
 use jar_kernel::{
-    DataCap, ImageId, RegCap, ResourceCap, ResourceKind, State, Vault, VaultId, VaultRefCap,
+    FileCap, ImageId, RegCap, ResourceCap, ResourceKind, State, Vault, VaultId, VaultRefCap,
     VaultRights,
 };
 
@@ -80,17 +80,24 @@ fn take_requires_revoke_right() {
 }
 
 #[test]
-fn take_data_cap_returns_none() {
+fn take_file_cap_returns_none() {
     let (mut state, vault_id) = empty_vault();
+    // Pre-allocate a file referencing entry in σ.
+    let qid = state.insert_storage_quota(u64::MAX / 2);
+    let file_id = state
+        .allocate_file(b"sample".to_vec(), 1, qid)
+        .expect("allocate_file");
     place(
         &mut state,
         vault_id,
         7,
-        RegCap::Data(DataCap {
-            content: Arc::new(b"sample".to_vec()),
-            page_count: 1,
+        RegCap::File(FileCap {
+            file_id,
+            byte_count: 6,
         }),
     );
+    // FileCap is reference-shaped but take is banned (would break
+    // refcount semantics under MGMT_MOVE).
     assert!(foreign_cnode::take(&mut state, vault_id, 7, VaultRights::ALL).is_none());
 }
 
@@ -189,12 +196,15 @@ fn clone_requires_derive_right() {
 fn clone_code_cap_returns_none() {
     use jar_kernel::CodeCap;
     let (mut state, vault_id) = empty_vault();
+    let qid = state.insert_storage_quota(u64::MAX / 2);
+    let code_id = state.intern_code(vec![0; 64], qid).expect("intern_code");
     place(
         &mut state,
         vault_id,
         7,
         RegCap::Code(CodeCap {
-            blob: Arc::new(vec![0; 64]),
+            code_id,
+            byte_count: 64,
         }),
     );
     assert!(foreign_cnode::clone(&state, vault_id, 7, VaultRights::ALL, None).is_none());

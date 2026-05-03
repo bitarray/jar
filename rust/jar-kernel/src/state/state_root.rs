@@ -8,6 +8,10 @@ use crate::types::{Hash, RegCap, State, VaultRights};
 
 use crate::crypto;
 
+fn push_u32(buf: &mut Vec<u8>, x: u32) {
+    buf.extend_from_slice(&x.to_le_bytes());
+}
+
 /// Canonical hash digest over σ. Maps and structured data are walked in
 /// `BTreeMap` order, which is canonical because every map in `State` is
 /// `BTreeMap`. Hashing is kernel-static — no Hardware needed.
@@ -16,6 +20,8 @@ pub fn state_root(state: &State) -> Hash {
 
     push_u64(&mut buf, state.id_counters.next_vault_id);
     push_u64(&mut buf, state.id_counters.next_image_id);
+    push_u64(&mut buf, state.id_counters.next_file_id);
+    push_u64(&mut buf, state.id_counters.next_quota_id);
     push_u64(&mut buf, state.chain_index);
     push_u64(&mut buf, state.validators.len() as u64);
     for k in &state.validators {
@@ -34,6 +40,35 @@ pub fn state_root(state: &State) -> Hash {
                 Some(cap) => encode_vault_cap(&mut buf, cap),
             }
         }
+    }
+
+    // data_blobs registry (sequential FileId).
+    push_u64(&mut buf, state.data_blobs.len() as u64);
+    for (fid, entry) in &state.data_blobs {
+        push_u64(&mut buf, fid.0);
+        push_u32(&mut buf, entry.page_count);
+        push_u32(&mut buf, entry.refcount);
+        push_u64(&mut buf, entry.origin_quota.0);
+        push_u64(&mut buf, entry.content.len() as u64);
+        buf.extend_from_slice(&entry.content);
+    }
+
+    // code_blobs registry (hash-addressed CodeId).
+    push_u64(&mut buf, state.code_blobs.len() as u64);
+    for (cid, entry) in &state.code_blobs {
+        buf.extend_from_slice(&cid.0);
+        push_u32(&mut buf, entry.refcount);
+        push_u64(&mut buf, entry.origin_quota.0);
+        push_u64(&mut buf, entry.blob.len() as u64);
+        buf.extend_from_slice(&entry.blob);
+    }
+
+    // storage_quotas registry.
+    push_u64(&mut buf, state.storage_quotas.len() as u64);
+    for (qid, entry) in &state.storage_quotas {
+        push_u64(&mut buf, qid.0);
+        push_u64(&mut buf, entry.bytes);
+        push_u32(&mut buf, entry.refcount);
     }
 
     push_u64(&mut buf, state.transact_endpoints.len() as u64);
@@ -76,14 +111,13 @@ fn encode_vault_cap(buf: &mut Vec<u8>, cap: &RegCap) {
         }
         RegCap::Code(c) => {
             buf.push(2);
-            push_u64(buf, c.blob.len() as u64);
-            buf.extend_from_slice(&c.blob);
+            buf.extend_from_slice(&c.code_id.0);
+            push_u64(buf, c.byte_count);
         }
-        RegCap::Data(d) => {
+        RegCap::File(f) => {
             buf.push(3);
-            push_u64(buf, d.content.len() as u64);
-            buf.extend_from_slice(&d.content);
-            push_u64(buf, d.page_count as u64);
+            push_u64(buf, f.file_id.0);
+            push_u64(buf, f.byte_count);
         }
         RegCap::Resource(r) => {
             buf.push(4);
@@ -97,6 +131,10 @@ fn encode_vault_cap(buf: &mut Vec<u8>, cap: &RegCap) {
             buf.push(5);
             push_u64(buf, ir.image_id.0);
             buf.push(image_ref_rights_byte(&ir.rights));
+        }
+        RegCap::StorageQuota(q) => {
+            buf.push(6);
+            push_u64(buf, q.quota_id.0);
         }
     }
 }

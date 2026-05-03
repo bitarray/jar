@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use crate::cap::Image;
-use crate::types::{CodeCap, EventEndpointCap, ImageId, KResult, RegCap, State, VaultId};
+use crate::types::{CodeCap, EventEndpointCap, ImageId, KResult, QuotaId, RegCap, State, VaultId};
 
 /// Default smoke fixture: a PVM blob that ecallis IPC-slot (REPLY) → halts
 /// immediately. Compiled at build time from `rust/jar-test-services/halt`.
@@ -66,10 +66,14 @@ impl GenesisBuilder {
         } = self;
         let mut state = State::empty();
 
-        let bi_image = register_image_for_blob(&mut state, &block_init_blob);
-        let t_image = register_image_for_blob(&mut state, &transact_blob);
-        let bf_image = register_image_for_blob(&mut state, &block_final_blob);
-        let d_image = register_image_for_blob(&mut state, &dispatch_blob);
+        // Pre-allocate a "genesis" StorageQuota with a large balance.
+        // All genesis-time interns/files debit from it.
+        let genesis_quota = state.insert_storage_quota(u64::MAX / 2);
+
+        let bi_image = register_image_for_blob(&mut state, &block_init_blob, genesis_quota);
+        let t_image = register_image_for_blob(&mut state, &transact_blob, genesis_quota);
+        let bf_image = register_image_for_blob(&mut state, &block_final_blob, genesis_quota);
+        let d_image = register_image_for_blob(&mut state, &dispatch_blob, genesis_quota);
 
         let bi_vault = alloc_vault_for_image(&mut state, bi_image);
         state.transact_endpoints.push(EventEndpointCap {
@@ -109,10 +113,11 @@ impl GenesisBuilder {
     }
 }
 
-/// Parse a JAR blob, extract its CODE sub-blob, build an Image
-/// holding the CodeCap at `DEFAULT_INIT_CAP_SLOT`, and register it
-/// in `state.images`. Returns the new ImageId.
-fn register_image_for_blob(state: &mut State, jar_blob: &[u8]) -> ImageId {
+/// Parse a JAR blob, extract its CODE sub-blob, intern it into
+/// `state.code_blobs` (debiting `quota_id`), build an Image holding
+/// the CodeCap at `DEFAULT_INIT_CAP_SLOT`, and register the image in
+/// `state.images`. Returns the new ImageId.
+fn register_image_for_blob(state: &mut State, jar_blob: &[u8], quota_id: QuotaId) -> ImageId {
     let parsed =
         javm::program::parse_blob(jar_blob).expect("genesis blob is a well-formed JAR blob");
     let code_entry = parsed
@@ -121,6 +126,10 @@ fn register_image_for_blob(state: &mut State, jar_blob: &[u8]) -> ImageId {
         .find(|e| matches!(e.cap_type, javm::program::CapEntryType::Code))
         .expect("genesis blob has at least one CODE manifest entry");
     let code_sub_blob = javm::program::cap_data(code_entry, parsed.data_section).to_vec();
+    let byte_count = code_sub_blob.len() as u64;
+    let code_id = state
+        .intern_code(code_sub_blob, quota_id)
+        .expect("genesis quota covers code blob");
 
     let mut image = Image {
         slots: crate::cap::CNode::default(),
@@ -129,7 +138,8 @@ fn register_image_for_blob(state: &mut State, jar_blob: &[u8]) -> ImageId {
     image.slots.set(
         DEFAULT_INIT_CAP_SLOT,
         Some(RegCap::Code(CodeCap {
-            blob: Arc::new(code_sub_blob),
+            code_id,
+            byte_count,
         })),
     );
 

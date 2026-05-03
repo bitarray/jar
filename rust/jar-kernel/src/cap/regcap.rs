@@ -1,10 +1,32 @@
 //! Cap shapes for the kernel.
 //!
-//! After the CapId-removal refactor, caps are pure value types stored
-//! inline. There's no cap_registry: `vault.slots` holds `RegCap`
-//! values directly, `σ.{transact,dispatch}_endpoints` hold
-//! `EventEndpointCap` values directly. Bulk content (CodeCap blob,
-//! DataCap content) shares storage via `Arc`.
+//! Caps in σ (`RegCap`) are uniformly **references**: small fixed-size
+//! triples that name a target object in one of σ's content registries
+//! (`state.data_blobs`, `state.code_blobs`, `state.storage_quotas`,
+//! `state.vaults`, `state.images`). Bulk content lives in the
+//! registries, not in the cap.
+//!
+//! Per-cap variants:
+//!
+//! - `RegCap::VaultRef(VaultRefCap{vault_id, rights})` — reference into
+//!   `state.vaults`.
+//! - `RegCap::ImageRef(ImageRefCap{image_id, rights})` — reference into
+//!   `state.images`.
+//! - `RegCap::Code(CodeCap{code_id, byte_count})` — reference into
+//!   `state.code_blobs`. Hash-addressed; identical bytes dedup.
+//! - `RegCap::File(FileCap{file_id, byte_count})` — reference into
+//!   `state.data_blobs`. Sequential `FileId`; file content is allowed
+//!   to change over time (no auto-dedup).
+//! - `RegCap::StorageQuota(QuotaCap{quota_id})` — reference into
+//!   `state.storage_quotas`. Bytes balance lives in the entry; copying
+//!   the cap doesn't multiply balance.
+//! - `RegCap::Resource(ResourceCap)` — small value cap (governance
+//!   handle).
+//!
+//! Cap copies share registry entries via refcounts. Granting a copy
+//! bumps the refcount; dropping decrements; refcount → 0 frees the
+//! entry and refunds bytes to the entry's `origin_quota` (for
+//! File/Code).
 //!
 //! The cost: no cascade revocation. Granting a copy of a cap
 //! transfers ownership of that copy; revoking the source is just
@@ -142,37 +164,106 @@ impl AttestationEntry {
     }
 }
 
-/// Persistent code capability. Holds a PVM program blob shared across
-/// holders via `Arc<Vec<u8>>`. Immutable.
-#[derive(Clone, Debug)]
+/// Identity of a code blob in `state.code_blobs`. Hash-addressed:
+/// `CodeId(blake2b_256(blob_bytes))`. Identical bytes therefore share
+/// one entry (auto-dedup) and one CodeId.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
+pub struct CodeId(pub [u8; 32]);
+
+/// Identity of a file blob in `state.data_blobs`. Monotonic u64 —
+/// **not** content-hashed because file content is allowed to change
+/// over a file's lifetime. A FileId names a specific file entry; two
+/// files with identical content get distinct ids.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
+pub struct FileId(pub u64);
+
+/// Identity of a storage-quota entry in `state.storage_quotas`.
+/// Monotonic u64.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
+pub struct QuotaId(pub u64);
+
+/// Persistent code capability. **Reference** into `state.code_blobs`.
+/// The actual bytes live in the registry entry; this cap is just the
+/// id + a cached byte_count.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub struct CodeCap {
-    pub blob: Arc<Vec<u8>>,
+    pub code_id: CodeId,
+    pub byte_count: u64,
 }
 
-impl PartialEq for CodeCap {
+/// Persistent file capability ("disk file"). **Reference** into
+/// `state.data_blobs`. The bytes live in the registry entry. Distinct
+/// from javm's `Cap::Data` (ephemeral mapped pages); convert via
+/// `host_open` (FileCap → DataCap, allocates ephemeral) and
+/// `host_save` (DataCap → FileCap, mints fresh σ entry).
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct FileCap {
+    pub file_id: FileId,
+    pub byte_count: u64,
+}
+
+/// Persistent storage-quota capability. **Reference** into
+/// `state.storage_quotas`. The bytes balance lives in the entry,
+/// debited at object mint and refunded at refcount → 0. Copies of
+/// this cap do not multiply balance — multiple references share one
+/// entry, refcount-tracked.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct QuotaCap {
+    pub quota_id: QuotaId,
+}
+
+/// Entry stored in `state.code_blobs[code_id]`. Refcount-tracked;
+/// freed (and bytes refunded to `origin_quota`) at refcount → 0.
+#[derive(Clone, Debug)]
+pub struct CodeEntry {
+    pub blob: Arc<Vec<u8>>,
+    pub refcount: u32,
+    /// QuotaEntry the bytes were debited from. Refund destination on
+    /// free. If the origin quota has itself been freed by then, the
+    /// refund is silently dropped.
+    pub origin_quota: QuotaId,
+}
+
+impl PartialEq for CodeEntry {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.blob, &other.blob) || *self.blob == *other.blob
+        self.refcount == other.refcount
+            && self.origin_quota == other.origin_quota
+            && (Arc::ptr_eq(&self.blob, &other.blob) || *self.blob == *other.blob)
     }
 }
 
-impl Eq for CodeCap {}
+impl Eq for CodeEntry {}
 
-/// Persistent data capability. Holds a fixed-size byte payload at 4 KiB
-/// page granularity. Immutable + shared via `Arc`.
+/// Entry stored in `state.data_blobs[file_id]`. Refcount-tracked;
+/// freed (and bytes refunded to `origin_quota`) at refcount → 0.
 #[derive(Clone, Debug)]
-pub struct DataCap {
+pub struct FileEntry {
     pub content: Arc<Vec<u8>>,
     pub page_count: u32,
+    pub refcount: u32,
+    pub origin_quota: QuotaId,
 }
 
-impl PartialEq for DataCap {
+impl PartialEq for FileEntry {
     fn eq(&self, other: &Self) -> bool {
         self.page_count == other.page_count
+            && self.refcount == other.refcount
+            && self.origin_quota == other.origin_quota
             && (Arc::ptr_eq(&self.content, &other.content) || *self.content == *other.content)
     }
 }
 
-impl Eq for DataCap {}
+impl Eq for FileEntry {}
+
+/// Entry stored in `state.storage_quotas[quota_id]`. Holds the
+/// available bytes balance and a refcount of `QuotaCap` references.
+/// Quota entries themselves are not free — they're created at genesis
+/// or via a future `mint_quota` op and live until refcount → 0.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct QuotaEntry {
+    pub bytes: u64,
+    pub refcount: u32,
+}
 
 /// Per-frame self identity. The kernel rewrites ephemeral sub-slot 2 on
 /// every CALL/REPLY so the active VM's "who am I" is correct.
@@ -213,16 +304,18 @@ pub fn is_identity_key(key: &KeyId) -> bool {
 // RegCap — what occupies one slot of a Vault.slots CNode
 // -----------------------------------------------------------------------------
 
-/// Cap kinds eligible for placement in `vault.slots`. Pure value types
-/// — no `CapId` indirection. Granting a copy of a `RegCap` transfers
-/// ownership of the copy; the source remains independent.
+/// Cap kinds eligible for placement in `vault.slots`. Each variant is
+/// a small **reference** triple (id + small metadata). Bulk content
+/// lives in `state.{data_blobs,code_blobs,storage_quotas,vaults,images}`.
+/// Copies share registry entries via refcount.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub enum RegCap {
     VaultRef(VaultRefCap),
     Code(CodeCap),
-    Data(DataCap),
+    File(FileCap),
     ImageRef(ImageRefCap),
     Resource(ResourceCap),
+    StorageQuota(QuotaCap),
 }
 
 // -----------------------------------------------------------------------------

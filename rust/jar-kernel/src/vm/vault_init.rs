@@ -8,9 +8,9 @@
 //! | `image.slots[N]`                                  | `cap_table[N]` |
 //! |---------------------------------------------------|----------------|
 //! | empty                                             | empty          |
-//! | `RegCap::Code(CodeCap{blob})`                     | `Cap::Code(...)` (compile blob) |
-//! | `RegCap::Data(DataCap{content, page_count})`      | `Cap::Data(...)` (fresh ephemeral pages, content-copied, **unmapped**) |
-//! | `RegCap::VaultRef(...)` / `Resource` / `ImageRef` | `Cap::Protocol(...)` projection |
+//! | `RegCap::Code(CodeCap{code_id, …})`               | `Cap::Code(...)` (look up `state.code_blobs[code_id]`, compile bytes) |
+//! | `RegCap::File(FileCap{file_id, …})`               | `Cap::Data(...)` (look up `state.data_blobs[file_id]`, allocate ephemeral pages, copy bytes, **unmapped**) |
+//! | `RegCap::VaultRef(...)` / `Resource` / `ImageRef` / `StorageQuota` | `Cap::Protocol(...)` projection |
 //!
 //! The DataCap path leaves the cap **unmapped**: the init program is
 //! responsible for `MGMT_MAP`-ing each persistent DataCap at runtime.
@@ -46,7 +46,11 @@ pub type InitArtifacts = javm::kernel::InvocationArtifacts<ProtocolCap>;
 ///
 /// Slot 0 must be empty in the source image — javm reserves it for
 /// the bare-Frame FrameRef.
+///
+/// Reads code / file bytes from the σ-resident registries
+/// (`state.code_blobs`, `state.data_blobs`).
 pub fn instantiate_from_image(
+    state: &State,
     image: &Image,
     memory_pages: u32,
     mut code_cache: Option<&mut javm::CodeCache>,
@@ -75,6 +79,7 @@ pub fn instantiate_from_image(
             None => continue,
         };
         let cap = translate_vault_cap(
+            state,
             vc,
             &mut code_caps,
             mem_cycles,
@@ -128,11 +133,12 @@ pub fn build_init_cap_table(
             vault_id, vault.image_id
         ))
     })?;
-    instantiate_from_image(image.as_ref(), memory_pages, code_cache, backend)
+    instantiate_from_image(state, image.as_ref(), memory_pages, code_cache, backend)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn translate_vault_cap(
+    state: &State,
     cap: &RegCap,
     code_caps: &mut Vec<Arc<javm::cap::CodeCap>>,
     mem_cycles: u8,
@@ -150,29 +156,42 @@ fn translate_vault_cap(
                     javm::vm_pool::MAX_CODE_CAPS
                 )));
             }
+            let entry = state.code_blobs.get(&c.code_id).ok_or_else(|| {
+                KernelError::Internal(format!(
+                    "image references missing code_blob {:?}",
+                    c.code_id
+                ))
+            })?;
             let id = code_caps.len() as u16;
             let code_cap =
-                javm::kernel::compile_code_blob(&c.blob, id, mem_cycles, backend, code_cache)
+                javm::kernel::compile_code_blob(&entry.blob, id, mem_cycles, backend, code_cache)
                     .map_err(|e| KernelError::Internal(format!("compile_code_blob: {:?}", e)))?;
             code_caps.push(Arc::clone(&code_cap));
             Ok(Cap::Code(code_cap))
         }
-        RegCap::Data(d) => {
+        RegCap::File(f) => {
+            let entry = state.data_blobs.get(&f.file_id).ok_or_else(|| {
+                KernelError::Internal(format!(
+                    "image references missing data_blob {:?}",
+                    f.file_id
+                ))
+            })?;
             let data_cap =
-                javm::kernel::allocate_data_cap(&d.content, d.page_count, untyped, backing)
+                javm::kernel::allocate_data_cap(&entry.content, entry.page_count, untyped, backing)
                     .map_err(|e| KernelError::Internal(format!("allocate_data_cap: {:?}", e)))?;
             // Cap is unmapped on purpose — the init program calls MGMT_MAP.
             Ok(Cap::Data(data_cap))
         }
         RegCap::Resource(r) => Ok(Cap::Protocol(ProtocolCap::Resource(r.clone()))),
         RegCap::ImageRef(ir) => Ok(Cap::Protocol(ProtocolCap::ImageRef(*ir))),
+        RegCap::StorageQuota(q) => Ok(Cap::Protocol(ProtocolCap::StorageQuota(*q))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cap::{CodeCap, DataCap, VaultRefCap, VaultRights};
+    use crate::cap::{CodeCap, FileCap, QuotaId, VaultRefCap, VaultRights};
 
     /// Per-test memory budget. Generous enough for the small fixtures.
     const TEST_MEM_PAGES: u32 = 16;
@@ -204,18 +223,35 @@ mod tests {
         javm::program::cap_data(code_entry, parsed.data_section).to_vec()
     }
 
-    fn halt_code_cap() -> RegCap {
-        RegCap::Code(CodeCap {
-            blob: Arc::new(halt_code_sub_blob()),
-        })
+    /// Build a State with a "genesis" QuotaEntry and intern the halt
+    /// code blob, returning (state, RegCap::Code referencing the blob).
+    fn state_with_halt_code() -> (State, RegCap) {
+        let mut state = State::empty();
+        let qid = state.insert_storage_quota(u64::MAX / 2);
+        let blob = halt_code_sub_blob();
+        let byte_count = blob.len() as u64;
+        let code_id = state.intern_code(blob, qid).expect("intern_code");
+        (
+            state,
+            RegCap::Code(CodeCap {
+                code_id,
+                byte_count,
+            }),
+        )
     }
 
     #[test]
     fn single_codecap_at_init_slot() {
-        let image = build_image(64, &[(64, halt_code_cap())]);
-        let artifacts =
-            instantiate_from_image(&image, TEST_MEM_PAGES, None, javm::PvmBackend::Default)
-                .unwrap();
+        let (state, halt) = state_with_halt_code();
+        let image = build_image(64, &[(64, halt)]);
+        let artifacts = instantiate_from_image(
+            &state,
+            &image,
+            TEST_MEM_PAGES,
+            None,
+            javm::PvmBackend::Default,
+        )
+        .unwrap();
 
         assert_eq!(artifacts.code_caps.len(), 1);
         assert_eq!(artifacts.init_code_id, 0);
@@ -224,10 +260,11 @@ mod tests {
 
     #[test]
     fn vaultref_passthrough() {
+        let (state, halt) = state_with_halt_code();
         let image = build_image(
             64,
             &[
-                (64, halt_code_cap()),
+                (64, halt),
                 (
                     100,
                     RegCap::VaultRef(VaultRefCap {
@@ -237,9 +274,14 @@ mod tests {
                 ),
             ],
         );
-        let artifacts =
-            instantiate_from_image(&image, TEST_MEM_PAGES, None, javm::PvmBackend::Default)
-                .unwrap();
+        let artifacts = instantiate_from_image(
+            &state,
+            &image,
+            TEST_MEM_PAGES,
+            None,
+            javm::PvmBackend::Default,
+        )
+        .unwrap();
         match artifacts.cap_table.get(100) {
             Some(Cap::Protocol(ProtocolCap::VaultRef(vr))) => {
                 assert_eq!(vr.vault_id, VaultId(99));
@@ -252,23 +294,33 @@ mod tests {
     }
 
     #[test]
-    fn datacap_propagated_unmapped() {
+    fn filecap_propagated_unmapped() {
+        let (mut state, halt) = state_with_halt_code();
+        let qid = QuotaId(0); // genesis quota allocated above
+        let file_id = state
+            .allocate_file(b"hello".to_vec(), 1, qid)
+            .expect("allocate_file");
         let image = build_image(
             64,
             &[
-                (64, halt_code_cap()),
+                (64, halt),
                 (
                     65,
-                    RegCap::Data(DataCap {
-                        content: Arc::new(b"hello".to_vec()),
-                        page_count: 1,
+                    RegCap::File(FileCap {
+                        file_id,
+                        byte_count: 5,
                     }),
                 ),
             ],
         );
-        let artifacts =
-            instantiate_from_image(&image, TEST_MEM_PAGES, None, javm::PvmBackend::Default)
-                .unwrap();
+        let artifacts = instantiate_from_image(
+            &state,
+            &image,
+            TEST_MEM_PAGES,
+            None,
+            javm::PvmBackend::Default,
+        )
+        .unwrap();
         match artifacts.cap_table.get(65) {
             Some(Cap::Data(d)) => {
                 assert_eq!(d.page_count, 1);
@@ -282,15 +334,23 @@ mod tests {
 
     #[test]
     fn missing_init_cap_errors() {
+        let state = State::empty();
         let image = build_image(64, &[]); // no Code at init slot
-        let err = instantiate_from_image(&image, TEST_MEM_PAGES, None, javm::PvmBackend::Default)
-            .err()
-            .expect("error expected");
+        let err = instantiate_from_image(
+            &state,
+            &image,
+            TEST_MEM_PAGES,
+            None,
+            javm::PvmBackend::Default,
+        )
+        .err()
+        .expect("error expected");
         assert!(matches!(err, KernelError::Internal(_)));
     }
 
     #[test]
     fn wrong_shape_at_init_cap_errors() {
+        let state = State::empty();
         let image = build_image(
             64,
             &[(
@@ -301,18 +361,31 @@ mod tests {
                 }),
             )],
         );
-        let err = instantiate_from_image(&image, TEST_MEM_PAGES, None, javm::PvmBackend::Default)
-            .err()
-            .expect("error expected");
+        let err = instantiate_from_image(
+            &state,
+            &image,
+            TEST_MEM_PAGES,
+            None,
+            javm::PvmBackend::Default,
+        )
+        .err()
+        .expect("error expected");
         assert!(matches!(err, KernelError::Internal(_)));
     }
 
     #[test]
     fn slot_zero_rejected() {
-        let image = build_image(64, &[(0, halt_code_cap()), (64, halt_code_cap())]);
-        let err = instantiate_from_image(&image, TEST_MEM_PAGES, None, javm::PvmBackend::Default)
-            .err()
-            .expect("error expected");
+        let (state, halt) = state_with_halt_code();
+        let image = build_image(64, &[(0, halt.clone()), (64, halt)]);
+        let err = instantiate_from_image(
+            &state,
+            &image,
+            TEST_MEM_PAGES,
+            None,
+            javm::PvmBackend::Default,
+        )
+        .err()
+        .expect("error expected");
         assert!(matches!(err, KernelError::Internal(_)));
     }
 
@@ -320,8 +393,8 @@ mod tests {
     /// image_id from `state.images`.
     #[test]
     fn build_init_cap_table_resolves_vault_image() {
-        let mut state = State::empty();
-        let image = build_image(64, &[(64, halt_code_cap())]);
+        let (mut state, halt) = state_with_halt_code();
+        let image = build_image(64, &[(64, halt)]);
         let image_id = state.next_image_id();
         state.images.insert(image_id, Arc::new(image));
         let vault_id = state.next_vault_id();

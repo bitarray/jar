@@ -156,9 +156,15 @@ impl Harness {
             .vault_id;
         let vault = state.vaults.get(&vault_id).expect("vault present");
         match vault.slots.get(genesis::ACCOUNT_MAP_SLOT) {
-            Some(jar_kernel::cap::RegCap::Data(d)) => (*d.content).clone(),
+            Some(jar_kernel::cap::RegCap::File(f)) => {
+                let entry = state
+                    .data_blobs
+                    .get(&f.file_id)
+                    .expect("account-map file_id present in data_blobs");
+                (*entry.content).clone()
+            }
             other => panic!(
-                "expected RegCap::Data at slot {} got {:?}",
+                "expected RegCap::File at slot {} got {:?}",
                 genesis::ACCOUNT_MAP_SLOT,
                 other
             ),

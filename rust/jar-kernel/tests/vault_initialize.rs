@@ -32,6 +32,10 @@ fn halt_code_sub_blob() -> Vec<u8> {
 fn vault_with_init_code() -> (State, VaultId) {
     use jar_kernel::cap::Image;
     let mut state = State::empty();
+    let qid = state.insert_storage_quota(u64::MAX / 2);
+    let blob = halt_code_sub_blob();
+    let byte_count = blob.len() as u64;
+    let code_id = state.intern_code(blob, qid).expect("intern_code");
     let mut image = Image {
         slots: jar_kernel::cap::CNode::default(),
         init_cap: INIT_SLOT,
@@ -39,7 +43,8 @@ fn vault_with_init_code() -> (State, VaultId) {
     image.slots.set(
         INIT_SLOT,
         Some(RegCap::Code(CodeCap {
-            blob: Arc::new(halt_code_sub_blob()),
+            code_id,
+            byte_count,
         })),
     );
     let image_id = state.next_image_id();
@@ -207,6 +212,10 @@ fn new_vm_from_vault_image_vault_ref_propagates() {
 
     let mut state = State::empty();
     let target_vault = VaultId(99);
+    let qid = state.insert_storage_quota(u64::MAX / 2);
+    let blob = halt_code_sub_blob();
+    let byte_count = blob.len() as u64;
+    let code_id = state.intern_code(blob, qid).expect("intern_code");
 
     // Build an Image with both the init Code AND a VaultRef in its
     // slots — the Image clone projects both into the Frame's
@@ -218,7 +227,8 @@ fn new_vm_from_vault_image_vault_ref_propagates() {
     image.slots.set(
         INIT_SLOT,
         Some(RegCap::Code(CodeCap {
-            blob: Arc::new(halt_code_sub_blob()),
+            code_id,
+            byte_count,
         })),
     );
     image.slots.set(
