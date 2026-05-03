@@ -41,10 +41,10 @@ fn resolve_dispatch_path(path: &[u8]) -> Option<usize> {
 /// emit_event self-broadcasts for the DA pattern).
 pub fn handle_inbound<H: Hardware>(
     state: &State,
-    _node: &mut NodeOffchain,
+    node: &mut NodeOffchain,
     target_path: &[u8],
-    _blob: &[u8],
-    _attestation_traces: &[AttestationEntry],
+    blob: &[u8],
+    attestation_traces: &[AttestationEntry],
     hw: &H,
 ) -> KResult<Vec<Command>> {
     let mut commands: Vec<Command> = Vec::new();
@@ -68,7 +68,17 @@ pub fn handle_inbound<H: Hardware>(
         })?;
 
     // Verify: fresh, ro-σ. Faulting verify drops the event silently.
-    let verify = transact::run_verify(state, &endpoint, &mut commands, hw)?;
+    let verify = transact::run_verify(
+        state,
+        &endpoint,
+        slot_idx,
+        /* dispatch_context */ true,
+        blob,
+        attestation_traces,
+        &mut node.pool,
+        &mut commands,
+        hw,
+    )?;
     if verify.fault.is_some() {
         return Ok(commands);
     }
@@ -76,7 +86,15 @@ pub fn handle_inbound<H: Hardware>(
     // Process: ro-σ for dispatch. Run on a discarded clone so any
     // mutations the chain-author attempts go nowhere.
     let mut state_ro = state.clone();
-    let process = transact::run_process(&mut state_ro, &endpoint, &mut commands, hw)?;
+    let process = transact::run_process(
+        &mut state_ro,
+        &endpoint,
+        slot_idx,
+        /* dispatch_context */ true,
+        &mut node.pool,
+        &mut commands,
+        hw,
+    )?;
     if process.fault.is_some() {
         // Dispatch process fault is informational only.
         return Ok(commands);

@@ -11,13 +11,15 @@
 //! logic-wise; a process fault from a chain-author bug is reported as a
 //! block panic for now (kept from the v1 stubs).
 //!
-//! Trace consumption is wired via `mint_attest_cap` inside the verify
-//! VM (Stage C/D). Today the host calls are stubbed, so the halt-blob
-//! genesis fixtures simply halt cleanly.
+//! The same harness drives off-chain dispatch invocations
+//! (`dispatch::handle_inbound`); `dispatch_context = true` selects the
+//! dispatch-only host-call behaviors (mint-seen-set tracking,
+//! `Restricted` AttestationScope, ro-σ process).
 
 use std::collections::BTreeSet;
 
-use crate::cap::AttestCursor;
+use crate::cap::{AttestCursor, AttestationScopeCap};
+use crate::pool::CyclePool;
 use crate::runtime::Hardware;
 use crate::types::{
     AttestationEntry, Caller, Command, EventEndpointCap, KResult, KernelError, KernelRole,
@@ -25,59 +27,116 @@ use crate::types::{
 };
 use crate::vm::{InvocationHost, InvocationResult, drive_invocation, new_vm_from_vault};
 
-/// Run one fresh `Vault.initialize` against a clone of σ for the verify
+/// One fresh `Vault.initialize` against a clone of σ for the verify
 /// phase. Returns the invocation result; the caller decides whether to
 /// panic the block on `result.fault`.
+#[allow(clippy::too_many_arguments)]
 pub fn run_verify<H: Hardware>(
     state: &State,
     endpoint: &EventEndpointCap,
+    endpoint_idx: usize,
+    dispatch_context: bool,
+    event_blob: &[u8],
+    attestation_traces: &[AttestationEntry],
+    pool: &mut CyclePool,
     commands: &mut Vec<Command>,
     hw: &H,
 ) -> KResult<InvocationResult> {
     let mut state_ro = state.clone();
-    run_one(&mut state_ro, endpoint, KernelRole::Verify, commands, hw)
+    run_one(
+        &mut state_ro,
+        endpoint,
+        endpoint_idx,
+        dispatch_context,
+        KernelRole::Verify,
+        event_blob,
+        attestation_traces,
+        pool,
+        commands,
+        hw,
+    )
 }
 
-/// Run one `Vault.initialize` against the live σ for the process phase.
+/// One `Vault.initialize` against the live σ for the process phase.
 /// Mutations persist on `state`. The caller decides what to do with a
 /// process fault — apply_block treats it as a block panic.
+#[allow(clippy::too_many_arguments)]
 pub fn run_process<H: Hardware>(
     state: &mut State,
     endpoint: &EventEndpointCap,
+    endpoint_idx: usize,
+    dispatch_context: bool,
+    pool: &mut CyclePool,
     commands: &mut Vec<Command>,
     hw: &H,
 ) -> KResult<InvocationResult> {
-    run_one(state, endpoint, KernelRole::Process, commands, hw)
+    run_one(
+        state,
+        endpoint,
+        endpoint_idx,
+        dispatch_context,
+        KernelRole::Process,
+        &[],
+        &[],
+        pool,
+        commands,
+        hw,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_one<H: Hardware>(
     state: &mut State,
     endpoint: &EventEndpointCap,
+    endpoint_idx: usize,
+    dispatch_context: bool,
     role: KernelRole,
+    event_blob: &[u8],
+    attestation_traces: &[AttestationEntry],
+    pool: &mut CyclePool,
     commands: &mut Vec<Command>,
     hw: &H,
 ) -> KResult<InvocationResult> {
+    let scope = (role == KernelRole::Verify).then(|| {
+        if dispatch_context {
+            AttestationScopeCap::Restricted(
+                pool.mint_seen_set(endpoint_idx)
+                    .keys
+                    .iter()
+                    .cloned()
+                    .collect(),
+            )
+        } else {
+            AttestationScopeCap::Unlimited
+        }
+    });
     let mut vm = new_vm_from_vault(
         state,
         endpoint.vault_id,
         endpoint.gas_budget,
         endpoint.memory_budget,
         None,
+        role,
+        scope,
     )?;
     let mut reach = ReachSet::default();
     let mut cursor = AttestCursor::new();
-    let mut attestation_trace: Vec<AttestationEntry> = Vec::new();
+    let mut attestation_trace: Vec<AttestationEntry> = attestation_traces.to_vec();
     let mut result_trace: Vec<ResultEntry> = Vec::new();
     let mut host = InvocationHost {
         state,
         role,
         current_vault: endpoint.vault_id,
         caller: Caller::Kernel(role),
+        endpoint_idx,
+        dispatch_context,
+        event_blob,
         commands,
         reach: &mut reach,
         attest_cursor: &mut cursor,
         attestation_trace: &mut attestation_trace,
         result_trace: &mut result_trace,
+        pool,
         hw,
     };
     drive_invocation(&mut vm, &mut host)

@@ -39,25 +39,61 @@ pub type Vm = javm::kernel::InvocationKernel<ProtocolCap>;
 
 /// Construct a fresh `Vm` ready to run `Vault.initialize` on the given
 /// home Vault. Walks `vault.slots` via [`vault_init::build_init_cap_table`],
-/// then hands the resulting artifacts to javm's `new_from_artifacts`.
+/// injects the kernel-managed protocol caps (`EmitEvent`,
+/// `MintAttestCap`, `SetScore`, `AttestationScope` where applicable),
+/// then hands the artifacts to javm's `new_from_artifacts`.
+///
+/// `role` selects which caps get injected: `Verify` gets all four;
+/// `Process` gets only `EmitEvent`. `attestation_scope` is the scope
+/// cap to place at [`crate::cap::KERNEL_CAP_SLOT`] for verify
+/// invocations (`Unlimited` for transact, `Restricted(seen)` for
+/// dispatch) — `None` for process.
 ///
 /// `code_cache` is consulted for each persistent CodeCap; pass
 /// `Some(&mut node.code_cache)` from the dispatch / transact entry
 /// points so re-runs of the same blob hit the JIT cache.
+#[allow(clippy::too_many_arguments)]
 pub fn new_vm_from_vault(
     state: &State,
     vault_id: VaultId,
     gas: u64,
     memory_pages: u32,
     code_cache: Option<&mut javm::CodeCache>,
+    role: crate::types::KernelRole,
+    attestation_scope: Option<crate::cap::AttestationScopeCap>,
 ) -> KResult<Vm> {
-    let artifacts = vault_init::build_init_cap_table(
+    use crate::cap::{KERNEL_CAP_SLOT, ProtocolCap};
+    use crate::vm::host_abi::{EMIT_EVENT_SLOT, MINT_ATTEST_CAP_SLOT, SET_SCORE_SLOT};
+    use javm::cap::Cap as JavmCap;
+
+    let mut artifacts = vault_init::build_init_cap_table(
         state,
         vault_id,
         memory_pages,
         code_cache,
         javm::PvmBackend::Default,
     )?;
+
+    artifacts
+        .cap_table
+        .set(EMIT_EVENT_SLOT, JavmCap::Protocol(ProtocolCap::EmitEvent));
+
+    if matches!(role, crate::types::KernelRole::Verify) {
+        artifacts.cap_table.set(
+            MINT_ATTEST_CAP_SLOT,
+            JavmCap::Protocol(ProtocolCap::MintAttestCap),
+        );
+        artifacts
+            .cap_table
+            .set(SET_SCORE_SLOT, JavmCap::Protocol(ProtocolCap::SetScore));
+        if let Some(scope) = attestation_scope {
+            artifacts.cap_table.set(
+                KERNEL_CAP_SLOT,
+                JavmCap::Protocol(ProtocolCap::AttestationScope(scope)),
+            );
+        }
+    }
+
     javm::kernel::InvocationKernel::new_from_artifacts(artifacts, gas, javm::PvmBackend::Default)
         .map_err(|e| KernelError::Internal(format!("javm init: {:?}", e)))
 }
@@ -79,11 +115,27 @@ pub struct InvocationHost<'a, H: Hardware> {
     pub role: KernelRole,
     pub current_vault: VaultId,
     pub caller: Caller,
+    /// Slot index of this invocation's endpoint in
+    /// `σ.transact_endpoints` (transact context) or
+    /// `σ.dispatch_endpoints` (dispatch context). Used by `setScore`
+    /// to address the per-(endpoint, cycle) pool entry, and by
+    /// `emit_event` in dispatch context to record signers in the
+    /// per-endpoint `MintSeenSet`.
+    pub endpoint_idx: usize,
+    /// True iff this invocation is a dispatch-context fire (off-chain).
+    /// Distinguishes which endpoint list `endpoint_idx` indexes and
+    /// gates dispatch-only behaviors like seen-set recording.
+    pub dispatch_context: bool,
+    /// The blob being verified by this invocation. `setScore` captures
+    /// it into the resulting `PoolEntry` so the proposer can replay
+    /// the blob in a later block. Empty in process role.
+    pub event_blob: &'a [u8],
     pub commands: &'a mut Vec<Command>,
     pub reach: &'a mut ReachSet,
     pub attest_cursor: &'a mut AttestCursor,
     pub attestation_trace: &'a mut Vec<AttestationEntry>,
     pub result_trace: &'a mut Vec<ResultEntry>,
+    pub pool: &'a mut crate::pool::CyclePool,
     pub hw: &'a H,
 }
 

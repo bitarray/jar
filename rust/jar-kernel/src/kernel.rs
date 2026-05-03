@@ -213,7 +213,13 @@ impl<H: Hardware> Kernel<H> {
             block_outcome,
             state_root: new_root,
             merkle_traces: _,
-        } = apply_block(&self.last_state, self.last_block_hash, &block_in, &self.hw)?;
+        } = apply_block(
+            &self.last_state,
+            self.last_block_hash,
+            &block_in,
+            &mut self.dispatches.pool,
+            &self.hw,
+        )?;
 
         // Commands first (Dispatch / BroadcastLite from inside the body).
         for cmd in commands {

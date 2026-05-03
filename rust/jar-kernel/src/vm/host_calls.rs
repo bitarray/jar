@@ -3,59 +3,195 @@
 //! Three callable `ProtocolCap` variants are dispatched from
 //! `InvocationHost::call`:
 //!
-//! - `emit_event(target_path, blob)` — available in verify and process.
-//!   Reads `(target_path_ptr, target_path_len, blob_ptr, blob_len)`
-//!   from φ[7..11]; routes through `Command::Emit` so the runtime can
-//!   broadcast (or short-circuit via `Hardware::is_self_only_subscribed`).
-//!   In dispatch context the kernel additionally records the originating
-//!   signer key in the per-(dispatch_endpoint, cycle) `MintSeenSet` so
-//!   subsequent `mint_attest_cap` calls with a `Restricted`
-//!   AttestationScope can be checked.
+//! - `emit_event(target_path, blob)` — verify and process. Pushes a
+//!   `Command::Emit` onto `host.commands`. In dispatch verify
+//!   context, additionally records each attached attestation entry's
+//!   signer key into the per-(dispatch_endpoint, cycle)
+//!   `MintSeenSet` so subsequent `mint_attest_cap` calls with a
+//!   `Restricted` AttestationScope can be checked.
 //!
-//! - `mint_attest_cap(scope, key, blob, sig?)` — verify-only. Mint
-//!   authority comes from the `AttestationScopeCap` injected at frame
-//!   init: `Unlimited` (apply_block-context) or `Restricted(seen_keys)`
-//!   (dispatch-context). The cap's existence is the proof; there is no
-//!   separate exercise call.
+//! - `mint_attest_cap(dst_slot, key, blob, sig?)` — verify-only. Validates
+//!   the key against the AttestationScope cap injected at
+//!   `KERNEL_CAP_SLOT`, verifies the signature via
+//!   `crypto::verify`, and mints `Cap::Protocol(Attestation(...))`
+//!   into the active VM's cap table at `dst_slot`. The cap's
+//!   existence is the proof.
 //!
-//! - `setScore(identifier, score)` — verify-only. Buffers the verifying
-//!   event into a per-(endpoint, cycle) max-register.
+//! - `setScore(identifier, score)` — dispatch-verify only. Buffers
+//!   the verifying event (its blob + accumulated attestation traces)
+//!   into `host.pool.entry(host.endpoint_idx)` keyed by `identifier`.
+//!   Same identifier + same blob keeps the higher score; same
+//!   identifier + different blob is a collision and defers to the
+//!   next cycle.
 //!
-//! All three are stubbed today and fault on call. Stage D wires:
-//! parameter decoding, scope/quota checks, and the
-//! `InvocationHost → NodeOffchain.pool` plumbing.
+//! ABI register layout: see `vm/host_abi.rs`.
 
+use crate::cap::{AttestationCap, AttestationScopeCap, KERNEL_CAP_SLOT, ProtocolCap};
+use crate::crypto;
+use crate::pool::PoolEntry;
 use crate::runtime::Hardware;
+use crate::types::{AttestationEntry, Command, KernelRole, KeyId, Signature};
+use crate::vm::host_abi::{RC_AUTHORITY, RC_BAD_CAP, RC_BAD_SIG, RC_OK, RC_READONLY};
 use crate::vm::{InvocationHost, Vm};
-use javm::cap::CallOutcome;
+use javm::cap::{CallOutcome, Cap};
 
-/// Stub: emit_event not yet wired. Always faults.
-pub fn host_emit_event<H: Hardware>(
-    _vm: &mut Vm,
-    _host: &mut InvocationHost<'_, H>,
-) -> CallOutcome {
-    CallOutcome::Fault("emit_event is stubbed; concrete handler lands in Stage D".into())
+fn rc(value: u64) -> CallOutcome {
+    CallOutcome::Resume {
+        phi7: value,
+        phi8: 0,
+    }
 }
 
-/// Stub: mint_attest_cap not yet wired. Always faults.
+/// `emit_event(target_path, blob)`:
+///   φ[7]=path_ptr, φ[8]=path_len, φ[9]=blob_ptr, φ[10]=blob_len.
+pub fn host_emit_event<H: Hardware>(vm: &mut Vm, host: &mut InvocationHost<'_, H>) -> CallOutcome {
+    let path_ptr = vm.active_reg(7) as u32;
+    let path_len = vm.active_reg(8) as u32;
+    let blob_ptr = vm.active_reg(9) as u32;
+    let blob_len = vm.active_reg(10) as u32;
+
+    let target_path = match read_window(vm, path_ptr, path_len, "emit_event target_path") {
+        Ok(v) => v,
+        Err(reason) => return CallOutcome::Fault(reason),
+    };
+    let blob = match read_window(vm, blob_ptr, blob_len, "emit_event blob") {
+        Ok(v) => v,
+        Err(reason) => return CallOutcome::Fault(reason),
+    };
+
+    let attestation_traces = host.attestation_trace.clone();
+
+    // Dispatch-verify: record signers from the trace into the seen-set
+    // so subsequent mint_attest_cap with Restricted scope can verify.
+    if host.dispatch_context && matches!(host.role, KernelRole::Verify) {
+        for entry in &attestation_traces {
+            host.pool
+                .mint_seen_set(host.endpoint_idx)
+                .record(entry.key.clone());
+        }
+    }
+
+    host.commands.push(Command::Emit {
+        target_path,
+        blob,
+        attestation_traces,
+    });
+    rc(RC_OK)
+}
+
+/// `mint_attest_cap(dst_slot, key, blob, sig?)`:
+///   φ[7]=dst_slot,
+///   φ[8]=key_ptr,  φ[9]=key_len,
+///   φ[10]=blob_ptr, φ[11]=blob_len,
+///   φ[12]=sig_ptr,  φ[13]=sig_len (0 = no signature; only legal
+///                                   for IDENTITY_KEY).
 pub fn host_mint_attest_cap<H: Hardware>(
-    _vm: &mut Vm,
-    _host: &mut InvocationHost<'_, H>,
+    vm: &mut Vm,
+    host: &mut InvocationHost<'_, H>,
 ) -> CallOutcome {
-    CallOutcome::Fault("mint_attest_cap is stubbed; concrete handler lands in Stage D".into())
+    if !matches!(host.role, KernelRole::Verify) {
+        return rc(RC_READONLY);
+    }
+
+    let dst_slot = vm.active_reg(7) as u8;
+    let key_ptr = vm.active_reg(8) as u32;
+    let key_len = vm.active_reg(9) as u32;
+    let blob_ptr = vm.active_reg(10) as u32;
+    let blob_len = vm.active_reg(11) as u32;
+    let sig_ptr = vm.active_reg(12) as u32;
+    let sig_len = vm.active_reg(13) as u32;
+
+    let scope = match vm.cap_table_get(KERNEL_CAP_SLOT) {
+        Some(Cap::Protocol(ProtocolCap::AttestationScope(s))) => s.clone(),
+        _ => return rc(RC_BAD_CAP),
+    };
+
+    let key_bytes = match read_window(vm, key_ptr, key_len, "mint_attest_cap key") {
+        Ok(v) => v,
+        Err(reason) => return CallOutcome::Fault(reason),
+    };
+    let blob = match read_window(vm, blob_ptr, blob_len, "mint_attest_cap blob") {
+        Ok(v) => v,
+        Err(reason) => return CallOutcome::Fault(reason),
+    };
+    let sig_bytes = match read_window(vm, sig_ptr, sig_len, "mint_attest_cap sig") {
+        Ok(v) => v,
+        Err(reason) => return CallOutcome::Fault(reason),
+    };
+
+    let key = KeyId(key_bytes);
+    let sig = Signature(sig_bytes);
+
+    let scope_ok = match &scope {
+        AttestationScopeCap::Unlimited => true,
+        AttestationScopeCap::Restricted(keys) => keys.contains(&key),
+    };
+    if !scope_ok {
+        return rc(RC_AUTHORITY);
+    }
+
+    // Signature verification. Empty sig is only legal for IDENTITY_KEY.
+    if !sig.0.is_empty() && !crypto::verify(&key, &blob, &sig) {
+        return rc(RC_BAD_SIG);
+    }
+    if sig.0.is_empty() && !crate::cap::is_identity_key(&key) {
+        return rc(RC_BAD_SIG);
+    }
+
+    if host.dispatch_context {
+        host.pool
+            .mint_seen_set(host.endpoint_idx)
+            .record(key.clone());
+    }
+
+    let blob_hash = crypto::hash(&blob);
+    let cap = Cap::Protocol(ProtocolCap::Attestation(AttestationCap {
+        key: key.clone(),
+        blob_hash,
+    }));
+    vm.cap_table_set(dst_slot, cap);
+
+    // Append to the trace so `emit_event` following the mint carries it.
+    host.attestation_trace.push(AttestationEntry {
+        key,
+        blob_hash,
+        signature: sig,
+    });
+
+    rc(RC_OK)
 }
 
-/// Stub: setScore not yet wired. Always faults.
-pub fn host_set_score<H: Hardware>(_vm: &mut Vm, _host: &mut InvocationHost<'_, H>) -> CallOutcome {
-    CallOutcome::Fault("setScore is stubbed; concrete handler lands in Stage D".into())
+/// `setScore(identifier, score)`:
+///   φ[7]=id_ptr, φ[8]=id_len, φ[9]=score.
+pub fn host_set_score<H: Hardware>(vm: &mut Vm, host: &mut InvocationHost<'_, H>) -> CallOutcome {
+    if !matches!(host.role, KernelRole::Verify) || !host.dispatch_context {
+        return rc(RC_READONLY);
+    }
+
+    let id_ptr = vm.active_reg(7) as u32;
+    let id_len = vm.active_reg(8) as u32;
+    let score = vm.active_reg(9);
+
+    let identifier = match read_window(vm, id_ptr, id_len, "setScore identifier") {
+        Ok(v) => v,
+        Err(reason) => return CallOutcome::Fault(reason),
+    };
+
+    host.pool.entry(host.endpoint_idx).insert(PoolEntry {
+        identifier,
+        score,
+        blob: host.event_blob.to_vec(),
+        attestation_traces: host.attestation_trace.clone(),
+    });
+
+    rc(RC_OK)
 }
 
 // =============================================================================
-// Memory window helpers (used by handlers once parameter decoding lands)
+// Memory window helpers
 // =============================================================================
 
-/// Read a guest memory window or return a guest fault outcome.
-#[allow(dead_code)] // stubbed during event-redesign migration; rewired in Stage D
+/// Read a guest memory window or return a guest-fault error string.
 pub(crate) fn read_window(vm: &Vm, addr: u32, len: u32, what: &str) -> Result<Vec<u8>, String> {
     if len == 0 {
         return Ok(Vec::new());
@@ -64,8 +200,8 @@ pub(crate) fn read_window(vm: &Vm, addr: u32, len: u32, what: &str) -> Result<Ve
         .ok_or_else(|| format!("{what}: bad read window @ {addr:#x}+{len}"))
 }
 
-/// Write to a guest memory window or return a guest fault outcome.
-#[allow(dead_code)] // stubbed during event-redesign migration; rewired in Stage D
+/// Write to a guest memory window or return a guest-fault error string.
+#[allow(dead_code)] // kept for future host-call additions
 pub(crate) fn write_window(vm: &mut Vm, addr: u32, data: &[u8], what: &str) -> Result<(), String> {
     if data.is_empty() {
         return Ok(());

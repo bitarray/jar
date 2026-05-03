@@ -68,6 +68,7 @@ pub fn apply_block<H: Hardware>(
     state_in: &State,
     prior_block_hash: BlockHash,
     block_in: &Block,
+    pool: &mut crate::pool::CyclePool,
     hw: &H,
 ) -> KResult<ApplyBlockOutcome> {
     let block = block_in.clone();
@@ -129,12 +130,23 @@ pub fn apply_block<H: Hardware>(
         let endpoint = state.transact_endpoints[slot_idx];
 
         let ev_indices = events_by_slot.remove(&slot_idx).unwrap_or_default();
-        let has_schedule_traces = schedule_traces.remove(&slot_idx).is_some();
+        let sched_slice = schedule_traces.remove(&slot_idx);
 
         if !ev_indices.is_empty() {
             // Per-event verify: fresh Vault.initialize against a clone of σ.
             for &ev_idx in &ev_indices {
-                let result = transact::run_verify(&state, &endpoint, &mut commands, hw)?;
+                let ev = &block.body.events[ev_idx];
+                let result = transact::run_verify(
+                    &state,
+                    &endpoint,
+                    slot_idx,
+                    /* dispatch_context */ false,
+                    &ev.blob,
+                    &ev.attestation_traces,
+                    pool,
+                    &mut commands,
+                    hw,
+                )?;
                 if let Some(reason) = result.fault {
                     return Ok(panicked(
                         state_in,
@@ -144,10 +156,20 @@ pub fn apply_block<H: Hardware>(
                     ));
                 }
             }
-        } else if has_schedule_traces {
+        } else if let Some(traces) = sched_slice {
             // Schedule slot verify: single fresh Vault.initialize that
             // consumes the kernel-fed schedule_attestation_traces slice.
-            let result = transact::run_verify(&state, &endpoint, &mut commands, hw)?;
+            let result = transact::run_verify(
+                &state,
+                &endpoint,
+                slot_idx,
+                /* dispatch_context */ false,
+                &[],
+                traces,
+                pool,
+                &mut commands,
+                hw,
+            )?;
             if let Some(reason) = result.fault {
                 return Ok(panicked(
                     state_in,
@@ -159,7 +181,15 @@ pub fn apply_block<H: Hardware>(
         }
 
         // Process: one Vault.initialize against live σ. Always fires.
-        let result = transact::run_process(&mut state, &endpoint, &mut commands, hw)?;
+        let result = transact::run_process(
+            &mut state,
+            &endpoint,
+            slot_idx,
+            /* dispatch_context */ false,
+            pool,
+            &mut commands,
+            hw,
+        )?;
         if let Some(reason) = result.fault {
             return Ok(panicked(
                 state_in,
