@@ -27,6 +27,10 @@
 //!
 //! ## Per-call ABI
 //!
+//! ### `caller_role()` (slot 3)
+//! - returns role in φ[7]: 0 = `KernelRole::Verify`,
+//!   1 = `KernelRole::Process`.
+//!
 //! ### `emit_event(target_path, blob)` (slot 4)
 //! - φ[7] = target_path_ptr, φ[8] = target_path_len
 //! - φ[9] = blob_ptr, φ[10] = blob_len

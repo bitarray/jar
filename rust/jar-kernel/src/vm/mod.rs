@@ -83,25 +83,23 @@ pub fn new_vm_from_vault(
     artifacts
         .cap_table
         .set(EMIT_EVENT_SLOT, JavmCap::Protocol(ProtocolCap::EmitEvent));
-    // Inject MintAttestCap + SetScore in both roles so a single guest
-    // can call them unconditionally; the handlers themselves return
-    // `RC_READONLY` outside Verify.
-    artifacts.cap_table.set(
-        MINT_ATTEST_CAP_SLOT,
-        JavmCap::Protocol(ProtocolCap::MintAttestCap),
-    );
-    artifacts
-        .cap_table
-        .set(SET_SCORE_SLOT, JavmCap::Protocol(ProtocolCap::SetScore));
 
-    // AttestationScope is verify-only — process has no scope cap.
-    if matches!(role, crate::types::KernelRole::Verify)
-        && let Some(scope) = attestation_scope
-    {
+    // Verify-only caps: MintAttestCap, SetScore, and AttestationScope.
+    // Process does not see these — least authority for the rw-σ phase.
+    if matches!(role, crate::types::KernelRole::Verify) {
         artifacts.cap_table.set(
-            KERNEL_CAP_SLOT,
-            JavmCap::Protocol(ProtocolCap::AttestationScope(scope)),
+            MINT_ATTEST_CAP_SLOT,
+            JavmCap::Protocol(ProtocolCap::MintAttestCap),
         );
+        artifacts
+            .cap_table
+            .set(SET_SCORE_SLOT, JavmCap::Protocol(ProtocolCap::SetScore));
+        if let Some(scope) = attestation_scope {
+            artifacts.cap_table.set(
+                KERNEL_CAP_SLOT,
+                JavmCap::Protocol(ProtocolCap::AttestationScope(scope)),
+            );
+        }
     }
 
     javm::kernel::InvocationKernel::new_from_artifacts(artifacts, gas, javm::PvmBackend::Default)
@@ -196,6 +194,18 @@ impl<H: Hardware> ProtocolCapHost<ProtocolCap> for InvocationHost<'_, H> {
             ProtocolCap::EmitEvent => host_emit_event(vm, self),
             ProtocolCap::MintAttestCap => host_mint_attest_cap(vm, self),
             ProtocolCap::SetScore => host_set_score(vm, self),
+            // Reading the caller's identity. CALL on `CallerKernel`
+            // returns the role discriminator in φ[7]:
+            //   0 = KernelRole::Verify, 1 = KernelRole::Process.
+            // The cap itself carries the role; the handler is just an
+            // accessor.
+            ProtocolCap::CallerKernel(c) => CallOutcome::Resume {
+                phi7: match c.role {
+                    crate::types::KernelRole::Verify => 0,
+                    crate::types::KernelRole::Process => 1,
+                },
+                phi8: 0,
+            },
             other => CallOutcome::Fault(format!("CALL on non-callable cap: {other:?}")),
         }
     }

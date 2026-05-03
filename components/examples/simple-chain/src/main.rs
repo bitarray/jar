@@ -1,24 +1,24 @@
 //! Simple example chain: ed25519-signed balance transfers over an
 //! account model.
 //!
-//! This is the chain-author program — the `Vault.initialize` body that
-//! the kernel runs in four contexts:
+//! This is the chain-author program — the `Vault.initialize` body
+//! the kernel runs. The kernel-injected `CallerKernel` cap at
+//! [`abi::CALLER_KERNEL_SLOT`] tells us whether we're in
+//! [`KernelRole::Verify`] or [`KernelRole::Process`]; the entry
+//! reads it via `caller_role()` and branches:
 //!
-//! - dispatch verify (off-chain arrival): mint AttestationCap to
-//!   sig-check, then `setScore` to enter the pool.
-//! - dispatch process (off-chain): no-op persistence (ro-σ).
-//! - transact verify (on-chain): re-mint AttestationCap (defense-in-
-//!   depth sig check).
-//! - transact process (on-chain): apply the debit/credit to the
-//!   account-map DataCap. Stage 2's post-process snapshot persists
-//!   the changes.
+//! - **verify** (dispatch and transact): parse, ed25519 sig-check
+//!   via `mint_attest_cap`, then `setScore` to enter the proposer
+//!   pool. ro-σ — no state mutation.
+//! - **process** (transact only — dispatch process is ro-σ and a
+//!   no-op for this chain): MGMT_MAP the account-map DataCap, apply
+//!   the debit/credit, halt. Stage 2's post-process snapshot
+//!   persists.
 //!
-//! The same code path runs in all four. Each host call returns
-//! `RC_READONLY` outside its valid context; the guest treats that as
-//! a no-op. Hard errors (bad signature, insufficient funds, nonce
-//! mismatch) panic the invocation — verify-side panics fail the
-//! txn / block; process-side panics shouldn't happen if verify did
-//! its job.
+//! Hard errors (bad signature, insufficient funds, nonce mismatch)
+//! panic the invocation: verify panics fail the txn or block;
+//! process panics shouldn't happen if the proposer's verify did its
+//! job.
 //!
 //! Transaction wire format (144 bytes):
 //!   0..32   from pubkey   (ed25519, 32 B)
@@ -55,6 +55,9 @@ fn main() {}
 // "javm"` guest functions; on host builds those callers are cfg'd out.
 #[cfg(target_env = "javm")]
 mod abi {
+    /// `CALL` on the cap at this slot returns the kernel role:
+    /// 0 = Verify, 1 = Process.
+    pub const CALLER_KERNEL_SLOT: u8 = 3;
     #[allow(dead_code)]
     pub const EMIT_EVENT_SLOT: u8 = 4;
     pub const MINT_ATTEST_CAP_SLOT: u8 = 5;
@@ -67,7 +70,9 @@ mod abi {
     pub const ATTESTATION_DST_SLOT: u8 = 7;
 
     pub const RC_OK: u64 = 0;
-    pub const RC_READONLY: u64 = u64::MAX - 2;
+
+    pub const ROLE_VERIFY: u64 = 0;
+    pub const ROLE_PROCESS: u64 = 1;
 
     pub const TXN_LEN: usize = 144;
     pub const RECORD_LEN: usize = 64;
@@ -87,43 +92,75 @@ use abi::*;
 extern "C" fn simple_chain_init(args_len: u64) -> u64 {
     let args = javm_builtins::map_args(args_len);
     if args.len() < TXN_LEN {
-        return RC_OK; // empty / too-short args: nothing to do (e.g. block_init)
+        // Empty/short args: kernel-fed schedule slot or pre-genesis
+        // block_init. Nothing to do regardless of role.
+        return RC_OK;
     }
-
     let txn = parse_txn(&args[..TXN_LEN]);
 
-    // 1) sig check via mint_attest_cap. RC_OK = sig valid, RC_READONLY
-    //    = process role (no sig check, trust the proposer's verify).
-    let msg = canonical_message(&txn);
-    let mint_rc = mint_attest_cap(ATTESTATION_DST_SLOT, &txn.from, &msg, &txn.sig);
-    if mint_rc != RC_OK && mint_rc != RC_READONLY {
-        // Bad signature or scope violation — fail this invocation.
-        // In verify, the kernel reports the fault as a verify panic
-        // (block fails). In process this branch shouldn't trigger
-        // since process returns RC_READONLY uniformly.
+    match caller_role() {
+        ROLE_VERIFY => verify_handler(&txn),
+        ROLE_PROCESS => process_handler(&txn),
+        _ => panic_loop(),
+    }
+}
+
+/// Verify path: ed25519 sig check, then setScore.
+/// ro-σ — no state mutation.
+#[cfg(target_env = "javm")]
+fn verify_handler(txn: &Txn) -> u64 {
+    let msg = canonical_message(txn);
+    if mint_attest_cap(ATTESTATION_DST_SLOT, &txn.from, &msg, &txn.sig) != RC_OK {
+        // Bad signature, scope violation, or other minting failure —
+        // fail this verify. The kernel reports a verify panic,
+        // dropping the txn (dispatch) or panicking the block
+        // (transact).
         panic_loop();
     }
 
-    // 2) Apply state change. Map the account-map DataCap, debit/credit,
-    //    write back. In verify-context this is ephemeral (no
-    //    snapshot). In process-context the kernel snapshots the
-    //    post-state back into σ.
-    let map_addr = map_account_map();
-    let map = unsafe {
-        core::slice::from_raw_parts_mut(map_addr as *mut u8, ACCOUNT_MAP_PAGES as usize * 4096)
-    };
-    if !apply_transfer(map, &txn) {
-        panic_loop();
-    }
-
-    // 3) Pool insert (only succeeds in dispatch verify; RC_READONLY
-    //    elsewhere). Identifier = from||nonce, score = amount.
+    // setScore is meaningful only in dispatch-verify (transact-verify
+    // returns RC_READONLY). Identifier = from||nonce, score = amount
+    // (placeholder fee model).
     let mut id = [0u8; 40];
     id[..32].copy_from_slice(&txn.from);
     id[32..40].copy_from_slice(&txn.nonce.to_le_bytes());
     let _ = set_score(&id, txn.amount);
 
     RC_OK
+}
+
+/// Process path: apply the txn to the persistent account-map.
+/// rw-σ in transact context; the kernel's post-process snapshot
+/// persists the writes. Dispatch-process is ro-σ — writes here would
+/// be discarded.
+#[cfg(target_env = "javm")]
+fn process_handler(txn: &Txn) -> u64 {
+    let map_addr = map_account_map();
+    let map = unsafe {
+        core::slice::from_raw_parts_mut(map_addr as *mut u8, ACCOUNT_MAP_PAGES as usize * 4096)
+    };
+    if !apply_transfer(map, txn) {
+        panic_loop();
+    }
+    RC_OK
+}
+
+/// Read the kernel role from the `CallerKernel` cap at slot 3.
+/// Returns 0 (Verify) or 1 (Process).
+#[cfg(target_env = "javm")]
+fn caller_role() -> u64 {
+    let mut role: u64;
+    unsafe {
+        core::arch::asm!(
+            "li t0, {slot}",
+            "ecall",
+            slot = const CALLER_KERNEL_SLOT as u32,
+            lateout("a0") role,
+            lateout("a1") _,
+            lateout("t0") _,
+        );
+    }
+    role
 }
 
 #[cfg(target_env = "javm")]
