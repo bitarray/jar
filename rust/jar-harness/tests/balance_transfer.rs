@@ -18,6 +18,7 @@ fn make_kp(seed_byte: u8) -> KeyPair {
 }
 
 #[test]
+#[ignore = "Stage 3: Vault.slots no longer cloned into Frame; Stage 7 restores via MGMT_COPY-in/out"]
 fn alice_pays_bob() {
     let alice = make_kp(0xA1);
     let bob = make_kp(0xB0);

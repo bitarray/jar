@@ -13,13 +13,19 @@ use std::sync::Arc;
 use jar_kernel::cap::{Cap, ProtocolCap};
 use jar_kernel::vm::foreign_cnode;
 use jar_kernel::{
-    DataCap, RegCap, ResourceCap, ResourceKind, State, Vault, VaultId, VaultRefCap, VaultRights,
+    DataCap, ImageId, RegCap, ResourceCap, ResourceKind, State, Vault, VaultId, VaultRefCap,
+    VaultRights,
 };
 
 fn empty_vault() -> (State, VaultId) {
     let mut state = State::empty();
     let vault_id = state.next_vault_id();
-    state.vaults.insert(vault_id, Arc::new(Vault::new()));
+    // Tests in this file exercise foreign_cnode operations; they
+    // never invoke vault.initialize, so a placeholder image_id is
+    // fine.
+    state
+        .vaults
+        .insert(vault_id, Arc::new(Vault::new(ImageId(0))));
     (state, vault_id)
 }
 

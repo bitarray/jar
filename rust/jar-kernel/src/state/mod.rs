@@ -16,22 +16,34 @@ use crate::types::{CNode, EventEndpointCap, ImageId, KResult, KernelError, KeyId
 
 pub mod state_root;
 
-/// Persistent Vault unit. After the unified-persistence refactor a Vault
-/// is `{ slots, init_cap }`. All persistent state — code, byte data,
-/// references to other Vaults, resource grants — lives as caps in
-/// `slots`. There is no separate `code_hash` field, no `code_vault`,
-/// and no KV `storage` map.
+/// A Vault is `{ image_id, slots }`:
+///
+/// - `image_id` references a program template in `state.images`. At
+///   `vault.initialize`, the kernel resolves
+///   `state.images[image_id]` and clones the Image's CapTable into a
+///   fresh Frame. Multiple Vaults can share one Arc<Image> for
+///   deduplication.
+/// - `slots` is per-vault persistent storage — chain-author state.
+///   Crucially, `slots` is NOT cloned into Frame at vault_init.
+///   Guests reach it via the home VaultRef the kernel injects into
+///   BareFrame, using the foreign-frame mechanism (MGMT_COPY in/out
+///   through the VaultRef).
 #[derive(Clone, Eq, PartialEq, Debug, Default)]
 pub struct Vault {
-    /// 256 cap slots — the persistent CNode.
+    /// Reference into `state.images`. Used by `vault.initialize` to
+    /// look up the program template.
+    pub image_id: ImageId,
+    /// Per-vault persistent storage. Foreign-frame from the active
+    /// VM's perspective; never directly in MainFrame.
     pub slots: CNode,
-    /// Slot in `slots` whose CodeCap is the **initialize program**.
-    pub init_cap: u8,
 }
 
 impl Vault {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(image_id: ImageId) -> Self {
+        Self {
+            image_id,
+            slots: CNode::default(),
+        }
     }
 }
 

@@ -30,17 +30,24 @@ fn halt_code_sub_blob() -> Vec<u8> {
 }
 
 fn vault_with_init_code() -> (State, VaultId) {
+    use jar_kernel::cap::Image;
     let mut state = State::empty();
-    let vault_id = state.next_vault_id();
-    let mut v = Vault::new();
-    v.init_cap = INIT_SLOT;
-    v.slots.set(
+    let mut image = Image {
+        slots: jar_kernel::cap::CNode::default(),
+        init_cap: INIT_SLOT,
+    };
+    image.slots.set(
         INIT_SLOT,
         Some(RegCap::Code(CodeCap {
             blob: Arc::new(halt_code_sub_blob()),
         })),
     );
-    state.vaults.insert(vault_id, Arc::new(v));
+    let image_id = state.next_image_id();
+    state.images.insert(image_id, Arc::new(image));
+    let vault_id = state.next_vault_id();
+    state
+        .vaults
+        .insert(vault_id, Arc::new(Vault::new(image_id)));
     (state, vault_id)
 }
 
@@ -195,21 +202,38 @@ fn set_args_rejects_double_call() {
 }
 
 #[test]
-fn new_vm_from_vault_inline_vault_ref_propagates() {
-    let (mut state, vault_id) = vault_with_init_code();
+fn new_vm_from_vault_image_vault_ref_propagates() {
+    use jar_kernel::cap::Image;
 
-    // VaultRef placed inline as a RegCap::VaultRef value.
+    let mut state = State::empty();
     let target_vault = VaultId(99);
-    let arc = state.vaults.get(&vault_id).unwrap().clone();
-    let mut v: Vault = (*arc).clone();
-    v.slots.set(
+
+    // Build an Image with both the init Code AND a VaultRef in its
+    // slots — the Image clone projects both into the Frame's
+    // CapTable.
+    let mut image = Image {
+        slots: jar_kernel::cap::CNode::default(),
+        init_cap: INIT_SLOT,
+    };
+    image.slots.set(
+        INIT_SLOT,
+        Some(RegCap::Code(CodeCap {
+            blob: Arc::new(halt_code_sub_blob()),
+        })),
+    );
+    image.slots.set(
         100,
         Some(RegCap::VaultRef(VaultRefCap {
             vault_id: target_vault,
             rights: VaultRights::ALL,
         })),
     );
-    state.vaults.insert(vault_id, Arc::new(v));
+    let image_id = state.next_image_id();
+    state.images.insert(image_id, Arc::new(image));
+    let vault_id = state.next_vault_id();
+    state
+        .vaults
+        .insert(vault_id, Arc::new(Vault::new(image_id)));
 
     let vm = new_vm_from_vault(
         &state,
@@ -222,7 +246,6 @@ fn new_vm_from_vault_inline_vault_ref_propagates() {
     )
     .expect("new_vm_from_vault succeeds");
 
-    // Slot 100 should hold ProtocolCap::VaultRef projecting the same shape.
     use jar_kernel::cap::{Cap, ProtocolCap};
     match vm.vm_arena.vm(0).cap_table.get(100) {
         Some(Cap::Protocol(ProtocolCap::VaultRef(vr))) => {

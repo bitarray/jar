@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use jar_kernel::cap::Cap;
 use jar_kernel::vm::foreign_cnode;
-use jar_kernel::{RegCap, ResourceCap, ResourceKind, State, Vault, VaultId, VaultRights};
+use jar_kernel::{ImageId, RegCap, ResourceCap, ResourceKind, State, Vault, VaultId, VaultRights};
 
 fn place_resource(state: &mut State, vault: VaultId, slot: u8) -> ResourceCap {
     let r = ResourceCap(ResourceKind::CreateVault { quota_pages: 16 });
@@ -24,7 +24,9 @@ fn place_resource(state: &mut State, vault: VaultId, slot: u8) -> ResourceCap {
 fn clone_leaves_source_intact_so_drop_is_safe() {
     let mut state = State::empty();
     let vault_id = state.next_vault_id();
-    state.vaults.insert(vault_id, Arc::new(Vault::new()));
+    state
+        .vaults
+        .insert(vault_id, Arc::new(Vault::new(ImageId(0))));
     let r = place_resource(&mut state, vault_id, 7);
 
     let _ephemeral = foreign_cnode::clone(&state, vault_id, 7, VaultRights::ALL).expect("clone");
@@ -40,7 +42,9 @@ fn clone_leaves_source_intact_so_drop_is_safe() {
 fn manager_pattern_no_commit_no_change() {
     let mut state = State::empty();
     let vault_id = state.next_vault_id();
-    state.vaults.insert(vault_id, Arc::new(Vault::new()));
+    state
+        .vaults
+        .insert(vault_id, Arc::new(Vault::new(ImageId(0))));
     let r = place_resource(&mut state, vault_id, 0);
 
     let _ = foreign_cnode::clone(&state, vault_id, 0, VaultRights::ALL).unwrap();
@@ -56,7 +60,9 @@ fn take_then_no_replace_leaves_slot_empty() {
     // For fault safety, managers use COPY (clone) for reads.
     let mut state = State::empty();
     let vault_id = state.next_vault_id();
-    state.vaults.insert(vault_id, Arc::new(Vault::new()));
+    state
+        .vaults
+        .insert(vault_id, Arc::new(Vault::new(ImageId(0))));
     let _ = place_resource(&mut state, vault_id, 0);
 
     let _taken: Cap = foreign_cnode::take(&mut state, vault_id, 0, VaultRights::ALL).unwrap();
