@@ -2320,6 +2320,32 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
             self.set_active_reg(7, RESULT_WHAT);
             return DispatchResult::Continue;
         }
+        // Local Cap::Data → Foreign: serialise pages and persist via the
+        // host adapter. The local source stays put; this is the
+        // ephemeral→σ direction of the persistence boundary. A "real"
+        // clone of a Cap::Data would alias backing pages, which we
+        // forbid — the host adapter reads `vm.backing` directly, so a
+        // disposable view cap (same backing_offset, no mappings) is
+        // enough.
+        if let (FrameId::Vm(idx), FrameId::Foreign(_)) = (s_frame, o_frame)
+            && matches!(
+                self.vm_arena.vm(idx).cap_table.get(s_slot),
+                Some(Cap::Data(_))
+            )
+        {
+            let (backing_offset, page_count) = match self.vm_arena.vm(idx).cap_table.get(s_slot) {
+                Some(Cap::Data(d)) => (d.backing_offset, d.page_count),
+                _ => unreachable!(),
+            };
+            let view = Cap::Data(DataCap::new(backing_offset, page_count));
+            if self
+                .frame_set(host, o_frame, o_slot, o_rights, view)
+                .is_err()
+            {
+                self.set_active_reg(7, RESULT_WHAT);
+            }
+            return DispatchResult::Continue;
+        }
         let copy = match self.frame_clone(host, s_frame, s_slot, s_rights) {
             Some(c) => c,
             None => {

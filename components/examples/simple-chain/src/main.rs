@@ -1,42 +1,48 @@
 //! Simple example chain: ed25519-signed balance transfers over an
 //! account model.
 //!
-//! This is the chain-author program — the `Vault.initialize` body
-//! the kernel runs. The kernel-injected `CallerKernel` cap at
-//! [`abi::CALLER_KERNEL_SLOT`] tells us whether we're in
-//! [`KernelRole::Verify`] or [`KernelRole::Process`]; the entry
-//! reads it via `caller_role()` and branches:
+//! Vault.initialize body. Kernel-injected caps live in BareFrame;
+//! persistent storage lives in `vault.slots`, accessed via the home
+//! VaultRef.
 //!
-//! - **verify** (dispatch and transact): parse, ed25519 sig-check
-//!   via `mint_attest_cap`, then `setScore` to enter the proposer
-//!   pool. ro-σ — no state mutation.
-//! - **process** (transact only — dispatch process is ro-σ and a
-//!   no-op for this chain): MGMT_MAP the account-map DataCap, apply
-//!   the debit/credit, halt. Stage 2's post-process snapshot
-//!   persists.
+//! Startup:
+//!   1. MGMT_COPY BareFrame[home VaultRef] → MainFrame[1] so we have
+//!      a stable handle for foreign-frame ops.
+//!   2. CALL BareFrame[CallerKernel] → role (verify or process).
+//!   3. Map args into the heap region.
+//!   4. Branch to verify_handler or process_handler.
 //!
-//! Hard errors (bad signature, insufficient funds, nonce mismatch)
-//! panic the invocation: verify panics fail the txn or block;
-//! process panics shouldn't happen if the proposer's verify did its
-//! job.
+//! Verify handler:
+//!   - Copy MintAttestCap and SetScore from BareFrame into MainFrame
+//!     for plain ecalli access.
+//!   - Validate ed25519 sig via mint_attest_cap. Bad sig → panic the
+//!     invocation.
+//!   - setScore (RC_OK in dispatch verify; RC_READONLY in transact
+//!     verify — ignore).
+//!
+//! Process handler:
+//!   - MGMT_COPY foreign(home_vault.slots[100]) → MainFrame[16]
+//!     (account-map clone).
+//!   - MGMT_MAP MainFrame[16] @ vaddr.
+//!   - Apply debit/credit.
+//!   - MGMT_DROP foreign(home_vault.slots[100]) — clear σ slot.
+//!   - MGMT_COPY MainFrame[16] → foreign(home_vault.slots[100]) —
+//!     write back.
+//!   - Halt. The kernel's `foreign_cnode::set` reads MainFrame[16]'s
+//!     post-execution pages from BackingStore and persists them.
 //!
 //! Transaction wire format (144 bytes):
-//!   0..32   from pubkey   (ed25519, 32 B)
-//!   32..64  to pubkey     (32 B)
-//!   64..72  amount        (u64 LE)
-//!   72..80  nonce         (u64 LE — must equal sender's next nonce)
-//!   80..144 signature     (ed25519, 64 B)
-//!
-//! Signing message: `from || to || amount_le || nonce_le` (80 bytes).
+//!   0..32   from pubkey
+//!   32..64  to pubkey
+//!   64..72  amount (u64 LE)
+//!   72..80  nonce  (u64 LE)
+//!   80..144 ed25519 signature
 //!
 //! Account-map layout (1 page = 64 records × 64 bytes):
-//!   record:   0..32   pubkey
-//!             32..40  balance (u64 LE)
-//!             40..48  nonce (u64 LE — next expected)
-//!             48..64  reserved (zero)
-//!   The map lives at `vault.slots[65]`. Genesis populates initial
-//!   balances; updates persist via the kernel's post-process DataCap
-//!   snapshot.
+//!   0..32   pubkey
+//!   32..40  balance (u64 LE)
+//!   40..48  nonce   (u64 LE — next expected)
+//!   48..64  reserved
 
 #![cfg_attr(target_env = "javm", no_std)]
 #![cfg_attr(target_env = "javm", no_main)]
@@ -48,29 +54,33 @@ javm_builtins::javm_entry!(simple_chain_init);
 fn main() {}
 
 // =============================================================================
-// Kernel ABI (mirrors jar-kernel/src/vm/host_abi.rs)
+// ABI constants — mirror jar-kernel/src/vm/host_abi.rs.
 // =============================================================================
 
-// Constants are only consumed inside the freestanding `target_env =
-// "javm"` guest functions; on host builds those callers are cfg'd out.
 #[cfg(target_env = "javm")]
 mod abi {
-    /// `CALL` on the cap at this slot returns the kernel role:
-    /// 0 = Verify, 1 = Process.
-    pub const CALLER_KERNEL_SLOT: u8 = 3;
+    // BareFrame slots (kernel-injected).
+    pub const BARE_HOME_VAULT_SLOT: u8 = 7;
+    pub const BARE_CALLER_KERNEL_SLOT: u8 = 8;
     #[allow(dead_code)]
-    pub const EMIT_EVENT_SLOT: u8 = 4;
-    pub const MINT_ATTEST_CAP_SLOT: u8 = 5;
-    pub const SET_SCORE_SLOT: u8 = 6;
-    /// DataCap slot in the vault holding the account map. Above the
-    /// blob's manifest-claimed range (slot 64 = code, 65 = stack,
-    /// 68 = heap).
-    pub const ACCOUNT_MAP_SLOT: u8 = 100;
-    /// Frame slot we mint AttestationCaps into during verify.
-    pub const ATTESTATION_DST_SLOT: u8 = 7;
+    pub const BARE_EMIT_EVENT_SLOT: u8 = 11;
+    pub const BARE_MINT_ATTEST_CAP_SLOT: u8 = 12;
+    pub const BARE_SET_SCORE_SLOT: u8 = 13;
+
+    // Where we relocate kernel caps in MainFrame for plain `ecalli`.
+    pub const MAIN_HOME_VAULT_SLOT: u8 = 1;
+    pub const MAIN_MINT_SLOT: u8 = 5;
+    pub const MAIN_SETSCORE_SLOT: u8 = 6;
+    pub const MAIN_ATTESTATION_DST_SLOT: u8 = 7;
+
+    // Slot in vault.slots holding the account-map.
+    pub const ACCOUNT_MAP_VAULT_SLOT: u8 = 100;
+    /// Where we COPY-in the account-map for use during process.
+    /// Above the manifest-claimed range (64=code, 65=stack, 66=ro,
+    /// 67=rw, 68=heap, 69=args).
+    pub const WORK_DATACAP_SLOT: u8 = 16;
 
     pub const RC_OK: u64 = 0;
-
     pub const ROLE_VERIFY: u64 = 0;
     pub const ROLE_PROCESS: u64 = 1;
 
@@ -78,6 +88,14 @@ mod abi {
     pub const RECORD_LEN: usize = 64;
     pub const ACCOUNT_MAP_PAGES: u32 = 1;
     pub const ACCOUNT_MAP_RECORDS: usize = 64;
+
+    // PVM ecall ops (for `csrw 0x800; ecall`).
+    pub const OP_MGMT_MAP: u64 = 2;
+    pub const OP_MGMT_DROP: u64 = 5;
+    pub const OP_MGMT_COPY: u64 = 7;
+
+    // Access bits for MGMT_MAP.
+    pub const ACCESS_RW: u64 = 1;
 }
 
 #[cfg(target_env = "javm")]
@@ -90,11 +108,15 @@ use abi::*;
 #[cfg(target_env = "javm")]
 #[unsafe(no_mangle)]
 extern "C" fn simple_chain_init(args_len: u64) -> u64 {
+    // 1. Promote home VaultRef from BareFrame to MainFrame so plain
+    //    cap-refs reach `vault.slots` via slot 1.
+    if !mgmt_copy_bare_to_main(BARE_HOME_VAULT_SLOT, MAIN_HOME_VAULT_SLOT) {
+        panic_loop();
+    }
+
     let args = javm_builtins::map_args(args_len);
     if args.len() < TXN_LEN {
-        // Empty/short args: kernel-fed schedule slot or pre-genesis
-        // block_init. Nothing to do regardless of role.
-        return RC_OK;
+        return RC_OK; // Schedule slot or pre-genesis block_init — nothing to do.
     }
     let txn = parse_txn(&args[..TXN_LEN]);
 
@@ -105,22 +127,21 @@ extern "C" fn simple_chain_init(args_len: u64) -> u64 {
     }
 }
 
-/// Verify path: ed25519 sig check, then setScore.
-/// ro-σ — no state mutation.
+/// Verify path: ed25519 sig check, then setScore. ro-σ.
 #[cfg(target_env = "javm")]
 fn verify_handler(txn: &Txn) -> u64 {
-    let msg = canonical_message(txn);
-    if mint_attest_cap(ATTESTATION_DST_SLOT, &txn.from, &msg, &txn.sig) != RC_OK {
-        // Bad signature, scope violation, or other minting failure —
-        // fail this verify. The kernel reports a verify panic,
-        // dropping the txn (dispatch) or panicking the block
-        // (transact).
+    if !mgmt_copy_bare_to_main(BARE_MINT_ATTEST_CAP_SLOT, MAIN_MINT_SLOT) {
+        panic_loop();
+    }
+    if !mgmt_copy_bare_to_main(BARE_SET_SCORE_SLOT, MAIN_SETSCORE_SLOT) {
         panic_loop();
     }
 
-    // setScore is meaningful only in dispatch-verify (transact-verify
-    // returns RC_READONLY). Identifier = from||nonce, score = amount
-    // (placeholder fee model).
+    let msg = canonical_message(txn);
+    if mint_attest_cap(MAIN_ATTESTATION_DST_SLOT, &txn.from, &msg, &txn.sig) != RC_OK {
+        panic_loop();
+    }
+
     let mut id = [0u8; 40];
     id[..32].copy_from_slice(&txn.from);
     id[32..40].copy_from_slice(&txn.nonce.to_le_bytes());
@@ -129,35 +150,67 @@ fn verify_handler(txn: &Txn) -> u64 {
     RC_OK
 }
 
-/// Process path: apply the txn to the persistent account-map.
-/// rw-σ in transact context; the kernel's post-process snapshot
-/// persists the writes. Dispatch-process is ro-σ — writes here would
-/// be discarded.
+/// Process path: read account-map from σ via the home VaultRef,
+/// apply the debit/credit, write the post-state back.
 #[cfg(target_env = "javm")]
 fn process_handler(txn: &Txn) -> u64 {
-    let map_addr = map_account_map();
+    // 1. COPY-in: foreign(home_vault.slots[100]) → MainFrame[16].
+    if !mgmt_copy_foreign_to_main(
+        MAIN_HOME_VAULT_SLOT,
+        ACCOUNT_MAP_VAULT_SLOT,
+        WORK_DATACAP_SLOT,
+    ) {
+        panic_loop();
+    }
+
+    // 2. MGMT_MAP MainFrame[16] @ a guest-chosen vaddr.
+    let map_addr = mgmt_map(WORK_DATACAP_SLOT, ACCOUNT_MAP_BASE_PAGE, ACCOUNT_MAP_PAGES);
     let map = unsafe {
         core::slice::from_raw_parts_mut(map_addr as *mut u8, ACCOUNT_MAP_PAGES as usize * 4096)
     };
+
+    // 3. Mutate the map.
     if !apply_transfer(map, txn) {
         panic_loop();
     }
+
+    // 4. DROP the σ slot, then COPY MainFrame[16] back to it.
+    if !mgmt_drop_foreign(MAIN_HOME_VAULT_SLOT, ACCOUNT_MAP_VAULT_SLOT) {
+        panic_loop();
+    }
+    if !mgmt_copy_main_to_foreign(
+        WORK_DATACAP_SLOT,
+        MAIN_HOME_VAULT_SLOT,
+        ACCOUNT_MAP_VAULT_SLOT,
+    ) {
+        panic_loop();
+    }
+
     RC_OK
 }
 
-/// Read the kernel role from the `CallerKernel` cap at slot 3.
-/// Returns 0 (Verify) or 1 (Process).
+/// Read the kernel role from BareFrame[CallerKernel]. Returns
+/// 0 (Verify) or 1 (Process).
 #[cfg(target_env = "javm")]
 fn caller_role() -> u64 {
+    // Dynamic CALL via cap-ref to BareFrame[CALLER_KERNEL_SLOT].
+    let cap_ref = (BARE_CALLER_KERNEL_SLOT as u64) << 8;
+    let phi12 = cap_ref << 32;
     let mut role: u64;
     unsafe {
         core::arch::asm!(
-            "li t0, {slot}",
+            "csrw 0x800, zero",
             "ecall",
-            slot = const CALLER_KERNEL_SLOT as u32,
+            in("a4") 0u64,        // op = Dynamic CALL
+            in("a5") phi12,       // (subject_ref << 32) | 0
             lateout("a0") role,
+            // The kernel writes φ[7]=a0 (role) AND φ[8]=a1 (status=0)
+            // on `CallOutcome::Resume`. Declare a1 clobbered so the
+            // compiler doesn't keep a live value in it across the
+            // ecall.
             lateout("a1") _,
-            lateout("t0") _,
+            lateout("a4") _,
+            lateout("a5") _,
         );
     }
     role
@@ -165,12 +218,110 @@ fn caller_role() -> u64 {
 
 #[cfg(target_env = "javm")]
 fn panic_loop() -> ! {
-    // Trigger a guest fault by issuing an `unimp` (treated as a panic
-    // by javm). This bubbles up as KernelResult::Panic → invocation
-    // fault → block panic for verify, block panic for process.
     unsafe {
         core::arch::asm!("unimp", options(noreturn));
     }
+}
+
+// =============================================================================
+// MGMT helpers
+// =============================================================================
+
+/// Address (in pages) where the account-map gets MGMT_MAP'd. Above
+/// the manifest-laid-out [stack, ro, rw, heap, args] region.
+#[cfg(target_env = "javm")]
+const ACCOUNT_MAP_BASE_PAGE: u64 = 64;
+
+/// MGMT_COPY subject_ref → object_ref. Returns true on success.
+///
+/// `ecall_copy` writes `RESULT_WHAT` (= `u64::MAX - 1`) to φ[7] on
+/// failure and leaves φ[7] untouched on success. We initialize φ[7]
+/// to 0 going in so the post-call value reliably distinguishes the
+/// two cases.
+#[cfg(target_env = "javm")]
+fn mgmt_copy(subject_ref: u32, object_ref: u32) -> bool {
+    let phi12 = ((subject_ref as u64) << 32) | (object_ref as u64);
+    let mut rc: u64 = 0;
+    unsafe {
+        core::arch::asm!(
+            "csrw 0x800, zero",
+            "ecall",
+            inout("a0") rc,
+            in("a4") OP_MGMT_COPY,
+            in("a5") phi12,
+            lateout("a4") _,
+            lateout("a5") _,
+        );
+    }
+    rc == 0
+}
+
+#[cfg(target_env = "javm")]
+fn mgmt_copy_bare_to_main(bare_slot: u8, main_slot: u8) -> bool {
+    let subject_ref = (bare_slot as u32) << 8; // (slot, ind0=0) → BareFrame[slot]
+    let object_ref = main_slot as u32; // direct MainFrame slot
+    mgmt_copy(subject_ref, object_ref)
+}
+
+#[cfg(target_env = "javm")]
+fn mgmt_copy_foreign_to_main(home_main_slot: u8, foreign_slot: u8, main_slot: u8) -> bool {
+    let subject_ref = ((home_main_slot as u32) << 8) | (foreign_slot as u32);
+    let object_ref = main_slot as u32;
+    mgmt_copy(subject_ref, object_ref)
+}
+
+#[cfg(target_env = "javm")]
+fn mgmt_copy_main_to_foreign(main_slot: u8, home_main_slot: u8, foreign_slot: u8) -> bool {
+    let subject_ref = main_slot as u32;
+    let object_ref = ((home_main_slot as u32) << 8) | (foreign_slot as u32);
+    mgmt_copy(subject_ref, object_ref)
+}
+
+/// MGMT_DROP at foreign(home_main_slot → foreign_slot). Returns true
+/// on success.
+#[cfg(target_env = "javm")]
+fn mgmt_drop_foreign(home_main_slot: u8, foreign_slot: u8) -> bool {
+    let subject_ref = ((home_main_slot as u32) << 8) | (foreign_slot as u32);
+    let phi12 = (subject_ref as u64) << 32;
+    let mut rc: u64 = 0;
+    unsafe {
+        core::arch::asm!(
+            "csrw 0x800, zero",
+            "ecall",
+            inout("a0") rc,
+            in("a4") OP_MGMT_DROP,
+            in("a5") phi12,
+            lateout("a4") _,
+            lateout("a5") _,
+        );
+    }
+    rc == 0
+}
+
+/// MGMT_MAP MainFrame[slot] @ base_page * 4096, RW.
+/// Returns the byte address of the mapping.
+#[cfg(target_env = "javm")]
+fn mgmt_map(slot: u8, base_page: u64, page_count: u32) -> u64 {
+    let map_refs: u64 = (slot as u64) << 32;
+    unsafe {
+        core::arch::asm!(
+            "csrw 0x800, zero",
+            "ecall",
+            in("a0") base_page,
+            in("a1") 0u64,
+            in("a2") page_count as u64,
+            in("a3") ACCESS_RW,
+            in("a4") OP_MGMT_MAP,
+            in("a5") map_refs,
+            lateout("a0") _,
+            lateout("a1") _,
+            lateout("a2") _,
+            lateout("a3") _,
+            lateout("a4") _,
+            lateout("a5") _,
+        );
+    }
+    base_page * 4096
 }
 
 // =============================================================================
@@ -224,7 +375,7 @@ fn canonical_message(t: &Txn) -> [u8; 80] {
 fn apply_transfer(map: &mut [u8], t: &Txn) -> bool {
     let from_idx = match find_record(map, &t.from) {
         Some(i) => i,
-        None => return false, // sender not funded
+        None => return false,
     };
 
     let from_balance = u64::from_le_bytes(map[from_idx + 32..from_idx + 40].try_into().unwrap());
@@ -234,13 +385,11 @@ fn apply_transfer(map: &mut [u8], t: &Txn) -> bool {
         return false;
     }
 
-    // Debit sender + bump nonce.
     let new_from_balance = from_balance - t.amount;
     let new_from_nonce = from_nonce + 1;
     map[from_idx + 32..from_idx + 40].copy_from_slice(&new_from_balance.to_le_bytes());
     map[from_idx + 40..from_idx + 48].copy_from_slice(&new_from_nonce.to_le_bytes());
 
-    // Credit receiver. Allocate an empty slot if not yet present.
     let to_idx = match find_record(map, &t.to) {
         Some(i) => i,
         None => match find_empty(map) {
@@ -248,7 +397,7 @@ fn apply_transfer(map: &mut [u8], t: &Txn) -> bool {
                 map[i..i + 32].copy_from_slice(&t.to);
                 i
             }
-            None => return false, // map full
+            None => return false,
         },
     };
     let to_balance = u64::from_le_bytes(map[to_idx + 32..to_idx + 40].try_into().unwrap());
@@ -282,14 +431,11 @@ fn find_empty(map: &[u8]) -> Option<usize> {
 }
 
 // =============================================================================
-// Host calls (ecalli wrappers)
+// ecalli wrappers (plain CALL on a MainFrame slot)
 // =============================================================================
 
-/// `mint_attest_cap(dst_slot, key_ptr, blob, sig_ptr)` — verify-only
-/// ed25519 signature check. Returns RC in φ[7].
-///
-/// The transpiler converts `li t0, N; ecall` (no CSR marker) into
-/// PVM `ecalli N`, which CALLs the cap at cap-table slot N.
+/// `mint_attest_cap(dst_slot, key, blob, sig)` — verify-only sig
+/// check. CALLs the cap at MainFrame[MAIN_MINT_SLOT].
 #[cfg(target_env = "javm")]
 fn mint_attest_cap(dst_slot: u8, key: &[u8; 32], blob: &[u8], sig: &[u8; 64]) -> u64 {
     let mut rc: u64;
@@ -297,7 +443,7 @@ fn mint_attest_cap(dst_slot: u8, key: &[u8; 32], blob: &[u8], sig: &[u8; 64]) ->
         core::arch::asm!(
             "li t0, {slot}",
             "ecall",
-            slot = const MINT_ATTEST_CAP_SLOT as u32,
+            slot = const MAIN_MINT_SLOT as u32,
             in("a0") dst_slot as u64,
             in("a1") key.as_ptr() as u64,
             in("a2") blob.as_ptr() as u64,
@@ -314,7 +460,7 @@ fn mint_attest_cap(dst_slot: u8, key: &[u8; 32], blob: &[u8], sig: &[u8; 64]) ->
     rc
 }
 
-/// `setScore(identifier, score)`. RC in φ[7].
+/// `setScore(identifier, score)`. CALLs MainFrame[MAIN_SETSCORE_SLOT].
 #[cfg(target_env = "javm")]
 fn set_score(identifier: &[u8], score: u64) -> u64 {
     let mut rc: u64;
@@ -322,7 +468,7 @@ fn set_score(identifier: &[u8], score: u64) -> u64 {
         core::arch::asm!(
             "li t0, {slot}",
             "ecall",
-            slot = const SET_SCORE_SLOT as u32,
+            slot = const MAIN_SETSCORE_SLOT as u32,
             in("a0") identifier.as_ptr() as u64,
             in("a1") identifier.len() as u64,
             in("a2") score,
@@ -333,52 +479,4 @@ fn set_score(identifier: &[u8], score: u64) -> u64 {
         );
     }
     rc
-}
-
-// =============================================================================
-// Account-map mapping (MGMT_MAP on slot 65)
-// =============================================================================
-
-/// MGMT_MAP the account-map DataCap into guest memory. Returns the
-/// base byte address of the mapping.
-///
-/// The base address is hardcoded to a page well beyond the
-/// transpiler-laid-out [stack, ro, rw, heap, args] region. For the
-/// simple-chain blob the layout is:
-///   stack 16p (slots 65) | ro 4p (66) | rw 1p (67) | heap 16p (68)
-/// = pages [0..37]. `javm_builtins::map_args` adds one page on top.
-/// We pick page 64 to leave plenty of room for layout drift.
-#[cfg(target_env = "javm")]
-fn map_account_map() -> u64 {
-    const ACCOUNT_MAP_BASE_PAGE: u64 = 64;
-    let map_base_page: u64 = ACCOUNT_MAP_BASE_PAGE;
-
-    // MGMT_MAP ABI:
-    //   φ[7]  = base_offset (target page in window)
-    //   φ[8]  = page_offset within cap
-    //   φ[9]  = page_count
-    //   φ[10] = access (1 = RW)
-    //   φ[11] = MGMT_MAP = 2
-    //   φ[12] = (subject << 32) | object
-    //         For direct slot N in active VM: subject = N (low byte).
-    let map_refs: u64 = (ACCOUNT_MAP_SLOT as u64) << 32;
-    let mut rc: u64 = map_base_page;
-    unsafe {
-        core::arch::asm!(
-            "csrw 0x800, zero",
-            "ecall",
-            inout("a0") rc,
-            inout("a1") 0u64 => _,
-            inout("a2") ACCOUNT_MAP_PAGES as u64 => _,
-            inout("a3") 1u64 => _,         // RW
-            inout("a4") 2u64 => _,         // MGMT_MAP
-            inout("a5") map_refs => _,
-        );
-    }
-    // ecall_map only writes φ[7] on failure (RESULT_WHAT). On success
-    // φ[7] is left untouched (= the base_page we passed in). Treat
-    // any value other than the base_page (still a valid success
-    // signal, since RESULT_WHAT differs) as success.
-    let _ = rc;
-    map_base_page * 4096
 }
