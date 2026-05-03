@@ -2,8 +2,9 @@
 //! account model.
 //!
 //! Vault.initialize body. Kernel-injected caps live in BareFrame;
-//! persistent storage lives in `vault.slots`, accessed via the home
-//! VaultRef.
+//! persistent storage lives in `vault.slots` as σ-resident
+//! references (FileCap into `state.data_blobs`; StorageQuota into
+//! `state.storage_quotas`), accessed via the home VaultRef.
 //!
 //! Startup:
 //!   1. MGMT_COPY BareFrame[home VaultRef] → MainFrame[1] so we have
@@ -21,15 +22,19 @@
 //!     verify — ignore).
 //!
 //! Process handler:
-//!   - MGMT_COPY foreign(home_vault.slots[100]) → MainFrame[16]
-//!     (account-map clone).
-//!   - MGMT_MAP MainFrame[16] @ vaddr.
+//!   - MGMT_COPY foreign(home_vault.slots[100]) FileCap → MainFrame.
+//!   - MGMT_COPY foreign(home_vault.slots[99]) StorageQuotaCap → MainFrame.
+//!   - MGMT_COPY BareFrame[Open], BareFrame[Save] → MainFrame.
+//!   - host_open(file_slot, data_dst) → ephemeral DataCap in MainFrame.
+//!   - MGMT_MAP DataCap @ vaddr.
 //!   - Apply debit/credit.
-//!   - MGMT_DROP foreign(home_vault.slots[100]) — clear σ slot.
-//!   - MGMT_COPY MainFrame[16] → foreign(home_vault.slots[100]) —
-//!     write back.
-//!   - Halt. The kernel's `foreign_cnode::set` reads MainFrame[16]'s
-//!     post-execution pages from BackingStore and persists them.
+//!   - host_save(data_slot, quota_slot, new_file_dst) → new FileCap.
+//!   - MGMT_DROP foreign(home_vault.slots[100]) — drop the old σ
+//!     reference; refcount on the old file drops to 0; freed +
+//!     bytes refunded to the StorageQuota entry.
+//!   - MGMT_COPY new FileCap → foreign(home_vault.slots[100]) — install
+//!     the new σ reference; refcount on the new file bumps to 1.
+//!   - Halt.
 //!
 //! Transaction wire format (144 bytes):
 //!   0..32   from pubkey
@@ -66,19 +71,29 @@ mod abi {
     pub const BARE_EMIT_EVENT_SLOT: u8 = 11;
     pub const BARE_MINT_ATTEST_CAP_SLOT: u8 = 12;
     pub const BARE_SET_SCORE_SLOT: u8 = 13;
+    pub const BARE_OPEN_SLOT: u8 = 15;
+    pub const BARE_SAVE_SLOT: u8 = 16;
 
     // Where we relocate kernel caps in MainFrame for plain `ecalli`.
     pub const MAIN_HOME_VAULT_SLOT: u8 = 1;
     pub const MAIN_MINT_SLOT: u8 = 5;
     pub const MAIN_SETSCORE_SLOT: u8 = 6;
     pub const MAIN_ATTESTATION_DST_SLOT: u8 = 7;
+    pub const MAIN_OPEN_SLOT: u8 = 8;
+    pub const MAIN_SAVE_SLOT: u8 = 9;
 
-    // Slot in vault.slots holding the account-map.
+    // Slot in vault.slots holding the account-map FileCap.
     pub const ACCOUNT_MAP_VAULT_SLOT: u8 = 100;
-    /// Where we COPY-in the account-map for use during process.
-    /// Above the manifest-claimed range (64=code, 65=stack, 66=ro,
-    /// 67=rw, 68=heap, 69=args).
-    pub const WORK_DATACAP_SLOT: u8 = 16;
+    /// Slot in vault.slots holding the StorageQuotaCap that pays
+    /// for new files minted via host_save.
+    pub const QUOTA_VAULT_SLOT: u8 = 99;
+
+    /// Working slots in MainFrame. Above the manifest-claimed range
+    /// (64=code, 65=stack, 66=ro, 67=rw, 68=heap, 69=args).
+    pub const WORK_FILE_SLOT: u8 = 70; // copy of σ FileCap (account-map)
+    pub const WORK_DATA_SLOT: u8 = 71; // ephemeral DataCap from host_open
+    pub const WORK_QUOTA_SLOT: u8 = 72; // copy of σ StorageQuotaCap
+    pub const NEW_FILE_SLOT: u8 = 73; // FileCap minted by host_save
 
     pub const RC_OK: u64 = 0;
     pub const ROLE_VERIFY: u64 = 0;
@@ -151,38 +166,56 @@ fn verify_handler(txn: &Txn) -> u64 {
 }
 
 /// Process path: read account-map from σ via the home VaultRef,
-/// apply the debit/credit, write the post-state back.
+/// apply the debit/credit, write the post-state back via the
+/// explicit FileCap + host_open + host_save flow.
 #[cfg(target_env = "javm")]
 fn process_handler(txn: &Txn) -> u64 {
-    // 1. COPY-in: foreign(home_vault.slots[100]) → MainFrame[16].
-    if !mgmt_copy_foreign_to_main(
-        MAIN_HOME_VAULT_SLOT,
-        ACCOUNT_MAP_VAULT_SLOT,
-        WORK_DATACAP_SLOT,
-    ) {
+    // 1. Bring the σ-side caps into MainFrame:
+    //    a. FileCap → MainFrame[WORK_FILE_SLOT].
+    //    b. StorageQuotaCap → MainFrame[WORK_QUOTA_SLOT].
+    //    c. host_open / host_save selectors → MainFrame.
+    if !mgmt_copy_foreign_to_main(MAIN_HOME_VAULT_SLOT, ACCOUNT_MAP_VAULT_SLOT, WORK_FILE_SLOT) {
+        panic_loop();
+    }
+    if !mgmt_copy_foreign_to_main(MAIN_HOME_VAULT_SLOT, QUOTA_VAULT_SLOT, WORK_QUOTA_SLOT) {
+        panic_loop();
+    }
+    if !mgmt_copy_bare_to_main(BARE_OPEN_SLOT, MAIN_OPEN_SLOT) {
+        panic_loop();
+    }
+    if !mgmt_copy_bare_to_main(BARE_SAVE_SLOT, MAIN_SAVE_SLOT) {
         panic_loop();
     }
 
-    // 2. MGMT_MAP MainFrame[16] @ a guest-chosen vaddr.
-    let map_addr = mgmt_map(WORK_DATACAP_SLOT, ACCOUNT_MAP_BASE_PAGE, ACCOUNT_MAP_PAGES);
+    // 2. host_open(WORK_FILE_SLOT, WORK_DATA_SLOT) → ephemeral DataCap.
+    if host_open_call(WORK_FILE_SLOT, WORK_DATA_SLOT) != RC_OK {
+        panic_loop();
+    }
+
+    // 3. MGMT_MAP MainFrame[WORK_DATA_SLOT] @ a guest-chosen vaddr.
+    let map_addr = mgmt_map(WORK_DATA_SLOT, ACCOUNT_MAP_BASE_PAGE, ACCOUNT_MAP_PAGES);
     let map = unsafe {
         core::slice::from_raw_parts_mut(map_addr as *mut u8, ACCOUNT_MAP_PAGES as usize * 4096)
     };
 
-    // 3. Mutate the map.
+    // 4. Mutate the map.
     if !apply_transfer(map, txn) {
         panic_loop();
     }
 
-    // 4. DROP the σ slot, then COPY MainFrame[16] back to it.
+    // 5. host_save(WORK_DATA_SLOT, WORK_QUOTA_SLOT, NEW_FILE_SLOT) → new FileCap.
+    if host_save_call(WORK_DATA_SLOT, WORK_QUOTA_SLOT, NEW_FILE_SLOT) != RC_OK {
+        panic_loop();
+    }
+
+    // 6. DROP the σ slot holding the OLD FileCap; refcount → 0,
+    //    entry freed, bytes refunded to the StorageQuota entry.
     if !mgmt_drop_foreign(MAIN_HOME_VAULT_SLOT, ACCOUNT_MAP_VAULT_SLOT) {
         panic_loop();
     }
-    if !mgmt_copy_main_to_foreign(
-        WORK_DATACAP_SLOT,
-        MAIN_HOME_VAULT_SLOT,
-        ACCOUNT_MAP_VAULT_SLOT,
-    ) {
+    // 7. COPY the new FileCap into the σ slot. foreign_cnode::set
+    //    bumps refcount on the new file's data_blobs entry.
+    if !mgmt_copy_main_to_foreign(NEW_FILE_SLOT, MAIN_HOME_VAULT_SLOT, ACCOUNT_MAP_VAULT_SLOT) {
         panic_loop();
     }
 
@@ -472,6 +505,50 @@ fn set_score(identifier: &[u8], score: u64) -> u64 {
             in("a0") identifier.as_ptr() as u64,
             in("a1") identifier.len() as u64,
             in("a2") score,
+            lateout("a0") rc,
+            lateout("a1") _,
+            lateout("a2") _,
+            lateout("t0") _,
+        );
+    }
+    rc
+}
+
+/// `host_open(file_cap_slot, dst_slot)` → reads file bytes from σ
+/// and places a fresh ephemeral `Cap::Data` at MainFrame[dst_slot].
+/// CALLs the Open selector at MainFrame[MAIN_OPEN_SLOT].
+#[cfg(target_env = "javm")]
+fn host_open_call(file_cap_slot: u8, dst_slot: u8) -> u64 {
+    let mut rc: u64;
+    unsafe {
+        core::arch::asm!(
+            "li t0, {slot}",
+            "ecall",
+            slot = const MAIN_OPEN_SLOT as u32,
+            in("a0") file_cap_slot as u64,
+            in("a1") dst_slot as u64,
+            lateout("a0") rc,
+            lateout("a1") _,
+            lateout("t0") _,
+        );
+    }
+    rc
+}
+
+/// `host_save(data_cap_slot, quota_cap_slot, dst_slot)` → mints a
+/// fresh σ-resident FileCap, debiting the named StorageQuota.
+/// CALLs the Save selector at MainFrame[MAIN_SAVE_SLOT].
+#[cfg(target_env = "javm")]
+fn host_save_call(data_cap_slot: u8, quota_cap_slot: u8, dst_slot: u8) -> u64 {
+    let mut rc: u64;
+    unsafe {
+        core::arch::asm!(
+            "li t0, {slot}",
+            "ecall",
+            slot = const MAIN_SAVE_SLOT as u32,
+            in("a0") data_cap_slot as u64,
+            in("a1") quota_cap_slot as u64,
+            in("a2") dst_slot as u64,
             lateout("a0") rc,
             lateout("a1") _,
             lateout("a2") _,

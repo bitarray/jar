@@ -160,15 +160,16 @@ impl State {
     }
 
     /// Decrement refcount on a quota entry. Frees the entry at
-    /// refcount → 0. The bytes balance, if any, is forfeit (a quota
-    /// entry has no parent quota to refund to — it's a root).
+    /// refcount transitioning from positive to 0. The bytes balance,
+    /// if any, is forfeit (a quota entry has no parent quota to
+    /// refund to — it's a root). No-op for orphan entries.
     pub fn drop_quota_refcount(&mut self, id: QuotaId) {
         let remove = match self.storage_quotas.get_mut(&id) {
-            Some(e) => {
-                e.refcount = e.refcount.saturating_sub(1);
+            Some(e) if e.refcount > 0 => {
+                e.refcount -= 1;
                 e.refcount == 0
             }
-            None => false,
+            _ => false,
         };
         if remove {
             self.storage_quotas.remove(&id);
@@ -204,9 +205,12 @@ impl State {
     /// the quota doesn't exist or has insufficient balance.
     ///
     /// The returned id is unique across the lifetime of the chain;
-    /// FileIds are never reused. Refcount starts at 1 (the caller is
-    /// expected to install the resulting cap somewhere — that
-    /// installation is the first reference).
+    /// FileIds are never reused. Refcount starts at **0** — the entry
+    /// is an "orphan" until the caller installs the resulting cap in
+    /// a σ slot (`foreign_cnode::set` bumps refcount on σ-side
+    /// installation). For genesis-style direct `vault.slots.set`
+    /// installs, the caller must call `bump_file_refcount` explicitly
+    /// after placing the cap.
     pub fn allocate_file(
         &mut self,
         content: Vec<u8>,
@@ -223,7 +227,7 @@ impl State {
             FileEntry {
                 content: Arc::new(content),
                 page_count,
-                refcount: 1,
+                refcount: 0,
                 origin_quota: quota_id,
             },
         );
@@ -237,13 +241,18 @@ impl State {
     }
 
     /// Decrement refcount; free the entry and refund bytes to its
-    /// `origin_quota` at refcount → 0.
+    /// `origin_quota` at refcount transitioning from positive to 0.
+    /// No-op if the entry was already orphan (refcount=0) — orphans
+    /// are entries that haven't been installed in any σ slot yet.
     pub fn drop_file_refcount(&mut self, id: FileId) {
         let entry = match self.data_blobs.get_mut(&id) {
             Some(e) => e,
             None => return,
         };
-        entry.refcount = entry.refcount.saturating_sub(1);
+        if entry.refcount == 0 {
+            return;
+        }
+        entry.refcount -= 1;
         if entry.refcount == 0 {
             let origin = entry.origin_quota;
             let bytes = entry.content.len() as u64;
@@ -257,14 +266,17 @@ impl State {
     // -------------------------------------------------------------
 
     /// Hash `blob` into a `CodeId`; insert into `state.code_blobs` if
-    /// new (debiting `quota_id` for `blob.len()` bytes), or bump the
-    /// refcount of the existing entry if the hash already exists.
-    /// Returns `None` if a new entry is needed and the quota has
-    /// insufficient balance.
+    /// new (debiting `quota_id`), otherwise return the existing id
+    /// without modifying refcount (callers bump explicitly when
+    /// installing in σ). Returns `None` if a new entry is needed and
+    /// the quota has insufficient balance.
+    ///
+    /// New entries start at refcount=0 — same orphan semantics as
+    /// `allocate_file`. The σ-side install (`foreign_cnode::set` or
+    /// genesis's direct `bump_code_refcount`) bumps to 1.
     pub fn intern_code(&mut self, blob: Vec<u8>, quota_id: QuotaId) -> Option<CodeId> {
         let id = CodeId(crate::crypto::hash(&blob).0);
-        if let Some(e) = self.code_blobs.get_mut(&id) {
-            e.refcount = e.refcount.saturating_add(1);
+        if self.code_blobs.contains_key(&id) {
             return Some(id);
         }
         let bytes = blob.len() as u64;
@@ -275,7 +287,7 @@ impl State {
             id,
             CodeEntry {
                 blob: Arc::new(blob),
-                refcount: 1,
+                refcount: 0,
                 origin_quota: quota_id,
             },
         );
@@ -289,13 +301,17 @@ impl State {
     }
 
     /// Decrement refcount; free the entry and refund bytes to its
-    /// `origin_quota` at refcount → 0.
+    /// `origin_quota` at refcount transitioning from positive to 0.
+    /// No-op for orphan entries (refcount=0).
     pub fn drop_code_refcount(&mut self, id: CodeId) {
         let entry = match self.code_blobs.get_mut(&id) {
             Some(e) => e,
             None => return,
         };
-        entry.refcount = entry.refcount.saturating_sub(1);
+        if entry.refcount == 0 {
+            return;
+        }
+        entry.refcount -= 1;
         if entry.refcount == 0 {
             let origin = entry.origin_quota;
             let bytes = entry.blob.len() as u64;

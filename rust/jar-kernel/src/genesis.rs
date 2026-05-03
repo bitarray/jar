@@ -117,6 +117,11 @@ impl GenesisBuilder {
 /// `state.code_blobs` (debiting `quota_id`), build an Image holding
 /// the CodeCap at `DEFAULT_INIT_CAP_SLOT`, and register the image in
 /// `state.images`. Returns the new ImageId.
+///
+/// Bumps the code refcount once for the σ-resident `RegCap::Code`
+/// entry installed in the Image's slot. (Genesis writes σ slots
+/// directly, bypassing `foreign_cnode::set`, so the refcount bump
+/// is explicit.)
 fn register_image_for_blob(state: &mut State, jar_blob: &[u8], quota_id: QuotaId) -> ImageId {
     let parsed =
         javm::program::parse_blob(jar_blob).expect("genesis blob is a well-formed JAR blob");
@@ -130,6 +135,7 @@ fn register_image_for_blob(state: &mut State, jar_blob: &[u8], quota_id: QuotaId
     let code_id = state
         .intern_code(code_sub_blob, quota_id)
         .expect("genesis quota covers code blob");
+    state.bump_code_refcount(code_id);
 
     let mut image = Image {
         slots: crate::cap::CNode::default(),

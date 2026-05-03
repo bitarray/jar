@@ -49,6 +49,8 @@ pub fn build(validators: &[KeyId], accounts: &[(KeyId, u64)]) -> State {
     let code_id = state
         .intern_code(code_sub_blob, genesis_quota)
         .expect("intern simple-chain code");
+    // Image holds 1 σ-resident reference to this code blob.
+    state.bump_code_refcount(code_id);
 
     // Build the Image: code at slot 64, manifest-derived data
     // file references at their declared slots (stack, ro, rw, heap).
@@ -76,6 +78,8 @@ pub fn build(validators: &[KeyId], accounts: &[(KeyId, u64)]) -> State {
         let file_id = state
             .allocate_file(initial, entry.page_count, genesis_quota)
             .expect("genesis quota covers manifest data caps");
+        // Image holds 1 σ-resident reference to this file.
+        state.bump_file_refcount(file_id);
         image.slots.set(
             entry.cap_index,
             Some(RegCap::File(FileCap {
@@ -101,6 +105,8 @@ pub fn build(validators: &[KeyId], accounts: &[(KeyId, u64)]) -> State {
     let map_file_id = state
         .allocate_file(map, 1, genesis_quota)
         .expect("genesis quota covers account-map");
+    // Vault.slots[ACCOUNT_MAP_SLOT] holds 1 σ-resident reference.
+    state.bump_file_refcount(map_file_id);
 
     let mut vault = Vault::new(image_id);
     vault.slots.set(

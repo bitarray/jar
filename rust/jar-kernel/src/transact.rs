@@ -146,10 +146,13 @@ fn run_one<H: Hardware>(
         };
         drive_invocation(&mut vm, &mut host)?
     };
-    // Persistence is now guest-driven: the chain author writes to
-    // σ via foreign-frame MGMT_COPY through the home VaultRef
-    // before halting. The kernel does not auto-snapshot DataCap
-    // pages back into σ.
+    // Persistence is guest-driven: the chain author writes to σ
+    // via foreign-frame MGMT_COPY through the home VaultRef before
+    // halting. The kernel doesn't auto-snapshot DataCap pages.
+    //
+    // Refcount accounting: registry refcounts track σ slots only.
+    // Frame caps are "lookup handles" — they don't bump σ refcount.
+    // No teardown sweep needed.
     Ok(result)
 }
 
