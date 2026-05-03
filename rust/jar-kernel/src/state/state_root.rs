@@ -15,11 +15,25 @@ pub fn state_root(state: &State) -> Hash {
     let mut buf = Vec::with_capacity(4096);
 
     push_u64(&mut buf, state.id_counters.next_vault_id);
+    push_u64(&mut buf, state.id_counters.next_image_id);
     push_u64(&mut buf, state.chain_index);
     push_u64(&mut buf, state.validators.len() as u64);
     for k in &state.validators {
         push_u64(&mut buf, k.0.len() as u64);
         buf.extend_from_slice(&k.0);
+    }
+
+    push_u64(&mut buf, state.images.len() as u64);
+    for (iid, image) in &state.images {
+        push_u64(&mut buf, iid.0);
+        buf.push(image.init_cap);
+        for (i, slot) in image.slots.slots.iter().enumerate() {
+            buf.push(i as u8);
+            match slot {
+                None => buf.push(0),
+                Some(cap) => encode_vault_cap(&mut buf, cap),
+            }
+        }
     }
 
     push_u64(&mut buf, state.transact_endpoints.len() as u64);
@@ -79,7 +93,16 @@ fn encode_vault_cap(buf: &mut Vec<u8>, cap: &RegCap) {
             push_u64(buf, dbg.len() as u64);
             buf.extend_from_slice(dbg.as_bytes());
         }
+        RegCap::ImageRef(ir) => {
+            buf.push(5);
+            push_u64(buf, ir.image_id.0);
+            buf.push(image_ref_rights_byte(&ir.rights));
+        }
     }
+}
+
+fn image_ref_rights_byte(r: &crate::cap::ImageRefRights) -> u8 {
+    (r.spawn as u8) | ((r.introspect as u8) << 1) | ((r.derive as u8) << 2)
 }
 
 fn push_u64(buf: &mut Vec<u8>, x: u64) {

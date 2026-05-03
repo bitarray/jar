@@ -22,7 +22,7 @@
 
 use crate::cap::{
     AttestationAggregateCap, AttestationCap, AttestationScopeCap, CallerKernelCap, CallerVaultCap,
-    ResourceCap, SelfCap, VaultRefCap, VaultRights,
+    ImageRefCap, ResourceCap, SelfCap, VaultRefCap, VaultRights,
 };
 use crate::types::VaultId;
 use javm::cap::ProtocolCap as ProtocolCapT;
@@ -76,6 +76,11 @@ pub enum ProtocolCap {
     /// A Resource cap projected from `vault.slots`. Pure value — no
     /// CapId since Resource caps no longer go through cap_registry.
     Resource(ResourceCap),
+
+    /// A persistent reference to an `Image` in `σ.images`. CALL on
+    /// this cap (when wired) spawns a sub-VM by cloning the
+    /// referenced Image into a fresh Frame.
+    ImageRef(ImageRefCap),
 
     // ---- Frame-only kernel-injected context kinds ----
     //

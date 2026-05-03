@@ -49,11 +49,14 @@ pub(crate) fn slot_set(state: &mut State, vault: VaultId, slot: u8, value: Optio
 
 /// Translate a `RegCap` into the Frame cap-table representation.
 /// Returns `None` for kinds that don't have a `ProtocolCap` variant
-/// (Code / Data are container-bound).
+/// (Code / Data are container-bound; Stage 6 lifts the Data
+/// restriction by routing through `InvocationHost::clone`'s vm
+/// access for ephemeral allocation).
 pub fn vault_cap_to_frame(cap: &RegCap) -> Option<Cap> {
     match cap {
         RegCap::VaultRef(vr) => Some(Cap::Protocol(ProtocolCap::VaultRef(*vr))),
         RegCap::Resource(r) => Some(Cap::Protocol(ProtocolCap::Resource(r.clone()))),
+        RegCap::ImageRef(ir) => Some(Cap::Protocol(ProtocolCap::ImageRef(*ir))),
         RegCap::Code(_) | RegCap::Data(_) => None,
     }
 }
@@ -64,6 +67,7 @@ pub fn frame_to_vault_cap(cap: &Cap) -> Option<RegCap> {
     match cap {
         Cap::Protocol(ProtocolCap::VaultRef(vr)) => Some(RegCap::VaultRef(*vr)),
         Cap::Protocol(ProtocolCap::Resource(r)) => Some(RegCap::Resource(r.clone())),
+        Cap::Protocol(ProtocolCap::ImageRef(ir)) => Some(RegCap::ImageRef(*ir)),
         _ => None,
     }
 }

@@ -157,6 +157,7 @@ fn translate_vault_cap(
             Ok(Cap::Data(data_cap))
         }
         RegCap::Resource(r) => Ok(Cap::Protocol(ProtocolCap::Resource(r.clone()))),
+        RegCap::ImageRef(ir) => Ok(Cap::Protocol(ProtocolCap::ImageRef(*ir))),
     }
 }
 

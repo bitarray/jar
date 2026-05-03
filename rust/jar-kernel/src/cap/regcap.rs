@@ -37,6 +37,65 @@ pub struct EventEndpointCap {
     pub memory_budget: u32,
 }
 
+/// Identity of an `Image` registered in `σ.images`. Allocated
+/// monotonically by the kernel.
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
+pub struct ImageId(pub u64);
+
+/// ImageRef rights — what the holder of an `ImageRefCap` may do
+/// with the referenced Image. Mirrors `VaultRights` / `FrameRefRights`
+/// in shape.
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
+pub struct ImageRefRights {
+    /// CALL on the cap spawns a sub-VM by cloning the referenced
+    /// Image into a fresh Frame.
+    pub spawn: bool,
+    /// Read the Image's slot metadata (cap kinds + page counts).
+    pub introspect: bool,
+    /// Derive a more narrowly-righted ImageRef pointing at the same
+    /// Image.
+    pub derive: bool,
+}
+
+impl ImageRefRights {
+    pub const ALL: ImageRefRights = ImageRefRights {
+        spawn: true,
+        introspect: true,
+        derive: true,
+    };
+    pub const SPAWN_ONLY: ImageRefRights = ImageRefRights {
+        spawn: true,
+        introspect: false,
+        derive: false,
+    };
+}
+
+/// Persistent reference to an Image in `σ.images`. CALL on this cap
+/// spawns a sub-VM by cloning the referenced Image into a fresh
+/// Frame (layer 2 of the call(Code)/call(Image)/call(Vault) stack).
+/// Today the runtime spawn path is not wired — the σ shape is
+/// established for v1; guest-callable spawn lands in a follow-up.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct ImageRefCap {
+    pub image_id: ImageId,
+    pub rights: ImageRefRights,
+}
+
+/// The program template — a snapshot of what a Frame's CapTable
+/// should look like at vault_init. Lives in `σ.images`, identified by
+/// `ImageId`, shared via `Arc` across vaults running the same
+/// program.
+///
+/// Frame init clones this: walk `slots`, translate each `RegCap`
+/// into a fresh ephemeral `Cap` in the new VM's CapTable.
+/// `init_cap` names the slot whose `RegCap::Code` is the entry
+/// program.
+#[derive(Clone, Eq, PartialEq, Debug, Default)]
+pub struct Image {
+    pub slots: CNode,
+    pub init_cap: u8,
+}
+
 /// Resource cap (governance handle: allocate Vault, set quota, etc.).
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct ResourceCap(pub ResourceKind);
@@ -162,6 +221,7 @@ pub enum RegCap {
     VaultRef(VaultRefCap),
     Code(CodeCap),
     Data(DataCap),
+    ImageRef(ImageRefCap),
     Resource(ResourceCap),
 }
 

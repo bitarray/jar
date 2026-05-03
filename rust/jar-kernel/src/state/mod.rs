@@ -11,7 +11,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::types::{CNode, EventEndpointCap, KResult, KernelError, KeyId, VaultId};
+use crate::cap::Image;
+use crate::types::{CNode, EventEndpointCap, ImageId, KResult, KernelError, KeyId, VaultId};
 
 pub mod state_root;
 
@@ -34,17 +35,22 @@ impl Vault {
     }
 }
 
-/// Monotonic id counters maintained by the kernel directly. After
-/// CapId removal, only VaultId is allocated by the kernel.
+/// Monotonic id counters maintained by the kernel directly.
 #[derive(Clone, Eq, PartialEq, Debug, Default)]
 pub struct IdCounters {
     pub next_vault_id: u64,
+    pub next_image_id: u64,
 }
 
 /// σ — the chain state.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct State {
     pub vaults: BTreeMap<VaultId, Arc<Vault>>,
+    /// Image registry. Each Image is a program template referenced by
+    /// `ImageId` from `RegCap::ImageRef` and (eventually) from
+    /// `Vault.image_id`. Shared via `Arc` to deduplicate across vaults
+    /// running the same program.
+    pub images: BTreeMap<ImageId, Arc<Image>>,
     /// Inline EventEndpointCaps for on-chain endpoints (apply_block).
     /// Slot order = apply_block execution order. Mix of event-receiving
     /// and Schedule (kernel-fired) endpoints.
@@ -68,12 +74,20 @@ impl State {
     pub fn empty() -> Self {
         State {
             vaults: BTreeMap::new(),
+            images: BTreeMap::new(),
             transact_endpoints: Vec::new(),
             dispatch_endpoints: Vec::new(),
             validators: Vec::new(),
             chain_index: 0,
             id_counters: IdCounters::default(),
         }
+    }
+
+    /// Allocate the next monotonic ImageId.
+    pub fn next_image_id(&mut self) -> ImageId {
+        let id = self.id_counters.next_image_id;
+        self.id_counters.next_image_id += 1;
+        ImageId(id)
     }
 
     /// Return the expected proposer KeyId for the *next* block (the one
