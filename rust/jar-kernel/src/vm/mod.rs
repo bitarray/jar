@@ -219,6 +219,7 @@ impl<H: Hardware> ProtocolCapHost<ProtocolCap> for InvocationHost<'_, H> {
         vault: VaultId,
         slot: u8,
         rights: crate::cap::VaultRights,
+        _vm: &mut Vm,
     ) -> Option<Cap<ProtocolCap>> {
         foreign_cnode::take(self.state, vault, slot, rights)
     }
@@ -229,6 +230,7 @@ impl<H: Hardware> ProtocolCapHost<ProtocolCap> for InvocationHost<'_, H> {
         slot: u8,
         rights: crate::cap::VaultRights,
         cap: Cap<ProtocolCap>,
+        _vm: &mut Vm,
     ) -> Result<(), Cap<ProtocolCap>> {
         foreign_cnode::set(self.state, vault, slot, rights, cap)
     }
@@ -238,6 +240,7 @@ impl<H: Hardware> ProtocolCapHost<ProtocolCap> for InvocationHost<'_, H> {
         vault: VaultId,
         slot: u8,
         rights: crate::cap::VaultRights,
+        _vm: &mut Vm,
     ) -> Option<Cap<ProtocolCap>> {
         foreign_cnode::clone(self.state, vault, slot, rights)
     }

@@ -1083,7 +1083,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
         rights: P::FinalStepRights,
     ) -> Option<Cap<P>> {
         match frame {
-            FrameId::Foreign(id) => host.take(id, slot, rights),
+            FrameId::Foreign(id) => host.take(id, slot, rights, self),
             _ => self.frame_table_mut(frame).and_then(|t| t.take(slot)),
         }
     }
@@ -1098,7 +1098,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
         cap: Cap<P>,
     ) -> Result<(), Cap<P>> {
         match frame {
-            FrameId::Foreign(id) => host.set(id, slot, rights, cap),
+            FrameId::Foreign(id) => host.set(id, slot, rights, cap, self),
             _ => match self.frame_table_mut(frame) {
                 Some(t) => {
                     t.set(slot, cap);
@@ -1119,7 +1119,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
         rights: P::FinalStepRights,
     ) -> Option<Cap<P>> {
         match frame {
-            FrameId::Foreign(id) => host.clone(id, slot, rights),
+            FrameId::Foreign(id) => host.clone(id, slot, rights, self),
             _ => self
                 .frame_table(frame)
                 .and_then(|t| t.get(slot))

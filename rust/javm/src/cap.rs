@@ -579,32 +579,48 @@ pub trait ProtocolCapHost<P: ProtocolCap> {
     /// Take the cap at `(id, slot)`. Empty slots return `None`. On
     /// `Some(_)` the host must have removed the cap from its frame
     /// (and updated any registry bookkeeping).
+    ///
+    /// `vm` provides access to the active VM's `untyped` + `backing`
+    /// in case the host needs to *materialize* a fresh ephemeral cap
+    /// (e.g. allocate a `Cap::Data` whose pages are byte-copied from
+    /// σ-resident DataCap content).
     fn take(
         &mut self,
         id: P::ForeignFrameId,
         slot: u8,
         rights: P::FinalStepRights,
+        vm: &mut crate::kernel::InvocationKernel<P>,
     ) -> Option<Cap<P>>;
 
     /// Place `cap` at `(id, slot)`. Returns `Err(cap)` if the host
     /// rejects placement (slot occupied, pinning violation, missing
     /// rights, non-persistable cap shape) — javm uses the returned
     /// cap to roll back the source slot.
+    ///
+    /// `vm` provides access to active-VM resources in case the host
+    /// needs to *consume* an ephemeral cap (e.g. read the post-
+    /// execution pages of a `Cap::Data` and persist them as σ-resident
+    /// DataCap content).
     fn set(
         &mut self,
         id: P::ForeignFrameId,
         slot: u8,
         rights: P::FinalStepRights,
         cap: Cap<P>,
+        vm: &mut crate::kernel::InvocationKernel<P>,
     ) -> Result<(), Cap<P>>;
 
     /// Produce a copy (host-side derive) of the cap at `(id, slot)`.
     /// Empty slots / non-copyable caps return `None`.
+    ///
+    /// `vm` provides access to active-VM resources for materializing
+    /// fresh ephemeral caps (DataCap allocation).
     fn clone(
         &mut self,
         id: P::ForeignFrameId,
         slot: u8,
         rights: P::FinalStepRights,
+        vm: &mut crate::kernel::InvocationKernel<P>,
     ) -> Option<Cap<P>>;
 
     /// Drop the cap at `(id, slot)` (host-side revoke). Returns
@@ -636,13 +652,32 @@ where
     fn get(&self, _id: (), _slot: u8) -> Option<Cap<P>> {
         None
     }
-    fn take(&mut self, _id: (), _slot: u8, _rights: ()) -> Option<Cap<P>> {
+    fn take(
+        &mut self,
+        _id: (),
+        _slot: u8,
+        _rights: (),
+        _vm: &mut crate::kernel::InvocationKernel<P>,
+    ) -> Option<Cap<P>> {
         None
     }
-    fn set(&mut self, _id: (), _slot: u8, _rights: (), cap: Cap<P>) -> Result<(), Cap<P>> {
+    fn set(
+        &mut self,
+        _id: (),
+        _slot: u8,
+        _rights: (),
+        cap: Cap<P>,
+        _vm: &mut crate::kernel::InvocationKernel<P>,
+    ) -> Result<(), Cap<P>> {
         Err(cap)
     }
-    fn clone(&mut self, _id: (), _slot: u8, _rights: ()) -> Option<Cap<P>> {
+    fn clone(
+        &mut self,
+        _id: (),
+        _slot: u8,
+        _rights: (),
+        _vm: &mut crate::kernel::InvocationKernel<P>,
+    ) -> Option<Cap<P>> {
         None
     }
     fn drop(&mut self, _id: (), _slot: u8, _rights: ()) -> bool {
