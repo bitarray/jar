@@ -132,46 +132,6 @@ pub fn new_vm_from_vault(
     Ok(vm)
 }
 
-/// After a process invocation halts, walk the home Vault's DataCap
-/// slots and replace each `RegCap::Data` in σ with the post-execution
-/// page contents read from the active VM's cap-table copy.
-///
-/// Only currently-mapped DataCaps are snapshotted; unmapped caps are
-/// left untouched (`vm.read_data_cap` returns `None`). Chain authors
-/// that mutate persistent state must keep the relevant DataCap mapped
-/// across halt — `simple-chain` follows this convention.
-pub fn snapshot_data_caps(vm: &Vm, vault_id: VaultId, state: &mut State) {
-    use std::sync::Arc;
-
-    let arc = match state.vaults.get(&vault_id) {
-        Some(a) => a.clone(),
-        None => return,
-    };
-    let mut new_vault: crate::types::Vault = (*arc).clone();
-    let mut changed = false;
-    for slot in 0u8..=255 {
-        let page_count = match new_vault.slots.get(slot) {
-            Some(crate::cap::RegCap::Data(d)) => d.page_count,
-            _ => continue,
-        };
-        let total_bytes = page_count.saturating_mul(javm::PVM_PAGE_SIZE);
-        let Some(bytes) = vm.read_data_cap(slot, 0, total_bytes) else {
-            continue;
-        };
-        new_vault.slots.set(
-            slot,
-            Some(crate::cap::RegCap::Data(crate::cap::DataCap {
-                content: Arc::new(bytes),
-                page_count,
-            })),
-        );
-        changed = true;
-    }
-    if changed {
-        state.vaults.insert(vault_id, Arc::new(new_vault));
-    }
-}
-
 /// Per-invocation kernel-side host. Implements
 /// `ProtocolCapHost<ProtocolCap>` — javm calls into this for:
 ///

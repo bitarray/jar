@@ -25,9 +25,7 @@ use crate::types::{
     AttestationEntry, Caller, Command, EventEndpointCap, KResult, KernelError, KernelRole,
     ReachEntry, ResultEntry, State, VaultId,
 };
-use crate::vm::{
-    InvocationHost, InvocationResult, drive_invocation, new_vm_from_vault, snapshot_data_caps,
-};
+use crate::vm::{InvocationHost, InvocationResult, drive_invocation, new_vm_from_vault};
 
 /// One fresh `Vault.initialize` against a clone of σ for the verify
 /// phase. Returns the invocation result; the caller decides whether to
@@ -148,12 +146,10 @@ fn run_one<H: Hardware>(
         };
         drive_invocation(&mut vm, &mut host)?
     };
-    // Process invocations may mutate persistent DataCaps; snapshot the
-    // post-execution page contents back into σ. Verify is ro-σ — no
-    // snapshot. A faulting process leaves σ unchanged.
-    if matches!(role, KernelRole::Process) && result.fault.is_none() {
-        snapshot_data_caps(&vm, endpoint.vault_id, state);
-    }
+    // Persistence is now guest-driven: the chain author writes to
+    // σ via foreign-frame MGMT_COPY through the home VaultRef
+    // before halting. The kernel does not auto-snapshot DataCap
+    // pages back into σ.
     Ok(result)
 }
 
