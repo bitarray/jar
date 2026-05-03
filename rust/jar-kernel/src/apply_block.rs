@@ -87,6 +87,40 @@ pub fn apply_block<H: Hardware>(
         ));
     }
 
+    // PoA proposer attestation check. Skipped for chains without
+    // validators registered (legacy halt-blob fixtures).
+    if let Some(expected) = state_in.expected_proposer() {
+        let pa = block.body.proposer_attestation.clone();
+        if pa.key != expected {
+            return Ok(panicked(
+                state_in,
+                block,
+                format!(
+                    "proposer attestation key mismatch: got {:?} expected {:?}",
+                    pa.key, expected
+                ),
+                prior_state_root,
+            ));
+        }
+        let signing_hash = crate::crypto::block_hash_for_signing(block_in);
+        if pa.blob_hash != signing_hash {
+            return Ok(panicked(
+                state_in,
+                block,
+                "proposer attestation blob_hash does not match signed block hash".into(),
+                prior_state_root,
+            ));
+        }
+        if !crate::crypto::verify(&pa.key, signing_hash.as_ref(), &pa.signature) {
+            return Ok(panicked(
+                state_in,
+                block,
+                "proposer attestation signature failed verification".into(),
+                prior_state_root,
+            ));
+        }
+    }
+
     let mut state = state_in.clone();
     let mut commands: Vec<Command> = Vec::new();
 
@@ -220,6 +254,7 @@ pub fn apply_block<H: Hardware>(
         ));
     }
 
+    state.chain_index = state.chain_index.saturating_add(1);
     let new_root = state_root::state_root(&state);
     Ok(ApplyBlockOutcome {
         state_next: state,

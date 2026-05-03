@@ -47,6 +47,14 @@ pub struct Body {
     /// Proposer-ordered list of body events targeting transact endpoints
     /// in `σ.transact_endpoints`.
     pub events: Vec<BodyEvent>,
+    /// PoA proposer attestation. The proposer signs the block hash
+    /// computed *with this field zeroed* (see
+    /// `crypto::block_hash_for_signing`); verifiers re-derive and
+    /// check the signature. `key` must equal
+    /// `state.validators[chain_index % validators.len()]` if the chain
+    /// has any validators registered. Empty (`AttestationEntry::default`)
+    /// for chains without PoA.
+    pub proposer_attestation: AttestationEntry,
     /// Block-level cumulative attestation trace consumed across all
     /// event-receiving slot verifies in slot order.
     pub attestation_trace: Vec<AttestationEntry>,

@@ -33,7 +33,10 @@
 //! The runtime creates one `Kernel<H>` per node.
 
 use crate::pool::CycleRoll;
-use crate::types::{Block, BlockHash, Body, BodyEvent, Hash, KResult, KernelError, State, VaultId};
+use crate::types::{
+    AttestationEntry, Block, BlockHash, Body, BodyEvent, Hash, KResult, KernelError, KeyId, State,
+    VaultId,
+};
 
 use crate::apply_block::{ApplyBlockOutcome, BlockOutcome, apply_block};
 use crate::crypto;
@@ -179,16 +182,29 @@ impl<H: Hardware> Kernel<H> {
 
     /// Build or verify a block.
     ///
-    /// - `block = None` (proposer mode): drain the in-memory dispatch list
-    ///   into a body, run apply_block on it, return the constructed block.
-    /// - `block = Some(b)` (verifier mode): apply `b` against `last_state`
-    ///   with parent linkage to `last_block_hash`. Returns `b` unchanged
-    ///   on success.
+    /// - `block = None` (proposer mode): assemble a body from the just-
+    ///   rolled cycle pool, optionally sign it as the round-robin
+    ///   validator if `validator_key = Some(k)`, and run `apply_block`
+    ///   on it.
+    /// - `block = Some(b)` (verifier mode): apply `b` against
+    ///   `last_state` with parent linkage to `last_block_hash`. Returns
+    ///   `b` unchanged on success. `validator_key` is ignored.
     ///
-    /// On success, advances `last_state` / `last_block_hash` and tells
-    /// hardware to commit the new state. Emits a `Score` command (placeholder
-    /// score = 1) so hardware knows about the new block.
-    pub fn advance(&mut self, block: Option<Block>) -> KResult<AdvanceOutcome> {
+    /// PoA contract: when `state.validators` is non-empty, the proposer
+    /// must supply the key matching `state.expected_proposer()` and the
+    /// kernel signs the body's `block_hash_for_signing`. Verifiers
+    /// re-derive and check inside `apply_block`. Empty-validator chains
+    /// pass `validator_key = None` and skip the proposer-attestation
+    /// check entirely (legacy halt-blob fixtures).
+    ///
+    /// On accept, advances `last_state` / `last_block_hash`, commits to
+    /// hardware, fires `Hardware::finalize` (instant finality), and
+    /// emits a `Score` for fork-tree input.
+    pub fn advance(
+        &mut self,
+        block: Option<Block>,
+        validator_key: Option<KeyId>,
+    ) -> KResult<AdvanceOutcome> {
         // Cycle boundary: drain the just-completed cycle's winners and
         // lift collision-deferred entries into the next cycle's pool.
         // Verifiers run roll_cycle for the same reason — to keep their
@@ -198,10 +214,37 @@ impl<H: Hardware> Kernel<H> {
         let block_in = match block {
             None => {
                 let body = assemble_body(&self.last_state, &roll)?;
-                Block {
+                let mut candidate = Block {
                     parent: self.last_block_hash,
                     body,
+                };
+                // PoA: if the chain has validators, the proposer must
+                // supply the key that the round-robin schedule expects,
+                // and we sign the canonical-without-attestation hash.
+                if let Some(expected) = self.last_state.expected_proposer() {
+                    let key = validator_key.clone().ok_or_else(|| {
+                        KernelError::Internal(
+                            "proposer mode requires validator_key on chains with validators".into(),
+                        )
+                    })?;
+                    if key != expected {
+                        return Err(KernelError::Internal(format!(
+                            "validator_key {:?} != expected proposer {:?}",
+                            key, expected
+                        )));
+                    }
+                    let signing_hash = crypto::block_hash_for_signing(&candidate);
+                    let signature = self
+                        .hw
+                        .sign(&key, signing_hash.as_ref())
+                        .map_err(|e| KernelError::Internal(format!("hardware sign: {:?}", e)))?;
+                    candidate.body.proposer_attestation = AttestationEntry {
+                        key,
+                        blob_hash: signing_hash,
+                        signature,
+                    };
                 }
+                candidate
             }
             Some(b) => b,
         };
@@ -230,6 +273,8 @@ impl<H: Hardware> Kernel<H> {
             let block_hash = crypto::block_hash(&block);
             self.hw.commit_state(block_hash, state_next.clone());
             self.hw.score(block_hash, 1);
+            // Instant finality: every accepted block is final.
+            self.hw.finalize(block_hash);
             self.last_state = state_next;
             self.last_block_hash = block_hash;
             Ok(AdvanceOutcome {

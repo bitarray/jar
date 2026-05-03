@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::types::{CNode, EventEndpointCap, KResult, KernelError, VaultId};
+use crate::types::{CNode, EventEndpointCap, KResult, KernelError, KeyId, VaultId};
 
 pub mod state_root;
 
@@ -51,6 +51,13 @@ pub struct State {
     pub transact_endpoints: Vec<EventEndpointCap>,
     /// Inline EventEndpointCaps for off-chain endpoints (per-cycle).
     pub dispatch_endpoints: Vec<EventEndpointCap>,
+    /// PoA validator schedule. Block at `chain_index` is proposed by
+    /// `validators[chain_index % validators.len()]`. Empty for chains
+    /// that don't enforce proposer attestation (legacy fixtures).
+    pub validators: Vec<KeyId>,
+    /// Number of accepted blocks so far. Used to round-robin pick the
+    /// expected proposer; incremented in `apply_block` on accept.
+    pub chain_index: u64,
     pub id_counters: IdCounters,
 }
 
@@ -63,7 +70,20 @@ impl State {
             vaults: BTreeMap::new(),
             transact_endpoints: Vec::new(),
             dispatch_endpoints: Vec::new(),
+            validators: Vec::new(),
+            chain_index: 0,
             id_counters: IdCounters::default(),
+        }
+    }
+
+    /// Return the expected proposer KeyId for the *next* block (the one
+    /// being built or verified now). `None` if no validators are
+    /// registered.
+    pub fn expected_proposer(&self) -> Option<KeyId> {
+        if self.validators.is_empty() {
+            None
+        } else {
+            Some(self.validators[(self.chain_index as usize) % self.validators.len()].clone())
         }
     }
 

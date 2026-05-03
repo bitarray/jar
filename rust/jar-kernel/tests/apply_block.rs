@@ -29,7 +29,7 @@ fn advance_accepts_an_empty_block() {
         parent: BlockHash::ZERO,
         body: Body::default(),
     };
-    let out = k.advance(Some(block)).unwrap();
+    let out = k.advance(Some(block), None).unwrap();
     assert!(matches!(out.block_outcome, BlockOutcome::Accepted));
 }
 
@@ -41,7 +41,7 @@ fn advance_rejects_block_with_wrong_parent() {
         parent: bogus_parent,
         body: Body::default(),
     };
-    let out = k.advance(Some(block)).unwrap();
+    let out = k.advance(Some(block), None).unwrap();
     match out.block_outcome {
         BlockOutcome::Panicked(reason) => assert!(
             reason.contains("parent hash mismatch"),
@@ -69,7 +69,7 @@ fn advance_rejects_event_targeting_unknown_slot() {
         parent: BlockHash::ZERO,
         body,
     };
-    let out = k.advance(Some(block)).unwrap();
+    let out = k.advance(Some(block), None).unwrap();
     match out.block_outcome {
         BlockOutcome::Panicked(reason) => assert!(
             reason.contains("body events targeting unknown slots"),
@@ -95,7 +95,7 @@ fn advance_rejects_event_with_malformed_target_path() {
         parent: BlockHash::ZERO,
         body,
     };
-    let out = k.advance(Some(block)).unwrap();
+    let out = k.advance(Some(block), None).unwrap();
     match out.block_outcome {
         BlockOutcome::Panicked(reason) => assert!(
             reason.contains("malformed target_path"),
@@ -123,7 +123,7 @@ fn advance_accepts_event_targeting_known_slot() {
         parent: BlockHash::ZERO,
         body,
     };
-    let out = k.advance(Some(block)).unwrap();
+    let out = k.advance(Some(block), None).unwrap();
     assert!(matches!(out.block_outcome, BlockOutcome::Accepted));
 }
 
@@ -148,7 +148,7 @@ fn advance_rejects_duplicate_schedule_traces_for_same_slot() {
         parent: BlockHash::ZERO,
         body,
     };
-    let out = k.advance(Some(block)).unwrap();
+    let out = k.advance(Some(block), None).unwrap();
     match out.block_outcome {
         BlockOutcome::Panicked(reason) => assert!(
             reason.contains("duplicate schedule_attestation_traces"),
@@ -161,7 +161,7 @@ fn advance_rejects_duplicate_schedule_traces_for_same_slot() {
 #[test]
 fn proposer_advance_with_empty_pool_produces_empty_body() {
     let mut k = build_kernel();
-    let out = k.advance(None).unwrap();
+    let out = k.advance(None, None).unwrap();
     assert!(matches!(out.block_outcome, BlockOutcome::Accepted));
     assert!(out.block.body.events.is_empty());
 }

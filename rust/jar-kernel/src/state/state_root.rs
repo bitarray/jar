@@ -15,6 +15,12 @@ pub fn state_root(state: &State) -> Hash {
     let mut buf = Vec::with_capacity(4096);
 
     push_u64(&mut buf, state.id_counters.next_vault_id);
+    push_u64(&mut buf, state.chain_index);
+    push_u64(&mut buf, state.validators.len() as u64);
+    for k in &state.validators {
+        push_u64(&mut buf, k.0.len() as u64);
+        buf.extend_from_slice(&k.0);
+    }
 
     push_u64(&mut buf, state.transact_endpoints.len() as u64);
     for ep in &state.transact_endpoints {

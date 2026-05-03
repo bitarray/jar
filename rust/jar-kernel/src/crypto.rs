@@ -117,21 +117,48 @@ pub fn aggregate_verify(_key: &KeyId, _msg: &[u8]) -> bool {
 // Block hashing
 // -----------------------------------------------------------------------------
 
-/// Canonical hash of a `Block`. Used by the chain's block-sealing
-/// AttestationCap (Sealing scope) and by hardware to index blocks in its
-/// fork tree / aux store.
-///
-/// Encoding: parent hash bytes followed by the body's canonical encoding.
-/// Body encoding mirrors `state_root::state_root`'s shape — flat,
-/// length-prefixed, BTreeMap-iterated. Stub-but-canonical.
+/// Canonical hash of a `Block`. Includes the proposer attestation
+/// field. Used by hardware to index blocks in its fork tree / aux
+/// store and as the canonical block identity once sealed.
 pub fn block_hash(block: &Block) -> Hash {
     let mut buf = Vec::with_capacity(4096);
     buf.extend_from_slice(block.parent.as_ref());
-    encode_body(&mut buf, &block.body);
+    encode_body(
+        &mut buf,
+        &block.body,
+        /* include_proposer_attest */ true,
+    );
     hash(&buf)
 }
 
-fn encode_body(buf: &mut Vec<u8>, body: &crate::types::Body) {
+/// The hash a proposer signs with their validator key. Same shape as
+/// `block_hash` but with the `proposer_attestation` field zeroed —
+/// otherwise the signature would have to commit to itself. Verifiers
+/// re-derive this with `body.proposer_attestation` cleared, then
+/// `crypto::verify(attestation.key, msg, attestation.signature)`.
+pub fn block_hash_for_signing(block: &Block) -> Hash {
+    let mut buf = Vec::with_capacity(4096);
+    buf.extend_from_slice(block.parent.as_ref());
+    encode_body(
+        &mut buf,
+        &block.body,
+        /* include_proposer_attest */ false,
+    );
+    hash(&buf)
+}
+
+fn encode_body(buf: &mut Vec<u8>, body: &crate::types::Body, include_proposer_attest: bool) {
+    if include_proposer_attest {
+        let a = &body.proposer_attestation;
+        push_bytes(buf, &a.key.0);
+        buf.extend_from_slice(a.blob_hash.as_ref());
+        push_bytes(buf, &a.signature.0);
+    } else {
+        // Proposer-attestation slot zeroed for the signing-hash variant.
+        push_bytes(buf, &[]);
+        buf.extend_from_slice(Hash::ZERO.as_ref());
+        push_bytes(buf, &[]);
+    }
     push_u64(buf, body.events.len() as u64);
     for ev in &body.events {
         push_bytes(buf, &ev.target_path);

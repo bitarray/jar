@@ -77,7 +77,7 @@ fn run_testnet(num_nodes: u32, num_slots: u32) {
         // Proposer builds the block.
         let proposed = {
             let proposer = &mut nodes[proposer_idx];
-            let out = proposer.kernel.advance(None).expect("propose ok");
+            let out = proposer.kernel.advance(None, None).expect("propose ok");
             match &out.block_outcome {
                 BlockOutcome::Accepted => {
                     tracing::info!(
@@ -106,7 +106,7 @@ fn run_testnet(num_nodes: u32, num_slots: u32) {
             }
             let ver = node
                 .kernel
-                .advance(Some(proposed.block.clone()))
+                .advance(Some(proposed.block.clone()), None)
                 .expect("verifier advance ok");
             assert!(matches!(ver.block_outcome, BlockOutcome::Accepted));
             assert_eq!(
