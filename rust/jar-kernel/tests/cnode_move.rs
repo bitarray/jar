@@ -99,7 +99,7 @@ fn set_places_resource_into_empty_slot() {
     let (mut state, vault_id) = empty_vault();
     let r = ResourceCap(ResourceKind::CreateVault { quota_pages: 16 });
     let cap = Cap::Protocol(ProtocolCap::Resource(r.clone()));
-    foreign_cnode::set(&mut state, vault_id, 8, VaultRights::ALL, cap)
+    foreign_cnode::set(&mut state, vault_id, 8, VaultRights::ALL, cap, None)
         .expect("set into empty slot 8");
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(8),
@@ -115,7 +115,8 @@ fn set_places_vault_ref_inline() {
         rights: VaultRights::READ,
     };
     let cap = Cap::Protocol(ProtocolCap::VaultRef(vr));
-    foreign_cnode::set(&mut state, vault_id, 0, VaultRights::ALL, cap).expect("set vault_ref");
+    foreign_cnode::set(&mut state, vault_id, 0, VaultRights::ALL, cap, None)
+        .expect("set vault_ref");
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(0),
         Some(&RegCap::VaultRef(vr))
@@ -128,7 +129,9 @@ fn set_rejects_frame_only_caps() {
     let ephemeral = Cap::Protocol(ProtocolCap::SelfId(jar_kernel::cap::SelfCap {
         vault_id: VaultId(0),
     }));
-    assert!(foreign_cnode::set(&mut state, vault_id, 0, VaultRights::ALL, ephemeral).is_err());
+    assert!(
+        foreign_cnode::set(&mut state, vault_id, 0, VaultRights::ALL, ephemeral, None).is_err()
+    );
 }
 
 #[test]
@@ -136,14 +139,14 @@ fn set_requires_grant_right() {
     let (mut state, vault_id) = empty_vault();
     let r = ResourceCap(ResourceKind::CreateVault { quota_pages: 16 });
     let cap = Cap::Protocol(ProtocolCap::Resource(r));
-    assert!(foreign_cnode::set(&mut state, vault_id, 0, VaultRights::READ, cap).is_err());
+    assert!(foreign_cnode::set(&mut state, vault_id, 0, VaultRights::READ, cap, None).is_err());
 }
 
 #[test]
 fn clone_resource_produces_independent_copy() {
     let (mut state, vault_id) = empty_vault();
     let r = place_resource(&mut state, vault_id, 7);
-    let cap = foreign_cnode::clone(&state, vault_id, 7, VaultRights::ALL)
+    let cap = foreign_cnode::clone(&state, vault_id, 7, VaultRights::ALL, None)
         .expect("clone with derive right");
     match cap {
         Cap::Protocol(ProtocolCap::Resource(out)) => assert_eq!(out, r),
@@ -163,7 +166,8 @@ fn clone_vault_ref_produces_inline_value() {
         rights: VaultRights::ALL,
     };
     place(&mut state, vault_id, 3, RegCap::VaultRef(vr));
-    let cap = foreign_cnode::clone(&state, vault_id, 3, VaultRights::ALL).expect("clone vault_ref");
+    let cap =
+        foreign_cnode::clone(&state, vault_id, 3, VaultRights::ALL, None).expect("clone vault_ref");
     match cap {
         Cap::Protocol(ProtocolCap::VaultRef(out)) => assert_eq!(out, vr),
         _ => panic!("expected ProtocolCap::VaultRef"),
@@ -178,7 +182,7 @@ fn clone_vault_ref_produces_inline_value() {
 fn clone_requires_derive_right() {
     let (mut state, vault_id) = empty_vault();
     let _ = place_resource(&mut state, vault_id, 7);
-    assert!(foreign_cnode::clone(&state, vault_id, 7, VaultRights::READ).is_none());
+    assert!(foreign_cnode::clone(&state, vault_id, 7, VaultRights::READ, None).is_none());
 }
 
 #[test]
@@ -193,7 +197,7 @@ fn clone_code_cap_returns_none() {
             blob: Arc::new(vec![0; 64]),
         }),
     );
-    assert!(foreign_cnode::clone(&state, vault_id, 7, VaultRights::ALL).is_none());
+    assert!(foreign_cnode::clone(&state, vault_id, 7, VaultRights::ALL, None).is_none());
 }
 
 #[test]

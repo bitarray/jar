@@ -144,6 +144,40 @@ impl BackingStore {
         }
     }
 
+    /// Read `page_count` pages starting at `backing_offset` from the
+    /// backing store into a fresh `Vec<u8>`. Mirrors
+    /// `write_init_data` in reverse: temporary mmap PROT_READ, copy
+    /// out, munmap. Used by jar-kernel's `foreign_cnode::set` to
+    /// persist a `Cap::Data`'s post-execution pages back into σ.
+    pub fn read_pages(&self, backing_offset: u32, page_count: u32) -> Option<Vec<u8>> {
+        if page_count == 0 {
+            return Some(Vec::new());
+        }
+        let offset = backing_offset as libc::off_t * PVM_PAGE_SIZE as libc::off_t;
+        let len = page_count as usize * PVM_PAGE_SIZE as usize;
+        // SAFETY: fd is valid; offset/len are within ftruncate'd range.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                self.fd,
+                offset,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            return None;
+        }
+        let mut out = vec![0u8; len];
+        // SAFETY: ptr is a valid mmap'd region of `len` bytes.
+        unsafe {
+            std::ptr::copy_nonoverlapping(ptr as *const u8, out.as_mut_ptr(), len);
+            libc::munmap(ptr, len);
+        }
+        Some(out)
+    }
+
     /// Write initial data into the backing store at a given page offset.
     ///
     /// This writes directly to the memfd via a temporary mmap, then unmaps.
@@ -246,6 +280,21 @@ impl BackingStore {
     /// No preconditions on non-Linux (function is a no-op).
     pub unsafe fn unmap_pages(_window_base: *mut u8, _base_page: u32, _page_count: u32) -> bool {
         true
+    }
+
+    /// Cross-platform analogue of the Linux `read_pages`: copy
+    /// `page_count` pages starting at `backing_offset` into a
+    /// fresh `Vec<u8>`. Used by jar-kernel's `foreign_cnode::set`.
+    pub fn read_pages(&self, backing_offset: u32, page_count: u32) -> Option<Vec<u8>> {
+        if page_count == 0 {
+            return Some(Vec::new());
+        }
+        let start = backing_offset as usize * PVM_PAGE_SIZE as usize;
+        let len = page_count as usize * PVM_PAGE_SIZE as usize;
+        if start + len > self.data.len() {
+            return None;
+        }
+        Some(self.data[start..start + len].to_vec())
     }
 
     /// Write initial data directly into the pool.

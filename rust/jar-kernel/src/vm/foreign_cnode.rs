@@ -1,27 +1,32 @@
 //! Cap-table host adapter helpers — `vault.slots` ↔ Frame `Cap`
 //! translation and rights-checked slot operations.
 //!
-//! After CapId removal, `vault.slots[N]` holds `RegCap` values
-//! directly. Translation between `RegCap` and the Frame's `Cap`
-//! representation:
+//! `vault.slots[N]` holds `RegCap` values directly. Translation
+//! between `RegCap` and the Frame's `Cap` representation:
 //!
 //! - `RegCap::VaultRef(vr)` ↔ `Cap::Protocol(ProtocolCap::VaultRef(vr))`.
 //! - `RegCap::Resource(r)`  ↔ `Cap::Protocol(ProtocolCap::Resource(r))`.
-//! - `RegCap::Code(_)` / `RegCap::Data(_)` are container-bound:
-//!   they're compiled / mapped at `vault_init` only, never moved
-//!   between Vault and Frame mid-VM. `take` / `clone` on those return
-//!   `None`.
+//! - `RegCap::ImageRef(ir)` ↔ `Cap::Protocol(ProtocolCap::ImageRef(ir))`.
+//! - `RegCap::Code(_)` is container-bound — `clone` / `take` return
+//!   `None`; code never moves between Vault and Frame.
+//! - `RegCap::Data(_)`: `clone` allocates a fresh ephemeral
+//!   `Cap::Data` from the active VM's `untyped` + `backing`,
+//!   byte-copying σ content. `set` reads the post-execution pages
+//!   of an ephemeral `Cap::Data` and persists them into σ.
+//!   `take` is BANNED for Data — MGMT_MOVE across the
+//!   persistent/ephemeral boundary returns `None`. Guests use
+//!   COPY + DROP instead.
 //!
 //! The rights-checked ops (`take` / `set` / `clone` / `drop` /
-//! `is_empty` / `get`) are exposed as free functions. The production
-//! `ProtocolCapHost` impl on [`crate::vm::InvocationHost`] delegates
-//! to them; tests that exercise cap-table semantics in isolation can
-//! call them directly without constructing a full host.
+//! `is_empty` / `get`) are exposed as free functions. The
+//! production `ProtocolCapHost` impl on
+//! [`crate::vm::InvocationHost`] delegates to them.
 
 use std::sync::Arc;
 
 use crate::cap::{Cap, ProtocolCap, RegCap, VaultRights};
-use crate::types::{State, VaultId};
+use crate::types::{DataCap, State, VaultId};
+use crate::vm::Vm;
 
 // =============================================================================
 // Slot accessors (low-level, no rights checks)
@@ -84,11 +89,20 @@ pub fn get(state: &State, vault: VaultId, slot: u8) -> Option<Cap> {
 }
 
 /// `ProtocolCapHost::take` — fetch and clear, gated by `rights.revoke`.
+/// `RegCap::Data` is rejected (returns `None`): MGMT_MOVE across
+/// the persistent/ephemeral boundary is banned. Guests use COPY +
+/// DROP for move-like semantics.
 pub fn take(state: &mut State, vault: VaultId, slot: u8, rights: VaultRights) -> Option<Cap> {
     if !rights.revoke {
         return None;
     }
     let cap = slot_cap(state, vault, slot)?;
+    if matches!(cap, RegCap::Data(_)) {
+        // Data crossings must use clone+drop, not move. The
+        // persistent and ephemeral memory pools are tracked
+        // separately; in-place move would entangle them.
+        return None;
+    }
     let frame_cap = vault_cap_to_frame(&cap)?;
     slot_set(state, vault, slot, None);
     Some(frame_cap)
@@ -96,12 +110,19 @@ pub fn take(state: &mut State, vault: VaultId, slot: u8, rights: VaultRights) ->
 
 /// `ProtocolCapHost::set` — place into an empty slot, gated by
 /// `rights.grant`. Returns `Err(cap)` if the host rejects placement.
+///
+/// For `Cap::Data`, the kernel reads the cap's post-execution
+/// pages from `vm.backing` and persists them as a fresh
+/// `RegCap::Data` σ entry. The ephemeral source slot is left
+/// untouched (Data MOVE-across-boundary is banned; semantically
+/// this is the COPY-into-σ path).
 pub fn set(
     state: &mut State,
     vault: VaultId,
     slot: u8,
     rights: VaultRights,
     cap: Cap,
+    vm: Option<&Vm>,
 ) -> Result<(), Cap> {
     if !rights.grant {
         return Err(cap);
@@ -110,21 +131,71 @@ pub fn set(
         Some(v) if v.slots.get(slot).is_none() => {}
         _ => return Err(cap),
     }
-    let vc = match frame_to_vault_cap(&cap) {
-        Some(v) => v,
-        None => return Err(cap),
+    let vc = match &cap {
+        Cap::Protocol(ProtocolCap::VaultRef(vr)) => RegCap::VaultRef(*vr),
+        Cap::Protocol(ProtocolCap::Resource(r)) => RegCap::Resource(r.clone()),
+        Cap::Protocol(ProtocolCap::ImageRef(ir)) => RegCap::ImageRef(*ir),
+        Cap::Data(d) => {
+            // Read post-execution pages directly from the
+            // BackingStore — works whether or not the cap is
+            // currently mapped in the active VM.
+            let vm = match vm {
+                Some(v) => v,
+                None => return Err(cap),
+            };
+            let bytes = match vm.backing.read_pages(d.backing_offset, d.page_count) {
+                Some(b) => b,
+                None => return Err(cap),
+            };
+            RegCap::Data(DataCap {
+                content: Arc::new(bytes),
+                page_count: d.page_count,
+            })
+        }
+        _ => return Err(cap),
     };
     slot_set(state, vault, slot, Some(vc));
     Ok(())
 }
 
 /// `ProtocolCapHost::clone` — read-only copy, gated by `rights.derive`.
-pub fn clone(state: &State, vault: VaultId, slot: u8, rights: VaultRights) -> Option<Cap> {
+///
+/// For `RegCap::Data`, allocates a fresh ephemeral `Cap::Data`
+/// from the active VM's `untyped` (BareFrame slot
+/// `BARE_FRAME_UNTYPED_SLOT`) + `backing`, byte-copying the σ
+/// content. The σ slot is left intact.
+pub fn clone(
+    state: &State,
+    vault: VaultId,
+    slot: u8,
+    rights: VaultRights,
+    vm: Option<&mut Vm>,
+) -> Option<Cap> {
     if !rights.derive {
         return None;
     }
     let cap = slot_cap(state, vault, slot)?;
-    vault_cap_to_frame(&cap)
+    match cap {
+        RegCap::VaultRef(vr) => Some(Cap::Protocol(ProtocolCap::VaultRef(vr))),
+        RegCap::Resource(r) => Some(Cap::Protocol(ProtocolCap::Resource(r))),
+        RegCap::ImageRef(ir) => Some(Cap::Protocol(ProtocolCap::ImageRef(ir))),
+        RegCap::Code(_) => None,
+        RegCap::Data(d) => {
+            // Allocate a fresh ephemeral DataCap from the active
+            // invocation's BareFrame Untyped + BackingStore.
+            let vm = vm?;
+            let bare_idx = vm.bare_frame_id.index();
+            let bare_table = &mut vm.vm_arena.vm_mut(bare_idx).cap_table;
+            let untyped = match bare_table.get_mut(javm::kernel::BARE_FRAME_UNTYPED_SLOT) {
+                Some(javm::cap::Cap::Untyped(u)) => u,
+                _ => return None,
+            };
+            let data_cap =
+                javm::kernel::allocate_data_cap(&d.content, d.page_count, untyped, &mut vm.backing)
+                    .ok()?;
+            Some(Cap::Data(data_cap))
+        }
+    }
 }
 
 /// `ProtocolCapHost::drop` — clear the slot, gated by `rights.revoke`.

@@ -29,7 +29,8 @@ fn clone_leaves_source_intact_so_drop_is_safe() {
         .insert(vault_id, Arc::new(Vault::new(ImageId(0))));
     let r = place_resource(&mut state, vault_id, 7);
 
-    let _ephemeral = foreign_cnode::clone(&state, vault_id, 7, VaultRights::ALL).expect("clone");
+    let _ephemeral =
+        foreign_cnode::clone(&state, vault_id, 7, VaultRights::ALL, None).expect("clone");
     drop(_ephemeral);
 
     assert_eq!(
@@ -47,7 +48,7 @@ fn manager_pattern_no_commit_no_change() {
         .insert(vault_id, Arc::new(Vault::new(ImageId(0))));
     let r = place_resource(&mut state, vault_id, 0);
 
-    let _ = foreign_cnode::clone(&state, vault_id, 0, VaultRights::ALL).unwrap();
+    let _ = foreign_cnode::clone(&state, vault_id, 0, VaultRights::ALL, None).unwrap();
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(0),
         Some(&RegCap::Resource(r))
