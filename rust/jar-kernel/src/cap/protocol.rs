@@ -66,6 +66,14 @@ pub enum ProtocolCap {
     MintAttestCap,
     /// `setScore(identifier, score)` — verify-only.
     SetScore,
+    /// `open(file_cap_slot, dst_slot)` — process-only. Reads bytes
+    /// from `state.data_blobs[file_id]` and allocates a fresh
+    /// ephemeral `Cap::Data` from the active VM's Untyped + backing.
+    Open,
+    /// `save(data_cap_slot, quota_cap_slot, dst_slot)` — process-only.
+    /// Mints a fresh `FileId` in `state.data_blobs` from a Frame
+    /// `Cap::Data` source, debiting the named StorageQuota.
+    Save,
 
     /// A VaultRef. Inline value (no `CapId`). Same shape whether the
     /// cap originated from a `vault.slots[…]` entry or was kernel-

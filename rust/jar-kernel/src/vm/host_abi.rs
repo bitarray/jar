@@ -66,6 +66,25 @@
 //! - φ[7] = identifier_ptr, φ[8] = identifier_len
 //! - φ[9] = score (u64)
 //! - returns RC in φ[7]
+//!
+//! ### `open(file_cap_slot, dst_slot)` (BareFrame slot 15)
+//! - φ[7] = file_cap_slot — slot in the active VM's MainFrame
+//!   holding `Cap::Protocol(File(FileCap))`.
+//! - φ[8] = dst_slot — slot in the active VM's MainFrame to place
+//!   the resulting `Cap::Data`. Must be empty.
+//! - returns RC in φ[7] (RC_OK on success; RC_BAD_CAP if file_cap_slot
+//!   doesn't hold a FileCap or destination is occupied; RC_QUOTA if
+//!   the active Untyped doesn't cover the file's page count).
+//!
+//! ### `save(data_cap_slot, quota_cap_slot, dst_slot)` (BareFrame slot 16)
+//! - φ[7] = data_cap_slot — slot in the active VM's MainFrame
+//!   holding the source `Cap::Data` (post-execution pages).
+//! - φ[8] = quota_cap_slot — slot holding the
+//!   `Cap::Protocol(StorageQuota(QuotaCap))` that pays for the new file.
+//! - φ[9] = dst_slot — slot to place the resulting
+//!   `Cap::Protocol(File(FileCap))`. Must be empty.
+//! - returns RC in φ[7]. Process role only — read-only contexts
+//!   (verify) get RC_READONLY.
 
 /// BareFrame slot holding the home VaultRef — handle the guest
 /// uses to reach its own `Vault.slots` via foreign-frame ops.
@@ -98,6 +117,21 @@ pub const BARE_SET_SCORE_SLOT: u8 = 13;
 /// BareFrame slot the kernel injects the `AttestationScope` cap
 /// at (verify only).
 pub const BARE_ATTESTATION_SCOPE_SLOT: u8 = 14;
+
+/// BareFrame slot the kernel injects the `Open` host-call selector
+/// at — `host_open(file_cap_slot, dst_slot)` reads bytes from
+/// `state.data_blobs[file_id]`, allocates ephemeral pages from the
+/// active Untyped, and places a fresh unmapped `Cap::Data` at
+/// `dst_slot` of the active VM's MainFrame. Process role only.
+pub const BARE_OPEN_SLOT: u8 = 15;
+
+/// BareFrame slot the kernel injects the `Save` host-call selector
+/// at — `host_save(data_cap_slot, quota_cap_slot, dst_slot)` reads
+/// post-execution pages from a Frame `Cap::Data`, debits bytes from
+/// the named StorageQuota entry, mints a fresh `FileId` in
+/// `state.data_blobs`, and places `Cap::Protocol(File(...))` at
+/// `dst_slot`. Process role only.
+pub const BARE_SAVE_SLOT: u8 = 16;
 
 /// Sentinel returned from host calls signalling success when the call
 /// has no natural return value.

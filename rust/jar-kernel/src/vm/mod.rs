@@ -65,7 +65,8 @@ pub fn new_vm_from_vault(
     use crate::cap::{CallerKernelCap, ProtocolCap, SelfCap, VaultRefCap, VaultRights};
     use crate::vm::host_abi::{
         BARE_ATTESTATION_SCOPE_SLOT, BARE_CALLER_KERNEL_SLOT, BARE_EMIT_EVENT_SLOT,
-        BARE_HOME_VAULT_SLOT, BARE_MINT_ATTEST_CAP_SLOT, BARE_SELF_ID_SLOT, BARE_SET_SCORE_SLOT,
+        BARE_HOME_VAULT_SLOT, BARE_MINT_ATTEST_CAP_SLOT, BARE_OPEN_SLOT, BARE_SAVE_SLOT,
+        BARE_SELF_ID_SLOT, BARE_SET_SCORE_SLOT,
     };
     use javm::cap::Cap as JavmCap;
 
@@ -109,6 +110,13 @@ pub fn new_vm_from_vault(
         BARE_EMIT_EVENT_SLOT,
         JavmCap::Protocol(ProtocolCap::EmitEvent),
     );
+
+    // host_open: any role (read-only against σ; allocates ephemeral).
+    // host_save: process role only (mints σ entries).
+    bare.set(BARE_OPEN_SLOT, JavmCap::Protocol(ProtocolCap::Open));
+    if matches!(role, crate::types::KernelRole::Process) {
+        bare.set(BARE_SAVE_SLOT, JavmCap::Protocol(ProtocolCap::Save));
+    }
 
     // Verify-only caps: MintAttestCap, SetScore, AttestationScope.
     // Process does not see these — least authority for rw-σ.
@@ -175,11 +183,15 @@ pub struct InvocationHost<'a, H: Hardware> {
 
 impl<H: Hardware> ProtocolCapHost<ProtocolCap> for InvocationHost<'_, H> {
     fn call(&mut self, cap: ProtocolCap, vm: &mut Vm) -> CallOutcome {
-        use crate::vm::host_calls::{host_emit_event, host_mint_attest_cap, host_set_score};
+        use crate::vm::host_calls::{
+            host_emit_event, host_mint_attest_cap, host_open, host_save, host_set_score,
+        };
         match cap {
             ProtocolCap::EmitEvent => host_emit_event(vm, self),
             ProtocolCap::MintAttestCap => host_mint_attest_cap(vm, self),
             ProtocolCap::SetScore => host_set_score(vm, self),
+            ProtocolCap::Open => host_open(vm, self),
+            ProtocolCap::Save => host_save(vm, self),
             // Reading the caller's identity. CALL on `CallerKernel`
             // returns the role discriminator in φ[7]:
             //   0 = KernelRole::Verify, 1 = KernelRole::Process.

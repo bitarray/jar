@@ -26,13 +26,13 @@
 //!
 //! ABI register layout: see `vm/host_abi.rs`.
 
-use crate::cap::{AttestationCap, AttestationScopeCap, ProtocolCap};
+use crate::cap::{AttestationCap, AttestationScopeCap, FileCap, ProtocolCap};
 use crate::crypto;
 use crate::pool::PoolEntry;
 use crate::runtime::Hardware;
 use crate::types::{AttestationEntry, Command, KernelRole, KeyId, Signature};
 use crate::vm::host_abi::{
-    BARE_ATTESTATION_SCOPE_SLOT, RC_AUTHORITY, RC_BAD_CAP, RC_BAD_SIG, RC_OK, RC_READONLY,
+    BARE_ATTESTATION_SCOPE_SLOT, RC_AUTHORITY, RC_BAD_CAP, RC_BAD_SIG, RC_OK, RC_QUOTA, RC_READONLY,
 };
 use crate::vm::{InvocationHost, Vm};
 use javm::cap::{CallOutcome, Cap};
@@ -207,6 +207,114 @@ pub fn host_set_score<H: Hardware>(vm: &mut Vm, host: &mut InvocationHost<'_, H>
         attestation_traces: host.attestation_trace.clone(),
     });
 
+    rc(RC_OK)
+}
+
+/// `open(file_cap_slot, dst_slot)`:
+///   φ[7] = file_cap_slot in active VM's MainFrame holding
+///          `Cap::Protocol(File(FileCap))`.
+///   φ[8] = dst_slot — destination for the resulting `Cap::Data`.
+///
+/// Reads the FileCap, looks up `state.data_blobs[file_id]`, allocates
+/// fresh ephemeral pages from the active invocation's BareFrame
+/// Untyped + BackingStore, copies file bytes, places an unmapped
+/// `Cap::Data` at `dst_slot`. Available in any role — opening is a
+/// read-only operation against σ (the σ entry is unchanged) and only
+/// allocates ephemeral memory.
+pub fn host_open<H: Hardware>(vm: &mut Vm, host: &mut InvocationHost<'_, H>) -> CallOutcome {
+    let file_cap_slot = vm.active_reg(7) as u8;
+    let dst_slot = vm.active_reg(8) as u8;
+
+    // Read the source FileCap from the active VM's main cap-table.
+    let file_cap = match vm.cap_table_get(file_cap_slot) {
+        Some(Cap::Protocol(ProtocolCap::File(f))) => *f,
+        _ => return rc(RC_BAD_CAP),
+    };
+    // Refuse if destination is occupied or pinned.
+    if vm.cap_table_get(dst_slot).is_some() {
+        return rc(RC_BAD_CAP);
+    }
+
+    // Look up the file's bytes + page count in σ.
+    let entry = match host.state.data_blobs.get(&file_cap.file_id) {
+        Some(e) => e,
+        None => return rc(RC_BAD_CAP),
+    };
+    let content = entry.content.clone();
+    let page_count = entry.page_count;
+
+    // Allocate ephemeral DataCap from the active invocation's
+    // BareFrame Untyped + BackingStore. Mirrors `foreign_cnode::clone`'s
+    // earlier σ→ephemeral path.
+    let bare_idx = vm.bare_frame_id.index();
+    let bare_table = &mut vm.vm_arena.vm_mut(bare_idx).cap_table;
+    let untyped = match bare_table.get_mut(javm::kernel::BARE_FRAME_UNTYPED_SLOT) {
+        Some(Cap::Untyped(u)) => u,
+        _ => return rc(RC_BAD_CAP),
+    };
+    let data_cap =
+        match javm::kernel::allocate_data_cap(&content, page_count, untyped, &mut vm.backing) {
+            Ok(d) => d,
+            Err(_) => return rc(RC_QUOTA),
+        };
+
+    vm.cap_table_set(dst_slot, Cap::Data(data_cap));
+    rc(RC_OK)
+}
+
+/// `save(data_cap_slot, quota_cap_slot, dst_slot)`:
+///   φ[7] = data_cap_slot — Frame slot holding source `Cap::Data`.
+///   φ[8] = quota_cap_slot — Frame slot holding `Cap::Protocol(StorageQuota(_))`.
+///   φ[9] = dst_slot — destination for the resulting FileCap.
+///
+/// Reads the data cap's post-execution pages, allocates a fresh
+/// `FileId` in `state.data_blobs` (debiting the named quota), places
+/// `Cap::Protocol(File(FileCap))` at `dst_slot`. Process-only — verify
+/// is read-only on σ.
+pub fn host_save<H: Hardware>(vm: &mut Vm, host: &mut InvocationHost<'_, H>) -> CallOutcome {
+    if !matches!(host.role, KernelRole::Process) {
+        return rc(RC_READONLY);
+    }
+    let data_cap_slot = vm.active_reg(7) as u8;
+    let quota_cap_slot = vm.active_reg(8) as u8;
+    let dst_slot = vm.active_reg(9) as u8;
+
+    // Read source DataCap's backing offset + page count.
+    let (backing_offset, page_count) = match vm.cap_table_get(data_cap_slot) {
+        Some(Cap::Data(d)) => (d.backing_offset, d.page_count),
+        _ => return rc(RC_BAD_CAP),
+    };
+    // Read the QuotaCap.
+    let quota_id = match vm.cap_table_get(quota_cap_slot) {
+        Some(Cap::Protocol(ProtocolCap::StorageQuota(q))) => q.quota_id,
+        _ => return rc(RC_BAD_CAP),
+    };
+    // Destination must be empty.
+    if vm.cap_table_get(dst_slot).is_some() {
+        return rc(RC_BAD_CAP);
+    }
+
+    // Read post-execution pages from BackingStore.
+    let bytes = match vm.backing.read_pages(backing_offset, page_count) {
+        Some(b) => b,
+        None => return rc(RC_BAD_CAP),
+    };
+    let byte_count = bytes.len() as u64;
+
+    // Allocate the σ-side file. Debits the quota; returns None if
+    // the quota entry is gone or has insufficient balance.
+    let file_id = match host.state.allocate_file(bytes, page_count, quota_id) {
+        Some(id) => id,
+        None => return rc(RC_QUOTA),
+    };
+
+    vm.cap_table_set(
+        dst_slot,
+        Cap::Protocol(ProtocolCap::File(FileCap {
+            file_id,
+            byte_count,
+        })),
+    );
     rc(RC_OK)
 }
 
