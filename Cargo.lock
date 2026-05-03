@@ -812,6 +812,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jar-harness"
+version = "0.1.0"
+dependencies = [
+ "build-javm",
+ "ed25519-dalek",
+ "jar-kernel",
+ "javm",
+ "rand 0.8.5",
+]
+
+[[package]]
 name = "jar-kernel"
 version = "0.1.0"
 dependencies = [
@@ -1641,6 +1652,13 @@ checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
  "digest",
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "simple-chain"
+version = "0.1.0"
+dependencies = [
+ "javm-builtins",
 ]
 
 [[package]]

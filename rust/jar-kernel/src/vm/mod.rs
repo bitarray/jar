@@ -62,8 +62,10 @@ pub fn new_vm_from_vault(
     role: crate::types::KernelRole,
     attestation_scope: Option<crate::cap::AttestationScopeCap>,
 ) -> KResult<Vm> {
-    use crate::cap::{KERNEL_CAP_SLOT, ProtocolCap};
-    use crate::vm::host_abi::{EMIT_EVENT_SLOT, MINT_ATTEST_CAP_SLOT, SET_SCORE_SLOT};
+    use crate::cap::{CallerKernelCap, KERNEL_CAP_SLOT, ProtocolCap};
+    use crate::vm::host_abi::{
+        CALLER_KERNEL_SLOT, EMIT_EVENT_SLOT, MINT_ATTEST_CAP_SLOT, SET_SCORE_SLOT,
+    };
     use javm::cap::Cap as JavmCap;
 
     let mut artifacts = vault_init::build_init_cap_table(
@@ -74,24 +76,32 @@ pub fn new_vm_from_vault(
         javm::PvmBackend::Default,
     )?;
 
+    artifacts.cap_table.set(
+        CALLER_KERNEL_SLOT,
+        JavmCap::Protocol(ProtocolCap::CallerKernel(CallerKernelCap { role })),
+    );
     artifacts
         .cap_table
         .set(EMIT_EVENT_SLOT, JavmCap::Protocol(ProtocolCap::EmitEvent));
+    // Inject MintAttestCap + SetScore in both roles so a single guest
+    // can call them unconditionally; the handlers themselves return
+    // `RC_READONLY` outside Verify.
+    artifacts.cap_table.set(
+        MINT_ATTEST_CAP_SLOT,
+        JavmCap::Protocol(ProtocolCap::MintAttestCap),
+    );
+    artifacts
+        .cap_table
+        .set(SET_SCORE_SLOT, JavmCap::Protocol(ProtocolCap::SetScore));
 
-    if matches!(role, crate::types::KernelRole::Verify) {
+    // AttestationScope is verify-only — process has no scope cap.
+    if matches!(role, crate::types::KernelRole::Verify)
+        && let Some(scope) = attestation_scope
+    {
         artifacts.cap_table.set(
-            MINT_ATTEST_CAP_SLOT,
-            JavmCap::Protocol(ProtocolCap::MintAttestCap),
+            KERNEL_CAP_SLOT,
+            JavmCap::Protocol(ProtocolCap::AttestationScope(scope)),
         );
-        artifacts
-            .cap_table
-            .set(SET_SCORE_SLOT, JavmCap::Protocol(ProtocolCap::SetScore));
-        if let Some(scope) = attestation_scope {
-            artifacts.cap_table.set(
-                KERNEL_CAP_SLOT,
-                JavmCap::Protocol(ProtocolCap::AttestationScope(scope)),
-            );
-        }
     }
 
     javm::kernel::InvocationKernel::new_from_artifacts(artifacts, gas, javm::PvmBackend::Default)

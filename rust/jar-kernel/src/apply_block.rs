@@ -214,12 +214,19 @@ pub fn apply_block<H: Hardware>(
             }
         }
 
-        // Process: one Vault.initialize against live σ. Always fires.
+        // Process: one Vault.initialize against live σ. v1 passes the
+        // first body event's blob (single-event-per-slot constraint —
+        // see `transact::run_process` doc).
+        let process_blob: &[u8] = ev_indices
+            .first()
+            .map(|&i| block.body.events[i].blob.as_slice())
+            .unwrap_or(&[]);
         let result = transact::run_process(
             &mut state,
             &endpoint,
             slot_idx,
             /* dispatch_context */ false,
+            process_blob,
             pool,
             &mut commands,
             hw,

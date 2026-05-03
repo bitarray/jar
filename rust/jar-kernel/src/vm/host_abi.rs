@@ -12,8 +12,7 @@
 //! - Slot 0: javm-reserved bare-Frame FrameRef.
 //! - Slot 1: home VaultRef (kernel-injected).
 //! - Slot 2: SelfId cap.
-//! - Slot 3: kernel-injected CallerKernelCap during top-level
-//!   invocations (carries `KernelRole`).
+//! - Slot 3: kernel-injected `CallerKernel` cap (carries `KernelRole`).
 //! - Slot 4: `EmitEvent` cap (verify + process).
 //! - Slot 5: `MintAttestCap` cap (verify only).
 //! - Slot 6: `SetScore` cap (verify only).
@@ -35,16 +34,25 @@
 //!
 //! ### `mint_attest_cap(dst_slot, key, blob, sig)` (slot 5)
 //! - φ[7] = dst_slot (cap-table slot to place the minted cap into)
-//! - φ[8] = key_ptr, φ[9] = key_len
-//! - φ[10] = blob_ptr, φ[11] = blob_len
-//! - φ[12] = sig_ptr, φ[13] = sig_len (sig_len = 0 → no signature
-//!   provided; only legal if `key == IDENTITY_KEY`)
+//! - φ[8] = key_ptr (0 → IDENTITY_KEY, no read; otherwise 32-byte
+//!   ed25519 pubkey)
+//! - φ[9] = blob_ptr, φ[10] = blob_len
+//! - φ[11] = sig_ptr (0 → no signature; only legal for IDENTITY_KEY.
+//!   Otherwise 64-byte ed25519 signature)
 //! - returns RC in φ[7]
+//!
+//! Key and signature lengths are hardcoded (ed25519 widths) to keep
+//! the call within the RISC-V `e`-feature 6-register limit.
 //!
 //! ### `setScore(identifier, score)` (slot 6)
 //! - φ[7] = identifier_ptr, φ[8] = identifier_len
 //! - φ[9] = score (u64)
 //! - returns RC in φ[7]
+
+/// Frame slot the kernel injects the `CallerKernel` cap at — its
+/// `role` field tells the guest whether this is a verify or process
+/// invocation.
+pub const CALLER_KERNEL_SLOT: u8 = 3;
 
 /// Frame slot the kernel injects the `EmitEvent` cap at.
 pub const EMIT_EVENT_SLOT: u8 = 4;

@@ -79,12 +79,11 @@ pub fn host_emit_event<H: Hardware>(vm: &mut Vm, host: &mut InvocationHost<'_, H
     rc(RC_OK)
 }
 
-/// `mint_attest_cap(dst_slot, key, blob, sig?)`:
+/// `mint_attest_cap(dst_slot, key_ptr, blob, sig_ptr)`:
 ///   φ[7]=dst_slot,
-///   φ[8]=key_ptr,  φ[9]=key_len,
-///   φ[10]=blob_ptr, φ[11]=blob_len,
-///   φ[12]=sig_ptr,  φ[13]=sig_len (0 = no signature; only legal
-///                                   for IDENTITY_KEY).
+///   φ[8]=key_ptr (0 = IDENTITY_KEY; otherwise 32-byte ed25519 pubkey),
+///   φ[9]=blob_ptr, φ[10]=blob_len,
+///   φ[11]=sig_ptr (0 = no signature; otherwise 64-byte ed25519 sig).
 pub fn host_mint_attest_cap<H: Hardware>(
     vm: &mut Vm,
     host: &mut InvocationHost<'_, H>,
@@ -92,31 +91,39 @@ pub fn host_mint_attest_cap<H: Hardware>(
     if !matches!(host.role, KernelRole::Verify) {
         return rc(RC_READONLY);
     }
+    const ED25519_KEY_LEN: u32 = 32;
+    const ED25519_SIG_LEN: u32 = 64;
 
     let dst_slot = vm.active_reg(7) as u8;
     let key_ptr = vm.active_reg(8) as u32;
-    let key_len = vm.active_reg(9) as u32;
-    let blob_ptr = vm.active_reg(10) as u32;
-    let blob_len = vm.active_reg(11) as u32;
-    let sig_ptr = vm.active_reg(12) as u32;
-    let sig_len = vm.active_reg(13) as u32;
+    let blob_ptr = vm.active_reg(9) as u32;
+    let blob_len = vm.active_reg(10) as u32;
+    let sig_ptr = vm.active_reg(11) as u32;
 
     let scope = match vm.cap_table_get(KERNEL_CAP_SLOT) {
         Some(Cap::Protocol(ProtocolCap::AttestationScope(s))) => s.clone(),
         _ => return rc(RC_BAD_CAP),
     };
 
-    let key_bytes = match read_window(vm, key_ptr, key_len, "mint_attest_cap key") {
-        Ok(v) => v,
-        Err(reason) => return CallOutcome::Fault(reason),
+    let key_bytes = if key_ptr == 0 {
+        Vec::new()
+    } else {
+        match read_window(vm, key_ptr, ED25519_KEY_LEN, "mint_attest_cap key") {
+            Ok(v) => v,
+            Err(reason) => return CallOutcome::Fault(reason),
+        }
     };
     let blob = match read_window(vm, blob_ptr, blob_len, "mint_attest_cap blob") {
         Ok(v) => v,
         Err(reason) => return CallOutcome::Fault(reason),
     };
-    let sig_bytes = match read_window(vm, sig_ptr, sig_len, "mint_attest_cap sig") {
-        Ok(v) => v,
-        Err(reason) => return CallOutcome::Fault(reason),
+    let sig_bytes = if sig_ptr == 0 {
+        Vec::new()
+    } else {
+        match read_window(vm, sig_ptr, ED25519_SIG_LEN, "mint_attest_cap sig") {
+            Ok(v) => v,
+            Err(reason) => return CallOutcome::Fault(reason),
+        }
     };
 
     let key = KeyId(key_bytes);

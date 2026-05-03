@@ -91,6 +91,7 @@ pub fn handle_inbound<H: Hardware>(
         &endpoint,
         slot_idx,
         /* dispatch_context */ true,
+        blob,
         &mut node.pool,
         &mut commands,
         hw,

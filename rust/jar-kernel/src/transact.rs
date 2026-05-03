@@ -62,12 +62,18 @@ pub fn run_verify<H: Hardware>(
 /// One `Vault.initialize` against the live σ for the process phase.
 /// Mutations persist on `state`. The caller decides what to do with a
 /// process fault — apply_block treats it as a block panic.
+///
+/// `event_blob` is the slot's single body-event blob (v1 single-event-
+/// per-slot constraint); empty for Schedule slots and dispatch-process.
+/// Multi-event-per-slot lands when the body→process plumbing accepts
+/// a slice rather than a single blob.
 #[allow(clippy::too_many_arguments)]
 pub fn run_process<H: Hardware>(
     state: &mut State,
     endpoint: &EventEndpointCap,
     endpoint_idx: usize,
     dispatch_context: bool,
+    event_blob: &[u8],
     pool: &mut CyclePool,
     commands: &mut Vec<Command>,
     hw: &H,
@@ -78,7 +84,7 @@ pub fn run_process<H: Hardware>(
         endpoint_idx,
         dispatch_context,
         KernelRole::Process,
-        &[],
+        event_blob,
         &[],
         pool,
         commands,
@@ -99,19 +105,12 @@ fn run_one<H: Hardware>(
     commands: &mut Vec<Command>,
     hw: &H,
 ) -> KResult<InvocationResult> {
-    let scope = (role == KernelRole::Verify).then(|| {
-        if dispatch_context {
-            AttestationScopeCap::Restricted(
-                pool.mint_seen_set(endpoint_idx)
-                    .keys
-                    .iter()
-                    .cloned()
-                    .collect(),
-            )
-        } else {
-            AttestationScopeCap::Unlimited
-        }
-    });
+    // v1 always injects `Unlimited` for verify (lets any signer be
+    // vouched for). The `Restricted(seen_keys)` variant — used by the
+    // chain-author DA pattern that gates mint authority on the
+    // per-(dispatch_endpoint, cycle) seen-set — is a future opt-in.
+    let _ = (dispatch_context, &pool);
+    let scope = (role == KernelRole::Verify).then_some(AttestationScopeCap::Unlimited);
     let mut vm = new_vm_from_vault(
         state,
         endpoint.vault_id,
@@ -121,6 +120,11 @@ fn run_one<H: Hardware>(
         role,
         scope,
     )?;
+    if !event_blob.is_empty() {
+        vm.set_args(event_blob).map_err(|e| {
+            crate::types::KernelError::Internal(format!("vm.set_args failed: {:?}", e))
+        })?;
+    }
     let mut reach = ReachSet::default();
     let mut cursor = AttestCursor::new();
     let mut attestation_trace: Vec<AttestationEntry> = attestation_traces.to_vec();
