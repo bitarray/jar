@@ -113,6 +113,21 @@ pub const MGMT_GAS_DERIVE: u32 = 0x10;
 /// BareFrame `B_GAS`, the merge bumps `active.vm.gas()`.
 pub const MGMT_GAS_MERGE: u32 = 0x11;
 
+/// CNode-cap mint: place a fresh empty `Cap::CNode` at `object_ref`.
+/// `subject_ref` is unused. Returns `0` in φ[7] on success,
+/// `RESULT_WHAT` on failure (destination occupied / pinned / not
+/// resolvable). The minted CNode is a Frame-only ephemeral working
+/// cap-table; cannot be moved to σ.
+pub const MGMT_CNODE_MINT: u32 = 0x12;
+
+/// CNode-cap swap: atomically swap the `Cap::CNode` payload at
+/// `subject_ref` (typically BareFrame[BARE_ARG_SLOT]) with the
+/// `Cap::CNode` payload at `object_ref`. Both must currently hold a
+/// `Cap::CNode`. Returns `0` on success, `RESULT_WHAT` on failure.
+/// The swap is purely structural — slot bitmaps stay with their
+/// frame; only the inner cap-table contents move.
+pub const MGMT_CNODE_SWAP: u32 = 0x13;
+
 /// Bare-Frame sub-slot used as the synchronous arg-in / result-out
 /// channel of the invocation: the host writes the args DATA cap here
 /// before the invocation runs (via [`InvocationKernel::set_args`]);
@@ -619,8 +634,8 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
                 self.flush_live_ctx();
                 self.handle_call_vm(target_vm)
             }
-            Cap::Data(_) | Cap::FaultHandler(_) | Cap::Gas(_) => {
-                // None of DATA / FaultHandler / Gas is callable.
+            Cap::Data(_) | Cap::FaultHandler(_) | Cap::Gas(_) | Cap::CNode(_) => {
+                // None of DATA / FaultHandler / Gas / CNode is callable.
                 self.set_active_reg(7, RESULT_WHAT);
                 DispatchResult::Continue
             }
@@ -1327,6 +1342,21 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
                 let (o_frame, o_slot, _) = resolve!(self, object_ref);
                 self.ecall_gas_merge(s_frame, s_slot, o_frame, o_slot)
             }
+            MGMT_CNODE_MINT => {
+                // CNODE_MINT — place a fresh empty Cap::CNode at
+                // object_ref. subject_ref is unused.
+                let (o_frame, o_slot, _) = resolve!(self, object_ref);
+                self.ecall_cnode_mint(o_frame, o_slot)
+            }
+            MGMT_CNODE_SWAP => {
+                // CNODE_SWAP — swap Cap::CNode payloads at subject_ref
+                // and object_ref. By convention subject_ref is
+                // BareFrame[BARE_ARG_SLOT], but the kernel treats it
+                // uniformly as just another resolved location.
+                let (s_frame, s_slot, _) = resolve!(self, subject_ref);
+                let (o_frame, o_slot, _) = resolve!(self, object_ref);
+                self.ecall_cnode_swap(s_frame, s_slot, o_frame, o_slot)
+            }
             _ => {
                 self.set_active_reg(7, RESULT_WHAT);
                 DispatchResult::Continue
@@ -1556,6 +1586,103 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
                 .set(s_slot, Cap::Gas(donor));
             self.set_active_reg(7, RESULT_WHAT);
         }
+        DispatchResult::Continue
+    }
+
+    /// `MGMT_CNODE_MINT` handler. Places a fresh empty `Cap::CNode`
+    /// at the resolved destination slot. Refuses if the slot is
+    /// pinned, occupied, or in a foreign frame (CNode caps don't
+    /// live in σ).
+    fn ecall_cnode_mint(
+        &mut self,
+        o_frame: FrameId<P::ForeignFrameId>,
+        o_slot: u8,
+    ) -> DispatchResult {
+        let o_vm_idx = match o_frame {
+            FrameId::Vm(idx) => idx,
+            FrameId::Foreign(_) => {
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
+        };
+        let table = &mut self.vm_arena.vm_mut(o_vm_idx).cap_table;
+        if table.is_pinned(o_slot) || table.get(o_slot).is_some() {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+        table.set(o_slot, Cap::CNode(Box::<CapTable<P>>::default()));
+        self.set_active_reg(7, 0);
+        DispatchResult::Continue
+    }
+
+    /// `MGMT_CNODE_SWAP` handler. Atomically swaps the `Cap::CNode`
+    /// payloads at `(s_frame, s_slot)` and `(o_frame, o_slot)`. Both
+    /// must currently hold a `Cap::CNode`; both must be in local
+    /// (Vm) frames; neither slot may be pinned. The operation
+    /// preserves slot bitmaps (pinning, original) on each side —
+    /// only the inner cap-table contents move.
+    fn ecall_cnode_swap(
+        &mut self,
+        s_frame: FrameId<P::ForeignFrameId>,
+        s_slot: u8,
+        o_frame: FrameId<P::ForeignFrameId>,
+        o_slot: u8,
+    ) -> DispatchResult {
+        // Same-slot swap is a no-op success.
+        if s_frame == o_frame && s_slot == o_slot {
+            self.set_active_reg(7, 0);
+            return DispatchResult::Continue;
+        }
+        let s_vm_idx = match s_frame {
+            FrameId::Vm(idx) => idx,
+            FrameId::Foreign(_) => {
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
+        };
+        let o_vm_idx = match o_frame {
+            FrameId::Vm(idx) => idx,
+            FrameId::Foreign(_) => {
+                self.set_active_reg(7, RESULT_WHAT);
+                return DispatchResult::Continue;
+            }
+        };
+        // Pinned-slot enforcement.
+        if self.vm_arena.vm(s_vm_idx).cap_table.is_pinned(s_slot)
+            || self.vm_arena.vm(o_vm_idx).cap_table.is_pinned(o_slot)
+        {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+        // Both slots must currently hold a Cap::CNode.
+        if !matches!(
+            self.vm_arena.vm(s_vm_idx).cap_table.get(s_slot),
+            Some(Cap::CNode(_))
+        ) || !matches!(
+            self.vm_arena.vm(o_vm_idx).cap_table.get(o_slot),
+            Some(Cap::CNode(_))
+        ) {
+            self.set_active_reg(7, RESULT_WHAT);
+            return DispatchResult::Continue;
+        }
+        // Atomic two-step: take from source (slot empty), take from
+        // destination, place source's cap at dst, place dst's cap at
+        // source. Borrow-checker forces the take-then-set ordering.
+        let s_cap = self
+            .vm_arena
+            .vm_mut(s_vm_idx)
+            .cap_table
+            .take(s_slot)
+            .expect("source held Cap::CNode");
+        let o_cap = self
+            .vm_arena
+            .vm_mut(o_vm_idx)
+            .cap_table
+            .take(o_slot)
+            .expect("destination held Cap::CNode");
+        self.vm_arena.vm_mut(s_vm_idx).cap_table.set(s_slot, o_cap);
+        self.vm_arena.vm_mut(o_vm_idx).cap_table.set(o_slot, s_cap);
+        self.set_active_reg(7, 0);
         DispatchResult::Continue
     }
 
@@ -4927,5 +5054,111 @@ mod tests {
 
         let k2: InvocationKernel = kernel_from_blob_warm(&blob, 100_000, &flat_mem, hb, ht, None);
         assert_eq!(k2.code_caps.len(), 1);
+    }
+
+    #[test]
+    fn cnode_mint_places_empty_cnode() {
+        let blob = make_simple_blob(10);
+        let mut k: InvocationKernel = kernel_from_blob(&blob, 100_000);
+        let active = k.active_vm;
+        let target_slot: u8 = 80;
+        // Slot starts empty.
+        assert!(k.vm_arena.vm(active).cap_table.get(target_slot).is_none());
+
+        let res = k.ecall_cnode_mint(FrameId::Vm(active), target_slot);
+        assert!(matches!(res, DispatchResult::Continue));
+        assert_eq!(k.active_reg(7), 0);
+        assert!(matches!(
+            k.vm_arena.vm(active).cap_table.get(target_slot),
+            Some(Cap::CNode(_))
+        ));
+    }
+
+    #[test]
+    fn cnode_mint_refuses_occupied_slot() {
+        let blob = make_simple_blob(10);
+        let mut k: InvocationKernel = kernel_from_blob(&blob, 100_000);
+        let active = k.active_vm;
+        let target_slot: u8 = 80;
+
+        // Place an arbitrary cap there first.
+        k.ecall_cnode_mint(FrameId::Vm(active), target_slot);
+        assert_eq!(k.active_reg(7), 0);
+
+        // Second mint into the same slot should fail.
+        let res = k.ecall_cnode_mint(FrameId::Vm(active), target_slot);
+        assert!(matches!(res, DispatchResult::Continue));
+        assert_eq!(k.active_reg(7), RESULT_WHAT);
+    }
+
+    #[test]
+    fn cnode_swap_exchanges_payloads() {
+        let blob = make_simple_blob(10);
+        let mut k: InvocationKernel = kernel_from_blob(&blob, 100_000);
+        let active = k.active_vm;
+        let s_slot: u8 = 80;
+        let o_slot: u8 = 81;
+
+        // Mint two CNodes; populate one with a Code cap so we can
+        // verify the swap moved contents.
+        k.ecall_cnode_mint(FrameId::Vm(active), s_slot);
+        k.ecall_cnode_mint(FrameId::Vm(active), o_slot);
+        assert_eq!(k.active_reg(7), 0);
+
+        // Stash a small "marker" cap inside s_slot's CNode so we can
+        // check it ends up in o_slot's CNode after the swap. We borrow
+        // a Cap::FrameRef-shaped marker from BareFrame[BARE_FRAME_SLOT]
+        // (slot 0 of every VM holds a FrameRef to the bare frame).
+        let bare_frame_slot_0 = match k.vm_arena.vm(active).cap_table.get(0) {
+            Some(Cap::FrameRef(f)) => *f,
+            _ => panic!("VM[0] slot 0 should hold a FrameRef to bare frame"),
+        };
+        let marker = Cap::FrameRef(bare_frame_slot_0);
+        match k.vm_arena.vm_mut(active).cap_table.get_mut(s_slot) {
+            Some(Cap::CNode(inner)) => {
+                inner.set(7, marker);
+            }
+            _ => panic!("s_slot should hold Cap::CNode"),
+        }
+
+        let res = k.ecall_cnode_swap(FrameId::Vm(active), s_slot, FrameId::Vm(active), o_slot);
+        assert!(matches!(res, DispatchResult::Continue));
+        assert_eq!(k.active_reg(7), 0);
+
+        // Marker should now live in o_slot's CNode at sub-slot 7.
+        match k.vm_arena.vm(active).cap_table.get(o_slot) {
+            Some(Cap::CNode(inner)) => {
+                assert!(matches!(inner.get(7), Some(Cap::FrameRef(_))));
+            }
+            _ => panic!("o_slot should hold Cap::CNode"),
+        }
+        // s_slot's CNode is now empty at sub-slot 7.
+        match k.vm_arena.vm(active).cap_table.get(s_slot) {
+            Some(Cap::CNode(inner)) => {
+                assert!(inner.get(7).is_none());
+            }
+            _ => panic!("s_slot should hold Cap::CNode"),
+        }
+    }
+
+    #[test]
+    fn cnode_swap_refuses_non_cnode_target() {
+        let blob = make_simple_blob(10);
+        let mut k: InvocationKernel = kernel_from_blob(&blob, 100_000);
+        let active = k.active_vm;
+        let s_slot: u8 = 80;
+        let o_slot: u8 = 81;
+
+        // Source has a CNode; destination is empty (no Cap::CNode).
+        k.ecall_cnode_mint(FrameId::Vm(active), s_slot);
+        let res = k.ecall_cnode_swap(FrameId::Vm(active), s_slot, FrameId::Vm(active), o_slot);
+        assert!(matches!(res, DispatchResult::Continue));
+        assert_eq!(k.active_reg(7), RESULT_WHAT);
+
+        // Source CNode is preserved (atomic — no half-swap).
+        assert!(matches!(
+            k.vm_arena.vm(active).cap_table.get(s_slot),
+            Some(Cap::CNode(_))
+        ));
     }
 }

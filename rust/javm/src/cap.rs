@@ -707,6 +707,15 @@ pub enum Cap<P: ProtocolCap = u8> {
     /// `MGMT_GAS_DERIVE` produces these (split from B_GAS, the view
     /// onto `active.vm.gas()`); `MGMT_GAS_MERGE` consumes them.
     Gas(GasCap),
+    /// Frame-only ephemeral working CNode. Holds a boxed
+    /// `CapTable<P>` of the same Frame cap shape. Used as the
+    /// scratch staging area for atomic batch writes via
+    /// `MGMT_CNODE_SWAP`. Move-only — cloning a 4 KiB cap-table
+    /// every COPY would be too expensive to support implicitly;
+    /// programs build a fresh one with `MGMT_CNODE_MINT`. Cannot
+    /// move to σ (no persistent CNode cap variant exists in
+    /// jar-kernel's RegCap).
+    CNode(Box<CapTable<P>>),
     Protocol(P),
 }
 
@@ -721,7 +730,9 @@ impl<P: ProtocolCap> Cap<P> {
     pub fn is_copyable(&self) -> bool {
         match self {
             Cap::Code(_) | Cap::FrameRef(_) => true,
-            Cap::Untyped(_) | Cap::Data(_) | Cap::FaultHandler(_) | Cap::Gas(_) => false,
+            Cap::Untyped(_) | Cap::Data(_) | Cap::FaultHandler(_) | Cap::Gas(_) | Cap::CNode(_) => {
+                false
+            }
             Cap::Protocol(p) => p.is_copyable(),
         }
     }
@@ -739,6 +750,7 @@ impl<P: ProtocolCap> Cap<P> {
             | Cap::Data(_)
             | Cap::FaultHandler(_)
             | Cap::Gas(_)
+            | Cap::CNode(_)
             | Cap::Protocol(_) => None,
         }
     }
