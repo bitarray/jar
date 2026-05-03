@@ -26,14 +26,30 @@
 //!
 //! ABI register layout: see `vm/host_abi.rs`.
 
-use crate::cap::{AttestationCap, AttestationScopeCap, KERNEL_CAP_SLOT, ProtocolCap};
+use crate::cap::{AttestationCap, AttestationScopeCap, ProtocolCap};
 use crate::crypto;
 use crate::pool::PoolEntry;
 use crate::runtime::Hardware;
 use crate::types::{AttestationEntry, Command, KernelRole, KeyId, Signature};
-use crate::vm::host_abi::{RC_AUTHORITY, RC_BAD_CAP, RC_BAD_SIG, RC_OK, RC_READONLY};
+use crate::vm::host_abi::{
+    BARE_ATTESTATION_SCOPE_SLOT, RC_AUTHORITY, RC_BAD_CAP, RC_BAD_SIG, RC_OK, RC_READONLY,
+};
 use crate::vm::{InvocationHost, Vm};
 use javm::cap::{CallOutcome, Cap};
+
+/// Read the AttestationScope cap from BareFrame, if present.
+fn bare_attestation_scope(vm: &Vm) -> Option<AttestationScopeCap> {
+    let bare_idx = vm.bare_frame_id.index();
+    match vm
+        .vm_arena
+        .vm(bare_idx)
+        .cap_table
+        .get(BARE_ATTESTATION_SCOPE_SLOT)
+    {
+        Some(Cap::Protocol(ProtocolCap::AttestationScope(s))) => Some(s.clone()),
+        _ => None,
+    }
+}
 
 fn rc(value: u64) -> CallOutcome {
     CallOutcome::Resume {
@@ -100,9 +116,9 @@ pub fn host_mint_attest_cap<H: Hardware>(
     let blob_len = vm.active_reg(10) as u32;
     let sig_ptr = vm.active_reg(11) as u32;
 
-    let scope = match vm.cap_table_get(KERNEL_CAP_SLOT) {
-        Some(Cap::Protocol(ProtocolCap::AttestationScope(s))) => s.clone(),
-        _ => return rc(RC_BAD_CAP),
+    let scope = match bare_attestation_scope(vm) {
+        Some(s) => s,
+        None => return rc(RC_BAD_CAP),
     };
 
     let key_bytes = if key_ptr == 0 {

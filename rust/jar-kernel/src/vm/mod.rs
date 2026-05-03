@@ -62,13 +62,14 @@ pub fn new_vm_from_vault(
     role: crate::types::KernelRole,
     attestation_scope: Option<crate::cap::AttestationScopeCap>,
 ) -> KResult<Vm> {
-    use crate::cap::{CallerKernelCap, KERNEL_CAP_SLOT, ProtocolCap};
+    use crate::cap::{CallerKernelCap, ProtocolCap, SelfCap, VaultRefCap, VaultRights};
     use crate::vm::host_abi::{
-        CALLER_KERNEL_SLOT, EMIT_EVENT_SLOT, MINT_ATTEST_CAP_SLOT, SET_SCORE_SLOT,
+        BARE_ATTESTATION_SCOPE_SLOT, BARE_CALLER_KERNEL_SLOT, BARE_EMIT_EVENT_SLOT,
+        BARE_HOME_VAULT_SLOT, BARE_MINT_ATTEST_CAP_SLOT, BARE_SELF_ID_SLOT, BARE_SET_SCORE_SLOT,
     };
     use javm::cap::Cap as JavmCap;
 
-    let mut artifacts = vault_init::build_init_cap_table(
+    let artifacts = vault_init::build_init_cap_table(
         state,
         vault_id,
         memory_pages,
@@ -76,34 +77,59 @@ pub fn new_vm_from_vault(
         javm::PvmBackend::Default,
     )?;
 
-    artifacts.cap_table.set(
-        CALLER_KERNEL_SLOT,
+    let mut vm = javm::kernel::InvocationKernel::new_from_artifacts(
+        artifacts,
+        gas,
+        javm::PvmBackend::Default,
+    )
+    .map_err(|e| KernelError::Internal(format!("javm init: {:?}", e)))?;
+
+    // Inject kernel-managed caps into BareFrame. MainFrame is left
+    // exactly as the Image clone produced — chain-author code owns
+    // it.
+    let bare_idx = vm.bare_frame_id.index();
+    let bare = &mut vm.vm_arena.vm_mut(bare_idx).cap_table;
+
+    bare.set(
+        BARE_CALLER_KERNEL_SLOT,
         JavmCap::Protocol(ProtocolCap::CallerKernel(CallerKernelCap { role })),
     );
-    artifacts
-        .cap_table
-        .set(EMIT_EVENT_SLOT, JavmCap::Protocol(ProtocolCap::EmitEvent));
+    bare.set(
+        BARE_HOME_VAULT_SLOT,
+        JavmCap::Protocol(ProtocolCap::VaultRef(VaultRefCap {
+            vault_id,
+            rights: VaultRights::ALL,
+        })),
+    );
+    bare.set(
+        BARE_SELF_ID_SLOT,
+        JavmCap::Protocol(ProtocolCap::SelfId(SelfCap { vault_id })),
+    );
+    bare.set(
+        BARE_EMIT_EVENT_SLOT,
+        JavmCap::Protocol(ProtocolCap::EmitEvent),
+    );
 
-    // Verify-only caps: MintAttestCap, SetScore, and AttestationScope.
-    // Process does not see these — least authority for the rw-σ phase.
+    // Verify-only caps: MintAttestCap, SetScore, AttestationScope.
+    // Process does not see these — least authority for rw-σ.
     if matches!(role, crate::types::KernelRole::Verify) {
-        artifacts.cap_table.set(
-            MINT_ATTEST_CAP_SLOT,
+        bare.set(
+            BARE_MINT_ATTEST_CAP_SLOT,
             JavmCap::Protocol(ProtocolCap::MintAttestCap),
         );
-        artifacts
-            .cap_table
-            .set(SET_SCORE_SLOT, JavmCap::Protocol(ProtocolCap::SetScore));
+        bare.set(
+            BARE_SET_SCORE_SLOT,
+            JavmCap::Protocol(ProtocolCap::SetScore),
+        );
         if let Some(scope) = attestation_scope {
-            artifacts.cap_table.set(
-                KERNEL_CAP_SLOT,
+            bare.set(
+                BARE_ATTESTATION_SCOPE_SLOT,
                 JavmCap::Protocol(ProtocolCap::AttestationScope(scope)),
             );
         }
     }
 
-    javm::kernel::InvocationKernel::new_from_artifacts(artifacts, gas, javm::PvmBackend::Default)
-        .map_err(|e| KernelError::Internal(format!("javm init: {:?}", e)))
+    Ok(vm)
 }
 
 /// After a process invocation halts, walk the home Vault's DataCap

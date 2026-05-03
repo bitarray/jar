@@ -1,23 +1,37 @@
-//! Host-call ABI for the event-redesign: register conventions, slot
-//! placement, and return-code sentinels.
+//! Host-call ABI: register conventions, BareFrame slot placement,
+//! and return-code sentinels.
 //!
-//! Host calls are dispatched as `ProtocolCap` variants — `EmitEvent`,
-//! `MintAttestCap`, `SetScore`. The kernel places each cap into a
-//! known frame cap-table slot at invocation init; an `ecalli <slot>`
-//! from the guest causes javm to read the cap at that slot and route
-//! through `InvocationHost::call`.
+//! Host calls are `ProtocolCap` variants the kernel injects into
+//! the BareFrame at `vault.initialize`. Guests reach them via
+//! cap-ref `(slot << 8) | 0` (cross slot 0 → BareFrame, target =
+//! slot in BareFrame), using javm's dynamic-CALL ecall path
+//! (`csrw 0x800; ecall`, op = 0x00, subject_ref in φ[12]).
 //!
-//! ## Frame slot placement
+//! Alternatively, a guest can MGMT_COPY a kernel cap from BareFrame
+//! into MainFrame at startup and then use plain `ecalli imm`.
 //!
-//! - Slot 0: javm-reserved bare-Frame FrameRef.
-//! - Slot 1: home VaultRef (kernel-injected).
-//! - Slot 2: SelfId cap.
-//! - Slot 3: kernel-injected `CallerKernel` cap (carries `KernelRole`).
-//! - Slot 4: `EmitEvent` cap (verify + process).
-//! - Slot 5: `MintAttestCap` cap (verify only).
-//! - Slot 6: `SetScore` cap (verify only).
-//! - Slot 32: `AttestationScope` cap (verify only). See
-//!   [`crate::cap::KERNEL_CAP_SLOT`].
+//! ## BareFrame slot placement
+//!
+//! javm-reserved: 0 (REPLY), 1 (caller cap), 4 (args DataCap from
+//! `set_args`), 9 (per-invocation `UntypedCap`). Jar-kernel injects
+//! around them:
+//!
+//! | Slot | Cap | When |
+//! |------|-----|------|
+//! | 0    | (javm) REPLY | always |
+//! | 1    | (javm) caller cap | per-CALL |
+//! | 4    | (javm) args DataCap | when set_args |
+//! | 7    | home VaultRef | always |
+//! | 8    | `CallerKernel` (role) | always |
+//! | 9    | (javm) UntypedCap | always |
+//! | 10   | SelfId | always |
+//! | 11   | `EmitEvent` | always |
+//! | 12   | `MintAttestCap` | verify only |
+//! | 13   | `SetScore` | verify only |
+//! | 14   | `AttestationScope` | verify only |
+//!
+//! MainFrame slots 1+ are entirely chain-author-controlled (image-
+//! driven). The kernel never touches them.
 //!
 //! ## Register conventions
 //!
@@ -27,16 +41,16 @@
 //!
 //! ## Per-call ABI
 //!
-//! ### `caller_role()` (slot 3)
+//! ### `caller_role()` (BareFrame slot 8)
 //! - returns role in φ[7]: 0 = `KernelRole::Verify`,
 //!   1 = `KernelRole::Process`.
 //!
-//! ### `emit_event(target_path, blob)` (slot 4)
+//! ### `emit_event(target_path, blob)` (BareFrame slot 11)
 //! - φ[7] = target_path_ptr, φ[8] = target_path_len
 //! - φ[9] = blob_ptr, φ[10] = blob_len
 //! - returns RC in φ[7]
 //!
-//! ### `mint_attest_cap(dst_slot, key, blob, sig)` (slot 5)
+//! ### `mint_attest_cap(dst_slot, key, blob, sig)` (BareFrame slot 12)
 //! - φ[7] = dst_slot (cap-table slot to place the minted cap into)
 //! - φ[8] = key_ptr (0 → IDENTITY_KEY, no read; otherwise 32-byte
 //!   ed25519 pubkey)
@@ -48,24 +62,42 @@
 //! Key and signature lengths are hardcoded (ed25519 widths) to keep
 //! the call within the RISC-V `e`-feature 6-register limit.
 //!
-//! ### `setScore(identifier, score)` (slot 6)
+//! ### `setScore(identifier, score)` (BareFrame slot 13)
 //! - φ[7] = identifier_ptr, φ[8] = identifier_len
 //! - φ[9] = score (u64)
 //! - returns RC in φ[7]
 
-/// Frame slot the kernel injects the `CallerKernel` cap at — its
-/// `role` field tells the guest whether this is a verify or process
-/// invocation.
-pub const CALLER_KERNEL_SLOT: u8 = 3;
+/// BareFrame slot holding the home VaultRef — handle the guest
+/// uses to reach its own `Vault.slots` via foreign-frame ops.
+/// Avoids javm's reserved slots (0/1/4/9).
+pub const BARE_HOME_VAULT_SLOT: u8 = 7;
 
-/// Frame slot the kernel injects the `EmitEvent` cap at.
-pub const EMIT_EVENT_SLOT: u8 = 4;
+/// BareFrame slot the kernel injects the `CallerKernel` cap at —
+/// its `role` field tells the guest verify vs process.
+pub const BARE_CALLER_KERNEL_SLOT: u8 = 8;
 
-/// Frame slot the kernel injects the `MintAttestCap` cap at (verify only).
-pub const MINT_ATTEST_CAP_SLOT: u8 = 5;
+// Per-invocation `UntypedCap` lives at javm's `BARE_FRAME_UNTYPED_SLOT`
+// (slot 9), placed by `new_from_artifacts` and pinned. Address it via
+// `javm::kernel::BARE_FRAME_UNTYPED_SLOT` directly.
 
-/// Frame slot the kernel injects the `SetScore` cap at (verify only).
-pub const SET_SCORE_SLOT: u8 = 6;
+/// BareFrame slot holding the SelfId cap — the running VM's
+/// own VaultId.
+pub const BARE_SELF_ID_SLOT: u8 = 10;
+
+/// BareFrame slot the kernel injects the `EmitEvent` cap at.
+pub const BARE_EMIT_EVENT_SLOT: u8 = 11;
+
+/// BareFrame slot the kernel injects the `MintAttestCap` cap at
+/// (verify only).
+pub const BARE_MINT_ATTEST_CAP_SLOT: u8 = 12;
+
+/// BareFrame slot the kernel injects the `SetScore` cap at
+/// (verify only).
+pub const BARE_SET_SCORE_SLOT: u8 = 13;
+
+/// BareFrame slot the kernel injects the `AttestationScope` cap
+/// at (verify only).
+pub const BARE_ATTESTATION_SCOPE_SLOT: u8 = 14;
 
 /// Sentinel returned from host calls signalling success when the call
 /// has no natural return value.
