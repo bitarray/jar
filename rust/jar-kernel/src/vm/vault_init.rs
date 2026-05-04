@@ -8,12 +8,23 @@
 //! | `image.slots[N]`                                  | `cap_table[N]` |
 //! |---------------------------------------------------|----------------|
 //! | empty                                             | empty          |
-//! | `RegCap::Code(CodeCap{code_id, …})`               | `Cap::Code(...)` (look up `state.code_blobs[code_id]`, compile bytes) |
-//! | `RegCap::File(FileCap{file_id, …})`               | `Cap::Data(...)` (look up `state.data_blobs[file_id]`, allocate ephemeral pages, copy bytes, **unmapped**) |
-//! | `RegCap::VaultRef(...)` / `Resource` / `ImageRef` / `StorageQuota` | `Cap::Protocol(...)` projection |
+//! | `RegCap::Code(CodeCap{code_id, ...})`             | `Cap::Protocol(ProtocolCap::Reg(RegCap::Code(...)))` plus internal compile for `Image.init_cap` |
+//! | `RegCap::File(FileCap{file_id, ...})`             | `Cap::Data(...)` (program materialization; unmapped) |
+//! | other `RegCap::*`                                 | `Cap::Protocol(ProtocolCap::Reg(_))` |
 //!
-//! The DataCap path leaves the cap **unmapped**: the init program is
-//! responsible for `MGMT_MAP`-ing each persistent DataCap at runtime.
+//! Persistent `RegCap::Code` and executable `Cap::Code` stay separate.
+//! The `Image.init_cap` slot must hold a `RegCap::Code`; the kernel
+//! compiles that code reference internally to seed the VM's entry
+//! `code_caps`, but leaves the source frame slot as the persistent code
+//! reference. A future explicit code-load management op will define the
+//! guest-visible `RegCap::Code -> Cap::Code` conversion together with
+//! gas/cache policy.
+//!
+//! Image `RegCap::File` entries are still materialized as unmapped
+//! `Cap::Data` values because JAVM program manifests use those slots
+//! for stack/heap/ro/rw pages and the transpiler-emitted prologue maps
+//! them before user code runs. Vault CNode FileCap copy/get/set remains
+//! a persistent-cap operation through `ProtocolCap::Reg(RegCap::File)`.
 //!
 //! Slot 0 of the resulting CapTable is reserved by javm for the
 //! bare-Frame FrameRef; occupying `image.slots[0]` is rejected up
@@ -53,7 +64,7 @@ pub fn instantiate_from_image(
     state: &State,
     image: &Image,
     memory_pages: u32,
-    mut code_cache: Option<&mut javm::CodeCache>,
+    code_cache: Option<&mut javm::CodeCache>,
     backend: javm::PvmBackend,
 ) -> KResult<InitArtifacts> {
     let mem_cycles = javm::compute_mem_cycles(memory_pages);
@@ -71,41 +82,43 @@ pub fn instantiate_from_image(
     let mut untyped = javm::cap::UntypedCap::new(memory_pages);
 
     let mut cap_table: CapTable<ProtocolCap> = CapTable::new();
+    let init_reg = image.slots.get(image.init_cap).ok_or_else(|| {
+        KernelError::Internal(format!(
+            "image has no cap at init_cap slot {}",
+            image.init_cap
+        ))
+    })?;
+    let init_code = match init_reg {
+        RegCap::Code(c) => *c,
+        _ => {
+            return Err(KernelError::Internal(format!(
+                "image init_cap slot {} does not hold a Code cap",
+                image.init_cap
+            )));
+        }
+    };
+
     let mut code_caps: Vec<Arc<javm::cap::CodeCap>> = Vec::new();
+    let init_code_id = compile_persistent_code(
+        state,
+        init_code,
+        &mut code_caps,
+        mem_cycles,
+        backend,
+        code_cache,
+    )?;
 
     for slot in 0u8..=255 {
         let vc = match image.slots.get(slot) {
             Some(c) => c,
             None => continue,
         };
-        let cap = translate_vault_cap(
-            state,
-            vc,
-            &mut code_caps,
-            mem_cycles,
-            backend,
-            code_cache.as_deref_mut(),
-            &mut untyped,
-            &mut backing,
-        )?;
+        let cap = match vc {
+            RegCap::File(f) => materialize_image_file(state, f, &mut untyped, &mut backing)?,
+            _ => Cap::from(vc.clone()),
+        };
         cap_table.set(slot, cap);
     }
-
-    let init_code_id = match cap_table.get(image.init_cap) {
-        Some(Cap::Code(c)) => c.id,
-        Some(_) => {
-            return Err(KernelError::Internal(format!(
-                "image init_cap slot {} does not hold a Code cap",
-                image.init_cap
-            )));
-        }
-        None => {
-            return Err(KernelError::Internal(format!(
-                "image has no cap at init_cap slot {}",
-                image.init_cap
-            )));
-        }
-    };
 
     Ok(InitArtifacts {
         cap_table,
@@ -136,56 +149,50 @@ pub fn build_init_cap_table(
     instantiate_from_image(state, image.as_ref(), memory_pages, code_cache, backend)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn translate_vault_cap(
+fn compile_persistent_code(
     state: &State,
-    cap: &RegCap,
+    cap: crate::cap::CodeCap,
     code_caps: &mut Vec<Arc<javm::cap::CodeCap>>,
     mem_cycles: u8,
     backend: javm::PvmBackend,
     code_cache: Option<&mut javm::CodeCache>,
+) -> KResult<u16> {
+    if code_caps.len() >= javm::vm_pool::MAX_CODE_CAPS {
+        return Err(KernelError::Internal(format!(
+            "vault holds more than {} CodeCap entries",
+            javm::vm_pool::MAX_CODE_CAPS
+        )));
+    }
+    let entry = state.code_blobs.get(&cap.code_id).ok_or_else(|| {
+        KernelError::Internal(format!(
+            "image references missing code_blob {:?}",
+            cap.code_id
+        ))
+    })?;
+    let id = code_caps.len() as u16;
+    let code_cap =
+        javm::kernel::compile_code_blob(&entry.blob, id, mem_cycles, backend, code_cache)
+            .map_err(|e| KernelError::Internal(format!("compile_code_blob: {:?}", e)))?;
+    code_caps.push(Arc::clone(&code_cap));
+    Ok(id)
+}
+
+fn materialize_image_file(
+    state: &State,
+    cap: &crate::cap::FileCap,
     untyped: &mut javm::cap::UntypedCap,
     backing: &mut javm::backing::BackingStore,
 ) -> KResult<Cap> {
-    match cap {
-        RegCap::VaultRef(vr) => Ok(Cap::Protocol(ProtocolCap::VaultRef(*vr))),
-        RegCap::Code(c) => {
-            if code_caps.len() >= javm::vm_pool::MAX_CODE_CAPS {
-                return Err(KernelError::Internal(format!(
-                    "vault holds more than {} CodeCap entries",
-                    javm::vm_pool::MAX_CODE_CAPS
-                )));
-            }
-            let entry = state.code_blobs.get(&c.code_id).ok_or_else(|| {
-                KernelError::Internal(format!(
-                    "image references missing code_blob {:?}",
-                    c.code_id
-                ))
-            })?;
-            let id = code_caps.len() as u16;
-            let code_cap =
-                javm::kernel::compile_code_blob(&entry.blob, id, mem_cycles, backend, code_cache)
-                    .map_err(|e| KernelError::Internal(format!("compile_code_blob: {:?}", e)))?;
-            code_caps.push(Arc::clone(&code_cap));
-            Ok(Cap::Code(code_cap))
-        }
-        RegCap::File(f) => {
-            let entry = state.data_blobs.get(&f.file_id).ok_or_else(|| {
-                KernelError::Internal(format!(
-                    "image references missing data_blob {:?}",
-                    f.file_id
-                ))
-            })?;
-            let data_cap =
-                javm::kernel::allocate_data_cap(&entry.content, entry.page_count, untyped, backing)
-                    .map_err(|e| KernelError::Internal(format!("allocate_data_cap: {:?}", e)))?;
-            // Cap is unmapped on purpose — the init program calls MGMT_MAP.
-            Ok(Cap::Data(data_cap))
-        }
-        RegCap::Resource(r) => Ok(Cap::Protocol(ProtocolCap::Resource(r.clone()))),
-        RegCap::ImageRef(ir) => Ok(Cap::Protocol(ProtocolCap::ImageRef(*ir))),
-        RegCap::StorageQuota(q) => Ok(Cap::Protocol(ProtocolCap::StorageQuota(*q))),
-    }
+    let entry = state.data_blobs.get(&cap.file_id).ok_or_else(|| {
+        KernelError::Internal(format!(
+            "image references missing data_blob {:?}",
+            cap.file_id
+        ))
+    })?;
+    let data_cap =
+        javm::kernel::allocate_data_cap(&entry.content, entry.page_count, untyped, backing)
+            .map_err(|e| KernelError::Internal(format!("allocate_data_cap: {:?}", e)))?;
+    Ok(Cap::Data(data_cap))
 }
 
 #[cfg(test)]
@@ -255,7 +262,10 @@ mod tests {
 
         assert_eq!(artifacts.code_caps.len(), 1);
         assert_eq!(artifacts.init_code_id, 0);
-        assert!(matches!(artifacts.cap_table.get(64), Some(Cap::Code(_))));
+        assert!(matches!(
+            artifacts.cap_table.get(64),
+            Some(Cap::Protocol(ProtocolCap::Reg(RegCap::Code(_))))
+        ));
     }
 
     #[test]
@@ -283,18 +293,18 @@ mod tests {
         )
         .unwrap();
         match artifacts.cap_table.get(100) {
-            Some(Cap::Protocol(ProtocolCap::VaultRef(vr))) => {
+            Some(Cap::Protocol(ProtocolCap::Reg(RegCap::VaultRef(vr)))) => {
                 assert_eq!(vr.vault_id, VaultId(99));
             }
             other => panic!(
-                "expected ProtocolCap::VaultRef at slot 100, got {:?}",
+                "expected embedded RegCap::VaultRef at slot 100, got {:?}",
                 other
             ),
         }
     }
 
     #[test]
-    fn filecap_propagated_unmapped() {
+    fn filecap_materializes_as_unmapped_data_for_image_programs() {
         let (mut state, halt) = state_with_halt_code();
         let qid = QuotaId(0); // genesis quota allocated above
         let file_id = state
@@ -413,6 +423,9 @@ mod tests {
             javm::PvmBackend::Default,
         )
         .unwrap();
-        assert!(matches!(artifacts.cap_table.get(64), Some(Cap::Code(_))));
+        assert!(matches!(
+            artifacts.cap_table.get(64),
+            Some(Cap::Protocol(ProtocolCap::Reg(RegCap::Code(_))))
+        ));
     }
 }

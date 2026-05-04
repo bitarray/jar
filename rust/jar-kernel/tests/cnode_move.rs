@@ -2,9 +2,9 @@
 //! is_empty against `vault.slots`. After CapId removal, caps live inline
 //! as `RegCap` values and project to/from Frame `Cap` representations:
 //!
-//! - VaultRef ↔ `ProtocolCap::VaultRef(_)`.
-//! - Resource ↔ `ProtocolCap::Resource(_)`.
-//! - Code / Data are container-bound (`take` / `clone` return `None`).
+//! - every `RegCap` embeds as `Cap::Protocol(ProtocolCap::Reg(_))`;
+//! - frame-only caps do not persist back into `vault.slots`;
+//! - registry-backed caps still cannot be taken with MOVE semantics.
 //!
 //! No cap_registry, no cascade revocation. `drop` just clears the slot.
 
@@ -49,8 +49,8 @@ fn take_resource_returns_protocol_resource_and_clears_slot() {
     let cap = foreign_cnode::take(&mut state, vault_id, 7, VaultRights::ALL)
         .expect("take with full rights");
     match cap {
-        Cap::Protocol(ProtocolCap::Resource(out)) => assert_eq!(out, r),
-        _ => panic!("expected ProtocolCap::Resource"),
+        Cap::Protocol(ProtocolCap::Reg(RegCap::Resource(out))) => assert_eq!(out, r),
+        _ => panic!("expected embedded RegCap::Resource"),
     }
     assert!(state.vaults.get(&vault_id).unwrap().slots.get(7).is_none());
 }
@@ -66,8 +66,8 @@ fn take_vault_ref_returns_protocol_vault_ref() {
     let cap =
         foreign_cnode::take(&mut state, vault_id, 5, VaultRights::ALL).expect("take vault_ref");
     match cap {
-        Cap::Protocol(ProtocolCap::VaultRef(out)) => assert_eq!(out, vr),
-        _ => panic!("expected ProtocolCap::VaultRef"),
+        Cap::Protocol(ProtocolCap::Reg(RegCap::VaultRef(out))) => assert_eq!(out, vr),
+        _ => panic!("expected embedded RegCap::VaultRef"),
     }
 }
 
@@ -105,7 +105,7 @@ fn take_file_cap_returns_none() {
 fn set_places_resource_into_empty_slot() {
     let (mut state, vault_id) = empty_vault();
     let r = ResourceCap(ResourceKind::CreateVault { quota_pages: 16 });
-    let cap = Cap::Protocol(ProtocolCap::Resource(r.clone()));
+    let cap = Cap::from(RegCap::Resource(r.clone()));
     foreign_cnode::set(&mut state, vault_id, 8, VaultRights::ALL, cap, None)
         .expect("set into empty slot 8");
     assert_eq!(
@@ -121,13 +121,35 @@ fn set_places_vault_ref_inline() {
         vault_id: VaultId(7),
         rights: VaultRights::READ,
     };
-    let cap = Cap::Protocol(ProtocolCap::VaultRef(vr));
+    let cap = Cap::from(RegCap::VaultRef(vr));
     foreign_cnode::set(&mut state, vault_id, 0, VaultRights::ALL, cap, None)
         .expect("set vault_ref");
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(0),
         Some(&RegCap::VaultRef(vr))
     );
+}
+
+#[test]
+fn set_places_persistent_code_reference() {
+    use jar_kernel::CodeCap;
+    let (mut state, vault_id) = empty_vault();
+    let qid = state.insert_storage_quota(u64::MAX / 2);
+    let code_id = state.intern_code(vec![0; 64], qid).expect("intern_code");
+    let code = CodeCap {
+        code_id,
+        byte_count: 64,
+    };
+    let cap = Cap::from(RegCap::Code(code));
+
+    foreign_cnode::set(&mut state, vault_id, 9, VaultRights::ALL, cap, None)
+        .expect("set persistent Code ref");
+
+    assert_eq!(
+        state.vaults.get(&vault_id).unwrap().slots.get(9),
+        Some(&RegCap::Code(code))
+    );
+    assert_eq!(state.code_blobs.get(&code_id).unwrap().refcount, 1);
 }
 
 #[test]
@@ -145,7 +167,7 @@ fn set_rejects_frame_only_caps() {
 fn set_requires_grant_right() {
     let (mut state, vault_id) = empty_vault();
     let r = ResourceCap(ResourceKind::CreateVault { quota_pages: 16 });
-    let cap = Cap::Protocol(ProtocolCap::Resource(r));
+    let cap = Cap::from(RegCap::Resource(r));
     assert!(foreign_cnode::set(&mut state, vault_id, 0, VaultRights::READ, cap, None).is_err());
 }
 
@@ -156,8 +178,8 @@ fn clone_resource_produces_independent_copy() {
     let cap = foreign_cnode::clone(&state, vault_id, 7, VaultRights::ALL, None)
         .expect("clone with derive right");
     match cap {
-        Cap::Protocol(ProtocolCap::Resource(out)) => assert_eq!(out, r),
-        _ => panic!("expected ProtocolCap::Resource"),
+        Cap::Protocol(ProtocolCap::Reg(RegCap::Resource(out))) => assert_eq!(out, r),
+        _ => panic!("expected embedded RegCap::Resource"),
     }
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(7),
@@ -176,8 +198,8 @@ fn clone_vault_ref_produces_inline_value() {
     let cap =
         foreign_cnode::clone(&state, vault_id, 3, VaultRights::ALL, None).expect("clone vault_ref");
     match cap {
-        Cap::Protocol(ProtocolCap::VaultRef(out)) => assert_eq!(out, vr),
-        _ => panic!("expected ProtocolCap::VaultRef"),
+        Cap::Protocol(ProtocolCap::Reg(RegCap::VaultRef(out))) => assert_eq!(out, vr),
+        _ => panic!("expected embedded RegCap::VaultRef"),
     }
     assert_eq!(
         state.vaults.get(&vault_id).unwrap().slots.get(3),
@@ -193,21 +215,23 @@ fn clone_requires_derive_right() {
 }
 
 #[test]
-fn clone_code_cap_returns_none() {
+fn clone_code_cap_returns_persistent_code_reference() {
     use jar_kernel::CodeCap;
     let (mut state, vault_id) = empty_vault();
     let qid = state.insert_storage_quota(u64::MAX / 2);
     let code_id = state.intern_code(vec![0; 64], qid).expect("intern_code");
-    place(
-        &mut state,
-        vault_id,
-        7,
-        RegCap::Code(CodeCap {
-            code_id,
-            byte_count: 64,
-        }),
-    );
-    assert!(foreign_cnode::clone(&state, vault_id, 7, VaultRights::ALL, None).is_none());
+    let code = CodeCap {
+        code_id,
+        byte_count: 64,
+    };
+    place(&mut state, vault_id, 7, RegCap::Code(code));
+    let cap = foreign_cnode::clone(&state, vault_id, 7, VaultRights::ALL, None)
+        .expect("Code RegCap embeds into Frame Cap");
+    match cap {
+        Cap::Protocol(ProtocolCap::Reg(RegCap::Code(out))) => assert_eq!(out, code),
+        Cap::Code(_) => panic!("persistent RegCap::Code must not become executable Cap::Code"),
+        _ => panic!("expected embedded RegCap::Code"),
+    }
 }
 
 #[test]
@@ -246,10 +270,10 @@ fn is_empty_reports_slot_state() {
 #[test]
 fn vault_ref_with_read_announces_foreign_frame() {
     use javm::cap::ProtocolCap as _;
-    let cap = ProtocolCap::VaultRef(VaultRefCap {
+    let cap = ProtocolCap::Reg(RegCap::VaultRef(VaultRefCap {
         vault_id: VaultId(42),
         rights: VaultRights::ALL,
-    });
+    }));
     let (id, rights) = cap.as_foreign_frame().expect("VaultRef → foreign frame");
     assert_eq!(id, VaultId(42));
     assert_eq!(rights, VaultRights::ALL);
@@ -258,9 +282,9 @@ fn vault_ref_with_read_announces_foreign_frame() {
 #[test]
 fn vault_ref_without_read_does_not_announce_foreign_frame() {
     use javm::cap::ProtocolCap as _;
-    let cap = ProtocolCap::VaultRef(VaultRefCap {
+    let cap = ProtocolCap::Reg(RegCap::VaultRef(VaultRefCap {
         vault_id: VaultId(42),
         rights: VaultRights::INITIALIZE,
-    });
+    }));
     assert!(cap.as_foreign_frame().is_none());
 }

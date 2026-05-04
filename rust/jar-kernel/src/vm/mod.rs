@@ -62,7 +62,7 @@ pub fn new_vm_from_vault(
     role: crate::types::KernelRole,
     attestation_scope: Option<crate::cap::AttestationScopeCap>,
 ) -> KResult<Vm> {
-    use crate::cap::{CallerKernelCap, ProtocolCap, SelfCap, VaultRefCap, VaultRights};
+    use crate::cap::{CallerKernelCap, ProtocolCap, RegCap, SelfCap, VaultRefCap, VaultRights};
     use crate::vm::host_abi::{
         BARE_ATTESTATION_SCOPE_SLOT, BARE_CALLER_KERNEL_SLOT, BARE_EMIT_EVENT_SLOT,
         BARE_HOME_VAULT_SLOT, BARE_MINT_ATTEST_CAP_SLOT, BARE_OPEN_SLOT, BARE_SAVE_SLOT,
@@ -97,10 +97,10 @@ pub fn new_vm_from_vault(
     );
     bare.set(
         BARE_HOME_VAULT_SLOT,
-        JavmCap::Protocol(ProtocolCap::VaultRef(VaultRefCap {
+        JavmCap::Protocol(ProtocolCap::Reg(RegCap::VaultRef(VaultRefCap {
             vault_id,
             rights: VaultRights::ALL,
-        })),
+        }))),
     );
     bare.set(
         BARE_SELF_ID_SLOT,
@@ -208,6 +208,17 @@ impl<H: Hardware> ProtocolCapHost<ProtocolCap> for InvocationHost<'_, H> {
         }
     }
 
+    fn caller_cap_for(
+        &mut self,
+        _caller_table: &javm::cap::CapTable<ProtocolCap>,
+    ) -> Option<Cap<ProtocolCap>> {
+        Some(Cap::Protocol(ProtocolCap::CallerVault(
+            crate::cap::CallerVaultCap {
+                vault_id: self.current_vault,
+            },
+        )))
+    }
+
     fn get(&self, vault: VaultId, slot: u8) -> Option<Cap<ProtocolCap>> {
         foreign_cnode::get(self.state, vault, slot)
     }
@@ -282,9 +293,6 @@ impl InvocationResult {
         self.fault.is_none()
     }
 }
-
-/// MainFrame slot where the kernel pins the running VM's `SelfCap`.
-pub const SELF_SLOT: u8 = 2;
 
 /// Drive a real javm VM to a terminal state. CALL dispatch happens
 /// inside javm via `InvocationHost::call`; this function just

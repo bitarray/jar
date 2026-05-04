@@ -135,8 +135,7 @@ pub const MGMT_CNODE_SWAP: u32 = 0x13;
 /// `FrameRef` to a public Callable produced by `Vault.initialize`)
 /// at this same slot before halting. The host reads the result on
 /// halt. Sits after the kernel-managed BareFrame slots Caller (1)
-/// and Gas (3); Self is pinned per-VM in MainFrame at `SELF_SLOT`
-/// (= 2) and has no BareFrame counterpart.
+/// and Gas (3); host-specific context caps use host-defined slots.
 pub const BARE_ARG_SLOT: u8 = 4;
 
 /// Bare-Frame sub-slot where the kernel places the per-invocation
@@ -147,13 +146,10 @@ pub const BARE_ARG_SLOT: u8 = 4;
 /// 9 is the next free sub-slot.
 pub const BARE_FRAME_UNTYPED_SLOT: u8 = 9;
 
-/// BareFrame sub-slot holding the per-CALL Caller cap. Set by the
-/// host (jar-kernel) at top-level invocation entry via
-/// `populate_ephemeral_kernel_caps`. javm refreshes this slot on
-/// every internal CALL transition by calling
-/// `ProtocolCap::caller_cap_for(caller_table)` so guests in a
-/// sub-CALL see their *immediate* caller, not the original
-/// invocation trigger; the prior value is restored on REPLY/halt/
+/// BareFrame sub-slot holding the per-CALL Caller cap. javm refreshes
+/// this slot on every internal CALL transition by asking the host's
+/// [`ProtocolCapHost`] for a caller cap, so guests in a sub-CALL see
+/// their immediate caller; the prior value is restored on REPLY/halt/
 /// fault via `restore_ephemeral_kernel_slots`.
 pub const BARE_CALLER_SLOT: u8 = 1;
 
@@ -632,7 +628,7 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
                 let target_vm = f.vm_id;
                 #[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
                 self.flush_live_ctx();
-                self.handle_call_vm(target_vm)
+                self.handle_call_vm(target_vm, host)
             }
             Cap::Data(_) | Cap::FaultHandler(_) | Cap::Gas(_) | Cap::CNode(_) => {
                 // None of DATA / FaultHandler / Gas / CNode is callable.
@@ -827,7 +823,11 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
     /// it back after REPLY. The kernel just transfers the active VM's
     /// remaining gas to the callee on the way in and the callee's
     /// remaining back to the caller on REPLY/HALT.
-    fn handle_call_vm(&mut self, vm_id: VmId) -> DispatchResult {
+    fn handle_call_vm<H: ProtocolCapHost<P>>(
+        &mut self,
+        vm_id: VmId,
+        host: &mut H,
+    ) -> DispatchResult {
         let target_vm_id = vm_id.index();
 
         // Validate VmId (generation check for stale handles)
@@ -869,15 +869,13 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
         let prev_kernel_slots = self.take_ephemeral_kernel_slots(caller_id);
 
         // Refresh BareFrame[BARE_CALLER_SLOT] with a fresh CallerCap
-        // identifying the calling VM. We compute this via
-        // `P::caller_cap_for(caller_table)` so jar-kernel can inspect
-        // the caller's home VaultRef and produce the right shape;
-        // protocol impls without a notion of caller (e.g. javm's
-        // u8 tests) return None and the slot is left as-stashed
-        // (will be restored to its pre-CALL value on REPLY).
+        // identifying the calling VM. Protocol hosts without a notion
+        // of caller (e.g. javm's u8 tests) return None and the slot is
+        // left as-stashed (will be restored to its pre-CALL value on
+        // REPLY).
         let new_caller_cap = {
             let caller_table = &self.vm_arena.vm(caller_id).cap_table;
-            P::caller_cap_for(caller_table)
+            host.caller_cap_for(caller_table)
         };
         if let Some(cap) = new_caller_cap {
             let bare_idx = self.bare_frame_idx();
@@ -1152,9 +1150,8 @@ impl<P: crate::cap::ProtocolCap> InvocationKernel<P> {
     /// Take the bare Frame's sub-slots 0/1 (Reply, Caller) for
     /// stashing on the call-stack. These slots are the per-frame
     /// kernel-managed area; the host (jar-kernel) populates them. javm
-    /// just preserves whatever was there. Self lives in each VM's
-    /// MainFrame at `SELF_SLOT` (= 2) and is per-VM, so it doesn't
-    /// need cross-CALL stashing.
+    /// just preserves whatever was there. Other host-specific context
+    /// caps are outside this javm-managed save/restore pair.
     fn take_ephemeral_kernel_slots(&mut self, _caller_vm: u16) -> [Option<Cap<P>>; 2] {
         let table = &mut self.vm_arena.vm_mut(self.bare_frame_idx()).cap_table;
         [table.take(0), table.take(1)]

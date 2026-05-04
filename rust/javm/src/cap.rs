@@ -69,7 +69,8 @@ impl FaultHandlerRights {
 /// kernel allows the mirror move under a narrow whitelist; arbitrary
 /// pinned-slot moves still refuse).
 ///
-/// Move-only: `is_copyable() = false`, `is_droppable() = false`.
+/// Move-only and non-copyable. Generic DROP refuses pinned
+/// FaultHandler slots except for kernel-managed release paths.
 /// Auto-released back to `B_FH` when the holder VM REPLYs / halts /
 /// faults so an ancestor can still catch later faults.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -469,10 +470,10 @@ pub enum CallOutcome {
 
 /// Per-variant policy for `Cap::Protocol(P)` payloads.
 ///
-/// javm consults these methods when handling cap-table mutation
-/// management ecallis (COPY / MOVE / DROP). The default impls allow
-/// every operation; consumers that want stricter rules (e.g. jar-kernel
-/// rejecting copy of pinned caps) override the relevant method.
+/// javm consults these methods when handling cap-table COPY policy and
+/// foreign-frame traversal. MOVE / DROP policy for protocol caps is
+/// host-side: local protocol caps move/drop like other slot values, and
+/// foreign frames route through [`ProtocolCapHost`].
 ///
 /// ## Foreign frames
 ///
@@ -497,25 +498,6 @@ pub trait ProtocolCap: Clone + core::fmt::Debug {
     /// May the guest COPY this cap to another cap-table slot?
     fn is_copyable(&self) -> bool {
         true
-    }
-    /// May the guest MOVE this cap between cap-table slots?
-    fn is_movable(&self) -> bool {
-        true
-    }
-    /// May the guest DROP this cap?
-    fn is_droppable(&self) -> bool {
-        true
-    }
-    /// Produce the cap to write at BareFrame `BARE_CALLER_SLOT` when
-    /// a CALL transitions into a callee VM. javm calls this with the
-    /// *caller* VM's persistent cap-table; the host (e.g. jar-kernel)
-    /// uses it to read identifying state (the home VaultRef at
-    /// MainFrame slot 1) and produces the appropriate `CallerCap`
-    /// shape. Returning `None` leaves `BARE_CALLER_SLOT` untouched —
-    /// the default for protocol-cap implementations that don't model
-    /// callers (e.g. javm's own tests with `P = u8`).
-    fn caller_cap_for(_caller_table: &CapTable<Self>) -> Option<Cap<Self>> {
-        None
     }
 
     /// If this cap is a handle into a foreign cap-table (e.g. a Vault
@@ -568,6 +550,14 @@ pub trait ProtocolCapHost<P: ProtocolCap> {
     /// here, so `cap` is just the protocol-payload value as the
     /// dispatch selector.
     fn call(&mut self, cap: P, vm: &mut crate::kernel::InvocationKernel<P>) -> CallOutcome;
+
+    /// Produce the cap to write at BareFrame `BARE_CALLER_SLOT` when
+    /// a CALL transitions into a callee VM. The default for protocol-cap
+    /// implementations that don't model callers (e.g. javm's own tests
+    /// with `P = u8`) leaves the slot untouched.
+    fn caller_cap_for(&mut self, _caller_table: &CapTable<P>) -> Option<Cap<P>> {
+        None
+    }
 
     /// Read-only fetch of the cap at `(id, slot)`. Used by the resolve
     /// walk to traverse cap-ref chains of any depth and by CALL
@@ -648,6 +638,9 @@ where
         CallOutcome::Fault(alloc::format!(
             "CALL on cap with no host CALL semantics: {cap:?}"
         ))
+    }
+    fn caller_cap_for(&mut self, _caller_table: &CapTable<P>) -> Option<Cap<P>> {
+        None
     }
     fn get(&self, _id: (), _slot: u8) -> Option<Cap<P>> {
         None

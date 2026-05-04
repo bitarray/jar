@@ -5,19 +5,11 @@
 //! reference projection is paired with refcount maintenance on the
 //! σ-side registry entry (data_blobs / code_blobs / storage_quotas):
 //!
-//! - `RegCap::VaultRef(vr)` ↔ `Cap::Protocol(ProtocolCap::VaultRef(vr))`.
-//! - `RegCap::Resource(r)`  ↔ `Cap::Protocol(ProtocolCap::Resource(r))`.
-//! - `RegCap::ImageRef(ir)` ↔ `Cap::Protocol(ProtocolCap::ImageRef(ir))`.
-//! - `RegCap::File(f)`      ↔ `Cap::Protocol(ProtocolCap::File(f))`.
-//!   `clone` bumps `data_blobs[file_id].refcount`; `drop`/`take`
-//!   decrement (and free + refund-to-origin at refcount → 0).
-//! - `RegCap::StorageQuota(q)` ↔ `Cap::Protocol(ProtocolCap::StorageQuota(q))`.
-//!   Same refcount discipline against `storage_quotas`.
-//! - `RegCap::Code(_)` is container-bound — `clone` / `take` return
-//!   `None`; the persistent code reference doesn't get a Frame
-//!   projection in v1 (Frame `Cap::Code` is the *compiled* artifact,
-//!   produced by `vault_init`'s compile path; the σ↔Frame conversion
-//!   path for Code is deferred).
+//! - every `RegCap` embeds into Frame as
+//!   `Cap::Protocol(ProtocolCap::Reg(_))`;
+//! - only that embedded persistent form can be written back to σ;
+//! - executable `Cap::Code` is frame-only and never persists as
+//!   `RegCap::Code`.
 //!
 //! Bytes-side conversion across the persistence boundary lives in
 //! the dedicated `host_open` / `host_save` host calls (Stage 3) —
@@ -26,7 +18,7 @@
 
 use std::sync::Arc;
 
-use crate::cap::{Cap, ProtocolCap, RegCap, VaultRights};
+use crate::cap::{Cap, RegCap, VaultRights};
 use crate::types::{State, VaultId};
 use crate::vm::Vm;
 
@@ -51,57 +43,22 @@ pub(crate) fn slot_set(state: &mut State, vault: VaultId, slot: u8, value: Optio
 }
 
 // =============================================================================
-// Cap-shape projection
-// =============================================================================
-
-/// Translate a `RegCap` into the Frame cap-table representation.
-/// Returns `None` for `RegCap::Code`, which is container-bound (Frame
-/// `Cap::Code` is the compiled artifact, not a reference; the
-/// vault_init compile path is the only σ→Frame transition for Code).
-pub fn vault_cap_to_frame(cap: &RegCap) -> Option<Cap> {
-    match cap {
-        RegCap::VaultRef(vr) => Some(Cap::Protocol(ProtocolCap::VaultRef(*vr))),
-        RegCap::Resource(r) => Some(Cap::Protocol(ProtocolCap::Resource(r.clone()))),
-        RegCap::ImageRef(ir) => Some(Cap::Protocol(ProtocolCap::ImageRef(*ir))),
-        RegCap::File(f) => Some(Cap::Protocol(ProtocolCap::File(*f))),
-        RegCap::StorageQuota(q) => Some(Cap::Protocol(ProtocolCap::StorageQuota(*q))),
-        RegCap::Code(_) => None,
-    }
-}
-
-/// Translate a Frame cap back to a `RegCap` for placement into
-/// `vault.slots`. Returns `None` if the cap can't legally live in σ.
-pub fn frame_to_vault_cap(cap: &Cap) -> Option<RegCap> {
-    match cap {
-        Cap::Protocol(ProtocolCap::VaultRef(vr)) => Some(RegCap::VaultRef(*vr)),
-        Cap::Protocol(ProtocolCap::Resource(r)) => Some(RegCap::Resource(r.clone())),
-        Cap::Protocol(ProtocolCap::ImageRef(ir)) => Some(RegCap::ImageRef(*ir)),
-        Cap::Protocol(ProtocolCap::File(f)) => Some(RegCap::File(*f)),
-        Cap::Protocol(ProtocolCap::StorageQuota(q)) => Some(RegCap::StorageQuota(*q)),
-        _ => None,
-    }
-}
-
-// =============================================================================
 // Rights-checked slot operations
 // =============================================================================
 
 /// `ProtocolCapHost::get` — read-only fetch.
 pub fn get(state: &State, vault: VaultId, slot: u8) -> Option<Cap> {
-    slot_cap(state, vault, slot)
-        .as_ref()
-        .and_then(vault_cap_to_frame)
+    slot_cap(state, vault, slot).map(Cap::from)
 }
 
 /// `ProtocolCapHost::take` — fetch and clear, gated by `rights.revoke`.
 ///
 /// Bans `RegCap::File`, `RegCap::Code`, and `RegCap::StorageQuota`:
-/// these are reference caps with refcount discipline, and the
+/// these are persistent registry references with refcount discipline, and the
 /// take-then-set ordering used by `MGMT_MOVE` cannot maintain
 /// refcount correctness when both endpoints would touch the same
 /// entry. Programs use `clone` + `drop` (i.e. MGMT_COPY then
-/// MGMT_DROP) for move semantics. This mirrors the prior ban on
-/// `RegCap::Data` MOVE-across-boundary.
+/// MGMT_DROP) for move semantics.
 pub fn take(state: &mut State, vault: VaultId, slot: u8, rights: VaultRights) -> Option<Cap> {
     if !rights.revoke {
         return None;
@@ -113,7 +70,7 @@ pub fn take(state: &mut State, vault: VaultId, slot: u8, rights: VaultRights) ->
     ) {
         return None;
     }
-    let frame_cap = vault_cap_to_frame(&cap)?;
+    let frame_cap = Cap::from(cap);
     slot_set(state, vault, slot, None);
     Some(frame_cap)
 }
@@ -140,13 +97,9 @@ pub fn set(
         Some(v) if v.slots.get(slot).is_none() => {}
         _ => return Err(cap),
     }
-    let vc = match &cap {
-        Cap::Protocol(ProtocolCap::VaultRef(vr)) => RegCap::VaultRef(*vr),
-        Cap::Protocol(ProtocolCap::Resource(r)) => RegCap::Resource(r.clone()),
-        Cap::Protocol(ProtocolCap::ImageRef(ir)) => RegCap::ImageRef(*ir),
-        Cap::Protocol(ProtocolCap::File(f)) => RegCap::File(*f),
-        Cap::Protocol(ProtocolCap::StorageQuota(q)) => RegCap::StorageQuota(*q),
-        _ => return Err(cap),
+    let vc = match RegCap::try_from(&cap) {
+        Ok(vc) => vc,
+        Err(_) => return Err(cap),
     };
     // Bump σ-side refcount on registry entries (File/Code/Quota).
     // Other RegCap kinds have no registry entry and need no bookkeeping.
@@ -173,7 +126,7 @@ pub fn clone(
         return None;
     }
     let cap = slot_cap(state, vault, slot)?;
-    vault_cap_to_frame(&cap)
+    Some(Cap::from(cap))
 }
 
 /// `ProtocolCapHost::drop` — clear the slot, gated by `rights.revoke`.

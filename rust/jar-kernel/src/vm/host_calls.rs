@@ -26,7 +26,7 @@
 //!
 //! ABI register layout: see `vm/host_abi.rs`.
 
-use crate::cap::{AttestationCap, AttestationScopeCap, FileCap, ProtocolCap};
+use crate::cap::{AttestationCap, AttestationScopeCap, FileCap, ProtocolCap, RegCap};
 use crate::crypto;
 use crate::pool::PoolEntry;
 use crate::runtime::Hardware;
@@ -212,7 +212,7 @@ pub fn host_set_score<H: Hardware>(vm: &mut Vm, host: &mut InvocationHost<'_, H>
 
 /// `open(file_cap_slot, dst_slot)`:
 ///   φ[7] = file_cap_slot in active VM's MainFrame holding
-///          `Cap::Protocol(File(FileCap))`.
+///          `Cap::Protocol(ProtocolCap::Reg(RegCap::File(_)))`.
 ///   φ[8] = dst_slot — destination for the resulting `Cap::Data`.
 ///
 /// Reads the FileCap, looks up `state.data_blobs[file_id]`, allocates
@@ -227,7 +227,7 @@ pub fn host_open<H: Hardware>(vm: &mut Vm, host: &mut InvocationHost<'_, H>) -> 
 
     // Read the source FileCap from the active VM's main cap-table.
     let file_cap = match vm.cap_table_get(file_cap_slot) {
-        Some(Cap::Protocol(ProtocolCap::File(f))) => *f,
+        Some(Cap::Protocol(ProtocolCap::Reg(RegCap::File(f)))) => *f,
         _ => return rc(RC_BAD_CAP),
     };
     // Refuse if destination is occupied or pinned.
@@ -264,13 +264,14 @@ pub fn host_open<H: Hardware>(vm: &mut Vm, host: &mut InvocationHost<'_, H>) -> 
 
 /// `save(data_cap_slot, quota_cap_slot, dst_slot)`:
 ///   φ[7] = data_cap_slot — Frame slot holding source `Cap::Data`.
-///   φ[8] = quota_cap_slot — Frame slot holding `Cap::Protocol(StorageQuota(_))`.
+///   φ[8] = quota_cap_slot — Frame slot holding
+///          `Cap::Protocol(ProtocolCap::Reg(RegCap::StorageQuota(_)))`.
 ///   φ[9] = dst_slot — destination for the resulting FileCap.
 ///
 /// Reads the data cap's post-execution pages, allocates a fresh
 /// `FileId` in `state.data_blobs` (debiting the named quota), places
-/// `Cap::Protocol(File(FileCap))` at `dst_slot`. Process-only — verify
-/// is read-only on σ.
+/// `Cap::Protocol(ProtocolCap::Reg(RegCap::File(_)))` at `dst_slot`.
+/// Process-only — verify is read-only on σ.
 pub fn host_save<H: Hardware>(vm: &mut Vm, host: &mut InvocationHost<'_, H>) -> CallOutcome {
     if !matches!(host.role, KernelRole::Process) {
         return rc(RC_READONLY);
@@ -286,7 +287,7 @@ pub fn host_save<H: Hardware>(vm: &mut Vm, host: &mut InvocationHost<'_, H>) -> 
     };
     // Read the QuotaCap.
     let quota_id = match vm.cap_table_get(quota_cap_slot) {
-        Some(Cap::Protocol(ProtocolCap::StorageQuota(q))) => q.quota_id,
+        Some(Cap::Protocol(ProtocolCap::Reg(RegCap::StorageQuota(q)))) => q.quota_id,
         _ => return rc(RC_BAD_CAP),
     };
     // Destination must be empty.
@@ -310,7 +311,7 @@ pub fn host_save<H: Hardware>(vm: &mut Vm, host: &mut InvocationHost<'_, H>) -> 
 
     vm.cap_table_set(
         dst_slot,
-        Cap::Protocol(ProtocolCap::File(FileCap {
+        Cap::from(RegCap::File(FileCap {
             file_id,
             byte_count,
         })),

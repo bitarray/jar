@@ -3,12 +3,13 @@
 //! Builds a Vault by hand (CodeCap holding a raw code sub-blob extracted
 //! from `halt_blob`), runs the new `vm::new_vm_from_vault` constructor,
 //! and asserts the resulting kernel has the expected shape: VM 0 + bare
-//! Frame in the arena, the CodeCap visible at slot 64 of VM 0's
-//! CapTable.
+//! Frame in the arena, and the persistent Code RegCap visible at slot
+//! 64 of VM 0's CapTable. The executable init code lives separately in
+//! `vm.code_caps`.
 
 use std::sync::Arc;
 
-use jar_kernel::cap::{CodeCap, VaultRefCap, VaultRights};
+use jar_kernel::cap::{CodeCap, ProtocolCap, VaultRefCap, VaultRights};
 use jar_kernel::vm::new_vm_from_vault;
 use jar_kernel::{RegCap, State, Vault, VaultId};
 
@@ -75,11 +76,17 @@ fn new_vm_from_vault_smoke_test() {
     assert_eq!(vm.vm_arena.len(), 2);
     // Single CodeCap in code_caps (the init CodeCap).
     assert_eq!(vm.code_caps.len(), 1);
-    // Slot 64 of VM 0 holds the Code cap (init slot per the test fixture).
+    // Slot 64 of VM 0 holds the persistent code reference. The executable
+    // compiled code is in vm.code_caps and selected by init_code_id.
     assert!(matches!(
         vm.vm_arena.vm(0).cap_table.get(INIT_SLOT),
-        Some(javm::cap::Cap::Code(_))
+        Some(javm::cap::Cap::Protocol(ProtocolCap::Reg(RegCap::Code(_))))
     ));
+    let executable = javm::cap::Cap::Code(vm.code_caps[0].clone());
+    assert!(
+        RegCap::try_from(&executable).is_err(),
+        "executable Cap::Code is frame-only and must not persist"
+    );
 }
 
 #[test]
@@ -256,14 +263,14 @@ fn new_vm_from_vault_image_vault_ref_propagates() {
     )
     .expect("new_vm_from_vault succeeds");
 
-    use jar_kernel::cap::{Cap, ProtocolCap};
+    use jar_kernel::cap::Cap;
     match vm.vm_arena.vm(0).cap_table.get(100) {
-        Some(Cap::Protocol(ProtocolCap::VaultRef(vr))) => {
+        Some(Cap::Protocol(ProtocolCap::Reg(RegCap::VaultRef(vr)))) => {
             assert_eq!(vr.vault_id, target_vault);
             assert_eq!(vr.rights, VaultRights::ALL);
         }
         other => panic!(
-            "expected ProtocolCap::VaultRef at slot 100, got {:?}",
+            "expected embedded RegCap::VaultRef at slot 100, got {:?}",
             other
         ),
     }

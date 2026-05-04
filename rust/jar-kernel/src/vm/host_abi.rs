@@ -69,7 +69,7 @@
 //!
 //! ### `open(file_cap_slot, dst_slot)` (BareFrame slot 15)
 //! - φ[7] = file_cap_slot — slot in the active VM's MainFrame
-//!   holding `Cap::Protocol(File(FileCap))`.
+//!   holding `Cap::Protocol(ProtocolCap::Reg(RegCap::File(_)))`.
 //! - φ[8] = dst_slot — slot in the active VM's MainFrame to place
 //!   the resulting `Cap::Data`. Must be empty.
 //! - returns RC in φ[7] (RC_OK on success; RC_BAD_CAP if file_cap_slot
@@ -80,9 +80,10 @@
 //! - φ[7] = data_cap_slot — slot in the active VM's MainFrame
 //!   holding the source `Cap::Data` (post-execution pages).
 //! - φ[8] = quota_cap_slot — slot holding the
-//!   `Cap::Protocol(StorageQuota(QuotaCap))` that pays for the new file.
+//!   `Cap::Protocol(ProtocolCap::Reg(RegCap::StorageQuota(_)))` that
+//!   pays for the new file.
 //! - φ[9] = dst_slot — slot to place the resulting
-//!   `Cap::Protocol(File(FileCap))`. Must be empty.
+//!   `Cap::Protocol(ProtocolCap::Reg(RegCap::File(_)))`. Must be empty.
 //! - returns RC in φ[7]. Process role only — read-only contexts
 //!   (verify) get RC_READONLY.
 
@@ -129,8 +130,9 @@ pub const BARE_OPEN_SLOT: u8 = 15;
 /// at — `host_save(data_cap_slot, quota_cap_slot, dst_slot)` reads
 /// post-execution pages from a Frame `Cap::Data`, debits bytes from
 /// the named StorageQuota entry, mints a fresh `FileId` in
-/// `state.data_blobs`, and places `Cap::Protocol(File(...))` at
-/// `dst_slot`. Process role only.
+/// `state.data_blobs`, and places
+/// `Cap::Protocol(ProtocolCap::Reg(RegCap::File(_)))` at `dst_slot`.
+/// Process role only.
 pub const BARE_SAVE_SLOT: u8 = 16;
 
 /// Sentinel returned from host calls signalling success when the call
