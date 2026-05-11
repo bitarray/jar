@@ -331,6 +331,54 @@ impl Assembler {
         self
     }
 
+    /// Opcode 150: mul_imm_64 (rD = rA * imm, 64-bit)
+    pub fn mul_imm_64(&mut self, rd: Reg, ra: Reg, imm: i32) -> &mut Self {
+        self.emit_byte(150, true);
+        self.emit_byte((rd as u8) | ((ra as u8) << 4), false);
+        self.emit_imm(imm as i64, 4);
+        self
+    }
+
+    /// Opcode 132: and_imm (rD = rA & imm)
+    pub fn and_imm(&mut self, rd: Reg, ra: Reg, imm: i32) -> &mut Self {
+        self.emit_byte(132, true);
+        self.emit_byte((rd as u8) | ((ra as u8) << 4), false);
+        self.emit_imm(imm as i64, 4);
+        self
+    }
+
+    /// Opcode 133: xor_imm (rD = rA ^ imm)
+    pub fn xor_imm(&mut self, rd: Reg, ra: Reg, imm: i32) -> &mut Self {
+        self.emit_byte(133, true);
+        self.emit_byte((rd as u8) | ((ra as u8) << 4), false);
+        self.emit_imm(imm as i64, 4);
+        self
+    }
+
+    /// Opcode 134: or_imm (rD = rA | imm)
+    pub fn or_imm(&mut self, rd: Reg, ra: Reg, imm: i32) -> &mut Self {
+        self.emit_byte(134, true);
+        self.emit_byte((rd as u8) | ((ra as u8) << 4), false);
+        self.emit_imm(imm as i64, 4);
+        self
+    }
+
+    /// Opcode 136: set_less_than_unsigned_imm (rD = (rA <u imm) ? 1 : 0)
+    pub fn set_less_than_unsigned_imm(&mut self, rd: Reg, ra: Reg, imm: i32) -> &mut Self {
+        self.emit_byte(136, true);
+        self.emit_byte((rd as u8) | ((ra as u8) << 4), false);
+        self.emit_imm(imm as i64, 4);
+        self
+    }
+
+    /// Opcode 137: set_less_than_signed_imm (rD = (rA <s imm) ? 1 : 0)
+    pub fn set_less_than_signed_imm(&mut self, rd: Reg, ra: Reg, imm: i32) -> &mut Self {
+        self.emit_byte(137, true);
+        self.emit_byte((rd as u8) | ((ra as u8) << 4), false);
+        self.emit_imm(imm as i64, 4);
+        self
+    }
+
     // ===== Three register instructions =====
 
     /// Opcode 200: add_64 (rD = rA + rB)
@@ -346,6 +394,150 @@ impl Assembler {
         self.emit_byte(201, true);
         self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
         self.emit_byte(rd as u8, false);
+        self
+    }
+
+    /// Opcode 202: mul_64 (rD = rA * rB)
+    pub fn mul_64(&mut self, rd: Reg, ra: Reg, rb: Reg) -> &mut Self {
+        self.emit_byte(202, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_byte(rd as u8, false);
+        self
+    }
+
+    /// Opcode 203: div_unsigned_64 (rD = rA /u rB)
+    pub fn div_unsigned_64(&mut self, rd: Reg, ra: Reg, rb: Reg) -> &mut Self {
+        self.emit_byte(203, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_byte(rd as u8, false);
+        self
+    }
+
+    /// Opcode 204: div_signed_64 (rD = rA /s rB)
+    pub fn div_signed_64(&mut self, rd: Reg, ra: Reg, rb: Reg) -> &mut Self {
+        self.emit_byte(204, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_byte(rd as u8, false);
+        self
+    }
+
+    /// Opcode 205: rem_unsigned_64 (rD = rA %u rB)
+    pub fn rem_unsigned_64(&mut self, rd: Reg, ra: Reg, rb: Reg) -> &mut Self {
+        self.emit_byte(205, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_byte(rd as u8, false);
+        self
+    }
+
+    /// Opcode 206: rem_signed_64 (rD = rA %s rB)
+    pub fn rem_signed_64(&mut self, rd: Reg, ra: Reg, rb: Reg) -> &mut Self {
+        self.emit_byte(206, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_byte(rd as u8, false);
+        self
+    }
+
+    /// Opcode 210: and (rD = rA & rB)
+    pub fn and(&mut self, rd: Reg, ra: Reg, rb: Reg) -> &mut Self {
+        self.emit_byte(210, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_byte(rd as u8, false);
+        self
+    }
+
+    /// Opcode 211: xor (rD = rA ^ rB)
+    pub fn xor(&mut self, rd: Reg, ra: Reg, rb: Reg) -> &mut Self {
+        self.emit_byte(211, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_byte(rd as u8, false);
+        self
+    }
+
+    /// Opcode 212: or (rD = rA | rB)
+    pub fn or(&mut self, rd: Reg, ra: Reg, rb: Reg) -> &mut Self {
+        self.emit_byte(212, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_byte(rd as u8, false);
+        self
+    }
+
+    /// Opcode 216: set_less_than_unsigned (rD = (rA <u rB) ? 1 : 0)
+    pub fn set_less_than_unsigned(&mut self, rd: Reg, ra: Reg, rb: Reg) -> &mut Self {
+        self.emit_byte(216, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_byte(rd as u8, false);
+        self
+    }
+
+    /// Opcode 217: set_less_than_signed (rD = (rA <s rB) ? 1 : 0)
+    pub fn set_less_than_signed(&mut self, rd: Reg, ra: Reg, rb: Reg) -> &mut Self {
+        self.emit_byte(217, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_byte(rd as u8, false);
+        self
+    }
+
+    // ===== Register-register branches =====
+    //
+    // Encoding: opcode + (rA | rB<<4) + 4-byte signed relative offset.
+    // Offset is relative to the branch instruction's own PC. Use a
+    // negative offset for backward jumps (loops); positive for forward.
+
+    /// Opcode 170: branch_eq (branch if rA == rB)
+    pub fn branch_eq(&mut self, ra: Reg, rb: Reg, rel_offset: i32) -> &mut Self {
+        self.emit_byte(170, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_imm(rel_offset as i64, 4);
+        self
+    }
+
+    /// Opcode 171: branch_not_eq (branch if rA != rB)
+    pub fn branch_not_eq(&mut self, ra: Reg, rb: Reg, rel_offset: i32) -> &mut Self {
+        self.emit_byte(171, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_imm(rel_offset as i64, 4);
+        self
+    }
+
+    /// Opcode 172: branch_less_unsigned (branch if rA <u rB)
+    pub fn branch_less_unsigned(&mut self, ra: Reg, rb: Reg, rel_offset: i32) -> &mut Self {
+        self.emit_byte(172, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_imm(rel_offset as i64, 4);
+        self
+    }
+
+    /// Opcode 173: branch_less_signed (branch if rA <s rB)
+    pub fn branch_less_signed(&mut self, ra: Reg, rb: Reg, rel_offset: i32) -> &mut Self {
+        self.emit_byte(173, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_imm(rel_offset as i64, 4);
+        self
+    }
+
+    /// Opcode 174: branch_greater_or_equal_unsigned (branch if rA >=u rB)
+    pub fn branch_greater_or_equal_unsigned(
+        &mut self,
+        ra: Reg,
+        rb: Reg,
+        rel_offset: i32,
+    ) -> &mut Self {
+        self.emit_byte(174, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_imm(rel_offset as i64, 4);
+        self
+    }
+
+    /// Opcode 175: branch_greater_or_equal_signed (branch if rA >=s rB)
+    pub fn branch_greater_or_equal_signed(
+        &mut self,
+        ra: Reg,
+        rb: Reg,
+        rel_offset: i32,
+    ) -> &mut Self {
+        self.emit_byte(175, true);
+        self.emit_byte((ra as u8) | ((rb as u8) << 4), false);
+        self.emit_imm(rel_offset as i64, 4);
         self
     }
 
@@ -887,5 +1079,173 @@ mod tests {
             javm::kernel::KernelResult::Halt(_) | javm::kernel::KernelResult::Panic => {}
             other => panic!("Expected Halt or Panic, got {:?}", other),
         }
+    }
+
+    // ===== Extended ALU + branch ops =====
+    //
+    // Each test verifies the emitted bytes match the documented opcode + the
+    // encoding shape used by the surrounding methods in this file.
+
+    #[test]
+    fn test_mul_imm_64_encoding() {
+        let mut asm = Assembler::new();
+        asm.mul_imm_64(Reg::A0, Reg::A1, 7);
+        assert_eq!(asm.code[0], 150); // opcode
+        assert_eq!(asm.code[1], (Reg::A0 as u8) | ((Reg::A1 as u8) << 4));
+        assert_eq!(asm.code[2], 7); // imm LE byte 0
+        assert_eq!(asm.code.len(), 6); // 1 opcode + 1 reg_byte + 4 imm
+        assert_eq!(asm.bitmask[0], 1);
+        assert!(asm.bitmask[1..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_set_less_than_unsigned_imm_encoding() {
+        let mut asm = Assembler::new();
+        asm.set_less_than_unsigned_imm(Reg::T0, Reg::T1, 100);
+        assert_eq!(asm.code[0], 136);
+        assert_eq!(asm.code[1], (Reg::T0 as u8) | ((Reg::T1 as u8) << 4));
+        assert_eq!(asm.code.len(), 6);
+    }
+
+    #[test]
+    fn test_mul_64_encoding() {
+        let mut asm = Assembler::new();
+        asm.mul_64(Reg::A0, Reg::A1, Reg::A2);
+        assert_eq!(asm.code[0], 202); // opcode
+        assert_eq!(asm.code[1], (Reg::A1 as u8) | ((Reg::A2 as u8) << 4));
+        assert_eq!(asm.code[2], Reg::A0 as u8);
+        assert_eq!(asm.code.len(), 3);
+        assert_eq!(asm.bitmask, vec![1, 0, 0]);
+    }
+
+    #[test]
+    fn test_div_unsigned_64_encoding() {
+        let mut asm = Assembler::new();
+        asm.div_unsigned_64(Reg::A0, Reg::A1, Reg::A2);
+        assert_eq!(asm.code[0], 203);
+        assert_eq!(asm.code.len(), 3);
+    }
+
+    #[test]
+    fn test_div_signed_64_encoding() {
+        let mut asm = Assembler::new();
+        asm.div_signed_64(Reg::A0, Reg::A1, Reg::A2);
+        assert_eq!(asm.code[0], 204);
+        assert_eq!(asm.code.len(), 3);
+    }
+
+    #[test]
+    fn test_rem_unsigned_64_encoding() {
+        let mut asm = Assembler::new();
+        asm.rem_unsigned_64(Reg::A0, Reg::A1, Reg::A2);
+        assert_eq!(asm.code[0], 205);
+        assert_eq!(asm.code.len(), 3);
+    }
+
+    #[test]
+    fn test_rem_signed_64_encoding() {
+        let mut asm = Assembler::new();
+        asm.rem_signed_64(Reg::A0, Reg::A1, Reg::A2);
+        assert_eq!(asm.code[0], 206);
+        assert_eq!(asm.code.len(), 3);
+    }
+
+    #[test]
+    fn test_and_or_xor_encoding() {
+        let mut asm = Assembler::new();
+        asm.and(Reg::A0, Reg::A1, Reg::A2);
+        asm.or(Reg::A0, Reg::A1, Reg::A2);
+        asm.xor(Reg::A0, Reg::A1, Reg::A2);
+        assert_eq!(asm.code[0], 210); // and
+        assert_eq!(asm.code[3], 212); // or
+        assert_eq!(asm.code[6], 211); // xor
+        assert_eq!(asm.code.len(), 9);
+    }
+
+    #[test]
+    fn test_set_less_than_unsigned_encoding() {
+        let mut asm = Assembler::new();
+        asm.set_less_than_unsigned(Reg::A0, Reg::A1, Reg::A2);
+        assert_eq!(asm.code[0], 216);
+        assert_eq!(asm.code.len(), 3);
+    }
+
+    #[test]
+    fn test_set_less_than_signed_encoding() {
+        let mut asm = Assembler::new();
+        asm.set_less_than_signed(Reg::A0, Reg::A1, Reg::A2);
+        assert_eq!(asm.code[0], 217);
+        assert_eq!(asm.code.len(), 3);
+    }
+
+    #[test]
+    fn test_branch_less_unsigned_encoding() {
+        // The canonical case: this is the encoding `grey-bench`'s
+        // `emit_branch_lt_u` helper has been hand-rolling. Verify the
+        // typed helper produces identical bytes.
+        let mut asm = Assembler::new();
+        asm.branch_less_unsigned(Reg::T2, Reg::S1, -5);
+        assert_eq!(asm.code[0], 172);
+        assert_eq!(asm.code[1], (Reg::T2 as u8) | ((Reg::S1 as u8) << 4));
+        // -5 as i32 LE: 0xFB, 0xFF, 0xFF, 0xFF
+        assert_eq!(&asm.code[2..6], &[0xFB, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(asm.code.len(), 6);
+        assert_eq!(asm.bitmask, vec![1, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_branch_eq_encoding() {
+        let mut asm = Assembler::new();
+        asm.branch_eq(Reg::T0, Reg::T1, 16);
+        assert_eq!(asm.code[0], 170);
+        assert_eq!(&asm.code[2..6], &16i32.to_le_bytes());
+    }
+
+    #[test]
+    fn test_branch_not_eq_encoding() {
+        let mut asm = Assembler::new();
+        asm.branch_not_eq(Reg::T0, Reg::T1, 16);
+        assert_eq!(asm.code[0], 171);
+    }
+
+    #[test]
+    fn test_branch_less_signed_encoding() {
+        let mut asm = Assembler::new();
+        asm.branch_less_signed(Reg::T0, Reg::T1, 16);
+        assert_eq!(asm.code[0], 173);
+    }
+
+    #[test]
+    fn test_branch_greater_or_equal_unsigned_encoding() {
+        let mut asm = Assembler::new();
+        asm.branch_greater_or_equal_unsigned(Reg::T0, Reg::T1, 16);
+        assert_eq!(asm.code[0], 174);
+    }
+
+    #[test]
+    fn test_branch_greater_or_equal_signed_encoding() {
+        let mut asm = Assembler::new();
+        asm.branch_greater_or_equal_signed(Reg::T0, Reg::T1, 16);
+        assert_eq!(asm.code[0], 175);
+    }
+
+    #[test]
+    fn test_and_imm_xor_imm_or_imm_encoding() {
+        let mut asm = Assembler::new();
+        asm.and_imm(Reg::A0, Reg::A1, 5);
+        asm.xor_imm(Reg::A0, Reg::A1, 5);
+        asm.or_imm(Reg::A0, Reg::A1, 5);
+        assert_eq!(asm.code[0], 132); // and_imm
+        assert_eq!(asm.code[6], 133); // xor_imm
+        assert_eq!(asm.code[12], 134); // or_imm
+        assert_eq!(asm.code.len(), 18); // 3 × 6 bytes each
+    }
+
+    #[test]
+    fn test_set_less_than_signed_imm_encoding() {
+        let mut asm = Assembler::new();
+        asm.set_less_than_signed_imm(Reg::T0, Reg::T1, -1);
+        assert_eq!(asm.code[0], 137);
+        assert_eq!(&asm.code[2..6], &(-1i32).to_le_bytes());
     }
 }
