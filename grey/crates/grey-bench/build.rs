@@ -24,6 +24,13 @@ fn main() {
         "bench-poseidon2-perm",
     );
     let pvm_poseidon2_perm = build_pvm::build("../../services/benches/poseidon2-perm");
+    let javm_poly_eval = build_javm::build("../../services/benches/poly-eval", "bench-poly-eval");
+    let pvm_poly_eval = build_pvm::build("../../services/benches/poly-eval");
+    let javm_fri_fold_tree = build_javm::build(
+        "../../services/benches/fri-fold-tree",
+        "bench-fri-fold-tree",
+    );
+    let pvm_fri_fold_tree = build_pvm::build("../../services/benches/fri-fold-tree");
     let service_blob =
         build_javm::build_service("../../services/samples/sample-service", "sample-service");
 
@@ -47,6 +54,10 @@ fn main() {
              const POLKAVM_GOLDILOCKS_MUL_BLOB: &[u8] = include_bytes!(\"{}\");\n\
              const GREY_POSEIDON2_PERM_BLOB: &[u8] = include_bytes!(\"{}\");\n\
              const POLKAVM_POSEIDON2_PERM_BLOB: &[u8] = include_bytes!(\"{}\");\n\
+             const GREY_POLY_EVAL_BLOB: &[u8] = include_bytes!(\"{}\");\n\
+             const POLKAVM_POLY_EVAL_BLOB: &[u8] = include_bytes!(\"{}\");\n\
+             const GREY_FRI_FOLD_TREE_BLOB: &[u8] = include_bytes!(\"{}\");\n\
+             const POLKAVM_FRI_FOLD_TREE_BLOB: &[u8] = include_bytes!(\"{}\");\n\
              const SAMPLE_SERVICE_BLOB: &[u8] = include_bytes!(\"{}\");\n",
             javm_ecrecover.display(),
             pvm_ecrecover.display(),
@@ -64,6 +75,10 @@ fn main() {
             pvm_goldilocks_mul.display(),
             javm_poseidon2_perm.display(),
             pvm_poseidon2_perm.display(),
+            javm_poly_eval.display(),
+            pvm_poly_eval.display(),
+            javm_fri_fold_tree.display(),
+            pvm_fri_fold_tree.display(),
             service_blob.display(),
         ),
     )

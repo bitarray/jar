@@ -99,3 +99,40 @@ pub fn square(x: u64) -> u64 {
 pub fn double(x: u64) -> u64 {
     add(x, x)
 }
+
+/// `base ^ exp` mod p via right-to-left binary square-and-multiply.
+///
+/// Used by [`inv`] for Fermat's-little-theorem inversion. Naïve algorithm
+/// (~64 squares + popcount(exp) muls) — Plonky3 uses a faster addition
+/// chain for inversion specifically, but for a benchmark of "how each VM
+/// handles exponentiation hot loops" this is what we want: predictable
+/// branchy dependent multiplies, exactly what the unoptimized algorithm
+/// looks like.
+#[inline]
+pub fn pow(base: u64, exp: u64) -> u64 {
+    if exp == 0 {
+        return ONE;
+    }
+    let mut result = ONE;
+    let mut b = base;
+    let mut e = exp;
+    while e > 0 {
+        if e & 1 == 1 {
+            result = mul(result, b);
+        }
+        b = mul(b, b);
+        e >>= 1;
+    }
+    result
+}
+
+/// Field inverse via Fermat's little theorem: `x^(p-2) mod p`.
+///
+/// `p - 2 = 0xFFFF_FFFE_FFFF_FFFF` — popcount = 63, so ~63 muls + ~64
+/// squares per inversion. Heavy: a single inverse costs ~127 mul-shaped
+/// ops. Montgomery's batch trick amortizes this to ~3 muls per inverse
+/// over N elements.
+#[inline]
+pub fn inv(x: u64) -> u64 {
+    pow(x, P - 2)
+}

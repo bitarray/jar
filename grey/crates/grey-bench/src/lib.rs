@@ -755,6 +755,18 @@ pub fn grey_poseidon2_perm_blob() -> &'static [u8] {
 pub fn polkavm_poseidon2_perm_blob() -> &'static [u8] {
     POLKAVM_POSEIDON2_PERM_BLOB
 }
+pub fn grey_poly_eval_blob() -> &'static [u8] {
+    GREY_POLY_EVAL_BLOB
+}
+pub fn polkavm_poly_eval_blob() -> &'static [u8] {
+    POLKAVM_POLY_EVAL_BLOB
+}
+pub fn grey_fri_fold_tree_blob() -> &'static [u8] {
+    GREY_FRI_FOLD_TREE_BLOB
+}
+pub fn polkavm_fri_fold_tree_blob() -> &'static [u8] {
+    POLKAVM_FRI_FOLD_TREE_BLOB
+}
 
 /// Grey PVM service blob for sample-service (refine at PC=0, accumulate at PC=5).
 pub fn sample_service_blob() -> &'static [u8] {

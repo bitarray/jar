@@ -401,6 +401,24 @@ fn bench_poseidon2_perm(c: &mut Criterion) {
     );
 }
 
+fn bench_poly_eval(c: &mut Criterion) {
+    bench_standard(
+        c,
+        "poly_eval",
+        grey_poly_eval_blob(),
+        polkavm_poly_eval_blob(),
+    );
+}
+
+fn bench_fri_fold_tree(c: &mut Criterion) {
+    bench_standard(
+        c,
+        "fri_fold_tree",
+        grey_fri_fold_tree_blob(),
+        polkavm_fri_fold_tree_blob(),
+    );
+}
+
 criterion_group!(
     benches,
     bench_fib,
@@ -413,6 +431,8 @@ criterion_group!(
     bench_ecrecover,
     bench_mini_verifier,
     bench_goldilocks_mul,
-    bench_poseidon2_perm
+    bench_poseidon2_perm,
+    bench_poly_eval,
+    bench_fri_fold_tree
 );
 criterion_main!(benches);

@@ -487,6 +487,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bench-fri-fold-tree"
+version = "0.1.0"
+dependencies = [
+ "bench-goldilocks-poseidon2",
+ "javm-builtins",
+ "polkavm-derive",
+]
+
+[[package]]
 name = "bench-goldilocks-mul"
 version = "0.1.0"
 dependencies = [
@@ -510,6 +519,15 @@ dependencies = [
 
 [[package]]
 name = "bench-mini-verifier"
+version = "0.1.0"
+dependencies = [
+ "bench-goldilocks-poseidon2",
+ "javm-builtins",
+ "polkavm-derive",
+]
+
+[[package]]
+name = "bench-poly-eval"
 version = "0.1.0"
 dependencies = [
  "bench-goldilocks-poseidon2",
