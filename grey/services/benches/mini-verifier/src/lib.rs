@@ -38,60 +38,60 @@ const CONSTRAINT_OPS_PER_EVAL: usize = 50;
 /// One STARK-verifier-shaped pass. Returns low 32 bits of the accumulator
 /// for cross-VM correctness checking.
 pub fn mini_verifier_bench() -> u32 {
-	// Deterministic seed — every cell distinct so all-zero collisions
-	// don't hide bugs.
-	let mut state: [u64; WIDTH] = [
-		0xdeadbeef_00000000,
-		0xdeadbeef_00000001,
-		0xdeadbeef_00000002,
-		0xdeadbeef_00000003,
-		0xdeadbeef_00000004,
-		0xdeadbeef_00000005,
-		0xdeadbeef_00000006,
-		0xdeadbeef_00000007,
-	];
+    // Deterministic seed — every cell distinct so all-zero collisions
+    // don't hide bugs.
+    let mut state: [u64; WIDTH] = [
+        0xdeadbeef_00000000,
+        0xdeadbeef_00000001,
+        0xdeadbeef_00000002,
+        0xdeadbeef_00000003,
+        0xdeadbeef_00000004,
+        0xdeadbeef_00000005,
+        0xdeadbeef_00000006,
+        0xdeadbeef_00000007,
+    ];
 
-	let mut i = 0u64;
-	while i < TRANSCRIPT_PERMS as u64 {
-		let slot = (i as usize) % WIDTH;
-		state[slot] = add(state[slot], i.wrapping_mul(0x9E3779B97F4A7C15));
-		permute(&mut state);
-		i += 1;
-	}
+    let mut i = 0u64;
+    while i < TRANSCRIPT_PERMS as u64 {
+        let slot = (i as usize) % WIDTH;
+        state[slot] = add(state[slot], i.wrapping_mul(0x9E3779B97F4A7C15));
+        permute(&mut state);
+        i += 1;
+    }
 
-	let mut accum = ZERO;
-	let mut q = 0;
-	while q < FRI_QUERIES {
-		let mut left = state[0];
-		let mut right = state[1];
-		let mut sibling = state[2];
-		let mut fold = 0;
-		while fold < FRI_FOLDS_PER_QUERY {
-			permute(&mut state);
-			let challenge = state[(q + fold) % WIDTH];
-			let one_minus_c = sub(ONE, challenge);
-			left = add(mul(one_minus_c, left), mul(challenge, right));
-			right = sibling;
-			sibling = state[3];
-			fold += 1;
-		}
-		accum = add(accum, left);
-		q += 1;
-	}
+    let mut accum = ZERO;
+    let mut q = 0;
+    while q < FRI_QUERIES {
+        let mut left = state[0];
+        let mut right = state[1];
+        let mut sibling = state[2];
+        let mut fold = 0;
+        while fold < FRI_FOLDS_PER_QUERY {
+            permute(&mut state);
+            let challenge = state[(q + fold) % WIDTH];
+            let one_minus_c = sub(ONE, challenge);
+            left = add(mul(one_minus_c, left), mul(challenge, right));
+            right = sibling;
+            sibling = state[3];
+            fold += 1;
+        }
+        accum = add(accum, left);
+        q += 1;
+    }
 
-	let coeff_a = state[3];
-	let coeff_b = state[5];
-	let mut k = 0;
-	while k < CONSTRAINT_EVALS {
-		let mut x = state[k % WIDTH];
-		let mut j = 0;
-		while j < CONSTRAINT_OPS_PER_EVAL {
-			x = add(mul(x, coeff_a), coeff_b);
-			j += 1;
-		}
-		accum = add(accum, x);
-		k += 1;
-	}
+    let coeff_a = state[3];
+    let coeff_b = state[5];
+    let mut k = 0;
+    while k < CONSTRAINT_EVALS {
+        let mut x = state[k % WIDTH];
+        let mut j = 0;
+        while j < CONSTRAINT_OPS_PER_EVAL {
+            x = add(mul(x, coeff_a), coeff_b);
+            j += 1;
+        }
+        accum = add(accum, x);
+        k += 1;
+    }
 
-	(canonical(accum) & 0xFFFF_FFFF) as u32
+    (canonical(accum) & 0xFFFF_FFFF) as u32
 }

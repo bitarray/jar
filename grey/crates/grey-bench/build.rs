@@ -9,14 +9,20 @@ fn main() {
     let pvm_blake2b = build_pvm::build("../../services/benches/blake2b");
     let javm_keccak = build_javm::build("../../services/benches/keccak", "bench-keccak");
     let pvm_keccak = build_pvm::build("../../services/benches/keccak");
-    let javm_mini_verifier =
-        build_javm::build("../../services/benches/mini-verifier", "bench-mini-verifier");
+    let javm_mini_verifier = build_javm::build(
+        "../../services/benches/mini-verifier",
+        "bench-mini-verifier",
+    );
     let pvm_mini_verifier = build_pvm::build("../../services/benches/mini-verifier");
-    let javm_goldilocks_mul =
-        build_javm::build("../../services/benches/goldilocks-mul", "bench-goldilocks-mul");
+    let javm_goldilocks_mul = build_javm::build(
+        "../../services/benches/goldilocks-mul",
+        "bench-goldilocks-mul",
+    );
     let pvm_goldilocks_mul = build_pvm::build("../../services/benches/goldilocks-mul");
-    let javm_poseidon2_perm =
-        build_javm::build("../../services/benches/poseidon2-perm", "bench-poseidon2-perm");
+    let javm_poseidon2_perm = build_javm::build(
+        "../../services/benches/poseidon2-perm",
+        "bench-poseidon2-perm",
+    );
     let pvm_poseidon2_perm = build_pvm::build("../../services/benches/poseidon2-perm");
     let service_blob =
         build_javm::build_service("../../services/samples/sample-service", "sample-service");

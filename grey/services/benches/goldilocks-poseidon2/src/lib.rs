@@ -10,5 +10,5 @@
 mod field;
 mod poseidon2;
 
-pub use field::{ONE, P, ZERO, add, canonical, double, mul, square, sub};
-pub use poseidon2::{WIDTH, permute};
+pub use field::{add, canonical, double, mul, square, sub, ONE, P, ZERO};
+pub use poseidon2::{permute, WIDTH};

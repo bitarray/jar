@@ -375,15 +375,30 @@ fn bench_ecrecover(c: &mut Criterion) {
 }
 
 fn bench_mini_verifier(c: &mut Criterion) {
-    bench_standard(c, "mini_verifier", grey_mini_verifier_blob(), polkavm_mini_verifier_blob());
+    bench_standard(
+        c,
+        "mini_verifier",
+        grey_mini_verifier_blob(),
+        polkavm_mini_verifier_blob(),
+    );
 }
 
 fn bench_goldilocks_mul(c: &mut Criterion) {
-    bench_standard(c, "goldilocks_mul", grey_goldilocks_mul_blob(), polkavm_goldilocks_mul_blob());
+    bench_standard(
+        c,
+        "goldilocks_mul",
+        grey_goldilocks_mul_blob(),
+        polkavm_goldilocks_mul_blob(),
+    );
 }
 
 fn bench_poseidon2_perm(c: &mut Criterion) {
-    bench_standard(c, "poseidon2_perm", grey_poseidon2_perm_blob(), polkavm_poseidon2_perm_blob());
+    bench_standard(
+        c,
+        "poseidon2_perm",
+        grey_poseidon2_perm_blob(),
+        polkavm_poseidon2_perm_blob(),
+    );
 }
 
 criterion_group!(

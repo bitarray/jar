@@ -18,11 +18,11 @@ const SEED: u64 = 0x123456789abcdef0;
 const MULTIPLIER: u64 = 0x9E3779B97F4A7C15;
 
 pub fn goldilocks_mul_bench() -> u32 {
-	let mut acc = SEED;
-	let mut i = 0;
-	while i < MUL_COUNT {
-		acc = mul(acc, MULTIPLIER);
-		i += 1;
-	}
-	(canonical(acc) & 0xFFFF_FFFF) as u32
+    let mut acc = SEED;
+    let mut i = 0;
+    while i < MUL_COUNT {
+        acc = mul(acc, MULTIPLIER);
+        i += 1;
+    }
+    (canonical(acc) & 0xFFFF_FFFF) as u32
 }
