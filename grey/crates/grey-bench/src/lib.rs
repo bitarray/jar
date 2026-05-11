@@ -686,7 +686,9 @@ pub fn polkavm_primes_blob(n: u64) -> Vec<u8> {
 
     builder.set_code(&code, &[]);
     builder.add_export_by_basic_block(0, b"main");
-    builder.to_vec().expect("failed to build polkavm primes blob")
+    builder
+        .to_vec()
+        .expect("failed to build polkavm primes blob")
 }
 
 // ---------------------------------------------------------------------------
