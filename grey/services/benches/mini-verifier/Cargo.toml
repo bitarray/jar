@@ -1,0 +1,17 @@
+[package]
+name = "bench-mini-verifier"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+javm-builtins = { path = "../../../crates/javm-builtins" }
+gp = { package = "bench-goldilocks-poseidon2", path = "../goldilocks-poseidon2" }
+
+[target.'cfg(target_env = "polkavm")'.dependencies]
+polkavm-derive = "0.32.0"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_env, values("javm", "polkavm"))', 'cfg(target_os, values("none"))'] }

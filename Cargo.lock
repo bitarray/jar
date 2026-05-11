@@ -487,12 +487,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "bench-goldilocks-mul"
+version = "0.1.0"
+dependencies = [
+ "bench-goldilocks-poseidon2",
+ "javm-builtins",
+ "polkavm-derive",
+]
+
+[[package]]
+name = "bench-goldilocks-poseidon2"
+version = "0.1.0"
+
+[[package]]
 name = "bench-keccak"
 version = "0.1.0"
 dependencies = [
  "javm-builtins",
  "polkavm-derive",
  "sha3",
+]
+
+[[package]]
+name = "bench-mini-verifier"
+version = "0.1.0"
+dependencies = [
+ "bench-goldilocks-poseidon2",
+ "javm-builtins",
+ "polkavm-derive",
+]
+
+[[package]]
+name = "bench-poseidon2-perm"
+version = "0.1.0"
+dependencies = [
+ "bench-goldilocks-poseidon2",
+ "javm-builtins",
+ "polkavm-derive",
 ]
 
 [[package]]

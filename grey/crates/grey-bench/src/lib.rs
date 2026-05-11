@@ -737,6 +737,25 @@ pub fn polkavm_keccak_blob() -> &'static [u8] {
     POLKAVM_KECCAK_BLOB
 }
 
+pub fn grey_mini_verifier_blob() -> &'static [u8] {
+    GREY_MINI_VERIFIER_BLOB
+}
+pub fn polkavm_mini_verifier_blob() -> &'static [u8] {
+    POLKAVM_MINI_VERIFIER_BLOB
+}
+pub fn grey_goldilocks_mul_blob() -> &'static [u8] {
+    GREY_GOLDILOCKS_MUL_BLOB
+}
+pub fn polkavm_goldilocks_mul_blob() -> &'static [u8] {
+    POLKAVM_GOLDILOCKS_MUL_BLOB
+}
+pub fn grey_poseidon2_perm_blob() -> &'static [u8] {
+    GREY_POSEIDON2_PERM_BLOB
+}
+pub fn polkavm_poseidon2_perm_blob() -> &'static [u8] {
+    POLKAVM_POSEIDON2_PERM_BLOB
+}
+
 /// Grey PVM service blob for sample-service (refine at PC=0, accumulate at PC=5).
 pub fn sample_service_blob() -> &'static [u8] {
     SAMPLE_SERVICE_BLOB
