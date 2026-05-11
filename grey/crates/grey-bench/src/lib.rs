@@ -558,6 +558,138 @@ pub fn polkavm_hostcall_blob(n: u64) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// Naive prime counting (trial division). Hand-assembled showcase for the
+// extended Assembler API (mul_64, rem_unsigned_64, set_less_than_unsigned,
+// branch_less_unsigned). Complements the pre-built `sieve` blobs further
+// down — different algorithm (O(N²) vs O(N log log N)) and different
+// construction path (hand-assembled vs Rust→RISC-V via build-script).
+// ---------------------------------------------------------------------------
+
+/// Build a naive-trial-division prime-count program as a grey-pvm blob.
+///
+/// Counts primes in `[2, N)` and returns the count in A0.
+///
+/// Algorithm (no early-exit; no forward branches anywhere):
+///   count = (2 < N) ? 1 : 0          // pre-count i=2 (always prime if in range)
+///   for i in 3..(N+1):                // i ranges over i ∈ [3, N]
+///     is_prime = 1
+///     for j in 2..i:                  // do-while is OK here since i ≥ 3
+///       rem = i %u j
+///       is_prime *= (0 <u rem)        // stays 1 only if all rems nonzero
+///     in_range = (i < N) ? 1 : 0      // masks the final overshoot iteration
+///     count += is_prime * in_range
+///   return count
+///
+/// Uses the extended Assembler methods: `rem_unsigned_64`,
+/// `set_less_than_unsigned`, `mul_64`, `branch_less_unsigned`. The
+/// `mul *= flag` pattern replaces early-exit forward branches — keeps
+/// all branches backward-only and dodges javm's basic-block boundary
+/// requirement on forward branch targets.
+pub fn grey_primes_blob(n: u64) -> Vec<u8> {
+    let mut asm = Assembler::new();
+    asm.set_stack_pages(1);
+    asm.set_heap_pages(0);
+
+    asm.load_imm_64(Reg::A3, n); // A3 = N (original, for in_range check)
+    asm.load_imm_64(Reg::T0, n.wrapping_add(1)); // T0 = N+1 (outer loop limit)
+    asm.load_imm_64(Reg::A1, 0); // const 0 for set_lt
+    asm.load_imm_64(Reg::A2, 2); // const 2 for initial count check
+
+    // count = (2 < N) ? 1 : 0 — pre-count the prime "2" when N > 2.
+    asm.set_less_than_unsigned(Reg::T1, Reg::A2, Reg::A3);
+
+    asm.load_imm_64(Reg::T2, 3); // i = 3
+
+    // Outer loop entry — jump forward to create a BB boundary at outer_pc.
+    let outer_pre = asm.current_offset();
+    asm.jump(5);
+    let outer_pc = asm.current_offset();
+    assert_eq!(outer_pc, outer_pre + 5);
+
+    // Inner setup: is_prime = 1, j = 2.
+    asm.load_imm_64(Reg::S0, 1);
+    asm.load_imm_64(Reg::S1, 2);
+
+    // Inner loop entry.
+    let inner_pre = asm.current_offset();
+    asm.jump(5);
+    let inner_pc = asm.current_offset();
+    assert_eq!(inner_pc, inner_pre + 5);
+
+    // rem = i %u j ; nonzero_flag = (0 <u rem) ; is_prime *= nonzero_flag
+    asm.move_reg(Reg::A0, Reg::T2);
+    asm.rem_unsigned_64(Reg::A0, Reg::A0, Reg::S1);
+    asm.set_less_than_unsigned(Reg::A2, Reg::A1, Reg::A0);
+    asm.mul_64(Reg::S0, Reg::S0, Reg::A2);
+
+    // j++ ; if j < i, loop.
+    asm.add_imm_64(Reg::S1, Reg::S1, 1);
+    let inner_branch_pc = asm.current_offset();
+    let inner_rel = (inner_pc as i64) - (inner_branch_pc as i64);
+    asm.branch_less_unsigned(Reg::S1, Reg::T2, inner_rel as i32);
+
+    // Post-inner BB (after branch terminator).
+    // in_range = (i < N) ? 1 : 0 ; is_prime *= in_range ; count += is_prime
+    asm.set_less_than_unsigned(Reg::A2, Reg::T2, Reg::A3);
+    asm.mul_64(Reg::S0, Reg::S0, Reg::A2);
+    asm.add_64(Reg::T1, Reg::T1, Reg::S0);
+
+    // i++ ; if i < N+1, loop outer.
+    asm.add_imm_64(Reg::T2, Reg::T2, 1);
+    let outer_branch_pc = asm.current_offset();
+    let outer_rel = (outer_pc as i64) - (outer_branch_pc as i64);
+    asm.branch_less_unsigned(Reg::T2, Reg::T0, outer_rel as i32);
+
+    // Post-outer: A0 = count ; ecalli REPLY.
+    asm.move_reg(Reg::A0, Reg::T1);
+    asm.ecalli(0);
+
+    asm.build()
+}
+
+/// Build the same prime-count program as a polkavm blob.
+pub fn polkavm_primes_blob(n: u64) -> Vec<u8> {
+    let isa = polkavm_common::program::InstructionSetKind::JamV1;
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.set_stack_size(4096);
+
+    let code = vec![
+        // BB0: init constants + pre-count i=2 if in range
+        PInst::load_imm64(pr(PReg::A3), n),
+        PInst::load_imm64(pr(PReg::T0), n.wrapping_add(1)),
+        PInst::load_imm64(pr(PReg::A1), 0),
+        PInst::load_imm64(pr(PReg::A2), 2),
+        PInst::set_less_than_unsigned(pr(PReg::T1), pr(PReg::A2), pr(PReg::A3)),
+        PInst::load_imm64(pr(PReg::T2), 3),
+        PInst::jump(1),
+        // BB1: inner setup
+        PInst::load_imm64(pr(PReg::S0), 1),
+        PInst::load_imm64(pr(PReg::S1), 2),
+        PInst::jump(2),
+        // BB2: inner body (loop back to self while j < i)
+        PInst::move_reg(pr(PReg::A0), pr(PReg::T2)),
+        PInst::rem_unsigned_64(pr(PReg::A0), pr(PReg::A0), pr(PReg::S1)),
+        PInst::set_less_than_unsigned(pr(PReg::A2), pr(PReg::A1), pr(PReg::A0)),
+        PInst::mul_64(pr(PReg::S0), pr(PReg::S0), pr(PReg::A2)),
+        PInst::add_imm_64(pr(PReg::S1), pr(PReg::S1), 1),
+        PInst::branch_less_unsigned(pr(PReg::S1), pr(PReg::T2), 2),
+        // BB3: post-inner — mask by in_range, accumulate, advance i
+        PInst::set_less_than_unsigned(pr(PReg::A2), pr(PReg::T2), pr(PReg::A3)),
+        PInst::mul_64(pr(PReg::S0), pr(PReg::S0), pr(PReg::A2)),
+        PInst::add_64(pr(PReg::T1), pr(PReg::T1), pr(PReg::S0)),
+        PInst::add_imm_64(pr(PReg::T2), pr(PReg::T2), 1),
+        PInst::branch_less_unsigned(pr(PReg::T2), pr(PReg::T0), 1),
+        // BB4: halt
+        PInst::move_reg(pr(PReg::A0), pr(PReg::T1)),
+        PInst::jump_indirect(pr(PReg::RA), 0),
+    ];
+
+    builder.set_code(&code, &[]);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.to_vec().expect("failed to build polkavm primes blob")
+}
+
+// ---------------------------------------------------------------------------
 // Ecrecover benchmark: secp256k1 ECDSA public key recovery (k256 crate)
 // ELFs are auto-built by build.rs via build-javm and build-pvm crates.
 // ---------------------------------------------------------------------------
@@ -851,6 +983,52 @@ pub fn run_fib_recur_with_backend(
         KernelResult::ProtocolCall { slot } => {
             panic!("fib_recur unexpected protocol call slot={slot}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_primes {
+    use super::*;
+
+    /// Native reference: naive trial division. Counts primes in `[2, n)`.
+    /// Mirrors the algorithm shape used by both blob builders so the
+    /// comparison is direct (no algorithmic divergence).
+    fn primes_count(n: u64) -> u64 {
+        let mut count = 0u64;
+        for i in 2..n {
+            let mut is_prime = 1u64;
+            let mut j = 2u64;
+            while j < i {
+                if i % j == 0 {
+                    is_prime = 0;
+                }
+                j += 1;
+            }
+            count += is_prime;
+        }
+        count
+    }
+
+    #[test]
+    fn test_grey_primes_matches_native_reference() {
+        for &n in &[2u64, 5, 10, 30] {
+            let blob = grey_primes_blob(n);
+            let (result, _gas) = run_kernel(&blob, 1_000_000_000);
+            assert_eq!(
+                result,
+                primes_count(n),
+                "grey_primes({n}) should be {}, got {result}",
+                primes_count(n),
+            );
+        }
+    }
+
+    /// primes(30) — primes in [2, 30) are {2,3,5,7,11,13,17,19,23,29} = 10.
+    #[test]
+    fn test_grey_primes_30_is_10() {
+        let blob = grey_primes_blob(30);
+        let (result, _gas) = run_kernel(&blob, 1_000_000_000);
+        assert_eq!(result, 10, "10 primes in [2, 30)");
     }
 }
 
