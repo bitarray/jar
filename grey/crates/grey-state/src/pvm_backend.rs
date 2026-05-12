@@ -60,10 +60,12 @@ impl PvmInstance {
         self.kernel.resume_protocol_call(result0, result1);
     }
 
+    /// Return the active VM's current gas budget.
     pub fn gas(&self) -> Gas {
         self.kernel.active_gas()
     }
 
+    /// Set the active VM's gas budget.
     pub fn set_gas(&mut self, gas: Gas) {
         self.kernel
             .vm_arena
