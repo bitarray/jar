@@ -241,6 +241,13 @@ pub trait JamRpc {
     /// Get peer connectivity information.
     #[method(name = "jam_getPeers")]
     async fn get_peers(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Get full extrinsic content (tickets, guarantees, assurances) for a block.
+    #[method(name = "jam_getBlockExtrinsics")]
+    async fn get_block_extrinsics(
+        &self,
+        hash_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 }
 
 /// WebSocket subscription API.
@@ -721,6 +728,90 @@ impl JamRpcServer for RpcImpl {
             .load(std::sync::atomic::Ordering::Relaxed);
         Ok(serde_json::json!({
             "peer_count": peer_count,
+        }))
+    }
+
+    async fn get_block_extrinsics(
+        &self,
+        hash_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let _latency = self.track_request("jam_getBlockExtrinsics");
+        let hash = parse_hash_hex(&hash_hex)?;
+
+        let block = match self.state.store.get_block(&hash) {
+            Ok(b) => b,
+            Err(grey_store::StoreError::NotFound) => return Err(not_found("block not found")),
+            Err(e) => return Err(internal_error(e.to_string())),
+        };
+
+        let tickets: Vec<serde_json::Value> = block
+            .extrinsic
+            .tickets
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "attempt": t.attempt,
+                    "proof": hex::encode(&t.proof),
+                })
+            })
+            .collect();
+
+        let guarantees: Vec<serde_json::Value> = block
+            .extrinsic
+            .guarantees
+            .iter()
+            .map(|g| {
+                let results: Vec<serde_json::Value> = g
+                    .report
+                    .results
+                    .iter()
+                    .map(|d| {
+                        serde_json::json!({
+                            "service_id": d.service_id,
+                            "code_hash": d.code_hash.to_hex(),
+                            "payload_hash": d.payload_hash.to_hex(),
+                            "accumulate_gas": d.accumulate_gas,
+                            "gas_used": d.gas_used,
+                            "result": match &d.result {
+                                grey_types::work::WorkResult::Ok(_) => "ok",
+                                grey_types::work::WorkResult::OutOfGas => "out-of-gas",
+                                grey_types::work::WorkResult::Panic => "panic",
+                                grey_types::work::WorkResult::BadExports => "bad-exports",
+                                grey_types::work::WorkResult::BadCode => "bad-code",
+                                grey_types::work::WorkResult::CodeOversize => "code-oversize",
+                            },
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "core_index": g.report.core_index,
+                    "package_hash": g.report.package_spec.package_hash.to_hex(),
+                    "erasure_root": g.report.package_spec.erasure_root.to_hex(),
+                    "exports_root": g.report.package_spec.exports_root.to_hex(),
+                    "auth_output": hex::encode(&g.report.auth_output),
+                    "auth_gas_used": g.report.auth_gas_used,
+                    "results": results,
+                })
+            })
+            .collect();
+
+        let assurances: Vec<serde_json::Value> = block
+            .extrinsic
+            .assurances
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "anchor": a.anchor.to_hex(),
+                    "bitfield": hex::encode(&a.bitfield),
+                    "validator_index": a.validator_index,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "tickets": tickets,
+            "guarantees": guarantees,
+            "assurances": assurances,
         }))
     }
 }
