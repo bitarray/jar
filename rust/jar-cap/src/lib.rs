@@ -15,9 +15,14 @@
 pub mod bmt;
 pub mod error;
 pub mod hash;
+pub mod image;
 pub mod slot;
 
 pub use bmt::Bmt;
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash};
+pub use image::{
+    EndpointDef, Image, MappingSource, MemoryMapping, PinnedCap, chain_extend, chain_genesis,
+    image_canonical_encoding, image_content_hash,
+};
 pub use slot::{SlotIdx, SlotPath};
