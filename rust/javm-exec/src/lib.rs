@@ -18,6 +18,7 @@
 pub mod ecall;
 pub mod exit;
 pub mod gas;
+pub mod instruction;
 pub mod interp;
 pub mod mem;
 pub mod regs;
@@ -25,6 +26,7 @@ pub mod regs;
 pub use ecall::{EcallHandler, EcallResult, PanickingHandler};
 pub use exit::ExitReason;
 pub use gas::{Gas, GasCounter, OutOfGas};
+pub use instruction::{InstructionCategory, Opcode, decode_opcode_fast};
 pub use interp::{GAS_COST_PER_INSN, Instruction, Interpreter};
 pub use mem::{Mem, MemAccess, PAGE_SIZE, Page, Perm};
 pub use regs::{REG_COUNT, Regs};
