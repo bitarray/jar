@@ -133,6 +133,7 @@ mod tests {
             gas_slots: Vec::new(),
             quota_slots: Vec::new(),
             pinned_slots: BTreeMap::new(),
+            initial_slots: BTreeMap::new(),
             yield_marker_slot: None,
         }
     }
@@ -164,7 +165,7 @@ mod tests {
         img.pinned_slots.insert(
             SlotIdx(2),
             PinnedCap::Data {
-                content_hash: [0; 32],
+                content: Vec::new(),
                 size: 0,
             },
         );

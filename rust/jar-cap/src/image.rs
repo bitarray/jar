@@ -44,8 +44,10 @@ pub struct Image {
     /// Endpoints addressable by `endpoint_idx` (u8). Sparse — only
     /// declared endpoints are present.
     pub endpoints: BTreeMap<u8, EndpointDef>,
-    /// Memory layout (declared mappings between cnode slots and
-    /// the address space).
+    /// Memory layout. Each entry maps a `Cap::Data` (resolved
+    /// through `source`) into the address space at `[start, start
+    /// + size)`. Permissions are derived from whether the target
+    /// slot appears in `pinned_slots` (RO) or not (RW).
     pub memory_mappings: Vec<MemoryMapping>,
     /// Cnode slots holding `Cap::Instance[Gas{meter_id}]`. Active
     /// gas debit comes from the first slot's meter; the rest are
@@ -57,6 +59,10 @@ pub struct Image {
     /// Pinned read-only caps (Cap::Data or Cap::Image) baked into
     /// the spec. The kernel rejects mutations to these slots.
     pub pinned_slots: BTreeMap<SlotIdx, PinnedCap>,
+    /// Initial cnode state for non-pinned mutable slots. Only
+    /// honored at standalone (root) Instance bootstrap — a
+    /// parented Instance receives its cnode from the spawner.
+    pub initial_slots: BTreeMap<SlotIdx, InitialDataCap>,
     /// Slot holding `Cap::Instance[YieldCatcher]`, if this Instance
     /// catches yields. None = no catcher.
     pub yield_marker_slot: Option<SlotIdx>,
@@ -79,33 +85,47 @@ pub struct EndpointDef {
     pub initial_regs: BTreeMap<u8, u64>,
 }
 
-/// Memory mapping: a region of the address space backed by a cnode
-/// slot (Persistent) or kernel-allocated for the apply (Ephemeral).
+/// One mapped region. The kernel resolves `source` at instance
+/// start, reads the bytes from the resulting `Cap::Data`, and lays
+/// them at `[start, start + size)` in the address space. Whether
+/// the region is RO or RW is derived from whether `source.target()`
+/// is in `Image.pinned_slots`.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct MemoryMapping {
     pub start: u64,
     pub size: u64,
-    pub source: MappingSource,
-}
-
-/// Memory mapping source. Variant order is load-bearing for SCALE
-/// encoding (Ephemeral = 0, Persistent = 1).
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-pub enum MappingSource {
-    /// Kernel-allocated per-apply; not in cnode.
-    Ephemeral,
-    /// Backed by the DataCap at the named slot path.
-    Persistent(crate::slot::SlotPath),
+    pub source: crate::slot::SlotPath,
 }
 
 /// Pinned slot content. Only content-addressed cap kinds can be
-/// pinned (Data or Image references).
+/// pinned (Data or Image). `Cap::Data` bytes are inlined in the
+/// Image; a future optimisation can add a hash-only variant for
+/// content that lives in σ.data_payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub enum PinnedCap {
-    /// Pinned `Cap::Data` content hash (32 bytes for Blake2b256).
-    Data { content_hash: [u8; 32], size: u64 },
-    /// Pinned `Cap::Image` content hash.
+    /// Pinned `Cap::Data` with bytes baked into the Image. `size`
+    /// may be larger than `content.len()`; trailing bytes are
+    /// zero-filled per the DataCap canonical form.
+    Data { content: Vec<u8>, size: u64 },
+    /// Pinned `Cap::Image` by content hash. Cap::Image is itself
+    /// content-addressed; inlining a whole sub-Image makes less
+    /// sense than for Data.
     Image { content_hash: [u8; 32] },
+}
+
+/// Initial `Cap::Data` content for a non-pinned mutable slot. Used
+/// at standalone (root) Instance bootstrap to seed the cnode. A
+/// parented Instance receives its slots from the spawner and
+/// ignores this field.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Encode, Decode)]
+pub struct InitialDataCap {
+    /// Initial bytes. May be empty for zero-filled regions like
+    /// stack and heap.
+    pub content: Vec<u8>,
+    /// Logical size of the cap. `size` may be larger than
+    /// `content.len()`; trailing bytes are zero-filled when the
+    /// cap is mapped.
+    pub size: u64,
 }
 
 impl Image {
@@ -119,6 +139,7 @@ impl Image {
             gas_slots: Vec::new(),
             quota_slots: Vec::new(),
             pinned_slots: BTreeMap::new(),
+            initial_slots: BTreeMap::new(),
             yield_marker_slot: None,
         }
     }
@@ -195,20 +216,27 @@ mod tests {
         img.memory_mappings.push(MemoryMapping {
             start: 0x1000,
             size: 0x4000,
-            source: MappingSource::Ephemeral,
+            source: crate::slot::SlotPath::root(SlotIdx(65)),
         });
         img.memory_mappings.push(MemoryMapping {
             start: 0x5000,
             size: 0x2000,
-            source: MappingSource::Persistent(crate::slot::SlotPath::root(SlotIdx(3))),
+            source: crate::slot::SlotPath::root(SlotIdx(3)),
         });
         img.gas_slots = vec![SlotIdx(7)];
         img.quota_slots = vec![SlotIdx(8)];
         img.pinned_slots.insert(
             SlotIdx(11),
             PinnedCap::Data {
-                content_hash: [0xAB; 32],
+                content: vec![0xAB; 1024],
                 size: 4096,
+            },
+        );
+        img.initial_slots.insert(
+            SlotIdx(65),
+            InitialDataCap {
+                content: Vec::new(),
+                size: 0x4000,
             },
         );
         img.yield_marker_slot = Some(SlotIdx(9));
@@ -252,14 +280,14 @@ mod tests {
         a.pinned_slots.insert(
             SlotIdx(3),
             PinnedCap::Data {
-                content_hash: [0xAA; 32],
+                content: vec![0xAA; 100],
                 size: 100,
             },
         );
         a.pinned_slots.insert(
             SlotIdx(7),
             PinnedCap::Data {
-                content_hash: [0xBB; 32],
+                content: vec![0xBB; 200],
                 size: 200,
             },
         );
@@ -269,14 +297,14 @@ mod tests {
         b.pinned_slots.insert(
             SlotIdx(7),
             PinnedCap::Data {
-                content_hash: [0xBB; 32],
+                content: vec![0xBB; 200],
                 size: 200,
             },
         );
         b.pinned_slots.insert(
             SlotIdx(3),
             PinnedCap::Data {
-                content_hash: [0xAA; 32],
+                content: vec![0xAA; 100],
                 size: 100,
             },
         );

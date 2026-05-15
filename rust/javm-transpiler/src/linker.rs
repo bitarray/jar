@@ -175,6 +175,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
         gas_slots: vec![BARE_GAS_SLOT],
         quota_slots: vec![BARE_QUOTA_SLOT],
         pinned_slots: BTreeMap::new(),
+        initial_slots: BTreeMap::new(),
         yield_marker_slot: Some(BARE_YIELD_CATCHER_SLOT),
     })
 }

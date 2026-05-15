@@ -116,6 +116,7 @@ mod tests {
             gas_slots: vec![abi::BARE_GAS_SLOT],
             quota_slots: vec![abi::BARE_QUOTA_SLOT],
             pinned_slots: BTreeMap::new(),
+            initial_slots: BTreeMap::new(),
             yield_marker_slot: Some(abi::BARE_YIELD_CATCHER_SLOT),
         }
     }

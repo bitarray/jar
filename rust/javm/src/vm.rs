@@ -19,10 +19,7 @@
 
 use std::sync::Arc;
 
-use jar_cap::{
-    CNodeBackend, Cap, DataCap, InstanceCap, SlotIdx,
-    image::{Image, MappingSource},
-};
+use jar_cap::{CNodeBackend, Cap, DataCap, InstanceCap, SlotIdx, image::Image};
 use javm_exec::{ExitReason, GasCounter, Interpreter, Mem, Regs};
 
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
@@ -466,16 +463,15 @@ impl<K: KernelAssist> Vm<K> {
     }
 
     /// At HALT, walk the running Image's `memory_mappings`; for each
-    /// `Persistent` mapping, re-hash the live mem span and install a
+    /// non-pinned mapping, re-hash the live mem span and install a
     /// fresh `Cap::Data` at the mapping's root-cnode slot.
     ///
-    /// Stage 3 supports root-level paths only (`path.is_root_slot()`);
+    /// Supports root-level paths only (`path.is_root_slot()`);
     /// nested paths land when chain bytecode starts using nested
     /// cnodes routinely.
     ///
-    /// Pinned slots are skipped (a Persistent mapping should never
-    /// target a pinned slot; if one does, we treat it as a spec
-    /// violation and leave the slot alone).
+    /// Pinned slots are skipped — the Image guarantees their content
+    /// doesn't change.
     fn writeback_persistent_mappings(&mut self) -> Result<(), VmError> {
         // Snapshot mappings + pinned set up front to avoid carrying a
         // borrow on the running entry while we mutate it.
@@ -497,10 +493,7 @@ impl<K: KernelAssist> Vm<K> {
         };
 
         for mapping in &mappings {
-            let path = match &mapping.source {
-                MappingSource::Persistent(p) => p,
-                MappingSource::Ephemeral => continue,
-            };
+            let path = &mapping.source;
             if !path.is_root_slot() {
                 // Nested paths not yet supported in write-back.
                 continue;
@@ -559,6 +552,7 @@ mod tests {
             gas_slots: Vec::new(),
             quota_slots: Vec::new(),
             pinned_slots: BTreeMap::new(),
+            initial_slots: BTreeMap::new(),
             yield_marker_slot: None,
         }
     }
@@ -985,7 +979,7 @@ mod tests {
         img.memory_mappings.push(jar_cap::image::MemoryMapping {
             start: 0,
             size: 4,
-            source: MappingSource::Persistent(jar_cap::SlotPath::root(SlotIdx(3))),
+            source: jar_cap::SlotPath::root(SlotIdx(3)),
         });
         let img = Arc::new(img);
         let prog =
