@@ -14,9 +14,19 @@
 //! shell; consumers should treat the API as unstable until Stage 3
 //! completes.
 
+pub mod callstack;
+pub mod error;
+pub mod image_cache;
 pub mod kernel_assist;
+pub mod vm;
 
+pub use callstack::{
+    CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry, ReferenceEntry,
+};
+pub use error::VmError;
+pub use image_cache::ImageCache;
 pub use kernel_assist::{
     InProcessKernelAssist, KernelAssist, KernelImage, MeterId, QuotaId, kernel_image_hash,
     recognize_kernel_image,
 };
+pub use vm::Vm;
