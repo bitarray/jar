@@ -15,10 +15,14 @@
 
 use crate::TranspileError;
 use crate::emitter;
-use crate::layout::{PVM_PAGE_SIZE, ProgramLayout};
+use crate::layout::{
+    HEAP_CAP_INDEX, PVM_PAGE_SIZE, ProgramLayout, RO_CAP_INDEX, RW_CAP_INDEX, STACK_CAP_INDEX,
+};
 use crate::riscv::TranslationContext;
+use jar_cap::SlotIdx;
 use jar_cap::abi::{BARE_GAS_SLOT, BARE_QUOTA_SLOT, BARE_YIELD_CATCHER_SLOT};
-use jar_cap::image::{EndpointDef, Image};
+use jar_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap};
+use jar_cap::slot::SlotPath;
 use std::collections::{BTreeMap, HashMap};
 
 /// PVM register index for the RISC-V stack pointer (φ[1]).
@@ -63,16 +67,14 @@ impl RelocType {
 
 /// Parsed ELF with relocation info for linking.
 ///
-/// Several fields (`ro_data`, `rw_data`, `stack_size`, `heap_pages`,
-/// `abs_code_ptrs`, `sub32_relocs`) are populated by
-/// [`parse_linked_elf`] but no longer consumed by [`link_elf`] now
-/// that the JAR v1 manifest layer has been retired in favor of v3
-/// `Image` output. They remain in the struct because
-/// [`rewrite_data_code_ptrs`] (still defined for future declarative
-/// memory-mapping work) reads them. Marked `allow(dead_code)`
-/// pending a follow-up cleanup that removes the dead parsing path
-/// entirely.
-#[allow(dead_code)]
+/// Field roles:
+/// - `code_sections` / `code_ranges` / `entry_vaddr` /
+///   `hi20_targets` / `lo12_targets` / `call_targets` drive code
+///   translation in `translate_section_linked`.
+/// - `ro_data` / `rw_data` / `stack_size` / `heap_pages` /
+///   `abs_code_ptrs` / `sub32_relocs` feed the v3 Image data fields
+///   (`memory_mappings` / `pinned_slots` / `initial_slots`) via
+///   [`link_elf`] and [`rewrite_data_code_ptrs`].
 struct LinkedElf {
     is_64bit: bool,
     /// All code sections: (file_offset, vaddr, data)
@@ -117,10 +119,14 @@ struct LinkedElf {
 ///   section (entries emitted by `#[subsoil::endpoint(N)]`). If the
 ///   section is absent, falls back to a single entrypoint at PC 0
 ///   targeting `_start` for backward compatibility with
-///   `subsoil::entry!`-based guests.
-/// - `memory_mappings`: empty (declarative mappings are a future
-///   refactor; the runtime prologue / data-cap manifest layer is no
-///   longer emitted).
+///   `subsoil::entry!`-based guests. Every endpoint gets
+///   `initial_regs[1] = stack_top` baked in.
+/// - `memory_mappings` + `pinned_slots` + `initial_slots`: declarative
+///   address-space layout. The transpiler emits one mapping per
+///   region (stack, ro, rw, heap) backed by a slot. ro_data lives
+///   in `pinned_slots` (RO at runtime); rw_data and the zero-filled
+///   stack/heap regions live in `initial_slots` (RW). The kernel's
+///   chain genesis installs Cap::Data's for each declared slot.
 /// - `gas_slots`, `quota_slots`, `yield_marker_slot`: standard
 ///   kernel-ABI defaults from [`jar_cap::abi`].
 pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
@@ -143,6 +149,13 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     }
     ctx.apply_fixups();
 
+    // The ro/rw byte vectors may contain RISC-V code-pointer bytes
+    // (LLVM jump tables, vtables). Rewrite them to PVM PCs before
+    // they get sealed into pinned_slots / initial_slots.
+    let mut ro_data = elf.ro_data.clone();
+    let mut rw_data = elf.rw_data.clone();
+    rewrite_data_code_ptrs(&elf, &mut ctx, &mut ro_data, &mut rw_data);
+
     crate::peephole_fuse_load_imm_alu(&mut ctx.code, &mut ctx.bitmask, &ctx.jump_table);
     crate::peephole_fuse_load_imm_memory(&mut ctx.code, &mut ctx.bitmask, &ctx.jump_table);
     crate::peephole_eliminate_dead_load_imm(&mut ctx.code, &mut ctx.bitmask, &ctx.jump_table);
@@ -155,27 +168,103 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     let code_blob = emitter::build_image_code_blob(&ctx.code, &ctx.bitmask, &ctx.jump_table);
     let mut endpoints = read_subsoil_endpoints(elf_data, &elf, &ctx)?;
 
-    // Compute the data-region layout to derive the initial stack
-    // pointer. The kernel will eventually consume these regions via
-    // declarative `Image.memory_mappings` (out of scope here); for
-    // now we only need `stack_top` to seed SP per endpoint.
+    // Compute the data-region layout. The transpiler emits one
+    // MemoryMapping per region (stack/ro/rw/heap) backed by a slot
+    // declared in pinned_slots (ro) or initial_slots (rw and
+    // zero-filled).
     let stack_pages = elf.stack_size / PVM_PAGE_SIZE;
-    let ro_pages = (elf.ro_data.len() as u32).div_ceil(PVM_PAGE_SIZE);
-    let rw_pages = (elf.rw_data.len() as u32).div_ceil(PVM_PAGE_SIZE);
+    let ro_pages = (ro_data.len() as u32).div_ceil(PVM_PAGE_SIZE);
+    let rw_pages = (rw_data.len() as u32).div_ceil(PVM_PAGE_SIZE);
     let layout = ProgramLayout::compute(stack_pages, ro_pages, rw_pages, elf.heap_pages);
     let stack_top = layout.stack_top();
     for def in endpoints.values_mut() {
         def.initial_regs.insert(SP_REG, stack_top);
     }
 
+    let mut memory_mappings: Vec<MemoryMapping> = Vec::new();
+    let mut pinned_slots: BTreeMap<SlotIdx, PinnedCap> = BTreeMap::new();
+    let mut initial_slots: BTreeMap<SlotIdx, InitialDataCap> = BTreeMap::new();
+
+    let page_bytes = u64::from(PVM_PAGE_SIZE);
+
+    // Stack: ephemeral-like zero-filled DataCap at the stack slot.
+    let stack_slot = SlotIdx(u32::from(STACK_CAP_INDEX));
+    let stack_size = u64::from(layout.stack.page_count) * page_bytes;
+    memory_mappings.push(MemoryMapping {
+        start: u64::from(layout.stack.base_page) * page_bytes,
+        size: stack_size,
+        source: SlotPath::root(stack_slot),
+    });
+    initial_slots.insert(
+        stack_slot,
+        InitialDataCap {
+            content: Vec::new(),
+            size: stack_size,
+        },
+    );
+
+    // ro_data: pinned (read-only) with bytes baked into the Image.
+    if let Some(ro) = &layout.ro {
+        let ro_slot = SlotIdx(u32::from(RO_CAP_INDEX));
+        let size = u64::from(ro.page_count) * page_bytes;
+        memory_mappings.push(MemoryMapping {
+            start: u64::from(ro.base_page) * page_bytes,
+            size,
+            source: SlotPath::root(ro_slot),
+        });
+        pinned_slots.insert(
+            ro_slot,
+            PinnedCap::Data {
+                content: ro_data.clone(),
+                size,
+            },
+        );
+    }
+
+    // rw_data: non-pinned, initial bytes baked into the Image.
+    if let Some(rw) = &layout.rw {
+        let rw_slot = SlotIdx(u32::from(RW_CAP_INDEX));
+        let size = u64::from(rw.page_count) * page_bytes;
+        memory_mappings.push(MemoryMapping {
+            start: u64::from(rw.base_page) * page_bytes,
+            size,
+            source: SlotPath::root(rw_slot),
+        });
+        initial_slots.insert(
+            rw_slot,
+            InitialDataCap {
+                content: rw_data.clone(),
+                size,
+            },
+        );
+    }
+
+    // Heap: zero-filled DataCap at the heap slot.
+    if let Some(heap) = &layout.heap {
+        let heap_slot = SlotIdx(u32::from(HEAP_CAP_INDEX));
+        let size = u64::from(heap.page_count) * page_bytes;
+        memory_mappings.push(MemoryMapping {
+            start: u64::from(heap.base_page) * page_bytes,
+            size,
+            source: SlotPath::root(heap_slot),
+        });
+        initial_slots.insert(
+            heap_slot,
+            InitialDataCap {
+                content: Vec::new(),
+                size,
+            },
+        );
+    }
+
     Ok(Image {
         code: code_blob,
         endpoints,
-        memory_mappings: Vec::new(),
+        memory_mappings,
         gas_slots: vec![BARE_GAS_SLOT],
         quota_slots: vec![BARE_QUOTA_SLOT],
-        pinned_slots: BTreeMap::new(),
-        initial_slots: BTreeMap::new(),
+        pinned_slots,
+        initial_slots,
         yield_marker_slot: Some(BARE_YIELD_CATCHER_SLOT),
     })
 }
@@ -628,12 +717,7 @@ fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError> {
     })
 }
 
-/// Translate a code section with relocation awareness.
 /// Rewrite code pointers in data sections (LLVM switch/jump tables, vtables).
-///
-/// Currently unused after the v3 Image refactor dropped the data-cap
-/// manifest; kept around for future declarative-mapping work.
-#[allow(dead_code)]
 ///
 /// Detects code pointers via:
 /// 1. R_RISCV_32/64 absolute relocations targeting code sections
