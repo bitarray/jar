@@ -12,8 +12,10 @@
 //! See `~/docs/minimum-v3/implementation/architecture.md` for the
 //! crate's role in the overall layering.
 
+pub mod bmt;
 pub mod error;
 pub mod hash;
 
+pub use bmt::Bmt;
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash};
