@@ -10,3 +10,4 @@ description = "JAR v3 execution engine: PVM interpreter, recompiler, memory, gas
 thiserror = { workspace = true }
 
 [dev-dependencies]
+proptest = { workspace = true }

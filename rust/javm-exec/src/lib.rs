@@ -15,6 +15,7 @@
 //! `~/docs/minimum-v3/implementation/architecture.md` for the
 //! layering.
 
+pub mod args;
 pub mod ecall;
 pub mod error;
 pub mod exit;

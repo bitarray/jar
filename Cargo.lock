@@ -883,6 +883,7 @@ version = "0.1.0"
 name = "javm-exec"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "thiserror 2.0.18",
 ]
 
