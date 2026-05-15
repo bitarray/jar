@@ -706,10 +706,304 @@ pub fn gas_cost_for_block(code: &[u8], bitmask: &[u8], start_pc: usize) -> u64 {
     if cycles > 3 { (cycles - 3) as u64 } else { 1 }
 }
 
-// (Cherry-pick stash: gas_cost_for_block_decoded / gas_sim_decoded /
-//  instruction_cost_fast removed; they depend on
-//  `crate::recompiler::predecode::PreDecodedInst` and return when the
-//  recompiler is ported.)
+// === gas_cost_for_block_decoded / gas_sim_decoded / instruction_cost_fast ===
+// Cherry-picked from v2 `javm/src/gas_cost.rs`. These helpers consume
+// the recompiler's pre-decoded instruction stream (PreDecodedInst).
+// Gated to platforms where the recompiler is available.
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn gas_cost_for_block_decoded(
+    instrs: &[crate::recompiler::predecode::PreDecodedInst],
+    code: &[u8],
+    bitmask: &[u8],
+) -> u64 {
+    let cycles = gas_sim_decoded(instrs, code, bitmask);
+    if cycles > 3 { (cycles - 3) as u64 } else { 1 }
+}
+
+/// Pipeline simulation from pre-decoded instructions (no raw byte re-parsing).
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn gas_sim_decoded(
+    instrs: &[crate::recompiler::predecode::PreDecodedInst],
+    code: &[u8],
+    bitmask: &[u8],
+) -> u32 {
+    use crate::args::Args;
+
+    let mut s = SimState {
+        ip: Some(0), // index into instrs
+        cycles: 0,
+        decode_slots: 4,
+        dispatch_slots: 5,
+        exec_units: ExecUnits::RESET,
+        rob: Vec::with_capacity(32),
+    };
+
+    for _ in 0..100_000 {
+        if let Some(idx) = s.ip
+            && idx < instrs.len()
+            && s.decode_slots > 0
+            && s.rob.len() < 32
+        {
+            let instr = &instrs[idx];
+            let opcode_byte = instr.opcode as u8;
+
+            let (ra, rb, rd) = match instr.args {
+                Args::ThreeReg { ra, rb, rd } => (ra as u8, rb as u8, rd as u8),
+                Args::TwoReg { rd: d, ra: a } => (a as u8, 0xFF, d as u8),
+                Args::TwoRegImm { ra, rb, .. }
+                | Args::TwoRegOffset { ra, rb, .. }
+                | Args::TwoRegTwoImm { ra, rb, .. } => (ra as u8, rb as u8, 0xFF),
+                Args::RegImm { ra, .. }
+                | Args::RegExtImm { ra, .. }
+                | Args::RegTwoImm { ra, .. }
+                | Args::RegImmOffset { ra, .. } => (ra as u8, 0xFF, 0xFF),
+                _ => (0xFF, 0xFF, 0xFF),
+            };
+
+            let cost = instruction_cost_fast(opcode_byte, ra, rb, rd, instr, code, bitmask);
+
+            let mut deps = [0xFF_u8; 4];
+            let mut dep_count = 0u8;
+            for (i, e) in s.rob.iter().enumerate() {
+                if e.state != RobState::Fin
+                    && e.dest_regs.iter().any(|dr| cost.src_regs.contains(*dr))
+                    && dep_count < 4
+                {
+                    deps[dep_count as usize] = i as u8;
+                    dep_count += 1;
+                }
+            }
+
+            s.decode_slots = s.decode_slots.saturating_sub(cost.decode_slots);
+            let next_ip = if cost.is_terminator {
+                None
+            } else {
+                Some(idx + 1)
+            };
+
+            if cost.is_move_reg {
+                s.ip = next_ip;
+            } else {
+                s.rob.push(RobEntry {
+                    state: RobState::Wait,
+                    cycles_left: cost.cycles,
+                    deps,
+                    dep_count,
+                    dest_regs: cost.dest_regs,
+                    exec_units: cost.exec_units,
+                });
+                s.ip = next_ip;
+            }
+            continue;
+        }
+
+        if s.dispatch_slots > 0
+            && let Some(idx) = find_ready_entry(&s.rob, s.exec_units)
+        {
+            let eu = s.rob[idx].exec_units;
+            s.rob[idx].state = RobState::Exe;
+            s.dispatch_slots -= 1;
+            s.exec_units = s.exec_units.sub(eu);
+            continue;
+        }
+
+        if s.ip.is_none_or(|i| i >= instrs.len()) && rob_all_finished(&s.rob) {
+            break;
+        }
+
+        for entry in s.rob.iter_mut() {
+            if entry.state == RobState::Exe {
+                if entry.cycles_left <= 1 {
+                    entry.state = RobState::Fin;
+                    entry.cycles_left = 0;
+                } else {
+                    entry.cycles_left -= 1;
+                }
+            }
+        }
+        s.cycles += 1;
+        s.decode_slots = 4;
+        s.dispatch_slots = 5;
+        s.exec_units = ExecUnits::RESET;
+    }
+
+    s.cycles
+}
+
+/// Fast instruction cost lookup using pre-decoded register fields.
+/// Avoids re-parsing code bytes for register extraction.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn instruction_cost_fast(
+    opcode: u8,
+    ra: u8,
+    rb: u8,
+    rd: u8,
+    instr: &crate::recompiler::predecode::PreDecodedInst,
+    code: &[u8],
+    bitmask: &[u8],
+) -> InstrCost {
+    let mk = |cy: u32, dc: u8, eu: ExecUnits, dst: RegSet, src: RegSet| -> InstrCost {
+        InstrCost {
+            cycles: cy,
+            decode_slots: dc,
+            exec_units: eu,
+            dest_regs: dst,
+            src_regs: src,
+            is_terminator: false,
+            is_move_reg: false,
+        }
+    };
+    let mkt = |cy: u32, dc: u8, eu: ExecUnits, dst: RegSet, src: RegSet| -> InstrCost {
+        InstrCost {
+            cycles: cy,
+            decode_slots: dc,
+            exec_units: eu,
+            dest_regs: dst,
+            src_regs: src,
+            is_terminator: true,
+            is_move_reg: false,
+        }
+    };
+    let e = RegSet::EMPTY;
+    let r1 = RegSet::one;
+    let r2 = RegSet::two;
+
+    match opcode {
+        0 => mkt(2, 1, ExecUnits::NONE, e, e),
+        1 => mkt(2, 1, ExecUnits::NONE, e, e),
+        2 => mkt(40, 1, ExecUnits::NONE, e, e),
+        10 => mkt(100, 4, ExecUnits::ALU, e, e),
+        40 => mkt(15, 1, ExecUnits::ALU, e, e),
+        80 => mkt(15, 1, ExecUnits::ALU, r1(ra), e),
+        50 => mkt(22, 1, ExecUnits::ALU, e, e),
+        180 => mkt(22, 1, ExecUnits::ALU, r1(ra), r1(rb)),
+        52..=58 => mk(25, 1, ExecUnits::LOAD, r1(ra), r1(rb)),
+        124..=130 => mk(25, 1, ExecUnits::LOAD, r1(ra), r1(rb)),
+        59..=62 => mk(25, 1, ExecUnits::STORE, e, r2(ra, rb)),
+        120..=123 => mk(25, 1, ExecUnits::STORE, e, r2(ra, rb)),
+        30..=33 => mk(25, 1, ExecUnits::STORE, e, e),
+        70..=73 => mk(25, 1, ExecUnits::STORE, e, r1(ra)),
+        51 => mk(1, 1, ExecUnits::NONE, r1(ra), e),
+        20 => mk(1, 2, ExecUnits::NONE, r1(ra), e),
+        100 => InstrCost {
+            cycles: 0,
+            decode_slots: 1,
+            exec_units: ExecUnits::NONE,
+            dest_regs: r1(ra),
+            src_regs: r1(rb),
+            is_terminator: false,
+            is_move_reg: true,
+        },
+        101 => mk(2, 1, ExecUnits::NONE, e, e),
+        81..=90 => {
+            let target = match instr.args {
+                crate::args::Args::RegImmOffset { offset, .. } => offset as usize,
+                _ => instr.pc as usize,
+            };
+            let bc = branch_cost(code, bitmask, target);
+            mkt(bc, 1, ExecUnits::ALU, e, r1(ra))
+        }
+        170..=175 => {
+            let target = match instr.args {
+                crate::args::Args::TwoRegOffset { offset, .. } => offset as usize,
+                _ => instr.pc as usize,
+            };
+            let bc = branch_cost(code, bitmask, target);
+            mkt(bc, 1, ExecUnits::ALU, e, r2(ra, rb))
+        }
+        200 | 201 | 210 | 211 | 212 => {
+            let dc = if dst_overlaps_src(ra, &r2(rb, rd)) {
+                1
+            } else {
+                2
+            };
+            mk(1, dc, ExecUnits::ALU, r1(ra), r2(rb, rd))
+        }
+        190 | 191 => {
+            let dc = if dst_overlaps_src(ra, &r2(rb, rd)) {
+                2
+            } else {
+                3
+            };
+            mk(2, dc, ExecUnits::ALU, r1(ra), r2(rb, rd))
+        }
+        132 | 133 | 134 | 149 | 151 | 152 | 153 | 158 | 110 => {
+            let dc = if dst_overlaps_src(ra, &r1(rb)) { 1 } else { 2 };
+            mk(1, dc, ExecUnits::ALU, r1(ra), r1(rb))
+        }
+        131 | 138 | 139 | 140 | 160 => {
+            let dc = if dst_overlaps_src(ra, &r1(rb)) { 2 } else { 3 };
+            mk(2, dc, ExecUnits::ALU, r1(ra), r1(rb))
+        }
+        102 | 103 | 104 | 105 | 108 | 109 => mk(1, 1, ExecUnits::ALU, r1(ra), r1(rb)),
+        106 | 107 => mk(2, 1, ExecUnits::ALU, r1(ra), r1(rb)),
+        111 => mk(1, 1, ExecUnits::ALU, r1(ra), r1(rb)),
+        207 | 208 | 209 | 220 | 222 => {
+            let dc = if rb == ra { 2 } else { 3 };
+            mk(1, dc, ExecUnits::ALU, r1(ra), r2(rb, rd))
+        }
+        197 | 198 | 199 | 221 | 223 => {
+            let dc = if rb == ra { 3 } else { 4 };
+            mk(2, dc, ExecUnits::ALU, r1(ra), r2(rb, rd))
+        }
+        155 | 156 | 157 | 159 => mk(1, 3, ExecUnits::ALU, r1(ra), r1(rb)),
+        144 | 145 | 146 | 161 => mk(2, 4, ExecUnits::ALU, r1(ra), r1(rb)),
+        216 | 217 => mk(3, 3, ExecUnits::ALU, r1(ra), r2(rb, rd)),
+        136 | 137 | 142 | 143 => mk(3, 3, ExecUnits::ALU, r1(ra), r1(rb)),
+        218 | 219 => mk(2, 2, ExecUnits::ALU, r1(ra), r2(rb, rd)),
+        147 | 148 => mk(2, 3, ExecUnits::ALU, r1(ra), r1(rb)),
+        227..=230 => {
+            let dc = if dst_overlaps_src(ra, &r2(rb, rd)) {
+                2
+            } else {
+                3
+            };
+            mk(3, dc, ExecUnits::ALU, r1(ra), r2(rb, rd))
+        }
+        224 | 225 => mk(2, 3, ExecUnits::ALU, r1(ra), r2(rb, rd)),
+        226 => {
+            let dc = if dst_overlaps_src(ra, &r2(rb, rd)) {
+                2
+            } else {
+                3
+            };
+            mk(2, dc, ExecUnits::ALU, r1(ra), r2(rb, rd))
+        }
+        154 => mk(2, 3, ExecUnits::ALU, r1(ra), r1(rb)),
+        141 => mk(3, 4, ExecUnits::ALU, r1(ra), r1(rb)),
+        202 => {
+            let dc = if dst_overlaps_src(ra, &r2(rb, rd)) {
+                1
+            } else {
+                2
+            };
+            mk(3, dc, ExecUnits::MUL, r1(ra), r2(rb, rd))
+        }
+        150 => {
+            let dc = if dst_overlaps_src(ra, &r1(rb)) { 1 } else { 2 };
+            mk(3, dc, ExecUnits::MUL, r1(ra), r1(rb))
+        }
+        192 => {
+            let dc = if dst_overlaps_src(ra, &r2(rb, rd)) {
+                2
+            } else {
+                3
+            };
+            mk(4, dc, ExecUnits::MUL, r1(ra), r2(rb, rd))
+        }
+        135 => {
+            let dc = if dst_overlaps_src(ra, &r1(rb)) { 2 } else { 3 };
+            mk(4, dc, ExecUnits::MUL, r1(ra), r1(rb))
+        }
+        213 | 214 => mk(4, 4, ExecUnits::MUL, r1(ra), r2(rb, rd)),
+        215 => mk(6, 4, ExecUnits::MUL, r1(ra), r2(rb, rd)),
+        193 | 194 | 195 | 196 | 203 | 204 | 205 | 206 => {
+            mk(60, 4, ExecUnits::DIV, r1(ra), r2(rb, rd))
+        }
+        _ => mk(1, 1, ExecUnits::NONE, e, e),
+    }
+}
 
 // (v2 had a 2-arg convenience `compute_block_gas_costs(code, bitmask)`
 //  here that called `crate::interpreter::compute_gas_block_starts`.
@@ -2446,10 +2740,154 @@ fn eu_consume(avail: &mut [u8; 5], eu: u8) {
     }
 }
 
-// (Cherry-pick stash: advance_cycle / gas_sim_fast / gas_cost_for_block_fast
-//  removed. These are the bitmask-based pipeline simulator used by the
-//  recompiler; they reference `crate::recompiler::predecode::PreDecodedInst`.
-//  Will be restored when the recompiler is ported.)
+// === advance_cycle / gas_sim_fast / gas_cost_for_block_fast ===
+// Cherry-picked from v2. Bitmask-based pipeline simulator used by the
+// recompiler; reference `crate::recompiler::predecode::PreDecodedInst`.
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn advance_cycle(cycles_left: &mut [u8; 32], exe_mask: &mut u32, fin_mask: &mut u32) {
+    let mut exe = *exe_mask;
+    while exe != 0 {
+        let i = exe.trailing_zeros() as usize;
+        exe &= exe - 1;
+        if cycles_left[i] <= 1 {
+            cycles_left[i] = 0;
+            *exe_mask &= !(1u32 << i);
+            *fin_mask |= 1u32 << i;
+        } else {
+            cycles_left[i] -= 1;
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn gas_sim_fast(
+    instrs: &[crate::recompiler::predecode::PreDecodedInst],
+    _code: &[u8],
+    _bitmask: &[u8],
+) -> u32 {
+    let mut state = [0u8; 32]; // 0=empty, 1=wait, 2=exe, 3=fin
+    let mut cycles_left = [0u8; 32];
+    let mut exec_unit = [0u8; 32];
+    let mut deps = [0u32; 32];
+    let mut reg_writer = [0xFFu8; 16];
+
+    let mut fin_mask: u32 = 0;
+    let mut wait_mask: u32 = 0;
+    let mut exe_mask: u32 = 0;
+
+    let mut next_slot: u8 = 0;
+    let mut instr_idx: usize = 0;
+    let mut cycles: u32 = 0;
+    let mut decode_slots: u8 = 4;
+    let mut dispatch_slots: u8 = 5;
+    let mut eu_avail: [u8; 5] = [4, 4, 4, 1, 1]; // alu, load, store, mul, div
+
+    for _safety in 0..100_000u32 {
+        while instr_idx < instrs.len() && decode_slots > 0 && (next_slot as usize) < 32 {
+            let ii = &instrs[instr_idx];
+            let cost = fast_cost_from_raw(
+                ii.opcode as u8,
+                ii.ra,
+                ii.rb,
+                ii.rd,
+                ii.pc,
+                _code,
+                _bitmask,
+                DEFAULT_MEM_CYCLES,
+            );
+
+            if cost.is_move_reg {
+                decode_slots = decode_slots.saturating_sub(cost.decode_slots);
+                instr_idx = if cost.is_terminator {
+                    instrs.len()
+                } else {
+                    instr_idx + 1
+                };
+                continue;
+            }
+
+            let mut dep_mask: u32 = 0;
+            let mut src = cost.src_mask;
+            while src != 0 {
+                let reg = src.trailing_zeros() as usize;
+                src &= src - 1;
+                let writer = reg_writer[reg];
+                if writer != 0xFF && (fin_mask & (1u32 << writer)) == 0 {
+                    dep_mask |= 1u32 << writer;
+                }
+            }
+
+            let slot = next_slot as usize;
+            state[slot] = 1; // WAIT
+            cycles_left[slot] = cost.cycles;
+            exec_unit[slot] = cost.exec_unit;
+            deps[slot] = dep_mask;
+            wait_mask |= 1u32 << slot;
+
+            let mut dst = cost.dst_mask;
+            while dst != 0 {
+                let reg = dst.trailing_zeros() as usize;
+                dst &= dst - 1;
+                reg_writer[reg] = next_slot;
+            }
+
+            next_slot += 1;
+            decode_slots = decode_slots.saturating_sub(cost.decode_slots);
+            instr_idx = if cost.is_terminator {
+                instrs.len()
+            } else {
+                instr_idx + 1
+            };
+        }
+
+        while dispatch_slots > 0 {
+            let mut candidates = wait_mask;
+            let mut found = false;
+            while candidates != 0 {
+                let i = candidates.trailing_zeros() as usize;
+                candidates &= candidates - 1;
+                if (deps[i] & !fin_mask) == 0 && eu_available(&eu_avail, exec_unit[i]) {
+                    eu_consume(&mut eu_avail, exec_unit[i]);
+                    state[i] = 2; // EXE
+                    wait_mask &= !(1u32 << i);
+                    exe_mask |= 1u32 << i;
+                    dispatch_slots -= 1;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                break;
+            }
+        }
+
+        if instr_idx >= instrs.len() && exe_mask == 0 && wait_mask == 0 {
+            break;
+        }
+
+        advance_cycle(&mut cycles_left, &mut exe_mask, &mut fin_mask);
+
+        cycles += 1;
+        decode_slots = 4;
+        dispatch_slots = 5;
+        eu_avail = [4, 4, 4, 1, 1];
+    }
+
+    let _ = state;
+    cycles
+}
+
+/// Fast gas cost computation using bitmask-based pipeline simulator.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn gas_cost_for_block_fast(
+    instrs: &[crate::recompiler::predecode::PreDecodedInst],
+    code: &[u8],
+    bitmask: &[u8],
+) -> u64 {
+    let cycles = gas_sim_fast(instrs, code, bitmask);
+    if cycles > 3 { (cycles - 3) as u64 } else { 1 }
+}
 
 #[cfg(test)]
 mod tests {

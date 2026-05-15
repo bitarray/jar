@@ -13,3 +13,4 @@
 //! driver as those land.
 
 pub mod asm;
+pub mod predecode;
