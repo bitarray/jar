@@ -1,9 +1,10 @@
 //! PVM program assembler — hand-craft PVM bytecode programs.
 //!
-//! Provides a builder API to emit PVM instructions and produce
-//! complete standard program blobs.
-
-use crate::emitter;
+//! Provides a builder API to emit individual PVM instructions
+//! (opcode + register operand + immediate encoding). Used by unit
+//! tests for the opcode encoding tables. Producing full chain
+//! Images happens via [`crate::link_elf`]; this module does not
+//! emit blobs.
 
 /// PVM register indices (0-12).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,11 +30,6 @@ pub struct Assembler {
     code: Vec<u8>,
     bitmask: Vec<u8>,
     jump_table: Vec<u32>,
-    ro_data: Vec<u8>,
-    rw_data: Vec<u8>,
-    heap_pages: u32,
-    max_heap_pages: u32,
-    stack_pages: u32,
     /// Labels: name → code offset
     labels: std::collections::HashMap<String, u32>,
     /// Pending fixups: (code_offset, label_name, fixup_size)
@@ -52,42 +48,9 @@ impl Assembler {
             code: Vec::new(),
             bitmask: Vec::new(),
             jump_table: Vec::new(),
-            ro_data: Vec::new(),
-            rw_data: Vec::new(),
-            heap_pages: 0,
-            max_heap_pages: 0,
-            stack_pages: 1, // 1 page = 4096 bytes default
             labels: std::collections::HashMap::new(),
             _fixups: Vec::new(),
         }
-    }
-
-    pub fn set_ro_data(&mut self, data: Vec<u8>) -> &mut Self {
-        self.ro_data = data;
-        self
-    }
-
-    pub fn set_rw_data(&mut self, data: Vec<u8>) -> &mut Self {
-        self.rw_data = data;
-        self
-    }
-
-    pub fn set_heap_pages(&mut self, pages: u32) -> &mut Self {
-        self.heap_pages = pages;
-        if self.max_heap_pages < pages {
-            self.max_heap_pages = pages;
-        }
-        self
-    }
-
-    pub fn set_max_heap_pages(&mut self, pages: u32) -> &mut Self {
-        self.max_heap_pages = pages;
-        self
-    }
-
-    pub fn set_stack_pages(&mut self, pages: u32) -> &mut Self {
-        self.stack_pages = pages;
-        self
     }
 
     /// Add a jump table entry pointing to the current code offset.
@@ -349,22 +312,6 @@ impl Assembler {
         self
     }
 
-    // ===== Blob building =====
-
-    /// Finalize and produce the standard program blob.
-    pub fn build(&self) -> Vec<u8> {
-        emitter::build_service_program(
-            &self.code,
-            &self.bitmask,
-            &self.jump_table,
-            &self.ro_data,
-            &self.rw_data,
-            self.stack_pages,
-            self.heap_pages,
-            self.heap_pages + self.stack_pages + 4, // memory_pages
-        )
-    }
-
     // ===== Public raw emission =====
 
     /// Emit a raw byte with bitmask control.
@@ -385,352 +332,6 @@ impl Assembler {
             self.emit_byte(*byte, false);
         }
     }
-}
-
-/// Build a minimal JAM service PVM blob.
-///
-/// The service has two entry points:
-/// - Entry 0 (PC=0): is_authorized / refine — reads arguments, returns result
-/// - Entry 5 (PC=`jump_table[2]`): accumulate — reads work items, writes state
-///
-/// This builds a simple "echo" service that:
-/// - Refine: returns the input payload as-is (output = input)
-/// - Accumulate: writes the first work item's result to storage key `[0]`
-pub fn build_sample_service() -> Vec<u8> {
-    let mut asm = Assembler::new();
-    asm.set_stack_pages(1);
-    asm.set_heap_pages(1);
-
-    // Jump table entry 0: refine entry (djump address = 2, index 0)
-    // Jump table entry 1: (reserved)
-    // Jump table entry 2: accumulate entry (djump address = 6, index 2)
-
-    // === Entry 0: Refine/Is-Authorized (PC=0) ===
-    // Jump table entry 0 → PC of refine code
-    let _refine_jt = asm.add_jump_entry(); // index 0 → current PC
-
-    // On entry for refine:
-    //   φ[7] (A0) = argument base address (pointer to args in memory)
-    //   φ[8] (A1) = argument length
-    //
-    // The refine function receives the work-item payload as arguments.
-    // We implement a simple "echo" service: output = input.
-    //
-    // To return output, we halt with:
-    //   φ[7] = pointer to output data
-    //   φ[8] = length of output data
-    //
-    // Since the arguments are already in memory at the arg base,
-    // we just leave φ[7] and φ[8] as-is and halt.
-
-    // The arguments are already set up: φ[7]=arg_base, φ[8]=arg_len
-    // Simply halt — the output is the arguments themselves.
-    // Halt address: djump to 2^32 - 2^16
-    // We use jump_ind with the halt address loaded into a register.
-
-    // Load halt address into T0
-    asm.load_imm_64(Reg::T0, 0xFFFF0000u64);
-
-    // jump_ind T0 (djump to halt)
-    asm.jump_ind(Reg::T0, 0);
-
-    // === Entry for Accumulate (needs to be at a jump table entry) ===
-    // Jump table entry 1 → placeholder
-    asm.add_jump_entry_at(0); // placeholder, points to trap
-
-    // Jump table entry 2 → accumulate code
-    let _acc_jt = asm.add_jump_entry(); // index 2 → current PC
-
-    // Accumulate entry point (reached via set_pc(5), which means ı=5,
-    // so djump(5) is not valid since 5 is odd — actually set_pc directly
-    // sets the instruction counter, not using djump).
-    //
-    // Actually, the Grey PVM sets PC=5 directly as the byte offset.
-    // So we need accumulate code to start at byte offset 5.
-    //
-    // Let's restructure: we need exact byte control.
-    // The refine code above took: 10 bytes (load_imm_64) + 6 bytes (jump_ind) = 16 bytes.
-    // That's too many. Let me rebuild with exact byte offsets.
-
-    // Actually — let me just start over with precise byte layout.
-    drop(asm);
-
-    build_sample_service_precise()
-}
-
-/// Build sample service with precise byte-level control over entry points.
-pub fn build_sample_service_precise() -> Vec<u8> {
-    // We need:
-    // - PC=0: refine entry point (is-authorized also uses entry 0)
-    // - PC=5: accumulate entry point
-    //
-    // Layout:
-    //   Byte 0: jump to refine_body (opcode 40 + 4-byte offset)  → 5 bytes
-    //   Byte 5: start of accumulate body
-    //   ...
-    //   Byte N: refine body
-    //
-    // Refine just halts returning the arguments (echo service).
-    // Accumulate reads the work-item data via host_fetch and writes to storage.
-
-    let mut code = Vec::new();
-    let mut bitmask = Vec::new();
-
-    // Helper to push instruction byte
-    let push_inst = |code: &mut Vec<u8>, bitmask: &mut Vec<u8>, byte: u8| {
-        code.push(byte);
-        bitmask.push(1);
-    };
-    let push_data = |code: &mut Vec<u8>, bitmask: &mut Vec<u8>, byte: u8| {
-        code.push(byte);
-        bitmask.push(0);
-    };
-
-    // We'll fill the jump target for PC=0 after we know where refine_body is.
-    // For now, use a placeholder.
-
-    // --- Byte 0-4: Jump to refine body (will be patched) ---
-    push_inst(&mut code, &mut bitmask, 40); // opcode: jump
-    // 4-byte LE offset (placeholder, will patch)
-    let jump_patch_offset = code.len();
-    for _ in 0..4 {
-        push_data(&mut code, &mut bitmask, 0);
-    }
-    // Now at byte 5.
-
-    // --- Byte 5+: Accumulate body ---
-    // Accumulate receives arguments encoded as:
-    //   E(timeslot, service_id, item_count) via φ[7]=arg_base, φ[8]=arg_len
-    //
-    // For a simple service, we just:
-    // 1. Call host_write to write a marker to storage
-    // 2. Halt with output = hash pointer
-    //
-    // host_write (ID=4):
-    //   φ[7] = key_ptr, φ[8] = key_len, φ[9] = val_ptr, φ[10] = val_len
-    //   Returns φ[7] = 0 (OK) or error
-    //
-    // We'll write the value [0x42] to storage key [0x01].
-    // First, we need the data in memory. The stack region is RW.
-    // Stack pointer φ[0] starts at 2^32 - 2^16 = 0xFFFF0000.
-    // We'll store our key/value on the stack.
-
-    // Save the argument pointer first
-    // move_reg S0, A0 (save arg base)
-    push_inst(&mut code, &mut bitmask, 100); // opcode: move_reg
-    push_data(
-        &mut code,
-        &mut bitmask,
-        (Reg::S0 as u8) | ((Reg::A0 as u8) << 4),
-    );
-
-    // move_reg S1, A1 (save arg len)
-    push_inst(&mut code, &mut bitmask, 100);
-    push_data(
-        &mut code,
-        &mut bitmask,
-        (Reg::S1 as u8) | ((Reg::A1 as u8) << 4),
-    );
-
-    // Allocate stack space: SP -= 16
-    // add_imm_64 SP, SP, -16 (opcode 149)
-    push_inst(&mut code, &mut bitmask, 149); // add_imm_64
-    push_data(
-        &mut code,
-        &mut bitmask,
-        (Reg::SP as u8) | ((Reg::SP as u8) << 4),
-    );
-    // immediate -16 in 4 bytes LE (sign-extended)
-    let neg16 = (-16i32).to_le_bytes();
-    for b in &neg16 {
-        push_data(&mut code, &mut bitmask, *b);
-    }
-
-    // Store key byte [0x01] at SP+0 using register-based stores.
-
-    // load_imm T0, 0x01 (key byte)
-    push_inst(&mut code, &mut bitmask, 51); // load_imm
-    push_data(&mut code, &mut bitmask, Reg::T0 as u8);
-    push_data(&mut code, &mut bitmask, 0x01); // imm = 1
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-
-    // store_ind_u8 T0, SP, 0 (store key byte at SP+0)
-    push_inst(&mut code, &mut bitmask, 120); // store_ind_u8
-    push_data(
-        &mut code,
-        &mut bitmask,
-        (Reg::T0 as u8) | ((Reg::SP as u8) << 4),
-    );
-    push_data(&mut code, &mut bitmask, 0x00); // imm = 0
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-
-    // load_imm T0, 0x42 (value byte)
-    push_inst(&mut code, &mut bitmask, 51);
-    push_data(&mut code, &mut bitmask, Reg::T0 as u8);
-    push_data(&mut code, &mut bitmask, 0x42);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-
-    // store_ind_u8 T0, SP, 8 (store value byte at SP+8)
-    push_inst(&mut code, &mut bitmask, 120);
-    push_data(
-        &mut code,
-        &mut bitmask,
-        (Reg::T0 as u8) | ((Reg::SP as u8) << 4),
-    );
-    push_data(&mut code, &mut bitmask, 0x08); // imm = 8
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-
-    // Set up host_write arguments:
-    // φ[7] (A0) = key_ptr = SP+0
-    // φ[8] (A1) = key_len = 1
-    // φ[9] (A2) = val_ptr = SP+8
-    // φ[10] (A3) = val_len = 1
-
-    // move_reg A0, SP
-    push_inst(&mut code, &mut bitmask, 100);
-    push_data(
-        &mut code,
-        &mut bitmask,
-        (Reg::A0 as u8) | ((Reg::SP as u8) << 4),
-    );
-
-    // load_imm A1, 1
-    push_inst(&mut code, &mut bitmask, 51);
-    push_data(&mut code, &mut bitmask, Reg::A1 as u8);
-    push_data(&mut code, &mut bitmask, 0x01);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-
-    // add_imm_64 A2, SP, 8
-    push_inst(&mut code, &mut bitmask, 149);
-    push_data(
-        &mut code,
-        &mut bitmask,
-        (Reg::A2 as u8) | ((Reg::SP as u8) << 4),
-    );
-    push_data(&mut code, &mut bitmask, 0x08);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-
-    // load_imm A3, 1
-    push_inst(&mut code, &mut bitmask, 51);
-    push_data(&mut code, &mut bitmask, Reg::A3 as u8);
-    push_data(&mut code, &mut bitmask, 0x01);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-
-    // ecalli 5 (STORAGE_W, slot 5)
-    push_inst(&mut code, &mut bitmask, 10); // ecalli
-    push_data(&mut code, &mut bitmask, 0x05); // ID = 5
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-
-    // Halt: set output pointer and length, then djump to halt address
-    // For accumulate, output is a 32-byte hash. We'll output nothing (empty).
-    // load_imm A0, 0 (null pointer)
-    push_inst(&mut code, &mut bitmask, 51);
-    push_data(&mut code, &mut bitmask, Reg::A0 as u8);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-
-    // load_imm A1, 0 (zero length)
-    push_inst(&mut code, &mut bitmask, 51);
-    push_data(&mut code, &mut bitmask, Reg::A1 as u8);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-
-    // Halt: load halt address and djump
-    // load_imm_64 T0, 0xFFFF0000
-    push_inst(&mut code, &mut bitmask, 20); // load_imm_64
-    push_data(&mut code, &mut bitmask, Reg::T0 as u8);
-    let halt_addr = 0xFFFF0000u64;
-    for i in 0..8 {
-        push_data(&mut code, &mut bitmask, (halt_addr >> (i * 8)) as u8);
-    }
-
-    // jump_ind T0, 0 (djump to halt)
-    push_inst(&mut code, &mut bitmask, 50);
-    push_data(&mut code, &mut bitmask, Reg::T0 as u8);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-
-    // --- Refine body (patched from byte 0 jump) ---
-    let refine_offset = code.len() as u32;
-
-    // Refine: just halt with the arguments as output (echo).
-    // φ[7] already has arg_base, φ[8] already has arg_len.
-    // Load halt address and djump.
-
-    push_inst(&mut code, &mut bitmask, 20); // load_imm_64 T0, halt_addr
-    push_data(&mut code, &mut bitmask, Reg::T0 as u8);
-    for i in 0..8 {
-        push_data(&mut code, &mut bitmask, (halt_addr >> (i * 8)) as u8);
-    }
-
-    push_inst(&mut code, &mut bitmask, 50); // jump_ind T0, 0
-    push_data(&mut code, &mut bitmask, Reg::T0 as u8);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-    push_data(&mut code, &mut bitmask, 0x00);
-
-    // Patch the jump at byte 0 to point to refine_offset
-    let refine_bytes = refine_offset.to_le_bytes();
-    code[jump_patch_offset] = refine_bytes[0];
-    code[jump_patch_offset + 1] = refine_bytes[1];
-    code[jump_patch_offset + 2] = refine_bytes[2];
-    code[jump_patch_offset + 3] = refine_bytes[3];
-
-    // Build jump table:
-    // Index 0 → refine entry (byte 0, which jumps to refine body)
-    // Index 1 → accumulate entry (byte 5)
-    // But djump(2) → jump_table[0], djump(4) → jump_table[1], djump(6) → jump_table[2]
-    // set_pc(5) sets ı=5 directly (doesn't use djump).
-    let jump_table = vec![0u32, 5, refine_offset];
-
-    // Build a service blob
-    emitter::build_service_program(
-        &code,
-        &bitmask,
-        &jump_table,
-        &[], // no ro_data
-        &[], // no rw_data
-        1,   // 1 stack page
-        1,   // 1 heap page
-        6,   // memory_pages
-    )
-}
-
-/// Build a trivial authorizer PVM blob that just halts immediately.
-///
-/// Used as a fallback when the pixels-authorizer ELF is not available.
-/// The sequential test doesn't exercise Ψ_I, so the authorizer code
-/// never actually runs — we only need a deterministic blob for hashing.
-pub fn build_trivial_authorizer() -> Vec<u8> {
-    let mut asm = Assembler::new();
-    asm.set_heap_pages(0);
-    asm.set_stack_pages(1);
-    // Emit trap instruction (opcode 0) at PC=0
-    asm.emit_raw(0, true);
-    asm.build()
 }
 
 #[cfg(test)]
@@ -849,25 +450,5 @@ mod tests {
         asm.trap();
         asm.label("after_trap");
         assert_eq!(asm.labels["after_trap"], 1);
-    }
-
-    #[test]
-    fn test_build_trivial_authorizer() {
-        let blob = build_trivial_authorizer();
-        assert!(!blob.is_empty());
-        // Should start with JAR magic
-        assert_eq!(&blob[..4], b"JAR\x02");
-    }
-
-    #[test]
-    fn test_build_sample_service() {
-        let blob = build_sample_service();
-        assert!(!blob.is_empty());
-        // Format-level sanity: starts with the JAR magic header. The
-        // v3 javm doesn't yet consume this blob format directly; the
-        // jar-kernel-v3 build pipeline (Stage D) parses the manifest
-        // via `crate::program::parse_blob` and constructs a v3
-        // `jar_cap::Image` from it.
-        assert_eq!(&blob[..4], b"JAR\x02");
     }
 }

@@ -1,26 +1,19 @@
-//! Shared program layout for transpiler-emitted JAR blobs.
+//! Shared program data-region layout for transpiler-emitted Images.
 //!
-//! [`ProgramLayout`] assigns `cap_index`, `base_page`, `page_count`, and
-//! `access` to each DATA cap that appears in a transpiler-emitted blob.
-//! It is computed once per blob and consumed by:
-//!
-//! - [`crate::emitter::build_service_program`], to populate the JAR
-//!   manifest (`CapManifestEntry` per DATA cap; the manifest no longer
-//!   carries `base_page`/`init_access` after the kernel-side pre-mmap
-//!   was retired).
-//! - [`emit_prologue`], to emit the stackless `MGMT_MAP` prologue plus
-//!   `load_imm_64 SP, stack_top` that runs before user code. The kernel
-//!   no longer pre-maps DATA caps; the prologue is the guest's
-//!   responsibility.
+//! [`ProgramLayout`] assigns `cap_index`, `base_page`, `page_count`,
+//! and `access` to each DATA cap appearing in a transpiler-emitted
+//! Image. Today the only consumer is [`crate::linker::link_elf`],
+//! which uses [`ProgramLayout::stack_top`] to compute the initial
+//! SP value baked into every endpoint's
+//! [`jar_cap::image::EndpointDef::initial_regs`]. The page-count
+//! and base-page metadata will also feed declarative
+//! `Image.memory_mappings` once the kernel honors them at instance
+//! init (future work).
 //!
 //! Cap-index convention: 64 = CODE, 65 = stack, 66 = ro, 67 = rw,
 //! 68 = heap. Address layout starts at page 0 and stacks linearly:
 //! stack lives at `[0, stack_pages)`, ro at `[stack_pages,
-//! stack_pages + ro_pages)`, etc. Args bytes (when present) are
-//! delivered out-of-band: the kernel allocates and places the args
-//! DATA cap at bare-Frame slot 4; the guest MOVE+MGMT_MAPs it
-//! itself (see `subsoil::map_args`). Args is not in the
-//! manifest and not in `ProgramLayout`.
+//! stack_pages + ro_pages)`, etc.
 
 use crate::program::Access;
 
@@ -138,215 +131,10 @@ impl ProgramLayout {
         (self.stack.base_page + self.stack.page_count) as u64 * PVM_PAGE_SIZE as u64
     }
 
-    /// Total pages across all DATA caps in this layout. Used by
-    /// `build_service_program` to compute `memory_pages` (the
-    /// per-invocation Untyped budget).
+    /// Total pages across all DATA caps in this layout.
     pub fn total_data_pages(&self) -> u32 {
         self.data_caps().map(|d| d.page_count).sum()
     }
-}
-
-// =============================================================================
-// Prologue emission
-//
-// PVM/JAVM is Harvard: CODE bytes execute from the CodeCap, never via a
-// mapped DATA address. The prologue can therefore run with the entire
-// data address space unmapped, as long as it sticks to register-only
-// instructions (no loads/stores, no stack spills) until at least the
-// stack DATA cap is mapped.
-//
-// Each `MGMT_MAP` is encoded as a no-immediate `ecall` (PVM opcode 3).
-// `ecalli` (opcode 10) accepts only `imm ∈ [0, 127]`, so management ops
-// are dispatched via `ecall` instead, with the op selector in φ[11] and
-// the cap-ref in the low 32 bits of φ[12]. `ecall_map` (the kernel
-// handler) reads:
-//
-//   φ[7]  = base_offset   (where in the active VM's window to map the cap)
-//   φ[8]  = page_offset   (within the cap, which page to start; 0 = start)
-//   φ[9]  = page_count    (how many pages to map)
-//   φ[10] = access        (0 = RO, 1 = RW)
-//   φ[11] = MGMT_MAP_OP   (= 0x02)
-//   φ[12] = subject_ref   (low 32 bits = cap-ref to the DATA cap)
-//
-// A direct cap-ref to slot N is the bare value `N` with no indirection
-// bytes — just the low byte of the u32. The high 32 bits of φ[12] are
-// the object-ref, unused for MAP.
-//
-// Per-cap emission (61 bytes):
-//   load_imm_64 φ[7],  base_page            (10 bytes)
-//   load_imm_64 φ[8],  0                    (10 bytes)
-//   load_imm_64 φ[9],  page_count           (10 bytes)
-//   load_imm_64 φ[10], access (0|1)         (10 bytes)
-//   load_imm_64 φ[11], MGMT_MAP_OP          (10 bytes)
-//   load_imm_64 φ[12], cap_index            (10 bytes)
-//   ecall                                    ( 1 byte)
-//
-// Plus, after the stack is mapped, a single SP setup (10 bytes):
-//   load_imm_64 SP, stack_top
-//
-// SP setup is sequenced AFTER the stack `MGMT_MAP` so any subsequent
-// instruction that touches memory (none in the prologue itself, but
-// user code right after) finds the stack already mapped.
-// =============================================================================
-
-/// PVM opcode for `load_imm_64 reg, imm64` (10 bytes total).
-const PVM_OPCODE_LOAD_IMM_64: u8 = 20;
-/// PVM opcode for `ecall` (1 byte; no immediate, op in φ[11]).
-const PVM_OPCODE_ECALL: u8 = 3;
-/// PVM opcode for `move_reg rd, ra` (2 bytes total).
-const PVM_OPCODE_MOVE_REG: u8 = 100;
-/// Stack-pointer register.
-const SP_REG: u8 = 1;
-/// `ecall_map` argument register layout (mirrors `javm_legacy::kernel::ecall_map`).
-const ARG_REG_BASE_OFFSET: u8 = 7;
-const ARG_REG_PAGE_OFFSET: u8 = 8;
-const ARG_REG_PAGE_COUNT: u8 = 9;
-const ARG_REG_ACCESS: u8 = 10;
-const ARG_REG_OP: u8 = 11;
-const ARG_REG_REFS: u8 = 12;
-/// Scratch registers used to save/restore φ[7..=12] across the
-/// prologue. The prologue clobbers φ[7..=12] for `MGMT_MAP` arg
-/// passing; we save them to φ[0] + φ[2..=6] (T0..T2, S0..S1, RA)
-/// before the first MGMT_MAP and restore after the last, so
-/// host-set arg registers survive the prologue.
-const SCRATCH_REGS: [u8; 6] = [0, 2, 3, 4, 5, 6];
-
-/// Emit `load_imm_64 reg, value` (PVM opcode 20, 10 bytes total:
-/// opcode + reg + 8-byte LE immediate). Bitmask: `1, 0, 0, 0, 0, 0, 0, 0, 0, 0`.
-fn emit_load_imm_64(code: &mut Vec<u8>, bitmask: &mut Vec<u8>, reg: u8, value: u64) {
-    code.push(PVM_OPCODE_LOAD_IMM_64);
-    code.push(reg);
-    code.extend_from_slice(&value.to_le_bytes());
-    bitmask.push(1);
-    for _ in 0..9 {
-        bitmask.push(0);
-    }
-}
-
-/// Emit `ecall` (PVM opcode 3, 1 byte total). Bitmask: `1`. ecall is a
-/// terminator — the next instruction must be a basic-block start.
-fn emit_ecall(code: &mut Vec<u8>, bitmask: &mut Vec<u8>) {
-    code.push(PVM_OPCODE_ECALL);
-    bitmask.push(1);
-}
-
-/// Emit `move_reg rd, ra` (PVM opcode 100, 2 bytes total: opcode + reg
-/// byte where reg_byte = `(ra << 4) | rd`). Bitmask: `1, 0`.
-fn emit_move_reg(code: &mut Vec<u8>, bitmask: &mut Vec<u8>, rd: u8, ra: u8) {
-    code.push(PVM_OPCODE_MOVE_REG);
-    code.push(((ra & 0x0F) << 4) | (rd & 0x0F));
-    bitmask.push(1);
-    bitmask.push(0);
-}
-
-/// Save host-set φ[7..=12] into [`SCRATCH_REGS`] before the prologue
-/// clobbers them. 12 bytes (6 × `move_reg`).
-fn emit_save_arg_regs(code: &mut Vec<u8>, bitmask: &mut Vec<u8>) {
-    let arg_regs = [
-        ARG_REG_BASE_OFFSET,
-        ARG_REG_PAGE_OFFSET,
-        ARG_REG_PAGE_COUNT,
-        ARG_REG_ACCESS,
-        ARG_REG_OP,
-        ARG_REG_REFS,
-    ];
-    for (scratch, src) in SCRATCH_REGS.iter().zip(arg_regs.iter()) {
-        emit_move_reg(code, bitmask, *scratch, *src);
-    }
-}
-
-/// Restore φ[7..=12] from [`SCRATCH_REGS`] after the prologue's
-/// MGMT_MAPs are done. 12 bytes (6 × `move_reg`).
-fn emit_restore_arg_regs(code: &mut Vec<u8>, bitmask: &mut Vec<u8>) {
-    let arg_regs = [
-        ARG_REG_BASE_OFFSET,
-        ARG_REG_PAGE_OFFSET,
-        ARG_REG_PAGE_COUNT,
-        ARG_REG_ACCESS,
-        ARG_REG_OP,
-        ARG_REG_REFS,
-    ];
-    for (dst, scratch) in arg_regs.iter().zip(SCRATCH_REGS.iter()) {
-        emit_move_reg(code, bitmask, *dst, *scratch);
-    }
-}
-
-/// Emit the `MGMT_MAP` ecall sequence for one DATA cap entry: six
-/// `load_imm_64` setups (61 bytes total including the trailing ecall).
-fn emit_mgmt_map(code: &mut Vec<u8>, bitmask: &mut Vec<u8>, entry: &DataCapEntry) {
-    let base_offset = entry.base_page;
-    let page_count = entry.page_count;
-    let access_word: u64 = match entry.access {
-        Access::RO => 0,
-        Access::RW => 1,
-    };
-    emit_load_imm_64(code, bitmask, ARG_REG_BASE_OFFSET, base_offset as u64);
-    emit_load_imm_64(code, bitmask, ARG_REG_PAGE_OFFSET, 0);
-    emit_load_imm_64(code, bitmask, ARG_REG_PAGE_COUNT, page_count as u64);
-    emit_load_imm_64(code, bitmask, ARG_REG_ACCESS, access_word);
-    emit_load_imm_64(code, bitmask, ARG_REG_OP, crate::program::MGMT_MAP as u64);
-    // φ[12] = (subject_ref << 32) | object_ref. The kernel reads:
-    //   subject_ref = (φ[12] >> 32) as u32
-    //   object_ref  = (φ[12] & 0xFFFFFFFF) as u32
-    // Subject is a direct cap-ref to the cap_index slot (no
-    // indirection); object is unused for MAP.
-    let refs: u64 = (entry.cap_index as u64) << 32;
-    emit_load_imm_64(code, bitmask, ARG_REG_REFS, refs);
-    emit_ecall(code, bitmask);
-}
-
-/// Emit the stackless `MGMT_MAP` prologue + SP setup for the given
-/// layout. Returns `(code, bitmask)` ready to be prepended to user
-/// code. The prologue runs at PC=0 of every invocation; user code
-/// follows immediately after (no trailing jump — falls through).
-///
-/// Emission order:
-/// 1. `MGMT_MAP` for the stack cap (so subsequent stack accesses work).
-/// 2. `load_imm_64 SP, stack_top` (RISC-V SP grows down).
-/// 3. `MGMT_MAP` for ro / rw / heap (skipping absent ones).
-///
-/// The prologue does **not** touch the args DATA cap. Args bytes (if
-/// any) sit at bare-Frame slot 4, placed there by
-/// [`javm_legacy::kernel::InvocationKernel::set_args`]. The guest is
-/// responsible for MOVE-ing the cap into its main-frame CapTable
-/// and MGMT_MAP-ing it (see `subsoil::map_args`).
-///
-/// Caller must shift `jump_table` entries by `code.len()` after
-/// concatenating user code, since they encode absolute byte offsets
-/// into the final code blob.
-pub fn emit_prologue(layout: &ProgramLayout) -> (Vec<u8>, Vec<u8>) {
-    let mut code = Vec::new();
-    let mut bitmask = Vec::new();
-
-    // 1. Save host-set φ[7..=12] into scratch regs (φ[0] + φ[2..=6])
-    //    so the prologue can clobber them for MGMT_MAP arg passing
-    //    without losing host-passed args (φ[7] = args_len, set by
-    //    `kernel.set_args`).
-    emit_save_arg_regs(&mut code, &mut bitmask);
-
-    // 2. Map the stack first — the SP setup that follows must reference
-    //    a mapped page, and any user code falling through to a memory
-    //    op needs the stack live.
-    emit_mgmt_map(&mut code, &mut bitmask, &layout.stack);
-
-    // 3. Set SP to stack_top. RISC-V SP convention: grows downward, so
-    //    the first push lands at SP - 8 inside the just-mapped region.
-    emit_load_imm_64(&mut code, &mut bitmask, SP_REG, layout.stack_top());
-
-    // 4. Map ro / rw / heap if present.
-    for opt in [layout.ro.as_ref(), layout.rw.as_ref(), layout.heap.as_ref()]
-        .iter()
-        .copied()
-        .flatten()
-    {
-        emit_mgmt_map(&mut code, &mut bitmask, opt);
-    }
-
-    // 5. Restore φ[7..=12] from scratch regs.
-    emit_restore_arg_regs(&mut code, &mut bitmask);
-
-    debug_assert_eq!(code.len(), bitmask.len());
-    (code, bitmask)
 }
 
 #[cfg(test)]
@@ -375,26 +163,5 @@ mod tests {
         assert_eq!(l.heap.as_ref().unwrap().base_page, 4);
         assert_eq!(l.stack_top(), 2 * 4096);
         assert_eq!(l.total_data_pages(), 2 + 1 + 1 + 4);
-    }
-
-    #[test]
-    fn prologue_basic_shape() {
-        let l = ProgramLayout::compute(1, 0, 0, 0);
-        let (code, bitmask) = emit_prologue(&l);
-        assert_eq!(code.len(), bitmask.len());
-        // save (12) + stack MGMT_MAP (61) + SP setup (10) + restore (12) = 95 bytes.
-        assert_eq!(code.len(), 12 + 61 + 10 + 12);
-        // First instruction must be a basic-block start.
-        assert_eq!(bitmask[0], 1);
-        // First instruction is move_reg (opcode 100) — saving φ[7] to φ[0].
-        assert_eq!(code[0], PVM_OPCODE_MOVE_REG);
-    }
-
-    #[test]
-    fn prologue_with_all_regions() {
-        let l = ProgramLayout::compute(2, 1, 1, 4);
-        let (code, _bitmask) = emit_prologue(&l);
-        // save(12) + stack(61) + SP(10) + ro(61) + rw(61) + heap(61) + restore(12) = 278 bytes.
-        assert_eq!(code.len(), 12 + 61 + 10 + 61 + 61 + 61 + 12);
     }
 }

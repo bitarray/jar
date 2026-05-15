@@ -27,27 +27,21 @@
 //!   (variable-length, referenced by capabilities)
 //! ```
 //!
-//! DATA caps are *not* pre-mapped by the kernel. The transpiler-emitted
-//! init prologue (see `javm-transpiler::layout::emit_prologue`) issues
-//! a stackless `MGMT_MAP` ecalli per DATA cap before user code runs;
-//! that's where `base_page` / `init_access` (which used to live in the
-//! manifest) get baked in.
+//! In the v3 model the kernel will eventually consume `Image.memory_mappings`
+//! to set up DATA-cap mappings declaratively at instance init. Until that
+//! lands, transpiled chain Images carry an empty mapping list; the SP
+//! value baked into `EndpointDef.initial_regs` makes the metadata
+//! correct for when mappings come online.
 
-/// Memory-mapping access mode for emit_prologue's `MGMT_MAP`. v2
-/// concept inherited verbatim; v3 jar-kernel treats Persistent
-/// mappings as RW and the prologue's encoding choice tracks the
-/// transpiler-emitted blob's intent.
+/// Memory-mapping access mode tracked by [`ProgramLayout`] for the
+/// stack / ro / rw / heap regions. Persistent mappings (declarative
+/// `Image.memory_mappings`) will translate this into the
+/// corresponding `MappingSource::Persistent(...)` entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     RO,
     RW,
 }
-
-/// MGMT_MAP op-code: encoded as `ecalli ((MGMT_MAP << 8) | cap_idx)`.
-/// v2 constant inherited so the transpiler can keep emitting the
-/// existing prologue. v3 kernel maps Persistent mappings via the
-/// declarative Image.memory_mappings (see jar-kernel-v3 Stage 4).
-pub const MGMT_MAP: u32 = 0x2;
 
 /// JAR magic: 'J','A','R', 0x02.
 pub const JAR_MAGIC: u32 = u32::from_le_bytes([b'J', b'A', b'R', 0x02]);
@@ -67,10 +61,10 @@ pub enum CapEntryType {
     Data = 1,
 }
 
-/// A single capability entry in the manifest. DATA caps no longer carry
-/// `(base_page, init_access)`; those decisions live in the transpiler's
-/// init prologue (see `javm-transpiler::layout::emit_prologue`), which
-/// issues `MGMT_MAP` for each DATA cap before user code runs.
+/// A single capability entry in the manifest. DATA caps carry only
+/// `(cap_index, page_count, data_offset, data_len)`; v3 chain Images
+/// will eventually express their data regions via
+/// `Image.memory_mappings` directly.
 #[derive(Debug, Clone)]
 pub struct CapManifestEntry {
     /// Slot in the VM's cap table.
