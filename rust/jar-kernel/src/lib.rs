@@ -21,5 +21,9 @@
 
 pub mod abi;
 pub mod error;
+pub mod state;
 
 pub use error::KernelError;
+pub use state::{
+    CodeId, DataBlob, FileId, IdCounters, State, ValidatorKey, VaultId, VaultRecord, state_root,
+};

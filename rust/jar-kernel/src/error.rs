@@ -12,7 +12,9 @@ pub enum KernelError {
     Op(#[from] jar_cap::OpError),
     #[error("file_id {0} not found in data_blobs registry")]
     FileNotFound(u64),
-    #[error("storage quota exhausted (quota_id {0}): tried to write {1} bytes, only {2} available)")]
+    #[error(
+        "storage quota exhausted (quota_id {0}): tried to write {1} bytes, only {2} available)"
+    )]
     StorageExhausted(u64, u64, u64),
     #[error("invariant violated: {0}")]
     Invariant(&'static str),
