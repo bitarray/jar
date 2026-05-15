@@ -20,6 +20,8 @@ pub mod ecall;
 pub mod error;
 pub mod exit;
 pub mod gas;
+pub mod gas_cost;
+pub mod gas_sim;
 pub mod instruction;
 pub mod interp;
 pub mod mem;
