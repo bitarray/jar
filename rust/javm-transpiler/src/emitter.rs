@@ -229,7 +229,7 @@ pub fn build_service_program(
     // `kernel.set_args(bytes)` at runtime, which allocates a fresh
     // DATA cap and places it at bare-Frame slot 4 (a kernel-managed
     // ephemeral sub-slot, not a manifest slot). The guest MOVE+MAPs
-    // it itself via `javm_builtins::map_args`.
+    // it itself via `subsoil::map_args`.
 
     // Untyped budget: max of the caller's request and the layout's
     // total reserved data pages plus an extra heap headroom (legacy

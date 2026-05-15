@@ -19,7 +19,7 @@
 //! stack_pages + ro_pages)`, etc. Args bytes (when present) are
 //! delivered out-of-band: the kernel allocates and places the args
 //! DATA cap at bare-Frame slot 4; the guest MOVE+MGMT_MAPs it
-//! itself (see `javm_builtins::map_args`). Args is not in the
+//! itself (see `subsoil::map_args`). Args is not in the
 //! manifest and not in `ProgramLayout`.
 
 use crate::program::Access;
@@ -309,7 +309,7 @@ fn emit_mgmt_map(code: &mut Vec<u8>, bitmask: &mut Vec<u8>, entry: &DataCapEntry
 /// any) sit at bare-Frame slot 4, placed there by
 /// [`javm_legacy::kernel::InvocationKernel::set_args`]. The guest is
 /// responsible for MOVE-ing the cap into its main-frame CapTable
-/// and MGMT_MAP-ing it (see `javm_builtins::map_args`).
+/// and MGMT_MAP-ing it (see `subsoil::map_args`).
 ///
 /// Caller must shift `jump_table` entries by `code.len()` after
 /// concatenating user code, since they encode absolute byte offsets

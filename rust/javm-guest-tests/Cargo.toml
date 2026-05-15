@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["lib"]
 
 [dependencies]
-javm-builtins = { path = "../javm-builtins" }
+subsoil = { workspace = true }
 blake2 = { version = "0.10", default-features = false }
 sha3 = { version = "0.10", default-features = false }
 

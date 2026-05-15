@@ -96,17 +96,17 @@ name = "bench-blake2b"
 version = "0.1.0"
 dependencies = [
  "blake2",
- "javm-builtins",
  "polkavm-derive",
+ "subsoil",
 ]
 
 [[package]]
 name = "bench-ecrecover"
 version = "0.1.0"
 dependencies = [
- "javm-builtins",
  "k256",
  "polkavm-derive",
+ "subsoil",
 ]
 
 [[package]]
@@ -114,25 +114,25 @@ name = "bench-ed25519"
 version = "0.1.0"
 dependencies = [
  "ed25519-compact",
- "javm-builtins",
  "polkavm-derive",
+ "subsoil",
 ]
 
 [[package]]
 name = "bench-keccak"
 version = "0.1.0"
 dependencies = [
- "javm-builtins",
  "polkavm-derive",
  "sha3",
+ "subsoil",
 ]
 
 [[package]]
 name = "bench-prime-sieve"
 version = "0.1.0"
 dependencies = [
- "javm-builtins",
  "polkavm-derive",
+ "subsoil",
 ]
 
 [[package]]
@@ -618,10 +618,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "javm-builtins"
-version = "0.1.0"
-
-[[package]]
 name = "javm-exec"
 version = "0.1.0"
 dependencies = [
@@ -637,8 +633,8 @@ version = "0.1.0"
 dependencies = [
  "blake2",
  "build-javm",
- "javm-builtins",
  "sha3",
+ "subsoil",
 ]
 
 [[package]]
@@ -1280,6 +1276,10 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+
+[[package]]
+name = "subsoil"
+version = "0.1.0"
 
 [[package]]
 name = "subtle"

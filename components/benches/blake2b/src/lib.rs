@@ -2,7 +2,7 @@
 
 #![cfg_attr(target_os = "none", no_std)]
 
-use javm_builtins as _;
+use subsoil as _;
 
 use blake2::digest::{consts::U32, Digest};
 use blake2::Blake2b;

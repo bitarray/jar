@@ -13,7 +13,7 @@
 
 #![cfg_attr(target_os = "none", no_std)]
 
-use javm_builtins as _;
+use subsoil as _;
 
 mod tests;
 

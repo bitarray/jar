@@ -8,7 +8,7 @@ crate-type = ["lib", "cdylib"]
 
 [dependencies]
 blake2 = { version = "0.10", default-features = false }
-javm-builtins = { path = "../../../rust/javm-builtins" }
+subsoil = { workspace = true }
 
 [target.'cfg(target_env = "polkavm")'.dependencies]
 polkavm-derive = "0.32.0"

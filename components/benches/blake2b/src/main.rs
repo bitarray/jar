@@ -2,7 +2,7 @@
 #![cfg_attr(target_env = "javm", no_main)]
 
 #[cfg(target_env = "javm")]
-javm_builtins::javm_entry!(javm_main);
+subsoil::entry!(javm_main);
 
 #[cfg(target_env = "javm")]
 #[no_mangle]

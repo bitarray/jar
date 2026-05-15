@@ -1,14 +1,14 @@
-//! Shared builtins for freestanding RISC-V service crates.
+//! Guest-side runtime support library for JAVM chain Images.
 //!
 //! Provides compiler builtins (memset, memcpy, memcmp), a panic handler,
-//! an entry point macro for JAVM/PolkaVM targets, and the `map_args`
+//! an entry point macro for the JAVM target, and the `map_args`
 //! runtime helper that moves the kernel-allocated args DATA cap from
 //! bare-Frame slot 4 into the guest's main-frame CapTable and maps it
 //! into the guest address space.
 //!
 //! All freestanding-only symbols are gated behind `cfg(target_os =
 //! "none")` — on host this crate is empty. Services force-link it via
-//! `use javm_builtins as _;`.
+//! `use subsoil as _;`.
 
 #![no_std]
 
@@ -63,23 +63,20 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 
 // -- Entry point macro --------------------------------------------------------
 
-/// Generate a `_start` entry point for JAVM and PolkaVM targets.
+/// Generate a `_start` entry point for the JAVM target.
 ///
 /// On JAVM: `_start` calls the named function with `a0 = φ[7] =
 /// args_len` (kernel-set by `kernel.set_args`), then terminates via
 /// `ecalli(0x00)` (REPLY to kernel via IPC slot 0).
-/// On PolkaVM: `_start` is `unimp` (polkavm uses exported functions
-/// directly).
 /// On host: expands to nothing.
 ///
 /// The user function signature is `fn(args_len: u64) -> u64`. To read
-/// the args bytes, the user calls
-/// [`javm_builtins::map_args`](crate::map_args) with the same
+/// the args bytes, the user calls [`crate::map_args`] with the same
 /// `args_len`.
 ///
-/// Usage: `javm_builtins::javm_entry!(my_bench_fn);`
+/// Usage: `subsoil::entry!(my_bench_fn);`
 #[macro_export]
-macro_rules! javm_entry {
+macro_rules! entry {
     ($fn_name:ident) => {
         #[cfg(target_env = "javm")]
         core::arch::global_asm!(
@@ -87,7 +84,7 @@ macro_rules! javm_entry {
             "_start:",
             // a0 = φ[7] = args_len. The kernel placed the args DATA
             // cap (if any) at bare-Frame slot 4; user code calls
-            // `javm_builtins::map_args(args_len)` to MOVE+MAP it and
+            // `subsoil::map_args(args_len)` to MOVE+MAP it and
             // get a `&[u8]`.
             concat!("call ", stringify!($fn_name)),
             // REPLY to kernel via IPC slot 0
@@ -95,8 +92,6 @@ macro_rules! javm_entry {
             "ecall",
             "unimp", // trap if somehow resumed after REPLY
         );
-        #[cfg(target_env = "polkavm")]
-        core::arch::global_asm!(".global _start", "_start:", "unimp",);
     };
 }
 
