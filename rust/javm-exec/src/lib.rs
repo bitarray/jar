@@ -16,6 +16,7 @@
 //! layering.
 
 pub mod args;
+pub mod decode;
 pub mod ecall;
 pub mod error;
 pub mod exit;
@@ -28,6 +29,7 @@ pub mod mem;
 pub mod program;
 pub mod regs;
 
+pub use decode::{DecodedInst, Predecoded, predecode};
 pub use ecall::{EcallHandler, EcallResult, PanickingHandler};
 pub use error::ProgramError;
 pub use exit::ExitReason;
