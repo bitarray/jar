@@ -32,4 +32,6 @@ pub enum VmError {
     SlotKindMismatch(u32),
     #[error("slot path step {0} traversed an empty slot")]
     SlotEmpty(u32),
+    #[error("memory mapping setup failed: {0:?}")]
+    MapRegion(javm_exec::MapError),
 }

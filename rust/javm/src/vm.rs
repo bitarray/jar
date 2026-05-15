@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use jar_cap::{CNodeBackend, Cap, DataCap, InstanceCap, SlotIdx, image::Image};
-use javm_exec::{ExitReason, GasCounter, Interpreter, Mem, Regs};
+use javm_exec::{Access, ExitReason, GasCounter, Interpreter, Mem, Regs};
 
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
 use crate::error::VmError;
@@ -147,7 +147,32 @@ impl<K: KernelAssist> Vm<K> {
                 }
             }
         }
-        let mem = Mem::new();
+        let mut mem = Mem::new();
+        // Materialise the Image's declarative memory mappings. For
+        // each mapping: resolve `source` → Cap::Data → bytes via the
+        // kernel-assist's σ.data_payloads lookup; map the bytes into
+        // `mem` with permissions derived from `pinned_slots`
+        // membership (pinned = RO; unpinned = RW). Empty Image
+        // (e.g. hand-authored kernel-test fixtures) yields no
+        // mappings — the loop is a no-op.
+        for mapping in &image.memory_mappings {
+            let path = &mapping.source;
+            if !path.is_root_slot() {
+                continue; // nested paths land later
+            }
+            let target = path.target();
+            let access = if image.pinned_slots.contains_key(&target) {
+                Access::ReadOnly
+            } else {
+                Access::ReadWrite
+            };
+            let bytes: Option<Vec<u8>> = cnode.get(target).ok().flatten().and_then(|c| match c {
+                Cap::Data(d) => self.kernel_assist.data_lookup(d.content_hash),
+                _ => None,
+            });
+            mem.map_region(mapping.start, mapping.size, access, bytes.as_deref())
+                .map_err(VmError::MapRegion)?;
+        }
         let (gas, gas_initial) = self.seed_gas(image.as_ref(), cnode.as_ref(), gas_budget);
 
         // 4. Push the entry. `pushed_pos` is the position of *this*
