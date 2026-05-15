@@ -36,6 +36,6 @@ pub use exit::ExitReason;
 pub use gas::{Gas, GasCounter, OutOfGas};
 pub use instruction::{InstructionCategory, Opcode, decode_opcode_fast};
 pub use interp::Interpreter;
-pub use mem::{Mem, MemAccess, PAGE_SIZE, Page, Perm};
+pub use mem::{Mem, MemAccess, PAGE_SIZE, perm};
 pub use program::{PvmProgram, compute_mem_cycles, unpack_bitmask};
 pub use regs::{REG_COUNT, Regs};
