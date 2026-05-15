@@ -106,10 +106,12 @@ impl Interpreter {
                     let vb = regs.read(b as usize);
                     regs.write(dst as usize, va.wrapping_sub(vb));
                 }
-                Instruction::Ecalli(op) => match handler.handle(op, regs, mem) {
-                    EcallResult::Continue => {}
-                    EcallResult::Exit(reason) => return reason,
-                },
+                Instruction::Ecalli(op) => {
+                    match handler.handle(crate::EcallKind::Ecalli(op), regs, mem) {
+                        EcallResult::Continue => {}
+                        EcallResult::Exit(reason) => return reason,
+                    }
+                }
             }
         }
     }
@@ -204,7 +206,12 @@ mod tests {
     /// Custom handler: every ecall increments φ₀ and continues.
     struct IncrementingHandler;
     impl EcallHandler for IncrementingHandler {
-        fn handle(&mut self, _op: u32, regs: &mut Regs, _mem: &mut Mem) -> EcallResult {
+        fn handle(
+            &mut self,
+            _kind: crate::EcallKind,
+            regs: &mut Regs,
+            _mem: &mut Mem,
+        ) -> EcallResult {
             regs.write(0, regs.read(0).wrapping_add(1));
             EcallResult::Continue
         }
@@ -230,8 +237,13 @@ mod tests {
     /// Custom handler: exit on opcode 42; otherwise continue.
     struct ExitOnOpHandler;
     impl EcallHandler for ExitOnOpHandler {
-        fn handle(&mut self, op: u32, _regs: &mut Regs, _mem: &mut Mem) -> EcallResult {
-            if op == 42 {
+        fn handle(
+            &mut self,
+            kind: crate::EcallKind,
+            _regs: &mut Regs,
+            _mem: &mut Mem,
+        ) -> EcallResult {
+            if matches!(kind, crate::EcallKind::Ecalli(42)) {
                 EcallResult::Exit(ExitReason::HostCall(42))
             } else {
                 EcallResult::Continue

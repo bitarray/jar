@@ -30,7 +30,7 @@ pub mod program;
 pub mod regs;
 
 pub use decode::{DecodedInst, Predecoded, predecode};
-pub use ecall::{EcallHandler, EcallResult, PanickingHandler};
+pub use ecall::{EcallHandler, EcallKind, EcallResult, PanickingHandler};
 pub use error::ProgramError;
 pub use exit::ExitReason;
 pub use gas::{Gas, GasCounter, OutOfGas};

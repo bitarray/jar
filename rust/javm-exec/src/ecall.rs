@@ -1,29 +1,38 @@
 //! `EcallHandler` trait: how the execution engine dispatches ecalls
 //! to the integration layer.
 //!
-//! Per architecture: the engine knows there are ecalls (one PVM
-//! opcode) and that each ecall carries a u32 opcode payload. It
-//! doesn't know what that opcode *means*. The caller supplies an
-//! `EcallHandler` implementation that interprets ecall opcodes as
-//! MGMT operations, host-call selectors, CALL / HALT / yield
-//! transfers, etc.
+//! Per architecture: the engine knows there are ecalls and that each
+//! carries a kind (PVM `ecall` opcode 3 with no immediate, vs PVM
+//! `ecalli` opcode 10 with a u32 immediate). It doesn't know what the
+//! kind *means*. The caller supplies an `EcallHandler` that
+//! interprets ecalls as MGMT operations, host-call selectors, CALL /
+//! HALT / yield transfers, etc.
 //!
 //! The handler may either:
 //!
-//! - Finish synchronously and return `Continue` — the engine
-//!   advances PC past the ecall instruction (already done before
-//!   the handler runs) and keeps executing. Used for purely-stateful
-//!   ecalls (MGMT_COPY, MGMT_MOVE, etc.) that just mutate `regs` /
-//!   `mem` and resume.
+//! - Return `Continue` — engine continues at the current PC
+//!   (already advanced past the ecall instruction before the handler
+//!   runs). Used for purely-stateful ecalls (MGMT_COPY, MGMT_MOVE,
+//!   etc.) that just mutate `regs` / `mem` and resume.
 //!
-//! - Return `Exit(reason)` — the engine returns this `ExitReason`
-//!   from its `execute()` call. Used for control-flow ecalls (HALT,
-//!   yield, CALL into another Instance) that require the
-//!   integration layer to take over.
+//! - Return `Exit(reason)` — engine returns this `ExitReason` from
+//!   `execute()`. Used for control-flow ecalls (HALT, yield, CALL
+//!   into another Instance) that require the integration layer.
 
 use crate::exit::ExitReason;
 use crate::mem::Mem;
 use crate::regs::Regs;
+
+/// Which PVM ecall opcode triggered this invocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EcallKind {
+    /// PVM `ecall` (opcode 3). No immediate; the handler reads
+    /// `regs[11]` (mgmt op) and `regs[12]` (subject|object) per the
+    /// v3 ABI convention.
+    Ecall,
+    /// PVM `ecalli` (opcode 10). Carries a u32 immediate payload.
+    Ecalli(u32),
+}
 
 /// Result of handling one ecall.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,14 +43,12 @@ pub enum EcallResult {
     Exit(ExitReason),
 }
 
-/// Trait the integration layer implements to interpret ecall opcodes.
+/// Trait the integration layer implements to interpret ecalls.
 ///
-/// `op` is the raw 32-bit ecall payload (per the PVM `ecalli`
-/// instruction). The engine has already validated the ecall encoding
-/// and advanced PC past the instruction; the handler operates on
-/// the post-advance register/memory state.
+/// PC has been advanced past the instruction by the engine; the
+/// handler operates on the post-advance register/memory state.
 pub trait EcallHandler {
-    fn handle(&mut self, op: u32, regs: &mut Regs, mem: &mut Mem) -> EcallResult;
+    fn handle(&mut self, kind: EcallKind, regs: &mut Regs, mem: &mut Mem) -> EcallResult;
 }
 
 /// A no-op handler: every ecall exits with `Panic`. Useful as a
@@ -51,7 +58,7 @@ pub trait EcallHandler {
 pub struct PanickingHandler;
 
 impl EcallHandler for PanickingHandler {
-    fn handle(&mut self, _op: u32, _regs: &mut Regs, _mem: &mut Mem) -> EcallResult {
+    fn handle(&mut self, _kind: EcallKind, _regs: &mut Regs, _mem: &mut Mem) -> EcallResult {
         EcallResult::Exit(ExitReason::Panic)
     }
 }
@@ -66,22 +73,21 @@ mod tests {
         let mut regs = Regs::new();
         let mut mem = Mem::new();
         assert_eq!(
-            h.handle(0, &mut regs, &mut mem),
+            h.handle(EcallKind::Ecall, &mut regs, &mut mem),
             EcallResult::Exit(ExitReason::Panic)
         );
         assert_eq!(
-            h.handle(42, &mut regs, &mut mem),
+            h.handle(EcallKind::Ecalli(42), &mut regs, &mut mem),
             EcallResult::Exit(ExitReason::Panic)
         );
     }
 
-    /// A handler that increments φ₀ on every ecall and continues.
-    /// Useful for exercising the loop-around-handler pattern.
+    /// A handler that increments φ₀ on every ecall (any kind).
     struct CountingHandler {
         count: u32,
     }
     impl EcallHandler for CountingHandler {
-        fn handle(&mut self, _op: u32, regs: &mut Regs, _mem: &mut Mem) -> EcallResult {
+        fn handle(&mut self, _kind: EcallKind, regs: &mut Regs, _mem: &mut Mem) -> EcallResult {
             self.count += 1;
             regs.write(0, regs.read(0).wrapping_add(1));
             EcallResult::Continue
@@ -93,9 +99,15 @@ mod tests {
         let mut h = CountingHandler { count: 0 };
         let mut regs = Regs::new();
         let mut mem = Mem::new();
-        assert_eq!(h.handle(1, &mut regs, &mut mem), EcallResult::Continue);
+        assert_eq!(
+            h.handle(EcallKind::Ecall, &mut regs, &mut mem),
+            EcallResult::Continue
+        );
         assert_eq!(regs.read(0), 1);
-        assert_eq!(h.handle(2, &mut regs, &mut mem), EcallResult::Continue);
+        assert_eq!(
+            h.handle(EcallKind::Ecalli(7), &mut regs, &mut mem),
+            EcallResult::Continue
+        );
         assert_eq!(regs.read(0), 2);
         assert_eq!(h.count, 2);
     }
