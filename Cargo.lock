@@ -1244,9 +1244,6 @@ dependencies = [
 [[package]]
 name = "simple-chain"
 version = "0.1.0"
-dependencies = [
- "javm-builtins",
-]
 
 [[package]]
 name = "slice-group-by"

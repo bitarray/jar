@@ -3,10 +3,6 @@ name = "simple-chain"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Example JAR chain: ed25519 account-model balance transfers."
+description = "Example JAR chain (v3 placeholder; runnable end-to-end demo lives in jar-kernel integration tests)."
 
 [dependencies]
-javm-builtins = { path = "../../../rust/javm-builtins" }
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_env, values("javm", "polkavm"))', 'cfg(target_os, values("none"))'] }
