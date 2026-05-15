@@ -29,6 +29,14 @@ pub mod perm {
     pub const RW: u8 = 2;
 }
 
+/// Mapping permission for [`Mem::map_region`]. RO regions back
+/// `perm::RO` pages; RW regions back `perm::RW` pages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    ReadOnly,
+    ReadWrite,
+}
+
 /// Outcome of a memory access (slow path; the fast inline helpers
 /// return raw `Option` / `bool`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +46,18 @@ pub enum MemAccess {
     PageFault(u32),
     /// Page is read-only and the access is a write.
     WriteProtected(u32),
+}
+
+/// Setup-time error for [`Mem::map_region`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MapError {
+    /// `start` is not page-aligned.
+    UnalignedStart(u64),
+    /// `size` is not a multiple of [`PAGE_SIZE`].
+    UnalignedSize(u64),
+    /// `start + size` overflows `usize` on this platform, or exceeds
+    /// the addressable range supported by `Mem`.
+    Overflow,
 }
 
 /// Address-space mapping for one execution context.
@@ -213,6 +233,71 @@ impl Mem {
         }
     }
 
+    /// Declare a mapped region at `[start, start + size)` with
+    /// per-page permissions `access` and optional initial bytes.
+    ///
+    /// - `start` and `size` must each be multiples of [`PAGE_SIZE`].
+    /// - Grows `flat_mem` to cover `start + size` if necessary
+    ///   (newly-grown bytes are zero-initialized; their pages
+    ///   default to [`perm::NONE`] before this call sets them).
+    /// - Sets pages in `[start / PAGE_SIZE, (start + size) /
+    ///   PAGE_SIZE)` to the permission byte for `access`.
+    /// - If `init` is `Some(bytes)`, copies `bytes[..bytes.len()
+    ///   .min(size)]` into `flat_mem[start..]`; the rest of the
+    ///   region remains zero-filled (matches the DataCap canonical
+    ///   form: trailing zeros are stripped from `content`, but the
+    ///   logical `size` may be larger).
+    pub fn map_region(
+        &mut self,
+        start: u64,
+        size: u64,
+        access: Access,
+        init: Option<&[u8]>,
+    ) -> Result<(), MapError> {
+        let page = PAGE_SIZE as u64;
+        if !start.is_multiple_of(page) {
+            return Err(MapError::UnalignedStart(start));
+        }
+        if !size.is_multiple_of(page) {
+            return Err(MapError::UnalignedSize(size));
+        }
+        let end = start.checked_add(size).ok_or(MapError::Overflow)?;
+        let end_usize: usize = end.try_into().map_err(|_| MapError::Overflow)?;
+
+        // Grow flat_mem + perms to cover [0, end).
+        if end_usize > self.flat_mem.len() {
+            self.flat_mem.resize(end_usize, 0);
+            let needed_pages = end_usize.div_ceil(PAGE_SIZE as usize);
+            if self.perms.len() < needed_pages {
+                self.perms.resize(needed_pages, perm::NONE);
+            }
+        }
+
+        // Set permissions on the affected pages.
+        let perm_byte = match access {
+            Access::ReadOnly => perm::RO,
+            Access::ReadWrite => perm::RW,
+        };
+        let first_page = (start / page) as usize;
+        let last_page = ((end / page) as usize).saturating_sub(1);
+        if size > 0 {
+            for p in first_page..=last_page {
+                self.perms[p] = perm_byte;
+            }
+        }
+
+        // Copy initial bytes if any. The destination starts as zero
+        // either from initial allocation or the grow above, so any
+        // trailing region beyond `init` is implicitly zero.
+        if let Some(bytes) = init {
+            let n = bytes.len().min(size as usize);
+            let s = start as usize;
+            self.flat_mem[s..s + n].copy_from_slice(&bytes[..n]);
+        }
+
+        Ok(())
+    }
+
     // ---- Slow-path helpers (for tests / non-hot paths). ----
 
     /// Read `len` bytes from `addr`. Returns `Err` on out-of-range.
@@ -311,5 +396,78 @@ mod tests {
         let mut m = Mem::with_pages(1, perm::RW);
         m.write(0, &[1, 2, 3, 4]).unwrap();
         assert_eq!(m.read(0, 4).unwrap(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn map_region_grows_buffer_and_sets_perms() {
+        let mut m = Mem::new();
+        m.map_region(
+            2 * PAGE_SIZE as u64,
+            2 * PAGE_SIZE as u64,
+            Access::ReadWrite,
+            None,
+        )
+        .unwrap();
+        assert_eq!(m.flat_mem.len(), 4 * PAGE_SIZE as usize);
+        // Pages 0..2 are unmapped; pages 2..4 are RW.
+        assert_eq!(m.perm_of(0), perm::NONE);
+        assert_eq!(m.perm_of(PAGE_SIZE), perm::NONE);
+        assert_eq!(m.perm_of(2 * PAGE_SIZE), perm::RW);
+        assert_eq!(m.perm_of(3 * PAGE_SIZE), perm::RW);
+    }
+
+    #[test]
+    fn map_region_copies_init_bytes_and_zero_fills_tail() {
+        let mut m = Mem::new();
+        m.map_region(
+            0,
+            PAGE_SIZE as u64,
+            Access::ReadOnly,
+            Some(&[0xAA, 0xBB, 0xCC]),
+        )
+        .unwrap();
+        assert_eq!(m.flat_mem[0], 0xAA);
+        assert_eq!(m.flat_mem[1], 0xBB);
+        assert_eq!(m.flat_mem[2], 0xCC);
+        assert_eq!(m.flat_mem[3], 0x00);
+        assert_eq!(m.perm_of(0), perm::RO);
+    }
+
+    #[test]
+    fn map_region_truncates_oversize_init() {
+        let mut m = Mem::new();
+        let init = vec![0x77u8; (PAGE_SIZE as usize) * 3];
+        // Only one page declared; init is bigger.
+        m.map_region(0, PAGE_SIZE as u64, Access::ReadWrite, Some(&init))
+            .unwrap();
+        assert_eq!(m.flat_mem.len(), PAGE_SIZE as usize);
+        assert_eq!(m.flat_mem[PAGE_SIZE as usize - 1], 0x77);
+    }
+
+    #[test]
+    fn map_region_rejects_unaligned_start() {
+        let mut m = Mem::new();
+        assert_eq!(
+            m.map_region(123, PAGE_SIZE as u64, Access::ReadOnly, None),
+            Err(MapError::UnalignedStart(123))
+        );
+    }
+
+    #[test]
+    fn map_region_rejects_unaligned_size() {
+        let mut m = Mem::new();
+        assert_eq!(
+            m.map_region(0, 123, Access::ReadOnly, None),
+            Err(MapError::UnalignedSize(123))
+        );
+    }
+
+    #[test]
+    fn map_region_overlapping_overwrites_perms() {
+        let mut m = Mem::with_pages(2, perm::RO);
+        m.map_region(0, 2 * PAGE_SIZE as u64, Access::ReadWrite, None)
+            .unwrap();
+        assert_eq!(m.perm_of(0), perm::RW);
+        assert_eq!(m.perm_of(PAGE_SIZE), perm::RW);
     }
 }
