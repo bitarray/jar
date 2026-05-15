@@ -21,10 +21,12 @@
 
 pub mod abi;
 pub mod error;
+pub mod genesis;
 pub mod kernel_assist;
 pub mod state;
 
 pub use error::KernelError;
+pub use genesis::{Genesis, genesis};
 pub use kernel_assist::SigmaKernelAssist;
 pub use state::{
     CodeId, DataBlob, FileId, IdCounters, State, ValidatorKey, VaultId, VaultRecord, state_root,
