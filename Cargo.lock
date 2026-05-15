@@ -800,6 +800,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jar-cap"
+version = "0.1.0"
+dependencies = [
+ "blake2",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "jar-genesis"
 version = "0.1.0"
 dependencies = [
