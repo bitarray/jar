@@ -28,7 +28,7 @@ use javm_exec::{ExitReason, GasCounter, Interpreter, Mem, Regs};
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
 use crate::error::VmError;
 use crate::image_cache::ImageCache;
-use crate::kernel_assist::KernelAssist;
+use crate::kernel_assist::{KernelAssist, KernelImage, kernel_image_hash};
 
 /// Result of a top-level `run_instance` / `call`.
 ///
@@ -131,13 +131,19 @@ impl<K: KernelAssist> Vm<K> {
             .map(|e| e.entry_pc)
             .unwrap_or(0);
 
-        // 3. Seed regs / mem / gas.
+        // 3. Seed regs / mem / gas. Gas: if the Image declares
+        //    `gas_slots[0]` and the slot holds a Cap::Instance whose
+        //    low 8 content_hash bytes encode the `meter_id`, pull
+        //    initial gas from the kernel-assist's GasMeter table
+        //    (topping up with `gas_budget` if the meter is empty).
+        //    Otherwise the local counter is seeded directly from
+        //    `gas_budget`.
         let mut regs = Regs::new();
         regs.pc = entry_pc;
         // Calling convention §4: φ[11] = endpoint_idx.
         regs.gpr[11] = endpoint_idx as u64;
         let mem = Mem::new();
-        let gas = GasCounter::new(gas_budget);
+        let (gas, gas_initial) = self.seed_gas(image.as_ref(), cnode.as_ref(), gas_budget);
 
         // 4. Push the entry. `pushed_pos` is the position of *this*
         //    InstanceEntry on the stack; we use it to detect whether
@@ -156,7 +162,41 @@ impl<K: KernelAssist> Vm<K> {
         self.stack.push_instance(entry)?;
 
         // 5. Drive the interpreter and translate the exit.
-        self.drive_and_translate(regs, mem, gas, gas_budget, pushed_pos)
+        self.drive_and_translate(regs, mem, gas, gas_initial, pushed_pos)
+    }
+
+    /// Read the active gas-meter ID from `image.gas_slots[0]` and
+    /// produce the seed `GasCounter` + `gas_initial` book-keeping
+    /// value used for `gas_used` reporting.
+    ///
+    /// If `gas_slots` is empty, falls back to `gas_budget` directly.
+    /// If non-empty: the slot must hold a `Cap::Instance` whose first
+    /// 8 content_hash bytes encode the `meter_id` (Stage 3
+    /// convention; Stage 4 jar-kernel-v3 will canonicalize).
+    fn seed_gas(
+        &mut self,
+        image: &Image,
+        cnode: &(dyn CNodeBackend<Cap> + Send + Sync),
+        gas_budget: u64,
+    ) -> (GasCounter, u64) {
+        let Some(gas_slot) = image.gas_slots.first() else {
+            return (GasCounter::new(gas_budget), gas_budget);
+        };
+        let Ok(Some(Cap::Instance(ic))) = cnode.get(*gas_slot) else {
+            return (GasCounter::new(gas_budget), gas_budget);
+        };
+        let meter_id = u64::from_le_bytes(ic.content_hash[..8].try_into().unwrap_or([0; 8]));
+        let current = self.kernel_assist.gas_meter_get(meter_id);
+        // Top up with gas_budget if the meter is empty (Stage 3
+        // convenience; Stage 4 chain orchestrator drives topups via
+        // SetGasMeter explicitly).
+        let seeded = if current == 0 {
+            self.kernel_assist.gas_meter_set(meter_id, gas_budget);
+            gas_budget
+        } else {
+            current
+        };
+        (GasCounter::new(seeded), seeded)
     }
 
     /// Resume the top `ReferenceEntry`: pop it, re-enter the
@@ -252,15 +292,31 @@ impl<K: KernelAssist> Vm<K> {
 
         let gas_used = gas_initial.saturating_sub(gas.remaining());
 
-        // Did host_yield push a ReferenceEntry above us?
+        // OOG: reconcile the meter to 0 and try to route a synthetic
+        // OogMarker yield. On match the stack grows (push_reference)
+        // and `oog_marker_payload` carries the `Cap::Instance[Gas{meter_id}]`
+        // that the catcher receives as its payload. On no match,
+        // leave the stack untouched and let the Faulted arm handle
+        // it as a hard OOG.
+        let oog_marker_payload = if matches!(exit, ExitReason::OutOfGas) {
+            self.reconcile_and_route_oog(pushed_pos)
+        } else {
+            None
+        };
+
+        // Did host_yield (or OOG routing) push a ReferenceEntry above us?
         let yielded = self.stack.entries().len() > pushed_pos + 1
             && matches!(self.stack.running(), Some(Entry::Reference(_)));
 
         if yielded {
-            // Read marker payload (the Cap::Instance[YieldMarker])
-            // from the yielder's slot referenced by φ[7] at yield time.
-            let marker_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
-            let marker_payload = {
+            // Read marker payload. For a synthetic OOG yield, the
+            // payload is the Gas{meter_id} cap. For ordinary
+            // host_yield, read from the yielder's slot referenced by
+            // φ[7] at yield time.
+            let marker_payload = if let Some(p) = oog_marker_payload {
+                Some(p)
+            } else {
+                let marker_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
                 let yielder = match &self.stack.entries()[pushed_pos] {
                     Entry::Instance(e) => e.as_ref(),
                     _ => return Err(VmError::Invariant("yielder is not an Instance")),
@@ -333,6 +389,72 @@ impl<K: KernelAssist> Vm<K> {
                 gas_used,
             },
         })
+    }
+
+    /// Reconcile the gas meter to 0 (the local counter has just been
+    /// exhausted) and attempt to route a synthetic OogMarker yield
+    /// through the call stack. On match: push a ReferenceEntry at
+    /// the catcher's position and return the Gas{meter_id} cap from
+    /// the yielder's `gas_slots[0]` (the marker_payload). On no
+    /// match: return None — caller surfaces this as a hard fault.
+    ///
+    /// Stage 3 routing parallels [`Vm::dispatch_host_yield`]: the
+    /// matcher is the well-known OogMarker image hash from the
+    /// kernel-image registry.
+    fn reconcile_and_route_oog(&mut self, yielder_pos: usize) -> Option<Cap> {
+        // 1. Find the Gas{meter_id} cap in the yielder's gas_slots[0].
+        //    If absent, we can't reconcile or build a payload.
+        let (gas_cap, meter_id) = {
+            let yielder = match self.stack.entries().get(yielder_pos)? {
+                Entry::Instance(e) => e.as_ref(),
+                _ => return None,
+            };
+            let slot = *yielder.image.gas_slots.first()?;
+            let ic = match yielder.cnode.get(slot).ok()?? {
+                Cap::Instance(ic) => ic,
+                _ => return None,
+            };
+            let meter_id = u64::from_le_bytes(ic.content_hash[..8].try_into().unwrap_or([0; 8]));
+            (Cap::Instance(*ic), meter_id)
+        };
+
+        // 2. Reconcile.
+        self.kernel_assist.gas_meter_set(meter_id, 0);
+
+        // 3. Walk stack top→bottom (skipping the yielder itself) for
+        //    a YieldCatcher catching the OogMarker hash.
+        let oog_hash = kernel_image_hash(KernelImage::OogMarker);
+        let stack_len = self.stack.entries().len();
+        let mut target_pos: Option<usize> = None;
+        for pos in (0..yielder_pos).rev() {
+            let ie = match &self.stack.entries()[pos] {
+                Entry::Instance(ie) => ie.as_ref(),
+                Entry::Reference(_) => continue,
+            };
+            let Some(catcher_slot) = ie.image.yield_marker_slot else {
+                continue;
+            };
+            let catcher_hash = match ie.cnode.get(catcher_slot) {
+                Ok(Some(Cap::Instance(ic))) => ic.content_hash,
+                _ => continue,
+            };
+            let markers = self.kernel_assist.yield_catcher_markers(catcher_hash);
+            if markers.contains(&oog_hash) {
+                target_pos = Some(pos);
+                break;
+            }
+        }
+
+        // 4. On match, push the reference. (Suppress the unused
+        //    `stack_len` lint when no match was found.)
+        let _ = stack_len;
+        match target_pos {
+            Some(pos) => {
+                self.stack.push_reference(pos).ok()?;
+                Some(gas_cap)
+            }
+            None => None,
+        }
     }
 
     /// At HALT, walk the running Image's `memory_mappings`; for each
@@ -744,6 +866,102 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn run_instance_oog_with_outer_catcher_yields_with_gas_marker() {
+        // Outer Instance: declares `yield_marker_slot` pointing at a
+        // YieldCatcher that catches OogMarker. Inner: tight loop with
+        // a tiny gas budget; gas_slots[0] points at a Gas{meter_id}
+        // cap. The inner runs OOG; reconcile_and_route_oog finds the
+        // outer's catcher; CallResult::Paused returned with the gas
+        // cap as marker_payload.
+        let mut vm = Vm::new(InProcessKernelAssist::new());
+
+        // Outer: YieldCatcher at slot 2; image declares slot 2 as
+        // yield_marker_slot.
+        let catcher_hash = [0x42u8; 32];
+        let outer_catcher = Cap::Instance(InstanceCap {
+            image_hash_chain: [0xCAu8; 32],
+            content_hash: catcher_hash,
+        });
+        let mut outer_cnode: Box<dyn CNodeBackend<Cap> + Send + Sync> =
+            Box::new(InMemoryCNode::<Cap>::new(4).unwrap());
+        outer_cnode.set(SlotIdx(2), Some(outer_catcher)).unwrap();
+        let mut outer_img = empty_image_with_code(vec![0]);
+        outer_img.yield_marker_slot = Some(SlotIdx(2));
+        let outer_img = Arc::new(outer_img);
+        let outer_prog =
+            Arc::new(javm_exec::PvmProgram::new(vec![0], vec![1], vec![], 25).unwrap());
+        vm.stack
+            .push_instance(InstanceEntry {
+                instance: InstanceCap {
+                    image_hash_chain: [0xAAu8; 32],
+                    content_hash: [0xBBu8; 32],
+                },
+                image: outer_img,
+                program: outer_prog,
+                cnode: outer_cnode,
+                regs: Regs::new(),
+                mem: Mem::new(),
+                gas: GasCounter::new(0),
+                status: EntryStatus::Waiting,
+            })
+            .unwrap();
+
+        // Register the catcher with OogMarker as a caught marker.
+        let oog_hash = kernel_image_hash(KernelImage::OogMarker);
+        vm.kernel_assist.yield_catcher_add(catcher_hash, oog_hash);
+
+        // Inner: gas_slots = [slot 1]; slot 1 = Cap::Instance with
+        // content_hash low 8 bytes = meter_id 42.
+        let meter_id: u64 = 42;
+        let mut gas_hash = [0u8; 32];
+        gas_hash[..8].copy_from_slice(&meter_id.to_le_bytes());
+        let gas_cap = Cap::Instance(InstanceCap {
+            image_hash_chain: kernel_image_hash(KernelImage::Gas),
+            content_hash: gas_hash,
+        });
+
+        // Code: tight loop of fallthroughs (opcode 1). Will burn gas
+        // until OOG.
+        let code = vec![1u8; 50];
+        let bitmask = vec![1u8; 50];
+        let mut inner_img = empty_image_with_code(code.clone());
+        inner_img.gas_slots = vec![SlotIdx(1)];
+        let inner_img = Arc::new(inner_img);
+        let inner_prog = Arc::new(javm_exec::PvmProgram::new(code, bitmask, vec![], 25).unwrap());
+
+        let mut inner_cnode: Box<dyn CNodeBackend<Cap> + Send + Sync> =
+            Box::new(InMemoryCNode::<Cap>::new(4).unwrap());
+        inner_cnode.set(SlotIdx(1), Some(gas_cap)).unwrap();
+
+        let inner_instance = InstanceCap {
+            image_hash_chain: [0xEEu8; 32],
+            content_hash: [0xFEu8; 32],
+        };
+        vm.image_cache
+            .insert(inner_instance.content_hash, inner_prog);
+
+        // Tiny gas budget — meter starts empty, gets topped up with 3.
+        let r = vm
+            .run_instance(inner_instance, inner_img, inner_cnode, 0, 3)
+            .unwrap();
+
+        match r {
+            CallResult::Paused { marker_payload, .. } => match marker_payload {
+                Some(Cap::Instance(ic)) => {
+                    // Payload is the Gas{42} cap.
+                    let id = u64::from_le_bytes(ic.content_hash[..8].try_into().unwrap());
+                    assert_eq!(id, meter_id);
+                }
+                other => panic!("expected Cap::Instance gas marker, got {:?}", other),
+            },
+            other => panic!("expected Paused, got {:?}", other),
+        }
+        // Stack: [outer, inner, reference(→outer)].
+        assert_eq!(vm.stack.entries().len(), 3);
+        assert!(matches!(vm.stack.running(), Some(Entry::Reference(_))));
     }
 
     #[test]
