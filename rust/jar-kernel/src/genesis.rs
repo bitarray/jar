@@ -17,8 +17,8 @@
 //!   by default.
 
 use jar_cap::{
-    CNodeBackend, Cap, InMemoryCNode, InstanceCap,
-    image::{Image, image_content_hash},
+    Blake2b256, CNodeBackend, Cap, DataCap, Hash, InMemoryCNode, InstanceCap,
+    image::{Image, PinnedCap, image_content_hash},
 };
 use javm::{KernelImage, kernel_image_hash};
 
@@ -150,6 +150,53 @@ pub fn genesis(chain_image: Image) -> Genesis {
             Some(kernel_stateless_cap(KernelImage::HostSave)),
         )
         .expect("BARE_HOST_SAVE_SLOT in-range");
+
+    // 6. Install pinned slots declared by the Image: register the
+    //    bytes in σ.data_payloads and place a Cap::Data at each
+    //    pinned slot. PinnedCap::Image variants are out of scope for
+    //    the standalone path (chains using them set the slots up
+    //    themselves; we don't have an Image arena in σ yet).
+    for (slot, pinned) in &chain_image.pinned_slots {
+        match pinned {
+            PinnedCap::Data { content, size } => {
+                let content_hash = Blake2b256::hash(content);
+                state.data_payloads.insert(content_hash, content.clone());
+                cnode
+                    .set(
+                        *slot,
+                        Some(Cap::Data(DataCap {
+                            content_hash,
+                            size: *size,
+                        })),
+                    )
+                    .expect("pinned slot index in-range");
+            }
+            PinnedCap::Image { .. } => {
+                // Standalone bootstrap doesn't install Cap::Image
+                // pinned slots; chains using them are responsible
+                // for set-up via derive_spawn.
+            }
+        }
+    }
+
+    // 7. Install initial slots: non-pinned mutable seeds (rw_data
+    //    initial bytes, empty stack/heap caps, etc.). Same shape as
+    //    pinned: register bytes in σ, place a Cap::Data at the slot.
+    for (slot, init) in &chain_image.initial_slots {
+        let content_hash = Blake2b256::hash(&init.content);
+        state
+            .data_payloads
+            .insert(content_hash, init.content.clone());
+        cnode
+            .set(
+                *slot,
+                Some(Cap::Data(DataCap {
+                    content_hash,
+                    size: init.size,
+                })),
+            )
+            .expect("initial slot index in-range");
+    }
 
     let _ = (vault_id, code_id);
 
