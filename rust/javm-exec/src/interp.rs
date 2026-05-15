@@ -1,118 +1,150 @@
-//! Interpreter: simple step-by-step PVM execution.
+//! Byte-PVM interpreter.
 //!
-//! **v0 scope is minimal.** v3 doesn't change the PVM instruction
-//! set, so the long-term goal is full coverage of the JAM Gray
-//! Paper Appendix A.5 opcode list (see v2 `javm/src/instruction.rs`
-//! for the canonical list). For now, the interpreter handles
-//! enough instructions to validate the architecture end-to-end:
-//! load-immediate, arithmetic, ecall, halt, trap.
+//! Predecodes a [`PvmProgram`] via [`crate::decode::predecode`] and
+//! dispatches over the resulting [`DecodedInst`] array.
 //!
-//! The instruction representation is also minimal — instructions
-//! are stored as a `Vec<Instruction>` rather than the byte-level
-//! PVM encoding. When the cap layer + integration crate are ready,
-//! we'll wire up the real PVM byte-encoded program loader and the
-//! instruction-set coverage grows incrementally.
+//! **Coverage in this commit is intentionally narrow** — the
+//! cherry-pick of v2's full 3000-line opcode dispatch is mechanical
+//! follow-up work. This MVP covers:
 //!
-//! What we *do* validate at this layer:
-//! - The execute-step-by-step loop structure.
-//! - Gas charging per instruction (placeholder constant cost).
-//! - `EcallHandler` plumbing (`Continue` vs `Exit`).
-//! - `ExitReason` produced at each natural termination point.
+//! - No-args: `Trap`, `Fallthrough`, `Unlikely`
+//! - PVM ecalls: `Ecall`, `Ecalli` (both route through
+//!   [`EcallHandler`])
+//! - One-reg ext imm: `LoadImm64`
+//! - Two registers: `MoveReg`
+//! - Three registers: `Add64`, `Sub64`, `And`, `Or`, `Xor`
+//!
+//! Any other opcode causes the interpreter to return
+//! `ExitReason::Panic` and records a `TODO` in
+//! `regs.gpr[7]` (the high register, conventionally unused by the
+//! ABI) — diagnostic aid, not part of the spec.
+//!
+//! This validates the byte-encoding pipeline end-to-end. Filling
+//! out the remaining ~80 opcodes follows the same dispatch shape
+//! and is a mechanical port from v2 `interpreter/mod.rs`.
 
-use crate::ecall::{EcallHandler, EcallResult};
+use crate::decode::{DecodedInst, predecode};
+use crate::ecall::{EcallHandler, EcallKind, EcallResult};
 use crate::exit::ExitReason;
 use crate::gas::GasCounter;
+use crate::instruction::Opcode;
 use crate::mem::Mem;
+use crate::program::PvmProgram;
 use crate::regs::Regs;
 
-/// Minimal v0 instruction set.
-///
-/// All instructions take 1 unit of gas (placeholder; the real
-/// per-instruction cost table lands when we cherry-pick `gas_cost`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Instruction {
-    /// Halt with `ExitReason::Halt`.
-    Halt,
-    /// Deliberate trap (opcode 0 in PVM). Returns `ExitReason::Trap`.
-    Trap,
-    /// No-op. Advances PC by one. Useful for tests.
-    Nop,
-    /// `regs[dst] = imm`.
-    LoadImm { dst: u8, imm: u64 },
-    /// `regs[dst] = regs[a] + regs[b]` (wrapping).
-    Add { dst: u8, a: u8, b: u8 },
-    /// `regs[dst] = regs[a] - regs[b]` (wrapping).
-    Sub { dst: u8, a: u8, b: u8 },
-    /// Ecall with the given u32 opcode. Dispatched to the
-    /// `EcallHandler`. If the handler returns `Continue`, PC is
-    /// advanced normally; if `Exit(reason)`, the interpreter returns
-    /// with that reason.
-    Ecalli(u32),
-}
-
-/// Placeholder per-instruction gas cost. The real cost table is
-/// cherry-picked later.
-pub const GAS_COST_PER_INSN: u64 = 1;
-
-/// The interpreter is a stateless namespace; `execute` is a free
-/// function on an immutable program plus mutable regs/mem/gas.
+/// Namespace for byte-PVM execution.
 pub struct Interpreter;
 
 impl Interpreter {
-    /// Execute instructions starting at `regs.pc`. Returns the
-    /// terminal `ExitReason`. After return, `regs.pc` reflects the
-    /// last advanced PC (so a `HostCall` caller can inspect /
-    /// resume).
-    pub fn execute(
-        program: &[Instruction],
+    /// Execute `program` starting at `regs.pc`. Returns the terminal
+    /// `ExitReason`. `regs.pc` after return reflects the last
+    /// advanced PC (so callers can inspect / resume after a
+    /// `HostCall` or `PageFault`).
+    pub fn run(
+        program: &PvmProgram,
         regs: &mut Regs,
         mem: &mut Mem,
         gas: &mut GasCounter,
         handler: &mut dyn EcallHandler,
     ) -> ExitReason {
-        loop {
-            // Out-of-program: treat as Panic (caller should never run
-            // past the end).
-            let pc = regs.pc as usize;
-            if pc >= program.len() {
-                return ExitReason::Panic;
-            }
+        let predecoded = predecode(program);
+        let insts = &predecoded.decoded_insts;
+        let pc_to_idx = &predecoded.pc_to_idx;
 
-            // Charge gas before executing.
-            if gas.charge(GAS_COST_PER_INSN).is_err() {
+        // Resolve starting PC.
+        let mut idx = if (regs.pc as usize) < pc_to_idx.len() {
+            pc_to_idx[regs.pc as usize]
+        } else {
+            u32::MAX
+        };
+        if idx == u32::MAX {
+            return ExitReason::Panic;
+        }
+
+        loop {
+            let inst: DecodedInst = insts[idx as usize];
+
+            // Per-gas-block charge (JAR v0.8.0).
+            if inst.bb_gas_cost > 0 && gas.charge(inst.bb_gas_cost as u64).is_err() {
+                regs.pc = inst.pc as u64;
                 return ExitReason::OutOfGas;
             }
 
-            let insn = program[pc];
+            let ra = inst.ra as usize;
+            let rb = inst.rb as usize;
+            let rd = inst.rd as usize;
 
-            // Advance PC *before* executing (so handlers see the
-            // post-advance PC).
-            regs.pc = regs.pc.wrapping_add(1);
+            let branch_idx = u32::MAX; // sentinel; branches/jumps will update once added
+            let mut exit: Option<ExitReason> = None;
 
-            match insn {
-                Instruction::Halt => return ExitReason::Halt,
-                Instruction::Trap => return ExitReason::Trap,
-                Instruction::Nop => {}
-                Instruction::LoadImm { dst, imm } => {
-                    regs.write(dst as usize, imm);
+            match inst.opcode {
+                Opcode::Trap => {
+                    exit = Some(ExitReason::Trap);
                 }
-                Instruction::Add { dst, a, b } => {
-                    let va = regs.read(a as usize);
-                    let vb = regs.read(b as usize);
-                    regs.write(dst as usize, va.wrapping_add(vb));
+                Opcode::Fallthrough | Opcode::Unlikely => {
+                    // No-op; sequential advance.
                 }
-                Instruction::Sub { dst, a, b } => {
-                    let va = regs.read(a as usize);
-                    let vb = regs.read(b as usize);
-                    regs.write(dst as usize, va.wrapping_sub(vb));
-                }
-                Instruction::Ecalli(op) => {
-                    match handler.handle(crate::EcallKind::Ecalli(op), regs, mem) {
+                Opcode::Ecall => {
+                    regs.pc = inst.next_pc as u64;
+                    match handler.handle(EcallKind::Ecall, regs, mem) {
                         EcallResult::Continue => {}
                         EcallResult::Exit(reason) => return reason,
                     }
+                    idx = inst.next_idx;
+                    continue;
+                }
+                Opcode::Ecalli => {
+                    regs.pc = inst.next_pc as u64;
+                    match handler.handle(EcallKind::Ecalli(inst.imm1 as u32), regs, mem) {
+                        EcallResult::Continue => {}
+                        EcallResult::Exit(reason) => return reason,
+                    }
+                    idx = inst.next_idx;
+                    continue;
+                }
+                Opcode::LoadImm64 => {
+                    regs.gpr[ra] = inst.imm1;
+                }
+                Opcode::MoveReg => {
+                    regs.gpr[rd] = regs.gpr[ra];
+                }
+                Opcode::Add64 => {
+                    regs.gpr[rd] = regs.gpr[ra].wrapping_add(regs.gpr[rb]);
+                }
+                Opcode::Sub64 => {
+                    regs.gpr[rd] = regs.gpr[ra].wrapping_sub(regs.gpr[rb]);
+                }
+                Opcode::And => {
+                    regs.gpr[rd] = regs.gpr[ra] & regs.gpr[rb];
+                }
+                Opcode::Or => {
+                    regs.gpr[rd] = regs.gpr[ra] | regs.gpr[rb];
+                }
+                Opcode::Xor => {
+                    regs.gpr[rd] = regs.gpr[ra] ^ regs.gpr[rb];
+                }
+                _ => {
+                    // TODO: cherry-pick remaining opcode arms from
+                    // v2 `interpreter/mod.rs::run`. Mark which opcode
+                    // wasn't handled in regs.gpr[7] as a diagnostic
+                    // (this is not part of the PVM spec; it's a
+                    // debugging convenience during the port).
+                    regs.gpr[7] = inst.opcode as u64;
+                    exit = Some(ExitReason::Panic);
                 }
             }
+
+            if let Some(reason) = exit {
+                regs.pc = inst.pc as u64;
+                return reason;
+            }
+
+            idx = if branch_idx != u32::MAX {
+                branch_idx
+            } else {
+                inst.next_idx
+            };
+            regs.pc = insts[idx as usize].pc as u64;
         }
     }
 }
@@ -122,149 +154,88 @@ mod tests {
     use super::*;
     use crate::ecall::PanickingHandler;
 
-    /// Helper: run program from PC=0 with a fresh state.
-    fn run(program: &[Instruction], gas: u64) -> (ExitReason, Regs, u64) {
+    /// Helper: encode an opcode + raw operand bytes into a PvmProgram
+    /// with trivial bitmask (every byte = instruction start). For
+    /// tests that don't need full multi-byte instructions.
+    fn single_byte_prog(opcode_byte: u8) -> PvmProgram {
+        PvmProgram::new(vec![opcode_byte], vec![1u8], vec![], 25).unwrap()
+    }
+
+    fn run_with_panic_handler(prog: &PvmProgram, gas: u64) -> (ExitReason, Regs) {
         let mut regs = Regs::new();
         let mut mem = Mem::new();
         let mut g = GasCounter::new(gas);
         let mut h = PanickingHandler;
-        let reason = Interpreter::execute(program, &mut regs, &mut mem, &mut g, &mut h);
-        (reason, regs, g.remaining())
-    }
-
-    #[test]
-    fn halt_immediately_returns_halt() {
-        let prog = [Instruction::Halt];
-        let (r, _, remaining) = run(&prog, 100);
-        assert_eq!(r, ExitReason::Halt);
-        assert_eq!(remaining, 99); // 1 instruction × 1 gas
+        let r = Interpreter::run(prog, &mut regs, &mut mem, &mut g, &mut h);
+        (r, regs)
     }
 
     #[test]
     fn trap_returns_trap() {
-        let prog = [Instruction::Trap];
-        let (r, _, _) = run(&prog, 100);
+        let (r, _) = run_with_panic_handler(&single_byte_prog(0), 1000);
         assert_eq!(r, ExitReason::Trap);
     }
 
     #[test]
-    fn add_two_numbers_then_halt() {
-        // r1 = 5; r2 = 7; r0 = r1 + r2; halt.
-        let prog = [
-            Instruction::LoadImm { dst: 1, imm: 5 },
-            Instruction::LoadImm { dst: 2, imm: 7 },
-            Instruction::Add { dst: 0, a: 1, b: 2 },
-            Instruction::Halt,
-        ];
-        let (r, regs, _) = run(&prog, 100);
-        assert_eq!(r, ExitReason::Halt);
-        assert_eq!(regs.read(0), 12);
-        assert_eq!(regs.read(1), 5);
-        assert_eq!(regs.read(2), 7);
+    fn fallthrough_falls_into_sentinel_trap() {
+        // 1-byte Fallthrough — after executing, the predecoder's
+        // sentinel trap takes over and we exit with Trap.
+        let (r, _) = run_with_panic_handler(&single_byte_prog(1), 1000);
+        assert_eq!(r, ExitReason::Trap);
     }
 
     #[test]
-    fn sub_works() {
-        let prog = [
-            Instruction::LoadImm { dst: 1, imm: 10 },
-            Instruction::LoadImm { dst: 2, imm: 3 },
-            Instruction::Sub { dst: 0, a: 1, b: 2 },
-            Instruction::Halt,
-        ];
-        let (_, regs, _) = run(&prog, 100);
-        assert_eq!(regs.read(0), 7);
+    fn unlikely_falls_into_sentinel_trap() {
+        let (r, _) = run_with_panic_handler(&single_byte_prog(2), 1000);
+        assert_eq!(r, ExitReason::Trap);
     }
 
+    /// Ecalli with `imm = 42` routes through the EcallHandler.
+    /// The handler exits with HostCall(42).
     #[test]
-    fn out_of_gas_terminates_with_outofgas() {
-        let prog = [
-            Instruction::LoadImm { dst: 0, imm: 1 },
-            Instruction::LoadImm { dst: 0, imm: 2 },
-            Instruction::LoadImm { dst: 0, imm: 3 },
-            Instruction::Halt,
-        ];
-        let (r, _, _) = run(&prog, 2);
-        // 2 charges succeed; 3rd charge fails.
-        assert_eq!(r, ExitReason::OutOfGas);
-    }
+    fn ecalli_routes_through_handler() {
+        // Ecalli encoding (OneImm, opcode 10):
+        //   bytes:   [opcode, imm0, imm1, ..., imm_{lx-1}]
+        // `lx` is `skip_distance.min(4)`, where skip_distance is the
+        // number of bytes from the opcode to the next instruction start
+        // in the bitmask. So for `imm=42` packing into 1 byte:
+        //   bytes:   [10, 42, <next-insn-opcode>]
+        //   bitmask: [1, 0, 1]  -- insn at PC=0, immediate byte at PC=1,
+        //                          next insn (trap) at PC=2.
+        let prog = PvmProgram::new(vec![10u8, 42, 0], vec![1, 0, 1], vec![], 25).unwrap();
 
-    #[test]
-    fn pc_past_end_panics() {
-        let prog: [Instruction; 0] = [];
-        let (r, _, _) = run(&prog, 100);
-        assert_eq!(r, ExitReason::Panic);
-    }
-
-    #[test]
-    fn nop_advances_pc() {
-        let prog = [Instruction::Nop, Instruction::Halt];
-        let (r, regs, _) = run(&prog, 100);
-        assert_eq!(r, ExitReason::Halt);
-        assert_eq!(regs.pc, 2);
-    }
-
-    /// Custom handler: every ecall increments φ₀ and continues.
-    struct IncrementingHandler;
-    impl EcallHandler for IncrementingHandler {
-        fn handle(
-            &mut self,
-            _kind: crate::EcallKind,
-            regs: &mut Regs,
-            _mem: &mut Mem,
-        ) -> EcallResult {
-            regs.write(0, regs.read(0).wrapping_add(1));
-            EcallResult::Continue
+        struct Capture {
+            seen: Option<EcallKind>,
         }
-    }
-
-    #[test]
-    fn ecalli_continue_passes_state_to_handler_and_resumes() {
-        let prog = [
-            Instruction::Ecalli(7),
-            Instruction::Ecalli(7),
-            Instruction::Ecalli(7),
-            Instruction::Halt,
-        ];
-        let mut regs = Regs::new();
-        let mut mem = Mem::new();
-        let mut gas = GasCounter::new(100);
-        let mut h = IncrementingHandler;
-        let r = Interpreter::execute(&prog, &mut regs, &mut mem, &mut gas, &mut h);
-        assert_eq!(r, ExitReason::Halt);
-        assert_eq!(regs.read(0), 3); // 3 ecalls, each += 1
-    }
-
-    /// Custom handler: exit on opcode 42; otherwise continue.
-    struct ExitOnOpHandler;
-    impl EcallHandler for ExitOnOpHandler {
-        fn handle(
-            &mut self,
-            kind: crate::EcallKind,
-            _regs: &mut Regs,
-            _mem: &mut Mem,
-        ) -> EcallResult {
-            if matches!(kind, crate::EcallKind::Ecalli(42)) {
-                EcallResult::Exit(ExitReason::HostCall(42))
-            } else {
-                EcallResult::Continue
+        impl EcallHandler for Capture {
+            fn handle(&mut self, kind: EcallKind, _regs: &mut Regs, _mem: &mut Mem) -> EcallResult {
+                self.seen = Some(kind);
+                EcallResult::Exit(ExitReason::HostCall(match kind {
+                    EcallKind::Ecalli(op) => op,
+                    EcallKind::Ecall => 0,
+                }))
             }
         }
+
+        let mut regs = Regs::new();
+        let mut mem = Mem::new();
+        let mut gas = GasCounter::new(1000);
+        let mut h = Capture { seen: None };
+        let r = Interpreter::run(&prog, &mut regs, &mut mem, &mut gas, &mut h);
+        assert_eq!(r, ExitReason::HostCall(42));
+        assert_eq!(h.seen, Some(EcallKind::Ecalli(42)));
     }
 
     #[test]
-    fn ecalli_exit_returns_to_caller() {
-        let prog = [
-            Instruction::Nop,
-            Instruction::Ecalli(42),
-            Instruction::Halt, // shouldn't reach
-        ];
-        let mut regs = Regs::new();
-        let mut mem = Mem::new();
-        let mut gas = GasCounter::new(100);
-        let mut h = ExitOnOpHandler;
-        let r = Interpreter::execute(&prog, &mut regs, &mut mem, &mut gas, &mut h);
-        assert_eq!(r, ExitReason::HostCall(42));
-        // PC was advanced past the ecalli before the handler ran.
-        assert_eq!(regs.pc, 2);
+    fn unsupported_opcode_panics_and_records_in_r7() {
+        // Opcode 100 = MoveReg, which IS supported. Use opcode 101
+        // (Sbrk) which isn't covered in this MVP — should Panic and
+        // record 101 in regs.gpr[7].
+        // Sbrk is TwoReg category: opcode + 1-byte regs.
+        // Bytes: [101, 0x00], bitmask: [1, 0].
+        let prog = PvmProgram::new(vec![101u8, 0x00], vec![1, 0], vec![], 25).unwrap();
+        let (r, regs) = run_with_panic_handler(&prog, 1000);
+        assert_eq!(r, ExitReason::Panic);
+        assert_eq!(regs.gpr[7], Opcode::Sbrk as u64);
     }
 }
