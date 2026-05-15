@@ -15,6 +15,7 @@
 //! completes.
 
 pub mod callstack;
+pub mod ecall;
 pub mod error;
 pub mod frame;
 pub mod image_cache;
