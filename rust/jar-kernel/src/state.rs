@@ -107,7 +107,14 @@ impl IdCounters {
 /// the struct declaration.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Encode, scale::Decode)]
 pub struct State {
+    /// Per-file metadata (refcount, backing quota). The bytes themselves
+    /// live in `data_payloads` (keyed by content_hash so multiple
+    /// FileBlobs sharing the same content dedup naturally).
     pub data_blobs: BTreeMap<FileId, DataBlob>,
+    /// Canonical content-addressed byte payloads. Lookup target for
+    /// `KernelAssist::data_lookup`; populated by `data_store` and
+    /// by HALT-time write-back.
+    pub data_payloads: BTreeMap<CapHash, Vec<u8>>,
     pub code_blobs: BTreeMap<CodeId, Vec<u8>>,
     pub vaults: BTreeMap<VaultId, VaultRecord>,
     pub validators: Vec<ValidatorKey>,
