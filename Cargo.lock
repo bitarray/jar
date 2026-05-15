@@ -1034,6 +1034,9 @@ dependencies = [
 [[package]]
 name = "simple-chain"
 version = "0.1.0"
+dependencies = [
+ "subsoil",
+]
 
 [[package]]
 name = "smallvec"

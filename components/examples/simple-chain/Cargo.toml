@@ -3,6 +3,13 @@ name = "simple-chain"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Example JAR chain (v3 placeholder; runnable end-to-end demo lives in jar-kernel integration tests)."
+description = "Example JAR chain — runnable end-to-end via the v3 jar-kernel integration test."
+
+[lib]
+crate-type = ["lib", "cdylib"]
 
 [dependencies]
+subsoil = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_env, values("javm"))', 'cfg(target_os, values("none"))'] }

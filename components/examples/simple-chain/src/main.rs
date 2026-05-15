@@ -1,17 +1,19 @@
-//! Simple example chain (v3 placeholder).
-//!
-//! The v2 simple-chain — a Rust→javm guest that implemented
-//! ed25519-signed account-model balance transfers — relied on v2
-//! ABI constants (Vault.initialize, MintAttestCap, SetScore,
-//! BareFrame layout, MGMT_MAP semantics) that don't carry over to
-//! v3. With v3 the chain Image construction, the kernel-cap layout,
-//! and the host_open/host_save flow all live in the new
-//! `jar-kernel` crate; a v3 Rust→javm pipeline that emits chain
-//! Image blobs is future work.
-//!
-//! For the end-to-end demonstration this crate is reduced to a
-//! host-only no-op. The runnable v3 chain apply path is exercised
-//! by the integration tests in `rust/jar-kernel/src/kernel.rs`
-//! and (Stage D.2) the dedicated end-to-end fixture there.
+#![cfg_attr(target_env = "javm", no_std)]
+#![cfg_attr(target_env = "javm", no_main)]
 
-fn main() {}
+use subsoil as _;
+
+#[cfg(target_env = "javm")]
+subsoil::entry!(simple_chain_main);
+
+#[cfg(target_env = "javm")]
+#[no_mangle]
+fn simple_chain_main(_args_len: u64) -> u64 {
+    simple_chain::simple_chain_sum()
+}
+
+#[cfg(not(target_env = "javm"))]
+fn main() {
+    // Host build: print the sum so this stays a runnable binary.
+    println!("{}", simple_chain::simple_chain_sum());
+}
