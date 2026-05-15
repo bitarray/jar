@@ -184,6 +184,14 @@ impl CallStack {
         &self.entries
     }
 
+    /// Mutable slice into entries — used by the driver to save live
+    /// regs/mem/gas back into a *specific* InstanceEntry by position
+    /// after the interpreter exits (e.g. saving the yielder's state
+    /// while a ReferenceEntry sits on top).
+    pub fn entries_mut(&mut self) -> &mut [Entry] {
+        &mut self.entries
+    }
+
     /// Push a fresh InstanceEntry. Transitions any prior top from
     /// `Running` to `Waiting`; the new entry becomes `Running`.
     pub fn push_instance(&mut self, mut entry: InstanceEntry) -> Result<(), VmError> {

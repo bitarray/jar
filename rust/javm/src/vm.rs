@@ -19,10 +19,10 @@
 
 use std::sync::Arc;
 
-use jar_cap::{CNodeBackend, Cap, InstanceCap, image::Image};
+use jar_cap::{CNodeBackend, Cap, InstanceCap, SlotIdx, image::Image};
 use javm_exec::{ExitReason, GasCounter, Interpreter, Mem, Regs};
 
-use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, EntryStatus, InstanceEntry};
+use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
 use crate::error::VmError;
 use crate::image_cache::ImageCache;
 use crate::kernel_assist::KernelAssist;
@@ -135,9 +135,11 @@ impl<K: KernelAssist> Vm<K> {
         regs.gpr[11] = endpoint_idx as u64;
         let mem = Mem::new();
         let gas = GasCounter::new(gas_budget);
-        let gas_initial = gas_budget;
 
-        // 4. Push the entry.
+        // 4. Push the entry. `pushed_pos` is the position of *this*
+        //    InstanceEntry on the stack; we use it to detect whether
+        //    host_yield grew the stack while we were running.
+        let pushed_pos = self.stack.entries().len();
         let entry = InstanceEntry {
             instance,
             image: image.clone(),
@@ -150,47 +152,153 @@ impl<K: KernelAssist> Vm<K> {
         };
         self.stack.push_instance(entry)?;
 
-        // 5. Drive the interpreter. `&mut self` flows in as the
-        //    EcallHandler; the running entry's cnode stays on the
-        //    stack (accessible via `self.stack.running_instance_mut()`).
-        //    The entry's regs/mem/gas fields are placeholders during
-        //    this scope — the MGMT dispatcher uses the function-arg
-        //    regs (which IS the live `regs` here).
-        let mut regs_live = regs;
-        let mut mem_live = mem;
-        let mut gas_live = gas;
-        let exit = Interpreter::run(
-            program.as_ref(),
-            &mut regs_live,
-            &mut mem_live,
-            &mut gas_live,
-            self,
-        );
+        // 5. Drive the interpreter and translate the exit.
+        self.drive_and_translate(regs, mem, gas, gas_budget, pushed_pos)
+    }
 
-        // 6. Restore the live state into the entry, then pop.
-        if let Some(entry) = self.stack.running_instance_mut() {
-            entry.regs = regs_live;
-            entry.mem = mem_live;
-            entry.gas = gas_live;
+    /// Resume the top `ReferenceEntry`: pop it, re-enter the
+    /// interpreter on the InstanceEntry it points at (which already
+    /// has its saved regs/mem/gas from the yield site), and translate
+    /// the next termination.
+    ///
+    /// Optionally reflects `scratchpad` into the resumed Instance's
+    /// slot[0] before re-entering — the spec's CALL_RESUME(payload)
+    /// pattern.
+    ///
+    /// Errors:
+    /// - `VmError::Invariant` if the top isn't a `ReferenceEntry`.
+    /// - `VmError::CallStackEmpty` if the resolved target Instance is
+    ///   missing.
+    pub fn call_resume(
+        &mut self,
+        _target_slot: jar_cap::SlotPath,
+        scratchpad: Option<Cap>,
+    ) -> Result<CallResult, VmError> {
+        // 1. Verify and pop the top ReferenceEntry.
+        match self.stack.running() {
+            Some(Entry::Reference(_)) => {}
+            _ => {
+                return Err(VmError::Invariant(
+                    "call_resume: top is not a ReferenceEntry",
+                ));
+            }
+        }
+        self.stack.pop().ok_or(VmError::CallStackEmpty)?;
+
+        // 2. Find the now-running InstanceEntry's position; reflect
+        //    scratchpad into its slot[0] if supplied.
+        let pos = self.stack.entries().len() - 1;
+        if let Some(cap) = scratchpad {
+            let target = self
+                .stack
+                .running_instance_mut()
+                .ok_or(VmError::Invariant("call_resume: no instance after pop"))?;
+            target.cnode.set(SlotIdx(0), Some(cap))?;
+        }
+
+        // 3. Take the resumed Instance's saved regs/mem/gas out into
+        //    locals (replacing with placeholders) for driving the
+        //    interpreter.
+        let (regs, mem, gas, gas_initial) = {
+            let target = self
+                .stack
+                .running_instance_mut()
+                .ok_or(VmError::Invariant("call_resume: no instance"))?;
+            let regs = core::mem::replace(&mut target.regs, Regs::new());
+            let mem = core::mem::replace(&mut target.mem, Mem::new());
+            let gas = core::mem::replace(&mut target.gas, GasCounter::new(0));
+            let gas_initial = gas.remaining();
+            (regs, mem, gas, gas_initial)
+        };
+
+        self.drive_and_translate(regs, mem, gas, gas_initial, pos)
+    }
+
+    /// Stub for DROP_PAUSED. Lands with the σ-resident Paused state
+    /// machine (Stage 4).
+    pub fn drop_paused(&mut self, _target_slot: jar_cap::SlotPath) -> Result<(), VmError> {
+        Err(VmError::Invariant(
+            "DROP_PAUSED requires σ-resident Paused state (Stage 4)",
+        ))
+    }
+
+    /// Drive `Interpreter::run` on the InstanceEntry at `pushed_pos`
+    /// using the supplied regs/mem/gas, then translate the
+    /// termination.
+    ///
+    /// Paused-on-yield is detected by a structural side-effect:
+    /// `host_yield` (Stage 3.8) pushes a `ReferenceEntry` on top of
+    /// the yielder. After `Interpreter::run` returns, if the stack is
+    /// taller than `pushed_pos + 1`, a yield occurred — leave the
+    /// stack in that shape and return `CallResult::Paused`. Otherwise
+    /// pop the entry and translate Halt / Fault as usual.
+    fn drive_and_translate(
+        &mut self,
+        mut regs: Regs,
+        mut mem: Mem,
+        mut gas: GasCounter,
+        gas_initial: u64,
+        pushed_pos: usize,
+    ) -> Result<CallResult, VmError> {
+        let program = match &self.stack.entries()[pushed_pos] {
+            Entry::Instance(e) => e.program.clone(),
+            _ => return Err(VmError::Invariant("pushed_pos points at non-Instance")),
+        };
+
+        let exit = Interpreter::run(program.as_ref(), &mut regs, &mut mem, &mut gas, self);
+
+        let gas_used = gas_initial.saturating_sub(gas.remaining());
+
+        // Did host_yield push a ReferenceEntry above us?
+        let yielded = self.stack.entries().len() > pushed_pos + 1
+            && matches!(self.stack.running(), Some(Entry::Reference(_)));
+
+        if yielded {
+            // Read marker payload (the Cap::Instance[YieldMarker])
+            // from the yielder's slot referenced by φ[7] at yield time.
+            let marker_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+            let marker_payload = {
+                let yielder = match &self.stack.entries()[pushed_pos] {
+                    Entry::Instance(e) => e.as_ref(),
+                    _ => return Err(VmError::Invariant("yielder is not an Instance")),
+                };
+                yielder.cnode.get(marker_slot).ok().flatten().cloned()
+            };
+
+            // Save live state back into the yielder InstanceEntry.
+            let yielder = match &mut self.stack.entries_mut()[pushed_pos] {
+                Entry::Instance(e) => e.as_mut(),
+                _ => return Err(VmError::Invariant("yielder is not an Instance")),
+            };
+            yielder.regs = regs;
+            yielder.mem = mem;
+            yielder.gas = gas;
+
+            return Ok(CallResult::Paused {
+                marker_payload,
+                gas_used,
+            });
+        }
+
+        // Halt / Fault path: top of stack is the InstanceEntry we drove.
+        if let Some(top) = self.stack.running_instance_mut() {
+            top.regs = regs;
+            top.mem = mem;
+            top.gas = gas;
         }
         let popped = self
             .stack
             .pop()
             .ok_or(VmError::Invariant("stack empty after Interpreter::run"))?;
 
-        // 7. Translate the exit into a CallResult.
-        let (instance_post, slot0, regs_post, gas_remaining) = match popped {
-            crate::callstack::Entry::Instance(e) => {
-                let e = *e;
-                // Take slot[0] for reflection.
-                let mut cnode = e.cnode;
-                let slot0 = cnode.take(jar_cap::SlotIdx(0)).ok().flatten();
-                let _ = cnode; // dropped here
-                (e.instance, slot0, e.regs, e.gas.remaining())
+        let (instance_post, slot0, regs_post) = match popped {
+            Entry::Instance(e) => {
+                let mut e = *e;
+                let slot0 = e.cnode.take(SlotIdx(0)).ok().flatten();
+                (e.instance, slot0, e.regs)
             }
             _ => return Err(VmError::Invariant("popped a non-Instance entry")),
         };
-        let gas_used = gas_initial.saturating_sub(gas_remaining);
 
         Ok(match exit {
             ExitReason::Halt => CallResult::Halt {
@@ -199,17 +307,10 @@ impl<K: KernelAssist> Vm<K> {
                 reflected_slot0: slot0,
                 gas_used,
             },
-            ExitReason::HostCall(_) | ExitReason::Ecall => {
-                // Stage 3.8 / 3.9: host calls and yields will be
-                // handled before the Interpreter returns. Reaching
-                // here means the EcallHandler returned Exit on a host
-                // call we don't yet recognize — surface as Paused so
-                // the caller can decide.
-                CallResult::Paused {
-                    marker_payload: slot0,
-                    gas_used,
-                }
-            }
+            ExitReason::HostCall(_) | ExitReason::Ecall => CallResult::Paused {
+                marker_payload: slot0,
+                gas_used,
+            },
             ExitReason::Trap
             | ExitReason::Panic
             | ExitReason::OutOfGas
@@ -219,26 +320,6 @@ impl<K: KernelAssist> Vm<K> {
                 gas_used,
             },
         })
-    }
-
-    /// Stub for spec-canonical CALL_RESUME. Lands once Stage 3.8
-    /// wires the yield-routing path.
-    pub fn call_resume(
-        &mut self,
-        _target_slot: jar_cap::SlotPath,
-        _scratchpad: Cap,
-    ) -> Result<CallResult, VmError> {
-        Err(VmError::Invariant(
-            "CALL_RESUME requires yield routing (Stage 3.8)",
-        ))
-    }
-
-    /// Stub for DROP_PAUSED. Lands with the σ-resident Paused state
-    /// machine (Stage 3.8 / Stage 4).
-    pub fn drop_paused(&mut self, _target_slot: jar_cap::SlotPath) -> Result<(), VmError> {
-        Err(VmError::Invariant(
-            "DROP_PAUSED requires σ-resident Paused state (Stage 4)",
-        ))
     }
 }
 
@@ -256,7 +337,7 @@ impl<K: KernelAssist + std::fmt::Debug> std::fmt::Debug for Vm<K> {
 mod tests {
     use super::*;
     use crate::kernel_assist::InProcessKernelAssist;
-    use jar_cap::{InMemoryCNode, image::Image};
+    use jar_cap::{InMemoryCNode, SlotPath, image::Image};
     use std::collections::BTreeMap;
 
     fn empty_image_with_code(code: Vec<u8>) -> Image {
@@ -269,6 +350,88 @@ mod tests {
             pinned_slots: BTreeMap::new(),
             yield_marker_slot: None,
         }
+    }
+
+    /// Byte-PVM program: `load_imm_64 φ[7] = marker_slot_idx; ecalli 16 (HOST_YIELD); ecalli 0 (HALT)`.
+    fn yield_then_halt_program(marker_slot_idx: u8) -> (Vec<u8>, Vec<u8>) {
+        // load_imm_64 (opcode 20, OneRegExtImm): [20, reg=7, imm_byte]
+        //   bitmask [1, 0, 0] — opcode head + reg byte + 1 imm byte.
+        // ecalli 16 (opcode 10, OneImm):   [10, 16]    bitmask [1, 0]
+        // ecalli 0  (opcode 10, OneImm):   [10, 0]     bitmask [1, 0]
+        let code = vec![20, 7, marker_slot_idx, 10, 16, 10, 0];
+        let bitmask = vec![1, 0, 0, 1, 0, 1, 0];
+        (code, bitmask)
+    }
+
+    /// Build a Vm with an outer InstanceEntry already on the stack
+    /// (Waiting), whose `yield_marker_slot` points at a
+    /// `Cap::Instance[YieldCatcher]` registered with the
+    /// `InProcessKernelAssist` to catch a particular marker
+    /// image_hash. Returns the inputs needed to invoke
+    /// `vm.run_instance` for the inner: an inner Instance whose
+    /// program yields with a marker that the outer catches.
+    fn setup_yield_routing() -> (
+        Vm<InProcessKernelAssist>,
+        InstanceCap,
+        Arc<Image>,
+        Box<dyn CNodeBackend<Cap> + Send + Sync>,
+    ) {
+        let mut vm = Vm::new(InProcessKernelAssist::new());
+
+        // Outer: a YieldCatcher cap parked at slot 2.
+        let catcher_content_hash = [0x42u8; 32];
+        let outer_catcher = Cap::Instance(InstanceCap {
+            image_hash_chain: [0xCAu8; 32],
+            content_hash: catcher_content_hash,
+        });
+        let mut outer_cnode: Box<dyn CNodeBackend<Cap> + Send + Sync> =
+            Box::new(InMemoryCNode::<Cap>::new(4).unwrap());
+        outer_cnode.set(SlotIdx(2), Some(outer_catcher)).unwrap();
+
+        let mut outer_img = empty_image_with_code(vec![0]);
+        outer_img.yield_marker_slot = Some(SlotIdx(2));
+        let outer_img = Arc::new(outer_img);
+        let outer_prog =
+            Arc::new(javm_exec::PvmProgram::new(vec![0], vec![1], vec![], 25).unwrap());
+        let outer_entry = InstanceEntry {
+            instance: InstanceCap {
+                image_hash_chain: [0xAAu8; 32],
+                content_hash: [0xBBu8; 32],
+            },
+            image: outer_img,
+            program: outer_prog,
+            cnode: outer_cnode,
+            regs: Regs::new(),
+            mem: Mem::new(),
+            gas: GasCounter::new(0),
+            status: EntryStatus::Waiting,
+        };
+        vm.stack.push_instance(outer_entry).unwrap();
+
+        // Register marker template with the catcher.
+        let marker_image_hash = [0x77u8; 32];
+        vm.kernel_assist
+            .yield_catcher_add(catcher_content_hash, marker_image_hash);
+
+        // Inner: yields the marker at slot 1, then halts.
+        let (code, bitmask) = yield_then_halt_program(1);
+        let inner_img = Arc::new(empty_image_with_code(code.clone()));
+        let inner_prog = Arc::new(javm_exec::PvmProgram::new(code, bitmask, vec![], 25).unwrap());
+        let inner_instance = InstanceCap {
+            image_hash_chain: [0xEEu8; 32],
+            content_hash: [0xFFu8; 32],
+        };
+        let mut inner_cnode: Box<dyn CNodeBackend<Cap> + Send + Sync> =
+            Box::new(InMemoryCNode::<Cap>::new(4).unwrap());
+        let marker = Cap::Instance(InstanceCap {
+            image_hash_chain: marker_image_hash,
+            content_hash: [0x11u8; 32],
+        });
+        inner_cnode.set(SlotIdx(1), Some(marker)).unwrap();
+        vm.image_cache
+            .insert(inner_instance.content_hash, inner_prog);
+
+        (vm, inner_instance, inner_img, inner_cnode)
     }
 
     #[test]
@@ -375,6 +538,106 @@ mod tests {
             }
             other => panic!("expected Halt, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn run_instance_yields_when_marker_caught_by_outer() {
+        let (mut vm, inst, img, cnode) = setup_yield_routing();
+        let r = vm.run_instance(inst, img, cnode, 0, 1000).unwrap();
+        match r {
+            CallResult::Paused { marker_payload, .. } => {
+                // Marker payload is the Cap::Instance at the inner's
+                // marker slot (image_hash_chain = 0x77).
+                match marker_payload {
+                    Some(Cap::Instance(ic)) => {
+                        assert_eq!(ic.image_hash_chain, [0x77u8; 32]);
+                    }
+                    other => panic!("expected Cap::Instance marker payload, got {:?}", other),
+                }
+            }
+            other => panic!("expected Paused, got {:?}", other),
+        }
+        // Stack: [outer, inner, reference(→outer)].
+        assert_eq!(vm.stack.entries().len(), 3);
+        assert!(matches!(vm.stack.running(), Some(Entry::Reference(_))));
+    }
+
+    #[test]
+    fn call_resume_after_yield_runs_to_halt() {
+        let (mut vm, inst, img, cnode) = setup_yield_routing();
+        // 1. Yield.
+        let r = vm.run_instance(inst, img, cnode, 0, 1000).unwrap();
+        assert!(matches!(r, CallResult::Paused { .. }));
+        assert_eq!(vm.stack.entries().len(), 3);
+        // 2. Resume — inner continues into `ecalli 0` → Halt.
+        let r = vm.call_resume(SlotPath::root(SlotIdx(0)), None).unwrap();
+        assert!(matches!(r, CallResult::Halt { .. }));
+        // After Halt, the inner entry is popped; outer remains.
+        assert_eq!(vm.stack.entries().len(), 1);
+        assert!(matches!(vm.stack.running(), Some(Entry::Instance(_))));
+    }
+
+    #[test]
+    fn run_instance_unhandled_marker_faults() {
+        // Build a setup where the outer has no yield_marker_slot at
+        // all → no catcher → unhandled. Reuse most of the fixture but
+        // override the outer image to drop its catcher slot.
+        let mut vm = Vm::new(InProcessKernelAssist::new());
+        let outer_img = Arc::new(empty_image_with_code(vec![0]));
+        let outer_prog =
+            Arc::new(javm_exec::PvmProgram::new(vec![0], vec![1], vec![], 25).unwrap());
+        let outer_cnode: Box<dyn CNodeBackend<Cap> + Send + Sync> =
+            Box::new(InMemoryCNode::<Cap>::new(4).unwrap());
+        vm.stack
+            .push_instance(InstanceEntry {
+                instance: InstanceCap {
+                    image_hash_chain: [0xAAu8; 32],
+                    content_hash: [0xBBu8; 32],
+                },
+                image: outer_img,
+                program: outer_prog,
+                cnode: outer_cnode,
+                regs: Regs::new(),
+                mem: Mem::new(),
+                gas: GasCounter::new(0),
+                status: EntryStatus::Waiting,
+            })
+            .unwrap();
+
+        // Inner: same yield-then-halt; marker at slot 1.
+        let (code, bitmask) = yield_then_halt_program(1);
+        let inner_img = Arc::new(empty_image_with_code(code.clone()));
+        let inner_prog = Arc::new(javm_exec::PvmProgram::new(code, bitmask, vec![], 25).unwrap());
+        let inner_instance = InstanceCap {
+            image_hash_chain: [0xEEu8; 32],
+            content_hash: [0xFEu8; 32],
+        };
+        let mut inner_cnode: Box<dyn CNodeBackend<Cap> + Send + Sync> =
+            Box::new(InMemoryCNode::<Cap>::new(4).unwrap());
+        inner_cnode
+            .set(
+                SlotIdx(1),
+                Some(Cap::Instance(InstanceCap {
+                    image_hash_chain: [0x77u8; 32],
+                    content_hash: [0x11u8; 32],
+                })),
+            )
+            .unwrap();
+        vm.image_cache
+            .insert(inner_instance.content_hash, inner_prog);
+
+        let r = vm
+            .run_instance(inner_instance, inner_img, inner_cnode, 0, 1000)
+            .unwrap();
+        assert!(matches!(
+            r,
+            CallResult::Faulted {
+                reason: ExitReason::Trap,
+                ..
+            }
+        ));
+        // Stack should be back to just the outer.
+        assert_eq!(vm.stack.entries().len(), 1);
     }
 
     #[test]

@@ -12,10 +12,9 @@
 //!
 //! ```text
 //!   0          REPLY (kernel-shorthand for "return to caller")
-//!                — out of scope here; the chain orchestrator
-//!                  intercepts via call-stack unwind in Stage 3.7.
+//!                — driven by run_instance / Interpreter::Halt translation.
 //!   1..=15     MGMT operations (this module).
-//!   16..=63    Kernel-known host calls (Stage 3.9 / 3.10).
+//!   16..=63    Kernel-known host calls (this module; sub-stages 3.8 ↑).
 //!   64..       Chain-user host calls (out of scope; reserved).
 //! ```
 //!
@@ -32,14 +31,27 @@
 //!   MGMT_CNODE_MINT  (op=5)   dst=φ[7], size_log=φ[8] (u8)
 //! ```
 //!
+//! Host call operand encoding (Stage 3.8+):
+//!
+//! ```text
+//!   HOST_YIELD       (op=16)  φ[7] = marker_slot_idx (u8) — the slot
+//!                              in the running Instance's cnode that
+//!                              holds the Cap::Instance[YieldMarker]
+//!                              being thrown. The marker payload is
+//!                              this same cap, reflected to the
+//!                              caller's slot[0] at resume.
+//! ```
+//!
 //! Multi-step `SlotPath` operands are out of scope for Stage 3; the
 //! kernel's spec-canonical encoding (single u32 packed path or a
 //! pointer to a path buffer in memory) lands when chain bytecode
 //! starts using nested cnodes routinely.
 
-use jar_cap::{SlotIdx, mgmt_cnode_mint, mgmt_cnode_swap, mgmt_copy, mgmt_drop, mgmt_move};
+use jar_cap::{Cap, SlotIdx, mgmt_cnode_mint, mgmt_cnode_swap, mgmt_copy, mgmt_drop, mgmt_move};
 use javm_exec::{EcallHandler, EcallKind, EcallResult, ExitReason, Mem, Regs};
 
+use crate::callstack::Entry;
+use crate::error::VmError;
 use crate::kernel_assist::KernelAssist;
 use crate::vm::Vm;
 
@@ -52,6 +64,15 @@ pub mod mgmt_op {
     pub const CNODE_MINT: u32 = 5;
     /// Inclusive upper bound of the MGMT range.
     pub const MAX: u32 = 15;
+}
+
+/// Kernel-known host call opcode space (in the `ecalli` immediate),
+/// 16..=63. Stage 3.8 lands `HOST_YIELD`; subsequent sub-stages fill
+/// the rest.
+pub mod host_op {
+    pub const HOST_YIELD: u32 = 16;
+    /// Inclusive upper bound of the kernel-known host call range.
+    pub const MAX: u32 = 63;
 }
 
 impl<K: KernelAssist> EcallHandler for Vm<K> {
@@ -76,14 +97,98 @@ impl<K: KernelAssist> Vm<K> {
                 Ok(()) => EcallResult::Continue,
                 Err(_) => EcallResult::Exit(ExitReason::Trap),
             },
+            o if o <= host_op::MAX => self.dispatch_host_call(o, _regs, _mem),
             _ => {
-                // Kernel-known and chain-user host calls land in 3.9 / 3.10.
-                // For now, treat any out-of-range op as a continue so
-                // prologue-like ecalls (used by javm-transpiler's blob
-                // format) don't fault the bench harness.
+                // Chain-user host calls (64+) land later. Continue
+                // silently for now so prologue-like ecalls (used by
+                // javm-transpiler's blob format) don't fault the bench
+                // harness.
                 EcallResult::Continue
             }
         }
+    }
+
+    /// Dispatch a kernel-known host call (op-codes 16..=63).
+    fn dispatch_host_call(&mut self, op: u32, regs: &mut Regs, _mem: &mut Mem) -> EcallResult {
+        match op {
+            host_op::HOST_YIELD => match self.dispatch_host_yield(regs) {
+                Ok(r) => r,
+                Err(_) => EcallResult::Exit(ExitReason::Trap),
+            },
+            _ => {
+                // 3.9 / 3.10 fill the rest. For now treat as a no-op.
+                EcallResult::Continue
+            }
+        }
+    }
+
+    /// `host_yield(marker_slot=φ[7])`.
+    ///
+    /// Resolves the marker cap from the running Instance's cnode,
+    /// walks the call stack top→bottom looking for an InstanceEntry
+    /// whose `Image.yield_marker_slot` references a
+    /// `Cap::Instance[YieldCatcher]` whose marker list contains the
+    /// thrown marker's `image_hash_chain`. On match: push a
+    /// ReferenceEntry pointing at the catcher's position; exit the
+    /// interpreter with `ExitReason::HostCall(HOST_YIELD)` so
+    /// `run_instance` surfaces `CallResult::Paused`.
+    ///
+    /// Errors:
+    /// - `VmError::CallStackEmpty` if there's no running entry.
+    /// - `VmError::SlotKindMismatch` / `SlotEmpty` if the marker slot
+    ///   doesn't hold a `Cap::Instance`.
+    /// - `VmError::UnhandledMarker` if no catcher on the stack catches
+    ///   this marker.
+    fn dispatch_host_yield(&mut self, regs: &mut Regs) -> Result<EcallResult, VmError> {
+        let marker_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+
+        // 1. Read marker's image_hash_chain from the running Instance's cnode.
+        let marker_hash = {
+            let running = self
+                .stack
+                .running_instance()
+                .ok_or(VmError::CallStackEmpty)?;
+            match running.cnode.get(marker_slot)? {
+                Some(Cap::Instance(ic)) => ic.image_hash_chain,
+                Some(_) => return Err(VmError::SlotKindMismatch(marker_slot.get())),
+                None => return Err(VmError::SlotEmpty(marker_slot.get())),
+            }
+        };
+
+        // 2. Walk the stack top→bottom (skip the top — that's the
+        //    yielder). Find first InstanceEntry whose declared
+        //    yield_marker_slot holds a YieldCatcher catching this
+        //    marker.
+        let stack_len = self.stack.entries().len();
+        let mut target_pos: Option<usize> = None;
+        // The yielder is at stack_len-1; iterate over positions below.
+        for pos in (0..stack_len.saturating_sub(1)).rev() {
+            let ie = match &self.stack.entries()[pos] {
+                Entry::Instance(ie) => ie.as_ref(),
+                Entry::Reference(_) => continue,
+            };
+            let Some(catcher_slot) = ie.image.yield_marker_slot else {
+                continue;
+            };
+            let catcher_hash = match ie.cnode.get(catcher_slot)? {
+                Some(Cap::Instance(ic)) => ic.content_hash,
+                _ => continue,
+            };
+            let markers = self.kernel_assist.yield_catcher_markers(catcher_hash);
+            if markers.contains(&marker_hash) {
+                target_pos = Some(pos);
+                break;
+            }
+        }
+
+        let pos = target_pos.ok_or(VmError::UnhandledMarker)?;
+
+        // 3. Push the ReferenceEntry. The yielder transitions to
+        //    Waiting; the new reference becomes Running and (via
+        //    `running_instance_mut`) resolves to the catcher's entry.
+        self.stack.push_reference(pos)?;
+
+        Ok(EcallResult::Exit(ExitReason::HostCall(host_op::HOST_YIELD)))
     }
 
     /// Plain `ecall` (opcode 3, no immediate). Spec §4 reads φ[11]
@@ -95,11 +200,11 @@ impl<K: KernelAssist> Vm<K> {
         self.dispatch_ecalli(op, regs, mem)
     }
 
-    fn dispatch_mgmt(&mut self, op: u32, regs: &mut Regs) -> Result<(), crate::error::VmError> {
+    fn dispatch_mgmt(&mut self, op: u32, regs: &mut Regs) -> Result<(), VmError> {
         let running = self
             .stack
             .running_instance_mut()
-            .ok_or(crate::error::VmError::CallStackEmpty)?;
+            .ok_or(VmError::CallStackEmpty)?;
         let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
         let cnode = running.cnode.as_mut();
         let a = SlotIdx((regs.gpr[7] & 0xFF) as u32);
@@ -113,7 +218,7 @@ impl<K: KernelAssist> Vm<K> {
                 let size_log = (regs.gpr[8] & 0xFF) as u8;
                 mgmt_cnode_mint(cnode, &pinned, a, size_log)?
             }
-            _ => return Err(crate::error::VmError::Invariant("unknown MGMT op")),
+            _ => return Err(VmError::Invariant("unknown MGMT op")),
         }
         Ok(())
     }
