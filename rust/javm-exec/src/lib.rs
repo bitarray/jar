@@ -14,3 +14,13 @@
 //! gas}` with cap-aware code stripped. See
 //! `~/docs/minimum-v3/implementation/architecture.md` for the
 //! layering.
+
+pub mod exit;
+pub mod gas;
+pub mod mem;
+pub mod regs;
+
+pub use exit::ExitReason;
+pub use gas::{Gas, GasCounter, OutOfGas};
+pub use mem::{Mem, MemAccess, PAGE_SIZE, Page, Perm};
+pub use regs::{REG_COUNT, Regs};
