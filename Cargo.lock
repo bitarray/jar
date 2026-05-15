@@ -507,6 +507,7 @@ dependencies = [
 name = "jar-kernel"
 version = "0.1.0"
 dependencies = [
+ "build-javm",
  "jar-cap",
  "javm",
  "javm-exec",

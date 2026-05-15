@@ -15,3 +15,6 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+
+[build-dependencies]
+build-javm = { path = "../build-javm" }
