@@ -47,7 +47,10 @@
 //! pointer to a path buffer in memory) lands when chain bytecode
 //! starts using nested cnodes routinely.
 
-use jar_cap::{Cap, SlotIdx, mgmt_cnode_mint, mgmt_cnode_swap, mgmt_copy, mgmt_drop, mgmt_move};
+use jar_cap::{
+    Blake2b256, Cap, Hash, InstanceCap, SlotIdx, TypeCap, mgmt_cnode_mint, mgmt_cnode_swap,
+    mgmt_copy, mgmt_drop, mgmt_move,
+};
 use javm_exec::{EcallHandler, EcallKind, EcallResult, ExitReason, Mem, Regs};
 
 use crate::callstack::Entry;
@@ -71,6 +74,26 @@ pub mod mgmt_op {
 /// the rest.
 pub mod host_op {
     pub const HOST_YIELD: u32 = 16;
+    /// `set_image(image_slot=φ[7])` — atomically swap the running
+    /// Instance's image: extend `image_hash_chain`, reload program
+    /// from the kernel-assist's image registry.
+    pub const SET_IMAGE: u32 = 17;
+    /// `host_derive_spawn(image_slot=φ[7], dst_slot=φ[8])` —
+    /// mint a fresh Cap::Instance whose image_hash_chain is
+    /// chain_extend(spawner.image_hash_chain, image.content_hash).
+    pub const DERIVE_SPAWN: u32 = 18;
+    /// `host_make_image(...)` — Stage 3.9 stub. Lands when the
+    /// in-memory parts encoding is fully spec'd; jar-kernel-v3
+    /// validates structurally at host_make_image time.
+    pub const MAKE_IMAGE: u32 = 19;
+    /// `host_same_type(slot_a=φ[7], slot_b=φ[8])` — compare
+    /// `image_hash_chain` of two Cap::Instance values; result (0 or
+    /// 1) returned in φ[7].
+    pub const HOST_SAME_TYPE: u32 = 20;
+    /// `host_type_of(src_slot=φ[7], dst_slot=φ[8])` — mint a
+    /// Cap::Type carrying the source Cap::Instance's
+    /// `image_hash_chain`; place at dst.
+    pub const HOST_TYPE_OF: u32 = 21;
     /// Inclusive upper bound of the kernel-known host call range.
     pub const MAX: u32 = 63;
 }
@@ -110,13 +133,36 @@ impl<K: KernelAssist> Vm<K> {
 
     /// Dispatch a kernel-known host call (op-codes 16..=63).
     fn dispatch_host_call(&mut self, op: u32, regs: &mut Regs, _mem: &mut Mem) -> EcallResult {
-        match op {
-            host_op::HOST_YIELD => match self.dispatch_host_yield(regs) {
-                Ok(r) => r,
+        fn trap_on_err<T>(r: Result<T, VmError>, ok: impl FnOnce(T) -> EcallResult) -> EcallResult {
+            match r {
+                Ok(v) => ok(v),
                 Err(_) => EcallResult::Exit(ExitReason::Trap),
-            },
+            }
+        }
+        match op {
+            host_op::HOST_YIELD => trap_on_err(self.dispatch_host_yield(regs), |r| r),
+            host_op::SET_IMAGE => {
+                trap_on_err(self.dispatch_set_image(regs), |()| EcallResult::Continue)
+            }
+            host_op::DERIVE_SPAWN => {
+                trap_on_err(self.dispatch_derive_spawn(regs), |()| EcallResult::Continue)
+            }
+            host_op::MAKE_IMAGE => {
+                // Stage 3.9 stub. The in-memory parts encoding for
+                // host_make_image is not finalized; jar-kernel-v3
+                // will land the proper memory-pointer-based variant
+                // when chain Images need runtime construction.
+                EcallResult::Exit(ExitReason::Trap)
+            }
+            host_op::HOST_SAME_TYPE => trap_on_err(self.dispatch_host_same_type(regs), |()| {
+                EcallResult::Continue
+            }),
+            host_op::HOST_TYPE_OF => {
+                trap_on_err(self.dispatch_host_type_of(regs), |()| EcallResult::Continue)
+            }
             _ => {
-                // 3.9 / 3.10 fill the rest. For now treat as a no-op.
+                // 3.10 / 3.11 / 3.12 fill the rest. Continue silently
+                // for now so unknown host call ops don't fault.
                 EcallResult::Continue
             }
         }
@@ -191,6 +237,188 @@ impl<K: KernelAssist> Vm<K> {
         Ok(EcallResult::Exit(ExitReason::HostCall(host_op::HOST_YIELD)))
     }
 
+    /// `set_image(image_slot=φ[7])`.
+    ///
+    /// Reads the Cap::Image at the named slot; chain_extends the
+    /// running InstanceCap's image_hash_chain with the image's
+    /// content_hash; looks up the full Image bytes via
+    /// `KernelAssist::image_lookup`; reloads the InstanceEntry's
+    /// image, program (via ImageCache), and instance.image_hash_chain.
+    ///
+    /// Errors:
+    /// - `VmError::CallStackEmpty` if no running entry.
+    /// - `VmError::SlotKindMismatch` / `SlotEmpty` if the slot does
+    ///   not hold a Cap::Image.
+    /// - `VmError::ImageNotFound` if the kernel-assist's image
+    ///   registry doesn't know this content_hash.
+    fn dispatch_set_image(&mut self, regs: &mut Regs) -> Result<(), VmError> {
+        let image_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+
+        // 1. Resolve the Cap::Image content_hash from the slot.
+        let new_image_hash: jar_cap::CapHash = {
+            let running = self
+                .stack
+                .running_instance()
+                .ok_or(VmError::CallStackEmpty)?;
+            match running.cnode.get(image_slot)? {
+                Some(Cap::Image(c)) => c.content_hash,
+                Some(_) => return Err(VmError::SlotKindMismatch(image_slot.get())),
+                None => return Err(VmError::SlotEmpty(image_slot.get())),
+            }
+        };
+
+        // 2. Resolve the full Image bytes via the kernel-assist.
+        let new_image = self
+            .kernel_assist
+            .image_lookup(new_image_hash)
+            .ok_or(VmError::ImageNotFound)?;
+
+        // 3. Extend the chain hash.
+        let extended_chain = {
+            let running = self
+                .stack
+                .running_instance()
+                .ok_or(VmError::CallStackEmpty)?;
+            Blake2b256::hash_pair(&running.instance.image_hash_chain, &new_image_hash)
+        };
+
+        // 4. Predecode the new image (cached on second invocation).
+        let program = self.image_cache.get_or_decode(
+            new_image_hash,
+            new_image.code.clone(),
+            vec![1u8; new_image.code.len()],
+            Vec::new(),
+        )?;
+
+        // 5. Install the swap into the running InstanceEntry.
+        let running = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?;
+        running.instance.image_hash_chain = extended_chain;
+        // content_hash semantics post-set_image are a Stage 4 concern
+        // (depends on canonical state digest). For Stage 3 we leave
+        // the previous content_hash; the chain hash captures the
+        // image lineage which is sufficient for type queries.
+        running.image = new_image;
+        running.program = program;
+        Ok(())
+    }
+
+    /// `host_derive_spawn(image_slot=φ[7], dst_slot=φ[8])`.
+    ///
+    /// Mint a fresh `Cap::Instance` whose image_hash_chain is
+    /// `chain_extend(self.image_hash_chain, image.content_hash)`.
+    /// content_hash is a placeholder for Stage 3 (zeroed) — Stage 4
+    /// jar-kernel-v3 defines the canonical state digest and will
+    /// populate it.
+    fn dispatch_derive_spawn(&mut self, regs: &mut Regs) -> Result<(), VmError> {
+        let image_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let dst_slot = SlotIdx((regs.gpr[8] & 0xFF) as u32);
+
+        // 1. Read Cap::Image at image_slot.
+        let new_image_hash: jar_cap::CapHash = {
+            let running = self
+                .stack
+                .running_instance()
+                .ok_or(VmError::CallStackEmpty)?;
+            match running.cnode.get(image_slot)? {
+                Some(Cap::Image(c)) => c.content_hash,
+                Some(_) => return Err(VmError::SlotKindMismatch(image_slot.get())),
+                None => return Err(VmError::SlotEmpty(image_slot.get())),
+            }
+        };
+
+        // 2. Derive the child chain hash + cap.
+        let child = {
+            let running = self
+                .stack
+                .running_instance()
+                .ok_or(VmError::CallStackEmpty)?;
+            let extended =
+                Blake2b256::hash_pair(&running.instance.image_hash_chain, &new_image_hash);
+            InstanceCap {
+                image_hash_chain: extended,
+                content_hash: [0u8; 32], // Stage 4 fills with canonical state digest.
+            }
+        };
+
+        // 3. Place the new Cap::Instance at dst_slot (rejects pinned).
+        let running = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?;
+        let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
+        if pinned.contains(&dst_slot) {
+            return Err(jar_cap::OpError::SlotPinned(dst_slot.get()).into());
+        }
+        running.cnode.set(dst_slot, Some(Cap::Instance(child)))?;
+        Ok(())
+    }
+
+    /// `host_same_type(slot_a=φ[7], slot_b=φ[8])`.
+    ///
+    /// Result (1 if same image_hash_chain, 0 otherwise) in φ[7].
+    fn dispatch_host_same_type(&mut self, regs: &mut Regs) -> Result<(), VmError> {
+        let a = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let b = SlotIdx((regs.gpr[8] & 0xFF) as u32);
+        let running = self
+            .stack
+            .running_instance()
+            .ok_or(VmError::CallStackEmpty)?;
+        let chain_a = type_chain_at(running.cnode.as_ref(), a)?;
+        let chain_b = type_chain_at(running.cnode.as_ref(), b)?;
+        regs.gpr[7] = if chain_a == chain_b { 1 } else { 0 };
+        Ok(())
+    }
+
+    /// `host_type_of(src_slot=φ[7], dst_slot=φ[8])`.
+    ///
+    /// Reads Cap::Instance at src; mints Cap::Type carrying the same
+    /// image_hash_chain; places at dst.
+    fn dispatch_host_type_of(&mut self, regs: &mut Regs) -> Result<(), VmError> {
+        let src = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let dst = SlotIdx((regs.gpr[8] & 0xFF) as u32);
+        let running = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?;
+        let chain = match running.cnode.get(src)? {
+            Some(Cap::Instance(ic)) => ic.image_hash_chain,
+            Some(Cap::Type(tc)) => tc.image_hash_chain,
+            Some(_) => return Err(VmError::SlotKindMismatch(src.get())),
+            None => return Err(VmError::SlotEmpty(src.get())),
+        };
+        let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
+        if pinned.contains(&dst) {
+            return Err(jar_cap::OpError::SlotPinned(dst.get()).into());
+        }
+        running.cnode.set(
+            dst,
+            Some(Cap::Type(TypeCap {
+                image_hash_chain: chain,
+            })),
+        )?;
+        Ok(())
+    }
+}
+
+/// Read the `image_hash_chain` for a Cap::Instance or Cap::Type at
+/// the named slot (used by host_same_type and host_type_eq). Errors
+/// if the slot is empty or holds a different cap kind.
+fn type_chain_at(
+    cnode: &(dyn jar_cap::CNodeBackend<Cap> + Send + Sync),
+    slot: SlotIdx,
+) -> Result<jar_cap::CapHash, VmError> {
+    match cnode.get(slot)? {
+        Some(Cap::Instance(ic)) => Ok(ic.image_hash_chain),
+        Some(Cap::Type(tc)) => Ok(tc.image_hash_chain),
+        Some(_) => Err(VmError::SlotKindMismatch(slot.get())),
+        None => Err(VmError::SlotEmpty(slot.get())),
+    }
+}
+
+impl<K: KernelAssist> Vm<K> {
     /// Plain `ecall` (opcode 3, no immediate). Spec §4 reads φ[11]
     /// (mgmt_op) and φ[12] (subject|object) for the management
     /// dispatch. Stage 3 routes the same way as `ecalli imm`, treating
@@ -412,5 +640,172 @@ mod tests {
         let mut mem = Mem::new();
         let r = vm.handle(EcallKind::Ecalli(999), &mut regs, &mut mem);
         assert!(matches!(r, EcallResult::Continue));
+    }
+
+    // -- 3.9 host calls --
+
+    #[test]
+    fn set_image_extends_chain_hash() {
+        let mut vm = fixture_vm();
+        // Register the target image keyed by [0xAA; 32] (the slot-2
+        // ImageCap content_hash).
+        let new_img = Arc::new(empty_image());
+        vm.kernel_assist.register_image([0xAA; 32], new_img);
+
+        let original_chain = vm
+            .stack
+            .running_instance()
+            .unwrap()
+            .instance
+            .image_hash_chain;
+
+        let mut regs = Regs::new();
+        regs.gpr[7] = 2; // image slot
+        let mut mem = Mem::new();
+        let r = vm.handle(EcallKind::Ecalli(host_op::SET_IMAGE), &mut regs, &mut mem);
+        assert!(matches!(r, EcallResult::Continue));
+
+        let new_chain = vm
+            .stack
+            .running_instance()
+            .unwrap()
+            .instance
+            .image_hash_chain;
+        assert_ne!(original_chain, new_chain);
+    }
+
+    #[test]
+    fn set_image_without_registry_traps() {
+        let mut vm = fixture_vm();
+        // No register_image call: [0xAA;32] won't resolve.
+        let mut regs = Regs::new();
+        regs.gpr[7] = 2;
+        let mut mem = Mem::new();
+        let r = vm.handle(EcallKind::Ecalli(host_op::SET_IMAGE), &mut regs, &mut mem);
+        assert!(matches!(r, EcallResult::Exit(ExitReason::Trap)));
+    }
+
+    #[test]
+    fn derive_spawn_mints_extended_chain_instance() {
+        let mut vm = fixture_vm();
+        let parent_chain = vm
+            .stack
+            .running_instance()
+            .unwrap()
+            .instance
+            .image_hash_chain;
+
+        let mut regs = Regs::new();
+        regs.gpr[7] = 2; // image slot (Cap::Image with content_hash [0xAA;32])
+        regs.gpr[8] = 5; // dst slot
+        let mut mem = Mem::new();
+        let r = vm.handle(
+            EcallKind::Ecalli(host_op::DERIVE_SPAWN),
+            &mut regs,
+            &mut mem,
+        );
+        assert!(matches!(r, EcallResult::Continue));
+
+        let cnode = &vm.stack.running_instance().unwrap().cnode;
+        let child = match cnode.get(SlotIdx(5)).unwrap() {
+            Some(Cap::Instance(c)) => *c,
+            other => panic!("expected Cap::Instance at dst slot, got {:?}", other),
+        };
+        assert_ne!(child.image_hash_chain, parent_chain);
+    }
+
+    #[test]
+    fn host_same_type_compares_chain() {
+        let mut vm = fixture_vm();
+        let inst_a = InstanceCap {
+            image_hash_chain: [0x33; 32],
+            content_hash: [0xCC; 32],
+        };
+        let inst_b = InstanceCap {
+            image_hash_chain: [0x33; 32],
+            content_hash: [0xDD; 32],
+        };
+        let inst_c = InstanceCap {
+            image_hash_chain: [0x99; 32],
+            content_hash: [0xEE; 32],
+        };
+        {
+            let running = vm.stack.running_instance_mut().unwrap();
+            running
+                .cnode
+                .set(SlotIdx(3), Some(Cap::Instance(inst_a)))
+                .unwrap();
+            running
+                .cnode
+                .set(SlotIdx(4), Some(Cap::Instance(inst_b)))
+                .unwrap();
+            running
+                .cnode
+                .set(SlotIdx(6), Some(Cap::Instance(inst_c)))
+                .unwrap();
+        }
+
+        let mut regs = Regs::new();
+        regs.gpr[7] = 3;
+        regs.gpr[8] = 4;
+        let mut mem = Mem::new();
+        let r = vm.handle(
+            EcallKind::Ecalli(host_op::HOST_SAME_TYPE),
+            &mut regs,
+            &mut mem,
+        );
+        assert!(matches!(r, EcallResult::Continue));
+        assert_eq!(regs.gpr[7], 1);
+
+        regs.gpr[7] = 3;
+        regs.gpr[8] = 6;
+        let r = vm.handle(
+            EcallKind::Ecalli(host_op::HOST_SAME_TYPE),
+            &mut regs,
+            &mut mem,
+        );
+        assert!(matches!(r, EcallResult::Continue));
+        assert_eq!(regs.gpr[7], 0);
+    }
+
+    #[test]
+    fn host_type_of_mints_type_cap() {
+        let mut vm = fixture_vm();
+        let inst = InstanceCap {
+            image_hash_chain: [0x77; 32],
+            content_hash: [0x11; 32],
+        };
+        vm.stack
+            .running_instance_mut()
+            .unwrap()
+            .cnode
+            .set(SlotIdx(3), Some(Cap::Instance(inst)))
+            .unwrap();
+
+        let mut regs = Regs::new();
+        regs.gpr[7] = 3;
+        regs.gpr[8] = 4;
+        let mut mem = Mem::new();
+        let r = vm.handle(
+            EcallKind::Ecalli(host_op::HOST_TYPE_OF),
+            &mut regs,
+            &mut mem,
+        );
+        assert!(matches!(r, EcallResult::Continue));
+
+        let cnode = &vm.stack.running_instance().unwrap().cnode;
+        match cnode.get(SlotIdx(4)).unwrap() {
+            Some(Cap::Type(tc)) => assert_eq!(tc.image_hash_chain, [0x77; 32]),
+            other => panic!("expected Cap::Type at dst, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn make_image_stubbed_traps() {
+        let mut vm = fixture_vm();
+        let mut regs = Regs::new();
+        let mut mem = Mem::new();
+        let r = vm.handle(EcallKind::Ecalli(host_op::MAKE_IMAGE), &mut regs, &mut mem);
+        assert!(matches!(r, EcallResult::Exit(ExitReason::Trap)));
     }
 }

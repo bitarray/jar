@@ -17,8 +17,9 @@
 
 use core::fmt;
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use jar_cap::{Blake2b256, CapHash, Hash};
+use jar_cap::{Blake2b256, CapHash, Hash, image::Image};
 
 /// Identifier for a row in the kernel-internal GasMeter table.
 /// Chain-chosen, not kernel-assigned (per spec §22).
@@ -70,6 +71,22 @@ pub trait KernelAssist {
     /// Mint a fresh empty YieldCatcher. Returns its content hash
     /// (which the caller stores as a Cap::Instance[YieldCatcher]).
     fn yield_catcher_new(&mut self) -> CapHash;
+
+    // ---- Image registry ----
+
+    /// Look up the full `Image` value by its content hash.
+    ///
+    /// Used by `host_set_image` (Stage 3.9) to atomically reload the
+    /// active Instance's program after an image swap. Default impl
+    /// returns `None`, meaning the kernel-assist has no image
+    /// registry; callers that need set_image (or set_image-style
+    /// reloads) must override.
+    ///
+    /// Stage 4 jar-kernel-v3's σ-aware impl looks this up against
+    /// `State.code_blobs`.
+    fn image_lookup(&self, _content_hash: CapHash) -> Option<Arc<Image>> {
+        None
+    }
 }
 
 /// In-process, in-memory `KernelAssist` impl. State lives in plain
@@ -88,6 +105,10 @@ pub struct InProcessKernelAssist {
     /// `Blake2b256::hash(epoch || nonce)` or similar; here we use a
     /// trivial monotonic counter (test-only).
     next_yc_nonce: u64,
+    /// Image registry. Looked up by `image_lookup` to support
+    /// `host_set_image`. Tests pre-register images that the running
+    /// program will swap to.
+    images: HashMap<CapHash, Arc<Image>>,
 }
 
 impl InProcessKernelAssist {
@@ -97,6 +118,7 @@ impl InProcessKernelAssist {
             storage_quotas: HashMap::new(),
             yield_catchers: HashMap::new(),
             next_yc_nonce: 0,
+            images: HashMap::new(),
         }
     }
 
@@ -110,6 +132,12 @@ impl InProcessKernelAssist {
         // Note: next_yc_nonce intentionally not reset — same-process
         // fresh catchers stay distinct even after block reset to
         // simplify test diagnostics.
+    }
+
+    /// Register an `Image` so `image_lookup` can resolve it. The key
+    /// is the image's canonical content hash (`image_content_hash`).
+    pub fn register_image(&mut self, content_hash: CapHash, image: Arc<Image>) {
+        self.images.insert(content_hash, image);
     }
 }
 
@@ -125,6 +153,7 @@ impl fmt::Debug for InProcessKernelAssist {
             .field("gas_meters", &self.gas_meters.len())
             .field("storage_quotas", &self.storage_quotas.len())
             .field("yield_catchers", &self.yield_catchers.len())
+            .field("images", &self.images.len())
             .finish()
     }
 }
@@ -174,6 +203,10 @@ impl KernelAssist for InProcessKernelAssist {
         let hash = Blake2b256::hash(&nonce.to_le_bytes());
         self.yield_catchers.insert(hash, Vec::new());
         hash
+    }
+
+    fn image_lookup(&self, content_hash: CapHash) -> Option<Arc<Image>> {
+        self.images.get(&content_hash).cloned()
     }
 }
 
