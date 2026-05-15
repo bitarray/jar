@@ -21,46 +21,50 @@ pub const GAS_LIMIT: u64 = 100_000_000;
 
 /// Run a javm blob on the kernel. Returns (result, gas_consumed).
 pub fn run_kernel(blob: &[u8], gas: u64) -> (u64, u64) {
-    run_kernel_with_backend(blob, gas, javm::PvmBackend::Default)
+    run_kernel_with_backend(blob, gas, javm_legacy::PvmBackend::Default)
 }
 
 /// Run a javm blob on the kernel with a specific backend. Returns (result, gas_consumed).
-pub fn run_kernel_with_backend(blob: &[u8], gas: u64, backend: javm::PvmBackend) -> (u64, u64) {
-    let artifacts = javm::kernel::cap_table_from_blob::<u8>(blob, backend, None)
+pub fn run_kernel_with_backend(
+    blob: &[u8],
+    gas: u64,
+    backend: javm_legacy::PvmBackend,
+) -> (u64, u64) {
+    let artifacts = javm_legacy::kernel::cap_table_from_blob::<u8>(blob, backend, None)
         .expect("cap_table_from_blob failed");
-    let mut kernel: javm::kernel::InvocationKernel =
-        javm::kernel::InvocationKernel::new_from_artifacts(artifacts, gas, backend)
+    let mut kernel: javm_legacy::kernel::InvocationKernel =
+        javm_legacy::kernel::InvocationKernel::new_from_artifacts(artifacts, gas, backend)
             .expect("kernel init failed");
     // javm no longer auto-populates protocol slots 1..=28 — populate the
     // host-call selector range explicitly so bench guests' `ecalli N`
     // yields `ProtocolCall { slot: N }` to the host loop below.
     for id in 1..=28u8 {
-        kernel.cap_table_set_original(id, javm::cap::Cap::Protocol(id));
+        kernel.cap_table_set_original(id, javm_legacy::cap::Cap::Protocol(id));
     }
     match kernel.run() {
-        javm::kernel::KernelResult::Halt(v) => (v, gas - kernel.active_gas()),
-        javm::kernel::KernelResult::Panic => {
+        javm_legacy::kernel::KernelResult::Halt(v) => (v, gas - kernel.active_gas()),
+        javm_legacy::kernel::KernelResult::Panic => {
             let vm = &kernel.vm_arena.vm(kernel.active_vm);
             panic!("kernel panicked at PC={} gas={}", vm.pc, vm.gas());
         }
-        javm::kernel::KernelResult::OutOfGas => panic!("kernel out of gas"),
-        javm::kernel::KernelResult::PageFault(a) => {
+        javm_legacy::kernel::KernelResult::OutOfGas => panic!("kernel out of gas"),
+        javm_legacy::kernel::KernelResult::PageFault(a) => {
             let vm = &kernel.vm_arena.vm(kernel.active_vm);
             panic!("kernel page fault at {a:#x} PC={} gas={}", vm.pc, vm.gas());
         }
-        javm::kernel::KernelResult::Fault(reason) => panic!("kernel fault: {reason}"),
+        javm_legacy::kernel::KernelResult::Fault(reason) => panic!("kernel fault: {reason}"),
     }
 }
 
 /// Run a javm blob on the interpreter (via kernel). Returns (result, gas_consumed).
 pub fn run_javm_interpreter(blob: &[u8], gas: u64) -> (u64, u64) {
-    run_kernel_with_backend(blob, gas, javm::PvmBackend::ForceInterpreter)
+    run_kernel_with_backend(blob, gas, javm_legacy::PvmBackend::ForceInterpreter)
 }
 
 /// Run a javm blob on the recompiler (via kernel). Returns (result, gas_consumed).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn run_javm_recompiler(blob: &[u8], gas: u64) -> (u64, u64) {
-    run_kernel_with_backend(blob, gas, javm::PvmBackend::ForceRecompiler)
+    run_kernel_with_backend(blob, gas, javm_legacy::PvmBackend::ForceRecompiler)
 }
 
 // ---------------------------------------------------------------------------
@@ -71,15 +75,16 @@ pub fn run_javm_recompiler(blob: &[u8], gas: u64) -> (u64, u64) {
 /// javm-exec `PvmProgram`. Uses v2's `parse_blob` + `parse_code_blob`
 /// to crack the blob (read-only; v2's blob format is unchanged).
 pub fn javm_blob_to_pvm_program(blob: &[u8]) -> javm_exec::PvmProgram {
-    let parsed = javm::program::parse_blob(blob).expect("parse_blob failed");
+    let parsed = javm_legacy::program::parse_blob(blob).expect("parse_blob failed");
     let init_cap = parsed.header.init_cap;
     let code_entry = parsed
         .caps
         .iter()
         .find(|e| e.cap_index == init_cap)
         .expect("init_cap entry not found in manifest");
-    let code_data = javm::program::cap_data(code_entry, parsed.data_section);
-    let code_blob = javm::program::parse_code_blob(code_data).expect("parse_code_blob failed");
+    let code_data = javm_legacy::program::cap_data(code_entry, parsed.data_section);
+    let code_blob =
+        javm_legacy::program::parse_code_blob(code_data).expect("parse_code_blob failed");
     javm_exec::PvmProgram::new(
         code_blob.code,
         code_blob.bitmask,
@@ -127,15 +132,16 @@ impl javm_exec::EcallHandler for BenchHandler {
 pub fn run_javm_exec_recompiler(blob: &[u8], gas: u64) -> (u64, u64) {
     use javm_exec::recompiler::{DataLayout, RecompiledPvm};
 
-    let parsed = javm::program::parse_blob(blob).expect("parse_blob failed");
+    let parsed = javm_legacy::program::parse_blob(blob).expect("parse_blob failed");
     let init_cap = parsed.header.init_cap;
     let code_entry = parsed
         .caps
         .iter()
         .find(|e| e.cap_index == init_cap)
         .expect("init_cap entry not found in manifest");
-    let code_data = javm::program::cap_data(code_entry, parsed.data_section);
-    let code_blob = javm::program::parse_code_blob(code_data).expect("parse_code_blob failed");
+    let code_data = javm_legacy::program::cap_data(code_entry, parsed.data_section);
+    let code_blob =
+        javm_legacy::program::parse_code_blob(code_data).expect("parse_code_blob failed");
 
     // Generous memory budget covering bench programs' stack + heap.
     let layout = DataLayout {
@@ -762,7 +768,7 @@ pub const FIB_RECUR_N: u64 = 20;
 ///
 /// memory_pages=0: no UNTYPED, no stack, no heap. Pure register computation.
 pub fn javm_fib_recur_blob() -> Vec<u8> {
-    use javm::program::{CapEntryType, CapManifestEntry, build_blob};
+    use javm_legacy::program::{CapEntryType, CapManifestEntry, build_blob};
 
     // Build PVM code using raw byte emission (need precise control over offsets)
     let mut code = Vec::new();
@@ -955,10 +961,10 @@ pub fn run_fib_recur_with_backend(
     blob: &[u8],
     n: u64,
     gas: u64,
-    backend: javm::PvmBackend,
+    backend: javm_legacy::PvmBackend,
 ) -> (u64, u64, usize) {
-    use javm::kernel::{InvocationKernel, KernelResult, cap_table_from_blob};
-    use javm::vm_pool::VmState;
+    use javm_legacy::kernel::{InvocationKernel, KernelResult, cap_table_from_blob};
+    use javm_legacy::vm_pool::VmState;
 
     let artifacts = cap_table_from_blob::<u8>(blob, backend, None)
         .expect("fib_recur cap_table_from_blob failed");
@@ -997,9 +1003,11 @@ mod tests_fib_recur {
     fn test_fib_recur_base_cases() {
         let blob = javm_fib_recur_blob();
         let gas = 100_000_000u64;
-        let (r0, _, _) = run_fib_recur_with_backend(&blob, 0, gas, javm::PvmBackend::Default);
+        let (r0, _, _) =
+            run_fib_recur_with_backend(&blob, 0, gas, javm_legacy::PvmBackend::Default);
         assert_eq!(r0, 0, "fib(0) should be 0");
-        let (r1, _, _) = run_fib_recur_with_backend(&blob, 1, gas, javm::PvmBackend::Default);
+        let (r1, _, _) =
+            run_fib_recur_with_backend(&blob, 1, gas, javm_legacy::PvmBackend::Default);
         assert_eq!(r1, 1, "fib(1) should be 1");
     }
 
@@ -1010,7 +1018,7 @@ mod tests_fib_recur {
         let expected = [0u64, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144];
         for (n, &expect) in expected.iter().enumerate() {
             let (result, _, _) =
-                run_fib_recur_with_backend(&blob, n as u64, gas, javm::PvmBackend::Default);
+                run_fib_recur_with_backend(&blob, n as u64, gas, javm_legacy::PvmBackend::Default);
             assert_eq!(result, expect, "fib({n}) should be {expect}, got {result}");
         }
     }
@@ -1020,7 +1028,7 @@ mod tests_fib_recur {
         let blob = javm_fib_recur_blob();
         let gas = 1_000_000_000u64;
         let (result, gas_used, vm_count) =
-            run_fib_recur_with_backend(&blob, 15, gas, javm::PvmBackend::Default);
+            run_fib_recur_with_backend(&blob, 15, gas, javm_legacy::PvmBackend::Default);
         assert_eq!(result, 610, "fib(15) should be 610");
         eprintln!("fib_recur(15): result={result} gas_used={gas_used} vms={vm_count}");
     }
@@ -1030,7 +1038,7 @@ mod tests_fib_recur {
         let blob = javm_fib_recur_blob();
         let gas = 10_000_000_000u64;
         let (result, gas_used, vm_count) =
-            run_fib_recur_with_backend(&blob, 20, gas, javm::PvmBackend::Default);
+            run_fib_recur_with_backend(&blob, 20, gas, javm_legacy::PvmBackend::Default);
         assert_eq!(result, 6765, "fib(20) should be 6765");
         eprintln!("fib_recur(20): result={result} gas_used={gas_used} vms={vm_count}");
     }
@@ -1041,7 +1049,7 @@ mod tests_fib_recur {
         let gas = 100_000_000_000u64;
         // fib(22) = 17711, creates 57313 VMs — near MAX_VMS (u16::MAX = 65535)
         let (result, gas_used, vm_count) =
-            run_fib_recur_with_backend(&blob, 22, gas, javm::PvmBackend::ForceInterpreter);
+            run_fib_recur_with_backend(&blob, 22, gas, javm_legacy::PvmBackend::ForceInterpreter);
         assert_eq!(result, 17711, "fib(22) should be 17711");
         eprintln!("fib_recur(22): result={result} gas={gas_used} vms={vm_count}");
     }
@@ -1052,9 +1060,9 @@ mod tests_fib_recur {
         let blob = javm_fib_recur_blob();
         let gas = 1_000_000_000u64;
         let (i_result, i_gas, i_vms) =
-            run_fib_recur_with_backend(&blob, 10, gas, javm::PvmBackend::ForceInterpreter);
+            run_fib_recur_with_backend(&blob, 10, gas, javm_legacy::PvmBackend::ForceInterpreter);
         let (r_result, r_gas, r_vms) =
-            run_fib_recur_with_backend(&blob, 10, gas, javm::PvmBackend::ForceRecompiler);
+            run_fib_recur_with_backend(&blob, 10, gas, javm_legacy::PvmBackend::ForceRecompiler);
         assert_eq!(i_result, 55, "fib(10) should be 55");
         assert_eq!(i_result, r_result, "interpreter/recompiler result mismatch");
         assert_eq!(i_gas, r_gas, "interpreter/recompiler gas mismatch");
@@ -1078,14 +1086,14 @@ mod tests_sort {
     fn test_ecrecover_code_size() {
         let blob = javm_ecrecover_blob();
         // Parse the v2 blob to inspect code structure
-        let parsed = javm::program::parse_blob(blob).expect("should parse v2 blob");
+        let parsed = javm_legacy::program::parse_blob(blob).expect("should parse v2 blob");
         let code_cap = parsed
             .caps
             .iter()
-            .find(|c| c.cap_type == javm::program::CapEntryType::Code);
+            .find(|c| c.cap_type == javm_legacy::program::CapEntryType::Code);
         if let Some(cc) = code_cap {
-            let code_data = javm::program::cap_data(cc, parsed.data_section);
-            if let Some(code_blob) = javm::program::parse_code_blob(code_data) {
+            let code_data = javm_legacy::program::cap_data(cc, parsed.data_section);
+            if let Some(code_blob) = javm_legacy::program::parse_code_blob(code_data) {
                 let inst_count: usize = code_blob.bitmask.iter().filter(|&&b| b == 1).count();
                 eprintln!(
                     "javm:  code={} bytes, {} instructions",

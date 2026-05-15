@@ -37,14 +37,14 @@ pub fn build(validators: &[KeyId], accounts: &[(KeyId, u64)]) -> State {
     // runtime budget for save/free churn.
     let genesis_quota = state.insert_storage_quota(u64::MAX / 2);
 
-    let parsed = javm::program::parse_blob(crate::SIMPLE_CHAIN_BLOB)
+    let parsed = javm_legacy::program::parse_blob(crate::SIMPLE_CHAIN_BLOB)
         .expect("simple-chain JAR blob is well-formed");
     let code_entry = parsed
         .caps
         .iter()
-        .find(|e| matches!(e.cap_type, javm::program::CapEntryType::Code))
+        .find(|e| matches!(e.cap_type, javm_legacy::program::CapEntryType::Code))
         .expect("simple-chain blob has a CODE manifest entry");
-    let code_sub_blob = javm::program::cap_data(code_entry, parsed.data_section).to_vec();
+    let code_sub_blob = javm_legacy::program::cap_data(code_entry, parsed.data_section).to_vec();
     let code_byte_count = code_sub_blob.len() as u64;
     let code_id = state
         .intern_code(code_sub_blob, genesis_quota)
@@ -66,11 +66,11 @@ pub fn build(validators: &[KeyId], accounts: &[(KeyId, u64)]) -> State {
         })),
     );
     for entry in &parsed.caps {
-        if !matches!(entry.cap_type, javm::program::CapEntryType::Data) {
+        if !matches!(entry.cap_type, javm_legacy::program::CapEntryType::Data) {
             continue;
         }
         let initial = if entry.data_len > 0 {
-            javm::program::cap_data(entry, parsed.data_section).to_vec()
+            javm_legacy::program::cap_data(entry, parsed.data_section).to_vec()
         } else {
             Vec::new()
         };

@@ -26,10 +26,10 @@ use criterion::{Criterion, criterion_group, criterion_main};
 fn kernel_from_blob(
     blob: &[u8],
     gas: u64,
-    backend: javm::PvmBackend,
-) -> javm::kernel::InvocationKernel<u8> {
-    let artifacts = javm::kernel::cap_table_from_blob::<u8>(blob, backend, None).unwrap();
-    javm::kernel::InvocationKernel::new_from_artifacts(artifacts, gas, backend).unwrap()
+    backend: javm_legacy::PvmBackend,
+) -> javm_legacy::kernel::InvocationKernel<u8> {
+    let artifacts = javm_legacy::kernel::cap_table_from_blob::<u8>(blob, backend, None).unwrap();
+    javm_legacy::kernel::InvocationKernel::new_from_artifacts(artifacts, gas, backend).unwrap()
 }
 use javm_bench::*;
 
@@ -160,12 +160,18 @@ fn bench_standard(c: &mut Criterion, name: &str, javm_blob: &[u8], pvm_blob: &[u
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     group.bench_function("javm-recompiler-exec", |b| {
         b.iter_batched(
-            || kernel_from_blob(javm_blob, GAS_LIMIT, javm::PvmBackend::ForceRecompiler),
+            || {
+                kernel_from_blob(
+                    javm_blob,
+                    GAS_LIMIT,
+                    javm_legacy::PvmBackend::ForceRecompiler,
+                )
+            },
             |mut kernel| {
                 loop {
                     match kernel.run() {
-                        javm::kernel::KernelResult::Halt(v) => break v,
-                        javm::kernel::KernelResult::Fault(_) => continue,
+                        javm_legacy::kernel::KernelResult::Halt(v) => break v,
+                        javm_legacy::kernel::KernelResult::Fault(_) => continue,
                         other => panic!("unexpected: {:?}", other),
                     }
                 }
@@ -259,13 +265,21 @@ fn bench_ecrecover(c: &mut Criterion) {
 
     group.bench_function("javm-interpreter", |b| {
         b.iter(|| {
-            run_kernel_with_backend(javm_blob, ecrecover_gas, javm::PvmBackend::ForceInterpreter)
+            run_kernel_with_backend(
+                javm_blob,
+                ecrecover_gas,
+                javm_legacy::PvmBackend::ForceInterpreter,
+            )
         })
     });
 
     group.bench_function("javm-recompiler", |b| {
         b.iter(|| {
-            run_kernel_with_backend(javm_blob, ecrecover_gas, javm::PvmBackend::ForceRecompiler)
+            run_kernel_with_backend(
+                javm_blob,
+                ecrecover_gas,
+                javm_legacy::PvmBackend::ForceRecompiler,
+            )
         })
     });
 
@@ -275,7 +289,7 @@ fn bench_ecrecover(c: &mut Criterion) {
             std::hint::black_box(kernel_from_blob(
                 javm_blob,
                 ecrecover_gas,
-                javm::PvmBackend::ForceRecompiler,
+                javm_legacy::PvmBackend::ForceRecompiler,
             ));
         })
     });
@@ -283,13 +297,19 @@ fn bench_ecrecover(c: &mut Criterion) {
     // Execution-only: compile in setup, measure only execution.
     group.bench_function("javm-recompiler-exec", |b| {
         b.iter_batched(
-            || kernel_from_blob(javm_blob, ecrecover_gas, javm::PvmBackend::ForceRecompiler),
+            || {
+                kernel_from_blob(
+                    javm_blob,
+                    ecrecover_gas,
+                    javm_legacy::PvmBackend::ForceRecompiler,
+                )
+            },
             |mut kernel| {
                 loop {
                     match kernel.run() {
-                        javm::kernel::KernelResult::Halt(v) => break v,
-                        javm::kernel::KernelResult::Panic => break 0,
-                        javm::kernel::KernelResult::Fault(_) => continue,
+                        javm_legacy::kernel::KernelResult::Halt(v) => break v,
+                        javm_legacy::kernel::KernelResult::Panic => break 0,
+                        javm_legacy::kernel::KernelResult::Fault(_) => continue,
                         other => panic!("unexpected: {:?}", other),
                     }
                 }

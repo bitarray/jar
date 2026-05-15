@@ -133,7 +133,7 @@ pub trait Hardware: Send + Sync {
 pub struct NodeOffchain {
     pub subscriptions: BTreeSet<VaultId>,
     /// javm code-cache; reused across handle_inbound arrivals.
-    pub code_cache: javm::CodeCache,
+    pub code_cache: javm_legacy::CodeCache,
     /// Per-cycle pool (setScore max-register + collision-defer +
     /// MintSeenSet per dispatch endpoint).
     pub pool: crate::pool::CyclePool,
@@ -149,7 +149,7 @@ impl NodeOffchain {
     pub fn new() -> Self {
         Self {
             subscriptions: BTreeSet::new(),
-            code_cache: javm::CodeCache::new(),
+            code_cache: javm_legacy::CodeCache::new(),
             pool: crate::pool::CyclePool::default(),
         }
     }

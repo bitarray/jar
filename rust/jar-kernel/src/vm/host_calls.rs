@@ -35,7 +35,7 @@ use crate::vm::host_abi::{
     BARE_ATTESTATION_SCOPE_SLOT, RC_AUTHORITY, RC_BAD_CAP, RC_BAD_SIG, RC_OK, RC_QUOTA, RC_READONLY,
 };
 use crate::vm::{InvocationHost, Vm};
-use javm::cap::{CallOutcome, Cap};
+use javm_legacy::cap::{CallOutcome, Cap};
 
 /// Read the AttestationScope cap from BareFrame, if present.
 fn bare_attestation_scope(vm: &Vm) -> Option<AttestationScopeCap> {
@@ -248,15 +248,19 @@ pub fn host_open<H: Hardware>(vm: &mut Vm, host: &mut InvocationHost<'_, H>) -> 
     // earlier σ→ephemeral path.
     let bare_idx = vm.bare_frame_id.index();
     let bare_table = &mut vm.vm_arena.vm_mut(bare_idx).cap_table;
-    let untyped = match bare_table.get_mut(javm::kernel::BARE_FRAME_UNTYPED_SLOT) {
+    let untyped = match bare_table.get_mut(javm_legacy::kernel::BARE_FRAME_UNTYPED_SLOT) {
         Some(Cap::Untyped(u)) => u,
         _ => return rc(RC_BAD_CAP),
     };
-    let data_cap =
-        match javm::kernel::allocate_data_cap(&content, page_count, untyped, &mut vm.backing) {
-            Ok(d) => d,
-            Err(_) => return rc(RC_QUOTA),
-        };
+    let data_cap = match javm_legacy::kernel::allocate_data_cap(
+        &content,
+        page_count,
+        untyped,
+        &mut vm.backing,
+    ) {
+        Ok(d) => d,
+        Err(_) => return rc(RC_QUOTA),
+    };
 
     vm.cap_table_set(dst_slot, Cap::Data(data_cap));
     rc(RC_OK)

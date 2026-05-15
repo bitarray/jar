@@ -60,7 +60,7 @@ fn main() {
         run_with_timeout("javm-interpreter", move || {
             let t = Instant::now();
             let (result, gas_used) =
-                run_kernel_with_backend(blob, GAS, javm::PvmBackend::ForceInterpreter);
+                run_kernel_with_backend(blob, GAS, javm_legacy::PvmBackend::ForceInterpreter);
             eprintln!(
                 "{:20} {:>10.3} ms  a0={result} gas_used={gas_used} ({:.1}M inst)",
                 "javm-interpreter",
@@ -76,7 +76,7 @@ fn main() {
         run_with_timeout("javm-recompiler", move || {
             let t = Instant::now();
             let (result, gas_used) =
-                run_kernel_with_backend(blob, GAS, javm::PvmBackend::ForceRecompiler);
+                run_kernel_with_backend(blob, GAS, javm_legacy::PvmBackend::ForceRecompiler);
             eprintln!(
                 "{:20} {:>10.3} ms  a0={result} gas_used={gas_used}",
                 "javm-recompiler",

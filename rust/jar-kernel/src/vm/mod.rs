@@ -1,4 +1,4 @@
-//! Invocation driver for `javm::kernel::InvocationKernel<ProtocolCap>`.
+//! Invocation driver for `javm_legacy::kernel::InvocationKernel<ProtocolCap>`.
 //!
 //! `drive_invocation` runs a real PVM VM until terminal (Halt / Panic /
 //! PageFault / OutOfGas / host Fault). Host-call dispatch happens
@@ -31,11 +31,11 @@ pub mod vault_init;
 use crate::cap::{AttestCursor, ProtocolCap};
 use crate::runtime::Hardware;
 use crate::transact::ReachSet;
-use javm::cap::{CallOutcome, Cap, ProtocolCapHost};
+use javm_legacy::cap::{CallOutcome, Cap, ProtocolCapHost};
 
 /// Convenience alias: the `InvocationKernel` parameterized over the
 /// kernel's protocol-cap payload.
-pub type Vm = javm::kernel::InvocationKernel<ProtocolCap>;
+pub type Vm = javm_legacy::kernel::InvocationKernel<ProtocolCap>;
 
 /// Construct a fresh `Vm` ready to run `Vault.initialize` on the given
 /// home Vault. Walks `vault.slots` via [`vault_init::build_init_cap_table`],
@@ -58,7 +58,7 @@ pub fn new_vm_from_vault(
     vault_id: VaultId,
     gas: u64,
     memory_pages: u32,
-    code_cache: Option<&mut javm::CodeCache>,
+    code_cache: Option<&mut javm_legacy::CodeCache>,
     role: crate::types::KernelRole,
     attestation_scope: Option<crate::cap::AttestationScopeCap>,
 ) -> KResult<Vm> {
@@ -68,20 +68,20 @@ pub fn new_vm_from_vault(
         BARE_HOME_VAULT_SLOT, BARE_MINT_ATTEST_CAP_SLOT, BARE_OPEN_SLOT, BARE_SAVE_SLOT,
         BARE_SELF_ID_SLOT, BARE_SET_SCORE_SLOT,
     };
-    use javm::cap::Cap as JavmCap;
+    use javm_legacy::cap::Cap as JavmCap;
 
     let artifacts = vault_init::build_init_cap_table(
         state,
         vault_id,
         memory_pages,
         code_cache,
-        javm::PvmBackend::Default,
+        javm_legacy::PvmBackend::Default,
     )?;
 
-    let mut vm = javm::kernel::InvocationKernel::new_from_artifacts(
+    let mut vm = javm_legacy::kernel::InvocationKernel::new_from_artifacts(
         artifacts,
         gas,
-        javm::PvmBackend::Default,
+        javm_legacy::PvmBackend::Default,
     )
     .map_err(|e| KernelError::Internal(format!("javm init: {:?}", e)))?;
 
@@ -210,7 +210,7 @@ impl<H: Hardware> ProtocolCapHost<ProtocolCap> for InvocationHost<'_, H> {
 
     fn caller_cap_for(
         &mut self,
-        _caller_table: &javm::cap::CapTable<ProtocolCap>,
+        _caller_table: &javm_legacy::cap::CapTable<ProtocolCap>,
     ) -> Option<Cap<ProtocolCap>> {
         Some(Cap::Protocol(ProtocolCap::CallerVault(
             crate::cap::CallerVaultCap {
@@ -271,7 +271,7 @@ pub struct InvocationResult {
     /// Public Callable produced by `Vault.initialize`: the FrameRef at
     /// `BARE_ARG_SLOT` (the synchronous arg-in / result-out channel)
     /// after the init program halts.
-    pub initialize_callable: Option<javm::vm_pool::VmId>,
+    pub initialize_callable: Option<javm_legacy::vm_pool::VmId>,
 }
 
 impl InvocationResult {
@@ -303,26 +303,27 @@ pub fn drive_invocation<H: Hardware>(
     host: &mut InvocationHost<'_, H>,
 ) -> KResult<InvocationResult> {
     match vm.run_with_host(host) {
-        javm::kernel::KernelResult::Halt(rv) => {
+        javm_legacy::kernel::KernelResult::Halt(rv) => {
             // After the init program halts, recover any public Callable
             // it placed at the BareFrame ARG/RESULT slot. Empty /
             // non-FrameRef ⇒ `None`; not a fault.
-            let initialize_callable = match vm.read_bare_frame_slot(javm::kernel::BARE_ARG_SLOT) {
-                Some(javm::cap::Cap::FrameRef(f)) => Some(f.vm_id),
-                _ => None,
-            };
+            let initialize_callable =
+                match vm.read_bare_frame_slot(javm_legacy::kernel::BARE_ARG_SLOT) {
+                    Some(javm_legacy::cap::Cap::FrameRef(f)) => Some(f.vm_id),
+                    _ => None,
+                };
             Ok(InvocationResult {
                 halt_value: Some(rv),
                 fault: None,
                 initialize_callable,
             })
         }
-        javm::kernel::KernelResult::Panic => Ok(InvocationResult::fault("guest panic")),
-        javm::kernel::KernelResult::OutOfGas => Err(KernelError::OutOfGas),
-        javm::kernel::KernelResult::PageFault(addr) => Ok(InvocationResult::fault(format!(
+        javm_legacy::kernel::KernelResult::Panic => Ok(InvocationResult::fault("guest panic")),
+        javm_legacy::kernel::KernelResult::OutOfGas => Err(KernelError::OutOfGas),
+        javm_legacy::kernel::KernelResult::PageFault(addr) => Ok(InvocationResult::fault(format!(
             "page fault at {:#x}",
             addr
         ))),
-        javm::kernel::KernelResult::Fault(reason) => Ok(InvocationResult::fault(reason)),
+        javm_legacy::kernel::KernelResult::Fault(reason) => Ok(InvocationResult::fault(reason)),
     }
 }

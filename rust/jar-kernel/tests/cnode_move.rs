@@ -269,7 +269,7 @@ fn is_empty_reports_slot_state() {
 
 #[test]
 fn vault_ref_with_read_announces_foreign_frame() {
-    use javm::cap::ProtocolCap as _;
+    use javm_legacy::cap::ProtocolCap as _;
     let cap = ProtocolCap::Reg(RegCap::VaultRef(VaultRefCap {
         vault_id: VaultId(42),
         rights: VaultRights::ALL,
@@ -281,7 +281,7 @@ fn vault_ref_with_read_announces_foreign_frame() {
 
 #[test]
 fn vault_ref_without_read_does_not_announce_foreign_frame() {
-    use javm::cap::ProtocolCap as _;
+    use javm_legacy::cap::ProtocolCap as _;
     let cap = ProtocolCap::Reg(RegCap::VaultRef(VaultRefCap {
         vault_id: VaultId(42),
         rights: VaultRights::INITIALIZE,

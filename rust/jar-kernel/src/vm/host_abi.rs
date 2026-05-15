@@ -98,7 +98,7 @@ pub const BARE_CALLER_KERNEL_SLOT: u8 = 8;
 
 // Per-invocation `UntypedCap` lives at javm's `BARE_FRAME_UNTYPED_SLOT`
 // (slot 9), placed by `new_from_artifacts` and pinned. Address it via
-// `javm::kernel::BARE_FRAME_UNTYPED_SLOT` directly.
+// `javm_legacy::kernel::BARE_FRAME_UNTYPED_SLOT` directly.
 
 /// BareFrame slot holding the SelfId cap — the running VM's
 /// own VaultId.

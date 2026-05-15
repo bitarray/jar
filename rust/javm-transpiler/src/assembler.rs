@@ -864,10 +864,11 @@ mod tests {
         let blob = build_sample_service();
         assert!(!blob.is_empty());
         // Verify it can be loaded by kernel
-        let backend = javm::PvmBackend::Default;
-        let kernel = javm::kernel::cap_table_from_blob::<u8>(&blob, backend, None).and_then(|a| {
-            javm::kernel::InvocationKernel::new_from_artifacts(a, 1_000_000, backend)
-        });
+        let backend = javm_legacy::PvmBackend::Default;
+        let kernel =
+            javm_legacy::kernel::cap_table_from_blob::<u8>(&blob, backend, None).and_then(|a| {
+                javm_legacy::kernel::InvocationKernel::new_from_artifacts(a, 1_000_000, backend)
+            });
         assert!(
             kernel.is_ok(),
             "Sample service blob should be loadable: {:?}",
@@ -879,14 +880,17 @@ mod tests {
     fn test_sample_service_runs_via_kernel() {
         let blob = build_sample_service();
         // Kernel runs single entrypoint at PC=0.
-        let artifacts =
-            javm::kernel::cap_table_from_blob::<u8>(&blob, javm::PvmBackend::Default, None)
-                .expect("cap_table_from_blob ok");
-        let mut kernel: javm::kernel::InvocationKernel =
-            javm::kernel::InvocationKernel::new_from_artifacts(
+        let artifacts = javm_legacy::kernel::cap_table_from_blob::<u8>(
+            &blob,
+            javm_legacy::PvmBackend::Default,
+            None,
+        )
+        .expect("cap_table_from_blob ok");
+        let mut kernel: javm_legacy::kernel::InvocationKernel =
+            javm_legacy::kernel::InvocationKernel::new_from_artifacts(
                 artifacts,
                 1_000_000,
-                javm::PvmBackend::Default,
+                javm_legacy::PvmBackend::Default,
             )
             .expect("should initialize");
         let result = kernel.run();
@@ -894,7 +898,8 @@ mod tests {
         // should either halt or panic (depending on the dispatch stub).
         // either halt or panic (depending on the dispatch stub).
         match result {
-            javm::kernel::KernelResult::Halt(_) | javm::kernel::KernelResult::Panic => {}
+            javm_legacy::kernel::KernelResult::Halt(_)
+            | javm_legacy::kernel::KernelResult::Panic => {}
             other => panic!("Expected Halt or Panic, got {:?}", other),
         }
     }

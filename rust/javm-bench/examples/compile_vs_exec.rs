@@ -19,18 +19,21 @@ fn main() {
     let mut exec_us = Vec::new();
     for _ in 0..ITERS {
         let t0 = Instant::now();
-        let backend = javm::PvmBackend::ForceRecompiler;
-        let artifacts = javm::kernel::cap_table_from_blob::<u8>(&sort_blob, backend, None).unwrap();
-        let mut kernel: javm::kernel::InvocationKernel =
-            javm::kernel::InvocationKernel::new_from_artifacts(artifacts, GAS_LIMIT, backend)
-                .unwrap();
+        let backend = javm_legacy::PvmBackend::ForceRecompiler;
+        let artifacts =
+            javm_legacy::kernel::cap_table_from_blob::<u8>(&sort_blob, backend, None).unwrap();
+        let mut kernel: javm_legacy::kernel::InvocationKernel =
+            javm_legacy::kernel::InvocationKernel::new_from_artifacts(
+                artifacts, GAS_LIMIT, backend,
+            )
+            .unwrap();
         compile_us.push(t0.elapsed().as_micros());
 
         let t1 = Instant::now();
         loop {
             match kernel.run() {
-                javm::kernel::KernelResult::Halt(_) => break,
-                javm::kernel::KernelResult::Fault(_) => continue,
+                javm_legacy::kernel::KernelResult::Halt(_) => break,
+                javm_legacy::kernel::KernelResult::Fault(_) => continue,
                 other => panic!("javm: {:?}", other),
             }
         }

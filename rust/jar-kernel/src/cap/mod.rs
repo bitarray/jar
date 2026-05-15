@@ -1,7 +1,7 @@
 //! Capabilities — the `RegCap` enum (cap shapes occupying
 //! `vault.slots`), the `ProtocolCap` enum (jar-kernel's impl of
-//! `javm::ProtocolCap`), and the `Cap` alias (the complete Frame cap
-//! type `javm::Cap<ProtocolCap>` — what's actually in a cap-table cell).
+//! `javm_legacy::ProtocolCap`), and the `Cap` alias (the complete Frame cap
+//! type `javm_legacy::Cap<ProtocolCap>` — what's actually in a cap-table cell).
 //!
 //! The persistence boundary is explicit:
 //! - every `RegCap` embeds into a Frame [`Cap`];
@@ -21,7 +21,7 @@ pub use regcap::*;
 /// Pattern-match on this when inspecting slot contents; reach for
 /// `ProtocolCap` only when you've already destructured the `Protocol`
 /// arm.
-pub type Cap = javm::cap::Cap<ProtocolCap>;
+pub type Cap = javm_legacy::cap::Cap<ProtocolCap>;
 
 /// Error returned when attempting to persist a Frame cap whose referent
 /// is invocation-local or otherwise not a Vault-storable `RegCap`.
@@ -104,10 +104,10 @@ mod tests {
                 key: KeyId::from_bytes(b"k"),
                 blob_hash: Hash::ZERO,
             })),
-            Cap::Untyped(javm::cap::UntypedCap::new(1)),
-            Cap::Data(javm::cap::DataCap::new(0, 1)),
-            Cap::Gas(javm::cap::GasCap { remaining: 1 }),
-            Cap::CNode(Box::<javm::cap::CapTable<ProtocolCap>>::default()),
+            Cap::Untyped(javm_legacy::cap::UntypedCap::new(1)),
+            Cap::Data(javm_legacy::cap::DataCap::new(0, 1)),
+            Cap::Gas(javm_legacy::cap::GasCap { remaining: 1 }),
+            Cap::CNode(Box::<javm_legacy::cap::CapTable<ProtocolCap>>::default()),
         ];
 
         for cap in &frame_only {

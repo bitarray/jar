@@ -152,7 +152,7 @@ pub fn map_args(args_len: u64) -> &'static [u8] {
     let args_base_page = args_base_addr / 4096;
     let page_count = args_len.div_ceil(4096);
 
-    // Cap-ref encoding (see `javm::kernel::resolve_cap_ref`):
+    // Cap-ref encoding (see `javm_legacy::kernel::resolve_cap_ref`):
     //   - direct slot N in the active VM:    `N` (8 bits)
     //   - slot N in the bare Frame:          `N << 8` (cross slot 0
     //     of active VM to bare Frame, then access slot N)

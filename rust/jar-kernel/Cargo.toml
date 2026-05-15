@@ -6,7 +6,7 @@ license.workspace = true
 description = "JAR minimum-kernel: capability-based microkernel implementation."
 
 [dependencies]
-javm = { workspace = true }
+javm-legacy = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 blake2 = { workspace = true }

@@ -12,7 +12,7 @@ polkavm-generic-sandbox = ["polkavm/generic-sandbox"]
 [dependencies]
 # for the entire workspace, preventing `cargo test --workspace` from testing
 # when running benchmarks.
-javm = { workspace = true }
+javm-legacy = { workspace = true }
 javm-exec = { workspace = true }
 javm-transpiler = { workspace = true }
 polkavm = "0.32.0"

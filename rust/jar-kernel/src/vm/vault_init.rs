@@ -37,14 +37,14 @@
 
 use std::sync::Arc;
 
-use javm::cap::CapTable;
+use javm_legacy::cap::CapTable;
 
 use crate::cap::{Cap, Image, ProtocolCap};
 use crate::types::{KResult, KernelError, RegCap, State, VaultId};
 
-/// Pre-built input to `javm::kernel::InvocationKernel::new_from_artifacts`,
+/// Pre-built input to `javm_legacy::kernel::InvocationKernel::new_from_artifacts`,
 /// produced by walking an `Image`'s slots.
-pub type InitArtifacts = javm::kernel::InvocationArtifacts<ProtocolCap>;
+pub type InitArtifacts = javm_legacy::kernel::InvocationArtifacts<ProtocolCap>;
 
 /// Layer-2 spawn primitive — clone an Image into a fresh VM
 /// CapTable. Used by `vault.initialize` (kernel-driven) and
@@ -64,10 +64,10 @@ pub fn instantiate_from_image(
     state: &State,
     image: &Image,
     memory_pages: u32,
-    code_cache: Option<&mut javm::CodeCache>,
-    backend: javm::PvmBackend,
+    code_cache: Option<&mut javm_legacy::CodeCache>,
+    backend: javm_legacy::PvmBackend,
 ) -> KResult<InitArtifacts> {
-    let mem_cycles = javm::compute_mem_cycles(memory_pages);
+    let mem_cycles = javm_legacy::compute_mem_cycles(memory_pages);
 
     if image.slots.get(0).is_some() {
         return Err(KernelError::Internal(
@@ -76,10 +76,10 @@ pub fn instantiate_from_image(
         ));
     }
 
-    let mut backing = javm::backing::BackingStore::new(memory_pages).ok_or_else(|| {
+    let mut backing = javm_legacy::backing::BackingStore::new(memory_pages).ok_or_else(|| {
         KernelError::Internal(format!("BackingStore::new({}) failed", memory_pages))
     })?;
-    let mut untyped = javm::cap::UntypedCap::new(memory_pages);
+    let mut untyped = javm_legacy::cap::UntypedCap::new(memory_pages);
 
     let mut cap_table: CapTable<ProtocolCap> = CapTable::new();
     let init_reg = image.slots.get(image.init_cap).ok_or_else(|| {
@@ -98,7 +98,7 @@ pub fn instantiate_from_image(
         }
     };
 
-    let mut code_caps: Vec<Arc<javm::cap::CodeCap>> = Vec::new();
+    let mut code_caps: Vec<Arc<javm_legacy::cap::CodeCap>> = Vec::new();
     let init_code_id = compile_persistent_code(
         state,
         init_code,
@@ -136,8 +136,8 @@ pub fn build_init_cap_table(
     state: &State,
     vault_id: VaultId,
     memory_pages: u32,
-    code_cache: Option<&mut javm::CodeCache>,
-    backend: javm::PvmBackend,
+    code_cache: Option<&mut javm_legacy::CodeCache>,
+    backend: javm_legacy::PvmBackend,
 ) -> KResult<InitArtifacts> {
     let vault = state.vault(vault_id)?;
     let image = state.images.get(&vault.image_id).ok_or_else(|| {
@@ -152,15 +152,15 @@ pub fn build_init_cap_table(
 fn compile_persistent_code(
     state: &State,
     cap: crate::cap::CodeCap,
-    code_caps: &mut Vec<Arc<javm::cap::CodeCap>>,
+    code_caps: &mut Vec<Arc<javm_legacy::cap::CodeCap>>,
     mem_cycles: u8,
-    backend: javm::PvmBackend,
-    code_cache: Option<&mut javm::CodeCache>,
+    backend: javm_legacy::PvmBackend,
+    code_cache: Option<&mut javm_legacy::CodeCache>,
 ) -> KResult<u16> {
-    if code_caps.len() >= javm::vm_pool::MAX_CODE_CAPS {
+    if code_caps.len() >= javm_legacy::vm_pool::MAX_CODE_CAPS {
         return Err(KernelError::Internal(format!(
             "vault holds more than {} CodeCap entries",
-            javm::vm_pool::MAX_CODE_CAPS
+            javm_legacy::vm_pool::MAX_CODE_CAPS
         )));
     }
     let entry = state.code_blobs.get(&cap.code_id).ok_or_else(|| {
@@ -171,7 +171,7 @@ fn compile_persistent_code(
     })?;
     let id = code_caps.len() as u16;
     let code_cap =
-        javm::kernel::compile_code_blob(&entry.blob, id, mem_cycles, backend, code_cache)
+        javm_legacy::kernel::compile_code_blob(&entry.blob, id, mem_cycles, backend, code_cache)
             .map_err(|e| KernelError::Internal(format!("compile_code_blob: {:?}", e)))?;
     code_caps.push(Arc::clone(&code_cap));
     Ok(id)
@@ -180,8 +180,8 @@ fn compile_persistent_code(
 fn materialize_image_file(
     state: &State,
     cap: &crate::cap::FileCap,
-    untyped: &mut javm::cap::UntypedCap,
-    backing: &mut javm::backing::BackingStore,
+    untyped: &mut javm_legacy::cap::UntypedCap,
+    backing: &mut javm_legacy::backing::BackingStore,
 ) -> KResult<Cap> {
     let entry = state.data_blobs.get(&cap.file_id).ok_or_else(|| {
         KernelError::Internal(format!(
@@ -190,7 +190,7 @@ fn materialize_image_file(
         ))
     })?;
     let data_cap =
-        javm::kernel::allocate_data_cap(&entry.content, entry.page_count, untyped, backing)
+        javm_legacy::kernel::allocate_data_cap(&entry.content, entry.page_count, untyped, backing)
             .map_err(|e| KernelError::Internal(format!("allocate_data_cap: {:?}", e)))?;
     Ok(Cap::Data(data_cap))
 }
@@ -221,13 +221,13 @@ mod tests {
     /// the CODE manifest entry of jar-kernel's halt smoke fixture.
     fn halt_code_sub_blob() -> Vec<u8> {
         let blob = crate::genesis::halt_blob();
-        let parsed = javm::program::parse_blob(blob).expect("parse halt_blob");
+        let parsed = javm_legacy::program::parse_blob(blob).expect("parse halt_blob");
         let code_entry = parsed
             .caps
             .iter()
-            .find(|e| matches!(e.cap_type, javm::program::CapEntryType::Code))
+            .find(|e| matches!(e.cap_type, javm_legacy::program::CapEntryType::Code))
             .expect("no CODE entry in halt_blob");
-        javm::program::cap_data(code_entry, parsed.data_section).to_vec()
+        javm_legacy::program::cap_data(code_entry, parsed.data_section).to_vec()
     }
 
     /// Build a State with a "genesis" QuotaEntry and intern the halt
@@ -256,7 +256,7 @@ mod tests {
             &image,
             TEST_MEM_PAGES,
             None,
-            javm::PvmBackend::Default,
+            javm_legacy::PvmBackend::Default,
         )
         .unwrap();
 
@@ -289,7 +289,7 @@ mod tests {
             &image,
             TEST_MEM_PAGES,
             None,
-            javm::PvmBackend::Default,
+            javm_legacy::PvmBackend::Default,
         )
         .unwrap();
         match artifacts.cap_table.get(100) {
@@ -328,7 +328,7 @@ mod tests {
             &image,
             TEST_MEM_PAGES,
             None,
-            javm::PvmBackend::Default,
+            javm_legacy::PvmBackend::Default,
         )
         .unwrap();
         match artifacts.cap_table.get(65) {
@@ -351,7 +351,7 @@ mod tests {
             &image,
             TEST_MEM_PAGES,
             None,
-            javm::PvmBackend::Default,
+            javm_legacy::PvmBackend::Default,
         )
         .err()
         .expect("error expected");
@@ -376,7 +376,7 @@ mod tests {
             &image,
             TEST_MEM_PAGES,
             None,
-            javm::PvmBackend::Default,
+            javm_legacy::PvmBackend::Default,
         )
         .err()
         .expect("error expected");
@@ -392,7 +392,7 @@ mod tests {
             &image,
             TEST_MEM_PAGES,
             None,
-            javm::PvmBackend::Default,
+            javm_legacy::PvmBackend::Default,
         )
         .err()
         .expect("error expected");
@@ -420,7 +420,7 @@ mod tests {
             vault_id,
             TEST_MEM_PAGES,
             None,
-            javm::PvmBackend::Default,
+            javm_legacy::PvmBackend::Default,
         )
         .unwrap();
         assert!(matches!(

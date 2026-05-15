@@ -1,6 +1,6 @@
-//! `ProtocolCap` — jar-kernel's impl of `javm::ProtocolCap`. The
-//! payload of `javm::Cap::Protocol(_)`. The complete Frame cap type
-//! (`javm::Cap<ProtocolCap>`) is exported as `crate::cap::Cap`.
+//! `ProtocolCap` — jar-kernel's impl of `javm_legacy::ProtocolCap`. The
+//! payload of `javm_legacy::Cap::Protocol(_)`. The complete Frame cap type
+//! (`javm_legacy::Cap<ProtocolCap>`) is exported as `crate::cap::Cap`.
 //!
 //! Each variant is one concrete JAR-specific payload that can occupy
 //! the `Protocol(_)` arm of a Frame cap-table slot.
@@ -23,7 +23,7 @@ use crate::cap::{
     RegCap, SelfCap, VaultRights,
 };
 use crate::types::VaultId;
-use javm::cap::ProtocolCap as ProtocolCapT;
+use javm_legacy::cap::ProtocolCap as ProtocolCapT;
 
 /// Cursor into a trace slice. Used for both per-event and block-level
 /// trace consumption during verify. Stage D wires it; today it is a
@@ -46,7 +46,7 @@ impl AttestCursor {
 pub const KERNEL_CAP_SLOT: u8 = 32;
 
 /// The protocol-cap payload type jar-kernel substitutes into
-/// `javm::Cap::Protocol(_)`. See module-level docs.
+/// `javm_legacy::Cap::Protocol(_)`. See module-level docs.
 ///
 /// Host-call variants (`EmitEvent`, `MintAttestCap`, `SetScore`) are
 /// placed in cap-table slots at invocation init. An `ecalli` from the

@@ -17,7 +17,7 @@ fn bench_fib_recur(c: &mut Criterion) {
 
     // Validate correctness before benchmarking
     let (result, gas_used, vm_count) =
-        run_fib_recur_with_backend(&blob, n, gas, javm::PvmBackend::Default);
+        run_fib_recur_with_backend(&blob, n, gas, javm_legacy::PvmBackend::Default);
     assert_eq!(result, 6765, "fib(20) should be 6765");
     eprintln!("fib_recur({n}): result={result} gas_used={gas_used} vms={vm_count}");
 
@@ -25,11 +25,15 @@ fn bench_fib_recur(c: &mut Criterion) {
     group.sample_size(10);
 
     group.bench_function("javm-interpreter", |b| {
-        b.iter(|| run_fib_recur_with_backend(&blob, n, gas, javm::PvmBackend::ForceInterpreter))
+        b.iter(|| {
+            run_fib_recur_with_backend(&blob, n, gas, javm_legacy::PvmBackend::ForceInterpreter)
+        })
     });
 
     group.bench_function("javm-recompiler", |b| {
-        b.iter(|| run_fib_recur_with_backend(&blob, n, gas, javm::PvmBackend::ForceRecompiler))
+        b.iter(|| {
+            run_fib_recur_with_backend(&blob, n, gas, javm_legacy::PvmBackend::ForceRecompiler)
+        })
     });
 
     group.finish();

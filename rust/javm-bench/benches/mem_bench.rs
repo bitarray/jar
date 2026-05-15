@@ -40,10 +40,10 @@ const SIZES: &[(&str, u64)] = &[
 ];
 
 /// Initialize a kernel for the given blob.
-fn init_kernel(blob: &[u8], gas: u64) -> javm::kernel::InvocationKernel {
-    let backend = javm::PvmBackend::ForceRecompiler;
-    let artifacts = javm::kernel::cap_table_from_blob::<u8>(blob, backend, None).unwrap();
-    javm::kernel::InvocationKernel::new_from_artifacts(artifacts, gas, backend).unwrap()
+fn init_kernel(blob: &[u8], gas: u64) -> javm_legacy::kernel::InvocationKernel {
+    let backend = javm_legacy::PvmBackend::ForceRecompiler;
+    let artifacts = javm_legacy::kernel::cap_table_from_blob::<u8>(blob, backend, None).unwrap();
+    javm_legacy::kernel::InvocationKernel::new_from_artifacts(artifacts, gas, backend).unwrap()
 }
 
 fn bench_mem_seq(c: &mut Criterion) {
@@ -61,8 +61,8 @@ fn bench_mem_seq(c: &mut Criterion) {
                 |mut kernel| {
                     loop {
                         match kernel.run() {
-                            javm::kernel::KernelResult::Halt(v) => break v,
-                            javm::kernel::KernelResult::Fault(_) => continue,
+                            javm_legacy::kernel::KernelResult::Halt(v) => break v,
+                            javm_legacy::kernel::KernelResult::Fault(_) => continue,
                             other => panic!("unexpected: {:?}", other),
                         }
                     }
@@ -89,8 +89,8 @@ fn bench_mem_rand(c: &mut Criterion) {
                 |mut kernel| {
                     loop {
                         match kernel.run() {
-                            javm::kernel::KernelResult::Halt(v) => break v,
-                            javm::kernel::KernelResult::Fault(_) => continue,
+                            javm_legacy::kernel::KernelResult::Halt(v) => break v,
+                            javm_legacy::kernel::KernelResult::Fault(_) => continue,
                             other => panic!("unexpected: {:?}", other),
                         }
                     }

@@ -23,7 +23,7 @@ Useful single-crate runs:
 
 ```bash
 cargo test -p jar-kernel                            # kernel unit + integration tests
-cargo test -p javm                                  # javm unit tests
+cargo test -p javm-legacy                           # legacy (v2) javm unit tests
 cargo test -p javm-guest-tests                      # javm guest conformance vectors
 ```
 

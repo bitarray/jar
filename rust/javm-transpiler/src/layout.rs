@@ -22,7 +22,7 @@
 //! itself (see `javm_builtins::map_args`). Args is not in the
 //! manifest and not in `ProgramLayout`.
 
-use javm::cap::Access;
+use javm_legacy::cap::Access;
 
 /// Cap index of the CODE cap in transpiler-emitted blobs. Matches the
 /// JAR `init_cap` field.
@@ -197,7 +197,7 @@ const PVM_OPCODE_ECALL: u8 = 3;
 const PVM_OPCODE_MOVE_REG: u8 = 100;
 /// Stack-pointer register.
 const SP_REG: u8 = 1;
-/// `ecall_map` argument register layout (mirrors `javm::kernel::ecall_map`).
+/// `ecall_map` argument register layout (mirrors `javm_legacy::kernel::ecall_map`).
 const ARG_REG_BASE_OFFSET: u8 = 7;
 const ARG_REG_PAGE_OFFSET: u8 = 8;
 const ARG_REG_PAGE_COUNT: u8 = 9;
@@ -284,7 +284,12 @@ fn emit_mgmt_map(code: &mut Vec<u8>, bitmask: &mut Vec<u8>, entry: &DataCapEntry
     emit_load_imm_64(code, bitmask, ARG_REG_PAGE_OFFSET, 0);
     emit_load_imm_64(code, bitmask, ARG_REG_PAGE_COUNT, page_count as u64);
     emit_load_imm_64(code, bitmask, ARG_REG_ACCESS, access_word);
-    emit_load_imm_64(code, bitmask, ARG_REG_OP, javm::kernel::MGMT_MAP as u64);
+    emit_load_imm_64(
+        code,
+        bitmask,
+        ARG_REG_OP,
+        javm_legacy::kernel::MGMT_MAP as u64,
+    );
     // φ[12] = (subject_ref << 32) | object_ref. The kernel reads:
     //   subject_ref = (φ[12] >> 32) as u32
     //   object_ref  = (φ[12] & 0xFFFFFFFF) as u32
@@ -307,7 +312,7 @@ fn emit_mgmt_map(code: &mut Vec<u8>, bitmask: &mut Vec<u8>, entry: &DataCapEntry
 ///
 /// The prologue does **not** touch the args DATA cap. Args bytes (if
 /// any) sit at bare-Frame slot 4, placed there by
-/// [`javm::kernel::InvocationKernel::set_args`]. The guest is
+/// [`javm_legacy::kernel::InvocationKernel::set_args`]. The guest is
 /// responsible for MOVE-ing the cap into its main-frame CapTable
 /// and MGMT_MAP-ing it (see `javm_builtins::map_args`).
 ///

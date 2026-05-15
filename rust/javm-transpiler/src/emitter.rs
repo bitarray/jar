@@ -132,7 +132,7 @@ pub fn build_service_program(
     memory_pages: u32,
 ) -> Vec<u8> {
     use crate::layout::{CODE_CAP_INDEX, PVM_PAGE_SIZE, ProgramLayout, emit_prologue};
-    use javm::program::{CapEntryType, CapManifestEntry, build_blob};
+    use javm_legacy::program::{CapEntryType, CapManifestEntry, build_blob};
 
     // Compute the shared layout so the prologue and the manifest agree
     // on which slot each DATA cap lives at.
@@ -252,10 +252,12 @@ mod tests {
 
     #[test]
     fn test_build_v2_minimal() {
-        let blob = javm::program::build_simple_blob(&[0, 1, 0], &[1, 1, 1], &[]);
-        let backend = javm::PvmBackend::Default;
-        let kernel = javm::kernel::cap_table_from_blob::<u8>(&blob, backend, None)
-            .and_then(|a| javm::kernel::InvocationKernel::new_from_artifacts(a, 100_000, backend));
+        let blob = javm_legacy::program::build_simple_blob(&[0, 1, 0], &[1, 1, 1], &[]);
+        let backend = javm_legacy::PvmBackend::Default;
+        let kernel =
+            javm_legacy::kernel::cap_table_from_blob::<u8>(&blob, backend, None).and_then(|a| {
+                javm_legacy::kernel::InvocationKernel::new_from_artifacts(a, 100_000, backend)
+            });
         assert!(
             kernel.is_ok(),
             "blob should be loadable: {:?}",
@@ -268,9 +270,11 @@ mod tests {
         let code = vec![0, 1, 0]; // trap, fallthrough, trap
         let bitmask = vec![1, 1, 1];
         let blob = build_service_program(&code, &bitmask, &[], &[], &[], 1, 0, 4);
-        let backend = javm::PvmBackend::Default;
-        let kernel = javm::kernel::cap_table_from_blob::<u8>(&blob, backend, None)
-            .and_then(|a| javm::kernel::InvocationKernel::new_from_artifacts(a, 100_000, backend));
+        let backend = javm_legacy::PvmBackend::Default;
+        let kernel =
+            javm_legacy::kernel::cap_table_from_blob::<u8>(&blob, backend, None).and_then(|a| {
+                javm_legacy::kernel::InvocationKernel::new_from_artifacts(a, 100_000, backend)
+            });
         assert!(
             kernel.is_ok(),
             "service blob should be loadable: {:?}",

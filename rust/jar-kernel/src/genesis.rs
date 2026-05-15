@@ -124,13 +124,13 @@ impl GenesisBuilder {
 /// is explicit.)
 fn register_image_for_blob(state: &mut State, jar_blob: &[u8], quota_id: QuotaId) -> ImageId {
     let parsed =
-        javm::program::parse_blob(jar_blob).expect("genesis blob is a well-formed JAR blob");
+        javm_legacy::program::parse_blob(jar_blob).expect("genesis blob is a well-formed JAR blob");
     let code_entry = parsed
         .caps
         .iter()
-        .find(|e| matches!(e.cap_type, javm::program::CapEntryType::Code))
+        .find(|e| matches!(e.cap_type, javm_legacy::program::CapEntryType::Code))
         .expect("genesis blob has at least one CODE manifest entry");
-    let code_sub_blob = javm::program::cap_data(code_entry, parsed.data_section).to_vec();
+    let code_sub_blob = javm_legacy::program::cap_data(code_entry, parsed.data_section).to_vec();
     let byte_count = code_sub_blob.len() as u64;
     let code_id = state
         .intern_code(code_sub_blob, quota_id)

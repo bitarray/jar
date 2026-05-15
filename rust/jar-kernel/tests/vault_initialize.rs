@@ -21,13 +21,13 @@ const TEST_MEM_PAGES: u32 = 16;
 /// the CODE manifest entry of jar-kernel's halt smoke fixture.
 fn halt_code_sub_blob() -> Vec<u8> {
     let blob = jar_kernel::genesis::halt_blob();
-    let parsed = javm::program::parse_blob(blob).expect("parse halt_blob");
+    let parsed = javm_legacy::program::parse_blob(blob).expect("parse halt_blob");
     let code_entry = parsed
         .caps
         .iter()
-        .find(|e| matches!(e.cap_type, javm::program::CapEntryType::Code))
+        .find(|e| matches!(e.cap_type, javm_legacy::program::CapEntryType::Code))
         .expect("no CODE entry in halt_blob");
-    javm::program::cap_data(code_entry, parsed.data_section).to_vec()
+    javm_legacy::program::cap_data(code_entry, parsed.data_section).to_vec()
 }
 
 fn vault_with_init_code() -> (State, VaultId) {
@@ -80,9 +80,11 @@ fn new_vm_from_vault_smoke_test() {
     // compiled code is in vm.code_caps and selected by init_code_id.
     assert!(matches!(
         vm.vm_arena.vm(0).cap_table.get(INIT_SLOT),
-        Some(javm::cap::Cap::Protocol(ProtocolCap::Reg(RegCap::Code(_))))
+        Some(javm_legacy::cap::Cap::Protocol(ProtocolCap::Reg(
+            RegCap::Code(_)
+        )))
     ));
-    let executable = javm::cap::Cap::Code(vm.code_caps[0].clone());
+    let executable = javm_legacy::cap::Cap::Code(vm.code_caps[0].clone());
     assert!(
         RegCap::try_from(&executable).is_err(),
         "executable Cap::Code is frame-only and must not persist"
@@ -110,17 +112,17 @@ fn initialize_callable_slot_read_returns_some_when_present() {
     .unwrap();
     let bare_idx = vm.bare_frame_id.index();
     let bare_id = vm.bare_frame_id;
-    let frame_ref = javm::cap::FrameRefCap {
+    let frame_ref = javm_legacy::cap::FrameRefCap {
         vm_id: bare_id,
-        rights: javm::cap::FrameRefRights::CALLABLE,
+        rights: javm_legacy::cap::FrameRefRights::CALLABLE,
     };
     vm.vm_arena.vm_mut(bare_idx).cap_table.set(
-        javm::kernel::BARE_ARG_SLOT,
-        javm::cap::Cap::FrameRef(frame_ref),
+        javm_legacy::kernel::BARE_ARG_SLOT,
+        javm_legacy::cap::Cap::FrameRef(frame_ref),
     );
-    let read = vm.read_bare_frame_slot(javm::kernel::BARE_ARG_SLOT);
+    let read = vm.read_bare_frame_slot(javm_legacy::kernel::BARE_ARG_SLOT);
     match read {
-        Some(javm::cap::Cap::FrameRef(f)) => assert_eq!(f.vm_id, bare_id),
+        Some(javm_legacy::cap::Cap::FrameRef(f)) => assert_eq!(f.vm_id, bare_id),
         other => panic!("expected FrameRef at BARE_ARG_SLOT, got {:?}", other),
     }
 }
@@ -139,7 +141,7 @@ fn initialize_callable_none_when_slot_empty() {
     )
     .unwrap();
     assert!(
-        vm.read_bare_frame_slot(javm::kernel::BARE_ARG_SLOT)
+        vm.read_bare_frame_slot(javm_legacy::kernel::BARE_ARG_SLOT)
             .is_none()
     );
 }
@@ -176,9 +178,9 @@ fn set_args_places_data_cap_at_bare_frame_slot_4() {
         .vm_arena
         .vm(bare_idx)
         .cap_table
-        .get(javm::kernel::BARE_ARG_SLOT)
+        .get(javm_legacy::kernel::BARE_ARG_SLOT)
     {
-        Some(javm::cap::Cap::Data(d)) => {
+        Some(javm_legacy::cap::Cap::Data(d)) => {
             assert_eq!(d.page_count, 1, "11 bytes fits in 1 page");
             assert!(
                 d.active_in.is_none(),
@@ -210,7 +212,7 @@ fn set_args_rejects_double_call() {
 
     vm.set_args(b"first").expect("first set_args ok");
     let err = vm.set_args(b"second").expect_err("second set_args fails");
-    assert!(matches!(err, javm::kernel::KernelError::InvalidBlob));
+    assert!(matches!(err, javm_legacy::kernel::KernelError::InvalidBlob));
 }
 
 #[test]

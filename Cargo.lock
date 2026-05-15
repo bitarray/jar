@@ -826,7 +826,7 @@ dependencies = [
  "build-javm",
  "ed25519-dalek",
  "jar-kernel",
- "javm",
+ "javm-legacy",
  "rand 0.8.5",
 ]
 
@@ -837,7 +837,7 @@ dependencies = [
  "blake2",
  "build-javm",
  "ed25519-dalek",
- "javm",
+ "javm-legacy",
  "rand 0.8.5",
  "thiserror 2.0.18",
  "tracing",
@@ -848,27 +848,14 @@ name = "jar-test-halt"
 version = "0.1.0"
 
 [[package]]
-name = "javm"
-version = "0.4.0"
-dependencies = [
- "blake2",
- "libc",
- "memoffset",
- "proptest",
- "scale",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
 name = "javm-bench"
 version = "0.1.0"
 dependencies = [
  "build-javm",
  "build-pvm",
  "criterion",
- "javm",
  "javm-exec",
+ "javm-legacy",
  "javm-transpiler",
  "k256",
  "libc",
@@ -896,17 +883,30 @@ version = "0.1.0"
 dependencies = [
  "blake2",
  "build-javm",
- "javm",
  "javm-builtins",
+ "javm-legacy",
  "javm-transpiler",
  "sha3",
+]
+
+[[package]]
+name = "javm-legacy"
+version = "0.4.0"
+dependencies = [
+ "blake2",
+ "libc",
+ "memoffset",
+ "proptest",
+ "scale",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
 name = "javm-transpiler"
 version = "0.1.0"
 dependencies = [
- "javm",
+ "javm-legacy",
  "proptest",
  "scale",
  "thiserror 2.0.18",

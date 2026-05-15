@@ -14,9 +14,9 @@ struct KernelRun {
 }
 
 /// Run the kernel with a specific backend, return output bytes and gas consumed.
-fn run_kernel(backend: javm::PvmBackend, input: &[u8], test_id: u32) -> KernelRun {
-    use javm::kernel::{cap_table_from_blob, InvocationKernel, KernelResult};
-    use javm::vm_pool::VmState;
+fn run_kernel(backend: javm_legacy::PvmBackend, input: &[u8], test_id: u32) -> KernelRun {
+    use javm_legacy::kernel::{cap_table_from_blob, InvocationKernel, KernelResult};
+    use javm_legacy::vm_pool::VmState;
 
     let gas = 100_000_000_000u64;
     let artifacts =
@@ -39,8 +39,8 @@ fn run_kernel(backend: javm::PvmBackend, input: &[u8], test_id: u32) -> KernelRu
     let gas_used = gas - kernel.active_gas();
 
     let label = match backend {
-        javm::PvmBackend::ForceInterpreter => "interpreter",
-        javm::PvmBackend::ForceRecompiler => "recompiler",
+        javm_legacy::PvmBackend::ForceInterpreter => "interpreter",
+        javm_legacy::PvmBackend::ForceRecompiler => "recompiler",
         _ => "default",
     };
 
@@ -70,7 +70,7 @@ fn run_test(test_id: u32, args: &[u8]) {
     input.extend_from_slice(args);
 
     let host_output = javm_guest_tests::dispatch_to_vec(&input);
-    let interp = run_kernel(javm::PvmBackend::ForceInterpreter, &input, test_id);
+    let interp = run_kernel(javm_legacy::PvmBackend::ForceInterpreter, &input, test_id);
 
     assert_eq!(
         host_output, interp.output,
@@ -79,7 +79,7 @@ fn run_test(test_id: u32, args: &[u8]) {
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        let recomp = run_kernel(javm::PvmBackend::ForceRecompiler, &input, test_id);
+        let recomp = run_kernel(javm_legacy::PvmBackend::ForceRecompiler, &input, test_id);
         assert_eq!(
             host_output, recomp.output,
             "test {test_id}: host vs recompiler output mismatch"

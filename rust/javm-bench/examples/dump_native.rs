@@ -29,14 +29,20 @@ fn dump_polkavm(name: &str, blob: Vec<u8>) {
 fn dump_javm(name: &str, blob: &[u8]) {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     {
-        let backend = javm::PvmBackend::ForceRecompiler;
-        let artifacts = javm::kernel::cap_table_from_blob::<u8>(blob, backend, None).unwrap();
-        let kernel: javm::kernel::InvocationKernel =
-            javm::kernel::InvocationKernel::new_from_artifacts(artifacts, 100_000_000, backend)
-                .unwrap();
+        let backend = javm_legacy::PvmBackend::ForceRecompiler;
+        let artifacts =
+            javm_legacy::kernel::cap_table_from_blob::<u8>(blob, backend, None).unwrap();
+        let kernel: javm_legacy::kernel::InvocationKernel =
+            javm_legacy::kernel::InvocationKernel::new_from_artifacts(
+                artifacts,
+                100_000_000,
+                backend,
+            )
+            .unwrap();
         // Access the first CODE cap's native code
         if let Some(code_cap) = kernel.code_caps.first()
-            && let javm::backend::CompiledProgram::Recompiler(ref compiled) = code_cap.compiled
+            && let javm_legacy::backend::CompiledProgram::Recompiler(ref compiled) =
+                code_cap.compiled
         {
             let native = unsafe {
                 std::slice::from_raw_parts(

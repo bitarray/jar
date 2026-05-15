@@ -7,7 +7,7 @@ description = "Multi-node integration harness for example JAR chains."
 
 [dependencies]
 jar-kernel = { workspace = true }
-javm = { workspace = true }
+javm-legacy = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 
