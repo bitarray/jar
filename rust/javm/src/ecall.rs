@@ -94,6 +94,16 @@ pub mod host_op {
     /// Cap::Type carrying the source Cap::Instance's
     /// `image_hash_chain`; place at dst.
     pub const HOST_TYPE_OF: u32 = 21;
+    /// `host_read_data_cap(cap_slot=φ[7], dst_addr=φ[8], len=φ[9])`
+    /// — copy bytes from the Cap::Data at `cap_slot` into mapped
+    /// memory at `dst_addr`. Honors `DataCap.size`; copies
+    /// `min(len, size)` bytes.
+    pub const HOST_READ_DATA_CAP: u32 = 22;
+    /// `host_mint_data_cap(src_addr=φ[7], len=φ[8], quota_slot=φ[9],
+    /// dst_slot=φ[10])` — read bytes from memory; strip trailing
+    /// zeros (canonical form §2); content-hash; debit StorageQuota
+    /// via KernelAssist; mint Cap::Data; place at dst_slot.
+    pub const HOST_MINT_DATA_CAP: u32 = 23;
     /// Inclusive upper bound of the kernel-known host call range.
     pub const MAX: u32 = 63;
 }
@@ -160,9 +170,19 @@ impl<K: KernelAssist> Vm<K> {
             host_op::HOST_TYPE_OF => {
                 trap_on_err(self.dispatch_host_type_of(regs), |()| EcallResult::Continue)
             }
+            host_op::HOST_READ_DATA_CAP => {
+                trap_on_err(self.dispatch_host_read_data_cap(regs, _mem), |()| {
+                    EcallResult::Continue
+                })
+            }
+            host_op::HOST_MINT_DATA_CAP => {
+                trap_on_err(self.dispatch_host_mint_data_cap(regs, _mem), |()| {
+                    EcallResult::Continue
+                })
+            }
             _ => {
-                // 3.10 / 3.11 / 3.12 fill the rest. Continue silently
-                // for now so unknown host call ops don't fault.
+                // 3.11 / 3.12 fill the rest. Continue silently for
+                // now so unknown host call ops don't fault.
                 EcallResult::Continue
             }
         }
@@ -401,6 +421,134 @@ impl<K: KernelAssist> Vm<K> {
         )?;
         Ok(())
     }
+
+    /// `host_read_data_cap(cap_slot=φ[7], dst_addr=φ[8], len=φ[9])`.
+    ///
+    /// Reads the Cap::Data at `cap_slot`; looks up its bytes via
+    /// `KernelAssist::data_lookup`; copies `min(len, size)` bytes
+    /// into memory at `dst_addr`. Pads zeros if the stored bytes
+    /// (after canonical-form strip) are shorter than `size`.
+    fn dispatch_host_read_data_cap(
+        &mut self,
+        regs: &mut Regs,
+        mem: &mut Mem,
+    ) -> Result<(), VmError> {
+        let cap_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let dst_addr = regs.gpr[8] as u32;
+        let len = regs.gpr[9] as usize;
+
+        let (content_hash, size) = {
+            let running = self
+                .stack
+                .running_instance()
+                .ok_or(VmError::CallStackEmpty)?;
+            match running.cnode.get(cap_slot)? {
+                Some(Cap::Data(c)) => (c.content_hash, c.size),
+                Some(_) => return Err(VmError::SlotKindMismatch(cap_slot.get())),
+                None => return Err(VmError::SlotEmpty(cap_slot.get())),
+            }
+        };
+
+        // Canonical-form data may be shorter than `size` (trailing
+        // zeros stripped). Pad with zeros up to the declared size.
+        let mut bytes = self
+            .kernel_assist
+            .data_lookup(content_hash)
+            .unwrap_or_default();
+        if (bytes.len() as u64) < size {
+            bytes.resize(size as usize, 0);
+        }
+
+        let copy_len = len.min(size as usize);
+        mem.write(dst_addr, &bytes[..copy_len])
+            .map_err(|_| VmError::Invariant("host_read_data_cap: memory write OOB / RO"))?;
+        Ok(())
+    }
+
+    /// `host_mint_data_cap(src_addr=φ[7], len=φ[8], quota_slot=φ[9],
+    /// dst_slot=φ[10])`.
+    ///
+    /// Reads bytes from mem[src_addr..src_addr+len]; strips trailing
+    /// zeros (canonical form); content-hashes; debits the
+    /// StorageQuota referenced by `quota_slot` (Cap::Instance[Quota])
+    /// for `size` bytes; mints Cap::Data{content_hash, size: pre-strip};
+    /// places at `dst_slot`.
+    fn dispatch_host_mint_data_cap(
+        &mut self,
+        regs: &mut Regs,
+        mem: &mut Mem,
+    ) -> Result<(), VmError> {
+        let src_addr = regs.gpr[7] as u32;
+        let len = regs.gpr[8] as usize;
+        let quota_slot = SlotIdx((regs.gpr[9] & 0xFF) as u32);
+        let dst_slot = SlotIdx((regs.gpr[10] & 0xFF) as u32);
+
+        // 1. Read bytes from memory.
+        let raw = mem
+            .read(src_addr, len)
+            .map_err(|_| VmError::Invariant("host_mint_data_cap: memory read OOB"))?;
+        let stripped_len = strip_trailing_zeros_len(&raw);
+        let canonical = &raw[..stripped_len];
+
+        // 2. Hash + store.
+        let content_hash = self.kernel_assist.data_store(canonical);
+
+        // 3. Debit storage quota.
+        let quota_id = {
+            let running = self
+                .stack
+                .running_instance()
+                .ok_or(VmError::CallStackEmpty)?;
+            match running.cnode.get(quota_slot)? {
+                Some(Cap::Instance(ic)) => {
+                    // Convention: Quota{id}.content_hash low 8 bytes = quota_id LE.
+                    u64::from_le_bytes(
+                        ic.content_hash[..8]
+                            .try_into()
+                            .map_err(|_| VmError::Invariant("quota content_hash too short"))?,
+                    )
+                }
+                Some(_) => return Err(VmError::SlotKindMismatch(quota_slot.get())),
+                None => return Err(VmError::SlotEmpty(quota_slot.get())),
+            }
+        };
+        let current = self.kernel_assist.storage_quota_get(quota_id);
+        let charge = len as u64;
+        if current < charge {
+            return Err(VmError::Op(jar_cap::OpError::SlotPinned(0))); // generic op fail
+        }
+        self.kernel_assist
+            .storage_quota_set(quota_id, current - charge);
+
+        // 4. Mint Cap::Data and place at dst.
+        let running = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?;
+        let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
+        if pinned.contains(&dst_slot) {
+            return Err(jar_cap::OpError::SlotPinned(dst_slot.get()).into());
+        }
+        running.cnode.set(
+            dst_slot,
+            Some(Cap::Data(jar_cap::DataCap {
+                content_hash,
+                size: len as u64,
+            })),
+        )?;
+        Ok(())
+    }
+}
+
+/// Canonical-form length: number of leading bytes before trailing
+/// zeros. Per v3 spec §2 "Cap::Data canonical form": trailing zeros
+/// are stripped from the byte buffer before content-hashing.
+pub(crate) fn strip_trailing_zeros_len(bytes: &[u8]) -> usize {
+    let mut n = bytes.len();
+    while n > 0 && bytes[n - 1] == 0 {
+        n -= 1;
+    }
+    n
 }
 
 /// Read the `image_hash_chain` for a Cap::Instance or Cap::Type at
@@ -807,5 +955,130 @@ mod tests {
         let mut mem = Mem::new();
         let r = vm.handle(EcallKind::Ecalli(host_op::MAKE_IMAGE), &mut regs, &mut mem);
         assert!(matches!(r, EcallResult::Exit(ExitReason::Trap)));
+    }
+
+    // -- 3.10 host calls --
+
+    #[test]
+    fn host_read_data_cap_copies_bytes_into_mem() {
+        let mut vm = fixture_vm();
+        // Seed kernel_assist with bytes at content_hash [0x55; 32].
+        let bytes = vec![0x11u8, 0x22, 0x33, 0x44];
+        vm.kernel_assist.register_data([0x55; 32], bytes.clone());
+        // Place a Cap::Data referencing them at slot 4.
+        vm.stack
+            .running_instance_mut()
+            .unwrap()
+            .cnode
+            .set(
+                SlotIdx(4),
+                Some(Cap::Data(jar_cap::DataCap {
+                    content_hash: [0x55; 32],
+                    size: 4,
+                })),
+            )
+            .unwrap();
+
+        let mut mem = javm_exec::Mem::with_pages(1, javm_exec::perm::RW);
+        let mut regs = Regs::new();
+        regs.gpr[7] = 4; // cap slot
+        regs.gpr[8] = 0x100; // dst addr
+        regs.gpr[9] = 4; // len
+        let r = vm.handle(
+            EcallKind::Ecalli(host_op::HOST_READ_DATA_CAP),
+            &mut regs,
+            &mut mem,
+        );
+        assert!(matches!(r, EcallResult::Continue));
+        assert_eq!(mem.read(0x100, 4).unwrap(), bytes);
+    }
+
+    #[test]
+    fn host_mint_data_cap_round_trip() {
+        let mut vm = fixture_vm();
+        // Seed a Quota cap at slot 5 with quota_id = 7.
+        let mut quota_hash = [0u8; 32];
+        quota_hash[..8].copy_from_slice(&7u64.to_le_bytes());
+        vm.stack
+            .running_instance_mut()
+            .unwrap()
+            .cnode
+            .set(
+                SlotIdx(5),
+                Some(Cap::Instance(InstanceCap {
+                    image_hash_chain: [0xCAu8; 32],
+                    content_hash: quota_hash,
+                })),
+            )
+            .unwrap();
+        vm.kernel_assist.storage_quota_set(7, 1000);
+
+        let mut mem = javm_exec::Mem::with_pages(1, javm_exec::perm::RW);
+        let payload = b"hello world";
+        mem.write(0x200, payload).unwrap();
+
+        let mut regs = Regs::new();
+        regs.gpr[7] = 0x200;
+        regs.gpr[8] = payload.len() as u64;
+        regs.gpr[9] = 5;
+        regs.gpr[10] = 6;
+        let r = vm.handle(
+            EcallKind::Ecalli(host_op::HOST_MINT_DATA_CAP),
+            &mut regs,
+            &mut mem,
+        );
+        assert!(matches!(r, EcallResult::Continue));
+
+        let cnode = &vm.stack.running_instance().unwrap().cnode;
+        match cnode.get(SlotIdx(6)).unwrap() {
+            Some(Cap::Data(c)) => assert_eq!(c.size, payload.len() as u64),
+            other => panic!("expected Cap::Data at dst, got {:?}", other),
+        }
+        assert_eq!(
+            vm.kernel_assist.storage_quota_get(7),
+            1000 - payload.len() as u64
+        );
+    }
+
+    #[test]
+    fn host_mint_data_cap_exhausts_quota_traps() {
+        let mut vm = fixture_vm();
+        let mut quota_hash = [0u8; 32];
+        quota_hash[..8].copy_from_slice(&7u64.to_le_bytes());
+        vm.stack
+            .running_instance_mut()
+            .unwrap()
+            .cnode
+            .set(
+                SlotIdx(5),
+                Some(Cap::Instance(InstanceCap {
+                    image_hash_chain: [0xCAu8; 32],
+                    content_hash: quota_hash,
+                })),
+            )
+            .unwrap();
+        vm.kernel_assist.storage_quota_set(7, 3); // less than payload
+
+        let mut mem = javm_exec::Mem::with_pages(1, javm_exec::perm::RW);
+        mem.write(0x200, b"too much").unwrap();
+        let mut regs = Regs::new();
+        regs.gpr[7] = 0x200;
+        regs.gpr[8] = 8;
+        regs.gpr[9] = 5;
+        regs.gpr[10] = 6;
+        let r = vm.handle(
+            EcallKind::Ecalli(host_op::HOST_MINT_DATA_CAP),
+            &mut regs,
+            &mut mem,
+        );
+        assert!(matches!(r, EcallResult::Exit(ExitReason::Trap)));
+    }
+
+    #[test]
+    fn strip_trailing_zeros_basic() {
+        assert_eq!(strip_trailing_zeros_len(&[1, 2, 3]), 3);
+        assert_eq!(strip_trailing_zeros_len(&[1, 2, 3, 0, 0]), 3);
+        assert_eq!(strip_trailing_zeros_len(&[0, 0, 0]), 0);
+        assert_eq!(strip_trailing_zeros_len(&[]), 0);
     }
 }

@@ -19,7 +19,10 @@
 
 use std::sync::Arc;
 
-use jar_cap::{CNodeBackend, Cap, InstanceCap, SlotIdx, image::Image};
+use jar_cap::{
+    CNodeBackend, Cap, DataCap, InstanceCap, SlotIdx,
+    image::{Image, MappingSource},
+};
 use javm_exec::{ExitReason, GasCounter, Interpreter, Mem, Regs};
 
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
@@ -286,6 +289,16 @@ impl<K: KernelAssist> Vm<K> {
             top.mem = mem;
             top.gas = gas;
         }
+
+        // HALT-time write-back: for each Persistent memory mapping
+        // declared by the running Image, re-hash the live mem span
+        // and install a fresh Cap::Data at the mapping's cnode slot.
+        // O(N) full re-hash for now; the page-BMT incremental variant
+        // is Stage 7.
+        if matches!(exit, ExitReason::Halt) {
+            self.writeback_persistent_mappings()?;
+        }
+
         let popped = self
             .stack
             .pop()
@@ -320,6 +333,74 @@ impl<K: KernelAssist> Vm<K> {
                 gas_used,
             },
         })
+    }
+
+    /// At HALT, walk the running Image's `memory_mappings`; for each
+    /// `Persistent` mapping, re-hash the live mem span and install a
+    /// fresh `Cap::Data` at the mapping's root-cnode slot.
+    ///
+    /// Stage 3 supports root-level paths only (`path.is_root_slot()`);
+    /// nested paths land when chain bytecode starts using nested
+    /// cnodes routinely.
+    ///
+    /// Pinned slots are skipped (a Persistent mapping should never
+    /// target a pinned slot; if one does, we treat it as a spec
+    /// violation and leave the slot alone).
+    fn writeback_persistent_mappings(&mut self) -> Result<(), VmError> {
+        // Snapshot mappings + pinned set up front to avoid carrying a
+        // borrow on the running entry while we mutate it.
+        let (mappings, pinned, mem_view) = {
+            let running = self
+                .stack
+                .running_instance()
+                .ok_or(VmError::CallStackEmpty)?;
+            (
+                running.image.memory_mappings.clone(),
+                running
+                    .image
+                    .pinned_slots
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                running.mem.clone(),
+            )
+        };
+
+        for mapping in &mappings {
+            let path = match &mapping.source {
+                MappingSource::Persistent(p) => p,
+                MappingSource::Ephemeral => continue,
+            };
+            if !path.is_root_slot() {
+                // Nested paths not yet supported in write-back.
+                continue;
+            }
+            let target = path.target();
+            if pinned.contains(&target) {
+                continue;
+            }
+
+            // Read bytes from mem; if the mapping is OOB the chain
+            // spec is broken — skip rather than fault HALT.
+            let Ok(bytes) = mem_view.read(mapping.start as u32, mapping.size as usize) else {
+                continue;
+            };
+            let strip_len = crate::ecall::strip_trailing_zeros_len(&bytes);
+            let content_hash = self.kernel_assist.data_store(&bytes[..strip_len]);
+
+            let running = self
+                .stack
+                .running_instance_mut()
+                .ok_or(VmError::CallStackEmpty)?;
+            running.cnode.set(
+                target,
+                Some(Cap::Data(DataCap {
+                    content_hash,
+                    size: mapping.size,
+                })),
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -663,5 +744,71 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn writeback_rehashes_persistent_mapping_at_halt() {
+        // Manually stage an InstanceEntry whose Image declares one
+        // Persistent mapping at addr 0, size 4, slot 3 — and whose
+        // mem already contains "ABCD" at addr 0. Call write-back
+        // directly; assert slot 3 now holds Cap::Data with
+        // content_hash = blake2b256("ABCD") and size = 4.
+        let mut vm = Vm::new(InProcessKernelAssist::new());
+
+        let mut img = empty_image_with_code(vec![10u8, 0]);
+        img.memory_mappings.push(jar_cap::image::MemoryMapping {
+            start: 0,
+            size: 4,
+            source: MappingSource::Persistent(jar_cap::SlotPath::root(SlotIdx(3))),
+        });
+        let img = Arc::new(img);
+        let prog =
+            Arc::new(javm_exec::PvmProgram::new(vec![10u8, 0], vec![1u8, 0], vec![], 25).unwrap());
+
+        let mut cnode: Box<dyn CNodeBackend<Cap> + Send + Sync> =
+            Box::new(InMemoryCNode::<Cap>::new(4).unwrap());
+        // Pre-seed slot 3 with a placeholder Cap::Data so the swap
+        // is observable.
+        cnode
+            .set(
+                SlotIdx(3),
+                Some(Cap::Data(jar_cap::DataCap {
+                    content_hash: [0u8; 32],
+                    size: 4,
+                })),
+            )
+            .unwrap();
+
+        let mut mem = javm_exec::Mem::with_pages(1, javm_exec::perm::RW);
+        mem.write(0, b"ABCD").unwrap();
+
+        vm.stack
+            .push_instance(InstanceEntry {
+                instance: InstanceCap {
+                    image_hash_chain: [1u8; 32],
+                    content_hash: [2u8; 32],
+                },
+                image: img,
+                program: prog,
+                cnode,
+                regs: Regs::new(),
+                mem,
+                gas: GasCounter::new(0),
+                status: EntryStatus::Waiting,
+            })
+            .unwrap();
+
+        vm.writeback_persistent_mappings().unwrap();
+
+        use jar_cap::Hash;
+        let expected = jar_cap::Blake2b256::hash(b"ABCD");
+        let cnode = &vm.stack.running_instance().unwrap().cnode;
+        match cnode.get(SlotIdx(3)).unwrap() {
+            Some(Cap::Data(c)) => {
+                assert_eq!(c.content_hash, expected);
+                assert_eq!(c.size, 4);
+            }
+            other => panic!("expected Cap::Data at slot 3, got {:?}", other),
+        }
     }
 }

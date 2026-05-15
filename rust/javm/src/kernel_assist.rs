@@ -87,6 +87,39 @@ pub trait KernelAssist {
     fn image_lookup(&self, _content_hash: CapHash) -> Option<Arc<Image>> {
         None
     }
+
+    // ---- Data blob registry ----
+
+    /// Look up the raw bytes of a `Cap::Data` by its content hash.
+    ///
+    /// Used by:
+    /// - `host_read_data_cap` (Stage 3.10) — read a Cap::Data's bytes
+    ///   into mapped memory.
+    /// - HALT-time mapped-region write-back — read prior content for
+    ///   diff comparison (optimization; not used in the O(N) rehash
+    ///   path).
+    ///
+    /// Default returns `None`. Stage 4 jar-kernel-v3 backs this with
+    /// `State.data_blobs`.
+    fn data_lookup(&self, _content_hash: CapHash) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Store raw bytes; return the content hash for the resulting
+    /// `Cap::Data`.
+    ///
+    /// Used by:
+    /// - `host_mint_data_cap` (Stage 3.10) — mint a fresh Cap::Data
+    ///   from memory bytes.
+    /// - HALT-time mapped-region write-back — store re-hashed memory
+    ///   for the new Cap::Data.
+    ///
+    /// Default no-ops (still returns a valid blake2b hash so call
+    /// sites don't NPE; the bytes just aren't persisted). Stage 4
+    /// jar-kernel-v3 inserts into `State.data_blobs`.
+    fn data_store(&mut self, bytes: &[u8]) -> CapHash {
+        Blake2b256::hash(bytes)
+    }
 }
 
 /// In-process, in-memory `KernelAssist` impl. State lives in plain
@@ -109,6 +142,9 @@ pub struct InProcessKernelAssist {
     /// `host_set_image`. Tests pre-register images that the running
     /// program will swap to.
     images: HashMap<CapHash, Arc<Image>>,
+    /// Data blob registry (content_hash → bytes). `host_read_data_cap`
+    /// resolves through this; `host_mint_data_cap` populates it.
+    data_blobs: HashMap<CapHash, Vec<u8>>,
 }
 
 impl InProcessKernelAssist {
@@ -119,6 +155,7 @@ impl InProcessKernelAssist {
             yield_catchers: HashMap::new(),
             next_yc_nonce: 0,
             images: HashMap::new(),
+            data_blobs: HashMap::new(),
         }
     }
 
@@ -138,6 +175,12 @@ impl InProcessKernelAssist {
     /// is the image's canonical content hash (`image_content_hash`).
     pub fn register_image(&mut self, content_hash: CapHash, image: Arc<Image>) {
         self.images.insert(content_hash, image);
+    }
+
+    /// Register raw data bytes under their hash; symmetric to
+    /// `data_store`. Useful when seeding fixtures.
+    pub fn register_data(&mut self, content_hash: CapHash, bytes: Vec<u8>) {
+        self.data_blobs.insert(content_hash, bytes);
     }
 }
 
@@ -207,6 +250,16 @@ impl KernelAssist for InProcessKernelAssist {
 
     fn image_lookup(&self, content_hash: CapHash) -> Option<Arc<Image>> {
         self.images.get(&content_hash).cloned()
+    }
+
+    fn data_lookup(&self, content_hash: CapHash) -> Option<Vec<u8>> {
+        self.data_blobs.get(&content_hash).cloned()
+    }
+
+    fn data_store(&mut self, bytes: &[u8]) -> CapHash {
+        let hash = Blake2b256::hash(bytes);
+        self.data_blobs.insert(hash, bytes.to_vec());
+        hash
     }
 }
 
