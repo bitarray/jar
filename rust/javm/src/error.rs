@@ -28,4 +28,8 @@ pub enum VmError {
     UnhandledMarker,
     #[error("image bytecode failed to parse: {0}")]
     InvalidBytecode(String),
+    #[error("slot path step {0} expected a Cap::CNode but found a different kind")]
+    SlotKindMismatch(u32),
+    #[error("slot path step {0} traversed an empty slot")]
+    SlotEmpty(u32),
 }
