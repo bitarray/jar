@@ -6,8 +6,9 @@ subsoil::entry!(javm_main);
 
 #[cfg(target_env = "javm")]
 #[no_mangle]
-extern "C" fn javm_main() -> u32 {
-    bench_ecrecover::ecrecover_bench()
+#[subsoil::endpoint(0)]
+fn javm_main(_args_len: u64) -> u64 {
+    bench_ecrecover::ecrecover_bench() as u64
 }
 
 #[cfg(not(target_env = "javm"))]
