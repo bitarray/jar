@@ -72,9 +72,6 @@ const EXPECTED_PUBKEY: [u8; 33] = [
     0xb0,
 ];
 
-#[cfg(target_env = "polkavm")]
-mod polkavm;
-
 /// Perform ecrecover: recover the public key from a signature + message hash.
 /// Returns 1 if the recovered key matches the expected public key, 0 otherwise.
 pub fn ecrecover_bench() -> u32 {

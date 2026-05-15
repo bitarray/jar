@@ -6,9 +6,6 @@ use subsoil as _;
 
 const N: usize = 100_000;
 
-#[cfg(target_env = "polkavm")]
-mod polkavm;
-
 /// Sieve of Eratosthenes: count primes up to N.
 /// Returns the prime count (π(100000) = 9592).
 pub fn prime_sieve() -> u32 {

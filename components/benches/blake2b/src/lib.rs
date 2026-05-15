@@ -11,9 +11,6 @@ type Blake2b256 = Blake2b<U32>;
 
 const MSG_LEN: usize = 1024;
 
-#[cfg(target_env = "polkavm")]
-mod polkavm;
-
 /// Hash a 1KB message with Blake2b-256. Returns first 4 bytes of hash as u32.
 pub fn blake2b_bench() -> u32 {
     let mut msg = [0u8; MSG_LEN];

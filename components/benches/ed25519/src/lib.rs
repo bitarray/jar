@@ -21,9 +21,6 @@ const SIGNATURE_BYTES: [u8; 64] = [
     0x4a, 0x7c, 0x15, 0xe9, 0x71, 0x6e, 0xd2, 0x8d, 0xc0, 0x27, 0xbe, 0xce, 0xea, 0x1e, 0xc4, 0x0a,
 ];
 
-#[cfg(target_env = "polkavm")]
-mod polkavm;
-
 /// Verify an Ed25519 signature. Returns 1 on success, 0 on failure.
 pub fn ed25519_verify_bench() -> u32 {
     let pk = match PublicKey::from_slice(&PUBLIC_KEY_BYTES) {

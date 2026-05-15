@@ -10,8 +10,6 @@ crate-type = ["lib", "cdylib"]
 ed25519-compact = { version = "2", default-features = false }
 subsoil = { workspace = true }
 
-[target.'cfg(target_env = "polkavm")'.dependencies]
-polkavm-derive = "0.32.0"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_env, values("javm", "polkavm"))', 'cfg(target_os, values("none"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_env, values("javm"))', 'cfg(target_os, values("none"))'] }

@@ -8,9 +8,6 @@ use sha3::{Digest, Keccak256};
 
 const MSG_LEN: usize = 1024;
 
-#[cfg(target_env = "polkavm")]
-mod polkavm;
-
 /// Keccak-256 of 1KB message. Returns first 4 bytes of hash as u32.
 pub fn keccak_bench() -> u32 {
     let mut msg = [0u8; MSG_LEN];
