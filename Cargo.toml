@@ -5,6 +5,7 @@ members = [
     "rust/build-crate",
     "rust/build-javm",
     "rust/build-pvm",
+    "rust/javm",
     "rust/javm-legacy",
     "rust/javm-bench",
     "rust/javm-builtins",
@@ -39,6 +40,7 @@ authors = [ "Bitarray GmbH <legal@bitarray.dev>" ]
 
 [workspace.dependencies]
 # Internal crates
+javm = { path = "rust/javm" }
 javm-legacy = { path = "rust/javm-legacy" }
 javm-exec = { path = "rust/javm-exec" }
 javm-transpiler = { path = "rust/javm-transpiler" }

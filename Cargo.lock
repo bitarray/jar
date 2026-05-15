@@ -848,6 +848,16 @@ name = "jar-test-halt"
 version = "0.1.0"
 
 [[package]]
+name = "javm"
+version = "0.1.0"
+dependencies = [
+ "jar-cap",
+ "javm-exec",
+ "proptest",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "javm-bench"
 version = "0.1.0"
 dependencies = [

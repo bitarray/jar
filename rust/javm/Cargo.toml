@@ -1,0 +1,15 @@
+[package]
+name = "javm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "JAR v3 integration crate: call stack, MGMT ecall dispatch, host-call coordination, yield-marker routing, gas debit. Composes jar-cap + javm-exec."
+
+[dependencies]
+jar-cap = { workspace = true }
+javm-exec = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
