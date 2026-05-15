@@ -63,6 +63,76 @@ pub fn run_javm_recompiler(blob: &[u8], gas: u64) -> (u64, u64) {
     run_kernel_with_backend(blob, gas, javm::PvmBackend::ForceRecompiler)
 }
 
+// ---------------------------------------------------------------------------
+// javm-exec runners (v3 byte-PVM interpreter + recompiler)
+// ---------------------------------------------------------------------------
+
+/// Extract the initialize CODE cap from a JAR blob and construct a
+/// javm-exec `PvmProgram`. Uses v2's `parse_blob` + `parse_code_blob`
+/// to crack the blob (read-only; v2's blob format is unchanged).
+pub fn javm_blob_to_pvm_program(blob: &[u8]) -> javm_exec::PvmProgram {
+    let parsed = javm::program::parse_blob(blob).expect("parse_blob failed");
+    let init_cap = parsed.header.init_cap;
+    let code_entry = parsed
+        .caps
+        .iter()
+        .find(|e| e.cap_index == init_cap)
+        .expect("init_cap entry not found in manifest");
+    let code_data = javm::program::cap_data(code_entry, parsed.data_section);
+    let code_blob = javm::program::parse_code_blob(code_data).expect("parse_code_blob failed");
+    javm_exec::PvmProgram::new(
+        code_blob.code,
+        code_blob.bitmask,
+        code_blob.jump_table,
+        javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
+    )
+    .expect("PvmProgram::new failed")
+}
+
+/// EcallHandler for bench programs. The four target benchmarks use
+/// only two ecallis:
+///
+/// - `ecalli 0` (REPLY): halt-equivalent; exit with Halt.
+/// - `ecalli 1` (GAS): bench-mode no-op; continue.
+///
+/// Any other ecalli also continues (bench programs don't depend on
+/// host-side state).
+pub struct BenchHandler;
+
+impl javm_exec::EcallHandler for BenchHandler {
+    fn handle(
+        &mut self,
+        kind: javm_exec::EcallKind,
+        _regs: &mut javm_exec::Regs,
+        _mem: &mut javm_exec::Mem,
+    ) -> javm_exec::EcallResult {
+        match kind {
+            javm_exec::EcallKind::Ecalli(0) => {
+                javm_exec::EcallResult::Exit(javm_exec::ExitReason::Halt)
+            }
+            javm_exec::EcallKind::Ecalli(_) => javm_exec::EcallResult::Continue,
+            javm_exec::EcallKind::Ecall => {
+                javm_exec::EcallResult::Exit(javm_exec::ExitReason::Panic)
+            }
+        }
+    }
+}
+
+/// Run a javm blob on javm-exec's byte-PVM interpreter. Returns
+/// `(result, gas_consumed)` matching the existing `run_javm_*` API.
+pub fn run_javm_exec_interpreter(blob: &[u8], gas: u64) -> (u64, u64) {
+    let prog = javm_blob_to_pvm_program(blob);
+    let mut regs = javm_exec::Regs::new();
+    let mut mem = javm_exec::Mem::new();
+    let mut gas_counter = javm_exec::GasCounter::new(gas);
+    let mut handler = BenchHandler;
+    let _ = javm_exec::Interpreter::run(&prog, &mut regs, &mut mem, &mut gas_counter, &mut handler);
+    // A0 = gpr[10] per JAR ABI.
+    let result = regs.gpr[10];
+    let consumed = gas.saturating_sub(gas_counter.remaining());
+    (result, consumed)
+}
+
 /// Number of Fibonacci iterations for the compute benchmark.
 pub const FIB_N: u64 = 1_000_000;
 

@@ -868,6 +868,7 @@ dependencies = [
  "build-pvm",
  "criterion",
  "javm",
+ "javm-exec",
  "javm-transpiler",
  "k256",
  "libc",
