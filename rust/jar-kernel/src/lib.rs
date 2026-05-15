@@ -20,13 +20,17 @@
 //! - C.8: Public `Kernel` API.
 
 pub mod abi;
+pub mod apply;
 pub mod error;
 pub mod genesis;
+pub mod kernel;
 pub mod kernel_assist;
 pub mod state;
 
+pub use apply::{Block, Event, EventOutcome, apply_block, apply_event};
 pub use error::KernelError;
 pub use genesis::{Genesis, genesis};
+pub use kernel::Kernel;
 pub use kernel_assist::SigmaKernelAssist;
 pub use state::{
     CodeId, DataBlob, FileId, IdCounters, State, ValidatorKey, VaultId, VaultRecord, state_root,
