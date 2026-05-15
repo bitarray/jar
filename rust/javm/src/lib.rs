@@ -13,3 +13,10 @@
 //! are declared here as they land. The skeleton has only the empty
 //! shell; consumers should treat the API as unstable until Stage 3
 //! completes.
+
+pub mod kernel_assist;
+
+pub use kernel_assist::{
+    InProcessKernelAssist, KernelAssist, KernelImage, MeterId, QuotaId, kernel_image_hash,
+    recognize_kernel_image,
+};
