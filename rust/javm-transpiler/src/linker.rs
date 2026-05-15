@@ -165,7 +165,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
         &mut ctx.jump_table,
     );
 
-    let code_blob = emitter::build_image_code_blob(&ctx.code, &ctx.bitmask, &ctx.jump_table);
+    let packed_bitmask = emitter::pack_bitmask(&ctx.bitmask);
     let mut endpoints = read_subsoil_endpoints(elf_data, &elf, &ctx)?;
 
     // Compute the data-region layout. The transpiler emits one
@@ -258,7 +258,9 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     }
 
     Ok(Image {
-        code: code_blob,
+        code: ctx.code.clone(),
+        packed_bitmask,
+        jump_table: ctx.jump_table.clone(),
         endpoints,
         memory_mappings,
         gas_slots: vec![BARE_GAS_SLOT],

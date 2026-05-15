@@ -109,8 +109,13 @@ mod tests {
                 initial_regs: BTreeMap::new(),
             },
         );
+        // Instruction starts at bytes 0 (load_imm_64) and 10 (ecalli).
+        // Packed bitmask (LSB-first): byte 0 = bit 0 set = 0x01;
+        // byte 1 = bit 2 set = 0x04.
         Image {
             code: vec![20u8, 7, 42, 0, 0, 0, 0, 0, 0, 0, 10, 0],
+            packed_bitmask: vec![0x01, 0x04],
+            jump_table: Vec::new(),
             endpoints,
             memory_mappings: Vec::new(),
             gas_slots: vec![abi::BARE_GAS_SLOT],

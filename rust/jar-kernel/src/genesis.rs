@@ -215,6 +215,9 @@ mod tests {
     fn empty_chain_image() -> Image {
         Image {
             code: vec![10u8, 0],
+            // 2 bytes of code → 2 instruction-start bits → 0b0000_0011.
+            packed_bitmask: vec![0x03],
+            jump_table: Vec::new(),
             endpoints: std::collections::BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: vec![abi::BARE_GAS_SLOT],

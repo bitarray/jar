@@ -104,20 +104,19 @@ impl<K: KernelAssist> Vm<K> {
         gas_budget: u64,
     ) -> Result<CallResult, VmError> {
         // 1. Predecode the image bytecode (cache hit if seen before).
+        //    The Image now carries code + packed_bitmask + jump_table
+        //    as separate fields; we just unpack the bitmask and hand
+        //    everything to the predecoder.
+        let bitmask = javm_exec::unpack_bitmask(&image.packed_bitmask, image.code.len());
         let program = self.image_cache.get_or_decode(
-            // For Stage 3 the cache key is the InstanceCap's content
-            // hash; a future refactor keys on Image content_hash
-            // directly. The image bytes don't change while the cap is
-            // alive so the two are equivalent for now.
+            // Cache key is the InstanceCap's content hash; a future
+            // refactor keys on Image content_hash directly. The image
+            // bytes don't change while the cap is alive so the two
+            // are equivalent for now.
             instance.content_hash,
             image.code.clone(),
-            // Bitmask + jump_table aren't carried on `Image` yet —
-            // Stage 3 derives a trivial bitmask "every byte is an
-            // instruction start" matching v2's `Interpreter::new_simple`.
-            // Production callers will pass a properly-parsed Image
-            // (jar-kernel-v3 will validate at host_make_image).
-            vec![1u8; image.code.len()],
-            Vec::new(),
+            bitmask,
+            image.jump_table.clone(),
         )?;
 
         // 2. Look up the endpoint definition. Missing → fall back
@@ -570,8 +569,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn empty_image_with_code(code: Vec<u8>) -> Image {
+        // Trivial "every byte is an instruction start" bitmask,
+        // bit-packed. Matches the previous synthesized form.
+        let packed_bitmask = vec![0xFFu8; code.len().div_ceil(8)];
         Image {
             code,
+            packed_bitmask,
+            jump_table: Vec::new(),
             endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: Vec::new(),

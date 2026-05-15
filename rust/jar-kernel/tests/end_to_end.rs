@@ -61,6 +61,11 @@ fn hello_world_chain_image() -> Image {
 
     Image {
         code,
+        // 2 bytes of code → both marked as instruction starts (the
+        // imm byte after opcode-10 is unreachable but harmless under
+        // an all-1s bitmask). Packed: bits 0,1 set → 0b0000_0011.
+        packed_bitmask: vec![0x03],
+        jump_table: Vec::new(),
         endpoints,
         memory_mappings: Vec::<MemoryMapping>::new(),
         gas_slots: vec![abi::BARE_GAS_SLOT],

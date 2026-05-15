@@ -128,6 +128,8 @@ mod tests {
     fn empty_image() -> Image {
         Image {
             code: vec![0u8],
+            packed_bitmask: vec![0x01],
+            jump_table: Vec::new(),
             endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: Vec::new(),

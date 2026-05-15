@@ -39,8 +39,17 @@ use std::collections::BTreeMap;
 /// read-only thereafter.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Image {
-    /// Bytecode (validated at construction; see `host_make_image`).
+    /// Bytecode bytes (validated at construction; see `host_make_image`).
     pub code: Vec<u8>,
+    /// Packed bitmask, one bit per `code` byte, LSB-first.
+    /// `packed_bitmask.len() == code.len().div_ceil(8)`. A `1` bit
+    /// marks the start of an instruction; a `0` bit marks a
+    /// continuation byte. Use [`javm_exec::unpack_bitmask`] to
+    /// recover the unpacked form at decode time.
+    pub packed_bitmask: Vec<u8>,
+    /// Jump-table entries (PVM PCs into `code`). Indexed by
+    /// `djump` immediates.
+    pub jump_table: Vec<u32>,
     /// Endpoints addressable by `endpoint_idx` (u8). Sparse — only
     /// declared endpoints are present.
     pub endpoints: BTreeMap<u8, EndpointDef>,
@@ -134,6 +143,8 @@ impl Image {
     pub fn empty() -> Self {
         Self {
             code: Vec::new(),
+            packed_bitmask: Vec::new(),
+            jump_table: Vec::new(),
             endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: Vec::new(),
@@ -193,6 +204,8 @@ mod tests {
     fn image_scale_roundtrip() {
         let mut img = Image::empty();
         img.code = b"sample code".to_vec();
+        img.packed_bitmask = vec![0xFF, 0x07]; // 11 bits set, all-1s
+        img.jump_table = vec![0u32, 4, 8];
         img.endpoints.insert(
             0,
             EndpointDef {
