@@ -21,4 +21,10 @@ pub enum ExitReason {
     /// Host-call with the given opcode (the integration layer
     /// supplies an `EcallHandler` that interprets the opcode).
     HostCall(u32),
+    /// PVM `ecall` (opcode 3, no immediate). The recompiler-side
+    /// counterpart to the interpreter's EcallKind::Ecall routing.
+    /// In the kernel, the integration layer reads φ[11] (mgmt op)
+    /// and φ[12] (subject|object) to dispatch; the bench harness
+    /// loops on this to skip the prologue's MGMT_MAP calls.
+    Ecall,
 }

@@ -120,6 +120,69 @@ impl javm_exec::EcallHandler for BenchHandler {
     }
 }
 
+/// Run a javm blob on javm-exec's JIT recompiler. Loops on HostCall
+/// exits like the v2 kernel: an `ecalli 0` (slot 0 = REPLY) returns
+/// the A0 register as the halt result; other ecalli slots are no-ops.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub fn run_javm_exec_recompiler(blob: &[u8], gas: u64) -> (u64, u64) {
+    use javm_exec::recompiler::{DataLayout, RecompiledPvm};
+
+    let parsed = javm::program::parse_blob(blob).expect("parse_blob failed");
+    let init_cap = parsed.header.init_cap;
+    let code_entry = parsed
+        .caps
+        .iter()
+        .find(|e| e.cap_index == init_cap)
+        .expect("init_cap entry not found in manifest");
+    let code_data = javm::program::cap_data(code_entry, parsed.data_section);
+    let code_blob = javm::program::parse_code_blob(code_data).expect("parse_code_blob failed");
+
+    // Generous memory budget covering bench programs' stack + heap.
+    let layout = DataLayout {
+        mem_size: 64 * 4096,
+        arg_start: 0,
+        arg_data: vec![],
+        ro_start: 0,
+        ro_data: vec![],
+        rw_start: 0,
+        rw_data: vec![],
+    };
+
+    let mut pvm = RecompiledPvm::new(
+        &code_blob.code,
+        code_blob.bitmask,
+        code_blob.jump_table,
+        [0u64; javm_exec::REG_COUNT],
+        gas,
+        Some(layout),
+        javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
+    )
+    .expect("RecompiledPvm::new failed");
+
+    // Loop on host calls (matches kernel CALL/REPLY semantics):
+    //   ecalli 0 → halt with A0 result
+    //   any other ecalli / plain ecall → no-op continue
+    loop {
+        match pvm.run() {
+            javm_exec::ExitReason::HostCall(0) => {
+                let result = pvm.registers()[7];
+                let consumed = gas.saturating_sub(pvm.gas());
+                return (result, consumed);
+            }
+            javm_exec::ExitReason::HostCall(_) | javm_exec::ExitReason::Ecall => {
+                // Continue past the ecall(i); entry_pc auto-set by run().
+                continue;
+            }
+            javm_exec::ExitReason::Halt => {
+                let result = pvm.registers()[7];
+                let consumed = gas.saturating_sub(pvm.gas());
+                return (result, consumed);
+            }
+            other => panic!("recompiler unexpected exit: {:?}", other),
+        }
+    }
+}
+
 /// Run a javm blob on javm-exec's byte-PVM interpreter. Returns
 /// `(result, gas_consumed)` matching the existing `run_javm_*` API.
 pub fn run_javm_exec_interpreter(blob: &[u8], gas: u64) -> (u64, u64) {

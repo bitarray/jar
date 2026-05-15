@@ -929,6 +929,13 @@ impl RecompiledPvm {
                         return ExitReason::Panic;
                     }
                 }
+                6 => {
+                    // EXIT_ECALL (PVM opcode 3, plain `ecall`). Mirror
+                    // the EXIT_HOST_CALL path: set entry_pc so caller
+                    // can re-enter after handling the MGMT op.
+                    self.ctx_mut().entry_pc = self.ctx().pc;
+                    return ExitReason::Ecall;
+                }
                 _ => return ExitReason::Panic,
             }
         }

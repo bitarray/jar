@@ -151,6 +151,11 @@ fn bench_standard(c: &mut Criterion, name: &str, javm_blob: &[u8], pvm_blob: &[u
         b.iter(|| run_javm_recompiler(javm_blob, GAS_LIMIT))
     });
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    group.bench_function("javm-exec-recompiler", |b| {
+        b.iter(|| run_javm_exec_recompiler(javm_blob, GAS_LIMIT))
+    });
+
     // Execution-only: compile in setup, measure only execution.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     group.bench_function("javm-recompiler-exec", |b| {
