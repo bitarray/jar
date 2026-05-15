@@ -6,7 +6,6 @@ members = [
     "rust/build-javm",
     "rust/build-pvm",
     "rust/javm",
-    "rust/javm-legacy",
     "rust/javm-builtins",
     "rust/javm-guest-tests",
     "rust/javm-transpiler",
@@ -14,7 +13,6 @@ members = [
     "rust/scale-derive",
     "rust/jar-cap",
     "rust/javm-exec",
-    "rust/jar-kernel",
     "rust/jar-test-services/halt",
     "components/benches/blake2b",
     "components/benches/ecrecover",
@@ -38,11 +36,9 @@ authors = [ "Bitarray GmbH <legal@bitarray.dev>" ]
 [workspace.dependencies]
 # Internal crates
 javm = { path = "rust/javm" }
-javm-legacy = { path = "rust/javm-legacy" }
 javm-exec = { path = "rust/javm-exec" }
 javm-transpiler = { path = "rust/javm-transpiler" }
 jar-cap = { path = "rust/jar-cap" }
-jar-kernel = { path = "rust/jar-kernel" }
 scale = { path = "rust/scale", default-features = false, features = ["std"] }
 scale-derive = { path = "rust/scale-derive" }
 
