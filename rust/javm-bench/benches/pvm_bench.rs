@@ -116,6 +116,13 @@ fn validate(name: &str, javm_blob: &[u8], pvm_blob: &[u8]) {
         gi_result as u32, pvm_result as u32,
         "{name}: javm/polkavm result mismatch (javm=0x{gi_result:X}, polkavm=0x{pvm_result:X})"
     );
+
+    // v3 javm-exec interpreter: equivalence check vs v2 javm interpreter.
+    let (xi_result, _) = run_javm_exec_interpreter(javm_blob, GAS_LIMIT);
+    assert_eq!(
+        xi_result as u32, gi_result as u32,
+        "{name}: javm-exec/javm result mismatch (javm-exec=0x{xi_result:X}, javm=0x{gi_result:X})"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +140,10 @@ fn bench_standard(c: &mut Criterion, name: &str, javm_blob: &[u8], pvm_blob: &[u
 
     group.bench_function("javm-interpreter", |b| {
         b.iter(|| run_javm_interpreter(javm_blob, GAS_LIMIT))
+    });
+
+    group.bench_function("javm-exec-interpreter", |b| {
+        b.iter(|| run_javm_exec_interpreter(javm_blob, GAS_LIMIT))
     });
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

@@ -89,14 +89,18 @@ pub fn javm_blob_to_pvm_program(blob: &[u8]) -> javm_exec::PvmProgram {
     .expect("PvmProgram::new failed")
 }
 
-/// EcallHandler for bench programs. The four target benchmarks use
-/// only two ecallis:
+/// EcallHandler for bench programs. The bench blobs include the
+/// javm-transpiler init prologue (stack/heap MGMT_MAP via plain
+/// `ecall`), so the handler must accept those as no-ops to let the
+/// prologue complete and user code start running.
 ///
-/// - `ecalli 0` (REPLY): halt-equivalent; exit with Halt.
+/// - `ecall` (opcode 3, no imm): MGMT op from the prologue — treat
+///   as Continue (the kernel would dispatch a memory map; for the
+///   bench it's a no-op).
+/// - `ecalli 0` (REPLY): halt-equivalent; exit with Halt and return
+///   φ[7] as the result (matches v2 kernel's `handle_reply`).
 /// - `ecalli 1` (GAS): bench-mode no-op; continue.
-///
-/// Any other ecalli also continues (bench programs don't depend on
-/// host-side state).
+/// - Any other `ecalli`: continue.
 pub struct BenchHandler;
 
 impl javm_exec::EcallHandler for BenchHandler {
@@ -111,9 +115,7 @@ impl javm_exec::EcallHandler for BenchHandler {
                 javm_exec::EcallResult::Exit(javm_exec::ExitReason::Halt)
             }
             javm_exec::EcallKind::Ecalli(_) => javm_exec::EcallResult::Continue,
-            javm_exec::EcallKind::Ecall => {
-                javm_exec::EcallResult::Exit(javm_exec::ExitReason::Panic)
-            }
+            javm_exec::EcallKind::Ecall => javm_exec::EcallResult::Continue,
         }
     }
 }
@@ -127,8 +129,8 @@ pub fn run_javm_exec_interpreter(blob: &[u8], gas: u64) -> (u64, u64) {
     let mut gas_counter = javm_exec::GasCounter::new(gas);
     let mut handler = BenchHandler;
     let _ = javm_exec::Interpreter::run(&prog, &mut regs, &mut mem, &mut gas_counter, &mut handler);
-    // A0 = gpr[10] per JAR ABI.
-    let result = regs.gpr[10];
+    // A0 = gpr[7] per JAR ABI (javm-transpiler::assembler::Reg::A0).
+    let result = regs.gpr[7];
     let consumed = gas.saturating_sub(gas_counter.remaining());
     (result, consumed)
 }

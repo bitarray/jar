@@ -34,6 +34,7 @@ impl GasCounter {
     /// Try to deduct `cost`. Returns `Ok(())` on success or
     /// `Err(OutOfGas)` if the counter would go negative (caller
     /// should produce `ExitReason::OutOfGas`).
+    #[inline(always)]
     pub fn charge(&mut self, cost: Gas) -> Result<(), OutOfGas> {
         match self.remaining.checked_sub(cost) {
             Some(new) => {
