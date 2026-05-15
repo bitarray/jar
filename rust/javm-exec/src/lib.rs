@@ -29,6 +29,9 @@ pub mod mem;
 pub mod program;
 pub mod regs;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub mod recompiler;
+
 pub use decode::{DecodedInst, Predecoded, predecode};
 pub use ecall::{EcallHandler, EcallKind, EcallResult, PanickingHandler};
 pub use error::ProgramError;
