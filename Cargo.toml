@@ -7,7 +7,6 @@ members = [
     "rust/build-pvm",
     "rust/javm",
     "rust/javm-legacy",
-    "rust/javm-bench",
     "rust/javm-builtins",
     "rust/javm-guest-tests",
     "rust/javm-transpiler",
