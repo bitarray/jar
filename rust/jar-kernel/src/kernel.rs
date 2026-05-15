@@ -175,5 +175,4 @@ mod tests {
         k2.apply(&block(), 10_000, 10_000).unwrap();
         assert_eq!(k1.state_root(), k2.state_root());
     }
-
 }
