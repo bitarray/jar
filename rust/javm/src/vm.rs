@@ -123,12 +123,11 @@ impl<K: KernelAssist> Vm<K> {
             Vec::new(),
         )?;
 
-        // 2. Determine endpoint entry_pc.
-        let entry_pc = image
-            .endpoints
-            .get(&endpoint_idx)
-            .map(|e| e.entry_pc)
-            .unwrap_or(0);
+        // 2. Look up the endpoint definition. Missing → fall back
+        //    to PC=0 with no register seeding (legacy single-entry
+        //    behaviour).
+        let endpoint_def = image.endpoints.get(&endpoint_idx);
+        let entry_pc = endpoint_def.map(|e| e.entry_pc).unwrap_or(0);
 
         // 3. Seed regs / mem / gas. Gas: if the Image declares
         //    `gas_slots[0]` and the slot holds a Cap::Instance whose
@@ -141,6 +140,16 @@ impl<K: KernelAssist> Vm<K> {
         regs.pc = entry_pc;
         // Calling convention §4: φ[11] = endpoint_idx.
         regs.gpr[11] = endpoint_idx as u64;
+        // Apply per-endpoint initial register state (e.g. SP =
+        // stack_top). Indices out of GPR range are silently skipped
+        // so a malformed Image can't index out of bounds.
+        if let Some(def) = endpoint_def {
+            for (&reg, &val) in &def.initial_regs {
+                if let Some(slot) = regs.gpr.get_mut(reg as usize) {
+                    *slot = val;
+                }
+            }
+        }
         let mem = Mem::new();
         let (gas, gas_initial) = self.seed_gas(image.as_ref(), cnode.as_ref(), gas_budget);
 

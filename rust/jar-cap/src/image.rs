@@ -63,7 +63,7 @@ pub struct Image {
 }
 
 /// Endpoint definition: entry PC + register conventions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct EndpointDef {
     /// Bytecode address to jump to.
     pub entry_pc: u64,
@@ -72,6 +72,11 @@ pub struct EndpointDef {
     pub arg_registers: u8,
     /// Size of the arg cnode the caller may attach.
     pub arg_cnode_size: u8,
+    /// PVM registers to seed before entering the endpoint. Keyed
+    /// by register index (0..=12). Common usage: φ[1] (RISC-V SP)
+    /// ← `stack_top`. The kernel applies these on top of the
+    /// calling-convention defaults (φ[11] = endpoint_idx).
+    pub initial_regs: BTreeMap<u8, u64>,
 }
 
 /// Memory mapping: a region of the address space backed by a cnode
@@ -173,14 +178,18 @@ mod tests {
                 entry_pc: 0x100,
                 arg_registers: 1,
                 arg_cnode_size: 0,
+                initial_regs: BTreeMap::new(),
             },
         );
+        let mut initial_regs = BTreeMap::new();
+        initial_regs.insert(1u8, 0x4000);
         img.endpoints.insert(
             255,
             EndpointDef {
                 entry_pc: 0xDEADBEEF,
                 arg_registers: 4,
                 arg_cnode_size: 8,
+                initial_regs,
             },
         );
         img.memory_mappings.push(MemoryMapping {
@@ -229,6 +238,7 @@ mod tests {
                 entry_pc: 0x1000,
                 arg_registers: 2,
                 arg_cnode_size: 0,
+                initial_regs: BTreeMap::new(),
             },
         );
         assert_ne!(image_content_hash::<H>(&a), image_content_hash::<H>(&b));

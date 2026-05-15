@@ -55,6 +55,7 @@ fn hello_world_chain_image() -> Image {
             entry_pc: 0,
             arg_registers: 0,
             arg_cnode_size: 0,
+            initial_regs: BTreeMap::new(),
         },
     );
 

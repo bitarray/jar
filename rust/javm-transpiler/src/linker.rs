@@ -15,10 +15,14 @@
 
 use crate::TranspileError;
 use crate::emitter;
+use crate::layout::{PVM_PAGE_SIZE, ProgramLayout};
 use crate::riscv::TranslationContext;
 use jar_cap::abi::{BARE_GAS_SLOT, BARE_QUOTA_SLOT, BARE_YIELD_CATCHER_SLOT};
 use jar_cap::image::{EndpointDef, Image};
 use std::collections::{BTreeMap, HashMap};
+
+/// PVM register index for the RISC-V stack pointer (φ[1]).
+const SP_REG: u8 = 1;
 
 /// RISC-V relocation types we care about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,7 +153,20 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     );
 
     let code_blob = emitter::build_image_code_blob(&ctx.code, &ctx.bitmask, &ctx.jump_table);
-    let endpoints = read_subsoil_endpoints(elf_data, &elf, &ctx)?;
+    let mut endpoints = read_subsoil_endpoints(elf_data, &elf, &ctx)?;
+
+    // Compute the data-region layout to derive the initial stack
+    // pointer. The kernel will eventually consume these regions via
+    // declarative `Image.memory_mappings` (out of scope here); for
+    // now we only need `stack_top` to seed SP per endpoint.
+    let stack_pages = elf.stack_size / PVM_PAGE_SIZE;
+    let ro_pages = (elf.ro_data.len() as u32).div_ceil(PVM_PAGE_SIZE);
+    let rw_pages = (elf.rw_data.len() as u32).div_ceil(PVM_PAGE_SIZE);
+    let layout = ProgramLayout::compute(stack_pages, ro_pages, rw_pages, elf.heap_pages);
+    let stack_top = layout.stack_top();
+    for def in endpoints.values_mut() {
+        def.initial_regs.insert(SP_REG, stack_top);
+    }
 
     Ok(Image {
         code: code_blob,
@@ -205,6 +222,7 @@ fn read_subsoil_endpoints(
                     entry_pc: pvm_pc as u64,
                     arg_registers,
                     arg_cnode_size,
+                    initial_regs: BTreeMap::new(),
                 },
             );
         }
@@ -218,6 +236,7 @@ fn read_subsoil_endpoints(
                 entry_pc: 0,
                 arg_registers: 0,
                 arg_cnode_size: 0,
+                initial_regs: BTreeMap::new(),
             },
         );
         let _ = elf; // suppress unused-warning when fallback is taken without the elf used
