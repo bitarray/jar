@@ -99,19 +99,18 @@ mod tests {
 
     fn minimal_chain_image() -> Image {
         // Program: load_imm_64 φ[7] = 42; ecalli 0 (HALT).
+        let mut endpoints = BTreeMap::new();
+        endpoints.insert(
+            0,
+            jar_cap::image::EndpointDef {
+                entry_pc: 0,
+                arg_registers: 0,
+                arg_cnode_size: 0,
+            },
+        );
         Image {
             code: vec![20u8, 7, 42, 0, 0, 0, 0, 0, 0, 0, 10, 0],
-            endpoints: core::array::from_fn(|i| {
-                if i == 0 {
-                    Some(jar_cap::image::EndpointDef {
-                        entry_pc: 0,
-                        arg_registers: 0,
-                        arg_cnode_size: 0,
-                    })
-                } else {
-                    None
-                }
-            }),
+            endpoints,
             memory_mappings: Vec::new(),
             gas_slots: vec![abi::BARE_GAS_SLOT],
             quota_slots: vec![abi::BARE_QUOTA_SLOT],

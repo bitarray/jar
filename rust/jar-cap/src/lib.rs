@@ -28,7 +28,7 @@ pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash};
 pub use image::{
     EndpointDef, Image, MappingSource, MemoryMapping, PinnedCap, chain_extend, chain_genesis,
-    image_canonical_encoding, image_content_hash,
+    image_content_hash,
 };
 pub use ops::{mgmt_cnode_mint, mgmt_cnode_swap, mgmt_copy, mgmt_drop, mgmt_move};
 pub use slot::{SlotIdx, SlotPath};

@@ -9,13 +9,14 @@
 //! to accommodate the largest cnode reachable in practice.
 
 use crate::error::CapError;
+use scale_derive::{Decode, Encode};
 
 /// Index into a single cnode (root or nested).
 ///
 /// For the root cnode (256 slots) only `0..256` is valid; for a
 /// nested `Cap::CNode` of `size_log = k`, `0..2^k` is valid.
 /// `CNodeBackend` rejects out-of-range indices.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Encode, Decode)]
 pub struct SlotIdx(pub u32);
 
 impl SlotIdx {
@@ -65,7 +66,7 @@ impl From<u16> for SlotIdx {
 /// slot 7 of the root cnode. `SlotPath { steps: vec![SlotIdx(7),
 /// SlotIdx(3)] }` addresses slot 3 of the Cap::CNode held in
 /// root slot 7.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct SlotPath {
     pub steps: Vec<SlotIdx>,
 }

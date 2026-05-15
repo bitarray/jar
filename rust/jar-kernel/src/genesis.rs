@@ -168,7 +168,7 @@ mod tests {
     fn empty_chain_image() -> Image {
         Image {
             code: vec![10u8, 0],
-            endpoints: core::array::from_fn(|_| None),
+            endpoints: std::collections::BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: vec![abi::BARE_GAS_SLOT],
             quota_slots: vec![abi::BARE_QUOTA_SLOT],

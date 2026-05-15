@@ -332,7 +332,7 @@ mod tests {
     fn empty_image() -> Image {
         Image {
             code: vec![0u8],
-            endpoints: core::array::from_fn(|_| None),
+            endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: Vec::new(),
             quota_slots: Vec::new(),

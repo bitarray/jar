@@ -48,19 +48,19 @@ fn hello_world_chain_image() -> Image {
     // it hits so this is fine.
     let code = vec![10u8, 0];
 
+    let mut endpoints = BTreeMap::new();
+    endpoints.insert(
+        0u8,
+        EndpointDef {
+            entry_pc: 0,
+            arg_registers: 0,
+            arg_cnode_size: 0,
+        },
+    );
+
     Image {
         code,
-        endpoints: core::array::from_fn(|i| {
-            if i == 0 {
-                Some(EndpointDef {
-                    entry_pc: 0,
-                    arg_registers: 0,
-                    arg_cnode_size: 0,
-                })
-            } else {
-                None
-            }
-        }),
+        endpoints,
         memory_mappings: Vec::<MemoryMapping>::new(),
         gas_slots: vec![abi::BARE_GAS_SLOT],
         quota_slots: vec![abi::BARE_QUOTA_SLOT],

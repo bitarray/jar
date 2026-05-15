@@ -126,8 +126,7 @@ impl<K: KernelAssist> Vm<K> {
         // 2. Determine endpoint entry_pc.
         let entry_pc = image
             .endpoints
-            .get(endpoint_idx as usize)
-            .and_then(|e| e.as_ref())
+            .get(&endpoint_idx)
             .map(|e| e.entry_pc)
             .unwrap_or(0);
 
@@ -546,7 +545,7 @@ mod tests {
     fn empty_image_with_code(code: Vec<u8>) -> Image {
         Image {
             code,
-            endpoints: core::array::from_fn(|_| None),
+            endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: Vec::new(),
             quota_slots: Vec::new(),

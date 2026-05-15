@@ -573,6 +573,8 @@ name = "jar-cap"
 version = "0.1.0"
 dependencies = [
  "blake2",
+ "scale",
+ "scale-derive",
  "thiserror 2.0.18",
 ]
 

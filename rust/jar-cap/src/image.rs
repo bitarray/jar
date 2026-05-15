@@ -27,6 +27,7 @@
 
 use crate::hash::Hash;
 use crate::slot::SlotIdx;
+use scale::{Decode, Encode};
 use std::collections::BTreeMap;
 
 /// Image: the program spec (code, endpoints, memory layout, slot
@@ -36,13 +37,13 @@ use std::collections::BTreeMap;
 /// kernel installs declared pinned content into the Instance's cnode
 /// at `set_image` / `host_derive_spawn` time and treats them as
 /// read-only thereafter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct Image {
     /// Bytecode (validated at construction; see `host_make_image`).
     pub code: Vec<u8>,
-    /// Endpoints indexed by `endpoint_idx` (0..256). `None` means
-    /// "no endpoint at this index."
-    pub endpoints: [Option<EndpointDef>; 256],
+    /// Endpoints addressable by `endpoint_idx` (u8). Sparse — only
+    /// declared endpoints are present.
+    pub endpoints: BTreeMap<u8, EndpointDef>,
     /// Memory layout (declared mappings between cnode slots and
     /// the address space).
     pub memory_mappings: Vec<MemoryMapping>,
@@ -62,7 +63,7 @@ pub struct Image {
 }
 
 /// Endpoint definition: entry PC + register conventions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub struct EndpointDef {
     /// Bytecode address to jump to.
     pub entry_pc: u64,
@@ -75,24 +76,26 @@ pub struct EndpointDef {
 
 /// Memory mapping: a region of the address space backed by a cnode
 /// slot (Persistent) or kernel-allocated for the apply (Ephemeral).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct MemoryMapping {
     pub start: u64,
     pub size: u64,
     pub source: MappingSource,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Memory mapping source. Variant order is load-bearing for SCALE
+/// encoding (Ephemeral = 0, Persistent = 1).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub enum MappingSource {
-    /// Backed by the DataCap at the named slot path.
-    Persistent(crate::slot::SlotPath),
     /// Kernel-allocated per-apply; not in cnode.
     Ephemeral,
+    /// Backed by the DataCap at the named slot path.
+    Persistent(crate::slot::SlotPath),
 }
 
 /// Pinned slot content. Only content-addressed cap kinds can be
 /// pinned (Data or Image references).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub enum PinnedCap {
     /// Pinned `Cap::Data` content hash (32 bytes for Blake2b256).
     Data { content_hash: [u8; 32], size: u64 },
@@ -106,7 +109,7 @@ impl Image {
     pub fn empty() -> Self {
         Self {
             code: Vec::new(),
-            endpoints: std::array::from_fn(|_| None),
+            endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: Vec::new(),
             quota_slots: Vec::new(),
@@ -116,112 +119,10 @@ impl Image {
     }
 }
 
-/// Canonical byte encoding of an Image, used as input to
-/// `image_content_hash`.
-///
-/// Format (v3 canonical, version-agnostic — bump if the layout
-/// changes):
-///
-/// ```text
-///   varlen<u32>(code) ++ code
-///   for i in 0..256:
-///     if endpoints[i] is Some(e): tag(0x01) ++ encode(e)
-///     else:                       tag(0x00)
-///   varlen<u32>(memory_mappings.len()) ++ each encoded
-///   varlen<u32>(gas_slots.len()) ++ each SlotIdx (u32-le)
-///   varlen<u32>(quota_slots.len()) ++ each SlotIdx (u32-le)
-///   varlen<u32>(pinned_slots.len()) ++ each (SlotIdx-le, PinnedCap)
-///   tag<u8>(yield_marker_slot) ++ optional SlotIdx-le
-/// ```
-///
-/// All multi-byte integers little-endian. Pinned slots iterated in
-/// `BTreeMap` order (ascending by SlotIdx) for determinism.
-pub fn image_canonical_encoding(image: &Image) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(image.code.len() + 256);
-
-    fn push_u32(buf: &mut Vec<u8>, v: u32) {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-    fn push_u64(buf: &mut Vec<u8>, v: u64) {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-
-    // code
-    push_u32(&mut buf, image.code.len() as u32);
-    buf.extend_from_slice(&image.code);
-
-    // endpoints (fixed 256 entries)
-    for ep in image.endpoints.iter() {
-        match ep {
-            None => buf.push(0x00),
-            Some(e) => {
-                buf.push(0x01);
-                push_u64(&mut buf, e.entry_pc);
-                buf.push(e.arg_registers);
-                buf.push(e.arg_cnode_size);
-            }
-        }
-    }
-
-    // memory_mappings
-    push_u32(&mut buf, image.memory_mappings.len() as u32);
-    for m in &image.memory_mappings {
-        push_u64(&mut buf, m.start);
-        push_u64(&mut buf, m.size);
-        match &m.source {
-            MappingSource::Ephemeral => buf.push(0x00),
-            MappingSource::Persistent(path) => {
-                buf.push(0x01);
-                push_u32(&mut buf, path.steps.len() as u32);
-                for s in &path.steps {
-                    push_u32(&mut buf, s.get());
-                }
-            }
-        }
-    }
-
-    // gas_slots / quota_slots
-    push_u32(&mut buf, image.gas_slots.len() as u32);
-    for s in &image.gas_slots {
-        push_u32(&mut buf, s.get());
-    }
-    push_u32(&mut buf, image.quota_slots.len() as u32);
-    for s in &image.quota_slots {
-        push_u32(&mut buf, s.get());
-    }
-
-    // pinned_slots (BTreeMap order = ascending by SlotIdx; deterministic)
-    push_u32(&mut buf, image.pinned_slots.len() as u32);
-    for (idx, cap) in &image.pinned_slots {
-        push_u32(&mut buf, idx.get());
-        match cap {
-            PinnedCap::Data { content_hash, size } => {
-                buf.push(0x00);
-                buf.extend_from_slice(content_hash);
-                push_u64(&mut buf, *size);
-            }
-            PinnedCap::Image { content_hash } => {
-                buf.push(0x01);
-                buf.extend_from_slice(content_hash);
-            }
-        }
-    }
-
-    // yield_marker_slot
-    match image.yield_marker_slot {
-        None => buf.push(0x00),
-        Some(idx) => {
-            buf.push(0x01);
-            push_u32(&mut buf, idx.get());
-        }
-    }
-
-    buf
-}
-
-/// Content hash of an Image: `H::hash(canonical_encoding(image))`.
+/// Content hash of an Image: `H::hash(image.encode())`. The
+/// canonical encoding is defined by `Image`'s `scale-derive` impl.
 pub fn image_content_hash<H: Hash>(image: &Image) -> H::Out {
-    H::hash(&image_canonical_encoding(image))
+    H::hash(&image.encode())
 }
 
 /// Genesis image-hash chain: a freshly-derived Instance (with no
@@ -263,6 +164,53 @@ mod tests {
     }
 
     #[test]
+    fn image_scale_roundtrip() {
+        let mut img = Image::empty();
+        img.code = b"sample code".to_vec();
+        img.endpoints.insert(
+            0,
+            EndpointDef {
+                entry_pc: 0x100,
+                arg_registers: 1,
+                arg_cnode_size: 0,
+            },
+        );
+        img.endpoints.insert(
+            255,
+            EndpointDef {
+                entry_pc: 0xDEADBEEF,
+                arg_registers: 4,
+                arg_cnode_size: 8,
+            },
+        );
+        img.memory_mappings.push(MemoryMapping {
+            start: 0x1000,
+            size: 0x4000,
+            source: MappingSource::Ephemeral,
+        });
+        img.memory_mappings.push(MemoryMapping {
+            start: 0x5000,
+            size: 0x2000,
+            source: MappingSource::Persistent(crate::slot::SlotPath::root(SlotIdx(3))),
+        });
+        img.gas_slots = vec![SlotIdx(7)];
+        img.quota_slots = vec![SlotIdx(8)];
+        img.pinned_slots.insert(
+            SlotIdx(11),
+            PinnedCap::Data {
+                content_hash: [0xAB; 32],
+                size: 4096,
+            },
+        );
+        img.yield_marker_slot = Some(SlotIdx(9));
+
+        let bytes = img.encode();
+        let (decoded, consumed) = Image::decode(&bytes).expect("decode");
+        assert_eq!(consumed, bytes.len());
+        assert_eq!(decoded, img);
+    }
+
+    #[test]
     fn different_code_different_hash() {
         let mut a = Image::empty();
         a.code = b"AAAA".to_vec();
@@ -275,11 +223,14 @@ mod tests {
     fn endpoints_affect_hash() {
         let a = Image::empty();
         let mut b = Image::empty();
-        b.endpoints[7] = Some(EndpointDef {
-            entry_pc: 0x1000,
-            arg_registers: 2,
-            arg_cnode_size: 0,
-        });
+        b.endpoints.insert(
+            7,
+            EndpointDef {
+                entry_pc: 0x1000,
+                arg_registers: 2,
+                arg_cnode_size: 0,
+            },
+        );
         assert_ne!(image_content_hash::<H>(&a), image_content_hash::<H>(&b));
     }
 

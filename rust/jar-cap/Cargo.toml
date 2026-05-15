@@ -9,5 +9,7 @@ description = "JAR v3 capability system: caps, cnode, image, BMT, hash"
 [dependencies]
 blake2 = { workspace = true }
 thiserror = { workspace = true }
+scale = { workspace = true }
+scale-derive = { workspace = true }
 
 [dev-dependencies]
