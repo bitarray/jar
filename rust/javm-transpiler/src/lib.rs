@@ -9,6 +9,7 @@ pub mod assembler;
 pub mod emitter;
 pub mod layout;
 pub mod linker;
+pub mod program;
 pub mod riscv;
 
 use thiserror::Error;

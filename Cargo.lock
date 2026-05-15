@@ -916,7 +916,6 @@ dependencies = [
 name = "javm-transpiler"
 version = "0.1.0"
 dependencies = [
- "javm-legacy",
  "proptest",
  "scale",
  "thiserror 2.0.18",

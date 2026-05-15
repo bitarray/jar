@@ -6,7 +6,6 @@ license.workspace = true
 description = "RISC-V ELF to JAVM PVM transpiler"
 
 [dependencies]
-javm-legacy = { workspace = true }
 scale = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

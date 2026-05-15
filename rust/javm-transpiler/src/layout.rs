@@ -22,7 +22,7 @@
 //! itself (see `javm_builtins::map_args`). Args is not in the
 //! manifest and not in `ProgramLayout`.
 
-use javm_legacy::cap::Access;
+use crate::program::Access;
 
 /// Cap index of the CODE cap in transpiler-emitted blobs. Matches the
 /// JAR `init_cap` field.
@@ -284,12 +284,7 @@ fn emit_mgmt_map(code: &mut Vec<u8>, bitmask: &mut Vec<u8>, entry: &DataCapEntry
     emit_load_imm_64(code, bitmask, ARG_REG_PAGE_OFFSET, 0);
     emit_load_imm_64(code, bitmask, ARG_REG_PAGE_COUNT, page_count as u64);
     emit_load_imm_64(code, bitmask, ARG_REG_ACCESS, access_word);
-    emit_load_imm_64(
-        code,
-        bitmask,
-        ARG_REG_OP,
-        javm_legacy::kernel::MGMT_MAP as u64,
-    );
+    emit_load_imm_64(code, bitmask, ARG_REG_OP, crate::program::MGMT_MAP as u64);
     // φ[12] = (subject_ref << 32) | object_ref. The kernel reads:
     //   subject_ref = (φ[12] >> 32) as u32
     //   object_ref  = (φ[12] & 0xFFFFFFFF) as u32

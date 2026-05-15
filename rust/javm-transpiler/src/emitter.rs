@@ -132,7 +132,7 @@ pub fn build_service_program(
     memory_pages: u32,
 ) -> Vec<u8> {
     use crate::layout::{CODE_CAP_INDEX, PVM_PAGE_SIZE, ProgramLayout, emit_prologue};
-    use javm_legacy::program::{CapEntryType, CapManifestEntry, build_blob};
+    use crate::program::{CapEntryType, CapManifestEntry, build_blob};
 
     // Compute the shared layout so the prologue and the manifest agree
     // on which slot each DATA cap lives at.
@@ -251,18 +251,11 @@ mod tests {
     }
 
     #[test]
-    fn test_build_v2_minimal() {
-        let blob = javm_legacy::program::build_simple_blob(&[0, 1, 0], &[1, 1, 1], &[]);
-        let backend = javm_legacy::PvmBackend::Default;
-        let kernel =
-            javm_legacy::kernel::cap_table_from_blob::<u8>(&blob, backend, None).and_then(|a| {
-                javm_legacy::kernel::InvocationKernel::new_from_artifacts(a, 100_000, backend)
-            });
-        assert!(
-            kernel.is_ok(),
-            "blob should be loadable: {:?}",
-            kernel.err()
-        );
+    fn test_build_simple_blob_round_trip() {
+        // Format-level round-trip via the vendored `program` module.
+        let blob = crate::program::build_simple_blob(&[0, 1, 0], &[1, 1, 1], &[]);
+        let parsed = crate::program::parse_blob(&blob).expect("parses");
+        assert_eq!(parsed.caps.len(), 1);
     }
 
     #[test]
@@ -270,15 +263,15 @@ mod tests {
         let code = vec![0, 1, 0]; // trap, fallthrough, trap
         let bitmask = vec![1, 1, 1];
         let blob = build_service_program(&code, &bitmask, &[], &[], &[], 1, 0, 4);
-        let backend = javm_legacy::PvmBackend::Default;
-        let kernel =
-            javm_legacy::kernel::cap_table_from_blob::<u8>(&blob, backend, None).and_then(|a| {
-                javm_legacy::kernel::InvocationKernel::new_from_artifacts(a, 100_000, backend)
-            });
+        // Format-level sanity only; v3 javm doesn't yet consume this
+        // blob format (jar-kernel-v3 will parse it via the vendored
+        // program module in Stage D).
+        let parsed = crate::program::parse_blob(&blob).expect("parses");
         assert!(
-            kernel.is_ok(),
-            "service blob should be loadable: {:?}",
-            kernel.err()
+            parsed
+                .caps
+                .iter()
+                .any(|c| matches!(c.cap_type, crate::program::CapEntryType::Code))
         );
     }
 }

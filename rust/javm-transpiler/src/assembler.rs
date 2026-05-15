@@ -863,44 +863,11 @@ mod tests {
     fn test_build_sample_service() {
         let blob = build_sample_service();
         assert!(!blob.is_empty());
-        // Verify it can be loaded by kernel
-        let backend = javm_legacy::PvmBackend::Default;
-        let kernel =
-            javm_legacy::kernel::cap_table_from_blob::<u8>(&blob, backend, None).and_then(|a| {
-                javm_legacy::kernel::InvocationKernel::new_from_artifacts(a, 1_000_000, backend)
-            });
-        assert!(
-            kernel.is_ok(),
-            "Sample service blob should be loadable: {:?}",
-            kernel.err()
-        );
-    }
-
-    #[test]
-    fn test_sample_service_runs_via_kernel() {
-        let blob = build_sample_service();
-        // Kernel runs single entrypoint at PC=0.
-        let artifacts = javm_legacy::kernel::cap_table_from_blob::<u8>(
-            &blob,
-            javm_legacy::PvmBackend::Default,
-            None,
-        )
-        .expect("cap_table_from_blob ok");
-        let mut kernel: javm_legacy::kernel::InvocationKernel =
-            javm_legacy::kernel::InvocationKernel::new_from_artifacts(
-                artifacts,
-                1_000_000,
-                javm_legacy::PvmBackend::Default,
-            )
-            .expect("should initialize");
-        let result = kernel.run();
-        // The sample service executes and
-        // should either halt or panic (depending on the dispatch stub).
-        // either halt or panic (depending on the dispatch stub).
-        match result {
-            javm_legacy::kernel::KernelResult::Halt(_)
-            | javm_legacy::kernel::KernelResult::Panic => {}
-            other => panic!("Expected Halt or Panic, got {:?}", other),
-        }
+        // Format-level sanity: starts with the JAR magic header. The
+        // v3 javm doesn't yet consume this blob format directly; the
+        // jar-kernel-v3 build pipeline (Stage D) parses the manifest
+        // via `crate::program::parse_blob` and constructs a v3
+        // `jar_cap::Image` from it.
+        assert_eq!(&blob[..4], b"JAR\x02");
     }
 }
