@@ -880,6 +880,13 @@ name = "javm-builtins"
 version = "0.1.0"
 
 [[package]]
+name = "javm-exec"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "javm-guest-tests"
 version = "0.1.0"
 dependencies = [
