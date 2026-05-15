@@ -894,8 +894,6 @@ dependencies = [
  "blake2",
  "build-javm",
  "javm-builtins",
- "javm-legacy",
- "javm-transpiler",
  "sha3",
 ]
 
