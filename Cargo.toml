@@ -15,8 +15,6 @@ members = [
     "rust/jar-cap",
     "rust/javm-exec",
     "rust/jar-kernel",
-    "rust/jar",
-    "rust/jar-harness",
     "rust/jar-test-services/halt",
     "components/benches/blake2b",
     "components/benches/ecrecover",
