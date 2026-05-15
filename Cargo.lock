@@ -589,6 +589,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jar-kernel"
+version = "0.1.0"
+dependencies = [
+ "jar-cap",
+ "javm",
+ "javm-exec",
+ "proptest",
+ "scale",
+ "scale-derive",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "jar-test-halt"
 version = "0.1.0"
 

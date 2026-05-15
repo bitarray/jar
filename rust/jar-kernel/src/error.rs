@@ -1,0 +1,21 @@
+//! Errors surfaced by the v3 jar-kernel.
+
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum KernelError {
+    #[error("vm error: {0}")]
+    Vm(#[from] javm::VmError),
+    #[error("cap-table operation failed: {0}")]
+    Cap(#[from] jar_cap::CapError),
+    #[error("mgmt op failed: {0}")]
+    Op(#[from] jar_cap::OpError),
+    #[error("file_id {0} not found in data_blobs registry")]
+    FileNotFound(u64),
+    #[error("storage quota exhausted (quota_id {0}): tried to write {1} bytes, only {2} available)")]
+    StorageExhausted(u64, u64, u64),
+    #[error("invariant violated: {0}")]
+    Invariant(&'static str),
+    #[error("blob format error: {0}")]
+    BlobFormat(&'static str),
+}

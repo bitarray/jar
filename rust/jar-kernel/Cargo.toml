@@ -1,0 +1,17 @@
+[package]
+name = "jar-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JAR v3 kernel: σ state, block apply, state-root, kernel-assisted Instances."
+
+[dependencies]
+jar-cap = { workspace = true }
+javm-exec = { workspace = true }
+javm = { workspace = true }
+scale = { workspace = true }
+scale-derive = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
