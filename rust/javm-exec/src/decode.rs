@@ -246,7 +246,7 @@ fn compute_bb_starts_inner(code: &[u8], bitmask: &[u8]) -> (Vec<bool>, Vec<u8>) 
 
 /// Compute gas cost per basic block using `GasSimulator`. Indexed by PC;
 /// only basic-block-start entries are meaningful.
-fn compute_block_gas_costs(
+pub fn compute_block_gas_costs(
     code: &[u8],
     bitmask: &[u8],
     basic_block_starts: &[bool],
