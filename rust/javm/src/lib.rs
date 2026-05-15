@@ -32,4 +32,4 @@ pub use kernel_assist::{
     InProcessKernelAssist, KernelAssist, KernelImage, MeterId, QuotaId, kernel_image_hash,
     recognize_kernel_image,
 };
-pub use vm::Vm;
+pub use vm::{CallResult, Vm};
