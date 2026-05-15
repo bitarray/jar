@@ -19,7 +19,7 @@ use core::fmt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use jar_cap::{Blake2b256, CapHash, Hash, image::Image};
+use jar_cap::{Blake2b256, CapHash, DataCap, Hash, image::Image};
 
 /// Identifier for a row in the kernel-internal GasMeter table.
 /// Chain-chosen, not kernel-assigned (per spec §22).
@@ -120,6 +120,29 @@ pub trait KernelAssist {
     fn data_store(&mut self, bytes: &[u8]) -> CapHash {
         Blake2b256::hash(bytes)
     }
+
+    // ---- σ-resident File registry ----
+    //
+    // A v3 "FileCap" is a `Cap::Instance` with the well-known
+    // `KernelImage::File` chain hash, whose `content_hash` carries
+    // the `file_id` (low 8 bytes, little-endian — Stage 3 convention).
+    // `host_open` materializes the file's bytes as an ephemeral
+    // `Cap::Data`; `host_save` mints a fresh FileCap from a Cap::Data
+    // after debiting StorageQuota.
+
+    /// Materialize a σ-resident file as a `Cap::Data`. `None` if the
+    /// file_id isn't registered. Stage 4 jar-kernel-v3 reads from
+    /// `State.data_blobs` (refcount preserved).
+    fn host_open(&mut self, _file_id: u64) -> Option<DataCap> {
+        None
+    }
+
+    /// Mint a new file from `data` after debiting `quota_id`. Returns
+    /// the new `file_id`. Stage 4 jar-kernel-v3 enforces the quota
+    /// and writes σ. The Stage 3 default returns None.
+    fn host_save(&mut self, _data: &DataCap, _quota_id: u64) -> Option<u64> {
+        None
+    }
 }
 
 /// In-process, in-memory `KernelAssist` impl. State lives in plain
@@ -145,6 +168,10 @@ pub struct InProcessKernelAssist {
     /// Data blob registry (content_hash → bytes). `host_read_data_cap`
     /// resolves through this; `host_mint_data_cap` populates it.
     data_blobs: HashMap<CapHash, Vec<u8>>,
+    /// σ-style file registry (file_id → DataCap). `host_open` reads
+    /// through this; `host_save` mints monotonic file_ids.
+    files: HashMap<u64, DataCap>,
+    next_file_id: u64,
 }
 
 impl InProcessKernelAssist {
@@ -156,6 +183,8 @@ impl InProcessKernelAssist {
             next_yc_nonce: 0,
             images: HashMap::new(),
             data_blobs: HashMap::new(),
+            files: HashMap::new(),
+            next_file_id: 1,
         }
     }
 
@@ -181,6 +210,15 @@ impl InProcessKernelAssist {
     /// `data_store`. Useful when seeding fixtures.
     pub fn register_data(&mut self, content_hash: CapHash, bytes: Vec<u8>) {
         self.data_blobs.insert(content_hash, bytes);
+    }
+
+    /// Register a FileId → DataCap mapping. `host_open` of the
+    /// file_id returns the DataCap. Useful when seeding fixtures.
+    pub fn register_file(&mut self, file_id: u64, data: DataCap) {
+        self.files.insert(file_id, data);
+        if file_id >= self.next_file_id {
+            self.next_file_id = file_id + 1;
+        }
     }
 }
 
@@ -261,6 +299,23 @@ impl KernelAssist for InProcessKernelAssist {
         self.data_blobs.insert(hash, bytes.to_vec());
         hash
     }
+
+    fn host_open(&mut self, file_id: u64) -> Option<DataCap> {
+        self.files.get(&file_id).copied()
+    }
+
+    fn host_save(&mut self, data: &DataCap, quota_id: u64) -> Option<u64> {
+        // Debit quota; return None if exhausted (caller traps).
+        let q = self.storage_quotas.get(&quota_id).copied().unwrap_or(0);
+        if q < data.size {
+            return None;
+        }
+        self.storage_quotas.insert(quota_id, q - data.size);
+        let id = self.next_file_id;
+        self.next_file_id += 1;
+        self.files.insert(id, *data);
+        Some(id)
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -290,6 +345,15 @@ pub enum KernelImage {
     CreateYieldCatcher,
     OogMarker,
     StorageExhaustedMarker,
+    /// Per-Instance File{file_id} handle: stable σ-resident reference
+    /// produced by host_save / consumed by host_open. State:
+    /// `file_id: u64`.
+    File,
+    /// Per-Instance HostOpen handle: kernel-issued cap that resolves
+    /// to the `host_open` host call dispatch.
+    HostOpen,
+    /// Per-Instance HostSave handle: symmetric counterpart.
+    HostSave,
 }
 
 /// Compute the placeholder image_hash for a kernel-assisted Image.
@@ -310,6 +374,9 @@ const fn const_kernel_image_label(kind: KernelImage) -> &'static [u8] {
         KernelImage::CreateYieldCatcher => b"kernel:create_yield_catcher",
         KernelImage::OogMarker => b"kernel:oog_marker",
         KernelImage::StorageExhaustedMarker => b"kernel:storage_exhausted_marker",
+        KernelImage::File => b"kernel:file",
+        KernelImage::HostOpen => b"kernel:host_open",
+        KernelImage::HostSave => b"kernel:host_save",
     }
 }
 
@@ -322,7 +389,7 @@ pub fn kernel_image_hash(kind: KernelImage) -> CapHash {
 /// Returns `None` for a hash that doesn't match any kernel-known
 /// Image (the common case — user Images are not kernel-assisted).
 pub fn recognize_kernel_image(hash: CapHash) -> Option<KernelImage> {
-    // Linear scan is fine: the registry has ~12 entries, lookup is
+    // Linear scan is fine: the registry has ~15 entries, lookup is
     // not on the hot path (only at Instance-entry / yield-route).
     [
         KernelImage::GasMeter,
@@ -337,6 +404,9 @@ pub fn recognize_kernel_image(hash: CapHash) -> Option<KernelImage> {
         KernelImage::CreateYieldCatcher,
         KernelImage::OogMarker,
         KernelImage::StorageExhaustedMarker,
+        KernelImage::File,
+        KernelImage::HostOpen,
+        KernelImage::HostSave,
     ]
     .into_iter()
     .find(|kind| kernel_image_hash(*kind) == hash)
@@ -447,6 +517,9 @@ mod tests {
             KernelImage::CreateYieldCatcher,
             KernelImage::OogMarker,
             KernelImage::StorageExhaustedMarker,
+            KernelImage::File,
+            KernelImage::HostOpen,
+            KernelImage::HostSave,
         ];
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {

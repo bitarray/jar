@@ -104,6 +104,17 @@ pub mod host_op {
     /// zeros (canonical form §2); content-hash; debit StorageQuota
     /// via KernelAssist; mint Cap::Data; place at dst_slot.
     pub const HOST_MINT_DATA_CAP: u32 = 23;
+    /// `host_open(file_slot=φ[7], dst_slot=φ[8])` — materialize the
+    /// σ-resident FileCap at `file_slot` into a `Cap::Data` and
+    /// place at `dst_slot`. The FileCap is a `Cap::Instance` whose
+    /// `image_hash_chain` matches `KernelImage::File` and whose
+    /// `content_hash` low 8 bytes encode the `file_id`.
+    pub const HOST_OPEN: u32 = 24;
+    /// `host_save(data_slot=φ[7], quota_slot=φ[8], dst_slot=φ[9])` —
+    /// mint a fresh FileCap from the Cap::Data at `data_slot`,
+    /// debiting StorageQuota at `quota_slot`. Result Cap::Instance
+    /// (kernel:file) placed at `dst_slot`.
+    pub const HOST_SAVE: u32 = 25;
     /// Inclusive upper bound of the kernel-known host call range.
     pub const MAX: u32 = 63;
 }
@@ -180,9 +191,15 @@ impl<K: KernelAssist> Vm<K> {
                     EcallResult::Continue
                 })
             }
+            host_op::HOST_OPEN => {
+                trap_on_err(self.dispatch_host_open(regs), |()| EcallResult::Continue)
+            }
+            host_op::HOST_SAVE => {
+                trap_on_err(self.dispatch_host_save(regs), |()| EcallResult::Continue)
+            }
             _ => {
-                // 3.11 / 3.12 fill the rest. Continue silently for
-                // now so unknown host call ops don't fault.
+                // Chain-user host calls (64+) land later. Continue
+                // silently for now.
                 EcallResult::Continue
             }
         }
@@ -536,6 +553,110 @@ impl<K: KernelAssist> Vm<K> {
                 size: len as u64,
             })),
         )?;
+        Ok(())
+    }
+
+    /// `host_open(file_slot=φ[7], dst_slot=φ[8])`.
+    ///
+    /// The FileCap is a `Cap::Instance` with low 8 content_hash
+    /// bytes = file_id. Materialize the file via
+    /// `KernelAssist::host_open` (returns a Cap::Data), then place
+    /// at `dst_slot`.
+    fn dispatch_host_open(&mut self, regs: &mut Regs) -> Result<(), VmError> {
+        let file_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let dst_slot = SlotIdx((regs.gpr[8] & 0xFF) as u32);
+
+        let file_id = {
+            let running = self
+                .stack
+                .running_instance()
+                .ok_or(VmError::CallStackEmpty)?;
+            match running.cnode.get(file_slot)? {
+                Some(Cap::Instance(ic)) => u64::from_le_bytes(
+                    ic.content_hash[..8]
+                        .try_into()
+                        .map_err(|_| VmError::Invariant("file content_hash too short"))?,
+                ),
+                Some(_) => return Err(VmError::SlotKindMismatch(file_slot.get())),
+                None => return Err(VmError::SlotEmpty(file_slot.get())),
+            }
+        };
+
+        let data = self
+            .kernel_assist
+            .host_open(file_id)
+            .ok_or(VmError::Invariant("host_open: file_id not registered"))?;
+
+        let running = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?;
+        let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
+        if pinned.contains(&dst_slot) {
+            return Err(jar_cap::OpError::SlotPinned(dst_slot.get()).into());
+        }
+        running.cnode.set(dst_slot, Some(Cap::Data(data)))?;
+        Ok(())
+    }
+
+    /// `host_save(data_slot=φ[7], quota_slot=φ[8], dst_slot=φ[9])`.
+    ///
+    /// Mint a fresh FileCap from the Cap::Data at `data_slot`,
+    /// debiting StorageQuota at `quota_slot`. The new FileCap is a
+    /// `Cap::Instance` carrying the kernel `File` image_hash; low 8
+    /// content_hash bytes encode the new file_id.
+    fn dispatch_host_save(&mut self, regs: &mut Regs) -> Result<(), VmError> {
+        let data_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let quota_slot = SlotIdx((regs.gpr[8] & 0xFF) as u32);
+        let dst_slot = SlotIdx((regs.gpr[9] & 0xFF) as u32);
+
+        let (data, quota_id) = {
+            let running = self
+                .stack
+                .running_instance()
+                .ok_or(VmError::CallStackEmpty)?;
+            let data = match running.cnode.get(data_slot)? {
+                Some(Cap::Data(d)) => *d,
+                Some(_) => return Err(VmError::SlotKindMismatch(data_slot.get())),
+                None => return Err(VmError::SlotEmpty(data_slot.get())),
+            };
+            let quota_id = match running.cnode.get(quota_slot)? {
+                Some(Cap::Instance(ic)) => u64::from_le_bytes(
+                    ic.content_hash[..8]
+                        .try_into()
+                        .map_err(|_| VmError::Invariant("quota content_hash too short"))?,
+                ),
+                Some(_) => return Err(VmError::SlotKindMismatch(quota_slot.get())),
+                None => return Err(VmError::SlotEmpty(quota_slot.get())),
+            };
+            (data, quota_id)
+        };
+
+        let new_file_id =
+            self.kernel_assist
+                .host_save(&data, quota_id)
+                .ok_or(VmError::Invariant(
+                    "host_save: quota exhausted or kernel-assist unsupported",
+                ))?;
+
+        let mut file_content_hash = [0u8; 32];
+        file_content_hash[..8].copy_from_slice(&new_file_id.to_le_bytes());
+        let new_file_cap = Cap::Instance(InstanceCap {
+            image_hash_chain: crate::kernel_assist::kernel_image_hash(
+                crate::kernel_assist::KernelImage::File,
+            ),
+            content_hash: file_content_hash,
+        });
+
+        let running = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?;
+        let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
+        if pinned.contains(&dst_slot) {
+            return Err(jar_cap::OpError::SlotPinned(dst_slot.get()).into());
+        }
+        running.cnode.set(dst_slot, Some(new_file_cap))?;
         Ok(())
     }
 }
@@ -1080,5 +1201,119 @@ mod tests {
         assert_eq!(strip_trailing_zeros_len(&[1, 2, 3, 0, 0]), 3);
         assert_eq!(strip_trailing_zeros_len(&[0, 0, 0]), 0);
         assert_eq!(strip_trailing_zeros_len(&[]), 0);
+    }
+
+    // -- 3.12 host_open / host_save --
+
+    #[test]
+    fn host_open_materializes_registered_file_as_data() {
+        let mut vm = fixture_vm();
+        // Register file_id 99 → DataCap{hash=[0x77;32], size=12}.
+        let data = jar_cap::DataCap {
+            content_hash: [0x77u8; 32],
+            size: 12,
+        };
+        vm.kernel_assist.register_file(99, data);
+        // Place a FileCap (Cap::Instance with content_hash low 8
+        // bytes = file_id 99) at slot 3.
+        let mut file_hash = [0u8; 32];
+        file_hash[..8].copy_from_slice(&99u64.to_le_bytes());
+        vm.stack
+            .running_instance_mut()
+            .unwrap()
+            .cnode
+            .set(
+                SlotIdx(3),
+                Some(Cap::Instance(InstanceCap {
+                    image_hash_chain: crate::kernel_assist::kernel_image_hash(
+                        crate::kernel_assist::KernelImage::File,
+                    ),
+                    content_hash: file_hash,
+                })),
+            )
+            .unwrap();
+
+        let mut regs = Regs::new();
+        regs.gpr[7] = 3; // file slot
+        regs.gpr[8] = 4; // dst slot
+        let mut mem = Mem::new();
+        let r = vm.handle(EcallKind::Ecalli(host_op::HOST_OPEN), &mut regs, &mut mem);
+        assert!(matches!(r, EcallResult::Continue));
+
+        let cnode = &vm.stack.running_instance().unwrap().cnode;
+        match cnode.get(SlotIdx(4)).unwrap() {
+            Some(Cap::Data(c)) => {
+                assert_eq!(c.content_hash, [0x77u8; 32]);
+                assert_eq!(c.size, 12);
+            }
+            other => panic!("expected Cap::Data at dst, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn host_save_mints_file_after_quota_debit() {
+        let mut vm = fixture_vm();
+        // Quota{quota_id=4} at slot 3 with 1000 bytes.
+        let mut quota_hash = [0u8; 32];
+        quota_hash[..8].copy_from_slice(&4u64.to_le_bytes());
+        vm.stack
+            .running_instance_mut()
+            .unwrap()
+            .cnode
+            .set(
+                SlotIdx(3),
+                Some(Cap::Instance(InstanceCap {
+                    image_hash_chain: [0xCAu8; 32],
+                    content_hash: quota_hash,
+                })),
+            )
+            .unwrap();
+        vm.kernel_assist.storage_quota_set(4, 1000);
+        // Data cap at slot 4 (size 100).
+        vm.stack
+            .running_instance_mut()
+            .unwrap()
+            .cnode
+            .set(
+                SlotIdx(4),
+                Some(Cap::Data(jar_cap::DataCap {
+                    content_hash: [0x66u8; 32],
+                    size: 100,
+                })),
+            )
+            .unwrap();
+
+        let mut regs = Regs::new();
+        regs.gpr[7] = 4; // data slot
+        regs.gpr[8] = 3; // quota slot
+        regs.gpr[9] = 5; // dst slot
+        let mut mem = Mem::new();
+        let r = vm.handle(EcallKind::Ecalli(host_op::HOST_SAVE), &mut regs, &mut mem);
+        assert!(matches!(r, EcallResult::Continue));
+
+        // dst should hold a Cap::Instance (FileCap) with kernel:file image_hash.
+        let cnode = &vm.stack.running_instance().unwrap().cnode;
+        let file_id = match cnode.get(SlotIdx(5)).unwrap() {
+            Some(Cap::Instance(ic)) => {
+                assert_eq!(
+                    ic.image_hash_chain,
+                    crate::kernel_assist::kernel_image_hash(
+                        crate::kernel_assist::KernelImage::File
+                    )
+                );
+                u64::from_le_bytes(ic.content_hash[..8].try_into().unwrap())
+            }
+            other => panic!("expected Cap::Instance FileCap at dst, got {:?}", other),
+        };
+        // file_id should be 1 (the first id minted).
+        assert_eq!(file_id, 1);
+        // Quota debited by 100.
+        assert_eq!(vm.kernel_assist.storage_quota_get(4), 900);
+
+        // Re-open the newly-minted file → DataCap with the original
+        // content_hash + size.
+        let data = vm.kernel_assist.host_open(file_id).unwrap();
+        assert_eq!(data.content_hash, [0x66u8; 32]);
+        assert_eq!(data.size, 100);
     }
 }
