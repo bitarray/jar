@@ -167,6 +167,7 @@ version = "0.1.0"
 dependencies = [
  "build-crate",
  "javm-transpiler",
+ "scale",
 ]
 
 [[package]]
@@ -553,6 +554,7 @@ dependencies = [
 name = "javm-transpiler"
 version = "0.1.0"
 dependencies = [
+ "jar-cap",
  "proptest",
  "scale",
  "thiserror",

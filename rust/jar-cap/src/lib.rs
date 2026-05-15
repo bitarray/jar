@@ -12,6 +12,7 @@
 //! See `~/docs/minimum-v3/implementation/architecture.md` for the
 //! crate's role in the overall layering.
 
+pub mod abi;
 pub mod bmt;
 pub mod cap;
 pub mod cnode;

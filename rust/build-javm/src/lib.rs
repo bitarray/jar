@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use build_crate::{BuildKind, GuestBuild};
+use scale::Encode;
 
 const TARGET_JSON: &str = include_str!("riscv64em-javm.json");
 const TARGET_NAME: &str = "riscv64em-javm";
@@ -64,10 +65,11 @@ pub fn build(manifest_dir: &str, bin_name: &str) -> PathBuf {
 
     let elf_path = guest.build();
     let elf_data = std::fs::read(&elf_path).expect("failed to read ELF");
-    let blob =
-        javm_transpiler::link_elf(&elf_data).expect("failed to transpile ELF to v2 PVM blob");
+    let image =
+        javm_transpiler::link_elf(&elf_data).expect("failed to transpile ELF to Cap::Image");
+    let encoded = image.encode();
 
-    std::fs::write(&blob_path, &blob).expect("failed to write PVM blob");
+    std::fs::write(&blob_path, &encoded).expect("failed to write Image blob");
     blob_path
 }
 
@@ -107,9 +109,10 @@ pub fn build_service(manifest_dir: &str, bin_name: &str) -> PathBuf {
 
     let elf_path = guest.build();
     let elf_data = std::fs::read(&elf_path).expect("failed to read ELF");
-    let blob =
-        javm_transpiler::link_elf(&elf_data).expect("failed to transpile ELF to v2 PVM blob");
+    let image =
+        javm_transpiler::link_elf(&elf_data).expect("failed to transpile ELF to Cap::Image");
+    let encoded = image.encode();
 
-    std::fs::write(&blob_path, &blob).expect("failed to write PVM blob");
+    std::fs::write(&blob_path, &encoded).expect("failed to write Image blob");
     blob_path
 }

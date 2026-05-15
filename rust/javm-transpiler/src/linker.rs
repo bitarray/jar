@@ -10,11 +10,15 @@
 //! 3. Build a relocation map: code_offset → resolved_address
 //! 4. Translate RISC-V instructions, using relocation info to replace
 //!    AUIPC+LO12 pairs with direct load_imm of the final PVM address
+//! 5. Emit a v3 `jar_cap::image::Image` with the code sub-blob,
+//!    declared endpoints, and standard kernel-ABI slot conventions.
 
 use crate::TranspileError;
 use crate::emitter;
 use crate::riscv::TranslationContext;
-use std::collections::HashMap;
+use jar_cap::abi::{BARE_GAS_SLOT, BARE_QUOTA_SLOT, BARE_YIELD_CATCHER_SLOT};
+use jar_cap::image::{EndpointDef, Image};
+use std::collections::{BTreeMap, HashMap};
 
 /// RISC-V relocation types we care about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +58,17 @@ impl RelocType {
 }
 
 /// Parsed ELF with relocation info for linking.
+///
+/// Several fields (`ro_data`, `rw_data`, `stack_size`, `heap_pages`,
+/// `abs_code_ptrs`, `sub32_relocs`) are populated by
+/// [`parse_linked_elf`] but no longer consumed by [`link_elf`] now
+/// that the JAR v1 manifest layer has been retired in favor of v3
+/// `Image` output. They remain in the struct because
+/// [`rewrite_data_code_ptrs`] (still defined for future declarative
+/// memory-mapping work) reads them. Marked `allow(dead_code)`
+/// pending a follow-up cleanup that removes the dead parsing path
+/// entirely.
+#[allow(dead_code)]
 struct LinkedElf {
     is_64bit: bool,
     /// All code sections: (file_offset, vaddr, data)
@@ -89,13 +104,22 @@ struct LinkedElf {
     entry_vaddr: u64,
 }
 
-/// Transpile an rv64em ELF into a JAR capability manifest PVM blob.
+/// Transpile an rv64em ELF into a v3 chain [`Image`].
 ///
-/// The init prologue (`MGMT_MAP` per DATA cap + SP setup) is emitted
-/// inside [`crate::emitter::build_service_program`] and prepended to
-/// the user code below; this function emits only an unconditional jump
-/// to ELF entry plus the translated user code.
-pub fn link_elf(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
+/// Output Image:
+/// - `code`: CODE sub-blob (jump_table + code + packed bitmask) of
+///   the translated user code.
+/// - `endpoints`: populated from the `.subsoil.endpoints` ELF
+///   section (entries emitted by `#[subsoil::endpoint(N)]`). If the
+///   section is absent, falls back to a single entrypoint at PC 0
+///   targeting `_start` for backward compatibility with
+///   `subsoil::entry!`-based guests.
+/// - `memory_mappings`: empty (declarative mappings are a future
+///   refactor; the runtime prologue / data-cap manifest layer is no
+///   longer emitted).
+/// - `gas_slots`, `quota_slots`, `yield_marker_slot`: standard
+///   kernel-ABI defaults from [`jar_cap::abi`].
+pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     let elf = parse_linked_elf(elf_data)?;
     let mut ctx = TranslationContext::new(elf.is_64bit);
     ctx.code_ranges = elf.code_ranges.clone();
@@ -115,10 +139,6 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
     }
     ctx.apply_fixups();
 
-    let mut ro_data = elf.ro_data.clone();
-    let mut rw_data = elf.rw_data.clone();
-    rewrite_data_code_ptrs(&elf, &mut ctx, &mut ro_data, &mut rw_data);
-
     crate::peephole_fuse_load_imm_alu(&mut ctx.code, &mut ctx.bitmask, &ctx.jump_table);
     crate::peephole_fuse_load_imm_memory(&mut ctx.code, &mut ctx.bitmask, &ctx.jump_table);
     crate::peephole_eliminate_dead_load_imm(&mut ctx.code, &mut ctx.bitmask, &ctx.jump_table);
@@ -128,17 +148,128 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
         &mut ctx.jump_table,
     );
 
-    let stack_pages = elf.stack_size / 4096;
-    Ok(emitter::build_service_program(
-        &ctx.code,
-        &ctx.bitmask,
-        &ctx.jump_table,
-        &ro_data,
-        &rw_data,
-        stack_pages,
-        elf.heap_pages,
-        elf.heap_pages,
-    ))
+    let code_blob = emitter::build_image_code_blob(&ctx.code, &ctx.bitmask, &ctx.jump_table);
+    let endpoints = read_subsoil_endpoints(elf_data, &elf, &ctx)?;
+
+    Ok(Image {
+        code: code_blob,
+        endpoints,
+        memory_mappings: Vec::new(),
+        gas_slots: vec![BARE_GAS_SLOT],
+        quota_slots: vec![BARE_QUOTA_SLOT],
+        pinned_slots: BTreeMap::new(),
+        yield_marker_slot: Some(BARE_YIELD_CATCHER_SLOT),
+    })
+}
+
+/// Read the `.subsoil.endpoints` ELF section (emitted by
+/// `subsoil_derive::endpoint`) and resolve each descriptor's RISC-V
+/// fn_ptr to a PVM PC via the transpiler's address map.
+///
+/// Each descriptor is 16 bytes, `#[repr(C)]`:
+///   `fn_ptr: u64 LE | index: u8 | arg_registers: u8 | arg_cnode_size: u8 | _pad[5]`
+///
+/// If the section is absent (e.g., a guest still using
+/// `subsoil::entry!`), returns a single fallback endpoint at index 0
+/// pointing to PVM PC 0 — matching the legacy single-entrypoint
+/// behavior.
+fn read_subsoil_endpoints(
+    elf_data: &[u8],
+    elf: &LinkedElf,
+    ctx: &TranslationContext,
+) -> Result<BTreeMap<u8, EndpointDef>, TranspileError> {
+    let mut endpoints = BTreeMap::new();
+    if let Some(section_bytes) = find_section_bytes(elf_data, ".subsoil.endpoints")? {
+        const DESCRIPTOR_SIZE: usize = 16;
+        if section_bytes.len() % DESCRIPTOR_SIZE != 0 {
+            return Err(TranspileError::InvalidSection(format!(
+                ".subsoil.endpoints size {} is not a multiple of {}",
+                section_bytes.len(),
+                DESCRIPTOR_SIZE
+            )));
+        }
+        for chunk in section_bytes.chunks(DESCRIPTOR_SIZE) {
+            let fn_ptr = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+            let index = chunk[8];
+            let arg_registers = chunk[9];
+            let arg_cnode_size = chunk[10];
+            let pvm_pc = ctx.address_map.get(&fn_ptr).copied().ok_or_else(|| {
+                TranspileError::InvalidSection(format!(
+                    "subsoil endpoint {} fn_ptr {:#x} has no PVM address mapping",
+                    index, fn_ptr
+                ))
+            })?;
+            endpoints.insert(
+                index,
+                EndpointDef {
+                    entry_pc: pvm_pc as u64,
+                    arg_registers,
+                    arg_cnode_size,
+                },
+            );
+        }
+    }
+    if endpoints.is_empty() {
+        // Backward-compat: no `.subsoil.endpoints` section means the
+        // guest uses `subsoil::entry!` for a single _start entrypoint.
+        endpoints.insert(
+            0,
+            EndpointDef {
+                entry_pc: 0,
+                arg_registers: 0,
+                arg_cnode_size: 0,
+            },
+        );
+        let _ = elf; // suppress unused-warning when fallback is taken without the elf used
+    }
+    Ok(endpoints)
+}
+
+/// Locate a named section's bytes in an ELF file. Returns `Ok(None)`
+/// if the section is absent (not an error — caller may have a
+/// fallback). Returns the raw section bytes (lifetime-tied to
+/// `elf_data`).
+fn find_section_bytes<'a>(
+    elf_data: &'a [u8],
+    section_name: &str,
+) -> Result<Option<&'a [u8]>, TranspileError> {
+    if elf_data.len() < 64 || elf_data[0..4] != [0x7F, b'E', b'L', b'F'] {
+        return Err(TranspileError::ElfParse("not an ELF file".into()));
+    }
+    if elf_data[4] != 2 {
+        return Err(TranspileError::ElfParse("only 64-bit ELF supported".into()));
+    }
+    let e_shoff = u64::from_le_bytes(elf_data[40..48].try_into().unwrap()) as usize;
+    let e_shentsize = u16::from_le_bytes(elf_data[58..60].try_into().unwrap()) as usize;
+    let e_shnum = u16::from_le_bytes(elf_data[60..62].try_into().unwrap()) as usize;
+    let e_shstrndx = u16::from_le_bytes(elf_data[62..64].try_into().unwrap()) as usize;
+
+    let strtab = {
+        let sh = e_shoff + e_shstrndx * e_shentsize;
+        let off = u64::from_le_bytes(elf_data[sh + 24..sh + 32].try_into().unwrap()) as usize;
+        let sz = u64::from_le_bytes(elf_data[sh + 32..sh + 40].try_into().unwrap()) as usize;
+        &elf_data[off..off + sz]
+    };
+
+    for i in 0..e_shnum {
+        let sh = e_shoff + i * e_shentsize;
+        if sh + e_shentsize > elf_data.len() {
+            break;
+        }
+        let name_off = u32::from_le_bytes(elf_data[sh..sh + 4].try_into().unwrap()) as usize;
+        let file_off = u64::from_le_bytes(elf_data[sh + 24..sh + 32].try_into().unwrap()) as usize;
+        let size = u64::from_le_bytes(elf_data[sh + 32..sh + 40].try_into().unwrap()) as usize;
+        let name = if name_off < strtab.len() {
+            let end = strtab[name_off..].iter().position(|&b| b == 0).unwrap_or(0);
+            std::str::from_utf8(&strtab[name_off..name_off + end]).unwrap_or("")
+        } else {
+            ""
+        };
+        if name == section_name && file_off + size <= elf_data.len() {
+            return Ok(Some(&elf_data[file_off..file_off + size]));
+        }
+    }
+    Ok(None)
 }
 
 /// Parse ELF with full relocation info.
@@ -479,6 +610,10 @@ fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError> {
 
 /// Translate a code section with relocation awareness.
 /// Rewrite code pointers in data sections (LLVM switch/jump tables, vtables).
+///
+/// Currently unused after the v3 Image refactor dropped the data-cap
+/// manifest; kept around for future declarative-mapping work.
+#[allow(dead_code)]
 ///
 /// Detects code pointers via:
 /// 1. R_RISCV_32/64 absolute relocations targeting code sections

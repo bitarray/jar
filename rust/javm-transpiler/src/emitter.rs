@@ -49,6 +49,32 @@ pub fn pack_bitmask(bitmask: &[u8]) -> Vec<u8> {
     packed
 }
 
+/// Build the CODE sub-blob for embedding in `Image.code`.
+///
+/// Layout: `jump_len: u32 LE | entry_size: u8 | code_len: u32 LE |
+/// jump_table_entries | code_bytes | packed_bitmask`. This is the
+/// same inner format the legacy JAR v1 manifest stored in its
+/// CodeCap entry; we expose it directly because v3 Image.code is
+/// the new container.
+pub fn build_image_code_blob(code: &[u8], bitmask: &[u8], jump_table: &[u32]) -> Vec<u8> {
+    assert_eq!(
+        code.len(),
+        bitmask.len(),
+        "code and bitmask must have same length"
+    );
+    let entry_size = jump_table_entry_size(jump_table);
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&(jump_table.len() as u32).to_le_bytes());
+    blob.push(entry_size);
+    blob.extend_from_slice(&(code.len() as u32).to_le_bytes());
+    for &entry in jump_table {
+        blob.extend_from_slice(&entry.to_le_bytes()[..entry_size as usize]);
+    }
+    blob.extend_from_slice(code);
+    blob.extend_from_slice(&pack_bitmask(bitmask));
+    blob
+}
+
 /// Build a complete JAR v1 program blob.
 ///
 /// Layout: header | ro_data | rw_data | jump_table | code | packed_bitmask

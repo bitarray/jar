@@ -49,9 +49,13 @@ pub enum TranspileError {
     InvalidSection(String),
 }
 
-/// Link a RISC-V rv64em ELF binary into a JAR capability manifest PVM blob.
-/// Single entrypoint (PC=0). Works for both standard and service programs.
-pub fn link_elf(elf_data: &[u8]) -> Result<Vec<u8>, TranspileError> {
+/// Link a RISC-V rv64em ELF binary into a v3 chain
+/// [`jar_cap::image::Image`]. The Image carries the PVM CODE sub-blob
+/// in its `code` field, populated endpoints (from any
+/// `.subsoil.endpoints` ELF section, or a single PC-0 fallback for
+/// `subsoil::entry!`-based guests), and standard kernel-ABI slot
+/// conventions.
+pub fn link_elf(elf_data: &[u8]) -> Result<jar_cap::image::Image, TranspileError> {
     linker::link_elf(elf_data)
 }
 
