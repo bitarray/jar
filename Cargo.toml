@@ -6,6 +6,7 @@ members = [
     "rust/build-javm",
     "rust/javm",
     "rust/subsoil",
+    "rust/subsoil-derive",
     "rust/javm-guest-tests",
     "rust/javm-transpiler",
     "rust/scale",
@@ -41,6 +42,7 @@ javm-transpiler = { path = "rust/javm-transpiler" }
 jar-cap = { path = "rust/jar-cap" }
 jar-kernel = { path = "rust/jar-kernel" }
 subsoil = { path = "rust/subsoil" }
+subsoil-derive = { path = "rust/subsoil-derive" }
 scale = { path = "rust/scale", default-features = false, features = ["std"] }
 scale-derive = { path = "rust/scale-derive" }
 

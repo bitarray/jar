@@ -12,6 +12,32 @@
 
 #![no_std]
 
+pub use subsoil_derive::endpoint;
+
+/// Descriptor written into the `.subsoil.endpoints` ELF section by
+/// the [`endpoint`] attribute macro. The JAVM transpiler reads this
+/// section at link time and uses each entry to populate the chain
+/// Image's `endpoints: BTreeMap<u8, EndpointDef>` field.
+///
+/// Layout is `#[repr(C)]` so the transpiler can decode the section
+/// as a flat array of fixed-size records. On RISC-V64 the function
+/// pointer occupies 8 bytes, followed by 8 bytes of metadata, for a
+/// total stride of 16 bytes.
+#[repr(C)]
+pub struct EndpointDescriptor {
+    /// RISC-V address of the endpoint function. The transpiler maps
+    /// this to a PVM PC via its instruction-mapping table.
+    pub fn_ptr: fn(u64) -> u64,
+    /// Endpoint index (key in the chain Image's `endpoints` map).
+    pub index: u8,
+    /// Caller-supplied register-arg count (per Image::EndpointDef).
+    pub arg_registers: u8,
+    /// Caller-supplied arg-cnode size (per Image::EndpointDef).
+    pub arg_cnode_size: u8,
+    /// Reserved for alignment / future expansion.
+    pub _pad: [u8; 5],
+}
+
 // -- Compiler builtins (freestanding targets only) ----------------------------
 
 #[cfg(target_os = "none")]
