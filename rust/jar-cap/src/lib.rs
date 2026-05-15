@@ -13,6 +13,7 @@
 //! crate's role in the overall layering.
 
 pub mod bmt;
+pub mod cap;
 pub mod cnode;
 pub mod error;
 pub mod hash;
@@ -20,7 +21,8 @@ pub mod image;
 pub mod slot;
 
 pub use bmt::Bmt;
-pub use cnode::{CNodeBackend, InMemoryCNode};
+pub use cap::{CNodeCap, Cap, CapHash, CapKind, DataCap, ImageCap, InstanceCap, TypeCap};
+pub use cnode::{CNodeBackend, CnodeHash, InMemoryCNode, SlotHasher};
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash};
 pub use image::{

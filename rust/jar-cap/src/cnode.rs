@@ -44,9 +44,9 @@ pub type SlotHasher<T> = dyn Fn(&T) -> CnodeHash;
 /// - Produce a deterministic `hash` of the slot contents.
 /// - Provide a `snapshot` that decouples mutations to the original
 ///   from mutations to the snapshot.
-pub trait CNodeBackend<T>: core::fmt::Debug
+pub trait CNodeBackend<T>: core::fmt::Debug + Send + Sync
 where
-    T: Clone + core::fmt::Debug + 'static,
+    T: Clone + core::fmt::Debug + Send + Sync + 'static,
 {
     fn size_log(&self) -> u8;
 
@@ -77,12 +77,12 @@ where
 /// modest `Cap::CNode` values. For very large cnodes (size_log > 14
 /// ish), use a future `MerkleCNode` backend.
 #[derive(Debug, Clone)]
-pub struct InMemoryCNode<T: Clone + core::fmt::Debug + 'static> {
+pub struct InMemoryCNode<T: Clone + core::fmt::Debug + Send + Sync + 'static> {
     size_log: u8,
     slots: Vec<Option<T>>,
 }
 
-impl<T: Clone + core::fmt::Debug + 'static> InMemoryCNode<T> {
+impl<T: Clone + core::fmt::Debug + Send + Sync + 'static> InMemoryCNode<T> {
     /// Construct an empty in-memory cnode with `2^size_log` slots.
     ///
     /// Returns `Err(CapError::InvalidCNodeSize)` if `size_log > 16`.
@@ -97,7 +97,7 @@ impl<T: Clone + core::fmt::Debug + 'static> InMemoryCNode<T> {
     }
 }
 
-impl<T: Clone + core::fmt::Debug + 'static> CNodeBackend<T> for InMemoryCNode<T> {
+impl<T: Clone + core::fmt::Debug + Send + Sync + 'static> CNodeBackend<T> for InMemoryCNode<T> {
     fn size_log(&self) -> u8 {
         self.size_log
     }
