@@ -1,0 +1,22 @@
+[package]
+name = "javm-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "JAVM v3 benchmarks: byte-PVM interpreter vs JIT recompiler."
+
+[dependencies]
+jar-cap = { workspace = true }
+jar-kernel = { workspace = true }
+javm-exec = { workspace = true }
+scale = { workspace = true }
+
+[build-dependencies]
+build-javm = { path = "../build-javm" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "pvm_bench"
+harness = false

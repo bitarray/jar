@@ -13,6 +13,7 @@ members = [
     "rust/scale-derive",
     "rust/jar-cap",
     "rust/javm-exec",
+    "rust/javm-bench",
     "rust/jar-kernel",
     "rust/jar-test-services/halt",
     "components/benches/blake2b",
