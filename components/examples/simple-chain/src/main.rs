@@ -4,10 +4,7 @@
 use subsoil as _;
 
 #[cfg(target_env = "javm")]
-subsoil::entry!(simple_chain_main);
-
-#[cfg(target_env = "javm")]
-#[unsafe(no_mangle)]
+#[subsoil::endpoint(0)]
 fn simple_chain_main(_args_len: u64) -> u64 {
     simple_chain::simple_chain_sum()
 }

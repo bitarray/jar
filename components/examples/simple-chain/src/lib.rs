@@ -3,8 +3,8 @@
 //! The chain's endpoint receives an `args_len` (currently ignored)
 //! and returns a u64 — the sum of a fixed array. Exercises the
 //! transpiled-Image runtime end-to-end: stack frame, array on
-//! the stack, iterative sum, function return through
-//! `subsoil::entry!`'s halt wrapper.
+//! the stack, iterative sum, function return through the
+//! `#[subsoil::endpoint]` trampoline's halt wrapper.
 
 #![cfg_attr(target_os = "none", no_std)]
 

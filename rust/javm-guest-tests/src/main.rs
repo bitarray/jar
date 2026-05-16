@@ -2,10 +2,7 @@
 #![cfg_attr(target_env = "javm", no_main)]
 
 #[cfg(target_env = "javm")]
-subsoil::entry!(javm_main);
-
-#[cfg(target_env = "javm")]
-#[no_mangle]
+#[subsoil::endpoint(0)]
 extern "C" fn javm_main(args_len: u64) -> u64 {
     let input = subsoil::map_args(args_len);
     let output_len = javm_guest_tests::dispatch(input);

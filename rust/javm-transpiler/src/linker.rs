@@ -116,11 +116,12 @@ struct LinkedElf {
 /// - `code`: CODE sub-blob (jump_table + code + packed bitmask) of
 ///   the translated user code.
 /// - `endpoints`: populated from the `.subsoil.endpoints` ELF
-///   section (entries emitted by `#[subsoil::endpoint(N)]`). If the
-///   section is absent, falls back to a single entrypoint at PC 0
-///   targeting `_start` for backward compatibility with
-///   `subsoil::entry!`-based guests. Every endpoint gets
-///   `initial_regs[1] = stack_top` baked in.
+///   section (entries emitted by `#[subsoil::endpoint(N)]`). Each
+///   descriptor's `fn_ptr` points at a per-endpoint trampoline
+///   that calls the user fn and halts. Guests must declare at
+///   least one endpoint; the transpiler errors if the section is
+///   absent or empty. Every endpoint gets `initial_regs[1] =
+///   stack_top` baked in.
 /// - `memory_mappings` + `pinned_slots` + `initial_slots`: declarative
 ///   address-space layout. The transpiler emits one mapping per
 ///   region (stack, ro, rw, heap) backed by a slot. ro_data lives
@@ -278,10 +279,10 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
 /// Each descriptor is 16 bytes, `#[repr(C)]`:
 ///   `fn_ptr: u64 LE | index: u8 | arg_registers: u8 | arg_cnode_size: u8 | _pad[5]`
 ///
-/// If the section is absent (e.g., a guest still using
-/// `subsoil::entry!`), returns a single fallback endpoint at index 0
-/// pointing to PVM PC 0 — matching the legacy single-entrypoint
-/// behavior.
+/// `fn_ptr` points at a per-endpoint trampoline (a `call user_fn;
+/// ecall HALT` wrapper) emitted by `#[subsoil::endpoint(N)]`, not
+/// at the user fn itself. Guests must declare at least one
+/// endpoint; an absent or empty section is a hard error.
 fn read_subsoil_endpoints(
     elf_data: &[u8],
     elf: &LinkedElf,
@@ -320,19 +321,13 @@ fn read_subsoil_endpoints(
         }
     }
     if endpoints.is_empty() {
-        // Backward-compat: no `.subsoil.endpoints` section means the
-        // guest uses `subsoil::entry!` for a single _start entrypoint.
-        endpoints.insert(
-            0,
-            EndpointDef {
-                entry_pc: 0,
-                arg_registers: 0,
-                arg_cnode_size: 0,
-                initial_regs: BTreeMap::new(),
-            },
-        );
-        let _ = elf; // suppress unused-warning when fallback is taken without the elf used
+        return Err(TranspileError::InvalidSection(
+            ".subsoil.endpoints section is absent or empty: \
+             the guest must declare at least one #[subsoil::endpoint(N)]"
+                .into(),
+        ));
     }
+    let _ = elf; // currently unused; reserved for future symbol-table cross-checks
     Ok(endpoints)
 }
 

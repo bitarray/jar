@@ -65,7 +65,7 @@ pub fn endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
         );
 
         #[cfg(all(target_env = "javm", target_os = "none"))]
-        unsafe extern "C" {
+        unsafe extern "Rust" {
             safe fn #trampoline_ident(args_len: u64) -> u64;
         }
 
