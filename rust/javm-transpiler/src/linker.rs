@@ -289,8 +289,15 @@ fn read_subsoil_endpoints(
     ctx: &TranslationContext,
 ) -> Result<BTreeMap<u8, EndpointDef>, TranspileError> {
     let mut endpoints = BTreeMap::new();
-    if let Some(section_bytes) = find_section_bytes(elf_data, ".subsoil.endpoints")? {
-        const DESCRIPTOR_SIZE: usize = 16;
+    // LLD emits one `.subsoil.endpoints` *input* section per
+    // `#[link_section]` static, and does not coalesce them into a
+    // single output section header — so the ELF can carry many
+    // section headers with this exact name, laid out contiguously
+    // by address. Concatenate them in address order so the descriptor
+    // array reads correctly regardless of header count.
+    let section_chunks = find_all_section_bytes(elf_data, ".subsoil.endpoints")?;
+    const DESCRIPTOR_SIZE: usize = 16;
+    for section_bytes in &section_chunks {
         if section_bytes.len() % DESCRIPTOR_SIZE != 0 {
             return Err(TranspileError::InvalidSection(format!(
                 ".subsoil.endpoints size {} is not a multiple of {}",
@@ -309,15 +316,23 @@ fn read_subsoil_endpoints(
                     index, fn_ptr
                 ))
             })?;
-            endpoints.insert(
-                index,
-                EndpointDef {
-                    entry_pc: pvm_pc as u64,
-                    arg_registers,
-                    arg_cnode_size,
-                    initial_regs: BTreeMap::new(),
-                },
-            );
+            if endpoints
+                .insert(
+                    index,
+                    EndpointDef {
+                        entry_pc: pvm_pc as u64,
+                        arg_registers,
+                        arg_cnode_size,
+                        initial_regs: BTreeMap::new(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(TranspileError::InvalidSection(format!(
+                    "duplicate #[subsoil::endpoint({})] declaration",
+                    index
+                )));
+            }
         }
     }
     if endpoints.is_empty() {
@@ -331,14 +346,14 @@ fn read_subsoil_endpoints(
     Ok(endpoints)
 }
 
-/// Locate a named section's bytes in an ELF file. Returns `Ok(None)`
-/// if the section is absent (not an error — caller may have a
-/// fallback). Returns the raw section bytes (lifetime-tied to
-/// `elf_data`).
-fn find_section_bytes<'a>(
+/// Locate every section header with the given name and return
+/// their bytes, ordered by ELF virtual address. Multiple headers
+/// can share a name when LLD doesn't coalesce input sections
+/// (e.g., `#[link_section]` statics from a single rlib).
+fn find_all_section_bytes<'a>(
     elf_data: &'a [u8],
     section_name: &str,
-) -> Result<Option<&'a [u8]>, TranspileError> {
+) -> Result<Vec<&'a [u8]>, TranspileError> {
     if elf_data.len() < 64 || elf_data[0..4] != [0x7F, b'E', b'L', b'F'] {
         return Err(TranspileError::ElfParse("not an ELF file".into()));
     }
@@ -357,12 +372,14 @@ fn find_section_bytes<'a>(
         &elf_data[off..off + sz]
     };
 
+    let mut hits: Vec<(u64, &[u8])> = Vec::new();
     for i in 0..e_shnum {
         let sh = e_shoff + i * e_shentsize;
         if sh + e_shentsize > elf_data.len() {
             break;
         }
         let name_off = u32::from_le_bytes(elf_data[sh..sh + 4].try_into().unwrap()) as usize;
+        let addr = u64::from_le_bytes(elf_data[sh + 16..sh + 24].try_into().unwrap());
         let file_off = u64::from_le_bytes(elf_data[sh + 24..sh + 32].try_into().unwrap()) as usize;
         let size = u64::from_le_bytes(elf_data[sh + 32..sh + 40].try_into().unwrap()) as usize;
         let name = if name_off < strtab.len() {
@@ -372,10 +389,11 @@ fn find_section_bytes<'a>(
             ""
         };
         if name == section_name && file_off + size <= elf_data.len() {
-            return Ok(Some(&elf_data[file_off..file_off + size]));
+            hits.push((addr, &elf_data[file_off..file_off + size]));
         }
     }
-    Ok(None)
+    hits.sort_by_key(|&(addr, _)| addr);
+    Ok(hits.into_iter().map(|(_, bytes)| bytes).collect())
 }
 
 /// Parse ELF with full relocation info.
