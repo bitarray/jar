@@ -1,10 +1,18 @@
 //! Guest-side runtime support library for JAVM chain Images.
 //!
-//! Provides compiler builtins (memset, memcpy, memcmp), a panic handler,
-//! an entry point macro for the JAVM target, and the `map_args`
-//! runtime helper that moves the kernel-allocated args DATA cap from
-//! bare-Frame slot 4 into the guest's main-frame CapTable and maps it
-//! into the guest address space.
+//! Provides compiler builtins (memset, memcpy, memcmp), a panic
+//! handler, a default trap `_start` (so guests link without
+//! defining one themselves), and the `map_args` runtime helper
+//! that moves the kernel-allocated args DATA cap from bare-Frame
+//! slot 4 into the guest's main-frame CapTable and maps it into
+//! the guest address space.
+//!
+//! Guests declare their entry points via the
+//! `#[subsoil::endpoint(N)]` attribute (from `subsoil-derive`).
+//! Each annotation emits a per-endpoint trampoline that calls the
+//! user fn and halts; the kernel enters trampolines via
+//! `endpoints[N].entry_pc`. `_start` (PC=0) is never an intended
+//! entry — it traps via `unimp` if ever reached.
 //!
 //! All freestanding-only symbols are gated behind `cfg(target_os =
 //! "none")` — on host this crate is empty. Services force-link it via
@@ -87,39 +95,20 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
     }
 }
 
-// -- Entry point macro --------------------------------------------------------
-
-/// Generate a `_start` entry point for the JAVM target.
-///
-/// On JAVM: `_start` calls the named function with `a0 = φ[7] =
-/// args_len` (kernel-set by `kernel.set_args`), then terminates via
-/// `ecalli(0x00)` (REPLY to kernel via IPC slot 0).
-/// On host: expands to nothing.
-///
-/// The user function signature is `fn(args_len: u64) -> u64`. To read
-/// the args bytes, the user calls [`crate::map_args`] with the same
-/// `args_len`.
-///
-/// Usage: `subsoil::entry!(my_bench_fn);`
-#[macro_export]
-macro_rules! entry {
-    ($fn_name:ident) => {
-        #[cfg(target_env = "javm")]
-        core::arch::global_asm!(
-            ".global _start",
-            "_start:",
-            // a0 = φ[7] = args_len. The kernel placed the args DATA
-            // cap (if any) at bare-Frame slot 4; user code calls
-            // `subsoil::map_args(args_len)` to MOVE+MAP it and
-            // get a `&[u8]`.
-            concat!("call ", stringify!($fn_name)),
-            // REPLY to kernel via IPC slot 0
-            "li t0, 0",
-            "ecall",
-            "unimp", // trap if somehow resumed after REPLY
-        );
-    };
-}
+// -- Default `_start` ---------------------------------------------------------
+//
+// The linker picks `_start` as the default ELF entry symbol. Guests
+// never expect PC=0 to be entered at runtime — the kernel always
+// enters via `endpoints[N].entry_pc` (a trampoline emitted by
+// `#[subsoil::endpoint(N)]`). This default `_start` exists only to
+// satisfy the linker and traps loudly if ever reached.
+#[cfg(target_env = "javm")]
+core::arch::global_asm!(
+    ".section .text._start, \"ax\", @progbits",
+    ".global _start",
+    "_start:",
+    "  unimp",
+);
 
 // -- Args helper --------------------------------------------------------------
 
