@@ -4,6 +4,12 @@
 //! Used as a backend alongside the JIT recompiler.
 
 use alloc::{vec, vec::Vec};
+// SAFETY: project requires nightly (rust-toolchain.toml); `unlikely` is a
+// stable hint in all nightly builds.  It guides LLVM to lay out the cold
+// gas-charge path out-of-line, keeping the sequential hot path in the
+// fall-through code stream.
+#[allow(unused_imports)]
+use core::intrinsics::unlikely;
 
 use crate::args::{self, Args};
 use crate::instruction::Opcode;
@@ -1586,8 +1592,10 @@ impl Interpreter {
             // and incremented only via validated next_pc / jump targets.
             let inst = *unsafe { self.decoded_insts.get_unchecked(idx as usize) };
 
-            // Per-gas-block charging (JAR v0.8.0): only at PC=0 and post-terminator starts
-            if inst.bb_gas_cost > 0 {
+            // Per-gas-block charging (JAR v0.8.0): only at PC=0 and post-terminator starts.
+            // Gas-block starts are sparse (~5–15 % of instructions); hint LLVM to keep the
+            // charge path cold so the sequential fall-through stays in the I-cache hot path.
+            if unlikely(inst.bb_gas_cost > 0) {
                 if self.gas < inst.bb_gas_cost as u64 {
                     self.pc = inst.pc;
                     return (ExitReason::OutOfGas, initial_gas - self.gas);
