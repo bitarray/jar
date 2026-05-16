@@ -1376,6 +1376,11 @@ mod tests {
     use jsonrpsee::http_client::HttpClientBuilder;
     use jsonrpsee::rpc_params;
 
+    /// Build an HTTP client for the test server.
+    fn test_client(url: &str) -> jsonrpsee::http_client::HttpClient {
+        HttpClientBuilder::default().build(url).unwrap()
+    }
+
     /// Create a temp store, RPC state, and start an ephemeral server.
     /// Returns (client_url, rpc_state, command_rx, store, _tempdir).
     async fn setup() -> (
@@ -1423,7 +1428,7 @@ mod tests {
             status.head_hash = "abc123".into();
             status.blocks_authored = 10;
         }
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: serde_json::Value = client
             .request("jam_getStatus", rpc_params![])
             .await
@@ -1437,7 +1442,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_head_empty() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: serde_json::Value = client.request("jam_getHead", rpc_params![]).await.unwrap();
         assert!(result["hash"].is_null());
         assert_eq!(result["slot"], 0);
@@ -1450,7 +1455,7 @@ mod tests {
         let hash = store.put_block(&block).unwrap();
         store.set_head(&hash, 100).unwrap();
 
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: serde_json::Value = client.request("jam_getHead", rpc_params![]).await.unwrap();
         assert_eq!(result["hash"], hash.to_hex());
         assert_eq!(result["slot"], 100);
@@ -1462,7 +1467,7 @@ mod tests {
         let block = test_block(50);
         let hash = store.put_block(&block).unwrap();
 
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: serde_json::Value = client
             .request("jam_getBlock", rpc_params![hash.to_hex()])
             .await
@@ -1474,7 +1479,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_block_not_found() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: Result<serde_json::Value, _> = client
             .request("jam_getBlock", rpc_params![hex::encode([0u8; 32])])
             .await;
@@ -1484,7 +1489,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_block_invalid_hex() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: Result<serde_json::Value, _> =
             client.request("jam_getBlock", rpc_params!["not_hex"]).await;
         assert!(result.is_err());
@@ -1493,7 +1498,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_block_wrong_length() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: Result<serde_json::Value, _> =
             client.request("jam_getBlock", rpc_params!["aabb"]).await;
         assert!(result.is_err());
@@ -1505,7 +1510,7 @@ mod tests {
         let block = test_block(77);
         let hash = store.put_block(&block).unwrap();
 
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: serde_json::Value = client
             .request("jam_getBlockBySlot", rpc_params![77])
             .await
@@ -1517,7 +1522,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_block_by_slot_not_found() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: Result<serde_json::Value, _> = client
             .request("jam_getBlockBySlot", rpc_params![9999])
             .await;
@@ -1527,7 +1532,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_finalized_empty() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: serde_json::Value = client
             .request("jam_getFinalized", rpc_params![])
             .await
@@ -1543,7 +1548,7 @@ mod tests {
         let hash = store.put_block(&block).unwrap();
         store.set_finalized(&hash, 60).unwrap();
 
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: serde_json::Value = client
             .request("jam_getFinalized", rpc_params![])
             .await
@@ -1577,7 +1582,7 @@ mod tests {
     #[tokio::test]
     async fn test_submit_work_package() {
         let (url, _state, mut rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let wp_bytes = minimal_work_package_bytes();
         let data_hex = hex::encode(&wp_bytes);
         let result: serde_json::Value = client
@@ -1599,7 +1604,7 @@ mod tests {
     #[tokio::test]
     async fn test_submit_empty_work_package() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: Result<serde_json::Value, _> = client
             .request("jam_submitWorkPackage", rpc_params![""])
             .await;
@@ -1609,7 +1614,7 @@ mod tests {
     #[tokio::test]
     async fn test_submit_invalid_codec_work_package() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         // Random bytes that won't decode as a valid WorkPackage
         let result: Result<serde_json::Value, _> = client
             .request(
@@ -1623,7 +1628,7 @@ mod tests {
     #[tokio::test]
     async fn test_submit_oversized_work_package() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         // Exceeds MAX_WORK_PACKAGE_BLOB_SIZE (13,791,360 bytes)
         let oversized = vec![0u8; 14_000_000];
         let result: Result<serde_json::Value, _> = client
@@ -1706,7 +1711,7 @@ mod tests {
         store.put_state(&hash, &genesis_state, &config).unwrap();
         store.set_head(&hash, 1).unwrap();
 
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
 
         // Query existing service
         let result: serde_json::Value = client
@@ -1758,7 +1763,7 @@ mod tests {
         store.put_state(&hash, &genesis_state, &config).unwrap();
         store.set_head(&hash, 1).unwrap();
 
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: serde_json::Value = client
             .request("jam_getServiceAccount", rpc_params![2000u32])
             .await
@@ -1779,7 +1784,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_chain_spec() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: serde_json::Value = client
             .request("jam_getChainSpec", rpc_params![])
             .await
@@ -1810,7 +1815,7 @@ mod tests {
         store.put_state(&hash, &genesis_state, &config).unwrap();
         store.set_head(&hash, 1).unwrap();
 
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
 
         // Default: head block
         let result: serde_json::Value = client
@@ -1845,7 +1850,7 @@ mod tests {
         store.put_state(&hash, &genesis_state, &config).unwrap();
         store.set_head(&hash, 1).unwrap();
 
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
 
         // Default: current validators
         let result: serde_json::Value = client
@@ -1899,7 +1904,7 @@ mod tests {
     #[tokio::test]
     async fn test_error_invalid_method() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let err = client
             .request::<serde_json::Value, _>("jam_nonExistentMethod", rpc_params![])
             .await;
@@ -1909,7 +1914,7 @@ mod tests {
     #[tokio::test]
     async fn test_error_get_block_non_hex() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let err = client
             .request::<serde_json::Value, _>("jam_getBlock", rpc_params!["not-hex-data!!"])
             .await;
@@ -1919,7 +1924,7 @@ mod tests {
     #[tokio::test]
     async fn test_error_get_block_short_hash() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         // Valid hex but only 16 bytes (not 32)
         let err = client
             .request::<serde_json::Value, _>("jam_getBlock", rpc_params!["aabb"])
@@ -1930,7 +1935,7 @@ mod tests {
     #[tokio::test]
     async fn test_error_read_storage_invalid_hex_key() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let err = client
             .request::<serde_json::Value, _>("jam_readStorage", rpc_params![42u32, "zzz-not-hex"])
             .await;
@@ -1940,7 +1945,7 @@ mod tests {
     #[tokio::test]
     async fn test_error_submit_invalid_hex_wp() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let err = client
             .request::<serde_json::Value, _>("jam_submitWorkPackage", rpc_params!["xyz-not-hex"])
             .await;
@@ -1950,7 +1955,7 @@ mod tests {
     #[tokio::test]
     async fn test_error_get_block_by_slot_not_stored() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let err = client
             .request::<serde_json::Value, _>("jam_getBlockBySlot", rpc_params![99999u32])
             .await;
@@ -1971,7 +1976,7 @@ mod tests {
         for _ in 0..100 {
             let url = url.clone();
             handles.push(tokio::spawn(async move {
-                let client = HttpClientBuilder::default().build(&url).unwrap();
+                let client = test_client(&url);
                 client
                     .request::<serde_json::Value, _>("jam_getStatus", rpc_params![])
                     .await
@@ -2031,7 +2036,7 @@ mod tests {
     #[tokio::test]
     async fn test_submit_duplicate_work_package() {
         let (url, _state, mut rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let wp_bytes = minimal_work_package_bytes();
         let data_hex = hex::encode(&wp_bytes);
 
@@ -2064,7 +2069,7 @@ mod tests {
     #[tokio::test]
     async fn test_submit_zero_gas_work_item() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
 
         // Manually construct a work package with gas_limit=0 work item.
         // The JAM codec should still accept this (gas validation happens at
@@ -2083,7 +2088,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_block_range_with_blocks() {
         let (url, _state, _rx, store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
 
         // Store blocks at slots 1, 2, 3
         for slot in 1..=3 {
@@ -2105,7 +2110,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_block_range_empty() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
 
         // No blocks stored — range returns empty
         let result: serde_json::Value = client
@@ -2119,7 +2124,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_block_range_invalid_range() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
 
         // to_slot < from_slot — should error
         let result: Result<serde_json::Value, _> = client
@@ -2131,7 +2136,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_block_range_too_large() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
 
         // Range > 1000 slots — should error
         let result: Result<serde_json::Value, _> = client
@@ -2143,7 +2148,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_peers() {
         let (url, state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
 
         // Default peer count is 0
         let result: serde_json::Value =
@@ -2162,7 +2167,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_context_with_block() {
         let (url, _state, _rx, store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
 
         // Store a block and set it as head
         let block = test_block(1);
@@ -2188,7 +2193,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_context_no_head() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
 
         // No head set — should return error
         let result: Result<serde_json::Value, _> =
@@ -2273,7 +2278,7 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_rpc_method() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: Result<serde_json::Value, _> =
             client.request("jam_nonExistentMethod", rpc_params![]).await;
         assert!(result.is_err(), "non-existent method should return error");
@@ -2287,7 +2292,7 @@ mod tests {
         let hash = store.put_block(&block).unwrap();
         store.set_head(&hash, 1).unwrap();
 
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         // Missing key parameter (only service_id)
         let result: Result<serde_json::Value, _> =
             client.request("jam_readStorage", rpc_params![1000]).await;
@@ -2300,7 +2305,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_block_wrong_param_type() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         // Pass a number instead of a string
         let result: Result<serde_json::Value, _> =
             client.request("jam_getBlock", rpc_params![12345]).await;
@@ -2313,7 +2318,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_block_by_slot_wrong_param_type() {
         let (url, _state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         // Pass a string instead of a number
         let result: Result<serde_json::Value, _> = client
             .request("jam_getBlockBySlot", rpc_params!["not_a_number"])
@@ -2331,7 +2336,7 @@ mod tests {
         let hash = store.put_block(&block).unwrap();
         store.set_head(&hash, 1).unwrap();
 
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: Result<serde_json::Value, _> = client
             .request("jam_getServiceAccount", rpc_params![99999])
             .await;
@@ -2345,7 +2350,7 @@ mod tests {
         let hash = store.put_block(&block).unwrap();
         store.set_head(&hash, 1).unwrap();
 
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
         let result: Result<serde_json::Value, _> = client
             .request("jam_getValidators", rpc_params!["invalid_set_name"])
             .await;
@@ -2420,7 +2425,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_latency_histogram() {
         let (url, state, _rx, _store, _dir) = setup().await;
-        let client = HttpClientBuilder::default().build(&url).unwrap();
+        let client = test_client(&url);
 
         let _: serde_json::Value = client
             .request("jam_getStatus", rpc_params![])
@@ -2489,7 +2494,7 @@ mod tests {
             let url = url.clone();
             let hash_hex = hash.to_hex();
             handles.push(tokio::spawn(async move {
-                let client = HttpClientBuilder::default().build(&url).unwrap();
+                let client = test_client(&url);
                 let result: Result<serde_json::Value, _> = match i % 4 {
                     0 => client.request("jam_getStatus", rpc_params![]).await,
                     1 => client.request("jam_getHead", rpc_params![]).await,
