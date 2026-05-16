@@ -1,22 +1,27 @@
 //! Procedural macros for declaring subsoil guest endpoints.
 //!
 //! The `#[subsoil::endpoint(N)]` attribute marks a function as
-//! endpoint `N` of a JAR chain Image. The macro:
+//! endpoint `N` of a JAR chain Image. The macro emits three items
+//! into the guest crate:
 //!
-//! 1. Leaves the function definition unchanged.
-//! 2. Emits a `subsoil::EndpointDescriptor` static into the
-//!    `.subsoil.endpoints` ELF section. The transpiler reads this
-//!    section at link time to populate the chain Image's
-//!    `endpoints: BTreeMap<u8, EndpointDef>` field.
+//! 1. The function definition itself, unchanged.
+//! 2. A per-endpoint trampoline `__subsoil_ep_N_trampoline` in
+//!    `.text` that calls the user function, then halts the VM via
+//!    a REPLY ecall (`li t0, 0; ecall`). The trampoline lives in
+//!    regular code; the kernel enters it at `endpoints[N].entry_pc`.
+//! 3. A `subsoil::EndpointDescriptor` static in the
+//!    `.subsoil.endpoints` ELF section whose `fn_ptr` points at
+//!    the trampoline (not the user fn). The transpiler reads the
+//!    section at link time and resolves each `fn_ptr` to a PVM PC.
 //!
 //! ```ignore
 //! #[subsoil::endpoint(0)]
 //! fn process(args_len: u64) -> u64 { ... }
 //! ```
 //!
-//! On host targets the attribute is a no-op (the descriptor is
-//! emitted only under `cfg(all(target_env = "javm", target_os =
-//! "none"))`).
+//! On host targets the macro emits only the function definition;
+//! the trampoline and descriptor are gated behind
+//! `cfg(all(target_env = "javm", target_os = "none"))`.
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
@@ -38,9 +43,31 @@ pub fn endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
     let fn_name = &func.sig.ident;
     let descriptor_name = format_ident!("__SUBSOIL_ENDPOINT_{}", idx_value);
+    let trampoline_ident = format_ident!("__subsoil_ep_{}_trampoline", idx_value);
+    let trampoline_label = format!("__subsoil_ep_{}_trampoline", idx_value);
+    let global_directive = format!(".global {trampoline_label}");
+    let trampoline_label_colon = format!("{trampoline_label}:");
 
     let expanded = quote! {
         #func
+
+        #[cfg(all(target_env = "javm", target_os = "none"))]
+        core::arch::global_asm!(
+            ".text",
+            #global_directive,
+            #trampoline_label_colon,
+            "call {user_fn}",
+            // REPLY to kernel via IPC slot 0 (HALT).
+            "li t0, 0",
+            "ecall",
+            "unimp", // trap if somehow resumed after REPLY
+            user_fn = sym #fn_name,
+        );
+
+        #[cfg(all(target_env = "javm", target_os = "none"))]
+        unsafe extern "C" {
+            safe fn #trampoline_ident(args_len: u64) -> u64;
+        }
 
         #[cfg(all(target_env = "javm", target_os = "none"))]
         #[doc(hidden)]
@@ -48,7 +75,7 @@ pub fn endpoint(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[used]
         static #descriptor_name: ::subsoil::EndpointDescriptor =
             ::subsoil::EndpointDescriptor {
-                fn_ptr: #fn_name,
+                fn_ptr: #trampoline_ident,
                 index: #idx_value,
                 arg_registers: 0,
                 arg_cnode_size: 0,
