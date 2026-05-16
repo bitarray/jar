@@ -547,6 +547,10 @@ version = "0.1.0"
 dependencies = [
  "blake2",
  "build-javm",
+ "jar-cap",
+ "jar-kernel",
+ "javm-exec",
+ "scale",
  "sha3",
  "subsoil",
 ]

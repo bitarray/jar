@@ -1,17 +1,20 @@
+//! Cross-compile this crate's `main.rs` for the JAVM target, transpile
+//! to a SCALE-encoded `Image`, and expose the blob path to the
+//! integration test via the `GUEST_TESTS_BLOB` environment variable.
+//!
+//! Mirrors `rust/jar-kernel/build.rs`. The `BUILD_CRATE_GUEST_BUILD`
+//! env-var guard prevents infinite recursion when `build-crate`
+//! re-invokes cargo for the guest target.
+
 fn main() {
-    // Don't recurse: build-crate sets JAVM_GUEST_BUILD when spawning guest builds.
     if std::env::var("BUILD_CRATE_GUEST_BUILD").is_ok() {
         return;
     }
 
     let blob = build_javm::build(".", "javm-guest-tests");
-    let out_dir = std::env::var("OUT_DIR").unwrap();
-    std::fs::write(
-        format!("{out_dir}/guest_blob.rs"),
-        format!(
-            "const GUEST_TESTS_BLOB: &[u8] = include_bytes!(\"{}\");\n",
-            blob.display(),
-        ),
-    )
-    .unwrap();
+    println!("cargo:rustc-env=GUEST_TESTS_BLOB={}", blob.display());
+    println!("cargo:rerun-if-changed=src/lib.rs");
+    println!("cargo:rerun-if-changed=src/main.rs");
+    println!("cargo:rerun-if-changed=src/tests");
+    println!("cargo:rerun-if-changed=Cargo.toml");
 }
