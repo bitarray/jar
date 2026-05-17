@@ -33,7 +33,7 @@ use crate::ecall::{EcallHandler, EcallKind, EcallResult};
 use crate::exit::ExitReason;
 use crate::gas::GasCounter;
 use crate::instruction::Opcode;
-use crate::mem::Mem;
+use crate::mem::Memory;
 use crate::program::PvmProgram;
 use crate::regs::Regs;
 
@@ -45,10 +45,10 @@ impl Interpreter {
     /// [`ExitReason`]. On return, `regs.pc` reflects the PC at exit
     /// (already advanced past an ecall instruction if exit came from
     /// the handler; otherwise the PC of the offending instruction).
-    pub fn run(
+    pub fn run<M: Memory>(
         program: &PvmProgram,
         regs: &mut Regs,
-        mem: &mut Mem,
+        mem: &mut M,
         gas: &mut GasCounter,
         handler: &mut dyn EcallHandler,
     ) -> ExitReason {
@@ -866,6 +866,7 @@ fn djump(a: u64, jump_table: &[u32], basic_block_starts: &[bool]) -> Result<u32,
 mod tests {
     use super::*;
     use crate::ecall::PanickingHandler;
+    use crate::mem::Mem;
     use crate::regs::REG_COUNT;
 
     /// Helper: build a PvmProgram from a single trap byte.
@@ -910,7 +911,12 @@ mod tests {
             seen: Option<EcallKind>,
         }
         impl EcallHandler for Capture {
-            fn handle(&mut self, kind: EcallKind, _r: &mut Regs, _m: &mut Mem) -> EcallResult {
+            fn handle(
+                &mut self,
+                kind: EcallKind,
+                _r: &mut Regs,
+                _m: &mut dyn Memory,
+            ) -> EcallResult {
                 self.seen = Some(kind);
                 EcallResult::Exit(ExitReason::HostCall(match kind {
                     EcallKind::Ecalli(op) => op,

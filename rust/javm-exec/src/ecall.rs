@@ -20,7 +20,7 @@
 //!   into another Instance) that require the integration layer.
 
 use crate::exit::ExitReason;
-use crate::mem::Mem;
+use crate::mem::Memory;
 use crate::regs::Regs;
 
 /// Which PVM ecall opcode triggered this invocation.
@@ -48,7 +48,7 @@ pub enum EcallResult {
 /// PC has been advanced past the instruction by the engine; the
 /// handler operates on the post-advance register/memory state.
 pub trait EcallHandler {
-    fn handle(&mut self, kind: EcallKind, regs: &mut Regs, mem: &mut Mem) -> EcallResult;
+    fn handle(&mut self, kind: EcallKind, regs: &mut Regs, mem: &mut dyn Memory) -> EcallResult;
 }
 
 /// A no-op handler: every ecall exits with `Panic`. Useful as a
@@ -58,7 +58,7 @@ pub trait EcallHandler {
 pub struct PanickingHandler;
 
 impl EcallHandler for PanickingHandler {
-    fn handle(&mut self, _kind: EcallKind, _regs: &mut Regs, _mem: &mut Mem) -> EcallResult {
+    fn handle(&mut self, _kind: EcallKind, _regs: &mut Regs, _mem: &mut dyn Memory) -> EcallResult {
         EcallResult::Exit(ExitReason::Panic)
     }
 }
@@ -66,6 +66,7 @@ impl EcallHandler for PanickingHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mem::Mem;
 
     #[test]
     fn panicking_handler_always_exits_panic() {
@@ -87,7 +88,12 @@ mod tests {
         count: u32,
     }
     impl EcallHandler for CountingHandler {
-        fn handle(&mut self, _kind: EcallKind, regs: &mut Regs, _mem: &mut Mem) -> EcallResult {
+        fn handle(
+            &mut self,
+            _kind: EcallKind,
+            regs: &mut Regs,
+            _mem: &mut dyn Memory,
+        ) -> EcallResult {
             self.count += 1;
             regs.write(0, regs.read(0).wrapping_add(1));
             EcallResult::Continue

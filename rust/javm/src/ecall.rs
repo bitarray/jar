@@ -51,7 +51,7 @@ use javm_cap::{
     Blake2b256, Cap, Hash, InstanceCap, SlotIdx, TypeCap, mgmt_cnode_mint, mgmt_cnode_swap,
     mgmt_copy, mgmt_drop, mgmt_move,
 };
-use javm_exec::{EcallHandler, EcallKind, EcallResult, ExitReason, Mem, Regs};
+use javm_exec::{EcallHandler, EcallKind, EcallResult, ExitReason, Memory, Regs};
 
 use crate::callstack::Entry;
 use crate::error::VmError;
@@ -120,7 +120,7 @@ pub mod host_op {
 }
 
 impl<K: KernelAssist> EcallHandler for Vm<K> {
-    fn handle(&mut self, kind: EcallKind, regs: &mut Regs, mem: &mut Mem) -> EcallResult {
+    fn handle(&mut self, kind: EcallKind, regs: &mut Regs, mem: &mut dyn Memory) -> EcallResult {
         match kind {
             EcallKind::Ecalli(op) => self.dispatch_ecalli(op, regs, mem),
             EcallKind::Ecall => self.dispatch_ecall(regs, mem),
@@ -129,7 +129,7 @@ impl<K: KernelAssist> EcallHandler for Vm<K> {
 }
 
 impl<K: KernelAssist> Vm<K> {
-    fn dispatch_ecalli(&mut self, op: u32, _regs: &mut Regs, _mem: &mut Mem) -> EcallResult {
+    fn dispatch_ecalli(&mut self, op: u32, _regs: &mut Regs, _mem: &mut dyn Memory) -> EcallResult {
         match op {
             0 => {
                 // REPLY is handled by the CALL/HALT driver (Stage 3.7).
@@ -153,7 +153,12 @@ impl<K: KernelAssist> Vm<K> {
     }
 
     /// Dispatch a kernel-known host call (op-codes 16..=63).
-    fn dispatch_host_call(&mut self, op: u32, regs: &mut Regs, _mem: &mut Mem) -> EcallResult {
+    fn dispatch_host_call(
+        &mut self,
+        op: u32,
+        regs: &mut Regs,
+        _mem: &mut dyn Memory,
+    ) -> EcallResult {
         fn trap_on_err<T>(r: Result<T, VmError>, ok: impl FnOnce(T) -> EcallResult) -> EcallResult {
             match r {
                 Ok(v) => ok(v),
@@ -448,7 +453,7 @@ impl<K: KernelAssist> Vm<K> {
     fn dispatch_host_read_data_cap(
         &mut self,
         regs: &mut Regs,
-        mem: &mut Mem,
+        mem: &mut dyn Memory,
     ) -> Result<(), VmError> {
         let cap_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
         let dst_addr = regs.gpr[8] as u32;
@@ -493,7 +498,7 @@ impl<K: KernelAssist> Vm<K> {
     fn dispatch_host_mint_data_cap(
         &mut self,
         regs: &mut Regs,
-        mem: &mut Mem,
+        mem: &mut dyn Memory,
     ) -> Result<(), VmError> {
         let src_addr = regs.gpr[7] as u32;
         let len = regs.gpr[8] as usize;
@@ -692,7 +697,7 @@ impl<K: KernelAssist> Vm<K> {
     /// (mgmt_op) and φ[12] (subject|object) for the management
     /// dispatch. Stage 3 routes the same way as `ecalli imm`, treating
     /// φ[11] as the op.
-    fn dispatch_ecall(&mut self, regs: &mut Regs, mem: &mut Mem) -> EcallResult {
+    fn dispatch_ecall(&mut self, regs: &mut Regs, mem: &mut dyn Memory) -> EcallResult {
         let op = regs.gpr[11] as u32;
         self.dispatch_ecalli(op, regs, mem)
     }
