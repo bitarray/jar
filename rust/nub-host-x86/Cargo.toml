@@ -15,67 +15,28 @@ name = "nub_host_x86"
 path = "src/lib.rs"
 
 [features]
-build-metadata = ["dep:built"]
-crashdump = [
-    "dep:chrono",
-    "dep:elfcore",
-]
-default = [
-    "kvm",
-    "build-metadata",
-]
+default = ["kvm"]
 executable_heap = []
 function_call_metrics = []
-fuzzing = ["hyperlight-common/fuzzing"]
-gdb = [
-    "dep:gdbstub",
-    "dep:gdbstub_arch",
-]
-guest-counter = ["hyperlight-common/guest-counter"]
 hw-interrupts = []
-i686-guest = ["hyperlight-common/i686-guest"]
 kvm = [
     "dep:kvm-bindings",
     "dep:kvm-ioctls",
 ]
-mem_profile = [
-    "trace_guest",
-    "dep:framehop",
-    "dep:fallible-iterator",
-    "hyperlight-common/mem_profile",
-]
-nanvix-unstable = [
-    "i686-guest",
-    "hyperlight-common/nanvix-unstable",
-]
 print_debug = []
-trace_guest = [
-    "dep:opentelemetry",
-    "dep:tracing-opentelemetry",
-    "dep:hyperlight-guest-tracing",
-    "hyperlight-common/trace_guest",
-]
 
 [dependencies]
 anyhow = "1.0"
 bitflags = "2.11.1"
 blake3 = "1.8.5"
 cfg-if = "1.0.4"
-chrono = { version = "0.4", optional = true }
 crossbeam-channel = "0.5.15"
-elfcore = { version = "2.0", optional = true }
-fallible-iterator = { version = "0.3.0", optional = true }
 flatbuffers = "25.12.19"
-framehop = { version = "0.16.0", optional = true }
-gdbstub = { version = "0.7.10", optional = true }
-gdbstub_arch = { version = "0.3.3", optional = true }
 goblin = { version = "0.10", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
 hyperlight-common = { version = "0.15.0", features = ["std"] }
-hyperlight-guest-tracing = { version = "0.15.0", optional = true }
 libc = "0.2.186"
 log = "0.4.29"
 metrics = "0.24.5"
-opentelemetry = { version = "0.31.0", optional = true }
 page_size = "0.6.0"
 rand = "0.10"
 serde_json = "1.0"
@@ -84,7 +45,6 @@ thiserror = { workspace = true, features = ["std"] }
 tracing = { version = "0.1.44", features = ["log"] }
 tracing-core = "0.1.36"
 tracing-log = "0.2.0"
-tracing-opentelemetry = { version = "0.32.1", optional = true }
 uuid = { version = "1.23.1", features = ["v4"] }
 vmm-sys-util = "0.15.0"
 
@@ -94,14 +54,17 @@ kvm-ioctls = { version = "0.24", optional = true }
 
 [build-dependencies]
 anyhow = "1.0.102"
-built = { version = "0.8.0", features = ["chrono", "git2"], optional = true }
 cfg_aliases = "0.2.1"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
-# `cfg(mshv3)` was a cfg_alias in upstream; after F2.1 dropped the
-# MSHV backend the alias is gone but residual `#[cfg(mshv3)]` /
-# `#[cfg(not(mshv3))]` markers in source still serve as gates
-# (always-false). They'll be stripped opportunistically as other
-# stages touch each file.
-unexpected_cfgs = { level = "allow", check-cfg = ['cfg(mshv3)'] }
+# Residual cfg gates left after F2.1 (mshv3) and F2.2 (gdb, crashdump,
+# trace_guest, mem_profile, i686-guest, nanvix-unstable, fuzzing). The
+# alias / feature is gone so the gates are always-false. They'll get
+# stripped opportunistically as later stages touch each file.
+unexpected_cfgs = { level = "allow", check-cfg = [
+    'cfg(mshv3)',
+    'cfg(gdb)',
+    'cfg(crashdump)',
+    'cfg(unshared_snapshot_mem)',
+] }

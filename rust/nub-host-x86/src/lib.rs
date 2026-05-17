@@ -78,9 +78,7 @@ pub mod sandbox;
 /// Signal handling for Linux
 #[cfg(target_os = "linux")]
 pub(crate) mod signal_handlers;
-/// Utilities for testing including interacting with `simpleguest` testing guest binary
-#[cfg(test)]
-pub(crate) mod testing;
+// F2.2: `testing/` module dropped (was internal test utilities only).
 
 /// The re-export for the `HyperlightError` type
 pub use error::HyperlightError;

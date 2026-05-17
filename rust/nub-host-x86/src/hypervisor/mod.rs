@@ -14,42 +14,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-/// GDB debugging support
-#[cfg(gdb)]
-pub(crate) mod gdb;
-
 /// Abstracts over different hypervisor register representations
 pub(crate) mod regs;
 
 pub(crate) mod virtual_machine;
 
-#[cfg(target_os = "windows")]
-/// Hyperlight Surrogate Process
-pub(crate) mod surrogate_process;
-#[cfg(target_os = "windows")]
-/// Hyperlight Surrogate Process
-pub(crate) mod surrogate_process_manager;
-/// Safe wrappers around windows types like `PSTR`
-#[cfg(target_os = "windows")]
-pub mod wrappers;
-
-#[cfg(crashdump)]
-pub(crate) mod crashdump;
-
 pub(crate) mod hyperlight_vm;
 
 use std::fmt::Debug;
-#[cfg(any(kvm, mshv3))]
+#[cfg(kvm)]
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-#[cfg(target_os = "windows")]
-use std::sync::atomic::{AtomicU8, Ordering};
-#[cfg(any(kvm, mshv3))]
+#[cfg(kvm)]
 use std::time::Duration;
 
 /// A trait for platform-specific interrupt handle implementation details
 pub(crate) trait InterruptHandleImpl: InterruptHandle {
     /// Set the thread ID for the vcpu thread
-    #[cfg(any(kvm, mshv3))]
+    #[cfg(kvm)]
     fn set_tid(&self);
 
     /// Set the running state
@@ -102,7 +83,7 @@ pub trait InterruptHandle: Send + Sync + Debug {
     fn dropped(&self) -> bool;
 }
 
-#[cfg(any(kvm, mshv3))]
+#[cfg(kvm)]
 #[derive(Debug)]
 pub(super) struct LinuxInterruptHandle {
     /// Atomic value packing vcpu execution state.
@@ -132,7 +113,7 @@ pub(super) struct LinuxInterruptHandle {
     sig_rt_min_offset: u8,
 }
 
-#[cfg(any(kvm, mshv3))]
+#[cfg(kvm)]
 impl LinuxInterruptHandle {
     const RUNNING_BIT: u8 = 1 << 1;
     const CANCEL_BIT: u8 = 1 << 0;
@@ -184,7 +165,7 @@ impl LinuxInterruptHandle {
     }
 }
 
-#[cfg(any(kvm, mshv3))]
+#[cfg(kvm)]
 impl InterruptHandleImpl for LinuxInterruptHandle {
     fn set_tid(&self) {
         // Release ordering to synchronize with the Acquire load of `running` in send_signal()
@@ -243,7 +224,7 @@ impl InterruptHandleImpl for LinuxInterruptHandle {
     }
 }
 
-#[cfg(any(kvm, mshv3))]
+#[cfg(kvm)]
 impl InterruptHandle for LinuxInterruptHandle {
     fn kill(&self) -> bool {
         // Release ordering ensures that any writes before kill() are visible to the vcpu thread
@@ -267,262 +248,3 @@ impl InterruptHandle for LinuxInterruptHandle {
     }
 }
 
-#[cfg(target_os = "windows")]
-#[derive(Debug)]
-pub(super) struct WindowsInterruptHandle {
-    /// Atomic value packing vcpu execution state.
-    ///
-    /// Bit layout:
-    /// - Bit 2: DEBUG_INTERRUPT_BIT - set when debugger interrupt is requested
-    /// - Bit 1: RUNNING_BIT - set when vcpu is actively running
-    /// - Bit 0: CANCEL_BIT - set when cancellation has been requested
-    ///
-    /// `WHvCancelRunVirtualProcessor()` will return Ok even if the vcpu is not running,
-    /// which is why we need the RUNNING_BIT.
-    ///
-    /// CANCEL_BIT persists across vcpu exits/re-entries within a single `VirtualCPU::run()` call
-    /// (e.g., during host function calls), but is cleared at the start of each new `VirtualCPU::run()` call.
-    state: AtomicU8,
-
-    /// RwLock protecting the partition handle and dropped state.
-    ///
-    /// This lock prevents a race condition between `kill()` calling `WHvCancelRunVirtualProcessor`
-    /// and `WhpVm::drop()` calling `WHvDeletePartition`. These two Windows Hypervisor Platform APIs
-    /// must not execute concurrently - if `WHvDeletePartition` frees the partition while
-    /// `WHvCancelRunVirtualProcessor` is still accessing it, the result is a use-after-free
-    /// causing STATUS_ACCESS_VIOLATION or STATUS_HEAP_CORRUPTION.
-    ///
-    /// The synchronization works as follows:
-    /// - `kill()` takes a read lock before calling `WHvCancelRunVirtualProcessor`
-    /// - `set_dropped()` takes a write lock, which blocks until all in-flight `kill()` calls complete,
-    ///   then sets `dropped = true`. This is called from `HyperlightVm::drop()` before `WhpVm::drop()`
-    ///   runs, ensuring no `kill()` is accessing the partition when `WHvDeletePartition` is called.
-    partition_state: std::sync::RwLock<PartitionState>,
-}
-
-/// State protected by the RwLock in `WindowsInterruptHandle`.
-///
-/// Contains a copy of the partition handle from `WhpVm` (not an owning reference).
-/// The RwLock and `dropped` flag ensure this handle is never used after `WhpVm`
-/// deletes the partition.
-#[cfg(target_os = "windows")]
-#[derive(Debug)]
-pub(super) struct PartitionState {
-    /// Copy of partition handle from `WhpVm`. Only valid while `dropped` is false.
-    pub(super) handle: windows::Win32::System::Hypervisor::WHV_PARTITION_HANDLE,
-    /// Set true before partition deletion; prevents further use of `handle`.
-    pub(super) dropped: bool,
-}
-
-#[cfg(target_os = "windows")]
-impl WindowsInterruptHandle {
-    const RUNNING_BIT: u8 = 1 << 1;
-    const CANCEL_BIT: u8 = 1 << 0;
-    #[cfg(gdb)]
-    const DEBUG_INTERRUPT_BIT: u8 = 1 << 2;
-}
-
-#[cfg(target_os = "windows")]
-impl InterruptHandleImpl for WindowsInterruptHandle {
-    fn set_running(&self) {
-        // Release ordering to ensure prior memory operations are visible when another thread observes running=true
-        self.state.fetch_or(Self::RUNNING_BIT, Ordering::Release);
-    }
-
-    fn is_cancelled(&self) -> bool {
-        // Acquire ordering to synchronize with the Release in kill()
-        // This ensures we see the CANCEL_BIT set by the interrupt thread
-        self.state.load(Ordering::Acquire) & Self::CANCEL_BIT != 0
-    }
-
-    fn clear_cancel(&self) {
-        // Release ordering to ensure that any operations from the previous run()
-        // are visible to other threads. While this is typically called by the vcpu thread
-        // at the start of run(), the VM itself can move between threads across guest calls.
-        self.state.fetch_and(!Self::CANCEL_BIT, Ordering::Release);
-    }
-
-    fn clear_running(&self) {
-        // Release ordering to ensure all vcpu operations are visible before clearing running
-        self.state.fetch_and(!Self::RUNNING_BIT, Ordering::Release);
-    }
-
-    fn is_debug_interrupted(&self) -> bool {
-        #[cfg(gdb)]
-        {
-            self.state.load(Ordering::Acquire) & Self::DEBUG_INTERRUPT_BIT != 0
-        }
-        #[cfg(not(gdb))]
-        {
-            false
-        }
-    }
-
-    #[cfg(gdb)]
-    fn clear_debug_interrupt(&self) {
-        self.state
-            .fetch_and(!Self::DEBUG_INTERRUPT_BIT, Ordering::Release);
-    }
-
-    fn set_dropped(&self) {
-        // Take write lock to:
-        // 1. Wait for any in-flight kill() calls (holding read locks) to complete
-        // 2. Block new kill() calls from starting while we hold the write lock
-        // 3. Set dropped=true so no future kill() calls will use the handle
-        // After this returns, no WHvCancelRunVirtualProcessor calls are in progress
-        // or will ever be made, so WHvDeletePartition can safely be called.
-        match self.partition_state.write() {
-            Ok(mut guard) => {
-                guard.dropped = true;
-            }
-            Err(e) => {
-                tracing::error!("Failed to acquire partition_state write lock: {}", e);
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl InterruptHandle for WindowsInterruptHandle {
-    fn kill(&self) -> bool {
-        use windows::Win32::System::Hypervisor::WHvCancelRunVirtualProcessor;
-
-        // Release ordering ensures that any writes before kill() are visible to the vcpu thread
-        // when it checks is_cancelled() with Acquire ordering
-        self.state.fetch_or(Self::CANCEL_BIT, Ordering::Release);
-
-        // Acquire ordering to synchronize with the Release in set_running()
-        // This ensures we see the running state set by the vcpu thread
-        let state = self.state.load(Ordering::Acquire);
-        if state & Self::RUNNING_BIT == 0 {
-            return false;
-        }
-
-        // Take read lock to prevent race with WHvDeletePartition in set_dropped().
-        // Multiple kill() calls can proceed concurrently (read locks don't block each other),
-        // but set_dropped() will wait for all kill() calls to complete before proceeding.
-        let guard = match self.partition_state.read() {
-            Ok(guard) => guard,
-            Err(e) => {
-                tracing::error!("Failed to acquire partition_state read lock: {}", e);
-                return false;
-            }
-        };
-
-        if guard.dropped {
-            return false;
-        }
-
-        unsafe { WHvCancelRunVirtualProcessor(guard.handle, 0, 0).is_ok() }
-    }
-    #[cfg(gdb)]
-    fn kill_from_debugger(&self) -> bool {
-        use windows::Win32::System::Hypervisor::WHvCancelRunVirtualProcessor;
-
-        self.state
-            .fetch_or(Self::DEBUG_INTERRUPT_BIT, Ordering::Release);
-
-        // Acquire ordering to synchronize with the Release in set_running()
-        let state = self.state.load(Ordering::Acquire);
-        if state & Self::RUNNING_BIT == 0 {
-            return false;
-        }
-
-        // Take read lock to prevent race with WHvDeletePartition in set_dropped()
-        let guard = match self.partition_state.read() {
-            Ok(guard) => guard,
-            Err(e) => {
-                tracing::error!("Failed to acquire partition_state read lock: {}", e);
-                return false;
-            }
-        };
-
-        if guard.dropped {
-            return false;
-        }
-
-        unsafe { WHvCancelRunVirtualProcessor(guard.handle, 0, 0).is_ok() }
-    }
-
-    fn dropped(&self) -> bool {
-        // Take read lock to check dropped state consistently
-        match self.partition_state.read() {
-            Ok(guard) => guard.dropped,
-            Err(e) => {
-                tracing::error!("Failed to acquire partition_state read lock: {}", e);
-                true // Assume dropped if we can't acquire lock
-            }
-        }
-    }
-}
-
-#[cfg(all(test, any(target_os = "windows", kvm)))]
-pub(crate) mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use hyperlight_testing::dummy_guest_as_string;
-
-    use crate::sandbox::uninitialized::GuestBinary;
-    #[cfg(any(crashdump, gdb))]
-    use crate::sandbox::uninitialized::SandboxRuntimeConfig;
-    use crate::sandbox::uninitialized_evolve::set_up_hypervisor_partition;
-    use crate::sandbox::{SandboxConfiguration, UninitializedSandbox};
-    use crate::{Result, is_hypervisor_present, new_error};
-
-    #[cfg_attr(feature = "hw-interrupts", ignore)]
-    #[test]
-    fn test_initialise() -> Result<()> {
-        if !is_hypervisor_present() {
-            return Ok(());
-        }
-
-        use crate::mem::ptr::RawPtr;
-        use crate::sandbox::host_funcs::FunctionRegistry;
-
-        let filename = dummy_guest_as_string().map_err(|e| new_error!("{}", e))?;
-
-        let config: SandboxConfiguration = Default::default();
-        #[cfg(any(crashdump, gdb))]
-        let rt_cfg: SandboxRuntimeConfig = Default::default();
-        let sandbox =
-            UninitializedSandbox::new(GuestBinary::FilePath(filename.clone()), Some(config))?;
-        let (mut mem_mgr, gshm) = sandbox.mgr.build().unwrap();
-        let exn_stack_top_gva = hyperlight_common::layout::MAX_GVA as u64
-            - hyperlight_common::layout::SCRATCH_TOP_EXN_STACK_OFFSET
-            + 1;
-        let mut vm = set_up_hypervisor_partition(
-            gshm,
-            &config,
-            exn_stack_top_gva,
-            page_size::get(),
-            #[cfg(any(crashdump, gdb))]
-            rt_cfg,
-            sandbox.load_info,
-        )?;
-
-        // Set up required parameters for initialise
-        let peb_addr = RawPtr::from(0x1000u64); // Dummy PEB address
-        let seed = 12345u64; // Random seed
-        let page_size = 4096u32; // Standard page size
-        let host_funcs = Arc::new(Mutex::new(FunctionRegistry::default()));
-        let guest_max_log_level = Some(tracing_core::LevelFilter::ERROR);
-
-        #[cfg(gdb)]
-        let dbg_mem_access_fn = Arc::new(Mutex::new(mem_mgr.clone()));
-
-        // Test the initialise method
-        vm.initialise(
-            peb_addr,
-            seed,
-            page_size,
-            &mut mem_mgr,
-            &host_funcs,
-            guest_max_log_level,
-            #[cfg(gdb)]
-            dbg_mem_access_fn,
-        )
-        .unwrap();
-
-        Ok(())
-    }
-}
