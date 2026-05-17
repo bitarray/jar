@@ -1,6 +1,10 @@
-//! Bare-metal Hyperlight guest for the `nub` ring-0 spike.
+//! Nub Arch implementation for Hyperlight: a bare-metal guest binary
+//! that runs the kernel on real CPU + MMU. Today this crate hosts the
+//! ring-0 spike test functions that proved the Hyperlight substrate
+//! works; the actual `Arch` impl plus the kernel will land in
+//! follow-up commits.
 //!
-//! Built with `build-nub` → `cargo build --target=x86_64-unknown-none`.
+//! Built with `nub-build` → `cargo build --target=x86_64-unknown-none`.
 //! Links against `hyperlight-guest-bin` with `default-features = false`
 //! (no picolibc, no C). Entry point is `entrypoint` (provided by
 //! `hyperlight-guest-bin`), which initialises the heap + GDT + IDT

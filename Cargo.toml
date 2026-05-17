@@ -6,7 +6,7 @@ members = [
     "rust/build-javm",
     "rust/nub-build",
     "rust/nub",
-    "rust/nub-guest",
+    "rust/nub-arch-hyperlight",
     "rust/javm",
     "rust/subsoil",
     "rust/subsoil-derive",

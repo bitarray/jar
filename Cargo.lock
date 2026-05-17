@@ -1492,19 +1492,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "nub-build"
-version = "0.1.0"
-dependencies = [
- "build-crate",
-]
-
-[[package]]
-name = "nub-guest"
+name = "nub-arch-hyperlight"
 version = "0.1.0"
 dependencies = [
  "hyperlight-common",
  "hyperlight-guest",
  "hyperlight-guest-bin",
+]
+
+[[package]]
+name = "nub-build"
+version = "0.1.0"
+dependencies = [
+ "build-crate",
 ]
 
 [[package]]

@@ -1,12 +1,12 @@
 [package]
-name = "nub-guest"
+name = "nub-arch-hyperlight"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Bare-metal Hyperlight guest for the nub-prototype ring-0 spike"
+description = "Nub Arch implementation for Hyperlight: bare-metal guest binary running the kernel on real CPU + MMU"
 
 [[bin]]
-name = "nub-guest"
+name = "nub-arch-hyperlight"
 path = "src/main.rs"
 
 # Hyperlight guest deps only on the bare-metal target. On the host

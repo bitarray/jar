@@ -1,4 +1,4 @@
-//! `nub` host driver: load the `nub-guest` ELF into a Hyperlight
+//! `nub` host driver: load the `nub-arch-hyperlight` ELF into a Hyperlight
 //! sandbox, run the ring-0 spike tests, print the results.
 //!
 //! Tests:
@@ -17,15 +17,15 @@
 use anyhow::Result;
 use hyperlight_host::sandbox::{GuestBinary, UninitializedSandbox};
 
-const NUB_GUEST_BLOB_PATH: &str = env!("NUB_GUEST_BLOB");
+const NUB_ARCH_HYPERLIGHT_BLOB_PATH: &str = env!("NUB_ARCH_HYPERLIGHT_BLOB");
 
 fn main() -> Result<()> {
     println!("nub-prototype: Hyperlight + ring-0 spike");
-    println!("guest blob: {NUB_GUEST_BLOB_PATH}");
+    println!("guest blob: {NUB_ARCH_HYPERLIGHT_BLOB_PATH}");
     println!();
 
     let uninit =
-        UninitializedSandbox::new(GuestBinary::FilePath(NUB_GUEST_BLOB_PATH.to_string()), None)?;
+        UninitializedSandbox::new(GuestBinary::FilePath(NUB_ARCH_HYPERLIGHT_BLOB_PATH.to_string()), None)?;
     let mut sandbox = uninit.evolve()?;
 
     // -- A1 smoke --
