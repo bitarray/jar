@@ -164,6 +164,17 @@ fn main() -> Result<()> {
         check(rl > 0),
     );
 
+    // -- C1 in-kernel JIT compile + map (Stage 2.2 prep) --
+    let c1: u64 = sandbox.call("c1_jit_compile_smoke", ())?;
+    let c1_bytes = c1 >> 16;
+    let c1_pages = c1 & 0xFFFF;
+    println!(
+        "C1  jit_compile    bytes={:<3} pages={}                            {}",
+        c1_bytes,
+        c1_pages,
+        check(c1_bytes > 0 && c1_pages > 0),
+    );
+
     // -- A1 bump arena smoke (Stage 2.2 prep) --
     let bump: u64 = sandbox.call("bump_smoke", ())?;
     let aligned = (bump >> 1) & 1 != 0;

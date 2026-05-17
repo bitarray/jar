@@ -251,6 +251,81 @@ mod guest {
         result.native_code.len() as u64
     }
 
+    // === C1: in-kernel JIT codegen + executable mapping ======================
+
+    /// Compile a PVM program, allocate a phys page for the native
+    /// code, copy bytes into it, map the page user-RX in a fresh
+    /// PageTable. Returns (native_byte_count << 16) | rounded_pages.
+    ///
+    /// Doesn't execute the code (that's C3); only validates the
+    /// in-kernel compile → map pipeline.
+    #[guest_function("c1_jit_compile_smoke")]
+    pub fn c1_jit_compile_smoke() -> u64 {
+        // PVM `trap`.
+        let code = [0u8];
+        let bitmask = [1u8];
+        let jump_table: [u32; 0] = [];
+
+        let helpers = javm_recompiler_x86::codegen::HelperFns {
+            mem_read_u8: 0,
+            mem_read_u16: 0,
+            mem_read_u32: 0,
+            mem_read_u64: 0,
+            mem_write_u8: 0,
+            mem_write_u16: 0,
+            mem_write_u32: 0,
+            mem_write_u64: 0,
+            sbrk_helper: 0,
+        };
+        let compiler = javm_recompiler_x86::codegen::Compiler::new(
+            &bitmask,
+            &jump_table,
+            helpers,
+            code.len(),
+            false,
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
+        );
+        let result = compiler.compile(&code, &bitmask);
+        let native = &result.native_code;
+        if native.is_empty() {
+            return 0xDEAD_0001;
+        }
+
+        // Allocate enough phys pages to fit the code.
+        let n_pages = native.len().div_ceil(PAGE_SIZE as usize);
+        let exec_pa = unsafe { hyperlight_guest::prim_alloc::alloc_phys_pages(n_pages as u64) };
+        let stage_va = match paging::pa_to_va(exec_pa) {
+            Some(v) => v,
+            None => return 0xDEAD_0002,
+        };
+        // SAFETY: scratch is mapped writable kernel-only at stage_va;
+        // we own these freshly allocated phys pages.
+        unsafe {
+            core::ptr::copy_nonoverlapping(native.as_ptr(), stage_va as *mut u8, native.len());
+        }
+
+        // Build a per-invocation page table; map the exec region user-RX.
+        let arena = match BumpArena::new(crate::bump::SMOKE_CAPACITY) {
+            Some(a) => a,
+            None => return 0xDEAD_0003,
+        };
+        let mut pt = match PageTable::new_in(&arena) {
+            Some(p) => p,
+            None => return 0xDEAD_0004,
+        };
+        const USER_CODE_VA: u64 = 32u64 << 39;
+        let pages_bytes = (n_pages * PAGE_SIZE as usize) as u64;
+        if pt
+            .map(USER_CODE_VA, exec_pa, pages_bytes, Perm::user_rx())
+            .is_none()
+        {
+            return 0xDEAD_0005;
+        }
+
+        // Pack: high 48 bits = native byte count, low 16 = n_pages.
+        ((native.len() as u64) << 16) | (n_pages as u64)
+    }
+
     // === A4: ring-3 entry smoke ==============================================
 
     /// Drop to ring 3, run a 7-byte stub that does
