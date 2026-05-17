@@ -1,0 +1,117 @@
+//! Nub: the JAR v3 microkernel — uniform caller-facing handle.
+//!
+//! The [`Nub`] handle is the API callers (chain runtime, tests, RPC,
+//! `jar-apply`) link against. It hides the choice of substrate behind
+//! a single invoke surface, dispatching to one of two backends:
+//!
+//! - **Local**: runs `Kernel<nub_arch_local::LocalArch>` directly
+//!   in-process. Used for tests, deterministic replay, and any host
+//!   that doesn't need real ring-0 isolation.
+//!
+//! - **Hyperlight**: ships the invocation as an RPC into a
+//!   `nub-arch-hyperlight` guest binary running inside a Hyperlight
+//!   sandbox. The actual `Kernel<HyperlightArch>` lives guest-side;
+//!   the host holds only the sandbox + an `InstanceRef` table.
+//!
+//! Both backends share the [`nub_kernel::Arch`] trait surface
+//! ([`invoke`](Nub::invoke) + [`state_root`](Nub::state_root)). The
+//! current skeleton implementation returns a fixed value (42) from
+//! either backend, just to exercise the wiring.
+
+use anyhow::Result;
+use hyperlight_host::sandbox::{GuestBinary, MultiUseSandbox, UninitializedSandbox};
+use nub_arch_local::LocalArch;
+use nub_kernel::Kernel;
+
+pub use nub_kernel::{CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
+
+/// Path to the cross-compiled Hyperlight guest blob. Set by
+/// `build.rs` via [`nub_build::build`].
+const NUB_ARCH_HYPERLIGHT_BLOB_PATH: &str = env!("NUB_ARCH_HYPERLIGHT_BLOB");
+
+/// Uniform handle to the nub microkernel.
+pub struct Nub {
+    backend: Backend,
+}
+
+enum Backend {
+    Local(Kernel<LocalArch>),
+    Hyperlight(Box<HyperlightDriver>),
+}
+
+/// Host-side RPC stub for the Hyperlight backend. The real kernel
+/// lives guest-side; this wrapper just ships invocations into the
+/// sandbox.
+struct HyperlightDriver {
+    sandbox: MultiUseSandbox,
+    state_root_cache: CapHash,
+}
+
+impl Nub {
+    /// Construct a Nub backed by the in-process [`LocalArch`].
+    pub fn new_local() -> Self {
+        Self {
+            backend: Backend::Local(Kernel::new(LocalArch::new())),
+        }
+    }
+
+    /// Construct a Nub backed by a fresh Hyperlight sandbox loaded
+    /// from the `nub-arch-hyperlight` guest blob.
+    pub fn new_hyperlight() -> Result<Self> {
+        let uninit = UninitializedSandbox::new(
+            GuestBinary::FilePath(NUB_ARCH_HYPERLIGHT_BLOB_PATH.to_string()),
+            None,
+        )?;
+        let sandbox = uninit.evolve()?;
+        Ok(Self {
+            backend: Backend::Hyperlight(Box::new(HyperlightDriver {
+                sandbox,
+                state_root_cache: [0; 32],
+            })),
+        })
+    }
+
+    /// Invoke `endpoint` on `target` with `args`.
+    pub fn invoke(
+        &mut self,
+        target: InstanceRef,
+        endpoint: u16,
+        args: &[u8],
+        opts: InvokeOptions,
+    ) -> Result<InvokeOutcome> {
+        match &mut self.backend {
+            Backend::Local(k) => Ok(k
+                .invoke(target, endpoint, args, opts)
+                .expect("LocalArch::Error is uninhabited")),
+            Backend::Hyperlight(h) => h.invoke(target, endpoint, args, opts),
+        }
+    }
+
+    /// Current state root.
+    pub fn state_root(&self) -> CapHash {
+        match &self.backend {
+            Backend::Local(k) => k.state_root(),
+            Backend::Hyperlight(h) => h.state_root_cache,
+        }
+    }
+}
+
+impl HyperlightDriver {
+    fn invoke(
+        &mut self,
+        _target: InstanceRef,
+        _endpoint: u16,
+        _args: &[u8],
+        _opts: InvokeOptions,
+    ) -> Result<InvokeOutcome> {
+        // Skeleton: ship a fixed RPC into the guest. The guest's
+        // `nub_smoke` returns 42, matching `LocalArch`'s stub. Real
+        // dispatch (target / endpoint / args wired through) lands
+        // alongside the guest-side `Kernel<HyperlightArch>`.
+        let return_value: u64 = self.sandbox.call("nub_smoke", ())?;
+        Ok(InvokeOutcome {
+            return_value,
+            gas_used: 0,
+        })
+    }
+}

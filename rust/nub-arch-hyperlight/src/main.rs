@@ -41,10 +41,23 @@ mod guest {
     // === A1: smoke ============================================================
 
     /// Trivial round-trip. Host calls; guest returns 42.
-    /// Validates that build-nub + hyperlight-guest-bin link cleanly
+    /// Validates that nub-build + hyperlight-guest-bin link cleanly
     /// and Hyperlight's host-callable ABI works end-to-end.
     #[guest_function("smoke")]
     pub fn smoke() -> u64 {
+        42
+    }
+
+    // === nub-handle skeleton smoke ===========================================
+
+    /// Skeleton stand-in for the Nub-handle `invoke` RPC. The host's
+    /// `Nub::new_hyperlight().invoke(...)` calls into this. Returns 42
+    /// to match `nub_arch_local::LocalArch`'s stubbed return value, so
+    /// both backends look identical to the test harness. Real
+    /// invocation dispatch — driven by `Kernel<HyperlightArch>` in the
+    /// guest — lands in a follow-up commit.
+    #[guest_function("nub_smoke")]
+    pub fn nub_smoke() -> u64 {
         42
     }
 

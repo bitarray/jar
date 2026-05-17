@@ -1488,7 +1488,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hyperlight-host",
+ "nub-arch-local",
  "nub-build",
+ "nub-kernel",
 ]
 
 [[package]]

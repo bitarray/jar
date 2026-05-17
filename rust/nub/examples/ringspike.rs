@@ -1,5 +1,16 @@
-//! `nub` host driver: load the `nub-arch-hyperlight` ELF into a Hyperlight
-//! sandbox, run the ring-0 spike tests, print the results.
+//! Ring-0 spike: load the `nub-arch-hyperlight` ELF into a Hyperlight
+//! sandbox and run the ring-0 conformance tests that validated the
+//! Hyperlight substrate. Run with:
+//!
+//! ```ignore
+//! cargo run -p nub --example ringspike --release
+//! ```
+//!
+//! This is a *regression check* on the Arch substrate, not the kernel
+//! interface — it predates `nub-kernel` and bypasses it entirely by
+//! calling the guest's bare ring-0 test functions directly through
+//! the Hyperlight sandbox. See `tests/smoke.rs` for the Nub-handle
+//! smoke tests.
 //!
 //! Tests:
 //!
@@ -24,8 +35,10 @@ fn main() -> Result<()> {
     println!("guest blob: {NUB_ARCH_HYPERLIGHT_BLOB_PATH}");
     println!();
 
-    let uninit =
-        UninitializedSandbox::new(GuestBinary::FilePath(NUB_ARCH_HYPERLIGHT_BLOB_PATH.to_string()), None)?;
+    let uninit = UninitializedSandbox::new(
+        GuestBinary::FilePath(NUB_ARCH_HYPERLIGHT_BLOB_PATH.to_string()),
+        None,
+    )?;
     let mut sandbox = uninit.evolve()?;
 
     // -- A1 smoke --

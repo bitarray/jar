@@ -56,7 +56,12 @@ mod tests {
     fn stub_invoke_returns_42() {
         let mut arch = LocalArch::new();
         let outcome = arch
-            .invoke(InstanceRef::from_hash([0; 32]), 0, &[], InvokeOptions::default())
+            .invoke(
+                InstanceRef::from_hash([0; 32]),
+                0,
+                &[],
+                InvokeOptions::default(),
+            )
             .unwrap();
         assert_eq!(outcome.return_value, 42);
     }
