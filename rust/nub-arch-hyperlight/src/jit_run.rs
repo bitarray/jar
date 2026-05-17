@@ -31,8 +31,86 @@
 use crate::bump::{BumpArena, PAGE_SIZE};
 use crate::paging::{self, PageTable, Perm};
 use crate::ring3;
+use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use hyperlight_guest_bin::exception::arch::{Context, ExceptionInfo, HANDLERS};
 use javm_recompiler_x86::JitContext;
 use javm_recompiler_x86::codegen::{Compiler, HelperFns};
+
+// === Per-invocation context for the #PF handler ===========================
+//
+// Set by `run_pvm` immediately before `enter_ring3`, read by
+// `jit_pf_handler` if a #PF fires from inside the JIT'd code window.
+// Single-threaded (Hyperlight serialises calls), so unsynchronised
+// statics are safe — we use atomics for `&'static mut` avoidance only.
+
+static JIT_CODE_BASE: AtomicU64 = AtomicU64::new(0);
+static JIT_CODE_LEN: AtomicU64 = AtomicU64::new(0);
+static EXIT_LABEL_VA: AtomicU64 = AtomicU64::new(0);
+static TRAP_TABLE_PTR: AtomicPtr<(u32, u32)> = AtomicPtr::new(core::ptr::null_mut());
+static TRAP_TABLE_LEN: AtomicU64 = AtomicU64::new(0);
+static CTX_KVA: AtomicU64 = AtomicU64::new(0);
+
+/// Hyperlight-chained #PF handler. Fires AFTER Hyperlight's own
+/// stack-growth / CoW handlers have declined to handle the fault.
+///
+/// If the faulting RIP is inside the registered JIT code window:
+/// resolve the PVM PC via the trap table, populate
+/// `JitContext::{exit_reason, exit_arg, pc}`, redirect the saved RIP
+/// in the iretq frame to the JIT's exit label, return `true`. The
+/// CPU then `iretq`s back to ring 3 at the exit label, which `ret`s
+/// to the trampoline, which `int 0x81`s back to the kernel — exactly
+/// the same path as a clean `ecalli` exit (Stage C3).
+///
+/// Returns `false` for any fault outside the JIT window, letting
+/// Hyperlight abort.
+fn jit_pf_handler(
+    _exception_number: u64,
+    info: *mut ExceptionInfo,
+    _ctx: *mut Context,
+    gva: u64,
+) -> bool {
+    // SAFETY: Hyperlight passes a valid pointer to the iretq frame.
+    let saved_rip = unsafe { (&raw const (*info).rip).read_volatile() };
+    let code_base = JIT_CODE_BASE.load(Ordering::SeqCst);
+    let code_len = JIT_CODE_LEN.load(Ordering::SeqCst);
+    if code_len == 0 || saved_rip < code_base || saved_rip >= code_base + code_len {
+        return false;
+    }
+
+    let offset = (saved_rip - code_base) as u32;
+    let tt_ptr = TRAP_TABLE_PTR.load(Ordering::SeqCst);
+    let tt_len = TRAP_TABLE_LEN.load(Ordering::SeqCst) as usize;
+    let mut pvm_pc = 0u32;
+    if !tt_ptr.is_null() && tt_len > 0 {
+        // SAFETY: tt_ptr + tt_len describes a contiguous slice in
+        // kernel scratch memory, valid for the duration of `run_pvm`
+        // (which is the only function that publishes / clears the
+        // statics that point at it).
+        let tt = unsafe { core::slice::from_raw_parts(tt_ptr, tt_len) };
+        match tt.binary_search_by_key(&offset, |&(no, _)| no) {
+            Ok(idx) => pvm_pc = tt[idx].1,
+            Err(0) => {}
+            Err(idx) => pvm_pc = tt[idx - 1].1,
+        }
+    }
+
+    let ctx_kva = CTX_KVA.load(Ordering::SeqCst);
+    // SAFETY: ctx_kva is the scratch VA of the JitContext page for the
+    // current invocation; valid while the handler runs.
+    unsafe {
+        let ctx = ctx_kva as *mut JitContext;
+        (*ctx).exit_reason = 3; // PageFault
+        (*ctx).exit_arg = gva as u32;
+        (*ctx).pc = pvm_pc;
+    }
+
+    let exit_va = EXIT_LABEL_VA.load(Ordering::SeqCst);
+    // SAFETY: info is a valid pointer to a writable iretq frame.
+    unsafe {
+        (&raw mut (*info).rip).write_volatile(exit_va);
+    }
+    true
+}
 
 /// Result of an in-kernel PVM run.
 #[derive(Debug, Clone, Copy)]
@@ -94,6 +172,8 @@ pub unsafe fn run_pvm(
     let result = compiler.compile(code, bitmask);
     let native = result.native_code;
     let dispatch_table = result.dispatch_table;
+    let trap_table = result.trap_table;
+    let exit_label_offset = result.exit_label_offset;
     if native.is_empty() {
         return None;
     }
@@ -206,15 +286,38 @@ pub unsafe fn run_pvm(
     pt.map(STACK_VA, stack_pa, PAGE_SIZE as u64, Perm::user_rw())?;
     let new_cr3 = pt.cr3()?;
 
-    // ---- install ring-3 GDT/IDT (idempotent) -------------------------------
+    // ---- install ring-3 GDT/IDT + JIT #PF handler --------------------------
     // SAFETY: ring-0 mutation of GDT/IDT; serialised by Hyperlight.
     unsafe { ring3::install_ring3_exit_gate() };
+
+    // Publish per-invocation state for the #PF handler, then install
+    // the handler at HANDLERS[14]. Hyperlight's own stack-growth /
+    // CoW handlers run first; we only see faults inside the JIT'd
+    // code window.
+    JIT_CODE_BASE.store(JIT_VA, Ordering::SeqCst);
+    JIT_CODE_LEN.store((jit_pages * PAGE_SIZE) as u64, Ordering::SeqCst);
+    EXIT_LABEL_VA.store(JIT_VA + exit_label_offset as u64, Ordering::SeqCst);
+    TRAP_TABLE_PTR.store(trap_table.as_ptr() as *mut (u32, u32), Ordering::SeqCst);
+    TRAP_TABLE_LEN.store(trap_table.len() as u64, Ordering::SeqCst);
+    CTX_KVA.store(ctx_kva, Ordering::SeqCst);
+    HANDLERS[14].store(jit_pf_handler as *const () as u64, Ordering::Release);
 
     // ---- drop to ring 3 ----------------------------------------------------
     let user_stack_top = STACK_VA + PAGE_SIZE as u64;
     // SAFETY: trampoline + stack mapped above; new_cr3 carries the
     // kernel half so kernel reentry survives.
     let _user_rax_at_exit = unsafe { ring3::nub_enter_ring3(TRAMP_VA, user_stack_top, new_cr3) };
+
+    // Clear the #PF handler so subsequent kernel-mode faults don't
+    // get redirected into our stale exit_label.
+    HANDLERS[14].store(0, Ordering::Release);
+    TRAP_TABLE_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
+    TRAP_TABLE_LEN.store(0, Ordering::SeqCst);
+    JIT_CODE_LEN.store(0, Ordering::SeqCst);
+
+    // Keep `trap_table` alive across the run — the handler held a raw
+    // pointer into its buffer.
+    drop(trap_table);
 
     // ---- read the ctx the JIT wrote ----------------------------------------
     // The CR3 has been restored by ring3_exit_stub. The JitContext

@@ -253,6 +253,37 @@ mod guest {
         result.native_code.len() as u64
     }
 
+    // === C4: in-kernel #PF handler with trap table lookup ====================
+
+    /// Run a PVM program whose first instruction is `LoadU8 r0,
+    /// 0x4000` — guaranteed to fault because the per-invocation page
+    /// table doesn't map low-VA program memory. The kernel #PF
+    /// handler installed by `run_pvm` resolves the faulting native
+    /// RIP back to the PVM PC via the trap table, sets
+    /// `ctx.exit_reason = 3` (PageFault) + `ctx.exit_arg = faulting_va`,
+    /// redirects RIP to the JIT's exit label, and `iretq`s. The exit
+    /// label runs, `ret`s to the trampoline, traps via int 0x81,
+    /// kernel longjmps back.
+    ///
+    /// Returns `(exit_reason << 32) | (exit_arg & 0xFFFF_FFFF)`.
+    /// Expected: exit_reason=3, exit_arg=`PROG_BASE + 4096 + 0x4000`
+    /// truncated to u32.
+    #[guest_function("c4_pf_smoke")]
+    pub fn c4_pf_smoke() -> u64 {
+        // `LoadU8 r0, imm=0x4000`: opcode 52, reg_byte 0, 3-byte
+        // little-endian imm. ℓ=4 (3 imm bytes), bitmask marks
+        // PC=0 as the instruction start.
+        let code = [52u8, 0, 0x00, 0x40, 0x00, 0];
+        let bitmask = [1u8, 0, 0, 0, 0, 1];
+        let jump_table: [u32; 0] = [];
+
+        let info = match unsafe { crate::jit_run::run_pvm(&code, &bitmask, &jump_table, 1_000) } {
+            Some(i) => i,
+            None => return 0xDEAD_BEEF_DEAD_BEEF,
+        };
+        ((info.exit_reason as u64) << 32) | (info.exit_arg as u64)
+    }
+
     // === C3: run JIT'd code at ring 3 ========================================
 
     /// Compile a PVM `ecalli 42` program, run it at ring 3 through

@@ -203,6 +203,17 @@ fn main() -> Result<()> {
         check(c3_reason == 4 && c3_arg == 42),
     );
 
+    // -- C4 in-kernel #PF handler (Stage 2.2 prep) --
+    let c4: u64 = sandbox.call("c4_pf_smoke", ())?;
+    let c4_reason = c4 >> 32;
+    let c4_arg = c4 & 0xFFFF_FFFF;
+    println!(
+        "C4  pf_handler     exit_reason={} exit_arg={:#x}                  {}",
+        c4_reason,
+        c4_arg,
+        check(c4_reason == 3),
+    );
+
     // -- A1 bump arena smoke (Stage 2.2 prep) --
     let bump: u64 = sandbox.call("bump_smoke", ())?;
     let aligned = (bump >> 1) & 1 != 0;
