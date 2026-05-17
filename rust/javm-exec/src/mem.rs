@@ -16,6 +16,8 @@
 //! `write_unaligned` via raw pointers — single MOV on x86. Same
 //! shape as v2 `javm/src/interpreter/mod.rs:198-309`.
 
+use alloc::vec::Vec;
+
 /// PVM page size: 4 KiB.
 pub const PAGE_SIZE: u32 = 1 << 12;
 

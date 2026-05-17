@@ -13,6 +13,7 @@
 use crate::args::{self, Args};
 use crate::instruction::Opcode;
 use crate::program::PvmProgram;
+use alloc::vec::Vec;
 
 /// Pre-decoded instruction for the fast interpreter / JIT path.
 ///

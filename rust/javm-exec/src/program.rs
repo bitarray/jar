@@ -10,6 +10,7 @@
 //! interpreter and recompiler both consume `&PvmProgram`.
 
 use crate::error::ProgramError;
+use alloc::vec::Vec;
 
 /// PVM program for execution.
 ///

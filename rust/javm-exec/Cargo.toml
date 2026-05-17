@@ -4,10 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "JAR v3 execution engine: PVM interpreter, recompiler, memory, gas. No cap awareness."
+description = "JAR v3 execution engine: PVM interpreter, memory, gas. No cap awareness."
+
+[features]
+default = ["std"]
+std = ["thiserror/std"]
 
 [dependencies]
-thiserror = { workspace = true }
+thiserror = { version = "2", default-features = false }
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -8,7 +8,21 @@
 //! - 4 decode slots per cycle, 5 dispatch slots per cycle
 //! - Execution units: ALU:4, LOAD:4, STORE:4, MUL:1, DIV:1
 
-// std prelude already provides Vec / vec!; no alloc import needed.
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+/// `trace_eprintln!`-equivalent that's a no-op without std. Used by the
+/// trace path in `gas_sim_traced`, which is only ever enabled in
+/// debug builds.
+#[cfg(feature = "std")]
+macro_rules! trace_eprintln {
+    ($($t:tt)*) => { std::eprintln!($($t)*) };
+}
+#[cfg(not(feature = "std"))]
+macro_rules! trace_eprintln {
+    ($($t:tt)*) => { let _ = format_args!($($t)*); };
+}
 
 // --- Data structures ---
 
@@ -584,7 +598,7 @@ fn gas_sim_traced(code: &[u8], bitmask: &[u8], start_pc: usize, trace: bool) -> 
                 let op = crate::instruction::Opcode::from_byte(code[pc])
                     .map(|o| format!("{:?}", o))
                     .unwrap_or("?".into());
-                eprintln!(
+                trace_eprintln!(
                     "  [{}] DECODE pc={} {} cy={} dec={} rob_idx={} deps={:?} move={} term={} slots_left={}",
                     iter,
                     pc,
@@ -621,7 +635,7 @@ fn gas_sim_traced(code: &[u8], bitmask: &[u8], start_pc: usize, trace: bool) -> 
             let eu = s.rob[idx].exec_units;
 
             if trace {
-                eprintln!(
+                trace_eprintln!(
                     "  [{}] DISPATCH rob[{}] cy={} dispatch_left={}",
                     iter,
                     idx,
@@ -638,7 +652,7 @@ fn gas_sim_traced(code: &[u8], bitmask: &[u8], start_pc: usize, trace: bool) -> 
         // Priority 3: Done
         if s.ip.is_none() && rob_all_finished(&s.rob) {
             if trace {
-                eprintln!("  [{}] DONE cycles={}", iter, s.cycles);
+                trace_eprintln!("  [{}] DONE cycles={}", iter, s.cycles);
             }
             break;
         }
@@ -668,7 +682,7 @@ fn gas_sim_traced(code: &[u8], bitmask: &[u8], start_pc: usize, trace: bool) -> 
                     )
                 })
                 .collect();
-            eprintln!(
+            trace_eprintln!(
                 "  [{}] ADVANCE cycle {} → {} rob=[{}]",
                 iter,
                 s.cycles,

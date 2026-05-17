@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "std"), no_std)]
+
 //! JAR v3 execution engine.
 //!
 //! Pure PVM execution: interpreter, recompiler (JIT), memory pages,
@@ -14,6 +16,9 @@
 //! gas}` with cap-aware code stripped. See
 //! `~/docs/minimum-v3/implementation/architecture.md` for the
 //! layering.
+
+#[macro_use]
+extern crate alloc;
 
 pub mod args;
 pub mod decode;
