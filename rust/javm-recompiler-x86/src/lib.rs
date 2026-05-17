@@ -267,7 +267,7 @@ pub struct DataLayout {
     pub rw_data: Vec<u8>,
 }
 
-struct FlatMemory {
+pub struct FlatMemory {
     /// Base of the entire mmap'd region.
     region: *mut u8,
     /// Total mmap size.
@@ -276,7 +276,20 @@ struct FlatMemory {
     buf: *mut u8,
     /// Pointer to the permission table (= region).
     perms: *mut u8,
+    /// Largest valid guest-address bound: bytes in `[0, mem_size)`
+    /// are considered in-range for `Memory` accesses. The underlying
+    /// mmap actually covers 4 GiB, but the practical PVM program
+    /// uses far less; we cap reads/writes here so the interpreter
+    /// path's `Option<T>` / `bool` returns behave sensibly.
+    mem_size: u32,
 }
+
+// SAFETY: FlatMemory holds raw pointers to its own mmap'd region; the
+// region is owned by FlatMemory itself (no external aliasing) and
+// access is single-threaded (driven by the kernel's cooperative
+// scheduler).
+unsafe impl Send for FlatMemory {}
+unsafe impl Sync for FlatMemory {}
 
 const FLAT_BUF_SIZE: usize = 1 << 32; // 4GB virtual
 const NUM_PAGES: usize = 1 << 20; // 2^20 = 1M pages
@@ -348,6 +361,7 @@ impl FlatMemory {
             region_size,
             buf,
             perms,
+            mem_size: layout.mem_size,
         })
     }
 
@@ -399,6 +413,232 @@ impl Drop for FlatMemory {
         unsafe {
             libc::munmap(self.region as *mut libc::c_void, self.region_size);
         }
+    }
+}
+
+/// Extension of [`javm_exec::Memory`] for backends suitable as the
+/// recompiler's address space.
+///
+/// **Invariant** (to be enforced by `RecompiledPvm::new` once the
+/// recompiler stops owning its own mmap in commit 5):
+/// `host_buf_ptr() as usize + host_buf_len() <= 1 << 32` — i.e. the
+/// backing buffer lives in the host's low 4 GiB so guest 32-bit
+/// addresses equal host pointers via zero-extension and the JIT can
+/// emit `[rdx]`-style absolute addressing without a base register.
+///
+/// Today's [`FlatMemory`] satisfies the trait but mmaps anywhere the
+/// kernel picks; the low-VA invariant lands in commit 5 alongside
+/// the codegen change.
+pub trait NativeMemory: javm_exec::Memory {
+    /// Base pointer of the guest's address space.
+    fn host_buf_ptr(&self) -> *mut u8;
+    /// Length of the addressable guest region in bytes (≤ 2^32).
+    fn host_buf_len(&self) -> usize;
+    /// Per-page permission table base pointer. The SIGSEGV handler
+    /// reads it to classify faults (RO-write vs unmapped).
+    fn host_perms_ptr(&self) -> *mut u8;
+}
+
+impl javm_exec::Memory for FlatMemory {
+    #[inline]
+    fn read_u8(&self, addr: u32) -> Option<u8> {
+        if addr >= self.mem_size {
+            return None;
+        }
+        // SAFETY: addr < mem_size <= NUM_PAGES * 4096; buf covers the
+        // full 4 GiB anonymous mapping.
+        Some(unsafe { *self.buf.add(addr as usize) })
+    }
+    #[inline]
+    fn read_u16_le(&self, addr: u32) -> Option<u16> {
+        if (addr as u64).saturating_add(2) > self.mem_size as u64 {
+            return None;
+        }
+        // SAFETY: bounds-checked above.
+        Some(unsafe { self.buf.add(addr as usize).cast::<u16>().read_unaligned() })
+    }
+    #[inline]
+    fn read_u32_le(&self, addr: u32) -> Option<u32> {
+        if (addr as u64).saturating_add(4) > self.mem_size as u64 {
+            return None;
+        }
+        Some(unsafe { self.buf.add(addr as usize).cast::<u32>().read_unaligned() })
+    }
+    #[inline]
+    fn read_u64_le(&self, addr: u32) -> Option<u64> {
+        if (addr as u64).saturating_add(8) > self.mem_size as u64 {
+            return None;
+        }
+        Some(unsafe { self.buf.add(addr as usize).cast::<u64>().read_unaligned() })
+    }
+    #[inline]
+    fn write_u8(&mut self, addr: u32, val: u8) -> bool {
+        if addr >= self.mem_size {
+            return false;
+        }
+        unsafe {
+            *self.buf.add(addr as usize) = val;
+        }
+        true
+    }
+    #[inline]
+    fn write_u16_le(&mut self, addr: u32, val: u16) -> bool {
+        if (addr as u64).saturating_add(2) > self.mem_size as u64 {
+            return false;
+        }
+        unsafe {
+            self.buf
+                .add(addr as usize)
+                .cast::<u16>()
+                .write_unaligned(val);
+        }
+        true
+    }
+    #[inline]
+    fn write_u32_le(&mut self, addr: u32, val: u32) -> bool {
+        if (addr as u64).saturating_add(4) > self.mem_size as u64 {
+            return false;
+        }
+        unsafe {
+            self.buf
+                .add(addr as usize)
+                .cast::<u32>()
+                .write_unaligned(val);
+        }
+        true
+    }
+    #[inline]
+    fn write_u64_le(&mut self, addr: u32, val: u64) -> bool {
+        if (addr as u64).saturating_add(8) > self.mem_size as u64 {
+            return false;
+        }
+        unsafe {
+            self.buf
+                .add(addr as usize)
+                .cast::<u64>()
+                .write_unaligned(val);
+        }
+        true
+    }
+
+    fn map_region(
+        &mut self,
+        start: u64,
+        size: u64,
+        access: javm_exec::Access,
+        init: Option<&[u8]>,
+    ) -> Result<(), javm_exec::MapError> {
+        let page = javm_exec::PAGE_SIZE as u64;
+        if !start.is_multiple_of(page) {
+            return Err(javm_exec::MapError::UnalignedStart(start));
+        }
+        if !size.is_multiple_of(page) {
+            return Err(javm_exec::MapError::UnalignedSize(size));
+        }
+        let end = start
+            .checked_add(size)
+            .ok_or(javm_exec::MapError::Overflow)?;
+        if end > self.mem_size as u64 {
+            // Grow the effective bound. The underlying mmap already covers 4 GiB.
+            let end_u32: u32 = end.try_into().map_err(|_| javm_exec::MapError::Overflow)?;
+            self.mem_size = end_u32;
+        }
+
+        let perm_byte = match access {
+            javm_exec::Access::ReadOnly => javm_exec::perm::RO,
+            javm_exec::Access::ReadWrite => javm_exec::perm::RW,
+        };
+        let first_page = (start / page) as usize;
+        let last_page = ((end / page) as usize).saturating_sub(1);
+        if size > 0 {
+            // SAFETY: page indices are clamped by mem_size <= NUM_PAGES*4096.
+            unsafe {
+                for p in first_page..=last_page {
+                    *self.perms.add(p) = perm_byte;
+                }
+            }
+        }
+
+        if let Some(bytes) = init {
+            let n = bytes.len().min(size as usize);
+            // SAFETY: start..start+n is within mem_size (bounds-checked above).
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.buf.add(start as usize), n);
+            }
+        }
+        Ok(())
+    }
+
+    fn perm_of(&self, addr: u32) -> u8 {
+        let page = (addr / javm_exec::PAGE_SIZE) as usize;
+        if page >= NUM_PAGES {
+            return javm_exec::perm::NONE;
+        }
+        // SAFETY: page < NUM_PAGES (size of the perm table).
+        unsafe { *self.perms.add(page) }
+    }
+
+    fn read(&self, addr: u32, len: usize) -> Result<Vec<u8>, javm_exec::MemAccess> {
+        let end = (addr as u64)
+            .checked_add(len as u64)
+            .ok_or(javm_exec::MemAccess::PageFault(
+                addr & !(javm_exec::PAGE_SIZE - 1),
+            ))?;
+        if end > self.mem_size as u64 {
+            return Err(javm_exec::MemAccess::PageFault(
+                addr & !(javm_exec::PAGE_SIZE - 1),
+            ));
+        }
+        let mut out = vec![0u8; len];
+        // SAFETY: addr..addr+len within mem_size (checked).
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.buf.add(addr as usize), out.as_mut_ptr(), len);
+        }
+        Ok(out)
+    }
+
+    fn write(&mut self, addr: u32, data: &[u8]) -> Result<(), javm_exec::MemAccess> {
+        let end =
+            (addr as u64)
+                .checked_add(data.len() as u64)
+                .ok_or(javm_exec::MemAccess::PageFault(
+                    addr & !(javm_exec::PAGE_SIZE - 1),
+                ))?;
+        if end > self.mem_size as u64 {
+            return Err(javm_exec::MemAccess::PageFault(
+                addr & !(javm_exec::PAGE_SIZE - 1),
+            ));
+        }
+        // Per-page perm check.
+        let start_page = (addr as usize) / (javm_exec::PAGE_SIZE as usize);
+        let last_page = (end as usize - 1) / (javm_exec::PAGE_SIZE as usize);
+        for p in start_page..=last_page {
+            let perm = unsafe { *self.perms.add(p) };
+            if perm != javm_exec::perm::RW {
+                return Err(javm_exec::MemAccess::WriteProtected(
+                    (p as u32) * javm_exec::PAGE_SIZE,
+                ));
+            }
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr(), self.buf.add(addr as usize), data.len());
+        }
+        Ok(())
+    }
+}
+
+impl NativeMemory for FlatMemory {
+    #[inline]
+    fn host_buf_ptr(&self) -> *mut u8 {
+        self.buf
+    }
+    #[inline]
+    fn host_buf_len(&self) -> usize {
+        FLAT_BUF_SIZE
+    }
+    #[inline]
+    fn host_perms_ptr(&self) -> *mut u8 {
+        self.perms
     }
 }
 
