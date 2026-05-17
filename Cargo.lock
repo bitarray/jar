@@ -1501,6 +1501,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nub-arch-local"
+version = "0.1.0"
+dependencies = [
+ "nub-kernel",
+]
+
+[[package]]
 name = "nub-build"
 version = "0.1.0"
 dependencies = [
