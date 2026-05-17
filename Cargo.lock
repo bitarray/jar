@@ -1193,7 +1193,7 @@ dependencies = [
  "jar-kernel",
  "javm-cap",
  "javm-exec",
- "javm-recompiler-x86",
+ "nub",
  "scale",
 ]
 
@@ -1224,7 +1224,7 @@ dependencies = [
  "jar-kernel",
  "javm-cap",
  "javm-exec",
- "javm-recompiler-x86",
+ "nub",
  "scale",
  "sha3",
  "subsoil",

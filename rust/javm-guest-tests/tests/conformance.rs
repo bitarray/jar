@@ -7,19 +7,20 @@
 //! 2. **Interpreter** — load the transpiled Image into a fresh
 //!    `jar_kernel::Kernel`, apply a single event targeting the
 //!    endpoint, read `EventOutcome::Halt::{return_value, gas_used}`.
-//! 3. **Recompiler** — load the Image's `(code, bitmask, jump_table)`
-//!    into a standalone `RecompiledPvm` (Linux x86-64 only). Build
-//!    its `DataLayout` from `memory_mappings + pinned_slots +
-//!    initial_slots`. Seed `regs` and `PC` from the endpoint
-//!    definition. Run; read `φ[7]` post-halt and `GAS_BUDGET - gas()`
-//!    for the consumed gas.
+//! 3. **Recompiler (in-kernel JIT)** — Stage E1: ship the program
+//!    into a `nub::Nub` Hyperlight sandbox via `invoke_spec`. The
+//!    guest's `nub_invoke` entry compiles + runs the program at ring
+//!    3 with its own page table; the host reads `(return_value,
+//!    gas_remaining)` out of the resulting `InvocationResult`. The
+//!    standalone host-side `RecompiledPvm` JIT remains in
+//!    `javm-recompiler-x86` for that crate's unit tests only.
 //!
 //! Assertions:
 //! - native == interpreter == recompiler return value.
 //! - interpreter gas == recompiler gas.
 
 use jar_kernel::{Block, Event, EventOutcome, Kernel};
-use javm_cap::image::{Image, PinnedCap};
+use javm_cap::image::Image;
 use scale::Decode;
 
 const BLOB: &[u8] = include_bytes!(env!("GUEST_TESTS_BLOB"));
@@ -58,8 +59,18 @@ fn run_interpreter(image: &Image, ep: u8) -> (u64, u64) {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod recomp {
     use super::*;
-    use javm_exec::{compute_mem_cycles, unpack_bitmask, ExitReason, REG_COUNT};
-    use javm_recompiler_x86::{populate_memory, DataLayout, FlatMemory, RecompiledPvm};
+    use javm_cap::image::PinnedCap;
+    use javm_exec::{unpack_bitmask, REG_COUNT};
+    use nub::{InvocationSpec, Nub, PvmRegs};
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// One Hyperlight sandbox per test thread, reused across
+        /// every `conform()` call. Sandbox construction takes ~hundreds
+        /// of ms; without caching the whole conformance run is
+        /// dominated by sandbox startup, not the actual JIT execution.
+        static NUB: RefCell<Option<Nub>> = const { RefCell::new(None) };
+    }
 
     pub fn run(image: &Image, ep: u8) -> (u64, u64) {
         let bitmask = unpack_bitmask(&image.packed_bitmask, image.code.len());
@@ -76,39 +87,51 @@ mod recomp {
             }
         }
 
-        let layout = build_data_layout(image);
-        let total_pages = (layout.mem_size as u64).div_ceil(4096) as u32;
-        let mem_cycles = compute_mem_cycles(total_pages);
+        let (mem_size, ro_start, ro_data, rw_start, rw_data) = build_data_layout(image);
 
-        let mut memory =
-            FlatMemory::new(layout.mem_size).unwrap_or_else(|| panic!("FlatMemory::new failed"));
-        populate_memory(&mut memory, &layout);
-
-        let mut recomp = RecompiledPvm::new(
-            &mut memory,
-            &image.code,
+        let spec = InvocationSpec {
+            code: image.code.clone(),
             bitmask,
-            image.jump_table.clone(),
-            regs,
-            GAS_BUDGET,
-            mem_cycles,
-        )
-        .unwrap_or_else(|e| panic!("RecompiledPvm::new failed: {e}"));
-        recomp.set_pc(endpoint.entry_pc as u32);
+            jump_table: image.jump_table.clone(),
+            entry_pc: endpoint.entry_pc as u32,
+            initial_gas: GAS_BUDGET,
+            initial_regs: PvmRegs::from_array(regs),
+            mem_size,
+            arg_start: 0,
+            arg_data: Vec::new(),
+            ro_start,
+            ro_data,
+            rw_start,
+            rw_data,
+        };
 
-        let exit = recomp.run();
-        // The endpoint trampoline halts via `ecalli 0` (REPLY/HALT).
-        // The recompiler surfaces this as `HostCall(0)`; the
-        // interpreter routes the same opcode through `EcallHandler`
-        // and we see `Halt` after that translation. Accept either.
-        assert!(
-            matches!(exit, ExitReason::Halt | ExitReason::HostCall(0)),
-            "endpoint {ep}: unexpected exit {exit:?}",
-        );
+        NUB.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            if borrow.is_none() {
+                *borrow = Some(Nub::new_hyperlight().expect("Hyperlight sandbox"));
+            }
+            let nub = borrow.as_mut().expect("nub initialised above");
+            let result = nub
+                .invoke_spec(&spec)
+                .unwrap_or_else(|e| panic!("endpoint {ep}: invoke_spec failed: {e}"));
 
-        let return_value = recomp.registers()[7];
-        let gas_used = GAS_BUDGET - recomp.gas();
-        (return_value, gas_used)
+            // The endpoint trampoline halts via `ecalli 0` (REPLY/HALT).
+            // The in-kernel JIT surfaces this as exit_reason=4 (HostCall)
+            // with exit_arg=0; report a panic if we got anything else.
+            assert_eq!(
+                result.exit_reason, 4,
+                "endpoint {ep}: unexpected exit_reason {} (exit_arg={})",
+                result.exit_reason, result.exit_arg,
+            );
+            assert_eq!(
+                result.exit_arg, 0,
+                "endpoint {ep}: expected HostCall(0) trampoline halt, got HostCall({})",
+                result.exit_arg,
+            );
+
+            let gas_used = GAS_BUDGET.saturating_sub(result.gas_remaining);
+            (result.return_value, gas_used)
+        })
     }
 
     /// Walk the Image's memory mappings + slot contents and project
@@ -124,7 +147,7 @@ mod recomp {
     ///   inputs into the guest).
     /// - `mem_size`: `max(mapping.start + mapping.size)` over all
     ///   mappings — covers stack, ro, rw, and heap.
-    fn build_data_layout(image: &Image) -> DataLayout {
+    fn build_data_layout(image: &Image) -> (u32, u32, Vec<u8>, u32, Vec<u8>) {
         let mut mem_size: u32 = 0;
         let mut ro: Option<(u32, Vec<u8>)> = None;
         let mut rw: Option<(u32, Vec<u8>)> = None;
@@ -153,15 +176,7 @@ mod recomp {
         let (ro_start, ro_data) = ro.unwrap_or((0, Vec::new()));
         let (rw_start, rw_data) = rw.unwrap_or((0, Vec::new()));
 
-        DataLayout {
-            mem_size,
-            arg_start: 0,
-            arg_data: Vec::new(),
-            ro_start,
-            ro_data,
-            rw_start,
-            rw_data,
-        }
+        (mem_size, ro_start, ro_data, rw_start, rw_data)
     }
 }
 
