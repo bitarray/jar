@@ -8,6 +8,7 @@ members = [
     "rust/nub",
     "rust/nub-arch-hyperlight",
     "rust/nub-arch-hyperlight-abi",
+    "rust/nub-host-x86",
     "rust/nub-arch-local",
     "rust/nub-kernel",
     "rust/javm",

@@ -1,0 +1,15 @@
+[package]
+name = "hyperlight_surrogate"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[workspace]
+
+[dependencies]
+
+# Note - This crate will currently get built during the build.rs script for the hyperlight-host crate.
+# Cargo package does not allow for files named 'Cargo.toml' to be included in a crate so we'll rename
+# during the build.rs script so this file can be included with source for hyperlight_surrogate.exe 
+# the in hyperlight-host crate.

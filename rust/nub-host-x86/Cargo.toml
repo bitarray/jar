@@ -1,0 +1,127 @@
+# Vendored from hyperlight-host 0.15.0 (Apache-2.0).
+# Stage F.1: byte-for-byte copy, no behavior changes. Subsequent stages
+# strip non-KVM backends, snapshot/restore, optional features, and
+# disable CoW marking.
+
+[package]
+name = "nub-host-x86"
+version.workspace = true
+edition = "2024"
+rust-version = "1.89"
+license.workspace = true
+description = "Forked Hyperlight host (KVM-only) — micro-VM host driver for nub."
+
+[lib]
+name = "nub_host_x86"
+path = "src/lib.rs"
+
+[features]
+build-metadata = ["dep:built"]
+crashdump = [
+    "dep:chrono",
+    "dep:elfcore",
+]
+default = [
+    "kvm",
+    "mshv3",
+    "build-metadata",
+]
+executable_heap = []
+function_call_metrics = []
+fuzzing = ["hyperlight-common/fuzzing"]
+gdb = [
+    "dep:gdbstub",
+    "dep:gdbstub_arch",
+]
+guest-counter = ["hyperlight-common/guest-counter"]
+hw-interrupts = []
+i686-guest = ["hyperlight-common/i686-guest"]
+kvm = [
+    "dep:kvm-bindings",
+    "dep:kvm-ioctls",
+]
+mem_profile = [
+    "trace_guest",
+    "dep:framehop",
+    "dep:fallible-iterator",
+    "hyperlight-common/mem_profile",
+]
+mshv3 = [
+    "dep:mshv-bindings",
+    "dep:mshv-ioctls",
+]
+nanvix-unstable = [
+    "i686-guest",
+    "hyperlight-common/nanvix-unstable",
+]
+print_debug = []
+trace_guest = [
+    "dep:opentelemetry",
+    "dep:tracing-opentelemetry",
+    "dep:hyperlight-guest-tracing",
+    "hyperlight-common/trace_guest",
+]
+
+[dependencies]
+anyhow = "1.0"
+bitflags = "2.11.1"
+blake3 = "1.8.5"
+cfg-if = "1.0.4"
+chrono = { version = "0.4", optional = true }
+crossbeam-channel = "0.5.15"
+elfcore = { version = "2.0", optional = true }
+fallible-iterator = { version = "0.3.0", optional = true }
+flatbuffers = "25.12.19"
+framehop = { version = "0.16.0", optional = true }
+gdbstub = { version = "0.7.10", optional = true }
+gdbstub_arch = { version = "0.3.3", optional = true }
+goblin = { version = "0.10", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
+hyperlight-common = { version = "0.15.0", features = ["std"] }
+hyperlight-guest-tracing = { version = "0.15.0", optional = true }
+libc = "0.2.186"
+log = "0.4.29"
+metrics = "0.24.5"
+opentelemetry = { version = "0.31.0", optional = true }
+page_size = "0.6.0"
+rand = "0.10"
+serde_json = "1.0"
+termcolor = "1.2.0"
+thiserror = { workspace = true, features = ["std"] }
+tracing = { version = "0.1.44", features = ["log"] }
+tracing-core = "0.1.36"
+tracing-log = "0.2.0"
+tracing-opentelemetry = { version = "0.32.1", optional = true }
+uuid = { version = "1.23.1", features = ["v4"] }
+vmm-sys-util = "0.15.0"
+
+[target."cfg(unix)".dependencies]
+kvm-bindings = { version = "0.14", features = ["fam-wrappers"], optional = true }
+kvm-ioctls = { version = "0.24", optional = true }
+mshv-bindings = { version = "0.6", optional = true }
+mshv-ioctls = { version = "0.6", optional = true }
+
+[target."cfg(windows)".dependencies]
+lazy_static = "1.4.0"
+rust-embed = { version = "8.11.0", features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_JobObjects",
+    "Win32_Security",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Hypervisor",
+    "Win32_System_Memory",
+    "Win32_System_SystemServices",
+] }
+windows-result = "0.4"
+windows-sys = { version = "0.61", features = ["Win32"] }
+windows-version = "0.1"
+
+[build-dependencies]
+anyhow = "1.0.102"
+built = { version = "0.8.0", features = ["chrono", "git2"], optional = true }
+cfg_aliases = "0.2.1"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
