@@ -79,7 +79,7 @@ fn main() -> Result<()> {
             let value_ok = readback == 0xCAFE_BABE;
             let ns = cycles_to_ns(cycles);
             println!(
-                "C1 pf_roundtrip    handler_fires={}  readback={:#010x}  cycles={}  (~{} ns)  {}",
+                "C1 pf_roundtrip    fires={} readback={:#010x}  cycles={}  (~{} ns)  {}",
                 pf_count,
                 readback,
                 cycles,
@@ -91,6 +91,46 @@ fn main() -> Result<()> {
             println!("C1 pf_roundtrip    error: {e}  (likely Hyperlight forces VM-exit on #PF)  ✗");
         }
     }
+
+    // -- C2 cr3_self_swap --
+    let cr3: u64 = sandbox.call("cr3_self_swap", ())?;
+    println!(
+        "C2 cr3_self_swap   CR3={:#x}                              {}",
+        cr3,
+        check(cr3 != 0),
+    );
+
+    // -- D2 cow_roundtrip --
+    match sandbox.call::<u64>("cow_roundtrip", ()) {
+        Ok(packed) => {
+            let pf_count = packed >> 48;
+            let cycles = packed & 0x0000_FFFF_FFFF_FFFF;
+            let ns = cycles_to_ns(cycles);
+            println!(
+                "D2 cow_roundtrip   fires={}  cycles={}  (~{} ns)  {}",
+                pf_count,
+                cycles,
+                ns,
+                check(pf_count == 1),
+            );
+        }
+        Err(e) => {
+            println!("D2 cow_roundtrip   error: {e}  ✗");
+        }
+    }
+
+    // -- D1 per-call latency --
+    const N_CALLS: u64 = 10_000;
+    let t1 = std::time::Instant::now();
+    for _ in 0..N_CALLS {
+        let _: u64 = sandbox.call("noop", ())?;
+    }
+    let elapsed = t1.elapsed();
+    let per_call_ns = elapsed.as_nanos() as u64 / N_CALLS;
+    println!(
+        "D1 per_call_avg    {} ns/call over {} calls",
+        per_call_ns, N_CALLS,
+    );
 
     Ok(())
 }

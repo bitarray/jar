@@ -177,6 +177,140 @@ mod guest {
         let test_ptr: *const u64 = TEST_VADDR as *const u64;
         unsafe { core::ptr::read_volatile(test_ptr) }
     }
+
+    // === C2: CR3 read/write (self-swap) ======================================
+    //
+    // Demonstrates that the guest can manipulate the page-table base
+    // register at ring 0. We read CR3, write it back to itself (a
+    // TLB flush no-op), and read it again. Returns the CR3 value if
+    // both reads agree; 0 otherwise.
+    //
+    // A real microkernel uses CR3 swaps to switch between sub-Instance
+    // address spaces. Proving the instruction works is what we need
+    // here; the prototype doesn't build a second page table.
+
+    #[guest_function("cr3_self_swap")]
+    pub fn cr3_self_swap() -> u64 {
+        let cr3_before: u64;
+        let cr3_after: u64;
+        unsafe {
+            core::arch::asm!(
+                "mov {0}, cr3",
+                "mov cr3, {0}",
+                "mov {1}, cr3",
+                out(reg) cr3_before,
+                out(reg) cr3_after,
+                options(nostack, preserves_flags),
+            );
+        }
+        if cr3_before == cr3_after && cr3_before != 0 {
+            cr3_before
+        } else {
+            0
+        }
+    }
+
+    // === D1: per-call latency bench ===========================================
+    //
+    // Measures rdtsc cycles for `n` host-callable function invocations.
+    // The actual measurement happens host-side; this function exists
+    // only as a no-op target to drive the call loop. Returns 0.
+
+    #[guest_function("noop")]
+    pub fn noop() -> u64 {
+        0
+    }
+
+    // === D2: CoW round-trip ===================================================
+    //
+    // Remap an existing (already-mapped) page as read-only, write to
+    // it, observe the in-guest #PF handler flip it back to writable,
+    // CPU retries, write succeeds. This is the per-page cost of
+    // `mgmt_copy` divergence — the actual CoW flip, distinct from
+    // the demand-paging cost measured in C1.
+    //
+    // Uses the page we mapped during pf_roundtrip (TEST_VADDR is now
+    // a normally-mapped writable page).
+
+    fn cow_handler(
+        _exception_number: u64,
+        _info: *mut ExceptionInfo,
+        _ctx: *mut Context,
+        gva: u64,
+    ) -> bool {
+        PF_COUNT.fetch_add(1, Ordering::SeqCst);
+
+        // Find the existing physical mapping for the faulting page
+        // and re-establish it as writable. We're not actually
+        // copying anything (CoW would normally copy the page); we
+        // just flip the writable bit. That's the "fast path" cost.
+        let page_va = gva & !(PAGE_SIZE as u64 - 1);
+        let mappings: alloc::vec::Vec<_> =
+            hyperlight_guest_bin::paging::virt_to_phys(page_va).collect();
+        if let Some(m) = mappings.first() {
+            unsafe {
+                hyperlight_guest_bin::paging::map_region(
+                    m.phys_base,
+                    page_va as *mut u8,
+                    PAGE_SIZE as u64,
+                    MappingKind::Basic(BasicMapping {
+                        readable: true,
+                        writable: true,
+                        executable: false,
+                    }),
+                );
+            }
+        }
+        true
+    }
+
+    /// Pre-condition: `pf_roundtrip` has already run, so `TEST_VADDR`
+    /// is mapped writable. We re-map it read-only, install the CoW
+    /// handler, write to it, expect handler to flip RO→RW, retry,
+    /// succeed. Returns the cycle delta around the faulting write.
+    #[guest_function("cow_roundtrip")]
+    pub fn cow_roundtrip() -> u64 {
+        // Find existing mapping, re-map as read-only.
+        let page_va = TEST_VADDR;
+        let mappings: alloc::vec::Vec<_> =
+            hyperlight_guest_bin::paging::virt_to_phys(page_va).collect();
+        let Some(m) = mappings.first() else {
+            return u64::MAX; // mapping not found — pf_roundtrip didn't run?
+        };
+        unsafe {
+            hyperlight_guest_bin::paging::map_region(
+                m.phys_base,
+                page_va as *mut u8,
+                PAGE_SIZE as u64,
+                MappingKind::Basic(BasicMapping {
+                    readable: true,
+                    writable: false,
+                    executable: false,
+                }),
+            );
+            // Flush TLB by reloading CR3.
+            let cr3: u64;
+            core::arch::asm!("mov {0}, cr3; mov cr3, {0}", out(reg) cr3);
+            let _ = cr3;
+        }
+
+        // Install the CoW handler at #PF.
+        let handler_addr = cow_handler as *const () as u64;
+        HANDLERS[14].store(handler_addr, Ordering::Release);
+        PF_COUNT.store(0, Ordering::SeqCst);
+
+        // Trigger CoW write fault.
+        let test_ptr: *mut u64 = TEST_VADDR as *mut u64;
+        let t1 = unsafe { core::arch::x86_64::_rdtsc() };
+        unsafe {
+            core::ptr::write_volatile(test_ptr, 0xDEAD_BEEF);
+        }
+        let t2 = unsafe { core::arch::x86_64::_rdtsc() };
+
+        let cycles = t2 - t1;
+        let count = PF_COUNT.load(Ordering::SeqCst);
+        (count << 48) | (cycles & 0x0000_FFFF_FFFF_FFFF)
+    }
 }
 
 // === Linker stubs =========================================================
