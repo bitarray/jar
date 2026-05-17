@@ -1,0 +1,22 @@
+[package]
+name = "nub-guest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bare-metal Hyperlight guest for the nub-prototype ring-0 spike"
+
+[[bin]]
+name = "nub-guest"
+path = "src/main.rs"
+
+# Hyperlight guest deps only on the bare-metal target. On the host
+# target this crate compiles to a trivial empty `main` so it can be
+# part of `cargo build --workspace` without forcing Hyperlight deps
+# onto host platforms.
+[target.'cfg(target_os = "none")'.dependencies]
+hyperlight-guest = { version = "0.15", default-features = false }
+hyperlight-guest-bin = { version = "0.15", default-features = false, features = ["macros"] }
+hyperlight-common = { version = "0.15", default-features = false }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hyperlight)'] }
