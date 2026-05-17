@@ -148,6 +148,14 @@ fn main() -> Result<()> {
         check(int80 == 1),
     );
 
+    // -- A4 ring-3 entry (Stage 2.2 prep) --
+    let r3: u64 = sandbox.call("ring3_smoke", ())?;
+    println!(
+        "A4  ring3_smoke    user_rax={:#x}                                {}",
+        r3,
+        check(r3 == 0x1337),
+    );
+
     // -- A1 bump arena smoke (Stage 2.2 prep) --
     let bump: u64 = sandbox.call("bump_smoke", ())?;
     let aligned = (bump >> 1) & 1 != 0;

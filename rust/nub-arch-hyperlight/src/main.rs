@@ -35,12 +35,15 @@ mod bump;
 #[cfg(target_os = "none")]
 mod paging;
 #[cfg(target_os = "none")]
+mod ring3;
+#[cfg(target_os = "none")]
 mod segments;
 
 #[cfg(target_os = "none")]
 mod guest {
     use crate::bump::BumpArena;
     use crate::paging::{self, PageTable, Perm};
+    use crate::ring3;
     use crate::segments;
     use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -129,7 +132,7 @@ mod guest {
         let before = INT80_COUNTER.load(Ordering::SeqCst);
         // SAFETY: nub_int80_stub is a well-formed handler stub.
         unsafe {
-            let _idt = segments::install_dpl3_handler(0x80, nub_int80_stub as *const () as u64);
+            let _idt = segments::install_dpl3_handler(0x80, nub_int80_stub as *const () as u64, 0);
         }
         // SAFETY: int 0x80 dispatches through the IDT entry we just installed.
         unsafe {
@@ -206,6 +209,85 @@ mod guest {
         }
 
         readback
+    }
+
+    // === A4: ring-3 entry smoke ==============================================
+
+    /// Drop to ring 3, run a 7-byte stub that does
+    /// `mov eax, 0x1337; int 0x81`, return the captured user-mode RAX.
+    ///
+    /// Validates: GDT extension with user CS/DS, IDT vector 0x81 at
+    /// DPL=3, iretq → ring 3, ring-3 → ring-0 trap via int 0x81,
+    /// kernel-side longjmp back to caller, value transfer through RAX,
+    /// per-invocation PageTable with both kernel-half and user-half
+    /// mappings.
+    #[guest_function("ring3_smoke")]
+    pub fn ring3_smoke() -> u64 {
+        let arena = match BumpArena::new(crate::bump::SMOKE_CAPACITY) {
+            Some(a) => a,
+            None => return 0xDEAD_0001,
+        };
+
+        // User code + user stack live in scratch GPA; the user-VA
+        // mapping points back to those PAs via the new PageTable.
+        let code_pa = unsafe { hyperlight_guest::prim_alloc::alloc_phys_pages(1) };
+        let stack_pa = unsafe { hyperlight_guest::prim_alloc::alloc_phys_pages(1) };
+
+        // Stage the ring-3 stub through the scratch VA of the code page.
+        let code_stage_va = match paging::pa_to_va(code_pa) {
+            Some(v) => v,
+            None => return 0xDEAD_0002,
+        };
+        // mov eax, 0x1337  → B8 37 13 00 00
+        // int 0x81         → CD 81
+        const STUB: [u8; 7] = [0xB8, 0x37, 0x13, 0x00, 0x00, 0xCD, 0x81];
+        // SAFETY: stage_va is a writable kernel mapping of the page.
+        unsafe {
+            core::ptr::copy_nonoverlapping(STUB.as_ptr(), code_stage_va as *mut u8, STUB.len());
+        }
+
+        // Build the per-invocation page table. Map user code at
+        // USER_CODE_VA (RX, user) and user stack at USER_STACK_VA (RW,
+        // user). The stack page is mapped as one 4 KiB page; the user
+        // RSP starts at the top of that page.
+        const USER_CODE_VA: u64 = 32u64 << 39; // 16 TiB, PML4 idx 32
+        const USER_STACK_BASE: u64 = USER_CODE_VA + 0x1000;
+        let user_stack_top = USER_STACK_BASE + PAGE_SIZE as u64;
+
+        let mut pt = match PageTable::new_in(&arena) {
+            Some(p) => p,
+            None => return 0xDEAD_0003,
+        };
+        if pt
+            .map(USER_CODE_VA, code_pa, PAGE_SIZE as u64, Perm::user_rx())
+            .is_none()
+        {
+            return 0xDEAD_0004;
+        }
+        if pt
+            .map(USER_STACK_BASE, stack_pa, PAGE_SIZE as u64, Perm::user_rw())
+            .is_none()
+        {
+            return 0xDEAD_0005;
+        }
+        let new_cr3 = match pt.cr3() {
+            Some(v) => v,
+            None => return 0xDEAD_0006,
+        };
+
+        // Install the user segments + ring-3 exit gate. Idempotent.
+        // SAFETY: ring-0 mutation of GDT/IDT; serialised by Hyperlight.
+        unsafe {
+            ring3::install_ring3_exit_gate();
+        }
+
+        // SAFETY: code + stack mappings are valid in `new_cr3`;
+        // kernel-half mappings were copied from the live PML4 so
+        // kernel code + stack survive the swap.
+        let rax = unsafe { ring3::nub_enter_ring3(USER_CODE_VA, user_stack_top, new_cr3) };
+
+        // The stub stored 0x1337 in EAX.
+        rax & 0xFFFF
     }
 
     // === A1: bump arena smoke ================================================

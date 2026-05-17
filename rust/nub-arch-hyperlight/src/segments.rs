@@ -1,19 +1,26 @@
-//! IDT manipulation for the in-kernel JIT path.
+//! IDT + GDT manipulation for the in-kernel JIT path.
 //!
 //! Hyperlight's guest-bin pre-installs a 256-entry IDT covering CPU
-//! exceptions (vectors 0–30) plus stubs for everything else. For the
-//! nub kernel we need vector `0x80` (the PVM ecall trampoline) to be
-//! invocable from ring 3, which requires `DPL=3` on the IDT entry.
-//! We can't get that with Hyperlight's defaults.
+//! exceptions (vectors 0–30) plus stubs for everything else, and a
+//! 5-entry GDT containing only null + kernel CS + kernel DS + TSS.
+//! For the nub kernel we need a few things on top of this:
 //!
-//! This module installs a *patched* IDT: it copies Hyperlight's
-//! current IDT into a heap-allocated buffer, overwrites entry 0x80
-//! with our own handler at DPL=3, and `lidt`s the new buffer. The
-//! original IDT in `.data` stays untouched.
+//! * Vector `0x80` (the PVM ecall trampoline) to be invocable from
+//!   ring 3 — requires `DPL=3` on the IDT entry (A2).
+//! * Vector `0x81` (ring-3 exit) to be invocable from ring 3 — and
+//!   it must use IST=1 so the handler runs on the exception stack
+//!   that Hyperlight already maintains for #PF / #GP / etc., rather
+//!   than relying on TSS.RSP0 (A4).
+//! * User code (DPL=3 code segment) and user data (DPL=3 data
+//!   segment) selectors for the iretq frame that drops us into ring 3
+//!   (A4).
 //!
-//! GDT + TSS for ring-3 entry land in commit A4 (when we actually
-//! drop to ring 3). A2 only needs the IDT change so we can validate
-//! the int-0x80 path from ring 0.
+//! For both the IDT extensions, we copy Hyperlight's current IDT into
+//! a heap-allocated buffer, patch the new entry, and `lidt` the new
+//! buffer. The original IDT in `.data` stays untouched. The GDT
+//! extension writes user selectors into the unused padding bytes that
+//! Hyperlight reserves after its 5-entry GDT (the `PADDING_BEFORE_TSS`
+//! region) and re-loads GDTR with a larger limit.
 
 #![cfg(target_os = "none")]
 
@@ -91,16 +98,16 @@ pub unsafe fn lidt(descriptor: &IdtDescriptor) {
 }
 
 /// Patch IDT entry `vector` to install a new handler at DPL=3
-/// (callable from ring 3). Returns a leak'd `Box` holding the new
-/// IDT buffer — the caller is expected to store this in a static so
-/// the lidt'd memory survives.
+/// (callable from ring 3) with the given IST index (0 = use TSS.RSP0,
+/// 1..=7 = use TSS.istN). Returns a leak'd `Box` holding the new
+/// IDT buffer — stored in a static so the lidt'd memory survives.
 ///
 /// # Safety
 /// `handler_va` must be a valid kernel-mode code entry point that
-/// preserves CPU state and ends in `iretq`. The current IDT (whose
-/// base is reported by `sidt`) must be readable for `IDT_BYTES`
-/// bytes.
-pub unsafe fn install_dpl3_handler(vector: u8, handler_va: u64) -> &'static IdtDescriptor {
+/// preserves CPU state and ends in `iretq` (or otherwise unwinds the
+/// interrupt frame). The current IDT (whose base is reported by
+/// `sidt`) must be readable for `IDT_BYTES` bytes.
+pub unsafe fn install_dpl3_handler(vector: u8, handler_va: u64, ist: u8) -> &'static IdtDescriptor {
     // 1. Snapshot the existing IDT.
     // SAFETY: sidt is harmless; result is a copy.
     let old = unsafe { sidt() };
@@ -119,7 +126,7 @@ pub unsafe fn install_dpl3_handler(vector: u8, handler_va: u64) -> &'static IdtD
     let e = &mut new_idt[vector as usize];
     e.set_offset(handler_va);
     e.selector = 0x08; // kernel code segment (Hyperlight default)
-    e.ist = 0;
+    e.ist = ist & 0x7;
     e.type_attr = 0xEE; // interrupt gate, DPL=3, present
 
     // 4. Leak the Vec into a Box<[IdtEntry]> for stable storage.
@@ -137,4 +144,124 @@ pub unsafe fn install_dpl3_handler(vector: u8, handler_va: u64) -> &'static IdtD
     unsafe { lidt(descriptor_box) };
 
     descriptor_box
+}
+
+// === GDT: user-mode segment selectors ===================================
+
+/// 8-byte GDT entry layout (matches `hyperlight_guest_bin`'s internal
+/// `GdtEntry`).
+///
+/// In long mode, the base/limit fields are ignored for code/data
+/// segments — only access/flags matter.
+#[repr(C, align(8))]
+#[derive(Clone, Copy)]
+struct GdtEntry {
+    limit_low: u16,
+    base_low: u16,
+    base_middle: u8,
+    access: u8,
+    flags_limit: u8,
+    base_high: u8,
+}
+
+impl GdtEntry {
+    const fn new(access: u8, flags: u8) -> Self {
+        Self {
+            limit_low: 0,
+            base_low: 0,
+            base_middle: 0,
+            access,
+            flags_limit: (flags & 0x0f) << 4,
+            base_high: 0,
+        }
+    }
+}
+
+/// 10-byte GDT descriptor for `lgdt` / `sgdt`.
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+pub struct GdtDescriptor {
+    pub limit: u16,
+    pub base: u64,
+}
+
+/// Ring-3 code selector (`USER_CS | RPL=3`).
+pub const USER_CODE_SEL: u16 = 0x28 | 3;
+/// Ring-3 data/stack selector (`USER_DS | RPL=3`).
+pub const USER_DATA_SEL: u16 = 0x30 | 3;
+
+/// Read the current GDTR.
+///
+/// # Safety
+/// Issues `sgdt`, which is harmless.
+pub unsafe fn sgdt() -> GdtDescriptor {
+    let mut descriptor = GdtDescriptor { limit: 0, base: 0 };
+    // SAFETY: sgdt writes 10 bytes to the supplied address.
+    unsafe {
+        core::arch::asm!(
+            "sgdt [{0}]",
+            in(reg) &mut descriptor,
+            options(nostack, preserves_flags),
+        );
+    }
+    descriptor
+}
+
+/// Load a new GDT via `lgdt`.
+///
+/// # Safety
+/// `descriptor` must point at a valid GDT whose base outlives the
+/// next `lgdt`. The current CS/DS/SS selectors must still describe
+/// valid entries within the new GDT (we don't reload selectors here).
+pub unsafe fn lgdt(descriptor: &GdtDescriptor) {
+    // SAFETY: descriptor is valid; lgdt reads 10 bytes.
+    unsafe {
+        core::arch::asm!(
+            "lgdt [{0}]",
+            in(reg) descriptor,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Append `USER_CS` (selector 0x28, DPL=3 code) and `USER_DS`
+/// (selector 0x30, DPL=3 data) to the existing Hyperlight GDT, then
+/// reload GDTR with the larger limit. Returns the user-CS selector.
+///
+/// Hyperlight reserves 24 bytes of padding after its 5-entry GDT
+/// (`PADDING_BEFORE_TSS`) before the TSS proper, so writing two more
+/// 8-byte entries at offsets 0x28 / 0x30 is safe and doesn't overlap
+/// the TSS that begins at offset 64 within `ProcCtrl`.
+///
+/// Calling this multiple times is idempotent; the user entries are
+/// rewritten in place.
+///
+/// # Safety
+/// Caller must not be running with a DPL>0 segment loaded — we only
+/// extend the GDT, we don't reload segment registers. The patched
+/// GDT bytes must remain mapped + writable (they live at
+/// `PROC_CONTROL_GVA`, which is identity- pinned by Hyperlight).
+pub unsafe fn install_user_segments() {
+    // SAFETY: sgdt is harmless.
+    let gdtr = unsafe { sgdt() };
+    let base = gdtr.base;
+
+    // User code: present, DPL=3, S=1 (code), code/exec/readable.
+    let user_code = GdtEntry::new(0xFA, 0xA);
+    // User data: present, DPL=3, S=1 (data), data/RW. D/B=1, granularity=1.
+    let user_data = GdtEntry::new(0xF2, 0xC);
+
+    // SAFETY: GDT region has at least 0x40 - 0x28 = 24 bytes of
+    // padding after the 5-entry default. Writing 16 bytes at offset
+    // 0x28 fits comfortably.
+    unsafe {
+        core::ptr::write_unaligned((base + 0x28) as *mut GdtEntry, user_code);
+        core::ptr::write_unaligned((base + 0x30) as *mut GdtEntry, user_data);
+    }
+
+    // New limit = 7 entries (null, kernel_code, kernel_data, tss_lo,
+    // tss_hi, user_code, user_data) × 8 - 1 = 0x37.
+    let new_gdtr = GdtDescriptor { limit: 0x37, base };
+    // SAFETY: new_gdtr is on the kernel stack and consumed before return.
+    unsafe { lgdt(&new_gdtr) };
 }

@@ -41,10 +41,12 @@ use crate::paging;
 /// allocations (page tables, JIT exec pages, etc.).
 pub const PAGE_SIZE: usize = 4096;
 
-/// Default arena size for smoke tests. Production per-invocation
-/// arenas (Stage C+) will use a larger capacity sized to fit
-/// page tables + JIT code + JitContext + trap table.
-pub const SMOKE_CAPACITY: usize = 64 * 1024;
+/// Default arena size for smoke tests. Just enough for a 4-level
+/// page-table set (PML4 + PDPT + PD + PT) per smoke invocation.
+/// Production per-invocation arenas (Stage C+) will use a larger
+/// capacity sized to fit page tables + JIT code + JitContext +
+/// trap table.
+pub const SMOKE_CAPACITY: usize = 8 * PAGE_SIZE;
 
 /// Bump arena holding a contiguous, page-aligned buffer.
 pub struct BumpArena {
