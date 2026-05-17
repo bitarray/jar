@@ -1,4 +1,6 @@
-//! Flat-buffer memory model.
+//! Flat-buffer memory model + the [`Memory`] trait that abstracts
+//! over different memory backends (software-copy here, hardware-paged
+//! in the bare-metal Hyperlight guest).
 //!
 //! Matches v2 javm's `flat_mem` layout for perf parity: a single
 //! contiguous `Vec<u8>` indexed by 32-bit address. Reads/writes are
@@ -31,7 +33,7 @@ pub mod perm {
     pub const RW: u8 = 2;
 }
 
-/// Mapping permission for [`Mem::map_region`]. RO regions back
+/// Mapping permission for [`Memory::map_region`]. RO regions back
 /// `perm::RO` pages; RW regions back `perm::RW` pages.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Access {
@@ -50,7 +52,7 @@ pub enum MemAccess {
     WriteProtected(u32),
 }
 
-/// Setup-time error for [`Mem::map_region`].
+/// Setup-time error for [`Memory::map_region`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MapError {
     /// `start` is not page-aligned.
@@ -62,13 +64,67 @@ pub enum MapError {
     Overflow,
 }
 
+/// Memory backend abstraction.
+///
+/// The interpreter is generic over `M: Memory` so the same source
+/// compiles for two substrates:
+///
+/// - **Software-copy**: [`CopyingMemory`] (this module) — an owning
+///   `Vec<u8>` with per-page permissions. Runs in-process.
+/// - **Hardware-paged**: a future bare-metal impl in
+///   `nub-arch-hyperlight` that maps PVM pages onto real CPU pages
+///   via the in-guest IDT + page tables.
+///
+/// Hot-path methods (`read_u*`/`write_u*`) return `Option<T>` or
+/// `bool` to keep the interpreter loop branch-free. Implementations
+/// should mark these `#[inline]` (or `#[inline(always)]`) — the
+/// interpreter calls them through trait dispatch, and we want
+/// monomorphisation to collapse to direct function calls.
+pub trait Memory {
+    // ---- Hot-path width-typed reads. ----
+    fn read_u8(&self, addr: u32) -> Option<u8>;
+    fn read_u16_le(&self, addr: u32) -> Option<u16>;
+    fn read_u32_le(&self, addr: u32) -> Option<u32>;
+    fn read_u64_le(&self, addr: u32) -> Option<u64>;
+
+    // ---- Hot-path width-typed writes. ----
+    fn write_u8(&mut self, addr: u32, val: u8) -> bool;
+    fn write_u16_le(&mut self, addr: u32, val: u16) -> bool;
+    fn write_u32_le(&mut self, addr: u32, val: u32) -> bool;
+    fn write_u64_le(&mut self, addr: u32, val: u64) -> bool;
+
+    // ---- Setup-time + cold-path. ----
+
+    /// Declare a mapped region. See [`CopyingMemory::map_region`] for
+    /// the canonical semantics.
+    fn map_region(
+        &mut self,
+        start: u64,
+        size: u64,
+        access: Access,
+        init: Option<&[u8]>,
+    ) -> Result<(), MapError>;
+
+    /// Per-page permission byte for the page containing `addr`.
+    /// Returns [`perm::NONE`] if `addr` is out of range.
+    fn perm_of(&self, addr: u32) -> u8;
+
+    /// Read `dst.len()` bytes starting at `addr` into `dst`.
+    fn read(&self, addr: u32, len: usize) -> Result<Vec<u8>, MemAccess>;
+
+    /// Write `data.len()` bytes starting at `addr`. Per-page perm
+    /// checks apply; out-of-range or RO-page writes return `Err`.
+    fn write(&mut self, addr: u32, data: &[u8]) -> Result<(), MemAccess>;
+}
+
 /// Address-space mapping for one execution context.
 ///
 /// Flat-buffer layout matching v2 javm. The buffer's length defines
 /// the upper bound of valid addresses; per-page permissions live in
-/// `perms`.
+/// `perms`. Implements [`Memory`] via inherent-method delegation so
+/// concrete callers don't need to import the trait.
 #[derive(Clone, Debug)]
-pub struct Mem {
+pub struct CopyingMemory {
     /// Contiguous byte buffer covering `0..flat_mem.len()`.
     pub flat_mem: Vec<u8>,
     /// One permission byte per `PAGE_SIZE`-page in `flat_mem`.
@@ -82,13 +138,18 @@ pub struct Mem {
     pub max_heap_pages: u32,
 }
 
-impl Default for Mem {
+impl Default for CopyingMemory {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Mem {
+/// Compatibility alias for the pre-trait name. Consumers can keep
+/// writing `Mem`; new code should prefer `CopyingMemory` (when the
+/// concrete impl is wanted) or be generic over `M: Memory`.
+pub type Mem = CopyingMemory;
+
+impl CopyingMemory {
     /// Empty memory; no pages allocated.
     pub fn new() -> Self {
         Self {
@@ -335,6 +396,66 @@ impl Mem {
         }
         self.flat_mem[a..end].copy_from_slice(data);
         Ok(())
+    }
+}
+
+// `Memory` impl delegates to inherent methods via UFCS (no name
+// clash, no recursion). All bodies are `#[inline(always)]` so trait
+// dispatch is zero-cost after monomorphisation.
+impl Memory for CopyingMemory {
+    #[inline(always)]
+    fn read_u8(&self, addr: u32) -> Option<u8> {
+        CopyingMemory::read_u8(self, addr)
+    }
+    #[inline(always)]
+    fn read_u16_le(&self, addr: u32) -> Option<u16> {
+        CopyingMemory::read_u16_le(self, addr)
+    }
+    #[inline(always)]
+    fn read_u32_le(&self, addr: u32) -> Option<u32> {
+        CopyingMemory::read_u32_le(self, addr)
+    }
+    #[inline(always)]
+    fn read_u64_le(&self, addr: u32) -> Option<u64> {
+        CopyingMemory::read_u64_le(self, addr)
+    }
+    #[inline(always)]
+    fn write_u8(&mut self, addr: u32, val: u8) -> bool {
+        CopyingMemory::write_u8(self, addr, val)
+    }
+    #[inline(always)]
+    fn write_u16_le(&mut self, addr: u32, val: u16) -> bool {
+        CopyingMemory::write_u16_le(self, addr, val)
+    }
+    #[inline(always)]
+    fn write_u32_le(&mut self, addr: u32, val: u32) -> bool {
+        CopyingMemory::write_u32_le(self, addr, val)
+    }
+    #[inline(always)]
+    fn write_u64_le(&mut self, addr: u32, val: u64) -> bool {
+        CopyingMemory::write_u64_le(self, addr, val)
+    }
+    #[inline]
+    fn map_region(
+        &mut self,
+        start: u64,
+        size: u64,
+        access: Access,
+        init: Option<&[u8]>,
+    ) -> Result<(), MapError> {
+        CopyingMemory::map_region(self, start, size, access, init)
+    }
+    #[inline]
+    fn perm_of(&self, addr: u32) -> u8 {
+        CopyingMemory::perm_of(self, addr)
+    }
+    #[inline]
+    fn read(&self, addr: u32, len: usize) -> Result<Vec<u8>, MemAccess> {
+        CopyingMemory::read(self, addr, len)
+    }
+    #[inline]
+    fn write(&mut self, addr: u32, data: &[u8]) -> Result<(), MemAccess> {
+        CopyingMemory::write(self, addr, data)
     }
 }
 
