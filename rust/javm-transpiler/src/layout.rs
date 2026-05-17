@@ -5,7 +5,7 @@
 //! Image. Today the only consumer is [`crate::linker::link_elf`],
 //! which uses [`ProgramLayout::stack_top`] to compute the initial
 //! SP value baked into every endpoint's
-//! [`jar_cap::image::EndpointDef::initial_regs`]. The page-count
+//! [`javm_cap::image::EndpointDef::initial_regs`]. The page-count
 //! and base-page metadata will also feed declarative
 //! `Image.memory_mappings` once the kernel honors them at instance
 //! init (future work).

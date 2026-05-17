@@ -15,7 +15,7 @@
 //! (e.g., the bench may eventually reuse one JIT compilation
 //! across iterations).
 
-use jar_cap::image::Image;
+use javm_cap::image::Image;
 use jar_kernel::{Block, Event, EventOutcome, Kernel};
 
 /// Drive `image`'s `endpoint_idx` through the kernel interpreter
@@ -55,7 +55,7 @@ pub use recomp::run_recompiler;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod recomp {
     use super::*;
-    use jar_cap::image::PinnedCap;
+    use javm_cap::image::PinnedCap;
     use javm_exec::recompiler::{DataLayout, RecompiledPvm};
     use javm_exec::{ExitReason, REG_COUNT, compute_mem_cycles, unpack_bitmask};
 

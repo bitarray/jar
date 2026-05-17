@@ -18,7 +18,7 @@
 //! - native == interpreter == recompiler return value.
 //! - interpreter gas == recompiler gas.
 
-use jar_cap::image::{Image, PinnedCap};
+use javm_cap::image::{Image, PinnedCap};
 use jar_kernel::{Block, Event, EventOutcome, Kernel};
 use scale::Decode;
 

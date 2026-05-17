@@ -1,6 +1,6 @@
 //! Errors surfaced by the v3 Vm.
 
-use jar_cap::{CapError, OpError};
+use javm_cap::{CapError, OpError};
 
 /// Errors from the Vm driver. Distinct from per-instruction
 /// `ExitReason` values (those come from `javm_exec`).

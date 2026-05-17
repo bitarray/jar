@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use jar_cap::{Blake2b256, CNodeBackend, Cap, DataCap, Hash, InstanceCap, SlotIdx, image::Image};
+use javm_cap::{Blake2b256, CNodeBackend, Cap, DataCap, Hash, InstanceCap, SlotIdx, image::Image};
 use javm::{CallResult, KernelAssist as _, Vm};
 
 use crate::error::KernelError;

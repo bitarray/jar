@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use jar_cap::{CNodeBackend, Cap, DataCap, InstanceCap, SlotIdx, image::Image};
+use javm_cap::{CNodeBackend, Cap, DataCap, InstanceCap, SlotIdx, image::Image};
 use javm_exec::{Access, ExitReason, GasCounter, Interpreter, Mem, Regs};
 
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
@@ -243,7 +243,7 @@ impl<K: KernelAssist> Vm<K> {
     ///   missing.
     pub fn call_resume(
         &mut self,
-        _target_slot: jar_cap::SlotPath,
+        _target_slot: javm_cap::SlotPath,
         scratchpad: Option<Cap>,
     ) -> Result<CallResult, VmError> {
         // 1. Verify and pop the top ReferenceEntry.
@@ -288,7 +288,7 @@ impl<K: KernelAssist> Vm<K> {
 
     /// Stub for DROP_PAUSED. Lands with the σ-resident Paused state
     /// machine (Stage 4).
-    pub fn drop_paused(&mut self, _target_slot: jar_cap::SlotPath) -> Result<(), VmError> {
+    pub fn drop_paused(&mut self, _target_slot: javm_cap::SlotPath) -> Result<(), VmError> {
         Err(VmError::Invariant(
             "DROP_PAUSED requires σ-resident Paused state (Stage 4)",
         ))
@@ -565,7 +565,7 @@ impl<K: KernelAssist + std::fmt::Debug> std::fmt::Debug for Vm<K> {
 mod tests {
     use super::*;
     use crate::kernel_assist::InProcessKernelAssist;
-    use jar_cap::{InMemoryCNode, SlotPath, image::Image};
+    use javm_cap::{InMemoryCNode, SlotPath, image::Image};
     use std::collections::BTreeMap;
 
     fn empty_image_with_code(code: Vec<u8>) -> Image {
@@ -1005,10 +1005,10 @@ mod tests {
         let mut vm = Vm::new(InProcessKernelAssist::new());
 
         let mut img = empty_image_with_code(vec![10u8, 0]);
-        img.memory_mappings.push(jar_cap::image::MemoryMapping {
+        img.memory_mappings.push(javm_cap::image::MemoryMapping {
             start: 0,
             size: 4,
-            source: jar_cap::SlotPath::root(SlotIdx(3)),
+            source: javm_cap::SlotPath::root(SlotIdx(3)),
         });
         let img = Arc::new(img);
         let prog =
@@ -1021,7 +1021,7 @@ mod tests {
         cnode
             .set(
                 SlotIdx(3),
-                Some(Cap::Data(jar_cap::DataCap {
+                Some(Cap::Data(javm_cap::DataCap {
                     content_hash: [0u8; 32],
                     size: 4,
                 })),
@@ -1049,8 +1049,8 @@ mod tests {
 
         vm.writeback_persistent_mappings().unwrap();
 
-        use jar_cap::Hash;
-        let expected = jar_cap::Blake2b256::hash(b"ABCD");
+        use javm_cap::Hash;
+        let expected = javm_cap::Blake2b256::hash(b"ABCD");
         let cnode = &vm.stack.running_instance().unwrap().cnode;
         match cnode.get(SlotIdx(3)).unwrap() {
             Some(Cap::Data(c)) => {

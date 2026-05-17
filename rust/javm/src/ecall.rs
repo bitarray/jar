@@ -47,7 +47,7 @@
 //! pointer to a path buffer in memory) lands when chain bytecode
 //! starts using nested cnodes routinely.
 
-use jar_cap::{
+use javm_cap::{
     Blake2b256, Cap, Hash, InstanceCap, SlotIdx, TypeCap, mgmt_cnode_mint, mgmt_cnode_swap,
     mgmt_copy, mgmt_drop, mgmt_move,
 };
@@ -292,7 +292,7 @@ impl<K: KernelAssist> Vm<K> {
         let image_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
 
         // 1. Resolve the Cap::Image content_hash from the slot.
-        let new_image_hash: jar_cap::CapHash = {
+        let new_image_hash: javm_cap::CapHash = {
             let running = self
                 .stack
                 .running_instance()
@@ -354,7 +354,7 @@ impl<K: KernelAssist> Vm<K> {
         let dst_slot = SlotIdx((regs.gpr[8] & 0xFF) as u32);
 
         // 1. Read Cap::Image at image_slot.
-        let new_image_hash: jar_cap::CapHash = {
+        let new_image_hash: javm_cap::CapHash = {
             let running = self
                 .stack
                 .running_instance()
@@ -387,7 +387,7 @@ impl<K: KernelAssist> Vm<K> {
             .ok_or(VmError::CallStackEmpty)?;
         let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
         if pinned.contains(&dst_slot) {
-            return Err(jar_cap::OpError::SlotPinned(dst_slot.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(dst_slot.get()).into());
         }
         running.cnode.set(dst_slot, Some(Cap::Instance(child)))?;
         Ok(())
@@ -428,7 +428,7 @@ impl<K: KernelAssist> Vm<K> {
         };
         let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
         if pinned.contains(&dst) {
-            return Err(jar_cap::OpError::SlotPinned(dst.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(dst.get()).into());
         }
         running.cnode.set(
             dst,
@@ -532,7 +532,7 @@ impl<K: KernelAssist> Vm<K> {
         let current = self.kernel_assist.storage_quota_get(quota_id);
         let charge = len as u64;
         if current < charge {
-            return Err(VmError::Op(jar_cap::OpError::SlotPinned(0))); // generic op fail
+            return Err(VmError::Op(javm_cap::OpError::SlotPinned(0))); // generic op fail
         }
         self.kernel_assist
             .storage_quota_set(quota_id, current - charge);
@@ -544,11 +544,11 @@ impl<K: KernelAssist> Vm<K> {
             .ok_or(VmError::CallStackEmpty)?;
         let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
         if pinned.contains(&dst_slot) {
-            return Err(jar_cap::OpError::SlotPinned(dst_slot.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(dst_slot.get()).into());
         }
         running.cnode.set(
             dst_slot,
-            Some(Cap::Data(jar_cap::DataCap {
+            Some(Cap::Data(javm_cap::DataCap {
                 content_hash,
                 size: len as u64,
             })),
@@ -593,7 +593,7 @@ impl<K: KernelAssist> Vm<K> {
             .ok_or(VmError::CallStackEmpty)?;
         let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
         if pinned.contains(&dst_slot) {
-            return Err(jar_cap::OpError::SlotPinned(dst_slot.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(dst_slot.get()).into());
         }
         running.cnode.set(dst_slot, Some(Cap::Data(data)))?;
         Ok(())
@@ -654,7 +654,7 @@ impl<K: KernelAssist> Vm<K> {
             .ok_or(VmError::CallStackEmpty)?;
         let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
         if pinned.contains(&dst_slot) {
-            return Err(jar_cap::OpError::SlotPinned(dst_slot.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(dst_slot.get()).into());
         }
         running.cnode.set(dst_slot, Some(new_file_cap))?;
         Ok(())
@@ -676,9 +676,9 @@ pub(crate) fn strip_trailing_zeros_len(bytes: &[u8]) -> usize {
 /// the named slot (used by host_same_type and host_type_eq). Errors
 /// if the slot is empty or holds a different cap kind.
 fn type_chain_at(
-    cnode: &(dyn jar_cap::CNodeBackend<Cap> + Send + Sync),
+    cnode: &(dyn javm_cap::CNodeBackend<Cap> + Send + Sync),
     slot: SlotIdx,
-) -> Result<jar_cap::CapHash, VmError> {
+) -> Result<javm_cap::CapHash, VmError> {
     match cnode.get(slot)? {
         Some(Cap::Instance(ic)) => Ok(ic.image_hash_chain),
         Some(Cap::Type(tc)) => Ok(tc.image_hash_chain),
@@ -726,7 +726,7 @@ mod tests {
     use super::*;
     use crate::callstack::{EntryStatus, InstanceEntry};
     use crate::kernel_assist::InProcessKernelAssist;
-    use jar_cap::{CNodeBackend, Cap, ImageCap, InMemoryCNode, InstanceCap, image::Image};
+    use javm_cap::{CNodeBackend, Cap, ImageCap, InMemoryCNode, InstanceCap, image::Image};
     use javm_exec::{GasCounter, Mem, PvmProgram, Regs};
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -1096,7 +1096,7 @@ mod tests {
             .cnode
             .set(
                 SlotIdx(4),
-                Some(Cap::Data(jar_cap::DataCap {
+                Some(Cap::Data(javm_cap::DataCap {
                     content_hash: [0x55; 32],
                     size: 4,
                 })),
@@ -1212,7 +1212,7 @@ mod tests {
     fn host_open_materializes_registered_file_as_data() {
         let mut vm = fixture_vm();
         // Register file_id 99 → DataCap{hash=[0x77;32], size=12}.
-        let data = jar_cap::DataCap {
+        let data = javm_cap::DataCap {
             content_hash: [0x77u8; 32],
             size: 12,
         };
@@ -1279,7 +1279,7 @@ mod tests {
             .cnode
             .set(
                 SlotIdx(4),
-                Some(Cap::Data(jar_cap::DataCap {
+                Some(Cap::Data(javm_cap::DataCap {
                     content_hash: [0x66u8; 32],
                     size: 100,
                 })),

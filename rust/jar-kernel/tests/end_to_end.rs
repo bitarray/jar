@@ -1,7 +1,7 @@
 //! End-to-end v3 chain demonstration.
 //!
 //! Exercises the full v3 stack:
-//!   jar-cap (cap kinds, MGMT ops, Image, BMT)
+//!   javm-cap (cap kinds, MGMT ops, Image, BMT)
 //!     ↓
 //!   javm-exec (PVM interpreter + recompiler)
 //!     ↓
@@ -16,7 +16,7 @@
 //! round-trips and observable state-root evolution as σ.data_payloads
 //! accumulates per-block event-payload entries.
 
-use jar_cap::image::{EndpointDef, Image, MemoryMapping};
+use javm_cap::image::{EndpointDef, Image, MemoryMapping};
 use jar_kernel::{Block, Event, EventOutcome, Kernel, abi};
 use std::collections::BTreeMap;
 
@@ -37,7 +37,7 @@ fn hello_world_chain_image() -> Image {
     // "every byte is an instruction" bitmask via run_instance's
     // ImageCache::get_or_decode default). To exercise the real
     // load_imm_64 path we'd need to wire the kernel to feed
-    // jar-cap's image_canonical_encoding through a parser that
+    // javm-cap's image_canonical_encoding through a parser that
     // recovers code + bitmask + jump_table.
     //
     // For this end-to-end test we use a minimal program that works

@@ -1,10 +1,10 @@
 [package]
-name = "jar-cap"
+name = "javm-cap"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "JAR v3 capability system: caps, cnode, image, BMT, hash"
+description = "JAVM capability system: caps, cnode, image, BMT, hash"
 
 [dependencies]
 blake2 = { workspace = true }

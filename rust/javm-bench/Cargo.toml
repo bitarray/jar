@@ -6,7 +6,7 @@ license.workspace = true
 description = "JAVM v3 benchmarks: byte-PVM interpreter vs JIT recompiler."
 
 [dependencies]
-jar-cap = { workspace = true }
+javm-cap = { workspace = true }
 jar-kernel = { workspace = true }
 javm-exec = { workspace = true }
 scale = { workspace = true }

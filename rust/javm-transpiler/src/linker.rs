@@ -10,7 +10,7 @@
 //! 3. Build a relocation map: code_offset → resolved_address
 //! 4. Translate RISC-V instructions, using relocation info to replace
 //!    AUIPC+LO12 pairs with direct load_imm of the final PVM address
-//! 5. Emit a v3 `jar_cap::image::Image` with the code sub-blob,
+//! 5. Emit a v3 `javm_cap::image::Image` with the code sub-blob,
 //!    declared endpoints, and standard kernel-ABI slot conventions.
 
 use crate::TranspileError;
@@ -19,10 +19,10 @@ use crate::layout::{
     HEAP_CAP_INDEX, PVM_PAGE_SIZE, ProgramLayout, RO_CAP_INDEX, RW_CAP_INDEX, STACK_CAP_INDEX,
 };
 use crate::riscv::TranslationContext;
-use jar_cap::SlotIdx;
-use jar_cap::abi::{BARE_GAS_SLOT, BARE_QUOTA_SLOT, BARE_YIELD_CATCHER_SLOT};
-use jar_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap};
-use jar_cap::slot::SlotPath;
+use javm_cap::SlotIdx;
+use javm_cap::abi::{BARE_GAS_SLOT, BARE_QUOTA_SLOT, BARE_YIELD_CATCHER_SLOT};
+use javm_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap};
+use javm_cap::slot::SlotPath;
 use std::collections::{BTreeMap, HashMap};
 
 /// PVM register index for the RISC-V stack pointer (φ[1]).
@@ -129,7 +129,7 @@ struct LinkedElf {
 ///   stack/heap regions live in `initial_slots` (RW). The kernel's
 ///   chain genesis installs Cap::Data's for each declared slot.
 /// - `gas_slots`, `quota_slots`, `yield_marker_slot`: standard
-///   kernel-ABI defaults from [`jar_cap::abi`].
+///   kernel-ABI defaults from [`javm_cap::abi`].
 pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     let elf = parse_linked_elf(elf_data)?;
     let mut ctx = TranslationContext::new(elf.is_64bit);

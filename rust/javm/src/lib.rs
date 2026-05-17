@@ -1,6 +1,6 @@
 //! JAR v3 integration crate.
 //!
-//! Composes the foundational cap system (`jar-cap`) and the pure
+//! Composes the foundational cap system (`javm-cap`) and the pure
 //! execution engine (`javm-exec`) into a call-stack-aware VM driver
 //! that implements the v3 kernel ABI.
 //!

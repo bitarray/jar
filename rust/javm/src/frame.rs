@@ -26,7 +26,7 @@
 //! `Cap::CNode` slots) is provided here too: the MGMT dispatcher
 //! takes a `SlotPath` operand, this module walks it.
 
-use jar_cap::{CNodeBackend, Cap, CapError, PinnedCap, SlotIdx, SlotPath, image::Image};
+use javm_cap::{CNodeBackend, Cap, CapError, PinnedCap, SlotIdx, SlotPath, image::Image};
 
 use crate::error::VmError;
 
@@ -121,7 +121,7 @@ impl<'a> BareFrame<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jar_cap::{CNodeCap, InMemoryCNode};
+    use javm_cap::{CNodeCap, InMemoryCNode};
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn mainframe_get_root_slot() {
-        let cap = Cap::Image(jar_cap::ImageCap {
+        let cap = Cap::Image(javm_cap::ImageCap {
             content_hash: [1; 32],
         });
         let cn = cnode_with(&[(SlotIdx(5), cap.clone())]);
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn mainframe_resolve_root_path() {
-        let cap = Cap::Image(jar_cap::ImageCap {
+        let cap = Cap::Image(javm_cap::ImageCap {
             content_hash: [7; 32],
         });
         let cn = cnode_with(&[(SlotIdx(9), cap)]);
@@ -194,7 +194,7 @@ mod tests {
         // Inner cnode at slot 3 of root; inner slot 1 holds a Cap::Type.
         let inner = cnode_with(&[(
             SlotIdx(1),
-            Cap::Type(jar_cap::TypeCap {
+            Cap::Type(javm_cap::TypeCap {
                 image_hash_chain: [42; 32],
             }),
         )]);
@@ -211,7 +211,7 @@ mod tests {
     fn mainframe_resolve_non_cnode_intermediate_errors() {
         // Root slot 4 holds a Cap::Image (not a Cap::CNode); walking
         // through it should fail.
-        let img_cap = Cap::Image(jar_cap::ImageCap {
+        let img_cap = Cap::Image(javm_cap::ImageCap {
             content_hash: [9; 32],
         });
         let root = cnode_with(&[(SlotIdx(4), img_cap)]);
@@ -234,14 +234,14 @@ mod tests {
 
     #[test]
     fn bareframe_only_reads_pinned() {
-        let cap = Cap::Image(jar_cap::ImageCap {
+        let cap = Cap::Image(javm_cap::ImageCap {
             content_hash: [3; 32],
         });
         let cn = cnode_with(&[
             (SlotIdx(2), cap),
             (
                 SlotIdx(3),
-                Cap::Type(jar_cap::TypeCap {
+                Cap::Type(javm_cap::TypeCap {
                     image_hash_chain: [0; 32],
                 }),
             ),

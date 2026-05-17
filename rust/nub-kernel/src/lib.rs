@@ -43,9 +43,9 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-/// 32-byte content hash. Same shape as `jar_cap::CapHash`; defined
+/// 32-byte content hash. Same shape as `javm_cap::CapHash`; defined
 /// here locally so this crate stays `no_std`. A future unification
-/// pass will share the type once `jar-cap` becomes `no_std`-clean.
+/// pass will share the type once `javm-cap` becomes `no_std`-clean.
 pub type CapHash = [u8; 32];
 
 /// Opaque, 32-byte handle to an Instance held by an `Arch`.

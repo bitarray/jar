@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use jar_cap::{CNodeBackend, Cap, CapHash, InstanceCap, image::Image};
+use javm_cap::{CNodeBackend, Cap, CapHash, InstanceCap, image::Image};
 
 use crate::apply::{Block, EventOutcome, apply_block};
 use crate::error::KernelError;
@@ -94,7 +94,7 @@ mod tests {
     use super::*;
     use crate::abi;
     use crate::apply::{Block, Event};
-    use jar_cap::image::Image;
+    use javm_cap::image::Image;
     use std::collections::BTreeMap;
 
     fn minimal_chain_image() -> Image {
@@ -102,7 +102,7 @@ mod tests {
         let mut endpoints = BTreeMap::new();
         endpoints.insert(
             0,
-            jar_cap::image::EndpointDef {
+            javm_cap::image::EndpointDef {
                 entry_pc: 0,
                 arg_registers: 0,
                 arg_cnode_size: 0,

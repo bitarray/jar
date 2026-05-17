@@ -16,7 +16,7 @@
 //!   StorageExhaustedMarker so the chain catches OOG/Storage faults
 //!   by default.
 
-use jar_cap::{
+use javm_cap::{
     Blake2b256, CNodeBackend, Cap, DataCap, Hash, InMemoryCNode, InstanceCap,
     image::{Image, PinnedCap, image_content_hash},
 };
@@ -71,7 +71,7 @@ pub fn genesis(chain_image: Image) -> Genesis {
     // 1. Register the chain Image in σ.code_blobs. The image's
     //    content_hash drives identity; CodeId is just a σ-side
     //    monotonic alias.
-    let image_hash = image_content_hash::<jar_cap::Blake2b256>(&chain_image);
+    let image_hash = image_content_hash::<javm_cap::Blake2b256>(&chain_image);
     let code_id = state.counters.allocate_code_id();
     state.code_blobs.insert(code_id, chain_image.code.clone());
 
@@ -210,7 +210,7 @@ pub fn genesis(chain_image: Image) -> Genesis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jar_cap::image::Image;
+    use javm_cap::image::Image;
 
     fn empty_chain_image() -> Image {
         Image {
@@ -264,7 +264,7 @@ mod tests {
     fn chain_instance_image_hash_matches_content_hash() {
         let img = empty_chain_image();
         let g = genesis(img.clone());
-        let expected = jar_cap::image::image_content_hash::<jar_cap::Blake2b256>(&img);
+        let expected = javm_cap::image::image_content_hash::<javm_cap::Blake2b256>(&img);
         assert_eq!(g.chain_instance.image_hash_chain, expected);
     }
 }

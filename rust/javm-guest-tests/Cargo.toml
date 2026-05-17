@@ -15,7 +15,7 @@ sha3 = { version = "0.10", default-features = false }
 build-javm = { path = "../build-javm" }
 
 [dev-dependencies]
-jar-cap = { workspace = true }
+javm-cap = { workspace = true }
 jar-kernel = { workspace = true }
 javm-exec = { workspace = true }
 scale = { workspace = true }

@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use jar_cap::CapHash;
+use javm_cap::CapHash;
 use javm_exec::{PvmProgram, gas_cost::DEFAULT_MEM_CYCLES};
 
 use crate::error::VmError;

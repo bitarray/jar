@@ -1145,16 +1145,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "jar-cap"
-version = "0.1.0"
-dependencies = [
- "blake2",
- "scale",
- "scale-derive",
- "thiserror",
-]
-
-[[package]]
 name = "jar-genesis"
 version = "0.1.0"
 dependencies = [
@@ -1171,8 +1161,8 @@ name = "jar-kernel"
 version = "0.1.0"
 dependencies = [
  "build-javm",
- "jar-cap",
  "javm",
+ "javm-cap",
  "javm-exec",
  "proptest",
  "scale",
@@ -1188,7 +1178,7 @@ version = "0.1.0"
 name = "javm"
 version = "0.1.0"
 dependencies = [
- "jar-cap",
+ "javm-cap",
  "javm-exec",
  "proptest",
  "thiserror",
@@ -1200,10 +1190,20 @@ version = "0.1.0"
 dependencies = [
  "build-javm",
  "criterion",
- "jar-cap",
  "jar-kernel",
+ "javm-cap",
  "javm-exec",
  "scale",
+]
+
+[[package]]
+name = "javm-cap"
+version = "0.1.0"
+dependencies = [
+ "blake2",
+ "scale",
+ "scale-derive",
+ "thiserror",
 ]
 
 [[package]]
@@ -1222,8 +1222,8 @@ version = "0.1.0"
 dependencies = [
  "blake2",
  "build-javm",
- "jar-cap",
  "jar-kernel",
+ "javm-cap",
  "javm-exec",
  "scale",
  "sha3",
@@ -1234,7 +1234,7 @@ dependencies = [
 name = "javm-transpiler"
 version = "0.1.0"
 dependencies = [
- "jar-cap",
+ "javm-cap",
  "proptest",
  "scale",
  "thiserror",

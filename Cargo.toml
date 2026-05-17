@@ -16,7 +16,7 @@ members = [
     "rust/javm-transpiler",
     "rust/scale",
     "rust/scale-derive",
-    "rust/jar-cap",
+    "rust/javm-cap",
     "rust/javm-exec",
     "rust/javm-bench",
     "rust/jar-kernel",
@@ -45,7 +45,7 @@ authors = [ "Bitarray GmbH <legal@bitarray.dev>" ]
 javm = { path = "rust/javm" }
 javm-exec = { path = "rust/javm-exec" }
 javm-transpiler = { path = "rust/javm-transpiler" }
-jar-cap = { path = "rust/jar-cap" }
+javm-cap = { path = "rust/javm-cap" }
 jar-kernel = { path = "rust/jar-kernel" }
 subsoil = { path = "rust/subsoil" }
 subsoil-derive = { path = "rust/subsoil-derive" }

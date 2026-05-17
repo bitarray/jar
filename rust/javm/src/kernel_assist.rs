@@ -19,7 +19,7 @@ use core::fmt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use jar_cap::{Blake2b256, CapHash, DataCap, Hash, image::Image};
+use javm_cap::{Blake2b256, CapHash, DataCap, Hash, image::Image};
 
 /// Identifier for a row in the kernel-internal GasMeter table.
 /// Chain-chosen, not kernel-assigned (per spec §22).

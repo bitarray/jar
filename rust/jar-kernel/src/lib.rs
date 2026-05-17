@@ -1,6 +1,6 @@
 //! JAR v3 kernel.
 //!
-//! Composes the foundational cap system (`jar-cap`), the pure
+//! Composes the foundational cap system (`javm-cap`), the pure
 //! execution engine (`javm-exec`), and the integration crate
 //! (`javm`) into the chain-side kernel: σ state, block apply,
 //! state-root, kernel-assisted Instance impls, host_open/host_save.

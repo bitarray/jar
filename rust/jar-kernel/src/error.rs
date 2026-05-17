@@ -7,9 +7,9 @@ pub enum KernelError {
     #[error("vm error: {0}")]
     Vm(#[from] javm::VmError),
     #[error("cap-table operation failed: {0}")]
-    Cap(#[from] jar_cap::CapError),
+    Cap(#[from] javm_cap::CapError),
     #[error("mgmt op failed: {0}")]
-    Op(#[from] jar_cap::OpError),
+    Op(#[from] javm_cap::OpError),
     #[error("file_id {0} not found in data_blobs registry")]
     FileNotFound(u64),
     #[error(

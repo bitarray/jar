@@ -8,7 +8,7 @@
 //! in `end_to_end.rs` cover the smaller surface (kernel state
 //! root evolution, replay determinism).
 
-use jar_cap::image::Image;
+use javm_cap::image::Image;
 use jar_kernel::{Block, Event, EventOutcome, Kernel};
 use scale::Decode;
 

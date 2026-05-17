@@ -5,7 +5,7 @@
 //! two backends agree on result + gas, then runs criterion on both.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use jar_cap::image::Image;
+use javm_cap::image::Image;
 use scale::Decode;
 
 const GAS: u64 = 100_000_000_000;

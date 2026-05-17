@@ -50,12 +50,12 @@ pub enum TranspileError {
 }
 
 /// Link a RISC-V rv64em ELF binary into a v3 chain
-/// [`jar_cap::image::Image`]. The Image carries the PVM CODE sub-blob
+/// [`javm_cap::image::Image`]. The Image carries the PVM CODE sub-blob
 /// in its `code` field, populated endpoints (from any
 /// `.subsoil.endpoints` ELF section, or a single PC-0 fallback for
 /// `subsoil::entry!`-based guests), and standard kernel-ABI slot
 /// conventions.
-pub fn link_elf(elf_data: &[u8]) -> Result<jar_cap::image::Image, TranspileError> {
+pub fn link_elf(elf_data: &[u8]) -> Result<javm_cap::image::Image, TranspileError> {
     linker::link_elf(elf_data)
 }
 

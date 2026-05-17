@@ -19,11 +19,11 @@
 use scale::Encode;
 use std::collections::BTreeMap;
 
-use jar_cap::{Blake2b256, CapHash, Hash, InstanceCap};
+use javm_cap::{Blake2b256, CapHash, Hash, InstanceCap};
 
-/// SCALE-encodable shadow of `jar_cap::InstanceCap`. Stored in σ
+/// SCALE-encodable shadow of `javm_cap::InstanceCap`. Stored in σ
 /// instead of the cap struct directly so we can derive Encode/Decode
-/// without modifying jar-cap.
+/// without modifying javm-cap.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Encode, scale::Decode)]
 pub struct VaultRecord {
     pub image_hash_chain: CapHash,
