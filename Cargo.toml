@@ -4,7 +4,7 @@ members = [
     "tools/jar-genesis",
     "rust/build-crate",
     "rust/build-javm",
-    "rust/build-nub",
+    "rust/nub-build",
     "rust/nub",
     "rust/nub-guest",
     "rust/javm",

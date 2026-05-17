@@ -1,9 +1,0 @@
-[package]
-name = "build-nub"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-description = "build.rs helper: cross-compile a hyperlight guest crate for x86_64-unknown-none"
-
-[dependencies]
-build-crate = { path = "../build-crate" }

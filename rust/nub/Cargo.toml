@@ -10,4 +10,4 @@ anyhow = "1"
 hyperlight-host = "0.15"
 
 [build-dependencies]
-build-nub = { path = "../build-nub" }
+nub-build = { path = "../nub-build" }

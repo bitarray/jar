@@ -6,7 +6,7 @@ fn main() {
     if std::env::var("BUILD_CRATE_GUEST_BUILD").is_ok() {
         return;
     }
-    let elf = build_nub::build("../nub-guest", "nub-guest");
+    let elf = nub_build::build("../nub-guest", "nub-guest");
     println!("cargo:rustc-env=NUB_GUEST_BLOB={}", elf.display());
     println!("cargo:rerun-if-changed=../nub-guest/src");
     println!("cargo:rerun-if-changed=../nub-guest/Cargo.toml");

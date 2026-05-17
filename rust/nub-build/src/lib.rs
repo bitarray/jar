@@ -1,6 +1,11 @@
-//! build.rs helper: cross-compile a hyperlight guest crate for the
-//! stable bare-metal target `x86_64-unknown-none` and return the
-//! path to the resulting ELF.
+//! build.rs helper: cross-compile a nub bare-metal Arch guest crate
+//! for a stable bare-metal target (today: `x86_64-unknown-none`) and
+//! return the path to the resulting ELF.
+//!
+//! Today's only consumer is `nub-arch-hyperlight`. As we add more
+//! bare-metal Arch backends (e.g. an arm/riscv guest), they live here
+//! too — this crate owns the cross-compile recipe for all of nub's
+//! bare-metal arch guests.
 //!
 //! Modeled on `build-javm`, but with two simplifications:
 //!
@@ -53,7 +58,7 @@ pub fn build(manifest_dir: &str, bin_name: &str) -> PathBuf {
     println!("cargo:rerun-if-env-changed=SKIP_GUEST_BUILD");
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
-    let target_dir = PathBuf::from(&out_dir).join("nub-guest-build");
+    let target_dir = PathBuf::from(&out_dir).join("nub-arch-guest-build");
     let elf_path = target_dir
         .join(TARGET_TRIPLE)
         .join("release")
@@ -86,13 +91,15 @@ pub fn build(manifest_dir: &str, bin_name: &str) -> PathBuf {
         .env("BUILD_CRATE_GUEST_BUILD", "1")
         .env("CARGO_ENCODED_RUSTFLAGS", rustflags);
 
-    let output = cmd.output().expect("failed to spawn cargo for nub-guest");
+    let output = cmd
+        .output()
+        .expect("failed to spawn cargo for nub arch guest");
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         panic!(
-            "nub-guest build failed for {}:\n--- stderr ---\n{}\n--- stdout ---\n{}",
+            "nub arch guest build failed for {}:\n--- stderr ---\n{}\n--- stdout ---\n{}",
             manifest_dir.display(),
             stderr,
             stdout
