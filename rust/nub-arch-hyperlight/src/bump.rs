@@ -73,6 +73,15 @@ impl BumpArena {
         // SAFETY: prim_alloc::alloc_phys_pages is safe to call from
         // ring-0 guest code; it returns a GPA backing `pages` 4 KiB pages.
         let base_pa = unsafe { hyperlight_guest::prim_alloc::alloc_phys_pages(pages) };
+        Self::from_existing(base_pa, capacity)
+    }
+
+    /// Wrap a pre-allocated contiguous run of physical pages as a fresh
+    /// [`BumpArena`] (cursor reset to zero). The caller owns the
+    /// underlying allocation lifetime; the arena holds a raw pointer
+    /// into it.
+    pub fn from_existing(base_pa: u64, capacity: usize) -> Option<Self> {
+        assert!(capacity.is_multiple_of(PAGE_SIZE));
         let base_va = paging::pa_to_va(base_pa)?;
         let base = NonNull::new(base_va as *mut u8)?;
         Some(Self {

@@ -19,7 +19,9 @@
 //! either backend, just to exercise the wiring.
 
 use anyhow::Result;
-use hyperlight_host::sandbox::{GuestBinary, MultiUseSandbox, UninitializedSandbox};
+use hyperlight_host::sandbox::{
+    GuestBinary, MultiUseSandbox, SandboxConfiguration, UninitializedSandbox,
+};
 use nub_arch_local::LocalArch;
 use nub_kernel::Kernel;
 
@@ -61,9 +63,32 @@ impl Nub {
     /// Construct a Nub backed by a fresh Hyperlight sandbox loaded
     /// from the `nub-arch-hyperlight` guest blob.
     pub fn new_hyperlight() -> Result<Self> {
+        // Scratch budget covers the per-process pool inside the guest
+        // (`nub-arch-hyperlight::pool`): mem + perms + bb + jt + jit +
+        // arena + a few page-sized side buffers. Sized to ~144 MiB so
+        // the largest bench programs fit with comfortable headroom.
+        //
+        // Input / output buffers: the host SCALE-encodes an
+        // `InvocationSpec` (containing the program's full code +
+        // bitmask + jump table + initial data regions) and ships it
+        // via Hyperlight's input-data ring. Default 16 KiB is
+        // exhausted by guest-tests' multi-endpoint Image.
+        let mut cfg = SandboxConfiguration::default();
+        cfg.set_scratch_size(512 * 1024 * 1024);
+        cfg.set_input_data_size(16 * 1024 * 1024);
+        cfg.set_output_data_size(16 * 1024 * 1024);
+        // Heap for the guest's buddy allocator. The default 128 KiB
+        // is sized only for the original ring-0 spike. With the
+        // in-kernel JIT path: each invocation alloc/frees ~hundreds
+        // of KiB of compiler scratch (native code Vec, dispatch
+        // table, label vector). The bench harness does tens of
+        // thousands of iters in a row, and the buddy allocator's
+        // power-of-2 fragmentation eats headroom over time. 1 GiB
+        // ensures even the longest bench run stays comfortable.
+        cfg.set_heap_size(1024 * 1024 * 1024);
         let uninit = UninitializedSandbox::new(
             GuestBinary::FilePath(NUB_ARCH_HYPERLIGHT_BLOB_PATH.to_string()),
-            None,
+            Some(cfg),
         )?;
         let sandbox = uninit.evolve()?;
         Ok(Self {

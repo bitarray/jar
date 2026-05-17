@@ -112,6 +112,14 @@ impl Perm {
             executable: true,
         }
     }
+    #[allow(dead_code)] // used by Stage E1 (pinned/RO data regions)
+    pub const fn user_ro() -> Self {
+        Self {
+            writable: false,
+            user: true,
+            executable: false,
+        }
+    }
     #[allow(dead_code)] // used by Stage A4 (kernel-only ctx pages)
     pub const fn kernel_rw() -> Self {
         Self {

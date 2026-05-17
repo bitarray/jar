@@ -64,6 +64,19 @@ pub struct InvocationSpec {
     pub entry_pc: u32,
     pub initial_gas: u64,
     pub initial_regs: PvmRegs,
+    /// Total guest-memory size in bytes. Pages in `[0, mem_size)` are
+    /// mapped; accesses past this boundary fault.
+    pub mem_size: u32,
+    /// `arg` region: guest VA + bytes to populate before entry.
+    pub arg_start: u32,
+    pub arg_data: Vec<u8>,
+    /// `ro` region: pinned/read-only mapping. Mapped user-RO so writes
+    /// trigger a #PF (exit_reason=3).
+    pub ro_start: u32,
+    pub ro_data: Vec<u8>,
+    /// `rw` region: initialised read-write mapping.
+    pub rw_start: u32,
+    pub rw_data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]

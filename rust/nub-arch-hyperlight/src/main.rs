@@ -37,6 +37,8 @@ mod jit_run;
 #[cfg(target_os = "none")]
 mod paging;
 #[cfg(target_os = "none")]
+mod pool;
+#[cfg(target_os = "none")]
 mod ring3;
 #[cfg(target_os = "none")]
 mod segments;
@@ -281,13 +283,26 @@ mod guest {
         };
 
         let info = unsafe {
-            crate::jit_run::run_pvm_full(
+            crate::jit_run::run_pvm_with_mem(
                 &spec.code,
                 &spec.bitmask,
                 &spec.jump_table,
                 spec.initial_gas as i64,
                 spec.entry_pc,
                 spec.initial_regs.into_array(),
+                spec.mem_size,
+                crate::jit_run::MemRegion {
+                    start: spec.arg_start,
+                    data: &spec.arg_data,
+                },
+                crate::jit_run::MemRegion {
+                    start: spec.ro_start,
+                    data: &spec.ro_data,
+                },
+                crate::jit_run::MemRegion {
+                    start: spec.rw_start,
+                    data: &spec.rw_data,
+                },
             )
         };
 

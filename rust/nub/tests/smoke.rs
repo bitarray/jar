@@ -45,6 +45,13 @@ fn hyperlight_invoke_spec_ecalli() {
         entry_pc: 0,
         initial_gas: 1_000,
         initial_regs: PvmRegs::zeros(),
+        mem_size: 0,
+        arg_start: 0,
+        arg_data: vec![],
+        ro_start: 0,
+        ro_data: vec![],
+        rw_start: 0,
+        rw_data: vec![],
     };
     let mut hl = Nub::new_hyperlight().expect("hyperlight sandbox should open");
     let result = hl.invoke_spec(&spec).expect("invoke_spec");

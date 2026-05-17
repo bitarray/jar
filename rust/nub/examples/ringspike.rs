@@ -37,13 +37,14 @@ fn main() -> Result<()> {
     println!("guest blob: {NUB_ARCH_HYPERLIGHT_BLOB_PATH}");
     println!();
 
-    // Bump scratch to 8 MiB so all the per-smoke phys-page allocations
-    // (per-call BumpArenas + per-test JIT/ctx/stack pages) fit without
-    // exhausting Hyperlight's bump-pointer phys allocator. Default is
-    // 0x48000 (= 72 pages) which is enough for the original ring-0
-    // smokes but not the in-kernel JIT path that lands in Stage C.
+    // Bump scratch to 192 MiB so all the per-smoke phys-page
+    // allocations fit: the per-call C3/C4 smokes (per-test JIT/ctx/
+    // stack/page-table pages) plus the D1 `nub_invoke` path which
+    // lazily reserves the per-process pool inside the guest
+    // (`nub-arch-hyperlight::pool` ~ 94 MiB). Default is 0x48000
+    // (= 72 pages), enough only for the original ring-0 spike.
     let mut cfg = SandboxConfiguration::default();
-    cfg.set_scratch_size(8 * 1024 * 1024);
+    cfg.set_scratch_size(192 * 1024 * 1024);
     let uninit = UninitializedSandbox::new(
         GuestBinary::FilePath(NUB_ARCH_HYPERLIGHT_BLOB_PATH.to_string()),
         Some(cfg),
@@ -225,6 +226,13 @@ fn main() -> Result<()> {
         entry_pc: 0,
         initial_gas: 1_000,
         initial_regs: PvmRegs::zeros(),
+        mem_size: 0,
+        arg_start: 0,
+        arg_data: vec![],
+        ro_start: 0,
+        ro_data: vec![],
+        rw_start: 0,
+        rw_data: vec![],
     };
     let result_bytes: Vec<u8> = sandbox.call("nub_invoke", spec.encode())?;
     let (d1, _consumed) = InvocationResult::decode(&result_bytes)
