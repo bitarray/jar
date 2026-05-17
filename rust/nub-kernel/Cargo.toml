@@ -1,0 +1,12 @@
+[package]
+name = "nub-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Nub: the JAR v3 microkernel. Defines the Arch substrate trait and the generic Kernel<A: Arch> over it."
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
