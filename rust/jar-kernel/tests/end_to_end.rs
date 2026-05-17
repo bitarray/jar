@@ -16,8 +16,8 @@
 //! round-trips and observable state-root evolution as σ.data_payloads
 //! accumulates per-block event-payload entries.
 
-use javm_cap::image::{EndpointDef, Image, MemoryMapping};
 use jar_kernel::{Block, Event, EventOutcome, Kernel, abi};
+use javm_cap::image::{EndpointDef, Image, MemoryMapping};
 use std::collections::BTreeMap;
 
 /// Build a tiny chain image whose endpoint 0 program is:

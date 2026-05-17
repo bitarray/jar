@@ -15,8 +15,8 @@
 //! (e.g., the bench may eventually reuse one JIT compilation
 //! across iterations).
 
-use javm_cap::image::Image;
 use jar_kernel::{Block, Event, EventOutcome, Kernel};
+use javm_cap::image::Image;
 
 /// Drive `image`'s `endpoint_idx` through the kernel interpreter
 /// with `gas` budget. Returns `(return_value, gas_used)` from the
@@ -56,8 +56,8 @@ pub use recomp::run_recompiler;
 mod recomp {
     use super::*;
     use javm_cap::image::PinnedCap;
-    use javm_exec::recompiler::{DataLayout, RecompiledPvm};
     use javm_exec::{ExitReason, REG_COUNT, compute_mem_cycles, unpack_bitmask};
+    use javm_recompiler_x86::{DataLayout, RecompiledPvm};
 
     /// Drive `image`'s `endpoint_idx` through a fresh `RecompiledPvm`
     /// (one JIT compile per call) with `gas` budget. Returns

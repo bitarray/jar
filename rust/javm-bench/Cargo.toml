@@ -11,6 +11,9 @@ jar-kernel = { workspace = true }
 javm-exec = { workspace = true }
 scale = { workspace = true }
 
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+javm-recompiler-x86 = { workspace = true }
+
 [build-dependencies]
 build-javm = { path = "../build-javm" }
 

@@ -1193,6 +1193,7 @@ dependencies = [
  "jar-kernel",
  "javm-cap",
  "javm-exec",
+ "javm-recompiler-x86",
  "scale",
 ]
 
@@ -1210,8 +1211,6 @@ dependencies = [
 name = "javm-exec"
 version = "0.1.0"
 dependencies = [
- "libc",
- "memoffset",
  "proptest",
  "thiserror",
 ]
@@ -1225,9 +1224,20 @@ dependencies = [
  "jar-kernel",
  "javm-cap",
  "javm-exec",
+ "javm-recompiler-x86",
  "scale",
  "sha3",
  "subsoil",
+]
+
+[[package]]
+name = "javm-recompiler-x86"
+version = "0.1.0"
+dependencies = [
+ "javm-exec",
+ "libc",
+ "memoffset",
+ "proptest",
 ]
 
 [[package]]

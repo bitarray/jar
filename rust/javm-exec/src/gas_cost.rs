@@ -713,7 +713,7 @@ pub fn gas_cost_for_block(code: &[u8], bitmask: &[u8], start_pc: usize) -> u64 {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn gas_cost_for_block_decoded(
-    instrs: &[crate::recompiler::predecode::PreDecodedInst],
+    instrs: &[crate::predecoded::PreDecodedInst],
     code: &[u8],
     bitmask: &[u8],
 ) -> u64 {
@@ -724,7 +724,7 @@ pub fn gas_cost_for_block_decoded(
 /// Pipeline simulation from pre-decoded instructions (no raw byte re-parsing).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn gas_sim_decoded(
-    instrs: &[crate::recompiler::predecode::PreDecodedInst],
+    instrs: &[crate::predecoded::PreDecodedInst],
     code: &[u8],
     bitmask: &[u8],
 ) -> u32 {
@@ -839,7 +839,7 @@ fn instruction_cost_fast(
     ra: u8,
     rb: u8,
     rd: u8,
-    instr: &crate::recompiler::predecode::PreDecodedInst,
+    instr: &crate::predecoded::PreDecodedInst,
     code: &[u8],
     bitmask: &[u8],
 ) -> InstrCost {
@@ -2742,7 +2742,7 @@ fn eu_consume(avail: &mut [u8; 5], eu: u8) {
 
 // === advance_cycle / gas_sim_fast / gas_cost_for_block_fast ===
 // Cherry-picked from v2. Bitmask-based pipeline simulator used by the
-// recompiler; reference `crate::recompiler::predecode::PreDecodedInst`.
+// recompiler; reference `crate::predecoded::PreDecodedInst`.
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn advance_cycle(cycles_left: &mut [u8; 32], exe_mask: &mut u32, fin_mask: &mut u32) {
@@ -2762,7 +2762,7 @@ fn advance_cycle(cycles_left: &mut [u8; 32], exe_mask: &mut u32, fin_mask: &mut 
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn gas_sim_fast(
-    instrs: &[crate::recompiler::predecode::PreDecodedInst],
+    instrs: &[crate::predecoded::PreDecodedInst],
     _code: &[u8],
     _bitmask: &[u8],
 ) -> u32 {
@@ -2881,7 +2881,7 @@ fn gas_sim_fast(
 /// Fast gas cost computation using bitmask-based pipeline simulator.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub fn gas_cost_for_block_fast(
-    instrs: &[crate::recompiler::predecode::PreDecodedInst],
+    instrs: &[crate::predecoded::PreDecodedInst],
     code: &[u8],
     bitmask: &[u8],
 ) -> u64 {

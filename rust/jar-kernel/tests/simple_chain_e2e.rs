@@ -8,8 +8,8 @@
 //! in `end_to_end.rs` cover the smaller surface (kernel state
 //! root evolution, replay determinism).
 
-use javm_cap::image::Image;
 use jar_kernel::{Block, Event, EventOutcome, Kernel};
+use javm_cap::image::Image;
 use scale::Decode;
 
 const BLOB: &[u8] = include_bytes!(env!("SIMPLE_CHAIN_BLOB"));

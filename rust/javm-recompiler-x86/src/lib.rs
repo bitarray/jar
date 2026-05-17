@@ -36,9 +36,9 @@ pub mod codegen;
 pub mod predecode;
 pub mod signal;
 
-use crate::ExitReason;
-use crate::{Gas, REG_COUNT as PVM_REGISTER_COUNT};
 use codegen::{Compiler, HelperFns};
+use javm_exec::ExitReason;
+use javm_exec::{Gas, REG_COUNT as PVM_REGISTER_COUNT};
 
 /// No-op tracing shim. v2 javm uses the `tracing` crate for diagnostic
 /// logs; javm-exec doesn't pull that in. Diagnostic logs in the JIT
@@ -574,7 +574,7 @@ extern "sysv64" fn mem_write_u64_fn(ctx: *mut JitContext, addr: u32, value: u64)
 extern "sysv64" fn sbrk_helper(ctx: *mut JitContext, size: u64) -> u64 {
     // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
     let ctx = unsafe { &mut *ctx };
-    let ps = crate::PAGE_SIZE;
+    let ps = javm_exec::PAGE_SIZE;
 
     if size > u32::MAX as u64 {
         return 0;
@@ -1206,7 +1206,7 @@ mod tests {
             registers,
             1000,
             Some(test_layout()),
-            crate::gas_cost::DEFAULT_MEM_CYCLES,
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
         let exit = pvm.run();
@@ -1226,7 +1226,7 @@ mod tests {
             registers,
             1000,
             Some(test_layout()),
-            crate::gas_cost::DEFAULT_MEM_CYCLES,
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
         let exit = pvm.run();
@@ -1246,7 +1246,7 @@ mod tests {
             registers,
             1000,
             Some(test_layout()),
-            crate::gas_cost::DEFAULT_MEM_CYCLES,
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
         let exit = pvm.run();
@@ -1272,7 +1272,7 @@ mod tests {
             registers,
             1000,
             Some(test_layout()),
-            crate::gas_cost::DEFAULT_MEM_CYCLES,
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
         let exit = pvm.run();
@@ -1293,7 +1293,7 @@ mod tests {
             registers,
             0,
             Some(test_layout()),
-            crate::gas_cost::DEFAULT_MEM_CYCLES,
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
         let exit = pvm.run();
@@ -1323,7 +1323,7 @@ mod tests {
             registers,
             10000,
             Some(test_layout()),
-            crate::gas_cost::DEFAULT_MEM_CYCLES,
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
         let exit = pvm.run();
@@ -1342,7 +1342,7 @@ mod tests {
             registers2,
             10000,
             Some(test_layout()),
-            crate::gas_cost::DEFAULT_MEM_CYCLES,
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
         let exit2 = pvm2.run();
@@ -1370,7 +1370,7 @@ mod tests {
             registers,
             10000,
             Some(test_layout()),
-            crate::gas_cost::DEFAULT_MEM_CYCLES,
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
         let exit = pvm.run();
@@ -1397,7 +1397,7 @@ mod tests {
             registers,
             10000,
             Some(test_layout()),
-            crate::gas_cost::DEFAULT_MEM_CYCLES,
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
         let exit = pvm.run();
@@ -1444,7 +1444,7 @@ mod tests {
             registers,
             10000,
             Some(layout),
-            crate::gas_cost::DEFAULT_MEM_CYCLES,
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
         let exit = pvm.run();
@@ -1472,7 +1472,7 @@ mod tests {
             registers,
             10000,
             Some(test_layout()),
-            crate::gas_cost::DEFAULT_MEM_CYCLES,
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
         let exit = pvm.run();
@@ -1523,7 +1523,7 @@ mod tests {
             registers,
             100_000,
             Some(test_layout()),
-            crate::gas_cost::DEFAULT_MEM_CYCLES,
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
         let exit = pvm.run();
@@ -1560,7 +1560,7 @@ mod tests {
             registers,
             10000,
             Some(test_layout()),
-            crate::gas_cost::DEFAULT_MEM_CYCLES,
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
         let exit = pvm.run();

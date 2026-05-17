@@ -22,9 +22,9 @@
 //! Reserved: R15 = JitContext pointer, RDX = scratch, RSP = native stack.
 
 use super::asm::{Assembler, Cc, Label, Reg};
-use crate::args::{self, Args};
-use crate::gas_sim::GasSimulator;
-use crate::instruction::Opcode;
+use javm_exec::args::{self, Args};
+use javm_exec::gas_sim::GasSimulator;
+use javm_exec::instruction::Opcode;
 
 /// Compute skip(i) — distance to next instruction start.
 fn compute_skip(pc: usize, bitmask: &[u8]) -> usize {
@@ -297,11 +297,11 @@ impl Compiler {
             // but ARE terminators, so the next instruction starts a new gas block.
             if raw_byte == 1 || raw_byte == 2 {
                 // Fallthrough=1, Unlikely=2
-                let skip = crate::gas_cost::skip_distance(bitmask, pc);
+                let skip = javm_exec::gas_cost::skip_distance(bitmask, pc);
                 if is_gas_start {
                     self.emit_gas_block_start(pc, &mut pending_gas, &mut gas_sim);
                 }
-                gas_sim.feed(&crate::gas_cost::FastCost {
+                gas_sim.feed(&javm_exec::gas_cost::FastCost {
                     cycles: 2,
                     decode_slots: 1,
                     exec_unit: 0,
@@ -316,7 +316,7 @@ impl Compiler {
             }
 
             // Combined opcode validation + category lookup in a single array access.
-            let (opcode, category) = match crate::instruction::decode_opcode_fast(raw_byte) {
+            let (opcode, category) = match javm_exec::instruction::decode_opcode_fast(raw_byte) {
                 Some(oc) => oc,
                 None => {
                     self.asm.mov_store32_imm(CTX, CTX_PC, pc as i32);
@@ -325,7 +325,7 @@ impl Compiler {
                     continue;
                 }
             };
-            let skip = crate::gas_cost::skip_distance(bitmask, pc);
+            let skip = javm_exec::gas_cost::skip_distance(bitmask, pc);
             let next_pc = (pc + 1 + skip) as u32;
 
             // Read register bytes once — used by both arg decoding and gas cost.
@@ -345,30 +345,30 @@ impl Compiler {
             let raw_rb = reg_byte1 >> 4;
 
             let decoded_args = match category {
-                crate::instruction::InstructionCategory::ThreeReg => Args::ThreeReg {
+                javm_exec::instruction::InstructionCategory::ThreeReg => Args::ThreeReg {
                     ra: raw_ra.min(12) as usize,
                     rb: raw_rb.min(12) as usize,
                     rd: reg_byte2.min(12) as usize,
                 },
-                crate::instruction::InstructionCategory::TwoReg => Args::TwoReg {
+                javm_exec::instruction::InstructionCategory::TwoReg => Args::TwoReg {
                     rd: raw_ra.min(12) as usize,
                     ra: raw_rb.min(12) as usize,
                 },
-                crate::instruction::InstructionCategory::TwoRegOneImm => {
+                javm_exec::instruction::InstructionCategory::TwoRegOneImm => {
                     let ra = raw_ra.min(12) as usize;
                     let rb = raw_rb.min(12) as usize;
                     let lx = if skip > 1 { (skip - 1).min(4) } else { 0 };
                     let imm = args::read_signed_imm(code, pc + 2, lx);
                     Args::TwoRegImm { ra, rb, imm }
                 }
-                crate::instruction::InstructionCategory::NoArgs => Args::None,
-                crate::instruction::InstructionCategory::OneImm => {
+                javm_exec::instruction::InstructionCategory::NoArgs => Args::None,
+                javm_exec::instruction::InstructionCategory::OneImm => {
                     let lx = skip.min(4);
                     Args::Imm {
                         imm: args::read_signed_imm(code, pc + 1, lx),
                     }
                 }
-                crate::instruction::InstructionCategory::OneRegOneImm => {
+                javm_exec::instruction::InstructionCategory::OneRegOneImm => {
                     let ra = raw_ra.min(12) as usize;
                     let lx = if skip > 1 { (skip - 1).min(4) } else { 0 };
                     Args::RegImm {
@@ -376,14 +376,14 @@ impl Compiler {
                         imm: args::read_signed_imm(code, pc + 2, lx),
                     }
                 }
-                crate::instruction::InstructionCategory::OneRegExtImm => {
+                javm_exec::instruction::InstructionCategory::OneRegExtImm => {
                     let ra = raw_ra.min(12) as usize;
                     Args::RegExtImm {
                         ra,
                         imm: args::read_le_imm(code, pc + 2, 8),
                     }
                 }
-                crate::instruction::InstructionCategory::TwoImm => {
+                javm_exec::instruction::InstructionCategory::TwoImm => {
                     let lx = (reg_byte1 as usize % 8).min(4);
                     let ly = if skip > lx + 1 {
                         (skip - lx - 1).min(4)
@@ -395,14 +395,14 @@ impl Compiler {
                         imm_y: args::read_signed_imm(code, pc + 2 + lx, ly),
                     }
                 }
-                crate::instruction::InstructionCategory::OneOffset => {
+                javm_exec::instruction::InstructionCategory::OneOffset => {
                     let lx = skip.min(4);
                     let signed_off = args::read_signed_imm(code, pc + 1, lx) as i64;
                     Args::Offset {
                         offset: (pc as i64).wrapping_add(signed_off) as u64,
                     }
                 }
-                crate::instruction::InstructionCategory::OneRegTwoImm => {
+                javm_exec::instruction::InstructionCategory::OneRegTwoImm => {
                     let ra = raw_ra.min(12) as usize;
                     let lx = ((reg_byte1 as usize / 16) % 8).min(4);
                     let ly = if skip > lx + 1 {
@@ -416,7 +416,7 @@ impl Compiler {
                         imm_y: args::read_signed_imm(code, pc + 2 + lx, ly),
                     }
                 }
-                crate::instruction::InstructionCategory::OneRegImmOffset => {
+                javm_exec::instruction::InstructionCategory::OneRegImmOffset => {
                     let ra = raw_ra.min(12) as usize;
                     let lx = ((reg_byte1 as usize / 16) % 8).min(4);
                     let ly = if skip > lx + 1 {
@@ -432,7 +432,7 @@ impl Compiler {
                         offset: (pc as i64).wrapping_add(signed_off) as u64,
                     }
                 }
-                crate::instruction::InstructionCategory::TwoRegOneOffset => {
+                javm_exec::instruction::InstructionCategory::TwoRegOneOffset => {
                     let ra = raw_ra.min(12) as usize;
                     let rb = raw_rb.min(12) as usize;
                     let lx = if skip > 1 { (skip - 1).min(4) } else { 0 };
@@ -443,7 +443,7 @@ impl Compiler {
                         offset: (pc as i64).wrapping_add(signed_off) as u64,
                     }
                 }
-                crate::instruction::InstructionCategory::TwoRegTwoImm => {
+                javm_exec::instruction::InstructionCategory::TwoRegTwoImm => {
                     let ra = raw_ra.min(12) as usize;
                     let rb = raw_rb.min(12) as usize;
                     let lx = (reg_byte2 as usize % 8).min(4);
@@ -469,7 +469,7 @@ impl Compiler {
             let is_terminator = {
                 // Fast path: feed gas simulator directly from register bytes,
                 // skipping FastCost struct construction and bitmask iteration.
-                let (term, needs_full) = crate::gas_cost::feed_gas_direct(
+                let (term, needs_full) = javm_exec::gas_cost::feed_gas_direct(
                     opcode as u8,
                     raw_ra,
                     raw_rb,
@@ -479,7 +479,7 @@ impl Compiler {
                 );
                 if needs_full {
                     // Slow path for branches/overlap/move: use full FastCost
-                    let fc = crate::gas_cost::fast_cost_lut_regs(
+                    let fc = javm_exec::gas_cost::fast_cost_lut_regs(
                         opcode as u8,
                         &decoded_args,
                         pc,
@@ -543,21 +543,21 @@ impl Compiler {
                     // Fast path: invalidate dest register based on category.
                     // The destination is the first register field for most categories.
                     match category {
-                        crate::instruction::InstructionCategory::ThreeReg => {
+                        javm_exec::instruction::InstructionCategory::ThreeReg => {
                             if let Args::ThreeReg { rd, .. } = decoded_args {
                                 self.invalidate_reg(rd);
                             }
                         }
-                        crate::instruction::InstructionCategory::TwoReg => {
+                        javm_exec::instruction::InstructionCategory::TwoReg => {
                             if let Args::TwoReg { rd, .. } = decoded_args {
                                 self.invalidate_reg(rd);
                             }
                         }
-                        crate::instruction::InstructionCategory::TwoRegOneImm
-                        | crate::instruction::InstructionCategory::OneRegOneImm
-                        | crate::instruction::InstructionCategory::OneRegExtImm
-                        | crate::instruction::InstructionCategory::OneRegTwoImm
-                        | crate::instruction::InstructionCategory::OneRegImmOffset => {
+                        javm_exec::instruction::InstructionCategory::TwoRegOneImm
+                        | javm_exec::instruction::InstructionCategory::OneRegOneImm
+                        | javm_exec::instruction::InstructionCategory::OneRegExtImm
+                        | javm_exec::instruction::InstructionCategory::OneRegTwoImm
+                        | javm_exec::instruction::InstructionCategory::OneRegImmOffset => {
                             // Destination = first register (ra in raw byte low nibble)
                             self.invalidate_reg(raw_ra.min(12) as usize);
                         }
@@ -746,7 +746,7 @@ impl Compiler {
 
         // Feed instructions 2-4 to gas sim (using decoded args, no redundant decode)
         for &(opc, a, p) in &[(op2, &args2, pc2), (op3, &args3, pc3), (op4, &args4, pc4)] {
-            let fc = crate::gas_cost::fast_cost_from_decoded(
+            let fc = javm_exec::gas_cost::fast_cost_from_decoded(
                 opc as u8,
                 a,
                 p as u32,
@@ -854,7 +854,7 @@ impl Compiler {
         }
 
         // Feed instruction 2 to gas sim (using decoded args, no redundant decode)
-        let fc = crate::gas_cost::fast_cost_from_decoded(
+        let fc = javm_exec::gas_cost::fast_cost_from_decoded(
             op2 as u8,
             &args2,
             pc2 as u32,

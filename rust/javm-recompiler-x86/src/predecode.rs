@@ -4,30 +4,9 @@
 //! upfront decode pass. The codegen then iterates a `&[PreDecodedInst]` slice,
 //! eliminating redundant `compute_skip()` and `decode_args()` calls.
 
-use crate::args::{self, Args};
-use crate::instruction::Opcode;
-
-/// Pre-decoded PVM instruction. Stores everything the codegen needs per instruction.
-#[derive(Clone, Copy, Debug)]
-pub struct PreDecodedInst {
-    /// PVM opcode (for compile_instruction match dispatch).
-    pub opcode: Opcode,
-    /// Decoded arguments (registers, immediates, offsets).
-    pub args: Args,
-    /// PVM byte offset of this instruction.
-    pub pc: u32,
-    /// PVM byte offset of the next instruction.
-    pub next_pc: u32,
-    /// Gas cost if this is a gas block start (>0), 0 otherwise.
-    /// Set by single-pass codegen via placeholder + patch.
-    pub gas_cost: u32,
-    /// Whether this instruction starts a gas metering block.
-    pub is_gas_block_start: bool,
-    /// Flat register fields for fast gas cost lookup (avoids Args enum match).
-    pub ra: u8,
-    pub rb: u8,
-    pub rd: u8,
-}
+use javm_exec::args::{self, Args};
+use javm_exec::instruction::Opcode;
+pub use javm_exec::predecoded::PreDecodedInst;
 
 /// Pre-decode all instructions from raw code+bitmask into a flat array.
 ///
@@ -177,7 +156,7 @@ pub fn compute_gas_blocks(code: &[u8], bitmask: &[u8], jump_table: &[u32]) -> Ve
             // Extract branch/jump targets from raw bytes
             let category = op.category();
             let target_pc = match category {
-                crate::instruction::InstructionCategory::OneOffset => {
+                javm_exec::instruction::InstructionCategory::OneOffset => {
                     // Jump: offset is signed, relative to pc
                     let raw = args::decode_args(code, pc, skip, category);
                     match raw {
@@ -185,14 +164,14 @@ pub fn compute_gas_blocks(code: &[u8], bitmask: &[u8], jump_table: &[u32]) -> Ve
                         _ => None,
                     }
                 }
-                crate::instruction::InstructionCategory::OneRegImmOffset => {
+                javm_exec::instruction::InstructionCategory::OneRegImmOffset => {
                     let raw = args::decode_args(code, pc, skip, category);
                     match raw {
                         Args::RegImmOffset { offset, .. } => Some(offset as usize),
                         _ => None,
                     }
                 }
-                crate::instruction::InstructionCategory::TwoRegOneOffset => {
+                javm_exec::instruction::InstructionCategory::TwoRegOneOffset => {
                     let raw = args::decode_args(code, pc, skip, category);
                     match raw {
                         Args::TwoRegOffset { offset, .. } => Some(offset as usize),

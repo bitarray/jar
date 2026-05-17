@@ -1,0 +1,17 @@
+[package]
+name = "javm-recompiler-x86"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "JAVM x86_64 recompiler (JIT): native codegen + signal-based fault handling. Linux/x86_64 only."
+
+[dependencies]
+javm-exec = { workspace = true }
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+libc = "0.2"
+memoffset = "0.9"
+
+[dev-dependencies]
+proptest = { workspace = true }

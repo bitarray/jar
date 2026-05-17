@@ -18,8 +18,8 @@
 
 use std::sync::Arc;
 
-use javm_cap::{Blake2b256, CNodeBackend, Cap, DataCap, Hash, InstanceCap, SlotIdx, image::Image};
 use javm::{CallResult, KernelAssist as _, Vm};
+use javm_cap::{Blake2b256, CNodeBackend, Cap, DataCap, Hash, InstanceCap, SlotIdx, image::Image};
 
 use crate::error::KernelError;
 use crate::kernel_assist::SigmaKernelAssist;

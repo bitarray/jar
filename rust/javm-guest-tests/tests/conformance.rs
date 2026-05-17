@@ -18,8 +18,8 @@
 //! - native == interpreter == recompiler return value.
 //! - interpreter gas == recompiler gas.
 
-use javm_cap::image::{Image, PinnedCap};
 use jar_kernel::{Block, Event, EventOutcome, Kernel};
+use javm_cap::image::{Image, PinnedCap};
 use scale::Decode;
 
 const BLOB: &[u8] = include_bytes!(env!("GUEST_TESTS_BLOB"));
@@ -58,8 +58,8 @@ fn run_interpreter(image: &Image, ep: u8) -> (u64, u64) {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod recomp {
     use super::*;
-    use javm_exec::recompiler::{DataLayout, RecompiledPvm};
     use javm_exec::{compute_mem_cycles, unpack_bitmask, ExitReason, REG_COUNT};
+    use javm_recompiler_x86::{DataLayout, RecompiledPvm};
 
     pub fn run(image: &Image, ep: u8) -> (u64, u64) {
         let bitmask = unpack_bitmask(&image.packed_bitmask, image.code.len());
