@@ -23,7 +23,10 @@ use hyperlight_host::sandbox::{GuestBinary, MultiUseSandbox, UninitializedSandbo
 use nub_arch_local::LocalArch;
 use nub_kernel::Kernel;
 
+pub use nub_arch_hyperlight_abi::{InvocationResult, InvocationSpec, PvmRegs};
 pub use nub_kernel::{CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
+
+use scale::{Decode, Encode};
 
 /// Path to the cross-compiled Hyperlight guest blob. Set by
 /// `build.rs` via [`nub_build::build`].
@@ -92,6 +95,30 @@ impl Nub {
         match &self.backend {
             Backend::Local(k) => k.state_root(),
             Backend::Hyperlight(h) => h.state_root_cache,
+        }
+    }
+
+    /// Direct-spec invocation path (Stage 2.2). Ships a pre-built
+    /// `InvocationSpec` straight into the backend, bypassing the
+    /// (still-skeletal) `Arch::invoke` trait. The Hyperlight backend
+    /// SCALE-encodes the spec and calls the guest's `nub_invoke`
+    /// guest_function; the local backend returns a stub for now
+    /// (Stage 3 will switch the local arm to the interpreter).
+    pub fn invoke_spec(&mut self, spec: &InvocationSpec) -> Result<InvocationResult> {
+        match &mut self.backend {
+            Backend::Local(_) => Ok(InvocationResult {
+                exit_reason: 4,
+                exit_arg: 0,
+                return_value: 42,
+                gas_remaining: spec.initial_gas,
+            }),
+            Backend::Hyperlight(h) => {
+                let bytes = spec.encode();
+                let result_bytes: Vec<u8> = h.sandbox.call("nub_invoke", bytes)?;
+                let (result, _consumed) = InvocationResult::decode(&result_bytes)
+                    .map_err(|e| anyhow::anyhow!("decode InvocationResult: {e:?}"))?;
+                Ok(result)
+            }
         }
     }
 }
