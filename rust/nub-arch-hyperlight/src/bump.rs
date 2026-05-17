@@ -1,15 +1,22 @@
 //! Bump-pointer arena for per-invocation kernel allocations.
 //!
-//! Backing is a single fixed-size buffer allocated once at
-//! `hyperlight_main` time from the buddy heap. Every per-invocation
-//! object (page tables, JIT code buffer, JitContext, trap table)
-//! lives in this arena. Between invocations the kernel calls
-//! [`BumpArena::reset`] to rewind the high-water mark; objects are
-//! POD and have no Drop semantics.
+//! Backing is a contiguous run of physical pages obtained from
+//! [`hyperlight_guest::prim_alloc::alloc_phys_pages`], rather than the
+//! buddy heap. The reason: anything that ends up in a page-table PTE
+//! (page tables themselves, JIT exec pages, JitContext) needs its
+//! physical address to be exactly recoverable from its virtual
+//! address, and the buddy heap lives at a VA whose PA we'd have to
+//! page-walk to recover. `prim_alloc` returns a GPA in Hyperlight's
+//! scratch region, whose VA is `scratch_base_gva + (gpa -
+//! scratch_base_gpa)` — a constant offset (see [`crate::paging`]).
 //!
-//! The arena's backing buffer is page-aligned so allocations that
-//! request `PAGE_SIZE` alignment can be satisfied without a separate
-//! page allocator.
+//! Between invocations the kernel calls [`BumpArena::reset`] to
+//! rewind the high-water mark; objects are POD with no Drop semantics.
+//!
+//! The backing is page-aligned (each call to `alloc_phys_pages`
+//! returns a page-aligned region), so allocations requesting
+//! `PAGE_SIZE` alignment are satisfied without a separate page
+//! allocator.
 //!
 //! # Concurrency
 //!
@@ -18,21 +25,26 @@
 //! `!Sync`; storing it in a `static mut` requires the caller to
 //! enforce non-reentrancy (per the Hyperlight ABI, host calls into
 //! the guest are serialised by the sandbox).
+//!
+//! Physical pages obtained from `alloc_phys_pages` cannot be released
+//! back to Hyperlight; the arena leaks them at drop. Production use
+//! is one global arena per guest, reset between invocations.
 
 #![cfg(target_os = "none")]
 
 use core::cell::Cell;
 use core::ptr::NonNull;
 
+use crate::paging;
+
 /// 4 KiB page size — the unit of alignment for page-aligned
 /// allocations (page tables, JIT exec pages, etc.).
 pub const PAGE_SIZE: usize = 4096;
 
-/// Maximum live arena size. Sized to comfortably accommodate the
-/// per-invocation working set: page tables (~64 KiB), JIT code
-/// buffer (~1 MiB), JitContext + trap table (~few hundred KiB),
-/// plus headroom.
-pub const ARENA_CAPACITY: usize = 16 * 1024 * 1024;
+/// Default arena size for smoke tests. Production per-invocation
+/// arenas (Stage C+) will use a larger capacity sized to fit
+/// page tables + JIT code + JitContext + trap table.
+pub const SMOKE_CAPACITY: usize = 64 * 1024;
 
 /// Bump arena holding a contiguous, page-aligned buffer.
 pub struct BumpArena {
@@ -45,24 +57,25 @@ pub struct BumpArena {
 }
 
 impl BumpArena {
-    /// Construct a `BumpArena` with `ARENA_CAPACITY` bytes allocated
-    /// from the global allocator. Returns `None` if the allocator
-    /// fails or the returned buffer isn't `PAGE_SIZE`-aligned.
+    /// Construct a `BumpArena` whose backing is `capacity / PAGE_SIZE`
+    /// physical pages obtained from `prim_alloc::alloc_phys_pages`.
+    /// `capacity` must be a multiple of [`PAGE_SIZE`].
     ///
-    /// The caller is expected to leak the backing buffer for the
-    /// lifetime of the guest (a `static mut BumpArena` set up at
-    /// `hyperlight_main` time, never freed).
-    pub fn new() -> Option<Self> {
-        // Allocate via the buddy heap. `Vec::with_capacity` doesn't
-        // give us page alignment, so use the raw allocator API.
-        let layout = core::alloc::Layout::from_size_align(ARENA_CAPACITY, PAGE_SIZE).ok()?;
-        // SAFETY: layout is valid (positive size, power-of-two
-        // alignment). The pointer's lifetime is the entire guest.
-        let raw = unsafe { alloc::alloc::alloc(layout) };
-        let base = NonNull::new(raw)?;
+    /// Pages cannot be returned to Hyperlight, so smoke tests that
+    /// drop the arena leak the backing. In production, a single
+    /// global arena is created at `hyperlight_main` time and
+    /// reset between invocations.
+    pub fn new(capacity: usize) -> Option<Self> {
+        assert!(capacity.is_multiple_of(PAGE_SIZE));
+        let pages = (capacity / PAGE_SIZE) as u64;
+        // SAFETY: prim_alloc::alloc_phys_pages is safe to call from
+        // ring-0 guest code; it returns a GPA backing `pages` 4 KiB pages.
+        let base_pa = unsafe { hyperlight_guest::prim_alloc::alloc_phys_pages(pages) };
+        let base_va = paging::pa_to_va(base_pa)?;
+        let base = NonNull::new(base_va as *mut u8)?;
         Some(Self {
             base,
-            capacity: ARENA_CAPACITY,
+            capacity,
             cursor: Cell::new(0),
         })
     }

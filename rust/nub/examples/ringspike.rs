@@ -132,6 +132,14 @@ fn main() -> Result<()> {
         }
     }
 
+    // -- A3 page table smoke (Stage 2.2 prep) --
+    let pt: u64 = sandbox.call("page_table_smoke", ())?;
+    println!(
+        "A3  page_table     readback={:#018x}                {}",
+        pt,
+        check(pt == 0xCAFE_BABE_DEAD_BEEF),
+    );
+
     // -- A2 int 0x80 IDT handler (Stage 2.2 prep) --
     let int80: u64 = sandbox.call("int80_smoke", ())?;
     println!(

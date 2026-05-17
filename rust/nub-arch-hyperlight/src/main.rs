@@ -33,11 +33,14 @@ extern crate hyperlight_guest_bin;
 #[cfg(target_os = "none")]
 mod bump;
 #[cfg(target_os = "none")]
+mod paging;
+#[cfg(target_os = "none")]
 mod segments;
 
 #[cfg(target_os = "none")]
 mod guest {
     use crate::bump::BumpArena;
+    use crate::paging::{self, PageTable, Perm};
     use crate::segments;
     use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -136,6 +139,75 @@ mod guest {
         after - before
     }
 
+    // === A3: page table smoke ================================================
+
+    /// Build a fresh PageTable, map a user-accessible page at a known
+    /// VA pointing at a phys page we just stuffed with a magic value,
+    /// CR3 to the new PML4, read the value back through the user VA,
+    /// CR3 back to the original. Returns the readback value.
+    ///
+    /// Expected: `0xCAFEBABE_DEADBEEF`.
+    #[guest_function("page_table_smoke")]
+    pub fn page_table_smoke() -> u64 {
+        // Arena now backs onto scratch phys pages, so PA↔VA is a
+        // constant offset and PML4 entries we install can hold real PAs.
+        let arena = match BumpArena::new(crate::bump::SMOKE_CAPACITY) {
+            Some(a) => a,
+            None => return 0xDEAD_0001,
+        };
+
+        // Stage the magic value into a phys page through its scratch VA.
+        let phys = unsafe { hyperlight_guest::prim_alloc::alloc_phys_pages(1) };
+        let magic: u64 = 0xCAFE_BABE_DEAD_BEEF;
+        let stage_va = match paging::pa_to_va(phys) {
+            Some(v) => v,
+            None => return 0xDEAD_0002,
+        };
+        // SAFETY: scratch is mapped writable kernel-only at stage_va.
+        unsafe {
+            core::ptr::write_volatile(stage_va as *mut u64, magic);
+        }
+
+        let mut pt = match PageTable::new_in(&arena) {
+            Some(p) => p,
+            None => return 0xDEAD_0003,
+        };
+
+        // Add a user-RW mapping at a VA way above any pre-existing
+        // mapping. 32 << 39 = 16 TiB — PML4 index 32, unmapped in
+        // Hyperlight's default layout.
+        const USER_VA: u64 = 32u64 << 39;
+        const _: () = assert!(USER_VA < (1u64 << 47));
+        if pt
+            .map(USER_VA, phys, PAGE_SIZE as u64, Perm::user_rw())
+            .is_none()
+        {
+            return 0xDEAD_0004;
+        }
+
+        let new_cr3 = match pt.cr3() {
+            Some(v) => v,
+            None => return 0xDEAD_0005,
+        };
+        let old_cr3 = paging::read_cr3();
+
+        // SAFETY: new_cr3 PML4 was seeded from the current PML4 so
+        // kernel code / stack / heap mappings survive the swap.
+        unsafe {
+            paging::write_cr3(new_cr3);
+        }
+
+        // SAFETY: we just installed a user-RW mapping at USER_VA → phys.
+        let readback = unsafe { core::ptr::read_volatile(USER_VA as *const u64) };
+
+        // SAFETY: restore original CR3.
+        unsafe {
+            paging::write_cr3(old_cr3);
+        }
+
+        readback
+    }
+
     // === A1: bump arena smoke ================================================
 
     /// Allocate two blocks, reset, allocate one block, return a
@@ -145,7 +217,7 @@ mod guest {
     /// rewinds the cursor).
     #[guest_function("bump_smoke")]
     pub fn bump_smoke() -> u64 {
-        let arena = match BumpArena::new() {
+        let arena = match BumpArena::new(crate::bump::SMOKE_CAPACITY) {
             Some(a) => a,
             None => return 0,
         };
