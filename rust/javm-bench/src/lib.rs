@@ -57,7 +57,7 @@ mod recomp {
     use super::*;
     use javm_cap::image::PinnedCap;
     use javm_exec::{ExitReason, REG_COUNT, compute_mem_cycles, unpack_bitmask};
-    use javm_recompiler_x86::{DataLayout, RecompiledPvm};
+    use javm_recompiler_x86::{DataLayout, FlatMemory, RecompiledPvm, populate_memory};
 
     /// Drive `image`'s `endpoint_idx` through a fresh `RecompiledPvm`
     /// (one JIT compile per call) with `gas` budget. Returns
@@ -82,13 +82,17 @@ mod recomp {
         let total_pages = (layout.mem_size as u64).div_ceil(4096) as u32;
         let mem_cycles = compute_mem_cycles(total_pages);
 
+        let mut memory =
+            FlatMemory::new(layout.mem_size).unwrap_or_else(|| panic!("FlatMemory::new failed"));
+        populate_memory(&mut memory, &layout);
+
         let mut recomp = RecompiledPvm::new(
+            &mut memory,
             &image.code,
             bitmask,
             image.jump_table.clone(),
             regs,
             gas,
-            Some(layout),
             mem_cycles,
         )
         .unwrap_or_else(|e| panic!("RecompiledPvm::new failed: {e}"));

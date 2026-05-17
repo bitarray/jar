@@ -297,8 +297,14 @@ const CTX_PAGE: usize = 4096; // JitContext page
 const HEADER_SIZE: usize = NUM_PAGES + CTX_PAGE; // perms + ctx page before guest mem
 
 impl FlatMemory {
-    /// Create a flat memory from a data layout.
-    fn new(layout: &DataLayout) -> Option<Self> {
+    /// Allocate a fresh 4 GiB virtual address space (anonymous,
+    /// `MAP_NORESERVE`) plus the leading perm-table + CTX_PAGE.
+    ///
+    /// `mem_size` sets the practical guest-address upper bound for
+    /// the `Memory` trait's bounds checks. Pages in `[0, mem_size)`
+    /// are pre-marked RW in the perm table so `populate_memory` can
+    /// overwrite them with the proper RO/RW classification.
+    pub fn new(mem_size: u32) -> Option<Self> {
         let region_size = HEADER_SIZE + FLAT_BUF_SIZE;
         // SAFETY: mmap with MAP_ANONYMOUS|MAP_PRIVATE|MAP_NORESERVE allocates virtual pages.
         // MAP_FAILED checked below.
@@ -320,40 +326,13 @@ impl FlatMemory {
         // SAFETY: HEADER_SIZE < region_size, so region + HEADER_SIZE is within the mmap.
         let buf = unsafe { region.add(HEADER_SIZE) };
 
-        // Set all pages in [0, mem_size) as read-write in the permission table.
-        // Reserved for future software bounds checking path
-        // AND for write_bytes/read_bytes which always check the permission table.
-        {
-            let num_pages = layout.mem_size.div_ceil(4096) as usize;
-            // SAFETY: perms points to the start of the mmap region; num_pages is clamped to NUM_PAGES.
-            unsafe {
-                std::ptr::write_bytes(perms, 2u8, num_pages.min(NUM_PAGES));
-            }
-        }
-        // SAFETY: buf points to guest memory base within the mmap. Data layout offsets and
-        // lengths are validated by parse_program_blob to fit within the allocated region.
+        // Pre-mark `[0, mem_size)` pages RW so `populate_memory` can
+        // refine per region. (The native ABI's read/write helpers
+        // check this table; perms here gate the cold-path API. JIT'd
+        // code path-bounds via mmap guard pages, not this table.)
+        let num_pages = mem_size.div_ceil(4096) as usize;
         unsafe {
-            if !layout.arg_data.is_empty() {
-                std::ptr::copy_nonoverlapping(
-                    layout.arg_data.as_ptr(),
-                    buf.add(layout.arg_start as usize),
-                    layout.arg_data.len(),
-                );
-            }
-            if !layout.ro_data.is_empty() {
-                std::ptr::copy_nonoverlapping(
-                    layout.ro_data.as_ptr(),
-                    buf.add(layout.ro_start as usize),
-                    layout.ro_data.len(),
-                );
-            }
-            if !layout.rw_data.is_empty() {
-                std::ptr::copy_nonoverlapping(
-                    layout.rw_data.as_ptr(),
-                    buf.add(layout.rw_start as usize),
-                    layout.rw_data.len(),
-                );
-            }
+            std::ptr::write_bytes(perms, javm_exec::perm::RW, num_pages.min(NUM_PAGES));
         }
 
         Some(Self {
@@ -361,7 +340,7 @@ impl FlatMemory {
             region_size,
             buf,
             perms,
-            mem_size: layout.mem_size,
+            mem_size,
         })
     }
 
@@ -370,40 +349,23 @@ impl FlatMemory {
         // SAFETY: buf = region + HEADER_SIZE and HEADER_SIZE >= CTX_PAGE, so sub is in-bounds.
         unsafe { self.buf.sub(CTX_PAGE) }
     }
+}
 
-    /// Mark pages beyond heap_top as PROT_NONE (guard pages).
-    /// Pages [0, heap_top) remain PROT_READ|PROT_WRITE.
-    #[allow(dead_code)]
-    fn install_guard_pages(&self, heap_top: u32) {
-        let heap_top_page = (heap_top as usize).div_ceil(4096);
-        // SAFETY: buf points to guest memory base; heap_top_page * 4096 <= FLAT_BUF_SIZE.
-        let guard_start = unsafe { self.buf.add(heap_top_page * 4096) };
-        let guard_len = FLAT_BUF_SIZE - heap_top_page * 4096;
-        if guard_len > 0 {
-            // SAFETY: guard_start..+guard_len is within the mmap'd guest memory region.
-            unsafe {
-                libc::mprotect(guard_start as *mut libc::c_void, guard_len, libc::PROT_NONE);
-            }
-        }
+/// Populate `memory` from a `DataLayout` by writing arg/ro/rw
+/// regions in place. The caller is responsible for ensuring the
+/// memory backing covers `layout.mem_size`.
+pub fn populate_memory<M: javm_exec::Memory>(memory: &mut M, layout: &DataLayout) {
+    if !layout.arg_data.is_empty() {
+        // Best-effort: ignore errors for the test/bench path (which
+        // pre-validates layout). Errors here would indicate a layout
+        // bug, not a runtime fault.
+        let _ = memory.write(layout.arg_start, &layout.arg_data);
     }
-
-    /// Make pages in [old_top, new_top) accessible after heap growth.
-    fn update_guard_pages(&self, old_top: u32, new_top: u32) {
-        let old_page = (old_top as usize).div_ceil(4096);
-        let new_page = (new_top as usize).div_ceil(4096);
-        if new_page > old_page {
-            // SAFETY: buf + old_page..new_page page range is within the mmap'd guest region.
-            let start = unsafe { self.buf.add(old_page * 4096) };
-            let len = (new_page - old_page) * 4096;
-            // SAFETY: start..+len is within the mmap'd guest memory region.
-            unsafe {
-                libc::mprotect(
-                    start as *mut libc::c_void,
-                    len,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                );
-            }
-        }
+    if !layout.ro_data.is_empty() {
+        let _ = memory.write(layout.ro_start, &layout.ro_data);
+    }
+    if !layout.rw_data.is_empty() {
+        let _ = memory.write(layout.rw_start, &layout.rw_data);
     }
 }
 
@@ -437,6 +399,13 @@ pub trait NativeMemory: javm_exec::Memory {
     /// Per-page permission table base pointer. The SIGSEGV handler
     /// reads it to classify faults (RO-write vs unmapped).
     fn host_perms_ptr(&self) -> *mut u8;
+    /// Pointer to a scratch region (≥ 4 KiB) where the recompiler
+    /// places its per-invocation `JitContext`. The layout invariant
+    /// is that the JIT'd code can reach this region via
+    /// `R15 - CTX_OFFSET`, i.e. `host_ctx_ptr() == host_buf_ptr() - CTX_PAGE`.
+    /// Today's [`FlatMemory`] satisfies this by reserving the page
+    /// immediately below the guest buffer.
+    fn host_ctx_ptr(&self) -> *mut u8;
 }
 
 impl javm_exec::Memory for FlatMemory {
@@ -639,6 +608,10 @@ impl NativeMemory for FlatMemory {
     #[inline]
     fn host_perms_ptr(&self) -> *mut u8 {
         self.perms
+    }
+    #[inline]
+    fn host_ctx_ptr(&self) -> *mut u8 {
+        self.ctx_ptr()
     }
 }
 
@@ -881,11 +854,16 @@ extern "sysv64" fn sbrk_helper(ctx: *mut JitContext, size: u64) -> u64 {
     old_top as u64
 }
 
-/// Recompiled PVM instance.
-pub struct RecompiledPvm {
+/// Recompiled PVM instance, borrowed against a `NativeMemory`
+/// owned by the caller. The lifetime parameter ties the recompiler's
+/// internal ctx pointer (which lives inside the memory's reserved
+/// CTX_PAGE slot) to the borrow.
+pub struct RecompiledPvm<'mem> {
     /// Native code buffer.
     native_code: NativeCode,
-    /// JIT context — lives inside the flat_memory mmap region, NOT heap-allocated.
+    /// JIT context — lives inside the memory's reserved CTX_PAGE
+    /// slot (at `memory.host_ctx_ptr()`). Valid for the duration of
+    /// the `'mem` borrow.
     ctx: *mut JitContext,
     /// Bitmask.
     bitmask: Vec<u8>,
@@ -897,23 +875,27 @@ pub struct RecompiledPvm {
     dispatch_table: Vec<i32>,
     /// Cached debug flag.
     debug: bool,
-    /// Flat memory for inline JIT access.
-    flat_memory: Option<FlatMemory>,
     /// Signal-based bounds checking state.
     signal_state: Option<Box<signal::SignalState>>,
     /// Trap table (owned, referenced by signal_state via raw pointer).
     _trap_table: Vec<(u32, u32)>,
+    /// Tie this struct's lifetime to the borrowed memory.
+    _memory: core::marker::PhantomData<&'mem mut ()>,
 }
 
-impl RecompiledPvm {
+impl<'mem> RecompiledPvm<'mem> {
     /// Create a new recompiled PVM from parsed program components.
-    pub fn new(
+    ///
+    /// The `memory` must already be populated (e.g. via
+    /// [`populate_memory`]) — this function just wires the JIT
+    /// against its buffer and perm pointers.
+    pub fn new<M: NativeMemory>(
+        memory: &'mem mut M,
         code: &[u8],
         bitmask: Vec<u8>,
         jump_table: Vec<u32>,
         registers: [u64; PVM_REGISTER_COUNT],
         gas: Gas,
-        data_layout: Option<DataLayout>,
         mem_cycles: u8,
     ) -> Result<Self, String> {
         let debug = {
@@ -933,15 +915,12 @@ impl RecompiledPvm {
         // Gas blocks and validation are now computed inline during the compile loop.
         // No separate pre-passes needed.
 
-        let layout = data_layout.ok_or("data_layout required for recompiler")?;
-
-        // Initialize flat memory — JitContext will live inside this region
-        let _t1 = std::time::Instant::now();
-        let flat_memory = FlatMemory::new(&layout).ok_or("failed to mmap flat memory region")?;
-        let _t_flat = _t1.elapsed();
-
-        // Place JitContext inside the flat memory region (at buf - CTX_PAGE)
-        let ctx_raw = flat_memory.ctx_ptr() as *mut JitContext;
+        // The caller owns the memory; we just wire ctx + JIT pointers
+        // against it. The ctx lives in the memory's reserved CTX_PAGE
+        // slot (see NativeMemory::host_ctx_ptr).
+        let ctx_raw = memory.host_ctx_ptr() as *mut JitContext;
+        let host_buf = memory.host_buf_ptr();
+        let host_perms = memory.host_perms_ptr();
         // SAFETY: ctx_raw points to a properly aligned CTX_PAGE region within the mmap.
         // Writing the JitContext initializes the memory that JIT code will access via R15.
         unsafe {
@@ -963,8 +942,8 @@ impl RecompiledPvm {
                 pc: 0,
                 dispatch_table: std::ptr::null(),
                 code_base: 0,
-                flat_buf: flat_memory.buf,
-                flat_perms: flat_memory.perms,
+                flat_buf: host_buf,
+                flat_perms: host_perms,
                 fast_reentry: 0,
                 _pad2: 0,
                 max_heap_pages: 0,
@@ -1062,7 +1041,6 @@ impl RecompiledPvm {
         };
 
         tracing::debug!(
-            flat_mem_us = _t_flat.as_micros() as u64,
             compile_us = _t_compile.as_micros() as u64,
             native_us = _t_native.as_micros() as u64,
             code_len = code.len(),
@@ -1081,9 +1059,9 @@ impl RecompiledPvm {
             _initial_gas: gas,
             dispatch_table,
             debug,
-            flat_memory: Some(flat_memory),
             signal_state,
             _trap_table: trap_table,
+            _memory: core::marker::PhantomData,
         };
 
         // Set dispatch_table pointer (must point to the Vec's data in Self)
@@ -1234,90 +1212,6 @@ impl RecompiledPvm {
         self.ctx().gas.max(0) as u64
     }
 
-    /// Read a byte directly from the flat buffer.
-    /// Returns None on inaccessible page.
-    pub fn read_byte(&self, addr: u32) -> Option<u8> {
-        let fm = self.flat_memory.as_ref()?;
-        let page = addr as usize / 4096;
-        if page < NUM_PAGES {
-            // SAFETY: page is bounds-checked against NUM_PAGES above; perms is valid for NUM_PAGES.
-            let perm = unsafe { *fm.perms.add(page) };
-            if perm >= 1 {
-                // SAFETY: permission check passed; addr is within the mmap'd guest memory.
-                return Some(unsafe { *fm.buf.add(addr as usize) });
-            }
-        }
-        None
-    }
-
-    /// Write a byte directly to the flat buffer.
-    /// Returns true on success, false on page fault.
-    pub fn write_byte(&mut self, addr: u32, value: u8) -> bool {
-        let fm = match self.flat_memory.as_ref() {
-            Some(f) => f,
-            None => return false,
-        };
-        let page = addr as usize / 4096;
-        if page < NUM_PAGES {
-            // SAFETY: page is bounds-checked against NUM_PAGES above; perms is valid for NUM_PAGES.
-            let perm = unsafe { *fm.perms.add(page) };
-            if perm >= 2 {
-                // SAFETY: permission check passed; addr is within the mmap'd guest memory.
-                unsafe {
-                    *fm.buf.add(addr as usize) = value;
-                }
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Read bytes directly from flat buffer. Returns None on page fault.
-    pub fn read_bytes(&self, addr: u32, len: u32) -> Option<Vec<u8>> {
-        let fm = self.flat_memory.as_ref()?;
-        let mut result = Vec::with_capacity(len as usize);
-        for i in 0..len {
-            let a = addr.wrapping_add(i);
-            let page = a as usize / 4096;
-            if page >= NUM_PAGES {
-                return None;
-            }
-            // SAFETY: page is bounds-checked against NUM_PAGES above.
-            let perm = unsafe { *fm.perms.add(page) };
-            if perm < 1 {
-                return None;
-            }
-            // SAFETY: permission check passed; a is within the mmap'd guest memory.
-            result.push(unsafe { *fm.buf.add(a as usize) });
-        }
-        Some(result)
-    }
-
-    /// Write bytes directly to flat buffer. Returns false on page fault.
-    pub fn write_bytes(&mut self, addr: u32, data: &[u8]) -> bool {
-        let fm = match self.flat_memory.as_ref() {
-            Some(f) => f,
-            None => return false,
-        };
-        for (i, &byte) in data.iter().enumerate() {
-            let a = addr.wrapping_add(i as u32);
-            let page = a as usize / 4096;
-            if page >= NUM_PAGES {
-                return false;
-            }
-            // SAFETY: page is bounds-checked against NUM_PAGES above.
-            let perm = unsafe { *fm.perms.add(page) };
-            if perm < 2 {
-                return false;
-            }
-            // SAFETY: permission check passed; a is within the mmap'd guest memory.
-            unsafe {
-                *fm.buf.add(a as usize) = byte;
-            }
-        }
-        true
-    }
-
     /// Get the program counter (last known PC on exit).
     pub fn pc(&self) -> u32 {
         self.ctx().pc
@@ -1345,10 +1239,6 @@ impl RecompiledPvm {
     }
     /// Set heap top.
     pub fn set_heap_top(&mut self, top: u32) {
-        if let Some(ref fm) = self.flat_memory {
-            let old = self.ctx().heap_top;
-            fm.update_guard_pages(old, top);
-        }
         self.ctx_mut().heap_top = top;
     }
 
@@ -1421,17 +1311,9 @@ mod tests {
         );
     }
 
-    fn test_layout() -> DataLayout {
-        DataLayout {
-            mem_size: 4096,
-            arg_start: 0,
-            arg_data: vec![],
-            ro_start: 0,
-            ro_data: vec![],
-            rw_start: 0,
-            rw_data: vec![],
-        }
-    }
+    // (`test_layout` was the pre-refactor helper; tests now construct
+    // FlatMemory directly with a 4096-byte capacity since they don't
+    // need to seed any data.)
 
     #[test]
     fn test_recompile_trap() {
@@ -1439,13 +1321,14 @@ mod tests {
         let bitmask = vec![1u8];
         let registers = [0u64; 13];
 
+        let mut memory = FlatMemory::new(4096).expect("memory");
         let mut pvm = RecompiledPvm::new(
+            &mut memory,
             &code,
             bitmask,
             vec![],
             registers,
             1000,
-            Some(test_layout()),
             javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
@@ -1459,13 +1342,14 @@ mod tests {
         let bitmask = vec![1, 0];
         let registers = [0u64; 13];
 
+        let mut memory = FlatMemory::new(4096).expect("memory");
         let mut pvm = RecompiledPvm::new(
+            &mut memory,
             &code,
             bitmask,
             vec![],
             registers,
             1000,
-            Some(test_layout()),
             javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
@@ -1479,13 +1363,14 @@ mod tests {
         let bitmask = vec![1, 0, 0, 1];
         let registers = [0u64; 13];
 
+        let mut memory = FlatMemory::new(4096).expect("memory");
         let mut pvm = RecompiledPvm::new(
+            &mut memory,
             &code,
             bitmask,
             vec![],
             registers,
             1000,
-            Some(test_layout()),
             javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
@@ -1505,13 +1390,14 @@ mod tests {
         let bitmask = vec![1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0];
         let registers = [0u64; 13];
 
+        let mut memory = FlatMemory::new(4096).expect("memory");
         let mut pvm = RecompiledPvm::new(
+            &mut memory,
             &code,
             bitmask,
             vec![],
             registers,
             1000,
-            Some(test_layout()),
             javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
@@ -1526,13 +1412,14 @@ mod tests {
         let bitmask = vec![1, 0, 0];
         let registers = [0u64; 13];
 
+        let mut memory = FlatMemory::new(4096).expect("memory");
         let mut pvm = RecompiledPvm::new(
+            &mut memory,
             &code,
             bitmask,
             vec![],
             registers,
             0,
-            Some(test_layout()),
             javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
@@ -1556,13 +1443,14 @@ mod tests {
         registers[0] = u64::MAX; // r0 = MAX
         registers[1] = 1; // r1 = 1
 
+        let mut memory = FlatMemory::new(4096).expect("memory");
         let mut pvm = RecompiledPvm::new(
+            &mut memory,
             &code,
             mk_bitmask(),
             vec![],
             registers,
             10000,
-            Some(test_layout()),
             javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
@@ -1575,13 +1463,14 @@ mod tests {
         let mut registers2 = [0u64; 13];
         registers2[0] = 5;
         registers2[1] = 3;
+        let mut memory2 = FlatMemory::new(4096).expect("memory");
         let mut pvm2 = RecompiledPvm::new(
+            &mut memory2,
             &code,
             mk_bitmask(),
             vec![],
             registers2,
             10000,
-            Some(test_layout()),
             javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
@@ -1603,13 +1492,14 @@ mod tests {
         let bitmask = vec![1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0];
         let registers = [0u64; 13];
 
+        let mut memory = FlatMemory::new(4096).expect("memory");
         let mut pvm = RecompiledPvm::new(
+            &mut memory,
             &code,
             bitmask,
             vec![],
             registers,
             10000,
-            Some(test_layout()),
             javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
@@ -1630,13 +1520,14 @@ mod tests {
         let bitmask = vec![1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0];
         let registers = [0u64; 13];
 
+        let mut memory = FlatMemory::new(4096).expect("memory");
         let mut pvm = RecompiledPvm::new(
+            &mut memory,
             &code,
             bitmask,
             vec![],
             registers,
             10000,
-            Some(test_layout()),
             javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
@@ -1677,13 +1568,15 @@ mod tests {
         let mut registers = [0u64; 13];
         registers[1] = 0xDEAD; // value to store
 
+        let mut memory = FlatMemory::new(layout.mem_size).expect("memory");
+        populate_memory(&mut memory, &layout);
         let mut pvm = RecompiledPvm::new(
+            &mut memory,
             &code,
             bitmask,
             vec![],
             registers,
             10000,
-            Some(layout),
             javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
@@ -1705,13 +1598,14 @@ mod tests {
         let bitmask = vec![1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0];
         let registers = [0u64; 13];
 
+        let mut memory = FlatMemory::new(4096).expect("memory");
         let mut pvm = RecompiledPvm::new(
+            &mut memory,
             &code,
             bitmask,
             vec![],
             registers,
             10000,
-            Some(test_layout()),
             javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
@@ -1756,13 +1650,14 @@ mod tests {
         ];
         let registers = [0u64; 13];
 
+        let mut memory = FlatMemory::new(4096).expect("memory");
         let mut pvm = RecompiledPvm::new(
+            &mut memory,
             &code,
             bitmask,
             vec![],
             registers,
             100_000,
-            Some(test_layout()),
             javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");
@@ -1793,13 +1688,14 @@ mod tests {
         let bitmask = vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0];
         let registers = [0u64; 13];
 
+        let mut memory = FlatMemory::new(4096).expect("memory");
         let mut pvm = RecompiledPvm::new(
+            &mut memory,
             &code,
             bitmask,
             vec![],
             registers,
             10000,
-            Some(test_layout()),
             javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         )
         .expect("compilation should succeed");

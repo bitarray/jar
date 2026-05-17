@@ -59,7 +59,7 @@ fn run_interpreter(image: &Image, ep: u8) -> (u64, u64) {
 mod recomp {
     use super::*;
     use javm_exec::{compute_mem_cycles, unpack_bitmask, ExitReason, REG_COUNT};
-    use javm_recompiler_x86::{DataLayout, RecompiledPvm};
+    use javm_recompiler_x86::{populate_memory, DataLayout, FlatMemory, RecompiledPvm};
 
     pub fn run(image: &Image, ep: u8) -> (u64, u64) {
         let bitmask = unpack_bitmask(&image.packed_bitmask, image.code.len());
@@ -80,13 +80,17 @@ mod recomp {
         let total_pages = (layout.mem_size as u64).div_ceil(4096) as u32;
         let mem_cycles = compute_mem_cycles(total_pages);
 
+        let mut memory =
+            FlatMemory::new(layout.mem_size).unwrap_or_else(|| panic!("FlatMemory::new failed"));
+        populate_memory(&mut memory, &layout);
+
         let mut recomp = RecompiledPvm::new(
+            &mut memory,
             &image.code,
             bitmask,
             image.jump_table.clone(),
             regs,
             GAS_BUDGET,
-            Some(layout),
             mem_cycles,
         )
         .unwrap_or_else(|e| panic!("RecompiledPvm::new failed: {e}"));
