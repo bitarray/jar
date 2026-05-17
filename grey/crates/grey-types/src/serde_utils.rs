@@ -3,8 +3,7 @@
 /// Deserialize a 0x-prefixed hex string as `Vec<u8>`.
 pub fn hex_bytes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
     let s: String = serde::Deserialize::deserialize(d)?;
-    let stripped = s.strip_prefix("0x").unwrap_or(&s);
-    hex::decode(stripped).map_err(serde::de::Error::custom)
+    crate::decode_hex(&s).map_err(serde::de::Error::custom)
 }
 
 /// Deserialize a 0x-prefixed hex string as [u8; 128] (metadata field).
