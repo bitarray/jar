@@ -9,7 +9,7 @@ description = "JAVM v3 benchmarks: byte-PVM interpreter vs JIT recompiler."
 javm-cap = { workspace = true }
 jar-kernel = { workspace = true }
 javm-exec = { workspace = true }
-scale = { workspace = true }
+scale = { workspace = true, features = ["std"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 javm-recompiler-x86 = { workspace = true }

@@ -6,9 +6,13 @@ license.workspace = true
 authors.workspace = true
 description = "JAVM capability system: caps, cnode, image, BMT, hash"
 
+[features]
+default = ["std"]
+std = ["scale/std", "blake2/std", "thiserror/std"]
+
 [dependencies]
-blake2 = { workspace = true }
-thiserror = { workspace = true }
+blake2 = { version = "0.10", default-features = false }
+thiserror = { version = "2", default-features = false }
 scale = { workspace = true }
 scale-derive = { workspace = true }
 

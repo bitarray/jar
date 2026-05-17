@@ -1,3 +1,5 @@
+#![cfg_attr(not(feature = "std"), no_std)]
+
 //! JAR v3 capability system.
 //!
 //! Foundational layer for the v3 implementation. Defines the five
@@ -11,6 +13,9 @@
 //!
 //! See `~/docs/minimum-v3/implementation/architecture.md` for the
 //! crate's role in the overall layering.
+
+#[macro_use]
+extern crate alloc;
 
 pub mod abi;
 pub mod bmt;

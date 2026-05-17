@@ -14,6 +14,7 @@
 //! provided they've maintained leaf domain separation themselves.
 
 use crate::hash::Hash;
+use alloc::vec::Vec;
 
 /// BMT primitive namespace.
 ///

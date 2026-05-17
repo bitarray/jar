@@ -13,7 +13,7 @@ use crate::cap::{CNodeCap, Cap};
 use crate::cnode::CNodeBackend;
 use crate::error::OpError;
 use crate::slot::SlotIdx;
-use std::sync::Arc;
+use alloc::sync::Arc;
 
 /// Returns true iff `idx` appears in the pinned-slot whitelist.
 fn is_pinned(pinned: &[SlotIdx], idx: SlotIdx) -> bool {

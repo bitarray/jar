@@ -14,8 +14,10 @@
 //! `Cap::Instance` values with particular Images.
 
 use crate::cnode::{CNodeBackend, CnodeHash};
-use std::fmt;
-use std::sync::Arc;
+use alloc::string::String;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::fmt;
 
 /// 32-byte digest used for all v3 cap identity / content hashes.
 pub type CapHash = [u8; 32];

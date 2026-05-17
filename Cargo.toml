@@ -51,7 +51,7 @@ javm-cap = { path = "rust/javm-cap" }
 jar-kernel = { path = "rust/jar-kernel" }
 subsoil = { path = "rust/subsoil" }
 subsoil-derive = { path = "rust/subsoil-derive" }
-scale = { path = "rust/scale", default-features = false, features = ["std"] }
+scale = { path = "rust/scale", default-features = false }
 scale-derive = { path = "rust/scale-derive" }
 
 # External dependencies

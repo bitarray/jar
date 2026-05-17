@@ -7,7 +7,7 @@ description = "RISC-V ELF to JAVM PVM transpiler"
 
 [dependencies]
 javm-cap = { workspace = true }
-scale = { workspace = true }
+scale = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-test = { workspace = true }

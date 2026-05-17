@@ -5,6 +5,8 @@
 //! The trait exists so we can swap in a mock hash for testing or
 //! a different hash function later without churning call sites.
 
+use alloc::vec::Vec;
+
 /// Hash function abstraction.
 ///
 /// Implementations are stateless types (typically unit structs);

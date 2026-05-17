@@ -24,6 +24,8 @@ use crate::bmt::Bmt;
 use crate::error::CapError;
 use crate::hash::{Blake2b256, Hash};
 use crate::slot::SlotIdx;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 /// 32-byte digest used at the cnode-backend layer. Blake2b-256-shaped.
 pub type CnodeHash = [u8; 32];

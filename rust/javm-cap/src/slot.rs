@@ -9,6 +9,7 @@
 //! to accommodate the largest cnode reachable in practice.
 
 use crate::error::CapError;
+use alloc::vec::Vec;
 use scale_derive::{Decode, Encode};
 
 /// Index into a single cnode (root or nested).

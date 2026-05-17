@@ -27,8 +27,9 @@
 
 use crate::hash::Hash;
 use crate::slot::SlotIdx;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use scale::{Decode, Encode};
-use std::collections::BTreeMap;
 
 /// Image: the program spec (code, endpoints, memory layout, slot
 /// declarations, pinned ro caps).
