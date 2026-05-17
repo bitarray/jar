@@ -175,6 +175,16 @@ fn main() -> Result<()> {
         check(c1_bytes > 0 && c1_pages > 0),
     );
 
+    // -- C2 program memory mapping (Stage 2.2 prep) --
+    let c2: u64 = sandbox.call("c2_program_mem_smoke", ())?;
+    let expected = 0xAA ^ 0xBB ^ 0xCC;
+    println!(
+        "C2  program_mem    xor={:#04x} (expected {:#04x})                  {}",
+        c2,
+        expected,
+        check(c2 == expected),
+    );
+
     // -- A1 bump arena smoke (Stage 2.2 prep) --
     let bump: u64 = sandbox.call("bump_smoke", ())?;
     let aligned = (bump >> 1) & 1 != 0;

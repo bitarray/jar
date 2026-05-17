@@ -251,6 +251,66 @@ mod guest {
         result.native_code.len() as u64
     }
 
+    // === C2: program memory mapping from DataLayout ==========================
+
+    /// Map a chunk of phys pages user-RW at a known user VA, populate
+    /// them with three regions (arg / ro / rw) via their scratch VAs,
+    /// CR3-swap to the new PT, read back the three regions through the
+    /// user VA, swap back. Returns a packed result: the XOR of the
+    /// three readback bytes — must equal 0xAA ^ 0xBB ^ 0xCC.
+    #[guest_function("c2_program_mem_smoke")]
+    pub fn c2_program_mem_smoke() -> u64 {
+        // Mini "DataLayout": three single-byte regions at distinct
+        // offsets inside a 4 KiB program memory.
+        const ARG_OFF: u32 = 0x010;
+        const RO_OFF: u32 = 0x100;
+        const RW_OFF: u32 = 0x800;
+        let mem_pa = unsafe { hyperlight_guest::prim_alloc::alloc_phys_pages(1) };
+        let stage_va = match paging::pa_to_va(mem_pa) {
+            Some(v) => v,
+            None => return 0xDEAD_0001,
+        };
+        // Populate the three bytes through the scratch VA.
+        // SAFETY: a freshly allocated 4 KiB phys page mapped writable
+        // at stage_va.
+        unsafe {
+            core::ptr::write_volatile((stage_va + ARG_OFF as u64) as *mut u8, 0xAA);
+            core::ptr::write_volatile((stage_va + RO_OFF as u64) as *mut u8, 0xBB);
+            core::ptr::write_volatile((stage_va + RW_OFF as u64) as *mut u8, 0xCC);
+        }
+
+        // Map at a user VA in our fresh PageTable.
+        let arena = match BumpArena::new(crate::bump::SMOKE_CAPACITY) {
+            Some(a) => a,
+            None => return 0xDEAD_0002,
+        };
+        let mut pt = match PageTable::new_in(&arena) {
+            Some(p) => p,
+            None => return 0xDEAD_0003,
+        };
+        const PROG_BASE: u64 = 33u64 << 39; // PML4 idx 33
+        if pt
+            .map(PROG_BASE, mem_pa, PAGE_SIZE as u64, Perm::user_rw())
+            .is_none()
+        {
+            return 0xDEAD_0004;
+        }
+        let new_cr3 = match pt.cr3() {
+            Some(v) => v,
+            None => return 0xDEAD_0005,
+        };
+        let old_cr3 = paging::read_cr3();
+        // SAFETY: new PML4 carries the kernel half from old CR3.
+        unsafe { paging::write_cr3(new_cr3) };
+        // SAFETY: PROG_BASE..+4096 was just mapped user-RW.
+        let a = unsafe { core::ptr::read_volatile((PROG_BASE + ARG_OFF as u64) as *const u8) };
+        let b = unsafe { core::ptr::read_volatile((PROG_BASE + RO_OFF as u64) as *const u8) };
+        let c = unsafe { core::ptr::read_volatile((PROG_BASE + RW_OFF as u64) as *const u8) };
+        unsafe { paging::write_cr3(old_cr3) };
+
+        (a ^ b ^ c) as u64
+    }
+
     // === C1: in-kernel JIT codegen + executable mapping ======================
 
     /// Compile a PVM program, allocate a phys page for the native
