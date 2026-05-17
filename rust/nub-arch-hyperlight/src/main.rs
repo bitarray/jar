@@ -31,7 +31,11 @@ extern crate alloc;
 extern crate hyperlight_guest_bin;
 
 #[cfg(target_os = "none")]
+mod bump;
+
+#[cfg(target_os = "none")]
 mod guest {
+    use crate::bump::BumpArena;
     use core::sync::atomic::{AtomicU64, Ordering};
 
     use hyperlight_common::vmem::{BasicMapping, MappingKind, PAGE_SIZE};
@@ -59,6 +63,38 @@ mod guest {
     #[guest_function("nub_smoke")]
     pub fn nub_smoke() -> u64 {
         42
+    }
+
+    // === A1: bump arena smoke ================================================
+
+    /// Allocate two blocks, reset, allocate one block, return a
+    /// packed status: `(first_addr_aligned << 8) | reuses_first`.
+    /// `reuses_first` is `1` iff the post-reset allocation starts at
+    /// the same offset as the first allocation (proves `reset`
+    /// rewinds the cursor).
+    #[guest_function("bump_smoke")]
+    pub fn bump_smoke() -> u64 {
+        let arena = match BumpArena::new() {
+            Some(a) => a,
+            None => return 0,
+        };
+        let a = match arena.alloc(0x100, 0x10) {
+            Some(p) => p.as_ptr() as usize,
+            None => return 0,
+        };
+        // alignment: low 4 bits must be zero.
+        let aligned = (a & 0xF) == 0;
+        let _b = match arena.alloc(0x100, 0x10) {
+            Some(p) => p.as_ptr() as usize,
+            None => return 0,
+        };
+        arena.reset();
+        let c = match arena.alloc(0x100, 0x10) {
+            Some(p) => p.as_ptr() as usize,
+            None => return 0,
+        };
+        let reuses = c == a;
+        ((aligned as u64) << 1) | (reuses as u64)
     }
 
     // === B1: read control registers ==========================================

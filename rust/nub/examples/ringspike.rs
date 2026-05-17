@@ -132,6 +132,17 @@ fn main() -> Result<()> {
         }
     }
 
+    // -- A1 bump arena smoke (Stage 2.2 prep) --
+    let bump: u64 = sandbox.call("bump_smoke", ())?;
+    let aligned = (bump >> 1) & 1 != 0;
+    let reuses = bump & 1 != 0;
+    println!(
+        "A1b bump_smoke     aligned={} reuses_after_reset={}                {}",
+        bit(aligned),
+        bit(reuses),
+        check(aligned && reuses),
+    );
+
     // -- D1 per-call latency --
     const N_CALLS: u64 = 10_000;
     let t1 = std::time::Instant::now();
