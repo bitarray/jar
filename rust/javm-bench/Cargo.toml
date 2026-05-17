@@ -12,7 +12,7 @@ javm-exec = { workspace = true }
 scale = { workspace = true, features = ["std"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
-javm-recompiler-x86 = { workspace = true }
+nub = { path = "../nub" }
 
 [build-dependencies]
 build-javm = { path = "../build-javm" }

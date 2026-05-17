@@ -4,16 +4,10 @@
 //!
 //! - `run_interpreter` — drives the byte-PVM interpreter via
 //!   `jar_kernel::Kernel::apply` (one event, empty payload).
-//! - `run_recompiler` — drives the JIT recompiler standalone with
-//!   a `DataLayout` projected from the Image's mappings. Linux
-//!   x86-64 only.
-//!
-//! The pattern duplicates
-//! `rust/javm-guest-tests/tests/conformance.rs` rather than
-//! extracting a shared crate, because the bench and conformance
-//! consumers will pull these helpers in different directions
-//! (e.g., the bench may eventually reuse one JIT compilation
-//! across iterations).
+//! - `run_recompiler` — Stage E2: ships the `Image` into a long-lived
+//!   `nub::Nub` Hyperlight sandbox (cached in a `OnceLock` so
+//!   per-iteration cost amortises the sandbox boot), drives the
+//!   in-kernel JIT path via `Nub::invoke_spec`. Linux x86-64 only.
 
 use jar_kernel::{Block, Event, EventOutcome, Kernel};
 use javm_cap::image::Image;
@@ -56,13 +50,21 @@ pub use recomp::run_recompiler;
 mod recomp {
     use super::*;
     use javm_cap::image::PinnedCap;
-    use javm_exec::{ExitReason, REG_COUNT, compute_mem_cycles, unpack_bitmask};
-    use javm_recompiler_x86::{DataLayout, FlatMemory, RecompiledPvm, populate_memory};
+    use javm_exec::{REG_COUNT, unpack_bitmask};
+    use nub::{InvocationSpec, Nub, PvmRegs};
+    use std::sync::{Mutex, OnceLock};
 
-    /// Drive `image`'s `endpoint_idx` through a fresh `RecompiledPvm`
-    /// (one JIT compile per call) with `gas` budget. Returns
-    /// `(return_value, gas_used)` reading `registers[7]` and
-    /// `gas - recomp.gas()`.
+    /// Long-lived Hyperlight sandbox shared across bench iterations.
+    /// Sandbox construction takes ~hundreds of ms; without caching,
+    /// criterion's per-iteration cost would be dominated by it.
+    fn nub() -> &'static Mutex<Nub> {
+        static NUB: OnceLock<Mutex<Nub>> = OnceLock::new();
+        NUB.get_or_init(|| Mutex::new(Nub::new_hyperlight().expect("Hyperlight sandbox")))
+    }
+
+    /// Drive `image`'s `endpoint_idx` through `Nub::invoke_spec`
+    /// (in-kernel JIT, ring 3) with `gas` budget. Returns
+    /// `(return_value, gas_used)` from the resulting `InvocationResult`.
     pub fn run_recompiler(image: &Image, endpoint_idx: u8, gas: u64) -> (u64, u64) {
         let bitmask = unpack_bitmask(&image.packed_bitmask, image.code.len());
         let endpoint = image
@@ -78,39 +80,45 @@ mod recomp {
             }
         }
 
-        let layout = build_data_layout(image);
-        let total_pages = (layout.mem_size as u64).div_ceil(4096) as u32;
-        let mem_cycles = compute_mem_cycles(total_pages);
+        let (mem_size, ro_start, ro_data, rw_start, rw_data) = build_data_layout(image);
 
-        let mut memory =
-            FlatMemory::new(layout.mem_size).unwrap_or_else(|| panic!("FlatMemory::new failed"));
-        populate_memory(&mut memory, &layout);
-
-        let mut recomp = RecompiledPvm::new(
-            &mut memory,
-            &image.code,
+        let spec = InvocationSpec {
+            code: image.code.clone(),
             bitmask,
-            image.jump_table.clone(),
-            regs,
-            gas,
-            mem_cycles,
-        )
-        .unwrap_or_else(|e| panic!("RecompiledPvm::new failed: {e}"));
-        recomp.set_pc(endpoint.entry_pc as u32);
+            jump_table: image.jump_table.clone(),
+            entry_pc: endpoint.entry_pc as u32,
+            initial_gas: gas,
+            initial_regs: PvmRegs::from_array(regs),
+            mem_size,
+            arg_start: 0,
+            arg_data: Vec::new(),
+            ro_start,
+            ro_data,
+            rw_start,
+            rw_data,
+        };
 
-        let exit = recomp.run();
-        // The endpoint trampoline halts via `ecalli 0` (REPLY/HALT).
-        // The recompiler surfaces this as `HostCall(0)`; the
-        // interpreter routes the same opcode through `EcallHandler`
-        // and we'd see `Halt` after that translation. Accept either.
-        assert!(
-            matches!(exit, ExitReason::Halt | ExitReason::HostCall(0)),
-            "endpoint {endpoint_idx}: unexpected exit {exit:?}",
+        let mut handle = nub().lock().expect("nub mutex");
+        let result = handle
+            .invoke_spec(&spec)
+            .unwrap_or_else(|e| panic!("endpoint {endpoint_idx}: invoke_spec failed: {e}"));
+
+        // The endpoint trampoline halts via `ecalli 0` (REPLY/HALT);
+        // the in-kernel JIT surfaces this as exit_reason=4 (HostCall)
+        // with exit_arg=0.
+        assert_eq!(
+            result.exit_reason, 4,
+            "endpoint {endpoint_idx}: unexpected exit_reason {} (exit_arg={})",
+            result.exit_reason, result.exit_arg,
+        );
+        assert_eq!(
+            result.exit_arg, 0,
+            "endpoint {endpoint_idx}: expected HostCall(0) trampoline halt, got HostCall({})",
+            result.exit_arg,
         );
 
-        let return_value = recomp.registers()[7];
-        let gas_used = gas - recomp.gas();
-        (return_value, gas_used)
+        let gas_used = gas.saturating_sub(result.gas_remaining);
+        (result.return_value, gas_used)
     }
 
     /// Walk the Image's memory mappings + slot contents and project
@@ -124,7 +132,7 @@ mod recomp {
     /// - `arg`: empty (no payload delivery).
     /// - `mem_size`: `max(mapping.start + mapping.size)` over all
     ///   mappings.
-    fn build_data_layout(image: &Image) -> DataLayout {
+    fn build_data_layout(image: &Image) -> (u32, u32, Vec<u8>, u32, Vec<u8>) {
         let mut mem_size: u32 = 0;
         let mut ro: Option<(u32, Vec<u8>)> = None;
         let mut rw: Option<(u32, Vec<u8>)> = None;
@@ -153,14 +161,6 @@ mod recomp {
         let (ro_start, ro_data) = ro.unwrap_or((0, Vec::new()));
         let (rw_start, rw_data) = rw.unwrap_or((0, Vec::new()));
 
-        DataLayout {
-            mem_size,
-            arg_start: 0,
-            arg_data: Vec::new(),
-            ro_start,
-            ro_data,
-            rw_start,
-            rw_data,
-        }
+        (mem_size, ro_start, ro_data, rw_start, rw_data)
     }
 }
