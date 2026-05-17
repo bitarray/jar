@@ -156,6 +156,14 @@ fn main() -> Result<()> {
         check(r3 == 0x1337),
     );
 
+    // -- B2 javm-recompiler-x86 link smoke (Stage 2.2 prep) --
+    let rl: u64 = sandbox.call("recomp_link_smoke", ())?;
+    println!(
+        "B2  recomp_link    native_bytes={:<3}                              {}",
+        rl,
+        check(rl > 0),
+    );
+
     // -- A1 bump arena smoke (Stage 2.2 prep) --
     let bump: u64 = sandbox.call("bump_smoke", ())?;
     let aligned = (bump >> 1) & 1 != 0;

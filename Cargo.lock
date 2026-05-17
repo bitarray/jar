@@ -1510,6 +1510,8 @@ dependencies = [
  "hyperlight-common",
  "hyperlight-guest",
  "hyperlight-guest-bin",
+ "javm-exec",
+ "javm-recompiler-x86",
 ]
 
 [[package]]

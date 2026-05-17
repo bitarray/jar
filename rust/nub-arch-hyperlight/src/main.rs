@@ -211,6 +211,46 @@ mod guest {
         readback
     }
 
+    // === B2: javm-recompiler-x86 link smoke ==================================
+
+    /// Compile a single-instruction PVM program with the in-kernel
+    /// recompiler. Returns the size of the produced native code
+    /// (must be > 0 to prove the codegen path runs).
+    ///
+    /// Doesn't *execute* the code yet — that's C3. This smoke only
+    /// validates that javm-recompiler-x86 links cleanly into the
+    /// no_std guest binary and the codegen path runs to completion.
+    #[guest_function("recomp_link_smoke")]
+    pub fn recomp_link_smoke() -> u64 {
+        // PVM `trap` (opcode 0); bitmask says PC=0 is an instruction start.
+        let code = [0u8];
+        let bitmask = [1u8];
+        let jump_table: [u32; 0] = [];
+
+        let helpers = javm_recompiler_x86::codegen::HelperFns {
+            mem_read_u8: 0,
+            mem_read_u16: 0,
+            mem_read_u32: 0,
+            mem_read_u64: 0,
+            mem_write_u8: 0,
+            mem_write_u16: 0,
+            mem_write_u32: 0,
+            mem_write_u64: 0,
+            sbrk_helper: 0,
+        };
+
+        let compiler = javm_recompiler_x86::codegen::Compiler::new(
+            &bitmask,
+            &jump_table,
+            helpers,
+            code.len(),
+            false, // use_mmap (irrelevant in no_std; always Vec)
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
+        );
+        let result = compiler.compile(&code, &bitmask);
+        result.native_code.len() as u64
+    }
+
     // === A4: ring-3 entry smoke ==============================================
 
     /// Drop to ring 3, run a 7-byte stub that does

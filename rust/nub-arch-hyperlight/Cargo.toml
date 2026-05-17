@@ -17,6 +17,12 @@ path = "src/main.rs"
 hyperlight-guest = { version = "0.15", default-features = false }
 hyperlight-guest-bin = { version = "0.15", default-features = false, features = ["macros"] }
 hyperlight-common = { version = "0.15", default-features = false }
+# Built no_std; supplies the codegen + assembler used by the
+# in-kernel JIT path (Stages C1+). Direct path deps (not workspace
+# inheritance) because cargo forbids overriding workspace
+# `default-features` from the member crate.
+javm-recompiler-x86 = { path = "../javm-recompiler-x86", default-features = false }
+javm-exec = { path = "../javm-exec", default-features = false }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hyperlight)'] }
