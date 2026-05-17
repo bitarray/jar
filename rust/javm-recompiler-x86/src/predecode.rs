@@ -4,6 +4,8 @@
 //! upfront decode pass. The codegen then iterates a `&[PreDecodedInst]` slice,
 //! eliminating redundant `compute_skip()` and `decode_args()` calls.
 
+use alloc::vec;
+use alloc::vec::Vec;
 use javm_exec::args::{self, Args};
 use javm_exec::instruction::Opcode;
 pub use javm_exec::predecoded::PreDecodedInst;

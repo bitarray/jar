@@ -1,3 +1,11 @@
+#![cfg_attr(not(feature = "std"), no_std)]
+// In the no_std build, several helpers (mem_*, sbrk_helper, FlatMemory
+// support constants) are unused because their consumers — RecompiledPvm,
+// compile_code, FlatMemory — are gated behind `feature = "std"`. They
+// remain in the crate because the in-kernel JIT path that lives in
+// `nub-arch-hyperlight` calls them directly via function pointers.
+#![cfg_attr(not(feature = "std"), allow(dead_code))]
+
 //! PVM recompiler — compiles PVM bytecode to native x86-64 machine code.
 //!
 //! This provides the same semantics as the interpreter but with significantly
@@ -31,18 +39,27 @@
 //! - Uses the `trap_table` (sorted native PC → PVM PC pairs) to map faulting
 //!   address back to PVM state for page fault reporting
 
+extern crate alloc;
+
+#[cfg(feature = "std")]
+use alloc::string::String;
+use alloc::vec::Vec;
+
 pub mod asm;
 pub mod codegen;
 pub mod predecode;
-pub mod signal;
 
+#[cfg(feature = "std")]
 use codegen::{Compiler, HelperFns};
+#[cfg(feature = "std")]
 use javm_exec::ExitReason;
+#[cfg(feature = "std")]
 use javm_exec::{Gas, REG_COUNT as PVM_REGISTER_COUNT};
 
 /// No-op tracing shim. v2 javm uses the `tracing` crate for diagnostic
 /// logs; javm-exec doesn't pull that in. Diagnostic logs in the JIT
 /// driver are pure diagnostics, so we no-op them here.
+#[cfg(feature = "std")]
 mod tracing {
     macro_rules! debug {
         ($($tt:tt)*) => {{}};
@@ -100,6 +117,7 @@ pub struct JitContext {
 ///
 /// The allocation includes a trailing PROT_NONE guard page that catches
 /// wild forward jumps or buffer overruns past the end of the JIT code.
+#[cfg(feature = "std")]
 pub struct NativeCode {
     pub ptr: *mut u8,
     pub len: usize,
@@ -107,13 +125,16 @@ pub struct NativeCode {
     pub mmap_cap: usize,
 }
 
+#[cfg(feature = "std")]
 const PAGE_SIZE: usize = 4096;
 
 /// Round `n` up to the next multiple of `PAGE_SIZE`.
+#[cfg(feature = "std")]
 fn page_align(n: usize) -> usize {
     (n + PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
 }
 
+#[cfg(feature = "std")]
 impl NativeCode {
     /// Allocate an executable code buffer and copy machine code into it.
     /// This is the fallback path; the mmap-direct path skips the copy.
@@ -181,6 +202,7 @@ impl NativeCode {
     }
 }
 
+#[cfg(feature = "std")]
 impl Drop for NativeCode {
     fn drop(&mut self) {
         // SAFETY: ptr and mmap_cap correspond to a valid mmap allocation from new().
@@ -191,6 +213,7 @@ impl Drop for NativeCode {
 }
 
 /// Result of standalone code compilation (no execution context).
+#[cfg(feature = "std")]
 pub struct CompiledCode {
     pub native_code: NativeCode,
     pub dispatch_table: Vec<i32>,
@@ -200,6 +223,7 @@ pub struct CompiledCode {
 
 /// Compile PVM code to native x86-64 without creating an execution context.
 /// Returns the compiled artifacts that can be stored in a CodeCap.
+#[cfg(feature = "std")]
 pub fn compile_code(
     code: &[u8],
     bitmask: &[u8],
@@ -242,7 +266,9 @@ pub fn compile_code(
 
 // SAFETY: NativeCode holds a raw pointer to mmap'd memory. It's only accessed from
 // the thread that owns the kernel (cooperative scheduling).
+#[cfg(feature = "std")]
 unsafe impl Send for NativeCode {}
+#[cfg(feature = "std")]
 unsafe impl Sync for NativeCode {}
 
 /// Flat memory backing buffer for inline JIT memory access.
@@ -267,6 +293,7 @@ pub struct DataLayout {
     pub rw_data: Vec<u8>,
 }
 
+#[cfg(feature = "std")]
 pub struct FlatMemory {
     /// Base of the entire mmap'd region.
     region: *mut u8,
@@ -288,7 +315,9 @@ pub struct FlatMemory {
 // region is owned by FlatMemory itself (no external aliasing) and
 // access is single-threaded (driven by the kernel's cooperative
 // scheduler).
+#[cfg(feature = "std")]
 unsafe impl Send for FlatMemory {}
+#[cfg(feature = "std")]
 unsafe impl Sync for FlatMemory {}
 
 /// Guest address-space size. Reduced from 4 GiB to 64 MiB so many
@@ -304,6 +333,7 @@ const NUM_PAGES: usize = FLAT_BUF_SIZE / 4096;
 const CTX_PAGE: usize = 4096; // JitContext page
 const HEADER_SIZE: usize = NUM_PAGES + CTX_PAGE; // perms + ctx page before guest mem
 
+#[cfg(feature = "std")]
 impl FlatMemory {
     /// Allocate a fresh 4 GiB virtual address space (anonymous,
     /// `MAP_NORESERVE`) plus the leading perm-table + CTX_PAGE.
@@ -383,6 +413,7 @@ pub fn populate_memory<M: javm_exec::Memory>(memory: &mut M, layout: &DataLayout
     }
 }
 
+#[cfg(feature = "std")]
 impl Drop for FlatMemory {
     fn drop(&mut self) {
         // SAFETY: region and region_size correspond to a valid mmap allocation from new().
@@ -422,6 +453,7 @@ pub trait NativeMemory: javm_exec::Memory {
     fn host_ctx_ptr(&self) -> *mut u8;
 }
 
+#[cfg(feature = "std")]
 impl javm_exec::Memory for FlatMemory {
     #[inline]
     fn read_u8(&self, addr: u32) -> Option<u8> {
@@ -610,6 +642,7 @@ impl javm_exec::Memory for FlatMemory {
     }
 }
 
+#[cfg(feature = "std")]
 impl NativeMemory for FlatMemory {
     #[inline]
     fn host_buf_ptr(&self) -> *mut u8 {
@@ -668,7 +701,7 @@ unsafe fn flat_read(ctx: &JitContext, addr: u32, len: usize) -> u64 {
             1 => *ptr as u64,
             2 => u16::from_le_bytes([*ptr, *ptr.add(1)]) as u64,
             4 => u32::from_le_bytes([*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)]) as u64,
-            8 => u64::from_le_bytes(std::ptr::read_unaligned(ptr as *const [u8; 8])),
+            8 => u64::from_le_bytes(core::ptr::read_unaligned(ptr as *const [u8; 8])),
             _ => 0,
         }
     }
@@ -678,7 +711,11 @@ unsafe fn flat_read(ctx: &JitContext, addr: u32, len: usize) -> u64 {
 unsafe fn flat_write(ctx: &JitContext, addr: u32, bytes: &[u8]) {
     // SAFETY: caller verified permissions via flat_check_perm; addr..+len is within flat_buf.
     unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ctx.flat_buf.add(addr as usize), bytes.len());
+        core::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            ctx.flat_buf.add(addr as usize),
+            bytes.len(),
+        );
     }
 }
 
@@ -847,6 +884,7 @@ extern "sysv64" fn sbrk_helper(ctx: *mut JitContext, size: u64) -> u64 {
     }
 
     // Make newly accessible pages PROT_READ|PROT_WRITE.
+    #[cfg(feature = "std")]
     if !ctx.flat_buf.is_null() {
         let old_page = (old_top as usize).div_ceil(4096);
         let new_page = (new_top_u32 as usize).div_ceil(4096);
@@ -872,6 +910,7 @@ extern "sysv64" fn sbrk_helper(ctx: *mut JitContext, size: u64) -> u64 {
 /// owned by the caller. The lifetime parameter ties the recompiler's
 /// internal ctx pointer (which lives inside the memory's reserved
 /// CTX_PAGE slot) to the borrow.
+#[cfg(feature = "std")]
 pub struct RecompiledPvm<'mem> {
     /// Native code buffer.
     native_code: NativeCode,
@@ -889,14 +928,13 @@ pub struct RecompiledPvm<'mem> {
     dispatch_table: Vec<i32>,
     /// Cached debug flag.
     debug: bool,
-    /// Signal-based bounds checking state.
-    signal_state: Option<Box<signal::SignalState>>,
-    /// Trap table (owned, referenced by signal_state via raw pointer).
+    /// Trap table (kept for trap-table addressing; signal handling lives elsewhere).
     _trap_table: Vec<(u32, u32)>,
     /// Tie this struct's lifetime to the borrowed memory.
     _memory: core::marker::PhantomData<&'mem mut ()>,
 }
 
+#[cfg(feature = "std")]
 impl<'mem> RecompiledPvm<'mem> {
     /// Create a new recompiled PVM from parsed program components.
     ///
@@ -1053,21 +1091,9 @@ impl<'mem> RecompiledPvm<'mem> {
         };
         let _t_native = _t3.elapsed();
 
-        // Signal-based bounds checking: build trap table and install guard pages.
+        // Trap table is kept around for diagnostics; SIGSEGV-based bounds
+        // checking was removed in B1 (the in-kernel path doesn't use it).
         let trap_table = compile_result.trap_table;
-        let signal_state = {
-            signal::ensure_installed();
-            let ss = Box::new(signal::SignalState {
-                code_start: native_code.ptr as usize,
-                code_end: native_code.ptr as usize + native_code.len,
-                exit_label_addr: native_code.ptr as usize
-                    + compile_result.exit_label_offset as usize,
-                ctx_ptr: ctx_raw,
-                trap_table_ptr: trap_table.as_ptr(),
-                trap_table_len: trap_table.len(),
-            });
-            Some(ss)
-        };
 
         tracing::debug!(
             compile_us = _t_compile.as_micros() as u64,
@@ -1088,7 +1114,6 @@ impl<'mem> RecompiledPvm<'mem> {
             _initial_gas: gas,
             dispatch_table,
             debug,
-            signal_state,
             _trap_table: trap_table,
             _memory: core::marker::PhantomData,
         };
@@ -1128,19 +1153,15 @@ impl<'mem> RecompiledPvm<'mem> {
                 self.ctx_mut().exit_reason = 0xDEAD;
             }
 
-            // Execute native code — set up signal state for SIGSEGV handler
-            if let Some(ref mut ss) = self.signal_state {
-                signal::SIGNAL_STATE.with(|cell| cell.set(&mut **ss as *mut _));
-            }
-
+            // Execute native code. SIGSEGV-based bounds checking was removed
+            // in B1; the in-kernel path doesn't need it and out-of-bounds
+            // guest accesses still trap via the explicit helper path.
             let entry = self.native_code.entry();
             // SAFETY: entry points to valid JIT-compiled x86-64 code; self.ctx is a valid
             // JitContext pointer. The native code follows the sysv64 calling convention.
             unsafe {
                 entry(self.ctx);
             }
-
-            signal::SIGNAL_STATE.with(|cell| cell.set(std::ptr::null_mut()));
 
             if self.debug {
                 tracing::debug!(
@@ -1278,7 +1299,7 @@ impl<'mem> RecompiledPvm<'mem> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use codegen::{

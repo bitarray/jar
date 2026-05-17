@@ -21,6 +21,9 @@
 //!
 //! Reserved: R15 = JitContext pointer, RDX = scratch, RSP = native stack.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::asm::{Assembler, Cc, Label, Reg};
 use javm_exec::args::{self, Args};
 use javm_exec::gas_sim::GasSimulator;
@@ -209,10 +212,16 @@ impl Compiler {
         let estimated_native = code_len * 3 + 8192;
         // Labels: one per PC (dense array) + fixed overhead for exit/oog/stubs.
         let estimated_labels = code_len + 1024;
+        #[cfg(feature = "std")]
         let mut asm = if use_mmap {
             Assembler::with_mmap(estimated_native, estimated_labels)
                 .unwrap_or_else(|_| Assembler::with_capacity(estimated_native, estimated_labels))
         } else {
+            Assembler::with_capacity(estimated_native, estimated_labels)
+        };
+        #[cfg(not(feature = "std"))]
+        let mut asm = {
+            let _ = use_mmap;
             Assembler::with_capacity(estimated_native, estimated_labels)
         };
         // Reserve label 0 so label IDs start from 1 (for consistency with fixed labels).
@@ -609,22 +618,37 @@ impl Compiler {
 
         // If the assembler uses mmap, finalize directly to executable memory
         // (no copy). Otherwise fall back to Vec-based finalize.
-        match self.asm.finalize_executable() {
-            Ok((ptr, code_len, mmap_cap)) => {
-                // Wrap in a Vec that will munmap on drop (via NativeCode).
-                // We return a CompileResult with a dummy native_code — the caller
-                // should use native_mmap_ptr/len/cap instead.
-                CompileResult {
-                    native_code: Vec::new(), // not used when mmap_ptr is set
+        #[cfg(feature = "std")]
+        {
+            match self.asm.finalize_executable() {
+                Ok((ptr, code_len, mmap_cap)) => {
+                    // Wrap in a Vec that will munmap on drop (via NativeCode).
+                    // We return a CompileResult with a dummy native_code — the caller
+                    // should use native_mmap_ptr/len/cap instead.
+                    CompileResult {
+                        native_code: Vec::new(), // not used when mmap_ptr is set
+                        dispatch_table,
+                        trap_table,
+                        exit_label_offset,
+                        mmap_ptr: Some(ptr),
+                        mmap_len: code_len,
+                        mmap_cap,
+                    }
+                }
+                Err(_) => CompileResult {
+                    native_code: self.asm.finalize(),
                     dispatch_table,
                     trap_table,
                     exit_label_offset,
-                    mmap_ptr: Some(ptr),
-                    mmap_len: code_len,
-                    mmap_cap,
-                }
+                    mmap_ptr: None,
+                    mmap_len: 0,
+                    mmap_cap: 0,
+                },
             }
-            Err(_) => CompileResult {
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            CompileResult {
                 native_code: self.asm.finalize(),
                 dispatch_table,
                 trap_table,
@@ -632,7 +656,7 @@ impl Compiler {
                 mmap_ptr: None,
                 mmap_len: 0,
                 mmap_cap: 0,
-            },
+            }
         }
     }
 
@@ -2954,7 +2978,7 @@ impl Compiler {
 
         // Per-gas-block OOG stubs: compact format — load PC into SCRATCH,
         // jump to shared handler. Saves ~6 bytes per stub vs inline PC store.
-        let stubs = std::mem::take(&mut self.oog_stubs);
+        let stubs = core::mem::take(&mut self.oog_stubs);
         for (label, pvm_pc, _cost) in &stubs {
             self.asm.bind_label(*label);
             self.asm.mov_ri32(SCRATCH, *pvm_pc);

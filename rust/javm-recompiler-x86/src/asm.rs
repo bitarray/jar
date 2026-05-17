@@ -12,6 +12,11 @@
 //! guards. Callers must ensure capacity via `ensure_capacity()` before emitting.
 //! Vec length is synced via `set_len(write_pos)` only at finalization boundaries.
 
+#[cfg(feature = "std")]
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
 /// Instruction buffer: accumulates x86 bytes in a u128 register, then flushes
 /// with a single bulk write. Avoids per-byte memory stores.
 #[derive(Clone, Copy)]
@@ -143,6 +148,7 @@ enum CodeBuf {
     Vec(Vec<u8>),
     /// mmap-backed (PROT_READ|PROT_WRITE). Avoids the copy in NativeCode::new
     /// by writing directly to the buffer that will become executable.
+    #[cfg(feature = "std")]
     Mmap { ptr: *mut u8, capacity: usize },
 }
 
@@ -214,6 +220,7 @@ impl Assembler {
     /// Create with an mmap-backed code buffer. Code is written directly to the
     /// mmap region during compilation. After finalize_mmap(), the buffer is
     /// mprotected to PROT_READ|PROT_EXEC — no copy needed.
+    #[cfg(feature = "std")]
     pub fn with_mmap(code_capacity: usize, label_capacity: usize) -> Result<Self, String> {
         // SAFETY: mmap with MAP_ANONYMOUS|MAP_PRIVATE creates a fresh private mapping.
         // Returns MAP_FAILED on error, checked below.
@@ -269,6 +276,7 @@ impl Assembler {
                     code.set_len(0);
                 }
             }
+            #[cfg(feature = "std")]
             CodeBuf::Mmap { ptr, capacity } => {
                 // For mmap buffers, mremap to a larger size
                 let new_cap = (*capacity + additional).next_power_of_two();
@@ -342,7 +350,7 @@ impl Assembler {
         debug_assert!(offset + 4 <= self.write_pos);
         // SAFETY: offset + 4 <= write_pos <= capacity, so buf.add(offset) is in bounds.
         unsafe {
-            std::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), self.buf.add(offset), 4);
+            core::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), self.buf.add(offset), 4);
         }
     }
 
@@ -389,8 +397,8 @@ impl Assembler {
         // the actual instruction bytes.
         unsafe {
             let p = self.buf.add(self.write_pos);
-            std::ptr::write_unaligned(p as *mut u64, ib.out as u64);
-            std::ptr::write_unaligned(p.add(8) as *mut u64, (ib.out >> 64) as u64);
+            core::ptr::write_unaligned(p as *mut u64, ib.out as u64);
+            core::ptr::write_unaligned(p.add(8) as *mut u64, (ib.out >> 64) as u64);
         }
         self.write_pos += len;
     }
@@ -401,7 +409,7 @@ impl Assembler {
         // SAFETY: write_pos + 4 <= capacity asserted; unaligned write is valid
         // for any byte-aligned pointer within the buffer.
         unsafe {
-            std::ptr::write_unaligned(self.buf.add(self.write_pos) as *mut u32, v.to_le());
+            core::ptr::write_unaligned(self.buf.add(self.write_pos) as *mut u32, v.to_le());
         }
         self.write_pos += 4;
     }
@@ -412,7 +420,7 @@ impl Assembler {
         debug_assert!(self.write_pos + 8 <= self.capacity);
         // SAFETY: write_pos + 8 <= capacity asserted; unaligned write is valid.
         unsafe {
-            std::ptr::write_unaligned(self.buf.add(self.write_pos) as *mut u64, v.to_le());
+            core::ptr::write_unaligned(self.buf.add(self.write_pos) as *mut u64, v.to_le());
         }
         self.write_pos += 8;
     }
@@ -423,7 +431,7 @@ impl Assembler {
         // SAFETY: write_pos + 4 <= capacity asserted; unaligned write is valid.
         // The cast chain converts i32 → LE bytes → u32 for write_unaligned.
         unsafe {
-            std::ptr::write_unaligned(
+            core::ptr::write_unaligned(
                 self.buf.add(self.write_pos) as *mut u32,
                 v.to_le_bytes().as_ptr().cast::<u32>().read(),
             );
@@ -1695,6 +1703,9 @@ impl Assembler {
 
     /// Sync Vec length with the write cursor. Call before accessing `self.code` directly.
     pub fn sync_len(&mut self) {
+        // `if let` here is irrefutable in no_std builds (CodeBuf::Mmap is std-only),
+        // but stays for symmetry with std builds where it matters.
+        #[cfg_attr(not(feature = "std"), allow(irrefutable_let_patterns))]
         if let CodeBuf::Vec(code) = &mut self.code_buf {
             // SAFETY: write_pos <= code.capacity() (maintained by emission guards).
             unsafe {
@@ -1714,7 +1725,7 @@ impl Assembler {
             let rel32 = rel as i32;
             // SAFETY: fixup.offset + 4 <= write_pos (fixup was recorded during emission).
             unsafe {
-                std::ptr::copy_nonoverlapping(
+                core::ptr::copy_nonoverlapping(
                     rel32.to_le_bytes().as_ptr(),
                     self.buf.add(fixup.offset),
                     4,
@@ -1732,19 +1743,20 @@ impl Assembler {
                 unsafe {
                     code.set_len(self.write_pos);
                 }
-                std::mem::take(code)
+                core::mem::take(code)
             }
+            #[cfg(feature = "std")]
             CodeBuf::Mmap { ptr, capacity } => {
                 // Copy from mmap to Vec (fallback path)
                 let mut v = Vec::with_capacity(self.write_pos);
                 // SAFETY: ptr is valid for write_pos bytes (written during compilation).
                 // munmap frees the original mapping after the copy.
                 unsafe {
-                    std::ptr::copy_nonoverlapping(*ptr, v.as_mut_ptr(), self.write_pos);
+                    core::ptr::copy_nonoverlapping(*ptr, v.as_mut_ptr(), self.write_pos);
                     v.set_len(self.write_pos);
                     libc::munmap(*ptr as *mut libc::c_void, *capacity);
                 }
-                *ptr = std::ptr::null_mut();
+                *ptr = core::ptr::null_mut();
                 *capacity = 0;
                 v
             }
@@ -1755,6 +1767,7 @@ impl Assembler {
     /// trailing PROT_NONE guard page, and return the executable buffer pointer
     /// and length. Only works for mmap-backed buffers.
     /// Returns (ptr, code_len, mmap_capacity) for NativeCode construction.
+    #[cfg(feature = "std")]
     pub fn finalize_executable(&mut self) -> Result<(*mut u8, usize, usize), String> {
         self.resolve_fixups();
         match &mut self.code_buf {
@@ -1836,13 +1849,15 @@ impl Assembler {
         match &self.code_buf {
             CodeBuf::Vec(v) => v.as_slice(),
             // SAFETY: ptr is valid for write_pos bytes (the mmap region).
+            #[cfg(feature = "std")]
             CodeBuf::Mmap { ptr, .. } => unsafe {
-                std::slice::from_raw_parts(*ptr, self.write_pos)
+                core::slice::from_raw_parts(*ptr, self.write_pos)
             },
         }
     }
 }
 
+#[cfg(feature = "std")]
 impl Drop for Assembler {
     fn drop(&mut self) {
         if let CodeBuf::Mmap { ptr, capacity } = self.code_buf

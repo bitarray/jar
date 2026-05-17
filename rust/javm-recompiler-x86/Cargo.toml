@@ -4,14 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "JAVM x86_64 recompiler (JIT): native codegen + signal-based fault handling. Linux/x86_64 only."
+description = "JAVM x86_64 recompiler (JIT): native codegen. no_std-compatible bytes-producer; mmap-backed code buffers + SIGSEGV fault handling require the `std` feature."
+
+[features]
+default = ["std"]
+# `std`: host-targeted build — includes mmap-backed code/data
+# buffers and the SIGSEGV signal handler. Disable for no_std
+# embedding (e.g. nub-arch-hyperlight in-kernel).
+std = ["javm-exec/std", "dep:libc"]
 
 [dependencies]
-javm-exec = { workspace = true }
-
-[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
-libc = "0.2"
+javm-exec = { path = "../javm-exec", default-features = false }
 memoffset = "0.9"
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
