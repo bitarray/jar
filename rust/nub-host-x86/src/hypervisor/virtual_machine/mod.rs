@@ -31,12 +31,6 @@ use crate::sandbox::trace::TraceContext as SandboxTraceContext;
 /// KVM (Kernel-based Virtual Machine) functionality (linux)
 #[cfg(kvm)]
 pub(crate) mod kvm;
-/// MSHV (Microsoft Hypervisor) functionality (linux)
-#[cfg(mshv3)]
-pub(crate) mod mshv;
-/// WHP (Windows Hypervisor Platform) functionality (windows)
-#[cfg(target_os = "windows")]
-pub(crate) mod whp;
 
 /// Shared x86-64 helpers for hardware interrupt support (MSHV and WHP)
 #[cfg(feature = "hw-interrupts")]
@@ -47,39 +41,17 @@ static AVAILABLE_HYPERVISOR: OnceLock<Option<HypervisorType>> = OnceLock::new();
 /// Returns which type of hypervisor is available, if any
 pub fn get_available_hypervisor() -> &'static Option<HypervisorType> {
     AVAILABLE_HYPERVISOR.get_or_init(|| {
-        cfg_if::cfg_if! {
-            if #[cfg(all(kvm, mshv3))] {
-                // If both features are enabled, we need to determine hypervisor at runtime.
-                // Currently /dev/kvm and /dev/mshv cannot exist on the same machine, so the first one
-                // that works is guaranteed to be correct.
-                if mshv::is_hypervisor_present() {
-                    Some(HypervisorType::Mshv)
-                } else if kvm::is_hypervisor_present() {
-                    Some(HypervisorType::Kvm)
-                } else {
-                    None
-                }
-            } else if #[cfg(kvm)] {
-                if kvm::is_hypervisor_present() {
-                    Some(HypervisorType::Kvm)
-                } else {
-                    None
-                }
-            } else if #[cfg(mshv3)] {
-                if mshv::is_hypervisor_present() {
-                    Some(HypervisorType::Mshv)
-                } else {
-                    None
-                }
-            } else if #[cfg(target_os = "windows")] {
-                if whp::is_hypervisor_present() {
-                    Some(HypervisorType::Whp)
-                } else {
-                    None
-                }
+        #[cfg(kvm)]
+        {
+            if kvm::is_hypervisor_present() {
+                Some(HypervisorType::Kvm)
             } else {
                 None
             }
+        }
+        #[cfg(not(kvm))]
+        {
+            None
         }
     })
 }
@@ -96,29 +68,16 @@ pub fn is_hypervisor_present() -> bool {
 pub(crate) enum HypervisorType {
     #[cfg(kvm)]
     Kvm,
-
-    #[cfg(mshv3)]
-    Mshv,
-
-    #[cfg(target_os = "windows")]
-    Whp,
 }
 
-/// Minimum XSAVE buffer size: 512 bytes legacy region + 64 bytes header.
-/// Only used by MSHV and WHP which use compacted XSAVE format and need to
-/// validate buffer size before accessing XCOMP_BV.
-#[cfg(any(mshv3, target_os = "windows"))]
-pub(crate) const XSAVE_MIN_SIZE: usize = 576;
-
-/// Standard XSAVE buffer size (4KB) used by KVM and MSHV.
-/// WHP queries the required size dynamically.
-#[cfg(all(any(kvm, mshv3), test, not(feature = "i686-guest")))]
+/// Standard XSAVE buffer size (4KB) used by KVM.
+#[cfg(all(kvm, test, not(feature = "i686-guest")))]
 pub(crate) const XSAVE_BUFFER_SIZE: usize = 4096;
 
 // Compiler error if no hypervisor type is available (not applicable on aarch64 yet)
-#[cfg(not(any(kvm, mshv3, target_os = "windows", target_arch = "aarch64")))]
+#[cfg(not(any(kvm, target_arch = "aarch64")))]
 compile_error!(
-    "No hypervisor type is available for the current platform. Please enable either the `kvm` or `mshv3` cargo feature."
+    "No hypervisor type is available for the current platform. Please enable the `kvm` cargo feature."
 );
 
 /// The various reasons a VM's vCPU can exit
@@ -284,12 +243,6 @@ pub enum HypervisorError {
     #[cfg(kvm)]
     #[error("KVM error: {0}")]
     KvmError(#[from] kvm_ioctls::Error),
-    #[cfg(mshv3)]
-    #[error("MSHV error: {0}")]
-    MshvError(#[from] mshv_ioctls::MshvError),
-    #[cfg(target_os = "windows")]
-    #[error("Windows error: {0}")]
-    WindowsError(#[from] windows_result::Error),
 }
 
 /// Trait for single-vCPU VMs. Provides a common interface for basic VM operations.
@@ -360,23 +313,10 @@ pub(crate) trait VirtualMachine: Debug + Send {
 
 #[cfg(test)]
 mod tests {
-
     #[test]
-    // TODO: add support for testing on WHP
-    #[cfg(target_os = "linux")]
+    #[cfg(kvm)]
     fn is_hypervisor_present() {
         use std::path::Path;
-
-        cfg_if::cfg_if! {
-            if #[cfg(all(kvm, mshv3))] {
-                assert_eq!(Path::new("/dev/kvm").exists() || Path::new("/dev/mshv").exists(), super::is_hypervisor_present());
-            } else if #[cfg(kvm)] {
-                assert_eq!(Path::new("/dev/kvm").exists(), super::is_hypervisor_present());
-            } else if #[cfg(mshv3)] {
-                assert_eq!(Path::new("/dev/mshv").exists(), super::is_hypervisor_present());
-            } else {
-                assert!(!super::is_hypervisor_present());
-            }
-        }
+        assert_eq!(Path::new("/dev/kvm").exists(), super::is_hypervisor_present());
     }
 }

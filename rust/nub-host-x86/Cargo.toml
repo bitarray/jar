@@ -1,7 +1,6 @@
 # Vendored from hyperlight-host 0.15.0 (Apache-2.0).
-# Stage F.1: byte-for-byte copy, no behavior changes. Subsequent stages
-# strip non-KVM backends, snapshot/restore, optional features, and
-# disable CoW marking.
+# Stage F.2.1: dropped MSHV + WHP + Windows surrogate. KVM is the only
+# supported hypervisor backend now.
 
 [package]
 name = "nub-host-x86"
@@ -23,7 +22,6 @@ crashdump = [
 ]
 default = [
     "kvm",
-    "mshv3",
     "build-metadata",
 ]
 executable_heap = []
@@ -45,10 +43,6 @@ mem_profile = [
     "dep:framehop",
     "dep:fallible-iterator",
     "hyperlight-common/mem_profile",
-]
-mshv3 = [
-    "dep:mshv-bindings",
-    "dep:mshv-ioctls",
 ]
 nanvix-unstable = [
     "i686-guest",
@@ -97,26 +91,6 @@ vmm-sys-util = "0.15.0"
 [target."cfg(unix)".dependencies]
 kvm-bindings = { version = "0.14", features = ["fam-wrappers"], optional = true }
 kvm-ioctls = { version = "0.24", optional = true }
-mshv-bindings = { version = "0.6", optional = true }
-mshv-ioctls = { version = "0.6", optional = true }
-
-[target."cfg(windows)".dependencies]
-lazy_static = "1.4.0"
-rust-embed = { version = "8.11.0", features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
-windows = { version = "0.62", features = [
-    "Win32_Foundation",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Threading",
-    "Win32_System_JobObjects",
-    "Win32_Security",
-    "Win32_System_Diagnostics_Debug",
-    "Win32_System_Hypervisor",
-    "Win32_System_Memory",
-    "Win32_System_SystemServices",
-] }
-windows-result = "0.4"
-windows-sys = { version = "0.61", features = ["Win32"] }
-windows-version = "0.1"
 
 [build-dependencies]
 anyhow = "1.0.102"
@@ -125,3 +99,9 @@ cfg_aliases = "0.2.1"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+# `cfg(mshv3)` was a cfg_alias in upstream; after F2.1 dropped the
+# MSHV backend the alias is gone but residual `#[cfg(mshv3)]` /
+# `#[cfg(not(mshv3))]` markers in source still serve as gates
+# (always-false). They'll be stripped opportunistically as other
+# stages touch each file.
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(mshv3)'] }
