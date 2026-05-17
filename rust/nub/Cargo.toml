@@ -1,0 +1,13 @@
+[package]
+name = "nub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Host driver for the nub-prototype Hyperlight + ring-0 spike"
+
+[dependencies]
+anyhow = "1"
+hyperlight-host = "0.15"
+
+[build-dependencies]
+build-nub = { path = "../build-nub" }
