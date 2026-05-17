@@ -291,8 +291,16 @@ pub struct FlatMemory {
 unsafe impl Send for FlatMemory {}
 unsafe impl Sync for FlatMemory {}
 
-const FLAT_BUF_SIZE: usize = 1 << 32; // 4GB virtual
-const NUM_PAGES: usize = 1 << 20; // 2^20 = 1M pages
+/// Guest address-space size. Reduced from 4 GiB to 64 MiB so many
+/// concurrent JIT instances (e.g. `cargo test` running with default
+/// parallelism) can each grab a low-VA reservation under MAP_32BIT.
+/// PVM programs in the current bench/test corpus all use << 64 MiB.
+/// When a guest needs more we'll switch FlatMemory to
+/// `MAP_FIXED_NOREPLACE` at a chosen low address and reserve a
+/// single process-wide pool.
+const FLAT_BUF_SIZE: usize = 1 << 24; // 16 MiB virtual
+/// Perm-table size, one byte per 4 KiB page covering FLAT_BUF_SIZE.
+const NUM_PAGES: usize = FLAT_BUF_SIZE / 4096;
 const CTX_PAGE: usize = 4096; // JitContext page
 const HEADER_SIZE: usize = NUM_PAGES + CTX_PAGE; // perms + ctx page before guest mem
 
@@ -306,6 +314,12 @@ impl FlatMemory {
     /// overwrite them with the proper RO/RW classification.
     pub fn new(mem_size: u32) -> Option<Self> {
         let region_size = HEADER_SIZE + FLAT_BUF_SIZE;
+        // `MAP_32BIT` forces the kernel to pick an address in [0, 2 GiB).
+        // Combined with FLAT_BUF_SIZE = 1 GiB, the entire reservation
+        // ends below 2^32, satisfying the `NativeMemory` low-4 GiB
+        // invariant (guest 32-bit addresses == host pointers via
+        // zero-extension).
+        //
         // SAFETY: mmap with MAP_ANONYMOUS|MAP_PRIVATE|MAP_NORESERVE allocates virtual pages.
         // MAP_FAILED checked below.
         let region = unsafe {
@@ -313,7 +327,7 @@ impl FlatMemory {
                 std::ptr::null_mut(),
                 region_size,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_ANONYMOUS | libc::MAP_PRIVATE | libc::MAP_NORESERVE,
+                libc::MAP_ANONYMOUS | libc::MAP_PRIVATE | libc::MAP_NORESERVE | libc::MAP_32BIT,
                 -1,
                 0,
             )
@@ -921,6 +935,21 @@ impl<'mem> RecompiledPvm<'mem> {
         let ctx_raw = memory.host_ctx_ptr() as *mut JitContext;
         let host_buf = memory.host_buf_ptr();
         let host_perms = memory.host_perms_ptr();
+
+        // Enforce the NativeMemory low-4 GiB invariant: the entire
+        // guest backing must sit at host VA < 2^32 so guest 32-bit
+        // addresses equal host pointers via zero-extension. The
+        // planned R15-drop in codegen relies on this; even with R15
+        // base addressing today, keeping the invariant tight
+        // ensures the substrate doesn't drift.
+        debug_assert!(
+            (host_buf as usize)
+                .checked_add(memory.host_buf_len())
+                .is_some_and(|end| end <= 1usize << 32),
+            "NativeMemory backing must end below 2^32 (host_buf_ptr=0x{:x}, len=0x{:x})",
+            host_buf as usize,
+            memory.host_buf_len(),
+        );
         // SAFETY: ctx_raw points to a properly aligned CTX_PAGE region within the mmap.
         // Writing the JitContext initializes the memory that JIT code will access via R15.
         unsafe {
