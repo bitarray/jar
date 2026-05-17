@@ -23,6 +23,10 @@ hyperlight-common = { version = "0.15", default-features = false }
 # `default-features` from the member crate.
 javm-recompiler-x86 = { path = "../javm-recompiler-x86", default-features = false }
 javm-exec = { path = "../javm-exec", default-features = false }
+scale = { path = "../scale", default-features = false }
+scale-derive = { workspace = true }
+# Wire types shared between guest and host (D1+).
+nub-arch-hyperlight-abi = { path = "../nub-arch-hyperlight-abi", default-features = false }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hyperlight)'] }

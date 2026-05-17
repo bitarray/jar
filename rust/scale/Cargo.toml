@@ -7,10 +7,12 @@ description = "SCALE codec without compact encoding. Fixed-width LE integers, u3
 
 [features]
 default = ["std"]
-std = []
+std = ["thiserror/std"]
 
 [dependencies]
-thiserror = { workspace = true }
+# Direct dep with `default-features = false` so we can switch
+# thiserror on/off via the `std` feature for no_std consumers.
+thiserror = { version = "2", default-features = false }
 scale-derive = { workspace = true }
 
 [dev-dependencies]

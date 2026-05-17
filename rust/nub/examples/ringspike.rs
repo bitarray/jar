@@ -27,6 +27,8 @@
 
 use anyhow::Result;
 use hyperlight_host::sandbox::{GuestBinary, SandboxConfiguration, UninitializedSandbox};
+use nub_arch_hyperlight_abi::{InvocationResult, InvocationSpec, PvmRegs};
+use scale::{Decode, Encode};
 
 const NUB_ARCH_HYPERLIGHT_BLOB_PATH: &str = env!("NUB_ARCH_HYPERLIGHT_BLOB");
 
@@ -212,6 +214,26 @@ fn main() -> Result<()> {
         c4_reason,
         c4_arg,
         check(c4_reason == 3),
+    );
+
+    // -- D1 nub_invoke RPC (Stage 2.2 prep) --
+    let spec = InvocationSpec {
+        // PVM `ecalli 99`: opcode 10, single-byte imm.
+        code: vec![10u8, 99],
+        bitmask: vec![1u8, 0],
+        jump_table: vec![],
+        entry_pc: 0,
+        initial_gas: 1_000,
+        initial_regs: PvmRegs::zeros(),
+    };
+    let result_bytes: Vec<u8> = sandbox.call("nub_invoke", spec.encode())?;
+    let (d1, _consumed) = InvocationResult::decode(&result_bytes)
+        .map_err(|e| anyhow::anyhow!("decode InvocationResult: {e:?}"))?;
+    println!(
+        "D1  nub_invoke     exit_reason={} exit_arg={}                       {}",
+        d1.exit_reason,
+        d1.exit_arg,
+        check(d1.exit_reason == 4 && d1.exit_arg == 99),
     );
 
     // -- A1 bump arena smoke (Stage 2.2 prep) --

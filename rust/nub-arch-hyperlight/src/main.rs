@@ -47,7 +47,10 @@ mod guest {
     use crate::paging::{self, PageTable, Perm};
     use crate::ring3;
     use crate::segments;
+    use alloc::vec::Vec;
     use core::sync::atomic::{AtomicU64, Ordering};
+    use nub_arch_hyperlight_abi::{InvocationResult, InvocationSpec};
+    use scale::{Decode, Encode};
 
     use hyperlight_common::vmem::{BasicMapping, MappingKind, PAGE_SIZE};
     use hyperlight_guest_bin::exception::arch::{Context, ExceptionInfo, HANDLERS};
@@ -253,6 +256,59 @@ mod guest {
         result.native_code.len() as u64
     }
 
+    // === D1: nub_invoke entry point ==========================================
+
+    /// SCALE-decode the host's `InvocationSpec` from `spec_bytes`,
+    /// run the embedded PVM program through the in-kernel JIT path,
+    /// SCALE-encode an `InvocationResult` and return it.
+    ///
+    /// This is the host-facing RPC the `Nub::invoke` driver calls
+    /// (D2). The wire types live in [`crate::invoke_abi`].
+    #[guest_function("nub_invoke")]
+    pub fn nub_invoke(spec_bytes: Vec<u8>) -> Vec<u8> {
+        let spec = match InvocationSpec::decode(&spec_bytes) {
+            Ok((s, _consumed)) => s,
+            Err(_) => {
+                // Malformed input — return an error sentinel.
+                return InvocationResult {
+                    exit_reason: u32::MAX,
+                    exit_arg: 1,
+                    return_value: 0,
+                    gas_remaining: 0,
+                }
+                .encode();
+            }
+        };
+
+        let info = unsafe {
+            crate::jit_run::run_pvm_full(
+                &spec.code,
+                &spec.bitmask,
+                &spec.jump_table,
+                spec.initial_gas as i64,
+                spec.entry_pc,
+                spec.initial_regs.into_array(),
+            )
+        };
+
+        let result = match info {
+            Some(i) => InvocationResult {
+                exit_reason: i.exit_reason,
+                exit_arg: i.exit_arg,
+                return_value: i.reg_a0,
+                gas_remaining: i.gas_remaining.max(0) as u64,
+            },
+            None => InvocationResult {
+                exit_reason: u32::MAX,
+                exit_arg: 2,
+                return_value: 0,
+                gas_remaining: 0,
+            },
+        };
+
+        result.encode()
+    }
+
     // === C4: in-kernel #PF handler with trap table lookup ====================
 
     /// Run a PVM program whose first instruction is `LoadU8 r0,
@@ -406,7 +462,7 @@ mod guest {
         }
 
         // Allocate enough phys pages to fit the code.
-        let n_pages = native.len().div_ceil(PAGE_SIZE as usize);
+        let n_pages = native.len().div_ceil(PAGE_SIZE);
         let exec_pa = unsafe { hyperlight_guest::prim_alloc::alloc_phys_pages(n_pages as u64) };
         let stage_va = match paging::pa_to_va(exec_pa) {
             Some(v) => v,
@@ -428,7 +484,7 @@ mod guest {
             None => return 0xDEAD_0004,
         };
         const USER_CODE_VA: u64 = 32u64 << 39;
-        let pages_bytes = (n_pages * PAGE_SIZE as usize) as u64;
+        let pages_bytes = (n_pages * PAGE_SIZE) as u64;
         if pt
             .map(USER_CODE_VA, exec_pa, pages_bytes, Perm::user_rx())
             .is_none()

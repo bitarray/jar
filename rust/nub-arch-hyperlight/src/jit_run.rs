@@ -147,6 +147,24 @@ pub unsafe fn run_pvm(
     jump_table: &[u32],
     initial_gas: i64,
 ) -> Option<ExitInfo> {
+    // SAFETY: caller upholds preconditions.
+    unsafe { run_pvm_full(code, bitmask, jump_table, initial_gas, 0, [0u64; 13]) }
+}
+
+/// Like [`run_pvm`] but also seeds the entry PC and initial PVM
+/// registers — used by the `nub_invoke` host-callable entry point
+/// (D1+).
+///
+/// # Safety
+/// Same as [`run_pvm`].
+pub unsafe fn run_pvm_full(
+    code: &[u8],
+    bitmask: &[u8],
+    jump_table: &[u32],
+    initial_gas: i64,
+    entry_pc: u32,
+    initial_regs: [u64; 13],
+) -> Option<ExitInfo> {
     assert_eq!(code.len(), bitmask.len());
 
     // ---- compile -----------------------------------------------------------
@@ -224,7 +242,7 @@ pub unsafe fn run_pvm(
     // SAFETY: ctx_kva points to a freshly mapped ctx page with the
     // right alignment for JitContext.
     unsafe {
-        (*ctx).regs = [0u64; 13];
+        (*ctx).regs = initial_regs;
         (*ctx).gas = initial_gas;
         (*ctx).exit_reason = 0;
         (*ctx).exit_arg = 0;
@@ -236,8 +254,8 @@ pub unsafe fn run_pvm(
         (*ctx).bb_starts = core::ptr::null();
         (*ctx).bb_len = bitmask.len() as u32;
         (*ctx)._pad1 = 0;
-        (*ctx).entry_pc = 0;
-        (*ctx).pc = 0;
+        (*ctx).entry_pc = entry_pc;
+        (*ctx).pc = entry_pc;
         (*ctx).dispatch_table = dispatch_table_va as *const i32;
         (*ctx).code_base = JIT_VA;
         (*ctx).flat_buf = core::ptr::null_mut();
