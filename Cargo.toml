@@ -35,6 +35,12 @@ exclude = [
     "grey",
     "spec/crypto-ffi",
     "spec/fuzz",
+    # Vendored guest-bin (`#![no_std]` with its own panic_handler +
+    # global_allocator). Only consumed by `nub-arch-hyperlight` on
+    # the `cfg(target_os = "none")` cross-compile; excluding it from
+    # the workspace prevents `cargo build --workspace` (host target)
+    # from trying to link a no_std panic_impl into a std world.
+    "rust/nub-arch-guestbin",
 ]
 
 [workspace.package]

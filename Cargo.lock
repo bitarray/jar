@@ -983,8 +983,6 @@ dependencies = [
 [[package]]
 name = "hyperlight-guest-bin"
 version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bc349c61dc771769308a2079d398488cd0c52d9bdcad8cf633922b288dd2aed"
 dependencies = [
  "buddy_system_allocator",
  "flatbuffers",
