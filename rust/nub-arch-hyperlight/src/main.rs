@@ -32,10 +32,13 @@ extern crate hyperlight_guest_bin;
 
 #[cfg(target_os = "none")]
 mod bump;
+#[cfg(target_os = "none")]
+mod segments;
 
 #[cfg(target_os = "none")]
 mod guest {
     use crate::bump::BumpArena;
+    use crate::segments;
     use core::sync::atomic::{AtomicU64, Ordering};
 
     use hyperlight_common::vmem::{BasicMapping, MappingKind, PAGE_SIZE};
@@ -63,6 +66,74 @@ mod guest {
     #[guest_function("nub_smoke")]
     pub fn nub_smoke() -> u64 {
         42
+    }
+
+    // === A2: int 0x80 IDT handler ===========================================
+
+    /// Counter incremented by the int 0x80 handler. Tests inspect
+    /// this after triggering `int 0x80` to verify the patched IDT
+    /// is being used.
+    static INT80_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Rust-side body of the int 0x80 handler. Called by the asm
+    /// stub `nub_int80_stub` (see `global_asm!` below) after
+    /// register state is saved. Increments the counter and returns;
+    /// the asm stub restores state and `iretq`s.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn nub_int80_rust() {
+        INT80_COUNTER.fetch_add(1, Ordering::SeqCst);
+    }
+
+    // Assembly stub for vector 0x80. Saves caller-saved registers,
+    // calls `nub_int80_rust`, restores, `iretq`s. Tagged `.global`
+    // so the IDT can take its address.
+    core::arch::global_asm!(
+        ".global nub_int80_stub",
+        "nub_int80_stub:",
+        "    push rax",
+        "    push rcx",
+        "    push rdx",
+        "    push rdi",
+        "    push rsi",
+        "    push r8",
+        "    push r9",
+        "    push r10",
+        "    push r11",
+        // Align stack to 16 before sysv64 call (we've pushed 9*8 = 72
+        // bytes; 72 + 8 (return addr already on stack from int) = 80;
+        // 80 mod 16 = 0. Good).
+        "    call nub_int80_rust",
+        "    pop r11",
+        "    pop r10",
+        "    pop r9",
+        "    pop r8",
+        "    pop rsi",
+        "    pop rdi",
+        "    pop rdx",
+        "    pop rcx",
+        "    pop rax",
+        "    iretq",
+    );
+
+    unsafe extern "C" {
+        fn nub_int80_stub();
+    }
+
+    /// Install our `int 0x80` handler at DPL=3 and trigger the
+    /// interrupt from ring 0. Returns the counter delta — should be 1.
+    #[guest_function("int80_smoke")]
+    pub fn int80_smoke() -> u64 {
+        let before = INT80_COUNTER.load(Ordering::SeqCst);
+        // SAFETY: nub_int80_stub is a well-formed handler stub.
+        unsafe {
+            let _idt = segments::install_dpl3_handler(0x80, nub_int80_stub as *const () as u64);
+        }
+        // SAFETY: int 0x80 dispatches through the IDT entry we just installed.
+        unsafe {
+            core::arch::asm!("int 0x80", options(nostack, preserves_flags));
+        }
+        let after = INT80_COUNTER.load(Ordering::SeqCst);
+        after - before
     }
 
     // === A1: bump arena smoke ================================================

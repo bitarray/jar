@@ -132,6 +132,14 @@ fn main() -> Result<()> {
         }
     }
 
+    // -- A2 int 0x80 IDT handler (Stage 2.2 prep) --
+    let int80: u64 = sandbox.call("int80_smoke", ())?;
+    println!(
+        "A2  int80_smoke    delta={}                                       {}",
+        int80,
+        check(int80 == 1),
+    );
+
     // -- A1 bump arena smoke (Stage 2.2 prep) --
     let bump: u64 = sandbox.call("bump_smoke", ())?;
     let aligned = (bump >> 1) & 1 != 0;
