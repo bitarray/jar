@@ -33,6 +33,8 @@ extern crate hyperlight_guest_bin;
 #[cfg(target_os = "none")]
 mod bump;
 #[cfg(target_os = "none")]
+mod jit_run;
+#[cfg(target_os = "none")]
 mod paging;
 #[cfg(target_os = "none")]
 mod ring3;
@@ -249,6 +251,27 @@ mod guest {
         );
         let result = compiler.compile(&code, &bitmask);
         result.native_code.len() as u64
+    }
+
+    // === C3: run JIT'd code at ring 3 ========================================
+
+    /// Compile a PVM `ecalli 42` program, run it at ring 3 through
+    /// the in-kernel JIT path, return `(exit_reason << 32) | exit_arg`.
+    ///
+    /// Expected: `(4 << 32) | 42` — exit_reason=4 (HostCall),
+    /// exit_arg=42 (the ecalli imm).
+    #[guest_function("c3_jit_run_smoke")]
+    pub fn c3_jit_run_smoke() -> u64 {
+        // PVM `ecalli 42`: opcode 10, imm 42.
+        let code = [10u8, 42];
+        let bitmask = [1u8, 0];
+        let jump_table: [u32; 0] = [];
+
+        let info = match unsafe { crate::jit_run::run_pvm(&code, &bitmask, &jump_table, 1_000) } {
+            Some(i) => i,
+            None => return 0xDEAD_BEEF_DEAD_BEEF,
+        };
+        ((info.exit_reason as u64) << 32) | (info.exit_arg as u64)
     }
 
     // === C2: program memory mapping from DataLayout ==========================

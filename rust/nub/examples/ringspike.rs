@@ -26,7 +26,7 @@
 //!   an error.
 
 use anyhow::Result;
-use hyperlight_host::sandbox::{GuestBinary, UninitializedSandbox};
+use hyperlight_host::sandbox::{GuestBinary, SandboxConfiguration, UninitializedSandbox};
 
 const NUB_ARCH_HYPERLIGHT_BLOB_PATH: &str = env!("NUB_ARCH_HYPERLIGHT_BLOB");
 
@@ -35,9 +35,16 @@ fn main() -> Result<()> {
     println!("guest blob: {NUB_ARCH_HYPERLIGHT_BLOB_PATH}");
     println!();
 
+    // Bump scratch to 8 MiB so all the per-smoke phys-page allocations
+    // (per-call BumpArenas + per-test JIT/ctx/stack pages) fit without
+    // exhausting Hyperlight's bump-pointer phys allocator. Default is
+    // 0x48000 (= 72 pages) which is enough for the original ring-0
+    // smokes but not the in-kernel JIT path that lands in Stage C.
+    let mut cfg = SandboxConfiguration::default();
+    cfg.set_scratch_size(8 * 1024 * 1024);
     let uninit = UninitializedSandbox::new(
         GuestBinary::FilePath(NUB_ARCH_HYPERLIGHT_BLOB_PATH.to_string()),
-        None,
+        Some(cfg),
     )?;
     let mut sandbox = uninit.evolve()?;
 
@@ -183,6 +190,17 @@ fn main() -> Result<()> {
         c2,
         expected,
         check(c2 == expected),
+    );
+
+    // -- C3 in-kernel JIT at ring 3 (Stage 2.2 prep) --
+    let c3: u64 = sandbox.call("c3_jit_run_smoke", ())?;
+    let c3_reason = c3 >> 32;
+    let c3_arg = c3 & 0xFFFF_FFFF;
+    println!(
+        "C3  jit_run        exit_reason={} exit_arg={}                       {}",
+        c3_reason,
+        c3_arg,
+        check(c3_reason == 4 && c3_arg == 42),
     );
 
     // -- A1 bump arena smoke (Stage 2.2 prep) --
