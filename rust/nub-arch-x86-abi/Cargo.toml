@@ -3,12 +3,14 @@ name = "nub-arch-x86-abi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Wire types shared between the nub-arch-x86 guest and its host driver (SCALE-encoded InvocationSpec / InvocationResult)."
+description = "Wire types shared between the nub-arch-x86 guest and its host driver. Migrating from SCALE to rkyv: both derives coexist transitionally; the rkyv path becomes the wire codec in Stages E+F."
 
 [features]
 default = ["std"]
-std = ["scale/std"]
+std = ["scale/std", "rkyv/std"]
 
 [dependencies]
 scale = { path = "../scale", default-features = false }
 scale-derive = { workspace = true }
+rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
+bytecheck = { version = "0.8", default-features = false }

@@ -1,16 +1,14 @@
-//! Wire format for the host → guest "run this PVM program" RPC.
+//! Wire format for the host ↔ guest "run this PVM program" RPC.
 //!
-//! The host crate (`nub`) SCALE-encodes an `InvocationSpec` and
-//! ships it via the `nub_invoke` guest_function; the guest decodes,
-//! runs, encodes an `InvocationResult` and returns it.
+//! The host crate (`nub`) encodes an `InvocationSpec` and ships it
+//! via the `nub_invoke` guest_function; the guest decodes, runs,
+//! encodes an `InvocationResult` and returns it.
 //!
-//! The spec is deliberately a stripped-down view of `javm_cap::Image`
-//! for Stage 2.2: no cnode / pinned-slots / mappings (Stage 3 work).
-//! It carries exactly what `jit_run::run_pvm` needs:
-//!
-//! * `code` + `bitmask` + `jump_table` — the recompiler input;
-//! * `entry_pc` + `initial_regs` — what to seed before the JIT runs;
-//! * `initial_gas` — the gas budget.
+//! Transitional codec state (during the FB+SCALE → rkyv migration):
+//! both `scale::{Encode, Decode}` and `rkyv::{Archive, Serialize}`
+//! are derived on the wire types. Active callers still use SCALE;
+//! the rkyv path becomes the live encoder/decoder in Stages E + F,
+//! and the SCALE derives are removed in Stage H.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -21,8 +19,12 @@ use scale_derive::{Decode, Encode};
 
 /// PVM registers per Image — fixed-width 13-element tuple. SCALE
 /// doesn't auto-impl `Decode` for `[u64; N]`, so we use a tuple
-/// struct.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
+/// struct (kept for now; once SCALE leaves we can simplify to a
+/// real array).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, rkyv::Archive, rkyv::Serialize,
+)]
+#[rkyv(derive(Debug, PartialEq, Eq))]
 pub struct PvmRegs(
     pub u64,
     pub u64,
@@ -56,7 +58,8 @@ impl PvmRegs {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, rkyv::Archive, rkyv::Serialize)]
+#[rkyv(derive(Debug))]
 pub struct InvocationSpec {
     pub code: Vec<u8>,
     pub bitmask: Vec<u8>,
@@ -79,7 +82,10 @@ pub struct InvocationSpec {
     pub rw_data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, rkyv::Archive, rkyv::Serialize,
+)]
+#[rkyv(derive(Debug, PartialEq, Eq))]
 pub struct InvocationResult {
     pub exit_reason: u32,
     pub exit_arg: u32,
