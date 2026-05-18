@@ -25,21 +25,24 @@
 //!
 //! ## PA ↔ VA translation
 //!
-//! Hyperlight's guest layout has two address-translation regimes:
+//! Three address-translation regimes (Stage F kernel relocation):
 //!
-//! * **Low memory (kernel code, heap, host I/O buffers)** is
-//!   identity-mapped: `VA == PA`. With CoW removed (Stage F.CoW) heap
-//!   pages stay identity-mapped on first write — there's no remap to
-//!   a scratch frame anymore — so talc allocations satisfy `PA == VA`
-//!   for the lifetime of the allocation.
+//! * **Kernel half (code, PEB, heap, init-data, talc allocations)**
+//!   lives at high VA `[KERNEL_HIGH_BASE, scratch_base_gva)` and is
+//!   backed by low GPAs `[KERNEL_BASE_GPA, scratch_base_gpa)`. The
+//!   linker (`link.x`) places the binary at `KERNEL_HIGH_BASE =
+//!   0xFFFFFFFF80000000`; the host's initial PT
+//!   (`rust/nub-host-kvm/src/sandbox/snapshot.rs::from_env`) installs
+//!   the mapping `gva = KERNEL_HIGH_BASE + (gpa - KERNEL_BASE_GPA)`.
 //! * **Scratch region (allocations from `prim_alloc::alloc_phys_pages`,
-//!   TSS/IDT, the existing kernel PML4)** is mapped at a high VA via a
+//!   TSS/IDT, the existing kernel PML4)** is mapped at high VA via a
 //!   constant offset:
 //!   ```text
 //!     gva = scratch_base_gva + (gpa - scratch_base_gpa)
 //!   ```
-//!
-//! [`va_to_pa`] / [`pa_to_va`] handle both modes.
+//! * **User half (low VA, 0..512 GiB)** is owned by the per-invocation
+//!   PT we build for ring-3 PVM programs; ring-0 paging helpers below
+//!   return `None` for these addresses.
 
 #![cfg(target_os = "none")]
 
@@ -57,6 +60,14 @@ use hyperlight_guest::layout::{scratch_base_gpa, scratch_base_gva};
 /// allocations (page tables, JIT exec pages, etc.).
 pub const PAGE_SIZE: usize = 4096;
 
+/// Low GPA where the host loads the kernel ELF. Matches
+/// `SandboxMemoryLayout::BASE_ADDRESS` in `nub-host-kvm`.
+const KERNEL_BASE_GPA: u64 = 0x1000;
+/// High GVA the kernel is linked at. Matches the `. =` directive in
+/// [`rust/nub-arch-x86/link.x`](../link.x) and
+/// `SandboxMemoryLayout::KERNEL_HIGH_BASE` in `nub-host-kvm`.
+const KERNEL_HIGH_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+
 /// PTE flag bits.
 pub mod flag {
     /// Present. Required for any valid mapping.
@@ -72,25 +83,30 @@ pub mod flag {
 /// Mask covering the physical-address bits of a PTE (bits 12..51).
 const PA_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
-/// Convert a kernel VA to its physical address. Handles both
-/// Hyperlight memory regions: the identity-mapped low half and the
-/// scratch region (translated by a constant offset).
+/// Convert a kernel VA to its physical address. Three regimes:
+/// scratch (high VA, offset to scratch GPA), kernel half (high VA in
+/// `[KERNEL_HIGH_BASE, scratch_base_gva)`, offset to low GPA), and
+/// low VA (user-half, owned by per-invocation PT — returns `None`).
 pub fn va_to_pa(va: u64) -> Option<u64> {
-    let gva = scratch_base_gva();
-    if va >= gva {
-        Some(scratch_base_gpa() + (va - gva))
+    let scratch_gva = scratch_base_gva();
+    if va >= scratch_gva {
+        Some(scratch_base_gpa() + (va - scratch_gva))
+    } else if va >= KERNEL_HIGH_BASE {
+        Some(KERNEL_BASE_GPA + (va - KERNEL_HIGH_BASE))
     } else {
-        Some(va)
+        None
     }
 }
 
 /// Convert a PA to its kernel VA. The dual of [`va_to_pa`].
 pub fn pa_to_va(pa: u64) -> Option<u64> {
-    let gpa = scratch_base_gpa();
-    if pa >= gpa {
-        Some(scratch_base_gva() + (pa - gpa))
+    let scratch_gpa = scratch_base_gpa();
+    if pa >= scratch_gpa {
+        Some(scratch_base_gva() + (pa - scratch_gpa))
+    } else if pa >= KERNEL_BASE_GPA {
+        Some(KERNEL_HIGH_BASE + (pa - KERNEL_BASE_GPA))
     } else {
-        Some(pa)
+        None
     }
 }
 

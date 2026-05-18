@@ -258,6 +258,18 @@ impl SandboxMemoryLayout {
     /// The base address of the sandbox's memory.
     pub(crate) const BASE_ADDRESS: usize = 0x1000;
 
+    /// High virtual-address base where the kernel is mapped.
+    ///
+    /// Matches the linker base in
+    /// [`rust/nub-arch-x86/link.x`](../../../nub-arch-x86/link.x); the
+    /// initial PT maps `[BASE_ADDRESS, ...) GPAs` to
+    /// `[KERNEL_HIGH_BASE, ...) GVAs` via a constant offset, so
+    /// `kernel_gva = KERNEL_HIGH_BASE + (gpa - BASE_ADDRESS)`.
+    ///
+    /// Chosen between `SNAPSHOT_PT_GVA_MAX = 0xFFFF_80FF_FFFF_FFFF` and
+    /// the scratch region (top of GVA space). Linux convention.
+    pub(crate) const KERNEL_HIGH_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+
     // the offset into a sandbox's input/output buffer where the stack starts
     pub(crate) const STACK_POINTER_SIZE_BYTES: u64 = 8;
 
@@ -669,7 +681,10 @@ impl SandboxMemoryLayout {
     /// from this function.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn write_peb(&self, mem: &mut [u8]) -> Result<()> {
-        let guest_offset = SandboxMemoryLayout::BASE_ADDRESS;
+        // (No `guest_offset` here — Stage F kernel relocation replaced
+        // the legacy `get_address!` macro with `get_gva!` for the
+        // kernel-half PEB pointers, and the input/output buffer
+        // pointers compute their GVAs via `get_*_gva()`.)
 
         fn write_u64(mem: &mut [u8], offset: usize, value: u64) -> Result<()> {
             if offset + 8 > mem.len() {
@@ -683,9 +698,14 @@ impl SandboxMemoryLayout {
             Ok(())
         }
 
-        macro_rules! get_address {
+        // Returns the kernel-half GVA for a PEB-pointer field. Used for
+        // `init_data.ptr` / `guest_heap.ptr` — the guest dereferences
+        // these and expects high-VA pointers after Stage F kernel
+        // relocation. The legacy `get_address!` macro (GPA-returning)
+        // is gone with the file-mapping API.
+        macro_rules! get_gva {
             ($something:ident) => {
-                u64::try_from(guest_offset + self.$something)?
+                Self::KERNEL_HIGH_BASE + (self.$something as u64)
             };
         }
 
@@ -719,17 +739,19 @@ impl SandboxMemoryLayout {
             self.get_output_data_buffer_gva(),
         )?;
 
-        // Set up init data pointer
+        // Set up init data pointer (high GVA — guest dereferences via
+        // the kernel-half mapping).
         write_u64(
             mem,
             self.get_init_data_size_offset(),
             (self.get_unaligned_memory_size() - self.init_data_offset).try_into()?,
         )?;
-        let addr = get_address!(init_data_offset);
+        let addr = get_gva!(init_data_offset);
         write_u64(mem, self.get_init_data_pointer_offset(), addr)?;
 
-        // Set up heap buffer pointer
-        let addr = get_address!(guest_heap_buffer_offset);
+        // Set up heap buffer pointer (high GVA — talc's `claim` reads
+        // this directly from `(*peb).guest_heap.ptr`).
+        let addr = get_gva!(guest_heap_buffer_offset);
         write_u64(mem, self.get_heap_size_offset(), self.heap_size.try_into()?)?;
         write_u64(mem, self.get_heap_pointer_offset(), addr)?;
 

@@ -17,4 +17,5 @@ fn main() {
     println!("cargo:rustc-env=NUB_ARCH_X86_BLOB={}", elf.display());
     println!("cargo:rerun-if-changed=../nub-arch-x86/src");
     println!("cargo:rerun-if-changed=../nub-arch-x86/Cargo.toml");
+    println!("cargo:rerun-if-changed=../nub-arch-x86/link.x");
 }

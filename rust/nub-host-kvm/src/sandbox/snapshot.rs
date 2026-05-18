@@ -222,6 +222,10 @@ impl Snapshot {
         // 1. Map the pages of snapshot data as plain RW basic mappings.
         // Pre-Stage-F these were CoW so the (now-deleted) snapshot/restore
         // machinery could roll back writes; we don't use it.
+        //
+        // Kernel half lives at high VA (`KERNEL_HIGH_BASE`); GPAs stay
+        // identical, only the GVA shifts. Computes
+        // `virt_base = KERNEL_HIGH_BASE + (phys_base - BASE_ADDRESS)`.
         for rgn in layout.get_memory_regions_::<GuestMemoryRegion>(())?.iter() {
             let readable = rgn.flags.contains(MemoryRegionFlags::READ);
             let executable = rgn.flags.contains(MemoryRegionFlags::EXECUTE);
@@ -231,9 +235,12 @@ impl Snapshot {
                 writable,
                 executable,
             });
+            let phys_base = rgn.guest_region.start as u64;
+            let virt_base = crate::mem::layout::SandboxMemoryLayout::KERNEL_HIGH_BASE
+                + (phys_base - crate::mem::layout::SandboxMemoryLayout::BASE_ADDRESS as u64);
             let mapping = Mapping {
-                phys_base: rgn.guest_region.start as u64,
-                virt_base: rgn.guest_region.start as u64,
+                phys_base,
+                virt_base,
                 len: rgn.guest_region.len() as u64,
                 kind,
                 user_accessible: false,
@@ -258,13 +265,22 @@ impl Snapshot {
         let extra_regions: Vec<MemoryRegion> = Vec::new();
         let hash = hash(&memory, &extra_regions)?;
 
+        // Entrypoint GVA: kernel base + offset from ELF base to
+        // entrypoint + offset from BASE_ADDRESS to the code's GPA.
+        // Today `load_addr == BASE_ADDRESS` and `base_va == KERNEL_HIGH_BASE`,
+        // so this is just `entrypoint_va`, but the general form keeps
+        // working if either shifts.
+        let entrypoint_gva = crate::mem::layout::SandboxMemoryLayout::KERNEL_HIGH_BASE
+            + (load_addr - crate::mem::layout::SandboxMemoryLayout::BASE_ADDRESS as u64)
+            + (entrypoint_va - base_va);
+
         Ok(Self {
             memory: ReadonlySharedMemory::from_bytes(&memory)?,
             layout,
             load_info,
             hash,
             stack_top_gva: exn_stack_top_gva,
-            entrypoint: NextAction::Initialise(load_addr + entrypoint_va - base_va),
+            entrypoint: NextAction::Initialise(entrypoint_gva),
         })
     }
 

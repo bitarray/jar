@@ -70,10 +70,20 @@ pub fn build(manifest_dir: &str, bin_name: &str, features: &[&str]) -> PathBuf {
         return elf_path;
     }
 
+    // Custom linker script placing the kernel at the high "negative
+    // 2 GiB" VA. Adjacent to the guest crate's `src/`.
+    let link_script = manifest_dir.join("link.x");
+    let link_script_arg = format!("-Clink-args=-T{}", link_script.display());
+    // Non-PIE: with a fixed link base we don't need relocations, and
+    // R_X86_64_RELATIVE entries from a PIE binary would carry the
+    // wrong runtime address (the host applies them against the GPA
+    // load_addr, not the high GVA).
     let rustflags = [
         "--cfg=hyperlight",
         "--check-cfg=cfg(hyperlight)",
         "-Clink-args=-eentrypoint",
+        link_script_arg.as_str(),
+        "-Crelocation-model=static",
         // Smallest valid panic strategy for no_std bin
         "-Cpanic=abort",
     ]

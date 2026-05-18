@@ -174,14 +174,15 @@ impl PageBuf {
         Some(Self { ptr, layout })
     }
 
-    /// Kernel VA of the buffer (== PA since talc lives in identity-mapped low memory).
+    /// Kernel VA of the buffer.
     fn kva(&self) -> u64 {
         self.ptr.as_ptr() as u64
     }
 
-    /// Physical address — identical to `kva` for low-memory allocations.
+    /// Physical address. Talc heap lives at high kernel VA (Stage F);
+    /// `va_to_pa` walks back through the kernel-half offset.
     fn pa(&self) -> u64 {
-        self.kva()
+        crate::paging::va_to_pa(self.kva()).expect("talc kva must lie in kernel half")
     }
 
     /// Total size in bytes (multiple of `PAGE_SIZE`).

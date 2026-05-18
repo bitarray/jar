@@ -27,6 +27,13 @@ use hyperlight_guest::prim_alloc::alloc_phys_pages;
 //       virtual address 0, and Rust raw pointer operations can't be
 //       used to read/write from address 0.
 
+/// Low-memory GPA where the host loads the kernel ELF (matches
+/// `SandboxMemoryLayout::BASE_ADDRESS` on the host).
+const KERNEL_BASE_GPA: u64 = 0x1000;
+/// High GVA the kernel is linked at (matches `KERNEL_HIGH_BASE` on
+/// the host and `. = 0xFFFFFFFF80000000` in `link.x`).
+const KERNEL_HIGH_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+
 #[derive(Copy, Clone)]
 struct GuestMappingOperations {
     scratch_base_gpa: u64,
@@ -41,8 +48,14 @@ impl GuestMappingOperations {
     }
     fn try_phys_to_virt(&self, addr: u64) -> Option<*mut u8> {
         if addr >= self.scratch_base_gpa {
+            // Scratch region: offset translation.
             Some((self.scratch_base_gva + (addr - self.scratch_base_gpa)) as *mut u8)
+        } else if addr >= KERNEL_BASE_GPA {
+            // Kernel half: low GPA maps to high GVA via constant
+            // offset (Stage F kernel relocation).
+            Some((KERNEL_HIGH_BASE + (addr - KERNEL_BASE_GPA)) as *mut u8)
         } else {
+            // Below BASE_ADDRESS — NULL guard page, not mapped.
             None
         }
     }
