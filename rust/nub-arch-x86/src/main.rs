@@ -68,6 +68,75 @@ mod guest {
         42
     }
 
+    /// Diagnostic: receives a `Vec<u8>`, returns an empty `Vec<u8>`.
+    /// Used to bisect whether the per-iter leak in `nub_invoke` is
+    /// the input-buffer / SCALE-decode plumbing or further down (the
+    /// compile / run path).
+    #[guest_function("nub_passthrough")]
+    pub fn nub_passthrough(_spec_bytes: Vec<u8>) -> Vec<u8> {
+        Vec::new()
+    }
+
+    /// Diagnostic: takes a `Vec<u8>`, SCALE-decodes into an
+    /// `InvocationSpec`, returns an empty `Vec<u8>`. If this leaks
+    /// but `nub_passthrough` doesn't, the SCALE decode is the
+    /// culprit. If it doesn't, the leak is in `run_pvm_with_mem`.
+    #[guest_function("nub_decode_only")]
+    pub fn nub_decode_only(spec_bytes: Vec<u8>) -> Vec<u8> {
+        let _spec = InvocationSpec::decode(&spec_bytes).ok();
+        Vec::new()
+    }
+
+    /// Diagnostic: SCALE-decode the spec, run `Compiler::new(...).compile(...)`,
+    /// drop all results. No pool, no page-table, no ring 3 — isolates
+    /// whether the leak is in the recompiler itself.
+    #[guest_function("nub_compile_only")]
+    pub fn nub_compile_only(spec_bytes: Vec<u8>) -> Vec<u8> {
+        use javm_recompiler_x86::codegen::{Compiler, HelperFns};
+        let (spec, _) = match InvocationSpec::decode(&spec_bytes) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let helpers = HelperFns {
+            mem_read_u8: 0x1001,
+            mem_read_u16: 0x1002,
+            mem_read_u32: 0x1003,
+            mem_read_u64: 0x1004,
+            mem_write_u8: 0x1005,
+            mem_write_u16: 0x1006,
+            mem_write_u32: 0x1007,
+            mem_write_u64: 0x1008,
+            sbrk_helper: 0x1009,
+        };
+        let compiler = Compiler::new(
+            &spec.bitmask,
+            &spec.jump_table,
+            helpers,
+            spec.code.len(),
+            false,
+            javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
+        );
+        let _result = compiler.compile(&spec.code, &spec.bitmask);
+        Vec::new()
+    }
+
+    /// Diagnostic: report talc's current allocation state as 32 LE
+    /// bytes packing `[allocated_bytes, allocation_count,
+    /// fragment_count, available_bytes]` (four u64s). Used to
+    /// investigate whether the heap leak is real allocations growing
+    /// unboundedly vs. fragmentation (`allocated_bytes` oscillates
+    /// within a band, but `fragment_count` climbs).
+    #[guest_function("nub_heap_stats")]
+    pub fn nub_heap_stats() -> Vec<u8> {
+        let counters = hyperlight_guest_bin::HEAP_ALLOCATOR.lock().counters().clone();
+        let mut buf = alloc::vec![0u8; 32];
+        buf[0..8].copy_from_slice(&(counters.allocated_bytes as u64).to_le_bytes());
+        buf[8..16].copy_from_slice(&(counters.allocation_count as u64).to_le_bytes());
+        buf[16..24].copy_from_slice(&(counters.fragment_count as u64).to_le_bytes());
+        buf[24..32].copy_from_slice(&(counters.available_bytes as u64).to_le_bytes());
+        buf
+    }
+
     // === nub-handle skeleton smoke ===========================================
 
     /// Skeleton stand-in for the Nub-handle `invoke` RPC. The host's

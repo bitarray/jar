@@ -45,7 +45,7 @@ pub mod paging;
 // fragmenting the heap badly enough that 16 KiB allocations failed
 // after a few thousand iterations.
 #[global_allocator]
-pub(crate) static HEAP_ALLOCATOR: talc::TalcLock<spinning_top::RawSpinlock, talc::source::Manual> =
+pub static HEAP_ALLOCATOR: talc::TalcLock<spinning_top::RawSpinlock, talc::source::Manual> =
     talc::TalcLock::new(talc::source::Manual);
 
 pub static mut GUEST_HANDLE: GuestHandle = GuestHandle::new();

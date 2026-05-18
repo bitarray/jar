@@ -47,7 +47,7 @@
 
 #![cfg(target_os = "none")]
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Vector for the ring-3 exit gate.
 pub const RING3_EXIT_VECTOR: u8 = 0x81;
@@ -164,14 +164,24 @@ core::arch::global_asm!(
 /// this from an interrupt handler (which would race against the
 /// current CPU's GDTR/IDTR pointer).
 pub unsafe fn install_ring3_exit_gate() {
-    // SAFETY: ring-0 GDT/IDT mutation; see module-level docs.
-    unsafe {
-        crate::segments::install_user_segments();
-        let _ = crate::segments::install_dpl3_handler(
-            RING3_EXIT_VECTOR,
-            nub_ring3_exit_stub as *const () as u64,
-            1, // IST=1, run on the pre-existing exception stack
-        );
+    // First-call-only: install GDT user segments + patch IDT entry
+    // for the ring-3 exit vector. Both `install_user_segments` and
+    // `install_dpl3_handler` `Box::leak` ~4 KiB of memory (the new
+    // IDT + descriptor) on every call — re-running them per
+    // invocation leaked 4106 B/iter (confirmed via `talc::counters`).
+    // The installed IDT is shared across all invocations; nothing
+    // about it depends on per-call state.
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if !INSTALLED.swap(true, Ordering::AcqRel) {
+        // SAFETY: ring-0 GDT/IDT mutation; see module-level docs.
+        unsafe {
+            crate::segments::install_user_segments();
+            let _ = crate::segments::install_dpl3_handler(
+                RING3_EXIT_VECTOR,
+                nub_ring3_exit_stub as *const () as u64,
+                1, // IST=1, run on the pre-existing exception stack
+            );
+        }
     }
     // Reset captured state from any prior call.
     KERNEL_RESUME_RSP.store(0, Ordering::SeqCst);
