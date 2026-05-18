@@ -1170,6 +1170,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nub-host-guest-macro"
+version = "0.1.0"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "nub-host-kvm"
 version = "0.1.0"
 dependencies = [

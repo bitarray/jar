@@ -1,0 +1,15 @@
+[package]
+name = "nub-host-guest-macro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Proc macros for registering guest functions on the in-sandbox guest. Forked from hyperlight-guest-macro 0.15.0 (Apache-2.0); stripped of name-based + parameter-polymorphic registration, replaced by `fn_id`-indexed `(&[u8]) -> Vec<u8>` dispatch."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro-crate = "3.5"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
