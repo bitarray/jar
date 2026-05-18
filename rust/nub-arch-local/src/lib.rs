@@ -2,12 +2,16 @@
 //! Rust data structures. Runs directly in the host process; no
 //! sandbox, no cross-compilation.
 //!
-//! Today this is a **stub** — every invoke returns a fixed
-//! deterministic result so the trait wiring + crate boundaries can
-//! be exercised end-to-end. Real JAVM invocation (using `javm::Vm`)
-//! lands in a follow-up commit, once `javm`'s `KernelAssist` shape
-//! is reconciled with the nub state-ownership model.
+//! `run_invocation_spec` is the Stage-3 wiring from a SCALE-shaped
+//! [`InvocationSpec`] to the byte-PVM interpreter
+//! ([`javm_exec::Interpreter::run`]) — the in-process counterpart
+//! to nub-arch-x86's JIT-driven `run_pvm_with_mem`.
 
+use javm_exec::{
+    Access, CopyingMemory, EcallHandler, EcallKind, EcallResult, ExitReason, GasCounter,
+    Interpreter, PAGE_SIZE, PvmProgram, Regs, gas_cost::DEFAULT_MEM_CYCLES,
+};
+use nub_arch_x86_abi::{InvocationResult, InvocationSpec};
 use nub_kernel::{Arch, CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
 
 /// In-process Arch backend.
@@ -48,6 +52,92 @@ impl Arch for LocalArch {
     }
 }
 
-// `#[cfg(test)] mod tests` deferred until the LocalArch stub is
-// replaced with a real javm-driven invocation (Stage 3). Asserting
-// that the stub returns 42 today carries no signal.
+/// Run an [`InvocationSpec`] through the byte-PVM interpreter and
+/// return an [`InvocationResult`] in the same shape `nub-arch-x86`'s
+/// JIT path produces. The exit-reason mapping matches the JIT exit
+/// codes (HostCall=4, Trap=7, etc.) so the two backends agree on a
+/// well-formed program.
+pub fn run_invocation_spec(spec: &InvocationSpec) -> InvocationResult {
+    let program = PvmProgram::new(
+        spec.code.clone(),
+        spec.bitmask.clone(),
+        spec.jump_table.clone(),
+        DEFAULT_MEM_CYCLES,
+    )
+    .expect("PvmProgram (bitmask len must match code len)");
+
+    let mut mem = CopyingMemory::new();
+    let mem_size_pages = page_round_up_u64(spec.mem_size as u64);
+    // Cover the whole accessible range as RW first; ro/rw_data
+    // overlays below downgrade or refill specific subranges. The JIT
+    // path's per-invocation PT maps `[0, mem_size)` uniformly user-RW
+    // and lets the recompiler-side bounds-check via the PT itself;
+    // here we approximate that with per-page perms in CopyingMemory.
+    mem.map_region(0, mem_size_pages, Access::ReadWrite, None)
+        .expect("map base RW region");
+    overlay(&mut mem, spec.ro_start, &spec.ro_data, Access::ReadOnly);
+    overlay(&mut mem, spec.rw_start, &spec.rw_data, Access::ReadWrite);
+    overlay(&mut mem, spec.arg_start, &spec.arg_data, Access::ReadWrite);
+
+    let mut regs = Regs::new();
+    regs.pc = spec.entry_pc as u64;
+    regs.gpr = spec.initial_regs.into_array();
+
+    let mut gas = GasCounter::new(spec.initial_gas);
+    let mut handler = LocalEcallHandler;
+    let exit = Interpreter::run(&program, &mut regs, &mut mem, &mut gas, &mut handler);
+
+    let (exit_reason, exit_arg) = match exit {
+        ExitReason::Halt => (0, 0),
+        ExitReason::Panic => (1, 0),
+        ExitReason::OutOfGas => (2, 0),
+        ExitReason::PageFault(addr) => (3, addr),
+        ExitReason::HostCall(imm) => (4, imm),
+        ExitReason::Ecall => (6, 0),
+        ExitReason::Trap => (7, 0),
+    };
+    InvocationResult {
+        exit_reason,
+        exit_arg,
+        return_value: regs.gpr[7],
+        gas_remaining: gas.remaining(),
+    }
+}
+
+fn page_round_up_u64(n: u64) -> u64 {
+    let p = PAGE_SIZE as u64;
+    n.div_ceil(p) * p
+}
+
+/// Overlay a sub-region of mem with a permission + initial bytes. No-op
+/// if `data` is empty (the spec carries empty arg/ro/rw vectors when
+/// the program has no such region).
+fn overlay(mem: &mut CopyingMemory, start: u32, data: &[u8], access: Access) {
+    if data.is_empty() {
+        return;
+    }
+    let size = page_round_up_u64(data.len() as u64);
+    mem.map_region(start as u64, size, access, Some(data))
+        .expect("map_region overlay");
+}
+
+/// Minimal `EcallHandler` for the local backend: every `ecall` /
+/// `ecalli` ends the run by surfacing the corresponding `ExitReason`,
+/// matching the JIT trampoline's exit shape (no in-engine ecall
+/// dispatch — the integration layer above us, if any, would re-enter
+/// with updated state).
+struct LocalEcallHandler;
+
+impl EcallHandler for LocalEcallHandler {
+    fn handle(
+        &mut self,
+        kind: EcallKind,
+        _regs: &mut Regs,
+        _mem: &mut dyn javm_exec::Memory,
+    ) -> EcallResult {
+        match kind {
+            EcallKind::Ecalli(imm) => EcallResult::Exit(ExitReason::HostCall(imm)),
+            EcallKind::Ecall => EcallResult::Exit(ExitReason::Ecall),
+        }
+    }
+}

@@ -7,3 +7,5 @@ description = "Nub Arch implementation: in-process. Simulates the CPU/MMU substr
 
 [dependencies]
 nub-kernel = { path = "../nub-kernel" }
+nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
+javm-exec = { path = "../javm-exec" }

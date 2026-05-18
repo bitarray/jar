@@ -170,20 +170,15 @@ impl Nub {
         }
     }
 
-    /// Direct-spec invocation path (Stage 2.2). Ships a pre-built
-    /// `InvocationSpec` straight into the backend, bypassing the
-    /// (still-skeletal) `Arch::invoke` trait. The Hyperlight backend
-    /// SCALE-encodes the spec and calls the guest's `nub_invoke`
-    /// guest_function; the local backend returns a stub for now
-    /// (Stage 3 will switch the local arm to the interpreter).
+    /// Direct-spec invocation path. Ships a pre-built `InvocationSpec`
+    /// straight into the backend, bypassing the (still-skeletal)
+    /// `Arch::invoke` trait. The Hyperlight backend SCALE-encodes the
+    /// spec and calls the guest's `nub_invoke` guest_function; the
+    /// local backend runs the byte-PVM interpreter in-process via
+    /// `nub_arch_local::run_invocation_spec`.
     pub fn invoke_spec(&mut self, spec: &InvocationSpec) -> Result<InvocationResult> {
         match &mut self.backend {
-            Backend::Local(_) => Ok(InvocationResult {
-                exit_reason: 4,
-                exit_arg: 0,
-                return_value: 42,
-                gas_remaining: spec.initial_gas,
-            }),
+            Backend::Local(_) => Ok(nub_arch_local::run_invocation_spec(spec)),
             Backend::Hyperlight(h) => {
                 let bytes = spec.encode();
                 let result_bytes: Vec<u8> = h.sandbox.call("nub_invoke", bytes)?;

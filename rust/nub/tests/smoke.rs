@@ -1,20 +1,17 @@
-//! End-to-end smoke for the `Nub` Hyperlight backend: build a trivial
-//! `InvocationSpec` (PVM `ecalli 42`), ship it via `invoke_spec`,
-//! verify the in-guest JIT path reports `exit_reason=4` (HostCall) +
+//! End-to-end smoke for both `Nub` backends. Each builds a trivial
+//! `InvocationSpec` (PVM `ecalli 42`), ships it via `invoke_spec`,
+//! and verifies the result agrees on `exit_reason=4` (HostCall) +
 //! `exit_arg=42` (the ecalli imm).
 //!
-//! This exercises the full production stack — host SCALE-encode,
-//! Hyperlight call, guest decode, compile, ring-3 JIT, ring-0 reentry,
-//! result encode. The skeleton `Nub::invoke` / `LocalArch::invoke`
-//! paths (currently both return a hard-coded 42) intentionally have
-//! no test coverage: they'll get real tests when Stage 3 wires them up
-//! to actual kernel dispatch.
+//! - **Hyperlight**: exercises host SCALE-encode → Hyperlight call →
+//!   guest decode/JIT → ring-3 entry → ring-0 reentry → encode.
+//! - **Local**: exercises the in-process byte-PVM interpreter wired
+//!   through `nub_arch_local::run_invocation_spec`.
 
 use nub::{InvocationSpec, Nub, PvmRegs};
 
-#[test]
-fn hyperlight_invoke_spec_ecalli() {
-    let spec = InvocationSpec {
+fn ecalli_42_spec() -> InvocationSpec {
+    InvocationSpec {
         code: vec![10u8, 42],
         bitmask: vec![1u8, 0],
         jump_table: vec![],
@@ -28,9 +25,23 @@ fn hyperlight_invoke_spec_ecalli() {
         ro_data: vec![],
         rw_start: 0,
         rw_data: vec![],
-    };
+    }
+}
+
+#[test]
+fn hyperlight_invoke_spec_ecalli() {
+    let spec = ecalli_42_spec();
     let mut hl = Nub::new_hyperlight().expect("hyperlight sandbox should open");
     let result = hl.invoke_spec(&spec).expect("invoke_spec");
+    assert_eq!(result.exit_reason, 4, "expected HostCall exit");
+    assert_eq!(result.exit_arg, 42, "expected ecalli imm");
+}
+
+#[test]
+fn local_invoke_spec_ecalli() {
+    let spec = ecalli_42_spec();
+    let mut nub = Nub::new_local();
+    let result = nub.invoke_spec(&spec).expect("invoke_spec");
     assert_eq!(result.exit_reason, 4, "expected HostCall exit");
     assert_eq!(result.exit_arg, 42, "expected ecalli imm");
 }

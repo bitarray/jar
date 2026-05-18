@@ -878,7 +878,6 @@ version = "0.1.0"
 dependencies = [
  "build-javm",
  "criterion",
- "jar-kernel",
  "javm-cap",
  "javm-exec",
  "nub",
@@ -1123,6 +1122,8 @@ dependencies = [
 name = "nub-arch-local"
 version = "0.1.0"
 dependencies = [
+ "javm-exec",
+ "nub-arch-x86-abi",
  "nub-kernel",
 ]
 
