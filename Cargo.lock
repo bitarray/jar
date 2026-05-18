@@ -893,9 +893,7 @@ dependencies = [
  "hyperlight-common",
  "hyperlight-guest",
  "hyperlight-guest-macro",
- "hyperlight-guest-tracing",
  "linkme",
- "log",
  "spin",
  "tracing",
 ]
@@ -910,18 +908,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "hyperlight-guest-tracing"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca03b1ccd29c0c277555d8bd737257d0598554004f9667bb196227d5ed8b5b7e"
-dependencies = [
- "hyperlight-common",
- "spin",
- "tracing",
- "tracing-core",
 ]
 
 [[package]]
