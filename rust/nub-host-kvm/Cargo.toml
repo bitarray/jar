@@ -13,14 +13,6 @@ description = "Forked Hyperlight host (KVM-only) — micro-VM host driver for nu
 [lib]
 name = "nub_host_kvm"
 path = "src/lib.rs"
-# Skip building the test target + doctests for the vendored crate.
-# The upstream source carries inline `#[cfg(test)] mod tests` blocks
-# that reference dev-deps (hyperlight-testing, iced-x86, metrics-util)
-# we stripped, plus doctests that exercise upstream-only APIs
-# (`snapshot()` / `restore()` etc) we dropped. Coverage flows through
-# `nub` / `javm-guest-tests` / `javm-bench` end-to-end instead.
-test = false
-doctest = false
 
 [features]
 default = ["kvm"]

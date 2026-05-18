@@ -205,23 +205,3 @@ pub(crate) fn set_up_hypervisor_partition(
     )
     .map_err(HyperlightVmError::Create)?)
 }
-
-#[cfg(test)]
-mod tests {
-    use hyperlight_testing::simple_guest_as_string;
-
-    use super::evolve_impl_multi_use;
-    use crate::UninitializedSandbox;
-    use crate::sandbox::uninitialized::GuestBinary;
-
-    #[test]
-    fn test_evolve() {
-        let guest_bin_paths = vec![simple_guest_as_string().unwrap()];
-        for guest_bin_path in guest_bin_paths {
-            let u_sbox =
-                UninitializedSandbox::new(GuestBinary::FilePath(guest_bin_path.clone()), None)
-                    .unwrap();
-            evolve_impl_multi_use(u_sbox).unwrap();
-        }
-    }
-}
