@@ -77,36 +77,31 @@ const CALLER_SAVED: [Reg; 8] = [
     Reg::RCX,
 ];
 
-/// JitContext field offsets — absolute VAs in PVM low-half.
-///
-/// Memory layout:
-///   CTX_VA           .. CTX_VA + 4K: JitContext page
-///   R15              .. R15 + 4GB:   guest memory (flat buffer)
-///
-/// CTX accesses use absolute SIB `[disp32]` encoding rather than going
-/// through R15 — saves one indirection register and lets R15 carry only
-/// the mem base. The disp32 is sign-extended to 64-bit so CTX_VA must
-/// stay below 0x8000_0000.
-pub const CTX_VA: i32 = 0x4000_0000;
+/// JitContext lives above the PVM u32 address space (no bounds check
+/// on guest mem — the full low 4 GiB of native VA belongs to the
+/// program). CTX is reached via RIP-relative `[rip+disp32]`, which
+/// gives ±2 GiB range from the JIT code, so CTX just needs to be
+/// adjacent to the JIT region.
+pub const CTX_VA: u64 = 1u64 << 32;
 
 use super::JitContext;
 use memoffset::offset_of;
 
-pub const CTX_REGS: i32 = CTX_VA + offset_of!(JitContext, regs) as i32;
-pub const CTX_GAS: i32 = CTX_VA + offset_of!(JitContext, gas) as i32;
-pub const CTX_EXIT_REASON: i32 = CTX_VA + offset_of!(JitContext, exit_reason) as i32;
-pub const CTX_EXIT_ARG: i32 = CTX_VA + offset_of!(JitContext, exit_arg) as i32;
-pub const CTX_HEAP_BASE: i32 = CTX_VA + offset_of!(JitContext, heap_base) as i32;
-pub const CTX_HEAP_TOP: i32 = CTX_VA + offset_of!(JitContext, heap_top) as i32;
-pub const CTX_JT_PTR: i32 = CTX_VA + offset_of!(JitContext, jt_ptr) as i32;
-pub const CTX_JT_LEN: i32 = CTX_VA + offset_of!(JitContext, jt_len) as i32;
-pub const CTX_BB_STARTS: i32 = CTX_VA + offset_of!(JitContext, bb_starts) as i32;
-pub const CTX_BB_LEN: i32 = CTX_VA + offset_of!(JitContext, bb_len) as i32;
-pub const CTX_ENTRY_PC: i32 = CTX_VA + offset_of!(JitContext, entry_pc) as i32;
-pub const CTX_PC: i32 = CTX_VA + offset_of!(JitContext, pc) as i32;
-pub const CTX_DISPATCH_TABLE: i32 = CTX_VA + offset_of!(JitContext, dispatch_table) as i32;
-pub const CTX_CODE_BASE: i32 = CTX_VA + offset_of!(JitContext, code_base) as i32;
-pub const CTX_FAST_REENTRY: i32 = CTX_VA + offset_of!(JitContext, fast_reentry) as i32;
+pub const CTX_REGS: u64 = CTX_VA + offset_of!(JitContext, regs) as u64;
+pub const CTX_GAS: u64 = CTX_VA + offset_of!(JitContext, gas) as u64;
+pub const CTX_EXIT_REASON: u64 = CTX_VA + offset_of!(JitContext, exit_reason) as u64;
+pub const CTX_EXIT_ARG: u64 = CTX_VA + offset_of!(JitContext, exit_arg) as u64;
+pub const CTX_HEAP_BASE: u64 = CTX_VA + offset_of!(JitContext, heap_base) as u64;
+pub const CTX_HEAP_TOP: u64 = CTX_VA + offset_of!(JitContext, heap_top) as u64;
+pub const CTX_JT_PTR: u64 = CTX_VA + offset_of!(JitContext, jt_ptr) as u64;
+pub const CTX_JT_LEN: u64 = CTX_VA + offset_of!(JitContext, jt_len) as u64;
+pub const CTX_BB_STARTS: u64 = CTX_VA + offset_of!(JitContext, bb_starts) as u64;
+pub const CTX_BB_LEN: u64 = CTX_VA + offset_of!(JitContext, bb_len) as u64;
+pub const CTX_ENTRY_PC: u64 = CTX_VA + offset_of!(JitContext, entry_pc) as u64;
+pub const CTX_PC: u64 = CTX_VA + offset_of!(JitContext, pc) as u64;
+pub const CTX_DISPATCH_TABLE: u64 = CTX_VA + offset_of!(JitContext, dispatch_table) as u64;
+pub const CTX_CODE_BASE: u64 = CTX_VA + offset_of!(JitContext, code_base) as u64;
+pub const CTX_FAST_REENTRY: u64 = CTX_VA + offset_of!(JitContext, fast_reentry) as u64;
 
 /// Exit reason codes (matching ExitReason enum).
 pub const EXIT_HALT: u32 = 0;
@@ -200,7 +195,7 @@ impl Compiler {
         _jump_table: &[u32],
         helpers: HelperFns,
         code_len: usize,
-        _use_mmap: bool,
+        jit_va_base: u64,
         mem_cycles: u8,
     ) -> Self {
         // Estimate native code size: ~3x PVM code provides safety margin for
@@ -211,6 +206,10 @@ impl Compiler {
         // mmap-backed assembler buffer was a host-only path; the recompiler is
         // now embedded only by `nub-arch-x86`, which uses the Vec-backed form.
         let mut asm = Assembler::with_capacity(estimated_native, estimated_labels);
+        // RIP-relative CTX accesses need the eventual load VA to compute
+        // disp32. Callers from a per-invocation runtime pass JIT_VA_M;
+        // tests pass 0 (encodings reference offset 0).
+        asm.set_jit_va_base(jit_va_base);
         // Reserve label 0 so label IDs start from 1 (for consistency with fixed labels).
         let _reserved = asm.new_label(); // Label(0)
         let exit_label = asm.new_label();
@@ -315,7 +314,7 @@ impl Compiler {
             let (opcode, category) = match javm_exec::instruction::decode_opcode_fast(raw_byte) {
                 Some(oc) => oc,
                 None => {
-                    self.asm.mov_store32_abs_imm(CTX_PC, pc as i32);
+                    self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
                     self.emit_exit(EXIT_PANIC, 0);
                     pc += 1;
                     continue;
@@ -1201,7 +1200,7 @@ impl Compiler {
         match opcode {
             // === A.5.1: No arguments ===
             Opcode::Trap => {
-                self.asm.mov_store32_abs_imm(CTX_PC, pc as i32);
+                self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
                 self.emit_exit(EXIT_TRAP, 0);
             }
             Opcode::Fallthrough | Opcode::Unlikely => {
@@ -1211,7 +1210,7 @@ impl Compiler {
 
             // === A.5.1b: Ecall (management ops, no immediate) ===
             Opcode::Ecall => {
-                self.asm.mov_store32_abs_imm(CTX_PC, next_pc as i32);
+                self.asm.mov_store32_rip_rel_imm(CTX_PC, next_pc as i32);
                 self.emit_exit(EXIT_ECALL, 0);
             }
 
@@ -1224,7 +1223,7 @@ impl Compiler {
                     // present in v2 is stripped — there is no protocol cap
                     // in v3, and gas-debit will reattach in Stage 3 with
                     // the kernel-assisted Gas Instance.
-                    self.asm.mov_store32_abs_imm(CTX_PC, next_pc as i32);
+                    self.asm.mov_store32_rip_rel_imm(CTX_PC, next_pc as i32);
                     self.emit_exit(EXIT_HOST_CALL, cap_slot);
                 }
             }
@@ -1410,7 +1409,7 @@ impl Compiler {
             }
             Opcode::Sbrk => {
                 // JAR v0.8.0: sbrk removed from ISA, replaced by grow_heap hostcall
-                self.asm.mov_store32_abs_imm(CTX_PC, pc as i32);
+                self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
                 self.emit_exit(EXIT_PANIC, 0);
             }
             Opcode::CountSetBits64 => {
@@ -2335,7 +2334,7 @@ impl Compiler {
             return;
         }
         if !self.is_basic_block_start(target) {
-            self.asm.mov_store32_abs_imm(CTX_PC, pc as i32);
+            self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
             self.emit_exit(EXIT_PANIC, 0);
             return;
         }
@@ -2346,7 +2345,7 @@ impl Compiler {
     /// Emit a dynamic jump (through jump table).
     fn emit_dynamic_jump(&mut self, ra: usize, imm: u64, pc: u32) {
         // Store PC for any exit path in the dynamic jump sequence
-        self.asm.mov_store32_abs_imm(CTX_PC, pc as i32);
+        self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
         // addr = (φ[ra] + imm) % 2^32
         self.asm.mov_rr(SCRATCH, REG_MAP[ra]);
         if imm as i32 != 0 {
@@ -2375,31 +2374,31 @@ impl Compiler {
 
         // Inline djump resolution: idx is in SCRATCH (RDX).
         // Bounds check: idx < jt_len
-        self.asm.cmp_mem32_abs_r(CTX_JT_LEN, SCRATCH);
+        self.asm.cmp_mem32_rip_rel_r(CTX_JT_LEN, SCRATCH);
         self.asm.jcc_label(Cc::BE, self.panic_label); // jt_len <= idx → panic
 
         // target_pc = jt_ptr[idx] (u32 array, need idx*4)
         self.asm.push(Reg::RAX); // save φ[11]
         self.asm.shl_ri64(SCRATCH, 2); // idx *= 4
-        self.asm.mov_load64_abs(Reg::RAX, CTX_JT_PTR);
+        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_JT_PTR);
         self.asm.add_rr(Reg::RAX, SCRATCH);
         self.asm.mov_load32(SCRATCH, Reg::RAX, 0); // SCRATCH = jt_ptr[idx]
 
         // Validate: target_pc < bb_len && bb_starts[target_pc] == 1
         let djump_panic = self.asm.new_label();
-        self.asm.cmp_mem32_abs_r(CTX_BB_LEN, SCRATCH);
+        self.asm.cmp_mem32_rip_rel_r(CTX_BB_LEN, SCRATCH);
         self.asm.jcc_label(Cc::BE, djump_panic); // bb_len <= target → panic
-        self.asm.mov_load64_abs(Reg::RAX, CTX_BB_STARTS);
+        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_BB_STARTS);
         self.asm.movzx_load8_sib(Reg::RAX, Reg::RAX, SCRATCH);
         self.asm.cmp_ri32(Reg::RAX, 1);
         self.asm.jcc_label(Cc::NE, djump_panic);
 
         // Dispatch: native_addr = code_base + dispatch_table[target_pc]
-        self.asm.mov_load64_abs(Reg::RAX, CTX_DISPATCH_TABLE);
+        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_DISPATCH_TABLE);
         self.asm.movsxd_load_sib4(Reg::RAX, Reg::RAX, SCRATCH);
-        self.asm.add_r64_mem_abs(Reg::RAX, CTX_CODE_BASE);
+        self.asm.add_r64_mem_rip_rel(Reg::RAX, CTX_CODE_BASE);
         // Store target PC for gas block tracking
-        self.asm.mov_store32_abs(CTX_PC, SCRATCH);
+        self.asm.mov_store32_rip_rel(CTX_PC, SCRATCH);
         // RAX = native addr, [rsp] = saved φ[11].
         // Use SCRATCH (which we no longer need) to swap.
         self.asm.mov_rr(SCRATCH, Reg::RAX); // SCRATCH = native addr
@@ -2465,7 +2464,7 @@ impl Compiler {
     ) {
         if !self.is_basic_block_start(target) {
             // Target not valid → store PC and panic if condition true (cold path)
-            self.asm.mov_store32_abs_imm(CTX_PC, pc as i32);
+            self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
             self.asm.mov_ri64(SCRATCH, imm);
             self.asm.cmp_rr(reg, SCRATCH);
             self.asm.jcc_label(cc, self.panic_label);
@@ -2479,7 +2478,7 @@ impl Compiler {
     /// Emit a branch comparing two registers.
     fn emit_branch_reg(&mut self, a: Reg, b: Reg, cc: Cc, target: u32, _fallthrough: u32, pc: u32) {
         if !self.is_basic_block_start(target) {
-            self.asm.mov_store32_abs_imm(CTX_PC, pc as i32);
+            self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
             self.asm.cmp_rr(a, b);
             self.asm.jcc_label(cc, self.panic_label);
             return;
@@ -2857,8 +2856,9 @@ impl Compiler {
 
     /// Emit an exit sequence that sets exit_reason and exit_arg.
     fn emit_exit(&mut self, reason: u32, arg: u32) {
-        self.asm.mov_store32_abs_imm(CTX_EXIT_REASON, reason as i32);
-        self.asm.mov_store32_abs_imm(CTX_EXIT_ARG, arg as i32);
+        self.asm
+            .mov_store32_rip_rel_imm(CTX_EXIT_REASON, reason as i32);
+        self.asm.mov_store32_rip_rel_imm(CTX_EXIT_ARG, arg as i32);
         self.asm.jmp_label(self.exit_label);
     }
 
@@ -2884,22 +2884,22 @@ impl Compiler {
         // per basic block, flushed back to ctx.gas at exit. Mem accesses
         // are baseless `[rdx]` (PVM addr == native VA); CTX is reached via
         // absolute SIB. Neither path reads R15.
-        self.asm.mov_load64_abs(GAS, CTX_GAS);
+        self.asm.mov_load64_rip_rel(GAS, CTX_GAS);
 
         // Clear exit reason
-        self.asm.mov_store32_abs_imm(CTX_EXIT_REASON, 0);
+        self.asm.mov_store32_rip_rel_imm(CTX_EXIT_REASON, 0);
 
         // --- O(1) dispatch via table lookup (before loading PVM regs) ---
-        self.asm.mov_load32_abs(SCRATCH, CTX_ENTRY_PC);
-        self.asm.mov_load64_abs(Reg::RAX, CTX_DISPATCH_TABLE);
+        self.asm.mov_load32_rip_rel(SCRATCH, CTX_ENTRY_PC);
+        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_DISPATCH_TABLE);
         self.asm.movsxd_load_sib4(Reg::RAX, Reg::RAX, SCRATCH);
-        self.asm.mov_load64_abs(SCRATCH, CTX_CODE_BASE);
+        self.asm.mov_load64_rip_rel(SCRATCH, CTX_CODE_BASE);
         self.asm.add_rr(Reg::RAX, SCRATCH);
         self.asm.push(Reg::RAX);
 
         // Load all 13 PVM registers from context
         for (i, &reg) in REG_MAP.iter().enumerate() {
-            self.asm.mov_load64_abs(reg, CTX_REGS + (i as i32) * 8);
+            self.asm.mov_load64_rip_rel(reg, CTX_REGS + (i as u64) * 8);
         }
 
         // Jump to the dispatch target (pop into SCRATCH, then indirect jump)
@@ -2916,11 +2916,11 @@ impl Compiler {
         // Shared OOG handler that reads PC from SCRATCH — emitted BEFORE OOG
         // stubs so backward jumps from stubs can use jmp rel8 (2 bytes).
         self.asm.bind_label(self.oog_pc_label);
-        self.asm.mov_store32_abs(CTX_PC, SCRATCH);
+        self.asm.mov_store32_rip_rel(CTX_PC, SCRATCH);
         // fall through to oog_label:
         self.asm.bind_label(self.oog_label);
         self.asm
-            .mov_store32_abs_imm(CTX_EXIT_REASON, EXIT_OOG as i32);
+            .mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_OOG as i32);
         self.asm.jmp_label(self.exit_label);
 
         // Per-gas-block OOG stubs: compact format — load PC into SCRATCH,
@@ -2937,14 +2937,14 @@ impl Compiler {
         // Panic exit
         self.asm.bind_label(self.panic_label);
         self.asm
-            .mov_store32_abs_imm(CTX_EXIT_REASON, EXIT_PANIC as i32);
+            .mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_PANIC as i32);
         // fall through to exit_label
 
         // Common exit: flush gas (R15) → ctx.gas, then save PVM regs.
         self.asm.bind_label(self.exit_label);
-        self.asm.mov_store64_abs(CTX_GAS, GAS);
+        self.asm.mov_store64_rip_rel(CTX_GAS, GAS);
         for (i, &reg) in REG_MAP.iter().enumerate() {
-            self.asm.mov_store64_abs(CTX_REGS + (i as i32) * 8, reg);
+            self.asm.mov_store64_rip_rel(CTX_REGS + (i as u64) * 8, reg);
         }
 
         // Restore callee-saved (+ alignment padding)

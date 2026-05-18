@@ -165,6 +165,11 @@ pub struct Assembler {
     /// The Vec is pre-sized but labels_len tracks the logical length.
     labels_len: usize,
     fixups: Vec<Fixup>,
+    /// Eventual VA the code buffer will be loaded at. Used by RIP-relative
+    /// emitters to compute `disp32 = target_va - (jit_va_base + RIP_after_inst)`.
+    /// Zero means "relocatable / unknown" — RIP-relative emitters then
+    /// produce offsets relative to code-buffer offset 0, useful for tests.
+    jit_va_base: u64,
 }
 
 /// Unbound label sentinel. We use 0 so that bulk label allocation can use
@@ -191,6 +196,7 @@ impl Assembler {
             labels: Vec::new(),
             labels_len: 0,
             fixups: Vec::new(),
+            jit_va_base: 0,
         }
     }
 
@@ -209,7 +215,14 @@ impl Assembler {
             labels: vec![0u32; label_capacity],
             labels_len: 0,
             fixups: Vec::with_capacity(2048),
+            jit_va_base: 0,
         }
+    }
+
+    /// Set the eventual load VA for the code buffer. Must be called before
+    /// any RIP-relative emitter that targets a fixed VA (i.e. CTX accesses).
+    pub fn set_jit_va_base(&mut self, va: u64) {
+        self.jit_va_base = va;
     }
 
     /// Ensure at least `additional` bytes of capacity remain.
@@ -1194,98 +1207,108 @@ impl Assembler {
         self.emit_i32(imm);
     }
 
-    // -- Absolute SIB addressing `[disp32]` --
+    // -- RIP-relative addressing `[rip + disp32]` --
     //
-    // 64-bit mode's `mov dst, [disp32]` raw form requires SIB-with-
-    // no-base: `(mod=00, r/m=100=SIB) (scale=00, index=100=none,
-    // base=101=disp32)` followed by the 4-byte disp32. The disp32 is
-    // sign-extended to 64-bit, so callers must keep `addr < 0x8000_0000`.
-    fn modrm_sib_disp32(&mut self, reg: u8, addr: i32) {
-        let r = reg & 7;
-        self.emit((r << 3) | 4); // mod=00, reg, r/m=100 (SIB follows)
-        self.emit(0x25); // SIB: scale=00, index=100 (none), base=101 (disp32-only)
-        self.emit_i32(addr);
+    // 64-bit mode's mod=00 r/m=101 form is RIP-relative: the effective
+    // address is `RIP_after_instruction + sign_extend(disp32)`. Used to
+    // reach CTX, which lives above 4 GiB (outside the PVM u32 range)
+    // and is therefore beyond absolute-SIB disp32 reach. The
+    // `jit_va_base` field of the assembler holds the eventual load VA;
+    // `target_va - (jit_va_base + write_pos + 4)` is the disp32 we
+    // emit.
+    //
+    // 1 byte shorter per access than the absolute-SIB form (no SIB
+    // byte). Range: target must be within ±2 GiB of post-instruction
+    // RIP, which holds for any CTX page placed in or near the META
+    // region above PVM mem.
+    /// Emit a 4-byte RIP-relative disp32 targeting `target_va`. The CPU
+    /// resolves the effective address against RIP-at-next-instruction,
+    /// so we add 4 (for the disp32 itself) plus `trailing_bytes` (any
+    /// imm fields following disp32 in the same instruction — 4 for
+    /// `mov [rip+disp32], imm32`, 0 for everything else).
+    fn emit_rip_rel_disp32(&mut self, target_va: u64, trailing_bytes: u64) {
+        let post_inst_rip = self
+            .jit_va_base
+            .wrapping_add(self.write_pos as u64)
+            .wrapping_add(4)
+            .wrapping_add(trailing_bytes);
+        let disp = (target_va as i64).wrapping_sub(post_inst_rip as i64);
+        debug_assert!(
+            disp >= i32::MIN as i64 && disp <= i32::MAX as i64,
+            "RIP-relative target 0x{:x} out of range from base 0x{:x} + offset 0x{:x}",
+            target_va,
+            self.jit_va_base,
+            self.write_pos
+        );
+        self.emit_i32(disp as i32);
     }
 
-    /// mov r32, dword [disp32] (zero-extends to 64-bit)
-    pub fn mov_load32_abs(&mut self, dst: Reg, addr: i32) {
+    fn modrm_rip_rel(&mut self, reg: u8) {
+        // mod=00, reg, r/m=101 = RIP-relative (no SIB byte).
+        self.emit(((reg & 7) << 3) | 5);
+    }
+
+    /// mov r32, dword [rip+disp32] (zero-extends to 64-bit)
+    pub fn mov_load32_rip_rel(&mut self, dst: Reg, target_va: u64) {
         if dst.hi() != 0 {
             self.emit(0x40 | (dst.hi() << 2));
         }
         self.emit(0x8B);
-        self.modrm_sib_disp32(dst.lo(), addr);
+        self.modrm_rip_rel(dst.lo());
+        self.emit_rip_rel_disp32(target_va, 0);
     }
 
-    /// mov r64, qword [disp32]
-    pub fn mov_load64_abs(&mut self, dst: Reg, addr: i32) {
+    /// mov r64, qword [rip+disp32]
+    pub fn mov_load64_rip_rel(&mut self, dst: Reg, target_va: u64) {
         self.emit(0x48 | (dst.hi() << 2));
         self.emit(0x8B);
-        self.modrm_sib_disp32(dst.lo(), addr);
+        self.modrm_rip_rel(dst.lo());
+        self.emit_rip_rel_disp32(target_va, 0);
     }
 
-    /// mov dword [disp32], r32
-    pub fn mov_store32_abs(&mut self, addr: i32, src: Reg) {
+    /// mov dword [rip+disp32], r32
+    pub fn mov_store32_rip_rel(&mut self, target_va: u64, src: Reg) {
         if src.hi() != 0 {
             self.emit(0x40 | (src.hi() << 2));
         }
         self.emit(0x89);
-        self.modrm_sib_disp32(src.lo(), addr);
+        self.modrm_rip_rel(src.lo());
+        self.emit_rip_rel_disp32(target_va, 0);
     }
 
-    /// mov qword [disp32], r64
-    pub fn mov_store64_abs(&mut self, addr: i32, src: Reg) {
+    /// mov qword [rip+disp32], r64
+    pub fn mov_store64_rip_rel(&mut self, target_va: u64, src: Reg) {
         self.emit(0x48 | (src.hi() << 2));
         self.emit(0x89);
-        self.modrm_sib_disp32(src.lo(), addr);
+        self.modrm_rip_rel(src.lo());
+        self.emit_rip_rel_disp32(target_va, 0);
     }
 
-    /// mov dword [disp32], imm32
-    pub fn mov_store32_abs_imm(&mut self, addr: i32, imm: i32) {
+    /// mov dword [rip+disp32], imm32 — the trailing imm32 means the
+    /// "next-instruction RIP" is 4 bytes further than disp32 alone.
+    pub fn mov_store32_rip_rel_imm(&mut self, target_va: u64, imm: i32) {
         self.emit(0xC7);
-        self.modrm_sib_disp32(0, addr);
+        self.modrm_rip_rel(0);
+        self.emit_rip_rel_disp32(target_va, 4);
         self.emit_i32(imm);
     }
 
-    /// mov qword [disp32], sign-extended imm32
-    pub fn mov_store64_abs_imm(&mut self, addr: i32, imm: i32) {
-        self.emit(0x48);
-        self.emit(0xC7);
-        self.modrm_sib_disp32(0, addr);
-        self.emit_i32(imm);
-    }
-
-    /// cmp dword [disp32], reg32  (sets flags: mem vs reg)
-    pub fn cmp_mem32_abs_r(&mut self, addr: i32, src: Reg) {
+    /// cmp dword [rip+disp32], reg32 (sets flags: mem vs reg)
+    pub fn cmp_mem32_rip_rel_r(&mut self, target_va: u64, src: Reg) {
         if src.hi() != 0 {
             self.emit(0x40 | (src.hi() << 2));
         }
         self.emit(0x39);
-        self.modrm_sib_disp32(src.lo(), addr);
+        self.modrm_rip_rel(src.lo());
+        self.emit_rip_rel_disp32(target_va, 0);
     }
 
-    /// cmp dword [disp32], imm32
-    pub fn cmp_mem32_abs_imm(&mut self, addr: i32, imm: i32) {
-        self.emit(0x81);
-        self.modrm_sib_disp32(7, addr); // /7 = cmp
-        self.emit_i32(imm);
-    }
-
-    /// add r64, qword [disp32]
-    pub fn add_r64_mem_abs(&mut self, dst: Reg, addr: i32) {
+    /// add r64, qword [rip+disp32]
+    pub fn add_r64_mem_rip_rel(&mut self, dst: Reg, target_va: u64) {
         self.emit(0x48 | (dst.hi() << 2));
         self.emit(0x03);
-        self.modrm_sib_disp32(dst.lo(), addr);
-    }
-
-    /// sub qword [disp32], sign-extended imm32. Always uses disp32
-    /// encoding for the immediate so the caller can patch via
-    /// `offset() - 4` (gas metering).
-    pub fn sub_mem64_abs_imm32(&mut self, addr: i32, imm: i32) {
-        // NOTE: Cannot use InstBuf here — caller reads offset() for patching.
-        self.emit(0x48);
-        self.emit(0x81);
-        self.modrm_sib_disp32(5, addr); // /5 = sub
-        self.emit_i32(imm);
+        self.modrm_rip_rel(dst.lo());
+        self.emit_rip_rel_disp32(target_va, 0);
     }
 
     // -- In-register gas decrement (patchable) --
@@ -1998,30 +2021,31 @@ mod tests {
         assert_eq!(asm.code_bytes(), &[0x4D, 0x8B, 0x04, 0x24]);
     }
 
-    /// Absolute SIB `mov eax, [0x1010]`:
-    /// 0x8B + ModRM(0x04: mod=00 reg=000 r/m=100 SIB) + SIB(0x25: disp32-only) + disp32.
+    /// `mov eax, [rip+disp32]` reaches `target_va`. With jit_va_base=0
+    /// and write_pos=0 after emit, post-instruction RIP is the 7th byte,
+    /// so disp32 = target_va - 7.
     #[test]
-    fn test_mov_load32_abs() {
+    fn test_mov_load32_rip_rel() {
         let mut asm = Assembler::new();
-        asm.mov_load32_abs(Reg::RAX, 0x1010);
-        assert_eq!(
-            asm.code_bytes(),
-            &[0x8B, 0x04, 0x25, 0x10, 0x10, 0x00, 0x00]
-        );
+        asm.set_jit_va_base(0x1_0000_0000); // 4 GiB
+        asm.mov_load32_rip_rel(Reg::RAX, 0x1_0000_0040); // 64 bytes above base
+        // 8B 05 <disp32>  — disp = 0x40 - (0 + 6) = 0x3A
+        // Wait: instruction is 6 bytes (no REX needed). post_inst_rip = base + 6.
+        // disp = 0x1_0000_0040 - (0x1_0000_0000 + 6) = 0x3A.
+        assert_eq!(asm.code_bytes(), &[0x8B, 0x05, 0x3A, 0x00, 0x00, 0x00]);
     }
 
-    /// `mov [0x1234], r15` — store-abs form with REX.R=1 for R15.
+    /// `mov [rip+disp32], r15` with REX.W|REX.R = 0x4C.
     #[test]
-    fn test_mov_store64_abs_r15() {
+    fn test_mov_store64_rip_rel_r15() {
         let mut asm = Assembler::new();
-        asm.mov_store64_abs(0x1234, Reg::R15);
-        // REX.W=1 REX.R=1 → 0x4C
-        // opcode 0x89
-        // ModRM (mod=00, reg=111=R15.lo, r/m=100=SIB) → 0x3C
-        // SIB 0x25 + disp32
+        asm.set_jit_va_base(0x1_0000_0000);
+        asm.mov_store64_rip_rel(0x1_0000_0080, Reg::R15);
+        // 4C 89 3D <disp32> — 7-byte instruction.
+        // disp = 0x80 - (0 + 7) = 0x79.
         assert_eq!(
             asm.code_bytes(),
-            &[0x4C, 0x89, 0x3C, 0x25, 0x34, 0x12, 0x00, 0x00]
+            &[0x4C, 0x89, 0x3D, 0x79, 0x00, 0x00, 0x00]
         );
     }
 
@@ -2080,27 +2104,34 @@ mod tests {
         assert_eq!(asm.code_bytes(), &[0x88, 0x02]);
     }
 
-    /// `mov dword [0x40000000], 0x123` — abs store-imm form.
+    /// `mov dword [rip+disp32], imm32` — RIP-relative store-imm form.
+    /// 10-byte instruction: C7 05 <disp32> <imm32>. The CPU resolves
+    /// RIP-relative against the NEXT-instruction RIP, which is past
+    /// BOTH disp32 and the trailing imm32 — so disp = target - 10.
     #[test]
-    fn test_mov_store32_abs_imm() {
+    fn test_mov_store32_rip_rel_imm() {
         let mut asm = Assembler::new();
-        asm.mov_store32_abs_imm(0x4000_0000, 0x123);
+        asm.set_jit_va_base(0x1_0000_0000);
+        asm.mov_store32_rip_rel_imm(0x1_0000_0100, 0x123);
+        // disp = 0x100 - (0 + 10) = 0xF6.
         assert_eq!(
             asm.code_bytes(),
-            &[
-                0xC7, 0x04, 0x25, 0x00, 0x00, 0x00, 0x40, 0x23, 0x01, 0x00, 0x00
-            ]
+            &[0xC7, 0x05, 0xF6, 0x00, 0x00, 0x00, 0x23, 0x01, 0x00, 0x00]
         );
     }
 
-    /// `add rax, [0x40000000]` — abs add for dispatch.
+    /// `add rax, [rip+disp32]` — used by the dispatch sequence to
+    /// fold code_base into native_addr.
     #[test]
-    fn test_add_r64_mem_abs() {
+    fn test_add_r64_mem_rip_rel() {
         let mut asm = Assembler::new();
-        asm.add_r64_mem_abs(Reg::RAX, 0x4000_0000);
+        asm.set_jit_va_base(0x1_0000_0000);
+        asm.add_r64_mem_rip_rel(Reg::RAX, 0x1_0000_0020);
+        // 48 03 05 <disp32> — 7-byte instruction.
+        // disp = 0x20 - (0 + 7) = 0x19.
         assert_eq!(
             asm.code_bytes(),
-            &[0x48, 0x03, 0x04, 0x25, 0x00, 0x00, 0x00, 0x40]
+            &[0x48, 0x03, 0x05, 0x19, 0x00, 0x00, 0x00]
         );
     }
 

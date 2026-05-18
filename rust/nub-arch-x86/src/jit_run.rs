@@ -16,11 +16,17 @@
 //! the JIT page table is per-invocation and only the guest's own
 //! mem region is mapped low.
 //!
+//! CTX sits at VA 4 GiB — the first page above the PVM u32 address
+//! range. The recompiler doesn't bounds-check guest mem (the PT does)
+//! so the full low 4 GiB belongs to the program; CTX must be outside.
+//! CTX is reached via RIP-relative addressing from the JIT code in
+//! META, which is within ±2 GiB.
+//!
 //! ```text
 //!   MEM_VA   = 0                               mem_size bytes guest memory
-//!   CTX_VA   = 1 GiB                           4 KiB JitContext (high disp32)
+//!   CTX_VA   = 4 GiB                           4 KiB JitContext
 //!
-//!   META_BASE= 4 GiB                           clear of any mem range
+//!   META_BASE= 4 GiB + 16 MiB                  clear of CTX, well-aligned
 //!   BB_VA    = META_BASE                       bitmask scratch (user-RO)
 //!   JT_VA    = META_BASE + 16 MiB              jump-table scratch (user-RO)
 //!   DISPATCH = META_BASE + 32 MiB              dispatch table (user-RO)
@@ -142,13 +148,15 @@ pub struct ExitInfo {
 // Lives in PML4 slot 0 (low VA 0..512 GiB) — now empty after the
 // Stage F kernel relocation moved the kernel to PML4 slot 511. User
 // VA `[0, mem_size)` mirrors PVM's u32 address space directly so
-// mem accesses can use `[rdx]` baseless. CTX sits at 1 GiB above mem
-// — well above any reasonable `mem_size` and within positive disp32
-// for absolute-SIB CTX addressing.
+// mem accesses can use `[rdx]` baseless. CTX sits at exactly 4 GiB
+// — the first page above the PVM u32 range. The recompiler does no
+// bounds-checking on guest mem (the PT does, via faults outside
+// `[0, mem_size)`) so PVM addresses can reach anywhere in the low
+// 4 GiB; CTX must be outside that range to avoid spoofing.
 
-const CTX_VA_M: u64 = 0x4000_0000; // 1 GiB
 const MEM_VA_M: u64 = 0;
-const META_BASE_M: u64 = 0x1_0000_0000; // 4 GiB
+const CTX_VA_M: u64 = 1u64 << 32; // 4 GiB — first page above PVM u32 range
+const META_BASE_M: u64 = CTX_VA_M + (1u64 << 24); // CTX + 16 MiB headroom
 const BB_VA_M: u64 = META_BASE_M;
 const JT_VA_M: u64 = META_BASE_M + (1u64 << 24); // +16 MiB
 const DISPATCH_VA_M: u64 = META_BASE_M + (1u64 << 25); // +32 MiB
@@ -263,7 +271,7 @@ pub unsafe fn run_pvm_with_mem(
         jump_table,
         helpers,
         code.len(),
-        false,
+        JIT_VA_M,
         javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
     );
     let result = compiler.compile(code, bitmask);
