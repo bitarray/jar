@@ -10,14 +10,17 @@
 //! ## Memory layout (per invocation, in the new page table)
 //!
 //! Everything lives in PML4 slot 0 (low VA, kernel relocated to slot
-//! 511 in Stage F kernel-high). VA 0 stays unmapped to preserve the
-//! NULL-deref guard.
+//! 511 in Stage F kernel-high). PVM addr == native VA: guest memory
+//! starts at VA 0 so mem accesses can use `[rdx]` baseless. The
+//! NULL-deref guard the old layout provided at VA 0 is moot here —
+//! the JIT page table is per-invocation and only the guest's own
+//! mem region is mapped low.
 //!
 //! ```text
-//!   CTX_VA   = 0x1000                          4 KiB JitContext
-//!   MEM_VA   = 0x2000                          mem_size bytes guest memory (R15)
+//!   MEM_VA   = 0                               mem_size bytes guest memory
+//!   CTX_VA   = 1 GiB                           4 KiB JitContext (high disp32)
 //!
-//!   META_BASE= 4 GiB + 0x2000                  clear of any mem range
+//!   META_BASE= 4 GiB                           clear of any mem range
 //!   BB_VA    = META_BASE                       bitmask scratch (user-RO)
 //!   JT_VA    = META_BASE + 16 MiB              jump-table scratch (user-RO)
 //!   DISPATCH = META_BASE + 32 MiB              dispatch table (user-RO)
@@ -138,18 +141,14 @@ pub struct ExitInfo {
 //
 // Lives in PML4 slot 0 (low VA 0..512 GiB) — now empty after the
 // Stage F kernel relocation moved the kernel to PML4 slot 511. User
-// VA `[PROG_BASE_M, ...)` mirrors PVM's u32 address space (plus our
-// own scratch tables in META region above). Skips VA 0 to preserve
-// the NULL-deref guard page.
-//
-// After the PERMS sweep, CTX sits at `PROG_BASE_M` (was 1 MiB above
-// PERMS); MEM follows immediately. R15 = MEM_VA_M = CTX + 4 KiB,
-// matching the recompiler's `lea CTX, [RDI + CTX_OFFSET]` prologue.
+// VA `[0, mem_size)` mirrors PVM's u32 address space directly so
+// mem accesses can use `[rdx]` baseless. CTX sits at 1 GiB above mem
+// — well above any reasonable `mem_size` and within positive disp32
+// for absolute-SIB CTX addressing.
 
-const PROG_BASE_M: u64 = 0x1000;
-const CTX_VA_M: u64 = PROG_BASE_M;
-const MEM_VA_M: u64 = PROG_BASE_M + 0x1000;
-const META_BASE_M: u64 = MEM_VA_M + (4u64 << 30); // +4 GiB above MEM
+const CTX_VA_M: u64 = 0x4000_0000; // 1 GiB
+const MEM_VA_M: u64 = 0;
+const META_BASE_M: u64 = 0x1_0000_0000; // 4 GiB
 const BB_VA_M: u64 = META_BASE_M;
 const JT_VA_M: u64 = META_BASE_M + (1u64 << 24); // +16 MiB
 const DISPATCH_VA_M: u64 = META_BASE_M + (1u64 << 25); // +32 MiB
@@ -280,7 +279,9 @@ pub unsafe fn run_pvm_with_mem(
     let mem_bytes = (mem_size as usize).next_multiple_of(PAGE_SIZE);
     let bb_bytes = bitmask.len();
     let jt_bytes = jump_table.len().checked_mul(core::mem::size_of::<u32>())?;
-    let dispatch_bytes = dispatch_table.len().checked_mul(core::mem::size_of::<i32>())?;
+    let dispatch_bytes = dispatch_table
+        .len()
+        .checked_mul(core::mem::size_of::<i32>())?;
     let dispatch_size_bytes = code.len().checked_mul(core::mem::size_of::<i32>())?;
     let jit_bytes = native.len();
 
@@ -411,8 +412,18 @@ pub unsafe fn run_pvm_with_mem(
         Perm::user_ro(),
     )?;
     pt.map(JIT_VA_M, jit_buf.pa(), jit_buf.size(), Perm::user_rx())?;
-    pt.map(TRAMP_VA_M, tramp_buf.pa(), tramp_buf.size(), Perm::user_rx())?;
-    pt.map(STACK_VA_M, stack_buf.pa(), stack_buf.size(), Perm::user_rw())?;
+    pt.map(
+        TRAMP_VA_M,
+        tramp_buf.pa(),
+        tramp_buf.size(),
+        Perm::user_rx(),
+    )?;
+    pt.map(
+        STACK_VA_M,
+        stack_buf.pa(),
+        stack_buf.size(),
+        Perm::user_rw(),
+    )?;
     let new_cr3 = pt.cr3()?;
 
     // ---- install ring-3 GDT/IDT + JIT #PF handler --------------------------

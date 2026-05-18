@@ -8,8 +8,8 @@
 //! always produces identical decoded state).
 //!
 //! Stage 3 stores predecoded `PvmProgram` directly. A future
-//! optimization can swap in JIT-compiled `CompiledCode` for the same
-//! key and serve both paths from one cache.
+//! optimization can swap in JIT-compiled bytes for the same key and
+//! serve both paths from one cache.
 
 use std::collections::HashMap;
 use std::sync::Arc;

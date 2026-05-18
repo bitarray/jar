@@ -923,7 +923,6 @@ name = "javm-recompiler-x86"
 version = "0.1.0"
 dependencies = [
  "javm-exec",
- "libc",
  "memoffset",
  "proptest",
 ]

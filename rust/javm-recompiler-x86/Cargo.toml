@@ -4,19 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "JAVM x86_64 recompiler (JIT): native codegen. no_std-compatible bytes-producer; mmap-backed code buffers + SIGSEGV fault handling require the `std` feature."
-
-[features]
-default = ["std"]
-# `std`: host-targeted build — includes mmap-backed code/data
-# buffers and the SIGSEGV signal handler. Disable for no_std
-# embedding (e.g. nub-arch-x86 in-kernel).
-std = ["javm-exec/std", "dep:libc"]
+description = "JAVM x86_64 recompiler (JIT): no_std bytes-producer. Embedded by nub-arch-x86, which supplies its own per-invocation runtime substrate."
 
 [dependencies]
 javm-exec = { path = "../javm-exec", default-features = false }
 memoffset = "0.9"
-libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

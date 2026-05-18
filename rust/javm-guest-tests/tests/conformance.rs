@@ -11,9 +11,7 @@
 //!    into a `nub::Nub` Hyperlight sandbox via `invoke_spec`. The
 //!    guest's `nub_invoke` entry compiles + runs the program at ring
 //!    3 with its own page table; the host reads `(return_value,
-//!    gas_remaining)` out of the resulting `InvocationResult`. The
-//!    standalone host-side `RecompiledPvm` JIT remains in
-//!    `javm-recompiler-x86` for that crate's unit tests only.
+//!    gas_remaining)` out of the resulting `InvocationResult`.
 //!
 //! Assertions:
 //! - native == interpreter == recompiler return value.

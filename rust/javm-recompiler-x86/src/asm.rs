@@ -12,8 +12,6 @@
 //! guards. Callers must ensure capacity via `ensure_capacity()` before emitting.
 //! Vec length is synced via `set_len(write_pos)` only at finalization boundaries.
 
-#[cfg(feature = "std")]
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -142,14 +140,11 @@ struct Fixup {
     label: Label,
 }
 
-/// Code buffer mode: either Vec-backed (for tests) or mmap-backed (for JIT).
+/// Code buffer mode. Today only a heap-allocated Vec is supported; the
+/// host-targeted `mmap`-direct path was retired with the
+/// `RecompiledPvm` sweep.
 enum CodeBuf {
-    /// Heap-allocated via Vec (used by tests and small programs).
     Vec(Vec<u8>),
-    /// mmap-backed (PROT_READ|PROT_WRITE). Avoids the copy in NativeCode::new
-    /// by writing directly to the buffer that will become executable.
-    #[cfg(feature = "std")]
-    Mmap { ptr: *mut u8, capacity: usize },
 }
 
 /// x86-64 assembler with label support.
@@ -217,87 +212,24 @@ impl Assembler {
         }
     }
 
-    /// Create with an mmap-backed code buffer. Code is written directly to the
-    /// mmap region during compilation. After finalize_mmap(), the buffer is
-    /// mprotected to PROT_READ|PROT_EXEC — no copy needed.
-    #[cfg(feature = "std")]
-    pub fn with_mmap(code_capacity: usize, label_capacity: usize) -> Result<Self, String> {
-        // SAFETY: mmap with MAP_ANONYMOUS|MAP_PRIVATE creates a fresh private mapping.
-        // Returns MAP_FAILED on error, checked below.
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                code_capacity,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
-                -1,
-                0,
-            )
-        };
-        if ptr == libc::MAP_FAILED || ptr.is_null() {
-            return Err("mmap failed for assembler code buffer".into());
-        }
-        let ptr = ptr as *mut u8;
-        Ok(Self {
-            code_buf: CodeBuf::Mmap {
-                ptr,
-                capacity: code_capacity,
-            },
-            buf: ptr,
-            write_pos: 0,
-            capacity: code_capacity,
-            labels: vec![0u32; label_capacity],
-            labels_len: 0,
-            // Fixups are far fewer than labels — typically ~2K for large programs
-            // (one per forward branch + one per OOG stub jcc). Over-allocating to
-            // label_capacity wastes ~1.5MB for ecrecover.
-            fixups: Vec::with_capacity(2048),
-        })
-    }
-
     /// Ensure at least `additional` bytes of capacity remain.
     /// Called before emitting large sequences. Most individual instructions
     /// need at most ~32 bytes, so this is rarely needed mid-compilation.
     #[cold]
     fn grow(&mut self, additional: usize) {
-        match &mut self.code_buf {
-            CodeBuf::Vec(code) => {
-                // SAFETY: write_pos <= code.capacity() is maintained by ensure_capacity().
-                // set_len(write_pos) exposes the bytes we've written so reserve() copies them.
-                unsafe {
-                    code.set_len(self.write_pos);
-                }
-                code.reserve(additional);
-                self.buf = code.as_mut_ptr();
-                self.capacity = code.capacity();
-                // SAFETY: Reset len to 0 — we track the actual length via write_pos,
-                // not Vec::len. The data is preserved in the backing allocation.
-                unsafe {
-                    code.set_len(0);
-                }
-            }
-            #[cfg(feature = "std")]
-            CodeBuf::Mmap { ptr, capacity } => {
-                // For mmap buffers, mremap to a larger size
-                let new_cap = (*capacity + additional).next_power_of_two();
-                // SAFETY: ptr/capacity are valid from a previous mmap. mremap may move
-                // the mapping; the returned pointer replaces the old one.
-                let new_ptr = unsafe {
-                    libc::mremap(
-                        *ptr as *mut libc::c_void,
-                        *capacity,
-                        new_cap,
-                        libc::MREMAP_MAYMOVE,
-                    )
-                };
-                if new_ptr == libc::MAP_FAILED {
-                    panic!("mremap failed: need {} bytes", new_cap);
-                }
-                *ptr = new_ptr as *mut u8;
-                *capacity = new_cap;
-                self.buf = *ptr;
-                self.capacity = new_cap;
-            }
+        let CodeBuf::Vec(code) = &mut self.code_buf;
+        // SAFETY: write_pos <= code.capacity() is maintained by ensure_capacity().
+        // set_len(write_pos) exposes the bytes we've written so reserve() copies them.
+        unsafe {
+            code.set_len(self.write_pos);
+        }
+        code.reserve(additional);
+        self.buf = code.as_mut_ptr();
+        self.capacity = code.capacity();
+        // SAFETY: Reset len to 0 — we track the actual length via write_pos,
+        // not Vec::len. The data is preserved in the backing allocation.
+        unsafe {
+            code.set_len(0);
         }
     }
 
@@ -1113,6 +1045,263 @@ impl Assembler {
         self.emit_i32(imm);
     }
 
+    // -- Baseless memory access [idx] (mod=00 r/m=idx, no SIB) --
+    //
+    // Codegen uses this when the PVM addr is itself the host VA — no
+    // base register needed because the runtime substrate's per-
+    // invocation page table maps `addr` → `addr` for the guest range.
+    // Saves one byte per access vs the SIB form `[base + idx]`.
+    //
+    // ModRM bytes: `(mod=00, reg, r/m=idx.lo())` if idx.lo() ∉ {4, 5}.
+    // For `idx.lo() == 4` (RSP/R12) the ModRM r/m=100 encoding means
+    // "SIB follows"; emit SIB = `(scale=00, index=100, base=4)` to
+    // recover plain `[idx]`. For `idx.lo() == 5` (RBP/R13) the
+    // mod=00 r/m=101 form is reserved for [RIP+disp32], so use
+    // mod=01 + disp8=0.
+    fn modrm_baseless(&mut self, reg: u8, idx: Reg) {
+        let r = reg & 7;
+        match idx.lo() {
+            4 => {
+                // SIB form: [RSP/R12]
+                self.emit((r << 3) | 4); // mod=00 r/m=100
+                self.emit(0x24); // SIB: scale=00, index=100=none, base=4
+            }
+            5 => {
+                // mod=01 disp8=0: [RBP/R13]
+                self.emit(0x40 | (r << 3) | 5);
+                self.emit(0);
+            }
+            _ => {
+                self.emit((r << 3) | idx.lo());
+            }
+        }
+    }
+
+    /// movzx r64, byte [idx] — zero-extending u8 load
+    pub fn movzx_load8_at_index(&mut self, dst: Reg, idx: Reg) {
+        self.emit(0x48 | (dst.hi() << 2) | idx.hi());
+        self.emit(0x0F);
+        self.emit(0xB6);
+        self.modrm_baseless(dst.lo(), idx);
+    }
+
+    /// movzx r64, word [idx] — zero-extending u16 load
+    pub fn movzx_load16_at_index(&mut self, dst: Reg, idx: Reg) {
+        let rex = 0x40 | (dst.hi() << 2) | idx.hi();
+        if rex != 0x40 {
+            self.emit(rex);
+        }
+        self.emit(0x0F);
+        self.emit(0xB7);
+        self.modrm_baseless(dst.lo(), idx);
+    }
+
+    /// mov r32, dword [idx] — zero-extending u32 load (writes EAX, clears upper 32)
+    pub fn mov_load32_at_index(&mut self, dst: Reg, idx: Reg) {
+        let rex = 0x40 | (dst.hi() << 2) | idx.hi();
+        if rex != 0x40 {
+            self.emit(rex);
+        }
+        self.emit(0x8B);
+        self.modrm_baseless(dst.lo(), idx);
+    }
+
+    /// mov r64, qword [idx]
+    pub fn mov_load64_at_index(&mut self, dst: Reg, idx: Reg) {
+        self.emit(0x48 | (dst.hi() << 2) | idx.hi());
+        self.emit(0x8B);
+        self.modrm_baseless(dst.lo(), idx);
+    }
+
+    /// mov byte [idx], r8
+    pub fn mov_store8_at_index(&mut self, idx: Reg, src: Reg) {
+        // REX prefix mandatory if `src` is SIL/DIL/BPL/SPL (encoded
+        // 4..=7 with hi=0) — without REX those encodings decode as
+        // AH/CH/DH/BH. (`needs_rex` only catches R8-R15.)
+        let rex = 0x40 | (src.hi() << 2) | idx.hi();
+        if rex != 0x40 || src.lo() >= 4 {
+            self.emit(rex);
+        }
+        self.emit(0x88);
+        self.modrm_baseless(src.lo(), idx);
+    }
+
+    /// mov word [idx], r16
+    pub fn mov_store16_at_index(&mut self, idx: Reg, src: Reg) {
+        self.emit(0x66);
+        let rex = 0x40 | (src.hi() << 2) | idx.hi();
+        if rex != 0x40 {
+            self.emit(rex);
+        }
+        self.emit(0x89);
+        self.modrm_baseless(src.lo(), idx);
+    }
+
+    /// mov dword [idx], r32
+    pub fn mov_store32_at_index(&mut self, idx: Reg, src: Reg) {
+        let rex = 0x40 | (src.hi() << 2) | idx.hi();
+        if rex != 0x40 {
+            self.emit(rex);
+        }
+        self.emit(0x89);
+        self.modrm_baseless(src.lo(), idx);
+    }
+
+    /// mov qword [idx], r64
+    pub fn mov_store64_at_index(&mut self, idx: Reg, src: Reg) {
+        self.emit(0x48 | (src.hi() << 2) | idx.hi());
+        self.emit(0x89);
+        self.modrm_baseless(src.lo(), idx);
+    }
+
+    /// mov byte [idx], imm8
+    pub fn mov_store8_at_index_imm(&mut self, idx: Reg, imm: u8) {
+        if idx.hi() != 0 {
+            self.emit(0x40 | idx.hi());
+        }
+        self.emit(0xC6);
+        self.modrm_baseless(0, idx);
+        self.emit(imm);
+    }
+
+    /// mov word [idx], imm16
+    pub fn mov_store16_at_index_imm(&mut self, idx: Reg, imm: u16) {
+        self.emit(0x66);
+        if idx.hi() != 0 {
+            self.emit(0x40 | idx.hi());
+        }
+        self.emit(0xC7);
+        self.modrm_baseless(0, idx);
+        self.emit(imm as u8);
+        self.emit((imm >> 8) as u8);
+    }
+
+    /// mov dword [idx], imm32
+    pub fn mov_store32_at_index_imm(&mut self, idx: Reg, imm: i32) {
+        if idx.hi() != 0 {
+            self.emit(0x40 | idx.hi());
+        }
+        self.emit(0xC7);
+        self.modrm_baseless(0, idx);
+        self.emit_i32(imm);
+    }
+
+    /// mov qword [idx], sign-extended imm32
+    pub fn mov_store64_at_index_imm(&mut self, idx: Reg, imm: i32) {
+        self.emit(0x48 | idx.hi());
+        self.emit(0xC7);
+        self.modrm_baseless(0, idx);
+        self.emit_i32(imm);
+    }
+
+    // -- Absolute SIB addressing `[disp32]` --
+    //
+    // 64-bit mode's `mov dst, [disp32]` raw form requires SIB-with-
+    // no-base: `(mod=00, r/m=100=SIB) (scale=00, index=100=none,
+    // base=101=disp32)` followed by the 4-byte disp32. The disp32 is
+    // sign-extended to 64-bit, so callers must keep `addr < 0x8000_0000`.
+    fn modrm_sib_disp32(&mut self, reg: u8, addr: i32) {
+        let r = reg & 7;
+        self.emit((r << 3) | 4); // mod=00, reg, r/m=100 (SIB follows)
+        self.emit(0x25); // SIB: scale=00, index=100 (none), base=101 (disp32-only)
+        self.emit_i32(addr);
+    }
+
+    /// mov r32, dword [disp32] (zero-extends to 64-bit)
+    pub fn mov_load32_abs(&mut self, dst: Reg, addr: i32) {
+        if dst.hi() != 0 {
+            self.emit(0x40 | (dst.hi() << 2));
+        }
+        self.emit(0x8B);
+        self.modrm_sib_disp32(dst.lo(), addr);
+    }
+
+    /// mov r64, qword [disp32]
+    pub fn mov_load64_abs(&mut self, dst: Reg, addr: i32) {
+        self.emit(0x48 | (dst.hi() << 2));
+        self.emit(0x8B);
+        self.modrm_sib_disp32(dst.lo(), addr);
+    }
+
+    /// mov dword [disp32], r32
+    pub fn mov_store32_abs(&mut self, addr: i32, src: Reg) {
+        if src.hi() != 0 {
+            self.emit(0x40 | (src.hi() << 2));
+        }
+        self.emit(0x89);
+        self.modrm_sib_disp32(src.lo(), addr);
+    }
+
+    /// mov qword [disp32], r64
+    pub fn mov_store64_abs(&mut self, addr: i32, src: Reg) {
+        self.emit(0x48 | (src.hi() << 2));
+        self.emit(0x89);
+        self.modrm_sib_disp32(src.lo(), addr);
+    }
+
+    /// mov dword [disp32], imm32
+    pub fn mov_store32_abs_imm(&mut self, addr: i32, imm: i32) {
+        self.emit(0xC7);
+        self.modrm_sib_disp32(0, addr);
+        self.emit_i32(imm);
+    }
+
+    /// mov qword [disp32], sign-extended imm32
+    pub fn mov_store64_abs_imm(&mut self, addr: i32, imm: i32) {
+        self.emit(0x48);
+        self.emit(0xC7);
+        self.modrm_sib_disp32(0, addr);
+        self.emit_i32(imm);
+    }
+
+    /// cmp dword [disp32], reg32  (sets flags: mem vs reg)
+    pub fn cmp_mem32_abs_r(&mut self, addr: i32, src: Reg) {
+        if src.hi() != 0 {
+            self.emit(0x40 | (src.hi() << 2));
+        }
+        self.emit(0x39);
+        self.modrm_sib_disp32(src.lo(), addr);
+    }
+
+    /// cmp dword [disp32], imm32
+    pub fn cmp_mem32_abs_imm(&mut self, addr: i32, imm: i32) {
+        self.emit(0x81);
+        self.modrm_sib_disp32(7, addr); // /7 = cmp
+        self.emit_i32(imm);
+    }
+
+    /// add r64, qword [disp32]
+    pub fn add_r64_mem_abs(&mut self, dst: Reg, addr: i32) {
+        self.emit(0x48 | (dst.hi() << 2));
+        self.emit(0x03);
+        self.modrm_sib_disp32(dst.lo(), addr);
+    }
+
+    /// sub qword [disp32], sign-extended imm32. Always uses disp32
+    /// encoding for the immediate so the caller can patch via
+    /// `offset() - 4` (gas metering).
+    pub fn sub_mem64_abs_imm32(&mut self, addr: i32, imm: i32) {
+        // NOTE: Cannot use InstBuf here — caller reads offset() for patching.
+        self.emit(0x48);
+        self.emit(0x81);
+        self.modrm_sib_disp32(5, addr); // /5 = sub
+        self.emit_i32(imm);
+    }
+
+    // -- In-register gas decrement (patchable) --
+
+    /// sub r64, imm32 in the always-imm32 (7-byte) encoding.
+    /// `offset() - 4` after this call points at the imm32 field;
+    /// callers patch it after emission for per-block gas metering.
+    pub fn sub_r64_imm32_patchable(&mut self, dst: Reg, imm: i32) {
+        // NOTE: Cannot use InstBuf here — caller reads offset() for
+        // patching. The imm32 must be the trailing 4 bytes.
+        self.emit(0x48 | dst.hi());
+        self.emit(0x81);
+        self.emit(0xE8 | dst.lo()); // mod=11 (register), reg=5 (sub), r/m=dst.lo()
+        self.emit_i32(imm);
+    }
+
     // -- IMUL --
 
     /// imul r64, r64
@@ -1703,14 +1892,10 @@ impl Assembler {
 
     /// Sync Vec length with the write cursor. Call before accessing `self.code` directly.
     pub fn sync_len(&mut self) {
-        // `if let` here is irrefutable in no_std builds (CodeBuf::Mmap is std-only),
-        // but stays for symmetry with std builds where it matters.
-        #[cfg_attr(not(feature = "std"), allow(irrefutable_let_patterns))]
-        if let CodeBuf::Vec(code) = &mut self.code_buf {
-            // SAFETY: write_pos <= code.capacity() (maintained by emission guards).
-            unsafe {
-                code.set_len(self.write_pos);
-            }
+        let CodeBuf::Vec(code) = &mut self.code_buf;
+        // SAFETY: write_pos <= code.capacity() (maintained by emission guards).
+        unsafe {
+            code.set_len(self.write_pos);
         }
     }
 
@@ -1734,142 +1919,23 @@ impl Assembler {
         }
     }
 
-    /// Resolve fixups and return the code as a `Vec<u8>` (for Vec-backed buffers).
+    /// Resolve fixups and return the code as a `Vec<u8>`.
     pub fn finalize(&mut self) -> Vec<u8> {
         self.resolve_fixups();
-        match &mut self.code_buf {
-            CodeBuf::Vec(code) => {
-                // SAFETY: write_pos <= code.capacity().
-                unsafe {
-                    code.set_len(self.write_pos);
-                }
-                core::mem::take(code)
-            }
-            #[cfg(feature = "std")]
-            CodeBuf::Mmap { ptr, capacity } => {
-                // Copy from mmap to Vec (fallback path)
-                let mut v = Vec::with_capacity(self.write_pos);
-                // SAFETY: ptr is valid for write_pos bytes (written during compilation).
-                // munmap frees the original mapping after the copy.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(*ptr, v.as_mut_ptr(), self.write_pos);
-                    v.set_len(self.write_pos);
-                    libc::munmap(*ptr as *mut libc::c_void, *capacity);
-                }
-                *ptr = core::ptr::null_mut();
-                *capacity = 0;
-                v
-            }
+        let CodeBuf::Vec(code) = &mut self.code_buf;
+        // SAFETY: write_pos <= code.capacity().
+        unsafe {
+            code.set_len(self.write_pos);
         }
-    }
-
-    /// Resolve fixups, mprotect the buffer to PROT_READ|PROT_EXEC with a
-    /// trailing PROT_NONE guard page, and return the executable buffer pointer
-    /// and length. Only works for mmap-backed buffers.
-    /// Returns (ptr, code_len, mmap_capacity) for NativeCode construction.
-    #[cfg(feature = "std")]
-    pub fn finalize_executable(&mut self) -> Result<(*mut u8, usize, usize), String> {
-        self.resolve_fixups();
-        match &mut self.code_buf {
-            CodeBuf::Mmap { ptr, capacity } => {
-                let code_len = self.write_pos;
-                let p = *ptr;
-                let mut cap = *capacity;
-                let page_size = 4096usize;
-                let code_pages = (code_len + page_size - 1) & !(page_size - 1);
-                let needed = code_pages + page_size; // + trailing guard page
-
-                // Extend the mapping if necessary to fit a trailing guard page.
-                if cap < needed {
-                    // SAFETY: p/cap are from a valid mmap. mremap may move the
-                    // mapping; the returned pointer replaces the old one.
-                    let new_ptr = unsafe {
-                        libc::mremap(p as *mut libc::c_void, cap, needed, libc::MREMAP_MAYMOVE)
-                    };
-                    if new_ptr == libc::MAP_FAILED {
-                        // SAFETY: p/cap are from the original valid mmap (mremap failed,
-                        // so the original mapping is still intact and must be freed).
-                        unsafe {
-                            libc::munmap(p as *mut libc::c_void, cap);
-                        }
-                        *ptr = std::ptr::null_mut();
-                        *capacity = 0;
-                        return Err("mremap for guard page failed".into());
-                    }
-                    let new_p = new_ptr as *mut u8;
-                    *ptr = new_p;
-                    cap = needed;
-                    *capacity = cap;
-                }
-
-                let p = *ptr;
-
-                // SAFETY: mprotect transitions code pages from RW to RX (W^X).
-                // On failure, munmap cleans up. Ownership transfers to the caller
-                // by nulling ptr/capacity (prevents double-free in Drop).
-                unsafe {
-                    if libc::mprotect(
-                        p as *mut libc::c_void,
-                        code_pages,
-                        libc::PROT_READ | libc::PROT_EXEC,
-                    ) != 0
-                    {
-                        libc::munmap(p as *mut libc::c_void, cap);
-                        *ptr = std::ptr::null_mut();
-                        *capacity = 0;
-                        return Err("mprotect RX failed".into());
-                    }
-                    // Trailing guard: PROT_NONE catches wild forward jumps past JIT code.
-                    // SAFETY: p + code_pages is within the mmap region (cap >= needed).
-                    if libc::mprotect(
-                        p.add(code_pages) as *mut libc::c_void,
-                        cap - code_pages,
-                        libc::PROT_NONE,
-                    ) != 0
-                    {
-                        libc::munmap(p as *mut libc::c_void, cap);
-                        *ptr = std::ptr::null_mut();
-                        *capacity = 0;
-                        return Err("mprotect guard failed".into());
-                    }
-                }
-                // Prevent Drop from double-freeing — ownership transfers to caller
-                *ptr = std::ptr::null_mut();
-                *capacity = 0;
-                Ok((p, code_len, cap))
-            }
-            CodeBuf::Vec(_) => Err("finalize_executable requires mmap-backed buffer".into()),
-        }
+        core::mem::take(code)
     }
 
     /// Get a slice of the written code bytes (for tests). Syncs Vec len first.
     #[cfg(test)]
     pub fn code_bytes(&mut self) -> &[u8] {
         self.sync_len();
-        match &self.code_buf {
-            CodeBuf::Vec(v) => v.as_slice(),
-            // SAFETY: ptr is valid for write_pos bytes (the mmap region).
-            #[cfg(feature = "std")]
-            CodeBuf::Mmap { ptr, .. } => unsafe {
-                core::slice::from_raw_parts(*ptr, self.write_pos)
-            },
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl Drop for Assembler {
-    fn drop(&mut self) {
-        if let CodeBuf::Mmap { ptr, capacity } = self.code_buf
-            && !ptr.is_null()
-            && capacity > 0
-        {
-            // SAFETY: ptr/capacity are from a valid mmap that wasn't transferred
-            // to the caller (finalize_executable nulls ptr on ownership transfer).
-            unsafe {
-                libc::munmap(ptr as *mut libc::c_void, capacity);
-            }
-        }
+        let CodeBuf::Vec(v) = &self.code_buf;
+        v.as_slice()
     }
 }
 
@@ -1907,6 +1973,151 @@ mod tests {
         assert_eq!(code[0], 0xE9);
         let rel = i32::from_le_bytes([code[1], code[2], code[3], code[4]]);
         assert_eq!(rel, 1); // skip over the nop
+    }
+
+    /// Baseless `mov r32, [rdx]`:
+    /// REX (0x40) + 0x8B + ModRM (mod=00, reg=000=eax, r/m=010=rdx) = 3 bytes.
+    /// Codegen relies on this being the 3-byte form (vs the 4-byte SIB).
+    #[test]
+    fn test_mov_load32_at_rdx() {
+        let mut asm = Assembler::new();
+        asm.mov_load32_at_index(Reg::RAX, Reg::RDX);
+        assert_eq!(asm.code_bytes(), &[0x8B, 0x02]);
+    }
+
+    /// Same shape but with R8 as dst (REX.R=1) and R12 as idx
+    /// (lo=4, needs SIB recovery to encode bare `[r12]`).
+    #[test]
+    fn test_mov_load64_at_r12_into_r8() {
+        let mut asm = Assembler::new();
+        asm.mov_load64_at_index(Reg::R8, Reg::R12);
+        // REX.W=1 REX.R=1 REX.B=1 → 0x4D
+        // opcode 0x8B
+        // ModRM mod=00 reg=000 r/m=100 → 0x04
+        // SIB scale=00 index=100=none base=100 → 0x24
+        assert_eq!(asm.code_bytes(), &[0x4D, 0x8B, 0x04, 0x24]);
+    }
+
+    /// Absolute SIB `mov eax, [0x1010]`:
+    /// 0x8B + ModRM(0x04: mod=00 reg=000 r/m=100 SIB) + SIB(0x25: disp32-only) + disp32.
+    #[test]
+    fn test_mov_load32_abs() {
+        let mut asm = Assembler::new();
+        asm.mov_load32_abs(Reg::RAX, 0x1010);
+        assert_eq!(
+            asm.code_bytes(),
+            &[0x8B, 0x04, 0x25, 0x10, 0x10, 0x00, 0x00]
+        );
+    }
+
+    /// `mov [0x1234], r15` — store-abs form with REX.R=1 for R15.
+    #[test]
+    fn test_mov_store64_abs_r15() {
+        let mut asm = Assembler::new();
+        asm.mov_store64_abs(0x1234, Reg::R15);
+        // REX.W=1 REX.R=1 → 0x4C
+        // opcode 0x89
+        // ModRM (mod=00, reg=111=R15.lo, r/m=100=SIB) → 0x3C
+        // SIB 0x25 + disp32
+        assert_eq!(
+            asm.code_bytes(),
+            &[0x4C, 0x89, 0x3C, 0x25, 0x34, 0x12, 0x00, 0x00]
+        );
+    }
+
+    /// `mov [rdx], eax` (32-bit store) — baseless form, 2 bytes.
+    #[test]
+    fn test_mov_store32_at_rdx() {
+        let mut asm = Assembler::new();
+        asm.mov_store32_at_index(Reg::RDX, Reg::RAX);
+        assert_eq!(asm.code_bytes(), &[0x89, 0x02]);
+    }
+
+    /// `mov [rdx], r11d` — REX.R for r11 source.
+    #[test]
+    fn test_mov_store32_at_rdx_from_r11() {
+        let mut asm = Assembler::new();
+        asm.mov_store32_at_index(Reg::RDX, Reg::R11);
+        assert_eq!(asm.code_bytes(), &[0x44, 0x89, 0x1A]);
+    }
+
+    /// `mov byte [rdx], sil` — src ∈ {SPL,BPL,SIL,DIL} requires a
+    /// REX prefix to disambiguate from AH/CH/DH/BH. The bare `88 32`
+    /// would decode as `mov [rdx], DH` which is silently wrong.
+    #[test]
+    fn test_mov_store8_at_rdx_from_sil() {
+        let mut asm = Assembler::new();
+        asm.mov_store8_at_index(Reg::RDX, Reg::RSI);
+        assert_eq!(asm.code_bytes(), &[0x40, 0x88, 0x32]);
+    }
+
+    #[test]
+    fn test_mov_store8_at_rdx_from_dil() {
+        let mut asm = Assembler::new();
+        asm.mov_store8_at_index(Reg::RDX, Reg::RDI);
+        assert_eq!(asm.code_bytes(), &[0x40, 0x88, 0x3A]);
+    }
+
+    #[test]
+    fn test_mov_store8_at_rdx_from_bpl() {
+        let mut asm = Assembler::new();
+        asm.mov_store8_at_index(Reg::RDX, Reg::RBP);
+        assert_eq!(asm.code_bytes(), &[0x40, 0x88, 0x2A]);
+    }
+
+    #[test]
+    fn test_mov_store8_at_rdx_from_spl() {
+        let mut asm = Assembler::new();
+        asm.mov_store8_at_index(Reg::RDX, Reg::RSP);
+        assert_eq!(asm.code_bytes(), &[0x40, 0x88, 0x22]);
+    }
+
+    /// `mov byte [rdx], al` — REX still NOT emitted for AL/CL/DL/BL.
+    #[test]
+    fn test_mov_store8_at_rdx_from_al_no_rex() {
+        let mut asm = Assembler::new();
+        asm.mov_store8_at_index(Reg::RDX, Reg::RAX);
+        assert_eq!(asm.code_bytes(), &[0x88, 0x02]);
+    }
+
+    /// `mov dword [0x40000000], 0x123` — abs store-imm form.
+    #[test]
+    fn test_mov_store32_abs_imm() {
+        let mut asm = Assembler::new();
+        asm.mov_store32_abs_imm(0x4000_0000, 0x123);
+        assert_eq!(
+            asm.code_bytes(),
+            &[
+                0xC7, 0x04, 0x25, 0x00, 0x00, 0x00, 0x40, 0x23, 0x01, 0x00, 0x00
+            ]
+        );
+    }
+
+    /// `add rax, [0x40000000]` — abs add for dispatch.
+    #[test]
+    fn test_add_r64_mem_abs() {
+        let mut asm = Assembler::new();
+        asm.add_r64_mem_abs(Reg::RAX, 0x4000_0000);
+        assert_eq!(
+            asm.code_bytes(),
+            &[0x48, 0x03, 0x04, 0x25, 0x00, 0x00, 0x00, 0x40]
+        );
+    }
+
+    /// `sub r15, imm32` patchable form — must be exactly 7 bytes with
+    /// the imm32 at bytes 3..7 (codegen patches via `offset() - 4`).
+    #[test]
+    fn test_sub_r64_imm32_patchable_r15() {
+        let mut asm = Assembler::new();
+        asm.sub_r64_imm32_patchable(Reg::R15, 0xCAFE_F00D_u32 as i32);
+        let bytes = asm.code_bytes();
+        assert_eq!(bytes.len(), 7, "patchable sub must be 7 bytes");
+        // REX.W=1 REX.B=1 → 0x49
+        // opcode 0x81
+        // ModRM mod=11 reg=5 r/m=7 → 0xEF
+        // imm32 at bytes 3..7 in LE
+        assert_eq!(&bytes[0..3], &[0x49, 0x81, 0xEF]);
+        assert_eq!(&bytes[3..7], &[0x0D, 0xF0, 0xFE, 0xCA]);
     }
 
     #[test]
