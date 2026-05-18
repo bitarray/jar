@@ -16,8 +16,6 @@ limitations under the License.
 
 /// Configuration needed to establish a sandbox.
 pub mod config;
-/// Host-side file mapping preparation for `map_file_cow`.
-pub(crate) mod file_mapping;
 /// Functionality for reading, but not modifying host functions
 pub(crate) mod host_funcs;
 /// Functionality for dealing with initialized sandboxes that can
@@ -44,7 +42,7 @@ pub use callable::Callable;
 /// Re-export for `SandboxConfiguration` type
 pub use config::SandboxConfiguration;
 /// Re-export for the `MultiUseSandbox` type
-pub use initialized_multi_use::{MultiUseSandbox, PtRootFinder};
+pub use initialized_multi_use::MultiUseSandbox;
 /// Re-export for `GuestBinary` type
 pub use uninitialized::GuestBinary;
 /// Re-export for `UninitializedSandbox` type

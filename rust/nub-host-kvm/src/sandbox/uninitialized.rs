@@ -181,9 +181,6 @@ pub struct UninitializedSandbox {
     /// multiple counters that would have divergent cached values.
     #[cfg(feature = "guest-counter")]
     counter_taken: std::sync::atomic::AtomicBool,
-    /// File mappings prepared by [`Self::map_file_cow`] that will be
-    /// applied to the VM during [`Self::evolve`].
-    pub(crate) pending_file_mappings: Vec<super::file_mapping::PreparedFileMapping>,
 }
 
 impl Debug for UninitializedSandbox {
@@ -380,7 +377,6 @@ impl UninitializedSandbox {
             deferred_hshm: Arc::new(Mutex::new(None)),
             #[cfg(feature = "guest-counter")]
             counter_taken: std::sync::atomic::AtomicBool::new(false),
-            pending_file_mappings: Vec::new(),
         };
 
         // If we were passed a writer for host print register it otherwise use the default.
@@ -430,86 +426,6 @@ impl UninitializedSandbox {
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     pub fn evolve(self) -> Result<MultiUseSandbox> {
         evolve_impl_multi_use(self)
-    }
-
-    /// Map the contents of a file into the guest at a particular address.
-    ///
-    /// The file mapping is prepared immediately (host-side OS work) but
-    /// the actual VM-side mapping is deferred until [`evolve()`](Self::evolve).
-    ///
-    /// An optional `label` identifies this mapping in the PEB's
-    /// `FileMappingInfo` array (max 63 bytes, defaults to the file name).
-    ///
-    /// The `guest_base` must be page-aligned and must lie **outside**
-    /// the sandbox's primary shared memory region (`BASE_ADDRESS` to
-    /// `BASE_ADDRESS + shared_mem_size`).
-    ///
-    /// Returns the length of the mapping in bytes.
-    #[instrument(err(Debug), skip(self, file_path, guest_base, label), parent = Span::current())]
-    pub fn map_file_cow(
-        &mut self,
-        file_path: &std::path::Path,
-        guest_base: u64,
-        label: Option<&str>,
-    ) -> crate::Result<u64> {
-        // Fail fast if the preallocated PEB array is already full.
-        if self.pending_file_mappings.len() >= hyperlight_common::mem::MAX_FILE_MAPPINGS {
-            return Err(crate::HyperlightError::Error(format!(
-                "map_file_cow: file mapping limit reached ({} of {})",
-                self.pending_file_mappings.len(),
-                hyperlight_common::mem::MAX_FILE_MAPPINGS,
-            )));
-        }
-
-        // Validate that guest_base is outside the sandbox's primary memory slot.
-        // (Full range check happens after prepare_file_cow when we know the mapped size.)
-        let shared_size = self.mgr.shared_mem.mem_size() as u64;
-        let base_addr = crate::mem::layout::SandboxMemoryLayout::BASE_ADDRESS as u64;
-
-        let prepared = super::file_mapping::prepare_file_cow(file_path, guest_base, label)?;
-
-        // Validate full mapped range doesn't overlap shared memory.
-        let mapping_end = guest_base
-            .checked_add(prepared.size as u64)
-            .ok_or_else(|| {
-                crate::HyperlightError::Error(format!(
-                    "map_file_cow: guest address overflow: {:#x} + {:#x}",
-                    guest_base, prepared.size
-                ))
-            })?;
-        let shared_end = base_addr.checked_add(shared_size).ok_or_else(|| {
-            crate::HyperlightError::Error("shared memory end overflow".to_string())
-        })?;
-        if guest_base < shared_end && mapping_end > base_addr {
-            return Err(crate::HyperlightError::Error(format!(
-                "map_file_cow: mapping [{:#x}..{:#x}) overlaps sandbox shared memory [{:#x}..{:#x})",
-                guest_base, mapping_end, base_addr, shared_end,
-            )));
-        }
-
-        let size = prepared.size as u64;
-
-        // Check for overlaps with existing pending file mappings.
-        let new_start = guest_base;
-        let new_end = mapping_end;
-        for existing in &self.pending_file_mappings {
-            let ex_start = existing.guest_base;
-            let ex_end = ex_start.checked_add(existing.size as u64).ok_or_else(|| {
-                crate::HyperlightError::Error(format!(
-                    "map_file_cow: existing mapping address overflow: {:#x} + {:#x}",
-                    ex_start, existing.size
-                ))
-            })?;
-            if new_start < ex_end && new_end > ex_start {
-                return Err(crate::HyperlightError::Error(format!(
-                    "map_file_cow: mapping [{:#x}..{:#x}) overlaps existing mapping [{:#x}..{:#x})",
-                    new_start, new_end, ex_start, ex_end,
-                )));
-            }
-        }
-
-        self.pending_file_mappings.push(prepared);
-        Ok(size)
     }
 
     /// Returns the total size of the sandbox shared memory region in bytes.

@@ -317,9 +317,12 @@ impl HyperlightError {
     /// state where memory, resources, or data structures may be corrupted or leaked. Usually
     /// due to the guest not running to completion.
     ///
-    /// If this method returns `true`, the sandbox will be poisoned and all further operations
-    /// will fail until the sandbox is restored from a non-poisoned snapshot using
-    /// [`crate::MultiUseSandbox::restore()`].
+    /// Post-Stage-F: poison-tracking on `MultiUseSandbox` was removed along
+    /// with `snapshot()` / `restore()`. This method is unused by the host
+    /// driver — callers drop the sandbox and rebuild on error. It is kept
+    /// (and `dead_code`-allowed) only so the inner
+    /// `DispatchGuestCallError::is_poison_error` chain still type-checks.
+    #[allow(dead_code)]
     pub(crate) fn is_poison_error(&self) -> bool {
         // wildcard _ or matches! not used here purposefully to ensure that new error variants
         // are explicitly considered for poisoning behavior.

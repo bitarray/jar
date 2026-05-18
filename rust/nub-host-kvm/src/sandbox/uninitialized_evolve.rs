@@ -83,42 +83,6 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
     #[cfg(target_os = "linux")]
     setup_signal_handlers(&u_sbox.config)?;
 
-    // Apply any file mappings that were prepared before evolve.
-    // This must happen before vm.initialise() so the mapped data is
-    // visible to the guest's init code.
-    //
-    // Each PreparedFileMapping is marked consumed immediately after
-    // its map_region succeeds — on Windows, WhpVm::map_memory copies
-    // the handle into its own cleanup list, so we must not let
-    // PreparedFileMapping::drop also release it (double-close).
-    // Unconsumed mappings (those after a failed map_region) are
-    // cleaned up by Drop when `pending` goes out of scope.
-    let pending = u_sbox.pending_file_mappings;
-    for mut prepared in pending {
-        let region = prepared.to_memory_region()?;
-        unsafe { vm.map_region(&region) }.map_err(|e| {
-            crate::HyperlightError::HyperlightVmError(HyperlightVmError::MapRegion(e))
-        })?;
-
-        // Mark consumed immediately after map_region succeeds.
-        // On Windows, WhpVm::map_memory copies the file mapping handle
-        // into its own `file_mappings` vec for cleanup on drop. If we
-        // deferred mark_consumed(), both PreparedFileMapping::drop and
-        // WhpVm::drop would release the same handle — a double-close.
-        // For linux see https://github.com/hyperlight-dev/hyperlight/issues/1290.
-        prepared.mark_consumed();
-        // Record the mapping metadata in the PEB. This runs after
-        // mark_consumed() because map_region already transferred
-        // resource ownership to the VM layer. If this write fails,
-        // the VM still holds a valid mapping but the PEB won't list
-        // it — acceptable since we're about to return Err and the
-        // VM will be dropped. The limit was already validated in
-        // UninitializedSandbox::map_file_cow.
-        #[cfg(feature = "nanvix-unstable")]
-        hshm.write_file_mapping_entry(prepared.guest_base, prepared.size as u64, &prepared.label)?;
-        hshm.mapped_rgns += 1;
-    }
-
     vm.initialise(
         peb_addr,
         seed,
