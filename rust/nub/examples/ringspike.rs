@@ -26,7 +26,7 @@
 //!   an error.
 
 use anyhow::Result;
-use hyperlight_host::sandbox::{GuestBinary, SandboxConfiguration, UninitializedSandbox};
+use nub_host_x86::sandbox::{GuestBinary, SandboxConfiguration, UninitializedSandbox};
 use nub_arch_hyperlight_abi::{InvocationResult, InvocationSpec, PvmRegs};
 use scale::{Decode, Encode};
 

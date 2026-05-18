@@ -19,7 +19,7 @@
 //! either backend, just to exercise the wiring.
 
 use anyhow::Result;
-use hyperlight_host::sandbox::{
+use nub_host_x86::sandbox::{
     GuestBinary, MultiUseSandbox, SandboxConfiguration, UninitializedSandbox,
 };
 use nub_arch_local::LocalArch;

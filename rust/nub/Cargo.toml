@@ -11,7 +11,9 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
-hyperlight-host = "0.15"
+# Forked KVM-only Hyperlight host (vendored + stripped from
+# `hyperlight-host` 0.15.0; see `rust/nub-host-x86`).
+nub-host-x86 = { path = "../nub-host-x86" }
 nub-kernel = { path = "../nub-kernel" }
 nub-arch-local = { path = "../nub-arch-local" }
 # Wire types shared between the host driver and the guest's
