@@ -15,7 +15,6 @@ extern crate alloc;
 use core::fmt::Write;
 
 use arch::dispatch::dispatch_function;
-use buddy_system_allocator::LockedHeap;
 use guest_function::register::GuestFunctionRegister;
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_common::mem::HyperlightPEB;
@@ -38,8 +37,16 @@ pub mod host_comm;
 pub mod paging;
 
 // === Globals ===
+//
+// F3.4: replaced upstream's `buddy_system_allocator::LockedHeap<32>`
+// with `talc::TalcLock`. Talc is dlmalloc-style (linked-list +
+// boundary tagging + binning) and copes much better with the bench
+// workload's alloc/free churn — buddy's power-of-2 binning was
+// fragmenting the heap badly enough that 16 KiB allocations failed
+// after a few thousand iterations.
 #[global_allocator]
-pub(crate) static HEAP_ALLOCATOR: LockedHeap<32> = LockedHeap::<32>::empty();
+pub(crate) static HEAP_ALLOCATOR: talc::TalcLock<spinning_top::RawSpinlock, talc::source::Manual> =
+    talc::TalcLock::new(talc::source::Manual);
 
 pub static mut GUEST_HANDLE: GuestHandle = GuestHandle::new();
 pub(crate) static mut REGISTERED_GUEST_FUNCTIONS: GuestFunctionRegister<GuestFunc> =
@@ -138,12 +145,16 @@ pub(crate) extern "C" fn generic_init(
         #[allow(static_mut_refs)]
         let peb_ptr = GUEST_HANDLE.peb().unwrap();
 
-        let heap_start = (*peb_ptr).guest_heap.ptr as usize;
+        let heap_start = (*peb_ptr).guest_heap.ptr as *mut u8;
         let heap_size = (*peb_ptr).guest_heap.size as usize;
+        // SAFETY: the host hands us a contiguous, exclusively-owned
+        // writable region of `heap_size` bytes at `heap_start`. We
+        // claim it once, here, before any allocator-backed code runs.
         HEAP_ALLOCATOR
             .try_lock()
             .expect("Failed to access HEAP_ALLOCATOR")
-            .init(heap_start, heap_size);
+            .claim(heap_start, heap_size)
+            .expect("talc heap claim");
         peb_ptr
     };
 

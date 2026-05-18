@@ -74,18 +74,21 @@ impl Nub {
         // via Hyperlight's input-data ring. Default 16 KiB is
         // exhausted by guest-tests' multi-endpoint Image.
         let mut cfg = SandboxConfiguration::default();
+        // Sized post-Stage-F: forked host (nub-host-x86) + forked
+        // guest-bin still mark writable pages CoW so the host's
+        // snapshot machinery has somewhere to roll back from. The
+        // leak that motivated the fork is bounded by the heap size —
+        // every heap page CoW-resolves once into a fresh scratch
+        // frame, then the working set asymptotes. With a 64 MiB heap
+        // the worst-case CoW consumption is ~64 MiB; plus the
+        // per-process pool (~94 MiB; see `nub-arch-hyperlight::pool`),
+        // plus a small stack-growth allowance, comfortably fits in
+        // 192 MiB scratch. Without the bench-era 1 GiB heap, the
+        // criterion default sample sizes no longer blow the budget.
         cfg.set_scratch_size(512 * 1024 * 1024);
         cfg.set_input_data_size(16 * 1024 * 1024);
         cfg.set_output_data_size(16 * 1024 * 1024);
-        // Heap for the guest's buddy allocator. The default 128 KiB
-        // is sized only for the original ring-0 spike. With the
-        // in-kernel JIT path: each invocation alloc/frees ~hundreds
-        // of KiB of compiler scratch (native code Vec, dispatch
-        // table, label vector). The bench harness does tens of
-        // thousands of iters in a row, and the buddy allocator's
-        // power-of-2 fragmentation eats headroom over time. 1 GiB
-        // ensures even the longest bench run stays comfortable.
-        cfg.set_heap_size(1024 * 1024 * 1024);
+        cfg.set_heap_size(256 * 1024 * 1024);
         let uninit = UninitializedSandbox::new(
             GuestBinary::FilePath(NUB_ARCH_HYPERLIGHT_BLOB_PATH.to_string()),
             Some(cfg),

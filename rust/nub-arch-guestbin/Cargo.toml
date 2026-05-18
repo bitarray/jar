@@ -34,13 +34,14 @@ name = "hyperlight_guest_bin"
 path = "src/lib.rs"
 
 [dependencies]
-buddy_system_allocator = "0.13.0"
 flatbuffers = { version = "25.12.19", default-features = false }
 hyperlight-common = { version = "0.15.0", default-features = false }
 hyperlight-guest = { version = "0.15.0", default-features = false }
 hyperlight-guest-macro = { version = "0.15.0", optional = true, default-features = false }
 linkme = { version = "0.3.36", optional = true }
 spin = "0.10.0"
+spinning_top = "0.3.0"
+talc = "5.0.3"
 tracing = { version = "0.1.44", features = ["attributes"], default-features = false }
 
 [lints.rust]
