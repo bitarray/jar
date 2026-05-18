@@ -168,8 +168,7 @@ impl Perm {
 /// 4 KiB page table (512 × 8-byte entries).
 type Table = [u64; 512];
 
-const TABLE_LAYOUT: Layout =
-    unsafe { Layout::from_size_align_unchecked(PAGE_SIZE, PAGE_SIZE) };
+const TABLE_LAYOUT: Layout = unsafe { Layout::from_size_align_unchecked(PAGE_SIZE, PAGE_SIZE) };
 
 fn alloc_table() -> Option<NonNull<Table>> {
     // SAFETY: `TABLE_LAYOUT` is a non-zero, well-formed Layout.

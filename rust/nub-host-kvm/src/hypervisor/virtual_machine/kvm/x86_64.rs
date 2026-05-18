@@ -19,9 +19,7 @@ use std::sync::LazyLock;
 use hyperlight_common::outb::VmAction;
 #[cfg(gdb)]
 use kvm_bindings::kvm_guest_debug;
-use kvm_bindings::{
-    kvm_fpu, kvm_regs, kvm_sregs, kvm_userspace_memory_region,
-};
+use kvm_bindings::{kvm_fpu, kvm_regs, kvm_sregs, kvm_userspace_memory_region};
 use kvm_ioctls::Cap::UserMemory;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use tracing::{Span, instrument};
@@ -38,8 +36,7 @@ use crate::hypervisor::regs::{
 #[cfg(feature = "hw-interrupts")]
 use crate::hypervisor::virtual_machine::x86_64::hw_interrupts::TimerThread;
 use crate::hypervisor::virtual_machine::{
-    CreateVmError, MapMemoryError, RegisterError, RunVcpuError, VirtualMachine,
-    VmExit,
+    CreateVmError, MapMemoryError, RegisterError, RunVcpuError, VirtualMachine, VmExit,
 };
 use crate::mem::memory_region::MemoryRegion;
 #[cfg(feature = "trace_guest")]

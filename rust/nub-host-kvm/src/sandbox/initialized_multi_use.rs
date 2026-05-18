@@ -28,6 +28,7 @@ use tracing::{Span, instrument};
 use super::Callable;
 use super::host_funcs::FunctionRegistry;
 use crate::HyperlightError;
+use crate::Result;
 use crate::func::{ParameterTuple, SupportedReturnType};
 use crate::hypervisor::InterruptHandle;
 use crate::hypervisor::hyperlight_vm::HyperlightVm;
@@ -36,7 +37,6 @@ use crate::mem::shared_mem::HostSharedMemory;
 use crate::metrics::{
     METRIC_GUEST_ERROR, METRIC_GUEST_ERROR_LABEL_CODE, maybe_time_and_emit_guest_call,
 };
-use crate::Result;
 
 /// A fully initialized sandbox that can execute guest functions multiple times.
 ///

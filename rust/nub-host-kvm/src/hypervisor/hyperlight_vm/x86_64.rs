@@ -40,9 +40,7 @@ use crate::hypervisor::gdb::{
 };
 #[cfg(gdb)]
 use crate::hypervisor::gdb::{DebugError, DebugMemoryAccessError};
-use crate::hypervisor::regs::{
-    CommonFpu, CommonRegisters, CommonSpecialRegisters,
-};
+use crate::hypervisor::regs::{CommonFpu, CommonRegisters, CommonSpecialRegisters};
 #[cfg(not(gdb))]
 use crate::hypervisor::virtual_machine::VirtualMachine;
 #[cfg(kvm)]
@@ -51,9 +49,7 @@ use crate::hypervisor::virtual_machine::kvm::KvmVm;
 use crate::hypervisor::virtual_machine::mshv::MshvVm;
 #[cfg(target_os = "windows")]
 use crate::hypervisor::virtual_machine::whp::WhpVm;
-use crate::hypervisor::virtual_machine::{
-    HypervisorType, VmError, get_available_hypervisor,
-};
+use crate::hypervisor::virtual_machine::{HypervisorType, VmError, get_available_hypervisor};
 #[cfg(target_os = "windows")]
 use crate::hypervisor::{PartitionState, WindowsInterruptHandle};
 #[cfg(crashdump)]

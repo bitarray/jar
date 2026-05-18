@@ -283,7 +283,6 @@ where
     pub(crate) fn get_abort_buffer_mut(&mut self) -> &mut Vec<u8> {
         &mut self.abort_buffer
     }
-
 }
 
 impl SandboxMemoryManager<ExclusiveSharedMemory> {

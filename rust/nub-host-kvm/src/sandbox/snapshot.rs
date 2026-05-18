@@ -18,9 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use hyperlight_common::layout::{scratch_base_gpa, scratch_base_gva};
 use hyperlight_common::vmem;
-use hyperlight_common::vmem::{
-    BasicMapping, Mapping, MappingKind,
-};
+use hyperlight_common::vmem::{BasicMapping, Mapping, MappingKind};
 use tracing::{Span, instrument};
 
 use crate::HyperlightError::MemoryRegionSizeMismatch;
@@ -144,7 +142,6 @@ fn hash(memory: &[u8], regions: &[MemoryRegion]) -> Result<[u8; 32]> {
     // snapshot/workload.
     Ok(hasher.finalize().into())
 }
-
 
 fn map_specials(pt_buf: &GuestPageTableBuffer, scratch_size: usize) {
     // Map the scratch region
@@ -284,7 +281,6 @@ impl Snapshot {
         })
     }
 
-
     /// Return the main memory contents of the snapshot
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn memory(&self) -> &ReadonlySharedMemory {
@@ -307,7 +303,6 @@ impl Snapshot {
     pub(crate) fn stack_top_gva(&self) -> u64 {
         self.stack_top_gva
     }
-
 
     pub(crate) fn entrypoint(&self) -> NextAction {
         self.entrypoint
