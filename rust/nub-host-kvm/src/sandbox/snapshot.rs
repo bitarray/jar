@@ -368,23 +368,18 @@ impl Snapshot {
         // Set up page table entries for the snapshot
         let pt_buf = GuestPageTableBuffer::new(layout.get_pt_base_gpa() as usize);
 
-        // 1. Map the (ideally readonly) pages of snapshot data
+        // 1. Map the pages of snapshot data as plain RW basic mappings.
+        // Pre-Stage-F these were CoW so the (now-deleted) snapshot/restore
+        // machinery could roll back writes; we don't use it.
         for rgn in layout.get_memory_regions_::<GuestMemoryRegion>(())?.iter() {
             let readable = rgn.flags.contains(MemoryRegionFlags::READ);
             let executable = rgn.flags.contains(MemoryRegionFlags::EXECUTE);
             let writable = rgn.flags.contains(MemoryRegionFlags::WRITE);
-            let kind = if writable {
-                MappingKind::Cow(CowMapping {
-                    readable,
-                    executable,
-                })
-            } else {
-                MappingKind::Basic(BasicMapping {
-                    readable,
-                    writable: false,
-                    executable,
-                })
-            };
+            let kind = MappingKind::Basic(BasicMapping {
+                readable,
+                writable,
+                executable,
+            });
             let mapping = Mapping {
                 phys_base: rgn.guest_region.start as u64,
                 virt_base: rgn.guest_region.start as u64,

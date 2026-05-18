@@ -1326,12 +1326,18 @@ impl ReadonlySharedMemory {
         if region_type != MemoryRegionType::Snapshot {
             panic!("ReadonlySharedMemory::mapping_at should only be used for Snapshot regions");
         }
+        // Register snapshot mem RWX at the KVM level. Upstream marked
+        // this RX-only and relied on guest-PT CoW for write semantics,
+        // which trapped first writes and resolved them to scratch frames
+        // — driving a slow leak via prim_alloc. The underlying mmap is
+        // already PROT_READ|PROT_WRITE; `ReadonlySharedMemory` is a
+        // host-side Rust-API artifact, not a KVM-level constraint.
         mapping_at(
             self,
             guest_base,
             self.guest_mapped_size(),
             region_type,
-            MemoryRegionFlags::READ | MemoryRegionFlags::EXECUTE,
+            MemoryRegionFlags::READ | MemoryRegionFlags::WRITE | MemoryRegionFlags::EXECUTE,
         )
     }
 }
