@@ -317,6 +317,9 @@ mod tests {
     #[cfg(kvm)]
     fn is_hypervisor_present() {
         use std::path::Path;
-        assert_eq!(Path::new("/dev/kvm").exists(), super::is_hypervisor_present());
+        assert_eq!(
+            Path::new("/dev/kvm").exists(),
+            super::is_hypervisor_present()
+        );
     }
 }

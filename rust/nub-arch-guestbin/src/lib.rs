@@ -44,8 +44,16 @@ pub mod paging;
 // workload's alloc/free churn — buddy's power-of-2 binning was
 // fragmenting the heap badly enough that 16 KiB allocations failed
 // after a few thousand iterations.
+// Public iff the `heap-diag` feature is on, so the `nub-arch-x86`
+// guest can read talc counters for the leak-hunting diagnostic in
+// `Nub::heap_stats`. Default-private otherwise.
+#[cfg(feature = "heap-diag")]
 #[global_allocator]
 pub static HEAP_ALLOCATOR: talc::TalcLock<spinning_top::RawSpinlock, talc::source::Manual> =
+    talc::TalcLock::new(talc::source::Manual);
+#[cfg(not(feature = "heap-diag"))]
+#[global_allocator]
+pub(crate) static HEAP_ALLOCATOR: talc::TalcLock<spinning_top::RawSpinlock, talc::source::Manual> =
     talc::TalcLock::new(talc::source::Manual);
 
 pub static mut GUEST_HANDLE: GuestHandle = GuestHandle::new();

@@ -48,27 +48,6 @@ impl Arch for LocalArch {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stub_invoke_returns_42() {
-        let mut arch = LocalArch::new();
-        let outcome = arch
-            .invoke(
-                InstanceRef::from_hash([0; 32]),
-                0,
-                &[],
-                InvokeOptions::default(),
-            )
-            .unwrap();
-        assert_eq!(outcome.return_value, 42);
-    }
-
-    #[test]
-    fn state_root_starts_zero() {
-        let arch = LocalArch::new();
-        assert_eq!(arch.state_root(), [0; 32]);
-    }
-}
+// `#[cfg(test)] mod tests` deferred until the LocalArch stub is
+// replaced with a real javm-driven invocation (Stage 3). Asserting
+// that the stub returns 42 today carries no signal.

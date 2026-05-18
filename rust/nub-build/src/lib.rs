@@ -44,12 +44,14 @@ const TARGET_TRIPLE: &str = "x86_64-unknown-none";
 ///
 /// `manifest_dir` is relative to the calling `build.rs`'s
 /// `CARGO_MANIFEST_DIR`. `bin_name` is the `[[bin]]` name to build.
+/// `features` is forwarded to cargo as `--features <comma-joined>`;
+/// pass `&[]` for no extras.
 ///
 /// Emits `cargo:rerun-if-changed` for the guest crate's `src/` and
 /// `Cargo.toml`, plus `cargo:rerun-if-env-changed` for
 /// `SKIP_GUEST_BUILD`. Respects the `BUILD_CRATE_GUEST_BUILD` env
 /// var as a recursion guard (mirrors `build-javm`).
-pub fn build(manifest_dir: &str, bin_name: &str) -> PathBuf {
+pub fn build(manifest_dir: &str, bin_name: &str, features: &[&str]) -> PathBuf {
     let manifest_dir = build_crate::resolve_manifest_dir(manifest_dir);
     let manifest_path = manifest_dir.join("Cargo.toml");
 
@@ -90,6 +92,9 @@ pub fn build(manifest_dir: &str, bin_name: &str) -> PathBuf {
         .env("CARGO_TARGET_DIR", &target_dir)
         .env("BUILD_CRATE_GUEST_BUILD", "1")
         .env("CARGO_ENCODED_RUSTFLAGS", rustflags);
+    if !features.is_empty() {
+        cmd.arg("--features").arg(features.join(","));
+    }
 
     let output = cmd
         .output()

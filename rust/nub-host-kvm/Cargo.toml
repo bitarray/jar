@@ -13,6 +13,14 @@ description = "Forked Hyperlight host (KVM-only) — micro-VM host driver for nu
 [lib]
 name = "nub_host_kvm"
 path = "src/lib.rs"
+# Skip building the test target + doctests for the vendored crate.
+# The upstream source carries inline `#[cfg(test)] mod tests` blocks
+# that reference dev-deps (hyperlight-testing, iced-x86, metrics-util)
+# we stripped, plus doctests that exercise upstream-only APIs
+# (`snapshot()` / `restore()` etc) we dropped. Coverage flows through
+# `nub` / `javm-guest-tests` / `javm-bench` end-to-end instead.
+test = false
+doctest = false
 
 [features]
 default = ["kvm"]
@@ -68,3 +76,8 @@ unexpected_cfgs = { level = "allow", check-cfg = [
     'cfg(crashdump)',
     'cfg(unshared_snapshot_mem)',
 ] }
+
+# Allow upstream-style code patterns that newer clippy flags but we
+# don't want to diverge from upstream over. Re-evaluate periodically.
+[lints.clippy]
+while_let_loop = "allow"

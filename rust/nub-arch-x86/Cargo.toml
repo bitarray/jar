@@ -33,5 +33,12 @@ scale-derive = { workspace = true }
 # Wire types shared between guest and host (D1+).
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi", default-features = false }
 
+[features]
+default = []
+# Enable the `nub_heap_stats` diagnostic guest function (reads talc's
+# allocation counters). Flows through to `hyperlight-guest-bin`'s
+# `heap-diag` feature. Off in production.
+heap-diag = ["hyperlight-guest-bin/heap-diag"]
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hyperlight)'] }

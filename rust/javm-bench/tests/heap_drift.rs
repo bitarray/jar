@@ -1,28 +1,22 @@
-//! Diagnostic: characterise whether the guest heap leaks across
-//! repeated `Nub::invoke_spec` calls, fragments, or stays steady.
+//! Regression test: the guest heap must not grow across repeated
+//! `Nub::invoke_spec` calls. Runs `prime_sieve` 2000 times against a
+//! single Hyperlight sandbox, sampling `talc`'s counters every 100
+//! iters; asserts that allocated bytes and allocation count are
+//! exactly bit-stable from iter 1 onward (iter 0 → 1 is allowed to
+//! grow once for one-shot static init).
 //!
-//! Runs the `prime_sieve` workload N times against a single
-//! Hyperlight sandbox, sampling `talc`'s counters every K iters.
-//! Prints `(iter, allocated_bytes, allocation_count, fragment_count,
-//! available_bytes)`. Run with:
+//! Catches re-introduction of the kind of leak we fixed in commit
+//! ad8b227d — there `install_ring3_exit_gate` was `Box::leak`ing 4106
+//! B per invocation, exhausting the heap during long bench runs.
+//!
+//! Requires the `heap-diag` feature. Run with:
 //!
 //! ```bash
-//! cargo test -p javm-bench --test heap_drift --release -- --nocapture
+//! cargo test -p javm-bench --test heap_drift --features heap-diag \
+//!     --release -- --ignored --nocapture
 //! ```
-//!
-//! Interpretation:
-//! - `allocated_bytes` growing monotonically → real leak (Vec / Box
-//!   somewhere not getting dropped per iter).
-//! - `allocated_bytes` oscillates within a band, `fragment_count`
-//!   climbs, `available_bytes` shrinks → fragmentation (talc can't
-//!   coalesce despite proper free).
-//! - All four steady → no leak; OOM (if it happens) is from something
-//!   else (Hyperlight scratch / CoW).
-//!
-//! This is gated to Linux/x86_64 + a build flag — it's not part of
-//! the normal CI loop.
 
-#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#![cfg(all(target_os = "linux", target_arch = "x86_64", feature = "heap-diag"))]
 
 use javm_cap::image::{Image, PinnedCap};
 use javm_exec::{REG_COUNT, unpack_bitmask};
@@ -31,9 +25,7 @@ use scale::Decode;
 
 const PRIME_SIEVE_BLOB: &[u8] = include_bytes!(env!("PRIME_SIEVE_BLOB"));
 const GAS: u64 = 100_000_000_000;
-/// Total iterations.
 const N: usize = 2000;
-/// Sample interval — print talc counters every `STEP` iters.
 const STEP: usize = 100;
 
 fn build_data_layout(image: &Image) -> (u32, u32, Vec<u8>, u32, Vec<u8>) {
@@ -93,186 +85,39 @@ fn build_spec(image: &Image, ep: u8) -> InvocationSpec {
     }
 }
 
-/// Diagnostic isolating the leak from any of *our* per-call work: this
-/// drives `Nub::invoke` (which calls the trivial `nub_smoke` guest
-/// function — returns 42, no compile, no decode, no Vec<u8> input).
-/// If heap_stats grows linearly here too, the leak is in Hyperlight's
-/// `#[guest_function]` dispatch wrapper (FunctionCall TryFrom,
-/// FlatBufferBuilder, etc.), not anything we wrote.
 #[test]
 #[ignore]
-fn heap_drift_nub_smoke() {
-    use nub::{InstanceRef, InvokeOptions};
-
-    let mut nub = Nub::new_hyperlight().expect("sandbox");
-    let s0 = nub.heap_stats().expect("baseline heap_stats");
-    eprintln!(
-        "iter         alloc_B    n_alloc   n_frag   avail_B   Δalloc (nub_smoke / Nub::invoke)"
-    );
-    eprintln!(
-        "{:>5}  {:>12}  {:>8}  {:>7}  {:>9}  {:>9}",
-        0, s0.allocated_bytes, s0.allocation_count, s0.fragment_count, s0.available_bytes, 0i64,
-    );
-
-    let mut prev = s0;
-    for i in 1..=N {
-        let _ = nub
-            .invoke(InstanceRef::from_hash([0; 32]), 0, &[], InvokeOptions::default())
-            .expect("invoke");
-
-        if i % STEP == 0 || i == 1 {
-            let s = nub.heap_stats().expect("heap_stats");
-            let delta = s.allocated_bytes as i64 - prev.allocated_bytes as i64;
-            eprintln!(
-                "{:>5}  {:>12}  {:>8}  {:>7}  {:>9}  {:>+9}",
-                i,
-                s.allocated_bytes,
-                s.allocation_count,
-                s.fragment_count,
-                s.available_bytes,
-                delta,
-            );
-            prev = s;
-        }
-    }
-}
-
-/// Bisect step 1: ship the SCALE-encoded spec bytes into the guest
-/// but have the guest immediately drop them. If THIS leaks, the leak
-/// is in the input-Vec<u8> Hyperlight plumbing (`try_pop_shared_input`,
-/// `FunctionCall::try_from` of FlatBuffers). If not, leak is in the
-/// SCALE decode or downstream.
-#[test]
-#[ignore]
-fn heap_drift_passthrough() {
-    use scale::Encode;
-
-    let image = Image::decode(PRIME_SIEVE_BLOB).expect("decode prime_sieve Image").0;
-    let spec = build_spec(&image, 0);
-    let bytes = spec.encode();
-
-    let mut nub = Nub::new_hyperlight().expect("sandbox");
-    let s0 = nub.heap_stats().expect("baseline heap_stats");
-    eprintln!(
-        "iter         alloc_B    n_alloc   n_frag   avail_B   Δalloc (nub_passthrough)"
-    );
-    eprintln!(
-        "{:>5}  {:>12}  {:>8}  {:>7}  {:>9}  {:>9}",
-        0, s0.allocated_bytes, s0.allocation_count, s0.fragment_count, s0.available_bytes, 0i64,
-    );
-    let mut prev = s0;
-    for i in 1..=N {
-        nub.diag_passthrough(bytes.clone()).expect("passthrough");
-        if i % STEP == 0 || i == 1 {
-            let s = nub.heap_stats().expect("heap_stats");
-            let delta = s.allocated_bytes as i64 - prev.allocated_bytes as i64;
-            eprintln!(
-                "{:>5}  {:>12}  {:>8}  {:>7}  {:>9}  {:>+9}",
-                i, s.allocated_bytes, s.allocation_count, s.fragment_count, s.available_bytes, delta,
-            );
-            prev = s;
-        }
-    }
-}
-
-/// Bisect step 2: ship the bytes AND SCALE-decode into an
-/// `InvocationSpec`, then drop. If this leaks but `passthrough`
-/// doesn't, the SCALE decode is the culprit. If neither leaks but
-/// `prime_sieve` does, the leak is in `run_pvm_with_mem`.
-#[test]
-#[ignore]
-fn heap_drift_decode_only() {
-    use scale::Encode;
-
-    let image = Image::decode(PRIME_SIEVE_BLOB).expect("decode prime_sieve Image").0;
-    let spec = build_spec(&image, 0);
-    let bytes = spec.encode();
-
-    let mut nub = Nub::new_hyperlight().expect("sandbox");
-    let s0 = nub.heap_stats().expect("baseline heap_stats");
-    eprintln!(
-        "iter         alloc_B    n_alloc   n_frag   avail_B   Δalloc (nub_decode_only)"
-    );
-    eprintln!(
-        "{:>5}  {:>12}  {:>8}  {:>7}  {:>9}  {:>9}",
-        0, s0.allocated_bytes, s0.allocation_count, s0.fragment_count, s0.available_bytes, 0i64,
-    );
-    let mut prev = s0;
-    for i in 1..=N {
-        nub.diag_decode_only(bytes.clone()).expect("decode_only");
-        if i % STEP == 0 || i == 1 {
-            let s = nub.heap_stats().expect("heap_stats");
-            let delta = s.allocated_bytes as i64 - prev.allocated_bytes as i64;
-            eprintln!(
-                "{:>5}  {:>12}  {:>8}  {:>7}  {:>9}  {:>+9}",
-                i, s.allocated_bytes, s.allocation_count, s.fragment_count, s.available_bytes, delta,
-            );
-            prev = s;
-        }
-    }
-}
-
-/// Bisect step 3: decode + run `Compiler::new(...).compile(...)` in
-/// the guest, drop. No pool, no page-table, no ring 3. Isolates
-/// whether the leak is in `javm-recompiler-x86`'s compiler itself.
-#[test]
-#[ignore]
-fn heap_drift_compile_only() {
-    use scale::Encode;
-
-    let image = Image::decode(PRIME_SIEVE_BLOB).expect("decode prime_sieve Image").0;
-    let spec = build_spec(&image, 0);
-    let bytes = spec.encode();
-
-    let mut nub = Nub::new_hyperlight().expect("sandbox");
-    let s0 = nub.heap_stats().expect("baseline heap_stats");
-    eprintln!(
-        "iter         alloc_B    n_alloc   n_frag   avail_B   Δalloc (nub_compile_only)"
-    );
-    eprintln!(
-        "{:>5}  {:>12}  {:>8}  {:>7}  {:>9}  {:>9}",
-        0, s0.allocated_bytes, s0.allocation_count, s0.fragment_count, s0.available_bytes, 0i64,
-    );
-    let mut prev = s0;
-    for i in 1..=N {
-        nub.diag_compile_only(bytes.clone()).expect("compile_only");
-        if i % STEP == 0 || i == 1 {
-            let s = nub.heap_stats().expect("heap_stats");
-            let delta = s.allocated_bytes as i64 - prev.allocated_bytes as i64;
-            eprintln!(
-                "{:>5}  {:>12}  {:>8}  {:>7}  {:>9}  {:>+9}",
-                i, s.allocated_bytes, s.allocation_count, s.fragment_count, s.available_bytes, delta,
-            );
-            prev = s;
-        }
-    }
-}
-
-#[test]
-#[ignore] // Run explicitly with --ignored to keep CI fast.
 fn heap_drift_prime_sieve() {
-    let image = Image::decode(PRIME_SIEVE_BLOB).expect("decode prime_sieve Image").0;
+    let image = Image::decode(PRIME_SIEVE_BLOB)
+        .expect("decode prime_sieve Image")
+        .0;
     let spec = build_spec(&image, 0);
     let mut nub = Nub::new_hyperlight().expect("sandbox");
 
-    let s0 = nub.heap_stats().expect("baseline heap_stats");
-    eprintln!(
-        "iter         alloc_B    n_alloc   n_frag   avail_B   Δalloc"
-    );
+    // Iter 0: baseline.
+    let _ = nub.heap_stats().expect("baseline heap_stats");
+
+    // Iter 1: lets any first-call static init (e.g. one-shot IDT
+    // install in `install_ring3_exit_gate`) settle.
+    let _ = nub.invoke_spec(&spec).expect("invoke_spec");
+    let warm = nub.heap_stats().expect("post-warmup heap_stats");
+    eprintln!("iter         alloc_B    n_alloc   n_frag   avail_B   Δalloc");
     eprintln!(
         "{:>5}  {:>12}  {:>8}  {:>7}  {:>9}  {:>9}",
-        0, s0.allocated_bytes, s0.allocation_count, s0.fragment_count, s0.available_bytes, 0i64,
+        1,
+        warm.allocated_bytes,
+        warm.allocation_count,
+        warm.fragment_count,
+        warm.available_bytes,
+        0i64,
     );
 
-    let mut prev = s0;
-    for i in 1..=N {
-        let result = nub.invoke_spec(&spec).expect("invoke_spec");
-        assert_eq!(result.exit_reason, 4);
-        assert_eq!(result.exit_arg, 0);
-
-        if i % STEP == 0 || i == 1 {
+    // Iters 2..=N: should be exactly bit-stable.
+    for i in 2..=N {
+        nub.invoke_spec(&spec).expect("invoke_spec");
+        if i % STEP == 0 {
             let s = nub.heap_stats().expect("heap_stats");
-            let delta = s.allocated_bytes as i64 - prev.allocated_bytes as i64;
+            let delta = s.allocated_bytes as i64 - warm.allocated_bytes as i64;
             eprintln!(
                 "{:>5}  {:>12}  {:>8}  {:>7}  {:>9}  {:>+9}",
                 i,
@@ -282,7 +127,16 @@ fn heap_drift_prime_sieve() {
                 s.available_bytes,
                 delta,
             );
-            prev = s;
+            assert_eq!(
+                s.allocated_bytes, warm.allocated_bytes,
+                "heap drifted at iter {i}: {} bytes vs warm {} bytes",
+                s.allocated_bytes, warm.allocated_bytes,
+            );
+            assert_eq!(
+                s.allocation_count, warm.allocation_count,
+                "allocation count drifted at iter {i}: {} vs warm {}",
+                s.allocation_count, warm.allocation_count,
+            );
         }
     }
 }

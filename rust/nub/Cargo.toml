@@ -9,6 +9,14 @@ description = "Nub: the JAR v3 microkernel — uniform Nub handle over interchan
 name = "nub"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Enable the `Nub::heap_stats` diagnostic + the guest-side
+# `nub_heap_stats` guest_function (reads talc allocation counters).
+# Off in production. Used by `javm-bench/tests/heap_drift.rs` to
+# detect per-iter leaks.
+heap-diag = []
+
 [dependencies]
 anyhow = "1"
 # Forked KVM-only Hyperlight host (vendored + stripped from

@@ -247,4 +247,3 @@ impl InterruptHandle for LinuxInterruptHandle {
         self.dropped.load(Ordering::Acquire)
     }
 }
-

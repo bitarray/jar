@@ -35,6 +35,5 @@ pub mod ptr_offset;
 /// A wrapper around unsafe functionality to create and initialize
 /// a memory region for a guest running in a sandbox.
 pub mod shared_mem;
-/// Utilities for writing shared memory tests
-#[cfg(all(test, not(miri)))] // uses proptest which isn't miri-compatible
-pub(crate) mod shared_mem_tests;
+// F2.2: dropped `shared_mem_tests` (proptest-driven coverage that
+// required upstream dev-deps + guest fixtures).

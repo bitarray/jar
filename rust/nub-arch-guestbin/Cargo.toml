@@ -28,6 +28,11 @@ macros = [
     "dep:hyperlight-guest-macro",
     "dep:linkme",
 ]
+# Expose `HEAP_ALLOCATOR` as `pub` (instead of `pub(crate)`) and turn
+# on talc's `counters` feature so callers can read allocation
+# statistics. Adds a small per-alloc bookkeeping cost; keep off in
+# production.
+heap-diag = ["talc/counters"]
 
 [lib]
 name = "hyperlight_guest_bin"
@@ -41,7 +46,7 @@ hyperlight-guest-macro = { version = "0.15.0", optional = true, default-features
 linkme = { version = "0.3.36", optional = true }
 spin = "0.10.0"
 spinning_top = "0.3.0"
-talc = { version = "5.0.3", features = ["counters"] }
+talc = "5.0.3"
 tracing = { version = "0.1.44", features = ["attributes"], default-features = false }
 
 [lints.rust]

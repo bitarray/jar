@@ -19,10 +19,10 @@
 //! either backend, just to exercise the wiring.
 
 use anyhow::Result;
+use nub_arch_local::LocalArch;
 use nub_host_kvm::sandbox::{
     GuestBinary, MultiUseSandbox, SandboxConfiguration, UninitializedSandbox,
 };
-use nub_arch_local::LocalArch;
 use nub_kernel::Kernel;
 
 pub use nub_arch_x86_abi::{InvocationResult, InvocationSpec, PvmRegs};
@@ -32,6 +32,7 @@ use scale::{Decode, Encode};
 
 /// Snapshot of the guest's talc allocation state. Returned by
 /// [`Nub::heap_stats`].
+#[cfg(feature = "heap-diag")]
 #[derive(Debug, Clone, Copy)]
 pub struct HeapStats {
     /// Sum of live allocations' layout sizes.
@@ -142,12 +143,14 @@ impl Nub {
 
     /// Diagnostic: read the guest's talc allocation counters
     /// (allocated_bytes, allocation_count, fragment_count,
-    /// available_bytes). Hyperlight backend only.
+    /// available_bytes). Hyperlight backend only. Requires the
+    /// `heap-diag` feature.
+    #[cfg(feature = "heap-diag")]
     pub fn heap_stats(&mut self) -> Result<HeapStats> {
         match &mut self.backend {
-            Backend::Local(_) => {
-                Err(anyhow::anyhow!("heap_stats: Local backend has no guest heap"))
-            }
+            Backend::Local(_) => Err(anyhow::anyhow!(
+                "heap_stats: Local backend has no guest heap"
+            )),
             Backend::Hyperlight(h) => {
                 let raw: Vec<u8> = h.sandbox.call("nub_heap_stats", ())?;
                 if raw.len() != 32 {
@@ -156,9 +159,7 @@ impl Nub {
                         raw.len()
                     ));
                 }
-                let parse = |off: usize| {
-                    u64::from_le_bytes(raw[off..off + 8].try_into().unwrap())
-                };
+                let parse = |off: usize| u64::from_le_bytes(raw[off..off + 8].try_into().unwrap());
                 Ok(HeapStats {
                     allocated_bytes: parse(0),
                     allocation_count: parse(8),
@@ -167,35 +168,6 @@ impl Nub {
                 })
             }
         }
-    }
-
-    /// Diagnostic: ship `bytes` to the guest's `nub_passthrough`
-    /// guest_function, discard the response. Used for heap-leak
-    /// bisection; not part of the production API.
-    pub fn diag_passthrough(&mut self, bytes: Vec<u8>) -> Result<()> {
-        if let Backend::Hyperlight(h) = &mut self.backend {
-            let _: Vec<u8> = h.sandbox.call("nub_passthrough", bytes)?;
-        }
-        Ok(())
-    }
-
-    /// Diagnostic: ship `bytes` to the guest's `nub_decode_only`
-    /// guest_function (decodes spec, then immediately drops).
-    pub fn diag_decode_only(&mut self, bytes: Vec<u8>) -> Result<()> {
-        if let Backend::Hyperlight(h) = &mut self.backend {
-            let _: Vec<u8> = h.sandbox.call("nub_decode_only", bytes)?;
-        }
-        Ok(())
-    }
-
-    /// Diagnostic: ship `bytes` to `nub_compile_only` (decode + run the
-    /// recompiler + drop everything; no JIT execution / pool / page
-    /// tables).
-    pub fn diag_compile_only(&mut self, bytes: Vec<u8>) -> Result<()> {
-        if let Backend::Hyperlight(h) = &mut self.backend {
-            let _: Vec<u8> = h.sandbox.call("nub_compile_only", bytes)?;
-        }
-        Ok(())
     }
 
     /// Direct-spec invocation path (Stage 2.2). Ships a pre-built

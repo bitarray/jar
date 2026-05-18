@@ -41,13 +41,6 @@ use crate::paging;
 /// allocations (page tables, JIT exec pages, etc.).
 pub const PAGE_SIZE: usize = 4096;
 
-/// Default arena size for smoke tests. Just enough for a 4-level
-/// page-table set (PML4 + PDPT + PD + PT) per smoke invocation.
-/// Production per-invocation arenas (Stage C+) will use a larger
-/// capacity sized to fit page tables + JIT code + JitContext +
-/// trap table.
-pub const SMOKE_CAPACITY: usize = 4 * PAGE_SIZE;
-
 /// Bump arena holding a contiguous, page-aligned buffer.
 pub struct BumpArena {
     /// Base of the backing buffer.
@@ -59,23 +52,6 @@ pub struct BumpArena {
 }
 
 impl BumpArena {
-    /// Construct a `BumpArena` whose backing is `capacity / PAGE_SIZE`
-    /// physical pages obtained from `prim_alloc::alloc_phys_pages`.
-    /// `capacity` must be a multiple of [`PAGE_SIZE`].
-    ///
-    /// Pages cannot be returned to Hyperlight, so smoke tests that
-    /// drop the arena leak the backing. In production, a single
-    /// global arena is created at `hyperlight_main` time and
-    /// reset between invocations.
-    pub fn new(capacity: usize) -> Option<Self> {
-        assert!(capacity.is_multiple_of(PAGE_SIZE));
-        let pages = (capacity / PAGE_SIZE) as u64;
-        // SAFETY: prim_alloc::alloc_phys_pages is safe to call from
-        // ring-0 guest code; it returns a GPA backing `pages` 4 KiB pages.
-        let base_pa = unsafe { hyperlight_guest::prim_alloc::alloc_phys_pages(pages) };
-        Self::from_existing(base_pa, capacity)
-    }
-
     /// Wrap a pre-allocated contiguous run of physical pages as a fresh
     /// [`BumpArena`] (cursor reset to zero). The caller owns the
     /// underlying allocation lifetime; the arena holds a raw pointer
@@ -113,12 +89,6 @@ impl BumpArena {
     pub fn alloc_pages(&self, count: usize) -> Option<NonNull<u8>> {
         let size = count.checked_mul(PAGE_SIZE)?;
         self.alloc(size, PAGE_SIZE)
-    }
-
-    /// Reset the high-water mark. All prior allocations become
-    /// invalid; the caller must ensure no live references survive.
-    pub fn reset(&self) {
-        self.cursor.set(0);
     }
 
     /// Current high-water mark (bytes used).

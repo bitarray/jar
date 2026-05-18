@@ -37,9 +37,7 @@ pub mod snapshot;
 /// Trait used by the macros to paper over the differences between hyperlight and hyperlight-wasm
 mod callable;
 
-/// Module for tracing guest execution
-#[cfg(feature = "trace_guest")]
-pub(crate) mod trace;
+// F2.2: dropped the `trace/` submodule (OpenTelemetry guest tracing).
 
 /// Trait used by the macros to paper over the differences between hyperlight and hyperlight-wasm
 pub use callable::Callable;
@@ -51,4 +49,3 @@ pub use initialized_multi_use::{MultiUseSandbox, PtRootFinder};
 pub use uninitialized::GuestBinary;
 /// Re-export for `UninitializedSandbox` type
 pub use uninitialized::UninitializedSandbox;
-
