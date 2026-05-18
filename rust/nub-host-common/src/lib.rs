@@ -29,5 +29,6 @@ pub mod layout;
 pub mod log_level;
 pub mod mem;
 pub mod outb;
+pub mod rpc;
 pub mod version_note;
 pub mod vmem;

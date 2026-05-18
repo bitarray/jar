@@ -18,6 +18,8 @@ nanvix-unstable = ["i686-guest"]
 [dependencies]
 anyhow = { version = "1", default-features = false }
 log = "0.4"
+rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
+bytecheck = { version = "0.8", default-features = false }
 spin = "0.10"
 thiserror = { version = "2", default-features = false }
 tracing = { version = "0.1", optional = true }
