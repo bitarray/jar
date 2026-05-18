@@ -134,11 +134,14 @@ impl<K: KernelAssist> Vm<K> {
         //    `gas_budget`.
         let mut regs = Regs::new();
         regs.pc = entry_pc;
-        // Calling convention §4: φ[11] = endpoint_idx.
-        regs.gpr[11] = endpoint_idx as u64;
-        // Apply per-endpoint initial register state (e.g. SP =
-        // stack_top). Indices out of GPR range are silently skipped
-        // so a malformed Image can't index out of bounds.
+        // Endpoint invocation is process spawn, not function call:
+        // `initial_regs` from the Image's endpoint table IS the
+        // callee's bootstrap snapshot (typically phi[1] = stack_top).
+        // The kernel doesn't write endpoint_idx into a register — the
+        // endpoint is encoded by PC. Caller-supplied args (phi[7..10])
+        // would layer on top once arg passing lands. Indices out of
+        // GPR range are silently skipped so a malformed Image can't
+        // index out of bounds.
         if let Some(def) = endpoint_def {
             for (&reg, &val) in &def.initial_regs {
                 if let Some(slot) = regs.gpr.get_mut(reg as usize) {

@@ -42,8 +42,11 @@ pub fn build_spec(image: &Image, endpoint_idx: u8, gas: u64) -> InvocationSpec {
         .get(&endpoint_idx)
         .unwrap_or_else(|| panic!("endpoint {endpoint_idx} not declared"));
 
+    // Endpoint invocation = process spawn. `initial_regs` from the
+    // Image's endpoint table IS the bootstrap snapshot (typically
+    // phi[1] = stack_top); endpoint is encoded by PC, not by a
+    // register the kernel writes.
     let mut regs = [0u64; REG_COUNT];
-    regs[11] = endpoint_idx as u64; // calling-convention φ[11]
     for (&i, &v) in &endpoint.initial_regs {
         if let Some(slot) = regs.get_mut(i as usize) {
             *slot = v;

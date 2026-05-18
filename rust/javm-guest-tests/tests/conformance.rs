@@ -77,8 +77,10 @@ mod recomp {
             .get(&ep)
             .unwrap_or_else(|| panic!("endpoint {ep} not declared in Image"));
 
+        // Endpoint invocation = process spawn; `initial_regs` is the
+        // bootstrap snapshot. Endpoint is encoded by PC, not by a
+        // kernel-written selector register.
         let mut regs = [0u64; REG_COUNT];
-        regs[11] = ep as u64; // calling-convention φ[11] = endpoint_idx
         for (&i, &v) in &endpoint.initial_regs {
             if let Some(slot) = regs.get_mut(i as usize) {
                 *slot = v;
