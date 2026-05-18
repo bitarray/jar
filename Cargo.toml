@@ -8,7 +8,7 @@ members = [
     "rust/nub",
     "rust/nub-arch-x86",
     "rust/nub-arch-x86-abi",
-    "rust/nub-host-x86",
+    "rust/nub-host-kvm",
     "rust/nub-arch-local",
     "rust/nub-kernel",
     "rust/javm",

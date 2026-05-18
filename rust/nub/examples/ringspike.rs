@@ -26,7 +26,7 @@
 //!   an error.
 
 use anyhow::Result;
-use nub_host_x86::sandbox::{GuestBinary, SandboxConfiguration, UninitializedSandbox};
+use nub_host_kvm::sandbox::{GuestBinary, SandboxConfiguration, UninitializedSandbox};
 use nub_arch_x86_abi::{InvocationResult, InvocationSpec, PvmRegs};
 use scale::{Decode, Encode};
 

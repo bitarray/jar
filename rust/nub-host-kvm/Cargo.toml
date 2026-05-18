@@ -3,7 +3,7 @@
 # supported hypervisor backend now.
 
 [package]
-name = "nub-host-x86"
+name = "nub-host-kvm"
 version.workspace = true
 edition = "2024"
 rust-version = "1.89"
@@ -11,7 +11,7 @@ license.workspace = true
 description = "Forked Hyperlight host (KVM-only) — micro-VM host driver for nub."
 
 [lib]
-name = "nub_host_x86"
+name = "nub_host_kvm"
 path = "src/lib.rs"
 
 [features]

@@ -19,7 +19,7 @@
 //! either backend, just to exercise the wiring.
 
 use anyhow::Result;
-use nub_host_x86::sandbox::{
+use nub_host_kvm::sandbox::{
     GuestBinary, MultiUseSandbox, SandboxConfiguration, UninitializedSandbox,
 };
 use nub_arch_local::LocalArch;
@@ -74,7 +74,7 @@ impl Nub {
         // via Hyperlight's input-data ring. Default 16 KiB is
         // exhausted by guest-tests' multi-endpoint Image.
         let mut cfg = SandboxConfiguration::default();
-        // Sized post-Stage-F: forked host (nub-host-x86) + forked
+        // Sized post-Stage-F: forked host (nub-host-kvm) + forked
         // guest-bin still mark writable pages CoW so the host's
         // snapshot machinery has somewhere to roll back from. The
         // leak that motivated the fork is bounded by the heap size —

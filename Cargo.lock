@@ -1115,7 +1115,7 @@ dependencies = [
  "nub-arch-local",
  "nub-arch-x86-abi",
  "nub-build",
- "nub-host-x86",
+ "nub-host-kvm",
  "nub-kernel",
  "scale",
 ]
@@ -1157,7 +1157,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nub-host-x86"
+name = "nub-host-kvm"
 version = "0.1.0"
 dependencies = [
  "anyhow",

@@ -15,7 +15,7 @@ name = "hyperlight-guest-bin"
 # Version locked to upstream 0.15.0 because `hyperlight-host`'s ELF
 # load-time ABI check compares the `.note.hyperlight-version` against
 # its own crate version. We'll relax this once `nub` switches over to
-# `nub-host-x86` (which will drop the check) in Stage F4.
+# `nub-host-kvm` (which will drop the check) in Stage F4.
 version = "0.15.0"
 edition = "2024"
 rust-version = "1.89"

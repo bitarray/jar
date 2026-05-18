@@ -331,7 +331,7 @@ impl Snapshot {
         };
 
         // F4.2: dropped the host/guest version-mismatch check. As a
-        // fork, our host crate's version (nub-host-x86) intentionally
+        // fork, our host crate's version (nub-host-kvm) intentionally
         // diverges from the upstream `hyperlight-guest-bin` ELF note
         // version. The note's bit-for-bit ABI contract is what
         // matters; we honor it. The `exe_info.guest_bin_version()`
