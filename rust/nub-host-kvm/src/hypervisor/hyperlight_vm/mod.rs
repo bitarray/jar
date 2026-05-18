@@ -364,13 +364,9 @@ pub(crate) struct HyperlightVm {
     pub(super) vm: Box<dyn DebuggableVm>,
     #[cfg(not(gdb))]
     pub(super) vm: Box<dyn VirtualMachine>,
-    pub(super) page_size: usize,
     pub(super) entrypoint: NextAction, // only present if this vm has not yet been initialised
     pub(super) rsp_gva: u64,
     pub(super) interrupt_handle: Arc<dyn InterruptHandleImpl>,
-
-    pub(super) next_slot: u32, // Monotonically increasing slot number
-    pub(super) freed_slots: Vec<u32>, // Reusable slots from unmapped regions
 
     pub(super) snapshot_slot: u32,
     // The current snapshot region, used to keep it alive as long as
@@ -396,120 +392,40 @@ pub(crate) struct HyperlightVm {
 }
 
 impl HyperlightVm {
-    /// Map a region of host memory into the sandbox.
-    ///
-    /// Safety: The caller must ensure that the region points to valid memory and
-    /// that the memory is valid for the duration of Self's lifetime.
-    /// Depending on the host platform, there are likely alignment
-    /// requirements of at least one page for base and len.
-    pub(crate) unsafe fn map_region(
-        &mut self,
-        region: &MemoryRegion,
-    ) -> std::result::Result<(), MapRegionError> {
-        if [
-            region.guest_region.start,
-            region.guest_region.end,
-            #[allow(clippy::useless_conversion)]
-            region.host_region.start.into(),
-            #[allow(clippy::useless_conversion)]
-            region.host_region.end.into(),
-        ]
-        .iter()
-        .any(|x| x % self.page_size != 0)
-        {
-            return Err(MapRegionError::NotPageAligned(self.page_size));
-        }
-
-        // Try to reuse a freed slot first, otherwise use next_slot
-        let slot = if let Some(freed_slot) = self.freed_slots.pop() {
-            freed_slot
-        } else {
-            let slot = self.next_slot;
-            self.next_slot += 1;
-            slot
-        };
-
-        // Safety: slots are unique. It's up to caller to ensure that the region is valid
-        unsafe { self.vm.map_memory((slot, region))? };
-        self.mmap_regions.push((slot, region.clone()));
-        Ok(())
-    }
-
-    /// Unmap a memory region from the sandbox
-    pub(crate) fn unmap_region(
-        &mut self,
-        region: &MemoryRegion,
-    ) -> std::result::Result<(), UnmapRegionError> {
-        let pos = self
-            .mmap_regions
-            .iter()
-            .position(|(_, r)| r == region)
-            .ok_or(UnmapRegionError::RegionNotFound)?;
-
-        let (slot, _) = self.mmap_regions.remove(pos);
-        self.freed_slots.push(slot);
-        self.vm.unmap_memory((slot, region))?;
-        Ok(())
-    }
-
-    /// Get the currently mapped dynamic memory regions (not including initial sandbox region)
+    /// Iterator over the dynamic memory regions registered via the
+    /// VM's `map_region` API. Post-Stage-F.CoW the registration path
+    /// is gone, so this is always empty — kept for the MMIO
+    /// access-violation reporter, which iterates it to produce
+    /// informative error messages.
     pub(crate) fn get_mapped_regions(&self) -> impl Iterator<Item = &MemoryRegion> {
         self.mmap_regions.iter().map(|(_, region)| region)
     }
 
-    /// Update the snapshot mapping to point to a new GuestSharedMemory
-    pub(crate) fn update_snapshot_mapping(
+    /// Register the snapshot memory region with the VM. Called once
+    /// during construction; post-Stage-F.CoW there is no rollback
+    /// path that re-registers it.
+    pub(crate) fn install_snapshot_mapping(
         &mut self,
         snapshot: SnapshotSharedMemory<GuestSharedMemory>,
     ) -> Result<(), UpdateRegionError> {
         let guest_base = crate::mem::layout::SandboxMemoryLayout::BASE_ADDRESS as u64;
         let rgn = snapshot.mapping_at(guest_base, MemoryRegionType::Snapshot);
-
-        if let Some(old_snapshot) = self.snapshot_memory.replace(snapshot) {
-            let old_rgn = old_snapshot.mapping_at(guest_base, MemoryRegionType::Snapshot);
-            self.vm.unmap_memory((self.snapshot_slot, &old_rgn))?;
-        }
+        self.snapshot_memory = Some(snapshot);
         unsafe { self.vm.map_memory((self.snapshot_slot, &rgn))? };
-
         Ok(())
     }
 
-    /// Update the scratch mapping to point to a new GuestSharedMemory
-    pub(crate) fn update_scratch_mapping(
+    /// Register the scratch memory region with the VM. Called once
+    /// during construction.
+    pub(crate) fn install_scratch_mapping(
         &mut self,
         scratch: GuestSharedMemory,
     ) -> Result<(), UpdateRegionError> {
         let guest_base = hyperlight_common::layout::scratch_base_gpa(scratch.mem_size());
         let rgn = scratch.mapping_at(guest_base, MemoryRegionType::Scratch);
-
-        if let Some(old_scratch) = self.scratch_memory.replace(scratch) {
-            let old_base = hyperlight_common::layout::scratch_base_gpa(old_scratch.mem_size());
-            let old_rgn = old_scratch.mapping_at(old_base, MemoryRegionType::Scratch);
-            self.vm.unmap_memory((self.scratch_slot, &old_rgn))?;
-        }
+        self.scratch_memory = Some(scratch);
         unsafe { self.vm.map_memory((self.scratch_slot, &rgn))? };
-
         Ok(())
-    }
-
-    /// Get the current stack top virtual address
-    pub(crate) fn get_stack_top(&mut self) -> u64 {
-        self.rsp_gva
-    }
-
-    /// Set the current stack top virtual address
-    pub(crate) fn set_stack_top(&mut self, gva: u64) {
-        self.rsp_gva = gva;
-    }
-
-    /// Get the current entrypoint action
-    pub(crate) fn get_entrypoint(&self) -> NextAction {
-        self.entrypoint
-    }
-
-    /// Set the current entrypoint action
-    pub(crate) fn set_entrypoint(&mut self, entrypoint: NextAction) {
-        self.entrypoint = entrypoint
     }
 
     pub(crate) fn interrupt_handle(&self) -> Arc<dyn InterruptHandle> {

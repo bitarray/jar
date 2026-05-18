@@ -1278,18 +1278,6 @@ impl ReadonlySharedMemory {
         })
     }
 
-    pub(crate) fn from_bytes_with_mapped_size(
-        contents: &[u8],
-        guest_mapped_size: usize,
-    ) -> Result<Self> {
-        let mut anon = ExclusiveSharedMemory::new(contents.len())?;
-        anon.copy_from_slice(contents, 0)?;
-        Ok(ReadonlySharedMemory {
-            region: anon.region,
-            guest_mapped_size: Some(guest_mapped_size),
-        })
-    }
-
     /// The number of bytes that should be mapped into guest PA space.
     /// Returns `guest_mapped_size` if set, otherwise `mem_size()`.
     #[cfg(not(unshared_snapshot_mem))]

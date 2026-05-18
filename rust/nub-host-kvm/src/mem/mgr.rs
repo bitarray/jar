@@ -31,8 +31,6 @@ use super::layout::SandboxMemoryLayout;
 use super::shared_mem::{
     ExclusiveSharedMemory, GuestSharedMemory, HostSharedMemory, ReadonlySharedMemory, SharedMemory,
 };
-use crate::hypervisor::regs::CommonSpecialRegisters;
-use crate::mem::memory_region::MemoryRegion;
 #[cfg(crashdump)]
 use crate::mem::memory_region::{CrashDumpRegion, MemoryRegionFlags, MemoryRegionType};
 use crate::sandbox::snapshot::{NextAction, Snapshot};
@@ -247,17 +245,6 @@ impl GuestPageTableBuffer {
         }
     }
 
-    /// Switch the active root. `addr` must have been obtained either
-    /// as the initial root GPA (`phys_base`) or via `alloc_table`.
-    pub(crate) fn set_root(&self, addr: u64) {
-        self.root.set(addr);
-    }
-
-    /// GPA of the initial root allocated by `new`.
-    pub(crate) fn initial_root(&self) -> u64 {
-        self.phys_base as u64
-    }
-
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn size(&self) -> usize {
@@ -297,31 +284,6 @@ where
         &mut self.abort_buffer
     }
 
-    /// Create a snapshot with the given mapped regions
-    pub(crate) fn snapshot(
-        &mut self,
-        sandbox_id: u64,
-        mapped_regions: Vec<MemoryRegion>,
-        root_pt_gpas: &[u64],
-        rsp_gva: u64,
-        sregs: CommonSpecialRegisters,
-        entrypoint: NextAction,
-    ) -> Result<Snapshot> {
-        self.snapshot_count += 1;
-        Snapshot::new(
-            &mut self.shared_mem,
-            &mut self.scratch_mem,
-            sandbox_id,
-            self.layout,
-            crate::mem::exe::LoadInfo::dummy(),
-            mapped_regions,
-            root_pt_gpas,
-            rsp_gva,
-            sregs,
-            entrypoint,
-            self.snapshot_count,
-        )
-    }
 }
 
 impl SandboxMemoryManager<ExclusiveSharedMemory> {
@@ -517,56 +479,6 @@ impl SandboxMemoryManager<HostSharedMemory> {
                 break;
             };
         }
-    }
-
-    /// This function restores a memory snapshot from a given snapshot.
-    pub(crate) fn restore_snapshot(
-        &mut self,
-        snapshot: &Snapshot,
-    ) -> Result<(
-        Option<SnapshotSharedMemory<GuestSharedMemory>>,
-        Option<GuestSharedMemory>,
-    )> {
-        let gsnapshot = if *snapshot.memory() == self.shared_mem {
-            // If the snapshot memory is already the correct memory,
-            // which is readonly, don't bother with restoring it,
-            // since its contents must be the same.  Note that in the
-            // #[cfg(unshared_snapshot_mem)] case, this condition will
-            // never be true, since even immediately after a restore,
-            // self.shared_mem is a (writable) copy, not the original
-            // shared_mem.
-            None
-        } else {
-            let new_snapshot_mem = snapshot.memory().to_mgr_snapshot_mem()?;
-            let (hsnapshot, gsnapshot) = new_snapshot_mem.build();
-            self.shared_mem = hsnapshot;
-            Some(gsnapshot)
-        };
-        let new_scratch_size = snapshot.layout().get_scratch_size();
-        let gscratch = if new_scratch_size == self.scratch_mem.mem_size() {
-            self.scratch_mem.zero()?;
-            None
-        } else {
-            let new_scratch_mem = ExclusiveSharedMemory::new(new_scratch_size)?;
-            let (hscratch, gscratch) = new_scratch_mem.build();
-            // Even though this destroys the reference to the host
-            // side of the old scratch mapping, the VM should still
-            // own the reference to the guest side of the old scratch
-            // mapping, so it won't actually be deallocated until it
-            // has been unmapped from the VM.
-            self.scratch_mem = hscratch;
-
-            Some(gscratch)
-        };
-        self.layout = *snapshot.layout();
-        // Inherit the snapshot's own generation number — the
-        // guest-visible counter reflects "which snapshot is the
-        // sandbox currently a clone of", not "how many restores have
-        // happened into this (possibly-reused) partition".
-        self.snapshot_count = snapshot.snapshot_generation();
-
-        self.update_scratch_bookkeeping()?;
-        Ok((gsnapshot, gscratch))
     }
 
     #[inline]

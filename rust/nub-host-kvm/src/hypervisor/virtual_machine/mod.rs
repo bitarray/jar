@@ -261,12 +261,6 @@ pub(crate) trait VirtualMachine: Debug + Send {
         region: (u32, &MemoryRegion),
     ) -> std::result::Result<(), MapMemoryError>;
 
-    /// Unmap memory region from this VM that has previously been mapped using `map_memory`.
-    fn unmap_memory(
-        &mut self,
-        region: (u32, &MemoryRegion),
-    ) -> std::result::Result<(), UnmapMemoryError>;
-
     /// Runs the vCPU until it exits.
     /// Note: this function emits traces spans for guests
     /// and the span setup is called right before the run virtual processor call of each hypervisor
@@ -293,14 +287,10 @@ pub(crate) trait VirtualMachine: Debug + Send {
     /// Get the debug registers of the vCPU
     #[allow(dead_code)]
     fn debug_regs(&self) -> std::result::Result<CommonDebugRegs, RegisterError>;
-    /// Set the debug registers of the vCPU
-    fn set_debug_regs(&self, drs: &CommonDebugRegs) -> std::result::Result<(), RegisterError>;
 
     /// Get xsave
     #[allow(dead_code)]
     fn xsave(&self) -> std::result::Result<Vec<u8>, RegisterError>;
-    /// Reset xsave to default state
-    fn reset_xsave(&self) -> std::result::Result<(), RegisterError>;
     /// Set xsave - only used for tests
     #[cfg(test)]
     #[cfg(not(feature = "i686-guest"))]

@@ -20,7 +20,7 @@ use hyperlight_common::outb::VmAction;
 #[cfg(gdb)]
 use kvm_bindings::kvm_guest_debug;
 use kvm_bindings::{
-    kvm_debugregs, kvm_fpu, kvm_regs, kvm_sregs, kvm_userspace_memory_region, kvm_xsave,
+    kvm_fpu, kvm_regs, kvm_sregs, kvm_userspace_memory_region,
 };
 use kvm_ioctls::Cap::UserMemory;
 use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
@@ -33,15 +33,14 @@ use vmm_sys_util::eventfd::EventFd;
 #[cfg(gdb)]
 use crate::hypervisor::gdb::{DebugError, DebuggableVm};
 use crate::hypervisor::regs::{
-    CommonDebugRegs, CommonFpu, CommonRegisters, CommonSpecialRegisters, FP_CONTROL_WORD_DEFAULT,
-    MXCSR_DEFAULT,
+    CommonDebugRegs, CommonFpu, CommonRegisters, CommonSpecialRegisters,
 };
 #[cfg(all(test, not(feature = "i686-guest")))]
 use crate::hypervisor::virtual_machine::XSAVE_BUFFER_SIZE;
 #[cfg(feature = "hw-interrupts")]
 use crate::hypervisor::virtual_machine::x86_64::hw_interrupts::TimerThread;
 use crate::hypervisor::virtual_machine::{
-    CreateVmError, MapMemoryError, RegisterError, RunVcpuError, UnmapMemoryError, VirtualMachine,
+    CreateVmError, MapMemoryError, RegisterError, RunVcpuError, VirtualMachine,
     VmExit,
 };
 use crate::mem::memory_region::MemoryRegion;
@@ -305,20 +304,6 @@ impl VirtualMachine for KvmVm {
             .map_err(|e| MapMemoryError::Hypervisor(e.into()))
     }
 
-    fn unmap_memory(
-        &mut self,
-        (slot, region): (u32, &MemoryRegion),
-    ) -> std::result::Result<(), UnmapMemoryError> {
-        let mut kvm_region: kvm_userspace_memory_region = region.into();
-        kvm_region.slot = slot;
-        // Setting memory_size to 0 unmaps the slot's region
-        // From https://docs.kernel.org/virt/kvm/api.html
-        // > Deleting a slot is done by passing zero for memory_size.
-        kvm_region.memory_size = 0;
-        unsafe { self.vm_fd.set_user_memory_region(kvm_region) }
-            .map_err(|e| UnmapMemoryError::Hypervisor(e.into()))
-    }
-
     fn run_vcpu(
         &mut self,
         #[cfg(feature = "trace_guest")] tc: &mut SandboxTraceContext,
@@ -395,14 +380,6 @@ impl VirtualMachine for KvmVm {
         Ok(kvm_debug_regs.into())
     }
 
-    fn set_debug_regs(&self, drs: &CommonDebugRegs) -> std::result::Result<(), RegisterError> {
-        let kvm_debug_regs: kvm_debugregs = drs.into();
-        self.vcpu_fd
-            .set_debug_regs(&kvm_debug_regs)
-            .map_err(|e| RegisterError::SetDebugRegs(e.into()))?;
-        Ok(())
-    }
-
     #[allow(dead_code)]
     fn xsave(&self) -> std::result::Result<Vec<u8>, RegisterError> {
         let xsave = self
@@ -414,35 +391,6 @@ impl VirtualMachine for KvmVm {
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect())
-    }
-
-    fn reset_xsave(&self) -> std::result::Result<(), RegisterError> {
-        let mut xsave = kvm_xsave::default(); // default is zeroed 4KB buffer with no FAM
-
-        // XSAVE legacy region layout (Intel SDM Vol. 1 Section 13.4.1):
-        // - Bytes 0-1: FCW, 2-3: FSW
-        // - Bytes 24-27: MXCSR
-        // - Bytes 512-519: XSTATE_BV
-        // - Bytes 520-527: XCOMP_BV (compaction format indicator)
-        //
-        // kvm_xsave.region is [u32], so region[0] covers FCW (low 16) and FSW (high 16, stays 0).
-        xsave.region[0] = FP_CONTROL_WORD_DEFAULT as u32;
-        xsave.region[6] = MXCSR_DEFAULT;
-        // XSTATE_BV = 0x3: bits 0,1 = x87 + SSE valid. This tells KVM to apply
-        // the legacy region from this buffer. Without this, some KVM versions
-        // may ignore set_xsave entirely when XSTATE_BV=0.
-        xsave.region[128] = 0x3;
-        // Note: Unlike MSHV/WHP, we don't preserve XCOMP_BV because KVM uses
-        // standard (non-compacted) XSAVE format where XCOMP_BV remains 0.
-
-        // SAFETY: No dynamic features enabled, 4KB is sufficient
-        unsafe {
-            self.vcpu_fd
-                .set_xsave(&xsave)
-                .map_err(|e| RegisterError::SetXsave(e.into()))?
-        };
-
-        Ok(())
     }
 
     #[cfg(test)]

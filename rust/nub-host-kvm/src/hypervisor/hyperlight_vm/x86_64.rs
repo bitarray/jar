@@ -41,7 +41,7 @@ use crate::hypervisor::gdb::{
 #[cfg(gdb)]
 use crate::hypervisor::gdb::{DebugError, DebugMemoryAccessError};
 use crate::hypervisor::regs::{
-    CommonDebugRegs, CommonFpu, CommonRegisters, CommonSpecialRegisters,
+    CommonFpu, CommonRegisters, CommonSpecialRegisters,
 };
 #[cfg(not(gdb))]
 use crate::hypervisor::virtual_machine::VirtualMachine;
@@ -52,7 +52,7 @@ use crate::hypervisor::virtual_machine::mshv::MshvVm;
 #[cfg(target_os = "windows")]
 use crate::hypervisor::virtual_machine::whp::WhpVm;
 use crate::hypervisor::virtual_machine::{
-    HypervisorType, RegisterError, VmError, get_available_hypervisor,
+    HypervisorType, VmError, get_available_hypervisor,
 };
 #[cfg(target_os = "windows")]
 use crate::hypervisor::{PartitionState, WindowsInterruptHandle};
@@ -79,7 +79,7 @@ impl HyperlightVm {
         _root_pt_addr: u64,
         entrypoint: NextAction,
         rsp_gva: u64,
-        page_size: usize,
+        _page_size: usize,
         #[cfg_attr(target_os = "windows", allow(unused_variables))] config: &SandboxConfiguration,
         #[cfg(gdb)] gdb_conn: Option<DebugCommChannel<DebugResponse, DebugMsg>>,
         #[cfg(crashdump)] rt_cfg: SandboxRuntimeConfig,
@@ -150,10 +150,6 @@ impl HyperlightVm {
             entrypoint,
             rsp_gva,
             interrupt_handle,
-            page_size,
-
-            next_slot: scratch_slot + 1,
-            freed_slots: Vec::new(),
 
             snapshot_slot,
             snapshot_memory: None,
@@ -174,8 +170,8 @@ impl HyperlightVm {
             rt_cfg,
         };
 
-        ret.update_snapshot_mapping(snapshot_mem)?;
-        ret.update_scratch_mapping(scratch_mem)?;
+        ret.install_snapshot_mapping(snapshot_mem)?;
+        ret.install_scratch_mapping(scratch_mem)?;
 
         // Send the interrupt handle to the GDB thread if debugging is enabled
         // This is used to allow the GDB thread to stop the vCPU
@@ -252,20 +248,6 @@ impl HyperlightVm {
         Ok(())
     }
 
-    /// Get the current base page table physical address from CR3.
-    pub(crate) fn get_root_pt(&self) -> Result<u64, AccessPageTableError> {
-        let sregs = self.vm.sregs()?;
-        // Mask off the flags bits
-        Ok(sregs.cr3 & !0xfff_u64)
-    }
-
-    /// Get the special registers that need to be stored in a snapshot.
-    pub(crate) fn get_snapshot_sregs(
-        &mut self,
-    ) -> Result<CommonSpecialRegisters, AccessPageTableError> {
-        Ok(self.vm.sregs()?)
-    }
-
     /// Dispatch a call from the host to the guest using the given pointer
     /// to the dispatch function _in the guest's address space_.
     ///
@@ -326,34 +308,6 @@ impl HyperlightVm {
         self.pending_tlb_flush = false;
 
         result
-    }
-
-    /// Resets the following vCPU state:
-    /// - General purpose registers
-    /// - Debug registers
-    /// - XSAVE (includes FPU/SSE state with proper FCW and MXCSR defaults)
-    /// - Special registers (restored from snapshot, with CR3 updated to new page table location)
-    // TODO: check if other state needs to be reset
-    pub(crate) fn reset_vcpu(
-        &mut self,
-        cr3: u64,
-        sregs: &CommonSpecialRegisters,
-    ) -> std::result::Result<(), RegisterError> {
-        self.vm.set_regs(&CommonRegisters {
-            rflags: 1 << 1, // Reserved bit always set
-            ..Default::default()
-        })?;
-        self.vm.set_debug_regs(&CommonDebugRegs::default())?;
-        self.vm.reset_xsave()?;
-
-        // Restore the full special registers from snapshot, but update CR3
-        // to point to the new (relocated) page tables
-        let mut sregs = *sregs;
-        sregs.cr3 = cr3;
-        self.pending_tlb_flush = true;
-        self.vm.set_sregs(&sregs)?;
-
-        Ok(())
     }
 
     // Handle a debug exit

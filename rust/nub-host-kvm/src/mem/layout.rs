@@ -68,77 +68,15 @@ use tracing::{Span, instrument};
 
 use super::memory_region::MemoryRegionType::{Code, Heap, InitData, Peb};
 use super::memory_region::{
-    DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegion, MemoryRegion_, MemoryRegionFlags, MemoryRegionKind,
+    DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegion_, MemoryRegionFlags, MemoryRegionKind,
     MemoryRegionVecBuilder,
 };
 #[cfg(any(gdb, feature = "mem_profile"))]
 use super::shared_mem::HostSharedMemory;
-use super::shared_mem::{ExclusiveSharedMemory, ReadonlySharedMemory};
 use crate::error::HyperlightError::{MemoryRequestTooBig, MemoryRequestTooSmall};
 use crate::sandbox::SandboxConfiguration;
 use crate::{Result, new_error};
 
-pub(crate) enum BaseGpaRegion<Sn, Sc> {
-    Snapshot(Sn),
-    Scratch(Sc),
-    Mmap(MemoryRegion),
-}
-
-// It's an invariant of this type, checked on creation, that the
-// offset is in bounds for the base region.
-pub(crate) struct ResolvedGpa<Sn, Sc> {
-    pub(crate) offset: usize,
-    pub(crate) base: BaseGpaRegion<Sn, Sc>,
-}
-
-impl AsRef<[u8]> for ExclusiveSharedMemory {
-    fn as_ref(&self) -> &[u8] {
-        self.as_slice()
-    }
-}
-impl AsRef<[u8]> for ReadonlySharedMemory {
-    fn as_ref(&self) -> &[u8] {
-        self.as_slice()
-    }
-}
-
-impl<Sn, Sc> ResolvedGpa<Sn, Sc> {
-    pub(crate) fn with_memories<Sn2, Sc2>(self, sn: Sn2, sc: Sc2) -> ResolvedGpa<Sn2, Sc2> {
-        ResolvedGpa {
-            offset: self.offset,
-            base: match self.base {
-                BaseGpaRegion::Snapshot(_) => BaseGpaRegion::Snapshot(sn),
-                BaseGpaRegion::Scratch(_) => BaseGpaRegion::Scratch(sc),
-                BaseGpaRegion::Mmap(r) => BaseGpaRegion::Mmap(r),
-            },
-        }
-    }
-}
-impl<'a> BaseGpaRegion<&'a [u8], &'a [u8]> {
-    pub(crate) fn as_ref<'b>(&'b self) -> &'a [u8] {
-        match self {
-            BaseGpaRegion::Snapshot(sn) => sn,
-            BaseGpaRegion::Scratch(sc) => sc,
-            BaseGpaRegion::Mmap(r) => unsafe {
-                #[allow(clippy::useless_conversion)]
-                let host_region_base: usize = r.host_region.start.into();
-                #[allow(clippy::useless_conversion)]
-                let host_region_end: usize = r.host_region.end.into();
-                let len = host_region_end - host_region_base;
-                std::slice::from_raw_parts(host_region_base as *const u8, len)
-            },
-        }
-    }
-}
-impl<'a> ResolvedGpa<&'a [u8], &'a [u8]> {
-    pub(crate) fn as_ref<'b>(&'b self) -> &'a [u8] {
-        let base = self.base.as_ref();
-        if self.offset > base.len() {
-            return &[];
-        }
-        &self.base.as_ref()[self.offset..]
-    }
-}
 #[cfg(any(gdb, feature = "mem_profile"))]
 #[allow(unused)] // may be unused when i686-guest is also enabled
 pub(crate) trait ReadableSharedMemory {
@@ -820,36 +758,6 @@ impl SandboxMemoryLayout {
         Ok(())
     }
 
-    /// Determine what region this gpa is in, and its offset into that region
-    pub(crate) fn resolve_gpa(
-        &self,
-        gpa: u64,
-        mmap_regions: &[MemoryRegion],
-    ) -> Option<ResolvedGpa<(), ()>> {
-        let scratch_base = hyperlight_common::layout::scratch_base_gpa(self.scratch_size);
-        if gpa >= scratch_base && gpa < scratch_base + self.scratch_size as u64 {
-            return Some(ResolvedGpa {
-                offset: (gpa - scratch_base) as usize,
-                base: BaseGpaRegion::Scratch(()),
-            });
-        } else if gpa >= SandboxMemoryLayout::BASE_ADDRESS as u64
-            && gpa < SandboxMemoryLayout::BASE_ADDRESS as u64 + self.snapshot_size as u64
-        {
-            return Some(ResolvedGpa {
-                offset: gpa as usize - SandboxMemoryLayout::BASE_ADDRESS,
-                base: BaseGpaRegion::Snapshot(()),
-            });
-        }
-        for rgn in mmap_regions {
-            if gpa >= rgn.guest_region.start as u64 && gpa < rgn.guest_region.end as u64 {
-                return Some(ResolvedGpa {
-                    offset: gpa as usize - rgn.guest_region.start,
-                    base: BaseGpaRegion::Mmap(rgn.clone()),
-                });
-            }
-        }
-        None
-    }
 }
 
 #[cfg(test)]

@@ -13,15 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-#![warn(missing_docs, unused_mut)]
-// Stage F.CoW (this commit) removed `MultiUseSandbox::snapshot()`,
-// `restore()`, `map_file_cow()`, and the `poisoned` field, plus the
-// host-side machinery (CoW PT marking, snapshot rebuild, file-mapping
-// preparation). A lot of internal helpers in `mem/mgr.rs`,
-// `hypervisor/hyperlight_vm/`, and `sandbox/snapshot.rs` no longer
-// have callers. A follow-up commit deletes them; for now, suppress
-// the dead-code lint so clippy stays green.
-#![allow(dead_code)]
+#![warn(dead_code, missing_docs, unused_mut)]
 //! Hyperlight host runtime for executing guest code in lightweight virtual machines.
 //!
 //! This crate provides the host-side runtime for Hyperlight, enabling safe execution
