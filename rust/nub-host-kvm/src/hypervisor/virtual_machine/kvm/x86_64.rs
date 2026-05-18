@@ -35,8 +35,6 @@ use crate::hypervisor::gdb::{DebugError, DebuggableVm};
 use crate::hypervisor::regs::{
     CommonDebugRegs, CommonFpu, CommonRegisters, CommonSpecialRegisters,
 };
-#[cfg(all(test, not(feature = "i686-guest")))]
-use crate::hypervisor::virtual_machine::XSAVE_BUFFER_SIZE;
 #[cfg(feature = "hw-interrupts")]
 use crate::hypervisor::virtual_machine::x86_64::hw_interrupts::TimerThread;
 use crate::hypervisor::virtual_machine::{
@@ -391,30 +389,6 @@ impl VirtualMachine for KvmVm {
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect())
-    }
-
-    #[cfg(test)]
-    #[cfg(not(feature = "i686-guest"))]
-    fn set_xsave(&self, xsave: &[u32]) -> std::result::Result<(), RegisterError> {
-        if std::mem::size_of_val(xsave) != XSAVE_BUFFER_SIZE {
-            return Err(RegisterError::XsaveSizeMismatch {
-                expected: XSAVE_BUFFER_SIZE as u32,
-                actual: std::mem::size_of_val(xsave) as u32,
-            });
-        }
-        let xsave = kvm_xsave {
-            region: xsave.try_into().expect("xsave slice has correct length"),
-            ..Default::default()
-        };
-        // Safety: Safe because we only copy 4096 bytes
-        // and have not enabled any dynamic xsave features
-        unsafe {
-            self.vcpu_fd
-                .set_xsave(&xsave)
-                .map_err(|e| RegisterError::SetXsave(e.into()))?
-        };
-
-        Ok(())
     }
 }
 

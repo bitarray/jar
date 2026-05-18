@@ -70,10 +70,6 @@ pub(crate) enum HypervisorType {
     Kvm,
 }
 
-/// Standard XSAVE buffer size (4KB) used by KVM.
-#[cfg(all(kvm, test, not(feature = "i686-guest")))]
-pub(crate) const XSAVE_BUFFER_SIZE: usize = 4096;
-
 // Compiler error if no hypervisor type is available (not applicable on aarch64 yet)
 #[cfg(not(any(kvm, target_arch = "aarch64")))]
 compile_error!(
@@ -291,10 +287,6 @@ pub(crate) trait VirtualMachine: Debug + Send {
     /// Get xsave
     #[allow(dead_code)]
     fn xsave(&self) -> std::result::Result<Vec<u8>, RegisterError>;
-    /// Set xsave - only used for tests
-    #[cfg(test)]
-    #[cfg(not(feature = "i686-guest"))]
-    fn set_xsave(&self, xsave: &[u32]) -> std::result::Result<(), RegisterError>;
 
     /// Get partition handle
     #[cfg(target_os = "windows")]

@@ -78,14 +78,14 @@ const CALLER_SAVED: [Reg; 8] = [
 
 /// JitContext field offsets — all NEGATIVE from R15 (guest memory base).
 ///
-/// Memory layout (contiguous mmap):
-///   R15 - PERMS_OFFSET .. R15 - CTX_OFFSET:  permission table (1MB)
-///   R15 - CTX_OFFSET   .. R15:               JitContext (~208 bytes, padded to page)
-///   R15                .. R15 + 4GB:          guest memory (flat buffer)
+/// Memory layout:
+///   R15 - CTX_OFFSET .. R15:        JitContext (~200 bytes, padded to page)
+///   R15              .. R15 + 4GB:  guest memory (flat buffer)
 ///
 /// CTX_OFFSET is the page-aligned distance from R15 to JitContext start.
+/// (PERMS_OFFSET / a permission table at R15 - 1 MiB was removed in the
+/// PERMS sweep — PT-based enforcement supplants it.)
 pub const CTX_OFFSET: i32 = 4096; // JitContext at R15 - 4096
-pub const PERMS_OFFSET: i32 = CTX_OFFSET + (1 << 20); // perms at R15 - 1052672
 
 use super::JitContext;
 use memoffset::offset_of;

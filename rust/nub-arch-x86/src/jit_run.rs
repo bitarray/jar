@@ -9,16 +9,15 @@
 //!
 //! ## Memory layout (per invocation, in the new page table)
 //!
-//! Everything lives at user VAs derived from a single base
-//! (`PROG_BASE_M`). The base is chosen high enough not to collide
-//! with any kernel mapping carried over from the source PML4.
+//! Everything lives in PML4 slot 0 (low VA, kernel relocated to slot
+//! 511 in Stage F kernel-high). VA 0 stays unmapped to preserve the
+//! NULL-deref guard.
 //!
 //! ```text
-//!   PERMS_VA = PROG_BASE                       perms (user-RW)
-//!   CTX_VA   = PROG_BASE + 0x100000            4 KiB ctx + dispatch_table
-//!   MEM_VA   = PROG_BASE + 0x101000            mem_size bytes guest memory (R15)
+//!   CTX_VA   = 0x1000                          4 KiB JitContext
+//!   MEM_VA   = 0x2000                          mem_size bytes guest memory (R15)
 //!
-//!   META_BASE= PROG_BASE + (4 GiB)             clear of any mem range
+//!   META_BASE= 4 GiB + 0x2000                  clear of any mem range
 //!   BB_VA    = META_BASE                       bitmask scratch (user-RO)
 //!   JT_VA    = META_BASE + 16 MiB              jump-table scratch (user-RO)
 //!   DISPATCH = META_BASE + 32 MiB              dispatch table (user-RO)
@@ -27,10 +26,10 @@
 //!   STACK    = TRAMP + 4 KiB                   stack (user-RW)
 //! ```
 //!
-//! All backing pages come from the global heap (talc), which lives
-//! in Hyperlight's identity-mapped low memory (`PA == VA`). The
-//! buffers are sized to the actual program (rather than fixed pool
-//! sizes) and freed when [`run_pvm_with_mem`] returns.
+//! All backing pages come from the global heap (talc). Per-page PVM
+//! `RO`/`RW` enforcement was removed alongside the PERMS sweep — the
+//! per-invocation PT itself enforces bounds (faults outside
+//! `[MEM_VA, MEM_VA + mem_size)` route via `jit_pf_handler`).
 
 #![cfg(target_os = "none")]
 
@@ -142,12 +141,15 @@ pub struct ExitInfo {
 // VA `[PROG_BASE_M, ...)` mirrors PVM's u32 address space (plus our
 // own scratch tables in META region above). Skips VA 0 to preserve
 // the NULL-deref guard page.
+//
+// After the PERMS sweep, CTX sits at `PROG_BASE_M` (was 1 MiB above
+// PERMS); MEM follows immediately. R15 = MEM_VA_M = CTX + 4 KiB,
+// matching the recompiler's `lea CTX, [RDI + CTX_OFFSET]` prologue.
 
 const PROG_BASE_M: u64 = 0x1000;
-const PERMS_VA_M: u64 = PROG_BASE_M;
-const CTX_VA_M: u64 = PROG_BASE_M + 0x100000;
-const MEM_VA_M: u64 = PROG_BASE_M + 0x101000;
-const META_BASE_M: u64 = PROG_BASE_M + (4u64 << 30); // +4 GiB
+const CTX_VA_M: u64 = PROG_BASE_M;
+const MEM_VA_M: u64 = PROG_BASE_M + 0x1000;
+const META_BASE_M: u64 = MEM_VA_M + (4u64 << 30); // +4 GiB above MEM
 const BB_VA_M: u64 = META_BASE_M;
 const JT_VA_M: u64 = META_BASE_M + (1u64 << 24); // +16 MiB
 const DISPATCH_VA_M: u64 = META_BASE_M + (1u64 << 25); // +32 MiB
@@ -276,7 +278,6 @@ pub unsafe fn run_pvm_with_mem(
 
     // ---- size each buffer to the actual program --------------------------
     let mem_bytes = (mem_size as usize).next_multiple_of(PAGE_SIZE);
-    let perms_bytes = (mem_size as usize).div_ceil(PAGE_SIZE);
     let bb_bytes = bitmask.len();
     let jt_bytes = jump_table.len().checked_mul(core::mem::size_of::<u32>())?;
     let dispatch_bytes = dispatch_table.len().checked_mul(core::mem::size_of::<i32>())?;
@@ -285,7 +286,6 @@ pub unsafe fn run_pvm_with_mem(
 
     // ---- allocate per-invocation buffers ---------------------------------
     let mem_buf = PageBuf::new(mem_bytes.max(PAGE_SIZE))?;
-    let perms_buf = PageBuf::new(perms_bytes.max(PAGE_SIZE))?;
     let ctx_buf = PageBuf::new(PAGE_SIZE)?;
     let bb_buf = PageBuf::new(bb_bytes.max(PAGE_SIZE))?;
     let jt_buf = PageBuf::new(jt_bytes.max(PAGE_SIZE))?;
@@ -309,13 +309,6 @@ pub unsafe fn run_pvm_with_mem(
             jt_buf.kva() as *mut u8,
             jt_bytes,
         );
-    }
-
-    // ---- mark `[0, mem_size)` pages RW in perms ----------------------------
-    // (perms_buf is already zeroed by alloc_zeroed.)
-    // SAFETY: perms_buf has at least perms_bytes available.
-    unsafe {
-        core::ptr::write_bytes(perms_buf.kva() as *mut u8, javm_exec::perm::RW, perms_bytes);
     }
 
     // ---- populate mem regions ----------------------------------------------
@@ -373,7 +366,6 @@ pub unsafe fn run_pvm_with_mem(
         (*ctx).dispatch_table = DISPATCH_VA_M as *const i32;
         (*ctx).code_base = JIT_VA_M;
         (*ctx).flat_buf = MEM_VA_M as *mut u8;
-        (*ctx).flat_perms = PERMS_VA_M as *const u8;
         (*ctx).fast_reentry = 0;
         (*ctx)._pad2 = 0;
         (*ctx).max_heap_pages = 0;
@@ -406,7 +398,6 @@ pub unsafe fn run_pvm_with_mem(
 
     // ---- build the page table ----------------------------------------------
     let mut pt = PageTable::new()?;
-    pt.map(PERMS_VA_M, perms_buf.pa(), perms_buf.size(), Perm::user_rw())?;
     pt.map(CTX_VA_M, ctx_buf.pa(), ctx_buf.size(), Perm::user_rw())?;
     if mem_bytes > 0 {
         pt.map(MEM_VA_M, mem_buf.pa(), mem_buf.size(), Perm::user_rw())?;

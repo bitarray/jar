@@ -599,14 +599,6 @@ impl ExclusiveSharedMemory {
         unsafe { std::slice::from_raw_parts(self.base_ptr(), self.mem_size()) }
     }
 
-    /// Copy the entire contents of `self` into a `Vec<u8>`, then return it
-    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
-    #[cfg(test)]
-    pub(crate) fn copy_all_to_vec(&self) -> Result<Vec<u8>> {
-        let data = self.as_slice();
-        Ok(data.to_vec())
-    }
-
     /// Copies all bytes from `src` to `self` starting at offset
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
     pub fn copy_from_slice(&mut self, src: &[u8], offset: usize) -> Result<()> {

@@ -103,12 +103,10 @@ pub struct JitContext {
     pub code_base: u64,
     /// Flat guest memory buffer base pointer (offset 184).
     pub flat_buf: *mut u8,
-    /// Permission table base pointer (offset 192).
-    pub flat_perms: *const u8,
-    /// Fast re-entry flag (offset 200).
+    /// Fast re-entry flag.
     pub fast_reentry: u32,
     pub _pad2: u32,
-    /// Maximum heap pages — grow_heap refuses beyond this (offset 208).
+    /// Maximum heap pages — grow_heap refuses beyond this.
     pub max_heap_pages: u32,
     pub _pad3: u32,
 }
@@ -230,16 +228,19 @@ pub fn compile_code(
     jump_table: &[u32],
     mem_cycles: u8,
 ) -> Result<CompiledCode, String> {
+    // The recompiler uses these as width-dispatch sentinels — it
+    // never CALLs them — so any distinct non-zero values work. The
+    // actual helper fns were removed (see PERMS sweep).
     let helpers = HelperFns {
-        mem_read_u8: mem_read_u8 as *const () as u64,
-        mem_read_u16: mem_read_u16 as *const () as u64,
-        mem_read_u32: mem_read_u32 as *const () as u64,
-        mem_read_u64: mem_read_u64_fn as *const () as u64,
-        mem_write_u8: mem_write_u8 as *const () as u64,
-        mem_write_u16: mem_write_u16 as *const () as u64,
-        mem_write_u32: mem_write_u32 as *const () as u64,
-        mem_write_u64: mem_write_u64_fn as *const () as u64,
-        sbrk_helper: sbrk_helper as *const () as u64,
+        mem_read_u8: 0x1001,
+        mem_read_u16: 0x1002,
+        mem_read_u32: 0x1003,
+        mem_read_u64: 0x1004,
+        mem_write_u8: 0x1005,
+        mem_write_u16: 0x1006,
+        mem_write_u32: 0x1007,
+        mem_write_u64: 0x1008,
+        sbrk_helper: 0x1009,
     };
 
     let compiler = Compiler::new(bitmask, jump_table, helpers, code.len(), true, mem_cycles);
@@ -301,8 +302,6 @@ pub struct FlatMemory {
     region_size: usize,
     /// Pointer to the guest memory base (= region + HEADER_SIZE).
     buf: *mut u8,
-    /// Pointer to the permission table (= region).
-    perms: *mut u8,
     /// Largest valid guest-address bound: bytes in `[0, mem_size)`
     /// are considered in-range for `Memory` accesses. The underlying
     /// mmap actually covers 4 GiB, but the practical PVM program
@@ -327,20 +326,17 @@ unsafe impl Sync for FlatMemory {}
 /// (`nub-arch-x86`) is the production substrate; FlatMemory
 /// exists only to back the crate's own unit tests post-Stage-2.2.
 const FLAT_BUF_SIZE: usize = 1 << 26; // 64 MiB virtual
-/// Perm-table size, one byte per 4 KiB page covering FLAT_BUF_SIZE.
-const NUM_PAGES: usize = FLAT_BUF_SIZE / 4096;
 const CTX_PAGE: usize = 4096; // JitContext page
-const HEADER_SIZE: usize = NUM_PAGES + CTX_PAGE; // perms + ctx page before guest mem
+const HEADER_SIZE: usize = CTX_PAGE; // ctx page before guest mem
 
 #[cfg(feature = "std")]
 impl FlatMemory {
     /// Allocate a virtual address space for the host-side
-    /// FlatMemory plus the leading perm-table + CTX_PAGE.
+    /// FlatMemory: one leading CTX_PAGE for JitContext, then
+    /// FLAT_BUF_SIZE of guest memory.
     ///
     /// `mem_size` sets the practical guest-address upper bound for
-    /// the `Memory` trait's bounds checks. Pages in `[0, mem_size)`
-    /// are pre-marked RW in the perm table so `populate_memory` can
-    /// refine per region.
+    /// the `Memory` trait's bounds checks.
     pub fn new(mem_size: u32) -> Option<Self> {
         let region_size = HEADER_SIZE + FLAT_BUF_SIZE;
         // SAFETY: mmap with MAP_ANONYMOUS|MAP_PRIVATE|MAP_NORESERVE allocates virtual pages.
@@ -363,24 +359,13 @@ impl FlatMemory {
             return None;
         }
         let region = region as *mut u8;
-        let perms = region;
         // SAFETY: HEADER_SIZE < region_size, so region + HEADER_SIZE is within the mmap.
         let buf = unsafe { region.add(HEADER_SIZE) };
-
-        // Pre-mark `[0, mem_size)` pages RW so `populate_memory` can
-        // refine per region. (The native ABI's read/write helpers
-        // check this table; perms here gate the cold-path API. JIT'd
-        // code path-bounds via mmap guard pages, not this table.)
-        let num_pages = mem_size.div_ceil(4096) as usize;
-        unsafe {
-            std::ptr::write_bytes(perms, javm_exec::perm::RW, num_pages.min(NUM_PAGES));
-        }
 
         Some(Self {
             region,
             region_size,
             buf,
-            perms,
             mem_size,
         })
     }
@@ -438,9 +423,6 @@ pub trait NativeMemory: javm_exec::Memory {
     fn host_buf_ptr(&self) -> *mut u8;
     /// Length of the addressable guest region in bytes (≤ 2^32).
     fn host_buf_len(&self) -> usize;
-    /// Per-page permission table base pointer. The SIGSEGV handler
-    /// reads it to classify faults (RO-write vs unmapped).
-    fn host_perms_ptr(&self) -> *mut u8;
     /// Pointer to a scratch region (≥ 4 KiB) where the recompiler
     /// places its per-invocation `JitContext`. The layout invariant
     /// is that the JIT'd code can reach this region via
@@ -556,20 +538,11 @@ impl javm_exec::Memory for FlatMemory {
             self.mem_size = end_u32;
         }
 
-        let perm_byte = match access {
-            javm_exec::Access::ReadOnly => javm_exec::perm::RO,
-            javm_exec::Access::ReadWrite => javm_exec::perm::RW,
-        };
-        let first_page = (start / page) as usize;
-        let last_page = ((end / page) as usize).saturating_sub(1);
-        if size > 0 {
-            // SAFETY: page indices are clamped by mem_size <= NUM_PAGES*4096.
-            unsafe {
-                for p in first_page..=last_page {
-                    *self.perms.add(p) = perm_byte;
-                }
-            }
-        }
+        // Permission bits are no longer tracked (Stage F follow-up):
+        // RO/RW enforcement was a vestigial cold-path concern; the
+        // in-kernel JIT enforces bounds via the per-invocation PT and
+        // the host-side recompiler tests don't exercise RO writes.
+        let _ = access;
 
         if let Some(bytes) = init {
             let n = bytes.len().min(size as usize);
@@ -582,12 +555,13 @@ impl javm_exec::Memory for FlatMemory {
     }
 
     fn perm_of(&self, addr: u32) -> u8 {
-        let page = (addr / javm_exec::PAGE_SIZE) as usize;
-        if page >= NUM_PAGES {
-            return javm_exec::perm::NONE;
+        // FlatMemory no longer tracks per-page perms (Stage F PERMS
+        // sweep). Anything in `[0, mem_size)` is treated as RW.
+        if addr >= self.mem_size {
+            javm_exec::perm::NONE
+        } else {
+            javm_exec::perm::RW
         }
-        // SAFETY: page < NUM_PAGES (size of the perm table).
-        unsafe { *self.perms.add(page) }
     }
 
     fn read(&self, addr: u32, len: usize) -> Result<Vec<u8>, javm_exec::MemAccess> {
@@ -621,17 +595,8 @@ impl javm_exec::Memory for FlatMemory {
                 addr & !(javm_exec::PAGE_SIZE - 1),
             ));
         }
-        // Per-page perm check.
-        let start_page = (addr as usize) / (javm_exec::PAGE_SIZE as usize);
-        let last_page = (end as usize - 1) / (javm_exec::PAGE_SIZE as usize);
-        for p in start_page..=last_page {
-            let perm = unsafe { *self.perms.add(p) };
-            if perm != javm_exec::perm::RW {
-                return Err(javm_exec::MemAccess::WriteProtected(
-                    (p as u32) * javm_exec::PAGE_SIZE,
-                ));
-            }
-        }
+        // Bounds-check only; per-page RO enforcement is gone — see the
+        // `map_region` comment above.
         unsafe {
             core::ptr::copy_nonoverlapping(data.as_ptr(), self.buf.add(addr as usize), data.len());
         }
@@ -650,10 +615,6 @@ impl NativeMemory for FlatMemory {
         FLAT_BUF_SIZE
     }
     #[inline]
-    fn host_perms_ptr(&self) -> *mut u8 {
-        self.perms
-    }
-    #[inline]
     fn host_ctx_ptr(&self) -> *mut u8 {
         self.ctx_ptr()
     }
@@ -664,244 +625,16 @@ impl NativeMemory for FlatMemory {
 // We pass memory pointer directly, and handle faults via a global context.
 // Actually, let's pass ctx as first arg for writes so we can set fault info.
 
-// Reads: fn(ctx: *mut JitContext, addr: u32) -> u64
-// On fault, the caller checks ctx.exit_reason after the call.
-// But the helper doesn't have ctx... Let's restructure.
-// Pass ctx as first arg to everything.
-
-/// Check flat buffer permission for a byte range. Returns true if all bytes are accessible.
-fn flat_check_perm(ctx: &JitContext, addr: u32, len: u32, min_perm: u8) -> bool {
-    if ctx.flat_perms.is_null() {
-        return false;
-    }
-    let start_page = addr as usize / 4096;
-    let end_page = (addr as usize + len as usize - 1) / 4096;
-    for p in start_page..=end_page {
-        if p >= NUM_PAGES {
-            return false;
-        }
-        // SAFETY: p is bounds-checked against NUM_PAGES above; flat_perms is valid for NUM_PAGES.
-        let perm = unsafe { *ctx.flat_perms.add(p) };
-        if perm < min_perm {
-            return false;
-        }
-    }
-    true
-}
-
-/// Read from flat buffer. Caller must have checked permissions.
-unsafe fn flat_read(ctx: &JitContext, addr: u32, len: usize) -> u64 {
-    // SAFETY: caller verified permissions via flat_check_perm; addr..+len is within flat_buf.
-    unsafe {
-        let ptr = ctx.flat_buf.add(addr as usize);
-        match len {
-            1 => *ptr as u64,
-            2 => u16::from_le_bytes([*ptr, *ptr.add(1)]) as u64,
-            4 => u32::from_le_bytes([*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)]) as u64,
-            8 => u64::from_le_bytes(core::ptr::read_unaligned(ptr as *const [u8; 8])),
-            _ => 0,
-        }
-    }
-}
-
-/// Write to flat buffer. Caller must have checked permissions.
-unsafe fn flat_write(ctx: &JitContext, addr: u32, bytes: &[u8]) {
-    // SAFETY: caller verified permissions via flat_check_perm; addr..+len is within flat_buf.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            ctx.flat_buf.add(addr as usize),
-            bytes.len(),
-        );
-    }
-}
-
-/// Memory read helpers — read from flat buffer.
-///
-/// All extern "sysv64" helpers below are called from JIT-generated code with a valid
-/// JitContext pointer passed as the first argument via the sysv64 calling convention.
-/// The pointer is valid for the duration of JIT execution because JitContext lives in
-/// the FlatMemory mmap region which outlives the JIT call.
-extern "sysv64" fn mem_read_u8(ctx: *mut JitContext, addr: u32) -> u64 {
-    // SAFETY: ctx is a valid JitContext pointer from JIT code; see group comment above.
-    let ctx = unsafe { &mut *ctx };
-    if flat_check_perm(ctx, addr, 1, 1) {
-        // SAFETY: flat_check_perm confirmed the page is readable.
-        return unsafe { flat_read(ctx, addr, 1) };
-    }
-    ctx.exit_reason = 3;
-    ctx.exit_arg = addr;
-    0
-}
-
-extern "sysv64" fn mem_read_u16(ctx: *mut JitContext, addr: u32) -> u64 {
-    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
-    let ctx = unsafe { &mut *ctx };
-    if flat_check_perm(ctx, addr, 2, 1) {
-        // SAFETY: flat_check_perm confirmed the pages are readable.
-        return unsafe { flat_read(ctx, addr, 2) };
-    }
-    ctx.exit_reason = 3;
-    ctx.exit_arg = addr;
-    0
-}
-
-extern "sysv64" fn mem_read_u32(ctx: *mut JitContext, addr: u32) -> u64 {
-    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
-    let ctx = unsafe { &mut *ctx };
-    if flat_check_perm(ctx, addr, 4, 1) {
-        // SAFETY: flat_check_perm confirmed the pages are readable.
-        return unsafe { flat_read(ctx, addr, 4) };
-    }
-    ctx.exit_reason = 3;
-    ctx.exit_arg = addr;
-    0
-}
-
-extern "sysv64" fn mem_read_u64_fn(ctx: *mut JitContext, addr: u32) -> u64 {
-    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
-    let ctx = unsafe { &mut *ctx };
-    if flat_check_perm(ctx, addr, 8, 1) {
-        // SAFETY: flat_check_perm confirmed the pages are readable.
-        return unsafe { flat_read(ctx, addr, 8) };
-    }
-    ctx.exit_reason = 3;
-    ctx.exit_arg = addr;
-    0
-}
-
-/// Memory write helpers — write to flat buffer.
-extern "sysv64" fn mem_write_u8(ctx: *mut JitContext, addr: u32, value: u64) -> u64 {
-    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
-    let ctx = unsafe { &mut *ctx };
-    if flat_check_perm(ctx, addr, 1, 2) {
-        // SAFETY: flat_check_perm confirmed the page is writable.
-        unsafe {
-            flat_write(ctx, addr, &[value as u8]);
-        }
-        return 0;
-    }
-    ctx.exit_reason = 3;
-    ctx.exit_arg = addr;
-    1
-}
-
-extern "sysv64" fn mem_write_u16(ctx: *mut JitContext, addr: u32, value: u64) -> u64 {
-    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
-    let ctx = unsafe { &mut *ctx };
-    if flat_check_perm(ctx, addr, 2, 2) {
-        // SAFETY: flat_check_perm confirmed the pages are writable.
-        unsafe {
-            flat_write(ctx, addr, &(value as u16).to_le_bytes());
-        }
-        return 0;
-    }
-    ctx.exit_reason = 3;
-    ctx.exit_arg = addr;
-    1
-}
-
-extern "sysv64" fn mem_write_u32(ctx: *mut JitContext, addr: u32, value: u64) -> u64 {
-    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
-    let ctx = unsafe { &mut *ctx };
-    if flat_check_perm(ctx, addr, 4, 2) {
-        // SAFETY: flat_check_perm confirmed the pages are writable.
-        unsafe {
-            flat_write(ctx, addr, &(value as u32).to_le_bytes());
-        }
-        return 0;
-    }
-    ctx.exit_reason = 3;
-    ctx.exit_arg = addr;
-    1
-}
-
-extern "sysv64" fn mem_write_u64_fn(ctx: *mut JitContext, addr: u32, value: u64) -> u64 {
-    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
-    let ctx = unsafe { &mut *ctx };
-    if flat_check_perm(ctx, addr, 8, 2) {
-        // SAFETY: flat_check_perm confirmed the pages are writable.
-        unsafe {
-            flat_write(ctx, addr, &value.to_le_bytes());
-        }
-        return 0;
-    }
-    ctx.exit_reason = 3;
-    ctx.exit_arg = addr;
-    1
-}
-
-/// Sbrk helper. ctx: *mut JitContext, size: u64 → result in return.
-extern "sysv64" fn sbrk_helper(ctx: *mut JitContext, size: u64) -> u64 {
-    // SAFETY: valid JitContext pointer from JIT code; see group comment on mem_read_u8.
-    let ctx = unsafe { &mut *ctx };
-    let ps = javm_exec::PAGE_SIZE;
-
-    if size > u32::MAX as u64 {
-        return 0;
-    }
-    if size == 0 {
-        // Query: return current heap top
-        return ctx.heap_top as u64;
-    }
-
-    let size_u32 = size as u32;
-    let old_top = ctx.heap_top;
-    let new_top = (old_top as u64) + (size_u32 as u64);
-
-    if new_top > (u32::MAX as u64) + 1 {
-        return 0;
-    }
-
-    let new_top_u32 = new_top as u32;
-
-    // Check max_heap_pages limit
-    if ctx.max_heap_pages > 0 {
-        let max_top = ctx.heap_base as u64 + (ctx.max_heap_pages as u64) * (ps as u64);
-        if new_top > max_top {
-            return 0;
-        }
-    }
-
-    // Map any pages in [old_top, new_top) that aren't mapped yet
-    let start_page = old_top / ps;
-    let end_page = if new_top_u32 == 0 {
-        u32::MAX / ps
-    } else {
-        (new_top_u32 - 1) / ps
-    };
-    let perms = ctx.flat_perms as *mut u8;
-    for p in start_page..=end_page {
-        // SAFETY: p is a valid page index within the permission table (bounded by address space).
-        unsafe {
-            if *perms.add(p as usize) == 0 {
-                *perms.add(p as usize) = 2; // read-write
-            }
-        }
-    }
-
-    // Make newly accessible pages PROT_READ|PROT_WRITE.
-    #[cfg(feature = "std")]
-    if !ctx.flat_buf.is_null() {
-        let old_page = (old_top as usize).div_ceil(4096);
-        let new_page = (new_top_u32 as usize).div_ceil(4096);
-        if new_page > old_page {
-            // SAFETY: flat_buf points to guest memory base; page range is within the mmap region.
-            unsafe {
-                let start = ctx.flat_buf.add(old_page * 4096);
-                let len = (new_page - old_page) * 4096;
-                libc::mprotect(
-                    start as *mut libc::c_void,
-                    len,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                );
-            }
-        }
-    }
-
-    ctx.heap_top = new_top_u32;
-    old_top as u64
-}
+// The host-side memory access path used to live here: `flat_check_perm`,
+// `flat_read`, `flat_write`, the eight `mem_read_*` / `mem_write_*`
+// `extern "sysv64"` helpers and `sbrk_helper`. These were the fallback
+// callable from JIT'd code on cross-page / out-of-bounds access. The
+// recompiler never actually emitted CALLs to them — it emits inline
+// SIB loads and recovers OOB via the trap_table — so the whole chain
+// was dead. Removed in the PERMS sweep alongside `flat_perms` /
+// `host_perms_ptr` / `FlatMemory::perms`. PT-based bounds checking in
+// the in-kernel JIT substrate (`nub-arch-x86`) is the only enforcement
+// path now.
 
 /// Recompiled PVM instance, borrowed against a `NativeMemory`
 /// owned by the caller. The lifetime parameter ties the recompiler's
@@ -969,7 +702,6 @@ impl<'mem> RecompiledPvm<'mem> {
         // slot (see NativeMemory::host_ctx_ptr).
         let ctx_raw = memory.host_ctx_ptr() as *mut JitContext;
         let host_buf = memory.host_buf_ptr();
-        let host_perms = memory.host_perms_ptr();
 
         // (The original Stage-2.1-era debug_assert that forced the
         // backing into the low 4 GiB is gone — the in-kernel JIT
@@ -998,7 +730,6 @@ impl<'mem> RecompiledPvm<'mem> {
                 dispatch_table: std::ptr::null(),
                 code_base: 0,
                 flat_buf: host_buf,
-                flat_perms: host_perms,
                 fast_reentry: 0,
                 _pad2: 0,
                 max_heap_pages: 0,
@@ -1012,27 +743,21 @@ impl<'mem> RecompiledPvm<'mem> {
         ctx.jt_ptr = jump_table.as_ptr();
         ctx.bb_starts = bitmask.as_ptr();
 
-        if debug {
-            tracing::debug!(
-                write_u8 = format_args!("0x{:x}", mem_write_u8 as *const () as usize),
-                write_u32 = format_args!("0x{:x}", mem_write_u32 as *const () as usize),
-                read_u8 = format_args!("0x{:x}", mem_read_u8 as *const () as usize),
-                "recompiler helper function pointers"
-            );
-        }
-
-        // Compile
+        // Compile. The helper-fn addresses are width-dispatch sentinels
+        // (see `compile_code` above); the actual helpers were removed
+        // in the PERMS sweep — the recompiler never CALLs them.
         let helpers = HelperFns {
-            mem_read_u8: mem_read_u8 as *const () as u64,
-            mem_read_u16: mem_read_u16 as *const () as u64,
-            mem_read_u32: mem_read_u32 as *const () as u64,
-            mem_read_u64: mem_read_u64_fn as *const () as u64,
-            mem_write_u8: mem_write_u8 as *const () as u64,
-            mem_write_u16: mem_write_u16 as *const () as u64,
-            mem_write_u32: mem_write_u32 as *const () as u64,
-            mem_write_u64: mem_write_u64_fn as *const () as u64,
-            sbrk_helper: sbrk_helper as *const () as u64,
+            mem_read_u8: 0x1001,
+            mem_read_u16: 0x1002,
+            mem_read_u32: 0x1003,
+            mem_read_u64: 0x1004,
+            mem_write_u8: 0x1005,
+            mem_write_u16: 0x1006,
+            mem_write_u32: 0x1007,
+            mem_write_u64: 0x1008,
+            sbrk_helper: 0x1009,
         };
+        let _ = debug;
 
         let _t2 = std::time::Instant::now();
         let compiler = Compiler::new(
@@ -1319,7 +1044,6 @@ mod tests {
             dispatch_table: std::ptr::null(),
             code_base: 0,
             flat_buf: std::ptr::null_mut(),
-            flat_perms: std::ptr::null(),
             fast_reentry: 0,
             _pad2: 0,
             max_heap_pages: 0,
