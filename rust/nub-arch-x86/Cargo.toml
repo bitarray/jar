@@ -20,7 +20,7 @@ hyperlight-guest = { version = "0.15", default-features = false }
 # upstream name `hyperlight-guest-bin` so the `#[guest_function]`
 # proc-macro's `proc_macro_crate::crate_name("hyperlight-guest-bin")`
 # lookup resolves it (the macro keys by package name, not dep name).
-hyperlight-guest-bin = { path = "../nub-arch-guestbin", default-features = false, features = ["macros"] }
+hyperlight-guest-bin = { path = "../nub-arch-guestbin", default-features = false }
 hyperlight-common = { version = "0.15", default-features = false }
 # Built no_std; supplies the codegen + assembler used by the
 # in-kernel JIT path (Stages C1+). Direct path deps (not workspace
@@ -28,10 +28,12 @@ hyperlight-common = { version = "0.15", default-features = false }
 # `default-features` from the member crate.
 javm-recompiler-x86 = { path = "../javm-recompiler-x86", default-features = false }
 javm-exec = { path = "../javm-exec", default-features = false }
-scale = { path = "../scale", default-features = false }
-scale-derive = { workspace = true }
-# Wire types shared between guest and host (D1+).
+# Wire types shared between guest and host. The fn-id constants and
+# `Archive` / `Serialize` derives on `InvocationSpec` /
+# `InvocationResult` live here.
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi", default-features = false }
+rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
+bytecheck = { version = "0.8", default-features = false }
 
 [features]
 default = []

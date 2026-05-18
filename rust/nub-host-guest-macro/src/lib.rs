@@ -24,10 +24,13 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
-use syn::{Error, ItemFn, LitInt, Token, parse_macro_input};
+use syn::{Error, Expr, ItemFn, Token, parse_macro_input};
 
-/// Parses `fn_id = N` from the attribute args.
-struct FnIdArg(u32);
+/// Parses `fn_id = <expr>` from the attribute args. The expression
+/// is forwarded verbatim into the emitted static initializer, so it
+/// can be a `u32` literal, a path to a `const FN_ID_*: u32` (the
+/// usual case), or any other const-evaluable u32 expression.
+struct FnIdArg(Expr);
 
 impl Parse for FnIdArg {
     fn parse(input: ParseStream) -> syn::Result<Self> {
@@ -35,13 +38,12 @@ impl Parse for FnIdArg {
         if ident != "fn_id" {
             return Err(Error::new(
                 ident.span(),
-                "expected `fn_id = N`, where N is a u32 literal",
+                "expected `fn_id = <const u32 expression>`",
             ));
         }
         let _eq: Token![=] = input.parse()?;
-        let lit: LitInt = input.parse()?;
-        let value: u32 = lit.base10_parse()?;
-        Ok(FnIdArg(value))
+        let expr: Expr = input.parse()?;
+        Ok(FnIdArg(expr))
     }
 }
 
@@ -72,7 +74,7 @@ fn resolve_crate(name: &str) -> proc_macro2::TokenStream {
 #[proc_macro_attribute]
 pub fn guest_function(attr: TokenStream, item: TokenStream) -> TokenStream {
     let crate_name = resolve_crate("hyperlight-guest-bin");
-    let FnIdArg(fn_id) = parse_macro_input!(attr as FnIdArg);
+    let FnIdArg(fn_id_expr) = parse_macro_input!(attr as FnIdArg);
     let fn_declaration = parse_macro_input!(item as ItemFn);
 
     let ident = fn_declaration.sig.ident.clone();
@@ -93,7 +95,7 @@ pub fn guest_function(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     let registration_ident = syn::Ident::new(
-        &format!("__NUB_GUEST_FN_{fn_id}_ENTRY"),
+        &format!("__NUB_GUEST_FN_{ident}_ENTRY"),
         Span::call_site(),
     );
 
@@ -107,7 +109,7 @@ pub fn guest_function(attr: TokenStream, item: TokenStream) -> TokenStream {
         static #registration_ident:
             #crate_name::guest_function::register::GuestFnEntry =
             #crate_name::guest_function::register::GuestFnEntry {
-                fn_id: #fn_id,
+                fn_id: (#fn_id_expr),
                 dispatcher: #ident,
             };
     }
@@ -131,13 +133,12 @@ pub fn guest_function(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn host_function(attr: TokenStream, item: TokenStream) -> TokenStream {
     let crate_name = resolve_crate("hyperlight-guest-bin");
-    let FnIdArg(fn_id) = parse_macro_input!(attr as FnIdArg);
+    let FnIdArg(fn_id_expr) = parse_macro_input!(attr as FnIdArg);
     let fn_declaration = parse_macro_input!(item as syn::ForeignItemFn);
 
     let syn::ForeignItemFn {
         attrs, vis, sig, ..
     } = fn_declaration;
-    let ident = sig.ident.clone();
 
     // Validate signature: one `&[u8]` arg, `Vec<u8>` return.
     if sig.inputs.len() != 1 {
@@ -149,11 +150,32 @@ pub fn host_function(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into();
     }
 
+    // The single parameter's pattern (e.g. `payload: &[u8]`) — we
+    // need its identifier to forward into `call_host_raw`.
+    let arg_ident = match sig.inputs.first().unwrap() {
+        syn::FnArg::Typed(pat_type) => match &*pat_type.pat {
+            syn::Pat::Ident(pat_ident) => pat_ident.ident.clone(),
+            _ => {
+                return Error::new(
+                    pat_type.pat.span(),
+                    "expected a plain identifier pattern (e.g. `payload: &[u8]`)",
+                )
+                .to_compile_error()
+                .into();
+            }
+        },
+        syn::FnArg::Receiver(arg) => {
+            return Error::new(arg.span(), "receiver (self) argument not allowed")
+                .to_compile_error()
+                .into();
+        }
+    };
+
     quote! {
         #(#attrs)*
         #vis #sig {
-            #crate_name::host_comm::call_host_raw(#fn_id, #ident)
-                .expect(concat!("host function call (fn_id=", stringify!(#fn_id), ") failed"))
+            #crate_name::host_comm::call_host_raw((#fn_id_expr), #arg_ident)
+                .expect("host function call failed")
         }
     }
     .into()

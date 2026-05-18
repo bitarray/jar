@@ -14,33 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-/// Definitions and functionality to enable guest-to-host function calling,
-/// also called "host functions"
-///
-/// This module includes functionality to do the following
-///
-/// - Define several prototypes for what a host function must look like,
-///   including the number of arguments (arity) they can have, supported argument
-///   types, and supported return types
-/// - Registering host functions to be callable by the guest
-/// - Dynamically dispatching a call from the guest to the appropriate
-///   host function
+//! Host-side guest↔host RPC types.
+//!
+//! After the FB+SCALE → rkyv migration this module is a thin
+//! re-export of [`HostFn`] (the boxed `FnMut(&[u8]) -> Result<Vec<u8>>`
+//! signature every host function shares) + [`Registerable`] (the
+//! trait that exposes `register_host_function(fn_id, hf)` on
+//! `Uninitialized`/`MultiUse` sandboxes).
+
 pub(crate) mod host_functions;
 
-/// Re-export for `HostFunction` trait
-pub use host_functions::{HostFunction, Registerable};
-/// Re-export for `ParameterType` enum
-pub use hyperlight_common::flatbuffer_wrappers::function_types::ParameterType;
-/// Re-export for `ParameterValue` enum
-pub use hyperlight_common::flatbuffer_wrappers::function_types::ParameterValue;
-/// Re-export for `ReturnType` enum
-pub use hyperlight_common::flatbuffer_wrappers::function_types::ReturnType;
-/// Re-export for `ReturnValue` enum
-pub use hyperlight_common::flatbuffer_wrappers::function_types::ReturnValue;
-/// Re-export for `HostFunctionDefinition`
-pub use hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition;
-/// Re-export for `HostFunctionDetails`
-pub use hyperlight_common::flatbuffer_wrappers::host_function_details::HostFunctionDetails;
-pub use hyperlight_common::func::{
-    ParameterTuple, ResultType, SupportedParameterType, SupportedReturnType,
-};
+pub use crate::sandbox::host_funcs::HostFn;
+pub use host_functions::Registerable;

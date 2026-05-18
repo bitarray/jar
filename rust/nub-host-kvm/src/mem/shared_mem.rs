@@ -1122,6 +1122,49 @@ impl HostSharedMemory {
         Ok(())
     }
 
+    /// Pop the top element of the ring as raw bytes. Unlike
+    /// [`try_pop_buffer_into`], this doesn't peek at the element's
+    /// contents — the element size is recovered from the trailing
+    /// back-pointer that [`push_buffer`] wrote.
+    pub fn try_pop_buffer_raw(
+        &mut self,
+        buffer_start_offset: usize,
+        buffer_size: usize,
+    ) -> Result<Vec<u8>> {
+        let stack_pointer_rel = self.read::<u64>(buffer_start_offset)? as usize;
+
+        if stack_pointer_rel > buffer_size || stack_pointer_rel < 16 {
+            return Err(new_error!(
+                "try_pop_buffer_raw: stack pointer {} out of bounds (size {})",
+                stack_pointer_rel,
+                buffer_size
+            ));
+        }
+
+        let back_ptr_abs = stack_pointer_rel + buffer_start_offset - 8;
+        let element_offset_rel = self.read::<u64>(back_ptr_abs)? as usize;
+
+        if element_offset_rel < 8 || element_offset_rel > stack_pointer_rel.saturating_sub(8) {
+            return Err(new_error!(
+                "try_pop_buffer_raw: back-pointer {} outside [8, {}]",
+                element_offset_rel,
+                stack_pointer_rel.saturating_sub(8)
+            ));
+        }
+
+        let element_size = stack_pointer_rel - element_offset_rel - 8;
+        let element_abs = element_offset_rel + buffer_start_offset;
+        let mut out = vec![0u8; element_size];
+        self.copy_to_slice(&mut out, element_abs)?;
+
+        // Pop: rewind stack pointer.
+        self.write::<u64>(buffer_start_offset, element_offset_rel as u64)?;
+        // Zero out the popped slot + its back-pointer.
+        self.fill(0, element_abs, stack_pointer_rel - element_offset_rel)?;
+
+        Ok(out)
+    }
+
     /// Pops the given given buffer into a `T` and returns it.
     /// NOTE! the data must be a size-prefixed flatbuffer, and
     /// buffer_start_offset must point to the beginning of the buffer

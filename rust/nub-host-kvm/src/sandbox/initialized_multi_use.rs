@@ -17,19 +17,13 @@ limitations under the License.
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
-use flatbuffers::FlatBufferBuilder;
-use hyperlight_common::flatbuffer_wrappers::function_call::{FunctionCall, FunctionCallType};
-use hyperlight_common::flatbuffer_wrappers::function_types::{
-    ParameterValue, ReturnType, ReturnValue,
-};
-use hyperlight_common::flatbuffer_wrappers::util::estimate_flatbuffer_capacity;
+use nub_host_common::rpc::{ArchivedResponse, Request};
+use rkyv::util::AlignedVec;
 use tracing::{Span, instrument};
 
-use super::Callable;
 use super::host_funcs::FunctionRegistry;
 use crate::HyperlightError;
 use crate::Result;
-use crate::func::{ParameterTuple, SupportedReturnType};
 use crate::hypervisor::InterruptHandle;
 use crate::hypervisor::hyperlight_vm::HyperlightVm;
 use crate::mem::mgr::SandboxMemoryManager;
@@ -84,70 +78,37 @@ impl MultiUseSandbox {
         self.id
     }
 
-    /// Calls a guest function by name with the specified arguments.
+    /// Call a guest function by `fn_id` with a raw byte payload.
+    /// Returns the response payload bytes on success.
+    ///
+    /// Wire format: the host serialises a
+    /// [`nub_host_common::rpc::Request`] (rkyv) carrying `fn_id` and
+    /// `payload`, ships it via the input data ring, the guest decodes
+    /// + dispatches + writes a `Response` to the output ring, and we
+    /// read + check `status` before returning the inner payload.
     ///
     /// Changes made to the sandbox during execution are persisted.
     /// On failure the sandbox should be dropped and rebuilt.
-    #[instrument(err(Debug), skip(self, args), parent = Span::current())]
-    pub fn call<Output: SupportedReturnType>(
-        &mut self,
-        func_name: &str,
-        args: impl ParameterTuple,
-    ) -> Result<Output> {
-        maybe_time_and_emit_guest_call(func_name, || {
-            let ret = self.call_guest_function_by_name_no_reset(
-                func_name,
-                Output::TYPE,
-                args.into_value(),
-            );
-            // Use the ? operator to allow converting any hyperlight_common::func::Error
-            // returned by from_value into a HyperlightError
-            let ret = Output::from_value(ret?)?;
-            Ok(ret)
-        })
+    #[instrument(err(Debug), skip(self, payload), parent = Span::current())]
+    pub fn call_raw(&mut self, fn_id: u32, payload: &[u8]) -> Result<Vec<u8>> {
+        maybe_time_and_emit_guest_call("call_raw", || self.call_guest_function_by_id(fn_id, payload))
     }
 
-    /// Calls a guest function with type-erased parameters and return values.
-    ///
-    /// This function is used for fuzz testing parameter and return type handling.
-    #[cfg(feature = "fuzzing")]
-    #[instrument(err(Debug), skip(self, args), parent = Span::current())]
-    pub fn call_type_erased_guest_function_by_name(
-        &mut self,
-        func_name: &str,
-        ret_type: ReturnType,
-        args: Vec<ParameterValue>,
-    ) -> Result<ReturnValue> {
-        maybe_time_and_emit_guest_call(func_name, || {
-            self.call_guest_function_by_name_no_reset(func_name, ret_type, args)
-        })
-    }
-
-    fn call_guest_function_by_name_no_reset(
-        &mut self,
-        function_name: &str,
-        return_type: ReturnType,
-        args: Vec<ParameterValue>,
-    ) -> Result<ReturnValue> {
+    fn call_guest_function_by_id(&mut self, fn_id: u32, payload: &[u8]) -> Result<Vec<u8>> {
         // ===== KILL() TIMING POINT 1 =====
         // Clear any stale cancellation from a previous guest function call or if kill() was called too early.
         // Any kill() that completed (even partially) BEFORE this line has NO effect on this call.
         self.vm.clear_cancel();
 
         let res = (|| {
-            let estimated_capacity = estimate_flatbuffer_capacity(function_name, &args);
+            let req = Request {
+                fn_id,
+                payload: payload.to_vec(),
+            };
+            let req_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&req)
+                .map_err(|e| crate::new_error!("rkyv-serialize Request: {e}"))?;
 
-            let fc = FunctionCall::new(
-                function_name.to_string(),
-                Some(args),
-                FunctionCallType::Guest,
-                return_type,
-            );
-
-            let mut builder = FlatBufferBuilder::with_capacity(estimated_capacity);
-            let buffer = fc.encode(&mut builder);
-
-            self.mem_mgr.write_guest_function_call(buffer)?;
+            self.mem_mgr.write_guest_function_call_raw(req_bytes.as_slice())?;
 
             let dispatch_res = self.vm.dispatch_call_from_host(
                 &mut self.mem_mgr,
@@ -156,47 +117,47 @@ impl MultiUseSandbox {
                 self.dbg_mem_access_fn.clone(),
             );
 
-            // Convert dispatch errors to HyperlightErrors. Upstream tracked
-            // whether the error should "poison" the sandbox — we don't poison
-            // anymore (no snapshot/restore to recover from), so just discard
-            // the poison bit.
             if let Err(e) = dispatch_res {
                 let (error, _should_poison) = e.promote();
                 return Err(error);
             }
 
-            let guest_result = self.mem_mgr.get_guest_function_call_result()?.into_inner();
+            let raw_resp = self.mem_mgr.read_guest_function_call_result_raw()?;
 
-            match guest_result {
-                Ok(val) => Ok(val),
-                Err(guest_error) => {
-                    metrics::counter!(
-                        METRIC_GUEST_ERROR,
-                        METRIC_GUEST_ERROR_LABEL_CODE => (guest_error.code as u64).to_string()
-                    )
-                    .increment(1);
+            let mut aligned = AlignedVec::<16>::with_capacity(raw_resp.len());
+            aligned.extend_from_slice(&raw_resp);
 
-                    Err(HyperlightError::GuestError(
-                        guest_error.code,
-                        guest_error.message,
-                    ))
-                }
+            let resp =
+                rkyv::access::<ArchivedResponse, rkyv::rancor::Error>(aligned.as_slice())
+                    .map_err(|e| crate::new_error!("rkyv-access Response: {e}"))?;
+
+            let status = resp.status.to_native();
+            if status != 0 {
+                let msg = resp
+                    .error_msg
+                    .as_ref()
+                    .map(|s| s.as_str().to_string())
+                    .unwrap_or_else(|| format!("guest fn_id={fn_id} returned status {status}"));
+                metrics::counter!(
+                    METRIC_GUEST_ERROR,
+                    METRIC_GUEST_ERROR_LABEL_CODE => status.to_string()
+                )
+                .increment(1);
+                return Err(HyperlightError::GuestError(
+                    hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode::GuestError,
+                    msg,
+                ));
             }
+
+            Ok(resp.payload.as_slice().to_vec())
         })();
 
         // Clear partial abort bytes so they don't leak across calls.
         self.mem_mgr.abort_buffer.clear();
 
-        // In the happy path we do not need to clear io-buffers from the host because:
-        // - the serialized guest function call is zeroed out by the guest during deserialization, see call to `try_pop_shared_input_data_into::<FunctionCall>()`
-        // - the serialized guest function result is zeroed out by us (the host) during deserialization, see `get_guest_function_call_result`
-        // - any serialized host function call are zeroed out by us (the host) during deserialization, see `get_host_function_call`
-        // - any serialized host function result is zeroed out by the guest during deserialization, see `get_host_return_value`
         if res.is_err() {
             self.mem_mgr.clear_io_buffers();
         }
-
-        // Note: clear_call_active() is automatically called when _guard is dropped here
 
         res
     }
@@ -222,16 +183,6 @@ impl MultiUseSandbox {
             &mut self.mem_mgr,
             Some(dir.into()),
         )
-    }
-}
-
-impl Callable for MultiUseSandbox {
-    fn call<Output: SupportedReturnType>(
-        &mut self,
-        func_name: &str,
-        args: impl ParameterTuple,
-    ) -> Result<Output> {
-        self.call(func_name, args)
     }
 }
 

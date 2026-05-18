@@ -4,26 +4,42 @@
 //! via the `nub_invoke` guest_function; the guest decodes, runs,
 //! encodes an `InvocationResult` and returns it.
 //!
-//! Transitional codec state (during the FB+SCALE → rkyv migration):
-//! both `scale::{Encode, Decode}` and `rkyv::{Archive, Serialize}`
-//! are derived on the wire types. Active callers still use SCALE;
-//! the rkyv path becomes the live encoder/decoder in Stages E + F,
-//! and the SCALE derives are removed in Stage H.
+//! Codec: rkyv. The host serialises with `rkyv::to_bytes`, the
+//! guest reads with `rkyv::access` (zero-copy pointer cast + a
+//! bytecheck validation pass).
+//!
+//! Also exports the compile-time `FN_ID_*` constants that select
+//! which guest function the RPC envelope (`nub_host_common::rpc`)
+//! routes to.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
 
 use alloc::vec::Vec;
-use scale_derive::{Decode, Encode};
+
+/// `fn_id` for the `nub_smoke` skeleton RPC (returns `42u64`).
+pub const FN_ID_NUB_SMOKE: u32 = 0;
+
+/// `fn_id` for the `nub_invoke` RPC — host → guest "run this PVM
+/// program" call. Payload is a rkyv-archived `InvocationSpec`;
+/// response is a rkyv-archived `InvocationResult`.
+pub const FN_ID_NUB_INVOKE: u32 = 1;
+
+/// `fn_id` for the `nub_heap_stats` diagnostic. Payload is empty;
+/// response is 32 bytes packing four LE u64s (allocated_bytes,
+/// allocation_count, fragment_count, available_bytes).
+pub const FN_ID_NUB_HEAP_STATS: u32 = 2;
+
+/// Number of guest-function slots reserved in the dispatch table.
+/// Must be at least `max(FN_ID_*) + 1`.
+pub const GUEST_FN_TABLE_SIZE: usize = 8;
 
 /// PVM registers per Image — fixed-width 13-element tuple. SCALE
 /// doesn't auto-impl `Decode` for `[u64; N]`, so we use a tuple
 /// struct (kept for now; once SCALE leaves we can simplify to a
 /// real array).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, rkyv::Archive, rkyv::Serialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
 pub struct PvmRegs(
     pub u64,
@@ -58,7 +74,7 @@ impl PvmRegs {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, rkyv::Archive, rkyv::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize)]
 #[rkyv(derive(Debug))]
 pub struct InvocationSpec {
     pub code: Vec<u8>,
@@ -82,9 +98,7 @@ pub struct InvocationSpec {
     pub rw_data: Vec<u8>,
 }
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, rkyv::Archive, rkyv::Serialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
 pub struct InvocationResult {
     pub exit_reason: u32,

@@ -16,11 +16,11 @@ limitations under the License.
 
 use std::sync::{Arc, Mutex};
 
-use hyperlight_common::flatbuffer_wrappers::function_types::{FunctionCallResult, ParameterValue};
-use hyperlight_common::flatbuffer_wrappers::guest_error::{ErrorCode, GuestError};
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
-use nub_host_common::outb::{Exception, OutBAction};
 use log::{Level, Record};
+use nub_host_common::outb::{Exception, OutBAction};
+use nub_host_common::rpc::{ArchivedRequest, Response};
+use rkyv::util::AlignedVec;
 use tracing::{Span, instrument};
 use tracing_log::format_trace;
 
@@ -196,21 +196,41 @@ pub(crate) fn handle_outb(
     {
         OutBAction::Log => outb_log(mem_mgr),
         OutBAction::CallFunction => {
-            let call = mem_mgr
-                .get_host_function_call()
+            let req_bytes = mem_mgr
+                .read_host_function_call_raw()
                 .map_err(|e| HandleOutbError::ReadHostFunctionCall(e.to_string()))?;
-            let name = call.function_name.clone();
-            let args: Vec<ParameterValue> = call.parameters.unwrap_or(vec![]);
-            let res = host_funcs
-                .try_lock()
-                .map_err(|e| HandleOutbError::LockFailed(file!(), line!(), e.to_string()))?
-                .call_host_function(&name, args)
-                .map_err(|e| GuestError::new(ErrorCode::HostFunctionError, e.to_string()));
 
-            let func_result = FunctionCallResult::new(res);
+            let mut aligned = AlignedVec::<16>::with_capacity(req_bytes.len());
+            aligned.extend_from_slice(&req_bytes);
+
+            let response = match rkyv::access::<ArchivedRequest, rkyv::rancor::Error>(
+                aligned.as_slice(),
+            ) {
+                Ok(req) => {
+                    let fn_id = req.fn_id.to_native();
+                    let payload = req.payload.as_slice();
+                    let res = host_funcs
+                        .try_lock()
+                        .map_err(|e| {
+                            HandleOutbError::LockFailed(file!(), line!(), e.to_string())
+                        })?
+                        .call_host_function(fn_id, payload);
+
+                    match res {
+                        Ok(bytes) => Response::ok(bytes),
+                        Err(e) => Response::err(1, format!("host fn_id={fn_id}: {e}")),
+                    }
+                }
+                Err(e) => Response::err(2, format!("rkyv-access Request: {e}")),
+            };
+
+            let resp_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&response)
+                .map_err(|e| {
+                    HandleOutbError::WriteHostFunctionResponse(format!("rkyv-serialize: {e}"))
+                })?;
 
             mem_mgr
-                .write_response_from_host_function_call(&func_result)
+                .write_host_function_response_raw(resp_bytes.as_slice())
                 .map_err(|e| HandleOutbError::WriteHostFunctionResponse(e.to_string()))?;
 
             Ok(())

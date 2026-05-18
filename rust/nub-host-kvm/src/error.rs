@@ -25,7 +25,6 @@ use std::time::SystemTimeError;
 
 #[cfg(target_os = "windows")]
 use crossbeam_channel::{RecvError, SendError};
-use flatbuffers::InvalidFlatbuffer;
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnValue};
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use thiserror::Error;
@@ -137,10 +136,6 @@ pub enum HyperlightError {
     /// Failed to convert to Integer
     #[error("Failed To Convert Size to usize")]
     IntConversionFailure(#[from] TryFromIntError),
-
-    /// The flatbuffer is invalid
-    #[error("The flatbuffer is invalid")]
-    InvalidFlatBuffer(#[from] InvalidFlatbuffer),
 
     /// Conversion of str to Json failed
     #[error("Conversion of str data to json failed")]
@@ -370,7 +365,6 @@ impl HyperlightError {
             | HyperlightError::HyperlightVmError(HyperlightVmError::UnmapRegion(_))
             | HyperlightError::IOError(_)
             | HyperlightError::IntConversionFailure(_)
-            | HyperlightError::InvalidFlatBuffer(_)
             | HyperlightError::JsonConversionFailure(_)
             | HyperlightError::LockAttemptFailed(_)
             | HyperlightError::MemoryAllocationFailed(_)

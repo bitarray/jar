@@ -14,124 +14,81 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-use std::collections::HashMap;
-use std::io::{IsTerminal, Write};
+//! Fn-id-indexed registry of host callbacks the guest can invoke
+//! via the `OutBAction::CallFunction` outb port. Each entry is a
+//! `FnMut(&[u8]) -> Result<Vec<u8>>` — receives the raw payload
+//! bytes from a `nub_host_common::rpc::Request`, produces the raw
+//! response payload bytes that the host wraps in a `Response`.
+//!
+//! No more name strings, no more parameter-tuple polymorphism. If
+//! a future caller wants typed `Fn(Spec) -> Result` registration,
+//! a sugar attribute (`#[host_function(fn_id = N)]`) in
+//! `nub-host-guest-macro` can wrap the encode/decode at compile
+//! time.
 
-use hyperlight_common::flatbuffer_wrappers::function_types::{
-    ParameterType, ParameterValue, ReturnType, ReturnValue,
-};
-use hyperlight_common::flatbuffer_wrappers::host_function_definition::HostFunctionDefinition;
-use hyperlight_common::flatbuffer_wrappers::host_function_details::HostFunctionDetails;
-use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 use tracing::{Span, instrument};
 
 use crate::HyperlightError::HostFunctionNotFound;
 use crate::Result;
-use crate::func::host_functions::TypeErasedHostFunction;
 
-#[derive(Default)]
-/// A Wrapper around details of functions exposed by the Host
+/// Boxed host function. Takes a payload byte slice (the inner
+/// `Request.payload`), returns response payload bytes.
+pub type HostFn = Box<dyn FnMut(&[u8]) -> Result<Vec<u8>> + Send>;
+
+/// Maximum number of registered host functions. Sized so the
+/// fixed-size array fits in a single cache line of pointer-sized
+/// slots while leaving room for a handful of future callbacks.
+pub const HOST_FN_TABLE_SIZE: usize = 64;
+
+/// Fn-id-indexed registry. Slots default to `None`; registering at
+/// index `i` puts a callback there. Dispatching at index `i`
+/// returns `HostFunctionNotFound` if the slot is empty.
 pub struct FunctionRegistry {
-    functions_map: HashMap<String, FunctionEntry>,
+    functions: [Option<HostFn>; HOST_FN_TABLE_SIZE],
 }
 
-impl From<&mut FunctionRegistry> for HostFunctionDetails {
-    fn from(registry: &mut FunctionRegistry) -> Self {
-        let host_functions = registry
-            .functions_map
-            .iter()
-            .map(|(name, entry)| HostFunctionDefinition {
-                function_name: name.clone(),
-                parameter_types: Some(entry.parameter_types.to_vec()),
-                return_type: entry.return_type,
-            })
-            .collect();
-
-        HostFunctionDetails {
-            host_functions: Some(host_functions),
-        }
+impl Default for FunctionRegistry {
+    fn default() -> Self {
+        Self::new()
     }
-}
-
-pub struct FunctionEntry {
-    pub function: TypeErasedHostFunction,
-    pub parameter_types: &'static [ParameterType],
-    pub return_type: ReturnType,
 }
 
 impl FunctionRegistry {
-    /// Register a host function with the sandbox.
-    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
-    pub(crate) fn register_host_function(
-        &mut self,
-        name: String,
-        func: FunctionEntry,
-    ) -> Result<()> {
-        self.functions_map.insert(name, func);
+    pub const fn new() -> Self {
+        // `[None; N]` requires `Copy`; `Option<HostFn>` isn't.
+        // Build the array element-by-element.
+        Self {
+            functions: [const { None }; HOST_FN_TABLE_SIZE],
+        }
+    }
 
+    /// Register `func` under `fn_id`. Overwrites any prior entry.
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    pub(crate) fn register_host_function(&mut self, fn_id: u32, func: HostFn) -> Result<()> {
+        let idx = fn_id as usize;
+        if idx >= HOST_FN_TABLE_SIZE {
+            return Err(crate::new_error!(
+                "register_host_function: fn_id={} exceeds HOST_FN_TABLE_SIZE={}",
+                fn_id,
+                HOST_FN_TABLE_SIZE
+            ));
+        }
+        self.functions[idx] = Some(func);
         Ok(())
     }
 
-    /// Assuming a host function called `"HostPrint"` exists, and takes a
-    /// single string parameter, call it with the given `msg` parameter.
-    ///
-    /// Return `Ok` if the function was found and was of the right signature,
-    /// and `Err` otherwise.
+    /// Dispatch a guest→host call to the registered handler. Returns
+    /// `HostFunctionNotFound` if no handler is registered for
+    /// `fn_id`. The handler's `Err` is propagated as-is.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
-    #[allow(dead_code)]
-    pub(super) fn host_print(&mut self, msg: String) -> Result<i32> {
-        let res = self.call_host_func_impl("HostPrint", vec![ParameterValue::String(msg)])?;
-        res.try_into()
-            .map_err(|_| HostFunctionNotFound("HostPrint".to_string()))
-    }
-    /// From the set of registered host functions, attempt to get the one
-    /// named `name`. If it exists, call it with the given arguments list
-    /// `args` and return its result.
-    ///
-    /// Return `Err` if no such function exists,
-    /// its parameter list doesn't match `args`, or there was another error
-    /// getting, configuring or calling the function.
-    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
-    pub(super) fn call_host_function(
-        &self,
-        name: &str,
-        args: Vec<ParameterValue>,
-    ) -> Result<ReturnValue> {
-        self.call_host_func_impl(name, args)
-    }
-
-    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
-    fn call_host_func_impl(&self, name: &str, args: Vec<ParameterValue>) -> Result<ReturnValue> {
-        let FunctionEntry {
-            function,
-            parameter_types: _,
-            return_type: _,
-        } = self
-            .functions_map
-            .get(name)
-            .ok_or_else(|| HostFunctionNotFound(name.to_string()))?;
-
-        // Make the host function call
-        crate::metrics::maybe_time_and_emit_host_call(name, || function.call(args))
+    pub(crate) fn call_host_function(&mut self, fn_id: u32, payload: &[u8]) -> Result<Vec<u8>> {
+        let idx = fn_id as usize;
+        let entry = self
+            .functions
+            .get_mut(idx)
+            .and_then(|slot| slot.as_mut())
+            .ok_or_else(|| HostFunctionNotFound(format!("fn_id={fn_id}")))?;
+        crate::metrics::maybe_time_and_emit_host_call(&format!("fn_id={fn_id}"), || entry(payload))
     }
 }
 
-/// The default writer function is to write to stdout with green text.
-#[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
-pub(super) fn default_writer_func(s: String) -> Result<i32> {
-    match std::io::stdout().is_terminal() {
-        false => {
-            print!("{}", s);
-            Ok(s.len() as i32)
-        }
-        true => {
-            let mut stdout = StandardStream::stdout(ColorChoice::Auto);
-            let mut color_spec = ColorSpec::new();
-            color_spec.set_fg(Some(Color::Green));
-            stdout.set_color(&color_spec)?;
-            stdout.write_all(s.as_bytes())?;
-            stdout.reset()?;
-            Ok(s.len() as i32)
-        }
-    }
-}

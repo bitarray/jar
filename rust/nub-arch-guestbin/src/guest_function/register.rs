@@ -1,105 +1,33 @@
-/*
-Copyright 2025  The Hyperlight Authors.
+//! Compile-time guest-function registration.
+//!
+//! Each guest function is a `fn(&[u8]) -> Vec<u8>` that decodes the
+//! caller's archived request payload, runs the user code, and
+//! returns the encoded response payload. The `#[guest_function(fn_id
+//! = N)]` proc-macro emits a `linkme` distributed-slice entry into
+//! [`GUEST_FUNCTION_TABLE`] under the chosen integer id, and the
+//! dispatcher in [`super::call`] does the lookup at call time.
+//!
+//! No more name strings, no more parameter polymorphism — every
+//! guest function has the same byte-slice-in / byte-vec-out shape.
+//! Typed encode/decode lives inside the user function body (today
+//! that means rkyv archives of `nub-arch-x86-abi` types).
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+use alloc::vec::Vec;
 
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
-use alloc::collections::BTreeMap;
-use alloc::string::String;
-
-use hyperlight_common::func::{ParameterTuple, SupportedReturnType};
-
-use super::definition::{GuestFunc, GuestFunctionDefinition};
-use crate::REGISTERED_GUEST_FUNCTIONS;
-use crate::guest_function::definition::AsGuestFunctionDefinition;
-
-/// Represents the functions that the guest exposes to the host.
-#[derive(Debug, Clone)]
-pub struct GuestFunctionRegister<F: Copy> {
-    /// Currently registered guest functions
-    guest_functions: BTreeMap<String, GuestFunctionDefinition<F>>,
+/// One row of the guest-function dispatch table.
+#[derive(Clone, Copy)]
+pub struct GuestFnEntry {
+    /// Compile-time-assigned identifier for this function. The
+    /// dispatcher matches the caller's `Request.fn_id` against this.
+    pub fn_id: u32,
+    /// Implementation: receives the request payload bytes and
+    /// returns the response payload bytes.
+    pub dispatcher: fn(&[u8]) -> Vec<u8>,
 }
 
-impl<F: Copy> Default for GuestFunctionRegister<F> {
-    fn default() -> Self {
-        Self {
-            guest_functions: BTreeMap::new(),
-        }
-    }
-}
-
-impl<F: Copy> GuestFunctionRegister<F> {
-    /// Create a new `GuestFunctionRegister`.
-    pub const fn new() -> Self {
-        Self {
-            guest_functions: BTreeMap::new(),
-        }
-    }
-
-    /// Register a new `GuestFunctionDefinition` into self.
-    /// If a function with the same name already exists, it will be replaced.
-    /// None is returned if the function name was not previously registered,
-    /// otherwise the previous `GuestFunctionDefinition` is returned.
-    pub fn register(
-        &mut self,
-        guest_function: GuestFunctionDefinition<F>,
-    ) -> Option<GuestFunctionDefinition<F>> {
-        self.guest_functions
-            .insert(guest_function.function_name.clone(), guest_function)
-    }
-
-    /// Gets a `GuestFunctionDefinition` by its `name` field.
-    pub fn get(&self, function_name: &str) -> Option<&GuestFunctionDefinition<F>> {
-        self.guest_functions.get(function_name)
-    }
-}
-
-impl GuestFunctionRegister<GuestFunc> {
-    pub fn register_fn<Output, Args>(
-        &mut self,
-        name: impl Into<String>,
-        f: impl AsGuestFunctionDefinition<Output, Args>,
-    ) where
-        Args: ParameterTuple,
-        Output: SupportedReturnType,
-    {
-        let gfd = f.as_guest_function_definition(name);
-        self.register(gfd);
-    }
-}
-
-pub fn register_function(function_definition: GuestFunctionDefinition<GuestFunc>) {
-    unsafe {
-        // This is currently safe, because we are single threaded, but we
-        // should find a better way to do this, see issue #808
-        #[allow(static_mut_refs)]
-        let gfd = &mut REGISTERED_GUEST_FUNCTIONS;
-        gfd.register(function_definition);
-    }
-}
-
-pub fn register_fn<Output, Args>(
-    name: impl Into<String>,
-    f: impl AsGuestFunctionDefinition<Output, Args>,
-) where
-    Args: ParameterTuple,
-    Output: SupportedReturnType,
-{
-    unsafe {
-        // This is currently safe, because we are single threaded, but we
-        // should find a better way to do this, see issue #808
-        #[allow(static_mut_refs)]
-        let gfd = &mut REGISTERED_GUEST_FUNCTIONS;
-        gfd.register_fn(name, f);
-    }
-}
+/// Compile-time-populated guest-function table. The
+/// `#[guest_function(fn_id = N)]` macro emits one entry into this
+/// slice; the dispatcher in [`super::call::internal_dispatch_function`]
+/// iterates it to find the matching `fn_id`.
+#[linkme::distributed_slice]
+pub static GUEST_FUNCTION_TABLE: [GuestFnEntry];

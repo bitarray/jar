@@ -3,7 +3,10 @@ Copyright 2025  The Hyperlight Authors.
 Vendored & trimmed for nub. Stage F.2.3 dropped aarch64, libc/picolibc
 stubs, the guest logger, mem_profile, and trace_guest. Subsequent
 stages drop the CoW pagefault handler (F3.3) and swap the buddy
-allocator for talc (F3.4).
+allocator for talc (F3.4). The FB+SCALE → rkyv migration deletes
+the name-based + parameter-polymorphic guest-function registry and
+replaces it with a fn_id-indexed linkme table; see
+[`guest_function::register::GUEST_FUNCTION_TABLE`].
 
 Licensed under the Apache License, Version 2.0.
 */
@@ -15,7 +18,6 @@ extern crate alloc;
 use core::fmt::Write;
 
 use arch::dispatch::dispatch_function;
-use guest_function::register::GuestFunctionRegister;
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 // PEB type comes from upstream hyperlight_common because we feed it
 // into the upstream `hyperlight-guest` crate's `GuestHandle::init`.
@@ -33,13 +35,13 @@ mod arch;
 pub mod exception;
 pub mod guest_function {
     pub(super) mod call;
-    pub mod definition;
     pub mod register;
 }
 
 pub mod error;
 pub mod host_comm;
 pub mod paging;
+pub mod ring;
 
 // === Globals ===
 //
@@ -62,8 +64,6 @@ pub(crate) static HEAP_ALLOCATOR: talc::TalcLock<spinning_top::RawSpinlock, talc
     talc::TalcLock::new(talc::source::Manual);
 
 pub static mut GUEST_HANDLE: GuestHandle = GuestHandle::new();
-pub(crate) static mut REGISTERED_GUEST_FUNCTIONS: GuestFunctionRegister<GuestFunc> =
-    GuestFunctionRegister::new();
 
 const VERSION_STR: &str = env!("CARGO_PKG_VERSION");
 
@@ -175,11 +175,6 @@ pub(crate) extern "C" fn generic_init(
         OS_PAGE_SIZE = ops as u32;
     }
 
-    #[cfg(feature = "macros")]
-    for registration in __private::GUEST_FUNCTION_INIT {
-        registration();
-    }
-
     unsafe {
         hyperlight_main();
     }
@@ -187,52 +182,11 @@ pub(crate) extern "C" fn generic_init(
     dispatch_function as usize as u64
 }
 
-#[cfg(feature = "macros")]
 #[doc(hidden)]
 pub mod __private {
-    pub use alloc::vec::Vec;
-
-    pub use hyperlight_common::flatbuffer_wrappers::function_call::FunctionCall;
-    pub use hyperlight_common::func::ResultType;
-    pub use hyperlight_guest::error::HyperlightGuestError;
     pub use linkme;
 
-    #[linkme::distributed_slice]
-    pub static GUEST_FUNCTION_INIT: [fn()];
-
-    pub trait FromResult {
-        type Output;
-        fn from_result(res: Result<Self::Output, HyperlightGuestError>) -> Self;
-    }
-
-    use alloc::string::String;
-
-    use hyperlight_common::for_each_return_type;
-
-    macro_rules! impl_maybe_unwrap {
-        ($ty:ty, $enum:ident) => {
-            impl FromResult for $ty {
-                type Output = Self;
-                fn from_result(res: Result<Self::Output, HyperlightGuestError>) -> Self {
-                    // Unwrapping here is fine as this would only run in a guest
-                    // and not in the host.
-                    res.unwrap()
-                }
-            }
-
-            impl FromResult for Result<$ty, HyperlightGuestError> {
-                type Output = $ty;
-                fn from_result(res: Result<Self::Output, HyperlightGuestError>) -> Self {
-                    res
-                }
-            }
-        };
-    }
-
-    for_each_return_type!(impl_maybe_unwrap);
+    pub use crate::guest_function::register::GUEST_FUNCTION_TABLE;
 }
 
-#[cfg(feature = "macros")]
-pub use hyperlight_guest_macro::{dispatch, guest_function, host_function, main};
-
-pub use crate::guest_function::definition::GuestFunc;
+pub use nub_host_guest_macro::{guest_function, host_function};

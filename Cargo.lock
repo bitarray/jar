@@ -788,28 +788,18 @@ dependencies = [
 name = "hyperlight-guest-bin"
 version = "0.15.0"
 dependencies = [
- "flatbuffers",
+ "anyhow",
+ "bytecheck",
  "hyperlight-common",
  "hyperlight-guest",
- "hyperlight-guest-macro",
  "linkme",
  "nub-host-common",
+ "nub-host-guest-macro",
+ "rkyv",
  "spin",
  "spinning_top",
  "talc",
  "tracing",
-]
-
-[[package]]
-name = "hyperlight-guest-macro"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bef332d8490f2ebe5b8d52f7d39263f82580c54e9505980fea8186fd6679ea3"
-dependencies = [
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -1160,12 +1150,13 @@ name = "nub"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytecheck",
  "nub-arch-local",
  "nub-arch-x86-abi",
  "nub-build",
  "nub-host-kvm",
  "nub-kernel",
- "scale",
+ "rkyv",
 ]
 
 [[package]]
@@ -1181,14 +1172,14 @@ dependencies = [
 name = "nub-arch-x86"
 version = "0.1.0"
 dependencies = [
+ "bytecheck",
  "hyperlight-common",
  "hyperlight-guest",
  "hyperlight-guest-bin",
  "javm-exec",
  "javm-recompiler-x86",
  "nub-arch-x86-abi",
- "scale",
- "scale-derive",
+ "rkyv",
 ]
 
 [[package]]
@@ -1197,8 +1188,6 @@ version = "0.1.0"
 dependencies = [
  "bytecheck",
  "rkyv",
- "scale",
- "scale-derive",
 ]
 
 [[package]]
@@ -1239,10 +1228,10 @@ dependencies = [
  "anyhow",
  "bitflags 2.11.1",
  "blake3",
+ "bytecheck",
  "cfg-if",
  "cfg_aliases",
  "crossbeam-channel",
- "flatbuffers",
  "goblin",
  "hyperlight-common",
  "kvm-bindings",
@@ -1253,6 +1242,7 @@ dependencies = [
  "nub-host-common",
  "page_size",
  "rand 0.10.1",
+ "rkyv",
  "serde_json",
  "termcolor",
  "thiserror",

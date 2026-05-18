@@ -32,13 +32,8 @@ pub(crate) mod uninitialized_evolve;
 /// Representation of a snapshot of a `Sandbox`.
 pub mod snapshot;
 
-/// Trait used by the macros to paper over the differences between hyperlight and hyperlight-wasm
-mod callable;
-
 // F2.2: dropped the `trace/` submodule (OpenTelemetry guest tracing).
 
-/// Trait used by the macros to paper over the differences between hyperlight and hyperlight-wasm
-pub use callable::Callable;
 /// Re-export for `SandboxConfiguration` type
 pub use config::SandboxConfiguration;
 /// Re-export for the `MultiUseSandbox` type

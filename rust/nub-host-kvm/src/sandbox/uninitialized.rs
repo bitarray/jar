@@ -22,11 +22,11 @@ use std::sync::{Arc, Mutex};
 use tracing::{Span, instrument};
 use tracing_core::LevelFilter;
 
-use super::host_funcs::{FunctionRegistry, default_writer_func};
+use super::host_funcs::FunctionRegistry;
 use super::snapshot::Snapshot;
 use super::uninitialized_evolve::evolve_impl_multi_use;
-use crate::func::host_functions::{HostFunction, register_host_function};
-use crate::func::{ParameterTuple, SupportedReturnType};
+use crate::func::HostFn;
+use crate::func::host_functions::register_host_function;
 #[cfg(feature = "build-metadata")]
 use crate::log_build_details;
 use crate::mem::memory_region::{DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegionFlags};
@@ -364,7 +364,7 @@ impl UninitializedSandbox {
 
         let host_funcs = Arc::new(Mutex::new(FunctionRegistry::default()));
 
-        let mut sandbox = Self {
+        let sandbox = Self {
             host_funcs,
             mgr: mem_mgr_wrapper,
             max_guest_log_level: None,
@@ -379,8 +379,11 @@ impl UninitializedSandbox {
             counter_taken: std::sync::atomic::AtomicBool::new(false),
         };
 
-        // If we were passed a writer for host print register it otherwise use the default.
-        sandbox.register_print(default_writer_func)?;
+        // Upstream registered a default "HostPrint" handler here.
+        // After the FB/SCALE → rkyv migration, host functions are
+        // fn_id-indexed and there is no host-print integration; if a
+        // future caller needs guest stdout it can register a handler
+        // explicitly via `register_host_function`.
 
         crate::debug!("Sandbox created:  {:#?}", sandbox);
 
@@ -444,25 +447,12 @@ impl UninitializedSandbox {
         self.max_guest_log_level = Some(log_level);
     }
 
-    /// Registers a host function that the guest can call.
-    pub fn register<Args: ParameterTuple, Output: SupportedReturnType>(
-        &mut self,
-        name: impl AsRef<str>,
-        host_func: impl Into<HostFunction<Output, Args>>,
-    ) -> Result<()> {
-        register_host_function(host_func, self, name.as_ref())
-    }
-
-    /// Registers the special "HostPrint" function for guest printing.
-    ///
-    /// This overrides the default behavior of writing to stdout.
-    /// The function expects the signature `FnMut(String) -> i32`
-    /// and will be called when the guest wants to print output.
-    pub fn register_print(
-        &mut self,
-        print_func: impl Into<HostFunction<i32, (String,)>>,
-    ) -> Result<()> {
-        self.register("HostPrint", print_func)
+    /// Registers a host function under `fn_id` that the guest can
+    /// call via the `OutBAction::CallFunction` outb port. The
+    /// closure receives the raw `Request.payload` bytes from the
+    /// guest and returns the raw response payload bytes.
+    pub fn register(&mut self, fn_id: u32, host_func: HostFn) -> Result<()> {
+        register_host_function(self, fn_id, host_func)
     }
 
     /// Populate the deferred `HostSharedMemory` slot without running

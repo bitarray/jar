@@ -16,11 +16,6 @@ limitations under the License.
 #[cfg(feature = "nanvix-unstable")]
 use std::mem::offset_of;
 
-use flatbuffers::FlatBufferBuilder;
-use hyperlight_common::flatbuffer_wrappers::function_call::{
-    FunctionCall, validate_guest_function_call_buffer,
-};
-use hyperlight_common::flatbuffer_wrappers::function_types::FunctionCallResult;
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
 use nub_host_common::vmem::{self, PAGE_TABLE_SIZE};
 #[cfg(all(feature = "crashdump", not(feature = "i686-guest")))]
@@ -34,7 +29,9 @@ use super::shared_mem::{
 #[cfg(crashdump)]
 use crate::mem::memory_region::{CrashDumpRegion, MemoryRegionFlags, MemoryRegionType};
 use crate::sandbox::snapshot::{NextAction, Snapshot};
-use crate::{Result, new_error};
+use crate::Result;
+#[allow(unused_imports)]
+use crate::new_error;
 
 #[cfg(all(feature = "crashdump", not(feature = "i686-guest")))]
 fn mapping_kind_to_flags(kind: &MappingKind) -> (MemoryRegionFlags, MemoryRegionType) {
@@ -397,56 +394,45 @@ impl SandboxMemoryManager<HostSharedMemory> {
         Ok(())
     }
 
-    /// Reads a host function call from memory
+    /// Push raw bytes (e.g. a rkyv-archived `Request` envelope) onto
+    /// the guest's input data ring.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn get_host_function_call(&mut self) -> Result<FunctionCall> {
-        self.scratch_mem.try_pop_buffer_into::<FunctionCall>(
-            self.layout.get_output_data_buffer_scratch_host_offset(),
-            self.layout.sandbox_memory_config.get_output_data_size(),
-        )
-    }
-
-    /// Writes a host function call result to memory
-    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn write_response_from_host_function_call(
-        &mut self,
-        res: &FunctionCallResult,
-    ) -> Result<()> {
-        let mut builder = FlatBufferBuilder::new();
-        let data = res.encode(&mut builder);
-
-        self.scratch_mem.push_buffer(
-            self.layout.get_input_data_buffer_scratch_host_offset(),
-            self.layout.sandbox_memory_config.get_input_data_size(),
-            data,
-        )
-    }
-
-    /// Writes a guest function call to memory
-    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn write_guest_function_call(&mut self, buffer: &[u8]) -> Result<()> {
-        validate_guest_function_call_buffer(buffer).map_err(|e| {
-            new_error!(
-                "Guest function call buffer validation failed: {}",
-                e.to_string()
-            )
-        })?;
-
+    pub(crate) fn write_guest_function_call_raw(&mut self, buffer: &[u8]) -> Result<()> {
         self.scratch_mem.push_buffer(
             self.layout.get_input_data_buffer_scratch_host_offset(),
             self.layout.sandbox_memory_config.get_input_data_size(),
             buffer,
-        )?;
-        Ok(())
+        )
     }
 
-    /// Reads a function call result from memory.
-    /// A function call result can be either an error or a successful return value.
+    /// Pop the response bytes (e.g. a rkyv-archived `Response`
+    /// envelope) from the guest's output data ring.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn get_guest_function_call_result(&mut self) -> Result<FunctionCallResult> {
-        self.scratch_mem.try_pop_buffer_into::<FunctionCallResult>(
+    pub(crate) fn read_guest_function_call_result_raw(&mut self) -> Result<Vec<u8>> {
+        self.scratch_mem.try_pop_buffer_raw(
             self.layout.get_output_data_buffer_scratch_host_offset(),
             self.layout.sandbox_memory_config.get_output_data_size(),
+        )
+    }
+
+    /// Pop raw bytes from the output ring — used by the host's
+    /// `OutBAction::CallFunction` arm to read the guest's request.
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn read_host_function_call_raw(&mut self) -> Result<Vec<u8>> {
+        self.scratch_mem.try_pop_buffer_raw(
+            self.layout.get_output_data_buffer_scratch_host_offset(),
+            self.layout.sandbox_memory_config.get_output_data_size(),
+        )
+    }
+
+    /// Push raw bytes (response to a guest→host call) onto the
+    /// guest's input data ring.
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
+    pub(crate) fn write_host_function_response_raw(&mut self, buffer: &[u8]) -> Result<()> {
+        self.scratch_mem.push_buffer(
+            self.layout.get_input_data_buffer_scratch_host_offset(),
+            self.layout.sandbox_memory_config.get_input_data_size(),
+            buffer,
         )
     }
 

@@ -23,11 +23,7 @@ license = "Apache-2.0"
 description = "Forked Hyperlight guest-bin (x86_64-only) — guest-side init + panic handler + exception entry for nub."
 
 [features]
-default = ["macros"]
-macros = [
-    "dep:hyperlight-guest-macro",
-    "dep:linkme",
-]
+default = []
 # Expose `HEAP_ALLOCATOR` as `pub` (instead of `pub(crate)`) and turn
 # on talc's `counters` feature so callers can read allocation
 # statistics. Adds a small per-alloc bookkeeping cost; keep off in
@@ -39,12 +35,14 @@ name = "hyperlight_guest_bin"
 path = "src/lib.rs"
 
 [dependencies]
-flatbuffers = { version = "25.12.19", default-features = false }
+anyhow = { version = "1", default-features = false }
+bytecheck = { version = "0.8", default-features = false }
 hyperlight-common = { version = "0.15.0", default-features = false }
 nub-host-common = { path = "../nub-host-common", default-features = false }
+nub-host-guest-macro = { path = "../nub-host-guest-macro" }
 hyperlight-guest = { version = "0.15.0", default-features = false }
-hyperlight-guest-macro = { version = "0.15.0", optional = true, default-features = false }
-linkme = { version = "0.3.36", optional = true }
+linkme = "0.3.36"
+rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
 spin = "0.10.0"
 spinning_top = "0.3.0"
 talc = "5.0.3"

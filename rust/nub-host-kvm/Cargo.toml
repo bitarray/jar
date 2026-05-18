@@ -31,10 +31,11 @@ bitflags = "2.11.1"
 blake3 = "1.8.5"
 cfg-if = "1.0.4"
 crossbeam-channel = "0.5.15"
-flatbuffers = "25.12.19"
+bytecheck = "0.8"
 goblin = { version = "0.10", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
 hyperlight-common = { version = "0.15.0", features = ["std"] }
 nub-host-common = { path = "../nub-host-common", features = ["std"] }
+rkyv = { version = "0.8", features = ["std"] }
 libc = "0.2.186"
 log = "0.4.29"
 metrics = "0.24.5"
