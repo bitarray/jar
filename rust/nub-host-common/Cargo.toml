@@ -1,0 +1,27 @@
+[package]
+name = "nub-host-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Common types shared between the nub host (nub-host-kvm) and the in-sandbox guest (nub-arch-guestbin). Forked + stripped from hyperlight-common 0.15.0 (Apache-2.0): drops all FlatBuffers wrappers/codegen and the param-tuple polymorphism — those layers are replaced by rkyv-archived `rpc::{Request, Response}` envelopes."
+
+[features]
+default = ["tracing"]
+std = ["thiserror/std", "log/std", "tracing/std"]
+tracing = ["dep:tracing"]
+trace_guest = []
+guest-counter = []
+mem_profile = []
+i686-guest = []
+nanvix-unstable = ["i686-guest"]
+
+[dependencies]
+anyhow = { version = "1", default-features = false }
+log = "0.4"
+spin = "0.10"
+thiserror = { version = "2", default-features = false }
+tracing = { version = "0.1", optional = true }
+tracing-core = { version = "0.1", default-features = false }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

@@ -18,8 +18,8 @@ use std::ops::Range;
 
 use bitflags::bitflags;
 #[cfg(mshv3)]
-use hyperlight_common::mem::PAGE_SHIFT;
-use hyperlight_common::mem::PAGE_SIZE_USIZE;
+use nub_host_common::mem::PAGE_SHIFT;
+use nub_host_common::mem::PAGE_SIZE_USIZE;
 #[cfg(kvm)]
 use kvm_bindings::{KVM_MEM_READONLY, kvm_userspace_memory_region};
 #[cfg(mshv3)]

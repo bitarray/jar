@@ -152,7 +152,7 @@ impl ElfInfo {
 
     /// Read the hyperlight version note from the ELF binary
     fn read_version_note<'a>(elf: &Elf<'a>, bytes: &'a [u8]) -> Option<String> {
-        use hyperlight_common::version_note::{
+        use nub_host_common::version_note::{
             HYPERLIGHT_NOTE_NAME, HYPERLIGHT_NOTE_TYPE, HYPERLIGHT_VERSION_SECTION,
         };
 

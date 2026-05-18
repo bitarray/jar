@@ -288,7 +288,7 @@ impl UninitializedSandbox {
     pub fn guest_counter(&mut self) -> Result<GuestCounter> {
         use std::sync::atomic::Ordering;
 
-        use hyperlight_common::layout::SCRATCH_TOP_GUEST_COUNTER_OFFSET;
+        use nub_host_common::layout::SCRATCH_TOP_GUEST_COUNTER_OFFSET;
 
         if self.counter_taken.swap(true, Ordering::Relaxed) {
             return Err(new_error!(

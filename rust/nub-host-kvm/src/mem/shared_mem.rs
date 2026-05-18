@@ -22,7 +22,7 @@ use std::mem::{align_of, size_of};
 use std::ptr::null_mut;
 use std::sync::{Arc, RwLock};
 
-use hyperlight_common::mem::PAGE_SIZE_USIZE;
+use nub_host_common::mem::PAGE_SIZE_USIZE;
 use tracing::{Span, instrument};
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};

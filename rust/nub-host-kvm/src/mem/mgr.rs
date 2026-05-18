@@ -22,9 +22,9 @@ use hyperlight_common::flatbuffer_wrappers::function_call::{
 };
 use hyperlight_common::flatbuffer_wrappers::function_types::FunctionCallResult;
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
-use hyperlight_common::vmem::{self, PAGE_TABLE_SIZE};
+use nub_host_common::vmem::{self, PAGE_TABLE_SIZE};
 #[cfg(all(feature = "crashdump", not(feature = "i686-guest")))]
-use hyperlight_common::vmem::{BasicMapping, MappingKind};
+use nub_host_common::vmem::{BasicMapping, MappingKind};
 use tracing::{Span, instrument};
 
 use super::layout::SandboxMemoryLayout;
@@ -350,16 +350,16 @@ impl SandboxMemoryManager<HostSharedMemory> {
     ///
     /// Returns an error if [`MAX_FILE_MAPPINGS`] has been reached.
     ///
-    /// [`FileMappingInfo`]: hyperlight_common::mem::FileMappingInfo
-    /// [`MAX_FILE_MAPPINGS`]: hyperlight_common::mem::MAX_FILE_MAPPINGS
+    /// [`FileMappingInfo`]: nub_host_common::mem::FileMappingInfo
+    /// [`MAX_FILE_MAPPINGS`]: nub_host_common::mem::MAX_FILE_MAPPINGS
     #[cfg(feature = "nanvix-unstable")]
     pub(crate) fn write_file_mapping_entry(
         &mut self,
         guest_addr: u64,
         size: u64,
-        label: &[u8; hyperlight_common::mem::FILE_MAPPING_LABEL_MAX_LEN + 1],
+        label: &[u8; nub_host_common::mem::FILE_MAPPING_LABEL_MAX_LEN + 1],
     ) -> Result<()> {
-        use hyperlight_common::mem::{FileMappingInfo, MAX_FILE_MAPPINGS};
+        use nub_host_common::mem::{FileMappingInfo, MAX_FILE_MAPPINGS};
 
         // Read the current entry count from the PEB. This is the source
         // of truth — it survives snapshot/restore because the PEB is
@@ -488,7 +488,7 @@ impl SandboxMemoryManager<HostSharedMemory> {
     }
 
     fn update_scratch_bookkeeping(&mut self) -> Result<()> {
-        use hyperlight_common::layout::*;
+        use nub_host_common::layout::*;
         let scratch_size = self.scratch_mem.mem_size();
         self.update_scratch_bookkeeping_item(SCRATCH_TOP_SIZE_OFFSET, scratch_size as u64)?;
         self.update_scratch_bookkeeping_item(
@@ -561,7 +561,7 @@ impl SandboxMemoryManager<HostSharedMemory> {
     ) -> Result<Vec<CrashDumpRegion>> {
         use crate::sandbox::snapshot::SharedMemoryPageTableBuffer;
 
-        let len = hyperlight_common::layout::MAX_GVA;
+        let len = nub_host_common::layout::MAX_GVA;
 
         let regions = self.shared_mem.with_contents(|snapshot| {
             self.scratch_mem.with_contents(|scratch| {
@@ -569,7 +569,7 @@ impl SandboxMemoryManager<HostSharedMemory> {
                     SharedMemoryPageTableBuffer::new(snapshot, scratch, self.layout, root_pt);
 
                 let mappings: Vec<_> =
-                    unsafe { hyperlight_common::vmem::virt_to_phys(&pt_buf, 0, len as u64) }
+                    unsafe { nub_host_common::vmem::virt_to_phys(&pt_buf, 0, len as u64) }
                         .collect();
 
                 if mappings.is_empty() {
@@ -628,7 +628,7 @@ impl SandboxMemoryManager<HostSharedMemory> {
         let snapshot_host = self.shared_mem.base_addr();
 
         let scratch_size = self.scratch_mem.mem_size();
-        let scratch_gva = hyperlight_common::layout::scratch_base_gva(scratch_size) as usize;
+        let scratch_gva = nub_host_common::layout::scratch_base_gva(scratch_size) as usize;
         let scratch_host = self.scratch_mem.base_addr();
 
         let mut regions = vec![
@@ -679,7 +679,7 @@ impl SandboxMemoryManager<HostSharedMemory> {
         len: usize,
         root_pt: u64,
     ) -> Result<Vec<u8>> {
-        use hyperlight_common::vmem::PAGE_SIZE;
+        use nub_host_common::vmem::PAGE_SIZE;
 
         use crate::sandbox::snapshot::{SharedMemoryPageTableBuffer, access_gpa};
 
@@ -689,7 +689,7 @@ impl SandboxMemoryManager<HostSharedMemory> {
 
                 // Walk page tables to get all mappings that cover the GVA range
                 let mappings: Vec<_> = unsafe {
-                    hyperlight_common::vmem::virt_to_phys(&pt_buf, gva, len as u64)
+                    nub_host_common::vmem::virt_to_phys(&pt_buf, gva, len as u64)
                 }
                 .collect();
 

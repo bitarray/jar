@@ -92,8 +92,8 @@ unsafe fn init_tss(pc: *mut ProcCtrl) {
         let tss_ptr = &raw mut (*pc).tss;
         // copy byte by byte to avoid alignment issues
         let ist1_ptr = &raw mut (*tss_ptr).ist1 as *mut [u8; 8];
-        let exn_stack = hyperlight_common::layout::MAX_GVA as u64
-            - hyperlight_common::layout::SCRATCH_TOP_EXN_STACK_OFFSET
+        let exn_stack = nub_host_common::layout::MAX_GVA as u64
+            - nub_host_common::layout::SCRATCH_TOP_EXN_STACK_OFFSET
             + 1;
         ist1_ptr.write_volatile(exn_stack.to_ne_bytes());
         asm!(
@@ -110,7 +110,7 @@ unsafe fn init_stack() -> u64 {
     use hyperlight_guest::layout::MAIN_STACK_TOP_GVA;
     let stack_top_page_base = (MAIN_STACK_TOP_GVA - 1) & !0xfff;
     unsafe {
-        use hyperlight_common::vmem::{BasicMapping, MappingKind, PAGE_SIZE};
+        use nub_host_common::vmem::{BasicMapping, MappingKind, PAGE_SIZE};
         crate::paging::map_region(
             hyperlight_guest::prim_alloc::alloc_phys_pages(1),
             stack_top_page_base as *mut u8,
@@ -180,5 +180,5 @@ core::arch::global_asm!("
     .cfi_endproc\n
 ",
     generic_init = sym crate::generic_init,
-    halt_port = const hyperlight_common::outb::VmAction::Halt as u16,
+    halt_port = const nub_host_common::outb::VmAction::Halt as u16,
 );

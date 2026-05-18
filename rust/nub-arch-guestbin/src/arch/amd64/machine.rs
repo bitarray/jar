@@ -16,7 +16,7 @@ limitations under the License.
 
 use core::mem;
 
-use hyperlight_common::vmem::{BasicMapping, MappingKind, PAGE_SIZE};
+use nub_host_common::vmem::{BasicMapping, MappingKind, PAGE_SIZE};
 
 use super::layout::PROC_CONTROL_GVA;
 

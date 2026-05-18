@@ -16,7 +16,7 @@ limitations under the License.
 
 use std::sync::LazyLock;
 
-use hyperlight_common::outb::VmAction;
+use nub_host_common::outb::VmAction;
 #[cfg(gdb)]
 use kvm_bindings::kvm_guest_debug;
 use kvm_bindings::{kvm_fpu, kvm_regs, kvm_sregs, kvm_userspace_memory_region};
@@ -169,7 +169,7 @@ impl KvmVm {
                 == CPUID_FUNCTION_PROCESSOR_CAPACITY_PARAMETERS_AND_EXTENDED_FEATURE_IDENTIFICATION
             {
                 entry.eax &= !0xff;
-                entry.eax |= hyperlight_common::layout::MAX_GPA.ilog2() + 1;
+                entry.eax |= nub_host_common::layout::MAX_GPA.ilog2() + 1;
             }
         }
         vcpu_fd

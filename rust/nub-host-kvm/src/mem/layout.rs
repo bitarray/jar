@@ -36,7 +36,7 @@ limitations under the License.
 //!
 //! Everything except for the guest page tables is currently
 //! identity-mapped; the guest page tables themselves are mapped at
-//! [`hyperlight_common::layout::SNAPSHOT_PT_GVA`] =
+//! [`nub_host_common::layout::SNAPSHOT_PT_GVA`] =
 //! 0xffff_8000_0000_0000.
 //!
 //! - `InitData` - some extra data that can be loaded onto the sandbox during
@@ -63,7 +63,7 @@ limitations under the License.
 use std::fmt::Debug;
 use std::mem::{offset_of, size_of};
 
-use hyperlight_common::mem::{HyperlightPEB, PAGE_SIZE_USIZE};
+use nub_host_common::mem::{HyperlightPEB, PAGE_SIZE_USIZE};
 use tracing::{Span, instrument};
 
 use super::memory_region::MemoryRegionType::{Code, Heap, InitData, Peb};
@@ -287,7 +287,7 @@ impl SandboxMemoryLayout {
         if scratch_size > Self::MAX_MEMORY_SIZE {
             return Err(MemoryRequestTooBig(scratch_size, Self::MAX_MEMORY_SIZE));
         }
-        let min_scratch_size = hyperlight_common::layout::min_scratch_size(
+        let min_scratch_size = nub_host_common::layout::min_scratch_size(
             cfg.get_input_data_size(),
             cfg.get_output_data_size(),
         );
@@ -320,8 +320,8 @@ impl SandboxMemoryLayout {
         #[cfg(feature = "nanvix-unstable")]
         let file_mappings_array_end = peb_offset
             + size_of::<HyperlightPEB>()
-            + hyperlight_common::mem::MAX_FILE_MAPPINGS
-                * size_of::<hyperlight_common::mem::FileMappingInfo>();
+            + nub_host_common::mem::MAX_FILE_MAPPINGS
+                * size_of::<nub_host_common::mem::FileMappingInfo>();
         #[cfg(feature = "nanvix-unstable")]
         let guest_heap_buffer_offset = file_mappings_array_end.next_multiple_of(PAGE_SIZE_USIZE);
         #[cfg(not(feature = "nanvix-unstable"))]
@@ -394,7 +394,7 @@ impl SandboxMemoryLayout {
     /// Get the guest virtual address of the start of output data.
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_output_data_buffer_gva(&self) -> u64 {
-        hyperlight_common::layout::scratch_base_gva(self.scratch_size)
+        nub_host_common::layout::scratch_base_gva(self.scratch_size)
             + self.sandbox_memory_config.get_input_data_size() as u64
     }
 
@@ -423,7 +423,7 @@ impl SandboxMemoryLayout {
     /// Get the guest virtual address of the start of input data
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     fn get_input_data_buffer_gva(&self) -> u64 {
-        hyperlight_common::layout::scratch_base_gva(self.scratch_size)
+        nub_host_common::layout::scratch_base_gva(self.scratch_size)
     }
 
     /// Get the offset into the host scratch buffer of the start of
@@ -439,14 +439,14 @@ impl SandboxMemoryLayout {
     pub(crate) fn get_pt_base_scratch_offset(&self) -> usize {
         (self.sandbox_memory_config.get_input_data_size()
             + self.sandbox_memory_config.get_output_data_size())
-        .next_multiple_of(hyperlight_common::vmem::PAGE_SIZE)
+        .next_multiple_of(nub_host_common::vmem::PAGE_SIZE)
     }
 
     /// Get the base GPA to which the page tables will be eagerly
     /// copied on restore
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_pt_base_gpa(&self) -> u64 {
-        hyperlight_common::layout::scratch_base_gpa(self.scratch_size)
+        nub_host_common::layout::scratch_base_gpa(self.scratch_size)
             + self.get_pt_base_scratch_offset() as u64
     }
 
@@ -541,7 +541,7 @@ impl SandboxMemoryLayout {
     /// Sets the size of the memory region used for page tables
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn set_pt_size(&mut self, size: usize) -> Result<()> {
-        let min_fixed_scratch = hyperlight_common::layout::min_scratch_size(
+        let min_fixed_scratch = nub_host_common::layout::min_scratch_size(
             self.sandbox_memory_config.get_input_data_size(),
             self.sandbox_memory_config.get_output_data_size(),
         );
@@ -596,8 +596,8 @@ impl SandboxMemoryLayout {
         #[cfg(feature = "nanvix-unstable")]
         let heap_offset = {
             let peb_and_array_size = size_of::<HyperlightPEB>()
-                + hyperlight_common::mem::MAX_FILE_MAPPINGS
-                    * size_of::<hyperlight_common::mem::FileMappingInfo>();
+                + nub_host_common::mem::MAX_FILE_MAPPINGS
+                    * size_of::<nub_host_common::mem::FileMappingInfo>();
             builder.push_page_aligned(
                 peb_and_array_size,
                 MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
@@ -783,7 +783,7 @@ impl SandboxMemoryLayout {
 
 #[cfg(test)]
 mod tests {
-    use hyperlight_common::mem::PAGE_SIZE_USIZE;
+    use nub_host_common::mem::PAGE_SIZE_USIZE;
 
     use super::*;
 
@@ -796,8 +796,8 @@ mod tests {
         // PEB + preallocated FileMappingInfo array
         #[cfg(feature = "nanvix-unstable")]
         let peb_and_array = size_of::<HyperlightPEB>()
-            + hyperlight_common::mem::MAX_FILE_MAPPINGS
-                * size_of::<hyperlight_common::mem::FileMappingInfo>();
+            + nub_host_common::mem::MAX_FILE_MAPPINGS
+                * size_of::<nub_host_common::mem::FileMappingInfo>();
         #[cfg(not(feature = "nanvix-unstable"))]
         let peb_and_array = size_of::<HyperlightPEB>();
         expected_size += peb_and_array.next_multiple_of(PAGE_SIZE_USIZE);

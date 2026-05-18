@@ -16,7 +16,7 @@ limitations under the License.
 
 use core::arch::asm;
 
-use hyperlight_common::vmem;
+use nub_host_common::vmem;
 use hyperlight_guest::prim_alloc::alloc_phys_pages;
 
 // TODO: This is not at all thread-safe atm

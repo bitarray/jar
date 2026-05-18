@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(target_arch = "aarch64")]
 pub(crate) use aarch64::*;
-use hyperlight_common::log_level::GuestLogFilter;
+use nub_host_common::log_level::GuestLogFilter;
 use tracing_core::LevelFilter;
 
 use crate::HyperlightError;
@@ -421,7 +421,7 @@ impl HyperlightVm {
         &mut self,
         scratch: GuestSharedMemory,
     ) -> Result<(), UpdateRegionError> {
-        let guest_base = hyperlight_common::layout::scratch_base_gpa(scratch.mem_size());
+        let guest_base = nub_host_common::layout::scratch_base_gpa(scratch.mem_size());
         let rgn = scratch.mapping_at(guest_base, MemoryRegionType::Scratch);
         self.scratch_memory = Some(scratch);
         unsafe { self.vm.map_memory((self.scratch_slot, &rgn))? };

@@ -17,6 +17,11 @@ use core::fmt::Write;
 use arch::dispatch::dispatch_function;
 use guest_function::register::GuestFunctionRegister;
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
+// PEB type comes from upstream hyperlight_common because we feed it
+// into the upstream `hyperlight-guest` crate's `GuestHandle::init`.
+// `nub_host_common::mem::HyperlightPEB` is the same bytes-on-the-wire
+// but a distinct nominal type — using the upstream alias here avoids
+// a nominal-type mismatch.
 use hyperlight_common::mem::HyperlightPEB;
 use hyperlight_guest::exit::write_abort;
 use hyperlight_guest::guest_handle::handle::GuestHandle;
@@ -68,17 +73,17 @@ const VERSION_STR: &str = env!("CARGO_PKG_VERSION");
 // accept this guest.
 #[used]
 #[unsafe(link_section = ".note.hyperlight-version")]
-static HYPERLIGHT_VERSION_NOTE: hyperlight_common::version_note::ElfNote<
+static HYPERLIGHT_VERSION_NOTE: nub_host_common::version_note::ElfNote<
     {
-        hyperlight_common::version_note::padded_name_size(
-            hyperlight_common::version_note::HYPERLIGHT_NOTE_NAME.len() + 1,
+        nub_host_common::version_note::padded_name_size(
+            nub_host_common::version_note::HYPERLIGHT_NOTE_NAME.len() + 1,
         )
     },
-    { hyperlight_common::version_note::padded_desc_size(VERSION_STR.len() + 1) },
-> = hyperlight_common::version_note::ElfNote::new(
-    hyperlight_common::version_note::HYPERLIGHT_NOTE_NAME,
+    { nub_host_common::version_note::padded_desc_size(VERSION_STR.len() + 1) },
+> = nub_host_common::version_note::ElfNote::new(
+    nub_host_common::version_note::HYPERLIGHT_NOTE_NAME,
     VERSION_STR,
-    hyperlight_common::version_note::HYPERLIGHT_NOTE_TYPE,
+    nub_host_common::version_note::HYPERLIGHT_NOTE_TYPE,
 );
 
 /// The size of one page in the host OS.

@@ -16,9 +16,9 @@ limitations under the License.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hyperlight_common::layout::{scratch_base_gpa, scratch_base_gva};
-use hyperlight_common::vmem;
-use hyperlight_common::vmem::{BasicMapping, Mapping, MappingKind};
+use nub_host_common::layout::{scratch_base_gpa, scratch_base_gva};
+use nub_host_common::vmem;
+use nub_host_common::vmem::{BasicMapping, Mapping, MappingKind};
 use tracing::{Span, instrument};
 
 use crate::HyperlightError::MemoryRegionSizeMismatch;
@@ -77,7 +77,7 @@ pub struct Snapshot {
     /// The next action that should be performed on this snapshot
     entrypoint: NextAction,
 }
-impl hyperlight_common::vmem::TableReadOps for Snapshot {
+impl nub_host_common::vmem::TableReadOps for Snapshot {
     type TableAddr = u64;
     fn entry_addr(addr: u64, offset: u64) -> u64 {
         addr + offset
@@ -252,8 +252,8 @@ impl Snapshot {
         layout.set_pt_size(pt_bytes.len())?;
         memory.extend(&pt_bytes);
 
-        let exn_stack_top_gva = hyperlight_common::layout::MAX_GVA as u64
-            - hyperlight_common::layout::SCRATCH_TOP_EXN_STACK_OFFSET
+        let exn_stack_top_gva = nub_host_common::layout::MAX_GVA as u64
+            - nub_host_common::layout::SCRATCH_TOP_EXN_STACK_OFFSET
             + 1;
 
         // Bump the configuration counter so `MultiUseSandbox::id`

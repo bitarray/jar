@@ -533,7 +533,7 @@ impl HyperlightVm {
 
 #[cfg(gdb)]
 pub(super) mod debug {
-    use hyperlight_common::mem::PAGE_SIZE;
+    use nub_host_common::mem::PAGE_SIZE;
 
     use super::HyperlightVm;
     use crate::hypervisor::gdb::arch::{SW_BP, SW_BP_SIZE};

@@ -75,5 +75,5 @@ core::arch::global_asm!("
     .cfi_endproc
 ",
     internal_dispatch_function = sym crate::guest_function::call::internal_dispatch_function,
-    halt_port = const hyperlight_common::outb::VmAction::Halt as u16,
+    halt_port = const nub_host_common::outb::VmAction::Halt as u16,
 );

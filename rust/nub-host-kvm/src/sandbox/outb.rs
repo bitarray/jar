@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use hyperlight_common::flatbuffer_wrappers::function_types::{FunctionCallResult, ParameterValue};
 use hyperlight_common::flatbuffer_wrappers::guest_error::{ErrorCode, GuestError};
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
-use hyperlight_common::outb::{Exception, OutBAction};
+use nub_host_common::outb::{Exception, OutBAction};
 use log::{Level, Record};
 use tracing::{Span, instrument};
 use tracing_log::format_trace;

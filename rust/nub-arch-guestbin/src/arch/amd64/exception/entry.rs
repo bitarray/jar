@@ -19,7 +19,7 @@ limitations under the License.
 
 use core::arch::{asm, global_asm};
 
-use hyperlight_common::outb::Exception;
+use nub_host_common::outb::Exception;
 
 use super::super::context;
 use super::super::machine::{IDT, IdtEntry, IdtPointer, ProcCtrl};

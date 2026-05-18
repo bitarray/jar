@@ -764,6 +764,7 @@ dependencies = [
  "hyperlight-guest",
  "hyperlight-guest-macro",
  "linkme",
+ "nub-host-common",
  "spin",
  "spinning_top",
  "talc",
@@ -1157,6 +1158,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nub-host-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "spin",
+ "thiserror",
+ "tracing",
+ "tracing-core",
+]
+
+[[package]]
 name = "nub-host-kvm"
 version = "0.1.0"
 dependencies = [
@@ -1174,6 +1187,7 @@ dependencies = [
  "libc",
  "log",
  "metrics",
+ "nub-host-common",
  "page_size",
  "rand 0.10.1",
  "serde_json",
