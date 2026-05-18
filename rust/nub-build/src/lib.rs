@@ -2,7 +2,7 @@
 //! for a stable bare-metal target (today: `x86_64-unknown-none`) and
 //! return the path to the resulting ELF.
 //!
-//! Today's only consumer is `nub-arch-hyperlight`. As we add more
+//! Today's only consumer is `nub-arch-x86`. As we add more
 //! bare-metal Arch backends (e.g. an arm/riscv guest), they live here
 //! too — this crate owns the cross-compile recipe for all of nub's
 //! bare-metal arch guests.

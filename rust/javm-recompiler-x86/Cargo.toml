@@ -10,7 +10,7 @@ description = "JAVM x86_64 recompiler (JIT): native codegen. no_std-compatible b
 default = ["std"]
 # `std`: host-targeted build — includes mmap-backed code/data
 # buffers and the SIGSEGV signal handler. Disable for no_std
-# embedding (e.g. nub-arch-hyperlight in-kernel).
+# embedding (e.g. nub-arch-x86 in-kernel).
 std = ["javm-exec/std", "dep:libc"]
 
 [dependencies]

@@ -1,4 +1,4 @@
-//! Ring-0 spike: load the `nub-arch-hyperlight` ELF into a Hyperlight
+//! Ring-0 spike: load the `nub-arch-x86` ELF into a Hyperlight
 //! sandbox and run the ring-0 conformance tests that validated the
 //! Hyperlight substrate. Run with:
 //!
@@ -27,26 +27,26 @@
 
 use anyhow::Result;
 use nub_host_x86::sandbox::{GuestBinary, SandboxConfiguration, UninitializedSandbox};
-use nub_arch_hyperlight_abi::{InvocationResult, InvocationSpec, PvmRegs};
+use nub_arch_x86_abi::{InvocationResult, InvocationSpec, PvmRegs};
 use scale::{Decode, Encode};
 
-const NUB_ARCH_HYPERLIGHT_BLOB_PATH: &str = env!("NUB_ARCH_HYPERLIGHT_BLOB");
+const NUB_ARCH_X86_BLOB_PATH: &str = env!("NUB_ARCH_X86_BLOB");
 
 fn main() -> Result<()> {
     println!("nub-prototype: Hyperlight + ring-0 spike");
-    println!("guest blob: {NUB_ARCH_HYPERLIGHT_BLOB_PATH}");
+    println!("guest blob: {NUB_ARCH_X86_BLOB_PATH}");
     println!();
 
     // Bump scratch to 192 MiB so all the per-smoke phys-page
     // allocations fit: the per-call C3/C4 smokes (per-test JIT/ctx/
     // stack/page-table pages) plus the D1 `nub_invoke` path which
     // lazily reserves the per-process pool inside the guest
-    // (`nub-arch-hyperlight::pool` ~ 94 MiB). Default is 0x48000
+    // (`nub-arch-x86::pool` ~ 94 MiB). Default is 0x48000
     // (= 72 pages), enough only for the original ring-0 spike.
     let mut cfg = SandboxConfiguration::default();
     cfg.set_scratch_size(192 * 1024 * 1024);
     let uninit = UninitializedSandbox::new(
-        GuestBinary::FilePath(NUB_ARCH_HYPERLIGHT_BLOB_PATH.to_string()),
+        GuestBinary::FilePath(NUB_ARCH_X86_BLOB_PATH.to_string()),
         Some(cfg),
     )?;
     let mut sandbox = uninit.evolve()?;

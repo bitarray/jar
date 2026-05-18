@@ -1112,8 +1112,8 @@ name = "nub"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "nub-arch-hyperlight-abi",
  "nub-arch-local",
+ "nub-arch-x86-abi",
  "nub-build",
  "nub-host-x86",
  "nub-kernel",
@@ -1121,7 +1121,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "nub-arch-hyperlight"
+name = "nub-arch-local"
+version = "0.1.0"
+dependencies = [
+ "nub-kernel",
+]
+
+[[package]]
+name = "nub-arch-x86"
 version = "0.1.0"
 dependencies = [
  "hyperlight-common",
@@ -1129,24 +1136,17 @@ dependencies = [
  "hyperlight-guest-bin",
  "javm-exec",
  "javm-recompiler-x86",
- "nub-arch-hyperlight-abi",
+ "nub-arch-x86-abi",
  "scale",
  "scale-derive",
 ]
 
 [[package]]
-name = "nub-arch-hyperlight-abi"
+name = "nub-arch-x86-abi"
 version = "0.1.0"
 dependencies = [
  "scale",
  "scale-derive",
-]
-
-[[package]]
-name = "nub-arch-local"
-version = "0.1.0"
-dependencies = [
- "nub-kernel",
 ]
 
 [[package]]

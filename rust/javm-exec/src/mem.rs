@@ -72,7 +72,7 @@ pub enum MapError {
 /// - **Software-copy**: [`CopyingMemory`] (this module) — an owning
 ///   `Vec<u8>` with per-page permissions. Runs in-process.
 /// - **Hardware-paged**: a future bare-metal impl in
-///   `nub-arch-hyperlight` that maps PVM pages onto real CPU pages
+///   `nub-arch-x86` that maps PVM pages onto real CPU pages
 ///   via the in-guest IDT + page tables.
 ///
 /// Hot-path methods (`read_u*`/`write_u*`) return `Option<T>` or

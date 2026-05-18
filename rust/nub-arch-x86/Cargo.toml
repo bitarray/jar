@@ -1,12 +1,12 @@
 [package]
-name = "nub-arch-hyperlight"
+name = "nub-arch-x86"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Nub Arch implementation for Hyperlight: bare-metal guest binary running the kernel on real CPU + MMU"
 
 [[bin]]
-name = "nub-arch-hyperlight"
+name = "nub-arch-x86"
 path = "src/main.rs"
 
 # Hyperlight guest deps only on the bare-metal target. On the host
@@ -31,7 +31,7 @@ javm-exec = { path = "../javm-exec", default-features = false }
 scale = { path = "../scale", default-features = false }
 scale-derive = { workspace = true }
 # Wire types shared between guest and host (D1+).
-nub-arch-hyperlight-abi = { path = "../nub-arch-hyperlight-abi", default-features = false }
+nub-arch-x86-abi = { path = "../nub-arch-x86-abi", default-features = false }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hyperlight)'] }

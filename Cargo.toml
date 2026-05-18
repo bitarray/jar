@@ -6,8 +6,8 @@ members = [
     "rust/build-javm",
     "rust/nub-build",
     "rust/nub",
-    "rust/nub-arch-hyperlight",
-    "rust/nub-arch-hyperlight-abi",
+    "rust/nub-arch-x86",
+    "rust/nub-arch-x86-abi",
     "rust/nub-host-x86",
     "rust/nub-arch-local",
     "rust/nub-kernel",
@@ -36,7 +36,7 @@ exclude = [
     "spec/crypto-ffi",
     "spec/fuzz",
     # Vendored guest-bin (`#![no_std]` with its own panic_handler +
-    # global_allocator). Only consumed by `nub-arch-hyperlight` on
+    # global_allocator). Only consumed by `nub-arch-x86` on
     # the `cfg(target_os = "none")` cross-compile; excluding it from
     # the workspace prevents `cargo build --workspace` (host target)
     # from trying to link a no_std panic_impl into a std world.

@@ -51,7 +51,7 @@ mod guest {
     use crate::segments;
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicU64, Ordering};
-    use nub_arch_hyperlight_abi::{InvocationResult, InvocationSpec};
+    use nub_arch_x86_abi::{InvocationResult, InvocationSpec};
     use scale::{Decode, Encode};
 
     use hyperlight_common::vmem::{BasicMapping, MappingKind, PAGE_SIZE};

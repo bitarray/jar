@@ -18,7 +18,7 @@ nub-kernel = { path = "../nub-kernel" }
 nub-arch-local = { path = "../nub-arch-local" }
 # Wire types shared between the host driver and the guest's
 # `nub_invoke` entry (D1+).
-nub-arch-hyperlight-abi = { path = "../nub-arch-hyperlight-abi" }
+nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
 scale = { workspace = true }
 
 [build-dependencies]

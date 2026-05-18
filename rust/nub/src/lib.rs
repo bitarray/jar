@@ -9,7 +9,7 @@
 //!   that doesn't need real ring-0 isolation.
 //!
 //! - **Hyperlight**: ships the invocation as an RPC into a
-//!   `nub-arch-hyperlight` guest binary running inside a Hyperlight
+//!   `nub-arch-x86` guest binary running inside a Hyperlight
 //!   sandbox. The actual `Kernel<HyperlightArch>` lives guest-side;
 //!   the host holds only the sandbox + an `InstanceRef` table.
 //!
@@ -25,14 +25,14 @@ use nub_host_x86::sandbox::{
 use nub_arch_local::LocalArch;
 use nub_kernel::Kernel;
 
-pub use nub_arch_hyperlight_abi::{InvocationResult, InvocationSpec, PvmRegs};
+pub use nub_arch_x86_abi::{InvocationResult, InvocationSpec, PvmRegs};
 pub use nub_kernel::{CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
 
 use scale::{Decode, Encode};
 
 /// Path to the cross-compiled Hyperlight guest blob. Set by
 /// `build.rs` via [`nub_build::build`].
-const NUB_ARCH_HYPERLIGHT_BLOB_PATH: &str = env!("NUB_ARCH_HYPERLIGHT_BLOB");
+const NUB_ARCH_X86_BLOB_PATH: &str = env!("NUB_ARCH_X86_BLOB");
 
 /// Uniform handle to the nub microkernel.
 pub struct Nub {
@@ -61,10 +61,10 @@ impl Nub {
     }
 
     /// Construct a Nub backed by a fresh Hyperlight sandbox loaded
-    /// from the `nub-arch-hyperlight` guest blob.
+    /// from the `nub-arch-x86` guest blob.
     pub fn new_hyperlight() -> Result<Self> {
         // Scratch budget covers the per-process pool inside the guest
-        // (`nub-arch-hyperlight::pool`): mem + perms + bb + jt + jit +
+        // (`nub-arch-x86::pool`): mem + perms + bb + jt + jit +
         // arena + a few page-sized side buffers. Sized to ~144 MiB so
         // the largest bench programs fit with comfortable headroom.
         //
@@ -81,7 +81,7 @@ impl Nub {
         // every heap page CoW-resolves once into a fresh scratch
         // frame, then the working set asymptotes. With a 64 MiB heap
         // the worst-case CoW consumption is ~64 MiB; plus the
-        // per-process pool (~94 MiB; see `nub-arch-hyperlight::pool`),
+        // per-process pool (~94 MiB; see `nub-arch-x86::pool`),
         // plus a small stack-growth allowance, comfortably fits in
         // 192 MiB scratch. Without the bench-era 1 GiB heap, the
         // criterion default sample sizes no longer blow the budget.
@@ -90,7 +90,7 @@ impl Nub {
         cfg.set_output_data_size(16 * 1024 * 1024);
         cfg.set_heap_size(256 * 1024 * 1024);
         let uninit = UninitializedSandbox::new(
-            GuestBinary::FilePath(NUB_ARCH_HYPERLIGHT_BLOB_PATH.to_string()),
+            GuestBinary::FilePath(NUB_ARCH_X86_BLOB_PATH.to_string()),
             Some(cfg),
         )?;
         let sandbox = uninit.evolve()?;

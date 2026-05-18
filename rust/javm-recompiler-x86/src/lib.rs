@@ -3,7 +3,7 @@
 // support constants) are unused because their consumers — RecompiledPvm,
 // compile_code, FlatMemory — are gated behind `feature = "std"`. They
 // remain in the crate because the in-kernel JIT path that lives in
-// `nub-arch-hyperlight` calls them directly via function pointers.
+// `nub-arch-x86` calls them directly via function pointers.
 #![cfg_attr(not(feature = "std"), allow(dead_code))]
 
 //! PVM recompiler — compiles PVM bytecode to native x86-64 machine code.
@@ -324,7 +324,7 @@ unsafe impl Sync for FlatMemory {}
 /// the largest mem_size any current host test / bench uses (≪ 64
 /// MiB), with comfortable headroom. The host JIT path doesn't rely
 /// on a low-VA reservation any more — the in-kernel JIT path
-/// (`nub-arch-hyperlight`) is the production substrate; FlatMemory
+/// (`nub-arch-x86`) is the production substrate; FlatMemory
 /// exists only to back the crate's own unit tests post-Stage-2.2.
 const FLAT_BUF_SIZE: usize = 1 << 26; // 64 MiB virtual
 /// Perm-table size, one byte per 4 KiB page covering FLAT_BUF_SIZE.
@@ -345,7 +345,7 @@ impl FlatMemory {
         let region_size = HEADER_SIZE + FLAT_BUF_SIZE;
         // SAFETY: mmap with MAP_ANONYMOUS|MAP_PRIVATE|MAP_NORESERVE allocates virtual pages.
         // MAP_FAILED checked below. No MAP_32BIT: the in-kernel JIT
-        // (`nub-arch-hyperlight`) is the production substrate; the
+        // (`nub-arch-x86`) is the production substrate; the
         // host JIT path here is for unit tests only and the
         // recompiler's R15+rdx addressing doesn't need a low-VA
         // reservation.

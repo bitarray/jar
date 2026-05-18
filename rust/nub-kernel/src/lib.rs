@@ -16,7 +16,7 @@
 //!                  │
 //!     ┌────────────┼────────────────┐
 //!     │                             │
-//! nub-arch-local        nub-arch-hyperlight
+//! nub-arch-local        nub-arch-x86
 //! (in-process,         (bare-metal guest,
 //!  std)                 no_std + no_main)
 //!     │                             │
@@ -31,7 +31,7 @@
 //! The kernel "owns the state": the invoking `Cap::Instance` and
 //! everything reachable from it. Concretely the [`Arch`] impl holds
 //! the storage (in-process structures for `nub-arch-local`,
-//! guest-resident structures for `nub-arch-hyperlight`); the
+//! guest-resident structures for `nub-arch-x86`); the
 //! [`Kernel`] is a thin generic wrapper that delegates to the Arch.
 //!
 //! ## `no_std`

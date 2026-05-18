@@ -1,9 +1,9 @@
 [package]
-name = "nub-arch-hyperlight-abi"
+name = "nub-arch-x86-abi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Wire types shared between the nub-arch-hyperlight guest and its host driver (SCALE-encoded InvocationSpec / InvocationResult)."
+description = "Wire types shared between the nub-arch-x86 guest and its host driver (SCALE-encoded InvocationSpec / InvocationResult)."
 
 [features]
 default = ["std"]
