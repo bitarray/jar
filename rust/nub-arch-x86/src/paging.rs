@@ -2,9 +2,9 @@
 //!
 //! Hyperlight's `paging::map_region` is hard-coded to `user_accessible
 //! = false` — fine for kernel pages but unusable for ring-3 PVM
-//! programs. We build our own page tables in the bump arena so the
-//! kernel can map per-invocation program memory and JIT'd code with
-//! the User/Supervisor bit set.
+//! programs. We build our own page tables so the kernel can map
+//! per-invocation program memory and JIT'd code with the
+//! User/Supervisor bit set.
 //!
 //! ## Layout
 //!
@@ -18,36 +18,44 @@
 //!   virt[11: 0] → byte offset in page
 //! ```
 //!
-//! Each table is 4 KiB (512 × 8-byte PTEs); tables are allocated
-//! page-aligned from the bump arena.
+//! Each table is 4 KiB (512 × 8-byte PTEs); fresh tables are allocated
+//! through the global heap (talc), which lives in Hyperlight's
+//! identity-mapped low-memory region. `PageTable` owns every table it
+//! allocates and frees them on drop.
 //!
 //! ## PA ↔ VA translation
 //!
-//! Hyperlight's guest layout has two address-translation modes for
-//! kernel-mode pages:
+//! Hyperlight's guest layout has two address-translation regimes:
 //!
 //! * **Low memory (kernel code, heap, host I/O buffers)** is
-//!   identity-mapped: `VA == PA`.
-//! * **Scratch region (page tables, TSS, IDT)** is mapped at a high
-//!   VA via a constant offset:
+//!   identity-mapped: `VA == PA`. With CoW removed (Stage F.CoW) heap
+//!   pages stay identity-mapped on first write — there's no remap to
+//!   a scratch frame anymore — so talc allocations satisfy `PA == VA`
+//!   for the lifetime of the allocation.
+//! * **Scratch region (allocations from `prim_alloc::alloc_phys_pages`,
+//!   TSS/IDT, the existing kernel PML4)** is mapped at a high VA via a
+//!   constant offset:
 //!   ```text
 //!     gva = scratch_base_gva + (gpa - scratch_base_gpa)
 //!   ```
-//!   Scratch PAs sit near the top of the 36-bit GPA range; scratch
-//!   VAs sit near the top of the 48-bit canonical VA range.
 //!
-//! [`va_to_pa`] / [`pa_to_va`] handle both modes: addresses in the
-//! scratch range use the offset translation, everything else is
-//! treated as identity-mapped. The boundary check uses
-//! [`hyperlight_guest::layout::scratch_base_gpa`] /
-//! [`scratch_base_gva`].
+//! [`va_to_pa`] / [`pa_to_va`] handle both modes.
 
 #![cfg(target_os = "none")]
 
-use crate::bump::{BumpArena, PAGE_SIZE};
+extern crate alloc;
+
+use alloc::alloc::{alloc_zeroed, dealloc};
+use alloc::vec::Vec;
+use core::alloc::Layout;
+use core::cell::RefCell;
 use core::ptr::NonNull;
 
 use hyperlight_guest::layout::{scratch_base_gpa, scratch_base_gva};
+
+/// 4 KiB page size — the unit of alignment for page-aligned
+/// allocations (page tables, JIT exec pages, etc.).
+pub const PAGE_SIZE: usize = 4096;
 
 /// PTE flag bits.
 pub mod flag {
@@ -64,27 +72,25 @@ pub mod flag {
 /// Mask covering the physical-address bits of a PTE (bits 12..51).
 const PA_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
-/// Convert a scratch VA to its physical address. Returns `None` if
-/// `va` is outside the scratch GVA range — i.e. it isn't a scratch
-/// address that the kernel itself allocated via `alloc_phys_pages`.
+/// Convert a kernel VA to its physical address. Handles both
+/// Hyperlight memory regions: the identity-mapped low half and the
+/// scratch region (translated by a constant offset).
 pub fn va_to_pa(va: u64) -> Option<u64> {
     let gva = scratch_base_gva();
     if va >= gva {
         Some(scratch_base_gpa() + (va - gva))
     } else {
-        None
+        Some(va)
     }
 }
 
-/// Convert a scratch PA to its kernel VA. Returns `None` if `pa` is
-/// outside the scratch GPA range (i.e. it points at kernel code, the
-/// host-mapped low memory region, or an unrecognised area).
+/// Convert a PA to its kernel VA. The dual of [`va_to_pa`].
 pub fn pa_to_va(pa: u64) -> Option<u64> {
     let gpa = scratch_base_gpa();
     if pa >= gpa {
         Some(scratch_base_gva() + (pa - gpa))
     } else {
-        None
+        Some(pa)
     }
 }
 
@@ -104,7 +110,6 @@ impl Perm {
             executable: false,
         }
     }
-    #[allow(dead_code)] // used by Stage C1 (JIT exec pages)
     pub const fn user_rx() -> Self {
         Self {
             writable: false,
@@ -112,7 +117,6 @@ impl Perm {
             executable: true,
         }
     }
-    #[allow(dead_code)] // used by Stage E1 (pinned/RO data regions)
     pub const fn user_ro() -> Self {
         Self {
             writable: false,
@@ -120,7 +124,7 @@ impl Perm {
             executable: false,
         }
     }
-    #[allow(dead_code)] // used by Stage A4 (kernel-only ctx pages)
+    #[allow(dead_code)] // available for kernel-only mappings
     pub const fn kernel_rw() -> Self {
         Self {
             writable: true,
@@ -148,40 +152,49 @@ impl Perm {
 /// 4 KiB page table (512 × 8-byte entries).
 type Table = [u64; 512];
 
-/// In-kernel page table holding a fresh PML4 allocated from the bump
-/// arena. Lifetime is tied to the arena (via Rust borrow).
-pub struct PageTable<'a> {
-    pml4: NonNull<Table>,
-    arena: &'a BumpArena,
+const TABLE_LAYOUT: Layout =
+    unsafe { Layout::from_size_align_unchecked(PAGE_SIZE, PAGE_SIZE) };
+
+fn alloc_table() -> Option<NonNull<Table>> {
+    // SAFETY: `TABLE_LAYOUT` is a non-zero, well-formed Layout.
+    let ptr = unsafe { alloc_zeroed(TABLE_LAYOUT) };
+    NonNull::new(ptr as *mut Table)
 }
 
-impl<'a> PageTable<'a> {
-    /// Allocate a fresh PML4 (zero-initialised) in `arena`, then copy
-    /// every PML4 entry from the current CR3 so kernel-half mappings
-    /// stay valid after a CR3 switch.
+/// Per-invocation page table. Owns its PML4 plus every intermediate
+/// table allocated via [`PageTable::map`]. All backing pages are freed
+/// when the `PageTable` is dropped.
+pub struct PageTable {
+    pml4: NonNull<Table>,
+    /// All allocated tables (PML4 + intermediates). Freed in Drop.
+    owned: RefCell<Vec<NonNull<Table>>>,
+}
+
+impl PageTable {
+    /// Allocate a fresh PML4, copy every kernel-half PML4 entry from
+    /// the current CR3 so kernel-half mappings stay valid after a CR3
+    /// switch, and return the new table.
     ///
     /// Note: this *shallow-copies* PML4 entries — descendant tables
     /// are shared with the original. Per-invocation isolation only
     /// requires that *new* mappings (the user-half entries we add)
     /// don't share with the kernel's existing pages, which they don't
     /// because they live in different PML4 slots.
-    pub fn new_in(arena: &'a BumpArena) -> Option<Self> {
-        let pml4_ptr = arena.alloc_pages(1)?.cast::<Table>();
-        // SAFETY: arena returned a fresh 4 KiB page-aligned region.
-        unsafe {
-            core::ptr::write_bytes(pml4_ptr.as_ptr() as *mut u8, 0, PAGE_SIZE);
-        }
+    pub fn new() -> Option<Self> {
+        let pml4_ptr = alloc_table()?;
         let cr3_pa = read_cr3() & PA_MASK;
         let src_va = pa_to_va(cr3_pa)?;
         let src_pml4 = src_va as *const Table;
-        // SAFETY: src_va is the scratch-mapped VA of the current PML4;
-        // 4 KiB of bytes are valid.
+        // SAFETY: src_va is the kernel VA of the current PML4; 4 KiB
+        // of bytes are valid. pml4_ptr was just allocated.
         unsafe {
             core::ptr::copy_nonoverlapping(src_pml4, pml4_ptr.as_ptr(), 1);
         }
+        let mut owned = Vec::with_capacity(8);
+        owned.push(pml4_ptr);
         Some(Self {
             pml4: pml4_ptr,
-            arena,
+            owned: RefCell::new(owned),
         })
     }
 
@@ -192,9 +205,8 @@ impl<'a> PageTable<'a> {
 
     /// Map `len` bytes at virtual address `virt` to physical address
     /// `phys` with the given permissions. `virt`, `phys`, and `len`
-    /// must each be 4 KiB-aligned. Allocates intermediate tables from
-    /// the bump arena as needed; an existing mapping at the same VA
-    /// is overwritten.
+    /// must each be 4 KiB-aligned. Allocates intermediate tables as
+    /// needed; an existing mapping at the same VA is overwritten.
     pub fn map(&mut self, virt: u64, phys: u64, len: u64, perm: Perm) -> Option<()> {
         assert!(virt.is_multiple_of(PAGE_SIZE as u64));
         assert!(phys.is_multiple_of(PAGE_SIZE as u64));
@@ -212,7 +224,7 @@ impl<'a> PageTable<'a> {
     }
 
     /// Map a single 4 KiB page.
-    fn map_one(&mut self, va: u64, pa: u64, perm: Perm) -> Option<()> {
+    fn map_one(&self, va: u64, pa: u64, perm: Perm) -> Option<()> {
         let idx4 = ((va >> 39) & 0x1FF) as usize;
         let idx3 = ((va >> 30) & 0x1FF) as usize;
         let idx2 = ((va >> 21) & 0x1FF) as usize;
@@ -222,12 +234,12 @@ impl<'a> PageTable<'a> {
         // so the leaf's flag is the decisive permission).
         let inner_flags = flag::P | flag::RW | flag::US;
 
-        // SAFETY: self.pml4 is a valid 4 KiB-aligned table in the arena.
+        // SAFETY: self.pml4 is a valid 4 KiB-aligned table this PT owns.
         let pml4 = unsafe { &mut *self.pml4.as_ptr() };
         let pdpt = self.ensure_inner(&mut pml4[idx4], inner_flags)?;
 
         // SAFETY: ensure_inner returned a freshly allocated or pre-existing
-        // table; the pointer is a kernel VA in the scratch region.
+        // table; the pointer is a kernel VA.
         let pdpt = unsafe { &mut *pdpt };
         let pd = self.ensure_inner(&mut pdpt[idx3], inner_flags)?;
 
@@ -241,8 +253,8 @@ impl<'a> PageTable<'a> {
 
     /// Ensure that the inner-table entry at `entry` has a backing
     /// table. If it does, return its address (after re-asserting the
-    /// requested inner flags). Otherwise, allocate a fresh table in
-    /// the arena, install it in `entry`, return its address.
+    /// requested inner flags). Otherwise, allocate a fresh table,
+    /// install it in `entry`, and return its address.
     ///
     /// Returns `None` if `entry` is a leaf (large-page) mapping — we
     /// can't split it without losing the existing mapping. Callers
@@ -259,14 +271,24 @@ impl<'a> PageTable<'a> {
             let va = pa_to_va(pa)?;
             return Some(va as *mut Table);
         }
-        let new_va_ptr = self.arena.alloc_pages(1)?.cast::<Table>();
-        // SAFETY: arena returned a fresh page-aligned 4 KiB block; zero it.
-        unsafe {
-            core::ptr::write_bytes(new_va_ptr.as_ptr() as *mut u8, 0, PAGE_SIZE);
-        }
-        let pa = va_to_pa(new_va_ptr.as_ptr() as u64)?;
+        let new_table = alloc_table()?;
+        self.owned.borrow_mut().push(new_table);
+        let va = new_table.as_ptr() as u64;
+        let pa = va_to_pa(va)?;
         *entry = (pa & PA_MASK) | inner_flags;
-        Some(new_va_ptr.as_ptr())
+        Some(new_table.as_ptr())
+    }
+}
+
+impl Drop for PageTable {
+    fn drop(&mut self) {
+        for table in self.owned.borrow_mut().drain(..) {
+            // SAFETY: every entry in `owned` came from `alloc_table`
+            // (same Layout); we hand it back exactly once.
+            unsafe {
+                dealloc(table.as_ptr() as *mut u8, TABLE_LAYOUT);
+            }
+        }
     }
 }
 
@@ -296,7 +318,7 @@ pub unsafe fn write_cr3(value: u64) {
 }
 
 /// TLB flush via CR3 self-swap (full flush of non-global entries).
-#[allow(dead_code)] // used by Stage A4
+#[allow(dead_code)]
 pub fn flush_tlb() {
     // SAFETY: rewriting CR3 with its current value is observably a
     // TLB flush.

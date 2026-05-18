@@ -1,37 +1,46 @@
 //! In-kernel JIT execution at ring 3.
 //!
 //! Takes a PVM program (code + bitmask + jump_table) and runs it
-//! inside the per-invocation page table at ring 3. The PVM exits
+//! inside a per-invocation page table at ring 3. The PVM exits
 //! through `int 0x81` (a hand-rolled trampoline placed after the
-//! JIT'd code at a user-RX VA); the kernel handler longjmps back
-//! to the caller of [`run_pvm`] and we read the JitContext that
-//! the JIT wrote during execution.
+//! JIT'd code at a user-RX VA); the kernel handler longjmps back to
+//! the caller of [`run_pvm_with_mem`] and we read the JitContext
+//! that the JIT wrote during execution.
 //!
 //! ## Memory layout (per invocation, in the new page table)
 //!
 //! Everything lives at user VAs derived from a single base
-//! (`BASE`). The base is chosen high enough not to collide with any
-//! kernel mapping carried over from the source PML4.
+//! (`PROG_BASE_M`). The base is chosen high enough not to collide
+//! with any kernel mapping carried over from the source PML4.
 //!
 //! ```text
-//!   ctx_va    = BASE                  4 KiB JitContext + dispatch_table
-//!   jit_va    = BASE + 0x10000        N × 4 KiB JIT'd code (user-RX)
-//!   tramp_va  = BASE + 0x20000        4 KiB trampoline page (user-RX)
-//!   stack_va  = BASE + 0x21000        4 KiB user stack (user-RW)
+//!   PERMS_VA = PROG_BASE                       perms (user-RW)
+//!   CTX_VA   = PROG_BASE + 0x100000            4 KiB ctx + dispatch_table
+//!   MEM_VA   = PROG_BASE + 0x101000            mem_size bytes guest memory (R15)
+//!
+//!   META_BASE= PROG_BASE + (4 GiB)             clear of any mem range
+//!   BB_VA    = META_BASE                       bitmask scratch (user-RO)
+//!   JT_VA    = META_BASE + 16 MiB              jump-table scratch (user-RO)
+//!   DISPATCH = META_BASE + 32 MiB              dispatch table (user-RO)
+//!   JIT_VA   = META_BASE + 64 MiB              JIT'd native (user-RX)
+//!   TRAMP    = META_BASE + 128 MiB             trampoline (user-RX)
+//!   STACK    = TRAMP + 4 KiB                   stack (user-RW)
 //! ```
 //!
-//! `R15` (the JIT's "guest memory base" register) is set to
-//! `ctx_va + CTX_OFFSET` (one page past the ctx page) — for PVM
-//! programs that *don't* touch guest memory (Stage C3 smoke), R15
-//! is only used as a base for `[r15 - 4096 + field]` accesses
-//! into the ctx struct.
+//! All backing pages come from the global heap (talc), which lives
+//! in Hyperlight's identity-mapped low memory (`PA == VA`). The
+//! buffers are sized to the actual program (rather than fixed pool
+//! sizes) and freed when [`run_pvm_with_mem`] returns.
 
 #![cfg(target_os = "none")]
 
-use crate::bump::PAGE_SIZE;
-use crate::paging::{self, PageTable, Perm};
-use crate::pool;
+extern crate alloc;
+
+use crate::paging::{PAGE_SIZE, PageTable, Perm};
 use crate::ring3;
+use alloc::alloc::{alloc_zeroed, dealloc};
+use core::alloc::Layout;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use hyperlight_guest_bin::exception::arch::{Context, ExceptionInfo, HANDLERS};
 use javm_recompiler_x86::JitContext;
@@ -39,7 +48,7 @@ use javm_recompiler_x86::codegen::{Compiler, HelperFns};
 
 // === Per-invocation context for the #PF handler ===========================
 //
-// Set by `run_pvm` immediately before `enter_ring3`, read by
+// Set by `run_pvm_with_mem` immediately before `enter_ring3`, read by
 // `jit_pf_handler` if a #PF fires from inside the JIT'd code window.
 // Single-threaded (Hyperlight serialises calls), so unsynchronised
 // statics are safe — we use atomics for `&'static mut` avoidance only.
@@ -52,7 +61,7 @@ static TRAP_TABLE_LEN: AtomicU64 = AtomicU64::new(0);
 static CTX_KVA: AtomicU64 = AtomicU64::new(0);
 
 /// Hyperlight-chained #PF handler. Fires AFTER Hyperlight's own
-/// stack-growth / CoW handlers have declined to handle the fault.
+/// stack-growth handler has declined to handle the fault.
 ///
 /// If the faulting RIP is inside the registered JIT code window:
 /// resolve the PVM PC via the trap table, populate
@@ -60,7 +69,7 @@ static CTX_KVA: AtomicU64 = AtomicU64::new(0);
 /// in the iretq frame to the JIT's exit label, return `true`. The
 /// CPU then `iretq`s back to ring 3 at the exit label, which `ret`s
 /// to the trampoline, which `int 0x81`s back to the kernel — exactly
-/// the same path as a clean `ecalli` exit (Stage C3).
+/// the same path as a clean `ecalli` exit.
 ///
 /// Returns `false` for any fault outside the JIT window, letting
 /// Hyperlight abort.
@@ -84,7 +93,7 @@ fn jit_pf_handler(
     let mut pvm_pc = 0u32;
     if !tt_ptr.is_null() && tt_len > 0 {
         // SAFETY: tt_ptr + tt_len describes a contiguous slice in
-        // kernel scratch memory, valid for the duration of `run_pvm`
+        // kernel memory, valid for the duration of `run_pvm_with_mem`
         // (which is the only function that publishes / clears the
         // statics that point at it).
         let tt = unsafe { core::slice::from_raw_parts(tt_ptr, tt_len) };
@@ -96,7 +105,7 @@ fn jit_pf_handler(
     }
 
     let ctx_kva = CTX_KVA.load(Ordering::SeqCst);
-    // SAFETY: ctx_kva is the scratch VA of the JitContext page for the
+    // SAFETY: ctx_kva is the kernel VA of the JitContext page for the
     // current invocation; valid while the handler runs.
     unsafe {
         let ctx = ctx_kva as *mut JitContext;
@@ -127,26 +136,6 @@ pub struct ExitInfo {
 }
 
 // === Per-invocation memory layout =======================================
-//
-// Layout in the per-invocation page table:
-//
-// ```text
-//   PERMS_VA = PROG_BASE                       1 MiB user-RW perms
-//   CTX_VA   = PROG_BASE + 0x100000            4 KiB ctx + dispatch_table
-//   MEM_VA   = PROG_BASE + 0x101000            mem_size bytes guest memory (R15)
-//
-//   META_BASE= PROG_BASE + (4 GiB)             — clear of any mem range
-//   BB_VA    = META_BASE                        bitmask scratch (user-RO)
-//   JT_VA    = META_BASE + 16 MiB               jump-table scratch (user-RO)
-//   JIT_VA_M = META_BASE + 32 MiB               JIT'd native (user-RX)
-//   TRAMP_M  = META_BASE + 64 MiB               trampoline (user-RX)
-//   STACK_M  = TRAMP_M + 4 KiB                  stack (user-RW)
-// ```
-//
-// R15 = MEM_VA satisfies the JIT's layout invariants:
-//   * `[r15 - CTX_OFFSET + field]`   → CTX_VA + field
-//   * `[r15 - PERMS_OFFSET + page]`  → PERMS_VA + page
-//   * `[r15 + rdx]`                  → MEM_VA + rdx (guest mem access)
 
 const PROG_BASE_M: u64 = 32u64 << 39;
 const PERMS_VA_M: u64 = PROG_BASE_M;
@@ -167,16 +156,59 @@ pub struct MemRegion<'a> {
     pub data: &'a [u8],
 }
 
+/// Page-aligned heap allocation. Frees on drop.
+struct PageBuf {
+    ptr: NonNull<u8>,
+    layout: Layout,
+}
+
+impl PageBuf {
+    /// Allocate `size` bytes (rounded up to a page boundary), zeroed,
+    /// aligned to a page.
+    fn new(size: usize) -> Option<Self> {
+        let size = size.next_multiple_of(PAGE_SIZE).max(PAGE_SIZE);
+        let layout = Layout::from_size_align(size, PAGE_SIZE).ok()?;
+        // SAFETY: layout is non-zero and well-formed.
+        let raw = unsafe { alloc_zeroed(layout) };
+        let ptr = NonNull::new(raw)?;
+        Some(Self { ptr, layout })
+    }
+
+    /// Kernel VA of the buffer (== PA since talc lives in identity-mapped low memory).
+    fn kva(&self) -> u64 {
+        self.ptr.as_ptr() as u64
+    }
+
+    /// Physical address — identical to `kva` for low-memory allocations.
+    fn pa(&self) -> u64 {
+        self.kva()
+    }
+
+    /// Total size in bytes (multiple of `PAGE_SIZE`).
+    fn size(&self) -> u64 {
+        self.layout.size() as u64
+    }
+}
+
+impl Drop for PageBuf {
+    fn drop(&mut self) {
+        // SAFETY: layout matches the one we passed to `alloc_zeroed`.
+        unsafe {
+            dealloc(self.ptr.as_ptr(), self.layout);
+        }
+    }
+}
+
 /// Run a PVM program with a real flat-memory mapping at ring 3.
 ///
-/// Uses the per-process pool ([`crate::pool`]) for backing storage so
-/// repeated invocations don't exhaust Hyperlight's bump-pointer phys
-/// allocator. Per call:
-///   1. Reset the page-table arena.
-///   2. Copy program bitmask + jump_table into bb / jt scratch pools.
-///   3. Compile + copy native code into the JIT pool.
-///   4. Zero perms; mark `[0, mem_size)` pages RW.
-///   5. Zero mem; populate arg / ro / rw regions.
+/// All backing memory (mem, perms, ctx, bb, jt, dispatch, JIT code,
+/// trampoline, stack, page tables) is allocated from talc for this
+/// invocation only, then freed when this function returns. Per call:
+///   1. Compile the PVM program.
+///   2. Allocate per-buffer pages sized to the program.
+///   3. Copy program bitmask + jump_table + dispatch + JIT code in.
+///   4. Mark `[0, mem_size)` pages RW in perms.
+///   5. Populate arg / ro / rw regions.
 ///   6. Build a fresh page table, drop to ring 3, read back ctx.
 ///
 /// # Safety
@@ -196,24 +228,6 @@ pub unsafe fn run_pvm_with_mem(
     rw: MemRegion,
 ) -> Option<ExitInfo> {
     assert_eq!(code.len(), bitmask.len());
-
-    // ---- size checks against pool bounds -----------------------------------
-    let mem_bytes_needed = (mem_size as usize).next_multiple_of(PAGE_SIZE);
-    if mem_bytes_needed > pool::MEM_POOL_BYTES {
-        return None;
-    }
-    if bitmask.len() > pool::BB_POOL_BYTES {
-        return None;
-    }
-    let jt_bytes = jump_table.len().checked_mul(core::mem::size_of::<u32>())?;
-    if jt_bytes > pool::JT_POOL_BYTES {
-        return None;
-    }
-    // Dispatch table has one i32 per PVM byte.
-    let dt_bytes = code.len().checked_mul(core::mem::size_of::<i32>())?;
-    if dt_bytes > pool::DISPATCH_POOL_BYTES {
-        return None;
-    }
 
     // ---- compile -----------------------------------------------------------
     //
@@ -252,92 +266,88 @@ pub unsafe fn run_pvm_with_mem(
     if native.is_empty() {
         return None;
     }
-    if native.len() > pool::JIT_POOL_BYTES {
-        return None;
-    }
 
-    let p = pool::get_or_init();
+    // ---- size each buffer to the actual program --------------------------
+    let mem_bytes = (mem_size as usize).next_multiple_of(PAGE_SIZE);
+    let perms_bytes = (mem_size as usize).div_ceil(PAGE_SIZE);
+    let bb_bytes = bitmask.len();
+    let jt_bytes = jump_table.len().checked_mul(core::mem::size_of::<u32>())?;
+    let dispatch_bytes = dispatch_table.len().checked_mul(core::mem::size_of::<i32>())?;
+    let dispatch_size_bytes = code.len().checked_mul(core::mem::size_of::<i32>())?;
+    let jit_bytes = native.len();
 
-    // ---- scratch VAs into the pool buffers ---------------------------------
-    let mem_kva = paging::pa_to_va(p.mem_pa)?;
-    let perms_kva = paging::pa_to_va(p.perms_pa)?;
-    let ctx_kva = paging::pa_to_va(p.ctx_pa)?;
-    let bb_kva = paging::pa_to_va(p.bb_pa)?;
-    let jt_kva = paging::pa_to_va(p.jt_pa)?;
-    let dispatch_kva = paging::pa_to_va(p.dispatch_pa)?;
-    let jit_kva = paging::pa_to_va(p.jit_pa)?;
-    let tramp_kva = paging::pa_to_va(p.tramp_pa)?;
+    // ---- allocate per-invocation buffers ---------------------------------
+    let mem_buf = PageBuf::new(mem_bytes.max(PAGE_SIZE))?;
+    let perms_buf = PageBuf::new(perms_bytes.max(PAGE_SIZE))?;
+    let ctx_buf = PageBuf::new(PAGE_SIZE)?;
+    let bb_buf = PageBuf::new(bb_bytes.max(PAGE_SIZE))?;
+    let jt_buf = PageBuf::new(jt_bytes.max(PAGE_SIZE))?;
+    let dispatch_buf = PageBuf::new(dispatch_size_bytes.max(PAGE_SIZE))?;
+    let jit_buf = PageBuf::new(jit_bytes)?;
+    let tramp_buf = PageBuf::new(PAGE_SIZE)?;
+    let stack_buf = PageBuf::new(PAGE_SIZE)?;
 
     // ---- write the JIT code ------------------------------------------------
-    // SAFETY: jit_kva points to JIT_POOL_BYTES of scratch; native.len() ≤ that.
+    // SAFETY: jit_buf has at least `jit_bytes` of capacity.
     unsafe {
-        core::ptr::copy_nonoverlapping(native.as_ptr(), jit_kva as *mut u8, native.len());
+        core::ptr::copy_nonoverlapping(native.as_ptr(), jit_buf.kva() as *mut u8, jit_bytes);
     }
 
     // ---- write bb_starts / jt scratch --------------------------------------
-    // SAFETY: bb_kva/jt_kva cover their pool sizes; bitmask/jt fit per checks above.
+    // SAFETY: bb_buf/jt_buf are sized to fit the actual lengths.
     unsafe {
-        core::ptr::copy_nonoverlapping(bitmask.as_ptr(), bb_kva as *mut u8, bitmask.len());
+        core::ptr::copy_nonoverlapping(bitmask.as_ptr(), bb_buf.kva() as *mut u8, bb_bytes);
         core::ptr::copy_nonoverlapping(
             jump_table.as_ptr() as *const u8,
-            jt_kva as *mut u8,
+            jt_buf.kva() as *mut u8,
             jt_bytes,
         );
     }
 
-    // ---- zero perms; mark [0, mem_size) pages RW ---------------------------
-    let num_pages = (mem_size as usize).div_ceil(PAGE_SIZE);
-    // SAFETY: perms_kva covers PERMS_POOL_BYTES; we write num_pages bytes (≤ 256 K).
+    // ---- mark `[0, mem_size)` pages RW in perms ----------------------------
+    // (perms_buf is already zeroed by alloc_zeroed.)
+    // SAFETY: perms_buf has at least perms_bytes available.
     unsafe {
-        core::ptr::write_bytes(perms_kva as *mut u8, 0, pool::PERMS_POOL_BYTES);
-        core::ptr::write_bytes(perms_kva as *mut u8, javm_exec::perm::RW, num_pages);
+        core::ptr::write_bytes(perms_buf.kva() as *mut u8, javm_exec::perm::RW, perms_bytes);
     }
 
-    // ---- zero mem; populate arg / ro / rw ----------------------------------
-    // SAFETY: mem_kva covers MEM_POOL_BYTES; mem_bytes_needed ≤ that.
-    unsafe {
-        core::ptr::write_bytes(mem_kva as *mut u8, 0, mem_bytes_needed);
-    }
+    // ---- populate mem regions ----------------------------------------------
+    // (mem_buf is already zeroed by alloc_zeroed.)
     for region in [arg, ro, rw] {
         if region.data.is_empty() {
             continue;
         }
         let off = region.start as usize;
         let end = off.checked_add(region.data.len())?;
-        if end > mem_bytes_needed {
+        if end > mem_bytes {
             return None;
         }
-        // SAFETY: bounds-checked against mem_bytes_needed.
+        // SAFETY: bounds-checked against mem_bytes.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 region.data.as_ptr(),
-                (mem_kva + off as u64) as *mut u8,
+                (mem_buf.kva() + off as u64) as *mut u8,
                 region.data.len(),
             );
         }
     }
 
-    // ---- write the dispatch table into its own pool page -------------------
-    let dispatch_actual = dispatch_table.len() * core::mem::size_of::<i32>();
-    // SAFETY: dispatch_kva covers DISPATCH_POOL_BYTES; dispatch_actual ≤ that
-    // (checked above via dt_bytes ≤ DISPATCH_POOL_BYTES, with dispatch_actual
-    // ≤ dt_bytes because dispatch_table.len() ≤ code.len() by construction).
+    // ---- write the dispatch table -----------------------------------------
+    // SAFETY: dispatch_buf is sized to dispatch_size_bytes (capped at code.len() * 4);
+    // dispatch_bytes ≤ dispatch_size_bytes since dispatch_table.len() ≤ code.len().
     unsafe {
         core::ptr::copy_nonoverlapping(
             dispatch_table.as_ptr() as *const u8,
-            dispatch_kva as *mut u8,
-            dispatch_actual,
+            dispatch_buf.kva() as *mut u8,
+            dispatch_bytes,
         );
     }
 
     // ---- build JitContext in the ctx page ----------------------------------
-    // SAFETY: ctx_kva is a 4 KiB pool page; zero then init field-by-field.
-    unsafe {
-        core::ptr::write_bytes(ctx_kva as *mut u8, 0, PAGE_SIZE);
-    }
+    let ctx_kva = ctx_buf.kva();
     let ctx = ctx_kva as *mut JitContext;
 
-    // SAFETY: ctx points to a fresh ctx page.
+    // SAFETY: ctx points to a fresh zeroed ctx page.
     unsafe {
         (*ctx).regs = initial_regs;
         (*ctx).gas = initial_gas;
@@ -382,46 +392,29 @@ pub unsafe fn run_pvm_with_mem(
     tramp[23] = 0x81;
     tramp[24] = 0x0F;
     tramp[25] = 0x0B;
-    // SAFETY: tramp_kva covers a 4 KiB pool page.
+    // SAFETY: tramp_buf is a 4 KiB page.
     unsafe {
-        core::ptr::copy_nonoverlapping(tramp.as_ptr(), tramp_kva as *mut u8, tramp.len());
+        core::ptr::copy_nonoverlapping(tramp.as_ptr(), tramp_buf.kva() as *mut u8, tramp.len());
     }
 
     // ---- build the page table ----------------------------------------------
-    let arena = pool::arena()?;
-    let mut pt = PageTable::new_in(&arena)?;
-    pt.map(
-        PERMS_VA_M,
-        p.perms_pa,
-        pool::PERMS_POOL_BYTES as u64,
-        Perm::user_rw(),
-    )?;
-    pt.map(CTX_VA_M, p.ctx_pa, PAGE_SIZE as u64, Perm::user_rw())?;
-    if mem_bytes_needed > 0 {
-        pt.map(MEM_VA_M, p.mem_pa, mem_bytes_needed as u64, Perm::user_rw())?;
+    let mut pt = PageTable::new()?;
+    pt.map(PERMS_VA_M, perms_buf.pa(), perms_buf.size(), Perm::user_rw())?;
+    pt.map(CTX_VA_M, ctx_buf.pa(), ctx_buf.size(), Perm::user_rw())?;
+    if mem_bytes > 0 {
+        pt.map(MEM_VA_M, mem_buf.pa(), mem_buf.size(), Perm::user_rw())?;
     }
-    pt.map(
-        BB_VA_M,
-        p.bb_pa,
-        pool::BB_POOL_BYTES as u64,
-        Perm::user_ro(),
-    )?;
-    pt.map(
-        JT_VA_M,
-        p.jt_pa,
-        pool::JT_POOL_BYTES as u64,
-        Perm::user_ro(),
-    )?;
+    pt.map(BB_VA_M, bb_buf.pa(), bb_buf.size(), Perm::user_ro())?;
+    pt.map(JT_VA_M, jt_buf.pa(), jt_buf.size(), Perm::user_ro())?;
     pt.map(
         DISPATCH_VA_M,
-        p.dispatch_pa,
-        pool::DISPATCH_POOL_BYTES as u64,
+        dispatch_buf.pa(),
+        dispatch_buf.size(),
         Perm::user_ro(),
     )?;
-    let jit_map_bytes = native.len().next_multiple_of(PAGE_SIZE) as u64;
-    pt.map(JIT_VA_M, p.jit_pa, jit_map_bytes, Perm::user_rx())?;
-    pt.map(TRAMP_VA_M, p.tramp_pa, PAGE_SIZE as u64, Perm::user_rx())?;
-    pt.map(STACK_VA_M, p.stack_pa, PAGE_SIZE as u64, Perm::user_rw())?;
+    pt.map(JIT_VA_M, jit_buf.pa(), jit_buf.size(), Perm::user_rx())?;
+    pt.map(TRAMP_VA_M, tramp_buf.pa(), tramp_buf.size(), Perm::user_rx())?;
+    pt.map(STACK_VA_M, stack_buf.pa(), stack_buf.size(), Perm::user_rw())?;
     let new_cr3 = pt.cr3()?;
 
     // ---- install ring-3 GDT/IDT + JIT #PF handler --------------------------
@@ -429,7 +422,7 @@ pub unsafe fn run_pvm_with_mem(
     unsafe { ring3::install_ring3_exit_gate() };
 
     JIT_CODE_BASE.store(JIT_VA_M, Ordering::SeqCst);
-    JIT_CODE_LEN.store(jit_map_bytes, Ordering::SeqCst);
+    JIT_CODE_LEN.store(jit_buf.size(), Ordering::SeqCst);
     EXIT_LABEL_VA.store(JIT_VA_M + exit_label_offset as u64, Ordering::SeqCst);
     TRAP_TABLE_PTR.store(trap_table.as_ptr() as *mut (u32, u32), Ordering::SeqCst);
     TRAP_TABLE_LEN.store(trap_table.len() as u64, Ordering::SeqCst);
@@ -437,7 +430,7 @@ pub unsafe fn run_pvm_with_mem(
     HANDLERS[14].store(jit_pf_handler as *const () as u64, Ordering::Release);
 
     // ---- drop to ring 3 ----------------------------------------------------
-    let user_stack_top = STACK_VA_M + PAGE_SIZE as u64;
+    let user_stack_top = STACK_VA_M + stack_buf.size();
     // SAFETY: trampoline + stack mapped above; new_cr3 carries kernel half.
     let _user_rax = unsafe { ring3::nub_enter_ring3(TRAMP_VA_M, user_stack_top, new_cr3) };
 
@@ -448,7 +441,7 @@ pub unsafe fn run_pvm_with_mem(
 
     drop(trap_table);
 
-    // SAFETY: ctx_kva still points to the same phys page; read final state.
+    // SAFETY: ctx_kva still points to the same page (ctx_buf alive until end of fn).
     let info = unsafe {
         ExitInfo {
             exit_reason: (*ctx).exit_reason,
@@ -457,5 +450,10 @@ pub unsafe fn run_pvm_with_mem(
             reg_a0: (*ctx).regs[7],
         }
     };
+
+    // PageTable + all PageBufs drop here, freeing per-invocation memory
+    // back to talc.
+    drop(pt);
+
     Some(info)
 }

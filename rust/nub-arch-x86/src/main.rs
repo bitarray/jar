@@ -28,13 +28,9 @@ extern crate alloc;
 extern crate hyperlight_guest_bin;
 
 #[cfg(target_os = "none")]
-mod bump;
-#[cfg(target_os = "none")]
 mod jit_run;
 #[cfg(target_os = "none")]
 mod paging;
-#[cfg(target_os = "none")]
-mod pool;
 #[cfg(target_os = "none")]
 mod ring3;
 #[cfg(target_os = "none")]
