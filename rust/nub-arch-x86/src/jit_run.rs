@@ -136,8 +136,14 @@ pub struct ExitInfo {
 }
 
 // === Per-invocation memory layout =======================================
+//
+// Lives in PML4 slot 0 (low VA 0..512 GiB) — now empty after the
+// Stage F kernel relocation moved the kernel to PML4 slot 511. User
+// VA `[PROG_BASE_M, ...)` mirrors PVM's u32 address space (plus our
+// own scratch tables in META region above). Skips VA 0 to preserve
+// the NULL-deref guard page.
 
-const PROG_BASE_M: u64 = 32u64 << 39;
+const PROG_BASE_M: u64 = 0x1000;
 const PERMS_VA_M: u64 = PROG_BASE_M;
 const CTX_VA_M: u64 = PROG_BASE_M + 0x100000;
 const MEM_VA_M: u64 = PROG_BASE_M + 0x101000;
