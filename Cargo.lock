@@ -128,10 +128,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "bench-fri-fold-tree"
+version = "0.1.0"
+dependencies = [
+ "bench-goldilocks-poseidon2",
+ "subsoil",
+]
+
+[[package]]
+name = "bench-goldilocks-mul"
+version = "0.1.0"
+dependencies = [
+ "bench-goldilocks-poseidon2",
+ "subsoil",
+]
+
+[[package]]
+name = "bench-goldilocks-poseidon2"
+version = "0.1.0"
+
+[[package]]
 name = "bench-keccak"
 version = "0.1.0"
 dependencies = [
  "sha3",
+ "subsoil",
+]
+
+[[package]]
+name = "bench-mini-verifier"
+version = "0.1.0"
+dependencies = [
+ "bench-goldilocks-poseidon2",
+ "subsoil",
+]
+
+[[package]]
+name = "bench-poly-eval"
+version = "0.1.0"
+dependencies = [
+ "bench-goldilocks-poseidon2",
+ "subsoil",
+]
+
+[[package]]
+name = "bench-poseidon2-perm"
+version = "0.1.0"
+dependencies = [
+ "bench-goldilocks-poseidon2",
  "subsoil",
 ]
 
