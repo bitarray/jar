@@ -159,8 +159,14 @@ impl Drop for TalcSlice {
     fn drop(&mut self) {
         // Allocation was sized to `len.max(1)`; mirror it on free.
         let alloc_len = self.len.max(1);
-        // unwrap: alloc_len >= 1 with align 1; cannot overflow.
-        let layout = Layout::from_size_align(alloc_len, 1).expect("talc-slice layout");
+        // `Layout::from_size_align(N, 1)` cannot fail for any N that
+        // fits in `isize` (the only failure mode). Allocations come
+        // from talc which clamps to its arena size — well within
+        // `isize::MAX`.
+        let layout = match Layout::from_size_align(alloc_len, 1) {
+            Ok(l) => l,
+            Err(_) => return, // refuse to free; UB-safe (leak).
+        };
         unsafe {
             (*self.talc.as_ptr())
                 .lock()

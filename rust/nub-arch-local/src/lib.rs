@@ -11,7 +11,7 @@ use javm_exec::{
     Access, CopyingMemory, EcallHandler, EcallKind, EcallResult, ExitReason, GasCounter,
     Interpreter, PAGE_SIZE, PvmProgram, Regs, gas_cost::DEFAULT_MEM_CYCLES,
 };
-use nub_arch_x86_abi::{InvocationResult, InvocationSpec};
+use nub_arch_x86_abi::{InvocationResult, InvocationSpec, PublishSpec};
 use nub_kernel::{Arch, CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
 
 /// In-process Arch backend.
@@ -84,6 +84,67 @@ pub fn run_invocation_spec(spec: &InvocationSpec) -> InvocationResult {
     regs.gpr = spec.initial_regs.into_array();
 
     let mut gas = GasCounter::new(spec.initial_gas);
+    let mut handler = LocalEcallHandler;
+    let exit = Interpreter::run(&program, &mut regs, &mut mem, &mut gas, &mut handler);
+
+    let (exit_reason, exit_arg) = match exit {
+        ExitReason::Halt => (0, 0),
+        ExitReason::Panic => (1, 0),
+        ExitReason::OutOfGas => (2, 0),
+        ExitReason::PageFault(addr) => (3, addr),
+        ExitReason::HostCall(imm) => (4, imm),
+        ExitReason::Ecall => (6, 0),
+        ExitReason::Trap => (7, 0),
+    };
+    InvocationResult {
+        exit_reason,
+        exit_arg,
+        return_value: regs.gpr[7],
+        gas_remaining: gas.remaining(),
+    }
+}
+
+/// Run a `PublishSpec` (cache path's host-side type) through the
+/// byte-PVM interpreter, returning the same `InvocationResult` shape
+/// as `run_invocation_spec`. Endpoint dispatch: `endpoint_idx` selects
+/// `spec.entry_pcs[endpoint_idx]`; caller-supplied `args` overlay
+/// φ[7..=10] on top of the baseline `spec.initial_regs`.
+pub fn run_published(
+    spec: &PublishSpec,
+    endpoint_idx: u8,
+    args: [u64; 4],
+    initial_gas: u64,
+) -> InvocationResult {
+    let program = PvmProgram::new(
+        spec.code.clone(),
+        spec.bitmask.clone(),
+        spec.jump_table.clone(),
+        DEFAULT_MEM_CYCLES,
+    )
+    .expect("PvmProgram (bitmask len must match code len)");
+
+    let mut mem = CopyingMemory::new();
+    let mem_size_pages = page_round_up_u64(spec.mem_size as u64);
+    mem.map_region(0, mem_size_pages, Access::ReadWrite, None)
+        .expect("map base RW region");
+    overlay(&mut mem, spec.ro_start, &spec.ro_data, Access::ReadOnly);
+    overlay(&mut mem, spec.rw_start, &spec.rw_data, Access::ReadWrite);
+    overlay(&mut mem, spec.arg_start, &spec.arg_data, Access::ReadWrite);
+
+    let entry_pc = spec
+        .entry_pcs
+        .get(endpoint_idx as usize)
+        .copied()
+        .unwrap_or(0);
+
+    let mut regs = Regs::new();
+    regs.pc = entry_pc;
+    regs.gpr = spec.initial_regs;
+    for (i, v) in args.iter().enumerate() {
+        regs.gpr[7 + i] = *v;
+    }
+
+    let mut gas = GasCounter::new(initial_gas);
     let mut handler = LocalEcallHandler;
     let exit = Interpreter::run(&program, &mut regs, &mut mem, &mut gas, &mut handler);
 

@@ -32,6 +32,7 @@ javm-exec = { path = "../javm-exec", default-features = false }
 # `Archive` / `Serialize` derives on `InvocationSpec` /
 # `InvocationResult` live here.
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi", default-features = false }
+nub-host-common = { path = "../nub-host-common", default-features = false }
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
 bytecheck = { version = "0.8", default-features = false }
 

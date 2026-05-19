@@ -1179,6 +1179,7 @@ dependencies = [
  "javm-exec",
  "javm-recompiler-x86",
  "nub-arch-x86-abi",
+ "nub-host-common",
  "rkyv",
 ]
 

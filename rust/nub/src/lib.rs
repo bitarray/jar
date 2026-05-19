@@ -25,11 +25,17 @@ use nub_host_kvm::sandbox::{
 };
 use nub_kernel::Kernel;
 
-use nub_arch_x86_abi::{ArchivedInvocationResult, FN_ID_NUB_INVOKE, FN_ID_NUB_SMOKE};
+use nub_arch_x86_abi::{
+    ArchivedInvocationResult, FN_ID_NUB_INVOKE, FN_ID_NUB_INVOKE_CACHED, FN_ID_NUB_SMOKE,
+    InvokePacket,
+};
 #[cfg(feature = "heap-diag")]
 use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
-pub use nub_arch_x86_abi::{InvocationResult, InvocationSpec, PvmRegs};
+pub use nub_arch_x86_abi::{InvocationResult, InvocationSpec, PublishSpec, PvmRegs};
 pub use nub_kernel::{CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
+// Re-export `CapHash` from the abi for callers that don't want to
+// depend on nub-kernel just for the alias.
+pub use nub_arch_x86_abi::CapHash as AbiCapHash;
 
 use rkyv::primitive::ArchivedU64;
 use rkyv::util::AlignedVec;
@@ -56,6 +62,12 @@ const NUB_ARCH_X86_BLOB_PATH: &str = env!("NUB_ARCH_X86_BLOB");
 /// Uniform handle to the nub microkernel.
 pub struct Nub {
     backend: Backend,
+    /// In-process PublishSpec store for the Local backend's
+    /// `invoke_cached` path. Always present (even on Hyperlight
+    /// backend) so tests can construct a Nub and not care which
+    /// backend uses the store. On Hyperlight the store is unused —
+    /// the cache region in `sandbox.cache()` is the source of truth.
+    local_store: std::collections::HashMap<AbiCapHash, PublishSpec>,
 }
 
 enum Backend {
@@ -76,6 +88,7 @@ impl Nub {
     pub fn new_local() -> Self {
         Self {
             backend: Backend::Local(Kernel::new(LocalArch::new())),
+            local_store: std::collections::HashMap::new(),
         }
     }
 
@@ -118,6 +131,7 @@ impl Nub {
                 sandbox,
                 state_root_cache: [0; 32],
             })),
+            local_store: std::collections::HashMap::new(),
         })
     }
 
@@ -169,6 +183,85 @@ impl Nub {
                     allocation_count: parse(8),
                     fragment_count: parse(16),
                     available_bytes: parse(24),
+                })
+            }
+        }
+    }
+
+    /// Publish a Cap::Instance into the state cache so subsequent
+    /// `invoke_cached(hash, …)` calls can find it.
+    ///
+    /// The Local backend keeps an in-process `HashMap<CapHash,
+    /// PublishSpec>`; the Hyperlight backend lays the spec into
+    /// the shared cache region (`nub-host-kvm::cache`).
+    pub fn publish_instance(&mut self, spec: PublishSpec) -> Result<()> {
+        match &mut self.backend {
+            Backend::Local(_) => {
+                self.local_store
+                    .insert(spec.instance_hash, spec);
+                Ok(())
+            }
+            Backend::Hyperlight(h) => h
+                .sandbox
+                .cache()
+                .publish(spec)
+                .map_err(|e| anyhow::anyhow!("cache publish: {e}")),
+        }
+    }
+
+    /// Invoke a previously-published Cap::Instance by hash. V0 args
+    /// are 4 u64s laid into φ[7..=10] on top of the published
+    /// `initial_regs` baseline.
+    pub fn invoke_cached(
+        &mut self,
+        instance_hash: AbiCapHash,
+        endpoint_idx: u8,
+        args: [u64; 4],
+        initial_gas: u64,
+    ) -> Result<InvocationResult> {
+        match &mut self.backend {
+            Backend::Local(_) => {
+                let spec = self
+                    .local_store
+                    .get(&instance_hash)
+                    .ok_or_else(|| anyhow::anyhow!("invoke_cached: hash not published"))?
+                    .clone();
+                Ok(nub_arch_local::run_published(
+                    &spec,
+                    endpoint_idx,
+                    args,
+                    initial_gas,
+                ))
+            }
+            Backend::Hyperlight(h) => {
+                h.sandbox
+                    .cache()
+                    .pin(instance_hash)
+                    .map_err(|e| anyhow::anyhow!("cache pin: {e}"))?;
+                let packet = InvokePacket {
+                    instance_hash,
+                    endpoint_idx: endpoint_idx as u32,
+                    _pad: 0,
+                    args,
+                    initial_gas,
+                };
+                let result_bytes = h
+                    .sandbox
+                    .call_raw(FN_ID_NUB_INVOKE_CACHED, packet.as_bytes());
+                h.sandbox.cache().unpin(instance_hash);
+                let result_bytes = result_bytes?;
+
+                let mut aligned = AlignedVec::<16>::with_capacity(result_bytes.len());
+                aligned.extend_from_slice(&result_bytes);
+                let archived = rkyv::access::<ArchivedInvocationResult, rkyv::rancor::Error>(
+                    aligned.as_slice(),
+                )
+                .map_err(|e| anyhow::anyhow!("rkyv-access InvocationResult: {e}"))?;
+                Ok(InvocationResult {
+                    exit_reason: archived.exit_reason.to_native(),
+                    exit_arg: archived.exit_arg.to_native(),
+                    return_value: archived.return_value.to_native(),
+                    gas_remaining: archived.gas_remaining.to_native(),
                 })
             }
         }
