@@ -49,6 +49,10 @@ use std::sync::Once;
 pub(crate) mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
+/// The host-side state cache that backs `nub::Nub::publish_instance`
+/// and `Nub::invoke_cached`. Owns the mmap'd shared region + the
+/// `TalcLock` inside it.
+pub mod cache;
 /// Dealing with errors, including errors across VM boundaries
 pub mod error;
 /// Wrappers for host and guest functions.
