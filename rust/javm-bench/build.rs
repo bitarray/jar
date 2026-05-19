@@ -52,6 +52,16 @@ fn main() {
             "bench-mini-verifier",
             "MINI_VERIFIER_BLOB",
         ),
+        (
+            "../../components/benches/poly-eval",
+            "bench-poly-eval",
+            "POLY_EVAL_BLOB",
+        ),
+        (
+            "../../components/benches/fri-fold-tree",
+            "bench-fri-fold-tree",
+            "FRI_FOLD_TREE_BLOB",
+        ),
     ] {
         let blob = build_javm::build(path, crate_name);
         println!("cargo:rustc-env={env}={}", blob.display());

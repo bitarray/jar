@@ -1,6 +1,6 @@
 //! STARK-shaped PVM benchmarks: byte-PVM interpreter vs JIT recompiler.
 //!
-//! Three workloads decomposing the cost of one moderate uni-stark
+//! Five workloads decomposing the cost of one moderate uni-stark
 //! verify into its constituent pieces:
 //!
 //! - `goldilocks_mul` — 100k chained Goldilocks multiplications,
@@ -10,6 +10,12 @@
 //! - `mini_verifier` — Fiat-Shamir transcript + FRI fold + AIR
 //!   constraint-eval composite (~400 Poseidon2 perms + ~2400
 //!   Goldilocks ops per call).
+//! - `poly_eval` — Horner's-method evaluation of a degree-4096
+//!   polynomial at 64 challenge points (~262k mul-add ops with
+//!   sequential L1-resident coefficient reads).
+//! - `fri_fold_tree` — 30 queries × 12 levels of merkle-tree walk
+//!   with scattered sibling lookups + Poseidon2 mix + Goldilocks
+//!   linear-combine fold (64 KiB tree).
 //!
 //! All three share the no_std hand-written Goldilocks + Poseidon2
 //! implementation in `components/benches/goldilocks-poseidon2`,
@@ -67,6 +73,15 @@ macro_rules! bench_workload {
 bench_workload!(goldilocks_mul, "GOLDILOCKS_MUL_BLOB", 0);
 bench_workload!(poseidon2_perm, "POSEIDON2_PERM_BLOB", 0);
 bench_workload!(mini_verifier, "MINI_VERIFIER_BLOB", 0);
+bench_workload!(poly_eval, "POLY_EVAL_BLOB", 0);
+bench_workload!(fri_fold_tree, "FRI_FOLD_TREE_BLOB", 0);
 
-criterion_group!(benches, goldilocks_mul, poseidon2_perm, mini_verifier);
+criterion_group!(
+    benches,
+    goldilocks_mul,
+    poseidon2_perm,
+    mini_verifier,
+    poly_eval,
+    fri_fold_tree,
+);
 criterion_main!(benches);
