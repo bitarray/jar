@@ -24,6 +24,7 @@ use tracing::{Span, instrument};
 use super::host_funcs::FunctionRegistry;
 use crate::HyperlightError;
 use crate::Result;
+use crate::cache::Cache;
 use crate::hypervisor::InterruptHandle;
 use crate::hypervisor::hyperlight_vm::HyperlightVm;
 use crate::mem::mgr::SandboxMemoryManager;
@@ -45,7 +46,11 @@ pub struct MultiUseSandbox {
     id: u64,
     pub(crate) host_funcs: Arc<Mutex<FunctionRegistry>>,
     pub(crate) mem_mgr: SandboxMemoryManager<HostSharedMemory>,
+    /// Host-side state cache. The KVM memory slot installed during
+    /// evolve points into `cache`'s mmap'd region; `cache` MUST drop
+    /// AFTER `vm` (Rust drops fields in declaration order).
     vm: HyperlightVm,
+    pub(crate) cache: Cache,
     #[cfg(gdb)]
     dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
 }
@@ -61,6 +66,7 @@ impl MultiUseSandbox {
         host_funcs: Arc<Mutex<FunctionRegistry>>,
         mgr: SandboxMemoryManager<HostSharedMemory>,
         vm: HyperlightVm,
+        cache: Cache,
         #[cfg(gdb)] dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
     ) -> MultiUseSandbox {
         Self {
@@ -68,9 +74,16 @@ impl MultiUseSandbox {
             host_funcs,
             mem_mgr: mgr,
             vm,
+            cache,
             #[cfg(gdb)]
             dbg_mem_access_fn,
         }
+    }
+
+    /// Accessor for the host-side state cache. Used by `Nub` to
+    /// publish/pin/unpin Cap::Instance state before/after `call_raw`.
+    pub fn cache(&mut self) -> &mut Cache {
+        &mut self.cache
     }
 
     /// Returns this sandbox's unique id.

@@ -33,10 +33,17 @@ pub mod talc_box;
 pub use index::{INSTANCE_INDEX_OFFSET, IndexSlot, InstanceIndex, MAX_ENDPOINTS, MAX_INDEX_SLOTS};
 pub use talc_box::{CacheTalcLock, TalcBox, TalcSlice};
 
-/// Fixed virtual address the cache region is mapped at, on both
-/// host and guest. 64 TiB into user-half canonical space; well clear
-/// of the JIT (low 4 GiB) and the kernel half (0xFFFF_FFFF_8000_0000).
+/// Fixed guest virtual address the cache region is mapped at. The
+/// guest's per-invocation page-table builder maps this VA to
+/// [`STATE_CACHE_GPA`] with user RW permission. The host accesses
+/// cache memory via its own (kernel-chosen) host VA returned by
+/// `mmap`; index offsets translate between the two.
 pub const STATE_CACHE_VA: u64 = 0x4000_0000_0000;
+
+/// Fixed guest physical address the cache region is mapped at. Sits
+/// at 8 GiB, well clear of the snapshot region (low GPAs) and the
+/// scratch region (top of [`nub_host_common::layout::MAX_GPA`]).
+pub const STATE_CACHE_GPA: u64 = 0x2_0000_0000;
 
 /// Total size of the cache region. 1 GiB.
 pub const STATE_CACHE_SIZE: usize = 1 << 30;

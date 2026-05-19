@@ -140,6 +140,7 @@ impl HyperlightVm {
 
         let snapshot_slot = 0u32;
         let scratch_slot = 1u32;
+        let cache_slot = 2u32;
         #[cfg_attr(not(gdb), allow(unused_mut))]
         let mut ret = Self {
             vm,
@@ -151,6 +152,7 @@ impl HyperlightVm {
             snapshot_memory: None,
             scratch_slot,
             scratch_memory: None,
+            cache_slot,
 
             mmap_regions: Vec::new(),
 
