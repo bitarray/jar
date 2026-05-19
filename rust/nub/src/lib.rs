@@ -26,12 +26,11 @@ use nub_host_kvm::sandbox::{
 use nub_kernel::Kernel;
 
 use nub_arch_x86_abi::{
-    ArchivedInvocationResult, FN_ID_NUB_INVOKE, FN_ID_NUB_INVOKE_CACHED, FN_ID_NUB_SMOKE,
-    InvokePacket,
+    ArchivedInvocationResult, FN_ID_NUB_INVOKE_CACHED, FN_ID_NUB_SMOKE, InvokePacket,
 };
 #[cfg(feature = "heap-diag")]
 use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
-pub use nub_arch_x86_abi::{InvocationResult, InvocationSpec, PublishSpec, PvmRegs};
+pub use nub_arch_x86_abi::{InvocationResult, PublishSpec};
 pub use nub_kernel::{CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
 // Re-export `CapHash` from the abi for callers that don't want to
 // depend on nub-kernel just for the alias.
@@ -267,34 +266,6 @@ impl Nub {
         }
     }
 
-    /// Direct-spec invocation path. Ships a pre-built `InvocationSpec`
-    /// straight into the backend, bypassing the (still-skeletal)
-    /// `Arch::invoke` trait. The Hyperlight backend rkyv-encodes the
-    /// spec and ships it via `MultiUseSandbox::call_raw`; the local
-    /// backend runs the byte-PVM interpreter in-process via
-    /// `nub_arch_local::run_invocation_spec`.
-    pub fn invoke_spec(&mut self, spec: &InvocationSpec) -> Result<InvocationResult> {
-        match &mut self.backend {
-            Backend::Local(_) => Ok(nub_arch_local::run_invocation_spec(spec)),
-            Backend::Hyperlight(h) => {
-                let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(spec)
-                    .map_err(|e| anyhow::anyhow!("rkyv-serialize InvocationSpec: {e}"))?;
-                let result_bytes = h.sandbox.call_raw(FN_ID_NUB_INVOKE, bytes.as_slice())?;
-
-                let mut aligned = AlignedVec::<16>::with_capacity(result_bytes.len());
-                aligned.extend_from_slice(&result_bytes);
-                let archived =
-                    rkyv::access::<ArchivedInvocationResult, rkyv::rancor::Error>(aligned.as_slice())
-                        .map_err(|e| anyhow::anyhow!("rkyv-access InvocationResult: {e}"))?;
-                Ok(InvocationResult {
-                    exit_reason: archived.exit_reason.to_native(),
-                    exit_arg: archived.exit_arg.to_native(),
-                    return_value: archived.return_value.to_native(),
-                    gas_remaining: archived.gas_remaining.to_native(),
-                })
-            }
-        }
-    }
 }
 
 impl HyperlightDriver {

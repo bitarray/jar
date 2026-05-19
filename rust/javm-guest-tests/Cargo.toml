@@ -22,6 +22,8 @@ scale = { workspace = true, features = ["std"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dev-dependencies]
 nub = { path = "../nub" }
+nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
+blake3 = "1"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_env, values("javm"))', 'cfg(target_os, values("none"))'] }

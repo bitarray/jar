@@ -1,21 +1,23 @@
 //! Shared runners for `benches/pvm_bench.rs`.
 //!
-//! Both backends route through `Nub::invoke_spec(&InvocationSpec)`:
+//! Both backends route through the cache-based API:
+//!   - `Nub::publish_instance(spec)` once per workload (idempotent).
+//!   - `Nub::invoke_cached(hash, ep, args, gas)` per iteration.
 //!
 //! - `run_interpreter` — `Nub::new_local()` drives the byte-PVM
 //!   interpreter (`javm-exec`) in-process. Constructed per-call;
 //!   `new_local()` is a trivial allocation.
 //! - `run_recompiler` — a long-lived `Nub::new_hyperlight()` sandbox
 //!   (cached in a `OnceLock`) drives the in-kernel JIT path via the
-//!   same `invoke_spec` API. The sandbox boot (~hundreds of ms) lands
-//!   on the first `nub_hyperlight()` call; subsequent calls reuse the
-//!   cached instance, and the bench harness primes it via the sanity
-//!   check before the timed loop.
+//!   same `invoke_cached` API. The sandbox boot (~hundreds of ms)
+//!   lands on the first `nub_hyperlight()` call; subsequent calls
+//!   reuse the cached instance, and the bench harness primes it via
+//!   the sanity check before the timed loop.
 //!
-//! `build_spec` is the shared spec-builder — projects an `Image` +
-//! endpoint onto an `InvocationSpec` once, before the iter loop.
-//! Re-running the same spec is free; the per-iteration cost in the
-//! bench is the `invoke_spec` call itself.
+//! `build_publish_spec` is the shared spec-builder — projects an
+//! `Image` + endpoint onto a [`PublishSpec`] once, before the iter
+//! loop. The bench publishes once (idempotent) and then the per-iter
+//! cost is just `invoke_cached` + a HashMap lookup.
 //!
 //! Linux x86-64 only — `nub` pulls the Hyperlight host stack
 //! unconditionally.
@@ -24,7 +26,7 @@
 
 use javm_cap::image::{Image, PinnedCap};
 use javm_exec::{REG_COUNT, unpack_bitmask};
-use nub::{InvocationResult, InvocationSpec, Nub, PvmRegs};
+use nub::{InvocationResult, Nub, PublishSpec};
 use std::sync::{Mutex, OnceLock};
 
 /// HostCall(0) — the trampoline halt all bench programs end on
@@ -32,10 +34,14 @@ use std::sync::{Mutex, OnceLock};
 /// exit_arg=0`.
 const EXIT_HOSTCALL: u32 = 4;
 
-/// Build an `InvocationSpec` from `image`'s endpoint. Builds once per
+/// Default initial-gas budget for the bench. Stored at build time so
+/// `finish` can compute `gas_used` from the result's remaining gas.
+const INITIAL_GAS: u64 = 100_000_000_000;
+
+/// Build a [`PublishSpec`] from `image`'s endpoint. Builds once per
 /// workload — the bench harness reuses the same spec across all
-/// criterion iterations, so the per-iter cost stays in `invoke_spec`.
-pub fn build_spec(image: &Image, endpoint_idx: u8, gas: u64) -> InvocationSpec {
+/// criterion iterations, so the per-iter cost stays in `invoke_cached`.
+pub fn build_publish_spec(image: &Image, endpoint_idx: u8) -> PublishSpec {
     let bitmask = unpack_bitmask(&image.packed_bitmask, image.code.len());
     let endpoint = image
         .endpoints
@@ -55,46 +61,75 @@ pub fn build_spec(image: &Image, endpoint_idx: u8, gas: u64) -> InvocationSpec {
 
     let (mem_size, ro_start, ro_data, rw_start, rw_data) = build_data_layout(image);
 
-    InvocationSpec {
+    // Dense entry-pc table: place the requested endpoint's PC at
+    // index `endpoint_idx`; leave others at 0 (= not defined).
+    let mut entry_pcs = [0u64; nub_arch_x86_abi::MAX_ENDPOINTS];
+    if (endpoint_idx as usize) < entry_pcs.len() {
+        entry_pcs[endpoint_idx as usize] = endpoint.entry_pc;
+    }
+
+    // Hash for cache identity: blake2b256 over a few stable fields.
+    // The bench doesn't care about the chain semantics — just needs a
+    // deterministic 32-byte id distinct per (image, endpoint).
+    let instance_hash = hash_image_endpoint(image, endpoint_idx);
+
+    PublishSpec {
+        instance_hash,
         code: image.code.clone(),
         bitmask,
         jump_table: image.jump_table.clone(),
-        entry_pc: endpoint.entry_pc as u32,
-        initial_gas: gas,
-        initial_regs: PvmRegs::from_array(regs),
         mem_size,
-        arg_start: 0,
-        arg_data: Vec::new(),
         ro_start,
         ro_data,
         rw_start,
         rw_data,
+        arg_start: 0,
+        arg_data: Vec::new(),
+        entry_pcs,
+        initial_regs: regs,
     }
 }
 
-/// Drive `spec` through the byte-PVM interpreter via
-/// `Nub::new_local().invoke_spec(...)`. Returns `(return_value,
-/// gas_used)` from the resulting trampoline halt.
-pub fn run_interpreter(spec: &InvocationSpec) -> (u64, u64) {
+fn hash_image_endpoint(image: &Image, endpoint_idx: u8) -> [u8; 32] {
+    // Cheap stable hash. blake3 is already a transitive dep via the
+    // hyperlight host stack; reuse it.
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&image.code);
+    hasher.update(&[endpoint_idx]);
+    hasher.finalize().as_bytes()[..32]
+        .try_into()
+        .expect("blake3 32-byte digest")
+}
+
+/// Drive `spec` through the byte-PVM interpreter via `Nub::new_local`.
+/// Publish is idempotent — the cost on second+ calls is just a
+/// HashMap lookup.
+pub fn run_interpreter(spec: &PublishSpec) -> (u64, u64) {
     let mut nub = Nub::new_local();
+    // Local backend publish moves the spec into a HashMap; we clone
+    // to keep the caller's PublishSpec usable across iterations.
+    nub.publish_instance(spec.clone())
+        .expect("publish_instance (local)");
     let result = nub
-        .invoke_spec(spec)
-        .unwrap_or_else(|e| panic!("interpreter invoke_spec: {e}"));
-    finish(spec, &result)
+        .invoke_cached(spec.instance_hash, 0, [0; 4], INITIAL_GAS)
+        .unwrap_or_else(|e| panic!("interpreter invoke_cached: {e}"));
+    finish(&result)
 }
 
 /// Drive `spec` through the in-kernel JIT via the cached Hyperlight
-/// `Nub`. Returns `(return_value, gas_used)` from the resulting
-/// trampoline halt.
-pub fn run_recompiler(spec: &InvocationSpec) -> (u64, u64) {
+/// `Nub`. The first call publishes the spec into the cache; subsequent
+/// calls are publish-no-op + invoke.
+pub fn run_recompiler(spec: &PublishSpec) -> (u64, u64) {
     let mut nub = nub_hyperlight().lock().expect("nub mutex");
+    nub.publish_instance(spec.clone())
+        .expect("publish_instance (hyperlight)");
     let result = nub
-        .invoke_spec(spec)
-        .unwrap_or_else(|e| panic!("recompiler invoke_spec: {e}"));
-    finish(spec, &result)
+        .invoke_cached(spec.instance_hash, 0, [0; 4], INITIAL_GAS)
+        .unwrap_or_else(|e| panic!("recompiler invoke_cached: {e}"));
+    finish(&result)
 }
 
-fn finish(spec: &InvocationSpec, result: &InvocationResult) -> (u64, u64) {
+fn finish(result: &InvocationResult) -> (u64, u64) {
     assert_eq!(
         result.exit_reason, EXIT_HOSTCALL,
         "unexpected exit_reason {} (exit_arg={})",
@@ -105,7 +140,7 @@ fn finish(spec: &InvocationSpec, result: &InvocationResult) -> (u64, u64) {
         "expected HostCall(0) trampoline halt, got HostCall({})",
         result.exit_arg,
     );
-    let gas_used = spec.initial_gas.saturating_sub(result.gas_remaining);
+    let gas_used = INITIAL_GAS.saturating_sub(result.gas_remaining);
     (result.return_value, gas_used)
 }
 

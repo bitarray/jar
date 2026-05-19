@@ -209,13 +209,15 @@ impl Cache {
     /// matching `IndexSlot`, and inserts an `Entry` keyed by
     /// `spec.instance_hash`.
     ///
-    /// Returns `Ok(())` on success. Returns an error if the hash is
-    /// already published, the index is full, or any allocation fails.
+    /// **Idempotent**: returns `Ok(())` immediately if `spec.instance_hash`
+    /// is already published (caller-friendly for bench/test loops that
+    /// publish-then-invoke many times). To replace existing state,
+    /// callers should remove the entry first (future API).
+    ///
+    /// Returns an error if the index is full or any allocation fails.
     pub fn publish(&mut self, spec: PublishSpec) -> Result<()> {
         if self.entries.contains_key(&spec.instance_hash) {
-            // V0: idempotent re-publish would be useful; for now
-            // strict (caller should hold pin or skip).
-            return Err(new_error!("cache: instance already published"));
+            return Ok(());
         }
 
         let slot_idx = self
@@ -406,5 +408,19 @@ mod tests {
         spec.instance_hash = [0xFF; 32];
         let err = cache.publish(spec).unwrap_err();
         assert!(err.to_string().contains("index full"));
+    }
+
+    #[test]
+    fn publish_is_idempotent_on_same_hash() {
+        let mut cache = Cache::new().expect("alloc");
+        let mut spec = PublishSpec::empty();
+        spec.instance_hash = [0xCC; 32];
+        spec.code = vec![1, 2, 3];
+        cache.publish(spec.clone()).expect("first publish");
+        // Second publish with the same hash is a no-op success.
+        cache.publish(spec).expect("idempotent publish");
+        // Still exactly 1 entry, 1 free slot consumed.
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.free_slots.len(), MAX_INDEX_SLOTS - 1);
     }
 }

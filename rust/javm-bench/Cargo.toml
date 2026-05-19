@@ -19,6 +19,8 @@ scale = { workspace = true, features = ["std"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 nub = { path = "../nub" }
+nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
+blake3 = "1"
 
 [build-dependencies]
 build-javm = { path = "../build-javm" }

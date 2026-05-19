@@ -59,7 +59,7 @@ mod recomp {
     use super::*;
     use javm_cap::image::PinnedCap;
     use javm_exec::{unpack_bitmask, REG_COUNT};
-    use nub::{InvocationSpec, Nub, PvmRegs};
+    use nub::{Nub, PublishSpec};
     use std::cell::RefCell;
 
     thread_local! {
@@ -89,20 +89,41 @@ mod recomp {
 
         let (mem_size, ro_start, ro_data, rw_start, rw_data) = build_data_layout(image);
 
-        let spec = InvocationSpec {
+        // Populate entry_pcs from EVERY declared endpoint in the
+        // Image, not just `ep`. All endpoints share the same code
+        // and slabs — they're one Cap::Instance with many entry
+        // points — so we publish a single cache slot and reuse it
+        // across conform() iterations.
+        let mut entry_pcs = [0u64; nub_arch_x86_abi::MAX_ENDPOINTS];
+        for (&i, def) in &image.endpoints {
+            if (i as usize) < entry_pcs.len() {
+                entry_pcs[i as usize] = def.entry_pc;
+            }
+        }
+
+        // One CapHash per Image (the endpoint is in the invoke call,
+        // not the publish). `publish` is idempotent — first call
+        // populates the slot, subsequent calls are no-ops.
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&image.code);
+        let instance_hash: [u8; 32] = hasher.finalize().as_bytes()[..32]
+            .try_into()
+            .expect("blake3 32-byte digest");
+
+        let spec = PublishSpec {
+            instance_hash,
             code: image.code.clone(),
             bitmask,
             jump_table: image.jump_table.clone(),
-            entry_pc: endpoint.entry_pc as u32,
-            initial_gas: GAS_BUDGET,
-            initial_regs: PvmRegs::from_array(regs),
             mem_size,
-            arg_start: 0,
-            arg_data: Vec::new(),
             ro_start,
             ro_data,
             rw_start,
             rw_data,
+            arg_start: 0,
+            arg_data: Vec::new(),
+            entry_pcs,
+            initial_regs: regs,
         };
 
         NUB.with(|cell| {
@@ -111,9 +132,11 @@ mod recomp {
                 *borrow = Some(Nub::new_hyperlight().expect("Hyperlight sandbox"));
             }
             let nub = borrow.as_mut().expect("nub initialised above");
+            nub.publish_instance(spec)
+                .unwrap_or_else(|e| panic!("endpoint {ep}: publish_instance: {e}"));
             let result = nub
-                .invoke_spec(&spec)
-                .unwrap_or_else(|e| panic!("endpoint {ep}: invoke_spec failed: {e}"));
+                .invoke_cached(instance_hash, ep, [0; 4], GAS_BUDGET)
+                .unwrap_or_else(|e| panic!("endpoint {ep}: invoke_cached failed: {e}"));
 
             // The endpoint trampoline halts via `ecalli 0` (REPLY/HALT).
             // The in-kernel JIT surfaces this as exit_reason=4 (HostCall)

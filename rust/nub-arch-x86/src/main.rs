@@ -47,10 +47,8 @@ mod guest {
     #[cfg(feature = "heap-diag")]
     use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
     use nub_arch_x86_abi::{
-        ArchivedInvocationSpec, FN_ID_NUB_INVOKE, FN_ID_NUB_INVOKE_CACHED, FN_ID_NUB_SMOKE,
-        InvocationResult, InvokePacket,
+        FN_ID_NUB_INVOKE_CACHED, FN_ID_NUB_SMOKE, InvocationResult, InvokePacket,
     };
-    use rkyv::util::AlignedVec;
 
     /// Skeleton stand-in for the `Nub::invoke` RPC. The host's
     /// `Nub::new_hyperlight().invoke(...)` calls into this; returns 42
@@ -61,93 +59,6 @@ mod guest {
         let v: u64 = 42;
         rkyv::to_bytes::<rkyv::rancor::Error>(&v)
             .expect("rkyv-encode u64")
-            .into_vec()
-    }
-
-    /// rkyv-decode the host's `InvocationSpec` from `spec_bytes`,
-    /// run the embedded PVM program through the in-kernel JIT path
-    /// (`jit_run::run_pvm_with_mem`), rkyv-encode an
-    /// `InvocationResult` and return it.
-    ///
-    /// This is the host-facing RPC the `Nub::invoke_spec` driver
-    /// calls. The wire types live in `nub-arch-x86-abi`.
-    #[guest_function(fn_id = FN_ID_NUB_INVOKE)]
-    pub fn nub_invoke(spec_bytes: &[u8]) -> Vec<u8> {
-        // rkyv::access wants an aligned buffer; the ring is byte-
-        // addressed and the upstream `internal_dispatch_function`
-        // already copied request bytes into an AlignedVec — but the
-        // *inner* payload slice we get here is a sub-slice of that
-        // and may be misaligned. Copy once more.
-        let mut aligned = AlignedVec::<16>::with_capacity(spec_bytes.len());
-        aligned.extend_from_slice(spec_bytes);
-
-        let spec =
-            match rkyv::access::<ArchivedInvocationSpec, rkyv::rancor::Error>(aligned.as_slice()) {
-                Ok(s) => s,
-                Err(_) => return encode_result_error(1),
-            };
-
-        // The JIT's `run_pvm_with_mem` takes `&[u32]` (native). Each
-        // archived element is endian-converted via `.to_native()` —
-        // bind the resulting Vec to a local so its slice stays live.
-        let jump_table: Vec<u32> = spec.jump_table.iter().map(|v| v.to_native()).collect();
-        let initial_regs: [u64; 13] = [
-            spec.initial_regs.0.to_native(),
-            spec.initial_regs.1.to_native(),
-            spec.initial_regs.2.to_native(),
-            spec.initial_regs.3.to_native(),
-            spec.initial_regs.4.to_native(),
-            spec.initial_regs.5.to_native(),
-            spec.initial_regs.6.to_native(),
-            spec.initial_regs.7.to_native(),
-            spec.initial_regs.8.to_native(),
-            spec.initial_regs.9.to_native(),
-            spec.initial_regs.10.to_native(),
-            spec.initial_regs.11.to_native(),
-            spec.initial_regs.12.to_native(),
-        ];
-
-        let info = unsafe {
-            crate::jit_run::run_pvm_with_mem(
-                spec.code.as_slice(),
-                spec.bitmask.as_slice(),
-                &jump_table,
-                spec.initial_gas.to_native() as i64,
-                spec.entry_pc.to_native(),
-                initial_regs,
-                spec.mem_size.to_native(),
-                crate::jit_run::MemRegion {
-                    start: spec.arg_start.to_native(),
-                    data: spec.arg_data.as_slice(),
-                },
-                crate::jit_run::MemRegion {
-                    start: spec.ro_start.to_native(),
-                    data: spec.ro_data.as_slice(),
-                },
-                crate::jit_run::MemRegion {
-                    start: spec.rw_start.to_native(),
-                    data: spec.rw_data.as_slice(),
-                },
-            )
-        };
-
-        let result = match info {
-            Some(i) => InvocationResult {
-                exit_reason: i.exit_reason,
-                exit_arg: i.exit_arg,
-                return_value: i.reg_a0,
-                gas_remaining: i.gas_remaining.max(0) as u64,
-            },
-            None => InvocationResult {
-                exit_reason: u32::MAX,
-                exit_arg: 2,
-                return_value: 0,
-                gas_remaining: 0,
-            },
-        };
-
-        rkyv::to_bytes::<rkyv::rancor::Error>(&result)
-            .expect("rkyv-encode InvocationResult")
             .into_vec()
     }
 

@@ -896,11 +896,13 @@ dependencies = [
 name = "javm-bench"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "build-javm",
  "criterion",
  "javm-cap",
  "javm-exec",
  "nub",
+ "nub-arch-x86-abi",
  "scale",
 ]
 
@@ -927,11 +929,13 @@ name = "javm-guest-tests"
 version = "0.1.0"
 dependencies = [
  "blake2",
+ "blake3",
  "build-javm",
  "jar-kernel",
  "javm-cap",
  "javm-exec",
  "nub",
+ "nub-arch-x86-abi",
  "scale",
  "sha3",
  "subsoil",

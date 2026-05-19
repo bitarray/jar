@@ -1,13 +1,13 @@
 //! Recompiler granular bug-pattern tests, routed through the nub
-//! kernel JIT path. These are the translated descendants of the
-//! `tests::test_recompile_*` block that used to live in
-//! `javm-recompiler-x86/src/lib.rs` against the now-removed host
-//! `RecompiledPvm` / `FlatMemory` surface.
+//! kernel JIT path via the cache-based RPC. These are the translated
+//! descendants of the `tests::test_recompile_*` block that used to
+//! live in `javm-recompiler-x86/src/lib.rs` against the now-removed
+//! host `RecompiledPvm` / `FlatMemory` surface.
 //!
 //! Translation rules:
-//! - Each program runs through `Nub::invoke_spec`. The host sees
-//!   `InvocationResult::{exit_reason, exit_arg, return_value,
-//!   gas_remaining}` — `return_value` is φ[7] at exit.
+//! - Each program runs through `Nub::publish_instance` + `invoke_cached`.
+//!   The host sees `InvocationResult::{exit_reason, exit_arg,
+//!   return_value, gas_remaining}` — `return_value` is φ[7] at exit.
 //! - To observe φ[k] for k != 7, append `move φ[7] ← φ[k]`
 //!   (MoveReg/TwoReg, opcode 100, 2 bytes) before the halting
 //!   instruction (`ecalli 0` or `trap`).
@@ -21,7 +21,7 @@
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use nub::{InvocationSpec, Nub, PvmRegs};
+use nub::{Nub, PublishSpec};
 use std::cell::RefCell;
 
 thread_local! {
@@ -50,21 +50,28 @@ struct RunResult {
 }
 
 fn run(ps: ProgSpec) -> RunResult {
-    let spec = InvocationSpec {
-        code: ps.code,
-        bitmask: ps.bitmask,
-        jump_table: Vec::new(),
-        entry_pc: 0,
-        initial_gas: ps.gas,
-        initial_regs: PvmRegs::from_array(ps.registers),
-        mem_size: ps.mem_size.max(4096),
-        arg_start: 0,
-        arg_data: Vec::new(),
-        ro_start: 0,
-        ro_data: Vec::new(),
-        rw_start: ps.rw_start,
-        rw_data: ps.rw_data,
-    };
+    // Hash the program bytes to get a unique CapHash per test —
+    // ensures each test publishes a distinct cache entry.
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&ps.code);
+    hasher.update(&ps.bitmask);
+    hasher.update(&ps.rw_data);
+    hasher.update(&ps.rw_start.to_le_bytes());
+    let instance_hash: [u8; 32] = hasher.finalize().as_bytes()[..32]
+        .try_into()
+        .expect("blake3 32-byte digest");
+
+    let mut entry_pcs = [0u64; nub_arch_x86_abi::MAX_ENDPOINTS];
+    entry_pcs[0] = 0; // endpoint 0 → PC=0
+    let mut spec = PublishSpec::empty();
+    spec.instance_hash = instance_hash;
+    spec.code = ps.code;
+    spec.bitmask = ps.bitmask;
+    spec.mem_size = ps.mem_size.max(4096);
+    spec.rw_start = ps.rw_start;
+    spec.rw_data = ps.rw_data;
+    spec.entry_pcs = entry_pcs;
+    spec.initial_regs = ps.registers;
 
     NUB.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -72,7 +79,10 @@ fn run(ps: ProgSpec) -> RunResult {
             *borrow = Some(Nub::new_hyperlight().expect("Hyperlight sandbox"));
         }
         let nub = borrow.as_mut().expect("nub initialised above");
-        let r = nub.invoke_spec(&spec).expect("invoke_spec");
+        nub.publish_instance(spec).expect("publish_instance");
+        let r = nub
+            .invoke_cached(instance_hash, 0, [0; 4], ps.gas)
+            .expect("invoke_cached");
         RunResult {
             exit_reason: r.exit_reason,
             exit_arg: r.exit_arg,

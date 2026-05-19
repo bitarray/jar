@@ -1,20 +1,10 @@
 //! Wire format for the host ↔ guest "run this PVM program" RPC.
 //!
-//! Two paths coexist during the cache-migration:
-//!
-//! 1. **Cache path** ([`nub_invoke_cached`](FN_ID_NUB_INVOKE_CACHED)):
-//!    host pre-publishes a Cap::Instance's state into the shared
-//!    state cache (`nub_host_common::cache`), then ships a fixed-size
-//!    [`InvokePacket`] referencing it by hash. No payload codec — the
-//!    packet is `#[repr(C)]` bytes. This is the going-forward path.
-//!
-//! 2. **Legacy spec path** ([`nub_invoke`](FN_ID_NUB_INVOKE)): host
-//!    rkyv-serialises an entire [`InvocationSpec`] (code + bitmask +
-//!    jump_table + initial mappings) on every call. Kept alive only
-//!    until callers migrate to the cache path; deleted in the cleanup
-//!    stage of this migration.
-//!
-//! Both paths return a rkyv-archived [`InvocationResult`].
+//! The host pre-publishes a `Cap::Instance`'s state into the shared
+//! state cache (`nub_host_common::cache`), then ships a fixed-size
+//! [`InvokePacket`] referencing it by hash on every call. No payload
+//! codec — the packet is `#[repr(C)]` bytes; only the response is
+//! rkyv-archived ([`InvocationResult`]).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -24,12 +14,6 @@ use alloc::vec::Vec;
 
 /// `fn_id` for the `nub_smoke` skeleton RPC (returns `42u64`).
 pub const FN_ID_NUB_SMOKE: u32 = 0;
-
-/// `fn_id` for the legacy `nub_invoke` RPC — host → guest "run this
-/// PVM program" call. Payload is a rkyv-archived [`InvocationSpec`];
-/// response is a rkyv-archived [`InvocationResult`]. Deleted in
-/// cleanup once the cache path is fully wired.
-pub const FN_ID_NUB_INVOKE: u32 = 1;
 
 /// `fn_id` for the `nub_heap_stats` diagnostic. Payload is empty;
 /// response is 32 bytes packing four LE u64s (allocated_bytes,
@@ -54,7 +38,7 @@ pub type CapHash = [u8; 32];
 
 /// Maximum number of endpoints per Image the cache supports. Matches
 /// `nub_host_common::cache::MAX_ENDPOINTS`.
-pub const MAX_ENDPOINTS: usize = 8;
+pub const MAX_ENDPOINTS: usize = 64;
 
 /// Number of PVM general-purpose registers (φ[0]..φ[12]).
 pub const NUM_REGS: usize = 13;
@@ -98,10 +82,6 @@ impl InvokePacket {
 /// cache. The host's `Nub::publish_instance` consumes this and lays
 /// the contained slabs into the cache region, then registers an
 /// [`nub_host_common::cache::IndexSlot`] keyed by `instance_hash`.
-///
-/// V0 contains the same byte regions as the legacy [`InvocationSpec`]
-/// but is host-side-only (never sent over the RPC envelope) — so it
-/// has no rkyv derive and uses plain `Vec<u8>`/`Vec<u32>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishSpec {
     pub instance_hash: CapHash,
@@ -147,69 +127,8 @@ impl PublishSpec {
     }
 }
 
-/// PVM registers per Image — fixed-width 13-element tuple. SCALE
-/// doesn't auto-impl `Decode` for `[u64; N]`, so we use a tuple
-/// struct (kept for now; once SCALE leaves we can simplify to a
-/// real array).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize)]
-#[rkyv(derive(Debug, PartialEq, Eq))]
-pub struct PvmRegs(
-    pub u64,
-    pub u64,
-    pub u64,
-    pub u64,
-    pub u64,
-    pub u64,
-    pub u64,
-    pub u64,
-    pub u64,
-    pub u64,
-    pub u64,
-    pub u64,
-    pub u64,
-);
-
-impl PvmRegs {
-    pub const fn zeros() -> Self {
-        Self(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-    }
-
-    pub fn from_array(a: [u64; 13]) -> Self {
-        Self(
-            a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11], a[12],
-        )
-    }
-
-    pub fn into_array(self) -> [u64; 13] {
-        let Self(a, b, c, d, e, f, g, h, i, j, k, l, m) = self;
-        [a, b, c, d, e, f, g, h, i, j, k, l, m]
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize)]
-#[rkyv(derive(Debug))]
-pub struct InvocationSpec {
-    pub code: Vec<u8>,
-    pub bitmask: Vec<u8>,
-    pub jump_table: Vec<u32>,
-    pub entry_pc: u32,
-    pub initial_gas: u64,
-    pub initial_regs: PvmRegs,
-    /// Total guest-memory size in bytes. Pages in `[0, mem_size)` are
-    /// mapped; accesses past this boundary fault.
-    pub mem_size: u32,
-    /// `arg` region: guest VA + bytes to populate before entry.
-    pub arg_start: u32,
-    pub arg_data: Vec<u8>,
-    /// `ro` region: pinned/read-only mapping. Mapped user-RO so writes
-    /// trigger a #PF (exit_reason=3).
-    pub ro_start: u32,
-    pub ro_data: Vec<u8>,
-    /// `rw` region: initialised read-write mapping.
-    pub rw_start: u32,
-    pub rw_data: Vec<u8>,
-}
-
+/// Invocation result. Both backends produce this shape on completion;
+/// rkyv-archived on the wire from the cached path's response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
 pub struct InvocationResult {

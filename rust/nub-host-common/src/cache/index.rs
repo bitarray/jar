@@ -21,7 +21,7 @@ pub const MAX_INDEX_SLOTS: usize = 16;
 
 /// Maximum number of endpoints per Image the V0 cache stores
 /// entry-PC for. `0` is the canonical "endpoint not defined" sentinel.
-pub const MAX_ENDPOINTS: usize = 8;
+pub const MAX_ENDPOINTS: usize = 64;
 
 /// Number of PVM general-purpose registers (φ[0]..φ[12]).
 pub const NUM_REGS: usize = 13;
