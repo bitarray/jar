@@ -1,16 +1,20 @@
 //! Wire format for the host ↔ guest "run this PVM program" RPC.
 //!
-//! The host crate (`nub`) encodes an `InvocationSpec` and ships it
-//! via the `nub_invoke` guest_function; the guest decodes, runs,
-//! encodes an `InvocationResult` and returns it.
+//! Two paths coexist during the cache-migration:
 //!
-//! Codec: rkyv. The host serialises with `rkyv::to_bytes`, the
-//! guest reads with `rkyv::access` (zero-copy pointer cast + a
-//! bytecheck validation pass).
+//! 1. **Cache path** ([`nub_invoke_cached`](FN_ID_NUB_INVOKE_CACHED)):
+//!    host pre-publishes a Cap::Instance's state into the shared
+//!    state cache (`nub_host_common::cache`), then ships a fixed-size
+//!    [`InvokePacket`] referencing it by hash. No payload codec — the
+//!    packet is `#[repr(C)]` bytes. This is the going-forward path.
 //!
-//! Also exports the compile-time `FN_ID_*` constants that select
-//! which guest function the RPC envelope (`nub_host_common::rpc`)
-//! routes to.
+//! 2. **Legacy spec path** ([`nub_invoke`](FN_ID_NUB_INVOKE)): host
+//!    rkyv-serialises an entire [`InvocationSpec`] (code + bitmask +
+//!    jump_table + initial mappings) on every call. Kept alive only
+//!    until callers migrate to the cache path; deleted in the cleanup
+//!    stage of this migration.
+//!
+//! Both paths return a rkyv-archived [`InvocationResult`].
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -21,9 +25,10 @@ use alloc::vec::Vec;
 /// `fn_id` for the `nub_smoke` skeleton RPC (returns `42u64`).
 pub const FN_ID_NUB_SMOKE: u32 = 0;
 
-/// `fn_id` for the `nub_invoke` RPC — host → guest "run this PVM
-/// program" call. Payload is a rkyv-archived `InvocationSpec`;
-/// response is a rkyv-archived `InvocationResult`.
+/// `fn_id` for the legacy `nub_invoke` RPC — host → guest "run this
+/// PVM program" call. Payload is a rkyv-archived [`InvocationSpec`];
+/// response is a rkyv-archived [`InvocationResult`]. Deleted in
+/// cleanup once the cache path is fully wired.
 pub const FN_ID_NUB_INVOKE: u32 = 1;
 
 /// `fn_id` for the `nub_heap_stats` diagnostic. Payload is empty;
@@ -31,9 +36,116 @@ pub const FN_ID_NUB_INVOKE: u32 = 1;
 /// allocation_count, fragment_count, available_bytes).
 pub const FN_ID_NUB_HEAP_STATS: u32 = 2;
 
+/// `fn_id` for the cache-based RPC. Payload is a
+/// [`InvokePacket`] (host-side `#[repr(C)]` bytes, no rkyv); the
+/// guest dereferences cache VAs by `instance_hash` lookup, runs the
+/// JIT, and replies with rkyv-archived [`InvocationResult`].
+pub const FN_ID_NUB_INVOKE_CACHED: u32 = 3;
+
 /// Number of guest-function slots reserved in the dispatch table.
 /// Must be at least `max(FN_ID_*) + 1`.
 pub const GUEST_FN_TABLE_SIZE: usize = 8;
+
+/// 32-byte Cap::Instance identity hash. Matches
+/// `javm_cap::CapHash` byte-wise (kept as a local alias here so
+/// `nub-arch-x86-abi` stays free of the javm-cap dependency, which
+/// pulls in `alloc::collections` etc.).
+pub type CapHash = [u8; 32];
+
+/// Maximum number of endpoints per Image the cache supports. Matches
+/// `nub_host_common::cache::MAX_ENDPOINTS`.
+pub const MAX_ENDPOINTS: usize = 8;
+
+/// Number of PVM general-purpose registers (φ[0]..φ[12]).
+pub const NUM_REGS: usize = 13;
+
+/// Fixed-layout invocation packet. Sent as raw `#[repr(C)]` bytes via
+/// the existing rkyv `Request` envelope (its `payload` field). The
+/// guest reads the bytes directly with `core::ptr::read_unaligned`.
+///
+/// Args 0..=3 overlay the cached `IndexSlot.initial_regs` at
+/// φ[7..=10] before entering the bytecode.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvokePacket {
+    pub instance_hash: CapHash,
+    pub endpoint_idx: u32,
+    pub _pad: u32,
+    pub args: [u64; 4],
+    pub initial_gas: u64,
+}
+
+impl InvokePacket {
+    /// Size of the packet in bytes — what the host writes to the
+    /// `Request.payload` and what the guest reads back.
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+
+    /// Cast the packet to its raw bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self as *const Self as *const u8, Self::SIZE) }
+    }
+
+    /// Parse a packet from raw bytes (length-checked).
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != Self::SIZE {
+            return None;
+        }
+        Some(unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const Self) })
+    }
+}
+
+/// Spec describing how to publish a `Cap::Instance` into the state
+/// cache. The host's `Nub::publish_instance` consumes this and lays
+/// the contained slabs into the cache region, then registers an
+/// [`nub_host_common::cache::IndexSlot`] keyed by `instance_hash`.
+///
+/// V0 contains the same byte regions as the legacy [`InvocationSpec`]
+/// but is host-side-only (never sent over the RPC envelope) — so it
+/// has no rkyv derive and uses plain `Vec<u8>`/`Vec<u32>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishSpec {
+    pub instance_hash: CapHash,
+    pub code: Vec<u8>,
+    /// Packed (bit-per-byte) bitmask of instruction starts. Same
+    /// layout as `javm_cap::image::Image.packed_bitmask`.
+    pub bitmask: Vec<u8>,
+    pub jump_table: Vec<u32>,
+    pub mem_size: u32,
+    pub ro_start: u32,
+    pub ro_data: Vec<u8>,
+    pub rw_start: u32,
+    pub rw_data: Vec<u8>,
+    pub arg_start: u32,
+    pub arg_data: Vec<u8>,
+    /// Dense table: `entry_pcs[i]` = PC for endpoint i. `0` means
+    /// "not defined" — the host writes this when flattening an
+    /// `Image.endpoints` BTreeMap into the cache index.
+    pub entry_pcs: [u64; MAX_ENDPOINTS],
+    /// Baseline regs to seed at endpoint entry. The host can write
+    /// the flattened `EndpointDef.initial_regs` here.
+    pub initial_regs: [u64; NUM_REGS],
+}
+
+impl PublishSpec {
+    /// An empty PublishSpec — useful as a starting point for tests.
+    pub fn empty() -> Self {
+        Self {
+            instance_hash: [0; 32],
+            code: Vec::new(),
+            bitmask: Vec::new(),
+            jump_table: Vec::new(),
+            mem_size: 0,
+            ro_start: 0,
+            ro_data: Vec::new(),
+            rw_start: 0,
+            rw_data: Vec::new(),
+            arg_start: 0,
+            arg_data: Vec::new(),
+            entry_pcs: [0; MAX_ENDPOINTS],
+            initial_regs: [0; NUM_REGS],
+        }
+    }
+}
 
 /// PVM registers per Image — fixed-width 13-element tuple. SCALE
 /// doesn't auto-impl `Decode` for `[u64; N]`, so we use a tuple

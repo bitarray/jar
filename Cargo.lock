@@ -1206,6 +1206,8 @@ dependencies = [
  "log",
  "rkyv",
  "spin",
+ "spinning_top",
+ "talc",
  "thiserror",
  "tracing",
  "tracing-core",

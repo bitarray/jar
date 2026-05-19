@@ -21,6 +21,11 @@ log = "0.4"
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
 bytecheck = { version = "0.8", default-features = false }
 spin = "0.10"
+# The state-cache allocator. We instantiate `TalcLock<RawSpinlock,
+# Manual>` in shared memory at offset 0 of the cache region; both host
+# and guest call into it under the same spinlock.
+spinning_top = "0.3"
+talc = "5.0.3"
 thiserror = { version = "2", default-features = false }
 tracing = { version = "0.1", optional = true }
 tracing-core = { version = "0.1", default-features = false }

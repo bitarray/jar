@@ -15,8 +15,11 @@
 //! - [`layout`] — sandbox memory-layout constants.
 //! - [`log_level`] — guest log filter.
 //! - [`version_note`] — ELF version-note check for guest binaries.
-//! - [`rpc`] (new) — `Request` / `Response` envelope types for the
+//! - [`rpc`] — `Request` / `Response` envelope types for the
 //!   rkyv-based RPC.
+//! - [`cache`] (new) — fixed-VA shared state-cache types
+//!   ([`cache::TalcBox`], [`cache::TalcSlice`], [`cache::InstanceIndex`])
+//!   plus layout constants used by both host and guest.
 
 #![cfg_attr(not(any(test, debug_assertions)), warn(clippy::panic))]
 #![cfg_attr(not(any(test, debug_assertions)), warn(clippy::expect_used))]
@@ -25,6 +28,7 @@
 
 extern crate alloc;
 
+pub mod cache;
 pub mod layout;
 pub mod log_level;
 pub mod mem;
