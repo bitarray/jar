@@ -29,7 +29,11 @@ members = [
     "components/benches/blake2b",
     "components/benches/ecrecover",
     "components/benches/ed25519",
+    "components/benches/goldilocks-mul",
+    "components/benches/goldilocks-poseidon2",
     "components/benches/keccak",
+    "components/benches/mini-verifier",
+    "components/benches/poseidon2-perm",
     "components/benches/prime-sieve",
     "components/examples/simple-chain",
 ]

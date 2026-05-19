@@ -31,3 +31,7 @@ criterion = "0.5"
 [[bench]]
 name = "pvm_bench"
 harness = false
+
+[[bench]]
+name = "stark_bench"
+harness = false

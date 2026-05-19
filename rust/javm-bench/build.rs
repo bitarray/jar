@@ -37,6 +37,21 @@ fn main() {
             "bench-ecrecover",
             "ECRECOVER_BLOB",
         ),
+        (
+            "../../components/benches/goldilocks-mul",
+            "bench-goldilocks-mul",
+            "GOLDILOCKS_MUL_BLOB",
+        ),
+        (
+            "../../components/benches/poseidon2-perm",
+            "bench-poseidon2-perm",
+            "POSEIDON2_PERM_BLOB",
+        ),
+        (
+            "../../components/benches/mini-verifier",
+            "bench-mini-verifier",
+            "MINI_VERIFIER_BLOB",
+        ),
     ] {
         let blob = build_javm::build(path, crate_name);
         println!("cargo:rustc-env={env}={}", blob.display());
