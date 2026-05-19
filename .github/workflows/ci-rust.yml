@@ -118,3 +118,36 @@ jobs:
         run: cargo test --locked --workspace --release
         env:
           RUSTFLAGS: "-D warnings"
+
+  test-macos:
+    # macOS only exercises the interpreter / spec-facing portion of
+    # the workspace. The `nub` stack (KVM host + cross-compiled x86_64
+    # guest binary) and `javm-recompiler-x86` are Linux-x86_64 only,
+    # so we exclude them here. See ci-rust.yml comments for the
+    # interpreter-only crate set.
+    name: Tests (macOS, interpreter)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Workspace tests (interpreter only)
+        run: >
+          cargo test --locked --workspace --release
+          --exclude nub
+          --exclude nub-host-kvm
+          --exclude nub-host-common
+          --exclude nub-host-guest-macro
+          --exclude nub-kernel
+          --exclude nub-arch-local
+          --exclude nub-arch-x86
+          --exclude nub-arch-x86-abi
+          --exclude nub-build
+          --exclude javm-recompiler-x86
+        env:
+          RUSTFLAGS: "-D warnings"
