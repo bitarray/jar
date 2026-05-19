@@ -1763,25 +1763,24 @@ impl Compiler {
             }
             Opcode::CmovIzImm => {
                 if let Args::TwoRegImm { ra, rb, imm } = args {
-                    // if φ[rb] == 0 then φ[ra] = imm
+                    // if φ[rb] == 0 then φ[ra] = imm — branchless via cmov.
+                    // Hot in Goldilocks `add` overflow-correction (~10% of
+                    // poseidon2 PVM trace), where the carry is ~50% random
+                    // and the branch was a pipeline drag.
                     let rb_reg = REG_MAP[*rb];
+                    let ra_reg = REG_MAP[*ra];
+                    self.asm.mov_ri64(SCRATCH, *imm);
                     self.asm.test_rr(rb_reg, rb_reg);
-                    let skip = self.asm.new_label();
-                    self.asm.jcc_label(Cc::NE, skip);
-                    self.asm.mov_ri64(REG_MAP[*ra], *imm);
-
-                    self.asm.bind_label(skip);
+                    self.asm.cmovcc(Cc::E, ra_reg, SCRATCH);
                 }
             }
             Opcode::CmovNzImm => {
                 if let Args::TwoRegImm { ra, rb, imm } = args {
                     let rb_reg = REG_MAP[*rb];
+                    let ra_reg = REG_MAP[*ra];
+                    self.asm.mov_ri64(SCRATCH, *imm);
                     self.asm.test_rr(rb_reg, rb_reg);
-                    let skip = self.asm.new_label();
-                    self.asm.jcc_label(Cc::E, skip);
-                    self.asm.mov_ri64(REG_MAP[*ra], *imm);
-
-                    self.asm.bind_label(skip);
+                    self.asm.cmovcc(Cc::NE, ra_reg, SCRATCH);
                 }
             }
             Opcode::RotR64Imm => {
