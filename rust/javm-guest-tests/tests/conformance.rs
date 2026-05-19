@@ -207,7 +207,10 @@ fn conform(ep: u8, name: &str, host_fn: fn() -> u64) {
     let image = image();
     let host = host_fn();
 
-    let (interp_value, interp_gas) = run_interpreter(&image, ep);
+    // `_interp_gas` is only consumed by the recomp gas-equality
+    // check below, which is cfg'd to Linux x86_64. Underscore prefix
+    // silences `unused_variables` on other targets.
+    let (interp_value, _interp_gas) = run_interpreter(&image, ep);
     assert_eq!(
         host, interp_value,
         "[{name} ep={ep}] host vs interpreter: {host:#018x} vs {interp_value:#018x}",
@@ -221,8 +224,8 @@ fn conform(ep: u8, name: &str, host_fn: fn() -> u64) {
             "[{name} ep={ep}] host vs recompiler: {host:#018x} vs {recomp_value:#018x}",
         );
         assert_eq!(
-            interp_gas, recomp_gas,
-            "[{name} ep={ep}] gas mismatch: interp {interp_gas} vs recomp {recomp_gas}",
+            _interp_gas, recomp_gas,
+            "[{name} ep={ep}] gas mismatch: interp {_interp_gas} vs recomp {recomp_gas}",
         );
     }
 }
