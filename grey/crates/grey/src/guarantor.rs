@@ -286,6 +286,16 @@ pub fn decode_guarantee(data: &[u8]) -> Option<(Guarantee, Hash)> {
     let cred_count = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
     pos += 2;
 
+    // Bound `cred_count` by the bytes remaining before allocating. Each
+    // credential is 66 bytes on the wire (2-byte validator_index + 64-byte
+    // Ed25519 signature). Without this guard a peer can broadcast a 38-byte
+    // gossip message with `cred_count = u16::MAX` and force every receiver
+    // subscribed to the `guarantees` topic to pre-allocate ~4.3 MiB before
+    // the per-iteration bounds check rejects the message.
+    if cred_count > data.len().saturating_sub(pos) / 66 {
+        return None;
+    }
+
     let mut credentials = Vec::with_capacity(cred_count);
     for _ in 0..cred_count {
         if pos + 2 + 64 > data.len() {
@@ -673,6 +683,25 @@ mod tests {
             fn decode_guarantee_never_panics(data in prop::collection::vec(any::<u8>(), 0..2048)) {
                 let _ = decode_guarantee(&data);
             }
+        }
+
+        /// Targeted regression test for the bound check on `cred_count`.
+        ///
+        /// The existing proptest above generates random bytes up to 2048 in
+        /// length, but does not specifically explore the adversarial shape
+        /// of a 38-byte message with `cred_count = u16::MAX`: the random
+        /// search would need to land exactly on a 38-byte length AND on
+        /// `0xFFFF` in the cred_count field, which has effectively zero
+        /// probability under uniform sampling. This test exercises that
+        /// shape directly.
+        #[test]
+        fn decode_guarantee_rejects_oversized_cred_count() {
+            // [report_hash(32)] + [timeslot(4)] + [cred_count = u16::MAX]
+            // and nothing else.
+            let mut data = vec![0u8; 32 + 4 + 2];
+            data[32 + 4] = 0xff;
+            data[32 + 4 + 1] = 0xff;
+            assert!(decode_guarantee(&data).is_none());
         }
     }
 }
