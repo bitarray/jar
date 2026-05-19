@@ -69,9 +69,7 @@ pub fn pop_shared_input_raw(handle: &GuestHandle) -> Result<Vec<u8>> {
     if back_ptr < 8 || back_ptr > stack_ptr_rel - 8 {
         return Err(HyperlightGuestError::new(
             ErrorCode::GuestError,
-            format!(
-                "pop_shared_input_raw: invalid back-pointer {back_ptr} (sp={stack_ptr_rel})"
-            ),
+            format!("pop_shared_input_raw: invalid back-pointer {back_ptr} (sp={stack_ptr_rel})"),
         ));
     }
 

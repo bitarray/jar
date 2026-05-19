@@ -451,7 +451,7 @@ pub unsafe fn map<Op: TableOps>(op: &Op, mapping: Mapping) {
 /// Returns an iterator with an entry for each mapped page that
 /// intersects the given range.
 ///
-/// This takes AsRef<Op> + Copy so that on targets where the
+/// This takes `AsRef<Op>` + Copy so that on targets where the
 /// operations have little state (e.g. the guest) the operations state
 /// can be copied into the closure(s) in the iterator, allowing for a
 /// nicer result lifetime.  On targets like the

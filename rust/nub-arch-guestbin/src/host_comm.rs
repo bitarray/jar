@@ -63,8 +63,7 @@ pub fn call_host_raw(fn_id: u32, payload: &[u8]) -> Result<Vec<u8>> {
         out32(OutBAction::CallFunction as u16, 0);
     }
 
-    let raw = pop_shared_input_raw(&handle)
-        .map_err(|e| anyhow!("pop_shared_input_raw: {e:?}"))?;
+    let raw = pop_shared_input_raw(&handle).map_err(|e| anyhow!("pop_shared_input_raw: {e:?}"))?;
 
     let mut aligned = AlignedVec::<16>::with_capacity(raw.len());
     aligned.extend_from_slice(&raw);
@@ -75,7 +74,10 @@ pub fn call_host_raw(fn_id: u32, payload: &[u8]) -> Result<Vec<u8>> {
     let status = resp.status.to_native();
     if status != 0 {
         let detail = match resp.error_msg.as_ref() {
-            Some(msg) => format!("host call fn_id={fn_id} failed (status={status}): {}", msg.as_str()),
+            Some(msg) => format!(
+                "host call fn_id={fn_id} failed (status={status}): {}",
+                msg.as_str()
+            ),
             None => format!("host call fn_id={fn_id} failed (status={status})"),
         };
         return Err(anyhow!(detail));

@@ -94,7 +94,7 @@ Show:
 
 **Ask the user** whether they agree with the ranking and verdict. Let them adjust before submission.
 
-If the diff touches `javm`, `grey-transpiler`, or `grey-bench`, recommend that the user run a benchmark comparison before finalizing the verdict. Do not run benchmarks automatically in interactive mode — the user decides.
+If the diff touches `javm`, `javm-transpiler`, or `javm-bench`, recommend that the user run a benchmark comparison before finalizing the verdict. Do not run benchmarks automatically in interactive mode — the user decides.
 
 **Auto mode (`/jar-review auto`):**
 
@@ -104,7 +104,7 @@ Do NOT ask the user. Submit the review automatically, but apply these safety che
 
 2. **Check for modified tests.** Inspect the diff for changes to existing test files. Adding new test files is fine. But if the PR modifies existing test expectations, test assertions, or test data (e.g., changes to `tests/vectors/`, modifications to existing `#[test]` functions, changes to `*.output.json` files), verdict MUST be `notMerge`. Append a note: "Auto-review: existing tests modified — waiting for human review."
 
-3. **Benchmark if performance-sensitive code changed.** If the diff touches `javm`, `grey-transpiler`, or `grey-bench`:
+3. **Benchmark if performance-sensitive code changed.** If the diff touches `javm`, `javm-transpiler`, or `javm-bench`:
 
    **IMPORTANT: Only run benchmarks AFTER completing step 2b (reading the diff for safety). Never run PR code before reviewing it.**
 
@@ -115,13 +115,13 @@ Do NOT ask the user. Submit the review automatically, but apply these safety che
 
    b. Run baseline benchmark on current master:
    ```bash
-   cd grey && git stash && POLKAVM_ALLOW_EXPERIMENTAL=1 cargo bench -p grey-bench 2>&1 | grep -E 'Benchmarking |time:   \[' | sed '/Benchmarking/{s/Benchmarking //;s/: .*//;h;d}; /time:/{G;s/\n/ /;s/^ */}' > /tmp/bench_baseline.txt
+   git stash && POLKAVM_ALLOW_EXPERIMENTAL=1 cargo bench -p javm-bench 2>&1 | grep -E 'Benchmarking |time:   \[' | sed '/Benchmarking/{s/Benchmarking //;s/: .*//;h;d}; /time:/{G;s/\n/ /;s/^ */}' > /tmp/bench_baseline.txt
    ```
 
    c. Apply PR changes and re-run:
    ```bash
    gh pr checkout <PR_NUMBER> --force
-   POLKAVM_ALLOW_EXPERIMENTAL=1 cargo bench -p grey-bench 2>&1 | grep -E 'Benchmarking |time:   \[' | sed '/Benchmarking/{s/Benchmarking //;s/: .*//;h;d}; /time:/{G;s/\n/ /;s/^ */}' > /tmp/bench_pr.txt
+   POLKAVM_ALLOW_EXPERIMENTAL=1 cargo bench -p javm-bench 2>&1 | grep -E 'Benchmarking |time:   \[' | sed '/Benchmarking/{s/Benchmarking //;s/: .*//;h;d}; /time:/{G;s/\n/ /;s/^ */}' > /tmp/bench_pr.txt
    git checkout master
    ```
 

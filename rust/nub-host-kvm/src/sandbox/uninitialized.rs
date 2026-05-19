@@ -442,7 +442,7 @@ impl UninitializedSandbox {
     /// Sets the maximum log level for guest code execution.
     ///
     /// If not set, the log level is determined by the `RUST_LOG` environment variable,
-    /// defaulting to [`LevelFilter::Error`] if unset.
+    /// defaulting to `LevelFilter::Error` if unset.
     pub fn set_max_guest_log_level(&mut self, log_level: LevelFilter) {
         self.max_guest_log_level = Some(log_level);
     }

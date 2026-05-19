@@ -88,7 +88,7 @@ pub mod host_op {
     pub const MAKE_IMAGE: u32 = 19;
     /// `host_same_type(slot_a=φ[7], slot_b=φ[8])` — compare
     /// `image_hash_chain` of two Cap::Instance values; result (0 or
-    /// 1) returned in φ[7].
+    /// 1) returned in φ\[7\].
     pub const HOST_SAME_TYPE: u32 = 20;
     /// `host_type_of(src_slot=φ[7], dst_slot=φ[8])` — mint a
     /// Cap::Type carrying the source Cap::Instance's

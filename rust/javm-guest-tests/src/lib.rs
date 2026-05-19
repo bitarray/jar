@@ -7,7 +7,7 @@
 //! baked corpus of inputs and XOR-folds the results into a single
 //! u64 fingerprint.
 //!
-//! The conformance harness ([`tests/conformance.rs`]) calls every
+//! The conformance harness (`tests/conformance.rs`) calls every
 //! suite three ways — host native, byte-PVM interpreter (via
 //! `jar-kernel`), JIT recompiler (via `javm-exec`) — and asserts
 //! the fingerprints agree, plus that the two PVM backends consume

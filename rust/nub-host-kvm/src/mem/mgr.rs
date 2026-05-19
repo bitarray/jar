@@ -26,12 +26,12 @@ use super::layout::SandboxMemoryLayout;
 use super::shared_mem::{
     ExclusiveSharedMemory, GuestSharedMemory, HostSharedMemory, ReadonlySharedMemory, SharedMemory,
 };
+use crate::Result;
 #[cfg(crashdump)]
 use crate::mem::memory_region::{CrashDumpRegion, MemoryRegionFlags, MemoryRegionType};
-use crate::sandbox::snapshot::{NextAction, Snapshot};
-use crate::Result;
 #[allow(unused_imports)]
 use crate::new_error;
+use crate::sandbox::snapshot::{NextAction, Snapshot};
 
 #[cfg(all(feature = "crashdump", not(feature = "i686-guest")))]
 fn mapping_kind_to_flags(kind: &MappingKind) -> (MemoryRegionFlags, MemoryRegionType) {

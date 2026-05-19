@@ -25,9 +25,9 @@ limitations under the License.
 //! side.
 
 use crate::Result;
+use crate::new_error;
 use crate::sandbox::UninitializedSandbox;
 use crate::sandbox::host_funcs::HostFn;
-use crate::new_error;
 
 /// A sandbox on which host functions can be registered.
 pub trait Registerable {

@@ -110,7 +110,7 @@ Remember the comment URL/ID so you can edit it later if needed.
 4. Implement the fix/improvement:
    - Follow the project's coding conventions (see AGENTS.md)
    - Commit early, commit often
-   - Run tests to verify correctness: `cargo test` for grey, `make test` for spec
+   - Run tests to verify correctness: `cargo test --workspace` for rust, `make test` for spec
    - For chunked issues: stay strictly within the scope of the selected sub-task. Do not fix adjacent sub-tasks even if they look easy.
 
 5. **Interactive mode:** If the implementation is complex or ambiguous, pause and explain the approach to the user. Ask for confirmation before proceeding.

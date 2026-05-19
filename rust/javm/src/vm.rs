@@ -36,20 +36,20 @@ use crate::kernel_assist::{KernelAssist, KernelImage, kernel_image_hash};
 #[derive(Debug)]
 pub enum CallResult {
     Halt {
-        /// φ[7] (A0) at REPLY time.
+        /// φ\[7\] (A0) at REPLY time.
         return_value: u64,
         /// New value identity of the Instance post-HALT. Differs from
         /// the input `InstanceCap.content_hash` if state diverged.
         post_instance: InstanceCap,
-        /// The reflected slot[0] payload (target's slot[0] at HALT).
-        /// `None` if target's slot[0] was empty.
+        /// The reflected slot\[0\] payload (target's slot\[0\] at HALT).
+        /// `None` if target's slot\[0\] was empty.
         reflected_slot0: Option<Cap>,
         /// Gas consumed by the apply.
         gas_used: u64,
     },
     Faulted {
         reason: ExitReason,
-        /// Reflected slot[0] at fault point.
+        /// Reflected slot\[0\] at fault point.
         reflected_slot0: Option<Cap>,
         gas_used: u64,
     },
@@ -237,7 +237,7 @@ impl<K: KernelAssist> Vm<K> {
     /// the next termination.
     ///
     /// Optionally reflects `scratchpad` into the resumed Instance's
-    /// slot[0] before re-entering — the spec's CALL_RESUME(payload)
+    /// slot\[0\] before re-entering — the spec's CALL_RESUME(payload)
     /// pattern.
     ///
     /// Errors:

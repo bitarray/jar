@@ -36,7 +36,7 @@ limitations under the License.
 //!
 //! Everything except for the guest page tables is currently
 //! identity-mapped; the guest page tables themselves are mapped at
-//! [`nub_host_common::layout::SNAPSHOT_PT_GVA`] =
+//! `nub_host_common::layout::SNAPSHOT_PT_GVA` =
 //! 0xffff_8000_0000_0000.
 //!
 //! - `InitData` - some extra data that can be loaded onto the sandbox during

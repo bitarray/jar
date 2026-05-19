@@ -5,7 +5,7 @@
 //!    caps (kernel-caps are re-injected per event — the cnode is
 //!    transient; persistent state lives in σ via FileCaps).
 //! 2. Reflect the event payload as a `Cap::Data` at the chain's
-//!    slot[0] scratchpad; pre-register the bytes in
+//!    slot\[0\] scratchpad; pre-register the bytes in
 //!    `σ.data_payloads` so the chain can resolve them via
 //!    `host_read_data_cap`.
 //! 3. Reset per-block ephemeral kernel-assist tables; seed root
@@ -30,7 +30,7 @@ pub struct Event {
     /// Chain Image endpoint to invoke.
     pub endpoint_idx: u8,
     /// Raw payload bytes; delivered as a `Cap::Data` at the chain
-    /// Instance's slot[0] before the call.
+    /// Instance's slot\[0\] before the call.
     pub payload: Vec<u8>,
 }
 

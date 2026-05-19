@@ -768,7 +768,7 @@ pub trait SharedMemory {
     /// SharedMemory.
     ///
     /// On Linux this returns a raw `usize` pointer. On Windows it
-    /// returns a [`HostRegionBase`](super::memory_region::HostRegionBase)
+    /// returns a `HostRegionBase` (see `super::memory_region`)
     /// that carries the file-mapping handle metadata needed by WHP.
     fn host_region_base(&self) -> <HostGuestMemoryRegion as MemoryRegionKind>::HostBaseType {
         #[cfg(not(windows))]
@@ -1123,9 +1123,9 @@ impl HostSharedMemory {
     }
 
     /// Pop the top element of the ring as raw bytes. Unlike
-    /// [`try_pop_buffer_into`], this doesn't peek at the element's
+    /// [`Self::try_pop_buffer_into`], this doesn't peek at the element's
     /// contents — the element size is recovered from the trailing
-    /// back-pointer that [`push_buffer`] wrote.
+    /// back-pointer that [`Self::push_buffer`] wrote.
     pub fn try_pop_buffer_raw(
         &mut self,
         buffer_start_offset: usize,

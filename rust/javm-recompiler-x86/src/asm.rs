@@ -1090,7 +1090,7 @@ impl Assembler {
         }
     }
 
-    /// movzx r64, byte [idx] — zero-extending u8 load
+    /// movzx r64, byte \[idx\] — zero-extending u8 load
     pub fn movzx_load8_at_index(&mut self, dst: Reg, idx: Reg) {
         self.emit(0x48 | (dst.hi() << 2) | idx.hi());
         self.emit(0x0F);
@@ -1098,7 +1098,7 @@ impl Assembler {
         self.modrm_baseless(dst.lo(), idx);
     }
 
-    /// movzx r64, word [idx] — zero-extending u16 load
+    /// movzx r64, word \[idx\] — zero-extending u16 load
     pub fn movzx_load16_at_index(&mut self, dst: Reg, idx: Reg) {
         let rex = 0x40 | (dst.hi() << 2) | idx.hi();
         if rex != 0x40 {
@@ -1109,7 +1109,7 @@ impl Assembler {
         self.modrm_baseless(dst.lo(), idx);
     }
 
-    /// mov r32, dword [idx] — zero-extending u32 load (writes EAX, clears upper 32)
+    /// mov r32, dword \[idx\] — zero-extending u32 load (writes EAX, clears upper 32)
     pub fn mov_load32_at_index(&mut self, dst: Reg, idx: Reg) {
         let rex = 0x40 | (dst.hi() << 2) | idx.hi();
         if rex != 0x40 {
@@ -1119,14 +1119,14 @@ impl Assembler {
         self.modrm_baseless(dst.lo(), idx);
     }
 
-    /// mov r64, qword [idx]
+    /// mov r64, qword \[idx\]
     pub fn mov_load64_at_index(&mut self, dst: Reg, idx: Reg) {
         self.emit(0x48 | (dst.hi() << 2) | idx.hi());
         self.emit(0x8B);
         self.modrm_baseless(dst.lo(), idx);
     }
 
-    /// mov byte [idx], r8
+    /// mov byte \[idx\], r8
     pub fn mov_store8_at_index(&mut self, idx: Reg, src: Reg) {
         // REX prefix mandatory if `src` is SIL/DIL/BPL/SPL (encoded
         // 4..=7 with hi=0) — without REX those encodings decode as
@@ -1139,7 +1139,7 @@ impl Assembler {
         self.modrm_baseless(src.lo(), idx);
     }
 
-    /// mov word [idx], r16
+    /// mov word \[idx\], r16
     pub fn mov_store16_at_index(&mut self, idx: Reg, src: Reg) {
         self.emit(0x66);
         let rex = 0x40 | (src.hi() << 2) | idx.hi();
@@ -1150,7 +1150,7 @@ impl Assembler {
         self.modrm_baseless(src.lo(), idx);
     }
 
-    /// mov dword [idx], r32
+    /// mov dword \[idx\], r32
     pub fn mov_store32_at_index(&mut self, idx: Reg, src: Reg) {
         let rex = 0x40 | (src.hi() << 2) | idx.hi();
         if rex != 0x40 {
@@ -1160,14 +1160,14 @@ impl Assembler {
         self.modrm_baseless(src.lo(), idx);
     }
 
-    /// mov qword [idx], r64
+    /// mov qword \[idx\], r64
     pub fn mov_store64_at_index(&mut self, idx: Reg, src: Reg) {
         self.emit(0x48 | (src.hi() << 2) | idx.hi());
         self.emit(0x89);
         self.modrm_baseless(src.lo(), idx);
     }
 
-    /// mov byte [idx], imm8
+    /// mov byte \[idx\], imm8
     pub fn mov_store8_at_index_imm(&mut self, idx: Reg, imm: u8) {
         if idx.hi() != 0 {
             self.emit(0x40 | idx.hi());
@@ -1177,7 +1177,7 @@ impl Assembler {
         self.emit(imm);
     }
 
-    /// mov word [idx], imm16
+    /// mov word \[idx\], imm16
     pub fn mov_store16_at_index_imm(&mut self, idx: Reg, imm: u16) {
         self.emit(0x66);
         if idx.hi() != 0 {
@@ -1189,7 +1189,7 @@ impl Assembler {
         self.emit((imm >> 8) as u8);
     }
 
-    /// mov dword [idx], imm32
+    /// mov dword \[idx\], imm32
     pub fn mov_store32_at_index_imm(&mut self, idx: Reg, imm: i32) {
         if idx.hi() != 0 {
             self.emit(0x40 | idx.hi());
@@ -1199,7 +1199,7 @@ impl Assembler {
         self.emit_i32(imm);
     }
 
-    /// mov qword [idx], sign-extended imm32
+    /// mov qword \[idx\], sign-extended imm32
     pub fn mov_store64_at_index_imm(&mut self, idx: Reg, imm: i32) {
         self.emit(0x48 | idx.hi());
         self.emit(0xC7);

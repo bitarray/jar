@@ -203,31 +203,29 @@ pub(crate) fn handle_outb(
             let mut aligned = AlignedVec::<16>::with_capacity(req_bytes.len());
             aligned.extend_from_slice(&req_bytes);
 
-            let response = match rkyv::access::<ArchivedRequest, rkyv::rancor::Error>(
-                aligned.as_slice(),
-            ) {
-                Ok(req) => {
-                    let fn_id = req.fn_id.to_native();
-                    let payload = req.payload.as_slice();
-                    let res = host_funcs
-                        .try_lock()
-                        .map_err(|e| {
-                            HandleOutbError::LockFailed(file!(), line!(), e.to_string())
-                        })?
-                        .call_host_function(fn_id, payload);
+            let response =
+                match rkyv::access::<ArchivedRequest, rkyv::rancor::Error>(aligned.as_slice()) {
+                    Ok(req) => {
+                        let fn_id = req.fn_id.to_native();
+                        let payload = req.payload.as_slice();
+                        let res = host_funcs
+                            .try_lock()
+                            .map_err(|e| {
+                                HandleOutbError::LockFailed(file!(), line!(), e.to_string())
+                            })?
+                            .call_host_function(fn_id, payload);
 
-                    match res {
-                        Ok(bytes) => Response::ok(bytes),
-                        Err(e) => Response::err(1, format!("host fn_id={fn_id}: {e}")),
+                        match res {
+                            Ok(bytes) => Response::ok(bytes),
+                            Err(e) => Response::err(1, format!("host fn_id={fn_id}: {e}")),
+                        }
                     }
-                }
-                Err(e) => Response::err(2, format!("rkyv-access Request: {e}")),
-            };
+                    Err(e) => Response::err(2, format!("rkyv-access Request: {e}")),
+                };
 
-            let resp_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&response)
-                .map_err(|e| {
-                    HandleOutbError::WriteHostFunctionResponse(format!("rkyv-serialize: {e}"))
-                })?;
+            let resp_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&response).map_err(|e| {
+                HandleOutbError::WriteHostFunctionResponse(format!("rkyv-serialize: {e}"))
+            })?;
 
             mem_mgr
                 .write_host_function_response_raw(resp_bytes.as_slice())

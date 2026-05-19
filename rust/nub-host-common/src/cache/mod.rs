@@ -42,7 +42,7 @@ pub const STATE_CACHE_VA: u64 = 0x4000_0000_0000;
 
 /// Fixed guest physical address the cache region is mapped at. Sits
 /// at 8 GiB, well clear of the snapshot region (low GPAs) and the
-/// scratch region (top of [`nub_host_common::layout::MAX_GPA`]).
+/// scratch region (top of [`crate::layout::MAX_GPA`]).
 pub const STATE_CACHE_GPA: u64 = 0x2_0000_0000;
 
 /// Total size of the cache region. 1 GiB.

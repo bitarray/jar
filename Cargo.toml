@@ -34,7 +34,6 @@ members = [
     "components/examples/simple-chain",
 ]
 exclude = [
-    "grey",
     "spec/crypto-ffi",
     "spec/fuzz",
     # Vendored guest-bin (`#![no_std]` with its own panic_handler +

@@ -18,25 +18,23 @@ JAR is a **JAM (Join-Accumulate Machine)** blockchain node implementation in Rus
 
 ```
 jar/
-  grey/                     # The node — this is where most work happens
-    crates/
-      grey/                 # Main binary (CLI, startup, config)
-      grey-rpc/             # JSON-RPC server (jsonrpsee)
-      grey-network/         # libp2p networking (QUIC transport)
-      grey-consensus/       # Block authoring, Safrole, GRANDPA
-      grey-state/           # State transition function (STF)
-      grey-store/           # Persistent storage (redb)
-      grey-types/           # Core types, constants, config
-      grey-crypto/          # Cryptography (bandersnatch, ed25519, blake2)
-      grey-codec/           # JAM codec (NOT scale)
-      grey-erasure/         # Reed-Solomon erasure coding
-      grey-merkle/          # Binary Merkle tree
-      grey-services/        # Service execution
-      grey-transpiler/      # PVM transpiler
-      javm/                 # PVM (PolkaVM) implementation
+  rust/                     # Rust workspace — where node-side work happens
+    jar-kernel/             # Kernel: state, types, host calls
+    javm/                   # PVM (Polkadot VM) entry point
+    javm-exec/              # PVM execution
+    javm-transpiler/        # rv64em → x86-64 transpiler
+    javm-recompiler-x86/    # x86-64 JIT recompiler
+    javm-cap/               # Capability layer for javm
+    javm-bench/             # PVM benchmarks (vs polkavm)
+    javm-guest-tests/       # Conformance vectors for javm guests
+    nub*/                   # Sandbox runtime (kernel, host, arch backends)
+    scale/, scale-derive/   # SCALE codec
+    subsoil/, subsoil-derive/  # Storage layer
+    jar-test-services/      # Test guest services
+  components/               # Guest crates consumed by rust/ (bench guests)
   spec/                     # Lean 4 formal specification
+  tools/jar-genesis/        # Genesis Proof-of-Intelligence tooling
   docs/                     # Documentation
-  tools/                    # Utilities
 ```
 
 ## Code style rules
@@ -101,11 +99,9 @@ ci: add cargo audit to CI pipeline
 ## Building
 
 ```bash
-cd grey
-cargo build --release -p grey       # Build the node
-cargo test -p grey-state             # Run conformance tests
-cargo run --release -- --test        # Quick sequential test
-cargo run --release -- --seq-testnet # Deterministic testnet
+cargo build --workspace              # Build everything
+cargo test --workspace               # Run all tests
+cargo bench -p javm-bench            # PVM interp/recomp vs polkavm
 ```
 
 ## For Zo Computer users

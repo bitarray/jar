@@ -17,8 +17,8 @@ limitations under the License.
 //! Host-side guest↔host RPC types.
 //!
 //! After the FB+SCALE → rkyv migration this module is a thin
-//! re-export of [`HostFn`] (the boxed `FnMut(&[u8]) -> Result<Vec<u8>>`
-//! signature every host function shares) + [`Registerable`] (the
+//! re-export of `HostFn` (the boxed `FnMut(&[u8]) -> Result<Vec<u8>>`
+//! signature every host function shares) + `Registerable` (the
 //! trait that exposes `register_host_function(fn_id, hf)` on
 //! `Uninitialized`/`MultiUse` sandboxes).
 

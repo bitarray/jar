@@ -15,16 +15,16 @@ Licensed under the Apache License, Version 2.0.
 //! Per-stage scope: this module sets up the host-side mmap + talc +
 //! index + publish/pin API. Wiring the region into the guest's
 //! address space (KVM slot install, page-table entries at
-//! [`STATE_CACHE_VA`]) lands in a follow-up.
+//! `STATE_CACHE_VA`) lands in a follow-up.
 
 use std::collections::HashMap;
 use std::ptr::NonNull;
 
+use nub_arch_x86_abi::{CapHash, PublishSpec};
 use nub_host_common::cache::{
     CacheTalcLock, INSTANCE_INDEX_OFFSET, IndexSlot, InstanceIndex, MAX_INDEX_SLOTS,
     STATE_CACHE_SIZE, TALC_HEAP_OFFSET, TALC_HEAP_SIZE, TalcSlice,
 };
-use nub_arch_x86_abi::{CapHash, PublishSpec};
 use talc::source::Manual;
 
 use crate::{HyperlightError, Result, new_error};

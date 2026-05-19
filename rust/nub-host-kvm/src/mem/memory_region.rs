@@ -17,9 +17,6 @@ limitations under the License.
 use std::ops::Range;
 
 use bitflags::bitflags;
-#[cfg(mshv3)]
-use nub_host_common::mem::PAGE_SHIFT;
-use nub_host_common::mem::PAGE_SIZE_USIZE;
 #[cfg(kvm)]
 use kvm_bindings::{KVM_MEM_READONLY, kvm_userspace_memory_region};
 #[cfg(mshv3)]
@@ -30,6 +27,9 @@ use mshv_bindings::{
 use mshv_bindings::{hv_arm64_memory_intercept_message, mshv_user_mem_region};
 #[cfg(all(mshv3, target_arch = "x86_64"))]
 use mshv_bindings::{hv_x64_memory_intercept_message, mshv_user_mem_region};
+#[cfg(mshv3)]
+use nub_host_common::mem::PAGE_SHIFT;
+use nub_host_common::mem::PAGE_SIZE_USIZE;
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Hypervisor::{self, WHV_MEMORY_ACCESS_TYPE};
 
@@ -142,7 +142,7 @@ pub enum MemoryRegionType {
     Scratch,
     /// The snapshot region
     Snapshot,
-    /// An externally-mapped file (via [`MultiUseSandbox::map_file_cow`]).
+    /// An externally-mapped file (via `MultiUseSandbox::map_file_cow`).
     /// These regions are backed by file handles (Windows) or mmap
     /// (Linux) and are read-only + executable. They are cleaned up
     /// during restore/drop — not part of the guest's own allocator.

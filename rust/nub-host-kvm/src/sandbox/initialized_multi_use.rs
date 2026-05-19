@@ -104,7 +104,9 @@ impl MultiUseSandbox {
     /// On failure the sandbox should be dropped and rebuilt.
     #[instrument(err(Debug), skip(self, payload), parent = Span::current())]
     pub fn call_raw(&mut self, fn_id: u32, payload: &[u8]) -> Result<Vec<u8>> {
-        maybe_time_and_emit_guest_call("call_raw", || self.call_guest_function_by_id(fn_id, payload))
+        maybe_time_and_emit_guest_call("call_raw", || {
+            self.call_guest_function_by_id(fn_id, payload)
+        })
     }
 
     fn call_guest_function_by_id(&mut self, fn_id: u32, payload: &[u8]) -> Result<Vec<u8>> {
@@ -121,7 +123,8 @@ impl MultiUseSandbox {
             let req_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&req)
                 .map_err(|e| crate::new_error!("rkyv-serialize Request: {e}"))?;
 
-            self.mem_mgr.write_guest_function_call_raw(req_bytes.as_slice())?;
+            self.mem_mgr
+                .write_guest_function_call_raw(req_bytes.as_slice())?;
 
             let dispatch_res = self.vm.dispatch_call_from_host(
                 &mut self.mem_mgr,
@@ -140,9 +143,8 @@ impl MultiUseSandbox {
             let mut aligned = AlignedVec::<16>::with_capacity(raw_resp.len());
             aligned.extend_from_slice(&raw_resp);
 
-            let resp =
-                rkyv::access::<ArchivedResponse, rkyv::rancor::Error>(aligned.as_slice())
-                    .map_err(|e| crate::new_error!("rkyv-access Response: {e}"))?;
+            let resp = rkyv::access::<ArchivedResponse, rkyv::rancor::Error>(aligned.as_slice())
+                .map_err(|e| crate::new_error!("rkyv-access Response: {e}"))?;
 
             let status = resp.status.to_native();
             if status != 0 {

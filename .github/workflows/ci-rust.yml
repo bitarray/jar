@@ -1,4 +1,4 @@
-name: "CI: Grey"
+name: "CI: Rust"
 
 on:
   push:
@@ -56,10 +56,11 @@ jobs:
       - name: Upload SBOM artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: grey-sbom
+          name: rust-sbom
           if-no-files-found: error
           path: |
-            grey/**/sbom.json
+            rust/**/sbom.json
+            components/**/sbom.json
             tools/**/sbom.json
 
   lint:
@@ -100,16 +101,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Workspace tests (recompiler)
+      - name: Workspace tests
         run: cargo test --locked --workspace --release
         env:
-          GREY_PVM: recompiler
-          RUSTFLAGS: "-D warnings"
-
-      - name: Workspace tests (interpreter)
-        run: cargo test --locked --workspace --release
-        env:
-          GREY_PVM: interpreter
           RUSTFLAGS: "-D warnings"
 
   test-macos:
@@ -124,23 +118,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Workspace tests (interpreter)
+      - name: Workspace tests
         run: cargo test --locked --workspace --release
         env:
-          GREY_PVM: interpreter
           RUSTFLAGS: "-D warnings"
-
-  harness:
-    name: Integration harness
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rust-src
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Run harness
-        run: cargo run --locked --release -p harness -- --seq-testnet

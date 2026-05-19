@@ -16,10 +16,10 @@ limitations under the License.
 
 use core::fmt::Write;
 
-use nub_host_common::outb::Exception;
-use nub_host_common::vmem::{BasicMapping, MappingKind, PAGE_SIZE};
 use hyperlight_guest::exit::write_abort;
 use hyperlight_guest::layout::{MAIN_STACK_LIMIT_GVA, MAIN_STACK_TOP_GVA};
+use nub_host_common::outb::Exception;
+use nub_host_common::vmem::{BasicMapping, MappingKind, PAGE_SIZE};
 
 use super::super::context::Context;
 use super::super::machine::ExceptionInfo;

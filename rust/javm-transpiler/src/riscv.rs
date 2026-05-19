@@ -1899,13 +1899,15 @@ impl TranslationContext {
             } else {
                 unresolved += 1;
                 eprintln!(
-                    "grey: unresolved return_fixup jt_idx={jt_idx} rv_addr={:#x}",
+                    "javm-transpiler: unresolved return_fixup jt_idx={jt_idx} rv_addr={:#x}",
                     rv_addr
                 );
             }
         }
         if unresolved > 0 {
-            eprintln!("grey: {unresolved} unresolved return_fixups (will panic on jump)");
+            eprintln!(
+                "javm-transpiler: {unresolved} unresolved return_fixups (will panic on jump)"
+            );
         }
     }
 }

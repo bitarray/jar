@@ -97,14 +97,10 @@ mod guest {
         // state_cache::lookup() returned, so ensure_mapped already
         // succeeded; offsets came from an IndexSlot the host wrote;
         // they're within the cache region.
-        let code: Vec<u8> = unsafe {
-            crate::state_cache::slab_bytes(slot.code_off, slot.code_len)
-        }
-        .to_vec();
-        let bitmask: Vec<u8> = unsafe {
-            crate::state_cache::slab_bytes(slot.bitmask_off, slot.bitmask_len)
-        }
-        .to_vec();
+        let code: Vec<u8> =
+            unsafe { crate::state_cache::slab_bytes(slot.code_off, slot.code_len) }.to_vec();
+        let bitmask: Vec<u8> =
+            unsafe { crate::state_cache::slab_bytes(slot.bitmask_off, slot.bitmask_len) }.to_vec();
         // jump_table is laid out as little-endian u32s in the cache;
         // decode into native u32s here.
         let jt_bytes: &[u8] = unsafe {
@@ -114,18 +110,12 @@ mod guest {
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
-        let ro_data: Vec<u8> = unsafe {
-            crate::state_cache::slab_bytes(slot.ro_off, slot.ro_len)
-        }
-        .to_vec();
-        let rw_data: Vec<u8> = unsafe {
-            crate::state_cache::slab_bytes(slot.rw_off, slot.rw_len)
-        }
-        .to_vec();
-        let arg_data: Vec<u8> = unsafe {
-            crate::state_cache::slab_bytes(slot.arg_off, slot.arg_len)
-        }
-        .to_vec();
+        let ro_data: Vec<u8> =
+            unsafe { crate::state_cache::slab_bytes(slot.ro_off, slot.ro_len) }.to_vec();
+        let rw_data: Vec<u8> =
+            unsafe { crate::state_cache::slab_bytes(slot.rw_off, slot.rw_len) }.to_vec();
+        let arg_data: Vec<u8> =
+            unsafe { crate::state_cache::slab_bytes(slot.arg_off, slot.arg_len) }.to_vec();
 
         let endpoint = packet.endpoint_idx as usize;
         if endpoint >= slot.entry_pcs.len() {

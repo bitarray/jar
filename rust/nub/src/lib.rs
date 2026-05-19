@@ -25,11 +25,11 @@ use nub_host_kvm::sandbox::{
 };
 use nub_kernel::Kernel;
 
+#[cfg(feature = "heap-diag")]
+use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
 use nub_arch_x86_abi::{
     ArchivedInvocationResult, FN_ID_NUB_INVOKE_CACHED, FN_ID_NUB_SMOKE, InvokePacket,
 };
-#[cfg(feature = "heap-diag")]
-use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
 pub use nub_arch_x86_abi::{InvocationResult, PublishSpec};
 pub use nub_kernel::{CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
 // Re-export `CapHash` from the abi for callers that don't want to
@@ -196,8 +196,7 @@ impl Nub {
     pub fn publish_instance(&mut self, spec: PublishSpec) -> Result<()> {
         match &mut self.backend {
             Backend::Local(_) => {
-                self.local_store
-                    .insert(spec.instance_hash, spec);
+                self.local_store.insert(spec.instance_hash, spec);
                 Ok(())
             }
             Backend::Hyperlight(h) => h
@@ -265,7 +264,6 @@ impl Nub {
             }
         }
     }
-
 }
 
 impl HyperlightDriver {

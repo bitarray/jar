@@ -1,7 +1,7 @@
 //! RISC-V ELF to JAM PVM transpiler.
 //!
 //! Converts RISC-V rv64em ELF binaries into PVM program blobs
-//! suitable for execution by the Grey PVM (Appendix A).
+//! suitable for execution by the JAR PVM (Appendix A).
 //!
 //! Also provides utilities to hand-assemble PVM programs directly.
 

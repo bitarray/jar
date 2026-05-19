@@ -10,9 +10,9 @@ The protocol originates from JAM but introduces its own specification improvemen
 
 The complete protocol formalized in Lean 4. Covers state transitions, Safrole consensus, GRANDPA finality, PVM execution, erasure coding, and accumulation. The formalization enables experimentation with protocol changes under machine-checked proofs, then cross-verification against the Rust node.
 
-### [Grey — Rust Node](https://github.com/jarchain/jar/tree/master/grey)
+### [Rust Workspace](https://github.com/jarchain/jar/tree/master/rust)
 
-A high-performance JAR node in Rust with both an interpreter and a JIT recompiler. Grey delivers 2.2x faster ecrecover execution and 2.9x faster compilation compared to PolkaVM with pipeline gas metering, alongside a linear memory model and single-pass JIT compilation.
+A high-performance JAR node in Rust with both an interpreter and a JIT recompiler. The PVM delivers 2.2x faster ecrecover execution and 2.9x faster compilation compared to PolkaVM with pipeline gas metering, alongside a linear memory model and single-pass JIT compilation.
 
 ### [Genesis — Proof of Intelligence](https://github.com/jarchain/jar/blob/master/GENESIS.md)
 

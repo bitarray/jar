@@ -91,4 +91,3 @@ impl FunctionRegistry {
         crate::metrics::maybe_time_and_emit_host_call(&format!("fn_id={fn_id}"), || entry(payload))
     }
 }
-

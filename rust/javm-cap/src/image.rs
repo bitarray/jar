@@ -45,7 +45,7 @@ pub struct Image {
     /// Packed bitmask, one bit per `code` byte, LSB-first.
     /// `packed_bitmask.len() == code.len().div_ceil(8)`. A `1` bit
     /// marks the start of an instruction; a `0` bit marks a
-    /// continuation byte. Use [`javm_exec::unpack_bitmask`] to
+    /// continuation byte. Use `javm_exec::unpack_bitmask` to
     /// recover the unpacked form at decode time.
     pub packed_bitmask: Vec<u8>,
     /// Jump-table entries (PVM PCs into `code`). Indexed by
@@ -89,9 +89,9 @@ pub struct EndpointDef {
     /// Size of the arg cnode the caller may attach.
     pub arg_cnode_size: u8,
     /// PVM registers to seed before entering the endpoint. Keyed
-    /// by register index (0..=12). Common usage: φ[1] (RISC-V SP)
+    /// by register index (0..=12). Common usage: φ\[1\] (RISC-V SP)
     /// ← `stack_top`. The kernel applies these on top of the
-    /// calling-convention defaults (φ[11] = endpoint_idx).
+    /// calling-convention defaults (φ\[11\] = endpoint_idx).
     pub initial_regs: BTreeMap<u8, u64>,
 }
 

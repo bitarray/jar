@@ -7,8 +7,6 @@
 
 # Rust (workspace root)
 /target
-/grey/.cargo/
-/grey/services/**/target
 
 # Docs (Zensical build output)
 /site
@@ -18,7 +16,6 @@
 /.claude/settings.local.json
 /.claude/scheduled_tasks.lock
 .devcontainer/
-grey/fuzz/target/
 
 # IDE
 /.vscode

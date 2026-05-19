@@ -19,8 +19,8 @@
 //! `hyperlight_main` and hand-wire the dispatcher.
 
 use proc_macro::TokenStream;
-use proc_macro2::Span;
 use proc_macro_crate::{FoundCrate, crate_name};
+use proc_macro2::Span;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
@@ -94,10 +94,8 @@ pub fn guest_function(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into();
     }
 
-    let registration_ident = syn::Ident::new(
-        &format!("__NUB_GUEST_FN_{ident}_ENTRY"),
-        Span::call_site(),
-    );
+    let registration_ident =
+        syn::Ident::new(&format!("__NUB_GUEST_FN_{ident}_ENTRY"), Span::call_site());
 
     quote! {
         #fn_declaration
@@ -142,12 +140,9 @@ pub fn host_function(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Validate signature: one `&[u8]` arg, `Vec<u8>` return.
     if sig.inputs.len() != 1 {
-        return Error::new(
-            sig.inputs.span(),
-            "expected exactly one `&[u8]` parameter",
-        )
-        .to_compile_error()
-        .into();
+        return Error::new(sig.inputs.span(), "expected exactly one `&[u8]` parameter")
+            .to_compile_error()
+            .into();
     }
 
     // The single parameter's pattern (e.g. `payload: &[u8]`) — we

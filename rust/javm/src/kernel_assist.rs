@@ -69,7 +69,7 @@ pub trait KernelAssist {
     fn yield_catcher_remove(&mut self, catcher_hash: CapHash, marker_instance_hash: CapHash);
 
     /// Mint a fresh empty YieldCatcher. Returns its content hash
-    /// (which the caller stores as a Cap::Instance[YieldCatcher]).
+    /// (which the caller stores as a Cap::Instance\[YieldCatcher\]).
     fn yield_catcher_new(&mut self) -> CapHash;
 
     // ---- Image registry ----

@@ -33,7 +33,7 @@
 //! value baked into `EndpointDef.initial_regs` makes the metadata
 //! correct for when mappings come online.
 
-/// Memory-mapping access mode tracked by [`ProgramLayout`] for the
+/// Memory-mapping access mode tracked by [`ProgramLayout`](crate::layout::ProgramLayout) for the
 /// stack / ro / rw / heap regions. Persistent mappings (declarative
 /// `Image.memory_mappings`) will translate this into the
 /// corresponding `MappingSource::Persistent(...)` entries.

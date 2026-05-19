@@ -210,12 +210,12 @@ pub enum HyperlightError {
     /// - **Invalid memory access** - Attempts to read/write/execute memory outside allowed regions
     /// - **Stack overflow** - Guest exhausts its stack space during execution
     /// - **Heap exhaustion** - Guest runs out of heap memory
-    /// - **Host-initiated cancellation** - Calling [`InterruptHandle::kill()`] to forcefully
+    /// - **Host-initiated cancellation** - Calling `InterruptHandle::kill()` to forcefully
     ///   terminate an in-progress guest function
     ///
     /// ## Recovery
     ///
-    /// Use [`crate::MultiUseSandbox::restore()`] to recover from a poisoned sandbox.
+    /// Use `MultiUseSandbox::restore()` to recover from a poisoned sandbox.
     #[error("The sandbox was poisoned")]
     PoisonedSandbox,
 

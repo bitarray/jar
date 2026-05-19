@@ -19,7 +19,7 @@
 //! 1. Resolve a `SlotPath` to a cap.
 //! 2. Enforce pinned-slot read-only semantics on writes.
 //! 3. Expose pinned-cap content to host calls that need it (e.g.,
-//!    `host_yield` reads the Cap::Instance[YieldCatcher] from the
+//!    `host_yield` reads the Cap::Instance\[YieldCatcher\] from the
 //!    Image-declared `yield_marker_slot`).
 //!
 //! Multi-step `SlotPath` traversal (walking through nested

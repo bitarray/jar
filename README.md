@@ -22,7 +22,7 @@ Key optimizations: per-basic-block pipeline gas simulation, peephole instruction
 | Directory | Description |
 |-----------|-------------|
 | [spec/](spec/) | Lean 4 formal specification — executable, machine-checked, tested against conformance vectors |
-| [grey/](grey/) | Grey — Rust protocol node implementation |
+| [rust/](rust/) | Rust workspace — jar-kernel, javm (PVM), nub, scale, subsoil |
 
 ## Genesis — Proof of Intelligence
 
@@ -39,10 +39,9 @@ lake build
 make test
 ```
 
-### Grey (Rust)
+### Rust workspace
 
 ```sh
-cd grey
 cargo test --workspace
 ```
 

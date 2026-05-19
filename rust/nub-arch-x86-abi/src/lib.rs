@@ -40,7 +40,7 @@ pub type CapHash = [u8; 32];
 /// `nub_host_common::cache::MAX_ENDPOINTS`.
 pub const MAX_ENDPOINTS: usize = 64;
 
-/// Number of PVM general-purpose registers (φ[0]..φ[12]).
+/// Number of PVM general-purpose registers (φ\[0\]..φ\[12\]).
 pub const NUM_REGS: usize = 13;
 
 /// Fixed-layout invocation packet. Sent as raw `#[repr(C)]` bytes via
@@ -81,7 +81,7 @@ impl InvokePacket {
 /// Spec describing how to publish a `Cap::Instance` into the state
 /// cache. The host's `Nub::publish_instance` consumes this and lays
 /// the contained slabs into the cache region, then registers an
-/// [`nub_host_common::cache::IndexSlot`] keyed by `instance_hash`.
+/// `nub_host_common::cache::IndexSlot` keyed by `instance_hash`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishSpec {
     pub instance_hash: CapHash,

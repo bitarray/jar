@@ -1,7 +1,7 @@
 //! Byte-PVM interpreter.
 //!
 //! Predecodes a [`PvmProgram`] via [`crate::decode::predecode`] and
-//! dispatches over the resulting [`DecodedInst`] array.
+//! dispatches over the resulting [`DecodedInst`](crate::DecodedInst) array.
 //!
 //! Cherry-picked from v2 `javm/src/interpreter/mod.rs::run` (~787
 //! LOC). The opcode-dispatch arms are verbatim modulo two adaptations:

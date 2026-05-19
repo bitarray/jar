@@ -18,7 +18,7 @@ Grey's RISC-V recompiler vs PolkaVM's compiler backend, measured on 8 workloads 
 **Reproduction:**
 ```bash
 POLKAVM_ALLOW_EXPERIMENTAL=1 POLKAVM_DEFAULT_COST_MODEL=full-l1-hit \
-  cargo bench -p grey-bench
+  cargo bench -p javm-bench
 ```
 
 ## Results: Compile + Execute (full pipeline)

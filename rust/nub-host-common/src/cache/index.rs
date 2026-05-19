@@ -23,7 +23,7 @@ pub const MAX_INDEX_SLOTS: usize = 16;
 /// entry-PC for. `0` is the canonical "endpoint not defined" sentinel.
 pub const MAX_ENDPOINTS: usize = 64;
 
-/// Number of PVM general-purpose registers (φ[0]..φ[12]).
+/// Number of PVM general-purpose registers (φ\[0\]..φ\[12\]).
 pub const NUM_REGS: usize = 13;
 
 /// State for a single published Cap::Instance in the cache.
@@ -102,7 +102,7 @@ impl InstanceIndex {
     ///
     /// # Safety
     ///
-    /// `ptr` must point at a writable region of at least [`SIZE`]
+    /// `ptr` must point at a writable region of at least [`Self::SIZE`]
     /// bytes, suitably aligned for `InstanceIndex` (align 8).
     pub unsafe fn init_at(ptr: *mut InstanceIndex) {
         unsafe {
