@@ -497,12 +497,9 @@ impl Compiler {
                 Opcode::Add64 => {
                     self.try_fuse_scaled_index_raw(code, bitmask, pc, &decoded_args, &mut gas_sim)
                 }
-                // Mul64+MulUpper fusion disabled: corrupts results when φ[11] (RAX)
-                // is involved as both source and destination. The push/restore sequence
-                // conflicts with rd_hi/rd_lo assignments when they alias RAX.
-                // Opcode::Mul64 => {
-                //     self.try_fuse_mul_pair_raw(code, bitmask, pc, &decoded_args, &mut gas_sim)
-                // }
+                Opcode::Mul64 => {
+                    self.try_fuse_mul_pair_raw(code, bitmask, pc, &decoded_args, &mut gas_sim)
+                }
                 _ => None,
             };
 
@@ -775,10 +772,17 @@ impl Compiler {
         }
     }
 
-    /// Peephole: fuse Mul64 + MulUpper from raw code.
-    /// Currently disabled: corrupts results when φ[11] (RAX) is both source and destination.
-    /// Kept for future fix (needs proper RAX aliasing handling in push/pop sequence).
-    #[allow(dead_code)]
+    /// Peephole: fuse `mul_64 D_lo, A, B` + `mul_upper_{uu,ss} D_hi, A, B`
+    /// (same A and B) into a single x86 `MUL`/`IMUL` that computes the
+    /// full 128-bit product in one shot (`RDX:RAX = A*B`).
+    ///
+    /// Hot in Goldilocks `mul`: the `(a as u128)*(b as u128)` decomposition
+    /// emits the PVM pair on identical operands; the standalone codegen
+    /// would do two separate full 64-bit multiplies (one for low, one
+    /// for high).
+    ///
+    /// Skipped for `mul_upper_su` (mixed signedness): handled by its
+    /// dedicated emit path, which needs the sign-correction.
     fn try_fuse_mul_pair_raw(
         &mut self,
         code: &[u8],
@@ -820,8 +824,13 @@ impl Compiler {
         if u_ra != *m_ra || u_rb != *m_rb {
             return None;
         }
+        // Disallow rd_lo == rd_hi (would only deliver one of the two products).
+        if *m_rd == u_rd {
+            return None;
+        }
 
-        // Feed instruction 2 to gas sim (using decoded args, no redundant decode)
+        // Feed instruction 2 to gas sim (using decoded args, no redundant decode).
+        // Fused mul-pair instructions are never terminators — no gas block binding.
         let fc = javm_exec::gas_cost::fast_cost_from_decoded(
             op2 as u8,
             &args2,
@@ -832,33 +841,76 @@ impl Compiler {
         );
         gas_sim.feed(&fc);
 
-        // Bind labels
-        // Fused mul-pair instructions are never terminators — no gas block binding.
-
         let (a, b) = (REG_MAP[*m_ra], REG_MAP[*m_rb]);
         let (rd_lo, rd_hi) = (REG_MAP[*m_rd], REG_MAP[u_rd]);
+        let phi11 = REG_MAP[11]; // RAX
+        debug_assert_eq!(phi11, Reg::RAX);
 
-        self.asm.push(Reg::RAX);
-        self.asm.push(SCRATCH);
-        self.asm.mov_rr(Reg::RAX, a);
-        let mul_src = if b == Reg::RAX {
-            self.asm.mov_load64(SCRATCH, Reg::RSP, 8);
+        // Strategy:
+        //   1. Get A's value into RAX (preserve φ[11] if it's neither rd_lo
+        //      nor rd_hi).
+        //   2. Get B's value into a non-RAX, non-RDX register (mul_src).
+        //   3. MUL/IMUL mul_src → RDX:RAX.
+        //   4. Move RAX → rd_lo (skip if rd_lo is RAX, value already there).
+        //   5. Move RDX → rd_hi (skip if rd_hi is RDX = SCRATCH, but SCRATCH
+        //      isn't a PVM register, so rd_hi is always ≠ RDX).
+        //   6. Restore φ[11] from stack if we saved it.
+        //
+        // Order of moves matters when rd_lo or rd_hi aliases A or B:
+        //   - rd_hi aliases A: writing rd_hi clobbers A's home, but A's
+        //     value was already consumed by mul. OK.
+        //   - rd_lo aliases B: writing rd_lo overwrites B's home. mul has
+        //     already consumed B. OK.
+        //   - rd_lo == RAX: RAX already holds low; skip the mov.
+        //
+        // We preserve φ[11] when neither rd writes to it (the rest of the
+        // program may still expect RAX to hold φ[11]'s value).
+        let need_save_phi11 = rd_lo != phi11 && rd_hi != phi11;
+
+        if need_save_phi11 {
+            self.asm.push(phi11);
+        }
+
+        // If B is RAX, its value is now either in RAX (where mul wants A)
+        // or on the stack (above) if we saved. Load to SCRATCH before
+        // clobbering RAX with A.
+        let mul_src = if b == phi11 {
+            if need_save_phi11 {
+                // φ[11]'s original value is at [RSP], which is B's value.
+                self.asm.mov_load64(SCRATCH, Reg::RSP, 0);
+            } else {
+                // Didn't save; B's value is still in RAX. But we're about
+                // to overwrite RAX with A. Stash B to SCRATCH first.
+                self.asm.mov_rr(SCRATCH, b);
+            }
             SCRATCH
         } else {
             b
         };
+
+        // Load A into RAX.
+        if a != phi11 {
+            self.asm.mov_rr(phi11, a);
+        }
+
         if signed {
             self.asm.imul_rdx_rax(mul_src);
         } else {
             self.asm.mul_rdx_rax(mul_src);
         }
-        self.asm.push(SCRATCH);
-        self.asm.push(Reg::RAX);
-        self.asm.mov_load64(SCRATCH, Reg::RSP, 16);
-        self.asm.mov_load64(Reg::RAX, Reg::RSP, 24);
-        self.asm.mov_load64(rd_lo, Reg::RSP, 0);
-        self.asm.mov_load64(rd_hi, Reg::RSP, 8);
-        self.asm.add_ri(Reg::RSP, 32);
+
+        // Write rd_lo (from RAX) first. If rd_lo == phi11, no-op. If rd_lo
+        // == SCRATCH that's impossible (SCRATCH isn't a PVM reg).
+        if rd_lo != phi11 {
+            self.asm.mov_rr(rd_lo, phi11);
+        }
+        // Write rd_hi (from RDX = SCRATCH).
+        self.asm.mov_rr(rd_hi, SCRATCH);
+
+        if need_save_phi11 {
+            self.asm.pop(phi11);
+        }
+
         self.invalidate_all_regs();
         Some(pc2 + 1 + skip2 - pc)
     }
