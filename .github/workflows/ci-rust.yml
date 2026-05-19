@@ -71,7 +71,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, rust-src
+          targets: x86_64-unknown-none
 
       - uses: Swatinem/rust-cache@v2
 
@@ -98,25 +99,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rust-src
+          targets: x86_64-unknown-none
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Workspace tests
-        run: cargo test --locked --workspace --release
-        env:
-          RUSTFLAGS: "-D warnings"
-
-  test-macos:
-    name: Tests (macOS)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rust-src
-
-      - uses: Swatinem/rust-cache@v2
+      # nub-host-kvm uses /dev/kvm; standard ubuntu-latest runners
+      # have nested-virt available but /dev/kvm is owned by `kvm`
+      # group and not writable by the runner user. Install a udev
+      # rule that makes the device world-rw.
+      - name: Enable /dev/kvm access
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
 
       - name: Workspace tests
         run: cargo test --locked --workspace --release
