@@ -1,3 +1,10 @@
+---
+title: Benchmark
+linkTitle: Benchmark
+weight: 4
+url: /benchmark/
+---
+
 # Grey PVM Benchmark Results
 
 Grey's RISC-V recompiler vs PolkaVM's compiler backend, measured on 8 workloads covering compute, memory, crypto, and host call patterns.

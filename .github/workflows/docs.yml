@@ -15,20 +15,33 @@ concurrency:
   group: pages-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  HUGO_VERSION: 0.159.0
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      # -- Zensical (main site) --
-      - uses: actions/setup-python@v5
         with:
-          python-version: 3.x
-      - run: pip install zensical
-      - run: zensical build --clean
+          fetch-depth: 0
 
-      # -- JarBook (spec subfolder) --
+      # -- Hugo + Hextra (main site) --
+      - name: Install Hugo (extended)
+        run: |
+          curl -fsSL -o /tmp/hugo.deb \
+            "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.deb"
+          sudo dpkg -i /tmp/hugo.deb
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build Hugo site
+        working-directory: website
+        run: hugo --minify --gc --destination ../site
+
+      # -- JarBook (Lean spec, served at /lean/) --
       - name: Install elan
         run: |
           curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
@@ -59,9 +72,9 @@ jobs:
         working-directory: spec
         run: make book
 
-      # -- Combine --
+      # -- Combine: JarBook served at /lean/ (the /spec/ path now hosts the minimum-v3 spec docs) --
       - name: Copy JarBook into site
-        run: cp -r spec/_out/html-multi site/spec
+        run: cp -r spec/_out/html-multi site/lean
 
       - uses: actions/upload-pages-artifact@v4
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
