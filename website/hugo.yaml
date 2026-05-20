@@ -41,6 +41,11 @@ params:
     displayPoweredBy: false
   toc:
     displayTags: true
+  blog:
+    list:
+      displayTags: true
+      sortBy: date
+      sortOrder: desc
 
 menu:
   main:
@@ -56,14 +61,18 @@ menu:
       name: Lean Book
       url: /lean/
       weight: 3
+    - identifier: blog
+      name: Blog
+      pageRef: /blog
+      weight: 4
     - identifier: matrix
       name: Matrix
       url: https://matrix.to/#/#jar:matrix.org
-      weight: 4
+      weight: 5
     - identifier: github
       name: GitHub
       url: https://github.com/jarchain/jar
-      weight: 5
+      weight: 6
       params:
         icon: github
 
