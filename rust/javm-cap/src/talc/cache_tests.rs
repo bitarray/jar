@@ -671,6 +671,72 @@ fn publish_image_rejects_out_of_range_endpoint() {
 }
 
 #[test]
+fn publish_data_paged_round_trips() {
+    let mut cache = Cache::new_in(Global);
+    let p0 = vec![0xAAu8; 4096];
+    let p1 = vec![0xBBu8; 4096];
+    let pages = [Some(p0.as_slice()), None, Some(p1.as_slice())];
+    let h = cache
+        .publish_data_paged(4096, &pages, 4096 * 3)
+        .expect("publish");
+
+    // Refcount of the paged blob = 1 (publisher).
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(h)), Some(1));
+    let cap = cache.get(CapHashOrRef::Hash(h)).expect("present");
+    match cap {
+        Cap::Data(d) => {
+            assert_eq!(d.size, 4096 * 3);
+            match &d.content {
+                DataContent::Paged { page_size, pages } => {
+                    assert_eq!(*page_size, 4096);
+                    assert_eq!(pages.len(), 3);
+                    assert!(matches!(pages[0], PageSlot::Loaded(_)));
+                    assert!(matches!(pages[1], PageSlot::Empty));
+                    assert!(matches!(pages[2], PageSlot::Loaded(_)));
+                    // Loaded pages start with refcount 1 (the page is
+                    // uniquely owned by the DataCap that holds it).
+                    if let PageSlot::Loaded(pr) = &pages[0] {
+                        assert_eq!(pr.refcount(), 1);
+                        assert_eq!(pr.get().bytes.as_slice(), &[0xAAu8; 4096][..]);
+                    }
+                }
+                _ => panic!("expected paged content"),
+            }
+        }
+        _ => panic!("expected Data cap"),
+    }
+}
+
+#[test]
+fn publish_data_paged_rejects_mismatched_page_length() {
+    let mut cache = Cache::new_in(Global);
+    let bad = vec![0u8; 4095]; // wrong size
+    let pages = [Some(bad.as_slice())];
+    let err = cache.publish_data_paged(4096, &pages, 4096);
+    assert!(matches!(
+        err,
+        Err(super::cache::CacheError::PageSizeMismatch {
+            expected: 4096,
+            got: 4095,
+        })
+    ));
+    // No partial state: cache stays empty on the failure path.
+    assert_eq!(cache.blob_count(), 0);
+}
+
+#[test]
+fn publish_data_paged_is_idempotent_on_identical_content() {
+    let mut cache = Cache::new_in(Global);
+    let p = vec![0x42u8; 4096];
+    let pages = [Some(p.as_slice()), None];
+    let h1 = cache.publish_data_paged(4096, &pages, 8192).unwrap();
+    let h2 = cache.publish_data_paged(4096, &pages, 8192).unwrap();
+    assert_eq!(h1, h2);
+    // Second publish bumped the blob's refcount.
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(h1)), Some(2));
+}
+
+#[test]
 fn get_mut_image_or_type_errors() {
     let mut cache = Cache::new_in(Global);
     // Image: requires owned content; we set up a minimal one.

@@ -25,6 +25,9 @@ use allocator_api2::alloc::{Allocator, Global};
 use allocator_api2::boxed::Box as ABox;
 use allocator_api2::vec::Vec as AVec;
 
+use core::sync::atomic::AtomicU32;
+
+use crate::hash::{Blake2b256, Hash as _};
 use crate::slot::SlotIdx;
 
 use super::cap::{Cap, CapHash, CapHashOrRef, CapRef, NUM_REGS};
@@ -34,7 +37,7 @@ use super::entry::CacheEntry;
 use super::hash::cap_hash;
 use super::image::{ImageCap, ImageConvertError, image_cap_in};
 use super::instance::{InstanceCap, RwOverlay};
-use super::page::PageSlot;
+use super::page::{PageBytes, PageRef, PageSlot};
 
 /// Talc-friendly Box alias — `allocator_api2::Box` parameterised on
 /// the cap's allocator.
@@ -52,6 +55,8 @@ pub enum CacheError {
     NonMutableKind,
     #[error("image conversion failed: {0}")]
     ImageConvertFailed(#[from] ImageConvertError),
+    #[error("paged data: page length mismatch (expected={expected}, got={got})")]
+    PageSizeMismatch { expected: u32, got: usize },
 }
 
 pub struct Cache<A: Allocator + Clone = Global> {
@@ -284,6 +289,65 @@ impl<A: Allocator + Clone> Cache<A> {
         let cap = Cap::Data(DataCap {
             size,
             content: DataContent::Inline(buf),
+        });
+        let hash = cap_hash(&cap);
+        self.put_blob(hash, cap)?;
+        Ok(hash)
+    }
+
+    /// Publish a paged DataCap. Each entry in `pages` is `None` for
+    /// the canonical zero page or `Some(bytes)` for a loaded page;
+    /// loaded byte slices must each equal `page_size` (mismatched
+    /// length is a caller bug and returns [`CacheError::PageSizeMismatch`]).
+    ///
+    /// `size` is the logical byte length of the data (typically
+    /// `pages.len() * page_size`, but the caller chooses — paged
+    /// DataCaps may declare a smaller logical size than their backing
+    /// page array).
+    ///
+    /// Allocates per-page slabs through this cache's allocator and
+    /// wraps each in a [`PageRef`] with refcount=1. Hashes the cap and
+    /// inserts it as a blob.
+    pub fn publish_data_paged(
+        &mut self,
+        page_size: u32,
+        pages: &[Option<&[u8]>],
+        size: u64,
+    ) -> Result<CapHash, CacheError> {
+        let page_size_usize = page_size as usize;
+        let mut slots: AVec<PageSlot<A>, A> =
+            AVec::with_capacity_in(pages.len(), self.alloc.clone());
+        for p in pages {
+            match p {
+                None => slots.push(PageSlot::Empty),
+                Some(bytes) => {
+                    if bytes.len() != page_size_usize {
+                        return Err(CacheError::PageSizeMismatch {
+                            expected: page_size,
+                            got: bytes.len(),
+                        });
+                    }
+                    let hash = Blake2b256::hash(bytes);
+                    let mut buf: AVec<u8, A> =
+                        AVec::with_capacity_in(bytes.len(), self.alloc.clone());
+                    buf.extend_from_slice(bytes);
+                    let pb = PageBytes {
+                        refcount: AtomicU32::new(1),
+                        hash,
+                        bytes: buf,
+                    };
+                    let pr: PageRef<A> = PageRef::new_in(pb, self.alloc.clone())
+                        .map_err(|_| CacheError::AllocFailure)?;
+                    slots.push(PageSlot::Loaded(pr));
+                }
+            }
+        }
+        let cap = Cap::Data(DataCap {
+            size,
+            content: DataContent::Paged {
+                page_size,
+                pages: slots,
+            },
         });
         let hash = cap_hash(&cap);
         self.put_blob(hash, cap)?;
