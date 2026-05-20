@@ -27,11 +27,15 @@
 //! - Layout constants ([`STATE_CACHE_VA`], [`STATE_CACHE_SIZE`],
 //!   [`INSTANCE_INDEX_OFFSET`], [`TALC_HEAP_OFFSET`]).
 
+pub mod directory;
 pub mod index;
 pub mod talc_alloc;
 pub mod talc_arc;
 pub mod talc_box;
 
+pub use directory::{
+    BlobSlot, CacheDirectory, InstanceSlot, MAX_BLOB_SLOTS, MAX_INSTANCE_SLOTS,
+};
 pub use index::{INSTANCE_INDEX_OFFSET, IndexSlot, InstanceIndex, MAX_ENDPOINTS, MAX_INDEX_SLOTS};
 pub use talc_alloc::TalcAlloc;
 pub use talc_arc::{Aarc, AarcRefCounted, TalcArc, TalcRefCounted};
