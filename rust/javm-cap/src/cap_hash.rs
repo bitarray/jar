@@ -16,8 +16,8 @@
 //! cap's current state (no separate stored field — we removed the
 //! stale-prone `content_hash` cache from the new types).
 
-use allocator_api2::alloc::Allocator;
 use alloc::vec::Vec;
+use allocator_api2::alloc::Allocator;
 
 use crate::bmt::Bmt;
 use crate::hash::{Blake2b256, Hash};
@@ -237,11 +237,11 @@ mod tests {
     use allocator_api2::vec::Vec as AVec;
     use core::sync::atomic::AtomicU32;
 
-    use crate::slot::SlotIdx;
     use crate::cnode::CNodeSlotEntry;
     use crate::image_cap::ImageCap;
     use crate::instance::InstanceCap;
     use crate::page::{PageBytes, PageRef};
+    use crate::slot::SlotIdx;
 
     #[test]
     fn type_cap_matches_old_protocol() {

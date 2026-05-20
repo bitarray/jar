@@ -191,8 +191,8 @@ pub struct TypeCap {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::cnode::InMemoryCNode;
+    use super::*;
 
     fn instance_a() -> Cap {
         Cap::Instance(InstanceCap {

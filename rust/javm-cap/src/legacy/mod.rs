@@ -8,8 +8,6 @@ pub mod cap;
 pub mod cnode;
 pub mod ops;
 
-pub use cap::{
-    CNodeCap, Cap, CapHash, CapKind, DataCap, ImageCap, InstanceCap, TypeCap,
-};
+pub use cap::{CNodeCap, Cap, CapHash, CapKind, DataCap, ImageCap, InstanceCap, TypeCap};
 pub use cnode::{CNodeBackend, CnodeHash, InMemoryCNode, SlotHasher};
 pub use ops::{mgmt_cnode_mint, mgmt_cnode_swap, mgmt_copy, mgmt_drop, mgmt_move};

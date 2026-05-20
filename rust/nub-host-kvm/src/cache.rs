@@ -26,13 +26,11 @@ use std::ptr::NonNull;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use javm_cap::slot::SlotIdx;
-use javm_cap::{
-    Cache as TypedCache, CapHashOrRef, CapRef, ImageCap as TImageCap, image_cap_in,
-};
+use javm_cap::{Cache as TypedCache, CapHashOrRef, CapRef, ImageCap as TImageCap, image_cap_in};
 use nub_arch_x86_abi::CapHash;
 use nub_host_common::cache::{
-    BlobSlot, CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheTalcLock, InstanceSlot, STATE_CACHE_SIZE,
-    STATE_CACHE_VA, TALC_HEAP_OFFSET, TALC_HEAP_SIZE, TalcAlloc,
+    BlobSlot, CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheTalcLock, InstanceSlot,
+    STATE_CACHE_SIZE, STATE_CACHE_VA, TALC_HEAP_OFFSET, TALC_HEAP_SIZE, TalcAlloc,
 };
 use talc::source::Manual;
 
@@ -308,17 +306,16 @@ impl Cache {
 
     /// Publish an inline DataCap and record it in the directory.
     pub fn publish_data_inline(&mut self, bytes: &[u8]) -> Result<CapHash> {
-        let h = self.typed_cache.publish_data_inline(bytes).map_err(CacheError::from)?;
+        let h = self
+            .typed_cache
+            .publish_data_inline(bytes)
+            .map_err(CacheError::from)?;
         self.touch_blob(h)?;
         Ok(h)
     }
 
     /// Publish an inline DataCap with explicit logical size.
-    pub fn publish_data_inline_with_size(
-        &mut self,
-        bytes: &[u8],
-        size: u64,
-    ) -> Result<CapHash> {
+    pub fn publish_data_inline_with_size(&mut self, bytes: &[u8], size: u64) -> Result<CapHash> {
         let h = self
             .typed_cache
             .publish_data_inline_with_size(bytes, size)
@@ -331,7 +328,10 @@ impl Cache {
     /// pinned/initial slots, publishes each Data, then publishes the
     /// `ImageCap`. Records the resulting Image blob in the directory.
     pub fn publish_image(&mut self, image: &javm_cap::image::Image) -> Result<CapHash> {
-        let h = self.typed_cache.publish_image(image).map_err(CacheError::from)?;
+        let h = self
+            .typed_cache
+            .publish_image(image)
+            .map_err(CacheError::from)?;
         self.touch_blob(h)?;
         Ok(h)
     }
@@ -426,10 +426,9 @@ impl Cache {
             }
             return Ok(());
         }
-        let idx = unsafe { CacheDirectory::first_empty_blob(dir_ptr) }
-            .ok_or(CacheError::BlobDirectoryFull(
-                nub_host_common::cache::MAX_BLOB_SLOTS,
-            ))?;
+        let idx = unsafe { CacheDirectory::first_empty_blob(dir_ptr) }.ok_or(
+            CacheError::BlobDirectoryFull(nub_host_common::cache::MAX_BLOB_SLOTS),
+        )?;
         let slot = unsafe { CacheDirectory::blob_slot_ptr(dir_ptr, idx) };
         unsafe {
             (*slot).hash = hash;
@@ -483,10 +482,7 @@ mod tests {
             "cache region must be mapped at STATE_CACHE_VA (host VA == guest VA invariant)"
         );
         let dir = cache.directory();
-        assert_eq!(
-            dir.blob_count.load(std::sync::atomic::Ordering::Acquire),
-            0
-        );
+        assert_eq!(dir.blob_count.load(std::sync::atomic::Ordering::Acquire), 0);
         assert_eq!(
             dir.instance_count
                 .load(std::sync::atomic::Ordering::Acquire),
@@ -501,10 +497,7 @@ mod tests {
             .publish_data_inline(&[0xAA, 0xBB, 0xCC])
             .expect("publish");
         let dir = cache.directory();
-        assert_eq!(
-            dir.blob_count.load(std::sync::atomic::Ordering::Acquire),
-            1
-        );
+        assert_eq!(dir.blob_count.load(std::sync::atomic::Ordering::Acquire), 1);
         let dir_ptr = dir as *const CacheDirectory;
         let (idx, slot_ptr) = unsafe { CacheDirectory::find_blob(dir_ptr, &h) }.expect("found");
         assert_eq!(idx, 0);
@@ -526,10 +519,7 @@ mod tests {
         let dir = cache.directory();
         // Only one directory slot consumed (touch_blob updates an
         // existing slot rather than allocating a new one).
-        assert_eq!(
-            dir.blob_count.load(std::sync::atomic::Ordering::Acquire),
-            1
-        );
+        assert_eq!(dir.blob_count.load(std::sync::atomic::Ordering::Acquire), 1);
     }
 
     #[test]
@@ -567,10 +557,7 @@ mod tests {
             .expect("instance");
         let dir = cache.directory();
         // 4 blob entries in the directory (data, cnode, image, instance).
-        assert_eq!(
-            dir.blob_count.load(std::sync::atomic::Ordering::Acquire),
-            4
-        );
+        assert_eq!(dir.blob_count.load(std::sync::atomic::Ordering::Acquire), 4);
         // Each hash resolves.
         let dir_ptr = dir as *const CacheDirectory;
         for &h in &[data_h, cnode_h, image_h, inst_h] {

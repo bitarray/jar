@@ -31,10 +31,10 @@ use crate::hash::{Blake2b256, Hash as _};
 use crate::slot::SlotIdx;
 
 use super::cap::{Cap, CapHash, CapHashOrRef, CapRef, NUM_REGS};
+use super::cap_hash::cap_hash;
 use super::cnode::{CNodeCap, CNodeSlotEntry};
 use super::data::{DataCap, DataContent};
 use super::entry::CacheEntry;
-use super::cap_hash::cap_hash;
 use super::image_cap::{ImageCap, ImageConvertError, image_cap_in};
 use super::instance::{InstanceCap, RwOverlay};
 use super::page::{PageBytes, PageRef, PageSlot};
@@ -66,6 +66,21 @@ pub struct Cache<A: Allocator + Clone = Global> {
     next_ref: u64,
 }
 
+impl Cache<Global> {
+    /// Construct an empty heap-backed cache. Equivalent to
+    /// `Cache::new_in(Global)` for callers that don't want an
+    /// `allocator_api2` dependency.
+    pub fn new() -> Self {
+        Self::new_in(Global)
+    }
+}
+
+impl Default for Cache<Global> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<A: Allocator + Clone> Cache<A> {
     /// Construct an empty cache that allocates cap content through
     /// `alloc`.
@@ -85,6 +100,13 @@ impl<A: Allocator + Clone> Cache<A> {
     }
     pub fn instance_count(&self) -> usize {
         self.instances.len()
+    }
+
+    /// Iterate the cache's blob tier in sorted `CapHash` order. Useful
+    /// for state-root computations that walk all content-addressed caps
+    /// deterministically. `BTreeMap`'s iter is already sorted by key.
+    pub fn iter_blobs(&self) -> impl Iterator<Item = (&CapHash, &Cap<A>)> {
+        self.blobs.iter().map(|(h, b)| (h, &b.cap))
     }
 
     /// Get a shared reference to the cap stored under `key`.
@@ -132,8 +154,8 @@ impl<A: Allocator + Clone> Cache<A> {
             return Ok(prev + 1);
         }
         let entry = CacheEntry::new(cap);
-        let boxed = ABox::try_new_in(entry, self.alloc.clone())
-            .map_err(|_| CacheError::AllocFailure)?;
+        let boxed =
+            ABox::try_new_in(entry, self.alloc.clone()).map_err(|_| CacheError::AllocFailure)?;
         self.blobs.insert(hash, boxed);
         Ok(1)
     }
@@ -142,10 +164,13 @@ impl<A: Allocator + Clone> Cache<A> {
     /// allocated `CapRef`. Refcount starts at 1.
     pub fn put_instance(&mut self, cap: Cap<A>) -> Result<CapRef, CacheError> {
         let entry = CacheEntry::new(cap);
-        let boxed = ABox::try_new_in(entry, self.alloc.clone())
-            .map_err(|_| CacheError::AllocFailure)?;
+        let boxed =
+            ABox::try_new_in(entry, self.alloc.clone()).map_err(|_| CacheError::AllocFailure)?;
         let r = self.next_ref;
-        self.next_ref = self.next_ref.checked_add(1).expect("CapRef space exhausted");
+        self.next_ref = self
+            .next_ref
+            .checked_add(1)
+            .expect("CapRef space exhausted");
         self.instances.insert(r, boxed);
         Ok(r)
     }
@@ -171,9 +196,7 @@ impl<A: Allocator + Clone> Cache<A> {
     pub fn decref(&mut self, key: CapHashOrRef) -> Result<u32, CacheError> {
         let prev_count = {
             let entry = match key {
-                CapHashOrRef::Hash(h) => {
-                    self.blobs.get(&h).ok_or(CacheError::BlobMissing)?
-                }
+                CapHashOrRef::Hash(h) => self.blobs.get(&h).ok_or(CacheError::BlobMissing)?,
                 CapHashOrRef::Ref(r) => self
                     .instances
                     .get(&r)
@@ -244,8 +267,10 @@ impl<A: Allocator + Clone> Cache<A> {
                         .expect("present (we just observed it)");
                     boxed.refcount.store(1, Ordering::Release);
                     let r = self.next_ref;
-                    self.next_ref =
-                        self.next_ref.checked_add(1).expect("CapRef space exhausted");
+                    self.next_ref = self
+                        .next_ref
+                        .checked_add(1)
+                        .expect("CapRef space exhausted");
                     self.instances.insert(r, boxed);
                     Ok(r)
                 } else {
@@ -438,10 +463,7 @@ impl<A: Allocator + Clone> Cache<A> {
     /// each slot's target blob (refcount equals the number of slots
     /// referencing it), and the publisher does not transitively hold
     /// the Data blobs themselves.
-    pub fn publish_image(
-        &mut self,
-        image: &crate::image::Image,
-    ) -> Result<CapHash, CacheError> {
+    pub fn publish_image(&mut self, image: &crate::image::Image) -> Result<CapHash, CacheError> {
         let mut my_published: AVec<CapHash> = AVec::new();
         let result = self.publish_image_inner(image, &mut my_published);
         // Release temporary holds taken by internal publish_data calls.
@@ -797,9 +819,8 @@ fn collect_ref_targets<A: Allocator + Clone>(cap: &Cap<A>) -> AVec<CapRef> {
 /// `CapHashOrRef::Hash(h)` according to the `(r, h)` mapping in
 /// `resolved`.
 fn rewrite_ref_targets<A: Allocator + Clone>(cap: &mut Cap<A>, resolved: &[(CapRef, CapHash)]) {
-    let lookup = |r: CapRef| -> Option<CapHash> {
-        resolved.iter().find(|(k, _)| *k == r).map(|(_, h)| *h)
-    };
+    let lookup =
+        |r: CapRef| -> Option<CapHash> { resolved.iter().find(|(k, _)| *k == r).map(|(_, h)| *h) };
     match cap {
         Cap::CNode(cn) => {
             for slot in cn.slots.iter_mut() {
@@ -824,10 +845,7 @@ fn rewrite_ref_targets<A: Allocator + Clone>(cap: &mut Cap<A>, resolved: &[(CapR
 /// Shallow-clone a cap: duplicate the slot/page table allocations
 /// only, sharing all targets. Targets' refcounts must be bumped by
 /// the caller after this returns.
-fn shallow_clone_cap<A: Allocator + Clone>(
-    cap: &Cap<A>,
-    alloc: A,
-) -> Result<Cap<A>, CacheError> {
+fn shallow_clone_cap<A: Allocator + Clone>(cap: &Cap<A>, alloc: A) -> Result<Cap<A>, CacheError> {
     match cap {
         Cap::CNode(cn) => {
             let mut slots: AVec<CNodeSlotEntry, A> =
@@ -873,8 +891,7 @@ fn shallow_clone_cap<A: Allocator + Clone>(
             let mut new_overlays: AVec<RwOverlay<A>, A> =
                 AVec::with_capacity_in(inst.rw_overlays.len(), alloc.clone());
             for o in inst.rw_overlays.iter() {
-                let mut bytes: AVec<u8, A> =
-                    AVec::with_capacity_in(o.bytes.len(), alloc.clone());
+                let mut bytes: AVec<u8, A> = AVec::with_capacity_in(o.bytes.len(), alloc.clone());
                 bytes.extend_from_slice(o.bytes.as_slice());
                 new_overlays.push(RwOverlay {
                     start: o.start,

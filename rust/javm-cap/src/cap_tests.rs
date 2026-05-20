@@ -115,15 +115,29 @@ fn cnode_set_takes_and_keeps_slots_sorted() {
     assert_eq!(cnode.get(SlotIdx(0)), None);
 
     // Inserting out-of-order still leaves slots sorted.
-    let prior = cnode.set(SlotIdx(7), Some(CapHashOrRef::Hash([0x77; 32]))).unwrap();
+    let prior = cnode
+        .set(SlotIdx(7), Some(CapHashOrRef::Hash([0x77; 32])))
+        .unwrap();
     assert_eq!(prior, None);
-    cnode.set(SlotIdx(2), Some(CapHashOrRef::Hash([0x22; 32]))).unwrap();
-    cnode.set(SlotIdx(11), Some(CapHashOrRef::Hash([0xBB; 32]))).unwrap();
-    assert_eq!(cnode.slots.iter().map(|e| e.slot.get()).collect::<alloc::vec::Vec<u32>>(),
-        alloc::vec![2u32, 7, 11]);
+    cnode
+        .set(SlotIdx(2), Some(CapHashOrRef::Hash([0x22; 32])))
+        .unwrap();
+    cnode
+        .set(SlotIdx(11), Some(CapHashOrRef::Hash([0xBB; 32])))
+        .unwrap();
+    assert_eq!(
+        cnode
+            .slots
+            .iter()
+            .map(|e| e.slot.get())
+            .collect::<alloc::vec::Vec<u32>>(),
+        alloc::vec![2u32, 7, 11]
+    );
 
     // Overwrite returns prior target.
-    let prior = cnode.set(SlotIdx(7), Some(CapHashOrRef::Hash([0xFF; 32]))).unwrap();
+    let prior = cnode
+        .set(SlotIdx(7), Some(CapHashOrRef::Hash([0xFF; 32])))
+        .unwrap();
     assert_eq!(prior, Some(CapHashOrRef::Hash([0x77; 32])));
     assert_eq!(cnode.get(SlotIdx(7)), Some(CapHashOrRef::Hash([0xFF; 32])));
 
@@ -132,11 +146,21 @@ fn cnode_set_takes_and_keeps_slots_sorted() {
     assert_eq!(taken, Some(CapHashOrRef::Hash([0x22; 32])));
     assert_eq!(cnode.get(SlotIdx(2)), None);
     // Remaining slots stay sorted.
-    assert_eq!(cnode.slots.iter().map(|e| e.slot.get()).collect::<alloc::vec::Vec<u32>>(),
-        alloc::vec![7u32, 11]);
+    assert_eq!(
+        cnode
+            .slots
+            .iter()
+            .map(|e| e.slot.get())
+            .collect::<alloc::vec::Vec<u32>>(),
+        alloc::vec![7u32, 11]
+    );
 
     // Out-of-range slot rejected.
-    assert!(cnode.set(SlotIdx(16), Some(CapHashOrRef::Hash([0; 32]))).is_err());
+    assert!(
+        cnode
+            .set(SlotIdx(16), Some(CapHashOrRef::Hash([0; 32])))
+            .is_err()
+    );
 }
 
 #[test]
@@ -267,9 +291,7 @@ fn cache_entry_refcount_starts_at_one() {
     let cap: Cap<Global> = Cap::CNode(CNodeCap::new_in(4, Global).unwrap());
     let entry = CacheEntry::new(cap);
     assert_eq!(
-        entry
-            .refcount
-            .load(core::sync::atomic::Ordering::Relaxed),
+        entry.refcount.load(core::sync::atomic::Ordering::Relaxed),
         1
     );
 }
@@ -315,7 +337,14 @@ fn cache_with_talc_alloc_round_trips_full_publish_chain() {
     let regs = [0u64; NUM_REGS];
     let inst_h = cache
         .publish_instance_blob(
-            [0u8; 32], image_h, cnode_h, &[], 4096, regs, 0x1000, 1_000_000,
+            [0u8; 32],
+            image_h,
+            cnode_h,
+            &[],
+            4096,
+            regs,
+            0x1000,
+            1_000_000,
         )
         .expect("publish instance");
     assert_eq!(cache.refcount(CapHashOrRef::Hash(inst_h)), Some(1));

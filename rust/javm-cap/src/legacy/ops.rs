@@ -152,9 +152,9 @@ pub fn mgmt_cnode_mint(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::cap::{DataCap, ImageCap};
     use super::super::cnode::InMemoryCNode;
+    use super::*;
 
     fn fresh_table() -> InMemoryCNode<Cap> {
         InMemoryCNode::new(4).unwrap() // 16 slots

@@ -84,7 +84,6 @@ fn genesis_yields_stable_state_root_for_identical_images() {
 }
 
 #[test]
-#[ignore = "pending apply_event migration to Vm::invoke_cached (Commit 3)"]
 fn single_event_apply_halts_and_advances_state_root() {
     let mut k = Kernel::from_genesis(hello_world_chain_image());
     let root_pre = k.state_root();
@@ -111,7 +110,6 @@ fn single_event_apply_halts_and_advances_state_root() {
 }
 
 #[test]
-#[ignore = "pending apply_event migration to Vm::invoke_cached (Commit 3)"]
 fn multi_block_apply_advances_state_root_each_step() {
     let mut k = Kernel::from_genesis(hello_world_chain_image());
     let r0 = k.state_root();
@@ -150,7 +148,6 @@ fn multi_block_apply_advances_state_root_each_step() {
 }
 
 #[test]
-#[ignore = "pending apply_event migration to Vm::invoke_cached (Commit 3)"]
 fn identical_apply_sequences_produce_identical_state_roots() {
     let mut k1 = Kernel::from_genesis(hello_world_chain_image());
     let mut k2 = Kernel::from_genesis(hello_world_chain_image());
@@ -181,7 +178,6 @@ fn identical_apply_sequences_produce_identical_state_roots() {
 }
 
 #[test]
-#[ignore = "pending apply_event migration to Vm::invoke_cached (Commit 3)"]
 fn distinct_payloads_produce_distinct_state_roots() {
     // Two kernels, both apply a single event but with different
     // payload bytes. Post-apply state_roots must differ since

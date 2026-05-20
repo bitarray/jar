@@ -15,7 +15,6 @@ use scale::Decode;
 const BLOB: &[u8] = include_bytes!(env!("SIMPLE_CHAIN_BLOB"));
 
 #[test]
-#[ignore = "pending apply_event migration to Vm::invoke_cached (Commit 3)"]
 fn simple_chain_returns_sum() {
     // Decode the transpiler output as a v3 chain Image.
     let (image, _consumed) =

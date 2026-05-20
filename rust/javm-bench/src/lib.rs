@@ -21,8 +21,8 @@
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use javm_cap::image::{Image, PinnedCap};
 use javm_cap::NUM_REGS;
+use javm_cap::image::{Image, PinnedCap};
 use nub::{InvocationResult, Nub};
 use nub_arch_x86_abi::CapHash;
 use std::sync::{Mutex, OnceLock};
@@ -87,7 +87,16 @@ pub fn publish(nub: &mut Nub, image: &Image, endpoint_idx: u8) -> Published {
     //    nub_invoke_cached overrides them from the endpoint table +
     //    packet, so 0/0 is fine here.
     let instance_h = nub
-        .publish_instance([0u8; 32], image_h, cnode_h, &overlay_slices, mem_size, regs, 0, 0)
+        .publish_instance(
+            [0u8; 32],
+            image_h,
+            cnode_h,
+            &overlay_slices,
+            mem_size,
+            regs,
+            0,
+            0,
+        )
         .expect("publish_instance");
 
     Published {

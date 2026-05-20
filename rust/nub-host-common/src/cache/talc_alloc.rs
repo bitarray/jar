@@ -59,14 +59,15 @@ unsafe impl Allocator for TalcAlloc {
     fn allocate(&self, layout: core::alloc::Layout) -> Result<NonNull<[u8]>, AllocError> {
         // talc 5.x: `Talc::allocate` returns `Option<NonNull<u8>>`,
         // `deallocate` takes a raw `*mut u8`. Convert at the boundary.
-        let raw = unsafe { (*self.talc.as_ptr()).lock().allocate(layout) }
-            .ok_or(AllocError)?;
+        let raw = unsafe { (*self.talc.as_ptr()).lock().allocate(layout) }.ok_or(AllocError)?;
         Ok(NonNull::slice_from_raw_parts(raw, layout.size()))
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: core::alloc::Layout) {
         unsafe {
-            (*self.talc.as_ptr()).lock().deallocate(ptr.as_ptr(), layout);
+            (*self.talc.as_ptr())
+                .lock()
+                .deallocate(ptr.as_ptr(), layout);
         }
     }
 }

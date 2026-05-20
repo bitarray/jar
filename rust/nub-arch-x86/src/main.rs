@@ -122,8 +122,7 @@ mod guest {
         // SAFETY: cache mapping is installed (state_cache::lookup_cap
         // succeeded); pointers live inside the cache region.
         let code: Vec<u8> = img.code.as_slice().to_vec();
-        let bitmask: Vec<u8> =
-            javm_exec::unpack_bitmask(img.bitmask.as_slice(), code.len());
+        let bitmask: Vec<u8> = javm_exec::unpack_bitmask(img.bitmask.as_slice(), code.len());
         let jump_table: Vec<u32> = img.jump_table.as_slice().to_vec();
 
         // Endpoint baseline first, then layer the InstanceCap's

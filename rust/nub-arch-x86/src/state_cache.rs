@@ -83,9 +83,7 @@ pub fn lookup_blob<A: Allocator + Clone>(hash: &[u8; 32]) -> Option<&'static Cac
 
 /// Resolve an instance ref to its `CacheEntry`.
 #[allow(dead_code)]
-pub fn lookup_instance<A: Allocator + Clone>(
-    ref_id: u64,
-) -> Option<&'static CacheEntry<A>> {
+pub fn lookup_instance<A: Allocator + Clone>(ref_id: u64) -> Option<&'static CacheEntry<A>> {
     ensure_mapped().ok()?;
     let dir = directory_ptr();
     let (_, slot_ptr) = unsafe { CacheDirectory::find_instance(dir, ref_id) }?;

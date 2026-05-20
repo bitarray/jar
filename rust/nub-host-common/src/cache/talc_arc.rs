@@ -116,7 +116,9 @@ impl<T: AarcRefCounted, A: Allocator + Clone> Aarc<T, A> {
 impl<T: AarcRefCounted, A: Allocator + Clone> Clone for Aarc<T, A> {
     fn clone(&self) -> Self {
         unsafe {
-            (*self.ptr.as_ptr()).refcount().fetch_add(1, Ordering::Relaxed);
+            (*self.ptr.as_ptr())
+                .refcount()
+                .fetch_add(1, Ordering::Relaxed);
         }
         Self {
             ptr: self.ptr,

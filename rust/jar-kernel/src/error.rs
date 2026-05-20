@@ -10,7 +10,9 @@ pub enum KernelError {
     Cap(#[from] javm_cap::CapError),
     #[error("mgmt op failed: {0}")]
     Op(#[from] javm_cap::OpError),
-    #[error("file_id {0} not found in data_blobs registry")]
+    #[error("cache error: {0}")]
+    Cache(#[from] javm_cap::CacheError),
+    #[error("file_id {0} not found in cache")]
     FileNotFound(u64),
     #[error(
         "storage quota exhausted (quota_id {0}): tried to write {1} bytes, only {2} available)"

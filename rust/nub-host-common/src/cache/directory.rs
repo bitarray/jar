@@ -186,10 +186,7 @@ impl CacheDirectory {
     /// # Safety
     ///
     /// `this` must point at a live `CacheDirectory`; `idx < MAX_INSTANCE_SLOTS`.
-    pub unsafe fn instance_slot_ptr(
-        this: *mut CacheDirectory,
-        idx: usize,
-    ) -> *mut InstanceSlot {
+    pub unsafe fn instance_slot_ptr(this: *mut CacheDirectory, idx: usize) -> *mut InstanceSlot {
         debug_assert!(idx < MAX_INSTANCE_SLOTS);
         unsafe { core::ptr::addr_of_mut!((*this).instance_slots[idx]) }
     }

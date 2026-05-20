@@ -33,10 +33,7 @@ fn make_cnode_with(entries: &[(SlotIdx, CapHashOrRef)]) -> Cap<Global> {
         slots.push(CNodeSlotEntry { slot, target });
     }
     slots.sort_by_key(|e| e.slot);
-    Cap::CNode(CNodeCap {
-        size_log: 8,
-        slots,
-    })
+    Cap::CNode(CNodeCap { size_log: 8, slots })
 }
 
 #[test]
@@ -484,7 +481,9 @@ fn publish_image_inlines_pinned_data_blobs() {
 
     // Each pinned data should be a separate blob with refcount=1
     // (held by the image's one slot reference).
-    let data_a_hash = cache.publish_data_inline_with_size(bytes_a, bytes_a.len() as u64).unwrap();
+    let data_a_hash = cache
+        .publish_data_inline_with_size(bytes_a, bytes_a.len() as u64)
+        .unwrap();
     // The publish_data above bumped refcount; image already held it.
     // Refcount should now be 2 (image + temp publisher).
     assert_eq!(cache.refcount(CapHashOrRef::Hash(data_a_hash)), Some(2));
@@ -508,7 +507,9 @@ fn publish_image_duplicate_data_shared_with_per_slot_refcount() {
 
     // Recompute the data hash externally (bumps it once) so we can
     // observe the post-publish refcount, then release.
-    let data_hash = cache.publish_data_inline_with_size(bytes, bytes.len() as u64).unwrap();
+    let data_hash = cache
+        .publish_data_inline_with_size(bytes, bytes.len() as u64)
+        .unwrap();
     assert_eq!(
         cache.refcount(CapHashOrRef::Hash(data_hash)),
         Some(3),
@@ -592,8 +593,8 @@ fn publish_image_pinned_image_succeeds_when_sub_image_present() {
 #[test]
 fn publish_image_carries_endpoint_fields() {
     // Verify the conversion preserves the endpoint mapping.
-    use alloc::collections::BTreeMap;
     use crate::image::EndpointDef as ScaleEp;
+    use alloc::collections::BTreeMap;
     let mut img = crate::image::Image::empty();
     let mut initial_regs = BTreeMap::new();
     initial_regs.insert(1u8, 0x4000); // stack pointer (φ[1])
@@ -617,7 +618,10 @@ fn publish_image_carries_endpoint_fields() {
     };
     let ep = &img_cap.endpoints[7];
     assert_eq!(ep.entry_pc, 0x1000);
-    assert_eq!(ep.stack_top, 0x4000, "stack_top extracted from initial_regs[1]");
+    assert_eq!(
+        ep.stack_top, 0x4000,
+        "stack_top extracted from initial_regs[1]"
+    );
     assert_eq!(ep.arg_cnode_size, 4);
     assert_eq!(ep.initial_regs[1], 0x4000);
     assert_eq!(ep.initial_regs[11], 0x42);
@@ -647,8 +651,8 @@ fn publish_image_rejects_too_deep_source_path() {
 
 #[test]
 fn publish_image_rejects_out_of_range_endpoint() {
-    use alloc::collections::BTreeMap;
     use crate::image::EndpointDef as ScaleEp;
+    use alloc::collections::BTreeMap;
     let mut img = crate::image::Image::empty();
     img.endpoints.insert(
         // MAX_ENDPOINTS = 64; index 200 is out of range.
@@ -756,8 +760,5 @@ fn get_mut_image_or_type_errors() {
     cache.put_blob(h, img_cap).unwrap();
     // get_mut on Image is invalid in V1 (Images are immutable).
     let err = cache.get_mut(CapHashOrRef::Hash(h));
-    assert!(matches!(
-        err,
-        Err(super::cache::CacheError::NonMutableKind)
-    ));
+    assert!(matches!(err, Err(super::cache::CacheError::NonMutableKind)));
 }

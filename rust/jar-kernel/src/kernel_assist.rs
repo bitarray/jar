@@ -1,59 +1,54 @@
 //! σ-aware [`javm::KernelAssist`] implementation.
 //!
-//! Stage C.3 wires the production-side kernel-assist hooks against
-//! the canonical σ store. Compared with `javm::InProcessKernelAssist`
-//! (which holds everything in plain HashMaps), this impl:
+//! After the javm-cap consolidation (Commits 1-3 of the cap-type
+//! plan) the kernel assist holds only the ephemeral per-block kernel
+//! state — gas meters, storage quotas, yield catchers, file_id ↔
+//! cache-reference mapping. Cap content lives in σ's cache and is
+//! looked up through there; this trait surface no longer reaches
+//! into σ.
 //!
-//! - Holds the per-block ephemeral GasMeter / StorageQuota /
-//!   YieldCatcher tables in memory (NOT in σ — per design these
-//!   reset every block).
-//! - `host_open` / `host_save` route through σ.data_blobs for
-//!   file-id ↔ cache reference mapping.
-//!
-//! After the javm-cap consolidation (Commit 2 of the cap-type plan)
-//! the kernel assist no longer carries image_lookup / data_lookup /
-//! data_store — those are cache operations now. The jar-kernel needs
-//! a Commit 3 follow-up to migrate `apply_event` onto the cache-driven
-//! `Vm::invoke_cached` path; until then the data_payloads ↔ cache
-//! adapter helpers below preserve test scaffolding behaviour without
-//! sitting on the trait surface.
+//! NB: at this stage the host_open / host_save ecalls don't actually
+//! get exercised from inside `Vm::invoke_cached` — those ecalls trap
+//! because the cache borrow isn't threaded through to the kernel
+//! assist (a follow-up commit will wire it). The implementation is
+//! present so the trait surface compiles and stays exercisable from
+//! unit tests.
 
 use std::collections::HashMap;
 
 use javm::{KernelAssist, MeterId, QuotaId};
 use javm_cap::{Blake2b256, CapHash, CapHashOrRef, Hash};
 
-use crate::state::{DataBlob, FileId, State};
-
-/// σ-aware KernelAssist. Holds a `&mut State` borrow for the
-/// duration of a block apply.
-pub struct SigmaKernelAssist<'a> {
-    pub state: &'a mut State,
+/// σ-aware KernelAssist. Owns only ephemeral per-block kernel state.
+pub struct SigmaKernelAssist {
     /// Per-block ephemeral: gas meters reset at block start.
     gas_meters: HashMap<MeterId, u64>,
     /// Per-block ephemeral: storage quotas reset at block start.
     storage_quotas: HashMap<QuotaId, u64>,
-    /// Per-block ephemeral: yield catcher marker lists. Stage 4
-    /// jar-kernel uses native dispatch (Stage C.4) for YieldCatcher
-    /// endpoints; this map backs that dispatcher.
+    /// Per-block ephemeral: yield catcher marker lists.
     yield_catchers: HashMap<CapHash, Vec<CapHash>>,
     /// Monotonic nonce for `yield_catcher_new`.
     next_yc_nonce: u64,
+    /// file_id → cache reference. host_save mints fresh ids, host_open
+    /// reads through this map.
+    files: HashMap<u64, CapHashOrRef>,
+    next_file_id: u64,
 }
 
-impl<'a> SigmaKernelAssist<'a> {
-    pub fn new(state: &'a mut State) -> Self {
+impl SigmaKernelAssist {
+    pub fn new() -> Self {
         Self {
-            state,
             gas_meters: HashMap::new(),
             storage_quotas: HashMap::new(),
             yield_catchers: HashMap::new(),
             next_yc_nonce: 0,
+            files: HashMap::new(),
+            next_file_id: 1,
         }
     }
 
     /// Reset per-block ephemeral tables. Called at the start of each
-    /// block apply; preserves σ.
+    /// block apply.
     pub fn reset_block_state(&mut self) {
         self.gas_meters.clear();
         self.storage_quotas.clear();
@@ -70,27 +65,15 @@ impl<'a> SigmaKernelAssist<'a> {
     pub fn seed_root_quota(&mut self, budget: u64) {
         self.storage_quotas.insert(0, budget);
     }
+}
 
-    /// Look up raw bytes by content hash. Inherent helper kept for
-    /// pre-cache callers (apply_event payload registration); Commit 3
-    /// will migrate this to the cache.
-    pub fn data_lookup(&self, content_hash: CapHash) -> Option<Vec<u8>> {
-        self.state.data_payloads.get(&content_hash).cloned()
-    }
-
-    /// Store raw bytes under their content hash. Inherent helper
-    /// kept for pre-cache callers.
-    pub fn data_store(&mut self, bytes: &[u8]) -> CapHash {
-        let hash = Blake2b256::hash(bytes);
-        self.state
-            .data_payloads
-            .entry(hash)
-            .or_insert_with(|| bytes.to_vec());
-        hash
+impl Default for SigmaKernelAssist {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-impl<'a> KernelAssist for SigmaKernelAssist<'a> {
+impl KernelAssist for SigmaKernelAssist {
     // ---- Gas ----
     fn gas_meter_get(&self, meter_id: MeterId) -> u64 {
         self.gas_meters.get(&meter_id).copied().unwrap_or(0)
@@ -133,42 +116,24 @@ impl<'a> KernelAssist for SigmaKernelAssist<'a> {
         hash
     }
 
-    // ---- File registry (σ-backed) ----
+    // ---- File registry ----
     fn host_open(&mut self, file_id: u64) -> Option<CapHashOrRef> {
-        let blob = self.state.data_blobs.get(&FileId::from(file_id))?;
-        // Surface the file's content hash as a cache reference;
-        // jar-kernel callers stitch together a Cap::Data behind this
-        // hash via the cache (Commit 3 wires the publish step).
-        Some(CapHashOrRef::Hash(blob.content_hash))
+        self.files.get(&file_id).copied()
     }
 
     fn host_save(&mut self, data: CapHashOrRef, quota_id: u64) -> Option<u64> {
-        // Commit 3 will rewrite host_save to consult the cache for
-        // the data size + content hash. For now we accept only the
-        // Hash-form reference, debit a placeholder 1-byte charge,
-        // and register the file_id → content_hash mapping.
-        let content_hash = match data {
-            CapHashOrRef::Hash(h) => h,
-            CapHashOrRef::Ref(_) => return None,
-        };
-
+        // Without a cache borrow we can't read the data's size; debit
+        // a placeholder 1-byte charge so the mechanics are observable.
+        // A follow-up commit threads `&mut Cache<Global>` through to
+        // resolve the actual data size.
         let current = self.storage_quotas.get(&quota_id).copied().unwrap_or(0);
         if current < 1 {
             return None;
         }
         self.storage_quotas.insert(quota_id, current - 1);
-
-        let file_id = self.state.counters.allocate_file_id();
-        self.state.data_blobs.insert(
-            file_id,
-            DataBlob {
-                content_hash,
-                // Commit 3: read size from the cache. V1: zero.
-                size: 0,
-                refcount: 1,
-                backing_quota: quota_id,
-            },
-        );
+        let file_id = self.next_file_id;
+        self.next_file_id += 1;
+        self.files.insert(file_id, data);
         Some(file_id)
     }
 }
@@ -178,69 +143,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn host_open_returns_data_cap_for_registered_file() {
-        let mut state = State::new();
-        // Seed σ with a file at file_id 1.
-        state.data_payloads.insert([0x55; 32], b"hello".to_vec());
-        state.data_blobs.insert(
-            1,
-            DataBlob {
-                content_hash: [0x55; 32],
-                size: 5,
-                refcount: 1,
-                backing_quota: 0,
-            },
-        );
-        state.counters.next_file_id = 2;
-        let mut ka = SigmaKernelAssist::new(&mut state);
-        let data = ka.host_open(1).expect("registered file should resolve");
-        assert_eq!(data, CapHashOrRef::Hash([0x55; 32]));
-    }
-
-    #[test]
     fn host_save_debits_quota_and_allocates_file_id() {
-        let mut state = State::new();
-        let mut ka = SigmaKernelAssist::new(&mut state);
+        let mut ka = SigmaKernelAssist::new();
         ka.seed_root_quota(1000);
-        let payload = b"hello world";
-        let hash = ka.data_store(payload);
-        let file_id = ka.host_save(CapHashOrRef::Hash(hash), 0).unwrap();
-        assert_eq!(file_id, 0); // first allocation
-        // Commit 3 will plumb the real data size; for now the stub
-        // debits a placeholder 1 byte.
+        let file_id = ka.host_save(CapHashOrRef::Hash([0u8; 32]), 0).unwrap();
+        assert_eq!(file_id, 1); // first allocation
         assert_eq!(ka.storage_quota_get(0), 999);
-        assert_eq!(
-            ka.state.data_blobs.get(&file_id).unwrap().content_hash,
-            hash
-        );
+        assert_eq!(ka.host_open(file_id), Some(CapHashOrRef::Hash([0u8; 32])));
     }
 
     #[test]
     fn host_save_exhausted_quota_returns_none() {
-        let mut state = State::new();
-        let mut ka = SigmaKernelAssist::new(&mut state);
+        let mut ka = SigmaKernelAssist::new();
         // Quota 0 starts empty; any save should fail.
-        let payload = b"too much";
-        let hash = ka.data_store(payload);
-        assert!(ka.host_save(CapHashOrRef::Hash(hash), 0).is_none());
-    }
-
-    #[test]
-    fn data_round_trip_via_store_then_lookup() {
-        let mut state = State::new();
-        let mut ka = SigmaKernelAssist::new(&mut state);
-        let hash = ka.data_store(b"abc");
-        assert_eq!(ka.data_lookup(hash), Some(b"abc".to_vec()));
+        assert!(ka.host_save(CapHashOrRef::Hash([0u8; 32]), 0).is_none());
     }
 
     #[test]
     fn reset_block_state_clears_ephemeral_tables() {
-        let mut state = State::new();
-        let mut ka = SigmaKernelAssist::new(&mut state);
+        let mut ka = SigmaKernelAssist::new();
         ka.seed_root_gas(1000);
         ka.seed_root_quota(2000);
         ka.reset_block_state();
         assert_eq!(ka.gas_meter_get(0), 0);
         assert_eq!(ka.storage_quota_get(0), 0);
+    }
+
+    #[test]
+    fn yield_catcher_round_trip() {
+        let mut ka = SigmaKernelAssist::new();
+        let yc = ka.yield_catcher_new();
+        let marker = [0xAA; 32];
+        ka.yield_catcher_add(yc, marker);
+        assert_eq!(ka.yield_catcher_markers(yc), vec![marker]);
+        ka.yield_catcher_remove(yc, marker);
+        assert!(ka.yield_catcher_markers(yc).is_empty());
     }
 }
