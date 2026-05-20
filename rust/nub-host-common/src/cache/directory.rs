@@ -1,7 +1,7 @@
 //! `CacheDirectory` — guest-readable index of cache-resident caps.
 //!
 //! Lives in shared memory; the host populates it when publishing caps
-//! via `javm_cap::talc::Cache`, and the guest scans it to resolve
+//! via `javm_cap::Cache`, and the guest scans it to resolve
 //! `CapHashOrRef` keys into a usable virtual address for the
 //! corresponding `CacheEntry`.
 //!

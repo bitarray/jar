@@ -22,7 +22,7 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use javm_cap::image::{Image, PinnedCap};
-use javm_cap::talc::NUM_REGS;
+use javm_cap::NUM_REGS;
 use nub::{InvocationResult, Nub};
 use nub_arch_x86_abi::CapHash;
 use std::sync::{Mutex, OnceLock};

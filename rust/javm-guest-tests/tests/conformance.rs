@@ -58,7 +58,7 @@ fn run_interpreter(image: &Image, ep: u8) -> (u64, u64) {
 mod recomp {
     use super::*;
     use javm_cap::image::PinnedCap;
-    use javm_cap::talc::NUM_REGS;
+    use javm_cap::NUM_REGS;
     use nub::Nub;
     use std::cell::RefCell;
 

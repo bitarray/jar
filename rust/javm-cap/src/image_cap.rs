@@ -12,6 +12,7 @@ use crate::slot::SlotIdx;
 
 use super::cap::{CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
 
+#[derive(Clone, Debug)]
 pub struct ImageCap<A: Allocator + Clone = Global> {
     /// Bytecode bytes.
     pub code: Vec<u8, A>,

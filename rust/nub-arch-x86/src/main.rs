@@ -84,7 +84,7 @@ mod guest {
     /// (zero-copy).
     #[guest_function(fn_id = FN_ID_NUB_INVOKE_CACHED)]
     pub fn nub_invoke_cached(packet_bytes: &[u8]) -> Vec<u8> {
-        use javm_cap::talc::cap::Cap;
+        use javm_cap::cap::Cap;
 
         let packet = match InvokePacket::from_bytes(packet_bytes) {
             Some(p) => p,
@@ -201,7 +201,7 @@ mod guest {
     /// triple expected by `run_pvm_with_mem`. Missing entries become
     /// `(0, empty)` which `run_pvm_with_mem` treats as "no overlay".
     fn pack_overlays<A: allocator_api2::alloc::Allocator + Clone>(
-        overlays: &allocator_api2::vec::Vec<javm_cap::talc::instance::RwOverlay<A>, A>,
+        overlays: &allocator_api2::vec::Vec<javm_cap::instance::RwOverlay<A>, A>,
     ) -> (Overlay, Overlay, Overlay) {
         let mut packed = [(0u32, Vec::<u8>::new()), (0, Vec::new()), (0, Vec::new())];
         for (i, o) in overlays.iter().take(3).enumerate() {

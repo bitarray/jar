@@ -4,7 +4,7 @@
 //! `HostCall(42)` result.
 
 use javm_cap::image::{EndpointDef, Image};
-use javm_cap::talc::NUM_REGS;
+use javm_cap::NUM_REGS;
 use nub::Nub;
 use std::collections::BTreeMap;
 

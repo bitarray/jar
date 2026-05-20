@@ -18,6 +18,7 @@ use super::cap::CapHash;
 /// canonical zero page; `Loaded` holds a refcounted byte slab;
 /// `Missing` records the page's content hash so a host callback can
 /// later resolve it (V1: never observed — we always pre-publish).
+#[derive(Clone, Debug)]
 pub enum PageSlot<A: Allocator + Clone = Global> {
     Empty,
     Loaded(PageRef<A>),
@@ -31,6 +32,7 @@ pub type PageRef<A> = Aarc<PageBytes<A>, A>;
 
 /// One page's bytes plus metadata. The `refcount` is what the
 /// `Aarc` machinery uses to manage sharing.
+#[derive(Debug)]
 pub struct PageBytes<A: Allocator + Clone = Global> {
     pub refcount: AtomicU32,
     pub hash: CapHash,

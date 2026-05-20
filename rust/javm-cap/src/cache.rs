@@ -34,8 +34,8 @@ use super::cap::{Cap, CapHash, CapHashOrRef, CapRef, NUM_REGS};
 use super::cnode::{CNodeCap, CNodeSlotEntry};
 use super::data::{DataCap, DataContent};
 use super::entry::CacheEntry;
-use super::hash::cap_hash;
-use super::image::{ImageCap, ImageConvertError, image_cap_in};
+use super::cap_hash::cap_hash;
+use super::image_cap::{ImageCap, ImageConvertError, image_cap_in};
 use super::instance::{InstanceCap, RwOverlay};
 use super::page::{PageBytes, PageRef, PageSlot};
 

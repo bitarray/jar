@@ -9,8 +9,8 @@
 //! Pinned-slot enforcement is at this layer (not at the backend),
 //! because the pinning information is per-Image, not per-cnode.
 
-use crate::cap::{CNodeCap, Cap};
-use crate::cnode::CNodeBackend;
+use super::cap::{CNodeCap, Cap};
+use super::cnode::CNodeBackend;
 use crate::error::OpError;
 use crate::slot::SlotIdx;
 use alloc::sync::Arc;
@@ -144,7 +144,7 @@ pub fn mgmt_cnode_mint(
     if table.get(dst)?.is_some() {
         return Err(OpError::DestinationOccupied);
     }
-    let fresh = crate::cnode::InMemoryCNode::<Cap>::new(size_log)?;
+    let fresh = super::cnode::InMemoryCNode::<Cap>::new(size_log)?;
     let cap = Cap::CNode(CNodeCap::new(Arc::new(fresh)));
     table.set(dst, Some(cap))?;
     Ok(())
@@ -153,8 +153,8 @@ pub fn mgmt_cnode_mint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cap::{DataCap, ImageCap};
-    use crate::cnode::InMemoryCNode;
+    use super::super::cap::{DataCap, ImageCap};
+    use super::super::cnode::InMemoryCNode;
 
     fn fresh_table() -> InMemoryCNode<Cap> {
         InMemoryCNode::new(4).unwrap() // 16 slots
@@ -306,11 +306,11 @@ mod tests {
         // Now slot 2 holds the data cap; slot 7 holds the image cap.
         assert_eq!(
             t.get(SlotIdx(2)).unwrap().unwrap().kind(),
-            crate::CapKind::Data
+            super::super::cap::CapKind::Data
         );
         assert_eq!(
             t.get(SlotIdx(7)).unwrap().unwrap().kind(),
-            crate::CapKind::Image
+            super::super::cap::CapKind::Image
         );
     }
 
@@ -357,7 +357,7 @@ mod tests {
         let mut t = fresh_table();
         mgmt_cnode_mint(&mut t, &[], SlotIdx(5), 4).unwrap();
         let cap = t.get(SlotIdx(5)).unwrap().unwrap();
-        assert_eq!(cap.kind(), crate::CapKind::CNode);
+        assert_eq!(cap.kind(), super::super::cap::CapKind::CNode);
     }
 
     #[test]

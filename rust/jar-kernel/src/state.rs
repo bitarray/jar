@@ -19,9 +19,10 @@
 use scale::Encode;
 use std::collections::BTreeMap;
 
-use javm_cap::{Blake2b256, CapHash, Hash, InstanceCap};
+use javm_cap::legacy::InstanceCap;
+use javm_cap::{Blake2b256, CapHash, Hash};
 
-/// SCALE-encodable shadow of `javm_cap::InstanceCap`. Stored in σ
+/// SCALE-encodable shadow of `javm_cap::legacy::InstanceCap`. Stored in σ
 /// instead of the cap struct directly so we can derive Encode/Decode
 /// without modifying javm-cap.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Encode, scale::Decode)]

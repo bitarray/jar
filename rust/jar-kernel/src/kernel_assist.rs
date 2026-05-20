@@ -19,7 +19,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use javm::{KernelAssist, MeterId, QuotaId};
-use javm_cap::{Blake2b256, CapHash, DataCap, Hash, image::Image};
+use javm_cap::image::Image;
+use javm_cap::legacy::DataCap;
+use javm_cap::{Blake2b256, CapHash, Hash};
 
 use crate::state::{DataBlob, FileId, State};
 

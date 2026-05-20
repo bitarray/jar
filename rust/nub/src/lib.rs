@@ -20,7 +20,7 @@
 use allocator_api2::alloc::Global;
 use anyhow::Result;
 use javm_cap::slot::SlotIdx;
-use javm_cap::talc::{
+use javm_cap::{
     Cache as TypedCache, CapHashOrRef, NUM_REGS,
     cap::Cap,
 };

@@ -26,8 +26,8 @@ use std::ptr::NonNull;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use javm_cap::slot::SlotIdx;
-use javm_cap::talc::{
-    Cache as TypedCache, CapHashOrRef, CapRef, image::ImageCap as TImageCap, image_cap_in,
+use javm_cap::{
+    Cache as TypedCache, CapHashOrRef, CapRef, ImageCap as TImageCap, image_cap_in,
 };
 use nub_arch_x86_abi::CapHash;
 use nub_host_common::cache::{
@@ -146,9 +146,9 @@ pub enum CacheError {
     /// unavailable — should never happen in practice.
     #[error("blob not found for hash {0:?}")]
     BlobMissing([u8; 32]),
-    /// The inner `javm_cap::talc::Cache` returned an error.
+    /// The inner `javm_cap::Cache` returned an error.
     #[error("typed cache error: {0}")]
-    Typed(#[from] javm_cap::talc::CacheError),
+    Typed(#[from] javm_cap::CacheError),
 }
 
 impl From<CacheError> for HyperlightError {
@@ -385,7 +385,7 @@ impl Cache {
         root_cnode: CapHash,
         rw_overlays: &[(u32, &[u8])],
         mem_size: u32,
-        regs: [u64; javm_cap::talc::NUM_REGS],
+        regs: [u64; javm_cap::NUM_REGS],
         pc: u64,
         gas_remaining: u64,
     ) -> Result<CapHash> {
@@ -534,7 +534,7 @@ mod tests {
 
     #[test]
     fn publish_chain_data_cnode_image_instance() {
-        use javm_cap::talc::CapHashOrRef;
+        use javm_cap::CapHashOrRef;
 
         let mut cache = Cache::new().expect("alloc");
         // Data
@@ -560,7 +560,7 @@ mod tests {
                 cnode_h,
                 &[],
                 4096,
-                [0u64; javm_cap::talc::NUM_REGS],
+                [0u64; javm_cap::NUM_REGS],
                 0x1000,
                 1_000_000,
             )

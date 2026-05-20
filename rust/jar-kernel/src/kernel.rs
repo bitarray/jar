@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use javm_cap::{CNodeBackend, Cap, CapHash, InstanceCap, image::Image};
+use javm_cap::CapHash;
+use javm_cap::image::Image;
+use javm_cap::legacy::{CNodeBackend, Cap, InstanceCap};
 
 use crate::apply::{Block, EventOutcome, apply_block};
 use crate::error::KernelError;

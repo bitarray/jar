@@ -15,7 +15,7 @@ use super::cap::{Cap, CapHashOrRef};
 use super::cnode::{CNodeCap, CNodeSlotEntry};
 use super::data::{DataCap, DataContent};
 use super::entry::CacheEntry;
-use super::image::{EndpointDef, ImageCap, ImageSlotEntry, MemoryMapping};
+use super::image_cap::{EndpointDef, ImageCap, ImageSlotEntry, MemoryMapping};
 use super::instance::{InstanceCap, RwOverlay};
 use super::page::{PageBytes, PageRef, PageSlot};
 
@@ -60,7 +60,7 @@ fn make_image_cap_in<A: allocator_api2::alloc::Allocator + Clone>(alloc: A) -> I
 fn cap_default_uses_global() {
     // `Cap` without a type argument defaults to `Cap<Global>`.
     let _img: Cap<Global> = Cap::Image(make_image_cap_in(Global));
-    let cnode: CNodeCap = CNodeCap::new_in(8, Global);
+    let cnode: CNodeCap = CNodeCap::new_in(8, Global).unwrap();
     assert_eq!(cnode.size_log, 8);
     assert_eq!(cnode.capacity(), 256);
 }
@@ -76,9 +76,73 @@ fn cap_talc_backed() {
 }
 
 #[test]
+fn data_inline_constructor() {
+    let cap = Cap::data_inline(b"hello");
+    match cap {
+        Cap::Data(d) => {
+            assert_eq!(d.size, 5);
+            match d.content {
+                DataContent::Inline(bytes) => assert_eq!(bytes.as_slice(), b"hello"),
+                _ => panic!("expected Inline content"),
+            }
+        }
+        _ => panic!("expected Cap::Data"),
+    }
+}
+
+#[test]
+fn empty_cnode_constructor() {
+    let cap = Cap::empty_cnode(4).unwrap();
+    match cap {
+        Cap::CNode(c) => {
+            assert_eq!(c.size_log, 4);
+            assert_eq!(c.capacity(), 16);
+            assert!(c.slots.is_empty());
+        }
+        _ => panic!("expected Cap::CNode"),
+    }
+}
+
+#[test]
+fn empty_cnode_size_log_too_large_rejected() {
+    assert!(Cap::empty_cnode(17).is_err());
+    assert!(CNodeCap::new(17).is_err());
+}
+
+#[test]
+fn cnode_set_takes_and_keeps_slots_sorted() {
+    let mut cnode: CNodeCap<Global> = CNodeCap::new(4).unwrap();
+    assert_eq!(cnode.get(SlotIdx(0)), None);
+
+    // Inserting out-of-order still leaves slots sorted.
+    let prior = cnode.set(SlotIdx(7), Some(CapHashOrRef::Hash([0x77; 32]))).unwrap();
+    assert_eq!(prior, None);
+    cnode.set(SlotIdx(2), Some(CapHashOrRef::Hash([0x22; 32]))).unwrap();
+    cnode.set(SlotIdx(11), Some(CapHashOrRef::Hash([0xBB; 32]))).unwrap();
+    assert_eq!(cnode.slots.iter().map(|e| e.slot.get()).collect::<alloc::vec::Vec<u32>>(),
+        alloc::vec![2u32, 7, 11]);
+
+    // Overwrite returns prior target.
+    let prior = cnode.set(SlotIdx(7), Some(CapHashOrRef::Hash([0xFF; 32]))).unwrap();
+    assert_eq!(prior, Some(CapHashOrRef::Hash([0x77; 32])));
+    assert_eq!(cnode.get(SlotIdx(7)), Some(CapHashOrRef::Hash([0xFF; 32])));
+
+    // Take removes and returns the prior target.
+    let taken = cnode.take(SlotIdx(2)).unwrap();
+    assert_eq!(taken, Some(CapHashOrRef::Hash([0x22; 32])));
+    assert_eq!(cnode.get(SlotIdx(2)), None);
+    // Remaining slots stay sorted.
+    assert_eq!(cnode.slots.iter().map(|e| e.slot.get()).collect::<alloc::vec::Vec<u32>>(),
+        alloc::vec![7u32, 11]);
+
+    // Out-of-range slot rejected.
+    assert!(cnode.set(SlotIdx(16), Some(CapHashOrRef::Hash([0; 32]))).is_err());
+}
+
+#[test]
 fn cnode_lookup_after_set() {
     let cnode_alloc = Global;
-    let mut cnode: CNodeCap<Global> = CNodeCap::new_in(8, cnode_alloc);
+    let mut cnode: CNodeCap<Global> = CNodeCap::new_in(8, cnode_alloc).unwrap();
     cnode.slots.push(CNodeSlotEntry {
         slot: SlotIdx(7),
         target: CapHashOrRef::Hash([0x11; 32]),
@@ -200,7 +264,7 @@ fn image_slot_entry_compact() {
 
 #[test]
 fn cache_entry_refcount_starts_at_one() {
-    let cap: Cap<Global> = Cap::CNode(CNodeCap::new_in(4, Global));
+    let cap: Cap<Global> = Cap::CNode(CNodeCap::new_in(4, Global).unwrap());
     let entry = CacheEntry::new(cap);
     assert_eq!(
         entry
@@ -212,8 +276,8 @@ fn cache_entry_refcount_starts_at_one() {
 
 #[test]
 fn cache_with_talc_alloc_round_trips_full_publish_chain() {
-    use crate::talc::cache::Cache;
-    use crate::talc::cap::NUM_REGS;
+    use crate::cache::Cache;
+    use crate::cap::NUM_REGS;
 
     // Plenty of headroom — the published Image is tiny and the inline
     // Data slot is 8 bytes; 256 KiB is excessive but exercises real

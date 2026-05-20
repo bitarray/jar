@@ -17,10 +17,9 @@
 //!   by default.
 
 use javm::{KernelImage, kernel_image_hash};
-use javm_cap::{
-    Blake2b256, CNodeBackend, Cap, DataCap, Hash, InMemoryCNode, InstanceCap,
-    image::{Image, PinnedCap, image_content_hash},
-};
+use javm_cap::image::{Image, PinnedCap, image_content_hash};
+use javm_cap::legacy::{CNodeBackend, Cap, DataCap, InMemoryCNode, InstanceCap};
+use javm_cap::{Blake2b256, Hash};
 
 use crate::abi;
 use crate::state::State;

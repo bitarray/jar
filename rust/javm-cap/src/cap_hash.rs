@@ -25,7 +25,7 @@ use crate::hash::{Blake2b256, Hash};
 use super::cap::{Cap, CapHash, CapHashOrRef};
 use super::cnode::CNodeCap;
 use super::data::{DataCap, DataContent};
-use super::image::ImageCap;
+use super::image_cap::ImageCap;
 use super::instance::InstanceCap;
 use super::page::PageSlot;
 
@@ -129,7 +129,7 @@ fn extend_lp(buf: &mut Vec<u8>, bytes: &[u8]) {
     buf.extend_from_slice(bytes);
 }
 
-fn extend_image_slots(buf: &mut Vec<u8>, entries: &[super::image::ImageSlotEntry]) {
+fn extend_image_slots(buf: &mut Vec<u8>, entries: &[super::image_cap::ImageSlotEntry]) {
     buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for e in entries {
         buf.extend_from_slice(&e.slot.get().to_le_bytes());
@@ -238,15 +238,15 @@ mod tests {
     use core::sync::atomic::AtomicU32;
 
     use crate::slot::SlotIdx;
-    use crate::talc::cnode::CNodeSlotEntry;
-    use crate::talc::image::ImageCap;
-    use crate::talc::instance::InstanceCap;
-    use crate::talc::page::{PageBytes, PageRef};
+    use crate::cnode::CNodeSlotEntry;
+    use crate::image_cap::ImageCap;
+    use crate::instance::InstanceCap;
+    use crate::page::{PageBytes, PageRef};
 
     #[test]
     fn type_cap_matches_old_protocol() {
         let chain = [0xAA; 32];
-        let cap: Cap<Global> = Cap::Type(crate::talc::cap::TypeCap {
+        let cap: Cap<Global> = Cap::Type(crate::cap::TypeCap {
             image_hash_chain: chain,
         });
         let mut expected_buf = alloc::vec![0x50u8];
@@ -279,8 +279,8 @@ mod tests {
 
     #[test]
     fn cnode_empty_vs_one_populated_differ() {
-        let empty: CNodeCap<Global> = CNodeCap::new_in(2, Global);
-        let mut populated: CNodeCap<Global> = CNodeCap::new_in(2, Global);
+        let empty: CNodeCap<Global> = CNodeCap::new_in(2, Global).unwrap();
+        let mut populated: CNodeCap<Global> = CNodeCap::new_in(2, Global).unwrap();
         populated.slots.push(CNodeSlotEntry {
             slot: SlotIdx(0),
             target: CapHashOrRef::Hash([0xEE; 32]),
@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn cnode_with_ref_target_panics() {
-        let mut cn: CNodeCap<Global> = CNodeCap::new_in(2, Global);
+        let mut cn: CNodeCap<Global> = CNodeCap::new_in(2, Global).unwrap();
         cn.slots.push(CNodeSlotEntry {
             slot: SlotIdx(0),
             target: CapHashOrRef::Ref(42),
@@ -344,7 +344,7 @@ mod tests {
             root_cnode: CapHashOrRef::Hash([0; 32]),
             rw_overlays: AVec::new_in(Global),
             mem_size: 0,
-            regs: [0; crate::talc::cap::NUM_REGS],
+            regs: [0; crate::cap::NUM_REGS],
             pc: 0,
             gas_remaining: 0,
         }

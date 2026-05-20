@@ -25,7 +25,8 @@
 
 use std::sync::Arc;
 
-use javm_cap::{CNodeBackend, Cap, InstanceCap, image::Image};
+use javm_cap::image::Image;
+use javm_cap::legacy::{CNodeBackend, Cap, InstanceCap};
 use javm_exec::{GasCounter, Mem, PvmProgram, Regs};
 
 use crate::error::VmError;
@@ -325,7 +326,8 @@ fn short_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use javm_cap::{InMemoryCNode, image::Image};
+    use javm_cap::image::Image;
+    use javm_cap::legacy::InMemoryCNode;
     use javm_exec::PvmProgram;
     use std::collections::BTreeMap;
 

@@ -19,7 +19,9 @@
 
 use std::sync::Arc;
 
-use javm_cap::{CNodeBackend, Cap, DataCap, InstanceCap, SlotIdx, image::Image};
+use javm_cap::SlotIdx;
+use javm_cap::image::Image;
+use javm_cap::legacy::{CNodeBackend, Cap, DataCap, InstanceCap};
 use javm_exec::{Access, ExitReason, GasCounter, Interpreter, Mem, Regs};
 
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
@@ -568,7 +570,9 @@ impl<K: KernelAssist + std::fmt::Debug> std::fmt::Debug for Vm<K> {
 mod tests {
     use super::*;
     use crate::kernel_assist::InProcessKernelAssist;
-    use javm_cap::{InMemoryCNode, SlotPath, image::Image};
+    use javm_cap::SlotPath;
+    use javm_cap::image::Image;
+    use javm_cap::legacy::InMemoryCNode;
     use std::collections::BTreeMap;
 
     fn empty_image_with_code(code: Vec<u8>) -> Image {
@@ -1024,7 +1028,7 @@ mod tests {
         cnode
             .set(
                 SlotIdx(3),
-                Some(Cap::Data(javm_cap::DataCap {
+                Some(Cap::Data(javm_cap::legacy::DataCap {
                     content_hash: [0u8; 32],
                     size: 4,
                 })),

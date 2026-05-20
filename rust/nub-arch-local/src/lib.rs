@@ -4,15 +4,15 @@
 //!
 //! [`run_instance`] is the in-process counterpart to nub-arch-x86's
 //! JIT-driven `run_pvm_with_mem`: takes a published
-//! [`javm_cap::talc::InstanceCap`] + its referenced
-//! [`javm_cap::talc::image::ImageCap`] (both `Global`-allocated
+//! [`javm_cap::InstanceCap`] + its referenced
+//! [`javm_cap::image_cap::ImageCap`] (both `Global`-allocated
 //! locally), wires the bytecode + memory layout to
 //! [`javm_exec::Interpreter::run`], and produces an
 //! [`InvocationResult`].
 
 use allocator_api2::alloc::Global;
-use javm_cap::talc::image::ImageCap;
-use javm_cap::talc::instance::InstanceCap;
+use javm_cap::image_cap::ImageCap;
+use javm_cap::instance::InstanceCap;
 use javm_exec::{
     Access, CopyingMemory, EcallHandler, EcallKind, EcallResult, ExitReason, GasCounter,
     Interpreter, PAGE_SIZE, PvmProgram, Regs, gas_cost::DEFAULT_MEM_CYCLES, unpack_bitmask,

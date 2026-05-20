@@ -47,10 +47,10 @@
 //! pointer to a path buffer in memory) lands when chain bytecode
 //! starts using nested cnodes routinely.
 
-use javm_cap::{
-    Blake2b256, Cap, Hash, InstanceCap, SlotIdx, TypeCap, mgmt_cnode_mint, mgmt_cnode_swap,
-    mgmt_copy, mgmt_drop, mgmt_move,
+use javm_cap::legacy::{
+    Cap, InstanceCap, TypeCap, mgmt_cnode_mint, mgmt_cnode_swap, mgmt_copy, mgmt_drop, mgmt_move,
 };
+use javm_cap::{Blake2b256, Hash, SlotIdx};
 use javm_exec::{EcallHandler, EcallKind, EcallResult, ExitReason, Memory, Regs};
 
 use crate::callstack::Entry;
@@ -553,7 +553,7 @@ impl<K: KernelAssist> Vm<K> {
         }
         running.cnode.set(
             dst_slot,
-            Some(Cap::Data(javm_cap::DataCap {
+            Some(Cap::Data(javm_cap::legacy::DataCap {
                 content_hash,
                 size: len as u64,
             })),
@@ -681,7 +681,7 @@ pub(crate) fn strip_trailing_zeros_len(bytes: &[u8]) -> usize {
 /// the named slot (used by host_same_type and host_type_eq). Errors
 /// if the slot is empty or holds a different cap kind.
 fn type_chain_at(
-    cnode: &(dyn javm_cap::CNodeBackend<Cap> + Send + Sync),
+    cnode: &(dyn javm_cap::legacy::CNodeBackend<Cap> + Send + Sync),
     slot: SlotIdx,
 ) -> Result<javm_cap::CapHash, VmError> {
     match cnode.get(slot)? {
@@ -731,7 +731,8 @@ mod tests {
     use super::*;
     use crate::callstack::{EntryStatus, InstanceEntry};
     use crate::kernel_assist::InProcessKernelAssist;
-    use javm_cap::{CNodeBackend, Cap, ImageCap, InMemoryCNode, InstanceCap, image::Image};
+    use javm_cap::image::Image;
+    use javm_cap::legacy::{CNodeBackend, Cap, ImageCap, InMemoryCNode, InstanceCap};
     use javm_exec::{GasCounter, Mem, PvmProgram, Regs};
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -1101,7 +1102,7 @@ mod tests {
             .cnode
             .set(
                 SlotIdx(4),
-                Some(Cap::Data(javm_cap::DataCap {
+                Some(Cap::Data(javm_cap::legacy::DataCap {
                     content_hash: [0x55; 32],
                     size: 4,
                 })),
@@ -1217,7 +1218,7 @@ mod tests {
     fn host_open_materializes_registered_file_as_data() {
         let mut vm = fixture_vm();
         // Register file_id 99 → DataCap{hash=[0x77;32], size=12}.
-        let data = javm_cap::DataCap {
+        let data = javm_cap::legacy::DataCap {
             content_hash: [0x77u8; 32],
             size: 12,
         };
@@ -1284,7 +1285,7 @@ mod tests {
             .cnode
             .set(
                 SlotIdx(4),
-                Some(Cap::Data(javm_cap::DataCap {
+                Some(Cap::Data(javm_cap::legacy::DataCap {
                     content_hash: [0x66u8; 32],
                     size: 100,
                 })),

@@ -219,16 +219,16 @@ fn publish_image_increfs_pinned_and_initial() {
     assert_eq!(cache.refcount(CapHashOrRef::Hash(d_initial)), Some(1));
 
     let mut pinned = AVec::new_in(Global);
-    pinned.push(crate::talc::image::ImageSlotEntry {
+    pinned.push(crate::image_cap::ImageSlotEntry {
         slot: SlotIdx(3),
         cap_hash: d_pinned,
     });
     let mut initial = AVec::new_in(Global);
-    initial.push(crate::talc::image::ImageSlotEntry {
+    initial.push(crate::image_cap::ImageSlotEntry {
         slot: SlotIdx(7),
         cap_hash: d_initial,
     });
-    let img = crate::talc::image::ImageCap {
+    let img = crate::image_cap::ImageCap {
         code: AVec::new_in(Global),
         bitmask: AVec::new_in(Global),
         jump_table: AVec::new_in(Global),
@@ -250,11 +250,11 @@ fn publish_image_increfs_pinned_and_initial() {
 fn publish_image_missing_target_errors() {
     let mut cache = Cache::new_in(Global);
     let mut pinned = AVec::new_in(Global);
-    pinned.push(crate::talc::image::ImageSlotEntry {
+    pinned.push(crate::image_cap::ImageSlotEntry {
         slot: SlotIdx(0),
         cap_hash: [0xFE; 32],
     });
-    let img = crate::talc::image::ImageCap {
+    let img = crate::image_cap::ImageCap {
         code: AVec::new_in(Global),
         bitmask: AVec::new_in(Global),
         jump_table: AVec::new_in(Global),
@@ -310,7 +310,7 @@ fn publish_instance_blob_increfs_image_and_cnode() {
     // observation (publish_instance_blob only checks blob presence).
     let mut code = AVec::new_in(Global);
     code.push(0x00);
-    let img = Cap::Image(crate::talc::image::ImageCap {
+    let img = Cap::Image(crate::image_cap::ImageCap {
         code,
         bitmask: AVec::new_in(Global),
         jump_table: AVec::new_in(Global),
@@ -320,7 +320,7 @@ fn publish_instance_blob_increfs_image_and_cnode() {
         initial: AVec::new_in(Global),
         yield_marker_slot: None,
     });
-    let img_hash = super::hash::cap_hash(&img);
+    let img_hash = super::cap_hash::cap_hash(&img);
     cache.put_blob(img_hash, img).unwrap();
     let c = cache.publish_cnode(4, &[]).unwrap();
 
@@ -388,7 +388,7 @@ fn settle_instance_resolves_root_cnode_ref() {
 
     // Build a minimal image to satisfy publish_instance_blob's
     // existence check.
-    let img = Cap::Image(crate::talc::image::ImageCap {
+    let img = Cap::Image(crate::image_cap::ImageCap {
         code: AVec::new_in(Global),
         bitmask: AVec::new_in(Global),
         jump_table: AVec::new_in(Global),
@@ -398,7 +398,7 @@ fn settle_instance_resolves_root_cnode_ref() {
         initial: AVec::new_in(Global),
         yield_marker_slot: None,
     });
-    let img_hash = super::hash::cap_hash(&img);
+    let img_hash = super::cap_hash::cap_hash(&img);
     cache.put_blob(img_hash, img).unwrap();
 
     let inst_hash = cache
@@ -640,7 +640,7 @@ fn publish_image_rejects_too_deep_source_path() {
     assert!(matches!(
         err,
         Err(super::cache::CacheError::ImageConvertFailed(
-            crate::talc::image::ImageConvertError::SourcePathTooDeep(9)
+            crate::image_cap::ImageConvertError::SourcePathTooDeep(9)
         ))
     ));
 }
@@ -665,7 +665,7 @@ fn publish_image_rejects_out_of_range_endpoint() {
     assert!(matches!(
         err,
         Err(super::cache::CacheError::ImageConvertFailed(
-            crate::talc::image::ImageConvertError::EndpointIndexOutOfRange(200)
+            crate::image_cap::ImageConvertError::EndpointIndexOutOfRange(200)
         ))
     ));
 }
@@ -742,7 +742,7 @@ fn get_mut_image_or_type_errors() {
     // Image: requires owned content; we set up a minimal one.
     let mut code = AVec::new_in(Global);
     code.push(0xAB);
-    let img_cap = Cap::Image(crate::talc::image::ImageCap {
+    let img_cap = Cap::Image(crate::image_cap::ImageCap {
         code,
         bitmask: AVec::new_in(Global),
         jump_table: AVec::new_in(Global),

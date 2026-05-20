@@ -10,6 +10,7 @@ use allocator_api2::vec::Vec;
 
 use super::cap::{CapHash, CapHashOrRef, NUM_REGS};
 
+#[derive(Clone, Debug)]
 pub struct InstanceCap<A: Allocator + Clone = Global> {
     /// Cumulative chain hash identifying the Instance's type.
     pub image_hash_chain: CapHash,
@@ -39,6 +40,7 @@ pub struct InstanceCap<A: Allocator + Clone = Global> {
 
 /// One byte overlay backing a memory mapping. `bytes.len()` ≤
 /// the mapping's `size`; trailing untouched bytes default to zero.
+#[derive(Clone, Debug)]
 pub struct RwOverlay<A: Allocator + Clone = Global> {
     pub start: u32,
     pub bytes: Vec<u8, A>,

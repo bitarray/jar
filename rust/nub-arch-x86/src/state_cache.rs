@@ -20,8 +20,8 @@
 use allocator_api2::alloc::Allocator;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use javm_cap::talc::cap::Cap;
-use javm_cap::talc::entry::CacheEntry;
+use javm_cap::cap::Cap;
+use javm_cap::entry::CacheEntry;
 use nub_host_common::cache::{
     CACHE_DIRECTORY_OFFSET, CacheDirectory, STATE_CACHE_GPA, STATE_CACHE_SIZE, STATE_CACHE_VA,
     TalcAlloc,

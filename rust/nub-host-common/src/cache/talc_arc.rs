@@ -51,6 +51,12 @@ pub struct Aarc<T: AarcRefCounted, A: Allocator + Clone> {
 unsafe impl<T: AarcRefCounted + Send + Sync, A: Allocator + Clone + Send> Send for Aarc<T, A> {}
 unsafe impl<T: AarcRefCounted + Send + Sync, A: Allocator + Clone + Sync> Sync for Aarc<T, A> {}
 
+impl<T: AarcRefCounted + core::fmt::Debug, A: Allocator + Clone> core::fmt::Debug for Aarc<T, A> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("Aarc").field(self.get()).finish()
+    }
+}
+
 impl<T: AarcRefCounted, A: Allocator + Clone> Aarc<T, A> {
     /// Allocate space for a `T` through `alloc`, move `value` in,
     /// and return a handle.

@@ -12,11 +12,13 @@ use allocator_api2::vec::Vec;
 
 use super::page::PageSlot;
 
+#[derive(Clone, Debug)]
 pub struct DataCap<A: Allocator + Clone = Global> {
     pub size: u64,
     pub content: DataContent<A>,
 }
 
+#[derive(Clone, Debug)]
 pub enum DataContent<A: Allocator + Clone = Global> {
     /// Bytes in a single slab.
     Inline(Vec<u8, A>),

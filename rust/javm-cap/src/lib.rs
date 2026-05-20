@@ -2,40 +2,62 @@
 
 //! JAR v3 capability system.
 //!
-//! Foundational layer for the v3 implementation. Defines the five
-//! v3 cap kinds (Instance, Image, Data, CNode, Type), the CNode
-//! abstraction with a pluggable backend trait, the Image structure
-//! and its hash-chain math, and primitives (BMT, hash) used by
-//! upstream layers.
+//! Defines the five v3 cap kinds (Instance, Image, Data, CNode, Type),
+//! their content-bearing representations, a two-tier cache for
+//! identity-keyed mutable state + content-addressed blobs, and the
+//! primitives (BMT, hash) used by upstream layers.
 //!
-//! No execution awareness. No I/O. No kernel concepts. Caps and
-//! cnodes here are pure values with deterministic hashing.
+//! `Cap<A>` is allocator-parameterised — `A` defaults to `Global` so
+//! existing callers get a heap-resident cap. The cache layer
+//! instantiates `Cap<TalcAlloc>` to land content in the shared-memory
+//! cache region.
 //!
-//! See `~/docs/minimum-v3/implementation/architecture.md` for the
-//! crate's role in the overall layering.
+//! See `~/jar/website/content/spec/implementation/architecture.md` for
+//! the crate's role in the overall layering.
 
 #[macro_use]
 extern crate alloc;
 
 pub mod abi;
 pub mod bmt;
+pub mod cache;
 pub mod cap;
+pub mod cap_hash;
 pub mod cnode;
+pub mod data;
+pub mod entry;
 pub mod error;
 pub mod hash;
 pub mod image;
-pub mod ops;
+pub mod image_cap;
+pub mod instance;
+pub mod legacy;
+pub mod page;
 pub mod slot;
-pub mod talc;
+
+#[cfg(test)]
+mod cache_tests;
+#[cfg(test)]
+mod cap_tests;
 
 pub use bmt::Bmt;
-pub use cap::{CNodeCap, Cap, CapHash, CapKind, DataCap, ImageCap, InstanceCap, TypeCap};
-pub use cnode::{CNodeBackend, CnodeHash, InMemoryCNode, SlotHasher};
+pub use cache::{Cache, CacheError};
+pub use cap::{
+    Cap, CapHash, CapHashOrRef, CapKind, CapRef, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS, TypeCap,
+};
+pub use cap_hash::cap_hash;
+pub use cnode::{CNodeCap, CNodeSlotEntry};
+pub use data::{DataCap, DataContent};
+pub use entry::CacheEntry;
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash};
 pub use image::{
-    EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap, chain_extend, chain_genesis,
-    image_content_hash,
+    EndpointDef as ImageEndpointDef, Image, InitialDataCap, MemoryMapping as ImageMemoryMapping,
+    PinnedCap, chain_extend, chain_genesis, image_content_hash,
 };
-pub use ops::{mgmt_cnode_mint, mgmt_cnode_swap, mgmt_copy, mgmt_drop, mgmt_move};
+pub use image_cap::{
+    EndpointDef, ImageCap, ImageConvertError, ImageSlotEntry, MemoryMapping, image_cap_in,
+};
+pub use instance::{InstanceCap, RwOverlay};
+pub use page::{PageBytes, PageRef, PageSlot};
 pub use slot::{SlotIdx, SlotPath};
