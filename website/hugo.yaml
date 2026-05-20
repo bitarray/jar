@@ -38,7 +38,7 @@ params:
   footer:
     enable: true
     displayCopyright: true
-    displayPoweredBy: false
+    displayPoweredBy: true
   toc:
     displayTags: true
   blog:
