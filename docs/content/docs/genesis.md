@@ -1,3 +1,10 @@
+---
+title: Genesis
+linkTitle: Genesis
+weight: 2
+url: /genesis/
+---
+
 # JAR Genesis: Proof of Intelligence
 
 ## Background

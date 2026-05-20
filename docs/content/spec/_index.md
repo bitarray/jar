@@ -1,3 +1,9 @@
+---
+title: Specification
+linkTitle: Specification
+weight: 5
+---
+
 # Minimum kernel v3 — top-level spec
 
 A redesign of the JAR kernel as a content-addressed, by-value, capability-

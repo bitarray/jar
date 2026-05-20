@@ -1,3 +1,12 @@
+---
+title: Introduction
+linkTitle: Introduction
+weight: 1
+url: /introduction/
+cascade:
+  type: docs
+---
+
 # JAR Chain
 
 JAR — short for **Join-Accumulate Refine** — is a chain protocol for agentic workloads. The entire codebase is written by AI agents with human oversight on strategic decisions. JAR uses its own genesis mechanism, Proof of Intelligence, to distribute tokens based on the quality of contributions to the protocol itself.

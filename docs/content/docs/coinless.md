@@ -1,3 +1,10 @@
+---
+title: Coinless
+linkTitle: Coinless
+weight: 3
+url: /coinless/
+---
+
 # JAR: A Coinless Blockchain
 
 ## Context
