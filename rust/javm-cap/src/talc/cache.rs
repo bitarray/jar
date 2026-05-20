@@ -25,10 +25,13 @@ use allocator_api2::alloc::{Allocator, Global};
 use allocator_api2::boxed::Box as ABox;
 use allocator_api2::vec::Vec as AVec;
 
-use super::cap::{Cap, CapHash, CapHashOrRef, CapRef};
+use crate::slot::SlotIdx;
+
+use super::cap::{Cap, CapHash, CapHashOrRef, CapRef, NUM_REGS};
 use super::cnode::{CNodeCap, CNodeSlotEntry};
 use super::data::{DataCap, DataContent};
 use super::entry::CacheEntry;
+use super::hash::cap_hash;
 use super::instance::{InstanceCap, RwOverlay};
 use super::page::PageSlot;
 
@@ -247,6 +250,246 @@ impl<A: Allocator + Clone> Cache<A> {
         self.alloc.clone()
     }
 
+    // --- High-level publish helpers ---
+
+    /// Publish an inline DataCap blob from a byte buffer. Allocates a
+    /// fresh copy of `bytes` in this cache's allocator, hashes the
+    /// resulting cap, and inserts it into `blobs`. Returns the hash
+    /// (suitable for use as a `CapHashOrRef::Hash` target).
+    ///
+    /// Idempotent: re-publishing identical bytes returns the same hash
+    /// and bumps the existing entry's refcount.
+    pub fn publish_data_inline(&mut self, bytes: &[u8]) -> Result<CapHash, CacheError> {
+        let mut buf: AVec<u8, A> = AVec::with_capacity_in(bytes.len(), self.alloc.clone());
+        buf.extend_from_slice(bytes);
+        let cap = Cap::Data(DataCap {
+            size: bytes.len() as u64,
+            content: DataContent::Inline(buf),
+        });
+        let hash = cap_hash(&cap);
+        self.put_blob(hash, cap)?;
+        Ok(hash)
+    }
+
+    /// Publish a CNodeCap blob with the given size and populated
+    /// slots. Each `(SlotIdx, CapHashOrRef)` target must already exist
+    /// in the cache (either as a blob or an instance); on success the
+    /// cache bumps each target's refcount to reflect the new cnode's
+    /// reference.
+    ///
+    /// `entries` may be in any order; the cnode's internal slot table
+    /// is sorted by slot index. Returns the cnode's hash.
+    pub fn publish_cnode(
+        &mut self,
+        size_log: u8,
+        entries: &[(SlotIdx, CapHashOrRef)],
+    ) -> Result<CapHash, CacheError> {
+        // Validate targets exist before allocating, so we can fail
+        // fast without leaving partial state.
+        for (_, target) in entries {
+            match target {
+                CapHashOrRef::Hash(h) => {
+                    if !self.blobs.contains_key(h) {
+                        return Err(CacheError::BlobMissing);
+                    }
+                }
+                CapHashOrRef::Ref(r) => {
+                    if !self.instances.contains_key(r) {
+                        return Err(CacheError::InstanceMissing(*r));
+                    }
+                }
+            }
+        }
+
+        let mut slots: AVec<CNodeSlotEntry, A> =
+            AVec::with_capacity_in(entries.len(), self.alloc.clone());
+        for (slot, target) in entries {
+            slots.push(CNodeSlotEntry {
+                slot: *slot,
+                target: *target,
+            });
+        }
+        slots.sort_by_key(|e| e.slot);
+
+        let cap = Cap::CNode(CNodeCap { size_log, slots });
+        let hash = cap_hash(&cap);
+        let post = self.put_blob(hash, cap)?;
+        if post == 1 {
+            // Fresh entry: this cnode now holds a reference to each
+            // target; reflect that in their refcounts.
+            for (_, target) in entries {
+                self.incref(*target)?;
+            }
+        }
+        Ok(hash)
+    }
+
+    /// Publish an InstanceCap blob. The `image_hash` blob and the
+    /// `root_cnode` blob must already exist in the cache; both have
+    /// their refcounts incremented on success.
+    ///
+    /// `rw_overlays` is given as `(start, bytes)` pairs; each is
+    /// copied into the cache's allocator.
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_instance_blob(
+        &mut self,
+        image_hash_chain: CapHash,
+        image_hash: CapHash,
+        root_cnode: CapHash,
+        rw_overlays: &[(u32, &[u8])],
+        mem_size: u32,
+        regs: [u64; NUM_REGS],
+        pc: u64,
+        gas_remaining: u64,
+    ) -> Result<CapHash, CacheError> {
+        // Validate referenced blobs exist before allocating.
+        if !self.blobs.contains_key(&image_hash) {
+            return Err(CacheError::BlobMissing);
+        }
+        if !self.blobs.contains_key(&root_cnode) {
+            return Err(CacheError::BlobMissing);
+        }
+
+        let mut overlays: AVec<RwOverlay<A>, A> =
+            AVec::with_capacity_in(rw_overlays.len(), self.alloc.clone());
+        for (start, bytes) in rw_overlays {
+            let mut buf: AVec<u8, A> = AVec::with_capacity_in(bytes.len(), self.alloc.clone());
+            buf.extend_from_slice(bytes);
+            overlays.push(RwOverlay {
+                start: *start,
+                bytes: buf,
+            });
+        }
+
+        let cap = Cap::Instance(InstanceCap {
+            image_hash_chain,
+            image_hash,
+            root_cnode: CapHashOrRef::Hash(root_cnode),
+            rw_overlays: overlays,
+            mem_size,
+            regs,
+            pc,
+            gas_remaining,
+        });
+        let hash = cap_hash(&cap);
+        let post = self.put_blob(hash, cap)?;
+        if post == 1 {
+            self.incref(CapHashOrRef::Hash(image_hash))?;
+            self.incref(CapHashOrRef::Hash(root_cnode))?;
+        }
+        Ok(hash)
+    }
+
+    /// Settle a cap reference: resolve any `CapHashOrRef::Ref` targets
+    /// nested inside the cap to their content-addressed hashes,
+    /// graduating descendants from `instances` to `blobs` as needed,
+    /// then return the cap's hash.
+    ///
+    /// Behaviour by cap kind at `key`:
+    ///
+    /// - If `key` is already a `Hash`, return it unchanged (no work).
+    /// - For an Instance ref: recursively settle `root_cnode` if it's
+    ///   a `Ref`, replace with the resulting `Hash`, then hash the
+    ///   InstanceCap. The instance entry **stays in `instances`** as
+    ///   the live mutable state; the returned hash is a snapshot
+    ///   identifier (callers can `put_blob`-snapshot externally if
+    ///   they want to keep an immutable copy).
+    /// - For a CNode ref: recursively settle each Ref slot target,
+    ///   replace with Hashes, hash the CNodeCap, then move the entry
+    ///   from `instances` to `blobs` under the new hash.
+    /// - For a Data ref: no nested refs to settle. Hash, then move
+    ///   from `instances` to `blobs`.
+    ///
+    /// Returns the resolved `CapHash`.
+    pub fn settle(&mut self, key: CapHashOrRef) -> Result<CapHash, CacheError> {
+        match key {
+            CapHashOrRef::Hash(h) => Ok(h),
+            CapHashOrRef::Ref(r) => self.settle_ref(r),
+        }
+    }
+
+    fn settle_ref(&mut self, r: CapRef) -> Result<CapHash, CacheError> {
+        // First, recursively settle any nested Refs (mutating the cap
+        // in place to replace Ref targets with Hash targets).
+        self.settle_nested_refs(r)?;
+
+        // Now the cap holds only Hash targets; we can hash it.
+        let cap = &self
+            .instances
+            .get(&r)
+            .ok_or(CacheError::InstanceMissing(r))?
+            .cap;
+        let hash = cap_hash(cap);
+
+        // Graduate non-Instance entries from `instances` to `blobs`
+        // under the computed hash. Instance entries stay live (they
+        // are the working state); their snapshot hash is returned but
+        // not separately stored.
+        let is_instance = matches!(cap, Cap::Instance(_));
+        if !is_instance {
+            // Move the entry over. The refcount carries across; we
+            // also need to handle the case where a blob with the same
+            // hash already exists (incref + drop the instance entry).
+            if self.blobs.contains_key(&hash) {
+                // Merge into existing blob: incref it, drop the
+                // instance entry. Targets stay referenced once via
+                // the surviving entry (the instance's own target
+                // refs need a decref to avoid double-counting).
+                let targets = self.collect_targets(CapHashOrRef::Ref(r))?;
+                self.blobs
+                    .get(&hash)
+                    .expect("checked above")
+                    .refcount
+                    .fetch_add(1, Ordering::Relaxed);
+                self.instances.remove(&r);
+                for t in targets {
+                    self.decref(t)?;
+                }
+            } else {
+                let boxed = self
+                    .instances
+                    .remove(&r)
+                    .expect("present (we just observed it)");
+                self.blobs.insert(hash, boxed);
+            }
+        }
+        Ok(hash)
+    }
+
+    /// Walk the cap at instance ref `r` and replace any
+    /// `CapHashOrRef::Ref` targets it directly holds with the
+    /// `CapHashOrRef::Hash` produced by settling those refs.
+    /// Recursive: settling a ref triggers settling of its own
+    /// nested refs first.
+    fn settle_nested_refs(&mut self, r: CapRef) -> Result<(), CacheError> {
+        // Collect the list of Refs we need to settle before mutating.
+        let nested: AVec<CapRef> = {
+            let cap = &self
+                .instances
+                .get(&r)
+                .ok_or(CacheError::InstanceMissing(r))?
+                .cap;
+            collect_ref_targets(cap)
+        };
+
+        // Settle each nested ref (returns the resolved Hash).
+        let mut resolved: AVec<(CapRef, CapHash)> = AVec::new();
+        for n in nested.iter() {
+            let h = self.settle_ref(*n)?;
+            resolved.push((*n, h));
+        }
+
+        // Rewrite the parent cap's Ref targets to use the resolved
+        // Hashes.
+        let cap = &mut self
+            .instances
+            .get_mut(&r)
+            .ok_or(CacheError::InstanceMissing(r))?
+            .cap;
+        rewrite_ref_targets(cap, &resolved);
+        Ok(())
+    }
+
     // --- Internals ---
 
     /// Shallow-clone the blob at `hash` into a fresh `Cap<A>`. Only
@@ -296,6 +539,56 @@ impl<A: Allocator + Clone> Cache<A> {
             }
         }
         Ok(out)
+    }
+}
+
+/// Collect the directly-referenced `CapRef`s held by `cap`. Used by
+/// `settle` to know which sub-refs to resolve before hashing.
+fn collect_ref_targets<A: Allocator + Clone>(cap: &Cap<A>) -> AVec<CapRef> {
+    let mut out: AVec<CapRef> = AVec::new();
+    match cap {
+        Cap::CNode(cn) => {
+            for slot in cn.slots.iter() {
+                if let CapHashOrRef::Ref(r) = slot.target {
+                    out.push(r);
+                }
+            }
+        }
+        Cap::Instance(inst) => {
+            if let CapHashOrRef::Ref(r) = inst.root_cnode {
+                out.push(r);
+            }
+        }
+        Cap::Data(_) | Cap::Image(_) | Cap::Type(_) => {}
+    }
+    out
+}
+
+/// Rewrite `cap`'s direct `CapHashOrRef::Ref(r)` targets to
+/// `CapHashOrRef::Hash(h)` according to the `(r, h)` mapping in
+/// `resolved`.
+fn rewrite_ref_targets<A: Allocator + Clone>(cap: &mut Cap<A>, resolved: &[(CapRef, CapHash)]) {
+    let lookup = |r: CapRef| -> Option<CapHash> {
+        resolved.iter().find(|(k, _)| *k == r).map(|(_, h)| *h)
+    };
+    match cap {
+        Cap::CNode(cn) => {
+            for slot in cn.slots.iter_mut() {
+                if let CapHashOrRef::Ref(r) = slot.target
+                    && let Some(h) = lookup(r)
+                {
+                    slot.target = CapHashOrRef::Hash(h);
+                }
+            }
+        }
+        Cap::Instance(inst) => {
+            if let CapHashOrRef::Ref(r) = inst.root_cnode
+                && let Some(h) = lookup(r)
+            {
+                inst.root_cnode = CapHashOrRef::Hash(h);
+            }
+        }
+        Cap::Data(_) | Cap::Image(_) | Cap::Type(_) => {}
     }
 }
 

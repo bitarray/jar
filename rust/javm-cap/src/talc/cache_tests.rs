@@ -211,6 +211,181 @@ fn get_mut_already_ref_is_idempotent() {
 }
 
 #[test]
+fn publish_data_inline_hashes_and_stores() {
+    let mut cache = Cache::new_in(Global);
+    let h = cache.publish_data_inline(b"hello").unwrap();
+    // Stored as a blob keyed by its content hash.
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(h)), Some(1));
+    assert_eq!(cache.blob_count(), 1);
+    // Same bytes => same hash, refcount bumps.
+    let h2 = cache.publish_data_inline(b"hello").unwrap();
+    assert_eq!(h, h2);
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(h)), Some(2));
+    assert_eq!(cache.blob_count(), 1);
+}
+
+#[test]
+fn publish_cnode_increfs_targets() {
+    let mut cache = Cache::new_in(Global);
+    let d = cache.publish_data_inline(b"target").unwrap();
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(d)), Some(1));
+
+    let c = cache
+        .publish_cnode(4, &[(SlotIdx(0), CapHashOrRef::Hash(d))])
+        .unwrap();
+    // Target's refcount bumped because cnode references it.
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(d)), Some(2));
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(c)), Some(1));
+}
+
+#[test]
+fn publish_cnode_missing_target_errors() {
+    let mut cache = Cache::new_in(Global);
+    let err = cache.publish_cnode(4, &[(SlotIdx(0), CapHashOrRef::Hash([0xFE; 32]))]);
+    assert!(matches!(err, Err(super::cache::CacheError::BlobMissing)));
+}
+
+#[test]
+fn publish_instance_blob_increfs_image_and_cnode() {
+    let mut cache = Cache::new_in(Global);
+    // Image is content-addressed; stash a synthetic one for refcount
+    // observation (publish_instance_blob only checks blob presence).
+    let mut code = AVec::new_in(Global);
+    code.push(0x00);
+    let img = Cap::Image(crate::talc::image::ImageCap {
+        code,
+        bitmask: AVec::new_in(Global),
+        jump_table: AVec::new_in(Global),
+        endpoints: AVec::new_in(Global),
+        mappings: AVec::new_in(Global),
+        pinned: AVec::new_in(Global),
+        initial: AVec::new_in(Global),
+        yield_marker_slot: None,
+    });
+    let img_hash = super::hash::cap_hash(&img);
+    cache.put_blob(img_hash, img).unwrap();
+    let c = cache.publish_cnode(4, &[]).unwrap();
+
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(img_hash)), Some(1));
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(c)), Some(1));
+
+    let inst_hash = cache
+        .publish_instance_blob(
+            [0xAA; 32],
+            img_hash,
+            c,
+            &[(0x1000, &[0xDE, 0xAD][..])],
+            0x10000,
+            [0u64; super::cap::NUM_REGS],
+            0,
+            1_000_000,
+        )
+        .unwrap();
+
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(inst_hash)), Some(1));
+    // Image + cnode both bumped because the instance references them.
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(img_hash)), Some(2));
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(c)), Some(2));
+}
+
+#[test]
+fn settle_hash_is_identity() {
+    let mut cache = Cache::new_in(Global);
+    let h = cache.publish_data_inline(b"x").unwrap();
+    let settled = cache.settle(CapHashOrRef::Hash(h)).unwrap();
+    assert_eq!(h, settled);
+}
+
+#[test]
+fn settle_promotes_cnode_to_blob() {
+    // Setup: a Data blob D and a CNode blob C referencing D. Then we
+    // get_mut C (sole-owner move-promote) and settle the result.
+    let mut cache = Cache::new_in(Global);
+    let d = cache.publish_data_inline(b"target").unwrap();
+    let c = cache
+        .publish_cnode(2, &[(SlotIdx(0), CapHashOrRef::Hash(d))])
+        .unwrap();
+    let c_ref = cache.get_mut(CapHashOrRef::Hash(c)).unwrap();
+    assert_eq!(cache.blob_count(), 1); // d only
+    assert_eq!(cache.instance_count(), 1); // c (promoted)
+
+    let new_c_hash = cache.settle(CapHashOrRef::Ref(c_ref)).unwrap();
+    // Settled cnode is now a blob. The cnode wasn't mutated, so its
+    // hash equals the original `c`.
+    assert_eq!(new_c_hash, c);
+    assert_eq!(cache.blob_count(), 2);
+    assert_eq!(cache.instance_count(), 0);
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(new_c_hash)), Some(1));
+}
+
+#[test]
+fn settle_instance_resolves_root_cnode_ref() {
+    // Setup: Data D, CNode C → D, Instance I → C. Get_mut C to promote
+    // it, rebind I.root_cnode to Ref(c_r), then settle the instance.
+    let mut cache = Cache::new_in(Global);
+    let d = cache.publish_data_inline(b"d").unwrap();
+    let c = cache
+        .publish_cnode(2, &[(SlotIdx(0), CapHashOrRef::Hash(d))])
+        .unwrap();
+
+    // Build a minimal image to satisfy publish_instance_blob's
+    // existence check.
+    let img = Cap::Image(crate::talc::image::ImageCap {
+        code: AVec::new_in(Global),
+        bitmask: AVec::new_in(Global),
+        jump_table: AVec::new_in(Global),
+        endpoints: AVec::new_in(Global),
+        mappings: AVec::new_in(Global),
+        pinned: AVec::new_in(Global),
+        initial: AVec::new_in(Global),
+        yield_marker_slot: None,
+    });
+    let img_hash = super::hash::cap_hash(&img);
+    cache.put_blob(img_hash, img).unwrap();
+
+    let inst_hash = cache
+        .publish_instance_blob(
+            [0; 32],
+            img_hash,
+            c,
+            &[],
+            0,
+            [0u64; super::cap::NUM_REGS],
+            0,
+            0,
+        )
+        .unwrap();
+
+    // Promote I and C to instances; rebind I.root_cnode to Ref(c_r).
+    let i_ref = cache.get_mut(CapHashOrRef::Hash(inst_hash)).unwrap();
+    let c_ref = cache.get_mut(CapHashOrRef::Hash(c)).unwrap();
+    if let Cap::Instance(inst) = cache.instance_mut(i_ref).unwrap() {
+        inst.root_cnode = CapHashOrRef::Ref(c_ref);
+    } else {
+        panic!("expected Instance");
+    }
+
+    let snapshot = cache.settle(CapHashOrRef::Ref(i_ref)).unwrap();
+    // Instance stays in instances; the cnode has graduated back to a
+    // blob with the same hash as before (no mutation occurred).
+    assert!(cache.refcount(CapHashOrRef::Ref(i_ref)).is_some());
+    // c_blob has 2 holders: the publisher (test scope still "owns"
+    // the originally-published hash) and the instance (its Hash(c)
+    // reference after the Ref→Hash rewrite). The earlier get_mut
+    // shared-clone path balanced its own bookkeeping.
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(c)), Some(2));
+    // root_cnode is now Hash again.
+    if let Some(Cap::Instance(inst)) = cache.get(CapHashOrRef::Ref(i_ref)) {
+        assert_eq!(inst.root_cnode, CapHashOrRef::Hash(c));
+    } else {
+        panic!("expected Instance still live");
+    }
+    // Settling again must be idempotent and return the same hash.
+    let again = cache.settle(CapHashOrRef::Ref(i_ref)).unwrap();
+    assert_eq!(snapshot, again);
+}
+
+#[test]
 fn get_mut_image_or_type_errors() {
     let mut cache = Cache::new_in(Global);
     // Image: requires owned content; we set up a minimal one.
