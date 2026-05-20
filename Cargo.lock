@@ -1280,6 +1280,7 @@ dependencies = [
 name = "nub-host-kvm"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "anyhow",
  "bitflags 2.11.1",
  "blake3",
@@ -1289,6 +1290,7 @@ dependencies = [
  "crossbeam-channel",
  "goblin",
  "hyperlight-common",
+ "javm-cap",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",

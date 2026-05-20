@@ -20,10 +20,11 @@ Licensed under the Apache License, Version 2.0.
 use std::collections::HashMap;
 use std::ptr::NonNull;
 
+use javm_cap::talc::Cache as TypedCache;
 use nub_arch_x86_abi::{CapHash, PublishSpec};
 use nub_host_common::cache::{
-    CacheTalcLock, INSTANCE_INDEX_OFFSET, IndexSlot, InstanceIndex, MAX_INDEX_SLOTS,
-    STATE_CACHE_SIZE, TALC_HEAP_OFFSET, TALC_HEAP_SIZE, TalcSlice,
+    CacheDirectory, CacheTalcLock, INSTANCE_INDEX_OFFSET, IndexSlot, InstanceIndex,
+    MAX_INDEX_SLOTS, STATE_CACHE_SIZE, TALC_HEAP_OFFSET, TALC_HEAP_SIZE, TalcAlloc, TalcSlice,
 };
 use talc::source::Manual;
 
@@ -110,12 +111,37 @@ struct Entry {
 
 /// The state cache. One per `MultiUseSandbox`.
 ///
-/// **Field order is load-bearing.** Drop order matters: `entries`
-/// drops first (which calls `talc.deallocate(...)` for each Box's
-/// slabs). `region` drops last (`munmap`).
+/// **Field order is load-bearing.** Drop order matters:
+///
+/// 1. `entries` drops first — each `Entry`'s `TalcSlice` fields call
+///    `talc.deallocate(...)` on slabs inside `region`.
+/// 2. `typed_cache` drops next — its `BTreeMap`s contain `TBox`
+///    handles that deallocate cap content through the same talc.
+/// 3. `directory` drops next — its backing `Box<_, TalcAlloc>` returns
+///    its slab to talc.
+/// 4. Everything else (handles, counters) is plain integers / heap
+///    allocations whose order doesn't affect safety.
+/// 5. `region` drops last (`munmap`), at which point the mmap'd
+///    memory holding talc + the index + everything talc-allocated
+///    above is released.
+///
+/// Adding new fields that hold pointers into the cache region: place
+/// them BEFORE `region` in declaration order.
 pub struct Cache {
     /// Host-side index of published Caps. Maps hash → Entry.
     entries: HashMap<CapHash, Entry>,
+    /// Talc-resident cap storage (the V2 cache shape). Coexists with
+    /// the legacy `entries` map during the migration; callers will be
+    /// moved over to typed publishes incrementally. Empty by default.
+    #[allow(dead_code)]
+    typed_cache: TypedCache<TalcAlloc>,
+    /// Talc-resident directory that the guest scans to resolve
+    /// `CapHash` / `CapRef` keys into entry VAs. Not wired up to a
+    /// fixed cache-region offset yet — the guest navigator continues
+    /// using the legacy `index` (`InstanceIndex`) until a follow-up
+    /// commit moves it to a known offset.
+    #[allow(dead_code)]
+    directory: allocator_api2::boxed::Box<CacheDirectory, TalcAlloc>,
     /// Currently pinned hashes (one slot per active call frame).
     /// Eviction passes (future stage) skip these.
     #[allow(dead_code)]
@@ -183,14 +209,57 @@ impl Cache {
 
         let free_slots: Vec<usize> = (0..MAX_INDEX_SLOTS).rev().collect();
 
+        // V2 cache wiring: build a TalcAlloc from the same talc lock
+        // that the legacy slab path uses, then stand up an empty
+        // TypedCache + CacheDirectory backed by it. Neither is consumed
+        // yet — the migration to typed publishes happens incrementally.
+        // SAFETY: `talc` was just initialised above and lives as long
+        // as `region`, which outlives both the typed cache and the
+        // directory (enforced by Cache's field order).
+        let alloc = unsafe { TalcAlloc::from_raw(talc) };
+        let typed_cache = TypedCache::new_in(alloc);
+        let mut directory = allocator_api2::boxed::Box::try_new_in(
+            // Pre-init via zeroed write so the sentinel-empty
+            // contract holds without depending on talc giving us a
+            // pre-zeroed slab.
+            unsafe { core::mem::zeroed::<CacheDirectory>() },
+            alloc,
+        )
+        .map_err(|_| new_error!("cache: talc alloc for CacheDirectory failed"))?;
+        // Belt-and-braces: re-zero through init_at in case some future
+        // CacheDirectory field grows a Drop-bearing inner type that
+        // `mem::zeroed` would have left in an unsound state.
+        unsafe {
+            CacheDirectory::init_at(&mut *directory as *mut CacheDirectory);
+        }
+
         Ok(Self {
             entries: HashMap::new(),
+            typed_cache,
+            directory,
             pinned: smallvec::SmallVec::new(),
             talc,
             index,
             free_slots,
             region,
         })
+    }
+
+    /// Mutable accessor for the V2 typed cache. Callers can drive
+    /// `publish_data`, `publish_image`, etc. here; the resulting caps
+    /// land in the same talc region as the legacy slab storage and
+    /// share its lifetime.
+    #[allow(dead_code)]
+    pub fn typed_cache_mut(&mut self) -> &mut TypedCache<TalcAlloc> {
+        &mut self.typed_cache
+    }
+
+    /// Shared accessor for the V2 directory. Read-only inspection
+    /// from the host side (e.g., to observe what the guest would
+    /// see during navigation tests).
+    #[allow(dead_code)]
+    pub fn directory(&self) -> &CacheDirectory {
+        &self.directory
     }
 
     /// Host VA of the cache region's base. Used to compute
@@ -422,5 +491,59 @@ mod tests {
         // Still exactly 1 entry, 1 free slot consumed.
         assert_eq!(cache.entries.len(), 1);
         assert_eq!(cache.free_slots.len(), MAX_INDEX_SLOTS - 1);
+    }
+
+    /// Typed cache (V2) starts empty and lives alongside the legacy
+    /// slab storage. Both share the same talc instance.
+    #[test]
+    fn typed_cache_starts_empty() {
+        let cache = Cache::new().expect("alloc");
+        assert_eq!(cache.typed_cache.blob_count(), 0);
+        assert_eq!(cache.typed_cache.instance_count(), 0);
+    }
+
+    /// Drive a small typed-publish chain through the shared-memory
+    /// talc to prove the foundation is wired correctly: the talc
+    /// region is large enough, allocations succeed, refcounts are
+    /// maintained, and drop order tears everything down cleanly.
+    #[test]
+    fn typed_cache_publish_chain_round_trips() {
+        use javm_cap::talc::CapHashOrRef;
+        use javm_cap::slot::SlotIdx;
+
+        let mut cache = Cache::new().expect("alloc");
+        let tc = cache.typed_cache_mut();
+        let data_h = tc
+            .publish_data_inline(&[0xDE, 0xAD, 0xBE, 0xEF])
+            .expect("publish data");
+        let cnode_h = tc
+            .publish_cnode(4, &[(SlotIdx(0), CapHashOrRef::Hash(data_h))])
+            .expect("publish cnode");
+        assert_eq!(tc.blob_count(), 2);
+        // Data referenced once by cnode, once as publisher's hold.
+        assert_eq!(tc.refcount(CapHashOrRef::Hash(data_h)), Some(2));
+        assert_eq!(tc.refcount(CapHashOrRef::Hash(cnode_h)), Some(1));
+    }
+
+    /// Directory is talc-allocated and starts with the sentinel-empty
+    /// invariant on all slots.
+    #[test]
+    fn directory_starts_empty() {
+        let cache = Cache::new().expect("alloc");
+        let dir = cache.directory();
+        assert_eq!(
+            dir.blob_count.load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+        assert_eq!(
+            dir.instance_count
+                .load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+        // Spot-check a few slots.
+        for i in [0usize, 1, 100, 200, 255] {
+            assert_eq!(dir.blob_slots[i].hash, [0u8; 32]);
+            assert_eq!(dir.instance_slots[i].ref_id, 0);
+        }
     }
 }
