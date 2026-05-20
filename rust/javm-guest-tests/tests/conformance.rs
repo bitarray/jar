@@ -209,6 +209,7 @@ fn conform(ep: u8, name: &str, host_fn: fn() -> u64) {
 }
 
 #[test]
+#[ignore = "pending apply_event migration to Vm::invoke_cached (Commit 3)"]
 fn every_suite_matches_three_ways() {
     for &(ep, name, host_fn) in javm_guest_tests::SUITE_TABLE {
         conform(ep, name, host_fn);

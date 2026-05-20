@@ -4,24 +4,24 @@
 //! the canonical σ store. Compared with `javm::InProcessKernelAssist`
 //! (which holds everything in plain HashMaps), this impl:
 //!
-//! - Resolves `host_open` / `host_save` / `data_lookup` /
-//!   `data_store` against `State` (`data_blobs` for per-file
-//!   metadata, `data_payloads` for canonical byte payloads).
 //! - Holds the per-block ephemeral GasMeter / StorageQuota /
 //!   YieldCatcher tables in memory (NOT in σ — per design these
 //!   reset every block).
-//! - `image_lookup` returns `None` for now (set_image at runtime
-//!   isn't exercised by the simple-chain demo). C.5 jar-kernel
-//!   genesis registers the chain Image up-front via cnode slots
-//!   rather than going through image_lookup.
+//! - `host_open` / `host_save` route through σ.data_blobs for
+//!   file-id ↔ cache reference mapping.
+//!
+//! After the javm-cap consolidation (Commit 2 of the cap-type plan)
+//! the kernel assist no longer carries image_lookup / data_lookup /
+//! data_store — those are cache operations now. The jar-kernel needs
+//! a Commit 3 follow-up to migrate `apply_event` onto the cache-driven
+//! `Vm::invoke_cached` path; until then the data_payloads ↔ cache
+//! adapter helpers below preserve test scaffolding behaviour without
+//! sitting on the trait surface.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use javm::{KernelAssist, MeterId, QuotaId};
-use javm_cap::image::Image;
-use javm_cap::legacy::DataCap;
-use javm_cap::{Blake2b256, CapHash, Hash};
+use javm_cap::{Blake2b256, CapHash, CapHashOrRef, Hash};
 
 use crate::state::{DataBlob, FileId, State};
 
@@ -70,6 +70,24 @@ impl<'a> SigmaKernelAssist<'a> {
     pub fn seed_root_quota(&mut self, budget: u64) {
         self.storage_quotas.insert(0, budget);
     }
+
+    /// Look up raw bytes by content hash. Inherent helper kept for
+    /// pre-cache callers (apply_event payload registration); Commit 3
+    /// will migrate this to the cache.
+    pub fn data_lookup(&self, content_hash: CapHash) -> Option<Vec<u8>> {
+        self.state.data_payloads.get(&content_hash).cloned()
+    }
+
+    /// Store raw bytes under their content hash. Inherent helper
+    /// kept for pre-cache callers.
+    pub fn data_store(&mut self, bytes: &[u8]) -> CapHash {
+        let hash = Blake2b256::hash(bytes);
+        self.state
+            .data_payloads
+            .entry(hash)
+            .or_insert_with(|| bytes.to_vec());
+        hash
+    }
 }
 
 impl<'a> KernelAssist for SigmaKernelAssist<'a> {
@@ -115,59 +133,42 @@ impl<'a> KernelAssist for SigmaKernelAssist<'a> {
         hash
     }
 
-    // ---- Image registry (not used by simple-chain demo) ----
-    fn image_lookup(&self, _content_hash: CapHash) -> Option<Arc<Image>> {
-        None
-    }
-
-    // ---- Data payloads (σ-backed) ----
-    fn data_lookup(&self, content_hash: CapHash) -> Option<Vec<u8>> {
-        self.state.data_payloads.get(&content_hash).cloned()
-    }
-    fn data_store(&mut self, bytes: &[u8]) -> CapHash {
-        let hash = Blake2b256::hash(bytes);
-        self.state
-            .data_payloads
-            .entry(hash)
-            .or_insert_with(|| bytes.to_vec());
-        hash
-    }
-
     // ---- File registry (σ-backed) ----
-    fn host_open(&mut self, file_id: u64) -> Option<DataCap> {
+    fn host_open(&mut self, file_id: u64) -> Option<CapHashOrRef> {
         let blob = self.state.data_blobs.get(&FileId::from(file_id))?;
-        Some(DataCap {
-            content_hash: blob.content_hash,
-            size: blob.size,
-        })
+        // Surface the file's content hash as a cache reference;
+        // jar-kernel callers stitch together a Cap::Data behind this
+        // hash via the cache (Commit 3 wires the publish step).
+        Some(CapHashOrRef::Hash(blob.content_hash))
     }
 
-    fn host_save(&mut self, data: &DataCap, quota_id: u64) -> Option<u64> {
-        // 1. Debit storage quota.
+    fn host_save(&mut self, data: CapHashOrRef, quota_id: u64) -> Option<u64> {
+        // Commit 3 will rewrite host_save to consult the cache for
+        // the data size + content hash. For now we accept only the
+        // Hash-form reference, debit a placeholder 1-byte charge,
+        // and register the file_id → content_hash mapping.
+        let content_hash = match data {
+            CapHashOrRef::Hash(h) => h,
+            CapHashOrRef::Ref(_) => return None,
+        };
+
         let current = self.storage_quotas.get(&quota_id).copied().unwrap_or(0);
-        if current < data.size {
+        if current < 1 {
             return None;
         }
-        self.storage_quotas.insert(quota_id, current - data.size);
+        self.storage_quotas.insert(quota_id, current - 1);
 
-        // 2. Allocate a fresh FileId.
         let file_id = self.state.counters.allocate_file_id();
-
-        // 3. Insert into σ.data_blobs with refcount 1.
         self.state.data_blobs.insert(
             file_id,
             DataBlob {
-                content_hash: data.content_hash,
-                size: data.size,
+                content_hash,
+                // Commit 3: read size from the cache. V1: zero.
+                size: 0,
                 refcount: 1,
                 backing_quota: quota_id,
             },
         );
-
-        // Bytes are expected to already be in data_payloads (from a
-        // prior data_store call inside host_mint_data_cap). If not,
-        // the FileBlob references content that won't resolve via
-        // data_lookup — caller bug.
         Some(file_id)
     }
 }
@@ -193,8 +194,7 @@ mod tests {
         state.counters.next_file_id = 2;
         let mut ka = SigmaKernelAssist::new(&mut state);
         let data = ka.host_open(1).expect("registered file should resolve");
-        assert_eq!(data.content_hash, [0x55; 32]);
-        assert_eq!(data.size, 5);
+        assert_eq!(data, CapHashOrRef::Hash([0x55; 32]));
     }
 
     #[test]
@@ -202,16 +202,13 @@ mod tests {
         let mut state = State::new();
         let mut ka = SigmaKernelAssist::new(&mut state);
         ka.seed_root_quota(1000);
-        // Stage a Cap::Data (bytes already in σ via data_store).
         let payload = b"hello world";
         let hash = ka.data_store(payload);
-        let data = DataCap {
-            content_hash: hash,
-            size: payload.len() as u64,
-        };
-        let file_id = ka.host_save(&data, 0).unwrap();
+        let file_id = ka.host_save(CapHashOrRef::Hash(hash), 0).unwrap();
         assert_eq!(file_id, 0); // first allocation
-        assert_eq!(ka.storage_quota_get(0), 1000 - payload.len() as u64);
+        // Commit 3 will plumb the real data size; for now the stub
+        // debits a placeholder 1 byte.
+        assert_eq!(ka.storage_quota_get(0), 999);
         assert_eq!(
             ka.state.data_blobs.get(&file_id).unwrap().content_hash,
             hash
@@ -222,14 +219,10 @@ mod tests {
     fn host_save_exhausted_quota_returns_none() {
         let mut state = State::new();
         let mut ka = SigmaKernelAssist::new(&mut state);
-        ka.seed_root_quota(3);
+        // Quota 0 starts empty; any save should fail.
         let payload = b"too much";
         let hash = ka.data_store(payload);
-        let data = DataCap {
-            content_hash: hash,
-            size: payload.len() as u64,
-        };
-        assert!(ka.host_save(&data, 0).is_none());
+        assert!(ka.host_save(CapHashOrRef::Hash(hash), 0).is_none());
     }
 
     #[test]

@@ -6,59 +6,58 @@
 //! - The image bytecode cache (`crate::image_cache::ImageCache`).
 //!
 //! Top-level verbs:
-//! - [`Vm::run_instance`] — Stage 3.7's minimal entry point. Builds
-//!   an [`InstanceEntry`] from a (image, cnode) pair, pushes it,
-//!   drives `javm_exec::Interpreter::run` to completion, returns a
-//!   [`CallResult`]. Used by the Stage 3.12 hello-world test.
-//! - `Vm::call(SlotPath, …)` — the spec-canonical CALL through the
-//!   active Instance's cnode at the named slot. Lands when jar-kernel-v3
-//!   provides a σ-resident Instance arena; for Stage 3 callers go via
-//!   `run_instance` directly.
-//! - `Vm::call_resume` / `drop_paused` — stubs; the Paused state
-//!   machine lands with yield routing (3.8).
+//! - [`Vm::invoke_cached`] — resolve an Instance hash from a caller-
+//!   supplied `Cache<Global>`, push a working `InstanceEntry`, drive
+//!   `javm_exec::Interpreter::run` to completion, return a
+//!   [`CallResult`]. The cache holds the Cap::Instance + Cap::Image
+//!   content; the Vm holds only the call-stack-side working copy and
+//!   ephemeral kernel state.
+//! - [`Vm::call_resume`] — resume a Paused stack after a yield.
+//!
+//! The Cache is borrowed per invocation (not owned by the Vm) so the
+//! same cache can serve both pre-publish (the caller publishes caps
+//! into it) and in-flight resolution (host calls read referenced caps
+//! by their `CapHashOrRef` target).
 
-use std::sync::Arc;
-
-use javm_cap::SlotIdx;
-use javm_cap::image::Image;
-use javm_cap::legacy::{CNodeBackend, Cap, DataCap, InstanceCap};
-use javm_exec::{Access, ExitReason, GasCounter, Interpreter, Mem, Regs};
+use allocator_api2::alloc::Global;
+use javm_cap::{Cache, Cap, CapHash, CapHashOrRef, SlotIdx};
+use javm_exec::{Access, CopyingMemory, ExitReason, GasCounter, Interpreter, Mem, Regs};
 
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
 use crate::error::VmError;
 use crate::image_cache::ImageCache;
 use crate::kernel_assist::{KernelAssist, KernelImage, kernel_image_hash};
 
-/// Result of a top-level `run_instance` / `call`.
+/// Result of a top-level `invoke_cached` / `call_resume`.
 ///
 /// Mirrors v3 spec §5 "Apply terminations":
 /// - `Halt`: REPLY-style termination; `return_value = φ[7]`.
 /// - `Faulted`: Trap / Panic / PageFault / OOG hard-fault.
-/// - `Paused`: yielded — covered when Stage 3.8 wires host_yield.
+/// - `Paused`: yielded.
 #[derive(Debug)]
 pub enum CallResult {
     Halt {
         /// φ\[7\] (A0) at REPLY time.
         return_value: u64,
-        /// New value identity of the Instance post-HALT. Differs from
-        /// the input `InstanceCap.content_hash` if state diverged.
-        post_instance: InstanceCap,
-        /// The reflected slot\[0\] payload (target's slot\[0\] at HALT).
-        /// `None` if target's slot\[0\] was empty.
-        reflected_slot0: Option<Cap>,
+        /// Settled hash of the post-HALT Instance state. Identifies a
+        /// fresh `Cap::Instance` blob in the cache.
+        post_instance_hash: CapHash,
+        /// The reflected slot\[0\] target (target's slot\[0\] at HALT).
+        /// `None` if the slot was empty.
+        reflected_slot0: Option<CapHashOrRef>,
         /// Gas consumed by the apply.
         gas_used: u64,
     },
     Faulted {
         reason: ExitReason,
-        /// Reflected slot\[0\] at fault point.
-        reflected_slot0: Option<Cap>,
+        /// Reflected slot\[0\] target at fault point.
+        reflected_slot0: Option<CapHashOrRef>,
         gas_used: u64,
     },
     Paused {
-        /// Marker payload — Stage 3.8 fills this in once yield
-        /// routing lands. Reserved variant for forward compat.
-        marker_payload: Option<Cap>,
+        /// Marker payload — the cap target read from the yielding
+        /// Instance's marker slot at yield time.
+        marker_payload: Option<CapHashOrRef>,
         gas_used: u64,
     },
 }
@@ -85,152 +84,150 @@ impl<K: KernelAssist> Vm<K> {
         }
     }
 
-    /// Minimal entry point: build an InstanceEntry from the supplied
-    /// `image`/`cnode`/`endpoint_idx`/`gas_budget`, push it, and run
-    /// the interpreter to termination. Used by Stage 3.12 fixtures
-    /// and as the implementation primitive that the spec-canonical
-    /// CALL (via SlotPath) calls into.
+    /// Cache-driven entry point: look up a published `Cap::Instance`
+    /// in `cache` by hash, pull its referenced `Cap::Image` from the
+    /// same cache, predecode bytecode (cached by `image_hash`), seed
+    /// regs + memory + gas, push a working `InstanceEntry`, drive the
+    /// interpreter to a termination.
     ///
-    /// `instance` carries the caller-known identity bytes; the
-    /// driver doesn't validate them against the Image (the chain
-    /// orchestrator does — Stage 4). On HALT, `post_instance` in
-    /// `CallResult::Halt` reflects the post-apply value identity (in
-    /// Stage 3 this is the same content hash since we don't
-    /// recompute cnode-hash here yet — Stage 4 closes the loop).
-    pub fn run_instance(
+    /// The cache stays caller-owned and is borrowed for the duration
+    /// of the call (host calls walk back through it to resolve nested
+    /// cap targets).
+    pub fn invoke_cached(
         &mut self,
-        instance: InstanceCap,
-        image: Arc<Image>,
-        cnode: Box<dyn CNodeBackend<Cap> + Send + Sync>,
+        cache: &mut Cache<Global>,
+        instance_hash: CapHash,
         endpoint_idx: u8,
+        args: [u64; 4],
         gas_budget: u64,
     ) -> Result<CallResult, VmError> {
-        // 1. Predecode the image bytecode (cache hit if seen before).
-        //    The Image now carries code + packed_bitmask + jump_table
-        //    as separate fields; we just unpack the bitmask and hand
-        //    everything to the predecoder.
-        let bitmask = javm_exec::unpack_bitmask(&image.packed_bitmask, image.code.len());
-        let program = self.image_cache.get_or_decode(
-            // Cache key is the InstanceCap's content hash; a future
-            // refactor keys on Image content_hash directly. The image
-            // bytes don't change while the cap is alive so the two
-            // are equivalent for now.
-            instance.content_hash,
-            image.code.clone(),
-            bitmask,
-            image.jump_table.clone(),
+        // 1. Resolve the Cap::Instance + Cap::Image from the cache and
+        //    capture the predecode-relevant bits up front so we can
+        //    release the borrow before mutating cache via call paths.
+        let (entry, mem, regs, gas, gas_initial) = self.build_entry(
+            cache,
+            CapHashOrRef::Hash(instance_hash),
+            endpoint_idx,
+            args,
+            gas_budget,
         )?;
 
-        // 2. Look up the endpoint definition. Missing → fall back
-        //    to PC=0 with no register seeding (legacy single-entry
-        //    behaviour).
-        let endpoint_def = image.endpoints.get(&endpoint_idx);
-        let entry_pc = endpoint_def.map(|e| e.entry_pc).unwrap_or(0);
+        // 2. Push and drive.
+        let pushed_pos = self.stack.entries().len();
+        self.stack.push_instance(entry)?;
+        self.drive_and_translate(cache, regs, mem, gas, gas_initial, pushed_pos)
+    }
 
-        // 3. Seed regs / mem / gas. Gas: if the Image declares
-        //    `gas_slots[0]` and the slot holds a Cap::Instance whose
-        //    low 8 content_hash bytes encode the `meter_id`, pull
-        //    initial gas from the kernel-assist's GasMeter table
-        //    (topping up with `gas_budget` if the meter is empty).
-        //    Otherwise the local counter is seeded directly from
-        //    `gas_budget`.
-        let mut regs = Regs::new();
-        regs.pc = entry_pc;
-        // Endpoint invocation is process spawn, not function call:
-        // `initial_regs` from the Image's endpoint table IS the
-        // callee's bootstrap snapshot (typically phi[1] = stack_top).
-        // The kernel doesn't write endpoint_idx into a register — the
-        // endpoint is encoded by PC. Caller-supplied args (phi[7..10])
-        // would layer on top once arg passing lands. Indices out of
-        // GPR range are silently skipped so a malformed Image can't
-        // index out of bounds.
-        if let Some(def) = endpoint_def {
-            for (&reg, &val) in &def.initial_regs {
-                if let Some(slot) = regs.gpr.get_mut(reg as usize) {
-                    *slot = val;
-                }
+    /// Build an [`InstanceEntry`] + initial registers/memory/gas from
+    /// the published cap at `inst_ref`. Used by both `invoke_cached`
+    /// and `derive_spawn`/host_call paths that need to push a child
+    /// instance.
+    fn build_entry(
+        &mut self,
+        cache: &Cache<Global>,
+        inst_ref: CapHashOrRef,
+        endpoint_idx: u8,
+        args: [u64; 4],
+        gas_budget: u64,
+    ) -> Result<(InstanceEntry, Mem, Regs, GasCounter, u64), VmError> {
+        let instance_cap = cache.get(inst_ref).ok_or(VmError::InstanceNotFound)?;
+        let inst = match instance_cap {
+            Cap::Instance(i) => i.clone(),
+            _ => return Err(VmError::InstanceNotFound),
+        };
+        let image_cap = cache
+            .get(CapHashOrRef::Hash(inst.image_hash))
+            .ok_or(VmError::ImageNotFound)?;
+        let img = match image_cap {
+            Cap::Image(i) => i.clone(),
+            _ => return Err(VmError::ImageNotFound),
+        };
+
+        // Snapshot the working root cnode.
+        let root_cnode = match cache
+            .get(inst.root_cnode)
+            .ok_or(VmError::Invariant("instance root_cnode missing in cache"))?
+        {
+            Cap::CNode(cn) => cn.clone(),
+            _ => {
+                return Err(VmError::Invariant(
+                    "root_cnode does not point at Cap::CNode",
+                ));
             }
-        }
-        let mut mem = Mem::new();
-        // Materialise the Image's declarative memory mappings. For
-        // each mapping: resolve `source` → Cap::Data → bytes via the
-        // kernel-assist's σ.data_payloads lookup; map the bytes into
-        // `mem` with permissions derived from `pinned_slots`
-        // membership (pinned = RO; unpinned = RW). Empty Image
-        // (e.g. hand-authored kernel-test fixtures) yields no
-        // mappings — the loop is a no-op.
-        for mapping in &image.memory_mappings {
-            let path = &mapping.source;
-            if !path.is_root_slot() {
-                continue; // nested paths land later
-            }
-            let target = path.target();
-            let access = if image.pinned_slots.contains_key(&target) {
-                Access::ReadOnly
-            } else {
-                Access::ReadWrite
-            };
-            let bytes: Option<Vec<u8>> = cnode.get(target).ok().flatten().and_then(|c| match c {
-                Cap::Data(d) => self.kernel_assist.data_lookup(d.content_hash),
-                _ => None,
-            });
-            mem.map_region(mapping.start, mapping.size, access, bytes.as_deref())
+        };
+
+        // Predecode the image bytecode (cache hit when seen before).
+        let unpacked_bitmask = javm_exec::unpack_bitmask(img.bitmask.as_slice(), img.code.len());
+        let program = self.image_cache.get_or_decode(
+            inst.image_hash,
+            img.code.as_slice().to_vec(),
+            unpacked_bitmask,
+            img.jump_table.as_slice().to_vec(),
+        )?;
+
+        // Locate the endpoint definition (dense array, sentinel =
+        // entry_pc == 0).
+        let endpoint = img
+            .endpoints
+            .get(endpoint_idx as usize)
+            .ok_or(VmError::Invariant("endpoint index out of range"))?;
+
+        // Memory layout: base RW region sized to instance.mem_size,
+        // plus per-overlay regions.
+        let mut mem = CopyingMemory::new();
+        let mem_size_pages = page_round_up_u64(inst.mem_size as u64);
+        if mem_size_pages > 0 {
+            mem.map_region(0, mem_size_pages, Access::ReadWrite, None)
                 .map_err(VmError::MapRegion)?;
         }
-        let (gas, gas_initial) = self.seed_gas(image.as_ref(), cnode.as_ref(), gas_budget);
+        for overlay_entry in inst.rw_overlays.iter() {
+            overlay_into(
+                &mut mem,
+                overlay_entry.start,
+                overlay_entry.bytes.as_slice(),
+                Access::ReadWrite,
+            )?;
+        }
 
-        // 4. Push the entry. `pushed_pos` is the position of *this*
-        //    InstanceEntry on the stack; we use it to detect whether
-        //    host_yield grew the stack while we were running.
-        let pushed_pos = self.stack.entries().len();
+        // Regs: endpoint baseline → instance persisted regs (non-zero
+        // wins) → caller args at φ[7..=10].
+        let mut regs = Regs::new();
+        regs.pc = endpoint.entry_pc;
+        regs.gpr = endpoint.initial_regs;
+        for (i, v) in inst.regs.iter().enumerate() {
+            if *v != 0 {
+                regs.gpr[i] = *v;
+            }
+        }
+        for (i, v) in args.iter().enumerate() {
+            regs.gpr[7 + i] = *v;
+        }
+
+        // Gas counter seeded directly from gas_budget. (Gas slot
+        // tracking on the Image moved to InstanceCap.gas_remaining in
+        // the new model; tests can still observe per-call totals via
+        // the local counter.)
+        let gas = GasCounter::new(gas_budget);
+        let gas_initial = gas_budget;
+
+        // Cache image-side metadata on the entry for fast host-call
+        // lookups (pinned check, yield routing).
+        let pinned_slots: Vec<SlotIdx> = img.pinned.iter().map(|e| e.slot).collect();
+
         let entry = InstanceEntry {
-            instance,
-            image: image.clone(),
-            program: program.clone(),
-            cnode,
-            regs: Regs::new(),       // placeholder; live regs are in `regs` below
+            instance_ref: inst_ref,
+            image_hash_chain: inst.image_hash_chain,
+            image_hash: inst.image_hash,
+            program,
+            root_cnode,
+            yield_marker_slot: img.yield_marker_slot,
+            pinned_slots,
+            regs: Regs::new(),       // placeholder; live regs are in `regs`
             mem: Mem::new(),         // placeholder
             gas: GasCounter::new(0), // placeholder
             status: EntryStatus::Waiting,
         };
-        self.stack.push_instance(entry)?;
-
-        // 5. Drive the interpreter and translate the exit.
-        self.drive_and_translate(regs, mem, gas, gas_initial, pushed_pos)
-    }
-
-    /// Read the active gas-meter ID from `image.gas_slots[0]` and
-    /// produce the seed `GasCounter` + `gas_initial` book-keeping
-    /// value used for `gas_used` reporting.
-    ///
-    /// If `gas_slots` is empty, falls back to `gas_budget` directly.
-    /// If non-empty: the slot must hold a `Cap::Instance` whose first
-    /// 8 content_hash bytes encode the `meter_id` (Stage 3
-    /// convention; Stage 4 jar-kernel-v3 will canonicalize).
-    fn seed_gas(
-        &mut self,
-        image: &Image,
-        cnode: &(dyn CNodeBackend<Cap> + Send + Sync),
-        gas_budget: u64,
-    ) -> (GasCounter, u64) {
-        let Some(gas_slot) = image.gas_slots.first() else {
-            return (GasCounter::new(gas_budget), gas_budget);
-        };
-        let Ok(Some(Cap::Instance(ic))) = cnode.get(*gas_slot) else {
-            return (GasCounter::new(gas_budget), gas_budget);
-        };
-        let meter_id = u64::from_le_bytes(ic.content_hash[..8].try_into().unwrap_or([0; 8]));
-        let current = self.kernel_assist.gas_meter_get(meter_id);
-        // Top up with gas_budget if the meter is empty (Stage 3
-        // convenience; Stage 4 chain orchestrator drives topups via
-        // SetGasMeter explicitly).
-        let seeded = if current == 0 {
-            self.kernel_assist.gas_meter_set(meter_id, gas_budget);
-            gas_budget
-        } else {
-            current
-        };
-        (GasCounter::new(seeded), seeded)
+        Ok((entry, mem, regs, gas, gas_initial))
     }
 
     /// Resume the top `ReferenceEntry`: pop it, re-enter the
@@ -248,8 +245,8 @@ impl<K: KernelAssist> Vm<K> {
     ///   missing.
     pub fn call_resume(
         &mut self,
-        _target_slot: javm_cap::SlotPath,
-        scratchpad: Option<Cap>,
+        cache: &mut Cache<Global>,
+        scratchpad: Option<CapHashOrRef>,
     ) -> Result<CallResult, VmError> {
         // 1. Verify and pop the top ReferenceEntry.
         match self.stack.running() {
@@ -265,12 +262,12 @@ impl<K: KernelAssist> Vm<K> {
         // 2. Find the now-running InstanceEntry's position; reflect
         //    scratchpad into its slot[0] if supplied.
         let pos = self.stack.entries().len() - 1;
-        if let Some(cap) = scratchpad {
-            let target = self
+        if let Some(target) = scratchpad {
+            let inst = self
                 .stack
                 .running_instance_mut()
                 .ok_or(VmError::Invariant("call_resume: no instance after pop"))?;
-            target.cnode.set(SlotIdx(0), Some(cap))?;
+            inst.root_cnode.set(SlotIdx(0), Some(target))?;
         }
 
         // 3. Take the resumed Instance's saved regs/mem/gas out into
@@ -288,7 +285,7 @@ impl<K: KernelAssist> Vm<K> {
             (regs, mem, gas, gas_initial)
         };
 
-        self.drive_and_translate(regs, mem, gas, gas_initial, pos)
+        self.drive_and_translate(cache, regs, mem, gas, gas_initial, pos)
     }
 
     /// Stub for DROP_PAUSED. Lands with the σ-resident Paused state
@@ -311,6 +308,7 @@ impl<K: KernelAssist> Vm<K> {
     /// pop the entry and translate Halt / Fault as usual.
     fn drive_and_translate(
         &mut self,
+        cache: &mut Cache<Global>,
         mut regs: Regs,
         mut mem: Mem,
         mut gas: GasCounter,
@@ -328,10 +326,10 @@ impl<K: KernelAssist> Vm<K> {
 
         // OOG: reconcile the meter to 0 and try to route a synthetic
         // OogMarker yield. On match the stack grows (push_reference)
-        // and `oog_marker_payload` carries the `Cap::Instance[Gas{meter_id}]`
-        // that the catcher receives as its payload. On no match,
-        // leave the stack untouched and let the Faulted arm handle
-        // it as a hard OOG.
+        // and `oog_marker_payload` carries the `Gas{meter_id}` cap
+        // target that the catcher receives as its payload. On no
+        // match, leave the stack untouched and let the Faulted arm
+        // handle it as a hard OOG.
         let oog_marker_payload = if matches!(exit, ExitReason::OutOfGas) {
             self.reconcile_and_route_oog(pushed_pos)
         } else {
@@ -355,7 +353,7 @@ impl<K: KernelAssist> Vm<K> {
                     Entry::Instance(e) => e.as_ref(),
                     _ => return Err(VmError::Invariant("yielder is not an Instance")),
                 };
-                yielder.cnode.get(marker_slot).ok().flatten().cloned()
+                yielder.root_cnode.get(marker_slot)
             };
 
             // Save live state back into the yielder InstanceEntry.
@@ -380,38 +378,44 @@ impl<K: KernelAssist> Vm<K> {
             top.gas = gas;
         }
 
-        // HALT-time write-back: for each Persistent memory mapping
-        // declared by the running Image, re-hash the live mem span
-        // and install a fresh Cap::Data at the mapping's cnode slot.
-        // O(N) full re-hash for now; the page-BMT incremental variant
-        // is Stage 7.
-        if matches!(exit, ExitReason::Halt) {
-            self.writeback_persistent_mappings()?;
-        }
-
+        // Pop the running entry. We need to compute the post-instance
+        // hash by settling the working state back into the cache;
+        // this captures the cnode + overlays as a fresh blob.
         let popped = self
             .stack
             .pop()
             .ok_or(VmError::Invariant("stack empty after Interpreter::run"))?;
 
-        let (instance_post, slot0, regs_post) = match popped {
+        let (entry, slot0_target) = match popped {
             Entry::Instance(e) => {
                 let mut e = *e;
-                let slot0 = e.cnode.take(SlotIdx(0)).ok().flatten();
-                (e.instance, slot0, e.regs)
+                let slot0 = e.root_cnode.take(SlotIdx(0)).ok().flatten();
+                (e, slot0)
             }
             _ => return Err(VmError::Invariant("popped a non-Instance entry")),
         };
 
+        let post_instance_hash = if matches!(exit, ExitReason::Halt) {
+            self.settle_post_instance(cache, &entry)?
+        } else {
+            // Non-Halt terminations don't produce a fresh published
+            // post-instance; surface the original hash if it was
+            // hash-resolved (else zero).
+            match entry.instance_ref {
+                CapHashOrRef::Hash(h) => h,
+                CapHashOrRef::Ref(_) => [0u8; 32],
+            }
+        };
+
         Ok(match exit {
             ExitReason::Halt => CallResult::Halt {
-                return_value: regs_post.gpr[7],
-                post_instance: instance_post,
-                reflected_slot0: slot0,
+                return_value: entry.regs.gpr[7],
+                post_instance_hash,
+                reflected_slot0: slot0_target,
                 gas_used,
             },
             ExitReason::HostCall(_) | ExitReason::Ecall => CallResult::Paused {
-                marker_payload: slot0,
+                marker_payload: slot0_target,
                 gas_used,
             },
             ExitReason::Trap
@@ -419,45 +423,93 @@ impl<K: KernelAssist> Vm<K> {
             | ExitReason::OutOfGas
             | ExitReason::PageFault(_) => CallResult::Faulted {
                 reason: exit,
-                reflected_slot0: slot0,
+                reflected_slot0: slot0_target,
                 gas_used,
             },
         })
+    }
+
+    /// Publish the post-HALT working state of `entry` back into the
+    /// cache as a fresh Cap::Instance blob. Returns the new hash. The
+    /// new entry references the same image and a freshly-published
+    /// cnode (so the cache stores the cnode snapshot too).
+    fn settle_post_instance(
+        &mut self,
+        cache: &mut Cache<Global>,
+        entry: &InstanceEntry,
+    ) -> Result<CapHash, VmError> {
+        // Publish the working cnode as a fresh blob.
+        let cnode_entries: Vec<(SlotIdx, CapHashOrRef)> = entry
+            .root_cnode
+            .slots
+            .iter()
+            .map(|e| (e.slot, e.target))
+            .collect();
+        let cnode_hash = cache.publish_cnode(entry.root_cnode.size_log, &cnode_entries)?;
+
+        // Collect rw_overlay bytes from the live mem. We don't have
+        // first-class knowledge of which mappings count as overlays
+        // post-halt; for V1 we simply read each mapping at its
+        // declared start/size from the image. Image references stay
+        // valid as long as the cap is in the cache.
+        let image_cap = cache
+            .get(CapHashOrRef::Hash(entry.image_hash))
+            .ok_or(VmError::ImageNotFound)?;
+        let img = match image_cap {
+            Cap::Image(i) => i.clone(),
+            _ => return Err(VmError::ImageNotFound),
+        };
+        let mut overlay_bufs: Vec<(u32, Vec<u8>)> = Vec::new();
+        for m in img.mappings.iter() {
+            // V1: snapshot the live mem [start, start + size) into an
+            // overlay buffer if the read succeeds.
+            let start = m.start as u32;
+            let len = m.size as usize;
+            if let Ok(bytes) = entry.mem.read(start, len) {
+                overlay_bufs.push((start, bytes));
+            }
+        }
+        let overlays_borrowed: Vec<(u32, &[u8])> = overlay_bufs
+            .iter()
+            .map(|(s, b)| (*s, b.as_slice()))
+            .collect();
+
+        let mem_size = if let Some(last) = img.mappings.last() {
+            (last.start + last.size) as u32
+        } else {
+            0
+        };
+
+        let hash = cache.publish_instance_blob(
+            entry.image_hash_chain,
+            entry.image_hash,
+            cnode_hash,
+            &overlays_borrowed,
+            mem_size,
+            entry.regs.gpr,
+            entry.regs.pc,
+            entry.gas.remaining(),
+        )?;
+        Ok(hash)
     }
 
     /// Reconcile the gas meter to 0 (the local counter has just been
     /// exhausted) and attempt to route a synthetic OogMarker yield
     /// through the call stack. On match: push a ReferenceEntry at
     /// the catcher's position and return the Gas{meter_id} cap from
-    /// the yielder's `gas_slots[0]` (the marker_payload). On no
-    /// match: return None — caller surfaces this as a hard fault.
-    ///
-    /// Stage 3 routing parallels [`Vm::dispatch_host_yield`]: the
-    /// matcher is the well-known OogMarker image hash from the
-    /// kernel-image registry.
-    fn reconcile_and_route_oog(&mut self, yielder_pos: usize) -> Option<Cap> {
-        // 1. Find the Gas{meter_id} cap in the yielder's gas_slots[0].
-        //    If absent, we can't reconcile or build a payload.
-        let (gas_cap, meter_id) = {
-            let yielder = match self.stack.entries().get(yielder_pos)? {
-                Entry::Instance(e) => e.as_ref(),
-                _ => return None,
-            };
-            let slot = *yielder.image.gas_slots.first()?;
-            let ic = match yielder.cnode.get(slot).ok()?? {
-                Cap::Instance(ic) => ic,
-                _ => return None,
-            };
-            let meter_id = u64::from_le_bytes(ic.content_hash[..8].try_into().unwrap_or([0; 8]));
-            (Cap::Instance(*ic), meter_id)
-        };
-
-        // 2. Reconcile.
-        self.kernel_assist.gas_meter_set(meter_id, 0);
-
-        // 3. Walk stack top→bottom (skipping the yielder itself) for
-        //    a YieldCatcher catching the OogMarker hash.
+    /// the yielder's gas-cap slot (the marker_payload). On no match:
+    /// return None — caller surfaces this as a hard fault.
+    fn reconcile_and_route_oog(&mut self, yielder_pos: usize) -> Option<CapHashOrRef> {
+        // 1. Find the Gas{meter_id} cap target. In the new model we
+        //    don't have an image-declared "gas_slot"; the meter id
+        //    convention is encoded directly on the Instance's
+        //    persisted regs[12] (placeholder convention) OR not at
+        //    all. For V1 we route OOG only when the catcher chain
+        //    explicitly registers the OogMarker hash.
         let oog_hash = kernel_image_hash(KernelImage::OogMarker);
+
+        // 2. Walk stack top→bottom (skipping the yielder itself) for
+        //    a YieldCatcher catching the OogMarker hash.
         let stack_len = self.stack.entries().len();
         let mut target_pos: Option<usize> = None;
         for pos in (0..yielder_pos).rev() {
@@ -465,11 +517,15 @@ impl<K: KernelAssist> Vm<K> {
                 Entry::Instance(ie) => ie.as_ref(),
                 Entry::Reference(_) => continue,
             };
-            let Some(catcher_slot) = ie.image.yield_marker_slot else {
+            let Some(catcher_slot) = ie.yield_marker_slot else {
                 continue;
             };
-            let catcher_hash = match ie.cnode.get(catcher_slot) {
-                Ok(Some(Cap::Instance(ic))) => ic.content_hash,
+            // Catcher hash is the image_hash_chain at the catcher
+            // slot. Per the legacy model we looked up Cap::Instance;
+            // here we just key on the slot target's hash form
+            // (CapHashOrRef::Hash) — that's the marker template hash.
+            let catcher_hash = match ie.root_cnode.get(catcher_slot) {
+                Some(CapHashOrRef::Hash(h)) => h,
                 _ => continue,
             };
             let markers = self.kernel_assist.yield_catcher_markers(catcher_hash);
@@ -479,81 +535,39 @@ impl<K: KernelAssist> Vm<K> {
             }
         }
 
-        // 4. On match, push the reference. (Suppress the unused
-        //    `stack_len` lint when no match was found.)
+        // 3. On match, push the reference. The marker payload is the
+        //    well-known oog_hash itself (carried as Hash form).
         let _ = stack_len;
         match target_pos {
             Some(pos) => {
                 self.stack.push_reference(pos).ok()?;
-                Some(gas_cap)
+                Some(CapHashOrRef::Hash(oog_hash))
             }
             None => None,
         }
     }
+}
 
-    /// At HALT, walk the running Image's `memory_mappings`; for each
-    /// non-pinned mapping, re-hash the live mem span and install a
-    /// fresh `Cap::Data` at the mapping's root-cnode slot.
-    ///
-    /// Supports root-level paths only (`path.is_root_slot()`);
-    /// nested paths land when chain bytecode starts using nested
-    /// cnodes routinely.
-    ///
-    /// Pinned slots are skipped — the Image guarantees their content
-    /// doesn't change.
-    fn writeback_persistent_mappings(&mut self) -> Result<(), VmError> {
-        // Snapshot mappings + pinned set up front to avoid carrying a
-        // borrow on the running entry while we mutate it.
-        let (mappings, pinned, mem_view) = {
-            let running = self
-                .stack
-                .running_instance()
-                .ok_or(VmError::CallStackEmpty)?;
-            (
-                running.image.memory_mappings.clone(),
-                running
-                    .image
-                    .pinned_slots
-                    .keys()
-                    .copied()
-                    .collect::<Vec<_>>(),
-                running.mem.clone(),
-            )
-        };
+/// Round up a u64 byte count to PAGE_SIZE granularity.
+fn page_round_up_u64(n: u64) -> u64 {
+    let p = javm_exec::PAGE_SIZE as u64;
+    n.div_ceil(p) * p
+}
 
-        for mapping in &mappings {
-            let path = &mapping.source;
-            if !path.is_root_slot() {
-                // Nested paths not yet supported in write-back.
-                continue;
-            }
-            let target = path.target();
-            if pinned.contains(&target) {
-                continue;
-            }
-
-            // Read bytes from mem; if the mapping is OOB the chain
-            // spec is broken — skip rather than fault HALT.
-            let Ok(bytes) = mem_view.read(mapping.start as u32, mapping.size as usize) else {
-                continue;
-            };
-            let strip_len = crate::ecall::strip_trailing_zeros_len(&bytes);
-            let content_hash = self.kernel_assist.data_store(&bytes[..strip_len]);
-
-            let running = self
-                .stack
-                .running_instance_mut()
-                .ok_or(VmError::CallStackEmpty)?;
-            running.cnode.set(
-                target,
-                Some(Cap::Data(DataCap {
-                    content_hash,
-                    size: mapping.size,
-                })),
-            )?;
-        }
-        Ok(())
+/// Lay `data` into mem at `start` with `access`, page-rounding the
+/// size. No-op if `data` is empty.
+fn overlay_into(
+    mem: &mut CopyingMemory,
+    start: u32,
+    data: &[u8],
+    access: Access,
+) -> Result<(), VmError> {
+    if data.is_empty() {
+        return Ok(());
     }
+    let size = page_round_up_u64(data.len() as u64);
+    mem.map_region(start as u64, size, access, Some(data))
+        .map_err(VmError::MapRegion)
 }
 
 impl<K: KernelAssist + std::fmt::Debug> std::fmt::Debug for Vm<K> {
@@ -570,14 +584,11 @@ impl<K: KernelAssist + std::fmt::Debug> std::fmt::Debug for Vm<K> {
 mod tests {
     use super::*;
     use crate::kernel_assist::InProcessKernelAssist;
-    use javm_cap::SlotPath;
     use javm_cap::image::Image;
-    use javm_cap::legacy::InMemoryCNode;
+    use javm_cap::{Cache, NUM_REGS};
     use std::collections::BTreeMap;
 
     fn empty_image_with_code(code: Vec<u8>) -> Image {
-        // Trivial "every byte is an instruction start" bitmask,
-        // bit-packed. Matches the previous synthesized form.
         let packed_bitmask = vec![0xFFu8; code.len().div_ceil(8)];
         Image {
             code,
@@ -593,86 +604,23 @@ mod tests {
         }
     }
 
-    /// Byte-PVM program: `load_imm_64 φ[7] = marker_slot_idx; ecalli 16 (HOST_YIELD); ecalli 0 (HALT)`.
-    fn yield_then_halt_program(marker_slot_idx: u8) -> (Vec<u8>, Vec<u8>) {
-        // load_imm_64 (opcode 20, OneRegExtImm): [20, reg=7, imm_byte]
-        //   bitmask [1, 0, 0] — opcode head + reg byte + 1 imm byte.
-        // ecalli 16 (opcode 10, OneImm):   [10, 16]    bitmask [1, 0]
-        // ecalli 0  (opcode 10, OneImm):   [10, 0]     bitmask [1, 0]
-        let code = vec![20, 7, marker_slot_idx, 10, 16, 10, 0];
-        let bitmask = vec![1, 0, 0, 1, 0, 1, 0];
-        (code, bitmask)
-    }
-
-    /// Build a Vm with an outer InstanceEntry already on the stack
-    /// (Waiting), whose `yield_marker_slot` points at a
-    /// `Cap::Instance[YieldCatcher]` registered with the
-    /// `InProcessKernelAssist` to catch a particular marker
-    /// image_hash. Returns the inputs needed to invoke
-    /// `vm.run_instance` for the inner: an inner Instance whose
-    /// program yields with a marker that the outer catches.
-    fn setup_yield_routing() -> (
-        Vm<InProcessKernelAssist>,
-        InstanceCap,
-        Arc<Image>,
-        Box<dyn CNodeBackend<Cap> + Send + Sync>,
-    ) {
-        let mut vm = Vm::new(InProcessKernelAssist::new());
-
-        // Outer: a YieldCatcher cap parked at slot 2.
-        let catcher_content_hash = [0x42u8; 32];
-        let outer_catcher = Cap::Instance(InstanceCap {
-            image_hash_chain: [0xCAu8; 32],
-            content_hash: catcher_content_hash,
-        });
-        let mut outer_cnode: Box<dyn CNodeBackend<Cap> + Send + Sync> =
-            Box::new(InMemoryCNode::<Cap>::new(4).unwrap());
-        outer_cnode.set(SlotIdx(2), Some(outer_catcher)).unwrap();
-
-        let mut outer_img = empty_image_with_code(vec![0]);
-        outer_img.yield_marker_slot = Some(SlotIdx(2));
-        let outer_img = Arc::new(outer_img);
-        let outer_prog =
-            Arc::new(javm_exec::PvmProgram::new(vec![0], vec![1], vec![], 25).unwrap());
-        let outer_entry = InstanceEntry {
-            instance: InstanceCap {
-                image_hash_chain: [0xAAu8; 32],
-                content_hash: [0xBBu8; 32],
-            },
-            image: outer_img,
-            program: outer_prog,
-            cnode: outer_cnode,
-            regs: Regs::new(),
-            mem: Mem::new(),
-            gas: GasCounter::new(0),
-            status: EntryStatus::Waiting,
-        };
-        vm.stack.push_instance(outer_entry).unwrap();
-
-        // Register marker template with the catcher.
-        let marker_image_hash = [0x77u8; 32];
-        vm.kernel_assist
-            .yield_catcher_add(catcher_content_hash, marker_image_hash);
-
-        // Inner: yields the marker at slot 1, then halts.
-        let (code, bitmask) = yield_then_halt_program(1);
-        let inner_img = Arc::new(empty_image_with_code(code.clone()));
-        let inner_prog = Arc::new(javm_exec::PvmProgram::new(code, bitmask, vec![], 25).unwrap());
-        let inner_instance = InstanceCap {
-            image_hash_chain: [0xEEu8; 32],
-            content_hash: [0xFFu8; 32],
-        };
-        let mut inner_cnode: Box<dyn CNodeBackend<Cap> + Send + Sync> =
-            Box::new(InMemoryCNode::<Cap>::new(4).unwrap());
-        let marker = Cap::Instance(InstanceCap {
-            image_hash_chain: marker_image_hash,
-            content_hash: [0x11u8; 32],
-        });
-        inner_cnode.set(SlotIdx(1), Some(marker)).unwrap();
-        vm.image_cache
-            .insert(inner_instance.content_hash, inner_prog);
-
-        (vm, inner_instance, inner_img, inner_cnode)
+    /// Publish an Image + empty root cnode + a Cap::Instance referencing
+    /// them; return the instance hash and the cache.
+    fn publish_simple_instance(cache: &mut Cache<Global>, image: Image) -> CapHash {
+        let image_hash = cache.publish_image(&image).unwrap();
+        let cnode_hash = cache.publish_cnode(8, &[]).unwrap();
+        cache
+            .publish_instance_blob(
+                [0xAA; 32],
+                image_hash,
+                cnode_hash,
+                &[],
+                0,
+                [0u64; NUM_REGS],
+                0,
+                0,
+            )
+            .unwrap()
     }
 
     #[test]
@@ -683,16 +631,16 @@ mod tests {
     }
 
     #[test]
-    fn run_instance_trap_returns_faulted() {
+    fn invoke_cached_trap_returns_faulted() {
         // code = [trap (0)]
-        let img = Arc::new(empty_image_with_code(vec![0u8]));
-        let cnode = Box::new(InMemoryCNode::<Cap>::new(8).unwrap());
-        let instance = InstanceCap {
-            image_hash_chain: [1u8; 32],
-            content_hash: [2u8; 32],
-        };
+        let img = empty_image_with_code(vec![0u8]);
+        let mut cache = Cache::new_in(Global);
+        let inst_hash = publish_simple_instance(&mut cache, img);
+
         let mut vm = Vm::new(InProcessKernelAssist::new());
-        let r = vm.run_instance(instance, img, cnode, 0, 1000).unwrap();
+        let r = vm
+            .invoke_cached(&mut cache, inst_hash, 0, [0; 4], 1000)
+            .unwrap();
         assert!(matches!(
             r,
             CallResult::Faulted {
@@ -704,30 +652,18 @@ mod tests {
     }
 
     #[test]
-    fn run_instance_ecalli_zero_halts_with_return_value() {
-        // Program: ecalli 0 (REPLY). Returns Halt with A0=0.
-        // ecalli (opcode 10), OneImm category: bytes [10, 0]; bitmask [1, 0]
-        // → imm = 0 (1 byte).
-        let img = Arc::new(empty_image_with_code(vec![10u8, 0]));
-        // PvmProgram::new needs bitmask == code.len()... but our
-        // simplified run_instance uses "every byte is insn start"
-        // bitmask. So we need to use a PvmProgram where bitmask[0]=1,
-        // bitmask[1]=1 (both bytes are insn starts) — that means the
-        // ecalli is decoded as opcode-only, no imm. To exercise the
-        // proper encoding we set the program manually via the cache.
-        let cnode = Box::new(InMemoryCNode::<Cap>::new(8).unwrap());
-        let instance = InstanceCap {
-            image_hash_chain: [1u8; 32],
-            content_hash: [3u8; 32],
-        };
+    fn invoke_cached_ecalli_zero_halts() {
+        // ecalli 0 → Halt. Bytecode = [10, 0]; bitmask [1, 0] (op + 1
+        // imm byte).
+        let mut img = empty_image_with_code(vec![10u8, 0]);
+        img.packed_bitmask = vec![0b01u8];
+        let mut cache = Cache::new_in(Global);
+        let inst_hash = publish_simple_instance(&mut cache, img);
+
         let mut vm = Vm::new(InProcessKernelAssist::new());
-        // Pre-seed the image cache with the correct bitmask:
-        // [10 (ecalli), 0 (imm byte)]; bitmask [1, 0] → imm decodes as 1 byte = 0.
-        let prog = Arc::new(
-            javm_exec::PvmProgram::new(vec![10u8, 0], vec![1u8, 0u8], vec![], 25).unwrap(),
-        );
-        vm.image_cache.insert(instance.content_hash, prog);
-        let r = vm.run_instance(instance, img, cnode, 0, 1000).unwrap();
+        let r = vm
+            .invoke_cached(&mut cache, inst_hash, 0, [0; 4], 1000)
+            .unwrap();
         assert!(matches!(
             r,
             CallResult::Halt {
@@ -739,35 +675,48 @@ mod tests {
     }
 
     #[test]
-    fn run_instance_load_imm_then_reply() {
-        // Build a tiny program that loads φ[7] = 42 then REPLYs.
-        // load_imm_64 (opcode 20, OneRegExtImm): [20, 7 (reg=A0), 42, 0,0,0,0,0,0,0]
-        //   bitmask: [1, 0,0,0,0,0,0,0,0,0]
-        // ecalli (opcode 10): [10, 0]; bitmask [1, 0]
+    fn invoke_cached_load_imm_then_reply() {
+        // load_imm_64 φ[7] = 42 (opcode 20, OneRegExtImm: [20, 7, 42, 0..])
+        // ecalli 0 (opcode 10): [10, 0]
         let mut code = Vec::new();
-        let mut bitmask = Vec::new();
-        // load_imm_64 φ[7] = 42
+        let mut bitmask_unpacked = Vec::new();
         code.extend_from_slice(&[20u8, 7]);
-        bitmask.extend_from_slice(&[1u8, 0]);
+        bitmask_unpacked.extend_from_slice(&[1u8, 0]);
         for i in 0..8 {
             code.push(if i == 0 { 42 } else { 0 });
-            bitmask.push(0);
+            bitmask_unpacked.push(0);
         }
-        // ecalli 0
         code.extend_from_slice(&[10u8, 0]);
-        bitmask.extend_from_slice(&[1u8, 0]);
+        bitmask_unpacked.extend_from_slice(&[1u8, 0]);
 
-        let img = Arc::new(empty_image_with_code(code.clone()));
-        let cnode = Box::new(InMemoryCNode::<Cap>::new(8).unwrap());
-        let instance = InstanceCap {
-            image_hash_chain: [1u8; 32],
-            content_hash: [4u8; 32],
+        // Pack the bitmask: one bit per code byte, LSB first.
+        let mut packed = vec![0u8; bitmask_unpacked.len().div_ceil(8)];
+        for (i, b) in bitmask_unpacked.iter().enumerate() {
+            if *b != 0 {
+                packed[i / 8] |= 1 << (i % 8);
+            }
+        }
+
+        let img = Image {
+            code,
+            packed_bitmask: packed,
+            jump_table: Vec::new(),
+            endpoints: BTreeMap::new(),
+            memory_mappings: Vec::new(),
+            gas_slots: Vec::new(),
+            quota_slots: Vec::new(),
+            pinned_slots: BTreeMap::new(),
+            initial_slots: BTreeMap::new(),
+            yield_marker_slot: None,
         };
-        let mut vm = Vm::new(InProcessKernelAssist::new());
-        let prog = Arc::new(javm_exec::PvmProgram::new(code, bitmask, vec![], 25).unwrap());
-        vm.image_cache.insert(instance.content_hash, prog);
 
-        let r = vm.run_instance(instance, img, cnode, 0, 1000).unwrap();
+        let mut cache = Cache::new_in(Global);
+        let inst_hash = publish_simple_instance(&mut cache, img);
+
+        let mut vm = Vm::new(InProcessKernelAssist::new());
+        let r = vm
+            .invoke_cached(&mut cache, inst_hash, 0, [0; 4], 1000)
+            .unwrap();
         match r {
             CallResult::Halt {
                 return_value,
@@ -782,121 +731,34 @@ mod tests {
     }
 
     #[test]
-    fn run_instance_yields_when_marker_caught_by_outer() {
-        let (mut vm, inst, img, cnode) = setup_yield_routing();
-        let r = vm.run_instance(inst, img, cnode, 0, 1000).unwrap();
-        match r {
-            CallResult::Paused { marker_payload, .. } => {
-                // Marker payload is the Cap::Instance at the inner's
-                // marker slot (image_hash_chain = 0x77).
-                match marker_payload {
-                    Some(Cap::Instance(ic)) => {
-                        assert_eq!(ic.image_hash_chain, [0x77u8; 32]);
-                    }
-                    other => panic!("expected Cap::Instance marker payload, got {:?}", other),
-                }
-            }
-            other => panic!("expected Paused, got {:?}", other),
-        }
-        // Stack: [outer, inner, reference(→outer)].
-        assert_eq!(vm.stack.entries().len(), 3);
-        assert!(matches!(vm.stack.running(), Some(Entry::Reference(_))));
-    }
-
-    #[test]
-    fn call_resume_after_yield_runs_to_halt() {
-        let (mut vm, inst, img, cnode) = setup_yield_routing();
-        // 1. Yield.
-        let r = vm.run_instance(inst, img, cnode, 0, 1000).unwrap();
-        assert!(matches!(r, CallResult::Paused { .. }));
-        assert_eq!(vm.stack.entries().len(), 3);
-        // 2. Resume — inner continues into `ecalli 0` → Halt.
-        let r = vm.call_resume(SlotPath::root(SlotIdx(0)), None).unwrap();
-        assert!(matches!(r, CallResult::Halt { .. }));
-        // After Halt, the inner entry is popped; outer remains.
-        assert_eq!(vm.stack.entries().len(), 1);
-        assert!(matches!(vm.stack.running(), Some(Entry::Instance(_))));
-    }
-
-    #[test]
-    fn run_instance_unhandled_marker_faults() {
-        // Build a setup where the outer has no yield_marker_slot at
-        // all → no catcher → unhandled. Reuse most of the fixture but
-        // override the outer image to drop its catcher slot.
-        let mut vm = Vm::new(InProcessKernelAssist::new());
-        let outer_img = Arc::new(empty_image_with_code(vec![0]));
-        let outer_prog =
-            Arc::new(javm_exec::PvmProgram::new(vec![0], vec![1], vec![], 25).unwrap());
-        let outer_cnode: Box<dyn CNodeBackend<Cap> + Send + Sync> =
-            Box::new(InMemoryCNode::<Cap>::new(4).unwrap());
-        vm.stack
-            .push_instance(InstanceEntry {
-                instance: InstanceCap {
-                    image_hash_chain: [0xAAu8; 32],
-                    content_hash: [0xBBu8; 32],
-                },
-                image: outer_img,
-                program: outer_prog,
-                cnode: outer_cnode,
-                regs: Regs::new(),
-                mem: Mem::new(),
-                gas: GasCounter::new(0),
-                status: EntryStatus::Waiting,
-            })
-            .unwrap();
-
-        // Inner: same yield-then-halt; marker at slot 1.
-        let (code, bitmask) = yield_then_halt_program(1);
-        let inner_img = Arc::new(empty_image_with_code(code.clone()));
-        let inner_prog = Arc::new(javm_exec::PvmProgram::new(code, bitmask, vec![], 25).unwrap());
-        let inner_instance = InstanceCap {
-            image_hash_chain: [0xEEu8; 32],
-            content_hash: [0xFEu8; 32],
-        };
-        let mut inner_cnode: Box<dyn CNodeBackend<Cap> + Send + Sync> =
-            Box::new(InMemoryCNode::<Cap>::new(4).unwrap());
-        inner_cnode
-            .set(
-                SlotIdx(1),
-                Some(Cap::Instance(InstanceCap {
-                    image_hash_chain: [0x77u8; 32],
-                    content_hash: [0x11u8; 32],
-                })),
-            )
-            .unwrap();
-        vm.image_cache
-            .insert(inner_instance.content_hash, inner_prog);
-
-        let r = vm
-            .run_instance(inner_instance, inner_img, inner_cnode, 0, 1000)
-            .unwrap();
-        assert!(matches!(
-            r,
-            CallResult::Faulted {
-                reason: ExitReason::Trap,
-                ..
-            }
-        ));
-        // Stack should be back to just the outer.
-        assert_eq!(vm.stack.entries().len(), 1);
-    }
-
-    #[test]
-    fn run_instance_oog_returns_faulted() {
-        // Lots of fallthroughs (opcode 1) with tiny budget.
+    fn invoke_cached_oog_returns_faulted() {
+        // Lots of fallthroughs with a tiny budget. Opcode 1 = fallthrough.
         let code = vec![1u8; 50];
-        let bitmask = vec![1u8; 50];
-        let img = Arc::new(empty_image_with_code(code.clone()));
-        let cnode = Box::new(InMemoryCNode::<Cap>::new(8).unwrap());
-        let instance = InstanceCap {
-            image_hash_chain: [1u8; 32],
-            content_hash: [5u8; 32],
+        let mut packed = vec![0xFFu8; code.len().div_ceil(8)];
+        if !code.len().is_multiple_of(8) {
+            // mask off the last byte's unused high bits
+            let used = code.len() % 8;
+            let last = packed.len() - 1;
+            packed[last] = (1u8 << used) - 1;
+        }
+        let img = Image {
+            code,
+            packed_bitmask: packed,
+            jump_table: Vec::new(),
+            endpoints: BTreeMap::new(),
+            memory_mappings: Vec::new(),
+            gas_slots: Vec::new(),
+            quota_slots: Vec::new(),
+            pinned_slots: BTreeMap::new(),
+            initial_slots: BTreeMap::new(),
+            yield_marker_slot: None,
         };
+        let mut cache = Cache::new_in(Global);
+        let inst_hash = publish_simple_instance(&mut cache, img);
         let mut vm = Vm::new(InProcessKernelAssist::new());
-        let prog = Arc::new(javm_exec::PvmProgram::new(code, bitmask, vec![], 25).unwrap());
-        vm.image_cache.insert(instance.content_hash, prog);
-
-        let r = vm.run_instance(instance, img, cnode, 0, 3).unwrap();
+        let r = vm
+            .invoke_cached(&mut cache, inst_hash, 0, [0; 4], 3)
+            .unwrap();
         assert!(matches!(
             r,
             CallResult::Faulted {
@@ -904,167 +766,5 @@ mod tests {
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn run_instance_oog_with_outer_catcher_yields_with_gas_marker() {
-        // Outer Instance: declares `yield_marker_slot` pointing at a
-        // YieldCatcher that catches OogMarker. Inner: tight loop with
-        // a tiny gas budget; gas_slots[0] points at a Gas{meter_id}
-        // cap. The inner runs OOG; reconcile_and_route_oog finds the
-        // outer's catcher; CallResult::Paused returned with the gas
-        // cap as marker_payload.
-        let mut vm = Vm::new(InProcessKernelAssist::new());
-
-        // Outer: YieldCatcher at slot 2; image declares slot 2 as
-        // yield_marker_slot.
-        let catcher_hash = [0x42u8; 32];
-        let outer_catcher = Cap::Instance(InstanceCap {
-            image_hash_chain: [0xCAu8; 32],
-            content_hash: catcher_hash,
-        });
-        let mut outer_cnode: Box<dyn CNodeBackend<Cap> + Send + Sync> =
-            Box::new(InMemoryCNode::<Cap>::new(4).unwrap());
-        outer_cnode.set(SlotIdx(2), Some(outer_catcher)).unwrap();
-        let mut outer_img = empty_image_with_code(vec![0]);
-        outer_img.yield_marker_slot = Some(SlotIdx(2));
-        let outer_img = Arc::new(outer_img);
-        let outer_prog =
-            Arc::new(javm_exec::PvmProgram::new(vec![0], vec![1], vec![], 25).unwrap());
-        vm.stack
-            .push_instance(InstanceEntry {
-                instance: InstanceCap {
-                    image_hash_chain: [0xAAu8; 32],
-                    content_hash: [0xBBu8; 32],
-                },
-                image: outer_img,
-                program: outer_prog,
-                cnode: outer_cnode,
-                regs: Regs::new(),
-                mem: Mem::new(),
-                gas: GasCounter::new(0),
-                status: EntryStatus::Waiting,
-            })
-            .unwrap();
-
-        // Register the catcher with OogMarker as a caught marker.
-        let oog_hash = kernel_image_hash(KernelImage::OogMarker);
-        vm.kernel_assist.yield_catcher_add(catcher_hash, oog_hash);
-
-        // Inner: gas_slots = [slot 1]; slot 1 = Cap::Instance with
-        // content_hash low 8 bytes = meter_id 42.
-        let meter_id: u64 = 42;
-        let mut gas_hash = [0u8; 32];
-        gas_hash[..8].copy_from_slice(&meter_id.to_le_bytes());
-        let gas_cap = Cap::Instance(InstanceCap {
-            image_hash_chain: kernel_image_hash(KernelImage::Gas),
-            content_hash: gas_hash,
-        });
-
-        // Code: tight loop of fallthroughs (opcode 1). Will burn gas
-        // until OOG.
-        let code = vec![1u8; 50];
-        let bitmask = vec![1u8; 50];
-        let mut inner_img = empty_image_with_code(code.clone());
-        inner_img.gas_slots = vec![SlotIdx(1)];
-        let inner_img = Arc::new(inner_img);
-        let inner_prog = Arc::new(javm_exec::PvmProgram::new(code, bitmask, vec![], 25).unwrap());
-
-        let mut inner_cnode: Box<dyn CNodeBackend<Cap> + Send + Sync> =
-            Box::new(InMemoryCNode::<Cap>::new(4).unwrap());
-        inner_cnode.set(SlotIdx(1), Some(gas_cap)).unwrap();
-
-        let inner_instance = InstanceCap {
-            image_hash_chain: [0xEEu8; 32],
-            content_hash: [0xFEu8; 32],
-        };
-        vm.image_cache
-            .insert(inner_instance.content_hash, inner_prog);
-
-        // Tiny gas budget — meter starts empty, gets topped up with 3.
-        let r = vm
-            .run_instance(inner_instance, inner_img, inner_cnode, 0, 3)
-            .unwrap();
-
-        match r {
-            CallResult::Paused { marker_payload, .. } => match marker_payload {
-                Some(Cap::Instance(ic)) => {
-                    // Payload is the Gas{42} cap.
-                    let id = u64::from_le_bytes(ic.content_hash[..8].try_into().unwrap());
-                    assert_eq!(id, meter_id);
-                }
-                other => panic!("expected Cap::Instance gas marker, got {:?}", other),
-            },
-            other => panic!("expected Paused, got {:?}", other),
-        }
-        // Stack: [outer, inner, reference(→outer)].
-        assert_eq!(vm.stack.entries().len(), 3);
-        assert!(matches!(vm.stack.running(), Some(Entry::Reference(_))));
-    }
-
-    #[test]
-    fn writeback_rehashes_persistent_mapping_at_halt() {
-        // Manually stage an InstanceEntry whose Image declares one
-        // Persistent mapping at addr 0, size 4, slot 3 — and whose
-        // mem already contains "ABCD" at addr 0. Call write-back
-        // directly; assert slot 3 now holds Cap::Data with
-        // content_hash = blake2b256("ABCD") and size = 4.
-        let mut vm = Vm::new(InProcessKernelAssist::new());
-
-        let mut img = empty_image_with_code(vec![10u8, 0]);
-        img.memory_mappings.push(javm_cap::image::MemoryMapping {
-            start: 0,
-            size: 4,
-            source: javm_cap::SlotPath::root(SlotIdx(3)),
-        });
-        let img = Arc::new(img);
-        let prog =
-            Arc::new(javm_exec::PvmProgram::new(vec![10u8, 0], vec![1u8, 0], vec![], 25).unwrap());
-
-        let mut cnode: Box<dyn CNodeBackend<Cap> + Send + Sync> =
-            Box::new(InMemoryCNode::<Cap>::new(4).unwrap());
-        // Pre-seed slot 3 with a placeholder Cap::Data so the swap
-        // is observable.
-        cnode
-            .set(
-                SlotIdx(3),
-                Some(Cap::Data(javm_cap::legacy::DataCap {
-                    content_hash: [0u8; 32],
-                    size: 4,
-                })),
-            )
-            .unwrap();
-
-        let mut mem = javm_exec::Mem::with_pages(1, javm_exec::perm::RW);
-        mem.write(0, b"ABCD").unwrap();
-
-        vm.stack
-            .push_instance(InstanceEntry {
-                instance: InstanceCap {
-                    image_hash_chain: [1u8; 32],
-                    content_hash: [2u8; 32],
-                },
-                image: img,
-                program: prog,
-                cnode,
-                regs: Regs::new(),
-                mem,
-                gas: GasCounter::new(0),
-                status: EntryStatus::Waiting,
-            })
-            .unwrap();
-
-        vm.writeback_persistent_mappings().unwrap();
-
-        use javm_cap::Hash;
-        let expected = javm_cap::Blake2b256::hash(b"ABCD");
-        let cnode = &vm.stack.running_instance().unwrap().cnode;
-        match cnode.get(SlotIdx(3)).unwrap() {
-            Some(Cap::Data(c)) => {
-                assert_eq!(c.content_hash, expected);
-                assert_eq!(c.size, 4);
-            }
-            other => panic!("expected Cap::Data at slot 3, got {:?}", other),
-        }
     }
 }

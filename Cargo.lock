@@ -930,6 +930,7 @@ version = "0.1.0"
 name = "javm"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "javm-cap",
  "javm-exec",
  "proptest",
