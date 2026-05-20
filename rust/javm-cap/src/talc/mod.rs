@@ -18,6 +18,7 @@ pub mod cap;
 pub mod cnode;
 pub mod data;
 pub mod entry;
+pub mod hash;
 pub mod image;
 pub mod instance;
 pub mod page;
@@ -32,6 +33,7 @@ pub use cap::{Cap, CapHash, CapHashOrRef, CapKind, CapRef, MAX_ENDPOINTS, MAX_SO
 pub use cnode::{CNodeCap, CNodeSlotEntry};
 pub use data::{DataCap, DataContent};
 pub use entry::CacheEntry;
+pub use hash::cap_hash;
 pub use image::{EndpointDef, ImageCap, ImageSlotEntry, MemoryMapping};
 pub use instance::{InstanceCap, RwOverlay};
 pub use page::{PageBytes, PageRef, PageSlot};
