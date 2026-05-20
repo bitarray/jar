@@ -19,51 +19,138 @@ Licensed under the Apache License, Version 2.0.
 
 use std::collections::HashMap;
 use std::ptr::NonNull;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use javm_cap::talc::Cache as TypedCache;
 use nub_arch_x86_abi::{CapHash, PublishSpec};
 use nub_host_common::cache::{
     CacheDirectory, CacheTalcLock, INSTANCE_INDEX_OFFSET, IndexSlot, InstanceIndex,
-    MAX_INDEX_SLOTS, STATE_CACHE_SIZE, TALC_HEAP_OFFSET, TALC_HEAP_SIZE, TalcAlloc, TalcSlice,
+    MAX_INDEX_SLOTS, STATE_CACHE_SIZE, STATE_CACHE_VA, TALC_HEAP_OFFSET, TALC_HEAP_SIZE,
+    TalcAlloc, TalcSlice,
 };
 use talc::source::Manual;
 
 use crate::{HyperlightError, Result, new_error};
 
-/// RAII wrapper over the mmap'd cache region. Munmaps on Drop.
+/// Process-wide singleton mapping for the cache region.
+///
+/// The cache region is mmap'd ONCE at [`STATE_CACHE_VA`] on first use
+/// and reused for the rest of the process's lifetime. Two reasons we
+/// don't allocate per `Cache`:
+///
+/// 1. The region's purpose is to give the guest a fixed VA it can
+///    install in its page tables ([`STATE_CACHE_VA`]). The host
+///    must mmap at the SAME VA so that pointers stored inside the
+///    region (e.g. talc-allocated `Vec`'s internal `NonNull<u8>`)
+///    work on both sides. With `MAP_FIXED_NOREPLACE` we can only
+///    ever have one such mapping in the process — a second mmap at
+///    the same VA fails.
+///
+/// 2. Production: there's one `Nub` per process and one `Cache` per
+///    sandbox; multiple sandboxes per process aren't supported. Tests
+///    create caches serially via the lease mutex below.
+///
+/// `REGION_BASE` stores the address as a `usize` because raw pointers
+/// can't sit in `static` directly. It's initialised exactly once.
+static REGION_BASE: OnceLock<usize> = OnceLock::new();
+
+/// Exclusive lease over the cache region. Each [`Cache`] holds the
+/// lock for its lifetime so concurrent `Cache::new()` calls (e.g.
+/// parallel tests) serialise and don't trample each other's talc
+/// state. Production has one Cache per process, so this never
+/// contends in practice.
+static REGION_LEASE: Mutex<()> = Mutex::new(());
+
+/// Lazily map the cache region at [`STATE_CACHE_VA`]. Calls into the
+/// kernel exactly once across the entire process; subsequent callers
+/// just read the cached address.
+///
+/// We use `MAP_FIXED_NOREPLACE` (Linux ≥ 4.17) so the call refuses
+/// to silently clobber an existing mapping. `STATE_CACHE_VA = 64 TiB`
+/// sits well above the loader's heap/stack/libs so the address is
+/// reliably free at process startup.
+fn map_region_once(size: usize) -> Result<NonNull<u8>> {
+    if let Some(&addr) = REGION_BASE.get() {
+        return Ok(unsafe { NonNull::new_unchecked(addr as *mut u8) });
+    }
+    // SAFETY: mmap is a kernel call; we check the result before use.
+    let ptr = unsafe {
+        libc::mmap(
+            STATE_CACHE_VA as *mut libc::c_void,
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED | libc::MAP_ANONYMOUS | libc::MAP_FIXED_NOREPLACE,
+            -1,
+            0,
+        )
+    };
+    if ptr == libc::MAP_FAILED {
+        let err = std::io::Error::last_os_error();
+        return Err(new_error!(
+            "Cache mmap({:#x}, {} bytes, MAP_FIXED_NOREPLACE) failed: {} \
+             (cache region must be reserved at STATE_CACHE_VA so host \
+             VAs match guest VAs)",
+            STATE_CACHE_VA,
+            size,
+            err
+        ));
+    }
+    if ptr as u64 != STATE_CACHE_VA {
+        // Older glibc fallback path: NOREPLACE was ignored and the
+        // kernel picked another address. Refuse and roll back.
+        unsafe {
+            libc::munmap(ptr, size);
+        }
+        return Err(new_error!(
+            "Cache mmap returned {:#x}, expected {:#x} (MAP_FIXED_NOREPLACE \
+             fallback)",
+            ptr as u64,
+            STATE_CACHE_VA
+        ));
+    }
+    let _ = REGION_BASE.set(ptr as usize);
+    // SAFETY: ptr is non-null (we checked MAP_FAILED).
+    Ok(unsafe { NonNull::new_unchecked(ptr as *mut u8) })
+}
+
+/// RAII wrapper holding the exclusive lease over the (process-global)
+/// cache region. Re-zeroes the region on construction so each fresh
+/// `Cache::new()` starts from a known state. Dropping releases the
+/// lease (mmap stays mapped for the process lifetime).
 struct CacheRegion {
+    _lease: MutexGuard<'static, ()>,
     base: NonNull<u8>,
     size: usize,
 }
 
-// Send/Sync: the underlying mmap is process-local, single-threaded
-// access in V0; the wrapper isn't shared across threads.
+// SAFETY: the base pointer addresses process-global memory under the
+// exclusive lease (`_lease`); concurrent access is impossible while
+// the lease is held.
 unsafe impl Send for CacheRegion {}
 
 impl CacheRegion {
-    /// Allocate `size` bytes of anonymous, shared, read-write memory
-    /// at any host VA the kernel picks. Caller is responsible for
-    /// initialising the contents (the bytes start zeroed).
     fn allocate(size: usize) -> Result<Self> {
-        // SAFETY: mmap is a kernel call; we check the result for
-        // MAP_FAILED before dereferencing.
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            let err = std::io::Error::last_os_error();
-            return Err(new_error!("Cache mmap({} bytes) failed: {}", size, err));
+        assert_eq!(
+            size, STATE_CACHE_SIZE,
+            "CacheRegion::allocate: size must be STATE_CACHE_SIZE \
+             (singleton region; per-call sizing is not supported)",
+        );
+        let lease = REGION_LEASE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let base = map_region_once(size)?;
+        // Wipe to zero so the new Cache starts fresh. The previous
+        // Cache (if any) is long-dropped at this point, so the talc
+        // contents are stale; zeroing makes the new talc's claim
+        // succeed without picking up dangling state.
+        unsafe {
+            core::ptr::write_bytes(base.as_ptr(), 0, size);
         }
-        // SAFETY: mmap returned a valid non-null pointer.
-        let base = unsafe { NonNull::new_unchecked(ptr as *mut u8) };
-        Ok(Self { base, size })
+        Ok(Self {
+            _lease: lease,
+            base,
+            size,
+        })
     }
 
     fn base_va(&self) -> u64 {
@@ -73,11 +160,8 @@ impl CacheRegion {
 
 impl Drop for CacheRegion {
     fn drop(&mut self) {
-        // SAFETY: pointer was returned by mmap; size matches what we
-        // passed to mmap.
-        unsafe {
-            libc::munmap(self.base.as_ptr().cast::<libc::c_void>(), self.size);
-        }
+        // No munmap: the region is process-global and reused across
+        // Cache instances. Lease releases when `_lease` drops.
     }
 }
 
@@ -413,6 +497,13 @@ mod tests {
     #[test]
     fn cache_new_initializes_index_zero() {
         let cache = Cache::new().expect("alloc");
+        // The cache region must map at STATE_CACHE_VA so that host and
+        // guest see the same VA for talc-allocated cap structures.
+        assert_eq!(
+            cache.base_va(),
+            STATE_CACHE_VA,
+            "cache region must be mapped at STATE_CACHE_VA (host VA == guest VA invariant)"
+        );
         unsafe {
             let count = (*cache.index.as_ptr())
                 .count
