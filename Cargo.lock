@@ -955,6 +955,7 @@ name = "javm-cap"
 version = "0.1.0"
 dependencies = [
  "blake2",
+ "nub-host-common",
  "scale",
  "scale-derive",
  "thiserror",
@@ -1250,6 +1251,7 @@ dependencies = [
 name = "nub-host-common"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "anyhow",
  "bytecheck",
  "log",

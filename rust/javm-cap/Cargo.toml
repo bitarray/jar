@@ -15,5 +15,6 @@ blake2 = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
 scale = { workspace = true }
 scale-derive = { workspace = true }
+nub-host-common = { path = "../nub-host-common", default-features = false }
 
 [dev-dependencies]
