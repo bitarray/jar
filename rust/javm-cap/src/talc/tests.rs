@@ -209,3 +209,69 @@ fn cache_entry_refcount_starts_at_one() {
         1
     );
 }
+
+#[test]
+fn cache_with_talc_alloc_round_trips_full_publish_chain() {
+    use crate::talc::cache::Cache;
+    use crate::talc::cap::NUM_REGS;
+
+    // Plenty of headroom — the published Image is tiny and the inline
+    // Data slot is 8 bytes; 256 KiB is excessive but exercises real
+    // talc claims rather than the embedded-arena edge case.
+    let arena = Arena::new(256 * 1024);
+    let mut cache = Cache::new_in(arena.alloc());
+
+    // 1. Publish a Data blob.
+    let data_h = cache
+        .publish_data_inline(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
+        .expect("publish data");
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(data_h)), Some(1));
+
+    // 2. Publish a CNode referencing it (refcount on data → 2).
+    let cnode_h = cache
+        .publish_cnode(4, &[(SlotIdx(0), CapHashOrRef::Hash(data_h))])
+        .expect("publish cnode");
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(cnode_h)), Some(1));
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(data_h)), Some(2));
+
+    // 3. Publish a minimal Image referencing the same Data blob as a
+    //    pinned slot (refcount on data → 3).
+    let mut img = make_image_cap_in(arena.alloc());
+    img.pinned.push(ImageSlotEntry {
+        slot: SlotIdx(7),
+        cap_hash: data_h,
+    });
+    let image_h = cache.publish_image_from_cap(img).expect("publish image");
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(image_h)), Some(1));
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(data_h)), Some(3));
+
+    // 4. Publish an Instance binding image + cnode (refcounts on those
+    //    blobs → 2 each; data blob unaffected since it's referenced
+    //    transitively through cnode/image, not directly).
+    let regs = [0u64; NUM_REGS];
+    let inst_h = cache
+        .publish_instance_blob(
+            [0u8; 32], image_h, cnode_h, &[], 4096, regs, 0x1000, 1_000_000,
+        )
+        .expect("publish instance");
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(inst_h)), Some(1));
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(image_h)), Some(2));
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(cnode_h)), Some(2));
+
+    // 5. Promote the cnode to a mutable instance via get_mut, then
+    //    settle: confirms the talc-backed CoW path. After get_mut, the
+    //    blob holding the original cnode either moves (sole owner) or
+    //    shallow-clones; either way the get_mut'd entry lives in
+    //    `instances` and we can mutate it. Here the cnode has
+    //    refcount=2 (Instance + this test's publish), so get_mut takes
+    //    the shared path: shallow clone + decref original.
+    let new_ref = cache
+        .get_mut(CapHashOrRef::Hash(cnode_h))
+        .expect("get_mut cnode");
+    let settled_h = cache
+        .settle(CapHashOrRef::Ref(new_ref))
+        .expect("settle resolves the ref");
+    // Settling an unchanged cnode-clone produces the same content
+    // hash as the original blob.
+    assert_eq!(settled_h, cnode_h);
+}
