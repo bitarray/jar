@@ -13,6 +13,7 @@
 //! "talc-only." With `A = Global` the types live on the heap; only
 //! `A = TalcAlloc` puts them in the shared cache region.
 
+pub mod cache;
 pub mod cap;
 pub mod cnode;
 pub mod data;
@@ -22,8 +23,11 @@ pub mod instance;
 pub mod page;
 
 #[cfg(test)]
+mod cache_tests;
+#[cfg(test)]
 mod tests;
 
+pub use cache::{Cache, CacheError};
 pub use cap::{Cap, CapHash, CapHashOrRef, CapKind, CapRef, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
 pub use cnode::{CNodeCap, CNodeSlotEntry};
 pub use data::{DataCap, DataContent};
