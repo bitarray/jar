@@ -164,8 +164,7 @@ fn empty_page_hash() -> CapHash {
 
 /// Cnode merkle root. Leaves are sized to the cnode's `2^size_log`
 /// slots; populated slots use `H(0x01 || slot_target_hash)`; empty
-/// slots use `H(0x00)`. Matches the legacy InMemoryCNode hashing
-/// protocol byte-for-byte.
+/// slots use `H(0x00)`.
 fn cnode_content_hash<A: Allocator + Clone>(cn: &CNodeCap<A>) -> CapHash {
     let n = 1usize << cn.size_log;
     let mut leaves: Vec<CapHash> = Vec::with_capacity(n);

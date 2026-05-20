@@ -31,7 +31,6 @@ pub mod hash;
 pub mod image;
 pub mod image_cap;
 pub mod instance;
-pub mod legacy;
 pub mod page;
 pub mod slot;
 

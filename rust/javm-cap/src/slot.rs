@@ -16,7 +16,7 @@ use scale_derive::{Decode, Encode};
 ///
 /// For the root cnode (256 slots) only `0..256` is valid; for a
 /// nested `Cap::CNode` of `size_log = k`, `0..2^k` is valid.
-/// `CNodeBackend` rejects out-of-range indices.
+/// `CNodeCap` rejects out-of-range indices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Encode, Decode)]
 pub struct SlotIdx(pub u32);
 
