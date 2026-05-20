@@ -211,6 +211,64 @@ fn get_mut_already_ref_is_idempotent() {
 }
 
 #[test]
+fn publish_image_increfs_pinned_and_initial() {
+    let mut cache = Cache::new_in(Global);
+    let d_pinned = cache.publish_data_inline(b"pinned").unwrap();
+    let d_initial = cache.publish_data_inline(b"initial").unwrap();
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(d_pinned)), Some(1));
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(d_initial)), Some(1));
+
+    let mut pinned = AVec::new_in(Global);
+    pinned.push(crate::talc::image::ImageSlotEntry {
+        slot: SlotIdx(3),
+        cap_hash: d_pinned,
+    });
+    let mut initial = AVec::new_in(Global);
+    initial.push(crate::talc::image::ImageSlotEntry {
+        slot: SlotIdx(7),
+        cap_hash: d_initial,
+    });
+    let img = crate::talc::image::ImageCap {
+        code: AVec::new_in(Global),
+        bitmask: AVec::new_in(Global),
+        jump_table: AVec::new_in(Global),
+        endpoints: AVec::new_in(Global),
+        mappings: AVec::new_in(Global),
+        pinned,
+        initial,
+        yield_marker_slot: None,
+    };
+    let img_hash = cache.publish_image_from_cap(img).unwrap();
+
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(img_hash)), Some(1));
+    // Pinned + initial blobs both bumped.
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(d_pinned)), Some(2));
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(d_initial)), Some(2));
+}
+
+#[test]
+fn publish_image_missing_target_errors() {
+    let mut cache = Cache::new_in(Global);
+    let mut pinned = AVec::new_in(Global);
+    pinned.push(crate::talc::image::ImageSlotEntry {
+        slot: SlotIdx(0),
+        cap_hash: [0xFE; 32],
+    });
+    let img = crate::talc::image::ImageCap {
+        code: AVec::new_in(Global),
+        bitmask: AVec::new_in(Global),
+        jump_table: AVec::new_in(Global),
+        endpoints: AVec::new_in(Global),
+        mappings: AVec::new_in(Global),
+        pinned,
+        initial: AVec::new_in(Global),
+        yield_marker_slot: None,
+    };
+    let err = cache.publish_image_from_cap(img);
+    assert!(matches!(err, Err(super::cache::CacheError::BlobMissing)));
+}
+
+#[test]
 fn publish_data_inline_hashes_and_stores() {
     let mut cache = Cache::new_in(Global);
     let h = cache.publish_data_inline(b"hello").unwrap();

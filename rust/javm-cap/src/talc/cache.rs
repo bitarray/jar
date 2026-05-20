@@ -32,6 +32,7 @@ use super::cnode::{CNodeCap, CNodeSlotEntry};
 use super::data::{DataCap, DataContent};
 use super::entry::CacheEntry;
 use super::hash::cap_hash;
+use super::image::ImageCap;
 use super::instance::{InstanceCap, RwOverlay};
 use super::page::PageSlot;
 
@@ -268,6 +269,51 @@ impl<A: Allocator + Clone> Cache<A> {
         });
         let hash = cap_hash(&cap);
         self.put_blob(hash, cap)?;
+        Ok(hash)
+    }
+
+    /// Publish a prebuilt `ImageCap<A>` as a blob. Each entry in
+    /// `pinned` and `initial` must reference an existing blob (Images
+    /// reference content-addressed caps only). On success the cache
+    /// bumps each referenced blob's refcount to reflect the image's
+    /// reference.
+    ///
+    /// Returns the image's hash. Idempotent on re-publish: a second
+    /// call with structurally-identical content bumps the existing
+    /// entry's refcount and re-increfs the targets (matching the
+    /// invariant that each entry's refcount equals its holder count).
+    pub fn publish_image_from_cap(&mut self, image: ImageCap<A>) -> Result<CapHash, CacheError> {
+        // Validate referenced blobs exist before allocating, to keep
+        // the failure path side-effect-free.
+        for entry in image.pinned.iter().chain(image.initial.iter()) {
+            if !self.blobs.contains_key(&entry.cap_hash) {
+                return Err(CacheError::BlobMissing);
+            }
+        }
+        // Collect target hashes for the post-insert incref pass.
+        let mut targets: AVec<CapHash, A> =
+            AVec::with_capacity_in(image.pinned.len() + image.initial.len(), self.alloc.clone());
+        for entry in image.pinned.iter() {
+            targets.push(entry.cap_hash);
+        }
+        for entry in image.initial.iter() {
+            targets.push(entry.cap_hash);
+        }
+
+        let cap = Cap::Image(image);
+        let hash = cap_hash(&cap);
+        let post = self.put_blob(hash, cap)?;
+        // Only the *first* successful publish needs to incref the
+        // targets — that captures the one logical reference the image
+        // value has to each target. Subsequent republishes only add
+        // holders of the image itself (handled by put_blob's
+        // refcount bump); the underlying slot references don't
+        // multiply.
+        if post == 1 {
+            for h in targets.iter() {
+                self.incref(CapHashOrRef::Hash(*h))?;
+            }
+        }
         Ok(hash)
     }
 
