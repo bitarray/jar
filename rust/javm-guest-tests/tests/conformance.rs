@@ -58,8 +58,8 @@ fn run_interpreter(image: &Image, ep: u8) -> (u64, u64) {
 mod recomp {
     use super::*;
     use javm_cap::image::PinnedCap;
-    use javm_exec::{unpack_bitmask, REG_COUNT};
-    use nub::{Nub, PublishSpec};
+    use javm_cap::talc::NUM_REGS;
+    use nub::Nub;
     use std::cell::RefCell;
 
     thread_local! {
@@ -71,7 +71,6 @@ mod recomp {
     }
 
     pub fn run(image: &Image, ep: u8) -> (u64, u64) {
-        let bitmask = unpack_bitmask(&image.packed_bitmask, image.code.len());
         let endpoint = image
             .endpoints
             .get(&ep)
@@ -80,51 +79,18 @@ mod recomp {
         // Endpoint invocation = process spawn; `initial_regs` is the
         // bootstrap snapshot. Endpoint is encoded by PC, not by a
         // kernel-written selector register.
-        let mut regs = [0u64; REG_COUNT];
+        let mut regs = [0u64; NUM_REGS];
         for (&i, &v) in &endpoint.initial_regs {
             if let Some(slot) = regs.get_mut(i as usize) {
                 *slot = v;
             }
         }
 
-        let (mem_size, ro_start, ro_data, rw_start, rw_data) = build_data_layout(image);
-
-        // Populate entry_pcs from EVERY declared endpoint in the
-        // Image, not just `ep`. All endpoints share the same code
-        // and slabs — they're one Cap::Instance with many entry
-        // points — so we publish a single cache slot and reuse it
-        // across conform() iterations.
-        let mut entry_pcs = [0u64; nub_arch_x86_abi::MAX_ENDPOINTS];
-        for (&i, def) in &image.endpoints {
-            if (i as usize) < entry_pcs.len() {
-                entry_pcs[i as usize] = def.entry_pc;
-            }
-        }
-
-        // One CapHash per Image (the endpoint is in the invoke call,
-        // not the publish). `publish` is idempotent — first call
-        // populates the slot, subsequent calls are no-ops.
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&image.code);
-        let instance_hash: [u8; 32] = hasher.finalize().as_bytes()[..32]
-            .try_into()
-            .expect("blake3 32-byte digest");
-
-        let spec = PublishSpec {
-            instance_hash,
-            code: image.code.clone(),
-            bitmask,
-            jump_table: image.jump_table.clone(),
-            mem_size,
-            ro_start,
-            ro_data,
-            rw_start,
-            rw_data,
-            arg_start: 0,
-            arg_data: Vec::new(),
-            entry_pcs,
-            initial_regs: regs,
-        };
+        let (mem_size, overlays) = build_overlays(image);
+        let overlay_slices: Vec<(u32, &[u8])> = overlays
+            .iter()
+            .map(|(start, bytes)| (*start, bytes.as_slice()))
+            .collect();
 
         NUB.with(|cell| {
             let mut borrow = cell.borrow_mut();
@@ -132,7 +98,26 @@ mod recomp {
                 *borrow = Some(Nub::new_hyperlight().expect("Hyperlight sandbox"));
             }
             let nub = borrow.as_mut().expect("nub initialised above");
-            nub.publish_instance(spec)
+            // Publish the canonical Image + an empty root CNode + an
+            // InstanceCap binding both. Content-hashed at every step,
+            // so re-publishing the same Image is idempotent.
+            let image_h = nub
+                .publish_image(image)
+                .unwrap_or_else(|e| panic!("endpoint {ep}: publish_image: {e}"));
+            let cnode_h = nub
+                .publish_cnode(0, &[])
+                .unwrap_or_else(|e| panic!("endpoint {ep}: publish_cnode: {e}"));
+            let instance_hash = nub
+                .publish_instance(
+                    [0u8; 32],
+                    image_h,
+                    cnode_h,
+                    &overlay_slices,
+                    mem_size,
+                    regs,
+                    0,
+                    0,
+                )
                 .unwrap_or_else(|e| panic!("endpoint {ep}: publish_instance: {e}"));
             let result = nub
                 .invoke_cached(instance_hash, ep, [0; 4], GAS_BUDGET)
@@ -170,10 +155,9 @@ mod recomp {
     ///   inputs into the guest).
     /// - `mem_size`: `max(mapping.start + mapping.size)` over all
     ///   mappings — covers stack, ro, rw, and heap.
-    fn build_data_layout(image: &Image) -> (u32, u32, Vec<u8>, u32, Vec<u8>) {
+    fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
         let mut mem_size: u32 = 0;
-        let mut ro: Option<(u32, Vec<u8>)> = None;
-        let mut rw: Option<(u32, Vec<u8>)> = None;
+        let mut overlays: Vec<(u32, Vec<u8>)> = Vec::new();
 
         for mapping in &image.memory_mappings {
             let end = (mapping.start + mapping.size) as u32;
@@ -183,23 +167,17 @@ mod recomp {
 
             let target = mapping.source.target();
             if let Some(PinnedCap::Data { content, .. }) = image.pinned_slots.get(&target) {
-                assert!(ro.is_none(), "multiple pinned mappings not supported");
-                ro = Some((mapping.start as u32, content.clone()));
+                if !content.is_empty() {
+                    overlays.push((mapping.start as u32, content.clone()));
+                }
             } else if let Some(init) = image.initial_slots.get(&target) {
                 if !init.content.is_empty() {
-                    assert!(
-                        rw.is_none(),
-                        "multiple non-empty initial mappings not supported"
-                    );
-                    rw = Some((mapping.start as u32, init.content.clone()));
+                    overlays.push((mapping.start as u32, init.content.clone()));
                 }
             }
         }
 
-        let (ro_start, ro_data) = ro.unwrap_or((0, Vec::new()));
-        let (rw_start, rw_data) = rw.unwrap_or((0, Vec::new()));
-
-        (mem_size, ro_start, ro_data, rw_start, rw_data)
+        (mem_size, overlays)
     }
 }
 

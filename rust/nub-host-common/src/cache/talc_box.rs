@@ -64,7 +64,8 @@ impl<T> TalcBox<T> {
     }
 
     /// The cache VA the underlying slab lives at — what the host
-    /// writes into [`IndexSlot`](super::IndexSlot) for the guest.
+    /// writes into [`CacheDirectory`](super::CacheDirectory) slots
+    /// for the guest.
     #[inline]
     pub fn va(&self) -> u64 {
         self.ptr.as_ptr() as u64

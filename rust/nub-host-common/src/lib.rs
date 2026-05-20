@@ -18,7 +18,7 @@
 //! - [`rpc`] — `Request` / `Response` envelope types for the
 //!   rkyv-based RPC.
 //! - [`cache`] (new) — fixed-VA shared state-cache types
-//!   ([`cache::TalcBox`], [`cache::TalcSlice`], [`cache::InstanceIndex`])
+//!   ([`cache::TalcBox`], [`cache::TalcSlice`], [`cache::CacheDirectory`])
 //!   plus layout constants used by both host and guest.
 
 #![cfg_attr(not(any(test, debug_assertions)), warn(clippy::panic))]

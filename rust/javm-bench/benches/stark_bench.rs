@@ -34,16 +34,14 @@ macro_rules! bench_workload {
             let image = Image::decode(blob).expect("decode Image").0;
             let ep: u8 = $endpoint;
 
-            let spec = javm_bench::build_publish_spec(&image, ep);
-
-            let (interp_val, interp_gas) = javm_bench::run_interpreter(&spec);
+            let (interp_val, interp_gas) = javm_bench::run_interpreter(&image, ep);
             eprintln!(
                 "[{}] result = {:#x}, interp gas = {}",
                 stringify!($name),
                 interp_val,
                 interp_gas,
             );
-            let (recomp_val, recomp_gas) = javm_bench::run_recompiler(&spec);
+            let (recomp_val, recomp_gas) = javm_bench::run_recompiler(&image, ep);
             assert_eq!(
                 interp_val,
                 recomp_val,
@@ -60,10 +58,10 @@ macro_rules! bench_workload {
 
             let mut g = c.benchmark_group(stringify!($name));
             g.bench_function("interpreter", |b| {
-                b.iter(|| javm_bench::run_interpreter(&spec))
+                b.iter(|| javm_bench::run_interpreter(&image, ep))
             });
             g.bench_function("recompiler", |b| {
-                b.iter(|| javm_bench::run_recompiler(&spec))
+                b.iter(|| javm_bench::run_recompiler(&image, ep))
             });
             g.finish();
         }

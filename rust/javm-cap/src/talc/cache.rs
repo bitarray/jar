@@ -105,6 +105,24 @@ impl<A: Allocator + Clone> Cache<A> {
         Some(entry.refcount.load(Ordering::Acquire))
     }
 
+    /// Get the VA of the [`CacheEntry`] backing `key`. Returns `None`
+    /// if the cap is absent.
+    ///
+    /// Useful for downstream layers that maintain a shared-memory
+    /// directory mapping `CapHash` / `CapRef` to entry pointers: the
+    /// guest scans the directory, reads the VA, and dereferences the
+    /// `CacheEntry`'s `cap` field directly. Requires the cache to be
+    /// backed by an allocator whose pointers are valid in the guest's
+    /// address space (e.g. `TalcAlloc` over a region mapped at the
+    /// same VA on host and guest).
+    pub fn entry_va(&self, key: CapHashOrRef) -> Option<u64> {
+        let entry: &CacheEntry<A> = match key {
+            CapHashOrRef::Hash(h) => &**self.blobs.get(&h)?,
+            CapHashOrRef::Ref(r) => &**self.instances.get(&r)?,
+        };
+        Some(entry as *const CacheEntry<A> as u64)
+    }
+
     /// Insert a cap as a blob keyed by `hash`. If the hash is already
     /// present, increment its refcount instead of allocating a fresh
     /// entry. Returns the post-insertion refcount.

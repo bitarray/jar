@@ -1,11 +1,11 @@
 //! PVM benchmarks: byte-PVM interpreter vs JIT recompiler.
 //!
 //! Each guest crate at `components/benches/<workload>` builds to a
-//! single-endpoint Image; this bench loads each Image, builds the
-//! shared [`nub::PublishSpec`] ONCE per workload, runs a sanity check
-//! (which also primes the Hyperlight sandbox via the cached
-//! `OnceLock` and publishes into the cache), then runs criterion on
-//! both backends.
+//! single-endpoint Image; this bench loads each Image, runs a sanity
+//! check (which primes the cached Hyperlight sandbox), then runs
+//! criterion on both backends. The cache is content-addressed and
+//! re-publishing the same Image is idempotent, so the per-iter cost
+//! stays in `invoke_cached`.
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
@@ -20,23 +20,18 @@ macro_rules! bench_workload {
             let image = Image::decode(blob).expect("decode Image").0;
             let ep: u8 = $endpoint;
 
-            // Build the PublishSpec ONCE — re-using across iterations
-            // keeps per-iter cost in `invoke_cached` proper, not in
-            // bitmask unpack + ro/rw byte clones.
-            let spec = javm_bench::build_publish_spec(&image, ep);
-
             // Sanity: interpreter and recompiler must agree. Running
             // each backend once before the timed loop also pays the
             // Hyperlight sandbox boot (~hundreds of ms) so it never
             // lands inside a criterion sample.
-            let (interp_val, interp_gas) = javm_bench::run_interpreter(&spec);
+            let (interp_val, interp_gas) = javm_bench::run_interpreter(&image, ep);
             eprintln!(
                 "[{}] result = {:#x}, interp gas = {}",
                 stringify!($name),
                 interp_val,
                 interp_gas,
             );
-            let (recomp_val, recomp_gas) = javm_bench::run_recompiler(&spec);
+            let (recomp_val, recomp_gas) = javm_bench::run_recompiler(&image, ep);
             assert_eq!(
                 interp_val,
                 recomp_val,
@@ -53,10 +48,10 @@ macro_rules! bench_workload {
 
             let mut g = c.benchmark_group(stringify!($name));
             g.bench_function("interpreter", |b| {
-                b.iter(|| javm_bench::run_interpreter(&spec))
+                b.iter(|| javm_bench::run_interpreter(&image, ep))
             });
             g.bench_function("recompiler", |b| {
-                b.iter(|| javm_bench::run_recompiler(&spec))
+                b.iter(|| javm_bench::run_recompiler(&image, ep))
             });
             g.finish();
         }

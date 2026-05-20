@@ -18,7 +18,9 @@ default = []
 heap-diag = []
 
 [dependencies]
+allocator-api2 = "0.4"
 anyhow = "1"
+javm-cap = { path = "../javm-cap" }
 # Forked KVM-only Hyperlight host (vendored + stripped from
 # `hyperlight-host` 0.15.0; see `rust/nub-host-kvm`).
 nub-host-kvm = { path = "../nub-host-kvm" }

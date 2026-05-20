@@ -4,21 +4,26 @@
 //! `jar-apply`) link against. It hides the choice of substrate behind
 //! a single invoke surface, dispatching to one of two backends:
 //!
-//! - **Local**: runs `Kernel<nub_arch_local::LocalArch>` directly
-//!   in-process. Used for tests, deterministic replay, and any host
-//!   that doesn't need real ring-0 isolation.
-//!
+//! - **Local**: runs the byte-PVM interpreter directly in-process via
+//!   `nub_arch_local::run_instance`. Used for tests, deterministic
+//!   replay, and any host that doesn't need real ring-0 isolation.
 //! - **Hyperlight**: ships the invocation as an RPC into a
 //!   `nub-arch-x86` guest binary running inside a Hyperlight
 //!   sandbox. The actual `Kernel<HyperlightArch>` lives guest-side;
-//!   the host holds only the sandbox + an `InstanceRef` table.
+//!   the host holds only the sandbox + a state cache.
 //!
-//! Both backends share the [`nub_kernel::Arch`] trait surface
-//! ([`invoke`](Nub::invoke) + [`state_root`](Nub::state_root)). The
-//! current skeleton implementation returns a fixed value (42) from
-//! either backend, just to exercise the wiring.
+//! Both backends share the same typed publish/invoke surface — the
+//! caller publishes a `Cap::Image` (and optionally a `Cap::CNode`),
+//! publishes a `Cap::Instance` referencing them, and then invokes by
+//! the resulting instance hash.
 
+use allocator_api2::alloc::Global;
 use anyhow::Result;
+use javm_cap::slot::SlotIdx;
+use javm_cap::talc::{
+    Cache as TypedCache, CapHashOrRef, NUM_REGS,
+    cap::Cap,
+};
 use nub_arch_local::LocalArch;
 use nub_host_kvm::sandbox::{
     GuestBinary, MultiUseSandbox, SandboxConfiguration, UninitializedSandbox,
@@ -30,11 +35,8 @@ use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
 use nub_arch_x86_abi::{
     ArchivedInvocationResult, FN_ID_NUB_INVOKE_CACHED, FN_ID_NUB_SMOKE, InvokePacket,
 };
-pub use nub_arch_x86_abi::{InvocationResult, PublishSpec};
+pub use nub_arch_x86_abi::{CapHash as AbiCapHash, InvocationResult};
 pub use nub_kernel::{CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
-// Re-export `CapHash` from the abi for callers that don't want to
-// depend on nub-kernel just for the alias.
-pub use nub_arch_x86_abi::CapHash as AbiCapHash;
 
 use rkyv::primitive::ArchivedU64;
 use rkyv::util::AlignedVec;
@@ -44,13 +46,9 @@ use rkyv::util::AlignedVec;
 #[cfg(feature = "heap-diag")]
 #[derive(Debug, Clone, Copy)]
 pub struct HeapStats {
-    /// Sum of live allocations' layout sizes.
     pub allocated_bytes: u64,
-    /// Count of live allocations.
     pub allocation_count: u64,
-    /// Number of free-list holes between allocations (fragmentation indicator).
     pub fragment_count: u64,
-    /// Bytes available for new allocations (heap total − allocated − talc metadata).
     pub available_bytes: u64,
 }
 
@@ -61,12 +59,13 @@ const NUB_ARCH_X86_BLOB_PATH: &str = env!("NUB_ARCH_X86_BLOB");
 /// Uniform handle to the nub microkernel.
 pub struct Nub {
     backend: Backend,
-    /// In-process PublishSpec store for the Local backend's
-    /// `invoke_cached` path. Always present (even on Hyperlight
-    /// backend) so tests can construct a Nub and not care which
-    /// backend uses the store. On Hyperlight the store is unused —
-    /// the cache region in `sandbox.cache()` is the source of truth.
-    local_store: std::collections::HashMap<AbiCapHash, PublishSpec>,
+    /// In-process typed cache, used by the Local backend to back its
+    /// publish_*/invoke_cached path. Always present (even on the
+    /// Hyperlight backend) so tests can construct a Nub and not care
+    /// which backend they hit. On Hyperlight the local cache is unused
+    /// at runtime — the shared-memory cache in `sandbox.cache()` is
+    /// the source of truth.
+    local_cache: TypedCache<Global>,
 }
 
 enum Backend {
@@ -87,35 +86,14 @@ impl Nub {
     pub fn new_local() -> Self {
         Self {
             backend: Backend::Local(Kernel::new(LocalArch::new())),
-            local_store: std::collections::HashMap::new(),
+            local_cache: TypedCache::new_in(Global),
         }
     }
 
     /// Construct a Nub backed by a fresh Hyperlight sandbox loaded
     /// from the `nub-arch-x86` guest blob.
     pub fn new_hyperlight() -> Result<Self> {
-        // Scratch budget covers the per-process pool inside the guest
-        // (`nub-arch-x86::pool`): mem + perms + bb + jt + jit +
-        // arena + a few page-sized side buffers. Sized to ~144 MiB so
-        // the largest bench programs fit with comfortable headroom.
-        //
-        // Input / output buffers: the host SCALE-encodes an
-        // `InvocationSpec` (containing the program's full code +
-        // bitmask + jump table + initial data regions) and ships it
-        // via Hyperlight's input-data ring. Default 16 KiB is
-        // exhausted by guest-tests' multi-endpoint Image.
         let mut cfg = SandboxConfiguration::default();
-        // Sized post-Stage-F: forked host (nub-host-kvm) + forked
-        // guest-bin still mark writable pages CoW so the host's
-        // snapshot machinery has somewhere to roll back from. The
-        // leak that motivated the fork is bounded by the heap size —
-        // every heap page CoW-resolves once into a fresh scratch
-        // frame, then the working set asymptotes. With a 64 MiB heap
-        // the worst-case CoW consumption is ~64 MiB; plus the
-        // per-process pool (~94 MiB; see `nub-arch-x86::pool`),
-        // plus a small stack-growth allowance, comfortably fits in
-        // 192 MiB scratch. Without the bench-era 1 GiB heap, the
-        // criterion default sample sizes no longer blow the budget.
         cfg.set_scratch_size(512 * 1024 * 1024);
         cfg.set_input_data_size(16 * 1024 * 1024);
         cfg.set_output_data_size(16 * 1024 * 1024);
@@ -130,11 +108,12 @@ impl Nub {
                 sandbox,
                 state_root_cache: [0; 32],
             })),
-            local_store: std::collections::HashMap::new(),
+            local_cache: TypedCache::new_in(Global),
         })
     }
 
-    /// Invoke `endpoint` on `target` with `args`.
+    /// Invoke `endpoint` on `target` with `args`. Kernel-style entry
+    /// point — currently a skeleton returning 42 from both backends.
     pub fn invoke(
         &mut self,
         target: InstanceRef,
@@ -158,10 +137,8 @@ impl Nub {
         }
     }
 
-    /// Diagnostic: read the guest's talc allocation counters
-    /// (allocated_bytes, allocation_count, fragment_count,
-    /// available_bytes). Hyperlight backend only. Requires the
-    /// `heap-diag` feature.
+    /// Diagnostic: read the guest's talc allocation counters.
+    /// Hyperlight backend only. Requires the `heap-diag` feature.
     #[cfg(feature = "heap-diag")]
     pub fn heap_stats(&mut self) -> Result<HeapStats> {
         match &mut self.backend {
@@ -187,29 +164,111 @@ impl Nub {
         }
     }
 
-    /// Publish a Cap::Instance into the state cache so subsequent
-    /// `invoke_cached(hash, …)` calls can find it.
-    ///
-    /// The Local backend keeps an in-process `HashMap<CapHash,
-    /// PublishSpec>`; the Hyperlight backend lays the spec into
-    /// the shared cache region (`nub-host-kvm::cache`).
-    pub fn publish_instance(&mut self, spec: PublishSpec) -> Result<()> {
+    // --- Typed publish surface ---
+
+    /// Publish an inline `Cap::Data` blob from a byte buffer. Returns
+    /// the data cap's hash. Idempotent: re-publishing identical bytes
+    /// returns the same hash.
+    pub fn publish_data(&mut self, bytes: &[u8]) -> Result<AbiCapHash> {
         match &mut self.backend {
-            Backend::Local(_) => {
-                self.local_store.insert(spec.instance_hash, spec);
-                Ok(())
-            }
+            Backend::Local(_) => self
+                .local_cache
+                .publish_data_inline(bytes)
+                .map_err(|e| anyhow::anyhow!("publish_data (local): {e}")),
             Backend::Hyperlight(h) => h
                 .sandbox
                 .cache()
-                .publish(spec)
-                .map_err(|e| anyhow::anyhow!("cache publish: {e}")),
+                .publish_data_inline(bytes)
+                .map_err(|e| anyhow::anyhow!("publish_data: {e}")),
         }
     }
 
-    /// Invoke a previously-published Cap::Instance by hash. V0 args
+    /// Publish a SCALE-encoded [`javm_cap::image::Image`] end-to-end.
+    /// Walks the image's pinned/initial slots, publishes each as a
+    /// `Cap::Data`, then publishes the `Cap::Image`. Returns the
+    /// image's content hash.
+    pub fn publish_image(&mut self, img: &javm_cap::image::Image) -> Result<AbiCapHash> {
+        match &mut self.backend {
+            Backend::Local(_) => self
+                .local_cache
+                .publish_image(img)
+                .map_err(|e| anyhow::anyhow!("publish_image (local): {e}")),
+            Backend::Hyperlight(h) => h
+                .sandbox
+                .cache()
+                .publish_image(img)
+                .map_err(|e| anyhow::anyhow!("publish_image: {e}")),
+        }
+    }
+
+    /// Publish a `Cap::CNode` whose slots reference existing caps.
+    /// Each `target` must already be published.
+    pub fn publish_cnode(
+        &mut self,
+        size_log: u8,
+        entries: &[(SlotIdx, CapHashOrRef)],
+    ) -> Result<AbiCapHash> {
+        match &mut self.backend {
+            Backend::Local(_) => self
+                .local_cache
+                .publish_cnode(size_log, entries)
+                .map_err(|e| anyhow::anyhow!("publish_cnode (local): {e}")),
+            Backend::Hyperlight(h) => h
+                .sandbox
+                .cache()
+                .publish_cnode(size_log, entries)
+                .map_err(|e| anyhow::anyhow!("publish_cnode: {e}")),
+        }
+    }
+
+    /// Publish a `Cap::Instance` blob binding an `image_hash` +
+    /// `root_cnode` + initial state. Returns the instance cap's hash.
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_instance(
+        &mut self,
+        image_hash_chain: AbiCapHash,
+        image_hash: AbiCapHash,
+        root_cnode: AbiCapHash,
+        rw_overlays: &[(u32, &[u8])],
+        mem_size: u32,
+        regs: [u64; NUM_REGS],
+        pc: u64,
+        gas_remaining: u64,
+    ) -> Result<AbiCapHash> {
+        match &mut self.backend {
+            Backend::Local(_) => self
+                .local_cache
+                .publish_instance_blob(
+                    image_hash_chain,
+                    image_hash,
+                    root_cnode,
+                    rw_overlays,
+                    mem_size,
+                    regs,
+                    pc,
+                    gas_remaining,
+                )
+                .map_err(|e| anyhow::anyhow!("publish_instance (local): {e}")),
+            Backend::Hyperlight(h) => h
+                .sandbox
+                .cache()
+                .publish_instance_blob(
+                    image_hash_chain,
+                    image_hash,
+                    root_cnode,
+                    rw_overlays,
+                    mem_size,
+                    regs,
+                    pc,
+                    gas_remaining,
+                )
+                .map_err(|e| anyhow::anyhow!("publish_instance: {e}")),
+        }
+    }
+
+    /// Invoke a previously-published `Cap::Instance` by hash. V0 args
     /// are 4 u64s laid into φ[7..=10] on top of the published
-    /// `initial_regs` baseline.
+    /// endpoint's `initial_regs` baseline.
     pub fn invoke_cached(
         &mut self,
         instance_hash: AbiCapHash,
@@ -219,13 +278,35 @@ impl Nub {
     ) -> Result<InvocationResult> {
         match &mut self.backend {
             Backend::Local(_) => {
-                let spec = self
-                    .local_store
-                    .get(&instance_hash)
-                    .ok_or_else(|| anyhow::anyhow!("invoke_cached: hash not published"))?
-                    .clone();
-                Ok(nub_arch_local::run_published(
-                    &spec,
+                // Resolve the instance + image from the in-process
+                // cache and drive the byte-PVM interpreter.
+                let instance_cap = self
+                    .local_cache
+                    .get(CapHashOrRef::Hash(instance_hash))
+                    .ok_or_else(|| anyhow::anyhow!("invoke_cached: instance not published"))?;
+                let inst = match instance_cap {
+                    Cap::Instance(i) => i,
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "invoke_cached: cap at hash is not an Instance"
+                        ));
+                    }
+                };
+                let image_cap = self
+                    .local_cache
+                    .get(CapHashOrRef::Hash(inst.image_hash))
+                    .ok_or_else(|| anyhow::anyhow!("invoke_cached: image not in cache"))?;
+                let img = match image_cap {
+                    Cap::Image(i) => i,
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "invoke_cached: cap at image_hash is not an Image"
+                        ));
+                    }
+                };
+                Ok(nub_arch_local::run_instance(
+                    inst,
+                    img,
                     endpoint_idx,
                     args,
                     initial_gas,
@@ -275,9 +356,7 @@ impl HyperlightDriver {
         _opts: InvokeOptions,
     ) -> Result<InvokeOutcome> {
         // Skeleton: ship a fixed RPC into the guest. The guest's
-        // `nub_smoke` returns 42, matching `LocalArch`'s stub. Real
-        // dispatch (target / endpoint / args wired through) lands
-        // alongside the guest-side `Kernel<HyperlightArch>`.
+        // `nub_smoke` returns 42, matching `LocalArch`'s stub.
         let result_bytes = self.sandbox.call_raw(FN_ID_NUB_SMOKE, &[])?;
         let mut aligned = AlignedVec::<16>::with_capacity(result_bytes.len());
         aligned.extend_from_slice(&result_bytes);

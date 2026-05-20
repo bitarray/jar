@@ -1200,8 +1200,10 @@ dependencies = [
 name = "nub"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "anyhow",
  "bytecheck",
+ "javm-cap",
  "nub-arch-local",
  "nub-arch-x86-abi",
  "nub-build",
@@ -1214,6 +1216,8 @@ dependencies = [
 name = "nub-arch-local"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
+ "javm-cap",
  "javm-exec",
  "nub-arch-x86-abi",
  "nub-kernel",
@@ -1223,10 +1227,12 @@ dependencies = [
 name = "nub-arch-x86"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "bytecheck",
  "hyperlight-common",
  "hyperlight-guest",
  "hyperlight-guest-bin",
+ "javm-cap",
  "javm-exec",
  "javm-recompiler-x86",
  "nub-arch-x86-abi",
