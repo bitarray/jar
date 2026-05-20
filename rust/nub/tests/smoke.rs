@@ -13,7 +13,11 @@ use std::collections::BTreeMap;
 /// byte 0 is a NOP and byte 1+ holds the ecalli encoding.
 fn ecalli_42_image() -> Image {
     let mut img = Image::empty();
-    img.code = vec![0xFA, 10u8, 42]; // NOP, then ecalli (opcode 10), imm = 42
+    // PC=0 is the spec's reserved "fallback PC" — a real Image always
+    // has *some* instruction there even if the entry_pc points
+    // elsewhere. Trap is a valid 1-byte instruction; we never reach it
+    // because `endpoint.entry_pc = 1` jumps straight to the ecalli.
+    img.code = vec![0u8, 10u8, 42]; // trap, then ecalli (opcode 10), imm = 42
     img.packed_bitmask = vec![0b011]; // bits 0, 1 are instruction starts (byte 2 is ecalli's imm)
 
     let mut endpoints: BTreeMap<u8, EndpointDef> = BTreeMap::new();
