@@ -34,7 +34,7 @@ pub mod talc_box;
 
 pub use index::{INSTANCE_INDEX_OFFSET, IndexSlot, InstanceIndex, MAX_ENDPOINTS, MAX_INDEX_SLOTS};
 pub use talc_alloc::TalcAlloc;
-pub use talc_arc::{TalcArc, TalcRefCounted};
+pub use talc_arc::{Aarc, AarcRefCounted, TalcArc, TalcRefCounted};
 pub use talc_box::{CacheTalcLock, TalcBox, TalcSlice};
 
 /// Fixed guest virtual address the cache region is mapped at. The

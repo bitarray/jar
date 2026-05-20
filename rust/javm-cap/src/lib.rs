@@ -26,6 +26,7 @@ pub mod hash;
 pub mod image;
 pub mod ops;
 pub mod slot;
+pub mod talc;
 
 pub use bmt::Bmt;
 pub use cap::{CNodeCap, Cap, CapHash, CapKind, DataCap, ImageCap, InstanceCap, TypeCap};

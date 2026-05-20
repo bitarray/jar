@@ -954,10 +954,12 @@ dependencies = [
 name = "javm-cap"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "blake2",
  "nub-host-common",
  "scale",
  "scale-derive",
+ "talc",
  "thiserror",
 ]
 
