@@ -107,7 +107,15 @@ pub fn run_instance(
 
     let mut regs = Regs::new();
     regs.pc = endpoint.entry_pc;
+    // Endpoint baseline first, then layer the InstanceCap's persisted
+    // regs on top (publish_instance writes them; subsequent invokes
+    // observe them). Args overlay φ[7..=10] last.
     regs.gpr = endpoint.initial_regs;
+    for (i, v) in instance.regs.iter().enumerate() {
+        if *v != 0 {
+            regs.gpr[i] = *v;
+        }
+    }
     for (i, v) in args.iter().enumerate() {
         regs.gpr[7 + i] = *v;
     }

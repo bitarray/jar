@@ -126,9 +126,15 @@ mod guest {
             javm_exec::unpack_bitmask(img.bitmask.as_slice(), code.len());
         let jump_table: Vec<u32> = img.jump_table.as_slice().to_vec();
 
-        // Overlay caller-supplied register args on φ[7..=10] on top
-        // of the endpoint's initial_regs baseline.
+        // Endpoint baseline first, then layer the InstanceCap's
+        // persisted regs on top (non-zero entries override). Caller-
+        // supplied args overlay φ[7..=10] last.
         let mut initial_regs = ep.initial_regs;
+        for (i, v) in inst.regs.iter().enumerate() {
+            if *v != 0 {
+                initial_regs[i] = *v;
+            }
+        }
         for (i, v) in packet.args.iter().enumerate() {
             initial_regs[7 + i] = *v;
         }

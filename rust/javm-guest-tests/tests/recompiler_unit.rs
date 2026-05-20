@@ -52,15 +52,35 @@ struct RunResult {
 }
 
 fn run(ps: ProgSpec) -> RunResult {
-    // Build a minimal Image whose endpoint 0 enters at PC=0.
+    // Prefix a one-byte fallback trap at PC=0 so endpoints can enter
+    // at PC=1. The talc-shape `EndpointDef::empty` uses `entry_pc == 0`
+    // as the "endpoint not defined" sentinel; live endpoints must point
+    // at PC >= 1 (matching the PVM spec's reserved-fallback convention,
+    // mirrored in `nub/tests/smoke.rs`). The test fixtures use an
+    // unpacked bitmask (1 byte per code byte: 1 = insn start, 0 =
+    // continuation); `Image::packed_bitmask` is bit-packed, so we also
+    // pack here.
+    let mut shifted_code = Vec::with_capacity(ps.code.len() + 1);
+    shifted_code.push(0u8);
+    shifted_code.extend_from_slice(&ps.code);
+
+    let mut packed_bitmask = vec![0u8; shifted_code.len().div_ceil(8)];
+    packed_bitmask[0] |= 1;
+    for old_idx in 0..ps.code.len() {
+        if ps.bitmask[old_idx] != 0 {
+            let new_bit = old_idx + 1;
+            packed_bitmask[new_bit / 8] |= 1 << (new_bit % 8);
+        }
+    }
+
     let mut img = Image::empty();
-    img.code = ps.code;
-    img.packed_bitmask = ps.bitmask;
+    img.code = shifted_code;
+    img.packed_bitmask = packed_bitmask;
     let mut endpoints: BTreeMap<u8, EndpointDef> = BTreeMap::new();
     endpoints.insert(
         0,
         EndpointDef {
-            entry_pc: 0,
+            entry_pc: 1,
             arg_registers: 0,
             arg_cnode_size: 0,
             initial_regs: BTreeMap::new(),
