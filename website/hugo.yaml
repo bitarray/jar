@@ -34,7 +34,7 @@ params:
       index: content
   editURL:
     enable: true
-    base: "https://github.com/jarchain/jar/edit/master/docs/content"
+    base: "https://github.com/jarchain/jar/edit/master/website/content"
   footer:
     enable: true
     displayCopyright: true

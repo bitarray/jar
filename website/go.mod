@@ -1,4 +1,4 @@
-module github.com/jarchain/jar/docs
+module github.com/jarchain/jar/website
 
 go 1.22
 

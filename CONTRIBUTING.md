@@ -34,7 +34,7 @@ jar/
   components/               # Guest crates consumed by rust/ (bench guests)
   spec/                     # Lean 4 formal specification
   tools/jar-genesis/        # Genesis Proof-of-Intelligence tooling
-  docs/                     # Documentation
+  website/                  # Hugo + Hextra documentation site
 ```
 
 ## Code style rules

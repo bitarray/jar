@@ -11,7 +11,7 @@ The project is distinguished by its **Proof of Intelligence** genesis model — 
 The repository hosts two parallel tracks that converge in `rust/`:
 
 - **`spec/`** — the protocol formalised in **Lean 4** (the JAM-derived state-transition function, Safrole, GRANDPA, PVM, erasure coding, accumulation), with machine-checked proofs and JSON conformance vectors that the Rust implementation must pass.
-- **`docs/spec/`** — the **minimum-kernel v3** spec (cap system, Image / Instance model, image_hash chain, `MGMT_*` semantics, the `nub` KVM-microkernel design). The authoritative source for the architecture the Rust workspace is being shaped toward.
+- **`website/content/spec/`** — the **minimum-kernel v3** spec (cap system, Image / Instance model, image_hash chain, `MGMT_*` semantics, the `nub` KVM-microkernel design). The authoritative source for the architecture the Rust workspace is being shaped toward.
 - **`rust/`** — the Rust workspace. Implements the JAVM execution engine, the kernel under design (`jar-kernel`), and `nub` — the long-running KVM-microkernel that hosts state σ inside the guest.
 
 ## Repository Structure
@@ -19,7 +19,7 @@ The repository hosts two parallel tracks that converge in `rust/`:
 | Directory | Description |
 |-----------|-------------|
 | [`spec/`](spec/) | Lean 4 formal specification — executable, machine-checked, tested against conformance vectors |
-| [`docs/spec/`](docs/spec/) | Minimum-kernel v3 architecture spec (cap system, Image / Instance, `nub` microkernel design) |
+| [`website/content/spec/`](website/content/spec/) | Minimum-kernel v3 architecture spec (cap system, Image / Instance, `nub` microkernel design) |
 | [`rust/`](rust/) | Rust workspace — JAVM, recompiler, `nub`, `jar-kernel`, `scale`, `subsoil` |
 | [`components/`](components/) | Guest crates compiled to PVM blobs (bench guests; future userspace services) |
 | [`tools/`](tools/) | Genesis Proof-of-Intelligence CLI tooling |
@@ -40,7 +40,7 @@ The repository hosts two parallel tracks that converge in `rust/`:
 
 ## Why a KVM-microkernel
 
-JAVM compiles untrusted PVM bytecode to native x86-64. Running that JIT in the same address space as the chain client was the trade-off PolkaVM eventually rejected by sandboxing into a separate process — which trades safety for hostcall round-trip cost. `nub` instead runs the JIT inside a hardware-virtualization guest (KVM on Linux via Hyperlight; Hypervisor.framework on macOS and WHP on Windows are on the roadmap), keeps σ resident in the guest, and lets the JIT issue hostcalls without crossing back to the host for most operations. As a side benefit, the per-Instance memory model (CoW, `mgmt_copy` as a near-zero-cost page-table operation, per-Instance fault handling) maps directly onto ring-0 page tables. See [`docs/spec/implementation/kvm-microkernel.md`](docs/spec/implementation/kvm-microkernel.md).
+JAVM compiles untrusted PVM bytecode to native x86-64. Running that JIT in the same address space as the chain client was the trade-off PolkaVM eventually rejected by sandboxing into a separate process — which trades safety for hostcall round-trip cost. `nub` instead runs the JIT inside a hardware-virtualization guest (KVM on Linux via Hyperlight; Hypervisor.framework on macOS and WHP on Windows are on the roadmap), keeps σ resident in the guest, and lets the JIT issue hostcalls without crossing back to the host for most operations. As a side benefit, the per-Instance memory model (CoW, `mgmt_copy` as a near-zero-cost page-table operation, per-Instance fault handling) maps directly onto ring-0 page tables. See [`website/content/spec/implementation/kvm-microkernel.md`](website/content/spec/implementation/kvm-microkernel.md).
 
 ## PVM Recompiler Benchmarks
 

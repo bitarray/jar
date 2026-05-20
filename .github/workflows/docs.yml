@@ -38,7 +38,7 @@ jobs:
           go-version: '1.22'
 
       - name: Build Hugo site
-        working-directory: docs
+        working-directory: website
         run: hugo --minify --gc --destination ../site
 
       # -- JarBook (Lean spec, served at /lean/) --

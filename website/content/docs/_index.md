@@ -17,7 +17,7 @@ The protocol originates from JAM but is being redesigned around a **minimum-kern
 
 An **Instance** holds an **Image** (its current spec) and a 256-slot **cnode** (its mutable state). Image is a structured cap kind (`Cap::Image`) containing code, endpoints, memory mappings, and pinned read-only caps. Instances evolve their Image via `set_image` — atomically swapping pinned slots and extending the cumulative `image_hash` chain. All five cap kinds (Instance, Image, Data, CNode, Type) are **uniformly copyable** (content-addressed; `MGMT_COPY` shares content; mutations diverge). Conservation lives in **authority bytecode**; structural forgery resistance comes from the `image_hash` chain rooted at the genesis Kernel Instance. New Instances are produced via `MGMT_COPY` of an existing `Cap::Instance` (same-type sibling) or `host_derive_spawn` (new image; sub-type creation).
 
-See [`docs/spec/README.md`](spec/README.md) for the complete spec.
+See the [Specification](/spec/) for the complete v3 spec.
 
 ## Why a minimum kernel
 
@@ -61,11 +61,11 @@ This replaces the JAM `gratis` and `balance` fields with auditable resource coun
 
 ## Components
 
-### [JAR — Formal Specification (`spec/`)](/spec/)
+### [JAR — Formal Specification (Lean)](/lean/)
 
 The Gray-Paper-derived protocol formalised in Lean 4. Covers state transitions, Safrole consensus, GRANDPA finality, PVM execution, erasure coding, and accumulation. Generates JSON conformance vectors the Rust implementation must pass.
 
-### [Minimum-kernel v3 spec (`docs/spec/`)](spec/)
+### [Minimum-kernel v3 spec](/spec/)
 
 The architecture spec for the v3 redesign. Covers the cap system, Image / Instance model, `image_hash` chain, `MGMT_*` semantics, and the `nub` KVM-microkernel design. Authoritative for how the Rust workspace is being shaped.
 
