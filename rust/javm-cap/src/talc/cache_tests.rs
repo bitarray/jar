@@ -443,6 +443,233 @@ fn settle_instance_resolves_root_cnode_ref() {
     assert_eq!(snapshot, again);
 }
 
+// ---- publish_image (SCALE Image -> ImageCap bridge) ----
+
+fn make_scale_image_with_pinned_data(
+    slots: &[(crate::slot::SlotIdx, &[u8], u64)],
+) -> crate::image::Image {
+    use crate::image::PinnedCap;
+    let mut img = crate::image::Image::empty();
+    for (slot, content, size) in slots {
+        img.pinned_slots.insert(
+            *slot,
+            PinnedCap::Data {
+                content: content.to_vec(),
+                size: *size,
+            },
+        );
+    }
+    img
+}
+
+#[test]
+fn publish_image_inlines_pinned_data_blobs() {
+    // Each pinned Data slot becomes a DataCap blob in `blobs`; the
+    // image references it by hash. The image's refcount is 1
+    // (publisher's hold), and each pinned blob's refcount is 1
+    // (image's per-slot hold).
+    let mut cache = Cache::new_in(Global);
+    let bytes_a = b"slot_a_content";
+    let bytes_b = b"slot_b_content";
+    let img = make_scale_image_with_pinned_data(&[
+        (SlotIdx(1), bytes_a, bytes_a.len() as u64),
+        (SlotIdx(2), bytes_b, bytes_b.len() as u64),
+    ]);
+    let image_hash = cache.publish_image(&img).unwrap();
+    assert_eq!(
+        cache.refcount(CapHashOrRef::Hash(image_hash)),
+        Some(1),
+        "image's own refcount"
+    );
+
+    // Each pinned data should be a separate blob with refcount=1
+    // (held by the image's one slot reference).
+    let data_a_hash = cache.publish_data_inline_with_size(bytes_a, bytes_a.len() as u64).unwrap();
+    // The publish_data above bumped refcount; image already held it.
+    // Refcount should now be 2 (image + temp publisher).
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(data_a_hash)), Some(2));
+    let _ = cache.decref(CapHashOrRef::Hash(data_a_hash));
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(data_a_hash)), Some(1));
+}
+
+#[test]
+fn publish_image_duplicate_data_shared_with_per_slot_refcount() {
+    // Two pinned slots referencing identical Data content share a
+    // single blob; that blob's refcount equals the number of slot
+    // references (2) — not 1 (shared) and not 4 (with publish/decref
+    // double-counting).
+    let mut cache = Cache::new_in(Global);
+    let bytes = b"shared_data";
+    let img = make_scale_image_with_pinned_data(&[
+        (SlotIdx(1), bytes, bytes.len() as u64),
+        (SlotIdx(2), bytes, bytes.len() as u64),
+    ]);
+    let _image_hash = cache.publish_image(&img).unwrap();
+
+    // Recompute the data hash externally (bumps it once) so we can
+    // observe the post-publish refcount, then release.
+    let data_hash = cache.publish_data_inline_with_size(bytes, bytes.len() as u64).unwrap();
+    assert_eq!(
+        cache.refcount(CapHashOrRef::Hash(data_hash)),
+        Some(3),
+        "image holds 2 + temp publisher = 3"
+    );
+    let _ = cache.decref(CapHashOrRef::Hash(data_hash));
+    assert_eq!(
+        cache.refcount(CapHashOrRef::Hash(data_hash)),
+        Some(2),
+        "image holds 2 references to shared blob (one per slot)"
+    );
+}
+
+#[test]
+fn publish_image_inlines_initial_data_blobs() {
+    use crate::image::InitialDataCap;
+    let mut cache = Cache::new_in(Global);
+    let bytes = b"initial_content";
+    let size = 4096; // larger than content; trailing zero-padding
+    let mut img = crate::image::Image::empty();
+    img.initial_slots.insert(
+        SlotIdx(7),
+        InitialDataCap {
+            content: bytes.to_vec(),
+            size,
+        },
+    );
+    let image_hash = cache.publish_image(&img).unwrap();
+    assert!(cache.refcount(CapHashOrRef::Hash(image_hash)).is_some());
+
+    // The published data uses the explicit `size` (not bytes.len()).
+    // Recompute its hash externally to observe.
+    let data_hash = cache.publish_data_inline_with_size(bytes, size).unwrap();
+    assert_eq!(
+        cache.refcount(CapHashOrRef::Hash(data_hash)),
+        Some(2),
+        "image holds 1 + temp publisher = 2"
+    );
+}
+
+#[test]
+fn publish_image_pinned_image_validates_existing_hash() {
+    // PinnedCap::Image { content_hash } requires the referenced
+    // sub-Image blob to already exist; publish_image errors with
+    // BlobMissing if it doesn't.
+    let mut cache = Cache::new_in(Global);
+    let mut img = crate::image::Image::empty();
+    let missing_hash = [0xDEu8; 32];
+    img.pinned_slots.insert(
+        SlotIdx(1),
+        crate::image::PinnedCap::Image {
+            content_hash: missing_hash,
+        },
+    );
+    let err = cache.publish_image(&img);
+    assert!(matches!(err, Err(super::cache::CacheError::BlobMissing)));
+}
+
+#[test]
+fn publish_image_pinned_image_succeeds_when_sub_image_present() {
+    // Pre-publish a sub-Image, then reference it from a pinned slot
+    // via PinnedCap::Image{content_hash=<that hash>}.
+    let mut cache = Cache::new_in(Global);
+    let sub_img = crate::image::Image::empty();
+    let sub_hash = cache.publish_image(&sub_img).unwrap();
+
+    let mut parent = crate::image::Image::empty();
+    parent.pinned_slots.insert(
+        SlotIdx(5),
+        crate::image::PinnedCap::Image {
+            content_hash: sub_hash,
+        },
+    );
+    let parent_hash = cache.publish_image(&parent).unwrap();
+    // Parent references sub by hash; sub's refcount should now be 2
+    // (one for the initial publish, one for parent's pinned slot ref).
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(sub_hash)), Some(2));
+    assert!(parent_hash != sub_hash);
+}
+
+#[test]
+fn publish_image_carries_endpoint_fields() {
+    // Verify the conversion preserves the endpoint mapping.
+    use alloc::collections::BTreeMap;
+    use crate::image::EndpointDef as ScaleEp;
+    let mut img = crate::image::Image::empty();
+    let mut initial_regs = BTreeMap::new();
+    initial_regs.insert(1u8, 0x4000); // stack pointer (φ[1])
+    initial_regs.insert(11u8, 0x42); // endpoint_idx
+    img.endpoints.insert(
+        7,
+        ScaleEp {
+            entry_pc: 0x1000,
+            arg_registers: 2,
+            arg_cnode_size: 4,
+            initial_regs,
+        },
+    );
+
+    let mut cache = Cache::new_in(Global);
+    let image_hash = cache.publish_image(&img).unwrap();
+    let cap = cache.get(CapHashOrRef::Hash(image_hash)).unwrap();
+    let img_cap = match cap {
+        Cap::Image(ic) => ic,
+        _ => panic!("expected ImageCap"),
+    };
+    let ep = &img_cap.endpoints[7];
+    assert_eq!(ep.entry_pc, 0x1000);
+    assert_eq!(ep.stack_top, 0x4000, "stack_top extracted from initial_regs[1]");
+    assert_eq!(ep.arg_cnode_size, 4);
+    assert_eq!(ep.initial_regs[1], 0x4000);
+    assert_eq!(ep.initial_regs[11], 0x42);
+    // Untouched endpoints stay empty.
+    assert_eq!(img_cap.endpoints[0].entry_pc, 0);
+}
+
+#[test]
+fn publish_image_rejects_too_deep_source_path() {
+    // SlotPath with 9 steps > MAX_SOURCE_DEPTH (8).
+    let mut img = crate::image::Image::empty();
+    let steps: alloc::vec::Vec<SlotIdx> = (0..9u32).map(SlotIdx).collect();
+    img.memory_mappings.push(crate::image::MemoryMapping {
+        start: 0,
+        size: 0x1000,
+        source: crate::slot::SlotPath::new(steps).unwrap(),
+    });
+    let mut cache = Cache::new_in(Global);
+    let err = cache.publish_image(&img);
+    assert!(matches!(
+        err,
+        Err(super::cache::CacheError::ImageConvertFailed(
+            crate::talc::image::ImageConvertError::SourcePathTooDeep(9)
+        ))
+    ));
+}
+
+#[test]
+fn publish_image_rejects_out_of_range_endpoint() {
+    use alloc::collections::BTreeMap;
+    use crate::image::EndpointDef as ScaleEp;
+    let mut img = crate::image::Image::empty();
+    img.endpoints.insert(
+        // MAX_ENDPOINTS = 64; index 200 is out of range.
+        200,
+        ScaleEp {
+            entry_pc: 0x1000,
+            arg_registers: 0,
+            arg_cnode_size: 0,
+            initial_regs: BTreeMap::new(),
+        },
+    );
+    let mut cache = Cache::new_in(Global);
+    let err = cache.publish_image(&img);
+    assert!(matches!(
+        err,
+        Err(super::cache::CacheError::ImageConvertFailed(
+            crate::talc::image::ImageConvertError::EndpointIndexOutOfRange(200)
+        ))
+    ));
+}
+
 #[test]
 fn get_mut_image_or_type_errors() {
     let mut cache = Cache::new_in(Global);

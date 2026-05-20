@@ -34,6 +34,8 @@ pub use cnode::{CNodeCap, CNodeSlotEntry};
 pub use data::{DataCap, DataContent};
 pub use entry::CacheEntry;
 pub use hash::cap_hash;
-pub use image::{EndpointDef, ImageCap, ImageSlotEntry, MemoryMapping};
+pub use image::{
+    EndpointDef, ImageCap, ImageConvertError, ImageSlotEntry, MemoryMapping, image_cap_in,
+};
 pub use instance::{InstanceCap, RwOverlay};
 pub use page::{PageBytes, PageRef, PageSlot};

@@ -32,7 +32,7 @@ use super::cnode::{CNodeCap, CNodeSlotEntry};
 use super::data::{DataCap, DataContent};
 use super::entry::CacheEntry;
 use super::hash::cap_hash;
-use super::image::ImageCap;
+use super::image::{ImageCap, ImageConvertError, image_cap_in};
 use super::instance::{InstanceCap, RwOverlay};
 use super::page::PageSlot;
 
@@ -50,6 +50,8 @@ pub enum CacheError {
     AllocFailure,
     #[error("get_mut called on Type/Image (only Data/CNode/Instance can be promoted)")]
     NonMutableKind,
+    #[error("image conversion failed: {0}")]
+    ImageConvertFailed(#[from] ImageConvertError),
 }
 
 pub struct Cache<A: Allocator + Clone = Global> {
@@ -260,11 +262,27 @@ impl<A: Allocator + Clone> Cache<A> {
     ///
     /// Idempotent: re-publishing identical bytes returns the same hash
     /// and bumps the existing entry's refcount.
+    ///
+    /// The DataCap's logical `size` is set to `bytes.len()`. Use
+    /// [`Self::publish_data_inline_with_size`] when the logical size
+    /// differs from the inline byte count (e.g., zero-padded data).
     pub fn publish_data_inline(&mut self, bytes: &[u8]) -> Result<CapHash, CacheError> {
+        self.publish_data_inline_with_size(bytes, bytes.len() as u64)
+    }
+
+    /// Publish an inline DataCap with an explicit logical size. Used
+    /// when the cap's size exceeds the inline byte count (typical for
+    /// pinned/initial slots whose declared size includes zero-padding
+    /// past the inline content).
+    pub fn publish_data_inline_with_size(
+        &mut self,
+        bytes: &[u8],
+        size: u64,
+    ) -> Result<CapHash, CacheError> {
         let mut buf: AVec<u8, A> = AVec::with_capacity_in(bytes.len(), self.alloc.clone());
         buf.extend_from_slice(bytes);
         let cap = Cap::Data(DataCap {
-            size: bytes.len() as u64,
+            size,
             content: DataContent::Inline(buf),
         });
         let hash = cap_hash(&cap);
@@ -315,6 +333,89 @@ impl<A: Allocator + Clone> Cache<A> {
             }
         }
         Ok(hash)
+    }
+
+    /// Publish a SCALE-encoded [`crate::image::Image`] into this cache.
+    /// Walks the image's `pinned_slots` and `initial_slots`, publishing
+    /// each inlined Data content as a separate DataCap blob, then
+    /// assembles and publishes the [`ImageCap`] referencing those blobs
+    /// by hash. Returns the resulting Image cap's hash.
+    ///
+    /// `pinned_slots` entries of variant `PinnedCap::Image { content_hash }`
+    /// require that blob to already exist in the cache (we cannot
+    /// publish a sub-Image purely from its hash); a missing prerequisite
+    /// returns [`CacheError::BlobMissing`].
+    ///
+    /// **Refcount lifecycle:** each internal `publish_data_inline_with_size`
+    /// call bumps the published blob's refcount by 1 (consistent with
+    /// the [`Self::publish_data_inline`] contract). After the parent
+    /// ImageCap is published — at which point [`Self::publish_image_from_cap`]
+    /// has incref'd each slot target — we release those temporary
+    /// holds with a matching `decref`. Net effect: the caller of
+    /// `publish_image` holds the image (refcount=1), the image holds
+    /// each slot's target blob (refcount equals the number of slots
+    /// referencing it), and the publisher does not transitively hold
+    /// the Data blobs themselves.
+    pub fn publish_image(
+        &mut self,
+        image: &crate::image::Image,
+    ) -> Result<CapHash, CacheError> {
+        let mut my_published: AVec<CapHash> = AVec::new();
+        let result = self.publish_image_inner(image, &mut my_published);
+        // Release temporary holds taken by internal publish_data calls.
+        // On the success path, publish_image_from_cap has already
+        // incref'd each blob via the slot references; on the error
+        // path, we still want to release them so the cache doesn't
+        // accumulate orphan refcounts.
+        for h in my_published.iter() {
+            // Best-effort: decref may fail if the blob was somehow
+            // already evicted, but V1 has no eviction so this is
+            // infallible in practice.
+            let _ = self.decref(CapHashOrRef::Hash(*h));
+        }
+        result
+    }
+
+    fn publish_image_inner(
+        &mut self,
+        image: &crate::image::Image,
+        my_published: &mut AVec<CapHash>,
+    ) -> Result<CapHash, CacheError> {
+        use crate::image::PinnedCap;
+
+        let mut pinned_hashes: AVec<(SlotIdx, CapHash)> = AVec::new();
+        for (slot, pinned) in &image.pinned_slots {
+            let hash = match pinned {
+                PinnedCap::Data { content, size } => {
+                    let h = self.publish_data_inline_with_size(content, *size)?;
+                    my_published.push(h);
+                    h
+                }
+                PinnedCap::Image { content_hash } => {
+                    if !self.blobs.contains_key(content_hash) {
+                        return Err(CacheError::BlobMissing);
+                    }
+                    *content_hash
+                }
+            };
+            pinned_hashes.push((*slot, hash));
+        }
+
+        let mut initial_hashes: AVec<(SlotIdx, CapHash)> = AVec::new();
+        for (slot, init) in &image.initial_slots {
+            let h = self.publish_data_inline_with_size(&init.content, init.size)?;
+            my_published.push(h);
+            initial_hashes.push((*slot, h));
+        }
+
+        let image_cap = image_cap_in(
+            image,
+            pinned_hashes.as_slice(),
+            initial_hashes.as_slice(),
+            self.alloc.clone(),
+        )?;
+
+        self.publish_image_from_cap(image_cap)
     }
 
     /// Publish a CNodeCap blob with the given size and populated
