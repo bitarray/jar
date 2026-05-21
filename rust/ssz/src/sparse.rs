@@ -81,6 +81,19 @@ impl<T, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
         self.entries.iter().map(|(k, v)| (*k, v))
     }
 
+    /// Mutable iterator over (index, &mut MissingOr<T>) for materialized
+    /// entries only. Used by callers that need to rewrite entry values
+    /// in place (e.g., resolving `Ref` targets to `Hash` after settle).
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (u64, &mut MissingOr<T>)> {
+        self.entries.iter_mut().map(|(k, v)| (*k, v))
+    }
+
+    /// Number of materialized entries (BTreeMap length). Distinct from
+    /// [`len`](Self::len), which is the logical length (max index + 1).
+    pub fn entries_count(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Look up a single entry by leaf index.
     pub fn get(&self, idx: u64) -> Option<&MissingOr<T>> {
         self.entries.get(&idx)
@@ -97,6 +110,13 @@ impl<T, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
         self.len = self.len.max(idx + 1);
         self.entries.insert(idx, value);
         Ok(())
+    }
+
+    /// Remove the entry at `idx`, returning its previous value if any.
+    /// Does **not** decrement `len` — the logical length is independent
+    /// of which indices are materialized.
+    pub fn remove(&mut self, idx: u64) -> Option<MissingOr<T>> {
+        self.entries.remove(&idx)
     }
 
     /// Set the logical length explicitly (does not affect entries).

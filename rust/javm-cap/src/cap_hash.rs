@@ -53,7 +53,7 @@ mod tests {
     use core::sync::atomic::AtomicU32;
 
     use crate::cap::{CapHashOrRef, TypeCap};
-    use crate::cnode::{CNodeCap, CNodeSlotEntry};
+    use crate::cnode::CNodeCap;
     use crate::data::{DataCap, DataContent};
     use crate::image_cap::ImageCap;
     use crate::instance::InstanceCap;
@@ -116,10 +116,9 @@ mod tests {
     fn cnode_empty_vs_one_populated_differ() {
         let empty: CNodeCap<Global> = CNodeCap::new_in(2, Global).unwrap();
         let mut populated: CNodeCap<Global> = CNodeCap::new_in(2, Global).unwrap();
-        populated.slots.push(CNodeSlotEntry {
-            slot: SlotIdx(0),
-            target: CapHashOrRef::Hash([0xEE; 32]),
-        });
+        populated
+            .set(SlotIdx(0), Some(CapHashOrRef::Hash([0xEE; 32])))
+            .unwrap();
         let a: Cap<Global> = Cap::CNode(empty);
         let b: Cap<Global> = Cap::CNode(populated);
         assert_ne!(cap_hash(&a), cap_hash(&b));
@@ -128,10 +127,7 @@ mod tests {
     #[test]
     fn cnode_with_ref_target_panics() {
         let mut cn: CNodeCap<Global> = CNodeCap::new_in(2, Global).unwrap();
-        cn.slots.push(CNodeSlotEntry {
-            slot: SlotIdx(0),
-            target: CapHashOrRef::Ref(42),
-        });
+        cn.set(SlotIdx(0), Some(CapHashOrRef::Ref(42))).unwrap();
         let cap: Cap<Global> = Cap::CNode(cn);
         let result = std::panic::catch_unwind(|| cap_hash(&cap));
         assert!(result.is_err());

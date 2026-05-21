@@ -12,7 +12,7 @@ use talc::source::Manual;
 use crate::slot::SlotIdx;
 
 use super::cap::{Cap, CapHashOrRef};
-use super::cnode::{CNodeCap, CNodeSlotEntry};
+use super::cnode::CNodeCap;
 use super::data::{DataCap, DataContent};
 use super::entry::CacheEntry;
 use super::image_cap::{EndpointDef, ImageCap, ImageSlotEntry, MemoryMapping};
@@ -129,7 +129,7 @@ fn cnode_set_takes_and_keeps_slots_sorted() {
         cnode
             .slots
             .iter()
-            .map(|e| e.slot.get())
+            .map(|(idx, _)| idx as u32)
             .collect::<alloc::vec::Vec<u32>>(),
         alloc::vec![2u32, 7, 11]
     );
@@ -150,7 +150,7 @@ fn cnode_set_takes_and_keeps_slots_sorted() {
         cnode
             .slots
             .iter()
-            .map(|e| e.slot.get())
+            .map(|(idx, _)| idx as u32)
             .collect::<alloc::vec::Vec<u32>>(),
         alloc::vec![7u32, 11]
     );
@@ -167,15 +167,12 @@ fn cnode_set_takes_and_keeps_slots_sorted() {
 fn cnode_lookup_after_set() {
     let cnode_alloc = Global;
     let mut cnode: CNodeCap<Global> = CNodeCap::new_in(8, cnode_alloc).unwrap();
-    cnode.slots.push(CNodeSlotEntry {
-        slot: SlotIdx(7),
-        target: CapHashOrRef::Hash([0x11; 32]),
-    });
-    cnode.slots.push(CNodeSlotEntry {
-        slot: SlotIdx(42),
-        target: CapHashOrRef::Ref(99),
-    });
-    cnode.slots.sort_by_key(|e| e.slot);
+    cnode
+        .set(SlotIdx(7), Some(CapHashOrRef::Hash([0x11; 32])))
+        .unwrap();
+    cnode
+        .set(SlotIdx(42), Some(CapHashOrRef::Ref(99)))
+        .unwrap();
 
     assert_eq!(cnode.get(SlotIdx(7)), Some(CapHashOrRef::Hash([0x11; 32])));
     assert_eq!(cnode.get(SlotIdx(42)), Some(CapHashOrRef::Ref(99)));

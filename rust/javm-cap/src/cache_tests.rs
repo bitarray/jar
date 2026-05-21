@@ -14,7 +14,7 @@ use crate::slot::SlotIdx;
 
 use super::cache::Cache;
 use super::cap::{Cap, CapHashOrRef};
-use super::cnode::{CNodeCap, CNodeSlotEntry};
+use super::cnode::CNodeCap;
 use super::data::{DataCap, DataContent};
 use super::page::{PageBytes, PageRef, PageSlot};
 
@@ -28,12 +28,11 @@ fn make_data_inline(bytes: &[u8]) -> Cap<Global> {
 }
 
 fn make_cnode_with(entries: &[(SlotIdx, CapHashOrRef)]) -> Cap<Global> {
-    let mut slots = AVec::new_in(Global);
+    let mut cn: CNodeCap<Global> = CNodeCap::new_in(8, Global).unwrap();
     for &(slot, target) in entries {
-        slots.push(CNodeSlotEntry { slot, target });
+        cn.set(slot, Some(target)).unwrap();
     }
-    slots.sort_by_key(|e| e.slot);
-    Cap::CNode(CNodeCap { size_log: 8, slots })
+    Cap::CNode(cn)
 }
 
 #[test]

@@ -10,6 +10,7 @@ description = "JAR v3 integration crate: call stack, MGMT ecall dispatch, host-c
 allocator-api2 = "0.4"
 javm-cap = { workspace = true }
 javm-exec = { workspace = true }
+ssz = { workspace = true, features = ["std", "sha2", "derive"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]

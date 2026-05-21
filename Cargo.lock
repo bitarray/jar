@@ -1125,6 +1125,7 @@ dependencies = [
  "javm-cap",
  "javm-exec",
  "proptest",
+ "ssz",
  "thiserror",
 ]
 

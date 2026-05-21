@@ -1,39 +1,50 @@
 //! `CNodeCap<A>` — talc-friendly CNode cap.
 //!
-//! V1 representation: a flat sparse array of populated slots, sorted
-//! by slot index for `O(log N)` binary-search lookup. Empty slots are
-//! represented by absence. Adequate for cnodes up through
-//! `size_log ≈ 14` (16K slots). Larger sparse cnodes get a merkle
-//! trie representation in V2 — see plan
-//! `distributed-puzzling-tower.md`.
+//! Slot table is a [`SparseList`] of [`MissingOr`] entries: a sparse
+//! materialized-on-demand map from `SlotIdx` to [`CapHashOrRef`]. The
+//! merkle tree shape is fixed at depth 16 (= ceil_log2(MAX_CNODE_SLOTS))
+//! regardless of `size_log`; `size_log` is runtime metadata used for
+//! bounds-checking slot indices.
+//!
+//! Empty slots contribute `zero_hash` at the depth-16 leaf level; a
+//! `Missing(h)` placeholder substitutes losslessly for the materialized
+//! contents whose `hash_tree_root` equals `h`. This is the load-bearing
+//! property for sparse cnode loading from cold storage.
+//!
+//! `size_log` is permitted in `0..=16` (the spec's hard ceiling).
 
 use allocator_api2::alloc::{Allocator, Global};
-use allocator_api2::vec::Vec;
+use ssz::{MissingOr, SparseList};
 
 use crate::error::CapError;
 use crate::slot::SlotIdx;
 
 use super::cap::CapHashOrRef;
 
+/// Maximum cnode capacity (`2^16` slots). The SSZ merkle tree depth is
+/// fixed at 16 regardless of an individual cnode's declared `size_log`.
+pub const MAX_CNODE_SLOTS: u64 = 1u64 << 16;
+
 #[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
 pub struct CNodeCap<A: Allocator + Clone = Global> {
     pub size_log: u8,
-    /// Populated slots, sorted by slot index for binary search.
-    pub slots: Vec<CNodeSlotEntry, A>,
+    /// Sparse slot table keyed by slot index. Missing keys are absent
+    /// slots (contribute `zero_hash` to the merkle root). The merkle
+    /// tree is always size `MAX_CNODE_SLOTS = 2^16`; `size_log` bounds
+    /// the addressable range.
+    pub slots: SparseList<CapHashOrRef, MAX_CNODE_SLOTS, A>,
 }
 
 impl<A: Allocator + Clone> CNodeCap<A> {
     /// Construct an empty cnode of `2^size_log` slots in the given
-    /// allocator. Empty cnodes carry no allocation past the
-    /// allocator-handle bytes inside the Vec. Rejects
-    /// `size_log > 16` (the spec's hard ceiling).
+    /// allocator. Rejects `size_log > 16`.
     pub fn new_in(size_log: u8, alloc: A) -> Result<Self, CapError> {
         if size_log > 16 {
             return Err(CapError::InvalidCNodeSize(size_log));
         }
         Ok(Self {
             size_log,
-            slots: Vec::new_in(alloc),
+            slots: SparseList::new_in(alloc),
         })
     }
 
@@ -42,19 +53,23 @@ impl<A: Allocator + Clone> CNodeCap<A> {
         1u64 << self.size_log
     }
 
-    /// Look up a slot by index. Returns `None` for empty slots (the
-    /// common case in sparse cnodes).
+    /// Look up a slot by index. Returns `None` for empty (unmaterialized)
+    /// slots; returns the materialized `CapHashOrRef` otherwise.
+    ///
+    /// For a `MissingOr::Missing(_)` placeholder slot (used when a
+    /// subtree was loaded by hash without contents), this returns
+    /// `None` — callers needing to distinguish "absent" from "missing
+    /// placeholder" should inspect `self.slots.get(...)` directly.
     pub fn get(&self, slot: SlotIdx) -> Option<CapHashOrRef> {
-        let idx = self
-            .slots
-            .binary_search_by_key(&slot, |entry| entry.slot)
-            .ok()?;
-        Some(self.slots[idx].target)
+        match self.slots.get(slot.get() as u64)? {
+            MissingOr::Materialized(t) => Some(*t),
+            MissingOr::Missing(_) => None,
+        }
     }
 
-    /// Bind `slot` to `target`, or remove the binding if `target` is
-    /// `None`. Rejects slot indices outside the cnode's
-    /// `2^size_log` range. Returns the prior target at `slot`, if any.
+    /// Bind `slot` to `target`, or clear the binding if `target` is
+    /// `None`. Rejects slot indices outside the cnode's `2^size_log`
+    /// range. Returns the prior materialized target at `slot`, if any.
     pub fn set(
         &mut self,
         slot: SlotIdx,
@@ -63,22 +78,25 @@ impl<A: Allocator + Clone> CNodeCap<A> {
         if !slot.fits(self.size_log) {
             return Err(CapError::SlotOutOfRange(slot.get(), self.size_log));
         }
-        match self.slots.binary_search_by_key(&slot, |e| e.slot) {
-            Ok(idx) => match target {
-                Some(t) => {
-                    let prior = self.slots[idx].target;
-                    self.slots[idx].target = t;
-                    Ok(Some(prior))
-                }
-                None => Ok(Some(self.slots.remove(idx).target)),
-            },
-            Err(idx) => {
-                if let Some(t) = target {
-                    self.slots.insert(idx, CNodeSlotEntry { slot, target: t });
-                }
-                Ok(None)
+        let key = slot.get() as u64;
+        let prior = match self.slots.get(key) {
+            Some(MissingOr::Materialized(t)) => Some(*t),
+            Some(MissingOr::Missing(_)) | None => None,
+        };
+        match target {
+            Some(t) => {
+                // `MAX_CNODE_SLOTS = 2^16` and `slot.fits(size_log)` with
+                // `size_log <= 16` guarantee `key < MAX_CNODE_SLOTS`, so
+                // the bound check inside `SparseList::insert` cannot fail.
+                self.slots
+                    .insert(key, MissingOr::Materialized(t))
+                    .expect("slot index fits cnode capacity (checked above)");
+            }
+            None => {
+                self.slots.remove(key);
             }
         }
+        Ok(prior)
     }
 
     /// Take the binding at `slot`, leaving the slot empty. Returns the
@@ -101,17 +119,12 @@ impl CNodeCap<Global> {
     }
 }
 
-/// One populated slot.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-    ssz_derive::Encode,
-    ssz_derive::Decode,
-    ssz_derive::HashTreeRoot,
-)]
+/// One populated slot — retained as a serialisation helper for callers
+/// that need a flat `(slot, target)` pair (e.g., `Cache::publish_cnode`).
+///
+/// The on-the-wire/hash representation of `CNodeCap` no longer uses this
+/// type; the cnode is encoded directly as a `SparseList<CapHashOrRef, ...>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CNodeSlotEntry {
     pub slot: SlotIdx,
     pub target: CapHashOrRef,

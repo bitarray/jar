@@ -438,12 +438,17 @@ impl<K: KernelAssist> Vm<K> {
         cache: &mut Cache<Global>,
         entry: &InstanceEntry,
     ) -> Result<CapHash, VmError> {
-        // Publish the working cnode as a fresh blob.
+        // Publish the working cnode as a fresh blob. We only flatten the
+        // materialized entries; unmaterialized (`Missing`) slots aren't
+        // valid mid-execution and the SparseList shouldn't contain them.
         let cnode_entries: Vec<(SlotIdx, CapHashOrRef)> = entry
             .root_cnode
             .slots
             .iter()
-            .map(|e| (e.slot, e.target))
+            .filter_map(|(idx, mo)| match mo {
+                ssz::MissingOr::Materialized(t) => Some((SlotIdx(idx as u32), *t)),
+                ssz::MissingOr::Missing(_) => None,
+            })
             .collect();
         let cnode_hash = cache.publish_cnode(entry.root_cnode.size_log, &cnode_entries)?;
 

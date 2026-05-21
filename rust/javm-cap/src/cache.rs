@@ -32,7 +32,7 @@ use crate::slot::SlotIdx;
 
 use super::cap::{Cap, CapHash, CapHashOrRef, CapRef, NUM_REGS};
 use super::cap_hash::cap_hash;
-use super::cnode::{CNodeCap, CNodeSlotEntry};
+use super::cnode::CNodeCap;
 use super::data::{DataCap, DataContent};
 use super::entry::CacheEntry;
 use super::image_cap::{ImageCap, ImageConvertError, image_cap_in};
@@ -57,6 +57,8 @@ pub enum CacheError {
     ImageConvertFailed(#[from] ImageConvertError),
     #[error("paged data: page length mismatch (expected={expected}, got={got})")]
     PageSizeMismatch { expected: u32, got: usize },
+    #[error("cnode slot index out of range")]
+    SlotOutOfRange,
 }
 
 pub struct Cache<A: Allocator + Clone = Global> {
@@ -552,15 +554,13 @@ impl<A: Allocator + Clone> Cache<A> {
             }
         }
 
-        let mut slots: AVec<CNodeSlotEntry, A> =
-            AVec::with_capacity_in(entries.len(), self.alloc.clone());
+        let mut slots: ssz::SparseList<CapHashOrRef, { crate::cnode::MAX_CNODE_SLOTS }, A> =
+            ssz::SparseList::new_in(self.alloc.clone());
         for (slot, target) in entries {
-            slots.push(CNodeSlotEntry {
-                slot: *slot,
-                target: *target,
-            });
+            slots
+                .insert(slot.get() as u64, ssz::MissingOr::Materialized(*target))
+                .map_err(|_| CacheError::SlotOutOfRange)?;
         }
-        slots.sort_by_key(|e| e.slot);
 
         let cap = Cap::CNode(CNodeCap { size_log, slots });
         let hash = cap_hash(&cap);
@@ -773,8 +773,10 @@ impl<A: Allocator + Clone> Cache<A> {
         let mut out: AVec<CapHashOrRef> = AVec::new();
         match cap {
             Cap::CNode(cn) => {
-                for slot in cn.slots.iter() {
-                    out.push(slot.target);
+                for (_, mo) in cn.slots.iter() {
+                    if let ssz::MissingOr::Materialized(t) = mo {
+                        out.push(*t);
+                    }
                 }
             }
             Cap::Instance(inst) => {
@@ -799,9 +801,9 @@ fn collect_ref_targets<A: Allocator + Clone>(cap: &Cap<A>) -> AVec<CapRef> {
     let mut out: AVec<CapRef> = AVec::new();
     match cap {
         Cap::CNode(cn) => {
-            for slot in cn.slots.iter() {
-                if let CapHashOrRef::Ref(r) = slot.target {
-                    out.push(r);
+            for (_, mo) in cn.slots.iter() {
+                if let ssz::MissingOr::Materialized(CapHashOrRef::Ref(r)) = mo {
+                    out.push(*r);
                 }
             }
         }
@@ -823,11 +825,12 @@ fn rewrite_ref_targets<A: Allocator + Clone>(cap: &mut Cap<A>, resolved: &[(CapR
         |r: CapRef| -> Option<CapHash> { resolved.iter().find(|(k, _)| *k == r).map(|(_, h)| *h) };
     match cap {
         Cap::CNode(cn) => {
-            for slot in cn.slots.iter_mut() {
-                if let CapHashOrRef::Ref(r) = slot.target
+            for (_, mo) in cn.slots.iter_mut() {
+                if let ssz::MissingOr::Materialized(t) = mo
+                    && let CapHashOrRef::Ref(r) = *t
                     && let Some(h) = lookup(r)
                 {
-                    slot.target = CapHashOrRef::Hash(h);
+                    *t = CapHashOrRef::Hash(h);
                 }
             }
         }
@@ -848,10 +851,17 @@ fn rewrite_ref_targets<A: Allocator + Clone>(cap: &mut Cap<A>, resolved: &[(CapR
 fn shallow_clone_cap<A: Allocator + Clone>(cap: &Cap<A>, alloc: A) -> Result<Cap<A>, CacheError> {
     match cap {
         Cap::CNode(cn) => {
-            let mut slots: AVec<CNodeSlotEntry, A> =
-                AVec::with_capacity_in(cn.slots.len(), alloc.clone());
-            for slot in cn.slots.iter() {
-                slots.push(*slot);
+            // SparseList clones into a new allocator handle: the BTreeMap
+            // storage uses Global regardless of A (std::collections has no
+            // custom-allocator support on stable), but cloning the map's
+            // values and stamping the new allocator handle gives us a
+            // logically independent copy.
+            let mut slots: ssz::SparseList<CapHashOrRef, { crate::cnode::MAX_CNODE_SLOTS }, A> =
+                ssz::SparseList::new_in(alloc.clone());
+            for (idx, mo) in cn.slots.iter() {
+                slots
+                    .insert(idx, mo.clone())
+                    .expect("source SparseList already satisfies the bound");
             }
             Ok(Cap::CNode(CNodeCap {
                 size_log: cn.size_log,
