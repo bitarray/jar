@@ -87,7 +87,9 @@ mod tests {
     fn state_root_changes_with_published_data() {
         let mut s = State::new();
         let r0 = state_root(&s);
-        s.caps.publish_data_inline(b"hello").unwrap();
+        s.caps
+            .put_cap(&javm_cap::Cap::data_inline(b"hello"))
+            .unwrap();
         let r1 = state_root(&s);
         assert_ne!(r0, r1);
     }

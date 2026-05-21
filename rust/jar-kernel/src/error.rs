@@ -12,6 +12,8 @@ pub enum KernelError {
     Op(#[from] javm_cap::OpError),
     #[error("cache error: {0}")]
     Cache(#[from] javm_cap::CacheError),
+    #[error("image conversion failed: {0}")]
+    ImageConvert(#[from] javm_cap::ImageConvertError),
     #[error("file_id {0} not found in cache")]
     FileNotFound(u64),
     #[error(
