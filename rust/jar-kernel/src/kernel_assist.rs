@@ -7,12 +7,9 @@
 //! looked up through there; this trait surface no longer reaches
 //! into σ.
 //!
-//! NB: at this stage the host_open / host_save ecalls don't actually
-//! get exercised from inside `Vm::invoke_cached` — those ecalls trap
-//! because the cache borrow isn't threaded through to the kernel
-//! assist (a follow-up commit will wire it). The implementation is
-//! present so the trait surface compiles and stays exercisable from
-//! unit tests.
+//! `Vm::invoke_cached` resolves DataCap sizes before calling into
+//! this trait, so `host_save` debits the actual logical byte size
+//! while this type remains free of direct cache ownership.
 
 use std::collections::HashMap;
 
@@ -121,16 +118,12 @@ impl KernelAssist for SigmaKernelAssist {
         self.files.get(&file_id).copied()
     }
 
-    fn host_save(&mut self, data: CapHashOrRef, quota_id: u64) -> Option<u64> {
-        // Without a cache borrow we can't read the data's size; debit
-        // a placeholder 1-byte charge so the mechanics are observable.
-        // A follow-up commit threads `&mut Cache<Global>` through to
-        // resolve the actual data size.
+    fn host_save(&mut self, data: CapHashOrRef, quota_id: u64, size: u64) -> Option<u64> {
         let current = self.storage_quotas.get(&quota_id).copied().unwrap_or(0);
-        if current < 1 {
+        if current < size {
             return None;
         }
-        self.storage_quotas.insert(quota_id, current - 1);
+        self.storage_quotas.insert(quota_id, current - size);
         let file_id = self.next_file_id;
         self.next_file_id += 1;
         self.files.insert(file_id, data);
@@ -146,9 +139,9 @@ mod tests {
     fn host_save_debits_quota_and_allocates_file_id() {
         let mut ka = SigmaKernelAssist::new();
         ka.seed_root_quota(1000);
-        let file_id = ka.host_save(CapHashOrRef::Hash([0u8; 32]), 0).unwrap();
+        let file_id = ka.host_save(CapHashOrRef::Hash([0u8; 32]), 0, 32).unwrap();
         assert_eq!(file_id, 1); // first allocation
-        assert_eq!(ka.storage_quota_get(0), 999);
+        assert_eq!(ka.storage_quota_get(0), 968);
         assert_eq!(ka.host_open(file_id), Some(CapHashOrRef::Hash([0u8; 32])));
     }
 
@@ -156,7 +149,7 @@ mod tests {
     fn host_save_exhausted_quota_returns_none() {
         let mut ka = SigmaKernelAssist::new();
         // Quota 0 starts empty; any save should fail.
-        assert!(ka.host_save(CapHashOrRef::Hash([0u8; 32]), 0).is_none());
+        assert!(ka.host_save(CapHashOrRef::Hash([0u8; 32]), 0, 1).is_none());
     }
 
     #[test]
