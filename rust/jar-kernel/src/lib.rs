@@ -9,7 +9,7 @@
 //! content (Images, Data, CNodes, Instances) lives in the cache and
 //! is content-addressed by [`javm_cap::CapHash`]. `apply_event`
 //! publishes the event payload as a DataCap, rebinds the chain root
-//! cnode's slot[0] to it, and drives [`javm::Vm::invoke_cached`].
+//! cnode's slot\[0\] to it, and drives [`javm::Vm::invoke_cached`].
 
 pub mod abi;
 pub mod apply;

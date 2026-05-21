@@ -9,7 +9,7 @@
 //! Why not stock `alloc::sync::Arc`? Two reasons:
 //!
 //! 1. Stock `Arc` allocates from the global Rust allocator. The
-//!    state-cache region uses its own [`CacheTalcLock`] instance;
+//!    state-cache region uses its own `CacheTalcLock` instance;
 //!    putting an `Arc<T>` whose header is in the global heap but
 //!    payload is in talc memory (or vice versa) would deadlock the
 //!    cache layout.

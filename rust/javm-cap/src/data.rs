@@ -4,8 +4,9 @@
 //! - `Inline` — bytes in one `Vec<u8, A>`. Used for "small" Data
 //!   (typically ≤ 1 page; the exact threshold is a callers' choice).
 //! - `Paged` — page-merkleized; each page is owned by the DataCap
-//!   via a reference-counted [`PageRef`] so multiple DataCap clones
-//!   can share page bytes between CoW operations.
+//!   via a reference-counted [`PageRef`](crate::page::PageRef) so
+//!   multiple DataCap clones can share page bytes between CoW
+//!   operations.
 
 use allocator_api2::alloc::{Allocator, Global};
 use allocator_api2::vec::Vec;

@@ -24,7 +24,7 @@ pub enum CapHashOrRef {
     Ref(CapRef),
 }
 
-/// Number of PVM general-purpose registers (φ[0]..φ[12]).
+/// Number of PVM general-purpose registers (φ\[0\]..φ\[12\]).
 pub const NUM_REGS: usize = 13;
 
 /// Maximum depth of a `MemoryMapping.source_path`. v3 cap graphs

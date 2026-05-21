@@ -6,9 +6,9 @@ Licensed under the Apache License, Version 2.0.
 //! Host-side state cache.
 //!
 //! Owns a 1 GiB shared-memory region mapped at the fixed
-//! [`STATE_CACHE_VA`] on both host and guest. A `TalcLock` at offset 0
-//! manages allocations. At offset [`CACHE_DIRECTORY_OFFSET`] (= 0x1000)
-//! sits the guest-readable [`CacheDirectory`] mapping `CapHash` /
+//! `STATE_CACHE_VA` on both host and guest. A `TalcLock` at offset 0
+//! manages allocations. At offset `CACHE_DIRECTORY_OFFSET` (= 0x1000)
+//! sits the guest-readable `CacheDirectory` mapping `CapHash` /
 //! `CapRef` to entry VAs. The talc heap fills the rest.
 //!
 //! All cap content (Vec<u8, TalcAlloc>, Box<_, TalcAlloc>, …) lives in
@@ -18,8 +18,8 @@ Licensed under the Apache License, Version 2.0.
 //! pointer dereference.
 //!
 //! Per-process singleton: only one cache region can be mapped per
-//! process (`MAP_FIXED_NOREPLACE`). Each [`Cache`] holds an exclusive
-//! lease ([`REGION_LEASE`]) over the region for its lifetime; parallel
+//! process (`MAP_FIXED_NOREPLACE`). Each `Cache` holds an exclusive
+//! lease (`REGION_LEASE`) over the region for its lifetime; parallel
 //! tests serialise on it.
 
 use std::ptr::NonNull;
@@ -41,7 +41,7 @@ use crate::{HyperlightError, Result, new_error};
 static REGION_BASE: OnceLock<usize> = OnceLock::new();
 static REGION_LEASE: Mutex<()> = Mutex::new(());
 
-/// Lazily map the cache region at [`STATE_CACHE_VA`]. Calls into the
+/// Lazily map the cache region at `STATE_CACHE_VA`. Calls into the
 /// kernel exactly once across the entire process; subsequent callers
 /// just read the cached address.
 fn map_region_once(size: usize) -> Result<NonNull<u8>> {
@@ -192,8 +192,8 @@ unsafe impl Send for Cache {}
 
 impl Cache {
     /// Allocate the cache region, initialise the TalcLock at offset 0
-    /// and the CacheDirectory at [`CACHE_DIRECTORY_OFFSET`]. The talc
-    /// heap covers everything from [`TALC_HEAP_OFFSET`] to the end of
+    /// and the CacheDirectory at `CACHE_DIRECTORY_OFFSET`. The talc
+    /// heap covers everything from `TALC_HEAP_OFFSET` to the end of
     /// the region.
     pub fn new() -> Result<Self> {
         let region = CacheRegion::allocate(STATE_CACHE_SIZE)?;

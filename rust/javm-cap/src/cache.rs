@@ -16,7 +16,7 @@
 //! Refcounting uses the same protocol as `Arc::make_mut`:
 //! `fetch_sub(1, Release)` at mutation time; if `prev == 1` we have
 //! sole ownership and move-promote (no copy), else we shallow-clone
-//! into a fresh instance entry. See [`Self::get_mut`] for details.
+//! into a fresh instance entry. See [`Cache::get_mut`] for details.
 
 use alloc::collections::BTreeMap;
 use core::sync::atomic::Ordering;

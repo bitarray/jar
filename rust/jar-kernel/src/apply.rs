@@ -3,7 +3,7 @@
 //! For each event in a block:
 //! 1. Publish the event's `payload` as a `Cap::Data` blob in σ's
 //!    cache via `publish_data_inline`.
-//! 2. CoW-promote the chain's root cnode and rebind slot[0] to the
+//! 2. CoW-promote the chain's root cnode and rebind slot\[0\] to the
 //!    payload's CapHash; settle to a fresh cnode hash.
 //! 3. Republish the chain InstanceCap with the new root cnode hash;
 //!    the chain instance's hash updates monotonically per event.
