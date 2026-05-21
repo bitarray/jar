@@ -602,7 +602,7 @@ mod tests {
     use super::*;
     use crate::kernel_assist::InProcessKernelAssist;
     use javm_cap::image::Image;
-    use javm_cap::{Cache, NUM_REGS};
+    use javm_cap::{Cache, Cap, NUM_REGS};
     use std::collections::BTreeMap;
 
     fn empty_image_with_code(code: Vec<u8>) -> Image {

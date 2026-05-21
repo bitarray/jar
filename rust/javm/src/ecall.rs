@@ -41,11 +41,12 @@
 //! operate on `CapHashOrRef` targets in the running root cnode and
 //! cross-reference into the caller-supplied `Cache<Global>` for kind
 //! dispatch. `Vm::drive_and_translate` installs a short-lived
-//! [`CachedEcallHandler`] for interpreter runs, so cache-touching host
+//! `CachedEcallHandler` for interpreter runs, so cache-touching host
 //! calls can read/write cap content without storing the cache borrow
 //! in the long-lived `Vm`.
 
 use allocator_api2::alloc::Global;
+use allocator_api2::vec::Vec as AVec;
 use javm_cap::{
     Blake2b256, Cache, Cap, CapHashOrRef, DataCap, DataContent, Hash, SlotIdx, TypeCap,
 };
@@ -533,7 +534,14 @@ impl<K: KernelAssist> Vm<K> {
         }
         self.kernel_assist
             .storage_quota_set(quota_id, quota - debit);
-        let h = cache.publish_data_inline(&bytes[..canonical_len])?;
+        let mut inline = AVec::new_in(Global);
+        inline.extend_from_slice(&bytes[..canonical_len]);
+        let cap = Cap::Data(DataCap {
+            size: canonical_len as u64,
+            content: DataContent::Inline(inline),
+        });
+        let h = javm_cap::cap_hash(&cap);
+        cache.put_blob(h, cap)?;
 
         let running = self
             .stack
@@ -756,12 +764,14 @@ impl<K: KernelAssist> Vm<K> {
         size_log: u8,
         cache: Option<&mut Cache<Global>>,
     ) -> Result<(), VmError> {
+        let cap = Cap::CNode(javm_cap::CNodeCap::<Global>::new(size_log)?);
+        let cap_hash = javm_cap::cap_hash(&cap);
         let h = match cache {
-            Some(cache) => cache.publish_cnode(size_log, &[])?,
-            None => {
-                let cn = javm_cap::CNodeCap::<Global>::new(size_log)?;
-                javm_cap::cap_hash(&Cap::CNode(cn))
+            Some(cache) => {
+                cache.put_blob(cap_hash, cap)?;
+                cap_hash
             }
+            None => cap_hash,
         };
         let running = self
             .stack
@@ -820,6 +830,18 @@ mod tests {
     ) -> EcallResult {
         let mut handler = CachedEcallHandler { vm, cache };
         handler.handle(EcallKind::Ecalli(op), regs, mem)
+    }
+
+    fn publish_data_inline(cache: &mut Cache<Global>, bytes: &[u8]) -> javm_cap::CapHash {
+        let mut inline = AVec::new_in(Global);
+        inline.extend_from_slice(bytes);
+        let cap = Cap::Data(DataCap {
+            size: bytes.len() as u64,
+            content: DataContent::Inline(inline),
+        });
+        let h = javm_cap::cap_hash(&cap);
+        cache.put_blob(h, cap).unwrap();
+        h
     }
 
     #[test]
@@ -984,7 +1006,9 @@ mod tests {
         let mut img = Image::empty();
         img.code = vec![10u8, 0];
         img.packed_bitmask = vec![0b01u8];
-        let image_hash = cache.publish_image(&img).unwrap();
+        let image_hash = cache
+            .put_cap(&Cap::image_with_slots(&img, &[], &[]).unwrap())
+            .unwrap();
         vm.stack
             .running_instance_mut()
             .unwrap()
@@ -1120,7 +1144,7 @@ mod tests {
     fn host_read_data_cap_copies_bytes_from_cache() {
         let mut vm = fixture_vm();
         let mut cache = Cache::new_in(Global);
-        let data_hash = cache.publish_data_inline(b"hello").unwrap();
+        let data_hash = publish_data_inline(&mut cache, b"hello");
         vm.stack
             .running_instance_mut()
             .unwrap()
@@ -1191,7 +1215,7 @@ mod tests {
     fn host_open_places_registered_file_data_in_slot() {
         let mut vm = fixture_vm();
         let mut cache = Cache::new_in(Global);
-        let data_hash = cache.publish_data_inline(b"file").unwrap();
+        let data_hash = publish_data_inline(&mut cache, b"file");
         vm.kernel_assist
             .register_file(9, CapHashOrRef::Hash(data_hash));
         let mut regs = Regs::new();
@@ -1214,7 +1238,7 @@ mod tests {
     fn host_save_debits_actual_data_size_and_returns_file_id() {
         let mut vm = fixture_vm();
         let mut cache = Cache::new_in(Global);
-        let data_hash = cache.publish_data_inline(b"stored").unwrap();
+        let data_hash = publish_data_inline(&mut cache, b"stored");
         vm.kernel_assist.storage_quota_set(0, 10);
         vm.stack
             .running_instance_mut()
