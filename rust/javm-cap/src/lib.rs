@@ -19,7 +19,6 @@
 extern crate alloc;
 
 pub mod abi;
-pub mod bmt;
 pub mod cache;
 pub mod cap;
 pub mod cap_hash;
@@ -39,7 +38,6 @@ mod cache_tests;
 #[cfg(test)]
 mod cap_tests;
 
-pub use bmt::Bmt;
 pub use cache::{Cache, CacheError};
 pub use cap::{
     Cap, CapHash, CapHashOrRef, CapKind, CapRef, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS, TypeCap,

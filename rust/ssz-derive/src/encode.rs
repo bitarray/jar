@@ -35,9 +35,9 @@ pub fn derive_encode_impl(input: &DeriveInput) -> syn::Result<TokenStream> {
                             fn ssz_bytes_len(&self) -> usize {
                                 ssz::Encode::ssz_bytes_len(&self.0)
                             }
-                            fn ssz_append<__A: allocator_api2::alloc::Allocator + Clone>(
+                            fn ssz_append<__A: ::ssz::allocator_api2::alloc::Allocator + Clone>(
                                 &self,
-                                buf: &mut allocator_api2::vec::Vec<u8, __A>,
+                                buf: &mut ::ssz::allocator_api2::vec::Vec<u8, __A>,
                             ) {
                                 ssz::Encode::ssz_append(&self.0, buf);
                             }
@@ -136,9 +136,9 @@ fn encode_struct(
             fn ssz_bytes_len(&self) -> usize {
                 #bytes_len
             }
-            fn ssz_append<__A: allocator_api2::alloc::Allocator + Clone>(
+            fn ssz_append<__A: ::ssz::allocator_api2::alloc::Allocator + Clone>(
                 &self,
-                buf: &mut allocator_api2::vec::Vec<u8, __A>,
+                buf: &mut ::ssz::allocator_api2::vec::Vec<u8, __A>,
             ) {
                 #append_body
             }
@@ -259,9 +259,9 @@ fn encode_enum(
                     #(#bytes_len_arms),*
                 }
             }
-            fn ssz_append<__A: allocator_api2::alloc::Allocator + Clone>(
+            fn ssz_append<__A: ::ssz::allocator_api2::alloc::Allocator + Clone>(
                 &self,
-                buf: &mut allocator_api2::vec::Vec<u8, __A>,
+                buf: &mut ::ssz::allocator_api2::vec::Vec<u8, __A>,
             ) {
                 match self {
                     #(#append_arms),*

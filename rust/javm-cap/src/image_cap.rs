@@ -155,7 +155,7 @@ impl ssz::Decode for MemoryMapping {
 }
 
 impl ssz::HashTreeRoot for MemoryMapping {
-    fn hash_tree_root<D: ::digest::Digest<OutputSize = ::digest::typenum::U32>>(&self) -> [u8; 32] {
+    fn hash_tree_root<D: ::ssz::digest::Digest<OutputSize = ::ssz::digest::typenum::U32>>(&self) -> [u8; 32] {
         // SSZ container root: merkleize the per-field roots with
         // limit = number of fields (4). All four are fixed-size leaves.
         let path_root = {

@@ -23,7 +23,7 @@ pub fn derive_hash_tree_root_impl(input: &DeriveInput) -> syn::Result<TokenStrea
                     let ty = &field.ty;
                     return Ok(quote! {
                         impl #impl_generics ssz::HashTreeRoot for #name #ty_generics #where_clause {
-                            fn hash_tree_root<__D: ::digest::Digest<OutputSize = ::digest::typenum::U32>>(
+                            fn hash_tree_root<__D: ::ssz::digest::Digest<OutputSize = ::ssz::digest::typenum::U32>>(
                                 &self,
                             ) -> [u8; 32] {
                                 <#ty as ssz::HashTreeRoot>::hash_tree_root::<__D>(&self.0)
@@ -87,7 +87,7 @@ fn hash_struct(
 
     Ok(quote! {
         impl #impl_generics ssz::HashTreeRoot for #name #ty_generics #where_clause {
-            fn hash_tree_root<__D: ::digest::Digest<OutputSize = ::digest::typenum::U32>>(
+            fn hash_tree_root<__D: ::ssz::digest::Digest<OutputSize = ::ssz::digest::typenum::U32>>(
                 &self,
             ) -> [u8; 32] {
                 #body
@@ -182,7 +182,7 @@ fn hash_enum(
 
     Ok(quote! {
         impl #impl_generics ssz::HashTreeRoot for #name #ty_generics #where_clause {
-            fn hash_tree_root<__D: ::digest::Digest<OutputSize = ::digest::typenum::U32>>(
+            fn hash_tree_root<__D: ::ssz::digest::Digest<OutputSize = ::ssz::digest::typenum::U32>>(
                 &self,
             ) -> [u8; 32] {
                 match self {

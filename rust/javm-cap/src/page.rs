@@ -67,7 +67,7 @@ impl<A: Allocator + Clone> AarcRefCounted for PageBytes<A> {
 // --------------------------------------------------------------------------
 
 impl<A: Allocator + Clone> ssz::HashTreeRoot for PageSlot<A> {
-    fn hash_tree_root<D: ::digest::Digest<OutputSize = ::digest::typenum::U32>>(&self) -> [u8; 32] {
+    fn hash_tree_root<D: ::ssz::digest::Digest<OutputSize = ::ssz::digest::typenum::U32>>(&self) -> [u8; 32] {
         match self {
             // Canonical zero-page sentinel. Under SSZ, an empty page's
             // root is the empty 32-byte chunk.
@@ -79,7 +79,7 @@ impl<A: Allocator + Clone> ssz::HashTreeRoot for PageSlot<A> {
 }
 
 impl<A: Allocator + Clone> ssz::HashTreeRoot for PageBytes<A> {
-    fn hash_tree_root<D: ::digest::Digest<OutputSize = ::digest::typenum::U32>>(&self) -> [u8; 32] {
+    fn hash_tree_root<D: ::ssz::digest::Digest<OutputSize = ::ssz::digest::typenum::U32>>(&self) -> [u8; 32] {
         // `self.hash` is the precomputed page-content identity (kept
         // consistent with `bytes` by `cache.rs`). Returning it directly
         // preserves substitution: a `Loaded(page)` slot is

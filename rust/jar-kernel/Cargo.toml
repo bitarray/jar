@@ -11,11 +11,11 @@ javm-exec = { workspace = true }
 javm = { workspace = true }
 scale = { workspace = true, features = ["std"] }
 scale-derive = { workspace = true }
+ssz = { workspace = true, features = ["std", "sha2", "derive"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
-ssz = { workspace = true, features = ["std", "sha2", "derive"] }
 
 [build-dependencies]
 build-javm = { path = "../build-javm" }

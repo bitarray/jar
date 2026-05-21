@@ -34,7 +34,7 @@ pub enum CapHashOrRef {
 }
 
 impl ssz::HashTreeRoot for CapHashOrRef {
-    fn hash_tree_root<D: ::digest::Digest<OutputSize = ::digest::typenum::U32>>(&self) -> [u8; 32] {
+    fn hash_tree_root<D: ::ssz::digest::Digest<OutputSize = ::ssz::digest::typenum::U32>>(&self) -> [u8; 32] {
         match self {
             CapHashOrRef::Hash(h) => *h,
             CapHashOrRef::Ref(_) => {
