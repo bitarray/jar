@@ -33,8 +33,17 @@ fn heap_drift_prime_sieve() {
     let image = Image::from_ssz_bytes(PRIME_SIEVE_BLOB)
         .expect("decode prime_sieve Image");
     let mut nub = Nub::new_hyperlight().expect("sandbox");
-    let published = javm_bench::publish(&mut nub, &image, 0);
-    let instance_hash = published.instance_hash;
+    let built = javm_bench::BuiltCaps::for_image(&image, 0);
+    for (h, cap) in &built.data_caps {
+        nub.put_cap_with_hash(*h, cap).expect("put_cap data");
+    }
+    nub.put_cap_with_hash(built.image_hash, &built.image_cap)
+        .expect("put_cap image");
+    nub.put_cap_with_hash(built.cnode_hash, &built.cnode_cap)
+        .expect("put_cap cnode");
+    nub.put_cap_with_hash(built.instance_hash, &built.instance_cap)
+        .expect("put_cap instance");
+    let instance_hash = built.instance_hash;
 
     // Iter 0: baseline.
     let _ = nub.heap_stats().expect("baseline heap_stats");

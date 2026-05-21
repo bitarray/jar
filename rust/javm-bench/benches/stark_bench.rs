@@ -34,14 +34,16 @@ macro_rules! bench_workload {
             let image = Image::from_ssz_bytes(blob).expect("decode Image");
             let ep: u8 = $endpoint;
 
-            let (interp_val, interp_gas) = javm_bench::run_interpreter(&image, ep);
+            let built = javm_bench::BuiltCaps::for_image(&image, ep);
+
+            let (interp_val, interp_gas) = javm_bench::run_interpreter(&built);
             eprintln!(
                 "[{}] result = {:#x}, interp gas = {}",
                 stringify!($name),
                 interp_val,
                 interp_gas,
             );
-            let (recomp_val, recomp_gas) = javm_bench::run_recompiler(&image, ep);
+            let (recomp_val, recomp_gas) = javm_bench::run_recompiler(&built);
             assert_eq!(
                 interp_val,
                 recomp_val,
@@ -56,20 +58,9 @@ macro_rules! bench_workload {
             );
             eprintln!("[{}] recomp gas = {}", stringify!($name), recomp_gas);
 
-            // TEMPORARY: bench publish-hoisted invokes to isolate pure
-            // invoke cost. Re-fold publish back into the iter loop once
-            // the cache-publish path itself is cheap on idempotent
-            // re-publish (currently it re-hashes every iteration).
-            let (mut interp_nub, interp_handle) = javm_bench::publish_local(&image, ep);
-            let recomp_handle = javm_bench::publish_hyperlight(&image, ep);
-
             let mut g = c.benchmark_group(stringify!($name));
-            g.bench_function("interpreter", |b| {
-                b.iter(|| javm_bench::invoke_interpreter(&mut interp_nub, interp_handle))
-            });
-            g.bench_function("recompiler", |b| {
-                b.iter(|| javm_bench::invoke_recompiler(recomp_handle))
-            });
+            g.bench_function("interpreter", |b| b.iter(|| javm_bench::run_interpreter(&built)));
+            g.bench_function("recompiler", |b| b.iter(|| javm_bench::run_recompiler(&built)));
             g.finish();
         }
     };

@@ -212,10 +212,18 @@ impl Cap<Global> {
     /// if the logical size differs from the inline byte count
     /// (e.g. zero-padded paged data).
     pub fn data_inline(bytes: &[u8]) -> Self {
+        Self::data_inline_with_size(bytes, bytes.len() as u64)
+    }
+
+    /// Build a heap `Cap::Data` with an explicit logical `size` that
+    /// may exceed `bytes.len()` (e.g. zero-padded paged data, or a
+    /// pinned `.bss`-style region with non-empty initial content but a
+    /// larger declared size).
+    pub fn data_inline_with_size(bytes: &[u8], size: u64) -> Self {
         let mut buf = allocator_api2::vec::Vec::with_capacity_in(bytes.len(), Global);
         buf.extend_from_slice(bytes);
         Cap::Data(DataCap {
-            size: bytes.len() as u64,
+            size,
             content: super::data::DataContent::Inline(buf),
         })
     }
