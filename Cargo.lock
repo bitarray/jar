@@ -1109,8 +1109,6 @@ dependencies = [
  "javm-cap",
  "javm-exec",
  "proptest",
- "scale",
- "scale-derive",
  "ssz",
  "thiserror",
 ]
@@ -1151,8 +1149,6 @@ dependencies = [
  "allocator-api2",
  "blake2",
  "nub-host-common",
- "scale",
- "scale-derive",
  "ssz",
  "ssz-derive",
  "talc",
@@ -1199,7 +1195,6 @@ version = "0.1.0"
 dependencies = [
  "javm-cap",
  "proptest",
- "scale",
  "thiserror",
  "tracing",
  "tracing-test",
@@ -2077,24 +2072,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
-]
-
-[[package]]
-name = "scale"
-version = "0.1.0"
-dependencies = [
- "proptest",
- "scale-derive",
- "thiserror",
-]
-
-[[package]]
-name = "scale-derive"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]

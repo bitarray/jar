@@ -8,14 +8,12 @@ description = "JAVM capability system: caps, cnode, image, SSZ hash"
 
 [features]
 default = ["std"]
-std = ["scale/std", "ssz/std", "blake2/std", "thiserror/std"]
+std = ["ssz/std", "blake2/std", "thiserror/std"]
 
 [dependencies]
 allocator-api2 = { version = "0.4", default-features = false, features = ["alloc"] }
 blake2 = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
-scale = { workspace = true }
-scale-derive = { workspace = true }
 ssz = { workspace = true, features = ["sha2", "derive"] }
 ssz-derive = { workspace = true }
 nub-host-common = { path = "../nub-host-common", default-features = false }

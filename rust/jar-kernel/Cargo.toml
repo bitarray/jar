@@ -9,8 +9,6 @@ description = "JAR v3 kernel: σ state, block apply, state-root, kernel-assisted
 javm-cap = { workspace = true }
 javm-exec = { workspace = true }
 javm = { workspace = true }
-scale = { workspace = true, features = ["std"] }
-scale-derive = { workspace = true }
 ssz = { workspace = true, features = ["std", "sha2", "derive"] }
 thiserror = { workspace = true }
 

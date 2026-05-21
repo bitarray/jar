@@ -2,7 +2,7 @@
 //!
 //! Wire format: equivalent to `List<(K, V), MAX_BTREE_LEN>` — i.e., a flat
 //! list of sorted `(K, V)` pairs. Decode rejects out-of-order or duplicate
-//! keys (matches the SCALE invariant in `scale/src/lib.rs:255-259`).
+//! keys.
 //!
 //! Hash form: same as `List<(K, V), MAX_BTREE_LEN>` — merkleize the pair
 //! roots, mix in length.
