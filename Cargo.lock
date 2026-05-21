@@ -1170,10 +1170,12 @@ dependencies = [
 name = "javm-guest-tests"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "blake2",
  "blake3",
  "build-javm",
  "jar-kernel",
+ "javm",
  "javm-cap",
  "javm-exec",
  "nub",
@@ -2254,6 +2256,20 @@ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "spawn-child-s"
+version = "0.1.0"
+dependencies = [
+ "subsoil",
+]
+
+[[package]]
+name = "spawn-parent-m"
+version = "0.1.0"
+dependencies = [
+ "subsoil",
 ]
 
 [[package]]

@@ -38,6 +38,8 @@ members = [
     "components/benches/poseidon2-perm",
     "components/benches/prime-sieve",
     "components/examples/simple-chain",
+    "components/tests/spawn-child-s",
+    "components/tests/spawn-parent-m",
 ]
 exclude = [
     "spec/crypto-ffi",

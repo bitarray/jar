@@ -15,10 +15,12 @@ sha3 = { version = "0.10", default-features = false }
 build-javm = { path = "../build-javm" }
 
 [dev-dependencies]
+javm = { path = "../javm" }
 javm-cap = { workspace = true }
 jar-kernel = { workspace = true }
 javm-exec = { workspace = true }
 ssz = { workspace = true, features = ["std", "sha2", "derive"] }
+allocator-api2 = "0.4"
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dev-dependencies]
 nub = { path = "../nub" }
