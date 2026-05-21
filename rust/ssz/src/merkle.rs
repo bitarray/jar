@@ -66,6 +66,11 @@ pub fn ceil_log2(n: u64) -> usize {
 ///
 /// Empty input with `limit == 0` returns a zero hash (the root of a single
 /// zero chunk).
+///
+/// Complexity: `O(chunks.len() + depth)` hash operations, independent of
+/// `limit`. This is achieved by only materialising the "real" prefix at
+/// each level; the implicit zero-padded suffix folds into `zero_hash(d)`
+/// without iteration.
 pub fn merkleize<D: Digest<OutputSize = U32>>(chunks: &[[u8; 32]], limit: usize) -> [u8; 32] {
     let target = core::cmp::max(limit, chunks.len()).max(1);
     let padded_len = target.next_power_of_two();
@@ -75,35 +80,28 @@ pub fn merkleize<D: Digest<OutputSize = U32>>(chunks: &[[u8; 32]], limit: usize)
         return chunks.first().copied().unwrap_or([0u8; 32]);
     }
 
-    // Iterative bottom-up reduction using virtual padding by `zero_hash`.
-    // We avoid materialising `padded_len` leaves.
+    // Empty input with depth > 0 → entire tree is implicit zero padding.
+    if chunks.is_empty() {
+        return zero_hash::<D>(depth);
+    }
+
+    // Iterative bottom-up reduction. At each level we only iterate over the
+    // "real" entries; missing right siblings draw from `zero_hash(d)`. The
+    // implicit padding to `padded_len` is handled by continuing to fold for
+    // the full `depth` iterations even after `level.len()` reaches 1.
     let mut level: Vec<[u8; 32], Global> = Vec::new_in(Global);
     level.extend_from_slice(chunks);
-    let mut current_count = chunks.len();
-    let mut current_padded = padded_len;
 
     for d in 0..depth {
-        let pair_count = current_padded / 2;
-        let zero_hash_for_level = zero_hash::<D>(d);
-        let mut next: Vec<[u8; 32], Global> = Vec::with_capacity_in(pair_count, Global);
-        for i in 0..pair_count {
-            let li = 2 * i;
-            let ri = 2 * i + 1;
-            let l = if li < current_count {
-                level[li]
-            } else {
-                zero_hash_for_level
-            };
-            let r = if ri < current_count {
-                level[ri]
-            } else {
-                zero_hash_for_level
-            };
+        let zero_h = zero_hash::<D>(d);
+        let next_count = level.len().div_ceil(2);
+        let mut next: Vec<[u8; 32], Global> = Vec::with_capacity_in(next_count, Global);
+        for i in 0..next_count {
+            let l = level[2 * i];
+            let r = level.get(2 * i + 1).copied().unwrap_or(zero_h);
             next.push(hash_pair::<D>(&l, &r));
         }
         level = next;
-        current_count = pair_count;
-        current_padded = pair_count;
     }
 
     level[0]
@@ -199,6 +197,51 @@ mod tests {
         expected[1] = 2;
         expected[2] = 3;
         assert_eq!(chunks[0], expected);
+    }
+
+    #[test]
+    fn merkleize_huge_limit_finishes_fast() {
+        // Regression: previous algorithm was O(padded_len), so a 4-billion
+        // limit would try to allocate a 2-billion-entry Vec. Now O(depth).
+        // limit = 1 << 32 → padded_len = 2^32, depth = 32 hash operations
+        // after the initial input fold. Should complete in microseconds.
+        let chunk = [0xAAu8; 32];
+        let root = merkleize::<Sha256>(&[chunk], 1usize << 32);
+
+        // Equivalent: a single real leaf in a depth-32 tree; sibling at
+        // each level is zero_hash(d).
+        let mut current = chunk;
+        for d in 0..32 {
+            current = hash_pair::<Sha256>(&current, &zero_hash::<Sha256>(d));
+        }
+        assert_eq!(root, current);
+    }
+
+    #[test]
+    fn merkleize_empty_with_large_limit_is_zero_subtree() {
+        // Empty input, limit = 1024 → root must be zero_hash(10) without
+        // materializing 1024 zero leaves.
+        let root = merkleize::<Sha256>(&[], 1024);
+        assert_eq!(root, zero_hash::<Sha256>(10));
+    }
+
+    #[test]
+    fn merkleize_three_chunks_with_large_limit() {
+        // 3 chunks, limit = 16 → padded_len = 16, depth = 4.
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        let c = [3u8; 32];
+        let root = merkleize::<Sha256>(&[a, b, c], 16);
+
+        // Compute by hand. Level 0 has [a, b, c]; level 1 has
+        // [H(a,b), H(c, zero_h0)]; level 2 has [H(L1[0], L1[1])];
+        // level 3 has [H(L2[0], zero_h2)]; level 4 has [H(L3[0], zero_h3)].
+        let l1_0 = hash_pair::<Sha256>(&a, &b);
+        let l1_1 = hash_pair::<Sha256>(&c, &zero_hash::<Sha256>(0));
+        let l2_0 = hash_pair::<Sha256>(&l1_0, &l1_1);
+        let l3_0 = hash_pair::<Sha256>(&l2_0, &zero_hash::<Sha256>(2));
+        let l4_0 = hash_pair::<Sha256>(&l3_0, &zero_hash::<Sha256>(3));
+        assert_eq!(root, l4_0);
     }
 
     #[test]
