@@ -39,14 +39,17 @@
 //!
 //! After the move to the `javm_cap::Cap<A>` cache model, ecalls
 //! operate on `CapHashOrRef` targets in the running root cnode and
-//! cross-reference into the caller-supplied `Cache<Global>` for
-//! kind dispatch. The `Cache<Global>` is NOT borrowed for the
-//! duration of `Interpreter::run` — the ecall handler keeps the
-//! call-stack mutation local; host calls that need cache writes
-//! (host_open / host_save / host_mint_data_cap) are deferred to
-//! Stage 4 once the borrow model crystallizes.
+//! cross-reference into the caller-supplied `Cache<Global>` for kind
+//! dispatch. `Vm::drive_and_translate` installs a short-lived
+//! `CachedEcallHandler` for interpreter runs, so cache-touching host
+//! calls can read/write cap content without storing the cache borrow
+//! in the long-lived `Vm`.
 
-use javm_cap::{Blake2b256, CapHashOrRef, Hash, SlotIdx};
+use allocator_api2::alloc::Global;
+use allocator_api2::vec::Vec as AVec;
+use javm_cap::{
+    Blake2b256, Cache, Cap, CapHashOrRef, DataCap, DataContent, Hash, SlotIdx, TypeCap,
+};
 use javm_exec::{EcallHandler, EcallKind, EcallResult, ExitReason, Memory, Regs};
 
 use crate::callstack::Entry;
@@ -97,24 +100,46 @@ pub mod host_op {
 impl<K: KernelAssist> EcallHandler for Vm<K> {
     fn handle(&mut self, kind: EcallKind, regs: &mut Regs, mem: &mut dyn Memory) -> EcallResult {
         match kind {
-            EcallKind::Ecalli(op) => self.dispatch_ecalli(op, regs, mem),
-            EcallKind::Ecall => self.dispatch_ecall(regs, mem),
+            EcallKind::Ecalli(op) => self.dispatch_ecalli(op, regs, mem, None),
+            EcallKind::Ecall => self.dispatch_ecall(regs, mem, None),
+        }
+    }
+}
+
+pub(crate) struct CachedEcallHandler<'a, K: KernelAssist> {
+    pub(crate) vm: &'a mut Vm<K>,
+    pub(crate) cache: &'a mut Cache<Global>,
+}
+
+impl<K: KernelAssist> EcallHandler for CachedEcallHandler<'_, K> {
+    fn handle(&mut self, kind: EcallKind, regs: &mut Regs, mem: &mut dyn Memory) -> EcallResult {
+        match kind {
+            EcallKind::Ecalli(op) => self
+                .vm
+                .dispatch_ecalli(op, regs, mem, Some(&mut *self.cache)),
+            EcallKind::Ecall => self.vm.dispatch_ecall(regs, mem, Some(&mut *self.cache)),
         }
     }
 }
 
 impl<K: KernelAssist> Vm<K> {
-    fn dispatch_ecalli(&mut self, op: u32, _regs: &mut Regs, _mem: &mut dyn Memory) -> EcallResult {
+    fn dispatch_ecalli(
+        &mut self,
+        op: u32,
+        regs: &mut Regs,
+        mem: &mut dyn Memory,
+        cache: Option<&mut Cache<Global>>,
+    ) -> EcallResult {
         match op {
             0 => {
                 // REPLY is handled by the CALL/HALT driver.
                 EcallResult::Exit(ExitReason::Halt)
             }
-            o if o <= mgmt_op::MAX => match self.dispatch_mgmt(o, _regs) {
+            o if o <= mgmt_op::MAX => match self.dispatch_mgmt(o, regs, cache) {
                 Ok(()) => EcallResult::Continue,
                 Err(_) => EcallResult::Exit(ExitReason::Trap),
             },
-            o if o <= host_op::MAX => self.dispatch_host_call(o, _regs, _mem),
+            o if o <= host_op::MAX => self.dispatch_host_call(o, regs, mem, cache),
             _ => {
                 // Chain-user host calls (64+) land later. Continue
                 // silently for now so prologue-like ecalls (used by
@@ -129,7 +154,8 @@ impl<K: KernelAssist> Vm<K> {
         &mut self,
         op: u32,
         regs: &mut Regs,
-        _mem: &mut dyn Memory,
+        mem: &mut dyn Memory,
+        cache: Option<&mut Cache<Global>>,
     ) -> EcallResult {
         fn trap_on_err<T>(r: Result<T, VmError>, ok: impl FnOnce(T) -> EcallResult) -> EcallResult {
             match r {
@@ -139,9 +165,12 @@ impl<K: KernelAssist> Vm<K> {
         }
         match op {
             host_op::HOST_YIELD => trap_on_err(self.dispatch_host_yield(regs), |r| r),
-            host_op::SET_IMAGE => {
-                trap_on_err(self.dispatch_set_image(regs), |()| EcallResult::Continue)
-            }
+            host_op::SET_IMAGE => match cache {
+                Some(cache) => trap_on_err(self.dispatch_set_image_cached(regs, cache), |()| {
+                    EcallResult::Exit(ExitReason::HostCall(host_op::SET_IMAGE))
+                }),
+                None => trap_on_err(self.dispatch_set_image(regs), |()| EcallResult::Continue),
+            },
             host_op::DERIVE_SPAWN => {
                 trap_on_err(self.dispatch_derive_spawn(regs), |()| EcallResult::Continue)
             }
@@ -152,16 +181,40 @@ impl<K: KernelAssist> Vm<K> {
             host_op::HOST_SAME_TYPE => trap_on_err(self.dispatch_host_same_type(regs), |()| {
                 EcallResult::Continue
             }),
-            host_op::HOST_TYPE_OF
-            | host_op::HOST_READ_DATA_CAP
-            | host_op::HOST_MINT_DATA_CAP
-            | host_op::HOST_OPEN
-            | host_op::HOST_SAVE => {
-                // These host calls all require cache writes, which the
-                // interpreter-borrow shape doesn't allow until Stage 4
-                // wires a deferred-effect channel. For now, trap.
-                EcallResult::Exit(ExitReason::Trap)
-            }
+            host_op::HOST_TYPE_OF => match cache {
+                Some(cache) => trap_on_err(self.dispatch_host_type_of(regs, cache), |()| {
+                    EcallResult::Continue
+                }),
+                None => EcallResult::Exit(ExitReason::Trap),
+            },
+            host_op::HOST_READ_DATA_CAP => match cache {
+                Some(cache) => {
+                    trap_on_err(self.dispatch_host_read_data_cap(regs, mem, cache), |()| {
+                        EcallResult::Continue
+                    })
+                }
+                None => EcallResult::Exit(ExitReason::Trap),
+            },
+            host_op::HOST_MINT_DATA_CAP => match cache {
+                Some(cache) => {
+                    trap_on_err(self.dispatch_host_mint_data_cap(regs, mem, cache), |()| {
+                        EcallResult::Continue
+                    })
+                }
+                None => EcallResult::Exit(ExitReason::Trap),
+            },
+            host_op::HOST_OPEN => match cache {
+                Some(cache) => trap_on_err(self.dispatch_host_open(regs, cache), |()| {
+                    EcallResult::Continue
+                }),
+                None => EcallResult::Exit(ExitReason::Trap),
+            },
+            host_op::HOST_SAVE => match cache {
+                Some(cache) => trap_on_err(self.dispatch_host_save(regs, cache), |()| {
+                    EcallResult::Continue
+                }),
+                None => EcallResult::Exit(ExitReason::Trap),
+            },
             _ => {
                 // Chain-user host calls (64+) land later. Continue
                 // silently for now.
@@ -272,6 +325,58 @@ impl<K: KernelAssist> Vm<K> {
         Ok(())
     }
 
+    fn dispatch_set_image_cached(
+        &mut self,
+        regs: &mut Regs,
+        cache: &Cache<Global>,
+    ) -> Result<(), VmError> {
+        let image_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let (new_image_hash, extended_chain) = {
+            let running = self
+                .stack
+                .running_instance()
+                .ok_or(VmError::CallStackEmpty)?;
+            let new_image_hash = match running.root_cnode.get(image_slot) {
+                Some(CapHashOrRef::Hash(h)) => h,
+                Some(CapHashOrRef::Ref(_)) => {
+                    return Err(VmError::SlotKindMismatch(image_slot.get()));
+                }
+                None => return Err(VmError::SlotEmpty(image_slot.get())),
+            };
+            (
+                new_image_hash,
+                Blake2b256::hash_pair(&running.image_hash_chain, &new_image_hash),
+            )
+        };
+
+        let img = match cache
+            .get(CapHashOrRef::Hash(new_image_hash))
+            .ok_or(VmError::ImageNotFound)?
+        {
+            Cap::Image(i) => i.clone(),
+            _ => return Err(VmError::ImageNotFound),
+        };
+        let unpacked_bitmask = javm_exec::unpack_bitmask(img.bitmask.as_slice(), img.code.len());
+        let program = self.image_cache.get_or_decode(
+            new_image_hash,
+            img.code.as_slice().to_vec(),
+            unpacked_bitmask,
+            img.jump_table.as_slice().to_vec(),
+        )?;
+        let pinned_slots: Vec<SlotIdx> = img.pinned.iter().map(|e| e.slot).collect();
+
+        let running = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?;
+        running.image_hash_chain = extended_chain;
+        running.image_hash = new_image_hash;
+        running.program = program;
+        running.pinned_slots = pinned_slots;
+        running.yield_marker_slot = img.yield_marker_slot;
+        Ok(())
+    }
+
     /// `host_derive_spawn(image_slot=φ[7], dst_slot=φ[8])`.
     ///
     /// Mint a fresh `CapHashOrRef::Hash` carrying
@@ -344,6 +449,170 @@ impl<K: KernelAssist> Vm<K> {
         regs.gpr[7] = if ha == hb { 1 } else { 0 };
         Ok(())
     }
+
+    fn dispatch_host_type_of(
+        &mut self,
+        regs: &mut Regs,
+        cache: &mut Cache<Global>,
+    ) -> Result<(), VmError> {
+        let src = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let dst = SlotIdx((regs.gpr[8] & 0xFF) as u32);
+        let target = self
+            .stack
+            .running_instance()
+            .ok_or(VmError::CallStackEmpty)?
+            .root_cnode
+            .get(src)
+            .ok_or(VmError::SlotEmpty(src.get()))?;
+        let image_hash_chain = match cache.get(target).ok_or(VmError::InstanceNotFound)? {
+            Cap::Instance(i) => i.image_hash_chain,
+            _ => return Err(VmError::InstanceNotFound),
+        };
+        let cap = Cap::Type(TypeCap { image_hash_chain });
+        let h = javm_cap::cap_hash(&cap);
+        cache.put_cap_with_hash(h, &cap)?;
+
+        let running = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?;
+        if running.pinned_slots.binary_search(&dst).is_ok() {
+            return Err(javm_cap::OpError::SlotPinned(dst.get()).into());
+        }
+        running.root_cnode.set(dst, Some(CapHashOrRef::Hash(h)))?;
+        Ok(())
+    }
+
+    fn dispatch_host_read_data_cap(
+        &mut self,
+        regs: &mut Regs,
+        mem: &mut dyn Memory,
+        cache: &Cache<Global>,
+    ) -> Result<(), VmError> {
+        let src = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let dst_offset = regs.gpr[8] as u32;
+        let len = regs.gpr[9] as usize;
+        let target = self
+            .stack
+            .running_instance()
+            .ok_or(VmError::CallStackEmpty)?
+            .root_cnode
+            .get(src)
+            .ok_or(VmError::SlotEmpty(src.get()))?;
+        let data = match cache
+            .get(target)
+            .ok_or(VmError::Invariant("data cap missing"))?
+        {
+            Cap::Data(d) => d,
+            _ => return Err(VmError::Invariant("slot does not hold Cap::Data")),
+        };
+        let bytes = data_cap_prefix(data, len);
+        mem.write(dst_offset, &bytes)
+            .map_err(|_| VmError::Invariant("host_read_data_cap memory write failed"))?;
+        regs.gpr[7] = bytes.len() as u64;
+        Ok(())
+    }
+
+    fn dispatch_host_mint_data_cap(
+        &mut self,
+        regs: &mut Regs,
+        mem: &mut dyn Memory,
+        cache: &mut Cache<Global>,
+    ) -> Result<(), VmError> {
+        let src_offset = regs.gpr[7] as u32;
+        let len = regs.gpr[8] as usize;
+        let quota_id = regs.gpr[9];
+        let dst = SlotIdx((regs.gpr[10] & 0xFF) as u32);
+        let bytes = mem
+            .read(src_offset, len)
+            .map_err(|_| VmError::Invariant("host_mint_data_cap memory read failed"))?;
+        let canonical_len = strip_trailing_zeros_len(&bytes);
+        let debit = canonical_len as u64;
+        let quota = self.kernel_assist.storage_quota_get(quota_id);
+        if quota < debit {
+            return Err(VmError::Invariant("storage quota exhausted"));
+        }
+        self.kernel_assist
+            .storage_quota_set(quota_id, quota - debit);
+        let mut inline = AVec::new_in(Global);
+        inline.extend_from_slice(&bytes[..canonical_len]);
+        let cap = Cap::Data(DataCap {
+            size: canonical_len as u64,
+            content: DataContent::Inline(inline),
+        });
+        let h = javm_cap::cap_hash(&cap);
+        cache.put_cap_with_hash(h, &cap)?;
+
+        let running = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?;
+        if running.pinned_slots.binary_search(&dst).is_ok() {
+            return Err(javm_cap::OpError::SlotPinned(dst.get()).into());
+        }
+        running.root_cnode.set(dst, Some(CapHashOrRef::Hash(h)))?;
+        Ok(())
+    }
+
+    fn dispatch_host_open(
+        &mut self,
+        regs: &mut Regs,
+        cache: &mut Cache<Global>,
+    ) -> Result<(), VmError> {
+        let file_id = regs.gpr[7];
+        let dst = SlotIdx((regs.gpr[8] & 0xFF) as u32);
+        let data_ref = self
+            .kernel_assist
+            .host_open(file_id)
+            .ok_or(VmError::Invariant("unknown file id"))?;
+        match cache
+            .get(data_ref)
+            .ok_or(VmError::Invariant("file data missing"))?
+        {
+            Cap::Data(_) => {}
+            _ => return Err(VmError::Invariant("file target is not Cap::Data")),
+        }
+        let h = cache.settle(data_ref)?;
+
+        let running = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?;
+        if running.pinned_slots.binary_search(&dst).is_ok() {
+            return Err(javm_cap::OpError::SlotPinned(dst.get()).into());
+        }
+        running.root_cnode.set(dst, Some(CapHashOrRef::Hash(h)))?;
+        Ok(())
+    }
+
+    fn dispatch_host_save(
+        &mut self,
+        regs: &mut Regs,
+        cache: &Cache<Global>,
+    ) -> Result<(), VmError> {
+        let src = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let quota_id = regs.gpr[8];
+        let target = self
+            .stack
+            .running_instance()
+            .ok_or(VmError::CallStackEmpty)?
+            .root_cnode
+            .get(src)
+            .ok_or(VmError::SlotEmpty(src.get()))?;
+        let size = match cache
+            .get(target)
+            .ok_or(VmError::Invariant("host_save data missing"))?
+        {
+            Cap::Data(d) => d.size,
+            _ => return Err(VmError::Invariant("host_save source is not Cap::Data")),
+        };
+        let file_id = self
+            .kernel_assist
+            .host_save(target, quota_id, size)
+            .ok_or(VmError::Invariant("host_save failed"))?;
+        regs.gpr[7] = file_id;
+        Ok(())
+    }
 }
 
 /// Canonical-form length: number of leading bytes before trailing
@@ -358,17 +627,53 @@ pub(crate) fn strip_trailing_zeros_len(bytes: &[u8]) -> usize {
     n
 }
 
+fn data_cap_prefix(data: &DataCap<Global>, len: usize) -> Vec<u8> {
+    let actual_len = len.min(data.size as usize);
+    let mut out = vec![0u8; actual_len];
+    match &data.content {
+        DataContent::Inline(bytes) => {
+            let copy_len = actual_len.min(bytes.len());
+            out[..copy_len].copy_from_slice(&bytes[..copy_len]);
+        }
+        DataContent::Paged { page_size, pages } => {
+            let page_size = *page_size as usize;
+            for (page_idx, page) in pages.iter().enumerate() {
+                let start = page_idx * page_size;
+                if start >= actual_len {
+                    break;
+                }
+                let end = (start + page_size).min(actual_len);
+                if let javm_cap::page::PageSlot::Loaded(page_ref) = page {
+                    let page_bytes = &page_ref.get().bytes;
+                    out[start..end].copy_from_slice(&page_bytes[..end - start]);
+                }
+            }
+        }
+    }
+    out
+}
+
 impl<K: KernelAssist> Vm<K> {
     /// Plain `ecall` (opcode 3, no immediate). Spec §4 reads φ[11]
     /// (mgmt_op) and φ[12] (subject|object) for the management
     /// dispatch. Stage 3 routes the same way as `ecalli imm`, treating
     /// φ[11] as the op.
-    fn dispatch_ecall(&mut self, regs: &mut Regs, mem: &mut dyn Memory) -> EcallResult {
+    fn dispatch_ecall(
+        &mut self,
+        regs: &mut Regs,
+        mem: &mut dyn Memory,
+        cache: Option<&mut Cache<Global>>,
+    ) -> EcallResult {
         let op = regs.gpr[11] as u32;
-        self.dispatch_ecalli(op, regs, mem)
+        self.dispatch_ecalli(op, regs, mem, cache)
     }
 
-    fn dispatch_mgmt(&mut self, op: u32, regs: &mut Regs) -> Result<(), VmError> {
+    fn dispatch_mgmt(
+        &mut self,
+        op: u32,
+        regs: &mut Regs,
+        cache: Option<&mut Cache<Global>>,
+    ) -> Result<(), VmError> {
         let a = SlotIdx((regs.gpr[7] & 0xFF) as u32);
         let b = SlotIdx((regs.gpr[8] & 0xFF) as u32);
         match op {
@@ -378,7 +683,7 @@ impl<K: KernelAssist> Vm<K> {
             mgmt_op::CNODE_SWAP => self.mgmt_cnode_swap(a, b),
             mgmt_op::CNODE_MINT => {
                 let size_log = (regs.gpr[8] & 0xFF) as u8;
-                self.mgmt_cnode_mint(a, size_log)
+                self.mgmt_cnode_mint(a, size_log, cache)
             }
             _ => Err(VmError::Invariant("unknown MGMT op")),
         }
@@ -453,16 +758,21 @@ impl<K: KernelAssist> Vm<K> {
         Ok(())
     }
 
-    fn mgmt_cnode_mint(&mut self, dst: SlotIdx, size_log: u8) -> Result<(), VmError> {
-        // Create a fresh empty CNodeCap, hash it via `cap_hash`, and
-        // store the hash at `dst`. The cnode content itself isn't
-        // published to the cache here (V1: deferred-effect channel
-        // not yet wired). The hash is stable for an empty cnode of
-        // the given size so callers can address the slot
-        // consistently across invocations.
-        use javm_cap::Cap;
-        let cn = javm_cap::CNodeCap::<allocator_api2::alloc::Global>::new(size_log)?;
-        let h = javm_cap::cap_hash(&Cap::CNode(cn));
+    fn mgmt_cnode_mint(
+        &mut self,
+        dst: SlotIdx,
+        size_log: u8,
+        cache: Option<&mut Cache<Global>>,
+    ) -> Result<(), VmError> {
+        let cap = Cap::CNode(javm_cap::CNodeCap::<Global>::new(size_log)?);
+        let cap_hash = javm_cap::cap_hash(&cap);
+        let h = match cache {
+            Some(cache) => {
+                cache.put_cap_with_hash(cap_hash, &cap)?;
+                cap_hash
+            }
+            None => cap_hash,
+        };
         let running = self
             .stack
             .running_instance_mut()
@@ -481,8 +791,9 @@ mod tests {
     use crate::callstack::{EntryStatus, InstanceEntry};
     use crate::kernel_assist::InProcessKernelAssist;
     use allocator_api2::alloc::Global;
-    use javm_cap::CNodeCap;
-    use javm_exec::{GasCounter, Mem, PvmProgram, Regs};
+    use javm_cap::image::Image;
+    use javm_cap::{CNodeCap, NUM_REGS};
+    use javm_exec::{Access, GasCounter, Mem, PAGE_SIZE, PvmProgram, Regs};
     use std::sync::Arc;
 
     fn fixture_vm() -> Vm<InProcessKernelAssist> {
@@ -508,6 +819,21 @@ mod tests {
         };
         vm.stack.push_instance(entry).unwrap();
         vm
+    }
+
+    fn handle_cached(
+        vm: &mut Vm<InProcessKernelAssist>,
+        cache: &mut Cache<Global>,
+        op: u32,
+        regs: &mut Regs,
+        mem: &mut Mem,
+    ) -> EcallResult {
+        let mut handler = CachedEcallHandler { vm, cache };
+        handler.handle(EcallKind::Ecalli(op), regs, mem)
+    }
+
+    fn publish_data_inline(cache: &mut Cache<Global>, bytes: &[u8]) -> javm_cap::CapHash {
+        cache.put_cap(&Cap::data_inline(bytes)).unwrap()
     }
 
     #[test]
@@ -561,6 +887,27 @@ mod tests {
         assert!(matches!(r, EcallResult::Continue));
         let cnode = &vm.stack.running_instance().unwrap().root_cnode;
         assert!(matches!(cnode.get(SlotIdx(5)), Some(CapHashOrRef::Hash(_))));
+    }
+
+    #[test]
+    fn mgmt_cnode_mint_publishes_cnode_when_cache_threaded() {
+        let mut vm = fixture_vm();
+        let mut cache = Cache::new_in(Global);
+        let mut regs = Regs::new();
+        regs.gpr[7] = 5;
+        regs.gpr[8] = 3;
+        let mut mem = Mem::new();
+        let r = handle_cached(
+            &mut vm,
+            &mut cache,
+            mgmt_op::CNODE_MINT,
+            &mut regs,
+            &mut mem,
+        );
+        assert!(matches!(r, EcallResult::Continue));
+        let cnode = &vm.stack.running_instance().unwrap().root_cnode;
+        let target = cnode.get(SlotIdx(5)).unwrap();
+        assert!(matches!(cache.get(target), Some(Cap::CNode(_))));
     }
 
     #[test]
@@ -645,6 +992,35 @@ mod tests {
     }
 
     #[test]
+    fn set_image_reloads_program_from_cache() {
+        let mut vm = fixture_vm();
+        let mut cache = Cache::new_in(Global);
+        let mut img = Image::empty();
+        img.code = vec![10u8, 0];
+        img.packed_bitmask = vec![0b01u8];
+        let image_hash = cache
+            .put_cap(&Cap::image_with_slots(&img, &[], &[]).unwrap())
+            .unwrap();
+        vm.stack
+            .running_instance_mut()
+            .unwrap()
+            .root_cnode
+            .set(SlotIdx(3), Some(CapHashOrRef::Hash(image_hash)))
+            .unwrap();
+
+        let mut regs = Regs::new();
+        regs.gpr[7] = 3;
+        let mut mem = Mem::new();
+        let r = handle_cached(&mut vm, &mut cache, host_op::SET_IMAGE, &mut regs, &mut mem);
+        assert!(
+            matches!(r, EcallResult::Exit(ExitReason::HostCall(op)) if op == host_op::SET_IMAGE)
+        );
+        let running = vm.stack.running_instance().unwrap();
+        assert_eq!(running.image_hash, image_hash);
+        assert_eq!(running.program.code, vec![10u8, 0]);
+    }
+
+    #[test]
     fn derive_spawn_mints_extended_chain_target() {
         let mut vm = fixture_vm();
         let parent_chain = vm.stack.running_instance().unwrap().image_hash_chain;
@@ -706,6 +1082,182 @@ mod tests {
     }
 
     #[test]
+    fn host_type_of_publishes_type_cap() {
+        let mut vm = fixture_vm();
+        let mut cache = Cache::new_in(Global);
+        // Instance references image + cnode by hash; both must be in
+        // the cache for `put_cap` to accept the Instance.
+        let image_hash = cache
+            .put_cap(&Cap::image_with_slots(&Image::empty(), &[], &[]).unwrap())
+            .unwrap();
+        let cnode_hash = cache.put_cap(&Cap::empty_cnode(0).unwrap()).unwrap();
+        let inst_hash = cache
+            .put_cap(&Cap::instance_with_overlays(
+                [0x42; 32],
+                image_hash,
+                cnode_hash,
+                &[],
+                0,
+                [0u64; NUM_REGS],
+                0,
+                0,
+            ))
+            .unwrap();
+        vm.stack
+            .running_instance_mut()
+            .unwrap()
+            .root_cnode
+            .set(SlotIdx(3), Some(CapHashOrRef::Hash(inst_hash)))
+            .unwrap();
+
+        let mut regs = Regs::new();
+        regs.gpr[7] = 3;
+        regs.gpr[8] = 6;
+        let mut mem = Mem::new();
+        let r = handle_cached(
+            &mut vm,
+            &mut cache,
+            host_op::HOST_TYPE_OF,
+            &mut regs,
+            &mut mem,
+        );
+        assert!(matches!(r, EcallResult::Continue));
+        let target = vm
+            .stack
+            .running_instance()
+            .unwrap()
+            .root_cnode
+            .get(SlotIdx(6))
+            .unwrap();
+        assert!(matches!(
+            cache.get(target),
+            Some(Cap::Type(TypeCap {
+                image_hash_chain
+            })) if *image_hash_chain == [0x42; 32]
+        ));
+    }
+
+    #[test]
+    fn host_read_data_cap_copies_bytes_from_cache() {
+        let mut vm = fixture_vm();
+        let mut cache = Cache::new_in(Global);
+        let data_hash = publish_data_inline(&mut cache, b"hello");
+        vm.stack
+            .running_instance_mut()
+            .unwrap()
+            .root_cnode
+            .set(SlotIdx(3), Some(CapHashOrRef::Hash(data_hash)))
+            .unwrap();
+        let mut mem = Mem::new();
+        mem.map_region(0, PAGE_SIZE as u64, Access::ReadWrite, None)
+            .unwrap();
+        let mut regs = Regs::new();
+        regs.gpr[7] = 3;
+        regs.gpr[8] = 16;
+        regs.gpr[9] = 8;
+
+        let r = handle_cached(
+            &mut vm,
+            &mut cache,
+            host_op::HOST_READ_DATA_CAP,
+            &mut regs,
+            &mut mem,
+        );
+        assert!(matches!(r, EcallResult::Continue));
+        assert_eq!(regs.gpr[7], 5);
+        assert_eq!(mem.read(16, 5).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn host_mint_data_cap_publishes_canonical_bytes() {
+        let mut vm = fixture_vm();
+        let mut cache = Cache::new_in(Global);
+        vm.kernel_assist.storage_quota_set(0, 10);
+        let mut mem = Mem::new();
+        mem.map_region(0, PAGE_SIZE as u64, Access::ReadWrite, None)
+            .unwrap();
+        mem.write(32, b"abc\0\0").unwrap();
+        let mut regs = Regs::new();
+        regs.gpr[7] = 32;
+        regs.gpr[8] = 5;
+        regs.gpr[9] = 0;
+        regs.gpr[10] = 6;
+
+        let r = handle_cached(
+            &mut vm,
+            &mut cache,
+            host_op::HOST_MINT_DATA_CAP,
+            &mut regs,
+            &mut mem,
+        );
+        assert!(matches!(r, EcallResult::Continue));
+        assert_eq!(vm.kernel_assist.storage_quota_get(0), 7);
+        let target = vm
+            .stack
+            .running_instance()
+            .unwrap()
+            .root_cnode
+            .get(SlotIdx(6))
+            .unwrap();
+        match cache.get(target).unwrap() {
+            Cap::Data(d) => {
+                assert_eq!(d.size, 3);
+                assert_eq!(data_cap_prefix(d, 10), b"abc");
+            }
+            _ => panic!("expected Data cap"),
+        }
+    }
+
+    #[test]
+    fn host_open_places_registered_file_data_in_slot() {
+        let mut vm = fixture_vm();
+        let mut cache = Cache::new_in(Global);
+        let data_hash = publish_data_inline(&mut cache, b"file");
+        vm.kernel_assist
+            .register_file(9, CapHashOrRef::Hash(data_hash));
+        let mut regs = Regs::new();
+        regs.gpr[7] = 9;
+        regs.gpr[8] = 6;
+        let mut mem = Mem::new();
+        let r = handle_cached(&mut vm, &mut cache, host_op::HOST_OPEN, &mut regs, &mut mem);
+        assert!(matches!(r, EcallResult::Continue));
+        let target = vm
+            .stack
+            .running_instance()
+            .unwrap()
+            .root_cnode
+            .get(SlotIdx(6))
+            .unwrap();
+        assert!(matches!(cache.get(target), Some(Cap::Data(_))));
+    }
+
+    #[test]
+    fn host_save_debits_actual_data_size_and_returns_file_id() {
+        let mut vm = fixture_vm();
+        let mut cache = Cache::new_in(Global);
+        let data_hash = publish_data_inline(&mut cache, b"stored");
+        vm.kernel_assist.storage_quota_set(0, 10);
+        vm.stack
+            .running_instance_mut()
+            .unwrap()
+            .root_cnode
+            .set(SlotIdx(3), Some(CapHashOrRef::Hash(data_hash)))
+            .unwrap();
+        let mut regs = Regs::new();
+        regs.gpr[7] = 3;
+        regs.gpr[8] = 0;
+        let mut mem = Mem::new();
+        let r = handle_cached(&mut vm, &mut cache, host_op::HOST_SAVE, &mut regs, &mut mem);
+        assert!(matches!(r, EcallResult::Continue));
+        assert_eq!(regs.gpr[7], 1);
+        assert_eq!(vm.kernel_assist.storage_quota_get(0), 4);
+        assert_eq!(
+            vm.kernel_assist.host_open(1),
+            Some(CapHashOrRef::Hash(data_hash))
+        );
+    }
+
+    #[test]
     fn make_image_stubbed_traps() {
         let mut vm = fixture_vm();
         let mut regs = Regs::new();
@@ -715,10 +1267,9 @@ mod tests {
     }
 
     #[test]
-    fn cache_dependent_host_calls_trap() {
-        // host_read_data_cap / host_mint_data_cap / host_open /
-        // host_save / host_type_of all need cache access during
-        // interpreter run — deferred to Stage 4. They trap in V1.
+    fn cache_dependent_host_calls_without_cache_still_trap() {
+        // Direct `Vm` handler calls don't carry a cache borrow, so
+        // cache-dependent host calls still trap outside invoke_cached.
         for op in [
             host_op::HOST_TYPE_OF,
             host_op::HOST_READ_DATA_CAP,

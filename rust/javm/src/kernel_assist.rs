@@ -86,9 +86,9 @@ pub trait KernelAssist {
     }
 
     /// Mint a new file from the cache reference `data` after debiting
-    /// `quota_id`. Returns the new `file_id`. Default returns None
-    /// (no file registry).
-    fn host_save(&mut self, _data: CapHashOrRef, _quota_id: u64) -> Option<u64> {
+    /// `quota_id` by the resolved DataCap size. Returns the new
+    /// `file_id`. Default returns None (no file registry).
+    fn host_save(&mut self, _data: CapHashOrRef, _quota_id: u64, _size: u64) -> Option<u64> {
         None
     }
 }
@@ -217,17 +217,12 @@ impl KernelAssist for InProcessKernelAssist {
         self.files.get(&file_id).copied()
     }
 
-    fn host_save(&mut self, data: CapHashOrRef, quota_id: u64) -> Option<u64> {
-        // Default impl ignores the size (it's stored on the cache side)
-        // and just allocates a fresh file_id. Real impl would debit
-        // quota by the data's logical size; this stub debits a
-        // placeholder 1 byte per save so tests can observe the
-        // mechanics.
+    fn host_save(&mut self, data: CapHashOrRef, quota_id: u64, size: u64) -> Option<u64> {
         let q = self.storage_quotas.get(&quota_id).copied().unwrap_or(0);
-        if q < 1 {
+        if q < size {
             return None;
         }
-        self.storage_quotas.insert(quota_id, q - 1);
+        self.storage_quotas.insert(quota_id, q - size);
         let id = self.next_file_id;
         self.next_file_id += 1;
         self.files.insert(id, data);

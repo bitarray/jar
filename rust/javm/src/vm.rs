@@ -24,6 +24,7 @@ use javm_cap::{Cache, Cap, CapHash, CapHashOrRef, SlotIdx};
 use javm_exec::{Access, CopyingMemory, ExitReason, GasCounter, Interpreter, Mem, Regs};
 
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
+use crate::ecall::{CachedEcallHandler, host_op};
 use crate::error::VmError;
 use crate::image_cache::ImageCache;
 use crate::kernel_assist::{KernelAssist, KernelImage, kernel_image_hash};
@@ -315,12 +316,24 @@ impl<K: KernelAssist> Vm<K> {
         gas_initial: u64,
         pushed_pos: usize,
     ) -> Result<CallResult, VmError> {
-        let program = match &self.stack.entries()[pushed_pos] {
-            Entry::Instance(e) => e.program.clone(),
-            _ => return Err(VmError::Invariant("pushed_pos points at non-Instance")),
+        let exit = loop {
+            let program = match &self.stack.entries()[pushed_pos] {
+                Entry::Instance(e) => e.program.clone(),
+                _ => return Err(VmError::Invariant("pushed_pos points at non-Instance")),
+            };
+            let mut handler = CachedEcallHandler { vm: self, cache };
+            let exit = Interpreter::run(
+                program.as_ref(),
+                &mut regs,
+                &mut mem,
+                &mut gas,
+                &mut handler,
+            );
+            if matches!(exit, ExitReason::HostCall(op) if op == host_op::SET_IMAGE) {
+                continue;
+            }
+            break exit;
         };
-
-        let exit = Interpreter::run(program.as_ref(), &mut regs, &mut mem, &mut gas, self);
 
         let gas_used = gas_initial.saturating_sub(gas.remaining());
 
@@ -589,7 +602,7 @@ mod tests {
     use super::*;
     use crate::kernel_assist::InProcessKernelAssist;
     use javm_cap::image::Image;
-    use javm_cap::{Cache, NUM_REGS};
+    use javm_cap::{Cache, Cap, NUM_REGS};
     use std::collections::BTreeMap;
 
     fn empty_image_with_code(code: Vec<u8>) -> Image {
