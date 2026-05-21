@@ -76,12 +76,12 @@ impl<T, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
         self.len == 0
     }
 
-    /// Iterator over (index, MissingOr<T>) for materialized entries only.
+    /// Iterator over `(index, MissingOr<T>)` for materialized entries only.
     pub fn iter(&self) -> impl Iterator<Item = (u64, &MissingOr<T>)> {
         self.entries.iter().map(|(k, v)| (*k, v))
     }
 
-    /// Mutable iterator over (index, &mut MissingOr<T>) for materialized
+    /// Mutable iterator over `(index, &mut MissingOr<T>)` for materialized
     /// entries only. Used by callers that need to rewrite entry values
     /// in place (e.g., resolving `Ref` targets to `Hash` after settle).
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (u64, &mut MissingOr<T>)> {

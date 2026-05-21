@@ -63,7 +63,7 @@ pub struct BuiltCaps {
 }
 
 impl BuiltCaps {
-    /// Build the full Cap<Global> graph for `image[endpoint_idx]`. All
+    /// Build the full `Cap<Global>` graph for `image[endpoint_idx]`. All
     /// hashes are precomputed once here.
     pub fn for_image(image: &Image, endpoint_idx: u8) -> Self {
         let endpoint = image

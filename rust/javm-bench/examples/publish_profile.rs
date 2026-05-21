@@ -3,6 +3,11 @@
 //! Breaks each step into its sub-operations (talc alloc + memcpy, cap_hash,
 //! BTreeMap lookup) and times each on a hot loop, so we can see where the
 //! ~700 µs per publish_image / per publish_instance lands.
+//!
+//! Linux x86-64 only — `nub` pulls the Hyperlight host stack
+//! unconditionally; on other targets `javm_bench` compiles down to nothing.
+
+#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use std::time::Instant;
 

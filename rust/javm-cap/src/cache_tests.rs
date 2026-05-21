@@ -974,12 +974,14 @@ fn put_cap_with_hash_hot_path_is_pure_refcount_bump() {
     assert_eq!(cache.refcount(CapHashOrRef::Hash(h)), Some(2));
 }
 
+// Only fires under debug_assert. In release builds the assertion is
+// elided and the wrong hash is silently trusted — that's the documented
+// contract; see put_cap_with_hash. Gate the test accordingly so CI's
+// release-mode test runs don't fail expecting the panic.
+#[cfg(debug_assertions)]
 #[test]
 #[should_panic(expected = "claimed hash does not match cap content")]
 fn put_cap_with_hash_rejects_wrong_hash_in_debug() {
-    // Only fires under debug_assert. In release builds the assertion is
-    // elided and the wrong hash is silently trusted — that's the
-    // documented contract; see put_cap_with_hash.
     let mut cache = Cache::new_in(Global);
     let cap = make_data_inline(b"epsilon");
     let wrong = [0xCDu8; 32];
