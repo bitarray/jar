@@ -304,27 +304,32 @@ fn cache_with_talc_alloc_round_trips_full_publish_chain() {
     let arena = Arena::new(256 * 1024);
     let mut cache = Cache::new_in(arena.alloc());
 
-    // 1. Publish a Data blob.
+    // 1. Publish a Data blob (cap is Global; cache deep-clones into talc).
     let data_h = cache
-        .publish_data_inline(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
-        .expect("publish data");
+        .put_cap(&Cap::data_inline(&[
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        ]))
+        .expect("put data");
     assert_eq!(cache.refcount(CapHashOrRef::Hash(data_h)), Some(1));
 
     // 2. Publish a CNode referencing it (refcount on data → 2).
-    let cnode_h = cache
-        .publish_cnode(4, &[(SlotIdx(0), CapHashOrRef::Hash(data_h))])
-        .expect("publish cnode");
+    let cnode_h = {
+        let mut cn: CNodeCap<Global> = CNodeCap::new_in(4, Global).unwrap();
+        cn.set(SlotIdx(0), Some(CapHashOrRef::Hash(data_h))).unwrap();
+        cache.put_cap(&Cap::CNode(cn)).expect("put cnode")
+    };
     assert_eq!(cache.refcount(CapHashOrRef::Hash(cnode_h)), Some(1));
     assert_eq!(cache.refcount(CapHashOrRef::Hash(data_h)), Some(2));
 
     // 3. Publish a minimal Image referencing the same Data blob as a
-    //    pinned slot (refcount on data → 3).
-    let mut img = make_image_cap_in(arena.alloc());
+    //    pinned slot (refcount on data → 3). Build the Image cap on
+    //    the global heap and pass it through put_cap.
+    let mut img = make_image_cap_in(Global);
     img.pinned.push(ImageSlotEntry {
         slot: SlotIdx(7),
         cap_hash: data_h,
     });
-    let image_h = cache.publish_image_from_cap(img).expect("publish image");
+    let image_h = cache.put_cap(&Cap::Image(img)).expect("put image");
     assert_eq!(cache.refcount(CapHashOrRef::Hash(image_h)), Some(1));
     assert_eq!(cache.refcount(CapHashOrRef::Hash(data_h)), Some(3));
 
@@ -333,7 +338,7 @@ fn cache_with_talc_alloc_round_trips_full_publish_chain() {
     //    transitively through cnode/image, not directly).
     let regs = [0u64; NUM_REGS];
     let inst_h = cache
-        .publish_instance_blob(
+        .put_cap(&Cap::instance_with_overlays(
             [0u8; 32],
             image_h,
             cnode_h,
@@ -342,8 +347,8 @@ fn cache_with_talc_alloc_round_trips_full_publish_chain() {
             regs,
             0x1000,
             1_000_000,
-        )
-        .expect("publish instance");
+        ))
+        .expect("put instance");
     assert_eq!(cache.refcount(CapHashOrRef::Hash(inst_h)), Some(1));
     assert_eq!(cache.refcount(CapHashOrRef::Hash(image_h)), Some(2));
     assert_eq!(cache.refcount(CapHashOrRef::Hash(cnode_h)), Some(2));

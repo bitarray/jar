@@ -1133,6 +1133,7 @@ dependencies = [
 name = "javm-bench"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "blake3",
  "build-javm",
  "criterion",
@@ -1140,6 +1141,7 @@ dependencies = [
  "javm-exec",
  "nub",
  "nub-arch-x86-abi",
+ "sha2",
  "ssz",
 ]
 

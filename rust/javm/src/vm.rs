@@ -438,19 +438,18 @@ impl<K: KernelAssist> Vm<K> {
         cache: &mut Cache<Global>,
         entry: &InstanceEntry,
     ) -> Result<CapHash, VmError> {
-        // Publish the working cnode as a fresh blob. We only flatten the
-        // materialized entries; unmaterialized (`Missing`) slots aren't
-        // valid mid-execution and the SparseList shouldn't contain them.
-        let cnode_entries: Vec<(SlotIdx, CapHashOrRef)> = entry
-            .root_cnode
-            .slots
-            .iter()
-            .filter_map(|(idx, mo)| match mo {
-                ssz::MissingOr::Materialized(t) => Some((SlotIdx(idx as u32), *t)),
-                ssz::MissingOr::Missing(_) => None,
-            })
-            .collect();
-        let cnode_hash = cache.publish_cnode(entry.root_cnode.size_log, &cnode_entries)?;
+        // Build the working cnode as a Cap<Global> and put it. We only
+        // flatten the materialized entries; unmaterialized (`Missing`)
+        // slots aren't valid mid-execution and shouldn't appear here.
+        let cnode_hash = {
+            let mut cnode = javm_cap::CNodeCap::new(entry.root_cnode.size_log)?;
+            for (idx, mo) in entry.root_cnode.slots.iter() {
+                if let ssz::MissingOr::Materialized(t) = mo {
+                    cnode.set(SlotIdx(idx as u32), Some(*t))?;
+                }
+            }
+            cache.put_cap(&Cap::CNode(cnode))?
+        };
 
         // Collect rw_overlay bytes from the live mem. We don't have
         // first-class knowledge of which mappings count as overlays
@@ -485,7 +484,7 @@ impl<K: KernelAssist> Vm<K> {
             0
         };
 
-        let hash = cache.publish_instance_blob(
+        let hash = cache.put_cap(&Cap::instance_with_overlays(
             entry.image_hash_chain,
             entry.image_hash,
             cnode_hash,
@@ -494,7 +493,7 @@ impl<K: KernelAssist> Vm<K> {
             entry.regs.gpr,
             entry.regs.pc,
             entry.gas.remaining(),
-        )?;
+        ))?;
         Ok(hash)
     }
 
@@ -612,10 +611,12 @@ mod tests {
     /// Publish an Image + empty root cnode + a Cap::Instance referencing
     /// them; return the instance hash and the cache.
     fn publish_simple_instance(cache: &mut Cache<Global>, image: Image) -> CapHash {
-        let image_hash = cache.publish_image(&image).unwrap();
-        let cnode_hash = cache.publish_cnode(8, &[]).unwrap();
+        let image_hash = cache
+            .put_cap(&Cap::image_with_slots(&image, &[], &[]).unwrap())
+            .unwrap();
+        let cnode_hash = cache.put_cap(&Cap::empty_cnode(8).unwrap()).unwrap();
         cache
-            .publish_instance_blob(
+            .put_cap(&Cap::instance_with_overlays(
                 [0xAA; 32],
                 image_hash,
                 cnode_hash,
@@ -624,7 +625,7 @@ mod tests {
                 [0u64; NUM_REGS],
                 0,
                 0,
-            )
+            ))
             .unwrap()
     }
 

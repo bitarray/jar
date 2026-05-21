@@ -25,8 +25,7 @@ Licensed under the Apache License, Version 2.0.
 use std::ptr::NonNull;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use javm_cap::slot::SlotIdx;
-use javm_cap::{Cache as TypedCache, CapHashOrRef, CapRef, ImageCap as TImageCap, image_cap_in};
+use javm_cap::{Cache as TypedCache, CapHashOrRef, CapRef};
 use nub_arch_x86_abi::CapHash;
 use nub_host_common::cache::{
     BlobSlot, CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheTalcLock, InstanceSlot,
@@ -329,110 +328,6 @@ impl Cache {
         Ok(())
     }
 
-    // --- Legacy typed publish methods (retained until Stage F) ---
-
-    /// Publish an inline DataCap and record it in the directory.
-    pub fn publish_data_inline(&mut self, bytes: &[u8]) -> Result<CapHash> {
-        let h = self
-            .typed_cache
-            .publish_data_inline(bytes)
-            .map_err(CacheError::from)?;
-        self.touch_blob(h)?;
-        Ok(h)
-    }
-
-    /// Publish an inline DataCap with explicit logical size.
-    pub fn publish_data_inline_with_size(&mut self, bytes: &[u8], size: u64) -> Result<CapHash> {
-        let h = self
-            .typed_cache
-            .publish_data_inline_with_size(bytes, size)
-            .map_err(CacheError::from)?;
-        self.touch_blob(h)?;
-        Ok(h)
-    }
-
-    /// Publish an Image (SCALE-encoded shape) end-to-end: walks
-    /// pinned/initial slots, publishes each Data, then publishes the
-    /// `ImageCap`. Records the resulting Image blob in the directory.
-    pub fn publish_image(&mut self, image: &javm_cap::image::Image) -> Result<CapHash> {
-        let h = self
-            .typed_cache
-            .publish_image(image)
-            .map_err(CacheError::from)?;
-        self.touch_blob(h)?;
-        Ok(h)
-    }
-
-    /// Publish a pre-built `ImageCap<TalcAlloc>`. Lower-level; the
-    /// caller is responsible for constructing the cap in this cache's
-    /// allocator (see [`Self::alloc`]).
-    pub fn publish_image_from_cap(&mut self, image: TImageCap<TalcAlloc>) -> Result<CapHash> {
-        let h = self
-            .typed_cache
-            .publish_image_from_cap(image)
-            .map_err(CacheError::from)?;
-        self.touch_blob(h)?;
-        Ok(h)
-    }
-
-    /// Convert a borrowed SCALE [`javm_cap::image::Image`] into a
-    /// talc-resident [`TImageCap<TalcAlloc>`] using this cache's
-    /// allocator, given resolved hashes for the image's pinned and
-    /// initial slots.
-    pub fn image_cap_in(
-        &self,
-        image: &javm_cap::image::Image,
-        pinned_hashes: &[(SlotIdx, CapHash)],
-        initial_hashes: &[(SlotIdx, CapHash)],
-    ) -> Result<TImageCap<TalcAlloc>> {
-        image_cap_in(image, pinned_hashes, initial_hashes, self.alloc)
-            .map_err(|e| new_error!("cache: image_cap_in: {e}"))
-    }
-
-    /// Publish a CNode and record it.
-    pub fn publish_cnode(
-        &mut self,
-        size_log: u8,
-        entries: &[(SlotIdx, CapHashOrRef)],
-    ) -> Result<CapHash> {
-        let h = self
-            .typed_cache
-            .publish_cnode(size_log, entries)
-            .map_err(CacheError::from)?;
-        self.touch_blob(h)?;
-        Ok(h)
-    }
-
-    /// Publish an InstanceCap blob and record it.
-    #[allow(clippy::too_many_arguments)]
-    pub fn publish_instance_blob(
-        &mut self,
-        image_hash_chain: CapHash,
-        image_hash: CapHash,
-        root_cnode: CapHash,
-        rw_overlays: &[(u32, &[u8])],
-        mem_size: u32,
-        regs: [u64; javm_cap::NUM_REGS],
-        pc: u64,
-        gas_remaining: u64,
-    ) -> Result<CapHash> {
-        let h = self
-            .typed_cache
-            .publish_instance_blob(
-                image_hash_chain,
-                image_hash,
-                root_cnode,
-                rw_overlays,
-                mem_size,
-                regs,
-                pc,
-                gas_remaining,
-            )
-            .map_err(CacheError::from)?;
-        self.touch_blob(h)?;
-        Ok(h)
-    }
-
     // --- Directory maintenance ---
 
     /// Ensure the directory has a slot for `hash` pointing at the
@@ -555,6 +450,7 @@ mod tests {
 
     #[test]
     fn publish_chain_data_cnode_image_instance() {
+        use javm_cap::slot::SlotIdx;
         use javm_cap::{Cap, CapHashOrRef};
 
         let mut cache = Cache::new().expect("alloc");
