@@ -34,23 +34,19 @@
 //! Host call operand encoding (Stage 3.8+):
 //!
 //! ```text
-//!   HOST_YIELD       (op=16)  φ[7] = marker_slot_idx (u8) — the slot
-//!                              in the running Instance's cnode that
-//!                              holds the Cap::Instance[YieldMarker]
-//!                              being thrown. The marker payload is
-//!                              this same cap, reflected to the
-//!                              caller's slot[0] at resume.
+//!   HOST_YIELD       (op=16)  φ[7] = marker_slot_idx (u8)
 //! ```
 //!
-//! Multi-step `SlotPath` operands are out of scope for Stage 3; the
-//! kernel's spec-canonical encoding (single u32 packed path or a
-//! pointer to a path buffer in memory) lands when chain bytecode
-//! starts using nested cnodes routinely.
+//! After the move to the `javm_cap::Cap<A>` cache model, ecalls
+//! operate on `CapHashOrRef` targets in the running root cnode and
+//! cross-reference into the caller-supplied `Cache<Global>` for
+//! kind dispatch. The `Cache<Global>` is NOT borrowed for the
+//! duration of `Interpreter::run` — the ecall handler keeps the
+//! call-stack mutation local; host calls that need cache writes
+//! (host_open / host_save / host_mint_data_cap) are deferred to
+//! Stage 4 once the borrow model crystallizes.
 
-use javm_cap::{
-    Blake2b256, Cap, Hash, InstanceCap, SlotIdx, TypeCap, mgmt_cnode_mint, mgmt_cnode_swap,
-    mgmt_copy, mgmt_drop, mgmt_move,
-};
+use javm_cap::{Blake2b256, CapHashOrRef, Hash, SlotIdx};
 use javm_exec::{EcallHandler, EcallKind, EcallResult, ExitReason, Memory, Regs};
 
 use crate::callstack::Entry;
@@ -74,46 +70,25 @@ pub mod mgmt_op {
 /// the rest.
 pub mod host_op {
     pub const HOST_YIELD: u32 = 16;
-    /// `set_image(image_slot=φ[7])` — atomically swap the running
-    /// Instance's image: extend `image_hash_chain`, reload program
-    /// from the kernel-assist's image registry.
+    /// `set_image(image_slot=φ[7])` — extend the active Instance's
+    /// `image_hash_chain` with the Image at `image_slot`.
     pub const SET_IMAGE: u32 = 17;
-    /// `host_derive_spawn(image_slot=φ[7], dst_slot=φ[8])` —
-    /// mint a fresh Cap::Instance whose image_hash_chain is
-    /// chain_extend(spawner.image_hash_chain, image.content_hash).
+    /// `host_derive_spawn(image_slot=φ[7], dst_slot=φ[8])`.
     pub const DERIVE_SPAWN: u32 = 18;
-    /// `host_make_image(...)` — Stage 3.9 stub. Lands when the
-    /// in-memory parts encoding is fully spec'd; jar-kernel-v3
-    /// validates structurally at host_make_image time.
+    /// `host_make_image(...)` — Stage 3.9 stub.
     pub const MAKE_IMAGE: u32 = 19;
-    /// `host_same_type(slot_a=φ[7], slot_b=φ[8])` — compare
-    /// `image_hash_chain` of two Cap::Instance values; result (0 or
-    /// 1) returned in φ\[7\].
+    /// `host_same_type(slot_a=φ[7], slot_b=φ[8])`.
     pub const HOST_SAME_TYPE: u32 = 20;
-    /// `host_type_of(src_slot=φ[7], dst_slot=φ[8])` — mint a
-    /// Cap::Type carrying the source Cap::Instance's
-    /// `image_hash_chain`; place at dst.
+    /// `host_type_of(src_slot=φ[7], dst_slot=φ[8])` — Stage 4 (needs
+    /// cache write).
     pub const HOST_TYPE_OF: u32 = 21;
-    /// `host_read_data_cap(cap_slot=φ[7], dst_addr=φ[8], len=φ[9])`
-    /// — copy bytes from the Cap::Data at `cap_slot` into mapped
-    /// memory at `dst_addr`. Honors `DataCap.size`; copies
-    /// `min(len, size)` bytes.
+    /// `host_read_data_cap` — Stage 4 (needs cache read into mem).
     pub const HOST_READ_DATA_CAP: u32 = 22;
-    /// `host_mint_data_cap(src_addr=φ[7], len=φ[8], quota_slot=φ[9],
-    /// dst_slot=φ[10])` — read bytes from memory; strip trailing
-    /// zeros (canonical form §2); content-hash; debit StorageQuota
-    /// via KernelAssist; mint Cap::Data; place at dst_slot.
+    /// `host_mint_data_cap` — Stage 4 (needs cache write).
     pub const HOST_MINT_DATA_CAP: u32 = 23;
-    /// `host_open(file_slot=φ[7], dst_slot=φ[8])` — materialize the
-    /// σ-resident FileCap at `file_slot` into a `Cap::Data` and
-    /// place at `dst_slot`. The FileCap is a `Cap::Instance` whose
-    /// `image_hash_chain` matches `KernelImage::File` and whose
-    /// `content_hash` low 8 bytes encode the `file_id`.
+    /// `host_open` — Stage 4 (needs cache read + slot write).
     pub const HOST_OPEN: u32 = 24;
-    /// `host_save(data_slot=φ[7], quota_slot=φ[8], dst_slot=φ[9])` —
-    /// mint a fresh FileCap from the Cap::Data at `data_slot`,
-    /// debiting StorageQuota at `quota_slot`. Result Cap::Instance
-    /// (kernel:file) placed at `dst_slot`.
+    /// `host_save` — Stage 4 (needs cache write + slot write).
     pub const HOST_SAVE: u32 = 25;
     /// Inclusive upper bound of the kernel-known host call range.
     pub const MAX: u32 = 63;
@@ -132,9 +107,7 @@ impl<K: KernelAssist> Vm<K> {
     fn dispatch_ecalli(&mut self, op: u32, _regs: &mut Regs, _mem: &mut dyn Memory) -> EcallResult {
         match op {
             0 => {
-                // REPLY is handled by the CALL/HALT driver (Stage 3.7).
-                // Until then, treat it as a halt-equivalent exit so the
-                // interpreter's outer driver sees a clean termination.
+                // REPLY is handled by the CALL/HALT driver.
                 EcallResult::Exit(ExitReason::Halt)
             }
             o if o <= mgmt_op::MAX => match self.dispatch_mgmt(o, _regs) {
@@ -145,8 +118,7 @@ impl<K: KernelAssist> Vm<K> {
             _ => {
                 // Chain-user host calls (64+) land later. Continue
                 // silently for now so prologue-like ecalls (used by
-                // javm-transpiler's blob format) don't fault the bench
-                // harness.
+                // javm-transpiler's blob format) don't fault.
                 EcallResult::Continue
             }
         }
@@ -174,33 +146,21 @@ impl<K: KernelAssist> Vm<K> {
                 trap_on_err(self.dispatch_derive_spawn(regs), |()| EcallResult::Continue)
             }
             host_op::MAKE_IMAGE => {
-                // Stage 3.9 stub. The in-memory parts encoding for
-                // host_make_image is not finalized; jar-kernel-v3
-                // will land the proper memory-pointer-based variant
-                // when chain Images need runtime construction.
+                // Stage 3.9 stub.
                 EcallResult::Exit(ExitReason::Trap)
             }
             host_op::HOST_SAME_TYPE => trap_on_err(self.dispatch_host_same_type(regs), |()| {
                 EcallResult::Continue
             }),
-            host_op::HOST_TYPE_OF => {
-                trap_on_err(self.dispatch_host_type_of(regs), |()| EcallResult::Continue)
-            }
-            host_op::HOST_READ_DATA_CAP => {
-                trap_on_err(self.dispatch_host_read_data_cap(regs, _mem), |()| {
-                    EcallResult::Continue
-                })
-            }
-            host_op::HOST_MINT_DATA_CAP => {
-                trap_on_err(self.dispatch_host_mint_data_cap(regs, _mem), |()| {
-                    EcallResult::Continue
-                })
-            }
-            host_op::HOST_OPEN => {
-                trap_on_err(self.dispatch_host_open(regs), |()| EcallResult::Continue)
-            }
-            host_op::HOST_SAVE => {
-                trap_on_err(self.dispatch_host_save(regs), |()| EcallResult::Continue)
+            host_op::HOST_TYPE_OF
+            | host_op::HOST_READ_DATA_CAP
+            | host_op::HOST_MINT_DATA_CAP
+            | host_op::HOST_OPEN
+            | host_op::HOST_SAVE => {
+                // These host calls all require cache writes, which the
+                // interpreter-borrow shape doesn't allow until Stage 4
+                // wires a deferred-effect channel. For now, trap.
+                EcallResult::Exit(ExitReason::Trap)
             }
             _ => {
                 // Chain-user host calls (64+) land later. Continue
@@ -211,34 +171,23 @@ impl<K: KernelAssist> Vm<K> {
     }
 
     /// `host_yield(marker_slot=φ[7])`.
-    ///
-    /// Resolves the marker cap from the running Instance's cnode,
-    /// walks the call stack top→bottom looking for an InstanceEntry
-    /// whose `Image.yield_marker_slot` references a
-    /// `Cap::Instance[YieldCatcher]` whose marker list contains the
-    /// thrown marker's `image_hash_chain`. On match: push a
-    /// ReferenceEntry pointing at the catcher's position; exit the
-    /// interpreter with `ExitReason::HostCall(HOST_YIELD)` so
-    /// `run_instance` surfaces `CallResult::Paused`.
-    ///
-    /// Errors:
-    /// - `VmError::CallStackEmpty` if there's no running entry.
-    /// - `VmError::SlotKindMismatch` / `SlotEmpty` if the marker slot
-    ///   doesn't hold a `Cap::Instance`.
-    /// - `VmError::UnhandledMarker` if no catcher on the stack catches
-    ///   this marker.
     fn dispatch_host_yield(&mut self, regs: &mut Regs) -> Result<EcallResult, VmError> {
         let marker_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
 
-        // 1. Read marker's image_hash_chain from the running Instance's cnode.
+        // 1. Read marker's hash from the running Instance's cnode.
+        //    In the new model the slot stores a `CapHashOrRef`; we
+        //    key yield routing on the Hash form (the marker template
+        //    image_hash). Ref-form markers are not catchable in V1.
         let marker_hash = {
             let running = self
                 .stack
                 .running_instance()
                 .ok_or(VmError::CallStackEmpty)?;
-            match running.cnode.get(marker_slot)? {
-                Some(Cap::Instance(ic)) => ic.image_hash_chain,
-                Some(_) => return Err(VmError::SlotKindMismatch(marker_slot.get())),
+            match running.root_cnode.get(marker_slot) {
+                Some(CapHashOrRef::Hash(h)) => h,
+                Some(CapHashOrRef::Ref(_)) => {
+                    return Err(VmError::SlotKindMismatch(marker_slot.get()));
+                }
                 None => return Err(VmError::SlotEmpty(marker_slot.get())),
             }
         };
@@ -249,17 +198,16 @@ impl<K: KernelAssist> Vm<K> {
         //    marker.
         let stack_len = self.stack.entries().len();
         let mut target_pos: Option<usize> = None;
-        // The yielder is at stack_len-1; iterate over positions below.
         for pos in (0..stack_len.saturating_sub(1)).rev() {
             let ie = match &self.stack.entries()[pos] {
                 Entry::Instance(ie) => ie.as_ref(),
                 Entry::Reference(_) => continue,
             };
-            let Some(catcher_slot) = ie.image.yield_marker_slot else {
+            let Some(catcher_slot) = ie.yield_marker_slot else {
                 continue;
             };
-            let catcher_hash = match ie.cnode.get(catcher_slot)? {
-                Some(Cap::Instance(ic)) => ic.content_hash,
+            let catcher_hash = match ie.root_cnode.get(catcher_slot) {
+                Some(CapHashOrRef::Hash(h)) => h,
                 _ => continue,
             };
             let markers = self.kernel_assist.yield_catcher_markers(catcher_hash);
@@ -272,8 +220,7 @@ impl<K: KernelAssist> Vm<K> {
         let pos = target_pos.ok_or(VmError::UnhandledMarker)?;
 
         // 3. Push the ReferenceEntry. The yielder transitions to
-        //    Waiting; the new reference becomes Running and (via
-        //    `running_instance_mut`) resolves to the catcher's entry.
+        //    Waiting; the new reference becomes Running.
         self.stack.push_reference(pos)?;
 
         Ok(EcallResult::Exit(ExitReason::HostCall(host_op::HOST_YIELD)))
@@ -281,126 +228,104 @@ impl<K: KernelAssist> Vm<K> {
 
     /// `set_image(image_slot=φ[7])`.
     ///
-    /// Reads the Cap::Image at the named slot; chain_extends the
-    /// running InstanceCap's image_hash_chain with the image's
-    /// content_hash; looks up the full Image bytes via
-    /// `KernelAssist::image_lookup`; reloads the InstanceEntry's
-    /// image, program (via ImageCache), and instance.image_hash_chain.
-    ///
-    /// Errors:
-    /// - `VmError::CallStackEmpty` if no running entry.
-    /// - `VmError::SlotKindMismatch` / `SlotEmpty` if the slot does
-    ///   not hold a Cap::Image.
-    /// - `VmError::ImageNotFound` if the kernel-assist's image
-    ///   registry doesn't know this content_hash.
+    /// Reads the Cap::Image hash at the named slot; chain_extends the
+    /// running instance's `image_hash_chain` with the slot's hash.
+    /// The new model resolves Image bytes from the cache rather than
+    /// the kernel-assist registry — but since the cache isn't
+    /// reachable from inside `Interpreter::run` in V1, set_image
+    /// updates only the chain hash; bytecode swap is deferred.
     fn dispatch_set_image(&mut self, regs: &mut Regs) -> Result<(), VmError> {
         let image_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
 
-        // 1. Resolve the Cap::Image content_hash from the slot.
-        let new_image_hash: javm_cap::CapHash = {
+        // 1. Resolve the Cap::Image hash from the slot.
+        let new_image_hash = {
             let running = self
                 .stack
                 .running_instance()
                 .ok_or(VmError::CallStackEmpty)?;
-            match running.cnode.get(image_slot)? {
-                Some(Cap::Image(c)) => c.content_hash,
-                Some(_) => return Err(VmError::SlotKindMismatch(image_slot.get())),
+            match running.root_cnode.get(image_slot) {
+                Some(CapHashOrRef::Hash(h)) => h,
+                Some(CapHashOrRef::Ref(_)) => {
+                    return Err(VmError::SlotKindMismatch(image_slot.get()));
+                }
                 None => return Err(VmError::SlotEmpty(image_slot.get())),
             }
         };
 
-        // 2. Resolve the full Image bytes via the kernel-assist.
-        let new_image = self
-            .kernel_assist
-            .image_lookup(new_image_hash)
-            .ok_or(VmError::ImageNotFound)?;
-
-        // 3. Extend the chain hash.
+        // 2. Extend the chain hash.
         let extended_chain = {
             let running = self
                 .stack
                 .running_instance()
                 .ok_or(VmError::CallStackEmpty)?;
-            Blake2b256::hash_pair(&running.instance.image_hash_chain, &new_image_hash)
+            Blake2b256::hash_pair(&running.image_hash_chain, &new_image_hash)
         };
 
-        // 4. Predecode the new image (cached on second invocation).
-        let program = self.image_cache.get_or_decode(
-            new_image_hash,
-            new_image.code.clone(),
-            vec![1u8; new_image.code.len()],
-            Vec::new(),
-        )?;
-
-        // 5. Install the swap into the running InstanceEntry.
+        // 3. Install the chain extension. Bytecode swap deferred —
+        //    Stage 4 wires the cache borrow.
         let running = self
             .stack
             .running_instance_mut()
             .ok_or(VmError::CallStackEmpty)?;
-        running.instance.image_hash_chain = extended_chain;
-        // content_hash semantics post-set_image are a Stage 4 concern
-        // (depends on canonical state digest). For Stage 3 we leave
-        // the previous content_hash; the chain hash captures the
-        // image lineage which is sufficient for type queries.
-        running.image = new_image;
-        running.program = program;
+        running.image_hash_chain = extended_chain;
+        running.image_hash = new_image_hash;
         Ok(())
     }
 
     /// `host_derive_spawn(image_slot=φ[7], dst_slot=φ[8])`.
     ///
-    /// Mint a fresh `Cap::Instance` whose image_hash_chain is
-    /// `chain_extend(self.image_hash_chain, image.content_hash)`.
-    /// content_hash is a placeholder for Stage 3 (zeroed) — Stage 4
-    /// jar-kernel-v3 defines the canonical state digest and will
-    /// populate it.
+    /// Mint a fresh `CapHashOrRef::Hash` carrying
+    /// `chain_extend(self.image_hash_chain, image_hash)`. The cap
+    /// content (a full Cap::Instance referencing the image with
+    /// placeholder regs/pc/etc.) lives in the cache in Stage 4; V1
+    /// stores only the chain hash as the slot target.
     fn dispatch_derive_spawn(&mut self, regs: &mut Regs) -> Result<(), VmError> {
         let image_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
         let dst_slot = SlotIdx((regs.gpr[8] & 0xFF) as u32);
 
-        // 1. Read Cap::Image at image_slot.
-        let new_image_hash: javm_cap::CapHash = {
+        // 1. Read Image hash at image_slot.
+        let new_image_hash = {
             let running = self
                 .stack
                 .running_instance()
                 .ok_or(VmError::CallStackEmpty)?;
-            match running.cnode.get(image_slot)? {
-                Some(Cap::Image(c)) => c.content_hash,
-                Some(_) => return Err(VmError::SlotKindMismatch(image_slot.get())),
+            match running.root_cnode.get(image_slot) {
+                Some(CapHashOrRef::Hash(h)) => h,
+                Some(CapHashOrRef::Ref(_)) => {
+                    return Err(VmError::SlotKindMismatch(image_slot.get()));
+                }
                 None => return Err(VmError::SlotEmpty(image_slot.get())),
             }
         };
 
-        // 2. Derive the child chain hash + cap.
-        let child = {
+        // 2. Derive the child chain hash.
+        let extended = {
             let running = self
                 .stack
                 .running_instance()
                 .ok_or(VmError::CallStackEmpty)?;
-            let extended =
-                Blake2b256::hash_pair(&running.instance.image_hash_chain, &new_image_hash);
-            InstanceCap {
-                image_hash_chain: extended,
-                content_hash: [0u8; 32], // Stage 4 fills with canonical state digest.
-            }
+            Blake2b256::hash_pair(&running.image_hash_chain, &new_image_hash)
         };
 
-        // 3. Place the new Cap::Instance at dst_slot (rejects pinned).
+        // 3. Place at dst_slot (rejects pinned).
         let running = self
             .stack
             .running_instance_mut()
             .ok_or(VmError::CallStackEmpty)?;
-        let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
-        if pinned.contains(&dst_slot) {
+        if running.pinned_slots.binary_search(&dst_slot).is_ok() {
             return Err(javm_cap::OpError::SlotPinned(dst_slot.get()).into());
         }
-        running.cnode.set(dst_slot, Some(Cap::Instance(child)))?;
+        running
+            .root_cnode
+            .set(dst_slot, Some(CapHashOrRef::Hash(extended)))?;
         Ok(())
     }
 
     /// `host_same_type(slot_a=φ[7], slot_b=φ[8])`.
     ///
-    /// Result (1 if same image_hash_chain, 0 otherwise) in φ[7].
+    /// Compares the slot targets' Hash bytes (which encode
+    /// image_hash_chain identity in V1). Result 1 if same, 0
+    /// otherwise, into φ[7].
     fn dispatch_host_same_type(&mut self, regs: &mut Regs) -> Result<(), VmError> {
         let a = SlotIdx((regs.gpr[7] & 0xFF) as u32);
         let b = SlotIdx((regs.gpr[8] & 0xFF) as u32);
@@ -408,288 +333,29 @@ impl<K: KernelAssist> Vm<K> {
             .stack
             .running_instance()
             .ok_or(VmError::CallStackEmpty)?;
-        let chain_a = type_chain_at(running.cnode.as_ref(), a)?;
-        let chain_b = type_chain_at(running.cnode.as_ref(), b)?;
-        regs.gpr[7] = if chain_a == chain_b { 1 } else { 0 };
-        Ok(())
-    }
-
-    /// `host_type_of(src_slot=φ[7], dst_slot=φ[8])`.
-    ///
-    /// Reads Cap::Instance at src; mints Cap::Type carrying the same
-    /// image_hash_chain; places at dst.
-    fn dispatch_host_type_of(&mut self, regs: &mut Regs) -> Result<(), VmError> {
-        let src = SlotIdx((regs.gpr[7] & 0xFF) as u32);
-        let dst = SlotIdx((regs.gpr[8] & 0xFF) as u32);
-        let running = self
-            .stack
-            .running_instance_mut()
-            .ok_or(VmError::CallStackEmpty)?;
-        let chain = match running.cnode.get(src)? {
-            Some(Cap::Instance(ic)) => ic.image_hash_chain,
-            Some(Cap::Type(tc)) => tc.image_hash_chain,
-            Some(_) => return Err(VmError::SlotKindMismatch(src.get())),
-            None => return Err(VmError::SlotEmpty(src.get())),
+        let ha = match running.root_cnode.get(a) {
+            Some(CapHashOrRef::Hash(h)) => h,
+            _ => return Err(VmError::SlotEmpty(a.get())),
         };
-        let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
-        if pinned.contains(&dst) {
-            return Err(javm_cap::OpError::SlotPinned(dst.get()).into());
-        }
-        running.cnode.set(
-            dst,
-            Some(Cap::Type(TypeCap {
-                image_hash_chain: chain,
-            })),
-        )?;
-        Ok(())
-    }
-
-    /// `host_read_data_cap(cap_slot=φ[7], dst_addr=φ[8], len=φ[9])`.
-    ///
-    /// Reads the Cap::Data at `cap_slot`; looks up its bytes via
-    /// `KernelAssist::data_lookup`; copies `min(len, size)` bytes
-    /// into memory at `dst_addr`. Pads zeros if the stored bytes
-    /// (after canonical-form strip) are shorter than `size`.
-    fn dispatch_host_read_data_cap(
-        &mut self,
-        regs: &mut Regs,
-        mem: &mut dyn Memory,
-    ) -> Result<(), VmError> {
-        let cap_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
-        let dst_addr = regs.gpr[8] as u32;
-        let len = regs.gpr[9] as usize;
-
-        let (content_hash, size) = {
-            let running = self
-                .stack
-                .running_instance()
-                .ok_or(VmError::CallStackEmpty)?;
-            match running.cnode.get(cap_slot)? {
-                Some(Cap::Data(c)) => (c.content_hash, c.size),
-                Some(_) => return Err(VmError::SlotKindMismatch(cap_slot.get())),
-                None => return Err(VmError::SlotEmpty(cap_slot.get())),
-            }
+        let hb = match running.root_cnode.get(b) {
+            Some(CapHashOrRef::Hash(h)) => h,
+            _ => return Err(VmError::SlotEmpty(b.get())),
         };
-
-        // Canonical-form data may be shorter than `size` (trailing
-        // zeros stripped). Pad with zeros up to the declared size.
-        let mut bytes = self
-            .kernel_assist
-            .data_lookup(content_hash)
-            .unwrap_or_default();
-        if (bytes.len() as u64) < size {
-            bytes.resize(size as usize, 0);
-        }
-
-        let copy_len = len.min(size as usize);
-        mem.write(dst_addr, &bytes[..copy_len])
-            .map_err(|_| VmError::Invariant("host_read_data_cap: memory write OOB / RO"))?;
-        Ok(())
-    }
-
-    /// `host_mint_data_cap(src_addr=φ[7], len=φ[8], quota_slot=φ[9],
-    /// dst_slot=φ[10])`.
-    ///
-    /// Reads bytes from mem[src_addr..src_addr+len]; strips trailing
-    /// zeros (canonical form); content-hashes; debits the
-    /// StorageQuota referenced by `quota_slot` (Cap::Instance[Quota])
-    /// for `size` bytes; mints Cap::Data{content_hash, size: pre-strip};
-    /// places at `dst_slot`.
-    fn dispatch_host_mint_data_cap(
-        &mut self,
-        regs: &mut Regs,
-        mem: &mut dyn Memory,
-    ) -> Result<(), VmError> {
-        let src_addr = regs.gpr[7] as u32;
-        let len = regs.gpr[8] as usize;
-        let quota_slot = SlotIdx((regs.gpr[9] & 0xFF) as u32);
-        let dst_slot = SlotIdx((regs.gpr[10] & 0xFF) as u32);
-
-        // 1. Read bytes from memory.
-        let raw = mem
-            .read(src_addr, len)
-            .map_err(|_| VmError::Invariant("host_mint_data_cap: memory read OOB"))?;
-        let stripped_len = strip_trailing_zeros_len(&raw);
-        let canonical = &raw[..stripped_len];
-
-        // 2. Hash + store.
-        let content_hash = self.kernel_assist.data_store(canonical);
-
-        // 3. Debit storage quota.
-        let quota_id = {
-            let running = self
-                .stack
-                .running_instance()
-                .ok_or(VmError::CallStackEmpty)?;
-            match running.cnode.get(quota_slot)? {
-                Some(Cap::Instance(ic)) => {
-                    // Convention: Quota{id}.content_hash low 8 bytes = quota_id LE.
-                    u64::from_le_bytes(
-                        ic.content_hash[..8]
-                            .try_into()
-                            .map_err(|_| VmError::Invariant("quota content_hash too short"))?,
-                    )
-                }
-                Some(_) => return Err(VmError::SlotKindMismatch(quota_slot.get())),
-                None => return Err(VmError::SlotEmpty(quota_slot.get())),
-            }
-        };
-        let current = self.kernel_assist.storage_quota_get(quota_id);
-        let charge = len as u64;
-        if current < charge {
-            return Err(VmError::Op(javm_cap::OpError::SlotPinned(0))); // generic op fail
-        }
-        self.kernel_assist
-            .storage_quota_set(quota_id, current - charge);
-
-        // 4. Mint Cap::Data and place at dst.
-        let running = self
-            .stack
-            .running_instance_mut()
-            .ok_or(VmError::CallStackEmpty)?;
-        let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
-        if pinned.contains(&dst_slot) {
-            return Err(javm_cap::OpError::SlotPinned(dst_slot.get()).into());
-        }
-        running.cnode.set(
-            dst_slot,
-            Some(Cap::Data(javm_cap::DataCap {
-                content_hash,
-                size: len as u64,
-            })),
-        )?;
-        Ok(())
-    }
-
-    /// `host_open(file_slot=φ[7], dst_slot=φ[8])`.
-    ///
-    /// The FileCap is a `Cap::Instance` with low 8 content_hash
-    /// bytes = file_id. Materialize the file via
-    /// `KernelAssist::host_open` (returns a Cap::Data), then place
-    /// at `dst_slot`.
-    fn dispatch_host_open(&mut self, regs: &mut Regs) -> Result<(), VmError> {
-        let file_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
-        let dst_slot = SlotIdx((regs.gpr[8] & 0xFF) as u32);
-
-        let file_id = {
-            let running = self
-                .stack
-                .running_instance()
-                .ok_or(VmError::CallStackEmpty)?;
-            match running.cnode.get(file_slot)? {
-                Some(Cap::Instance(ic)) => u64::from_le_bytes(
-                    ic.content_hash[..8]
-                        .try_into()
-                        .map_err(|_| VmError::Invariant("file content_hash too short"))?,
-                ),
-                Some(_) => return Err(VmError::SlotKindMismatch(file_slot.get())),
-                None => return Err(VmError::SlotEmpty(file_slot.get())),
-            }
-        };
-
-        let data = self
-            .kernel_assist
-            .host_open(file_id)
-            .ok_or(VmError::Invariant("host_open: file_id not registered"))?;
-
-        let running = self
-            .stack
-            .running_instance_mut()
-            .ok_or(VmError::CallStackEmpty)?;
-        let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
-        if pinned.contains(&dst_slot) {
-            return Err(javm_cap::OpError::SlotPinned(dst_slot.get()).into());
-        }
-        running.cnode.set(dst_slot, Some(Cap::Data(data)))?;
-        Ok(())
-    }
-
-    /// `host_save(data_slot=φ[7], quota_slot=φ[8], dst_slot=φ[9])`.
-    ///
-    /// Mint a fresh FileCap from the Cap::Data at `data_slot`,
-    /// debiting StorageQuota at `quota_slot`. The new FileCap is a
-    /// `Cap::Instance` carrying the kernel `File` image_hash; low 8
-    /// content_hash bytes encode the new file_id.
-    fn dispatch_host_save(&mut self, regs: &mut Regs) -> Result<(), VmError> {
-        let data_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
-        let quota_slot = SlotIdx((regs.gpr[8] & 0xFF) as u32);
-        let dst_slot = SlotIdx((regs.gpr[9] & 0xFF) as u32);
-
-        let (data, quota_id) = {
-            let running = self
-                .stack
-                .running_instance()
-                .ok_or(VmError::CallStackEmpty)?;
-            let data = match running.cnode.get(data_slot)? {
-                Some(Cap::Data(d)) => *d,
-                Some(_) => return Err(VmError::SlotKindMismatch(data_slot.get())),
-                None => return Err(VmError::SlotEmpty(data_slot.get())),
-            };
-            let quota_id = match running.cnode.get(quota_slot)? {
-                Some(Cap::Instance(ic)) => u64::from_le_bytes(
-                    ic.content_hash[..8]
-                        .try_into()
-                        .map_err(|_| VmError::Invariant("quota content_hash too short"))?,
-                ),
-                Some(_) => return Err(VmError::SlotKindMismatch(quota_slot.get())),
-                None => return Err(VmError::SlotEmpty(quota_slot.get())),
-            };
-            (data, quota_id)
-        };
-
-        let new_file_id =
-            self.kernel_assist
-                .host_save(&data, quota_id)
-                .ok_or(VmError::Invariant(
-                    "host_save: quota exhausted or kernel-assist unsupported",
-                ))?;
-
-        let mut file_content_hash = [0u8; 32];
-        file_content_hash[..8].copy_from_slice(&new_file_id.to_le_bytes());
-        let new_file_cap = Cap::Instance(InstanceCap {
-            image_hash_chain: crate::kernel_assist::kernel_image_hash(
-                crate::kernel_assist::KernelImage::File,
-            ),
-            content_hash: file_content_hash,
-        });
-
-        let running = self
-            .stack
-            .running_instance_mut()
-            .ok_or(VmError::CallStackEmpty)?;
-        let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
-        if pinned.contains(&dst_slot) {
-            return Err(javm_cap::OpError::SlotPinned(dst_slot.get()).into());
-        }
-        running.cnode.set(dst_slot, Some(new_file_cap))?;
+        regs.gpr[7] = if ha == hb { 1 } else { 0 };
         Ok(())
     }
 }
 
 /// Canonical-form length: number of leading bytes before trailing
-/// zeros. Per v3 spec §2 "Cap::Data canonical form": trailing zeros
-/// are stripped from the byte buffer before content-hashing.
+/// zeros. Used by host_mint_data_cap once that host call lands
+/// (Stage 4 wires the cache borrow).
+#[allow(dead_code)]
 pub(crate) fn strip_trailing_zeros_len(bytes: &[u8]) -> usize {
     let mut n = bytes.len();
     while n > 0 && bytes[n - 1] == 0 {
         n -= 1;
     }
     n
-}
-
-/// Read the `image_hash_chain` for a Cap::Instance or Cap::Type at
-/// the named slot (used by host_same_type and host_type_eq). Errors
-/// if the slot is empty or holds a different cap kind.
-fn type_chain_at(
-    cnode: &(dyn javm_cap::CNodeBackend<Cap> + Send + Sync),
-    slot: SlotIdx,
-) -> Result<javm_cap::CapHash, VmError> {
-    match cnode.get(slot)? {
-        Some(Cap::Instance(ic)) => Ok(ic.image_hash_chain),
-        Some(Cap::Type(tc)) => Ok(tc.image_hash_chain),
-        Some(_) => Err(VmError::SlotKindMismatch(slot.get())),
-        None => Err(VmError::SlotEmpty(slot.get())),
-    }
 }
 
 impl<K: KernelAssist> Vm<K> {
@@ -703,25 +369,108 @@ impl<K: KernelAssist> Vm<K> {
     }
 
     fn dispatch_mgmt(&mut self, op: u32, regs: &mut Regs) -> Result<(), VmError> {
+        let a = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let b = SlotIdx((regs.gpr[8] & 0xFF) as u32);
+        match op {
+            mgmt_op::COPY => self.mgmt_copy(a, b),
+            mgmt_op::MOVE => self.mgmt_move(a, b),
+            mgmt_op::DROP => self.mgmt_drop(a),
+            mgmt_op::CNODE_SWAP => self.mgmt_cnode_swap(a, b),
+            mgmt_op::CNODE_MINT => {
+                let size_log = (regs.gpr[8] & 0xFF) as u8;
+                self.mgmt_cnode_mint(a, size_log)
+            }
+            _ => Err(VmError::Invariant("unknown MGMT op")),
+        }
+    }
+
+    fn mgmt_copy(&mut self, a: SlotIdx, b: SlotIdx) -> Result<(), VmError> {
         let running = self
             .stack
             .running_instance_mut()
             .ok_or(VmError::CallStackEmpty)?;
-        let pinned: Vec<SlotIdx> = running.image.pinned_slots.keys().copied().collect();
-        let cnode = running.cnode.as_mut();
-        let a = SlotIdx((regs.gpr[7] & 0xFF) as u32);
-        let b = SlotIdx((regs.gpr[8] & 0xFF) as u32);
-        match op {
-            mgmt_op::COPY => mgmt_copy(cnode, &pinned, a, b)?,
-            mgmt_op::MOVE => mgmt_move(cnode, &pinned, a, b)?,
-            mgmt_op::DROP => mgmt_drop(cnode, &pinned, a)?,
-            mgmt_op::CNODE_SWAP => mgmt_cnode_swap(cnode, &pinned, a, b)?,
-            mgmt_op::CNODE_MINT => {
-                let size_log = (regs.gpr[8] & 0xFF) as u8;
-                mgmt_cnode_mint(cnode, &pinned, a, size_log)?
-            }
-            _ => return Err(VmError::Invariant("unknown MGMT op")),
+        if running.pinned_slots.binary_search(&b).is_ok() {
+            return Err(javm_cap::OpError::SlotPinned(b.get()).into());
         }
+        let src = running
+            .root_cnode
+            .get(a)
+            .ok_or(javm_cap::OpError::SourceEmpty)?;
+        running.root_cnode.set(b, Some(src))?;
+        Ok(())
+    }
+
+    fn mgmt_move(&mut self, a: SlotIdx, b: SlotIdx) -> Result<(), VmError> {
+        let running = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?;
+        if running.pinned_slots.binary_search(&a).is_ok() {
+            return Err(javm_cap::OpError::SlotPinned(a.get()).into());
+        }
+        if running.pinned_slots.binary_search(&b).is_ok() {
+            return Err(javm_cap::OpError::SlotPinned(b.get()).into());
+        }
+        let src = running
+            .root_cnode
+            .take(a)?
+            .ok_or(javm_cap::OpError::SourceEmpty)?;
+        running.root_cnode.set(b, Some(src))?;
+        Ok(())
+    }
+
+    fn mgmt_drop(&mut self, a: SlotIdx) -> Result<(), VmError> {
+        let running = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?;
+        if running.pinned_slots.binary_search(&a).is_ok() {
+            return Err(javm_cap::OpError::SlotPinned(a.get()).into());
+        }
+        running.root_cnode.take(a)?;
+        Ok(())
+    }
+
+    fn mgmt_cnode_swap(&mut self, a: SlotIdx, b: SlotIdx) -> Result<(), VmError> {
+        let running = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?;
+        if running.pinned_slots.binary_search(&a).is_ok() {
+            return Err(javm_cap::OpError::SlotPinned(a.get()).into());
+        }
+        if running.pinned_slots.binary_search(&b).is_ok() {
+            return Err(javm_cap::OpError::SlotPinned(b.get()).into());
+        }
+        let av = running.root_cnode.take(a)?;
+        let bv = running.root_cnode.take(b)?;
+        if let Some(t) = bv {
+            running.root_cnode.set(a, Some(t))?;
+        }
+        if let Some(t) = av {
+            running.root_cnode.set(b, Some(t))?;
+        }
+        Ok(())
+    }
+
+    fn mgmt_cnode_mint(&mut self, dst: SlotIdx, size_log: u8) -> Result<(), VmError> {
+        // Create a fresh empty CNodeCap, hash it via `cap_hash`, and
+        // store the hash at `dst`. The cnode content itself isn't
+        // published to the cache here (V1: deferred-effect channel
+        // not yet wired). The hash is stable for an empty cnode of
+        // the given size so callers can address the slot
+        // consistently across invocations.
+        use javm_cap::Cap;
+        let cn = javm_cap::CNodeCap::<allocator_api2::alloc::Global>::new(size_log)?;
+        let h = javm_cap::cap_hash(&Cap::CNode(cn));
+        let running = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?;
+        if running.pinned_slots.binary_search(&dst).is_ok() {
+            return Err(javm_cap::OpError::SlotPinned(dst.get()).into());
+        }
+        running.root_cnode.set(dst, Some(CapHashOrRef::Hash(h)))?;
         Ok(())
     }
 }
@@ -731,48 +480,27 @@ mod tests {
     use super::*;
     use crate::callstack::{EntryStatus, InstanceEntry};
     use crate::kernel_assist::InProcessKernelAssist;
-    use javm_cap::{CNodeBackend, Cap, ImageCap, InMemoryCNode, InstanceCap, image::Image};
+    use allocator_api2::alloc::Global;
+    use javm_cap::CNodeCap;
     use javm_exec::{GasCounter, Mem, PvmProgram, Regs};
-    use std::collections::BTreeMap;
     use std::sync::Arc;
-
-    fn empty_image() -> Image {
-        Image {
-            code: vec![0u8],
-            packed_bitmask: vec![0x01],
-            jump_table: Vec::new(),
-            endpoints: BTreeMap::new(),
-            memory_mappings: Vec::new(),
-            gas_slots: Vec::new(),
-            quota_slots: Vec::new(),
-            pinned_slots: BTreeMap::new(),
-            initial_slots: BTreeMap::new(),
-            yield_marker_slot: None,
-        }
-    }
 
     fn fixture_vm() -> Vm<InProcessKernelAssist> {
         let mut vm = Vm::new(InProcessKernelAssist::new());
-        let mut cnode = Box::new(InMemoryCNode::<Cap>::new(4).unwrap());
-        // Seed slot 2 with an Image cap.
+        let mut cnode = CNodeCap::<Global>::new(4).unwrap();
+        // Seed slot 2 with a Hash-form target (treated as an Image hash).
         cnode
-            .set(
-                SlotIdx(2),
-                Some(Cap::Image(ImageCap {
-                    content_hash: [0xAA; 32],
-                })),
-            )
+            .set(SlotIdx(2), Some(CapHashOrRef::Hash([0xAA; 32])))
             .unwrap();
-        let img = Arc::new(empty_image());
         let prog = Arc::new(PvmProgram::new(vec![0u8], vec![1u8], vec![], 25).unwrap());
         let entry = InstanceEntry {
-            instance: InstanceCap {
-                image_hash_chain: [1u8; 32],
-                content_hash: [2u8; 32],
-            },
-            image: img,
+            instance_ref: CapHashOrRef::Hash([1u8; 32]),
+            image_hash_chain: [1u8; 32],
+            image_hash: [2u8; 32],
             program: prog,
-            cnode,
+            root_cnode: cnode,
+            yield_marker_slot: None,
+            pinned_slots: Vec::new(),
             regs: Regs::new(),
             mem: Mem::new(),
             gas: GasCounter::new(1000),
@@ -791,9 +519,9 @@ mod tests {
         let mut mem = Mem::new();
         let r = vm.handle(EcallKind::Ecalli(mgmt_op::COPY), &mut regs, &mut mem);
         assert!(matches!(r, EcallResult::Continue));
-        let cnode = &vm.stack.running_instance().unwrap().cnode;
-        assert!(cnode.get(SlotIdx(2)).unwrap().is_some());
-        assert!(cnode.get(SlotIdx(7)).unwrap().is_some());
+        let cnode = &vm.stack.running_instance().unwrap().root_cnode;
+        assert!(cnode.get(SlotIdx(2)).is_some());
+        assert!(cnode.get(SlotIdx(7)).is_some());
     }
 
     #[test]
@@ -805,9 +533,9 @@ mod tests {
         let mut mem = Mem::new();
         let r = vm.handle(EcallKind::Ecalli(mgmt_op::MOVE), &mut regs, &mut mem);
         assert!(matches!(r, EcallResult::Continue));
-        let cnode = &vm.stack.running_instance().unwrap().cnode;
-        assert!(cnode.get(SlotIdx(2)).unwrap().is_none()); // source moved out
-        assert!(cnode.get(SlotIdx(9)).unwrap().is_some()); // dst now holds it
+        let cnode = &vm.stack.running_instance().unwrap().root_cnode;
+        assert!(cnode.get(SlotIdx(2)).is_none()); // source moved out
+        assert!(cnode.get(SlotIdx(9)).is_some()); // dst now holds it
     }
 
     #[test]
@@ -818,12 +546,12 @@ mod tests {
         let mut mem = Mem::new();
         let r = vm.handle(EcallKind::Ecalli(mgmt_op::DROP), &mut regs, &mut mem);
         assert!(matches!(r, EcallResult::Continue));
-        let cnode = &vm.stack.running_instance().unwrap().cnode;
-        assert!(cnode.get(SlotIdx(2)).unwrap().is_none());
+        let cnode = &vm.stack.running_instance().unwrap().root_cnode;
+        assert!(cnode.get(SlotIdx(2)).is_none());
     }
 
     #[test]
-    fn mgmt_cnode_mint_creates_nested_cnode() {
+    fn mgmt_cnode_mint_places_hash_at_dst() {
         let mut vm = fixture_vm();
         let mut regs = Regs::new();
         regs.gpr[7] = 5; // dst
@@ -831,27 +559,18 @@ mod tests {
         let mut mem = Mem::new();
         let r = vm.handle(EcallKind::Ecalli(mgmt_op::CNODE_MINT), &mut regs, &mut mem);
         assert!(matches!(r, EcallResult::Continue));
-        let cnode = &vm.stack.running_instance().unwrap().cnode;
-        assert!(matches!(
-            cnode.get(SlotIdx(5)).unwrap(),
-            Some(Cap::CNode(_))
-        ));
+        let cnode = &vm.stack.running_instance().unwrap().root_cnode;
+        assert!(matches!(cnode.get(SlotIdx(5)), Some(CapHashOrRef::Hash(_))));
     }
 
     #[test]
     fn mgmt_cnode_swap_swaps_slots() {
         let mut vm = fixture_vm();
-        // Seed slot 3 with another cap so we have something to swap.
         vm.stack
             .running_instance_mut()
             .unwrap()
-            .cnode
-            .set(
-                SlotIdx(3),
-                Some(Cap::Image(ImageCap {
-                    content_hash: [0xBB; 32],
-                })),
-            )
+            .root_cnode
+            .set(SlotIdx(3), Some(CapHashOrRef::Hash([0xBB; 32])))
             .unwrap();
         let mut regs = Regs::new();
         regs.gpr[7] = 2;
@@ -859,17 +578,11 @@ mod tests {
         let mut mem = Mem::new();
         let r = vm.handle(EcallKind::Ecalli(mgmt_op::CNODE_SWAP), &mut regs, &mut mem);
         assert!(matches!(r, EcallResult::Continue));
-        let cnode = &vm.stack.running_instance().unwrap().cnode;
-        let slot2 = match cnode.get(SlotIdx(2)).unwrap() {
-            Some(Cap::Image(c)) => c.content_hash,
-            _ => panic!(),
-        };
-        let slot3 = match cnode.get(SlotIdx(3)).unwrap() {
-            Some(Cap::Image(c)) => c.content_hash,
-            _ => panic!(),
-        };
-        assert_eq!(slot2, [0xBB; 32]);
-        assert_eq!(slot3, [0xAA; 32]);
+        let cnode = &vm.stack.running_instance().unwrap().root_cnode;
+        let s2 = cnode.get(SlotIdx(2)).unwrap();
+        let s3 = cnode.get(SlotIdx(3)).unwrap();
+        assert_eq!(s2, CapHashOrRef::Hash([0xBB; 32]));
+        assert_eq!(s3, CapHashOrRef::Hash([0xAA; 32]));
     }
 
     #[test]
@@ -903,9 +616,8 @@ mod tests {
             vm.stack
                 .running_instance()
                 .unwrap()
-                .cnode
+                .root_cnode
                 .get(SlotIdx(2))
-                .unwrap()
                 .is_none()
         );
     }
@@ -919,62 +631,26 @@ mod tests {
         assert!(matches!(r, EcallResult::Continue));
     }
 
-    // -- 3.9 host calls --
-
     #[test]
     fn set_image_extends_chain_hash() {
         let mut vm = fixture_vm();
-        // Register the target image keyed by [0xAA; 32] (the slot-2
-        // ImageCap content_hash).
-        let new_img = Arc::new(empty_image());
-        vm.kernel_assist.register_image([0xAA; 32], new_img);
-
-        let original_chain = vm
-            .stack
-            .running_instance()
-            .unwrap()
-            .instance
-            .image_hash_chain;
-
-        let mut regs = Regs::new();
-        regs.gpr[7] = 2; // image slot
-        let mut mem = Mem::new();
-        let r = vm.handle(EcallKind::Ecalli(host_op::SET_IMAGE), &mut regs, &mut mem);
-        assert!(matches!(r, EcallResult::Continue));
-
-        let new_chain = vm
-            .stack
-            .running_instance()
-            .unwrap()
-            .instance
-            .image_hash_chain;
-        assert_ne!(original_chain, new_chain);
-    }
-
-    #[test]
-    fn set_image_without_registry_traps() {
-        let mut vm = fixture_vm();
-        // No register_image call: [0xAA;32] won't resolve.
+        let original_chain = vm.stack.running_instance().unwrap().image_hash_chain;
         let mut regs = Regs::new();
         regs.gpr[7] = 2;
         let mut mem = Mem::new();
         let r = vm.handle(EcallKind::Ecalli(host_op::SET_IMAGE), &mut regs, &mut mem);
-        assert!(matches!(r, EcallResult::Exit(ExitReason::Trap)));
+        assert!(matches!(r, EcallResult::Continue));
+        let new_chain = vm.stack.running_instance().unwrap().image_hash_chain;
+        assert_ne!(original_chain, new_chain);
     }
 
     #[test]
-    fn derive_spawn_mints_extended_chain_instance() {
+    fn derive_spawn_mints_extended_chain_target() {
         let mut vm = fixture_vm();
-        let parent_chain = vm
-            .stack
-            .running_instance()
-            .unwrap()
-            .instance
-            .image_hash_chain;
-
+        let parent_chain = vm.stack.running_instance().unwrap().image_hash_chain;
         let mut regs = Regs::new();
-        regs.gpr[7] = 2; // image slot (Cap::Image with content_hash [0xAA;32])
-        regs.gpr[8] = 5; // dst slot
+        regs.gpr[7] = 2;
+        regs.gpr[8] = 5;
         let mut mem = Mem::new();
         let r = vm.handle(
             EcallKind::Ecalli(host_op::DERIVE_SPAWN),
@@ -982,49 +658,33 @@ mod tests {
             &mut mem,
         );
         assert!(matches!(r, EcallResult::Continue));
-
-        let cnode = &vm.stack.running_instance().unwrap().cnode;
-        let child = match cnode.get(SlotIdx(5)).unwrap() {
-            Some(Cap::Instance(c)) => *c,
-            other => panic!("expected Cap::Instance at dst slot, got {:?}", other),
-        };
-        assert_ne!(child.image_hash_chain, parent_chain);
+        let cnode = &vm.stack.running_instance().unwrap().root_cnode;
+        let child = cnode.get(SlotIdx(5)).unwrap();
+        match child {
+            CapHashOrRef::Hash(h) => assert_ne!(h, parent_chain),
+            _ => panic!("expected Hash form at dst"),
+        }
     }
 
     #[test]
     fn host_same_type_compares_chain() {
         let mut vm = fixture_vm();
-        let inst_a = InstanceCap {
-            image_hash_chain: [0x33; 32],
-            content_hash: [0xCC; 32],
-        };
-        let inst_b = InstanceCap {
-            image_hash_chain: [0x33; 32],
-            content_hash: [0xDD; 32],
-        };
-        let inst_c = InstanceCap {
-            image_hash_chain: [0x99; 32],
-            content_hash: [0xEE; 32],
-        };
-        {
-            let running = vm.stack.running_instance_mut().unwrap();
-            running
-                .cnode
-                .set(SlotIdx(3), Some(Cap::Instance(inst_a)))
-                .unwrap();
-            running
-                .cnode
-                .set(SlotIdx(4), Some(Cap::Instance(inst_b)))
-                .unwrap();
-            running
-                .cnode
-                .set(SlotIdx(6), Some(Cap::Instance(inst_c)))
-                .unwrap();
-        }
-
+        vm.stack
+            .running_instance_mut()
+            .unwrap()
+            .root_cnode
+            .set(SlotIdx(3), Some(CapHashOrRef::Hash([0xAA; 32])))
+            .unwrap();
+        vm.stack
+            .running_instance_mut()
+            .unwrap()
+            .root_cnode
+            .set(SlotIdx(4), Some(CapHashOrRef::Hash([0x99; 32])))
+            .unwrap();
+        // slot 2 already has [0xAA;32].
         let mut regs = Regs::new();
-        regs.gpr[7] = 3;
-        regs.gpr[8] = 4;
+        regs.gpr[7] = 2;
+        regs.gpr[8] = 3;
         let mut mem = Mem::new();
         let r = vm.handle(
             EcallKind::Ecalli(host_op::HOST_SAME_TYPE),
@@ -1034,8 +694,8 @@ mod tests {
         assert!(matches!(r, EcallResult::Continue));
         assert_eq!(regs.gpr[7], 1);
 
-        regs.gpr[7] = 3;
-        regs.gpr[8] = 6;
+        regs.gpr[7] = 2;
+        regs.gpr[8] = 4;
         let r = vm.handle(
             EcallKind::Ecalli(host_op::HOST_SAME_TYPE),
             &mut regs,
@@ -1043,38 +703,6 @@ mod tests {
         );
         assert!(matches!(r, EcallResult::Continue));
         assert_eq!(regs.gpr[7], 0);
-    }
-
-    #[test]
-    fn host_type_of_mints_type_cap() {
-        let mut vm = fixture_vm();
-        let inst = InstanceCap {
-            image_hash_chain: [0x77; 32],
-            content_hash: [0x11; 32],
-        };
-        vm.stack
-            .running_instance_mut()
-            .unwrap()
-            .cnode
-            .set(SlotIdx(3), Some(Cap::Instance(inst)))
-            .unwrap();
-
-        let mut regs = Regs::new();
-        regs.gpr[7] = 3;
-        regs.gpr[8] = 4;
-        let mut mem = Mem::new();
-        let r = vm.handle(
-            EcallKind::Ecalli(host_op::HOST_TYPE_OF),
-            &mut regs,
-            &mut mem,
-        );
-        assert!(matches!(r, EcallResult::Continue));
-
-        let cnode = &vm.stack.running_instance().unwrap().cnode;
-        match cnode.get(SlotIdx(4)).unwrap() {
-            Some(Cap::Type(tc)) => assert_eq!(tc.image_hash_chain, [0x77; 32]),
-            other => panic!("expected Cap::Type at dst, got {:?}", other),
-        }
     }
 
     #[test]
@@ -1086,121 +714,28 @@ mod tests {
         assert!(matches!(r, EcallResult::Exit(ExitReason::Trap)));
     }
 
-    // -- 3.10 host calls --
-
     #[test]
-    fn host_read_data_cap_copies_bytes_into_mem() {
-        let mut vm = fixture_vm();
-        // Seed kernel_assist with bytes at content_hash [0x55; 32].
-        let bytes = vec![0x11u8, 0x22, 0x33, 0x44];
-        vm.kernel_assist.register_data([0x55; 32], bytes.clone());
-        // Place a Cap::Data referencing them at slot 4.
-        vm.stack
-            .running_instance_mut()
-            .unwrap()
-            .cnode
-            .set(
-                SlotIdx(4),
-                Some(Cap::Data(javm_cap::DataCap {
-                    content_hash: [0x55; 32],
-                    size: 4,
-                })),
-            )
-            .unwrap();
-
-        let mut mem = javm_exec::Mem::with_pages(1, javm_exec::perm::RW);
-        let mut regs = Regs::new();
-        regs.gpr[7] = 4; // cap slot
-        regs.gpr[8] = 0x100; // dst addr
-        regs.gpr[9] = 4; // len
-        let r = vm.handle(
-            EcallKind::Ecalli(host_op::HOST_READ_DATA_CAP),
-            &mut regs,
-            &mut mem,
-        );
-        assert!(matches!(r, EcallResult::Continue));
-        assert_eq!(mem.read(0x100, 4).unwrap(), bytes);
-    }
-
-    #[test]
-    fn host_mint_data_cap_round_trip() {
-        let mut vm = fixture_vm();
-        // Seed a Quota cap at slot 5 with quota_id = 7.
-        let mut quota_hash = [0u8; 32];
-        quota_hash[..8].copy_from_slice(&7u64.to_le_bytes());
-        vm.stack
-            .running_instance_mut()
-            .unwrap()
-            .cnode
-            .set(
-                SlotIdx(5),
-                Some(Cap::Instance(InstanceCap {
-                    image_hash_chain: [0xCAu8; 32],
-                    content_hash: quota_hash,
-                })),
-            )
-            .unwrap();
-        vm.kernel_assist.storage_quota_set(7, 1000);
-
-        let mut mem = javm_exec::Mem::with_pages(1, javm_exec::perm::RW);
-        let payload = b"hello world";
-        mem.write(0x200, payload).unwrap();
-
-        let mut regs = Regs::new();
-        regs.gpr[7] = 0x200;
-        regs.gpr[8] = payload.len() as u64;
-        regs.gpr[9] = 5;
-        regs.gpr[10] = 6;
-        let r = vm.handle(
-            EcallKind::Ecalli(host_op::HOST_MINT_DATA_CAP),
-            &mut regs,
-            &mut mem,
-        );
-        assert!(matches!(r, EcallResult::Continue));
-
-        let cnode = &vm.stack.running_instance().unwrap().cnode;
-        match cnode.get(SlotIdx(6)).unwrap() {
-            Some(Cap::Data(c)) => assert_eq!(c.size, payload.len() as u64),
-            other => panic!("expected Cap::Data at dst, got {:?}", other),
+    fn cache_dependent_host_calls_trap() {
+        // host_read_data_cap / host_mint_data_cap / host_open /
+        // host_save / host_type_of all need cache access during
+        // interpreter run — deferred to Stage 4. They trap in V1.
+        for op in [
+            host_op::HOST_TYPE_OF,
+            host_op::HOST_READ_DATA_CAP,
+            host_op::HOST_MINT_DATA_CAP,
+            host_op::HOST_OPEN,
+            host_op::HOST_SAVE,
+        ] {
+            let mut vm = fixture_vm();
+            let mut regs = Regs::new();
+            let mut mem = Mem::new();
+            let r = vm.handle(EcallKind::Ecalli(op), &mut regs, &mut mem);
+            assert!(
+                matches!(r, EcallResult::Exit(ExitReason::Trap)),
+                "op {} should trap (cache-dependent host call)",
+                op
+            );
         }
-        assert_eq!(
-            vm.kernel_assist.storage_quota_get(7),
-            1000 - payload.len() as u64
-        );
-    }
-
-    #[test]
-    fn host_mint_data_cap_exhausts_quota_traps() {
-        let mut vm = fixture_vm();
-        let mut quota_hash = [0u8; 32];
-        quota_hash[..8].copy_from_slice(&7u64.to_le_bytes());
-        vm.stack
-            .running_instance_mut()
-            .unwrap()
-            .cnode
-            .set(
-                SlotIdx(5),
-                Some(Cap::Instance(InstanceCap {
-                    image_hash_chain: [0xCAu8; 32],
-                    content_hash: quota_hash,
-                })),
-            )
-            .unwrap();
-        vm.kernel_assist.storage_quota_set(7, 3); // less than payload
-
-        let mut mem = javm_exec::Mem::with_pages(1, javm_exec::perm::RW);
-        mem.write(0x200, b"too much").unwrap();
-        let mut regs = Regs::new();
-        regs.gpr[7] = 0x200;
-        regs.gpr[8] = 8;
-        regs.gpr[9] = 5;
-        regs.gpr[10] = 6;
-        let r = vm.handle(
-            EcallKind::Ecalli(host_op::HOST_MINT_DATA_CAP),
-            &mut regs,
-            &mut mem,
-        );
-        assert!(matches!(r, EcallResult::Exit(ExitReason::Trap)));
     }
 
     #[test]
@@ -1209,119 +744,5 @@ mod tests {
         assert_eq!(strip_trailing_zeros_len(&[1, 2, 3, 0, 0]), 3);
         assert_eq!(strip_trailing_zeros_len(&[0, 0, 0]), 0);
         assert_eq!(strip_trailing_zeros_len(&[]), 0);
-    }
-
-    // -- 3.12 host_open / host_save --
-
-    #[test]
-    fn host_open_materializes_registered_file_as_data() {
-        let mut vm = fixture_vm();
-        // Register file_id 99 → DataCap{hash=[0x77;32], size=12}.
-        let data = javm_cap::DataCap {
-            content_hash: [0x77u8; 32],
-            size: 12,
-        };
-        vm.kernel_assist.register_file(99, data);
-        // Place a FileCap (Cap::Instance with content_hash low 8
-        // bytes = file_id 99) at slot 3.
-        let mut file_hash = [0u8; 32];
-        file_hash[..8].copy_from_slice(&99u64.to_le_bytes());
-        vm.stack
-            .running_instance_mut()
-            .unwrap()
-            .cnode
-            .set(
-                SlotIdx(3),
-                Some(Cap::Instance(InstanceCap {
-                    image_hash_chain: crate::kernel_assist::kernel_image_hash(
-                        crate::kernel_assist::KernelImage::File,
-                    ),
-                    content_hash: file_hash,
-                })),
-            )
-            .unwrap();
-
-        let mut regs = Regs::new();
-        regs.gpr[7] = 3; // file slot
-        regs.gpr[8] = 4; // dst slot
-        let mut mem = Mem::new();
-        let r = vm.handle(EcallKind::Ecalli(host_op::HOST_OPEN), &mut regs, &mut mem);
-        assert!(matches!(r, EcallResult::Continue));
-
-        let cnode = &vm.stack.running_instance().unwrap().cnode;
-        match cnode.get(SlotIdx(4)).unwrap() {
-            Some(Cap::Data(c)) => {
-                assert_eq!(c.content_hash, [0x77u8; 32]);
-                assert_eq!(c.size, 12);
-            }
-            other => panic!("expected Cap::Data at dst, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn host_save_mints_file_after_quota_debit() {
-        let mut vm = fixture_vm();
-        // Quota{quota_id=4} at slot 3 with 1000 bytes.
-        let mut quota_hash = [0u8; 32];
-        quota_hash[..8].copy_from_slice(&4u64.to_le_bytes());
-        vm.stack
-            .running_instance_mut()
-            .unwrap()
-            .cnode
-            .set(
-                SlotIdx(3),
-                Some(Cap::Instance(InstanceCap {
-                    image_hash_chain: [0xCAu8; 32],
-                    content_hash: quota_hash,
-                })),
-            )
-            .unwrap();
-        vm.kernel_assist.storage_quota_set(4, 1000);
-        // Data cap at slot 4 (size 100).
-        vm.stack
-            .running_instance_mut()
-            .unwrap()
-            .cnode
-            .set(
-                SlotIdx(4),
-                Some(Cap::Data(javm_cap::DataCap {
-                    content_hash: [0x66u8; 32],
-                    size: 100,
-                })),
-            )
-            .unwrap();
-
-        let mut regs = Regs::new();
-        regs.gpr[7] = 4; // data slot
-        regs.gpr[8] = 3; // quota slot
-        regs.gpr[9] = 5; // dst slot
-        let mut mem = Mem::new();
-        let r = vm.handle(EcallKind::Ecalli(host_op::HOST_SAVE), &mut regs, &mut mem);
-        assert!(matches!(r, EcallResult::Continue));
-
-        // dst should hold a Cap::Instance (FileCap) with kernel:file image_hash.
-        let cnode = &vm.stack.running_instance().unwrap().cnode;
-        let file_id = match cnode.get(SlotIdx(5)).unwrap() {
-            Some(Cap::Instance(ic)) => {
-                assert_eq!(
-                    ic.image_hash_chain,
-                    crate::kernel_assist::kernel_image_hash(
-                        crate::kernel_assist::KernelImage::File
-                    )
-                );
-                u64::from_le_bytes(ic.content_hash[..8].try_into().unwrap())
-            }
-            other => panic!("expected Cap::Instance FileCap at dst, got {:?}", other),
-        };
-        // file_id should be 1 (the first id minted).
-        assert_eq!(file_id, 1);
-        // Quota debited by 100.
-        assert_eq!(vm.kernel_assist.storage_quota_get(4), 900);
-
-        // Re-open the newly-minted file → DataCap with the original
-        // content_hash + size.
-        let data = vm.kernel_assist.host_open(file_id).unwrap();
-        assert_eq!(data.content_hash, [0x66u8; 32]);
-        assert_eq!(data.size, 100);
     }
 }

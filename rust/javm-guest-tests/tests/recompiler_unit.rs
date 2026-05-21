@@ -21,8 +21,10 @@
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use nub::{Nub, PublishSpec};
+use javm_cap::image::{EndpointDef, Image};
+use nub::Nub;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 thread_local! {
     static NUB: RefCell<Option<Nub>> = const { RefCell::new(None) };
@@ -50,28 +52,48 @@ struct RunResult {
 }
 
 fn run(ps: ProgSpec) -> RunResult {
-    // Hash the program bytes to get a unique CapHash per test —
-    // ensures each test publishes a distinct cache entry.
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&ps.code);
-    hasher.update(&ps.bitmask);
-    hasher.update(&ps.rw_data);
-    hasher.update(&ps.rw_start.to_le_bytes());
-    let instance_hash: [u8; 32] = hasher.finalize().as_bytes()[..32]
-        .try_into()
-        .expect("blake3 32-byte digest");
+    // Prefix a one-byte fallback trap at PC=0 so endpoints can enter
+    // at PC=1. The talc-shape `EndpointDef::empty` uses `entry_pc == 0`
+    // as the "endpoint not defined" sentinel; live endpoints must point
+    // at PC >= 1 (matching the PVM spec's reserved-fallback convention,
+    // mirrored in `nub/tests/smoke.rs`). The test fixtures use an
+    // unpacked bitmask (1 byte per code byte: 1 = insn start, 0 =
+    // continuation); `Image::packed_bitmask` is bit-packed, so we also
+    // pack here.
+    let mut shifted_code = Vec::with_capacity(ps.code.len() + 1);
+    shifted_code.push(0u8);
+    shifted_code.extend_from_slice(&ps.code);
 
-    let mut entry_pcs = [0u64; nub_arch_x86_abi::MAX_ENDPOINTS];
-    entry_pcs[0] = 0; // endpoint 0 → PC=0
-    let mut spec = PublishSpec::empty();
-    spec.instance_hash = instance_hash;
-    spec.code = ps.code;
-    spec.bitmask = ps.bitmask;
-    spec.mem_size = ps.mem_size.max(4096);
-    spec.rw_start = ps.rw_start;
-    spec.rw_data = ps.rw_data;
-    spec.entry_pcs = entry_pcs;
-    spec.initial_regs = ps.registers;
+    let mut packed_bitmask = vec![0u8; shifted_code.len().div_ceil(8)];
+    packed_bitmask[0] |= 1;
+    for old_idx in 0..ps.code.len() {
+        if ps.bitmask[old_idx] != 0 {
+            let new_bit = old_idx + 1;
+            packed_bitmask[new_bit / 8] |= 1 << (new_bit % 8);
+        }
+    }
+
+    let mut img = Image::empty();
+    img.code = shifted_code;
+    img.packed_bitmask = packed_bitmask;
+    let mut endpoints: BTreeMap<u8, EndpointDef> = BTreeMap::new();
+    endpoints.insert(
+        0,
+        EndpointDef {
+            entry_pc: 1,
+            arg_registers: 0,
+            arg_cnode_size: 0,
+            initial_regs: BTreeMap::new(),
+        },
+    );
+    img.endpoints = endpoints;
+
+    let mem_size = ps.mem_size.max(4096);
+    let overlay_vec: Vec<(u32, &[u8])> = if ps.rw_data.is_empty() {
+        Vec::new()
+    } else {
+        vec![(ps.rw_start, ps.rw_data.as_slice())]
+    };
 
     NUB.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -79,9 +101,22 @@ fn run(ps: ProgSpec) -> RunResult {
             *borrow = Some(Nub::new_hyperlight().expect("Hyperlight sandbox"));
         }
         let nub = borrow.as_mut().expect("nub initialised above");
-        nub.publish_instance(spec).expect("publish_instance");
+        let image_h = nub.publish_image(&img).expect("publish_image");
+        let cnode_h = nub.publish_cnode(0, &[]).expect("publish_cnode");
+        let instance_h = nub
+            .publish_instance(
+                [0u8; 32],
+                image_h,
+                cnode_h,
+                &overlay_vec,
+                mem_size,
+                ps.registers,
+                0,
+                0,
+            )
+            .expect("publish_instance");
         let r = nub
-            .invoke_cached(instance_hash, 0, [0; 4], ps.gas)
+            .invoke_cached(instance_h, 0, [0; 4], ps.gas)
             .expect("invoke_cached");
         RunResult {
             exit_reason: r.exit_reason,

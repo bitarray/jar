@@ -7,19 +7,24 @@
 //! rebuilds via the shallow-PML4-copy mechanism in
 //! [`crate::paging::PageTable::new`].
 //!
-//! In V0 the JIT does not read directly from the cache region; the
-//! `nub_invoke_cached` dispatcher copies slabs into per-call Vec<u8>s
-//! and hands those to the existing `jit_run::run_pvm_with_mem`. A
-//! follow-up can flip the cache mapping to USER|RW so the JIT can
-//! reference cache VAs directly.
+//! Host and guest both map the region at the same VA
+//! ([`STATE_CACHE_VA`]) via `MAP_FIXED_NOREPLACE` on the host side,
+//! which means every pointer the host wrote inside the region is
+//! directly dereferenceable here. The directory at
+//! [`CACHE_DIRECTORY_OFFSET`] holds `(CapHash, entry_va)` pairs that
+//! resolve cap-hash queries into a `&CacheEntry<TalcAlloc>` we can
+//! walk by pointer.
 
 #![cfg(target_os = "none")]
 
+use allocator_api2::alloc::Allocator;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use javm_cap::cap::Cap;
+use javm_cap::entry::CacheEntry;
 use nub_host_common::cache::{
-    INSTANCE_INDEX_OFFSET, IndexSlot, InstanceIndex, MAX_INDEX_SLOTS, STATE_CACHE_GPA,
-    STATE_CACHE_SIZE, STATE_CACHE_VA,
+    CACHE_DIRECTORY_OFFSET, CacheDirectory, STATE_CACHE_GPA, STATE_CACHE_SIZE, STATE_CACHE_VA,
+    TalcAlloc,
 };
 
 use crate::paging::{Perm, install_persistent_kernel_mapping};
@@ -34,7 +39,6 @@ pub fn ensure_mapped() -> Result<(), &'static str> {
     if CACHE_MAPPED.load(Ordering::Acquire) {
         return Ok(());
     }
-    // Kernel-only (no USER) — V0 dispatcher reads from kernel mode.
     let perm = Perm::kernel_rw();
     unsafe {
         install_persistent_kernel_mapping(
@@ -49,34 +53,48 @@ pub fn ensure_mapped() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Read-only view into the cache's InstanceIndex.
-fn index_ptr() -> *const InstanceIndex {
-    (STATE_CACHE_VA + INSTANCE_INDEX_OFFSET as u64) as *const InstanceIndex
+/// Read-only view into the cache's `CacheDirectory`.
+fn directory_ptr() -> *const CacheDirectory {
+    (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *const CacheDirectory
 }
 
-/// Look up an IndexSlot by instance hash. Returns a copy of the slot
-/// (`#[repr(C)]` plain data).
-pub fn lookup(hash: &[u8; 32]) -> Option<IndexSlot> {
-    ensure_mapped().ok()?;
-    let idx = index_ptr();
-    for i in 0..MAX_INDEX_SLOTS {
-        let slot_ptr = unsafe { core::ptr::addr_of!((*idx).slots[i]) };
-        let slot_hash = unsafe { (*slot_ptr).instance_hash };
-        if &slot_hash == hash {
-            return Some(unsafe { core::ptr::read(slot_ptr) });
-        }
-    }
-    None
-}
-
-/// Resolve a `(off, len)` slot field into a borrowed byte slice
-/// pointing into cache memory.
+/// Look up a blob (content-addressed cap) by hash. Returns a borrowed
+/// reference to the `CacheEntry` living in cache memory.
 ///
 /// # Safety
 ///
-/// `ensure_mapped()` must have succeeded. `off + len` must be within
-/// the cache region.
-pub unsafe fn slab_bytes(off: u32, len: u32) -> &'static [u8] {
-    let base = STATE_CACHE_VA + off as u64;
-    unsafe { core::slice::from_raw_parts(base as *const u8, len as usize) }
+/// The returned reference borrows from the cache region. Callers must
+/// ensure the cap isn't unpublished (decref to zero) while the
+/// reference is live. V1 uses per-call `pin/unpin` on the host side
+/// to enforce this.
+pub fn lookup_blob<A: Allocator + Clone>(hash: &[u8; 32]) -> Option<&'static CacheEntry<A>> {
+    ensure_mapped().ok()?;
+    let dir = directory_ptr();
+    // SAFETY: dir is a live pointer; find_blob just scans the array.
+    let (_, slot_ptr) = unsafe { CacheDirectory::find_blob(dir, hash) }?;
+    let va = unsafe { (*slot_ptr).entry_va };
+    if va == 0 {
+        return None;
+    }
+    // SAFETY: the host wrote a valid CacheEntry<TalcAlloc> at this VA;
+    // host VA == guest VA so the pointer is directly dereferenceable.
+    Some(unsafe { &*(va as *const CacheEntry<A>) })
+}
+
+/// Resolve an instance ref to its `CacheEntry`.
+#[allow(dead_code)]
+pub fn lookup_instance<A: Allocator + Clone>(ref_id: u64) -> Option<&'static CacheEntry<A>> {
+    ensure_mapped().ok()?;
+    let dir = directory_ptr();
+    let (_, slot_ptr) = unsafe { CacheDirectory::find_instance(dir, ref_id) }?;
+    let va = unsafe { (*slot_ptr).entry_va };
+    if va == 0 {
+        return None;
+    }
+    Some(unsafe { &*(va as *const CacheEntry<A>) })
+}
+
+/// Convenience: resolve a blob hash directly to its inner `Cap`.
+pub fn lookup_cap(hash: &[u8; 32]) -> Option<&'static Cap<TalcAlloc>> {
+    lookup_blob::<TalcAlloc>(hash).map(|e| &e.cap)
 }

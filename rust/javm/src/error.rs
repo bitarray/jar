@@ -1,6 +1,6 @@
 //! Errors surfaced by the v3 Vm.
 
-use javm_cap::{CapError, OpError};
+use javm_cap::{CacheError, CapError, OpError};
 
 /// Errors from the Vm driver. Distinct from per-instruction
 /// `ExitReason` values (those come from `javm_exec`).
@@ -24,6 +24,8 @@ pub enum VmError {
     CapTable(#[from] CapError),
     #[error("MGMT op failed: {0}")]
     Op(#[from] OpError),
+    #[error("cache operation failed: {0}")]
+    Cache(#[from] CacheError),
     #[error("yield marker did not match any handler on the call stack")]
     UnhandledMarker,
     #[error("image bytecode failed to parse: {0}")]

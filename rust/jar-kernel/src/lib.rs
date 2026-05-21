@@ -5,19 +5,11 @@
 //! (`javm`) into the chain-side kernel: σ state, block apply,
 //! state-root, kernel-assisted Instance impls, host_open/host_save.
 //!
-//! See `~/docs/minimum-v3/implementation/architecture.md` (Layer 4
-//! — `jar-kernel`) for the design.
-//!
-//! Stage 4 of the v3 implementation. Built incrementally:
-//!
-//! - C.1 (this commit): crate scaffold + module declarations.
-//! - C.2: `State` + `state_root` via SCALE + blake2b.
-//! - C.3: `SigmaKernelAssist` — σ-aware [`javm::KernelAssist`] impl.
-//! - C.4: Native kernel-assisted Instance dispatch.
-//! - C.5: Genesis + kernel cap injection.
-//! - C.6: Block apply driver.
-//! - C.7: σ data_blob refcount + drop-time refund.
-//! - C.8: Public `Kernel` API.
+//! σ is a [`javm_cap::Cache<Global>`] plus the validator set; cap
+//! content (Images, Data, CNodes, Instances) lives in the cache and
+//! is content-addressed by [`javm_cap::CapHash`]. `apply_event`
+//! publishes the event payload as a DataCap, rebinds the chain root
+//! cnode's slot\[0\] to it, and drives [`javm::Vm::invoke_cached`].
 
 pub mod abi;
 pub mod apply;
@@ -32,6 +24,4 @@ pub use error::KernelError;
 pub use genesis::{Genesis, genesis};
 pub use kernel::Kernel;
 pub use kernel_assist::SigmaKernelAssist;
-pub use state::{
-    CodeId, DataBlob, FileId, IdCounters, State, ValidatorKey, VaultId, VaultRecord, state_root,
-};
+pub use state::{State, ValidatorKey, state_root};

@@ -11,9 +11,12 @@ default = ["std"]
 std = ["scale/std", "blake2/std", "thiserror/std"]
 
 [dependencies]
+allocator-api2 = { version = "0.4", default-features = false, features = ["alloc"] }
 blake2 = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
 scale = { workspace = true }
 scale-derive = { workspace = true }
+nub-host-common = { path = "../nub-host-common", default-features = false }
 
 [dev-dependencies]
+talc = { version = "5.0.3", default-features = false }

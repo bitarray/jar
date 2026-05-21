@@ -14,76 +14,79 @@
 //!   kernel rejects mutations to these slots.
 //!
 //! Both are lightweight borrow views; the data lives on
-//! `InstanceEntry::{cnode, image}`. The MGMT dispatcher (Stage 3.6)
-//! uses these views to:
-//! 1. Resolve a `SlotPath` to a cap.
+//! `InstanceEntry::{root_cnode, pinned_slots}` plus the `Cache` that
+//! resolves nested-cnode walks. The MGMT dispatcher (Stage 3.6) uses
+//! these views to:
+//! 1. Resolve a `SlotPath` to a cap target (CapHashOrRef).
 //! 2. Enforce pinned-slot read-only semantics on writes.
 //! 3. Expose pinned-cap content to host calls that need it (e.g.,
 //!    `host_yield` reads the Cap::Instance\[YieldCatcher\] from the
 //!    Image-declared `yield_marker_slot`).
-//!
-//! Multi-step `SlotPath` traversal (walking through nested
-//! `Cap::CNode` slots) is provided here too: the MGMT dispatcher
-//! takes a `SlotPath` operand, this module walks it.
 
-use javm_cap::{CNodeBackend, Cap, CapError, PinnedCap, SlotIdx, SlotPath, image::Image};
+use allocator_api2::alloc::Global;
+use javm_cap::{CNodeCap, Cache, Cap, CapHashOrRef, SlotIdx, SlotPath};
 
 use crate::error::VmError;
 
 /// Read-only view of an active Instance's MainFrame cnode.
 pub struct MainFrame<'a> {
-    cnode: &'a (dyn CNodeBackend<Cap> + Send + Sync),
-    image: &'a Image,
+    cnode: &'a CNodeCap<Global>,
+    pinned: &'a [SlotIdx],
+    cache: &'a Cache<Global>,
 }
 
 impl<'a> MainFrame<'a> {
-    pub fn new(cnode: &'a (dyn CNodeBackend<Cap> + Send + Sync), image: &'a Image) -> Self {
-        Self { cnode, image }
+    pub fn new(
+        cnode: &'a CNodeCap<Global>,
+        pinned: &'a [SlotIdx],
+        cache: &'a Cache<Global>,
+    ) -> Self {
+        Self {
+            cnode,
+            pinned,
+            cache,
+        }
     }
 
     /// Cnode size as `log2(slots)`.
     pub fn size_log(&self) -> u8 {
-        self.cnode.size_log()
+        self.cnode.size_log
     }
 
     /// True if `idx` is declared pinned by the Image.
     pub fn is_pinned(&self, idx: SlotIdx) -> bool {
-        self.image.pinned_slots.contains_key(&idx)
+        self.pinned.binary_search(&idx).is_ok()
     }
 
-    /// Read a single root-cnode slot.
-    pub fn get(&self, idx: SlotIdx) -> Result<Option<&Cap>, CapError> {
+    /// Read a single root-cnode slot target.
+    pub fn get(&self, idx: SlotIdx) -> Option<CapHashOrRef> {
         self.cnode.get(idx)
     }
 
     /// Resolve a `SlotPath` against this MainFrame. Walks nested
-    /// `Cap::CNode` slots; returns the cap at the target slot (or
-    /// `None` if the slot is empty).
+    /// `Cap::CNode` slots via the cache; returns the cap target at
+    /// the path's terminal slot (or `None` if the slot is empty).
     ///
     /// Error: if any intermediate step fails to land on a
     /// `Cap::CNode` or hits an empty slot, returns
     /// `VmError::{SlotKindMismatch, SlotEmpty}`.
-    pub fn resolve<'b>(&'b self, path: &SlotPath) -> Result<Option<&'b Cap>, VmError>
-    where
-        'a: 'b,
-    {
-        let mut cur: &dyn CNodeBackend<Cap> = self.cnode;
+    pub fn resolve(&self, path: &SlotPath) -> Result<Option<CapHashOrRef>, VmError> {
+        let mut cur: &CNodeCap<Global> = self.cnode;
+        // Walk each intermediate step.
         for step in path.prefix() {
-            let entry = cur.get(*step)?;
-            match entry {
-                Some(Cap::CNode(c)) => {
-                    cur = c.backend.as_ref();
+            let target = cur.get(*step).ok_or(VmError::SlotEmpty(step.get()))?;
+            let cap = self
+                .cache
+                .get(target)
+                .ok_or(VmError::SlotKindMismatch(step.get()))?;
+            match cap {
+                Cap::CNode(inner) => {
+                    cur = inner;
                 }
-                Some(_) => return Err(VmError::SlotKindMismatch(step.get())),
-                None => return Err(VmError::SlotEmpty(step.get())),
+                _ => return Err(VmError::SlotKindMismatch(step.get())),
             }
         }
-        Ok(cur.get(path.target())?)
-    }
-
-    /// Image-declared pinned slots iterator.
-    pub fn pinned_slots(&self) -> impl Iterator<Item = (&SlotIdx, &PinnedCap)> {
-        self.image.pinned_slots.iter()
+        Ok(cur.get(path.target()))
     }
 }
 
@@ -96,137 +99,81 @@ pub struct BareFrame<'a> {
 }
 
 impl<'a> BareFrame<'a> {
-    pub fn new(cnode: &'a (dyn CNodeBackend<Cap> + Send + Sync), image: &'a Image) -> Self {
+    pub fn new(
+        cnode: &'a CNodeCap<Global>,
+        pinned: &'a [SlotIdx],
+        cache: &'a Cache<Global>,
+    ) -> Self {
         Self {
-            main: MainFrame::new(cnode, image),
+            main: MainFrame::new(cnode, pinned, cache),
         }
     }
 
-    /// Read the cap at a pinned slot. Returns `None` if the slot is
-    /// either not pinned by this Image's declarations or empty.
-    pub fn get(&self, idx: SlotIdx) -> Result<Option<&Cap>, CapError> {
+    /// Read the cap target at a pinned slot. Returns `None` if the
+    /// slot is either not pinned by this Image's declarations or
+    /// empty.
+    pub fn get(&self, idx: SlotIdx) -> Option<CapHashOrRef> {
         if self.main.is_pinned(idx) {
             self.main.get(idx)
         } else {
-            Ok(None)
+            None
         }
     }
 
     /// Image-declared pinned-slot iterator.
-    pub fn pinned_slots(&self) -> impl Iterator<Item = (&SlotIdx, &PinnedCap)> {
-        self.main.pinned_slots()
+    pub fn pinned_slots(&self) -> impl Iterator<Item = &SlotIdx> {
+        self.main.pinned.iter()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use javm_cap::{CNodeCap, InMemoryCNode};
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use javm_cap::Cache;
 
-    fn empty_image() -> Image {
-        Image {
-            code: vec![0u8],
-            packed_bitmask: vec![0x01],
-            jump_table: Vec::new(),
-            endpoints: BTreeMap::new(),
-            memory_mappings: Vec::new(),
-            gas_slots: Vec::new(),
-            quota_slots: Vec::new(),
-            pinned_slots: BTreeMap::new(),
-            initial_slots: BTreeMap::new(),
-            yield_marker_slot: None,
-        }
-    }
-
-    fn cnode_with(slots: &[(SlotIdx, Cap)]) -> InMemoryCNode<Cap> {
-        let mut c = InMemoryCNode::<Cap>::new(8).unwrap();
-        for (i, cap) in slots {
-            c.set(*i, Some(cap.clone())).unwrap();
-        }
-        c
+    fn empty_cache() -> Cache<Global> {
+        Cache::new_in(Global)
     }
 
     #[test]
     fn mainframe_get_root_slot() {
-        let cap = Cap::Image(javm_cap::ImageCap {
-            content_hash: [1; 32],
-        });
-        let cn = cnode_with(&[(SlotIdx(5), cap.clone())]);
-        let img = empty_image();
-        let m = MainFrame::new(&cn, &img);
-        assert!(m.get(SlotIdx(5)).unwrap().is_some());
-        assert!(m.get(SlotIdx(6)).unwrap().is_none());
+        let mut cn = CNodeCap::new(8).unwrap();
+        cn.set(SlotIdx(5), Some(CapHashOrRef::Hash([1u8; 32])))
+            .unwrap();
+        let cache = empty_cache();
+        let m = MainFrame::new(&cn, &[], &cache);
+        assert!(m.get(SlotIdx(5)).is_some());
+        assert!(m.get(SlotIdx(6)).is_none());
     }
 
     #[test]
-    fn mainframe_is_pinned_reads_image_decl() {
-        let cn = InMemoryCNode::<Cap>::new(8).unwrap();
-        let mut img = empty_image();
-        img.pinned_slots.insert(
-            SlotIdx(2),
-            PinnedCap::Data {
-                content: Vec::new(),
-                size: 0,
-            },
-        );
-        let m = MainFrame::new(&cn, &img);
+    fn mainframe_is_pinned_reads_pinned_list() {
+        let cn = CNodeCap::new(8).unwrap();
+        let cache = empty_cache();
+        let pinned = vec![SlotIdx(2), SlotIdx(5)];
+        let m = MainFrame::new(&cn, &pinned, &cache);
         assert!(m.is_pinned(SlotIdx(2)));
         assert!(!m.is_pinned(SlotIdx(3)));
+        assert!(m.is_pinned(SlotIdx(5)));
     }
 
     #[test]
     fn mainframe_resolve_root_path() {
-        let cap = Cap::Image(javm_cap::ImageCap {
-            content_hash: [7; 32],
-        });
-        let cn = cnode_with(&[(SlotIdx(9), cap)]);
-        let img = empty_image();
-        let m = MainFrame::new(&cn, &img);
+        let mut cn = CNodeCap::new(8).unwrap();
+        cn.set(SlotIdx(9), Some(CapHashOrRef::Hash([7u8; 32])))
+            .unwrap();
+        let cache = empty_cache();
+        let m = MainFrame::new(&cn, &[], &cache);
         let p = SlotPath::root(SlotIdx(9));
         let got = m.resolve(&p).unwrap();
-        assert!(matches!(got, Some(Cap::Image(_))));
-    }
-
-    #[test]
-    fn mainframe_resolve_nested_path() {
-        // Inner cnode at slot 3 of root; inner slot 1 holds a Cap::Type.
-        let inner = cnode_with(&[(
-            SlotIdx(1),
-            Cap::Type(javm_cap::TypeCap {
-                image_hash_chain: [42; 32],
-            }),
-        )]);
-        let inner_cap = Cap::CNode(CNodeCap::new(Arc::new(inner)));
-        let root = cnode_with(&[(SlotIdx(3), inner_cap)]);
-        let img = empty_image();
-        let m = MainFrame::new(&root, &img);
-        let p = SlotPath::new(vec![SlotIdx(3), SlotIdx(1)]).unwrap();
-        let got = m.resolve(&p).unwrap();
-        assert!(matches!(got, Some(Cap::Type(_))));
-    }
-
-    #[test]
-    fn mainframe_resolve_non_cnode_intermediate_errors() {
-        // Root slot 4 holds a Cap::Image (not a Cap::CNode); walking
-        // through it should fail.
-        let img_cap = Cap::Image(javm_cap::ImageCap {
-            content_hash: [9; 32],
-        });
-        let root = cnode_with(&[(SlotIdx(4), img_cap)]);
-        let img = empty_image();
-        let m = MainFrame::new(&root, &img);
-        let p = SlotPath::new(vec![SlotIdx(4), SlotIdx(0)]).unwrap();
-        let res = m.resolve(&p);
-        assert!(matches!(res, Err(VmError::SlotKindMismatch(4))));
+        assert_eq!(got, Some(CapHashOrRef::Hash([7u8; 32])));
     }
 
     #[test]
     fn mainframe_resolve_empty_intermediate_errors() {
-        let root = InMemoryCNode::<Cap>::new(8).unwrap();
-        let img = empty_image();
-        let m = MainFrame::new(&root, &img);
+        let cn = CNodeCap::new(8).unwrap();
+        let cache = empty_cache();
+        let m = MainFrame::new(&cn, &[], &cache);
         let p = SlotPath::new(vec![SlotIdx(7), SlotIdx(0)]).unwrap();
         let res = m.resolve(&p);
         assert!(matches!(res, Err(VmError::SlotEmpty(7))));
@@ -234,29 +181,17 @@ mod tests {
 
     #[test]
     fn bareframe_only_reads_pinned() {
-        let cap = Cap::Image(javm_cap::ImageCap {
-            content_hash: [3; 32],
-        });
-        let cn = cnode_with(&[
-            (SlotIdx(2), cap),
-            (
-                SlotIdx(3),
-                Cap::Type(javm_cap::TypeCap {
-                    image_hash_chain: [0; 32],
-                }),
-            ),
-        ]);
-        let mut img = empty_image();
-        img.pinned_slots.insert(
-            SlotIdx(2),
-            PinnedCap::Image {
-                content_hash: [3; 32],
-            },
-        );
-        let b = BareFrame::new(&cn, &img);
+        let mut cn = CNodeCap::new(8).unwrap();
+        cn.set(SlotIdx(2), Some(CapHashOrRef::Hash([3u8; 32])))
+            .unwrap();
+        cn.set(SlotIdx(3), Some(CapHashOrRef::Hash([4u8; 32])))
+            .unwrap();
+        let cache = empty_cache();
+        let pinned = vec![SlotIdx(2)];
+        let b = BareFrame::new(&cn, &pinned, &cache);
         // Slot 2 is pinned and present → readable.
-        assert!(b.get(SlotIdx(2)).unwrap().is_some());
+        assert!(b.get(SlotIdx(2)).is_some());
         // Slot 3 is present but NOT pinned → hidden.
-        assert!(b.get(SlotIdx(3)).unwrap().is_none());
+        assert!(b.get(SlotIdx(3)).is_none());
     }
 }

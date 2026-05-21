@@ -26,8 +26,10 @@ hyperlight-common = { version = "0.15", default-features = false }
 # in-kernel JIT path (Stages C1+). Direct path deps (not workspace
 # inheritance) because cargo forbids overriding workspace
 # `default-features` from the member crate.
+javm-cap = { path = "../javm-cap", default-features = false }
 javm-recompiler-x86 = { path = "../javm-recompiler-x86", default-features = false }
 javm-exec = { path = "../javm-exec", default-features = false }
+allocator-api2 = { version = "0.4", default-features = false, features = ["alloc"] }
 # Wire types shared between guest and host. The fn-id constants and
 # `Archive` / `Serialize` derives on `InvocationSpec` /
 # `InvocationResult` live here.

@@ -33,10 +33,9 @@ fn heap_drift_prime_sieve() {
     let image = Image::decode(PRIME_SIEVE_BLOB)
         .expect("decode prime_sieve Image")
         .0;
-    let spec = javm_bench::build_publish_spec(&image, 0);
-    let instance_hash = spec.instance_hash;
     let mut nub = Nub::new_hyperlight().expect("sandbox");
-    nub.publish_instance(spec).expect("publish_instance");
+    let published = javm_bench::publish(&mut nub, &image, 0);
+    let instance_hash = published.instance_hash;
 
     // Iter 0: baseline.
     let _ = nub.heap_stats().expect("baseline heap_stats");

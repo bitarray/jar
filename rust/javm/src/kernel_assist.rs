@@ -1,6 +1,5 @@
 //! `KernelAssist` trait: the integration point for kernel-assisted
-//! Instances (GasMeter, StorageQuota, YieldCatcher, plus the factory
-//! caps that mint them).
+//! Instances (GasMeter, StorageQuota, YieldCatcher).
 //!
 //! Per the v3 spec (README §22 "Kernel-assisted Instances"), certain
 //! Cap::Instance values are recognized by their `image_hash_chain` as
@@ -9,17 +8,16 @@
 //! still look like ordinary Cap::Instance values; the
 //! special-cased path is invisible.
 //!
-//! For Stage 3, the integration crate doesn't own σ, so it can't
-//! actually store kernel-internal state. Instead it asks an injected
-//! `KernelAssist` impl for the state on every short-circuit. The
-//! v3-jar-kernel that lands later will provide a σ-backed implementation;
-//! v3 javm ships `InProcessKernelAssist` for tests and standalone use.
+//! After the move to the `javm_cap::Cap<A>` cache model, image / data
+//! / file lookups are cache operations rather than KernelAssist
+//! hooks — the cache holds the content, the assist holds only the
+//! per-block ephemeral kernel state (gas meters, storage quotas,
+//! yield catchers, file id allocation).
 
 use core::fmt;
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use javm_cap::{Blake2b256, CapHash, DataCap, Hash, image::Image};
+use javm_cap::{Blake2b256, CapHash, CapHashOrRef, Hash};
 
 /// Identifier for a row in the kernel-internal GasMeter table.
 /// Chain-chosen, not kernel-assigned (per spec §22).
@@ -34,8 +32,7 @@ pub type QuotaId = u64;
 /// - per-instruction gas debit (gas_meter_*),
 /// - host_yield routing (yield_catcher_*),
 /// - host_mint_data_cap quota debit (storage_quota_*),
-/// - factory caps (SetGasMeter / SetStorageQuota / CreateYieldCatcher
-///   endpoints — short-circuited via the kernel_image registry).
+/// - host_open / host_save resolved via cache references.
 ///
 /// Methods on `&self` are reads; methods on `&mut self` are state
 /// mutations. Atomic semantics where the spec requires it
@@ -72,75 +69,26 @@ pub trait KernelAssist {
     /// (which the caller stores as a Cap::Instance\[YieldCatcher\]).
     fn yield_catcher_new(&mut self) -> CapHash;
 
-    // ---- Image registry ----
-
-    /// Look up the full `Image` value by its content hash.
-    ///
-    /// Used by `host_set_image` (Stage 3.9) to atomically reload the
-    /// active Instance's program after an image swap. Default impl
-    /// returns `None`, meaning the kernel-assist has no image
-    /// registry; callers that need set_image (or set_image-style
-    /// reloads) must override.
-    ///
-    /// Stage 4 jar-kernel-v3's σ-aware impl looks this up against
-    /// `State.code_blobs`.
-    fn image_lookup(&self, _content_hash: CapHash) -> Option<Arc<Image>> {
-        None
-    }
-
-    // ---- Data blob registry ----
-
-    /// Look up the raw bytes of a `Cap::Data` by its content hash.
-    ///
-    /// Used by:
-    /// - `host_read_data_cap` (Stage 3.10) — read a Cap::Data's bytes
-    ///   into mapped memory.
-    /// - HALT-time mapped-region write-back — read prior content for
-    ///   diff comparison (optimization; not used in the O(N) rehash
-    ///   path).
-    ///
-    /// Default returns `None`. Stage 4 jar-kernel-v3 backs this with
-    /// `State.data_blobs`.
-    fn data_lookup(&self, _content_hash: CapHash) -> Option<Vec<u8>> {
-        None
-    }
-
-    /// Store raw bytes; return the content hash for the resulting
-    /// `Cap::Data`.
-    ///
-    /// Used by:
-    /// - `host_mint_data_cap` (Stage 3.10) — mint a fresh Cap::Data
-    ///   from memory bytes.
-    /// - HALT-time mapped-region write-back — store re-hashed memory
-    ///   for the new Cap::Data.
-    ///
-    /// Default no-ops (still returns a valid blake2b hash so call
-    /// sites don't NPE; the bytes just aren't persisted). Stage 4
-    /// jar-kernel-v3 inserts into `State.data_blobs`.
-    fn data_store(&mut self, bytes: &[u8]) -> CapHash {
-        Blake2b256::hash(bytes)
-    }
-
     // ---- σ-resident File registry ----
     //
     // A v3 "FileCap" is a `Cap::Instance` with the well-known
-    // `KernelImage::File` chain hash, whose `content_hash` carries
-    // the `file_id` (low 8 bytes, little-endian — Stage 3 convention).
-    // `host_open` materializes the file's bytes as an ephemeral
-    // `Cap::Data`; `host_save` mints a fresh FileCap from a Cap::Data
-    // after debiting StorageQuota.
+    // `KernelImage::File` chain hash. After the cache migration the
+    // file's bytes live in the cache as a `Cap::Data`; this trait
+    // maps `file_id ↔ CapHashOrRef` so host_open/host_save can route
+    // requests to the σ-resident registry without knowing the cap
+    // layout.
 
-    /// Materialize a σ-resident file as a `Cap::Data`. `None` if the
-    /// file_id isn't registered. Stage 4 jar-kernel-v3 reads from
-    /// `State.data_blobs` (refcount preserved).
-    fn host_open(&mut self, _file_id: u64) -> Option<DataCap> {
+    /// Materialize a σ-resident file as a cache reference (typically
+    /// a `CapHashOrRef::Hash` of a published `Cap::Data`). `None` if
+    /// the file_id isn't registered.
+    fn host_open(&mut self, _file_id: u64) -> Option<CapHashOrRef> {
         None
     }
 
-    /// Mint a new file from `data` after debiting `quota_id`. Returns
-    /// the new `file_id`. Stage 4 jar-kernel-v3 enforces the quota
-    /// and writes σ. The Stage 3 default returns None.
-    fn host_save(&mut self, _data: &DataCap, _quota_id: u64) -> Option<u64> {
+    /// Mint a new file from the cache reference `data` after debiting
+    /// `quota_id`. Returns the new `file_id`. Default returns None
+    /// (no file registry).
+    fn host_save(&mut self, _data: CapHashOrRef, _quota_id: u64) -> Option<u64> {
         None
     }
 }
@@ -161,16 +109,9 @@ pub struct InProcessKernelAssist {
     /// `Blake2b256::hash(epoch || nonce)` or similar; here we use a
     /// trivial monotonic counter (test-only).
     next_yc_nonce: u64,
-    /// Image registry. Looked up by `image_lookup` to support
-    /// `host_set_image`. Tests pre-register images that the running
-    /// program will swap to.
-    images: HashMap<CapHash, Arc<Image>>,
-    /// Data blob registry (content_hash → bytes). `host_read_data_cap`
-    /// resolves through this; `host_mint_data_cap` populates it.
-    data_blobs: HashMap<CapHash, Vec<u8>>,
-    /// σ-style file registry (file_id → DataCap). `host_open` reads
-    /// through this; `host_save` mints monotonic file_ids.
-    files: HashMap<u64, DataCap>,
+    /// σ-style file registry (file_id → cache reference). `host_open`
+    /// reads through this; `host_save` mints monotonic file_ids.
+    files: HashMap<u64, CapHashOrRef>,
     next_file_id: u64,
 }
 
@@ -181,8 +122,6 @@ impl InProcessKernelAssist {
             storage_quotas: HashMap::new(),
             yield_catchers: HashMap::new(),
             next_yc_nonce: 0,
-            images: HashMap::new(),
-            data_blobs: HashMap::new(),
             files: HashMap::new(),
             next_file_id: 1,
         }
@@ -200,21 +139,9 @@ impl InProcessKernelAssist {
         // simplify test diagnostics.
     }
 
-    /// Register an `Image` so `image_lookup` can resolve it. The key
-    /// is the image's canonical content hash (`image_content_hash`).
-    pub fn register_image(&mut self, content_hash: CapHash, image: Arc<Image>) {
-        self.images.insert(content_hash, image);
-    }
-
-    /// Register raw data bytes under their hash; symmetric to
-    /// `data_store`. Useful when seeding fixtures.
-    pub fn register_data(&mut self, content_hash: CapHash, bytes: Vec<u8>) {
-        self.data_blobs.insert(content_hash, bytes);
-    }
-
-    /// Register a FileId → DataCap mapping. `host_open` of the
-    /// file_id returns the DataCap. Useful when seeding fixtures.
-    pub fn register_file(&mut self, file_id: u64, data: DataCap) {
+    /// Register a FileId → cache reference mapping. `host_open` of the
+    /// file_id returns the cache reference. Useful when seeding fixtures.
+    pub fn register_file(&mut self, file_id: u64, data: CapHashOrRef) {
         self.files.insert(file_id, data);
         if file_id >= self.next_file_id {
             self.next_file_id = file_id + 1;
@@ -234,7 +161,7 @@ impl fmt::Debug for InProcessKernelAssist {
             .field("gas_meters", &self.gas_meters.len())
             .field("storage_quotas", &self.storage_quotas.len())
             .field("yield_catchers", &self.yield_catchers.len())
-            .field("images", &self.images.len())
+            .field("files", &self.files.len())
             .finish()
     }
 }
@@ -286,34 +213,24 @@ impl KernelAssist for InProcessKernelAssist {
         hash
     }
 
-    fn image_lookup(&self, content_hash: CapHash) -> Option<Arc<Image>> {
-        self.images.get(&content_hash).cloned()
-    }
-
-    fn data_lookup(&self, content_hash: CapHash) -> Option<Vec<u8>> {
-        self.data_blobs.get(&content_hash).cloned()
-    }
-
-    fn data_store(&mut self, bytes: &[u8]) -> CapHash {
-        let hash = Blake2b256::hash(bytes);
-        self.data_blobs.insert(hash, bytes.to_vec());
-        hash
-    }
-
-    fn host_open(&mut self, file_id: u64) -> Option<DataCap> {
+    fn host_open(&mut self, file_id: u64) -> Option<CapHashOrRef> {
         self.files.get(&file_id).copied()
     }
 
-    fn host_save(&mut self, data: &DataCap, quota_id: u64) -> Option<u64> {
-        // Debit quota; return None if exhausted (caller traps).
+    fn host_save(&mut self, data: CapHashOrRef, quota_id: u64) -> Option<u64> {
+        // Default impl ignores the size (it's stored on the cache side)
+        // and just allocates a fresh file_id. Real impl would debit
+        // quota by the data's logical size; this stub debits a
+        // placeholder 1 byte per save so tests can observe the
+        // mechanics.
         let q = self.storage_quotas.get(&quota_id).copied().unwrap_or(0);
-        if q < data.size {
+        if q < 1 {
             return None;
         }
-        self.storage_quotas.insert(quota_id, q - data.size);
+        self.storage_quotas.insert(quota_id, q - 1);
         let id = self.next_file_id;
         self.next_file_id += 1;
-        self.files.insert(id, *data);
+        self.files.insert(id, data);
         Some(id)
     }
 }

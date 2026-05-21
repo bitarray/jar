@@ -6,6 +6,8 @@ license.workspace = true
 description = "Nub Arch implementation: in-process. Simulates the CPU/MMU substrate with Rust data structures; runs in the host process."
 
 [dependencies]
+allocator-api2 = "0.4"
 nub-kernel = { path = "../nub-kernel" }
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
+javm-cap = { path = "../javm-cap" }
 javm-exec = { path = "../javm-exec" }

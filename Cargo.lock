@@ -930,6 +930,7 @@ version = "0.1.0"
 name = "javm"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "javm-cap",
  "javm-exec",
  "proptest",
@@ -954,9 +955,12 @@ dependencies = [
 name = "javm-cap"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "blake2",
+ "nub-host-common",
  "scale",
  "scale-derive",
+ "talc",
  "thiserror",
 ]
 
@@ -1197,8 +1201,10 @@ dependencies = [
 name = "nub"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "anyhow",
  "bytecheck",
+ "javm-cap",
  "nub-arch-local",
  "nub-arch-x86-abi",
  "nub-build",
@@ -1211,6 +1217,8 @@ dependencies = [
 name = "nub-arch-local"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
+ "javm-cap",
  "javm-exec",
  "nub-arch-x86-abi",
  "nub-kernel",
@@ -1220,10 +1228,12 @@ dependencies = [
 name = "nub-arch-x86"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "bytecheck",
  "hyperlight-common",
  "hyperlight-guest",
  "hyperlight-guest-bin",
+ "javm-cap",
  "javm-exec",
  "javm-recompiler-x86",
  "nub-arch-x86-abi",
@@ -1250,6 +1260,7 @@ dependencies = [
 name = "nub-host-common"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "anyhow",
  "bytecheck",
  "log",
@@ -1276,6 +1287,7 @@ dependencies = [
 name = "nub-host-kvm"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2",
  "anyhow",
  "bitflags 2.11.1",
  "blake3",
@@ -1285,6 +1297,7 @@ dependencies = [
  "crossbeam-channel",
  "goblin",
  "hyperlight-common",
+ "javm-cap",
  "kvm-bindings",
  "kvm-ioctls",
  "libc",

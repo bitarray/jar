@@ -2,16 +2,22 @@
 //! Rust data structures. Runs directly in the host process; no
 //! sandbox, no cross-compilation.
 //!
-//! [`run_published`] is the in-process counterpart to
-//! nub-arch-x86's JIT-driven `run_pvm_with_mem`: takes a
-//! [`PublishSpec`] (the cache-path's host-side spec type), wires
-//! it to [`javm_exec::Interpreter::run`].
+//! [`run_instance`] is the in-process counterpart to nub-arch-x86's
+//! JIT-driven `run_pvm_with_mem`: takes a published
+//! [`javm_cap::InstanceCap`] + its referenced
+//! [`javm_cap::image_cap::ImageCap`] (both `Global`-allocated
+//! locally), wires the bytecode + memory layout to
+//! [`javm_exec::Interpreter::run`], and produces an
+//! [`InvocationResult`].
 
+use allocator_api2::alloc::Global;
+use javm_cap::image_cap::ImageCap;
+use javm_cap::instance::InstanceCap;
 use javm_exec::{
     Access, CopyingMemory, EcallHandler, EcallKind, EcallResult, ExitReason, GasCounter,
-    Interpreter, PAGE_SIZE, PvmProgram, Regs, gas_cost::DEFAULT_MEM_CYCLES,
+    Interpreter, PAGE_SIZE, PvmProgram, Regs, gas_cost::DEFAULT_MEM_CYCLES, unpack_bitmask,
 };
-use nub_arch_x86_abi::{InvocationResult, PublishSpec};
+use nub_arch_x86_abi::InvocationResult;
 use nub_kernel::{Arch, CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
 
 /// In-process Arch backend.
@@ -52,44 +58,64 @@ impl Arch for LocalArch {
     }
 }
 
-/// Run a [`PublishSpec`] through the byte-PVM interpreter, returning
-/// the same `InvocationResult` shape `nub-arch-x86`'s JIT path
-/// produces. The exit-reason mapping matches the JIT exit codes
-/// (HostCall=4, Trap=7, etc.) so the two backends agree on a
-/// well-formed program. Endpoint dispatch: `endpoint_idx` selects
-/// `spec.entry_pcs[endpoint_idx]`; caller-supplied `args` overlay
-/// φ[7..=10] on top of the baseline `spec.initial_regs`.
-pub fn run_published(
-    spec: &PublishSpec,
+/// Run an Instance through the byte-PVM interpreter, returning the
+/// same `InvocationResult` shape `nub-arch-x86`'s JIT path produces.
+/// The exit-reason mapping matches the JIT exit codes (HostCall=4,
+/// Trap=7, etc.) so the two backends agree on a well-formed program.
+///
+/// Endpoint dispatch: `endpoint_idx` selects
+/// `image.endpoints[endpoint_idx]`; the endpoint's `entry_pc` is used
+/// as the start PC. Caller-supplied `args` overlay φ[7..=10] on top
+/// of the endpoint's `initial_regs`. Memory is sized from
+/// `instance.mem_size` and seeded with each entry in
+/// `instance.rw_overlays` laid at its declared `start`.
+pub fn run_instance(
+    instance: &InstanceCap<Global>,
+    image: &ImageCap<Global>,
     endpoint_idx: u8,
     args: [u64; 4],
     initial_gas: u64,
 ) -> InvocationResult {
+    // ImageCap stores the packed bitmask (1 bit per code byte). The
+    // interpreter wants the unpacked form (1 byte per code byte).
+    let unpacked_bitmask = unpack_bitmask(image.bitmask.as_slice(), image.code.len());
     let program = PvmProgram::new(
-        spec.code.clone(),
-        spec.bitmask.clone(),
-        spec.jump_table.clone(),
+        image.code.as_slice().to_vec(),
+        unpacked_bitmask,
+        image.jump_table.as_slice().to_vec(),
         DEFAULT_MEM_CYCLES,
     )
     .expect("PvmProgram (bitmask len must match code len)");
 
     let mut mem = CopyingMemory::new();
-    let mem_size_pages = page_round_up_u64(spec.mem_size as u64);
+    let mem_size_pages = page_round_up_u64(instance.mem_size as u64);
     mem.map_region(0, mem_size_pages, Access::ReadWrite, None)
         .expect("map base RW region");
-    overlay(&mut mem, spec.ro_start, &spec.ro_data, Access::ReadOnly);
-    overlay(&mut mem, spec.rw_start, &spec.rw_data, Access::ReadWrite);
-    overlay(&mut mem, spec.arg_start, &spec.arg_data, Access::ReadWrite);
+    for overlay_entry in instance.rw_overlays.iter() {
+        overlay(
+            &mut mem,
+            overlay_entry.start,
+            overlay_entry.bytes.as_slice(),
+            Access::ReadWrite,
+        );
+    }
 
-    let entry_pc = spec
-        .entry_pcs
+    let endpoint = image
+        .endpoints
         .get(endpoint_idx as usize)
-        .copied()
-        .unwrap_or(0);
+        .expect("endpoint index out of range");
 
     let mut regs = Regs::new();
-    regs.pc = entry_pc;
-    regs.gpr = spec.initial_regs;
+    regs.pc = endpoint.entry_pc;
+    // Endpoint baseline first, then layer the InstanceCap's persisted
+    // regs on top (publish_instance writes them; subsequent invokes
+    // observe them). Args overlay φ[7..=10] last.
+    regs.gpr = endpoint.initial_regs;
+    for (i, v) in instance.regs.iter().enumerate() {
+        if *v != 0 {
+            regs.gpr[i] = *v;
+        }
+    }
     for (i, v) in args.iter().enumerate() {
         regs.gpr[7 + i] = *v;
     }
@@ -121,8 +147,7 @@ fn page_round_up_u64(n: u64) -> u64 {
 }
 
 /// Overlay a sub-region of mem with a permission + initial bytes. No-op
-/// if `data` is empty (the spec carries empty arg/ro/rw vectors when
-/// the program has no such region).
+/// if `data` is empty.
 fn overlay(mem: &mut CopyingMemory, start: u32, data: &[u8], access: Access) {
     if data.is_empty() {
         return;
@@ -134,9 +159,7 @@ fn overlay(mem: &mut CopyingMemory, start: u32, data: &[u8], access: Access) {
 
 /// Minimal `EcallHandler` for the local backend: every `ecall` /
 /// `ecalli` ends the run by surfacing the corresponding `ExitReason`,
-/// matching the JIT trampoline's exit shape (no in-engine ecall
-/// dispatch — the integration layer above us, if any, would re-enter
-/// with updated state).
+/// matching the JIT trampoline's exit shape.
 struct LocalEcallHandler;
 
 impl EcallHandler for LocalEcallHandler {

@@ -18,14 +18,15 @@
 //! - A `ReferenceEntry` at position `i` has
 //!   `target_position < i` and the target is an `InstanceEntry`.
 //!
-//! State storage: an `InstanceEntry` owns its in-flight state
-//! (image, cnode, regs, mem). The Vm consults the stack top to find
+//! State storage: an `InstanceEntry` owns its in-flight working root
+//! cnode and references into a shared `Cache` for the underlying
+//! Image and Instance content. The Vm consults the stack top to find
 //! the actively executing Instance; it consults lower entries during
 //! yield-marker routing.
 
 use std::sync::Arc;
 
-use javm_cap::{CNodeBackend, Cap, InstanceCap, image::Image};
+use javm_cap::{CNodeCap, CapHash, CapHashOrRef, SlotIdx};
 use javm_exec::{GasCounter, Mem, PvmProgram, Regs};
 
 use crate::error::VmError;
@@ -44,27 +45,32 @@ pub enum EntryStatus {
 
 /// In-flight state of an Instance currently on the call stack.
 ///
-/// Owns the cnode, regs, and memory of this invocation. The Vm
-/// updates these in place as the interpreter runs. The `image` is
-/// shared (Arc) — multiple in-flight entries can share the same
-/// Image (e.g. siblings of the same type).
+/// Owns the working root cnode, regs, and memory of this invocation.
+/// The Vm updates these in place as the interpreter runs. The
+/// `program` is shared (Arc) — multiple in-flight entries can share
+/// the same predecoded bytecode (e.g. siblings of the same image).
 pub struct InstanceEntry {
-    /// Stable identity carried into / out of the entry. The
-    /// `image_hash_chain` matches the Image's chain; the
-    /// `content_hash` reflects the value at entry time (refreshed
-    /// post-HALT once Stage 3.7 lands).
-    pub instance: InstanceCap,
-    /// Shared Image specification.
-    pub image: Arc<Image>,
-    /// Predecoded bytecode (cached via `ImageCache`).
+    /// Reference back to the Cache entry this invocation is running.
+    /// Carried across the apply so the post-HALT settle can hash the
+    /// final working state into a `CapHash`.
+    pub instance_ref: CapHashOrRef,
+    /// Cached for quick read of the Instance's type identity.
+    pub image_hash_chain: CapHash,
+    /// Cached for quick read of the bound Image hash.
+    pub image_hash: CapHash,
+    /// Predecoded bytecode (keyed by `image_hash` in `ImageCache`).
     pub program: Arc<PvmProgram>,
     /// MainFrame cnode — the active CapTable. Owned by this entry; on
-    /// HALT it's commit-merged back into the σ-resident Instance
-    /// state (Stage 3.7 work).
-    pub cnode: Box<dyn CNodeBackend<Cap> + Send + Sync>,
+    /// HALT it's commit-merged back into the cache.
+    pub root_cnode: CNodeCap,
+    /// `Image.yield_marker_slot`, cached for yield routing.
+    pub yield_marker_slot: Option<SlotIdx>,
+    /// Sorted slot indices declared pinned by this Image. Cached for
+    /// fast `is_pinned` checks.
+    pub pinned_slots: Vec<SlotIdx>,
     /// Working registers.
     pub regs: Regs,
-    /// Working memory (mapped DataCap regions + ephemeral).
+    /// Working memory (mapped RW overlays + ephemeral).
     pub mem: Mem,
     /// Local gas counter — pulls from `KernelAssist::gas_meter_*`
     /// against the active gas slot.
@@ -76,17 +82,11 @@ pub struct InstanceEntry {
 impl std::fmt::Debug for InstanceEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InstanceEntry")
-            .field(
-                "instance.image_hash_chain",
-                &short_hex(&self.instance.image_hash_chain),
-            )
-            .field(
-                "instance.content_hash",
-                &short_hex(&self.instance.content_hash),
-            )
+            .field("image_hash_chain", &short_hex(&self.image_hash_chain))
+            .field("image_hash", &short_hex(&self.image_hash))
             .field("pc", &self.regs.pc)
             .field("status", &self.status)
-            .field("cnode.size_log", &self.cnode.size_log())
+            .field("cnode.size_log", &self.root_cnode.size_log)
             .finish_non_exhaustive()
     }
 }
@@ -325,37 +325,19 @@ fn short_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use javm_cap::{InMemoryCNode, image::Image};
     use javm_exec::PvmProgram;
-    use std::collections::BTreeMap;
-
-    fn empty_image() -> Image {
-        Image {
-            code: vec![0u8],
-            packed_bitmask: vec![0x01],
-            jump_table: Vec::new(),
-            endpoints: BTreeMap::new(),
-            memory_mappings: Vec::new(),
-            gas_slots: Vec::new(),
-            quota_slots: Vec::new(),
-            pinned_slots: BTreeMap::new(),
-            initial_slots: BTreeMap::new(),
-            yield_marker_slot: None,
-        }
-    }
 
     fn make_entry(tag: u8) -> InstanceEntry {
-        let img = Arc::new(empty_image());
         let prog = Arc::new(PvmProgram::new(vec![0u8], vec![1u8], vec![], 25).unwrap());
-        let cnode = Box::new(InMemoryCNode::<Cap>::new(8).unwrap());
+        let cnode = CNodeCap::new(8).unwrap();
         InstanceEntry {
-            instance: InstanceCap {
-                image_hash_chain: [tag; 32],
-                content_hash: [tag.wrapping_add(0x10); 32],
-            },
-            image: img,
+            instance_ref: CapHashOrRef::Hash([tag; 32]),
+            image_hash_chain: [tag; 32],
+            image_hash: [tag.wrapping_add(0x10); 32],
             program: prog,
-            cnode,
+            root_cnode: cnode,
+            yield_marker_slot: None,
+            pinned_slots: Vec::new(),
             regs: Regs::new(),
             mem: Mem::new(),
             gas: GasCounter::new(1000),
@@ -461,6 +443,6 @@ mod tests {
         s.push_reference(0).unwrap();
         let ic = s.running_instance().unwrap();
         // The reference points at entry 0 (tag=1).
-        assert_eq!(ic.instance.image_hash_chain, [1u8; 32]);
+        assert_eq!(ic.image_hash_chain, [1u8; 32]);
     }
 }

@@ -1,270 +1,372 @@
 //! Chain genesis: σ initialization + kernel-cap injection.
 //!
-//! `genesis` takes a chain `Image` and constructs:
-//! - An empty σ (`State`) with the chain Image registered.
-//! - The chain Instance's root cnode pre-populated with kernel-
-//!   issued caps at the well-known slots ([`crate::abi`]).
-//! - The chain `InstanceCap` itself.
+//! `genesis` takes a chain `Image` and publishes into σ's cache:
+//! - The chain Image (as a `Cap::Image` blob).
+//! - The kernel-issued unit caps at well-known slots
+//!   (Gas{0}, Quota{0}, YieldCatcher, factories, host entries).
+//! - The chain's root cnode binding those caps + the image's pinned /
+//!   initial slot data caps.
+//! - The chain `Cap::Instance` referencing the chain image and root
+//!   cnode.
 //!
-//! Per architecture.md Stage 4, kernel-issued caps comprise:
-//! - Root `Gas{0}` and `Quota{0}` handles (one each — chain spec
-//!   pulls per-instruction gas debits from `Gas{0}`).
-//! - Factory caps: SetGasMeter, SetStorageQuota, MintGas, MintQuota,
-//!   CreateYieldCatcher.
-//! - HostOpen / HostSave entry handles.
-//! - A `YieldCatcher` pre-populated with OogMarker and
-//!   StorageExhaustedMarker so the chain catches OOG/Storage faults
-//!   by default.
+//! Per the v3 spec's "kernel-issued caps", each unit cap encodes its
+//! identity (meter id, quota id) in `regs[0]` — InstanceCap no longer
+//! has a free-standing `content_hash` field, so identity rides on
+//! observable state. Kernel caps are immutable by convention
+//! (userspace never invokes them via PVM), so `regs[0]` is stable.
 
 use javm::{KernelImage, kernel_image_hash};
-use javm_cap::{
-    Blake2b256, CNodeBackend, Cap, DataCap, Hash, InMemoryCNode, InstanceCap,
-    image::{Image, PinnedCap, image_content_hash},
-};
+use javm_cap::abi as cap_abi;
+use javm_cap::image::Image;
+use javm_cap::{Cache, CapHash, CapHashOrRef, NUM_REGS, SlotIdx};
 
 use crate::abi;
+use crate::error::KernelError;
 use crate::state::State;
 
-/// Output of `genesis`: the initial σ, the chain Instance, and the
-/// chain's root cnode (256 slots, populated with kernel-issued caps
-/// at the abi::BARE_* slots).
+/// Output of `genesis`: the initial σ together with hashes identifying
+/// the chain Image, root cnode, and chain Instance inside the cache.
 pub struct Genesis {
     pub state: State,
-    pub chain_instance: InstanceCap,
-    pub chain_cnode: Box<dyn CNodeBackend<Cap> + Send + Sync>,
+    pub chain_instance_hash: CapHash,
+    pub chain_image_hash: CapHash,
+    pub root_cnode_hash: CapHash,
 }
 
-/// Mint a kernel-issued unit handle: a `Cap::Instance` whose
-/// `image_hash_chain` matches the well-known kernel image, with
-/// `content_hash` carrying the `id` in its low 8 bytes (so a
-/// running guest can decode the id without going through σ).
-fn kernel_unit_cap(image: KernelImage, id: u64) -> Cap {
-    let mut content_hash = [0u8; 32];
-    content_hash[..8].copy_from_slice(&id.to_le_bytes());
-    Cap::Instance(InstanceCap {
-        image_hash_chain: kernel_image_hash(image),
-        content_hash,
-    })
+/// Mint and publish a kernel-issued unit cap into the cache. The
+/// kernel-image label drives `image_hash_chain`; `id` encodes the
+/// runtime identity (meter id, quota id, etc.) into `regs[0]`. Returns
+/// the published cap's hash. The placeholder image blob is shared
+/// across all kernel unit caps and resolved at publish time.
+fn publish_kernel_unit_cap(
+    cache: &mut Cache,
+    image: KernelImage,
+    placeholder_image_hash: CapHash,
+    empty_cnode_hash: CapHash,
+    id: u64,
+) -> Result<CapHash, KernelError> {
+    let mut regs = [0u64; NUM_REGS];
+    regs[0] = id;
+    let hash = cache.publish_instance_blob(
+        kernel_image_hash(image),
+        placeholder_image_hash,
+        empty_cnode_hash,
+        &[],
+        0,
+        regs,
+        0,
+        0,
+    )?;
+    Ok(hash)
 }
 
-/// Mint a stateless kernel-issued cap (no unique id; same value
-/// for all chain Instances). The `content_hash` is just zeros.
-fn kernel_stateless_cap(image: KernelImage) -> Cap {
-    Cap::Instance(InstanceCap {
-        image_hash_chain: kernel_image_hash(image),
-        content_hash: [0u8; 32],
-    })
+/// Stateless variant: no runtime identity (`regs[0] = 0`). Used for
+/// factory and host-entry kernel caps where every chain Instance sees
+/// the same well-known cap.
+fn publish_kernel_stateless_cap(
+    cache: &mut Cache,
+    image: KernelImage,
+    placeholder_image_hash: CapHash,
+    empty_cnode_hash: CapHash,
+) -> Result<CapHash, KernelError> {
+    publish_kernel_unit_cap(cache, image, placeholder_image_hash, empty_cnode_hash, 0)
 }
 
 /// Construct chain genesis from a chain Image.
 ///
-/// `chain_image` is registered in `state.code_blobs` keyed by its
-/// content hash (used as `code_id` for now — Stage C may refine).
-/// The chain `Instance` is registered in `state.vaults` under
-/// `VaultId(0)`.
-///
-/// The chain's `image_hash_chain` is the image's content_hash
-/// directly (genesis case — no prior chain).
-pub fn genesis(chain_image: Image) -> Genesis {
+/// Publishes the chain image, the kernel-issued unit caps, the root
+/// cnode (256 slots, populated with kernel caps at `abi::BARE_*` slots
+/// plus pinned/initial slot data caps from the image), and the chain
+/// Instance into σ. Returns hashes for downstream callers.
+pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     let mut state = State::new();
 
-    // 1. Register the chain Image in σ.code_blobs. The image's
-    //    content_hash drives identity; CodeId is just a σ-side
-    //    monotonic alias.
-    let image_hash = image_content_hash::<javm_cap::Blake2b256>(&chain_image);
-    let code_id = state.counters.allocate_code_id();
-    state.code_blobs.insert(code_id, chain_image.code.clone());
+    // 1. Publish the chain Image. This walks its pinned/initial slots
+    //    and publishes their inline content as DataCap blobs too, so
+    //    they're addressable from the cache for the root-cnode build
+    //    below.
+    let chain_image_hash = state.caps.publish_image(&chain_image)?;
 
-    // 2. Construct the chain InstanceCap. content_hash is a Stage 3
-    //    placeholder (Stage 4 will canonicalize via state digest).
-    let chain_instance = InstanceCap {
-        image_hash_chain: image_hash,
-        content_hash: [0u8; 32],
-    };
+    // 2. A shared placeholder Image cap referenced by all kernel-issued
+    //    Instance caps. Using a tiny but well-formed Image (1 byte of
+    //    code, single instruction-start bit set) sidesteps the image-cap
+    //    validation while keeping kernel caps content-hashable in a
+    //    stable way. The same hash is reused for every kernel unit.
+    let placeholder_image_hash = state.caps.publish_image(&placeholder_kernel_image())?;
 
-    // 3. Register the chain in σ.vaults.
-    let vault_id = state.counters.allocate_vault_id();
-    state.vaults.insert(vault_id, chain_instance.into());
+    // 3. A shared empty cnode for kernel-issued Instance caps. They
+    //    never invoke any of their own slots; the empty cnode keeps
+    //    them well-formed.
+    let empty_cnode_hash = state.caps.publish_cnode(0, &[])?;
 
-    // 4. Build the chain's root cnode (8-slot log2 = 256 slots).
-    let mut cnode = InMemoryCNode::<Cap>::new(8).expect("256-slot cnode");
+    // 4. Publish each kernel-issued unit cap.
+    let gas_hash = publish_kernel_unit_cap(
+        &mut state.caps,
+        KernelImage::Gas,
+        placeholder_image_hash,
+        empty_cnode_hash,
+        0,
+    )?;
+    let quota_hash = publish_kernel_unit_cap(
+        &mut state.caps,
+        KernelImage::Quota,
+        placeholder_image_hash,
+        empty_cnode_hash,
+        0,
+    )?;
+    let yield_catcher_hash = publish_kernel_stateless_cap(
+        &mut state.caps,
+        KernelImage::YieldCatcher,
+        placeholder_image_hash,
+        empty_cnode_hash,
+    )?;
+    let set_gas_meter_hash = publish_kernel_stateless_cap(
+        &mut state.caps,
+        KernelImage::SetGasMeter,
+        placeholder_image_hash,
+        empty_cnode_hash,
+    )?;
+    let set_storage_quota_hash = publish_kernel_stateless_cap(
+        &mut state.caps,
+        KernelImage::SetStorageQuota,
+        placeholder_image_hash,
+        empty_cnode_hash,
+    )?;
+    let mint_gas_hash = publish_kernel_stateless_cap(
+        &mut state.caps,
+        KernelImage::MintGas,
+        placeholder_image_hash,
+        empty_cnode_hash,
+    )?;
+    let mint_quota_hash = publish_kernel_stateless_cap(
+        &mut state.caps,
+        KernelImage::MintQuota,
+        placeholder_image_hash,
+        empty_cnode_hash,
+    )?;
+    let create_yc_hash = publish_kernel_stateless_cap(
+        &mut state.caps,
+        KernelImage::CreateYieldCatcher,
+        placeholder_image_hash,
+        empty_cnode_hash,
+    )?;
+    let host_open_hash = publish_kernel_stateless_cap(
+        &mut state.caps,
+        KernelImage::HostOpen,
+        placeholder_image_hash,
+        empty_cnode_hash,
+    )?;
+    let host_save_hash = publish_kernel_stateless_cap(
+        &mut state.caps,
+        KernelImage::HostSave,
+        placeholder_image_hash,
+        empty_cnode_hash,
+    )?;
 
-    // 5. Inject kernel-issued caps at well-known slots.
-    cnode
-        .set(
-            abi::BARE_GAS_SLOT,
-            Some(kernel_unit_cap(KernelImage::Gas, 0)),
-        )
-        .expect("BARE_GAS_SLOT in-range");
-    cnode
-        .set(
-            abi::BARE_QUOTA_SLOT,
-            Some(kernel_unit_cap(KernelImage::Quota, 0)),
-        )
-        .expect("BARE_QUOTA_SLOT in-range");
-    cnode
-        .set(
+    // 5. Build the chain's root cnode entries. Kernel caps go at the
+    //    well-known abi::BARE_* slots; pinned/initial slot data caps
+    //    are republished alongside (they were also republished by
+    //    `publish_image` above, but the cnode references them by hash
+    //    so we just locate the hashes).
+    let mut entries: Vec<(SlotIdx, CapHashOrRef)> = vec![
+        (abi::BARE_GAS_SLOT, CapHashOrRef::Hash(gas_hash)),
+        (abi::BARE_QUOTA_SLOT, CapHashOrRef::Hash(quota_hash)),
+        (
             abi::BARE_YIELD_CATCHER_SLOT,
-            Some(kernel_stateless_cap(KernelImage::YieldCatcher)),
-        )
-        .expect("BARE_YIELD_CATCHER_SLOT in-range");
-    cnode
-        .set(
+            CapHashOrRef::Hash(yield_catcher_hash),
+        ),
+        (
             abi::BARE_SET_GAS_METER_SLOT,
-            Some(kernel_stateless_cap(KernelImage::SetGasMeter)),
-        )
-        .expect("BARE_SET_GAS_METER_SLOT in-range");
-    cnode
-        .set(
+            CapHashOrRef::Hash(set_gas_meter_hash),
+        ),
+        (
             abi::BARE_SET_STORAGE_QUOTA_SLOT,
-            Some(kernel_stateless_cap(KernelImage::SetStorageQuota)),
-        )
-        .expect("BARE_SET_STORAGE_QUOTA_SLOT in-range");
-    cnode
-        .set(
-            abi::BARE_MINT_GAS_SLOT,
-            Some(kernel_stateless_cap(KernelImage::MintGas)),
-        )
-        .expect("BARE_MINT_GAS_SLOT in-range");
-    cnode
-        .set(
+            CapHashOrRef::Hash(set_storage_quota_hash),
+        ),
+        (abi::BARE_MINT_GAS_SLOT, CapHashOrRef::Hash(mint_gas_hash)),
+        (
             abi::BARE_MINT_QUOTA_SLOT,
-            Some(kernel_stateless_cap(KernelImage::MintQuota)),
-        )
-        .expect("BARE_MINT_QUOTA_SLOT in-range");
-    cnode
-        .set(
+            CapHashOrRef::Hash(mint_quota_hash),
+        ),
+        (
             abi::BARE_CREATE_YIELD_CATCHER_SLOT,
-            Some(kernel_stateless_cap(KernelImage::CreateYieldCatcher)),
-        )
-        .expect("BARE_CREATE_YIELD_CATCHER_SLOT in-range");
-    cnode
-        .set(
-            abi::BARE_HOST_OPEN_SLOT,
-            Some(kernel_stateless_cap(KernelImage::HostOpen)),
-        )
-        .expect("BARE_HOST_OPEN_SLOT in-range");
-    cnode
-        .set(
-            abi::BARE_HOST_SAVE_SLOT,
-            Some(kernel_stateless_cap(KernelImage::HostSave)),
-        )
-        .expect("BARE_HOST_SAVE_SLOT in-range");
+            CapHashOrRef::Hash(create_yc_hash),
+        ),
+        (abi::BARE_HOST_OPEN_SLOT, CapHashOrRef::Hash(host_open_hash)),
+        (abi::BARE_HOST_SAVE_SLOT, CapHashOrRef::Hash(host_save_hash)),
+    ];
 
-    // 6. Install pinned slots declared by the Image: register the
-    //    bytes in σ.data_payloads and place a Cap::Data at each
-    //    pinned slot. PinnedCap::Image variants are out of scope for
-    //    the standalone path (chains using them set the slots up
-    //    themselves; we don't have an Image arena in σ yet).
+    // Pinned slots: republish content under the cache so the root cnode
+    // can bind to it by hash. `publish_data_inline_with_size` is
+    // idempotent on identical content so this is cheap when the
+    // `publish_image` walk above already published it.
+    use javm_cap::image::PinnedCap;
     for (slot, pinned) in &chain_image.pinned_slots {
-        match pinned {
+        let h = match pinned {
             PinnedCap::Data { content, size } => {
-                let content_hash = Blake2b256::hash(content);
-                state.data_payloads.insert(content_hash, content.clone());
-                cnode
-                    .set(
-                        *slot,
-                        Some(Cap::Data(DataCap {
-                            content_hash,
-                            size: *size,
-                        })),
-                    )
-                    .expect("pinned slot index in-range");
+                state.caps.publish_data_inline_with_size(content, *size)?
             }
-            PinnedCap::Image { .. } => {
-                // Standalone bootstrap doesn't install Cap::Image
-                // pinned slots; chains using them are responsible
-                // for set-up via derive_spawn.
+            PinnedCap::Image { content_hash } => *content_hash,
+        };
+        entries.push((*slot, CapHashOrRef::Hash(h)));
+    }
+    for (slot, init) in &chain_image.initial_slots {
+        let h = state
+            .caps
+            .publish_data_inline_with_size(&init.content, init.size)?;
+        entries.push((*slot, CapHashOrRef::Hash(h)));
+    }
+
+    // 6. Publish the root cnode (256 slots, size_log = 8).
+    let root_cnode_hash = state.caps.publish_cnode(8, &entries)?;
+
+    // 7. Compute the chain Instance's memory layout from the image's
+    //    memory mappings. Mirrors the recomp path's build_overlays:
+    //    mem_size = max(start + size); rw_overlays come from the
+    //    image's pinned/initial slot contents for each mapping.
+    let (mem_size, overlays) = build_overlays(&chain_image);
+    let overlay_slices: Vec<(u32, &[u8])> = overlays
+        .iter()
+        .map(|(start, bytes)| (*start, bytes.as_slice()))
+        .collect();
+
+    // 8. Publish the chain Instance. `image_hash_chain` mirrors the
+    //    image's content hash directly at genesis (no prior chain).
+    //    `regs` start at zeros (chain doesn't have a unit-id; events
+    //    drive it via cnode slot[0]).
+    let chain_instance_hash = state.caps.publish_instance_blob(
+        chain_image_hash,
+        chain_image_hash,
+        root_cnode_hash,
+        &overlay_slices,
+        mem_size,
+        [0u64; NUM_REGS],
+        0,
+        0,
+    )?;
+
+    let _ = cap_abi::BARE_GAS_SLOT; // keep the abi re-export pinned
+
+    Ok(Genesis {
+        state,
+        chain_instance_hash,
+        chain_image_hash,
+        root_cnode_hash,
+    })
+}
+
+/// Build memory overlays from the chain image's memory_mappings.
+/// Mirrors `javm-guest-tests::conformance::build_overlays`: for each
+/// mapping, look up the pinned or initial slot content at the
+/// mapping's target slot; record an overlay tuple if content is
+/// non-empty.
+///
+/// Returns `(mem_size, overlays)` where `mem_size = max(start+size)`
+/// over all mappings.
+pub(crate) fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
+    use javm_cap::image::PinnedCap;
+    let mut mem_size: u32 = 0;
+    let mut overlays: Vec<(u32, Vec<u8>)> = Vec::new();
+
+    for mapping in &image.memory_mappings {
+        let end = (mapping.start + mapping.size) as u32;
+        if end > mem_size {
+            mem_size = end;
+        }
+
+        let target = mapping.source.target();
+        if let Some(PinnedCap::Data { content, .. }) = image.pinned_slots.get(&target) {
+            if !content.is_empty() {
+                overlays.push((mapping.start as u32, content.clone()));
             }
+        } else if let Some(init) = image.initial_slots.get(&target)
+            && !init.content.is_empty()
+        {
+            overlays.push((mapping.start as u32, init.content.clone()));
         }
     }
 
-    // 7. Install initial slots: non-pinned mutable seeds (rw_data
-    //    initial bytes, empty stack/heap caps, etc.). Same shape as
-    //    pinned: register bytes in σ, place a Cap::Data at the slot.
-    for (slot, init) in &chain_image.initial_slots {
-        let content_hash = Blake2b256::hash(&init.content);
-        state
-            .data_payloads
-            .insert(content_hash, init.content.clone());
-        cnode
-            .set(
-                *slot,
-                Some(Cap::Data(DataCap {
-                    content_hash,
-                    size: init.size,
-                })),
-            )
-            .expect("initial slot index in-range");
-    }
+    (mem_size, overlays)
+}
 
-    let _ = (vault_id, code_id);
-
-    Genesis {
-        state,
-        chain_instance,
-        chain_cnode: Box::new(cnode),
+/// A minimal well-formed Image used as a placeholder for kernel-
+/// issued unit caps. The image is never actually invoked — kernel
+/// caps short-circuit at the host-call layer.
+fn placeholder_kernel_image() -> Image {
+    use std::collections::BTreeMap;
+    Image {
+        code: vec![0u8], // single TRAP byte
+        packed_bitmask: vec![0x01],
+        jump_table: Vec::new(),
+        endpoints: BTreeMap::new(),
+        memory_mappings: Vec::new(),
+        gas_slots: Vec::new(),
+        quota_slots: Vec::new(),
+        pinned_slots: BTreeMap::new(),
+        initial_slots: BTreeMap::new(),
+        yield_marker_slot: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use javm_cap::image::Image;
+    use javm_cap::Cap;
 
     fn empty_chain_image() -> Image {
+        use std::collections::BTreeMap;
         Image {
             code: vec![10u8, 0],
             // 2 bytes of code → 2 instruction-start bits → 0b0000_0011.
             packed_bitmask: vec![0x03],
             jump_table: Vec::new(),
-            endpoints: std::collections::BTreeMap::new(),
+            endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: vec![abi::BARE_GAS_SLOT],
             quota_slots: vec![abi::BARE_QUOTA_SLOT],
-            pinned_slots: std::collections::BTreeMap::new(),
-            initial_slots: std::collections::BTreeMap::new(),
+            pinned_slots: BTreeMap::new(),
+            initial_slots: BTreeMap::new(),
             yield_marker_slot: Some(abi::BARE_YIELD_CATCHER_SLOT),
         }
     }
 
     #[test]
-    fn genesis_populates_known_slots() {
-        let g = genesis(empty_chain_image());
-        assert!(g.chain_cnode.get(abi::BARE_GAS_SLOT).unwrap().is_some());
-        assert!(g.chain_cnode.get(abi::BARE_QUOTA_SLOT).unwrap().is_some());
-        assert!(
-            g.chain_cnode
-                .get(abi::BARE_YIELD_CATCHER_SLOT)
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            g.chain_cnode
-                .get(abi::BARE_HOST_OPEN_SLOT)
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            g.chain_cnode
-                .get(abi::BARE_HOST_SAVE_SLOT)
-                .unwrap()
-                .is_some()
-        );
+    fn genesis_publishes_chain_instance() {
+        let g = genesis(empty_chain_image()).expect("genesis");
+        // Chain instance exists in cache.
+        let inst = g
+            .state
+            .caps
+            .get(CapHashOrRef::Hash(g.chain_instance_hash))
+            .expect("chain instance present");
+        assert!(matches!(inst, Cap::Instance(_)));
     }
 
     #[test]
-    fn genesis_registers_chain_in_vaults() {
-        let g = genesis(empty_chain_image());
-        assert!(g.state.vaults.contains_key(&0));
-        assert!(g.state.code_blobs.contains_key(&0));
+    fn genesis_populates_root_cnode_with_kernel_caps() {
+        let g = genesis(empty_chain_image()).expect("genesis");
+        let cn = match g
+            .state
+            .caps
+            .get(CapHashOrRef::Hash(g.root_cnode_hash))
+            .expect("root cnode present")
+        {
+            Cap::CNode(cn) => cn.clone(),
+            _ => panic!("root cnode is not Cap::CNode"),
+        };
+        assert!(cn.get(abi::BARE_GAS_SLOT).is_some());
+        assert!(cn.get(abi::BARE_QUOTA_SLOT).is_some());
+        assert!(cn.get(abi::BARE_YIELD_CATCHER_SLOT).is_some());
+        assert!(cn.get(abi::BARE_HOST_OPEN_SLOT).is_some());
+        assert!(cn.get(abi::BARE_HOST_SAVE_SLOT).is_some());
     }
 
     #[test]
-    fn chain_instance_image_hash_matches_content_hash() {
-        let img = empty_chain_image();
-        let g = genesis(img.clone());
-        let expected = javm_cap::image::image_content_hash::<javm_cap::Blake2b256>(&img);
-        assert_eq!(g.chain_instance.image_hash_chain, expected);
+    fn genesis_is_deterministic() {
+        let g1 = genesis(empty_chain_image()).expect("g1");
+        let g2 = genesis(empty_chain_image()).expect("g2");
+        assert_eq!(g1.chain_instance_hash, g2.chain_instance_hash);
+        assert_eq!(g1.chain_image_hash, g2.chain_image_hash);
+        assert_eq!(g1.root_cnode_hash, g2.root_cnode_hash);
     }
 }
