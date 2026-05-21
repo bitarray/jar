@@ -12,7 +12,6 @@ use javm_cap::cap::Cap;
 use javm_cap::cap_hash::cap_hash;
 use javm_cap::data::{DataCap, DataContent};
 use javm_cap::image::Image;
-use javm_cap::NUM_REGS;
 use nub::Nub;
 use ssz::Decode;
 
@@ -53,45 +52,32 @@ fn main() {
 
     let n: u32 = 200;
 
-    eprintln!("\n=== high-level (Nub::publish_*) ===");
+    eprintln!("\n=== high-level (Nub::put_cap_with_hash, idempotent) ===");
     let mut nub = Nub::new_local();
-    let _ = nub.publish_image(&image).unwrap();
-    let _ = nub.publish_cnode(0, &[]).unwrap();
+    let built = javm_bench::BuiltCaps::for_image(&image, 0);
 
-    measure("Nub::publish_image (idempotent, hot)", n, || {
-        let _ = nub.publish_image(&image).unwrap();
-    });
-    measure("Nub::publish_cnode(empty) (idempotent, hot)", n, || {
-        let _ = nub.publish_cnode(0, &[]).unwrap();
-    });
-
-    use javm_cap::image::PinnedCap;
-    let mut overlays: Vec<(u32, Vec<u8>)> = Vec::new();
-    let mut mem_size: u32 = 0;
-    for mapping in &image.memory_mappings {
-        let end = (mapping.start + mapping.size) as u32;
-        if end > mem_size {
-            mem_size = end;
-        }
-        let target = mapping.source.target();
-        if let Some(PinnedCap::Data { content, .. }) = image.pinned_slots.get(&target) {
-            if !content.is_empty() {
-                overlays.push((mapping.start as u32, content.clone()));
-            }
-        } else if let Some(init) = image.initial_slots.get(&target)
-            && !init.content.is_empty()
-        {
-            overlays.push((mapping.start as u32, init.content.clone()));
-        }
+    // Warm-up: first put pays the deep-clone; subsequent puts are
+    // BTreeMap lookup + refcount bump only.
+    for (h, cap) in &built.data_caps {
+        nub.put_cap_with_hash(*h, cap).unwrap();
     }
-    let overlay_refs: Vec<(u32, &[u8])> =
-        overlays.iter().map(|(s, b)| (*s, b.as_slice())).collect();
-    let image_h = nub.publish_image(&image).unwrap();
-    let cnode_h = nub.publish_cnode(0, &[]).unwrap();
-    let regs = [0u64; NUM_REGS];
-    measure("Nub::publish_instance (idempotent, hot)", n, || {
-        let _ = nub
-            .publish_instance([0; 32], image_h, cnode_h, &overlay_refs, mem_size, regs, 0, 0)
+    nub.put_cap_with_hash(built.image_hash, &built.image_cap)
+        .unwrap();
+    nub.put_cap_with_hash(built.cnode_hash, &built.cnode_cap)
+        .unwrap();
+    nub.put_cap_with_hash(built.instance_hash, &built.instance_cap)
+        .unwrap();
+
+    measure("Nub::put_cap_with_hash image (idempotent)", n, || {
+        nub.put_cap_with_hash(built.image_hash, &built.image_cap)
+            .unwrap();
+    });
+    measure("Nub::put_cap_with_hash cnode (idempotent)", n, || {
+        nub.put_cap_with_hash(built.cnode_hash, &built.cnode_cap)
+            .unwrap();
+    });
+    measure("Nub::put_cap_with_hash instance (idempotent)", n, || {
+        nub.put_cap_with_hash(built.instance_hash, &built.instance_cap)
             .unwrap();
     });
 
@@ -151,14 +137,13 @@ fn main() {
         drop(cap);
     });
 
-    // (e) Nub::publish_data on the same bytes — talc-backed, full
-    //     publish_data_inline_with_size path (alloc + memcpy + hash +
-    //     put_blob lookup + drop). Difference vs (d) ≈ talc cost.
-    measure(
-        "(e) Nub::publish_data(bytes) [talc-backed; hit path]",
-        n,
-        || {
-            let _ = nub.publish_data(bytes).unwrap();
-        },
-    );
+    // (e) Nub::put_cap on a fresh Cap::Data — talc-backed, exercises
+    //     the full put_cap path including SSZ cap_hash + (on first
+    //     iter) deep-clone into talc; subsequent iters hit the
+    //     idempotent fast path. Difference vs (d) ≈ talc + idempotency
+    //     short-circuit cost.
+    let data_cap_global: Cap<Global> = Cap::data_inline(bytes);
+    measure("(e) Nub::put_cap(&data_cap) [idempotent re-put]", n, || {
+        let _ = nub.put_cap(&data_cap_global).unwrap();
+    });
 }
