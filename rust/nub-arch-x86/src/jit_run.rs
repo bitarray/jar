@@ -140,8 +140,13 @@ pub struct ExitInfo {
     pub exit_arg: u32,
     /// Gas remaining at exit.
     pub gas_remaining: i64,
-    /// PVM register 7 (PVM ABI: the program's u32 return value).
-    pub reg_a0: u64,
+    /// PVM register file at exit. φ[7] is the program's return value
+    /// (PVM ABI); the call loop also reads φ[7..=12] for HOST_CALL
+    /// args + φ[11] as the op code on plain `ecall` exits.
+    pub regs: [u64; 13],
+    /// PVM PC at exit (the instruction *after* the ecall on a clean
+    /// HOST_CALL / ECALL exit, the faulting PC on a PageFault).
+    pub pc: u32,
 }
 
 // === Per-invocation memory layout =======================================
@@ -464,7 +469,8 @@ pub unsafe fn run_pvm_with_mem(
             exit_reason: (*ctx).exit_reason,
             exit_arg: (*ctx).exit_arg,
             gas_remaining: (*ctx).gas,
-            reg_a0: (*ctx).regs[7],
+            regs: (*ctx).regs,
+            pc: (*ctx).pc,
         }
     };
 

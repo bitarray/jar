@@ -30,6 +30,8 @@ extern crate alloc;
 extern crate hyperlight_guest_bin;
 
 #[cfg(target_os = "none")]
+mod call_loop;
+#[cfg(target_os = "none")]
 mod jit_cache;
 #[cfg(target_os = "none")]
 mod jit_run;
@@ -76,115 +78,38 @@ mod guest {
             .into_vec()
     }
 
-    /// Cache-based RPC: read an `InvokePacket`, look up the referenced
-    /// `Cap::Instance` in the host-published state cache, walk to its
-    /// `Cap::Image`, run the bytecode, return an `InvocationResult`.
+    /// Cache-based RPC: read an `InvokePacket`, drive the in-kernel
+    /// CALL/HALT loop ([`crate::call_loop`]) — which spins up frames,
+    /// dispatches `derive_spawn` + `host_call` in-sandbox, and tears
+    /// each frame down on HALT.
     ///
-    /// V1 path: copies cache slabs into per-call `Vec<u8>`s and calls
-    /// the existing `run_pvm_with_mem`. A follow-up can flip the cache
-    /// mapping to USER and let the JIT reference talc VAs directly
-    /// (zero-copy).
+    /// Memory regions live behind the per-invocation page-table for the
+    /// duration of one JIT entry; the call loop builds them fresh on
+    /// every push.
     #[guest_function(fn_id = FN_ID_NUB_INVOKE_CACHED)]
     pub fn nub_invoke_cached(packet_bytes: &[u8]) -> Vec<u8> {
-        use javm_cap::cap::Cap;
-
         let packet = match InvokePacket::from_bytes(packet_bytes) {
             Some(p) => p,
             None => return encode_result_error(10),
         };
-        let inst_cap = match crate::state_cache::lookup_cap(&packet.instance_hash) {
-            Some(c) => c,
-            None => return encode_result_error(11),
-        };
-        let inst = match inst_cap {
-            Cap::Instance(i) => i,
-            _ => return encode_result_error(12), // cap at hash isn't an Instance
-        };
-        let img_cap = match crate::state_cache::lookup_cap(&inst.image_hash) {
-            Some(c) => c,
-            None => return encode_result_error(13),
-        };
-        let img = match img_cap {
-            Cap::Image(i) => i,
-            _ => return encode_result_error(14), // cap at image_hash isn't an Image
-        };
 
-        let endpoint = packet.endpoint_idx as usize;
-        if endpoint >= img.endpoints.len() {
-            return encode_result_error(15);
-        }
-        let ep = &img.endpoints[endpoint];
-        if ep.entry_pc == 0 {
-            return encode_result_error(16); // endpoint not defined
-        }
+        let outcome = crate::call_loop::run_top(
+            &packet.instance_hash,
+            packet.endpoint_idx,
+            packet.args,
+            packet.initial_gas as i64,
+        );
 
-        // Code/bitmask/jt: copy from cache into per-call Vec<u8>s.
-        // ImageCap stores the packed bitmask (1 bit per code byte);
-        // the JIT path wants the unpacked form (1 byte per code byte).
-        // SAFETY: cache mapping is installed (state_cache::lookup_cap
-        // succeeded); pointers live inside the cache region.
-        let code: Vec<u8> = img.code.as_slice().to_vec();
-        let bitmask: Vec<u8> = javm_exec::unpack_bitmask(img.bitmask.as_slice(), code.len());
-        let jump_table: Vec<u32> = img.jump_table.as_slice().to_vec();
-
-        // Endpoint baseline first, then layer the InstanceCap's
-        // persisted regs on top (non-zero entries override). Caller-
-        // supplied args overlay φ[7..=10] last.
-        let mut initial_regs = ep.initial_regs;
-        for (i, v) in inst.regs.iter().enumerate() {
-            if *v != 0 {
-                initial_regs[i] = *v;
-            }
-        }
-        for (i, v) in packet.args.iter().enumerate() {
-            initial_regs[7 + i] = *v;
-        }
-
-        // Build memory regions from InstanceCap.rw_overlays. V1 puts
-        // ro/rw/arg data all in rw_overlays (the spec-level
-        // distinction is materialised by the caller). For backwards
-        // compat with run_pvm_with_mem, we pack the first three
-        // overlays into the (arg, ro, rw) slots; the JIT path treats
-        // them uniformly as initial-state byte regions.
-        let mut overlays = img.code.as_slice().iter(); // dummy iterator for type
-        let _ = &mut overlays;
-        let (arg, ro, rw) = pack_overlays(&inst.rw_overlays);
-
-        let info = unsafe {
-            crate::jit_run::run_pvm_with_mem(
-                &inst.image_hash,
-                &code,
-                &bitmask,
-                &jump_table,
-                packet.initial_gas as i64,
-                ep.entry_pc as u32,
-                initial_regs,
-                inst.mem_size,
-                crate::jit_run::MemRegion {
-                    start: arg.0,
-                    data: &arg.1,
-                },
-                crate::jit_run::MemRegion {
-                    start: ro.0,
-                    data: &ro.1,
-                },
-                crate::jit_run::MemRegion {
-                    start: rw.0,
-                    data: &rw.1,
-                },
-            )
-        };
-
-        let result = match info {
-            Some(i) => InvocationResult {
-                exit_reason: i.exit_reason,
-                exit_arg: i.exit_arg,
-                return_value: i.reg_a0,
-                gas_remaining: i.gas_remaining.max(0) as u64,
+        let result = match outcome {
+            Ok(o) => InvocationResult {
+                exit_reason: o.exit_reason,
+                exit_arg: o.exit_arg,
+                return_value: o.return_value,
+                gas_remaining: o.gas_remaining.max(0) as u64,
             },
-            None => InvocationResult {
+            Err(code) => InvocationResult {
                 exit_reason: u32::MAX,
-                exit_arg: 17,
+                exit_arg: code,
                 return_value: 0,
                 gas_remaining: 0,
             },
@@ -193,24 +118,6 @@ mod guest {
         rkyv::to_bytes::<rkyv::rancor::Error>(&result)
             .expect("rkyv-encode InvocationResult")
             .into_vec()
-    }
-
-    /// Materialised mem overlay: `(start, bytes)` pair, ready for
-    /// `run_pvm_with_mem` to lay flat into the per-call memory image.
-    type Overlay = (u32, Vec<u8>);
-
-    /// Pack up to three `RwOverlay` entries into the (arg, ro, rw)
-    /// triple expected by `run_pvm_with_mem`. Missing entries become
-    /// `(0, empty)` which `run_pvm_with_mem` treats as "no overlay".
-    fn pack_overlays<A: allocator_api2::alloc::Allocator + Clone>(
-        overlays: &allocator_api2::vec::Vec<javm_cap::instance::RwOverlay<A>, A>,
-    ) -> (Overlay, Overlay, Overlay) {
-        let mut packed = [(0u32, Vec::<u8>::new()), (0, Vec::new()), (0, Vec::new())];
-        for (i, o) in overlays.iter().take(3).enumerate() {
-            packed[i] = (o.start, o.bytes.as_slice().to_vec());
-        }
-        let [arg, ro, rw] = packed;
-        (arg, ro, rw)
     }
 
     /// Diagnostic: report talc's current allocation state as 32 LE

@@ -62,6 +62,11 @@ fn main() {
             "bench-fri-fold-tree",
             "FRI_FOLD_TREE_BLOB",
         ),
+        (
+            "../../components/benches/sub-vm-recurse",
+            "bench-sub-vm-recurse",
+            "SUB_VM_RECURSE_BLOB",
+        ),
     ] {
         let blob = build_javm::build(path, crate_name);
         println!("cargo:rustc-env={env}={}", blob.display());
