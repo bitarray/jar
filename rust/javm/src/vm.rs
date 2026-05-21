@@ -123,7 +123,7 @@ impl<K: KernelAssist> Vm<K> {
     /// the published cap at `inst_ref`. Used by both `invoke_cached`
     /// and `derive_spawn`/host_call paths that need to push a child
     /// instance.
-    fn build_entry(
+    pub(crate) fn build_entry(
         &mut self,
         cache: &Cache<Global>,
         inst_ref: CapHashOrRef,
@@ -316,10 +316,18 @@ impl<K: KernelAssist> Vm<K> {
         gas_initial: u64,
         pushed_pos: usize,
     ) -> Result<CallResult, VmError> {
+        // `cur_pos` tracks which InstanceEntry the interpreter is
+        // driving right now. Starts at `pushed_pos` (the entry
+        // `invoke_cached`/`call_resume` pushed); grows by 1 on each
+        // nested HOST_CALL, shrinks by 1 on each nested HALT. The
+        // loop exits when the entry at `pushed_pos` itself terminates
+        // (Halt/Fault) or yields (host_yield pushes a ReferenceEntry
+        // above us — detected post-loop).
+        let mut cur_pos = pushed_pos;
         let exit = loop {
-            let program = match &self.stack.entries()[pushed_pos] {
+            let program = match &self.stack.entries()[cur_pos] {
                 Entry::Instance(e) => e.program.clone(),
-                _ => return Err(VmError::Invariant("pushed_pos points at non-Instance")),
+                _ => return Err(VmError::Invariant("cur_pos points at non-Instance")),
             };
             let mut handler = CachedEcallHandler { vm: self, cache };
             let exit = Interpreter::run(
@@ -329,9 +337,67 @@ impl<K: KernelAssist> Vm<K> {
                 &mut gas,
                 &mut handler,
             );
+
+            // SET_IMAGE re-entry: the running entry's image+program
+            // were swapped by `dispatch_set_image_cached`; re-enter
+            // `Interpreter::run` on the same frame with the same
+            // live state.
             if matches!(exit, ExitReason::HostCall(op) if op == host_op::SET_IMAGE) {
                 continue;
             }
+
+            // HOST_CALL push: `dispatch_host_call_cached` pushed a
+            // child InstanceEntry above us. Save the parent's live
+            // regs/mem into its entry so we can restore them when the
+            // child halts; take the child's stashed initial state.
+            // Gas stays threaded (shared pool).
+            if matches!(exit, ExitReason::HostCall(op) if op == host_op::HOST_CALL) {
+                if self.stack.entries().len() != cur_pos + 2 {
+                    return Err(VmError::Invariant(
+                        "HOST_CALL exit without expected child push",
+                    ));
+                }
+                if let Some(Entry::Instance(parent)) = self.stack.entries_mut().get_mut(cur_pos) {
+                    parent.regs = regs;
+                    parent.mem = mem;
+                }
+                cur_pos += 1;
+                let child = self
+                    .stack
+                    .running_instance_mut()
+                    .ok_or(VmError::Invariant("no child after HOST_CALL push"))?;
+                regs = core::mem::replace(&mut child.regs, Regs::new());
+                mem = core::mem::replace(&mut child.mem, Mem::new());
+                continue;
+            }
+
+            // Nested HALT: a child halted while a parent waits below.
+            // Take the child's slot[0] (the spec's reflected
+            // scratchpad), pop the child, restore the parent's
+            // regs/mem, plant slot[0] in the parent.
+            if matches!(exit, ExitReason::Halt) && cur_pos > pushed_pos {
+                let child_slot0 = self
+                    .stack
+                    .running_instance_mut()
+                    .ok_or(VmError::Invariant("no child to halt"))?
+                    .root_cnode
+                    .take(SlotIdx(0))
+                    .ok()
+                    .flatten();
+                self.stack.pop();
+                cur_pos -= 1;
+                let parent = self
+                    .stack
+                    .running_instance_mut()
+                    .ok_or(VmError::Invariant("parent gone after child pop"))?;
+                regs = core::mem::replace(&mut parent.regs, Regs::new());
+                mem = core::mem::replace(&mut parent.mem, Mem::new());
+                if let Some(s0) = child_slot0 {
+                    parent.root_cnode.set(SlotIdx(0), Some(s0))?;
+                }
+                continue;
+            }
+
             break exit;
         };
 
@@ -747,6 +813,132 @@ mod tests {
             }
             other => panic!("expected Halt, got {:?}", other),
         }
+    }
+
+    /// End-to-end at the byte-PVM level: M does `host_call(slot=9,
+    /// endpoint=0)` to enter S, S halts, M halts. Verifies the
+    /// `drive_and_translate` loop's HOST_CALL push + nested HALT pop
+    /// arms wire up correctly. The return value lands on M's φ[7],
+    /// which M never wrote to — i.e., whatever HOST_CALL set it to
+    /// (the slot index 9). The point of the test is that the chain
+    /// terminates without infinite looping or trapping.
+    #[test]
+    fn invoke_cached_host_call_into_child_then_halts() {
+        // S's bytecode: `load_imm φ[7] = 42; ecalli 0` (same shape as
+        // invoke_cached_load_imm_then_reply).
+        let s_img = {
+            let mut code = Vec::new();
+            let mut bm = Vec::new();
+            code.extend_from_slice(&[20u8, 7]);
+            bm.extend_from_slice(&[1u8, 0]);
+            for i in 0..8 {
+                code.push(if i == 0 { 42 } else { 0 });
+                bm.push(0);
+            }
+            code.extend_from_slice(&[10u8, 0]);
+            bm.extend_from_slice(&[1u8, 0]);
+            let mut packed = vec![0u8; bm.len().div_ceil(8)];
+            for (i, b) in bm.iter().enumerate() {
+                if *b != 0 {
+                    packed[i / 8] |= 1 << (i % 8);
+                }
+            }
+            Image {
+                code,
+                packed_bitmask: packed,
+                jump_table: Vec::new(),
+                endpoints: BTreeMap::new(),
+                memory_mappings: Vec::new(),
+                gas_slots: Vec::new(),
+                quota_slots: Vec::new(),
+                pinned_slots: BTreeMap::new(),
+                initial_slots: BTreeMap::new(),
+                yield_marker_slot: None,
+            }
+        };
+
+        // M's bytecode: `load_imm φ[7] = 9; load_imm φ[8] = 0;
+        // ecalli 26 (HOST_CALL); ecalli 0 (HALT)`.
+        let m_img = {
+            let mut code = Vec::new();
+            let mut bm = Vec::new();
+            // load_imm φ[7] = 9
+            code.extend_from_slice(&[20u8, 7]);
+            bm.extend_from_slice(&[1u8, 0]);
+            for i in 0..8 {
+                code.push(if i == 0 { 9 } else { 0 });
+                bm.push(0);
+            }
+            // load_imm φ[8] = 0
+            code.extend_from_slice(&[20u8, 8]);
+            bm.extend_from_slice(&[1u8, 0]);
+            for _ in 0..8 {
+                code.push(0);
+                bm.push(0);
+            }
+            // ecalli 26 (HOST_CALL)
+            code.extend_from_slice(&[10u8, 26]);
+            bm.extend_from_slice(&[1u8, 0]);
+            // ecalli 0 (HALT)
+            code.extend_from_slice(&[10u8, 0]);
+            bm.extend_from_slice(&[1u8, 0]);
+            let mut packed = vec![0u8; bm.len().div_ceil(8)];
+            for (i, b) in bm.iter().enumerate() {
+                if *b != 0 {
+                    packed[i / 8] |= 1 << (i % 8);
+                }
+            }
+            Image {
+                code,
+                packed_bitmask: packed,
+                jump_table: Vec::new(),
+                endpoints: BTreeMap::new(),
+                memory_mappings: Vec::new(),
+                gas_slots: Vec::new(),
+                quota_slots: Vec::new(),
+                pinned_slots: BTreeMap::new(),
+                initial_slots: BTreeMap::new(),
+                yield_marker_slot: None,
+            }
+        };
+
+        // Publish S as a complete Cap::Instance.
+        let mut cache = Cache::new_in(Global);
+        let s_inst_hash = publish_simple_instance(&mut cache, s_img);
+
+        // Publish M with a root cnode that has slot 9 = Hash(S_inst).
+        let m_image_hash = cache
+            .put_cap(&Cap::image_with_slots(&m_img, &[], &[]).unwrap())
+            .unwrap();
+        let m_cnode_hash = {
+            let mut cn = javm_cap::CNodeCap::new(8).unwrap();
+            cn.set(SlotIdx(9), Some(CapHashOrRef::Hash(s_inst_hash)))
+                .unwrap();
+            cache.put_cap(&Cap::CNode(cn)).unwrap()
+        };
+        let m_inst_hash = cache
+            .put_cap(&Cap::instance_with_overlays(
+                [0xAA; 32],
+                m_image_hash,
+                m_cnode_hash,
+                &[],
+                0,
+                [0u64; NUM_REGS],
+                0,
+                0,
+            ))
+            .unwrap();
+
+        let mut vm = Vm::new(InProcessKernelAssist::new());
+        let r = vm
+            .invoke_cached(&mut cache, m_inst_hash, 0, [0; 4], 100_000)
+            .unwrap();
+        assert!(
+            matches!(r, CallResult::Halt { .. }),
+            "expected Halt, got {:?}",
+            r,
+        );
+        assert!(vm.stack.is_empty());
     }
 
     #[test]
