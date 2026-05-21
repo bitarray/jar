@@ -306,7 +306,10 @@ impl Cache {
     /// Put a caller-built `Cap<Global>`. Computes the cap's content hash,
     /// deep-clones it into the cache's talc-backed allocator on first put,
     /// or bumps the existing entry's refcount on idempotent re-put.
-    pub fn put_cap(&mut self, cap: &javm_cap::Cap<allocator_api2::alloc::Global>) -> Result<CapHash> {
+    pub fn put_cap(
+        &mut self,
+        cap: &javm_cap::Cap<allocator_api2::alloc::Global>,
+    ) -> Result<CapHash> {
         let h = self.typed_cache.put_cap(cap).map_err(CacheError::from)?;
         self.touch_blob(h)?;
         Ok(h)

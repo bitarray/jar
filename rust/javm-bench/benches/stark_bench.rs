@@ -59,8 +59,12 @@ macro_rules! bench_workload {
             eprintln!("[{}] recomp gas = {}", stringify!($name), recomp_gas);
 
             let mut g = c.benchmark_group(stringify!($name));
-            g.bench_function("interpreter", |b| b.iter(|| javm_bench::run_interpreter(&built)));
-            g.bench_function("recompiler", |b| b.iter(|| javm_bench::run_recompiler(&built)));
+            g.bench_function("interpreter", |b| {
+                b.iter(|| javm_bench::run_interpreter(&built))
+            });
+            g.bench_function("recompiler", |b| {
+                b.iter(|| javm_bench::run_recompiler(&built))
+            });
             g.finish();
         }
     };

@@ -106,8 +106,8 @@ mod recomp {
             let image_h = nub
                 .put_cap(&image_cap)
                 .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap image: {e}"));
-            let cnode_cap = Cap::empty_cnode(0)
-                .unwrap_or_else(|e| panic!("endpoint {ep}: empty_cnode: {e}"));
+            let cnode_cap =
+                Cap::empty_cnode(0).unwrap_or_else(|e| panic!("endpoint {ep}: empty_cnode: {e}"));
             let cnode_h = nub
                 .put_cap(&cnode_cap)
                 .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap cnode: {e}"));

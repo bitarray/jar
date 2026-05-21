@@ -170,9 +170,7 @@ fn cnode_lookup_after_set() {
     cnode
         .set(SlotIdx(7), Some(CapHashOrRef::Hash([0x11; 32])))
         .unwrap();
-    cnode
-        .set(SlotIdx(42), Some(CapHashOrRef::Ref(99)))
-        .unwrap();
+    cnode.set(SlotIdx(42), Some(CapHashOrRef::Ref(99))).unwrap();
 
     assert_eq!(cnode.get(SlotIdx(7)), Some(CapHashOrRef::Hash([0x11; 32])));
     assert_eq!(cnode.get(SlotIdx(42)), Some(CapHashOrRef::Ref(99)));
@@ -315,7 +313,8 @@ fn cache_with_talc_alloc_round_trips_full_publish_chain() {
     // 2. Publish a CNode referencing it (refcount on data → 2).
     let cnode_h = {
         let mut cn: CNodeCap<Global> = CNodeCap::new_in(4, Global).unwrap();
-        cn.set(SlotIdx(0), Some(CapHashOrRef::Hash(data_h))).unwrap();
+        cn.set(SlotIdx(0), Some(CapHashOrRef::Hash(data_h)))
+            .unwrap();
         cache.put_cap(&Cap::CNode(cn)).expect("put cnode")
     };
     assert_eq!(cache.refcount(CapHashOrRef::Hash(cnode_h)), Some(1));

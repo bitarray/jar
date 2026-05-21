@@ -29,7 +29,9 @@ fn measure<F: FnMut()>(label: &str, n: u32, mut f: F) {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: publish_profile <pvm-blob>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: publish_profile <pvm-blob>");
     let blob = std::fs::read(&path).expect("read");
     let image = Image::from_ssz_bytes(&blob).expect("decode Image");
     eprintln!(

@@ -34,7 +34,9 @@ pub enum CapHashOrRef {
 }
 
 impl ssz::HashTreeRoot for CapHashOrRef {
-    fn hash_tree_root<D: ::ssz::digest::Digest<OutputSize = ::ssz::digest::typenum::U32>>(&self) -> [u8; 32] {
+    fn hash_tree_root<D: ::ssz::digest::Digest<OutputSize = ::ssz::digest::typenum::U32>>(
+        &self,
+    ) -> [u8; 32] {
         match self {
             CapHashOrRef::Hash(h) => *h,
             CapHashOrRef::Ref(_) => {
@@ -287,10 +289,8 @@ impl Cap<Global> {
         pc: u64,
         gas_remaining: u64,
     ) -> Self {
-        let mut overlays: allocator_api2::vec::Vec<
-            super::instance::RwOverlay<Global>,
-            Global,
-        > = allocator_api2::vec::Vec::new_in(Global);
+        let mut overlays: allocator_api2::vec::Vec<super::instance::RwOverlay<Global>, Global> =
+            allocator_api2::vec::Vec::new_in(Global);
         for (start, bytes) in rw_overlays {
             let mut buf = allocator_api2::vec::Vec::with_capacity_in(bytes.len(), Global);
             buf.extend_from_slice(bytes);

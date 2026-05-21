@@ -89,9 +89,9 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     let mut chain_initial_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
     for (slot, pinned) in &chain_image.pinned_slots {
         let h = match pinned {
-            PinnedCap::Data { content, size } => {
-                state.caps.put_cap(&Cap::data_inline_with_size(content, *size))?
-            }
+            PinnedCap::Data { content, size } => state
+                .caps
+                .put_cap(&Cap::data_inline_with_size(content, *size))?,
             PinnedCap::Image { content_hash } => *content_hash,
         };
         chain_pinned_hashes.push((*slot, h));
@@ -115,9 +115,11 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     //    code, single instruction-start bit set) sidesteps the image-cap
     //    validation while keeping kernel caps content-hashable in a
     //    stable way. The same hash is reused for every kernel unit.
-    let placeholder_image_hash = state
-        .caps
-        .put_cap(&Cap::image_with_slots(&placeholder_kernel_image(), &[], &[])?)?;
+    let placeholder_image_hash = state.caps.put_cap(&Cap::image_with_slots(
+        &placeholder_kernel_image(),
+        &[],
+        &[],
+    )?)?;
 
     // 4. A shared empty cnode for kernel-issued Instance caps. They
     //    never invoke any of their own slots; the empty cnode keeps

@@ -17,8 +17,7 @@ const BLOB: &[u8] = include_bytes!(env!("SIMPLE_CHAIN_BLOB"));
 #[test]
 fn simple_chain_returns_sum() {
     // Decode the transpiler output as a v3 chain Image.
-    let image =
-        Image::from_ssz_bytes(BLOB).expect("SSZ-decode the transpiled simple-chain Image");
+    let image = Image::from_ssz_bytes(BLOB).expect("SSZ-decode the transpiled simple-chain Image");
 
     // Drive a single event through the kernel.
     let mut kernel = Kernel::from_genesis(image);

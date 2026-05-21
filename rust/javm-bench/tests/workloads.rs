@@ -26,8 +26,8 @@ use ssz::Decode;
 /// Drive both backends on a workload's Image and check they agree
 /// with each other and with the pinned reference.
 fn check_workload(name: &str, blob: &[u8], expected_value: u64, expected_gas: u64) {
-    let image = Image::from_ssz_bytes(blob)
-        .unwrap_or_else(|e| panic!("[{name}] decode Image: {e:?}"));
+    let image =
+        Image::from_ssz_bytes(blob).unwrap_or_else(|e| panic!("[{name}] decode Image: {e:?}"));
     let built = javm_bench::BuiltCaps::for_image(&image, 0);
 
     let (interp_val, interp_gas) = javm_bench::run_interpreter(&built);

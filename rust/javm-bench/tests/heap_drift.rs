@@ -30,8 +30,7 @@ const GAS: u64 = 100_000_000_000;
 #[test]
 #[ignore]
 fn heap_drift_prime_sieve() {
-    let image = Image::from_ssz_bytes(PRIME_SIEVE_BLOB)
-        .expect("decode prime_sieve Image");
+    let image = Image::from_ssz_bytes(PRIME_SIEVE_BLOB).expect("decode prime_sieve Image");
     let mut nub = Nub::new_hyperlight().expect("sandbox");
     let built = javm_bench::BuiltCaps::for_image(&image, 0);
     for (h, cap) in &built.data_caps {
