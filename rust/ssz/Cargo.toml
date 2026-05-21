@@ -1,0 +1,41 @@
+[package]
+name = "ssz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SimpleSerialize (SSZ) codec with hash_tree_root, MissingOr/SparseList extensions, and allocator-api2 integration."
+
+[features]
+default = ["std", "sha2", "derive"]
+std = ["thiserror/std"]
+sha2 = ["dep:sha2"]
+derive = ["dep:ssz-derive"]
+# Enables the `tests/ethereum_conformance.rs` cross-check against the
+# upstream `ethereum_ssz` + `tree_hash` reference crates. The crates are
+# always present as `dev-dependencies`; the feature gate just prevents
+# the test body from running when off, so day-to-day `cargo test -p ssz`
+# stays fast.
+ethereum-conformance = []
+
+[dependencies]
+allocator-api2 = { version = "0.4", default-features = false, features = ["alloc"] }
+digest = { version = "0.10", default-features = false }
+sha2 = { version = "0.10", default-features = false, optional = true }
+thiserror = { version = "2", default-features = false }
+ssz-derive = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+sha2 = { version = "0.10" }
+# Used by `ethereum_conformance.rs` (gated behind the
+# `ethereum-conformance` feature at the test source level). Always
+# present in dev builds; the gate just prevents the test body from
+# running when the feature is off.
+# `ethereum_ssz`'s lib is named `ssz` (collides with our own crate name),
+# so we can't link both into the same compilation unit. We cross-check
+# only the `tree_hash` side (its lib is `tree_hash`, no collision).
+# Byte-equal `as_ssz_bytes` cross-checks would require renaming our crate
+# at the lib level; deferred until we either bump the published name or
+# split the conformance test into its own crate.
+tree_hash = "0.6"
+tree_hash_derive = "0.6"

@@ -20,6 +20,8 @@ members = [
     "rust/javm-transpiler",
     "rust/scale",
     "rust/scale-derive",
+    "rust/ssz",
+    "rust/ssz-derive",
     "rust/javm-cap",
     "rust/javm-exec",
     "rust/javm-recompiler-x86",
@@ -68,6 +70,8 @@ subsoil = { path = "rust/subsoil" }
 subsoil-derive = { path = "rust/subsoil-derive" }
 scale = { path = "rust/scale", default-features = false }
 scale-derive = { path = "rust/scale-derive" }
+ssz = { path = "rust/ssz", default-features = false }
+ssz-derive = { path = "rust/ssz-derive" }
 
 # External dependencies
 blake2 = "0.10"

@@ -1,0 +1,14 @@
+[package]
+name = "ssz-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Derive macros for SSZ Encode/Decode/HashTreeRoot traits."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
