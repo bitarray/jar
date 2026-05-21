@@ -162,6 +162,56 @@ impl<A: Allocator + Clone> Cache<A> {
         Ok(1)
     }
 
+    /// Insert a caller-built `Cap<Global>` by reference.
+    ///
+    /// Computes the cap's content hash via [`crate::cap_hash::cap_hash`],
+    /// then either bumps the refcount of an already-present entry (no
+    /// allocation) or deep-clones the cap into this cache's allocator and
+    /// inserts it (one allocation pass through `A`).
+    ///
+    /// Returns the cap's content hash. Idempotent: re-put with identical
+    /// content returns the same hash and increments refcount.
+    pub fn put_cap(&mut self, cap: &Cap<Global>) -> Result<CapHash, CacheError> {
+        let hash = crate::cap_hash::cap_hash(cap);
+        self.put_cap_with_hash(hash, cap)?;
+        Ok(hash)
+    }
+
+    /// Pre-hashed variant of [`Self::put_cap`].
+    ///
+    /// The caller asserts that `hash == cap_hash(cap)`; this lets the hot
+    /// idempotent-re-put path skip the SSZ merkleize entirely (becomes a
+    /// single BTreeMap lookup + refcount increment). In debug builds the
+    /// hash is verified; in release the assertion is elided so the path
+    /// stays cheap.
+    ///
+    /// Returns the post-insertion refcount.
+    pub fn put_cap_with_hash(
+        &mut self,
+        hash: CapHash,
+        cap: &Cap<Global>,
+    ) -> Result<u32, CacheError> {
+        // Hot path: idempotent re-put. Bump refcount, return.
+        if let Some(existing) = self.blobs.get(&hash) {
+            let prev = existing.refcount.fetch_add(1, Ordering::Relaxed);
+            return Ok(prev + 1);
+        }
+        // Cold path: deep-clone into the cache's allocator and insert.
+        // Verify the asserted hash in debug builds; trust the caller in
+        // release so we don't pay the SSZ merkleize twice.
+        debug_assert_eq!(
+            crate::cap_hash::cap_hash(cap),
+            hash,
+            "put_cap_with_hash: claimed hash does not match cap content",
+        );
+        let owned = deep_clone_into(cap, self.alloc.clone());
+        let entry = CacheEntry::new(owned);
+        let boxed =
+            ABox::try_new_in(entry, self.alloc.clone()).map_err(|_| CacheError::AllocFailure)?;
+        self.blobs.insert(hash, boxed);
+        Ok(1)
+    }
+
     /// Insert a cap as a fresh mutable instance entry. Returns the
     /// allocated `CapRef`. Refcount starts at 1.
     pub fn put_instance(&mut self, cap: Cap<A>) -> Result<CapRef, CacheError> {
@@ -842,6 +892,140 @@ fn rewrite_ref_targets<A: Allocator + Clone>(cap: &mut Cap<A>, resolved: &[(CapR
             }
         }
         Cap::Data(_) | Cap::Image(_) | Cap::Type(_) => {}
+    }
+}
+
+/// Deep-clone a `Cap<Global>` into the cache's allocator `A`. Walks every
+/// owned `Vec<T, Global>` in the cap tree and re-allocates through `alloc`;
+/// for `DataContent::Paged` allocates a fresh `PageBytes<A>` per loaded
+/// page (the inbound `PageRef<Global>` is dropped after copying out).
+///
+/// This is the cross-allocator counterpart to [`shallow_clone_cap`] — used
+/// by `put_cap` to move a caller-built cap into cache-resident memory.
+pub(crate) fn deep_clone_into<A: Allocator + Clone>(src: &Cap<Global>, alloc: A) -> Cap<A> {
+    match src {
+        Cap::Data(d) => {
+            let content = match &d.content {
+                DataContent::Inline(bytes) => {
+                    let mut new_bytes: AVec<u8, A> =
+                        AVec::with_capacity_in(bytes.len(), alloc.clone());
+                    new_bytes.extend_from_slice(bytes.as_slice());
+                    DataContent::Inline(new_bytes)
+                }
+                DataContent::Paged { page_size, pages } => {
+                    let mut new_pages: AVec<PageSlot<A>, A> =
+                        AVec::with_capacity_in(pages.len(), alloc.clone());
+                    for p in pages.iter() {
+                        let new_slot = match p {
+                            PageSlot::Empty => PageSlot::Empty,
+                            PageSlot::Missing(h) => PageSlot::Missing(*h),
+                            PageSlot::Loaded(pr) => {
+                                let src_pb = pr.get();
+                                let mut bytes: AVec<u8, A> =
+                                    AVec::with_capacity_in(src_pb.bytes.len(), alloc.clone());
+                                bytes.extend_from_slice(src_pb.bytes.as_slice());
+                                let pb = PageBytes {
+                                    refcount: core::sync::atomic::AtomicU32::new(1),
+                                    hash: src_pb.hash,
+                                    bytes,
+                                };
+                                let pr = PageRef::<A>::new_in(pb, alloc.clone())
+                                    .expect("alloc PageRef during deep_clone_into");
+                                PageSlot::Loaded(pr)
+                            }
+                        };
+                        new_pages.push(new_slot);
+                    }
+                    DataContent::Paged {
+                        page_size: *page_size,
+                        pages: new_pages,
+                    }
+                }
+            };
+            Cap::Data(DataCap {
+                size: d.size,
+                content,
+            })
+        }
+        Cap::Image(img) => {
+            let mut code = AVec::with_capacity_in(img.code.len(), alloc.clone());
+            code.extend_from_slice(img.code.as_slice());
+
+            let mut bitmask = AVec::with_capacity_in(img.bitmask.len(), alloc.clone());
+            bitmask.extend_from_slice(img.bitmask.as_slice());
+
+            let mut jump_table = AVec::with_capacity_in(img.jump_table.len(), alloc.clone());
+            for v in img.jump_table.iter() {
+                jump_table.push(*v);
+            }
+
+            let mut endpoints = AVec::with_capacity_in(img.endpoints.len(), alloc.clone());
+            for e in img.endpoints.iter() {
+                endpoints.push(*e);
+            }
+
+            let mut mappings = AVec::with_capacity_in(img.mappings.len(), alloc.clone());
+            for m in img.mappings.iter() {
+                mappings.push(*m);
+            }
+
+            let mut pinned = AVec::with_capacity_in(img.pinned.len(), alloc.clone());
+            for s in img.pinned.iter() {
+                pinned.push(*s);
+            }
+
+            let mut initial = AVec::with_capacity_in(img.initial.len(), alloc.clone());
+            for s in img.initial.iter() {
+                initial.push(*s);
+            }
+
+            Cap::Image(crate::image_cap::ImageCap {
+                code,
+                bitmask,
+                jump_table,
+                endpoints,
+                mappings,
+                pinned,
+                initial,
+                yield_marker_slot: img.yield_marker_slot,
+            })
+        }
+        Cap::CNode(cn) => {
+            let mut slots: ssz::SparseList<CapHashOrRef, { crate::cnode::MAX_CNODE_SLOTS }, A> =
+                ssz::SparseList::new_in(alloc.clone());
+            for (idx, mo) in cn.slots.iter() {
+                slots
+                    .insert(idx, mo.clone())
+                    .expect("source SparseList already satisfies the bound");
+            }
+            Cap::CNode(CNodeCap {
+                size_log: cn.size_log,
+                slots,
+            })
+        }
+        Cap::Instance(inst) => {
+            let mut new_overlays: AVec<RwOverlay<A>, A> =
+                AVec::with_capacity_in(inst.rw_overlays.len(), alloc.clone());
+            for o in inst.rw_overlays.iter() {
+                let mut bytes: AVec<u8, A> = AVec::with_capacity_in(o.bytes.len(), alloc.clone());
+                bytes.extend_from_slice(o.bytes.as_slice());
+                new_overlays.push(RwOverlay {
+                    start: o.start,
+                    bytes,
+                });
+            }
+            Cap::Instance(InstanceCap {
+                image_hash_chain: inst.image_hash_chain,
+                image_hash: inst.image_hash,
+                root_cnode: inst.root_cnode,
+                rw_overlays: new_overlays,
+                mem_size: inst.mem_size,
+                regs: inst.regs,
+                pc: inst.pc,
+                gas_remaining: inst.gas_remaining,
+            })
+        }
+        Cap::Type(t) => Cap::Type(*t),
     }
 }
 

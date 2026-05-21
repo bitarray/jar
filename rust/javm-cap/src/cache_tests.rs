@@ -761,3 +761,74 @@ fn get_mut_image_or_type_errors() {
     let err = cache.get_mut(CapHashOrRef::Hash(h));
     assert!(matches!(err, Err(super::cache::CacheError::NonMutableKind)));
 }
+
+// ----------------------------------------------------------------------------
+// put_cap / put_cap_with_hash — Stage A regression tests
+// ----------------------------------------------------------------------------
+
+#[test]
+fn put_cap_idempotent_returns_same_hash_and_bumps_refcount() {
+    let mut cache = Cache::new_in(Global);
+    let cap = make_data_inline(b"alpha");
+    let h1 = cache.put_cap(&cap).expect("first put");
+    let h2 = cache.put_cap(&cap).expect("second put");
+    assert_eq!(h1, h2, "put_cap must be idempotent on hash");
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(h1)), Some(2));
+}
+
+#[test]
+fn put_cap_with_hash_matches_put_cap() {
+    let mut cache_a = Cache::new_in(Global);
+    let mut cache_b = Cache::new_in(Global);
+    let cap = make_data_inline(b"beta");
+    let h_a = cache_a.put_cap(&cap).unwrap();
+    let h_b = crate::cap_hash::cap_hash(&cap);
+    cache_b.put_cap_with_hash(h_b, &cap).unwrap();
+    assert_eq!(h_a, h_b, "put_cap and put_cap_with_hash must agree on hash");
+    // Both caches now hold one entry at refcount=1.
+    assert_eq!(cache_a.refcount(CapHashOrRef::Hash(h_a)), Some(1));
+    assert_eq!(cache_b.refcount(CapHashOrRef::Hash(h_b)), Some(1));
+}
+
+#[test]
+fn put_cap_deep_clones_content_into_cache_allocator() {
+    let mut cache = Cache::new_in(Global);
+    let cap = make_data_inline(b"gamma");
+    let h = cache.put_cap(&cap).unwrap();
+    // After put, the in-cache cap must roundtrip identical content.
+    match cache.get(CapHashOrRef::Hash(h)).unwrap() {
+        Cap::Data(d) => match &d.content {
+            DataContent::Inline(bs) => assert_eq!(bs.as_slice(), b"gamma"),
+            _ => panic!("expected Inline"),
+        },
+        _ => panic!("expected Data"),
+    }
+    // And the cached cap_hash agrees with the input cap_hash.
+    assert_eq!(h, crate::cap_hash::cap_hash(&cap));
+}
+
+#[test]
+fn put_cap_with_hash_hot_path_is_pure_refcount_bump() {
+    // The second put_cap_with_hash MUST hit the in-cache entry — no new
+    // allocation, no deep-clone. Validate by inspecting refcount + blob_count.
+    let mut cache = Cache::new_in(Global);
+    let cap = make_data_inline(b"delta");
+    let h = crate::cap_hash::cap_hash(&cap);
+    cache.put_cap_with_hash(h, &cap).unwrap();
+    assert_eq!(cache.blob_count(), 1);
+    cache.put_cap_with_hash(h, &cap).unwrap();
+    assert_eq!(cache.blob_count(), 1, "no new blob on idempotent re-put");
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(h)), Some(2));
+}
+
+#[test]
+#[should_panic(expected = "claimed hash does not match cap content")]
+fn put_cap_with_hash_rejects_wrong_hash_in_debug() {
+    // Only fires under debug_assert. In release builds the assertion is
+    // elided and the wrong hash is silently trusted — that's the
+    // documented contract; see put_cap_with_hash.
+    let mut cache = Cache::new_in(Global);
+    let cap = make_data_inline(b"epsilon");
+    let wrong = [0xCDu8; 32];
+    let _ = cache.put_cap_with_hash(wrong, &cap);
+}

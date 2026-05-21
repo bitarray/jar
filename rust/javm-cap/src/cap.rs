@@ -240,4 +240,66 @@ impl Cap<Global> {
     pub fn empty_cnode(size_log: u8) -> Result<Self, crate::error::CapError> {
         Ok(Cap::CNode(CNodeCap::new(size_log)?))
     }
+
+    /// Build a heap `Cap::Image` from a SCALE `Image` plus the caller-resolved
+    /// pinned/initial slot `CapHash` pairs.
+    ///
+    /// Wraps [`super::image_cap::image_cap_in`] with `A = Global` and the
+    /// `Cap::Image` constructor. Use this when the caller has already
+    /// published (or knows the hashes of) the pinned/initial data blobs that
+    /// the image references.
+    pub fn image_with_slots(
+        image: &crate::image::Image,
+        pinned_hashes: &[(crate::slot::SlotIdx, CapHash)],
+        initial_hashes: &[(crate::slot::SlotIdx, CapHash)],
+    ) -> Result<Self, super::image_cap::ImageConvertError> {
+        Ok(Cap::Image(super::image_cap::image_cap_in(
+            image,
+            pinned_hashes,
+            initial_hashes,
+            Global,
+        )?))
+    }
+
+    /// Build a heap `Cap::Instance` directly from field values. Mirrors the
+    /// shape the old `Cache::publish_instance_blob` reconstructed
+    /// field-by-field but produces a `Cap::Instance(InstanceCap<Global>)`
+    /// the caller owns.
+    ///
+    /// `rw_overlays` is the list of `(start_va, bytes)` overlays the
+    /// Instance carries — each becomes one `RwOverlay<Global>` entry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn instance_with_overlays(
+        image_hash_chain: CapHash,
+        image_hash: CapHash,
+        root_cnode: CapHash,
+        rw_overlays: &[(u32, &[u8])],
+        mem_size: u32,
+        regs: [u64; NUM_REGS],
+        pc: u64,
+        gas_remaining: u64,
+    ) -> Self {
+        let mut overlays: allocator_api2::vec::Vec<
+            super::instance::RwOverlay<Global>,
+            Global,
+        > = allocator_api2::vec::Vec::new_in(Global);
+        for (start, bytes) in rw_overlays {
+            let mut buf = allocator_api2::vec::Vec::with_capacity_in(bytes.len(), Global);
+            buf.extend_from_slice(bytes);
+            overlays.push(super::instance::RwOverlay {
+                start: *start,
+                bytes: buf,
+            });
+        }
+        Cap::Instance(super::instance::InstanceCap {
+            image_hash_chain,
+            image_hash,
+            root_cnode: CapHashOrRef::Hash(root_cnode),
+            rw_overlays: overlays,
+            mem_size,
+            regs,
+            pc,
+            gas_remaining,
+        })
+    }
 }
