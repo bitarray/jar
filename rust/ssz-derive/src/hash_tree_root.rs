@@ -4,6 +4,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{Data, DataEnum, DeriveInput, Fields};
 
+use crate::container::container_hash_root_expr;
 use crate::parse::{parse_field_attrs, parse_variant_attrs};
 
 pub fn derive_hash_tree_root_impl(input: &DeriveInput) -> syn::Result<TokenStream> {
@@ -45,45 +46,44 @@ fn hash_struct(
 ) -> syn::Result<TokenStream> {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    // Collect non-skip field accessor expressions.
-    let accessors: Vec<TokenStream> = match fields {
+    // Collect non-skip field types/accessors. Accessors are reference
+    // expressions (`&self.foo`) so they're directly usable by the shared
+    // container hash helper.
+    let (accessors, tys): (Vec<TokenStream>, Vec<TokenStream>) = match fields {
         Fields::Named(named) => {
             let mut accs = Vec::new();
+            let mut tys = Vec::new();
             for f in &named.named {
                 let a = parse_field_attrs(&f.attrs)?;
                 if a.skip {
                     continue;
                 }
                 let id = f.ident.as_ref().unwrap();
-                accs.push(quote! { ssz::HashTreeRoot::hash_tree_root::<__D>(&self.#id) });
+                let ty = &f.ty;
+                accs.push(quote! { &self.#id });
+                tys.push(quote! { #ty });
             }
-            accs
+            (accs, tys)
         }
         Fields::Unnamed(unnamed) => {
             let mut accs = Vec::new();
+            let mut tys = Vec::new();
             for (i, f) in unnamed.unnamed.iter().enumerate() {
                 let a = parse_field_attrs(&f.attrs)?;
                 if a.skip {
                     continue;
                 }
                 let idx = syn::Index::from(i);
-                accs.push(quote! { ssz::HashTreeRoot::hash_tree_root::<__D>(&self.#idx) });
+                let ty = &f.ty;
+                accs.push(quote! { &self.#idx });
+                tys.push(quote! { #ty });
             }
-            accs
+            (accs, tys)
         }
-        Fields::Unit => Vec::new(),
+        Fields::Unit => (Vec::new(), Vec::new()),
     };
 
-    let n = accessors.len();
-    let body = if n == 0 {
-        // Empty container → root is `zero_hash(0)`.
-        quote! { [0u8; 32] }
-    } else {
-        quote! {
-            let __roots: [[u8; 32]; #n] = [#(#accessors),*];
-            ssz::merkleize::<__D>(&__roots, #n)
-        }
-    };
+    let body = container_hash_root_expr(&accessors, &tys);
 
     Ok(quote! {
         impl #impl_generics ssz::HashTreeRoot for #name #ty_generics #where_clause {
@@ -119,6 +119,15 @@ fn hash_enum(
                 });
             }
             Fields::Unnamed(unnamed) => {
+                if unnamed.unnamed.is_empty() {
+                    // `A()` — payload root = zero_hash(0).
+                    arms.push(quote! {
+                        Self::#vident() => {
+                            ssz::mix_in_selector::<__D>([0u8; 32], #selector)
+                        }
+                    });
+                    continue;
+                }
                 if unnamed.unnamed.len() != 1 {
                     return Err(syn::Error::new_spanned(
                         variant,
@@ -133,11 +142,40 @@ fn hash_enum(
                     }
                 });
             }
-            Fields::Named(_) => {
-                return Err(syn::Error::new_spanned(
-                    variant,
-                    "SSZ Union variants with named fields not supported",
-                ));
+            Fields::Named(named) => {
+                let idents: Vec<&syn::Ident> = named
+                    .named
+                    .iter()
+                    .map(|f| f.ident.as_ref().unwrap())
+                    .collect();
+                let bind_pat = quote! { Self::#vident { #(#idents),* } };
+
+                if idents.is_empty() {
+                    // `A {}` — payload root = zero_hash(0).
+                    arms.push(quote! {
+                        #bind_pat => {
+                            ssz::mix_in_selector::<__D>([0u8; 32], #selector)
+                        }
+                    });
+                    continue;
+                }
+
+                let tys: Vec<TokenStream> = named
+                    .named
+                    .iter()
+                    .map(|f| {
+                        let ty = &f.ty;
+                        quote! { #ty }
+                    })
+                    .collect();
+                let accessors: Vec<TokenStream> = idents.iter().map(|id| quote! { #id }).collect();
+                let payload = container_hash_root_expr(&accessors, &tys);
+                arms.push(quote! {
+                    #bind_pat => {
+                        let __r = #payload;
+                        ssz::mix_in_selector::<__D>(__r, #selector)
+                    }
+                });
             }
         }
     }

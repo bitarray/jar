@@ -43,6 +43,10 @@ pub mod union;
 pub mod vector;
 
 pub use bits::{Bitlist, Bitvector};
+// Re-exports so consumers of the derive macros can name the crates the
+// generated code references without taking direct dependencies.
+pub use allocator_api2;
+pub use digest;
 pub use error::DecodeError;
 pub use list::List;
 pub use merkle::{merkleize, mix_in_length, mix_in_selector, pack_bytes, zero_hash};
@@ -131,10 +135,8 @@ pub trait Decode: Sized {
     }
 
     /// Decode a full instance from `bytes`, using `alloc` for owned buffers.
-    fn from_ssz_bytes_in<A: Allocator + Clone>(
-        bytes: &[u8],
-        alloc: A,
-    ) -> Result<Self, DecodeError>;
+    fn from_ssz_bytes_in<A: Allocator + Clone>(bytes: &[u8], alloc: A)
+    -> Result<Self, DecodeError>;
 }
 
 /// Computes a 32-byte hash tree root for SSZ types.
@@ -162,11 +164,7 @@ pub fn hash_tree_root<T: HashTreeRoot + ?Sized>(value: &T) -> [u8; 32] {
 /// Wraps a slice index check that returns [`DecodeError::UnexpectedEof`] on
 /// out-of-bounds.
 #[inline]
-pub(crate) fn read_slice(
-    bytes: &[u8],
-    offset: usize,
-    len: usize,
-) -> Result<&[u8], DecodeError> {
+pub(crate) fn read_slice(bytes: &[u8], offset: usize, len: usize) -> Result<&[u8], DecodeError> {
     let end = offset.checked_add(len).ok_or(DecodeError::UnexpectedEof {
         expected: len,
         actual: bytes.len().saturating_sub(offset),
@@ -187,4 +185,3 @@ pub(crate) fn read_offset(bytes: &[u8], off: usize) -> Result<usize, DecodeError
     let arr: [u8; 4] = slice.try_into().expect("len checked");
     Ok(u32::from_le_bytes(arr) as usize)
 }
-

@@ -423,7 +423,9 @@ impl<T: HashTreeRoot, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
         total_depth: usize,
     ) -> [u8; 32] {
         // Fast path: explicitly cached subtree root for this coordinate.
-        if let Some(cached) = self.cached_subtree_roots.get(&coord_to_key(node_depth, node_index_at_depth))
+        if let Some(cached) = self
+            .cached_subtree_roots
+            .get(&coord_to_key(node_depth, node_index_at_depth))
         {
             return *cached;
         }
@@ -446,21 +448,14 @@ impl<T: HashTreeRoot, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
 
         // If no materialized entries fall in [lo, hi), this subtree is
         // entirely empty → it's a zero-hash at the appropriate depth.
-        let has_entries = self
-            .entries
-            .range(lo..hi)
-            .next()
-            .is_some();
+        let has_entries = self.entries.range(lo..hi).next().is_some();
         if !has_entries {
             return zero_hash::<D>(levels_below);
         }
 
         // Recurse into children.
-        let left = self.compute_subtree_root::<D>(
-            node_depth + 1,
-            node_index_at_depth * 2,
-            total_depth,
-        );
+        let left =
+            self.compute_subtree_root::<D>(node_depth + 1, node_index_at_depth * 2, total_depth);
         let right = self.compute_subtree_root::<D>(
             node_depth + 1,
             node_index_at_depth * 2 + 1,

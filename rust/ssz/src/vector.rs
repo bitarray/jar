@@ -12,9 +12,7 @@ use digest::typenum::U32;
 
 use crate::list::encode_var_list_payloads;
 use crate::merkle::{merkleize, pack_bytes};
-use crate::{
-    BYTES_PER_LENGTH_OFFSET, Decode, DecodeError, Encode, HashTreeRoot, read_offset,
-};
+use crate::{BYTES_PER_LENGTH_OFFSET, Decode, DecodeError, Encode, HashTreeRoot, read_offset};
 
 /// SSZ vector with a compile-time length of `N`.
 ///
@@ -182,11 +180,8 @@ impl<T: HashTreeRoot + Encode, const N: usize, A: Allocator + Clone> HashTreeRoo
             merkleize::<D>(&chunks, chunk_limit)
         } else {
             // Composite vector: merkleize per-element roots.
-            let roots: alloc::vec::Vec<[u8; 32]> = self
-                .inner
-                .iter()
-                .map(|t| t.hash_tree_root::<D>())
-                .collect();
+            let roots: alloc::vec::Vec<[u8; 32]> =
+                self.inner.iter().map(|t| t.hash_tree_root::<D>()).collect();
             merkleize::<D>(&roots, N.max(1))
         }
     }

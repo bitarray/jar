@@ -62,4 +62,3 @@ pub fn parse_variant_attrs(attrs: &[Attribute]) -> syn::Result<VariantAttrs> {
     }
     Ok(VariantAttrs { selector })
 }
-

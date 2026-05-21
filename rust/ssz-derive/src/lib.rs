@@ -31,6 +31,7 @@
 use proc_macro::TokenStream;
 use syn::{DeriveInput, parse_macro_input};
 
+mod container;
 mod decode;
 mod encode;
 mod hash_tree_root;

@@ -4,6 +4,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Data, DataEnum, DeriveInput, Fields};
 
+use crate::container::container_decode_body;
 use crate::parse::{parse_field_attrs, parse_variant_attrs};
 
 pub fn derive_decode_impl(input: &DeriveInput) -> syn::Result<TokenStream> {
@@ -139,109 +140,8 @@ fn decode_struct(
 
     let n = active.len();
     let val_idents: Vec<syn::Ident> = (0..n).map(|i| format_ident!("__val_{}", i)).collect();
-    let off_idents: Vec<syn::Ident> = (0..n).map(|i| format_ident!("__off_{}", i)).collect();
-    let tys: Vec<syn::Type> = active.iter().map(|(_, _, t)| t.clone()).collect();
+    let tys: Vec<TokenStream> = active.iter().map(|(_, _, t)| quote! { #t }).collect();
 
-    // Pass 1: walk fixed region, store fixed values immediately or offsets
-    // for variable fields.
-    let fixed_size_terms: Vec<TokenStream> = tys
-        .iter()
-        .map(|t| {
-            quote! {
-                if <#t as ssz::Decode>::is_ssz_fixed_len() {
-                    <#t as ssz::Decode>::ssz_fixed_len()
-                } else {
-                    ssz::BYTES_PER_LENGTH_OFFSET
-                }
-            }
-        })
-        .collect();
-
-    let pass1: Vec<TokenStream> = tys
-        .iter()
-        .zip(val_idents.iter())
-        .zip(off_idents.iter())
-        .map(|((ty, val), off)| {
-            quote! {
-                let mut #val: ::core::option::Option<#ty> = None;
-                let mut #off: ::core::option::Option<usize> = None;
-                if <#ty as ssz::Decode>::is_ssz_fixed_len() {
-                    let __sz = <#ty as ssz::Decode>::ssz_fixed_len();
-                    if __cursor + __sz > bytes.len() {
-                        return Err(ssz::DecodeError::UnexpectedEof {
-                            expected: __cursor + __sz,
-                            actual: bytes.len(),
-                        });
-                    }
-                    #val = Some(<#ty as ssz::Decode>::from_ssz_bytes_in(
-                        &bytes[__cursor..__cursor + __sz], alloc.clone(),
-                    )?);
-                    __cursor += __sz;
-                } else {
-                    if __cursor + 4 > bytes.len() {
-                        return Err(ssz::DecodeError::UnexpectedEof {
-                            expected: __cursor + 4,
-                            actual: bytes.len(),
-                        });
-                    }
-                    let mut __ob = [0u8; 4];
-                    __ob.copy_from_slice(&bytes[__cursor..__cursor + 4]);
-                    #off = Some(u32::from_le_bytes(__ob) as usize);
-                    __cursor += 4;
-                }
-            }
-        })
-        .collect();
-
-    // Push variable offsets into a Vec (preserve declaration order).
-    let push_var_offs: Vec<TokenStream> = tys
-        .iter()
-        .zip(off_idents.iter())
-        .enumerate()
-        .map(|(i, (ty, off))| {
-            quote! {
-                if !<#ty as ssz::Decode>::is_ssz_fixed_len() {
-                    __var_positions.push((#i, #off.unwrap()));
-                }
-            }
-        })
-        .collect();
-
-    // Pass 2: decode variable fields. We need the end of each variable
-    // field's slice = next variable offset (or bytes.len()).
-    let pass2: Vec<TokenStream> = tys
-        .iter()
-        .zip(val_idents.iter())
-        .zip(off_idents.iter())
-        .enumerate()
-        .map(|(i, ((ty, val), off))| {
-            quote! {
-                if !<#ty as ssz::Decode>::is_ssz_fixed_len() {
-                    let __start = #off.unwrap();
-                    // Find this field in __var_positions and the next one's offset (or bytes.len()).
-                    let __idx_in_var = __var_positions
-                        .iter()
-                        .position(|(j, _)| *j == #i)
-                        .expect("variable field in var_positions");
-                    let __end = if __idx_in_var + 1 < __var_positions.len() {
-                        __var_positions[__idx_in_var + 1].1
-                    } else {
-                        bytes.len()
-                    };
-                    if __start > __end {
-                        return Err(ssz::DecodeError::OffsetsNotMonotonic {
-                            prev: __start, curr: __end,
-                        });
-                    }
-                    #val = Some(<#ty as ssz::Decode>::from_ssz_bytes_in(
-                        &bytes[__start..__end], alloc.clone(),
-                    )?);
-                }
-            }
-        })
-        .collect();
-
-    // Build struct init.
     // Map all-index → val ident (or None for skipped).
     let mut active_to_val: std::collections::BTreeMap<usize, syn::Ident> =
         std::collections::BTreeMap::new();
@@ -291,7 +191,8 @@ fn decode_struct(
                 .collect();
             quote! { #name { #(#parts),* } }
         } else {
-            let parts: Vec<TokenStream> = all.iter().map(|_| quote! { Default::default() }).collect();
+            let parts: Vec<TokenStream> =
+                all.iter().map(|_| quote! { Default::default() }).collect();
             quote! { #name(#(#parts),*) }
         };
         quote! {
@@ -299,40 +200,9 @@ fn decode_struct(
             Ok(#bind)
         }
     } else {
+        let body = container_decode_body(&tys);
         quote! {
-            let mut __cursor: usize = 0;
-            let __fixed_size: usize = 0usize #(+ #fixed_size_terms)*;
-            #(#pass1)*
-            debug_assert_eq!(__cursor, __fixed_size);
-
-            // Collect variable-field positions in declaration order.
-            let mut __var_positions: allocator_api2::vec::Vec<(usize, usize)> = allocator_api2::vec::Vec::new();
-            #(#push_var_offs)*
-            // Validate monotonic and start at __fixed_size.
-            for __pair in __var_positions.windows(2) {
-                if __pair[1].1 < __pair[0].1 {
-                    return Err(ssz::DecodeError::OffsetsNotMonotonic {
-                        prev: __pair[0].1, curr: __pair[1].1,
-                    });
-                }
-            }
-            if let Some(&(_, __first)) = __var_positions.first() {
-                if __first != __fixed_size {
-                    return Err(ssz::DecodeError::InvalidOffset {
-                        offset: __first, len: bytes.len(), fixed: __fixed_size,
-                    });
-                }
-            } else {
-                // No variable fields; verify no trailing bytes.
-                if bytes.len() != __fixed_size {
-                    return Err(ssz::DecodeError::TrailingBytes {
-                        expected: __fixed_size, actual: bytes.len(),
-                    });
-                }
-            }
-
-            #(#pass2)*
-
+            #body
             Ok(#init_body)
         }
     };
@@ -383,6 +253,20 @@ fn decode_enum(
                 });
             }
             Fields::Unnamed(unnamed) => {
+                if unnamed.unnamed.is_empty() {
+                    // `A()` — selector only, no payload.
+                    arms.push(quote! {
+                        #selector => {
+                            if bytes.len() != 1 {
+                                return Err(ssz::DecodeError::TrailingBytes {
+                                    expected: 1, actual: bytes.len(),
+                                });
+                            }
+                            Ok(#name::#vident())
+                        }
+                    });
+                    continue;
+                }
                 if unnamed.unnamed.len() != 1 {
                     return Err(syn::Error::new_spanned(
                         variant,
@@ -399,11 +283,52 @@ fn decode_enum(
                     }
                 });
             }
-            Fields::Named(_) => {
-                return Err(syn::Error::new_spanned(
-                    variant,
-                    "SSZ Union variants with named fields not supported",
-                ));
+            Fields::Named(named) => {
+                let idents: Vec<&syn::Ident> = named
+                    .named
+                    .iter()
+                    .map(|f| f.ident.as_ref().unwrap())
+                    .collect();
+
+                if idents.is_empty() {
+                    // `A {}` — treat like a unit variant.
+                    arms.push(quote! {
+                        #selector => {
+                            if bytes.len() != 1 {
+                                return Err(ssz::DecodeError::TrailingBytes {
+                                    expected: 1, actual: bytes.len(),
+                                });
+                            }
+                            Ok(#name::#vident {})
+                        }
+                    });
+                    continue;
+                }
+
+                let tys: Vec<TokenStream> = named
+                    .named
+                    .iter()
+                    .map(|f| {
+                        let ty = &f.ty;
+                        quote! { #ty }
+                    })
+                    .collect();
+                let n = idents.len();
+                let val_idents: Vec<syn::Ident> =
+                    (0..n).map(|i| format_ident!("__val_{}", i)).collect();
+                let body = container_decode_body(&tys);
+                let init_parts: Vec<TokenStream> = idents
+                    .iter()
+                    .zip(val_idents.iter())
+                    .map(|(id, v)| quote! { #id: #v.expect("decoded") })
+                    .collect();
+                arms.push(quote! {
+                    #selector => {
+                        let bytes = &bytes[1..];
+                        #body
+                        Ok(#name::#vident { #(#init_parts),* })
+                    }
+                });
             }
         }
     }

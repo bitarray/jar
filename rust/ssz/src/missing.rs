@@ -100,7 +100,10 @@ impl<T: Decode> Decode for MissingOr<T> {
     ) -> Result<Self, DecodeError> {
         let tag = read_slice(bytes, 0, 1)?[0];
         match tag {
-            0 => Ok(Self::Materialized(T::from_ssz_bytes_in(&bytes[1..], alloc)?)),
+            0 => Ok(Self::Materialized(T::from_ssz_bytes_in(
+                &bytes[1..],
+                alloc,
+            )?)),
             1 => {
                 if bytes.len() != 33 {
                     return Err(DecodeError::TrailingBytes {

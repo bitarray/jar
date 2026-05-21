@@ -4,6 +4,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Data, DataEnum, DeriveInput, Fields};
 
+use crate::container::{container_bytes_len_expr, container_encode_body};
 use crate::parse::{parse_field_attrs, parse_variant_attrs};
 
 pub fn derive_encode_impl(input: &DeriveInput) -> syn::Result<TokenStream> {
@@ -58,7 +59,9 @@ fn encode_struct(
 ) -> syn::Result<TokenStream> {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    // Collect non-skip field types/accessors.
+    // Collect non-skip field types/accessors. Accessors are reference
+    // expressions (`&self.foo` / `&self.0`) so they're directly usable by
+    // the shared container helpers.
     let (field_tys, field_accessors): (Vec<TokenStream>, Vec<TokenStream>) = match fields {
         Fields::Named(named) => {
             let mut tys = Vec::new();
@@ -71,7 +74,7 @@ fn encode_struct(
                 let ident = field.ident.as_ref().unwrap();
                 let ty = &field.ty;
                 tys.push(quote! { #ty });
-                accs.push(quote! { self.#ident });
+                accs.push(quote! { &self.#ident });
             }
             (tys, accs)
         }
@@ -86,7 +89,7 @@ fn encode_struct(
                 let idx = syn::Index::from(i);
                 let ty = &field.ty;
                 tys.push(quote! { #ty });
-                accs.push(quote! { self.#idx });
+                accs.push(quote! { &self.#idx });
             }
             (tys, accs)
         }
@@ -119,108 +122,8 @@ fn encode_struct(
         quote! { 0usize #(+ #parts)* }
     };
 
-    // ssz_bytes_len: fixed slots + variable payloads.
-    let bytes_len = {
-        let var_terms: Vec<TokenStream> = field_tys
-            .iter()
-            .zip(field_accessors.iter())
-            .map(|(t, a)| {
-                quote! {
-                    if !<#t as ssz::Encode>::is_ssz_fixed_len() {
-                        total += ssz::Encode::ssz_bytes_len(&#a);
-                    }
-                }
-            })
-            .collect();
-        quote! {
-            let mut total: usize = <Self as ssz::Encode>::ssz_fixed_len();
-            #(#var_terms)*
-            total
-        }
-    };
-
-    // ssz_append: container encoding (fixed inline, variable via offset + payload).
-    let append_body = {
-        // Reserve space for fixed region.
-        let n_fields = field_tys.len();
-        if n_fields == 0 {
-            quote! {}
-        } else {
-            let field_indices: Vec<usize> = (0..n_fields).collect();
-            let tmp_idents: Vec<syn::Ident> =
-                (0..n_fields).map(|i| format_ident!("__field_{}", i)).collect();
-
-            // Pre-encode each field into a temporary buffer (using Global
-            // for simplicity — these are small and short-lived) so we can
-            // compute offsets without re-running encode.
-            let pre_encode: Vec<TokenStream> = field_tys
-                .iter()
-                .zip(field_accessors.iter())
-                .zip(tmp_idents.iter())
-                .map(|((t, a), tmp)| {
-                    quote! {
-                        let mut #tmp: allocator_api2::vec::Vec<u8, allocator_api2::alloc::Global> =
-                            allocator_api2::vec::Vec::new_in(allocator_api2::alloc::Global);
-                        <#t as ssz::Encode>::ssz_append(&#a, &mut #tmp);
-                    }
-                })
-                .collect();
-
-            // Compute fixed-region size.
-            let fixed_size_terms: Vec<TokenStream> = field_tys
-                .iter()
-                .map(|t| {
-                    quote! {
-                        if <#t as ssz::Encode>::is_ssz_fixed_len() {
-                            <#t as ssz::Encode>::ssz_fixed_len()
-                        } else {
-                            ssz::BYTES_PER_LENGTH_OFFSET
-                        }
-                    }
-                })
-                .collect();
-
-            // Walk fields in order: emit fixed bytes or offset to current
-            // running variable cursor.
-            let write_fixed: Vec<TokenStream> = field_tys
-                .iter()
-                .zip(tmp_idents.iter())
-                .enumerate()
-                .map(|(i, (t, tmp))| {
-                    let idx = field_indices[i];
-                    let _ = idx;
-                    quote! {
-                        if <#t as ssz::Encode>::is_ssz_fixed_len() {
-                            buf.extend_from_slice(&#tmp);
-                        } else {
-                            buf.extend_from_slice(&(__var_cursor as u32).to_le_bytes());
-                            __var_cursor += #tmp.len();
-                        }
-                    }
-                })
-                .collect();
-
-            let write_var: Vec<TokenStream> = field_tys
-                .iter()
-                .zip(tmp_idents.iter())
-                .map(|(t, tmp)| {
-                    quote! {
-                        if !<#t as ssz::Encode>::is_ssz_fixed_len() {
-                            buf.extend_from_slice(&#tmp);
-                        }
-                    }
-                })
-                .collect();
-
-            quote! {
-                #(#pre_encode)*
-                let __fixed_size: usize = 0usize #(+ #fixed_size_terms)*;
-                let mut __var_cursor: usize = __fixed_size;
-                #(#write_fixed)*
-                #(#write_var)*
-            }
-        }
-    };
+    let bytes_len = container_bytes_len_expr(&field_accessors, &field_tys);
+    let append_body = container_encode_body(&field_accessors, &field_tys);
 
     Ok(quote! {
         impl #impl_generics ssz::Encode for #name #ty_generics #where_clause {
@@ -294,25 +197,49 @@ fn encode_enum(
                 });
             }
             Fields::Named(named) => {
-                let idents: Vec<&syn::Ident> =
-                    named.named.iter().map(|f| f.ident.as_ref().unwrap()).collect();
+                // Variant payload is encoded as an anonymous SSZ container
+                // of its named fields: fixed inline, variable via offset
+                // table + appended payloads.
+                let idents: Vec<&syn::Ident> = named
+                    .named
+                    .iter()
+                    .map(|f| f.ident.as_ref().unwrap())
+                    .collect();
+                let tys: Vec<TokenStream> = named
+                    .named
+                    .iter()
+                    .map(|f| {
+                        let ty = &f.ty;
+                        quote! { #ty }
+                    })
+                    .collect();
+                let accessors: Vec<TokenStream> = idents.iter().map(|id| quote! { #id }).collect();
+
                 let bind_pat = quote! { Self::#vident { #(#idents),* } };
-                let bytes_terms = idents.iter().map(|id| {
-                    quote! { ssz::Encode::ssz_bytes_len(#id) }
-                });
-                let bytes_terms_clone: Vec<_> = bytes_terms.collect();
+
+                if idents.is_empty() {
+                    // `A {}` — treat like a unit variant: selector only.
+                    bytes_len_arms.push(quote! { #bind_pat => 1 });
+                    append_arms.push(quote! {
+                        #bind_pat => {
+                            buf.push(#selector);
+                        }
+                    });
+                    continue;
+                }
+
+                let bytes_inner = container_bytes_len_expr(&accessors, &tys);
                 bytes_len_arms.push(quote! {
                     #bind_pat => {
-                        1 #(+ #bytes_terms_clone)*
+                        1 + #bytes_inner
                     }
                 });
-                let append_stmts = idents.iter().map(|id| {
-                    quote! { ssz::Encode::ssz_append(#id, buf); }
-                });
+
+                let body = container_encode_body(&accessors, &tys);
                 append_arms.push(quote! {
                     #bind_pat => {
                         buf.push(#selector);
-                        #(#append_stmts)*
+                        #body
                     }
                 });
             }

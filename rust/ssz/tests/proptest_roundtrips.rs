@@ -200,3 +200,67 @@ proptest! {
         prop_assert_eq!(h1, h2);
     }
 }
+
+// --- Union (derived enum) with named-field variants ---
+
+#[derive(Debug, Clone, PartialEq, Eq, ssz::Encode, ssz::Decode, ssz::HashTreeRoot)]
+enum NamedVariant {
+    #[ssz(selector = 0)]
+    Mixed { code: Vec<u8>, size: u64 },
+    #[ssz(selector = 1)]
+    Fixed { hash: [u8; 32] },
+}
+
+proptest! {
+    #[test]
+    fn named_variant_mixed_roundtrip(code in pvec(any::<u8>(), 0..128), size: u64) {
+        roundtrip(&NamedVariant::Mixed { code, size });
+    }
+    #[test]
+    fn named_variant_fixed_roundtrip(hash: [u8; 32]) {
+        roundtrip(&NamedVariant::Fixed { hash });
+    }
+    #[test]
+    fn named_variant_hashes_distinguish_variants(code in pvec(any::<u8>(), 0..32), size: u64) {
+        let h_mixed = ssz::hash_tree_root(&NamedVariant::Mixed { code: code.clone(), size });
+        let h_fixed = ssz::hash_tree_root(&NamedVariant::Fixed { hash: [0; 32] });
+        prop_assert_ne!(h_mixed, h_fixed);
+    }
+}
+
+#[test]
+fn named_variant_wire_is_container_plus_selector() {
+    let v = NamedVariant::Mixed {
+        code: vec![1, 2, 3, 4],
+        size: 0xABCD,
+    };
+    let bytes = v.as_ssz_bytes();
+    assert_eq!(bytes[0], 0u8, "selector");
+    // Container: 4-byte offset (= 12 = 4 (offset slot) + 8 (size)) + 8-byte size + 4 bytes content.
+    assert_eq!(&bytes[1..5], &12u32.to_le_bytes());
+    assert_eq!(&bytes[5..13], &0xABCDu64.to_le_bytes());
+    assert_eq!(&bytes[13..17], &[1, 2, 3, 4]);
+}
+
+// --- Edge case: empty named-fields variant (`A {}`) is selector-only ---
+
+#[derive(Debug, Clone, PartialEq, Eq, ssz::Encode, ssz::Decode, ssz::HashTreeRoot)]
+enum EmptyNamed {
+    #[ssz(selector = 0)]
+    Nothing {},
+    #[ssz(selector = 1)]
+    Something { value: u32 },
+}
+
+#[test]
+fn empty_named_variant_is_selector_only() {
+    let v = EmptyNamed::Nothing {};
+    let bytes = v.as_ssz_bytes();
+    assert_eq!(bytes, vec![0u8]);
+    let decoded = EmptyNamed::from_ssz_bytes(&bytes).unwrap();
+    assert_eq!(decoded, v);
+    // Hash distinguishes from a populated sibling.
+    let h_empty = ssz::hash_tree_root(&v);
+    let h_something = ssz::hash_tree_root(&EmptyNamed::Something { value: 0 });
+    assert_ne!(h_empty, h_something);
+}

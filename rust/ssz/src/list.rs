@@ -202,11 +202,8 @@ impl<T: HashTreeRoot + Encode, const N: u64, A: Allocator + Clone> HashTreeRoot 
             let chunk_limit = cap_bytes.div_ceil(32).max(1);
             merkleize::<D>(&chunks, chunk_limit)
         } else {
-            let roots: alloc::vec::Vec<[u8; 32]> = self
-                .inner
-                .iter()
-                .map(|t| t.hash_tree_root::<D>())
-                .collect();
+            let roots: alloc::vec::Vec<[u8; 32]> =
+                self.inner.iter().map(|t| t.hash_tree_root::<D>()).collect();
             merkleize::<D>(&roots, (N as usize).max(1))
         };
         mix_in_length::<D>(inner_root, len)
