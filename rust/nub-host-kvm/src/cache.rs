@@ -302,7 +302,34 @@ impl Cache {
         }
     }
 
-    // --- Typed publish methods ---
+    // --- New typed publish surface (Stage A/B of the put_cap redesign) ---
+
+    /// Put a caller-built `Cap<Global>`. Computes the cap's content hash,
+    /// deep-clones it into the cache's talc-backed allocator on first put,
+    /// or bumps the existing entry's refcount on idempotent re-put.
+    pub fn put_cap(&mut self, cap: &javm_cap::Cap<allocator_api2::alloc::Global>) -> Result<CapHash> {
+        let h = self.typed_cache.put_cap(cap).map_err(CacheError::from)?;
+        self.touch_blob(h)?;
+        Ok(h)
+    }
+
+    /// Pre-hashed variant. The caller asserts `hash == cap_hash(cap)`;
+    /// `put_cap_with_hash` skips the SSZ merkleize on the idempotent path
+    /// (BTreeMap lookup + refcount bump). Debug-asserts the claimed hash
+    /// in debug builds; trusts the caller in release.
+    pub fn put_cap_with_hash(
+        &mut self,
+        hash: CapHash,
+        cap: &javm_cap::Cap<allocator_api2::alloc::Global>,
+    ) -> Result<()> {
+        self.typed_cache
+            .put_cap_with_hash(hash, cap)
+            .map_err(CacheError::from)?;
+        self.touch_blob(hash)?;
+        Ok(())
+    }
+
+    // --- Legacy typed publish methods (retained until Stage F) ---
 
     /// Publish an inline DataCap and record it in the directory.
     pub fn publish_data_inline(&mut self, bytes: &[u8]) -> Result<CapHash> {

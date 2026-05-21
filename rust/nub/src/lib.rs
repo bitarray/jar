@@ -161,7 +161,52 @@ impl Nub {
         }
     }
 
-    // --- Typed publish surface ---
+    // --- New publish surface (caller-built Cap<Global>) ---
+
+    /// Put a caller-built `Cap<Global>` into the active cache. Computes
+    /// the cap's content hash and either deep-clones into talc memory
+    /// on first put or bumps refcount on idempotent re-put. Returns the
+    /// cap's content hash.
+    pub fn put_cap(&mut self, cap: &javm_cap::Cap<Global>) -> Result<AbiCapHash> {
+        match &mut self.backend {
+            Backend::Local(_) => self
+                .local_cache
+                .put_cap(cap)
+                .map_err(|e| anyhow::anyhow!("put_cap (local): {e}")),
+            Backend::Hyperlight(h) => h
+                .sandbox
+                .cache()
+                .put_cap(cap)
+                .map_err(|e| anyhow::anyhow!("put_cap: {e}")),
+        }
+    }
+
+    /// Pre-hashed variant. Caller computed `ssz::hash_tree_root(cap)`
+    /// at warmup and passes it explicitly; skips the SSZ merkleize on
+    /// the hot idempotent path. Debug-asserts the claimed hash matches
+    /// the cap; release trusts the caller.
+    pub fn put_cap_with_hash(
+        &mut self,
+        hash: AbiCapHash,
+        cap: &javm_cap::Cap<Global>,
+    ) -> Result<()> {
+        match &mut self.backend {
+            Backend::Local(_) => {
+                let _refcount = self
+                    .local_cache
+                    .put_cap_with_hash(hash, cap)
+                    .map_err(|e| anyhow::anyhow!("put_cap_with_hash (local): {e}"))?;
+                Ok(())
+            }
+            Backend::Hyperlight(h) => h
+                .sandbox
+                .cache()
+                .put_cap_with_hash(hash, cap)
+                .map_err(|e| anyhow::anyhow!("put_cap_with_hash: {e}")),
+        }
+    }
+
+    // --- Legacy publish surface (retained until callers migrate; Stage F deletes) ---
 
     /// Publish an inline `Cap::Data` blob from a byte buffer. Returns
     /// the data cap's hash. Idempotent: re-publishing identical bytes
