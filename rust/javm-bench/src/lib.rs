@@ -127,6 +127,50 @@ pub fn run_recompiler(image: &Image, endpoint_idx: u8) -> (u64, u64) {
     finish(&result)
 }
 
+// ----------------------------------------------------------------------------
+// TEMPORARY: publish-hoisted variants for diagnosing publish-vs-invoke cost.
+// Re-fold publish back in once the per-iteration publish path becomes cheap
+// (idempotency short-circuit etc.) — see the perf discussion in the bench
+// regression bisect. These exist purely to isolate "pure invoke" cost from
+// "publish + invoke" cost in criterion.
+// ----------------------------------------------------------------------------
+
+/// Publish `image[endpoint_idx]` into a fresh interpreter `Nub` once
+/// and return the handle + the `Nub` for repeated `invoke_cached`.
+pub fn publish_local(image: &Image, endpoint_idx: u8) -> (Nub, Published) {
+    let mut nub = Nub::new_local();
+    let p = publish(&mut nub, image, endpoint_idx);
+    (nub, p)
+}
+
+/// Invoke a previously-published handle through the interpreter. No
+/// publish work; matches the README-era "compile + execute" methodology
+/// for criterion's iter loop.
+pub fn invoke_interpreter(nub: &mut Nub, p: Published) -> (u64, u64) {
+    let result = nub
+        .invoke_cached(p.instance_hash, p.endpoint_idx, [0; 4], INITIAL_GAS)
+        .unwrap_or_else(|e| panic!("interpreter invoke_cached: {e}"));
+    finish(&result)
+}
+
+/// Publish into the long-lived Hyperlight `Nub` once and return the
+/// handle. The Nub stays in the global `OnceLock`; callers must
+/// `nub_hyperlight().lock()` to drive subsequent invokes.
+pub fn publish_hyperlight(image: &Image, endpoint_idx: u8) -> Published {
+    let mut nub = nub_hyperlight().lock().expect("nub mutex");
+    publish(&mut nub, image, endpoint_idx)
+}
+
+/// Invoke a previously-published handle through the JIT recompiler.
+/// Re-locks the global Hyperlight `Nub` each call.
+pub fn invoke_recompiler(p: Published) -> (u64, u64) {
+    let mut nub = nub_hyperlight().lock().expect("nub mutex");
+    let result = nub
+        .invoke_cached(p.instance_hash, p.endpoint_idx, [0; 4], INITIAL_GAS)
+        .unwrap_or_else(|e| panic!("recompiler invoke_cached: {e}"));
+    finish(&result)
+}
+
 fn finish(result: &InvocationResult) -> (u64, u64) {
     assert_eq!(
         result.exit_reason, EXIT_HOSTCALL,

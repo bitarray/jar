@@ -56,12 +56,19 @@ macro_rules! bench_workload {
             );
             eprintln!("[{}] recomp gas = {}", stringify!($name), recomp_gas);
 
+            // TEMPORARY: bench publish-hoisted invokes to isolate pure
+            // invoke cost. Re-fold publish back into the iter loop once
+            // the cache-publish path itself is cheap on idempotent
+            // re-publish (currently it re-hashes every iteration).
+            let (mut interp_nub, interp_handle) = javm_bench::publish_local(&image, ep);
+            let recomp_handle = javm_bench::publish_hyperlight(&image, ep);
+
             let mut g = c.benchmark_group(stringify!($name));
             g.bench_function("interpreter", |b| {
-                b.iter(|| javm_bench::run_interpreter(&image, ep))
+                b.iter(|| javm_bench::invoke_interpreter(&mut interp_nub, interp_handle))
             });
             g.bench_function("recompiler", |b| {
-                b.iter(|| javm_bench::run_recompiler(&image, ep))
+                b.iter(|| javm_bench::invoke_recompiler(recomp_handle))
             });
             g.finish();
         }
