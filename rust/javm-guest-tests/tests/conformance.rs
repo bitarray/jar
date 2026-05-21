@@ -19,15 +19,13 @@
 
 use jar_kernel::{Block, Event, EventOutcome, Kernel};
 use javm_cap::image::Image;
-use scale::Decode;
+use ssz::Decode;
 
 const BLOB: &[u8] = include_bytes!(env!("GUEST_TESTS_BLOB"));
 const GAS_BUDGET: u64 = 10_000_000_000;
 
 fn image() -> Image {
-    Image::decode(BLOB)
-        .expect("SCALE-decode guest-tests Image")
-        .0
+    Image::from_ssz_bytes(BLOB).expect("SSZ-decode guest-tests Image")
 }
 
 fn run_interpreter(image: &Image, ep: u8) -> (u64, u64) {
@@ -99,26 +97,33 @@ mod recomp {
             }
             let nub = borrow.as_mut().expect("nub initialised above");
             // Publish the canonical Image + an empty root CNode + an
-            // InstanceCap binding both. Content-hashed at every step,
-            // so re-publishing the same Image is idempotent.
+            // InstanceCap binding both. Build each as a Cap<Global>;
+            // the cache deep-clones into talc on first put and just
+            // bumps refcounts on re-puts of identical content.
+            use javm_cap::Cap;
+            let image_cap = Cap::image_with_slots(image, &[], &[])
+                .unwrap_or_else(|e| panic!("endpoint {ep}: image_with_slots: {e}"));
             let image_h = nub
-                .publish_image(image)
-                .unwrap_or_else(|e| panic!("endpoint {ep}: publish_image: {e}"));
+                .put_cap(&image_cap)
+                .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap image: {e}"));
+            let cnode_cap =
+                Cap::empty_cnode(0).unwrap_or_else(|e| panic!("endpoint {ep}: empty_cnode: {e}"));
             let cnode_h = nub
-                .publish_cnode(0, &[])
-                .unwrap_or_else(|e| panic!("endpoint {ep}: publish_cnode: {e}"));
+                .put_cap(&cnode_cap)
+                .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap cnode: {e}"));
+            let instance_cap = Cap::instance_with_overlays(
+                [0u8; 32],
+                image_h,
+                cnode_h,
+                &overlay_slices,
+                mem_size,
+                regs,
+                0,
+                0,
+            );
             let instance_hash = nub
-                .publish_instance(
-                    [0u8; 32],
-                    image_h,
-                    cnode_h,
-                    &overlay_slices,
-                    mem_size,
-                    regs,
-                    0,
-                    0,
-                )
-                .unwrap_or_else(|e| panic!("endpoint {ep}: publish_instance: {e}"));
+                .put_cap(&instance_cap)
+                .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap instance: {e}"));
             let result = nub
                 .invoke_cached(instance_hash, ep, [0; 4], GAS_BUDGET)
                 .unwrap_or_else(|e| panic!("endpoint {ep}: invoke_cached failed: {e}"));

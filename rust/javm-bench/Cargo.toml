@@ -13,9 +13,11 @@ default = []
 heap-diag = ["nub/heap-diag"]
 
 [dependencies]
+allocator-api2 = "0.4"
 javm-cap = { workspace = true }
 javm-exec = { workspace = true }
-scale = { workspace = true, features = ["std"] }
+sha2 = "0.10"
+ssz = { workspace = true, features = ["std", "sha2", "derive"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 nub = { path = "../nub" }
@@ -35,3 +37,7 @@ harness = false
 [[bench]]
 name = "stark_bench"
 harness = false
+
+[[example]]
+name = "publish_profile"
+path = "examples/publish_profile.rs"

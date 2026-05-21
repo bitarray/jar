@@ -13,10 +13,170 @@ use core::sync::atomic::AtomicU32;
 use crate::slot::SlotIdx;
 
 use super::cache::Cache;
-use super::cap::{Cap, CapHashOrRef};
-use super::cnode::{CNodeCap, CNodeSlotEntry};
+use super::cap::{Cap, CapHash, CapHashOrRef};
+use super::cnode::CNodeCap;
 use super::data::{DataCap, DataContent};
+use super::image::Image;
+use super::image_cap::ImageCap;
 use super::page::{PageBytes, PageRef, PageSlot};
+
+// ---- Test-only thin wrappers preserving the old publish_* call shape. ----
+//
+// Mirror the field-by-field publish API the production cache used to expose,
+// implemented over the new `put_cap` primitive. Keeping these as free
+// helpers (instead of methods on `Cache`) means the tests can validate
+// refcount-on-incref + missing-target rejection without resurrecting the
+// SCALE/legacy decomposition in the production surface.
+
+#[allow(dead_code)]
+fn t_publish_data_inline(cache: &mut Cache, bytes: &[u8]) -> CapHash {
+    cache
+        .put_cap(&Cap::data_inline(bytes))
+        .expect("put_cap data")
+}
+
+fn t_publish_data_inline_with_size(
+    cache: &mut Cache,
+    bytes: &[u8],
+    size: u64,
+) -> Result<CapHash, super::cache::CacheError> {
+    cache.put_cap(&Cap::data_inline_with_size(bytes, size))
+}
+
+#[allow(dead_code)]
+fn t_publish_image_from_cap(
+    cache: &mut Cache,
+    img: ImageCap<Global>,
+) -> Result<CapHash, super::cache::CacheError> {
+    cache.put_cap(&Cap::Image(img))
+}
+
+fn t_publish_image(cache: &mut Cache, image: &Image) -> Result<CapHash, super::cache::CacheError> {
+    use super::image::PinnedCap;
+    // Track per-iter publishes so we can release the temporary refcounts
+    // we held while building the image. Mirrors the old `publish_image`
+    // semantics: net effect is that referenced Data blobs end up with
+    // refcount equal to the number of slots referencing them, with no
+    // dangling "publisher" hold from the image-construction process.
+    let mut my_published: alloc::vec::Vec<CapHash> = alloc::vec::Vec::new();
+    let mut pinned_hashes: alloc::vec::Vec<(SlotIdx, CapHash)> = alloc::vec::Vec::new();
+    for (slot, pinned) in &image.pinned_slots {
+        let h = match pinned {
+            PinnedCap::Data { content, size } => {
+                let h = cache.put_cap(&Cap::data_inline_with_size(content, *size))?;
+                my_published.push(h);
+                h
+            }
+            PinnedCap::Image { content_hash } => {
+                if !cache.contains_blob(content_hash) {
+                    return Err(super::cache::CacheError::BlobMissing);
+                }
+                *content_hash
+            }
+        };
+        pinned_hashes.push((*slot, h));
+    }
+    let mut initial_hashes: alloc::vec::Vec<(SlotIdx, CapHash)> = alloc::vec::Vec::new();
+    for (slot, init) in &image.initial_slots {
+        let h = cache.put_cap(&Cap::data_inline_with_size(&init.content, init.size))?;
+        my_published.push(h);
+        initial_hashes.push((*slot, h));
+    }
+    let image_cap = Cap::image_with_slots(image, &pinned_hashes, &initial_hashes)
+        .map_err(super::cache::CacheError::from)?;
+    let result = cache.put_cap(&image_cap);
+    // Release the temporary holds taken by per-slot publishes; the
+    // image's own incref pass (inside put_cap_with_hash) has already
+    // bumped each referenced target.
+    for h in &my_published {
+        let _ = cache.decref(CapHashOrRef::Hash(*h));
+    }
+    result
+}
+
+fn t_publish_cnode(
+    cache: &mut Cache,
+    size_log: u8,
+    entries: &[(SlotIdx, CapHashOrRef)],
+) -> Result<CapHash, super::cache::CacheError> {
+    let mut cn = CNodeCap::new(size_log).map_err(|_| super::cache::CacheError::SlotOutOfRange)?;
+    for (slot, target) in entries {
+        cn.set(*slot, Some(*target))
+            .map_err(|_| super::cache::CacheError::SlotOutOfRange)?;
+    }
+    cache.put_cap(&Cap::CNode(cn))
+}
+
+fn t_publish_data_paged(
+    cache: &mut Cache,
+    page_size: u32,
+    pages: &[Option<&[u8]>],
+    size: u64,
+) -> Result<CapHash, super::cache::CacheError> {
+    let page_size_usize = page_size as usize;
+    let mut slots: AVec<PageSlot<Global>, Global> = AVec::with_capacity_in(pages.len(), Global);
+    for p in pages {
+        match p {
+            None => slots.push(PageSlot::Empty),
+            Some(bytes) => {
+                if bytes.len() != page_size_usize {
+                    return Err(super::cache::CacheError::PageSizeMismatch {
+                        expected: page_size,
+                        got: bytes.len(),
+                    });
+                }
+                let mut buf: AVec<u8, Global> = AVec::with_capacity_in(bytes.len(), Global);
+                buf.extend_from_slice(bytes);
+                // The Aarc carries the canonical page hash; for tests
+                // we pre-compute it as raw Blake2b over the bytes —
+                // the cache's put_cap path doesn't depend on this
+                // matching, but downstream cap_hash on the DataCap
+                // recomputes from the actual bytes.
+                let hash = <crate::hash::Blake2b256 as crate::hash::Hash>::hash(bytes);
+                let pb = PageBytes {
+                    refcount: AtomicU32::new(1),
+                    hash,
+                    bytes: buf,
+                };
+                let pr: PageRef<Global> = PageRef::new_in(pb, Global)
+                    .map_err(|_| super::cache::CacheError::AllocFailure)?;
+                slots.push(PageSlot::Loaded(pr));
+            }
+        }
+    }
+    let cap = Cap::Data(DataCap {
+        size,
+        content: DataContent::Paged {
+            page_size,
+            pages: slots,
+        },
+    });
+    cache.put_cap(&cap)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn t_publish_instance_blob(
+    cache: &mut Cache,
+    image_hash_chain: CapHash,
+    image_hash: CapHash,
+    root_cnode: CapHash,
+    rw_overlays: &[(u32, &[u8])],
+    mem_size: u32,
+    regs: [u64; super::cap::NUM_REGS],
+    pc: u64,
+    gas_remaining: u64,
+) -> Result<CapHash, super::cache::CacheError> {
+    cache.put_cap(&Cap::instance_with_overlays(
+        image_hash_chain,
+        image_hash,
+        root_cnode,
+        rw_overlays,
+        mem_size,
+        regs,
+        pc,
+        gas_remaining,
+    ))
+}
 
 fn make_data_inline(bytes: &[u8]) -> Cap<Global> {
     let mut v = AVec::new_in(Global);
@@ -28,12 +188,11 @@ fn make_data_inline(bytes: &[u8]) -> Cap<Global> {
 }
 
 fn make_cnode_with(entries: &[(SlotIdx, CapHashOrRef)]) -> Cap<Global> {
-    let mut slots = AVec::new_in(Global);
+    let mut cn: CNodeCap<Global> = CNodeCap::new_in(8, Global).unwrap();
     for &(slot, target) in entries {
-        slots.push(CNodeSlotEntry { slot, target });
+        cn.set(slot, Some(target)).unwrap();
     }
-    slots.sort_by_key(|e| e.slot);
-    Cap::CNode(CNodeCap { size_log: 8, slots })
+    Cap::CNode(cn)
 }
 
 #[test]
@@ -210,8 +369,8 @@ fn get_mut_already_ref_is_idempotent() {
 #[test]
 fn publish_image_increfs_pinned_and_initial() {
     let mut cache = Cache::new_in(Global);
-    let d_pinned = cache.publish_data_inline(b"pinned").unwrap();
-    let d_initial = cache.publish_data_inline(b"initial").unwrap();
+    let d_pinned = cache.put_cap(&Cap::data_inline(b"pinned")).unwrap();
+    let d_initial = cache.put_cap(&Cap::data_inline(b"initial")).unwrap();
     assert_eq!(cache.refcount(CapHashOrRef::Hash(d_pinned)), Some(1));
     assert_eq!(cache.refcount(CapHashOrRef::Hash(d_initial)), Some(1));
 
@@ -235,7 +394,7 @@ fn publish_image_increfs_pinned_and_initial() {
         initial,
         yield_marker_slot: None,
     };
-    let img_hash = cache.publish_image_from_cap(img).unwrap();
+    let img_hash = cache.put_cap(&Cap::Image(img)).unwrap();
 
     assert_eq!(cache.refcount(CapHashOrRef::Hash(img_hash)), Some(1));
     // Pinned + initial blobs both bumped.
@@ -261,19 +420,19 @@ fn publish_image_missing_target_errors() {
         initial: AVec::new_in(Global),
         yield_marker_slot: None,
     };
-    let err = cache.publish_image_from_cap(img);
+    let err = cache.put_cap(&Cap::Image(img));
     assert!(matches!(err, Err(super::cache::CacheError::BlobMissing)));
 }
 
 #[test]
 fn publish_data_inline_hashes_and_stores() {
     let mut cache = Cache::new_in(Global);
-    let h = cache.publish_data_inline(b"hello").unwrap();
+    let h = cache.put_cap(&Cap::data_inline(b"hello")).unwrap();
     // Stored as a blob keyed by its content hash.
     assert_eq!(cache.refcount(CapHashOrRef::Hash(h)), Some(1));
     assert_eq!(cache.blob_count(), 1);
     // Same bytes => same hash, refcount bumps.
-    let h2 = cache.publish_data_inline(b"hello").unwrap();
+    let h2 = cache.put_cap(&Cap::data_inline(b"hello")).unwrap();
     assert_eq!(h, h2);
     assert_eq!(cache.refcount(CapHashOrRef::Hash(h)), Some(2));
     assert_eq!(cache.blob_count(), 1);
@@ -282,12 +441,10 @@ fn publish_data_inline_hashes_and_stores() {
 #[test]
 fn publish_cnode_increfs_targets() {
     let mut cache = Cache::new_in(Global);
-    let d = cache.publish_data_inline(b"target").unwrap();
+    let d = cache.put_cap(&Cap::data_inline(b"target")).unwrap();
     assert_eq!(cache.refcount(CapHashOrRef::Hash(d)), Some(1));
 
-    let c = cache
-        .publish_cnode(4, &[(SlotIdx(0), CapHashOrRef::Hash(d))])
-        .unwrap();
+    let c = t_publish_cnode(&mut cache, 4, &[(SlotIdx(0), CapHashOrRef::Hash(d))]).unwrap();
     // Target's refcount bumped because cnode references it.
     assert_eq!(cache.refcount(CapHashOrRef::Hash(d)), Some(2));
     assert_eq!(cache.refcount(CapHashOrRef::Hash(c)), Some(1));
@@ -296,7 +453,11 @@ fn publish_cnode_increfs_targets() {
 #[test]
 fn publish_cnode_missing_target_errors() {
     let mut cache = Cache::new_in(Global);
-    let err = cache.publish_cnode(4, &[(SlotIdx(0), CapHashOrRef::Hash([0xFE; 32]))]);
+    let err = t_publish_cnode(
+        &mut cache,
+        4,
+        &[(SlotIdx(0), CapHashOrRef::Hash([0xFE; 32]))],
+    );
     assert!(matches!(err, Err(super::cache::CacheError::BlobMissing)));
 }
 
@@ -319,23 +480,23 @@ fn publish_instance_blob_increfs_image_and_cnode() {
     });
     let img_hash = super::cap_hash::cap_hash(&img);
     cache.put_blob(img_hash, img).unwrap();
-    let c = cache.publish_cnode(4, &[]).unwrap();
+    let c = t_publish_cnode(&mut cache, 4, &[]).unwrap();
 
     assert_eq!(cache.refcount(CapHashOrRef::Hash(img_hash)), Some(1));
     assert_eq!(cache.refcount(CapHashOrRef::Hash(c)), Some(1));
 
-    let inst_hash = cache
-        .publish_instance_blob(
-            [0xAA; 32],
-            img_hash,
-            c,
-            &[(0x1000, &[0xDE, 0xAD][..])],
-            0x10000,
-            [0u64; super::cap::NUM_REGS],
-            0,
-            1_000_000,
-        )
-        .unwrap();
+    let inst_hash = t_publish_instance_blob(
+        &mut cache,
+        [0xAA; 32],
+        img_hash,
+        c,
+        &[(0x1000, &[0xDE, 0xAD][..])],
+        0x10000,
+        [0u64; super::cap::NUM_REGS],
+        0,
+        1_000_000,
+    )
+    .unwrap();
 
     assert_eq!(cache.refcount(CapHashOrRef::Hash(inst_hash)), Some(1));
     // Image + cnode both bumped because the instance references them.
@@ -346,7 +507,7 @@ fn publish_instance_blob_increfs_image_and_cnode() {
 #[test]
 fn settle_hash_is_identity() {
     let mut cache = Cache::new_in(Global);
-    let h = cache.publish_data_inline(b"x").unwrap();
+    let h = cache.put_cap(&Cap::data_inline(b"x")).unwrap();
     let settled = cache.settle(CapHashOrRef::Hash(h)).unwrap();
     assert_eq!(h, settled);
 }
@@ -356,10 +517,8 @@ fn settle_promotes_cnode_to_blob() {
     // Setup: a Data blob D and a CNode blob C referencing D. Then we
     // get_mut C (sole-owner move-promote) and settle the result.
     let mut cache = Cache::new_in(Global);
-    let d = cache.publish_data_inline(b"target").unwrap();
-    let c = cache
-        .publish_cnode(2, &[(SlotIdx(0), CapHashOrRef::Hash(d))])
-        .unwrap();
+    let d = cache.put_cap(&Cap::data_inline(b"target")).unwrap();
+    let c = t_publish_cnode(&mut cache, 2, &[(SlotIdx(0), CapHashOrRef::Hash(d))]).unwrap();
     let c_ref = cache.get_mut(CapHashOrRef::Hash(c)).unwrap();
     assert_eq!(cache.blob_count(), 1); // d only
     assert_eq!(cache.instance_count(), 1); // c (promoted)
@@ -378,10 +537,8 @@ fn settle_instance_resolves_root_cnode_ref() {
     // Setup: Data D, CNode C → D, Instance I → C. Get_mut C to promote
     // it, rebind I.root_cnode to Ref(c_r), then settle the instance.
     let mut cache = Cache::new_in(Global);
-    let d = cache.publish_data_inline(b"d").unwrap();
-    let c = cache
-        .publish_cnode(2, &[(SlotIdx(0), CapHashOrRef::Hash(d))])
-        .unwrap();
+    let d = cache.put_cap(&Cap::data_inline(b"d")).unwrap();
+    let c = t_publish_cnode(&mut cache, 2, &[(SlotIdx(0), CapHashOrRef::Hash(d))]).unwrap();
 
     // Build a minimal image to satisfy publish_instance_blob's
     // existence check.
@@ -398,18 +555,18 @@ fn settle_instance_resolves_root_cnode_ref() {
     let img_hash = super::cap_hash::cap_hash(&img);
     cache.put_blob(img_hash, img).unwrap();
 
-    let inst_hash = cache
-        .publish_instance_blob(
-            [0; 32],
-            img_hash,
-            c,
-            &[],
-            0,
-            [0u64; super::cap::NUM_REGS],
-            0,
-            0,
-        )
-        .unwrap();
+    let inst_hash = t_publish_instance_blob(
+        &mut cache,
+        [0; 32],
+        img_hash,
+        c,
+        &[],
+        0,
+        [0u64; super::cap::NUM_REGS],
+        0,
+        0,
+    )
+    .unwrap();
 
     // Promote I and C to instances; rebind I.root_cnode to Ref(c_r).
     let i_ref = cache.get_mut(CapHashOrRef::Hash(inst_hash)).unwrap();
@@ -472,7 +629,7 @@ fn publish_image_inlines_pinned_data_blobs() {
         (SlotIdx(1), bytes_a, bytes_a.len() as u64),
         (SlotIdx(2), bytes_b, bytes_b.len() as u64),
     ]);
-    let image_hash = cache.publish_image(&img).unwrap();
+    let image_hash = t_publish_image(&mut cache, &img).unwrap();
     assert_eq!(
         cache.refcount(CapHashOrRef::Hash(image_hash)),
         Some(1),
@@ -481,9 +638,8 @@ fn publish_image_inlines_pinned_data_blobs() {
 
     // Each pinned data should be a separate blob with refcount=1
     // (held by the image's one slot reference).
-    let data_a_hash = cache
-        .publish_data_inline_with_size(bytes_a, bytes_a.len() as u64)
-        .unwrap();
+    let data_a_hash =
+        t_publish_data_inline_with_size(&mut cache, bytes_a, bytes_a.len() as u64).unwrap();
     // The publish_data above bumped refcount; image already held it.
     // Refcount should now be 2 (image + temp publisher).
     assert_eq!(cache.refcount(CapHashOrRef::Hash(data_a_hash)), Some(2));
@@ -503,13 +659,11 @@ fn publish_image_duplicate_data_shared_with_per_slot_refcount() {
         (SlotIdx(1), bytes, bytes.len() as u64),
         (SlotIdx(2), bytes, bytes.len() as u64),
     ]);
-    let _image_hash = cache.publish_image(&img).unwrap();
+    let _image_hash = t_publish_image(&mut cache, &img).unwrap();
 
     // Recompute the data hash externally (bumps it once) so we can
     // observe the post-publish refcount, then release.
-    let data_hash = cache
-        .publish_data_inline_with_size(bytes, bytes.len() as u64)
-        .unwrap();
+    let data_hash = t_publish_data_inline_with_size(&mut cache, bytes, bytes.len() as u64).unwrap();
     assert_eq!(
         cache.refcount(CapHashOrRef::Hash(data_hash)),
         Some(3),
@@ -537,12 +691,12 @@ fn publish_image_inlines_initial_data_blobs() {
             size,
         },
     );
-    let image_hash = cache.publish_image(&img).unwrap();
+    let image_hash = t_publish_image(&mut cache, &img).unwrap();
     assert!(cache.refcount(CapHashOrRef::Hash(image_hash)).is_some());
 
     // The published data uses the explicit `size` (not bytes.len()).
     // Recompute its hash externally to observe.
-    let data_hash = cache.publish_data_inline_with_size(bytes, size).unwrap();
+    let data_hash = t_publish_data_inline_with_size(&mut cache, bytes, size).unwrap();
     assert_eq!(
         cache.refcount(CapHashOrRef::Hash(data_hash)),
         Some(2),
@@ -564,7 +718,7 @@ fn publish_image_pinned_image_validates_existing_hash() {
             content_hash: missing_hash,
         },
     );
-    let err = cache.publish_image(&img);
+    let err = t_publish_image(&mut cache, &img);
     assert!(matches!(err, Err(super::cache::CacheError::BlobMissing)));
 }
 
@@ -574,7 +728,7 @@ fn publish_image_pinned_image_succeeds_when_sub_image_present() {
     // via PinnedCap::Image{content_hash=<that hash>}.
     let mut cache = Cache::new_in(Global);
     let sub_img = crate::image::Image::empty();
-    let sub_hash = cache.publish_image(&sub_img).unwrap();
+    let sub_hash = t_publish_image(&mut cache, &sub_img).unwrap();
 
     let mut parent = crate::image::Image::empty();
     parent.pinned_slots.insert(
@@ -583,7 +737,7 @@ fn publish_image_pinned_image_succeeds_when_sub_image_present() {
             content_hash: sub_hash,
         },
     );
-    let parent_hash = cache.publish_image(&parent).unwrap();
+    let parent_hash = t_publish_image(&mut cache, &parent).unwrap();
     // Parent references sub by hash; sub's refcount should now be 2
     // (one for the initial publish, one for parent's pinned slot ref).
     assert_eq!(cache.refcount(CapHashOrRef::Hash(sub_hash)), Some(2));
@@ -610,7 +764,7 @@ fn publish_image_carries_endpoint_fields() {
     );
 
     let mut cache = Cache::new_in(Global);
-    let image_hash = cache.publish_image(&img).unwrap();
+    let image_hash = t_publish_image(&mut cache, &img).unwrap();
     let cap = cache.get(CapHashOrRef::Hash(image_hash)).unwrap();
     let img_cap = match cap {
         Cap::Image(ic) => ic,
@@ -640,7 +794,7 @@ fn publish_image_rejects_too_deep_source_path() {
         source: crate::slot::SlotPath::new(steps).unwrap(),
     });
     let mut cache = Cache::new_in(Global);
-    let err = cache.publish_image(&img);
+    let err = t_publish_image(&mut cache, &img);
     assert!(matches!(
         err,
         Err(super::cache::CacheError::ImageConvertFailed(
@@ -665,7 +819,7 @@ fn publish_image_rejects_out_of_range_endpoint() {
         },
     );
     let mut cache = Cache::new_in(Global);
-    let err = cache.publish_image(&img);
+    let err = t_publish_image(&mut cache, &img);
     assert!(matches!(
         err,
         Err(super::cache::CacheError::ImageConvertFailed(
@@ -680,9 +834,7 @@ fn publish_data_paged_round_trips() {
     let p0 = vec![0xAAu8; 4096];
     let p1 = vec![0xBBu8; 4096];
     let pages = [Some(p0.as_slice()), None, Some(p1.as_slice())];
-    let h = cache
-        .publish_data_paged(4096, &pages, 4096 * 3)
-        .expect("publish");
+    let h = t_publish_data_paged(&mut cache, 4096, &pages, 4096 * 3).expect("publish");
 
     // Refcount of the paged blob = 1 (publisher).
     assert_eq!(cache.refcount(CapHashOrRef::Hash(h)), Some(1));
@@ -716,7 +868,7 @@ fn publish_data_paged_rejects_mismatched_page_length() {
     let mut cache = Cache::new_in(Global);
     let bad = vec![0u8; 4095]; // wrong size
     let pages = [Some(bad.as_slice())];
-    let err = cache.publish_data_paged(4096, &pages, 4096);
+    let err = t_publish_data_paged(&mut cache, 4096, &pages, 4096);
     assert!(matches!(
         err,
         Err(super::cache::CacheError::PageSizeMismatch {
@@ -733,8 +885,8 @@ fn publish_data_paged_is_idempotent_on_identical_content() {
     let mut cache = Cache::new_in(Global);
     let p = vec![0x42u8; 4096];
     let pages = [Some(p.as_slice()), None];
-    let h1 = cache.publish_data_paged(4096, &pages, 8192).unwrap();
-    let h2 = cache.publish_data_paged(4096, &pages, 8192).unwrap();
+    let h1 = t_publish_data_paged(&mut cache, 4096, &pages, 8192).unwrap();
+    let h2 = t_publish_data_paged(&mut cache, 4096, &pages, 8192).unwrap();
     assert_eq!(h1, h2);
     // Second publish bumped the blob's refcount.
     assert_eq!(cache.refcount(CapHashOrRef::Hash(h1)), Some(2));
@@ -761,4 +913,77 @@ fn get_mut_image_or_type_errors() {
     // get_mut on Image is invalid in V1 (Images are immutable).
     let err = cache.get_mut(CapHashOrRef::Hash(h));
     assert!(matches!(err, Err(super::cache::CacheError::NonMutableKind)));
+}
+
+// ----------------------------------------------------------------------------
+// put_cap / put_cap_with_hash — Stage A regression tests
+// ----------------------------------------------------------------------------
+
+#[test]
+fn put_cap_idempotent_returns_same_hash_and_bumps_refcount() {
+    let mut cache = Cache::new_in(Global);
+    let cap = make_data_inline(b"alpha");
+    let h1 = cache.put_cap(&cap).expect("first put");
+    let h2 = cache.put_cap(&cap).expect("second put");
+    assert_eq!(h1, h2, "put_cap must be idempotent on hash");
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(h1)), Some(2));
+}
+
+#[test]
+fn put_cap_with_hash_matches_put_cap() {
+    let mut cache_a = Cache::new_in(Global);
+    let mut cache_b = Cache::new_in(Global);
+    let cap = make_data_inline(b"beta");
+    let h_a = cache_a.put_cap(&cap).unwrap();
+    let h_b = crate::cap_hash::cap_hash(&cap);
+    cache_b.put_cap_with_hash(h_b, &cap).unwrap();
+    assert_eq!(h_a, h_b, "put_cap and put_cap_with_hash must agree on hash");
+    // Both caches now hold one entry at refcount=1.
+    assert_eq!(cache_a.refcount(CapHashOrRef::Hash(h_a)), Some(1));
+    assert_eq!(cache_b.refcount(CapHashOrRef::Hash(h_b)), Some(1));
+}
+
+#[test]
+fn put_cap_deep_clones_content_into_cache_allocator() {
+    let mut cache = Cache::new_in(Global);
+    let cap = make_data_inline(b"gamma");
+    let h = cache.put_cap(&cap).unwrap();
+    // After put, the in-cache cap must roundtrip identical content.
+    match cache.get(CapHashOrRef::Hash(h)).unwrap() {
+        Cap::Data(d) => match &d.content {
+            DataContent::Inline(bs) => assert_eq!(bs.as_slice(), b"gamma"),
+            _ => panic!("expected Inline"),
+        },
+        _ => panic!("expected Data"),
+    }
+    // And the cached cap_hash agrees with the input cap_hash.
+    assert_eq!(h, crate::cap_hash::cap_hash(&cap));
+}
+
+#[test]
+fn put_cap_with_hash_hot_path_is_pure_refcount_bump() {
+    // The second put_cap_with_hash MUST hit the in-cache entry — no new
+    // allocation, no deep-clone. Validate by inspecting refcount + blob_count.
+    let mut cache = Cache::new_in(Global);
+    let cap = make_data_inline(b"delta");
+    let h = crate::cap_hash::cap_hash(&cap);
+    cache.put_cap_with_hash(h, &cap).unwrap();
+    assert_eq!(cache.blob_count(), 1);
+    cache.put_cap_with_hash(h, &cap).unwrap();
+    assert_eq!(cache.blob_count(), 1, "no new blob on idempotent re-put");
+    assert_eq!(cache.refcount(CapHashOrRef::Hash(h)), Some(2));
+}
+
+// Only fires under debug_assert. In release builds the assertion is
+// elided and the wrong hash is silently trusted — that's the documented
+// contract; see put_cap_with_hash. Gate the test accordingly so CI's
+// release-mode test runs don't fail expecting the panic.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "claimed hash does not match cap content")]
+fn put_cap_with_hash_rejects_wrong_hash_in_debug() {
+    let mut cache = Cache::new_in(Global);
+    let cap = make_data_inline(b"epsilon");
+    let wrong = [0xCDu8; 32];
+    let _ = cache.put_cap_with_hash(wrong, &cap);
 }

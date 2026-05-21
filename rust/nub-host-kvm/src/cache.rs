@@ -25,8 +25,7 @@ Licensed under the Apache License, Version 2.0.
 use std::ptr::NonNull;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use javm_cap::slot::SlotIdx;
-use javm_cap::{Cache as TypedCache, CapHashOrRef, CapRef, ImageCap as TImageCap, image_cap_in};
+use javm_cap::{Cache as TypedCache, CapHashOrRef, CapRef};
 use nub_arch_x86_abi::CapHash;
 use nub_host_common::cache::{
     BlobSlot, CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheTalcLock, InstanceSlot,
@@ -302,108 +301,34 @@ impl Cache {
         }
     }
 
-    // --- Typed publish methods ---
+    // --- New typed publish surface (Stage A/B of the put_cap redesign) ---
 
-    /// Publish an inline DataCap and record it in the directory.
-    pub fn publish_data_inline(&mut self, bytes: &[u8]) -> Result<CapHash> {
-        let h = self
-            .typed_cache
-            .publish_data_inline(bytes)
-            .map_err(CacheError::from)?;
-        self.touch_blob(h)?;
-        Ok(h)
-    }
-
-    /// Publish an inline DataCap with explicit logical size.
-    pub fn publish_data_inline_with_size(&mut self, bytes: &[u8], size: u64) -> Result<CapHash> {
-        let h = self
-            .typed_cache
-            .publish_data_inline_with_size(bytes, size)
-            .map_err(CacheError::from)?;
-        self.touch_blob(h)?;
-        Ok(h)
-    }
-
-    /// Publish an Image (SCALE-encoded shape) end-to-end: walks
-    /// pinned/initial slots, publishes each Data, then publishes the
-    /// `ImageCap`. Records the resulting Image blob in the directory.
-    pub fn publish_image(&mut self, image: &javm_cap::image::Image) -> Result<CapHash> {
-        let h = self
-            .typed_cache
-            .publish_image(image)
-            .map_err(CacheError::from)?;
-        self.touch_blob(h)?;
-        Ok(h)
-    }
-
-    /// Publish a pre-built `ImageCap<TalcAlloc>`. Lower-level; the
-    /// caller is responsible for constructing the cap in this cache's
-    /// allocator (see [`Self::alloc`]).
-    pub fn publish_image_from_cap(&mut self, image: TImageCap<TalcAlloc>) -> Result<CapHash> {
-        let h = self
-            .typed_cache
-            .publish_image_from_cap(image)
-            .map_err(CacheError::from)?;
-        self.touch_blob(h)?;
-        Ok(h)
-    }
-
-    /// Convert a borrowed SCALE [`javm_cap::image::Image`] into a
-    /// talc-resident [`TImageCap<TalcAlloc>`] using this cache's
-    /// allocator, given resolved hashes for the image's pinned and
-    /// initial slots.
-    pub fn image_cap_in(
-        &self,
-        image: &javm_cap::image::Image,
-        pinned_hashes: &[(SlotIdx, CapHash)],
-        initial_hashes: &[(SlotIdx, CapHash)],
-    ) -> Result<TImageCap<TalcAlloc>> {
-        image_cap_in(image, pinned_hashes, initial_hashes, self.alloc)
-            .map_err(|e| new_error!("cache: image_cap_in: {e}"))
-    }
-
-    /// Publish a CNode and record it.
-    pub fn publish_cnode(
+    /// Put a caller-built `Cap<Global>`. Computes the cap's content hash,
+    /// deep-clones it into the cache's talc-backed allocator on first put,
+    /// or bumps the existing entry's refcount on idempotent re-put.
+    pub fn put_cap(
         &mut self,
-        size_log: u8,
-        entries: &[(SlotIdx, CapHashOrRef)],
+        cap: &javm_cap::Cap<allocator_api2::alloc::Global>,
     ) -> Result<CapHash> {
-        let h = self
-            .typed_cache
-            .publish_cnode(size_log, entries)
-            .map_err(CacheError::from)?;
+        let h = self.typed_cache.put_cap(cap).map_err(CacheError::from)?;
         self.touch_blob(h)?;
         Ok(h)
     }
 
-    /// Publish an InstanceCap blob and record it.
-    #[allow(clippy::too_many_arguments)]
-    pub fn publish_instance_blob(
+    /// Pre-hashed variant. The caller asserts `hash == cap_hash(cap)`;
+    /// `put_cap_with_hash` skips the SSZ merkleize on the idempotent path
+    /// (BTreeMap lookup + refcount bump). Debug-asserts the claimed hash
+    /// in debug builds; trusts the caller in release.
+    pub fn put_cap_with_hash(
         &mut self,
-        image_hash_chain: CapHash,
-        image_hash: CapHash,
-        root_cnode: CapHash,
-        rw_overlays: &[(u32, &[u8])],
-        mem_size: u32,
-        regs: [u64; javm_cap::NUM_REGS],
-        pc: u64,
-        gas_remaining: u64,
-    ) -> Result<CapHash> {
-        let h = self
-            .typed_cache
-            .publish_instance_blob(
-                image_hash_chain,
-                image_hash,
-                root_cnode,
-                rw_overlays,
-                mem_size,
-                regs,
-                pc,
-                gas_remaining,
-            )
+        hash: CapHash,
+        cap: &javm_cap::Cap<allocator_api2::alloc::Global>,
+    ) -> Result<()> {
+        self.typed_cache
+            .put_cap_with_hash(hash, cap)
             .map_err(CacheError::from)?;
-        self.touch_blob(h)?;
-        Ok(h)
+        self.touch_blob(hash)?;
+        Ok(())
     }
 
     // --- Directory maintenance ---
@@ -494,8 +419,8 @@ mod tests {
     fn publish_data_records_directory_slot() {
         let mut cache = Cache::new().expect("alloc");
         let h = cache
-            .publish_data_inline(&[0xAA, 0xBB, 0xCC])
-            .expect("publish");
+            .put_cap(&javm_cap::Cap::data_inline(&[0xAA, 0xBB, 0xCC]))
+            .expect("put_cap");
         let dir = cache.directory();
         assert_eq!(dir.blob_count.load(std::sync::atomic::Ordering::Acquire), 1);
         let dir_ptr = dir as *const CacheDirectory;
@@ -513,8 +438,12 @@ mod tests {
     #[test]
     fn publish_data_is_idempotent_in_directory() {
         let mut cache = Cache::new().expect("alloc");
-        let h1 = cache.publish_data_inline(&[1, 2, 3]).expect("publish 1");
-        let h2 = cache.publish_data_inline(&[1, 2, 3]).expect("publish 2");
+        let h1 = cache
+            .put_cap(&javm_cap::Cap::data_inline(&[1, 2, 3]))
+            .expect("put_cap 1");
+        let h2 = cache
+            .put_cap(&javm_cap::Cap::data_inline(&[1, 2, 3]))
+            .expect("put_cap 2");
         assert_eq!(h1, h2);
         let dir = cache.directory();
         // Only one directory slot consumed (touch_blob updates an
@@ -524,27 +453,29 @@ mod tests {
 
     #[test]
     fn publish_chain_data_cnode_image_instance() {
-        use javm_cap::CapHashOrRef;
+        use javm_cap::slot::SlotIdx;
+        use javm_cap::{Cap, CapHashOrRef};
 
         let mut cache = Cache::new().expect("alloc");
         // Data
-        let data_h = cache.publish_data_inline(&[0x42; 8]).expect("data");
-        // CNode referencing it
-        let cnode_h = cache
-            .publish_cnode(4, &[(SlotIdx(0), CapHashOrRef::Hash(data_h))])
-            .expect("cnode");
-        // Build an image cap with a pinned reference to data, publish it
-        let img = cache
-            .image_cap_in(
-                &javm_cap::image::Image::empty(),
-                &[(SlotIdx(7), data_h)],
-                &[],
-            )
-            .expect("image_cap_in");
-        let image_h = cache.publish_image_from_cap(img).expect("image");
+        let data_h = cache.put_cap(&Cap::data_inline(&[0x42; 8])).expect("data");
+        // CNode referencing it (built as a Cap<Global>)
+        let mut cnode = javm_cap::CNodeCap::new(4).expect("cnode new");
+        cnode
+            .set(SlotIdx(0), Some(CapHashOrRef::Hash(data_h)))
+            .expect("cnode set");
+        let cnode_h = cache.put_cap(&Cap::CNode(cnode)).expect("cnode");
+        // Image with a pinned reference to the data
+        let image_cap = Cap::image_with_slots(
+            &javm_cap::image::Image::empty(),
+            &[(SlotIdx(7), data_h)],
+            &[],
+        )
+        .expect("image_with_slots");
+        let image_h = cache.put_cap(&image_cap).expect("image");
         // Instance
         let inst_h = cache
-            .publish_instance_blob(
+            .put_cap(&Cap::instance_with_overlays(
                 [0; 32],
                 image_h,
                 cnode_h,
@@ -553,7 +484,7 @@ mod tests {
                 [0u64; javm_cap::NUM_REGS],
                 0x1000,
                 1_000_000,
-            )
+            ))
             .expect("instance");
         let dir = cache.directory();
         // 4 blob entries in the directory (data, cnode, image, instance).
@@ -568,7 +499,9 @@ mod tests {
     #[test]
     fn pin_unpin_roundtrip() {
         let mut cache = Cache::new().expect("alloc");
-        let h = cache.publish_data_inline(&[0; 4]).expect("publish");
+        let h = cache
+            .put_cap(&javm_cap::Cap::data_inline(&[0; 4]))
+            .expect("put_cap");
         cache.pin(h).expect("pin");
         assert_eq!(cache.pinned.len(), 1);
         cache.unpin(h);

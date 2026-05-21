@@ -25,23 +25,25 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use javm_cap::image::Image;
-use scale::Decode;
+use ssz::Decode;
 
 macro_rules! bench_workload {
     ($name:ident, $env:literal, $endpoint:literal) => {
         fn $name(c: &mut Criterion) {
             let blob: &[u8] = include_bytes!(env!($env));
-            let image = Image::decode(blob).expect("decode Image").0;
+            let image = Image::from_ssz_bytes(blob).expect("decode Image");
             let ep: u8 = $endpoint;
 
-            let (interp_val, interp_gas) = javm_bench::run_interpreter(&image, ep);
+            let built = javm_bench::BuiltCaps::for_image(&image, ep);
+
+            let (interp_val, interp_gas) = javm_bench::run_interpreter(&built);
             eprintln!(
                 "[{}] result = {:#x}, interp gas = {}",
                 stringify!($name),
                 interp_val,
                 interp_gas,
             );
-            let (recomp_val, recomp_gas) = javm_bench::run_recompiler(&image, ep);
+            let (recomp_val, recomp_gas) = javm_bench::run_recompiler(&built);
             assert_eq!(
                 interp_val,
                 recomp_val,
@@ -58,10 +60,10 @@ macro_rules! bench_workload {
 
             let mut g = c.benchmark_group(stringify!($name));
             g.bench_function("interpreter", |b| {
-                b.iter(|| javm_bench::run_interpreter(&image, ep))
+                b.iter(|| javm_bench::run_interpreter(&built))
             });
             g.bench_function("recompiler", |b| {
-                b.iter(|| javm_bench::run_recompiler(&image, ep))
+                b.iter(|| javm_bench::run_recompiler(&built))
             });
             g.finish();
         }

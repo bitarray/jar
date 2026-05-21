@@ -19,8 +19,7 @@
 
 use allocator_api2::alloc::Global;
 use anyhow::Result;
-use javm_cap::slot::SlotIdx;
-use javm_cap::{Cache as TypedCache, CapHashOrRef, NUM_REGS, cap::Cap};
+use javm_cap::{Cache as TypedCache, CapHashOrRef, cap::Cap};
 use nub_arch_local::LocalArch;
 use nub_host_kvm::sandbox::{
     GuestBinary, MultiUseSandbox, SandboxConfiguration, UninitializedSandbox,
@@ -161,105 +160,48 @@ impl Nub {
         }
     }
 
-    // --- Typed publish surface ---
+    // --- New publish surface (caller-built Cap<Global>) ---
 
-    /// Publish an inline `Cap::Data` blob from a byte buffer. Returns
-    /// the data cap's hash. Idempotent: re-publishing identical bytes
-    /// returns the same hash.
-    pub fn publish_data(&mut self, bytes: &[u8]) -> Result<AbiCapHash> {
+    /// Put a caller-built `Cap<Global>` into the active cache. Computes
+    /// the cap's content hash and either deep-clones into talc memory
+    /// on first put or bumps refcount on idempotent re-put. Returns the
+    /// cap's content hash.
+    pub fn put_cap(&mut self, cap: &javm_cap::Cap<Global>) -> Result<AbiCapHash> {
         match &mut self.backend {
             Backend::Local(_) => self
                 .local_cache
-                .publish_data_inline(bytes)
-                .map_err(|e| anyhow::anyhow!("publish_data (local): {e}")),
+                .put_cap(cap)
+                .map_err(|e| anyhow::anyhow!("put_cap (local): {e}")),
             Backend::Hyperlight(h) => h
                 .sandbox
                 .cache()
-                .publish_data_inline(bytes)
-                .map_err(|e| anyhow::anyhow!("publish_data: {e}")),
+                .put_cap(cap)
+                .map_err(|e| anyhow::anyhow!("put_cap: {e}")),
         }
     }
 
-    /// Publish a SCALE-encoded [`javm_cap::image::Image`] end-to-end.
-    /// Walks the image's pinned/initial slots, publishes each as a
-    /// `Cap::Data`, then publishes the `Cap::Image`. Returns the
-    /// image's content hash.
-    pub fn publish_image(&mut self, img: &javm_cap::image::Image) -> Result<AbiCapHash> {
-        match &mut self.backend {
-            Backend::Local(_) => self
-                .local_cache
-                .publish_image(img)
-                .map_err(|e| anyhow::anyhow!("publish_image (local): {e}")),
-            Backend::Hyperlight(h) => h
-                .sandbox
-                .cache()
-                .publish_image(img)
-                .map_err(|e| anyhow::anyhow!("publish_image: {e}")),
-        }
-    }
-
-    /// Publish a `Cap::CNode` whose slots reference existing caps.
-    /// Each `target` must already be published.
-    pub fn publish_cnode(
+    /// Pre-hashed variant. Caller computed `ssz::hash_tree_root(cap)`
+    /// at warmup and passes it explicitly; skips the SSZ merkleize on
+    /// the hot idempotent path. Debug-asserts the claimed hash matches
+    /// the cap; release trusts the caller.
+    pub fn put_cap_with_hash(
         &mut self,
-        size_log: u8,
-        entries: &[(SlotIdx, CapHashOrRef)],
-    ) -> Result<AbiCapHash> {
+        hash: AbiCapHash,
+        cap: &javm_cap::Cap<Global>,
+    ) -> Result<()> {
         match &mut self.backend {
-            Backend::Local(_) => self
-                .local_cache
-                .publish_cnode(size_log, entries)
-                .map_err(|e| anyhow::anyhow!("publish_cnode (local): {e}")),
+            Backend::Local(_) => {
+                let _refcount = self
+                    .local_cache
+                    .put_cap_with_hash(hash, cap)
+                    .map_err(|e| anyhow::anyhow!("put_cap_with_hash (local): {e}"))?;
+                Ok(())
+            }
             Backend::Hyperlight(h) => h
                 .sandbox
                 .cache()
-                .publish_cnode(size_log, entries)
-                .map_err(|e| anyhow::anyhow!("publish_cnode: {e}")),
-        }
-    }
-
-    /// Publish a `Cap::Instance` blob binding an `image_hash` +
-    /// `root_cnode` + initial state. Returns the instance cap's hash.
-    #[allow(clippy::too_many_arguments)]
-    pub fn publish_instance(
-        &mut self,
-        image_hash_chain: AbiCapHash,
-        image_hash: AbiCapHash,
-        root_cnode: AbiCapHash,
-        rw_overlays: &[(u32, &[u8])],
-        mem_size: u32,
-        regs: [u64; NUM_REGS],
-        pc: u64,
-        gas_remaining: u64,
-    ) -> Result<AbiCapHash> {
-        match &mut self.backend {
-            Backend::Local(_) => self
-                .local_cache
-                .publish_instance_blob(
-                    image_hash_chain,
-                    image_hash,
-                    root_cnode,
-                    rw_overlays,
-                    mem_size,
-                    regs,
-                    pc,
-                    gas_remaining,
-                )
-                .map_err(|e| anyhow::anyhow!("publish_instance (local): {e}")),
-            Backend::Hyperlight(h) => h
-                .sandbox
-                .cache()
-                .publish_instance_blob(
-                    image_hash_chain,
-                    image_hash,
-                    root_cnode,
-                    rw_overlays,
-                    mem_size,
-                    regs,
-                    pc,
-                    gas_remaining,
-                )
-                .map_err(|e| anyhow::anyhow!("publish_instance: {e}")),
+                .put_cap_with_hash(hash, cap)
+                .map_err(|e| anyhow::anyhow!("put_cap_with_hash: {e}")),
         }
     }
 

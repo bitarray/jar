@@ -2,7 +2,7 @@
 //!
 //! For each event in a block:
 //! 1. Publish the event's `payload` as a `Cap::Data` blob in σ's
-//!    cache via `publish_data_inline`.
+//!    cache via `put_cap(&Cap::data_inline(...))`.
 //! 2. CoW-promote the chain's root cnode and rebind slot\[0\] to the
 //!    payload's CapHash; settle to a fresh cnode hash.
 //! 3. Republish the chain InstanceCap with the new root cnode hash;
@@ -57,7 +57,7 @@ pub fn apply_event(
     _storage_quota: u64,
 ) -> Result<EventOutcome, KernelError> {
     // 1. Publish the event payload as a DataCap.
-    let payload_hash = state.caps.publish_data_inline(&event.payload)?;
+    let payload_hash = state.caps.put_cap(&Cap::data_inline(&event.payload))?;
 
     // 2. Snapshot the chain instance's identifying fields (image hash
     //    chain, image hash, current cnode hash) plus its memory layout
@@ -131,7 +131,7 @@ pub fn apply_event(
         .iter()
         .map(|(s, b)| (*s, b.as_slice()))
         .collect();
-    let new_chain_instance_hash = state.caps.publish_instance_blob(
+    let new_chain_instance_hash = state.caps.put_cap(&Cap::instance_with_overlays(
         image_hash_chain,
         image_hash,
         new_root_cnode_hash,
@@ -140,7 +140,7 @@ pub fn apply_event(
         regs,
         pc,
         0,
-    )?;
+    ))?;
 
     // 4. Drive the Vm.
     let result = vm.invoke_cached(

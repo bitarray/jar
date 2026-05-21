@@ -1,30 +1,35 @@
-//! Shared runners for `benches/pvm_bench.rs`.
+//! Shared runners for `benches/pvm_bench.rs` and `benches/stark_bench.rs`.
 //!
-//! Both backends route through the cache-based API:
-//!   - `Nub::publish_image` / `publish_cnode` / `publish_instance` once
-//!     per workload (idempotent on the content-hash key).
-//!   - `Nub::invoke_cached(instance_hash, ep, args, gas)` per iteration.
+//! The bench measures the full per-invocation lifecycle:
+//!   * `Nub::put_cap_with_hash` for each cap the invocation requires
+//!     (Data blobs the Image references, the Image itself, the empty
+//!     root cnode, the Instance). Each put is a single
+//!     `BTreeMap::get + refcount.fetch_add(1)` after warm-up — i.e. a
+//!     few tens of nanoseconds per cap.
+//!   * `Nub::invoke_cached(instance_hash, endpoint, args, gas)`.
 //!
 //! - `run_interpreter` — `Nub::new_local()` drives the byte-PVM
 //!   interpreter (`javm-exec`) in-process.
 //! - `run_recompiler` — a long-lived `Nub::new_hyperlight()` sandbox
-//!   (cached in a `OnceLock`) drives the in-kernel JIT path via the
-//!   same `invoke_cached` API.
+//!   (cached in a `OnceLock`) drives the in-kernel JIT path through
+//!   the same `invoke_cached` API.
 //!
-//! `Published` is the shared post-publish handle — the bench harness
-//! publishes once via `publish_local` / `publish_hyperlight`, then
-//! reuses the resulting `(instance_hash, endpoint_idx)` pair across
-//! iterations so per-iter cost is just `invoke_cached`.
+//! `BuiltCaps` holds the pre-built `Cap<Global>` graph + its precomputed
+//! hashes. Construction happens once per workload at bench warm-up via
+//! [`BuiltCaps::for_image`]; the iter loop reuses the resulting handles.
 //!
 //! Linux x86-64 only — `nub` pulls the Hyperlight host stack
 //! unconditionally.
 
+#![cfg_attr(not(all(target_os = "linux", target_arch = "x86_64")), allow(unused))]
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
+use allocator_api2::alloc::Global;
 use javm_cap::NUM_REGS;
 use javm_cap::image::{Image, PinnedCap};
+use javm_cap::slot::SlotIdx;
+use javm_cap::{Cap, CapHash};
 use nub::{InvocationResult, Nub};
-use nub_arch_x86_abi::CapHash;
 use std::sync::{Mutex, OnceLock};
 
 /// HostCall(0) — the trampoline halt all bench programs end on
@@ -35,94 +40,151 @@ const EXIT_HOSTCALL: u32 = 4;
 /// Default initial-gas budget for the bench.
 const INITIAL_GAS: u64 = 100_000_000_000;
 
-/// Published handle: enough state for `Nub::invoke_cached` to re-enter.
-#[derive(Debug, Clone, Copy)]
-pub struct Published {
+/// Pre-built `Cap<Global>` graph for one (image, endpoint) bench cell.
+///
+/// Built once at warm-up via [`Self::for_image`]; the iter loop puts each
+/// cap with its precomputed hash and invokes. The first iter pays the
+/// full deep-clone cost (caps move into the Nub's cache allocator);
+/// subsequent iters hit the idempotent fast path (refcount bump only).
+pub struct BuiltCaps {
+    /// Cap::Data blobs for each pinned-slot Data + each initial-slot Data,
+    /// paired with their content hashes.
+    pub data_caps: Vec<(CapHash, Cap<Global>)>,
+    /// Cap::Image referencing the data_caps above by hash.
+    pub image_cap: Cap<Global>,
+    pub image_hash: CapHash,
+    /// Empty Cap::CNode (V1 has no per-instance slot bindings).
+    pub cnode_cap: Cap<Global>,
+    pub cnode_hash: CapHash,
+    /// Cap::Instance with the bench's flat (ro, rw) overlay layout.
+    pub instance_cap: Cap<Global>,
     pub instance_hash: CapHash,
     pub endpoint_idx: u8,
 }
 
-/// Publish `image`'s `endpoint_idx` into `nub`, returning a
-/// [`Published`] handle for subsequent `Nub::invoke_cached` calls.
-///
-/// V1 lays the image's ro/rw bytes into `InstanceCap.rw_overlays`
-/// rather than walking the slot-graph at invoke time — the slot
-/// machinery is in place but `nub_invoke_cached` reads overlays
-/// directly for V1. The Image's `pinned_slots` and `memory_mappings`
-/// are still used by `publish_image` to materialise the canonical
-/// content hash, but the bench's runtime layout comes from overlays.
-pub fn publish(nub: &mut Nub, image: &Image, endpoint_idx: u8) -> Published {
-    // Sanity-check the endpoint exists.
-    let endpoint = image
-        .endpoints
-        .get(&endpoint_idx)
-        .unwrap_or_else(|| panic!("endpoint {endpoint_idx} not declared"));
+impl BuiltCaps {
+    /// Build the full `Cap<Global>` graph for `image[endpoint_idx]`. All
+    /// hashes are precomputed once here.
+    pub fn for_image(image: &Image, endpoint_idx: u8) -> Self {
+        let endpoint = image
+            .endpoints
+            .get(&endpoint_idx)
+            .unwrap_or_else(|| panic!("endpoint {endpoint_idx} not declared"));
 
-    // 1. publish_image — drives all the pinned/initial Data publishes
-    //    and yields the Image's content hash.
-    let image_h = nub.publish_image(image).expect("publish_image");
+        // 1. Build a Cap::Data per non-empty pinned/initial slot. Track
+        //    each slot's resolved CapHash so the Image can reference them.
+        let mut data_caps: Vec<(CapHash, Cap<Global>)> = Vec::new();
+        let mut pinned_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
+        let mut initial_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
 
-    // 2. Empty root CNode (V1 has no per-instance slot bindings).
-    let cnode_h = nub.publish_cnode(0, &[]).expect("publish_cnode (empty)");
-
-    // 3. Materialise the bench's flat (ro, rw) layout as
-    //    InstanceCap.rw_overlays for the guest to lay flat at invoke.
-    let (mem_size, overlays) = build_overlays(image);
-    let overlay_slices: Vec<(u32, &[u8])> = overlays
-        .iter()
-        .map(|(start, bytes)| (*start, bytes.as_slice()))
-        .collect();
-
-    // 4. Build the endpoint's initial_regs (dense [u64; NUM_REGS]).
-    //    Used by `nub_invoke_cached` as the regs baseline; args
-    //    overlay φ[7..=10] on top.
-    let mut regs = [0u64; NUM_REGS];
-    for (&i, &v) in &endpoint.initial_regs {
-        if let Some(slot) = regs.get_mut(i as usize) {
-            *slot = v;
+        for (slot, pinned) in &image.pinned_slots {
+            let (h, cap) = match pinned {
+                PinnedCap::Data { content, size } => {
+                    let cap = Cap::data_inline_with_size(content, *size);
+                    let h = ssz::hash_tree_root(&cap);
+                    (h, Some(cap))
+                }
+                PinnedCap::Image { content_hash } => {
+                    // Sub-Image hash assumed already-published; carry it
+                    // through to the image_with_slots builder.
+                    (*content_hash, None)
+                }
+            };
+            pinned_hashes.push((*slot, h));
+            if let Some(c) = cap {
+                data_caps.push((h, c));
+            }
         }
-    }
+        for (slot, init) in &image.initial_slots {
+            let cap = Cap::data_inline_with_size(&init.content, init.size);
+            let h = ssz::hash_tree_root(&cap);
+            initial_hashes.push((*slot, h));
+            data_caps.push((h, cap));
+        }
 
-    // 5. publish_instance. pc/gas live on InstanceCap but
-    //    nub_invoke_cached overrides them from the endpoint table +
-    //    packet, so 0/0 is fine here.
-    let instance_h = nub
-        .publish_instance(
+        // 2. Build the Cap::Image referencing the data caps by hash.
+        let image_cap = Cap::image_with_slots(image, &pinned_hashes, &initial_hashes)
+            .expect("image_with_slots");
+        let image_hash = ssz::hash_tree_root(&image_cap);
+
+        // 3. Empty root CNode (V1: no per-instance slot bindings).
+        let cnode_cap = Cap::empty_cnode(0).expect("empty_cnode");
+        let cnode_hash = ssz::hash_tree_root(&cnode_cap);
+
+        // 4. Build the Instance with the bench's flat overlay layout.
+        let (mem_size, overlays) = build_overlays(image);
+        let overlay_slices: Vec<(u32, &[u8])> = overlays
+            .iter()
+            .map(|(start, bytes)| (*start, bytes.as_slice()))
+            .collect();
+
+        let mut regs = [0u64; NUM_REGS];
+        for (&i, &v) in &endpoint.initial_regs {
+            if let Some(slot) = regs.get_mut(i as usize) {
+                *slot = v;
+            }
+        }
+
+        let instance_cap = Cap::instance_with_overlays(
             [0u8; 32],
-            image_h,
-            cnode_h,
+            image_hash,
+            cnode_hash,
             &overlay_slices,
             mem_size,
             regs,
             0,
             0,
-        )
-        .expect("publish_instance");
+        );
+        let instance_hash = ssz::hash_tree_root(&instance_cap);
 
-    Published {
-        instance_hash: instance_h,
-        endpoint_idx,
+        BuiltCaps {
+            data_caps,
+            image_cap,
+            image_hash,
+            cnode_cap,
+            cnode_hash,
+            instance_cap,
+            instance_hash,
+            endpoint_idx,
+        }
+    }
+
+    /// Put every cap into `nub`'s cache via `put_cap_with_hash`.
+    /// Idempotent re-puts after the first call are refcount bumps only.
+    fn put_into(&self, nub: &mut Nub) {
+        for (h, cap) in &self.data_caps {
+            nub.put_cap_with_hash(*h, cap)
+                .unwrap_or_else(|e| panic!("put_cap_with_hash data: {e}"));
+        }
+        nub.put_cap_with_hash(self.image_hash, &self.image_cap)
+            .unwrap_or_else(|e| panic!("put_cap_with_hash image: {e}"));
+        nub.put_cap_with_hash(self.cnode_hash, &self.cnode_cap)
+            .unwrap_or_else(|e| panic!("put_cap_with_hash cnode: {e}"));
+        nub.put_cap_with_hash(self.instance_hash, &self.instance_cap)
+            .unwrap_or_else(|e| panic!("put_cap_with_hash instance: {e}"));
     }
 }
 
-/// Drive `image[endpoint_idx]` through the byte-PVM interpreter via
-/// `Nub::new_local`.
-pub fn run_interpreter(image: &Image, endpoint_idx: u8) -> (u64, u64) {
+/// Drive `built[endpoint_idx]` through the byte-PVM interpreter via a
+/// fresh `Nub::new_local()` (the Local backend has no per-invocation
+/// state, so a fresh Nub each call is fine — and matches the chain's
+/// per-event allocation model).
+pub fn run_interpreter(built: &BuiltCaps) -> (u64, u64) {
     let mut nub = Nub::new_local();
-    let p = publish(&mut nub, image, endpoint_idx);
+    built.put_into(&mut nub);
     let result = nub
-        .invoke_cached(p.instance_hash, p.endpoint_idx, [0; 4], INITIAL_GAS)
+        .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
         .unwrap_or_else(|e| panic!("interpreter invoke_cached: {e}"));
     finish(&result)
 }
 
-/// Drive `image[endpoint_idx]` through the in-kernel JIT via the
-/// cached Hyperlight `Nub`.
-pub fn run_recompiler(image: &Image, endpoint_idx: u8) -> (u64, u64) {
+/// Drive `built[endpoint_idx]` through the in-kernel JIT via the long-
+/// lived Hyperlight `Nub`.
+pub fn run_recompiler(built: &BuiltCaps) -> (u64, u64) {
     let mut nub = nub_hyperlight().lock().expect("nub mutex");
-    let p = publish(&mut nub, image, endpoint_idx);
+    built.put_into(&mut nub);
     let result = nub
-        .invoke_cached(p.instance_hash, p.endpoint_idx, [0; 4], INITIAL_GAS)
+        .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
         .unwrap_or_else(|e| panic!("recompiler invoke_cached: {e}"));
     finish(&result)
 }
@@ -149,13 +211,9 @@ fn nub_hyperlight() -> &'static Mutex<Nub> {
 }
 
 /// Walk the Image's memory mappings + slot contents and produce
-/// `(mem_size, overlays)` for the InstanceCap. Each non-empty
-/// content gets an overlay `(start, bytes)`.
-///
-/// V1 uses the same shape the legacy `PublishSpec` produced: one
-/// overlay for the unique pinned mapping (typically `.rodata`), one
-/// for the unique non-empty initial mapping (`.data`). Stack/heap
-/// are empty inside `mem_size` as zero-init RW pages.
+/// `(mem_size, overlays)` for the InstanceCap. Each non-empty content
+/// becomes one `(start, bytes)` overlay; stack/heap are empty inside
+/// `mem_size` as zero-init RW pages.
 fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
     let mut mem_size: u32 = 0;
     let mut overlays: Vec<(u32, Vec<u8>)> = Vec::new();

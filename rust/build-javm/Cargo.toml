@@ -8,4 +8,4 @@ description = "build.rs helper: compile a Rust crate to a SCALE-encoded JAVM Cap
 [dependencies]
 build-crate = { path = "../build-crate" }
 javm-transpiler = { path = "../javm-transpiler" }
-scale = { workspace = true, features = ["std"] }
+ssz = { workspace = true, features = ["std", "sha2", "derive"] }

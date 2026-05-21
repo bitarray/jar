@@ -3,8 +3,8 @@
 //! typed API and check that `invoke_cached` returns the expected
 //! `HostCall(42)` result.
 
-use javm_cap::NUM_REGS;
 use javm_cap::image::{EndpointDef, Image};
+use javm_cap::{Cap, NUM_REGS};
 use nub::Nub;
 use std::collections::BTreeMap;
 
@@ -36,20 +36,21 @@ fn ecalli_42_image() -> Image {
 
 fn publish_and_invoke(nub: &mut Nub) -> nub::InvocationResult {
     let img = ecalli_42_image();
-    let image_h = nub.publish_image(&img).expect("publish_image");
-    let cnode_h = nub.publish_cnode(0, &[]).expect("publish_cnode");
-    let instance_h = nub
-        .publish_instance(
-            [0u8; 32],
-            image_h,
-            cnode_h,
-            &[],
-            4096,
-            [0u64; NUM_REGS],
-            0,
-            0,
-        )
-        .expect("publish_instance");
+    let image_cap = Cap::image_with_slots(&img, &[], &[]).expect("image_with_slots");
+    let image_h = nub.put_cap(&image_cap).expect("put_cap image");
+    let cnode_cap = Cap::empty_cnode(0).expect("empty_cnode");
+    let cnode_h = nub.put_cap(&cnode_cap).expect("put_cap cnode");
+    let instance_cap = Cap::instance_with_overlays(
+        [0u8; 32],
+        image_h,
+        cnode_h,
+        &[],
+        4096,
+        [0u64; NUM_REGS],
+        0,
+        0,
+    );
+    let instance_h = nub.put_cap(&instance_cap).expect("put_cap instance");
     nub.invoke_cached(instance_h, 0, [0; 4], 1_000)
         .expect("invoke_cached")
 }

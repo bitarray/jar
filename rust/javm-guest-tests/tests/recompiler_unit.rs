@@ -101,20 +101,22 @@ fn run(ps: ProgSpec) -> RunResult {
             *borrow = Some(Nub::new_hyperlight().expect("Hyperlight sandbox"));
         }
         let nub = borrow.as_mut().expect("nub initialised above");
-        let image_h = nub.publish_image(&img).expect("publish_image");
-        let cnode_h = nub.publish_cnode(0, &[]).expect("publish_cnode");
-        let instance_h = nub
-            .publish_instance(
-                [0u8; 32],
-                image_h,
-                cnode_h,
-                &overlay_vec,
-                mem_size,
-                ps.registers,
-                0,
-                0,
-            )
-            .expect("publish_instance");
+        use javm_cap::Cap;
+        let image_cap = Cap::image_with_slots(&img, &[], &[]).expect("image_with_slots");
+        let image_h = nub.put_cap(&image_cap).expect("put_cap image");
+        let cnode_cap = Cap::empty_cnode(0).expect("empty_cnode");
+        let cnode_h = nub.put_cap(&cnode_cap).expect("put_cap cnode");
+        let instance_cap = Cap::instance_with_overlays(
+            [0u8; 32],
+            image_h,
+            cnode_h,
+            &overlay_vec,
+            mem_size,
+            ps.registers,
+            0,
+            0,
+        );
+        let instance_h = nub.put_cap(&instance_cap).expect("put_cap instance");
         let r = nub
             .invoke_cached(instance_h, 0, [0; 4], ps.gas)
             .expect("invoke_cached");

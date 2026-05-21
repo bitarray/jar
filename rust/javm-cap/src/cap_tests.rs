@@ -12,7 +12,7 @@ use talc::source::Manual;
 use crate::slot::SlotIdx;
 
 use super::cap::{Cap, CapHashOrRef};
-use super::cnode::{CNodeCap, CNodeSlotEntry};
+use super::cnode::CNodeCap;
 use super::data::{DataCap, DataContent};
 use super::entry::CacheEntry;
 use super::image_cap::{EndpointDef, ImageCap, ImageSlotEntry, MemoryMapping};
@@ -129,7 +129,7 @@ fn cnode_set_takes_and_keeps_slots_sorted() {
         cnode
             .slots
             .iter()
-            .map(|e| e.slot.get())
+            .map(|(idx, _)| idx as u32)
             .collect::<alloc::vec::Vec<u32>>(),
         alloc::vec![2u32, 7, 11]
     );
@@ -150,7 +150,7 @@ fn cnode_set_takes_and_keeps_slots_sorted() {
         cnode
             .slots
             .iter()
-            .map(|e| e.slot.get())
+            .map(|(idx, _)| idx as u32)
             .collect::<alloc::vec::Vec<u32>>(),
         alloc::vec![7u32, 11]
     );
@@ -167,15 +167,10 @@ fn cnode_set_takes_and_keeps_slots_sorted() {
 fn cnode_lookup_after_set() {
     let cnode_alloc = Global;
     let mut cnode: CNodeCap<Global> = CNodeCap::new_in(8, cnode_alloc).unwrap();
-    cnode.slots.push(CNodeSlotEntry {
-        slot: SlotIdx(7),
-        target: CapHashOrRef::Hash([0x11; 32]),
-    });
-    cnode.slots.push(CNodeSlotEntry {
-        slot: SlotIdx(42),
-        target: CapHashOrRef::Ref(99),
-    });
-    cnode.slots.sort_by_key(|e| e.slot);
+    cnode
+        .set(SlotIdx(7), Some(CapHashOrRef::Hash([0x11; 32])))
+        .unwrap();
+    cnode.set(SlotIdx(42), Some(CapHashOrRef::Ref(99))).unwrap();
 
     assert_eq!(cnode.get(SlotIdx(7)), Some(CapHashOrRef::Hash([0x11; 32])));
     assert_eq!(cnode.get(SlotIdx(42)), Some(CapHashOrRef::Ref(99)));
@@ -307,27 +302,33 @@ fn cache_with_talc_alloc_round_trips_full_publish_chain() {
     let arena = Arena::new(256 * 1024);
     let mut cache = Cache::new_in(arena.alloc());
 
-    // 1. Publish a Data blob.
+    // 1. Publish a Data blob (cap is Global; cache deep-clones into talc).
     let data_h = cache
-        .publish_data_inline(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08])
-        .expect("publish data");
+        .put_cap(&Cap::data_inline(&[
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        ]))
+        .expect("put data");
     assert_eq!(cache.refcount(CapHashOrRef::Hash(data_h)), Some(1));
 
     // 2. Publish a CNode referencing it (refcount on data → 2).
-    let cnode_h = cache
-        .publish_cnode(4, &[(SlotIdx(0), CapHashOrRef::Hash(data_h))])
-        .expect("publish cnode");
+    let cnode_h = {
+        let mut cn: CNodeCap<Global> = CNodeCap::new_in(4, Global).unwrap();
+        cn.set(SlotIdx(0), Some(CapHashOrRef::Hash(data_h)))
+            .unwrap();
+        cache.put_cap(&Cap::CNode(cn)).expect("put cnode")
+    };
     assert_eq!(cache.refcount(CapHashOrRef::Hash(cnode_h)), Some(1));
     assert_eq!(cache.refcount(CapHashOrRef::Hash(data_h)), Some(2));
 
     // 3. Publish a minimal Image referencing the same Data blob as a
-    //    pinned slot (refcount on data → 3).
-    let mut img = make_image_cap_in(arena.alloc());
+    //    pinned slot (refcount on data → 3). Build the Image cap on
+    //    the global heap and pass it through put_cap.
+    let mut img = make_image_cap_in(Global);
     img.pinned.push(ImageSlotEntry {
         slot: SlotIdx(7),
         cap_hash: data_h,
     });
-    let image_h = cache.publish_image_from_cap(img).expect("publish image");
+    let image_h = cache.put_cap(&Cap::Image(img)).expect("put image");
     assert_eq!(cache.refcount(CapHashOrRef::Hash(image_h)), Some(1));
     assert_eq!(cache.refcount(CapHashOrRef::Hash(data_h)), Some(3));
 
@@ -336,7 +337,7 @@ fn cache_with_talc_alloc_round_trips_full_publish_chain() {
     //    transitively through cnode/image, not directly).
     let regs = [0u64; NUM_REGS];
     let inst_h = cache
-        .publish_instance_blob(
+        .put_cap(&Cap::instance_with_overlays(
             [0u8; 32],
             image_h,
             cnode_h,
@@ -345,8 +346,8 @@ fn cache_with_talc_alloc_round_trips_full_publish_chain() {
             regs,
             0x1000,
             1_000_000,
-        )
-        .expect("publish instance");
+        ))
+        .expect("put instance");
     assert_eq!(cache.refcount(CapHashOrRef::Hash(inst_h)), Some(1));
     assert_eq!(cache.refcount(CapHashOrRef::Hash(image_h)), Some(2));
     assert_eq!(cache.refcount(CapHashOrRef::Hash(cnode_h)), Some(2));

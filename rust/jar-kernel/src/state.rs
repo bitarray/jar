@@ -1,21 +1,29 @@
 //! σ — the v3 chain state.
 //!
-//! Stage C.2 (this commit) lands a cache-driven state shape: σ is a
-//! `Cache<Global>` plus the validator set. Data blobs, image blobs,
-//! cnode blobs, and chain Instance blobs all live in the cache as
-//! `Cap` values, addressed by content hash.
+//! σ is a `Cache<Global>` plus the validator set. Data blobs, image
+//! blobs, cnode blobs, and chain Instance blobs all live in the cache
+//! as `Cap` values, addressed by content hash.
 //!
-//! The previous Stage C.2 design carried separate registries
-//! (`data_blobs`, `data_payloads`, `code_blobs`, `vaults`, etc.) and a
-//! SCALE-derived state root. Commit 3 of the cap-type consolidation
-//! moves all of those into the cache; their consumers now look up
-//! `state.caps.get(CapHashOrRef::Hash(h))` directly.
+//! The state root is the SSZ `hash_tree_root` of the cache's blobs,
+//! each represented as a `(blob_hash, cap_hash)` leaf container.
 
-use javm_cap::bmt::Bmt;
-use javm_cap::{Blake2b256, Cache, CapHash, Hash, cap_hash};
+use javm_cap::{Cache, CapHash, cap_hash};
+use ssz::{Encode, HashTreeRoot};
 
 /// PoA validator key (placeholder — 32-byte public key).
 pub type ValidatorKey = [u8; 32];
+
+/// One state-root leaf: a `(blob_hash, cap_hash)` pair.
+///
+/// Encoded as the SSZ container `{ blob_hash: [u8;32], cap_hash: [u8;32] }`.
+/// The leaf's `hash_tree_root` is `merkleize([blob_hash, cap_hash], 2) =
+/// hash(blob_hash || cap_hash)` — equivalent to the legacy BMT leaf
+/// protocol but with SHA-256 instead of Blake2b.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, HashTreeRoot)]
+pub struct StateLeaf {
+    pub blob_hash: CapHash,
+    pub cap_hash: CapHash,
+}
 
 /// The chain's σ-resident state.
 ///
@@ -42,29 +50,26 @@ impl Default for State {
     }
 }
 
-/// State-root: BMT over the cache's blobs.
+/// State-root: SSZ `hash_tree_root` of the cache's blobs.
 ///
-/// Each leaf is `blake2b256(blob_hash || cap_hash(cap))` so divergence
-/// in either the storage key or the cap content surfaces in the root.
+/// Each leaf is a `StateLeaf { blob_hash, cap_hash }` container. The
+/// full state root is `hash_tree_root` of the `Vec<StateLeaf>`, which
+/// merkleizes the per-leaf roots, pads to the next power of two, and
+/// mixes in the length per SSZ `List` semantics.
+///
 /// Leaves are produced in sorted `CapHash` order (BTreeMap iteration
-/// order is sort-stable) so the result is independent of insertion
-/// order.
-///
-/// Empty caches reduce to `Blake2b256::hash(&[])` via the BMT's
-/// canonical empty-marker convention.
+/// is sort-stable), so the result is independent of insertion order.
+/// Empty caches reduce to the SSZ canonical empty-list root.
 pub fn state_root(state: &State) -> CapHash {
-    let leaves: Vec<[u8; 32]> = state
+    let leaves: Vec<StateLeaf> = state
         .caps
         .iter_blobs()
-        .map(|(hash, cap)| {
-            let c = cap_hash(cap);
-            let mut buf = [0u8; 64];
-            buf[..32].copy_from_slice(hash);
-            buf[32..].copy_from_slice(&c);
-            Blake2b256::hash(&buf)
+        .map(|(hash, cap)| StateLeaf {
+            blob_hash: *hash,
+            cap_hash: cap_hash(cap),
         })
         .collect();
-    Bmt::root::<Blake2b256>(&leaves)
+    ssz::hash_tree_root(&leaves)
 }
 
 #[cfg(test)]
@@ -82,7 +87,9 @@ mod tests {
     fn state_root_changes_with_published_data() {
         let mut s = State::new();
         let r0 = state_root(&s);
-        s.caps.publish_data_inline(b"hello").unwrap();
+        s.caps
+            .put_cap(&javm_cap::Cap::data_inline(b"hello"))
+            .unwrap();
         let r1 = state_root(&s);
         assert_ne!(r0, r1);
     }

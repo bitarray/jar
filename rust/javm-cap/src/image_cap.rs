@@ -12,7 +12,7 @@ use crate::slot::SlotIdx;
 
 use super::cap::{CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
 pub struct ImageCap<A: Allocator + Clone = Global> {
     /// Bytecode bytes.
     pub code: Vec<u8, A>,
@@ -41,7 +41,16 @@ pub struct ImageCap<A: Allocator + Clone = Global> {
 /// corresponds to PVM register `φ[i]`. `0` is "use default" (same
 /// semantics as the spec's old `BTreeMap<u8, u64>` when the key is
 /// absent).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    ssz_derive::Encode,
+    ssz_derive::Decode,
+    ssz_derive::HashTreeRoot,
+)]
 pub struct EndpointDef {
     pub entry_pc: u64,
     pub stack_top: u64,
@@ -69,12 +78,112 @@ impl EndpointDef {
 /// start, reads the bytes from the resulting `Cap::Data`, and lays
 /// them at `[start, start + size)`. `source_path` is a fixed-cap
 /// array; `source_path_len` is the actual depth.
+///
+/// **SSZ note**: `Encode`/`Decode`/`HashTreeRoot` are hand-written
+/// because the `source_path` field is `[SlotIdx; MAX_SOURCE_DEPTH]` —
+/// an array of a local type, which Rust's orphan rules block from
+/// receiving a blanket impl in either `ssz` or `javm-cap`. The encoded
+/// form is field-by-field SSZ: `u64 || u64 || (MAX_SOURCE_DEPTH * 4
+/// LE bytes) || u8`. All fields are fixed-length so the container is
+/// fixed-length too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemoryMapping {
     pub start: u64,
     pub size: u64,
     pub source_path: [SlotIdx; MAX_SOURCE_DEPTH],
     pub source_path_len: u8,
+}
+
+impl MemoryMapping {
+    /// SSZ fixed encoded length: 8 + 8 + (MAX_SOURCE_DEPTH * 4) + 1.
+    const SSZ_LEN: usize = 8 + 8 + MAX_SOURCE_DEPTH * 4 + 1;
+}
+
+impl ssz::Encode for MemoryMapping {
+    fn is_ssz_fixed_len() -> bool {
+        true
+    }
+    fn ssz_fixed_len() -> usize {
+        Self::SSZ_LEN
+    }
+    fn ssz_bytes_len(&self) -> usize {
+        Self::SSZ_LEN
+    }
+    fn ssz_append<A: allocator_api2::alloc::Allocator + Clone>(&self, buf: &mut Vec<u8, A>) {
+        buf.extend_from_slice(&self.start.to_le_bytes());
+        buf.extend_from_slice(&self.size.to_le_bytes());
+        for s in &self.source_path {
+            buf.extend_from_slice(&s.get().to_le_bytes());
+        }
+        buf.push(self.source_path_len);
+    }
+}
+
+impl ssz::Decode for MemoryMapping {
+    fn is_ssz_fixed_len() -> bool {
+        true
+    }
+    fn ssz_fixed_len() -> usize {
+        Self::SSZ_LEN
+    }
+    fn from_ssz_bytes_in<A: allocator_api2::alloc::Allocator + Clone>(
+        bytes: &[u8],
+        _alloc: A,
+    ) -> Result<Self, ssz::DecodeError> {
+        if bytes.len() != Self::SSZ_LEN {
+            return Err(ssz::DecodeError::UnexpectedEof {
+                expected: Self::SSZ_LEN,
+                actual: bytes.len(),
+            });
+        }
+        let start = u64::from_le_bytes(bytes[0..8].try_into().expect("len checked"));
+        let size = u64::from_le_bytes(bytes[8..16].try_into().expect("len checked"));
+        let mut source_path = [SlotIdx(0); MAX_SOURCE_DEPTH];
+        for (i, slot) in source_path.iter_mut().enumerate() {
+            let s = 16 + i * 4;
+            let arr: [u8; 4] = bytes[s..s + 4].try_into().expect("len checked");
+            *slot = SlotIdx(u32::from_le_bytes(arr));
+        }
+        let source_path_len = bytes[16 + MAX_SOURCE_DEPTH * 4];
+        Ok(Self {
+            start,
+            size,
+            source_path,
+            source_path_len,
+        })
+    }
+}
+
+impl ssz::HashTreeRoot for MemoryMapping {
+    fn hash_tree_root<D: ::ssz::digest::Digest<OutputSize = ::ssz::digest::typenum::U32>>(
+        &self,
+    ) -> [u8; 32] {
+        // SSZ container root: merkleize the per-field roots with
+        // limit = number of fields (4). All four are fixed-size leaves.
+        let path_root = {
+            // Treat the fixed-length path array as a `Vector<u32,
+            // MAX_SOURCE_DEPTH>` for hashing: pack to bytes, merkleize
+            // with `ceil(N*4/32)` chunks.
+            let mut buf: allocator_api2::vec::Vec<u8, allocator_api2::alloc::Global> =
+                allocator_api2::vec::Vec::with_capacity_in(
+                    MAX_SOURCE_DEPTH * 4,
+                    allocator_api2::alloc::Global,
+                );
+            for s in &self.source_path {
+                buf.extend_from_slice(&s.get().to_le_bytes());
+            }
+            let chunks = ssz::pack_bytes(&buf);
+            let limit = (MAX_SOURCE_DEPTH * 4).div_ceil(32).max(1);
+            ssz::merkleize::<D>(&chunks, limit)
+        };
+        let roots = [
+            ssz::HashTreeRoot::hash_tree_root::<D>(&self.start),
+            ssz::HashTreeRoot::hash_tree_root::<D>(&self.size),
+            path_root,
+            ssz::HashTreeRoot::hash_tree_root::<D>(&self.source_path_len),
+        ];
+        ssz::merkleize::<D>(&roots, 4)
+    }
 }
 
 impl MemoryMapping {
@@ -86,7 +195,16 @@ impl MemoryMapping {
 
 /// `(slot_idx, cap_hash)` pair used by Image's `pinned` and
 /// `initial` arrays. References content-addressed caps only.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    ssz_derive::Encode,
+    ssz_derive::Decode,
+    ssz_derive::HashTreeRoot,
+)]
 pub struct ImageSlotEntry {
     pub slot: SlotIdx,
     pub cap_hash: CapHash,

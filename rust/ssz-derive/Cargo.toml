@@ -1,9 +1,9 @@
 [package]
-name = "scale-derive"
+name = "ssz-derive"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Derive macros for SCALE Encode/Decode traits."
+description = "Derive macros for SSZ Encode/Decode/HashTreeRoot traits."
 
 [lib]
 proc-macro = true

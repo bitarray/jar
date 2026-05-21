@@ -18,7 +18,7 @@
 use javm::{KernelImage, kernel_image_hash};
 use javm_cap::abi as cap_abi;
 use javm_cap::image::Image;
-use javm_cap::{Cache, CapHash, CapHashOrRef, NUM_REGS, SlotIdx};
+use javm_cap::{CNodeCap, Cache, Cap, CapHash, CapHashOrRef, NUM_REGS, SlotIdx};
 
 use crate::abi;
 use crate::error::KernelError;
@@ -47,7 +47,7 @@ fn publish_kernel_unit_cap(
 ) -> Result<CapHash, KernelError> {
     let mut regs = [0u64; NUM_REGS];
     regs[0] = id;
-    let hash = cache.publish_instance_blob(
+    let cap = Cap::instance_with_overlays(
         kernel_image_hash(image),
         placeholder_image_hash,
         empty_cnode_hash,
@@ -56,8 +56,8 @@ fn publish_kernel_unit_cap(
         regs,
         0,
         0,
-    )?;
-    Ok(hash)
+    );
+    Ok(cache.put_cap(&cap)?)
 }
 
 /// Stateless variant: no runtime identity (`regs[0] = 0`). Used for
@@ -81,23 +81,50 @@ fn publish_kernel_stateless_cap(
 pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     let mut state = State::new();
 
-    // 1. Publish the chain Image. This walks its pinned/initial slots
-    //    and publishes their inline content as DataCap blobs too, so
-    //    they're addressable from the cache for the root-cnode build
-    //    below.
-    let chain_image_hash = state.caps.publish_image(&chain_image)?;
+    // 1. Build Cap::Data for each pinned/initial slot in the chain
+    //    image; remember each slot's content hash so the Image can
+    //    reference them, and so the root cnode can bind to them later.
+    use javm_cap::image::PinnedCap;
+    let mut chain_pinned_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
+    let mut chain_initial_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
+    for (slot, pinned) in &chain_image.pinned_slots {
+        let h = match pinned {
+            PinnedCap::Data { content, size } => state
+                .caps
+                .put_cap(&Cap::data_inline_with_size(content, *size))?,
+            PinnedCap::Image { content_hash } => *content_hash,
+        };
+        chain_pinned_hashes.push((*slot, h));
+    }
+    for (slot, init) in &chain_image.initial_slots {
+        let h = state
+            .caps
+            .put_cap(&Cap::data_inline_with_size(&init.content, init.size))?;
+        chain_initial_hashes.push((*slot, h));
+    }
 
-    // 2. A shared placeholder Image cap referenced by all kernel-issued
+    // 2. Publish the chain Image referencing the slot data by hash.
+    let chain_image_hash = state.caps.put_cap(&Cap::image_with_slots(
+        &chain_image,
+        &chain_pinned_hashes,
+        &chain_initial_hashes,
+    )?)?;
+
+    // 3. A shared placeholder Image cap referenced by all kernel-issued
     //    Instance caps. Using a tiny but well-formed Image (1 byte of
     //    code, single instruction-start bit set) sidesteps the image-cap
     //    validation while keeping kernel caps content-hashable in a
     //    stable way. The same hash is reused for every kernel unit.
-    let placeholder_image_hash = state.caps.publish_image(&placeholder_kernel_image())?;
+    let placeholder_image_hash = state.caps.put_cap(&Cap::image_with_slots(
+        &placeholder_kernel_image(),
+        &[],
+        &[],
+    )?)?;
 
-    // 3. A shared empty cnode for kernel-issued Instance caps. They
+    // 4. A shared empty cnode for kernel-issued Instance caps. They
     //    never invoke any of their own slots; the empty cnode keeps
     //    them well-formed.
-    let empty_cnode_hash = state.caps.publish_cnode(0, &[])?;
+    let empty_cnode_hash = state.caps.put_cap(&Cap::empty_cnode(0)?)?;
 
     // 4. Publish each kernel-issued unit cap.
     let gas_hash = publish_kernel_unit_cap(
@@ -166,7 +193,7 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     // 5. Build the chain's root cnode entries. Kernel caps go at the
     //    well-known abi::BARE_* slots; pinned/initial slot data caps
     //    are republished alongside (they were also republished by
-    //    `publish_image` above, but the cnode references them by hash
+    //    chain image step above, but the cnode references them by hash
     //    so we just locate the hashes).
     let mut entries: Vec<(SlotIdx, CapHashOrRef)> = vec![
         (abi::BARE_GAS_SLOT, CapHashOrRef::Hash(gas_hash)),
@@ -196,29 +223,23 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
         (abi::BARE_HOST_SAVE_SLOT, CapHashOrRef::Hash(host_save_hash)),
     ];
 
-    // Pinned slots: republish content under the cache so the root cnode
-    // can bind to it by hash. `publish_data_inline_with_size` is
-    // idempotent on identical content so this is cheap when the
-    // `publish_image` walk above already published it.
-    use javm_cap::image::PinnedCap;
-    for (slot, pinned) in &chain_image.pinned_slots {
-        let h = match pinned {
-            PinnedCap::Data { content, size } => {
-                state.caps.publish_data_inline_with_size(content, *size)?
-            }
-            PinnedCap::Image { content_hash } => *content_hash,
-        };
-        entries.push((*slot, CapHashOrRef::Hash(h)));
+    // Pinned + initial slots: the hashes were already recorded above
+    // (step 1) when we built the Cap::Data blobs. Reuse them directly.
+    for (slot, h) in &chain_pinned_hashes {
+        entries.push((*slot, CapHashOrRef::Hash(*h)));
     }
-    for (slot, init) in &chain_image.initial_slots {
-        let h = state
-            .caps
-            .publish_data_inline_with_size(&init.content, init.size)?;
-        entries.push((*slot, CapHashOrRef::Hash(h)));
+    for (slot, h) in &chain_initial_hashes {
+        entries.push((*slot, CapHashOrRef::Hash(*h)));
     }
 
     // 6. Publish the root cnode (256 slots, size_log = 8).
-    let root_cnode_hash = state.caps.publish_cnode(8, &entries)?;
+    let root_cnode_hash = {
+        let mut cnode = CNodeCap::new(8).map_err(KernelError::from)?;
+        for (slot, target) in &entries {
+            cnode.set(*slot, Some(*target)).map_err(KernelError::from)?;
+        }
+        state.caps.put_cap(&Cap::CNode(cnode))?
+    };
 
     // 7. Compute the chain Instance's memory layout from the image's
     //    memory mappings. Mirrors the recomp path's build_overlays:
@@ -234,7 +255,7 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     //    image's content hash directly at genesis (no prior chain).
     //    `regs` start at zeros (chain doesn't have a unit-id; events
     //    drive it via cnode slot[0]).
-    let chain_instance_hash = state.caps.publish_instance_blob(
+    let chain_instance_hash = state.caps.put_cap(&Cap::instance_with_overlays(
         chain_image_hash,
         chain_image_hash,
         root_cnode_hash,
@@ -243,7 +264,7 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
         [0u64; NUM_REGS],
         0,
         0,
-    )?;
+    ))?;
 
     let _ = cap_abi::BARE_GAS_SLOT; // keep the abi re-export pinned
 

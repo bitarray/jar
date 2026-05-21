@@ -13,18 +13,20 @@ use allocator_api2::vec::Vec;
 
 use super::page::PageSlot;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
 pub struct DataCap<A: Allocator + Clone = Global> {
     pub size: u64,
     pub content: DataContent<A>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
 pub enum DataContent<A: Allocator + Clone = Global> {
     /// Bytes in a single slab.
+    #[ssz(selector = 0)]
     Inline(Vec<u8, A>),
     /// Page-merkleized form. Each page is owned (via refcounted
     /// PageRef) so DataCap clones can share unmodified pages.
+    #[ssz(selector = 1)]
     Paged {
         /// Logical page size (typically 4 KiB). Every page slab
         /// has exactly this many bytes.
