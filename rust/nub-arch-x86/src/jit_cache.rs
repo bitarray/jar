@@ -84,7 +84,14 @@ pub fn get_or_compile(
     // call back into this module.
     let map = unsafe { &mut *CACHE.inner.get() };
     if !map.contains_key(image_hash) {
-        let compiler = Compiler::new(bitmask, jump_table, helpers, code.len(), jit_va_m, mem_cycles);
+        let compiler = Compiler::new(
+            bitmask,
+            jump_table,
+            helpers,
+            code.len(),
+            jit_va_m,
+            mem_cycles,
+        );
         let CompileResult {
             native_code,
             dispatch_table,
