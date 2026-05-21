@@ -19,15 +19,13 @@
 
 use jar_kernel::{Block, Event, EventOutcome, Kernel};
 use javm_cap::image::Image;
-use scale::Decode;
+use ssz::Decode;
 
 const BLOB: &[u8] = include_bytes!(env!("GUEST_TESTS_BLOB"));
 const GAS_BUDGET: u64 = 10_000_000_000;
 
 fn image() -> Image {
-    Image::decode(BLOB)
-        .expect("SCALE-decode guest-tests Image")
-        .0
+    Image::from_ssz_bytes(BLOB).expect("SSZ-decode guest-tests Image")
 }
 
 fn run_interpreter(image: &Image, ep: u8) -> (u64, u64) {

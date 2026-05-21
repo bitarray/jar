@@ -267,7 +267,7 @@ version = "0.1.0"
 dependencies = [
  "build-crate",
  "javm-transpiler",
- "scale",
+ "ssz",
 ]
 
 [[package]]
@@ -1111,6 +1111,7 @@ dependencies = [
  "proptest",
  "scale",
  "scale-derive",
+ "ssz",
  "thiserror",
 ]
 
@@ -1140,7 +1141,7 @@ dependencies = [
  "javm-exec",
  "nub",
  "nub-arch-x86-abi",
- "scale",
+ "ssz",
 ]
 
 [[package]]
@@ -1149,9 +1150,12 @@ version = "0.1.0"
 dependencies = [
  "allocator-api2",
  "blake2",
+ "digest",
  "nub-host-common",
  "scale",
  "scale-derive",
+ "ssz",
+ "ssz-derive",
  "talc",
  "thiserror",
 ]
@@ -1176,8 +1180,8 @@ dependencies = [
  "javm-exec",
  "nub",
  "nub-arch-x86-abi",
- "scale",
  "sha3",
+ "ssz",
  "subsoil",
 ]
 

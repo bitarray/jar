@@ -25,13 +25,13 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use javm_cap::image::Image;
-use scale::Decode;
+use ssz::Decode;
 
 macro_rules! bench_workload {
     ($name:ident, $env:literal, $endpoint:literal) => {
         fn $name(c: &mut Criterion) {
             let blob: &[u8] = include_bytes!(env!($env));
-            let image = Image::decode(blob).expect("decode Image").0;
+            let image = Image::from_ssz_bytes(blob).expect("decode Image");
             let ep: u8 = $endpoint;
 
             let (interp_val, interp_gas) = javm_bench::run_interpreter(&image, ep);

@@ -15,6 +15,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+ssz = { workspace = true, features = ["std", "sha2", "derive"] }
 
 [build-dependencies]
 build-javm = { path = "../build-javm" }

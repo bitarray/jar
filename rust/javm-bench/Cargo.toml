@@ -15,7 +15,7 @@ heap-diag = ["nub/heap-diag"]
 [dependencies]
 javm-cap = { workspace = true }
 javm-exec = { workspace = true }
-scale = { workspace = true, features = ["std"] }
+ssz = { workspace = true, features = ["std", "sha2", "derive"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 nub = { path = "../nub" }

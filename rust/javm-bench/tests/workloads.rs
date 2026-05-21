@@ -21,14 +21,13 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use javm_cap::image::Image;
-use scale::Decode;
+use ssz::Decode;
 
 /// Drive both backends on a workload's Image and check they agree
 /// with each other and with the pinned reference.
 fn check_workload(name: &str, blob: &[u8], expected_value: u64, expected_gas: u64) {
-    let image = Image::decode(blob)
-        .unwrap_or_else(|e| panic!("[{name}] decode Image: {e:?}"))
-        .0;
+    let image = Image::from_ssz_bytes(blob)
+        .unwrap_or_else(|e| panic!("[{name}] decode Image: {e:?}"));
 
     let (interp_val, interp_gas) = javm_bench::run_interpreter(&image, 0);
     assert_eq!(

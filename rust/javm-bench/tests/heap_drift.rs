@@ -20,7 +20,7 @@
 
 use javm_cap::image::Image;
 use nub::Nub;
-use scale::Decode;
+use ssz::Decode;
 
 const PRIME_SIEVE_BLOB: &[u8] = include_bytes!(env!("PRIME_SIEVE_BLOB"));
 const N: usize = 2000;
@@ -30,9 +30,8 @@ const GAS: u64 = 100_000_000_000;
 #[test]
 #[ignore]
 fn heap_drift_prime_sieve() {
-    let image = Image::decode(PRIME_SIEVE_BLOB)
-        .expect("decode prime_sieve Image")
-        .0;
+    let image = Image::from_ssz_bytes(PRIME_SIEVE_BLOB)
+        .expect("decode prime_sieve Image");
     let mut nub = Nub::new_hyperlight().expect("sandbox");
     let published = javm_bench::publish(&mut nub, &image, 0);
     let instance_hash = published.instance_hash;

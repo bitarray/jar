@@ -29,7 +29,7 @@ use crate::hash::Hash;
 use crate::slot::SlotIdx;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use scale::{Decode, Encode};
+use ssz_derive::{Decode, Encode};
 
 /// Image: the program spec (code, endpoints, memory layout, slot
 /// declarations, pinned ro caps).
@@ -38,7 +38,7 @@ use scale::{Decode, Encode};
 /// kernel installs declared pinned content into the Instance's cnode
 /// at `set_image` / `host_derive_spawn` time and treats them as
 /// read-only thereafter.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
 pub struct Image {
     /// Bytecode bytes (validated at construction; see `host_make_image`).
     pub code: Vec<u8>,
@@ -79,7 +79,7 @@ pub struct Image {
 }
 
 /// Endpoint definition: entry PC + register conventions.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
 pub struct EndpointDef {
     /// Bytecode address to jump to.
     pub entry_pc: u64,
@@ -100,7 +100,7 @@ pub struct EndpointDef {
 /// them at `[start, start + size)` in the address space. Whether
 /// the region is RO or RW is derived from whether `source.target()`
 /// is in `Image.pinned_slots`.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
 pub struct MemoryMapping {
     pub start: u64,
     pub size: u64,
@@ -111,12 +111,14 @@ pub struct MemoryMapping {
 /// pinned (Data or Image). `Cap::Data` bytes are inlined in the
 /// Image; a future optimisation can add a hash-only variant for
 /// content that lives in σ.data_payloads.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
 pub enum PinnedCap {
+    #[ssz(selector = 0)]
     /// Pinned `Cap::Data` with bytes baked into the Image. `size`
     /// may be larger than `content.len()`; trailing bytes are
     /// zero-filled per the DataCap canonical form.
     Data { content: Vec<u8>, size: u64 },
+    #[ssz(selector = 1)]
     /// Pinned `Cap::Image` by content hash. Cap::Image is itself
     /// content-addressed; inlining a whole sub-Image makes less
     /// sense than for Data.
@@ -127,7 +129,7 @@ pub enum PinnedCap {
 /// at standalone (root) Instance bootstrap to seed the cnode. A
 /// parented Instance receives its slots from the spawner and
 /// ignores this field.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Encode, Decode)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
 pub struct InitialDataCap {
     /// Initial bytes. May be empty for zero-filled regions like
     /// stack and heap.
@@ -157,10 +159,11 @@ impl Image {
     }
 }
 
-/// Content hash of an Image: `H::hash(image.encode())`. The
-/// canonical encoding is defined by `Image`'s `scale-derive` impl.
-pub fn image_content_hash<H: Hash>(image: &Image) -> H::Out {
-    H::hash(&image.encode())
+/// Content hash of an Image: SSZ `hash_tree_root` (SHA-256 merkleization
+/// of the derived SSZ container). The canonical encoding/merkleization is
+/// defined by `Image`'s `ssz-derive` impl.
+pub fn image_content_hash(image: &Image) -> [u8; 32] {
+    ssz::hash_tree_root(image)
 }
 
 /// Genesis image-hash chain: a freshly-derived Instance (with no
@@ -169,8 +172,11 @@ pub fn image_content_hash<H: Hash>(image: &Image) -> H::Out {
 /// This is the case for the very first Instance the chain spec
 /// produces. Subsequent Instances always derive from some spawner
 /// via `chain_extend`.
-pub fn chain_genesis<H: Hash>(image: &Image) -> H::Out {
-    image_content_hash::<H>(image)
+pub fn chain_genesis<H: Hash>(image: &Image) -> H::Out
+where
+    H::Out: From<[u8; 32]>,
+{
+    image_content_hash(image).into()
 }
 
 /// Extend an image-hash chain with a new image:
@@ -182,27 +188,28 @@ pub fn chain_extend<H: Hash>(prev_chain: &H::Out, new_image: &Image) -> H::Out
 where
     H::Out: AsRef<[u8]>,
 {
-    let new_image_hash = image_content_hash::<H>(new_image);
-    H::hash_pair(prev_chain.as_ref(), new_image_hash.as_ref())
+    let new_image_hash = image_content_hash(new_image);
+    H::hash_pair(prev_chain.as_ref(), &new_image_hash)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::hash::Blake2b256;
+    use ssz::Decode as _;
 
     type H = Blake2b256;
 
     #[test]
     fn empty_image_hashes_deterministically() {
         let img = Image::empty();
-        let h1 = image_content_hash::<H>(&img);
-        let h2 = image_content_hash::<H>(&img);
+        let h1 = image_content_hash(&img);
+        let h2 = image_content_hash(&img);
         assert_eq!(h1, h2);
     }
 
     #[test]
-    fn image_scale_roundtrip() {
+    fn image_ssz_roundtrip() {
         let mut img = Image::empty();
         img.code = b"sample code".to_vec();
         img.packed_bitmask = vec![0xFF, 0x07]; // 11 bits set, all-1s
@@ -255,9 +262,8 @@ mod tests {
         );
         img.yield_marker_slot = Some(SlotIdx(9));
 
-        let bytes = img.encode();
-        let (decoded, consumed) = Image::decode(&bytes).expect("decode");
-        assert_eq!(consumed, bytes.len());
+        let bytes = ssz::Encode::as_ssz_bytes(&img);
+        let decoded = Image::from_ssz_bytes(&bytes).expect("decode");
         assert_eq!(decoded, img);
     }
 
@@ -267,7 +273,7 @@ mod tests {
         a.code = b"AAAA".to_vec();
         let mut b = Image::empty();
         b.code = b"BBBB".to_vec();
-        assert_ne!(image_content_hash::<H>(&a), image_content_hash::<H>(&b));
+        assert_ne!(image_content_hash(&a), image_content_hash(&b));
     }
 
     #[test]
@@ -283,7 +289,7 @@ mod tests {
                 initial_regs: BTreeMap::new(),
             },
         );
-        assert_ne!(image_content_hash::<H>(&a), image_content_hash::<H>(&b));
+        assert_ne!(image_content_hash(&a), image_content_hash(&b));
     }
 
     #[test]
@@ -323,13 +329,13 @@ mod tests {
             },
         );
 
-        assert_eq!(image_content_hash::<H>(&a), image_content_hash::<H>(&b));
+        assert_eq!(image_content_hash(&a), image_content_hash(&b));
     }
 
     #[test]
     fn chain_genesis_equals_content_hash() {
         let img = Image::empty();
-        assert_eq!(chain_genesis::<H>(&img), image_content_hash::<H>(&img));
+        assert_eq!(chain_genesis::<H>(&img), image_content_hash(&img));
     }
 
     #[test]
