@@ -5,25 +5,43 @@
 //! ~700 µs per publish_image / per publish_instance lands.
 //!
 //! Linux x86-64 only — `nub` pulls the Hyperlight host stack
-//! unconditionally; on other targets `javm_bench` compiles down to nothing.
+//! unconditionally; on other targets `javm_bench` compiles down to nothing
+//! and `main` becomes a no-op so the example still links.
 
-#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn main() {
+    eprintln!(
+        "publish_profile is Linux x86-64 only; this build target has no \
+         Hyperlight host stack."
+    );
+}
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use std::time::Instant;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use allocator_api2::alloc::Global;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use allocator_api2::vec::Vec as AVec;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_cap::cap::Cap;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_cap::cap_hash::cap_hash;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_cap::data::{DataCap, DataContent};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_cap::image::Image;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use nub::Nub;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use ssz::Decode;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn iter_us(n: u32, dur: std::time::Duration) -> f64 {
     dur.as_secs_f64() * 1e6 / n as f64
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn measure<F: FnMut()>(label: &str, n: u32, mut f: F) {
     let t = Instant::now();
     for _ in 0..n {
@@ -33,6 +51,7 @@ fn measure<F: FnMut()>(label: &str, n: u32, mut f: F) {
     eprintln!("  {label:55}{:>10.3} µs/iter", iter_us(n, e));
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn main() {
     let path = std::env::args()
         .nth(1)
