@@ -85,15 +85,29 @@ pub fn merkleize<D: Digest<OutputSize = U32>>(chunks: &[[u8; 32]], limit: usize)
         return zero_hash::<D>(depth);
     }
 
+    // Precompute the zero-hash table for this call's `depth`. Each level's
+    // zero_hash is `H(prev || prev)`; computing it once up-front turns the
+    // per-level lookup from O(d) into O(1) and the total from O(depth²)
+    // into O(depth). Without this, a depth-32 merkleize (e.g. a Vec<T> with
+    // MAX_VEC_LEN = 1 << 32) burns ~496 redundant SHA-256s per call just
+    // recomputing the same zero hashes.
+    let mut zero_h_table: Vec<[u8; 32], Global> = Vec::with_capacity_in(depth, Global);
+    let mut cur_zero = [0u8; 32];
+    zero_h_table.push(cur_zero);
+    for _ in 1..depth {
+        cur_zero = hash_pair::<D>(&cur_zero, &cur_zero);
+        zero_h_table.push(cur_zero);
+    }
+
     // Iterative bottom-up reduction. At each level we only iterate over the
-    // "real" entries; missing right siblings draw from `zero_hash(d)`. The
+    // "real" entries; missing right siblings draw from `zero_h_table[d]`. The
     // implicit padding to `padded_len` is handled by continuing to fold for
     // the full `depth` iterations even after `level.len()` reaches 1.
     let mut level: Vec<[u8; 32], Global> = Vec::new_in(Global);
     level.extend_from_slice(chunks);
 
     for d in 0..depth {
-        let zero_h = zero_hash::<D>(d);
+        let zero_h = zero_h_table[d];
         let next_count = level.len().div_ceil(2);
         let mut next: Vec<[u8; 32], Global> = Vec::with_capacity_in(next_count, Global);
         for i in 0..next_count {
