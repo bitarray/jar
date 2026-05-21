@@ -49,6 +49,9 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
+          targets: x86_64-unknown-none
 
       - name: Cache Lake packages
         uses: actions/cache@v4
@@ -72,9 +75,81 @@ jobs:
         working-directory: spec
         run: make book
 
-      # -- Combine: JarBook served at /lean/ (the /spec/ path now hosts the minimum-v3 spec docs) --
+      # -- Rustdoc (workspace, served at /rustdoc/) --
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: docs-rustdoc
+
+      - name: Build rustdoc
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+          SKIP_GUEST_BUILD: "1"
+        run: |
+          # Start clean: ci-rust.yml's cache layer can ship a target/ with
+          # leftover crate dirs we don't want to publish.
+          rm -rf target/doc
+          cargo doc --locked --workspace --no-deps
+
+      - name: Generate rustdoc landing page
+        run: |
+          DOC_DIR=target/doc
+          {
+            cat <<'HEADER'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>JAR Rust Docs</title>
+            <style>
+              body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; max-width: 48rem; margin: 4rem auto; padding: 0 1rem; color: #1f2937; line-height: 1.5; }
+              h1 { font-size: 2rem; margin: 0 0 0.5rem; letter-spacing: -0.02em; }
+              p.lead { color: #6b7280; margin: 0 0 2rem; }
+              ul { list-style: none; padding: 0; columns: 2; column-gap: 2rem; }
+              @media (max-width: 40rem) { ul { columns: 1; } }
+              li { padding: 0.25rem 0; break-inside: avoid; }
+              a { color: #2563eb; text-decoration: none; }
+              a:hover { text-decoration: underline; }
+              .footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #e5e7eb; color: #9ca3af; font-size: 0.85rem; }
+              @media (prefers-color-scheme: dark) {
+                body { background: #0a0a0a; color: #e5e7eb; }
+                p.lead { color: #9ca3af; }
+                a { color: #60a5fa; }
+                .footer { border-color: #262626; color: #6b7280; }
+              }
+            </style>
+          </head>
+          <body>
+            <h1>JAR Rust Docs</h1>
+            <p class="lead">API documentation for the JAR Rust workspace. Pick a crate below.</p>
+            <ul>
+          HEADER
+            # Use cargo metadata so we list workspace members only (rustdoc
+            # turns hyphens into underscores in directory names).
+            cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[].name' \
+              | sort \
+              | while read -r name; do
+                  dir=$(echo "$name" | tr - _)
+                  if [ -f "$DOC_DIR/$dir/index.html" ]; then
+                    echo "      <li><a href=\"${dir}/index.html\">${name}</a></li>"
+                  fi
+                done
+            cat <<'FOOTER'
+            </ul>
+            <p class="footer">← <a href="/">jarchain.org</a></p>
+          </body>
+          </html>
+          FOOTER
+          } > "$DOC_DIR/index.html"
+
+      # -- Combine: JarBook served at /lean/ (the /spec/ path now hosts the
+      #    minimum-v3 spec docs); rustdoc served at /rustdoc/. --
       - name: Copy JarBook into site
         run: cp -r spec/_out/html-multi site/lean
+
+      - name: Copy rustdoc into site
+        run: cp -r target/doc site/rustdoc
 
       - uses: actions/upload-pages-artifact@v4
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
