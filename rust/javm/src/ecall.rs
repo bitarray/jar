@@ -470,7 +470,7 @@ impl<K: KernelAssist> Vm<K> {
         };
         let cap = Cap::Type(TypeCap { image_hash_chain });
         let h = javm_cap::cap_hash(&cap);
-        cache.put_blob(h, cap)?;
+        cache.put_cap_with_hash(h, &cap)?;
 
         let running = self
             .stack
@@ -541,7 +541,7 @@ impl<K: KernelAssist> Vm<K> {
             content: DataContent::Inline(inline),
         });
         let h = javm_cap::cap_hash(&cap);
-        cache.put_blob(h, cap)?;
+        cache.put_cap_with_hash(h, &cap)?;
 
         let running = self
             .stack
@@ -768,7 +768,7 @@ impl<K: KernelAssist> Vm<K> {
         let cap_hash = javm_cap::cap_hash(&cap);
         let h = match cache {
             Some(cache) => {
-                cache.put_blob(cap_hash, cap)?;
+                cache.put_cap_with_hash(cap_hash, &cap)?;
                 cap_hash
             }
             None => cap_hash,
@@ -792,7 +792,7 @@ mod tests {
     use crate::kernel_assist::InProcessKernelAssist;
     use allocator_api2::alloc::Global;
     use javm_cap::image::Image;
-    use javm_cap::{CNodeCap, InstanceCap, NUM_REGS, RwOverlay};
+    use javm_cap::{CNodeCap, NUM_REGS};
     use javm_exec::{Access, GasCounter, Mem, PAGE_SIZE, PvmProgram, Regs};
     use std::sync::Arc;
 
@@ -833,15 +833,7 @@ mod tests {
     }
 
     fn publish_data_inline(cache: &mut Cache<Global>, bytes: &[u8]) -> javm_cap::CapHash {
-        let mut inline = AVec::new_in(Global);
-        inline.extend_from_slice(bytes);
-        let cap = Cap::Data(DataCap {
-            size: bytes.len() as u64,
-            content: DataContent::Inline(inline),
-        });
-        let h = javm_cap::cap_hash(&cap);
-        cache.put_blob(h, cap).unwrap();
-        h
+        cache.put_cap(&Cap::data_inline(bytes)).unwrap()
     }
 
     #[test]
@@ -1093,19 +1085,24 @@ mod tests {
     fn host_type_of_publishes_type_cap() {
         let mut vm = fixture_vm();
         let mut cache = Cache::new_in(Global);
-        let inst = InstanceCap {
-            image_hash_chain: [0x42; 32],
-            image_hash: [0x24; 32],
-            root_cnode: CapHashOrRef::Hash([0x11; 32]),
-            rw_overlays: allocator_api2::vec::Vec::<RwOverlay<Global>, Global>::new_in(Global),
-            mem_size: 0,
-            regs: [0u64; NUM_REGS],
-            pc: 0,
-            gas_remaining: 0,
-        };
-        let cap = Cap::Instance(inst);
-        let inst_hash = javm_cap::cap_hash(&cap);
-        cache.put_blob(inst_hash, cap).unwrap();
+        // Instance references image + cnode by hash; both must be in
+        // the cache for `put_cap` to accept the Instance.
+        let image_hash = cache
+            .put_cap(&Cap::image_with_slots(&Image::empty(), &[], &[]).unwrap())
+            .unwrap();
+        let cnode_hash = cache.put_cap(&Cap::empty_cnode(0).unwrap()).unwrap();
+        let inst_hash = cache
+            .put_cap(&Cap::instance_with_overlays(
+                [0x42; 32],
+                image_hash,
+                cnode_hash,
+                &[],
+                0,
+                [0u64; NUM_REGS],
+                0,
+                0,
+            ))
+            .unwrap();
         vm.stack
             .running_instance_mut()
             .unwrap()
