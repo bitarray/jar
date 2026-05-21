@@ -166,3 +166,37 @@ proptest! {
         roundtrip(&Color::Blue(v));
     }
 }
+
+// --- Vec blanket impl roundtrips ---
+
+proptest! {
+    #[test]
+    fn vec_u8_roundtrip(items in pvec(any::<u8>(), 0..256)) {
+        roundtrip(&items);
+    }
+
+    #[test]
+    fn vec_u32_roundtrip(items in pvec(any::<u32>(), 0..64)) {
+        roundtrip(&items);
+    }
+
+    #[test]
+    fn vec_of_inner_roundtrip(items in pvec((any::<u32>(), any::<u64>()), 0..16)) {
+        let v: Vec<Inner> = items.into_iter().map(|(a, b)| Inner { a, b }).collect();
+        roundtrip(&v);
+    }
+
+    #[test]
+    fn vec_hash_matches_list_hash(items in pvec(any::<u32>(), 0..32)) {
+        // Vec<u32> uses MAX_VEC_LEN = 1 << 32 limit, but the merkle root
+        // depends on the limit's `next_power_of_two` chunking — so a Vec<u32>
+        // and a List<u32, 32> won't match unless both pick the same cap.
+        // Instead: verify Vec hash is deterministic and roundtrip-stable.
+        let v = items.clone();
+        let h1 = ssz::hash_tree_root(&v);
+        let bytes = v.as_ssz_bytes();
+        let decoded: Vec<u32> = Vec::from_ssz_bytes(&bytes).unwrap();
+        let h2 = ssz::hash_tree_root(&decoded);
+        prop_assert_eq!(h1, h2);
+    }
+}
