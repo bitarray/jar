@@ -35,6 +35,9 @@ proptest! {
     fn array_32_roundtrip(v: [u8; 32]) { roundtrip(&v); }
 
     #[test]
+    fn array_u64_8_roundtrip(v: [u64; 8]) { roundtrip(&v); }
+
+    #[test]
     fn option_u64_roundtrip(v: Option<u64>) { roundtrip(&v); }
 
     #[test]
@@ -133,6 +136,19 @@ proptest! {
 
 #[derive(Debug, Clone, PartialEq, Eq, ssz::Encode, ssz::Decode, ssz::HashTreeRoot)]
 struct SlotIdx(#[ssz(transparent)] u32);
+
+#[test]
+fn array_u64_13_roundtrip() {
+    let arr: [u64; 13] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    roundtrip(&arr);
+}
+
+#[test]
+fn array_u64_hash_deterministic() {
+    let a: [u64; 13] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+    let b: [u64; 13] = a;
+    assert_eq!(ssz::hash_tree_root(&a), ssz::hash_tree_root(&b));
+}
 
 #[test]
 fn slot_idx_is_transparent_on_wire() {

@@ -15,7 +15,7 @@ use crate::slot::SlotIdx;
 
 use super::cap::CapHashOrRef;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
 pub struct CNodeCap<A: Allocator + Clone = Global> {
     pub size_log: u8,
     /// Populated slots, sorted by slot index for binary search.
@@ -102,7 +102,16 @@ impl CNodeCap<Global> {
 }
 
 /// One populated slot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    ssz_derive::Encode,
+    ssz_derive::Decode,
+    ssz_derive::HashTreeRoot,
+)]
 pub struct CNodeSlotEntry {
     pub slot: SlotIdx,
     pub target: CapHashOrRef,

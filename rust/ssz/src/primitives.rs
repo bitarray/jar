@@ -1,6 +1,6 @@
 //! SSZ blanket impls for built-in scalar and array types.
 
-use allocator_api2::alloc::Allocator;
+use allocator_api2::alloc::{Allocator, Global};
 use allocator_api2::vec::Vec;
 use core::num::NonZeroU32;
 use digest::Digest;
@@ -282,6 +282,74 @@ impl<const N: usize> HashTreeRoot for [u8; N] {
 // cover byte arrays; jar's only non-byte fixed-array usages today
 // (e.g. `[Reg; 8]`) live behind newtypes that can use `FixedVector`
 // during the Stage-2+ migration.
+
+// --------------------------------------------------------------------------
+// Fixed-size arrays of u64 — `[u64; N]`.
+//
+// Encoded as `N * 8` little-endian bytes with no length prefix (SSZ's
+// equivalent of `Vector<uint64, N>`). Hash tree root packs the bytes into
+// 32-byte chunks and merkleizes with `ceil(N*8/32)` chunks. Does not
+// conflict with the `[u8; N]` blanket above — different element type.
+// --------------------------------------------------------------------------
+
+impl<const N: usize> Encode for [u64; N] {
+    fn is_ssz_fixed_len() -> bool {
+        true
+    }
+    fn ssz_fixed_len() -> usize {
+        N * 8
+    }
+    fn ssz_bytes_len(&self) -> usize {
+        N * 8
+    }
+    fn ssz_append<A: Allocator + Clone>(&self, buf: &mut Vec<u8, A>) {
+        for v in self {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+}
+
+impl<const N: usize> Decode for [u64; N] {
+    fn is_ssz_fixed_len() -> bool {
+        true
+    }
+    fn ssz_fixed_len() -> usize {
+        N * 8
+    }
+    fn from_ssz_bytes_in<A: Allocator + Clone>(
+        bytes: &[u8],
+        _alloc: A,
+    ) -> Result<Self, DecodeError> {
+        if bytes.len() != N * 8 {
+            return Err(DecodeError::UnexpectedEof {
+                expected: N * 8,
+                actual: bytes.len(),
+            });
+        }
+        let mut out = [0u64; N];
+        for (i, v) in out.iter_mut().enumerate() {
+            let s = i * 8;
+            let arr: [u8; 8] = bytes[s..s + 8].try_into().expect("len checked");
+            *v = u64::from_le_bytes(arr);
+        }
+        Ok(out)
+    }
+}
+
+impl<const N: usize> HashTreeRoot for [u64; N] {
+    fn hash_tree_root<D: Digest<OutputSize = U32>>(&self) -> [u8; 32] {
+        // Treat as a fixed-length `Vector<uint64, N>`. Pack to bytes,
+        // merkleize with `limit = ceil(N*8/32)` chunks. No mix_in_length
+        // (fixed-size vector).
+        let mut buf: Vec<u8, Global> = Vec::with_capacity_in(N * 8, Global);
+        for v in self {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        let chunks = pack_bytes(&buf);
+        let limit = (N * 8).div_ceil(32).max(1);
+        merkleize::<D>(&chunks, limit)
+    }
+}
 
 // --------------------------------------------------------------------------
 // Option<T> — SSZ Union form (selector 0 = None, 1 = Some).

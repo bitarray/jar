@@ -18,10 +18,110 @@ pub type CapRef = u64;
 
 /// Slot/field reference: either a content-addressed blob in
 /// `cache.blobs` or a mutable working entry in `cache.instances`.
+///
+/// **SSZ note**: `CapHashOrRef`'s `HashTreeRoot` impl is hand-rolled
+/// (see below), not derived. The pass-through semantics — `Hash(h)`
+/// hashes to `h` — let a freshly-published cap substitute for a
+/// `Ref` reference without changing the hash of any cap that holds
+/// it. The `Ref` arm panics: callers must `settle` a cap graph before
+/// hashing it. We deliberately do not derive `Encode + Decode` either,
+/// because `CapHashOrRef` never appears on the wire (it lives only
+/// in the cache).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum CapHashOrRef {
     Hash(CapHash),
     Ref(CapRef),
+}
+
+impl ssz::HashTreeRoot for CapHashOrRef {
+    fn hash_tree_root<D: ::digest::Digest<OutputSize = ::digest::typenum::U32>>(&self) -> [u8; 32] {
+        match self {
+            CapHashOrRef::Hash(h) => *h,
+            CapHashOrRef::Ref(_) => {
+                panic!("cap_hash: unresolved CapRef in cap graph; settle first")
+            }
+        }
+    }
+}
+
+// `Encode`/`Decode` on `CapHashOrRef` is a standard SSZ Union: selector
+// 0 + 32 bytes for `Hash`, selector 1 + 8 bytes for `Ref`. These exist so
+// derives on outer types (`CNodeSlotEntry`, `InstanceCap`) can compose
+// the SSZ wire form; in practice these wire encodings aren't transmitted
+// (caps are in-process state), but providing them keeps the derive set
+// consistent.
+impl ssz::Encode for CapHashOrRef {
+    fn is_ssz_fixed_len() -> bool {
+        false
+    }
+    fn ssz_fixed_len() -> usize {
+        ssz::BYTES_PER_LENGTH_OFFSET
+    }
+    fn ssz_bytes_len(&self) -> usize {
+        match self {
+            CapHashOrRef::Hash(_) => 1 + 32,
+            CapHashOrRef::Ref(_) => 1 + 8,
+        }
+    }
+    fn ssz_append<A: allocator_api2::alloc::Allocator + Clone>(
+        &self,
+        buf: &mut allocator_api2::vec::Vec<u8, A>,
+    ) {
+        match self {
+            CapHashOrRef::Hash(h) => {
+                buf.push(0);
+                buf.extend_from_slice(h);
+            }
+            CapHashOrRef::Ref(r) => {
+                buf.push(1);
+                buf.extend_from_slice(&r.to_le_bytes());
+            }
+        }
+    }
+}
+
+impl ssz::Decode for CapHashOrRef {
+    fn is_ssz_fixed_len() -> bool {
+        false
+    }
+    fn ssz_fixed_len() -> usize {
+        ssz::BYTES_PER_LENGTH_OFFSET
+    }
+    fn from_ssz_bytes_in<A: allocator_api2::alloc::Allocator + Clone>(
+        bytes: &[u8],
+        _alloc: A,
+    ) -> Result<Self, ssz::DecodeError> {
+        if bytes.is_empty() {
+            return Err(ssz::DecodeError::UnexpectedEof {
+                expected: 1,
+                actual: 0,
+            });
+        }
+        match bytes[0] {
+            0 => {
+                if bytes.len() != 1 + 32 {
+                    return Err(ssz::DecodeError::UnexpectedEof {
+                        expected: 1 + 32,
+                        actual: bytes.len(),
+                    });
+                }
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&bytes[1..1 + 32]);
+                Ok(CapHashOrRef::Hash(h))
+            }
+            1 => {
+                if bytes.len() != 1 + 8 {
+                    return Err(ssz::DecodeError::UnexpectedEof {
+                        expected: 1 + 8,
+                        actual: bytes.len(),
+                    });
+                }
+                let arr: [u8; 8] = bytes[1..1 + 8].try_into().expect("len checked");
+                Ok(CapHashOrRef::Ref(u64::from_le_bytes(arr)))
+            }
+            v => Err(ssz::DecodeError::InvalidSelector(v)),
+        }
+    }
 }
 
 /// Number of PVM general-purpose registers (φ\[0\]..φ\[12\]).
@@ -40,18 +140,41 @@ pub const MAX_ENDPOINTS: usize = 64;
 /// The default allocator is `Global` (heap) so existing callers that
 /// just say `Cap` continue to work. The cache layer instantiates
 /// `Cap<TalcAlloc>` so the content lives in shared talc memory.
-#[derive(Clone, Debug)]
+///
+/// **SSZ note**: the `HashTreeRoot` derive treats `Cap<A>` as an SSZ
+/// Union over the five variants. Each variant's selector provides the
+/// domain separation that the legacy byte-protocol kind tags
+/// (`0x10..0x50`) provided; the per-variant root is computed by that
+/// variant's own `HashTreeRoot` impl. We do not derive `Encode +
+/// Decode` on `Cap<A>` itself; caps move through the cache by direct
+/// allocation and aren't wire-transmitted at this layer.
+#[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
 pub enum Cap<A: Allocator + Clone = Global> {
+    #[ssz(selector = 0)]
     Instance(InstanceCap<A>),
+    #[ssz(selector = 1)]
     Image(ImageCap<A>),
+    #[ssz(selector = 2)]
     Data(DataCap<A>),
+    #[ssz(selector = 3)]
     CNode(CNodeCap<A>),
+    #[ssz(selector = 4)]
     Type(TypeCap),
 }
 
 /// `Cap::Type` payload. Pure identifier; no owned content, so no
 /// allocator parameter needed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    ssz_derive::Encode,
+    ssz_derive::Decode,
+    ssz_derive::HashTreeRoot,
+)]
 pub struct TypeCap {
     pub image_hash_chain: CapHash,
 }

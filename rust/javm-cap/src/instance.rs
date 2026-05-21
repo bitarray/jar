@@ -10,7 +10,7 @@ use allocator_api2::vec::Vec;
 
 use super::cap::{CapHash, CapHashOrRef, NUM_REGS};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
 pub struct InstanceCap<A: Allocator + Clone = Global> {
     /// Cumulative chain hash identifying the Instance's type.
     pub image_hash_chain: CapHash,
@@ -40,7 +40,12 @@ pub struct InstanceCap<A: Allocator + Clone = Global> {
 
 /// One byte overlay backing a memory mapping. `bytes.len()` ≤
 /// the mapping's `size`; trailing untouched bytes default to zero.
-#[derive(Clone, Debug)]
+///
+/// **SSZ note**: only `Encode + HashTreeRoot` are derived. `Decode`
+/// is omitted because `Vec<T, A>: Decode` requires `A: Default`,
+/// which the cap-resident `TalcAlloc` does not satisfy. The cap shape
+/// is never wire-decoded (it lives in the cache, not on the wire).
+#[derive(Clone, Debug, ssz_derive::Encode, ssz_derive::HashTreeRoot)]
 pub struct RwOverlay<A: Allocator + Clone = Global> {
     pub start: u32,
     pub bytes: Vec<u8, A>,
