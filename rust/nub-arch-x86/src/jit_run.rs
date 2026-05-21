@@ -44,6 +44,7 @@
 
 extern crate alloc;
 
+use crate::jit_cache;
 use crate::paging::{PAGE_SIZE, PageTable, Perm};
 use crate::ring3;
 use alloc::alloc::{alloc_zeroed, dealloc};
@@ -52,7 +53,7 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use hyperlight_guest_bin::exception::arch::{Context, ExceptionInfo, HANDLERS};
 use javm_recompiler_x86::JitContext;
-use javm_recompiler_x86::codegen::{Compiler, HelperFns};
+use javm_recompiler_x86::codegen::HelperFns;
 
 // === Per-invocation context for the #PF handler ===========================
 //
@@ -232,6 +233,7 @@ impl Drop for PageBuf {
 /// Hyperlight construction.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn run_pvm_with_mem(
+    image_hash: &javm_cap::CapHash,
     code: &[u8],
     bitmask: &[u8],
     jump_table: &[u32],
@@ -245,7 +247,7 @@ pub unsafe fn run_pvm_with_mem(
 ) -> Option<ExitInfo> {
     assert_eq!(code.len(), bitmask.len());
 
-    // ---- compile -----------------------------------------------------------
+    // ---- compile (cached by image_hash) -----------------------------------
     //
     // The codegen reads the helper-fn addresses to look up the access
     // width (`if fn_addr == helpers.mem_write_u8 { width = 1 }`).
@@ -266,19 +268,19 @@ pub unsafe fn run_pvm_with_mem(
         mem_write_u64: 0x1008,
         sbrk_helper: 0x1009,
     };
-    let compiler = Compiler::new(
+    let cached = jit_cache::get_or_compile(
+        image_hash,
+        code,
         bitmask,
         jump_table,
-        helpers,
-        code.len(),
         JIT_VA_M,
         javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
+        helpers,
     );
-    let result = compiler.compile(code, bitmask);
-    let native = result.native_code;
-    let dispatch_table = result.dispatch_table;
-    let trap_table = result.trap_table;
-    let exit_label_offset = result.exit_label_offset;
+    let native: &[u8] = cached.native.as_slice();
+    let dispatch_table: &[i32] = cached.dispatch_table.as_slice();
+    let trap_table: &[(u32, u32)] = cached.trap_table.as_slice();
+    let exit_label_offset = cached.exit_label_offset;
     if native.is_empty() {
         return None;
     }
@@ -455,8 +457,6 @@ pub unsafe fn run_pvm_with_mem(
     TRAP_TABLE_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
     TRAP_TABLE_LEN.store(0, Ordering::SeqCst);
     JIT_CODE_LEN.store(0, Ordering::SeqCst);
-
-    drop(trap_table);
 
     // SAFETY: ctx_kva still points to the same page (ctx_buf alive until end of fn).
     let info = unsafe {

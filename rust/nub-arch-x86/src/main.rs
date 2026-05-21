@@ -30,6 +30,8 @@ extern crate alloc;
 extern crate hyperlight_guest_bin;
 
 #[cfg(target_os = "none")]
+mod jit_cache;
+#[cfg(target_os = "none")]
 mod jit_run;
 #[cfg(target_os = "none")]
 mod paging;
@@ -150,6 +152,7 @@ mod guest {
 
         let info = unsafe {
             crate::jit_run::run_pvm_with_mem(
+                &inst.image_hash,
                 &code,
                 &bitmask,
                 &jump_table,
