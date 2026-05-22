@@ -17,4 +17,25 @@ fn main() {
     println!("cargo:rerun-if-changed=src/main.rs");
     println!("cargo:rerun-if-changed=src/tests");
     println!("cargo:rerun-if-changed=Cargo.toml");
+
+    // Sub-VM lifecycle test guests. The `tests/sub_vm.rs`
+    // integration test publishes both Images, derives M's child
+    // Instance, CALLs S, and asserts the round-trip.
+    for (path, crate_name, env) in [
+        (
+            "../../components/tests/spawn-parent-m",
+            "spawn-parent-m",
+            "SPAWN_PARENT_M_BLOB",
+        ),
+        (
+            "../../components/tests/spawn-child-s",
+            "spawn-child-s",
+            "SPAWN_CHILD_S_BLOB",
+        ),
+    ] {
+        let blob = build_javm::build(path, crate_name);
+        println!("cargo:rustc-env={env}={}", blob.display());
+        println!("cargo:rerun-if-changed={path}/src");
+        println!("cargo:rerun-if-changed={path}/Cargo.toml");
+    }
 }

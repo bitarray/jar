@@ -93,6 +93,15 @@ pub mod host_op {
     pub const HOST_OPEN: u32 = 24;
     /// `host_save` — Stage 4 (needs cache write + slot write).
     pub const HOST_SAVE: u32 = 25;
+    /// `host_call(instance_slot=φ[7], endpoint_idx=φ[8])` — push a
+    /// child `InstanceEntry` from the `Cap::Instance` at
+    /// `instance_slot`, move the caller's `slot[0]` into the child's
+    /// `slot[0]`. The interpreter exits with
+    /// `ExitReason::HostCall(HOST_CALL)`; the `drive_and_translate`
+    /// loop re-enters `Interpreter::run` on the new top frame. On
+    /// child HALT the loop pops the child, reflects its `slot[0]`
+    /// back into the caller's `slot[0]`, and resumes the caller.
+    pub const HOST_CALL: u32 = 26;
     /// Inclusive upper bound of the kernel-known host call range.
     pub const MAX: u32 = 63;
 }
@@ -171,9 +180,12 @@ impl<K: KernelAssist> Vm<K> {
                 }),
                 None => trap_on_err(self.dispatch_set_image(regs), |()| EcallResult::Continue),
             },
-            host_op::DERIVE_SPAWN => {
-                trap_on_err(self.dispatch_derive_spawn(regs), |()| EcallResult::Continue)
-            }
+            host_op::DERIVE_SPAWN => match cache {
+                Some(cache) => trap_on_err(self.dispatch_derive_spawn_cached(regs, cache), |()| {
+                    EcallResult::Continue
+                }),
+                None => trap_on_err(self.dispatch_derive_spawn(regs), |()| EcallResult::Continue),
+            },
             host_op::MAKE_IMAGE => {
                 // Stage 3.9 stub.
                 EcallResult::Exit(ExitReason::Trap)
@@ -212,6 +224,12 @@ impl<K: KernelAssist> Vm<K> {
             host_op::HOST_SAVE => match cache {
                 Some(cache) => trap_on_err(self.dispatch_host_save(regs, cache), |()| {
                     EcallResult::Continue
+                }),
+                None => EcallResult::Exit(ExitReason::Trap),
+            },
+            host_op::HOST_CALL => match cache {
+                Some(cache) => trap_on_err(self.dispatch_host_call_cached(regs, cache), |()| {
+                    EcallResult::Exit(ExitReason::HostCall(host_op::HOST_CALL))
                 }),
                 None => EcallResult::Exit(ExitReason::Trap),
             },
@@ -377,13 +395,11 @@ impl<K: KernelAssist> Vm<K> {
         Ok(())
     }
 
-    /// `host_derive_spawn(image_slot=φ[7], dst_slot=φ[8])`.
-    ///
-    /// Mint a fresh `CapHashOrRef::Hash` carrying
-    /// `chain_extend(self.image_hash_chain, image_hash)`. The cap
-    /// content (a full Cap::Instance referencing the image with
-    /// placeholder regs/pc/etc.) lives in the cache in Stage 4; V1
-    /// stores only the chain hash as the slot target.
+    /// `host_derive_spawn(image_slot=φ[7], dst_slot=φ[8])` — uncached
+    /// fallback that only records the extended chain hash. Cache-less
+    /// callers (no `dispatch_host_call_cached` borrow) can't publish a
+    /// real `Cap::Instance`, so this writes the chain-hash placeholder
+    /// for back-compat with pre-Stage-4 fixtures.
     fn dispatch_derive_spawn(&mut self, regs: &mut Regs) -> Result<(), VmError> {
         let image_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
         let dst_slot = SlotIdx((regs.gpr[8] & 0xFF) as u32);
@@ -423,6 +439,166 @@ impl<K: KernelAssist> Vm<K> {
         running
             .root_cnode
             .set(dst_slot, Some(CapHashOrRef::Hash(extended)))?;
+        Ok(())
+    }
+
+    /// `host_derive_spawn(image_slot=φ[7], cnode_slot=φ[8],
+    /// dst_slot=φ[9])` — full spec form.
+    ///
+    /// Builds a fresh child `Cap::Instance`:
+    /// 1. Read the `Cap::Image` hash at `image_slot` and the prepared
+    ///    `Cap::CNode` hash at `cnode_slot`.
+    /// 2. `child.image_hash_chain = blake2b(parent.chain ||
+    ///    hash(image))`.
+    /// 3. Build the child's root cnode = prepared cnode + the
+    ///    spawned image's pinned slots overlaid on top. Publish.
+    /// 4. Publish a fresh `Cap::Instance` referencing the image and
+    ///    new root cnode with default initial state (mem_size from
+    ///    image mappings, no overlays, zeroed regs/pc/gas).
+    /// 5. Consume (clear) the prepared cnode slot in the caller's
+    ///    cnode — spec MOVE semantics.
+    /// 6. Write `Hash(new_instance_hash)` to `dst_slot`.
+    fn dispatch_derive_spawn_cached(
+        &mut self,
+        regs: &mut Regs,
+        cache: &mut Cache<Global>,
+    ) -> Result<(), VmError> {
+        let image_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let cnode_slot = SlotIdx((regs.gpr[8] & 0xFF) as u32);
+        let dst_slot = SlotIdx((regs.gpr[9] & 0xFF) as u32);
+
+        // 1. Resolve image_hash, cnode_hash, parent chain.
+        let (image_hash, cnode_hash, parent_chain) = {
+            let running = self
+                .stack
+                .running_instance()
+                .ok_or(VmError::CallStackEmpty)?;
+            let img_h = match running.root_cnode.get(image_slot) {
+                Some(CapHashOrRef::Hash(h)) => h,
+                Some(CapHashOrRef::Ref(_)) => {
+                    return Err(VmError::SlotKindMismatch(image_slot.get()));
+                }
+                None => return Err(VmError::SlotEmpty(image_slot.get())),
+            };
+            let cn_h = match running.root_cnode.get(cnode_slot) {
+                Some(CapHashOrRef::Hash(h)) => h,
+                Some(CapHashOrRef::Ref(_)) => {
+                    return Err(VmError::SlotKindMismatch(cnode_slot.get()));
+                }
+                None => return Err(VmError::SlotEmpty(cnode_slot.get())),
+            };
+            (img_h, cn_h, running.image_hash_chain)
+        };
+
+        // 2. Child chain hash.
+        let child_chain = Blake2b256::hash_pair(&parent_chain, &image_hash);
+
+        // 3. Build child cnode = prepared cnode + image's pinned +
+        //    initial slots overlaid. Spec strictly says initial is
+        //    ignored for parented instances; V1 simplification: also
+        //    apply initial when the prepared slot is empty, so the
+        //    parent doesn't have to mint stack/heap/rw_data caps
+        //    by hand on every spawn. A future spec-strict mode can
+        //    skip the initial overlay.
+        let img_cap = match cache
+            .get(CapHashOrRef::Hash(image_hash))
+            .ok_or(VmError::ImageNotFound)?
+        {
+            Cap::Image(i) => i.clone(),
+            _ => return Err(VmError::ImageNotFound),
+        };
+        let mut child_cn = match cache
+            .get(CapHashOrRef::Hash(cnode_hash))
+            .ok_or(VmError::Invariant("derive_spawn: prepared cnode missing"))?
+        {
+            Cap::CNode(c) => c.clone(),
+            _ => {
+                return Err(VmError::Invariant(
+                    "derive_spawn: cnode_slot does not hold Cap::CNode",
+                ));
+            }
+        };
+        for e in img_cap.pinned.iter() {
+            child_cn.set(e.slot, Some(CapHashOrRef::Hash(e.cap_hash)))?;
+        }
+        for e in img_cap.initial.iter() {
+            if child_cn.get(e.slot).is_none() {
+                child_cn.set(e.slot, Some(CapHashOrRef::Hash(e.cap_hash)))?;
+            }
+        }
+        let new_cnode_hash = cache.put_cap(&Cap::CNode(child_cn))?;
+
+        // 4. Build the child's `rw_overlays` by walking the image's
+        //    memory mappings and resolving each source slot to a
+        //    `Cap::Data` in the (post-overlay) cnode. Each mapping
+        //    becomes one (start, bytes) overlay; the build_entry side
+        //    lays them into RW memory at CALL time. The base RW
+        //    region is sized to cover the max(start+size) span.
+        let new_cnode_cap = cache
+            .get(CapHashOrRef::Hash(new_cnode_hash))
+            .ok_or(VmError::Invariant("derive_spawn: new cnode missing"))?;
+        let new_cnode = match new_cnode_cap {
+            Cap::CNode(c) => c.clone(),
+            _ => return Err(VmError::Invariant("derive_spawn: cnode hash misroutes")),
+        };
+        let mut overlay_bufs: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut mem_size: u32 = 0;
+        for m in img_cap.mappings.iter() {
+            let end = (m.start + m.size) as u32;
+            if end > mem_size {
+                mem_size = end;
+            }
+            if m.source_path_len == 0 {
+                continue;
+            }
+            // V1: only single-step source paths are exercised.
+            let src_slot = m.source_path[0];
+            let target = match new_cnode.get(src_slot) {
+                Some(t) => t,
+                None => continue,
+            };
+            let data_cap = match cache.get(target) {
+                Some(Cap::Data(d)) => d,
+                _ => continue,
+            };
+            let bytes_vec = match &data_cap.content {
+                javm_cap::DataContent::Inline(v) => v.as_slice().to_vec(),
+                javm_cap::DataContent::Paged { .. } => continue,
+            };
+            if !bytes_vec.is_empty() {
+                overlay_bufs.push((m.start as u32, bytes_vec));
+            }
+        }
+        let overlay_slices: Vec<(u32, &[u8])> = overlay_bufs
+            .iter()
+            .map(|(s, b)| (*s, b.as_slice()))
+            .collect();
+
+        let inst_cap = Cap::instance_with_overlays(
+            child_chain,
+            image_hash,
+            new_cnode_hash,
+            &overlay_slices,
+            mem_size,
+            [0u64; javm_cap::NUM_REGS],
+            0,
+            0,
+        );
+        let new_instance_hash = cache.put_cap(&inst_cap)?;
+
+        // 5+6. Consume prepared cnode, write child instance hash to
+        //      dst (rejects pinned).
+        let running = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?;
+        if running.pinned_slots.binary_search(&dst_slot).is_ok() {
+            return Err(javm_cap::OpError::SlotPinned(dst_slot.get()).into());
+        }
+        running.root_cnode.take(cnode_slot)?;
+        running
+            .root_cnode
+            .set(dst_slot, Some(CapHashOrRef::Hash(new_instance_hash)))?;
         Ok(())
     }
 
@@ -611,6 +787,74 @@ impl<K: KernelAssist> Vm<K> {
             .host_save(target, quota_id, size)
             .ok_or(VmError::Invariant("host_save failed"))?;
         regs.gpr[7] = file_id;
+        Ok(())
+    }
+
+    /// `host_call(instance_slot=φ[7], endpoint_idx=φ[8])`.
+    ///
+    /// Resolve the `Cap::Instance` at `instance_slot` in the running
+    /// cnode, build a child `InstanceEntry` via [`Vm::build_entry`],
+    /// move the caller's `slot[0]` into the child's `slot[0]` (CALL
+    /// scratchpad), and push the child. The dispatcher returns; the
+    /// caller (in `dispatch_host_call`) wraps the result as
+    /// `EcallResult::Exit(ExitReason::HostCall(HOST_CALL))` so the
+    /// `drive_and_translate` loop re-enters `Interpreter::run` on the
+    /// new top frame.
+    ///
+    /// Child gas: V1 threads the parent's live `GasCounter` through to
+    /// the child (shared pool). The child's `entry.gas` field is left
+    /// as the build_entry placeholder; the live counter is owned by
+    /// `drive_and_translate`.
+    fn dispatch_host_call_cached(
+        &mut self,
+        regs: &mut Regs,
+        cache: &mut Cache<Global>,
+    ) -> Result<(), VmError> {
+        let inst_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let endpoint_idx = (regs.gpr[8] & 0xFF) as u8;
+
+        // 1. Resolve target Cap::Instance from caller's cnode.
+        let target_ref = self
+            .stack
+            .running_instance()
+            .ok_or(VmError::CallStackEmpty)?
+            .root_cnode
+            .get(inst_slot)
+            .ok_or(VmError::SlotEmpty(inst_slot.get()))?;
+        match cache.get(target_ref) {
+            Some(Cap::Instance(_)) => {}
+            _ => return Err(VmError::InstanceNotFound),
+        }
+
+        // 2. Move caller's slot[0] (CALL scratchpad). Empty is fine.
+        let scratch = self
+            .stack
+            .running_instance_mut()
+            .ok_or(VmError::CallStackEmpty)?
+            .root_cnode
+            .take(SlotIdx(0))?;
+
+        // 3. Build the child entry + its initial regs/mem. Gas budget
+        //    is irrelevant — V1 shares the parent's live counter, so
+        //    this is a throwaway.
+        let (mut child, child_mem, child_regs, _child_gas, _) =
+            self.build_entry(cache, target_ref, endpoint_idx, [0u64; 4], 0)?;
+
+        // 4. Plant slot[0] in the child's cnode.
+        if let Some(cap) = scratch {
+            child.root_cnode.set(SlotIdx(0), Some(cap))?;
+        }
+
+        // 5. Stash child's initial regs/mem in the entry so the
+        //    `drive_and_translate` loop can pick them up on the next
+        //    iteration. Gas stays threaded via the loop's live
+        //    counter; the entry.gas placeholder isn't read.
+        child.regs = child_regs;
+        child.mem = child_mem;
+
+        // 6. Push. push_instance flips the parent's status
+        //    Running→Waiting; the child becomes Running.
+        self.stack.push_instance(child)?;
         Ok(())
     }
 }
@@ -1276,6 +1520,7 @@ mod tests {
             host_op::HOST_MINT_DATA_CAP,
             host_op::HOST_OPEN,
             host_op::HOST_SAVE,
+            host_op::HOST_CALL,
         ] {
             let mut vm = fixture_vm();
             let mut regs = Regs::new();
@@ -1287,6 +1532,177 @@ mod tests {
                 op
             );
         }
+    }
+
+    /// `derive_spawn_cached` publishes a fresh `Cap::Instance` whose
+    /// `image_hash_chain` extends the parent's, references the
+    /// caller-prepared CNode (with the image's pinned slots overlaid
+    /// on top), and lands by hash in the dst slot. Consumes the
+    /// prepared-cnode slot.
+    #[test]
+    fn derive_spawn_cached_publishes_child_instance() {
+        let mut vm = fixture_vm();
+        let mut cache = Cache::new_in(Global);
+
+        // Publish a tiny child image with no pinned/initial slots.
+        let mut child_img = javm_cap::image::Image::empty();
+        child_img.code = vec![10u8, 0]; // ecalli 0
+        child_img.packed_bitmask = vec![0b01u8];
+        let image_hash = cache
+            .put_cap(&Cap::image_with_slots(&child_img, &[], &[]).unwrap())
+            .unwrap();
+
+        // Publish an empty prepared cnode.
+        let prep_cnode_hash = cache.put_cap(&Cap::empty_cnode(4).unwrap()).unwrap();
+
+        // Put both into the running instance's cnode at known slots.
+        let parent_chain = [0xC1; 32];
+        {
+            let running = vm.stack.running_instance_mut().unwrap();
+            running.image_hash_chain = parent_chain;
+            running
+                .root_cnode
+                .set(SlotIdx(3), Some(CapHashOrRef::Hash(image_hash)))
+                .unwrap();
+            running
+                .root_cnode
+                .set(SlotIdx(4), Some(CapHashOrRef::Hash(prep_cnode_hash)))
+                .unwrap();
+        }
+
+        let mut regs = Regs::new();
+        regs.gpr[7] = 3; // image slot
+        regs.gpr[8] = 4; // prepared cnode slot
+        regs.gpr[9] = 7; // dst
+        let mut mem = Mem::new();
+        let mut handler = CachedEcallHandler {
+            vm: &mut vm,
+            cache: &mut cache,
+        };
+        let r = handler.handle(
+            EcallKind::Ecalli(host_op::DERIVE_SPAWN),
+            &mut regs,
+            &mut mem,
+        );
+        assert!(matches!(r, EcallResult::Continue), "got {:?}", r);
+
+        // dst slot now holds Hash(new_instance_hash).
+        let new_target = vm
+            .stack
+            .running_instance()
+            .unwrap()
+            .root_cnode
+            .get(SlotIdx(7))
+            .expect("dst slot populated");
+        let new_instance_hash = match new_target {
+            CapHashOrRef::Hash(h) => h,
+            _ => panic!("expected Hash target"),
+        };
+
+        // The published Cap::Instance has the extended chain.
+        let cap = cache.get(new_target).expect("instance in cache");
+        let inst = match cap {
+            Cap::Instance(i) => i,
+            _ => panic!("expected Cap::Instance"),
+        };
+        let expected_chain = Blake2b256::hash_pair(&parent_chain, &image_hash);
+        assert_eq!(inst.image_hash_chain, expected_chain);
+        assert_eq!(inst.image_hash, image_hash);
+        assert!(matches!(inst.root_cnode, CapHashOrRef::Hash(_)));
+
+        // The prepared cnode slot is now empty (MOVE semantics).
+        assert!(
+            vm.stack
+                .running_instance()
+                .unwrap()
+                .root_cnode
+                .get(SlotIdx(4))
+                .is_none()
+        );
+
+        // Hash hygiene: the new instance hash actually matches what
+        // cap_hash computes on the published cap.
+        assert_eq!(new_instance_hash, javm_cap::cap_hash(cap));
+    }
+
+    /// `dispatch_host_call_cached` pushes a child entry on top of
+    /// the running instance and moves caller's slot[0] into the
+    /// child's slot[0].
+    #[test]
+    fn host_call_cached_pushes_child_and_moves_slot0() {
+        let mut vm = fixture_vm();
+        let mut cache = Cache::new_in(Global);
+
+        // Publish a no-op image (one Halt instruction) + empty cnode
+        // + Cap::Instance referencing them.
+        let mut child_img = javm_cap::image::Image::empty();
+        child_img.code = vec![10u8, 0];
+        child_img.packed_bitmask = vec![0b01u8];
+        let image_hash = cache
+            .put_cap(&Cap::image_with_slots(&child_img, &[], &[]).unwrap())
+            .unwrap();
+        let cnode_hash = cache.put_cap(&Cap::empty_cnode(4).unwrap()).unwrap();
+        let child_instance_hash = cache
+            .put_cap(&Cap::instance_with_overlays(
+                [0xCC; 32],
+                image_hash,
+                cnode_hash,
+                &[],
+                0,
+                [0u64; javm_cap::NUM_REGS],
+                0,
+                0,
+            ))
+            .unwrap();
+
+        // Wire the parent: slot 9 → Cap::Instance(child); slot 0 →
+        // some marker the child should see in its slot 0.
+        let marker_hash = [0xAB; 32];
+        {
+            let running = vm.stack.running_instance_mut().unwrap();
+            running
+                .root_cnode
+                .set(SlotIdx(9), Some(CapHashOrRef::Hash(child_instance_hash)))
+                .unwrap();
+            running
+                .root_cnode
+                .set(SlotIdx(0), Some(CapHashOrRef::Hash(marker_hash)))
+                .unwrap();
+        }
+
+        let mut regs = Regs::new();
+        regs.gpr[7] = 9; // instance_slot
+        regs.gpr[8] = 0; // endpoint_idx (the only endpoint, default)
+        let mut mem = Mem::new();
+        let mut handler = CachedEcallHandler {
+            vm: &mut vm,
+            cache: &mut cache,
+        };
+        let r = handler.handle(EcallKind::Ecalli(host_op::HOST_CALL), &mut regs, &mut mem);
+        assert!(
+            matches!(r, EcallResult::Exit(ExitReason::HostCall(op)) if op == host_op::HOST_CALL),
+            "got {:?}",
+            r,
+        );
+
+        // Stack grew by 1; child is Running.
+        assert_eq!(vm.stack.len(), 2);
+        assert_eq!(vm.stack.entries()[0].status(), EntryStatus::Waiting);
+        assert_eq!(vm.stack.entries()[1].status(), EntryStatus::Running);
+        let child = vm.stack.running_instance().unwrap();
+        // Child's image identity matches what we published.
+        assert_eq!(child.image_hash, image_hash);
+        // The scratchpad moved into child's slot[0].
+        assert_eq!(
+            child.root_cnode.get(SlotIdx(0)),
+            Some(CapHashOrRef::Hash(marker_hash))
+        );
+        // Parent's slot[0] was emptied (MOVE).
+        let parent = match &vm.stack.entries()[0] {
+            Entry::Instance(e) => e.as_ref(),
+            _ => panic!("entry 0 not Instance"),
+        };
+        assert!(parent.root_cnode.get(SlotIdx(0)).is_none());
     }
 
     #[test]
