@@ -44,6 +44,48 @@
 //!   underlying `Cap::CNode` in the cache is read-only. A follow-up
 //!   commit will migrate writes into the cache via `cap_make_mut` so
 //!   the cnode lives entirely in cache.instances.
+//!
+//! ## Data-flow principle and dirty pages
+//!
+//! Per [`website/content/spec/discussions/data-flow-principle.md`][df],
+//! JAR's foundational invariant is **single-mutator-per-state-unit
+//! at any moment**: effects can only follow explicit data flow.
+//! Two in-flight invocations never share a mutator on the same
+//! state, and one invocation's mutations are never visible to
+//! another except through a deliberate data-flow event (a return
+//! value, an explicit cnode-slot move, etc.).
+//!
+//! What this means for [`KernelFrame::dirty_pages`]:
+//!
+//! - The CoW #PF handler ([`crate::jit_run::jit_pf_handler`])
+//!   allocates a fresh page on every guest write to a CoW-armed
+//!   mapping and records the page on the running frame's
+//!   `dirty_pages` vector. That page is the frame's own working
+//!   memory — it lets the frame read its own writes within ring 3.
+//!
+//! - On frame pop the dirty pages are **dropped**, not propagated.
+//!   F1's modifications to its mem region do not appear in F0's
+//!   cnode or memory automatically; F1 must hand them up through
+//!   an explicit data-flow channel. Today that channel is `φ[7]`
+//!   (the return value reflected by [`pop_and_reflect`]). The spec
+//!   intent for cap-shaped returns is a designated
+//!   scratchpad-cnode slot the child writes and the parent
+//!   explicitly moves into its own cnode; not yet implemented.
+//!
+//! - The `source_hash` / `source_slot` fields on [`DirtyPage`] and
+//!   [`CowRange`] are populated by the #PF handler but currently
+//!   unused — they're the metadata the future scratchpad mechanism
+//!   will need.
+//!
+//! Early drafts of this codepath included an "auto-mint" step that
+//! published the dirty pages as a fresh `Cap::Data` and rewrote
+//! the parent's cnode slot when a source-hash match held. That was
+//! a side-channel from child to parent — it violated the
+//! data-flow invariant by propagating effects without a
+//! corresponding move. It was reverted; this comment exists so the
+//! mistake isn't re-made.
+//!
+//! [df]: ../../../../website/content/spec/discussions/data-flow-principle.md
 
 #![cfg(target_os = "none")]
 
