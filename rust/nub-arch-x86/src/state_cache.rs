@@ -389,3 +389,273 @@ pub fn clear_scratch() {
         }
     }
 }
+
+// ============================================================
+// `Cache` struct — the lifetime-correct, no-SSZ-Merkle API
+// ============================================================
+//
+// Coexists with the legacy `lookup_*` / `publish_*` / `clear_scratch`
+// module functions during the migration. Callers gradually move from
+// the legacy free-functions to method calls on a `&Cache` /
+// `&mut Cache`; the legacy API will be removed once nothing in tree
+// calls it.
+
+/// Cap-not-found / invalid-state errors returned by `Cache` methods.
+/// Kept as a small enum so callers can branch on the cause without
+/// matching on string literals.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheErr {
+    /// The requested hash or ref isn't present in the directory.
+    NotFound,
+    /// `promote_blob` was called on an immutable cap kind
+    /// (`Cap::Image`, `Cap::Type`).
+    NotMutable,
+    /// Directory ran out of slots (blob bucket full, or instance
+    /// `alloc_ref` collided every retry).
+    DirectoryFull,
+    /// Allocator returned `AllocError`.
+    AllocFailed,
+    /// `ensure_mapped` couldn't install the persistent kernel mapping.
+    MapNotInstalled,
+}
+
+/// Guest-side cache handle. Zero-sized: all the actual state
+/// (directory pointer + scratch tracker) lives in the
+/// `STATE_CACHE_VA` shared region and the per-process `SCRATCH`
+/// static. `Cache` exists as a Rust-level marker so callers can
+/// take `&Cache` / `&mut Cache` borrows; Rust's borrow checker then
+/// prevents publish/promote/clear ops from running while a `&Cap`
+/// read borrow is live (no eviction during reads).
+///
+/// Construct via `Cache::new()` at kernel boot. Pass `&mut Cache` to
+/// the call loop; pass `&Cache` to read-only paths.
+#[allow(dead_code)]
+pub struct Cache {
+    _priv: (),
+}
+
+#[allow(dead_code)]
+impl Cache {
+    /// Construct a `Cache` handle, installing the persistent kernel
+    /// mapping if not already done. Cheap to call repeatedly.
+    pub fn new() -> Result<Self, CacheErr> {
+        ensure_mapped().map_err(|_| CacheErr::MapNotInstalled)?;
+        Ok(Self { _priv: () })
+    }
+
+    /// Allocator handle for the shared talc heap. Cheap to clone.
+    pub fn allocator(&self) -> TalcAlloc {
+        talc_alloc()
+    }
+
+    /// Look up a content-addressed blob. Returns `&Cap` with
+    /// lifetime tied to `&self`; the borrow checker stops anyone
+    /// from publishing / promoting / clearing while it lives.
+    pub fn read_blob(&self, h: &javm_cap::CapHash) -> Option<&Cap<TalcAlloc>> {
+        let entry = lookup_blob::<TalcAlloc>(h)?;
+        Some(&entry.cap)
+    }
+
+    /// Look up an identity-addressed instance.
+    pub fn read_instance(&self, r: javm_cap::CapRef) -> Option<&Cap<TalcAlloc>> {
+        let entry = lookup_instance::<TalcAlloc>(r)?;
+        Some(&entry.cap)
+    }
+
+    /// Dispatch a `CapHashOrRef` to the matching bucket.
+    pub fn read_cap(&self, k: CapHashOrRef) -> Option<&Cap<TalcAlloc>> {
+        match k {
+            CapHashOrRef::Hash(h) => self.read_blob(&h),
+            CapHashOrRef::Ref(r) => self.read_instance(r),
+        }
+    }
+
+    /// Mutable access to an instance. Implements Arc-`make_mut`
+    /// semantics on the entry's refcount: refcount==1 → mutate in
+    /// place; refcount>1 → shallow-clone the cap into a fresh entry,
+    /// install in the same directory slot, drop the old entry's
+    /// refcount by 1 (other holders keep observing the original).
+    pub fn mut_instance(&mut self, r: javm_cap::CapRef) -> Result<&mut Cap<TalcAlloc>, CacheErr> {
+        let dir_ptr = (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *mut CacheDirectory;
+        // SAFETY: dir_ptr is live for the cache's lifetime.
+        let (slot_idx, _slot_ptr) =
+            unsafe { CacheDirectory::find_instance(dir_ptr, r) }.ok_or(CacheErr::NotFound)?;
+        // SAFETY: slot is present (we just located it) — entry_va is non-zero.
+        let entry_va = unsafe { (*CacheDirectory::instance_slot_ptr(dir_ptr, slot_idx)).entry_va };
+        if entry_va == 0 {
+            return Err(CacheErr::NotFound);
+        }
+        let entry_ptr = entry_va as *mut CacheEntry<TalcAlloc>;
+        // SAFETY: entry_ptr is live by directory contract.
+        let refcount = unsafe { (*entry_ptr).refcount.load(Ordering::Acquire) };
+        if refcount == 1 {
+            // Sole owner: mutate in place.
+            // SAFETY: we hold &mut self; no other &Cache borrow can
+            // be live, so nothing else dereferences this entry.
+            return Ok(unsafe { &mut (*entry_ptr).cap });
+        }
+        // Shared: clone via shallow_clone_cap; install fresh entry
+        // in the same slot; drop original refcount by 1.
+        let alloc = self.allocator();
+        let cloned: Cap<TalcAlloc> = {
+            // SAFETY: as above.
+            let orig_cap = unsafe { &(*entry_ptr).cap };
+            javm_cap::cache::shallow_clone_cap(orig_cap, alloc)
+                .map_err(|_| CacheErr::AllocFailed)?
+        };
+        let new_entry = CacheEntry::new(cloned);
+        let new_boxed =
+            ABox::try_new_in(new_entry, self.allocator()).map_err(|_| CacheErr::AllocFailed)?;
+        let new_entry_ptr = ABox::into_raw(new_boxed);
+        let new_entry_nn = NonNull::new(new_entry_ptr).expect("just allocated");
+        let new_entry_va = new_entry_ptr as u64;
+
+        // Swap the directory slot to point at the new entry, then
+        // decrement the old entry's refcount.
+        // SAFETY: same slot we located above; valid for the cache.
+        unsafe {
+            let slot = CacheDirectory::instance_slot_ptr(dir_ptr, slot_idx);
+            (*slot).entry_va = new_entry_va;
+            (*entry_ptr).refcount.fetch_sub(1, Ordering::Release);
+        }
+
+        // Record the new entry in scratch (so clear_scratch frees it).
+        // SAFETY: single-threaded guest.
+        let tracker = unsafe { &mut *SCRATCH.inner.get() };
+        tracker.entries.push(ScratchEntry::Instance {
+            slot_idx,
+            entry: new_entry_nn,
+        });
+
+        // SAFETY: we just published it; no one else has a reference.
+        Ok(unsafe { &mut (*new_entry_ptr).cap })
+    }
+
+    /// Promote a blob (Hash-keyed) into the instance bucket
+    /// (Ref-keyed). Move-promote when the blob's refcount is 1 (sole
+    /// holder is the cache itself); shallow-clone otherwise. Returns
+    /// the fresh `CapRef` either way. Mirrors host-side
+    /// `Cache::get_mut`.
+    pub fn promote_blob(&mut self, h: &javm_cap::CapHash) -> Result<javm_cap::CapRef, CacheErr> {
+        let dir_ptr = (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *mut CacheDirectory;
+        // SAFETY: dir_ptr in persistent kernel mapping.
+        let (blob_slot_idx, _) =
+            unsafe { CacheDirectory::find_blob(dir_ptr, h) }.ok_or(CacheErr::NotFound)?;
+        // SAFETY: slot present.
+        let entry_va = unsafe { (*CacheDirectory::blob_slot_ptr(dir_ptr, blob_slot_idx)).entry_va };
+        if entry_va == 0 {
+            return Err(CacheErr::NotFound);
+        }
+        let entry_ptr = entry_va as *mut CacheEntry<TalcAlloc>;
+        // SAFETY: live by directory contract.
+        match unsafe { &(*entry_ptr).cap } {
+            Cap::Image(_) | Cap::Type(_) => return Err(CacheErr::NotMutable),
+            _ => {}
+        }
+        // SAFETY: same.
+        let refcount = unsafe { (*entry_ptr).refcount.load(Ordering::Acquire) };
+        if refcount == 1 {
+            // Move-promote: zero blob slot, allocate fresh instance
+            // ref, point it at the existing entry. No clone.
+            let (ref_id, inst_slot_idx) =
+                unsafe { CacheDirectory::alloc_ref(dir_ptr) }.ok_or(CacheErr::DirectoryFull)?;
+            // SAFETY: directory ops.
+            unsafe {
+                let bslot = CacheDirectory::blob_slot_ptr(dir_ptr, blob_slot_idx);
+                (*bslot).hash = [0u8; 32];
+                (*bslot).entry_va = 0;
+                (*dir_ptr).blob_count_decr();
+                let islot = CacheDirectory::instance_slot_ptr(dir_ptr, inst_slot_idx);
+                (*islot).ref_id = ref_id;
+                (*islot).entry_va = entry_va;
+                (*dir_ptr).instance_count_incr();
+            }
+            // Record in scratch so clear_scratch can release.
+            // SAFETY: single-threaded guest.
+            let tracker = unsafe { &mut *SCRATCH.inner.get() };
+            let entry_nn = NonNull::new(entry_ptr).expect("non-null");
+            tracker.entries.push(ScratchEntry::Instance {
+                slot_idx: inst_slot_idx,
+                entry: entry_nn,
+            });
+            return Ok(ref_id);
+        }
+        // Shared: shallow-clone the cap, publish under fresh CapRef.
+        let alloc = self.allocator();
+        let cloned: Cap<TalcAlloc> = {
+            // SAFETY: as above.
+            let orig_cap = unsafe { &(*entry_ptr).cap };
+            javm_cap::cache::shallow_clone_cap(orig_cap, alloc)
+                .map_err(|_| CacheErr::AllocFailed)?
+        };
+        self.publish_instance(cloned)
+    }
+
+    /// Allocate a fresh `CapRef` pointing at the same entry as `r`.
+    /// Bumps the entry's refcount by 1. Cheap pointer-clone — no
+    /// `Cap` content is duplicated. Used by cnode inheritance.
+    pub fn clone_instance(&mut self, r: javm_cap::CapRef) -> Result<javm_cap::CapRef, CacheErr> {
+        let dir_ptr = (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *mut CacheDirectory;
+        let (slot_idx, _) =
+            unsafe { CacheDirectory::find_instance(dir_ptr, r) }.ok_or(CacheErr::NotFound)?;
+        // SAFETY: directory.
+        let entry_va = unsafe { (*CacheDirectory::instance_slot_ptr(dir_ptr, slot_idx)).entry_va };
+        if entry_va == 0 {
+            return Err(CacheErr::NotFound);
+        }
+        let entry_ptr = entry_va as *mut CacheEntry<TalcAlloc>;
+        // Bump refcount before publishing the new slot — keeps the
+        // entry alive even if some other holder drops to zero between
+        // now and the slot write.
+        // SAFETY: entry live.
+        unsafe { (*entry_ptr).refcount.fetch_add(1, Ordering::Relaxed) };
+        // Allocate a fresh ref + slot.
+        let (new_ref, new_slot_idx) =
+            unsafe { CacheDirectory::alloc_ref(dir_ptr) }.ok_or_else(|| {
+                // Roll back the refcount bump on directory-full.
+                // SAFETY: same entry.
+                unsafe { (*entry_ptr).refcount.fetch_sub(1, Ordering::Release) };
+                CacheErr::DirectoryFull
+            })?;
+        // SAFETY: directory.
+        unsafe {
+            let slot = CacheDirectory::instance_slot_ptr(dir_ptr, new_slot_idx);
+            (*slot).ref_id = new_ref;
+            (*slot).entry_va = entry_va;
+            (*dir_ptr).instance_count_incr();
+        }
+        let entry_nn = NonNull::new(entry_ptr).expect("non-null");
+        // SAFETY: single-threaded guest.
+        let tracker = unsafe { &mut *SCRATCH.inner.get() };
+        tracker.entries.push(ScratchEntry::Instance {
+            slot_idx: new_slot_idx,
+            entry: entry_nn,
+        });
+        Ok(new_ref)
+    }
+
+    /// Publish a fresh blob (content-addressed). Wraps the legacy
+    /// `publish_blob` free function with `&mut self` to participate
+    /// in the borrow checker's no-eviction-during-read invariant.
+    pub fn publish_blob(
+        &mut self,
+        hash: javm_cap::CapHash,
+        cap: Cap<TalcAlloc>,
+    ) -> Result<(), CacheErr> {
+        publish_blob(hash, cap).map_err(|_| CacheErr::AllocFailed)
+    }
+
+    /// Publish a fresh instance (identity-addressed). Returns the
+    /// allocated `CapRef`.
+    pub fn publish_instance(&mut self, cap: Cap<TalcAlloc>) -> Result<javm_cap::CapRef, CacheErr> {
+        publish_instance(cap).map_err(|_| CacheErr::AllocFailed)
+    }
+
+    /// Sweep all scratch entries this RPC published. Same semantics
+    /// as the legacy `clear_scratch` — see its doc for the refcount
+    /// safety-net behaviour.
+    pub fn clear_scratch(&mut self) {
+        clear_scratch();
+    }
+}
