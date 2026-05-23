@@ -55,7 +55,7 @@ use javm_cap::cap::Cap;
 use javm_cap::hash::{Blake2b256, Hash};
 use javm_cap::{CapHash, NUM_REGS};
 
-use crate::jit_run::{self, ExitInfo, MemRegion};
+use crate::jit_run::{self, ExitInfo, FrameRuntime, MemRegion};
 use crate::state_cache;
 
 const EXIT_HALT: u32 = 0;
@@ -68,6 +68,17 @@ const OP_HOST_CALL: u32 = 26;
 
 const CNODE_SLOTS: usize = 256;
 const MAX_DEPTH: usize = 32_768;
+/// Maximum number of concurrently-resident [`FrameRuntime`]s. Each
+/// runtime keeps ~48 KiB of pages alive (page table + mem/ctx/stack
+/// buffers); bounding this at 256 caps the in-kernel footprint at
+/// ~12 MiB even for pathologically deep recursion.
+///
+/// On each push, the frame at depth `stack.len() - RUNTIME_CACHE_CAP`
+/// is evicted: that frame is about to fall outside the cached window
+/// and will rebuild its runtime on resume. For depth ≤ cap, no
+/// eviction — every frame keeps its cached PT + bufs across the
+/// inevitable child-HALT → parent-resume cycle.
+const RUNTIME_CACHE_CAP: usize = 256;
 
 // Error codes returned to the host as InvocationResult.exit_arg when
 // the call loop bails out. The byte stays small so a hex dump in the
@@ -101,6 +112,12 @@ pub struct KernelFrame {
     mem_size: u32,
     overlays: Vec<(u32, Vec<u8>)>,
     cnode: Vec<Option<CapHash>>,
+    /// Per-frame ring-3 resources (PT + mem/ctx/stack buffers). Lazily
+    /// built on the first [`run_one_entry`] for this frame and reused
+    /// across every subsequent re-entry (after a child HALTs and the
+    /// parent resumes). Cuts N PageTable + 3 PageBuf allocations for
+    /// a depth-N recursion. Dropped when the frame is popped.
+    runtime: Option<FrameRuntime>,
 }
 
 /// One transient `Cap::Instance` created by an in-kernel
@@ -174,7 +191,7 @@ pub fn run_top(
     loop {
         // Phase 1: run one ring-3 entry on the top frame.
         let info = {
-            let frame = stack.last().expect("stack non-empty");
+            let frame = stack.last_mut().expect("stack non-empty");
             run_one_entry(frame, gas)?
         };
         gas = info.gas_remaining;
@@ -238,6 +255,18 @@ pub fn run_top(
                             let parent = stack.last().expect("non-empty");
                             dispatch_host_call(parent)?
                         };
+                        // Bound the resident-runtime set to the top
+                        // RUNTIME_CACHE_CAP frames. After the new child
+                        // is pushed, the frame at depth (len -
+                        // RUNTIME_CACHE_CAP) is the one just falling
+                        // outside the window — evict its runtime so
+                        // talc reclaims the ~48 KiB of pages it held.
+                        // That frame will rebuild its runtime when it
+                        // eventually resumes.
+                        if stack.len() >= RUNTIME_CACHE_CAP {
+                            let evict_idx = stack.len() - RUNTIME_CACHE_CAP;
+                            stack[evict_idx].runtime = None;
+                        }
                         stack.push(child);
                         transient_owned.push(owns);
                     }
@@ -271,41 +300,48 @@ pub fn run_top(
     }
 }
 
-/// Run exactly one ring-3 cycle for `frame`. Builds the per-call mem
-/// overlays from the frame's stashed copies (so each entry starts
-/// from a known image-initial state — V1 mem-snapshotting decision).
-fn run_one_entry(frame: &KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
-    let mut regions: [(u32, &[u8]); 3] = [(0, &[]), (0, &[]), (0, &[])];
-    for (slot, ov) in regions.iter_mut().zip(frame.overlays.iter()).take(3) {
-        *slot = (ov.0, ov.1.as_slice());
-    }
-    let [arg, ro, rw] = regions;
+/// Run exactly one ring-3 cycle for `frame`. The first call on a
+/// frame builds [`FrameRuntime`] (PT + mem/ctx/stack pages, mem
+/// populated from overlays); subsequent calls (parent resumes after
+/// a child HALT) reuse the cached runtime. Frame mem persists across
+/// re-entries — the parent's writes survive the child's execution.
+fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
+    if frame.runtime.is_none() {
+        let mut regions: [(u32, &[u8]); 3] = [(0, &[]), (0, &[]), (0, &[])];
+        for (slot, ov) in regions.iter_mut().zip(frame.overlays.iter()).take(3) {
+            *slot = (ov.0, ov.1.as_slice());
+        }
+        let [arg, ro, rw] = regions;
 
-    let info = unsafe {
-        jit_run::run_pvm_with_mem(
-            &frame.image_hash,
-            &frame.code,
-            &frame.bitmask,
-            &frame.jump_table,
-            gas,
-            frame.pc,
-            frame.regs,
-            frame.mem_size,
-            MemRegion {
-                start: arg.0,
-                data: arg.1,
-            },
-            MemRegion {
-                start: ro.0,
-                data: ro.1,
-            },
-            MemRegion {
-                start: rw.0,
-                data: rw.1,
-            },
-        )
-    };
-    info.ok_or(ERR_JIT_FAILED)
+        let rt = unsafe {
+            jit_run::build_frame_runtime(
+                &frame.image_hash,
+                &frame.code,
+                &frame.bitmask,
+                &frame.jump_table,
+                frame.pc,
+                frame.mem_size,
+                MemRegion {
+                    start: arg.0,
+                    data: arg.1,
+                },
+                MemRegion {
+                    start: ro.0,
+                    data: ro.1,
+                },
+                MemRegion {
+                    start: rw.0,
+                    data: rw.1,
+                },
+            )
+        }
+        .ok_or(ERR_JIT_FAILED)?;
+        frame.runtime = Some(rt);
+    }
+
+    let rt = frame.runtime.as_mut().expect("just built");
+    let info = unsafe { jit_run::enter_frame(rt, gas, frame.pc, frame.regs) };
+    Ok(info)
 }
 
 /// Pop the top frame; if a parent exists, reflect the popped child's
@@ -556,5 +592,6 @@ fn build_frame_from_image(
         mem_size,
         overlays,
         cnode,
+        runtime: None,
     })
 }

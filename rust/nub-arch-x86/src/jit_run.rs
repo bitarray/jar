@@ -196,35 +196,57 @@ pub struct MemRegion<'a> {
     pub data: &'a [u8],
 }
 
-/// Run a PVM program with a real flat-memory mapping at ring 3.
+/// Per-frame ring-3 resources retained across re-entries.
 ///
-/// All backing memory (mem, perms, ctx, bb, jt, dispatch, JIT code,
-/// trampoline, stack, page tables) is allocated from talc for this
-/// invocation only, then freed when this function returns. Per call:
-///   1. Compile the PVM program.
-///   2. Allocate per-buffer pages sized to the program.
-///   3. Copy program bitmask + jump_table + dispatch + JIT code in.
-///   4. Mark `[0, mem_size)` pages RW in perms.
-///   5. Populate arg / ro / rw regions.
-///   6. Build a fresh page table, drop to ring 3, read back ctx.
+/// Holds the per-call page table + private mem/ctx/stack pages, plus
+/// the cached `CompiledImage` fields needed to publish #PF-handler
+/// atomics on every entry. Built once per `KernelFrame` (lazily on
+/// first [`enter_frame`]); reused across re-entries on the same frame
+/// — saves N PageTable + 3 PageBuf allocations in a depth-N recursion.
+///
+/// Frame-constant `JitContext` fields (jt_ptr, bb_starts,
+/// dispatch_table, code_base, flat_buf, …) are written once when the
+/// runtime is built. [`enter_frame`] only updates regs/pc/gas/exit_*.
+pub struct FrameRuntime {
+    pt: PageTable,
+    #[allow(dead_code)] // kept solely to own the backing page (referenced by `pt`).
+    mem_buf: PageBuf,
+    #[allow(dead_code)] // kept solely to own the backing page (referenced by `pt`).
+    ctx_buf: PageBuf,
+    stack_buf: PageBuf,
+    jit_va: u64,
+    jit_size: u64,
+    exit_label_va: u64,
+    trap_table_ptr: *const (u32, u32),
+    trap_table_len: u64,
+    tramp_va: u64,
+    new_cr3: u64,
+    ctx_kva: u64,
+}
+
+/// Build a per-frame runtime: compile the Image (cached), allocate
+/// per-call mem/ctx/stack pages, populate mem from `arg`/`ro`/`rw`,
+/// initialise the frame-constant `JitContext` fields, and build the
+/// per-call page table.
+///
+/// Per-entry mutable state (regs, pc, gas, exit_*) is written by
+/// [`enter_frame`]; this function only touches frame-constant fields.
 ///
 /// # Safety
-/// Modifies CR3 + GDT + IDT during the call. Single-threaded by
-/// Hyperlight construction.
+/// Caller must keep the returned `FrameRuntime` alive for the lifetime
+/// of the [`KernelFrame`] (the PT references the buf pages by PA).
 #[allow(clippy::too_many_arguments)]
-pub unsafe fn run_pvm_with_mem(
+pub unsafe fn build_frame_runtime(
     image_hash: &javm_cap::CapHash,
     code: &[u8],
     bitmask: &[u8],
     jump_table: &[u32],
-    initial_gas: i64,
     entry_pc: u32,
-    initial_regs: [u64; 13],
     mem_size: u32,
     arg: MemRegion,
     ro: MemRegion,
     rw: MemRegion,
-) -> Option<ExitInfo> {
+) -> Option<FrameRuntime> {
     assert_eq!(code.len(), bitmask.len());
 
     // ---- compile (cached by image_hash) into per-Image arena --------------
@@ -271,14 +293,14 @@ pub unsafe fn run_pvm_with_mem(
 
     let mem_bytes = (mem_size as usize).next_multiple_of(PAGE_SIZE);
 
-    // ---- allocate per-invocation buffers ---------------------------------
-    // CTX (mutable, written by JIT every instruction) and per-call MEM /
+    // ---- allocate per-frame buffers --------------------------------------
+    // CTX (mutable, written by JIT every instruction) and per-frame MEM /
     // STACK stay private. The five Image-shared regions live in `cached.arena`.
     let mem_buf = PageBuf::new(mem_bytes.max(PAGE_SIZE))?;
     let ctx_buf = PageBuf::new(PAGE_SIZE)?;
     let stack_buf = PageBuf::new(PAGE_SIZE)?;
 
-    // ---- populate mem regions ----------------------------------------------
+    // ---- populate mem regions (once, on build) ---------------------------
     // (mem_buf is already zeroed by alloc_zeroed.)
     for region in [arg, ro, rw] {
         if region.data.is_empty() {
@@ -299,17 +321,13 @@ pub unsafe fn run_pvm_with_mem(
         }
     }
 
-    // ---- build JitContext in the ctx page ----------------------------------
+    // ---- init frame-constant JitContext fields ----------------------------
     let ctx_kva = ctx_buf.kva();
     let ctx = ctx_kva as *mut JitContext;
-
     // SAFETY: ctx points to a fresh zeroed ctx page. Pointer fields use
-    // the per-Image VAs computed above (not the old fixed constants).
+    // the per-Image VAs computed above. Per-entry fields (regs/pc/gas/
+    // exit_*) are zeroed and will be overwritten by `enter_frame`.
     unsafe {
-        (*ctx).regs = initial_regs;
-        (*ctx).gas = initial_gas;
-        (*ctx).exit_reason = 0;
-        (*ctx).exit_arg = 0;
         (*ctx).heap_base = 0;
         (*ctx).heap_top = 0;
         (*ctx).jt_ptr = jt_va as *const u32;
@@ -319,7 +337,6 @@ pub unsafe fn run_pvm_with_mem(
         (*ctx).bb_len = bitmask.len() as u32;
         (*ctx)._pad1 = 0;
         (*ctx).entry_pc = entry_pc;
-        (*ctx).pc = entry_pc;
         (*ctx).dispatch_table = dispatch_va as *const i32;
         (*ctx).code_base = jit_va;
         (*ctx).flat_buf = MEM_VA_M as *mut u8;
@@ -329,8 +346,8 @@ pub unsafe fn run_pvm_with_mem(
         (*ctx)._pad3 = 0;
     }
 
-    // ---- build the page table ----------------------------------------------
-    // CTX + MEM + STACK are per-call: each maps fresh PD/PT pages owned
+    // ---- build the page table --------------------------------------------
+    // CTX + MEM + STACK are per-frame: each maps fresh PD/PT pages owned
     // by this PageTable. The per-Image arena lives under a shared PD
     // owned by the Image's TemplatePT; install_borrowed_pd writes its
     // PA into PDPT[1] of the META PML4 slot without per-call alloc.
@@ -348,34 +365,74 @@ pub unsafe fn run_pvm_with_mem(
     )?;
     let new_cr3 = pt.cr3()?;
 
-    // ---- install ring-3 GDT/IDT + JIT #PF handler --------------------------
+    Some(FrameRuntime {
+        pt,
+        mem_buf,
+        ctx_buf,
+        stack_buf,
+        jit_va,
+        jit_size: cached.jit_size as u64,
+        exit_label_va: jit_va + cached.exit_label_offset as u64,
+        trap_table_ptr: cached.trap_table.as_ptr(),
+        trap_table_len: cached.trap_table.len() as u64,
+        tramp_va,
+        new_cr3,
+        ctx_kva,
+    })
+}
+
+/// Enter ring 3 on `rt`. Updates per-entry `JitContext` fields (regs,
+/// pc, gas, exit_*), publishes the #PF handler atomics, drops to
+/// ring 3, then reads back the post-exit state.
+///
+/// # Safety
+/// Mutates CR3 + GDT + IDT during the call. Single-threaded by
+/// Hyperlight construction.
+pub unsafe fn enter_frame(
+    rt: &mut FrameRuntime,
+    initial_gas: i64,
+    entry_pc: u32,
+    initial_regs: [u64; 13],
+) -> ExitInfo {
+    let ctx = rt.ctx_kva as *mut JitContext;
+    // SAFETY: ctx_kva owned by `rt.ctx_buf`, alive across this call.
+    unsafe {
+        (*ctx).regs = initial_regs;
+        (*ctx).gas = initial_gas;
+        (*ctx).exit_reason = 0;
+        (*ctx).exit_arg = 0;
+        (*ctx).entry_pc = entry_pc;
+        (*ctx).pc = entry_pc;
+    }
+
+    // ---- install ring-3 GDT/IDT + JIT #PF handler ------------------------
     // SAFETY: ring-0 mutation of GDT/IDT; serialised by Hyperlight.
     unsafe { ring3::install_ring3_exit_gate() };
 
-    JIT_CODE_BASE.store(jit_va, Ordering::SeqCst);
-    JIT_CODE_LEN.store(cached.jit_size as u64, Ordering::SeqCst);
-    EXIT_LABEL_VA.store(jit_va + cached.exit_label_offset as u64, Ordering::SeqCst);
-    TRAP_TABLE_PTR.store(
-        cached.trap_table.as_ptr() as *mut (u32, u32),
-        Ordering::SeqCst,
-    );
-    TRAP_TABLE_LEN.store(cached.trap_table.len() as u64, Ordering::SeqCst);
-    CTX_KVA.store(ctx_kva, Ordering::SeqCst);
+    JIT_CODE_BASE.store(rt.jit_va, Ordering::SeqCst);
+    JIT_CODE_LEN.store(rt.jit_size, Ordering::SeqCst);
+    EXIT_LABEL_VA.store(rt.exit_label_va, Ordering::SeqCst);
+    TRAP_TABLE_PTR.store(rt.trap_table_ptr as *mut (u32, u32), Ordering::SeqCst);
+    TRAP_TABLE_LEN.store(rt.trap_table_len, Ordering::SeqCst);
+    CTX_KVA.store(rt.ctx_kva, Ordering::SeqCst);
     HANDLERS[14].store(jit_pf_handler as *const () as u64, Ordering::Release);
 
-    // ---- drop to ring 3 ----------------------------------------------------
-    let user_stack_top = STACK_VA_M + stack_buf.size();
+    let user_stack_top = STACK_VA_M + rt.stack_buf.size();
     // SAFETY: trampoline (inside the Image arena) + stack mapped above;
     // new_cr3 carries kernel half.
-    let _user_rax = unsafe { ring3::nub_enter_ring3(tramp_va, user_stack_top, new_cr3) };
+    let _user_rax = unsafe { ring3::nub_enter_ring3(rt.tramp_va, user_stack_top, rt.new_cr3) };
 
     HANDLERS[14].store(0, Ordering::Release);
     TRAP_TABLE_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
     TRAP_TABLE_LEN.store(0, Ordering::SeqCst);
     JIT_CODE_LEN.store(0, Ordering::SeqCst);
 
-    // SAFETY: ctx_kva still points to the same page (ctx_buf alive until end of fn).
-    let info = unsafe {
+    // Suppress unused-field warning: `pt` is referenced indirectly via
+    // `new_cr3` (the PML4's PA) and kept alive by owning the page tables.
+    let _ = &rt.pt;
+
+    // SAFETY: ctx_kva still points to the same page (ctx_buf alive).
+    unsafe {
         ExitInfo {
             exit_reason: (*ctx).exit_reason,
             exit_arg: (*ctx).exit_arg,
@@ -383,11 +440,5 @@ pub unsafe fn run_pvm_with_mem(
             regs: (*ctx).regs,
             pc: (*ctx).pc,
         }
-    };
-
-    // PageTable + all PageBufs drop here, freeing per-invocation memory
-    // back to talc.
-    drop(pt);
-
-    Some(info)
+    }
 }
