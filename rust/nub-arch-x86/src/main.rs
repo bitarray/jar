@@ -36,6 +36,8 @@ mod jit_cache;
 #[cfg(target_os = "none")]
 mod jit_run;
 #[cfg(target_os = "none")]
+mod page_alloc;
+#[cfg(target_os = "none")]
 mod paging;
 #[cfg(target_os = "none")]
 mod ring3;

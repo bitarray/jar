@@ -5,8 +5,29 @@
 //! `List<T, N>` with the same effective contents. The algorithm walks the
 //! implicit balanced binary tree of depth `ceil_log2(N)` iteratively,
 //! using a fixed-size stack — never materialising the full `N` leaves.
+//!
+//! ## Storage
+//!
+//! Both inner maps are sorted `Vec`s keyed by `u64`, allocated through
+//! the caller-provided `A: Allocator + Clone`. Sorted Vec gives us:
+//!
+//! - **O(log n) lookup** via `binary_search_by_key`.
+//! - **O(n) insert/remove** at the sorted position. For the cnode-slot
+//!   use case (N ≤ 256, typically very sparse), the linear shift is
+//!   trivial.
+//! - **O(log n) range queries** via `partition_point`, used by
+//!   `compute_subtree_root` to short-circuit empty subtrees.
+//! - **Iteration in sorted order**, byte-equivalent to `BTreeMap::iter`.
+//! - **Allocator-genericity** — `allocator_api2::vec::Vec<T, A>` carries
+//!   the allocator handle on every allocation, so a `SparseList<_, N,
+//!   TalcAlloc>` keeps no state on the host's `Global` allocator. This
+//!   is what makes `Cap::CNode` walkable from the guest's view of the
+//!   shared state cache.
+//!
+//! Previous versions used `alloc::collections::BTreeMap` (stable, but
+//! hardwired to `Global`); the switch preserves wire-format and
+//! hash-tree-root output byte-identically.
 
-use alloc::collections::BTreeMap;
 use allocator_api2::alloc::{Allocator, Global};
 use allocator_api2::vec::Vec;
 use core::fmt;
@@ -25,27 +46,23 @@ use crate::{BYTES_PER_LENGTH_OFFSET, Decode, DecodeError, Encode, HashTreeRoot};
 /// same effective contents.
 pub struct SparseList<T, const N: u64, A: Allocator + Clone = Global> {
     len: u64,
-    /// Map from leaf index to optional materialized entry (or precomputed
-    /// hash). Absent indices contribute `zero_hash(0)` to the root unless
-    /// covered by `cached_subtree_roots`.
-    entries: BTreeMap<u64, MissingOr<T>>,
-    /// Optional precomputed roots for whole subtrees. Key is a tree
-    /// coordinate `(depth, index_at_depth)` flattened to a `u64` via
-    /// `coord_to_key(depth, idx) = (1u64 << depth) | idx` — this is the
-    /// standard "heap index" of a node in a complete binary tree.
-    cached_subtree_roots: BTreeMap<u64, [u8; 32]>,
-    _alloc: A,
+    /// Sorted (by `u64` key) entries: leaf index → optional materialized
+    /// value (or precomputed hash). Absent indices contribute
+    /// `zero_hash(0)` to the root unless covered by
+    /// [`cached_subtree_roots`].
+    entries: Vec<(u64, MissingOr<T>), A>,
+    /// Sorted (by `u64` key) cache of precomputed subtree roots. Key is
+    /// a tree coordinate `(depth, index_at_depth)` flattened via
+    /// `coord_to_key(depth, idx) = (1u64 << depth) | idx` — the standard
+    /// "heap index" of a node in a complete binary tree.
+    cached_subtree_roots: Vec<(u64, [u8; 32]), A>,
+    alloc: A,
 }
 
 impl<T, const N: u64> SparseList<T, N, Global> {
     /// Build an empty `Global`-allocated sparse list.
     pub fn new() -> Self {
-        Self {
-            len: 0,
-            entries: BTreeMap::new(),
-            cached_subtree_roots: BTreeMap::new(),
-            _alloc: Global,
-        }
+        Self::new_in(Global)
     }
 }
 
@@ -60,10 +77,16 @@ impl<T, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
     pub fn new_in(alloc: A) -> Self {
         Self {
             len: 0,
-            entries: BTreeMap::new(),
-            cached_subtree_roots: BTreeMap::new(),
-            _alloc: alloc,
+            entries: Vec::new_in(alloc.clone()),
+            cached_subtree_roots: Vec::new_in(alloc.clone()),
+            alloc,
         }
+    }
+
+    /// Borrow the captured allocator handle.
+    #[inline]
+    pub fn allocator(&self) -> &A {
+        &self.alloc
     }
 
     /// Logical length.
@@ -88,18 +111,23 @@ impl<T, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
         self.entries.iter_mut().map(|(k, v)| (*k, v))
     }
 
-    /// Number of materialized entries (BTreeMap length). Distinct from
-    /// [`len`](Self::len), which is the logical length (max index + 1).
+    /// Number of materialized entries. Distinct from [`len`](Self::len),
+    /// which is the logical length (max index + 1).
     pub fn entries_count(&self) -> usize {
         self.entries.len()
     }
 
-    /// Look up a single entry by leaf index.
+    /// Look up a single entry by leaf index. O(log n).
     pub fn get(&self, idx: u64) -> Option<&MissingOr<T>> {
-        self.entries.get(&idx)
+        match self.entries.binary_search_by_key(&idx, |(k, _)| *k) {
+            Ok(pos) => Some(&self.entries[pos].1),
+            Err(_) => None,
+        }
     }
 
     /// Insert a materialized entry. Updates `len` to `max(len, idx + 1)`.
+    /// O(n) — sorted shift on insert. If `idx` is already present, the
+    /// existing value is overwritten (matching `BTreeMap::insert` semantics).
     pub fn insert(&mut self, idx: u64, value: MissingOr<T>) -> Result<(), DecodeError> {
         if idx >= N {
             return Err(DecodeError::BoundExceeded {
@@ -108,7 +136,14 @@ impl<T, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
             });
         }
         self.len = self.len.max(idx + 1);
-        self.entries.insert(idx, value);
+        match self.entries.binary_search_by_key(&idx, |(k, _)| *k) {
+            Ok(pos) => {
+                self.entries[pos].1 = value;
+            }
+            Err(pos) => {
+                self.entries.insert(pos, (idx, value));
+            }
+        }
         Ok(())
     }
 
@@ -116,7 +151,10 @@ impl<T, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
     /// Does **not** decrement `len` — the logical length is independent
     /// of which indices are materialized.
     pub fn remove(&mut self, idx: u64) -> Option<MissingOr<T>> {
-        self.entries.remove(&idx)
+        match self.entries.binary_search_by_key(&idx, |(k, _)| *k) {
+            Ok(pos) => Some(self.entries.remove(pos).1),
+            Err(_) => None,
+        }
     }
 
     /// Set the logical length explicitly (does not affect entries).
@@ -130,14 +168,41 @@ impl<T, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
 
     /// Cache a precomputed subtree root at tree position `(depth, idx)`.
     /// `depth == 0` corresponds to the root; deeper means closer to leaves.
+    /// O(n) — sorted insert into `cached_subtree_roots`.
     pub fn cache_subtree_root(&mut self, depth: usize, idx: u64, root: [u8; 32]) {
         let key = coord_to_key(depth, idx);
-        self.cached_subtree_roots.insert(key, root);
+        match self
+            .cached_subtree_roots
+            .binary_search_by_key(&key, |(k, _)| *k)
+        {
+            Ok(pos) => {
+                self.cached_subtree_roots[pos].1 = root;
+            }
+            Err(pos) => {
+                self.cached_subtree_roots.insert(pos, (key, root));
+            }
+        }
     }
 
-    /// Borrow the cached-subtree-root map.
-    pub fn cached_subtree_roots(&self) -> &BTreeMap<u64, [u8; 32]> {
-        &self.cached_subtree_roots
+    /// Number of cached subtree roots. Used by [`fmt::Debug`].
+    pub fn cached_subtree_roots_count(&self) -> usize {
+        self.cached_subtree_roots.len()
+    }
+
+    /// Iterator over cached subtree roots in sorted-by-key order.
+    pub fn cached_subtree_roots(&self) -> impl Iterator<Item = (u64, &[u8; 32])> {
+        self.cached_subtree_roots.iter().map(|(k, v)| (*k, v))
+    }
+
+    /// Internal: look up a cached subtree root by its `coord_to_key`-encoded key.
+    fn cached_subtree_root(&self, key: u64) -> Option<&[u8; 32]> {
+        match self
+            .cached_subtree_roots
+            .binary_search_by_key(&key, |(k, _)| *k)
+        {
+            Ok(pos) => Some(&self.cached_subtree_roots[pos].1),
+            Err(_) => None,
+        }
     }
 }
 
@@ -159,20 +224,50 @@ impl<T: fmt::Debug, const N: u64, A: Allocator + Clone> fmt::Debug for SparseLis
 
 impl<T: Clone, const N: u64, A: Allocator + Clone> Clone for SparseList<T, N, A> {
     fn clone(&self) -> Self {
+        let mut entries: Vec<(u64, MissingOr<T>), A> =
+            Vec::with_capacity_in(self.entries.len(), self.alloc.clone());
+        for (k, v) in self.entries.iter() {
+            entries.push((*k, v.clone()));
+        }
+        let mut cached: Vec<(u64, [u8; 32]), A> =
+            Vec::with_capacity_in(self.cached_subtree_roots.len(), self.alloc.clone());
+        for (k, v) in self.cached_subtree_roots.iter() {
+            cached.push((*k, *v));
+        }
         Self {
             len: self.len,
-            entries: self.entries.clone(),
-            cached_subtree_roots: self.cached_subtree_roots.clone(),
-            _alloc: self._alloc.clone(),
+            entries,
+            cached_subtree_roots: cached,
+            alloc: self.alloc.clone(),
         }
     }
 }
 
 impl<T: PartialEq, const N: u64, A: Allocator + Clone> PartialEq for SparseList<T, N, A> {
     fn eq(&self, other: &Self) -> bool {
-        self.len == other.len
-            && self.entries == other.entries
-            && self.cached_subtree_roots == other.cached_subtree_roots
+        if self.len != other.len
+            || self.entries.len() != other.entries.len()
+            || self.cached_subtree_roots.len() != other.cached_subtree_roots.len()
+        {
+            return false;
+        }
+        // Both vectors are sorted by key, so element-wise comparison
+        // suffices.
+        for ((ka, va), (kb, vb)) in self.entries.iter().zip(other.entries.iter()) {
+            if ka != kb || va != vb {
+                return false;
+            }
+        }
+        for ((ka, va), (kb, vb)) in self
+            .cached_subtree_roots
+            .iter()
+            .zip(other.cached_subtree_roots.iter())
+        {
+            if ka != kb || va != vb {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -200,8 +295,8 @@ impl<T: Encode, const N: u64, A: Allocator + Clone> Encode for SparseList<T, N, 
         let n_entries = self.entries.len();
         let entry_var_size: usize = self
             .entries
-            .values()
-            .map(|v| v.ssz_bytes_len())
+            .iter()
+            .map(|(_, v)| v.ssz_bytes_len())
             .sum::<usize>();
         // Each entry is (u64 key, MissingOr<T> value). u64 is fixed (8B);
         // MissingOr<T> is variable, so each entry has a 4B offset slot.
@@ -224,15 +319,13 @@ impl<T: Encode, const N: u64, A: Allocator + Clone> Encode for SparseList<T, N, 
         buf.extend_from_slice(&12u32.to_le_bytes());
         // Now encode the entries list. SSZ list of container elements
         // where the container is (u64 key, MissingOr<T> value).
-        let entries: alloc::vec::Vec<(u64, &MissingOr<T>)> =
-            self.entries.iter().map(|(k, v)| (*k, v)).collect();
-        encode_sparse_entries_list(&entries, buf);
+        encode_sparse_entries_list(&self.entries, buf);
     }
 }
 
-fn encode_sparse_entries_list<T: Encode, A: Allocator + Clone>(
-    entries: &[(u64, &MissingOr<T>)],
-    buf: &mut Vec<u8, A>,
+fn encode_sparse_entries_list<T: Encode, A: Allocator + Clone, A2: Allocator + Clone>(
+    entries: &Vec<(u64, MissingOr<T>), A>,
+    buf: &mut Vec<u8, A2>,
 ) {
     let n = entries.len();
     // Each entry container: (u64 key, MissingOr<T> value).
@@ -303,10 +396,12 @@ impl<T: Decode, const N: u64, A: Allocator + Clone + Default> Decode for SparseL
             });
         }
         let payload = &bytes[12..];
-        let entries = decode_sparse_entries_list::<T, A2>(payload, alloc)?;
-        let mut map: BTreeMap<u64, MissingOr<T>> = BTreeMap::new();
+        let entries_in = decode_sparse_entries_list::<T, A2>(payload, alloc)?;
+        let target_alloc = A::default();
+        let mut entries: Vec<(u64, MissingOr<T>), A> =
+            Vec::with_capacity_in(entries_in.len(), target_alloc.clone());
         let mut prev_key: Option<u64> = None;
-        for (k, v) in entries {
+        for (k, v) in entries_in {
             if k >= N {
                 return Err(DecodeError::BoundExceeded {
                     len: k + 1,
@@ -319,13 +414,13 @@ impl<T: Decode, const N: u64, A: Allocator + Clone + Default> Decode for SparseL
                 return Err(DecodeError::NotSorted);
             }
             prev_key = Some(k);
-            map.insert(k, v);
+            entries.push((k, v));
         }
         Ok(Self {
             len,
-            entries: map,
-            cached_subtree_roots: BTreeMap::new(),
-            _alloc: A::default(),
+            entries,
+            cached_subtree_roots: Vec::new_in(target_alloc.clone()),
+            alloc: target_alloc,
         })
     }
 }
@@ -443,9 +538,8 @@ impl<T: HashTreeRoot, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
         total_depth: usize,
     ) -> [u8; 32] {
         // Fast path: explicitly cached subtree root for this coordinate.
-        if let Some(cached) = self
-            .cached_subtree_roots
-            .get(&coord_to_key(node_depth, node_index_at_depth))
+        if let Some(cached) =
+            self.cached_subtree_root(coord_to_key(node_depth, node_index_at_depth))
         {
             return *cached;
         }
@@ -454,8 +548,7 @@ impl<T: HashTreeRoot, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
         if node_depth == total_depth {
             // Leaf index is `node_index_at_depth`. Return the chunk root.
             return self
-                .entries
-                .get(&node_index_at_depth)
+                .get(node_index_at_depth)
                 .map(|e| e.hash_tree_root::<D>())
                 .unwrap_or([0u8; 32]);
         }
@@ -468,7 +561,11 @@ impl<T: HashTreeRoot, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
 
         // If no materialized entries fall in [lo, hi), this subtree is
         // entirely empty → it's a zero-hash at the appropriate depth.
-        let has_entries = self.entries.range(lo..hi).next().is_some();
+        // `partition_point` gives us the index of the first entry with
+        // key >= lo. If that entry's key is < hi, there's at least one
+        // materialized entry in range.
+        let pos = self.entries.partition_point(|(k, _)| *k < lo);
+        let has_entries = self.entries.get(pos).is_some_and(|(k, _)| *k < hi);
         if !has_entries {
             return zero_hash::<D>(levels_below);
         }
