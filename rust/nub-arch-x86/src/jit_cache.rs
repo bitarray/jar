@@ -63,19 +63,9 @@ pub struct CompiledImage {
     pub dispatch_offset: usize,
     pub jit_offset: usize,
     pub tramp_offset: usize,
-    /// Byte sizes of the regions as stored in the arena (each rounded
-    /// up to the next page boundary). `jit_size` is read by the #PF
-    /// handler to bound the JIT-window check; the others are kept for
-    /// diagnostics.
-    #[allow(dead_code)]
-    pub bb_size: usize,
-    #[allow(dead_code)]
-    pub jt_size: usize,
-    #[allow(dead_code)]
-    pub dispatch_size: usize,
+    /// Byte size of the JIT region (page-rounded). Read by the #PF
+    /// handler to bound the JIT-window check.
     pub jit_size: usize,
-    #[allow(dead_code)]
-    pub tramp_size: usize,
     /// Native-code offset (within the JIT region) of the exit label
     /// — `jit_pf_handler` redirects the saved RIP here on page fault.
     pub exit_label_offset: u32,
@@ -251,11 +241,7 @@ pub fn get_or_compile(
                 dispatch_offset,
                 jit_offset,
                 tramp_offset,
-                bb_size,
-                jt_size,
-                dispatch_size,
                 jit_size,
-                tramp_size,
                 exit_label_offset,
                 trap_table,
                 template,
