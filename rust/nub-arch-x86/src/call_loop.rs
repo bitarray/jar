@@ -160,6 +160,21 @@ fn forget_transient(hash: &CapHash) {
     map.remove(hash);
 }
 
+/// Drop-guard that triggers the per-RPC scratch sweep on the way
+/// out of [`run_top`], regardless of how the loop returns (clean
+/// HALT, propagated `Err`, or any path that unwinds locals). Lives
+/// at the top of the function so it drops AFTER the per-RPC
+/// `Vec<KernelFrame>` stack — any `CapHandle` held inside a frame
+/// decrements its refcount before [`state_cache::clear_scratch`]
+/// observes the entries.
+struct ScratchGuard;
+
+impl Drop for ScratchGuard {
+    fn drop(&mut self) {
+        state_cache::clear_scratch();
+    }
+}
+
 /// Successful loop result — what the host RPC returns to the bench
 /// driver. On guest-side panic the loop returns `Err(code)` instead
 /// and `nub_invoke_cached` packs the code into `exit_arg`.
@@ -180,6 +195,14 @@ pub fn run_top(
     initial_gas: i64,
 ) -> Result<LoopOutcome, u32> {
     state_cache::ensure_mapped().map_err(|_| ERR_CACHE_MAP)?;
+
+    // `_scratch_guard` is declared BEFORE `stack` so its `Drop` runs
+    // AFTER the stack is dropped — frame-held `CapHandle`s release
+    // their refcounts first, then the per-RPC scratch sweep frees
+    // any guest-published cache entries whose refcounts have fallen
+    // to 1 (the scratch tracker's own reference). See
+    // [`state_cache::clear_scratch`] for the refcount safety net.
+    let _scratch_guard = ScratchGuard;
 
     let top = build_frame_from_published(instance_hash, endpoint_idx, args)?;
     let mut stack: Vec<KernelFrame> = Vec::with_capacity(8);

@@ -794,7 +794,16 @@ pub(crate) fn deep_clone_into<A: Allocator + Clone>(src: &Cap<Global>, alloc: A)
 /// Shallow-clone a cap: duplicate the slot/page table allocations
 /// only, sharing all targets. Targets' refcounts must be bumped by
 /// the caller after this returns.
-fn shallow_clone_cap<A: Allocator + Clone>(cap: &Cap<A>, alloc: A) -> Result<Cap<A>, CacheError> {
+/// Shallow-clone a `Cap<A>` into a fresh allocation. Only the
+/// directly-owned slot/page tables are duplicated; cross-references
+/// (CapHashOrRef in cnode slots, page hashes in DataCap) carry over
+/// by value. The caller is responsible for bumping the refcounts of
+/// any cross-referenced targets (host-side: [`Cache::bump_targets`];
+/// guest-side: state-cache's `cap_make_mut`).
+pub fn shallow_clone_cap<A: Allocator + Clone>(
+    cap: &Cap<A>,
+    alloc: A,
+) -> Result<Cap<A>, CacheError> {
     match cap {
         Cap::CNode(cn) => {
             // SparseList clones into a new allocator handle: the BTreeMap

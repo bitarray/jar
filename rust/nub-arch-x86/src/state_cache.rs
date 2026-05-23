@@ -11,9 +11,28 @@
 //! ([`STATE_CACHE_VA`]) via `MAP_FIXED_NOREPLACE` on the host side,
 //! which means every pointer the host wrote inside the region is
 //! directly dereferenceable here. The directory at
-//! [`CACHE_DIRECTORY_OFFSET`] holds `(CapHash, entry_va)` pairs that
-//! resolve cap-hash queries into a `&CacheEntry<TalcAlloc>` we can
-//! walk by pointer.
+//! [`CACHE_DIRECTORY_OFFSET`] holds `(CapHash, entry_va)` /
+//! `(CapRef, entry_va)` pairs that resolve cap queries into a
+//! `&CacheEntry<TalcAlloc>` we can walk by pointer.
+//!
+//! ## Handles vs. raw references
+//!
+//! Two flavors of lookup coexist:
+//!
+//! - The legacy `lookup_blob<A>` / `lookup_instance<A>` /
+//!   [`lookup_cap`] return `&'static CacheEntry<A>` / `&'static
+//!   Cap<TalcAlloc>` directly. The `'static` is a polite fiction —
+//!   the cache can free entries between RPCs — but it's safe within
+//!   a single RPC because Hyperlight serialises calls and the
+//!   per-RPC scratch-clear runs only after dispatch returns.
+//!
+//! - The new handle-returning variants
+//!   [`lookup_blob_handle`] / [`lookup_instance_handle`] return a
+//!   [`CacheHandle`] that bumps the entry's refcount on acquire and
+//!   decrements on drop. Storage is still cache-owned; the handle
+//!   only pins the entry against eviction during its lifetime.
+//!   These are the future-default — the legacy `'static` API will
+//!   migrate when callers can be updated incrementally.
 
 #![cfg(target_os = "none")]
 
@@ -29,13 +48,34 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use javm_cap::cap::Cap;
 use javm_cap::entry::CacheEntry;
 use nub_host_common::cache::{
-    CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheTalcLock, STATE_CACHE_GPA, STATE_CACHE_SIZE,
-    STATE_CACHE_VA, TalcAlloc,
+    CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheHandle, CacheTalcLock, STATE_CACHE_GPA,
+    STATE_CACHE_SIZE, STATE_CACHE_VA, TalcAlloc,
 };
 
 use crate::paging::{Perm, install_persistent_kernel_mapping};
 
+/// Refcount-bumping handle to a `CacheEntry<A>` resident in shared
+/// cache memory. The entry's storage is owned by the cache; the
+/// handle only protects the entry against eviction while it lives.
+pub type CapHandle<A> = CacheHandle<CacheEntry<A>>;
+
 static CACHE_MAPPED: AtomicBool = AtomicBool::new(false);
+
+/// One scratch entry tracked for end-of-RPC cleanup. Either a blob
+/// (keyed by hash slot index) or an instance (keyed by instance
+/// slot index). The directory slot is zeroed and the `CacheEntry`
+/// storage is reclaimed when the corresponding cleanup fires —
+/// provided no live [`CapHandle`] still references it.
+enum ScratchEntry {
+    Blob {
+        slot_idx: usize,
+        entry: NonNull<CacheEntry<TalcAlloc>>,
+    },
+    Instance {
+        slot_idx: usize,
+        entry: NonNull<CacheEntry<TalcAlloc>>,
+    },
+}
 
 /// Per-RPC tracker of guest-published cap entries so we can clear
 /// them at end of dispatch. The guest writes new caps into the
@@ -44,7 +84,7 @@ static CACHE_MAPPED: AtomicBool = AtomicBool::new(false);
 /// `derive_spawn`); they're cleared before the RPC returns so the
 /// host doesn't see stale "scratch" entries.
 struct ScratchTracker {
-    entries: Vec<(usize, NonNull<CacheEntry<TalcAlloc>>)>,
+    entries: Vec<ScratchEntry>,
 }
 
 /// SAFETY: single-threaded guest (Hyperlight serialises calls).
@@ -113,6 +153,19 @@ pub fn lookup_blob<A: Allocator + Clone>(hash: &[u8; 32]) -> Option<&'static Cac
     Some(unsafe { &*(va as *const CacheEntry<A>) })
 }
 
+/// Refcount-bumping variant of [`lookup_blob`]. Returns a
+/// [`CapHandle`] that pins the entry against eviction for its
+/// lifetime. Cheap to clone (one atomic increment); drop decrements.
+#[allow(dead_code)]
+pub fn lookup_blob_handle<A: Allocator + Clone + 'static>(hash: &[u8; 32]) -> Option<CapHandle<A>> {
+    let entry = lookup_blob::<A>(hash)?;
+    let ptr = NonNull::from(entry);
+    // SAFETY: entry came from `lookup_blob`, so the pointer is live;
+    // CacheHandle::acquire bumps the refcount under that liveness
+    // assumption.
+    Some(unsafe { CacheHandle::acquire(ptr) })
+}
+
 /// Resolve an instance ref to its `CacheEntry`.
 #[allow(dead_code)]
 pub fn lookup_instance<A: Allocator + Clone>(ref_id: u64) -> Option<&'static CacheEntry<A>> {
@@ -126,6 +179,15 @@ pub fn lookup_instance<A: Allocator + Clone>(ref_id: u64) -> Option<&'static Cac
     Some(unsafe { &*(va as *const CacheEntry<A>) })
 }
 
+/// Refcount-bumping variant of [`lookup_instance`].
+#[allow(dead_code)]
+pub fn lookup_instance_handle<A: Allocator + Clone + 'static>(ref_id: u64) -> Option<CapHandle<A>> {
+    let entry = lookup_instance::<A>(ref_id)?;
+    let ptr = NonNull::from(entry);
+    // SAFETY: entry came from `lookup_instance`; pointer is live.
+    Some(unsafe { CacheHandle::acquire(ptr) })
+}
+
 /// Convenience: resolve a blob hash directly to its inner `Cap`.
 pub fn lookup_cap(hash: &[u8; 32]) -> Option<&'static Cap<TalcAlloc>> {
     lookup_blob::<TalcAlloc>(hash).map(|e| &e.cap)
@@ -133,7 +195,6 @@ pub fn lookup_cap(hash: &[u8; 32]) -> Option<&'static Cap<TalcAlloc>> {
 
 /// `TalcAlloc` handle pointing at the shared cache region's lock at
 /// `STATE_CACHE_VA + 0`. Cheap to obtain (just wraps a pointer).
-#[allow(dead_code)]
 pub fn talc_alloc() -> TalcAlloc {
     ensure_mapped().expect("cache mapping");
     let lock_ptr =
@@ -168,11 +229,11 @@ pub fn publish_blob(hash: [u8; 32], cap: Cap<TalcAlloc>) -> Result<(), &'static 
 
     let dir_ptr = (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *mut CacheDirectory;
     // SAFETY: directory ptr is in the persistent kernel mapping.
-    let idx = unsafe { CacheDirectory::first_empty_blob(dir_ptr) }
+    let slot_idx = unsafe { CacheDirectory::first_empty_blob(dir_ptr) }
         .ok_or("publish_blob: directory full")?;
-    // SAFETY: idx < MAX_BLOB_SLOTS; directory ptr is valid.
+    // SAFETY: slot_idx < MAX_BLOB_SLOTS; directory ptr is valid.
     unsafe {
-        let slot = CacheDirectory::blob_slot_ptr(dir_ptr, idx);
+        let slot = CacheDirectory::blob_slot_ptr(dir_ptr, slot_idx);
         (*slot).hash = hash;
         (*slot).entry_va = entry_va;
         (*dir_ptr).blob_count_incr();
@@ -181,13 +242,77 @@ pub fn publish_blob(hash: [u8; 32], cap: Cap<TalcAlloc>) -> Result<(), &'static 
     // Record for cleanup at end of RPC.
     // SAFETY: single-threaded guest.
     let tracker = unsafe { &mut *SCRATCH.inner.get() };
-    tracker.entries.push((idx, entry_nn));
+    tracker.entries.push(ScratchEntry::Blob {
+        slot_idx,
+        entry: entry_nn,
+    });
     Ok(())
 }
 
-/// Clear all entries this RPC published via [`publish_blob`]. Walks
-/// the scratch tracker, zeroes each directory slot, and frees the
-/// `CacheEntry` storage on the shared talc heap. Idempotent.
+/// Publish a fresh `Cap::Instance` (or any mutable Cap variant) to
+/// the shared cache's instance bucket. Allocates a `CapRef` via the
+/// directory's shared `alloc_ref`, writes the `(ref_id, entry_va)`
+/// pair to the instance slot, and records the entry in [`SCRATCH`]
+/// for end-of-RPC cleanup.
+///
+/// Returns the assigned `CapRef` for cnode-slot insertion etc.
+#[allow(dead_code)]
+pub fn publish_instance(cap: Cap<TalcAlloc>) -> Result<u64, &'static str> {
+    let alloc = talc_alloc();
+    let entry = CacheEntry::new(cap);
+    let boxed = ABox::try_new_in(entry, alloc).map_err(|_| "publish_instance: alloc failed")?;
+    let entry_ptr: *mut CacheEntry<TalcAlloc> = ABox::into_raw(boxed);
+    let entry_nn = NonNull::new(entry_ptr).expect("just allocated");
+    let entry_va = entry_ptr as u64;
+
+    let dir_ptr = (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *mut CacheDirectory;
+    // SAFETY: dir_ptr is in the persistent kernel mapping; alloc_ref
+    // takes a const ptr and works through atomic ops.
+    let (ref_id, slot_idx) = match unsafe { CacheDirectory::alloc_ref(dir_ptr) } {
+        Some(pair) => pair,
+        None => {
+            // Roll back the allocation we made before bailing.
+            // SAFETY: we just got `entry_ptr` from `ABox::into_raw`.
+            unsafe {
+                let restored = ABox::from_raw_in(entry_ptr, talc_alloc());
+                drop(restored);
+            }
+            return Err("publish_instance: instance directory full");
+        }
+    };
+    // SAFETY: slot_idx < MAX_INSTANCE_SLOTS; alloc_ref's contract
+    // guarantees the slot is currently empty.
+    unsafe {
+        let slot = CacheDirectory::instance_slot_ptr(dir_ptr, slot_idx);
+        (*slot).ref_id = ref_id;
+        (*slot).entry_va = entry_va;
+        (*dir_ptr).instance_count_incr();
+    }
+
+    // Record for cleanup at end of RPC.
+    // SAFETY: single-threaded guest.
+    let tracker = unsafe { &mut *SCRATCH.inner.get() };
+    tracker.entries.push(ScratchEntry::Instance {
+        slot_idx,
+        entry: entry_nn,
+    });
+    Ok(ref_id)
+}
+
+/// Clear all entries this RPC published via [`publish_blob`] /
+/// [`publish_instance`]. Walks the scratch tracker; for each entry:
+///
+/// 1. If the entry's refcount is still > 1 (a [`CapHandle`] outside
+///    the now-dropped per-RPC stack still references it), log via
+///    debug-assert and SKIP the slot — leaving it live for the host
+///    to reclaim out of band. This is a safety net for bugs; in a
+///    well-disciplined RPC the stack drop should bring every handle
+///    down to refcount==1 (the scratch tracker's own reference).
+/// 2. Otherwise zero the directory slot and free the talc-heap
+///    `CacheEntry` storage.
+///
+/// MUST be called AFTER the call-loop's `Vec<KernelFrame>` has been
+/// dropped, so frame-held handles decrement their refcounts first.
 #[allow(dead_code)]
 pub fn clear_scratch() {
     let alloc = talc_alloc();
@@ -195,21 +320,52 @@ pub fn clear_scratch() {
 
     // SAFETY: single-threaded guest.
     let tracker = unsafe { &mut *SCRATCH.inner.get() };
-    for (idx, entry_ptr) in tracker.entries.drain(..) {
-        // SAFETY: idx is < MAX_BLOB_SLOTS; we wrote (hash, entry_va)
-        // when publishing.
-        unsafe {
-            let slot = CacheDirectory::blob_slot_ptr(dir_ptr, idx);
-            (*slot).hash = [0u8; 32];
-            (*slot).entry_va = 0;
-            (*dir_ptr).blob_count_decr();
+    for scratch in tracker.entries.drain(..) {
+        // Refcount safety net: if anyone still holds a handle, leave
+        // the entry alone. The publish protocol initialises refcount
+        // to 1 ("the scratch tracker's reference"); a refcount > 1
+        // means a live CapHandle is still pointing here.
+        let entry_ptr = match &scratch {
+            ScratchEntry::Blob { entry, .. } => entry.as_ptr(),
+            ScratchEntry::Instance { entry, .. } => entry.as_ptr(),
+        };
+        let count = unsafe { (*entry_ptr).refcount.load(Ordering::Acquire) };
+        if count > 1 {
+            // Leak rather than free under a live handle.
+            debug_assert!(
+                false,
+                "clear_scratch: entry still held (refcount={count}); skipping free"
+            );
+            continue;
         }
-        // SAFETY: we allocated this CacheEntry via `ABox::try_new_in`
-        // in `publish_blob` and leaked it; reconstruct + drop frees
-        // it through the same TalcAlloc.
-        unsafe {
-            let boxed = ABox::from_raw_in(entry_ptr.as_ptr(), alloc);
-            drop(boxed);
+
+        match scratch {
+            ScratchEntry::Blob { slot_idx, entry } => {
+                // SAFETY: slot_idx < MAX_BLOB_SLOTS by construction.
+                unsafe {
+                    let slot = CacheDirectory::blob_slot_ptr(dir_ptr, slot_idx);
+                    (*slot).hash = [0u8; 32];
+                    (*slot).entry_va = 0;
+                    (*dir_ptr).blob_count_decr();
+                }
+                // SAFETY: allocated via `ABox::try_new_in` in publish.
+                unsafe {
+                    let boxed = ABox::from_raw_in(entry.as_ptr(), alloc);
+                    drop(boxed);
+                }
+            }
+            ScratchEntry::Instance { slot_idx, entry } => {
+                // SAFETY: slot_idx < MAX_INSTANCE_SLOTS by construction.
+                unsafe {
+                    CacheDirectory::free_instance(dir_ptr, slot_idx);
+                    (*dir_ptr).instance_count_decr();
+                }
+                // SAFETY: allocated via `ABox::try_new_in` in publish.
+                unsafe {
+                    let boxed = ABox::from_raw_in(entry.as_ptr(), alloc);
+                    drop(boxed);
+                }
+            }
         }
     }
 }

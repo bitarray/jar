@@ -10,6 +10,8 @@
 use allocator_api2::alloc::{Allocator, Global};
 use core::sync::atomic::AtomicU32;
 
+use nub_host_common::cache::AarcRefCounted;
+
 use super::cap::Cap;
 
 pub struct CacheEntry<A: Allocator + Clone = Global> {
@@ -24,5 +26,11 @@ impl<A: Allocator + Clone> CacheEntry<A> {
             refcount: AtomicU32::new(1),
             cap,
         }
+    }
+}
+
+impl<A: Allocator + Clone> AarcRefCounted for CacheEntry<A> {
+    fn refcount(&self) -> &AtomicU32 {
+        &self.refcount
     }
 }
