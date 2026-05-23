@@ -196,6 +196,19 @@ pub struct MemRegion<'a> {
     pub data: &'a [u8],
 }
 
+/// One direct mem mapping projected straight into the per-call PT.
+/// `start` is the guest VA (4 KiB-aligned), `pa` the source physical
+/// address (in the talc-heap PA range under [`crate::paging::va_to_pa`]),
+/// `size` the length to map (4 KiB-aligned). Mapped read-only over
+/// the per-frame mem_buf so guest reads pull straight from the shared
+/// cap pages — no per-call memcpy.
+#[derive(Clone, Copy)]
+pub struct DirectMap {
+    pub start: u32,
+    pub pa: u64,
+    pub size: u32,
+}
+
 /// Per-frame ring-3 resources retained across re-entries.
 ///
 /// Holds the per-call page table + private mem/ctx/stack pages, plus
@@ -246,6 +259,7 @@ pub unsafe fn build_frame_runtime(
     arg: MemRegion,
     ro: MemRegion,
     rw: MemRegion,
+    direct_maps: &[DirectMap],
 ) -> Option<FrameRuntime> {
     assert_eq!(code.len(), bitmask.len());
 
@@ -355,6 +369,22 @@ pub unsafe fn build_frame_runtime(
     pt.map(CTX_VA_M, ctx_buf.pa(), ctx_buf.size(), Perm::user_rw())?;
     if mem_bytes > 0 {
         pt.map(MEM_VA_M, mem_buf.pa(), mem_buf.size(), Perm::user_rw())?;
+    }
+    // Overlay direct-map regions (DataCap pages projected straight
+    // into the PT) on top of the zeroed mem_buf. Each pt.map call
+    // overwrites the existing PTEs at the target VAs with user_ro
+    // pointers into the cap's pages. The bytes the guest reads come
+    // from the shared talc heap — no per-call memcpy.
+    for dm in direct_maps {
+        if dm.size == 0 {
+            continue;
+        }
+        pt.map(
+            MEM_VA_M + dm.start as u64,
+            dm.pa,
+            dm.size as u64,
+            Perm::user_ro(),
+        )?;
     }
     pt.install_borrowed_pd(META_BASE_M, cached.template_pd_pa)?;
     pt.map(

@@ -57,7 +57,8 @@ use javm_cap::hash::{Blake2b256, Hash};
 use javm_cap::{CapHash, CapRef, NUM_REGS};
 use nub_host_common::cache::TalcAlloc;
 
-use crate::jit_run::{self, ExitInfo, FrameRuntime, MemRegion};
+use crate::jit_run::{self, DirectMap, ExitInfo, FrameRuntime, MemRegion};
+use crate::paging;
 use crate::state_cache::{self, CapHandle};
 
 const EXIT_HALT: u32 = 0;
@@ -97,6 +98,8 @@ const ERR_DERIVE_PUBLISH: u32 = 32;
 const ERR_HOST_CALL_SLOT_EMPTY: u32 = 40;
 const ERR_JIT_FAILED: u32 = 50;
 const ERR_DEPTH_LIMIT: u32 = 51;
+const ERR_MAP_BAD_KIND: u32 = 60;
+const ERR_MAP_PAGED_UNSUPPORTED: u32 = 61;
 
 /// One stack frame on the in-kernel call stack. Carries refcount-
 /// pinning handles to the Image blob and the Instance entry (blob
@@ -133,11 +136,45 @@ pub struct KernelFrame {
     /// (blob hash for image pinned/initial entries; instance ref
     /// for kernel-derived transient instances) or `None`.
     cnode: Vec<Option<CapHashOrRef>>,
+    /// Refcount-pinned handles on every `Cap::Data` blob mapped into
+    /// this frame's PT, in resolution order. Populated once at frame
+    /// build (`build_frame_from_image_handle`); reused on every
+    /// `build_runtime` rebuild so eviction never bumps the count
+    /// again. Dropped on frame teardown → refcount-decrement → cache
+    /// reclaim on the next scratch sweep. Pinning the source caps is
+    /// what makes the direct PT mapping safe: as long as a handle
+    /// lives, the talc-resident bytes the PTEs point at stay alive.
+    mapping_pins: Vec<DataMappingPin>,
     /// Per-frame ring-3 resources (PT + mem/ctx/stack buffers).
     /// Lazily built on the first [`run_one_entry`] for this frame
     /// and reused across every subsequent re-entry. Cuts N
     /// PageTable + 3 PageBuf allocations for a depth-N recursion.
     runtime: Option<FrameRuntime>,
+}
+
+/// One DataCap pinned into this frame's PT. `start` is the guest VA
+/// (4 KiB-aligned), `size` the mapped length (4 KiB-aligned, ≤ the
+/// cap's content). `handle` keeps the cap entry alive so the
+/// physical pages mapped at `start..start+size` cannot be reclaimed
+/// while the frame holds the mapping.
+pub struct DataMappingPin {
+    pub start: u32,
+    pub size: u32,
+    pub handle: CapHandle<TalcAlloc>,
+}
+
+impl DataMappingPin {
+    /// Physical address of the cap's page-aligned inline content,
+    /// or `None` if the entry isn't an inline `Cap::Data`.
+    fn content_pa(&self) -> Option<u64> {
+        let Cap::Data(d) = &self.handle.cap else {
+            return None;
+        };
+        let javm_cap::DataContent::Inline(bytes) = &d.content else {
+            return None;
+        };
+        paging::va_to_pa(bytes.as_ptr() as u64)
+    }
 }
 
 /// Drop-guard that triggers the per-RPC scratch sweep on the way
@@ -313,22 +350,49 @@ fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
     Ok(info)
 }
 
-/// Build the per-frame ring-3 runtime. Reads image bytes via the
-/// frame's `CapHandle`, resolves the active mem overlays from image
-/// `mappings` + cnode, and calls into [`jit_run::build_frame_runtime`].
+/// Build the per-frame ring-3 runtime. Pinned-slot mappings project
+/// directly into the PT (RO; refcount-pinned via `frame.mapping_pins`).
+/// Initial-slot mappings and instance `rw_overlays` still memcpy
+/// into the per-frame mem_buf — Commit 4 will arm initial slots
+/// for CoW direct mapping.
 fn build_runtime<'a>(frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
     let img = image_cap(&frame.image)?;
 
-    // Collect at most three (start, &[u8]) regions to feed mem-
-    // population. Today's bench guest has no DataCap mappings; this
-    // walk is a no-op in that case. Top-level frames sourced from a
-    // host-published Instance with `rw_overlays` may carry mem-baked
-    // content there.
+    // Direct PT projections (pinned slots). Each pin already owns a
+    // refcount-bumping handle on its source `Cap::Data`; here we
+    // just collect (start, pa, size) triples for build_frame_runtime.
+    let mut direct_maps: Vec<DirectMap> = Vec::with_capacity(frame.mapping_pins.len());
+    let mut mem_size: u32 = 0;
+    for pin in frame.mapping_pins.iter() {
+        let end = pin.start.saturating_add(pin.size);
+        if end > mem_size {
+            mem_size = end;
+        }
+        let pa = pin.content_pa().ok_or(ERR_MAP_BAD_KIND)?;
+        let cap_bytes = match &pin.handle.cap {
+            Cap::Data(d) => match &d.content {
+                javm_cap::DataContent::Inline(b) => b.len() as u32,
+                _ => return Err(ERR_MAP_BAD_KIND),
+            },
+            _ => return Err(ERR_MAP_BAD_KIND),
+        };
+        let size = pin.size.min(cap_bytes);
+        if size == 0 {
+            continue;
+        }
+        direct_maps.push(DirectMap {
+            start: pin.start,
+            pa,
+            size,
+        });
+    }
+
+    // Memcpy regions: instance rw_overlays + initial-slot image
+    // mappings (mutable, not direct-mappable in V1). Capped at 3
+    // total per the existing build_frame_runtime contract.
     let mut regions: [(u32, &'a [u8]); 3] = [(0, &[]), (0, &[]), (0, &[])];
     let mut n = 0usize;
-    let mut mem_size: u32 = 0;
 
-    // First: any host-published rw_overlays (instance-baked content).
     if let Some(inst) = instance_cap(&frame.instance) {
         for ov in inst.rw_overlays.iter() {
             let end = ov.start.saturating_add(ov.bytes.len() as u32);
@@ -345,9 +409,18 @@ fn build_runtime<'a>(frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
         }
     }
 
-    // Then: image mappings resolved through the per-frame cnode.
-    // Only blob-hash slot entries yield mappable data; transient
-    // instance refs in the cnode are sub-VM children, not data.
+    // Initial-slot mappings (image-declared mutable initial state).
+    // We classify a slot as "initial" if it is NOT in img.pinned —
+    // pinned slots have already been direct-mapped via mapping_pins
+    // above and must be skipped here to avoid an RO/RW conflict on
+    // the same PTE.
+    let mut pinned_slot = [false; CNODE_SLOTS];
+    for e in img.pinned.iter() {
+        let s = e.slot.get() as usize;
+        if s < CNODE_SLOTS {
+            pinned_slot[s] = true;
+        }
+    }
     for m in img.mappings.iter() {
         let end = (m.start + m.size) as u32;
         if end > mem_size {
@@ -357,6 +430,9 @@ fn build_runtime<'a>(frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
             continue;
         }
         let src_slot = m.source_path[0].get() as usize;
+        if src_slot >= CNODE_SLOTS || pinned_slot[src_slot] {
+            continue;
+        }
         let Some(Some(target)) = frame.cnode.get(src_slot) else {
             continue;
         };
@@ -384,9 +460,9 @@ fn build_runtime<'a>(frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
     // matters on cache miss.
     let bitmask = javm_exec::unpack_bitmask(img.bitmask.as_slice(), img.code.len());
 
-    // SAFETY: caller keeps `frame.image` alive for the runtime's
-    // lifetime (it's owned by the frame). Code/jt slices come from
-    // the cap-resident memory and live as long as `frame.image`.
+    // SAFETY: caller keeps `frame.image` and `frame.mapping_pins`
+    // alive for the runtime's lifetime; code/jt/cap bytes are
+    // refcount-pinned through those handles.
     unsafe {
         jit_run::build_frame_runtime(
             &frame.image_hash,
@@ -407,6 +483,7 @@ fn build_runtime<'a>(frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
                 start: rw.0,
                 data: rw.1,
             },
+            &direct_maps,
         )
     }
     .ok_or(ERR_JIT_FAILED)
@@ -614,6 +691,12 @@ fn build_frame_from_image_handle(
         (regs, ep.entry_pc as u32, cnode)
     };
 
+    // Resolve image mappings to refcount-bumping handles on each
+    // `Cap::Data` we'll project into the PT. Done once at frame build;
+    // every subsequent `build_runtime` rebuild reads PAs off the
+    // already-pinned handles instead of re-bumping the cache.
+    let mapping_pins = resolve_mapping_pins(&image, &cnode)?;
+
     Ok(KernelFrame {
         image,
         image_hash,
@@ -622,8 +705,59 @@ fn build_frame_from_image_handle(
         regs,
         pc,
         cnode,
+        mapping_pins,
         runtime: None,
     })
+}
+
+/// Walk `image.mappings` and pair each declared mapping that lands
+/// on a **pinned** (immutable, image-declared RO) slot with a
+/// refcount-bumping handle on its source `Cap::Data`. Pinned
+/// mappings get direct-projected RO into the per-call PT (no
+/// memcpy). Mappings on *initial* slots — which the guest may
+/// mutate — are left to the legacy memcpy path until Commit 4 wires
+/// up CoW. Errors out on `Paged` caps; V1 only supports `Inline`.
+fn resolve_mapping_pins(
+    image: &CapHandle<TalcAlloc>,
+    cnode: &[Option<CapHashOrRef>],
+) -> Result<Vec<DataMappingPin>, u32> {
+    let img = image_cap(image)?;
+    let mut pinned_slot = [false; CNODE_SLOTS];
+    for e in img.pinned.iter() {
+        let s = e.slot.get() as usize;
+        if s < CNODE_SLOTS {
+            pinned_slot[s] = true;
+        }
+    }
+    let mut pins = Vec::with_capacity(img.pinned.len());
+    for m in img.mappings.iter() {
+        if m.source_path_len == 0 {
+            continue;
+        }
+        let src_slot = m.source_path[0].get() as usize;
+        if src_slot >= CNODE_SLOTS || !pinned_slot[src_slot] {
+            continue;
+        }
+        let target_hash = match cnode.get(src_slot) {
+            Some(Some(CapHashOrRef::Hash(h))) => *h,
+            _ => continue,
+        };
+        let handle: CapHandle<TalcAlloc> =
+            state_cache::lookup_blob_handle(&target_hash).ok_or(ERR_HOST_CALL_SLOT_EMPTY)?;
+        match &handle.cap {
+            Cap::Data(d) => match &d.content {
+                javm_cap::DataContent::Inline(_) => {}
+                javm_cap::DataContent::Paged { .. } => return Err(ERR_MAP_PAGED_UNSUPPORTED),
+            },
+            _ => return Err(ERR_MAP_BAD_KIND),
+        }
+        pins.push(DataMappingPin {
+            start: m.start as u32,
+            size: m.size as u32,
+            handle,
+        });
+    }
+    Ok(pins)
 }
 
 /// Helper: borrow the inner `Cap::Image` from a handle, or return
