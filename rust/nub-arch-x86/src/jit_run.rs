@@ -164,7 +164,7 @@ pub struct ExitInfo {
 
 const MEM_VA_M: u64 = 0;
 /// PML4 slot 1 (base 512 GiB) hosts CTX + the per-Image arena + STACK.
-/// MEM stays in PML4[0] at VA 0 so PVM addresses are still native VAs.
+/// MEM stays in `PML4[0]` at VA 0 so PVM addresses are still native VAs.
 /// Placing CTX in this slot too keeps it within ±2 GiB of the JIT
 /// region so codegen's RIP-relative addressing reaches it.
 ///

@@ -87,7 +87,7 @@ const CALLER_SAVED: [Reg; 8] = [
 /// live in PML4 slot 1 (base 512 GiB). Sharing one PML4 slot lets
 /// the Image's PDPT subtree be cached as a template across all
 /// Instances (per-call PT just shallow-clones the slot's entry). MEM
-/// stays in PML4[0] at VA 0 so PVM addr == native VA still holds.
+/// stays in `PML4[0]` at VA 0 so PVM addr == native VA still holds.
 pub const CTX_VA: u64 = 1u64 << 39;
 
 use super::JitContext;

@@ -27,10 +27,11 @@
 //!
 //! ## Instance-slot allocation
 //!
-//! [`alloc_ref`] atomically reads `next_ref` and increments it,
-//! retrying on slot collision. Allocation is therefore O(1)
-//! amortised; lookup via [`find_instance`] is O(1) deterministic
-//! (compute the natural slot, validate `ref_id` matches).
+//! [`CacheDirectory::alloc_ref`] atomically reads `next_ref` and
+//! increments it, retrying on slot collision. Allocation is therefore
+//! O(1) amortised; lookup via [`CacheDirectory::find_instance`] is
+//! O(1) deterministic (compute the natural slot, validate `ref_id`
+//! matches).
 //!
 //! With `MAX_INSTANCE_SLOTS = 32768` and live-ref counts well below
 //! that (deep recursion is bounded by `MAX_DEPTH = 32768` from the
@@ -242,7 +243,7 @@ impl CacheDirectory {
 
     /// Free an instance slot. Sets `ref_id = 0` and `entry_va = 0`,
     /// returning the slot to the pool for reuse by a future
-    /// [`alloc_ref`] whose natural slot collides here.
+    /// [`Self::alloc_ref`] whose natural slot collides here.
     ///
     /// # Safety
     ///

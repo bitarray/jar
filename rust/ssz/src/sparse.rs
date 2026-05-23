@@ -16,8 +16,7 @@
 //!   use case (N ≤ 256, typically very sparse), the linear shift is
 //!   trivial.
 //! - **O(log n) range queries** via `partition_point`, used by
-//!   [`compute_subtree_root`](SparseList::compute_subtree_root) to
-//!   short-circuit empty subtrees.
+//!   `compute_subtree_root` to short-circuit empty subtrees.
 //! - **Iteration in sorted order**, byte-equivalent to `BTreeMap::iter`.
 //! - **Allocator-genericity** — `allocator_api2::vec::Vec<T, A>` carries
 //!   the allocator handle on every allocation, so a `SparseList<_, N,

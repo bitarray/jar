@@ -61,8 +61,8 @@ impl<T: AarcRefCounted> CacheHandle<T> {
     ///
     /// # Safety
     ///
-    /// Same lifetime invariant as [`acquire`]. Additionally, the
-    /// caller must have already incremented the refcount by 1 to
+    /// Same lifetime invariant as [`Self::acquire`]. Additionally,
+    /// the caller must have already incremented the refcount by 1 to
     /// account for this handle, or be transferring a pre-existing
     /// count to the handle.
     #[inline]

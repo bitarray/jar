@@ -798,7 +798,7 @@ pub(crate) fn deep_clone_into<A: Allocator + Clone>(src: &Cap<Global>, alloc: A)
 /// directly-owned slot/page tables are duplicated; cross-references
 /// (CapHashOrRef in cnode slots, page hashes in DataCap) carry over
 /// by value. The caller is responsible for bumping the refcounts of
-/// any cross-referenced targets (host-side: [`Cache::bump_targets`];
+/// any cross-referenced targets (host-side: `Cache::bump_targets`;
 /// guest-side: state-cache's `cap_make_mut`).
 pub fn shallow_clone_cap<A: Allocator + Clone>(
     cap: &Cap<A>,
