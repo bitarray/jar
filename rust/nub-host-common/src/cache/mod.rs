@@ -34,7 +34,9 @@ pub mod talc_arc;
 pub mod talc_box;
 
 pub use cache_handle::CacheHandle;
-pub use directory::{BlobSlot, CacheDirectory, InstanceSlot, MAX_BLOB_SLOTS, MAX_INSTANCE_SLOTS};
+pub use directory::{
+    BlobSlot, CacheDirectory, INSTANCE_MASK, InstanceSlot, MAX_BLOB_SLOTS, MAX_INSTANCE_SLOTS,
+};
 pub use talc_alloc::TalcAlloc;
 pub use talc_arc::{Aarc, AarcRefCounted, TalcArc, TalcRefCounted};
 pub use talc_box::{CacheTalcLock, TalcBox, TalcSlice};

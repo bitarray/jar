@@ -28,8 +28,8 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use javm_cap::{Cache as TypedCache, CapHashOrRef, CapRef};
 use nub_arch_x86_abi::CapHash;
 use nub_host_common::cache::{
-    BlobSlot, CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheTalcLock, InstanceSlot,
-    STATE_CACHE_SIZE, STATE_CACHE_VA, TALC_HEAP_OFFSET, TALC_HEAP_SIZE, TalcAlloc,
+    BlobSlot, CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheTalcLock, STATE_CACHE_SIZE,
+    STATE_CACHE_VA, TALC_HEAP_OFFSET, TALC_HEAP_SIZE, TalcAlloc,
 };
 use talc::source::Manual;
 
@@ -365,26 +365,37 @@ impl Cache {
         Ok(())
     }
 
-    /// Record an instance ref in the directory. Used after a `get_mut`
-    /// promotes a blob to an instance entry, or after a fresh instance
-    /// publish (not currently used in V1 — Instances live as blobs).
+    /// Record an instance ref in the directory at its direct-indexed
+    /// slot (`slot_idx = (r - 1) & INSTANCE_MASK`). Used after a
+    /// `get_mut` promotes a blob to an instance entry, or after a
+    /// fresh instance publish (not currently used in V1 — Instances
+    /// live as blobs).
+    ///
+    /// `r` is expected to have come from `CacheDirectory::alloc_ref`
+    /// so the natural slot is guaranteed empty (or already holds the
+    /// same ref_id, in which case this acts as an entry_va update).
     #[allow(dead_code)]
     fn touch_instance(&mut self, r: CapRef) -> Result<()> {
+        use nub_host_common::cache::INSTANCE_MASK;
         let va = self
             .typed_cache
             .entry_va(CapHashOrRef::Ref(r))
             .ok_or_else(|| new_error!("cache: instance {r} missing"))?;
         let dir_ptr = self.directory.as_ptr();
-        if let Some((_, slot_ptr)) = unsafe { CacheDirectory::find_instance(dir_ptr, r) } {
-            unsafe {
-                (*(slot_ptr as *mut InstanceSlot)).entry_va = va;
-            }
+        let slot_idx = ((r - 1) & INSTANCE_MASK) as usize;
+        let slot = unsafe { CacheDirectory::instance_slot_ptr(dir_ptr, slot_idx) };
+        let existing = unsafe { (*slot).ref_id };
+        if existing == r {
+            // Idempotent update: same ref, refresh entry_va.
+            unsafe { (*slot).entry_va = va };
             return Ok(());
         }
-        let idx = unsafe { CacheDirectory::first_empty_instance(dir_ptr) }.ok_or(
-            CacheError::InstanceDirectoryFull(nub_host_common::cache::MAX_INSTANCE_SLOTS),
-        )?;
-        let slot = unsafe { CacheDirectory::instance_slot_ptr(dir_ptr, idx) };
+        if existing != 0 {
+            return Err(CacheError::InstanceDirectoryFull(
+                nub_host_common::cache::MAX_INSTANCE_SLOTS,
+            )
+            .into());
+        }
         unsafe {
             (*slot).ref_id = r;
             (*slot).entry_va = va;
