@@ -36,18 +36,26 @@ use javm_recompiler_x86::codegen::{CompileResult, Compiler, HelperFns};
 use javm_cap::CapHash;
 
 use crate::page_alloc::PageBuf;
-use crate::paging::PAGE_SIZE;
+use crate::paging::{PAGE_SIZE, Perm, TemplatePT};
 
 /// One cached Image's worth of compiled artifacts.
 ///
 /// The arena holds BB / JT / DISPATCH / JIT / TRAMP regions
-/// contiguously, page-aligned. The kernel maps the arena's pages
-/// (with per-region permissions) into the per-call page table.
+/// contiguously, page-aligned. The `template` is a pre-built PD
+/// subtree (one PD + up to a handful of PT pages) whose leaf PTEs
+/// already point at the arena's pages with the right permissions —
+/// per-call page tables install the PD via
+/// [`PageTable::install_borrowed_pd`](crate::paging::PageTable::install_borrowed_pd)
+/// instead of running `pt.map` over the arena.
 ///
 /// The `trap_table` is kept outside the arena — `jit_pf_handler` reads
 /// it via static atomics and never needs it mapped into ring-3.
 pub struct CompiledImage {
     /// Page-aligned buffer holding the five regions.
+    ///
+    /// Kept solely to own the backing pages — referenced by the
+    /// template's leaf PTEs and freed when the cache entry is evicted.
+    #[allow(dead_code)]
     pub arena: PageBuf,
     /// Offsets into `arena` for each region (in bytes from arena base).
     pub bb_offset: usize,
@@ -56,11 +64,17 @@ pub struct CompiledImage {
     pub jit_offset: usize,
     pub tramp_offset: usize,
     /// Byte sizes of the regions as stored in the arena (each rounded
-    /// up to the next page boundary).
+    /// up to the next page boundary). `jit_size` is read by the #PF
+    /// handler to bound the JIT-window check; the others are kept for
+    /// diagnostics.
+    #[allow(dead_code)]
     pub bb_size: usize,
+    #[allow(dead_code)]
     pub jt_size: usize,
+    #[allow(dead_code)]
     pub dispatch_size: usize,
     pub jit_size: usize,
+    #[allow(dead_code)]
     pub tramp_size: usize,
     /// Native-code offset (within the JIT region) of the exit label
     /// — `jit_pf_handler` redirects the saved RIP here on page fault.
@@ -68,6 +82,15 @@ pub struct CompiledImage {
     /// (native_offset, pvm_pc) pairs the #PF handler binary-searches
     /// to recover the PVM PC from a faulting RIP.
     pub trap_table: Vec<(u32, u32)>,
+    /// Template PD subtree mapping the arena pages at per-call VAs.
+    /// Per-call PTs install [`template_pd_pa`] into PDPT[1] of the
+    /// META PML4 slot; this `template` owns the backing PD + PT pages
+    /// and frees them on eviction (V1: effectively never).
+    #[allow(dead_code)]
+    pub template: TemplatePT,
+    /// Physical address of `template`'s PD page, cached for fast
+    /// install on the per-call hot path.
+    pub template_pd_pa: u64,
 }
 
 /// Process-wide compile cache.
@@ -195,6 +218,30 @@ pub fn get_or_compile(
         buf[tramp_start + 24] = 0x0F;
         buf[tramp_start + 25] = 0x0B;
 
+        // ---- build the template PD ------------------------------------
+        // One PD covers 1 GiB of VA starting at `arena_base_va`; leaf
+        // PTEs point at each 4 KiB arena page with the appropriate
+        // permission (RO for BB/JT/DISPATCH, RX for JIT/TRAMP).
+        let arena_pa = arena.pa();
+        let mut template = TemplatePT::new().expect("TemplatePT alloc");
+        let ro_end = jit_offset; // bytes covered by RO range (BB+JT+DISPATCH)
+        let arena_total = total;
+        let mut off = 0usize;
+        while off < arena_total {
+            let perm = if off < ro_end {
+                Perm::user_ro()
+            } else {
+                Perm::user_rx()
+            };
+            template
+                .map_leaf(off as u64, arena_pa + off as u64, perm)
+                .expect("TemplatePT::map_leaf");
+            off += PAGE_SIZE;
+        }
+        let template_pd_pa = template
+            .pd_pa()
+            .expect("template PD must be in kernel half");
+
         map.insert(
             *image_hash,
             CompiledImage {
@@ -211,6 +258,8 @@ pub fn get_or_compile(
                 tramp_size,
                 exit_label_offset,
                 trap_table,
+                template,
+                template_pd_pa,
             },
         );
     }

@@ -176,6 +176,80 @@ fn alloc_table() -> Option<NonNull<Table>> {
     NonNull::new(ptr as *mut Table)
 }
 
+/// Per-Image template page-directory subtree. Owns a single PD page
+/// covering 1 GiB of VA space and all PT pages it references, with
+/// leaf PTEs prefilled to point at the Image's arena pages.
+///
+/// Multiple per-call [`PageTable`]s install this template via
+/// [`PageTable::install_borrowed_pd`], which writes the template's PD
+/// physical address into one PDPT entry of the per-call PT. The
+/// per-call PT does NOT own the template's pages — they live for as
+/// long as the parent `CompiledImage` (effectively `'static` in V1).
+///
+/// The PD covers a 1 GiB-aligned VA range; leaf PTEs are addressed by
+/// the offset within that range (`0..1 GiB`).
+pub struct TemplatePT {
+    pd: NonNull<Table>,
+    /// PD page + every PT page allocated under it. Freed in Drop.
+    owned: Vec<NonNull<Table>>,
+}
+
+impl TemplatePT {
+    /// Allocate a fresh PD page. The PD starts empty; populate it with
+    /// [`TemplatePT::map_leaf`] before installing the template.
+    pub fn new() -> Option<Self> {
+        let pd = alloc_table()?;
+        let mut owned = Vec::with_capacity(4);
+        owned.push(pd);
+        Some(Self { pd, owned })
+    }
+
+    /// Add a leaf PTE for a single 4 KiB page at `offset` bytes into
+    /// the 1 GiB region this PD covers. `offset` must be 4 KiB-aligned
+    /// and strictly less than 1 GiB.
+    pub fn map_leaf(&mut self, offset: u64, pa: u64, perm: Perm) -> Option<()> {
+        assert!(offset.is_multiple_of(PAGE_SIZE as u64));
+        assert!(offset < (1u64 << 30));
+        let idx2 = ((offset >> 21) & 0x1FF) as usize;
+        let idx1 = ((offset >> 12) & 0x1FF) as usize;
+        // SAFETY: self.pd is a fresh table this template owns.
+        let pd = unsafe { &mut *self.pd.as_ptr() };
+        let inner_flags = flag::P | flag::RW | flag::US;
+        let pt_ptr = if pd[idx2] & flag::P != 0 {
+            let pa = pd[idx2] & PA_MASK;
+            pa_to_va(pa)? as *mut Table
+        } else {
+            let new_pt = alloc_table()?;
+            self.owned.push(new_pt);
+            let va = new_pt.as_ptr() as u64;
+            let pa = va_to_pa(va)?;
+            pd[idx2] = (pa & PA_MASK) | inner_flags;
+            new_pt.as_ptr()
+        };
+        // SAFETY: pt_ptr is a table allocated by us (either fresh or
+        // recovered from a present PDE); 512 entries are writable.
+        let pt = unsafe { &mut *pt_ptr };
+        pt[idx1] = (pa & PA_MASK) | perm.pte_flags();
+        Some(())
+    }
+
+    /// Physical address of the PD page — what per-call PTs install.
+    pub fn pd_pa(&self) -> Option<u64> {
+        va_to_pa(self.pd.as_ptr() as u64)
+    }
+}
+
+impl Drop for TemplatePT {
+    fn drop(&mut self) {
+        for table in self.owned.drain(..) {
+            // SAFETY: every entry came from `alloc_table` with TABLE_LAYOUT.
+            unsafe {
+                dealloc(table.as_ptr() as *mut u8, TABLE_LAYOUT);
+            }
+        }
+    }
+}
+
 /// Per-invocation page table. Owns its PML4 plus every intermediate
 /// table allocated via [`PageTable::map`]. All backing pages are freed
 /// when the `PageTable` is dropped.
@@ -263,6 +337,30 @@ impl PageTable {
 
         let pt = unsafe { &mut *pt };
         pt[idx1] = (pa & PA_MASK) | perm.pte_flags();
+        Some(())
+    }
+
+    /// Install a borrowed PD pointer (from a [`TemplatePT`]) at the
+    /// PDPT entry covering `va`. The PDPT is auto-allocated and owned
+    /// by this `PageTable` (freed on Drop); the PD (and the PT pages
+    /// it references) belong to the template and survive `Drop`.
+    ///
+    /// `va` must be 1 GiB-aligned — it identifies which PDPT entry
+    /// receives the template's PD. Any existing entry at that PDPT
+    /// slot is overwritten (intended: caller has not mapped anything
+    /// in this 1 GiB range yet).
+    pub fn install_borrowed_pd(&mut self, va: u64, pd_pa: u64) -> Option<()> {
+        assert!(va.is_multiple_of(1u64 << 30));
+        let idx4 = ((va >> 39) & 0x1FF) as usize;
+        let idx3 = ((va >> 30) & 0x1FF) as usize;
+        let inner_flags = flag::P | flag::RW | flag::US;
+        // SAFETY: self.pml4 is owned by this PT.
+        let pml4 = unsafe { &mut *self.pml4.as_ptr() };
+        let pdpt = self.ensure_inner(&mut pml4[idx4], inner_flags)?;
+        // SAFETY: pdpt is a table this PT owns (just allocated or
+        // shallow-copied from the active CR3).
+        let pdpt = unsafe { &mut *pdpt };
+        pdpt[idx3] = (pd_pa & PA_MASK) | inner_flags;
         Some(())
     }
 

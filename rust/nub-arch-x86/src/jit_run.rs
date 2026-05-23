@@ -163,21 +163,31 @@ pub struct ExitInfo {
 // 4 GiB; CTX must be outside that range to avoid spoofing.
 
 const MEM_VA_M: u64 = 0;
-/// PML4 slot 1 (base 512 GiB) hosts CTX + the per-Image arena. MEM
-/// stays in PML4[0] at VA 0 so PVM addresses are still native VAs.
+/// PML4 slot 1 (base 512 GiB) hosts CTX + the per-Image arena + STACK.
+/// MEM stays in PML4[0] at VA 0 so PVM addresses are still native VAs.
 /// Placing CTX in this slot too keeps it within ±2 GiB of the JIT
 /// region so codegen's RIP-relative addressing reaches it.
+///
+/// The three sub-regions occupy distinct 1 GiB PDPT slots within the
+/// PML4 slot so the per-Image template PT can own the META PD without
+/// colliding with the per-call CTX/STACK PDs.
+///
+/// ```text
+///   PML4[1] (512..1024 GiB)
+///     PDPT[0] (512..513 GiB)  ← CTX, per-call alloc
+///     PDPT[1] (513..514 GiB)  ← META arena, template-owned
+///     PDPT[2] (514..515 GiB)  ← STACK, per-call alloc
+/// ```
 const META_PML4_BASE: u64 = 1u64 << 39; // 512 GiB
-/// CTX sits at the slot base; the per-Image arena follows the CTX
-/// page. CTX_VA_M must match `javm_recompiler_x86::codegen::CTX_VA`.
+/// CTX sits at the slot base. CTX_VA_M must match
+/// `javm_recompiler_x86::codegen::CTX_VA`.
 const CTX_VA_M: u64 = META_PML4_BASE;
-/// Base of the per-Image arena (BB | JT | DISPATCH | JIT | TRAMP),
-/// one page past CTX so CTX gets its own page-table leaf entry.
-const META_BASE_M: u64 = CTX_VA_M + PAGE_SIZE as u64;
-/// STACK_VA must sit at a fixed location outside the Image arena.
-/// 1 GiB past META_BASE — comfortably > any single Image's compiled
-/// arena footprint and still in PML4 slot 1.
-const STACK_VA_M: u64 = META_PML4_BASE + (1u64 << 30); // META + 1 GiB
+/// Base of the per-Image arena (BB | JT | DISPATCH | JIT | TRAMP).
+/// 1 GiB past CTX so the arena occupies its own PDPT slot, enabling
+/// template-PT sharing of the entire PD subtree.
+const META_BASE_M: u64 = META_PML4_BASE + (1u64 << 30);
+/// STACK_VA — 2 GiB past the PML4 base, in its own PDPT slot.
+const STACK_VA_M: u64 = META_PML4_BASE + (2u64 << 30);
 
 /// One PVM region (arg / ro / rw) to populate before entry.
 #[derive(Clone, Copy)]
@@ -320,24 +330,16 @@ pub unsafe fn run_pvm_with_mem(
     }
 
     // ---- build the page table ----------------------------------------------
+    // CTX + MEM + STACK are per-call: each maps fresh PD/PT pages owned
+    // by this PageTable. The per-Image arena lives under a shared PD
+    // owned by the Image's TemplatePT; install_borrowed_pd writes its
+    // PA into PDPT[1] of the META PML4 slot without per-call alloc.
     let mut pt = PageTable::new()?;
     pt.map(CTX_VA_M, ctx_buf.pa(), ctx_buf.size(), Perm::user_rw())?;
     if mem_bytes > 0 {
         pt.map(MEM_VA_M, mem_buf.pa(), mem_buf.size(), Perm::user_rw())?;
     }
-    // Map the Image arena: BB / JT / DISPATCH as user-RO, JIT / TRAMP as
-    // user-RX. Three `pt.map` calls in place of the old five (and they
-    // reference the per-Image cached arena, not per-call buffers).
-    let arena_pa = cached.arena.pa();
-    let ro_region_size = (cached.bb_size + cached.jt_size + cached.dispatch_size) as u64;
-    let rx_region_size = (cached.jit_size + cached.tramp_size) as u64;
-    pt.map(bb_va, arena_pa, ro_region_size, Perm::user_ro())?;
-    pt.map(
-        jit_va,
-        arena_pa + cached.jit_offset as u64,
-        rx_region_size,
-        Perm::user_rx(),
-    )?;
+    pt.install_borrowed_pd(META_BASE_M, cached.template_pd_pa)?;
     pt.map(
         STACK_VA_M,
         stack_buf.pa(),
