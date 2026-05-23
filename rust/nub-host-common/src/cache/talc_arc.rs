@@ -113,6 +113,32 @@ impl<T: AarcRefCounted, A: Allocator + Clone> Aarc<T, A> {
     }
 }
 
+impl<T: AarcRefCounted + Clone, A: Allocator + Clone> Aarc<T, A> {
+    /// Return `&mut T`. If we're the sole owner (refcount == 1) the
+    /// caller mutates in place. Otherwise we deep-clone `T` into a
+    /// fresh `Aarc` slab, replace `*this` with that fresh handle, and
+    /// let the original Aarc drop (refcount on the original entry
+    /// decrements by 1; other holders keep observing the original).
+    ///
+    /// Returns `Err(AllocError)` if the clone path can't allocate;
+    /// the original `*this` is left untouched in that case.
+    ///
+    /// Single-threaded model: relaxed load is sufficient because no
+    /// other thread is concurrently bumping the refcount.
+    pub fn make_mut(this: &mut Self) -> Result<&mut T, AllocError> {
+        if this.get().refcount().load(Ordering::Relaxed) == 1 {
+            // SAFETY: sole owner; no aliasing.
+            return Ok(unsafe { this.as_mut_unchecked() });
+        }
+        let cloned: T = this.get().clone();
+        cloned.refcount().store(1, Ordering::Relaxed);
+        let new_aarc = Aarc::new_in(cloned, this.alloc.clone())?;
+        let _old = core::mem::replace(this, new_aarc);
+        // SAFETY: `this` now references the fresh sole-owner slab.
+        Ok(unsafe { this.as_mut_unchecked() })
+    }
+}
+
 impl<T: AarcRefCounted, A: Allocator + Clone> Clone for Aarc<T, A> {
     fn clone(&self) -> Self {
         unsafe {
@@ -203,6 +229,18 @@ mod tests {
             self.drop_counter.fetch_add(1, Ordering::Relaxed);
         }
     }
+    impl Clone for Counted<'_> {
+        fn clone(&self) -> Self {
+            // Fresh refcount of 1 — `make_mut` resets it anyway, but
+            // this matches the `Aarc::new_in` invariant the
+            // debug-assert checks for.
+            Counted {
+                refcount: AtomicU32::new(1),
+                drop_counter: self.drop_counter,
+                payload: self.payload,
+            }
+        }
+    }
 
     #[test]
     fn talc_backed_drops_after_last_clone() {
@@ -230,6 +268,61 @@ mod tests {
 
         drop(arc);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn make_mut_in_place_when_sole_owner() {
+        let drops = AtomicUsize::new(0);
+        let mut arc = Aarc::new_in(
+            Counted {
+                refcount: AtomicU32::new(1),
+                drop_counter: &drops,
+                payload: 11,
+            },
+            Global,
+        )
+        .unwrap();
+        // Sole owner: make_mut returns a mutable ref to the same slab,
+        // no clone happens (drop counter unchanged).
+        {
+            let m = Aarc::make_mut(&mut arc).unwrap();
+            assert_eq!(m.payload, 11);
+            m.payload = 22;
+        }
+        assert_eq!(arc.get().payload, 22);
+        assert_eq!(arc.refcount(), 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn make_mut_clones_when_shared() {
+        let drops = AtomicUsize::new(0);
+        let mut arc = Aarc::new_in(
+            Counted {
+                refcount: AtomicU32::new(1),
+                drop_counter: &drops,
+                payload: 7,
+            },
+            Global,
+        )
+        .unwrap();
+        let other = arc.clone();
+        assert_eq!(arc.refcount(), 2);
+        {
+            let m = Aarc::make_mut(&mut arc).unwrap();
+            // Sees the deep-cloned value initially, then we mutate it.
+            assert_eq!(m.payload, 7);
+            m.payload = 42;
+        }
+        // `arc` now points at the fresh slab; the original is still
+        // alive via `other`.
+        assert_eq!(arc.get().payload, 42);
+        assert_eq!(other.get().payload, 7);
+        assert_eq!(arc.refcount(), 1);
+        assert_eq!(other.refcount(), 1);
+        drop(arc);
+        drop(other);
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
     }
 
     #[test]
