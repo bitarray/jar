@@ -1,19 +1,27 @@
-//! Per-image JIT code cache.
+//! Per-Image JIT code cache + page-aligned arena.
 //!
-//! `Compiler::compile` emits native x86-64 bytes whose RIP-relative
-//! references hard-code the per-invocation VA layout: `CTX_VA` (4 GiB),
-//! `JIT_VA_M` (META_BASE + 64 MiB), `BB_VA_M`, `JT_VA_M`,
-//! `DISPATCH_VA_M`. Those VAs are *constants* in this crate, so the
-//! compiled bytes are reusable across every ring-3 entry — the JIT
-//! page-table sets up the same layout each time. Only the per-frame
-//! memory (CTX page, mem region, stack, PT skeleton) changes.
+//! Each Image gets one [`PageBuf`] arena containing five regions
+//! laid out contiguously, each starting on a page boundary:
 //!
-//! Caching the compile result keyed by `image_hash` (the `Cap::Image`
-//! content hash) lets the recursive-spawn bench reuse one compile pass
-//! across thousands of CALLs of the same Image. Without the cache,
-//! `Compiler::compile` runs once per invocation (~100–500 µs per
-//! call) and dwarfs the ~10 µs ring-3 context switch we're trying to
-//! measure.
+//! ```text
+//!   arena base (page-aligned)
+//!     + bb_offset       : BB (bitmask)      RO
+//!     + jt_offset       : JT (jump table)   RO
+//!     + dispatch_offset : DISPATCH table    RO
+//!     + jit_offset      : JIT native code   RX
+//!     + tramp_offset    : trampoline (26B)  RX
+//! ```
+//!
+//! The arena lives for the cache entry's lifetime and is mapped into
+//! every Instance's page table that runs this Image — so we only pay
+//! the alloc + memcpy + perm setup once per Image (not per call).
+//!
+//! `Compiler::compile` emits RIP-relative references to `CTX_VA`
+//! (a fixed constant) and embeds the per-Image `JIT_VA` for any
+//! within-JIT branch fix-ups. The dispatch table contains `i32`
+//! offsets relative to that `JIT_VA`; runtime resolution adds
+//! `code_base` (a `JitContext` field) to land on absolute native
+//! addresses.
 
 #![cfg(target_os = "none")]
 
@@ -27,19 +35,39 @@ use javm_recompiler_x86::codegen::{CompileResult, Compiler, HelperFns};
 
 use javm_cap::CapHash;
 
-/// One cached compile result, retained by `image_hash`.
+use crate::page_alloc::PageBuf;
+use crate::paging::PAGE_SIZE;
+
+/// One cached Image's worth of compiled artifacts.
 ///
-/// The fields mirror [`CompileResult`] but live in long-term storage.
-/// Each ring-3 entry copies `native` into the per-invocation user-RX
-/// page and `dispatch_table` into the user-RO dispatch page. The
-/// `trap_table` is consulted by `jit_pf_handler` to translate native
-/// offsets back to PVM PCs on page faults; we hand a borrowed slice
-/// to the handler via static atomics.
+/// The arena holds BB / JT / DISPATCH / JIT / TRAMP regions
+/// contiguously, page-aligned. The kernel maps the arena's pages
+/// (with per-region permissions) into the per-call page table.
+///
+/// The `trap_table` is kept outside the arena — `jit_pf_handler` reads
+/// it via static atomics and never needs it mapped into ring-3.
 pub struct CompiledImage {
-    pub native: Vec<u8>,
-    pub dispatch_table: Vec<i32>,
-    pub trap_table: Vec<(u32, u32)>,
+    /// Page-aligned buffer holding the five regions.
+    pub arena: PageBuf,
+    /// Offsets into `arena` for each region (in bytes from arena base).
+    pub bb_offset: usize,
+    pub jt_offset: usize,
+    pub dispatch_offset: usize,
+    pub jit_offset: usize,
+    pub tramp_offset: usize,
+    /// Byte sizes of the regions as stored in the arena (each rounded
+    /// up to the next page boundary).
+    pub bb_size: usize,
+    pub jt_size: usize,
+    pub dispatch_size: usize,
+    pub jit_size: usize,
+    pub tramp_size: usize,
+    /// Native-code offset (within the JIT region) of the exit label
+    /// — `jit_pf_handler` redirects the saved RIP here on page fault.
     pub exit_label_offset: u32,
+    /// (native_offset, pvm_pc) pairs the #PF handler binary-searches
+    /// to recover the PVM PC from a faulting RIP.
+    pub trap_table: Vec<(u32, u32)>,
 }
 
 /// Process-wide compile cache.
@@ -58,64 +86,139 @@ static CACHE: CompileCache = CompileCache {
     inner: UnsafeCell::new(BTreeMap::new()),
 };
 
-/// Look up the compile cache by `image_hash`. On miss, run
-/// `Compiler::compile` and insert the result. Returns a `'static`
-/// borrow into the cache entry — caller may freely read `native`,
-/// `dispatch_table`, `trap_table`, `exit_label_offset` for the
-/// duration of the invocation.
+/// Round a byte count up to the next [`PAGE_SIZE`] boundary, with a
+/// minimum of one page (so even empty regions occupy a single page
+/// in the arena — keeps the per-region PTEs uniform).
+fn page_round_up_min1(n: usize) -> usize {
+    n.next_multiple_of(PAGE_SIZE).max(PAGE_SIZE)
+}
+
+/// Look up the compile cache by `image_hash`. On miss, compile the
+/// Image and materialise the per-Image arena. Returns a `'static`
+/// borrow into the cache entry.
+///
+/// `arena_base_va` is the ring-3 VA where the arena will be mapped
+/// (used to compute the per-Image `JIT_VA` so codegen embeds correct
+/// RIP-relative displacements). Callers must map the arena at this
+/// exact VA on every entry.
 ///
 /// # Safety
 ///
-/// Hyperlight serialises host calls, so concurrent access is not
-/// possible. The returned reference is valid until the cache entry is
-/// evicted; in V1 we never evict, so the borrow lifetime is
-/// effectively `'static`.
+/// Hyperlight serialises host calls; the returned reference is valid
+/// until eviction (V1 never evicts), effectively `'static`.
+#[allow(clippy::too_many_arguments)]
 pub fn get_or_compile(
     image_hash: &CapHash,
     code: &[u8],
     bitmask: &[u8],
     jump_table: &[u32],
-    jit_va_m: u64,
+    arena_base_va: u64,
+    ctx_va: u64,
     mem_cycles: u8,
     helpers: HelperFns,
 ) -> &'static CompiledImage {
-    // SAFETY: single-threaded guest. Reentrant access from inside the
-    // closure below is impossible because `Compiler::compile` doesn't
-    // call back into this module.
+    // SAFETY: single-threaded guest.
     let map = unsafe { &mut *CACHE.inner.get() };
     if !map.contains_key(image_hash) {
-        let compiler = Compiler::new(
-            bitmask,
-            jump_table,
-            helpers,
-            code.len(),
-            jit_va_m,
-            mem_cycles,
-        );
+        // ---- compute region sizes and offsets --------------------------
+        let bb_size = page_round_up_min1(bitmask.len());
+        let jt_size = page_round_up_min1(core::mem::size_of_val(jump_table));
+        // Dispatch table sized at worst-case (one i32 per code byte) so
+        // every PC index lands in range; only the prefix produced by
+        // compile is filled, rest stays zero.
+        let dispatch_size = page_round_up_min1(code.len() * core::mem::size_of::<i32>());
+
+        let bb_offset = 0usize;
+        let jt_offset = bb_offset + bb_size;
+        let dispatch_offset = jt_offset + jt_size;
+        let jit_offset = dispatch_offset + dispatch_size;
+        // jit_va is the absolute VA where the JIT region will be mapped;
+        // codegen embeds this for its internal jump resolution.
+        let jit_va = arena_base_va + jit_offset as u64;
+
+        // ---- run codegen ----------------------------------------------
+        let compiler = Compiler::new(bitmask, jump_table, helpers, code.len(), jit_va, mem_cycles);
         let CompileResult {
             native_code,
             dispatch_table,
             trap_table,
             exit_label_offset,
         } = compiler.compile(code, bitmask);
+
+        let jit_size = page_round_up_min1(native_code.len());
+        let tramp_offset = jit_offset + jit_size;
+        let tramp_size = PAGE_SIZE; // 26 bytes; one page is plenty.
+
+        let total = tramp_offset + tramp_size;
+
+        // ---- allocate arena --------------------------------------------
+        let mut arena = PageBuf::new(total).expect("PageBuf alloc for Image arena");
+
+        // ---- fill BB / JT / DISPATCH / JIT / TRAMP into arena ----------
+        let buf = arena.as_mut_slice();
+        // BB
+        buf[bb_offset..bb_offset + bitmask.len()].copy_from_slice(bitmask);
+        // JT
+        let jt_bytes_len = core::mem::size_of_val(jump_table);
+        // Reinterpret &[u32] as &[u8] for the memcpy.
+        let jt_ptr = jump_table.as_ptr() as *const u8;
+        // SAFETY: jt_ptr is valid for jt_bytes_len bytes (jump_table
+        // length × size_of::<u32>).
+        let jt_slice = unsafe { core::slice::from_raw_parts(jt_ptr, jt_bytes_len) };
+        buf[jt_offset..jt_offset + jt_bytes_len].copy_from_slice(jt_slice);
+        // DISPATCH
+        let dispatch_bytes_len = core::mem::size_of_val(dispatch_table.as_slice());
+        let dispatch_ptr = dispatch_table.as_ptr() as *const u8;
+        // SAFETY: dispatch_ptr is valid for dispatch_bytes_len bytes.
+        let dispatch_slice =
+            unsafe { core::slice::from_raw_parts(dispatch_ptr, dispatch_bytes_len) };
+        buf[dispatch_offset..dispatch_offset + dispatch_bytes_len].copy_from_slice(dispatch_slice);
+        // JIT
+        buf[jit_offset..jit_offset + native_code.len()].copy_from_slice(&native_code);
+        // TRAMP — 26 bytes encoding the per-Image entry sequence.
+        //   mov rdi, ctx_va     ; 48 BF <imm64>  (10)
+        //   mov rax, jit_va     ; 48 B8 <imm64>  (10)
+        //   call rax            ; FF D0          (2)
+        //   int 0x81            ; CD 81          (2)
+        //   ud2                 ; 0F 0B          (2)
+        let tramp_start = tramp_offset;
+        buf[tramp_start] = 0x48;
+        buf[tramp_start + 1] = 0xBF;
+        buf[tramp_start + 2..tramp_start + 10].copy_from_slice(&ctx_va.to_le_bytes());
+        buf[tramp_start + 10] = 0x48;
+        buf[tramp_start + 11] = 0xB8;
+        buf[tramp_start + 12..tramp_start + 20].copy_from_slice(&jit_va.to_le_bytes());
+        buf[tramp_start + 20] = 0xFF;
+        buf[tramp_start + 21] = 0xD0;
+        buf[tramp_start + 22] = 0xCD;
+        buf[tramp_start + 23] = 0x81;
+        buf[tramp_start + 24] = 0x0F;
+        buf[tramp_start + 25] = 0x0B;
+
         map.insert(
             *image_hash,
             CompiledImage {
-                native: native_code,
-                dispatch_table,
-                trap_table,
+                arena,
+                bb_offset,
+                jt_offset,
+                dispatch_offset,
+                jit_offset,
+                tramp_offset,
+                bb_size,
+                jt_size,
+                dispatch_size,
+                jit_size,
+                tramp_size,
                 exit_label_offset,
+                trap_table,
             },
         );
     }
-    // SAFETY: just inserted (or already present); BTreeMap never
-    // moves entries by value once allocated through the global
-    // allocator, so the reference is stable for the cache's lifetime.
+    // SAFETY: present; BTreeMap entries don't move once inserted.
     map.get(image_hash).expect("inserted above")
 }
 
-/// Diagnostic: number of cached images. Useful for tests that assert
-/// the cache is being hit.
+/// Diagnostic: number of cached images. Useful for tests.
 #[allow(dead_code)]
 pub fn cached_count() -> usize {
     // SAFETY: single-threaded guest.

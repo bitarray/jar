@@ -23,33 +23,35 @@
 //! META, which is within ±2 GiB.
 //!
 //! ```text
-//!   MEM_VA   = 0                               mem_size bytes guest memory
-//!   CTX_VA   = 4 GiB                           4 KiB JitContext
+//!   MEM_VA   = 0                  mem_size bytes guest memory     (user-RW)
+//!   CTX_VA   = 4 GiB              4 KiB JitContext                (user-RW)
 //!
-//!   META_BASE= 4 GiB + 16 MiB                  clear of CTX, well-aligned
-//!   BB_VA    = META_BASE                       bitmask scratch (user-RO)
-//!   JT_VA    = META_BASE + 16 MiB              jump-table scratch (user-RO)
-//!   DISPATCH = META_BASE + 32 MiB              dispatch table (user-RO)
-//!   JIT_VA   = META_BASE + 64 MiB              JIT'd native (user-RX)
-//!   TRAMP    = META_BASE + 128 MiB             trampoline (user-RX)
-//!   STACK    = TRAMP + 4 KiB                   stack (user-RW)
+//!   META_BASE= 4 GiB + 16 MiB     per-Image arena base
+//!                                 (BB | JT | DISPATCH | JIT | TRAMP)
+//!     BB / JT / DISPATCH                                          (user-RO)
+//!     JIT / TRAMP                                                 (user-RX)
+//!
+//!   STACK    = META + 1 GiB       ring-3 x86 stack, 4 KiB         (user-RW)
 //! ```
 //!
-//! All backing pages come from the global heap (talc). Per-page PVM
-//! `RO`/`RW` enforcement was removed alongside the PERMS sweep — the
-//! per-invocation PT itself enforces bounds (faults outside
-//! `[MEM_VA, MEM_VA + mem_size)` route via `jit_pf_handler`).
+//! The Image arena lives in [`jit_cache::CompiledImage`] (one per
+//! Image, allocated once and mapped read-only into every Instance's
+//! PT). Per-call work allocates only CTX / MEM / STACK pages from
+//! talc, then maps the cached arena's pages into the per-invocation
+//! page table.
+//!
+//! Per-page PVM `RO`/`RW` enforcement is delegated to the page table —
+//! faults outside `[MEM_VA, MEM_VA + mem_size)` route via
+//! `jit_pf_handler`.
 
 #![cfg(target_os = "none")]
 
 extern crate alloc;
 
 use crate::jit_cache;
+use crate::page_alloc::PageBuf;
 use crate::paging::{PAGE_SIZE, PageTable, Perm};
 use crate::ring3;
-use alloc::alloc::{alloc_zeroed, dealloc};
-use core::alloc::Layout;
-use core::ptr::NonNull;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use hyperlight_guest_bin::exception::arch::{Context, ExceptionInfo, HANDLERS};
 use javm_recompiler_x86::JitContext;
@@ -161,64 +163,27 @@ pub struct ExitInfo {
 // 4 GiB; CTX must be outside that range to avoid spoofing.
 
 const MEM_VA_M: u64 = 0;
-const CTX_VA_M: u64 = 1u64 << 32; // 4 GiB — first page above PVM u32 range
-const META_BASE_M: u64 = CTX_VA_M + (1u64 << 24); // CTX + 16 MiB headroom
-const BB_VA_M: u64 = META_BASE_M;
-const JT_VA_M: u64 = META_BASE_M + (1u64 << 24); // +16 MiB
-const DISPATCH_VA_M: u64 = META_BASE_M + (1u64 << 25); // +32 MiB
-const JIT_VA_M: u64 = META_BASE_M + (1u64 << 26); // +64 MiB
-const TRAMP_VA_M: u64 = META_BASE_M + (1u64 << 27); // +128 MiB
-const STACK_VA_M: u64 = TRAMP_VA_M + PAGE_SIZE as u64;
+/// PML4 slot 1 (base 512 GiB) hosts CTX + the per-Image arena. MEM
+/// stays in PML4[0] at VA 0 so PVM addresses are still native VAs.
+/// Placing CTX in this slot too keeps it within ±2 GiB of the JIT
+/// region so codegen's RIP-relative addressing reaches it.
+const META_PML4_BASE: u64 = 1u64 << 39; // 512 GiB
+/// CTX sits at the slot base; the per-Image arena follows the CTX
+/// page. CTX_VA_M must match `javm_recompiler_x86::codegen::CTX_VA`.
+const CTX_VA_M: u64 = META_PML4_BASE;
+/// Base of the per-Image arena (BB | JT | DISPATCH | JIT | TRAMP),
+/// one page past CTX so CTX gets its own page-table leaf entry.
+const META_BASE_M: u64 = CTX_VA_M + PAGE_SIZE as u64;
+/// STACK_VA must sit at a fixed location outside the Image arena.
+/// 1 GiB past META_BASE — comfortably > any single Image's compiled
+/// arena footprint and still in PML4 slot 1.
+const STACK_VA_M: u64 = META_PML4_BASE + (1u64 << 30); // META + 1 GiB
 
 /// One PVM region (arg / ro / rw) to populate before entry.
 #[derive(Clone, Copy)]
 pub struct MemRegion<'a> {
     pub start: u32,
     pub data: &'a [u8],
-}
-
-/// Page-aligned heap allocation. Frees on drop.
-struct PageBuf {
-    ptr: NonNull<u8>,
-    layout: Layout,
-}
-
-impl PageBuf {
-    /// Allocate `size` bytes (rounded up to a page boundary), zeroed,
-    /// aligned to a page.
-    fn new(size: usize) -> Option<Self> {
-        let size = size.next_multiple_of(PAGE_SIZE).max(PAGE_SIZE);
-        let layout = Layout::from_size_align(size, PAGE_SIZE).ok()?;
-        // SAFETY: layout is non-zero and well-formed.
-        let raw = unsafe { alloc_zeroed(layout) };
-        let ptr = NonNull::new(raw)?;
-        Some(Self { ptr, layout })
-    }
-
-    /// Kernel VA of the buffer.
-    fn kva(&self) -> u64 {
-        self.ptr.as_ptr() as u64
-    }
-
-    /// Physical address. Talc heap lives at high kernel VA (Stage F);
-    /// `va_to_pa` walks back through the kernel-half offset.
-    fn pa(&self) -> u64 {
-        crate::paging::va_to_pa(self.kva()).expect("talc kva must lie in kernel half")
-    }
-
-    /// Total size in bytes (multiple of `PAGE_SIZE`).
-    fn size(&self) -> u64 {
-        self.layout.size() as u64
-    }
-}
-
-impl Drop for PageBuf {
-    fn drop(&mut self) {
-        // SAFETY: layout matches the one we passed to `alloc_zeroed`.
-        unsafe {
-            dealloc(self.ptr.as_ptr(), self.layout);
-        }
-    }
 }
 
 /// Run a PVM program with a real flat-memory mapping at ring 3.
@@ -252,7 +217,7 @@ pub unsafe fn run_pvm_with_mem(
 ) -> Option<ExitInfo> {
     assert_eq!(code.len(), bitmask.len());
 
-    // ---- compile (cached by image_hash) -----------------------------------
+    // ---- compile (cached by image_hash) into per-Image arena --------------
     //
     // The codegen reads the helper-fn addresses to look up the access
     // width (`if fn_addr == helpers.mem_write_u8 { width = 1 }`).
@@ -278,54 +243,30 @@ pub unsafe fn run_pvm_with_mem(
         code,
         bitmask,
         jump_table,
-        JIT_VA_M,
+        META_BASE_M,
+        CTX_VA_M,
         javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
         helpers,
     );
-    let native: &[u8] = cached.native.as_slice();
-    let dispatch_table: &[i32] = cached.dispatch_table.as_slice();
-    let trap_table: &[(u32, u32)] = cached.trap_table.as_slice();
-    let exit_label_offset = cached.exit_label_offset;
-    if native.is_empty() {
+    if cached.jit_size == 0 {
         return None;
     }
 
-    // ---- size each buffer to the actual program --------------------------
+    // ---- per-region VAs derived from the cached arena offsets -------------
+    let bb_va = META_BASE_M + cached.bb_offset as u64;
+    let jt_va = META_BASE_M + cached.jt_offset as u64;
+    let dispatch_va = META_BASE_M + cached.dispatch_offset as u64;
+    let jit_va = META_BASE_M + cached.jit_offset as u64;
+    let tramp_va = META_BASE_M + cached.tramp_offset as u64;
+
     let mem_bytes = (mem_size as usize).next_multiple_of(PAGE_SIZE);
-    let bb_bytes = bitmask.len();
-    let jt_bytes = jump_table.len().checked_mul(core::mem::size_of::<u32>())?;
-    let dispatch_bytes = dispatch_table
-        .len()
-        .checked_mul(core::mem::size_of::<i32>())?;
-    let dispatch_size_bytes = code.len().checked_mul(core::mem::size_of::<i32>())?;
-    let jit_bytes = native.len();
 
     // ---- allocate per-invocation buffers ---------------------------------
+    // CTX (mutable, written by JIT every instruction) and per-call MEM /
+    // STACK stay private. The five Image-shared regions live in `cached.arena`.
     let mem_buf = PageBuf::new(mem_bytes.max(PAGE_SIZE))?;
     let ctx_buf = PageBuf::new(PAGE_SIZE)?;
-    let bb_buf = PageBuf::new(bb_bytes.max(PAGE_SIZE))?;
-    let jt_buf = PageBuf::new(jt_bytes.max(PAGE_SIZE))?;
-    let dispatch_buf = PageBuf::new(dispatch_size_bytes.max(PAGE_SIZE))?;
-    let jit_buf = PageBuf::new(jit_bytes)?;
-    let tramp_buf = PageBuf::new(PAGE_SIZE)?;
     let stack_buf = PageBuf::new(PAGE_SIZE)?;
-
-    // ---- write the JIT code ------------------------------------------------
-    // SAFETY: jit_buf has at least `jit_bytes` of capacity.
-    unsafe {
-        core::ptr::copy_nonoverlapping(native.as_ptr(), jit_buf.kva() as *mut u8, jit_bytes);
-    }
-
-    // ---- write bb_starts / jt scratch --------------------------------------
-    // SAFETY: bb_buf/jt_buf are sized to fit the actual lengths.
-    unsafe {
-        core::ptr::copy_nonoverlapping(bitmask.as_ptr(), bb_buf.kva() as *mut u8, bb_bytes);
-        core::ptr::copy_nonoverlapping(
-            jump_table.as_ptr() as *const u8,
-            jt_buf.kva() as *mut u8,
-            jt_bytes,
-        );
-    }
 
     // ---- populate mem regions ----------------------------------------------
     // (mem_buf is already zeroed by alloc_zeroed.)
@@ -348,22 +289,12 @@ pub unsafe fn run_pvm_with_mem(
         }
     }
 
-    // ---- write the dispatch table -----------------------------------------
-    // SAFETY: dispatch_buf is sized to dispatch_size_bytes (capped at code.len() * 4);
-    // dispatch_bytes ≤ dispatch_size_bytes since dispatch_table.len() ≤ code.len().
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            dispatch_table.as_ptr() as *const u8,
-            dispatch_buf.kva() as *mut u8,
-            dispatch_bytes,
-        );
-    }
-
     // ---- build JitContext in the ctx page ----------------------------------
     let ctx_kva = ctx_buf.kva();
     let ctx = ctx_kva as *mut JitContext;
 
-    // SAFETY: ctx points to a fresh zeroed ctx page.
+    // SAFETY: ctx points to a fresh zeroed ctx page. Pointer fields use
+    // the per-Image VAs computed above (not the old fixed constants).
     unsafe {
         (*ctx).regs = initial_regs;
         (*ctx).gas = initial_gas;
@@ -371,45 +302,21 @@ pub unsafe fn run_pvm_with_mem(
         (*ctx).exit_arg = 0;
         (*ctx).heap_base = 0;
         (*ctx).heap_top = 0;
-        (*ctx).jt_ptr = JT_VA_M as *const u32;
+        (*ctx).jt_ptr = jt_va as *const u32;
         (*ctx).jt_len = jump_table.len() as u32;
         (*ctx)._pad0 = 0;
-        (*ctx).bb_starts = BB_VA_M as *const u8;
+        (*ctx).bb_starts = bb_va as *const u8;
         (*ctx).bb_len = bitmask.len() as u32;
         (*ctx)._pad1 = 0;
         (*ctx).entry_pc = entry_pc;
         (*ctx).pc = entry_pc;
-        (*ctx).dispatch_table = DISPATCH_VA_M as *const i32;
-        (*ctx).code_base = JIT_VA_M;
+        (*ctx).dispatch_table = dispatch_va as *const i32;
+        (*ctx).code_base = jit_va;
         (*ctx).flat_buf = MEM_VA_M as *mut u8;
         (*ctx).fast_reentry = 0;
         (*ctx)._pad2 = 0;
         (*ctx).max_heap_pages = 0;
         (*ctx)._pad3 = 0;
-    }
-
-    // ---- write the trampoline ----------------------------------------------
-    // mov rdi, ctx_va    ; 48 BF <imm64>  (10)
-    // mov rax, jit_va    ; 48 B8 <imm64>  (10)
-    // call rax           ; FF D0          (2)
-    // int 0x81           ; CD 81          (2)
-    // ud2                ; 0F 0B          (2)
-    let mut tramp = [0u8; 26];
-    tramp[0] = 0x48;
-    tramp[1] = 0xBF;
-    tramp[2..10].copy_from_slice(&CTX_VA_M.to_le_bytes());
-    tramp[10] = 0x48;
-    tramp[11] = 0xB8;
-    tramp[12..20].copy_from_slice(&JIT_VA_M.to_le_bytes());
-    tramp[20] = 0xFF;
-    tramp[21] = 0xD0;
-    tramp[22] = 0xCD;
-    tramp[23] = 0x81;
-    tramp[24] = 0x0F;
-    tramp[25] = 0x0B;
-    // SAFETY: tramp_buf is a 4 KiB page.
-    unsafe {
-        core::ptr::copy_nonoverlapping(tramp.as_ptr(), tramp_buf.kva() as *mut u8, tramp.len());
     }
 
     // ---- build the page table ----------------------------------------------
@@ -418,19 +325,17 @@ pub unsafe fn run_pvm_with_mem(
     if mem_bytes > 0 {
         pt.map(MEM_VA_M, mem_buf.pa(), mem_buf.size(), Perm::user_rw())?;
     }
-    pt.map(BB_VA_M, bb_buf.pa(), bb_buf.size(), Perm::user_ro())?;
-    pt.map(JT_VA_M, jt_buf.pa(), jt_buf.size(), Perm::user_ro())?;
+    // Map the Image arena: BB / JT / DISPATCH as user-RO, JIT / TRAMP as
+    // user-RX. Three `pt.map` calls in place of the old five (and they
+    // reference the per-Image cached arena, not per-call buffers).
+    let arena_pa = cached.arena.pa();
+    let ro_region_size = (cached.bb_size + cached.jt_size + cached.dispatch_size) as u64;
+    let rx_region_size = (cached.jit_size + cached.tramp_size) as u64;
+    pt.map(bb_va, arena_pa, ro_region_size, Perm::user_ro())?;
     pt.map(
-        DISPATCH_VA_M,
-        dispatch_buf.pa(),
-        dispatch_buf.size(),
-        Perm::user_ro(),
-    )?;
-    pt.map(JIT_VA_M, jit_buf.pa(), jit_buf.size(), Perm::user_rx())?;
-    pt.map(
-        TRAMP_VA_M,
-        tramp_buf.pa(),
-        tramp_buf.size(),
+        jit_va,
+        arena_pa + cached.jit_offset as u64,
+        rx_region_size,
         Perm::user_rx(),
     )?;
     pt.map(
@@ -445,18 +350,22 @@ pub unsafe fn run_pvm_with_mem(
     // SAFETY: ring-0 mutation of GDT/IDT; serialised by Hyperlight.
     unsafe { ring3::install_ring3_exit_gate() };
 
-    JIT_CODE_BASE.store(JIT_VA_M, Ordering::SeqCst);
-    JIT_CODE_LEN.store(jit_buf.size(), Ordering::SeqCst);
-    EXIT_LABEL_VA.store(JIT_VA_M + exit_label_offset as u64, Ordering::SeqCst);
-    TRAP_TABLE_PTR.store(trap_table.as_ptr() as *mut (u32, u32), Ordering::SeqCst);
-    TRAP_TABLE_LEN.store(trap_table.len() as u64, Ordering::SeqCst);
+    JIT_CODE_BASE.store(jit_va, Ordering::SeqCst);
+    JIT_CODE_LEN.store(cached.jit_size as u64, Ordering::SeqCst);
+    EXIT_LABEL_VA.store(jit_va + cached.exit_label_offset as u64, Ordering::SeqCst);
+    TRAP_TABLE_PTR.store(
+        cached.trap_table.as_ptr() as *mut (u32, u32),
+        Ordering::SeqCst,
+    );
+    TRAP_TABLE_LEN.store(cached.trap_table.len() as u64, Ordering::SeqCst);
     CTX_KVA.store(ctx_kva, Ordering::SeqCst);
     HANDLERS[14].store(jit_pf_handler as *const () as u64, Ordering::Release);
 
     // ---- drop to ring 3 ----------------------------------------------------
     let user_stack_top = STACK_VA_M + stack_buf.size();
-    // SAFETY: trampoline + stack mapped above; new_cr3 carries kernel half.
-    let _user_rax = unsafe { ring3::nub_enter_ring3(TRAMP_VA_M, user_stack_top, new_cr3) };
+    // SAFETY: trampoline (inside the Image arena) + stack mapped above;
+    // new_cr3 carries kernel half.
+    let _user_rax = unsafe { ring3::nub_enter_ring3(tramp_va, user_stack_top, new_cr3) };
 
     HANDLERS[14].store(0, Ordering::Release);
     TRAP_TABLE_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);

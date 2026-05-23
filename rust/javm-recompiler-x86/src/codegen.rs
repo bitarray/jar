@@ -80,9 +80,15 @@ const CALLER_SAVED: [Reg; 8] = [
 /// JitContext lives above the PVM u32 address space (no bounds check
 /// on guest mem — the full low 4 GiB of native VA belongs to the
 /// program). CTX is reached via RIP-relative `[rip+disp32]`, which
-/// gives ±2 GiB range from the JIT code, so CTX just needs to be
-/// adjacent to the JIT region.
-pub const CTX_VA: u64 = 1u64 << 32;
+/// gives ±2 GiB range from the JIT code, so CTX must be **adjacent**
+/// to the JIT region.
+///
+/// In the nub-x86 microkernel, CTX and the per-Image JIT arena both
+/// live in PML4 slot 1 (base 512 GiB). Sharing one PML4 slot lets
+/// the Image's PDPT subtree be cached as a template across all
+/// Instances (per-call PT just shallow-clones the slot's entry). MEM
+/// stays in PML4[0] at VA 0 so PVM addr == native VA still holds.
+pub const CTX_VA: u64 = 1u64 << 39;
 
 use super::JitContext;
 use memoffset::offset_of;
