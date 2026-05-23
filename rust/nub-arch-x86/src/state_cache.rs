@@ -45,7 +45,7 @@ use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use javm_cap::cap::Cap;
+use javm_cap::cap::{Cap, CapHashOrRef};
 use javm_cap::entry::CacheEntry;
 use nub_host_common::cache::{
     CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheHandle, CacheTalcLock, STATE_CACHE_GPA,
@@ -191,6 +191,26 @@ pub fn lookup_instance_handle<A: Allocator + Clone + 'static>(ref_id: u64) -> Op
 /// Convenience: resolve a blob hash directly to its inner `Cap`.
 pub fn lookup_cap(hash: &[u8; 32]) -> Option<&'static Cap<TalcAlloc>> {
     lookup_blob::<TalcAlloc>(hash).map(|e| &e.cap)
+}
+
+/// Convenience: resolve a `CapHashOrRef` to its inner `Cap`. Hashes
+/// hit `cache.blobs`; refs hit `cache.instances`.
+#[allow(dead_code)]
+pub fn lookup_cap_either(key: CapHashOrRef) -> Option<&'static Cap<TalcAlloc>> {
+    match key {
+        CapHashOrRef::Hash(h) => lookup_cap(&h),
+        CapHashOrRef::Ref(r) => lookup_instance::<TalcAlloc>(r).map(|e| &e.cap),
+    }
+}
+
+/// Refcount-bumping resolution of a [`CapHashOrRef`]. The returned
+/// handle pins the underlying entry for its lifetime.
+#[allow(dead_code)]
+pub fn lookup_handle(key: CapHashOrRef) -> Option<CapHandle<TalcAlloc>> {
+    match key {
+        CapHashOrRef::Hash(h) => lookup_blob_handle(&h),
+        CapHashOrRef::Ref(r) => lookup_instance_handle(r),
+    }
 }
 
 /// `TalcAlloc` handle pointing at the shared cache region's lock at
