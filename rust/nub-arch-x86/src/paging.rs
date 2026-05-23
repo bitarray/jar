@@ -25,7 +25,7 @@
 //!
 //! ## PA ↔ VA translation
 //!
-//! Three address-translation regimes (Stage F kernel relocation):
+//! Four address-translation regimes (Stage F kernel relocation):
 //!
 //! * **Kernel half (code, PEB, heap, init-data, talc allocations)**
 //!   lives at high VA `[KERNEL_HIGH_BASE, scratch_base_gva)` and is
@@ -40,9 +40,18 @@
 //!   ```text
 //!     gva = scratch_base_gva + (gpa - scratch_base_gpa)
 //!   ```
-//! * **User half (low VA, 0..512 GiB)** is owned by the per-invocation
-//!   PT we build for ring-3 PVM programs; ring-0 paging helpers below
-//!   return `None` for these addresses.
+//! * **State cache region** (shared talc heap with host) is mapped at
+//!   the fixed `STATE_CACHE_VA = 0x4000_0000_0000` backed by
+//!   `STATE_CACHE_GPA = 0x2_0000_0000` (8 GiB), 1 GiB long:
+//!   ```text
+//!     gva = STATE_CACHE_VA + (gpa - STATE_CACHE_GPA)
+//!   ```
+//!   Used to compute the PA of `Cap::Data` pages so they can be
+//!   mapped directly into the ring-3 PT (Issue #855).
+//! * **User half (low VA, 0..512 GiB except for the state cache
+//!   region above)** is owned by the per-invocation PT we build for
+//!   ring-3 PVM programs; ring-0 paging helpers below return `None`
+//!   for these addresses.
 
 #![cfg(target_os = "none")]
 
@@ -55,6 +64,7 @@ use core::cell::RefCell;
 use core::ptr::NonNull;
 
 use hyperlight_guest::layout::{scratch_base_gpa, scratch_base_gva};
+use nub_host_common::cache::{STATE_CACHE_GPA, STATE_CACHE_SIZE, STATE_CACHE_VA};
 
 /// 4 KiB page size — the unit of alignment for page-aligned
 /// allocations (page tables, JIT exec pages, etc.).
@@ -83,16 +93,17 @@ pub mod flag {
 /// Mask covering the physical-address bits of a PTE (bits 12..51).
 const PA_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
-/// Convert a kernel VA to its physical address. Three regimes:
-/// scratch (high VA, offset to scratch GPA), kernel half (high VA in
-/// `[KERNEL_HIGH_BASE, scratch_base_gva)`, offset to low GPA), and
-/// low VA (user-half, owned by per-invocation PT — returns `None`).
+/// Convert a kernel VA to its physical address. Four regimes (see
+/// module doc): scratch (high VA), kernel half (high VA), state
+/// cache (fixed VA at `STATE_CACHE_VA`), user half (returns `None`).
 pub fn va_to_pa(va: u64) -> Option<u64> {
     let scratch_gva = scratch_base_gva();
     if va >= scratch_gva {
         Some(scratch_base_gpa() + (va - scratch_gva))
     } else if va >= KERNEL_HIGH_BASE {
         Some(KERNEL_BASE_GPA + (va - KERNEL_HIGH_BASE))
+    } else if va >= STATE_CACHE_VA && va < STATE_CACHE_VA + STATE_CACHE_SIZE as u64 {
+        Some(STATE_CACHE_GPA + (va - STATE_CACHE_VA))
     } else {
         None
     }
@@ -103,6 +114,8 @@ pub fn pa_to_va(pa: u64) -> Option<u64> {
     let scratch_gpa = scratch_base_gpa();
     if pa >= scratch_gpa {
         Some(scratch_base_gva() + (pa - scratch_gpa))
+    } else if pa >= STATE_CACHE_GPA && pa < STATE_CACHE_GPA + STATE_CACHE_SIZE as u64 {
+        Some(STATE_CACHE_VA + (pa - STATE_CACHE_GPA))
     } else if pa >= KERNEL_BASE_GPA {
         Some(KERNEL_HIGH_BASE + (pa - KERNEL_BASE_GPA))
     } else {
@@ -402,6 +415,97 @@ impl Drop for PageTable {
                 dealloc(table.as_ptr() as *mut u8, TABLE_LAYOUT);
             }
         }
+    }
+}
+
+impl PageTable {
+    /// Kernel VA of this page table's PML4. Stashed in a static at
+    /// `enter_frame` time so the #PF handler can rewrite leaf PTEs
+    /// without needing access to the [`PageTable`] itself.
+    pub fn pml4_kva(&self) -> u64 {
+        self.pml4.as_ptr() as u64
+    }
+}
+
+/// Look up the physical address of the 4 KiB page covering `virt`
+/// in the page table rooted at `pml4_va`. Returns `None` if any
+/// table on the walk is non-present or marks a large-page leaf.
+///
+/// # Safety
+///
+/// `pml4_va` must be the kernel VA of a live 4-level page table
+/// (whose intermediate tables are reachable via [`pa_to_va`]).
+pub unsafe fn pt_lookup_leaf(pml4_va: u64, virt: u64) -> Option<u64> {
+    const PS: u64 = 1 << 7;
+    let idx4 = ((virt >> 39) & 0x1FF) as usize;
+    let idx3 = ((virt >> 30) & 0x1FF) as usize;
+    let idx2 = ((virt >> 21) & 0x1FF) as usize;
+    let idx1 = ((virt >> 12) & 0x1FF) as usize;
+
+    // SAFETY: pml4_va owned by caller, page-aligned, kernel-readable.
+    let pml4 = unsafe { &*(pml4_va as *const Table) };
+    if pml4[idx4] & flag::P == 0 {
+        return None;
+    }
+    let pdpt = unsafe { &*(pa_to_va(pml4[idx4] & PA_MASK)? as *const Table) };
+    if pdpt[idx3] & flag::P == 0 || pdpt[idx3] & PS != 0 {
+        return None;
+    }
+    let pd = unsafe { &*(pa_to_va(pdpt[idx3] & PA_MASK)? as *const Table) };
+    if pd[idx2] & flag::P == 0 || pd[idx2] & PS != 0 {
+        return None;
+    }
+    let pt = unsafe { &*(pa_to_va(pd[idx2] & PA_MASK)? as *const Table) };
+    if pt[idx1] & flag::P == 0 {
+        return None;
+    }
+    Some(pt[idx1] & PA_MASK)
+}
+
+/// Overwrite an existing leaf PTE in the page table rooted at
+/// `pml4_va` so the 4 KiB page covering `virt` now maps to `phys`
+/// with `perm`. Returns `None` if any intermediate is missing —
+/// i.e., the page wasn't previously mapped. Does not invalidate the
+/// TLB; the caller must [`invlpg`].
+///
+/// # Safety
+///
+/// Same as [`pt_lookup_leaf`], plus the caller must hold the only
+/// reference to the table during the rewrite (we currently have a
+/// single-threaded guest).
+pub unsafe fn pt_remap_leaf(pml4_va: u64, virt: u64, phys: u64, perm: Perm) -> Option<()> {
+    const PS: u64 = 1 << 7;
+    let idx4 = ((virt >> 39) & 0x1FF) as usize;
+    let idx3 = ((virt >> 30) & 0x1FF) as usize;
+    let idx2 = ((virt >> 21) & 0x1FF) as usize;
+    let idx1 = ((virt >> 12) & 0x1FF) as usize;
+
+    // SAFETY: as above.
+    let pml4 = unsafe { &mut *(pml4_va as *mut Table) };
+    if pml4[idx4] & flag::P == 0 {
+        return None;
+    }
+    let pdpt = unsafe { &mut *(pa_to_va(pml4[idx4] & PA_MASK)? as *mut Table) };
+    if pdpt[idx3] & flag::P == 0 || pdpt[idx3] & PS != 0 {
+        return None;
+    }
+    let pd = unsafe { &mut *(pa_to_va(pdpt[idx3] & PA_MASK)? as *mut Table) };
+    if pd[idx2] & flag::P == 0 || pd[idx2] & PS != 0 {
+        return None;
+    }
+    let pt = unsafe { &mut *(pa_to_va(pd[idx2] & PA_MASK)? as *mut Table) };
+    pt[idx1] = (phys & PA_MASK) | perm.pte_flags();
+    Some(())
+}
+
+/// Flush the TLB entry for `virt` on the current CPU. No-op when the
+/// caller is about to switch CR3 (which flushes every non-global
+/// entry), but cheap enough to always call after a PTE rewrite.
+#[inline]
+pub fn invlpg(virt: u64) {
+    // SAFETY: `invlpg` is a no-fault instruction on any address.
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
     }
 }
 

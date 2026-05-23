@@ -95,12 +95,20 @@ mod guest {
             None => return encode_result_error(10),
         };
 
+        let mut cache = match crate::state_cache::Cache::new() {
+            Ok(c) => c,
+            Err(_) => return encode_result_error(11),
+        };
         let outcome = crate::call_loop::run_top(
+            &mut cache,
             &packet.instance_hash,
             packet.endpoint_idx,
             packet.args,
             packet.initial_gas as i64,
         );
+        // `cache` drops at end of scope (after run_top returns).
+        // Cache::Drop runs clear_scratch — frame stack has already
+        // unwound, so any handles dropped before the sweep observes.
 
         let result = match outcome {
             Ok(o) => InvocationResult {

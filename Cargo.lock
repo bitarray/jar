@@ -187,6 +187,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "bench-sub-vm-data-recurse"
+version = "0.1.0"
+dependencies = [
+ "subsoil",
+]
+
+[[package]]
 name = "bench-sub-vm-recurse"
 version = "0.1.0"
 dependencies = [

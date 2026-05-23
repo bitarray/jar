@@ -67,6 +67,11 @@ fn main() {
             "bench-sub-vm-recurse",
             "SUB_VM_RECURSE_BLOB",
         ),
+        (
+            "../../components/benches/sub-vm-data-recurse",
+            "bench-sub-vm-data-recurse",
+            "SUB_VM_DATA_RECURSE_BLOB",
+        ),
     ] {
         let blob = build_javm::build(path, crate_name);
         println!("cargo:rustc-env={env}={}", blob.display());

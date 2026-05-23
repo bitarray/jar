@@ -42,6 +42,10 @@ harness = false
 name = "sub_vm_recurse"
 harness = false
 
+[[bench]]
+name = "sub_vm_data_recurse"
+harness = false
+
 [[example]]
 name = "publish_profile"
 path = "examples/publish_profile.rs"
