@@ -177,16 +177,12 @@ pub struct CowRange {
 }
 
 /// One CoW-allocated dirty page. Owned by `KernelFrame.dirty_pages`
-/// until [`auto_mint_dirty_pages`] consumes it at frame pop.
+/// until auto-mint consumes it (next commit). For now fields stay
+/// dead-code-allowed; the next commit reads them.
+#[allow(dead_code)]
 pub struct DirtyPage {
-    /// Page-aligned guest VA where this page lives in the frame's
-    /// PT. The byte offset within the source cap is `guest_va -
-    /// cow_range.start` (V1 only supports mapping.source_offset = 0).
     pub guest_va: u32,
-    /// Content hash of the original cap whose page we forked.
     pub source_hash: CapHash,
-    /// CNode slot the source cap lived in. The auto-mint path
-    /// rewrites the parent's slot from `source_hash` → fresh hash.
     pub source_slot: SlotIdx,
     /// 4 KiB page holding the dirtied contents. Page's PA is what
     /// the PTE currently points at; on auto-mint we read these bytes
@@ -507,137 +503,20 @@ fn build_runtime<'a>(frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
 }
 
 /// Pop the top frame; if a parent exists, reflect the popped child's
-/// `return_value` into the parent's φ[7]. Before dropping the popped
-/// frame, run the auto-mint path on any dirty pages it accumulated
-/// (CoW writes during ring-3 execution) and rewrite the matching
-/// parent cnode slot to the freshly-published `Cap::Data` hash.
-///
-/// Returns `true` when the stack has been drained — the RPC caller
-/// uses this to know it's time to hand a result back to the host.
-/// The dropped frame's `CapHandle`s decrement their refcounts
-/// automatically; the per-RPC scratch sweep at end of `run_top`
-/// reclaims any orphaned `cache.instances` slots.
+/// `return_value` into the parent's φ[7]. Returns `true` when the
+/// stack has been drained — the RPC caller uses this to know it's
+/// time to hand a result back to the host. The dropped frame's
+/// `CapHandle`s decrement their refcounts automatically; the per-
+/// RPC scratch sweep at end of `run_top` reclaims any orphaned
+/// `cache.instances` slots.
 fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
-    let mut popped = stack.pop().expect("non-empty");
-    if !popped.dirty_pages.is_empty() {
-        // We don't bubble errors out of auto-mint: a publish failure
-        // (e.g., directory full) is a soft fault — drop the dirty
-        // pages, leave the parent cnode pointing at the original
-        // cap, and continue. The guest still observed its own writes
-        // during the call (they went through CoW); the only loss is
-        // visibility to the parent.
-        let _ = auto_mint_dirty_pages(&mut popped, stack);
-    }
-    drop(popped);
+    let _popped = stack.pop().expect("non-empty");
     if stack.is_empty() {
         return true;
     }
     let parent = stack.last_mut().unwrap();
     parent.regs[7] = return_value;
     false
-}
-
-/// Materialise the popped frame's CoW dirty pages as a fresh
-/// `Cap::Data` per source cap, publish them to the shared cache,
-/// and rewrite the matching slot in the parent's per-frame cnode so
-/// the parent sees the modified data on its next entry. Per the
-/// approved plan this fires on every frame pop (including HALT /
-/// panic exits, per spec §2's status-2 path).
-fn auto_mint_dirty_pages(popped: &mut KernelFrame, stack: &mut [KernelFrame]) -> Result<(), u32> {
-    use alloc::collections::BTreeMap;
-
-    let dirty = core::mem::take(&mut popped.dirty_pages);
-    // Group dirty pages by source cap so each cap mints exactly once
-    // even when the guest dirtied multiple of its pages.
-    let mut by_source: BTreeMap<CapHash, (SlotIdx, Vec<DirtyPage>)> = BTreeMap::new();
-    for dp in dirty {
-        let slot = dp.source_slot;
-        let hash = dp.source_hash;
-        by_source
-            .entry(hash)
-            .or_insert((slot, Vec::new()))
-            .1
-            .push(dp);
-    }
-
-    for (orig_hash, (source_slot, group)) in by_source {
-        let new_cap = mint_with_dirty(orig_hash, &group)?;
-        let new_hash = javm_cap::cap_hash(&new_cap);
-        state_cache::publish_blob(new_hash, new_cap).map_err(|_| ERR_DERIVE_PUBLISH)?;
-
-        // Rewrite the matching cnode slot on the parent (if any).
-        // Only update when the parent still points at the original
-        // hash — if the parent's image overrode the slot or the
-        // parent already promoted to a ref, leave it alone.
-        if let Some(parent) = stack.last_mut() {
-            let s = source_slot.get() as usize;
-            if let Some(entry @ Some(CapHashOrRef::Hash(_))) = parent.cnode.get_mut(s)
-                && matches!(entry, Some(CapHashOrRef::Hash(h)) if *h == orig_hash)
-            {
-                *entry = Some(CapHashOrRef::Hash(new_hash));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Build a fresh `Cap::Data` whose bytes equal the original cap's
-/// content patched with every dirty page in `group`. Caller has
-/// already grouped by `source_hash` so every entry in `group`
-/// refers to the same original cap.
-fn mint_with_dirty(orig_hash: CapHash, group: &[DirtyPage]) -> Result<Cap<TalcAlloc>, u32> {
-    use javm_cap::DataContent;
-
-    let orig_handle: CapHandle<TalcAlloc> =
-        state_cache::lookup_blob_handle(&orig_hash).ok_or(ERR_HOST_CALL_SLOT_EMPTY)?;
-    let orig_bytes = match &orig_handle.cap {
-        Cap::Data(d) => match &d.content {
-            DataContent::Inline(b) => b,
-            DataContent::Paged { .. } => return Err(ERR_MAP_PAGED_UNSUPPORTED),
-        },
-        _ => return Err(ERR_MAP_BAD_KIND),
-    };
-
-    // Allocate fresh page-aligned bytes in the shared talc heap.
-    let alloc = state_cache::talc_alloc();
-    let mut new_bytes = javm_cap::alloc_page_aligned_zeroed(orig_bytes.len(), alloc);
-    new_bytes.copy_from_slice(orig_bytes.as_slice());
-
-    // Patch each dirty page. We assume mapping.start equals the
-    // cap's byte-0 (V1 doesn't expose a source_offset on
-    // MemoryMapping); the offset within the cap is therefore
-    // `guest_va - cow_range.start`. Today's `CowRange.start` always
-    // matches the mapping.start, so this is `guest_va & mask` for
-    // mappings that begin at a page-aligned VA.
-    //
-    // We recompute the per-page offset from the *original* cap size
-    // — if the dirty page is past the cap's end, we skip it (would
-    // be writing into mem_buf-only territory, not part of the cap).
-    for dp in group {
-        // Locate the source mapping by source_slot; mapping.start is
-        // the guest VA the cap starts at.
-        // Conservatively, we use guest_va modulo the cap size to
-        // place the dirty bytes — works for V1 where each cap is
-        // mapped exactly once.
-        let cap_len = orig_bytes.len();
-        let off = (dp.guest_va as usize) % cap_len.max(1);
-        if off + crate::paging::PAGE_SIZE > cap_len {
-            continue;
-        }
-        // SAFETY: dp.page owns 4 KiB at dp.page.kva(); new_bytes
-        // is at least `off + PAGE_SIZE` long after the bounds check.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                dp.page.kva() as *const u8,
-                new_bytes.as_mut_ptr().add(off),
-                crate::paging::PAGE_SIZE,
-            );
-        }
-    }
-
-    Ok(Cap::Data(javm_cap::DataCap {
-        content: DataContent::Inline(new_bytes),
-    }))
 }
 
 /// `host_derive_spawn(image_slot=φ[7], cnode_slot=φ[8],
