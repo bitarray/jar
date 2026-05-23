@@ -44,7 +44,7 @@ pub use cap::{
 };
 pub use cap_hash::cap_hash;
 pub use cnode::{CNodeCap, CNodeSlotEntry};
-pub use data::{DataCap, DataContent, PAGE_SIZE};
+pub use data::{DataCap, DataContent, PAGE_SIZE, alloc_page_aligned_zeroed};
 pub use entry::CacheEntry;
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash};
