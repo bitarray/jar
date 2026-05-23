@@ -27,13 +27,11 @@
 //! - Layout constants ([`STATE_CACHE_VA`], [`STATE_CACHE_SIZE`],
 //!   [`CACHE_DIRECTORY_OFFSET`], [`TALC_HEAP_OFFSET`]).
 
-pub mod cache_handle;
 pub mod directory;
 pub mod talc_alloc;
 pub mod talc_arc;
 pub mod talc_box;
 
-pub use cache_handle::CacheHandle;
 pub use directory::{
     BlobSlot, CacheDirectory, INSTANCE_MASK, InstanceSlot, MAX_BLOB_SLOTS, MAX_INSTANCE_SLOTS,
 };

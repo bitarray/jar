@@ -15,24 +15,19 @@
 //! `(CapRef, entry_va)` pairs that resolve cap queries into a
 //! `&CacheEntry<TalcAlloc>` we can walk by pointer.
 //!
-//! ## Handles vs. raw references
+//! ## Public API: the [`Cache`] struct
 //!
-//! Two flavors of lookup coexist:
+//! All in-kernel cache access goes through [`Cache`] — its methods
+//! return `&Cap` / `&mut Cap` borrows whose lifetime is tied to
+//! `&Cache` / `&mut Cache`. The borrow checker enforces "no
+//! eviction during read": while a `&Cap` is live, any `&mut Cache`
+//! op (publish / promote / clone / clear) is rejected by the
+//! compiler.
 //!
-//! - The legacy `lookup_blob<A>` / `lookup_instance<A>` /
-//!   [`lookup_cap`] return `&'static CacheEntry<A>` / `&'static
-//!   Cap<TalcAlloc>` directly. The `'static` is a polite fiction —
-//!   the cache can free entries between RPCs — but it's safe within
-//!   a single RPC because Hyperlight serialises calls and the
-//!   per-RPC scratch-clear runs only after dispatch returns.
-//!
-//! - The new handle-returning variants
-//!   [`lookup_blob_handle`] / [`lookup_instance_handle`] return a
-//!   [`CacheHandle`] that bumps the entry's refcount on acquire and
-//!   decrements on drop. Storage is still cache-owned; the handle
-//!   only pins the entry against eviction during its lifetime.
-//!   These are the future-default — the legacy `'static` API will
-//!   migrate when callers can be updated incrementally.
+//! Internally `Cache` delegates to module-private free helpers
+//! that do the directory pointer math and talc allocations. None of
+//! those helpers are public — callers outside this module use
+//! `Cache` methods only.
 
 #![cfg(target_os = "none")]
 
@@ -48,16 +43,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use javm_cap::cap::{Cap, CapHashOrRef};
 use javm_cap::entry::CacheEntry;
 use nub_host_common::cache::{
-    CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheHandle, CacheTalcLock, STATE_CACHE_GPA,
-    STATE_CACHE_SIZE, STATE_CACHE_VA, TalcAlloc,
+    CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheTalcLock, STATE_CACHE_GPA, STATE_CACHE_SIZE,
+    STATE_CACHE_VA, TalcAlloc,
 };
 
 use crate::paging::{Perm, install_persistent_kernel_mapping};
-
-/// Refcount-bumping handle to a `CacheEntry<A>` resident in shared
-/// cache memory. The entry's storage is owned by the cache; the
-/// handle only protects the entry against eviction while it lives.
-pub type CapHandle<A> = CacheHandle<CacheEntry<A>>;
 
 static CACHE_MAPPED: AtomicBool = AtomicBool::new(false);
 
@@ -104,10 +94,8 @@ static SCRATCH: ScratchCell = ScratchCell {
 };
 
 /// Idempotent: install the cache mapping in the active PML4 if not
-/// already done. Called lazily from the first `nub_invoke_cached`
-/// dispatch. Boot path doesn't depend on cache, so we defer until
-/// first use.
-pub fn ensure_mapped() -> Result<(), &'static str> {
+/// already done. Called from [`Cache::new`].
+fn ensure_mapped() -> Result<(), &'static str> {
     if CACHE_MAPPED.load(Ordering::Acquire) {
         return Ok(());
     }
@@ -131,15 +119,10 @@ fn directory_ptr() -> *const CacheDirectory {
 }
 
 /// Look up a blob (content-addressed cap) by hash. Returns a borrowed
-/// reference to the `CacheEntry` living in cache memory.
-///
-/// # Safety
-///
-/// The returned reference borrows from the cache region. Callers must
-/// ensure the cap isn't unpublished (decref to zero) while the
-/// reference is live. V1 uses per-call `pin/unpin` on the host side
-/// to enforce this.
-pub fn lookup_blob<A: Allocator + Clone>(hash: &[u8; 32]) -> Option<&'static CacheEntry<A>> {
+/// reference to the `CacheEntry` living in cache memory. The
+/// `'static` lifetime is a polite fiction tightened to the
+/// surrounding `&Cache` borrow by [`Cache::read_blob`].
+fn lookup_blob<A: Allocator + Clone>(hash: &[u8; 32]) -> Option<&'static CacheEntry<A>> {
     ensure_mapped().ok()?;
     let dir = directory_ptr();
     // SAFETY: dir is a live pointer; find_blob just scans the array.
@@ -153,22 +136,9 @@ pub fn lookup_blob<A: Allocator + Clone>(hash: &[u8; 32]) -> Option<&'static Cac
     Some(unsafe { &*(va as *const CacheEntry<A>) })
 }
 
-/// Refcount-bumping variant of [`lookup_blob`]. Returns a
-/// [`CapHandle`] that pins the entry against eviction for its
-/// lifetime. Cheap to clone (one atomic increment); drop decrements.
-#[allow(dead_code)]
-pub fn lookup_blob_handle<A: Allocator + Clone + 'static>(hash: &[u8; 32]) -> Option<CapHandle<A>> {
-    let entry = lookup_blob::<A>(hash)?;
-    let ptr = NonNull::from(entry);
-    // SAFETY: entry came from `lookup_blob`, so the pointer is live;
-    // CacheHandle::acquire bumps the refcount under that liveness
-    // assumption.
-    Some(unsafe { CacheHandle::acquire(ptr) })
-}
-
-/// Resolve an instance ref to its `CacheEntry`.
-#[allow(dead_code)]
-pub fn lookup_instance<A: Allocator + Clone>(ref_id: u64) -> Option<&'static CacheEntry<A>> {
+/// Resolve an instance ref to its `CacheEntry`. Same lifetime
+/// caveat as [`lookup_blob`].
+fn lookup_instance<A: Allocator + Clone>(ref_id: u64) -> Option<&'static CacheEntry<A>> {
     ensure_mapped().ok()?;
     let dir = directory_ptr();
     let (_, slot_ptr) = unsafe { CacheDirectory::find_instance(dir, ref_id) }?;
@@ -179,43 +149,9 @@ pub fn lookup_instance<A: Allocator + Clone>(ref_id: u64) -> Option<&'static Cac
     Some(unsafe { &*(va as *const CacheEntry<A>) })
 }
 
-/// Refcount-bumping variant of [`lookup_instance`].
-#[allow(dead_code)]
-pub fn lookup_instance_handle<A: Allocator + Clone + 'static>(ref_id: u64) -> Option<CapHandle<A>> {
-    let entry = lookup_instance::<A>(ref_id)?;
-    let ptr = NonNull::from(entry);
-    // SAFETY: entry came from `lookup_instance`; pointer is live.
-    Some(unsafe { CacheHandle::acquire(ptr) })
-}
-
-/// Convenience: resolve a blob hash directly to its inner `Cap`.
-pub fn lookup_cap(hash: &[u8; 32]) -> Option<&'static Cap<TalcAlloc>> {
-    lookup_blob::<TalcAlloc>(hash).map(|e| &e.cap)
-}
-
-/// Convenience: resolve a `CapHashOrRef` to its inner `Cap`. Hashes
-/// hit `cache.blobs`; refs hit `cache.instances`.
-#[allow(dead_code)]
-pub fn lookup_cap_either(key: CapHashOrRef) -> Option<&'static Cap<TalcAlloc>> {
-    match key {
-        CapHashOrRef::Hash(h) => lookup_cap(&h),
-        CapHashOrRef::Ref(r) => lookup_instance::<TalcAlloc>(r).map(|e| &e.cap),
-    }
-}
-
-/// Refcount-bumping resolution of a [`CapHashOrRef`]. The returned
-/// handle pins the underlying entry for its lifetime.
-#[allow(dead_code)]
-pub fn lookup_handle(key: CapHashOrRef) -> Option<CapHandle<TalcAlloc>> {
-    match key {
-        CapHashOrRef::Hash(h) => lookup_blob_handle(&h),
-        CapHashOrRef::Ref(r) => lookup_instance_handle(r),
-    }
-}
-
 /// `TalcAlloc` handle pointing at the shared cache region's lock at
 /// `STATE_CACHE_VA + 0`. Cheap to obtain (just wraps a pointer).
-pub fn talc_alloc() -> TalcAlloc {
+fn talc_alloc() -> TalcAlloc {
     ensure_mapped().expect("cache mapping");
     let lock_ptr =
         NonNull::new(STATE_CACHE_VA as *mut CacheTalcLock).expect("STATE_CACHE_VA is non-null");
@@ -236,8 +172,7 @@ pub fn talc_alloc() -> TalcAlloc {
 /// guest-published caps mid-RPC (Hyperlight serialises calls), and
 /// the cleanup at end-of-RPC ensures no stale entries leak across
 /// invocations.
-#[allow(dead_code)]
-pub fn publish_blob(hash: [u8; 32], cap: Cap<TalcAlloc>) -> Result<(), &'static str> {
+fn publish_blob(hash: [u8; 32], cap: Cap<TalcAlloc>) -> Result<(), &'static str> {
     let alloc = talc_alloc();
     let entry = CacheEntry::new(cap);
     let boxed = ABox::try_new_in(entry, alloc).map_err(|_| "publish_blob: alloc failed")?;
@@ -276,8 +211,7 @@ pub fn publish_blob(hash: [u8; 32], cap: Cap<TalcAlloc>) -> Result<(), &'static 
 /// for end-of-RPC cleanup.
 ///
 /// Returns the assigned `CapRef` for cnode-slot insertion etc.
-#[allow(dead_code)]
-pub fn publish_instance(cap: Cap<TalcAlloc>) -> Result<u64, &'static str> {
+fn publish_instance(cap: Cap<TalcAlloc>) -> Result<u64, &'static str> {
     let alloc = talc_alloc();
     let entry = CacheEntry::new(cap);
     let boxed = ABox::try_new_in(entry, alloc).map_err(|_| "publish_instance: alloc failed")?;
@@ -333,8 +267,7 @@ pub fn publish_instance(cap: Cap<TalcAlloc>) -> Result<u64, &'static str> {
 ///
 /// MUST be called AFTER the call-loop's `Vec<KernelFrame>` has been
 /// dropped, so frame-held handles decrement their refcounts first.
-#[allow(dead_code)]
-pub fn clear_scratch() {
+fn clear_scratch() {
     let alloc = talc_alloc();
     let dir_ptr = (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *mut CacheDirectory;
 
