@@ -25,7 +25,7 @@
 //!
 //! ## PA ↔ VA translation
 //!
-//! Three address-translation regimes (Stage F kernel relocation):
+//! Four address-translation regimes (Stage F kernel relocation):
 //!
 //! * **Kernel half (code, PEB, heap, init-data, talc allocations)**
 //!   lives at high VA `[KERNEL_HIGH_BASE, scratch_base_gva)` and is
@@ -40,9 +40,18 @@
 //!   ```text
 //!     gva = scratch_base_gva + (gpa - scratch_base_gpa)
 //!   ```
-//! * **User half (low VA, 0..512 GiB)** is owned by the per-invocation
-//!   PT we build for ring-3 PVM programs; ring-0 paging helpers below
-//!   return `None` for these addresses.
+//! * **State cache region** (shared talc heap with host) is mapped at
+//!   the fixed `STATE_CACHE_VA = 0x4000_0000_0000` backed by
+//!   `STATE_CACHE_GPA = 0x2_0000_0000` (8 GiB), 1 GiB long:
+//!   ```text
+//!     gva = STATE_CACHE_VA + (gpa - STATE_CACHE_GPA)
+//!   ```
+//!   Used to compute the PA of `Cap::Data` pages so they can be
+//!   mapped directly into the ring-3 PT (Issue #855).
+//! * **User half (low VA, 0..512 GiB except for the state cache
+//!   region above)** is owned by the per-invocation PT we build for
+//!   ring-3 PVM programs; ring-0 paging helpers below return `None`
+//!   for these addresses.
 
 #![cfg(target_os = "none")]
 
@@ -55,6 +64,7 @@ use core::cell::RefCell;
 use core::ptr::NonNull;
 
 use hyperlight_guest::layout::{scratch_base_gpa, scratch_base_gva};
+use nub_host_common::cache::{STATE_CACHE_GPA, STATE_CACHE_SIZE, STATE_CACHE_VA};
 
 /// 4 KiB page size — the unit of alignment for page-aligned
 /// allocations (page tables, JIT exec pages, etc.).
@@ -83,16 +93,17 @@ pub mod flag {
 /// Mask covering the physical-address bits of a PTE (bits 12..51).
 const PA_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
-/// Convert a kernel VA to its physical address. Three regimes:
-/// scratch (high VA, offset to scratch GPA), kernel half (high VA in
-/// `[KERNEL_HIGH_BASE, scratch_base_gva)`, offset to low GPA), and
-/// low VA (user-half, owned by per-invocation PT — returns `None`).
+/// Convert a kernel VA to its physical address. Four regimes (see
+/// module doc): scratch (high VA), kernel half (high VA), state
+/// cache (fixed VA at `STATE_CACHE_VA`), user half (returns `None`).
 pub fn va_to_pa(va: u64) -> Option<u64> {
     let scratch_gva = scratch_base_gva();
     if va >= scratch_gva {
         Some(scratch_base_gpa() + (va - scratch_gva))
     } else if va >= KERNEL_HIGH_BASE {
         Some(KERNEL_BASE_GPA + (va - KERNEL_HIGH_BASE))
+    } else if va >= STATE_CACHE_VA && va < STATE_CACHE_VA + STATE_CACHE_SIZE as u64 {
+        Some(STATE_CACHE_GPA + (va - STATE_CACHE_VA))
     } else {
         None
     }
@@ -103,6 +114,8 @@ pub fn pa_to_va(pa: u64) -> Option<u64> {
     let scratch_gpa = scratch_base_gpa();
     if pa >= scratch_gpa {
         Some(scratch_base_gva() + (pa - scratch_gpa))
+    } else if pa >= STATE_CACHE_GPA && pa < STATE_CACHE_GPA + STATE_CACHE_SIZE as u64 {
+        Some(STATE_CACHE_VA + (pa - STATE_CACHE_GPA))
     } else if pa >= KERNEL_BASE_GPA {
         Some(KERNEL_HIGH_BASE + (pa - KERNEL_BASE_GPA))
     } else {
