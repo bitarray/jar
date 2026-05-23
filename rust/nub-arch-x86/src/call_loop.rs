@@ -519,14 +519,13 @@ fn build_runtime<'a>(frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
 /// reclaims any orphaned `cache.instances` slots.
 fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
     let mut popped = stack.pop().expect("non-empty");
-    // Auto-mint is only useful when a parent will observe the new
-    // hash. On root HALT (stack empty after pop) the freshly-minted
-    // cap would be unreachable; skip the publish entirely.
-    if !popped.dirty_pages.is_empty() && !stack.is_empty() {
-        // Errors are soft: publish failures (directory full) drop the
-        // dirty pages but the call continues. The guest already
-        // observed its writes through the CoW pages during execution;
-        // only cross-frame visibility is lost.
+    if !popped.dirty_pages.is_empty() {
+        // We don't bubble errors out of auto-mint: a publish failure
+        // (e.g., directory full) is a soft fault — drop the dirty
+        // pages, leave the parent cnode pointing at the original
+        // cap, and continue. The guest still observed its own writes
+        // during the call (they went through CoW); the only loss is
+        // visibility to the parent.
         let _ = auto_mint_dirty_pages(&mut popped, stack);
     }
     drop(popped);
