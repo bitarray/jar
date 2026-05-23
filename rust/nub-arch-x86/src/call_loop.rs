@@ -97,13 +97,13 @@ use alloc::vec::Vec;
 use javm_cap::cap::{Cap, CapHashOrRef};
 use javm_cap::hash::{Blake2b256, Hash};
 use javm_cap::slot::SlotIdx;
-use javm_cap::{CapHash, CapRef, NUM_REGS};
+use javm_cap::{CapHash, NUM_REGS};
 use nub_host_common::cache::TalcAlloc;
 
 use crate::jit_run::{self, DirectMap, ExitInfo, FrameRuntime, MemRegion};
 use crate::page_alloc::PageBuf;
 use crate::paging;
-use crate::state_cache::{self, CapHandle};
+use crate::state_cache::Cache;
 
 const EXIT_HALT: u32 = 0;
 const EXIT_HOST_CALL: u32 = 4;
@@ -130,7 +130,6 @@ const RUNTIME_CACHE_CAP: usize = 256;
 // Error codes returned to the host as InvocationResult.exit_arg when
 // the call loop bails out. The byte stays small so a hex dump in the
 // host bench output is easy to read.
-const ERR_CACHE_MAP: u32 = 20;
 const ERR_INSTANCE_NOT_FOUND: u32 = 21;
 const ERR_INSTANCE_KIND: u32 = 22;
 const ERR_IMAGE_NOT_FOUND: u32 = 23;
@@ -145,34 +144,30 @@ const ERR_DEPTH_LIMIT: u32 = 51;
 const ERR_MAP_BAD_KIND: u32 = 60;
 const ERR_MAP_PAGED_UNSUPPORTED: u32 = 61;
 
-/// One stack frame on the in-kernel call stack. Carries refcount-
-/// pinning handles to the Image blob and the Instance entry (blob
-/// or ref), plus per-frame mutable PVM state and the ring-3
-/// resources cache.
-///
-/// All immutable image data (code/bitmask/jump_table/endpoints/
-/// mappings/pinned/initial) is read on demand through `image.cap`
-/// — no per-frame copies.
+/// One stack frame on the in-kernel call stack. Holds the
+/// identifiers for the Image and Instance caps the frame runs
+/// against (plus per-frame mutable PVM state and the ring-3
+/// resources cache). The caps themselves live in the [`Cache`];
+/// the frame re-looks them up on each access via `&Cache`. V1
+/// invariant: nothing evicts cache entries mid-RPC, so a hash that
+/// resolved at frame build resolves the same way for the frame's
+/// lifetime.
 pub struct KernelFrame {
-    /// Refcount-pinned handle on the `Cap::Image` blob this frame
-    /// runs against. Dropped automatically on frame teardown.
-    image: CapHandle<TalcAlloc>,
-    /// Cached content-hash of the image. Used as the cnode-slot
-    /// fallback in `derive_spawn` and as the JIT-cache key in
-    /// `build_frame_runtime`.
+    /// Content hash of the Image cap this frame runs. Resolved via
+    /// [`Cache::read_blob`] at each access (cheap, direct-indexed
+    /// for instance-keyed; linear-scan for blob hashes).
     image_hash: CapHash,
-    /// Image's chain hash. Read by `derive_spawn` to compute the
-    /// child's chain. Cached locally to avoid an instance deref per
+    /// Image's chain hash. Used by `derive_spawn` to compute the
+    /// child's chain. Cached locally to avoid a cap deref per
     /// derive.
     image_hash_chain: CapHash,
-    /// Refcount-pinned handle on the `Cap::Instance` entry — blob
-    /// for host-pre-published top-level instances, instance-slot
-    /// for kernel-derived sub-VMs. Drop releases the slot back to
-    /// the cache for reuse.
-    #[allow(dead_code)]
-    instance: CapHandle<TalcAlloc>,
+    /// Resolution key for the running Instance — either a content-
+    /// addressed blob (Hash) for host-published top-level instances,
+    /// or an identity-addressed slot (Ref) for kernel-derived
+    /// sub-VMs.
+    instance: CapHashOrRef,
     /// Live PVM register file. Written by the JIT on every entry/
-    /// exit; settled back to the instance at HALT in Phase 4.
+    /// exit.
     regs: [u64; NUM_REGS],
     /// Current PVM PC. Same lifecycle as `regs`.
     pc: u32,
@@ -180,24 +175,16 @@ pub struct KernelFrame {
     /// (blob hash for image pinned/initial entries; instance ref
     /// for kernel-derived transient instances) or `None`.
     cnode: Vec<Option<CapHashOrRef>>,
-    /// Refcount-pinned handles on every `Cap::Data` blob mapped into
-    /// this frame's PT, in resolution order. Populated once at frame
-    /// build (`build_frame_from_image_handle`); reused on every
-    /// `build_runtime` rebuild so eviction never bumps the count
-    /// again. Dropped on frame teardown → refcount-decrement → cache
-    /// reclaim on the next scratch sweep. Pinning the source caps is
-    /// what makes the direct PT mapping safe: as long as a handle
-    /// lives, the talc-resident bytes the PTEs point at stay alive.
-    mapping_pins: Vec<DataMappingPin>,
-    /// CoW-armed guest VA ranges. A subset of `mapping_pins` — the
-    /// initial-slot mappings whose pages can be copy-on-write'd on
-    /// guest writes. Published to the #PF handler at `enter_frame`
-    /// time so it can recognise legitimate write faults and remap.
+    /// CoW-armed guest VA ranges — the initial-slot mappings whose
+    /// pages can be copy-on-write'd on guest writes. Published to
+    /// the #PF handler at `enter_frame` time so it can recognise
+    /// legitimate write faults and remap.
     cow_ranges: Vec<CowRange>,
     /// CoW-allocated fresh pages, populated by `jit_pf_handler` on
-    /// the first write to each page of a CoW range. On frame pop
-    /// these get materialised into a fresh `Cap::Data` via the
-    /// auto-mint path (Commit 5).
+    /// the first write to each page of a CoW range. Per the data-
+    /// flow principle (see module doc), these are frame-local
+    /// working memory and are dropped at frame pop without
+    /// propagation.
     dirty_pages: Vec<DirtyPage>,
     /// Per-frame ring-3 resources (PT + mem/ctx/stack buffers).
     /// Lazily built on the first [`run_one_entry`] for this frame
@@ -232,46 +219,6 @@ pub struct DirtyPage {
     pub page: PageBuf,
 }
 
-/// One DataCap pinned into this frame's PT. `start` is the guest VA
-/// (4 KiB-aligned), `size` the mapped length (4 KiB-aligned, ≤ the
-/// cap's content). `handle` keeps the cap entry alive so the
-/// physical pages mapped at `start..start+size` cannot be reclaimed
-/// while the frame holds the mapping.
-pub struct DataMappingPin {
-    pub start: u32,
-    pub size: u32,
-    pub handle: CapHandle<TalcAlloc>,
-}
-
-impl DataMappingPin {
-    /// Physical address of the cap's page-aligned inline content,
-    /// or `None` if the entry isn't an inline `Cap::Data`.
-    fn content_pa(&self) -> Option<u64> {
-        let Cap::Data(d) = &self.handle.cap else {
-            return None;
-        };
-        let javm_cap::DataContent::Inline(bytes) = &d.content else {
-            return None;
-        };
-        paging::va_to_pa(bytes.as_ptr() as u64)
-    }
-}
-
-/// Drop-guard that triggers the per-RPC scratch sweep on the way
-/// out of [`run_top`], regardless of how the loop returns (clean
-/// HALT, propagated `Err`, or any path that unwinds locals). Lives
-/// at the top of the function so it drops AFTER the per-RPC
-/// `Vec<KernelFrame>` stack — any `CapHandle` held inside a frame
-/// decrements its refcount before [`state_cache::clear_scratch`]
-/// observes the entries.
-struct ScratchGuard;
-
-impl Drop for ScratchGuard {
-    fn drop(&mut self) {
-        state_cache::clear_scratch();
-    }
-}
-
 /// Successful loop result — what the host RPC returns to the bench
 /// driver. On guest-side panic the loop returns `Err(code)` instead
 /// and `nub_invoke_cached` packs the code into `exit_arg`.
@@ -285,32 +232,28 @@ pub struct LoopOutcome {
 /// Drive the CALL/HALT loop until either the top frame HALTs (clean
 /// exit) or the JIT signals an unrecoverable condition (page fault,
 /// gas exhaustion, …). See module docs for the loop body.
+///
+/// `cache` is the caller-owned cache handle. The borrow checker uses
+/// the `&mut Cache` argument to enforce that no other code holds a
+/// `&Cap` borrow concurrent with publish/promote/clone operations
+/// fired by `dispatch_derive_spawn` / `dispatch_host_call`.
 pub fn run_top(
+    cache: &mut Cache,
     instance_hash: &CapHash,
     endpoint_idx: u32,
     args: [u64; 4],
     initial_gas: i64,
 ) -> Result<LoopOutcome, u32> {
-    state_cache::ensure_mapped().map_err(|_| ERR_CACHE_MAP)?;
-
-    // `_scratch_guard` is declared BEFORE `stack` so its `Drop` runs
-    // AFTER the stack is dropped — frame-held `CapHandle`s release
-    // their refcounts first, then the per-RPC scratch sweep frees
-    // any guest-published cache entries whose refcounts have fallen
-    // to 1 (the scratch tracker's own reference). See
-    // [`state_cache::clear_scratch`] for the refcount safety net.
-    let _scratch_guard = ScratchGuard;
-
-    let top = build_frame_from_published(instance_hash, endpoint_idx, args)?;
+    let top = build_frame_from_published(cache, instance_hash, endpoint_idx, args)?;
     let mut stack: Vec<KernelFrame> = Vec::with_capacity(8);
     stack.push(top);
     let mut gas = initial_gas;
 
-    loop {
+    let outcome = loop {
         // Phase 1: run one ring-3 entry on the top frame.
         let info = {
             let frame = stack.last_mut().expect("stack non-empty");
-            run_one_entry(frame, gas)?
+            run_one_entry(cache, frame, gas)?
         };
         gas = info.gas_remaining;
         // Mirror the JIT's post-exit state back into the top frame.
@@ -325,16 +268,12 @@ pub fn run_top(
         match info.exit_reason {
             EXIT_HALT => {
                 if pop_and_reflect(&mut stack, info.regs[7]) {
-                    // Top frame halted — pass the JIT's own exit
-                    // reason through so callers that distinguish
-                    // EXIT_HALT (explicit) from EXIT_HOST_CALL(0)
-                    // (REPLY trampoline) see the right code.
-                    return Ok(LoopOutcome {
+                    break LoopOutcome {
                         exit_reason: info.exit_reason,
                         exit_arg: info.exit_arg,
                         return_value: info.regs[7],
                         gas_remaining: gas,
-                    });
+                    };
                 }
             }
             EXIT_HOST_CALL | EXIT_ECALL => {
@@ -348,12 +287,12 @@ pub fn run_top(
                         // Preserve the JIT exit shape so the host bench
                         // harness, which asserts `(reason=4, arg=0)` for
                         // the subsoil trampoline halt, doesn't trip.
-                        return Ok(LoopOutcome {
+                        break LoopOutcome {
                             exit_reason: info.exit_reason,
                             exit_arg: info.exit_arg,
                             return_value: info.regs[7],
                             gas_remaining: gas,
-                        });
+                        };
                     }
                     OP_REPLY => {
                         // Stack still has frames; the parent picks up at
@@ -361,7 +300,7 @@ pub fn run_top(
                     }
                     OP_DERIVE_SPAWN => {
                         let frame = stack.last_mut().expect("non-empty");
-                        dispatch_derive_spawn(frame)?;
+                        dispatch_derive_spawn(cache, frame)?;
                     }
                     OP_HOST_CALL => {
                         if stack.len() >= MAX_DEPTH {
@@ -369,7 +308,7 @@ pub fn run_top(
                         }
                         let child = {
                             let parent = stack.last().expect("non-empty");
-                            dispatch_host_call(parent)?
+                            dispatch_host_call(cache, parent)?
                         };
                         // Bound the resident-runtime set to the top
                         // RUNTIME_CACHE_CAP frames. After the new child
@@ -393,26 +332,35 @@ pub fn run_top(
                     // that fire `ecalli imm` and check `(reason=4,
                     // arg=imm)` keep passing.
                     _ => {
-                        return Ok(LoopOutcome {
+                        break LoopOutcome {
                             exit_reason: info.exit_reason,
                             exit_arg: info.exit_arg,
                             return_value: info.regs[7],
                             gas_remaining: gas,
-                        });
+                        };
                     }
                 }
             }
             _ => {
                 // PageFault (3), Panic (1), OOG (2), Trap (7), …
-                return Ok(LoopOutcome {
+                break LoopOutcome {
                     exit_reason: info.exit_reason,
                     exit_arg: info.exit_arg,
                     return_value: info.regs[7],
                     gas_remaining: gas,
-                });
+                };
             }
         }
-    }
+    };
+
+    // Drop the stack BEFORE we hand the outcome back. The caller
+    // (typically the `Cache`'s Drop, which fires when the cache
+    // goes out of scope) runs `clear_scratch`; any cnode-held
+    // `Ref(R)` entries that were tracked in scratch need to be
+    // released here so the underlying entries are reclaimable on
+    // the next sweep.
+    drop(stack);
+    Ok(outcome)
 }
 
 /// Run exactly one ring-3 cycle for `frame`. The first call on a
@@ -420,16 +368,11 @@ pub fn run_top(
 /// populated from overlays); subsequent calls (parent resumes after
 /// a child HALT) reuse the cached runtime. Frame mem persists across
 /// re-entries — the parent's writes survive the child's execution.
-fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
+fn run_one_entry(cache: &Cache, frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
     if frame.runtime.is_none() {
-        let rt = build_runtime(frame)?;
+        let rt = build_runtime(cache, frame)?;
         frame.runtime = Some(rt);
     }
-    // Split-borrow: cow_ranges (read-only slice), dirty_pages
-    // (raw *mut for the #PF handler to append to), and runtime
-    // (where the JIT actually runs) are all independent fields of
-    // KernelFrame. The 2024-edition disjoint borrow check allows
-    // them to coexist.
     let pc = frame.pc;
     let regs = frame.regs;
     let cow_ranges: &[CowRange] = frame.cow_ranges.as_slice();
@@ -444,30 +387,72 @@ fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
 /// armed for CoW via `frame.cow_ranges` and flipped writable by the
 /// #PF handler on first write. Instance `rw_overlays` (per-instance
 /// state, not page-aligned) still memcpy into the mem_buf.
-fn build_runtime<'a>(frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
-    let img = image_cap(&frame.image)?;
+///
+/// Looks the image cap up by hash through `cache.read_blob`; the
+/// returned `&Cap` borrow lives until function return. Per the V1
+/// invariant (no eviction mid-RPC) the PA installed in the PT stays
+/// valid for the frame's lifetime even after this borrow ends.
+fn build_runtime<'a>(cache: &'a Cache, frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
+    let img = match cache.read_blob(&frame.image_hash) {
+        Some(Cap::Image(i)) => i,
+        Some(_) => return Err(ERR_IMAGE_KIND),
+        None => return Err(ERR_IMAGE_NOT_FOUND),
+    };
 
-    let mut direct_maps: Vec<DirectMap> = Vec::with_capacity(frame.mapping_pins.len());
+    // Classify slots: pinned (RO, direct-map) vs initial (RW with
+    // CoW arming). Pinned slot indices are recorded so the initial
+    // walk can skip them — initial entries that collide with a
+    // pinned slot are ignored.
+    let mut pinned_slot = [false; CNODE_SLOTS];
+    let mut initial_slot = [false; CNODE_SLOTS];
+    for e in img.pinned.iter() {
+        let s = e.slot.get() as usize;
+        if s < CNODE_SLOTS {
+            pinned_slot[s] = true;
+        }
+    }
+    for e in img.initial.iter() {
+        let s = e.slot.get() as usize;
+        if s < CNODE_SLOTS && !pinned_slot[s] {
+            initial_slot[s] = true;
+        }
+    }
+
+    let mut direct_maps: Vec<DirectMap> = Vec::with_capacity(img.mappings.len());
     let mut mem_size: u32 = 0;
-    for pin in frame.mapping_pins.iter() {
-        let end = pin.start.saturating_add(pin.size);
+    for m in img.mappings.iter() {
+        let end = (m.start + m.size) as u32;
         if end > mem_size {
             mem_size = end;
         }
-        let pa = pin.content_pa().ok_or(ERR_MAP_BAD_KIND)?;
-        let cap_bytes = match &pin.handle.cap {
-            Cap::Data(d) => match &d.content {
-                javm_cap::DataContent::Inline(b) => b.len() as u32,
-                _ => return Err(ERR_MAP_BAD_KIND),
-            },
-            _ => return Err(ERR_MAP_BAD_KIND),
+        if m.source_path_len == 0 {
+            continue;
+        }
+        let src_slot = m.source_path[0].get() as usize;
+        if src_slot >= CNODE_SLOTS || !(pinned_slot[src_slot] || initial_slot[src_slot]) {
+            continue;
+        }
+        let target_hash = match frame.cnode.get(src_slot) {
+            Some(Some(CapHashOrRef::Hash(h))) => *h,
+            _ => continue,
         };
-        let size = pin.size.min(cap_bytes);
+        // Read the cap; lifetime tied to `cache`. The borrow ends at
+        // the end of this iteration's match block.
+        let bytes = match cache.read_blob(&target_hash) {
+            Some(Cap::Data(d)) => match &d.content {
+                javm_cap::DataContent::Inline(b) => b.as_slice(),
+                javm_cap::DataContent::Paged { .. } => return Err(ERR_MAP_PAGED_UNSUPPORTED),
+            },
+            Some(_) => return Err(ERR_MAP_BAD_KIND),
+            None => return Err(ERR_HOST_CALL_SLOT_EMPTY),
+        };
+        let pa = paging::va_to_pa(bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?;
+        let size = (m.size as u32).min(bytes.len() as u32);
         if size == 0 {
             continue;
         }
         direct_maps.push(DirectMap {
-            start: pin.start,
+            start: m.start as u32,
             pa,
             size,
         });
@@ -477,9 +462,12 @@ fn build_runtime<'a>(frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
     // allocated via the host's `Global` allocator and so not safely
     // direct-mappable (no page-alignment guarantee). Memcpy through
     // the per-frame mem_buf as before.
+    //
+    // Looked up afresh via cache.read_cap so the borrow is tied to
+    // `cache` (lifetime-correct).
     let mut regions: [(u32, &'a [u8]); 3] = [(0, &[]), (0, &[]), (0, &[])];
     let mut n = 0usize;
-    if let Some(inst) = instance_cap(&frame.instance) {
+    if let Some(Cap::Instance(inst)) = cache.read_cap(frame.instance) {
         for ov in inst.rw_overlays.iter() {
             let end = ov.start.saturating_add(ov.bytes.len() as u32);
             if end > mem_size {
@@ -495,16 +483,6 @@ fn build_runtime<'a>(frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
         }
     }
 
-    // Extend mem_size to cover image-declared mappings even when
-    // their source slot is empty (frame still expects zeroed memory
-    // at the declared range).
-    for m in img.mappings.iter() {
-        let end = (m.start + m.size) as u32;
-        if end > mem_size {
-            mem_size = end;
-        }
-    }
-
     let [arg, ro, rw] = regions;
 
     // `img.bitmask` is the packed form (1 bit per code byte);
@@ -515,9 +493,11 @@ fn build_runtime<'a>(frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
     // matters on cache miss.
     let bitmask = javm_exec::unpack_bitmask(img.bitmask.as_slice(), img.code.len());
 
-    // SAFETY: caller keeps `frame.image` and `frame.mapping_pins`
-    // alive for the runtime's lifetime; code/jt/cap bytes are
-    // refcount-pinned through those handles.
+    // SAFETY: image and any cap-backed slices are borrowed from
+    // `cache`; their lifetime is bounded by `'a`. The PT we build
+    // contains the PAs directly — once the FrameRuntime returns,
+    // the borrow ends, but the PA stays valid because V1 doesn't
+    // evict cache entries mid-RPC.
     unsafe {
         jit_run::build_frame_runtime(
             &frame.image_hash,
@@ -566,9 +546,9 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
 /// support — the child inherits the parent's cnode at CALL time).
 /// Computes `child_chain = blake2b(running.chain, image_hash)`,
 /// publishes a fresh `Cap::Instance` to `cache.instances` via
-/// [`state_cache::publish_instance`], and writes the resulting
-/// `CapRef` into the parent's `dst_slot`.
-fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<(), u32> {
+/// [`Cache::publish_instance`], and writes the resulting `CapRef`
+/// into the parent's `dst_slot`.
+fn dispatch_derive_spawn(cache: &mut Cache, frame: &mut KernelFrame) -> Result<(), u32> {
     let image_slot = (frame.regs[7] & 0xFF) as usize;
     let _cnode_slot = (frame.regs[8] & 0xFF) as usize;
     let dst_slot = (frame.regs[9] & 0xFF) as usize;
@@ -576,18 +556,16 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<(), u32> {
     if image_slot >= CNODE_SLOTS || dst_slot >= CNODE_SLOTS {
         return Err(ERR_DERIVE_SLOT_OOB);
     }
-    // Cnode-slot fallback: empty slots default to the running
-    // frame's own image_hash. Matches the recursive-spawn bench
-    // exactly and is reasonable for any caller that wants to
-    // re-enter its own program with fresh state.
     let image_hash = match frame.cnode[image_slot] {
         Some(CapHashOrRef::Hash(h)) => h,
         Some(CapHashOrRef::Ref(_)) | None => frame.image_hash,
     };
     let child_chain = Blake2b256::hash_pair(&frame.image_hash_chain, &image_hash);
 
-    let child_inst = build_transient_instance_cap(image_hash, child_chain);
-    let child_ref = state_cache::publish_instance(child_inst).map_err(|_| ERR_DERIVE_PUBLISH)?;
+    let child_inst = build_transient_instance_cap(cache, image_hash, child_chain);
+    let child_ref = cache
+        .publish_instance(child_inst)
+        .map_err(|_| ERR_DERIVE_PUBLISH)?;
     frame.cnode[dst_slot] = Some(CapHashOrRef::Ref(child_ref));
     Ok(())
 }
@@ -597,7 +575,7 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<(), u32> {
 /// [`KernelFrame`] for the child. Parent's φ[9..=12] become child's
 /// φ[7..=10] (arg-passing convention — used by the recursive-spawn
 /// bench to thread the remaining depth count).
-fn dispatch_host_call(parent: &KernelFrame) -> Result<KernelFrame, u32> {
+fn dispatch_host_call(cache: &mut Cache, parent: &KernelFrame) -> Result<KernelFrame, u32> {
     let instance_slot = (parent.regs[7] & 0xFF) as usize;
     let endpoint_idx = (parent.regs[8] & 0xFF) as u32;
     if instance_slot >= CNODE_SLOTS {
@@ -611,14 +589,17 @@ fn dispatch_host_call(parent: &KernelFrame) -> Result<KernelFrame, u32> {
     // the child. The bench guest threads `depth` through φ[9] alone.
     let args = [parent.regs[9], parent.regs[10], 0, 0];
 
-    let mut child = match target {
-        CapHashOrRef::Hash(h) => build_frame_from_published(&h, endpoint_idx, args)?,
-        CapHashOrRef::Ref(r) => build_frame_from_instance_ref(r, endpoint_idx, args)?,
-    };
+    let mut child = build_frame_from_cap(cache, target, endpoint_idx, args)?;
 
     // Child inherits the parent's cnode entries that the child's
-    // image didn't pre-populate. Lets the bench guest reach
-    // `SLOT_IMAGE` without the harness re-installing it per level.
+    // image didn't pre-populate. Per the data-flow principle every
+    // copy is a real copy: Hash entries copy the hash directly
+    // (cheap), Ref entries are NOT cloned in V1 — they propagate
+    // the parent's ref into the child without bumping the cache.
+    // This matches today's bench semantics; once the scratchpad-cnode
+    // return mechanism lands, inherited Ref slots should go through
+    // `cache.clone_instance` so each frame's cnode owns its own
+    // CapRef and mutations don't accidentally cross-share.
     for (i, slot) in parent.cnode.iter().enumerate() {
         if child.cnode[i].is_none() {
             child.cnode[i] = *slot;
@@ -630,30 +611,23 @@ fn dispatch_host_call(parent: &KernelFrame) -> Result<KernelFrame, u32> {
 /// Build a frame from a `Cap::Instance` blob published in the shared
 /// talc cache (the top-level invocation path; also used by
 /// `host_call` when the cnode slot points at a host-pre-published
-/// instance hash). Acquires refcount-pinning handles on both the
-/// Instance and its Image.
+/// instance hash).
 fn build_frame_from_published(
+    cache: &Cache,
     instance_hash: &CapHash,
     endpoint_idx: u32,
     args: [u64; 4],
 ) -> Result<KernelFrame, u32> {
-    let instance_handle: CapHandle<TalcAlloc> =
-        state_cache::lookup_blob_handle(instance_hash).ok_or(ERR_INSTANCE_NOT_FOUND)?;
-    let inst = match &instance_handle.cap {
-        Cap::Instance(i) => i,
-        _ => return Err(ERR_INSTANCE_KIND),
+    let (image_hash, image_hash_chain, inst_regs) = match cache.read_blob(instance_hash) {
+        Some(Cap::Instance(i)) => (i.image_hash, i.image_hash_chain, i.regs),
+        Some(_) => return Err(ERR_INSTANCE_KIND),
+        None => return Err(ERR_INSTANCE_NOT_FOUND),
     };
-    let image_hash = inst.image_hash;
-    let image_hash_chain = inst.image_hash_chain;
-    let inst_regs = inst.regs;
-
-    let image_handle: CapHandle<TalcAlloc> =
-        state_cache::lookup_blob_handle(&image_hash).ok_or(ERR_IMAGE_NOT_FOUND)?;
-    build_frame_from_image_handle(
-        image_handle,
+    build_frame_inner(
+        cache,
         image_hash,
         image_hash_chain,
-        instance_handle,
+        CapHashOrRef::Hash(*instance_hash),
         endpoint_idx,
         args,
         Some(&inst_regs),
@@ -661,126 +635,97 @@ fn build_frame_from_published(
 }
 
 /// Build a frame from a `Cap::Instance` resident in `cache.instances`
-/// (kernel-derived sub-VM). Acquires refcount-pinning handles on
-/// both the Instance and its Image.
+/// (kernel-derived sub-VM).
 fn build_frame_from_instance_ref(
-    ref_id: CapRef,
+    cache: &Cache,
+    ref_id: javm_cap::CapRef,
     endpoint_idx: u32,
     args: [u64; 4],
 ) -> Result<KernelFrame, u32> {
-    let instance_handle: CapHandle<TalcAlloc> =
-        state_cache::lookup_instance_handle(ref_id).ok_or(ERR_INSTANCE_NOT_FOUND)?;
-    let inst = match &instance_handle.cap {
-        Cap::Instance(i) => i,
-        _ => return Err(ERR_INSTANCE_KIND),
+    let (image_hash, image_hash_chain) = match cache.read_instance(ref_id) {
+        Some(Cap::Instance(i)) => (i.image_hash, i.image_hash_chain),
+        Some(_) => return Err(ERR_INSTANCE_KIND),
+        None => return Err(ERR_INSTANCE_NOT_FOUND),
     };
-    let image_hash = inst.image_hash;
-    let image_hash_chain = inst.image_hash_chain;
-
-    let image_handle: CapHandle<TalcAlloc> =
-        state_cache::lookup_blob_handle(&image_hash).ok_or(ERR_IMAGE_NOT_FOUND)?;
-    build_frame_from_image_handle(
-        image_handle,
+    build_frame_inner(
+        cache,
         image_hash,
         image_hash_chain,
-        instance_handle,
+        CapHashOrRef::Ref(ref_id),
         endpoint_idx,
         args,
         None,
     )
 }
 
-/// Core frame builder: takes refcount-pinning handles on Image and
-/// Instance plus the resolved identity hashes, seeds regs from
-/// endpoint + optional instance overrides, then seeds the per-frame
-/// cnode from `image.pinned + initial`.
-fn build_frame_from_image_handle(
-    image: CapHandle<TalcAlloc>,
+/// Dispatch on `CapHashOrRef` — used by `dispatch_host_call`.
+fn build_frame_from_cap(
+    cache: &Cache,
+    target: CapHashOrRef,
+    endpoint_idx: u32,
+    args: [u64; 4],
+) -> Result<KernelFrame, u32> {
+    match target {
+        CapHashOrRef::Hash(h) => build_frame_from_published(cache, &h, endpoint_idx, args),
+        CapHashOrRef::Ref(r) => build_frame_from_instance_ref(cache, r, endpoint_idx, args),
+    }
+}
+
+/// Core frame builder: reads the image cap to seed regs/pc/cnode +
+/// CoW ranges, stores only IDs on the frame (no `CapHandle` pins).
+fn build_frame_inner(
+    cache: &Cache,
     image_hash: CapHash,
     image_hash_chain: CapHash,
-    instance: CapHandle<TalcAlloc>,
+    instance: CapHashOrRef,
     endpoint_idx: u32,
     args: [u64; 4],
     inst_regs: Option<&[u64; NUM_REGS]>,
 ) -> Result<KernelFrame, u32> {
-    // Read everything we need from `image` first; the struct
-    // construction below moves `image` into the returned `KernelFrame`
-    // so any borrows on it must release before that point.
-    let (regs, pc, cnode) = {
-        let img = image_cap(&image)?;
-
-        let endpoint = endpoint_idx as usize;
-        if endpoint >= img.endpoints.len() {
-            return Err(ERR_ENDPOINT_OOB);
-        }
-        let ep = &img.endpoints[endpoint];
-        if ep.entry_pc == 0 {
-            return Err(ERR_ENDPOINT_UNDEFINED);
-        }
-
-        let mut regs = ep.initial_regs;
-        if let Some(inst_regs) = inst_regs {
-            for (i, v) in inst_regs.iter().enumerate() {
-                if *v != 0 {
-                    regs[i] = *v;
-                }
-            }
-        }
-        for (i, v) in args.iter().enumerate() {
-            regs[7 + i] = *v;
-        }
-
-        let mut cnode: Vec<Option<CapHashOrRef>> = vec![None; CNODE_SLOTS];
-        for e in img.pinned.iter() {
-            let s = e.slot.get() as usize;
-            if s < CNODE_SLOTS {
-                cnode[s] = Some(CapHashOrRef::Hash(e.cap_hash));
-            }
-        }
-        for e in img.initial.iter() {
-            let s = e.slot.get() as usize;
-            if s < CNODE_SLOTS && cnode[s].is_none() {
-                cnode[s] = Some(CapHashOrRef::Hash(e.cap_hash));
-            }
-        }
-        (regs, ep.entry_pc as u32, cnode)
+    let img = match cache.read_blob(&image_hash) {
+        Some(Cap::Image(i)) => i,
+        Some(_) => return Err(ERR_IMAGE_KIND),
+        None => return Err(ERR_IMAGE_NOT_FOUND),
     };
 
-    // Resolve image mappings to refcount-bumping handles on each
-    // `Cap::Data` we'll project into the PT. Done once at frame build;
-    // every subsequent `build_runtime` rebuild reads PAs off the
-    // already-pinned handles instead of re-bumping the cache. Initial
-    // slots get armed for CoW alongside; their pages are mapped RO at
-    // build time and flipped writable by the #PF handler on first
-    // write.
-    let (mapping_pins, cow_ranges) = resolve_mapping_pins(&image, &cnode)?;
+    let endpoint = endpoint_idx as usize;
+    if endpoint >= img.endpoints.len() {
+        return Err(ERR_ENDPOINT_OOB);
+    }
+    let ep = &img.endpoints[endpoint];
+    if ep.entry_pc == 0 {
+        return Err(ERR_ENDPOINT_UNDEFINED);
+    }
 
-    Ok(KernelFrame {
-        image,
-        image_hash,
-        image_hash_chain,
-        instance,
-        regs,
-        pc,
-        cnode,
-        mapping_pins,
-        cow_ranges,
-        dirty_pages: Vec::new(),
-        runtime: None,
-    })
-}
+    let mut regs = ep.initial_regs;
+    if let Some(inst_regs) = inst_regs {
+        for (i, v) in inst_regs.iter().enumerate() {
+            if *v != 0 {
+                regs[i] = *v;
+            }
+        }
+    }
+    for (i, v) in args.iter().enumerate() {
+        regs[7 + i] = *v;
+    }
+    let pc = ep.entry_pc as u32;
 
-/// Walk `image.mappings` and pin every Cap::Data backing them. Both
-/// **pinned** (immutable RO) and **initial** (RW with CoW) slots get
-/// refcount-bumping handles + direct PT projection; the latter also
-/// add a `CowRange` so the #PF handler will copy-on-write their
-/// pages on the first guest write. Errors out on `Paged` caps; V1
-/// only supports `Inline`.
-fn resolve_mapping_pins(
-    image: &CapHandle<TalcAlloc>,
-    cnode: &[Option<CapHashOrRef>],
-) -> Result<(Vec<DataMappingPin>, Vec<CowRange>), u32> {
-    let img = image_cap(image)?;
+    let mut cnode: Vec<Option<CapHashOrRef>> = vec![None; CNODE_SLOTS];
+    for e in img.pinned.iter() {
+        let s = e.slot.get() as usize;
+        if s < CNODE_SLOTS {
+            cnode[s] = Some(CapHashOrRef::Hash(e.cap_hash));
+        }
+    }
+    for e in img.initial.iter() {
+        let s = e.slot.get() as usize;
+        if s < CNODE_SLOTS && cnode[s].is_none() {
+            cnode[s] = Some(CapHashOrRef::Hash(e.cap_hash));
+        }
+    }
+
+    // Compute cow_ranges: every mapping whose source slot is an
+    // initial slot (not pinned) gets armed for CoW.
     let mut pinned_slot = [false; CNODE_SLOTS];
     let mut initial_slot = [false; CNODE_SLOTS];
     for e in img.pinned.iter() {
@@ -795,7 +740,6 @@ fn resolve_mapping_pins(
             initial_slot[s] = true;
         }
     }
-    let mut pins = Vec::with_capacity(img.mappings.len());
     let mut cow_ranges = Vec::new();
     for m in img.mappings.iter() {
         if m.source_path_len == 0 {
@@ -803,78 +747,47 @@ fn resolve_mapping_pins(
         }
         let src_slot_raw = m.source_path[0].get();
         let src_slot = src_slot_raw as usize;
-        let is_pinned = src_slot < CNODE_SLOTS && pinned_slot[src_slot];
-        let is_initial = src_slot < CNODE_SLOTS && initial_slot[src_slot];
-        if !is_pinned && !is_initial {
+        if src_slot >= CNODE_SLOTS || !initial_slot[src_slot] {
             continue;
         }
         let target_hash = match cnode.get(src_slot) {
             Some(Some(CapHashOrRef::Hash(h))) => *h,
             _ => continue,
         };
-        let handle: CapHandle<TalcAlloc> =
-            state_cache::lookup_blob_handle(&target_hash).ok_or(ERR_HOST_CALL_SLOT_EMPTY)?;
-        match &handle.cap {
-            Cap::Data(d) => match &d.content {
-                javm_cap::DataContent::Inline(_) => {}
-                javm_cap::DataContent::Paged { .. } => return Err(ERR_MAP_PAGED_UNSUPPORTED),
-            },
-            _ => return Err(ERR_MAP_BAD_KIND),
-        }
-        pins.push(DataMappingPin {
+        cow_ranges.push(CowRange {
             start: m.start as u32,
-            size: m.size as u32,
-            handle,
+            end: (m.start + m.size) as u32,
+            source_hash: target_hash,
+            source_slot: SlotIdx(src_slot_raw),
         });
-        if is_initial {
-            cow_ranges.push(CowRange {
-                start: m.start as u32,
-                end: (m.start + m.size) as u32,
-                source_hash: target_hash,
-                source_slot: SlotIdx(src_slot_raw),
-            });
-        }
     }
-    Ok((pins, cow_ranges))
-}
 
-/// Helper: borrow the inner `Cap::Image` from a handle, or return
-/// an error if the entry is the wrong kind.
-fn image_cap(
-    handle: &CapHandle<TalcAlloc>,
-) -> Result<&javm_cap::image_cap::ImageCap<TalcAlloc>, u32> {
-    match &handle.cap {
-        Cap::Image(i) => Ok(i),
-        _ => Err(ERR_IMAGE_KIND),
-    }
-}
-
-/// Helper: borrow the inner `Cap::Instance` from a handle.
-fn instance_cap(
-    handle: &CapHandle<TalcAlloc>,
-) -> Option<&javm_cap::instance::InstanceCap<TalcAlloc>> {
-    match &handle.cap {
-        Cap::Instance(i) => Some(i),
-        _ => None,
-    }
+    Ok(KernelFrame {
+        image_hash,
+        image_hash_chain,
+        instance,
+        regs,
+        pc,
+        cnode,
+        cow_ranges,
+        dirty_pages: Vec::new(),
+        runtime: None,
+    })
 }
 
 /// Construct a fresh `Cap::Instance` for a kernel-derived sub-VM.
 /// Inherits the parent's chain via `image_hash_chain`; `regs`, `pc`,
-/// `gas_remaining`, `rw_overlays` start empty (the in-kernel
-/// recurse-spawn pattern doesn't persist any of these via the
-/// instance cap — the frame's own `regs`/`pc` carry per-call state,
-/// settled back at HALT in Phase 4).
-fn build_transient_instance_cap(image_hash: CapHash, image_hash_chain: CapHash) -> Cap<TalcAlloc> {
+/// `gas_remaining`, `rw_overlays` start empty.
+fn build_transient_instance_cap(
+    cache: &Cache,
+    image_hash: CapHash,
+    image_hash_chain: CapHash,
+) -> Cap<TalcAlloc> {
     use allocator_api2::vec::Vec as AVec;
-    let alloc = state_cache::talc_alloc();
+    let alloc = cache.allocator();
     Cap::Instance(javm_cap::instance::InstanceCap {
         image_hash_chain,
         image_hash,
-        // Sub-VMs inherit the parent's cnode operationally via the
-        // per-frame `cnode` Vec (set in `dispatch_host_call`); the
-        // cap-resident `root_cnode` is a placeholder until Phase 4
-        // moves cnode mutation into the cache.
         root_cnode: CapHashOrRef::Hash([0u8; 32]),
         rw_overlays: AVec::new_in(alloc),
         mem_size: 0,

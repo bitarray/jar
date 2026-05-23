@@ -430,12 +430,10 @@ pub enum CacheErr {
 ///
 /// Construct via `Cache::new()` at kernel boot. Pass `&mut Cache` to
 /// the call loop; pass `&Cache` to read-only paths.
-#[allow(dead_code)]
 pub struct Cache {
     _priv: (),
 }
 
-#[allow(dead_code)]
 impl Cache {
     /// Construct a `Cache` handle, installing the persistent kernel
     /// mapping if not already done. Cheap to call repeatedly.
@@ -476,6 +474,11 @@ impl Cache {
     /// place; refcount>1 → shallow-clone the cap into a fresh entry,
     /// install in the same directory slot, drop the old entry's
     /// refcount by 1 (other holders keep observing the original).
+    ///
+    /// Currently unused — wired in once the spec defines the
+    /// scratchpad-cnode return mechanism. See the data-flow
+    /// principle commentary in `call_loop.rs`.
+    #[allow(dead_code)]
     pub fn mut_instance(&mut self, r: javm_cap::CapRef) -> Result<&mut Cap<TalcAlloc>, CacheErr> {
         let dir_ptr = (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *mut CacheDirectory;
         // SAFETY: dir_ptr is live for the cache's lifetime.
@@ -537,6 +540,10 @@ impl Cache {
     /// holder is the cache itself); shallow-clone otherwise. Returns
     /// the fresh `CapRef` either way. Mirrors host-side
     /// `Cache::get_mut`.
+    ///
+    /// Currently unused — wired in once the spec defines the
+    /// scratchpad-cnode return mechanism.
+    #[allow(dead_code)]
     pub fn promote_blob(&mut self, h: &javm_cap::CapHash) -> Result<javm_cap::CapRef, CacheErr> {
         let dir_ptr = (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *mut CacheDirectory;
         // SAFETY: dir_ptr in persistent kernel mapping.
@@ -594,7 +601,10 @@ impl Cache {
 
     /// Allocate a fresh `CapRef` pointing at the same entry as `r`.
     /// Bumps the entry's refcount by 1. Cheap pointer-clone — no
-    /// `Cap` content is duplicated. Used by cnode inheritance.
+    /// `Cap` content is duplicated. Will be used by cnode inheritance
+    /// once `dispatch_host_call` switches from value-copy to
+    /// ref-clone semantics (gated on scratchpad mechanism).
+    #[allow(dead_code)]
     pub fn clone_instance(&mut self, r: javm_cap::CapRef) -> Result<javm_cap::CapRef, CacheErr> {
         let dir_ptr = (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *mut CacheDirectory;
         let (slot_idx, _) =
@@ -638,6 +648,11 @@ impl Cache {
     /// Publish a fresh blob (content-addressed). Wraps the legacy
     /// `publish_blob` free function with `&mut self` to participate
     /// in the borrow checker's no-eviction-during-read invariant.
+    ///
+    /// Currently unused by the in-kernel path (the data-flow
+    /// principle keeps SSZ-Merkle out of the kernel); will be used
+    /// by future scratchpad code that commits ref→blob at RPC end.
+    #[allow(dead_code)]
     pub fn publish_blob(
         &mut self,
         hash: javm_cap::CapHash,
@@ -657,5 +672,17 @@ impl Cache {
     /// safety-net behaviour.
     pub fn clear_scratch(&mut self) {
         clear_scratch();
+    }
+}
+
+/// `Cache::Drop` fires the per-RPC scratch sweep. Construct one
+/// `Cache` at the top of an RPC (e.g. inside `nub_invoke_cached`)
+/// and pass `&mut Cache` to the call loop; when the variable goes
+/// out of scope after `run_top` returns, the kernel-frame stack has
+/// already unwound and any cnode-held entries with refcount==1 are
+/// reclaimed here.
+impl Drop for Cache {
+    fn drop(&mut self) {
+        self.clear_scratch();
     }
 }
