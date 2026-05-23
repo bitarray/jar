@@ -71,6 +71,20 @@ static TRAP_TABLE_PTR: AtomicPtr<(u32, u32)> = AtomicPtr::new(core::ptr::null_mu
 static TRAP_TABLE_LEN: AtomicU64 = AtomicU64::new(0);
 static CTX_KVA: AtomicU64 = AtomicU64::new(0);
 
+// === Per-invocation CoW state =============================================
+//
+// Set by `enter_frame` so `jit_pf_handler` can recognise legitimate
+// guest writes to mapped DataCap pages, allocate a fresh page, and
+// remap the PTE writable + new PA. The handler appends the dirty
+// page to a per-frame sink for downstream auto-mint (Commit 5).
+
+static COW_RANGES_PTR: AtomicPtr<crate::call_loop::CowRange> =
+    AtomicPtr::new(core::ptr::null_mut());
+static COW_RANGES_LEN: AtomicU64 = AtomicU64::new(0);
+static DIRTY_PAGE_SINK: AtomicPtr<alloc::vec::Vec<crate::call_loop::DirtyPage>> =
+    AtomicPtr::new(core::ptr::null_mut());
+static ACTIVE_PT_PML4_KVA: AtomicU64 = AtomicU64::new(0);
+
 /// Hyperlight-chained #PF handler. Fires AFTER Hyperlight's own
 /// stack-growth handler has declined to handle the fault.
 ///
@@ -96,6 +110,13 @@ fn jit_pf_handler(
     let code_len = JIT_CODE_LEN.load(Ordering::SeqCst);
     if code_len == 0 || saved_rip < code_base || saved_rip >= code_base + code_len {
         return false;
+    }
+
+    // CoW: if the faulting GVA falls inside a CoW-armed range, copy
+    // the cap page onto a fresh kernel-allocated page, rewrite the
+    // PTE writable + new PA, invlpg, retry the faulting instruction.
+    if try_handle_cow(gva) {
+        return true;
     }
 
     let offset = (saved_rip - code_base) as u32;
@@ -130,6 +151,87 @@ fn jit_pf_handler(
     unsafe {
         (&raw mut (*info).rip).write_volatile(exit_va);
     }
+    true
+}
+
+/// If `gva` falls inside one of the per-frame CoW-armed ranges
+/// published at `enter_frame` time, allocate a fresh page, copy from
+/// the read-only cap page currently mapped there, rewrite the PTE
+/// writable, invlpg, and append a [`crate::call_loop::DirtyPage`] to
+/// the per-frame sink. Returns `true` on success — the caller should
+/// retry the faulting instruction by leaving RIP untouched.
+fn try_handle_cow(gva: u64) -> bool {
+    let cow_ptr = COW_RANGES_PTR.load(Ordering::SeqCst);
+    let cow_len = COW_RANGES_LEN.load(Ordering::SeqCst) as usize;
+    if cow_ptr.is_null() || cow_len == 0 {
+        return false;
+    }
+    // SAFETY: cow_ptr/cow_len describe a contiguous slice owned by
+    // the running KernelFrame's `cow_ranges` Vec, valid until
+    // enter_frame returns and clears these statics.
+    let cows = unsafe { core::slice::from_raw_parts(cow_ptr, cow_len) };
+    let cow = cows
+        .iter()
+        .find(|c| (c.start as u64) <= gva && gva < (c.end as u64));
+    let Some(cow) = cow else {
+        return false;
+    };
+
+    let page_va = gva & !(PAGE_SIZE as u64 - 1);
+    let pml4_kva = ACTIVE_PT_PML4_KVA.load(Ordering::SeqCst);
+    if pml4_kva == 0 {
+        return false;
+    }
+    // SAFETY: pml4_kva was set by enter_frame to the kernel VA of
+    // the live per-call page table; valid while the handler runs.
+    let current_pa = match unsafe { crate::paging::pt_lookup_leaf(pml4_kva, page_va) } {
+        Some(pa) => pa,
+        None => return false,
+    };
+    let Some(src_kva) = crate::paging::pa_to_va(current_pa) else {
+        return false;
+    };
+    let Some(new_page) = crate::page_alloc::PageBuf::new(PAGE_SIZE) else {
+        return false;
+    };
+    let new_pa = new_page.pa();
+    let new_kva = new_page.kva();
+    // SAFETY: src_kva points at a 4 KiB page in talc-heap memory
+    // (refcount-pinned by the frame); new_page is a fresh, owned 4
+    // KiB page. Both pointers are 4 KiB-aligned.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src_kva as *const u8, new_kva as *mut u8, PAGE_SIZE);
+    }
+
+    // SAFETY: pml4_kva is the live PT; we're the only writer
+    // (single-threaded guest). page_va was just looked up so the
+    // walk is guaranteed to terminate at a present leaf PTE.
+    if unsafe {
+        crate::paging::pt_remap_leaf(pml4_kva, page_va, new_pa, crate::paging::Perm::user_rw())
+    }
+    .is_none()
+    {
+        return false;
+    }
+    crate::paging::invlpg(page_va);
+
+    let sink_ptr = DIRTY_PAGE_SINK.load(Ordering::SeqCst);
+    if sink_ptr.is_null() {
+        // No sink; the write still succeeded but we lose the
+        // ability to auto-mint at frame pop. Should not happen
+        // in normal flow (enter_frame always publishes a sink).
+        return true;
+    }
+    // SAFETY: sink_ptr was set by enter_frame to a *mut Vec<…>
+    // pointing into a KernelFrame field; the Vec struct's address
+    // is stable across pushes (only the underlying buffer moves).
+    let sink = unsafe { &mut *sink_ptr };
+    sink.push(crate::call_loop::DirtyPage {
+        guest_va: page_va as u32,
+        source_hash: cow.source_hash,
+        source_slot: cow.source_slot,
+        page: new_page,
+    });
     true
 }
 
@@ -412,17 +514,26 @@ pub unsafe fn build_frame_runtime(
 }
 
 /// Enter ring 3 on `rt`. Updates per-entry `JitContext` fields (regs,
-/// pc, gas, exit_*), publishes the #PF handler atomics, drops to
-/// ring 3, then reads back the post-exit state.
+/// pc, gas, exit_*), publishes the #PF handler atomics (including
+/// CoW state), drops to ring 3, then reads back the post-exit state.
+///
+/// `cow_ranges` describes which guest VAs the #PF handler should
+/// CoW on a write fault. `dirty_sink` is the per-frame `Vec` the
+/// handler appends to on each successful CoW (may be null to
+/// disable bookkeeping).
 ///
 /// # Safety
 /// Mutates CR3 + GDT + IDT during the call. Single-threaded by
-/// Hyperlight construction.
+/// Hyperlight construction. `cow_ranges` + `dirty_sink` must outlive
+/// the call.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn enter_frame(
     rt: &mut FrameRuntime,
     initial_gas: i64,
     entry_pc: u32,
     initial_regs: [u64; 13],
+    cow_ranges: &[crate::call_loop::CowRange],
+    dirty_sink: *mut alloc::vec::Vec<crate::call_loop::DirtyPage>,
 ) -> ExitInfo {
     let ctx = rt.ctx_kva as *mut JitContext;
     // SAFETY: ctx_kva owned by `rt.ctx_buf`, alive across this call.
@@ -445,6 +556,13 @@ pub unsafe fn enter_frame(
     TRAP_TABLE_PTR.store(rt.trap_table_ptr as *mut (u32, u32), Ordering::SeqCst);
     TRAP_TABLE_LEN.store(rt.trap_table_len, Ordering::SeqCst);
     CTX_KVA.store(rt.ctx_kva, Ordering::SeqCst);
+    COW_RANGES_PTR.store(
+        cow_ranges.as_ptr() as *mut crate::call_loop::CowRange,
+        Ordering::SeqCst,
+    );
+    COW_RANGES_LEN.store(cow_ranges.len() as u64, Ordering::SeqCst);
+    DIRTY_PAGE_SINK.store(dirty_sink, Ordering::SeqCst);
+    ACTIVE_PT_PML4_KVA.store(rt.pt.pml4_kva(), Ordering::SeqCst);
     HANDLERS[14].store(jit_pf_handler as *const () as u64, Ordering::Release);
 
     let user_stack_top = STACK_VA_M + rt.stack_buf.size();
@@ -456,6 +574,10 @@ pub unsafe fn enter_frame(
     TRAP_TABLE_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
     TRAP_TABLE_LEN.store(0, Ordering::SeqCst);
     JIT_CODE_LEN.store(0, Ordering::SeqCst);
+    COW_RANGES_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
+    COW_RANGES_LEN.store(0, Ordering::SeqCst);
+    DIRTY_PAGE_SINK.store(core::ptr::null_mut(), Ordering::SeqCst);
+    ACTIVE_PT_PML4_KVA.store(0, Ordering::SeqCst);
 
     // Suppress unused-field warning: `pt` is referenced indirectly via
     // `new_cr3` (the PML4's PA) and kept alive by owning the page tables.

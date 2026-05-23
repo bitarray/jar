@@ -54,10 +54,12 @@ use alloc::vec::Vec;
 
 use javm_cap::cap::{Cap, CapHashOrRef};
 use javm_cap::hash::{Blake2b256, Hash};
+use javm_cap::slot::SlotIdx;
 use javm_cap::{CapHash, CapRef, NUM_REGS};
 use nub_host_common::cache::TalcAlloc;
 
 use crate::jit_run::{self, DirectMap, ExitInfo, FrameRuntime, MemRegion};
+use crate::page_alloc::PageBuf;
 use crate::paging;
 use crate::state_cache::{self, CapHandle};
 
@@ -145,11 +147,47 @@ pub struct KernelFrame {
     /// what makes the direct PT mapping safe: as long as a handle
     /// lives, the talc-resident bytes the PTEs point at stay alive.
     mapping_pins: Vec<DataMappingPin>,
+    /// CoW-armed guest VA ranges. A subset of `mapping_pins` — the
+    /// initial-slot mappings whose pages can be copy-on-write'd on
+    /// guest writes. Published to the #PF handler at `enter_frame`
+    /// time so it can recognise legitimate write faults and remap.
+    cow_ranges: Vec<CowRange>,
+    /// CoW-allocated fresh pages, populated by `jit_pf_handler` on
+    /// the first write to each page of a CoW range. On frame pop
+    /// these get materialised into a fresh `Cap::Data` via the
+    /// auto-mint path (Commit 5).
+    dirty_pages: Vec<DirtyPage>,
     /// Per-frame ring-3 resources (PT + mem/ctx/stack buffers).
     /// Lazily built on the first [`run_one_entry`] for this frame
     /// and reused across every subsequent re-entry. Cuts N
     /// PageTable + 3 PageBuf allocations for a depth-N recursion.
     runtime: Option<FrameRuntime>,
+}
+
+/// One CoW-armed VA range. The #PF handler scans this list when a
+/// guest write faults inside ring 3; a hit triggers the CoW protocol
+/// (allocate a fresh page, memcpy from the cap, rewrite the PTE
+/// writable, record the dirty page).
+#[derive(Clone, Copy, Debug)]
+pub struct CowRange {
+    pub start: u32,
+    pub end: u32,
+    pub source_hash: CapHash,
+    pub source_slot: SlotIdx,
+}
+
+/// One CoW-allocated dirty page. Owned by `KernelFrame.dirty_pages`
+/// until auto-mint consumes it (next commit). For now fields stay
+/// dead-code-allowed; the next commit reads them.
+#[allow(dead_code)]
+pub struct DirtyPage {
+    pub guest_va: u32,
+    pub source_hash: CapHash,
+    pub source_slot: SlotIdx,
+    /// 4 KiB page holding the dirtied contents. Page's PA is what
+    /// the PTE currently points at; on auto-mint we read these bytes
+    /// to build the fresh `Cap::Data`.
+    pub page: PageBuf,
 }
 
 /// One DataCap pinned into this frame's PT. `start` is the guest VA
@@ -345,22 +383,28 @@ fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
         let rt = build_runtime(frame)?;
         frame.runtime = Some(rt);
     }
+    // Split-borrow: cow_ranges (read-only slice), dirty_pages
+    // (raw *mut for the #PF handler to append to), and runtime
+    // (where the JIT actually runs) are all independent fields of
+    // KernelFrame. The 2024-edition disjoint borrow check allows
+    // them to coexist.
+    let pc = frame.pc;
+    let regs = frame.regs;
+    let cow_ranges: &[CowRange] = frame.cow_ranges.as_slice();
+    let dirty_sink: *mut Vec<DirtyPage> = &mut frame.dirty_pages;
     let rt = frame.runtime.as_mut().expect("just built");
-    let info = unsafe { jit_run::enter_frame(rt, gas, frame.pc, frame.regs) };
+    let info = unsafe { jit_run::enter_frame(rt, gas, pc, regs, cow_ranges, dirty_sink) };
     Ok(info)
 }
 
-/// Build the per-frame ring-3 runtime. Pinned-slot mappings project
-/// directly into the PT (RO; refcount-pinned via `frame.mapping_pins`).
-/// Initial-slot mappings and instance `rw_overlays` still memcpy
-/// into the per-frame mem_buf — Commit 4 will arm initial slots
-/// for CoW direct mapping.
+/// Build the per-frame ring-3 runtime. Every pinned + initial slot
+/// mapping projects directly into the per-call PT; initial slots are
+/// armed for CoW via `frame.cow_ranges` and flipped writable by the
+/// #PF handler on first write. Instance `rw_overlays` (per-instance
+/// state, not page-aligned) still memcpy into the mem_buf.
 fn build_runtime<'a>(frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
     let img = image_cap(&frame.image)?;
 
-    // Direct PT projections (pinned slots). Each pin already owns a
-    // refcount-bumping handle on its source `Cap::Data`; here we
-    // just collect (start, pa, size) triples for build_frame_runtime.
     let mut direct_maps: Vec<DirectMap> = Vec::with_capacity(frame.mapping_pins.len());
     let mut mem_size: u32 = 0;
     for pin in frame.mapping_pins.iter() {
@@ -387,12 +431,12 @@ fn build_runtime<'a>(frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
         });
     }
 
-    // Memcpy regions: instance rw_overlays + initial-slot image
-    // mappings (mutable, not direct-mappable in V1). Capped at 3
-    // total per the existing build_frame_runtime contract.
+    // Instance rw_overlays: per-instance evolved state, currently
+    // allocated via the host's `Global` allocator and so not safely
+    // direct-mappable (no page-alignment guarantee). Memcpy through
+    // the per-frame mem_buf as before.
     let mut regions: [(u32, &'a [u8]); 3] = [(0, &[]), (0, &[]), (0, &[])];
     let mut n = 0usize;
-
     if let Some(inst) = instance_cap(&frame.instance) {
         for ov in inst.rw_overlays.iter() {
             let end = ov.start.saturating_add(ov.bytes.len() as u32);
@@ -409,44 +453,13 @@ fn build_runtime<'a>(frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
         }
     }
 
-    // Initial-slot mappings (image-declared mutable initial state).
-    // We classify a slot as "initial" if it is NOT in img.pinned —
-    // pinned slots have already been direct-mapped via mapping_pins
-    // above and must be skipped here to avoid an RO/RW conflict on
-    // the same PTE.
-    let mut pinned_slot = [false; CNODE_SLOTS];
-    for e in img.pinned.iter() {
-        let s = e.slot.get() as usize;
-        if s < CNODE_SLOTS {
-            pinned_slot[s] = true;
-        }
-    }
+    // Extend mem_size to cover image-declared mappings even when
+    // their source slot is empty (frame still expects zeroed memory
+    // at the declared range).
     for m in img.mappings.iter() {
         let end = (m.start + m.size) as u32;
         if end > mem_size {
             mem_size = end;
-        }
-        if m.source_path_len == 0 {
-            continue;
-        }
-        let src_slot = m.source_path[0].get() as usize;
-        if src_slot >= CNODE_SLOTS || pinned_slot[src_slot] {
-            continue;
-        }
-        let Some(Some(target)) = frame.cnode.get(src_slot) else {
-            continue;
-        };
-        let target_hash = match target {
-            CapHashOrRef::Hash(h) => *h,
-            CapHashOrRef::Ref(_) => continue,
-        };
-        if let Some(Cap::Data(d)) = state_cache::lookup_cap(&target_hash)
-            && let javm_cap::DataContent::Inline(bytes) = &d.content
-            && !bytes.is_empty()
-            && n < regions.len()
-        {
-            regions[n] = (m.start as u32, bytes.as_slice());
-            n += 1;
         }
     }
 
@@ -694,8 +707,11 @@ fn build_frame_from_image_handle(
     // Resolve image mappings to refcount-bumping handles on each
     // `Cap::Data` we'll project into the PT. Done once at frame build;
     // every subsequent `build_runtime` rebuild reads PAs off the
-    // already-pinned handles instead of re-bumping the cache.
-    let mapping_pins = resolve_mapping_pins(&image, &cnode)?;
+    // already-pinned handles instead of re-bumping the cache. Initial
+    // slots get armed for CoW alongside; their pages are mapped RO at
+    // build time and flipped writable by the #PF handler on first
+    // write.
+    let (mapping_pins, cow_ranges) = resolve_mapping_pins(&image, &cnode)?;
 
     Ok(KernelFrame {
         image,
@@ -706,36 +722,48 @@ fn build_frame_from_image_handle(
         pc,
         cnode,
         mapping_pins,
+        cow_ranges,
+        dirty_pages: Vec::new(),
         runtime: None,
     })
 }
 
-/// Walk `image.mappings` and pair each declared mapping that lands
-/// on a **pinned** (immutable, image-declared RO) slot with a
-/// refcount-bumping handle on its source `Cap::Data`. Pinned
-/// mappings get direct-projected RO into the per-call PT (no
-/// memcpy). Mappings on *initial* slots — which the guest may
-/// mutate — are left to the legacy memcpy path until Commit 4 wires
-/// up CoW. Errors out on `Paged` caps; V1 only supports `Inline`.
+/// Walk `image.mappings` and pin every Cap::Data backing them. Both
+/// **pinned** (immutable RO) and **initial** (RW with CoW) slots get
+/// refcount-bumping handles + direct PT projection; the latter also
+/// add a `CowRange` so the #PF handler will copy-on-write their
+/// pages on the first guest write. Errors out on `Paged` caps; V1
+/// only supports `Inline`.
 fn resolve_mapping_pins(
     image: &CapHandle<TalcAlloc>,
     cnode: &[Option<CapHashOrRef>],
-) -> Result<Vec<DataMappingPin>, u32> {
+) -> Result<(Vec<DataMappingPin>, Vec<CowRange>), u32> {
     let img = image_cap(image)?;
     let mut pinned_slot = [false; CNODE_SLOTS];
+    let mut initial_slot = [false; CNODE_SLOTS];
     for e in img.pinned.iter() {
         let s = e.slot.get() as usize;
         if s < CNODE_SLOTS {
             pinned_slot[s] = true;
         }
     }
-    let mut pins = Vec::with_capacity(img.pinned.len());
+    for e in img.initial.iter() {
+        let s = e.slot.get() as usize;
+        if s < CNODE_SLOTS && !pinned_slot[s] {
+            initial_slot[s] = true;
+        }
+    }
+    let mut pins = Vec::with_capacity(img.mappings.len());
+    let mut cow_ranges = Vec::new();
     for m in img.mappings.iter() {
         if m.source_path_len == 0 {
             continue;
         }
-        let src_slot = m.source_path[0].get() as usize;
-        if src_slot >= CNODE_SLOTS || !pinned_slot[src_slot] {
+        let src_slot_raw = m.source_path[0].get();
+        let src_slot = src_slot_raw as usize;
+        let is_pinned = src_slot < CNODE_SLOTS && pinned_slot[src_slot];
+        let is_initial = src_slot < CNODE_SLOTS && initial_slot[src_slot];
+        if !is_pinned && !is_initial {
             continue;
         }
         let target_hash = match cnode.get(src_slot) {
@@ -756,8 +784,16 @@ fn resolve_mapping_pins(
             size: m.size as u32,
             handle,
         });
+        if is_initial {
+            cow_ranges.push(CowRange {
+                start: m.start as u32,
+                end: (m.start + m.size) as u32,
+                source_hash: target_hash,
+                source_slot: SlotIdx(src_slot_raw),
+            });
+        }
     }
-    Ok(pins)
+    Ok((pins, cow_ranges))
 }
 
 /// Helper: borrow the inner `Cap::Image` from a handle, or return

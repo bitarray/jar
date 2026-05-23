@@ -418,6 +418,97 @@ impl Drop for PageTable {
     }
 }
 
+impl PageTable {
+    /// Kernel VA of this page table's PML4. Stashed in a static at
+    /// `enter_frame` time so the #PF handler can rewrite leaf PTEs
+    /// without needing access to the [`PageTable`] itself.
+    pub fn pml4_kva(&self) -> u64 {
+        self.pml4.as_ptr() as u64
+    }
+}
+
+/// Look up the physical address of the 4 KiB page covering `virt`
+/// in the page table rooted at `pml4_va`. Returns `None` if any
+/// table on the walk is non-present or marks a large-page leaf.
+///
+/// # Safety
+///
+/// `pml4_va` must be the kernel VA of a live 4-level page table
+/// (whose intermediate tables are reachable via [`pa_to_va`]).
+pub unsafe fn pt_lookup_leaf(pml4_va: u64, virt: u64) -> Option<u64> {
+    const PS: u64 = 1 << 7;
+    let idx4 = ((virt >> 39) & 0x1FF) as usize;
+    let idx3 = ((virt >> 30) & 0x1FF) as usize;
+    let idx2 = ((virt >> 21) & 0x1FF) as usize;
+    let idx1 = ((virt >> 12) & 0x1FF) as usize;
+
+    // SAFETY: pml4_va owned by caller, page-aligned, kernel-readable.
+    let pml4 = unsafe { &*(pml4_va as *const Table) };
+    if pml4[idx4] & flag::P == 0 {
+        return None;
+    }
+    let pdpt = unsafe { &*(pa_to_va(pml4[idx4] & PA_MASK)? as *const Table) };
+    if pdpt[idx3] & flag::P == 0 || pdpt[idx3] & PS != 0 {
+        return None;
+    }
+    let pd = unsafe { &*(pa_to_va(pdpt[idx3] & PA_MASK)? as *const Table) };
+    if pd[idx2] & flag::P == 0 || pd[idx2] & PS != 0 {
+        return None;
+    }
+    let pt = unsafe { &*(pa_to_va(pd[idx2] & PA_MASK)? as *const Table) };
+    if pt[idx1] & flag::P == 0 {
+        return None;
+    }
+    Some(pt[idx1] & PA_MASK)
+}
+
+/// Overwrite an existing leaf PTE in the page table rooted at
+/// `pml4_va` so the 4 KiB page covering `virt` now maps to `phys`
+/// with `perm`. Returns `None` if any intermediate is missing —
+/// i.e., the page wasn't previously mapped. Does not invalidate the
+/// TLB; the caller must [`invlpg`].
+///
+/// # Safety
+///
+/// Same as [`pt_lookup_leaf`], plus the caller must hold the only
+/// reference to the table during the rewrite (we currently have a
+/// single-threaded guest).
+pub unsafe fn pt_remap_leaf(pml4_va: u64, virt: u64, phys: u64, perm: Perm) -> Option<()> {
+    const PS: u64 = 1 << 7;
+    let idx4 = ((virt >> 39) & 0x1FF) as usize;
+    let idx3 = ((virt >> 30) & 0x1FF) as usize;
+    let idx2 = ((virt >> 21) & 0x1FF) as usize;
+    let idx1 = ((virt >> 12) & 0x1FF) as usize;
+
+    // SAFETY: as above.
+    let pml4 = unsafe { &mut *(pml4_va as *mut Table) };
+    if pml4[idx4] & flag::P == 0 {
+        return None;
+    }
+    let pdpt = unsafe { &mut *(pa_to_va(pml4[idx4] & PA_MASK)? as *mut Table) };
+    if pdpt[idx3] & flag::P == 0 || pdpt[idx3] & PS != 0 {
+        return None;
+    }
+    let pd = unsafe { &mut *(pa_to_va(pdpt[idx3] & PA_MASK)? as *mut Table) };
+    if pd[idx2] & flag::P == 0 || pd[idx2] & PS != 0 {
+        return None;
+    }
+    let pt = unsafe { &mut *(pa_to_va(pd[idx2] & PA_MASK)? as *mut Table) };
+    pt[idx1] = (phys & PA_MASK) | perm.pte_flags();
+    Some(())
+}
+
+/// Flush the TLB entry for `virt` on the current CPU. No-op when the
+/// caller is about to switch CR3 (which flushes every non-global
+/// entry), but cheap enough to always call after a PTE rewrite.
+#[inline]
+pub fn invlpg(virt: u64) {
+    // SAFETY: `invlpg` is a no-fault instruction on any address.
+    unsafe {
+        core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
+    }
+}
+
 /// Install a kernel-mode (no USER bit) page-table mapping in the
 /// **currently active** PML4. The mapping persists across
 /// per-invocation [`PageTable::new`] calls because that constructor
