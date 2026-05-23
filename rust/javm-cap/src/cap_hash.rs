@@ -101,13 +101,20 @@ mod tests {
             v.extend_from_slice(b"abc");
             v
         };
+        // Two caps with different inline byte lengths (same prefix)
+        // hash differently because content storage IS the identifier.
+        // Pad to distinct page-multiple sizes.
+        let mut bytes_a_padded: AVec<u8, Global> = AVec::new_in(Global);
+        bytes_a_padded.resize(crate::data::PAGE_SIZE, 0);
+        bytes_a_padded[..bytes_a.len()].copy_from_slice(bytes_a.as_slice());
+        let mut bytes_b_padded: AVec<u8, Global> = AVec::new_in(Global);
+        bytes_b_padded.resize(crate::data::PAGE_SIZE * 2, 0);
+        bytes_b_padded[..bytes_b.len()].copy_from_slice(bytes_b.as_slice());
         let a: Cap<Global> = Cap::Data(DataCap {
-            size: 3,
-            content: DataContent::Inline(bytes_a),
+            content: DataContent::Inline(bytes_a_padded),
         });
         let b: Cap<Global> = Cap::Data(DataCap {
-            size: 4, // different size, same inline bytes → different cap hash
-            content: DataContent::Inline(bytes_b),
+            content: DataContent::Inline(bytes_b_padded),
         });
         assert_ne!(cap_hash(&a), cap_hash(&b));
     }
@@ -195,7 +202,6 @@ mod tests {
         let mut pages: AVec<PageSlot<Global>, Global> = AVec::new_in(Global);
         pages.push(PageSlot::Loaded(pr));
         let cap: Cap<Global> = Cap::Data(DataCap {
-            size: 3,
             content: DataContent::Paged {
                 page_size: 4096,
                 pages,
@@ -214,7 +220,6 @@ mod tests {
         let mut pages2: AVec<PageSlot<Global>, Global> = AVec::new_in(Global);
         pages2.push(PageSlot::Loaded(pr2));
         let cap2: Cap<Global> = Cap::Data(DataCap {
-            size: 3,
             content: DataContent::Paged {
                 page_size: 4096,
                 pages: pages2,
@@ -240,7 +245,6 @@ mod tests {
         let mut pages_loaded: AVec<PageSlot<Global>, Global> = AVec::new_in(Global);
         pages_loaded.push(PageSlot::Loaded(pr));
         let cap_loaded: Cap<Global> = Cap::Data(DataCap {
-            size: 16,
             content: DataContent::Paged {
                 page_size: 16,
                 pages: pages_loaded,
@@ -250,7 +254,6 @@ mod tests {
         let mut pages_missing: AVec<PageSlot<Global>, Global> = AVec::new_in(Global);
         pages_missing.push(PageSlot::Missing(page_hash));
         let cap_missing: Cap<Global> = Cap::Data(DataCap {
-            size: 16,
             content: DataContent::Paged {
                 page_size: 16,
                 pages: pages_missing,

@@ -46,7 +46,6 @@
 //! in the long-lived `Vm`.
 
 use allocator_api2::alloc::Global;
-use allocator_api2::vec::Vec as AVec;
 use javm_cap::{
     Blake2b256, Cache, Cap, CapHashOrRef, DataCap, DataContent, Hash, SlotIdx, TypeCap,
 };
@@ -702,18 +701,21 @@ impl<K: KernelAssist> Vm<K> {
         let bytes = mem
             .read(src_offset, len)
             .map_err(|_| VmError::Invariant("host_mint_data_cap memory read failed"))?;
-        let canonical_len = strip_trailing_zeros_len(&bytes);
-        let debit = canonical_len as u64;
+        // DataCap content is page-multiple by construction: pad the
+        // caller's bytes up to the next 4 KiB boundary with zeros.
+        // Quota is debited by the padded length — the kernel owns
+        // a full page-aligned allocation regardless of caller's slice
+        // length, so callers pay for what they store.
+        let mut inline = javm_cap::data::alloc_page_aligned_zeroed::<Global>(bytes.len(), Global);
+        inline[..bytes.len()].copy_from_slice(&bytes);
+        let debit = inline.len() as u64;
         let quota = self.kernel_assist.storage_quota_get(quota_id);
         if quota < debit {
             return Err(VmError::Invariant("storage quota exhausted"));
         }
         self.kernel_assist
             .storage_quota_set(quota_id, quota - debit);
-        let mut inline = AVec::new_in(Global);
-        inline.extend_from_slice(&bytes[..canonical_len]);
         let cap = Cap::Data(DataCap {
-            size: canonical_len as u64,
             content: DataContent::Inline(inline),
         });
         let h = javm_cap::cap_hash(&cap);
@@ -779,7 +781,7 @@ impl<K: KernelAssist> Vm<K> {
             .get(target)
             .ok_or(VmError::Invariant("host_save data missing"))?
         {
-            Cap::Data(d) => d.size,
+            Cap::Data(d) => d.content_len(),
             _ => return Err(VmError::Invariant("host_save source is not Cap::Data")),
         };
         let file_id = self
@@ -859,20 +861,8 @@ impl<K: KernelAssist> Vm<K> {
     }
 }
 
-/// Canonical-form length: number of leading bytes before trailing
-/// zeros. Used by host_mint_data_cap once that host call lands
-/// (Stage 4 wires the cache borrow).
-#[allow(dead_code)]
-pub(crate) fn strip_trailing_zeros_len(bytes: &[u8]) -> usize {
-    let mut n = bytes.len();
-    while n > 0 && bytes[n - 1] == 0 {
-        n -= 1;
-    }
-    n
-}
-
 fn data_cap_prefix(data: &DataCap<Global>, len: usize) -> Vec<u8> {
-    let actual_len = len.min(data.size as usize);
+    let actual_len = len.min(data.content_len() as usize);
     let mut out = vec![0u8; actual_len];
     match &data.content {
         DataContent::Inline(bytes) => {
@@ -1383,6 +1373,11 @@ mod tests {
 
     #[test]
     fn host_read_data_cap_copies_bytes_from_cache() {
+        // After the page-aligned DataCap refactor, the cap'\''s content
+        // is always page-multiple. `host_read_data_cap` copies up to
+        // `len` bytes (capped at `content_len()`), so callers asking
+        // for fewer bytes than a page get exactly that many — with
+        // the meaningful prefix at the start and trailing zero-pad.
         let mut vm = fixture_vm();
         let mut cache = Cache::new_in(Global);
         let data_hash = publish_data_inline(&mut cache, b"hello");
@@ -1408,15 +1403,20 @@ mod tests {
             &mut mem,
         );
         assert!(matches!(r, EcallResult::Continue));
-        assert_eq!(regs.gpr[7], 5);
-        assert_eq!(mem.read(16, 5).unwrap(), b"hello");
+        // Asked for 8 bytes; the cap has 4096 bytes available so we
+        // get all 8: 5 meaningful "hello" plus 3 trailing zeros.
+        assert_eq!(regs.gpr[7], 8);
+        assert_eq!(mem.read(16, 8).unwrap(), b"hello\0\0\0");
     }
 
     #[test]
-    fn host_mint_data_cap_publishes_canonical_bytes() {
+    fn host_mint_data_cap_publishes_page_padded_bytes() {
+        // After the page-aligned DataCap refactor, mint pads the
+        // caller's bytes up to the next 4 KiB boundary and debits
+        // quota by the padded length (1 page = 4096 bytes).
         let mut vm = fixture_vm();
         let mut cache = Cache::new_in(Global);
-        vm.kernel_assist.storage_quota_set(0, 10);
+        vm.kernel_assist.storage_quota_set(0, 8192);
         let mut mem = Mem::new();
         mem.map_region(0, PAGE_SIZE as u64, Access::ReadWrite, None)
             .unwrap();
@@ -1435,7 +1435,8 @@ mod tests {
             &mut mem,
         );
         assert!(matches!(r, EcallResult::Continue));
-        assert_eq!(vm.kernel_assist.storage_quota_get(0), 7);
+        // Debit = one page (4096), starting from 8192 leaves 4096.
+        assert_eq!(vm.kernel_assist.storage_quota_get(0), 4096);
         let target = vm
             .stack
             .running_instance()
@@ -1445,8 +1446,10 @@ mod tests {
             .unwrap();
         match cache.get(target).unwrap() {
             Cap::Data(d) => {
-                assert_eq!(d.size, 3);
-                assert_eq!(data_cap_prefix(d, 10), b"abc");
+                assert_eq!(d.content_len(), javm_cap::PAGE_SIZE as u64);
+                // First 5 bytes echo what we wrote, including the
+                // two trailing zeros — no stripping.
+                assert_eq!(data_cap_prefix(d, 5), b"abc\0\0");
             }
             _ => panic!("expected Data cap"),
         }
@@ -1477,10 +1480,13 @@ mod tests {
 
     #[test]
     fn host_save_debits_actual_data_size_and_returns_file_id() {
+        // Page-aligned DataCap: `host_save` debits by the full
+        // page-multiple content length (4 KiB for the padded "stored"
+        // cap). Quota seeded with enough headroom for one save.
         let mut vm = fixture_vm();
         let mut cache = Cache::new_in(Global);
         let data_hash = publish_data_inline(&mut cache, b"stored");
-        vm.kernel_assist.storage_quota_set(0, 10);
+        vm.kernel_assist.storage_quota_set(0, 8192);
         vm.stack
             .running_instance_mut()
             .unwrap()
@@ -1494,7 +1500,8 @@ mod tests {
         let r = handle_cached(&mut vm, &mut cache, host_op::HOST_SAVE, &mut regs, &mut mem);
         assert!(matches!(r, EcallResult::Continue));
         assert_eq!(regs.gpr[7], 1);
-        assert_eq!(vm.kernel_assist.storage_quota_get(0), 4);
+        // Debit one page (4096) from initial 8192 → 4096 remaining.
+        assert_eq!(vm.kernel_assist.storage_quota_get(0), 4096);
         assert_eq!(
             vm.kernel_assist.host_open(1),
             Some(CapHashOrRef::Hash(data_hash))
@@ -1703,13 +1710,5 @@ mod tests {
             _ => panic!("entry 0 not Instance"),
         };
         assert!(parent.root_cnode.get(SlotIdx(0)).is_none());
-    }
-
-    #[test]
-    fn strip_trailing_zeros_basic() {
-        assert_eq!(strip_trailing_zeros_len(&[1, 2, 3]), 3);
-        assert_eq!(strip_trailing_zeros_len(&[1, 2, 3, 0, 0]), 3);
-        assert_eq!(strip_trailing_zeros_len(&[0, 0, 0]), 0);
-        assert_eq!(strip_trailing_zeros_len(&[]), 0);
     }
 }

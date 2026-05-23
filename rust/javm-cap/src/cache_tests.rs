@@ -111,7 +111,7 @@ fn t_publish_data_paged(
     cache: &mut Cache,
     page_size: u32,
     pages: &[Option<&[u8]>],
-    size: u64,
+    _size: u64,
 ) -> Result<CapHash, super::cache::CacheError> {
     let page_size_usize = page_size as usize;
     let mut slots: AVec<PageSlot<Global>, Global> = AVec::with_capacity_in(pages.len(), Global);
@@ -145,7 +145,6 @@ fn t_publish_data_paged(
         }
     }
     let cap = Cap::Data(DataCap {
-        size,
         content: DataContent::Paged {
             page_size,
             pages: slots,
@@ -179,12 +178,9 @@ fn t_publish_instance_blob(
 }
 
 fn make_data_inline(bytes: &[u8]) -> Cap<Global> {
-    let mut v = AVec::new_in(Global);
-    v.extend_from_slice(bytes);
-    Cap::Data(DataCap {
-        size: bytes.len() as u64,
-        content: DataContent::Inline(v),
-    })
+    // DataCap content is always page-multiple; the bytes get padded
+    // to the next 4 KiB boundary inside `data_inline`.
+    Cap::data_inline(bytes)
 }
 
 fn make_cnode_with(entries: &[(SlotIdx, CapHashOrRef)]) -> Cap<Global> {
@@ -247,12 +243,15 @@ fn sole_owner_get_mut_move_promotes() {
     // New instance entry's refcount starts at 1.
     assert_eq!(cache.refcount(CapHashOrRef::Ref(r)), Some(1));
 
-    // Content preserved.
+    // Content preserved (page-padded to 4 KiB).
     match cache.get(CapHashOrRef::Ref(r)).unwrap() {
         Cap::Data(d) => {
-            assert_eq!(d.size, 4);
+            assert_eq!(d.content_len(), crate::data::PAGE_SIZE as u64);
             match &d.content {
-                DataContent::Inline(bs) => assert_eq!(bs.as_slice(), b"sole"),
+                DataContent::Inline(bs) => {
+                    assert_eq!(bs.len(), crate::data::PAGE_SIZE);
+                    assert_eq!(&bs[..4], b"sole");
+                }
                 _ => panic!("expected Inline"),
             }
         }
@@ -288,7 +287,8 @@ fn shared_blob_get_mut_clones() {
     if let Cap::Data(d) = cache.get(CapHashOrRef::Hash(h)).unwrap()
         && let DataContent::Inline(bs) = &d.content
     {
-        assert_eq!(bs.as_slice(), b"shared");
+        // Page-padded: only the first len bytes are meaningful.
+        assert_eq!(&bs[..b"shared".len()], b"shared");
     }
 }
 
@@ -841,7 +841,7 @@ fn publish_data_paged_round_trips() {
     let cap = cache.get(CapHashOrRef::Hash(h)).expect("present");
     match cap {
         Cap::Data(d) => {
-            assert_eq!(d.size, 4096 * 3);
+            assert_eq!(d.content_len(), 4096 * 3);
             match &d.content {
                 DataContent::Paged { page_size, pages } => {
                     assert_eq!(*page_size, 4096);
@@ -951,7 +951,10 @@ fn put_cap_deep_clones_content_into_cache_allocator() {
     // After put, the in-cache cap must roundtrip identical content.
     match cache.get(CapHashOrRef::Hash(h)).unwrap() {
         Cap::Data(d) => match &d.content {
-            DataContent::Inline(bs) => assert_eq!(bs.as_slice(), b"gamma"),
+            DataContent::Inline(bs) => {
+                // Page-padded; only the meaningful prefix is checked.
+                assert_eq!(&bs[..b"gamma".len()], b"gamma");
+            }
             _ => panic!("expected Inline"),
         },
         _ => panic!("expected Data"),

@@ -656,9 +656,19 @@ pub(crate) fn deep_clone_into<A: Allocator + Clone>(src: &Cap<Global>, alloc: A)
         Cap::Data(d) => {
             let content = match &d.content {
                 DataContent::Inline(bytes) => {
+                    // Page-aligned re-allocation through `alloc`: the
+                    // resulting buffer can be mapped directly into a
+                    // ring-3 PT without an intermediate copy. Source
+                    // length is already a page-multiple (DataCap
+                    // invariant); we mirror the same length on the
+                    // target side.
+                    debug_assert!(
+                        bytes.len().is_multiple_of(crate::data::PAGE_SIZE),
+                        "DataCap inline content must be page-multiple"
+                    );
                     let mut new_bytes: AVec<u8, A> =
-                        AVec::with_capacity_in(bytes.len(), alloc.clone());
-                    new_bytes.extend_from_slice(bytes.as_slice());
+                        crate::data::alloc_page_aligned_zeroed::<A>(bytes.len(), alloc.clone());
+                    new_bytes[..bytes.len()].copy_from_slice(bytes.as_slice());
                     DataContent::Inline(new_bytes)
                 }
                 DataContent::Paged { page_size, pages } => {
@@ -670,9 +680,15 @@ pub(crate) fn deep_clone_into<A: Allocator + Clone>(src: &Cap<Global>, alloc: A)
                             PageSlot::Missing(h) => PageSlot::Missing(*h),
                             PageSlot::Loaded(pr) => {
                                 let src_pb = pr.get();
-                                let mut bytes: AVec<u8, A> =
-                                    AVec::with_capacity_in(src_pb.bytes.len(), alloc.clone());
-                                bytes.extend_from_slice(src_pb.bytes.as_slice());
+                                // Page bytes are also page-aligned so
+                                // they can be mapped directly.
+                                let mut bytes: AVec<u8, A> = crate::data::alloc_page_aligned_zeroed::<
+                                    A,
+                                >(
+                                    src_pb.bytes.len(), alloc.clone()
+                                );
+                                bytes[..src_pb.bytes.len()]
+                                    .copy_from_slice(src_pb.bytes.as_slice());
                                 let pb = PageBytes {
                                     refcount: core::sync::atomic::AtomicU32::new(1),
                                     hash: src_pb.hash,
@@ -691,10 +707,7 @@ pub(crate) fn deep_clone_into<A: Allocator + Clone>(src: &Cap<Global>, alloc: A)
                     }
                 }
             };
-            Cap::Data(DataCap {
-                size: d.size,
-                content,
-            })
+            Cap::Data(DataCap { content })
         }
         Cap::Image(img) => {
             let mut code = AVec::with_capacity_in(img.code.len(), alloc.clone());
@@ -804,9 +817,13 @@ fn shallow_clone_cap<A: Allocator + Clone>(cap: &Cap<A>, alloc: A) -> Result<Cap
         Cap::Data(d) => {
             let content = match &d.content {
                 DataContent::Inline(bytes) => {
+                    debug_assert!(
+                        bytes.len().is_multiple_of(crate::data::PAGE_SIZE),
+                        "DataCap inline content must be page-multiple"
+                    );
                     let mut new_bytes: AVec<u8, A> =
-                        AVec::with_capacity_in(bytes.len(), alloc.clone());
-                    new_bytes.extend_from_slice(bytes.as_slice());
+                        crate::data::alloc_page_aligned_zeroed::<A>(bytes.len(), alloc.clone());
+                    new_bytes[..bytes.len()].copy_from_slice(bytes.as_slice());
                     DataContent::Inline(new_bytes)
                 }
                 DataContent::Paged { page_size, pages } => {
@@ -825,10 +842,7 @@ fn shallow_clone_cap<A: Allocator + Clone>(cap: &Cap<A>, alloc: A) -> Result<Cap
                     }
                 }
             };
-            Ok(Cap::Data(DataCap {
-                size: d.size,
-                content,
-            }))
+            Ok(Cap::Data(DataCap { content }))
         }
         Cap::Instance(inst) => {
             let mut new_overlays: AVec<RwOverlay<A>, A> =

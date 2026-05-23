@@ -208,24 +208,38 @@ impl<A: Allocator + Clone> Cap<A> {
 // values without going through a `Cache`, suitable for callers (jar-
 // kernel, javm) that build caps locally before publishing.
 impl Cap<Global> {
-    /// Build a heap `Cap::Data` whose content is `bytes` inline.
-    /// `DataCap.size` is set to `bytes.len()`. Use a direct
-    /// `DataCap { size, content: DataContent::Inline(...) }` build
-    /// if the logical size differs from the inline byte count
-    /// (e.g. zero-padded paged data).
+    /// Build a heap `Cap::Data` whose content is `bytes` padded up to
+    /// the next [`PAGE_SIZE`](super::data::PAGE_SIZE) boundary with
+    /// zeros. The backing allocation is page-aligned so the kernel
+    /// can later map the cap's pages directly into a ring-3 PT.
+    ///
+    /// `DataCap.content_len()` returns the padded length (always a
+    /// 4 KiB-multiple). There is no separate logical-size field;
+    /// callers needing a shorter logical payload (e.g. variable-length
+    /// args) interpret the meaningful prefix themselves.
     pub fn data_inline(bytes: &[u8]) -> Self {
-        Self::data_inline_with_size(bytes, bytes.len() as u64)
+        let mut buf = super::data::alloc_page_aligned_zeroed::<Global>(bytes.len(), Global);
+        buf[..bytes.len()].copy_from_slice(bytes);
+        Cap::Data(DataCap {
+            content: super::data::DataContent::Inline(buf),
+        })
     }
 
-    /// Build a heap `Cap::Data` with an explicit logical `size` that
-    /// may exceed `bytes.len()` (e.g. zero-padded paged data, or a
-    /// pinned `.bss`-style region with non-empty initial content but a
-    /// larger declared size).
-    pub fn data_inline_with_size(bytes: &[u8], size: u64) -> Self {
-        let mut buf = allocator_api2::vec::Vec::with_capacity_in(bytes.len(), Global);
-        buf.extend_from_slice(bytes);
+    /// Build a heap `Cap::Data` whose backing buffer is at least
+    /// `target_size` bytes (rounded up to the next page boundary).
+    /// `bytes` is copied to the start of the buffer; the remainder is
+    /// zero-padded. Used by callers that need a cap matching a specific
+    /// `MemoryMapping.size` from an image manifest (e.g. genesis +
+    /// transpiler-emitted initial data).
+    ///
+    /// If `target_size < bytes.len()`, the buffer is sized to fit
+    /// `bytes` (still page-multiple) — i.e. `target_size` is a floor,
+    /// not a ceiling.
+    pub fn data_inline_with_size(bytes: &[u8], target_size: u64) -> Self {
+        let target = (target_size as usize).max(bytes.len());
+        let mut buf = super::data::alloc_page_aligned_zeroed::<Global>(target, Global);
+        buf[..bytes.len()].copy_from_slice(bytes);
         Cap::Data(DataCap {
-            size,
             content: super::data::DataContent::Inline(buf),
         })
     }

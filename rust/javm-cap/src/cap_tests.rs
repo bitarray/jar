@@ -80,9 +80,14 @@ fn data_inline_constructor() {
     let cap = Cap::data_inline(b"hello");
     match cap {
         Cap::Data(d) => {
-            assert_eq!(d.size, 5);
+            // DataCap content is page-padded to next 4 KiB boundary.
+            assert_eq!(d.content_len(), crate::data::PAGE_SIZE as u64);
             match d.content {
-                DataContent::Inline(bytes) => assert_eq!(bytes.as_slice(), b"hello"),
+                DataContent::Inline(bytes) => {
+                    assert_eq!(bytes.len(), crate::data::PAGE_SIZE);
+                    assert_eq!(&bytes[..5], b"hello");
+                    assert!(bytes[5..].iter().all(|b| *b == 0));
+                }
                 _ => panic!("expected Inline content"),
             }
         }
@@ -180,13 +185,16 @@ fn cnode_lookup_after_set() {
 #[test]
 fn data_inline_round_trip() {
     let mut bytes = AVec::new_in(Global);
-    bytes.extend_from_slice(b"hello");
+    bytes.resize(crate::data::PAGE_SIZE, 0);
+    bytes[..5].copy_from_slice(b"hello");
     let data: DataCap<Global> = DataCap {
-        size: 5,
         content: DataContent::Inline(bytes),
     };
     match data.content {
-        DataContent::Inline(b) => assert_eq!(b.as_slice(), b"hello"),
+        DataContent::Inline(b) => {
+            assert_eq!(b.len(), crate::data::PAGE_SIZE);
+            assert_eq!(&b[..5], b"hello");
+        }
         _ => panic!("expected Inline"),
     }
 }

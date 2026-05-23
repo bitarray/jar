@@ -384,12 +384,18 @@ Image {                        -- content-addressed; Cap::Image kind
 }
 
 MemoryMapping {
-  start:   u64                  -- virtual address
-  size:    u64                  -- bytes (any size; not page-aligned)
+  start:   u64                  -- virtual address; MUST be 4 KiB-aligned
+  size:    u64                  -- bytes; MUST be a multiple of 4 KiB
   source:  Persistent(SlotPath) -- cnode-DataCap-backed; mutations COW'd
         |  Ephemeral            -- kernel-allocated per-apply; not in cnode;
                                 --   captured into Paused on yield
 }
+
+-- Page-alignment rationale: DataCap content is page-multiple by
+-- construction (see §2). Page-aligning mappings lets the kernel map
+-- DataCap pages directly into ring-3 page tables without copying
+-- bytes through an intermediate per-call buffer. Pinned-RO mappings
+-- of the same DataCap across multiple Instances share physical pages.
 
 EndpointDef {
   entry_pc:          u64
@@ -602,32 +608,48 @@ in the apply's address space. Pinned source slots → mapped
 read-only. Unpinned → mapped read-write with copy-on-write per page.
 Ephemeral mappings are kernel-allocated zeroed at apply start.
 
-### DataCap canonical form: trailing-zero-stripped
+### DataCap shape: page-multiple content, no separate size
 
 ```
-DataCap.content has size N (the "stripped size" — no trailing zeros).
-hash(DataCap("Hello\0\0\0")) ≡ hash(DataCap("Hello"))
-DataCap.size = position of last non-zero byte + 1; or 0 if all zero.
+DataCap {
+  content: Bytes              -- length is always a multiple of 4 KiB
+}
+
+hash(DataCap) = hash_tree_root(content)
 ```
 
-Kernel strips trailing zeros at every mint operation. The
-content_hash and size both reflect the stripped representation.
+`DataCap.content.len()` is the only authoritative size — there is no
+separate `size` field. The kernel does NOT canonicalize content by
+stripping trailing zeros. `DataCap("Hello\0\0...\0")` (4 KiB) and
+`DataCap("Hello\0...\0")` (8 KiB) are distinct caps with distinct
+hashes; they coexist in the cache without dedup.
+
+Rationale: the previous "trailing-zero-stripped canonical form" rule
+existed to deduplicate logically-identical short caps. In practice
+nothing produces caps in both stripped and padded shapes for the same
+logical content — caps come from `host_mint_data_cap` (caller-supplied
+bytes, padded up to a page boundary at mint) or from HALT auto-mint
+(page-aligned dirty-page content). Both paths produce page-multiple
+caps. Removing the strip rule simplifies the kernel without losing
+any observable dedup.
 
 ### Size handling at map time
 
 ```
-DataCap.size = N
-region.size = S
+DataCap.content.len() = N      (both 4 KiB-multiples)
+region.size           = S      (both 4 KiB-multiples)
 
-if N == S:  direct mapping.
-if N <  S:  map bytes 0..N from DataCap; zero-fill bytes N..S in
-            address space.
-if N >  S:  CALL faults. Caller is responsible for ensuring DataCaps
-            fit the regions they'll be mapped into.
+if N == S:  direct page-by-page mapping.
+if N <  S:  map the N bytes of the DataCap; map the remaining S − N
+            bytes from the shared global zero page (RO).
+if N >  S:  CALL faults. Caller is responsible for sizing.
 ```
 
-Zero-padding small DataCaps lets callers pass variable-size args
-without explicit length encoding.
+Variable-length payloads (e.g., caller args via slot[0]) flow through
+a DataCap whose content's logical meaning is interpreted by the
+receiver — either via a length-prefix encoding inside the bytes or by
+zero-terminator scanning. The kernel does not carry a logical-length
+hint.
 
 ### Persistence of mapped regions at HALT
 
@@ -638,8 +660,8 @@ At HALT:
   If apply explicitly replaced the source slot via cap-table ops:
     Use the replaced cap. Discard memory modifications from this region.
   Else if any pages in the region are dirty:
-    Mint a new DataCap from the modified region content (trailing
-      zeros stripped). Place at source slot.
+    Mint a new DataCap whose content is the modified pages verbatim
+      (page-multiple, no trailing-zero stripping). Place at source slot.
   Else:
     Source slot unchanged.
 ```

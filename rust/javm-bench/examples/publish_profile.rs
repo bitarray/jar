@@ -28,7 +28,6 @@ use javm_cap::cap::Cap;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_cap::cap_hash::cap_hash;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use javm_cap::data::{DataCap, DataContent};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_cap::image::Image;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -136,28 +135,16 @@ fn main() {
 
     // (c) cap_hash(Cap::Data) — SSZ merkleize over the bytes, with Cap
     //     already built. Isolates the hash work from the alloc/copy.
-    let cap_data: Cap<Global> = {
-        let mut v: AVec<u8, Global> = AVec::with_capacity_in(bytes.len(), Global);
-        v.extend_from_slice(bytes);
-        Cap::Data(DataCap {
-            size: size_u64,
-            content: DataContent::Inline(v),
-        })
-    };
+    let cap_data: Cap<Global> = Cap::data_inline_with_size(bytes, size_u64);
     measure("(c) cap_hash(Cap::Data) on pre-built Cap", n, || {
         let h = cap_hash(&cap_data);
         std::hint::black_box(h);
     });
 
-    // (d) Full publish_data_inline_with_size hit-path on Global: build
+    // (d) Full data_inline_with_size hit-path on Global: build
     //     Cap::Data + cap_hash + drop. Compare against the talc-backed (e).
     measure("(d) build Cap::Data(Global) + cap_hash + drop", n, || {
-        let mut v: AVec<u8, Global> = AVec::with_capacity_in(bytes.len(), Global);
-        v.extend_from_slice(bytes);
-        let cap: Cap<Global> = Cap::Data(DataCap {
-            size: size_u64,
-            content: DataContent::Inline(v),
-        });
+        let cap: Cap<Global> = Cap::data_inline_with_size(bytes, size_u64);
         let h = cap_hash(&cap);
         std::hint::black_box(h);
         drop(cap);
