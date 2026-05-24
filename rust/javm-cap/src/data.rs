@@ -82,8 +82,9 @@ pub fn alloc_page_aligned_zeroed<A: Allocator + Clone>(len: usize, alloc: A) -> 
     let padded = len.next_multiple_of(PAGE_SIZE).max(PAGE_SIZE);
     let layout =
         Layout::from_size_align(padded, PAGE_SIZE).expect("DataCap page-aligned layout overflow");
-    let nn =
-        allocate::allocate_zeroed(&alloc, layout).expect("DataCap page-aligned allocation failed");
+    let nn = alloc
+        .allocate_zeroed(layout)
+        .expect("DataCap page-aligned allocation failed");
     // SAFETY: `allocate_zeroed` returned a non-null pointer to
     // `padded` zeroed bytes aligned to PAGE_SIZE. The capacity we
     // pass to `from_raw_parts_in` matches the allocation; the length

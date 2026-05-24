@@ -1,69 +1,44 @@
-//! `TalcAlloc`: the bridge from a `talc::TalcLock` to
-//! `core::alloc::Allocator`.
+//! Talc allocator integration.
+//!
+//! `TalcAlloc` is a **type alias** for `&'static CacheTalcLock`. Talc's
+//! `Talck` already implements `allocator_api2::alloc::Allocator`, and
+//! `&'static T` inherits that impl. The whole "allocator handle" is
+//! just a borrow — `Copy + Clone + Send + Sync` for free.
+//!
+//! Construction is one line at the call site:
+//!
+//! - **Tests**: `&TALC` where
+//!   `static TALC: CacheTalcLock = new_cache_talc_lock();` (see
+//!   [`crate::test_arena`]).
+//! - **Production**: the talc lives at a fixed VA (mmap'd, pinned for
+//!   the process lifetime):
+//!   ```ignore
+//!   let alloc: TalcAlloc =
+//!       unsafe { &*(STATE_CACHE_VA as *const CacheTalcLock) };
+//!   ```
+//!   The single `unsafe { &*VA }` cast asserts the `'static` lifetime
+//!   that the mmap pinning guarantees.
 
-use core::alloc::{AllocError, Allocator, Layout};
-use core::ptr::NonNull;
+pub use talc::{ClaimOnOom, ErrOnOom, OomHandler, Span, Talc, Talck};
 
-/// Re-exported from `talc::source::Manual` so consumers can construct
-/// a [`CacheTalcLock`] without a direct dep on talc.
-pub use talc::source::Manual;
-
-/// Concrete TalcLock flavor used by the shared state-cache region.
-/// `spinning_top::RawSpinlock` for serialisation, `Manual` source for
-/// claim-based initial allocation.
-pub type CacheTalcLock = talc::TalcLock<spinning_top::RawSpinlock, Manual>;
-
-/// `Copy` allocator handle that delegates to a [`CacheTalcLock`]
-/// living at a fixed pointer.
+/// Concrete `Talck` flavour used by the shared state-cache region.
 ///
-/// # Safety
-///
-/// The pointer must reference a live, `claim`-ed [`CacheTalcLock`].
-/// The caller is responsible for keeping the lock alive at least as
-/// long as any `TalcAlloc` derived from it.
-#[derive(Clone, Copy, Debug)]
-pub struct TalcAlloc {
-    talc: NonNull<CacheTalcLock>,
-}
+/// `spinning_top::RawSpinlock` for serialisation (no `lock_api` direct
+/// dep needed downstream); `ErrOnOom` so OOM returns `Err` rather than
+/// attempting heap extension — callers hand talc its backing memory up
+/// front via `Talc::claim`.
+pub type CacheTalcLock = Talck<spinning_top::RawSpinlock, ErrOnOom>;
 
-// SAFETY: the underlying lock provides interior serialisation; the
-// handle itself is just a pointer.
-unsafe impl Send for TalcAlloc {}
-unsafe impl Sync for TalcAlloc {}
+/// Workspace allocator handle. Just a `'static` borrow of a
+/// [`CacheTalcLock`] — `Copy + Clone + Send + Sync` by reference, and
+/// the underlying `Talck` already impls
+/// `allocator_api2::alloc::Allocator`.
+pub type TalcAlloc = &'static CacheTalcLock;
 
-impl TalcAlloc {
-    /// Wrap a raw pointer to a [`CacheTalcLock`].
-    ///
-    /// # Safety
-    ///
-    /// `talc` must point at a live, `claim`-ed `CacheTalcLock` that
-    /// outlives every allocation made through the returned allocator.
-    #[inline]
-    pub const unsafe fn from_raw(talc: NonNull<CacheTalcLock>) -> Self {
-        Self { talc }
-    }
-
-    /// Pointer back to the underlying [`CacheTalcLock`].
-    #[inline]
-    pub fn as_lock(&self) -> NonNull<CacheTalcLock> {
-        self.talc
-    }
-}
-
-// SAFETY: `talc 5.x` `TalcLock` serialises concurrent allocations
-// through its inner spinlock. The pointer is non-null and points at a
-// live lock (caller obligation enforced via `from_raw`).
-unsafe impl Allocator for TalcAlloc {
-    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-        let raw = unsafe { (*self.talc.as_ptr()).lock().allocate(layout) }.ok_or(AllocError)?;
-        Ok(NonNull::slice_from_raw_parts(raw, layout.size()))
-    }
-
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        unsafe {
-            (*self.talc.as_ptr())
-                .lock()
-                .deallocate(ptr.as_ptr(), layout);
-        }
-    }
+/// Const constructor for a fresh empty [`CacheTalcLock`]. Suitable for
+/// a `static` binding; backing memory must be supplied at runtime via
+/// `lock.lock().claim(Span::from_array(...))`.
+#[inline]
+pub const fn new_cache_talc_lock() -> CacheTalcLock {
+    Talc::new(ErrOnOom).lock()
 }

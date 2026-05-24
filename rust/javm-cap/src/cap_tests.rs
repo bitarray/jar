@@ -1,11 +1,8 @@
 //! Smoke tests demonstrating that the talc-friendly cap types work
 //! with both `Global` (heap) and `TalcAlloc` (cache) allocators.
 
-use core::ptr::NonNull;
-
 use allocate::Global;
-use allocate::talc::Manual;
-use allocate::talc::{CacheTalcLock, TalcAlloc};
+use allocate::talc::{CacheTalcLock, Span, TalcAlloc, new_cache_talc_lock};
 use allocate::vec::Vec as AVec;
 
 use crate::slot::SlotIdx;
@@ -25,10 +22,12 @@ struct Arena {
 impl Arena {
     fn new(size: usize) -> Self {
         let backing = alloc::vec![0u8; size];
-        let talc = alloc::boxed::Box::new(CacheTalcLock::new(Manual));
+        let talc = alloc::boxed::Box::new(new_cache_talc_lock());
         let base = backing.as_ptr() as *mut u8;
         unsafe {
-            let _ = talc.lock().claim(base, size).expect("claim");
+            talc.lock()
+                .claim(Span::from_base_size(base, size))
+                .expect("claim");
         }
         Self {
             _backing: backing,
@@ -36,7 +35,11 @@ impl Arena {
         }
     }
     fn alloc(&self) -> TalcAlloc {
-        unsafe { TalcAlloc::from_raw(NonNull::from(&*self.talc)) }
+        // SAFETY: `self.talc` is heap-pinned via the Box and outlives
+        // every `TalcAlloc` derived from this `Arena`; tests drop the
+        // arena last. The `'static` cast is the same lifetime fiction
+        // used in production (`HostCache::alloc`).
+        unsafe { &*(&*self.talc as *const CacheTalcLock) }
     }
 }
 

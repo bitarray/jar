@@ -129,13 +129,15 @@ fn directory_mut_ptr(base: NonNull<u8>) -> *mut CacheDirectory {
     unsafe { base.as_ptr().add(CACHE_DIRECTORY_OFFSET).cast() }
 }
 
-/// `TalcAlloc` handle for a given cache region. Cheap (wraps a pointer).
+/// `TalcAlloc` handle for a given cache region. Cheap (just a borrow).
 fn talc_alloc(base: NonNull<u8>) -> TalcAlloc {
     let lock_ptr = base.cast::<CacheTalcLock>();
     // SAFETY: caller guarantees `base` points at a cache region whose
     // first bytes are a live `CacheTalcLock` (initialised by the host
-    // before the region is shared).
-    unsafe { TalcAlloc::from_raw(lock_ptr) }
+    // before the region is shared). The `'static` lifetime is a
+    // fiction held by the cache region's pinned mapping for the
+    // process lifetime.
+    unsafe { &*lock_ptr.as_ptr() }
 }
 
 /// Look up a blob (content-addressed cap) by hash. Returns a borrowed

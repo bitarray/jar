@@ -15,10 +15,17 @@ dependencies = [
 name = "allocate"
 version = "0.1.0"
 dependencies = [
+ "allocator-api2 0.2.21",
  "hashbrown 0.17.1",
  "spinning_top",
- "talc",
+ "talc 4.4.3",
 ]
+
+[[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "allocator-api2"
@@ -950,6 +957,7 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 dependencies = [
+ "allocator-api2 0.2.21",
  "equivalent",
  "foldhash 0.2.0",
 ]
@@ -1023,7 +1031,7 @@ dependencies = [
  "rkyv",
  "spin",
  "spinning_top",
- "talc",
+ "talc 5.0.3",
  "tracing",
 ]
 
@@ -2406,11 +2414,21 @@ dependencies = [
 
 [[package]]
 name = "talc"
+version = "4.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3ae828aa394de34c7de08f522d1b86bd1c182c668d27da69caadda00590f26d"
+dependencies = [
+ "allocator-api2 0.2.21",
+ "lock_api",
+]
+
+[[package]]
+name = "talc"
 version = "5.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3081e3f3ad542dc4cd0ae720f752598f8880fd364dc2d031132e3509f673aa23"
 dependencies = [
- "allocator-api2",
+ "allocator-api2 0.4.0",
  "lock_api",
 ]
 

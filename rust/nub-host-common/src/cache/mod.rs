@@ -5,13 +5,13 @@
 //! region layout is:
 //!
 //! ```text
-//! offset 0           TalcLock<RawSpinlock, Manual> (padded to 4 KiB)
+//! offset 0           CacheTalcLock (padded to 4 KiB)
 //! offset 0x1000      CacheDirectory (BlobSlot[256] + InstanceSlot[..])
 //! offset 0x6000-ish  talc-managed heap (rest of the 1 GiB region)
 //! ```
 //!
 //! The talc lock and its smart-pointer primitives (TalcAlloc,
-//! TalcAlloc, CacheTalcLock, Arc) live in the [`allocate`] crate.
+//! CacheTalcLock, Arc) live in the [`allocate`] crate.
 //! This module owns the *cache-specific* pieces:
 //!
 //! - [`CacheDirectory`] — the guest-readable directory at

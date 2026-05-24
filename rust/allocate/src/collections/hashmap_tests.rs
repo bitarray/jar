@@ -1,29 +1,8 @@
 //! Tests for [`HashMap`].
 
 use super::HashMap;
-use crate::talc::{CacheTalcLock, Manual, TalcAlloc};
-
-struct Arena {
-    _backing: alloc::vec::Vec<u8>,
-    talc: alloc::boxed::Box<CacheTalcLock>,
-}
-impl Arena {
-    fn new(size: usize) -> Self {
-        let backing = alloc::vec![0u8; size];
-        let talc = alloc::boxed::Box::new(CacheTalcLock::new(Manual));
-        let base = backing.as_ptr() as *mut u8;
-        unsafe {
-            let _ = talc.lock().claim(base, size).expect("claim");
-        }
-        Self {
-            _backing: backing,
-            talc,
-        }
-    }
-    fn alloc(&self) -> TalcAlloc {
-        unsafe { TalcAlloc::from_raw(core::ptr::NonNull::from(&*self.talc)) }
-    }
-}
+use crate::talc::TalcAlloc;
+use crate::test_arena::test_talc;
 
 #[test]
 fn hashmap_in_global() {
@@ -39,9 +18,7 @@ fn hashmap_in_global() {
 
 #[test]
 fn hashmap_in_talc() {
-    let arena = Arena::new(64 * 1024);
-    let alloc = arena.alloc();
-    let mut m: HashMap<u32, u64, TalcAlloc> = HashMap::new_in(alloc);
+    let mut m: HashMap<u32, u64, TalcAlloc> = HashMap::new_in(test_talc());
     for i in 0..256u32 {
         m.insert(i, (i as u64) * 3);
     }
@@ -53,8 +30,7 @@ fn hashmap_in_talc() {
 
 #[test]
 fn hashmap_with_capacity_doesnt_realloc() {
-    let arena = Arena::new(64 * 1024);
-    let mut m: HashMap<u32, u32, TalcAlloc> = HashMap::with_capacity_in(64, arena.alloc());
+    let mut m: HashMap<u32, u32, TalcAlloc> = HashMap::with_capacity_in(64, test_talc());
     let pre = m.capacity();
     for i in 0..32u32 {
         m.insert(i, i);

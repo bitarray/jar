@@ -1,20 +1,24 @@
 //! Allocator-aware collections.
 //!
-//! Mirrors `alloc::collections` / `std::collections` paths:
+//! - [`HashMap<K, V, A>`] — type alias for
+//!   `hashbrown::HashMap<K, V, DefaultHashBuilder, A>`. Unordered
+//!   iteration; allocator-aware on stable via hashbrown's
+//!   `allocator-api2` feature.
 //!
-//! - [`HashMap`] — SwissTable hash map (wraps `hashbrown::HashMap`
-//!   with hashbrown's `nightly` feature on, so its `A` is the real
-//!   `core::alloc::Allocator`). Unordered iteration.
-//! - [`BTreeMap`] — ordered B-tree map (wraps
-//!   `alloc::collections::BTreeMap`). Sorted iteration.
+//! No allocator-aware `BTreeMap`: there's no stable impl, and no
+//! current consumer parameterises BTreeMap by allocator. Callers that
+//! want ordered iteration can sort a HashMap iterator at consumption
+//! time.
 
-pub mod btreemap;
-pub mod hashmap;
+pub use hashbrown::DefaultHashBuilder;
 
-#[cfg(test)]
-mod btreemap_tests;
+use crate::Global;
+
+/// SwissTable hash map allocated by `A`. Alias for
+/// `hashbrown::HashMap<K, V, DefaultHashBuilder, A>` with the
+/// parameter order rearranged to put the allocator before the hasher
+/// (matching `Box<T, A>` / `Vec<T, A>`).
+pub type HashMap<K, V, A = Global> = hashbrown::HashMap<K, V, DefaultHashBuilder, A>;
+
 #[cfg(test)]
 mod hashmap_tests;
-
-pub use btreemap::BTreeMap;
-pub use hashmap::HashMap;

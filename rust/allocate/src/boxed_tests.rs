@@ -1,29 +1,8 @@
 //! Tests for [`Box`].
 
 use crate::boxed::Box;
-use crate::talc::{CacheTalcLock, Manual, TalcAlloc};
-
-struct Arena {
-    _backing: alloc::vec::Vec<u8>,
-    talc: alloc::boxed::Box<CacheTalcLock>,
-}
-impl Arena {
-    fn new(size: usize) -> Self {
-        let backing = alloc::vec![0u8; size];
-        let talc = alloc::boxed::Box::new(CacheTalcLock::new(Manual));
-        let base = backing.as_ptr() as *mut u8;
-        unsafe {
-            let _ = talc.lock().claim(base, size).expect("claim");
-        }
-        Self {
-            _backing: backing,
-            talc,
-        }
-    }
-    fn alloc(&self) -> TalcAlloc {
-        unsafe { TalcAlloc::from_raw(core::ptr::NonNull::from(&*self.talc)) }
-    }
-}
+use crate::talc::TalcAlloc;
+use crate::test_arena::test_talc;
 
 #[test]
 fn box_in_global() {
@@ -33,15 +12,13 @@ fn box_in_global() {
 
 #[test]
 fn box_in_talc() {
-    let arena = Arena::new(64 * 1024);
-    let b: Box<u32, TalcAlloc> = Box::new_in(7, arena.alloc());
+    let b: Box<u32, TalcAlloc> = Box::new_in(7, test_talc());
     assert_eq!(*b, 7);
 }
 
 #[test]
 fn box_into_raw_round_trips() {
-    let arena = Arena::new(64 * 1024);
-    let alloc = arena.alloc();
+    let alloc = test_talc();
     let b: Box<u64, TalcAlloc> = Box::new_in(0xDEAD_BEEF, alloc);
     let (raw, recovered_alloc) = Box::into_raw_with_allocator(b);
     // SAFETY: raw came from a Box we just constructed; not yet freed.

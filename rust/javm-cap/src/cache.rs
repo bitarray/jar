@@ -9,7 +9,8 @@
 //!   identity-keyed mutable working state. Only Data, CNode,
 //!   Instance variants reach this map (after `get_mut` promotion).
 //!
-//! `A` is an [`allocate::Allocator`] (= `core::alloc::Allocator`).
+//! `A` is an [`allocate::Allocator`] (re-exported from the
+//! `allocator-api2` crate; downstream depends on `allocate` only).
 //! For host-private use the default `Global` gives a heap-backed
 //! cache. For the shared-memory state cache, `A = TalcAlloc` lands
 //! everything — including the HashMap node storage — in the cache
@@ -36,8 +37,8 @@ use super::image_cap::ImageConvertError;
 use super::instance::{InstanceCap, RwOverlay};
 use super::page::{PageBytes, PageRef, PageSlot};
 
-/// Talc-friendly Box alias — `allocator_api2::Box` parameterised on
-/// the cap's allocator.
+/// Talc-friendly Box alias — `allocate::Box` parameterised on the
+/// cap's allocator.
 type TBox<T, A> = ABox<T, A>;
 
 #[derive(Debug, thiserror::Error)]

@@ -25,8 +25,7 @@ Licensed under the Apache License, Version 2.0.
 use std::ptr::NonNull;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use allocate::talc::Manual;
-use allocate::talc::{CacheTalcLock, TalcAlloc};
+use allocate::talc::{CacheTalcLock, Span, TalcAlloc, new_cache_talc_lock};
 use javm_cap::{CapHashOrRef, CapRef, TypedCache};
 use nub_arch_x86_abi::CapHash;
 use nub_host_common::cache::{
@@ -200,7 +199,7 @@ impl HostCache {
         // satisfied (mmap returns page-aligned pointers).
         let talc_ptr = base.cast::<CacheTalcLock>();
         unsafe {
-            talc_ptr.write(CacheTalcLock::new(Manual));
+            talc_ptr.write(new_cache_talc_lock());
         }
         let talc = unsafe { NonNull::new_unchecked(talc_ptr) };
 
@@ -216,20 +215,21 @@ impl HostCache {
 
         // Claim the talc heap region (everything past the directory).
         // SAFETY: heap_base is within the mmap'd region; `size` bytes
-        // from there fit within the region. `Manual` source permits
+        // from there fit within the region. `ErrOnOom` source permits
         // manual `claim`.
         let heap_base = unsafe { base.add(TALC_HEAP_OFFSET) };
         unsafe {
             (*talc.as_ptr())
                 .lock()
-                .claim(heap_base, TALC_HEAP_SIZE)
-                .ok_or_else(|| new_error!("HostCache talc.claim failed"))?;
+                .claim(Span::from_base_size(heap_base, TALC_HEAP_SIZE))
+                .map_err(|()| new_error!("HostCache talc.claim failed"))?;
         }
 
         // SAFETY: `talc` was just initialised and lives as long as
         // `region`, which outlives `typed_cache` (enforced by field
-        // order).
-        let alloc = unsafe { TalcAlloc::from_raw(talc) };
+        // order). The `'static` cast asserts that lifetime; the lock
+        // is never moved or dropped before `typed_cache` does.
+        let alloc: TalcAlloc = unsafe { &*talc.as_ptr() };
         let typed_cache = TypedCache::new_in(alloc);
 
         Ok(Self {
@@ -272,11 +272,14 @@ impl HostCache {
 
     /// HostCache region's allocator handle. Useful when the caller needs
     /// to build a Cap value in talc memory and hand it off via a
-    /// `*_from_cap` publish. Cheap (wraps the talc-lock pointer).
+    /// `*_from_cap` publish. Cheap (just a `'static` borrow).
     pub fn alloc(&self) -> TalcAlloc {
         // SAFETY: `talc_lock_ptr()` points at the lock initialised in
-        // `HostCache::new`, which lives as long as `region`.
-        unsafe { TalcAlloc::from_raw(self.talc_lock_ptr()) }
+        // `HostCache::new`, which lives as long as `region`. The
+        // `'static` cast is a lifetime fiction valid because the lock
+        // is pinned for the cache region's lifetime and we never let
+        // a `TalcAlloc` outlive the `HostCache`.
+        unsafe { &*self.talc_lock_ptr().as_ptr() }
     }
 
     /// Shared reference to the typed cache. Read-only inspection from

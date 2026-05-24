@@ -1,31 +1,10 @@
 //! Tests for [`Arc`].
 
 use crate::sync::Arc;
-use crate::talc::{CacheTalcLock, Manual, TalcAlloc};
+use crate::talc::TalcAlloc;
+use crate::test_arena::test_talc;
 
 use core::sync::atomic::{AtomicUsize, Ordering};
-
-struct Arena {
-    _backing: alloc::vec::Vec<u8>,
-    talc: alloc::boxed::Box<CacheTalcLock>,
-}
-impl Arena {
-    fn new(size: usize) -> Self {
-        let backing = alloc::vec![0u8; size];
-        let talc = alloc::boxed::Box::new(CacheTalcLock::new(Manual));
-        let base = backing.as_ptr() as *mut u8;
-        unsafe {
-            let _ = talc.lock().claim(base, size).expect("claim");
-        }
-        Self {
-            _backing: backing,
-            talc,
-        }
-    }
-    fn alloc(&self) -> TalcAlloc {
-        unsafe { TalcAlloc::from_raw(core::ptr::NonNull::from(&*self.talc)) }
-    }
-}
 
 struct DropCounter<'a> {
     counter: &'a AtomicUsize,
@@ -55,14 +34,13 @@ fn arc_in_global_drops_once() {
 
 #[test]
 fn arc_in_talc() {
-    let arena = Arena::new(64 * 1024);
     let drops = AtomicUsize::new(0);
     let a: Arc<DropCounter, TalcAlloc> = Arc::new_in(
         DropCounter {
             counter: &drops,
             payload: 99,
         },
-        arena.alloc(),
+        test_talc(),
     );
     let b = a.clone();
     assert_eq!(Arc::strong_count(&a), 2);
