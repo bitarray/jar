@@ -170,23 +170,15 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
         Some(entry as *const CacheEntry<A> as u64)
     }
 
-    /// Test-only blob insert: takes `Cap<A>` already in this cache's
-    /// allocator and stores it under `hash`. Idempotent (bumps refcount
-    /// on a hit). Returns the post-insertion refcount.
+    /// Blob insert: takes `Cap<A>` already in this cache's allocator
+    /// and stores it under `hash`. Idempotent (bumps refcount on a
+    /// hit). Returns the post-insertion refcount.
     ///
-    /// Not exposed in production builds because the `Cap<A>` argument
-    /// leaks the cache's allocator onto the API surface — an outside
-    /// caller could construct a `Cap<A>` against a *different* `A`
-    /// instance (e.g., a foreign `TalcAlloc` over an unrelated arena)
-    /// and hand it in. The cache would then hold cap content whose
-    /// backing memory lives outside the cache's own arena, breaking
-    /// invariants like "all Hyperlight shared-cache content lives in
-    /// the MAP_SHARED region at `STATE_CACHE_VA`". Public publish goes
-    /// through [`Self::put_cap`] / [`Self::put_cap_with_hash`], which
-    /// take `&Cap<Global>` and deep-clone into `A` so the cache owns
-    /// every allocation.
-    #[cfg(test)]
-    pub(crate) fn put_blob(&mut self, hash: CapHash, cap: Cap<A>) -> Result<u32, CacheError> {
+    /// The caller asserts that `cap`'s allocations live in this
+    /// cache's `A`. Wrapped at higher layers by `Cache::publish_blob`
+    /// (nub-host-common) which both owns the canonical `TalcAlloc`
+    /// and routes through scratch tracking on the guest side.
+    pub fn put_blob(&mut self, hash: CapHash, cap: Cap<A>) -> Result<u32, CacheError> {
         if let Some(existing) = self.blobs.get(&hash) {
             let prev = existing.refcount.fetch_add(1, Ordering::Relaxed);
             return Ok(prev + 1);

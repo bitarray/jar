@@ -1,49 +1,40 @@
-//! Tests for the host-side [`HostCache`].
+//! Tests for the unified [`Cache`].
 
-use crate::cache::HostCache;
-use nub_host_common::cache::{CacheDirectory, STATE_CACHE_SIZE, STATE_CACHE_VA};
+use nub_host_common::cache::{Cache, STATE_CACHE_VA};
 
 #[test]
-fn cache_new_initializes_directory_zero() {
-    let cache = HostCache::new().expect("alloc");
+fn cache_new_initializes_directory_empty() {
+    let cache = Cache::new().expect("alloc");
     assert_eq!(
         cache.base_va(),
         STATE_CACHE_VA,
         "cache region must be mapped at STATE_CACHE_VA (host VA == guest VA invariant)"
     );
     let dir = cache.directory();
-    assert_eq!(dir.blob_count.load(std::sync::atomic::Ordering::Acquire), 0);
-    assert_eq!(
-        dir.instance_count
-            .load(std::sync::atomic::Ordering::Acquire),
-        0
-    );
+    assert_eq!(dir.blob_count(), 0);
+    assert_eq!(dir.instance_count(), 0);
 }
 
 #[test]
-fn publish_data_records_directory_slot() {
-    let mut cache = HostCache::new().expect("alloc");
+fn publish_data_records_blob() {
+    let mut cache = Cache::new().expect("alloc");
     let h = cache
         .put_cap(&javm_cap::Cap::data_inline(&[0xAA, 0xBB, 0xCC]))
         .expect("put_cap");
     let dir = cache.directory();
-    assert_eq!(dir.blob_count.load(std::sync::atomic::Ordering::Acquire), 1);
-    let dir_ptr = dir as *const CacheDirectory;
-    // Slot index is the hash's natural slot (open-addressed
-    // probe), not necessarily 0. Just verify the hash resolves
-    // and its entry_va points into the cache region.
-    let (_, slot_ptr) = unsafe { CacheDirectory::find_blob(dir_ptr, &h) }.expect("found");
-    unsafe {
-        assert_eq!((*slot_ptr).hash, h);
-        let va = (*slot_ptr).entry_va;
-        assert!(va >= STATE_CACHE_VA);
-        assert!(va < STATE_CACHE_VA + STATE_CACHE_SIZE as u64);
-    }
+    assert_eq!(dir.blob_count(), 1);
+    assert!(dir.contains_blob(&h));
+    // The cap's CacheEntry lives in the talc heap inside the region.
+    let va = dir
+        .entry_va(javm_cap::CapHashOrRef::Hash(h))
+        .expect("entry_va");
+    assert!(va >= STATE_CACHE_VA);
+    assert!(va < STATE_CACHE_VA + cache.size() as u64);
 }
 
 #[test]
-fn publish_data_is_idempotent_in_directory() {
-    let mut cache = HostCache::new().expect("alloc");
+fn publish_data_is_idempotent() {
+    let mut cache = Cache::new().expect("alloc");
     let h1 = cache
         .put_cap(&javm_cap::Cap::data_inline(&[1, 2, 3]))
         .expect("put_cap 1");
@@ -52,9 +43,13 @@ fn publish_data_is_idempotent_in_directory() {
         .expect("put_cap 2");
     assert_eq!(h1, h2);
     let dir = cache.directory();
-    // Only one directory slot consumed (touch_blob updates an
-    // existing slot rather than allocating a new one).
-    assert_eq!(dir.blob_count.load(std::sync::atomic::Ordering::Acquire), 1);
+    // Same hash → single blob slot, refcount bumped to 2.
+    assert_eq!(dir.blob_count(), 1);
+    assert_eq!(
+        dir.refcount(javm_cap::CapHashOrRef::Hash(h1)),
+        Some(2),
+        "refcount should be 2 after idempotent re-put"
+    );
 }
 
 #[test]
@@ -62,7 +57,7 @@ fn publish_chain_data_cnode_image_instance() {
     use javm_cap::slot::SlotIdx;
     use javm_cap::{Cap, CapHashOrRef};
 
-    let mut cache = HostCache::new().expect("alloc");
+    let mut cache = Cache::new().expect("alloc");
     // Data
     let data_h = cache.put_cap(&Cap::data_inline(&[0x42; 8])).expect("data");
     // CNode referencing it (built as a Cap<Global>)
@@ -94,22 +89,21 @@ fn publish_chain_data_cnode_image_instance() {
         .expect("instance");
     let dir = cache.directory();
     // 4 blob entries in the directory (data, cnode, image, instance).
-    assert_eq!(dir.blob_count.load(std::sync::atomic::Ordering::Acquire), 4);
+    assert_eq!(dir.blob_count(), 4);
     // Each hash resolves.
-    let dir_ptr = dir as *const CacheDirectory;
     for &h in &[data_h, cnode_h, image_h, inst_h] {
-        assert!(unsafe { CacheDirectory::find_blob(dir_ptr, &h) }.is_some());
+        assert!(dir.contains_blob(&h));
     }
 }
 
 #[test]
 fn pin_unpin_roundtrip() {
-    let mut cache = HostCache::new().expect("alloc");
+    let mut cache = Cache::new().expect("alloc");
     let h = cache
         .put_cap(&javm_cap::Cap::data_inline(&[0; 4]))
         .expect("put_cap");
     cache.pin(h).expect("pin");
-    assert_eq!(cache.pinned.len(), 1);
+    assert_eq!(cache.pinned_count(), 1);
     cache.unpin(h);
-    assert!(cache.pinned.is_empty());
+    assert_eq!(cache.pinned_count(), 0);
 }

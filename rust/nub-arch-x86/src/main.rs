@@ -80,7 +80,7 @@ mod guest {
             .into_vec()
     }
 
-    /// GuestCache-based RPC: read an `InvokePacket`, drive the in-kernel
+    /// Cache-based RPC: read an `InvokePacket`, drive the in-kernel
     /// CALL/HALT loop ([`crate::call_loop`]) — which spins up frames,
     /// dispatches `derive_spawn` + `host_call` in-sandbox, and tears
     /// each frame down on HALT.
@@ -95,7 +95,7 @@ mod guest {
             None => return encode_result_error(10),
         };
 
-        let mut cache = match crate::state_cache::GuestCache::new() {
+        let mut cache = match crate::state_cache::init_guest_cache() {
             Ok(c) => c,
             Err(_) => return encode_result_error(11),
         };
@@ -107,7 +107,7 @@ mod guest {
             packet.initial_gas as i64,
         );
         // `cache` drops at end of scope (after run_top returns).
-        // GuestCache::Drop runs clear_scratch — frame stack has already
+        // Cache::Drop runs clear_scratch — frame stack has already
         // unwound, so any handles dropped before the sweep observes.
 
         let result = match outcome {

@@ -24,7 +24,6 @@ use tracing::{Span, instrument};
 use super::host_funcs::FunctionRegistry;
 use crate::HyperlightError;
 use crate::Result;
-use crate::cache::HostCache;
 use crate::hypervisor::InterruptHandle;
 use crate::hypervisor::hyperlight_vm::HyperlightVm;
 use crate::mem::mgr::SandboxMemoryManager;
@@ -32,6 +31,7 @@ use crate::mem::shared_mem::HostSharedMemory;
 use crate::metrics::{
     METRIC_GUEST_ERROR, METRIC_GUEST_ERROR_LABEL_CODE, maybe_time_and_emit_guest_call,
 };
+use nub_host_common::cache::Cache;
 
 /// A fully initialized sandbox that can execute guest functions multiple times.
 ///
@@ -50,7 +50,7 @@ pub struct MultiUseSandbox {
     /// evolve points into `cache`'s mmap'd region; `cache` MUST drop
     /// AFTER `vm` (Rust drops fields in declaration order).
     vm: HyperlightVm,
-    pub(crate) cache: HostCache,
+    pub(crate) cache: Cache,
     #[cfg(gdb)]
     dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
 }
@@ -66,7 +66,7 @@ impl MultiUseSandbox {
         host_funcs: Arc<Mutex<FunctionRegistry>>,
         mgr: SandboxMemoryManager<HostSharedMemory>,
         vm: HyperlightVm,
-        cache: HostCache,
+        cache: Cache,
         #[cfg(gdb)] dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
     ) -> MultiUseSandbox {
         Self {
@@ -82,7 +82,7 @@ impl MultiUseSandbox {
 
     /// Accessor for the host-side state cache. Used by `Nub` to
     /// publish/pin/unpin Cap::Instance state before/after `call_raw`.
-    pub fn cache(&mut self) -> &mut HostCache {
+    pub fn cache(&mut self) -> &mut Cache {
         &mut self.cache
     }
 

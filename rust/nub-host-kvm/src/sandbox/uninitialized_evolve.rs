@@ -93,7 +93,8 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
     // memory slot. The cache outlives the sandbox; field-order in
     // `MultiUseSandbox` guarantees VM drops before cache so the slot
     // never references freed host memory.
-    let cache = crate::cache::HostCache::new()?;
+    let cache =
+        nub_host_common::cache::Cache::new().map_err(|e| crate::new_error!("cache: {e}"))?;
     vm.install_cache_mapping(cache.base_va() as usize, cache.size())
         .map_err(|e| crate::HyperlightError::from(HyperlightVmError::from(e)))?;
 

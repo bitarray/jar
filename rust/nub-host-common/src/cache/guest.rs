@@ -18,17 +18,17 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::ptr::NonNull;
 
+use javm_cap::{CapHash, CapHashOrRef, CapRef};
+
 use super::Cache;
 use super::STATE_CACHE_VA;
 
-/// One scratch entry tracked for end-of-RPC cleanup. Until the
-/// Cache's `publish_*` API is fleshed out in Commit 3 this is the
-/// stub shape; the real `Blob { hash, entry }` / `Instance {
-/// slot_idx, entry }` variants will land alongside the new typed
-/// publish helpers.
+/// One scratch entry — a directory key that should be `decref`-ed at
+/// end of RPC. The directory holds the actual Box; clear_scratch
+/// drops the box when refcount hits zero.
 pub(crate) enum ScratchEntry {
-    /// Reserved — see module-level comment.
-    _Placeholder,
+    Blob(CapHash),
+    Instance(CapRef),
 }
 
 /// Per-RPC tracker of guest-published cap entries.
@@ -63,12 +63,38 @@ impl Cache {
             scratch: ScratchTracker::new(),
         }
     }
+
+    /// Sweep all entries this RPC published. For each tracked key:
+    /// decref it; if refcount drops to zero the directory's HashMap
+    /// removes the entry and Drop frees the talc-allocated Box.
+    /// Idempotent — safe to call multiple times.
+    pub fn clear_scratch(&mut self) {
+        // We can't hold the directory lock across the whole sweep
+        // because `decref` re-takes it internally. Drain into a local
+        // vec instead.
+        let entries = core::mem::take(&mut self.scratch.entries);
+        for entry in entries {
+            let key = match entry {
+                ScratchEntry::Blob(h) => CapHashOrRef::Hash(h),
+                ScratchEntry::Instance(r) => CapHashOrRef::Ref(r),
+            };
+            // Best-effort: ignore "missing" errors (already cleaned up).
+            let _ = self.decref(key);
+        }
+    }
+
+    /// Track a directory key for end-of-RPC cleanup.
+    pub(crate) fn track_scratch_blob(&mut self, h: CapHash) {
+        self.scratch.entries.push(ScratchEntry::Blob(h));
+    }
+
+    pub(crate) fn track_scratch_instance(&mut self, r: CapRef) {
+        self.scratch.entries.push(ScratchEntry::Instance(r));
+    }
 }
 
 impl Drop for Cache {
     fn drop(&mut self) {
-        // Per-RPC sweep: free all entries this RPC published.
-        // Fully implemented in Commit 3 once publish_* is wired up.
-        self.scratch.entries.clear();
+        self.clear_scratch();
     }
 }

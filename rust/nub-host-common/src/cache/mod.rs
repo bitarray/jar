@@ -3,7 +3,7 @@
 //! The state cache is a shared memory region (1 GiB) mapped at the
 //! same fixed VA ([`STATE_CACHE_VA`]) on both host and guest.
 //!
-//! ## Layout (post-refactor)
+//! ## Layout
 //!
 //! ```text
 //! offset 0                       CacheHeader (talc + locked directory),
@@ -18,22 +18,15 @@
 //!   a `Mutex<RawSpinlock, _>` so mutations on either side serialise
 //!   correctly. In V0 the lock never contends (Hyperlight ensures
 //!   host and guest are never running simultaneously).
-//!
-//! ## Legacy: POD `CacheDirectory`
-//!
-//! The raw POD [`directory::CacheDirectory`] is the old layout (open-
-//! addressed Vec table). It's preserved here for Commit 2's
-//! intermediate state and gets deleted in Commit 3 once every caller
-//! has migrated to the unified [`Cache`].
 
 extern crate alloc;
 
 use core::ptr::NonNull;
 
-#[cfg(feature = "std")]
-use javm_cap::CapHash;
+use allocate::talc::{MutexGuard, RawSpinlock, TalcAlloc};
+use javm_cap::cap::Cap;
+use javm_cap::{CacheError, CapHash, CapHashOrRef, CapRef};
 
-pub mod directory;
 pub mod header;
 
 #[cfg(feature = "std")]
@@ -42,12 +35,6 @@ pub mod host;
 #[cfg(target_os = "none")]
 pub mod guest;
 
-#[cfg(test)]
-mod directory_tests;
-
-pub use directory::{
-    BlobSlot, CacheDirectory, INSTANCE_MASK, InstanceSlot, MAX_BLOB_SLOTS, MAX_INSTANCE_SLOTS,
-};
 pub use header::{CacheHeader, LockedDirectory, SharedCacheDirectory};
 
 #[cfg(feature = "std")]
@@ -68,18 +55,6 @@ pub const STATE_CACHE_GPA: u64 = 0x2_0000_0000;
 /// Total size of the cache region. 1 GiB.
 pub const STATE_CACHE_SIZE: usize = 1 << 30;
 
-// --- Legacy layout constants (consumed by the soon-to-be-deleted POD
-// `CacheDirectory` machinery in `nub-host-kvm::cache::HostCache` and
-// `nub-arch-x86::state_cache::GuestCache`). Kept here through Commit 2
-// so the workspace still compiles; gone in Commit 3.
-
-/// Legacy: offset where the POD `CacheDirectory` starts.
-pub const CACHE_DIRECTORY_OFFSET: usize = 0x1000;
-/// Legacy: offset where the talc heap starts (post POD directory).
-pub const TALC_HEAP_OFFSET: usize = CACHE_DIRECTORY_OFFSET + CacheDirectory::SIZE;
-/// Legacy: bytes available to the talc heap under the old layout.
-pub const TALC_HEAP_SIZE: usize = STATE_CACHE_SIZE - TALC_HEAP_OFFSET;
-
 // --- Unified `Cache` type ---
 
 /// Unified host/guest cache handle. Holds a pointer to the region
@@ -88,9 +63,9 @@ pub const TALC_HEAP_SIZE: usize = STATE_CACHE_SIZE - TALC_HEAP_OFFSET;
 /// guest instances additionally own the per-RPC scratch tracker.
 ///
 /// Construction is platform-specific:
-/// - host: [`Cache::new`] (this module, gated `not(target_os = "none")`)
+/// - host: [`Cache::new`] (this module, gated `feature = "std"`)
 /// - guest: [`Cache::from_mapped_region`] (this module, gated
-///   `target_os = "none"`), called by `nub-arch-x86`'s
+///   `target_os = "none"`), typically wrapped by `nub-arch-x86`'s
 ///   `state_cache::init_guest_cache` after the kernel page-table
 ///   mapping is installed.
 pub struct Cache {
@@ -104,10 +79,8 @@ pub struct Cache {
 
     /// Host-only: hashes currently pinned (active call frames).
     /// Eviction (future stage) skips these.
-    // Read by `pin`/`unpin` once wired in Commit 3.
     #[cfg(feature = "std")]
-    #[allow(dead_code)]
-    pinned: smallvec::SmallVec<[CapHash; 8]>,
+    pub(crate) pinned: smallvec::SmallVec<[CapHash; 8]>,
 
     /// Guest-only: per-RPC tracker of entries the guest published in
     /// this invocation, swept by `clear_scratch` (called by Drop).
@@ -142,18 +115,100 @@ impl Cache {
     }
 
     /// Crate-private allocator handle. Public callers go through the
-    /// typed `publish_*` API (added in Commit 3) so that every talc
-    /// allocation is reachable from the directory or scratch tracker.
+    /// typed `publish_*` API so that every talc allocation is reachable
+    /// from the directory or scratch tracker.
     ///
     /// The `'static` lifetime is the standard pinned-mapping fiction:
     /// the talc lives at the `CacheHeader`'s field address, which is
     /// pinned for the cache region's process lifetime. See
     /// `allocate::talc::TalcAlloc` for the contract.
-    #[allow(dead_code)]
-    pub(crate) fn alloc(&self) -> allocate::talc::TalcAlloc {
+    pub(crate) fn alloc(&self) -> TalcAlloc {
         // SAFETY: the talc lock is initialised by `CacheHeader::init_at`
         // before the `Cache` exists, and the region is pinned for the
         // process lifetime.
         unsafe { &*core::ptr::addr_of!(self.header().talc) }
+    }
+
+    /// Locked access to the underlying [`SharedCacheDirectory`]. The
+    /// returned guard scopes the spinlock; drop it as soon as the
+    /// operation finishes. In V0 the lock never contends (Hyperlight
+    /// serialises host↔guest), but holding it is still cheap (one CAS).
+    pub fn directory(&self) -> MutexGuard<'_, RawSpinlock, SharedCacheDirectory> {
+        self.header().directory.lock()
+    }
+}
+
+// --- Shared API: published verbs available on both host and guest. ---
+
+impl Cache {
+    /// Whether a content-addressed blob is present.
+    pub fn contains(&self, hash: &CapHash) -> bool {
+        self.directory().contains_blob(hash)
+    }
+
+    /// Publish a `Cap<TalcAlloc>` into the blobs tier under the given
+    /// hash. The cap's allocations must already live in this cache's
+    /// talc heap (i.e., be `Cap<TalcAlloc>`).
+    ///
+    /// Guest-side: the published hash is tracked in the per-RPC
+    /// scratch tracker and decref'd by `clear_scratch` on Drop.
+    pub fn publish_blob(&mut self, hash: CapHash, cap: Cap<TalcAlloc>) -> Result<(), CacheError> {
+        {
+            let mut dir = self.directory();
+            dir.put_blob(hash, cap)?;
+        }
+        #[cfg(target_os = "none")]
+        self.track_scratch_blob(hash);
+        Ok(())
+    }
+
+    /// Publish a `Cap<TalcAlloc>` as a fresh mutable instance. Returns
+    /// the allocated [`CapRef`].
+    ///
+    /// Guest-side: the returned ref is tracked in the per-RPC scratch
+    /// tracker and decref'd by `clear_scratch` on Drop.
+    pub fn publish_instance(&mut self, cap: Cap<TalcAlloc>) -> Result<CapRef, CacheError> {
+        let r = {
+            let mut dir = self.directory();
+            dir.put_instance(cap)?
+        };
+        #[cfg(target_os = "none")]
+        self.track_scratch_instance(r);
+        Ok(r)
+    }
+
+    /// Build a fresh `Cap::Instance` in the cache's talc heap and
+    /// publish it. Inherits the parent's chain via `image_hash_chain`;
+    /// `regs`, `pc`, `gas_remaining`, `rw_overlays` start empty. This
+    /// is the typed alternative to the old
+    /// `cache.allocator() + Cap::Instance(...) + publish_instance(cap)`
+    /// pattern.
+    pub fn publish_transient_instance(
+        &mut self,
+        image_hash: CapHash,
+        image_hash_chain: CapHash,
+    ) -> Result<CapRef, CacheError> {
+        let cap = Cap::Instance(javm_cap::instance::InstanceCap {
+            image_hash_chain,
+            image_hash,
+            root_cnode: CapHashOrRef::Hash([0u8; 32]),
+            rw_overlays: allocate::vec::Vec::new_in(self.alloc()),
+            mem_size: 0,
+            regs: [0u64; javm_cap::NUM_REGS],
+            pc: 0,
+            gas_remaining: 0,
+        });
+        self.publish_instance(cap)
+    }
+
+    /// Increment refcount on a key.
+    pub fn incref(&self, key: CapHashOrRef) -> Result<(), CacheError> {
+        self.directory().incref(key)
+    }
+
+    /// Decrement refcount on a key. If it drops to zero the entry is
+    /// removed (talc-allocated Box dropped). Returns the new refcount.
+    pub fn decref(&mut self, key: CapHashOrRef) -> Result<u32, CacheError> {
+        self.directory().decref(key)
     }
 }

@@ -170,3 +170,66 @@ impl Cache {
         })
     }
 }
+
+// --- Host-only convenience API ---
+
+use javm_cap::cap::Cap;
+use javm_cap::{CacheError, CapHash, CapHashOrRef};
+
+/// Errors raised by host-only Cache methods that go beyond
+/// `CacheError`/`HostCacheError` (e.g., pin asserts the cap exists).
+#[derive(Debug, thiserror::Error)]
+pub enum CachePinError {
+    #[error("cache: cannot pin unpublished hash")]
+    NotPublished,
+}
+
+impl Cache {
+    /// Convenience: hash + deep-clone-into-talc + publish_blob. Lets
+    /// host callers hand in a heap-built `Cap<Global>` in one call.
+    pub fn put_cap(&mut self, cap: &Cap<allocate::Global>) -> Result<CapHash, CacheError> {
+        let mut dir = self.directory();
+        dir.put_cap(cap)
+    }
+
+    /// Pre-hashed variant: caller asserts `hash == cap_hash(cap)`.
+    pub fn put_cap_with_hash(
+        &mut self,
+        hash: CapHash,
+        cap: &Cap<allocate::Global>,
+    ) -> Result<(), CacheError> {
+        let mut dir = self.directory();
+        dir.put_cap_with_hash(hash, cap)?;
+        Ok(())
+    }
+
+    /// Resolve cap references nested inside an instance to their
+    /// content-addressed hashes, graduating descendants from
+    /// `instances` to `blobs`. See `CacheDirectory::settle`.
+    pub fn settle(&mut self, key: CapHashOrRef) -> Result<CapHash, CacheError> {
+        let mut dir = self.directory();
+        dir.settle(key)
+    }
+
+    /// Pin a published hash so eviction (future stage) skips it
+    /// during an active call.
+    pub fn pin(&mut self, hash: CapHash) -> Result<(), CachePinError> {
+        if !self.contains(&hash) {
+            return Err(CachePinError::NotPublished);
+        }
+        self.pinned.push(hash);
+        Ok(())
+    }
+
+    /// Unpin (counterpart to `pin`). Silent no-op on unknown hashes.
+    pub fn unpin(&mut self, hash: CapHash) {
+        if let Some(pos) = self.pinned.iter().rposition(|h| *h == hash) {
+            self.pinned.swap_remove(pos);
+        }
+    }
+
+    /// Number of pinned hashes (for tests/diagnostics).
+    pub fn pinned_count(&self) -> usize {
+        self.pinned.len()
+    }
+}
