@@ -15,50 +15,52 @@
 //! `(CapRef, entry_va)` pairs that resolve cap queries into a
 //! `&CacheEntry<TalcAlloc>` we can walk by pointer.
 //!
-//! ## Public API: the [`Cache`] struct
+//! ## Public API: the [`GuestCache`] struct
 //!
-//! All in-kernel cache access goes through [`Cache`] — its methods
+//! All in-kernel cache access goes through [`GuestCache`] — its methods
 //! return `&Cap` / `&mut Cap` borrows whose lifetime is tied to
-//! `&Cache` / `&mut Cache`. The borrow checker enforces "no
-//! eviction during read": while a `&Cap` is live, any `&mut Cache`
+//! `&GuestCache` / `&mut GuestCache`. The borrow checker enforces "no
+//! eviction during read": while a `&Cap` is live, any `&mut GuestCache`
 //! op (publish / promote / clone / clear) is rejected by the
 //! compiler.
 //!
-//! Internally `Cache` delegates to module-private free helpers
-//! that do the directory pointer math and talc allocations. None of
-//! those helpers are public — callers outside this module use
-//! `Cache` methods only.
+//! `GuestCache` is just a pointer to the cache region's base. The
+//! default constructor picks [`STATE_CACHE_VA`]; every dereference
+//! goes through `self.base` so multi-region setups can be added by
+//! introducing an alternate constructor when needed.
 
 #![cfg(target_os = "none")]
 
 extern crate alloc;
 
 use alloc::vec::Vec;
-use allocator_api2::alloc::Allocator;
-use allocator_api2::boxed::Box as ABox;
+use allocate::Allocator;
+use allocate::boxed::Box as ABox;
 use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use allocate::talc::{CacheTalcLock, TalcAlloc};
 use javm_cap::cap::{Cap, CapHashOrRef};
 use javm_cap::entry::CacheEntry;
 use nub_host_common::cache::{
-    CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheTalcLock, STATE_CACHE_GPA, STATE_CACHE_SIZE,
-    STATE_CACHE_VA, TalcAlloc,
+    CACHE_DIRECTORY_OFFSET, CacheDirectory, STATE_CACHE_GPA, STATE_CACHE_SIZE, STATE_CACHE_VA,
 };
 
 use crate::paging::{Perm, install_persistent_kernel_mapping};
 
 static CACHE_MAPPED: AtomicBool = AtomicBool::new(false);
 
-/// One scratch entry tracked for end-of-RPC cleanup. Either a blob
-/// (keyed by hash slot index) or an instance (keyed by instance
-/// slot index). The directory slot is zeroed and the `CacheEntry`
-/// storage is reclaimed when the corresponding cleanup fires —
-/// provided no live [`CapHandle`] still references it.
+/// One scratch entry tracked for end-of-RPC cleanup. Blobs are
+/// removed by content hash (via [`CacheDirectory::remove_blob`])
+/// because the open-addressed directory may shift slots during
+/// other deletions in the same RPC. Instances are removed by slot
+/// index (the instance table is direct-indexed and stable). The
+/// `CacheEntry` storage is reclaimed when the corresponding cleanup
+/// fires — provided no live handle still references it.
 enum ScratchEntry {
     Blob {
-        slot_idx: usize,
+        hash: [u8; 32],
         entry: NonNull<CacheEntry<TalcAlloc>>,
     },
     Instance {
@@ -93,9 +95,10 @@ static SCRATCH: ScratchCell = ScratchCell {
     }),
 };
 
-/// Idempotent: install the cache mapping in the active PML4 if not
-/// already done. Called from [`Cache::new`].
-fn ensure_mapped() -> Result<(), &'static str> {
+/// Idempotent: install the default cache mapping (`STATE_CACHE_VA →
+/// STATE_CACHE_GPA`) in the active PML4 if not already done. Called
+/// from [`GuestCache::new`].
+fn ensure_default_mapped() -> Result<(), &'static str> {
     if CACHE_MAPPED.load(Ordering::Acquire) {
         return Ok(());
     }
@@ -113,18 +116,39 @@ fn ensure_mapped() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Read-only view into the cache's `CacheDirectory`.
-fn directory_ptr() -> *const CacheDirectory {
-    (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *const CacheDirectory
+/// Read-only view into a cache region's `CacheDirectory`.
+fn directory_ptr(base: NonNull<u8>) -> *const CacheDirectory {
+    // SAFETY: caller guarantees `base` points at a live cache region
+    // of size at least `CACHE_DIRECTORY_OFFSET + size_of::<CacheDirectory>()`.
+    unsafe { base.as_ptr().add(CACHE_DIRECTORY_OFFSET).cast() }
+}
+
+/// Mutable view into a cache region's `CacheDirectory`.
+fn directory_mut_ptr(base: NonNull<u8>) -> *mut CacheDirectory {
+    // SAFETY: same as `directory_ptr`.
+    unsafe { base.as_ptr().add(CACHE_DIRECTORY_OFFSET).cast() }
+}
+
+/// `TalcAlloc` handle for a given cache region. Cheap (just a borrow).
+fn talc_alloc(base: NonNull<u8>) -> TalcAlloc {
+    let lock_ptr = base.cast::<CacheTalcLock>();
+    // SAFETY: caller guarantees `base` points at a cache region whose
+    // first bytes are a live `CacheTalcLock` (initialised by the host
+    // before the region is shared). The `'static` lifetime is a
+    // fiction held by the cache region's pinned mapping for the
+    // process lifetime.
+    unsafe { &*lock_ptr.as_ptr() }
 }
 
 /// Look up a blob (content-addressed cap) by hash. Returns a borrowed
 /// reference to the `CacheEntry` living in cache memory. The
 /// `'static` lifetime is a polite fiction tightened to the
-/// surrounding `&Cache` borrow by [`Cache::read_blob`].
-fn lookup_blob<A: Allocator + Clone>(hash: &[u8; 32]) -> Option<&'static CacheEntry<A>> {
-    ensure_mapped().ok()?;
-    let dir = directory_ptr();
+/// surrounding `&GuestCache` borrow by [`GuestCache::read_blob`].
+fn lookup_blob<A: Allocator + Clone>(
+    base: NonNull<u8>,
+    hash: &[u8; 32],
+) -> Option<&'static CacheEntry<A>> {
+    let dir = directory_ptr(base);
     // SAFETY: dir is a live pointer; find_blob just scans the array.
     let (_, slot_ptr) = unsafe { CacheDirectory::find_blob(dir, hash) }?;
     let va = unsafe { (*slot_ptr).entry_va };
@@ -138,26 +162,17 @@ fn lookup_blob<A: Allocator + Clone>(hash: &[u8; 32]) -> Option<&'static CacheEn
 
 /// Resolve an instance ref to its `CacheEntry`. Same lifetime
 /// caveat as [`lookup_blob`].
-fn lookup_instance<A: Allocator + Clone>(ref_id: u64) -> Option<&'static CacheEntry<A>> {
-    ensure_mapped().ok()?;
-    let dir = directory_ptr();
+fn lookup_instance<A: Allocator + Clone>(
+    base: NonNull<u8>,
+    ref_id: u64,
+) -> Option<&'static CacheEntry<A>> {
+    let dir = directory_ptr(base);
     let (_, slot_ptr) = unsafe { CacheDirectory::find_instance(dir, ref_id) }?;
     let va = unsafe { (*slot_ptr).entry_va };
     if va == 0 {
         return None;
     }
     Some(unsafe { &*(va as *const CacheEntry<A>) })
-}
-
-/// `TalcAlloc` handle pointing at the shared cache region's lock at
-/// `STATE_CACHE_VA + 0`. Cheap to obtain (just wraps a pointer).
-fn talc_alloc() -> TalcAlloc {
-    ensure_mapped().expect("cache mapping");
-    let lock_ptr =
-        NonNull::new(STATE_CACHE_VA as *mut CacheTalcLock).expect("STATE_CACHE_VA is non-null");
-    // SAFETY: the host's `Cache<TalcAlloc>` lives at the same VA and
-    // already `claim`ed the lock; we share the same lock instance.
-    unsafe { TalcAlloc::from_raw(lock_ptr) }
 }
 
 /// Publish a `Cap<TalcAlloc>` to the shared cache region by writing
@@ -167,13 +182,17 @@ fn talc_alloc() -> TalcAlloc {
 /// Tracks the published entry in [`SCRATCH`] so [`clear_scratch`]
 /// can free + zero the directory slot at end of RPC.
 ///
-/// V1: the host's `Cache<TalcAlloc>` BTreeMap is NOT updated — the
+/// V1: the host's `TypedCache<TalcAlloc>` BTreeMap is NOT updated — the
 /// guest's view is via the directory only. The host doesn't query
 /// guest-published caps mid-RPC (Hyperlight serialises calls), and
 /// the cleanup at end-of-RPC ensures no stale entries leak across
 /// invocations.
-fn publish_blob(hash: [u8; 32], cap: Cap<TalcAlloc>) -> Result<(), &'static str> {
-    let alloc = talc_alloc();
+fn publish_blob(
+    base: NonNull<u8>,
+    hash: [u8; 32],
+    cap: Cap<TalcAlloc>,
+) -> Result<(), &'static str> {
+    let alloc = talc_alloc(base);
     let entry = CacheEntry::new(cap);
     let boxed = ABox::try_new_in(entry, alloc).map_err(|_| "publish_blob: alloc failed")?;
     // Leak the Box so the cache owns the entry; the pointer is
@@ -182,23 +201,24 @@ fn publish_blob(hash: [u8; 32], cap: Cap<TalcAlloc>) -> Result<(), &'static str>
     let entry_nn = NonNull::new(entry_ptr).expect("just allocated");
     let entry_va = entry_ptr as u64;
 
-    let dir_ptr = (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *mut CacheDirectory;
+    let dir_ptr = directory_mut_ptr(base);
     // SAFETY: directory ptr is in the persistent kernel mapping.
-    let slot_idx = unsafe { CacheDirectory::first_empty_blob(dir_ptr) }
-        .ok_or("publish_blob: directory full")?;
-    // SAFETY: slot_idx < MAX_BLOB_SLOTS; directory ptr is valid.
-    unsafe {
-        let slot = CacheDirectory::blob_slot_ptr(dir_ptr, slot_idx);
-        (*slot).hash = hash;
-        (*slot).entry_va = entry_va;
-        (*dir_ptr).blob_count_incr();
+    // `insert_blob` does the probe + write under one call.
+    if unsafe { CacheDirectory::insert_blob(dir_ptr, hash, entry_va) }.is_none() {
+        // Roll back the entry allocation on directory-full.
+        // SAFETY: we just got `entry_ptr` from `ABox::into_raw`.
+        unsafe {
+            let restored = ABox::from_raw_in(entry_ptr, talc_alloc(base));
+            drop(restored);
+        }
+        return Err("publish_blob: directory full");
     }
 
     // Record for cleanup at end of RPC.
     // SAFETY: single-threaded guest.
     let tracker = unsafe { &mut *SCRATCH.inner.get() };
     tracker.entries.push(ScratchEntry::Blob {
-        slot_idx,
+        hash,
         entry: entry_nn,
     });
     Ok(())
@@ -211,15 +231,15 @@ fn publish_blob(hash: [u8; 32], cap: Cap<TalcAlloc>) -> Result<(), &'static str>
 /// for end-of-RPC cleanup.
 ///
 /// Returns the assigned `CapRef` for cnode-slot insertion etc.
-fn publish_instance(cap: Cap<TalcAlloc>) -> Result<u64, &'static str> {
-    let alloc = talc_alloc();
+fn publish_instance(base: NonNull<u8>, cap: Cap<TalcAlloc>) -> Result<u64, &'static str> {
+    let alloc = talc_alloc(base);
     let entry = CacheEntry::new(cap);
     let boxed = ABox::try_new_in(entry, alloc).map_err(|_| "publish_instance: alloc failed")?;
     let entry_ptr: *mut CacheEntry<TalcAlloc> = ABox::into_raw(boxed);
     let entry_nn = NonNull::new(entry_ptr).expect("just allocated");
     let entry_va = entry_ptr as u64;
 
-    let dir_ptr = (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *mut CacheDirectory;
+    let dir_ptr = directory_mut_ptr(base);
     // SAFETY: dir_ptr is in the persistent kernel mapping; alloc_ref
     // takes a const ptr and works through atomic ops.
     let (ref_id, slot_idx) = match unsafe { CacheDirectory::alloc_ref(dir_ptr) } {
@@ -228,7 +248,7 @@ fn publish_instance(cap: Cap<TalcAlloc>) -> Result<u64, &'static str> {
             // Roll back the allocation we made before bailing.
             // SAFETY: we just got `entry_ptr` from `ABox::into_raw`.
             unsafe {
-                let restored = ABox::from_raw_in(entry_ptr, talc_alloc());
+                let restored = ABox::from_raw_in(entry_ptr, talc_alloc(base));
                 drop(restored);
             }
             return Err("publish_instance: instance directory full");
@@ -267,9 +287,9 @@ fn publish_instance(cap: Cap<TalcAlloc>) -> Result<u64, &'static str> {
 ///
 /// MUST be called AFTER the call-loop's `Vec<KernelFrame>` has been
 /// dropped, so frame-held handles decrement their refcounts first.
-fn clear_scratch() {
-    let alloc = talc_alloc();
-    let dir_ptr = (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *mut CacheDirectory;
+fn clear_scratch(base: NonNull<u8>) {
+    let alloc = talc_alloc(base);
+    let dir_ptr = directory_mut_ptr(base);
 
     // SAFETY: single-threaded guest.
     let tracker = unsafe { &mut *SCRATCH.inner.get() };
@@ -293,14 +313,11 @@ fn clear_scratch() {
         }
 
         match scratch {
-            ScratchEntry::Blob { slot_idx, entry } => {
-                // SAFETY: slot_idx < MAX_BLOB_SLOTS by construction.
-                unsafe {
-                    let slot = CacheDirectory::blob_slot_ptr(dir_ptr, slot_idx);
-                    (*slot).hash = [0u8; 32];
-                    (*slot).entry_va = 0;
-                    (*dir_ptr).blob_count_decr();
-                }
+            ScratchEntry::Blob { hash, entry } => {
+                // SAFETY: directory ptr is valid; `remove_blob` does
+                // backward-shift to keep probe chains dense.
+                let removed = unsafe { CacheDirectory::remove_blob(dir_ptr, &hash) };
+                debug_assert!(removed, "scratch blob missing from directory at cleanup");
                 // SAFETY: allocated via `ABox::try_new_in` in publish.
                 unsafe {
                     let boxed = ABox::from_raw_in(entry.as_ptr(), alloc);
@@ -324,19 +341,12 @@ fn clear_scratch() {
 }
 
 // ============================================================
-// `Cache` struct — the lifetime-correct, no-SSZ-Merkle API
+// `GuestCache` struct — the lifetime-correct, no-SSZ-Merkle API
 // ============================================================
-//
-// Coexists with the legacy `lookup_*` / `publish_*` / `clear_scratch`
-// module functions during the migration. Callers gradually move from
-// the legacy free-functions to method calls on a `&Cache` /
-// `&mut Cache`; the legacy API will be removed once nothing in tree
-// calls it.
 
-/// Cap-not-found / invalid-state errors returned by `Cache` methods.
+/// Cap-not-found / invalid-state errors returned by `GuestCache` methods.
 /// Kept as a small enum so callers can branch on the cause without
 /// matching on string literals.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheErr {
     /// The requested hash or ref isn't present in the directory.
@@ -349,48 +359,58 @@ pub enum CacheErr {
     DirectoryFull,
     /// Allocator returned `AllocError`.
     AllocFailed,
-    /// `ensure_mapped` couldn't install the persistent kernel mapping.
+    /// `ensure_default_mapped` couldn't install the persistent kernel mapping.
     MapNotInstalled,
 }
 
-/// Guest-side cache handle. Zero-sized: all the actual state
-/// (directory pointer + scratch tracker) lives in the
-/// `STATE_CACHE_VA` shared region and the per-process `SCRATCH`
-/// static. `Cache` exists as a Rust-level marker so callers can
-/// take `&Cache` / `&mut Cache` borrows; Rust's borrow checker then
+/// Guest-side cache handle. Holds a pointer to the cache region's
+/// base; methods derive the talc-lock pointer (offset 0) and the
+/// `CacheDirectory` pointer (offset [`CACHE_DIRECTORY_OFFSET`]) from
+/// it. No method body hardcodes [`STATE_CACHE_VA`] — that's only the
+/// default that [`GuestCache::new`] uses to construct `base`.
+///
+/// `GuestCache` exists as a Rust-level marker so callers can take
+/// `&GuestCache` / `&mut GuestCache` borrows; Rust's borrow checker then
 /// prevents publish/promote/clear ops from running while a `&Cap`
 /// read borrow is live (no eviction during reads).
 ///
-/// Construct via `Cache::new()` at kernel boot. Pass `&mut Cache` to
-/// the call loop; pass `&Cache` to read-only paths.
-pub struct Cache {
-    _priv: (),
+/// Construct via [`GuestCache::new`] at kernel boot. Pass `&mut GuestCache` to
+/// the call loop; pass `&GuestCache` to read-only paths.
+pub struct GuestCache {
+    base: NonNull<u8>,
 }
 
-impl Cache {
-    /// Construct a `Cache` handle, installing the persistent kernel
-    /// mapping if not already done. Cheap to call repeatedly.
+// SAFETY: `base` addresses the shared cache region; single-threaded
+// guest (Hyperlight serialises host↔guest calls) means there's no
+// cross-thread access from the guest side.
+unsafe impl Send for GuestCache {}
+
+impl GuestCache {
+    /// Construct a `GuestCache` handle for the default region at
+    /// [`STATE_CACHE_VA`], installing the persistent kernel mapping
+    /// if not already done. Cheap to call repeatedly.
     pub fn new() -> Result<Self, CacheErr> {
-        ensure_mapped().map_err(|_| CacheErr::MapNotInstalled)?;
-        Ok(Self { _priv: () })
+        ensure_default_mapped().map_err(|_| CacheErr::MapNotInstalled)?;
+        let base = NonNull::new(STATE_CACHE_VA as *mut u8).expect("STATE_CACHE_VA is non-null");
+        Ok(Self { base })
     }
 
     /// Allocator handle for the shared talc heap. Cheap to clone.
     pub fn allocator(&self) -> TalcAlloc {
-        talc_alloc()
+        talc_alloc(self.base)
     }
 
     /// Look up a content-addressed blob. Returns `&Cap` with
     /// lifetime tied to `&self`; the borrow checker stops anyone
     /// from publishing / promoting / clearing while it lives.
     pub fn read_blob(&self, h: &javm_cap::CapHash) -> Option<&Cap<TalcAlloc>> {
-        let entry = lookup_blob::<TalcAlloc>(h)?;
+        let entry = lookup_blob::<TalcAlloc>(self.base, h)?;
         Some(&entry.cap)
     }
 
     /// Look up an identity-addressed instance.
     pub fn read_instance(&self, r: javm_cap::CapRef) -> Option<&Cap<TalcAlloc>> {
-        let entry = lookup_instance::<TalcAlloc>(r)?;
+        let entry = lookup_instance::<TalcAlloc>(self.base, r)?;
         Some(&entry.cap)
     }
 
@@ -413,7 +433,7 @@ impl Cache {
     /// principle commentary in `call_loop.rs`.
     #[allow(dead_code)]
     pub fn mut_instance(&mut self, r: javm_cap::CapRef) -> Result<&mut Cap<TalcAlloc>, CacheErr> {
-        let dir_ptr = (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *mut CacheDirectory;
+        let dir_ptr = directory_mut_ptr(self.base);
         // SAFETY: dir_ptr is live for the cache's lifetime.
         let (slot_idx, _slot_ptr) =
             unsafe { CacheDirectory::find_instance(dir_ptr, r) }.ok_or(CacheErr::NotFound)?;
@@ -427,7 +447,7 @@ impl Cache {
         let refcount = unsafe { (*entry_ptr).refcount.load(Ordering::Acquire) };
         if refcount == 1 {
             // Sole owner: mutate in place.
-            // SAFETY: we hold &mut self; no other &Cache borrow can
+            // SAFETY: we hold &mut self; no other &GuestCache borrow can
             // be live, so nothing else dereferences this entry.
             return Ok(unsafe { &mut (*entry_ptr).cap });
         }
@@ -472,18 +492,17 @@ impl Cache {
     /// (Ref-keyed). Move-promote when the blob's refcount is 1 (sole
     /// holder is the cache itself); shallow-clone otherwise. Returns
     /// the fresh `CapRef` either way. Mirrors host-side
-    /// `Cache::get_mut`.
+    /// `GuestCache::get_mut`.
     ///
     /// Currently unused — wired in once the spec defines the
     /// scratchpad-cnode return mechanism.
     #[allow(dead_code)]
     pub fn promote_blob(&mut self, h: &javm_cap::CapHash) -> Result<javm_cap::CapRef, CacheErr> {
-        let dir_ptr = (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *mut CacheDirectory;
+        let dir_ptr = directory_mut_ptr(self.base);
         // SAFETY: dir_ptr in persistent kernel mapping.
-        let (blob_slot_idx, _) =
+        let (_, slot_ptr) =
             unsafe { CacheDirectory::find_blob(dir_ptr, h) }.ok_or(CacheErr::NotFound)?;
-        // SAFETY: slot present.
-        let entry_va = unsafe { (*CacheDirectory::blob_slot_ptr(dir_ptr, blob_slot_idx)).entry_va };
+        let entry_va = unsafe { (*slot_ptr).entry_va };
         if entry_va == 0 {
             return Err(CacheErr::NotFound);
         }
@@ -496,16 +515,13 @@ impl Cache {
         // SAFETY: same.
         let refcount = unsafe { (*entry_ptr).refcount.load(Ordering::Acquire) };
         if refcount == 1 {
-            // Move-promote: zero blob slot, allocate fresh instance
-            // ref, point it at the existing entry. No clone.
+            // Move-promote: remove blob slot (backward-shift), allocate
+            // fresh instance ref, point it at the existing entry. No clone.
             let (ref_id, inst_slot_idx) =
                 unsafe { CacheDirectory::alloc_ref(dir_ptr) }.ok_or(CacheErr::DirectoryFull)?;
             // SAFETY: directory ops.
             unsafe {
-                let bslot = CacheDirectory::blob_slot_ptr(dir_ptr, blob_slot_idx);
-                (*bslot).hash = [0u8; 32];
-                (*bslot).entry_va = 0;
-                (*dir_ptr).blob_count_decr();
+                CacheDirectory::remove_blob(dir_ptr, h);
                 let islot = CacheDirectory::instance_slot_ptr(dir_ptr, inst_slot_idx);
                 (*islot).ref_id = ref_id;
                 (*islot).entry_va = entry_va;
@@ -539,7 +555,7 @@ impl Cache {
     /// ref-clone semantics (gated on scratchpad mechanism).
     #[allow(dead_code)]
     pub fn clone_instance(&mut self, r: javm_cap::CapRef) -> Result<javm_cap::CapRef, CacheErr> {
-        let dir_ptr = (STATE_CACHE_VA + CACHE_DIRECTORY_OFFSET as u64) as *mut CacheDirectory;
+        let dir_ptr = directory_mut_ptr(self.base);
         let (slot_idx, _) =
             unsafe { CacheDirectory::find_instance(dir_ptr, r) }.ok_or(CacheErr::NotFound)?;
         // SAFETY: directory.
@@ -591,30 +607,30 @@ impl Cache {
         hash: javm_cap::CapHash,
         cap: Cap<TalcAlloc>,
     ) -> Result<(), CacheErr> {
-        publish_blob(hash, cap).map_err(|_| CacheErr::AllocFailed)
+        publish_blob(self.base, hash, cap).map_err(|_| CacheErr::AllocFailed)
     }
 
     /// Publish a fresh instance (identity-addressed). Returns the
     /// allocated `CapRef`.
     pub fn publish_instance(&mut self, cap: Cap<TalcAlloc>) -> Result<javm_cap::CapRef, CacheErr> {
-        publish_instance(cap).map_err(|_| CacheErr::AllocFailed)
+        publish_instance(self.base, cap).map_err(|_| CacheErr::AllocFailed)
     }
 
     /// Sweep all scratch entries this RPC published. Same semantics
     /// as the legacy `clear_scratch` — see its doc for the refcount
     /// safety-net behaviour.
     pub fn clear_scratch(&mut self) {
-        clear_scratch();
+        clear_scratch(self.base);
     }
 }
 
-/// `Cache::Drop` fires the per-RPC scratch sweep. Construct one
-/// `Cache` at the top of an RPC (e.g. inside `nub_invoke_cached`)
-/// and pass `&mut Cache` to the call loop; when the variable goes
+/// `GuestCache::Drop` fires the per-RPC scratch sweep. Construct one
+/// `GuestCache` at the top of an RPC (e.g. inside `nub_invoke_cached`)
+/// and pass `&mut GuestCache` to the call loop; when the variable goes
 /// out of scope after `run_top` returns, the kernel-frame stack has
 /// already unwound and any cnode-held entries with refcount==1 are
 /// reclaimed here.
-impl Drop for Cache {
+impl Drop for GuestCache {
     fn drop(&mut self) {
         self.clear_scratch();
     }

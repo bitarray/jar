@@ -12,6 +12,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocate"
+version = "0.1.0"
+dependencies = [
+ "allocator-api2 0.2.21",
+ "hashbrown 0.17.1",
+ "spinning_top",
+ "talc 4.4.3",
+]
+
+[[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "allocator-api2"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -804,6 +820,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -920,7 +942,7 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
- "foldhash",
+ "foldhash 0.1.5",
 ]
 
 [[package]]
@@ -934,6 +956,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2 0.2.21",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "heck"
@@ -1004,7 +1031,7 @@ dependencies = [
  "rkyv",
  "spin",
  "spinning_top",
- "talc",
+ "talc 5.0.3",
  "tracing",
 ]
 
@@ -1135,7 +1162,7 @@ version = "0.1.0"
 name = "javm"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "javm-cap",
  "javm-exec",
  "proptest",
@@ -1147,7 +1174,7 @@ dependencies = [
 name = "javm-bench"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "blake3",
  "build-javm",
  "criterion",
@@ -1163,12 +1190,11 @@ dependencies = [
 name = "javm-cap"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "blake2",
  "nub-host-common",
  "ssz",
  "ssz-derive",
- "talc",
  "thiserror",
 ]
 
@@ -1184,7 +1210,7 @@ dependencies = [
 name = "javm-guest-tests"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "blake2",
  "blake3",
  "build-javm",
@@ -1425,7 +1451,7 @@ dependencies = [
 name = "nub"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "anyhow",
  "bytecheck",
  "javm-cap",
@@ -1441,7 +1467,7 @@ dependencies = [
 name = "nub-arch-local"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "javm-cap",
  "javm-exec",
  "nub-arch-x86-abi",
@@ -1452,7 +1478,7 @@ dependencies = [
 name = "nub-arch-x86"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "bytecheck",
  "hyperlight-common",
  "hyperlight-guest",
@@ -1484,14 +1510,11 @@ dependencies = [
 name = "nub-host-common"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
  "anyhow",
  "bytecheck",
  "log",
  "rkyv",
  "spin",
- "spinning_top",
- "talc",
  "thiserror",
  "tracing",
  "tracing-core",
@@ -1511,7 +1534,7 @@ dependencies = [
 name = "nub-host-kvm"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "anyhow",
  "bitflags 2.11.1",
  "blake3",
@@ -1534,7 +1557,6 @@ dependencies = [
  "rkyv",
  "serde_json",
  "smallvec",
- "talc",
  "termcolor",
  "thiserror",
  "tracing",
@@ -2308,7 +2330,7 @@ dependencies = [
 name = "ssz"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "digest",
  "proptest",
  "sha2",
@@ -2392,11 +2414,21 @@ dependencies = [
 
 [[package]]
 name = "talc"
+version = "4.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3ae828aa394de34c7de08f522d1b86bd1c182c668d27da69caadda00590f26d"
+dependencies = [
+ "allocator-api2 0.2.21",
+ "lock_api",
+]
+
+[[package]]
+name = "talc"
 version = "5.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3081e3f3ad542dc4cd0ae720f752598f8880fd364dc2d031132e3509f673aa23"
 dependencies = [
- "allocator-api2",
+ "allocator-api2 0.4.0",
  "lock_api",
 ]
 

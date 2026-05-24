@@ -35,7 +35,7 @@
 //! `image_content_hash` is used for the image-hash chain protocol in
 //! `crate::image`.
 
-use allocator_api2::alloc::Allocator;
+use allocate::Allocator;
 
 use super::cap::{Cap, CapHash};
 
@@ -48,9 +48,8 @@ pub fn cap_hash<A: Allocator + Clone>(cap: &Cap<A>) -> CapHash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use allocator_api2::alloc::Global;
-    use allocator_api2::vec::Vec as AVec;
-    use core::sync::atomic::AtomicU32;
+    use allocate::Global;
+    use allocate::vec::Vec as AVec;
 
     use crate::cap::{CapHashOrRef, TypeCap};
     use crate::cnode::CNodeCap;
@@ -194,11 +193,10 @@ mod tests {
         bytes.extend_from_slice(&[1, 2, 3]);
         let pb_hash = [0xA1; 32];
         let pb = PageBytes {
-            refcount: AtomicU32::new(1),
             hash: pb_hash,
             bytes,
         };
-        let pr: PageRef<Global> = PageRef::new_in(pb, Global).unwrap();
+        let pr: PageRef<Global> = PageRef::new_in(pb, Global);
         let mut pages: AVec<PageSlot<Global>, Global> = AVec::new_in(Global);
         pages.push(PageSlot::Loaded(pr));
         let cap: Cap<Global> = Cap::Data(DataCap {
@@ -212,11 +210,10 @@ mod tests {
         let mut bytes2 = AVec::new_in(Global);
         bytes2.extend_from_slice(&[1, 2, 3]);
         let pb2 = PageBytes {
-            refcount: AtomicU32::new(1),
             hash: [0xB2; 32],
             bytes: bytes2,
         };
-        let pr2: PageRef<Global> = PageRef::new_in(pb2, Global).unwrap();
+        let pr2: PageRef<Global> = PageRef::new_in(pb2, Global);
         let mut pages2: AVec<PageSlot<Global>, Global> = AVec::new_in(Global);
         pages2.push(PageSlot::Loaded(pr2));
         let cap2: Cap<Global> = Cap::Data(DataCap {
@@ -236,11 +233,10 @@ mod tests {
         let mut bytes = AVec::new_in(Global);
         bytes.extend_from_slice(&[0xAA; 16]);
         let pb = PageBytes {
-            refcount: AtomicU32::new(1),
             hash: page_hash,
             bytes,
         };
-        let pr: PageRef<Global> = PageRef::new_in(pb, Global).unwrap();
+        let pr: PageRef<Global> = PageRef::new_in(pb, Global);
 
         let mut pages_loaded: AVec<PageSlot<Global>, Global> = AVec::new_in(Global);
         pages_loaded.push(PageSlot::Loaded(pr));

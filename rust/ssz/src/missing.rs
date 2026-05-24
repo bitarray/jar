@@ -16,8 +16,8 @@
 //! * byte 0 = `0` + payload bytes (Materialized)
 //! * byte 0 = `1` + 32 raw hash bytes (Missing)
 
-use allocator_api2::alloc::Allocator;
-use allocator_api2::vec::Vec;
+use allocate::Allocator;
+use allocate::vec::Vec;
 use core::fmt;
 use digest::Digest;
 use digest::typenum::U32;

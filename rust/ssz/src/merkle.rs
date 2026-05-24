@@ -4,8 +4,8 @@
 //! trait with `OutputSize = U32`. No domain bytes or prefixes are mixed in
 //! at the node level — concatenation is the only operation.
 
-use allocator_api2::alloc::Global;
-use allocator_api2::vec::Vec;
+use allocate::Global;
+use allocate::vec::Vec;
 use digest::Digest;
 use digest::typenum::U32;
 

@@ -94,16 +94,16 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use allocate::talc::TalcAlloc;
 use javm_cap::cap::{Cap, CapHashOrRef};
 use javm_cap::hash::{Blake2b256, Hash};
 use javm_cap::slot::SlotIdx;
 use javm_cap::{CapHash, NUM_REGS};
-use nub_host_common::cache::TalcAlloc;
 
 use crate::jit_run::{self, DirectMap, ExitInfo, FrameRuntime, MemRegion};
 use crate::page_alloc::PageBuf;
 use crate::paging;
-use crate::state_cache::Cache;
+use crate::state_cache::GuestCache;
 
 const EXIT_HALT: u32 = 0;
 const EXIT_HOST_CALL: u32 = 4;
@@ -147,14 +147,14 @@ const ERR_MAP_PAGED_UNSUPPORTED: u32 = 61;
 /// One stack frame on the in-kernel call stack. Holds the
 /// identifiers for the Image and Instance caps the frame runs
 /// against (plus per-frame mutable PVM state and the ring-3
-/// resources cache). The caps themselves live in the [`Cache`];
-/// the frame re-looks them up on each access via `&Cache`. V1
+/// resources cache). The caps themselves live in the [`GuestCache`];
+/// the frame re-looks them up on each access via `&GuestCache`. V1
 /// invariant: nothing evicts cache entries mid-RPC, so a hash that
 /// resolved at frame build resolves the same way for the frame's
 /// lifetime.
 pub struct KernelFrame {
     /// Content hash of the Image cap this frame runs. Resolved via
-    /// [`Cache::read_blob`] at each access (cheap, direct-indexed
+    /// [`GuestCache::read_blob`] at each access (cheap, direct-indexed
     /// for instance-keyed; linear-scan for blob hashes).
     image_hash: CapHash,
     /// Image's chain hash. Used by `derive_spawn` to compute the
@@ -234,11 +234,11 @@ pub struct LoopOutcome {
 /// gas exhaustion, …). See module docs for the loop body.
 ///
 /// `cache` is the caller-owned cache handle. The borrow checker uses
-/// the `&mut Cache` argument to enforce that no other code holds a
+/// the `&mut GuestCache` argument to enforce that no other code holds a
 /// `&Cap` borrow concurrent with publish/promote/clone operations
 /// fired by `dispatch_derive_spawn` / `dispatch_host_call`.
 pub fn run_top(
-    cache: &mut Cache,
+    cache: &mut GuestCache,
     instance_hash: &CapHash,
     endpoint_idx: u32,
     args: [u64; 4],
@@ -354,7 +354,7 @@ pub fn run_top(
     };
 
     // Drop the stack BEFORE we hand the outcome back. The caller
-    // (typically the `Cache`'s Drop, which fires when the cache
+    // (typically the `GuestCache`'s Drop, which fires when the cache
     // goes out of scope) runs `clear_scratch`; any cnode-held
     // `Ref(R)` entries that were tracked in scratch need to be
     // released here so the underlying entries are reclaimable on
@@ -368,7 +368,7 @@ pub fn run_top(
 /// populated from overlays); subsequent calls (parent resumes after
 /// a child HALT) reuse the cached runtime. Frame mem persists across
 /// re-entries — the parent's writes survive the child's execution.
-fn run_one_entry(cache: &Cache, frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
+fn run_one_entry(cache: &GuestCache, frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
     if frame.runtime.is_none() {
         let rt = build_runtime(cache, frame)?;
         frame.runtime = Some(rt);
@@ -392,7 +392,7 @@ fn run_one_entry(cache: &Cache, frame: &mut KernelFrame, gas: i64) -> Result<Exi
 /// returned `&Cap` borrow lives until function return. Per the V1
 /// invariant (no eviction mid-RPC) the PA installed in the PT stays
 /// valid for the frame's lifetime even after this borrow ends.
-fn build_runtime<'a>(cache: &'a Cache, frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
+fn build_runtime<'a>(cache: &'a GuestCache, frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
     let img = match cache.read_blob(&frame.image_hash) {
         Some(Cap::Image(i)) => i,
         Some(_) => return Err(ERR_IMAGE_KIND),
@@ -546,9 +546,9 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
 /// support — the child inherits the parent's cnode at CALL time).
 /// Computes `child_chain = blake2b(running.chain, image_hash)`,
 /// publishes a fresh `Cap::Instance` to `cache.instances` via
-/// [`Cache::publish_instance`], and writes the resulting `CapRef`
+/// [`GuestCache::publish_instance`], and writes the resulting `CapRef`
 /// into the parent's `dst_slot`.
-fn dispatch_derive_spawn(cache: &mut Cache, frame: &mut KernelFrame) -> Result<(), u32> {
+fn dispatch_derive_spawn(cache: &mut GuestCache, frame: &mut KernelFrame) -> Result<(), u32> {
     let image_slot = (frame.regs[7] & 0xFF) as usize;
     let _cnode_slot = (frame.regs[8] & 0xFF) as usize;
     let dst_slot = (frame.regs[9] & 0xFF) as usize;
@@ -575,7 +575,7 @@ fn dispatch_derive_spawn(cache: &mut Cache, frame: &mut KernelFrame) -> Result<(
 /// [`KernelFrame`] for the child. Parent's φ[9..=12] become child's
 /// φ[7..=10] (arg-passing convention — used by the recursive-spawn
 /// bench to thread the remaining depth count).
-fn dispatch_host_call(cache: &mut Cache, parent: &KernelFrame) -> Result<KernelFrame, u32> {
+fn dispatch_host_call(cache: &mut GuestCache, parent: &KernelFrame) -> Result<KernelFrame, u32> {
     let instance_slot = (parent.regs[7] & 0xFF) as usize;
     let endpoint_idx = (parent.regs[8] & 0xFF) as u32;
     if instance_slot >= CNODE_SLOTS {
@@ -613,7 +613,7 @@ fn dispatch_host_call(cache: &mut Cache, parent: &KernelFrame) -> Result<KernelF
 /// `host_call` when the cnode slot points at a host-pre-published
 /// instance hash).
 fn build_frame_from_published(
-    cache: &Cache,
+    cache: &GuestCache,
     instance_hash: &CapHash,
     endpoint_idx: u32,
     args: [u64; 4],
@@ -637,7 +637,7 @@ fn build_frame_from_published(
 /// Build a frame from a `Cap::Instance` resident in `cache.instances`
 /// (kernel-derived sub-VM).
 fn build_frame_from_instance_ref(
-    cache: &Cache,
+    cache: &GuestCache,
     ref_id: javm_cap::CapRef,
     endpoint_idx: u32,
     args: [u64; 4],
@@ -660,7 +660,7 @@ fn build_frame_from_instance_ref(
 
 /// Dispatch on `CapHashOrRef` — used by `dispatch_host_call`.
 fn build_frame_from_cap(
-    cache: &Cache,
+    cache: &GuestCache,
     target: CapHashOrRef,
     endpoint_idx: u32,
     args: [u64; 4],
@@ -674,7 +674,7 @@ fn build_frame_from_cap(
 /// Core frame builder: reads the image cap to seed regs/pc/cnode +
 /// CoW ranges, stores only IDs on the frame (no `CapHandle` pins).
 fn build_frame_inner(
-    cache: &Cache,
+    cache: &GuestCache,
     image_hash: CapHash,
     image_hash_chain: CapHash,
     instance: CapHashOrRef,
@@ -779,11 +779,11 @@ fn build_frame_inner(
 /// Inherits the parent's chain via `image_hash_chain`; `regs`, `pc`,
 /// `gas_remaining`, `rw_overlays` start empty.
 fn build_transient_instance_cap(
-    cache: &Cache,
+    cache: &GuestCache,
     image_hash: CapHash,
     image_hash_chain: CapHash,
 ) -> Cap<TalcAlloc> {
-    use allocator_api2::vec::Vec as AVec;
+    use allocate::vec::Vec as AVec;
     let alloc = cache.allocator();
     Cap::Instance(javm_cap::instance::InstanceCap {
         image_hash_chain,

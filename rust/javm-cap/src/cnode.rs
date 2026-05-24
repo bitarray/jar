@@ -13,7 +13,7 @@
 //!
 //! `size_log` is permitted in `0..=16` (the spec's hard ceiling).
 
-use allocator_api2::alloc::{Allocator, Global};
+use allocate::{Allocator, Global};
 use ssz::{MissingOr, SparseList};
 
 use crate::error::CapError;
@@ -120,7 +120,7 @@ impl CNodeCap<Global> {
 }
 
 /// One populated slot — retained as a serialisation helper for callers
-/// that need a flat `(slot, target)` pair (e.g., `Cache::publish_cnode`).
+/// that need a flat `(slot, target)` pair (e.g., `TypedCache::publish_cnode`).
 ///
 /// The on-the-wire/hash representation of `CNodeCap` no longer uses this
 /// type; the cnode is encoded directly as a `SparseList<CapHashOrRef, ...>`.

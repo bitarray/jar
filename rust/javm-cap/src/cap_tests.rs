@@ -1,13 +1,9 @@
 //! Smoke tests demonstrating that the talc-friendly cap types work
 //! with both `Global` (heap) and `TalcAlloc` (cache) allocators.
 
-use core::ptr::NonNull;
-use core::sync::atomic::AtomicU32;
-
-use allocator_api2::alloc::Global;
-use allocator_api2::vec::Vec as AVec;
-use nub_host_common::cache::{CacheTalcLock, TalcAlloc};
-use talc::source::Manual;
+use allocate::Global;
+use allocate::talc::{CacheTalcLock, Span, TalcAlloc, new_cache_talc_lock};
+use allocate::vec::Vec as AVec;
 
 use crate::slot::SlotIdx;
 
@@ -26,10 +22,12 @@ struct Arena {
 impl Arena {
     fn new(size: usize) -> Self {
         let backing = alloc::vec![0u8; size];
-        let talc = alloc::boxed::Box::new(CacheTalcLock::new(Manual));
+        let talc = alloc::boxed::Box::new(new_cache_talc_lock());
         let base = backing.as_ptr() as *mut u8;
         unsafe {
-            let _ = talc.lock().claim(base, size).expect("claim");
+            talc.lock()
+                .claim(Span::from_base_size(base, size))
+                .expect("claim");
         }
         Self {
             _backing: backing,
@@ -37,11 +35,15 @@ impl Arena {
         }
     }
     fn alloc(&self) -> TalcAlloc {
-        unsafe { TalcAlloc::from_raw(NonNull::from(&*self.talc)) }
+        // SAFETY: `self.talc` is heap-pinned via the Box and outlives
+        // every `TalcAlloc` derived from this `Arena`; tests drop the
+        // arena last. The `'static` cast is the same lifetime fiction
+        // used in production (`HostCache::alloc`).
+        unsafe { &*(&*self.talc as *const CacheTalcLock) }
     }
 }
 
-fn make_image_cap_in<A: allocator_api2::alloc::Allocator + Clone>(alloc: A) -> ImageCap<A> {
+fn make_image_cap_in<A: allocate::Allocator + Clone>(alloc: A) -> ImageCap<A> {
     let mut code = AVec::new_in(alloc.clone());
     code.extend_from_slice(&[0xAB, 0xCD]);
     ImageCap {
@@ -206,12 +208,11 @@ fn page_ref_shares_then_releases() {
     let mut bytes = AVec::new_in(alloc);
     bytes.extend_from_slice(&[1, 2, 3, 4]);
     let pb = PageBytes {
-        refcount: AtomicU32::new(1),
         hash: [0; 32],
         bytes,
     };
-    let pr: PageRef<TalcAlloc> = PageRef::new_in(pb, alloc).expect("alloc page");
-    assert_eq!(pr.refcount(), 1);
+    let pr: PageRef<TalcAlloc> = PageRef::new_in(pb, alloc);
+    assert_eq!(allocate::sync::Arc::strong_count(&pr), 1);
 
     let pages: AVec<PageSlot<TalcAlloc>, TalcAlloc> = {
         let mut v = AVec::new_in(alloc);
@@ -219,10 +220,10 @@ fn page_ref_shares_then_releases() {
         v.push(PageSlot::Loaded(pr.clone()));
         v
     };
-    assert_eq!(pr.refcount(), 3);
+    assert_eq!(allocate::sync::Arc::strong_count(&pr), 3);
 
     drop(pages);
-    assert_eq!(pr.refcount(), 1);
+    assert_eq!(allocate::sync::Arc::strong_count(&pr), 1);
     drop(pr);
     // Allocation freed; arena could be exhausted by future allocs in
     // isolated tests but we don't check the underlying talc state here.
@@ -301,14 +302,14 @@ fn cache_entry_refcount_starts_at_one() {
 
 #[test]
 fn cache_with_talc_alloc_round_trips_full_publish_chain() {
-    use crate::cache::Cache;
+    use crate::cache::TypedCache;
     use crate::cap::NUM_REGS;
 
     // Plenty of headroom — the published Image is tiny and the inline
     // Data slot is 8 bytes; 256 KiB is excessive but exercises real
     // talc claims rather than the embedded-arena edge case.
     let arena = Arena::new(256 * 1024);
-    let mut cache = Cache::new_in(arena.alloc());
+    let mut cache = TypedCache::new_in(arena.alloc());
 
     // 1. Publish a Data blob (cap is Global; cache deep-clones into talc).
     let data_h = cache

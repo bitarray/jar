@@ -5,7 +5,7 @@
 //! (`javm`) into the chain-side kernel: σ state, block apply,
 //! state-root, kernel-assisted Instance impls, host_open/host_save.
 //!
-//! σ is a [`javm_cap::Cache<Global>`] plus the validator set; cap
+//! σ is a [`javm_cap::TypedCache<Global>`] plus the validator set; cap
 //! content (Images, Data, CNodes, Instances) lives in the cache and
 //! is content-addressed by [`javm_cap::CapHash`]. `apply_event`
 //! publishes the event payload as a DataCap, rebinds the chain root

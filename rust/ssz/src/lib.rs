@@ -26,8 +26,8 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;
 
-use allocator_api2::alloc::{Allocator, Global};
-use allocator_api2::vec::Vec;
+use allocate::vec::Vec;
+use allocate::{Allocator, Global};
 use digest::Digest;
 use digest::typenum::U32;
 
@@ -45,7 +45,7 @@ pub mod vector;
 pub use bits::{Bitlist, Bitvector};
 // Re-exports so consumers of the derive macros can name the crates the
 // generated code references without taking direct dependencies.
-pub use allocator_api2;
+pub use allocate;
 pub use digest;
 pub use error::DecodeError;
 pub use list::List;
@@ -106,7 +106,7 @@ pub trait Encode {
     ///
     /// This is provided for convenience in callers that don't care about
     /// allocator threading. The default impl encodes into an
-    /// `allocator_api2::vec::Vec<u8, Global>` and copies into a standard
+    /// `allocate::vec::Vec<u8, Global>` and copies into a standard
     /// `alloc::vec::Vec<u8>`. Implementations may override for efficiency.
     fn as_ssz_bytes(&self) -> alloc::vec::Vec<u8> {
         let mut out = alloc::vec::Vec::with_capacity(self.ssz_bytes_len());

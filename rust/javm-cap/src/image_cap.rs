@@ -5,8 +5,8 @@
 //! per ImageCap is bounded (seven Vecs, regardless of content size);
 //! we accept that in exchange for direct field accessors.
 
-use allocator_api2::alloc::{Allocator, Global};
-use allocator_api2::vec::Vec;
+use allocate::vec::Vec;
+use allocate::{Allocator, Global};
 
 use crate::slot::SlotIdx;
 
@@ -109,7 +109,7 @@ impl ssz::Encode for MemoryMapping {
     fn ssz_bytes_len(&self) -> usize {
         Self::SSZ_LEN
     }
-    fn ssz_append<A: allocator_api2::alloc::Allocator + Clone>(&self, buf: &mut Vec<u8, A>) {
+    fn ssz_append<A: allocate::Allocator + Clone>(&self, buf: &mut Vec<u8, A>) {
         buf.extend_from_slice(&self.start.to_le_bytes());
         buf.extend_from_slice(&self.size.to_le_bytes());
         for s in &self.source_path {
@@ -126,7 +126,7 @@ impl ssz::Decode for MemoryMapping {
     fn ssz_fixed_len() -> usize {
         Self::SSZ_LEN
     }
-    fn from_ssz_bytes_in<A: allocator_api2::alloc::Allocator + Clone>(
+    fn from_ssz_bytes_in<A: allocate::Allocator + Clone>(
         bytes: &[u8],
         _alloc: A,
     ) -> Result<Self, ssz::DecodeError> {
@@ -164,11 +164,8 @@ impl ssz::HashTreeRoot for MemoryMapping {
             // Treat the fixed-length path array as a `Vector<u32,
             // MAX_SOURCE_DEPTH>` for hashing: pack to bytes, merkleize
             // with `ceil(N*4/32)` chunks.
-            let mut buf: allocator_api2::vec::Vec<u8, allocator_api2::alloc::Global> =
-                allocator_api2::vec::Vec::with_capacity_in(
-                    MAX_SOURCE_DEPTH * 4,
-                    allocator_api2::alloc::Global,
-                );
+            let mut buf: allocate::vec::Vec<u8, allocate::Global> =
+                allocate::vec::Vec::with_capacity_in(MAX_SOURCE_DEPTH * 4, allocate::Global);
             for s in &self.source_path {
                 buf.extend_from_slice(&s.get().to_le_bytes());
             }

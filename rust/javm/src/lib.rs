@@ -8,7 +8,7 @@
 //! CALL_RESUME, host call, and yield routing.
 //!
 //! `Vm::invoke_cached` is the canonical entry point: callers publish
-//! caps into a `Cache<Global>` (via `javm_cap::Cache::publish_*`)
+//! caps into a `TypedCache<Global>` (via `javm_cap::TypedCache::publish_*`)
 //! and then ask the Vm to drive a published instance by hash. The
 //! Vm holds only the call-stack-side working state; cap content
 //! lives in the cache.

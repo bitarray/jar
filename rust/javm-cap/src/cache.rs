@@ -1,29 +1,32 @@
-//! `Cache<A>` — two-tier cap store with refcount-based CoW.
+//! `TypedCache<A>` — two-tier cap store with refcount-based CoW.
 //!
 //! The cache holds caps in two maps:
 //!
-//! - **`blobs: BTreeMap<CapHash, TBox<CacheEntry<A>, A>>`** — content-
-//!   addressed immutable caps. All five kinds (Type, Image, Data,
-//!   CNode, Instance) can live here.
-//! - **`instances: BTreeMap<CapRef, TBox<CacheEntry<A>, A>>`** —
+//! - **`blobs: HashMap<CapHash, TBox<CacheEntry<A>, A>, A>`** —
+//!   content-addressed immutable caps. All five kinds (Type, Image,
+//!   Data, CNode, Instance) can live here.
+//! - **`instances: HashMap<CapRef, TBox<CacheEntry<A>, A>, A>`** —
 //!   identity-keyed mutable working state. Only Data, CNode,
 //!   Instance variants reach this map (after `get_mut` promotion).
 //!
-//! `A` is an [`allocator_api2`] allocator. For host-private use the
-//! default `Global` gives a heap-backed cache. For the shared-memory
-//! state cache, `A = TalcAlloc` lands everything in the cache region.
+//! `A` is an [`allocate::Allocator`] (re-exported from the
+//! `allocator-api2` crate; downstream depends on `allocate` only).
+//! For host-private use the default `Global` gives a heap-backed
+//! cache. For the shared-memory state cache, `A = TalcAlloc` lands
+//! everything — including the HashMap node storage — in the cache
+//! region.
 //!
 //! Refcounting uses the same protocol as `Arc::make_mut`:
 //! `fetch_sub(1, Release)` at mutation time; if `prev == 1` we have
 //! sole ownership and move-promote (no copy), else we shallow-clone
-//! into a fresh instance entry. See [`Cache::get_mut`] for details.
+//! into a fresh instance entry. See [`TypedCache::get_mut`] for details.
 
-use alloc::collections::BTreeMap;
 use core::sync::atomic::Ordering;
 
-use allocator_api2::alloc::{Allocator, Global};
-use allocator_api2::boxed::Box as ABox;
-use allocator_api2::vec::Vec as AVec;
+use allocate::boxed::Box as ABox;
+use allocate::collections::HashMap;
+use allocate::vec::Vec as AVec;
+use allocate::{Allocator, Global};
 
 use super::cap::{Cap, CapHash, CapHashOrRef, CapRef};
 use super::cap_hash::cap_hash;
@@ -34,8 +37,8 @@ use super::image_cap::ImageConvertError;
 use super::instance::{InstanceCap, RwOverlay};
 use super::page::{PageBytes, PageRef, PageSlot};
 
-/// Talc-friendly Box alias — `allocator_api2::Box` parameterised on
-/// the cap's allocator.
+/// Talc-friendly Box alias — `allocate::Box` parameterised on the
+/// cap's allocator.
 type TBox<T, A> = ABox<T, A>;
 
 #[derive(Debug, thiserror::Error)]
@@ -56,36 +59,36 @@ pub enum CacheError {
     SlotOutOfRange,
 }
 
-pub struct Cache<A: Allocator + Clone = Global> {
+pub struct TypedCache<A: Allocator + Clone = Global> {
     alloc: A,
-    blobs: BTreeMap<CapHash, TBox<CacheEntry<A>, A>>,
-    instances: BTreeMap<CapRef, TBox<CacheEntry<A>, A>>,
+    blobs: HashMap<CapHash, TBox<CacheEntry<A>, A>, A>,
+    instances: HashMap<CapRef, TBox<CacheEntry<A>, A>, A>,
     next_ref: u64,
 }
 
-impl Cache<Global> {
+impl TypedCache<Global> {
     /// Construct an empty heap-backed cache. Equivalent to
-    /// `Cache::new_in(Global)` for callers that don't want an
-    /// `allocator_api2` dependency.
+    /// `TypedCache::new_in(Global)` for callers that don't want an
+    /// allocator dependency.
     pub fn new() -> Self {
         Self::new_in(Global)
     }
 }
 
-impl Default for Cache<Global> {
+impl Default for TypedCache<Global> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<A: Allocator + Clone> Cache<A> {
+impl<A: Allocator + Clone> TypedCache<A> {
     /// Construct an empty cache that allocates cap content through
     /// `alloc`.
     pub fn new_in(alloc: A) -> Self {
         Self {
+            blobs: HashMap::new_in(alloc.clone()),
+            instances: HashMap::new_in(alloc.clone()),
             alloc,
-            blobs: BTreeMap::new(),
-            instances: BTreeMap::new(),
             // CapRef 0 is reserved; ref allocation starts at 1.
             next_ref: 1,
         }
@@ -554,7 +557,7 @@ impl<A: Allocator + Clone> Cache<A> {
             }
             Cap::Data(_) | Cap::Image(_) | Cap::Type(_) => {
                 // DataCap pages are owned (via PageRef.refcount) and
-                // not addressable through the Cache; ImageCap holds
+                // not addressable through the TypedCache; ImageCap holds
                 // ImageSlotEntry referring to blobs which the cache
                 // tracks separately at publish time, not at slot
                 // mutation time; TypeCap has no targets.
@@ -615,7 +618,7 @@ fn rewrite_ref_targets<A: Allocator + Clone>(cap: &mut Cap<A>, resolved: &[(CapR
 }
 
 /// Collect the cap targets a `Cap<Global>` directly holds — used by
-/// [`Cache::put_cap_with_hash`] to incref each target on first put so
+/// [`TypedCache::put_cap_with_hash`] to incref each target on first put so
 /// the refcount invariant (entry refcount == holder count) is preserved.
 fn collect_referenced_targets_global(cap: &Cap<Global>) -> alloc::vec::Vec<CapHashOrRef> {
     let mut out: alloc::vec::Vec<CapHashOrRef> = alloc::vec::Vec::new();
@@ -679,24 +682,20 @@ pub(crate) fn deep_clone_into<A: Allocator + Clone>(src: &Cap<Global>, alloc: A)
                             PageSlot::Empty => PageSlot::Empty,
                             PageSlot::Missing(h) => PageSlot::Missing(*h),
                             PageSlot::Loaded(pr) => {
-                                let src_pb = pr.get();
                                 // Page bytes are also page-aligned so
                                 // they can be mapped directly.
                                 let mut bytes: AVec<u8, A> = crate::data::alloc_page_aligned_zeroed::<
                                     A,
                                 >(
-                                    src_pb.bytes.len(), alloc.clone()
+                                    pr.bytes.len(), alloc.clone()
                                 );
-                                bytes[..src_pb.bytes.len()]
-                                    .copy_from_slice(src_pb.bytes.as_slice());
+                                bytes[..pr.bytes.len()].copy_from_slice(pr.bytes.as_slice());
                                 let pb = PageBytes {
-                                    refcount: core::sync::atomic::AtomicU32::new(1),
-                                    hash: src_pb.hash,
+                                    hash: pr.hash,
                                     bytes,
                                 };
-                                let pr = PageRef::<A>::new_in(pb, alloc.clone())
-                                    .expect("alloc PageRef during deep_clone_into");
-                                PageSlot::Loaded(pr)
+                                let new_pr = PageRef::<A>::new_in(pb, alloc.clone());
+                                PageSlot::Loaded(new_pr)
                             }
                         };
                         new_pages.push(new_slot);
@@ -798,7 +797,7 @@ pub(crate) fn deep_clone_into<A: Allocator + Clone>(src: &Cap<Global>, alloc: A)
 /// directly-owned slot/page tables are duplicated; cross-references
 /// (CapHashOrRef in cnode slots, page hashes in DataCap) carry over
 /// by value. The caller is responsible for bumping the refcounts of
-/// any cross-referenced targets (host-side: `Cache::bump_targets`;
+/// any cross-referenced targets (host-side: `TypedCache::bump_targets`;
 /// guest-side: state-cache's `cap_make_mut`).
 pub fn shallow_clone_cap<A: Allocator + Clone>(
     cap: &Cap<A>,

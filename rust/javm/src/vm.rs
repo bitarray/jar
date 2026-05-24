@@ -7,20 +7,20 @@
 //!
 //! Top-level verbs:
 //! - [`Vm::invoke_cached`] — resolve an Instance hash from a caller-
-//!   supplied `Cache<Global>`, push a working `InstanceEntry`, drive
+//!   supplied `TypedCache<Global>`, push a working `InstanceEntry`, drive
 //!   `javm_exec::Interpreter::run` to completion, return a
 //!   [`CallResult`]. The cache holds the Cap::Instance + Cap::Image
 //!   content; the Vm holds only the call-stack-side working copy and
 //!   ephemeral kernel state.
 //! - [`Vm::call_resume`] — resume a Paused stack after a yield.
 //!
-//! The Cache is borrowed per invocation (not owned by the Vm) so the
+//! The TypedCache is borrowed per invocation (not owned by the Vm) so the
 //! same cache can serve both pre-publish (the caller publishes caps
 //! into it) and in-flight resolution (host calls read referenced caps
 //! by their `CapHashOrRef` target).
 
-use allocator_api2::alloc::Global;
-use javm_cap::{Cache, Cap, CapHash, CapHashOrRef, SlotIdx};
+use allocate::Global;
+use javm_cap::{Cap, CapHash, CapHashOrRef, SlotIdx, TypedCache};
 use javm_exec::{Access, CopyingMemory, ExitReason, GasCounter, Interpreter, Mem, Regs};
 
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
@@ -85,7 +85,7 @@ impl<K: KernelAssist> Vm<K> {
         }
     }
 
-    /// Cache-driven entry point: look up a published `Cap::Instance`
+    /// TypedCache-driven entry point: look up a published `Cap::Instance`
     /// in `cache` by hash, pull its referenced `Cap::Image` from the
     /// same cache, predecode bytecode (cached by `image_hash`), seed
     /// regs + memory + gas, push a working `InstanceEntry`, drive the
@@ -96,7 +96,7 @@ impl<K: KernelAssist> Vm<K> {
     /// cap targets).
     pub fn invoke_cached(
         &mut self,
-        cache: &mut Cache<Global>,
+        cache: &mut TypedCache<Global>,
         instance_hash: CapHash,
         endpoint_idx: u8,
         args: [u64; 4],
@@ -125,7 +125,7 @@ impl<K: KernelAssist> Vm<K> {
     /// instance.
     pub(crate) fn build_entry(
         &mut self,
-        cache: &Cache<Global>,
+        cache: &TypedCache<Global>,
         inst_ref: CapHashOrRef,
         endpoint_idx: u8,
         args: [u64; 4],
@@ -211,7 +211,7 @@ impl<K: KernelAssist> Vm<K> {
         let gas = GasCounter::new(gas_budget);
         let gas_initial = gas_budget;
 
-        // Cache image-side metadata on the entry for fast host-call
+        // TypedCache image-side metadata on the entry for fast host-call
         // lookups (pinned check, yield routing).
         let pinned_slots: Vec<SlotIdx> = img.pinned.iter().map(|e| e.slot).collect();
 
@@ -246,7 +246,7 @@ impl<K: KernelAssist> Vm<K> {
     ///   missing.
     pub fn call_resume(
         &mut self,
-        cache: &mut Cache<Global>,
+        cache: &mut TypedCache<Global>,
         scratchpad: Option<CapHashOrRef>,
     ) -> Result<CallResult, VmError> {
         // 1. Verify and pop the top ReferenceEntry.
@@ -309,7 +309,7 @@ impl<K: KernelAssist> Vm<K> {
     /// pop the entry and translate Halt / Fault as usual.
     fn drive_and_translate(
         &mut self,
-        cache: &mut Cache<Global>,
+        cache: &mut TypedCache<Global>,
         mut regs: Regs,
         mut mem: Mem,
         mut gas: GasCounter,
@@ -514,7 +514,7 @@ impl<K: KernelAssist> Vm<K> {
     /// cnode (so the cache stores the cnode snapshot too).
     fn settle_post_instance(
         &mut self,
-        cache: &mut Cache<Global>,
+        cache: &mut TypedCache<Global>,
         entry: &InstanceEntry,
     ) -> Result<CapHash, VmError> {
         // Build the working cnode as a Cap<Global> and put it. We only
@@ -668,7 +668,7 @@ mod tests {
     use super::*;
     use crate::kernel_assist::InProcessKernelAssist;
     use javm_cap::image::Image;
-    use javm_cap::{Cache, Cap, NUM_REGS};
+    use javm_cap::{Cap, NUM_REGS, TypedCache};
     use std::collections::BTreeMap;
 
     fn empty_image_with_code(code: Vec<u8>) -> Image {
@@ -689,7 +689,7 @@ mod tests {
 
     /// Publish an Image + empty root cnode + a Cap::Instance referencing
     /// them; return the instance hash and the cache.
-    fn publish_simple_instance(cache: &mut Cache<Global>, image: Image) -> CapHash {
+    fn publish_simple_instance(cache: &mut TypedCache<Global>, image: Image) -> CapHash {
         let image_hash = cache
             .put_cap(&Cap::image_with_slots(&image, &[], &[]).unwrap())
             .unwrap();
@@ -719,7 +719,7 @@ mod tests {
     fn invoke_cached_trap_returns_faulted() {
         // code = [trap (0)]
         let img = empty_image_with_code(vec![0u8]);
-        let mut cache = Cache::new_in(Global);
+        let mut cache = TypedCache::new_in(Global);
         let inst_hash = publish_simple_instance(&mut cache, img);
 
         let mut vm = Vm::new(InProcessKernelAssist::new());
@@ -742,7 +742,7 @@ mod tests {
         // imm byte).
         let mut img = empty_image_with_code(vec![10u8, 0]);
         img.packed_bitmask = vec![0b01u8];
-        let mut cache = Cache::new_in(Global);
+        let mut cache = TypedCache::new_in(Global);
         let inst_hash = publish_simple_instance(&mut cache, img);
 
         let mut vm = Vm::new(InProcessKernelAssist::new());
@@ -795,7 +795,7 @@ mod tests {
             yield_marker_slot: None,
         };
 
-        let mut cache = Cache::new_in(Global);
+        let mut cache = TypedCache::new_in(Global);
         let inst_hash = publish_simple_instance(&mut cache, img);
 
         let mut vm = Vm::new(InProcessKernelAssist::new());
@@ -903,7 +903,7 @@ mod tests {
         };
 
         // Publish S as a complete Cap::Instance.
-        let mut cache = Cache::new_in(Global);
+        let mut cache = TypedCache::new_in(Global);
         let s_inst_hash = publish_simple_instance(&mut cache, s_img);
 
         // Publish M with a root cnode that has slot 9 = Hash(S_inst).
@@ -964,7 +964,7 @@ mod tests {
             initial_slots: BTreeMap::new(),
             yield_marker_slot: None,
         };
-        let mut cache = Cache::new_in(Global);
+        let mut cache = TypedCache::new_in(Global);
         let inst_hash = publish_simple_instance(&mut cache, img);
         let mut vm = Vm::new(InProcessKernelAssist::new());
         let r = vm

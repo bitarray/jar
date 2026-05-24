@@ -24,7 +24,7 @@
 #![cfg_attr(not(all(target_os = "linux", target_arch = "x86_64")), allow(unused))]
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use allocator_api2::alloc::Global;
+use allocate::Global;
 use javm_cap::NUM_REGS;
 use javm_cap::image::{Image, PinnedCap};
 use javm_cap::slot::SlotIdx;

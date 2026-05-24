@@ -17,11 +17,11 @@
 //! `slot[0]` DataCap, computes the wrapping byte-sum, mints a
 //! single-byte result DataCap, places it at `slot[0]`, and HALTs.
 
-use allocator_api2::alloc::Global;
+use allocate::Global;
 use javm::kernel_assist::{InProcessKernelAssist, KernelAssist};
 use javm::{CallResult, Vm};
 use javm_cap::image::{Image, PinnedCap};
-use javm_cap::{Cache, Cap, CapHashOrRef, SlotIdx, NUM_REGS};
+use javm_cap::{Cap, CapHashOrRef, SlotIdx, TypedCache, NUM_REGS};
 use ssz::Decode;
 
 const M_BLOB: &[u8] = include_bytes!(env!("SPAWN_PARENT_M_BLOB"));
@@ -38,7 +38,7 @@ fn m_calls_s_round_trip() {
     let m_image = Image::from_ssz_bytes(M_BLOB).expect("decode M");
     let s_image = Image::from_ssz_bytes(S_BLOB).expect("decode S");
 
-    let mut cache = Cache::new_in(Global);
+    let mut cache = TypedCache::new_in(Global);
 
     // Publish S's Image (plus its pinned + initial slots' data caps,
     // resolved via the same helper the bench harness uses).
@@ -135,7 +135,7 @@ fn m_calls_s_round_trip() {
     );
 }
 
-fn publish_image(cache: &mut Cache<Global>, image: &Image) -> javm_cap::CapHash {
+fn publish_image(cache: &mut TypedCache<Global>, image: &Image) -> javm_cap::CapHash {
     let pinned = collect_pinned_hashes(cache, image);
     let initial = collect_initial_hashes(cache, image);
     cache
@@ -144,7 +144,7 @@ fn publish_image(cache: &mut Cache<Global>, image: &Image) -> javm_cap::CapHash 
 }
 
 fn collect_pinned_hashes(
-    cache: &mut Cache<Global>,
+    cache: &mut TypedCache<Global>,
     image: &Image,
 ) -> Vec<(SlotIdx, javm_cap::CapHash)> {
     let mut out = Vec::new();
@@ -161,7 +161,7 @@ fn collect_pinned_hashes(
 }
 
 fn collect_initial_hashes(
-    cache: &mut Cache<Global>,
+    cache: &mut TypedCache<Global>,
     image: &Image,
 ) -> Vec<(SlotIdx, javm_cap::CapHash)> {
     let mut out = Vec::new();

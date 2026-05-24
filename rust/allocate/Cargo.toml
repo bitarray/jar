@@ -1,0 +1,15 @@
+[package]
+name = "allocate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Allocator-aware Box, Vec, Arc, HashMap + the TalcAlloc bridge. Re-export façade over talc 4.x + hashbrown 0.17 on allocator-api2 0.2; downstream depends only on this crate."
+
+[dependencies]
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
+hashbrown = { version = "0.17", default-features = false, features = ["allocator-api2", "default-hasher", "inline-more", "equivalent"] }
+spinning_top = "0.3"
+talc = { version = "4.4.3", default-features = false, features = ["lock_api", "allocator-api2"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

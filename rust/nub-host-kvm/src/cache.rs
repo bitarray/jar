@@ -18,20 +18,20 @@ Licensed under the Apache License, Version 2.0.
 //! pointer dereference.
 //!
 //! Per-process singleton: only one cache region can be mapped per
-//! process (`MAP_FIXED_NOREPLACE`). Each `Cache` holds an exclusive
+//! process (`MAP_FIXED_NOREPLACE`). Each `HostCache` holds an exclusive
 //! lease (`REGION_LEASE`) over the region for its lifetime; parallel
 //! tests serialise on it.
 
 use std::ptr::NonNull;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use javm_cap::{Cache as TypedCache, CapHashOrRef, CapRef};
+use allocate::talc::{CacheTalcLock, Span, TalcAlloc, new_cache_talc_lock};
+use javm_cap::{CapHashOrRef, CapRef, TypedCache};
 use nub_arch_x86_abi::CapHash;
 use nub_host_common::cache::{
-    BlobSlot, CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheTalcLock, STATE_CACHE_SIZE,
-    STATE_CACHE_VA, TALC_HEAP_OFFSET, TALC_HEAP_SIZE, TalcAlloc,
+    CACHE_DIRECTORY_OFFSET, CacheDirectory, STATE_CACHE_SIZE, STATE_CACHE_VA, TALC_HEAP_OFFSET,
+    TALC_HEAP_SIZE,
 };
-use talc::source::Manual;
 
 use crate::{HyperlightError, Result, new_error};
 
@@ -61,7 +61,7 @@ fn map_region_once(size: usize) -> Result<NonNull<u8>> {
     if ptr == libc::MAP_FAILED {
         let err = std::io::Error::last_os_error();
         return Err(new_error!(
-            "Cache mmap({:#x}, {} bytes, MAP_FIXED_NOREPLACE) failed: {} \
+            "HostCache mmap({:#x}, {} bytes, MAP_FIXED_NOREPLACE) failed: {} \
              (cache region must be reserved at STATE_CACHE_VA so host \
              VAs match guest VAs)",
             STATE_CACHE_VA,
@@ -75,7 +75,7 @@ fn map_region_once(size: usize) -> Result<NonNull<u8>> {
             libc::munmap(ptr, size);
         }
         return Err(new_error!(
-            "Cache mmap returned {:#x}, expected {:#x} (MAP_FIXED_NOREPLACE \
+            "HostCache mmap returned {:#x}, expected {:#x} (MAP_FIXED_NOREPLACE \
              fallback)",
             ptr as u64,
             STATE_CACHE_VA
@@ -88,7 +88,7 @@ fn map_region_once(size: usize) -> Result<NonNull<u8>> {
 
 /// RAII wrapper holding the exclusive lease over the (process-global)
 /// cache region. Re-zeroes the region on construction so each fresh
-/// `Cache::new()` starts from a known state.
+/// `HostCache::new()` starts from a known state.
 struct CacheRegion {
     _lease: MutexGuard<'static, ()>,
     base: NonNull<u8>,
@@ -111,7 +111,7 @@ impl CacheRegion {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let base = map_region_once(size)?;
-        // Wipe so the new Cache starts fresh.
+        // Wipe so the new HostCache starts fresh.
         unsafe {
             core::ptr::write_bytes(base.as_ptr(), 0, size);
         }
@@ -127,7 +127,7 @@ impl CacheRegion {
     }
 }
 
-// --- The Cache itself ---
+// --- The HostCache itself ---
 
 /// Errors raised by the host-side state cache.
 #[derive(Debug, thiserror::Error)]
@@ -143,7 +143,7 @@ pub enum CacheError {
     /// unavailable — should never happen in practice.
     #[error("blob not found for hash {0:?}")]
     BlobMissing([u8; 32]),
-    /// The inner `javm_cap::Cache` returned an error.
+    /// The inner `javm_cap::TypedCache` returned an error.
     #[error("typed cache error: {0}")]
     Typed(#[from] javm_cap::CacheError),
 }
@@ -159,37 +159,33 @@ impl From<CacheError> for HyperlightError {
 /// **Field order is load-bearing.** Drop order:
 /// 1. `typed_cache` drops first — its TBox handles deallocate cap
 ///    content back into talc.
-/// 2. `pinned`/`talc`/`directory` are plain handles into `region`.
+/// 2. `pinned` is a plain `SmallVec`.
 /// 3. `region` drops last (releases the lease; mmap stays mapped for
 ///    the process lifetime).
 ///
+/// The talc-lock pointer and `CacheDirectory` pointer aren't stored
+/// directly — they're derived on demand from `region.base` (offsets 0
+/// and `CACHE_DIRECTORY_OFFSET` respectively). This mirrors the guest
+/// side: `HostCache` is just a base pointer plus per-region state.
+///
 /// New fields that hold pointers into the region must go BEFORE
 /// `region` in declaration order.
-pub struct Cache {
+pub struct HostCache {
     /// Two-tier cap storage. Allocations route through `TalcAlloc`
     /// over `region`.
     typed_cache: TypedCache<TalcAlloc>,
     /// Hashes currently pinned (active call frames). Eviction (future
     /// stage) skips these.
-    pinned: smallvec::SmallVec<[CapHash; 8]>,
-    /// Pointer to the TalcLock living at offset 0 of `region`. Held
-    /// for talc-pointer construction via `TalcAlloc::from_raw`.
-    #[allow(dead_code)]
-    talc: NonNull<CacheTalcLock>,
-    /// Pointer to the `CacheDirectory` at `region.base + CACHE_DIRECTORY_OFFSET`.
-    directory: NonNull<CacheDirectory>,
-    /// Allocator handle used internally for typed publishes that need
-    /// allocator-aware container construction (e.g. `image_cap_in`).
-    alloc: TalcAlloc,
+    pub(crate) pinned: smallvec::SmallVec<[CapHash; 8]>,
     /// The mmap'd region. Drops LAST.
     region: CacheRegion,
 }
 
 // SAFETY: all inner pointers live inside `region` (Send); host side is
 // single-threaded in V0 anyway.
-unsafe impl Send for Cache {}
+unsafe impl Send for HostCache {}
 
-impl Cache {
+impl HostCache {
     /// Allocate the cache region, initialise the TalcLock at offset 0
     /// and the CacheDirectory at `CACHE_DIRECTORY_OFFSET`. The talc
     /// heap covers everything from `TALC_HEAP_OFFSET` to the end of
@@ -203,7 +199,7 @@ impl Cache {
         // satisfied (mmap returns page-aligned pointers).
         let talc_ptr = base.cast::<CacheTalcLock>();
         unsafe {
-            talc_ptr.write(CacheTalcLock::new(Manual));
+            talc_ptr.write(new_cache_talc_lock());
         }
         let talc = unsafe { NonNull::new_unchecked(talc_ptr) };
 
@@ -216,34 +212,51 @@ impl Cache {
         unsafe {
             CacheDirectory::init_at(dir_ptr);
         }
-        let directory = unsafe { NonNull::new_unchecked(dir_ptr) };
 
         // Claim the talc heap region (everything past the directory).
         // SAFETY: heap_base is within the mmap'd region; `size` bytes
-        // from there fit within the region. `Manual` source permits
+        // from there fit within the region. `ErrOnOom` source permits
         // manual `claim`.
         let heap_base = unsafe { base.add(TALC_HEAP_OFFSET) };
         unsafe {
             (*talc.as_ptr())
                 .lock()
-                .claim(heap_base, TALC_HEAP_SIZE)
-                .ok_or_else(|| new_error!("Cache talc.claim failed"))?;
+                .claim(Span::from_base_size(heap_base, TALC_HEAP_SIZE))
+                .map_err(|()| new_error!("HostCache talc.claim failed"))?;
         }
 
         // SAFETY: `talc` was just initialised and lives as long as
         // `region`, which outlives `typed_cache` (enforced by field
-        // order).
-        let alloc = unsafe { TalcAlloc::from_raw(talc) };
+        // order). The `'static` cast asserts that lifetime; the lock
+        // is never moved or dropped before `typed_cache` does.
+        let alloc: TalcAlloc = unsafe { &*talc.as_ptr() };
         let typed_cache = TypedCache::new_in(alloc);
 
         Ok(Self {
             typed_cache,
             pinned: smallvec::SmallVec::new(),
-            talc,
-            directory,
-            alloc,
             region,
         })
+    }
+
+    /// Pointer to the talc lock at offset 0 of the cache region.
+    fn talc_lock_ptr(&self) -> NonNull<CacheTalcLock> {
+        self.region.base.cast()
+    }
+
+    /// Pointer to the `CacheDirectory` at `region.base + CACHE_DIRECTORY_OFFSET`.
+    fn directory_ptr(&self) -> NonNull<CacheDirectory> {
+        // SAFETY: `region.base` is a valid mmap region of `STATE_CACHE_SIZE`
+        // bytes; `CACHE_DIRECTORY_OFFSET` is well within bounds.
+        unsafe {
+            NonNull::new_unchecked(
+                self.region
+                    .base
+                    .as_ptr()
+                    .add(CACHE_DIRECTORY_OFFSET)
+                    .cast::<CacheDirectory>(),
+            )
+        }
     }
 
     /// Host VA of the cache region's base. Equal to [`STATE_CACHE_VA`]
@@ -257,11 +270,16 @@ impl Cache {
         self.region.size
     }
 
-    /// Cache region's allocator handle. Useful when the caller needs
+    /// HostCache region's allocator handle. Useful when the caller needs
     /// to build a Cap value in talc memory and hand it off via a
-    /// `*_from_cap` publish.
+    /// `*_from_cap` publish. Cheap (just a `'static` borrow).
     pub fn alloc(&self) -> TalcAlloc {
-        self.alloc
+        // SAFETY: `talc_lock_ptr()` points at the lock initialised in
+        // `HostCache::new`, which lives as long as `region`. The
+        // `'static` cast is a lifetime fiction valid because the lock
+        // is pinned for the cache region's lifetime and we never let
+        // a `TalcAlloc` outlive the `HostCache`.
+        unsafe { &*self.talc_lock_ptr().as_ptr() }
     }
 
     /// Shared reference to the typed cache. Read-only inspection from
@@ -274,7 +292,7 @@ impl Cache {
     /// to observe what the guest sees.
     pub fn directory(&self) -> &CacheDirectory {
         // SAFETY: directory is non-null and lives inside region.
-        unsafe { self.directory.as_ref() }
+        unsafe { self.directory_ptr().as_ref() }
     }
 
     /// Whether a cap with this hash is currently published.
@@ -306,10 +324,7 @@ impl Cache {
     /// Put a caller-built `Cap<Global>`. Computes the cap's content hash,
     /// deep-clones it into the cache's talc-backed allocator on first put,
     /// or bumps the existing entry's refcount on idempotent re-put.
-    pub fn put_cap(
-        &mut self,
-        cap: &javm_cap::Cap<allocator_api2::alloc::Global>,
-    ) -> Result<CapHash> {
+    pub fn put_cap(&mut self, cap: &javm_cap::Cap<allocate::Global>) -> Result<CapHash> {
         let h = self.typed_cache.put_cap(cap).map_err(CacheError::from)?;
         self.touch_blob(h)?;
         Ok(h)
@@ -322,7 +337,7 @@ impl Cache {
     pub fn put_cap_with_hash(
         &mut self,
         hash: CapHash,
-        cap: &javm_cap::Cap<allocator_api2::alloc::Global>,
+        cap: &javm_cap::Cap<allocate::Global>,
     ) -> Result<()> {
         self.typed_cache
             .put_cap_with_hash(hash, cap)
@@ -334,34 +349,20 @@ impl Cache {
     // --- Directory maintenance ---
 
     /// Ensure the directory has a slot for `hash` pointing at the
-    /// blob's CacheEntry VA. Idempotent: if a slot already exists, the
-    /// VA is refreshed in case the entry moved (e.g. CoW promote).
+    /// blob's CacheEntry VA. Idempotent: if a slot already exists,
+    /// `insert_blob` refreshes the VA in case the entry moved (e.g.
+    /// CoW promote).
     fn touch_blob(&mut self, hash: CapHash) -> Result<()> {
         let va = self
             .typed_cache
             .entry_va(CapHashOrRef::Hash(hash))
             .ok_or(CacheError::BlobMissing(hash))?;
-        let dir_ptr = self.directory.as_ptr();
-        // SAFETY: dir_ptr is valid live pointer; find_blob just
-        // scans the array.
-        if let Some((_, slot_ptr)) = unsafe { CacheDirectory::find_blob(dir_ptr, &hash) } {
-            // Slot present — update VA (handles CoW relocations).
-            unsafe {
-                (*(slot_ptr as *mut BlobSlot)).entry_va = va;
-            }
-            return Ok(());
-        }
-        let idx = unsafe { CacheDirectory::first_empty_blob(dir_ptr) }.ok_or(
+        let dir_ptr = self.directory_ptr().as_ptr();
+        // SAFETY: dir_ptr is a valid live pointer; `insert_blob`
+        // handles probe + idempotency + count internally.
+        unsafe { CacheDirectory::insert_blob(dir_ptr, hash, va) }.ok_or(
             CacheError::BlobDirectoryFull(nub_host_common::cache::MAX_BLOB_SLOTS),
         )?;
-        let slot = unsafe { CacheDirectory::blob_slot_ptr(dir_ptr, idx) };
-        unsafe {
-            (*slot).hash = hash;
-            (*slot).entry_va = va;
-        }
-        // Release fence so the guest's acquire on `blob_count` sees
-        // the slot's contents.
-        unsafe { (*dir_ptr).blob_count_incr() };
         Ok(())
     }
 
@@ -381,7 +382,7 @@ impl Cache {
             .typed_cache
             .entry_va(CapHashOrRef::Ref(r))
             .ok_or_else(|| new_error!("cache: instance {r} missing"))?;
-        let dir_ptr = self.directory.as_ptr();
+        let dir_ptr = self.directory_ptr().as_ptr();
         let slot_idx = ((r - 1) & INSTANCE_MASK) as usize;
         let slot = unsafe { CacheDirectory::instance_slot_ptr(dir_ptr, slot_idx) };
         let existing = unsafe { (*slot).ref_id };
@@ -402,120 +403,5 @@ impl Cache {
         }
         unsafe { (*dir_ptr).instance_count_incr() };
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cache_new_initializes_directory_zero() {
-        let cache = Cache::new().expect("alloc");
-        assert_eq!(
-            cache.base_va(),
-            STATE_CACHE_VA,
-            "cache region must be mapped at STATE_CACHE_VA (host VA == guest VA invariant)"
-        );
-        let dir = cache.directory();
-        assert_eq!(dir.blob_count.load(std::sync::atomic::Ordering::Acquire), 0);
-        assert_eq!(
-            dir.instance_count
-                .load(std::sync::atomic::Ordering::Acquire),
-            0
-        );
-    }
-
-    #[test]
-    fn publish_data_records_directory_slot() {
-        let mut cache = Cache::new().expect("alloc");
-        let h = cache
-            .put_cap(&javm_cap::Cap::data_inline(&[0xAA, 0xBB, 0xCC]))
-            .expect("put_cap");
-        let dir = cache.directory();
-        assert_eq!(dir.blob_count.load(std::sync::atomic::Ordering::Acquire), 1);
-        let dir_ptr = dir as *const CacheDirectory;
-        let (idx, slot_ptr) = unsafe { CacheDirectory::find_blob(dir_ptr, &h) }.expect("found");
-        assert_eq!(idx, 0);
-        unsafe {
-            assert_eq!((*slot_ptr).hash, h);
-            // entry_va points inside the cache region.
-            let va = (*slot_ptr).entry_va;
-            assert!(va >= STATE_CACHE_VA);
-            assert!(va < STATE_CACHE_VA + STATE_CACHE_SIZE as u64);
-        }
-    }
-
-    #[test]
-    fn publish_data_is_idempotent_in_directory() {
-        let mut cache = Cache::new().expect("alloc");
-        let h1 = cache
-            .put_cap(&javm_cap::Cap::data_inline(&[1, 2, 3]))
-            .expect("put_cap 1");
-        let h2 = cache
-            .put_cap(&javm_cap::Cap::data_inline(&[1, 2, 3]))
-            .expect("put_cap 2");
-        assert_eq!(h1, h2);
-        let dir = cache.directory();
-        // Only one directory slot consumed (touch_blob updates an
-        // existing slot rather than allocating a new one).
-        assert_eq!(dir.blob_count.load(std::sync::atomic::Ordering::Acquire), 1);
-    }
-
-    #[test]
-    fn publish_chain_data_cnode_image_instance() {
-        use javm_cap::slot::SlotIdx;
-        use javm_cap::{Cap, CapHashOrRef};
-
-        let mut cache = Cache::new().expect("alloc");
-        // Data
-        let data_h = cache.put_cap(&Cap::data_inline(&[0x42; 8])).expect("data");
-        // CNode referencing it (built as a Cap<Global>)
-        let mut cnode = javm_cap::CNodeCap::new(4).expect("cnode new");
-        cnode
-            .set(SlotIdx(0), Some(CapHashOrRef::Hash(data_h)))
-            .expect("cnode set");
-        let cnode_h = cache.put_cap(&Cap::CNode(cnode)).expect("cnode");
-        // Image with a pinned reference to the data
-        let image_cap = Cap::image_with_slots(
-            &javm_cap::image::Image::empty(),
-            &[(SlotIdx(7), data_h)],
-            &[],
-        )
-        .expect("image_with_slots");
-        let image_h = cache.put_cap(&image_cap).expect("image");
-        // Instance
-        let inst_h = cache
-            .put_cap(&Cap::instance_with_overlays(
-                [0; 32],
-                image_h,
-                cnode_h,
-                &[],
-                4096,
-                [0u64; javm_cap::NUM_REGS],
-                0x1000,
-                1_000_000,
-            ))
-            .expect("instance");
-        let dir = cache.directory();
-        // 4 blob entries in the directory (data, cnode, image, instance).
-        assert_eq!(dir.blob_count.load(std::sync::atomic::Ordering::Acquire), 4);
-        // Each hash resolves.
-        let dir_ptr = dir as *const CacheDirectory;
-        for &h in &[data_h, cnode_h, image_h, inst_h] {
-            assert!(unsafe { CacheDirectory::find_blob(dir_ptr, &h) }.is_some());
-        }
-    }
-
-    #[test]
-    fn pin_unpin_roundtrip() {
-        let mut cache = Cache::new().expect("alloc");
-        let h = cache
-            .put_cap(&javm_cap::Cap::data_inline(&[0; 4]))
-            .expect("put_cap");
-        cache.pin(h).expect("pin");
-        assert_eq!(cache.pinned.len(), 1);
-        cache.unpin(h);
-        assert!(cache.pinned.is_empty());
     }
 }

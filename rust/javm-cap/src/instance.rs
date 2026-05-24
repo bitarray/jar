@@ -5,8 +5,8 @@
 //! cnode reference (by hash when clean / by ref while mutating),
 //! per-mapping rw overlays, register file, PC, gas counter.
 
-use allocator_api2::alloc::{Allocator, Global};
-use allocator_api2::vec::Vec;
+use allocate::vec::Vec;
+use allocate::{Allocator, Global};
 
 use super::cap::{CapHash, CapHashOrRef, NUM_REGS};
 

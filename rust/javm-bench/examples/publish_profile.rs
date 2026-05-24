@@ -20,9 +20,9 @@ fn main() {
 use std::time::Instant;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use allocator_api2::alloc::Global;
+use allocate::Global;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use allocator_api2::vec::Vec as AVec;
+use allocate::vec::Vec as AVec;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_cap::cap::Cap;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

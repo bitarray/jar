@@ -53,6 +53,8 @@ pub(crate) mod built_info {
 /// and `Nub::invoke_cached`. Owns the mmap'd shared region + the
 /// `TalcLock` inside it.
 pub mod cache;
+#[cfg(test)]
+mod cache_tests;
 /// Dealing with errors, including errors across VM boundaries
 pub mod error;
 /// Wrappers for host and guest functions.

@@ -1,6 +1,6 @@
 //! `Cap<A>` — allocator-parameterised cap enum + shared constants.
 
-use allocator_api2::alloc::{Allocator, Global};
+use allocate::{Allocator, Global};
 
 use super::cnode::CNodeCap;
 use super::data::DataCap;
@@ -11,7 +11,7 @@ use super::instance::InstanceCap;
 pub type CapHash = [u8; 32];
 
 /// Monotonic, cache-local handle for a mutable working entry in
-/// `cache.instances`. Two separate `Cache` instances produce
+/// `cache.instances`. Two separate `TypedCache` instances produce
 /// independent `CapRef` namespaces; refs must not be serialised
 /// across caches.
 pub type CapRef = u64;
@@ -65,10 +65,7 @@ impl ssz::Encode for CapHashOrRef {
             CapHashOrRef::Ref(_) => 1 + 8,
         }
     }
-    fn ssz_append<A: allocator_api2::alloc::Allocator + Clone>(
-        &self,
-        buf: &mut allocator_api2::vec::Vec<u8, A>,
-    ) {
+    fn ssz_append<A: allocate::Allocator + Clone>(&self, buf: &mut allocate::vec::Vec<u8, A>) {
         match self {
             CapHashOrRef::Hash(h) => {
                 buf.push(0);
@@ -89,7 +86,7 @@ impl ssz::Decode for CapHashOrRef {
     fn ssz_fixed_len() -> usize {
         ssz::BYTES_PER_LENGTH_OFFSET
     }
-    fn from_ssz_bytes_in<A: allocator_api2::alloc::Allocator + Clone>(
+    fn from_ssz_bytes_in<A: allocate::Allocator + Clone>(
         bytes: &[u8],
         _alloc: A,
     ) -> Result<Self, ssz::DecodeError> {
@@ -205,7 +202,7 @@ impl<A: Allocator + Clone> Cap<A> {
 }
 
 // Heap-only convenience constructors. These produce `Cap<Global>`
-// values without going through a `Cache`, suitable for callers (jar-
+// values without going through a `TypedCache`, suitable for callers (jar-
 // kernel, javm) that build caps locally before publishing.
 impl Cap<Global> {
     /// Build a heap `Cap::Data` whose content is `bytes` padded up to
@@ -286,7 +283,7 @@ impl Cap<Global> {
     }
 
     /// Build a heap `Cap::Instance` directly from field values. Mirrors the
-    /// shape the old `Cache::publish_instance_blob` reconstructed
+    /// shape the old `TypedCache::publish_instance_blob` reconstructed
     /// field-by-field but produces a `Cap::Instance(InstanceCap<Global>)`
     /// the caller owns.
     ///
@@ -303,10 +300,10 @@ impl Cap<Global> {
         pc: u64,
         gas_remaining: u64,
     ) -> Self {
-        let mut overlays: allocator_api2::vec::Vec<super::instance::RwOverlay<Global>, Global> =
-            allocator_api2::vec::Vec::new_in(Global);
+        let mut overlays: allocate::vec::Vec<super::instance::RwOverlay<Global>, Global> =
+            allocate::vec::Vec::new_in(Global);
         for (start, bytes) in rw_overlays {
-            let mut buf = allocator_api2::vec::Vec::with_capacity_in(bytes.len(), Global);
+            let mut buf = allocate::vec::Vec::with_capacity_in(bytes.len(), Global);
             buf.extend_from_slice(bytes);
             overlays.push(super::instance::RwOverlay {
                 start: *start,

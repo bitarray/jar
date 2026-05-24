@@ -1,7 +1,7 @@
 //! `List<T, N>` — variable-length list with compile-time cap of `N` elements.
 
-use allocator_api2::alloc::{Allocator, Global};
-use allocator_api2::vec::Vec;
+use allocate::vec::Vec;
+use allocate::{Allocator, Global};
 use core::fmt;
 use digest::Digest;
 use digest::typenum::U32;

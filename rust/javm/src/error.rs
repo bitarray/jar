@@ -25,7 +25,7 @@ pub enum VmError {
     #[error("MGMT op failed: {0}")]
     Op(#[from] OpError),
     #[error("cache operation failed: {0}")]
-    Cache(#[from] CacheError),
+    TypedCache(#[from] CacheError),
     #[error("yield marker did not match any handler on the call stack")]
     UnhandledMarker,
     #[error("image bytecode failed to parse: {0}")]

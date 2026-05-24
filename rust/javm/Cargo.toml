@@ -7,7 +7,7 @@ authors.workspace = true
 description = "JAR v3 integration crate: call stack, MGMT ecall dispatch, host-call coordination, yield-marker routing, gas debit. Composes javm-cap + javm-exec."
 
 [dependencies]
-allocator-api2 = "0.4"
+allocate = { path = "../allocate" }
 javm-cap = { workspace = true }
 javm-exec = { workspace = true }
 ssz = { workspace = true, features = ["std", "sha2", "derive"] }

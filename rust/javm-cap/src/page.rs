@@ -6,11 +6,9 @@
 //! cache subsystem doesn't index pages by hash — pages aren't
 //! first-class caps. They're internal to the DataCap layer.
 
-use allocator_api2::alloc::{Allocator, Global};
-use allocator_api2::vec::Vec;
-use core::sync::atomic::AtomicU32;
-
-use nub_host_common::cache::{Aarc, AarcRefCounted};
+use allocate::sync::Arc;
+use allocate::vec::Vec;
+use allocate::{Allocator, Global};
 
 use super::cap::CapHash;
 
@@ -25,24 +23,19 @@ pub enum PageSlot<A: Allocator + Clone = Global> {
     Missing(CapHash),
 }
 
-/// Hand-rolled `Arc<PageBytes>` backed by an arbitrary allocator.
-/// Aliases the generic `Aarc` from `nub-host-common` for cap-layer
-/// readability.
-pub type PageRef<A> = Aarc<PageBytes<A>, A>;
+/// Refcounted handle to a [`PageBytes`] allocated by `A`. Plain
+/// `allocate::sync::Arc` alias for cap-layer readability.
+pub type PageRef<A> = Arc<PageBytes<A>, A>;
 
-/// One page's bytes plus metadata. The `refcount` is what the
-/// `Aarc` machinery uses to manage sharing.
+/// One page's bytes plus its precomputed content hash.
+///
+/// Sharing across DataCap CoW clones is via [`PageRef`] (= `Arc`),
+/// which carries its own refcount in `ArcInner` — `PageBytes` itself
+/// is not refcounted.
 #[derive(Debug)]
 pub struct PageBytes<A: Allocator + Clone = Global> {
-    pub refcount: AtomicU32,
     pub hash: CapHash,
     pub bytes: Vec<u8, A>,
-}
-
-impl<A: Allocator + Clone> AarcRefCounted for PageBytes<A> {
-    fn refcount(&self) -> &AtomicU32 {
-        &self.refcount
-    }
 }
 
 // --------------------------------------------------------------------------
@@ -59,10 +52,9 @@ impl<A: Allocator + Clone> AarcRefCounted for PageBytes<A> {
 // HashTreeRoot` requires `PageSlot<A>: Encode` (the Vec impl uses
 // `is_ssz_fixed_len` / `is_basic_type` to pick its merkleization path).
 // The encoded form mirrors the standard SSZ Union: a selector byte plus
-// the variant payload. PageBytes encodes its `(hash, bytes)` pair; the
-// `refcount` is `Aarc` machinery and stays out of the wire form. We don't
-// implement `Decode`: pages aren't wire-transmitted, and decoding a
-// `Loaded` variant would require allocator threading that isn't worth
+// the variant payload. PageBytes encodes its `(hash, bytes)` pair. We
+// don't implement `Decode`: pages aren't wire-transmitted, and decoding
+// a `Loaded` variant would require allocator threading that isn't worth
 // the complexity for a never-exercised path.
 // --------------------------------------------------------------------------
 
@@ -74,7 +66,7 @@ impl<A: Allocator + Clone> ssz::HashTreeRoot for PageSlot<A> {
             // Canonical zero-page sentinel. Under SSZ, an empty page's
             // root is the empty 32-byte chunk.
             PageSlot::Empty => [0u8; 32],
-            PageSlot::Loaded(pr) => pr.get().hash_tree_root::<D>(),
+            PageSlot::Loaded(pr) => (**pr).hash_tree_root::<D>(),
             PageSlot::Missing(h) => *h,
         }
     }
@@ -103,7 +95,7 @@ impl<A: Allocator + Clone> ssz::Encode for PageSlot<A> {
     fn ssz_bytes_len(&self) -> usize {
         match self {
             PageSlot::Empty => 1,
-            PageSlot::Loaded(pr) => 1 + pr.get().ssz_bytes_len(),
+            PageSlot::Loaded(pr) => 1 + (**pr).ssz_bytes_len(),
             PageSlot::Missing(_) => 1 + 32,
         }
     }
@@ -112,7 +104,7 @@ impl<A: Allocator + Clone> ssz::Encode for PageSlot<A> {
             PageSlot::Empty => buf.push(0),
             PageSlot::Loaded(pr) => {
                 buf.push(1);
-                pr.get().ssz_append(buf);
+                (**pr).ssz_append(buf);
             }
             PageSlot::Missing(h) => {
                 buf.push(2);

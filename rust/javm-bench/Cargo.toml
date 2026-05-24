@@ -13,7 +13,7 @@ default = []
 heap-diag = ["nub/heap-diag"]
 
 [dependencies]
-allocator-api2 = "0.4"
+allocate = { path = "../allocate" }
 javm-cap = { workspace = true }
 javm-exec = { workspace = true }
 sha2 = "0.10"

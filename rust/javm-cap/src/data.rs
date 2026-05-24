@@ -23,8 +23,8 @@
 
 use core::alloc::Layout;
 
-use allocator_api2::alloc::{Allocator, Global};
-use allocator_api2::vec::Vec;
+use allocate::vec::Vec;
+use allocate::{Allocator, Global};
 
 use super::page::PageSlot;
 

@@ -1,43 +1,34 @@
-//! State-cache support types.
+//! State-cache directory + layout constants.
 //!
 //! The state cache is a shared memory region (1 GiB) mapped at the
-//! same fixed VA ([`STATE_CACHE_VA`]) on both host and guest. A single
-//! `TalcLock` instance at offset 0 manages allocations from the
-//! region; both parties call `.allocate()` / `.deallocate()` on it
-//! under the same spinlock. Phase-based mutual exclusion (guest is
-//! never running while host is mutating) means the spinlock never
-//! contends in V0.
-//!
-//! ## Layout
+//! same fixed VA ([`STATE_CACHE_VA`]) on both host and guest. The
+//! region layout is:
 //!
 //! ```text
-//! offset 0           TalcLock<RawSpinlock, Manual> (padded to 4 KiB)
-//! offset 0x1000      CacheDirectory (BlobSlot[256] + InstanceSlot[256])
+//! offset 0           CacheTalcLock (padded to 4 KiB)
+//! offset 0x1000      CacheDirectory (BlobSlot[256] + InstanceSlot[..])
 //! offset 0x6000-ish  talc-managed heap (rest of the 1 GiB region)
 //! ```
 //!
-//! ## What lives here
+//! The talc lock and its smart-pointer primitives (TalcAlloc,
+//! CacheTalcLock, Arc) live in the `allocate` crate.
+//! This module owns the *cache-specific* pieces:
 //!
-//! - [`TalcBox<T>`] / [`TalcSlice`] — hand-rolled smart pointers that
-//!   manage a value/slab inside talc memory. Drop = `talc.lock().free(...)`.
 //! - [`CacheDirectory`] — the guest-readable directory at
 //!   [`CACHE_DIRECTORY_OFFSET`]. Host populates entries when it
-//!   publishes a Cap; guest scans linearly when resolving
-//!   `CapHash` / `CapRef` into entry VAs.
+//!   publishes a Cap; guest resolves `CapHash` / `CapRef` into entry
+//!   VAs through its open-addressed / direct-indexed tables.
 //! - Layout constants ([`STATE_CACHE_VA`], [`STATE_CACHE_SIZE`],
 //!   [`CACHE_DIRECTORY_OFFSET`], [`TALC_HEAP_OFFSET`]).
 
 pub mod directory;
-pub mod talc_alloc;
-pub mod talc_arc;
-pub mod talc_box;
+
+#[cfg(test)]
+mod directory_tests;
 
 pub use directory::{
     BlobSlot, CacheDirectory, INSTANCE_MASK, InstanceSlot, MAX_BLOB_SLOTS, MAX_INSTANCE_SLOTS,
 };
-pub use talc_alloc::TalcAlloc;
-pub use talc_arc::{Aarc, AarcRefCounted, TalcArc, TalcRefCounted};
-pub use talc_box::{CacheTalcLock, TalcBox, TalcSlice};
 
 /// Fixed guest virtual address the cache region is mapped at. The
 /// guest's per-invocation page-table builder maps this VA to
