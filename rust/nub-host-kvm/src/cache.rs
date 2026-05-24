@@ -159,9 +159,14 @@ impl From<CacheError> for HyperlightError {
 /// **Field order is load-bearing.** Drop order:
 /// 1. `typed_cache` drops first — its TBox handles deallocate cap
 ///    content back into talc.
-/// 2. `pinned`/`talc`/`directory` are plain handles into `region`.
+/// 2. `pinned` is a plain `SmallVec`.
 /// 3. `region` drops last (releases the lease; mmap stays mapped for
 ///    the process lifetime).
+///
+/// The talc-lock pointer and `CacheDirectory` pointer aren't stored
+/// directly — they're derived on demand from `region.base` (offsets 0
+/// and `CACHE_DIRECTORY_OFFSET` respectively). This mirrors the guest
+/// side: `Cache` is just a base pointer plus per-region state.
 ///
 /// New fields that hold pointers into the region must go BEFORE
 /// `region` in declaration order.
@@ -172,15 +177,6 @@ pub struct Cache {
     /// Hashes currently pinned (active call frames). Eviction (future
     /// stage) skips these.
     pinned: smallvec::SmallVec<[CapHash; 8]>,
-    /// Pointer to the TalcLock living at offset 0 of `region`. Held
-    /// for talc-pointer construction via `TalcAlloc::from_raw`.
-    #[allow(dead_code)]
-    talc: NonNull<CacheTalcLock>,
-    /// Pointer to the `CacheDirectory` at `region.base + CACHE_DIRECTORY_OFFSET`.
-    directory: NonNull<CacheDirectory>,
-    /// Allocator handle used internally for typed publishes that need
-    /// allocator-aware container construction (e.g. `image_cap_in`).
-    alloc: TalcAlloc,
     /// The mmap'd region. Drops LAST.
     region: CacheRegion,
 }
@@ -216,7 +212,6 @@ impl Cache {
         unsafe {
             CacheDirectory::init_at(dir_ptr);
         }
-        let directory = unsafe { NonNull::new_unchecked(dir_ptr) };
 
         // Claim the talc heap region (everything past the directory).
         // SAFETY: heap_base is within the mmap'd region; `size` bytes
@@ -239,11 +234,28 @@ impl Cache {
         Ok(Self {
             typed_cache,
             pinned: smallvec::SmallVec::new(),
-            talc,
-            directory,
-            alloc,
             region,
         })
+    }
+
+    /// Pointer to the talc lock at offset 0 of the cache region.
+    fn talc_lock_ptr(&self) -> NonNull<CacheTalcLock> {
+        self.region.base.cast()
+    }
+
+    /// Pointer to the `CacheDirectory` at `region.base + CACHE_DIRECTORY_OFFSET`.
+    fn directory_ptr(&self) -> NonNull<CacheDirectory> {
+        // SAFETY: `region.base` is a valid mmap region of `STATE_CACHE_SIZE`
+        // bytes; `CACHE_DIRECTORY_OFFSET` is well within bounds.
+        unsafe {
+            NonNull::new_unchecked(
+                self.region
+                    .base
+                    .as_ptr()
+                    .add(CACHE_DIRECTORY_OFFSET)
+                    .cast::<CacheDirectory>(),
+            )
+        }
     }
 
     /// Host VA of the cache region's base. Equal to [`STATE_CACHE_VA`]
@@ -259,9 +271,11 @@ impl Cache {
 
     /// Cache region's allocator handle. Useful when the caller needs
     /// to build a Cap value in talc memory and hand it off via a
-    /// `*_from_cap` publish.
+    /// `*_from_cap` publish. Cheap (wraps the talc-lock pointer).
     pub fn alloc(&self) -> TalcAlloc {
-        self.alloc
+        // SAFETY: `talc_lock_ptr()` points at the lock initialised in
+        // `Cache::new`, which lives as long as `region`.
+        unsafe { TalcAlloc::from_raw(self.talc_lock_ptr()) }
     }
 
     /// Shared reference to the typed cache. Read-only inspection from
@@ -274,7 +288,7 @@ impl Cache {
     /// to observe what the guest sees.
     pub fn directory(&self) -> &CacheDirectory {
         // SAFETY: directory is non-null and lives inside region.
-        unsafe { self.directory.as_ref() }
+        unsafe { self.directory_ptr().as_ref() }
     }
 
     /// Whether a cap with this hash is currently published.
@@ -341,7 +355,7 @@ impl Cache {
             .typed_cache
             .entry_va(CapHashOrRef::Hash(hash))
             .ok_or(CacheError::BlobMissing(hash))?;
-        let dir_ptr = self.directory.as_ptr();
+        let dir_ptr = self.directory_ptr().as_ptr();
         // SAFETY: dir_ptr is valid live pointer; find_blob just
         // scans the array.
         if let Some((_, slot_ptr)) = unsafe { CacheDirectory::find_blob(dir_ptr, &hash) } {
@@ -381,7 +395,7 @@ impl Cache {
             .typed_cache
             .entry_va(CapHashOrRef::Ref(r))
             .ok_or_else(|| new_error!("cache: instance {r} missing"))?;
-        let dir_ptr = self.directory.as_ptr();
+        let dir_ptr = self.directory_ptr().as_ptr();
         let slot_idx = ((r - 1) & INSTANCE_MASK) as usize;
         let slot = unsafe { CacheDirectory::instance_slot_ptr(dir_ptr, slot_idx) };
         let existing = unsafe { (*slot).ref_id };
