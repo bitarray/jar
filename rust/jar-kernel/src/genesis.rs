@@ -18,7 +18,7 @@
 use javm::{KernelImage, kernel_image_hash};
 use javm_cap::abi as cap_abi;
 use javm_cap::image::Image;
-use javm_cap::{CNodeCap, Cap, CapHash, CapHashOrRef, NUM_REGS, SlotIdx, TypedCache};
+use javm_cap::{CNodeCap, CacheDirectory, Cap, CapHash, CapHashOrRef, NUM_REGS, SlotIdx};
 
 use crate::abi;
 use crate::error::KernelError;
@@ -39,7 +39,7 @@ pub struct Genesis {
 /// the published cap's hash. The placeholder image blob is shared
 /// across all kernel unit caps and resolved at publish time.
 fn publish_kernel_unit_cap(
-    cache: &mut TypedCache,
+    cache: &mut CacheDirectory,
     image: KernelImage,
     placeholder_image_hash: CapHash,
     empty_cnode_hash: CapHash,
@@ -64,7 +64,7 @@ fn publish_kernel_unit_cap(
 /// factory and host-entry kernel caps where every chain Instance sees
 /// the same well-known cap.
 fn publish_kernel_stateless_cap(
-    cache: &mut TypedCache,
+    cache: &mut CacheDirectory,
     image: KernelImage,
     placeholder_image_hash: CapHash,
     empty_cnode_hash: CapHash,

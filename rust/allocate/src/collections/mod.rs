@@ -14,11 +14,13 @@ pub use hashbrown::DefaultHashBuilder;
 
 use crate::Global;
 
-/// SwissTable hash map allocated by `A`. Alias for
-/// `hashbrown::HashMap<K, V, DefaultHashBuilder, A>` with the
-/// parameter order rearranged to put the allocator before the hasher
-/// (matching `Box<T, A>` / `Vec<T, A>`).
-pub type HashMap<K, V, A = Global> = hashbrown::HashMap<K, V, DefaultHashBuilder, A>;
+/// SwissTable hash map. Re-export of `hashbrown::HashMap<K, V, S, A>`
+/// with the upstream parameter order preserved: `K, V, S, A`. The
+/// `S` slot lets callers pin a deterministic hasher (e.g.
+/// `foldhash::fast::FixedState`) which the shared-memory state cache
+/// requires; the heap-backed default `DefaultHashBuilder` is
+/// `foldhash::fast::RandomState`.
+pub type HashMap<K, V, S = DefaultHashBuilder, A = Global> = hashbrown::HashMap<K, V, S, A>;
 
 #[cfg(test)]
 mod hashmap_tests;

@@ -182,7 +182,7 @@ fn lookup_instance<A: Allocator + Clone>(
 /// Tracks the published entry in [`SCRATCH`] so [`clear_scratch`]
 /// can free + zero the directory slot at end of RPC.
 ///
-/// V1: the host's `TypedCache<TalcAlloc>` BTreeMap is NOT updated — the
+/// V1: the host's `CacheDirectory<TalcAlloc>` BTreeMap is NOT updated — the
 /// guest's view is via the directory only. The host doesn't query
 /// guest-published caps mid-RPC (Hyperlight serialises calls), and
 /// the cleanup at end-of-RPC ensures no stale entries leak across

@@ -1,11 +1,11 @@
-//! `TypedCache<A>` — two-tier cap store with refcount-based CoW.
+//! `CacheDirectory<S, A>` — two-tier cap store with refcount-based CoW.
 //!
 //! The cache holds caps in two maps:
 //!
-//! - **`blobs: HashMap<CapHash, TBox<CacheEntry<A>, A>, A>`** —
+//! - **`blobs: HashMap<CapHash, TBox<CacheEntry<A>, A>, S, A>`** —
 //!   content-addressed immutable caps. All five kinds (Type, Image,
 //!   Data, CNode, Instance) can live here.
-//! - **`instances: HashMap<CapRef, TBox<CacheEntry<A>, A>, A>`** —
+//! - **`instances: HashMap<CapRef, TBox<CacheEntry<A>, A>, S, A>`** —
 //!   identity-keyed mutable working state. Only Data, CNode,
 //!   Instance variants reach this map (after `get_mut` promotion).
 //!
@@ -16,15 +16,24 @@
 //! everything — including the HashMap node storage — in the cache
 //! region.
 //!
+//! `S` is the `BuildHasher`. The heap-backed default is
+//! [`DefaultHashBuilder`] (= `foldhash::fast::RandomState`,
+//! per-process randomized). The shared-memory variant uses
+//! `foldhash::fast::FixedState` with a per-region random seed so that
+//! both host and guest builds compute identical bucket assignments
+//! against the same shared HashMap. Parameter order matches
+//! `hashbrown::HashMap<K, V, S, A>`.
+//!
 //! Refcounting uses the same protocol as `Arc::make_mut`:
 //! `fetch_sub(1, Release)` at mutation time; if `prev == 1` we have
 //! sole ownership and move-promote (no copy), else we shallow-clone
-//! into a fresh instance entry. See [`TypedCache::get_mut`] for details.
+//! into a fresh instance entry. See [`CacheDirectory::get_mut`] for details.
 
+use core::hash::BuildHasher;
 use core::sync::atomic::Ordering;
 
 use allocate::boxed::Box as ABox;
-use allocate::collections::HashMap;
+use allocate::collections::{DefaultHashBuilder, HashMap};
 use allocate::vec::Vec as AVec;
 use allocate::{Allocator, Global};
 
@@ -59,41 +68,52 @@ pub enum CacheError {
     SlotOutOfRange,
 }
 
-pub struct TypedCache<A: Allocator + Clone = Global> {
+pub struct CacheDirectory<S = DefaultHashBuilder, A: Allocator + Clone = Global> {
     alloc: A,
-    blobs: HashMap<CapHash, TBox<CacheEntry<A>, A>, A>,
-    instances: HashMap<CapRef, TBox<CacheEntry<A>, A>, A>,
+    blobs: HashMap<CapHash, TBox<CacheEntry<A>, A>, S, A>,
+    instances: HashMap<CapRef, TBox<CacheEntry<A>, A>, S, A>,
     next_ref: u64,
 }
 
-impl TypedCache<Global> {
+impl CacheDirectory<DefaultHashBuilder, Global> {
     /// Construct an empty heap-backed cache. Equivalent to
-    /// `TypedCache::new_in(Global)` for callers that don't want an
-    /// allocator dependency.
+    /// `CacheDirectory::new_in(Global)` for callers that don't want
+    /// an allocator dependency.
     pub fn new() -> Self {
         Self::new_in(Global)
     }
 }
 
-impl Default for TypedCache<Global> {
+impl Default for CacheDirectory<DefaultHashBuilder, Global> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<A: Allocator + Clone> TypedCache<A> {
+impl<A: Allocator + Clone> CacheDirectory<DefaultHashBuilder, A> {
     /// Construct an empty cache that allocates cap content through
-    /// `alloc`.
+    /// `alloc`, using the default per-process-randomized hasher.
     pub fn new_in(alloc: A) -> Self {
+        Self::with_hasher_in(DefaultHashBuilder::default(), alloc)
+    }
+}
+
+impl<S: BuildHasher + Clone, A: Allocator + Clone> CacheDirectory<S, A> {
+    /// Construct an empty cache with an explicit hasher. Used by the
+    /// shared-memory state cache to pin a `FixedState` so host and
+    /// guest hash to the same buckets.
+    pub fn with_hasher_in(hasher: S, alloc: A) -> Self {
         Self {
-            blobs: HashMap::new_in(alloc.clone()),
-            instances: HashMap::new_in(alloc.clone()),
+            blobs: HashMap::with_hasher_in(hasher.clone(), alloc.clone()),
+            instances: HashMap::with_hasher_in(hasher, alloc.clone()),
             alloc,
             // CapRef 0 is reserved; ref allocation starts at 1.
             next_ref: 1,
         }
     }
+}
 
+impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
     /// Number of entries in each tier. Useful for tests and metrics.
     pub fn blob_count(&self) -> usize {
         self.blobs.len()
@@ -107,9 +127,9 @@ impl<A: Allocator + Clone> TypedCache<A> {
         self.blobs.contains_key(hash)
     }
 
-    /// Iterate the cache's blob tier in sorted `CapHash` order. Useful
-    /// for state-root computations that walk all content-addressed caps
-    /// deterministically. `BTreeMap`'s iter is already sorted by key.
+    /// Iterate the cache's blob tier. Order is unspecified (the underlying
+    /// HashMap is not sorted). Callers that need deterministic iteration
+    /// (e.g. state-root computations) must collect + sort by `CapHash`.
     pub fn iter_blobs(&self) -> impl Iterator<Item = (&CapHash, &Cap<A>)> {
         self.blobs.iter().map(|(h, b)| (h, &b.cap))
     }
@@ -197,7 +217,7 @@ impl<A: Allocator + Clone> TypedCache<A> {
     ///
     /// The caller asserts that `hash == cap_hash(cap)`; this lets the hot
     /// idempotent-re-put path skip the SSZ merkleize entirely (becomes a
-    /// single BTreeMap lookup + refcount increment). In debug builds the
+    /// single HashMap lookup + refcount increment). In debug builds the
     /// hash is verified; in release the assertion is elided so the path
     /// stays cheap.
     ///
@@ -557,7 +577,7 @@ impl<A: Allocator + Clone> TypedCache<A> {
             }
             Cap::Data(_) | Cap::Image(_) | Cap::Type(_) => {
                 // DataCap pages are owned (via PageRef.refcount) and
-                // not addressable through the TypedCache; ImageCap holds
+                // not addressable through the CacheDirectory; ImageCap holds
                 // ImageSlotEntry referring to blobs which the cache
                 // tracks separately at publish time, not at slot
                 // mutation time; TypeCap has no targets.
@@ -618,7 +638,7 @@ fn rewrite_ref_targets<A: Allocator + Clone>(cap: &mut Cap<A>, resolved: &[(CapR
 }
 
 /// Collect the cap targets a `Cap<Global>` directly holds — used by
-/// [`TypedCache::put_cap_with_hash`] to incref each target on first put so
+/// [`CacheDirectory::put_cap_with_hash`] to incref each target on first put so
 /// the refcount invariant (entry refcount == holder count) is preserved.
 fn collect_referenced_targets_global(cap: &Cap<Global>) -> alloc::vec::Vec<CapHashOrRef> {
     let mut out: alloc::vec::Vec<CapHashOrRef> = alloc::vec::Vec::new();
@@ -797,7 +817,7 @@ pub(crate) fn deep_clone_into<A: Allocator + Clone>(src: &Cap<Global>, alloc: A)
 /// directly-owned slot/page tables are duplicated; cross-references
 /// (CapHashOrRef in cnode slots, page hashes in DataCap) carry over
 /// by value. The caller is responsible for bumping the refcounts of
-/// any cross-referenced targets (host-side: `TypedCache::bump_targets`;
+/// any cross-referenced targets (host-side: `CacheDirectory::bump_targets`;
 /// guest-side: state-cache's `cap_make_mut`).
 pub fn shallow_clone_cap<A: Allocator + Clone>(
     cap: &Cap<A>,

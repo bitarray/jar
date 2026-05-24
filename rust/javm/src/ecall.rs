@@ -39,7 +39,7 @@
 //!
 //! After the move to the `javm_cap::Cap<A>` cache model, ecalls
 //! operate on `CapHashOrRef` targets in the running root cnode and
-//! cross-reference into the caller-supplied `TypedCache<Global>` for kind
+//! cross-reference into the caller-supplied `CacheDirectory` for kind
 //! dispatch. `Vm::drive_and_translate` installs a short-lived
 //! `CachedEcallHandler` for interpreter runs, so cache-touching host
 //! calls can read/write cap content without storing the cache borrow
@@ -47,7 +47,7 @@
 
 use allocate::Global;
 use javm_cap::{
-    Blake2b256, Cap, CapHashOrRef, DataCap, DataContent, Hash, SlotIdx, TypeCap, TypedCache,
+    Blake2b256, CacheDirectory, Cap, CapHashOrRef, DataCap, DataContent, Hash, SlotIdx, TypeCap,
 };
 use javm_exec::{EcallHandler, EcallKind, EcallResult, ExitReason, Memory, Regs};
 
@@ -116,7 +116,7 @@ impl<K: KernelAssist> EcallHandler for Vm<K> {
 
 pub(crate) struct CachedEcallHandler<'a, K: KernelAssist> {
     pub(crate) vm: &'a mut Vm<K>,
-    pub(crate) cache: &'a mut TypedCache<Global>,
+    pub(crate) cache: &'a mut CacheDirectory,
 }
 
 impl<K: KernelAssist> EcallHandler for CachedEcallHandler<'_, K> {
@@ -136,7 +136,7 @@ impl<K: KernelAssist> Vm<K> {
         op: u32,
         regs: &mut Regs,
         mem: &mut dyn Memory,
-        cache: Option<&mut TypedCache<Global>>,
+        cache: Option<&mut CacheDirectory>,
     ) -> EcallResult {
         match op {
             0 => {
@@ -163,7 +163,7 @@ impl<K: KernelAssist> Vm<K> {
         op: u32,
         regs: &mut Regs,
         mem: &mut dyn Memory,
-        cache: Option<&mut TypedCache<Global>>,
+        cache: Option<&mut CacheDirectory>,
     ) -> EcallResult {
         fn trap_on_err<T>(r: Result<T, VmError>, ok: impl FnOnce(T) -> EcallResult) -> EcallResult {
             match r {
@@ -345,7 +345,7 @@ impl<K: KernelAssist> Vm<K> {
     fn dispatch_set_image_cached(
         &mut self,
         regs: &mut Regs,
-        cache: &TypedCache<Global>,
+        cache: &CacheDirectory,
     ) -> Result<(), VmError> {
         let image_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
         let (new_image_hash, extended_chain) = {
@@ -395,7 +395,7 @@ impl<K: KernelAssist> Vm<K> {
     }
 
     /// `host_derive_spawn(image_slot=φ[7], dst_slot=φ[8])` — uncached
-    /// fallback that only records the extended chain hash. TypedCache-less
+    /// fallback that only records the extended chain hash. CacheDirectory-less
     /// callers (no `dispatch_host_call_cached` borrow) can't publish a
     /// real `Cap::Instance`, so this writes the chain-hash placeholder
     /// for back-compat with pre-Stage-4 fixtures.
@@ -460,7 +460,7 @@ impl<K: KernelAssist> Vm<K> {
     fn dispatch_derive_spawn_cached(
         &mut self,
         regs: &mut Regs,
-        cache: &mut TypedCache<Global>,
+        cache: &mut CacheDirectory,
     ) -> Result<(), VmError> {
         let image_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
         let cnode_slot = SlotIdx((regs.gpr[8] & 0xFF) as u32);
@@ -628,7 +628,7 @@ impl<K: KernelAssist> Vm<K> {
     fn dispatch_host_type_of(
         &mut self,
         regs: &mut Regs,
-        cache: &mut TypedCache<Global>,
+        cache: &mut CacheDirectory,
     ) -> Result<(), VmError> {
         let src = SlotIdx((regs.gpr[7] & 0xFF) as u32);
         let dst = SlotIdx((regs.gpr[8] & 0xFF) as u32);
@@ -662,7 +662,7 @@ impl<K: KernelAssist> Vm<K> {
         &mut self,
         regs: &mut Regs,
         mem: &mut dyn Memory,
-        cache: &TypedCache<Global>,
+        cache: &CacheDirectory,
     ) -> Result<(), VmError> {
         let src = SlotIdx((regs.gpr[7] & 0xFF) as u32);
         let dst_offset = regs.gpr[8] as u32;
@@ -692,7 +692,7 @@ impl<K: KernelAssist> Vm<K> {
         &mut self,
         regs: &mut Regs,
         mem: &mut dyn Memory,
-        cache: &mut TypedCache<Global>,
+        cache: &mut CacheDirectory,
     ) -> Result<(), VmError> {
         let src_offset = regs.gpr[7] as u32;
         let len = regs.gpr[8] as usize;
@@ -735,7 +735,7 @@ impl<K: KernelAssist> Vm<K> {
     fn dispatch_host_open(
         &mut self,
         regs: &mut Regs,
-        cache: &mut TypedCache<Global>,
+        cache: &mut CacheDirectory,
     ) -> Result<(), VmError> {
         let file_id = regs.gpr[7];
         let dst = SlotIdx((regs.gpr[8] & 0xFF) as u32);
@@ -766,7 +766,7 @@ impl<K: KernelAssist> Vm<K> {
     fn dispatch_host_save(
         &mut self,
         regs: &mut Regs,
-        cache: &TypedCache<Global>,
+        cache: &CacheDirectory,
     ) -> Result<(), VmError> {
         let src = SlotIdx((regs.gpr[7] & 0xFF) as u32);
         let quota_id = regs.gpr[8];
@@ -810,7 +810,7 @@ impl<K: KernelAssist> Vm<K> {
     fn dispatch_host_call_cached(
         &mut self,
         regs: &mut Regs,
-        cache: &mut TypedCache<Global>,
+        cache: &mut CacheDirectory,
     ) -> Result<(), VmError> {
         let inst_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
         let endpoint_idx = (regs.gpr[8] & 0xFF) as u8;
@@ -896,7 +896,7 @@ impl<K: KernelAssist> Vm<K> {
         &mut self,
         regs: &mut Regs,
         mem: &mut dyn Memory,
-        cache: Option<&mut TypedCache<Global>>,
+        cache: Option<&mut CacheDirectory>,
     ) -> EcallResult {
         let op = regs.gpr[11] as u32;
         self.dispatch_ecalli(op, regs, mem, cache)
@@ -906,7 +906,7 @@ impl<K: KernelAssist> Vm<K> {
         &mut self,
         op: u32,
         regs: &mut Regs,
-        cache: Option<&mut TypedCache<Global>>,
+        cache: Option<&mut CacheDirectory>,
     ) -> Result<(), VmError> {
         let a = SlotIdx((regs.gpr[7] & 0xFF) as u32);
         let b = SlotIdx((regs.gpr[8] & 0xFF) as u32);
@@ -996,7 +996,7 @@ impl<K: KernelAssist> Vm<K> {
         &mut self,
         dst: SlotIdx,
         size_log: u8,
-        cache: Option<&mut TypedCache<Global>>,
+        cache: Option<&mut CacheDirectory>,
     ) -> Result<(), VmError> {
         let cap = Cap::CNode(javm_cap::CNodeCap::<Global>::new(size_log)?);
         let cap_hash = javm_cap::cap_hash(&cap);
@@ -1057,7 +1057,7 @@ mod tests {
 
     fn handle_cached(
         vm: &mut Vm<InProcessKernelAssist>,
-        cache: &mut TypedCache<Global>,
+        cache: &mut CacheDirectory,
         op: u32,
         regs: &mut Regs,
         mem: &mut Mem,
@@ -1066,7 +1066,7 @@ mod tests {
         handler.handle(EcallKind::Ecalli(op), regs, mem)
     }
 
-    fn publish_data_inline(cache: &mut TypedCache<Global>, bytes: &[u8]) -> javm_cap::CapHash {
+    fn publish_data_inline(cache: &mut CacheDirectory, bytes: &[u8]) -> javm_cap::CapHash {
         cache.put_cap(&Cap::data_inline(bytes)).unwrap()
     }
 
@@ -1126,7 +1126,7 @@ mod tests {
     #[test]
     fn mgmt_cnode_mint_publishes_cnode_when_cache_threaded() {
         let mut vm = fixture_vm();
-        let mut cache = TypedCache::new_in(Global);
+        let mut cache = CacheDirectory::new_in(Global);
         let mut regs = Regs::new();
         regs.gpr[7] = 5;
         regs.gpr[8] = 3;
@@ -1228,7 +1228,7 @@ mod tests {
     #[test]
     fn set_image_reloads_program_from_cache() {
         let mut vm = fixture_vm();
-        let mut cache = TypedCache::new_in(Global);
+        let mut cache = CacheDirectory::new_in(Global);
         let mut img = Image::empty();
         img.code = vec![10u8, 0];
         img.packed_bitmask = vec![0b01u8];
@@ -1318,7 +1318,7 @@ mod tests {
     #[test]
     fn host_type_of_publishes_type_cap() {
         let mut vm = fixture_vm();
-        let mut cache = TypedCache::new_in(Global);
+        let mut cache = CacheDirectory::new_in(Global);
         // Instance references image + cnode by hash; both must be in
         // the cache for `put_cap` to accept the Instance.
         let image_hash = cache
@@ -1379,7 +1379,7 @@ mod tests {
         // for fewer bytes than a page get exactly that many — with
         // the meaningful prefix at the start and trailing zero-pad.
         let mut vm = fixture_vm();
-        let mut cache = TypedCache::new_in(Global);
+        let mut cache = CacheDirectory::new_in(Global);
         let data_hash = publish_data_inline(&mut cache, b"hello");
         vm.stack
             .running_instance_mut()
@@ -1415,7 +1415,7 @@ mod tests {
         // caller's bytes up to the next 4 KiB boundary and debits
         // quota by the padded length (1 page = 4096 bytes).
         let mut vm = fixture_vm();
-        let mut cache = TypedCache::new_in(Global);
+        let mut cache = CacheDirectory::new_in(Global);
         vm.kernel_assist.storage_quota_set(0, 8192);
         let mut mem = Mem::new();
         mem.map_region(0, PAGE_SIZE as u64, Access::ReadWrite, None)
@@ -1458,7 +1458,7 @@ mod tests {
     #[test]
     fn host_open_places_registered_file_data_in_slot() {
         let mut vm = fixture_vm();
-        let mut cache = TypedCache::new_in(Global);
+        let mut cache = CacheDirectory::new_in(Global);
         let data_hash = publish_data_inline(&mut cache, b"file");
         vm.kernel_assist
             .register_file(9, CapHashOrRef::Hash(data_hash));
@@ -1484,7 +1484,7 @@ mod tests {
         // page-multiple content length (4 KiB for the padded "stored"
         // cap). Quota seeded with enough headroom for one save.
         let mut vm = fixture_vm();
-        let mut cache = TypedCache::new_in(Global);
+        let mut cache = CacheDirectory::new_in(Global);
         let data_hash = publish_data_inline(&mut cache, b"stored");
         vm.kernel_assist.storage_quota_set(0, 8192);
         vm.stack
@@ -1549,7 +1549,7 @@ mod tests {
     #[test]
     fn derive_spawn_cached_publishes_child_instance() {
         let mut vm = fixture_vm();
-        let mut cache = TypedCache::new_in(Global);
+        let mut cache = CacheDirectory::new_in(Global);
 
         // Publish a tiny child image with no pinned/initial slots.
         let mut child_img = javm_cap::image::Image::empty();
@@ -1638,7 +1638,7 @@ mod tests {
     #[test]
     fn host_call_cached_pushes_child_and_moves_slot0() {
         let mut vm = fixture_vm();
-        let mut cache = TypedCache::new_in(Global);
+        let mut cache = CacheDirectory::new_in(Global);
 
         // Publish a no-op image (one Halt instruction) + empty cnode
         // + Cap::Instance referencing them.

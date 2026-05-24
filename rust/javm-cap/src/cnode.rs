@@ -120,7 +120,7 @@ impl CNodeCap<Global> {
 }
 
 /// One populated slot — retained as a serialisation helper for callers
-/// that need a flat `(slot, target)` pair (e.g., `TypedCache::publish_cnode`).
+/// that need a flat `(slot, target)` pair (e.g., `CacheDirectory::publish_cnode`).
 ///
 /// The on-the-wire/hash representation of `CNodeCap` no longer uses this
 /// type; the cnode is encoded directly as a `SparseList<CapHashOrRef, ...>`.

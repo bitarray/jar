@@ -1,7 +1,7 @@
 //! `CacheDirectory` — guest-readable index of cache-resident caps.
 //!
 //! Lives in shared memory; the host populates blob slots when
-//! publishing caps via `javm_cap::TypedCache`, and both host + guest may
+//! publishing caps via `javm_cap::CacheDirectory`, and both host + guest may
 //! populate instance slots (host for pre-published Instances; guest
 //! for sub-VM Instances derived in-kernel). The directory is the
 //! only piece of cache state the guest sees directly — it scans here

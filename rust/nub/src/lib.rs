@@ -19,7 +19,7 @@
 
 use allocate::Global;
 use anyhow::Result;
-use javm_cap::{CapHashOrRef, TypedCache, cap::Cap};
+use javm_cap::{CacheDirectory, CapHashOrRef, cap::Cap};
 use nub_arch_local::LocalArch;
 use nub_host_kvm::sandbox::{
     GuestBinary, MultiUseSandbox, SandboxConfiguration, UninitializedSandbox,
@@ -61,7 +61,7 @@ pub struct Nub {
     /// which backend they hit. On Hyperlight the local cache is unused
     /// at runtime — the shared-memory cache in `sandbox.cache()` is
     /// the source of truth.
-    local_cache: TypedCache<Global>,
+    local_cache: CacheDirectory,
 }
 
 enum Backend {
@@ -82,7 +82,7 @@ impl Nub {
     pub fn new_local() -> Self {
         Self {
             backend: Backend::Local(Kernel::new(LocalArch::new())),
-            local_cache: TypedCache::new_in(Global),
+            local_cache: CacheDirectory::new_in(Global),
         }
     }
 
@@ -104,7 +104,7 @@ impl Nub {
                 sandbox,
                 state_root_cache: [0; 32],
             })),
-            local_cache: TypedCache::new_in(Global),
+            local_cache: CacheDirectory::new_in(Global),
         })
     }
 

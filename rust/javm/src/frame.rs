@@ -14,7 +14,7 @@
 //!   kernel rejects mutations to these slots.
 //!
 //! Both are lightweight borrow views; the data lives on
-//! `InstanceEntry::{root_cnode, pinned_slots}` plus the `TypedCache` that
+//! `InstanceEntry::{root_cnode, pinned_slots}` plus the `CacheDirectory` that
 //! resolves nested-cnode walks. The MGMT dispatcher (Stage 3.6) uses
 //! these views to:
 //! 1. Resolve a `SlotPath` to a cap target (CapHashOrRef).
@@ -24,7 +24,7 @@
 //!    Image-declared `yield_marker_slot`).
 
 use allocate::Global;
-use javm_cap::{CNodeCap, Cap, CapHashOrRef, SlotIdx, SlotPath, TypedCache};
+use javm_cap::{CNodeCap, CacheDirectory, Cap, CapHashOrRef, SlotIdx, SlotPath};
 
 use crate::error::VmError;
 
@@ -32,14 +32,14 @@ use crate::error::VmError;
 pub struct MainFrame<'a> {
     cnode: &'a CNodeCap<Global>,
     pinned: &'a [SlotIdx],
-    cache: &'a TypedCache<Global>,
+    cache: &'a CacheDirectory,
 }
 
 impl<'a> MainFrame<'a> {
     pub fn new(
         cnode: &'a CNodeCap<Global>,
         pinned: &'a [SlotIdx],
-        cache: &'a TypedCache<Global>,
+        cache: &'a CacheDirectory,
     ) -> Self {
         Self {
             cnode,
@@ -102,7 +102,7 @@ impl<'a> BareFrame<'a> {
     pub fn new(
         cnode: &'a CNodeCap<Global>,
         pinned: &'a [SlotIdx],
-        cache: &'a TypedCache<Global>,
+        cache: &'a CacheDirectory,
     ) -> Self {
         Self {
             main: MainFrame::new(cnode, pinned, cache),
@@ -129,10 +129,10 @@ impl<'a> BareFrame<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use javm_cap::TypedCache;
+    use javm_cap::CacheDirectory;
 
-    fn empty_cache() -> TypedCache<Global> {
-        TypedCache::new_in(Global)
+    fn empty_cache() -> CacheDirectory {
+        CacheDirectory::new_in(Global)
     }
 
     #[test]

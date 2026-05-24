@@ -1,6 +1,6 @@
 //! Tests for [`HashMap`].
 
-use super::HashMap;
+use super::{DefaultHashBuilder, HashMap};
 use crate::talc::TalcAlloc;
 use crate::test_arena::test_talc;
 
@@ -18,7 +18,7 @@ fn hashmap_in_global() {
 
 #[test]
 fn hashmap_in_talc() {
-    let mut m: HashMap<u32, u64, TalcAlloc> = HashMap::new_in(test_talc());
+    let mut m: HashMap<u32, u64, DefaultHashBuilder, TalcAlloc> = HashMap::new_in(test_talc());
     for i in 0..256u32 {
         m.insert(i, (i as u64) * 3);
     }
@@ -30,7 +30,8 @@ fn hashmap_in_talc() {
 
 #[test]
 fn hashmap_with_capacity_doesnt_realloc() {
-    let mut m: HashMap<u32, u32, TalcAlloc> = HashMap::with_capacity_in(64, test_talc());
+    let mut m: HashMap<u32, u32, DefaultHashBuilder, TalcAlloc> =
+        HashMap::with_capacity_in(64, test_talc());
     let pre = m.capacity();
     for i in 0..32u32 {
         m.insert(i, i);

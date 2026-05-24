@@ -19,7 +19,7 @@
 //!   `target_position < i` and the target is an `InstanceEntry`.
 //!
 //! State storage: an `InstanceEntry` owns its in-flight working root
-//! cnode and references into a shared `TypedCache` for the underlying
+//! cnode and references into a shared `CacheDirectory` for the underlying
 //! Image and Instance content. The Vm consults the stack top to find
 //! the actively executing Instance; it consults lower entries during
 //! yield-marker routing.
@@ -50,7 +50,7 @@ pub enum EntryStatus {
 /// `program` is shared (Arc) — multiple in-flight entries can share
 /// the same predecoded bytecode (e.g. siblings of the same image).
 pub struct InstanceEntry {
-    /// Reference back to the TypedCache entry this invocation is running.
+    /// Reference back to the CacheDirectory entry this invocation is running.
     /// Carried across the apply so the post-HALT settle can hash the
     /// final working state into a `CapHash`.
     pub instance_ref: CapHashOrRef,

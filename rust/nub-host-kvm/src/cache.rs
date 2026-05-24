@@ -26,7 +26,7 @@ use std::ptr::NonNull;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use allocate::talc::{CacheTalcLock, Span, TalcAlloc, new_cache_talc_lock};
-use javm_cap::{CapHashOrRef, CapRef, TypedCache};
+use javm_cap::{CapHashOrRef, CapRef};
 use nub_arch_x86_abi::CapHash;
 use nub_host_common::cache::{
     CACHE_DIRECTORY_OFFSET, CacheDirectory, STATE_CACHE_SIZE, STATE_CACHE_VA, TALC_HEAP_OFFSET,
@@ -143,7 +143,7 @@ pub enum CacheError {
     /// unavailable — should never happen in practice.
     #[error("blob not found for hash {0:?}")]
     BlobMissing([u8; 32]),
-    /// The inner `javm_cap::TypedCache` returned an error.
+    /// The inner `javm_cap::CacheDirectory` returned an error.
     #[error("typed cache error: {0}")]
     Typed(#[from] javm_cap::CacheError),
 }
@@ -173,7 +173,7 @@ impl From<CacheError> for HyperlightError {
 pub struct HostCache {
     /// Two-tier cap storage. Allocations route through `TalcAlloc`
     /// over `region`.
-    typed_cache: TypedCache<TalcAlloc>,
+    typed_cache: javm_cap::CacheDirectory<allocate::collections::DefaultHashBuilder, TalcAlloc>,
     /// Hashes currently pinned (active call frames). Eviction (future
     /// stage) skips these.
     pub(crate) pinned: smallvec::SmallVec<[CapHash; 8]>,
@@ -230,7 +230,7 @@ impl HostCache {
         // order). The `'static` cast asserts that lifetime; the lock
         // is never moved or dropped before `typed_cache` does.
         let alloc: TalcAlloc = unsafe { &*talc.as_ptr() };
-        let typed_cache = TypedCache::new_in(alloc);
+        let typed_cache = javm_cap::CacheDirectory::new_in(alloc);
 
         Ok(Self {
             typed_cache,
@@ -284,7 +284,9 @@ impl HostCache {
 
     /// Shared reference to the typed cache. Read-only inspection from
     /// the host (e.g., tests, settle, walks).
-    pub fn typed(&self) -> &TypedCache<TalcAlloc> {
+    pub fn typed(
+        &self,
+    ) -> &javm_cap::CacheDirectory<allocate::collections::DefaultHashBuilder, TalcAlloc> {
         &self.typed_cache
     }
 
