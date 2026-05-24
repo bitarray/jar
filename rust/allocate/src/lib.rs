@@ -41,6 +41,7 @@
 
 #![no_std]
 #![feature(allocator_api)]
+#![feature(btreemap_alloc)]
 
 extern crate alloc;
 
