@@ -1,7 +1,7 @@
 //! Tests for [`HashMap`].
 
-use super::*;
-use crate::talc_alloc::Manual;
+use super::HashMap;
+use crate::talc::{CacheTalcLock, Manual, TalcAlloc};
 
 struct Arena {
     _backing: alloc::vec::Vec<u8>,

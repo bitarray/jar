@@ -5,7 +5,7 @@
 //! at the node level — concatenation is the only operation.
 
 use allocate::Global;
-use allocate::Vec;
+use allocate::vec::Vec;
 use digest::Digest;
 use digest::typenum::U32;
 

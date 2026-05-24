@@ -7,7 +7,7 @@
 //! `distributed-puzzling-tower.md` for the full design.
 
 use allocate::Global;
-use allocate::Vec as AVec;
+use allocate::vec::Vec as AVec;
 
 use crate::slot::SlotIdx;
 
@@ -332,7 +332,7 @@ fn datacap_paged_pages_shared_via_pageref() {
         bytes,
     };
     let pr: PageRef<Global> = PageRef::new_in(pb, Global);
-    assert_eq!(allocate::Arc::strong_count(&pr), 1);
+    assert_eq!(allocate::sync::Arc::strong_count(&pr), 1);
 
     let mut pages_a: AVec<PageSlot<Global>, Global> = AVec::new_in(Global);
     pages_a.push(PageSlot::Loaded(pr.clone()));
@@ -340,12 +340,12 @@ fn datacap_paged_pages_shared_via_pageref() {
     pages_b.push(PageSlot::Loaded(pr.clone()));
 
     // Three holders: pr itself, pages_a's slot, pages_b's slot.
-    assert_eq!(allocate::Arc::strong_count(&pr), 3);
+    assert_eq!(allocate::sync::Arc::strong_count(&pr), 3);
 
     drop(pages_a);
-    assert_eq!(allocate::Arc::strong_count(&pr), 2);
+    assert_eq!(allocate::sync::Arc::strong_count(&pr), 2);
     drop(pages_b);
-    assert_eq!(allocate::Arc::strong_count(&pr), 1);
+    assert_eq!(allocate::sync::Arc::strong_count(&pr), 1);
     drop(pr);
     // PageBytes freed; nothing left to assert.
 }
@@ -848,7 +848,7 @@ fn publish_data_paged_round_trips() {
                     // Loaded pages start with refcount 1 (the page is
                     // uniquely owned by the DataCap that holds it).
                     if let PageSlot::Loaded(pr) = &pages[0] {
-                        assert_eq!(allocate::Arc::strong_count(pr), 1);
+                        assert_eq!(allocate::sync::Arc::strong_count(pr), 1);
                         assert_eq!(pr.bytes.as_slice(), &[0xAAu8; 4096][..]);
                     }
                 }

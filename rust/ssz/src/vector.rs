@@ -4,7 +4,7 @@
 //! variable-len T → N×4-byte offset table followed by variable payloads.
 //! No length prefix.
 
-use allocate::Vec;
+use allocate::vec::Vec;
 use allocate::{Allocator, Global};
 use core::fmt;
 use digest::Digest;

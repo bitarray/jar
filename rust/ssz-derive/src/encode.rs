@@ -37,7 +37,7 @@ pub fn derive_encode_impl(input: &DeriveInput) -> syn::Result<TokenStream> {
                             }
                             fn ssz_append<__A: ::ssz::allocate::Allocator + Clone>(
                                 &self,
-                                buf: &mut ::ssz::allocate::Vec<u8, __A>,
+                                buf: &mut ::ssz::allocate::vec::Vec<u8, __A>,
                             ) {
                                 ssz::Encode::ssz_append(&self.0, buf);
                             }
@@ -138,7 +138,7 @@ fn encode_struct(
             }
             fn ssz_append<__A: ::ssz::allocate::Allocator + Clone>(
                 &self,
-                buf: &mut ::ssz::allocate::Vec<u8, __A>,
+                buf: &mut ::ssz::allocate::vec::Vec<u8, __A>,
             ) {
                 #append_body
             }
@@ -261,7 +261,7 @@ fn encode_enum(
             }
             fn ssz_append<__A: ::ssz::allocate::Allocator + Clone>(
                 &self,
-                buf: &mut ::ssz::allocate::Vec<u8, __A>,
+                buf: &mut ::ssz::allocate::vec::Vec<u8, __A>,
             ) {
                 match self {
                     #(#append_arms),*

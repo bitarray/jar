@@ -13,30 +13,49 @@
 //! No third-party crate fills the gap cleanly on
 //! `allocator-api2 0.4`. So we use the `RUSTC_BOOTSTRAP` env-var
 //! escape hatch (see Firefox `mach build` for prior art), scoped via
-//! workspace `.cargo/config.toml` to just **three** crates:
-//! `allocate, talc, hashbrown`. Everything else compiles
+//! workspace `.cargo/config.toml` to just the named crates
+//! (`allocate, talc, hashbrown, foldhash`). Everything else compiles
 //! strictly-stable.
 //!
-//! ## What's exposed
+//! ## Module layout
 //!
-//! - [`Allocator`]: a stable supertrait wrapper for
-//!   `core::alloc::Allocator`. Any `T: core::alloc::Allocator`
-//!   auto-implements this. Use as a bound everywhere: `where A:
-//!   allocate::Allocator + Clone`.
-//! - [`Box`], [`Vec`], [`Arc`], [`Weak`], [`HashMap`]: newtype
-//!   wrappers around `alloc::boxed::Box`, `alloc::vec::Vec`,
-//!   `alloc::sync::Arc`, `alloc::sync::Weak`, and
-//!   `hashbrown::HashMap` respectively. Newtypes (not re-exports) so
-//!   downstream stays on stable Rust.
-//! - [`TalcAlloc`]: the talc → `Allocator` bridge. Single impl, no
-//!   `allocator-api2` involved.
-//! - [`CacheTalcLock`], [`Manual`]: re-exports so consumers don't
-//!   need a direct talc dep.
+//! Module paths mirror `alloc` / `std`:
+//!
+//! - [`boxed::Box<T, A>`] — newtype around `alloc::boxed::Box`.
+//! - [`vec::Vec<T, A>`] — newtype around `alloc::vec::Vec`.
+//! - [`sync::{Arc, Weak}<T, A>`] — newtype around `alloc::sync::Arc` /
+//!   `alloc::sync::Weak`.
+//! - [`collections::HashMap<K, V, A>`] — newtype around
+//!   `hashbrown::HashMap` (with hashbrown's `nightly` feature).
+//! - [`talc::{TalcAlloc, CacheTalcLock, Manual}`] — the talc →
+//!   `Allocator` bridge and supporting re-exports.
+//!
+//! Plus the trait and helpers at the crate root:
+//!
+//! - [`Allocator`]: stable supertrait wrapper for
+//!   `core::alloc::Allocator`.
+//! - [`Global`], [`AllocError`], [`Layout`].
+//! - [`allocate`], [`allocate_zeroed`], [`deallocate`]: free-function
+//!   wrappers for the unstable `Allocator` trait methods so callers
+//!   don't need `#![feature(allocator_api)]` to invoke them.
 
 #![no_std]
 #![feature(allocator_api)]
 
 extern crate alloc;
+
+pub mod boxed;
+pub mod collections;
+pub mod sync;
+pub mod talc;
+pub mod vec;
+
+#[cfg(test)]
+mod boxed_tests;
+#[cfg(test)]
+mod sync_tests;
+#[cfg(test)]
+mod vec_tests;
 
 /// Stable-name supertrait wrapper for `core::alloc::Allocator`.
 ///
@@ -110,27 +129,6 @@ unsafe impl core::alloc::Allocator for Global {
         }
     }
 }
-
-mod arc;
-mod box_;
-mod hashmap;
-mod talc_alloc;
-mod vec;
-
-#[cfg(test)]
-mod arc_tests;
-#[cfg(test)]
-mod box_tests;
-#[cfg(test)]
-mod hashmap_tests;
-#[cfg(test)]
-mod vec_tests;
-
-pub use arc::{Arc, Weak};
-pub use box_::Box;
-pub use hashmap::HashMap;
-pub use talc_alloc::{CacheTalcLock, Manual, TalcAlloc};
-pub use vec::Vec;
 
 // Stable-name helpers for unstable `Allocator` trait methods.
 // Downstream calls `allocate::allocate(&alloc, layout)` /

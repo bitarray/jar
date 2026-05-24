@@ -1,6 +1,6 @@
 //! `List<T, N>` — variable-length list with compile-time cap of `N` elements.
 
-use allocate::Vec;
+use allocate::vec::Vec;
 use allocate::{Allocator, Global};
 use core::fmt;
 use digest::Digest;

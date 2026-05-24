@@ -17,7 +17,7 @@
 //! * byte 0 = `1` + 32 raw hash bytes (Missing)
 
 use allocate::Allocator;
-use allocate::Vec;
+use allocate::vec::Vec;
 use core::fmt;
 use digest::Digest;
 use digest::typenum::U32;

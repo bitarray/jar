@@ -1,7 +1,7 @@
 //! Tests for [`Box`].
 
-use super::*;
-use crate::talc_alloc::Manual;
+use crate::boxed::Box;
+use crate::talc::{CacheTalcLock, Manual, TalcAlloc};
 
 struct Arena {
     _backing: alloc::vec::Vec<u8>,

@@ -35,12 +35,12 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use allocate::Allocator;
-use allocate::Box as ABox;
+use allocate::boxed::Box as ABox;
 use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use allocate::{CacheTalcLock, TalcAlloc};
+use allocate::talc::{CacheTalcLock, TalcAlloc};
 use javm_cap::cap::{Cap, CapHashOrRef};
 use javm_cap::entry::CacheEntry;
 use nub_host_common::cache::{

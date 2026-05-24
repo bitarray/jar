@@ -1,6 +1,6 @@
 //! SSZ blanket impls for built-in scalar and array types.
 
-use allocate::Vec;
+use allocate::vec::Vec;
 use allocate::{Allocator, Global};
 use core::num::NonZeroU32;
 use digest::Digest;

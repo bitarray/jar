@@ -4,9 +4,9 @@
 use core::ptr::NonNull;
 
 use allocate::Global;
-use allocate::Manual;
-use allocate::Vec as AVec;
-use allocate::{CacheTalcLock, TalcAlloc};
+use allocate::talc::Manual;
+use allocate::talc::{CacheTalcLock, TalcAlloc};
+use allocate::vec::Vec as AVec;
 
 use crate::slot::SlotIdx;
 
@@ -209,7 +209,7 @@ fn page_ref_shares_then_releases() {
         bytes,
     };
     let pr: PageRef<TalcAlloc> = PageRef::new_in(pb, alloc);
-    assert_eq!(allocate::Arc::strong_count(&pr), 1);
+    assert_eq!(allocate::sync::Arc::strong_count(&pr), 1);
 
     let pages: AVec<PageSlot<TalcAlloc>, TalcAlloc> = {
         let mut v = AVec::new_in(alloc);
@@ -217,10 +217,10 @@ fn page_ref_shares_then_releases() {
         v.push(PageSlot::Loaded(pr.clone()));
         v
     };
-    assert_eq!(allocate::Arc::strong_count(&pr), 3);
+    assert_eq!(allocate::sync::Arc::strong_count(&pr), 3);
 
     drop(pages);
-    assert_eq!(allocate::Arc::strong_count(&pr), 1);
+    assert_eq!(allocate::sync::Arc::strong_count(&pr), 1);
     drop(pr);
     // Allocation freed; arena could be exhausted by future allocs in
     // isolated tests but we don't check the underlying talc state here.

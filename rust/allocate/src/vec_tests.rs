@@ -1,7 +1,7 @@
 //! Tests for [`Vec`].
 
-use super::*;
-use crate::talc_alloc::Manual;
+use crate::talc::{CacheTalcLock, Manual, TalcAlloc};
+use crate::vec::Vec;
 
 struct Arena {
     _backing: alloc::vec::Vec<u8>,

@@ -6,7 +6,9 @@
 //! cache subsystem doesn't index pages by hash — pages aren't
 //! first-class caps. They're internal to the DataCap layer.
 
-use allocate::{Allocator, Arc, Global, Vec};
+use allocate::sync::Arc;
+use allocate::vec::Vec;
+use allocate::{Allocator, Global};
 
 use super::cap::CapHash;
 
@@ -22,7 +24,7 @@ pub enum PageSlot<A: Allocator + Clone = Global> {
 }
 
 /// Refcounted handle to a [`PageBytes`] allocated by `A`. Plain
-/// `allocate::Arc` alias for cap-layer readability.
+/// `allocate::sync::Arc` alias for cap-layer readability.
 pub type PageRef<A> = Arc<PageBytes<A>, A>;
 
 /// One page's bytes plus its precomputed content hash.

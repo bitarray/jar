@@ -18,7 +18,7 @@
 //! - **O(log n) range queries** via `partition_point`, used by
 //!   `compute_subtree_root` to short-circuit empty subtrees.
 //! - **Iteration in sorted order**, byte-equivalent to `BTreeMap::iter`.
-//! - **Allocator-genericity** — `allocate::Vec<T, A>` carries
+//! - **Allocator-genericity** — `allocate::vec::Vec<T, A>` carries
 //!   the allocator handle on every allocation, so a `SparseList<_, N,
 //!   TalcAlloc>` keeps no state on the host's `Global` allocator. This
 //!   is what makes `Cap::CNode` walkable from the guest's view of the
@@ -28,7 +28,7 @@
 //! hardwired to `Global`); the switch preserves wire-format and
 //! hash-tree-root output byte-identically.
 
-use allocate::Vec;
+use allocate::vec::Vec;
 use allocate::{Allocator, Global};
 use core::fmt;
 use digest::Digest;

@@ -49,7 +49,7 @@ pub fn cap_hash<A: Allocator + Clone>(cap: &Cap<A>) -> CapHash {
 mod tests {
     use super::*;
     use allocate::Global;
-    use allocate::Vec as AVec;
+    use allocate::vec::Vec as AVec;
 
     use crate::cap::{CapHashOrRef, TypeCap};
     use crate::cnode::CNodeCap;

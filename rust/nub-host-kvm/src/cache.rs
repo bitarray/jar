@@ -25,8 +25,8 @@ Licensed under the Apache License, Version 2.0.
 use std::ptr::NonNull;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use allocate::Manual;
-use allocate::{CacheTalcLock, TalcAlloc};
+use allocate::talc::Manual;
+use allocate::talc::{CacheTalcLock, TalcAlloc};
 use javm_cap::{CapHashOrRef, CapRef, TypedCache};
 use nub_arch_x86_abi::CapHash;
 use nub_host_common::cache::{

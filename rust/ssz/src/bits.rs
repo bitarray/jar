@@ -9,7 +9,7 @@
 //!   sentinel `1` bit immediately after the data bits; the decoder finds
 //!   the highest set bit in the final byte to recover the length.
 
-use allocate::Vec;
+use allocate::vec::Vec;
 use allocate::{Allocator, Global};
 use core::fmt;
 use digest::Digest;

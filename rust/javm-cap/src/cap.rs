@@ -65,7 +65,7 @@ impl ssz::Encode for CapHashOrRef {
             CapHashOrRef::Ref(_) => 1 + 8,
         }
     }
-    fn ssz_append<A: allocate::Allocator + Clone>(&self, buf: &mut allocate::Vec<u8, A>) {
+    fn ssz_append<A: allocate::Allocator + Clone>(&self, buf: &mut allocate::vec::Vec<u8, A>) {
         match self {
             CapHashOrRef::Hash(h) => {
                 buf.push(0);
@@ -300,10 +300,10 @@ impl Cap<Global> {
         pc: u64,
         gas_remaining: u64,
     ) -> Self {
-        let mut overlays: allocate::Vec<super::instance::RwOverlay<Global>, Global> =
-            allocate::Vec::new_in(Global);
+        let mut overlays: allocate::vec::Vec<super::instance::RwOverlay<Global>, Global> =
+            allocate::vec::Vec::new_in(Global);
         for (start, bytes) in rw_overlays {
-            let mut buf = allocate::Vec::with_capacity_in(bytes.len(), Global);
+            let mut buf = allocate::vec::Vec::with_capacity_in(bytes.len(), Global);
             buf.extend_from_slice(bytes);
             overlays.push(super::instance::RwOverlay {
                 start: *start,

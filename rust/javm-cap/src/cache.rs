@@ -22,9 +22,10 @@
 
 use core::sync::atomic::Ordering;
 
-use allocate::Box as ABox;
-use allocate::Vec as AVec;
-use allocate::{Allocator, Global, HashMap};
+use allocate::boxed::Box as ABox;
+use allocate::collections::HashMap;
+use allocate::vec::Vec as AVec;
+use allocate::{Allocator, Global};
 
 use super::cap::{Cap, CapHash, CapHashOrRef, CapRef};
 use super::cap_hash::cap_hash;

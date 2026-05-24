@@ -5,7 +5,7 @@
 //! per ImageCap is bounded (seven Vecs, regardless of content size);
 //! we accept that in exchange for direct field accessors.
 
-use allocate::Vec;
+use allocate::vec::Vec;
 use allocate::{Allocator, Global};
 
 use crate::slot::SlotIdx;
@@ -164,8 +164,8 @@ impl ssz::HashTreeRoot for MemoryMapping {
             // Treat the fixed-length path array as a `Vector<u32,
             // MAX_SOURCE_DEPTH>` for hashing: pack to bytes, merkleize
             // with `ceil(N*4/32)` chunks.
-            let mut buf: allocate::Vec<u8, allocate::Global> =
-                allocate::Vec::with_capacity_in(MAX_SOURCE_DEPTH * 4, allocate::Global);
+            let mut buf: allocate::vec::Vec<u8, allocate::Global> =
+                allocate::vec::Vec::with_capacity_in(MAX_SOURCE_DEPTH * 4, allocate::Global);
             for s in &self.source_path {
                 buf.extend_from_slice(&s.get().to_le_bytes());
             }

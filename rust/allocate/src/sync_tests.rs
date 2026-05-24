@@ -1,7 +1,8 @@
 //! Tests for [`Arc`].
 
-use super::*;
-use crate::talc_alloc::Manual;
+use crate::sync::Arc;
+use crate::talc::{CacheTalcLock, Manual, TalcAlloc};
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 struct Arena {
