@@ -10,7 +10,7 @@
 //! [`javm_exec::Interpreter::run`], and produces an
 //! [`InvocationResult`].
 
-use allocator_api2::alloc::Global;
+use allocate::Global;
 use javm_cap::image_cap::ImageCap;
 use javm_cap::instance::InstanceCap;
 use javm_exec::{

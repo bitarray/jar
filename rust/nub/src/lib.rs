@@ -17,7 +17,7 @@
 //! publishes a `Cap::Instance` referencing them, and then invokes by
 //! the resulting instance hash.
 
-use allocator_api2::alloc::Global;
+use allocate::Global;
 use anyhow::Result;
 use javm_cap::{CapHashOrRef, TypedCache, cap::Cap};
 use nub_arch_local::LocalArch;

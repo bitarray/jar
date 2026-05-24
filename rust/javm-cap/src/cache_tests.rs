@@ -6,9 +6,8 @@
 //! a copy, shared mutations shallow-clone. See plan
 //! `distributed-puzzling-tower.md` for the full design.
 
-use allocator_api2::alloc::Global;
-use allocator_api2::vec::Vec as AVec;
-use core::sync::atomic::AtomicU32;
+use allocate::Global;
+use allocate::Vec as AVec;
 
 use crate::slot::SlotIdx;
 
@@ -130,19 +129,14 @@ fn t_publish_data_paged(
                 }
                 let mut buf: AVec<u8, Global> = AVec::with_capacity_in(bytes.len(), Global);
                 buf.extend_from_slice(bytes);
-                // The Aarc carries the canonical page hash; for tests
+                // The Arc carries the canonical page hash; for tests
                 // we pre-compute it as raw Blake2b over the bytes —
                 // the cache's put_cap path doesn't depend on this
                 // matching, but downstream cap_hash on the DataCap
                 // recomputes from the actual bytes.
                 let hash = <crate::hash::Blake2b256 as crate::hash::Hash>::hash(bytes);
-                let pb = PageBytes {
-                    refcount: AtomicU32::new(1),
-                    hash,
-                    bytes: buf,
-                };
-                let pr: PageRef<Global> = PageRef::new_in(pb, Global)
-                    .map_err(|_| super::cache::CacheError::AllocFailure)?;
+                let pb = PageBytes { hash, bytes: buf };
+                let pr: PageRef<Global> = PageRef::new_in(pb, Global);
                 slots.push(PageSlot::Loaded(pr));
             }
         }
@@ -334,12 +328,11 @@ fn datacap_paged_pages_shared_via_pageref() {
     let mut bytes = AVec::new_in(Global);
     bytes.extend_from_slice(&[1, 2, 3, 4]);
     let pb = PageBytes {
-        refcount: AtomicU32::new(1),
         hash: [0; 32],
         bytes,
     };
-    let pr: PageRef<Global> = PageRef::new_in(pb, Global).expect("alloc");
-    assert_eq!(pr.refcount(), 1);
+    let pr: PageRef<Global> = PageRef::new_in(pb, Global);
+    assert_eq!(allocate::Arc::strong_count(&pr), 1);
 
     let mut pages_a: AVec<PageSlot<Global>, Global> = AVec::new_in(Global);
     pages_a.push(PageSlot::Loaded(pr.clone()));
@@ -347,12 +340,12 @@ fn datacap_paged_pages_shared_via_pageref() {
     pages_b.push(PageSlot::Loaded(pr.clone()));
 
     // Three holders: pr itself, pages_a's slot, pages_b's slot.
-    assert_eq!(pr.refcount(), 3);
+    assert_eq!(allocate::Arc::strong_count(&pr), 3);
 
     drop(pages_a);
-    assert_eq!(pr.refcount(), 2);
+    assert_eq!(allocate::Arc::strong_count(&pr), 2);
     drop(pages_b);
-    assert_eq!(pr.refcount(), 1);
+    assert_eq!(allocate::Arc::strong_count(&pr), 1);
     drop(pr);
     // PageBytes freed; nothing left to assert.
 }
@@ -855,8 +848,8 @@ fn publish_data_paged_round_trips() {
                     // Loaded pages start with refcount 1 (the page is
                     // uniquely owned by the DataCap that holds it).
                     if let PageSlot::Loaded(pr) = &pages[0] {
-                        assert_eq!(pr.refcount(), 1);
-                        assert_eq!(pr.get().bytes.as_slice(), &[0xAAu8; 4096][..]);
+                        assert_eq!(allocate::Arc::strong_count(pr), 1);
+                        assert_eq!(pr.bytes.as_slice(), &[0xAAu8; 4096][..]);
                     }
                 }
                 _ => panic!("expected paged content"),

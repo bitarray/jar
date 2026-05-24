@@ -17,7 +17,7 @@
 //! `slot[0]` DataCap, computes the wrapping byte-sum, mints a
 //! single-byte result DataCap, places it at `slot[0]`, and HALTs.
 
-use allocator_api2::alloc::Global;
+use allocate::Global;
 use javm::kernel_assist::{InProcessKernelAssist, KernelAssist};
 use javm::{CallResult, Vm};
 use javm_cap::image::{Image, PinnedCap};

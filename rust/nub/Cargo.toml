@@ -18,7 +18,7 @@ default = []
 heap-diag = []
 
 [dependencies]
-allocator-api2 = "0.4"
+allocate = { path = "../allocate" }
 anyhow = "1"
 javm-cap = { path = "../javm-cap" }
 # Forked KVM-only Hyperlight host (vendored + stripped from

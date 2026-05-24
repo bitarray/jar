@@ -27,7 +27,7 @@ impl<T> Arc<T, Global> {
     #[inline]
     pub fn new(value: T) -> Self {
         Self {
-            inner: alloc::sync::Arc::new(value),
+            inner: alloc::sync::Arc::new_in(value, Global),
         }
     }
 }

@@ -1,6 +1,6 @@
 //! `Cap<A>` — allocator-parameterised cap enum + shared constants.
 
-use allocator_api2::alloc::{Allocator, Global};
+use allocate::{Allocator, Global};
 
 use super::cnode::CNodeCap;
 use super::data::DataCap;
@@ -65,10 +65,7 @@ impl ssz::Encode for CapHashOrRef {
             CapHashOrRef::Ref(_) => 1 + 8,
         }
     }
-    fn ssz_append<A: allocator_api2::alloc::Allocator + Clone>(
-        &self,
-        buf: &mut allocator_api2::vec::Vec<u8, A>,
-    ) {
+    fn ssz_append<A: allocate::Allocator + Clone>(&self, buf: &mut allocate::Vec<u8, A>) {
         match self {
             CapHashOrRef::Hash(h) => {
                 buf.push(0);
@@ -89,7 +86,7 @@ impl ssz::Decode for CapHashOrRef {
     fn ssz_fixed_len() -> usize {
         ssz::BYTES_PER_LENGTH_OFFSET
     }
-    fn from_ssz_bytes_in<A: allocator_api2::alloc::Allocator + Clone>(
+    fn from_ssz_bytes_in<A: allocate::Allocator + Clone>(
         bytes: &[u8],
         _alloc: A,
     ) -> Result<Self, ssz::DecodeError> {
@@ -303,10 +300,10 @@ impl Cap<Global> {
         pc: u64,
         gas_remaining: u64,
     ) -> Self {
-        let mut overlays: allocator_api2::vec::Vec<super::instance::RwOverlay<Global>, Global> =
-            allocator_api2::vec::Vec::new_in(Global);
+        let mut overlays: allocate::Vec<super::instance::RwOverlay<Global>, Global> =
+            allocate::Vec::new_in(Global);
         for (start, bytes) in rw_overlays {
-            let mut buf = allocator_api2::vec::Vec::with_capacity_in(bytes.len(), Global);
+            let mut buf = allocate::Vec::with_capacity_in(bytes.len(), Global);
             buf.extend_from_slice(bytes);
             overlays.push(super::instance::RwOverlay {
                 start: *start,

@@ -23,7 +23,7 @@ impl<K, V> HashMap<K, V, Global, DefaultHashBuilder> {
     #[inline]
     pub fn new() -> Self {
         Self {
-            inner: hashbrown::HashMap::new(),
+            inner: hashbrown::HashMap::new_in(Global),
         }
     }
 
@@ -31,7 +31,7 @@ impl<K, V> HashMap<K, V, Global, DefaultHashBuilder> {
     #[inline]
     pub fn with_capacity(cap: usize) -> Self {
         Self {
-            inner: hashbrown::HashMap::with_capacity(cap),
+            inner: hashbrown::HashMap::with_capacity_in(cap, Global),
         }
     }
 }

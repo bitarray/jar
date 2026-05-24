@@ -25,14 +25,14 @@ Licensed under the Apache License, Version 2.0.
 use std::ptr::NonNull;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use allocate::Manual;
+use allocate::{CacheTalcLock, TalcAlloc};
 use javm_cap::{CapHashOrRef, CapRef, TypedCache};
 use nub_arch_x86_abi::CapHash;
 use nub_host_common::cache::{
     CACHE_DIRECTORY_OFFSET, CacheDirectory, STATE_CACHE_SIZE, STATE_CACHE_VA, TALC_HEAP_OFFSET,
     TALC_HEAP_SIZE,
 };
-use nub_talc_util::{CacheTalcLock, TalcAlloc};
-use talc::source::Manual;
 
 use crate::{HyperlightError, Result, new_error};
 
@@ -321,10 +321,7 @@ impl HostCache {
     /// Put a caller-built `Cap<Global>`. Computes the cap's content hash,
     /// deep-clones it into the cache's talc-backed allocator on first put,
     /// or bumps the existing entry's refcount on idempotent re-put.
-    pub fn put_cap(
-        &mut self,
-        cap: &javm_cap::Cap<allocator_api2::alloc::Global>,
-    ) -> Result<CapHash> {
+    pub fn put_cap(&mut self, cap: &javm_cap::Cap<allocate::Global>) -> Result<CapHash> {
         let h = self.typed_cache.put_cap(cap).map_err(CacheError::from)?;
         self.touch_blob(h)?;
         Ok(h)
@@ -337,7 +334,7 @@ impl HostCache {
     pub fn put_cap_with_hash(
         &mut self,
         hash: CapHash,
-        cap: &javm_cap::Cap<allocator_api2::alloc::Global>,
+        cap: &javm_cap::Cap<allocate::Global>,
     ) -> Result<()> {
         self.typed_cache
             .put_cap_with_hash(hash, cap)

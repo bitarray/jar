@@ -13,7 +13,7 @@
 //!
 //! `size_log` is permitted in `0..=16` (the spec's hard ceiling).
 
-use allocator_api2::alloc::{Allocator, Global};
+use allocate::{Allocator, Global};
 use ssz::{MissingOr, SparseList};
 
 use crate::error::CapError;

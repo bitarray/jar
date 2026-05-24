@@ -2,12 +2,11 @@
 //! with both `Global` (heap) and `TalcAlloc` (cache) allocators.
 
 use core::ptr::NonNull;
-use core::sync::atomic::AtomicU32;
 
-use allocator_api2::alloc::Global;
-use allocator_api2::vec::Vec as AVec;
-use nub_talc_util::{CacheTalcLock, TalcAlloc};
-use talc::source::Manual;
+use allocate::Global;
+use allocate::Manual;
+use allocate::Vec as AVec;
+use allocate::{CacheTalcLock, TalcAlloc};
 
 use crate::slot::SlotIdx;
 
@@ -41,7 +40,7 @@ impl Arena {
     }
 }
 
-fn make_image_cap_in<A: allocator_api2::alloc::Allocator + Clone>(alloc: A) -> ImageCap<A> {
+fn make_image_cap_in<A: allocate::Allocator + Clone>(alloc: A) -> ImageCap<A> {
     let mut code = AVec::new_in(alloc.clone());
     code.extend_from_slice(&[0xAB, 0xCD]);
     ImageCap {
@@ -206,12 +205,11 @@ fn page_ref_shares_then_releases() {
     let mut bytes = AVec::new_in(alloc);
     bytes.extend_from_slice(&[1, 2, 3, 4]);
     let pb = PageBytes {
-        refcount: AtomicU32::new(1),
         hash: [0; 32],
         bytes,
     };
-    let pr: PageRef<TalcAlloc> = PageRef::new_in(pb, alloc).expect("alloc page");
-    assert_eq!(pr.refcount(), 1);
+    let pr: PageRef<TalcAlloc> = PageRef::new_in(pb, alloc);
+    assert_eq!(allocate::Arc::strong_count(&pr), 1);
 
     let pages: AVec<PageSlot<TalcAlloc>, TalcAlloc> = {
         let mut v = AVec::new_in(alloc);
@@ -219,10 +217,10 @@ fn page_ref_shares_then_releases() {
         v.push(PageSlot::Loaded(pr.clone()));
         v
     };
-    assert_eq!(pr.refcount(), 3);
+    assert_eq!(allocate::Arc::strong_count(&pr), 3);
 
     drop(pages);
-    assert_eq!(pr.refcount(), 1);
+    assert_eq!(allocate::Arc::strong_count(&pr), 1);
     drop(pr);
     // Allocation freed; arena could be exhausted by future allocs in
     // isolated tests but we don't check the underlying talc state here.

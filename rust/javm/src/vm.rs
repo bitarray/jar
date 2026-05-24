@@ -19,7 +19,7 @@
 //! into it) and in-flight resolution (host calls read referenced caps
 //! by their `CapHashOrRef` target).
 
-use allocator_api2::alloc::Global;
+use allocate::Global;
 use javm_cap::{Cap, CapHash, CapHashOrRef, SlotIdx, TypedCache};
 use javm_exec::{Access, CopyingMemory, ExitReason, GasCounter, Interpreter, Mem, Regs};
 

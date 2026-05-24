@@ -94,11 +94,11 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use allocate::TalcAlloc;
 use javm_cap::cap::{Cap, CapHashOrRef};
 use javm_cap::hash::{Blake2b256, Hash};
 use javm_cap::slot::SlotIdx;
 use javm_cap::{CapHash, NUM_REGS};
-use nub_talc_util::TalcAlloc;
 
 use crate::jit_run::{self, DirectMap, ExitInfo, FrameRuntime, MemRegion};
 use crate::page_alloc::PageBuf;
@@ -783,7 +783,7 @@ fn build_transient_instance_cap(
     image_hash: CapHash,
     image_hash_chain: CapHash,
 ) -> Cap<TalcAlloc> {
-    use allocator_api2::vec::Vec as AVec;
+    use allocate::Vec as AVec;
     let alloc = cache.allocator();
     Cap::Instance(javm_cap::instance::InstanceCap {
         image_hash_chain,

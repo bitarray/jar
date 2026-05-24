@@ -9,8 +9,8 @@
 //!   sentinel `1` bit immediately after the data bits; the decoder finds
 //!   the highest set bit in the final byte to recover the length.
 
-use allocator_api2::alloc::{Allocator, Global};
-use allocator_api2::vec::Vec;
+use allocate::Vec;
+use allocate::{Allocator, Global};
 use core::fmt;
 use digest::Digest;
 use digest::typenum::U32;

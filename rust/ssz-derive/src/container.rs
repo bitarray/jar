@@ -23,7 +23,7 @@ use quote::{format_ident, quote};
 /// Emit the body of `ssz_append` for an anonymous SSZ container with the
 /// given field reference expressions / types.
 ///
-/// The emitted code expects `buf: &mut ::ssz::allocator_api2::vec::Vec<u8, __A>` to
+/// The emitted code expects `buf: &mut ::ssz::allocate::Vec<u8, __A>` to
 /// be in scope and appends the container encoding (fixed region + variable
 /// payloads) to it.
 pub(crate) fn container_encode_body(accessors: &[TokenStream], tys: &[TokenStream]) -> TokenStream {
@@ -44,8 +44,8 @@ pub(crate) fn container_encode_body(accessors: &[TokenStream], tys: &[TokenStrea
             .zip(tmp_idents.iter())
             .map(|((acc, ty), tmp)| {
                 quote! {
-                    let mut #tmp: ::ssz::allocator_api2::vec::Vec<u8, ::ssz::allocator_api2::alloc::Global> =
-                        ::ssz::allocator_api2::vec::Vec::new_in(::ssz::allocator_api2::alloc::Global);
+                    let mut #tmp: ::ssz::allocate::Vec<u8, ::ssz::allocate::Global> =
+                        ::ssz::allocate::Vec::new_in(::ssz::allocate::Global);
                     <#ty as ssz::Encode>::ssz_append(#acc, &mut #tmp);
                 }
             });
@@ -246,8 +246,8 @@ pub(crate) fn container_decode_body(tys: &[TokenStream]) -> TokenStream {
         #(#pass1)*
         debug_assert_eq!(__cursor, __fixed_size);
 
-        let mut __var_positions: ::ssz::allocator_api2::vec::Vec<(usize, usize)> =
-            ::ssz::allocator_api2::vec::Vec::new();
+        let mut __var_positions: ::ssz::allocate::Vec<(usize, usize)> =
+            ::ssz::allocate::Vec::new();
         #(#push_var_offs)*
         for __pair in __var_positions.windows(2) {
             if __pair[1].1 < __pair[0].1 {

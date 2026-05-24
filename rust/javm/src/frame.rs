@@ -23,7 +23,7 @@
 //!    `host_yield` reads the Cap::Instance\[YieldCatcher\] from the
 //!    Image-declared `yield_marker_slot`).
 
-use allocator_api2::alloc::Global;
+use allocate::Global;
 use javm_cap::{CNodeCap, Cap, CapHashOrRef, SlotIdx, SlotPath, TypedCache};
 
 use crate::error::VmError;

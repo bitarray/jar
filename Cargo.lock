@@ -1154,7 +1154,7 @@ version = "0.1.0"
 name = "javm"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "javm-cap",
  "javm-exec",
  "proptest",
@@ -1166,7 +1166,7 @@ dependencies = [
 name = "javm-bench"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "blake3",
  "build-javm",
  "criterion",
@@ -1182,13 +1182,11 @@ dependencies = [
 name = "javm-cap"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "blake2",
  "nub-host-common",
- "nub-talc-util",
  "ssz",
  "ssz-derive",
- "talc",
  "thiserror",
 ]
 
@@ -1204,7 +1202,7 @@ dependencies = [
 name = "javm-guest-tests"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "blake2",
  "blake3",
  "build-javm",
@@ -1445,7 +1443,7 @@ dependencies = [
 name = "nub"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "anyhow",
  "bytecheck",
  "javm-cap",
@@ -1461,7 +1459,7 @@ dependencies = [
 name = "nub-arch-local"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "javm-cap",
  "javm-exec",
  "nub-arch-x86-abi",
@@ -1472,7 +1470,7 @@ dependencies = [
 name = "nub-arch-x86"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "bytecheck",
  "hyperlight-common",
  "hyperlight-guest",
@@ -1482,7 +1480,6 @@ dependencies = [
  "javm-recompiler-x86",
  "nub-arch-x86-abi",
  "nub-host-common",
- "nub-talc-util",
  "rkyv",
 ]
 
@@ -1529,7 +1526,7 @@ dependencies = [
 name = "nub-host-kvm"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "anyhow",
  "bitflags 2.11.1",
  "blake3",
@@ -1547,13 +1544,11 @@ dependencies = [
  "metrics",
  "nub-arch-x86-abi",
  "nub-host-common",
- "nub-talc-util",
  "page_size",
  "rand 0.10.1",
  "rkyv",
  "serde_json",
  "smallvec",
- "talc",
  "termcolor",
  "thiserror",
  "tracing",
@@ -1566,15 +1561,6 @@ dependencies = [
 [[package]]
 name = "nub-kernel"
 version = "0.1.0"
-
-[[package]]
-name = "nub-talc-util"
-version = "0.1.0"
-dependencies = [
- "allocator-api2",
- "spinning_top",
- "talc",
-]
 
 [[package]]
 name = "num-traits"
@@ -2336,7 +2322,7 @@ dependencies = [
 name = "ssz"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
+ "allocate",
  "digest",
  "proptest",
  "sha2",

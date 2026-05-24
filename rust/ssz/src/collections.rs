@@ -8,8 +8,8 @@
 //! roots, mix in length.
 
 use alloc::collections::BTreeMap;
-use allocator_api2::alloc::{Allocator, Global};
-use allocator_api2::vec::Vec;
+use allocate::Vec;
+use allocate::{Allocator, Global};
 use digest::Digest;
 use digest::typenum::U32;
 
@@ -538,7 +538,7 @@ impl<T: HashTreeRoot + Encode> HashTreeRoot for alloc::vec::Vec<T> {
 }
 
 // --------------------------------------------------------------------------
-// allocator_api2::vec::Vec<T, A> — blanket SSZ impl
+// allocate::Vec<T, A> — blanket SSZ impl
 //
 // Used by cap-resident shapes (DataCap, CNodeCap, ImageCap, InstanceCap, ...)
 // where storage must thread through `A: Allocator + Clone` so the values

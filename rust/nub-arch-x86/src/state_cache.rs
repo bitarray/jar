@@ -34,18 +34,18 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use allocator_api2::alloc::Allocator;
-use allocator_api2::boxed::Box as ABox;
+use allocate::Allocator;
+use allocate::Box as ABox;
 use core::cell::UnsafeCell;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use allocate::{CacheTalcLock, TalcAlloc};
 use javm_cap::cap::{Cap, CapHashOrRef};
 use javm_cap::entry::CacheEntry;
 use nub_host_common::cache::{
     CACHE_DIRECTORY_OFFSET, CacheDirectory, STATE_CACHE_GPA, STATE_CACHE_SIZE, STATE_CACHE_VA,
 };
-use nub_talc_util::{CacheTalcLock, TalcAlloc};
 
 use crate::paging::{Perm, install_persistent_kernel_mapping};
 

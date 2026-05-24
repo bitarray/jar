@@ -1,16 +1,14 @@
-//! `CacheEntry<A>` — refcounted wrapper around a [`Cap`] for
-//! storage in `TypedCache::{blobs, instances}`.
+//! `CacheEntry<A>` — refcounted wrapper around a [`Cap`] for storage
+//! in `TypedCache::{blobs, instances}`.
 //!
 //! The refcount tracks how many slots in other caps reference this
 //! entry. Decrement at mutation time follows the `Arc::make_mut`
-//! protocol (see plan): if `prev == 1` we have sole ownership and
-//! can move-promote, otherwise we shallow-clone into a fresh
-//! instance entry.
+//! protocol: if `prev == 1` we have sole ownership and can
+//! move-promote, otherwise we shallow-clone into a fresh instance
+//! entry.
 
-use allocator_api2::alloc::{Allocator, Global};
+use allocate::{Allocator, Global};
 use core::sync::atomic::AtomicU32;
-
-use nub_talc_util::AarcRefCounted;
 
 use super::cap::Cap;
 
@@ -26,11 +24,5 @@ impl<A: Allocator + Clone> CacheEntry<A> {
             refcount: AtomicU32::new(1),
             cap,
         }
-    }
-}
-
-impl<A: Allocator + Clone> AarcRefCounted for CacheEntry<A> {
-    fn refcount(&self) -> &AtomicU32 {
-        &self.refcount
     }
 }

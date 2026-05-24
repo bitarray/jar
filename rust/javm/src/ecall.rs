@@ -45,7 +45,7 @@
 //! calls can read/write cap content without storing the cache borrow
 //! in the long-lived `Vm`.
 
-use allocator_api2::alloc::Global;
+use allocate::Global;
 use javm_cap::{
     Blake2b256, Cap, CapHashOrRef, DataCap, DataContent, Hash, SlotIdx, TypeCap, TypedCache,
 };
@@ -878,7 +878,7 @@ fn data_cap_prefix(data: &DataCap<Global>, len: usize) -> Vec<u8> {
                 }
                 let end = (start + page_size).min(actual_len);
                 if let javm_cap::page::PageSlot::Loaded(page_ref) = page {
-                    let page_bytes = &page_ref.get().bytes;
+                    let page_bytes = &page_ref.bytes;
                     out[start..end].copy_from_slice(&page_bytes[..end - start]);
                 }
             }
@@ -1024,7 +1024,7 @@ mod tests {
     use super::*;
     use crate::callstack::{EntryStatus, InstanceEntry};
     use crate::kernel_assist::InProcessKernelAssist;
-    use allocator_api2::alloc::Global;
+    use allocate::Global;
     use javm_cap::image::Image;
     use javm_cap::{CNodeCap, NUM_REGS};
     use javm_exec::{Access, GasCounter, Mem, PAGE_SIZE, PvmProgram, Regs};

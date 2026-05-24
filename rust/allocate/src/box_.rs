@@ -17,7 +17,7 @@ impl<T> Box<T, Global> {
     #[inline]
     pub fn new(value: T) -> Self {
         Self {
-            inner: alloc::boxed::Box::new(value),
+            inner: alloc::boxed::Box::new_in(value, Global),
         }
     }
 }
@@ -34,7 +34,9 @@ impl<T, A: Allocator> Box<T, A> {
     /// Fallible `new_in`.
     #[inline]
     pub fn try_new_in(value: T, alloc: A) -> Result<Self, crate::AllocError> {
-        alloc::boxed::Box::try_new_in(value, alloc).map(|inner| Self { inner })
+        alloc::boxed::Box::try_new_in(value, alloc)
+            .map(|inner| Self { inner })
+            .map_err(|_| crate::AllocError)
     }
 }
 

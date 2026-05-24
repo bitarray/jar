@@ -26,7 +26,7 @@ kvm = [
 print_debug = []
 
 [dependencies]
-allocator-api2 = "0.4"
+allocate = { path = "../allocate" }
 anyhow = "1.0"
 bitflags = "2.11.1"
 blake3 = "1.8.5"
@@ -38,10 +38,8 @@ hyperlight-common = { version = "0.15.0", features = ["std"] }
 javm-cap = { path = "../javm-cap" }
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
 nub-host-common = { path = "../nub-host-common", features = ["std"] }
-nub-talc-util = { path = "../nub-talc-util" }
 rkyv = { version = "0.8", features = ["std"] }
 smallvec = "1"
-talc = { version = "5.0.3" }
 libc = "0.2.186"
 log = "0.4.29"
 metrics = "0.24.5"

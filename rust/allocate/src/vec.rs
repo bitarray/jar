@@ -22,7 +22,7 @@ impl<T> Vec<T, Global> {
     #[inline]
     pub const fn new() -> Self {
         Self {
-            inner: alloc::vec::Vec::new(),
+            inner: alloc::vec::Vec::new_in(Global),
         }
     }
 }
@@ -88,6 +88,31 @@ impl<T, A: Allocator> Vec<T, A> {
     #[inline]
     pub fn swap_remove(&mut self, index: usize) -> T {
         self.inner.swap_remove(index)
+    }
+
+    #[inline]
+    pub fn insert(&mut self, index: usize, element: T) {
+        self.inner.insert(index, element);
+    }
+
+    #[inline]
+    pub fn remove(&mut self, index: usize) -> T {
+        self.inner.remove(index)
+    }
+
+    /// Re-wrap a raw allocation into a `Vec<T, A>`.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as `alloc::vec::Vec::from_raw_parts_in`: `ptr`
+    /// must point at `capacity * size_of::<T>()` bytes allocated by
+    /// `alloc`, the first `length` of those `T` must be initialised,
+    /// and the layout must match what was passed to `alloc`.
+    #[inline]
+    pub unsafe fn from_raw_parts_in(ptr: *mut T, length: usize, capacity: usize, alloc: A) -> Self {
+        Self {
+            inner: unsafe { alloc::vec::Vec::from_raw_parts_in(ptr, length, capacity, alloc) },
+        }
     }
 
     #[inline]

@@ -2,28 +2,29 @@
 //!
 //! The cache holds caps in two maps:
 //!
-//! - **`blobs: BTreeMap<CapHash, TBox<CacheEntry<A>, A>>`** — content-
-//!   addressed immutable caps. All five kinds (Type, Image, Data,
-//!   CNode, Instance) can live here.
-//! - **`instances: BTreeMap<CapRef, TBox<CacheEntry<A>, A>>`** —
+//! - **`blobs: HashMap<CapHash, TBox<CacheEntry<A>, A>, A>`** —
+//!   content-addressed immutable caps. All five kinds (Type, Image,
+//!   Data, CNode, Instance) can live here.
+//! - **`instances: HashMap<CapRef, TBox<CacheEntry<A>, A>, A>`** —
 //!   identity-keyed mutable working state. Only Data, CNode,
 //!   Instance variants reach this map (after `get_mut` promotion).
 //!
-//! `A` is an [`allocator_api2`] allocator. For host-private use the
-//! default `Global` gives a heap-backed cache. For the shared-memory
-//! state cache, `A = TalcAlloc` lands everything in the cache region.
+//! `A` is an [`allocate::Allocator`] (= `core::alloc::Allocator`).
+//! For host-private use the default `Global` gives a heap-backed
+//! cache. For the shared-memory state cache, `A = TalcAlloc` lands
+//! everything — including the HashMap node storage — in the cache
+//! region.
 //!
 //! Refcounting uses the same protocol as `Arc::make_mut`:
 //! `fetch_sub(1, Release)` at mutation time; if `prev == 1` we have
 //! sole ownership and move-promote (no copy), else we shallow-clone
 //! into a fresh instance entry. See [`TypedCache::get_mut`] for details.
 
-use alloc::collections::BTreeMap;
 use core::sync::atomic::Ordering;
 
-use allocator_api2::alloc::{Allocator, Global};
-use allocator_api2::boxed::Box as ABox;
-use allocator_api2::vec::Vec as AVec;
+use allocate::Box as ABox;
+use allocate::Vec as AVec;
+use allocate::{Allocator, Global, HashMap};
 
 use super::cap::{Cap, CapHash, CapHashOrRef, CapRef};
 use super::cap_hash::cap_hash;
@@ -58,15 +59,15 @@ pub enum CacheError {
 
 pub struct TypedCache<A: Allocator + Clone = Global> {
     alloc: A,
-    blobs: BTreeMap<CapHash, TBox<CacheEntry<A>, A>>,
-    instances: BTreeMap<CapRef, TBox<CacheEntry<A>, A>>,
+    blobs: HashMap<CapHash, TBox<CacheEntry<A>, A>, A>,
+    instances: HashMap<CapRef, TBox<CacheEntry<A>, A>, A>,
     next_ref: u64,
 }
 
 impl TypedCache<Global> {
     /// Construct an empty heap-backed cache. Equivalent to
     /// `TypedCache::new_in(Global)` for callers that don't want an
-    /// `allocator_api2` dependency.
+    /// allocator dependency.
     pub fn new() -> Self {
         Self::new_in(Global)
     }
@@ -83,9 +84,9 @@ impl<A: Allocator + Clone> TypedCache<A> {
     /// `alloc`.
     pub fn new_in(alloc: A) -> Self {
         Self {
+            blobs: HashMap::new_in(alloc.clone()),
+            instances: HashMap::new_in(alloc.clone()),
             alloc,
-            blobs: BTreeMap::new(),
-            instances: BTreeMap::new(),
             // CapRef 0 is reserved; ref allocation starts at 1.
             next_ref: 1,
         }
@@ -679,24 +680,20 @@ pub(crate) fn deep_clone_into<A: Allocator + Clone>(src: &Cap<Global>, alloc: A)
                             PageSlot::Empty => PageSlot::Empty,
                             PageSlot::Missing(h) => PageSlot::Missing(*h),
                             PageSlot::Loaded(pr) => {
-                                let src_pb = pr.get();
                                 // Page bytes are also page-aligned so
                                 // they can be mapped directly.
                                 let mut bytes: AVec<u8, A> = crate::data::alloc_page_aligned_zeroed::<
                                     A,
                                 >(
-                                    src_pb.bytes.len(), alloc.clone()
+                                    pr.bytes.len(), alloc.clone()
                                 );
-                                bytes[..src_pb.bytes.len()]
-                                    .copy_from_slice(src_pb.bytes.as_slice());
+                                bytes[..pr.bytes.len()].copy_from_slice(pr.bytes.as_slice());
                                 let pb = PageBytes {
-                                    refcount: core::sync::atomic::AtomicU32::new(1),
-                                    hash: src_pb.hash,
+                                    hash: pr.hash,
                                     bytes,
                                 };
-                                let pr = PageRef::<A>::new_in(pb, alloc.clone())
-                                    .expect("alloc PageRef during deep_clone_into");
-                                PageSlot::Loaded(pr)
+                                let new_pr = PageRef::<A>::new_in(pb, alloc.clone());
+                                PageSlot::Loaded(new_pr)
                             }
                         };
                         new_pages.push(new_slot);
