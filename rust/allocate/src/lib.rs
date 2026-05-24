@@ -98,35 +98,56 @@ impl core::fmt::Display for AllocError {
     }
 }
 
-// SAFETY: Global delegates to the global alloc/dealloc functions
-// (stable), which match the Allocator contract.
+// SAFETY: delegates to `alloc::alloc::Global`, which is the canonical
+// global allocator and trivially satisfies the `Allocator` contract.
+// Forwarding ensures we pick up any future optimizations in
+// `Global::grow` / `Global::shrink` / `Global::allocate_zeroed` for
+// free.
 unsafe impl core::alloc::Allocator for Global {
+    #[inline]
     fn allocate(
         &self,
         layout: Layout,
     ) -> Result<core::ptr::NonNull<[u8]>, core::alloc::AllocError> {
-        if layout.size() == 0 {
-            // Zero-sized: return a dangling-but-aligned non-null slice
-            // pointer (matches std::alloc::Global behaviour).
-            return Ok(core::ptr::NonNull::slice_from_raw_parts(
-                unsafe { core::ptr::NonNull::new_unchecked(layout.align() as *mut u8) },
-                0,
-            ));
-        }
-        let ptr = unsafe { alloc::alloc::alloc(layout) };
-        if ptr.is_null() {
-            Err(core::alloc::AllocError)
-        } else {
-            Ok(core::ptr::NonNull::slice_from_raw_parts(
-                unsafe { core::ptr::NonNull::new_unchecked(ptr) },
-                layout.size(),
-            ))
-        }
+        alloc::alloc::Global.allocate(layout)
     }
+    #[inline]
+    fn allocate_zeroed(
+        &self,
+        layout: Layout,
+    ) -> Result<core::ptr::NonNull<[u8]>, core::alloc::AllocError> {
+        alloc::alloc::Global.allocate_zeroed(layout)
+    }
+    #[inline]
     unsafe fn deallocate(&self, ptr: core::ptr::NonNull<u8>, layout: Layout) {
-        if layout.size() != 0 {
-            unsafe { alloc::alloc::dealloc(ptr.as_ptr(), layout) };
-        }
+        unsafe { alloc::alloc::Global.deallocate(ptr, layout) }
+    }
+    #[inline]
+    unsafe fn grow(
+        &self,
+        ptr: core::ptr::NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<core::ptr::NonNull<[u8]>, core::alloc::AllocError> {
+        unsafe { alloc::alloc::Global.grow(ptr, old_layout, new_layout) }
+    }
+    #[inline]
+    unsafe fn grow_zeroed(
+        &self,
+        ptr: core::ptr::NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<core::ptr::NonNull<[u8]>, core::alloc::AllocError> {
+        unsafe { alloc::alloc::Global.grow_zeroed(ptr, old_layout, new_layout) }
+    }
+    #[inline]
+    unsafe fn shrink(
+        &self,
+        ptr: core::ptr::NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<core::ptr::NonNull<[u8]>, core::alloc::AllocError> {
+        unsafe { alloc::alloc::Global.shrink(ptr, old_layout, new_layout) }
     }
 }
 
