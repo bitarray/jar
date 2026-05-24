@@ -1,28 +1,80 @@
-//! Allocator-aware collections + smart pointers over `allocator-api2 0.4`.
+//! Allocator-aware `Box`, `Vec`, `Arc`, `HashMap` and the `TalcAlloc`
+//! bridge — wrapped into stable newtypes for the rest of the workspace.
 //!
-//! The Rust ecosystem is mid-transition to the `Allocator` API. On stable
-//! `alloc::collections::BTreeMap` is `BTreeMap<K, V>` (no allocator param),
-//! `alloc::sync::Arc<T>` is `Arc<T>` (no allocator param), and `hashbrown`
-//! provides `HashMap<K, V, S, A>` but pins `allocator-api2 ^0.2.9` which
-//! conflicts with `talc 5.x`'s `allocator-api2 ^0.4` requirement.
+//! ## Why this crate exists
 //!
-//! `allocate` exists to fill the gap by:
+//! Stable Rust gives us 2-parameter `Box<T>` / `Vec<T>` /
+//! `BTreeMap<K, V>` / `Arc<T>` (defaulting to the global allocator),
+//! but the 3-parameter forms with a custom allocator are nightly. We
+//! want allocator-generic types so the shared talc-managed cache
+//! region can own everything (caps, refcounts, map storage) instead
+//! of half-talc-half-global.
 //!
-//! 1. Re-exporting the `allocator-api2 0.4` core types so callers depend
-//!    on one place for the `Allocator` trait, `Box<T, A>`, and `Vec<T, A>`.
-//! 2. Vendoring `BTreeMap` from `alloc::collections::BTreeMap`,
-//!    `HashMap` from `hashbrown`, and `Arc`/`Weak` from `alloc::sync`,
-//!    each mechanically patched to work on stable + `allocator-api2 0.4`.
+//! No third-party crate fills the gap cleanly on
+//! `allocator-api2 0.4`. So we use the `RUSTC_BOOTSTRAP` env-var
+//! escape hatch (see Firefox `mach build` for prior art), scoped via
+//! workspace `.cargo/config.toml` to just **three** crates:
+//! `allocate, talc, hashbrown`. Everything else compiles
+//! strictly-stable.
 //!
-//! Vendored modules are kept as close to upstream as possible — see
-//! the per-module `SOURCE.md` files for the upstream commit SHA and
-//! the patches applied. Re-syncing with upstream should be a routine
-//! 3-way merge, not a rewrite.
+//! ## What's exposed
+//!
+//! - [`Allocator`]: a stable supertrait wrapper for
+//!   `core::alloc::Allocator`. Any `T: core::alloc::Allocator`
+//!   auto-implements this. Use as a bound everywhere: `where A:
+//!   allocate::Allocator + Clone`.
+//! - [`Box`], [`Vec`], [`Arc`], [`Weak`], [`HashMap`]: newtype
+//!   wrappers around `alloc::boxed::Box`, `alloc::vec::Vec`,
+//!   `alloc::sync::Arc`, `alloc::sync::Weak`, and
+//!   `hashbrown::HashMap` respectively. Newtypes (not re-exports) so
+//!   downstream stays on stable Rust.
+//! - [`TalcAlloc`]: the talc → `Allocator` bridge. Single impl, no
+//!   `allocator-api2` involved.
+//! - [`CacheTalcLock`], [`Manual`]: re-exports so consumers don't
+//!   need a direct talc dep.
 
 #![no_std]
+#![feature(allocator_api)]
 
 extern crate alloc;
 
-pub use allocator_api2::alloc::{AllocError, Allocator, Global, Layout};
-pub use allocator_api2::boxed::Box;
-pub use allocator_api2::vec::Vec;
+/// Stable-name supertrait wrapper for `core::alloc::Allocator`.
+///
+/// Any `T: core::alloc::Allocator` automatically implements this
+/// (blanket impl). Use as a bound everywhere in the workspace:
+///
+/// ```ignore
+/// fn foo<A: allocate::Allocator + Clone>(alloc: A) { ... }
+/// ```
+///
+/// The supertrait is `core::alloc::Allocator` (nightly), but writing
+/// `where A: allocate::Allocator` is fully stable in downstream
+/// crates — only `allocate` itself needs `#![feature(allocator_api)]`
+/// to name the supertrait.
+pub trait Allocator: core::alloc::Allocator {}
+impl<T: core::alloc::Allocator + ?Sized> Allocator for T {}
+
+/// Re-exports of stable companion types.
+pub use alloc::alloc::Global;
+pub use core::alloc::{AllocError, Layout};
+
+mod arc;
+mod box_;
+mod hashmap;
+mod talc_alloc;
+mod vec;
+
+#[cfg(test)]
+mod arc_tests;
+#[cfg(test)]
+mod box_tests;
+#[cfg(test)]
+mod hashmap_tests;
+#[cfg(test)]
+mod vec_tests;
+
+pub use arc::{Arc, Weak};
+pub use box_::Box;
+pub use hashmap::HashMap;
+pub use talc_alloc::{CacheTalcLock, Manual, TalcAlloc};
+pub use vec::Vec;
