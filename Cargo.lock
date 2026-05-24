@@ -1166,6 +1166,7 @@ dependencies = [
  "allocator-api2",
  "blake2",
  "nub-host-common",
+ "nub-talc-util",
  "ssz",
  "ssz-derive",
  "talc",
@@ -1462,6 +1463,7 @@ dependencies = [
  "javm-recompiler-x86",
  "nub-arch-x86-abi",
  "nub-host-common",
+ "nub-talc-util",
  "rkyv",
 ]
 
@@ -1484,14 +1486,11 @@ dependencies = [
 name = "nub-host-common"
 version = "0.1.0"
 dependencies = [
- "allocator-api2",
  "anyhow",
  "bytecheck",
  "log",
  "rkyv",
  "spin",
- "spinning_top",
- "talc",
  "thiserror",
  "tracing",
  "tracing-core",
@@ -1529,6 +1528,7 @@ dependencies = [
  "metrics",
  "nub-arch-x86-abi",
  "nub-host-common",
+ "nub-talc-util",
  "page_size",
  "rand 0.10.1",
  "rkyv",
@@ -1547,6 +1547,15 @@ dependencies = [
 [[package]]
 name = "nub-kernel"
 version = "0.1.0"
+
+[[package]]
+name = "nub-talc-util"
+version = "0.1.0"
+dependencies = [
+ "allocator-api2",
+ "spinning_top",
+ "talc",
+]
 
 [[package]]
 name = "num-traits"

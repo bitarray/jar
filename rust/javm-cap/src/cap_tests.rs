@@ -6,7 +6,7 @@ use core::sync::atomic::AtomicU32;
 
 use allocator_api2::alloc::Global;
 use allocator_api2::vec::Vec as AVec;
-use nub_host_common::cache::{CacheTalcLock, TalcAlloc};
+use nub_talc_util::{CacheTalcLock, TalcAlloc};
 use talc::source::Manual;
 
 use crate::slot::SlotIdx;

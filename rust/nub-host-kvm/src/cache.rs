@@ -28,9 +28,10 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use javm_cap::{Cache as TypedCache, CapHashOrRef, CapRef};
 use nub_arch_x86_abi::CapHash;
 use nub_host_common::cache::{
-    CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheTalcLock, STATE_CACHE_SIZE, STATE_CACHE_VA,
-    TALC_HEAP_OFFSET, TALC_HEAP_SIZE, TalcAlloc,
+    CACHE_DIRECTORY_OFFSET, CacheDirectory, STATE_CACHE_SIZE, STATE_CACHE_VA, TALC_HEAP_OFFSET,
+    TALC_HEAP_SIZE,
 };
+use nub_talc_util::{CacheTalcLock, TalcAlloc};
 use talc::source::Manual;
 
 use crate::{HyperlightError, Result, new_error};

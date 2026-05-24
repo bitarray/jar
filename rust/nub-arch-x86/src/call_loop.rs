@@ -98,7 +98,7 @@ use javm_cap::cap::{Cap, CapHashOrRef};
 use javm_cap::hash::{Blake2b256, Hash};
 use javm_cap::slot::SlotIdx;
 use javm_cap::{CapHash, NUM_REGS};
-use nub_host_common::cache::TalcAlloc;
+use nub_talc_util::TalcAlloc;
 
 use crate::jit_run::{self, DirectMap, ExitInfo, FrameRuntime, MemRegion};
 use crate::page_alloc::PageBuf;

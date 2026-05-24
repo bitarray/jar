@@ -1,7 +1,7 @@
 //! Tests for [`Aarc`].
 
+use super::aarc::{Aarc, AarcRefCounted};
 use super::talc_alloc::TalcAlloc;
-use super::talc_arc::{Aarc, AarcRefCounted};
 use super::talc_box::CacheTalcLock;
 use allocator_api2::alloc::Global;
 use core::ptr::NonNull;

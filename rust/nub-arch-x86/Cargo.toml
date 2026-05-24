@@ -35,6 +35,7 @@ allocator-api2 = { version = "0.4", default-features = false, features = ["alloc
 # `InvocationResult` live here.
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi", default-features = false }
 nub-host-common = { path = "../nub-host-common", default-features = false }
+nub-talc-util = { path = "../nub-talc-util" }
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
 bytecheck = { version = "0.8", default-features = false }
 

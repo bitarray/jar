@@ -10,7 +10,7 @@ use allocator_api2::alloc::{Allocator, Global};
 use allocator_api2::vec::Vec;
 use core::sync::atomic::AtomicU32;
 
-use nub_host_common::cache::{Aarc, AarcRefCounted};
+use nub_talc_util::{Aarc, AarcRefCounted};
 
 use super::cap::CapHash;
 

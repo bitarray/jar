@@ -44,9 +44,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use javm_cap::cap::{Cap, CapHashOrRef};
 use javm_cap::entry::CacheEntry;
 use nub_host_common::cache::{
-    CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheTalcLock, STATE_CACHE_GPA, STATE_CACHE_SIZE,
-    STATE_CACHE_VA, TalcAlloc,
+    CACHE_DIRECTORY_OFFSET, CacheDirectory, STATE_CACHE_GPA, STATE_CACHE_SIZE, STATE_CACHE_VA,
 };
+use nub_talc_util::{CacheTalcLock, TalcAlloc};
 
 use crate::paging::{Perm, install_persistent_kernel_mapping};
 
