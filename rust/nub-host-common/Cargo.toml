@@ -16,7 +16,10 @@ i686-guest = []
 nanvix-unstable = ["i686-guest"]
 
 [dependencies]
+allocate = { path = "../allocate" }
 anyhow = { version = "1", default-features = false }
+foldhash = { version = "0.2", default-features = false }
+javm-cap = { path = "../javm-cap", default-features = false }
 log = "0.4"
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
 bytecheck = { version = "0.8", default-features = false }
@@ -24,6 +27,14 @@ spin = "0.10"
 thiserror = { version = "2", default-features = false }
 tracing = { version = "0.1", optional = true }
 tracing-core = { version = "0.1", default-features = false }
+
+# Host-only dependencies (kernel mmap path + per-region hasher seed +
+# pin-set storage). Gated by target_os so the no_std `target_os = "none"`
+# guest build doesn't pull libc / getrandom.
+[target.'cfg(not(target_os = "none"))'.dependencies]
+getrandom = "0.3"
+libc = "0.2"
+smallvec = "1"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

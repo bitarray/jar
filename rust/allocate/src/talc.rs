@@ -19,6 +19,8 @@
 //!   The single `unsafe { &*VA }` cast asserts the `'static` lifetime
 //!   that the mmap pinning guarantees.
 
+pub use lock_api::{Mutex, MutexGuard};
+pub use spinning_top::RawSpinlock;
 pub use talc::{ClaimOnOom, ErrOnOom, OomHandler, Span, Talc, Talck};
 
 /// Concrete `Talck` flavour used by the shared state-cache region.

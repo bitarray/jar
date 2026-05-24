@@ -17,6 +17,7 @@ version = "0.1.0"
 dependencies = [
  "allocator-api2 0.2.21",
  "hashbrown 0.17.1",
+ "lock_api",
  "spinning_top",
  "talc 4.4.3",
 ]
@@ -1192,7 +1193,6 @@ version = "0.1.0"
 dependencies = [
  "allocate",
  "blake2",
- "nub-host-common",
  "ssz",
  "ssz-derive",
  "thiserror",
@@ -1510,10 +1510,16 @@ dependencies = [
 name = "nub-host-common"
 version = "0.1.0"
 dependencies = [
+ "allocate",
  "anyhow",
  "bytecheck",
+ "foldhash 0.2.0",
+ "getrandom 0.3.4",
+ "javm-cap",
+ "libc",
  "log",
  "rkyv",
+ "smallvec",
  "spin",
  "thiserror",
  "tracing",

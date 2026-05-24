@@ -8,6 +8,7 @@ description = "Allocator-aware Box, Vec, Arc, HashMap + the TalcAlloc bridge. Re
 [dependencies]
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.17", default-features = false, features = ["allocator-api2", "default-hasher", "inline-more", "equivalent"] }
+lock_api = "0.4"
 spinning_top = "0.3"
 talc = { version = "4.4.3", default-features = false, features = ["lock_api", "allocator-api2"] }
 
