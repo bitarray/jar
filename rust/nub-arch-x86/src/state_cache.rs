@@ -347,7 +347,6 @@ fn clear_scratch(base: NonNull<u8>) {
 /// Cap-not-found / invalid-state errors returned by `Cache` methods.
 /// Kept as a small enum so callers can branch on the cause without
 /// matching on string literals.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheErr {
     /// The requested hash or ref isn't present in the directory.
@@ -375,9 +374,8 @@ pub enum CacheErr {
 /// prevents publish/promote/clear ops from running while a `&Cap`
 /// read borrow is live (no eviction during reads).
 ///
-/// Construct via [`Cache::new`] at kernel boot for the default
-/// region, or [`Cache::new_at`] for an alternate base. Pass
-/// `&mut Cache` to the call loop; pass `&Cache` to read-only paths.
+/// Construct via [`Cache::new`] at kernel boot. Pass `&mut Cache` to
+/// the call loop; pass `&Cache` to read-only paths.
 pub struct Cache {
     base: NonNull<u8>,
 }
@@ -395,23 +393,6 @@ impl Cache {
         ensure_default_mapped().map_err(|_| CacheErr::MapNotInstalled)?;
         let base = NonNull::new(STATE_CACHE_VA as *mut u8).expect("STATE_CACHE_VA is non-null");
         Ok(Self { base })
-    }
-
-    /// Construct a `Cache` handle pointing at an arbitrary base. The
-    /// caller must have arranged for the region to be mapped and
-    /// initialised (talc lock at offset 0, `CacheDirectory` at
-    /// [`CACHE_DIRECTORY_OFFSET`]). Reserved for future multi-region
-    /// setups; the default region uses [`Cache::new`].
-    #[allow(dead_code)]
-    pub fn new_at(base: NonNull<u8>) -> Result<Self, CacheErr> {
-        Ok(Self { base })
-    }
-
-    /// The region's base pointer. Equal to [`STATE_CACHE_VA`] for a
-    /// `Cache` constructed via [`Cache::new`].
-    #[allow(dead_code)]
-    pub fn base(&self) -> NonNull<u8> {
-        self.base
     }
 
     /// Allocator handle for the shared talc heap. Cheap to clone.
