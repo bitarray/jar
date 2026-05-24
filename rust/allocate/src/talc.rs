@@ -8,8 +8,8 @@
 //! Construction is one line at the call site:
 //!
 //! - **Tests**: `&TALC` where
-//!   `static TALC: CacheTalcLock = new_cache_talc_lock();` (see
-//!   [`crate::test_arena`]).
+//!   `static TALC: CacheTalcLock = new_cache_talc_lock();` (see the
+//!   `test_arena` helper).
 //! - **Production**: the talc lives at a fixed VA (mmap'd, pinned for
 //!   the process lifetime):
 //!   ```ignore

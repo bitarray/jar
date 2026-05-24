@@ -11,7 +11,7 @@
 //! ```
 //!
 //! The talc lock and its smart-pointer primitives (TalcAlloc,
-//! CacheTalcLock, Arc) live in the [`allocate`] crate.
+//! CacheTalcLock, Arc) live in the `allocate` crate.
 //! This module owns the *cache-specific* pieces:
 //!
 //! - [`CacheDirectory`] — the guest-readable directory at
