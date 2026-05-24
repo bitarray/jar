@@ -32,6 +32,13 @@ pub mod talc_alloc;
 pub mod talc_arc;
 pub mod talc_box;
 
+#[cfg(test)]
+mod directory_tests;
+#[cfg(test)]
+mod talc_alloc_tests;
+#[cfg(test)]
+mod talc_arc_tests;
+
 pub use directory::{
     BlobSlot, CacheDirectory, INSTANCE_MASK, InstanceSlot, MAX_BLOB_SLOTS, MAX_INSTANCE_SLOTS,
 };
