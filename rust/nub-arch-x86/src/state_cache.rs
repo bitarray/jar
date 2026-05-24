@@ -52,14 +52,16 @@ use crate::paging::{Perm, install_persistent_kernel_mapping};
 
 static CACHE_MAPPED: AtomicBool = AtomicBool::new(false);
 
-/// One scratch entry tracked for end-of-RPC cleanup. Either a blob
-/// (keyed by hash slot index) or an instance (keyed by instance
-/// slot index). The directory slot is zeroed and the `CacheEntry`
-/// storage is reclaimed when the corresponding cleanup fires —
-/// provided no live [`CapHandle`] still references it.
+/// One scratch entry tracked for end-of-RPC cleanup. Blobs are
+/// removed by content hash (via [`CacheDirectory::remove_blob`])
+/// because the open-addressed directory may shift slots during
+/// other deletions in the same RPC. Instances are removed by slot
+/// index (the instance table is direct-indexed and stable). The
+/// `CacheEntry` storage is reclaimed when the corresponding cleanup
+/// fires — provided no live handle still references it.
 enum ScratchEntry {
     Blob {
-        slot_idx: usize,
+        hash: [u8; 32],
         entry: NonNull<CacheEntry<TalcAlloc>>,
     },
     Instance {
@@ -201,21 +203,22 @@ fn publish_blob(
 
     let dir_ptr = directory_mut_ptr(base);
     // SAFETY: directory ptr is in the persistent kernel mapping.
-    let slot_idx = unsafe { CacheDirectory::first_empty_blob(dir_ptr) }
-        .ok_or("publish_blob: directory full")?;
-    // SAFETY: slot_idx < MAX_BLOB_SLOTS; directory ptr is valid.
-    unsafe {
-        let slot = CacheDirectory::blob_slot_ptr(dir_ptr, slot_idx);
-        (*slot).hash = hash;
-        (*slot).entry_va = entry_va;
-        (*dir_ptr).blob_count_incr();
+    // `insert_blob` does the probe + write under one call.
+    if unsafe { CacheDirectory::insert_blob(dir_ptr, hash, entry_va) }.is_none() {
+        // Roll back the entry allocation on directory-full.
+        // SAFETY: we just got `entry_ptr` from `ABox::into_raw`.
+        unsafe {
+            let restored = ABox::from_raw_in(entry_ptr, talc_alloc(base));
+            drop(restored);
+        }
+        return Err("publish_blob: directory full");
     }
 
     // Record for cleanup at end of RPC.
     // SAFETY: single-threaded guest.
     let tracker = unsafe { &mut *SCRATCH.inner.get() };
     tracker.entries.push(ScratchEntry::Blob {
-        slot_idx,
+        hash,
         entry: entry_nn,
     });
     Ok(())
@@ -310,14 +313,11 @@ fn clear_scratch(base: NonNull<u8>) {
         }
 
         match scratch {
-            ScratchEntry::Blob { slot_idx, entry } => {
-                // SAFETY: slot_idx < MAX_BLOB_SLOTS by construction.
-                unsafe {
-                    let slot = CacheDirectory::blob_slot_ptr(dir_ptr, slot_idx);
-                    (*slot).hash = [0u8; 32];
-                    (*slot).entry_va = 0;
-                    (*dir_ptr).blob_count_decr();
-                }
+            ScratchEntry::Blob { hash, entry } => {
+                // SAFETY: directory ptr is valid; `remove_blob` does
+                // backward-shift to keep probe chains dense.
+                let removed = unsafe { CacheDirectory::remove_blob(dir_ptr, &hash) };
+                debug_assert!(removed, "scratch blob missing from directory at cleanup");
                 // SAFETY: allocated via `ABox::try_new_in` in publish.
                 unsafe {
                     let boxed = ABox::from_raw_in(entry.as_ptr(), alloc);
@@ -519,10 +519,9 @@ impl Cache {
     pub fn promote_blob(&mut self, h: &javm_cap::CapHash) -> Result<javm_cap::CapRef, CacheErr> {
         let dir_ptr = directory_mut_ptr(self.base);
         // SAFETY: dir_ptr in persistent kernel mapping.
-        let (blob_slot_idx, _) =
+        let (_, slot_ptr) =
             unsafe { CacheDirectory::find_blob(dir_ptr, h) }.ok_or(CacheErr::NotFound)?;
-        // SAFETY: slot present.
-        let entry_va = unsafe { (*CacheDirectory::blob_slot_ptr(dir_ptr, blob_slot_idx)).entry_va };
+        let entry_va = unsafe { (*slot_ptr).entry_va };
         if entry_va == 0 {
             return Err(CacheErr::NotFound);
         }
@@ -535,16 +534,13 @@ impl Cache {
         // SAFETY: same.
         let refcount = unsafe { (*entry_ptr).refcount.load(Ordering::Acquire) };
         if refcount == 1 {
-            // Move-promote: zero blob slot, allocate fresh instance
-            // ref, point it at the existing entry. No clone.
+            // Move-promote: remove blob slot (backward-shift), allocate
+            // fresh instance ref, point it at the existing entry. No clone.
             let (ref_id, inst_slot_idx) =
                 unsafe { CacheDirectory::alloc_ref(dir_ptr) }.ok_or(CacheErr::DirectoryFull)?;
             // SAFETY: directory ops.
             unsafe {
-                let bslot = CacheDirectory::blob_slot_ptr(dir_ptr, blob_slot_idx);
-                (*bslot).hash = [0u8; 32];
-                (*bslot).entry_va = 0;
-                (*dir_ptr).blob_count_decr();
+                CacheDirectory::remove_blob(dir_ptr, h);
                 let islot = CacheDirectory::instance_slot_ptr(dir_ptr, inst_slot_idx);
                 (*islot).ref_id = ref_id;
                 (*islot).entry_va = entry_va;

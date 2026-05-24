@@ -28,8 +28,8 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use javm_cap::{Cache as TypedCache, CapHashOrRef, CapRef};
 use nub_arch_x86_abi::CapHash;
 use nub_host_common::cache::{
-    BlobSlot, CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheTalcLock, STATE_CACHE_SIZE,
-    STATE_CACHE_VA, TALC_HEAP_OFFSET, TALC_HEAP_SIZE, TalcAlloc,
+    CACHE_DIRECTORY_OFFSET, CacheDirectory, CacheTalcLock, STATE_CACHE_SIZE, STATE_CACHE_VA,
+    TALC_HEAP_OFFSET, TALC_HEAP_SIZE, TalcAlloc,
 };
 use talc::source::Manual;
 
@@ -348,34 +348,20 @@ impl Cache {
     // --- Directory maintenance ---
 
     /// Ensure the directory has a slot for `hash` pointing at the
-    /// blob's CacheEntry VA. Idempotent: if a slot already exists, the
-    /// VA is refreshed in case the entry moved (e.g. CoW promote).
+    /// blob's CacheEntry VA. Idempotent: if a slot already exists,
+    /// `insert_blob` refreshes the VA in case the entry moved (e.g.
+    /// CoW promote).
     fn touch_blob(&mut self, hash: CapHash) -> Result<()> {
         let va = self
             .typed_cache
             .entry_va(CapHashOrRef::Hash(hash))
             .ok_or(CacheError::BlobMissing(hash))?;
         let dir_ptr = self.directory_ptr().as_ptr();
-        // SAFETY: dir_ptr is valid live pointer; find_blob just
-        // scans the array.
-        if let Some((_, slot_ptr)) = unsafe { CacheDirectory::find_blob(dir_ptr, &hash) } {
-            // Slot present — update VA (handles CoW relocations).
-            unsafe {
-                (*(slot_ptr as *mut BlobSlot)).entry_va = va;
-            }
-            return Ok(());
-        }
-        let idx = unsafe { CacheDirectory::first_empty_blob(dir_ptr) }.ok_or(
+        // SAFETY: dir_ptr is a valid live pointer; `insert_blob`
+        // handles probe + idempotency + count internally.
+        unsafe { CacheDirectory::insert_blob(dir_ptr, hash, va) }.ok_or(
             CacheError::BlobDirectoryFull(nub_host_common::cache::MAX_BLOB_SLOTS),
         )?;
-        let slot = unsafe { CacheDirectory::blob_slot_ptr(dir_ptr, idx) };
-        unsafe {
-            (*slot).hash = hash;
-            (*slot).entry_va = va;
-        }
-        // Release fence so the guest's acquire on `blob_count` sees
-        // the slot's contents.
-        unsafe { (*dir_ptr).blob_count_incr() };
         Ok(())
     }
 
@@ -449,11 +435,12 @@ mod tests {
         let dir = cache.directory();
         assert_eq!(dir.blob_count.load(std::sync::atomic::Ordering::Acquire), 1);
         let dir_ptr = dir as *const CacheDirectory;
-        let (idx, slot_ptr) = unsafe { CacheDirectory::find_blob(dir_ptr, &h) }.expect("found");
-        assert_eq!(idx, 0);
+        // Slot index is the hash's natural slot (open-addressed
+        // probe), not necessarily 0. Just verify the hash resolves
+        // and its entry_va points into the cache region.
+        let (_, slot_ptr) = unsafe { CacheDirectory::find_blob(dir_ptr, &h) }.expect("found");
         unsafe {
             assert_eq!((*slot_ptr).hash, h);
-            // entry_va points inside the cache region.
             let va = (*slot_ptr).entry_va;
             assert!(va >= STATE_CACHE_VA);
             assert!(va < STATE_CACHE_VA + STATE_CACHE_SIZE as u64);
