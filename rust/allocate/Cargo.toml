@@ -1,0 +1,12 @@
+[package]
+name = "allocate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Allocator-aware Box, Vec, BTreeMap, HashMap, and Arc over allocator-api2 0.4. Re-exports allocator-api2's Box/Vec/Allocator; vendors BTreeMap from alloc::collections, HashMap from hashbrown, and Arc from alloc::sync to provide the third allocator type parameter on stable Rust."
+
+[dependencies]
+allocator-api2 = { version = "0.4", default-features = false, features = ["alloc"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

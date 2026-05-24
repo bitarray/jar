@@ -12,6 +12,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocate"
+version = "0.1.0"
+dependencies = [
+ "allocator-api2",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
