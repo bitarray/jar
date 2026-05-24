@@ -301,14 +301,14 @@ fn cache_entry_refcount_starts_at_one() {
 
 #[test]
 fn cache_with_talc_alloc_round_trips_full_publish_chain() {
-    use crate::cache::Cache;
+    use crate::cache::TypedCache;
     use crate::cap::NUM_REGS;
 
     // Plenty of headroom — the published Image is tiny and the inline
     // Data slot is 8 bytes; 256 KiB is excessive but exercises real
     // talc claims rather than the embedded-arena edge case.
     let arena = Arena::new(256 * 1024);
-    let mut cache = Cache::new_in(arena.alloc());
+    let mut cache = TypedCache::new_in(arena.alloc());
 
     // 1. Publish a Data blob (cap is Global; cache deep-clones into talc).
     let data_h = cache

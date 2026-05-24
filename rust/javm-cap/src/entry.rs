@@ -1,5 +1,5 @@
 //! `CacheEntry<A>` — refcounted wrapper around a [`Cap`] for
-//! storage in `Cache::{blobs, instances}`.
+//! storage in `TypedCache::{blobs, instances}`.
 //!
 //! The refcount tracks how many slots in other caps reference this
 //! entry. Decrement at mutation time follows the `Arc::make_mut`

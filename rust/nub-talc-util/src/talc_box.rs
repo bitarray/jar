@@ -9,7 +9,8 @@
 //! a raw `NonNull<TalcLock>` sidesteps the lifetime virus; the
 //! correctness obligation is that the cache region (and therefore
 //! the TalcLock at its offset 0) outlives every box pointing at it.
-//! That's enforced by Drop ordering inside the host's `Cache` struct.
+//! That's enforced by Drop ordering inside the host's `HostCache`
+//! struct.
 
 use alloc::alloc::Layout;
 use core::marker::PhantomData;

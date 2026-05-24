@@ -15,20 +15,19 @@
 //! `(CapRef, entry_va)` pairs that resolve cap queries into a
 //! `&CacheEntry<TalcAlloc>` we can walk by pointer.
 //!
-//! ## Public API: the [`Cache`] struct
+//! ## Public API: the [`GuestCache`] struct
 //!
-//! All in-kernel cache access goes through [`Cache`] — its methods
+//! All in-kernel cache access goes through [`GuestCache`] — its methods
 //! return `&Cap` / `&mut Cap` borrows whose lifetime is tied to
-//! `&Cache` / `&mut Cache`. The borrow checker enforces "no
-//! eviction during read": while a `&Cap` is live, any `&mut Cache`
+//! `&GuestCache` / `&mut GuestCache`. The borrow checker enforces "no
+//! eviction during read": while a `&Cap` is live, any `&mut GuestCache`
 //! op (publish / promote / clone / clear) is rejected by the
 //! compiler.
 //!
-//! `Cache` is just a pointer to the cache region's base. Today the
-//! default constructor picks [`STATE_CACHE_VA`]; in the future a
-//! separate constructor ([`Cache::new_at`]) accepts an arbitrary
-//! base, enabling multi-region setups. Every dereference goes
-//! through `self.base`; no method body hardcodes `STATE_CACHE_VA`.
+//! `GuestCache` is just a pointer to the cache region's base. The
+//! default constructor picks [`STATE_CACHE_VA`]; every dereference
+//! goes through `self.base` so multi-region setups can be added by
+//! introducing an alternate constructor when needed.
 
 #![cfg(target_os = "none")]
 
@@ -98,8 +97,7 @@ static SCRATCH: ScratchCell = ScratchCell {
 
 /// Idempotent: install the default cache mapping (`STATE_CACHE_VA →
 /// STATE_CACHE_GPA`) in the active PML4 if not already done. Called
-/// from [`Cache::new`]; [`Cache::new_at`] does not call this — the
-/// caller is responsible for mapping alternate regions.
+/// from [`GuestCache::new`].
 fn ensure_default_mapped() -> Result<(), &'static str> {
     if CACHE_MAPPED.load(Ordering::Acquire) {
         return Ok(());
@@ -143,7 +141,7 @@ fn talc_alloc(base: NonNull<u8>) -> TalcAlloc {
 /// Look up a blob (content-addressed cap) by hash. Returns a borrowed
 /// reference to the `CacheEntry` living in cache memory. The
 /// `'static` lifetime is a polite fiction tightened to the
-/// surrounding `&Cache` borrow by [`Cache::read_blob`].
+/// surrounding `&GuestCache` borrow by [`GuestCache::read_blob`].
 fn lookup_blob<A: Allocator + Clone>(
     base: NonNull<u8>,
     hash: &[u8; 32],
@@ -182,7 +180,7 @@ fn lookup_instance<A: Allocator + Clone>(
 /// Tracks the published entry in [`SCRATCH`] so [`clear_scratch`]
 /// can free + zero the directory slot at end of RPC.
 ///
-/// V1: the host's `Cache<TalcAlloc>` BTreeMap is NOT updated — the
+/// V1: the host's `TypedCache<TalcAlloc>` BTreeMap is NOT updated — the
 /// guest's view is via the directory only. The host doesn't query
 /// guest-published caps mid-RPC (Hyperlight serialises calls), and
 /// the cleanup at end-of-RPC ensures no stale entries leak across
@@ -341,10 +339,10 @@ fn clear_scratch(base: NonNull<u8>) {
 }
 
 // ============================================================
-// `Cache` struct — the lifetime-correct, no-SSZ-Merkle API
+// `GuestCache` struct — the lifetime-correct, no-SSZ-Merkle API
 // ============================================================
 
-/// Cap-not-found / invalid-state errors returned by `Cache` methods.
+/// Cap-not-found / invalid-state errors returned by `GuestCache` methods.
 /// Kept as a small enum so callers can branch on the cause without
 /// matching on string literals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,26 +365,26 @@ pub enum CacheErr {
 /// base; methods derive the talc-lock pointer (offset 0) and the
 /// `CacheDirectory` pointer (offset [`CACHE_DIRECTORY_OFFSET`]) from
 /// it. No method body hardcodes [`STATE_CACHE_VA`] — that's only the
-/// default that [`Cache::new`] uses to construct `base`.
+/// default that [`GuestCache::new`] uses to construct `base`.
 ///
-/// `Cache` exists as a Rust-level marker so callers can take
-/// `&Cache` / `&mut Cache` borrows; Rust's borrow checker then
+/// `GuestCache` exists as a Rust-level marker so callers can take
+/// `&GuestCache` / `&mut GuestCache` borrows; Rust's borrow checker then
 /// prevents publish/promote/clear ops from running while a `&Cap`
 /// read borrow is live (no eviction during reads).
 ///
-/// Construct via [`Cache::new`] at kernel boot. Pass `&mut Cache` to
-/// the call loop; pass `&Cache` to read-only paths.
-pub struct Cache {
+/// Construct via [`GuestCache::new`] at kernel boot. Pass `&mut GuestCache` to
+/// the call loop; pass `&GuestCache` to read-only paths.
+pub struct GuestCache {
     base: NonNull<u8>,
 }
 
 // SAFETY: `base` addresses the shared cache region; single-threaded
 // guest (Hyperlight serialises host↔guest calls) means there's no
 // cross-thread access from the guest side.
-unsafe impl Send for Cache {}
+unsafe impl Send for GuestCache {}
 
-impl Cache {
-    /// Construct a `Cache` handle for the default region at
+impl GuestCache {
+    /// Construct a `GuestCache` handle for the default region at
     /// [`STATE_CACHE_VA`], installing the persistent kernel mapping
     /// if not already done. Cheap to call repeatedly.
     pub fn new() -> Result<Self, CacheErr> {
@@ -447,7 +445,7 @@ impl Cache {
         let refcount = unsafe { (*entry_ptr).refcount.load(Ordering::Acquire) };
         if refcount == 1 {
             // Sole owner: mutate in place.
-            // SAFETY: we hold &mut self; no other &Cache borrow can
+            // SAFETY: we hold &mut self; no other &GuestCache borrow can
             // be live, so nothing else dereferences this entry.
             return Ok(unsafe { &mut (*entry_ptr).cap });
         }
@@ -492,7 +490,7 @@ impl Cache {
     /// (Ref-keyed). Move-promote when the blob's refcount is 1 (sole
     /// holder is the cache itself); shallow-clone otherwise. Returns
     /// the fresh `CapRef` either way. Mirrors host-side
-    /// `Cache::get_mut`.
+    /// `GuestCache::get_mut`.
     ///
     /// Currently unused — wired in once the spec defines the
     /// scratchpad-cnode return mechanism.
@@ -624,13 +622,13 @@ impl Cache {
     }
 }
 
-/// `Cache::Drop` fires the per-RPC scratch sweep. Construct one
-/// `Cache` at the top of an RPC (e.g. inside `nub_invoke_cached`)
-/// and pass `&mut Cache` to the call loop; when the variable goes
+/// `GuestCache::Drop` fires the per-RPC scratch sweep. Construct one
+/// `GuestCache` at the top of an RPC (e.g. inside `nub_invoke_cached`)
+/// and pass `&mut GuestCache` to the call loop; when the variable goes
 /// out of scope after `run_top` returns, the kernel-frame stack has
 /// already unwound and any cnode-held entries with refcount==1 are
 /// reclaimed here.
-impl Drop for Cache {
+impl Drop for GuestCache {
     fn drop(&mut self) {
         self.clear_scratch();
     }

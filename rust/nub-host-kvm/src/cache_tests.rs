@@ -1,11 +1,11 @@
-//! Tests for the host-side [`Cache`].
+//! Tests for the host-side [`HostCache`].
 
-use crate::cache::Cache;
+use crate::cache::HostCache;
 use nub_host_common::cache::{CacheDirectory, STATE_CACHE_SIZE, STATE_CACHE_VA};
 
 #[test]
 fn cache_new_initializes_directory_zero() {
-    let cache = Cache::new().expect("alloc");
+    let cache = HostCache::new().expect("alloc");
     assert_eq!(
         cache.base_va(),
         STATE_CACHE_VA,
@@ -22,7 +22,7 @@ fn cache_new_initializes_directory_zero() {
 
 #[test]
 fn publish_data_records_directory_slot() {
-    let mut cache = Cache::new().expect("alloc");
+    let mut cache = HostCache::new().expect("alloc");
     let h = cache
         .put_cap(&javm_cap::Cap::data_inline(&[0xAA, 0xBB, 0xCC]))
         .expect("put_cap");
@@ -43,7 +43,7 @@ fn publish_data_records_directory_slot() {
 
 #[test]
 fn publish_data_is_idempotent_in_directory() {
-    let mut cache = Cache::new().expect("alloc");
+    let mut cache = HostCache::new().expect("alloc");
     let h1 = cache
         .put_cap(&javm_cap::Cap::data_inline(&[1, 2, 3]))
         .expect("put_cap 1");
@@ -62,7 +62,7 @@ fn publish_chain_data_cnode_image_instance() {
     use javm_cap::slot::SlotIdx;
     use javm_cap::{Cap, CapHashOrRef};
 
-    let mut cache = Cache::new().expect("alloc");
+    let mut cache = HostCache::new().expect("alloc");
     // Data
     let data_h = cache.put_cap(&Cap::data_inline(&[0x42; 8])).expect("data");
     // CNode referencing it (built as a Cap<Global>)
@@ -104,7 +104,7 @@ fn publish_chain_data_cnode_image_instance() {
 
 #[test]
 fn pin_unpin_roundtrip() {
-    let mut cache = Cache::new().expect("alloc");
+    let mut cache = HostCache::new().expect("alloc");
     let h = cache
         .put_cap(&javm_cap::Cap::data_inline(&[0; 4]))
         .expect("put_cap");

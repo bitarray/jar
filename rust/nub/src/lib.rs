@@ -19,7 +19,7 @@
 
 use allocator_api2::alloc::Global;
 use anyhow::Result;
-use javm_cap::{Cache as TypedCache, CapHashOrRef, cap::Cap};
+use javm_cap::{CapHashOrRef, TypedCache, cap::Cap};
 use nub_arch_local::LocalArch;
 use nub_host_kvm::sandbox::{
     GuestBinary, MultiUseSandbox, SandboxConfiguration, UninitializedSandbox,

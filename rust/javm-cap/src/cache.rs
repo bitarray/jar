@@ -1,4 +1,4 @@
-//! `Cache<A>` — two-tier cap store with refcount-based CoW.
+//! `TypedCache<A>` — two-tier cap store with refcount-based CoW.
 //!
 //! The cache holds caps in two maps:
 //!
@@ -16,7 +16,7 @@
 //! Refcounting uses the same protocol as `Arc::make_mut`:
 //! `fetch_sub(1, Release)` at mutation time; if `prev == 1` we have
 //! sole ownership and move-promote (no copy), else we shallow-clone
-//! into a fresh instance entry. See [`Cache::get_mut`] for details.
+//! into a fresh instance entry. See [`TypedCache::get_mut`] for details.
 
 use alloc::collections::BTreeMap;
 use core::sync::atomic::Ordering;
@@ -56,29 +56,29 @@ pub enum CacheError {
     SlotOutOfRange,
 }
 
-pub struct Cache<A: Allocator + Clone = Global> {
+pub struct TypedCache<A: Allocator + Clone = Global> {
     alloc: A,
     blobs: BTreeMap<CapHash, TBox<CacheEntry<A>, A>>,
     instances: BTreeMap<CapRef, TBox<CacheEntry<A>, A>>,
     next_ref: u64,
 }
 
-impl Cache<Global> {
+impl TypedCache<Global> {
     /// Construct an empty heap-backed cache. Equivalent to
-    /// `Cache::new_in(Global)` for callers that don't want an
+    /// `TypedCache::new_in(Global)` for callers that don't want an
     /// `allocator_api2` dependency.
     pub fn new() -> Self {
         Self::new_in(Global)
     }
 }
 
-impl Default for Cache<Global> {
+impl Default for TypedCache<Global> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<A: Allocator + Clone> Cache<A> {
+impl<A: Allocator + Clone> TypedCache<A> {
     /// Construct an empty cache that allocates cap content through
     /// `alloc`.
     pub fn new_in(alloc: A) -> Self {
@@ -554,7 +554,7 @@ impl<A: Allocator + Clone> Cache<A> {
             }
             Cap::Data(_) | Cap::Image(_) | Cap::Type(_) => {
                 // DataCap pages are owned (via PageRef.refcount) and
-                // not addressable through the Cache; ImageCap holds
+                // not addressable through the TypedCache; ImageCap holds
                 // ImageSlotEntry referring to blobs which the cache
                 // tracks separately at publish time, not at slot
                 // mutation time; TypeCap has no targets.
@@ -615,7 +615,7 @@ fn rewrite_ref_targets<A: Allocator + Clone>(cap: &mut Cap<A>, resolved: &[(CapR
 }
 
 /// Collect the cap targets a `Cap<Global>` directly holds — used by
-/// [`Cache::put_cap_with_hash`] to incref each target on first put so
+/// [`TypedCache::put_cap_with_hash`] to incref each target on first put so
 /// the refcount invariant (entry refcount == holder count) is preserved.
 fn collect_referenced_targets_global(cap: &Cap<Global>) -> alloc::vec::Vec<CapHashOrRef> {
     let mut out: alloc::vec::Vec<CapHashOrRef> = alloc::vec::Vec::new();
@@ -798,7 +798,7 @@ pub(crate) fn deep_clone_into<A: Allocator + Clone>(src: &Cap<Global>, alloc: A)
 /// directly-owned slot/page tables are duplicated; cross-references
 /// (CapHashOrRef in cnode slots, page hashes in DataCap) carry over
 /// by value. The caller is responsible for bumping the refcounts of
-/// any cross-referenced targets (host-side: `Cache::bump_targets`;
+/// any cross-referenced targets (host-side: `TypedCache::bump_targets`;
 /// guest-side: state-cache's `cap_make_mut`).
 pub fn shallow_clone_cap<A: Allocator + Clone>(
     cap: &Cap<A>,

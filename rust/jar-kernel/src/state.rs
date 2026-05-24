@@ -1,13 +1,13 @@
 //! σ — the v3 chain state.
 //!
-//! σ is a `Cache<Global>` plus the validator set. Data blobs, image
+//! σ is a `TypedCache<Global>` plus the validator set. Data blobs, image
 //! blobs, cnode blobs, and chain Instance blobs all live in the cache
 //! as `Cap` values, addressed by content hash.
 //!
 //! The state root is the SSZ `hash_tree_root` of the cache's blobs,
 //! each represented as a `(blob_hash, cap_hash)` leaf container.
 
-use javm_cap::{Cache, CapHash, cap_hash};
+use javm_cap::{CapHash, TypedCache, cap_hash};
 use ssz::{Encode, HashTreeRoot};
 
 /// PoA validator key (placeholder — 32-byte public key).
@@ -27,18 +27,18 @@ pub struct StateLeaf {
 
 /// The chain's σ-resident state.
 ///
-/// All cap content lives in `caps` (a `Cache<Global>`). The validator
+/// All cap content lives in `caps` (a `TypedCache<Global>`). The validator
 /// set is kept alongside as a Vec for now; future revisions may move
 /// it into a dedicated registry cap.
 pub struct State {
-    pub caps: Cache,
+    pub caps: TypedCache,
     pub validators: Vec<ValidatorKey>,
 }
 
 impl State {
     pub fn new() -> Self {
         Self {
-            caps: Cache::new(),
+            caps: TypedCache::new(),
             validators: Vec::new(),
         }
     }

@@ -22,8 +22,8 @@ use super::talc_box::CacheTalcLock;
 /// # Safety
 ///
 /// The pointer must reference a live, `claim`ed `CacheTalcLock`. The
-/// host's `Cache` is responsible for keeping the lock alive at least
-/// as long as any `TalcAlloc` derived from it.
+/// host's `HostCache` is responsible for keeping the lock alive at
+/// least as long as any `TalcAlloc` derived from it.
 #[derive(Clone, Copy, Debug)]
 pub struct TalcAlloc {
     talc: NonNull<CacheTalcLock>,

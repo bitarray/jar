@@ -18,14 +18,14 @@ Licensed under the Apache License, Version 2.0.
 //! pointer dereference.
 //!
 //! Per-process singleton: only one cache region can be mapped per
-//! process (`MAP_FIXED_NOREPLACE`). Each `Cache` holds an exclusive
+//! process (`MAP_FIXED_NOREPLACE`). Each `HostCache` holds an exclusive
 //! lease (`REGION_LEASE`) over the region for its lifetime; parallel
 //! tests serialise on it.
 
 use std::ptr::NonNull;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use javm_cap::{Cache as TypedCache, CapHashOrRef, CapRef};
+use javm_cap::{CapHashOrRef, CapRef, TypedCache};
 use nub_arch_x86_abi::CapHash;
 use nub_host_common::cache::{
     CACHE_DIRECTORY_OFFSET, CacheDirectory, STATE_CACHE_SIZE, STATE_CACHE_VA, TALC_HEAP_OFFSET,
@@ -62,7 +62,7 @@ fn map_region_once(size: usize) -> Result<NonNull<u8>> {
     if ptr == libc::MAP_FAILED {
         let err = std::io::Error::last_os_error();
         return Err(new_error!(
-            "Cache mmap({:#x}, {} bytes, MAP_FIXED_NOREPLACE) failed: {} \
+            "HostCache mmap({:#x}, {} bytes, MAP_FIXED_NOREPLACE) failed: {} \
              (cache region must be reserved at STATE_CACHE_VA so host \
              VAs match guest VAs)",
             STATE_CACHE_VA,
@@ -76,7 +76,7 @@ fn map_region_once(size: usize) -> Result<NonNull<u8>> {
             libc::munmap(ptr, size);
         }
         return Err(new_error!(
-            "Cache mmap returned {:#x}, expected {:#x} (MAP_FIXED_NOREPLACE \
+            "HostCache mmap returned {:#x}, expected {:#x} (MAP_FIXED_NOREPLACE \
              fallback)",
             ptr as u64,
             STATE_CACHE_VA
@@ -89,7 +89,7 @@ fn map_region_once(size: usize) -> Result<NonNull<u8>> {
 
 /// RAII wrapper holding the exclusive lease over the (process-global)
 /// cache region. Re-zeroes the region on construction so each fresh
-/// `Cache::new()` starts from a known state.
+/// `HostCache::new()` starts from a known state.
 struct CacheRegion {
     _lease: MutexGuard<'static, ()>,
     base: NonNull<u8>,
@@ -112,7 +112,7 @@ impl CacheRegion {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let base = map_region_once(size)?;
-        // Wipe so the new Cache starts fresh.
+        // Wipe so the new HostCache starts fresh.
         unsafe {
             core::ptr::write_bytes(base.as_ptr(), 0, size);
         }
@@ -128,7 +128,7 @@ impl CacheRegion {
     }
 }
 
-// --- The Cache itself ---
+// --- The HostCache itself ---
 
 /// Errors raised by the host-side state cache.
 #[derive(Debug, thiserror::Error)]
@@ -144,7 +144,7 @@ pub enum CacheError {
     /// unavailable — should never happen in practice.
     #[error("blob not found for hash {0:?}")]
     BlobMissing([u8; 32]),
-    /// The inner `javm_cap::Cache` returned an error.
+    /// The inner `javm_cap::TypedCache` returned an error.
     #[error("typed cache error: {0}")]
     Typed(#[from] javm_cap::CacheError),
 }
@@ -167,11 +167,11 @@ impl From<CacheError> for HyperlightError {
 /// The talc-lock pointer and `CacheDirectory` pointer aren't stored
 /// directly — they're derived on demand from `region.base` (offsets 0
 /// and `CACHE_DIRECTORY_OFFSET` respectively). This mirrors the guest
-/// side: `Cache` is just a base pointer plus per-region state.
+/// side: `HostCache` is just a base pointer plus per-region state.
 ///
 /// New fields that hold pointers into the region must go BEFORE
 /// `region` in declaration order.
-pub struct Cache {
+pub struct HostCache {
     /// Two-tier cap storage. Allocations route through `TalcAlloc`
     /// over `region`.
     typed_cache: TypedCache<TalcAlloc>,
@@ -184,9 +184,9 @@ pub struct Cache {
 
 // SAFETY: all inner pointers live inside `region` (Send); host side is
 // single-threaded in V0 anyway.
-unsafe impl Send for Cache {}
+unsafe impl Send for HostCache {}
 
-impl Cache {
+impl HostCache {
     /// Allocate the cache region, initialise the TalcLock at offset 0
     /// and the CacheDirectory at `CACHE_DIRECTORY_OFFSET`. The talc
     /// heap covers everything from `TALC_HEAP_OFFSET` to the end of
@@ -223,7 +223,7 @@ impl Cache {
             (*talc.as_ptr())
                 .lock()
                 .claim(heap_base, TALC_HEAP_SIZE)
-                .ok_or_else(|| new_error!("Cache talc.claim failed"))?;
+                .ok_or_else(|| new_error!("HostCache talc.claim failed"))?;
         }
 
         // SAFETY: `talc` was just initialised and lives as long as
@@ -270,12 +270,12 @@ impl Cache {
         self.region.size
     }
 
-    /// Cache region's allocator handle. Useful when the caller needs
+    /// HostCache region's allocator handle. Useful when the caller needs
     /// to build a Cap value in talc memory and hand it off via a
     /// `*_from_cap` publish. Cheap (wraps the talc-lock pointer).
     pub fn alloc(&self) -> TalcAlloc {
         // SAFETY: `talc_lock_ptr()` points at the lock initialised in
-        // `Cache::new`, which lives as long as `region`.
+        // `HostCache::new`, which lives as long as `region`.
         unsafe { TalcAlloc::from_raw(self.talc_lock_ptr()) }
     }
 
