@@ -1,8 +1,8 @@
 //! Wire-form caps for the host ↔ guest `put_cap` RPC.
 //!
 //! [`Cap`] and its inner types use the SSZ derive macro for content
-//! hashing and carry rkyv-incompatible fields ([`SparseList`] in
-//! [`CNodeCap`], `Arc<PageBytes>` in [`PageSlot::Loaded`]). Adding
+//! hashing and carry rkyv-incompatible fields (`SparseList` in
+//! [`CNodeCap`], `Arc<PageBytes>` in `PageSlot::Loaded`). Adding
 //! rkyv derives there would either require hand-written `Archive` /
 //! `Serialize` / `Deserialize` impls for those types or a
 //! transformation wrapper. We pick a third option: a sibling enum
@@ -13,7 +13,7 @@
 //! ## V0 limitations
 //!
 //! - **`WireCap::CNode` only carries materialized `Hash` slot
-//!   entries.** [`SparseList`] cached-subtree-roots and
+//!   entries.** `SparseList` cached-subtree-roots and
 //!   `MissingOr::Missing(_)` placeholders are dropped on the wire;
 //!   the receiver reconstructs a fresh [`CNodeCap`] without them.
 //!   `Ref(_)` slot targets are rejected (`WireConvertError::CapHasRef`)

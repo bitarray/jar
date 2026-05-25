@@ -2,17 +2,17 @@
 //! directory.
 //!
 //! After Commit 2, the guest kernel is linked into the per-process
-//! [`GUEST_VA`] reservation at a canonical low-half VA. The host
+//! `GUEST_VA` reservation at a canonical low-half VA. The host
 //! process can mmap-shadow the kernel image at the same VA, so any
 //! kernel-mode pointer (e.g. the address of the
 //! `nub_arch_x86::state_cache::CACHE` `CacheDirectory<FixedState>`)
 //! is directly dereferenceable from host code.
 //!
-//! [`GuestCacheReader`] wraps the directory VA published by the
-//! guest in its [`BootInfo`] block ([`MultiUseSandbox::boot_info`]
+//! `GuestCacheReader` wraps the directory VA published by the
+//! guest in its `BootInfo` block (`MultiUseSandbox::boot_info`
 //! later — for now this module just exposes the type for
 //! Commit 4's wiring) and exposes a `get(hash) -> Option<&Cap>`
-//! helper. The directory is a [`CacheDirectory<FixedState>`] on
+//! helper. The directory is a `CacheDirectory<FixedState>` on
 //! both sides — both host and guest see the same
 //! `Box<CacheEntry>` cells through the same `FixedState` seed, so
 //! bucket assignments match and the host's view of the table is
@@ -22,7 +22,7 @@
 //!
 //! - The construction is `unsafe`: the caller must promise the
 //!   `directory_va` is correct (came from a verified
-//!   [`BootInfo::magic`] + matching `directory_type_id`).
+//!   `BootInfo::magic` + matching `directory_type_id`).
 //! - The reader holds no lock on its own. To read consistently, the
 //!   caller must ensure no concurrent guest-mode mutation is in
 //!   flight (V0: the host only reads when no guest call is
@@ -65,7 +65,7 @@ unsafe impl Send for GuestCacheReader {}
 unsafe impl Sync for GuestCacheReader {}
 
 impl GuestCacheReader {
-    /// Construct a reader from a [`BootInfo`] block.
+    /// Construct a reader from a `BootInfo` block.
     ///
     /// # Safety
     ///
@@ -94,7 +94,7 @@ impl GuestCacheReader {
     ///
     /// Implicit: see the type's safety section. We declare this
     /// `pub` (not `unsafe`) on the strength of the `new` contract
-    /// — once you have a [`GuestCacheReader`], every read assumes
+    /// — once you have a `GuestCacheReader`, every read assumes
     /// the directory is quiescent.
     pub fn len(&self) -> usize {
         // SAFETY: `directory` is `NonNull<GuestDirectory>`; the
@@ -132,11 +132,11 @@ impl GuestCacheReader {
 /// Failures from [`GuestCacheReader::new`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GuestCacheReaderError {
-    /// The [`BootInfo`] magic field didn't match
-    /// [`BootInfo::MAGIC`].
+    /// The `BootInfo` magic field didn't match
+    /// `BootInfo::MAGIC`.
     #[error("boot info magic mismatch")]
     BadMagic,
-    /// The directory VA in [`BootInfo`] was zero — the guest hasn't
+    /// The directory VA in `BootInfo` was zero — the guest hasn't
     /// run `init_directory_va` yet. Call any RPC that triggers the
     /// init hook (e.g. `nub_get_boot_info`) and retry.
     #[error("boot info directory_va is zero (guest hasn't initialised)")]

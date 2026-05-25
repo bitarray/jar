@@ -223,7 +223,7 @@ impl MultiUseSandbox {
     ///
     /// Behaviour:
     ///
-    /// - If [`GuestCacheReader::contains(hash)`] returns `true`,
+    /// - If `GuestCacheReader::contains(hash)` returns `true`,
     ///   return immediately — the guest already has the cap and we
     ///   skip rkyv encode + VMEXIT + guest decode + merkle walk +
     ///   directory insert. This is the hot path for bench loops that
@@ -247,7 +247,7 @@ impl MultiUseSandbox {
         Ok(())
     }
 
-    /// Lazily build the [`GuestCacheReader`]. Issues one
+    /// Lazily build the `GuestCacheReader`. Issues one
     /// `nub_get_boot_info` RPC to read `BootInfo.directory_va`, then
     /// constructs the reader; subsequent calls return the cached
     /// reader without a roundtrip.
