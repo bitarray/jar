@@ -78,7 +78,7 @@ impl Kernel {
 mod tests {
     use super::*;
     use crate::abi;
-    use crate::apply::{Block, Event, EventOutcome};
+    use crate::apply::{Block, Event};
     use javm_cap::image::Image;
     use std::collections::BTreeMap;
 
@@ -154,12 +154,5 @@ mod tests {
         let _ = k1.apply(&block(), 10_000, 10_000).unwrap();
         let _ = k2.apply(&block(), 10_000, 10_000).unwrap();
         assert_eq!(k1.state_root(), k2.state_root());
-    }
-
-    // Touch the EventOutcome enum so the import isn't unused if the
-    // tests above don't pattern-match it.
-    #[allow(dead_code)]
-    fn _enum_touch(o: EventOutcome) -> EventOutcome {
-        o
     }
 }

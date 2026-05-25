@@ -520,27 +520,3 @@ pub fn read_cr3() -> u64 {
     cr3
 }
 
-/// Write CR3. Loads `value` as the new page-table pointer + flushes
-/// the TLB for non-global entries.
-///
-/// # Safety
-/// `value` must be the physical address of a valid PML4 whose kernel-
-/// half PML4 entries cover the kernel's current code/stack/heap VAs;
-/// otherwise the next instruction fetch / stack access will fault.
-pub unsafe fn write_cr3(value: u64) {
-    // SAFETY: caller asserted preconditions.
-    unsafe {
-        core::arch::asm!("mov cr3, {0}", in(reg) value, options(nostack, preserves_flags));
-    }
-}
-
-/// TLB flush via CR3 self-swap (full flush of non-global entries).
-#[allow(dead_code)]
-pub fn flush_tlb() {
-    // SAFETY: rewriting CR3 with its current value is observably a
-    // TLB flush.
-    unsafe {
-        let cr3 = read_cr3();
-        write_cr3(cr3);
-    }
-}

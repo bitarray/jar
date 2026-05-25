@@ -1,15 +1,13 @@
-//! Smoke tests for the cap types. With the move to single-allocator
-//! cap storage (everything on the global heap), these tests just
-//! exercise the constructors and field accessors.
+//! Smoke tests for the cap types and `CacheDirectory`. Black-box
+//! tests against the crate's public API — kept out of `src/` to keep
+//! the source tree free of `_tests.rs` sidecars.
 
-use crate::slot::SlotIdx;
-
-use super::cap::{Cap, CapHashOrRef, CapRef};
-use super::cnode::CNodeCap;
-use super::data::{DataCap, DataContent};
-use super::image_cap::{EndpointDef, ImageCap, ImageSlotEntry, MemoryMapping};
-use super::instance::{InstanceCap, RwOverlay};
-use super::page::{PageBytes, PageRef, PageSlot};
+use javm_cap::{
+    CNodeCap, Cap, CapHashOrRef, CapRef, CacheDirectory, DataCap, DataContent, EndpointDef,
+    ImageCap, ImageSlotEntry, InstanceCap, MAX_SOURCE_DEPTH, MemoryMapping, NUM_REGS, PAGE_SIZE,
+    PageBytes, PageRef, PageSlot, RwOverlay, SlotIdx,
+};
+use std::sync::Arc;
 
 fn make_image_cap() -> ImageCap {
     let code: Vec<u8> = vec![0xAB, 0xCD];
@@ -48,10 +46,10 @@ fn data_inline_constructor() {
     match cap {
         Cap::Data(d) => {
             // DataCap content is page-padded to next 4 KiB boundary.
-            assert_eq!(d.content_len(), crate::data::PAGE_SIZE as u64);
+            assert_eq!(d.content_len(), PAGE_SIZE as u64);
             match d.content {
                 DataContent::Inline(bytes) => {
-                    assert_eq!(bytes.len(), crate::data::PAGE_SIZE);
+                    assert_eq!(bytes.len(), PAGE_SIZE);
                     assert_eq!(&bytes[..5], b"hello");
                     assert!(bytes[5..].iter().all(|b| *b == 0));
                 }
@@ -102,8 +100,8 @@ fn cnode_set_takes_and_keeps_slots_sorted() {
             .slots
             .iter()
             .map(|(idx, _)| idx as u32)
-            .collect::<alloc::vec::Vec<u32>>(),
-        alloc::vec![2u32, 7, 11]
+            .collect::<Vec<u32>>(),
+        vec![2u32, 7, 11]
     );
 
     // Overwrite returns prior target.
@@ -123,8 +121,8 @@ fn cnode_set_takes_and_keeps_slots_sorted() {
             .slots
             .iter()
             .map(|(idx, _)| idx as u32)
-            .collect::<alloc::vec::Vec<u32>>(),
-        alloc::vec![7u32, 11]
+            .collect::<Vec<u32>>(),
+        vec![7u32, 11]
     );
 
     // Out-of-range slot rejected.
@@ -155,14 +153,14 @@ fn cnode_lookup_after_set() {
 
 #[test]
 fn data_inline_round_trip() {
-    let mut bytes: Vec<u8> = vec![0u8; crate::data::PAGE_SIZE];
+    let mut bytes: Vec<u8> = vec![0u8; PAGE_SIZE];
     bytes[..5].copy_from_slice(b"hello");
     let data: DataCap = DataCap {
         content: DataContent::Inline(bytes),
     };
     match data.content {
         DataContent::Inline(b) => {
-            assert_eq!(b.len(), crate::data::PAGE_SIZE);
+            assert_eq!(b.len(), PAGE_SIZE);
             assert_eq!(&b[..5], b"hello");
         }
         _ => panic!("expected Inline"),
@@ -177,13 +175,13 @@ fn page_ref_shares_then_releases() {
         bytes,
     };
     let pr: PageRef = PageRef::new(pb);
-    assert_eq!(std::sync::Arc::strong_count(&pr), 1);
+    assert_eq!(Arc::strong_count(&pr), 1);
 
     let pages: Vec<PageSlot> = vec![PageSlot::Loaded(pr.clone()), PageSlot::Loaded(pr.clone())];
-    assert_eq!(std::sync::Arc::strong_count(&pr), 3);
+    assert_eq!(Arc::strong_count(&pr), 3);
 
     drop(pages);
-    assert_eq!(std::sync::Arc::strong_count(&pr), 1);
+    assert_eq!(Arc::strong_count(&pr), 1);
     drop(pr);
 }
 
@@ -202,7 +200,7 @@ fn instance_with_rw_overlay() {
         root_cnode: CapHashOrRef::Hash([0xCC; 32]),
         rw_overlays: overlays,
         mem_size: 0x10000,
-        regs: [0u64; super::cap::NUM_REGS],
+        regs: [0u64; NUM_REGS],
         pc: 0,
         gas_remaining: 1_000_000,
     };
@@ -222,7 +220,7 @@ fn endpoint_def_empty_sentinel() {
 
 #[test]
 fn memory_mapping_path_slice() {
-    let mut path = [SlotIdx(0); super::cap::MAX_SOURCE_DEPTH];
+    let mut path = [SlotIdx(0); MAX_SOURCE_DEPTH];
     path[0] = SlotIdx(3);
     path[1] = SlotIdx(7);
     let m = MemoryMapping {
@@ -257,9 +255,6 @@ fn capref_strong_count_tracks_holders() {
 
 #[test]
 fn cache_round_trips_full_publish_chain() {
-    use crate::cache::CacheDirectory;
-    use crate::cap::NUM_REGS;
-
     let cache = CacheDirectory::new();
 
     // 1. Publish a Data blob. Blobs are pure content-addressed
@@ -322,7 +317,6 @@ fn cache_round_trips_full_publish_chain() {
 
 #[test]
 fn capref_sweep_reclaims_orphaned_instance() {
-    use crate::cache::CacheDirectory;
     let cache = CacheDirectory::new();
 
     let r = cache.put_instance(Cap::CNode(CNodeCap::new(4).unwrap()));
@@ -342,7 +336,6 @@ fn capref_sweep_reclaims_orphaned_instance() {
 
 #[test]
 fn capref_sweep_cascades_through_cnode_ref_chain() {
-    use crate::cache::CacheDirectory;
     let cache = CacheDirectory::new();
 
     // Leaf instance with no nested Refs.

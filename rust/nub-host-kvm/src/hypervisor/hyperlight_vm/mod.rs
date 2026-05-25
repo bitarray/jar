@@ -492,10 +492,10 @@ impl HyperlightVm {
     /// path that re-registers it.
     ///
     /// The snapshot's host VA is forced to
-    /// `guest_va_base() + KERNEL_OFFSET` (= the new
-    /// `SandboxMemoryLayout::KERNEL_HIGH_BASE`) by re-mmapping a fresh
-    /// page-aligned region at that fixed VA and copying the snapshot
-    /// bytes in. This sits inside the per-process reservation made by
+    /// `guest_va_base() + KERNEL_OFFSET` (= `SandboxMemoryLayout::
+    /// kernel_base_va()`) by re-mmapping a fresh page-aligned region
+    /// at that fixed VA and copying the snapshot bytes in. This sits
+    /// inside the per-process reservation made by
     /// [`nub_host_common::layout::reserve_guest_va_range`], so we can
     /// safely use `MAP_FIXED` to overlay it.
     pub(crate) fn install_snapshot_mapping(

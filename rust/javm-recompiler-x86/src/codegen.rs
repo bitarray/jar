@@ -64,19 +64,6 @@ const SCRATCH: Reg = Reg::RDX;
 /// once per basic block, flushed back to `ctx.gas` at every exit.
 const GAS: Reg = Reg::R15;
 
-/// Caller-saved PVM registers that need saving around helper calls.
-#[allow(dead_code)]
-const CALLER_SAVED: [Reg; 8] = [
-    Reg::RSI,
-    Reg::RDI,
-    Reg::R8,
-    Reg::R9,
-    Reg::R10,
-    Reg::R11,
-    Reg::RAX,
-    Reg::RCX,
-];
-
 /// JitContext lives above the PVM u32 address space (no bounds check
 /// on guest mem — the full low 4 GiB of native VA belongs to the
 /// program). CTX is reached via RIP-relative `[rip+disp32]`, which
@@ -610,22 +597,6 @@ impl Compiler {
             dispatch_table,
             trap_table,
             exit_label_offset,
-        }
-    }
-
-    /// Save caller-saved registers (PVM registers in caller-saved x86-64 regs).
-    #[allow(dead_code)]
-    fn save_caller_saved(&mut self) {
-        for &reg in &CALLER_SAVED {
-            self.asm.push(reg);
-        }
-    }
-
-    /// Restore caller-saved registers (reverse order).
-    #[allow(dead_code)]
-    fn restore_caller_saved(&mut self) {
-        for &reg in CALLER_SAVED.iter().rev() {
-            self.asm.pop(reg);
         }
     }
 
@@ -2592,12 +2563,6 @@ impl Compiler {
         }
     }
 
-    /// Three-register 64-bit ALU: rd = ra OP rb
-    #[allow(dead_code)]
-    fn emit_alu3_64(&mut self, args: &Args, op: impl FnOnce(&mut Assembler, Reg, Reg)) {
-        self.emit_alu3_64_comm(args, false, op);
-    }
-
     /// Three-register 64-bit ALU with optional commutativity optimization.
     /// When `commutative` is true and rd == rb, emit `op(d, a)` directly
     /// instead of saving/restoring via SCRATCH.
@@ -2931,10 +2896,10 @@ impl Compiler {
         self.asm.push(Reg::R14);
         self.asm.push(Reg::R15);
 
-        // Stack alignment: after 6 callee-saved pushes + return address (7 * 8 = 56),
-        // RSP mod 16 = 8. With save_caller_saved (8 pushes = 64 bytes), total
-        // displacement = 56 + 64 = 120, RSP mod 16 = 8. Push extra 8 bytes for
-        // alignment so that save_caller_saved leaves RSP mod 16 = 0 for CALL.
+        // Stack alignment: after 6 callee-saved pushes + return address
+        // (7 * 8 = 56 bytes), RSP mod 16 = 8. Push one extra 8 bytes so
+        // RSP mod 16 = 0 — the SysV ABI alignment any helper CALL we
+        // emit below expects at the call site.
         self.asm.push(SCRATCH); // alignment padding
 
         // R15 = gas register. Loaded from ctx.gas at prologue, decremented
