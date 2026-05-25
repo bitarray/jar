@@ -519,4 +519,3 @@ pub fn read_cr3() -> u64 {
     }
     cr3
 }
-

@@ -3,7 +3,7 @@
 //! the source tree free of `_tests.rs` sidecars.
 
 use javm_cap::{
-    CNodeCap, Cap, CapHashOrRef, CapRef, CacheDirectory, DataCap, DataContent, EndpointDef,
+    CNodeCap, CacheDirectory, Cap, CapHashOrRef, CapRef, DataCap, DataContent, EndpointDef,
     ImageCap, ImageSlotEntry, InstanceCap, MAX_SOURCE_DEPTH, MemoryMapping, NUM_REGS, PAGE_SIZE,
     PageBytes, PageRef, PageSlot, RwOverlay, SlotIdx,
 };

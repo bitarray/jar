@@ -136,13 +136,10 @@ const ERR_IMAGE_KIND: u32 = 24;
 const ERR_ENDPOINT_OOB: u32 = 25;
 const ERR_ENDPOINT_UNDEFINED: u32 = 26;
 const ERR_DERIVE_SLOT_OOB: u32 = 31;
-// ERR_DERIVE_PUBLISH was reserved for the cache-publish path that
-// could fail with an out-of-memory error. The new
-// `publish_transient_instance` is infallible (insert into a heap
-// HashMap can't be rejected — talc OOM panics rather than
-// returning), so the code is no longer reachable.
-#[allow(dead_code)]
-const ERR_DERIVE_PUBLISH: u32 = 32;
+// Code 32 was `ERR_DERIVE_PUBLISH`, reserved for a publish-OOM path
+// that no longer exists: `publish_transient_instance` is infallible
+// (talc OOM panics rather than returning). Skip the value to keep
+// the existing error-code mapping stable.
 const ERR_HOST_CALL_SLOT_EMPTY: u32 = 40;
 const ERR_JIT_FAILED: u32 = 50;
 const ERR_DEPTH_LIMIT: u32 = 51;

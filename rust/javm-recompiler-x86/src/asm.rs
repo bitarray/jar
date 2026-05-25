@@ -360,17 +360,6 @@ impl Assembler {
     }
 
     #[inline(always)]
-    #[allow(dead_code)]
-    fn emit_u64(&mut self, v: u64) {
-        debug_assert!(self.write_pos + 8 <= self.capacity);
-        // SAFETY: write_pos + 8 <= capacity asserted; unaligned write is valid.
-        unsafe {
-            core::ptr::write_unaligned(self.buf.add(self.write_pos) as *mut u64, v.to_le());
-        }
-        self.write_pos += 8;
-    }
-
-    #[inline(always)]
     fn emit_i32(&mut self, v: i32) {
         debug_assert!(self.write_pos + 4 <= self.capacity);
         // SAFETY: write_pos + 4 <= capacity asserted; unaligned write is valid.
@@ -405,37 +394,15 @@ impl Assembler {
 
     // === REX prefix helpers ===
 
-    /// REX prefix for 64-bit reg-reg operations.
-    #[allow(dead_code)]
-    fn rex_w(&mut self, reg: Reg, rm: Reg) {
-        self.emit(0x48 | (reg.hi() << 2) | rm.hi());
-    }
-
     /// REX.W prefix for single-register operations.
     fn rex_w_b(&mut self, rm: Reg) {
         self.emit(0x48 | rm.hi());
-    }
-
-    /// Optional REX prefix for 32-bit ops (only if extended registers).
-    #[allow(dead_code)]
-    fn rex_opt(&mut self, reg: Reg, rm: Reg) {
-        let r = reg.hi();
-        let b = rm.hi();
-        if r != 0 || b != 0 {
-            self.emit(0x40 | (r << 2) | b);
-        }
     }
 
     fn rex_opt_b(&mut self, rm: Reg) {
         if rm.needs_rex() {
             self.emit(0x40 | rm.hi());
         }
-    }
-
-    /// ModR/M byte: mod=3 (register direct), reg, rm.
-    #[allow(dead_code)]
-    fn modrm_rr(&mut self, reg: Reg, rm: Reg) {
-        self.emit(0xC0 | (reg.lo() << 3) | rm.lo());
     }
 
     /// ModR/M (+ optional SIB) + displacement for [base + disp] addressing.
@@ -469,14 +436,6 @@ impl Assembler {
             }
             ib.push_i32(disp);
         }
-    }
-
-    /// Legacy wrapper — delegates to InstBuf-based version.
-    #[allow(dead_code)]
-    fn modrm_disp(&mut self, reg: u8, base: Reg, disp: i32) {
-        let mut ib = InstBuf::new();
-        Self::modrm_disp_ib(&mut ib, reg, base, disp);
-        self.flush_instbuf(ib);
     }
 
     /// ModR/M + SIB for [base + index] addressing, into InstBuf.
@@ -652,16 +611,6 @@ impl Assembler {
     }
 
     // -- SIB-based memory access [base + index] --
-
-    /// Emit ModR/M + SIB for [base + index] addressing (scale=1, no displacement).
-    /// Special case: base=RBP/R13 requires mod=01 with disp8=0.
-    /// Legacy wrapper — used by methods not yet converted to InstBuf.
-    #[allow(dead_code)]
-    fn modrm_sib_base_index(&mut self, reg: u8, base: Reg, index: Reg) {
-        let mut ib = InstBuf::new();
-        Self::modrm_sib_base_index_ib(&mut ib, reg, base, index);
-        self.flush_instbuf(ib);
-    }
 
     /// movzx r64, byte [base + index] — zero-extending u8 load
     pub fn movzx_load8_sib(&mut self, dst: Reg, base: Reg, index: Reg) {
