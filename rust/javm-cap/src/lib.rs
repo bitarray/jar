@@ -32,6 +32,7 @@ pub mod image_cap;
 pub mod instance;
 pub mod page;
 pub mod slot;
+pub mod wire;
 
 #[cfg(test)]
 mod cache_tests;

@@ -102,7 +102,7 @@ use javm_cap::{CapHash, NUM_REGS};
 use crate::jit_run::{self, DirectMap, ExitInfo, FrameRuntime, MemRegion};
 use crate::page_alloc::PageBuf;
 use crate::paging;
-use nub_host_common::cache::Cache;
+use crate::state_cache::{DIRECTORY, INSTANCES, publish_transient_instance};
 
 const EXIT_HALT: u32 = 0;
 const EXIT_HOST_CALL: u32 = 4;
@@ -136,6 +136,12 @@ const ERR_IMAGE_KIND: u32 = 24;
 const ERR_ENDPOINT_OOB: u32 = 25;
 const ERR_ENDPOINT_UNDEFINED: u32 = 26;
 const ERR_DERIVE_SLOT_OOB: u32 = 31;
+// ERR_DERIVE_PUBLISH was reserved for the cache-publish path that
+// could fail with an out-of-memory error. The new
+// `publish_transient_instance` is infallible (insert into a heap
+// HashMap can't be rejected — talc OOM panics rather than
+// returning), so the code is no longer reachable.
+#[allow(dead_code)]
 const ERR_DERIVE_PUBLISH: u32 = 32;
 const ERR_HOST_CALL_SLOT_EMPTY: u32 = 40;
 const ERR_JIT_FAILED: u32 = 50;
@@ -232,18 +238,18 @@ pub struct LoopOutcome {
 /// exit) or the JIT signals an unrecoverable condition (page fault,
 /// gas exhaustion, …). See module docs for the loop body.
 ///
-/// `cache` is the caller-owned cache handle. The borrow checker uses
-/// the `&mut Cache` argument to enforce that no other code holds a
-/// `&Cap` borrow concurrent with publish/promote/clone operations
-/// fired by `dispatch_derive_spawn` / `dispatch_host_call`.
+/// Cap lookups go through the heap-resident
+/// [`DIRECTORY`] / [`INSTANCES`] statics. Each lookup takes the
+/// directory's spinlock; we keep lock scopes tight (clone out the
+/// fields we need, drop the guard) so other guest-mode lookups can
+/// proceed concurrently.
 pub fn run_top(
-    cache: &mut Cache,
     instance_hash: &CapHash,
     endpoint_idx: u32,
     args: [u64; 4],
     initial_gas: i64,
 ) -> Result<LoopOutcome, u32> {
-    let top = build_frame_from_published(cache, instance_hash, endpoint_idx, args)?;
+    let top = build_frame_from_published(instance_hash, endpoint_idx, args)?;
     let mut stack: Vec<KernelFrame> = Vec::with_capacity(8);
     stack.push(top);
     let mut gas = initial_gas;
@@ -252,7 +258,7 @@ pub fn run_top(
         // Phase 1: run one ring-3 entry on the top frame.
         let info = {
             let frame = stack.last_mut().expect("stack non-empty");
-            run_one_entry(cache, frame, gas)?
+            run_one_entry(frame, gas)?
         };
         gas = info.gas_remaining;
         // Mirror the JIT's post-exit state back into the top frame.
@@ -299,7 +305,7 @@ pub fn run_top(
                     }
                     OP_DERIVE_SPAWN => {
                         let frame = stack.last_mut().expect("non-empty");
-                        dispatch_derive_spawn(cache, frame)?;
+                        dispatch_derive_spawn(frame)?;
                     }
                     OP_HOST_CALL => {
                         if stack.len() >= MAX_DEPTH {
@@ -307,7 +313,7 @@ pub fn run_top(
                         }
                         let child = {
                             let parent = stack.last().expect("non-empty");
-                            dispatch_host_call(cache, parent)?
+                            dispatch_host_call(parent)?
                         };
                         // Bound the resident-runtime set to the top
                         // RUNTIME_CACHE_CAP frames. After the new child
@@ -352,12 +358,9 @@ pub fn run_top(
         }
     };
 
-    // Drop the stack BEFORE we hand the outcome back. The caller
-    // (typically the `Cache`'s Drop, which fires when the cache
-    // goes out of scope) runs `clear_scratch`; any cnode-held
-    // `Ref(R)` entries that were tracked in scratch need to be
-    // released here so the underlying entries are reclaimable on
-    // the next sweep.
+    // Drop the stack BEFORE we hand the outcome back. Frames hold no
+    // refcounted handles into the heap-resident directory (V0: no
+    // scratch sweep, no eviction), so this is just a Vec drop.
     drop(stack);
     Ok(outcome)
 }
@@ -367,9 +370,9 @@ pub fn run_top(
 /// populated from overlays); subsequent calls (parent resumes after
 /// a child HALT) reuse the cached runtime. Frame mem persists across
 /// re-entries — the parent's writes survive the child's execution.
-fn run_one_entry(cache: &Cache, frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
+fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
     if frame.runtime.is_none() {
-        let rt = build_runtime(cache, frame)?;
+        let rt = build_runtime(frame)?;
         frame.runtime = Some(rt);
     }
     let pc = frame.pc;
@@ -387,15 +390,21 @@ fn run_one_entry(cache: &Cache, frame: &mut KernelFrame, gas: i64) -> Result<Exi
 /// #PF handler on first write. Instance `rw_overlays` (per-instance
 /// state, not page-aligned) still memcpy into the mem_buf.
 ///
-/// Looks the image cap up by hash through `cache.read_blob`; the
-/// returned `&Cap` borrow lives until function return. Per the V1
-/// invariant (no eviction mid-RPC) the PA installed in the PT stays
-/// valid for the frame's lifetime even after this borrow ends.
-fn build_runtime<'a>(cache: &'a Cache, frame: &'a KernelFrame) -> Result<FrameRuntime, u32> {
-    let dir = cache.directory();
-    let img = match dir.get(CapHashOrRef::Hash(frame.image_hash)) {
-        Some(Cap::Image(i)) => i,
-        Some(_) => return Err(ERR_IMAGE_KIND),
+/// Looks the image and any cap-backed slices up under one
+/// `DIRECTORY` lock scope. The PAs installed in the PT stay valid
+/// for the frame's lifetime per the V1 invariant (no eviction mid-
+/// RPC) even after this function returns and the guard is dropped.
+fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
+    // Single lock scope: hold the directory across the whole build
+    // (mirrors the previous `cache.directory()`-guarded codepath).
+    // For the instance lookup we may need the instances map too —
+    // take both locks below in a defined order to avoid deadlock.
+    let dir = DIRECTORY.lock();
+    let img = match dir.get(&frame.image_hash) {
+        Some(b) => match &**b {
+            Cap::Image(i) => i,
+            _ => return Err(ERR_IMAGE_KIND),
+        },
         None => return Err(ERR_IMAGE_NOT_FOUND),
     };
 
@@ -436,14 +445,16 @@ fn build_runtime<'a>(cache: &'a Cache, frame: &'a KernelFrame) -> Result<FrameRu
             Some(Some(CapHashOrRef::Hash(h))) => *h,
             _ => continue,
         };
-        // Read the cap; lifetime tied to `cache`. The borrow ends at
-        // the end of this iteration's match block.
-        let bytes = match dir.get(CapHashOrRef::Hash(target_hash)) {
-            Some(Cap::Data(d)) => match &d.content {
-                javm_cap::DataContent::Inline(b) => b.as_slice(),
-                javm_cap::DataContent::Paged { .. } => return Err(ERR_MAP_PAGED_UNSUPPORTED),
+        // Read the cap under the existing directory guard. Slice
+        // borrow ends at the end of this iteration's match block.
+        let bytes = match dir.get(&target_hash) {
+            Some(b) => match &**b {
+                Cap::Data(d) => match &d.content {
+                    javm_cap::DataContent::Inline(bs) => bs.as_slice(),
+                    javm_cap::DataContent::Paged { .. } => return Err(ERR_MAP_PAGED_UNSUPPORTED),
+                },
+                _ => return Err(ERR_MAP_BAD_KIND),
             },
-            Some(_) => return Err(ERR_MAP_BAD_KIND),
             None => return Err(ERR_HOST_CALL_SLOT_EMPTY),
         };
         let pa = paging::va_to_pa(bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?;
@@ -458,32 +469,81 @@ fn build_runtime<'a>(cache: &'a Cache, frame: &'a KernelFrame) -> Result<FrameRu
         });
     }
 
-    // Instance rw_overlays: per-instance evolved state, currently
-    // allocated via the host's `Global` allocator and so not safely
-    // direct-mappable (no page-alignment guarantee). Memcpy through
-    // the per-frame mem_buf as before.
+    // Instance rw_overlays: per-instance evolved state. Top-level
+    // instances live in DIRECTORY (Hash); derive_spawn-created
+    // children live in INSTANCES (Ref). Branch on the key type and
+    // extract overlays + mem_size under the appropriate lock; we
+    // hold-and-copy rather than try to borrow across two guards.
     //
-    // Looked up afresh under the directory lock; slices borrow from
-    // `dir` which lives until end of this function.
-    let mut regions: [(u32, &[u8]); 3] = [(0, &[]), (0, &[]), (0, &[])];
+    // Up to three overlays are propagated to the JIT (its arg / ro
+    // / rw mem regions). Anything beyond that is ignored — matches
+    // pre-rewrite behaviour.
+    let mut overlay_bufs: [(u32, Vec<u8>); 3] = [(0, Vec::new()), (0, Vec::new()), (0, Vec::new())];
     let mut n = 0usize;
-    if let Some(Cap::Instance(inst)) = dir.get(frame.instance) {
-        for ov in inst.rw_overlays.iter() {
-            let end = ov.start.saturating_add(ov.bytes.len() as u32);
-            if end > mem_size {
-                mem_size = end;
-            }
-            if n < regions.len() && !ov.bytes.is_empty() {
-                regions[n] = (ov.start, ov.bytes.as_slice());
-                n += 1;
+
+    match frame.instance {
+        CapHashOrRef::Hash(h) => {
+            if let Some(b) = dir.get(&h)
+                && let Cap::Instance(inst) = &**b
+            {
+                for ov in inst.rw_overlays.iter() {
+                    let end = ov.start.saturating_add(ov.bytes.len() as u32);
+                    if end > mem_size {
+                        mem_size = end;
+                    }
+                    if n < overlay_bufs.len() && !ov.bytes.is_empty() {
+                        overlay_bufs[n].0 = ov.start;
+                        overlay_bufs[n].1.clear();
+                        overlay_bufs[n].1.extend_from_slice(ov.bytes.as_slice());
+                        n += 1;
+                    }
+                }
+                if inst.mem_size > mem_size {
+                    mem_size = inst.mem_size;
+                }
             }
         }
-        if inst.mem_size > mem_size {
-            mem_size = inst.mem_size;
+        CapHashOrRef::Ref(r) => {
+            // Drop the directory guard before grabbing INSTANCES to
+            // keep the lock ordering simple and one-way.
+            drop(dir);
+            let map = INSTANCES.lock();
+            if let Some(b) = map.get(&r)
+                && let Cap::Instance(inst) = &**b
+            {
+                for ov in inst.rw_overlays.iter() {
+                    let end = ov.start.saturating_add(ov.bytes.len() as u32);
+                    if end > mem_size {
+                        mem_size = end;
+                    }
+                    if n < overlay_bufs.len() && !ov.bytes.is_empty() {
+                        overlay_bufs[n].0 = ov.start;
+                        overlay_bufs[n].1.clear();
+                        overlay_bufs[n].1.extend_from_slice(ov.bytes.as_slice());
+                        n += 1;
+                    }
+                }
+                if inst.mem_size > mem_size {
+                    mem_size = inst.mem_size;
+                }
+            }
         }
     }
 
-    let [arg, ro, rw] = regions;
+    // Now we still need `img` for the JIT call. Re-lock DIRECTORY
+    // (cheap; uncontended on the single guest thread).
+    let dir = DIRECTORY.lock();
+    let img = match dir.get(&frame.image_hash) {
+        Some(b) => match &**b {
+            Cap::Image(i) => i,
+            _ => return Err(ERR_IMAGE_KIND),
+        },
+        None => return Err(ERR_IMAGE_NOT_FOUND),
+    };
+
+    let arg: (u32, &[u8]) = (overlay_bufs[0].0, overlay_bufs[0].1.as_slice());
+    let ro: (u32, &[u8]) = (overlay_bufs[1].0, overlay_bufs[1].1.as_slice());
+    let rw: (u32, &[u8]) = (overlay_bufs[2].0, overlay_bufs[2].1.as_slice());
 
     // `img.bitmask` is the packed form (1 bit per code byte);
     // `build_frame_runtime` / `Compiler::new` expect the unpacked
@@ -493,11 +553,9 @@ fn build_runtime<'a>(cache: &'a Cache, frame: &'a KernelFrame) -> Result<FrameRu
     // matters on cache miss.
     let bitmask = javm_exec::unpack_bitmask(img.bitmask.as_slice(), img.code.len());
 
-    // SAFETY: image and any cap-backed slices are borrowed from
-    // `cache`; their lifetime is bounded by `'a`. The PT we build
-    // contains the PAs directly — once the FrameRuntime returns,
-    // the borrow ends, but the PA stays valid because V1 doesn't
-    // evict cache entries mid-RPC.
+    // SAFETY: image and any cap-backed slices live in the heap-
+    // resident DIRECTORY/INSTANCES; PAs survive the guard drop per
+    // the no-eviction V1 invariant.
     unsafe {
         jit_run::build_frame_runtime(
             &frame.image_hash,
@@ -545,10 +603,11 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
 /// dst_slot=φ[9])`. V1: ignores `cnode_slot` (no prepared cnode
 /// support — the child inherits the parent's cnode at CALL time).
 /// Computes `child_chain = blake2b(running.chain, image_hash)`,
-/// publishes a fresh `Cap::Instance` to `cache.instances` via
-/// [`Cache::publish_instance`], and writes the resulting `CapRef`
-/// into the parent's `dst_slot`.
-fn dispatch_derive_spawn(cache: &mut Cache, frame: &mut KernelFrame) -> Result<(), u32> {
+/// publishes a fresh `Cap::Instance` into the heap-resident
+/// [`INSTANCES`] map via
+/// [`crate::state_cache::publish_transient_instance`], and writes
+/// the resulting `CapRef` into the parent's `dst_slot`.
+fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<(), u32> {
     let image_slot = (frame.regs[7] & 0xFF) as usize;
     let _cnode_slot = (frame.regs[8] & 0xFF) as usize;
     let dst_slot = (frame.regs[9] & 0xFF) as usize;
@@ -562,9 +621,17 @@ fn dispatch_derive_spawn(cache: &mut Cache, frame: &mut KernelFrame) -> Result<(
     };
     let child_chain = Blake2b256::hash_pair(&frame.image_hash_chain, &image_hash);
 
-    let child_ref = cache
-        .publish_transient_instance(image_hash, child_chain)
-        .map_err(|_| ERR_DERIVE_PUBLISH)?;
+    let cap = Cap::Instance(javm_cap::instance::InstanceCap {
+        image_hash_chain: child_chain,
+        image_hash,
+        root_cnode: CapHashOrRef::Hash([0u8; 32]),
+        rw_overlays: Vec::new(),
+        mem_size: 0,
+        regs: [0u64; NUM_REGS],
+        pc: 0,
+        gas_remaining: 0,
+    });
+    let child_ref = publish_transient_instance(cap);
     frame.cnode[dst_slot] = Some(CapHashOrRef::Ref(child_ref));
     Ok(())
 }
@@ -574,7 +641,7 @@ fn dispatch_derive_spawn(cache: &mut Cache, frame: &mut KernelFrame) -> Result<(
 /// [`KernelFrame`] for the child. Parent's φ[9..=12] become child's
 /// φ[7..=10] (arg-passing convention — used by the recursive-spawn
 /// bench to thread the remaining depth count).
-fn dispatch_host_call(cache: &mut Cache, parent: &KernelFrame) -> Result<KernelFrame, u32> {
+fn dispatch_host_call(parent: &KernelFrame) -> Result<KernelFrame, u32> {
     let instance_slot = (parent.regs[7] & 0xFF) as usize;
     let endpoint_idx = (parent.regs[8] & 0xFF) as u32;
     if instance_slot >= CNODE_SLOTS {
@@ -588,7 +655,7 @@ fn dispatch_host_call(cache: &mut Cache, parent: &KernelFrame) -> Result<KernelF
     // the child. The bench guest threads `depth` through φ[9] alone.
     let args = [parent.regs[9], parent.regs[10], 0, 0];
 
-    let mut child = build_frame_from_cap(cache, target, endpoint_idx, args)?;
+    let mut child = build_frame_from_cap(target, endpoint_idx, args)?;
 
     // Child inherits the parent's cnode entries that the child's
     // image didn't pre-populate. Per the data-flow principle every
@@ -607,26 +674,26 @@ fn dispatch_host_call(cache: &mut Cache, parent: &KernelFrame) -> Result<KernelF
     Ok(child)
 }
 
-/// Build a frame from a `Cap::Instance` blob published in the shared
-/// talc cache (the top-level invocation path; also used by
-/// `host_call` when the cnode slot points at a host-pre-published
+/// Build a frame from a `Cap::Instance` blob published in the heap-
+/// resident [`DIRECTORY`] (the top-level invocation path; also used
+/// by `host_call` when the cnode slot points at a host-pre-published
 /// instance hash).
 fn build_frame_from_published(
-    cache: &Cache,
     instance_hash: &CapHash,
     endpoint_idx: u32,
     args: [u64; 4],
 ) -> Result<KernelFrame, u32> {
     let (image_hash, image_hash_chain, inst_regs) = {
-        let dir = cache.directory();
-        match dir.get(CapHashOrRef::Hash(*instance_hash)) {
-            Some(Cap::Instance(i)) => (i.image_hash, i.image_hash_chain, i.regs),
-            Some(_) => return Err(ERR_INSTANCE_KIND),
+        let dir = DIRECTORY.lock();
+        match dir.get(instance_hash) {
+            Some(b) => match &**b {
+                Cap::Instance(i) => (i.image_hash, i.image_hash_chain, i.regs),
+                _ => return Err(ERR_INSTANCE_KIND),
+            },
             None => return Err(ERR_INSTANCE_NOT_FOUND),
         }
     };
     build_frame_inner(
-        cache,
         image_hash,
         image_hash_chain,
         CapHashOrRef::Hash(*instance_hash),
@@ -636,24 +703,24 @@ fn build_frame_from_published(
     )
 }
 
-/// Build a frame from a `Cap::Instance` resident in `cache.instances`
+/// Build a frame from a `Cap::Instance` resident in [`INSTANCES`]
 /// (kernel-derived sub-VM).
 fn build_frame_from_instance_ref(
-    cache: &Cache,
     ref_id: javm_cap::CapRef,
     endpoint_idx: u32,
     args: [u64; 4],
 ) -> Result<KernelFrame, u32> {
     let (image_hash, image_hash_chain) = {
-        let dir = cache.directory();
-        match dir.get(CapHashOrRef::Ref(ref_id)) {
-            Some(Cap::Instance(i)) => (i.image_hash, i.image_hash_chain),
-            Some(_) => return Err(ERR_INSTANCE_KIND),
+        let map = INSTANCES.lock();
+        match map.get(&ref_id) {
+            Some(b) => match &**b {
+                Cap::Instance(i) => (i.image_hash, i.image_hash_chain),
+                _ => return Err(ERR_INSTANCE_KIND),
+            },
             None => return Err(ERR_INSTANCE_NOT_FOUND),
         }
     };
     build_frame_inner(
-        cache,
         image_hash,
         image_hash_chain,
         CapHashOrRef::Ref(ref_id),
@@ -665,21 +732,19 @@ fn build_frame_from_instance_ref(
 
 /// Dispatch on `CapHashOrRef` — used by `dispatch_host_call`.
 fn build_frame_from_cap(
-    cache: &Cache,
     target: CapHashOrRef,
     endpoint_idx: u32,
     args: [u64; 4],
 ) -> Result<KernelFrame, u32> {
     match target {
-        CapHashOrRef::Hash(h) => build_frame_from_published(cache, &h, endpoint_idx, args),
-        CapHashOrRef::Ref(r) => build_frame_from_instance_ref(cache, r, endpoint_idx, args),
+        CapHashOrRef::Hash(h) => build_frame_from_published(&h, endpoint_idx, args),
+        CapHashOrRef::Ref(r) => build_frame_from_instance_ref(r, endpoint_idx, args),
     }
 }
 
 /// Core frame builder: reads the image cap to seed regs/pc/cnode +
 /// CoW ranges, stores only IDs on the frame (no `CapHandle` pins).
 fn build_frame_inner(
-    cache: &Cache,
     image_hash: CapHash,
     image_hash_chain: CapHash,
     instance: CapHashOrRef,
@@ -687,10 +752,12 @@ fn build_frame_inner(
     args: [u64; 4],
     inst_regs: Option<&[u64; NUM_REGS]>,
 ) -> Result<KernelFrame, u32> {
-    let dir = cache.directory();
-    let img = match dir.get(CapHashOrRef::Hash(image_hash)) {
-        Some(Cap::Image(i)) => i,
-        Some(_) => return Err(ERR_IMAGE_KIND),
+    let dir = DIRECTORY.lock();
+    let img = match dir.get(&image_hash) {
+        Some(b) => match &**b {
+            Cap::Image(i) => i,
+            _ => return Err(ERR_IMAGE_KIND),
+        },
         None => return Err(ERR_IMAGE_NOT_FOUND),
     };
 

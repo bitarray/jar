@@ -48,12 +48,16 @@ mod state_cache;
 
 #[cfg(target_os = "none")]
 mod guest {
+    use alloc::boxed::Box;
     use alloc::vec::Vec;
     use hyperlight_guest_bin::guest_function;
+    use javm_cap::cap::Cap;
+    use javm_cap::wire::WireCap;
     #[cfg(feature = "heap-diag")]
     use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
     use nub_arch_x86_abi::{
-        FN_ID_NUB_INVOKE_CACHED, FN_ID_NUB_SMOKE, InvocationResult, InvokePacket,
+        BootInfo, FN_ID_NUB_GET_BOOT_INFO, FN_ID_NUB_INVOKE_CACHED, FN_ID_NUB_PUT_CAP,
+        FN_ID_NUB_SMOKE, InvocationResult, InvokePacket,
     };
 
     /// Skeleton stand-in for the `Nub::invoke` RPC. The host's
@@ -95,20 +99,16 @@ mod guest {
             None => return encode_result_error(10),
         };
 
-        let mut cache = match crate::state_cache::init_guest_cache() {
-            Ok(c) => c,
-            Err(_) => return encode_result_error(11),
-        };
+        // V0: caps are resolved via the heap-resident DIRECTORY +
+        // INSTANCES statics (see `crate::state_cache`). The shared-
+        // memory `Cache` shim still exists for legacy callers but
+        // is no longer threaded through the call loop.
         let outcome = crate::call_loop::run_top(
-            &mut cache,
             &packet.instance_hash,
             packet.endpoint_idx,
             packet.args,
             packet.initial_gas as i64,
         );
-        // `cache` drops at end of scope (after run_top returns).
-        // Cache::Drop runs clear_scratch — frame stack has already
-        // unwound, so any handles dropped before the sweep observes.
 
         let result = match outcome {
             Ok(o) => InvocationResult {
@@ -128,6 +128,77 @@ mod guest {
         rkyv::to_bytes::<rkyv::rancor::Error>(&result)
             .expect("rkyv-encode InvocationResult")
             .into_vec()
+    }
+
+    /// Heap-resident cap-directory publisher. Decodes the
+    /// rkyv-archived [`WireCap`] payload, converts it back into a
+    /// [`Cap`], computes its content hash, and inserts a `Box<Cap>`
+    /// into [`crate::state_cache::DIRECTORY`].
+    ///
+    /// On any decode/conversion failure we return a sentinel
+    /// `CapHash` of all-`0xFF`. The host's `MultiUseSandbox::put_cap`
+    /// helper compares against this sentinel and surfaces a typed
+    /// error.
+    #[guest_function(fn_id = FN_ID_NUB_PUT_CAP)]
+    pub fn nub_put_cap(payload: &[u8]) -> Vec<u8> {
+        // Lazy first-call boot-info patch. `init_directory_va` is
+        // idempotent + cheap; nicer than wiring a custom
+        // `hyperlight_main` for just this one publication.
+        crate::state_cache::init_directory_va();
+
+        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
+        aligned.extend_from_slice(payload);
+
+        let wire: WireCap = match rkyv::from_bytes::<WireCap, rkyv::rancor::Error>(&aligned) {
+            Ok(w) => w,
+            Err(_) => return error_hash_sentinel(),
+        };
+        let cap: Cap = match wire.into_cap() {
+            Ok(c) => c,
+            Err(_) => return error_hash_sentinel(),
+        };
+        let hash = javm_cap::cap_hash(&cap);
+        {
+            let mut dir = crate::state_cache::DIRECTORY.lock();
+            dir.insert(hash, Box::new(cap));
+        }
+        let mut out: Vec<u8> = Vec::with_capacity(32);
+        out.extend_from_slice(&hash);
+        out
+    }
+
+    /// Read the current `BootInfo` block out as raw bytes. Used by
+    /// the host as a fallback when ELF-section lookup fails. Payload
+    /// is empty.
+    #[guest_function(fn_id = FN_ID_NUB_GET_BOOT_INFO)]
+    pub fn nub_get_boot_info(_input: &[u8]) -> Vec<u8> {
+        // Patch the VA on first read if it wasn't already published.
+        crate::state_cache::init_directory_va();
+
+        // SAFETY: `BOOT_INFO` is `static mut`; we read it after the
+        // init hook above ran, and we publish bytes out via a fresh
+        // copy. Reads of a freshly-patched `directory_va` field are
+        // safe in this single-threaded boot context.
+        let info: BootInfo = unsafe {
+            let p = &raw const crate::state_cache::BOOT_INFO;
+            core::ptr::read(p)
+        };
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                &info as *const BootInfo as *const u8,
+                core::mem::size_of::<BootInfo>(),
+            )
+        };
+        bytes.to_vec()
+    }
+
+    /// `nub_put_cap` failure sentinel — a `CapHash` of all `0xFF`. No
+    /// real cap hashes to this value (SSZ root + Union mix-in
+    /// selector mean a content hash collides with all-ones only
+    /// with negligible probability), so the host can use equality
+    /// against this constant as a reliable error flag.
+    fn error_hash_sentinel() -> Vec<u8> {
+        alloc::vec![0xFFu8; 32]
     }
 
     /// Diagnostic: report talc's current allocation state as 32 LE

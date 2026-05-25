@@ -1193,6 +1193,7 @@ version = "0.1.0"
 dependencies = [
  "allocate",
  "blake2",
+ "rkyv",
  "ssz",
  "ssz-derive",
  "thiserror",
@@ -1480,6 +1481,7 @@ version = "0.1.0"
 dependencies = [
  "allocate",
  "bytecheck",
+ "foldhash 0.2.0",
  "hyperlight-common",
  "hyperlight-guest",
  "hyperlight-guest-bin",
@@ -1489,6 +1491,7 @@ dependencies = [
  "nub-arch-x86-abi",
  "nub-host-common",
  "rkyv",
+ "spin",
 ]
 
 [[package]]
@@ -1548,6 +1551,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "crossbeam-channel",
+ "foldhash 0.2.0",
  "goblin",
  "hyperlight-common",
  "javm-cap",

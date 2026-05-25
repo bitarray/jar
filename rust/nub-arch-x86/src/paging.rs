@@ -532,6 +532,7 @@ pub fn invlpg(virt: u64) {
 /// The current CR3 must point at a writable PML4 in talc memory
 /// (the kernel's boot PML4). The mapped GPA range must point at
 /// host-installed physical memory.
+#[allow(dead_code)]
 pub unsafe fn install_persistent_kernel_mapping(
     virt: u64,
     phys: u64,
@@ -563,6 +564,7 @@ pub unsafe fn install_persistent_kernel_mapping(
 /// Allocates intermediate tables via [`alloc_table`]; never frees
 /// them (caller's responsibility — for [`install_persistent_kernel_mapping`]
 /// they're intentionally leaked into the kernel's page-table tree).
+#[allow(dead_code)]
 unsafe fn map_one_in_pml4(pml4: *mut Table, va: u64, pa: u64, perm: Perm) -> Option<()> {
     let idx4 = ((va >> 39) & 0x1FF) as usize;
     let idx3 = ((va >> 30) & 0x1FF) as usize;
@@ -579,6 +581,7 @@ unsafe fn map_one_in_pml4(pml4: *mut Table, va: u64, pa: u64, perm: Perm) -> Opt
     Some(())
 }
 
+#[allow(dead_code)]
 unsafe fn ensure_inner_foreign(entry: &mut u64, inner_flags: u64) -> Option<*mut Table> {
     const PS: u64 = 1 << 7;
     if *entry & flag::P != 0 {

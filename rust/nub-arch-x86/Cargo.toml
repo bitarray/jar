@@ -37,6 +37,10 @@ nub-arch-x86-abi = { path = "../nub-arch-x86-abi", default-features = false }
 nub-host-common = { path = "../nub-host-common", default-features = false }
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
 bytecheck = { version = "0.8", default-features = false }
+# Heap-resident DIRECTORY mutex + const-fn hasher seed. Matches
+# `nub-host-common`'s spin and the workspace's foldhash version.
+spin = "0.10"
+foldhash = { version = "0.2", default-features = false }
 
 [features]
 default = []

@@ -17,6 +17,9 @@ limitations under the License.
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
+use javm_cap::cap::Cap;
+use javm_cap::wire::WireCap;
+use nub_arch_x86_abi::{CapHash as AbiCapHash, FN_ID_NUB_PUT_CAP};
 use nub_host_common::rpc::{ArchivedResponse, Request};
 use rkyv::util::AlignedVec;
 use tracing::{Span, instrument};
@@ -175,6 +178,46 @@ impl MultiUseSandbox {
         }
 
         res
+    }
+
+    /// Publish a [`Cap`] into the guest's heap-resident cap
+    /// directory via the [`FN_ID_NUB_PUT_CAP`] RPC.
+    ///
+    /// Encodes `cap` as a [`WireCap`] (see `javm-cap`'s `wire`
+    /// module), ships it via [`Self::call_raw`], and reads back the
+    /// guest-computed `CapHash`. On the guest side, the cap is
+    /// inserted into the
+    /// `nub_arch_x86::state_cache::DIRECTORY` map, keyed by hash.
+    ///
+    /// Caps that can't be represented on the wire (e.g.
+    /// `DataContent::Paged`, `CNode` with `Ref`-typed slots, etc.)
+    /// fail at the wire conversion step with a typed error.
+    /// Encode/decode failures are surfaced as
+    /// `HyperlightError::Error`. A sentinel response (all-`0xFF`
+    /// hash) from the guest is also turned into an error.
+    pub fn put_cap(&mut self, cap: &Cap) -> Result<AbiCapHash> {
+        let wire = WireCap::from_cap(cap)
+            .map_err(|e| crate::new_error!("put_cap: wire conversion failed: {e}"))?;
+        let cap_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&wire)
+            .map_err(|e| crate::new_error!("put_cap: rkyv encode WireCap: {e}"))?;
+        let resp = self.call_raw(FN_ID_NUB_PUT_CAP, cap_bytes.as_slice())?;
+        if resp.len() != 32 {
+            return Err(crate::new_error!(
+                "put_cap: expected 32-byte hash response, got {}",
+                resp.len()
+            ));
+        }
+        let mut hash: AbiCapHash = [0u8; 32];
+        hash.copy_from_slice(&resp);
+        // Guest's `nub_put_cap` returns `0xFF * 32` on decode/conv
+        // failure. Surface as a typed error so callers don't observe
+        // a fake hash.
+        if hash == [0xFFu8; 32] {
+            return Err(crate::new_error!(
+                "put_cap: guest reported decode/conversion failure (sentinel response)"
+            ));
+        }
+        Ok(hash)
     }
 
     /// Returns a handle for interrupting guest execution.
