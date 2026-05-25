@@ -1,6 +1,6 @@
 use javm_cap::{
-    CNodeCap, Cap, CapHashOrRef, CapRef, DataCap, DataContent, ImageCap, InstanceCap, NUM_REGS,
-    PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotIdx, TypeCap,
+    CNodeCap, Cap, CacheDirectory, CapHashOrRef, DataCap, DataContent, ImageCap, InstanceCap,
+    NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotIdx, TypeCap,
 };
 
 #[test]
@@ -66,9 +66,10 @@ fn cnode_empty_vs_one_populated_differ() {
 
 #[test]
 fn cnode_with_ref_target_panics() {
+    let cache = CacheDirectory::new();
+    let r = cache.put_instance(Cap::CNode(CNodeCap::new(0).unwrap()));
     let mut cn: CNodeCap = CNodeCap::new(2).unwrap();
-    cn.set(SlotIdx(0), Some(CapHashOrRef::Ref(CapRef::new(42))))
-        .unwrap();
+    cn.set(SlotIdx(0), Some(CapHashOrRef::Ref(r))).unwrap();
     let cap: Cap = Cap::CNode(cn);
     let result = std::panic::catch_unwind(|| cap.cap_hash());
     assert!(result.is_err());

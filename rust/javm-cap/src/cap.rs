@@ -46,9 +46,11 @@ pub struct CapRef {
 }
 
 impl CapRef {
-    /// Construct a fresh `CapRef`. Only [`crate::cache::CacheDirectory::
-    /// put_instance`] and tests are expected to call this.
-    pub fn new(id: u64) -> Self {
+    /// Mint a fresh `CapRef`. Restricted to the crate so the only
+    /// production constructor is
+    /// [`crate::cache::CacheDirectory::put_instance`]; external code
+    /// can never fabricate a handle that has no directory backing.
+    pub(crate) fn new(id: u64) -> Self {
         Self {
             id,
             rc: Arc::new(()),

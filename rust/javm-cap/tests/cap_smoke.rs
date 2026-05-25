@@ -3,9 +3,9 @@
 //! the source tree free of `_tests.rs` sidecars.
 
 use javm_cap::{
-    CNodeCap, CacheDirectory, Cap, CapHashOrRef, CapRef, DataCap, DataContent, EndpointDef,
-    ImageCap, ImageSlotEntry, InstanceCap, MAX_SOURCE_DEPTH, MemoryMapping, NUM_REGS, PAGE_SIZE,
-    PageBytes, PageRef, PageSlot, RwOverlay, SlotIdx,
+    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, DataContent, EndpointDef, ImageCap,
+    ImageSlotEntry, InstanceCap, MAX_SOURCE_DEPTH, MemoryMapping, NUM_REGS, PAGE_SIZE, PageBytes,
+    PageRef, PageSlot, RwOverlay, SlotIdx,
 };
 use std::sync::Arc;
 
@@ -139,9 +139,10 @@ fn cnode_lookup_after_set() {
     cnode
         .set(SlotIdx(7), Some(CapHashOrRef::Hash([0x11; 32])))
         .unwrap();
-    // CapRef is now a refcounted handle; fabricate one for the test
-    // (no directory backing — these test only the slot bookkeeping).
-    let r = CapRef::new(99);
+    // Mint a real CapRef via the cache so the bookkeeping test
+    // doesn't depend on the crate-internal `CapRef::new`.
+    let cache = CacheDirectory::new();
+    let r = cache.put_instance(Cap::CNode(CNodeCap::new(0).unwrap()));
     cnode
         .set(SlotIdx(42), Some(CapHashOrRef::Ref(r.clone())))
         .unwrap();
@@ -244,13 +245,16 @@ fn image_slot_entry_compact() {
 
 #[test]
 fn capref_strong_count_tracks_holders() {
-    let r = CapRef::new(7);
-    assert_eq!(r.strong_count(), 1);
-    let r2 = r.clone();
+    let cache = CacheDirectory::new();
+    // put_instance returns the caller's CapRef; the directory holds
+    // its own clone as the entry's self-ref, so strong_count starts at 2.
+    let r = cache.put_instance(Cap::CNode(CNodeCap::new(0).unwrap()));
     assert_eq!(r.strong_count(), 2);
-    assert_eq!(r2.strong_count(), 2);
+    let r2 = r.clone();
+    assert_eq!(r.strong_count(), 3);
+    assert_eq!(r2.strong_count(), 3);
     drop(r2);
-    assert_eq!(r.strong_count(), 1);
+    assert_eq!(r.strong_count(), 2);
 }
 
 #[test]
