@@ -21,7 +21,6 @@ extern crate alloc;
 pub mod abi;
 pub mod cache;
 pub mod cap;
-pub mod cap_hash;
 pub mod cnode;
 pub mod data;
 pub mod error;
@@ -37,7 +36,6 @@ pub use cache::{CacheDirectory, CacheError};
 pub use cap::{
     Cap, CapHash, CapHashOrRef, CapKind, CapRef, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS, TypeCap,
 };
-pub use cap_hash::cap_hash;
 pub use cnode::{CNodeCap, CNodeSlotEntry};
 pub use data::{DataCap, DataContent, PAGE_SIZE};
 pub use error::{CapError, OpError};

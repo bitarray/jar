@@ -22,8 +22,6 @@ use std::time::Instant;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_cap::cap::Cap;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use javm_cap::cap_hash::cap_hash;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_cap::image::Image;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use nub::Nub;
@@ -128,7 +126,7 @@ fn main() {
     //     already built. Isolates the hash work from the alloc/copy.
     let cap_data: Cap = Cap::data_inline_with_size(bytes, size_u64);
     measure("(c) cap_hash(Cap::Data) on pre-built Cap", n, || {
-        let h = cap_hash(&cap_data);
+        let h = cap_data.cap_hash();
         std::hint::black_box(h);
     });
 
@@ -136,7 +134,7 @@ fn main() {
     //     Cap::Data + cap_hash + drop. Compare against the talc-backed (e).
     measure("(d) build Cap::Data(Global) + cap_hash + drop", n, || {
         let cap: Cap = Cap::data_inline_with_size(bytes, size_u64);
-        let h = cap_hash(&cap);
+        let h = cap.cap_hash();
         std::hint::black_box(h);
         drop(cap);
     });

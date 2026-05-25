@@ -68,7 +68,6 @@ use hashbrown::{DefaultHashBuilder, HashMap};
 use spin::Mutex;
 
 use super::cap::{Cap, CapHash, CapHashOrRef, CapRef};
-use super::cap_hash::cap_hash;
 use super::image_cap::ImageConvertError;
 
 #[derive(Debug, thiserror::Error)]
@@ -217,7 +216,7 @@ impl<S: BuildHasher> CacheDirectory<S> {
     /// Hash + insert into blobs. Idempotent: re-puts of identical
     /// content are a no-op. Returns the content hash.
     pub fn put_cap(&self, cap: &Cap) -> Result<CapHash, CacheError> {
-        let hash = cap_hash(cap);
+        let hash = cap.cap_hash();
         self.put_cap_with_hash(hash, cap)?;
         Ok(hash)
     }
@@ -227,7 +226,7 @@ impl<S: BuildHasher> CacheDirectory<S> {
     /// cost on the publish path).
     pub fn put_cap_with_hash(&self, hash: CapHash, cap: &Cap) -> Result<(), CacheError> {
         debug_assert_eq!(
-            cap_hash(cap),
+            cap.cap_hash(),
             hash,
             "put_cap_with_hash: claimed hash does not match cap content",
         );
@@ -353,7 +352,7 @@ impl<S: BuildHasher> CacheDirectory<S> {
         let arc = self
             .get_instance(capref)
             .ok_or_else(|| CacheError::InstanceMissing(capref.id()))?;
-        let hash = cap_hash(&arc);
+        let hash = arc.cap_hash();
 
         // Step 3: graduate non-Instance entries to blobs. Instance
         // entries stay in instances (the snapshot hash is returned but

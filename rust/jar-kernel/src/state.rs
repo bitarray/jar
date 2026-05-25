@@ -7,7 +7,7 @@
 //! The state root is the SSZ `hash_tree_root` of the cache's blobs,
 //! each represented as a `(blob_hash, cap_hash)` leaf container.
 
-use javm_cap::{CacheDirectory, CapHash, cap_hash};
+use javm_cap::{CacheDirectory, CapHash};
 use ssz::{Encode, HashTreeRoot};
 
 /// PoA validator key (placeholder — 32-byte public key).
@@ -68,7 +68,7 @@ pub fn state_root(state: &State) -> CapHash {
         .into_iter()
         .map(|(hash, cap)| StateLeaf {
             blob_hash: hash,
-            cap_hash: cap_hash(&cap),
+            cap_hash: cap.cap_hash(),
         })
         .collect();
     leaves.sort_by_key(|l| l.blob_hash);

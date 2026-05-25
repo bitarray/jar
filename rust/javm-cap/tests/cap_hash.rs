@@ -1,6 +1,6 @@
 use javm_cap::{
     CNodeCap, Cap, CapHashOrRef, CapRef, DataCap, DataContent, ImageCap, InstanceCap, NUM_REGS,
-    PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotIdx, TypeCap, cap_hash,
+    PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotIdx, TypeCap,
 };
 
 #[test]
@@ -12,12 +12,12 @@ fn type_cap_hash_deterministic() {
     let b: Cap = Cap::Type(TypeCap {
         image_hash_chain: chain,
     });
-    assert_eq!(cap_hash(&a), cap_hash(&b));
+    assert_eq!(a.cap_hash(), b.cap_hash());
     // Different chain → different hash.
     let c: Cap = Cap::Type(TypeCap {
         image_hash_chain: [0xBB; 32],
     });
-    assert_ne!(cap_hash(&a), cap_hash(&c));
+    assert_ne!(a.cap_hash(), c.cap_hash());
 }
 
 #[test]
@@ -29,7 +29,7 @@ fn cap_variants_have_distinct_hashes() {
         image_hash_chain: [0; 32],
     });
     let cn: Cap = Cap::CNode(CNodeCap::new(0).unwrap());
-    assert_ne!(cap_hash(&t), cap_hash(&cn));
+    assert_ne!(t.cap_hash(), cn.cap_hash());
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn data_inline_hash_includes_size() {
     let b: Cap = Cap::Data(DataCap {
         content: DataContent::Inline(bytes_b_padded),
     });
-    assert_ne!(cap_hash(&a), cap_hash(&b));
+    assert_ne!(a.cap_hash(), b.cap_hash());
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn cnode_empty_vs_one_populated_differ() {
         .unwrap();
     let a: Cap = Cap::CNode(empty);
     let b: Cap = Cap::CNode(populated);
-    assert_ne!(cap_hash(&a), cap_hash(&b));
+    assert_ne!(a.cap_hash(), b.cap_hash());
 }
 
 #[test]
@@ -70,7 +70,7 @@ fn cnode_with_ref_target_panics() {
     cn.set(SlotIdx(0), Some(CapHashOrRef::Ref(CapRef::new(42))))
         .unwrap();
     let cap: Cap = Cap::CNode(cn);
-    let result = std::panic::catch_unwind(|| cap_hash(&cap));
+    let result = std::panic::catch_unwind(|| cap.cap_hash());
     assert!(result.is_err());
 }
 
@@ -82,7 +82,7 @@ fn image_hash_depends_on_code() {
     img_b.code.extend_from_slice(b"bar");
     let a: Cap = Cap::Image(img_a);
     let b: Cap = Cap::Image(img_b);
-    assert_ne!(cap_hash(&a), cap_hash(&b));
+    assert_ne!(a.cap_hash(), b.cap_hash());
 }
 
 fn empty_image() -> ImageCap {
@@ -106,7 +106,7 @@ fn instance_hash_depends_on_pc() {
     inst_b.pc = 0x200;
     let a: Cap = Cap::Instance(inst_a);
     let b: Cap = Cap::Instance(inst_b);
-    assert_ne!(cap_hash(&a), cap_hash(&b));
+    assert_ne!(a.cap_hash(), b.cap_hash());
 }
 
 fn empty_instance() -> InstanceCap {
@@ -139,7 +139,7 @@ fn data_paged_hash_uses_loaded_page_hashes() {
             pages,
         },
     });
-    let h = cap_hash(&cap);
+    let h = cap.cap_hash();
     // Sanity: identical Cap shape with a different page hash differs.
     let bytes2: Vec<u8> = vec![1, 2, 3];
     let pb2 = PageBytes {
@@ -154,7 +154,7 @@ fn data_paged_hash_uses_loaded_page_hashes() {
             pages: pages2,
         },
     });
-    assert_ne!(h, cap_hash(&cap2));
+    assert_ne!(h, cap2.cap_hash());
 }
 
 #[test]
@@ -185,5 +185,5 @@ fn loaded_page_substitutes_for_missing_with_same_hash() {
         },
     });
 
-    assert_eq!(cap_hash(&cap_loaded), cap_hash(&cap_missing));
+    assert_eq!(cap_loaded.cap_hash(), cap_missing.cap_hash());
 }

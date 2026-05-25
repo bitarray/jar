@@ -257,6 +257,34 @@ impl Cap {
         }
     }
 
+    /// 32-byte content hash. Walks the cap tree via SSZ `HashTreeRoot`
+    /// with SHA-256 as the digest; the five variants get their domain
+    /// separation from the SSZ Union selector.
+    ///
+    /// **Substitution invariants** preserved by hand-written
+    /// `HashTreeRoot` impls on [`super::page::PageSlot`],
+    /// [`super::page::PageBytes`], and [`CapHashOrRef`]:
+    /// - `PageSlot::Loaded(p)` hashes identically to
+    ///   `PageSlot::Missing(p.hash)` — a freshly-loaded page
+    ///   substitutes for a missing page without changing the
+    ///   enclosing cap's hash.
+    /// - `CapHashOrRef::Hash(h)` hashes to `h` exactly — a freshly-
+    ///   published cap blob substitutes for a `CapRef` reference
+    ///   without changing the enclosing cap's hash.
+    ///
+    /// **Unresolved refs panic**: hashing a cap whose graph still
+    /// contains `CapHashOrRef::Ref(_)` targets will panic. Callers
+    /// must `settle` the cap graph first.
+    ///
+    /// **Image hash distinction**: `Cap::Image(_).cap_hash()` and
+    /// `crate::image::image_content_hash` hash different types — the
+    /// cap-resident `ImageCap` has a flatter layout than the SCALE
+    /// `Image`. The cache publishes by `cap_hash`; the image-hash
+    /// chain protocol uses `image_content_hash`.
+    pub fn cap_hash(&self) -> CapHash {
+        ssz::hash_tree_root(self)
+    }
+
     /// Build a heap `Cap::Data` whose content is `bytes` padded up to
     /// the next [`PAGE_SIZE`](super::data::PAGE_SIZE) boundary with
     /// zeros. The backing allocation is page-aligned so the kernel

@@ -643,7 +643,7 @@ impl<K: KernelAssist> Vm<K> {
             _ => return Err(VmError::InstanceNotFound),
         };
         let cap = Cap::Type(TypeCap { image_hash_chain });
-        let h = javm_cap::cap_hash(&cap);
+        let h = cap.cap_hash();
         cache.put_cap_with_hash(h, &cap)?;
 
         let running = self
@@ -717,7 +717,7 @@ impl<K: KernelAssist> Vm<K> {
         let cap = Cap::Data(DataCap {
             content: DataContent::Inline(inline),
         });
-        let h = javm_cap::cap_hash(&cap);
+        let h = cap.cap_hash();
         cache.put_cap_with_hash(h, &cap)?;
 
         let running = self
@@ -999,7 +999,7 @@ impl<K: KernelAssist> Vm<K> {
         cache: Option<&mut CacheDirectory>,
     ) -> Result<(), VmError> {
         let cap = Cap::CNode(javm_cap::CNodeCap::new(size_log)?);
-        let cap_hash = javm_cap::cap_hash(&cap);
+        let cap_hash = cap.cap_hash();
         let h = match cache {
             Some(cache) => {
                 cache.put_cap_with_hash(cap_hash, &cap)?;
@@ -1629,7 +1629,7 @@ mod tests {
 
         // Hash hygiene: the new instance hash actually matches what
         // cap_hash computes on the published cap.
-        assert_eq!(new_instance_hash, javm_cap::cap_hash(&cap));
+        assert_eq!(new_instance_hash, cap.cap_hash());
     }
 
     /// `dispatch_host_call_cached` pushes a child entry on top of

@@ -1,6 +1,6 @@
 use javm_cap::image::EndpointDef;
 use javm_cap::wire::WireCap;
-use javm_cap::{CNodeCap, Cap, NUM_REGS, TypeCap, cap_hash, image::Image};
+use javm_cap::{CNodeCap, Cap, NUM_REGS, TypeCap, image::Image};
 use std::collections::BTreeMap;
 
 #[test]
@@ -10,7 +10,7 @@ fn type_cap_roundtrip_preserves_hash() {
     });
     let wire = WireCap::from_cap(&cap).expect("from_cap");
     let recovered = wire.into_cap().expect("into_cap");
-    assert_eq!(cap_hash(&cap), cap_hash(&recovered));
+    assert_eq!(cap.cap_hash(), recovered.cap_hash());
 }
 
 #[test]
@@ -18,7 +18,7 @@ fn empty_cnode_roundtrip_preserves_hash() {
     let cap = Cap::CNode(CNodeCap::new(0).expect("cnode"));
     let wire = WireCap::from_cap(&cap).expect("from_cap");
     let recovered = wire.into_cap().expect("into_cap");
-    assert_eq!(cap_hash(&cap), cap_hash(&recovered));
+    assert_eq!(cap.cap_hash(), recovered.cap_hash());
 }
 
 #[test]
@@ -26,7 +26,7 @@ fn inline_data_roundtrip_preserves_hash() {
     let cap = Cap::data_inline(b"hello-rkyv");
     let wire = WireCap::from_cap(&cap).expect("from_cap");
     let recovered = wire.into_cap().expect("into_cap");
-    assert_eq!(cap_hash(&cap), cap_hash(&recovered));
+    assert_eq!(cap.cap_hash(), recovered.cap_hash());
 }
 
 #[test]
@@ -39,7 +39,7 @@ fn rkyv_archive_roundtrip_data_cap() {
     let decoded: WireCap =
         rkyv::from_bytes::<WireCap, rkyv::rancor::Error>(&aligned).expect("rkyv decode");
     let recovered = decoded.into_cap().expect("into_cap");
-    assert_eq!(cap_hash(&cap), cap_hash(&recovered));
+    assert_eq!(cap.cap_hash(), recovered.cap_hash());
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn image_cap_roundtrip_preserves_hash() {
     let decoded: WireCap =
         rkyv::from_bytes::<WireCap, rkyv::rancor::Error>(&aligned).expect("rkyv decode");
     let recovered = decoded.into_cap().expect("into_cap");
-    assert_eq!(cap_hash(&cap), cap_hash(&recovered));
+    assert_eq!(cap.cap_hash(), recovered.cap_hash());
 }
 
 #[test]
@@ -90,5 +90,5 @@ fn instance_cap_roundtrip_preserves_hash() {
     let decoded: WireCap =
         rkyv::from_bytes::<WireCap, rkyv::rancor::Error>(&aligned).expect("rkyv decode");
     let recovered = decoded.into_cap().expect("into_cap");
-    assert_eq!(cap_hash(&cap), cap_hash(&recovered));
+    assert_eq!(cap.cap_hash(), recovered.cap_hash());
 }
