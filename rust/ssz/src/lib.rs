@@ -8,12 +8,6 @@
 //! the [`HashTreeRoot`] trait is generic over any `digest::Digest` with a
 //! 32-byte output, so callers can plug in alternative hashes at compile time.
 //!
-//! # Allocator-genericity
-//!
-//! Public encode paths take `&mut Vec<u8, A>` (from `allocator-api2`) so a
-//! caller in talc-allocated memory can serialize without bouncing through
-//! `Global`.
-//!
 //! # Wire format
 //!
 //! See [`encoding`](https://github.com/ethereum/consensus-specs/blob/dev/ssz/simple-serialize.md)
@@ -26,8 +20,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;
 
-use allocate::vec::Vec;
-use allocate::{Allocator, Global};
+use alloc::vec::Vec;
 use digest::Digest;
 use digest::typenum::U32;
 
@@ -45,8 +38,14 @@ pub mod vector;
 pub use bits::{Bitlist, Bitvector};
 // Re-exports so consumers of the derive macros can name the crates the
 // generated code references without taking direct dependencies.
-pub use allocate;
 pub use digest;
+
+/// Hidden re-exports used by the derive macros. Not part of the public
+/// API; do not depend on this directly.
+#[doc(hidden)]
+pub mod __private {
+    pub use alloc::vec::Vec;
+}
 pub use error::DecodeError;
 pub use list::List;
 pub use merkle::{merkleize, mix_in_length, mix_in_selector, pack_bytes, zero_hash};
@@ -69,8 +68,6 @@ pub const BYTES_PER_CHUNK: usize = 32;
 /// SSZ encoding trait.
 ///
 /// `ssz_append` is the primary primitive: every other method delegates to it.
-/// Callers in foreign allocators (e.g. talc) pass their `Allocator` via the
-/// `A` type parameter on `ssz_append` and `as_ssz_bytes_in`.
 pub trait Encode {
     /// `true` iff this type is fixed-length (no variable-length fields).
     fn is_ssz_fixed_len() -> bool;
@@ -93,26 +90,13 @@ pub trait Encode {
     fn ssz_bytes_len(&self) -> usize;
 
     /// Append the encoding of `self` to `buf`.
-    fn ssz_append<A: Allocator + Clone>(&self, buf: &mut Vec<u8, A>);
+    fn ssz_append(&self, buf: &mut Vec<u8>);
 
-    /// Serialize into a fresh buffer allocated from `alloc`.
-    fn as_ssz_bytes_in<A: Allocator + Clone>(&self, alloc: A) -> Vec<u8, A> {
-        let mut v = Vec::new_in(alloc);
+    /// Serialize into a fresh `Vec<u8>` allocated through the global allocator.
+    fn as_ssz_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(self.ssz_bytes_len());
         self.ssz_append(&mut v);
         v
-    }
-
-    /// Serialize into a fresh `Global`-allocated `alloc::vec::Vec`.
-    ///
-    /// This is provided for convenience in callers that don't care about
-    /// allocator threading. The default impl encodes into an
-    /// `allocate::vec::Vec<u8, Global>` and copies into a standard
-    /// `alloc::vec::Vec<u8>`. Implementations may override for efficiency.
-    fn as_ssz_bytes(&self) -> alloc::vec::Vec<u8> {
-        let mut out = alloc::vec::Vec::with_capacity(self.ssz_bytes_len());
-        let buf: Vec<u8, Global> = self.as_ssz_bytes_in(Global);
-        out.extend_from_slice(&buf);
-        out
     }
 }
 
@@ -128,15 +112,8 @@ pub trait Decode: Sized {
         BYTES_PER_LENGTH_OFFSET
     }
 
-    /// Decode a full instance from `bytes`, rejecting trailing input. Uses
-    /// the [`Global`] allocator for any internal buffers.
-    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
-        Self::from_ssz_bytes_in(bytes, Global)
-    }
-
-    /// Decode a full instance from `bytes`, using `alloc` for owned buffers.
-    fn from_ssz_bytes_in<A: Allocator + Clone>(bytes: &[u8], alloc: A)
-    -> Result<Self, DecodeError>;
+    /// Decode a full instance from `bytes`, rejecting trailing input.
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError>;
 }
 
 /// Computes a 32-byte hash tree root for SSZ types.

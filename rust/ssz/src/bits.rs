@@ -9,8 +9,7 @@
 //!   sentinel `1` bit immediately after the data bits; the decoder finds
 //!   the highest set bit in the final byte to recover the length.
 
-use allocate::vec::Vec;
-use allocate::{Allocator, Global};
+use alloc::vec::Vec;
 use core::fmt;
 use digest::Digest;
 use digest::typenum::U32;
@@ -29,7 +28,7 @@ use crate::{BYTES_PER_LENGTH_OFFSET, Decode, DecodeError, Encode, HashTreeRoot};
 /// invariant at the type level.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Bitvector<const N: usize> {
-    bytes: alloc::vec::Vec<u8>,
+    bytes: Vec<u8>,
 }
 
 #[inline]
@@ -113,7 +112,7 @@ impl<const N: usize> Encode for Bitvector<N> {
     fn ssz_bytes_len(&self) -> usize {
         bitvec_bytes(N)
     }
-    fn ssz_append<A: Allocator + Clone>(&self, buf: &mut Vec<u8, A>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&self.bytes);
     }
 }
@@ -125,10 +124,7 @@ impl<const N: usize> Decode for Bitvector<N> {
     fn ssz_fixed_len() -> usize {
         bitvec_bytes(N)
     }
-    fn from_ssz_bytes_in<A: Allocator + Clone>(
-        bytes: &[u8],
-        _alloc: A,
-    ) -> Result<Self, DecodeError> {
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         Self::from_slice(bytes)
     }
 }
@@ -172,35 +168,22 @@ fn validate_trailing_zero_bits(bytes: &[u8], n: usize) -> Result<(), DecodeError
 /// Wire format: packed bits (LSB-first within bytes), followed by a
 /// sentinel `1` bit immediately after the data bits. The sentinel marks
 /// the end of the logical bitstream and is not part of the bit content.
-pub struct Bitlist<const N: u64, A: Allocator + Clone = Global> {
-    bytes: Vec<u8, A>,
+pub struct Bitlist<const N: u64> {
+    bytes: Vec<u8>,
     bit_len: u64,
 }
 
-impl<const N: u64> Bitlist<N, Global> {
-    /// Build an empty `Global`-allocated bitlist.
+impl<const N: u64> Bitlist<N> {
+    /// Build an empty bitlist.
     pub fn new() -> Self {
         Self {
-            bytes: Vec::new_in(Global),
+            bytes: Vec::new(),
             bit_len: 0,
         }
     }
 
     /// Build from a logical bit vector.
     pub fn from_bits(bits: &[bool]) -> Result<Self, DecodeError> {
-        Self::from_bits_in(bits, Global)
-    }
-}
-
-impl<const N: u64> Default for Bitlist<N, Global> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<const N: u64, A: Allocator + Clone> Bitlist<N, A> {
-    /// Build from a logical bit vector with a caller-provided allocator.
-    pub fn from_bits_in(bits: &[bool], alloc: A) -> Result<Self, DecodeError> {
         if (bits.len() as u64) > N {
             return Err(DecodeError::BoundExceeded {
                 len: bits.len() as u64,
@@ -208,8 +191,7 @@ impl<const N: u64, A: Allocator + Clone> Bitlist<N, A> {
             });
         }
         let byte_len = bits.len().div_ceil(8);
-        let mut bytes: Vec<u8, A> = Vec::with_capacity_in(byte_len, alloc);
-        bytes.resize(byte_len, 0u8);
+        let mut bytes: Vec<u8> = alloc::vec![0u8; byte_len];
         for (i, b) in bits.iter().enumerate() {
             if *b {
                 bytes[i / 8] |= 1 << (i % 8);
@@ -251,7 +233,13 @@ impl<const N: u64, A: Allocator + Clone> Bitlist<N, A> {
     }
 }
 
-impl<const N: u64, A: Allocator + Clone> fmt::Debug for Bitlist<N, A> {
+impl<const N: u64> Default for Bitlist<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: u64> fmt::Debug for Bitlist<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Bitlist")
             .field("cap", &N)
@@ -261,7 +249,7 @@ impl<const N: u64, A: Allocator + Clone> fmt::Debug for Bitlist<N, A> {
     }
 }
 
-impl<const N: u64, A: Allocator + Clone> Clone for Bitlist<N, A> {
+impl<const N: u64> Clone for Bitlist<N> {
     fn clone(&self) -> Self {
         Self {
             bytes: self.bytes.clone(),
@@ -270,7 +258,7 @@ impl<const N: u64, A: Allocator + Clone> Clone for Bitlist<N, A> {
     }
 }
 
-impl<const N: u64, A: Allocator + Clone> PartialEq for Bitlist<N, A> {
+impl<const N: u64> PartialEq for Bitlist<N> {
     fn eq(&self, other: &Self) -> bool {
         if self.bit_len != other.bit_len {
             return false;
@@ -279,9 +267,9 @@ impl<const N: u64, A: Allocator + Clone> PartialEq for Bitlist<N, A> {
     }
 }
 
-impl<const N: u64, A: Allocator + Clone> Eq for Bitlist<N, A> {}
+impl<const N: u64> Eq for Bitlist<N> {}
 
-impl<const N: u64, A: Allocator + Clone> Encode for Bitlist<N, A> {
+impl<const N: u64> Encode for Bitlist<N> {
     fn is_ssz_fixed_len() -> bool {
         false
     }
@@ -291,7 +279,7 @@ impl<const N: u64, A: Allocator + Clone> Encode for Bitlist<N, A> {
     fn ssz_bytes_len(&self) -> usize {
         self.wire_byte_len()
     }
-    fn ssz_append<A2: Allocator + Clone>(&self, buf: &mut Vec<u8, A2>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         // Layout: copy data bytes, then set sentinel bit at position `bit_len`.
         let wire_len = self.wire_byte_len();
         let start = buf.len();
@@ -308,17 +296,14 @@ impl<const N: u64, A: Allocator + Clone> Encode for Bitlist<N, A> {
     }
 }
 
-impl<const N: u64, A: Allocator + Clone + Default> Decode for Bitlist<N, A> {
+impl<const N: u64> Decode for Bitlist<N> {
     fn is_ssz_fixed_len() -> bool {
         false
     }
     fn ssz_fixed_len() -> usize {
         BYTES_PER_LENGTH_OFFSET
     }
-    fn from_ssz_bytes_in<A2: Allocator + Clone>(
-        bytes: &[u8],
-        _alloc: A2,
-    ) -> Result<Self, DecodeError> {
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         if bytes.is_empty() {
             return Err(DecodeError::MissingBitlistSentinel);
         }
@@ -337,7 +322,7 @@ impl<const N: u64, A: Allocator + Clone + Default> Decode for Bitlist<N, A> {
 
         // Extract data: copy all bytes, then clear the sentinel bit and the
         // bits above it in the last byte.
-        let mut data: Vec<u8, A> = Vec::with_capacity_in(bytes.len(), A::default());
+        let mut data: Vec<u8> = Vec::with_capacity(bytes.len());
         data.extend_from_slice(bytes);
         if let Some(last_byte) = data.last_mut() {
             let keep_mask = (1u8 << sentinel_bit_in_byte).wrapping_sub(1);
@@ -360,7 +345,7 @@ impl<const N: u64, A: Allocator + Clone + Default> Decode for Bitlist<N, A> {
     }
 }
 
-impl<const N: u64, A: Allocator + Clone> HashTreeRoot for Bitlist<N, A> {
+impl<const N: u64> HashTreeRoot for Bitlist<N> {
     fn hash_tree_root<D: Digest<OutputSize = U32>>(&self) -> [u8; 32] {
         let data = &self.bytes[..];
         let chunks = pack_bytes(data);

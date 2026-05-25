@@ -1,10 +1,7 @@
 //! `Cap` — cap enum + shared constants.
 //!
 //! Cap types and their inner storage use the default `Global` allocator
-//! (= std heap on host, talc on guest via `#[global_allocator]`). The
-//! per-type SSZ trait impls keep an `<A: Allocator + Clone>` parameter on
-//! `ssz_append` / `from_ssz_bytes_in` because that `A` is the SSZ output
-//! buffer's allocator, unrelated to cap field storage.
+//! (= std heap on host, talc on guest via `#[global_allocator]`).
 
 use alloc::vec::Vec;
 
@@ -71,7 +68,7 @@ impl ssz::Encode for CapHashOrRef {
             CapHashOrRef::Ref(_) => 1 + 8,
         }
     }
-    fn ssz_append<A: allocate::Allocator + Clone>(&self, buf: &mut allocate::vec::Vec<u8, A>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         match self {
             CapHashOrRef::Hash(h) => {
                 buf.push(0);
@@ -92,10 +89,7 @@ impl ssz::Decode for CapHashOrRef {
     fn ssz_fixed_len() -> usize {
         ssz::BYTES_PER_LENGTH_OFFSET
     }
-    fn from_ssz_bytes_in<A: allocate::Allocator + Clone>(
-        bytes: &[u8],
-        _alloc: A,
-    ) -> Result<Self, ssz::DecodeError> {
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, ssz::DecodeError> {
         if bytes.is_empty() {
             return Err(ssz::DecodeError::UnexpectedEof {
                 expected: 1,

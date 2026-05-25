@@ -3,7 +3,7 @@ name = "ssz"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "SimpleSerialize (SSZ) codec with hash_tree_root, MissingOr/SparseList extensions, allocator-generic via the `allocate` crate."
+description = "SimpleSerialize (SSZ) codec with hash_tree_root, MissingOr/SparseList extensions."
 
 [features]
 default = ["std", "sha2", "derive"]
@@ -18,7 +18,6 @@ derive = ["dep:ssz-derive"]
 ethereum-conformance = []
 
 [dependencies]
-allocate = { path = "../allocate" }
 digest = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false, optional = true }
 thiserror = { version = "2", default-features = false }

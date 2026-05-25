@@ -47,9 +47,6 @@ pub struct PageBytes {
 // page digest). A `derive(HashTreeRoot)` would mix in a selector byte and
 // break that equality.
 //
-// `Encode`'s `ssz_append` takes the SSZ buffer's allocator as a
-// trait-method type parameter — that's the output-buffer allocator,
-// unrelated to our cap content's storage (which is always `Global`).
 // --------------------------------------------------------------------------
 
 impl ssz::HashTreeRoot for PageSlot {
@@ -93,7 +90,7 @@ impl ssz::Encode for PageSlot {
             PageSlot::Missing(_) => 1 + 32,
         }
     }
-    fn ssz_append<Al: allocate::Allocator + Clone>(&self, buf: &mut allocate::vec::Vec<u8, Al>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         match self {
             PageSlot::Empty => buf.push(0),
             PageSlot::Loaded(pr) => {
@@ -121,7 +118,7 @@ impl ssz::Encode for PageBytes {
         // payload = bytes.len().
         32 + 4 + self.bytes.len()
     }
-    fn ssz_append<Al: allocate::Allocator + Clone>(&self, buf: &mut allocate::vec::Vec<u8, Al>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         // Field 0: hash (fixed, 32 bytes).
         // Field 1: bytes (variable, offset slot + payload).
         let fixed_region = 32 + 4;

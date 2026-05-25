@@ -35,10 +35,7 @@ pub fn derive_encode_impl(input: &DeriveInput) -> syn::Result<TokenStream> {
                             fn ssz_bytes_len(&self) -> usize {
                                 ssz::Encode::ssz_bytes_len(&self.0)
                             }
-                            fn ssz_append<__A: ::ssz::allocate::Allocator + Clone>(
-                                &self,
-                                buf: &mut ::ssz::allocate::vec::Vec<u8, __A>,
-                            ) {
+                            fn ssz_append(&self, buf: &mut ::ssz::__private::Vec<u8>) {
                                 ssz::Encode::ssz_append(&self.0, buf);
                             }
                         }
@@ -136,10 +133,7 @@ fn encode_struct(
             fn ssz_bytes_len(&self) -> usize {
                 #bytes_len
             }
-            fn ssz_append<__A: ::ssz::allocate::Allocator + Clone>(
-                &self,
-                buf: &mut ::ssz::allocate::vec::Vec<u8, __A>,
-            ) {
+            fn ssz_append(&self, buf: &mut ::ssz::__private::Vec<u8>) {
                 #append_body
             }
         }
@@ -259,10 +253,7 @@ fn encode_enum(
                     #(#bytes_len_arms),*
                 }
             }
-            fn ssz_append<__A: ::ssz::allocate::Allocator + Clone>(
-                &self,
-                buf: &mut ::ssz::allocate::vec::Vec<u8, __A>,
-            ) {
+            fn ssz_append(&self, buf: &mut ::ssz::__private::Vec<u8>) {
                 match self {
                     #(#append_arms),*
                 }

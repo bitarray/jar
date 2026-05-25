@@ -108,7 +108,7 @@ impl ssz::Encode for MemoryMapping {
     fn ssz_bytes_len(&self) -> usize {
         Self::SSZ_LEN
     }
-    fn ssz_append<A: allocate::Allocator + Clone>(&self, buf: &mut allocate::vec::Vec<u8, A>) {
+    fn ssz_append(&self, buf: &mut alloc::vec::Vec<u8>) {
         buf.extend_from_slice(&self.start.to_le_bytes());
         buf.extend_from_slice(&self.size.to_le_bytes());
         for s in &self.source_path {
@@ -125,10 +125,7 @@ impl ssz::Decode for MemoryMapping {
     fn ssz_fixed_len() -> usize {
         Self::SSZ_LEN
     }
-    fn from_ssz_bytes_in<A: allocate::Allocator + Clone>(
-        bytes: &[u8],
-        _alloc: A,
-    ) -> Result<Self, ssz::DecodeError> {
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, ssz::DecodeError> {
         if bytes.len() != Self::SSZ_LEN {
             return Err(ssz::DecodeError::UnexpectedEof {
                 expected: Self::SSZ_LEN,
@@ -163,8 +160,7 @@ impl ssz::HashTreeRoot for MemoryMapping {
             // Treat the fixed-length path array as a `Vector<u32,
             // MAX_SOURCE_DEPTH>` for hashing: pack to bytes, merkleize
             // with `ceil(N*4/32)` chunks.
-            let mut buf: allocate::vec::Vec<u8, allocate::Global> =
-                allocate::vec::Vec::with_capacity_in(MAX_SOURCE_DEPTH * 4, allocate::Global);
+            let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(MAX_SOURCE_DEPTH * 4);
             for s in &self.source_path {
                 buf.extend_from_slice(&s.get().to_le_bytes());
             }

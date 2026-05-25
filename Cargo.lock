@@ -2334,7 +2334,6 @@ dependencies = [
 name = "ssz"
 version = "0.1.0"
 dependencies = [
- "allocate",
  "digest",
  "proptest",
  "sha2",

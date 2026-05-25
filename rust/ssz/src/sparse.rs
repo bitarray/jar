@@ -8,8 +8,7 @@
 //!
 //! ## Storage
 //!
-//! Both inner maps are sorted `Vec`s keyed by `u64`, allocated through
-//! the caller-provided `A: Allocator + Clone`. Sorted Vec gives us:
+//! Both inner maps are sorted `Vec`s keyed by `u64`. Sorted Vec gives us:
 //!
 //! - **O(log n) lookup** via `binary_search_by_key`.
 //! - **O(n) insert/remove** at the sorted position. For the cnode-slot
@@ -18,18 +17,8 @@
 //! - **O(log n) range queries** via `partition_point`, used by
 //!   `compute_subtree_root` to short-circuit empty subtrees.
 //! - **Iteration in sorted order**, byte-equivalent to `BTreeMap::iter`.
-//! - **Allocator-genericity** — `allocate::vec::Vec<T, A>` carries
-//!   the allocator handle on every allocation, so a `SparseList<_, N,
-//!   TalcAlloc>` keeps no state on the host's `Global` allocator. This
-//!   is what makes `Cap::CNode` walkable from the guest's view of the
-//!   shared state cache.
-//!
-//! Previous versions used `alloc::collections::BTreeMap` (stable, but
-//! hardwired to `Global`); the switch preserves wire-format and
-//! hash-tree-root output byte-identically.
 
-use allocate::vec::Vec;
-use allocate::{Allocator, Global};
+use alloc::vec::Vec;
 use core::fmt;
 use digest::Digest;
 use digest::typenum::U32;
@@ -44,49 +33,28 @@ use crate::{BYTES_PER_LENGTH_OFFSET, Decode, DecodeError, Encode, HashTreeRoot};
 ///
 /// Hash is byte-identical to a fully-materialised `List<T, N>` with the
 /// same effective contents.
-pub struct SparseList<T, const N: u64, A: Allocator + Clone = Global> {
+pub struct SparseList<T, const N: u64> {
     len: u64,
     /// Sorted (by `u64` key) entries: leaf index → optional materialized
     /// value (or precomputed hash). Absent indices contribute
     /// `zero_hash(0)` to the root unless covered by
     /// [`cached_subtree_roots`].
-    entries: Vec<(u64, MissingOr<T>), A>,
+    entries: Vec<(u64, MissingOr<T>)>,
     /// Sorted (by `u64` key) cache of precomputed subtree roots. Key is
     /// a tree coordinate `(depth, index_at_depth)` flattened via
     /// `coord_to_key(depth, idx) = (1u64 << depth) | idx` — the standard
     /// "heap index" of a node in a complete binary tree.
-    cached_subtree_roots: Vec<(u64, [u8; 32]), A>,
-    alloc: A,
+    cached_subtree_roots: Vec<(u64, [u8; 32])>,
 }
 
-impl<T, const N: u64> SparseList<T, N, Global> {
-    /// Build an empty `Global`-allocated sparse list.
+impl<T, const N: u64> SparseList<T, N> {
+    /// Build an empty sparse list.
     pub fn new() -> Self {
-        Self::new_in(Global)
-    }
-}
-
-impl<T, const N: u64> Default for SparseList<T, N, Global> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
-    /// Build an empty sparse list with a caller-provided allocator.
-    pub fn new_in(alloc: A) -> Self {
         Self {
             len: 0,
-            entries: Vec::new_in(alloc.clone()),
-            cached_subtree_roots: Vec::new_in(alloc.clone()),
-            alloc,
+            entries: Vec::new(),
+            cached_subtree_roots: Vec::new(),
         }
-    }
-
-    /// Borrow the captured allocator handle.
-    #[inline]
-    pub fn allocator(&self) -> &A {
-        &self.alloc
     }
 
     /// Logical length.
@@ -206,12 +174,18 @@ impl<T, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
     }
 }
 
+impl<T, const N: u64> Default for SparseList<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[inline]
 fn coord_to_key(depth: usize, idx: u64) -> u64 {
     (1u64 << depth) | idx
 }
 
-impl<T: fmt::Debug, const N: u64, A: Allocator + Clone> fmt::Debug for SparseList<T, N, A> {
+impl<T: fmt::Debug, const N: u64> fmt::Debug for SparseList<T, N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SparseList")
             .field("cap", &N)
@@ -222,28 +196,17 @@ impl<T: fmt::Debug, const N: u64, A: Allocator + Clone> fmt::Debug for SparseLis
     }
 }
 
-impl<T: Clone, const N: u64, A: Allocator + Clone> Clone for SparseList<T, N, A> {
+impl<T: Clone, const N: u64> Clone for SparseList<T, N> {
     fn clone(&self) -> Self {
-        let mut entries: Vec<(u64, MissingOr<T>), A> =
-            Vec::with_capacity_in(self.entries.len(), self.alloc.clone());
-        for (k, v) in self.entries.iter() {
-            entries.push((*k, v.clone()));
-        }
-        let mut cached: Vec<(u64, [u8; 32]), A> =
-            Vec::with_capacity_in(self.cached_subtree_roots.len(), self.alloc.clone());
-        for (k, v) in self.cached_subtree_roots.iter() {
-            cached.push((*k, *v));
-        }
         Self {
             len: self.len,
-            entries,
-            cached_subtree_roots: cached,
-            alloc: self.alloc.clone(),
+            entries: self.entries.clone(),
+            cached_subtree_roots: self.cached_subtree_roots.clone(),
         }
     }
 }
 
-impl<T: PartialEq, const N: u64, A: Allocator + Clone> PartialEq for SparseList<T, N, A> {
+impl<T: PartialEq, const N: u64> PartialEq for SparseList<T, N> {
     fn eq(&self, other: &Self) -> bool {
         if self.len != other.len
             || self.entries.len() != other.entries.len()
@@ -271,7 +234,7 @@ impl<T: PartialEq, const N: u64, A: Allocator + Clone> PartialEq for SparseList<
     }
 }
 
-impl<T: Eq, const N: u64, A: Allocator + Clone> Eq for SparseList<T, N, A> {}
+impl<T: Eq, const N: u64> Eq for SparseList<T, N> {}
 
 // --------------------------------------------------------------------------
 // Wire format: (len: u64, List<(u64, MissingOr<T>)>).
@@ -283,7 +246,7 @@ impl<T: Eq, const N: u64, A: Allocator + Clone> Eq for SparseList<T, N, A> {}
 // independent of the workspace `(K, V)` tuple impl (which currently
 // doesn't exist; we have only the `BTreeMap<K, V>` impl in collections.rs).
 
-impl<T: Encode, const N: u64, A: Allocator + Clone> Encode for SparseList<T, N, A> {
+impl<T: Encode, const N: u64> Encode for SparseList<T, N> {
     fn is_ssz_fixed_len() -> bool {
         false
     }
@@ -312,7 +275,7 @@ impl<T: Encode, const N: u64, A: Allocator + Clone> Encode for SparseList<T, N, 
         //   then concatenated payloads
         12 + n_entries * 12 + entry_var_size
     }
-    fn ssz_append<A2: Allocator + Clone>(&self, buf: &mut Vec<u8, A2>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         // len
         buf.extend_from_slice(&self.len.to_le_bytes());
         // entries_offset = 12
@@ -323,10 +286,7 @@ impl<T: Encode, const N: u64, A: Allocator + Clone> Encode for SparseList<T, N, 
     }
 }
 
-fn encode_sparse_entries_list<T: Encode, A: Allocator + Clone, A2: Allocator + Clone>(
-    entries: &Vec<(u64, MissingOr<T>), A>,
-    buf: &mut Vec<u8, A2>,
-) {
+fn encode_sparse_entries_list<T: Encode>(entries: &[(u64, MissingOr<T>)], buf: &mut Vec<u8>) {
     let n = entries.len();
     // Each entry container: (u64 key, MissingOr<T> value).
     // Key is fixed (8B), value is variable. Per-entry container:
@@ -364,17 +324,14 @@ fn encode_sparse_entries_list<T: Encode, A: Allocator + Clone, A2: Allocator + C
     }
 }
 
-impl<T: Decode, const N: u64, A: Allocator + Clone + Default> Decode for SparseList<T, N, A> {
+impl<T: Decode, const N: u64> Decode for SparseList<T, N> {
     fn is_ssz_fixed_len() -> bool {
         false
     }
     fn ssz_fixed_len() -> usize {
         BYTES_PER_LENGTH_OFFSET
     }
-    fn from_ssz_bytes_in<A2: Allocator + Clone>(
-        bytes: &[u8],
-        alloc: A2,
-    ) -> Result<Self, DecodeError> {
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         if bytes.len() < 12 {
             return Err(DecodeError::UnexpectedEof {
                 expected: 12,
@@ -396,10 +353,8 @@ impl<T: Decode, const N: u64, A: Allocator + Clone + Default> Decode for SparseL
             });
         }
         let payload = &bytes[12..];
-        let entries_in = decode_sparse_entries_list::<T, A2>(payload, alloc)?;
-        let target_alloc = A::default();
-        let mut entries: Vec<(u64, MissingOr<T>), A> =
-            Vec::with_capacity_in(entries_in.len(), target_alloc.clone());
+        let entries_in = decode_sparse_entries_list::<T>(payload)?;
+        let mut entries: Vec<(u64, MissingOr<T>)> = Vec::with_capacity(entries_in.len());
         let mut prev_key: Option<u64> = None;
         for (k, v) in entries_in {
             if k >= N {
@@ -419,18 +374,16 @@ impl<T: Decode, const N: u64, A: Allocator + Clone + Default> Decode for SparseL
         Ok(Self {
             len,
             entries,
-            cached_subtree_roots: Vec::new_in(target_alloc.clone()),
-            alloc: target_alloc,
+            cached_subtree_roots: Vec::new(),
         })
     }
 }
 
-fn decode_sparse_entries_list<T: Decode, A: Allocator + Clone>(
+fn decode_sparse_entries_list<T: Decode>(
     bytes: &[u8],
-    alloc: A,
-) -> Result<alloc::vec::Vec<(u64, MissingOr<T>)>, DecodeError> {
+) -> Result<Vec<(u64, MissingOr<T>)>, DecodeError> {
     if bytes.is_empty() {
-        return Ok(alloc::vec::Vec::new());
+        return Ok(Vec::new());
     }
     if bytes.len() < 4 {
         return Err(DecodeError::UnexpectedEof {
@@ -447,7 +400,7 @@ fn decode_sparse_entries_list<T: Decode, A: Allocator + Clone>(
         });
     }
     let n = first / BYTES_PER_LENGTH_OFFSET;
-    let mut offsets = alloc::vec::Vec::with_capacity(n + 1);
+    let mut offsets = Vec::with_capacity(n + 1);
     offsets.push(first);
     for i in 1..n {
         if bytes.len() < (i + 1) * BYTES_PER_LENGTH_OFFSET {
@@ -478,7 +431,7 @@ fn decode_sparse_entries_list<T: Decode, A: Allocator + Clone>(
     }
     offsets.push(bytes.len());
 
-    let mut out = alloc::vec::Vec::with_capacity(n);
+    let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let entry_slice = &bytes[offsets[i]..offsets[i + 1]];
         // Each entry: u64 key + value-offset (must be 12) + MissingOr<T> payload.
@@ -499,7 +452,7 @@ fn decode_sparse_entries_list<T: Decode, A: Allocator + Clone>(
                 fixed: 12,
             });
         }
-        let value = MissingOr::<T>::from_ssz_bytes_in(&entry_slice[12..], alloc.clone())?;
+        let value = MissingOr::<T>::from_ssz_bytes(&entry_slice[12..])?;
         out.push((key, value));
     }
     Ok(out)
@@ -509,9 +462,7 @@ fn decode_sparse_entries_list<T: Decode, A: Allocator + Clone>(
 // HashTreeRoot
 // --------------------------------------------------------------------------
 
-impl<T: HashTreeRoot + Encode, const N: u64, A: Allocator + Clone> HashTreeRoot
-    for SparseList<T, N, A>
-{
+impl<T: HashTreeRoot + Encode, const N: u64> HashTreeRoot for SparseList<T, N> {
     fn hash_tree_root<D: Digest<OutputSize = U32>>(&self) -> [u8; 32] {
         // The chunk-tree depth is ceil_log2(N) — the depth at which there
         // are exactly N leaves (one chunk per logical element, since we
@@ -524,7 +475,7 @@ impl<T: HashTreeRoot + Encode, const N: u64, A: Allocator + Clone> HashTreeRoot
     }
 }
 
-impl<T: HashTreeRoot, const N: u64, A: Allocator + Clone> SparseList<T, N, A> {
+impl<T: HashTreeRoot, const N: u64> SparseList<T, N> {
     /// Compute the merkle root of the subtree rooted at coordinate
     /// `(node_depth, node_index_at_depth)` within a balanced binary chunk
     /// tree of total depth `total_depth` (i.e., `2^total_depth` leaves).
