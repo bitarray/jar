@@ -1,4 +1,4 @@
-//! `CacheEntry<A>` — refcounted wrapper around a [`Cap`] for storage
+//! `CacheEntry` — refcounted wrapper around a [`Cap`] for storage
 //! in `CacheDirectory::{blobs, instances}`.
 //!
 //! The refcount tracks how many slots in other caps reference this
@@ -7,19 +7,18 @@
 //! move-promote, otherwise we shallow-clone into a fresh instance
 //! entry.
 
-use allocate::{Allocator, Global};
 use core::sync::atomic::AtomicU32;
 
 use super::cap::Cap;
 
-pub struct CacheEntry<A: Allocator + Clone = Global> {
+pub struct CacheEntry {
     pub refcount: AtomicU32,
-    pub cap: Cap<A>,
+    pub cap: Cap,
 }
 
-impl<A: Allocator + Clone> CacheEntry<A> {
+impl CacheEntry {
     /// Construct a fresh entry with refcount initialised to 1.
-    pub fn new(cap: Cap<A>) -> Self {
+    pub fn new(cap: Cap) -> Self {
         Self {
             refcount: AtomicU32::new(1),
             cap,

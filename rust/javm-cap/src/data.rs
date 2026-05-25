@@ -1,7 +1,7 @@
-//! `DataCap<A>` — talc-friendly Data cap.
+//! `DataCap` — Data cap.
 //!
 //! Two storage forms:
-//! - `Inline` — bytes in one `Vec<u8, A>`. Used for "small" Data
+//! - `Inline` — bytes in one `Vec<u8>`. Used for "small" Data
 //!   (typically a single page).
 //! - `Paged` — page-merkleized; each page is owned by the DataCap
 //!   via a reference-counted [`PageRef`](crate::page::PageRef) so
@@ -23,8 +23,8 @@
 
 use core::alloc::Layout;
 
-use allocate::vec::Vec;
-use allocate::{Allocator, Global};
+use alloc::alloc::alloc_zeroed;
+use alloc::vec::Vec;
 
 use super::page::PageSlot;
 
@@ -34,16 +34,16 @@ use super::page::PageSlot;
 pub const PAGE_SIZE: usize = 4096;
 
 #[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
-pub struct DataCap<A: Allocator + Clone = Global> {
-    pub content: DataContent<A>,
+pub struct DataCap {
+    pub content: DataContent,
 }
 
 #[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
-pub enum DataContent<A: Allocator + Clone = Global> {
+pub enum DataContent {
     /// Bytes in a single slab. `bytes.len()` must be a multiple of
     /// [`PAGE_SIZE`] (zero-padded by the constructor).
     #[ssz(selector = 0)]
-    Inline(Vec<u8, A>),
+    Inline(Vec<u8>),
     /// Page-merkleized form. Each page is owned (via refcounted
     /// PageRef) so DataCap clones can share unmodified pages.
     #[ssz(selector = 1)]
@@ -52,11 +52,11 @@ pub enum DataContent<A: Allocator + Clone = Global> {
         /// has exactly this many bytes.
         page_size: u32,
         /// Dense slot table indexed by page index.
-        pages: Vec<PageSlot<A>, A>,
+        pages: Vec<PageSlot>,
     },
 }
 
-impl<A: Allocator + Clone> DataCap<A> {
+impl DataCap {
     /// Total content size in bytes. Always a multiple of
     /// [`PAGE_SIZE`].
     pub fn content_len(&self) -> u64 {
@@ -69,7 +69,7 @@ impl<A: Allocator + Clone> DataCap<A> {
     }
 }
 
-/// Allocate a zero-filled `Vec<u8, A>` of `len` bytes (rounded up to
+/// Allocate a zero-filled `Vec<u8>` of `len` bytes (rounded up to
 /// the next page boundary) with `PAGE_SIZE`-aligned backing storage.
 ///
 /// The resulting `Vec` has `len == capacity == padded_len`; all bytes
@@ -78,16 +78,20 @@ impl<A: Allocator + Clone> DataCap<A> {
 ///
 /// Panics if the allocator returns null (out-of-memory) or if
 /// constructing the `Layout` overflows.
-pub fn alloc_page_aligned_zeroed<A: Allocator + Clone>(len: usize, alloc: A) -> Vec<u8, A> {
+pub fn alloc_page_aligned_zeroed(len: usize) -> Vec<u8> {
     let padded = len.next_multiple_of(PAGE_SIZE).max(PAGE_SIZE);
     let layout =
         Layout::from_size_align(padded, PAGE_SIZE).expect("DataCap page-aligned layout overflow");
-    let nn = alloc
-        .allocate_zeroed(layout)
-        .expect("DataCap page-aligned allocation failed");
-    // SAFETY: `allocate_zeroed` returned a non-null pointer to
-    // `padded` zeroed bytes aligned to PAGE_SIZE. The capacity we
-    // pass to `from_raw_parts_in` matches the allocation; the length
-    // (== capacity) reflects that all bytes are initialised (to zero).
-    unsafe { Vec::from_raw_parts_in(nn.as_ptr() as *mut u8, padded, padded, alloc) }
+    // SAFETY: `padded > 0` so `Layout` is non-zero; the std global
+    // allocator is what `Vec` itself uses, so the resulting buffer is
+    // compatible with `Vec::from_raw_parts`.
+    let ptr = unsafe { alloc_zeroed(layout) };
+    if ptr.is_null() {
+        alloc::alloc::handle_alloc_error(layout);
+    }
+    // SAFETY: `alloc_zeroed` returned a non-null pointer to `padded`
+    // zeroed bytes aligned to PAGE_SIZE. The capacity we pass to
+    // `from_raw_parts` matches the allocation; the length (== capacity)
+    // reflects that all bytes are initialised (to zero).
+    unsafe { Vec::from_raw_parts(ptr, padded, padded) }
 }

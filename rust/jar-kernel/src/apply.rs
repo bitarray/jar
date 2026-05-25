@@ -83,7 +83,7 @@ pub fn apply_event(
                 let overlays: Vec<(u32, Vec<u8>)> = inst
                     .rw_overlays
                     .iter()
-                    .map(|o| (o.start, o.bytes.iter().copied().collect::<Vec<u8>>()))
+                    .map(|o| (o.start, o.bytes.to_vec()))
                     .collect();
                 (
                     inst.image_hash_chain,

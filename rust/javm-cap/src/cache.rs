@@ -2,19 +2,19 @@
 //!
 //! The cache holds caps in two maps:
 //!
-//! - **`blobs: HashMap<CapHash, TBox<CacheEntry<A>, A>, S, A>`** —
+//! - **`blobs: HashMap<CapHash, TBox<CacheEntry, A>, S, A>`** —
 //!   content-addressed immutable caps. All five kinds (Type, Image,
 //!   Data, CNode, Instance) can live here.
-//! - **`instances: HashMap<CapRef, TBox<CacheEntry<A>, A>, S, A>`** —
+//! - **`instances: HashMap<CapRef, TBox<CacheEntry, A>, S, A>`** —
 //!   identity-keyed mutable working state. Only Data, CNode,
 //!   Instance variants reach this map (after `get_mut` promotion).
 //!
 //! `A` is an [`allocate::Allocator`] (re-exported from the
 //! `allocator-api2` crate; downstream depends on `allocate` only).
 //! For host-private use the default `Global` gives a heap-backed
-//! cache. For the shared-memory state cache, `A = TalcAlloc` lands
-//! everything — including the HashMap node storage — in the cache
-//! region.
+//! cache. For the shared-memory state cache, `A = TalcAlloc` lands the
+//! HashMap node storage in the cache region; cap content itself always
+//! lives on the global heap (= talc on guest via `#[global_allocator]`).
 //!
 //! `S` is the `BuildHasher`. The heap-backed default is
 //! [`DefaultHashBuilder`] (= `foldhash::fast::RandomState`,
@@ -39,15 +39,11 @@ use allocate::{Allocator, Global};
 
 use super::cap::{Cap, CapHash, CapHashOrRef, CapRef};
 use super::cap_hash::cap_hash;
-use super::cnode::CNodeCap;
-use super::data::{DataCap, DataContent};
 use super::entry::CacheEntry;
 use super::image_cap::ImageConvertError;
-use super::instance::{InstanceCap, RwOverlay};
-use super::page::{PageBytes, PageRef, PageSlot};
 
 /// Talc-friendly Box alias — `allocate::Box` parameterised on the
-/// cap's allocator.
+/// cache's outer allocator.
 type TBox<T, A> = ABox<T, A>;
 
 #[derive(Debug, thiserror::Error)]
@@ -70,8 +66,8 @@ pub enum CacheError {
 
 pub struct CacheDirectory<S = DefaultHashBuilder, A: Allocator + Clone = Global> {
     alloc: A,
-    blobs: HashMap<CapHash, TBox<CacheEntry<A>, A>, S, A>,
-    instances: HashMap<CapRef, TBox<CacheEntry<A>, A>, S, A>,
+    blobs: HashMap<CapHash, TBox<CacheEntry, A>, S, A>,
+    instances: HashMap<CapRef, TBox<CacheEntry, A>, S, A>,
     next_ref: u64,
 }
 
@@ -91,7 +87,7 @@ impl Default for CacheDirectory<DefaultHashBuilder, Global> {
 }
 
 impl<A: Allocator + Clone> CacheDirectory<DefaultHashBuilder, A> {
-    /// Construct an empty cache that allocates cap content through
+    /// Construct an empty cache that allocates HashMap nodes through
     /// `alloc`, using the default per-process-randomized hasher.
     pub fn new_in(alloc: A) -> Self {
         Self::with_hasher_in(DefaultHashBuilder::default(), alloc)
@@ -130,12 +126,12 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
     /// Iterate the cache's blob tier. Order is unspecified (the underlying
     /// HashMap is not sorted). Callers that need deterministic iteration
     /// (e.g. state-root computations) must collect + sort by `CapHash`.
-    pub fn iter_blobs(&self) -> impl Iterator<Item = (&CapHash, &Cap<A>)> {
+    pub fn iter_blobs(&self) -> impl Iterator<Item = (&CapHash, &Cap)> {
         self.blobs.iter().map(|(h, b)| (h, &b.cap))
     }
 
     /// Get a shared reference to the cap stored under `key`.
-    pub fn get(&self, key: CapHashOrRef) -> Option<&Cap<A>> {
+    pub fn get(&self, key: CapHashOrRef) -> Option<&Cap> {
         match key {
             CapHashOrRef::Hash(h) => self.blobs.get(&h).map(|b| &b.cap),
             CapHashOrRef::Ref(r) => self.instances.get(&r).map(|b| &b.cap),
@@ -163,22 +159,20 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
     /// address space (e.g. `TalcAlloc` over a region mapped at the
     /// same VA on host and guest).
     pub fn entry_va(&self, key: CapHashOrRef) -> Option<u64> {
-        let entry: &CacheEntry<A> = match key {
+        let entry: &CacheEntry = match key {
             CapHashOrRef::Hash(h) => &**self.blobs.get(&h)?,
             CapHashOrRef::Ref(r) => &**self.instances.get(&r)?,
         };
-        Some(entry as *const CacheEntry<A> as u64)
+        Some(entry as *const CacheEntry as u64)
     }
 
-    /// Blob insert: takes `Cap<A>` already in this cache's allocator
-    /// and stores it under `hash`. Idempotent (bumps refcount on a
-    /// hit). Returns the post-insertion refcount.
+    /// Blob insert: takes a `Cap` and stores it under `hash`. Idempotent
+    /// (bumps refcount on a hit). Returns the post-insertion refcount.
     ///
-    /// The caller asserts that `cap`'s allocations live in this
-    /// cache's `A`. Wrapped at higher layers by `Cache::publish_blob`
-    /// (nub-host-common) which both owns the canonical `TalcAlloc`
-    /// and routes through scratch tracking on the guest side.
-    pub fn put_blob(&mut self, hash: CapHash, cap: Cap<A>) -> Result<u32, CacheError> {
+    /// Wrapped at higher layers by `Cache::publish_blob`
+    /// (nub-host-common) which routes through scratch tracking on the
+    /// guest side.
+    pub fn put_blob(&mut self, hash: CapHash, cap: Cap) -> Result<u32, CacheError> {
         if let Some(existing) = self.blobs.get(&hash) {
             let prev = existing.refcount.fetch_add(1, Ordering::Relaxed);
             return Ok(prev + 1);
@@ -190,16 +184,15 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
         Ok(1)
     }
 
-    /// Insert a caller-built `Cap<Global>` by reference.
+    /// Insert a caller-built `Cap` by reference.
     ///
     /// Computes the cap's content hash via [`crate::cap_hash::cap_hash`],
     /// then either bumps the refcount of an already-present entry (no
-    /// allocation) or deep-clones the cap into this cache's allocator and
-    /// inserts it (one allocation pass through `A`).
+    /// allocation) or clones the cap and inserts it.
     ///
     /// Returns the cap's content hash. Idempotent: re-put with identical
     /// content returns the same hash and increments refcount.
-    pub fn put_cap(&mut self, cap: &Cap<Global>) -> Result<CapHash, CacheError> {
+    pub fn put_cap(&mut self, cap: &Cap) -> Result<CapHash, CacheError> {
         let hash = crate::cap_hash::cap_hash(cap);
         self.put_cap_with_hash(hash, cap)?;
         Ok(hash)
@@ -221,11 +214,7 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
     /// publish_instance_blob` refcount discipline.
     ///
     /// Returns the post-insertion refcount.
-    pub fn put_cap_with_hash(
-        &mut self,
-        hash: CapHash,
-        cap: &Cap<Global>,
-    ) -> Result<u32, CacheError> {
+    pub fn put_cap_with_hash(&mut self, hash: CapHash, cap: &Cap) -> Result<u32, CacheError> {
         // Hot path: idempotent re-put. Bump refcount, return.
         if let Some(existing) = self.blobs.get(&hash) {
             let prev = existing.refcount.fetch_add(1, Ordering::Relaxed);
@@ -236,7 +225,7 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
             hash,
             "put_cap_with_hash: claimed hash does not match cap content",
         );
-        // Cold path. Validate referenced targets exist, then deep-clone
+        // Cold path. Validate referenced targets exist, then clone
         // + insert + incref targets.
         let targets = collect_referenced_targets_global(cap);
         for t in &targets {
@@ -253,7 +242,7 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
                 }
             }
         }
-        let owned = deep_clone_into(cap, self.alloc.clone());
+        let owned = cap.clone();
         let entry = CacheEntry::new(owned);
         let boxed =
             ABox::try_new_in(entry, self.alloc.clone()).map_err(|_| CacheError::AllocFailure)?;
@@ -266,7 +255,7 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
 
     /// Insert a cap as a fresh mutable instance entry. Returns the
     /// allocated `CapRef`. Refcount starts at 1.
-    pub fn put_instance(&mut self, cap: Cap<A>) -> Result<CapRef, CacheError> {
+    pub fn put_instance(&mut self, cap: Cap) -> Result<CapRef, CacheError> {
         let entry = CacheEntry::new(cap);
         let boxed =
             ABox::try_new_in(entry, self.alloc.clone()).map_err(|_| CacheError::AllocFailure)?;
@@ -334,9 +323,8 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
     /// - If `key` is a `Hash` and the blob's refcount is exactly 1
     ///   (sole owner): move-promote — remove the entry from `blobs`,
     ///   re-insert under a fresh CapRef in `instances`. No copy.
-    /// - Otherwise: shallow-clone the cap's slot/page table into a
-    ///   fresh instance entry; targets stay shared via hash/ref and
-    ///   their refcounts are bumped.
+    /// - Otherwise: clone the cap into a fresh instance entry; targets
+    ///   stay shared via hash/ref and their refcounts are bumped.
     ///
     /// Returns the new (or existing) `CapRef` along with a mutable
     /// reference to the cap.
@@ -378,11 +366,16 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
                     self.instances.insert(r, boxed);
                     Ok(r)
                 } else {
-                    // Shared. Shallow-clone the cap into a new entry.
+                    // Shared. Clone the cap into a new entry.
                     // Targets stay shared via hash/ref; refcounts on
                     // those targets must be bumped to reflect the new
                     // referencing entry.
-                    let cloned = self.shallow_clone_blob(h)?;
+                    let cloned = self
+                        .blobs
+                        .get(&h)
+                        .expect("present (we just observed it)")
+                        .cap
+                        .clone();
                     let new_ref = self.put_instance(cloned)?;
                     // The new entry references the same targets as
                     // the original blob; bump their refcounts.
@@ -395,12 +388,12 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
 
     /// Mutable reference to the cap behind a known `CapRef`.
     /// Distinct from `get_mut` because it doesn't promote / clone.
-    pub fn instance_mut(&mut self, r: CapRef) -> Option<&mut Cap<A>> {
+    pub fn instance_mut(&mut self, r: CapRef) -> Option<&mut Cap> {
         self.instances.get_mut(&r).map(|b| &mut b.cap)
     }
 
     /// Allocator handle (clone). Useful for callers that want to
-    /// allocate caps externally before handing them to the cache.
+    /// allocate boxes externally before handing them to the cache.
     pub fn allocator(&self) -> A {
         self.alloc.clone()
     }
@@ -408,9 +401,9 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
     // --- High-level publish helpers ---
 
     /// Publish an inline DataCap blob from a byte buffer. Allocates a
-    /// fresh copy of `bytes` in this cache's allocator, hashes the
-    /// resulting cap, and inserts it into `blobs`. Returns the hash
-    /// (suitable for use as a `CapHashOrRef::Hash` target).
+    /// fresh copy of `bytes`, hashes the resulting cap, and inserts
+    /// it into `blobs`. Returns the hash (suitable for use as a
+    /// `CapHashOrRef::Hash` target).
     ///
     /// Idempotent: re-publishing identical bytes returns the same hash
     /// and bumps the existing entry's refcount.
@@ -527,18 +520,9 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
 
     // --- Internals ---
 
-    /// Shallow-clone the blob at `hash` into a fresh `Cap<A>`. Only
-    /// the directly-owned slot/page tables are duplicated; cross-
-    /// references (CapHashOrRef in cnode slots, page hashes in
-    /// DataCap) carry over by value.
-    fn shallow_clone_blob(&self, hash: CapHash) -> Result<Cap<A>, CacheError> {
-        let entry = self.blobs.get(&hash).ok_or(CacheError::BlobMissing)?;
-        shallow_clone_cap(&entry.cap, self.alloc.clone())
-    }
-
     /// For every cross-reference held by `key`'s cap, increment the
-    /// target's refcount. Used after `shallow_clone_blob` produces a
-    /// new entry that references the same targets as the original.
+    /// target's refcount. Used after cloning a cap into a new entry
+    /// that references the same targets as the original.
     fn bump_targets(&mut self, key: CapHashOrRef) -> Result<(), CacheError> {
         // Collect all target refs first to release the immutable
         // borrow on `self.instances` / `self.blobs`, then bump.
@@ -581,7 +565,7 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
 
 /// Collect the directly-referenced `CapRef`s held by `cap`. Used by
 /// `settle` to know which sub-refs to resolve before hashing.
-fn collect_ref_targets<A: Allocator + Clone>(cap: &Cap<A>) -> AVec<CapRef> {
+fn collect_ref_targets(cap: &Cap) -> AVec<CapRef> {
     let mut out: AVec<CapRef> = AVec::new();
     match cap {
         Cap::CNode(cn) => {
@@ -604,7 +588,7 @@ fn collect_ref_targets<A: Allocator + Clone>(cap: &Cap<A>) -> AVec<CapRef> {
 /// Rewrite `cap`'s direct `CapHashOrRef::Ref(r)` targets to
 /// `CapHashOrRef::Hash(h)` according to the `(r, h)` mapping in
 /// `resolved`.
-fn rewrite_ref_targets<A: Allocator + Clone>(cap: &mut Cap<A>, resolved: &[(CapRef, CapHash)]) {
+fn rewrite_ref_targets(cap: &mut Cap, resolved: &[(CapRef, CapHash)]) {
     let lookup =
         |r: CapRef| -> Option<CapHash> { resolved.iter().find(|(k, _)| *k == r).map(|(_, h)| *h) };
     match cap {
@@ -629,10 +613,10 @@ fn rewrite_ref_targets<A: Allocator + Clone>(cap: &mut Cap<A>, resolved: &[(CapR
     }
 }
 
-/// Collect the cap targets a `Cap<Global>` directly holds — used by
+/// Collect the cap targets a `Cap` directly holds — used by
 /// [`CacheDirectory::put_cap_with_hash`] to incref each target on first put so
 /// the refcount invariant (entry refcount == holder count) is preserved.
-fn collect_referenced_targets_global(cap: &Cap<Global>) -> alloc::vec::Vec<CapHashOrRef> {
+fn collect_referenced_targets_global(cap: &Cap) -> alloc::vec::Vec<CapHashOrRef> {
     let mut out: alloc::vec::Vec<CapHashOrRef> = alloc::vec::Vec::new();
     match cap {
         Cap::Image(img) => {
@@ -657,235 +641,4 @@ fn collect_referenced_targets_global(cap: &Cap<Global>) -> alloc::vec::Vec<CapHa
         Cap::Data(_) | Cap::Type(_) => {}
     }
     out
-}
-
-/// Deep-clone a `Cap<Global>` into the cache's allocator `A`. Walks every
-/// owned `Vec<T, Global>` in the cap tree and re-allocates through `alloc`;
-/// for `DataContent::Paged` allocates a fresh `PageBytes<A>` per loaded
-/// page (the inbound `PageRef<Global>` is dropped after copying out).
-///
-/// This is the cross-allocator counterpart to [`shallow_clone_cap`] — used
-/// by `put_cap` to move a caller-built cap into cache-resident memory.
-pub(crate) fn deep_clone_into<A: Allocator + Clone>(src: &Cap<Global>, alloc: A) -> Cap<A> {
-    match src {
-        Cap::Data(d) => {
-            let content = match &d.content {
-                DataContent::Inline(bytes) => {
-                    // Page-aligned re-allocation through `alloc`: the
-                    // resulting buffer can be mapped directly into a
-                    // ring-3 PT without an intermediate copy. Source
-                    // length is already a page-multiple (DataCap
-                    // invariant); we mirror the same length on the
-                    // target side.
-                    debug_assert!(
-                        bytes.len().is_multiple_of(crate::data::PAGE_SIZE),
-                        "DataCap inline content must be page-multiple"
-                    );
-                    let mut new_bytes: AVec<u8, A> =
-                        crate::data::alloc_page_aligned_zeroed::<A>(bytes.len(), alloc.clone());
-                    new_bytes[..bytes.len()].copy_from_slice(bytes.as_slice());
-                    DataContent::Inline(new_bytes)
-                }
-                DataContent::Paged { page_size, pages } => {
-                    let mut new_pages: AVec<PageSlot<A>, A> =
-                        AVec::with_capacity_in(pages.len(), alloc.clone());
-                    for p in pages.iter() {
-                        let new_slot = match p {
-                            PageSlot::Empty => PageSlot::Empty,
-                            PageSlot::Missing(h) => PageSlot::Missing(*h),
-                            PageSlot::Loaded(pr) => {
-                                // Page bytes are also page-aligned so
-                                // they can be mapped directly.
-                                let mut bytes: AVec<u8, A> = crate::data::alloc_page_aligned_zeroed::<
-                                    A,
-                                >(
-                                    pr.bytes.len(), alloc.clone()
-                                );
-                                bytes[..pr.bytes.len()].copy_from_slice(pr.bytes.as_slice());
-                                let pb = PageBytes {
-                                    hash: pr.hash,
-                                    bytes,
-                                };
-                                let new_pr = PageRef::<A>::new_in(pb, alloc.clone());
-                                PageSlot::Loaded(new_pr)
-                            }
-                        };
-                        new_pages.push(new_slot);
-                    }
-                    DataContent::Paged {
-                        page_size: *page_size,
-                        pages: new_pages,
-                    }
-                }
-            };
-            Cap::Data(DataCap { content })
-        }
-        Cap::Image(img) => {
-            let mut code = AVec::with_capacity_in(img.code.len(), alloc.clone());
-            code.extend_from_slice(img.code.as_slice());
-
-            let mut bitmask = AVec::with_capacity_in(img.bitmask.len(), alloc.clone());
-            bitmask.extend_from_slice(img.bitmask.as_slice());
-
-            let mut jump_table = AVec::with_capacity_in(img.jump_table.len(), alloc.clone());
-            for v in img.jump_table.iter() {
-                jump_table.push(*v);
-            }
-
-            let mut endpoints = AVec::with_capacity_in(img.endpoints.len(), alloc.clone());
-            for e in img.endpoints.iter() {
-                endpoints.push(*e);
-            }
-
-            let mut mappings = AVec::with_capacity_in(img.mappings.len(), alloc.clone());
-            for m in img.mappings.iter() {
-                mappings.push(*m);
-            }
-
-            let mut pinned = AVec::with_capacity_in(img.pinned.len(), alloc.clone());
-            for s in img.pinned.iter() {
-                pinned.push(*s);
-            }
-
-            let mut initial = AVec::with_capacity_in(img.initial.len(), alloc.clone());
-            for s in img.initial.iter() {
-                initial.push(*s);
-            }
-
-            Cap::Image(crate::image_cap::ImageCap {
-                code,
-                bitmask,
-                jump_table,
-                endpoints,
-                mappings,
-                pinned,
-                initial,
-                yield_marker_slot: img.yield_marker_slot,
-            })
-        }
-        Cap::CNode(cn) => {
-            let mut slots: ssz::SparseList<CapHashOrRef, { crate::cnode::MAX_CNODE_SLOTS }, A> =
-                ssz::SparseList::new_in(alloc.clone());
-            for (idx, mo) in cn.slots.iter() {
-                slots
-                    .insert(idx, mo.clone())
-                    .expect("source SparseList already satisfies the bound");
-            }
-            Cap::CNode(CNodeCap {
-                size_log: cn.size_log,
-                slots,
-            })
-        }
-        Cap::Instance(inst) => {
-            let mut new_overlays: AVec<RwOverlay<A>, A> =
-                AVec::with_capacity_in(inst.rw_overlays.len(), alloc.clone());
-            for o in inst.rw_overlays.iter() {
-                let mut bytes: AVec<u8, A> = AVec::with_capacity_in(o.bytes.len(), alloc.clone());
-                bytes.extend_from_slice(o.bytes.as_slice());
-                new_overlays.push(RwOverlay {
-                    start: o.start,
-                    bytes,
-                });
-            }
-            Cap::Instance(InstanceCap {
-                image_hash_chain: inst.image_hash_chain,
-                image_hash: inst.image_hash,
-                root_cnode: inst.root_cnode,
-                rw_overlays: new_overlays,
-                mem_size: inst.mem_size,
-                regs: inst.regs,
-                pc: inst.pc,
-                gas_remaining: inst.gas_remaining,
-            })
-        }
-        Cap::Type(t) => Cap::Type(*t),
-    }
-}
-
-/// Shallow-clone a cap: duplicate the slot/page table allocations
-/// only, sharing all targets. Targets' refcounts must be bumped by
-/// the caller after this returns.
-/// Shallow-clone a `Cap<A>` into a fresh allocation. Only the
-/// directly-owned slot/page tables are duplicated; cross-references
-/// (CapHashOrRef in cnode slots, page hashes in DataCap) carry over
-/// by value. The caller is responsible for bumping the refcounts of
-/// any cross-referenced targets (host-side: `CacheDirectory::bump_targets`;
-/// guest-side: state-cache's `cap_make_mut`).
-pub fn shallow_clone_cap<A: Allocator + Clone>(
-    cap: &Cap<A>,
-    alloc: A,
-) -> Result<Cap<A>, CacheError> {
-    match cap {
-        Cap::CNode(cn) => {
-            // SparseList clones into a new allocator handle: the BTreeMap
-            // storage uses Global regardless of A (std::collections has no
-            // custom-allocator support on stable), but cloning the map's
-            // values and stamping the new allocator handle gives us a
-            // logically independent copy.
-            let mut slots: ssz::SparseList<CapHashOrRef, { crate::cnode::MAX_CNODE_SLOTS }, A> =
-                ssz::SparseList::new_in(alloc.clone());
-            for (idx, mo) in cn.slots.iter() {
-                slots
-                    .insert(idx, mo.clone())
-                    .expect("source SparseList already satisfies the bound");
-            }
-            Ok(Cap::CNode(CNodeCap {
-                size_log: cn.size_log,
-                slots,
-            }))
-        }
-        Cap::Data(d) => {
-            let content = match &d.content {
-                DataContent::Inline(bytes) => {
-                    debug_assert!(
-                        bytes.len().is_multiple_of(crate::data::PAGE_SIZE),
-                        "DataCap inline content must be page-multiple"
-                    );
-                    let mut new_bytes: AVec<u8, A> =
-                        crate::data::alloc_page_aligned_zeroed::<A>(bytes.len(), alloc.clone());
-                    new_bytes[..bytes.len()].copy_from_slice(bytes.as_slice());
-                    DataContent::Inline(new_bytes)
-                }
-                DataContent::Paged { page_size, pages } => {
-                    let mut new_pages: AVec<PageSlot<A>, A> =
-                        AVec::with_capacity_in(pages.len(), alloc.clone());
-                    for p in pages.iter() {
-                        match p {
-                            PageSlot::Empty => new_pages.push(PageSlot::Empty),
-                            PageSlot::Missing(h) => new_pages.push(PageSlot::Missing(*h)),
-                            PageSlot::Loaded(pr) => new_pages.push(PageSlot::Loaded(pr.clone())),
-                        }
-                    }
-                    DataContent::Paged {
-                        page_size: *page_size,
-                        pages: new_pages,
-                    }
-                }
-            };
-            Ok(Cap::Data(DataCap { content }))
-        }
-        Cap::Instance(inst) => {
-            let mut new_overlays: AVec<RwOverlay<A>, A> =
-                AVec::with_capacity_in(inst.rw_overlays.len(), alloc.clone());
-            for o in inst.rw_overlays.iter() {
-                let mut bytes: AVec<u8, A> = AVec::with_capacity_in(o.bytes.len(), alloc.clone());
-                bytes.extend_from_slice(o.bytes.as_slice());
-                new_overlays.push(RwOverlay {
-                    start: o.start,
-                    bytes,
-                });
-            }
-            Ok(Cap::Instance(InstanceCap {
-                image_hash_chain: inst.image_hash_chain,
-                image_hash: inst.image_hash,
-                root_cnode: inst.root_cnode,
-                rw_overlays: new_overlays,
-                mem_size: inst.mem_size,
-                regs: inst.regs,
-                pc: inst.pc,
-                gas_remaining: inst.gas_remaining,
-            }))
-        }
-        Cap::Image(_) | Cap::Type(_) => Err(CacheError::NonMutableKind),
-    }
 }

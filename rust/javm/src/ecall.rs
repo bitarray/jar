@@ -37,7 +37,7 @@
 //!   HOST_YIELD       (op=16)  φ[7] = marker_slot_idx (u8)
 //! ```
 //!
-//! After the move to the `javm_cap::Cap<A>` cache model, ecalls
+//! After the move to the `javm_cap::Cap` cache model, ecalls
 //! operate on `CapHashOrRef` targets in the running root cnode and
 //! cross-reference into the caller-supplied `CacheDirectory` for kind
 //! dispatch. `Vm::drive_and_translate` installs a short-lived
@@ -45,7 +45,6 @@
 //! calls can read/write cap content without storing the cache borrow
 //! in the long-lived `Vm`.
 
-use allocate::Global;
 use javm_cap::{
     Blake2b256, CacheDirectory, Cap, CapHashOrRef, DataCap, DataContent, Hash, SlotIdx, TypeCap,
 };
@@ -706,7 +705,7 @@ impl<K: KernelAssist> Vm<K> {
         // Quota is debited by the padded length — the kernel owns
         // a full page-aligned allocation regardless of caller's slice
         // length, so callers pay for what they store.
-        let mut inline = javm_cap::data::alloc_page_aligned_zeroed::<Global>(bytes.len(), Global);
+        let mut inline = javm_cap::data::alloc_page_aligned_zeroed(bytes.len());
         inline[..bytes.len()].copy_from_slice(&bytes);
         let debit = inline.len() as u64;
         let quota = self.kernel_assist.storage_quota_get(quota_id);
@@ -861,7 +860,7 @@ impl<K: KernelAssist> Vm<K> {
     }
 }
 
-fn data_cap_prefix(data: &DataCap<Global>, len: usize) -> Vec<u8> {
+fn data_cap_prefix(data: &DataCap, len: usize) -> Vec<u8> {
     let actual_len = len.min(data.content_len() as usize);
     let mut out = vec![0u8; actual_len];
     match &data.content {
@@ -998,7 +997,7 @@ impl<K: KernelAssist> Vm<K> {
         size_log: u8,
         cache: Option<&mut CacheDirectory>,
     ) -> Result<(), VmError> {
-        let cap = Cap::CNode(javm_cap::CNodeCap::<Global>::new(size_log)?);
+        let cap = Cap::CNode(javm_cap::CNodeCap::new(size_log)?);
         let cap_hash = javm_cap::cap_hash(&cap);
         let h = match cache {
             Some(cache) => {
@@ -1032,7 +1031,7 @@ mod tests {
 
     fn fixture_vm() -> Vm<InProcessKernelAssist> {
         let mut vm = Vm::new(InProcessKernelAssist::new());
-        let mut cnode = CNodeCap::<Global>::new(4).unwrap();
+        let mut cnode = CNodeCap::new(4).unwrap();
         // Seed slot 2 with a Hash-form target (treated as an Image hash).
         cnode
             .set(SlotIdx(2), Some(CapHashOrRef::Hash([0xAA; 32])))

@@ -21,6 +21,7 @@
 
 extern crate alloc;
 
+use alloc::vec::Vec;
 use core::ptr::NonNull;
 
 use allocate::talc::{MutexGuard, RawSpinlock, TalcAlloc};
@@ -122,6 +123,7 @@ impl Cache {
     /// the talc lives at the `CacheHeader`'s field address, which is
     /// pinned for the cache region's process lifetime. See
     /// `allocate::talc::TalcAlloc` for the contract.
+    #[allow(dead_code)] // shared cache deletion comes in commit 5
     pub(crate) fn alloc(&self) -> TalcAlloc {
         // SAFETY: the talc lock is initialised by `CacheHeader::init_at`
         // before the `Cache` exists, and the region is pinned for the
@@ -146,13 +148,11 @@ impl Cache {
         self.directory().contains_blob(hash)
     }
 
-    /// Publish a `Cap<TalcAlloc>` into the blobs tier under the given
-    /// hash. The cap's allocations must already live in this cache's
-    /// talc heap (i.e., be `Cap<TalcAlloc>`).
+    /// Publish a `Cap` into the blobs tier under the given hash.
     ///
     /// Guest-side: the published hash is tracked in the per-RPC
     /// scratch tracker and decref'd by `clear_scratch` on Drop.
-    pub fn publish_blob(&mut self, hash: CapHash, cap: Cap<TalcAlloc>) -> Result<(), CacheError> {
+    pub fn publish_blob(&mut self, hash: CapHash, cap: Cap) -> Result<(), CacheError> {
         {
             let mut dir = self.directory();
             dir.put_blob(hash, cap)?;
@@ -162,12 +162,12 @@ impl Cache {
         Ok(())
     }
 
-    /// Publish a `Cap<TalcAlloc>` as a fresh mutable instance. Returns
+    /// Publish a `Cap` as a fresh mutable instance. Returns
     /// the allocated [`CapRef`].
     ///
     /// Guest-side: the returned ref is tracked in the per-RPC scratch
     /// tracker and decref'd by `clear_scratch` on Drop.
-    pub fn publish_instance(&mut self, cap: Cap<TalcAlloc>) -> Result<CapRef, CacheError> {
+    pub fn publish_instance(&mut self, cap: Cap) -> Result<CapRef, CacheError> {
         let r = {
             let mut dir = self.directory();
             dir.put_instance(cap)?
@@ -192,7 +192,7 @@ impl Cache {
             image_hash_chain,
             image_hash,
             root_cnode: CapHashOrRef::Hash([0u8; 32]),
-            rw_overlays: allocate::vec::Vec::new_in(self.alloc()),
+            rw_overlays: Vec::new(),
             mem_size: 0,
             regs: [0u64; javm_cap::NUM_REGS],
             pc: 0,

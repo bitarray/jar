@@ -7,10 +7,10 @@
 //! identity-keyed mutable state + content-addressed blobs, and the
 //! primitives (BMT, hash) used by upstream layers.
 //!
-//! `Cap<A>` is allocator-parameterised — `A` defaults to `Global` so
-//! existing callers get a heap-resident cap. The cache layer
-//! instantiates `Cap<TalcAlloc>` to land content in the shared-memory
-//! cache region.
+//! `Cap` and its inner storage use the default `Global` allocator (=
+//! std heap on host, talc on guest via `#[global_allocator]`). The
+//! cache layer's outer storage (`HashMap` / `Box` parameters) may still
+//! be parameterised on a custom allocator for shared-memory layouts.
 //!
 //! See `~/jar/website/content/spec/implementation/architecture.md` for
 //! the crate's role in the overall layering.
@@ -53,7 +53,7 @@ pub use image::{
     PinnedCap, chain_extend, chain_genesis, image_content_hash,
 };
 pub use image_cap::{
-    EndpointDef, ImageCap, ImageConvertError, ImageSlotEntry, MemoryMapping, image_cap_in,
+    EndpointDef, ImageCap, ImageConvertError, ImageSlotEntry, MemoryMapping, image_cap,
 };
 pub use instance::{InstanceCap, RwOverlay};
 pub use page::{PageBytes, PageRef, PageSlot};

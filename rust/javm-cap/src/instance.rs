@@ -1,17 +1,16 @@
-//! `InstanceCap<A>` — talc-friendly Instance cap.
+//! `InstanceCap` — Instance cap with mutable working state.
 //!
 //! Holds the mutable working state of a running Cap::Instance:
 //! image reference (by hash, since Images are immutable), root
 //! cnode reference (by hash when clean / by ref while mutating),
 //! per-mapping rw overlays, register file, PC, gas counter.
 
-use allocate::vec::Vec;
-use allocate::{Allocator, Global};
+use alloc::vec::Vec;
 
 use super::cap::{CapHash, CapHashOrRef, NUM_REGS};
 
 #[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
-pub struct InstanceCap<A: Allocator + Clone = Global> {
+pub struct InstanceCap {
     /// Cumulative chain hash identifying the Instance's type.
     pub image_hash_chain: CapHash,
     /// Hash of the Image cap currently bound. Always content-
@@ -25,7 +24,7 @@ pub struct InstanceCap<A: Allocator + Clone = Global> {
     /// `start` matches one of the Image's `MemoryMapping.start`
     /// values; `bytes` is the per-instance content (initial state
     /// at boot, then evolves under JIT writes).
-    pub rw_overlays: Vec<RwOverlay<A>, A>,
+    pub rw_overlays: Vec<RwOverlay>,
     /// Total addressable memory size for the Instance.
     pub mem_size: u32,
     /// PVM register file (`φ[0]..φ[12]`).
@@ -40,13 +39,8 @@ pub struct InstanceCap<A: Allocator + Clone = Global> {
 
 /// One byte overlay backing a memory mapping. `bytes.len()` ≤
 /// the mapping's `size`; trailing untouched bytes default to zero.
-///
-/// **SSZ note**: only `Encode + HashTreeRoot` are derived. `Decode`
-/// is omitted because `Vec<T, A>: Decode` requires `A: Default`,
-/// which the cap-resident `TalcAlloc` does not satisfy. The cap shape
-/// is never wire-decoded (it lives in the cache, not on the wire).
 #[derive(Clone, Debug, ssz_derive::Encode, ssz_derive::HashTreeRoot)]
-pub struct RwOverlay<A: Allocator + Clone = Global> {
+pub struct RwOverlay {
     pub start: u32,
-    pub bytes: Vec<u8, A>,
+    pub bytes: Vec<u8>,
 }

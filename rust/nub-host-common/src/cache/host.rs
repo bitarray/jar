@@ -185,19 +185,15 @@ pub enum CachePinError {
 }
 
 impl Cache {
-    /// Convenience: hash + deep-clone-into-talc + publish_blob. Lets
-    /// host callers hand in a heap-built `Cap<Global>` in one call.
-    pub fn put_cap(&mut self, cap: &Cap<allocate::Global>) -> Result<CapHash, CacheError> {
+    /// Convenience: hash + clone + publish_blob. Lets
+    /// host callers hand in a `Cap` in one call.
+    pub fn put_cap(&mut self, cap: &Cap) -> Result<CapHash, CacheError> {
         let mut dir = self.directory();
         dir.put_cap(cap)
     }
 
     /// Pre-hashed variant: caller asserts `hash == cap_hash(cap)`.
-    pub fn put_cap_with_hash(
-        &mut self,
-        hash: CapHash,
-        cap: &Cap<allocate::Global>,
-    ) -> Result<(), CacheError> {
+    pub fn put_cap_with_hash(&mut self, hash: CapHash, cap: &Cap) -> Result<(), CacheError> {
         let mut dir = self.directory();
         dir.put_cap_with_hash(hash, cap)?;
         Ok(())

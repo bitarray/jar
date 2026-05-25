@@ -135,7 +135,7 @@ fn main() {
 
     // (c) cap_hash(Cap::Data) — SSZ merkleize over the bytes, with Cap
     //     already built. Isolates the hash work from the alloc/copy.
-    let cap_data: Cap<Global> = Cap::data_inline_with_size(bytes, size_u64);
+    let cap_data: Cap = Cap::data_inline_with_size(bytes, size_u64);
     measure("(c) cap_hash(Cap::Data) on pre-built Cap", n, || {
         let h = cap_hash(&cap_data);
         std::hint::black_box(h);
@@ -144,7 +144,7 @@ fn main() {
     // (d) Full data_inline_with_size hit-path on Global: build
     //     Cap::Data + cap_hash + drop. Compare against the talc-backed (e).
     measure("(d) build Cap::Data(Global) + cap_hash + drop", n, || {
-        let cap: Cap<Global> = Cap::data_inline_with_size(bytes, size_u64);
+        let cap: Cap = Cap::data_inline_with_size(bytes, size_u64);
         let h = cap_hash(&cap);
         std::hint::black_box(h);
         drop(cap);
@@ -155,7 +155,7 @@ fn main() {
     //     iter) deep-clone into talc; subsequent iters hit the
     //     idempotent fast path. Difference vs (d) ≈ talc + idempotency
     //     short-circuit cost.
-    let data_cap_global: Cap<Global> = Cap::data_inline(bytes);
+    let data_cap_global: Cap = Cap::data_inline(bytes);
     measure("(e) Nub::put_cap(&data_cap) [idempotent re-put]", n, || {
         let _ = nub.put_cap(&data_cap_global).unwrap();
     });

@@ -1,6 +1,12 @@
-//! `Cap<A>` — allocator-parameterised cap enum + shared constants.
+//! `Cap` — cap enum + shared constants.
+//!
+//! Cap types and their inner storage use the default `Global` allocator
+//! (= std heap on host, talc on guest via `#[global_allocator]`). The
+//! per-type SSZ trait impls keep an `<A: Allocator + Clone>` parameter on
+//! `ssz_append` / `from_ssz_bytes_in` because that `A` is the SSZ output
+//! buffer's allocator, unrelated to cap field storage.
 
-use allocate::{Allocator, Global};
+use alloc::vec::Vec;
 
 use super::cnode::CNodeCap;
 use super::data::DataCap;
@@ -136,27 +142,23 @@ pub const MAX_ENDPOINTS: usize = 64;
 
 /// One of the five v3 cap kinds.
 ///
-/// The default allocator is `Global` (heap) so existing callers that
-/// just say `Cap` continue to work. The cache layer instantiates
-/// `Cap<TalcAlloc>` so the content lives in shared talc memory.
-///
-/// **SSZ note**: the `HashTreeRoot` derive treats `Cap<A>` as an SSZ
+/// **SSZ note**: the `HashTreeRoot` derive treats `Cap` as an SSZ
 /// Union over the five variants. Each variant's selector provides the
 /// domain separation that the legacy byte-protocol kind tags
 /// (`0x10..0x50`) provided; the per-variant root is computed by that
 /// variant's own `HashTreeRoot` impl. We do not derive `Encode +
-/// Decode` on `Cap<A>` itself; caps move through the cache by direct
+/// Decode` on `Cap` itself; caps move through the cache by direct
 /// allocation and aren't wire-transmitted at this layer.
 #[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
-pub enum Cap<A: Allocator + Clone = Global> {
+pub enum Cap {
     #[ssz(selector = 0)]
-    Instance(InstanceCap<A>),
+    Instance(InstanceCap),
     #[ssz(selector = 1)]
-    Image(ImageCap<A>),
+    Image(ImageCap),
     #[ssz(selector = 2)]
-    Data(DataCap<A>),
+    Data(DataCap),
     #[ssz(selector = 3)]
-    CNode(CNodeCap<A>),
+    CNode(CNodeCap),
     #[ssz(selector = 4)]
     Type(TypeCap),
 }
@@ -189,7 +191,7 @@ pub enum CapKind {
     Type,
 }
 
-impl<A: Allocator + Clone> Cap<A> {
+impl Cap {
     pub fn kind(&self) -> CapKind {
         match self {
             Cap::Instance(_) => CapKind::Instance,
@@ -199,12 +201,7 @@ impl<A: Allocator + Clone> Cap<A> {
             Cap::Type(_) => CapKind::Type,
         }
     }
-}
 
-// Heap-only convenience constructors. These produce `Cap<Global>`
-// values without going through a `CacheDirectory`, suitable for callers (jar-
-// kernel, javm) that build caps locally before publishing.
-impl Cap<Global> {
     /// Build a heap `Cap::Data` whose content is `bytes` padded up to
     /// the next [`PAGE_SIZE`](super::data::PAGE_SIZE) boundary with
     /// zeros. The backing allocation is page-aligned so the kernel
@@ -215,7 +212,7 @@ impl Cap<Global> {
     /// callers needing a shorter logical payload (e.g. variable-length
     /// args) interpret the meaningful prefix themselves.
     pub fn data_inline(bytes: &[u8]) -> Self {
-        let mut buf = super::data::alloc_page_aligned_zeroed::<Global>(bytes.len(), Global);
+        let mut buf = super::data::alloc_page_aligned_zeroed(bytes.len());
         buf[..bytes.len()].copy_from_slice(bytes);
         Cap::Data(DataCap {
             content: super::data::DataContent::Inline(buf),
@@ -234,7 +231,7 @@ impl Cap<Global> {
     /// not a ceiling.
     pub fn data_inline_with_size(bytes: &[u8], target_size: u64) -> Self {
         let target = (target_size as usize).max(bytes.len());
-        let mut buf = super::data::alloc_page_aligned_zeroed::<Global>(target, Global);
+        let mut buf = super::data::alloc_page_aligned_zeroed(target);
         buf[..bytes.len()].copy_from_slice(bytes);
         Cap::Data(DataCap {
             content: super::data::DataContent::Inline(buf),
@@ -243,17 +240,12 @@ impl Cap<Global> {
 
     /// Build a heap `Cap::Image` from a SCALE `Image` value. Pinned
     /// and initial slot references are left empty; callers that need
-    /// them should drive [`super::image_cap::image_cap_in`] directly
+    /// them should drive [`super::image_cap::image_cap`] directly
     /// with the already-resolved `(slot, CapHash)` pairs.
     pub fn image_from(
         image: &crate::image::Image,
     ) -> Result<Self, super::image_cap::ImageConvertError> {
-        Ok(Cap::Image(super::image_cap::image_cap_in(
-            image,
-            &[],
-            &[],
-            Global,
-        )?))
+        Ok(Cap::Image(super::image_cap::image_cap(image, &[], &[])?))
     }
 
     /// Build an empty heap `Cap::CNode` of `2^size_log` slots. Rejects
@@ -265,8 +257,8 @@ impl Cap<Global> {
     /// Build a heap `Cap::Image` from a SCALE `Image` plus the caller-resolved
     /// pinned/initial slot `CapHash` pairs.
     ///
-    /// Wraps [`super::image_cap::image_cap_in`] with `A = Global` and the
-    /// `Cap::Image` constructor. Use this when the caller has already
+    /// Wraps [`super::image_cap::image_cap`] with the `Cap::Image`
+    /// constructor. Use this when the caller has already
     /// published (or knows the hashes of) the pinned/initial data blobs that
     /// the image references.
     pub fn image_with_slots(
@@ -274,21 +266,20 @@ impl Cap<Global> {
         pinned_hashes: &[(crate::slot::SlotIdx, CapHash)],
         initial_hashes: &[(crate::slot::SlotIdx, CapHash)],
     ) -> Result<Self, super::image_cap::ImageConvertError> {
-        Ok(Cap::Image(super::image_cap::image_cap_in(
+        Ok(Cap::Image(super::image_cap::image_cap(
             image,
             pinned_hashes,
             initial_hashes,
-            Global,
         )?))
     }
 
     /// Build a heap `Cap::Instance` directly from field values. Mirrors the
     /// shape the old `CacheDirectory::publish_instance_blob` reconstructed
-    /// field-by-field but produces a `Cap::Instance(InstanceCap<Global>)`
+    /// field-by-field but produces a `Cap::Instance(InstanceCap)`
     /// the caller owns.
     ///
     /// `rw_overlays` is the list of `(start_va, bytes)` overlays the
-    /// Instance carries — each becomes one `RwOverlay<Global>` entry.
+    /// Instance carries — each becomes one `RwOverlay` entry.
     #[allow(clippy::too_many_arguments)]
     pub fn instance_with_overlays(
         image_hash_chain: CapHash,
@@ -300,10 +291,9 @@ impl Cap<Global> {
         pc: u64,
         gas_remaining: u64,
     ) -> Self {
-        let mut overlays: allocate::vec::Vec<super::instance::RwOverlay<Global>, Global> =
-            allocate::vec::Vec::new_in(Global);
+        let mut overlays: Vec<super::instance::RwOverlay> = Vec::new();
         for (start, bytes) in rw_overlays {
-            let mut buf = allocate::vec::Vec::with_capacity_in(bytes.len(), Global);
+            let mut buf = Vec::with_capacity(bytes.len());
             buf.extend_from_slice(bytes);
             overlays.push(super::instance::RwOverlay {
                 start: *start,

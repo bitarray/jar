@@ -160,13 +160,12 @@ impl Nub {
         }
     }
 
-    // --- New publish surface (caller-built Cap<Global>) ---
+    // --- New publish surface (caller-built `Cap`) ---
 
-    /// Put a caller-built `Cap<Global>` into the active cache. Computes
-    /// the cap's content hash and either deep-clones into talc memory
-    /// on first put or bumps refcount on idempotent re-put. Returns the
-    /// cap's content hash.
-    pub fn put_cap(&mut self, cap: &javm_cap::Cap<Global>) -> Result<AbiCapHash> {
+    /// Put a caller-built `Cap` into the active cache. Computes
+    /// the cap's content hash and either clones the cap on first put or
+    /// bumps refcount on idempotent re-put. Returns the cap's content hash.
+    pub fn put_cap(&mut self, cap: &javm_cap::Cap) -> Result<AbiCapHash> {
         match &mut self.backend {
             Backend::Local(_) => self
                 .local_cache
@@ -184,11 +183,7 @@ impl Nub {
     /// at warmup and passes it explicitly; skips the SSZ merkleize on
     /// the hot idempotent path. Debug-asserts the claimed hash matches
     /// the cap; release trusts the caller.
-    pub fn put_cap_with_hash(
-        &mut self,
-        hash: AbiCapHash,
-        cap: &javm_cap::Cap<Global>,
-    ) -> Result<()> {
+    pub fn put_cap_with_hash(&mut self, hash: AbiCapHash, cap: &javm_cap::Cap) -> Result<()> {
         match &mut self.backend {
             Backend::Local(_) => {
                 let _refcount = self
