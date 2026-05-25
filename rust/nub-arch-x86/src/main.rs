@@ -48,7 +48,6 @@ mod state_cache;
 
 #[cfg(target_os = "none")]
 mod guest {
-    use alloc::boxed::Box;
     use alloc::vec::Vec;
     use hyperlight_guest_bin::guest_function;
     use javm_cap::cap::Cap;
@@ -132,8 +131,8 @@ mod guest {
 
     /// Heap-resident cap-directory publisher. Decodes the
     /// rkyv-archived [`WireCap`] payload, converts it back into a
-    /// [`Cap`], computes its content hash, and inserts a `Box<Cap>`
-    /// into [`crate::state_cache::DIRECTORY`].
+    /// [`Cap`], and inserts it into [`crate::state_cache::CACHE`] via
+    /// [`javm_cap::cache::CacheDirectory::put_cap`].
     ///
     /// On any decode/conversion failure we return a sentinel
     /// `CapHash` of all-`0xFF`. The host's `MultiUseSandbox::put_cap`
@@ -157,11 +156,10 @@ mod guest {
             Ok(c) => c,
             Err(_) => return error_hash_sentinel(),
         };
-        let hash = javm_cap::cap_hash(&cap);
-        {
-            let mut dir = crate::state_cache::DIRECTORY.lock();
-            dir.insert(hash, Box::new(cap));
-        }
+        let hash = match crate::state_cache::CACHE.lock().put_cap(&cap) {
+            Ok(h) => h,
+            Err(_) => return error_hash_sentinel(),
+        };
         let mut out: Vec<u8> = Vec::with_capacity(32);
         out.extend_from_slice(&hash);
         out

@@ -38,7 +38,7 @@ pub struct DataCap {
     pub content: DataContent,
 }
 
-#[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
+#[derive(Debug, ssz_derive::HashTreeRoot)]
 pub enum DataContent {
     /// Bytes in a single slab. `bytes.len()` must be a multiple of
     /// [`PAGE_SIZE`] (zero-padded by the constructor).
@@ -54,6 +54,31 @@ pub enum DataContent {
         /// Dense slot table indexed by page index.
         pages: Vec<PageSlot>,
     },
+}
+
+// Manual Clone: the derived impl uses `Vec::clone`, which goes through
+// `Global::alloc` with the source Vec's *layout* — but `Vec::clone`
+// uses the default 1-byte alignment for `[u8]`. That violates DataCap's
+// page-alignment invariant: the kernel maps Inline content directly
+// into a ring-3 PT and panics at `assert!(phys.is_multiple_of(PAGE_SIZE))`
+// when the cloned buffer happens to land on an unaligned page.
+//
+// Re-allocate through `alloc_page_aligned_zeroed` and memcpy the bytes
+// to preserve the invariant across clones.
+impl Clone for DataContent {
+    fn clone(&self) -> Self {
+        match self {
+            DataContent::Inline(bytes) => {
+                let mut buf = alloc_page_aligned_zeroed(bytes.len());
+                buf[..bytes.len()].copy_from_slice(bytes);
+                DataContent::Inline(buf)
+            }
+            DataContent::Paged { page_size, pages } => DataContent::Paged {
+                page_size: *page_size,
+                pages: pages.clone(),
+            },
+        }
+    }
 }
 
 impl DataCap {

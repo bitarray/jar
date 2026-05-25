@@ -5,16 +5,17 @@
 //! [`GUEST_VA`] reservation at a canonical low-half VA. The host
 //! process can mmap-shadow the kernel image at the same VA, so any
 //! kernel-mode pointer (e.g. the address of the
-//! `nub_arch_x86::state_cache::DIRECTORY` HashMap) is directly
-//! dereferenceable from host code.
+//! `nub_arch_x86::state_cache::CACHE` `CacheDirectory<FixedState>`)
+//! is directly dereferenceable from host code.
 //!
 //! [`GuestCacheReader`] wraps the directory VA published by the
 //! guest in its [`BootInfo`] block ([`MultiUseSandbox::boot_info`]
 //! later — for now this module just exposes the type for
 //! Commit 4's wiring) and exposes a `get(hash) -> Option<&Cap>`
-//! helper. The directory's HashMap is parameterised on the same
-//! `FixedState` hasher seed and `Global` allocator on both sides,
-//! so bucket assignments match and the host's view of the table is
+//! helper. The directory is a [`CacheDirectory<FixedState>`] on
+//! both sides — both host and guest see the same
+//! `Box<CacheEntry>` cells through the same `FixedState` seed, so
+//! bucket assignments match and the host's view of the table is
 //! byte-identical to the guest's.
 //!
 //! ## Safety
@@ -32,22 +33,21 @@
 
 use core::ptr::NonNull;
 
-use allocate::Global;
-use allocate::collections::HashMap;
 use foldhash::fast::FixedState;
-use javm_cap::cap::{Cap, CapHash};
+use javm_cap::cache::CacheDirectory;
+use javm_cap::{Cap, CapHash, CapHashOrRef};
 use nub_arch_x86_abi::BootInfo;
 
-/// The directory's concrete HashMap type. Must match
-/// `nub_arch_x86::state_cache::DIRECTORY`'s inner type exactly —
-/// hashbrown's `HashMap` layout depends on its type parameters, so
+/// The directory's concrete type. Must match
+/// `nub_arch_x86::state_cache::CACHE`'s inner type exactly —
+/// `CacheDirectory`'s layout depends on its hasher parameter, so
 /// any divergence would silently produce nonsense reads.
-type GuestDirectory = HashMap<CapHash, alloc::boxed::Box<Cap>, FixedState, Global>;
+type GuestDirectory = CacheDirectory<FixedState>;
 
 /// Read-only view of the guest's heap-resident cap directory.
 pub struct GuestCacheReader {
-    /// Pointer to the guest's HashMap living at `directory_va`. The
-    /// pointer is valid only while the sandbox is alive and the
+    /// Pointer to the guest's CacheDirectory living at `directory_va`.
+    /// The pointer is valid only while the sandbox is alive and the
     /// guest's kernel-mode VA mapping is still in place.
     directory: NonNull<GuestDirectory>,
 }
@@ -76,7 +76,7 @@ impl GuestCacheReader {
         Ok(Self { directory: nn })
     }
 
-    /// Number of entries in the guest's directory.
+    /// Number of blob entries in the guest's directory.
     ///
     /// # Safety
     ///
@@ -88,10 +88,10 @@ impl GuestCacheReader {
         // SAFETY: `directory` is `NonNull<GuestDirectory>`; the
         // construction contract requires it points at a valid
         // directory in the host's address space.
-        unsafe { self.directory.as_ref().len() }
+        unsafe { self.directory.as_ref().blob_count() }
     }
 
-    /// `true` iff the directory holds no entries.
+    /// `true` iff the directory holds no blob entries.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -103,17 +103,16 @@ impl GuestCacheReader {
     /// `&Cap` pointers across that boundary.
     pub fn get(&self, hash: &CapHash) -> Option<&Cap> {
         // SAFETY: directory is valid (see construction contract);
-        // hashbrown's `get` is safe to call on a `&HashMap` and the
-        // returned `&Box<Cap>` is valid for the lifetime of the
-        // `&HashMap` borrow.
+        // `CacheDirectory::get` is safe on `&self` and the returned
+        // `&Cap` borrow is bounded by the `&Self` borrow we hold.
         let dir: &GuestDirectory = unsafe { self.directory.as_ref() };
-        dir.get(hash).map(|b| &**b)
+        dir.get(CapHashOrRef::Hash(*hash))
     }
 
-    /// Whether a key is present, without dereferencing the value.
+    /// Whether a hash is present, without dereferencing the value.
     pub fn contains(&self, hash: &CapHash) -> bool {
         let dir: &GuestDirectory = unsafe { self.directory.as_ref() };
-        dir.contains_key(hash)
+        dir.contains_blob(hash)
     }
 }
 
@@ -136,9 +135,3 @@ pub enum GuestCacheReaderError {
     #[error("directory_va decoded to a null pointer")]
     NullPointer,
 }
-
-// Bring `alloc::boxed::Box` into scope for the `GuestDirectory`
-// type alias. We use `alloc::boxed::Box` (rather than `std::boxed::
-// Box`) so the alias stays bit-identical to the guest's
-// `state_cache::DIRECTORY` definition.
-extern crate alloc;

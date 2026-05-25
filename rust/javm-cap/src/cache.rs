@@ -95,15 +95,17 @@ impl<S: BuildHasher> CacheDirectory<S> {
     }
 }
 
-impl<S: Copy> CacheDirectory<S> {
+impl<S> CacheDirectory<S> {
     /// `const fn` constructor for static initialisation. Used by the
-    /// guest's `state_cache::CACHE` static. Requires `S: Copy` so the
-    /// same hasher value can seed both inner maps without invoking
-    /// `Clone` (not allowed in `const fn` today).
-    pub const fn new_const(hasher: S) -> Self {
+    /// guest's `state_cache::CACHE` static. Takes both hashers
+    /// separately because `const fn` can't call `S::clone()` and
+    /// not every `BuildHasher` (notably `foldhash::fast::FixedState`)
+    /// implements `Copy`. Callers normally pass two identically-seeded
+    /// instances so blobs and instances hash to the same buckets.
+    pub const fn new_const(blobs_hasher: S, instances_hasher: S) -> Self {
         Self {
-            blobs: HashMap::with_hasher(hasher),
-            instances: HashMap::with_hasher(hasher),
+            blobs: HashMap::with_hasher(blobs_hasher),
+            instances: HashMap::with_hasher(instances_hasher),
             next_ref: 1,
         }
     }

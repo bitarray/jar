@@ -102,7 +102,7 @@ use javm_cap::{CapHash, NUM_REGS};
 use crate::jit_run::{self, DirectMap, ExitInfo, FrameRuntime, MemRegion};
 use crate::page_alloc::PageBuf;
 use crate::paging;
-use crate::state_cache::{DIRECTORY, INSTANCES, publish_transient_instance};
+use crate::state_cache::{CACHE, publish_transient_instance};
 
 const EXIT_HALT: u32 = 0;
 const EXIT_HOST_CALL: u32 = 4;
@@ -153,13 +153,13 @@ const ERR_MAP_PAGED_UNSUPPORTED: u32 = 61;
 /// identifiers for the Image and Instance caps the frame runs
 /// against (plus per-frame mutable PVM state and the ring-3
 /// resources cache). The caps themselves live in the heap-resident
-/// [`DIRECTORY`] (Hash-keyed) or [`INSTANCES`] (Ref-keyed); the
-/// frame re-looks them up under each lock on access. V1 invariant:
-/// nothing evicts directory entries mid-RPC, so a hash that resolved
-/// at frame build resolves the same way for the frame's lifetime.
+/// [`CACHE`] (`CacheDirectory<FixedState>`); the frame re-looks
+/// them up under the cache lock on access. V1 invariant: nothing
+/// evicts directory entries mid-RPC, so a hash that resolved at
+/// frame build resolves the same way for the frame's lifetime.
 pub struct KernelFrame {
     /// Content hash of the Image cap this frame runs. Resolved via
-    /// `DIRECTORY.lock().get(&image_hash)` at each access.
+    /// `CACHE.lock().get(CapHashOrRef::Hash(image_hash))` at each access.
     image_hash: CapHash,
     /// Image's chain hash. Used by `derive_spawn` to compute the
     /// child's chain. Cached locally to avoid a cap deref per
@@ -237,11 +237,10 @@ pub struct LoopOutcome {
 /// exit) or the JIT signals an unrecoverable condition (page fault,
 /// gas exhaustion, …). See module docs for the loop body.
 ///
-/// Cap lookups go through the heap-resident
-/// [`DIRECTORY`] / [`INSTANCES`] statics. Each lookup takes the
-/// directory's spinlock; we keep lock scopes tight (clone out the
-/// fields we need, drop the guard) so other guest-mode lookups can
-/// proceed concurrently.
+/// Cap lookups go through the heap-resident [`CACHE`] static. Each
+/// lookup takes the cache's spinlock; we keep lock scopes tight
+/// (clone out the fields we need, drop the guard) so other guest-mode
+/// lookups can proceed concurrently.
 pub fn run_top(
     instance_hash: &CapHash,
     endpoint_idx: u32,
@@ -394,17 +393,15 @@ fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
 /// for the frame's lifetime per the V1 invariant (no eviction mid-
 /// RPC) even after this function returns and the guard is dropped.
 fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
-    // Single lock scope on DIRECTORY: hold it across the whole build
-    // so `img` (borrowed from the guard) stays live for the JIT call.
-    // For `Ref` instances we additionally take INSTANCES inside this
-    // scope — DIRECTORY → INSTANCES is the consistent ordering for
-    // this module, so no deadlock vs the publish paths.
-    let dir = DIRECTORY.lock();
-    let img = match dir.get(&frame.image_hash) {
-        Some(b) => match &**b {
-            Cap::Image(i) => i,
-            _ => return Err(ERR_IMAGE_KIND),
-        },
+    // Single lock scope on CACHE: hold it across the whole build so
+    // `img` (borrowed from the guard) stays live for the JIT call.
+    // Both blob (Hash) and instance (Ref) lookups go through the
+    // unified `CacheDirectory::get(CapHashOrRef)` API; there is no
+    // second lock to acquire.
+    let dir = CACHE.lock();
+    let img = match dir.get(CapHashOrRef::Hash(frame.image_hash)) {
+        Some(Cap::Image(i)) => i,
+        Some(_) => return Err(ERR_IMAGE_KIND),
         None => return Err(ERR_IMAGE_NOT_FOUND),
     };
 
@@ -447,14 +444,12 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
         };
         // Read the cap under the existing directory guard. Slice
         // borrow ends at the end of this iteration's match block.
-        let bytes = match dir.get(&target_hash) {
-            Some(b) => match &**b {
-                Cap::Data(d) => match &d.content {
-                    javm_cap::DataContent::Inline(bs) => bs.as_slice(),
-                    javm_cap::DataContent::Paged { .. } => return Err(ERR_MAP_PAGED_UNSUPPORTED),
-                },
-                _ => return Err(ERR_MAP_BAD_KIND),
+        let bytes = match dir.get(CapHashOrRef::Hash(target_hash)) {
+            Some(Cap::Data(d)) => match &d.content {
+                javm_cap::DataContent::Inline(bs) => bs.as_slice(),
+                javm_cap::DataContent::Paged { .. } => return Err(ERR_MAP_PAGED_UNSUPPORTED),
             },
+            Some(_) => return Err(ERR_MAP_BAD_KIND),
             None => return Err(ERR_HOST_CALL_SLOT_EMPTY),
         };
         let pa = paging::va_to_pa(bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?;
@@ -469,35 +464,16 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
         });
     }
 
-    // Instance rw_overlays: per-instance evolved state. Top-level
-    // instances live in DIRECTORY (Hash); derive_spawn-created
-    // children live in INSTANCES (Ref). Branch on the key type and
-    // extract overlays + mem_size under the appropriate lock; we
-    // hold-and-copy rather than try to borrow across two guards.
+    // Instance rw_overlays: per-instance evolved state. Both top-level
+    // (Hash) and kernel-derived (Ref) instances live in the same
+    // CacheDirectory; `dir.get(CapHashOrRef)` does the dispatch.
     //
     // Up to three overlays are propagated to the JIT (its arg / ro
     // / rw mem regions). Anything beyond that is ignored — matches
     // pre-rewrite behaviour.
     let mut overlay_bufs: [(u32, Vec<u8>); 3] = [(0, Vec::new()), (0, Vec::new()), (0, Vec::new())];
     let mut n = 0usize;
-
-    // Read overlays from the appropriate map. For `Hash`, the
-    // instance lives in DIRECTORY (which we already hold). For `Ref`,
-    // it lives in INSTANCES; take that lock too. We DON'T drop `dir`
-    // here — it stays alive so `img` (borrowed from it) is still
-    // usable below for the JIT call. Lock ordering is always
-    // DIRECTORY → INSTANCES; consistent across this module.
-    let inst_view: Option<&javm_cap::instance::InstanceCap> = match frame.instance {
-        CapHashOrRef::Hash(h) => match dir.get(&h) {
-            Some(b) => match &**b {
-                Cap::Instance(inst) => Some(inst),
-                _ => None,
-            },
-            None => None,
-        },
-        CapHashOrRef::Ref(_) => None,
-    };
-    if let Some(inst) = inst_view {
+    if let Some(Cap::Instance(inst)) = dir.get(frame.instance) {
         for ov in inst.rw_overlays.iter() {
             let end = ov.start.saturating_add(ov.bytes.len() as u32);
             if end > mem_size {
@@ -512,27 +488,6 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
         }
         if inst.mem_size > mem_size {
             mem_size = inst.mem_size;
-        }
-    } else if let CapHashOrRef::Ref(r) = frame.instance {
-        let map = INSTANCES.lock();
-        if let Some(b) = map.get(&r)
-            && let Cap::Instance(inst) = &**b
-        {
-            for ov in inst.rw_overlays.iter() {
-                let end = ov.start.saturating_add(ov.bytes.len() as u32);
-                if end > mem_size {
-                    mem_size = end;
-                }
-                if n < overlay_bufs.len() && !ov.bytes.is_empty() {
-                    overlay_bufs[n].0 = ov.start;
-                    overlay_bufs[n].1.clear();
-                    overlay_bufs[n].1.extend_from_slice(ov.bytes.as_slice());
-                    n += 1;
-                }
-            }
-            if inst.mem_size > mem_size {
-                mem_size = inst.mem_size;
-            }
         }
     }
 
@@ -599,7 +554,7 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
 /// support — the child inherits the parent's cnode at CALL time).
 /// Computes `child_chain = blake2b(running.chain, image_hash)`,
 /// publishes a fresh `Cap::Instance` into the heap-resident
-/// [`INSTANCES`] map via
+/// [`CACHE`]'s instances tier via
 /// [`crate::state_cache::publish_transient_instance`], and writes
 /// the resulting `CapRef` into the parent's `dst_slot`.
 fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<(), u32> {
@@ -669,8 +624,8 @@ fn dispatch_host_call(parent: &KernelFrame) -> Result<KernelFrame, u32> {
     Ok(child)
 }
 
-/// Build a frame from a `Cap::Instance` blob published in the heap-
-/// resident [`DIRECTORY`] (the top-level invocation path; also used
+/// Build a frame from a `Cap::Instance` published in the heap-
+/// resident [`CACHE`] (the top-level invocation path; also used
 /// by `host_call` when the cnode slot points at a host-pre-published
 /// instance hash).
 fn build_frame_from_published(
@@ -679,12 +634,10 @@ fn build_frame_from_published(
     args: [u64; 4],
 ) -> Result<KernelFrame, u32> {
     let (image_hash, image_hash_chain, inst_regs) = {
-        let dir = DIRECTORY.lock();
-        match dir.get(instance_hash) {
-            Some(b) => match &**b {
-                Cap::Instance(i) => (i.image_hash, i.image_hash_chain, i.regs),
-                _ => return Err(ERR_INSTANCE_KIND),
-            },
+        let dir = CACHE.lock();
+        match dir.get(CapHashOrRef::Hash(*instance_hash)) {
+            Some(Cap::Instance(i)) => (i.image_hash, i.image_hash_chain, i.regs),
+            Some(_) => return Err(ERR_INSTANCE_KIND),
             None => return Err(ERR_INSTANCE_NOT_FOUND),
         }
     };
@@ -698,20 +651,18 @@ fn build_frame_from_published(
     )
 }
 
-/// Build a frame from a `Cap::Instance` resident in [`INSTANCES`]
-/// (kernel-derived sub-VM).
+/// Build a frame from a `Cap::Instance` resident in the kernel-
+/// derived (`Ref`-keyed) tier of [`CACHE`].
 fn build_frame_from_instance_ref(
     ref_id: javm_cap::CapRef,
     endpoint_idx: u32,
     args: [u64; 4],
 ) -> Result<KernelFrame, u32> {
     let (image_hash, image_hash_chain) = {
-        let map = INSTANCES.lock();
-        match map.get(&ref_id) {
-            Some(b) => match &**b {
-                Cap::Instance(i) => (i.image_hash, i.image_hash_chain),
-                _ => return Err(ERR_INSTANCE_KIND),
-            },
+        let dir = CACHE.lock();
+        match dir.get(CapHashOrRef::Ref(ref_id)) {
+            Some(Cap::Instance(i)) => (i.image_hash, i.image_hash_chain),
+            Some(_) => return Err(ERR_INSTANCE_KIND),
             None => return Err(ERR_INSTANCE_NOT_FOUND),
         }
     };
@@ -747,12 +698,10 @@ fn build_frame_inner(
     args: [u64; 4],
     inst_regs: Option<&[u64; NUM_REGS]>,
 ) -> Result<KernelFrame, u32> {
-    let dir = DIRECTORY.lock();
-    let img = match dir.get(&image_hash) {
-        Some(b) => match &**b {
-            Cap::Image(i) => i,
-            _ => return Err(ERR_IMAGE_KIND),
-        },
+    let dir = CACHE.lock();
+    let img = match dir.get(CapHashOrRef::Hash(image_hash)) {
+        Some(Cap::Image(i)) => i,
+        Some(_) => return Err(ERR_IMAGE_KIND),
         None => return Err(ERR_IMAGE_NOT_FOUND),
     };
 
