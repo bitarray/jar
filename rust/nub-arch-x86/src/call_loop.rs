@@ -395,10 +395,11 @@ fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
 /// for the frame's lifetime per the V1 invariant (no eviction mid-
 /// RPC) even after this function returns and the guard is dropped.
 fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
-    // Single lock scope: hold the directory across the whole build
-    // (mirrors the previous `cache.directory()`-guarded codepath).
-    // For the instance lookup we may need the instances map too —
-    // take both locks below in a defined order to avoid deadlock.
+    // Single lock scope on DIRECTORY: hold it across the whole build
+    // so `img` (borrowed from the guard) stays live for the JIT call.
+    // For `Ref` instances we additionally take INSTANCES inside this
+    // scope — DIRECTORY → INSTANCES is the consistent ordering for
+    // this module, so no deadlock vs the publish paths.
     let dir = DIRECTORY.lock();
     let img = match dir.get(&frame.image_hash) {
         Some(b) => match &**b {
@@ -481,65 +482,60 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     let mut overlay_bufs: [(u32, Vec<u8>); 3] = [(0, Vec::new()), (0, Vec::new()), (0, Vec::new())];
     let mut n = 0usize;
 
-    match frame.instance {
-        CapHashOrRef::Hash(h) => {
-            if let Some(b) = dir.get(&h)
-                && let Cap::Instance(inst) = &**b
-            {
-                for ov in inst.rw_overlays.iter() {
-                    let end = ov.start.saturating_add(ov.bytes.len() as u32);
-                    if end > mem_size {
-                        mem_size = end;
-                    }
-                    if n < overlay_bufs.len() && !ov.bytes.is_empty() {
-                        overlay_bufs[n].0 = ov.start;
-                        overlay_bufs[n].1.clear();
-                        overlay_bufs[n].1.extend_from_slice(ov.bytes.as_slice());
-                        n += 1;
-                    }
-                }
-                if inst.mem_size > mem_size {
-                    mem_size = inst.mem_size;
-                }
+    // Read overlays from the appropriate map. For `Hash`, the
+    // instance lives in DIRECTORY (which we already hold). For `Ref`,
+    // it lives in INSTANCES; take that lock too. We DON'T drop `dir`
+    // here — it stays alive so `img` (borrowed from it) is still
+    // usable below for the JIT call. Lock ordering is always
+    // DIRECTORY → INSTANCES; consistent across this module.
+    let inst_view: Option<&javm_cap::instance::InstanceCap> = match frame.instance {
+        CapHashOrRef::Hash(h) => match dir.get(&h) {
+            Some(b) => match &**b {
+                Cap::Instance(inst) => Some(inst),
+                _ => None,
+            },
+            None => None,
+        },
+        CapHashOrRef::Ref(_) => None,
+    };
+    if let Some(inst) = inst_view {
+        for ov in inst.rw_overlays.iter() {
+            let end = ov.start.saturating_add(ov.bytes.len() as u32);
+            if end > mem_size {
+                mem_size = end;
+            }
+            if n < overlay_bufs.len() && !ov.bytes.is_empty() {
+                overlay_bufs[n].0 = ov.start;
+                overlay_bufs[n].1.clear();
+                overlay_bufs[n].1.extend_from_slice(ov.bytes.as_slice());
+                n += 1;
             }
         }
-        CapHashOrRef::Ref(r) => {
-            // Drop the directory guard before grabbing INSTANCES to
-            // keep the lock ordering simple and one-way.
-            drop(dir);
-            let map = INSTANCES.lock();
-            if let Some(b) = map.get(&r)
-                && let Cap::Instance(inst) = &**b
-            {
-                for ov in inst.rw_overlays.iter() {
-                    let end = ov.start.saturating_add(ov.bytes.len() as u32);
-                    if end > mem_size {
-                        mem_size = end;
-                    }
-                    if n < overlay_bufs.len() && !ov.bytes.is_empty() {
-                        overlay_bufs[n].0 = ov.start;
-                        overlay_bufs[n].1.clear();
-                        overlay_bufs[n].1.extend_from_slice(ov.bytes.as_slice());
-                        n += 1;
-                    }
+        if inst.mem_size > mem_size {
+            mem_size = inst.mem_size;
+        }
+    } else if let CapHashOrRef::Ref(r) = frame.instance {
+        let map = INSTANCES.lock();
+        if let Some(b) = map.get(&r)
+            && let Cap::Instance(inst) = &**b
+        {
+            for ov in inst.rw_overlays.iter() {
+                let end = ov.start.saturating_add(ov.bytes.len() as u32);
+                if end > mem_size {
+                    mem_size = end;
                 }
-                if inst.mem_size > mem_size {
-                    mem_size = inst.mem_size;
+                if n < overlay_bufs.len() && !ov.bytes.is_empty() {
+                    overlay_bufs[n].0 = ov.start;
+                    overlay_bufs[n].1.clear();
+                    overlay_bufs[n].1.extend_from_slice(ov.bytes.as_slice());
+                    n += 1;
                 }
+            }
+            if inst.mem_size > mem_size {
+                mem_size = inst.mem_size;
             }
         }
     }
-
-    // Now we still need `img` for the JIT call. Re-lock DIRECTORY
-    // (cheap; uncontended on the single guest thread).
-    let dir = DIRECTORY.lock();
-    let img = match dir.get(&frame.image_hash) {
-        Some(b) => match &**b {
-            Cap::Image(i) => i,
-            _ => return Err(ERR_IMAGE_KIND),
-        },
-        None => return Err(ERR_IMAGE_NOT_FOUND),
-    };
 
     let arg: (u32, &[u8]) = (overlay_bufs[0].0, overlay_bufs[0].1.as_slice());
     let ro: (u32, &[u8]) = (overlay_bufs[1].0, overlay_bufs[1].1.as_slice());
