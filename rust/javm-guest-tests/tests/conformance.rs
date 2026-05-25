@@ -58,14 +58,19 @@ mod recomp {
     use javm_cap::image::PinnedCap;
     use javm_cap::NUM_REGS;
     use nub::Nub;
-    use std::cell::RefCell;
+    use std::sync::{Mutex, OnceLock};
 
-    thread_local! {
-        /// One Hyperlight sandbox per test thread, reused across
-        /// every `conform()` call. Sandbox construction takes ~hundreds
-        /// of ms; without caching the whole conformance run is
-        /// dominated by sandbox startup, not the actual JIT execution.
-        static NUB: RefCell<Option<Nub>> = const { RefCell::new(None) };
+    /// One Hyperlight sandbox shared across every test thread. Cargo
+    /// runs tests in parallel by default but `Nub::new_hyperlight()`
+    /// reserves a fixed host VA range and only one live sandbox per
+    /// process can occupy it (see
+    /// `nub_host_common::layout::reserve_guest_va_range`). The same
+    /// pattern is used by the bench drivers in `javm-bench`. Sandbox
+    /// construction also takes ~hundreds of ms; sharing keeps the
+    /// conformance run dominated by JIT execution rather than boot.
+    fn nub_hyperlight() -> &'static Mutex<Nub> {
+        static NUB: OnceLock<Mutex<Nub>> = OnceLock::new();
+        NUB.get_or_init(|| Mutex::new(Nub::new_hyperlight().expect("Hyperlight sandbox")))
     }
 
     pub fn run(image: &Image, ep: u8) -> (u64, u64) {
@@ -90,61 +95,55 @@ mod recomp {
             .map(|(start, bytes)| (*start, bytes.as_slice()))
             .collect();
 
-        NUB.with(|cell| {
-            let mut borrow = cell.borrow_mut();
-            if borrow.is_none() {
-                *borrow = Some(Nub::new_hyperlight().expect("Hyperlight sandbox"));
-            }
-            let nub = borrow.as_mut().expect("nub initialised above");
-            // Publish the canonical Image + an empty root CNode + an
-            // InstanceCap binding both. Build each as a Cap<Global>;
-            // the cache deep-clones into talc on first put and just
-            // bumps refcounts on re-puts of identical content.
-            use javm_cap::Cap;
-            let image_cap = Cap::image_with_slots(image, &[], &[])
-                .unwrap_or_else(|e| panic!("endpoint {ep}: image_with_slots: {e}"));
-            let image_h = nub
-                .put_cap(&image_cap)
-                .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap image: {e}"));
-            let cnode_cap =
-                Cap::empty_cnode(0).unwrap_or_else(|e| panic!("endpoint {ep}: empty_cnode: {e}"));
-            let cnode_h = nub
-                .put_cap(&cnode_cap)
-                .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap cnode: {e}"));
-            let instance_cap = Cap::instance_with_overlays(
-                [0u8; 32],
-                image_h,
-                cnode_h,
-                &overlay_slices,
-                mem_size,
-                regs,
-                0,
-                0,
-            );
-            let instance_hash = nub
-                .put_cap(&instance_cap)
-                .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap instance: {e}"));
-            let result = nub
-                .invoke_cached(instance_hash, ep, [0; 4], GAS_BUDGET)
-                .unwrap_or_else(|e| panic!("endpoint {ep}: invoke_cached failed: {e}"));
+        let mut nub = nub_hyperlight().lock().expect("nub mutex");
+        // Publish the canonical Image + an empty root CNode + an
+        // InstanceCap binding both. Build each as a Cap<Global>;
+        // the cache deep-clones into talc on first put and just
+        // bumps refcounts on re-puts of identical content.
+        use javm_cap::Cap;
+        let image_cap = Cap::image_with_slots(image, &[], &[])
+            .unwrap_or_else(|e| panic!("endpoint {ep}: image_with_slots: {e}"));
+        let image_h = nub
+            .put_cap(&image_cap)
+            .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap image: {e}"));
+        let cnode_cap =
+            Cap::empty_cnode(0).unwrap_or_else(|e| panic!("endpoint {ep}: empty_cnode: {e}"));
+        let cnode_h = nub
+            .put_cap(&cnode_cap)
+            .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap cnode: {e}"));
+        let instance_cap = Cap::instance_with_overlays(
+            [0u8; 32],
+            image_h,
+            cnode_h,
+            &overlay_slices,
+            mem_size,
+            regs,
+            0,
+            0,
+        );
+        let instance_hash = nub
+            .put_cap(&instance_cap)
+            .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap instance: {e}"));
+        let result = nub
+            .invoke_cached(instance_hash, ep, [0; 4], GAS_BUDGET)
+            .unwrap_or_else(|e| panic!("endpoint {ep}: invoke_cached failed: {e}"));
 
-            // The endpoint trampoline halts via `ecalli 0` (REPLY/HALT).
-            // The in-kernel JIT surfaces this as exit_reason=4 (HostCall)
-            // with exit_arg=0; report a panic if we got anything else.
-            assert_eq!(
-                result.exit_reason, 4,
-                "endpoint {ep}: unexpected exit_reason {} (exit_arg={})",
-                result.exit_reason, result.exit_arg,
-            );
-            assert_eq!(
-                result.exit_arg, 0,
-                "endpoint {ep}: expected HostCall(0) trampoline halt, got HostCall({})",
-                result.exit_arg,
-            );
+        // The endpoint trampoline halts via `ecalli 0` (REPLY/HALT).
+        // The in-kernel JIT surfaces this as exit_reason=4 (HostCall)
+        // with exit_arg=0; report a panic if we got anything else.
+        assert_eq!(
+            result.exit_reason, 4,
+            "endpoint {ep}: unexpected exit_reason {} (exit_arg={})",
+            result.exit_reason, result.exit_arg,
+        );
+        assert_eq!(
+            result.exit_arg, 0,
+            "endpoint {ep}: expected HostCall(0) trampoline halt, got HostCall({})",
+            result.exit_arg,
+        );
 
-            let gas_used = GAS_BUDGET.saturating_sub(result.gas_remaining);
-            (result.return_value, gas_used)
-        })
+        let gas_used = GAS_BUDGET.saturating_sub(result.gas_remaining);
+        (result.return_value, gas_used)
     }
 
     /// Walk the Image's memory mappings + slot contents and project

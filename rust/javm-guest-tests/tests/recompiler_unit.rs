@@ -17,17 +17,26 @@
 //!   2=OOG, 4=HostCall, 7=Trap).
 //!
 //! Each `tests/*.rs` integration test is its own test binary, so
-//! the singleton `Nub` thread_local is private to this file.
+//! the singleton `Nub` is private to this file.
+//!
+//! Sandbox sharing: cargo runs tests in parallel by default, but
+//! `Nub::new_hyperlight()` reserves a fixed host VA range that can
+//! only host one live sandbox per process (see
+//! `nub_host_common::layout::reserve_guest_va_range`). We therefore
+//! share a single global Hyperlight sandbox across all test threads
+//! via `OnceLock<Mutex<Nub>>`, the same pattern used by the bench
+//! drivers in `javm-bench`.
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use javm_cap::image::{EndpointDef, Image};
 use nub::Nub;
-use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 
-thread_local! {
-    static NUB: RefCell<Option<Nub>> = const { RefCell::new(None) };
+fn nub_hyperlight() -> &'static Mutex<Nub> {
+    static NUB: OnceLock<Mutex<Nub>> = OnceLock::new();
+    NUB.get_or_init(|| Mutex::new(Nub::new_hyperlight().expect("Hyperlight sandbox")))
 }
 
 const EXIT_OOG: u32 = 2;
@@ -95,37 +104,31 @@ fn run(ps: ProgSpec) -> RunResult {
         vec![(ps.rw_start, ps.rw_data.as_slice())]
     };
 
-    NUB.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        if borrow.is_none() {
-            *borrow = Some(Nub::new_hyperlight().expect("Hyperlight sandbox"));
-        }
-        let nub = borrow.as_mut().expect("nub initialised above");
-        use javm_cap::Cap;
-        let image_cap = Cap::image_with_slots(&img, &[], &[]).expect("image_with_slots");
-        let image_h = nub.put_cap(&image_cap).expect("put_cap image");
-        let cnode_cap = Cap::empty_cnode(0).expect("empty_cnode");
-        let cnode_h = nub.put_cap(&cnode_cap).expect("put_cap cnode");
-        let instance_cap = Cap::instance_with_overlays(
-            [0u8; 32],
-            image_h,
-            cnode_h,
-            &overlay_vec,
-            mem_size,
-            ps.registers,
-            0,
-            0,
-        );
-        let instance_h = nub.put_cap(&instance_cap).expect("put_cap instance");
-        let r = nub
-            .invoke_cached(instance_h, 0, [0; 4], ps.gas)
-            .expect("invoke_cached");
-        RunResult {
-            exit_reason: r.exit_reason,
-            exit_arg: r.exit_arg,
-            return_value: r.return_value,
-        }
-    })
+    let mut nub = nub_hyperlight().lock().expect("nub mutex");
+    use javm_cap::Cap;
+    let image_cap = Cap::image_with_slots(&img, &[], &[]).expect("image_with_slots");
+    let image_h = nub.put_cap(&image_cap).expect("put_cap image");
+    let cnode_cap = Cap::empty_cnode(0).expect("empty_cnode");
+    let cnode_h = nub.put_cap(&cnode_cap).expect("put_cap cnode");
+    let instance_cap = Cap::instance_with_overlays(
+        [0u8; 32],
+        image_h,
+        cnode_h,
+        &overlay_vec,
+        mem_size,
+        ps.registers,
+        0,
+        0,
+    );
+    let instance_h = nub.put_cap(&instance_cap).expect("put_cap instance");
+    let r = nub
+        .invoke_cached(instance_h, 0, [0; 4], ps.gas)
+        .expect("invoke_cached");
+    RunResult {
+        exit_reason: r.exit_reason,
+        exit_arg: r.exit_arg,
+        return_value: r.return_value,
+    }
 }
 
 /// Append `move φ[7] ← φ[k]` (MoveReg/TwoReg, opcode 100, 2 bytes)
