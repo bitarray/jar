@@ -20,31 +20,17 @@
 //! `static mut BootInfo` placed in the `.boot_info` linker section.
 //! The host reads the section from the kernel ELF after sandbox
 //! startup to learn where to find the cap directory.
-//!
-//! ## Legacy
-//!
-//! `init_guest_cache` (returning a shared-memory `Cache` handle) is
-//! retained for backward compatibility with code that still calls
-//! into the old shared-cache path — it errors at runtime if invoked
-//! because Commit 1 broke the underlying allocator-sharing
-//! assumption. Commit 5 deletes the shared-cache module wholesale;
-//! at that point this shim goes too.
 
 #![cfg(target_os = "none")]
 
-use core::sync::atomic::{AtomicBool, Ordering};
-
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use allocate::Global;
 use allocate::collections::HashMap;
 use foldhash::fast::FixedState;
 use javm_cap::cap::{Cap, CapHash, CapRef};
 use nub_arch_x86_abi::BootInfo;
-use nub_host_common::cache::{Cache, STATE_CACHE_GPA, STATE_CACHE_SIZE, STATE_CACHE_VA};
 use spin::Mutex;
-
-use crate::paging::{Perm, install_persistent_kernel_mapping};
 
 /// Per-cache hasher seed. Pinned at a constant so the host's
 /// future direct-dereference reader (via `BootInfo.directory_va`)
@@ -143,61 +129,4 @@ pub fn init_directory_va() {
         let p = &raw mut BOOT_INFO;
         (*p).directory_va = va;
     }
-}
-
-// --- Legacy shared-cache shim ---
-
-#[allow(dead_code)]
-static CACHE_MAPPED: AtomicBool = AtomicBool::new(false);
-
-/// Errors raised by guest-side `Cache` construction.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CacheErr {
-    /// `install_persistent_kernel_mapping` couldn't add the region
-    /// mapping.
-    MapNotInstalled,
-}
-
-/// Idempotent: install the default cache mapping (`STATE_CACHE_VA →
-/// STATE_CACHE_GPA`) in the active PML4 if not already done.
-#[allow(dead_code)]
-fn ensure_default_mapped() -> Result<(), CacheErr> {
-    if CACHE_MAPPED.load(Ordering::Acquire) {
-        return Ok(());
-    }
-    let perm = Perm::kernel_rw();
-    // SAFETY: STATE_CACHE_VA / STATE_CACHE_GPA / size are agreed-upon
-    // constants; the persistent kernel mapping is a one-time install
-    // that the per-invocation page-table builder copies forward.
-    unsafe {
-        install_persistent_kernel_mapping(
-            STATE_CACHE_VA,
-            STATE_CACHE_GPA,
-            STATE_CACHE_SIZE as u64,
-            perm,
-        )
-        .ok_or(CacheErr::MapNotInstalled)?;
-    }
-    CACHE_MAPPED.store(true, Ordering::Release);
-    Ok(())
-}
-
-/// Legacy shim: construct a guest-side shared-memory [`Cache`]
-/// handle. Retained for the old `nub_invoke_cached` codepath until
-/// Commit 5 deletes the shared-cache infrastructure.
-///
-/// After Commits 1+2, the shared cache no longer reliably carries
-/// cap content — caps allocate from `Global` (= talc heap) rather
-/// than from the cache region's talc. The call-loop has been
-/// migrated to read from [`DIRECTORY`] instead; this shim only
-/// survives because the function is invoked from the existing
-/// `nub_invoke_cached` RPC handler.
-#[allow(dead_code)]
-pub fn init_guest_cache() -> Result<Cache, CacheErr> {
-    ensure_default_mapped()?;
-    // SAFETY: `ensure_default_mapped` just installed the mapping;
-    // the host has initialised the `CacheHeader` at offset 0 of the
-    // region before sharing it with us.
-    Ok(unsafe { Cache::from_mapped_region() })
 }

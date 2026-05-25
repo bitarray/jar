@@ -136,8 +136,7 @@ pub const NUM_REGS: usize = 13;
 /// stay shallow; eight is plenty.
 pub const MAX_SOURCE_DEPTH: usize = 8;
 
-/// Maximum number of endpoints per Image stored in the cache.
-/// Matches `nub_host_common::cache::MAX_ENDPOINTS`.
+/// Maximum number of endpoints per Image.
 pub const MAX_ENDPOINTS: usize = 64;
 
 /// One of the five v3 cap kinds.

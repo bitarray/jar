@@ -462,9 +462,6 @@ pub(crate) struct HyperlightVm {
     // The current scratch region, used to keep it alive as long as it
     // is used & when unmapping
     pub(super) scratch_memory: Option<GuestSharedMemory>,
-    /// Slot number reserved for the state cache region (installed
-    /// once during evolve via [`Self::install_cache_mapping`]).
-    pub(super) cache_slot: u32,
 
     pub(super) mmap_regions: Vec<(u32, MemoryRegion)>, // Later mapped regions (slot number, region)
 
@@ -545,34 +542,6 @@ impl HyperlightVm {
         let rgn = scratch.mapping_at(guest_base, MemoryRegionType::Scratch);
         self.scratch_memory = Some(scratch);
         unsafe { self.vm.map_memory((self.scratch_slot, &rgn))? };
-        Ok(())
-    }
-
-    /// Register a fixed-VA state-cache region with the VM. Called
-    /// once during sandbox evolve. `host_base` is the host VA returned
-    /// by the cache's `mmap`; `size` is the cache size; the GPA is
-    /// fixed at [`nub_host_common::cache::STATE_CACHE_GPA`]. The
-    /// guest's per-invocation paging code is expected to install a
-    /// matching GVA→GPA mapping at
-    /// [`nub_host_common::cache::STATE_CACHE_VA`].
-    pub(crate) fn install_cache_mapping(
-        &mut self,
-        host_base: usize,
-        size: usize,
-    ) -> Result<(), UpdateRegionError> {
-        let gpa = nub_host_common::cache::STATE_CACHE_GPA as usize;
-        let rgn = MemoryRegion {
-            guest_region: gpa..(gpa + size),
-            host_region: host_base..(host_base + size),
-            flags: MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
-            // No matching variant in V0; reuse `Scratch` since the
-            // semantics (mutable, host-owned, no PEB significance)
-            // are closest to scratch. A dedicated variant can land
-            // when crashdump/diag paths start caring.
-            region_type: MemoryRegionType::Scratch,
-        };
-        unsafe { self.vm.map_memory((self.cache_slot, &rgn))? };
-        self.mmap_regions.push((self.cache_slot, rgn));
         Ok(())
     }
 

@@ -17,10 +17,6 @@
 //! - [`version_note`] — ELF version-note check for guest binaries.
 //! - [`rpc`] — `Request` / `Response` envelope types for the
 //!   rkyv-based RPC.
-//! - [`cache`] — fixed-VA shared state-cache directory
-//!   ([`cache::CacheDirectory`]) plus layout constants. The
-//!   talc-allocator primitives that back the region's heap live in
-//!   the `nub-talc-util` crate.
 
 #![cfg_attr(not(any(test, debug_assertions)), warn(clippy::panic))]
 #![cfg_attr(not(any(test, debug_assertions)), warn(clippy::expect_used))]
@@ -29,7 +25,6 @@
 
 extern crate alloc;
 
-pub mod cache;
 pub mod layout;
 pub mod log_level;
 pub mod mem;

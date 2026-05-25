@@ -152,15 +152,14 @@ const ERR_MAP_PAGED_UNSUPPORTED: u32 = 61;
 /// One stack frame on the in-kernel call stack. Holds the
 /// identifiers for the Image and Instance caps the frame runs
 /// against (plus per-frame mutable PVM state and the ring-3
-/// resources cache). The caps themselves live in the [`Cache`];
-/// the frame re-looks them up on each access via `&Cache`. V1
-/// invariant: nothing evicts cache entries mid-RPC, so a hash that
-/// resolved at frame build resolves the same way for the frame's
-/// lifetime.
+/// resources cache). The caps themselves live in the heap-resident
+/// [`DIRECTORY`] (Hash-keyed) or [`INSTANCES`] (Ref-keyed); the
+/// frame re-looks them up under each lock on access. V1 invariant:
+/// nothing evicts directory entries mid-RPC, so a hash that resolved
+/// at frame build resolves the same way for the frame's lifetime.
 pub struct KernelFrame {
     /// Content hash of the Image cap this frame runs. Resolved via
-    /// [`Cache::read_blob`] at each access (cheap, direct-indexed
-    /// for instance-keyed; linear-scan for blob hashes).
+    /// `DIRECTORY.lock().get(&image_hash)` at each access.
     image_hash: CapHash,
     /// Image's chain hash. Used by `derive_spawn` to compute the
     /// child's chain. Cached locally to avoid a cap deref per

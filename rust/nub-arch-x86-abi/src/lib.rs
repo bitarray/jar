@@ -1,10 +1,12 @@
 //! Wire format for the host ↔ guest "run this PVM program" RPC.
 //!
-//! The host pre-publishes a `Cap::Instance`'s state into the shared
-//! state cache (`nub_host_common::cache`), then ships a fixed-size
-//! [`InvokePacket`] referencing it by hash on every call. No payload
-//! codec — the packet is `#[repr(C)]` bytes; only the response is
-//! rkyv-archived ([`InvocationResult`]).
+//! The host pre-publishes each `Cap` it wants the guest to see via
+//! the [`FN_ID_NUB_PUT_CAP`] RPC (rkyv-archived `WireCap` payload;
+//! see the `state_cache` module in `nub-arch-x86` for the guest-side
+//! heap-resident directory it lands in), then ships a fixed-size
+//! [`InvokePacket`] referencing the published `Cap::Instance` by
+//! hash on every call. The invoke packet is `#[repr(C)]` bytes (no
+//! codec); the response is rkyv-archived ([`InvocationResult`]).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
