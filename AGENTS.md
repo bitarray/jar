@@ -30,3 +30,16 @@ cargo test -p javm-guest-tests                      # javm guest conformance vec
 - Don't "work around" an issue. Always fix the root cause.
 - Strict interfaces: require all fields, fail early, be loud about failures. Never silently default missing input — if a field is expected, error when it's absent. Fix callers, not callees.
 - Run `cargo fmt --all` and `cargo clippy --workspace --all-targets -- -D warnings` before submitting a PR. CI enforces both.
+
+## Test organisation
+
+Tests live in **`<crate>/tests/`** by default — one integration-test file per module under test, named after the module (e.g. `javm-cap/src/cap_hash.rs` → `javm-cap/tests/cap_hash.rs`). They run as separate binaries against the crate's public API, which keeps the source tree free of `#[cfg(test)] mod tests { ... }` boilerplate and forces the API to be reachable through `pub` paths.
+
+Inline `mod tests` is the **exception**, reserved for tests that genuinely need module-private access:
+
+- Private fields on a struct (e.g. `Assembler::labels`, `SandboxMemoryLayout::code_size`).
+- Private fns or consts (e.g. `parse_signed_imm`, `reg_bit`, `RegSet::one`).
+- `#[cfg(test)]`-only helpers defined on a public type (e.g. `Assembler::code_bytes`) — these don't exist in the integration-test build configuration.
+- `pub(crate)` / `pub(super)` / `pub(in crate::foo)` items.
+
+`_tests.rs` sidecar files are not used — pick one of the two forms above.
