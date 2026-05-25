@@ -24,7 +24,6 @@ pub mod cap;
 pub mod cap_hash;
 pub mod cnode;
 pub mod data;
-pub mod entry;
 pub mod error;
 pub mod hash;
 pub mod image;
@@ -35,8 +34,6 @@ pub mod slot;
 pub mod wire;
 
 #[cfg(test)]
-mod cache_tests;
-#[cfg(test)]
 mod cap_tests;
 
 pub use cache::{CacheDirectory, CacheError};
@@ -46,7 +43,6 @@ pub use cap::{
 pub use cap_hash::cap_hash;
 pub use cnode::{CNodeCap, CNodeSlotEntry};
 pub use data::{DataCap, DataContent, PAGE_SIZE};
-pub use entry::CacheEntry;
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash};
 pub use image::{

@@ -66,22 +66,30 @@ impl<'a> MainFrame<'a> {
     /// `Cap::CNode` or hits an empty slot, returns
     /// `VmError::{SlotKindMismatch, SlotEmpty}`.
     pub fn resolve(&self, path: &SlotPath) -> Result<Option<CapHashOrRef>, VmError> {
-        let mut cur: &CNodeCap = self.cnode;
-        // Walk each intermediate step.
-        for step in path.prefix() {
-            let target = cur.get(*step).ok_or(VmError::SlotEmpty(step.get()))?;
+        let prefix = path.prefix();
+        if prefix.is_empty() {
+            return Ok(self.cnode.get(path.target()));
+        }
+        // Walk intermediate cnodes by cloning. `cache.get` returns an
+        // owned `Arc<Cap>` rather than the old `&Cap`, so we can no
+        // longer chain borrows; cloning the CNodeCap (cheap for
+        // sparsely-populated tables) sidesteps the lifetime issue.
+        // SlotPath depth is bounded to MAX_SOURCE_DEPTH = 8.
+        let mut current = self.cnode.clone();
+        for step in prefix {
+            let target = current.get(*step).ok_or(VmError::SlotEmpty(step.get()))?;
             let cap = self
                 .cache
                 .get(target)
                 .ok_or(VmError::SlotKindMismatch(step.get()))?;
-            match cap {
+            match &*cap {
                 Cap::CNode(inner) => {
-                    cur = inner;
+                    current = inner.clone();
                 }
                 _ => return Err(VmError::SlotKindMismatch(step.get())),
             }
         }
-        Ok(cur.get(path.target()))
+        Ok(current.get(path.target()))
     }
 }
 

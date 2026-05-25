@@ -2,7 +2,25 @@
 //!
 //! Cap types and their inner storage use the default `Global` allocator
 //! (= std heap on host, talc on guest via `#[global_allocator]`).
+//!
+//! ## `CapRef` is an `Arc`-backed handle
+//!
+//! A `CapRef` is the entry-lifetime token for `CacheDirectory.instances`.
+//! `Clone` bumps an inner `Arc` refcount; `Drop` decrements it.
+//! `CacheDirectory` itself owns one `CapRef` per live entry alongside the
+//! data; when external holders all drop their clones, the directory's
+//! `sweep_instances` finds entries whose stored CapRef has
+//! `strong_count == 1` and removes them. No callback-on-drop, no
+//! deadlock discipline.
+//!
+//! `Cap::CNode` slots and `Cap::Instance.root_cnode` hold
+//! `CapHashOrRef::Ref(CapRef)` directly, so cloning a Cap deep-bumps every
+//! nested handle and dropping a Cap deep-releases them. Recursive cleanup
+//! is automatic via Rust's Drop semantics; cycles are structurally
+//! impossible (data-flow principle: no shared mutable state across
+//! Instance boundaries).
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use super::cnode::CNodeCap;
@@ -13,11 +31,55 @@ use super::instance::InstanceCap;
 /// 32-byte digest used for all v3 cap identity / content hashes.
 pub type CapHash = [u8; 32];
 
-/// Monotonic, cache-local handle for a mutable working entry in
-/// `cache.instances`. Two separate `CacheDirectory` instances produce
-/// independent `CapRef` namespaces; refs must not be serialised
-/// across caches.
-pub type CapRef = u64;
+/// Cache-local lifetime handle to a working `Cap::Instance` in
+/// `CacheDirectory.instances`. `Clone` bumps the refcount; the
+/// directory's `sweep_instances` reclaims entries whose only holder is
+/// the directory itself. Two separate `CacheDirectory` instances produce
+/// independent `CapRef` id namespaces — refs must not cross caches.
+#[derive(Clone, Debug)]
+pub struct CapRef {
+    id: u64,
+    /// Refcount tracker. The Arc's strong count is the number of
+    /// live `CapRef` holders for this id (including the directory's
+    /// own self-reference).
+    rc: Arc<()>,
+}
+
+impl CapRef {
+    /// Construct a fresh `CapRef`. Only [`crate::cache::CacheDirectory::
+    /// put_instance`] and tests are expected to call this.
+    pub fn new(id: u64) -> Self {
+        Self {
+            id,
+            rc: Arc::new(()),
+        }
+    }
+
+    /// The id this handle resolves to inside `CacheDirectory.instances`.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Number of live `CapRef` clones for this id, including the
+    /// directory's own self-reference. `sweep_instances` reclaims
+    /// entries whose stored handle has `strong_count == 1`.
+    pub fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.rc)
+    }
+}
+
+impl PartialEq for CapRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+impl Eq for CapRef {}
+
+impl core::hash::Hash for CapRef {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state)
+    }
+}
 
 /// Slot/field reference: either a content-addressed blob in
 /// `cache.blobs` or a mutable working entry in `cache.instances`.
@@ -27,10 +89,12 @@ pub type CapRef = u64;
 /// hashes to `h` — let a freshly-published cap substitute for a
 /// `Ref` reference without changing the hash of any cap that holds
 /// it. The `Ref` arm panics: callers must `settle` a cap graph before
-/// hashing it. We deliberately do not derive `Encode + Decode` either,
-/// because `CapHashOrRef` never appears on the wire (it lives only
-/// in the cache).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// hashing it. `Encode` mirrors `HashTreeRoot` (panic on Ref);
+/// `Decode` rejects the Ref selector (no directory context).
+///
+/// **Not `Copy`**: the `Ref(CapRef)` arm carries a refcounted handle,
+/// so the enum is `Clone`-only.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum CapHashOrRef {
     Hash(CapHash),
     Ref(CapRef),
@@ -49,12 +113,6 @@ impl ssz::HashTreeRoot for CapHashOrRef {
     }
 }
 
-// `Encode`/`Decode` on `CapHashOrRef` is a standard SSZ Union: selector
-// 0 + 32 bytes for `Hash`, selector 1 + 8 bytes for `Ref`. These exist so
-// derives on outer types (`CNodeSlotEntry`, `InstanceCap`) can compose
-// the SSZ wire form; in practice these wire encodings aren't transmitted
-// (caps are in-process state), but providing them keeps the derive set
-// consistent.
 impl ssz::Encode for CapHashOrRef {
     fn is_ssz_fixed_len() -> bool {
         false
@@ -65,7 +123,11 @@ impl ssz::Encode for CapHashOrRef {
     fn ssz_bytes_len(&self) -> usize {
         match self {
             CapHashOrRef::Hash(_) => 1 + 32,
-            CapHashOrRef::Ref(_) => 1 + 8,
+            // Ref must be settled before serialisation; matches the
+            // `HashTreeRoot` contract above. Reached only by buggy code.
+            CapHashOrRef::Ref(_) => {
+                panic!("ssz_bytes_len: unresolved CapRef in cap graph; settle first")
+            }
         }
     }
     fn ssz_append(&self, buf: &mut Vec<u8>) {
@@ -74,9 +136,8 @@ impl ssz::Encode for CapHashOrRef {
                 buf.push(0);
                 buf.extend_from_slice(h);
             }
-            CapHashOrRef::Ref(r) => {
-                buf.push(1);
-                buf.extend_from_slice(&r.to_le_bytes());
+            CapHashOrRef::Ref(_) => {
+                panic!("ssz_append: unresolved CapRef in cap graph; settle first")
             }
         }
     }
@@ -108,16 +169,12 @@ impl ssz::Decode for CapHashOrRef {
                 h.copy_from_slice(&bytes[1..1 + 32]);
                 Ok(CapHashOrRef::Hash(h))
             }
-            1 => {
-                if bytes.len() != 1 + 8 {
-                    return Err(ssz::DecodeError::UnexpectedEof {
-                        expected: 1 + 8,
-                        actual: bytes.len(),
-                    });
-                }
-                let arr: [u8; 8] = bytes[1..1 + 8].try_into().expect("len checked");
-                Ok(CapHashOrRef::Ref(u64::from_le_bytes(arr)))
-            }
+            // Refs are cache-local lifetime handles; the wire has no
+            // directory context to reconstruct one. Caller bugs that
+            // serialise a Ref into wire bytes surface here.
+            1 => Err(ssz::DecodeError::Custom(
+                "CapHashOrRef::Ref cannot be decoded from wire bytes",
+            )),
             v => Err(ssz::DecodeError::InvalidSelector(v)),
         }
     }
@@ -142,6 +199,11 @@ pub const MAX_ENDPOINTS: usize = 64;
 /// variant's own `HashTreeRoot` impl. We do not derive `Encode +
 /// Decode` on `Cap` itself; caps move through the cache by direct
 /// allocation and aren't wire-transmitted at this layer.
+///
+/// **Clone**: the derived `Clone` recursively clones field-by-field.
+/// `Cap::Instance` and `Cap::CNode` carry `CapHashOrRef` values; the
+/// `Ref(CapRef)` arm `Arc::clone`s the handle, so cloning a Cap
+/// deep-bumps every nested instance reference. Drop is symmetric.
 #[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
 pub enum Cap {
     #[ssz(selector = 0)]

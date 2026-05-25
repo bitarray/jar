@@ -32,10 +32,11 @@
 //!   may change and any retained pointer is stale.
 
 use core::ptr::NonNull;
+use std::sync::Arc;
 
 use foldhash::fast::FixedState;
 use javm_cap::cache::CacheDirectory;
-use javm_cap::{Cap, CapHash, CapHashOrRef};
+use javm_cap::{Cap, CapHash};
 use nub_arch_x86_abi::BootInfo;
 
 /// The directory's concrete type. Must match
@@ -107,17 +108,18 @@ impl GuestCacheReader {
         self.len() == 0
     }
 
-    /// Look up a cap by content hash. Returns `None` if absent.
+    /// Look up a cap by content hash. Returns an Arc::clone of the
+    /// guest's `Arc<Cap>` if the blob is published; `None` otherwise.
     ///
-    /// The borrow is bounded by `&self`. After the borrow ends, the
-    /// caller may hand control back to the guest; do not retain
-    /// `&Cap` pointers across that boundary.
-    pub fn get(&self, hash: &CapHash) -> Option<&Cap> {
+    /// The returned `Arc` keeps the guest's Cap data alive across the
+    /// lookup boundary — even if the guest later overwrites or removes
+    /// the entry, the caller's Arc stays valid (the data is freed only
+    /// when the last Arc clone drops).
+    pub fn get(&self, hash: &CapHash) -> Option<Arc<Cap>> {
         // SAFETY: directory is valid (see construction contract);
-        // `CacheDirectory::get` is safe on `&self` and the returned
-        // `&Cap` borrow is bounded by the `&Self` borrow we hold.
+        // `CacheDirectory::get_blob` clones the stored Arc internally.
         let dir: &GuestDirectory = unsafe { self.directory.as_ref() };
-        dir.get(CapHashOrRef::Hash(*hash))
+        dir.get_blob(hash)
     }
 
     /// Whether a hash is present, without dereferencing the value.

@@ -393,16 +393,18 @@ fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
 /// for the frame's lifetime per the V1 invariant (no eviction mid-
 /// RPC) even after this function returns and the guard is dropped.
 fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
-    // Single lock scope on CACHE: hold it across the whole build so
-    // `img` (borrowed from the guard) stays live for the JIT call.
-    // Both blob (Hash) and instance (Ref) lookups go through the
-    // unified `CacheDirectory::get(CapHashOrRef)` API; there is no
-    // second lock to acquire.
-    let dir = CACHE.lock();
-    let img = match dir.get(CapHashOrRef::Hash(frame.image_hash)) {
-        Some(Cap::Image(i)) => i,
-        Some(_) => return Err(ERR_IMAGE_KIND),
-        None => return Err(ERR_IMAGE_NOT_FOUND),
+    // CacheDirectory is interior-mutable; each `get` takes the inner
+    // spin::Mutex briefly and returns an `Arc<Cap>`. We keep the Arc
+    // locals alive for the duration of the function so any borrowed
+    // slices (used to compute PAs for direct PT mapping) stay valid.
+    // Blobs are never evicted in V0, so the PAs remain valid for the
+    // frame's lifetime past return.
+    let img_arc = CACHE
+        .get(CapHashOrRef::Hash(frame.image_hash))
+        .ok_or(ERR_IMAGE_NOT_FOUND)?;
+    let img = match &*img_arc {
+        Cap::Image(i) => i,
+        _ => return Err(ERR_IMAGE_KIND),
     };
 
     // Classify slots: pinned (RO, direct-map) vs initial (RW with
@@ -426,6 +428,9 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
 
     let mut direct_maps: Vec<DirectMap> = Vec::with_capacity(img.mappings.len());
     let mut mem_size: u32 = 0;
+    // Keep Arcs alive for the data-cap lookups so the slice references
+    // we feed to direct_maps stay valid until function return.
+    let mut data_arcs: Vec<alloc::sync::Arc<Cap>> = Vec::new();
     for m in img.mappings.iter() {
         let end = (m.start + m.size) as u32;
         if end > mem_size {
@@ -442,15 +447,27 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
             Some(Some(CapHashOrRef::Hash(h))) => *h,
             _ => continue,
         };
-        // Read the cap under the existing directory guard. Slice
-        // borrow ends at the end of this iteration's match block.
-        let bytes = match dir.get(CapHashOrRef::Hash(target_hash)) {
-            Some(Cap::Data(d)) => match &d.content {
-                javm_cap::DataContent::Inline(bs) => bs.as_slice(),
+        let data_arc = CACHE
+            .get(CapHashOrRef::Hash(target_hash))
+            .ok_or(ERR_HOST_CALL_SLOT_EMPTY)?;
+        // Validate kind + DataContent variant before stashing the Arc.
+        match &*data_arc {
+            Cap::Data(d) => match &d.content {
+                javm_cap::DataContent::Inline(_) => {}
                 javm_cap::DataContent::Paged { .. } => return Err(ERR_MAP_PAGED_UNSUPPORTED),
             },
-            Some(_) => return Err(ERR_MAP_BAD_KIND),
-            None => return Err(ERR_HOST_CALL_SLOT_EMPTY),
+            _ => return Err(ERR_MAP_BAD_KIND),
+        }
+        data_arcs.push(data_arc);
+        // SAFETY-ish: data_arcs[last] is the Arc we just pushed; its
+        // Cap::Data::Inline bytes have a stable address. Resolve PA
+        // from the bytes' VA.
+        let bytes = match data_arcs.last().unwrap().as_ref() {
+            Cap::Data(d) => match &d.content {
+                javm_cap::DataContent::Inline(bs) => bs.as_slice(),
+                _ => unreachable!("validated above"),
+            },
+            _ => unreachable!("validated above"),
         };
         let pa = paging::va_to_pa(bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?;
         let size = (m.size as u32).min(bytes.len() as u32);
@@ -466,14 +483,17 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
 
     // Instance rw_overlays: per-instance evolved state. Both top-level
     // (Hash) and kernel-derived (Ref) instances live in the same
-    // CacheDirectory; `dir.get(CapHashOrRef)` does the dispatch.
+    // CacheDirectory; `CACHE.get(CapHashOrRef)` does the dispatch.
     //
     // Up to three overlays are propagated to the JIT (its arg / ro
     // / rw mem regions). Anything beyond that is ignored — matches
     // pre-rewrite behaviour.
     let mut overlay_bufs: [(u32, Vec<u8>); 3] = [(0, Vec::new()), (0, Vec::new()), (0, Vec::new())];
     let mut n = 0usize;
-    if let Some(Cap::Instance(inst)) = dir.get(frame.instance) {
+    let inst_arc = CACHE.get(frame.instance.clone());
+    if let Some(arc) = inst_arc.as_ref()
+        && let Cap::Instance(inst) = &**arc
+    {
         for ov in inst.rw_overlays.iter() {
             let end = ov.start.saturating_add(ov.bytes.len() as u32);
             if end > mem_size {
@@ -597,7 +617,9 @@ fn dispatch_host_call(parent: &KernelFrame) -> Result<KernelFrame, u32> {
     if instance_slot >= CNODE_SLOTS {
         return Err(ERR_HOST_CALL_SLOT_EMPTY);
     }
-    let target = parent.cnode[instance_slot].ok_or(ERR_HOST_CALL_SLOT_EMPTY)?;
+    let target = parent.cnode[instance_slot]
+        .clone()
+        .ok_or(ERR_HOST_CALL_SLOT_EMPTY)?;
 
     // Arg-passing convention: parent's φ[9..=10] → child's φ[7..=8].
     // φ[11] holds the ecall op-code on a kernel-mode ecall exit (not
@@ -618,7 +640,10 @@ fn dispatch_host_call(parent: &KernelFrame) -> Result<KernelFrame, u32> {
     // CapRef and mutations don't accidentally cross-share.
     for (i, slot) in parent.cnode.iter().enumerate() {
         if child.cnode[i].is_none() {
-            child.cnode[i] = *slot;
+            // Clone the CapHashOrRef. For Ref(CapRef) slots this
+            // bumps the inner Arc strong count — the child's
+            // cnode keeps the instance alive while the child runs.
+            child.cnode[i] = slot.clone();
         }
     }
     Ok(child)
@@ -633,13 +658,12 @@ fn build_frame_from_published(
     endpoint_idx: u32,
     args: [u64; 4],
 ) -> Result<KernelFrame, u32> {
-    let (image_hash, image_hash_chain, inst_regs) = {
-        let dir = CACHE.lock();
-        match dir.get(CapHashOrRef::Hash(*instance_hash)) {
-            Some(Cap::Instance(i)) => (i.image_hash, i.image_hash_chain, i.regs),
-            Some(_) => return Err(ERR_INSTANCE_KIND),
-            None => return Err(ERR_INSTANCE_NOT_FOUND),
-        }
+    let arc = CACHE
+        .get(CapHashOrRef::Hash(*instance_hash))
+        .ok_or(ERR_INSTANCE_NOT_FOUND)?;
+    let (image_hash, image_hash_chain, inst_regs) = match &*arc {
+        Cap::Instance(i) => (i.image_hash, i.image_hash_chain, i.regs),
+        _ => return Err(ERR_INSTANCE_KIND),
     };
     build_frame_inner(
         image_hash,
@@ -658,13 +682,12 @@ fn build_frame_from_instance_ref(
     endpoint_idx: u32,
     args: [u64; 4],
 ) -> Result<KernelFrame, u32> {
-    let (image_hash, image_hash_chain) = {
-        let dir = CACHE.lock();
-        match dir.get(CapHashOrRef::Ref(ref_id)) {
-            Some(Cap::Instance(i)) => (i.image_hash, i.image_hash_chain),
-            Some(_) => return Err(ERR_INSTANCE_KIND),
-            None => return Err(ERR_INSTANCE_NOT_FOUND),
-        }
+    let arc = CACHE
+        .get(CapHashOrRef::Ref(ref_id.clone()))
+        .ok_or(ERR_INSTANCE_NOT_FOUND)?;
+    let (image_hash, image_hash_chain) = match &*arc {
+        Cap::Instance(i) => (i.image_hash, i.image_hash_chain),
+        _ => return Err(ERR_INSTANCE_KIND),
     };
     build_frame_inner(
         image_hash,
@@ -698,11 +721,12 @@ fn build_frame_inner(
     args: [u64; 4],
     inst_regs: Option<&[u64; NUM_REGS]>,
 ) -> Result<KernelFrame, u32> {
-    let dir = CACHE.lock();
-    let img = match dir.get(CapHashOrRef::Hash(image_hash)) {
-        Some(Cap::Image(i)) => i,
-        Some(_) => return Err(ERR_IMAGE_KIND),
-        None => return Err(ERR_IMAGE_NOT_FOUND),
+    let img_arc = CACHE
+        .get(CapHashOrRef::Hash(image_hash))
+        .ok_or(ERR_IMAGE_NOT_FOUND)?;
+    let img = match &*img_arc {
+        Cap::Image(i) => i,
+        _ => return Err(ERR_IMAGE_KIND),
     };
 
     let endpoint = endpoint_idx as usize;

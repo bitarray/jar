@@ -192,13 +192,10 @@ impl Nub {
     /// pays only one host-side `HashMap::contains_key`.
     pub fn put_cap_with_hash(&mut self, hash: AbiCapHash, cap: &javm_cap::Cap) -> Result<()> {
         match &mut self.backend {
-            Backend::Local(_) => {
-                let _refcount = self
-                    .local_cache
-                    .put_cap_with_hash(hash, cap)
-                    .map_err(|e| anyhow::anyhow!("put_cap_with_hash (local): {e}"))?;
-                Ok(())
-            }
+            Backend::Local(_) => self
+                .local_cache
+                .put_cap_with_hash(hash, cap)
+                .map_err(|e| anyhow::anyhow!("put_cap_with_hash (local): {e}")),
             Backend::Hyperlight(h) => h
                 .sandbox
                 .put_cap_with_hash(hash, cap)
@@ -224,8 +221,8 @@ impl Nub {
                     .local_cache
                     .get(CapHashOrRef::Hash(instance_hash))
                     .ok_or_else(|| anyhow::anyhow!("invoke_cached: instance not published"))?;
-                let inst = match instance_cap {
-                    Cap::Instance(i) => i,
+                let inst = match &*instance_cap {
+                    Cap::Instance(i) => i.clone(),
                     _ => {
                         return Err(anyhow::anyhow!(
                             "invoke_cached: cap at hash is not an Instance"
@@ -236,8 +233,8 @@ impl Nub {
                     .local_cache
                     .get(CapHashOrRef::Hash(inst.image_hash))
                     .ok_or_else(|| anyhow::anyhow!("invoke_cached: image not in cache"))?;
-                let img = match image_cap {
-                    Cap::Image(i) => i,
+                let img = match &*image_cap {
+                    Cap::Image(i) => i.clone(),
                     _ => {
                         return Err(anyhow::anyhow!(
                             "invoke_cached: cap at image_hash is not an Image"
@@ -245,8 +242,8 @@ impl Nub {
                     }
                 };
                 Ok(nub_arch_local::run_instance(
-                    inst,
-                    img,
+                    &inst,
+                    &img,
                     endpoint_idx,
                     args,
                     initial_gas,

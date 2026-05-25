@@ -61,7 +61,7 @@ impl CNodeCap {
     /// placeholder" should inspect `self.slots.get(...)` directly.
     pub fn get(&self, slot: SlotIdx) -> Option<CapHashOrRef> {
         match self.slots.get(slot.get() as u64)? {
-            MissingOr::Materialized(t) => Some(*t),
+            MissingOr::Materialized(t) => Some(t.clone()),
             MissingOr::Missing(_) => None,
         }
     }
@@ -79,7 +79,7 @@ impl CNodeCap {
         }
         let key = slot.get() as u64;
         let prior = match self.slots.get(key) {
-            Some(MissingOr::Materialized(t)) => Some(*t),
+            Some(MissingOr::Materialized(t)) => Some(t.clone()),
             Some(MissingOr::Missing(_)) | None => None,
         };
         match target {
@@ -115,7 +115,7 @@ impl CNodeCap {
 ///
 /// The on-the-wire/hash representation of `CNodeCap` no longer uses this
 /// type; the cnode is encoded directly as a `SparseList<CapHashOrRef, ...>`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CNodeSlotEntry {
     pub slot: SlotIdx,
     pub target: CapHashOrRef,

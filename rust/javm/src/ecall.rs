@@ -365,7 +365,7 @@ impl<K: KernelAssist> Vm<K> {
             )
         };
 
-        let img = match cache
+        let img = match &*cache
             .get(CapHashOrRef::Hash(new_image_hash))
             .ok_or(VmError::ImageNotFound)?
         {
@@ -498,14 +498,14 @@ impl<K: KernelAssist> Vm<K> {
         //    parent doesn't have to mint stack/heap/rw_data caps
         //    by hand on every spawn. A future spec-strict mode can
         //    skip the initial overlay.
-        let img_cap = match cache
+        let img_cap = match &*cache
             .get(CapHashOrRef::Hash(image_hash))
             .ok_or(VmError::ImageNotFound)?
         {
             Cap::Image(i) => i.clone(),
             _ => return Err(VmError::ImageNotFound),
         };
-        let mut child_cn = match cache
+        let mut child_cn = match &*cache
             .get(CapHashOrRef::Hash(cnode_hash))
             .ok_or(VmError::Invariant("derive_spawn: prepared cnode missing"))?
         {
@@ -535,7 +535,7 @@ impl<K: KernelAssist> Vm<K> {
         let new_cnode_cap = cache
             .get(CapHashOrRef::Hash(new_cnode_hash))
             .ok_or(VmError::Invariant("derive_spawn: new cnode missing"))?;
-        let new_cnode = match new_cnode_cap {
+        let new_cnode = match &*new_cnode_cap {
             Cap::CNode(c) => c.clone(),
             _ => return Err(VmError::Invariant("derive_spawn: cnode hash misroutes")),
         };
@@ -555,13 +555,13 @@ impl<K: KernelAssist> Vm<K> {
                 Some(t) => t,
                 None => continue,
             };
-            let data_cap = match cache.get(target) {
-                Some(Cap::Data(d)) => d,
+            let data_arc = cache.get(target);
+            let bytes_vec = match data_arc.as_deref() {
+                Some(Cap::Data(d)) => match &d.content {
+                    javm_cap::DataContent::Inline(v) => v.as_slice().to_vec(),
+                    javm_cap::DataContent::Paged { .. } => continue,
+                },
                 _ => continue,
-            };
-            let bytes_vec = match &data_cap.content {
-                javm_cap::DataContent::Inline(v) => v.as_slice().to_vec(),
-                javm_cap::DataContent::Paged { .. } => continue,
             };
             if !bytes_vec.is_empty() {
                 overlay_bufs.push((m.start as u32, bytes_vec));
@@ -638,7 +638,7 @@ impl<K: KernelAssist> Vm<K> {
             .root_cnode
             .get(src)
             .ok_or(VmError::SlotEmpty(src.get()))?;
-        let image_hash_chain = match cache.get(target).ok_or(VmError::InstanceNotFound)? {
+        let image_hash_chain = match &*cache.get(target).ok_or(VmError::InstanceNotFound)? {
             Cap::Instance(i) => i.image_hash_chain,
             _ => return Err(VmError::InstanceNotFound),
         };
@@ -673,10 +673,10 @@ impl<K: KernelAssist> Vm<K> {
             .root_cnode
             .get(src)
             .ok_or(VmError::SlotEmpty(src.get()))?;
-        let data = match cache
+        let data_arc = cache
             .get(target)
-            .ok_or(VmError::Invariant("data cap missing"))?
-        {
+            .ok_or(VmError::Invariant("data cap missing"))?;
+        let data = match &*data_arc {
             Cap::Data(d) => d,
             _ => return Err(VmError::Invariant("slot does not hold Cap::Data")),
         };
@@ -742,8 +742,8 @@ impl<K: KernelAssist> Vm<K> {
             .kernel_assist
             .host_open(file_id)
             .ok_or(VmError::Invariant("unknown file id"))?;
-        match cache
-            .get(data_ref)
+        match &*cache
+            .get(data_ref.clone())
             .ok_or(VmError::Invariant("file data missing"))?
         {
             Cap::Data(_) => {}
@@ -776,8 +776,8 @@ impl<K: KernelAssist> Vm<K> {
             .root_cnode
             .get(src)
             .ok_or(VmError::SlotEmpty(src.get()))?;
-        let size = match cache
-            .get(target)
+        let size = match &*cache
+            .get(target.clone())
             .ok_or(VmError::Invariant("host_save data missing"))?
         {
             Cap::Data(d) => d.content_len(),
@@ -822,7 +822,8 @@ impl<K: KernelAssist> Vm<K> {
             .root_cnode
             .get(inst_slot)
             .ok_or(VmError::SlotEmpty(inst_slot.get()))?;
-        match cache.get(target_ref) {
+        let target_arc = cache.get(target_ref.clone());
+        match target_arc.as_deref() {
             Some(Cap::Instance(_)) => {}
             _ => return Err(VmError::InstanceNotFound),
         }
@@ -1139,7 +1140,7 @@ mod tests {
         assert!(matches!(r, EcallResult::Continue));
         let cnode = &vm.stack.running_instance().unwrap().root_cnode;
         let target = cnode.get(SlotIdx(5)).unwrap();
-        assert!(matches!(cache.get(target), Some(Cap::CNode(_))));
+        assert!(matches!(cache.get(target).as_deref(), Some(Cap::CNode(_))));
     }
 
     #[test]
@@ -1362,7 +1363,7 @@ mod tests {
             .get(SlotIdx(6))
             .unwrap();
         assert!(matches!(
-            cache.get(target),
+            cache.get(target).as_deref(),
             Some(Cap::Type(TypeCap {
                 image_hash_chain
             })) if *image_hash_chain == [0x42; 32]
@@ -1442,7 +1443,8 @@ mod tests {
             .root_cnode
             .get(SlotIdx(6))
             .unwrap();
-        match cache.get(target).unwrap() {
+        let target_arc = cache.get(target).unwrap();
+        match &*target_arc {
             Cap::Data(d) => {
                 assert_eq!(d.content_len(), javm_cap::PAGE_SIZE as u64);
                 // First 5 bytes echo what we wrote, including the
@@ -1473,7 +1475,7 @@ mod tests {
             .root_cnode
             .get(SlotIdx(6))
             .unwrap();
-        assert!(matches!(cache.get(target), Some(Cap::Data(_))));
+        assert!(matches!(cache.get(target).as_deref(), Some(Cap::Data(_))));
     }
 
     #[test]
@@ -1606,7 +1608,7 @@ mod tests {
 
         // The published Cap::Instance has the extended chain.
         let cap = cache.get(new_target).expect("instance in cache");
-        let inst = match cap {
+        let inst = match &*cap {
             Cap::Instance(i) => i,
             _ => panic!("expected Cap::Instance"),
         };
@@ -1627,7 +1629,7 @@ mod tests {
 
         // Hash hygiene: the new instance hash actually matches what
         // cap_hash computes on the published cap.
-        assert_eq!(new_instance_hash, javm_cap::cap_hash(cap));
+        assert_eq!(new_instance_hash, javm_cap::cap_hash(&cap));
     }
 
     /// `dispatch_host_call_cached` pushes a child entry on top of

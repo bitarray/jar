@@ -4,10 +4,9 @@
 
 use crate::slot::SlotIdx;
 
-use super::cap::{Cap, CapHashOrRef};
+use super::cap::{Cap, CapHashOrRef, CapRef};
 use super::cnode::CNodeCap;
 use super::data::{DataCap, DataContent};
-use super::entry::CacheEntry;
 use super::image_cap::{EndpointDef, ImageCap, ImageSlotEntry, MemoryMapping};
 use super::instance::{InstanceCap, RwOverlay};
 use super::page::{PageBytes, PageRef, PageSlot};
@@ -142,10 +141,15 @@ fn cnode_lookup_after_set() {
     cnode
         .set(SlotIdx(7), Some(CapHashOrRef::Hash([0x11; 32])))
         .unwrap();
-    cnode.set(SlotIdx(42), Some(CapHashOrRef::Ref(99))).unwrap();
+    // CapRef is now a refcounted handle; fabricate one for the test
+    // (no directory backing — these test only the slot bookkeeping).
+    let r = CapRef::new(99);
+    cnode
+        .set(SlotIdx(42), Some(CapHashOrRef::Ref(r.clone())))
+        .unwrap();
 
     assert_eq!(cnode.get(SlotIdx(7)), Some(CapHashOrRef::Hash([0x11; 32])));
-    assert_eq!(cnode.get(SlotIdx(42)), Some(CapHashOrRef::Ref(99)));
+    assert_eq!(cnode.get(SlotIdx(42)), Some(CapHashOrRef::Ref(r)));
     assert_eq!(cnode.get(SlotIdx(100)), None);
 }
 
@@ -241,13 +245,14 @@ fn image_slot_entry_compact() {
 }
 
 #[test]
-fn cache_entry_refcount_starts_at_one() {
-    let cap: Cap = Cap::CNode(CNodeCap::new(4).unwrap());
-    let entry = CacheEntry::new(cap);
-    assert_eq!(
-        entry.refcount.load(core::sync::atomic::Ordering::Relaxed),
-        1
-    );
+fn capref_strong_count_tracks_holders() {
+    let r = CapRef::new(7);
+    assert_eq!(r.strong_count(), 1);
+    let r2 = r.clone();
+    assert_eq!(r.strong_count(), 2);
+    assert_eq!(r2.strong_count(), 2);
+    drop(r2);
+    assert_eq!(r.strong_count(), 1);
 }
 
 #[test]
@@ -255,36 +260,35 @@ fn cache_round_trips_full_publish_chain() {
     use crate::cache::CacheDirectory;
     use crate::cap::NUM_REGS;
 
-    let mut cache = CacheDirectory::new();
+    let cache = CacheDirectory::new();
 
-    // 1. Publish a Data blob.
+    // 1. Publish a Data blob. Blobs are pure content-addressed
+    //    storage — re-publishing the same content is a no-op.
     let data_h = cache
         .put_cap(&Cap::data_inline(&[
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
         ]))
         .expect("put data");
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(data_h)), Some(1));
+    assert!(cache.contains_blob(&data_h));
 
-    // 2. Publish a CNode referencing it (refcount on data → 2).
+    // 2. Publish a CNode referencing the Data blob by hash.
     let cnode_h = {
         let mut cn: CNodeCap = CNodeCap::new(4).unwrap();
         cn.set(SlotIdx(0), Some(CapHashOrRef::Hash(data_h)))
             .unwrap();
         cache.put_cap(&Cap::CNode(cn)).expect("put cnode")
     };
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(cnode_h)), Some(1));
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(data_h)), Some(2));
+    assert!(cache.contains_blob(&cnode_h));
 
     // 3. Publish a minimal Image referencing the same Data blob as a
-    //    pinned slot (refcount on data → 3).
+    //    pinned slot.
     let mut img = make_image_cap();
     img.pinned.push(ImageSlotEntry {
         slot: SlotIdx(7),
         cap_hash: data_h,
     });
     let image_h = cache.put_cap(&Cap::Image(img)).expect("put image");
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(image_h)), Some(1));
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(data_h)), Some(3));
+    assert!(cache.contains_blob(&image_h));
 
     // 4. Publish an Instance binding image + cnode.
     let regs = [0u64; NUM_REGS];
@@ -300,18 +304,70 @@ fn cache_round_trips_full_publish_chain() {
             1_000_000,
         ))
         .expect("put instance");
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(inst_h)), Some(1));
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(image_h)), Some(2));
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(cnode_h)), Some(2));
+    assert!(cache.contains_blob(&inst_h));
 
-    // 5. Promote the cnode to a mutable instance via get_mut, then settle.
+    // 5. Promote the cnode to a mutable instance via Arc::clone +
+    //    settle. With Arc storage the blob entry stays put; the
+    //    instances tier shares the same Arc until mutation.
     let new_ref = cache
-        .get_mut(CapHashOrRef::Hash(cnode_h))
-        .expect("get_mut cnode");
+        .promote_blob_to_instance(&cnode_h)
+        .expect("promote cnode");
     let settled_h = cache
         .settle(CapHashOrRef::Ref(new_ref))
         .expect("settle resolves the ref");
     // Settling an unchanged cnode-clone produces the same content
     // hash as the original blob.
     assert_eq!(settled_h, cnode_h);
+}
+
+#[test]
+fn capref_sweep_reclaims_orphaned_instance() {
+    use crate::cache::CacheDirectory;
+    let cache = CacheDirectory::new();
+
+    let r = cache.put_instance(Cap::CNode(CNodeCap::new(4).unwrap()));
+    assert_eq!(cache.instance_count(), 1);
+    // Two holders: caller's CapRef + directory's self-ref.
+    assert_eq!(r.strong_count(), 2);
+
+    // Sweep with the external holder still alive — nothing reclaimed.
+    cache.sweep_instances();
+    assert_eq!(cache.instance_count(), 1);
+
+    // Drop the external holder; sweep reclaims.
+    drop(r);
+    cache.sweep_instances();
+    assert_eq!(cache.instance_count(), 0);
+}
+
+#[test]
+fn capref_sweep_cascades_through_cnode_ref_chain() {
+    use crate::cache::CacheDirectory;
+    let cache = CacheDirectory::new();
+
+    // Leaf instance with no nested Refs.
+    let leaf = cache.put_instance(Cap::CNode(CNodeCap::new(4).unwrap()));
+
+    // Parent cnode holding the leaf via Ref. Cap::Clone bumps the
+    // leaf's strong count when we clone the CNodeCap into the cap.
+    let mut parent_cn: CNodeCap = CNodeCap::new(4).unwrap();
+    parent_cn
+        .set(SlotIdx(0), Some(CapHashOrRef::Ref(leaf.clone())))
+        .unwrap();
+    let parent = cache.put_instance(Cap::CNode(parent_cn));
+
+    // Counts: leaf has 3 strong refs (our local + parent's cnode slot
+    // + directory's self-ref); parent has 2 (our local + directory).
+    assert_eq!(leaf.strong_count(), 3);
+    assert_eq!(parent.strong_count(), 2);
+
+    drop(leaf);
+    drop(parent);
+    // Leaf still alive in parent's cnode; parent still alive in
+    // directory's self-ref. Sweep reclaims parent first (its
+    // self-ref count is 1 after we dropped our local). Reclaiming
+    // parent drops its Cap which drops its `Ref(leaf)` slot which
+    // drops leaf's last external clone — next pass reclaims leaf.
+    cache.sweep_instances();
+    assert_eq!(cache.instance_count(), 0);
 }

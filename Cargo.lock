@@ -1192,6 +1192,7 @@ dependencies = [
  "allocate",
  "blake2",
  "rkyv",
+ "spin",
  "ssz",
  "ssz-derive",
  "thiserror",

@@ -118,8 +118,10 @@ mod tests {
 
     #[test]
     fn cnode_with_ref_target_panics() {
+        use crate::cap::CapRef;
         let mut cn: CNodeCap = CNodeCap::new(2).unwrap();
-        cn.set(SlotIdx(0), Some(CapHashOrRef::Ref(42))).unwrap();
+        cn.set(SlotIdx(0), Some(CapHashOrRef::Ref(CapRef::new(42))))
+            .unwrap();
         let cap: Cap = Cap::CNode(cn);
         let result = std::panic::catch_unwind(|| cap_hash(&cap));
         assert!(result.is_err());

@@ -65,9 +65,10 @@ pub fn state_root(state: &State) -> CapHash {
     let mut leaves: Vec<StateLeaf> = state
         .caps
         .iter_blobs()
+        .into_iter()
         .map(|(hash, cap)| StateLeaf {
-            blob_hash: *hash,
-            cap_hash: cap_hash(cap),
+            blob_hash: hash,
+            cap_hash: cap_hash(&cap),
         })
         .collect();
     leaves.sort_by_key(|l| l.blob_hash);
@@ -87,7 +88,7 @@ mod tests {
 
     #[test]
     fn state_root_changes_with_published_data() {
-        let mut s = State::new();
+        let s = State::new();
         let r0 = state_root(&s);
         s.caps
             .put_cap(&javm_cap::Cap::data_inline(b"hello"))

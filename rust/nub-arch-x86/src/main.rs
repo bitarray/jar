@@ -98,16 +98,25 @@ mod guest {
             None => return encode_result_error(10),
         };
 
-        // V0: caps are resolved via the heap-resident DIRECTORY +
-        // INSTANCES statics (see `crate::state_cache`). The shared-
-        // memory `Cache` shim still exists for legacy callers but
-        // is no longer threaded through the call loop.
+        // Caps are resolved via the heap-resident `CACHE`
+        // (`CacheDirectory<FixedState>`) — see `crate::state_cache`.
         let outcome = crate::call_loop::run_top(
             &packet.instance_hash,
             packet.endpoint_idx,
             packet.args,
             packet.initial_gas as i64,
         );
+
+        // GC the transient instance entries that `derive_spawn`
+        // created during this RPC. By now `run_top` has dropped the
+        // call stack, so every frame's `CapHashOrRef::Ref(CapRef)`
+        // clone is gone — the only holder of each transient instance
+        // is the directory's own self-ref. `sweep_instances` walks
+        // the instances tier and removes entries where
+        // `Arc::strong_count(self_ref) == 1`, looping until stable.
+        // Without this, the bench's `sub_vm_data_recurse` OOMs the
+        // guest's talc heap within seconds.
+        crate::state_cache::CACHE.sweep_instances();
 
         let result = match outcome {
             Ok(o) => InvocationResult {
@@ -156,7 +165,7 @@ mod guest {
             Ok(c) => c,
             Err(_) => return error_hash_sentinel(),
         };
-        let hash = match crate::state_cache::CACHE.lock().put_cap(&cap) {
+        let hash = match crate::state_cache::CACHE.put_cap(&cap) {
             Ok(h) => h,
             Err(_) => return error_hash_sentinel(),
         };

@@ -130,24 +130,26 @@ impl<K: KernelAssist> Vm<K> {
         args: [u64; 4],
         gas_budget: u64,
     ) -> Result<(InstanceEntry, Mem, Regs, GasCounter, u64), VmError> {
-        let instance_cap = cache.get(inst_ref).ok_or(VmError::InstanceNotFound)?;
-        let inst = match instance_cap {
+        let instance_cap = cache
+            .get(inst_ref.clone())
+            .ok_or(VmError::InstanceNotFound)?;
+        let inst = match &*instance_cap {
             Cap::Instance(i) => i.clone(),
             _ => return Err(VmError::InstanceNotFound),
         };
         let image_cap = cache
             .get(CapHashOrRef::Hash(inst.image_hash))
             .ok_or(VmError::ImageNotFound)?;
-        let img = match image_cap {
+        let img = match &*image_cap {
             Cap::Image(i) => i.clone(),
             _ => return Err(VmError::ImageNotFound),
         };
 
         // Snapshot the working root cnode.
-        let root_cnode = match cache
-            .get(inst.root_cnode)
-            .ok_or(VmError::Invariant("instance root_cnode missing in cache"))?
-        {
+        let root_cnode_cap = cache
+            .get(inst.root_cnode.clone())
+            .ok_or(VmError::Invariant("instance root_cnode missing in cache"))?;
+        let root_cnode = match &*root_cnode_cap {
             Cap::CNode(cn) => cn.clone(),
             _ => {
                 return Err(VmError::Invariant(
@@ -523,7 +525,7 @@ impl<K: KernelAssist> Vm<K> {
             let mut cnode = javm_cap::CNodeCap::new(entry.root_cnode.size_log)?;
             for (idx, mo) in entry.root_cnode.slots.iter() {
                 if let ssz::MissingOr::Materialized(t) = mo {
-                    cnode.set(SlotIdx(idx as u32), Some(*t))?;
+                    cnode.set(SlotIdx(idx as u32), Some(t.clone()))?;
                 }
             }
             cache.put_cap(&Cap::CNode(cnode))?
@@ -537,7 +539,7 @@ impl<K: KernelAssist> Vm<K> {
         let image_cap = cache
             .get(CapHashOrRef::Hash(entry.image_hash))
             .ok_or(VmError::ImageNotFound)?;
-        let img = match image_cap {
+        let img = match &*image_cap {
             Cap::Image(i) => i.clone(),
             _ => return Err(VmError::ImageNotFound),
         };
