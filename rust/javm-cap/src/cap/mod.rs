@@ -7,13 +7,26 @@
 //! Cap types and their inner storage use the default `Global` allocator
 //! (= std heap on host, talc on guest via `#[global_allocator]`).
 //!
-//! `Cap::CNode` slots and `Cap::Instance.root_cnode` hold
-//! [`CapHashOrRef::Ref`] (a `super::cache::CapRef`) directly, so cloning
-//! a Cap deep-bumps every nested handle and dropping a Cap deep-releases
-//! them. Recursive cleanup is automatic via Rust's Drop semantics; cycles
-//! are structurally impossible (data-flow principle: no shared mutable
-//! state across Instance boundaries). See [`super::cache::CapRef`] for
-//! the handle's full lifecycle.
+//! ## Slot-target parameter `R`
+//!
+//! `Cap`, `CNodeCap`, and `InstanceCap` are generic over `R`, the slot-
+//! target type. Two instantiations:
+//!
+//! - `R = CapHashOrRef` (the default) — working / in-cache form. Slot
+//!   targets can be content-addressed hashes or cache-local `CapRef`
+//!   handles. CoW promotion in the cache mutates through `CapRef`.
+//! - `R = CapHash` — wire form. Slot targets are always content-
+//!   addressed. `CapRef` handles are structurally impossible at the
+//!   type level; rkyv `Archive`/`Serialize`/`Deserialize` is only
+//!   implemented on this instantiation.
+//!
+//! `Cap::CNode` slots and `Cap::Instance.root_cnode` hold `R` directly,
+//! so cloning a `Cap<CapHashOrRef>` deep-bumps every nested handle and
+//! dropping a Cap deep-releases them. Recursive cleanup is automatic
+//! via Rust's Drop semantics; cycles are structurally impossible
+//! (data-flow principle: no shared mutable state across Instance
+//! boundaries). See [`super::cache::CapRef`] for the handle's full
+//! lifecycle.
 
 pub mod cnode;
 pub mod data;
@@ -24,7 +37,7 @@ pub mod page;
 use alloc::vec::Vec;
 
 use super::cache::CapHashOrRef;
-use cnode::CNodeCap;
+use cnode::{CNodeCap, SlotTarget};
 use data::DataCap;
 use image::ImageCap;
 use instance::InstanceCap;
@@ -44,6 +57,10 @@ pub const MAX_ENDPOINTS: usize = 64;
 
 /// One of the five v3 cap kinds.
 ///
+/// Generic over `R` — the slot-target type in nested CNode / Instance
+/// references. See the module doc for the `CapHashOrRef` vs `CapHash`
+/// distinction.
+///
 /// **SSZ note**: the `HashTreeRoot` derive treats `Cap` as an SSZ
 /// Union over the five variants. Each variant's selector provides the
 /// domain separation that the legacy byte-protocol kind tags
@@ -53,25 +70,24 @@ pub const MAX_ENDPOINTS: usize = 64;
 /// allocation and aren't wire-transmitted at this layer.
 ///
 /// **Clone**: the derived `Clone` recursively clones field-by-field.
-/// `Cap::Instance` and `Cap::CNode` carry `CapHashOrRef` values; the
-/// `Ref(CapRef)` arm `Arc::clone`s the handle, so cloning a Cap
-/// deep-bumps every nested instance reference. Drop is symmetric.
+/// For `Cap<CapHashOrRef>`: `Ref(CapRef)` arms `Arc::clone` the
+/// handle, deep-bumping every nested instance reference. Drop is
+/// symmetric.
 #[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
-pub enum Cap {
+pub enum Cap<R: SlotTarget = CapHashOrRef> {
     #[ssz(selector = 0)]
-    Instance(InstanceCap),
+    Instance(InstanceCap<R>),
     #[ssz(selector = 1)]
     Image(ImageCap),
     #[ssz(selector = 2)]
     Data(DataCap),
     #[ssz(selector = 3)]
-    CNode(CNodeCap),
+    CNode(CNodeCap<R>),
     #[ssz(selector = 4)]
     Type(TypeCap),
 }
 
-/// `Cap::Type` payload. Pure identifier; no owned content, so no
-/// allocator parameter needed.
+/// `Cap::Type` payload. Pure identifier; no slot references.
 #[derive(
     Clone,
     Copy,
@@ -82,6 +98,9 @@ pub enum Cap {
     ssz_derive::Encode,
     ssz_derive::Decode,
     ssz_derive::HashTreeRoot,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
 )]
 pub struct TypeCap {
     pub image_hash_chain: CapHash,
@@ -98,7 +117,7 @@ pub enum CapKind {
     Type,
 }
 
-impl Cap {
+impl<R: SlotTarget> Cap<R> {
     pub fn kind(&self) -> CapKind {
         match self {
             Cap::Instance(_) => CapKind::Instance,
@@ -114,8 +133,8 @@ impl Cap {
     /// separation from the SSZ Union selector.
     ///
     /// **Substitution invariants** preserved by hand-written
-    /// `HashTreeRoot` impls on [`page::PageSlot`],
-    /// [`page::PageBytes`], and [`CapHashOrRef`]:
+    /// `HashTreeRoot` impls on [`page::PageSlot`], [`page::PageBytes`],
+    /// and [`CapHashOrRef`]:
     /// - `PageSlot::Loaded(p)` hashes identically to
     ///   `PageSlot::Missing(p.hash)` — a freshly-loaded page
     ///   substitutes for a missing page without changing the
@@ -124,9 +143,10 @@ impl Cap {
     ///   published cap blob substitutes for a `CapRef` reference
     ///   without changing the enclosing cap's hash.
     ///
-    /// **Unresolved refs panic**: hashing a cap whose graph still
-    /// contains `CapHashOrRef::Ref(_)` targets will panic. Callers
-    /// must `settle` the cap graph first.
+    /// **Unresolved refs panic**: hashing a `Cap<CapHashOrRef>` whose
+    /// graph still contains `CapHashOrRef::Ref(_)` targets will panic.
+    /// Callers must `settle` the cap graph first. `Cap<CapHash>` has no
+    /// Ref form by construction and is always safe to hash.
     ///
     /// **Image hash distinction**: `Cap::Image(_).cap_hash()` and
     /// `crate::image::image_content_hash` hash different types — the
@@ -136,7 +156,12 @@ impl Cap {
     pub fn cap_hash(&self) -> CapHash {
         ssz::hash_tree_root(self)
     }
+}
 
+// Constructors that produce the working form (`Cap<CapHashOrRef>`).
+// `instance_with_overlays` mints a `CapHashOrRef::Hash(_)` for the
+// `root_cnode` field so it's specifically a working cap, not a generic.
+impl Cap<CapHashOrRef> {
     /// Build a heap `Cap::Data` whose content is `bytes` padded up to
     /// the next [`PAGE_SIZE`](data::PAGE_SIZE) boundary with
     /// zeros. The backing allocation is page-aligned so the kernel
@@ -157,13 +182,7 @@ impl Cap {
     /// Build a heap `Cap::Data` whose backing buffer is at least
     /// `target_size` bytes (rounded up to the next page boundary).
     /// `bytes` is copied to the start of the buffer; the remainder is
-    /// zero-padded. Used by callers that need a cap matching a specific
-    /// `MemoryMapping.size` from an image manifest (e.g. genesis +
-    /// transpiler-emitted initial data).
-    ///
-    /// If `target_size < bytes.len()`, the buffer is sized to fit
-    /// `bytes` (still page-multiple) — i.e. `target_size` is a floor,
-    /// not a ceiling.
+    /// zero-padded.
     pub fn data_inline_with_size(bytes: &[u8], target_size: u64) -> Self {
         let target = (target_size as usize).max(bytes.len());
         let mut buf = data::alloc_page_aligned_zeroed(target);
@@ -174,9 +193,7 @@ impl Cap {
     }
 
     /// Build a heap `Cap::Image` from a SCALE `Image` value. Pinned
-    /// and initial slot references are left empty; callers that need
-    /// them should drive [`image::image_cap`] directly
-    /// with the already-resolved `(slot, CapHash)` pairs.
+    /// and initial slot references are left empty.
     pub fn image_from(image: &crate::image::Image) -> Result<Self, image::ImageConvertError> {
         Ok(Cap::Image(image::image_cap(image, &[], &[])?))
     }
@@ -187,13 +204,8 @@ impl Cap {
         Ok(Cap::CNode(CNodeCap::new(size_log)?))
     }
 
-    /// Build a heap `Cap::Image` from a SCALE `Image` plus the caller-resolved
-    /// pinned/initial slot `CapHash` pairs.
-    ///
-    /// Wraps [`image::image_cap`] with the `Cap::Image`
-    /// constructor. Use this when the caller has already
-    /// published (or knows the hashes of) the pinned/initial data blobs that
-    /// the image references.
+    /// Build a heap `Cap::Image` from a SCALE `Image` plus the
+    /// caller-resolved pinned/initial slot `CapHash` pairs.
     pub fn image_with_slots(
         image: &crate::image::Image,
         pinned_hashes: &[(crate::slot::SlotIdx, CapHash)],
@@ -206,10 +218,7 @@ impl Cap {
         )?))
     }
 
-    /// Build a heap `Cap::Instance` directly from field values. Mirrors the
-    /// shape the old `CacheDirectory::publish_instance_blob` reconstructed
-    /// field-by-field but produces a `Cap::Instance(InstanceCap)`
-    /// the caller owns.
+    /// Build a heap `Cap::Instance` directly from field values.
     ///
     /// `rw_overlays` is the list of `(start_va, bytes)` overlays the
     /// Instance carries — each becomes one `RwOverlay` entry.

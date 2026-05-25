@@ -11,7 +11,9 @@ use crate::slot::SlotIdx;
 
 use super::{CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
 
-#[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
+#[derive(
+    Clone, Debug, ssz_derive::HashTreeRoot, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 pub struct ImageCap {
     /// Bytecode bytes.
     pub code: Vec<u8>,
@@ -49,6 +51,9 @@ pub struct ImageCap {
     ssz_derive::Encode,
     ssz_derive::Decode,
     ssz_derive::HashTreeRoot,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
 )]
 pub struct EndpointDef {
     pub entry_pc: u64,
@@ -85,7 +90,7 @@ impl EndpointDef {
 /// form is field-by-field SSZ: `u64 || u64 || (MAX_SOURCE_DEPTH * 4
 /// LE bytes) || u8`. All fields are fixed-length so the container is
 /// fixed-length too.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct MemoryMapping {
     pub start: u64,
     pub size: u64,
@@ -196,6 +201,9 @@ impl MemoryMapping {
     ssz_derive::Encode,
     ssz_derive::Decode,
     ssz_derive::HashTreeRoot,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
 )]
 pub struct ImageSlotEntry {
     pub slot: SlotIdx,

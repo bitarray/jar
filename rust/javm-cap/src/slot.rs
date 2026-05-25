@@ -29,6 +29,9 @@ use ssz_derive::{Decode, Encode};
     Encode,
     Decode,
     ssz_derive::HashTreeRoot,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
 )]
 pub struct SlotIdx(#[ssz(transparent)] pub u32);
 

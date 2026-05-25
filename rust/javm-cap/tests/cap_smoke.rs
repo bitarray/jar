@@ -76,7 +76,7 @@ fn empty_cnode_constructor() {
 #[test]
 fn empty_cnode_size_log_too_large_rejected() {
     assert!(Cap::empty_cnode(17).is_err());
-    assert!(CNodeCap::new(17).is_err());
+    assert!(CNodeCap::<CapHashOrRef>::new(17).is_err());
 }
 
 #[test]
