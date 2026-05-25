@@ -94,7 +94,8 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use javm_cap::cap::{Cap, CapHashOrRef};
+use javm_cap::cache::CapHashOrRef;
+use javm_cap::cap::Cap;
 use javm_cap::hash::{Blake2b256, Hash};
 use javm_cap::slot::SlotIdx;
 use javm_cap::{CapHash, NUM_REGS};

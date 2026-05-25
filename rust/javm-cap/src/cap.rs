@@ -13,7 +13,7 @@
 
 use alloc::vec::Vec;
 
-use super::cache::CapRef;
+use super::cache::CapHashOrRef;
 use super::cnode::CNodeCap;
 use super::data::DataCap;
 use super::image_cap::ImageCap;
@@ -21,105 +21,6 @@ use super::instance::InstanceCap;
 
 /// 32-byte digest used for all v3 cap identity / content hashes.
 pub type CapHash = [u8; 32];
-
-/// Slot/field reference: either a content-addressed blob in
-/// `cache.blobs` or a mutable working entry in `cache.instances`.
-///
-/// **SSZ note**: `CapHashOrRef`'s `HashTreeRoot` impl is hand-rolled
-/// (see below), not derived. The pass-through semantics — `Hash(h)`
-/// hashes to `h` — let a freshly-published cap substitute for a
-/// `Ref` reference without changing the hash of any cap that holds
-/// it. The `Ref` arm panics: callers must `settle` a cap graph before
-/// hashing it. `Encode` mirrors `HashTreeRoot` (panic on Ref);
-/// `Decode` rejects the Ref selector (no directory context).
-///
-/// **Not `Copy`**: the `Ref(CapRef)` arm carries a refcounted handle,
-/// so the enum is `Clone`-only.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub enum CapHashOrRef {
-    Hash(CapHash),
-    Ref(CapRef),
-}
-
-impl ssz::HashTreeRoot for CapHashOrRef {
-    fn hash_tree_root<D: ::ssz::digest::Digest<OutputSize = ::ssz::digest::typenum::U32>>(
-        &self,
-    ) -> [u8; 32] {
-        match self {
-            CapHashOrRef::Hash(h) => *h,
-            CapHashOrRef::Ref(_) => {
-                panic!("cap_hash: unresolved CapRef in cap graph; settle first")
-            }
-        }
-    }
-}
-
-impl ssz::Encode for CapHashOrRef {
-    fn is_ssz_fixed_len() -> bool {
-        false
-    }
-    fn ssz_fixed_len() -> usize {
-        ssz::BYTES_PER_LENGTH_OFFSET
-    }
-    fn ssz_bytes_len(&self) -> usize {
-        match self {
-            CapHashOrRef::Hash(_) => 1 + 32,
-            // Ref must be settled before serialisation; matches the
-            // `HashTreeRoot` contract above. Reached only by buggy code.
-            CapHashOrRef::Ref(_) => {
-                panic!("ssz_bytes_len: unresolved CapRef in cap graph; settle first")
-            }
-        }
-    }
-    fn ssz_append(&self, buf: &mut Vec<u8>) {
-        match self {
-            CapHashOrRef::Hash(h) => {
-                buf.push(0);
-                buf.extend_from_slice(h);
-            }
-            CapHashOrRef::Ref(_) => {
-                panic!("ssz_append: unresolved CapRef in cap graph; settle first")
-            }
-        }
-    }
-}
-
-impl ssz::Decode for CapHashOrRef {
-    fn is_ssz_fixed_len() -> bool {
-        false
-    }
-    fn ssz_fixed_len() -> usize {
-        ssz::BYTES_PER_LENGTH_OFFSET
-    }
-    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, ssz::DecodeError> {
-        if bytes.is_empty() {
-            return Err(ssz::DecodeError::UnexpectedEof {
-                expected: 1,
-                actual: 0,
-            });
-        }
-        match bytes[0] {
-            0 => {
-                if bytes.len() != 1 + 32 {
-                    return Err(ssz::DecodeError::UnexpectedEof {
-                        expected: 1 + 32,
-                        actual: bytes.len(),
-                    });
-                }
-                let mut h = [0u8; 32];
-                h.copy_from_slice(&bytes[1..1 + 32]);
-                Ok(CapHashOrRef::Hash(h))
-            }
-            // Refs are cache-local lifetime handles; the wire has no
-            // directory context to reconstruct one. Caller bugs that
-            // serialise a Ref into wire bytes surface here.
-            1 => Err(ssz::DecodeError::Custom(
-                "CapHashOrRef::Ref cannot be decoded from wire bytes",
-            )),
-            v => Err(ssz::DecodeError::InvalidSelector(v)),
-        }
-    }
-}
 
 /// Number of PVM general-purpose registers (φ\[0\]..φ\[12\]).
 pub const NUM_REGS: usize = 13;

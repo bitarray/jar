@@ -18,7 +18,7 @@ use ssz::{MissingOr, SparseList};
 use crate::error::CapError;
 use crate::slot::SlotIdx;
 
-use super::cap::CapHashOrRef;
+use super::cache::CapHashOrRef;
 
 /// Maximum cnode capacity (`2^16` slots). The SSZ merkle tree depth is
 /// fixed at 16 regardless of an individual cnode's declared `size_log`.

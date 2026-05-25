@@ -34,7 +34,8 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use crate::cap::{Cap, CapHashOrRef, NUM_REGS, TypeCap};
+use crate::cache::CapHashOrRef;
+use crate::cap::{Cap, NUM_REGS, TypeCap};
 use crate::cnode::CNodeCap;
 use crate::data::{DataCap, DataContent};
 use crate::image_cap::{EndpointDef, ImageCap, ImageSlotEntry, MemoryMapping};
