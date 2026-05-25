@@ -1,5 +1,9 @@
 //! `Cap` — cap enum + shared constants.
 //!
+//! The five Cap variants live one-per-submodule under this directory:
+//! [`cnode`], [`data`], [`image`], [`instance`], [`page`] (a `data`
+//! detail). The root [`Cap`] enum dispatches to those structs.
+//!
 //! Cap types and their inner storage use the default `Global` allocator
 //! (= std heap on host, talc on guest via `#[global_allocator]`).
 //!
@@ -11,13 +15,19 @@
 //! state across Instance boundaries). See [`super::cache::CapRef`] for
 //! the handle's full lifecycle.
 
+pub mod cnode;
+pub mod data;
+pub mod image;
+pub mod instance;
+pub mod page;
+
 use alloc::vec::Vec;
 
 use super::cache::CapHashOrRef;
-use super::cnode::CNodeCap;
-use super::data::DataCap;
-use super::image_cap::ImageCap;
-use super::instance::InstanceCap;
+use cnode::CNodeCap;
+use data::DataCap;
+use image::ImageCap;
+use instance::InstanceCap;
 
 /// 32-byte digest used for all v3 cap identity / content hashes.
 pub type CapHash = [u8; 32];
@@ -104,8 +114,8 @@ impl Cap {
     /// separation from the SSZ Union selector.
     ///
     /// **Substitution invariants** preserved by hand-written
-    /// `HashTreeRoot` impls on [`super::page::PageSlot`],
-    /// [`super::page::PageBytes`], and [`CapHashOrRef`]:
+    /// `HashTreeRoot` impls on [`page::PageSlot`],
+    /// [`page::PageBytes`], and [`CapHashOrRef`]:
     /// - `PageSlot::Loaded(p)` hashes identically to
     ///   `PageSlot::Missing(p.hash)` — a freshly-loaded page
     ///   substitutes for a missing page without changing the
@@ -128,7 +138,7 @@ impl Cap {
     }
 
     /// Build a heap `Cap::Data` whose content is `bytes` padded up to
-    /// the next [`PAGE_SIZE`](super::data::PAGE_SIZE) boundary with
+    /// the next [`PAGE_SIZE`](data::PAGE_SIZE) boundary with
     /// zeros. The backing allocation is page-aligned so the kernel
     /// can later map the cap's pages directly into a ring-3 PT.
     ///
@@ -137,10 +147,10 @@ impl Cap {
     /// callers needing a shorter logical payload (e.g. variable-length
     /// args) interpret the meaningful prefix themselves.
     pub fn data_inline(bytes: &[u8]) -> Self {
-        let mut buf = super::data::alloc_page_aligned_zeroed(bytes.len());
+        let mut buf = data::alloc_page_aligned_zeroed(bytes.len());
         buf[..bytes.len()].copy_from_slice(bytes);
         Cap::Data(DataCap {
-            content: super::data::DataContent::Inline(buf),
+            content: data::DataContent::Inline(buf),
         })
     }
 
@@ -156,21 +166,19 @@ impl Cap {
     /// not a ceiling.
     pub fn data_inline_with_size(bytes: &[u8], target_size: u64) -> Self {
         let target = (target_size as usize).max(bytes.len());
-        let mut buf = super::data::alloc_page_aligned_zeroed(target);
+        let mut buf = data::alloc_page_aligned_zeroed(target);
         buf[..bytes.len()].copy_from_slice(bytes);
         Cap::Data(DataCap {
-            content: super::data::DataContent::Inline(buf),
+            content: data::DataContent::Inline(buf),
         })
     }
 
     /// Build a heap `Cap::Image` from a SCALE `Image` value. Pinned
     /// and initial slot references are left empty; callers that need
-    /// them should drive [`super::image_cap::image_cap`] directly
+    /// them should drive [`image::image_cap`] directly
     /// with the already-resolved `(slot, CapHash)` pairs.
-    pub fn image_from(
-        image: &crate::image::Image,
-    ) -> Result<Self, super::image_cap::ImageConvertError> {
-        Ok(Cap::Image(super::image_cap::image_cap(image, &[], &[])?))
+    pub fn image_from(image: &crate::image::Image) -> Result<Self, image::ImageConvertError> {
+        Ok(Cap::Image(image::image_cap(image, &[], &[])?))
     }
 
     /// Build an empty heap `Cap::CNode` of `2^size_log` slots. Rejects
@@ -182,7 +190,7 @@ impl Cap {
     /// Build a heap `Cap::Image` from a SCALE `Image` plus the caller-resolved
     /// pinned/initial slot `CapHash` pairs.
     ///
-    /// Wraps [`super::image_cap::image_cap`] with the `Cap::Image`
+    /// Wraps [`image::image_cap`] with the `Cap::Image`
     /// constructor. Use this when the caller has already
     /// published (or knows the hashes of) the pinned/initial data blobs that
     /// the image references.
@@ -190,8 +198,8 @@ impl Cap {
         image: &crate::image::Image,
         pinned_hashes: &[(crate::slot::SlotIdx, CapHash)],
         initial_hashes: &[(crate::slot::SlotIdx, CapHash)],
-    ) -> Result<Self, super::image_cap::ImageConvertError> {
-        Ok(Cap::Image(super::image_cap::image_cap(
+    ) -> Result<Self, image::ImageConvertError> {
+        Ok(Cap::Image(image::image_cap(
             image,
             pinned_hashes,
             initial_hashes,
@@ -216,16 +224,16 @@ impl Cap {
         pc: u64,
         gas_remaining: u64,
     ) -> Self {
-        let mut overlays: Vec<super::instance::RwOverlay> = Vec::new();
+        let mut overlays: Vec<instance::RwOverlay> = Vec::new();
         for (start, bytes) in rw_overlays {
             let mut buf = Vec::with_capacity(bytes.len());
             buf.extend_from_slice(bytes);
-            overlays.push(super::instance::RwOverlay {
+            overlays.push(instance::RwOverlay {
                 start: *start,
                 bytes: buf,
             });
         }
-        Cap::Instance(super::instance::InstanceCap {
+        Cap::Instance(instance::InstanceCap {
             image_hash_chain,
             image_hash,
             root_cnode: CapHashOrRef::Hash(root_cnode),

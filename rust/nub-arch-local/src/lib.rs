@@ -10,8 +10,8 @@
 //! [`javm_exec::Interpreter::run`], and produces an
 //! [`InvocationResult`].
 
-use javm_cap::image_cap::ImageCap;
-use javm_cap::instance::InstanceCap;
+use javm_cap::cap::image::ImageCap;
+use javm_cap::cap::instance::InstanceCap;
 use javm_exec::{
     Access, CopyingMemory, EcallHandler, EcallKind, EcallResult, ExitReason, GasCounter,
     Interpreter, PAGE_SIZE, PvmProgram, Regs, gas_cost::DEFAULT_MEM_CYCLES, unpack_bitmask,

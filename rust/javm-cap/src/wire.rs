@@ -35,11 +35,11 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::cache::CapHashOrRef;
+use crate::cap::cnode::CNodeCap;
+use crate::cap::data::{DataCap, DataContent};
+use crate::cap::image::{EndpointDef, ImageCap, ImageSlotEntry, MemoryMapping};
+use crate::cap::instance::{InstanceCap, RwOverlay};
 use crate::cap::{Cap, NUM_REGS, TypeCap};
-use crate::cnode::CNodeCap;
-use crate::data::{DataCap, DataContent};
-use crate::image_cap::{EndpointDef, ImageCap, ImageSlotEntry, MemoryMapping};
-use crate::instance::{InstanceCap, RwOverlay};
 use crate::slot::SlotIdx;
 
 /// Failures the wire-form conversion can produce. All non-fatal:
@@ -359,7 +359,7 @@ impl WireDataCap {
         // `DataCap` retains the page-alignment invariant the kernel
         // expects when direct-mapping data caps into ring 3.
         let bytes = self.bytes;
-        let mut buf = crate::data::alloc_page_aligned_zeroed(bytes.len());
+        let mut buf = crate::cap::data::alloc_page_aligned_zeroed(bytes.len());
         let copy_len = bytes.len().min(buf.len());
         buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
         DataCap {

@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use crate::slot::SlotIdx;
 
-use super::cap::{CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
+use super::{CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
 
 #[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
 pub struct ImageCap {

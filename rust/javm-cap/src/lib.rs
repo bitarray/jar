@@ -21,30 +21,25 @@ extern crate alloc;
 pub mod abi;
 pub mod cache;
 pub mod cap;
-pub mod cnode;
-pub mod data;
 pub mod error;
 pub mod hash;
 pub mod image;
-pub mod image_cap;
-pub mod instance;
-pub mod page;
 pub mod slot;
 pub mod wire;
 
 pub use cache::{CacheDirectory, CacheError, CapHashOrRef, CapRef};
+pub use cap::cnode::{CNodeCap, CNodeSlotEntry};
+pub use cap::data::{DataCap, DataContent, PAGE_SIZE};
+pub use cap::image::{
+    EndpointDef, ImageCap, ImageConvertError, ImageSlotEntry, MemoryMapping, image_cap,
+};
+pub use cap::instance::{InstanceCap, RwOverlay};
+pub use cap::page::{PageBytes, PageRef, PageSlot};
 pub use cap::{Cap, CapHash, CapKind, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS, TypeCap};
-pub use cnode::{CNodeCap, CNodeSlotEntry};
-pub use data::{DataCap, DataContent, PAGE_SIZE};
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash};
 pub use image::{
     EndpointDef as ImageEndpointDef, Image, InitialDataCap, MemoryMapping as ImageMemoryMapping,
     PinnedCap, chain_extend, chain_genesis, image_content_hash,
 };
-pub use image_cap::{
-    EndpointDef, ImageCap, ImageConvertError, ImageSlotEntry, MemoryMapping, image_cap,
-};
-pub use instance::{InstanceCap, RwOverlay};
-pub use page::{PageBytes, PageRef, PageSlot};
 pub use slot::{SlotIdx, SlotPath};

@@ -589,7 +589,7 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<(), u32> {
     };
     let child_chain = Blake2b256::hash_pair(&frame.image_hash_chain, &image_hash);
 
-    let cap = Cap::Instance(javm_cap::instance::InstanceCap {
+    let cap = Cap::Instance(javm_cap::cap::instance::InstanceCap {
         image_hash_chain: child_chain,
         image_hash,
         root_cnode: CapHashOrRef::Hash([0u8; 32]),

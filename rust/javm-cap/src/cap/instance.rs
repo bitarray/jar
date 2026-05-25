@@ -7,8 +7,9 @@
 
 use alloc::vec::Vec;
 
-use super::cache::CapHashOrRef;
-use super::cap::{CapHash, NUM_REGS};
+use crate::cache::CapHashOrRef;
+
+use super::{CapHash, NUM_REGS};
 
 #[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
 pub struct InstanceCap {

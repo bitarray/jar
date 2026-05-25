@@ -67,8 +67,8 @@ use core::hash::BuildHasher;
 use hashbrown::{DefaultHashBuilder, HashMap};
 use spin::Mutex;
 
+use super::cap::image::ImageConvertError;
 use super::cap::{Cap, CapHash};
-use super::image_cap::ImageConvertError;
 
 /// Cache-local lifetime handle to a working `Cap::Instance` in
 /// `CacheDirectory.instances`.

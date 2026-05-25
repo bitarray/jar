@@ -9,7 +9,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use super::cap::CapHash;
+use super::CapHash;
 
 /// Sparse representation of a paged DataCap's pages. `Empty` is the
 /// canonical zero page; `Loaded` holds a refcounted byte slab;

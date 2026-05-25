@@ -4,7 +4,7 @@
 //! - `Inline` — bytes in one `Vec<u8>`. Used for "small" Data
 //!   (typically a single page).
 //! - `Paged` — page-merkleized; each page is owned by the DataCap
-//!   via a reference-counted [`PageRef`](crate::page::PageRef) so
+//!   via a reference-counted [`PageRef`](crate::cap::page::PageRef) so
 //!   multiple DataCap clones can share page bytes between CoW
 //!   operations.
 //!
