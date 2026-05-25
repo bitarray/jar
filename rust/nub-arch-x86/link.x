@@ -1,13 +1,15 @@
 /* Linker script for the nub-arch-x86 guest kernel.
  *
- * Places the kernel at a canonical low-half VA inside the per-process
- * GUEST_VA reservation (GUEST_VA_BASE_DEFAULT + KERNEL_OFFSET =
- * 0x5000_0000_0000 + 0x1_4000_0000 = 0x5001_4000_0000). Low-half is
- * required so the host process (user-space, can only see canonical
- * low-half) can mmap-shadow the kernel at the same VA. The host's
- * initial PT (rust/nub-host-kvm/src/sandbox/snapshot.rs) maps the
- * low GPA range [BASE_ADDRESS, ...) to this GVA range via a constant
- * offset.
+ * The kernel binary is built as a position-independent executable
+ * (DYN ELF) linked at VA 0; the host loader patches `R_X86_64_RELATIVE`
+ * entries with the runtime base GVA (`guest_va_base() + KERNEL_OFFSET`
+ * from `nub-host-common::layout`) at sandbox construction.
+ *
+ * Low-half is required so the host process (user-space, can only see
+ * canonical low-half) can mmap-shadow the kernel at the same VA. The
+ * host's initial PT (rust/nub-host-kvm/src/sandbox/snapshot.rs) maps
+ * the low GPA range [BASE_ADDRESS, ...) to the chosen GVA range via
+ * a constant offset.
  *
  * Stays within a single 512 GiB PML4 slot so per-invocation ring-3
  * PTs (rust/nub-arch-x86/src/paging.rs) can inherit the kernel half
@@ -17,7 +19,10 @@
 ENTRY(entrypoint)
 
 SECTIONS {
-    . = 0x500140000000;
+    /* Anchor at VA 0 so the binary stays PIE (DYN ELF). The host
+     * loader patches `R_X86_64_RELATIVE` entries with the runtime
+     * base GVA. */
+    . = 0;
     _kernel_start = .;
 
     /* ELF notes (hyperlight version note read by the host loader). */

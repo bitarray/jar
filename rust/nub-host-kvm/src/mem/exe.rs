@@ -103,9 +103,13 @@ impl ExeInfo {
     // copying into target, but the PE loader chooses to apply
     // relocations in its owned representation of the PE contents,
     // which requires it to be &mut.
-    pub fn load(self, load_addr: usize, target: &mut [u8]) -> Result<LoadInfo> {
+    /// Load the executable into `target`. `runtime_base_va` is the
+    /// GVA at which the guest will see the loaded image — applied as
+    /// the base for `R_X86_64_RELATIVE` / `R_AARCH64_RELATIVE`
+    /// relocations so runtime pointers resolve to kernel-half VAs.
+    pub fn load(self, runtime_base_va: u64, target: &mut [u8]) -> Result<LoadInfo> {
         match self {
-            ExeInfo::Elf(elf) => elf.load_at(load_addr, target),
+            ExeInfo::Elf(elf) => elf.load_at(runtime_base_va, target),
         }
     }
 }

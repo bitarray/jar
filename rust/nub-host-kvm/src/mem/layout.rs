@@ -258,22 +258,18 @@ impl SandboxMemoryLayout {
     /// The base address of the sandbox's memory.
     pub(crate) const BASE_ADDRESS: usize = 0x1000;
 
-    /// Virtual-address base where the kernel is mapped.
+    /// Virtual-address base where the kernel is mapped. Resolved at
+    /// runtime so the per-process `guest_va_base()` (env-overridable
+    /// on Linux, dynamic on macOS) is the single source of truth.
     ///
-    /// Matches the linker base in
-    /// [`rust/nub-arch-x86/link.x`](../../../nub-arch-x86/link.x); the
-    /// initial PT maps `[BASE_ADDRESS, ...) GPAs` to
-    /// `[KERNEL_HIGH_BASE, ...) GVAs` via a constant offset, so
-    /// `kernel_gva = KERNEL_HIGH_BASE + (gpa - BASE_ADDRESS)`.
+    /// `kernel_gva = kernel_base_va() + (gpa - BASE_ADDRESS)`.
     ///
-    /// Now equal to `GUEST_VA_BASE_DEFAULT + KERNEL_OFFSET`
-    /// (see `nub_host_common::layout`). Lives in canonical low-half
-    /// so the host process can mmap-shadow this region at the same VA.
-    ///
-    /// TODO: rename to `KERNEL_BASE` — the name `KERNEL_HIGH_BASE` is
-    /// no longer accurate now that the kernel is in low-half. Kept
-    /// for this commit to minimise churn.
-    pub(crate) const KERNEL_HIGH_BASE: u64 = 0x5001_4000_0000;
+    /// Lives in canonical low-half so the host process can
+    /// mmap-shadow this region at the same VA.
+    #[inline]
+    pub(crate) fn kernel_base_va() -> u64 {
+        nub_host_common::layout::guest_va_base() + nub_host_common::layout::KERNEL_OFFSET
+    }
 
     // the offset into a sandbox's input/output buffer where the stack starts
     pub(crate) const STACK_POINTER_SIZE_BYTES: u64 = 8;
@@ -710,7 +706,7 @@ impl SandboxMemoryLayout {
         // is gone with the file-mapping API.
         macro_rules! get_gva {
             ($something:ident) => {
-                Self::KERNEL_HIGH_BASE + (self.$something as u64)
+                Self::kernel_base_va() + (self.$something as u64)
             };
         }
 

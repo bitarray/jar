@@ -30,11 +30,22 @@ use nub_host_common::vmem;
 /// Low-memory GPA where the host loads the kernel ELF (matches
 /// `SandboxMemoryLayout::BASE_ADDRESS` on the host).
 const KERNEL_BASE_GPA: u64 = 0x1000;
-/// GVA the kernel is linked at (matches `KERNEL_HIGH_BASE` on the
-/// host and `. = 0x5001_4000_0000` in `link.x`). Now in canonical
-/// low-half so the host process can mmap-shadow.
-/// TODO: rename to `KERNEL_BASE` once all three sites are renamed.
-const KERNEL_HIGH_BASE: u64 = 0x5001_4000_0000;
+
+unsafe extern "C" {
+    /// Linker-provided symbol marking the start of the kernel image.
+    /// Defined by `_kernel_start = .;` in the consuming binary's
+    /// `link.x` (e.g. `rust/nub-arch-x86/link.x`). With PIE output
+    /// this resolves at runtime to the actual GVA the host loaded
+    /// the kernel at, so the kernel half is VA-relocatable.
+    safe static _kernel_start: u8;
+}
+
+/// Runtime GVA at which the kernel image was loaded. Equivalent to
+/// `guest_va_base() + KERNEL_OFFSET` on the host side.
+#[inline]
+fn kernel_base_va() -> u64 {
+    &_kernel_start as *const u8 as u64
+}
 
 #[derive(Copy, Clone)]
 struct GuestMappingOperations {
@@ -55,7 +66,7 @@ impl GuestMappingOperations {
         } else if addr >= KERNEL_BASE_GPA {
             // Kernel half: low GPA maps to high GVA via constant
             // offset (Stage F kernel relocation).
-            Some((KERNEL_HIGH_BASE + (addr - KERNEL_BASE_GPA)) as *mut u8)
+            Some((kernel_base_va() + (addr - KERNEL_BASE_GPA)) as *mut u8)
         } else {
             // Below BASE_ADDRESS — NULL guard page, not mapped.
             None

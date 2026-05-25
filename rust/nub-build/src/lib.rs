@@ -70,27 +70,41 @@ pub fn build(manifest_dir: &str, bin_name: &str, features: &[&str]) -> PathBuf {
         return elf_path;
     }
 
-    // Custom linker script placing the kernel at the high "negative
-    // 2 GiB" VA. Adjacent to the guest crate's `src/`.
+    // Custom linker script. Adjacent to the guest crate's `src/`.
     let link_script = manifest_dir.join("link.x");
     let link_script_arg = format!("-Clink-args=-T{}", link_script.display());
-    // Non-PIE: with a fixed link base we don't need relocations, and
-    // R_X86_64_RELATIVE entries from a PIE binary would carry the
-    // wrong runtime address (the host applies them against the GPA
-    // load_addr, not the high GVA).
+    // The guest is a PIE (DYN ELF) linked at VA 0. The host loader
+    // (`nub-host-kvm/src/mem/elf.rs::load_at`) patches each
+    // `R_X86_64_RELATIVE` entry with `runtime_base_va + addend`, where
+    // `runtime_base_va = guest_va_base() + KERNEL_OFFSET` from
+    // `nub-host-common::layout` — env-overridable on Linux, dynamic
+    // on macOS. So the kernel boots wherever the host reserves the
+    // per-process GUEST_VA range, no hardcoded link base required.
     let rustflags = [
         "--cfg=hyperlight",
         "--check-cfg=cfg(hyperlight)",
         "-Clink-args=-eentrypoint",
+        // Force PIE output (DYN ELF) so absolute references emit
+        // `R_X86_64_RELATIVE` entries the host can patch at load
+        // time with the runtime base GVA. Without `-pie`, lld
+        // produces an EXEC binary with statically-resolved (to 0)
+        // absolute references, which would dereference garbage at
+        // runtime once mapped at a non-zero kernel base.
+        "-Clink-args=-pie",
         link_script_arg.as_str(),
-        "-Crelocation-model=static",
-        // The x86_64-unknown-none target defaults to the `kernel`
-        // code model, which assumes the kernel sits in the high-half
+        // PIC (not static): the linker -pie flag produces a DYN ELF
+        // with `R_X86_64_RELATIVE` entries for absolute references;
+        // the compiler must agree by emitting PIC-style code (so
+        // text-segment relocations can be rewritten as RELATIVE).
+        "-Crelocation-model=pic",
+        // x86_64-unknown-none defaults to the `kernel` code model,
+        // which assumes the kernel sits in the high-half
         // (`0xFFFF_FFFF_8000_0000+`) where R_X86_64_32S sign-extension
-        // does the right thing. We now link the guest at a low-half VA
-        // (`0x5001_4000_0000`), which is too far above 2 GiB for the
-        // small/kernel models — switch to `large` to emit 64-bit
-        // absolute relocations everywhere.
+        // does the right thing. We load the guest at a low-half VA
+        // (typically `0x5001_4000_0000`), which is too far above 2 GiB
+        // for the small/kernel models — switch to `large` to emit
+        // 64-bit absolute relocations everywhere (the linker rewrites
+        // them as `R_X86_64_RELATIVE` in the PIE output).
         "-Ccode-model=large",
         // Smallest valid panic strategy for no_std bin
         "-Cpanic=abort",

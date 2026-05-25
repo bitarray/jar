@@ -200,11 +200,12 @@ impl Snapshot {
         let load_addr = layout.get_guest_code_address() as u64;
         let base_va = exe_info.base_va();
         let entrypoint_va: u64 = exe_info.entrypoint().into();
+        let kernel_base_va = crate::mem::layout::SandboxMemoryLayout::kernel_base_va();
 
         let mut memory = vec![0; layout.get_memory_size()?];
 
         let load_info = exe_info.load(
-            load_addr.try_into()?,
+            kernel_base_va,
             &mut memory[layout.get_guest_code_offset()..],
         )?;
 
@@ -220,9 +221,9 @@ impl Snapshot {
         // Pre-Stage-F these were CoW so the (now-deleted) snapshot/restore
         // machinery could roll back writes; we don't use it.
         //
-        // Kernel half lives at high VA (`KERNEL_HIGH_BASE`); GPAs stay
+        // Kernel half lives at high VA (`kernel_base_va()`); GPAs stay
         // identical, only the GVA shifts. Computes
-        // `virt_base = KERNEL_HIGH_BASE + (phys_base - BASE_ADDRESS)`.
+        // `virt_base = kernel_base_va + (phys_base - BASE_ADDRESS)`.
         for rgn in layout.get_memory_regions_::<GuestMemoryRegion>(())?.iter() {
             let readable = rgn.flags.contains(MemoryRegionFlags::READ);
             let executable = rgn.flags.contains(MemoryRegionFlags::EXECUTE);
@@ -233,7 +234,7 @@ impl Snapshot {
                 executable,
             });
             let phys_base = rgn.guest_region.start as u64;
-            let virt_base = crate::mem::layout::SandboxMemoryLayout::KERNEL_HIGH_BASE
+            let virt_base = kernel_base_va
                 + (phys_base - crate::mem::layout::SandboxMemoryLayout::BASE_ADDRESS as u64);
             let mapping = Mapping {
                 phys_base,
@@ -264,10 +265,9 @@ impl Snapshot {
 
         // Entrypoint GVA: kernel base + offset from ELF base to
         // entrypoint + offset from BASE_ADDRESS to the code's GPA.
-        // Today `load_addr == BASE_ADDRESS` and `base_va == KERNEL_HIGH_BASE`,
-        // so this is just `entrypoint_va`, but the general form keeps
-        // working if either shifts.
-        let entrypoint_gva = crate::mem::layout::SandboxMemoryLayout::KERNEL_HIGH_BASE
+        // For the PIE guest, `base_va == 0` and `entrypoint_va` is the
+        // offset of the `entrypoint` symbol from the binary's start.
+        let entrypoint_gva = kernel_base_va
             + (load_addr - crate::mem::layout::SandboxMemoryLayout::BASE_ADDRESS as u64)
             + (entrypoint_va - base_va);
 

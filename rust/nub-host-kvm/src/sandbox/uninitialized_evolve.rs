@@ -75,9 +75,9 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
     // High GVA — the guest receives this in RDI and dereferences it
     // directly as `*mut HyperlightPEB` (see
     // `rust/nub-arch-guestbin/src/lib.rs::generic_init`). Kernel half
-    // lives at `KERNEL_HIGH_BASE`; PEB GPA → GVA via constant offset.
+    // lives at `kernel_base_va()`; PEB GPA → GVA via constant offset.
     let peb_addr = {
-        let peb_gva = crate::mem::layout::SandboxMemoryLayout::KERNEL_HIGH_BASE
+        let peb_gva = crate::mem::layout::SandboxMemoryLayout::kernel_base_va()
             + (hshm.layout.peb_address as u64
                 - crate::mem::layout::SandboxMemoryLayout::BASE_ADDRESS as u64);
         RawPtr::from(peb_gva)
