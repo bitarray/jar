@@ -1163,7 +1163,6 @@ version = "0.1.0"
 name = "javm"
 version = "0.1.0"
 dependencies = [
- "allocate",
  "javm-cap",
  "javm-exec",
  "proptest",
@@ -1175,7 +1174,6 @@ dependencies = [
 name = "javm-bench"
 version = "0.1.0"
 dependencies = [
- "allocate",
  "blake3",
  "build-javm",
  "criterion",
@@ -1211,7 +1209,6 @@ dependencies = [
 name = "javm-guest-tests"
 version = "0.1.0"
 dependencies = [
- "allocate",
  "blake2",
  "blake3",
  "build-javm",
@@ -1452,7 +1449,6 @@ dependencies = [
 name = "nub"
 version = "0.1.0"
 dependencies = [
- "allocate",
  "anyhow",
  "bytecheck",
  "javm-cap",
@@ -1468,7 +1464,6 @@ dependencies = [
 name = "nub-arch-local"
 version = "0.1.0"
 dependencies = [
- "allocate",
  "javm-cap",
  "javm-exec",
  "nub-arch-x86-abi",
@@ -1479,7 +1474,6 @@ dependencies = [
 name = "nub-arch-x86"
 version = "0.1.0"
 dependencies = [
- "allocate",
  "bytecheck",
  "foldhash 0.2.0",
  "hyperlight-common",
@@ -1537,7 +1531,6 @@ dependencies = [
 name = "nub-host-kvm"
 version = "0.1.0"
 dependencies = [
- "allocate",
  "anyhow",
  "bitflags 2.11.1",
  "blake3",

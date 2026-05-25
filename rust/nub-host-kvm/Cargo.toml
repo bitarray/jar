@@ -26,7 +26,6 @@ kvm = [
 print_debug = []
 
 [dependencies]
-allocate = { path = "../allocate" }
 anyhow = "1.0"
 bitflags = "2.11.1"
 blake3 = "1.8.5"
