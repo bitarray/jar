@@ -64,7 +64,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::hash::BuildHasher;
 
-use allocate::collections::{DefaultHashBuilder, HashMap};
+use hashbrown::{DefaultHashBuilder, HashMap};
 use spin::Mutex;
 
 use super::cap::{Cap, CapHash, CapHashOrRef, CapRef};
