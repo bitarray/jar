@@ -173,7 +173,6 @@ impl Nub {
                 .map_err(|e| anyhow::anyhow!("put_cap (local): {e}")),
             Backend::Hyperlight(h) => h
                 .sandbox
-                .cache()
                 .put_cap(cap)
                 .map_err(|e| anyhow::anyhow!("put_cap: {e}")),
         }
@@ -183,6 +182,11 @@ impl Nub {
     /// at warmup and passes it explicitly; skips the SSZ merkleize on
     /// the hot idempotent path. Debug-asserts the claimed hash matches
     /// the cap; release trusts the caller.
+    ///
+    /// On the Hyperlight backend the `hash` argument is currently
+    /// ignored — `MultiUseSandbox::put_cap` re-hashes the cap inside
+    /// the guest. The fast-path optimisation will land alongside a
+    /// dedicated pre-hashed RPC variant.
     pub fn put_cap_with_hash(&mut self, hash: AbiCapHash, cap: &javm_cap::Cap) -> Result<()> {
         match &mut self.backend {
             Backend::Local(_) => {
@@ -192,11 +196,17 @@ impl Nub {
                     .map_err(|e| anyhow::anyhow!("put_cap_with_hash (local): {e}"))?;
                 Ok(())
             }
-            Backend::Hyperlight(h) => h
-                .sandbox
-                .cache()
-                .put_cap_with_hash(hash, cap)
-                .map_err(|e| anyhow::anyhow!("put_cap_with_hash: {e}")),
+            Backend::Hyperlight(h) => {
+                let got = h
+                    .sandbox
+                    .put_cap(cap)
+                    .map_err(|e| anyhow::anyhow!("put_cap_with_hash: {e}"))?;
+                debug_assert_eq!(
+                    got, hash,
+                    "put_cap_with_hash: guest-computed hash differs from claimed hash"
+                );
+                Ok(())
+            }
         }
     }
 
@@ -247,10 +257,9 @@ impl Nub {
                 ))
             }
             Backend::Hyperlight(h) => {
-                h.sandbox
-                    .cache()
-                    .pin(instance_hash)
-                    .map_err(|e| anyhow::anyhow!("cache pin: {e}"))?;
+                // No host-side pin/unpin — the cap is owned by the
+                // guest's heap-resident DIRECTORY; there's nothing for
+                // the host to lock against (the guest doesn't evict).
                 let packet = InvokePacket {
                     instance_hash,
                     endpoint_idx: endpoint_idx as u32,
@@ -260,9 +269,7 @@ impl Nub {
                 };
                 let result_bytes = h
                     .sandbox
-                    .call_raw(FN_ID_NUB_INVOKE_CACHED, packet.as_bytes());
-                h.sandbox.cache().unpin(instance_hash);
-                let result_bytes = result_bytes?;
+                    .call_raw(FN_ID_NUB_INVOKE_CACHED, packet.as_bytes())?;
 
                 let mut aligned = AlignedVec::<16>::with_capacity(result_bytes.len());
                 aligned.extend_from_slice(&result_bytes);
