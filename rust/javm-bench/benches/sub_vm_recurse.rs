@@ -24,7 +24,6 @@
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use allocate::Global;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use javm_cap::image::{Image, PinnedCap};
 use javm_cap::slot::SlotIdx;
@@ -59,7 +58,7 @@ fn build_and_publish(nub: &mut Nub, depth_seed: u64) -> Built {
     // and reference them from the Cap::Image — the in-kernel
     // call_loop will read those Cap::Data bytes from the shared
     // cache when building a child frame's mem image.
-    let mut data_caps: Vec<(CapHash, Cap<Global>)> = Vec::new();
+    let mut data_caps: Vec<(CapHash, Cap)> = Vec::new();
     let mut pinned_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
     let mut initial_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
     for (slot, pinned) in &image.pinned_slots {
@@ -94,7 +93,7 @@ fn build_and_publish(nub: &mut Nub, depth_seed: u64) -> Built {
     // Recurse cnode: slot 3 → image_hash. Each level's frame inherits
     // this entry from its parent (see `dispatch_host_call` in
     // `nub-arch-x86::call_loop`).
-    let mut cn = CNodeCap::<Global>::new(8).expect("cnode");
+    let mut cn = CNodeCap::new(8).expect("cnode");
     cn.set(
         SlotIdx(SLOT_IMAGE_RECURSE as u32),
         Some(CapHashOrRef::Hash(image_hash)),

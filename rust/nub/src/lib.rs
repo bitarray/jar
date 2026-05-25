@@ -17,9 +17,8 @@
 //! publishes a `Cap::Instance` referencing them, and then invokes by
 //! the resulting instance hash.
 
-use allocate::Global;
 use anyhow::Result;
-use javm_cap::{CapHashOrRef, TypedCache, cap::Cap};
+use javm_cap::{CacheDirectory, CapHashOrRef, cap::Cap};
 use nub_arch_local::LocalArch;
 use nub_host_kvm::sandbox::{
     GuestBinary, MultiUseSandbox, SandboxConfiguration, UninitializedSandbox,
@@ -61,7 +60,7 @@ pub struct Nub {
     /// which backend they hit. On Hyperlight the local cache is unused
     /// at runtime — the shared-memory cache in `sandbox.cache()` is
     /// the source of truth.
-    local_cache: TypedCache<Global>,
+    local_cache: CacheDirectory,
 }
 
 enum Backend {
@@ -82,7 +81,7 @@ impl Nub {
     pub fn new_local() -> Self {
         Self {
             backend: Backend::Local(Kernel::new(LocalArch::new())),
-            local_cache: TypedCache::new_in(Global),
+            local_cache: CacheDirectory::new(),
         }
     }
 
@@ -104,7 +103,7 @@ impl Nub {
                 sandbox,
                 state_root_cache: [0; 32],
             })),
-            local_cache: TypedCache::new_in(Global),
+            local_cache: CacheDirectory::new(),
         })
     }
 
@@ -160,13 +159,12 @@ impl Nub {
         }
     }
 
-    // --- New publish surface (caller-built Cap<Global>) ---
+    // --- New publish surface (caller-built `Cap`) ---
 
-    /// Put a caller-built `Cap<Global>` into the active cache. Computes
-    /// the cap's content hash and either deep-clones into talc memory
-    /// on first put or bumps refcount on idempotent re-put. Returns the
-    /// cap's content hash.
-    pub fn put_cap(&mut self, cap: &javm_cap::Cap<Global>) -> Result<AbiCapHash> {
+    /// Put a caller-built `Cap` into the active cache. Computes
+    /// the cap's content hash and either clones the cap on first put or
+    /// bumps refcount on idempotent re-put. Returns the cap's content hash.
+    pub fn put_cap(&mut self, cap: &javm_cap::Cap) -> Result<AbiCapHash> {
         match &mut self.backend {
             Backend::Local(_) => self
                 .local_cache
@@ -174,32 +172,32 @@ impl Nub {
                 .map_err(|e| anyhow::anyhow!("put_cap (local): {e}")),
             Backend::Hyperlight(h) => h
                 .sandbox
-                .cache()
                 .put_cap(cap)
                 .map_err(|e| anyhow::anyhow!("put_cap: {e}")),
         }
     }
 
     /// Pre-hashed variant. Caller computed `ssz::hash_tree_root(cap)`
-    /// at warmup and passes it explicitly; skips the SSZ merkleize on
-    /// the hot idempotent path. Debug-asserts the claimed hash matches
-    /// the cap; release trusts the caller.
-    pub fn put_cap_with_hash(
-        &mut self,
-        hash: AbiCapHash,
-        cap: &javm_cap::Cap<Global>,
-    ) -> Result<()> {
+    /// at warmup and passes it explicitly; on the hot idempotent
+    /// path this lets both backends skip the SSZ merkleize entirely.
+    /// Debug-asserts the claimed hash matches the cap; release trusts
+    /// the caller.
+    ///
+    /// Hyperlight backend: short-circuits to a host-side
+    /// `GuestCacheReader::contains(hash)` check against the guest's
+    /// heap-resident `CacheDirectory` (mapped at the host's matching
+    /// VA via the snapshot mapping). On a hit, no RPC roundtrip and
+    /// no guest-side merkle walk — the typical bench / replay
+    /// workload re-publishes the same cap graph every iteration and
+    /// pays only one host-side `HashMap::contains_key`.
+    pub fn put_cap_with_hash(&mut self, hash: AbiCapHash, cap: &javm_cap::Cap) -> Result<()> {
         match &mut self.backend {
-            Backend::Local(_) => {
-                let _refcount = self
-                    .local_cache
-                    .put_cap_with_hash(hash, cap)
-                    .map_err(|e| anyhow::anyhow!("put_cap_with_hash (local): {e}"))?;
-                Ok(())
-            }
+            Backend::Local(_) => self
+                .local_cache
+                .put_cap_with_hash(hash, cap)
+                .map_err(|e| anyhow::anyhow!("put_cap_with_hash (local): {e}")),
             Backend::Hyperlight(h) => h
                 .sandbox
-                .cache()
                 .put_cap_with_hash(hash, cap)
                 .map_err(|e| anyhow::anyhow!("put_cap_with_hash: {e}")),
         }
@@ -223,8 +221,8 @@ impl Nub {
                     .local_cache
                     .get(CapHashOrRef::Hash(instance_hash))
                     .ok_or_else(|| anyhow::anyhow!("invoke_cached: instance not published"))?;
-                let inst = match instance_cap {
-                    Cap::Instance(i) => i,
+                let inst = match &*instance_cap {
+                    Cap::Instance(i) => i.clone(),
                     _ => {
                         return Err(anyhow::anyhow!(
                             "invoke_cached: cap at hash is not an Instance"
@@ -235,8 +233,8 @@ impl Nub {
                     .local_cache
                     .get(CapHashOrRef::Hash(inst.image_hash))
                     .ok_or_else(|| anyhow::anyhow!("invoke_cached: image not in cache"))?;
-                let img = match image_cap {
-                    Cap::Image(i) => i,
+                let img = match &*image_cap {
+                    Cap::Image(i) => i.clone(),
                     _ => {
                         return Err(anyhow::anyhow!(
                             "invoke_cached: cap at image_hash is not an Image"
@@ -244,18 +242,17 @@ impl Nub {
                     }
                 };
                 Ok(nub_arch_local::run_instance(
-                    inst,
-                    img,
+                    &inst,
+                    &img,
                     endpoint_idx,
                     args,
                     initial_gas,
                 ))
             }
             Backend::Hyperlight(h) => {
-                h.sandbox
-                    .cache()
-                    .pin(instance_hash)
-                    .map_err(|e| anyhow::anyhow!("cache pin: {e}"))?;
+                // No host-side pin/unpin — the cap is owned by the
+                // guest's heap-resident DIRECTORY; there's nothing for
+                // the host to lock against (the guest doesn't evict).
                 let packet = InvokePacket {
                     instance_hash,
                     endpoint_idx: endpoint_idx as u32,
@@ -265,9 +262,7 @@ impl Nub {
                 };
                 let result_bytes = h
                     .sandbox
-                    .call_raw(FN_ID_NUB_INVOKE_CACHED, packet.as_bytes());
-                h.sandbox.cache().unpin(instance_hash);
-                let result_bytes = result_bytes?;
+                    .call_raw(FN_ID_NUB_INVOKE_CACHED, packet.as_bytes())?;
 
                 let mut aligned = AlignedVec::<16>::with_capacity(result_bytes.len());
                 aligned.extend_from_slice(&result_bytes);

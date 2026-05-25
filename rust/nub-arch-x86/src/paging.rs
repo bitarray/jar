@@ -40,18 +40,9 @@
 //!   ```text
 //!     gva = scratch_base_gva + (gpa - scratch_base_gpa)
 //!   ```
-//! * **State cache region** (shared talc heap with host) is mapped at
-//!   the fixed `STATE_CACHE_VA = 0x4000_0000_0000` backed by
-//!   `STATE_CACHE_GPA = 0x2_0000_0000` (8 GiB), 1 GiB long:
-//!   ```text
-//!     gva = STATE_CACHE_VA + (gpa - STATE_CACHE_GPA)
-//!   ```
-//!   Used to compute the PA of `Cap::Data` pages so they can be
-//!   mapped directly into the ring-3 PT (Issue #855).
-//! * **User half (low VA, 0..512 GiB except for the state cache
-//!   region above)** is owned by the per-invocation PT we build for
-//!   ring-3 PVM programs; ring-0 paging helpers below return `None`
-//!   for these addresses.
+//! * **User half (low VA, 0..512 GiB)** is owned by the per-invocation
+//!   PT we build for ring-3 PVM programs; ring-0 paging helpers below
+//!   return `None` for these addresses.
 
 #![cfg(target_os = "none")]
 
@@ -64,7 +55,6 @@ use core::cell::RefCell;
 use core::ptr::NonNull;
 
 use hyperlight_guest::layout::{scratch_base_gpa, scratch_base_gva};
-use nub_host_common::cache::{STATE_CACHE_GPA, STATE_CACHE_SIZE, STATE_CACHE_VA};
 
 /// 4 KiB page size — the unit of alignment for page-aligned
 /// allocations (page tables, JIT exec pages, etc.).
@@ -73,10 +63,12 @@ pub const PAGE_SIZE: usize = 4096;
 /// Low GPA where the host loads the kernel ELF. Matches
 /// `SandboxMemoryLayout::BASE_ADDRESS` in `nub-host-kvm`.
 const KERNEL_BASE_GPA: u64 = 0x1000;
-/// High GVA the kernel is linked at. Matches the `. =` directive in
+/// GVA the kernel is linked at. Matches the `. =` directive in
 /// [`rust/nub-arch-x86/link.x`](../link.x) and
 /// `SandboxMemoryLayout::KERNEL_HIGH_BASE` in `nub-host-kvm`.
-const KERNEL_HIGH_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+/// Now in canonical low-half so the host process can mmap-shadow.
+/// TODO: rename to `KERNEL_BASE` once all three sites are renamed.
+const KERNEL_HIGH_BASE: u64 = 0x5001_4000_0000;
 
 /// PTE flag bits.
 pub mod flag {
@@ -93,17 +85,15 @@ pub mod flag {
 /// Mask covering the physical-address bits of a PTE (bits 12..51).
 const PA_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
-/// Convert a kernel VA to its physical address. Four regimes (see
-/// module doc): scratch (high VA), kernel half (high VA), state
-/// cache (fixed VA at `STATE_CACHE_VA`), user half (returns `None`).
+/// Convert a kernel VA to its physical address. Three regimes (see
+/// module doc): scratch (high VA), kernel half (low VA past
+/// `KERNEL_HIGH_BASE`), user half (returns `None`).
 pub fn va_to_pa(va: u64) -> Option<u64> {
     let scratch_gva = scratch_base_gva();
     if va >= scratch_gva {
         Some(scratch_base_gpa() + (va - scratch_gva))
     } else if va >= KERNEL_HIGH_BASE {
         Some(KERNEL_BASE_GPA + (va - KERNEL_HIGH_BASE))
-    } else if va >= STATE_CACHE_VA && va < STATE_CACHE_VA + STATE_CACHE_SIZE as u64 {
-        Some(STATE_CACHE_GPA + (va - STATE_CACHE_VA))
     } else {
         None
     }
@@ -114,8 +104,6 @@ pub fn pa_to_va(pa: u64) -> Option<u64> {
     let scratch_gpa = scratch_base_gpa();
     if pa >= scratch_gpa {
         Some(scratch_base_gva() + (pa - scratch_gpa))
-    } else if pa >= STATE_CACHE_GPA && pa < STATE_CACHE_GPA + STATE_CACHE_SIZE as u64 {
-        Some(STATE_CACHE_VA + (pa - STATE_CACHE_GPA))
     } else if pa >= KERNEL_BASE_GPA {
         Some(KERNEL_HIGH_BASE + (pa - KERNEL_BASE_GPA))
     } else {
@@ -507,92 +495,6 @@ pub fn invlpg(virt: u64) {
     unsafe {
         core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
     }
-}
-
-/// Install a kernel-mode (no USER bit) page-table mapping in the
-/// **currently active** PML4. The mapping persists across
-/// per-invocation [`PageTable::new`] calls because that constructor
-/// shallow-copies the active PML4 — any descendant tables we install
-/// here are then shared with every per-invocation PT.
-///
-/// Used at guest boot to map the host-installed state cache region
-/// into the kernel half of the address space (so the guest's
-/// kernel-mode RPC dispatcher can read cache memory). The 4 KiB-page
-/// granularity wastes ~2 MiB on intermediate tables for a 1 GiB
-/// mapping, but the cost is paid once at boot.
-///
-/// `virt`, `phys`, and `len` must be 4 KiB-aligned. Intermediate
-/// tables are talc-allocated and never freed (intentional — the
-/// mapping is permanent).
-///
-/// # Safety
-///
-/// The current CR3 must point at a writable PML4 in talc memory
-/// (the kernel's boot PML4). The mapped GPA range must point at
-/// host-installed physical memory.
-pub unsafe fn install_persistent_kernel_mapping(
-    virt: u64,
-    phys: u64,
-    len: u64,
-    perm: Perm,
-) -> Option<()> {
-    assert!(virt.is_multiple_of(PAGE_SIZE as u64));
-    assert!(phys.is_multiple_of(PAGE_SIZE as u64));
-    assert!(len.is_multiple_of(PAGE_SIZE as u64));
-
-    let cr3_pa = read_cr3() & PA_MASK;
-    let pml4_va = pa_to_va(cr3_pa)?;
-    let pml4 = pml4_va as *mut Table;
-
-    let mut va = virt;
-    let mut pa = phys;
-    let end = virt + len;
-    while va < end {
-        unsafe {
-            map_one_in_pml4(pml4, va, pa, perm)?;
-        }
-        va += PAGE_SIZE as u64;
-        pa += PAGE_SIZE as u64;
-    }
-    Some(())
-}
-
-/// Walk + extend a foreign PML4 to install one 4 KiB-page mapping.
-/// Allocates intermediate tables via [`alloc_table`]; never frees
-/// them (caller's responsibility — for [`install_persistent_kernel_mapping`]
-/// they're intentionally leaked into the kernel's page-table tree).
-unsafe fn map_one_in_pml4(pml4: *mut Table, va: u64, pa: u64, perm: Perm) -> Option<()> {
-    let idx4 = ((va >> 39) & 0x1FF) as usize;
-    let idx3 = ((va >> 30) & 0x1FF) as usize;
-    let idx2 = ((va >> 21) & 0x1FF) as usize;
-    let idx1 = ((va >> 12) & 0x1FF) as usize;
-    let inner_flags = flag::P | flag::RW | flag::US;
-
-    let pdpt = unsafe { ensure_inner_foreign(&mut (*pml4)[idx4], inner_flags)? };
-    let pd = unsafe { ensure_inner_foreign(&mut (*pdpt)[idx3], inner_flags) }?;
-    let pt = unsafe { ensure_inner_foreign(&mut (*pd)[idx2], inner_flags) }?;
-    unsafe {
-        (*pt)[idx1] = (pa & PA_MASK) | perm.pte_flags();
-    }
-    Some(())
-}
-
-unsafe fn ensure_inner_foreign(entry: &mut u64, inner_flags: u64) -> Option<*mut Table> {
-    const PS: u64 = 1 << 7;
-    if *entry & flag::P != 0 {
-        if *entry & PS != 0 {
-            return None;
-        }
-        let pa = *entry & PA_MASK;
-        *entry |= inner_flags;
-        let va = pa_to_va(pa)?;
-        return Some(va as *mut Table);
-    }
-    let new_table = alloc_table()?;
-    let va = new_table.as_ptr() as u64;
-    let pa = va_to_pa(va)?;
-    *entry = (pa & PA_MASK) | inner_flags;
-    Some(new_table.as_ptr())
 }
 
 /// Read CR3. Returns the physical address of the current PML4 (low

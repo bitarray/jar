@@ -1,7 +1,6 @@
 //! SSZ blanket impls for built-in scalar and array types.
 
-use allocate::vec::Vec;
-use allocate::{Allocator, Global};
+use alloc::vec::Vec;
 use core::num::NonZeroU32;
 use digest::Digest;
 use digest::typenum::U32;
@@ -30,7 +29,7 @@ macro_rules! impl_uint {
             fn ssz_bytes_len(&self) -> usize {
                 $size
             }
-            fn ssz_append<A: Allocator + Clone>(&self, buf: &mut Vec<u8, A>) {
+            fn ssz_append(&self, buf: &mut Vec<u8>) {
                 buf.extend_from_slice(&self.to_le_bytes());
             }
         }
@@ -42,10 +41,7 @@ macro_rules! impl_uint {
             fn ssz_fixed_len() -> usize {
                 $size
             }
-            fn from_ssz_bytes_in<A: Allocator + Clone>(
-                bytes: &[u8],
-                _alloc: A,
-            ) -> Result<Self, DecodeError> {
+            fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
                 if bytes.len() != $size {
                     return Err(DecodeError::UnexpectedEof {
                         expected: $size,
@@ -91,7 +87,7 @@ impl Encode for bool {
     fn ssz_bytes_len(&self) -> usize {
         1
     }
-    fn ssz_append<A: Allocator + Clone>(&self, buf: &mut Vec<u8, A>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         buf.push(if *self { 1 } else { 0 });
     }
 }
@@ -103,10 +99,7 @@ impl Decode for bool {
     fn ssz_fixed_len() -> usize {
         1
     }
-    fn from_ssz_bytes_in<A: Allocator + Clone>(
-        bytes: &[u8],
-        _alloc: A,
-    ) -> Result<Self, DecodeError> {
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         if bytes.len() != 1 {
             return Err(DecodeError::UnexpectedEof {
                 expected: 1,
@@ -143,7 +136,7 @@ impl Encode for NonZeroU32 {
     fn ssz_bytes_len(&self) -> usize {
         4
     }
-    fn ssz_append<A: Allocator + Clone>(&self, buf: &mut Vec<u8, A>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&self.get().to_le_bytes());
     }
 }
@@ -155,11 +148,8 @@ impl Decode for NonZeroU32 {
     fn ssz_fixed_len() -> usize {
         4
     }
-    fn from_ssz_bytes_in<A: Allocator + Clone>(
-        bytes: &[u8],
-        _alloc: A,
-    ) -> Result<Self, DecodeError> {
-        let raw = u32::from_ssz_bytes_in(bytes, _alloc)?;
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let raw = u32::from_ssz_bytes(bytes)?;
         NonZeroU32::new(raw).ok_or(DecodeError::ZeroNonZero)
     }
 }
@@ -193,7 +183,7 @@ impl Encode for U256 {
     fn ssz_bytes_len(&self) -> usize {
         32
     }
-    fn ssz_append<A: Allocator + Clone>(&self, buf: &mut Vec<u8, A>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(&self.0);
     }
 }
@@ -205,10 +195,7 @@ impl Decode for U256 {
     fn ssz_fixed_len() -> usize {
         32
     }
-    fn from_ssz_bytes_in<A: Allocator + Clone>(
-        bytes: &[u8],
-        _alloc: A,
-    ) -> Result<Self, DecodeError> {
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         if bytes.len() != 32 {
             return Err(DecodeError::UnexpectedEof {
                 expected: 32,
@@ -241,7 +228,7 @@ impl<const N: usize> Encode for [u8; N] {
     fn ssz_bytes_len(&self) -> usize {
         N
     }
-    fn ssz_append<A: Allocator + Clone>(&self, buf: &mut Vec<u8, A>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         buf.extend_from_slice(self);
     }
 }
@@ -253,10 +240,7 @@ impl<const N: usize> Decode for [u8; N] {
     fn ssz_fixed_len() -> usize {
         N
     }
-    fn from_ssz_bytes_in<A: Allocator + Clone>(
-        bytes: &[u8],
-        _alloc: A,
-    ) -> Result<Self, DecodeError> {
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         if bytes.len() != N {
             return Err(DecodeError::UnexpectedEof {
                 expected: N,
@@ -302,7 +286,7 @@ impl<const N: usize> Encode for [u64; N] {
     fn ssz_bytes_len(&self) -> usize {
         N * 8
     }
-    fn ssz_append<A: Allocator + Clone>(&self, buf: &mut Vec<u8, A>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         for v in self {
             buf.extend_from_slice(&v.to_le_bytes());
         }
@@ -316,10 +300,7 @@ impl<const N: usize> Decode for [u64; N] {
     fn ssz_fixed_len() -> usize {
         N * 8
     }
-    fn from_ssz_bytes_in<A: Allocator + Clone>(
-        bytes: &[u8],
-        _alloc: A,
-    ) -> Result<Self, DecodeError> {
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         if bytes.len() != N * 8 {
             return Err(DecodeError::UnexpectedEof {
                 expected: N * 8,
@@ -341,7 +322,7 @@ impl<const N: usize> HashTreeRoot for [u64; N] {
         // Treat as a fixed-length `Vector<uint64, N>`. Pack to bytes,
         // merkleize with `limit = ceil(N*8/32)` chunks. No mix_in_length
         // (fixed-size vector).
-        let mut buf: Vec<u8, Global> = Vec::with_capacity_in(N * 8, Global);
+        let mut buf: Vec<u8> = Vec::with_capacity(N * 8);
         for v in self {
             buf.extend_from_slice(&v.to_le_bytes());
         }
@@ -368,7 +349,7 @@ impl<T: Encode> Encode for Option<T> {
             Some(t) => 1 + t.ssz_bytes_len(),
         }
     }
-    fn ssz_append<A: Allocator + Clone>(&self, buf: &mut Vec<u8, A>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         match self {
             None => buf.push(0),
             Some(t) => {
@@ -386,10 +367,7 @@ impl<T: Decode> Decode for Option<T> {
     fn ssz_fixed_len() -> usize {
         BYTES_PER_LENGTH_OFFSET
     }
-    fn from_ssz_bytes_in<A: Allocator + Clone>(
-        bytes: &[u8],
-        alloc: A,
-    ) -> Result<Self, DecodeError> {
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         let selector_byte = read_slice(bytes, 0, 1)?[0];
         match selector_byte {
             0 => {
@@ -402,7 +380,7 @@ impl<T: Decode> Decode for Option<T> {
                 Ok(None)
             }
             1 => {
-                let inner = T::from_ssz_bytes_in(&bytes[1..], alloc)?;
+                let inner = T::from_ssz_bytes(&bytes[1..])?;
                 Ok(Some(inner))
             }
             v => Err(DecodeError::InvalidSelector(v)),

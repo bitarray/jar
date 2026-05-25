@@ -4,8 +4,7 @@
 //! trait with `OutputSize = U32`. No domain bytes or prefixes are mixed in
 //! at the node level — concatenation is the only operation.
 
-use allocate::Global;
-use allocate::vec::Vec;
+use alloc::vec::Vec;
 use digest::Digest;
 use digest::typenum::U32;
 
@@ -24,12 +23,12 @@ pub fn hash_pair<D: Digest<OutputSize = U32>>(left: &[u8; 32], right: &[u8; 32])
 }
 
 /// Pack a byte slice into 32-byte chunks, zero-padding the tail.
-pub fn pack_bytes(bytes: &[u8]) -> alloc::vec::Vec<[u8; 32]> {
+pub fn pack_bytes(bytes: &[u8]) -> Vec<[u8; 32]> {
     if bytes.is_empty() {
-        return alloc::vec::Vec::new();
+        return Vec::new();
     }
     let n = bytes.len().div_ceil(BYTES_PER_CHUNK);
-    let mut out = alloc::vec::Vec::with_capacity(n);
+    let mut out = Vec::with_capacity(n);
     let mut cursor = 0;
     for _ in 0..n {
         let mut chunk = [0u8; 32];
@@ -91,7 +90,7 @@ pub fn merkleize<D: Digest<OutputSize = U32>>(chunks: &[[u8; 32]], limit: usize)
     // into O(depth). Without this, a depth-32 merkleize (e.g. a Vec<T> with
     // MAX_VEC_LEN = 1 << 32) burns ~496 redundant SHA-256s per call just
     // recomputing the same zero hashes.
-    let mut zero_h_table: Vec<[u8; 32], Global> = Vec::with_capacity_in(depth, Global);
+    let mut zero_h_table: Vec<[u8; 32]> = Vec::with_capacity(depth);
     let mut cur_zero = [0u8; 32];
     zero_h_table.push(cur_zero);
     for _ in 1..depth {
@@ -103,13 +102,12 @@ pub fn merkleize<D: Digest<OutputSize = U32>>(chunks: &[[u8; 32]], limit: usize)
     // "real" entries; missing right siblings draw from `zero_h_table[d]`. The
     // implicit padding to `padded_len` is handled by continuing to fold for
     // the full `depth` iterations even after `level.len()` reaches 1.
-    let mut level: Vec<[u8; 32], Global> = Vec::new_in(Global);
+    let mut level: Vec<[u8; 32]> = Vec::new();
     level.extend_from_slice(chunks);
 
-    for d in 0..depth {
-        let zero_h = zero_h_table[d];
+    for &zero_h in zero_h_table.iter().take(depth) {
         let next_count = level.len().div_ceil(2);
-        let mut next: Vec<[u8; 32], Global> = Vec::with_capacity_in(next_count, Global);
+        let mut next: Vec<[u8; 32]> = Vec::with_capacity(next_count);
         for i in 0..next_count {
             let l = level[2 * i];
             let r = level.get(2 * i + 1).copied().unwrap_or(zero_h);

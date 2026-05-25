@@ -14,7 +14,7 @@
 //!   (cached in a `OnceLock`) drives the in-kernel JIT path through
 //!   the same `invoke_cached` API.
 //!
-//! `BuiltCaps` holds the pre-built `Cap<Global>` graph + its precomputed
+//! `BuiltCaps` holds the pre-built `Cap` graph + its precomputed
 //! hashes. Construction happens once per workload at bench warm-up via
 //! [`BuiltCaps::for_image`]; the iter loop reuses the resulting handles.
 //!
@@ -24,7 +24,6 @@
 #![cfg_attr(not(all(target_os = "linux", target_arch = "x86_64")), allow(unused))]
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use allocate::Global;
 use javm_cap::NUM_REGS;
 use javm_cap::image::{Image, PinnedCap};
 use javm_cap::slot::SlotIdx;
@@ -40,7 +39,7 @@ const EXIT_HOSTCALL: u32 = 4;
 /// Default initial-gas budget for the bench.
 const INITIAL_GAS: u64 = 100_000_000_000;
 
-/// Pre-built `Cap<Global>` graph for one (image, endpoint) bench cell.
+/// Pre-built `Cap` graph for one (image, endpoint) bench cell.
 ///
 /// Built once at warm-up via [`Self::for_image`]; the iter loop puts each
 /// cap with its precomputed hash and invokes. The first iter pays the
@@ -49,21 +48,21 @@ const INITIAL_GAS: u64 = 100_000_000_000;
 pub struct BuiltCaps {
     /// Cap::Data blobs for each pinned-slot Data + each initial-slot Data,
     /// paired with their content hashes.
-    pub data_caps: Vec<(CapHash, Cap<Global>)>,
+    pub data_caps: Vec<(CapHash, Cap)>,
     /// Cap::Image referencing the data_caps above by hash.
-    pub image_cap: Cap<Global>,
+    pub image_cap: Cap,
     pub image_hash: CapHash,
     /// Empty Cap::CNode (V1 has no per-instance slot bindings).
-    pub cnode_cap: Cap<Global>,
+    pub cnode_cap: Cap,
     pub cnode_hash: CapHash,
     /// Cap::Instance with the bench's flat (ro, rw) overlay layout.
-    pub instance_cap: Cap<Global>,
+    pub instance_cap: Cap,
     pub instance_hash: CapHash,
     pub endpoint_idx: u8,
 }
 
 impl BuiltCaps {
-    /// Build the full `Cap<Global>` graph for `image[endpoint_idx]`. All
+    /// Build the full `Cap` graph for `image[endpoint_idx]`. All
     /// hashes are precomputed once here.
     pub fn for_image(image: &Image, endpoint_idx: u8) -> Self {
         let endpoint = image
@@ -73,7 +72,7 @@ impl BuiltCaps {
 
         // 1. Build a Cap::Data per non-empty pinned/initial slot. Track
         //    each slot's resolved CapHash so the Image can reference them.
-        let mut data_caps: Vec<(CapHash, Cap<Global>)> = Vec::new();
+        let mut data_caps: Vec<(CapHash, Cap)> = Vec::new();
         let mut pinned_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
         let mut initial_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
 

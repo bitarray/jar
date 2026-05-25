@@ -258,7 +258,7 @@ impl SandboxMemoryLayout {
     /// The base address of the sandbox's memory.
     pub(crate) const BASE_ADDRESS: usize = 0x1000;
 
-    /// High virtual-address base where the kernel is mapped.
+    /// Virtual-address base where the kernel is mapped.
     ///
     /// Matches the linker base in
     /// [`rust/nub-arch-x86/link.x`](../../../nub-arch-x86/link.x); the
@@ -266,9 +266,14 @@ impl SandboxMemoryLayout {
     /// `[KERNEL_HIGH_BASE, ...) GVAs` via a constant offset, so
     /// `kernel_gva = KERNEL_HIGH_BASE + (gpa - BASE_ADDRESS)`.
     ///
-    /// Chosen between `SNAPSHOT_PT_GVA_MAX = 0xFFFF_80FF_FFFF_FFFF` and
-    /// the scratch region (top of GVA space). Linux convention.
-    pub(crate) const KERNEL_HIGH_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+    /// Now equal to `GUEST_VA_BASE_DEFAULT + KERNEL_OFFSET`
+    /// (see `nub_host_common::layout`). Lives in canonical low-half
+    /// so the host process can mmap-shadow this region at the same VA.
+    ///
+    /// TODO: rename to `KERNEL_BASE` — the name `KERNEL_HIGH_BASE` is
+    /// no longer accurate now that the kernel is in low-half. Kept
+    /// for this commit to minimise churn.
+    pub(crate) const KERNEL_HIGH_BASE: u64 = 0x5001_4000_0000;
 
     // the offset into a sandbox's input/output buffer where the stack starts
     pub(crate) const STACK_POINTER_SIZE_BYTES: u64 = 8;

@@ -84,6 +84,14 @@ pub fn build(manifest_dir: &str, bin_name: &str, features: &[&str]) -> PathBuf {
         "-Clink-args=-eentrypoint",
         link_script_arg.as_str(),
         "-Crelocation-model=static",
+        // The x86_64-unknown-none target defaults to the `kernel`
+        // code model, which assumes the kernel sits in the high-half
+        // (`0xFFFF_FFFF_8000_0000+`) where R_X86_64_32S sign-extension
+        // does the right thing. We now link the guest at a low-half VA
+        // (`0x5001_4000_0000`), which is too far above 2 GiB for the
+        // small/kernel models — switch to `large` to emit 64-bit
+        // absolute relocations everywhere.
+        "-Ccode-model=large",
         // Smallest valid panic strategy for no_std bin
         "-Cpanic=abort",
     ]

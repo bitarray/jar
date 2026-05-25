@@ -4,7 +4,7 @@
 //! `HashTreeRoot` tree (SHA-256 chunking, merkleization, Union
 //! `mix_in_selector` for variant domain separation). The five legacy
 //! kind tags `0x10..0x50` are replaced by the SSZ Union selectors on
-//! `Cap<A>` (0..4); the per-variant byte protocol is replaced by the
+//! `Cap` (0..4); the per-variant byte protocol is replaced by the
 //! field-by-field SSZ encoding derived on `InstanceCap`, `ImageCap`,
 //! `DataCap`, `CNodeCap`, and `TypeCap`.
 //!
@@ -35,21 +35,17 @@
 //! `image_content_hash` is used for the image-hash chain protocol in
 //! `crate::image`.
 
-use allocate::Allocator;
-
 use super::cap::{Cap, CapHash};
 
 /// 32-byte content hash of `cap`. Walks the cap tree via SSZ
 /// `HashTreeRoot` with SHA-256 as the default digest.
-pub fn cap_hash<A: Allocator + Clone>(cap: &Cap<A>) -> CapHash {
+pub fn cap_hash(cap: &Cap) -> CapHash {
     ssz::hash_tree_root(cap)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use allocate::Global;
-    use allocate::vec::Vec as AVec;
 
     use crate::cap::{CapHashOrRef, TypeCap};
     use crate::cnode::CNodeCap;
@@ -62,15 +58,15 @@ mod tests {
     #[test]
     fn type_cap_hash_deterministic() {
         let chain = [0xAA; 32];
-        let a: Cap<Global> = Cap::Type(TypeCap {
+        let a: Cap = Cap::Type(TypeCap {
             image_hash_chain: chain,
         });
-        let b: Cap<Global> = Cap::Type(TypeCap {
+        let b: Cap = Cap::Type(TypeCap {
             image_hash_chain: chain,
         });
         assert_eq!(cap_hash(&a), cap_hash(&b));
         // Different chain → different hash.
-        let c: Cap<Global> = Cap::Type(TypeCap {
+        let c: Cap = Cap::Type(TypeCap {
             image_hash_chain: [0xBB; 32],
         });
         assert_ne!(cap_hash(&a), cap_hash(&c));
@@ -81,38 +77,28 @@ mod tests {
         // The Union mix_in_selector ensures two caps whose payloads
         // happen to merkleize to the same root still differ at the
         // outer hash. Use the simplest distinguishable payloads.
-        let t: Cap<Global> = Cap::Type(TypeCap {
+        let t: Cap = Cap::Type(TypeCap {
             image_hash_chain: [0; 32],
         });
-        let cn: Cap<Global> = Cap::CNode(CNodeCap::new_in(0, Global).unwrap());
+        let cn: Cap = Cap::CNode(CNodeCap::new(0).unwrap());
         assert_ne!(cap_hash(&t), cap_hash(&cn));
     }
 
     #[test]
     fn data_inline_hash_includes_size() {
-        let bytes_a: AVec<u8, Global> = {
-            let mut v = AVec::new_in(Global);
-            v.extend_from_slice(b"abc");
-            v
-        };
-        let bytes_b: AVec<u8, Global> = {
-            let mut v = AVec::new_in(Global);
-            v.extend_from_slice(b"abc");
-            v
-        };
+        let bytes_a: Vec<u8> = b"abc".to_vec();
+        let bytes_b: Vec<u8> = b"abc".to_vec();
         // Two caps with different inline byte lengths (same prefix)
         // hash differently because content storage IS the identifier.
         // Pad to distinct page-multiple sizes.
-        let mut bytes_a_padded: AVec<u8, Global> = AVec::new_in(Global);
-        bytes_a_padded.resize(crate::data::PAGE_SIZE, 0);
+        let mut bytes_a_padded: Vec<u8> = vec![0u8; crate::data::PAGE_SIZE];
         bytes_a_padded[..bytes_a.len()].copy_from_slice(bytes_a.as_slice());
-        let mut bytes_b_padded: AVec<u8, Global> = AVec::new_in(Global);
-        bytes_b_padded.resize(crate::data::PAGE_SIZE * 2, 0);
+        let mut bytes_b_padded: Vec<u8> = vec![0u8; crate::data::PAGE_SIZE * 2];
         bytes_b_padded[..bytes_b.len()].copy_from_slice(bytes_b.as_slice());
-        let a: Cap<Global> = Cap::Data(DataCap {
+        let a: Cap = Cap::Data(DataCap {
             content: DataContent::Inline(bytes_a_padded),
         });
-        let b: Cap<Global> = Cap::Data(DataCap {
+        let b: Cap = Cap::Data(DataCap {
             content: DataContent::Inline(bytes_b_padded),
         });
         assert_ne!(cap_hash(&a), cap_hash(&b));
@@ -120,21 +106,23 @@ mod tests {
 
     #[test]
     fn cnode_empty_vs_one_populated_differ() {
-        let empty: CNodeCap<Global> = CNodeCap::new_in(2, Global).unwrap();
-        let mut populated: CNodeCap<Global> = CNodeCap::new_in(2, Global).unwrap();
+        let empty: CNodeCap = CNodeCap::new(2).unwrap();
+        let mut populated: CNodeCap = CNodeCap::new(2).unwrap();
         populated
             .set(SlotIdx(0), Some(CapHashOrRef::Hash([0xEE; 32])))
             .unwrap();
-        let a: Cap<Global> = Cap::CNode(empty);
-        let b: Cap<Global> = Cap::CNode(populated);
+        let a: Cap = Cap::CNode(empty);
+        let b: Cap = Cap::CNode(populated);
         assert_ne!(cap_hash(&a), cap_hash(&b));
     }
 
     #[test]
     fn cnode_with_ref_target_panics() {
-        let mut cn: CNodeCap<Global> = CNodeCap::new_in(2, Global).unwrap();
-        cn.set(SlotIdx(0), Some(CapHashOrRef::Ref(42))).unwrap();
-        let cap: Cap<Global> = Cap::CNode(cn);
+        use crate::cap::CapRef;
+        let mut cn: CNodeCap = CNodeCap::new(2).unwrap();
+        cn.set(SlotIdx(0), Some(CapHashOrRef::Ref(CapRef::new(42))))
+            .unwrap();
+        let cap: Cap = Cap::CNode(cn);
         let result = std::panic::catch_unwind(|| cap_hash(&cap));
         assert!(result.is_err());
     }
@@ -145,20 +133,20 @@ mod tests {
         let mut img_b = empty_image();
         img_a.code.extend_from_slice(b"foo");
         img_b.code.extend_from_slice(b"bar");
-        let a: Cap<Global> = Cap::Image(img_a);
-        let b: Cap<Global> = Cap::Image(img_b);
+        let a: Cap = Cap::Image(img_a);
+        let b: Cap = Cap::Image(img_b);
         assert_ne!(cap_hash(&a), cap_hash(&b));
     }
 
-    fn empty_image() -> ImageCap<Global> {
+    fn empty_image() -> ImageCap {
         ImageCap {
-            code: AVec::new_in(Global),
-            bitmask: AVec::new_in(Global),
-            jump_table: AVec::new_in(Global),
-            endpoints: AVec::new_in(Global),
-            mappings: AVec::new_in(Global),
-            pinned: AVec::new_in(Global),
-            initial: AVec::new_in(Global),
+            code: Vec::new(),
+            bitmask: Vec::new(),
+            jump_table: Vec::new(),
+            endpoints: Vec::new(),
+            mappings: Vec::new(),
+            pinned: Vec::new(),
+            initial: Vec::new(),
             yield_marker_slot: None,
         }
     }
@@ -169,17 +157,17 @@ mod tests {
         let mut inst_b = empty_instance();
         inst_a.pc = 0x100;
         inst_b.pc = 0x200;
-        let a: Cap<Global> = Cap::Instance(inst_a);
-        let b: Cap<Global> = Cap::Instance(inst_b);
+        let a: Cap = Cap::Instance(inst_a);
+        let b: Cap = Cap::Instance(inst_b);
         assert_ne!(cap_hash(&a), cap_hash(&b));
     }
 
-    fn empty_instance() -> InstanceCap<Global> {
+    fn empty_instance() -> InstanceCap {
         InstanceCap {
             image_hash_chain: [0; 32],
             image_hash: [0; 32],
             root_cnode: CapHashOrRef::Hash([0; 32]),
-            rw_overlays: AVec::new_in(Global),
+            rw_overlays: Vec::new(),
             mem_size: 0,
             regs: [0; crate::cap::NUM_REGS],
             pc: 0,
@@ -189,17 +177,16 @@ mod tests {
 
     #[test]
     fn data_paged_hash_uses_loaded_page_hashes() {
-        let mut bytes = AVec::new_in(Global);
+        let mut bytes = Vec::new();
         bytes.extend_from_slice(&[1, 2, 3]);
         let pb_hash = [0xA1; 32];
         let pb = PageBytes {
             hash: pb_hash,
             bytes,
         };
-        let pr: PageRef<Global> = PageRef::new_in(pb, Global);
-        let mut pages: AVec<PageSlot<Global>, Global> = AVec::new_in(Global);
-        pages.push(PageSlot::Loaded(pr));
-        let cap: Cap<Global> = Cap::Data(DataCap {
+        let pr: PageRef = PageRef::new(pb);
+        let pages: Vec<PageSlot> = vec![PageSlot::Loaded(pr)];
+        let cap: Cap = Cap::Data(DataCap {
             content: DataContent::Paged {
                 page_size: 4096,
                 pages,
@@ -207,16 +194,14 @@ mod tests {
         });
         let h = cap_hash(&cap);
         // Sanity: identical Cap shape with a different page hash differs.
-        let mut bytes2 = AVec::new_in(Global);
-        bytes2.extend_from_slice(&[1, 2, 3]);
+        let bytes2: Vec<u8> = vec![1, 2, 3];
         let pb2 = PageBytes {
             hash: [0xB2; 32],
             bytes: bytes2,
         };
-        let pr2: PageRef<Global> = PageRef::new_in(pb2, Global);
-        let mut pages2: AVec<PageSlot<Global>, Global> = AVec::new_in(Global);
-        pages2.push(PageSlot::Loaded(pr2));
-        let cap2: Cap<Global> = Cap::Data(DataCap {
+        let pr2: PageRef = PageRef::new(pb2);
+        let pages2: Vec<PageSlot> = vec![PageSlot::Loaded(pr2)];
+        let cap2: Cap = Cap::Data(DataCap {
             content: DataContent::Paged {
                 page_size: 4096,
                 pages: pages2,
@@ -230,26 +215,23 @@ mod tests {
         // Substitution invariant: Loaded(p) and Missing(p.hash) must
         // produce the same enclosing-cap hash.
         let page_hash = [0xCD; 32];
-        let mut bytes = AVec::new_in(Global);
-        bytes.extend_from_slice(&[0xAA; 16]);
+        let bytes: Vec<u8> = vec![0xAA; 16];
         let pb = PageBytes {
             hash: page_hash,
             bytes,
         };
-        let pr: PageRef<Global> = PageRef::new_in(pb, Global);
+        let pr: PageRef = PageRef::new(pb);
 
-        let mut pages_loaded: AVec<PageSlot<Global>, Global> = AVec::new_in(Global);
-        pages_loaded.push(PageSlot::Loaded(pr));
-        let cap_loaded: Cap<Global> = Cap::Data(DataCap {
+        let pages_loaded: Vec<PageSlot> = vec![PageSlot::Loaded(pr)];
+        let cap_loaded: Cap = Cap::Data(DataCap {
             content: DataContent::Paged {
                 page_size: 16,
                 pages: pages_loaded,
             },
         });
 
-        let mut pages_missing: AVec<PageSlot<Global>, Global> = AVec::new_in(Global);
-        pages_missing.push(PageSlot::Missing(page_hash));
-        let cap_missing: Cap<Global> = Cap::Data(DataCap {
+        let pages_missing: Vec<PageSlot> = vec![PageSlot::Missing(page_hash)];
+        let cap_missing: Cap = Cap::Data(DataCap {
             content: DataContent::Paged {
                 page_size: 16,
                 pages: pages_missing,

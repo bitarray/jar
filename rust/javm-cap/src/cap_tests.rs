@@ -1,76 +1,41 @@
-//! Smoke tests demonstrating that the talc-friendly cap types work
-//! with both `Global` (heap) and `TalcAlloc` (cache) allocators.
-
-use allocate::Global;
-use allocate::talc::{CacheTalcLock, Span, TalcAlloc, new_cache_talc_lock};
-use allocate::vec::Vec as AVec;
+//! Smoke tests for the cap types. With the move to single-allocator
+//! cap storage (everything on the global heap), these tests just
+//! exercise the constructors and field accessors.
 
 use crate::slot::SlotIdx;
 
-use super::cap::{Cap, CapHashOrRef};
+use super::cap::{Cap, CapHashOrRef, CapRef};
 use super::cnode::CNodeCap;
 use super::data::{DataCap, DataContent};
-use super::entry::CacheEntry;
 use super::image_cap::{EndpointDef, ImageCap, ImageSlotEntry, MemoryMapping};
 use super::instance::{InstanceCap, RwOverlay};
 use super::page::{PageBytes, PageRef, PageSlot};
 
-struct Arena {
-    _backing: alloc::vec::Vec<u8>,
-    talc: alloc::boxed::Box<CacheTalcLock>,
-}
-impl Arena {
-    fn new(size: usize) -> Self {
-        let backing = alloc::vec![0u8; size];
-        let talc = alloc::boxed::Box::new(new_cache_talc_lock());
-        let base = backing.as_ptr() as *mut u8;
-        unsafe {
-            talc.lock()
-                .claim(Span::from_base_size(base, size))
-                .expect("claim");
-        }
-        Self {
-            _backing: backing,
-            talc,
-        }
-    }
-    fn alloc(&self) -> TalcAlloc {
-        // SAFETY: `self.talc` is heap-pinned via the Box and outlives
-        // every `TalcAlloc` derived from this `Arena`; tests drop the
-        // arena last. The `'static` cast is the same lifetime fiction
-        // used in production (`HostCache::alloc`).
-        unsafe { &*(&*self.talc as *const CacheTalcLock) }
-    }
-}
-
-fn make_image_cap_in<A: allocate::Allocator + Clone>(alloc: A) -> ImageCap<A> {
-    let mut code = AVec::new_in(alloc.clone());
-    code.extend_from_slice(&[0xAB, 0xCD]);
+fn make_image_cap() -> ImageCap {
+    let code: Vec<u8> = vec![0xAB, 0xCD];
     ImageCap {
         code,
-        bitmask: AVec::new_in(alloc.clone()),
-        jump_table: AVec::new_in(alloc.clone()),
-        endpoints: AVec::new_in(alloc.clone()),
-        mappings: AVec::new_in(alloc.clone()),
-        pinned: AVec::new_in(alloc.clone()),
-        initial: AVec::new_in(alloc),
+        bitmask: Vec::new(),
+        jump_table: Vec::new(),
+        endpoints: Vec::new(),
+        mappings: Vec::new(),
+        pinned: Vec::new(),
+        initial: Vec::new(),
         yield_marker_slot: None,
     }
 }
 
 #[test]
-fn cap_default_uses_global() {
-    // `Cap` without a type argument defaults to `Cap<Global>`.
-    let _img: Cap<Global> = Cap::Image(make_image_cap_in(Global));
-    let cnode: CNodeCap = CNodeCap::new_in(8, Global).unwrap();
+fn cap_image_constructor() {
+    let _img: Cap = Cap::Image(make_image_cap());
+    let cnode: CNodeCap = CNodeCap::new(8).unwrap();
     assert_eq!(cnode.size_log, 8);
     assert_eq!(cnode.capacity(), 256);
 }
 
 #[test]
-fn cap_talc_backed() {
-    let arena = Arena::new(256 * 1024);
-    let img: Cap<TalcAlloc> = Cap::Image(make_image_cap_in(arena.alloc()));
+fn cap_image_payload_preserved() {
+    let img: Cap = Cap::Image(make_image_cap());
     match img {
         Cap::Image(i) => assert_eq!(i.code.as_slice(), &[0xAB, 0xCD]),
         _ => panic!("expected Image"),
@@ -118,7 +83,7 @@ fn empty_cnode_size_log_too_large_rejected() {
 
 #[test]
 fn cnode_set_takes_and_keeps_slots_sorted() {
-    let mut cnode: CNodeCap<Global> = CNodeCap::new(4).unwrap();
+    let mut cnode: CNodeCap = CNodeCap::new(4).unwrap();
     assert_eq!(cnode.get(SlotIdx(0)), None);
 
     // Inserting out-of-order still leaves slots sorted.
@@ -172,24 +137,27 @@ fn cnode_set_takes_and_keeps_slots_sorted() {
 
 #[test]
 fn cnode_lookup_after_set() {
-    let cnode_alloc = Global;
-    let mut cnode: CNodeCap<Global> = CNodeCap::new_in(8, cnode_alloc).unwrap();
+    let mut cnode: CNodeCap = CNodeCap::new(8).unwrap();
     cnode
         .set(SlotIdx(7), Some(CapHashOrRef::Hash([0x11; 32])))
         .unwrap();
-    cnode.set(SlotIdx(42), Some(CapHashOrRef::Ref(99))).unwrap();
+    // CapRef is now a refcounted handle; fabricate one for the test
+    // (no directory backing — these test only the slot bookkeeping).
+    let r = CapRef::new(99);
+    cnode
+        .set(SlotIdx(42), Some(CapHashOrRef::Ref(r.clone())))
+        .unwrap();
 
     assert_eq!(cnode.get(SlotIdx(7)), Some(CapHashOrRef::Hash([0x11; 32])));
-    assert_eq!(cnode.get(SlotIdx(42)), Some(CapHashOrRef::Ref(99)));
+    assert_eq!(cnode.get(SlotIdx(42)), Some(CapHashOrRef::Ref(r)));
     assert_eq!(cnode.get(SlotIdx(100)), None);
 }
 
 #[test]
 fn data_inline_round_trip() {
-    let mut bytes = AVec::new_in(Global);
-    bytes.resize(crate::data::PAGE_SIZE, 0);
+    let mut bytes: Vec<u8> = vec![0u8; crate::data::PAGE_SIZE];
     bytes[..5].copy_from_slice(b"hello");
-    let data: DataCap<Global> = DataCap {
+    let data: DataCap = DataCap {
         content: DataContent::Inline(bytes),
     };
     match data.content {
@@ -203,46 +171,32 @@ fn data_inline_round_trip() {
 
 #[test]
 fn page_ref_shares_then_releases() {
-    let arena = Arena::new(64 * 1024);
-    let alloc = arena.alloc();
-    let mut bytes = AVec::new_in(alloc);
-    bytes.extend_from_slice(&[1, 2, 3, 4]);
+    let bytes: Vec<u8> = vec![1, 2, 3, 4];
     let pb = PageBytes {
         hash: [0; 32],
         bytes,
     };
-    let pr: PageRef<TalcAlloc> = PageRef::new_in(pb, alloc);
-    assert_eq!(allocate::sync::Arc::strong_count(&pr), 1);
+    let pr: PageRef = PageRef::new(pb);
+    assert_eq!(std::sync::Arc::strong_count(&pr), 1);
 
-    let pages: AVec<PageSlot<TalcAlloc>, TalcAlloc> = {
-        let mut v = AVec::new_in(alloc);
-        v.push(PageSlot::Loaded(pr.clone()));
-        v.push(PageSlot::Loaded(pr.clone()));
-        v
-    };
-    assert_eq!(allocate::sync::Arc::strong_count(&pr), 3);
+    let pages: Vec<PageSlot> = vec![PageSlot::Loaded(pr.clone()), PageSlot::Loaded(pr.clone())];
+    assert_eq!(std::sync::Arc::strong_count(&pr), 3);
 
     drop(pages);
-    assert_eq!(allocate::sync::Arc::strong_count(&pr), 1);
+    assert_eq!(std::sync::Arc::strong_count(&pr), 1);
     drop(pr);
-    // Allocation freed; arena could be exhausted by future allocs in
-    // isolated tests but we don't check the underlying talc state here.
 }
 
 #[test]
 fn instance_with_rw_overlay() {
-    let arena = Arena::new(64 * 1024);
-    let alloc = arena.alloc();
-    let mut overlay_bytes = AVec::new_in(alloc);
-    overlay_bytes.extend_from_slice(&[0xDE, 0xAD]);
+    let overlay_bytes: Vec<u8> = vec![0xDE, 0xAD];
 
-    let mut overlays = AVec::new_in(alloc);
-    overlays.push(RwOverlay {
+    let overlays = vec![RwOverlay {
         start: 0x1000,
         bytes: overlay_bytes,
-    });
+    }];
 
-    let inst: InstanceCap<TalcAlloc> = InstanceCap {
+    let inst: InstanceCap = InstanceCap {
         image_hash_chain: [0xAA; 32],
         image_hash: [0xBB; 32],
         root_cnode: CapHashOrRef::Hash([0xCC; 32]),
@@ -291,59 +245,52 @@ fn image_slot_entry_compact() {
 }
 
 #[test]
-fn cache_entry_refcount_starts_at_one() {
-    let cap: Cap<Global> = Cap::CNode(CNodeCap::new_in(4, Global).unwrap());
-    let entry = CacheEntry::new(cap);
-    assert_eq!(
-        entry.refcount.load(core::sync::atomic::Ordering::Relaxed),
-        1
-    );
+fn capref_strong_count_tracks_holders() {
+    let r = CapRef::new(7);
+    assert_eq!(r.strong_count(), 1);
+    let r2 = r.clone();
+    assert_eq!(r.strong_count(), 2);
+    assert_eq!(r2.strong_count(), 2);
+    drop(r2);
+    assert_eq!(r.strong_count(), 1);
 }
 
 #[test]
-fn cache_with_talc_alloc_round_trips_full_publish_chain() {
-    use crate::cache::TypedCache;
+fn cache_round_trips_full_publish_chain() {
+    use crate::cache::CacheDirectory;
     use crate::cap::NUM_REGS;
 
-    // Plenty of headroom — the published Image is tiny and the inline
-    // Data slot is 8 bytes; 256 KiB is excessive but exercises real
-    // talc claims rather than the embedded-arena edge case.
-    let arena = Arena::new(256 * 1024);
-    let mut cache = TypedCache::new_in(arena.alloc());
+    let cache = CacheDirectory::new();
 
-    // 1. Publish a Data blob (cap is Global; cache deep-clones into talc).
+    // 1. Publish a Data blob. Blobs are pure content-addressed
+    //    storage — re-publishing the same content is a no-op.
     let data_h = cache
         .put_cap(&Cap::data_inline(&[
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
         ]))
         .expect("put data");
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(data_h)), Some(1));
+    assert!(cache.contains_blob(&data_h));
 
-    // 2. Publish a CNode referencing it (refcount on data → 2).
+    // 2. Publish a CNode referencing the Data blob by hash.
     let cnode_h = {
-        let mut cn: CNodeCap<Global> = CNodeCap::new_in(4, Global).unwrap();
+        let mut cn: CNodeCap = CNodeCap::new(4).unwrap();
         cn.set(SlotIdx(0), Some(CapHashOrRef::Hash(data_h)))
             .unwrap();
         cache.put_cap(&Cap::CNode(cn)).expect("put cnode")
     };
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(cnode_h)), Some(1));
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(data_h)), Some(2));
+    assert!(cache.contains_blob(&cnode_h));
 
     // 3. Publish a minimal Image referencing the same Data blob as a
-    //    pinned slot (refcount on data → 3). Build the Image cap on
-    //    the global heap and pass it through put_cap.
-    let mut img = make_image_cap_in(Global);
+    //    pinned slot.
+    let mut img = make_image_cap();
     img.pinned.push(ImageSlotEntry {
         slot: SlotIdx(7),
         cap_hash: data_h,
     });
     let image_h = cache.put_cap(&Cap::Image(img)).expect("put image");
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(image_h)), Some(1));
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(data_h)), Some(3));
+    assert!(cache.contains_blob(&image_h));
 
-    // 4. Publish an Instance binding image + cnode (refcounts on those
-    //    blobs → 2 each; data blob unaffected since it's referenced
-    //    transitively through cnode/image, not directly).
+    // 4. Publish an Instance binding image + cnode.
     let regs = [0u64; NUM_REGS];
     let inst_h = cache
         .put_cap(&Cap::instance_with_overlays(
@@ -357,24 +304,70 @@ fn cache_with_talc_alloc_round_trips_full_publish_chain() {
             1_000_000,
         ))
         .expect("put instance");
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(inst_h)), Some(1));
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(image_h)), Some(2));
-    assert_eq!(cache.refcount(CapHashOrRef::Hash(cnode_h)), Some(2));
+    assert!(cache.contains_blob(&inst_h));
 
-    // 5. Promote the cnode to a mutable instance via get_mut, then
-    //    settle: confirms the talc-backed CoW path. After get_mut, the
-    //    blob holding the original cnode either moves (sole owner) or
-    //    shallow-clones; either way the get_mut'd entry lives in
-    //    `instances` and we can mutate it. Here the cnode has
-    //    refcount=2 (Instance + this test's publish), so get_mut takes
-    //    the shared path: shallow clone + decref original.
+    // 5. Promote the cnode to a mutable instance via Arc::clone +
+    //    settle. With Arc storage the blob entry stays put; the
+    //    instances tier shares the same Arc until mutation.
     let new_ref = cache
-        .get_mut(CapHashOrRef::Hash(cnode_h))
-        .expect("get_mut cnode");
+        .promote_blob_to_instance(&cnode_h)
+        .expect("promote cnode");
     let settled_h = cache
         .settle(CapHashOrRef::Ref(new_ref))
         .expect("settle resolves the ref");
     // Settling an unchanged cnode-clone produces the same content
     // hash as the original blob.
     assert_eq!(settled_h, cnode_h);
+}
+
+#[test]
+fn capref_sweep_reclaims_orphaned_instance() {
+    use crate::cache::CacheDirectory;
+    let cache = CacheDirectory::new();
+
+    let r = cache.put_instance(Cap::CNode(CNodeCap::new(4).unwrap()));
+    assert_eq!(cache.instance_count(), 1);
+    // Two holders: caller's CapRef + directory's self-ref.
+    assert_eq!(r.strong_count(), 2);
+
+    // Sweep with the external holder still alive — nothing reclaimed.
+    cache.sweep_instances();
+    assert_eq!(cache.instance_count(), 1);
+
+    // Drop the external holder; sweep reclaims.
+    drop(r);
+    cache.sweep_instances();
+    assert_eq!(cache.instance_count(), 0);
+}
+
+#[test]
+fn capref_sweep_cascades_through_cnode_ref_chain() {
+    use crate::cache::CacheDirectory;
+    let cache = CacheDirectory::new();
+
+    // Leaf instance with no nested Refs.
+    let leaf = cache.put_instance(Cap::CNode(CNodeCap::new(4).unwrap()));
+
+    // Parent cnode holding the leaf via Ref. Cap::Clone bumps the
+    // leaf's strong count when we clone the CNodeCap into the cap.
+    let mut parent_cn: CNodeCap = CNodeCap::new(4).unwrap();
+    parent_cn
+        .set(SlotIdx(0), Some(CapHashOrRef::Ref(leaf.clone())))
+        .unwrap();
+    let parent = cache.put_instance(Cap::CNode(parent_cn));
+
+    // Counts: leaf has 3 strong refs (our local + parent's cnode slot
+    // + directory's self-ref); parent has 2 (our local + directory).
+    assert_eq!(leaf.strong_count(), 3);
+    assert_eq!(parent.strong_count(), 2);
+
+    drop(leaf);
+    drop(parent);
+    // Leaf still alive in parent's cnode; parent still alive in
+    // directory's self-ref. Sweep reclaims parent first (its
+    // self-ref count is 1 after we dropped our local). Reclaiming
+    // parent drops its Cap which drops its `Ref(leaf)` slot which
+    // drops leaf's last external clone — next pass reclaims leaf.
+    cache.sweep_instances();
+    assert_eq!(cache.instance_count(), 0);
 }

@@ -17,6 +17,11 @@ limitations under the License.
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
+use javm_cap::cap::Cap;
+use javm_cap::wire::WireCap;
+use nub_arch_x86_abi::{
+    BootInfo, CapHash as AbiCapHash, FN_ID_NUB_GET_BOOT_INFO, FN_ID_NUB_PUT_CAP,
+};
 use nub_host_common::rpc::{ArchivedResponse, Request};
 use rkyv::util::AlignedVec;
 use tracing::{Span, instrument};
@@ -24,7 +29,7 @@ use tracing::{Span, instrument};
 use super::host_funcs::FunctionRegistry;
 use crate::HyperlightError;
 use crate::Result;
-use crate::cache::HostCache;
+use crate::guest_cache_reader::GuestCacheReader;
 use crate::hypervisor::InterruptHandle;
 use crate::hypervisor::hyperlight_vm::HyperlightVm;
 use crate::mem::mgr::SandboxMemoryManager;
@@ -46,11 +51,13 @@ pub struct MultiUseSandbox {
     id: u64,
     pub(crate) host_funcs: Arc<Mutex<FunctionRegistry>>,
     pub(crate) mem_mgr: SandboxMemoryManager<HostSharedMemory>,
-    /// Host-side state cache. The KVM memory slot installed during
-    /// evolve points into `cache`'s mmap'd region; `cache` MUST drop
-    /// AFTER `vm` (Rust drops fields in declaration order).
     vm: HyperlightVm,
-    pub(crate) cache: HostCache,
+    /// Lazily-initialised host-side view of the guest's heap-resident
+    /// `CacheDirectory`. Built on the first `put_cap_with_hash` call
+    /// (triggers `nub_get_boot_info` once to read the directory VA),
+    /// then reused. Lets the host short-circuit idempotent re-puts
+    /// without a roundtrip + merkle walk through the guest.
+    guest_cache_reader: Option<GuestCacheReader>,
     #[cfg(gdb)]
     dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
 }
@@ -66,7 +73,6 @@ impl MultiUseSandbox {
         host_funcs: Arc<Mutex<FunctionRegistry>>,
         mgr: SandboxMemoryManager<HostSharedMemory>,
         vm: HyperlightVm,
-        cache: HostCache,
         #[cfg(gdb)] dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
     ) -> MultiUseSandbox {
         Self {
@@ -74,16 +80,10 @@ impl MultiUseSandbox {
             host_funcs,
             mem_mgr: mgr,
             vm,
-            cache,
+            guest_cache_reader: None,
             #[cfg(gdb)]
             dbg_mem_access_fn,
         }
-    }
-
-    /// Accessor for the host-side state cache. Used by `Nub` to
-    /// publish/pin/unpin Cap::Instance state before/after `call_raw`.
-    pub fn cache(&mut self) -> &mut HostCache {
-        &mut self.cache
     }
 
     /// Returns this sandbox's unique id.
@@ -175,6 +175,110 @@ impl MultiUseSandbox {
         }
 
         res
+    }
+
+    /// Publish a [`Cap`] into the guest's heap-resident cap
+    /// directory via the [`FN_ID_NUB_PUT_CAP`] RPC.
+    ///
+    /// Encodes `cap` as a [`WireCap`] (see `javm-cap`'s `wire`
+    /// module), ships it via [`Self::call_raw`], and reads back the
+    /// guest-computed `CapHash`. On the guest side, the cap is
+    /// inserted into the
+    /// `nub_arch_x86::state_cache::DIRECTORY` map, keyed by hash.
+    ///
+    /// Caps that can't be represented on the wire (e.g.
+    /// `DataContent::Paged`, `CNode` with `Ref`-typed slots, etc.)
+    /// fail at the wire conversion step with a typed error.
+    /// Encode/decode failures are surfaced as
+    /// `HyperlightError::Error`. A sentinel response (all-`0xFF`
+    /// hash) from the guest is also turned into an error.
+    pub fn put_cap(&mut self, cap: &Cap) -> Result<AbiCapHash> {
+        let wire = WireCap::from_cap(cap)
+            .map_err(|e| crate::new_error!("put_cap: wire conversion failed: {e}"))?;
+        let cap_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&wire)
+            .map_err(|e| crate::new_error!("put_cap: rkyv encode WireCap: {e}"))?;
+        let resp = self.call_raw(FN_ID_NUB_PUT_CAP, cap_bytes.as_slice())?;
+        if resp.len() != 32 {
+            return Err(crate::new_error!(
+                "put_cap: expected 32-byte hash response, got {}",
+                resp.len()
+            ));
+        }
+        let mut hash: AbiCapHash = [0u8; 32];
+        hash.copy_from_slice(&resp);
+        // Guest's `nub_put_cap` returns `0xFF * 32` on decode/conv
+        // failure. Surface as a typed error so callers don't observe
+        // a fake hash.
+        if hash == [0xFFu8; 32] {
+            return Err(crate::new_error!(
+                "put_cap: guest reported decode/conversion failure (sentinel response)"
+            ));
+        }
+        Ok(hash)
+    }
+
+    /// Pre-hashed put: idempotent fast path that short-circuits the
+    /// full [`Self::put_cap`] RPC when the guest's directory already
+    /// holds `hash`.
+    ///
+    /// Behaviour:
+    ///
+    /// - If `GuestCacheReader::contains(hash)` returns `true`,
+    ///   return immediately — the guest already has the cap and we
+    ///   skip rkyv encode + VMEXIT + guest decode + merkle walk +
+    ///   directory insert. This is the hot path for bench loops that
+    ///   re-publish the same cap graph every iteration.
+    /// - Otherwise, ship `put_cap(cap)`, then debug-assert the
+    ///   returned hash matches `hash`.
+    ///
+    /// The reader is built lazily on first call (one `nub_get_boot_info`
+    /// RPC to read `BootInfo.directory_va`, then a single struct
+    /// construction); subsequent calls hit the cached reader.
+    pub fn put_cap_with_hash(&mut self, hash: AbiCapHash, cap: &Cap) -> Result<()> {
+        let exists = self.ensure_guest_cache_reader()?.contains(&hash);
+        if exists {
+            return Ok(());
+        }
+        let got = self.put_cap(cap)?;
+        debug_assert_eq!(
+            got, hash,
+            "put_cap_with_hash: guest-computed hash differs from claimed hash"
+        );
+        Ok(())
+    }
+
+    /// Lazily build the `GuestCacheReader`. Issues one
+    /// `nub_get_boot_info` RPC to read `BootInfo.directory_va`, then
+    /// constructs the reader; subsequent calls return the cached
+    /// reader without a roundtrip.
+    fn ensure_guest_cache_reader(&mut self) -> Result<&GuestCacheReader> {
+        if self.guest_cache_reader.is_none() {
+            let raw = self.call_raw(FN_ID_NUB_GET_BOOT_INFO, &[])?;
+            let expected = core::mem::size_of::<BootInfo>();
+            if raw.len() != expected {
+                return Err(crate::new_error!(
+                    "nub_get_boot_info: expected {} bytes, got {}",
+                    expected,
+                    raw.len()
+                ));
+            }
+            // SAFETY: `BootInfo` is `#[repr(C)]` POD; the guest packs
+            // exactly `size_of::<BootInfo>()` bytes via
+            // `core::ptr::read` over its `static mut BOOT_INFO`. The
+            // host's matching layout comes from the same
+            // `nub-arch-x86-abi` crate.
+            let info: BootInfo =
+                unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const BootInfo) };
+            // SAFETY: `info.directory_va` was published by the guest
+            // after `init_directory_va`; the host has the guest's
+            // kernel image mmap'd at the same VA via the
+            // `install_snapshot_mapping` fixed-VA shadow, so the
+            // pointer is valid in the host's address space.
+            let reader = unsafe { GuestCacheReader::new(&info) }
+                .map_err(|e| crate::new_error!("guest_cache_reader: {e}"))?;
+            self.guest_cache_reader = Some(reader);
+        }
+        Ok(self.guest_cache_reader.as_ref().expect("set above"))
     }
 
     /// Returns a handle for interrupting guest execution.

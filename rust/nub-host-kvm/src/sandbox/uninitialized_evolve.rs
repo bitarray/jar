@@ -89,14 +89,6 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
     #[cfg(target_os = "linux")]
     setup_signal_handlers(&u_sbox.config)?;
 
-    // Allocate the state cache and install it as a fixed-GPA KVM
-    // memory slot. The cache outlives the sandbox; field-order in
-    // `MultiUseSandbox` guarantees VM drops before cache so the slot
-    // never references freed host memory.
-    let cache = crate::cache::HostCache::new()?;
-    vm.install_cache_mapping(cache.base_va() as usize, cache.size())
-        .map_err(|e| crate::HyperlightError::from(HyperlightVmError::from(e)))?;
-
     vm.initialise(
         peb_addr,
         seed,
@@ -116,7 +108,6 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
         u_sbox.host_funcs,
         hshm,
         vm,
-        cache,
         #[cfg(gdb)]
         dbg_mem_wrapper,
     ))
@@ -130,6 +121,13 @@ pub(crate) fn set_up_hypervisor_partition(
     #[cfg(any(crashdump, gdb))] rt_cfg: SandboxRuntimeConfig,
     _load_info: LoadInfo,
 ) -> Result<HyperlightVm> {
+    // Reserve the GUEST_VA range once per process. Later mmaps of
+    // guest-visible regions (snapshot kernel-shadow, etc.) land at
+    // fixed VAs inside this reservation. Errors here are fatal: we
+    // can't continue if something is squatting on our VA range.
+    nub_host_common::layout::reserve_guest_va_range()
+        .map_err(|e| crate::new_error!("reserve_guest_va_range: {e}"))?;
+
     // Create gdb thread if gdb is enabled and the configuration is provided
     #[cfg(gdb)]
     let gdb_conn = if let Some(DebugInfo { port }) = rt_cfg.debug_info {

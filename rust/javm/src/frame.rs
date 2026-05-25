@@ -14,7 +14,7 @@
 //!   kernel rejects mutations to these slots.
 //!
 //! Both are lightweight borrow views; the data lives on
-//! `InstanceEntry::{root_cnode, pinned_slots}` plus the `TypedCache` that
+//! `InstanceEntry::{root_cnode, pinned_slots}` plus the `CacheDirectory` that
 //! resolves nested-cnode walks. The MGMT dispatcher (Stage 3.6) uses
 //! these views to:
 //! 1. Resolve a `SlotPath` to a cap target (CapHashOrRef).
@@ -23,24 +23,19 @@
 //!    `host_yield` reads the Cap::Instance\[YieldCatcher\] from the
 //!    Image-declared `yield_marker_slot`).
 
-use allocate::Global;
-use javm_cap::{CNodeCap, Cap, CapHashOrRef, SlotIdx, SlotPath, TypedCache};
+use javm_cap::{CNodeCap, CacheDirectory, Cap, CapHashOrRef, SlotIdx, SlotPath};
 
 use crate::error::VmError;
 
 /// Read-only view of an active Instance's MainFrame cnode.
 pub struct MainFrame<'a> {
-    cnode: &'a CNodeCap<Global>,
+    cnode: &'a CNodeCap,
     pinned: &'a [SlotIdx],
-    cache: &'a TypedCache<Global>,
+    cache: &'a CacheDirectory,
 }
 
 impl<'a> MainFrame<'a> {
-    pub fn new(
-        cnode: &'a CNodeCap<Global>,
-        pinned: &'a [SlotIdx],
-        cache: &'a TypedCache<Global>,
-    ) -> Self {
+    pub fn new(cnode: &'a CNodeCap, pinned: &'a [SlotIdx], cache: &'a CacheDirectory) -> Self {
         Self {
             cnode,
             pinned,
@@ -71,22 +66,30 @@ impl<'a> MainFrame<'a> {
     /// `Cap::CNode` or hits an empty slot, returns
     /// `VmError::{SlotKindMismatch, SlotEmpty}`.
     pub fn resolve(&self, path: &SlotPath) -> Result<Option<CapHashOrRef>, VmError> {
-        let mut cur: &CNodeCap<Global> = self.cnode;
-        // Walk each intermediate step.
-        for step in path.prefix() {
-            let target = cur.get(*step).ok_or(VmError::SlotEmpty(step.get()))?;
+        let prefix = path.prefix();
+        if prefix.is_empty() {
+            return Ok(self.cnode.get(path.target()));
+        }
+        // Walk intermediate cnodes by cloning. `cache.get` returns an
+        // owned `Arc<Cap>` rather than the old `&Cap`, so we can no
+        // longer chain borrows; cloning the CNodeCap (cheap for
+        // sparsely-populated tables) sidesteps the lifetime issue.
+        // SlotPath depth is bounded to MAX_SOURCE_DEPTH = 8.
+        let mut current = self.cnode.clone();
+        for step in prefix {
+            let target = current.get(*step).ok_or(VmError::SlotEmpty(step.get()))?;
             let cap = self
                 .cache
                 .get(target)
                 .ok_or(VmError::SlotKindMismatch(step.get()))?;
-            match cap {
+            match &*cap {
                 Cap::CNode(inner) => {
-                    cur = inner;
+                    current = inner.clone();
                 }
                 _ => return Err(VmError::SlotKindMismatch(step.get())),
             }
         }
-        Ok(cur.get(path.target()))
+        Ok(current.get(path.target()))
     }
 }
 
@@ -99,11 +102,7 @@ pub struct BareFrame<'a> {
 }
 
 impl<'a> BareFrame<'a> {
-    pub fn new(
-        cnode: &'a CNodeCap<Global>,
-        pinned: &'a [SlotIdx],
-        cache: &'a TypedCache<Global>,
-    ) -> Self {
+    pub fn new(cnode: &'a CNodeCap, pinned: &'a [SlotIdx], cache: &'a CacheDirectory) -> Self {
         Self {
             main: MainFrame::new(cnode, pinned, cache),
         }
@@ -129,10 +128,10 @@ impl<'a> BareFrame<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use javm_cap::TypedCache;
+    use javm_cap::CacheDirectory;
 
-    fn empty_cache() -> TypedCache<Global> {
-        TypedCache::new_in(Global)
+    fn empty_cache() -> CacheDirectory {
+        CacheDirectory::new()
     }
 
     #[test]

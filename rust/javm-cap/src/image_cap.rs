@@ -1,38 +1,37 @@
-//! `ImageCap<A>` — talc-friendly Image cap.
+//! `ImageCap` — Image cap.
 //!
 //! Stores code, bitmask, jump_table, endpoints, mappings, and slot
-//! references as separate `Vec<T, A>` allocations. Allocation count
+//! references as separate `Vec<T>` allocations. Allocation count
 //! per ImageCap is bounded (seven Vecs, regardless of content size);
 //! we accept that in exchange for direct field accessors.
 
-use allocate::vec::Vec;
-use allocate::{Allocator, Global};
+use alloc::vec::Vec;
 
 use crate::slot::SlotIdx;
 
 use super::cap::{CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
 
 #[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
-pub struct ImageCap<A: Allocator + Clone = Global> {
+pub struct ImageCap {
     /// Bytecode bytes.
-    pub code: Vec<u8, A>,
+    pub code: Vec<u8>,
     /// Packed bit-per-byte instruction-start bitmask. Same layout
     /// as `crate::image::Image::packed_bitmask`.
-    pub bitmask: Vec<u8, A>,
+    pub bitmask: Vec<u8>,
     /// Jump-table entries (PVM PCs).
-    pub jump_table: Vec<u32, A>,
+    pub jump_table: Vec<u32>,
     /// Endpoint definitions. Stored as a dense array keyed by
     /// endpoint index — `endpoints[i].entry_pc == 0` means the
     /// endpoint at index `i` is not defined.
-    pub endpoints: Vec<EndpointDef, A>,
+    pub endpoints: Vec<EndpointDef>,
     /// Memory mappings.
-    pub mappings: Vec<MemoryMapping, A>,
+    pub mappings: Vec<MemoryMapping>,
     /// Pinned read-only slots (Cap::Data / Cap::Image). Images only
     /// ever reference content-addressed caps, so the target is a
     /// plain `CapHash`.
-    pub pinned: Vec<ImageSlotEntry, A>,
+    pub pinned: Vec<ImageSlotEntry>,
     /// Initial mutable slot state for non-pinned slots.
-    pub initial: Vec<ImageSlotEntry, A>,
+    pub initial: Vec<ImageSlotEntry>,
     /// Slot holding `Cap::Instance[YieldCatcher]`, if any.
     pub yield_marker_slot: Option<SlotIdx>,
 }
@@ -109,7 +108,7 @@ impl ssz::Encode for MemoryMapping {
     fn ssz_bytes_len(&self) -> usize {
         Self::SSZ_LEN
     }
-    fn ssz_append<A: allocate::Allocator + Clone>(&self, buf: &mut Vec<u8, A>) {
+    fn ssz_append(&self, buf: &mut alloc::vec::Vec<u8>) {
         buf.extend_from_slice(&self.start.to_le_bytes());
         buf.extend_from_slice(&self.size.to_le_bytes());
         for s in &self.source_path {
@@ -126,10 +125,7 @@ impl ssz::Decode for MemoryMapping {
     fn ssz_fixed_len() -> usize {
         Self::SSZ_LEN
     }
-    fn from_ssz_bytes_in<A: allocate::Allocator + Clone>(
-        bytes: &[u8],
-        _alloc: A,
-    ) -> Result<Self, ssz::DecodeError> {
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, ssz::DecodeError> {
         if bytes.len() != Self::SSZ_LEN {
             return Err(ssz::DecodeError::UnexpectedEof {
                 expected: Self::SSZ_LEN,
@@ -164,8 +160,7 @@ impl ssz::HashTreeRoot for MemoryMapping {
             // Treat the fixed-length path array as a `Vector<u32,
             // MAX_SOURCE_DEPTH>` for hashing: pack to bytes, merkleize
             // with `ceil(N*4/32)` chunks.
-            let mut buf: allocate::vec::Vec<u8, allocate::Global> =
-                allocate::vec::Vec::with_capacity_in(MAX_SOURCE_DEPTH * 4, allocate::Global);
+            let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(MAX_SOURCE_DEPTH * 4);
             for s in &self.source_path {
                 buf.extend_from_slice(&s.get().to_le_bytes());
             }
@@ -224,7 +219,7 @@ pub enum ImageConvertError {
     RegisterIndexOutOfRange(u8),
 }
 
-/// Build an [`ImageCap<A>`] from the SCALE-encoded [`crate::image::Image`]
+/// Build an [`ImageCap`] from the SCALE-encoded [`crate::image::Image`]
 /// shape. The Data content referenced by pinned and initial slots must
 /// already be published — pass the resolved `(SlotIdx, CapHash)` pairs
 /// in `pinned_hashes` and `initial_hashes`. The builder sorts both lists
@@ -244,26 +239,25 @@ pub enum ImageConvertError {
 ///   SP convention); `arg_cnode_slot` defaults to `SlotIdx(0)`.
 /// - `MemoryMapping.source: SlotPath` becomes `source_path: [SlotIdx;
 ///   MAX_SOURCE_DEPTH] + source_path_len`; paths deeper than 8 error.
-pub fn image_cap_in<A: Allocator + Clone>(
+pub fn image_cap(
     image: &crate::image::Image,
     pinned_hashes: &[(SlotIdx, CapHash)],
     initial_hashes: &[(SlotIdx, CapHash)],
-    alloc: A,
-) -> Result<ImageCap<A>, ImageConvertError> {
-    let mut code = Vec::with_capacity_in(image.code.len(), alloc.clone());
+) -> Result<ImageCap, ImageConvertError> {
+    let mut code = Vec::with_capacity(image.code.len());
     code.extend_from_slice(&image.code);
 
-    let mut bitmask = Vec::with_capacity_in(image.packed_bitmask.len(), alloc.clone());
+    let mut bitmask = Vec::with_capacity(image.packed_bitmask.len());
     bitmask.extend_from_slice(&image.packed_bitmask);
 
-    let mut jump_table = Vec::with_capacity_in(image.jump_table.len(), alloc.clone());
+    let mut jump_table = Vec::with_capacity(image.jump_table.len());
     for &j in &image.jump_table {
         jump_table.push(j);
     }
 
     // Endpoints: dense `MAX_ENDPOINTS`-sized array; empty entries have
     // `entry_pc == 0`.
-    let mut endpoints = Vec::with_capacity_in(MAX_ENDPOINTS, alloc.clone());
+    let mut endpoints = Vec::with_capacity(MAX_ENDPOINTS);
     for _ in 0..MAX_ENDPOINTS {
         endpoints.push(EndpointDef::empty());
     }
@@ -289,7 +283,7 @@ pub fn image_cap_in<A: Allocator + Clone>(
         };
     }
 
-    let mut mappings = Vec::with_capacity_in(image.memory_mappings.len(), alloc.clone());
+    let mut mappings = Vec::with_capacity(image.memory_mappings.len());
     for m in &image.memory_mappings {
         let steps = &m.source.steps;
         if steps.is_empty() {
@@ -310,8 +304,8 @@ pub fn image_cap_in<A: Allocator + Clone>(
         });
     }
 
-    let pinned = build_image_slot_vec(pinned_hashes, alloc.clone());
-    let initial = build_image_slot_vec(initial_hashes, alloc.clone());
+    let pinned = build_image_slot_vec(pinned_hashes);
+    let initial = build_image_slot_vec(initial_hashes);
 
     Ok(ImageCap {
         code,
@@ -325,13 +319,10 @@ pub fn image_cap_in<A: Allocator + Clone>(
     })
 }
 
-fn build_image_slot_vec<A: Allocator + Clone>(
-    pairs: &[(SlotIdx, CapHash)],
-    alloc: A,
-) -> Vec<ImageSlotEntry, A> {
-    let mut sorted: alloc::vec::Vec<(SlotIdx, CapHash)> = pairs.to_vec();
+fn build_image_slot_vec(pairs: &[(SlotIdx, CapHash)]) -> Vec<ImageSlotEntry> {
+    let mut sorted: Vec<(SlotIdx, CapHash)> = pairs.to_vec();
     sorted.sort_by_key(|(s, _)| *s);
-    let mut out = Vec::with_capacity_in(sorted.len(), alloc);
+    let mut out = Vec::with_capacity(sorted.len());
     for (slot, cap_hash) in &sorted {
         out.push(ImageSlotEntry {
             slot: *slot,

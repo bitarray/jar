@@ -16,8 +16,7 @@
 //! * byte 0 = `0` + payload bytes (Materialized)
 //! * byte 0 = `1` + 32 raw hash bytes (Missing)
 
-use allocate::Allocator;
-use allocate::vec::Vec;
+use alloc::vec::Vec;
 use core::fmt;
 use digest::Digest;
 use digest::typenum::U32;
@@ -73,7 +72,7 @@ impl<T: Encode> Encode for MissingOr<T> {
             Self::Missing(_) => 32,
         }
     }
-    fn ssz_append<A: Allocator + Clone>(&self, buf: &mut Vec<u8, A>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         match self {
             Self::Materialized(t) => {
                 buf.push(0);
@@ -94,16 +93,10 @@ impl<T: Decode> Decode for MissingOr<T> {
     fn ssz_fixed_len() -> usize {
         BYTES_PER_LENGTH_OFFSET
     }
-    fn from_ssz_bytes_in<A: Allocator + Clone>(
-        bytes: &[u8],
-        alloc: A,
-    ) -> Result<Self, DecodeError> {
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         let tag = read_slice(bytes, 0, 1)?[0];
         match tag {
-            0 => Ok(Self::Materialized(T::from_ssz_bytes_in(
-                &bytes[1..],
-                alloc,
-            )?)),
+            0 => Ok(Self::Materialized(T::from_ssz_bytes(&bytes[1..])?)),
             1 => {
                 if bytes.len() != 33 {
                     return Err(DecodeError::TrailingBytes {

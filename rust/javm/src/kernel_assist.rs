@@ -214,7 +214,7 @@ impl KernelAssist for InProcessKernelAssist {
     }
 
     fn host_open(&mut self, file_id: u64) -> Option<CapHashOrRef> {
-        self.files.get(&file_id).copied()
+        self.files.get(&file_id).cloned()
     }
 
     fn host_save(&mut self, data: CapHashOrRef, quota_id: u64, size: u64) -> Option<u64> {

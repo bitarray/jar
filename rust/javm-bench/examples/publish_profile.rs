@@ -20,14 +20,9 @@ fn main() {
 use std::time::Instant;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use allocate::Global;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use allocate::vec::Vec as AVec;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_cap::cap::Cap;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_cap::cap_hash::cap_hash;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_cap::image::Image;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -121,21 +116,17 @@ fn main() {
         let _ = std::hint::black_box(h.finalize());
     });
 
-    // (b) AVec<u8, Global> alloc + memcpy + drop — host heap baseline.
-    measure(
-        "(b) AVec<u8, Global> alloc + extend_from_slice + drop",
-        n,
-        || {
-            let mut v: AVec<u8, Global> = AVec::with_capacity_in(bytes.len(), Global);
-            v.extend_from_slice(bytes);
-            std::hint::black_box(&v);
-            drop(v);
-        },
-    );
+    // (b) Vec<u8> alloc + memcpy + drop — host heap baseline.
+    measure("(b) Vec<u8> alloc + extend_from_slice + drop", n, || {
+        let mut v: Vec<u8> = Vec::with_capacity(bytes.len());
+        v.extend_from_slice(bytes);
+        std::hint::black_box(&v);
+        drop(v);
+    });
 
     // (c) cap_hash(Cap::Data) — SSZ merkleize over the bytes, with Cap
     //     already built. Isolates the hash work from the alloc/copy.
-    let cap_data: Cap<Global> = Cap::data_inline_with_size(bytes, size_u64);
+    let cap_data: Cap = Cap::data_inline_with_size(bytes, size_u64);
     measure("(c) cap_hash(Cap::Data) on pre-built Cap", n, || {
         let h = cap_hash(&cap_data);
         std::hint::black_box(h);
@@ -144,7 +135,7 @@ fn main() {
     // (d) Full data_inline_with_size hit-path on Global: build
     //     Cap::Data + cap_hash + drop. Compare against the talc-backed (e).
     measure("(d) build Cap::Data(Global) + cap_hash + drop", n, || {
-        let cap: Cap<Global> = Cap::data_inline_with_size(bytes, size_u64);
+        let cap: Cap = Cap::data_inline_with_size(bytes, size_u64);
         let h = cap_hash(&cap);
         std::hint::black_box(h);
         drop(cap);
@@ -155,7 +146,7 @@ fn main() {
     //     iter) deep-clone into talc; subsequent iters hit the
     //     idempotent fast path. Difference vs (d) ≈ talc + idempotency
     //     short-circuit cost.
-    let data_cap_global: Cap<Global> = Cap::data_inline(bytes);
+    let data_cap_global: Cap = Cap::data_inline(bytes);
     measure("(e) Nub::put_cap(&data_cap) [idempotent re-put]", n, || {
         let _ = nub.put_cap(&data_cap_global).unwrap();
     });

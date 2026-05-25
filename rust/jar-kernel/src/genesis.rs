@@ -18,7 +18,7 @@
 use javm::{KernelImage, kernel_image_hash};
 use javm_cap::abi as cap_abi;
 use javm_cap::image::Image;
-use javm_cap::{CNodeCap, Cap, CapHash, CapHashOrRef, NUM_REGS, SlotIdx, TypedCache};
+use javm_cap::{CNodeCap, CacheDirectory, Cap, CapHash, CapHashOrRef, NUM_REGS, SlotIdx};
 
 use crate::abi;
 use crate::error::KernelError;
@@ -39,7 +39,7 @@ pub struct Genesis {
 /// the published cap's hash. The placeholder image blob is shared
 /// across all kernel unit caps and resolved at publish time.
 fn publish_kernel_unit_cap(
-    cache: &mut TypedCache,
+    cache: &mut CacheDirectory,
     image: KernelImage,
     placeholder_image_hash: CapHash,
     empty_cnode_hash: CapHash,
@@ -64,7 +64,7 @@ fn publish_kernel_unit_cap(
 /// factory and host-entry kernel caps where every chain Instance sees
 /// the same well-known cap.
 fn publish_kernel_stateless_cap(
-    cache: &mut TypedCache,
+    cache: &mut CacheDirectory,
     image: KernelImage,
     placeholder_image_hash: CapHash,
     empty_cnode_hash: CapHash,
@@ -236,7 +236,9 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     let root_cnode_hash = {
         let mut cnode = CNodeCap::new(8).map_err(KernelError::from)?;
         for (slot, target) in &entries {
-            cnode.set(*slot, Some(*target)).map_err(KernelError::from)?;
+            cnode
+                .set(*slot, Some(target.clone()))
+                .map_err(KernelError::from)?;
         }
         state.caps.put_cap(&Cap::CNode(cnode))?
     };
@@ -360,18 +362,18 @@ mod tests {
             .caps
             .get(CapHashOrRef::Hash(g.chain_instance_hash))
             .expect("chain instance present");
-        assert!(matches!(inst, Cap::Instance(_)));
+        assert!(matches!(&*inst, Cap::Instance(_)));
     }
 
     #[test]
     fn genesis_populates_root_cnode_with_kernel_caps() {
         let g = genesis(empty_chain_image()).expect("genesis");
-        let cn = match g
+        let cn_arc = g
             .state
             .caps
             .get(CapHashOrRef::Hash(g.root_cnode_hash))
-            .expect("root cnode present")
-        {
+            .expect("root cnode present");
+        let cn = match &*cn_arc {
             Cap::CNode(cn) => cn.clone(),
             _ => panic!("root cnode is not Cap::CNode"),
         };

@@ -10,7 +10,6 @@
 //! [`javm_exec::Interpreter::run`], and produces an
 //! [`InvocationResult`].
 
-use allocate::Global;
 use javm_cap::image_cap::ImageCap;
 use javm_cap::instance::InstanceCap;
 use javm_exec::{
@@ -70,8 +69,8 @@ impl Arch for LocalArch {
 /// `instance.mem_size` and seeded with each entry in
 /// `instance.rw_overlays` laid at its declared `start`.
 pub fn run_instance(
-    instance: &InstanceCap<Global>,
-    image: &ImageCap<Global>,
+    instance: &InstanceCap,
+    image: &ImageCap,
     endpoint_idx: u8,
     args: [u64; 4],
     initial_gas: u64,

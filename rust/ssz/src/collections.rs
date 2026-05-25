@@ -8,8 +8,7 @@
 //! roots, mix in length.
 
 use alloc::collections::BTreeMap;
-use allocate::vec::Vec;
-use allocate::{Allocator, Global};
+use alloc::vec::Vec;
 use digest::Digest;
 use digest::typenum::U32;
 
@@ -64,7 +63,7 @@ impl<A: Encode, B: Encode> Encode for (A, B) {
             total
         }
     }
-    fn ssz_append<Al: Allocator + Clone>(&self, buf: &mut Vec<u8, Al>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         if Self::is_ssz_fixed_len() {
             self.0.ssz_append(buf);
             self.1.ssz_append(buf);
@@ -74,11 +73,7 @@ impl<A: Encode, B: Encode> Encode for (A, B) {
     }
 }
 
-fn encode_container_pair<A: Encode, B: Encode, Al: Allocator + Clone>(
-    a: &A,
-    b: &B,
-    buf: &mut Vec<u8, Al>,
-) {
+fn encode_container_pair<A: Encode, B: Encode>(a: &A, b: &B, buf: &mut Vec<u8>) {
     // SSZ container layout: fixed-region first (with placeholders for
     // variable-field offsets), then variable-region.
     let a_fixed = if A::is_ssz_fixed_len() {
@@ -101,7 +96,7 @@ fn encode_container_pair<A: Encode, B: Encode, Al: Allocator + Clone>(
     // Field A.
     if A::is_ssz_fixed_len() {
         // Encode directly into the placeholder region.
-        let mut tmp: Vec<u8, Global> = Vec::new_in(Global);
+        let mut tmp: Vec<u8> = Vec::new();
         a.ssz_append(&mut tmp);
         debug_assert_eq!(tmp.len(), a_fixed);
         buf[start..start + a_fixed].copy_from_slice(&tmp);
@@ -119,7 +114,7 @@ fn encode_container_pair<A: Encode, B: Encode, Al: Allocator + Clone>(
     // Field B.
     let b_start = start + a_fixed;
     if B::is_ssz_fixed_len() {
-        let mut tmp: Vec<u8, Global> = Vec::new_in(Global);
+        let mut tmp: Vec<u8> = Vec::new();
         b.ssz_append(&mut tmp);
         debug_assert_eq!(tmp.len(), b_fixed);
         buf[b_start..b_start + b_fixed].copy_from_slice(&tmp);
@@ -140,10 +135,7 @@ impl<A: Decode, B: Decode> Decode for (A, B) {
             BYTES_PER_LENGTH_OFFSET
         }
     }
-    fn from_ssz_bytes_in<Al: Allocator + Clone>(
-        bytes: &[u8],
-        alloc: Al,
-    ) -> Result<Self, DecodeError> {
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         if Self::is_ssz_fixed_len() {
             let af = A::ssz_fixed_len();
             let bf = B::ssz_fixed_len();
@@ -153,18 +145,15 @@ impl<A: Decode, B: Decode> Decode for (A, B) {
                     actual: bytes.len(),
                 });
             }
-            let a = A::from_ssz_bytes_in(&bytes[..af], alloc.clone())?;
-            let b = B::from_ssz_bytes_in(&bytes[af..], alloc)?;
+            let a = A::from_ssz_bytes(&bytes[..af])?;
+            let b = B::from_ssz_bytes(&bytes[af..])?;
             return Ok((a, b));
         }
-        decode_container_pair::<A, B, Al>(bytes, alloc)
+        decode_container_pair::<A, B>(bytes)
     }
 }
 
-fn decode_container_pair<A: Decode, B: Decode, Al: Allocator + Clone>(
-    bytes: &[u8],
-    alloc: Al,
-) -> Result<(A, B), DecodeError> {
+fn decode_container_pair<A: Decode, B: Decode>(bytes: &[u8]) -> Result<(A, B), DecodeError> {
     let a_fixed = if A::is_ssz_fixed_len() {
         A::ssz_fixed_len()
     } else {
@@ -218,7 +207,7 @@ fn decode_container_pair<A: Decode, B: Decode, Al: Allocator + Clone>(
 
     // Decode A.
     let a_val = if A::is_ssz_fixed_len() {
-        A::from_ssz_bytes_in(&bytes[..a_fixed], alloc.clone())?
+        A::from_ssz_bytes(&bytes[..a_fixed])?
     } else {
         let start = a_var_off.unwrap();
         let end = b_var_off.unwrap_or(bytes.len());
@@ -229,12 +218,12 @@ fn decode_container_pair<A: Decode, B: Decode, Al: Allocator + Clone>(
                 fixed: fixed_region_size,
             });
         }
-        A::from_ssz_bytes_in(&bytes[start..end], alloc.clone())?
+        A::from_ssz_bytes(&bytes[start..end])?
     };
 
     // Decode B.
     let b_val = if B::is_ssz_fixed_len() {
-        B::from_ssz_bytes_in(&bytes[a_fixed..a_fixed + b_fixed], alloc)?
+        B::from_ssz_bytes(&bytes[a_fixed..a_fixed + b_fixed])?
     } else {
         let start = b_var_off.unwrap();
         let end = bytes.len();
@@ -245,7 +234,7 @@ fn decode_container_pair<A: Decode, B: Decode, Al: Allocator + Clone>(
                 fixed: fixed_region_size,
             });
         }
-        B::from_ssz_bytes_in(&bytes[start..end], alloc)?
+        B::from_ssz_bytes(&bytes[start..end])?
     };
 
     // Reject trailing bytes in the variable region.
@@ -285,7 +274,7 @@ impl<K: Encode + Ord, V: Encode> Encode for BTreeMap<K, V> {
             total
         }
     }
-    fn ssz_append<Al: Allocator + Clone>(&self, buf: &mut Vec<u8, Al>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         let elem_fixed = <(K, V) as Encode>::is_ssz_fixed_len();
         if elem_fixed {
             // List<(K, V)> with fixed element → simple concatenation.
@@ -298,7 +287,7 @@ impl<K: Encode + Ord, V: Encode> Encode for BTreeMap<K, V> {
             return;
         }
         // List<(K, V)> with variable element → offset table + payloads.
-        let entries: alloc::vec::Vec<(&K, &V)> = self.iter().collect();
+        let entries: Vec<(&K, &V)> = self.iter().collect();
         let header = entries.len() * BYTES_PER_LENGTH_OFFSET;
         let start = buf.len();
         buf.resize(start + header, 0u8);
@@ -345,11 +334,8 @@ impl<K: Decode + Ord, V: Decode> Decode for BTreeMap<K, V> {
     fn ssz_fixed_len() -> usize {
         BYTES_PER_LENGTH_OFFSET
     }
-    fn from_ssz_bytes_in<Al: Allocator + Clone>(
-        bytes: &[u8],
-        alloc: Al,
-    ) -> Result<Self, DecodeError> {
-        let entries: alloc::vec::Vec<(K, V)> = if <(K, V) as Decode>::is_ssz_fixed_len() {
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let entries: Vec<(K, V)> = if <(K, V) as Decode>::is_ssz_fixed_len() {
             let elem = <(K, V) as Decode>::ssz_fixed_len();
             if elem == 0 {
                 return Err(DecodeError::Custom(
@@ -363,24 +349,21 @@ impl<K: Decode + Ord, V: Decode> Decode for BTreeMap<K, V> {
                 });
             }
             let n = bytes.len() / elem;
-            let mut out = alloc::vec::Vec::with_capacity(n);
+            let mut out = Vec::with_capacity(n);
             for i in 0..n {
                 let s = i * elem;
-                out.push(<(K, V) as Decode>::from_ssz_bytes_in(
-                    &bytes[s..s + elem],
-                    alloc.clone(),
-                )?);
+                out.push(<(K, V) as Decode>::from_ssz_bytes(&bytes[s..s + elem])?);
             }
             out
         } else {
-            decode_var_collection::<(K, V), Al>(bytes, None, alloc)?
+            decode_var_collection::<(K, V)>(bytes, None)?
         };
 
         let mut map = BTreeMap::new();
         let mut prev: Option<&K> = None;
         // BTreeMap doesn't let us peek prev by reference cleanly while
         // inserting, so do the sorted-order check before insertion.
-        let mut staged: alloc::vec::Vec<(K, V)> = alloc::vec::Vec::with_capacity(entries.len());
+        let mut staged: Vec<(K, V)> = Vec::with_capacity(entries.len());
         for (k, v) in entries {
             if let Some(p) = prev
                 && &k <= p
@@ -399,7 +382,7 @@ impl<K: Decode + Ord, V: Decode> Decode for BTreeMap<K, V> {
 
 impl<K: HashTreeRoot + Ord + Encode, V: HashTreeRoot + Encode> HashTreeRoot for BTreeMap<K, V> {
     fn hash_tree_root<D: Digest<OutputSize = U32>>(&self) -> [u8; 32] {
-        let roots: alloc::vec::Vec<[u8; 32]> = self
+        let roots: Vec<[u8; 32]> = self
             .iter()
             .map(|(k, v)| {
                 let pair = [k.hash_tree_root::<D>(), v.hash_tree_root::<D>()];
@@ -424,7 +407,7 @@ impl<K: HashTreeRoot + Ord + Encode, V: HashTreeRoot + Encode> HashTreeRoot for 
 /// SCALE `u32` count-prefix cap (`1 << 32`).
 pub const MAX_VEC_LEN: u64 = 1u64 << 32;
 
-impl<T: Encode> Encode for alloc::vec::Vec<T> {
+impl<T: Encode> Encode for Vec<T> {
     fn is_ssz_fixed_len() -> bool {
         false
     }
@@ -442,7 +425,7 @@ impl<T: Encode> Encode for alloc::vec::Vec<T> {
             total
         }
     }
-    fn ssz_append<Al: Allocator + Clone>(&self, buf: &mut Vec<u8, Al>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         if T::is_ssz_fixed_len() {
             for item in self {
                 item.ssz_append(buf);
@@ -468,17 +451,14 @@ impl<T: Encode> Encode for alloc::vec::Vec<T> {
     }
 }
 
-impl<T: Decode> Decode for alloc::vec::Vec<T> {
+impl<T: Decode> Decode for Vec<T> {
     fn is_ssz_fixed_len() -> bool {
         false
     }
     fn ssz_fixed_len() -> usize {
         BYTES_PER_LENGTH_OFFSET
     }
-    fn from_ssz_bytes_in<Al: Allocator + Clone>(
-        bytes: &[u8],
-        alloc: Al,
-    ) -> Result<Self, DecodeError> {
+    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         if T::is_ssz_fixed_len() {
             let elem = T::ssz_fixed_len();
             if elem == 0 {
@@ -497,14 +477,14 @@ impl<T: Decode> Decode for alloc::vec::Vec<T> {
                     bound: MAX_VEC_LEN,
                 });
             }
-            let mut out = alloc::vec::Vec::with_capacity(n);
+            let mut out = Vec::with_capacity(n);
             for i in 0..n {
                 let s = i * elem;
-                out.push(T::from_ssz_bytes_in(&bytes[s..s + elem], alloc.clone())?);
+                out.push(T::from_ssz_bytes(&bytes[s..s + elem])?);
             }
             Ok(out)
         } else {
-            let out: alloc::vec::Vec<T> = decode_var_collection::<T, Al>(bytes, None, alloc)?;
+            let out: Vec<T> = decode_var_collection::<T>(bytes, None)?;
             if (out.len() as u64) > MAX_VEC_LEN {
                 return Err(DecodeError::BoundExceeded {
                     len: out.len() as u64,
@@ -516,11 +496,11 @@ impl<T: Decode> Decode for alloc::vec::Vec<T> {
     }
 }
 
-impl<T: HashTreeRoot + Encode> HashTreeRoot for alloc::vec::Vec<T> {
+impl<T: HashTreeRoot + Encode> HashTreeRoot for Vec<T> {
     fn hash_tree_root<D: Digest<OutputSize = U32>>(&self) -> [u8; 32] {
         let len = self.len() as u64;
         let inner_root = if T::is_basic_type() {
-            let mut buf: Vec<u8, Global> = Vec::new_in(Global);
+            let mut buf: Vec<u8> = Vec::new();
             for t in self {
                 t.ssz_append(&mut buf);
             }
@@ -529,139 +509,7 @@ impl<T: HashTreeRoot + Encode> HashTreeRoot for alloc::vec::Vec<T> {
             let chunk_limit = cap_bytes.div_ceil(32).max(1);
             merkleize::<D>(&chunks, chunk_limit)
         } else {
-            let roots: alloc::vec::Vec<[u8; 32]> =
-                self.iter().map(|t| t.hash_tree_root::<D>()).collect();
-            merkleize::<D>(&roots, (MAX_VEC_LEN as usize).max(1))
-        };
-        mix_in_length::<D>(inner_root, len)
-    }
-}
-
-// --------------------------------------------------------------------------
-// allocate::vec::Vec<T, A> — blanket SSZ impl
-//
-// Used by cap-resident shapes (DataCap, CNodeCap, ImageCap, InstanceCap, ...)
-// where storage must thread through `A: Allocator + Clone` so the values
-// can live in talc memory without bouncing through Global.
-//
-// Wire/hash semantics match `alloc::vec::Vec<T>` (cap = MAX_VEC_LEN).
-// Decode uses the storage allocator for the resulting Vec.
-// --------------------------------------------------------------------------
-
-impl<T: Encode, A: Allocator + Clone> Encode for Vec<T, A> {
-    fn is_ssz_fixed_len() -> bool {
-        false
-    }
-    fn ssz_fixed_len() -> usize {
-        BYTES_PER_LENGTH_OFFSET
-    }
-    fn ssz_bytes_len(&self) -> usize {
-        if T::is_ssz_fixed_len() {
-            T::ssz_fixed_len() * self.len()
-        } else {
-            let mut total = self.len() * BYTES_PER_LENGTH_OFFSET;
-            for item in self {
-                total += item.ssz_bytes_len();
-            }
-            total
-        }
-    }
-    fn ssz_append<Al: Allocator + Clone>(&self, buf: &mut Vec<u8, Al>) {
-        if T::is_ssz_fixed_len() {
-            for item in self {
-                item.ssz_append(buf);
-            }
-            return;
-        }
-        let n = self.len();
-        let header = n * BYTES_PER_LENGTH_OFFSET;
-        let start = buf.len();
-        buf.resize(start + header, 0u8);
-        let mut running = header as u32;
-        for (i, item) in self.iter().enumerate() {
-            let off_pos = start + i * BYTES_PER_LENGTH_OFFSET;
-            buf[off_pos..off_pos + 4].copy_from_slice(&running.to_le_bytes());
-            let before = buf.len();
-            item.ssz_append(buf);
-            let after = buf.len();
-            running = running
-                .checked_add((after - before) as u32)
-                .expect("ssz offset overflow");
-        }
-    }
-}
-
-impl<T: Decode, A: Allocator + Clone + Default> Decode for Vec<T, A> {
-    fn is_ssz_fixed_len() -> bool {
-        false
-    }
-    fn ssz_fixed_len() -> usize {
-        BYTES_PER_LENGTH_OFFSET
-    }
-    fn from_ssz_bytes_in<Al: Allocator + Clone>(
-        bytes: &[u8],
-        alloc: Al,
-    ) -> Result<Self, DecodeError> {
-        // Decode into a std Vec<T> via the existing helper, then move into a
-        // Vec<T, A> with A's default allocator. Callers that need a specific
-        // talc-backed A should use the typed `List<T, N, A>` instead.
-        let interim: alloc::vec::Vec<T> = if T::is_ssz_fixed_len() {
-            let elem = T::ssz_fixed_len();
-            if elem == 0 {
-                return Err(DecodeError::Custom("zero-sized fixed-length Vec element"));
-            }
-            if !bytes.len().is_multiple_of(elem) {
-                return Err(DecodeError::LengthMismatch {
-                    expected: bytes.len().div_ceil(elem) * elem,
-                    actual: bytes.len(),
-                });
-            }
-            let n = bytes.len() / elem;
-            if (n as u64) > MAX_VEC_LEN {
-                return Err(DecodeError::BoundExceeded {
-                    len: n as u64,
-                    bound: MAX_VEC_LEN,
-                });
-            }
-            let mut v = alloc::vec::Vec::with_capacity(n);
-            for i in 0..n {
-                let s = i * elem;
-                v.push(T::from_ssz_bytes_in(&bytes[s..s + elem], alloc.clone())?);
-            }
-            v
-        } else {
-            let v: alloc::vec::Vec<T> = decode_var_collection::<T, Al>(bytes, None, alloc)?;
-            if (v.len() as u64) > MAX_VEC_LEN {
-                return Err(DecodeError::BoundExceeded {
-                    len: v.len() as u64,
-                    bound: MAX_VEC_LEN,
-                });
-            }
-            v
-        };
-        let mut out: Vec<T, A> = Vec::with_capacity_in(interim.len(), A::default());
-        for t in interim {
-            out.push(t);
-        }
-        Ok(out)
-    }
-}
-
-impl<T: HashTreeRoot + Encode, A: Allocator + Clone> HashTreeRoot for Vec<T, A> {
-    fn hash_tree_root<D: Digest<OutputSize = U32>>(&self) -> [u8; 32] {
-        let len = self.len() as u64;
-        let inner_root = if T::is_basic_type() {
-            let mut buf: Vec<u8, Global> = Vec::new_in(Global);
-            for t in self {
-                t.ssz_append(&mut buf);
-            }
-            let chunks = crate::merkle::pack_bytes(&buf);
-            let cap_bytes = (MAX_VEC_LEN as usize).saturating_mul(T::ssz_fixed_len());
-            let chunk_limit = cap_bytes.div_ceil(32).max(1);
-            merkleize::<D>(&chunks, chunk_limit)
-        } else {
-            let roots: alloc::vec::Vec<[u8; 32]> =
-                self.iter().map(|t| t.hash_tree_root::<D>()).collect();
+            let roots: Vec<[u8; 32]> = self.iter().map(|t| t.hash_tree_root::<D>()).collect();
             merkleize::<D>(&roots, (MAX_VEC_LEN as usize).max(1))
         };
         mix_in_length::<D>(inner_root, len)

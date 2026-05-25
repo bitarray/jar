@@ -261,6 +261,87 @@ pub enum UpdateRegionError {
     MapMemory(#[from] MapMemoryError),
     #[error("VM unmap memory error: {0}")]
     UnmapMemory(#[from] UnmapMemoryError),
+    #[error("Fixed-VA snapshot mmap at {va:#x} failed: {err}")]
+    FixedVaMmap { va: u64, err: std::io::Error },
+}
+
+/// RAII handle over an mmap performed at a fixed host VA. Used to
+/// place the snapshot kernel-shadow at `GUEST_VA_BASE + KERNEL_OFFSET`
+/// inside the per-process reservation. Drop unmaps the region.
+#[derive(Debug)]
+pub(crate) struct FixedVaMapping {
+    base: usize,
+    size: usize,
+}
+
+// SAFETY: holds a raw pointer (`base`), but only as an integer index.
+// Concurrent reads of the mapped region by other code are this
+// struct's responsibility's caller — `FixedVaMapping` itself only
+// owns the unmap on Drop.
+unsafe impl Send for FixedVaMapping {}
+
+impl FixedVaMapping {
+    /// mmap `size` bytes at exactly `fixed_va` (rounded down to a
+    /// page boundary; size rounded up). The region must lie inside a
+    /// pre-reserved range, since we use `MAP_FIXED` to overlay it.
+    /// After mmap, copy `size` bytes from `src` into the new region.
+    fn new_with_contents(
+        fixed_va: u64,
+        size: usize,
+        src: *const u8,
+    ) -> Result<Self, UpdateRegionError> {
+        // SAFETY: mmap is a kernel call; result checked below.
+        let ptr = unsafe {
+            libc::mmap(
+                fixed_va as *mut libc::c_void,
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
+                -1,
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            return Err(UpdateRegionError::FixedVaMmap {
+                va: fixed_va,
+                err: std::io::Error::last_os_error(),
+            });
+        }
+        if ptr as u64 != fixed_va {
+            // SAFETY: ptr came from a successful mmap.
+            unsafe {
+                libc::munmap(ptr, size);
+            }
+            return Err(UpdateRegionError::FixedVaMmap {
+                va: fixed_va,
+                err: std::io::Error::other(format!(
+                    "MAP_FIXED returned unexpected address {:#x}",
+                    ptr as u64
+                )),
+            });
+        }
+        // SAFETY: src points to `size` valid bytes (the snapshot
+        // mapping); dst is a brand-new mmap of at least `size` bytes
+        // that nothing else references yet.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, ptr as *mut u8, size);
+        }
+        Ok(Self {
+            base: ptr as usize,
+            size,
+        })
+    }
+}
+
+impl Drop for FixedVaMapping {
+    fn drop(&mut self) {
+        // SAFETY: base/size came from a successful mmap and have not
+        // been freed otherwise (the field is private and only this
+        // Drop unmaps).
+        unsafe {
+            libc::munmap(self.base as *mut libc::c_void, self.size);
+        }
+    }
 }
 
 /// Errors that can occur when accessing the root page table state
@@ -372,13 +453,15 @@ pub(crate) struct HyperlightVm {
     // The current snapshot region, used to keep it alive as long as
     // it is used & when unmapping
     pub(super) snapshot_memory: Option<SnapshotSharedMemory<GuestSharedMemory>>,
+    /// Fixed-VA shadow mmap that holds a copy of the snapshot bytes at
+    /// `GUEST_VA_BASE + KERNEL_OFFSET`. KVM is pointed at this VA (not
+    /// the original snapshot mmap) so the host process can later read
+    /// the kernel through this region.
+    pub(super) snapshot_fixed_va: Option<FixedVaMapping>,
     pub(super) scratch_slot: u32, // The slot number used for the scratch region
     // The current scratch region, used to keep it alive as long as it
     // is used & when unmapping
     pub(super) scratch_memory: Option<GuestSharedMemory>,
-    /// Slot number reserved for the state cache region (installed
-    /// once during evolve via [`Self::install_cache_mapping`]).
-    pub(super) cache_slot: u32,
 
     pub(super) mmap_regions: Vec<(u32, MemoryRegion)>, // Later mapped regions (slot number, region)
 
@@ -407,13 +490,44 @@ impl HyperlightVm {
     /// Register the snapshot memory region with the VM. Called once
     /// during construction; post-Stage-F.CoW there is no rollback
     /// path that re-registers it.
+    ///
+    /// The snapshot's host VA is forced to
+    /// `guest_va_base() + KERNEL_OFFSET` (= the new
+    /// `SandboxMemoryLayout::KERNEL_HIGH_BASE`) by re-mmapping a fresh
+    /// page-aligned region at that fixed VA and copying the snapshot
+    /// bytes in. This sits inside the per-process reservation made by
+    /// [`nub_host_common::layout::reserve_guest_va_range`], so we can
+    /// safely use `MAP_FIXED` to overlay it.
     pub(crate) fn install_snapshot_mapping(
         &mut self,
         snapshot: SnapshotSharedMemory<GuestSharedMemory>,
     ) -> Result<(), UpdateRegionError> {
         let guest_base = crate::mem::layout::SandboxMemoryLayout::BASE_ADDRESS as u64;
-        let rgn = snapshot.mapping_at(guest_base, MemoryRegionType::Snapshot);
+        let orig_rgn = snapshot.mapping_at(guest_base, MemoryRegionType::Snapshot);
+
+        // The guest's kernel-shadow VA — also where the kernel was
+        // linked (link.x) and where the guest PT maps the kernel.
+        let fixed_va =
+            nub_host_common::layout::guest_va_base() + nub_host_common::layout::KERNEL_OFFSET;
+        let size = orig_rgn.host_region.end - orig_rgn.host_region.start;
+        let fixed = FixedVaMapping::new_with_contents(
+            fixed_va,
+            size,
+            orig_rgn.host_region.start as *const u8,
+        )?;
+
+        let rgn = MemoryRegion {
+            guest_region: orig_rgn.guest_region.clone(),
+            host_region: fixed.base..(fixed.base + fixed.size),
+            flags: orig_rgn.flags,
+            region_type: orig_rgn.region_type,
+        };
+
+        // Keep the original snapshot mmap alive (Drop'ing it would
+        // munmap the source); keep the fixed-VA shadow alive (Drop'ing
+        // it would munmap the region KVM is pointed at).
         self.snapshot_memory = Some(snapshot);
+        self.snapshot_fixed_va = Some(fixed);
         unsafe { self.vm.map_memory((self.snapshot_slot, &rgn))? };
         Ok(())
     }
@@ -428,34 +542,6 @@ impl HyperlightVm {
         let rgn = scratch.mapping_at(guest_base, MemoryRegionType::Scratch);
         self.scratch_memory = Some(scratch);
         unsafe { self.vm.map_memory((self.scratch_slot, &rgn))? };
-        Ok(())
-    }
-
-    /// Register a fixed-VA state-cache region with the VM. Called
-    /// once during sandbox evolve. `host_base` is the host VA returned
-    /// by the cache's `mmap`; `size` is the cache size; the GPA is
-    /// fixed at [`nub_host_common::cache::STATE_CACHE_GPA`]. The
-    /// guest's per-invocation paging code is expected to install a
-    /// matching GVA→GPA mapping at
-    /// [`nub_host_common::cache::STATE_CACHE_VA`].
-    pub(crate) fn install_cache_mapping(
-        &mut self,
-        host_base: usize,
-        size: usize,
-    ) -> Result<(), UpdateRegionError> {
-        let gpa = nub_host_common::cache::STATE_CACHE_GPA as usize;
-        let rgn = MemoryRegion {
-            guest_region: gpa..(gpa + size),
-            host_region: host_base..(host_base + size),
-            flags: MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
-            // No matching variant in V0; reuse `Scratch` since the
-            // semantics (mutable, host-owned, no PEB significance)
-            // are closest to scratch. A dedicated variant can land
-            // when crashdump/diag paths start caring.
-            region_type: MemoryRegionType::Scratch,
-        };
-        unsafe { self.vm.map_memory((self.cache_slot, &rgn))? };
-        self.mmap_regions.push((self.cache_slot, rgn));
         Ok(())
     }
 

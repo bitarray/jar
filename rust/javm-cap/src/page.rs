@@ -1,14 +1,13 @@
-//! `PageSlot<A>` and `PageRef<A>` — DataCap page storage.
+//! `PageSlot` and `PageRef` — DataCap page storage.
 //!
 //! Each page is owned by the DataCap that holds it. Sharing across
 //! DataCap CoW clones is done via [`PageRef`], a refcounted handle
-//! over [`PageBytes`] backed by the caller-supplied allocator. The
-//! cache subsystem doesn't index pages by hash — pages aren't
-//! first-class caps. They're internal to the DataCap layer.
+//! over [`PageBytes`] backed by the global allocator. The cache
+//! subsystem doesn't index pages by hash — pages aren't first-class
+//! caps. They're internal to the DataCap layer.
 
-use allocate::sync::Arc;
-use allocate::vec::Vec;
-use allocate::{Allocator, Global};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use super::cap::CapHash;
 
@@ -17,29 +16,29 @@ use super::cap::CapHash;
 /// `Missing` records the page's content hash so a host callback can
 /// later resolve it (V1: never observed — we always pre-publish).
 #[derive(Clone, Debug)]
-pub enum PageSlot<A: Allocator + Clone = Global> {
+pub enum PageSlot {
     Empty,
-    Loaded(PageRef<A>),
+    Loaded(PageRef),
     Missing(CapHash),
 }
 
-/// Refcounted handle to a [`PageBytes`] allocated by `A`. Plain
-/// `allocate::sync::Arc` alias for cap-layer readability.
-pub type PageRef<A> = Arc<PageBytes<A>, A>;
+/// Refcounted handle to a [`PageBytes`] allocated by the global
+/// allocator. Plain `std::sync::Arc` alias for cap-layer readability.
+pub type PageRef = Arc<PageBytes>;
 
 /// One page's bytes plus its precomputed content hash.
 ///
 /// Sharing across DataCap CoW clones is via [`PageRef`] (= `Arc`),
-/// which carries its own refcount in `ArcInner` — `PageBytes` itself
-/// is not refcounted.
+/// which carries its own refcount — `PageBytes` itself is not
+/// refcounted.
 #[derive(Debug)]
-pub struct PageBytes<A: Allocator + Clone = Global> {
+pub struct PageBytes {
     pub hash: CapHash,
-    pub bytes: Vec<u8, A>,
+    pub bytes: Vec<u8>,
 }
 
 // --------------------------------------------------------------------------
-// Hand-written SSZ impls for `PageSlot<A>` and `PageBytes<A>`.
+// Hand-written SSZ impls for `PageSlot` and `PageBytes`.
 //
 // `HashTreeRoot` is deliberately not derived: the pass-through semantics
 // are load-bearing for the substitution invariant. A `Loaded(page)` slot
@@ -48,17 +47,9 @@ pub struct PageBytes<A: Allocator + Clone = Global> {
 // page digest). A `derive(HashTreeRoot)` would mix in a selector byte and
 // break that equality.
 //
-// `Encode` is hand-written too — needed because `Vec<PageSlot<A>, A>:
-// HashTreeRoot` requires `PageSlot<A>: Encode` (the Vec impl uses
-// `is_ssz_fixed_len` / `is_basic_type` to pick its merkleization path).
-// The encoded form mirrors the standard SSZ Union: a selector byte plus
-// the variant payload. PageBytes encodes its `(hash, bytes)` pair. We
-// don't implement `Decode`: pages aren't wire-transmitted, and decoding
-// a `Loaded` variant would require allocator threading that isn't worth
-// the complexity for a never-exercised path.
 // --------------------------------------------------------------------------
 
-impl<A: Allocator + Clone> ssz::HashTreeRoot for PageSlot<A> {
+impl ssz::HashTreeRoot for PageSlot {
     fn hash_tree_root<D: ::ssz::digest::Digest<OutputSize = ::ssz::digest::typenum::U32>>(
         &self,
     ) -> [u8; 32] {
@@ -72,7 +63,7 @@ impl<A: Allocator + Clone> ssz::HashTreeRoot for PageSlot<A> {
     }
 }
 
-impl<A: Allocator + Clone> ssz::HashTreeRoot for PageBytes<A> {
+impl ssz::HashTreeRoot for PageBytes {
     fn hash_tree_root<D: ::ssz::digest::Digest<OutputSize = ::ssz::digest::typenum::U32>>(
         &self,
     ) -> [u8; 32] {
@@ -85,7 +76,7 @@ impl<A: Allocator + Clone> ssz::HashTreeRoot for PageBytes<A> {
     }
 }
 
-impl<A: Allocator + Clone> ssz::Encode for PageSlot<A> {
+impl ssz::Encode for PageSlot {
     fn is_ssz_fixed_len() -> bool {
         false
     }
@@ -99,7 +90,7 @@ impl<A: Allocator + Clone> ssz::Encode for PageSlot<A> {
             PageSlot::Missing(_) => 1 + 32,
         }
     }
-    fn ssz_append<Al: Allocator + Clone>(&self, buf: &mut Vec<u8, Al>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         match self {
             PageSlot::Empty => buf.push(0),
             PageSlot::Loaded(pr) => {
@@ -114,7 +105,7 @@ impl<A: Allocator + Clone> ssz::Encode for PageSlot<A> {
     }
 }
 
-impl<A: Allocator + Clone> ssz::Encode for PageBytes<A> {
+impl ssz::Encode for PageBytes {
     fn is_ssz_fixed_len() -> bool {
         false
     }
@@ -127,7 +118,7 @@ impl<A: Allocator + Clone> ssz::Encode for PageBytes<A> {
         // payload = bytes.len().
         32 + 4 + self.bytes.len()
     }
-    fn ssz_append<Al: Allocator + Clone>(&self, buf: &mut Vec<u8, Al>) {
+    fn ssz_append(&self, buf: &mut Vec<u8>) {
         // Field 0: hash (fixed, 32 bytes).
         // Field 1: bytes (variable, offset slot + payload).
         let fixed_region = 32 + 4;

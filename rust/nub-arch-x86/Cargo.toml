@@ -29,7 +29,6 @@ hyperlight-common = { version = "0.15", default-features = false }
 javm-cap = { path = "../javm-cap", default-features = false }
 javm-recompiler-x86 = { path = "../javm-recompiler-x86", default-features = false }
 javm-exec = { path = "../javm-exec", default-features = false }
-allocate = { path = "../allocate" }
 # Wire types shared between guest and host. The fn-id constants and
 # `Archive` / `Serialize` derives on `InvocationSpec` /
 # `InvocationResult` live here.
@@ -37,6 +36,12 @@ nub-arch-x86-abi = { path = "../nub-arch-x86-abi", default-features = false }
 nub-host-common = { path = "../nub-host-common", default-features = false }
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
 bytecheck = { version = "0.8", default-features = false }
+# Heap-resident `CACHE: Mutex<CacheDirectory<FixedState>>` lives in
+# `state_cache.rs`; spin gives us the `const fn` Mutex constructor
+# and foldhash gives us the `const fn` FixedState seed so the static
+# initialiser runs at link time.
+spin = "0.10"
+foldhash = { version = "0.2", default-features = false }
 
 [features]
 default = []

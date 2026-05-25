@@ -25,7 +25,6 @@
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use allocate::Global;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use javm_cap::image::{Image, PinnedCap};
 use javm_cap::slot::SlotIdx;
@@ -48,7 +47,7 @@ struct Built {
 fn build_and_publish(nub: &mut Nub) -> Built {
     let image = Image::from_ssz_bytes(BLOB).expect("decode data-recurse image");
 
-    let mut data_caps: Vec<(CapHash, Cap<Global>)> = Vec::new();
+    let mut data_caps: Vec<(CapHash, Cap)> = Vec::new();
     let mut pinned_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
     let mut initial_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
     for (slot, pinned) in &image.pinned_slots {
@@ -80,7 +79,7 @@ fn build_and_publish(nub: &mut Nub) -> Built {
     nub.put_cap_with_hash(image_hash, &image_cap)
         .expect("put image");
 
-    let mut cn = CNodeCap::<Global>::new(8).expect("cnode");
+    let mut cn = CNodeCap::new(8).expect("cnode");
     cn.set(
         SlotIdx(SLOT_IMAGE_RECURSE as u32),
         Some(CapHashOrRef::Hash(image_hash)),

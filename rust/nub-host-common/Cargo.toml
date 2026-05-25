@@ -20,10 +20,15 @@ anyhow = { version = "1", default-features = false }
 log = "0.4"
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
 bytecheck = { version = "0.8", default-features = false }
-spin = "0.10"
 thiserror = { version = "2", default-features = false }
 tracing = { version = "0.1", optional = true }
 tracing-core = { version = "0.1", default-features = false }
+
+# Host-only dependencies for `layout::reserve_guest_va_range` (mmap).
+# Gated by target_os so the no_std `target_os = "none"` guest build
+# doesn't pull libc.
+[target.'cfg(not(target_os = "none"))'.dependencies]
+libc = "0.2"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

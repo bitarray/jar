@@ -11,6 +11,8 @@
 //! 5. Translate `CallResult` → `EventOutcome`. Post-HALT, the call's
 //!    `post_instance_hash` becomes the new `chain_instance_hash`.
 
+use std::sync::Arc;
+
 use javm::{InProcessKernelAssist, Vm};
 use javm_cap::{Cap, CapHash, CapHashOrRef, SlotIdx};
 use javm_exec::ExitReason;
@@ -70,10 +72,10 @@ pub fn apply_event(
             .ok_or(KernelError::Invariant(
                 "apply_event: chain instance missing in cache",
             ))?;
-        match inst_cap {
+        match &*inst_cap {
             Cap::Instance(inst) => {
-                let cnode_hash = match inst.root_cnode {
-                    CapHashOrRef::Hash(h) => h,
+                let cnode_hash = match &inst.root_cnode {
+                    CapHashOrRef::Hash(h) => *h,
                     CapHashOrRef::Ref(_) => {
                         return Err(KernelError::Invariant(
                             "apply_event: chain instance root_cnode unsettled",
@@ -83,7 +85,7 @@ pub fn apply_event(
                 let overlays: Vec<(u32, Vec<u8>)> = inst
                     .rw_overlays
                     .iter()
-                    .map(|o| (o.start, o.bytes.iter().copied().collect::<Vec<u8>>()))
+                    .map(|o| (o.start, o.bytes.to_vec()))
                     .collect();
                 (
                     inst.image_hash_chain,
@@ -103,15 +105,24 @@ pub fn apply_event(
         }
     };
 
-    // CoW-promote the cnode and rebind slot[0].
-    let working_cnode_ref = state.caps.get_mut(CapHashOrRef::Hash(root_cnode_hash))?;
-    let cnode_mut =
-        match state
+    // CoW-promote the cnode: lazy clone via Arc::clone, then mutate
+    // through Arc::make_mut. The blob entry stays put; the new
+    // instance entry holds an Arc that's cloned-on-mutate.
+    let working_cnode_ref = state
+        .caps
+        .promote_blob_to_instance(&root_cnode_hash)
+        .ok_or(KernelError::Invariant(
+            "apply_event: chain root cnode not in blobs",
+        ))?;
+    let mut cnode_arc =
+        state
             .caps
-            .instance_mut(working_cnode_ref)
+            .get_instance(&working_cnode_ref)
             .ok_or(KernelError::Invariant(
                 "apply_event: promoted cnode missing in instances tier",
-            ))? {
+            ))?;
+    {
+        let cnode_mut = match Arc::make_mut(&mut cnode_arc) {
             Cap::CNode(cn) => cn,
             _ => {
                 return Err(KernelError::Invariant(
@@ -119,7 +130,9 @@ pub fn apply_event(
                 ));
             }
         };
-    cnode_mut.set(SlotIdx(0), Some(CapHashOrRef::Hash(payload_hash)))?;
+        cnode_mut.set(SlotIdx(0), Some(CapHashOrRef::Hash(payload_hash)))?;
+    }
+    state.caps.set_instance(&working_cnode_ref, cnode_arc)?;
 
     // Settle the cnode (graduates the entry back into blobs at its new
     // content hash).

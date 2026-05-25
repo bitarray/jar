@@ -23,8 +23,8 @@ use quote::{format_ident, quote};
 /// Emit the body of `ssz_append` for an anonymous SSZ container with the
 /// given field reference expressions / types.
 ///
-/// The emitted code expects `buf: &mut ::ssz::allocate::vec::Vec<u8, __A>` to
-/// be in scope and appends the container encoding (fixed region + variable
+/// The emitted code expects `buf: &mut ::ssz::__private::Vec<u8>` to be in
+/// scope and appends the container encoding (fixed region + variable
 /// payloads) to it.
 pub(crate) fn container_encode_body(accessors: &[TokenStream], tys: &[TokenStream]) -> TokenStream {
     debug_assert_eq!(accessors.len(), tys.len());
@@ -35,8 +35,8 @@ pub(crate) fn container_encode_body(accessors: &[TokenStream], tys: &[TokenStrea
 
     let tmp_idents: Vec<syn::Ident> = (0..n).map(|i| format_ident!("__field_{}", i)).collect();
 
-    // Pre-encode each field into a temporary Global-allocated buffer so we
-    // can compute offsets without re-running encode.
+    // Pre-encode each field into a temporary buffer so we can compute
+    // offsets without re-running encode.
     let pre_encode =
         accessors
             .iter()
@@ -44,8 +44,7 @@ pub(crate) fn container_encode_body(accessors: &[TokenStream], tys: &[TokenStrea
             .zip(tmp_idents.iter())
             .map(|((acc, ty), tmp)| {
                 quote! {
-                    let mut #tmp: ::ssz::allocate::vec::Vec<u8, ::ssz::allocate::Global> =
-                        ::ssz::allocate::vec::Vec::new_in(::ssz::allocate::Global);
+                    let mut #tmp: ::ssz::__private::Vec<u8> = ::ssz::__private::Vec::new();
                     <#ty as ssz::Encode>::ssz_append(#acc, &mut #tmp);
                 }
             });
@@ -129,8 +128,8 @@ pub(crate) fn container_bytes_len_expr(
 }
 
 /// Emit a statement block that decodes an anonymous SSZ container from
-/// `bytes: &[u8]` (in scope) using `alloc: __A` (in scope) and binds locals
-/// `__val_0 .. __val_{n-1}` of type `Option<T_i>` set to `Some(decoded)`.
+/// `bytes: &[u8]` (in scope) and binds locals `__val_0 .. __val_{n-1}` of
+/// type `Option<T_i>` set to `Some(decoded)`.
 ///
 /// Errors are reported via `return Err(...)` — callers should wrap this in a
 /// function returning `Result<_, ssz::DecodeError>`.
@@ -177,8 +176,8 @@ pub(crate) fn container_decode_body(tys: &[TokenStream]) -> TokenStream {
                             actual: bytes.len(),
                         });
                     }
-                    #val = Some(<#ty as ssz::Decode>::from_ssz_bytes_in(
-                        &bytes[__cursor..__cursor + __sz], alloc.clone(),
+                    #val = Some(<#ty as ssz::Decode>::from_ssz_bytes(
+                        &bytes[__cursor..__cursor + __sz],
                     )?);
                     __cursor += __sz;
                 } else {
@@ -233,8 +232,8 @@ pub(crate) fn container_decode_body(tys: &[TokenStream]) -> TokenStream {
                             prev: __start, curr: __end,
                         });
                     }
-                    #val = Some(<#ty as ssz::Decode>::from_ssz_bytes_in(
-                        &bytes[__start..__end], alloc.clone(),
+                    #val = Some(<#ty as ssz::Decode>::from_ssz_bytes(
+                        &bytes[__start..__end],
                     )?);
                 }
             }
@@ -246,8 +245,7 @@ pub(crate) fn container_decode_body(tys: &[TokenStream]) -> TokenStream {
         #(#pass1)*
         debug_assert_eq!(__cursor, __fixed_size);
 
-        let mut __var_positions: ::ssz::allocate::vec::Vec<(usize, usize)> =
-            ::ssz::allocate::vec::Vec::new();
+        let mut __var_positions: ::ssz::__private::Vec<(usize, usize)> = ::ssz::__private::Vec::new();
         #(#push_var_offs)*
         for __pair in __var_positions.windows(2) {
             if __pair[1].1 < __pair[0].1 {

@@ -49,16 +49,13 @@ use std::sync::Once;
 pub(crate) mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
 }
-/// The host-side state cache that backs `nub::Nub::publish_instance`
-/// and `Nub::invoke_cached`. Owns the mmap'd shared region + the
-/// `TalcLock` inside it.
-pub mod cache;
-#[cfg(test)]
-mod cache_tests;
 /// Dealing with errors, including errors across VM boundaries
 pub mod error;
 /// Wrappers for host and guest functions.
 pub mod func;
+/// Host-side read-only view of the guest's heap-resident cap
+/// directory (see [`guest_cache_reader::GuestCacheReader`]).
+pub mod guest_cache_reader;
 /// Wrappers for hypervisor implementations
 pub mod hypervisor;
 /// Functionality to establish and manage an individual sandbox's

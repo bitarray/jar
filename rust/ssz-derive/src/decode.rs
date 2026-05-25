@@ -30,11 +30,8 @@ pub fn derive_decode_impl(input: &DeriveInput) -> syn::Result<TokenStream> {
                             fn ssz_fixed_len() -> usize {
                                 <#ty as ssz::Decode>::ssz_fixed_len()
                             }
-                            fn from_ssz_bytes_in<__A: ::ssz::allocate::Allocator + Clone>(
-                                bytes: &[u8],
-                                alloc: __A,
-                            ) -> Result<Self, ssz::DecodeError> {
-                                Ok(#name(<#ty as ssz::Decode>::from_ssz_bytes_in(bytes, alloc)?))
+                            fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, ssz::DecodeError> {
+                                Ok(#name(<#ty as ssz::Decode>::from_ssz_bytes(bytes)?))
                             }
                         }
                     });
@@ -85,10 +82,7 @@ fn decode_struct(
                 impl #impl_generics ssz::Decode for #name #ty_generics #where_clause {
                     fn is_ssz_fixed_len() -> bool { true }
                     fn ssz_fixed_len() -> usize { 0 }
-                    fn from_ssz_bytes_in<__A: ::ssz::allocate::Allocator + Clone>(
-                        bytes: &[u8],
-                        _alloc: __A,
-                    ) -> Result<Self, ssz::DecodeError> {
+                    fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, ssz::DecodeError> {
                         if !bytes.is_empty() {
                             return Err(ssz::DecodeError::TrailingBytes {
                                 expected: 0, actual: bytes.len(),
@@ -196,7 +190,7 @@ fn decode_struct(
             quote! { #name(#(#parts),*) }
         };
         quote! {
-            let _ = bytes; let _ = alloc;
+            let _ = bytes;
             Ok(#bind)
         }
     } else {
@@ -215,10 +209,7 @@ fn decode_struct(
             fn ssz_fixed_len() -> usize {
                 #fixed_len
             }
-            fn from_ssz_bytes_in<__A: ::ssz::allocate::Allocator + Clone>(
-                bytes: &[u8],
-                alloc: __A,
-            ) -> Result<Self, ssz::DecodeError> {
+            fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, ssz::DecodeError> {
                 #decode_body
             }
         }
@@ -278,7 +269,7 @@ fn decode_enum(
                     #selector => {
                         let __payload = &bytes[1..];
                         Ok(#name::#vident(
-                            <#ty as ssz::Decode>::from_ssz_bytes_in(__payload, alloc)?,
+                            <#ty as ssz::Decode>::from_ssz_bytes(__payload)?,
                         ))
                     }
                 });
@@ -341,10 +332,7 @@ fn decode_enum(
             fn ssz_fixed_len() -> usize {
                 ssz::BYTES_PER_LENGTH_OFFSET
             }
-            fn from_ssz_bytes_in<__A: ::ssz::allocate::Allocator + Clone>(
-                bytes: &[u8],
-                alloc: __A,
-            ) -> Result<Self, ssz::DecodeError> {
+            fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, ssz::DecodeError> {
                 if bytes.is_empty() {
                     return Err(ssz::DecodeError::UnexpectedEof {
                         expected: 1, actual: 0,

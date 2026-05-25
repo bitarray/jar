@@ -1,10 +1,13 @@
 /* Linker script for the nub-arch-x86 guest kernel.
  *
- * Places the kernel at the canonical "negative 2 GiB" high VA used by
- * most modern OS kernels (Linux uses 0xFFFFFFFF80000000 as well). The
- * host's initial PT (rust/nub-host-kvm/src/sandbox/snapshot.rs) maps
- * the low GPA range [BASE_ADDRESS, ...) to this high GVA range via a
- * constant offset.
+ * Places the kernel at a canonical low-half VA inside the per-process
+ * GUEST_VA reservation (GUEST_VA_BASE_DEFAULT + KERNEL_OFFSET =
+ * 0x5000_0000_0000 + 0x1_4000_0000 = 0x5001_4000_0000). Low-half is
+ * required so the host process (user-space, can only see canonical
+ * low-half) can mmap-shadow the kernel at the same VA. The host's
+ * initial PT (rust/nub-host-kvm/src/sandbox/snapshot.rs) maps the
+ * low GPA range [BASE_ADDRESS, ...) to this GVA range via a constant
+ * offset.
  *
  * Stays within a single 512 GiB PML4 slot so per-invocation ring-3
  * PTs (rust/nub-arch-x86/src/paging.rs) can inherit the kernel half
@@ -14,7 +17,7 @@
 ENTRY(entrypoint)
 
 SECTIONS {
-    . = 0xFFFFFFFF80000000;
+    . = 0x500140000000;
     _kernel_start = .;
 
     /* ELF notes (hyperlight version note read by the host loader). */
@@ -38,6 +41,11 @@ SECTIONS {
 
     . = ALIGN(4096);
     .got     : { *(.got .got.plt) }
+    /* BootInfo lives in a named section so the host can resolve it
+     * by symbol lookup against the kernel ELF. Page-aligned so the
+     * host can mmap-shadow it if needed. */
+    . = ALIGN(4096);
+    .boot_info : { KEEP(*(.boot_info)) }
     .data    : { *(.data .data.*) }
     .bss     : { *(.bss .bss.* COMMON) }
 
