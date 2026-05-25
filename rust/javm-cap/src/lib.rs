@@ -25,6 +25,7 @@ pub mod error;
 pub mod hash;
 pub mod image;
 pub mod slot;
+#[doc(hidden)]
 pub mod wire;
 
 pub use cache::{CacheDirectory, CacheError, CapHashOrRef, CapRef};
@@ -36,6 +37,7 @@ pub use cap::image::{
 pub use cap::instance::{InstanceCap, RwOverlay};
 pub use cap::page::{PageBytes, PageRef, PageSlot};
 pub use cap::{Cap, CapHash, CapKind, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS, TypeCap};
+pub use cap::{WireCap, WireConvertError};
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash};
 pub use image::{

@@ -158,6 +158,182 @@ impl<R: SlotTarget> Cap<R> {
     }
 }
 
+/// Wire-form cap: a `Cap` whose nested slot targets are content-
+/// addressed hashes, not cache-local handles. `Ref` slot targets
+/// are structurally impossible at the type level. The rkyv
+/// `Archive`/`Serialize`/`Deserialize` impls live on this
+/// instantiation only — encoding a working-form cap is a compile
+/// error, not a runtime panic.
+///
+/// Conversion at the I/O boundary:
+/// - Outbound: [`Cap<CapHashOrRef>::try_into_wire`] walks the cap
+///   graph and errors if any nested target is a `Ref`.
+/// - Inbound: [`Cap<CapHash>::into_working`] lifts every nested
+///   hash into the [`CapHashOrRef::Hash`] arm (infallible).
+pub type WireCap = Cap<CapHash>;
+
+/// Failure mode for [`Cap::try_into_wire`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireConvertError {
+    /// A `CNode` slot or `Instance.root_cnode` held a
+    /// [`CapHashOrRef::Ref`] handle. Refs are cache-local lifetime
+    /// handles and have no resolution on the receive side — the
+    /// caller must `settle` the cap graph (or otherwise rewrite refs
+    /// to hashes) before crossing the wire.
+    CapHasRef,
+}
+
+impl core::fmt::Display for WireConvertError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            WireConvertError::CapHasRef => {
+                f.write_str("cap holds a CapHashOrRef::Ref target; settle before wire encode")
+            }
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for WireConvertError {}
+
+impl Cap<CapHashOrRef> {
+    /// Convert a working-form cap into wire form. Errors if the cap
+    /// graph still contains any [`CapHashOrRef::Ref`] target.
+    ///
+    /// This is the only step in the wire-encode pipeline that can
+    /// fail; once the cap is in wire form, rkyv encode is
+    /// infallible for shape (rkyv I/O errors aside).
+    pub fn try_into_wire(self) -> Result<Cap<CapHash>, WireConvertError> {
+        Ok(match self {
+            Cap::Instance(inst) => Cap::Instance(instance::InstanceCap {
+                image_hash_chain: inst.image_hash_chain,
+                image_hash: inst.image_hash,
+                root_cnode: hash_or_ref_to_hash(&inst.root_cnode)?,
+                rw_overlays: inst.rw_overlays,
+                mem_size: inst.mem_size,
+                regs: inst.regs,
+                pc: inst.pc,
+                gas_remaining: inst.gas_remaining,
+            }),
+            Cap::Image(i) => Cap::Image(i),
+            Cap::Data(d) => Cap::Data(d),
+            Cap::CNode(cn) => Cap::CNode(cnode_to_wire(cn)?),
+            Cap::Type(t) => Cap::Type(t),
+        })
+    }
+}
+
+impl Cap<CapHash> {
+    /// Lift a wire-form cap to working form. Every nested hash is
+    /// wrapped in [`CapHashOrRef::Hash`]. Infallible.
+    pub fn into_working(self) -> Cap<CapHashOrRef> {
+        match self {
+            Cap::Instance(inst) => Cap::Instance(instance::InstanceCap {
+                image_hash_chain: inst.image_hash_chain,
+                image_hash: inst.image_hash,
+                root_cnode: CapHashOrRef::Hash(inst.root_cnode),
+                rw_overlays: inst.rw_overlays,
+                mem_size: inst.mem_size,
+                regs: inst.regs,
+                pc: inst.pc,
+                gas_remaining: inst.gas_remaining,
+            }),
+            Cap::Image(i) => Cap::Image(i),
+            Cap::Data(d) => Cap::Data(d),
+            Cap::CNode(cn) => Cap::CNode(cnode_to_working(cn)),
+            Cap::Type(t) => Cap::Type(t),
+        }
+    }
+}
+
+fn hash_or_ref_to_hash(r: &CapHashOrRef) -> Result<CapHash, WireConvertError> {
+    match r {
+        CapHashOrRef::Hash(h) => Ok(*h),
+        CapHashOrRef::Ref(_) => Err(WireConvertError::CapHasRef),
+    }
+}
+
+fn cnode_to_wire(
+    cn: cnode::CNodeCap<CapHashOrRef>,
+) -> Result<cnode::CNodeCap<CapHash>, WireConvertError> {
+    let mut out = cnode::CNodeCap::<CapHash>::new(cn.size_log)
+        .expect("size_log fits (validated when cn was constructed)");
+    for (idx, entry) in cn.slots.iter() {
+        let new_entry = match entry {
+            ssz::MissingOr::Materialized(t) => {
+                ssz::MissingOr::Materialized(hash_or_ref_to_hash(t)?)
+            }
+            ssz::MissingOr::Missing(h) => ssz::MissingOr::Missing(*h),
+        };
+        out.slots
+            .insert(idx, new_entry)
+            .expect("slot index fits (validated when cn was constructed)");
+    }
+    Ok(out)
+}
+
+fn cnode_to_working(cn: cnode::CNodeCap<CapHash>) -> cnode::CNodeCap<CapHashOrRef> {
+    let mut out = cnode::CNodeCap::<CapHashOrRef>::new(cn.size_log)
+        .expect("size_log fits (validated when cn was constructed)");
+    for (idx, entry) in cn.slots.iter() {
+        let new_entry = match entry {
+            ssz::MissingOr::Materialized(h) => ssz::MissingOr::Materialized(CapHashOrRef::Hash(*h)),
+            ssz::MissingOr::Missing(h) => ssz::MissingOr::Missing(*h),
+        };
+        out.slots
+            .insert(idx, new_entry)
+            .expect("slot index fits (validated when cn was constructed)");
+    }
+    out
+}
+
+// --- rkyv impls for Cap<CapHash> (the wire form). ---
+//
+// Delegated to a `pub(crate)` `CapRepr` shape that derives rkyv. The
+// in-memory `Cap<CapHash>` has fields that don't derive rkyv
+// (`SparseList<CapHash, _>` inside `CNodeCap`, `Arc<PageBytes>` inside
+// `PageSlot::Loaded`); the repr flattens those to plain `Vec<…>`
+// forms. Conversion to/from repr is a tree walk; conversion happens
+// at archive/serialize/deserialize time. We pay the walk so callers
+// can write `rkyv::to_bytes(&cap)` directly.
+
+impl rkyv::Archive for Cap<CapHash> {
+    type Archived = <crate::wire::CapRepr as rkyv::Archive>::Archived;
+    type Resolver = <crate::wire::CapRepr as rkyv::Archive>::Resolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        crate::wire::CapRepr::from_cap(self).resolve(resolver, out)
+    }
+}
+
+impl<S> rkyv::Serialize<S> for Cap<CapHash>
+where
+    S: rkyv::rancor::Fallible + ?Sized,
+    crate::wire::CapRepr: rkyv::Serialize<S>,
+{
+    fn serialize(
+        &self,
+        serializer: &mut S,
+    ) -> Result<Self::Resolver, <S as rkyv::rancor::Fallible>::Error> {
+        crate::wire::CapRepr::from_cap(self).serialize(serializer)
+    }
+}
+
+impl<D> rkyv::Deserialize<Cap<CapHash>, D> for <crate::wire::CapRepr as rkyv::Archive>::Archived
+where
+    D: rkyv::rancor::Fallible + ?Sized,
+    <crate::wire::CapRepr as rkyv::Archive>::Archived: rkyv::Deserialize<crate::wire::CapRepr, D>,
+{
+    fn deserialize(
+        &self,
+        deserializer: &mut D,
+    ) -> Result<Cap<CapHash>, <D as rkyv::rancor::Fallible>::Error> {
+        let repr: crate::wire::CapRepr =
+            rkyv::Deserialize::<crate::wire::CapRepr, D>::deserialize(self, deserializer)?;
+        Ok(repr.into_cap())
+    }
+}
+
 // Constructors that produce the working form (`Cap<CapHashOrRef>`).
 // `instance_with_overlays` mints a `CapHashOrRef::Hash(_)` for the
 // `root_cnode` field so it's specifically a working cap, not a generic.

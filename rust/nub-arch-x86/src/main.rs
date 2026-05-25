@@ -50,8 +50,8 @@ mod state_cache;
 mod guest {
     use alloc::vec::Vec;
     use hyperlight_guest_bin::guest_function;
+    use javm_cap::WireCap;
     use javm_cap::cap::Cap;
-    use javm_cap::wire::WireCap;
     #[cfg(feature = "heap-diag")]
     use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
     use nub_arch_x86_abi::{
@@ -139,14 +139,15 @@ mod guest {
     }
 
     /// Heap-resident cap-directory publisher. Decodes the
-    /// rkyv-archived [`WireCap`] payload, converts it back into a
-    /// [`Cap`], and inserts it into [`crate::state_cache::CACHE`] via
+    /// rkyv-archived [`WireCap`] payload (= `Cap<CapHash>`), lifts
+    /// it to the working form via
+    /// [`Cap::into_working`](javm_cap::cap::Cap::into_working), and
+    /// inserts it into [`crate::state_cache::CACHE`] via
     /// [`javm_cap::cache::CacheDirectory::put_cap`].
     ///
-    /// On any decode/conversion failure we return a sentinel
-    /// `CapHash` of all-`0xFF`. The host's `MultiUseSandbox::put_cap`
-    /// helper compares against this sentinel and surfaces a typed
-    /// error.
+    /// On any decode failure we return a sentinel `CapHash` of
+    /// all-`0xFF`. The host's `MultiUseSandbox::put_cap` helper
+    /// compares against this sentinel and surfaces a typed error.
     #[guest_function(fn_id = FN_ID_NUB_PUT_CAP)]
     pub fn nub_put_cap(payload: &[u8]) -> Vec<u8> {
         // Lazy first-call boot-info patch. `init_directory_va` is
@@ -161,10 +162,7 @@ mod guest {
             Ok(w) => w,
             Err(_) => return error_hash_sentinel(),
         };
-        let cap: Cap = match wire.into_cap() {
-            Ok(c) => c,
-            Err(_) => return error_hash_sentinel(),
-        };
+        let cap: Cap = wire.into_working();
         let hash = match crate::state_cache::CACHE.put_cap(&cap) {
             Ok(h) => h,
             Err(_) => return error_hash_sentinel(),

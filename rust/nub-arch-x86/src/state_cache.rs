@@ -5,8 +5,9 @@
 //! The cap store is a `CacheDirectory<FixedState>` that lives entirely
 //! in the guest's talc heap. The host populates blobs via the
 //! [`FN_ID_NUB_PUT_CAP`](nub_arch_x86_abi::FN_ID_NUB_PUT_CAP) RPC:
-//! ship a [`WireCap`](javm_cap::wire::WireCap) payload, the guest
-//! decodes + inserts via [`CacheDirectory::put_cap`]. Kernel-derived
+//! ship a [`WireCap`](javm_cap::WireCap) payload (= `Cap<CapHash>`),
+//! the guest decodes + lifts to working form + inserts via
+//! [`CacheDirectory::put_cap`]. Kernel-derived
 //! sub-VM instances are published via
 //! [`CacheDirectory::put_instance`], which returns a `CapRef` handle
 //! whose `Arc::strong_count` tracks the holders.

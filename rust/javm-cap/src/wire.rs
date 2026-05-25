@@ -1,84 +1,58 @@
-//! Wire-form caps for the host ↔ guest `put_cap` RPC.
+//! Internal rkyv-archive representation backing `Cap<CapHash>`.
 //!
-//! [`Cap`] and its inner types use the SSZ derive macro for content
-//! hashing and carry rkyv-incompatible fields (`SparseList` in
-//! [`CNodeCap`], `Arc<PageBytes>` in `PageSlot::Loaded`). Adding
-//! rkyv derives there would either require hand-written `Archive` /
-//! `Serialize` / `Deserialize` impls for those types or a
-//! transformation wrapper. We pick a third option: a sibling enum
-//! whose shape mirrors `Cap` but flattens or omits the unsupported
-//! fields, with explicit `From<&Cap>` / `TryInto<Cap>` conversions
-//! at the wire boundary.
+//! `Cap<CapHash>` (the wire form of [`Cap`]) holds shapes that don't
+//! derive rkyv directly — [`SparseList`](ssz::SparseList) inside
+//! [`CNodeCap`], `Arc<PageBytes>` inside `PageSlot::Loaded`. This
+//! module defines a parallel `*Repr` type tree whose shape mirrors
+//! `Cap<CapHash>` but flattens those fields into plain `Vec<…>`
+//! shapes that derive `rkyv::{Archive, Serialize, Deserialize}`
+//! cleanly. The hand-rolled `rkyv` impls on `Cap<CapHash>` in
+//! [`crate::cap`] delegate to these `*Repr` types — callers write
+//! `rkyv::to_bytes::<_, _>(&cap)` directly.
 //!
-//! ## V0 limitations
+//! The conversion is infallible in both directions because
+//! `Cap<CapHash>` is structurally Ref-free (no `CapHashOrRef::Ref`
+//! variant exists when `R = CapHash`).
 //!
-//! - **`WireCap::CNode` only carries materialized `Hash` slot
-//!   entries.** `SparseList` cached-subtree-roots and
-//!   `MissingOr::Missing(_)` placeholders are dropped on the wire;
-//!   the receiver reconstructs a fresh [`CNodeCap`] without them.
-//!   `Ref(_)` slot targets are rejected (`WireConvertError::CapHasRef`)
-//!   because the receiver has no way to resolve them in its own
-//!   `CapRef` namespace.
-//! - **`WireCap::Data` only supports `DataContent::Inline`.** The
-//!   `Paged` variant errors out (`WireConvertError::PagedData`) —
-//!   `PageRef = Arc<PageBytes>` doesn't archive cleanly and the V0
-//!   bench guests don't need it.
-//! - **`WireCap::Instance` only carries `Hash` `root_cnode`** (no
-//!   live `Ref` targets, same reasoning as CNode).
+//! ## Wire shape vs in-memory shape
 //!
-//! These limits cover the smoke-test path (Image + empty CNode +
-//! Instance with no rw_overlays containing Refs) and are tightened
-//! at the type level: the wire types simply don't have fields for
-//! the unsupported shapes.
+//! - `CNodeCap<CapHash>`'s `SparseList` flattens to `Vec<CNodeSlotRepr>`
+//!   carrying both materialized `Hash` entries and `Missing(hash)`
+//!   placeholders. The wire preserves sparsity — only populated slots
+//!   travel, not the full `2^size_log` table.
+//! - `DataCap`'s `Paged` arm flattens to `Vec<PageSlotRepr>` with one
+//!   entry per non-empty page. `PageSlot::Loaded(Arc<PageBytes>)`
+//!   inlines the byte slab into the repr; receiver wraps in a fresh
+//!   `Arc`. `PageSlot::Empty` pages omit their entry entirely
+//!   (sparse).
+//! - Every other field is a direct mirror.
 
-use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use crate::cache::CapHashOrRef;
 use crate::cap::cnode::CNodeCap;
-use crate::cap::data::{DataCap, DataContent};
+use crate::cap::data::{DataCap, DataContent, alloc_page_aligned_zeroed};
 use crate::cap::image::{EndpointDef, ImageCap, ImageSlotEntry, MemoryMapping};
 use crate::cap::instance::{InstanceCap, RwOverlay};
-use crate::cap::{Cap, NUM_REGS, TypeCap};
+use crate::cap::page::{PageBytes, PageSlot};
+use crate::cap::{Cap, CapHash, NUM_REGS, TypeCap};
 use crate::slot::SlotIdx;
 
-/// Failures the wire-form conversion can produce. All non-fatal:
-/// they indicate the cap shape isn't supported on the V0 RPC path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WireConvertError {
-    /// A `Cap` field held a `CapHashOrRef::Ref(_)` target. The
-    /// receiver has no way to resolve refs in its own `CapRef`
-    /// namespace, so refs are rejected.
-    CapHasRef,
-    /// A `Cap::Data` carried a `DataContent::Paged` body. V0 doesn't
-    /// serialise paged data.
-    PagedData,
-    /// A `Cap::CNode` carried a `MissingOr::Missing(_)` placeholder.
-    /// The wire form only carries materialized slot entries.
-    CNodeMissingSlot,
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub enum CapRepr {
+    Instance(InstanceCapRepr),
+    Image(ImageCapRepr),
+    Data(DataCapRepr),
+    CNode(CNodeCapRepr),
+    Type(TypeCapRepr),
 }
 
-/// Wire-shaped cap. Derives `rkyv::{Archive, Serialize, Deserialize}`
-/// using only `alloc::Vec`/`Box` and plain `repr(C)` fields. The
-/// shape mirrors [`Cap`] but with the constraints called out in the
-/// module docs.
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub enum WireCap {
-    Instance(WireInstanceCap),
-    Image(WireImageCap),
-    Data(WireDataCap),
-    CNode(WireCNodeCap),
-    Type(WireTypeCap),
-}
-
-/// Wire form of [`InstanceCap`]. `root_cnode` collapses
-/// [`CapHashOrRef`] down to a plain hash (V0: refs unsupported).
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct WireInstanceCap {
-    pub image_hash_chain: [u8; 32],
-    pub image_hash: [u8; 32],
-    pub root_cnode_hash: [u8; 32],
-    pub rw_overlays: Vec<WireRwOverlay>,
+pub struct InstanceCapRepr {
+    pub image_hash_chain: CapHash,
+    pub image_hash: CapHash,
+    pub root_cnode_hash: CapHash,
+    pub rw_overlays: Vec<RwOverlayRepr>,
     pub mem_size: u32,
     pub regs: [u64; NUM_REGS],
     pub pc: u64,
@@ -86,27 +60,25 @@ pub struct WireInstanceCap {
 }
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct WireRwOverlay {
+pub struct RwOverlayRepr {
     pub start: u32,
     pub bytes: Vec<u8>,
 }
 
-/// Wire form of [`ImageCap`]. Direct field-for-field mirror — all
-/// inner types are derive-compatible already.
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct WireImageCap {
+pub struct ImageCapRepr {
     pub code: Vec<u8>,
     pub bitmask: Vec<u8>,
     pub jump_table: Vec<u32>,
-    pub endpoints: Vec<WireEndpointDef>,
-    pub mappings: Vec<WireMemoryMapping>,
-    pub pinned: Vec<WireImageSlotEntry>,
-    pub initial: Vec<WireImageSlotEntry>,
+    pub endpoints: Vec<EndpointDefRepr>,
+    pub mappings: Vec<MemoryMappingRepr>,
+    pub pinned: Vec<ImageSlotEntryRepr>,
+    pub initial: Vec<ImageSlotEntryRepr>,
     pub yield_marker_slot: Option<u32>,
 }
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct WireEndpointDef {
+pub struct EndpointDefRepr {
     pub entry_pc: u64,
     pub stack_top: u64,
     pub arg_cnode_slot: u32,
@@ -115,7 +87,7 @@ pub struct WireEndpointDef {
 }
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct WireMemoryMapping {
+pub struct MemoryMappingRepr {
     pub start: u64,
     pub size: u64,
     pub source_path: Vec<u32>,
@@ -123,95 +95,113 @@ pub struct WireMemoryMapping {
 }
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct WireImageSlotEntry {
+pub struct ImageSlotEntryRepr {
     pub slot: u32,
-    pub cap_hash: [u8; 32],
+    pub cap_hash: CapHash,
 }
 
-/// Wire form of [`DataCap`]. V0: inline-only.
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct WireDataCap {
-    pub bytes: Vec<u8>,
+pub enum DataCapRepr {
+    Inline(Vec<u8>),
+    Paged {
+        page_size: u32,
+        total_pages: u32,
+        /// Sparse: only non-`Empty` pages travel. Receiver fills the
+        /// gaps with `PageSlot::Empty` up to `total_pages`.
+        pages: Vec<PageSlotRepr>,
+    },
 }
 
-/// Wire form of [`CNodeCap`]. Flat list of `(slot, hash)` pairs;
-/// only materialized `Hash` slot entries are carried.
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct WireCNodeCap {
+pub struct PageSlotRepr {
+    pub index: u32,
+    pub data: PageDataRepr,
+}
+
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub enum PageDataRepr {
+    /// Page bytes inlined; receiver wraps in a fresh `Arc`.
+    Loaded { hash: CapHash, bytes: Vec<u8> },
+    /// Subtree-hash placeholder.
+    Missing(CapHash),
+}
+
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct CNodeCapRepr {
     pub size_log: u8,
-    pub slots: Vec<WireCNodeSlot>,
+    /// Sparse: only populated slots travel. Receiver reconstructs a
+    /// fresh `SparseList` of the same logical capacity.
+    pub slots: Vec<CNodeSlotRepr>,
 }
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct WireCNodeSlot {
+pub struct CNodeSlotRepr {
     pub slot: u32,
-    pub cap_hash: [u8; 32],
+    pub entry: CNodeEntryRepr,
 }
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct WireTypeCap {
-    pub image_hash_chain: [u8; 32],
+pub enum CNodeEntryRepr {
+    Materialized(CapHash),
+    Missing(CapHash),
+}
+
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct TypeCapRepr {
+    pub image_hash_chain: CapHash,
 }
 
 // --- Conversions ---
 
-impl WireCap {
-    /// Build a wire form from a borrowed [`Cap`]. The cap is read but
-    /// not mutated; the wire form owns its own allocations.
-    pub fn from_cap(cap: &Cap) -> Result<Self, WireConvertError> {
-        Ok(match cap {
-            Cap::Instance(i) => WireCap::Instance(WireInstanceCap::from_instance(i)?),
-            Cap::Image(i) => WireCap::Image(WireImageCap::from_image(i)),
-            Cap::Data(d) => WireCap::Data(WireDataCap::from_data(d)?),
-            Cap::CNode(c) => WireCap::CNode(WireCNodeCap::from_cnode(c)?),
-            Cap::Type(t) => WireCap::Type(WireTypeCap {
+impl CapRepr {
+    pub fn from_cap(cap: &Cap<CapHash>) -> Self {
+        match cap {
+            Cap::Instance(i) => CapRepr::Instance(InstanceCapRepr::from_instance(i)),
+            Cap::Image(i) => CapRepr::Image(ImageCapRepr::from_image(i)),
+            Cap::Data(d) => CapRepr::Data(DataCapRepr::from_data(d)),
+            Cap::CNode(c) => CapRepr::CNode(CNodeCapRepr::from_cnode(c)),
+            Cap::Type(t) => CapRepr::Type(TypeCapRepr {
                 image_hash_chain: t.image_hash_chain,
             }),
-        })
+        }
     }
 
-    /// Recover an owned [`Cap`] from this wire form. Allocates fresh
-    /// storage in the caller's allocator.
-    pub fn into_cap(self) -> Result<Cap, WireConvertError> {
-        Ok(match self {
-            WireCap::Instance(i) => Cap::Instance(i.into_instance()),
-            WireCap::Image(i) => Cap::Image(i.into_image()),
-            WireCap::Data(d) => Cap::Data(d.into_data()),
-            WireCap::CNode(c) => Cap::CNode(c.into_cnode()?),
-            WireCap::Type(t) => Cap::Type(TypeCap {
+    pub fn into_cap(self) -> Cap<CapHash> {
+        match self {
+            CapRepr::Instance(i) => Cap::Instance(i.into_instance()),
+            CapRepr::Image(i) => Cap::Image(i.into_image()),
+            CapRepr::Data(d) => Cap::Data(d.into_data()),
+            CapRepr::CNode(c) => Cap::CNode(c.into_cnode()),
+            CapRepr::Type(t) => Cap::Type(TypeCap {
                 image_hash_chain: t.image_hash_chain,
             }),
-        })
+        }
     }
 }
 
-impl WireInstanceCap {
-    fn from_instance(inst: &InstanceCap) -> Result<Self, WireConvertError> {
-        let root_cnode_hash = match inst.root_cnode {
-            CapHashOrRef::Hash(h) => h,
-            CapHashOrRef::Ref(_) => return Err(WireConvertError::CapHasRef),
-        };
+impl InstanceCapRepr {
+    fn from_instance(inst: &InstanceCap<CapHash>) -> Self {
         let rw_overlays = inst
             .rw_overlays
             .iter()
-            .map(|ov| WireRwOverlay {
+            .map(|ov| RwOverlayRepr {
                 start: ov.start,
                 bytes: ov.bytes.clone(),
             })
             .collect();
-        Ok(Self {
+        Self {
             image_hash_chain: inst.image_hash_chain,
             image_hash: inst.image_hash,
-            root_cnode_hash,
+            root_cnode_hash: inst.root_cnode,
             rw_overlays,
             mem_size: inst.mem_size,
             regs: inst.regs,
             pc: inst.pc,
             gas_remaining: inst.gas_remaining,
-        })
+        }
     }
 
-    fn into_instance(self) -> InstanceCap {
+    fn into_instance(self) -> InstanceCap<CapHash> {
         let rw_overlays = self
             .rw_overlays
             .into_iter()
@@ -223,7 +213,7 @@ impl WireInstanceCap {
         InstanceCap {
             image_hash_chain: self.image_hash_chain,
             image_hash: self.image_hash,
-            root_cnode: CapHashOrRef::Hash(self.root_cnode_hash),
+            root_cnode: self.root_cnode_hash,
             rw_overlays,
             mem_size: self.mem_size,
             regs: self.regs,
@@ -233,12 +223,12 @@ impl WireInstanceCap {
     }
 }
 
-impl WireImageCap {
+impl ImageCapRepr {
     fn from_image(img: &ImageCap) -> Self {
         let endpoints = img
             .endpoints
             .iter()
-            .map(|e| WireEndpointDef {
+            .map(|e| EndpointDefRepr {
                 entry_pc: e.entry_pc,
                 stack_top: e.stack_top,
                 arg_cnode_slot: e.arg_cnode_slot.get(),
@@ -249,7 +239,7 @@ impl WireImageCap {
         let mappings = img
             .mappings
             .iter()
-            .map(|m| WireMemoryMapping {
+            .map(|m| MemoryMappingRepr {
                 start: m.start,
                 size: m.size,
                 source_path: m.source_path.iter().map(|s| s.get()).collect(),
@@ -259,7 +249,7 @@ impl WireImageCap {
         let pinned = img
             .pinned
             .iter()
-            .map(|e| WireImageSlotEntry {
+            .map(|e| ImageSlotEntryRepr {
                 slot: e.slot.get(),
                 cap_hash: e.cap_hash,
             })
@@ -267,7 +257,7 @@ impl WireImageCap {
         let initial = img
             .initial
             .iter()
-            .map(|e| WireImageSlotEntry {
+            .map(|e| ImageSlotEntryRepr {
                 slot: e.slot.get(),
                 cap_hash: e.cap_hash,
             })
@@ -344,98 +334,115 @@ impl WireImageCap {
     }
 }
 
-impl WireDataCap {
-    fn from_data(d: &DataCap) -> Result<Self, WireConvertError> {
+impl DataCapRepr {
+    fn from_data(d: &DataCap) -> Self {
         match &d.content {
-            DataContent::Inline(bytes) => Ok(Self {
-                bytes: bytes.clone(),
-            }),
-            DataContent::Paged { .. } => Err(WireConvertError::PagedData),
+            DataContent::Inline(bytes) => DataCapRepr::Inline(bytes.clone()),
+            DataContent::Paged { page_size, pages } => {
+                let mut sparse: Vec<PageSlotRepr> = Vec::new();
+                for (i, slot) in pages.iter().enumerate() {
+                    match slot {
+                        PageSlot::Empty => {}
+                        PageSlot::Loaded(arc) => sparse.push(PageSlotRepr {
+                            index: i as u32,
+                            data: PageDataRepr::Loaded {
+                                hash: arc.hash,
+                                bytes: arc.bytes.clone(),
+                            },
+                        }),
+                        PageSlot::Missing(h) => sparse.push(PageSlotRepr {
+                            index: i as u32,
+                            data: PageDataRepr::Missing(*h),
+                        }),
+                    }
+                }
+                DataCapRepr::Paged {
+                    page_size: *page_size,
+                    total_pages: pages.len() as u32,
+                    pages: sparse,
+                }
+            }
         }
     }
 
     fn into_data(self) -> DataCap {
-        // Build a page-aligned, zero-padded buffer so the receiver's
-        // `DataCap` retains the page-alignment invariant the kernel
-        // expects when direct-mapping data caps into ring 3.
-        let bytes = self.bytes;
-        let mut buf = crate::cap::data::alloc_page_aligned_zeroed(bytes.len());
-        let copy_len = bytes.len().min(buf.len());
-        buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
-        DataCap {
-            content: DataContent::Inline(buf),
+        match self {
+            DataCapRepr::Inline(bytes) => {
+                // Preserve page-alignment invariant on the receive
+                // side: the kernel direct-maps inline content.
+                let mut buf = alloc_page_aligned_zeroed(bytes.len());
+                let copy_len = bytes.len().min(buf.len());
+                buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
+                DataCap {
+                    content: DataContent::Inline(buf),
+                }
+            }
+            DataCapRepr::Paged {
+                page_size,
+                total_pages,
+                pages: sparse,
+            } => {
+                let mut pages: Vec<PageSlot> = (0..total_pages).map(|_| PageSlot::Empty).collect();
+                for entry in sparse {
+                    let idx = entry.index as usize;
+                    if idx >= pages.len() {
+                        // Out-of-range entries are silently dropped;
+                        // `total_pages` is the authoritative bound.
+                        continue;
+                    }
+                    pages[idx] = match entry.data {
+                        PageDataRepr::Loaded { hash, bytes } => {
+                            PageSlot::Loaded(Arc::new(PageBytes { hash, bytes }))
+                        }
+                        PageDataRepr::Missing(h) => PageSlot::Missing(h),
+                    };
+                }
+                DataCap {
+                    content: DataContent::Paged { page_size, pages },
+                }
+            }
         }
     }
 }
 
-impl WireCNodeCap {
-    fn from_cnode(cn: &CNodeCap) -> Result<Self, WireConvertError> {
+impl CNodeCapRepr {
+    fn from_cnode(cn: &CNodeCap<CapHash>) -> Self {
         let mut slots = Vec::new();
         for (idx, entry) in cn.slots.iter() {
-            match entry {
-                ssz::MissingOr::Materialized(CapHashOrRef::Hash(h)) => {
-                    slots.push(WireCNodeSlot {
-                        slot: idx as u32,
-                        cap_hash: *h,
-                    });
-                }
-                ssz::MissingOr::Materialized(CapHashOrRef::Ref(_)) => {
-                    return Err(WireConvertError::CapHasRef);
-                }
-                ssz::MissingOr::Missing(_) => {
-                    return Err(WireConvertError::CNodeMissingSlot);
-                }
-            }
+            let repr_entry = match entry {
+                ssz::MissingOr::Materialized(h) => CNodeEntryRepr::Materialized(*h),
+                ssz::MissingOr::Missing(h) => CNodeEntryRepr::Missing(*h),
+            };
+            slots.push(CNodeSlotRepr {
+                slot: idx as u32,
+                entry: repr_entry,
+            });
         }
-        Ok(Self {
+        Self {
             size_log: cn.size_log,
             slots,
-        })
+        }
     }
 
-    fn into_cnode(self) -> Result<CNodeCap, WireConvertError> {
-        // Reconstruct via the public CNodeCap API so invariants
-        // (size_log bound + slot-fits check) are upheld.
-        let mut cn =
-            CNodeCap::new(self.size_log).map_err(|_| WireConvertError::CNodeMissingSlot)?;
+    fn into_cnode(self) -> CNodeCap<CapHash> {
+        // Construct via the public API so the size_log bound is
+        // re-checked on the receive side. The constructor only fails
+        // on `size_log > 16`; a malformed wire payload at this point
+        // is a programmer bug, so panic.
+        let mut cn = CNodeCap::<CapHash>::new(self.size_log)
+            .expect("CNodeCapRepr::into_cnode: size_log > 16 from wire");
         for entry in self.slots {
-            cn.set(
-                SlotIdx(entry.slot),
-                Some(CapHashOrRef::Hash(entry.cap_hash)),
-            )
-            .map_err(|_| WireConvertError::CNodeMissingSlot)?;
+            let key = entry.slot as u64;
+            let value = match entry.entry {
+                CNodeEntryRepr::Materialized(h) => ssz::MissingOr::Materialized(h),
+                CNodeEntryRepr::Missing(h) => ssz::MissingOr::Missing(h),
+            };
+            // SparseList::insert can fail only on out-of-range index;
+            // again, panic on malformed wire input.
+            cn.slots
+                .insert(key, value)
+                .expect("CNodeCapRepr::into_cnode: slot index >= MAX_CNODE_SLOTS from wire");
         }
-        Ok(cn)
+        cn
     }
 }
-
-// --- Helpers used by the host driver ---
-
-/// Box-ed convenience: produce a `Box<Cap>` from an archived
-/// `WireCap`. Used by the guest's `put_cap` RPC handler to deposit
-/// the decoded cap into its directory.
-pub fn box_from_wire(wire: WireCap) -> Result<Box<Cap>, WireConvertError> {
-    wire.into_cap().map(Box::new)
-}
-
-/// Convenience: pretty-print a `WireConvertError` without depending
-/// on `thiserror` (so this module stays usable in `no_std` contexts
-/// that don't pull in the error infra).
-impl core::fmt::Display for WireConvertError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            WireConvertError::CapHasRef => {
-                f.write_str("cap holds a CapHashOrRef::Ref target; refs are unsupported on the wire")
-            }
-            WireConvertError::PagedData => {
-                f.write_str("DataContent::Paged is not supported on the wire (V0 inline-only)")
-            }
-            WireConvertError::CNodeMissingSlot => {
-                f.write_str("CNodeCap slot is unrepresentable on the wire (missing placeholder or oversized cnode)")
-            }
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for WireConvertError {}
