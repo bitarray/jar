@@ -19,7 +19,9 @@ use std::sync::{Arc, Mutex};
 
 use javm_cap::cap::Cap;
 use javm_cap::wire::WireCap;
-use nub_arch_x86_abi::{CapHash as AbiCapHash, FN_ID_NUB_PUT_CAP};
+use nub_arch_x86_abi::{
+    BootInfo, CapHash as AbiCapHash, FN_ID_NUB_GET_BOOT_INFO, FN_ID_NUB_PUT_CAP,
+};
 use nub_host_common::rpc::{ArchivedResponse, Request};
 use rkyv::util::AlignedVec;
 use tracing::{Span, instrument};
@@ -27,6 +29,7 @@ use tracing::{Span, instrument};
 use super::host_funcs::FunctionRegistry;
 use crate::HyperlightError;
 use crate::Result;
+use crate::guest_cache_reader::GuestCacheReader;
 use crate::hypervisor::InterruptHandle;
 use crate::hypervisor::hyperlight_vm::HyperlightVm;
 use crate::mem::mgr::SandboxMemoryManager;
@@ -49,6 +52,12 @@ pub struct MultiUseSandbox {
     pub(crate) host_funcs: Arc<Mutex<FunctionRegistry>>,
     pub(crate) mem_mgr: SandboxMemoryManager<HostSharedMemory>,
     vm: HyperlightVm,
+    /// Lazily-initialised host-side view of the guest's heap-resident
+    /// `CacheDirectory`. Built on the first `put_cap_with_hash` call
+    /// (triggers `nub_get_boot_info` once to read the directory VA),
+    /// then reused. Lets the host short-circuit idempotent re-puts
+    /// without a roundtrip + merkle walk through the guest.
+    guest_cache_reader: Option<GuestCacheReader>,
     #[cfg(gdb)]
     dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
 }
@@ -71,6 +80,7 @@ impl MultiUseSandbox {
             host_funcs,
             mem_mgr: mgr,
             vm,
+            guest_cache_reader: None,
             #[cfg(gdb)]
             dbg_mem_access_fn,
         }
@@ -205,6 +215,70 @@ impl MultiUseSandbox {
             ));
         }
         Ok(hash)
+    }
+
+    /// Pre-hashed put: idempotent fast path that short-circuits the
+    /// full [`Self::put_cap`] RPC when the guest's directory already
+    /// holds `hash`.
+    ///
+    /// Behaviour:
+    ///
+    /// - If [`GuestCacheReader::contains(hash)`] returns `true`,
+    ///   return immediately — the guest already has the cap and we
+    ///   skip rkyv encode + VMEXIT + guest decode + merkle walk +
+    ///   directory insert. This is the hot path for bench loops that
+    ///   re-publish the same cap graph every iteration.
+    /// - Otherwise, ship `put_cap(cap)`, then debug-assert the
+    ///   returned hash matches `hash`.
+    ///
+    /// The reader is built lazily on first call (one `nub_get_boot_info`
+    /// RPC to read `BootInfo.directory_va`, then a single struct
+    /// construction); subsequent calls hit the cached reader.
+    pub fn put_cap_with_hash(&mut self, hash: AbiCapHash, cap: &Cap) -> Result<()> {
+        let exists = self.ensure_guest_cache_reader()?.contains(&hash);
+        if exists {
+            return Ok(());
+        }
+        let got = self.put_cap(cap)?;
+        debug_assert_eq!(
+            got, hash,
+            "put_cap_with_hash: guest-computed hash differs from claimed hash"
+        );
+        Ok(())
+    }
+
+    /// Lazily build the [`GuestCacheReader`]. Issues one
+    /// `nub_get_boot_info` RPC to read `BootInfo.directory_va`, then
+    /// constructs the reader; subsequent calls return the cached
+    /// reader without a roundtrip.
+    fn ensure_guest_cache_reader(&mut self) -> Result<&GuestCacheReader> {
+        if self.guest_cache_reader.is_none() {
+            let raw = self.call_raw(FN_ID_NUB_GET_BOOT_INFO, &[])?;
+            let expected = core::mem::size_of::<BootInfo>();
+            if raw.len() != expected {
+                return Err(crate::new_error!(
+                    "nub_get_boot_info: expected {} bytes, got {}",
+                    expected,
+                    raw.len()
+                ));
+            }
+            // SAFETY: `BootInfo` is `#[repr(C)]` POD; the guest packs
+            // exactly `size_of::<BootInfo>()` bytes via
+            // `core::ptr::read` over its `static mut BOOT_INFO`. The
+            // host's matching layout comes from the same
+            // `nub-arch-x86-abi` crate.
+            let info: BootInfo =
+                unsafe { core::ptr::read_unaligned(raw.as_ptr() as *const BootInfo) };
+            // SAFETY: `info.directory_va` was published by the guest
+            // after `init_directory_va`; the host has the guest's
+            // kernel image mmap'd at the same VA via the
+            // `install_snapshot_mapping` fixed-VA shadow, so the
+            // pointer is valid in the host's address space.
+            let reader = unsafe { GuestCacheReader::new(&info) }
+                .map_err(|e| crate::new_error!("guest_cache_reader: {e}"))?;
+            self.guest_cache_reader = Some(reader);
+        }
+        Ok(self.guest_cache_reader.as_ref().expect("set above"))
     }
 
     /// Returns a handle for interrupting guest execution.

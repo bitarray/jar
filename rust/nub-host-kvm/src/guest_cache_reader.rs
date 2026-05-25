@@ -52,6 +52,17 @@ pub struct GuestCacheReader {
     directory: NonNull<GuestDirectory>,
 }
 
+// SAFETY: `directory` is a raw pointer into the host's mapping of the
+// guest's kernel-half VA range. The reader holds it for read-only
+// access; we never observe a write through this pointer from another
+// thread while we're reading because the owning `MultiUseSandbox`
+// itself isn't shared across threads simultaneously (the workspace
+// keeps Hyperlight sandboxes inside `Mutex<Nub>`). Marking the type
+// `Send + Sync` lets a `MultiUseSandbox` containing one satisfy the
+// `Sync` bound demanded by `static OnceLock<Mutex<Nub>>`.
+unsafe impl Send for GuestCacheReader {}
+unsafe impl Sync for GuestCacheReader {}
+
 impl GuestCacheReader {
     /// Construct a reader from a [`BootInfo`] block.
     ///
