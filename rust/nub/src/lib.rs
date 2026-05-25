@@ -54,17 +54,20 @@ const NUB_ARCH_X86_BLOB_PATH: &str = env!("NUB_ARCH_X86_BLOB");
 /// Uniform handle to the nub microkernel.
 pub struct Nub {
     backend: Backend,
-    /// In-process typed cache, used by the Local backend to back its
-    /// publish_*/invoke_cached path. Always present (even on the
-    /// Hyperlight backend) so tests can construct a Nub and not care
-    /// which backend they hit. On Hyperlight the local cache is unused
-    /// at runtime — the shared-memory cache in `sandbox.cache()` is
-    /// the source of truth.
-    local_cache: CacheDirectory,
 }
 
 enum Backend {
-    Local(Kernel<LocalArch>),
+    /// In-process backend: the byte-PVM interpreter plus its own
+    /// cap directory. `cache` is the source of truth for caps published
+    /// via `Nub::put_cap*` and resolved by `Nub::invoke_cached`.
+    Local {
+        kernel: Kernel<LocalArch>,
+        cache: CacheDirectory,
+    },
+    /// Hyperlight backend: the cap directory lives guest-side as a
+    /// `static CacheDirectory<FixedState>` in `nub-arch-x86`; the host
+    /// reads it through `GuestCacheReader` (e.g. the `put_cap_with_hash`
+    /// short-circuit) and writes via the `FN_ID_NUB_PUT_CAP` RPC.
     Hyperlight(Box<HyperlightDriver>),
 }
 
@@ -80,8 +83,10 @@ impl Nub {
     /// Construct a Nub backed by the in-process [`LocalArch`].
     pub fn new_local() -> Self {
         Self {
-            backend: Backend::Local(Kernel::new(LocalArch::new())),
-            local_cache: CacheDirectory::new(),
+            backend: Backend::Local {
+                kernel: Kernel::new(LocalArch::new()),
+                cache: CacheDirectory::new(),
+            },
         }
     }
 
@@ -103,7 +108,6 @@ impl Nub {
                 sandbox,
                 state_root_cache: [0; 32],
             })),
-            local_cache: CacheDirectory::new(),
         })
     }
 
@@ -117,7 +121,7 @@ impl Nub {
         opts: InvokeOptions,
     ) -> Result<InvokeOutcome> {
         match &mut self.backend {
-            Backend::Local(k) => Ok(k
+            Backend::Local { kernel, .. } => Ok(kernel
                 .invoke(target, endpoint, args, opts)
                 .expect("LocalArch::Error is uninhabited")),
             Backend::Hyperlight(h) => h.invoke(target, endpoint, args, opts),
@@ -127,7 +131,7 @@ impl Nub {
     /// Current state root.
     pub fn state_root(&self) -> CapHash {
         match &self.backend {
-            Backend::Local(k) => k.state_root(),
+            Backend::Local { kernel, .. } => kernel.state_root(),
             Backend::Hyperlight(h) => h.state_root_cache,
         }
     }
@@ -166,8 +170,7 @@ impl Nub {
     /// bumps refcount on idempotent re-put. Returns the cap's content hash.
     pub fn put_cap(&mut self, cap: &javm_cap::Cap) -> Result<AbiCapHash> {
         match &mut self.backend {
-            Backend::Local(_) => self
-                .local_cache
+            Backend::Local { cache, .. } => cache
                 .put_cap(cap)
                 .map_err(|e| anyhow::anyhow!("put_cap (local): {e}")),
             Backend::Hyperlight(h) => h
@@ -192,8 +195,7 @@ impl Nub {
     /// pays only one host-side `HashMap::contains_key`.
     pub fn put_cap_with_hash(&mut self, hash: AbiCapHash, cap: &javm_cap::Cap) -> Result<()> {
         match &mut self.backend {
-            Backend::Local(_) => self
-                .local_cache
+            Backend::Local { cache, .. } => cache
                 .put_cap_with_hash(hash, cap)
                 .map_err(|e| anyhow::anyhow!("put_cap_with_hash (local): {e}")),
             Backend::Hyperlight(h) => h
@@ -214,11 +216,10 @@ impl Nub {
         initial_gas: u64,
     ) -> Result<InvocationResult> {
         match &mut self.backend {
-            Backend::Local(_) => {
+            Backend::Local { cache, .. } => {
                 // Resolve the instance + image from the in-process
                 // cache and drive the byte-PVM interpreter.
-                let instance_cap = self
-                    .local_cache
+                let instance_cap = cache
                     .get(CapHashOrRef::Hash(instance_hash))
                     .ok_or_else(|| anyhow::anyhow!("invoke_cached: instance not published"))?;
                 let inst = match &*instance_cap {
@@ -229,8 +230,7 @@ impl Nub {
                         ));
                     }
                 };
-                let image_cap = self
-                    .local_cache
+                let image_cap = cache
                     .get(CapHashOrRef::Hash(inst.image_hash))
                     .ok_or_else(|| anyhow::anyhow!("invoke_cached: image not in cache"))?;
                 let img = match &*image_cap {
