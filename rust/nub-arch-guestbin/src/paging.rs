@@ -30,9 +30,11 @@ use nub_host_common::vmem;
 /// Low-memory GPA where the host loads the kernel ELF (matches
 /// `SandboxMemoryLayout::BASE_ADDRESS` on the host).
 const KERNEL_BASE_GPA: u64 = 0x1000;
-/// High GVA the kernel is linked at (matches `KERNEL_HIGH_BASE` on
-/// the host and `. = 0xFFFFFFFF80000000` in `link.x`).
-const KERNEL_HIGH_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+/// GVA the kernel is linked at (matches `KERNEL_HIGH_BASE` on the
+/// host and `. = 0x5001_4000_0000` in `link.x`). Now in canonical
+/// low-half so the host process can mmap-shadow.
+/// TODO: rename to `KERNEL_BASE` once all three sites are renamed.
+const KERNEL_HIGH_BASE: u64 = 0x5001_4000_0000;
 
 #[derive(Copy, Clone)]
 struct GuestMappingOperations {

@@ -150,6 +150,7 @@ impl HyperlightVm {
 
             snapshot_slot,
             snapshot_memory: None,
+            snapshot_fixed_va: None,
             scratch_slot,
             scratch_memory: None,
             cache_slot,

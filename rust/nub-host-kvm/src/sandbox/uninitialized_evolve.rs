@@ -131,6 +131,13 @@ pub(crate) fn set_up_hypervisor_partition(
     #[cfg(any(crashdump, gdb))] rt_cfg: SandboxRuntimeConfig,
     _load_info: LoadInfo,
 ) -> Result<HyperlightVm> {
+    // Reserve the GUEST_VA range once per process. Later mmaps of
+    // guest-visible regions (snapshot kernel-shadow, etc.) land at
+    // fixed VAs inside this reservation. Errors here are fatal: we
+    // can't continue if something is squatting on our VA range.
+    nub_host_common::layout::reserve_guest_va_range()
+        .map_err(|e| crate::new_error!("reserve_guest_va_range: {e}"))?;
+
     // Create gdb thread if gdb is enabled and the configuration is provided
     #[cfg(gdb)]
     let gdb_conn = if let Some(DebugInfo { port }) = rt_cfg.debug_info {

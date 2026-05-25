@@ -73,10 +73,12 @@ pub const PAGE_SIZE: usize = 4096;
 /// Low GPA where the host loads the kernel ELF. Matches
 /// `SandboxMemoryLayout::BASE_ADDRESS` in `nub-host-kvm`.
 const KERNEL_BASE_GPA: u64 = 0x1000;
-/// High GVA the kernel is linked at. Matches the `. =` directive in
+/// GVA the kernel is linked at. Matches the `. =` directive in
 /// [`rust/nub-arch-x86/link.x`](../link.x) and
 /// `SandboxMemoryLayout::KERNEL_HIGH_BASE` in `nub-host-kvm`.
-const KERNEL_HIGH_BASE: u64 = 0xFFFF_FFFF_8000_0000;
+/// Now in canonical low-half so the host process can mmap-shadow.
+/// TODO: rename to `KERNEL_BASE` once all three sites are renamed.
+const KERNEL_HIGH_BASE: u64 = 0x5001_4000_0000;
 
 /// PTE flag bits.
 pub mod flag {
