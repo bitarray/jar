@@ -1,5 +1,5 @@
 use javm_cap::{
-    CNodeCap, Cap, CacheDirectory, CapHashOrRef, DataCap, DataContent, ImageCap, InstanceCap,
+    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, DataContent, ImageCap, InstanceCap,
     NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotIdx, TypeCap,
 };
 

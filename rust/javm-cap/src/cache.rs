@@ -67,8 +67,65 @@ use core::hash::BuildHasher;
 use hashbrown::{DefaultHashBuilder, HashMap};
 use spin::Mutex;
 
-use super::cap::{Cap, CapHash, CapHashOrRef, CapRef};
+use super::cap::{Cap, CapHash, CapHashOrRef};
 use super::image_cap::ImageConvertError;
+
+/// Cache-local lifetime handle to a working `Cap::Instance` in
+/// `CacheDirectory.instances`.
+///
+/// `Clone` bumps an inner `Arc` refcount; `Drop` decrements it. The
+/// directory owns one `CapRef` per live entry alongside the data; when
+/// external holders all drop their clones, [`CacheDirectory::sweep_instances`]
+/// finds entries whose stored handle has `strong_count == 1` and removes
+/// them. No callback-on-drop, no deadlock discipline.
+///
+/// Two separate `CacheDirectory` instances produce independent id
+/// namespaces — `CapRef`s must not cross caches.
+///
+/// The constructor is module-private: every handle in production traces
+/// back to [`CacheDirectory::put_instance`].
+#[derive(Clone, Debug)]
+pub struct CapRef {
+    id: u64,
+    /// Refcount tracker. The Arc's strong count is the number of
+    /// live `CapRef` holders for this id (including the directory's
+    /// own self-reference).
+    rc: Arc<()>,
+}
+
+impl CapRef {
+    fn new(id: u64) -> Self {
+        Self {
+            id,
+            rc: Arc::new(()),
+        }
+    }
+
+    /// The id this handle resolves to inside `CacheDirectory.instances`.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Number of live `CapRef` clones for this id, including the
+    /// directory's own self-reference. `sweep_instances` reclaims
+    /// entries whose stored handle has `strong_count == 1`.
+    pub fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.rc)
+    }
+}
+
+impl PartialEq for CapRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+impl Eq for CapRef {}
+
+impl core::hash::Hash for CapRef {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state)
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {

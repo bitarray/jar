@@ -34,8 +34,8 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use foldhash::fast::FixedState;
-use javm_cap::cache::CacheDirectory;
-use javm_cap::cap::{Cap, CapRef};
+use javm_cap::cache::{CacheDirectory, CapRef};
+use javm_cap::cap::Cap;
 use nub_arch_x86_abi::BootInfo;
 
 /// Per-cache hasher seed. Pinned at a constant so the host's

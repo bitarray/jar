@@ -3,26 +3,17 @@
 //! Cap types and their inner storage use the default `Global` allocator
 //! (= std heap on host, talc on guest via `#[global_allocator]`).
 //!
-//! ## `CapRef` is an `Arc`-backed handle
-//!
-//! A `CapRef` is the entry-lifetime token for `CacheDirectory.instances`.
-//! `Clone` bumps an inner `Arc` refcount; `Drop` decrements it.
-//! `CacheDirectory` itself owns one `CapRef` per live entry alongside the
-//! data; when external holders all drop their clones, the directory's
-//! `sweep_instances` finds entries whose stored CapRef has
-//! `strong_count == 1` and removes them. No callback-on-drop, no
-//! deadlock discipline.
-//!
 //! `Cap::CNode` slots and `Cap::Instance.root_cnode` hold
-//! `CapHashOrRef::Ref(CapRef)` directly, so cloning a Cap deep-bumps every
-//! nested handle and dropping a Cap deep-releases them. Recursive cleanup
-//! is automatic via Rust's Drop semantics; cycles are structurally
-//! impossible (data-flow principle: no shared mutable state across
-//! Instance boundaries).
+//! [`CapHashOrRef::Ref`] (a `super::cache::CapRef`) directly, so cloning
+//! a Cap deep-bumps every nested handle and dropping a Cap deep-releases
+//! them. Recursive cleanup is automatic via Rust's Drop semantics; cycles
+//! are structurally impossible (data-flow principle: no shared mutable
+//! state across Instance boundaries). See [`super::cache::CapRef`] for
+//! the handle's full lifecycle.
 
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use super::cache::CapRef;
 use super::cnode::CNodeCap;
 use super::data::DataCap;
 use super::image_cap::ImageCap;
@@ -30,58 +21,6 @@ use super::instance::InstanceCap;
 
 /// 32-byte digest used for all v3 cap identity / content hashes.
 pub type CapHash = [u8; 32];
-
-/// Cache-local lifetime handle to a working `Cap::Instance` in
-/// `CacheDirectory.instances`. `Clone` bumps the refcount; the
-/// directory's `sweep_instances` reclaims entries whose only holder is
-/// the directory itself. Two separate `CacheDirectory` instances produce
-/// independent `CapRef` id namespaces — refs must not cross caches.
-#[derive(Clone, Debug)]
-pub struct CapRef {
-    id: u64,
-    /// Refcount tracker. The Arc's strong count is the number of
-    /// live `CapRef` holders for this id (including the directory's
-    /// own self-reference).
-    rc: Arc<()>,
-}
-
-impl CapRef {
-    /// Mint a fresh `CapRef`. Restricted to the crate so the only
-    /// production constructor is
-    /// [`crate::cache::CacheDirectory::put_instance`]; external code
-    /// can never fabricate a handle that has no directory backing.
-    pub(crate) fn new(id: u64) -> Self {
-        Self {
-            id,
-            rc: Arc::new(()),
-        }
-    }
-
-    /// The id this handle resolves to inside `CacheDirectory.instances`.
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-
-    /// Number of live `CapRef` clones for this id, including the
-    /// directory's own self-reference. `sweep_instances` reclaims
-    /// entries whose stored handle has `strong_count == 1`.
-    pub fn strong_count(&self) -> usize {
-        Arc::strong_count(&self.rc)
-    }
-}
-
-impl PartialEq for CapRef {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-impl Eq for CapRef {}
-
-impl core::hash::Hash for CapRef {
-    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-        self.id.hash(state)
-    }
-}
 
 /// Slot/field reference: either a content-addressed blob in
 /// `cache.blobs` or a mutable working entry in `cache.instances`.

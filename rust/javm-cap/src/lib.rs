@@ -32,9 +32,9 @@ pub mod page;
 pub mod slot;
 pub mod wire;
 
-pub use cache::{CacheDirectory, CacheError};
+pub use cache::{CacheDirectory, CacheError, CapRef};
 pub use cap::{
-    Cap, CapHash, CapHashOrRef, CapKind, CapRef, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS, TypeCap,
+    Cap, CapHash, CapHashOrRef, CapKind, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS, TypeCap,
 };
 pub use cnode::{CNodeCap, CNodeSlotEntry};
 pub use data::{DataCap, DataContent, PAGE_SIZE};
