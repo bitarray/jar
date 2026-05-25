@@ -333,7 +333,6 @@ impl Assembler {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
