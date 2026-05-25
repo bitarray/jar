@@ -1,50 +1,46 @@
-//! `CacheDirectory<S, A>` — two-tier cap store with refcount-based CoW.
+//! `CacheDirectory<S>` — two-tier cap store with refcount-based CoW.
 //!
 //! The cache holds caps in two maps:
 //!
-//! - **`blobs: HashMap<CapHash, TBox<CacheEntry, A>, S, A>`** —
+//! - **`blobs: HashMap<CapHash, Box<CacheEntry>, S>`** —
 //!   content-addressed immutable caps. All five kinds (Type, Image,
 //!   Data, CNode, Instance) can live here.
-//! - **`instances: HashMap<CapRef, TBox<CacheEntry, A>, S, A>`** —
+//! - **`instances: HashMap<CapRef, Box<CacheEntry>, S>`** —
 //!   identity-keyed mutable working state. Only Data, CNode,
 //!   Instance variants reach this map (after `get_mut` promotion).
 //!
-//! `A` is an [`allocate::Allocator`] (re-exported from the
-//! `allocator-api2` crate; downstream depends on `allocate` only).
-//! For host-private use the default `Global` gives a heap-backed
-//! cache. For the shared-memory state cache, `A = TalcAlloc` lands the
-//! HashMap node storage in the cache region; cap content itself always
-//! lives on the global heap (= talc on guest via `#[global_allocator]`).
+//! Cap content always lives on the global heap (= std heap on host, talc
+//! on guest via `#[global_allocator]`). Two callers exist:
+//! - Nub local backend: heap-backed cache in the host's global allocator.
+//! - Nub Hyperlight backend: heap-resident cache in the guest's global
+//!   allocator. The guest's cache lives in a `static Mutex<CacheDirectory<
+//!   FixedState>>` and is initialised at link time via the [`new_const`]
+//!   constructor.
 //!
 //! `S` is the `BuildHasher`. The heap-backed default is
 //! [`DefaultHashBuilder`] (= `foldhash::fast::RandomState`,
-//! per-process randomized). The shared-memory variant uses
+//! per-process randomized). The guest uses
 //! `foldhash::fast::FixedState` with a per-region random seed so that
 //! both host and guest builds compute identical bucket assignments
 //! against the same shared HashMap. Parameter order matches
-//! `hashbrown::HashMap<K, V, S, A>`.
+//! `hashbrown::HashMap<K, V, S>`.
 //!
 //! Refcounting uses the same protocol as `Arc::make_mut`:
 //! `fetch_sub(1, Release)` at mutation time; if `prev == 1` we have
 //! sole ownership and move-promote (no copy), else we shallow-clone
 //! into a fresh instance entry. See [`CacheDirectory::get_mut`] for details.
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::hash::BuildHasher;
 use core::sync::atomic::Ordering;
 
-use allocate::boxed::Box as ABox;
 use allocate::collections::{DefaultHashBuilder, HashMap};
-use allocate::vec::Vec as AVec;
-use allocate::{Allocator, Global};
 
 use super::cap::{Cap, CapHash, CapHashOrRef, CapRef};
 use super::cap_hash::cap_hash;
 use super::entry::CacheEntry;
 use super::image_cap::ImageConvertError;
-
-/// Talc-friendly Box alias — `allocate::Box` parameterised on the
-/// cache's outer allocator.
-type TBox<T, A> = ABox<T, A>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
@@ -64,52 +60,56 @@ pub enum CacheError {
     SlotOutOfRange,
 }
 
-pub struct CacheDirectory<S = DefaultHashBuilder, A: Allocator + Clone = Global> {
-    alloc: A,
-    blobs: HashMap<CapHash, TBox<CacheEntry, A>, S, A>,
-    instances: HashMap<CapRef, TBox<CacheEntry, A>, S, A>,
+pub struct CacheDirectory<S = DefaultHashBuilder> {
+    blobs: HashMap<CapHash, Box<CacheEntry>, S>,
+    instances: HashMap<CapRef, Box<CacheEntry>, S>,
     next_ref: u64,
 }
 
-impl CacheDirectory<DefaultHashBuilder, Global> {
-    /// Construct an empty heap-backed cache. Equivalent to
-    /// `CacheDirectory::new_in(Global)` for callers that don't want
-    /// an allocator dependency.
+impl CacheDirectory<DefaultHashBuilder> {
+    /// Construct an empty heap-backed cache using the default
+    /// per-process-randomized hasher.
     pub fn new() -> Self {
-        Self::new_in(Global)
+        Self::with_hasher(DefaultHashBuilder::default())
     }
 }
 
-impl Default for CacheDirectory<DefaultHashBuilder, Global> {
+impl Default for CacheDirectory<DefaultHashBuilder> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<A: Allocator + Clone> CacheDirectory<DefaultHashBuilder, A> {
-    /// Construct an empty cache that allocates HashMap nodes through
-    /// `alloc`, using the default per-process-randomized hasher.
-    pub fn new_in(alloc: A) -> Self {
-        Self::with_hasher_in(DefaultHashBuilder::default(), alloc)
-    }
-}
-
-impl<S: BuildHasher + Clone, A: Allocator + Clone> CacheDirectory<S, A> {
-    /// Construct an empty cache with an explicit hasher. Used by the
-    /// shared-memory state cache to pin a `FixedState` so host and
-    /// guest hash to the same buckets.
-    pub fn with_hasher_in(hasher: S, alloc: A) -> Self {
+impl<S: BuildHasher> CacheDirectory<S> {
+    /// Construct an empty cache with an explicit hasher.
+    pub fn with_hasher(hasher: S) -> Self
+    where
+        S: Clone,
+    {
         Self {
-            blobs: HashMap::with_hasher_in(hasher.clone(), alloc.clone()),
-            instances: HashMap::with_hasher_in(hasher, alloc.clone()),
-            alloc,
+            blobs: HashMap::with_hasher(hasher.clone()),
+            instances: HashMap::with_hasher(hasher),
             // CapRef 0 is reserved; ref allocation starts at 1.
             next_ref: 1,
         }
     }
 }
 
-impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
+impl<S: Copy> CacheDirectory<S> {
+    /// `const fn` constructor for static initialisation. Used by the
+    /// guest's `state_cache::CACHE` static. Requires `S: Copy` so the
+    /// same hasher value can seed both inner maps without invoking
+    /// `Clone` (not allowed in `const fn` today).
+    pub const fn new_const(hasher: S) -> Self {
+        Self {
+            blobs: HashMap::with_hasher(hasher),
+            instances: HashMap::with_hasher(hasher),
+            next_ref: 1,
+        }
+    }
+}
+
+impl<S: BuildHasher> CacheDirectory<S> {
     /// Number of entries in each tier. Useful for tests and metrics.
     pub fn blob_count(&self) -> usize {
         self.blobs.len()
@@ -152,12 +152,7 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
     /// if the cap is absent.
     ///
     /// Useful for downstream layers that maintain a shared-memory
-    /// directory mapping `CapHash` / `CapRef` to entry pointers: the
-    /// guest scans the directory, reads the VA, and dereferences the
-    /// `CacheEntry`'s `cap` field directly. Requires the cache to be
-    /// backed by an allocator whose pointers are valid in the guest's
-    /// address space (e.g. `TalcAlloc` over a region mapped at the
-    /// same VA on host and guest).
+    /// directory mapping `CapHash` / `CapRef` to entry pointers.
     pub fn entry_va(&self, key: CapHashOrRef) -> Option<u64> {
         let entry: &CacheEntry = match key {
             CapHashOrRef::Hash(h) => &**self.blobs.get(&h)?,
@@ -168,18 +163,13 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
 
     /// Blob insert: takes a `Cap` and stores it under `hash`. Idempotent
     /// (bumps refcount on a hit). Returns the post-insertion refcount.
-    ///
-    /// Wrapped at higher layers by `Cache::publish_blob`
-    /// (nub-host-common) which routes through scratch tracking on the
-    /// guest side.
     pub fn put_blob(&mut self, hash: CapHash, cap: Cap) -> Result<u32, CacheError> {
         if let Some(existing) = self.blobs.get(&hash) {
             let prev = existing.refcount.fetch_add(1, Ordering::Relaxed);
             return Ok(prev + 1);
         }
         let entry = CacheEntry::new(cap);
-        let boxed =
-            ABox::try_new_in(entry, self.alloc.clone()).map_err(|_| CacheError::AllocFailure)?;
+        let boxed = Box::new(entry);
         self.blobs.insert(hash, boxed);
         Ok(1)
     }
@@ -244,8 +234,7 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
         }
         let owned = cap.clone();
         let entry = CacheEntry::new(owned);
-        let boxed =
-            ABox::try_new_in(entry, self.alloc.clone()).map_err(|_| CacheError::AllocFailure)?;
+        let boxed = Box::new(entry);
         self.blobs.insert(hash, boxed);
         for t in &targets {
             self.incref(*t)?;
@@ -257,8 +246,7 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
     /// allocated `CapRef`. Refcount starts at 1.
     pub fn put_instance(&mut self, cap: Cap) -> Result<CapRef, CacheError> {
         let entry = CacheEntry::new(cap);
-        let boxed =
-            ABox::try_new_in(entry, self.alloc.clone()).map_err(|_| CacheError::AllocFailure)?;
+        let boxed = Box::new(entry);
         let r = self.next_ref;
         self.next_ref = self
             .next_ref
@@ -392,22 +380,8 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
         self.instances.get_mut(&r).map(|b| &mut b.cap)
     }
 
-    /// Allocator handle (clone). Useful for callers that want to
-    /// allocate boxes externally before handing them to the cache.
-    pub fn allocator(&self) -> A {
-        self.alloc.clone()
-    }
-
     // --- High-level publish helpers ---
 
-    /// Publish an inline DataCap blob from a byte buffer. Allocates a
-    /// fresh copy of `bytes`, hashes the resulting cap, and inserts
-    /// it into `blobs`. Returns the hash (suitable for use as a
-    /// `CapHashOrRef::Hash` target).
-    ///
-    /// Idempotent: re-publishing identical bytes returns the same hash
-    /// and bumps the existing entry's refcount.
-    ///
     /// Settle a cap reference: resolve any `CapHashOrRef::Ref` targets
     /// nested inside the cap to their content-addressed hashes,
     /// graduating descendants from `instances` to `blobs` as needed,
@@ -491,7 +465,7 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
     /// nested refs first.
     fn settle_nested_refs(&mut self, r: CapRef) -> Result<(), CacheError> {
         // Collect the list of Refs we need to settle before mutating.
-        let nested: AVec<CapRef> = {
+        let nested: Vec<CapRef> = {
             let cap = &self
                 .instances
                 .get(&r)
@@ -501,7 +475,7 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
         };
 
         // Settle each nested ref (returns the resolved Hash).
-        let mut resolved: AVec<(CapRef, CapHash)> = AVec::new();
+        let mut resolved: Vec<(CapRef, CapHash)> = Vec::new();
         for n in nested.iter() {
             let h = self.settle_ref(*n)?;
             resolved.push((*n, h));
@@ -533,12 +507,12 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
         Ok(())
     }
 
-    fn collect_targets(&self, key: CapHashOrRef) -> Result<AVec<CapHashOrRef>, CacheError> {
+    fn collect_targets(&self, key: CapHashOrRef) -> Result<Vec<CapHashOrRef>, CacheError> {
         let cap = self.get(key).ok_or(match key {
             CapHashOrRef::Hash(_) => CacheError::BlobMissing,
             CapHashOrRef::Ref(r) => CacheError::InstanceMissing(r),
         })?;
-        let mut out: AVec<CapHashOrRef> = AVec::new();
+        let mut out: Vec<CapHashOrRef> = Vec::new();
         match cap {
             Cap::CNode(cn) => {
                 for (_, mo) in cn.slots.iter() {
@@ -565,8 +539,8 @@ impl<S: BuildHasher, A: Allocator + Clone> CacheDirectory<S, A> {
 
 /// Collect the directly-referenced `CapRef`s held by `cap`. Used by
 /// `settle` to know which sub-refs to resolve before hashing.
-fn collect_ref_targets(cap: &Cap) -> AVec<CapRef> {
-    let mut out: AVec<CapRef> = AVec::new();
+fn collect_ref_targets(cap: &Cap) -> Vec<CapRef> {
+    let mut out: Vec<CapRef> = Vec::new();
     match cap {
         Cap::CNode(cn) => {
             for (_, mo) in cn.slots.iter() {
@@ -616,8 +590,8 @@ fn rewrite_ref_targets(cap: &mut Cap, resolved: &[(CapRef, CapHash)]) {
 /// Collect the cap targets a `Cap` directly holds — used by
 /// [`CacheDirectory::put_cap_with_hash`] to incref each target on first put so
 /// the refcount invariant (entry refcount == holder count) is preserved.
-fn collect_referenced_targets_global(cap: &Cap) -> alloc::vec::Vec<CapHashOrRef> {
-    let mut out: alloc::vec::Vec<CapHashOrRef> = alloc::vec::Vec::new();
+fn collect_referenced_targets_global(cap: &Cap) -> Vec<CapHashOrRef> {
+    let mut out: Vec<CapHashOrRef> = Vec::new();
     match cap {
         Cap::Image(img) => {
             for e in img.pinned.iter() {

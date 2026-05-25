@@ -1023,7 +1023,6 @@ mod tests {
     use super::*;
     use crate::callstack::{EntryStatus, InstanceEntry};
     use crate::kernel_assist::InProcessKernelAssist;
-    use allocate::Global;
     use javm_cap::image::Image;
     use javm_cap::{CNodeCap, NUM_REGS};
     use javm_exec::{Access, GasCounter, Mem, PAGE_SIZE, PvmProgram, Regs};
@@ -1125,7 +1124,7 @@ mod tests {
     #[test]
     fn mgmt_cnode_mint_publishes_cnode_when_cache_threaded() {
         let mut vm = fixture_vm();
-        let mut cache = CacheDirectory::new_in(Global);
+        let mut cache = CacheDirectory::new();
         let mut regs = Regs::new();
         regs.gpr[7] = 5;
         regs.gpr[8] = 3;
@@ -1227,7 +1226,7 @@ mod tests {
     #[test]
     fn set_image_reloads_program_from_cache() {
         let mut vm = fixture_vm();
-        let mut cache = CacheDirectory::new_in(Global);
+        let mut cache = CacheDirectory::new();
         let mut img = Image::empty();
         img.code = vec![10u8, 0];
         img.packed_bitmask = vec![0b01u8];
@@ -1317,7 +1316,7 @@ mod tests {
     #[test]
     fn host_type_of_publishes_type_cap() {
         let mut vm = fixture_vm();
-        let mut cache = CacheDirectory::new_in(Global);
+        let mut cache = CacheDirectory::new();
         // Instance references image + cnode by hash; both must be in
         // the cache for `put_cap` to accept the Instance.
         let image_hash = cache
@@ -1378,7 +1377,7 @@ mod tests {
         // for fewer bytes than a page get exactly that many — with
         // the meaningful prefix at the start and trailing zero-pad.
         let mut vm = fixture_vm();
-        let mut cache = CacheDirectory::new_in(Global);
+        let mut cache = CacheDirectory::new();
         let data_hash = publish_data_inline(&mut cache, b"hello");
         vm.stack
             .running_instance_mut()
@@ -1414,7 +1413,7 @@ mod tests {
         // caller's bytes up to the next 4 KiB boundary and debits
         // quota by the padded length (1 page = 4096 bytes).
         let mut vm = fixture_vm();
-        let mut cache = CacheDirectory::new_in(Global);
+        let mut cache = CacheDirectory::new();
         vm.kernel_assist.storage_quota_set(0, 8192);
         let mut mem = Mem::new();
         mem.map_region(0, PAGE_SIZE as u64, Access::ReadWrite, None)
@@ -1457,7 +1456,7 @@ mod tests {
     #[test]
     fn host_open_places_registered_file_data_in_slot() {
         let mut vm = fixture_vm();
-        let mut cache = CacheDirectory::new_in(Global);
+        let mut cache = CacheDirectory::new();
         let data_hash = publish_data_inline(&mut cache, b"file");
         vm.kernel_assist
             .register_file(9, CapHashOrRef::Hash(data_hash));
@@ -1483,7 +1482,7 @@ mod tests {
         // page-multiple content length (4 KiB for the padded "stored"
         // cap). Quota seeded with enough headroom for one save.
         let mut vm = fixture_vm();
-        let mut cache = CacheDirectory::new_in(Global);
+        let mut cache = CacheDirectory::new();
         let data_hash = publish_data_inline(&mut cache, b"stored");
         vm.kernel_assist.storage_quota_set(0, 8192);
         vm.stack
@@ -1548,7 +1547,7 @@ mod tests {
     #[test]
     fn derive_spawn_cached_publishes_child_instance() {
         let mut vm = fixture_vm();
-        let mut cache = CacheDirectory::new_in(Global);
+        let mut cache = CacheDirectory::new();
 
         // Publish a tiny child image with no pinned/initial slots.
         let mut child_img = javm_cap::image::Image::empty();
@@ -1637,7 +1636,7 @@ mod tests {
     #[test]
     fn host_call_cached_pushes_child_and_moves_slot0() {
         let mut vm = fixture_vm();
-        let mut cache = CacheDirectory::new_in(Global);
+        let mut cache = CacheDirectory::new();
 
         // Publish a no-op image (one Halt instruction) + empty cnode
         // + Cap::Instance referencing them.

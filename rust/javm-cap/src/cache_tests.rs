@@ -1,4 +1,4 @@
-//! Refcount maintenance + CoW tests for `CacheDirectory<A>`.
+//! Refcount maintenance + CoW tests for `CacheDirectory`.
 //!
 //! Validates the `Arc::make_mut`-style protocol: blob entries start
 //! at refcount=1; binding into additional slots bumps via `incref`;

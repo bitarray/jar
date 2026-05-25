@@ -666,7 +666,6 @@ impl<K: KernelAssist + std::fmt::Debug> std::fmt::Debug for Vm<K> {
 mod tests {
     use super::*;
     use crate::kernel_assist::InProcessKernelAssist;
-    use allocate::Global;
     use javm_cap::image::Image;
     use javm_cap::{CacheDirectory, Cap, NUM_REGS};
     use std::collections::BTreeMap;
@@ -719,7 +718,7 @@ mod tests {
     fn invoke_cached_trap_returns_faulted() {
         // code = [trap (0)]
         let img = empty_image_with_code(vec![0u8]);
-        let mut cache = CacheDirectory::new_in(Global);
+        let mut cache = CacheDirectory::new();
         let inst_hash = publish_simple_instance(&mut cache, img);
 
         let mut vm = Vm::new(InProcessKernelAssist::new());
@@ -742,7 +741,7 @@ mod tests {
         // imm byte).
         let mut img = empty_image_with_code(vec![10u8, 0]);
         img.packed_bitmask = vec![0b01u8];
-        let mut cache = CacheDirectory::new_in(Global);
+        let mut cache = CacheDirectory::new();
         let inst_hash = publish_simple_instance(&mut cache, img);
 
         let mut vm = Vm::new(InProcessKernelAssist::new());
@@ -795,7 +794,7 @@ mod tests {
             yield_marker_slot: None,
         };
 
-        let mut cache = CacheDirectory::new_in(Global);
+        let mut cache = CacheDirectory::new();
         let inst_hash = publish_simple_instance(&mut cache, img);
 
         let mut vm = Vm::new(InProcessKernelAssist::new());
@@ -903,7 +902,7 @@ mod tests {
         };
 
         // Publish S as a complete Cap::Instance.
-        let mut cache = CacheDirectory::new_in(Global);
+        let mut cache = CacheDirectory::new();
         let s_inst_hash = publish_simple_instance(&mut cache, s_img);
 
         // Publish M with a root cnode that has slot 9 = Hash(S_inst).
@@ -964,7 +963,7 @@ mod tests {
             initial_slots: BTreeMap::new(),
             yield_marker_slot: None,
         };
-        let mut cache = CacheDirectory::new_in(Global);
+        let mut cache = CacheDirectory::new();
         let inst_hash = publish_simple_instance(&mut cache, img);
         let mut vm = Vm::new(InProcessKernelAssist::new());
         let r = vm

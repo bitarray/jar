@@ -20,14 +20,9 @@ fn main() {
 use std::time::Instant;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use allocate::Global;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use allocate::vec::Vec as AVec;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_cap::cap::Cap;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_cap::cap_hash::cap_hash;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_cap::image::Image;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -121,17 +116,13 @@ fn main() {
         let _ = std::hint::black_box(h.finalize());
     });
 
-    // (b) AVec<u8, Global> alloc + memcpy + drop — host heap baseline.
-    measure(
-        "(b) AVec<u8, Global> alloc + extend_from_slice + drop",
-        n,
-        || {
-            let mut v: AVec<u8, Global> = AVec::with_capacity_in(bytes.len(), Global);
-            v.extend_from_slice(bytes);
-            std::hint::black_box(&v);
-            drop(v);
-        },
-    );
+    // (b) Vec<u8> alloc + memcpy + drop — host heap baseline.
+    measure("(b) Vec<u8> alloc + extend_from_slice + drop", n, || {
+        let mut v: Vec<u8> = Vec::with_capacity(bytes.len());
+        v.extend_from_slice(bytes);
+        std::hint::black_box(&v);
+        drop(v);
+    });
 
     // (c) cap_hash(Cap::Data) — SSZ merkleize over the bytes, with Cap
     //     already built. Isolates the hash work from the alloc/copy.

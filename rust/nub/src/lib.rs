@@ -17,7 +17,6 @@
 //! publishes a `Cap::Instance` referencing them, and then invokes by
 //! the resulting instance hash.
 
-use allocate::Global;
 use anyhow::Result;
 use javm_cap::{CacheDirectory, CapHashOrRef, cap::Cap};
 use nub_arch_local::LocalArch;
@@ -82,7 +81,7 @@ impl Nub {
     pub fn new_local() -> Self {
         Self {
             backend: Backend::Local(Kernel::new(LocalArch::new())),
-            local_cache: CacheDirectory::new_in(Global),
+            local_cache: CacheDirectory::new(),
         }
     }
 
@@ -104,7 +103,7 @@ impl Nub {
                 sandbox,
                 state_root_cache: [0; 32],
             })),
-            local_cache: CacheDirectory::new_in(Global),
+            local_cache: CacheDirectory::new(),
         })
     }
 

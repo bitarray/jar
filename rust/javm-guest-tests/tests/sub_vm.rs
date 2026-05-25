@@ -17,7 +17,6 @@
 //! `slot[0]` DataCap, computes the wrapping byte-sum, mints a
 //! single-byte result DataCap, places it at `slot[0]`, and HALTs.
 
-use allocate::Global;
 use javm::kernel_assist::{InProcessKernelAssist, KernelAssist};
 use javm::{CallResult, Vm};
 use javm_cap::image::{Image, PinnedCap};
@@ -38,7 +37,7 @@ fn m_calls_s_round_trip() {
     let m_image = Image::from_ssz_bytes(M_BLOB).expect("decode M");
     let s_image = Image::from_ssz_bytes(S_BLOB).expect("decode S");
 
-    let mut cache = CacheDirectory::new_in(Global);
+    let mut cache = CacheDirectory::new();
 
     // Publish S's Image (plus its pinned + initial slots' data caps,
     // resolved via the same helper the bench harness uses).
