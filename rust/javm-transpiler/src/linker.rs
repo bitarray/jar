@@ -350,6 +350,14 @@ fn read_subsoil_endpoints(
 /// their bytes, ordered by ELF virtual address. Multiple headers
 /// can share a name when LLD doesn't coalesce input sections
 /// (e.g., `#[link_section]` statics from a single rlib).
+/// Public wrapper around [`find_all_section_bytes`] for `linker_rv.rs`.
+pub(crate) fn find_all_section_bytes_for_rv<'a>(
+    elf_data: &'a [u8],
+    section_name: &str,
+) -> Result<Vec<&'a [u8]>, TranspileError> {
+    find_all_section_bytes(elf_data, section_name)
+}
+
 fn find_all_section_bytes<'a>(
     elf_data: &'a [u8],
     section_name: &str,
