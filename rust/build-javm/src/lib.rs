@@ -6,6 +6,11 @@ use ssz::Encode;
 const TARGET_JSON: &str = include_str!("riscv64em-javm.json");
 const TARGET_NAME: &str = "riscv64em-javm";
 
+/// PVM2 target spec: adds `+c`, `+zba`, `+zbs`, `+zicond` (and drops
+/// `+xtheadcondmov`). Used by [`build_pvm2`].
+const TARGET_JSON_PVM2: &str = include_str!("riscv64emc-pvm2.json");
+const TARGET_NAME_PVM2: &str = "riscv64emc-pvm2";
+
 /// Emit `cargo:rerun-if-changed` for transpiler + javm sources so the blob
 /// is rebuilt when the transpiler or PVM format changes.
 fn watch_transpiler_sources() {
@@ -67,6 +72,62 @@ pub fn build(manifest_dir: &str, bin_name: &str) -> PathBuf {
     let elf_data = std::fs::read(&elf_path).expect("failed to read ELF");
     let image =
         javm_transpiler::link_elf(&elf_data).expect("failed to transpile ELF to Cap::Image");
+    let encoded = image.as_ssz_bytes();
+
+    std::fs::write(&blob_path, &encoded).expect("failed to write Image blob");
+    blob_path
+}
+
+/// Build a **PVM2** blob from a service crate. The guest is built for
+/// the RV+C+Zbb+Zba+Zbs+Zicond target and the ELF is linked via
+/// [`javm_transpiler::linker_rv::link_elf_rv`] — Image.code holds raw
+/// RV+C+custom-0 bytes, bitmask/jump_table are empty.
+///
+/// Parallel to [`build`]; consumers (today: the `pvm2-bench` arm of
+/// the bench harness) choose which one to call. Once PVM2 lands as
+/// the default, this replaces [`build`] in place.
+pub fn build_pvm2(manifest_dir: &str, bin_name: &str) -> PathBuf {
+    watch_transpiler_sources();
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
+    let blob_path = PathBuf::from(&out_dir).join(format!("{bin_name}.pvm2"));
+
+    if std::env::var("SKIP_GUEST_BUILD").is_ok() {
+        if !blob_path.exists() {
+            std::fs::write(&blob_path, b"").ok();
+        }
+        return blob_path;
+    }
+
+    let resolved = build_crate::resolve_manifest_dir(manifest_dir);
+    let target_json_path =
+        build_crate::write_target_json("riscv64emc-pvm2.json", TARGET_JSON_PVM2);
+
+    let extra_rustflags = vec!["-Cllvm-args=--inline-threshold=275".to_string()];
+    let guest = GuestBuild {
+        manifest_dir: resolved,
+        target_json_path,
+        target_dir_name: TARGET_NAME_PVM2.to_string(),
+        build_kind: BuildKind::Bin(bin_name.to_string()),
+        extra_rustflags,
+        extra_rustc_args: vec![],
+        env_overrides: vec![
+            (
+                "CARGO_PROFILE_RELEASE_OPT_LEVEL".to_string(),
+                "3".to_string(),
+            ),
+            ("CARGO_PROFILE_RELEASE_LTO".to_string(), "true".to_string()),
+            (
+                "CARGO_PROFILE_RELEASE_CODEGEN_UNITS".to_string(),
+                "1".to_string(),
+            ),
+        ],
+        rustc_bootstrap: true,
+    };
+
+    let elf_path = guest.build();
+    let elf_data = std::fs::read(&elf_path).expect("failed to read ELF");
+    let image = javm_transpiler::linker_rv::link_elf_rv(&elf_data)
+        .expect("failed to link ELF via PVM2 linker");
     let encoded = image.as_ssz_bytes();
 
     std::fs::write(&blob_path, &encoded).expect("failed to write Image blob");

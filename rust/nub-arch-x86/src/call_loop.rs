@@ -513,12 +513,41 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     let ro: (u32, &[u8]) = (overlay_bufs[1].0, overlay_bufs[1].1.as_slice());
     let rw: (u32, &[u8]) = (overlay_bufs[2].0, overlay_bufs[2].1.as_slice());
 
-    // `img.bitmask` is the packed form (1 bit per code byte);
-    // `build_frame_runtime` / `Compiler::new` expect the unpacked
-    // form (1 byte per code byte). Unpack into a local Vec — the
-    // jit_cache copies the result into the per-Image arena on first
-    // compile and reuses it thereafter, so this allocation only
-    // matters on cache miss.
+    // PVM2 path: an empty `bitmask` signals an Image whose `code`
+    // field is raw RV+C+custom-0 bytes (produced by
+    // `javm_transpiler::linker_rv::link_elf_rv`). Dispatch to the
+    // RV-aware runtime; the JIT cache predecodes the bytes once and
+    // populates the BB region with the valid-PC set.
+    if img.bitmask.is_empty() {
+        return unsafe {
+            jit_run::build_frame_runtime_rv(
+                &frame.image_hash,
+                img.code.as_slice(),
+                frame.pc,
+                mem_size,
+                MemRegion {
+                    start: arg.0,
+                    data: arg.1,
+                },
+                MemRegion {
+                    start: ro.0,
+                    data: ro.1,
+                },
+                MemRegion {
+                    start: rw.0,
+                    data: rw.1,
+                },
+                &direct_maps,
+            )
+        }
+        .ok_or(ERR_JIT_FAILED);
+    }
+
+    // PVM path. `img.bitmask` is the packed form (1 bit per code
+    // byte); `build_frame_runtime` / `Compiler::new` expect the
+    // unpacked form. Unpack once per cache miss — the jit_cache
+    // copies the result into the per-Image arena on first compile
+    // and reuses it thereafter.
     let bitmask = javm_exec::unpack_bitmask(img.bitmask.as_slice(), img.code.len());
 
     // SAFETY: image and any cap-backed slices live in the heap-
