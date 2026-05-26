@@ -79,37 +79,18 @@ pub fn predecode_rv(code: &[u8]) -> RvPredecode {
     }
 
     // ---- Pass 2: mark gas-block starts -------------------------------
-    // PC=0 is always a block start (entry).
-    if let Some(first) = insts.first_mut() {
-        first.is_gas_block_start = true;
-    }
-
-    // Build a PC -> index map for O(1) target lookup.
-    let mut pc_to_idx: Vec<u32> = vec![u32::MAX; code.len() + 1];
-    for (i, ip) in insts.iter().enumerate() {
-        pc_to_idx[ip.pc as usize] = i as u32;
-    }
-
-    // Branch/jump targets + post-terminator marks.
-    for i in 0..insts.len() {
-        let ip = insts[i];
-        // Static branch/jump targets (only relative jumps; jalr is
-        // dynamic and not pre-resolvable).
-        if let Some(target_byte) = static_target(&ip)
-            && target_byte < pc_to_idx.len()
-            && pc_to_idx[target_byte] != u32::MAX
-        {
-            let idx = pc_to_idx[target_byte] as usize;
-            insts[idx].is_gas_block_start = true;
-        }
-        // Post-terminator: the next instruction starts a fresh block.
-        if is_terminator(&ip.inst) && i + 1 < insts.len() {
-            insts[i + 1].is_gas_block_start = true;
-        }
-        // Post-ecalli: re-entry point.
-        if matches!(ip.inst, RvInst::Ecalli { .. }) && i + 1 < insts.len() {
-            insts[i + 1].is_gas_block_start = true;
-        }
+    //
+    // PVM2's JALR is dynamic — its target is computed from a register
+    // and validated at runtime against `valid_pc`. Any `valid_pc[i]`
+    // can therefore become an entry point from a JALR, so the
+    // dispatch table needs a non-zero entry at every `i` that's an
+    // instruction boundary. The cheapest way to guarantee that is to
+    // mark every decoded instruction as a gas-block start. This makes
+    // gas checks per-instruction (vs. per-block) — a perf regression
+    // until we add a JALR-target-aware pass, but it's needed for
+    // correctness today.
+    for ip in insts.iter_mut() {
+        ip.is_gas_block_start = true;
     }
 
     RvPredecode {
@@ -126,6 +107,7 @@ pub fn predecode_rv(code: &[u8]) -> RvPredecode {
 /// Targets are computed as `pc + imm` (signed). For RV B-type and
 /// J-type, `imm` is in bytes. For RV+C, decompression has already
 /// converted to byte offsets so the same `pc + imm` rule applies.
+#[allow(dead_code)]
 fn static_target(ip: &RvPreDecodedInst) -> Option<usize> {
     let pc = ip.pc as i64;
     let off: i64 = match ip.inst {
@@ -149,6 +131,7 @@ fn static_target(ip: &RvPreDecodedInst) -> Option<usize> {
 /// Block-terminating instructions: anything that *can* leave the
 /// fall-through path. Used to mark the next instruction as a
 /// gas-block start.
+#[allow(dead_code)]
 fn is_terminator(inst: &RvInst) -> bool {
     matches!(
         inst,

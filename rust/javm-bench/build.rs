@@ -77,16 +77,15 @@ fn main() {
         println!("cargo:rustc-env={env}={}", blob.display());
         println!("cargo:rerun-if-changed={path}/src");
         println!("cargo:rerun-if-changed={path}/Cargo.toml");
-    }
 
-    // PVM2 path is opt-in per guest for now: only those known to compile
-    // cleanly under the +e,+m,+c,+zbb,+zba,+zbs,+zicond target are
-    // built here. Others (e.g. ed25519) emit x3/x4 references via lld's
-    // gp/tp setup, which PVM2's validator rejects until we add a
-    // rewrite pass for that idiom.
-    let pvm2_blob = build_javm::build_pvm2(
-        "../../components/benches/prime-sieve",
-        "bench-prime-sieve",
-    );
-    println!("cargo:rustc-env=PRIME_SIEVE_PVM2_BLOB={}", pvm2_blob.display());
+        // Also build via PVM2. A failure here means linker_rv hit
+        // something it can't translate yet — surfaces at workspace
+        // build time, not bench-run time.
+        let pvm2_blob = build_javm::build_pvm2(path, crate_name);
+        let pvm2_env = env.trim_end_matches("_BLOB");
+        println!(
+            "cargo:rustc-env={pvm2_env}_PVM2_BLOB={}",
+            pvm2_blob.display()
+        );
+    }
 }

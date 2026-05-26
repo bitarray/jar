@@ -1,6 +1,6 @@
-//! Phase-2 smoke test: load the PVM2-built prime-sieve blob and run
-//! one invocation through the Hyperlight JIT. Exits 0 on success,
-//! panics with the failure reason otherwise.
+//! Phase-2 smoke test: load each PVM2-built bench blob and verify
+//! its result-value matches the corresponding PVM blob. Catches both
+//! `link_elf_rv` regressions and codegen miscompiles.
 
 #![cfg_attr(not(all(target_os = "linux", target_arch = "x86_64")), allow(unused))]
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -10,68 +10,144 @@ use javm_cap::image::Image;
 use nub::Nub;
 use ssz::Decode;
 
-fn main() {
-    let blob_path = env!("PRIME_SIEVE_PVM2_BLOB");
-    let blob = std::fs::read(blob_path).expect("read PRIME_SIEVE_PVM2_BLOB");
-    let image = Image::from_ssz_bytes(&blob).expect("decode PVM2 Image");
+struct Workload {
+    name: &'static str,
+    pvm: &'static [u8],
+    pvm2: &'static [u8],
+}
 
-    println!(
-        "PVM2 prime-sieve: code={}B bitmask={}B jump_table={}B endpoints={}",
-        image.code.len(),
-        image.packed_bitmask.len(),
-        image.jump_table.len(),
-        image.endpoints.len(),
-    );
-    for (idx, ep) in &image.endpoints {
-        println!(
-            "  endpoint {idx}: entry_pc={:#x} arg_registers={} arg_cnode_size={}",
-            ep.entry_pc, ep.arg_registers, ep.arg_cnode_size
-        );
-    }
-    println!(
-        "  pinned_slots={} initial_slots={} memory_mappings={}",
-        image.pinned_slots.len(),
-        image.initial_slots.len(),
-        image.memory_mappings.len(),
-    );
+const WORKLOADS: &[Workload] = &[
+    Workload {
+        name: "prime_sieve",
+        pvm: include_bytes!(env!("PRIME_SIEVE_BLOB")),
+        pvm2: include_bytes!(env!("PRIME_SIEVE_PVM2_BLOB")),
+    },
+    Workload {
+        name: "ed25519",
+        pvm: include_bytes!(env!("ED25519_BLOB")),
+        pvm2: include_bytes!(env!("ED25519_PVM2_BLOB")),
+    },
+    Workload {
+        name: "keccak",
+        pvm: include_bytes!(env!("KECCAK_BLOB")),
+        pvm2: include_bytes!(env!("KECCAK_PVM2_BLOB")),
+    },
+    Workload {
+        name: "blake2b",
+        pvm: include_bytes!(env!("BLAKE2B_BLOB")),
+        pvm2: include_bytes!(env!("BLAKE2B_PVM2_BLOB")),
+    },
+    Workload {
+        name: "ecrecover",
+        pvm: include_bytes!(env!("ECRECOVER_BLOB")),
+        pvm2: include_bytes!(env!("ECRECOVER_PVM2_BLOB")),
+    },
+    Workload {
+        name: "goldilocks_mul",
+        pvm: include_bytes!(env!("GOLDILOCKS_MUL_BLOB")),
+        pvm2: include_bytes!(env!("GOLDILOCKS_MUL_PVM2_BLOB")),
+    },
+    Workload {
+        name: "poseidon2_perm",
+        pvm: include_bytes!(env!("POSEIDON2_PERM_BLOB")),
+        pvm2: include_bytes!(env!("POSEIDON2_PERM_PVM2_BLOB")),
+    },
+    Workload {
+        name: "mini_verifier",
+        pvm: include_bytes!(env!("MINI_VERIFIER_BLOB")),
+        pvm2: include_bytes!(env!("MINI_VERIFIER_PVM2_BLOB")),
+    },
+    Workload {
+        name: "poly_eval",
+        pvm: include_bytes!(env!("POLY_EVAL_BLOB")),
+        pvm2: include_bytes!(env!("POLY_EVAL_PVM2_BLOB")),
+    },
+    Workload {
+        name: "fri_fold_tree",
+        pvm: include_bytes!(env!("FRI_FOLD_TREE_BLOB")),
+        pvm2: include_bytes!(env!("FRI_FOLD_TREE_PVM2_BLOB")),
+    },
+    Workload {
+        name: "sub_vm_recurse",
+        pvm: include_bytes!(env!("SUB_VM_RECURSE_BLOB")),
+        pvm2: include_bytes!(env!("SUB_VM_RECURSE_PVM2_BLOB")),
+    },
+    Workload {
+        name: "sub_vm_data_recurse",
+        pvm: include_bytes!(env!("SUB_VM_DATA_RECURSE_BLOB")),
+        pvm2: include_bytes!(env!("SUB_VM_DATA_RECURSE_PVM2_BLOB")),
+    },
+];
 
-    // Also load the PVM blob for comparison.
-    let pvm_blob_path = env!("PRIME_SIEVE_BLOB");
-    let pvm_blob = std::fs::read(pvm_blob_path).expect("read PRIME_SIEVE_BLOB");
-    let pvm_image = Image::from_ssz_bytes(&pvm_blob).expect("decode PVM Image");
-    println!(
-        "PVM prime-sieve (reference): code={}B bitmask={}B jump_table={}B",
-        pvm_image.code.len(),
-        pvm_image.packed_bitmask.len(),
-        pvm_image.jump_table.len(),
-    );
-    for (idx, ep) in &pvm_image.endpoints {
-        println!("  PVM endpoint {idx}: entry_pc={:#x}", ep.entry_pc);
-    }
-    assert!(
-        image.packed_bitmask.is_empty(),
-        "PVM2 path expects empty bitmask"
-    );
-    assert!(
-        image.jump_table.is_empty(),
-        "PVM2 path expects empty jump_table"
-    );
-
+fn run_one(blob: &[u8], nub: &mut Nub) -> (u32, u32, u64, i64) {
+    let image = Image::from_ssz_bytes(blob).expect("decode Image");
     let built = BuiltCaps::for_image(&image, 0);
-    let mut nub = Nub::new_hyperlight().expect("Nub::new_hyperlight");
-    built.put_into(&mut nub);
-    let result = nub
+    built.put_into(nub);
+    let r = nub
         .invoke_cached(built.instance_hash, 0, [0; 4], javm_bench::INITIAL_GAS)
         .expect("invoke_cached");
-    println!(
-        "result: exit_reason={} exit_arg={} return_value={} gas_remaining={}",
-        result.exit_reason, result.exit_arg, result.return_value, result.gas_remaining
-    );
-    // prime_sieve returns π(100000) = 9592 (Sieve of Eratosthenes).
-    assert_eq!(
-        result.return_value, 9592,
-        "unexpected return_value (expected 9592, got {})",
-        result.return_value
-    );
-    println!("PVM2 prime-sieve smoke: PASS");
+    (
+        r.exit_reason,
+        r.exit_arg,
+        r.return_value,
+        (javm_bench::INITIAL_GAS as i64) - (r.gas_remaining as i64),
+    )
+}
+
+fn main() {
+    let mut nub = Nub::new_hyperlight().expect("Nub::new_hyperlight");
+    let mut passes = 0usize;
+    let mut fails: Vec<(&str, String)> = Vec::new();
+
+    for w in WORKLOADS {
+        eprintln!("=== {} ===", w.name);
+        let pvm_img = Image::from_ssz_bytes(w.pvm).expect("decode PVM");
+        let pvm2_img = Image::from_ssz_bytes(w.pvm2).expect("decode PVM2");
+        eprintln!(
+            "  PVM:  code={}B bitmask={}B jt={}",
+            pvm_img.code.len(),
+            pvm_img.packed_bitmask.len(),
+            pvm_img.jump_table.len(),
+        );
+        eprintln!(
+            "  PVM2: code={}B bitmask={}B jt={}",
+            pvm2_img.code.len(),
+            pvm2_img.packed_bitmask.len(),
+            pvm2_img.jump_table.len(),
+        );
+
+        let (er_pvm, ea_pvm, rv_pvm, gas_pvm) = run_one(w.pvm, &mut nub);
+        let (er_pvm2, ea_pvm2, rv_pvm2, gas_pvm2) = run_one(w.pvm2, &mut nub);
+        eprintln!(
+            "  PVM:  exit_reason={} exit_arg={} return_value={:#x} gas_used={}",
+            er_pvm, ea_pvm, rv_pvm, gas_pvm,
+        );
+        eprintln!(
+            "  PVM2: exit_reason={} exit_arg={} return_value={:#x} gas_used={}",
+            er_pvm2, ea_pvm2, rv_pvm2, gas_pvm2,
+        );
+
+        if er_pvm == er_pvm2 && rv_pvm == rv_pvm2 {
+            passes += 1;
+            eprintln!("  PASS");
+        } else {
+            fails.push((
+                w.name,
+                format!(
+                    "exit_reason {} vs {}, return_value {:#x} vs {:#x}",
+                    er_pvm, er_pvm2, rv_pvm, rv_pvm2
+                ),
+            ));
+            eprintln!("  FAIL");
+        }
+    }
+
+    println!();
+    println!("Summary: {} pass / {} fail", passes, fails.len());
+    for (n, msg) in &fails {
+        println!("  FAIL {n}: {msg}");
+    }
+    if !fails.is_empty() {
+        std::process::exit(1);
+    }
 }

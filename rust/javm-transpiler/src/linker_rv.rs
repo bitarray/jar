@@ -113,41 +113,50 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
 
     // ---- 2. AUIPC → LUI rewrite ------------------------------------
     //
-    // Two flavours:
-    //  - CALL_PLT (`call_targets`): the absolute target is a *code PC*.
-    //    PVM2 PCs are byte offsets into `code` (0..code.len()), so the
-    //    LUI immediate is `vaddr_to_offset(target)`. The paired JALR's
-    //    lo12 was set by lld to `target & 0xFFF`; after the
-    //    `-base_vaddr` shift the low 12 bits change, so we patch the
-    //    JALR's imm field too.
-    //  - PCREL_HI20 (`hi20_targets`): the absolute target is usually
-    //    a *data address* (in .rodata/.data, identity-mapped into PVM
-    //    memory by the layout below). Code-pointer targets (function
-    //    pointers in .rodata) get the same code-PC treatment as
-    //    CALL_PLT. Pure-data targets are left as-is (LUI imm =
-    //    original absolute address, lo12 unchanged).
+    // lld emits each `auipc rd, hi20` with `hi20` chosen so that
+    //   anchor := auipc_pc + sext(hi20 << 12)
+    // sits within ±2 KiB of the symbol. The paired LO12 instruction
+    // (load/store/addi/jalr) carries `lo12 = target - anchor`. The
+    // anchor's low 12 bits inherit `auipc_pc`'s low 12 bits, so the
+    // anchor is *not* 4 KiB-aligned in general.
+    //
+    // LUI can only load 4-KiB-aligned values, so the rewrite must
+    // patch **both** the LUI immediate and the paired LO12's imm
+    // field. We compute:
+    //
+    //   effective_target = `target` for data refs,
+    //                    = `target − base_vaddr` for code refs
+    //                      (so JALR/branch validation against
+    //                      `valid_pc` indexes into our code buffer).
+    //   new_lui  = (effective_target + 0x800) & 0xFFFFF000
+    //   new_lo12 = effective_target & 0xFFF (12-bit signed)
+    //
+    // The +0x800 carry compensates for lo12's sign extension when
+    // its top bit is set.
     let is_code_addr = |addr: u64| -> bool {
         elf.code_ranges
             .iter()
             .any(|(start, end)| addr >= *start && addr < *end)
     };
 
-    // (auipc_vaddr, target_addr, is_code_target) tuples.
-    let mut auipc_rewrites: Vec<(u64, u64, bool)> = Vec::new();
+    // Compute effective_target per AUIPC reloc.
+    let mut auipc_effective: BTreeMap<u64, u32> = BTreeMap::new();
     for (&v, &t) in &elf.call_targets {
-        auipc_rewrites.push((v, t, true));
+        // CALL_PLT — always code.
+        auipc_effective.insert(v, t.wrapping_sub(base_vaddr) as u32);
     }
     for (&v, &t) in &elf.hi20_targets {
-        auipc_rewrites.push((v, t, is_code_addr(t)));
+        let eff = if is_code_addr(t) {
+            t.wrapping_sub(base_vaddr) as u32
+        } else {
+            (t & 0xFFFFFFFF) as u32
+        };
+        auipc_effective.insert(v, eff);
     }
 
-    // The LO12 immediates for code-target pairs need re-patching too.
-    // We track which (vaddr, new_lo12) pairs need writing back, then
-    // walk lo12_targets afterwards to apply.
-    let mut code_target_new_lo12: BTreeMap<u64, i32> = BTreeMap::new();
-
-    for (v, target, is_code) in &auipc_rewrites {
-        let off = vaddr_to_offset(*v).ok_or_else(|| {
+    // Rewrite AUIPC bytes → LUI.
+    for (&v, &eff) in &auipc_effective {
+        let off = vaddr_to_offset(v).ok_or_else(|| {
             TranspileError::InvalidSection(format!(
                 "link_elf_rv: AUIPC reloc at vaddr {:#x} outside code section",
                 v
@@ -173,41 +182,24 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
             )));
         }
         let rd = (word >> 7) & 0x1F;
-        let lui_value = if *is_code {
-            // Translate to byte-offset PC.
-            let off_target = (target.wrapping_sub(base_vaddr)) as u32;
-            // Record the new lo12 for the paired CALL_PLT JALR or
-            // PCREL_LO12 instruction.
-            let new_lo12 = (off_target as i32) << 20 >> 20; // sign-extend bottom 12
-            // Mark every "paired" instruction at the call site for
-            // lo12 patching. For CALL_PLT the paired JALR is at v+4.
-            // For PCREL_HI20 code refs the paired LO12 is in
-            // lo12_targets (we patch all entries whose hi20-source
-            // matches this v); to keep the bookkeeping simple we
-            // patch the JALR slot directly here and update
-            // lo12_targets in a separate loop below.
-            code_target_new_lo12.insert(*v, new_lo12);
-            off_target
-        } else {
-            (target & 0xFFFFFFFF) as u32
-        };
-        let new_hi = lui_value.wrapping_add(0x800) & 0xFFFFF000;
+        let new_hi = eff.wrapping_add(0x800) & 0xFFFFF000;
         let new_word = new_hi | (rd << 7) | OP_LUI;
         code[off..off + 4].copy_from_slice(&new_word.to_le_bytes());
     }
 
-    // ---- 2b. Patch paired LO12 / JALR lo12 fields for code refs ----
+    // ---- 2b. Patch paired LO12 / JALR lo12 fields ------------------
     //
     // For CALL_PLT entries the paired JALR is the 4-byte slot
     // immediately after the AUIPC at vaddr `v+4`. For PCREL_LO12
-    // entries the paired instruction's vaddr is keyed by its own
-    // reloc address; we look up the AUIPC's resolved target via the
-    // lo12_targets→auipc relationship (lo12_targets[L] gives the
-    // resolved absolute target, the same value the paired hi20 saw).
-    for &call_v in elf.call_targets.keys() {
-        let Some(&new_lo12) = code_target_new_lo12.get(&call_v) else {
-            continue;
-        };
+    // entries each `lo_v → target` pair names a specific instruction
+    // whose lo12 needs the same `effective_target & 0xFFF`.
+    let lo12_from_eff = |eff: u32| -> i32 {
+        // Sign-extend the low 12 bits.
+        (eff as i32) << 20 >> 20
+    };
+    for (&call_v, &call_target) in &elf.call_targets {
+        let eff = call_target.wrapping_sub(base_vaddr) as u32;
+        let new_lo12 = lo12_from_eff(eff);
         let jalr_v = call_v + 4;
         if let Some(jalr_off) = vaddr_to_offset(jalr_v) {
             if jalr_off + 4 > code.len() {
@@ -217,18 +209,18 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
         }
     }
     for (&lo_v, &target) in &elf.lo12_targets {
-        if !is_code_addr(target) {
-            continue;
-        }
         let Some(lo_off) = vaddr_to_offset(lo_v) else {
             continue;
         };
         if lo_off + 4 > code.len() {
             continue;
         }
-        // Compute the new lo12 from the shifted code-PC target.
-        let off_target = (target.wrapping_sub(base_vaddr)) as u32;
-        let new_lo12 = (off_target as i32) << 20 >> 20;
+        let eff = if is_code_addr(target) {
+            target.wrapping_sub(base_vaddr) as u32
+        } else {
+            (target & 0xFFFFFFFF) as u32
+        };
+        let new_lo12 = lo12_from_eff(eff);
         let opcode = code[lo_off] & 0x7F;
         match opcode {
             // I-type (load, addi, jalr) — imm in [31:20].
@@ -263,6 +255,82 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
     // length via op[1:0]) and reject anything that PVM2 forbids.
     validate_pvm2(&code)?;
 
+    // ---- 4b. Rewrite code pointers in .rodata -----------------------
+    //
+    // Function pointer tables (e.g. LLVM jump tables, vtables) store
+    // code addresses as raw u32/u64 values in .rodata. The original
+    // values are ELF vaddrs; the runtime JALR validates against
+    // `valid_pc` indexed by RV byte offset (0..code.len()), so we
+    // must translate each pointer.
+    //
+    // Sources of code pointers we recognise:
+    //  - `elf.abs_code_ptrs` — explicit R_RISCV_32/64/ADD32 relocs
+    //    naming code addresses. Already classified by size (4 or 8).
+    //  - 8-byte values in .rodata that happen to be in code_ranges
+    //    (heuristic — function pointers without an explicit reloc
+    //    show up this way).
+    //
+    // SUB32-based relative jump tables (entries of the form
+    // `target - base`) don't need rewriting: the linear shift of
+    // `-base_vaddr` cancels in the differential.
+    let mut ro_data_rewritten = elf.ro_data.clone();
+    let ro_base = elf.stack_size as u64;
+    {
+        // Build a set of vaddrs handled via sub32 (so we skip them in
+        // the absolute-rewrite pass).
+        let sub32_data_vaddrs: std::collections::HashSet<u64> =
+            elf.sub32_relocs.iter().map(|(v, _)| *v).collect();
+
+        for &(data_vaddr, rv_target, size) in &elf.abs_code_ptrs {
+            if sub32_data_vaddrs.contains(&data_vaddr) {
+                // Relative entry — uniform shift preserves the diff.
+                continue;
+            }
+            if !is_code_addr(rv_target) {
+                continue;
+            }
+            if data_vaddr < ro_base {
+                continue;
+            }
+            let off = (data_vaddr - ro_base) as usize;
+            let new_val = rv_target.wrapping_sub(base_vaddr);
+            match size {
+                4 if off + 4 <= ro_data_rewritten.len() => {
+                    ro_data_rewritten[off..off + 4]
+                        .copy_from_slice(&(new_val as u32).to_le_bytes());
+                }
+                8 if off + 8 <= ro_data_rewritten.len() => {
+                    ro_data_rewritten[off..off + 8]
+                        .copy_from_slice(&new_val.to_le_bytes());
+                }
+                _ => {}
+            }
+        }
+
+        // Heuristic: 8-byte values in .rodata that look like code
+        // pointers but aren't covered by an explicit reloc.
+        let mut off = 0;
+        let already_covered: std::collections::HashSet<u64> = elf
+            .abs_code_ptrs
+            .iter()
+            .map(|&(v, _, _)| v)
+            .collect();
+        while off + 8 <= ro_data_rewritten.len() {
+            let val = u64::from_le_bytes(
+                ro_data_rewritten[off..off + 8].try_into().unwrap(),
+            );
+            if is_code_addr(val) {
+                let vaddr = ro_base + off as u64;
+                if !already_covered.contains(&vaddr) {
+                    let new_val = val.wrapping_sub(base_vaddr);
+                    ro_data_rewritten[off..off + 8]
+                        .copy_from_slice(&new_val.to_le_bytes());
+                }
+            }
+            off += 8;
+        }
+    }
+
     // ---- 5. Endpoints -----------------------------------------------
     //
     // `parse_linked_elf` doesn't read `.subsoil.endpoints` itself —
@@ -272,16 +340,7 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
     let endpoints = read_subsoil_endpoints_rv(elf_data, base_vaddr, code.len())?;
 
     // ---- 6. Memory layout + Image construction ----------------------
-    //
-    // Identical to the PVM path's tail: compute page layout, attach
-    // ro/rw/stack/heap slots, plumb endpoint initial_regs[sp].
-    //
-    // Note: the existing rewrite_data_code_ptrs (LLVM jump-table
-    // rewriting) translates RV PCs in .rodata to PVM djump indices.
-    // For the RV path those bytes are already RV PCs (= byte offset
-    // into the code section), so we keep ro/rw_data unchanged. The
-    // recompiler's JALR validator catches any invalid PC at runtime.
-    let ro_data = elf.ro_data.clone();
+    let ro_data = ro_data_rewritten;
     let rw_data = elf.rw_data.clone();
 
     let stack_pages = elf.stack_size / PVM_PAGE_SIZE;
@@ -444,12 +503,88 @@ fn rewrite_ecall_markers(code: &mut [u8]) -> Result<(), TranspileError> {
     Ok(())
 }
 
+/// Which 5-bit fields of a 4-byte RV instruction encode registers
+/// (vs. parts of an immediate). Used by [`validate_pvm2`] so we don't
+/// flag S/B-type immediates that happen to match x3/x4 as "register
+/// use".
+#[derive(Clone, Copy)]
+struct RegFields {
+    rd: bool,
+    rs1: bool,
+    rs2: bool,
+}
+const REG_NONE: RegFields = RegFields {
+    rd: false,
+    rs1: false,
+    rs2: false,
+};
+
+/// Return which fields of `w` carry register numbers, given the
+/// 7-bit major opcode.
+fn reg_fields_for(opcode: u32) -> RegFields {
+    match opcode {
+        // R-type: rd, rs1, rs2 (OP, OP-32).
+        0b011_0011 | 0b011_1011 => RegFields {
+            rd: true,
+            rs1: true,
+            rs2: true,
+        },
+        // I-type loads (LOAD).
+        0b000_0011 => RegFields {
+            rd: true,
+            rs1: true,
+            rs2: false,
+        },
+        // I-type ALU (OP-IMM, OP-IMM-32) and JALR.
+        0b001_0011 | 0b001_1011 | 0b110_0111 => RegFields {
+            rd: true,
+            rs1: true,
+            rs2: false,
+        },
+        // S-type stores: rs1, rs2 are regs; rd slot is imm[4:0].
+        0b010_0011 => RegFields {
+            rd: false,
+            rs1: true,
+            rs2: true,
+        },
+        // B-type branches: rs1, rs2 are regs; rd slot is imm.
+        0b110_0011 => RegFields {
+            rd: false,
+            rs1: true,
+            rs2: true,
+        },
+        // U-type (LUI, AUIPC): rd is reg; rs1/rs2 slots are imm.
+        0b011_0111 | 0b001_0111 => RegFields {
+            rd: true,
+            rs1: false,
+            rs2: false,
+        },
+        // J-type (JAL): rd is reg; rs1/rs2 slots are imm.
+        0b110_1111 => RegFields {
+            rd: true,
+            rs1: false,
+            rs2: false,
+        },
+        // MISC-MEM (FENCE): no registers in scope.
+        0b000_1111 => REG_NONE,
+        // custom-0 (PVM2 host ops): trap/ecall.jar/ecalli — all reg
+        // fields are zero. ecalli's imm lives in the I-type slot,
+        // so we treat it as I-type for safety (rd = x0 always).
+        0b000_1011 => RegFields {
+            rd: true,
+            rs1: true,
+            rs2: false,
+        },
+        _ => REG_NONE,
+    }
+}
+
 /// Validate that `code` contains only PVM2-conformant encodings.
 ///
 /// Reject: any AUIPC, standard ECALL (not preceded by a marker — so
 /// any remaining ECALL after the rewrite pass is unaccounted for),
 /// EBREAK, CSR ops, atomics, FP/V, privileged, and any 5-bit reg
-/// field referencing x3 or x4.
+/// field that actually carries a register reference to x3 or x4.
 fn validate_pvm2(code: &[u8]) -> Result<(), TranspileError> {
     let n = code.len();
     let mut i = 0;
@@ -488,34 +623,29 @@ fn validate_pvm2(code: &[u8]) -> Result<(), TranspileError> {
                 let funct3 = (w >> 12) & 0x7;
                 let csr_or_imm = (w >> 20) & 0xFFF;
                 if funct3 == 0 {
-                    // ECALL or EBREAK.
                     return Err(TranspileError::InvalidSection(format!(
                         "link_elf_rv: standard ECALL/EBREAK at offset {:#x} (imm={:#x})",
                         i, csr_or_imm
                     )));
                 }
-                // funct3 in {1,2,3,5,6,7} → CSR ops (Zicsr). Forbidden.
                 return Err(TranspileError::InvalidSection(format!(
                     "link_elf_rv: CSR op at offset {:#x} (funct3={})",
                     i, funct3
                 )));
             }
             0b010_1111 => {
-                // OP-AMO (A extension). Forbidden.
                 return Err(TranspileError::InvalidSection(format!(
                     "link_elf_rv: atomic op at offset {:#x}",
                     i
                 )));
             }
             0b000_0111 | 0b010_0111 => {
-                // FP loads/stores. Forbidden (F/D extensions).
                 return Err(TranspileError::InvalidSection(format!(
                     "link_elf_rv: FP load/store at offset {:#x}",
                     i
                 )));
             }
             0b101_0011 => {
-                // FP arithmetic. Forbidden.
                 return Err(TranspileError::InvalidSection(format!(
                     "link_elf_rv: FP arithmetic at offset {:#x}",
                     i
@@ -523,17 +653,28 @@ fn validate_pvm2(code: &[u8]) -> Result<(), TranspileError> {
             }
             _ => {}
         }
-        // Check all register fields for x3 / x4.
+        // Check register fields based on the instruction encoding type.
+        let rf = reg_fields_for(opcode);
         let rd = (w >> 7) & 0x1F;
         let rs1 = (w >> 15) & 0x1F;
         let rs2 = (w >> 20) & 0x1F;
-        for (name, r) in [("rd", rd), ("rs1", rs1), ("rs2", rs2)] {
+        let check = |name: &str, r: u32| -> Result<(), TranspileError> {
             if r == 3 || r == 4 {
                 return Err(TranspileError::InvalidSection(format!(
                     "link_elf_rv: forbidden register x{} ({}) at offset {:#x}",
                     r, name, i
                 )));
             }
+            Ok(())
+        };
+        if rf.rd {
+            check("rd", rd)?;
+        }
+        if rf.rs1 {
+            check("rs1", rs1)?;
+        }
+        if rf.rs2 {
+            check("rs2", rs2)?;
         }
         i += 4;
     }

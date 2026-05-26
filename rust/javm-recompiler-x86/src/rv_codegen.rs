@@ -427,14 +427,38 @@ impl Compiler {
             self.rv_emit_panic_at(pc);
             return;
         }
-        // Load A into d (handles x0).
-        self.rv_read(rs1, d, pc);
-        let b_reg = if rs2 == 0 {
+        // Aliasing analysis: rv_read(rs1, d) might write d, which can
+        // clobber rs2's value if rd's slot equals rs2's slot. Save rs2
+        // into SCRATCH first whenever d aliases rs2 (and rs2 != rs1).
+        // x0 is handled specially since it has no mapped register.
+        let r1_is_x0 = rs1 == 0;
+        let r2_is_x0 = rs2 == 0;
+        let r1 = if r1_is_x0 {
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rs1).unwrap()])
+        };
+        let r2 = if r2_is_x0 {
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rs2).unwrap()])
+        };
+
+        let b_reg = if r2_is_x0 {
+            // rs2 == 0: materialise 0 in SCRATCH. rv_read of rs1 below
+            // won't touch SCRATCH (mov_rr / mov_ri64).
             self.asm.mov_ri64(SCRATCH, 0);
             SCRATCH
+        } else if Some(d) == r2 && r1 != r2 {
+            // d aliases r2 and rs1 != rs2 — rv_read(rs1, d) would
+            // clobber rs2. Snapshot rs2 into SCRATCH first.
+            self.asm.mov_rr(SCRATCH, r2.unwrap());
+            SCRATCH
         } else {
-            REG_MAP[rv_slot(rs2).unwrap()]
+            r2.unwrap()
         };
+        // Now safe to load rs1 into d.
+        self.rv_read(rs1, d, pc);
         self.apply_alu_op(op, d, b_reg);
         if rd != 0 {
             self.invalidate_reg(rv_slot(rd).unwrap());
@@ -496,9 +520,14 @@ impl Compiler {
 
     fn rv_slt_imm(&mut self, rd: u8, rs1: u8, imm: i32, signed: bool, pc: u32) {
         let Some(d) = self.rv_dst(rd, pc) else { return };
-        let src = self.rv_read_into(rs1, SCRATCH, pc);
-        self.asm.cmp_ri(src, imm);
+        // Zero d FIRST (mov_ri64 with 0 uses XOR → clobbers flags).
+        // Then cmp, setcc. setcc reads ZF/SF/CF; the XOR ZF/CF would
+        // confuse it if we did mov_ri64 between cmp and setcc.
         self.asm.mov_ri64(d, 0);
+        let src = self.rv_read_into(rs1, SCRATCH, pc);
+        // rv_read_into for rs1 == x0 uses mov_ri64 (XOR) — clobbers flags.
+        // That's fine: we cmp next which sets flags fresh.
+        self.asm.cmp_ri(src, imm);
         self.asm.setcc(if signed { Cc::L } else { Cc::B }, d);
         if rd != 0 {
             self.invalidate_reg(rv_slot(rd).unwrap());
@@ -511,19 +540,103 @@ impl Compiler {
             self.rv_emit_panic_at(pc);
             return;
         }
-        let a = self.rv_read_into(rs1, SCRATCH, pc);
-        let b = if a == SCRATCH {
-            // a is SCRATCH (rs1 was x0); rs2 must materialise into d.
-            self.rv_read(rs2, d, pc);
-            d
-        } else if rs2 == 0 {
-            self.asm.mov_ri64(SCRATCH, 0);
-            SCRATCH
+        // Snapshot operands into SCRATCH and/or read original mapped
+        // registers BEFORE touching d. Zero d up front; the cmp below
+        // sets flags fresh for the setcc.
+        let r1 = if rs1 == 0 {
+            None
         } else {
-            REG_MAP[rv_slot(rs2).unwrap()]
+            Some(REG_MAP[rv_slot(rs1).unwrap()])
         };
-        self.asm.cmp_rr(a, b);
+        let r2 = if rs2 == 0 {
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rs2).unwrap()])
+        };
+        // Choose registers for a and b without writing d yet.
+        // Strategy: if d aliases r1 or r2, snapshot one of them to
+        // SCRATCH. We only have one SCRATCH (RDX) so handle carefully.
+        let (a_reg, b_reg) = match (r1, r2) {
+            (Some(ra), Some(rb)) => {
+                if d == ra && d == rb {
+                    // Both r1 and r2 are d. cmp d, d → ZF=1 always; SLT=0.
+                    (ra, rb)
+                } else if d == ra {
+                    // We'll write d = 0 then load a into d. But that
+                    // overwrites b if d == ra... wait, ra is d. Snapshot
+                    // ra into SCRATCH BEFORE zeroing d.
+                    self.asm.mov_rr(SCRATCH, ra);
+                    (SCRATCH, rb)
+                } else if d == rb {
+                    self.asm.mov_rr(SCRATCH, rb);
+                    (ra, SCRATCH)
+                } else {
+                    (ra, rb)
+                }
+            }
+            (None, Some(rb)) => {
+                // a is x0. We'll use SCRATCH=0 as a. b stays.
+                if d == rb {
+                    // Snapshot rb into SCRATCH; use d-temp-with-zero... but
+                    // we only have one SCRATCH. Instead: zero d (it becomes
+                    // setcc target), then load b's value into SCRATCH first
+                    // before doing the zero-d step.
+                    // Actually with d == rb, just keep b = rb (we read it
+                    // before zeroing d below).
+                    // We use SCRATCH for a (= 0). Need to ensure b is read
+                    // before d is zeroed.
+                    // Simplest: save b to SCRATCH NOW and use it as b.
+                    // For a, we'd need another spare — push a non-d reg.
+                    self.asm.push(Reg::RAX);
+                    self.asm.mov_ri64(Reg::RAX, 0);
+                    self.asm.mov_rr(SCRATCH, rb);
+                    self.asm.mov_ri64(d, 0);
+                    self.asm.cmp_rr(Reg::RAX, SCRATCH);
+                    self.asm.setcc(if signed { Cc::L } else { Cc::B }, d);
+                    self.asm.pop(Reg::RAX);
+                    if rd != 0 {
+                        self.invalidate_reg(rv_slot(rd).unwrap());
+                    }
+                    return;
+                } else {
+                    self.asm.mov_ri64(SCRATCH, 0);
+                    (SCRATCH, rb)
+                }
+            }
+            (Some(ra), None) => {
+                // b is x0.
+                if d == ra {
+                    self.asm.mov_rr(SCRATCH, ra);
+                    self.asm.mov_ri64(d, 0);
+                    self.asm.cmp_ri(SCRATCH, 0);
+                    self.asm.setcc(if signed { Cc::L } else { Cc::B }, d);
+                    if rd != 0 {
+                        self.invalidate_reg(rv_slot(rd).unwrap());
+                    }
+                    return;
+                } else {
+                    // cmp ra, 0 — no need for SCRATCH.
+                    self.asm.mov_ri64(d, 0);
+                    self.asm.cmp_ri(ra, 0);
+                    self.asm.setcc(if signed { Cc::L } else { Cc::B }, d);
+                    if rd != 0 {
+                        self.invalidate_reg(rv_slot(rd).unwrap());
+                    }
+                    return;
+                }
+            }
+            (None, None) => {
+                // x0 < x0 — always false; d = 0.
+                self.asm.mov_ri64(d, 0);
+                if rd != 0 {
+                    self.invalidate_reg(rv_slot(rd).unwrap());
+                }
+                return;
+            }
+        };
+        // a_reg and b_reg now point at the actual values.
         self.asm.mov_ri64(d, 0);
+        self.asm.cmp_rr(a_reg, b_reg);
         self.asm.setcc(if signed { Cc::L } else { Cc::B }, d);
         if rd != 0 {
             self.invalidate_reg(rv_slot(rd).unwrap());
@@ -574,13 +687,27 @@ impl Compiler {
             self.rv_emit_panic_at(pc);
             return;
         }
-        self.rv_read(rs1, d, pc);
+        // Snapshot rs2 to SCRATCH if d would clobber it.
+        let r2 = if rs2 == 0 {
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rs2).unwrap()])
+        };
+        let r1 = if rs1 == 0 {
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rs1).unwrap()])
+        };
         let shift_src = if rs2 == 0 {
             self.asm.mov_ri64(SCRATCH, 0);
             SCRATCH
+        } else if Some(d) == r2 && r1 != r2 {
+            self.asm.mov_rr(SCRATCH, r2.unwrap());
+            SCRATCH
         } else {
-            REG_MAP[rv_slot(rs2).unwrap()]
+            r2.unwrap()
         };
+        self.rv_read(rs1, d, pc);
         let sub_op: u8 = match op {
             ShiftOp::Shl64 | ShiftOp::Shl32 => 4,
             ShiftOp::Shr64 | ShiftOp::Shr32 => 5,
@@ -702,102 +829,89 @@ impl Compiler {
             self.rv_emit_panic_at(pc);
             return;
         }
-        // Source regs (x0 sources materialised into spare slots).
-        // For Phase 1 we accept extra spills around div for clarity.
+        // ---- prologue (push spills once; both branches share a single
+        // cleanup epilogue at `join`) ----
         let save_rax = d != Reg::RAX;
-        // First load a into RAX (with x0 handling), holding b in some other reg.
-        let mut popped_rax = false;
         if save_rax {
             self.asm.push(Reg::RAX);
         }
-        // b: if x0, materialise into RCX (and save it). Otherwise it's mapped.
-        let mut spilled_rcx = false;
-        let b_reg = if rs2 == 0 {
+        // RCX is spilled when rs2 maps to nothing (x0) — we materialise
+        // 0 into RCX — or when rs2 maps to RAX (we move the divisor to
+        // RCX before loading the dividend into RAX).
+        let r2 = if rs2 == 0 {
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rs2).unwrap()])
+        };
+        let spilled_rcx = rs2 == 0 || r2 == Some(Reg::RAX);
+        if spilled_rcx {
             self.asm.push(Reg::RCX);
-            spilled_rcx = true;
+        }
+        // Determine the divisor register (b_reg).
+        let b_reg = if rs2 == 0 {
             self.asm.mov_ri64(Reg::RCX, 0);
             Reg::RCX
+        } else if r2 == Some(Reg::RAX) {
+            // rs2 mapped to RAX (x14). Read the original from the
+            // saved stack slot.
+            let off = if save_rax { 8 } else { 0 };
+            self.asm.mov_load64(Reg::RCX, Reg::RSP, off);
+            Reg::RCX
         } else {
-            REG_MAP[rv_slot(rs2).unwrap()]
+            r2.unwrap()
         };
-        // Load a into RAX.
+        // Load dividend (a) into RAX.
         if rs1 == 0 {
             self.asm.mov_ri64(Reg::RAX, 0);
         } else {
             let r1 = REG_MAP[rv_slot(rs1).unwrap()];
             if r1 == Reg::RAX {
                 if save_rax {
-                    self.asm.mov_load64(Reg::RAX, Reg::RSP, if spilled_rcx { 8 } else { 0 });
+                    let off = if spilled_rcx { 8 } else { 0 };
+                    self.asm.mov_load64(Reg::RAX, Reg::RSP, off);
                 }
-                // else: already in RAX
+                // else: already in RAX.
             } else {
                 self.asm.mov_rr(Reg::RAX, r1);
             }
         }
-        // Check b == 0 first.
+        // ---- branch on divisor == 0 ----
         self.asm.test_rr(b_reg, b_reg);
         let nonzero = self.asm.new_label();
-        let done = self.asm.new_label();
+        let join = self.asm.new_label();
         self.asm.jcc_label(Cc::NE, nonzero);
-        // div by zero: quotient = u64::MAX (or sign-extended u32::MAX);
-        // remainder = dividend.
+        // Divisor == 0: div → -1 (all-ones); remainder → dividend.
         if remainder {
-            self.asm.mov_rr(SCRATCH, Reg::RAX); // dividend → SCRATCH for now
-            if is_32bit {
-                self.asm.movsxd(SCRATCH, SCRATCH);
+            if d != Reg::RAX {
+                self.asm.mov_rr(d, Reg::RAX);
             }
-            if d != SCRATCH {
-                self.asm.mov_rr(d, SCRATCH);
-            }
-        } else {
-            self.asm.mov_ri64(d, u64::MAX);
             if is_32bit {
                 self.asm.movsxd(d, d);
             }
-        }
-        // Clean up spills, then jmp done.
-        if spilled_rcx {
-            self.asm.pop(Reg::RCX);
-        }
-        if save_rax {
-            self.asm.pop(Reg::RAX);
-            popped_rax = true;
-        }
-        self.asm.jmp_label(done);
-
-        self.asm.bind_label(nonzero);
-        // b_reg might be RCX (spilled or mapped); if mapped to RAX, that's
-        // impossible since b_reg comes from x5..x15 → not RAX-only.
-        // Actually RAX corresponds to slot 11 (x14), so b_reg can be RAX
-        // when rs2 == 14. Handle that via swap-to-RCX.
-        let divisor = if b_reg == Reg::RAX {
-            // Move b to RCX (if not already there); RCX may need saving.
-            if !spilled_rcx {
-                self.asm.push(Reg::RCX);
-                spilled_rcx = true;
-            }
-            self.asm.mov_rr(Reg::RCX, Reg::RAX);
-            // RAX still holds the dividend.
-            Reg::RCX
         } else {
-            b_reg
-        };
+            self.asm.mov_ri64(d, u64::MAX);
+            // u64::MAX is sign-extended -1 in both 32/64-bit views.
+        }
+        self.asm.jmp_label(join);
+
+        // ---- nonzero branch: real DIV/IDIV ----
+        self.asm.bind_label(nonzero);
         if is_32bit {
             if signed {
                 self.asm.movsxd(Reg::RAX, Reg::RAX);
                 self.asm.cdq();
-                self.asm.idiv32(divisor);
+                self.asm.idiv32(b_reg);
             } else {
                 self.asm.movzx_32_64(Reg::RAX, Reg::RAX);
                 self.asm.mov_ri64(SCRATCH, 0);
-                self.asm.div32(divisor);
+                self.asm.div32(b_reg);
             }
         } else if signed {
             self.asm.cqo();
-            self.asm.idiv64(divisor);
+            self.asm.idiv64(b_reg);
         } else {
             self.asm.mov_ri64(SCRATCH, 0);
-            self.asm.div64(divisor);
+            self.asm.div64(b_reg);
         }
         let result_reg = if remainder { SCRATCH } else { Reg::RAX };
         if d != result_reg {
@@ -806,14 +920,15 @@ impl Compiler {
         if is_32bit {
             self.asm.movsxd(d, d);
         }
-        // Restore spills.
+
+        // ---- single epilogue ----
+        self.asm.bind_label(join);
         if spilled_rcx {
             self.asm.pop(Reg::RCX);
         }
-        if save_rax && !popped_rax {
+        if save_rax {
             self.asm.pop(Reg::RAX);
         }
-        self.asm.bind_label(done);
         if rd != 0 {
             self.invalidate_reg(rv_slot(rd).unwrap());
         }
@@ -969,8 +1084,10 @@ impl Compiler {
             BitOp::Set => self.asm.or_rr(d, SCRATCH),
             BitOp::Invert => self.asm.xor_rr(d, SCRATCH),
             BitOp::Extract => {
+                // test sets ZF; mov_ri32 (not mov_ri64-zero) writes 0
+                // to d WITHOUT clobbering flags so setcc sees ZF.
                 self.asm.test_rr(d, SCRATCH);
-                self.asm.mov_ri64(d, 0);
+                self.asm.mov_ri32(d, 0);
                 self.asm.setcc(Cc::NE, d);
             }
         }
@@ -1022,21 +1139,66 @@ impl Compiler {
 
     // ---- Zicond -----------------------------------------------------
 
+    /// Semantics:
+    ///   `cond = Cc::E`  → czero.eqz rd, rs1, rs2 = (rs2 == 0) ? 0 : rs1
+    ///   `cond = Cc::NE` → czero.nez rd, rs1, rs2 = (rs2 != 0) ? 0 : rs1
+    ///
+    /// We build a mask `M = -1` when **rs1 should be kept** (the
+    /// "false" branch of the condition), else `M = 0`, then compute
+    /// `d = rs1 & M`. The mask uses the *inverted* condition because
+    /// the spec zeroes out when the condition holds.
     fn rv_czero(&mut self, rd: u8, rs1: u8, rs2: u8, cond: Cc, pc: u32) {
         let Some(d) = self.rv_dst(rd, pc) else { return };
-        self.rv_read(rs1, d, pc);
+        if rv_is_reserved(rs1) || rv_is_reserved(rs2) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
         if rs2 == 0 {
-            // rs2 == 0: eqz → always true; nez → always false.
+            // rs2 hardwired zero: condition is statically known.
+            //   eqz (Cc::E): rs2 == 0 is always true → d = 0
+            //   nez (Cc::NE): rs2 == 0 is true, rs2 != 0 is false → d = rs1
             if matches!(cond, Cc::E) {
                 self.asm.mov_ri64(d, 0);
+            } else {
+                self.rv_read(rs1, d, pc);
             }
-        } else if rv_is_reserved(rs2) {
-            self.rv_emit_panic_at(pc);
+            if rd != 0 {
+                self.invalidate_reg(rv_slot(rd).unwrap());
+            }
+            return;
+        }
+        let inv_cond = match cond {
+            Cc::E => Cc::NE,
+            Cc::NE => Cc::E,
+            _ => unreachable!("rv_czero only accepts E/NE"),
+        };
+        let r2 = REG_MAP[rv_slot(rs2).unwrap()];
+        // Test rs2 *before* writing d (d may alias r2). The setcc /
+        // neg / and chain that follows must keep ZF/etc. valid; we
+        // use `mov_ri32(_, 0)` (zero-imm mov, no XOR) so the flags
+        // from `test` survive into `setcc`.
+        if d == r2 {
+            // d aliases r2 — read rs2 into a temp first so rv_read can
+            // safely overwrite d.
+            self.asm.mov_rr(SCRATCH, r2);
+            self.asm.test_rr(SCRATCH, SCRATCH);
+            // Free up a non-d, non-SCRATCH register for the mask via
+            // push/pop of RAX (cheap; this path is the rare aliasing
+            // case).
+            self.asm.push(Reg::RAX);
+            self.asm.mov_ri32(Reg::RAX, 0);
+            self.asm.setcc(inv_cond, Reg::RAX);
+            self.asm.neg64(Reg::RAX);
+            self.rv_read(rs1, d, pc);
+            self.asm.and_rr(d, Reg::RAX);
+            self.asm.pop(Reg::RAX);
         } else {
-            let r2 = REG_MAP[rv_slot(rs2).unwrap()];
             self.asm.test_rr(r2, r2);
-            self.asm.mov_ri64(SCRATCH, 0);
-            self.asm.cmovcc(cond, d, SCRATCH);
+            self.asm.mov_ri32(SCRATCH, 0);
+            self.asm.setcc(inv_cond, SCRATCH);
+            self.asm.neg64(SCRATCH);
+            self.rv_read(rs1, d, pc);
+            self.asm.and_rr(d, SCRATCH);
         }
         if rd != 0 {
             self.invalidate_reg(rv_slot(rd).unwrap());
