@@ -32,6 +32,7 @@ use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 
 use javm_recompiler_x86::codegen::{CompileResult, Compiler, HelperFns};
+use javm_recompiler_x86::rv_codegen::predecode_rv;
 
 use javm_cap::CapHash;
 
@@ -264,5 +265,136 @@ pub fn get_or_compile(
         );
     }
     // SAFETY: present; BTreeMap entries don't move once inserted.
+    map.get(image_hash).expect("inserted above")
+}
+
+/// RV+C+custom-0 variant of [`get_or_compile`].
+///
+/// Layout differences vs the PVM path:
+/// - **BB region** carries the RV `valid_pc` set (one byte per code
+///   byte; 1 = instruction boundary). JALR's runtime validator reads
+///   it through `CTX_BB_STARTS`, same as the PVM djump table consumer.
+/// - **JT region** is empty (one page padding) — the RV path has no
+///   jump table; jalr targets are raw PCs validated against `valid_pc`.
+/// - Everything else (DISPATCH / JIT / TRAMP) matches the PVM layout.
+#[allow(clippy::too_many_arguments)]
+pub fn get_or_compile_rv(
+    image_hash: &CapHash,
+    code: &[u8],
+    arena_base_va: u64,
+    ctx_va: u64,
+    mem_cycles: u8,
+    helpers: HelperFns,
+) -> &'static CompiledImage {
+    // SAFETY: single-threaded guest.
+    let map = unsafe { &mut *CACHE.inner.get() };
+    if !map.contains_key(image_hash) {
+        // Predecode once: both Compiler::compile_rv and the BB region
+        // need the result. compile_rv consumes the valid_pc slice via a
+        // raw pointer stored inside the Compiler, then drops the ref;
+        // the BB region's contents are independent (we memcpy them into
+        // the arena).
+        let pd = predecode_rv(code);
+
+        // Region sizing.
+        let bb_size = page_round_up_min1(pd.valid_pc.len());
+        let jt_size = page_round_up_min1(0); // empty; just a padding page
+        let dispatch_size = page_round_up_min1(code.len() * core::mem::size_of::<i32>());
+
+        let bb_offset = 0usize;
+        let jt_offset = bb_offset + bb_size;
+        let dispatch_offset = jt_offset + jt_size;
+        let jit_offset = dispatch_offset + dispatch_size;
+        let jit_va = arena_base_va + jit_offset as u64;
+
+        let compiler = Compiler::new(&[], &[], helpers, code.len(), jit_va, mem_cycles);
+        let CompileResult {
+            native_code,
+            dispatch_table,
+            trap_table,
+            exit_label_offset,
+        } = compiler.compile_rv(code, &pd);
+
+        let jit_size = page_round_up_min1(native_code.len());
+        let tramp_offset = jit_offset + jit_size;
+        let tramp_size = PAGE_SIZE;
+        let total = tramp_offset + tramp_size;
+
+        let mut arena = PageBuf::new(total).expect("PageBuf alloc for Image arena");
+        let buf = arena.as_mut_slice();
+
+        // BB region: valid_pc as bytes (Vec<bool> is 0/1 single-byte
+        // representation, so a raw-pointer reinterpret is sound).
+        let bb_ptr = pd.valid_pc.as_ptr() as *const u8;
+        // SAFETY: bb_ptr valid for pd.valid_pc.len() bytes.
+        let bb_bytes =
+            unsafe { core::slice::from_raw_parts(bb_ptr, pd.valid_pc.len()) };
+        buf[bb_offset..bb_offset + pd.valid_pc.len()].copy_from_slice(bb_bytes);
+
+        // JT region: empty (zero bytes used).
+
+        // DISPATCH region.
+        let dispatch_bytes_len = core::mem::size_of_val(dispatch_table.as_slice());
+        let dispatch_ptr = dispatch_table.as_ptr() as *const u8;
+        // SAFETY: dispatch_ptr valid for dispatch_bytes_len bytes.
+        let dispatch_slice =
+            unsafe { core::slice::from_raw_parts(dispatch_ptr, dispatch_bytes_len) };
+        buf[dispatch_offset..dispatch_offset + dispatch_bytes_len].copy_from_slice(dispatch_slice);
+
+        // JIT region.
+        buf[jit_offset..jit_offset + native_code.len()].copy_from_slice(&native_code);
+
+        // TRAMP region (same 26-byte sequence as PVM).
+        let tramp_start = tramp_offset;
+        buf[tramp_start] = 0x48;
+        buf[tramp_start + 1] = 0xBF;
+        buf[tramp_start + 2..tramp_start + 10].copy_from_slice(&ctx_va.to_le_bytes());
+        buf[tramp_start + 10] = 0x48;
+        buf[tramp_start + 11] = 0xB8;
+        buf[tramp_start + 12..tramp_start + 20].copy_from_slice(&jit_va.to_le_bytes());
+        buf[tramp_start + 20] = 0xFF;
+        buf[tramp_start + 21] = 0xD0;
+        buf[tramp_start + 22] = 0xCD;
+        buf[tramp_start + 23] = 0x81;
+        buf[tramp_start + 24] = 0x0F;
+        buf[tramp_start + 25] = 0x0B;
+
+        // Template PD: same RO-then-RX split as the PVM path.
+        let arena_pa = arena.pa();
+        let mut template = TemplatePT::new().expect("TemplatePT alloc");
+        let ro_end = jit_offset;
+        let mut off = 0usize;
+        while off < total {
+            let perm = if off < ro_end {
+                Perm::user_ro()
+            } else {
+                Perm::user_rx()
+            };
+            template
+                .map_leaf(off as u64, arena_pa + off as u64, perm)
+                .expect("TemplatePT::map_leaf");
+            off += PAGE_SIZE;
+        }
+        let template_pd_pa = template
+            .pd_pa()
+            .expect("template PD must be in kernel half");
+
+        map.insert(
+            *image_hash,
+            CompiledImage {
+                arena,
+                bb_offset,
+                jt_offset,
+                dispatch_offset,
+                jit_offset,
+                tramp_offset,
+                jit_size,
+                exit_label_offset,
+                trap_table,
+                template,
+                template_pd_pa,
+            },
+        );
+    }
     map.get(image_hash).expect("inserted above")
 }

@@ -29,7 +29,7 @@ use super::codegen::{
     REG_MAP, SCRATCH,
 };
 use javm_exec::rv_instruction::RvInst;
-use javm_exec::rv_predecode::predecode_rv;
+pub use javm_exec::rv_predecode::{RvPredecode, predecode_rv};
 
 /// Map an RV register index to its PVM slot (0..=12).
 ///
@@ -57,13 +57,11 @@ fn rv_is_reserved(x: u8) -> bool {
 impl Compiler {
     /// Compile an RV+C+custom-0 byte stream into x86-64.
     ///
-    /// Drives a single-pass predecode (see `rv_predecode::predecode_rv`)
-    /// then walks the decoded instruction array, emitting a gas-block
-    /// header at every `is_gas_block_start` and dispatching each
-    /// [`RvInst`] through [`Compiler::compile_rv_instruction`].
-    pub fn compile_rv(mut self, code: &[u8]) -> CompileResult {
-        let pd = predecode_rv(code);
-
+    /// The caller produces a [`RvPredecode`] up front (the result is
+    /// also needed to populate the runtime BB / valid-PC region the
+    /// JIT consults for JALR validation, so it'd be wasteful to recompute
+    /// internally).
+    pub fn compile_rv(mut self, code: &[u8], pd: &RvPredecode) -> CompileResult {
         // Re-point the "valid target" array used by emit_static_branch /
         // emit_branch_reg / emit_branch_imm at the RV valid-PC set. The
         // existing `is_basic_block_start(byte_offset)` reads byte i from
