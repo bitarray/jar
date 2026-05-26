@@ -78,4 +78,14 @@ fn main() {
         println!("cargo:rerun-if-changed={path}/src");
         println!("cargo:rerun-if-changed={path}/Cargo.toml");
     }
+
+    // Phase 2 smoke: also build prime-sieve through the PVM2 path so
+    // we surface any link_elf_rv failure at workspace-build time
+    // rather than at bench-run time. The env var lets a follow-up
+    // bench arm load it.
+    let pvm2_blob = build_javm::build_pvm2(
+        "../../components/benches/prime-sieve",
+        "bench-prime-sieve",
+    );
+    println!("cargo:rustc-env=PRIME_SIEVE_PVM2_BLOB={}", pvm2_blob.display());
 }

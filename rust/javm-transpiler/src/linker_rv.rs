@@ -67,24 +67,36 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
 
     // ---- 1. Concatenate code sections ------------------------------
     //
-    // For LLD PIE output the typical shape is a single .text at vaddr
-    // 0. Reject anything more exotic for now — supporting multiple
-    // sections requires a vaddr→byte-offset map and rewriting all
-    // inter-section references, which the bench guests don't need.
+    // Multi-section ELFs from lld place each function in its own
+    // `.text.<symbol>` section so dead-code elimination can drop
+    // unused ones. To keep all reloc data working unchanged, we
+    // preserve the original RV vaddr layout in the output: take the
+    // minimum vaddr as the base, allocate a buffer spanning to
+    // `max_vaddr + max_section_size`, and copy each section in at
+    // its vaddr offset. Gaps stay zero (RVC `c.illegal`); the
+    // predecoder records them as Reserved and codegen emits a panic
+    // — fine because gaps shouldn't be reached during execution.
     if elf.code_sections.is_empty() {
         return Err(TranspileError::InvalidSection(
             "link_elf_rv: ELF has no code sections".into(),
         ));
     }
-    if elf.code_sections.len() > 1 {
-        return Err(TranspileError::InvalidSection(format!(
-            "link_elf_rv: multi-section ELFs not yet supported \
-             (got {} code sections)",
-            elf.code_sections.len()
-        )));
+    let mut sections_by_vaddr: Vec<&(u64, u64, Vec<u8>)> = elf.code_sections.iter().collect();
+    sections_by_vaddr.sort_by_key(|(_, v, _)| *v);
+    let base_vaddr = sections_by_vaddr[0].1;
+    let mut code_end_vaddr = base_vaddr;
+    for (_, v, d) in &sections_by_vaddr {
+        let end = v.saturating_add(d.len() as u64);
+        if end > code_end_vaddr {
+            code_end_vaddr = end;
+        }
     }
-    let (_file_off, base_vaddr, ref section_data) = elf.code_sections[0];
-    let mut code: Vec<u8> = section_data.clone();
+    let span = (code_end_vaddr - base_vaddr) as usize;
+    let mut code: Vec<u8> = vec![0u8; span];
+    for (_, v, d) in &sections_by_vaddr {
+        let off = (v - base_vaddr) as usize;
+        code[off..off + d.len()].copy_from_slice(d);
+    }
     let code_len = code.len();
 
     let vaddr_to_offset = |v: u64| -> Option<usize> {
@@ -101,24 +113,41 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
 
     // ---- 2. AUIPC → LUI rewrite ------------------------------------
     //
-    // Every `hi20_targets[v]` and `call_targets[v]` entry names an
-    // AUIPC at RV vaddr `v` with resolved absolute target `t`. The
-    // PVM2 memory cap guarantees `t` fits in 32 bits.
-    //
-    // LUI imm[31:12] encodes the top 20 bits of `target`, with the
-    // standard sign-carry: if `lo12 = target & 0xFFF` has its top
-    // bit set, sign-extension makes it negative, so the LUI half
-    // must be one larger to compensate.
-    let mut auipc_rewrites: BTreeMap<u64, u64> = BTreeMap::new();
-    for (&v, &t) in &elf.hi20_targets {
-        auipc_rewrites.insert(v, t);
-    }
+    // Two flavours:
+    //  - CALL_PLT (`call_targets`): the absolute target is a *code PC*.
+    //    PVM2 PCs are byte offsets into `code` (0..code.len()), so the
+    //    LUI immediate is `vaddr_to_offset(target)`. The paired JALR's
+    //    lo12 was set by lld to `target & 0xFFF`; after the
+    //    `-base_vaddr` shift the low 12 bits change, so we patch the
+    //    JALR's imm field too.
+    //  - PCREL_HI20 (`hi20_targets`): the absolute target is usually
+    //    a *data address* (in .rodata/.data, identity-mapped into PVM
+    //    memory by the layout below). Code-pointer targets (function
+    //    pointers in .rodata) get the same code-PC treatment as
+    //    CALL_PLT. Pure-data targets are left as-is (LUI imm =
+    //    original absolute address, lo12 unchanged).
+    let is_code_addr = |addr: u64| -> bool {
+        elf.code_ranges
+            .iter()
+            .any(|(start, end)| addr >= *start && addr < *end)
+    };
+
+    // (auipc_vaddr, target_addr, is_code_target) tuples.
+    let mut auipc_rewrites: Vec<(u64, u64, bool)> = Vec::new();
     for (&v, &t) in &elf.call_targets {
-        auipc_rewrites.insert(v, t);
+        auipc_rewrites.push((v, t, true));
+    }
+    for (&v, &t) in &elf.hi20_targets {
+        auipc_rewrites.push((v, t, is_code_addr(t)));
     }
 
-    for (&v, &target) in &auipc_rewrites {
-        let off = vaddr_to_offset(v).ok_or_else(|| {
+    // The LO12 immediates for code-target pairs need re-patching too.
+    // We track which (vaddr, new_lo12) pairs need writing back, then
+    // walk lo12_targets afterwards to apply.
+    let mut code_target_new_lo12: BTreeMap<u64, i32> = BTreeMap::new();
+
+    for (v, target, is_code) in &auipc_rewrites {
+        let off = vaddr_to_offset(*v).ok_or_else(|| {
             TranspileError::InvalidSection(format!(
                 "link_elf_rv: AUIPC reloc at vaddr {:#x} outside code section",
                 v
@@ -144,10 +173,74 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
             )));
         }
         let rd = (word >> 7) & 0x1F;
-        let target32 = (target & 0xFFFFFFFF) as u32;
-        let new_hi = target32.wrapping_add(0x800) & 0xFFFFF000;
+        let lui_value = if *is_code {
+            // Translate to byte-offset PC.
+            let off_target = (target.wrapping_sub(base_vaddr)) as u32;
+            // Record the new lo12 for the paired CALL_PLT JALR or
+            // PCREL_LO12 instruction.
+            let new_lo12 = (off_target as i32) << 20 >> 20; // sign-extend bottom 12
+            // Mark every "paired" instruction at the call site for
+            // lo12 patching. For CALL_PLT the paired JALR is at v+4.
+            // For PCREL_HI20 code refs the paired LO12 is in
+            // lo12_targets (we patch all entries whose hi20-source
+            // matches this v); to keep the bookkeeping simple we
+            // patch the JALR slot directly here and update
+            // lo12_targets in a separate loop below.
+            code_target_new_lo12.insert(*v, new_lo12);
+            off_target
+        } else {
+            (target & 0xFFFFFFFF) as u32
+        };
+        let new_hi = lui_value.wrapping_add(0x800) & 0xFFFFF000;
         let new_word = new_hi | (rd << 7) | OP_LUI;
         code[off..off + 4].copy_from_slice(&new_word.to_le_bytes());
+    }
+
+    // ---- 2b. Patch paired LO12 / JALR lo12 fields for code refs ----
+    //
+    // For CALL_PLT entries the paired JALR is the 4-byte slot
+    // immediately after the AUIPC at vaddr `v+4`. For PCREL_LO12
+    // entries the paired instruction's vaddr is keyed by its own
+    // reloc address; we look up the AUIPC's resolved target via the
+    // lo12_targets→auipc relationship (lo12_targets[L] gives the
+    // resolved absolute target, the same value the paired hi20 saw).
+    for &call_v in elf.call_targets.keys() {
+        let Some(&new_lo12) = code_target_new_lo12.get(&call_v) else {
+            continue;
+        };
+        let jalr_v = call_v + 4;
+        if let Some(jalr_off) = vaddr_to_offset(jalr_v) {
+            if jalr_off + 4 > code.len() {
+                continue;
+            }
+            patch_imm_i(&mut code[jalr_off..jalr_off + 4], new_lo12);
+        }
+    }
+    for (&lo_v, &target) in &elf.lo12_targets {
+        if !is_code_addr(target) {
+            continue;
+        }
+        let Some(lo_off) = vaddr_to_offset(lo_v) else {
+            continue;
+        };
+        if lo_off + 4 > code.len() {
+            continue;
+        }
+        // Compute the new lo12 from the shifted code-PC target.
+        let off_target = (target.wrapping_sub(base_vaddr)) as u32;
+        let new_lo12 = (off_target as i32) << 20 >> 20;
+        let opcode = code[lo_off] & 0x7F;
+        match opcode {
+            // I-type (load, addi, jalr) — imm in [31:20].
+            0b0000011 | 0b0010011 | 0b1100111 => {
+                patch_imm_i(&mut code[lo_off..lo_off + 4], new_lo12);
+            }
+            // S-type (store) — imm[11:5] in [31:25], imm[4:0] in [11:7].
+            0b0100011 => {
+                patch_imm_s(&mut code[lo_off..lo_off + 4], new_lo12);
+            }
+            _ => {}
+        }
     }
 
     // ---- 3. ECALL marker replacement -------------------------------
@@ -287,30 +380,35 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
     })
 }
 
-/// Walk `code` looking for the two-instruction `CSRRW(0x800/0x801) +
-/// ECALL` sequences emitted by the guest's ecall machinery. Rewrite
-/// each marker to NOP and each follow-up ECALL to a custom-0
-/// `ecall.jar` (0x800) or `ecalli imm=0` (0x801).
+/// Walk `code` and rewrite ECALL-related sequences:
+///
+/// - `CSRRW(0x800) + ECALL` → `NOP + custom-0 ecall.jar`.
+/// - `CSRRW(0x801) + ECALL` → `NOP + custom-0 ecalli imm=0`.
+/// - Bare standard `ECALL` (not preceded by a marker) → custom-0
+///   `ecalli imm=0`. This mirrors the legacy fallback in the PVM
+///   transpiler (`riscv.rs`: "No marker (legacy) — treat as ecalli for
+///   backward compat").
 fn rewrite_ecall_markers(code: &mut [u8]) -> Result<(), TranspileError> {
     let n = code.len();
     let mut i = 0;
-    while i + 4 <= n {
-        let word = u32::from_le_bytes([code[i], code[i + 1], code[i + 2], code[i + 3]]);
-        if !is_full_length(word) {
-            // 2-byte RVC — advance by 2 and continue.
+    while i + 2 <= n {
+        // RVC slots have op[1:0] != 11; skip them.
+        let lo = u16::from_le_bytes([code[i], code[i + 1]]);
+        if lo & 0b11 != 0b11 {
             i += 2;
             continue;
         }
+        if i + 4 > n {
+            break;
+        }
+        let word = u32::from_le_bytes([code[i], code[i + 1], code[i + 2], code[i + 3]]);
         let opcode = word & 0x7F;
         let funct3 = (word >> 12) & 0x7;
         if opcode == OP_SYSTEM && funct3 == 0b001 {
             // CSRRW. Check csr field.
             let csr = (word >> 20) & 0xFFF;
             if csr == CSR_ECALL_JAR || csr == CSR_ECALLI {
-                // Replace this slot with NOP.
                 code[i..i + 4].copy_from_slice(&NOP_BYTES);
-                // Look at the next 4-byte slot — if it's an ECALL,
-                // replace with the appropriate custom-0 op.
                 let j = i + 4;
                 if j + 4 <= n {
                     let nxt = u32::from_le_bytes([
@@ -326,23 +424,21 @@ fn rewrite_ecall_markers(code: &mut [u8]) -> Result<(), TranspileError> {
                             encode_custom0_ecalli(0)
                         };
                         code[j..j + 4].copy_from_slice(&new_word.to_le_bytes());
-                    } else {
-                        return Err(TranspileError::InvalidSection(format!(
-                            "link_elf_rv: CSRRW(0x{:x}) marker at offset {:#x} not followed by ECALL",
-                            csr, i
-                        )));
+                        i = j + 4;
+                        continue;
                     }
-                } else {
-                    return Err(TranspileError::InvalidSection(format!(
-                        "link_elf_rv: CSRRW(0x{:x}) marker at offset {:#x} at code end",
-                        csr, i
-                    )));
                 }
-                i = j + 4;
+                // Marker without follow-up ECALL — pass through as NOP,
+                // keep scanning.
+                i += 4;
                 continue;
             }
         }
-        // Not an ecall marker — advance by 4 (full-length).
+        if opcode == OP_SYSTEM && funct3 == 0 && is_standard_ecall(word) {
+            // Bare ECALL with no preceding marker → custom-0 ecalli imm=0.
+            let new_word = encode_custom0_ecalli(0);
+            code[i..i + 4].copy_from_slice(&new_word.to_le_bytes());
+        }
         i += 4;
     }
     Ok(())
@@ -511,6 +607,27 @@ fn read_subsoil_endpoints_rv(
 #[inline]
 fn is_full_length(word: u32) -> bool {
     word & 0b11 == 0b11
+}
+
+/// Patch an I-type instruction's 12-bit imm (bits [31:20]) in place.
+/// `imm` is the signed 12-bit value; only the low 12 bits are used.
+fn patch_imm_i(slot: &mut [u8], imm: i32) {
+    let w = u32::from_le_bytes([slot[0], slot[1], slot[2], slot[3]]);
+    let cleared = w & 0x000F_FFFF;
+    let imm12 = (imm as u32) & 0xFFF;
+    let patched = cleared | (imm12 << 20);
+    slot[0..4].copy_from_slice(&patched.to_le_bytes());
+}
+
+/// Patch an S-type instruction's 12-bit imm (bits [31:25] | [11:7]).
+fn patch_imm_s(slot: &mut [u8], imm: i32) {
+    let w = u32::from_le_bytes([slot[0], slot[1], slot[2], slot[3]]);
+    let cleared = w & 0x01FF_F07F;
+    let imm12 = (imm as u32) & 0xFFF;
+    let hi7 = (imm12 >> 5) & 0x7F;
+    let lo5 = imm12 & 0x1F;
+    let patched = cleared | (hi7 << 25) | (lo5 << 7);
+    slot[0..4].copy_from_slice(&patched.to_le_bytes());
 }
 
 /// True for the standard RV `ECALL` encoding `0x00000073`.

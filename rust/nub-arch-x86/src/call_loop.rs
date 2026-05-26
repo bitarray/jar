@@ -761,7 +761,13 @@ fn build_frame_inner(
         return Err(ERR_ENDPOINT_OOB);
     }
     let ep = &img.endpoints[endpoint];
-    if ep.entry_pc == 0 {
+    // PVM treats entry_pc==0 as "undefined" because PC=0 is reserved
+    // as the JAL-to-entry prologue. The PVM2 path has no such
+    // prologue; the first byte of the code section is a real
+    // instruction, so endpoint 0 with fn_ptr at base_vaddr lands
+    // legitimately at PC=0. Use img.bitmask.is_empty() as the
+    // PVM2-path signal.
+    if ep.entry_pc == 0 && !img.bitmask.is_empty() {
         return Err(ERR_ENDPOINT_UNDEFINED);
     }
 
