@@ -5,9 +5,21 @@ edition.workspace = true
 license.workspace = true
 description = "Nub Arch implementation for Hyperlight: bare-metal guest binary running the kernel on real CPU + MMU"
 
+[lib]
+name = "nub_arch_x86"
+path = "src/lib.rs"
+
 [[bin]]
 name = "nub-arch-x86"
 path = "src/main.rs"
+
+[[bin]]
+name = "nub-arch-x86-tests"
+path = "src/bin/tests.rs"
+
+[[bin]]
+name = "nub-arch-x86-benches"
+path = "src/bin/benches.rs"
 
 # Hyperlight guest deps only on the bare-metal target. On the host
 # target this crate compiles to a trivial empty `main` so it can be

@@ -17,6 +17,9 @@
 //! publishes a `Cap::Instance` referencing them, and then invokes by
 //! the resulting instance hash.
 
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 use anyhow::Result;
 use javm_cap::{CacheDirectory, CapHashOrRef, cap::Cap};
 use nub_arch_local::LocalArch;
@@ -27,13 +30,10 @@ use nub_kernel::Kernel;
 
 #[cfg(feature = "heap-diag")]
 use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
-use nub_arch_x86_abi::{
-    ArchivedInvocationResult, FN_ID_NUB_INVOKE_CACHED, FN_ID_NUB_SMOKE, InvokePacket,
-};
+use nub_arch_x86_abi::{ArchivedInvocationResult, FN_ID_NUB_INVOKE_CACHED, InvokePacket};
 pub use nub_arch_x86_abi::{CapHash as AbiCapHash, InvocationResult};
 pub use nub_kernel::{CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
 
-use rkyv::primitive::ArchivedU64;
 use rkyv::util::AlignedVec;
 
 /// Snapshot of the guest's talc allocation state. Returned by
@@ -93,15 +93,20 @@ impl Nub {
     /// Construct a Nub backed by a fresh Hyperlight sandbox loaded
     /// from the `nub-arch-x86` guest blob.
     pub fn new_hyperlight() -> Result<Self> {
+        Self::new_hyperlight_with_blob_path(NUB_ARCH_X86_BLOB_PATH)
+    }
+
+    /// Construct a Nub backed by a fresh Hyperlight sandbox loaded
+    /// from an arbitrary guest ELF on disk. Used by `test_support`
+    /// to swap in the test/bench binaries; production callers should
+    /// use [`Self::new_hyperlight`].
+    pub(crate) fn new_hyperlight_with_blob_path(path: &str) -> Result<Self> {
         let mut cfg = SandboxConfiguration::default();
         cfg.set_scratch_size(512 * 1024 * 1024);
         cfg.set_input_data_size(16 * 1024 * 1024);
         cfg.set_output_data_size(16 * 1024 * 1024);
         cfg.set_heap_size(256 * 1024 * 1024);
-        let uninit = UninitializedSandbox::new(
-            GuestBinary::FilePath(NUB_ARCH_X86_BLOB_PATH.to_string()),
-            Some(cfg),
-        )?;
+        let uninit = UninitializedSandbox::new(GuestBinary::FilePath(path.to_string()), Some(cfg))?;
         let sandbox = uninit.evolve()?;
         Ok(Self {
             backend: Backend::Hyperlight(Box::new(HyperlightDriver {
@@ -109,23 +114,6 @@ impl Nub {
                 state_root_cache: [0; 32],
             })),
         })
-    }
-
-    /// Invoke `endpoint` on `target` with `args`. Kernel-style entry
-    /// point — currently a skeleton returning 42 from both backends.
-    pub fn invoke(
-        &mut self,
-        target: InstanceRef,
-        endpoint: u16,
-        args: &[u8],
-        opts: InvokeOptions,
-    ) -> Result<InvokeOutcome> {
-        match &mut self.backend {
-            Backend::Local { kernel, .. } => Ok(kernel
-                .invoke(target, endpoint, args, opts)
-                .expect("LocalArch::Error is uninhabited")),
-            Backend::Hyperlight(h) => h.invoke(target, endpoint, args, opts),
-        }
     }
 
     /// Current state root.
@@ -278,27 +266,5 @@ impl Nub {
                 })
             }
         }
-    }
-}
-
-impl HyperlightDriver {
-    fn invoke(
-        &mut self,
-        _target: InstanceRef,
-        _endpoint: u16,
-        _args: &[u8],
-        _opts: InvokeOptions,
-    ) -> Result<InvokeOutcome> {
-        // Skeleton: ship a fixed RPC into the guest. The guest's
-        // `nub_smoke` returns 42, matching `LocalArch`'s stub.
-        let result_bytes = self.sandbox.call_raw(FN_ID_NUB_SMOKE, &[])?;
-        let mut aligned = AlignedVec::<16>::with_capacity(result_bytes.len());
-        aligned.extend_from_slice(&result_bytes);
-        let archived = rkyv::access::<ArchivedU64, rkyv::rancor::Error>(aligned.as_slice())
-            .map_err(|e| anyhow::anyhow!("rkyv-access u64 from nub_smoke: {e}"))?;
-        Ok(InvokeOutcome {
-            return_value: archived.to_native(),
-            gas_used: 0,
-        })
     }
 }

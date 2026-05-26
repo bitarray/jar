@@ -1433,8 +1433,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytecheck",
+ "criterion",
  "javm-cap",
+ "nub",
  "nub-arch-local",
+ "nub-arch-x86",
  "nub-arch-x86-abi",
  "nub-build",
  "nub-host-kvm",

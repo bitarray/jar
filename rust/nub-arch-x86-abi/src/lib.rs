@@ -13,9 +13,6 @@
 
 extern crate alloc;
 
-/// `fn_id` for the `nub_smoke` skeleton RPC (returns `42u64`).
-pub const FN_ID_NUB_SMOKE: u32 = 0;
-
 /// `fn_id` for the `nub_heap_stats` diagnostic. Payload is empty;
 /// response is 32 bytes packing four LE u64s (allocated_bytes,
 /// allocation_count, fragment_count, available_bytes).

@@ -1,6 +1,11 @@
 //! Cross-compile `nub-arch-x86` for `x86_64-unknown-none` and
-//! expose the ELF path to the host binary via the
-//! `NUB_ARCH_X86_BLOB` environment variable.
+//! expose the ELF paths to the host binary via env vars.
+//!
+//! - Production blob: always built. Exposed as `NUB_ARCH_X86_BLOB`.
+//! - Tests + benches blobs: only built when the `test-support`
+//!   feature is on (auto-enabled by the self-referencing dev-dep
+//!   in `Cargo.toml`). Exposed as `NUB_ARCH_X86_TESTS_BLOB` and
+//!   `NUB_ARCH_X86_BENCHES_BLOB`.
 
 fn main() {
     if std::env::var("BUILD_CRATE_GUEST_BUILD").is_ok() {
@@ -13,8 +18,23 @@ fn main() {
     if std::env::var("CARGO_FEATURE_HEAP_DIAG").is_ok() {
         features.push("heap-diag");
     }
-    let elf = nub_build::build("../nub-arch-x86", "nub-arch-x86", &features);
-    println!("cargo:rustc-env=NUB_ARCH_X86_BLOB={}", elf.display());
+
+    let prod = nub_build::build("../nub-arch-x86", "nub-arch-x86", &features);
+    println!("cargo:rustc-env=NUB_ARCH_X86_BLOB={}", prod.display());
+
+    if std::env::var("CARGO_FEATURE_TEST_SUPPORT").is_ok() {
+        let tests = nub_build::build("../nub-arch-x86", "nub-arch-x86-tests", &features);
+        println!(
+            "cargo:rustc-env=NUB_ARCH_X86_TESTS_BLOB={}",
+            tests.display()
+        );
+        let benches = nub_build::build("../nub-arch-x86", "nub-arch-x86-benches", &features);
+        println!(
+            "cargo:rustc-env=NUB_ARCH_X86_BENCHES_BLOB={}",
+            benches.display()
+        );
+    }
+
     println!("cargo:rerun-if-changed=../nub-arch-x86/src");
     println!("cargo:rerun-if-changed=../nub-arch-x86/Cargo.toml");
     println!("cargo:rerun-if-changed=../nub-arch-x86/link.x");
