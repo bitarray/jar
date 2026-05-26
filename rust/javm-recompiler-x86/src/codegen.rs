@@ -42,7 +42,7 @@ fn compute_skip(pc: usize, bitmask: &[u8]) -> usize {
 }
 /// Map PVM register index (0..12) to x86-64 register.
 /// All 13 PVM registers live in x86 registers.
-const REG_MAP: [Reg; 13] = [
+pub(crate) const REG_MAP: [Reg; 13] = [
     Reg::RBP, // φ[0] — RA (rarely used as memory base, so RBP encoding penalty is acceptable)
     Reg::RBX, // φ[1] — SP (frequently used as memory base, RBX avoids RBP disp8 penalty)
     Reg::R12, // φ[2]
@@ -59,10 +59,10 @@ const REG_MAP: [Reg; 13] = [
 ];
 
 /// Scratch register (not mapped to any PVM register).
-const SCRATCH: Reg = Reg::RDX;
+pub(crate) const SCRATCH: Reg = Reg::RDX;
 /// R15 = gas meter. Loaded from `ctx.gas` at the prologue, decremented
 /// once per basic block, flushed back to `ctx.gas` at every exit.
-const GAS: Reg = Reg::R15;
+pub(crate) const GAS: Reg = Reg::R15;
 
 /// JitContext lives above the PVM u32 address space (no bounds check
 /// on guest mem — the full low 4 GiB of native VA belongs to the
@@ -148,24 +148,24 @@ pub struct Compiler {
     pub asm: Assembler,
     /// Base label ID for PC labels. label_for_pc(pc) = Label(label_base + pc).
     /// Labels are bulk-allocated in the assembler with LABEL_UNBOUND=0 (zeroed pages).
-    label_base: u32,
+    pub(crate) label_base: u32,
     /// Gas block start PCs discovered during compilation (for dispatch table).
-    gas_block_pcs: Vec<u32>,
+    pub(crate) gas_block_pcs: Vec<u32>,
     /// Label for the exit sequence.
-    exit_label: Label,
+    pub(crate) exit_label: Label,
     /// Label for the shared out-of-gas exit (sets EXIT_OOG + jumps to exit).
     oog_label: Label,
     /// Label for panic exit.
-    panic_label: Label,
+    pub(crate) panic_label: Label,
     /// Label for OOG handler that reads PC from SCRATCH: stores PC, then falls through to oog_label.
     oog_pc_label: Label,
     /// Per-gas-block OOG stubs: (label, pvm_pc) — emitted as cold code after main body.
-    oog_stubs: Vec<(Label, u32, u32)>, // (label, pvm_pc, block_cost)
+    pub(crate) oog_stubs: Vec<(Label, u32, u32)>, // (label, pvm_pc, block_cost)
     /// Helper function addresses.
-    helpers: HelperFns,
+    pub(crate) helpers: HelperFns,
     /// Bitmask reference (1 = instruction start). Stored as raw pointer for self-referential use.
-    bitmask_ptr: *const u8,
-    bitmask_len: usize,
+    pub(crate) bitmask_ptr: *const u8,
+    pub(crate) bitmask_len: usize,
     /// Peephole: tracks how each PVM register was last defined.
     reg_defs: [RegDef; 13],
     /// Bitmask of registers that have non-Unknown reg_defs (for fast invalidation).
@@ -177,7 +177,7 @@ pub struct Compiler {
     /// immediately following setLtU).
     last_add_cf: Option<(usize, usize, usize)>,
     /// Trap table for signal-based bounds checking: (native_offset, pvm_pc).
-    trap_entries: Vec<(u32, u32)>,
+    pub(crate) trap_entries: Vec<(u32, u32)>,
     /// Memory tier load/store cycles for gas simulation.
     mem_cycles: u8,
 }
@@ -901,7 +901,7 @@ impl Compiler {
     /// Emit memory read with bounds check (cold fault path).
     /// Hot path: cmp + jae + load (2 instructions, no extra stores).
     /// No bounds check — SIGSEGV handler catches OOB.
-    fn emit_mem_read_sized(&mut self, dst: Reg, fn_addr: u64, width_bytes: u32, pvm_pc: u32) {
+    pub(crate) fn emit_mem_read_sized(&mut self, dst: Reg, fn_addr: u64, width_bytes: u32, pvm_pc: u32) {
         let w = if width_bytes > 0 {
             width_bytes
         } else if fn_addr == self.helpers.mem_read_u8 {
@@ -939,7 +939,7 @@ impl Compiler {
 
     /// Emit memory write with bounds check (cold fault path).
     /// No bounds check — SIGSEGV handler catches OOB.
-    fn emit_mem_write(&mut self, _addr_in_scratch: bool, val_reg: Reg, fn_addr: u64, pvm_pc: u32) {
+    pub(crate) fn emit_mem_write(&mut self, _addr_in_scratch: bool, val_reg: Reg, fn_addr: u64, pvm_pc: u32) {
         let w = if fn_addr == self.helpers.mem_write_u8 {
             1u32
         } else if fn_addr == self.helpers.mem_write_u16 {
@@ -1057,7 +1057,7 @@ impl Compiler {
 
     /// Invalidate a register's tracked definition and any dependents.
     #[inline]
-    fn invalidate_reg(&mut self, reg: usize) {
+    pub(crate) fn invalidate_reg(&mut self, reg: usize) {
         self.reg_defs[reg] = RegDef::Unknown;
         self.reg_defs_active &= !(1u16 << reg);
         self.invalidate_dependents(reg);
@@ -2357,7 +2357,7 @@ impl Compiler {
     // === Helper emission methods ===
 
     /// Emit a static branch (validated at compile time).
-    fn emit_static_branch(&mut self, target: u32, condition: bool, _fallthrough: u32, pc: u32) {
+    pub(crate) fn emit_static_branch(&mut self, target: u32, condition: bool, _fallthrough: u32, pc: u32) {
         if !condition {
             return;
         }
@@ -2504,7 +2504,7 @@ impl Compiler {
     }
 
     /// Emit a branch comparing two registers.
-    fn emit_branch_reg(&mut self, a: Reg, b: Reg, cc: Cc, target: u32, _fallthrough: u32, pc: u32) {
+    pub(crate) fn emit_branch_reg(&mut self, a: Reg, b: Reg, cc: Cc, target: u32, _fallthrough: u32, pc: u32) {
         if !self.is_basic_block_start(target) {
             self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
             self.asm.cmp_rr(a, b);
@@ -2518,7 +2518,7 @@ impl Compiler {
 
     /// Emit a shift by register value using CL.
     /// shift_op: 4=SHL, 5=SHR, 7=SAR, 0=ROL, 1=ROR
-    fn emit_shift_by_reg32(&mut self, dst: Reg, shift_reg: Reg, shift_op: u8) {
+    pub(crate) fn emit_shift_by_reg32(&mut self, dst: Reg, shift_reg: Reg, shift_op: u8) {
         // Need shift amount in CL (RCX = φ[12])
         // If shift_reg is already RCX, great. Otherwise save/restore.
         if shift_reg == Reg::RCX {
@@ -2545,7 +2545,7 @@ impl Compiler {
         }
     }
 
-    fn emit_shift_by_reg64(&mut self, dst: Reg, shift_reg: Reg, shift_op: u8) {
+    pub(crate) fn emit_shift_by_reg64(&mut self, dst: Reg, shift_reg: Reg, shift_op: u8) {
         if shift_reg == Reg::RCX {
             self.asm.shift_cl64(shift_op, dst);
         } else if dst == Reg::RCX {
@@ -2877,7 +2877,7 @@ impl Compiler {
     }
 
     /// Emit an exit sequence that sets exit_reason and exit_arg.
-    fn emit_exit(&mut self, reason: u32, arg: u32) {
+    pub(crate) fn emit_exit(&mut self, reason: u32, arg: u32) {
         self.asm
             .mov_store32_rip_rel_imm(CTX_EXIT_REASON, reason as i32);
         self.asm.mov_store32_rip_rel_imm(CTX_EXIT_ARG, arg as i32);
@@ -2886,7 +2886,7 @@ impl Compiler {
 
     /// Emit prologue: save callee-saved, load PVM registers from context,
     /// then dispatch to the correct basic block based on entry_pc.
-    fn emit_prologue(&mut self) {
+    pub(crate) fn emit_prologue(&mut self) {
         self.asm.ensure_capacity(512); // prologue needs ~200 bytes
         // Save callee-saved registers
         self.asm.push(Reg::RBX);
@@ -2930,7 +2930,7 @@ impl Compiler {
     }
 
     /// Emit exit sequences and epilogue.
-    fn emit_exit_sequences(&mut self) {
+    pub(crate) fn emit_exit_sequences(&mut self) {
         // Reserve capacity for exit sequences + all OOG stubs.
         // Each OOG stub is ~12 bytes.
         let needed = 512 + self.oog_stubs.len() * 16;

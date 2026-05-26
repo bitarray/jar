@@ -95,13 +95,12 @@ pub fn predecode_rv(code: &[u8]) -> RvPredecode {
         let ip = insts[i];
         // Static branch/jump targets (only relative jumps; jalr is
         // dynamic and not pre-resolvable).
-        if let Some(target_byte) = static_target(&ip) {
-            if target_byte < pc_to_idx.len()
-                && pc_to_idx[target_byte] != u32::MAX
-            {
-                let idx = pc_to_idx[target_byte] as usize;
-                insts[idx].is_gas_block_start = true;
-            }
+        if let Some(target_byte) = static_target(&ip)
+            && target_byte < pc_to_idx.len()
+            && pc_to_idx[target_byte] != u32::MAX
+        {
+            let idx = pc_to_idx[target_byte] as usize;
+            insts[idx].is_gas_block_start = true;
         }
         // Post-terminator: the next instruction starts a fresh block.
         if is_terminator(&ip.inst) && i + 1 < insts.len() {
