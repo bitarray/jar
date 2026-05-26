@@ -34,6 +34,7 @@ pub mod mem;
 pub mod predecoded;
 pub mod program;
 pub mod regs;
+pub mod rv_instruction;
 
 pub use decode::{DecodedInst, Predecoded, predecode};
 pub use ecall::{EcallHandler, EcallKind, EcallResult, PanickingHandler};
