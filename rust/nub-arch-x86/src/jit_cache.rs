@@ -106,6 +106,20 @@ fn page_round_up_min1(n: usize) -> usize {
     n.next_multiple_of(PAGE_SIZE).max(PAGE_SIZE)
 }
 
+/// Drop every compiled image from the cache.
+///
+/// Bench-only: each `CompiledImage`'s `Drop` releases its arena pages
+/// and template PD/PT pages, which is fine between invocations (no
+/// in-flight call references them). The next `get_or_compile` will
+/// pay full recompile cost. Safe under Hyperlight serialisation; not
+/// meant for production paths.
+pub fn evict_all() {
+    // SAFETY: single-threaded guest (Hyperlight serialisation), no
+    // concurrent call in progress when this RPC fires.
+    let map = unsafe { &mut *CACHE.inner.get() };
+    map.clear();
+}
+
 /// Look up the compile cache by `image_hash`. On miss, compile the
 /// Image and materialise the per-Image arena. Returns a `'static`
 /// borrow into the cache entry.

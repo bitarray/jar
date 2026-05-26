@@ -37,7 +37,7 @@ use std::sync::{Mutex, OnceLock};
 const EXIT_HOSTCALL: u32 = 4;
 
 /// Default initial-gas budget for the bench.
-const INITIAL_GAS: u64 = 100_000_000_000;
+pub const INITIAL_GAS: u64 = 100_000_000_000;
 
 /// Pre-built `Cap` graph for one (image, endpoint) bench cell.
 ///
@@ -150,7 +150,7 @@ impl BuiltCaps {
 
     /// Put every cap into `nub`'s cache via `put_cap_with_hash`.
     /// Idempotent re-puts after the first call are refcount bumps only.
-    fn put_into(&self, nub: &mut Nub) {
+    pub fn put_into(&self, nub: &mut Nub) {
         for (h, cap) in &self.data_caps {
             nub.put_cap_with_hash(*h, cap)
                 .unwrap_or_else(|e| panic!("put_cap_with_hash data: {e}"));
@@ -162,6 +162,24 @@ impl BuiltCaps {
         nub.put_cap_with_hash(self.instance_hash, &self.instance_cap)
             .unwrap_or_else(|e| panic!("put_cap_with_hash instance: {e}"));
     }
+}
+
+/// Bench-side accessor for the long-lived Hyperlight Nub. Returned
+/// guard holds the singleton mutex for the duration of one
+/// criterion `iter_batched` step (setup + routine).
+pub fn nub_hyperlight_lock() -> std::sync::MutexGuard<'static, Nub> {
+    nub_hyperlight().lock().expect("nub mutex")
+}
+
+/// Bench helper: drive one invocation through an already-locked Nub.
+/// Used inside `iter_batched`'s routine closure so the timed body is
+/// just the host-call round-trip + JIT path (no mutex acquire, no
+/// cap publish, no eviction).
+pub fn invoke(nub: &mut Nub, built: &BuiltCaps) -> (u64, u64) {
+    let result = nub
+        .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
+        .unwrap_or_else(|e| panic!("invoke_cached: {e}"));
+    finish(&result)
 }
 
 /// Drive `built[endpoint_idx]` through the byte-PVM interpreter via a
@@ -178,10 +196,27 @@ pub fn run_interpreter(built: &BuiltCaps) -> (u64, u64) {
 }
 
 /// Drive `built[endpoint_idx]` through the in-kernel JIT via the long-
-/// lived Hyperlight `Nub`.
+/// lived Hyperlight `Nub`. **Warm-cache** path: subsequent calls with
+/// the same Image hit the JIT compile cache. Useful for measuring
+/// steady-state execute throughput in isolation.
 pub fn run_recompiler(built: &BuiltCaps) -> (u64, u64) {
     let mut nub = nub_hyperlight().lock().expect("nub mutex");
     built.put_into(&mut nub);
+    let result = nub
+        .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
+        .unwrap_or_else(|e| panic!("recompiler invoke_cached: {e}"));
+    finish(&result)
+}
+
+/// Cold-cache variant: clear the JIT compile cache before each
+/// invocation so the call pays the full predecode + recompile cost
+/// alongside execute. Models a PolkaVM-shaped workload where each
+/// guest invocation may face a fresh Image hash.
+pub fn run_recompiler_cold(built: &BuiltCaps) -> (u64, u64) {
+    let mut nub = nub_hyperlight().lock().expect("nub mutex");
+    built.put_into(&mut nub);
+    nub.evict_jit_all()
+        .unwrap_or_else(|e| panic!("recompiler evict_jit_all: {e}"));
     let result = nub
         .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
         .unwrap_or_else(|e| panic!("recompiler invoke_cached: {e}"));

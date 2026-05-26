@@ -30,7 +30,9 @@ use nub_kernel::Kernel;
 
 #[cfg(feature = "heap-diag")]
 use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
-use nub_arch_x86_abi::{ArchivedInvocationResult, FN_ID_NUB_INVOKE_CACHED, InvokePacket};
+use nub_arch_x86_abi::{
+    ArchivedInvocationResult, FN_ID_NUB_EVICT_JIT_ALL, FN_ID_NUB_INVOKE_CACHED, InvokePacket,
+};
 pub use nub_arch_x86_abi::{CapHash as AbiCapHash, InvocationResult};
 pub use nub_kernel::{CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
 
@@ -121,6 +123,19 @@ impl Nub {
         match &self.backend {
             Backend::Local { kernel, .. } => kernel.state_root(),
             Backend::Hyperlight(h) => h.state_root_cache,
+        }
+    }
+
+    /// Bench-only: clear the guest's JIT compile cache so the next
+    /// `invoke_cached` pays a full recompile. No-op on the Local
+    /// backend (which uses the interpreter and has no JIT cache).
+    pub fn evict_jit_all(&mut self) -> Result<()> {
+        match &mut self.backend {
+            Backend::Local { .. } => Ok(()),
+            Backend::Hyperlight(h) => {
+                let _ = h.sandbox.call_raw(FN_ID_NUB_EVICT_JIT_ALL, &[])?;
+                Ok(())
+            }
         }
     }
 

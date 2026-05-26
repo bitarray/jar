@@ -20,10 +20,16 @@
 //! All three share the no_std hand-written Goldilocks + Poseidon2
 //! implementation in `components/benches/goldilocks-poseidon2`,
 //! bit-exact with `p3-goldilocks::default_goldilocks_poseidon2_8`.
+//!
+//! Two recompiler arms are reported per workload:
+//!
+//! - `recompiler_warm` — JIT cache hits; timed body is steady-state execute.
+//! - `recompiler_cold` — JIT cache evicted per iteration; timed body is
+//!   **predecode + JIT + execute**.
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use javm_cap::image::Image;
 use ssz::Decode;
 
@@ -62,8 +68,32 @@ macro_rules! bench_workload {
             g.bench_function("interpreter", |b| {
                 b.iter(|| javm_bench::run_interpreter(&built))
             });
-            g.bench_function("recompiler", |b| {
-                b.iter(|| javm_bench::run_recompiler(&built))
+            // See pvm_bench.rs for rationale. Timed body =
+            // put_cap_with_hash×4 + invoke_cached; untimed setup =
+            // mutex + (cold) evict_jit_all.
+            g.bench_function("recompiler_warm", |b| {
+                b.iter_batched(
+                    || javm_bench::nub_hyperlight_lock(),
+                    |mut nub| {
+                        built.put_into(&mut nub);
+                        javm_bench::invoke(&mut *nub, &built)
+                    },
+                    BatchSize::PerIteration,
+                )
+            });
+            g.bench_function("recompiler_cold", |b| {
+                b.iter_batched(
+                    || {
+                        let mut nub = javm_bench::nub_hyperlight_lock();
+                        nub.evict_jit_all().expect("evict_jit_all");
+                        nub
+                    },
+                    |mut nub| {
+                        built.put_into(&mut nub);
+                        javm_bench::invoke(&mut *nub, &built)
+                    },
+                    BatchSize::PerIteration,
+                )
             });
             g.finish();
         }
