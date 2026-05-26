@@ -126,9 +126,14 @@ fn ref_in_cap_errors_on_encode() {
         .expect("set ref");
     let cap = Cap::CNode(cn);
     let err = rkyv::to_bytes::<rkyv::rancor::Error>(&cap).expect_err("must reject Ref");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("CapHashOrRef::Ref") || msg.contains("CapRef") || msg.contains("settle"),
-        "expected CapHasRefError in chain, got: {msg}"
-    );
+    // Release builds strip rancor's source-chain detail (it requires
+    // both debug assertions and rancor's `alloc` feature), so we only
+    // assert on the message contents when debug assertions are on.
+    if cfg!(debug_assertions) {
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("CapHashOrRef::Ref") || msg.contains("CapRef") || msg.contains("settle"),
+            "expected CapHasRefError in chain, got: {msg}"
+        );
+    }
 }

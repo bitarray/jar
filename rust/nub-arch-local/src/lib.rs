@@ -4,8 +4,8 @@
 //!
 //! [`run_instance`] is the in-process counterpart to nub-arch-x86's
 //! JIT-driven `run_pvm_with_mem`: takes a published
-//! [`javm_cap::InstanceCap`] + its referenced
-//! [`javm_cap::image_cap::ImageCap`] (both `Global`-allocated
+//! [`javm_cap::cap::instance::InstanceCap`] + its referenced
+//! [`javm_cap::cap::image::ImageCap`] (both `Global`-allocated
 //! locally), wires the bytecode + memory layout to
 //! [`javm_exec::Interpreter::run`], and produces an
 //! [`InvocationResult`].

@@ -26,7 +26,7 @@ pub const FN_ID_NUB_INVOKE_CACHED: u32 = 3;
 
 /// `fn_id` for the heap-resident cap directory `put_cap` RPC.
 ///
-/// Payload: rkyv-archived [`javm_cap::Cap`]. Guest validates and
+/// Payload: rkyv-archived `javm_cap::Cap`. Guest validates and
 /// materialises via [`rkyv::access`] + [`rkyv::deserialize`], computes
 /// the cap's content hash, inserts into the guest-resident
 /// `DIRECTORY` (a `Mutex<HashMap<CapHash, Box<Cap>>>` living in talc

@@ -11,9 +11,10 @@
 //!
 //! `Cap` itself is the wire form. It derives
 //! `rkyv::Archive`/`Serialize`/`Deserialize` so callers write
-//! `rkyv::to_bytes(&cap)?` directly. The slot-target [`CapHashOrRef`]
-//! has a hand-rolled rkyv impl whose `Serialize` returns an error
-//! (`CapHasRefError`) if the cap graph still contains a `Ref`. The
+//! `rkyv::to_bytes(&cap)?` directly. The slot-target
+//! [`super::cache::CapHashOrRef`] has a hand-rolled rkyv impl whose
+//! `Serialize` returns an error ([`super::cache::CapHasRefError`]) if
+//! the cap graph still contains a `Ref`. The
 //! archived form for both `Hash` and `Ref` arms is `[u8; 32]` (= the
 //! `CapHash` archived form), so settled cap graphs serialise to the
 //! same bytes regardless of provenance, and `Ref`-bearing graphs
