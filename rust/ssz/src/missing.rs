@@ -24,6 +24,7 @@ use digest::typenum::U32;
 use crate::{BYTES_PER_LENGTH_OFFSET, Decode, DecodeError, Encode, HashTreeRoot, read_slice};
 
 /// Either a fully materialized value or a precomputed hash placeholder.
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum MissingOr<T> {
     Materialized(T),
     Missing([u8; 32]),

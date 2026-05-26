@@ -50,7 +50,6 @@ mod state_cache;
 mod guest {
     use alloc::vec::Vec;
     use hyperlight_guest_bin::guest_function;
-    use javm_cap::WireCap;
     use javm_cap::cap::Cap;
     #[cfg(feature = "heap-diag")]
     use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
@@ -138,10 +137,9 @@ mod guest {
             .into_vec()
     }
 
-    /// Heap-resident cap-directory publisher. Decodes the
-    /// rkyv-archived [`WireCap`] payload (= `Cap<CapHash>`), lifts
-    /// it to the working form via
-    /// [`Cap::into_working`](javm_cap::cap::Cap::into_working), and
+    /// Heap-resident cap-directory publisher. Validates the
+    /// rkyv-archived [`Cap`] payload via [`rkyv::access`] (zero-copy)
+    /// then materialises an owned `Cap` via [`rkyv::deserialize`] and
     /// inserts it into [`crate::state_cache::CACHE`] via
     /// [`javm_cap::cache::CacheDirectory::put_cap`].
     ///
@@ -158,11 +156,15 @@ mod guest {
         let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
         aligned.extend_from_slice(payload);
 
-        let wire: WireCap = match rkyv::from_bytes::<WireCap, rkyv::rancor::Error>(&aligned) {
-            Ok(w) => w,
+        let archived =
+            match rkyv::access::<rkyv::Archived<Cap>, rkyv::rancor::Error>(aligned.as_slice()) {
+                Ok(a) => a,
+                Err(_) => return error_hash_sentinel(),
+            };
+        let cap: Cap = match rkyv::deserialize::<Cap, rkyv::rancor::Error>(archived) {
+            Ok(c) => c,
             Err(_) => return error_hash_sentinel(),
         };
-        let cap: Cap = wire.into_working();
         let hash = match crate::state_cache::CACHE.put_cap(&cap) {
             Ok(h) => h,
             Err(_) => return error_hash_sentinel(),

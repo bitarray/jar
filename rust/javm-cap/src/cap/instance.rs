@@ -4,33 +4,26 @@
 //! image reference (by hash, since Images are immutable), root
 //! cnode reference (by hash when clean / by ref while mutating),
 //! per-mapping rw overlays, register file, PC, gas counter.
-//!
-//! ## Generic parameter `R`
-//!
-//! The `root_cnode` field's type is `R`. `R = CapHashOrRef` (default)
-//! lets the running Instance CoW-mutate via a directory-backed handle;
-//! `R = CapHash` is the wire form where the root cnode is always
-//! content-addressed.
 
 use alloc::vec::Vec;
 
 use crate::cache::CapHashOrRef;
 
-use super::cnode::SlotTarget;
 use super::{CapHash, NUM_REGS};
 
-#[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
-pub struct InstanceCap<R: SlotTarget = CapHashOrRef> {
+#[derive(
+    Clone, Debug, ssz_derive::HashTreeRoot, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
+pub struct InstanceCap {
     /// Cumulative chain hash identifying the Instance's type.
     pub image_hash_chain: CapHash,
     /// Hash of the Image cap currently bound. Always content-
     /// addressed (Images are immutable).
     pub image_hash: CapHash,
-    /// Reference to the root cnode. For `R = CapHashOrRef`: `Hash`
-    /// when clean / not yet promoted for mutation; `Ref` while the
-    /// running Instance is mutating it via CoW. For `R = CapHash`:
-    /// always content-addressed (wire form).
-    pub root_cnode: R,
+    /// Reference to the root cnode. `Hash` when clean / not yet
+    /// promoted for mutation; `Ref` while the running Instance is
+    /// mutating it via CoW.
+    pub root_cnode: CapHashOrRef,
     /// Mutable byte overlays per memory mapping. Each entry's
     /// `start` matches one of the Image's `MemoryMapping.start`
     /// values; `bytes` is the per-instance content (initial state

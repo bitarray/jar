@@ -1,10 +1,10 @@
 //! `CNodeCap` — CNode cap.
 //!
 //! Slot table is a [`SparseList`] of [`MissingOr`] entries: a sparse
-//! materialized-on-demand map from `SlotIdx` to a slot target `R`. The
-//! merkle tree shape is fixed at depth 16 (= ceil_log2(MAX_CNODE_SLOTS))
-//! regardless of `size_log`; `size_log` is runtime metadata used for
-//! bounds-checking slot indices.
+//! materialized-on-demand map from `SlotIdx` to a [`CapHashOrRef`]
+//! slot target. The merkle tree shape is fixed at depth 16 (=
+//! ceil_log2(MAX_CNODE_SLOTS)) regardless of `size_log`; `size_log`
+//! is runtime metadata used for bounds-checking slot indices.
 //!
 //! Empty slots contribute `zero_hash` at the depth-16 leaf level; a
 //! `Missing(h)` placeholder substitutes losslessly for the materialized
@@ -12,17 +12,10 @@
 //! property for sparse cnode loading from cold storage.
 //!
 //! `size_log` is permitted in `0..=16` (the spec's hard ceiling).
-//!
-//! ## Generic parameter `R`
-//!
-//! The slot target type `R` is `CapHashOrRef` for the in-memory working
-//! form (default) and `CapHash` for the wire form. The wire form
-//! structurally excludes `CapHashOrRef::Ref(_)` handles.
 
 use alloc::vec::Vec;
-use core::fmt::Debug;
 
-use ssz::{Encode, HashTreeRoot, MissingOr, SparseList};
+use ssz::{MissingOr, SparseList};
 
 use crate::cache::CapHashOrRef;
 use crate::error::CapError;
@@ -32,22 +25,19 @@ use crate::slot::SlotIdx;
 /// fixed at 16 regardless of an individual cnode's declared `size_log`.
 pub const MAX_CNODE_SLOTS: u64 = 1u64 << 16;
 
-/// Trait bound bundle for the slot-target type. Matches what
-/// `SparseList<R, N>`'s derived `HashTreeRoot` requires.
-pub trait SlotTarget: Clone + Debug + HashTreeRoot + Encode {}
-impl<T: Clone + Debug + HashTreeRoot + Encode> SlotTarget for T {}
-
-#[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
-pub struct CNodeCap<R: SlotTarget = CapHashOrRef> {
+#[derive(
+    Clone, Debug, ssz_derive::HashTreeRoot, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
+pub struct CNodeCap {
     pub size_log: u8,
     /// Sparse slot table keyed by slot index. Missing keys are absent
     /// slots (contribute `zero_hash` to the merkle root). The merkle
     /// tree is always size `MAX_CNODE_SLOTS = 2^16`; `size_log` bounds
     /// the addressable range.
-    pub slots: SparseList<R, MAX_CNODE_SLOTS>,
+    pub slots: SparseList<CapHashOrRef, MAX_CNODE_SLOTS>,
 }
 
-impl<R: SlotTarget> CNodeCap<R> {
+impl CNodeCap {
     /// Construct an empty cnode of `2^size_log` slots.
     /// Rejects `size_log > 16`.
     pub fn new(size_log: u8) -> Result<Self, CapError> {
@@ -72,7 +62,7 @@ impl<R: SlotTarget> CNodeCap<R> {
     /// subtree was loaded by hash without contents), this returns
     /// `None` — callers needing to distinguish "absent" from "missing
     /// placeholder" should inspect `self.slots.get(...)` directly.
-    pub fn get(&self, slot: SlotIdx) -> Option<R> {
+    pub fn get(&self, slot: SlotIdx) -> Option<CapHashOrRef> {
         match self.slots.get(slot.get() as u64)? {
             MissingOr::Materialized(t) => Some(t.clone()),
             MissingOr::Missing(_) => None,
@@ -82,7 +72,11 @@ impl<R: SlotTarget> CNodeCap<R> {
     /// Bind `slot` to `target`, or clear the binding if `target` is
     /// `None`. Rejects slot indices outside the cnode's `2^size_log`
     /// range. Returns the prior materialized target at `slot`, if any.
-    pub fn set(&mut self, slot: SlotIdx, target: Option<R>) -> Result<Option<R>, CapError> {
+    pub fn set(
+        &mut self,
+        slot: SlotIdx,
+        target: Option<CapHashOrRef>,
+    ) -> Result<Option<CapHashOrRef>, CapError> {
         if !slot.fits(self.size_log) {
             return Err(CapError::SlotOutOfRange(slot.get(), self.size_log));
         }
@@ -109,30 +103,26 @@ impl<R: SlotTarget> CNodeCap<R> {
 
     /// Take the binding at `slot`, leaving the slot empty. Returns the
     /// prior target (or `None` if the slot was already empty).
-    pub fn take(&mut self, slot: SlotIdx) -> Result<Option<R>, CapError> {
+    pub fn take(&mut self, slot: SlotIdx) -> Result<Option<CapHashOrRef>, CapError> {
         self.set(slot, None)
     }
 
     /// Alias of `set(slot, None)`.
-    pub fn remove(&mut self, slot: SlotIdx) -> Result<Option<R>, CapError> {
+    pub fn remove(&mut self, slot: SlotIdx) -> Result<Option<CapHashOrRef>, CapError> {
         self.set(slot, None)
     }
 
     /// Iterator over materialized `(slot, &target)` pairs in slot order.
     /// `Missing(_)` placeholders are skipped.
-    pub fn iter_materialized(&self) -> impl Iterator<Item = (u32, &R)> + '_ {
+    pub fn iter_materialized(&self) -> impl Iterator<Item = (u32, &CapHashOrRef)> + '_ {
         self.slots.iter().filter_map(|(idx, entry)| match entry {
             MissingOr::Materialized(t) => Some((idx as u32, t)),
             MissingOr::Missing(_) => None,
         })
     }
 
-    /// Collect the materialized entries into a `Vec<(u32, R)>`. Used by
-    /// the wire encoder.
-    pub fn materialized_entries(&self) -> Vec<(u32, R)>
-    where
-        R: Clone,
-    {
+    /// Collect the materialized entries into a `Vec<(u32, CapHashOrRef)>`.
+    pub fn materialized_entries(&self) -> Vec<(u32, CapHashOrRef)> {
         self.iter_materialized()
             .map(|(idx, t)| (idx, t.clone()))
             .collect()

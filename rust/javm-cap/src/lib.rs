@@ -12,6 +12,13 @@
 //! cache layer's outer storage (`HashMap` / `Box` parameters) may still
 //! be parameterised on a custom allocator for shared-memory layouts.
 //!
+//! `Cap` itself is the wire form: it derives
+//! `rkyv::Archive`/`Serialize`/`Deserialize` so callers move caps
+//! across the host/guest boundary by writing
+//! `rkyv::to_bytes(&cap)?` (errors on unsettled `Ref` targets) and
+//! `rkyv::access::<rkyv::Archived<Cap>, _>(bytes)?` for zero-copy
+//! decode. See [`cache::CapHasRefError`] for the encode-time error.
+//!
 //! See `~/jar/website/content/spec/implementation/architecture.md` for
 //! the crate's role in the overall layering.
 
@@ -25,10 +32,8 @@ pub mod error;
 pub mod hash;
 pub mod image;
 pub mod slot;
-#[doc(hidden)]
-pub mod wire;
 
-pub use cache::{CacheDirectory, CacheError, CapHashOrRef, CapRef};
+pub use cache::{CacheDirectory, CacheError, CapHasRefError, CapHashOrRef, CapRef};
 pub use cap::cnode::{CNodeCap, CNodeSlotEntry};
 pub use cap::data::{DataCap, DataContent, PAGE_SIZE};
 pub use cap::image::{
@@ -37,7 +42,6 @@ pub use cap::image::{
 pub use cap::instance::{InstanceCap, RwOverlay};
 pub use cap::page::{PageBytes, PageRef, PageSlot};
 pub use cap::{Cap, CapHash, CapKind, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS, TypeCap};
-pub use cap::{WireCap, WireConvertError};
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash};
 pub use image::{

@@ -7,7 +7,7 @@ description = "SimpleSerialize (SSZ) codec with hash_tree_root, MissingOr/Sparse
 
 [features]
 default = ["std", "sha2", "derive"]
-std = ["thiserror/std"]
+std = ["thiserror/std", "rkyv/std"]
 sha2 = ["dep:sha2"]
 derive = ["dep:ssz-derive"]
 # Enables the `tests/ethereum_conformance.rs` cross-check against the
@@ -22,6 +22,7 @@ digest = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false, optional = true }
 thiserror = { version = "2", default-features = false }
 ssz-derive = { workspace = true, optional = true }
+rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
 
 [dev-dependencies]
 proptest = { workspace = true }

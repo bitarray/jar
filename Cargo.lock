@@ -2311,6 +2311,7 @@ version = "0.1.0"
 dependencies = [
  "digest",
  "proptest",
+ "rkyv",
  "sha2",
  "ssz-derive",
  "thiserror",

@@ -33,12 +33,14 @@ use super::page::PageSlot;
 /// work).
 pub const PAGE_SIZE: usize = 4096;
 
-#[derive(Clone, Debug, ssz_derive::HashTreeRoot)]
+#[derive(
+    Clone, Debug, ssz_derive::HashTreeRoot, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 pub struct DataCap {
     pub content: DataContent,
 }
 
-#[derive(Debug, ssz_derive::HashTreeRoot)]
+#[derive(Debug, ssz_derive::HashTreeRoot, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum DataContent {
     /// Bytes in a single slab. `bytes.len()` must be a multiple of
     /// [`PAGE_SIZE`] (zero-padded by the constructor).

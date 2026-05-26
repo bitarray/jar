@@ -226,6 +226,79 @@ impl ssz::Decode for CapHashOrRef {
     }
 }
 
+// --- rkyv: hand-rolled. ---
+//
+// `CapHashOrRef`'s archived form is the same as `CapHash`'s — a plain
+// 32-byte digest. Serialize errors out on `Ref` (cache-local lifetime
+// handles have no wire form); resolve panics defensively for the path
+// where someone hand-built a Resolver and called resolve without going
+// through Serialize. Deserialize always produces `Hash` because the
+// archived form structurally can't carry a `Ref`.
+
+/// Error returned by `<CapHashOrRef as rkyv::Serialize<_>>::serialize`
+/// when the cap graph still holds a [`CapHashOrRef::Ref`] target.
+/// Callers must `settle` (or otherwise rewrite refs to hashes) before
+/// rkyv-encoding the cap.
+#[derive(Debug)]
+pub struct CapHasRefError;
+
+impl core::fmt::Display for CapHasRefError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("cap holds a CapHashOrRef::Ref target; settle before rkyv encode")
+    }
+}
+
+impl core::error::Error for CapHasRefError {}
+
+impl rkyv::Archive for CapHashOrRef {
+    type Archived = <CapHash as rkyv::Archive>::Archived;
+    type Resolver = <CapHash as rkyv::Archive>::Resolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        match self {
+            CapHashOrRef::Hash(h) => <CapHash as rkyv::Archive>::resolve(h, resolver, out),
+            // Unreachable if Serialize was called first (it errors on Ref).
+            // Defensive panic for the "hand-built resolver" path.
+            CapHashOrRef::Ref(_) => {
+                panic!("CapHashOrRef::Ref in archive resolve; Serialize should have rejected first")
+            }
+        }
+    }
+}
+
+impl<S> rkyv::Serialize<S> for CapHashOrRef
+where
+    S: rkyv::rancor::Fallible + ?Sized,
+    <S as rkyv::rancor::Fallible>::Error: rkyv::rancor::Source,
+    CapHash: rkyv::Serialize<S>,
+{
+    fn serialize(
+        &self,
+        serializer: &mut S,
+    ) -> Result<Self::Resolver, <S as rkyv::rancor::Fallible>::Error> {
+        match self {
+            CapHashOrRef::Hash(h) => <CapHash as rkyv::Serialize<S>>::serialize(h, serializer),
+            CapHashOrRef::Ref(_) => Err(rkyv::rancor::Source::new(CapHasRefError)),
+        }
+    }
+}
+
+// Use the concrete archived type `[u8; 32]` rather than
+// `<CapHash as Archive>::Archived` to avoid a coherence-checker false
+// conflict with rkyv's blanket `Deserialize for With<F, W>` impl
+// (associated-type opacity).
+impl<D> rkyv::Deserialize<CapHashOrRef, D> for [u8; 32]
+where
+    D: rkyv::rancor::Fallible + ?Sized,
+{
+    fn deserialize(
+        &self,
+        _deserializer: &mut D,
+    ) -> Result<CapHashOrRef, <D as rkyv::rancor::Fallible>::Error> {
+        Ok(CapHashOrRef::Hash(*self))
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
     #[error("blob not found for hash")]

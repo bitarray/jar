@@ -15,7 +15,7 @@ use super::CapHash;
 /// canonical zero page; `Loaded` holds a refcounted byte slab;
 /// `Missing` records the page's content hash so a host callback can
 /// later resolve it (V1: never observed — we always pre-publish).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum PageSlot {
     Empty,
     Loaded(PageRef),
@@ -31,7 +31,7 @@ pub type PageRef = Arc<PageBytes>;
 /// Sharing across DataCap CoW clones is via [`PageRef`] (= `Arc`),
 /// which carries its own refcount — `PageBytes` itself is not
 /// refcounted.
-#[derive(Debug)]
+#[derive(Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct PageBytes {
     pub hash: CapHash,
     pub bytes: Vec<u8>,

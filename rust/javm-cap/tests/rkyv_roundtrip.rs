@@ -1,29 +1,31 @@
-//! Round-trip tests for the `Cap<CapHashOrRef> → Cap<CapHash> → rkyv
-//! bytes → Cap<CapHash> → Cap<CapHashOrRef>` pipeline.
+//! Round-trip tests for the rkyv pipeline on `Cap`.
 //!
-//! Verifies content-hash preservation across the full I/O boundary and
-//! that the new wire shape supports the V1 features the legacy
-//! `WireCap` enum couldn't carry — paged data caps and sparse cnodes
-//! with `Missing(_)` placeholders.
+//! Encode: `rkyv::to_bytes(&cap)` — errors on unsettled `Ref` targets.
+//! Decode: `rkyv::access::<Archived<Cap>>` (zero-copy validation) →
+//!         `rkyv::deserialize::<Cap, _>(archived)` (materialise owned).
+//!
+//! Verifies content-hash preservation across the full I/O boundary,
+//! covers the V1 wire features (paged data, sparse cnodes), and asserts
+//! that `Ref`-bearing caps surface a typed encode error (no panic).
 
 use javm_cap::cache::CapHashOrRef;
 use javm_cap::cap::data::{DataCap, DataContent};
 use javm_cap::cap::page::{PageBytes, PageSlot};
 use javm_cap::image::EndpointDef;
-use javm_cap::{CNodeCap, Cap, NUM_REGS, TypeCap, WireCap, image::Image};
+use javm_cap::{CNodeCap, Cap, NUM_REGS, TypeCap, image::Image};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-fn round_trip(cap: Cap<CapHashOrRef>) {
-    let original_hash = cap.cap_hash();
-    let wire: WireCap = cap.try_into_wire().expect("try_into_wire");
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&wire).expect("rkyv encode");
+fn round_trip(cap: Cap) {
+    let original = cap.cap_hash();
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&cap).expect("rkyv encode");
     let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
     aligned.extend_from_slice(&bytes);
-    let decoded: WireCap =
-        rkyv::from_bytes::<WireCap, rkyv::rancor::Error>(&aligned).expect("rkyv decode");
-    let recovered = decoded.into_working();
-    assert_eq!(original_hash, recovered.cap_hash());
+    let archived = rkyv::access::<rkyv::Archived<Cap>, rkyv::rancor::Error>(aligned.as_slice())
+        .expect("rkyv access");
+    let recovered: Cap =
+        rkyv::deserialize::<Cap, rkyv::rancor::Error>(archived).expect("rkyv deserialize");
+    assert_eq!(original, recovered.cap_hash());
 }
 
 #[test]
@@ -83,8 +85,6 @@ fn instance_cap_roundtrip_preserves_hash() {
 
 #[test]
 fn paged_data_roundtrip_preserves_hash() {
-    // V1 feature: the wire now carries `DataContent::Paged`. The
-    // legacy `WireCap` rejected this with `WireConvertError::PagedData`.
     let page = PageBytes {
         hash: [0xCC; 32],
         bytes: vec![1u8; 4096],
@@ -104,8 +104,7 @@ fn paged_data_roundtrip_preserves_hash() {
 
 #[test]
 fn cnode_with_populated_slot_roundtrips() {
-    // V1 feature: sparse cnode encoding (only populated slots travel).
-    let mut cn: CNodeCap = CNodeCap::new(4).expect("cnode");
+    let mut cn = CNodeCap::new(4).expect("cnode");
     cn.set(2u16.into(), Some(CapHashOrRef::Hash([0xEE; 32])))
         .expect("set slot 2");
     cn.set(7u16.into(), Some(CapHashOrRef::Hash([0xFF; 32])))
@@ -114,18 +113,22 @@ fn cnode_with_populated_slot_roundtrips() {
 }
 
 #[test]
-fn try_into_wire_rejects_unresolved_ref() {
+fn ref_in_cap_errors_on_encode() {
     use javm_cap::CacheDirectory;
     let cache = CacheDirectory::new();
     let blob = Cap::Type(TypeCap {
         image_hash_chain: [0x11; 32],
     });
-    let blob_hash = cache.put_cap(&blob).expect("put_cap");
-    let capref = cache.promote_blob_to_instance(&blob_hash).expect("promote");
-    let mut cn: CNodeCap = CNodeCap::new(0).expect("cnode");
+    let h = cache.put_cap(&blob).expect("put_cap");
+    let capref = cache.promote_blob_to_instance(&h).expect("promote");
+    let mut cn = CNodeCap::new(0).expect("cnode");
     cn.set(0u16.into(), Some(CapHashOrRef::Ref(capref)))
         .expect("set ref");
     let cap = Cap::CNode(cn);
-    let err = cap.try_into_wire().expect_err("must reject Ref");
-    assert!(matches!(err, javm_cap::WireConvertError::CapHasRef));
+    let err = rkyv::to_bytes::<rkyv::rancor::Error>(&cap).expect_err("must reject Ref");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("CapHashOrRef::Ref") || msg.contains("CapRef") || msg.contains("settle"),
+        "expected CapHasRefError in chain, got: {msg}"
+    );
 }

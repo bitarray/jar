@@ -179,26 +179,22 @@ impl MultiUseSandbox {
     /// Publish a [`Cap`] into the guest's heap-resident cap
     /// directory via the [`FN_ID_NUB_PUT_CAP`] RPC.
     ///
-    /// Converts `cap` to wire form via
-    /// [`Cap::try_into_wire`](javm_cap::Cap::try_into_wire), rkyv-
-    /// encodes the resulting [`javm_cap::WireCap`], ships it via
-    /// [`Self::call_raw`], and reads back the guest-computed
-    /// `CapHash`. On the guest side, the cap is inserted into the
-    /// `nub_arch_x86::state_cache::DIRECTORY` map, keyed by hash.
+    /// rkyv-encodes `cap` directly via [`rkyv::to_bytes`]; the
+    /// resulting bytes are shipped via [`Self::call_raw`] and the
+    /// guest-computed `CapHash` is read back. On the guest side, the
+    /// cap is inserted into the `nub_arch_x86::state_cache::DIRECTORY`
+    /// map, keyed by hash.
     ///
     /// Caps whose graph still holds a `CapHashOrRef::Ref` target
     /// (cache-local lifetime handles with no resolution on the
-    /// receive side) fail at the wire conversion step with a typed
-    /// error. Encode/decode failures are surfaced as
-    /// `HyperlightError::Error`. A sentinel response (all-`0xFF`
+    /// receive side) fail at rkyv-encode with a typed
+    /// [`CapHasRefError`](javm_cap::CapHasRefError) wrapped in the
+    /// rancor error chain. Other encode/decode failures are surfaced
+    /// as `HyperlightError::Error`. A sentinel response (all-`0xFF`
     /// hash) from the guest is also turned into an error.
     pub fn put_cap(&mut self, cap: &Cap) -> Result<AbiCapHash> {
-        let wire = cap
-            .clone()
-            .try_into_wire()
-            .map_err(|e| crate::new_error!("put_cap: wire conversion failed: {e}"))?;
-        let cap_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&wire)
-            .map_err(|e| crate::new_error!("put_cap: rkyv encode Cap<CapHash>: {e}"))?;
+        let cap_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(cap)
+            .map_err(|e| crate::new_error!("put_cap: rkyv encode (or Ref present): {e}"))?;
         let resp = self.call_raw(FN_ID_NUB_PUT_CAP, cap_bytes.as_slice())?;
         if resp.len() != 32 {
             return Err(crate::new_error!(
