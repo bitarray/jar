@@ -9,8 +9,8 @@ use javm_cap::cap::Cap;
 #[cfg(feature = "heap-diag")]
 use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
 use nub_arch_x86_abi::{
-    BootInfo, FN_ID_NUB_GET_BOOT_INFO, FN_ID_NUB_INVOKE_CACHED, FN_ID_NUB_PUT_CAP,
-    InvocationResult, InvokePacket,
+    BootInfo, FN_ID_NUB_EVICT_JIT_ALL, FN_ID_NUB_GET_BOOT_INFO, FN_ID_NUB_INVOKE_CACHED,
+    FN_ID_NUB_PUT_CAP, InvocationResult, InvokePacket,
 };
 
 fn encode_result_error(exit_arg: u32) -> Vec<u8> {
@@ -115,6 +115,17 @@ pub fn nub_put_cap(payload: &[u8]) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(32);
     out.extend_from_slice(&hash);
     out
+}
+
+/// Bench-only: drop every entry in the JIT compile cache so the
+/// next `nub_invoke_cached` call pays a full recompile. Empty
+/// payload, empty response. Not meant for production paths — the
+/// cache is content-addressed and re-compiling the same Image
+/// produces identical native code.
+#[guest_function(fn_id = FN_ID_NUB_EVICT_JIT_ALL)]
+pub fn nub_evict_jit_all(_input: &[u8]) -> Vec<u8> {
+    crate::jit_cache::evict_all();
+    Vec::new()
 }
 
 /// Read the current `BootInfo` block out as raw bytes. Used by

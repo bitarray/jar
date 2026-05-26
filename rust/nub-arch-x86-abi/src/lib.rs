@@ -42,6 +42,13 @@ pub const FN_ID_NUB_PUT_CAP: u32 = 4;
 /// belt-and-braces fallback in case the ELF symbol lookup misses.
 pub const FN_ID_NUB_GET_BOOT_INFO: u32 = 5;
 
+/// `fn_id` for the bench-only "evict the entire JIT compile cache"
+/// RPC. Empty payload; empty response. Used by `javm-bench` to force
+/// each criterion iteration to pay the recompile cost (otherwise the
+/// JIT cache turns the loop into pure warm-cache execute, which isn't
+/// what we want to measure for PolkaVM-shaped workloads).
+pub const FN_ID_NUB_EVICT_JIT_ALL: u32 = 6;
+
 /// Number of guest-function slots reserved in the dispatch table.
 /// Must be at least `max(FN_ID_*) + 1`.
 pub const GUEST_FN_TABLE_SIZE: usize = 8;
