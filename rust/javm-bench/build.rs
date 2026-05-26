@@ -79,10 +79,11 @@ fn main() {
         println!("cargo:rerun-if-changed={path}/Cargo.toml");
     }
 
-    // Phase 2 smoke: also build prime-sieve through the PVM2 path so
-    // we surface any link_elf_rv failure at workspace-build time
-    // rather than at bench-run time. The env var lets a follow-up
-    // bench arm load it.
+    // PVM2 path is opt-in per guest for now: only those known to compile
+    // cleanly under the +e,+m,+c,+zbb,+zba,+zbs,+zicond target are
+    // built here. Others (e.g. ed25519) emit x3/x4 references via lld's
+    // gp/tp setup, which PVM2's validator rejects until we add a
+    // rewrite pass for that idiom.
     let pvm2_blob = build_javm::build_pvm2(
         "../../components/benches/prime-sieve",
         "bench-prime-sieve",
