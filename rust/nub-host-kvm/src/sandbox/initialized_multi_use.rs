@@ -18,7 +18,6 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use javm_cap::cap::Cap;
-use javm_cap::wire::WireCap;
 use nub_arch_x86_abi::{
     BootInfo, CapHash as AbiCapHash, FN_ID_NUB_GET_BOOT_INFO, FN_ID_NUB_PUT_CAP,
 };
@@ -180,23 +179,22 @@ impl MultiUseSandbox {
     /// Publish a [`Cap`] into the guest's heap-resident cap
     /// directory via the [`FN_ID_NUB_PUT_CAP`] RPC.
     ///
-    /// Encodes `cap` as a [`WireCap`] (see `javm-cap`'s `wire`
-    /// module), ships it via [`Self::call_raw`], and reads back the
-    /// guest-computed `CapHash`. On the guest side, the cap is
-    /// inserted into the
-    /// `nub_arch_x86::state_cache::DIRECTORY` map, keyed by hash.
+    /// rkyv-encodes `cap` directly via [`rkyv::to_bytes`]; the
+    /// resulting bytes are shipped via [`Self::call_raw`] and the
+    /// guest-computed `CapHash` is read back. On the guest side, the
+    /// cap is inserted into the `nub_arch_x86::state_cache::DIRECTORY`
+    /// map, keyed by hash.
     ///
-    /// Caps that can't be represented on the wire (e.g.
-    /// `DataContent::Paged`, `CNode` with `Ref`-typed slots, etc.)
-    /// fail at the wire conversion step with a typed error.
-    /// Encode/decode failures are surfaced as
-    /// `HyperlightError::Error`. A sentinel response (all-`0xFF`
+    /// Caps whose graph still holds a `CapHashOrRef::Ref` target
+    /// (cache-local lifetime handles with no resolution on the
+    /// receive side) fail at rkyv-encode with a typed
+    /// [`CapHasRefError`](javm_cap::CapHasRefError) wrapped in the
+    /// rancor error chain. Other encode/decode failures are surfaced
+    /// as `HyperlightError::Error`. A sentinel response (all-`0xFF`
     /// hash) from the guest is also turned into an error.
     pub fn put_cap(&mut self, cap: &Cap) -> Result<AbiCapHash> {
-        let wire = WireCap::from_cap(cap)
-            .map_err(|e| crate::new_error!("put_cap: wire conversion failed: {e}"))?;
-        let cap_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&wire)
-            .map_err(|e| crate::new_error!("put_cap: rkyv encode WireCap: {e}"))?;
+        let cap_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(cap)
+            .map_err(|e| crate::new_error!("put_cap: rkyv encode (or Ref present): {e}"))?;
         let resp = self.call_raw(FN_ID_NUB_PUT_CAP, cap_bytes.as_slice())?;
         if resp.len() != 32 {
             return Err(crate::new_error!(

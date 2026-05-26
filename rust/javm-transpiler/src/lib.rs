@@ -849,7 +849,6 @@ pub fn ensure_branch_targets_are_block_starts(
     *code = new_code;
     *bitmask = new_bitmask;
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

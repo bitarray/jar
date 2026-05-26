@@ -11,7 +11,7 @@ default = ["std"]
 std = ["ssz/std", "blake2/std", "thiserror/std", "rkyv/std"]
 
 [dependencies]
-allocate = { path = "../allocate" }
+hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"] }
 blake2 = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
 ssz = { workspace = true, features = ["sha2", "derive"] }

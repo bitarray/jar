@@ -252,11 +252,3 @@ pub fn get_or_compile(
     // SAFETY: present; BTreeMap entries don't move once inserted.
     map.get(image_hash).expect("inserted above")
 }
-
-/// Diagnostic: number of cached images. Useful for tests.
-#[allow(dead_code)]
-pub fn cached_count() -> usize {
-    // SAFETY: single-threaded guest.
-    let map = unsafe { &*CACHE.inner.get() };
-    map.len()
-}

@@ -643,7 +643,7 @@ impl<K: KernelAssist> Vm<K> {
             _ => return Err(VmError::InstanceNotFound),
         };
         let cap = Cap::Type(TypeCap { image_hash_chain });
-        let h = javm_cap::cap_hash(&cap);
+        let h = cap.cap_hash();
         cache.put_cap_with_hash(h, &cap)?;
 
         let running = self
@@ -705,7 +705,7 @@ impl<K: KernelAssist> Vm<K> {
         // Quota is debited by the padded length — the kernel owns
         // a full page-aligned allocation regardless of caller's slice
         // length, so callers pay for what they store.
-        let mut inline = javm_cap::data::alloc_page_aligned_zeroed(bytes.len());
+        let mut inline = javm_cap::cap::data::alloc_page_aligned_zeroed(bytes.len());
         inline[..bytes.len()].copy_from_slice(&bytes);
         let debit = inline.len() as u64;
         let quota = self.kernel_assist.storage_quota_get(quota_id);
@@ -717,7 +717,7 @@ impl<K: KernelAssist> Vm<K> {
         let cap = Cap::Data(DataCap {
             content: DataContent::Inline(inline),
         });
-        let h = javm_cap::cap_hash(&cap);
+        let h = cap.cap_hash();
         cache.put_cap_with_hash(h, &cap)?;
 
         let running = self
@@ -877,7 +877,7 @@ fn data_cap_prefix(data: &DataCap, len: usize) -> Vec<u8> {
                     break;
                 }
                 let end = (start + page_size).min(actual_len);
-                if let javm_cap::page::PageSlot::Loaded(page_ref) = page {
+                if let javm_cap::cap::page::PageSlot::Loaded(page_ref) = page {
                     let page_bytes = &page_ref.bytes;
                     out[start..end].copy_from_slice(&page_bytes[..end - start]);
                 }
@@ -999,7 +999,7 @@ impl<K: KernelAssist> Vm<K> {
         cache: Option<&mut CacheDirectory>,
     ) -> Result<(), VmError> {
         let cap = Cap::CNode(javm_cap::CNodeCap::new(size_log)?);
-        let cap_hash = javm_cap::cap_hash(&cap);
+        let cap_hash = cap.cap_hash();
         let h = match cache {
             Some(cache) => {
                 cache.put_cap_with_hash(cap_hash, &cap)?;
@@ -1629,7 +1629,7 @@ mod tests {
 
         // Hash hygiene: the new instance hash actually matches what
         // cap_hash computes on the published cap.
-        assert_eq!(new_instance_hash, javm_cap::cap_hash(&cap));
+        assert_eq!(new_instance_hash, cap.cap_hash());
     }
 
     /// `dispatch_host_call_cached` pushes a child entry on top of

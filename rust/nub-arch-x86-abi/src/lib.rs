@@ -1,9 +1,10 @@
 //! Wire format for the host ↔ guest "run this PVM program" RPC.
 //!
 //! The host pre-publishes each `Cap` it wants the guest to see via
-//! the [`FN_ID_NUB_PUT_CAP`] RPC (rkyv-archived `WireCap` payload;
-//! see the `state_cache` module in `nub-arch-x86` for the guest-side
-//! heap-resident directory it lands in), then ships a fixed-size
+//! the [`FN_ID_NUB_PUT_CAP`] RPC (rkyv-archived `javm_cap::Cap`
+//! payload; see the `state_cache` module in `nub-arch-x86` for the
+//! guest-side heap-resident directory it lands in), then ships a
+//! fixed-size
 //! [`InvokePacket`] referencing the published `Cap::Instance` by
 //! hash on every call. The invoke packet is `#[repr(C)]` bytes (no
 //! codec); the response is rkyv-archived ([`InvocationResult`]).
@@ -11,9 +12,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
-
-/// `fn_id` for the `nub_smoke` skeleton RPC (returns `42u64`).
-pub const FN_ID_NUB_SMOKE: u32 = 0;
 
 /// `fn_id` for the `nub_heap_stats` diagnostic. Payload is empty;
 /// response is 32 bytes packing four LE u64s (allocated_bytes,
@@ -28,11 +26,13 @@ pub const FN_ID_NUB_INVOKE_CACHED: u32 = 3;
 
 /// `fn_id` for the heap-resident cap directory `put_cap` RPC.
 ///
-/// Payload: rkyv-archived `javm_cap::wire::WireCap`. Guest decodes
-/// into a `Cap`, computes its content hash, inserts the cap into the
-/// guest-resident `DIRECTORY` (a `Mutex<HashMap<CapHash, Box<Cap>>>`
-/// living in talc heap), and replies with the rkyv-archived
-/// [`CapHash`] (raw 32 bytes).
+/// Payload: rkyv-archived `javm_cap::Cap`. Guest validates and
+/// materialises via [`rkyv::access`] + [`rkyv::deserialize`], computes
+/// the cap's content hash, inserts into the guest-resident
+/// `DIRECTORY` (a `Mutex<HashMap<CapHash, Box<Cap>>>` living in talc
+/// heap), and replies with the rkyv-archived [`CapHash`] (raw 32
+/// bytes). The host's `MultiUseSandbox::put_cap` propagates a
+/// `CapHasRefError` from `javm_cap` if any slot still holds a Ref.
 pub const FN_ID_NUB_PUT_CAP: u32 = 4;
 
 /// `fn_id` for the boot-info-read diagnostic RPC. Empty payload; the

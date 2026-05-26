@@ -2,7 +2,6 @@
 resolver = "3"
 members = [
     "tools/jar-genesis",
-    "rust/allocate",
     "rust/build-crate",
     "rust/build-javm",
     "rust/nub-build",

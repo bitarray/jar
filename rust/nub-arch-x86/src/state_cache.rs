@@ -5,8 +5,9 @@
 //! The cap store is a `CacheDirectory<FixedState>` that lives entirely
 //! in the guest's talc heap. The host populates blobs via the
 //! [`FN_ID_NUB_PUT_CAP`](nub_arch_x86_abi::FN_ID_NUB_PUT_CAP) RPC:
-//! ship a [`WireCap`](javm_cap::wire::WireCap) payload, the guest
-//! decodes + inserts via [`CacheDirectory::put_cap`]. Kernel-derived
+//! ship a rkyv-archived `Cap` payload, the guest validates via
+//! [`rkyv::access`], materialises via [`rkyv::deserialize`], and
+//! inserts via [`CacheDirectory::put_cap`]. Kernel-derived
 //! sub-VM instances are published via
 //! [`CacheDirectory::put_instance`], which returns a `CapRef` handle
 //! whose `Arc::strong_count` tracks the holders.
@@ -34,8 +35,8 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use foldhash::fast::FixedState;
-use javm_cap::cache::CacheDirectory;
-use javm_cap::cap::{Cap, CapRef};
+use javm_cap::cache::{CacheDirectory, CapRef};
+use javm_cap::cap::Cap;
 use nub_arch_x86_abi::BootInfo;
 
 /// Per-cache hasher seed. Pinned at a constant so the host's
@@ -66,11 +67,12 @@ pub fn publish_transient_instance(cap: Cap) -> CapRef {
 
 /// `BootInfo` placed in the `.boot_info` linker section. Initialised
 /// at link time with the magic and reserved fields; the
-/// `directory_va` slot is patched at boot by [`init_directory_va`].
+/// `directory_va` and `guest_va_base` slots are patched at boot by
+/// [`init_directory_va`].
 ///
-/// `static mut` because we patch one field at boot — the host
-/// reads it post-boot via the section's symbol address (resolved
-/// from the kernel ELF).
+/// `static mut` because we patch two fields at boot — the host reads
+/// them post-boot via the section's symbol address (resolved from
+/// the kernel ELF).
 #[unsafe(link_section = ".boot_info")]
 #[unsafe(no_mangle)]
 pub static mut BOOT_INFO: BootInfo = BootInfo {
@@ -81,11 +83,19 @@ pub static mut BOOT_INFO: BootInfo = BootInfo {
     // instances tier shape changed to `HashMap<u64, (CapRef,
     // Arc<Cap>)>`.
     directory_type_id: 0x0003,
-    guest_va_base: 0x5000_0000_0000,
+    // Patched at boot from `kernel_base_va() - KERNEL_OFFSET`.
+    guest_va_base: 0,
     _reserved: [0u64; 12],
 };
 
-/// Idempotent: write the VA of [`CACHE`] into `BOOT_INFO.directory_va`.
+unsafe extern "C" {
+    /// Linker symbol; PIE-relocated at load time to the kernel's
+    /// actual runtime base GVA. See `paging.rs` for context.
+    safe static _kernel_start: u8;
+}
+
+/// Idempotent: write the VA of [`CACHE`] into `BOOT_INFO.directory_va`
+/// and the kernel's actual runtime base into `BOOT_INFO.guest_va_base`.
 /// Called once at guest boot (we do it from the `put_cap` RPC's first
 /// call as a lazy hook — see `nub-arch-x86/src/main.rs`).
 pub fn init_directory_va() {
@@ -97,12 +107,15 @@ pub fn init_directory_va() {
         return;
     }
     let va = &CACHE as *const CacheDirectory<FixedState> as u64;
+    let kernel_base = &_kernel_start as *const u8 as u64;
+    let guest_va_base = kernel_base - nub_host_common::layout::KERNEL_OFFSET;
     // SAFETY: `BOOT_INFO` is `static mut` but we're the only writer
-    // (single-threaded guest at boot) and the read side
-    // (`directory_va` field) is loaded by the host only after
-    // sandbox boot completes. The atomic guard ensures we run once.
+    // (single-threaded guest at boot) and the read side is loaded
+    // by the host only after sandbox boot completes. The atomic
+    // guard ensures we run once.
     unsafe {
         let p = &raw mut BOOT_INFO;
         (*p).directory_va = va;
+        (*p).guest_va_base = guest_va_base;
     }
 }

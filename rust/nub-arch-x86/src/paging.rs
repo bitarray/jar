@@ -28,12 +28,12 @@
 //! Four address-translation regimes (Stage F kernel relocation):
 //!
 //! * **Kernel half (code, PEB, heap, init-data, talc allocations)**
-//!   lives at high VA `[KERNEL_HIGH_BASE, scratch_base_gva)` and is
+//!   lives at high VA `[kernel_base_va(), scratch_base_gva)` and is
 //!   backed by low GPAs `[KERNEL_BASE_GPA, scratch_base_gpa)`. The
-//!   linker (`link.x`) places the binary at `KERNEL_HIGH_BASE =
-//!   0xFFFFFFFF80000000`; the host's initial PT
-//!   (`rust/nub-host-kvm/src/sandbox/snapshot.rs::from_env`) installs
-//!   the mapping `gva = KERNEL_HIGH_BASE + (gpa - KERNEL_BASE_GPA)`.
+//!   binary is PIE; `kernel_base_va()` reads the linker symbol
+//!   `_kernel_start` (PIE-relocated by the host at load time to
+//!   `guest_va_base() + KERNEL_OFFSET`) — host and guest both derive
+//!   the same value, so `gva = kernel_base_va() + (gpa - KERNEL_BASE_GPA)`.
 //! * **Scratch region (allocations from `prim_alloc::alloc_phys_pages`,
 //!   TSS/IDT, the existing kernel PML4)** is mapped at high VA via a
 //!   constant offset:
@@ -63,12 +63,23 @@ pub const PAGE_SIZE: usize = 4096;
 /// Low GPA where the host loads the kernel ELF. Matches
 /// `SandboxMemoryLayout::BASE_ADDRESS` in `nub-host-kvm`.
 const KERNEL_BASE_GPA: u64 = 0x1000;
-/// GVA the kernel is linked at. Matches the `. =` directive in
-/// [`rust/nub-arch-x86/link.x`](../link.x) and
-/// `SandboxMemoryLayout::KERNEL_HIGH_BASE` in `nub-host-kvm`.
-/// Now in canonical low-half so the host process can mmap-shadow.
-/// TODO: rename to `KERNEL_BASE` once all three sites are renamed.
-const KERNEL_HIGH_BASE: u64 = 0x5001_4000_0000;
+
+unsafe extern "C" {
+    /// Linker-provided symbol marking the start of the kernel image.
+    /// Defined by `_kernel_start = .;` in [`link.x`](../link.x). With
+    /// PIE output, this resolves at runtime to the actual GVA the
+    /// host loaded the kernel at — `kernel_base_va() + KERNEL_OFFSET`
+    /// in host parlance — making the kernel half VA-relocatable.
+    safe static _kernel_start: u8;
+}
+
+/// Runtime GVA at which the kernel image was loaded. Equivalent to
+/// `guest_va_base() + KERNEL_OFFSET` on the host side. Lazily reads
+/// the linker symbol; PIE relocation makes this the actual base.
+#[inline]
+fn kernel_base_va() -> u64 {
+    &_kernel_start as *const u8 as u64
+}
 
 /// PTE flag bits.
 pub mod flag {
@@ -87,13 +98,14 @@ const PA_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
 /// Convert a kernel VA to its physical address. Three regimes (see
 /// module doc): scratch (high VA), kernel half (low VA past
-/// `KERNEL_HIGH_BASE`), user half (returns `None`).
+/// `kernel_base_va()`), user half (returns `None`).
 pub fn va_to_pa(va: u64) -> Option<u64> {
     let scratch_gva = scratch_base_gva();
+    let kernel_base = kernel_base_va();
     if va >= scratch_gva {
         Some(scratch_base_gpa() + (va - scratch_gva))
-    } else if va >= KERNEL_HIGH_BASE {
-        Some(KERNEL_BASE_GPA + (va - KERNEL_HIGH_BASE))
+    } else if va >= kernel_base {
+        Some(KERNEL_BASE_GPA + (va - kernel_base))
     } else {
         None
     }
@@ -105,7 +117,7 @@ pub fn pa_to_va(pa: u64) -> Option<u64> {
     if pa >= scratch_gpa {
         Some(scratch_base_gva() + (pa - scratch_gpa))
     } else if pa >= KERNEL_BASE_GPA {
-        Some(KERNEL_HIGH_BASE + (pa - KERNEL_BASE_GPA))
+        Some(kernel_base_va() + (pa - KERNEL_BASE_GPA))
     } else {
         None
     }
@@ -506,29 +518,4 @@ pub fn read_cr3() -> u64 {
         core::arch::asm!("mov {0}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
     }
     cr3
-}
-
-/// Write CR3. Loads `value` as the new page-table pointer + flushes
-/// the TLB for non-global entries.
-///
-/// # Safety
-/// `value` must be the physical address of a valid PML4 whose kernel-
-/// half PML4 entries cover the kernel's current code/stack/heap VAs;
-/// otherwise the next instruction fetch / stack access will fault.
-pub unsafe fn write_cr3(value: u64) {
-    // SAFETY: caller asserted preconditions.
-    unsafe {
-        core::arch::asm!("mov cr3, {0}", in(reg) value, options(nostack, preserves_flags));
-    }
-}
-
-/// TLB flush via CR3 self-swap (full flush of non-global entries).
-#[allow(dead_code)]
-pub fn flush_tlb() {
-    // SAFETY: rewriting CR3 with its current value is observably a
-    // TLB flush.
-    unsafe {
-        let cr3 = read_cr3();
-        write_cr3(cr3);
-    }
 }

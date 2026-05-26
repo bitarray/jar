@@ -462,6 +462,80 @@ fn decode_sparse_entries_list<T: Decode>(
 // HashTreeRoot
 // --------------------------------------------------------------------------
 
+// --------------------------------------------------------------------------
+// rkyv: hand-rolled via delegation to `SparseListRepr` (a non-generic-N
+// helper that mirrors the wire-relevant fields). `cached_subtree_roots` is
+// skipped — it's a pure in-memory cache (rebuilt on demand from `entries`).
+// --------------------------------------------------------------------------
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct SparseListRepr<T>
+where
+    T: rkyv::Archive,
+    MissingOr<T>: rkyv::Archive,
+{
+    pub len: u64,
+    pub entries: Vec<(u64, MissingOr<T>)>,
+}
+
+impl<T, const N: u64> rkyv::Archive for SparseList<T, N>
+where
+    T: rkyv::Archive + Clone,
+    MissingOr<T>: rkyv::Archive,
+{
+    type Archived = <SparseListRepr<T> as rkyv::Archive>::Archived;
+    type Resolver = <SparseListRepr<T> as rkyv::Archive>::Resolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let repr = SparseListRepr {
+            len: self.len,
+            entries: self.entries.clone(),
+        };
+        <SparseListRepr<T> as rkyv::Archive>::resolve(&repr, resolver, out)
+    }
+}
+
+impl<T, S, const N: u64> rkyv::Serialize<S> for SparseList<T, N>
+where
+    T: rkyv::Archive + Clone,
+    MissingOr<T>: rkyv::Archive,
+    SparseListRepr<T>: rkyv::Serialize<S>,
+    S: rkyv::rancor::Fallible + ?Sized,
+{
+    fn serialize(
+        &self,
+        serializer: &mut S,
+    ) -> Result<Self::Resolver, <S as rkyv::rancor::Fallible>::Error> {
+        let repr = SparseListRepr {
+            len: self.len,
+            entries: self.entries.clone(),
+        };
+        <SparseListRepr<T> as rkyv::Serialize<S>>::serialize(&repr, serializer)
+    }
+}
+
+impl<T, D, const N: u64> rkyv::Deserialize<SparseList<T, N>, D>
+    for <SparseListRepr<T> as rkyv::Archive>::Archived
+where
+    T: rkyv::Archive + Clone,
+    MissingOr<T>: rkyv::Archive,
+    <SparseListRepr<T> as rkyv::Archive>::Archived: rkyv::Deserialize<SparseListRepr<T>, D>,
+    D: rkyv::rancor::Fallible + ?Sized,
+{
+    fn deserialize(
+        &self,
+        deserializer: &mut D,
+    ) -> Result<SparseList<T, N>, <D as rkyv::rancor::Fallible>::Error> {
+        let repr: SparseListRepr<T> =
+            rkyv::Deserialize::<SparseListRepr<T>, D>::deserialize(self, deserializer)?;
+        Ok(SparseList {
+            len: repr.len,
+            entries: repr.entries,
+            cached_subtree_roots: Vec::new(),
+        })
+    }
+}
+
 impl<T: HashTreeRoot + Encode, const N: u64> HashTreeRoot for SparseList<T, N> {
     fn hash_tree_root<D: Digest<OutputSize = U32>>(&self) -> [u8; 32] {
         // The chunk-tree depth is ceil_log2(N) — the depth at which there

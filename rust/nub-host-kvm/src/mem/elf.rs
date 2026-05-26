@@ -196,7 +196,15 @@ impl ElfInfo {
             .unwrap();
         (max_phdr.p_vaddr + max_phdr.p_memsz - self.get_base_va()) as usize
     }
-    pub(crate) fn load_at(self, load_addr: usize, target: &mut [u8]) -> Result<LoadInfo> {
+    /// Copy the binary's PT_LOAD segments into `target` and apply
+    /// dynamic relocations.
+    ///
+    /// `runtime_base_va` is the GVA the guest will see for the lowest
+    /// PT_LOAD — `R_X86_64_RELATIVE` / `R_AARCH64_RELATIVE` entries
+    /// are written as `runtime_base_va + addend` so pointers in
+    /// `.data.rel.ro`, linkme tables, etc. resolve to kernel-half VAs
+    /// at runtime.
+    pub(crate) fn load_at(self, runtime_base_va: u64, target: &mut [u8]) -> Result<LoadInfo> {
         let base_va = self.get_base_va();
         for phdr in self.phdrs.iter().filter(|phdr| phdr.p_type == PT_LOAD) {
             let start_va = (phdr.p_vaddr - base_va) as usize;
@@ -216,7 +224,7 @@ impl ElfInfo {
                 R_AARCH64_RELATIVE => {
                     let addend = get_addend("R_AARCH64_RELATIVE", r)?;
                     target[r.r_offset as usize..r.r_offset as usize + 8]
-                        .copy_from_slice(&(load_addr as i64 + addend).to_le_bytes());
+                        .copy_from_slice(&(runtime_base_va as i64 + addend).to_le_bytes());
                 }
                 R_AARCH64_NONE => {}
                 _ => {
@@ -228,7 +236,7 @@ impl ElfInfo {
                 R_X86_64_RELATIVE => {
                     let addend = get_addend("R_X86_64_RELATIVE", r)?;
                     target[r.r_offset as usize..r.r_offset as usize + 8]
-                        .copy_from_slice(&(load_addr as i64 + addend).to_le_bytes());
+                        .copy_from_slice(&(runtime_base_va as i64 + addend).to_le_bytes());
                 }
                 R_X86_64_NONE => {}
                 _ => {

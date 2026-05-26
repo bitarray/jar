@@ -1951,7 +1951,6 @@ fn decode_s_imm(inst: u32) -> i32 {
         imm as i32
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

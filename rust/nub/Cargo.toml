@@ -16,6 +16,12 @@ default = []
 # Off in production. Used by `javm-bench/tests/heap_drift.rs` to
 # detect per-iter leaks.
 heap-diag = []
+# Enable the `test_support` module + build the test/bench guest
+# binaries (`nub-arch-x86-tests`, `nub-arch-x86-benches`) in addition
+# to the production blob. Off by default; auto-enabled for
+# `cargo test -p nub` / `cargo bench -p nub` via the self-referencing
+# dev-dep below.
+test-support = []
 
 [dependencies]
 anyhow = "1"
@@ -25,6 +31,9 @@ javm-cap = { path = "../javm-cap" }
 nub-host-kvm = { path = "../nub-host-kvm" }
 nub-kernel = { path = "../nub-kernel" }
 nub-arch-local = { path = "../nub-arch-local" }
+# Lib form of the guest crate — supplies `test_abi` constants on
+# host targets (and the kernel modules on bare-metal).
+nub-arch-x86 = { path = "../nub-arch-x86" }
 # Wire types shared between the host driver and the guest's
 # `nub_invoke` entry (D1+).
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
@@ -33,3 +42,15 @@ bytecheck = "0.8"
 
 [build-dependencies]
 nub-build = { path = "../nub-build" }
+
+[dev-dependencies]
+# Self-reference so `cargo test -p nub` and `cargo bench -p nub`
+# automatically enable the `test-support` feature, which in turn
+# builds the test/bench guest binaries and exposes the
+# `Nub::new_hyperlight_tests` / `new_hyperlight_benches` constructors.
+nub = { path = ".", features = ["test-support"] }
+criterion = "0.5"
+
+[[bench]]
+name = "arc_page_alloc"
+harness = false

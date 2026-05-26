@@ -27,8 +27,6 @@ use super::snapshot::Snapshot;
 use super::uninitialized_evolve::evolve_impl_multi_use;
 use crate::func::HostFn;
 use crate::func::host_functions::register_host_function;
-#[cfg(feature = "build-metadata")]
-use crate::log_build_details;
 use crate::mem::memory_region::{DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegionFlags};
 use crate::mem::mgr::SandboxMemoryManager;
 #[cfg(feature = "guest-counter")]
@@ -328,9 +326,6 @@ impl UninitializedSandbox {
         cfg: Option<SandboxConfiguration>,
         #[cfg(crashdump)] binary_path: Option<String>,
     ) -> Result<Self> {
-        #[cfg(feature = "build-metadata")]
-        log_build_details();
-
         // hyperlight is only supported on Windows 11 and Windows Server 2022 and later
         #[cfg(target_os = "windows")]
         check_windows_version()?;
