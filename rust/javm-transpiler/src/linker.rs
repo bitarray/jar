@@ -75,39 +75,39 @@ impl RelocType {
 ///   `abs_code_ptrs` / `sub32_relocs` feed the v3 Image data fields
 ///   (`memory_mappings` / `pinned_slots` / `initial_slots`) via
 ///   [`link_elf`] and [`rewrite_data_code_ptrs`].
-struct LinkedElf {
-    is_64bit: bool,
+pub(crate) struct LinkedElf {
+    pub(crate) is_64bit: bool,
     /// All code sections: (file_offset, vaddr, data)
-    code_sections: Vec<(u64, u64, Vec<u8>)>,
+    pub(crate) code_sections: Vec<(u64, u64, Vec<u8>)>,
     /// RO data blob and its PVM base address
-    ro_data: Vec<u8>,
+    pub(crate) ro_data: Vec<u8>,
     _ro_base: u64,
     /// RW data blob and its PVM base address
-    rw_data: Vec<u8>,
+    pub(crate) rw_data: Vec<u8>,
     _rw_base: u64,
     /// Stack size in bytes (= ro_base, so RO data is at the right PVM address)
-    stack_size: u32,
+    pub(crate) stack_size: u32,
     /// Heap pages
-    heap_pages: u32,
+    pub(crate) heap_pages: u32,
     /// PCREL_HI20: AUIPC instruction vaddr → resolved data address.
     /// The AUIPC itself should emit load_imm with this address.
-    hi20_targets: HashMap<u64, u64>,
+    pub(crate) hi20_targets: HashMap<u64, u64>,
     /// PCREL_LO12: instruction vaddr → resolved data address (looked up from paired HI20).
     /// These instructions should use the already-loaded address (from AUIPC/load_imm).
-    lo12_targets: HashMap<u64, u64>,
+    pub(crate) lo12_targets: HashMap<u64, u64>,
     /// CALL_PLT: AUIPC instruction vaddr → target function RISC-V vaddr.
-    call_targets: HashMap<u64, u64>,
+    pub(crate) call_targets: HashMap<u64, u64>,
     /// Absolute code pointers in data sections: (data_vaddr, target_code_vaddr, entry_size).
     /// entry_size is 4 for 32-bit or 8 for 64-bit entries.
-    abs_code_ptrs: Vec<(u64, u64, u8)>,
+    pub(crate) abs_code_ptrs: Vec<(u64, u64, u8)>,
     /// SUB32 relocations: (data_vaddr, subtracted_addr).
     /// For LLVM relative jump tables: entry = target - subtracted_addr.
     /// Combined with the resolved entry value, we can recover the target.
-    sub32_relocs: Vec<(u64, u64)>,
+    pub(crate) sub32_relocs: Vec<(u64, u64)>,
     /// Code section address ranges for detecting code pointers.
-    code_ranges: Vec<(u64, u64)>,
+    pub(crate) code_ranges: Vec<(u64, u64)>,
     /// ELF entry point (e_entry) — the RISC-V vaddr of _start.
-    entry_vaddr: u64,
+    pub(crate) entry_vaddr: u64,
 }
 
 /// Transpile an rv64em ELF into a v3 chain [`Image`].
@@ -397,7 +397,7 @@ fn find_all_section_bytes<'a>(
 }
 
 /// Parse ELF with full relocation info.
-fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError> {
+pub(crate) fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError> {
     if data.len() < 64 || data[0..4] != [0x7F, b'E', b'L', b'F'] {
         return Err(TranspileError::ElfParse("not an ELF file".into()));
     }

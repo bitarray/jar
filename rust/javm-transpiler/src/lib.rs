@@ -9,6 +9,7 @@ pub mod assembler;
 pub mod emitter;
 pub mod layout;
 pub mod linker;
+pub mod linker_rv;
 pub mod program;
 pub mod riscv;
 
