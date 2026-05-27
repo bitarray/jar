@@ -95,7 +95,8 @@ fn run_one(blob: &[u8], nub: &mut Nub) -> (u32, u32, u64, i64) {
 }
 
 fn main() {
-    let mut nub = Nub::new_hyperlight().expect("Nub::new_hyperlight");
+    let mut recomp = Nub::new_hyperlight().expect("Nub::new_hyperlight");
+    let mut interp = Nub::new_local();
     let mut passes = 0usize;
     let mut fails: Vec<(&str, String)> = Vec::new();
 
@@ -110,34 +111,60 @@ fn main() {
             pvm_img.jump_table.len(),
         );
         eprintln!(
-            "  PVM2: code={}B bitmask={}B jt={}",
+            "  PVM2: code={}B bitmask={}B jt={}  jt_offsets={}",
             pvm2_img.code.len(),
             pvm2_img.packed_bitmask.len(),
             pvm2_img.jump_table.len(),
+            pvm2_img.jump_table_offsets.len(),
         );
 
-        let (er_pvm, ea_pvm, rv_pvm, gas_pvm) = run_one(w.pvm, &mut nub);
-        let (er_pvm2, ea_pvm2, rv_pvm2, gas_pvm2) = run_one(w.pvm2, &mut nub);
+        // PVM legacy (interp via Local) vs PVM2 recomp (Hyperlight): the
+        // existing cross-check. Verifies the two ISAs agree on result
+        // shape across all 12 workloads.
+        let (er_pvm, ea_pvm, rv_pvm, gas_pvm) = run_one(w.pvm, &mut recomp);
+        let (er_pvm2, ea_pvm2, rv_pvm2, gas_pvm2) = run_one(w.pvm2, &mut recomp);
+        // PVM2 interpreter (Local backend → RvInterpreter).
+        let (er_pvm2i, ea_pvm2i, rv_pvm2i, gas_pvm2i) = run_one(w.pvm2, &mut interp);
         eprintln!(
-            "  PVM:  exit_reason={} exit_arg={} return_value={:#x} gas_used={}",
+            "  PVM:        exit_reason={} exit_arg={} return_value={:#x} gas_used={}",
             er_pvm, ea_pvm, rv_pvm, gas_pvm,
         );
         eprintln!(
-            "  PVM2: exit_reason={} exit_arg={} return_value={:#x} gas_used={}",
+            "  PVM2 recomp:exit_reason={} exit_arg={} return_value={:#x} gas_used={}",
             er_pvm2, ea_pvm2, rv_pvm2, gas_pvm2,
         );
+        eprintln!(
+            "  PVM2 interp:exit_reason={} exit_arg={} return_value={:#x} gas_used={}",
+            er_pvm2i, ea_pvm2i, rv_pvm2i, gas_pvm2i,
+        );
 
-        if er_pvm == er_pvm2 && rv_pvm == rv_pvm2 {
+        let cross_ok = er_pvm == er_pvm2 && rv_pvm == rv_pvm2;
+        // Bit-identical PVM2-interp vs PVM2-recomp: same exit, same
+        // return value, same gas_used. This is the invariant Phase 1
+        // of the PVM→PVM2 migration introduces.
+        let interp_ok = er_pvm2 == er_pvm2i
+            && ea_pvm2 == ea_pvm2i
+            && rv_pvm2 == rv_pvm2i
+            && gas_pvm2 == gas_pvm2i;
+
+        if cross_ok && interp_ok {
             passes += 1;
             eprintln!("  PASS");
         } else {
-            fails.push((
-                w.name,
-                format!(
-                    "exit_reason {} vs {}, return_value {:#x} vs {:#x}",
+            let mut msg = String::new();
+            if !cross_ok {
+                msg.push_str(&format!(
+                    "PVM vs PVM2: exit_reason {} vs {}, return_value {:#x} vs {:#x}; ",
                     er_pvm, er_pvm2, rv_pvm, rv_pvm2
-                ),
-            ));
+                ));
+            }
+            if !interp_ok {
+                msg.push_str(&format!(
+                    "PVM2 recomp vs interp: exit {}/{} vs {}/{}, return {:#x} vs {:#x}, gas {} vs {}",
+                    er_pvm2, ea_pvm2, er_pvm2i, ea_pvm2i, rv_pvm2, rv_pvm2i, gas_pvm2, gas_pvm2i,
+                ));
+            }
+            fails.push((w.name, msg));
             eprintln!("  FAIL");
         }
     }

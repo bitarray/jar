@@ -14,7 +14,8 @@ use javm_cap::cap::image::ImageCap;
 use javm_cap::cap::instance::InstanceCap;
 use javm_exec::{
     Access, CopyingMemory, EcallHandler, EcallKind, EcallResult, ExitReason, GasCounter,
-    Interpreter, PAGE_SIZE, PvmProgram, Regs, gas_cost::DEFAULT_MEM_CYCLES, unpack_bitmask,
+    Interpreter, PAGE_SIZE, PvmProgram, Regs, gas_cost::DEFAULT_MEM_CYCLES,
+    rv_interp::RvInterpreter, rv_predecode::predecode_rv, unpack_bitmask,
 };
 use nub_arch_x86_abi::InvocationResult;
 use nub_kernel::{Arch, CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
@@ -75,17 +76,6 @@ pub fn run_instance(
     args: [u64; 4],
     initial_gas: u64,
 ) -> InvocationResult {
-    // ImageCap stores the packed bitmask (1 bit per code byte). The
-    // interpreter wants the unpacked form (1 byte per code byte).
-    let unpacked_bitmask = unpack_bitmask(image.bitmask.as_slice(), image.code.len());
-    let program = PvmProgram::new(
-        image.code.as_slice().to_vec(),
-        unpacked_bitmask,
-        image.jump_table.as_slice().to_vec(),
-        DEFAULT_MEM_CYCLES,
-    )
-    .expect("PvmProgram (bitmask len must match code len)");
-
     let mut mem = CopyingMemory::new();
     let mem_size_pages = page_round_up_u64(instance.mem_size as u64);
     mem.map_region(0, mem_size_pages, Access::ReadWrite, None)
@@ -121,7 +111,34 @@ pub fn run_instance(
 
     let mut gas = GasCounter::new(initial_gas);
     let mut handler = LocalEcallHandler;
-    let exit = Interpreter::run(&program, &mut regs, &mut mem, &mut gas, &mut handler);
+
+    // Image ISA discriminator: PVM2 populates `jump_table_offsets`,
+    // PVM legacy leaves it empty (single-table mode).
+    let is_pvm2 = !image.jump_table_offsets.is_empty();
+    let exit = if is_pvm2 {
+        let predecode = predecode_rv(image.code.as_slice());
+        RvInterpreter::run(
+            &predecode,
+            image.jump_table.as_slice(),
+            image.jump_table_offsets.as_slice(),
+            &mut regs,
+            &mut mem,
+            &mut gas,
+            &mut handler,
+        )
+    } else {
+        // PVM legacy: unpack bitmask, build PvmProgram, run the byte-PVM
+        // interpreter.
+        let unpacked_bitmask = unpack_bitmask(image.bitmask.as_slice(), image.code.len());
+        let program = PvmProgram::new(
+            image.code.as_slice().to_vec(),
+            unpacked_bitmask,
+            image.jump_table.as_slice().to_vec(),
+            DEFAULT_MEM_CYCLES,
+        )
+        .expect("PvmProgram (bitmask len must match code len)");
+        Interpreter::run(&program, &mut regs, &mut mem, &mut gas, &mut handler)
+    };
 
     let (exit_reason, exit_arg) = match exit {
         ExitReason::Halt => (0, 0),
