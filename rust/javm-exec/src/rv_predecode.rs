@@ -15,22 +15,20 @@
 //!   instruction", a workaround for runtime JALR validation back when
 //!   PVM2 still had JALR).
 //!
-//! Gas cost per instruction is filled in via [`rv_gas_cost`]. For now
-//! this returns 1 for every instruction (placeholder); calibration is
-//! a follow-up.
+//! Per-block gas costs are computed by running the pipeline simulator
+//! in [`crate::gas_cost::rv_gas_cost_for_block`] once per basic block;
+//! the results are stored in [`RvPredecode::block_costs`].
 
 use crate::rv_instruction::{RvInst, decode};
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// One decoded instruction with its PC, next-PC, gas cost, and
-/// block-start flag.
+/// One decoded instruction with its PC, next-PC, and block-start flag.
 #[derive(Debug, Clone, Copy)]
 pub struct RvPreDecodedInst {
     pub inst: RvInst,
     pub pc: u32,
     pub next_pc: u32,
-    pub gas_cost: u32,
     pub is_gas_block_start: bool,
 }
 
@@ -40,9 +38,18 @@ pub struct RvPredecode {
     /// One entry per static instruction.
     pub insts: Vec<RvPreDecodedInst>,
     /// Byte-indexed: `valid_pc[i]` == true iff byte offset `i` is an
-    /// instruction start (and thus a valid JALR target). Length =
-    /// code.len().
+    /// instruction start. Length = `code.len()`. Used at deblob for
+    /// branch / call target alignment checks (a static-target reaching
+    /// a non-instruction-start byte is a program error).
     pub valid_pc: Vec<bool>,
+    /// Pre-computed per-basic-block gas cost. Aligned with `insts`:
+    /// `block_costs[i]` is meaningful only when
+    /// `insts[i].is_gas_block_start == true`; entries at non-
+    /// block-start indices are 0. Each meaningful entry is
+    /// `max(simulation_cycles - 3, 1)` for the block starting at
+    /// that instruction, computed by the pipeline simulator in
+    /// `gas_cost::rv_gas_cost_for_block`.
+    pub block_costs: Vec<u32>,
     /// If decode hit a reserved/illegal encoding, the byte offset of
     /// the first one. `None` on success.
     pub decode_error_at: Option<u32>,
@@ -53,7 +60,20 @@ pub struct RvPredecode {
 /// Linear pass; no recursion, no bitmask consultation. The
 /// self-describing length encoding (`op[1:0]` tells you 2-byte vs
 /// 4-byte) makes every advance unambiguous.
+///
+/// Per-block gas costs are computed by running the pipeline
+/// simulator from `gas_cost::rv_gas_cost_for_block` over every basic
+/// block. `mem_cycles` is the load/store cycle latency for the
+/// active memory tier (mirrors `DEFAULT_MEM_CYCLES = 25` from the
+/// PVM gas table).
 pub fn predecode_rv(code: &[u8]) -> RvPredecode {
+    predecode_rv_with_mem_cycles(code, crate::gas_cost::DEFAULT_MEM_CYCLES)
+}
+
+/// Like `predecode_rv` but takes an explicit `mem_cycles` parameter.
+/// Used by callers that want to override the default L2-hit latency
+/// (e.g. for tier-specific gas modeling).
+pub fn predecode_rv_with_mem_cycles(code: &[u8], mem_cycles: u8) -> RvPredecode {
     let mut insts: Vec<RvPreDecodedInst> = Vec::with_capacity(code.len() / 4);
     let mut valid_pc: Vec<bool> = vec![false; code.len()];
     let mut decode_error_at: Option<u32> = None;
@@ -74,7 +94,6 @@ pub fn predecode_rv(code: &[u8]) -> RvPredecode {
             inst,
             pc: pc as u32,
             next_pc,
-            gas_cost: rv_gas_cost(inst),
             is_gas_block_start: false,
         });
         pc = next_pc as usize;
@@ -82,15 +101,15 @@ pub fn predecode_rv(code: &[u8]) -> RvPredecode {
 
     // ---- Pass 2: mark gas-block starts (strict post-terminator) ------
     //
-    // PVM2 has no runtime indirect dispatch (no JALR; calls/returns are
-    // `callf`/`retf` lowered to native call/ret on the guest stack).
-    // The set of legal gas-block-starts is therefore:
+    // PVM2 has no runtime indirect dispatch (no JALR; calls go via
+    // `addi ra, x0, idx ; jal x0, callee`, returns via
+    // `br_table table_id, ra`). The set of legal gas-block-starts is:
     //
     //     {0} ∪ { pc | pc immediately follows a terminator instruction }
     //
     // The linker invariant (analogous to PVM's
     // `ensure_branch_targets_are_block_starts`) guarantees every
-    // statically-reachable branch / callf target lands in this set —
+    // statically-reachable branch / br_table target lands in this set —
     // it injects `Fallthrough` (a terminator no-op) before any target
     // that isn't naturally post-terminator.
     //
@@ -106,11 +125,28 @@ pub fn predecode_rv(code: &[u8]) -> RvPredecode {
         }
     }
 
+    // ---- Pass 3: per-block gas costs via pipeline simulation ---------
+    let block_costs = compute_block_costs(&insts, mem_cycles);
+
     RvPredecode {
         insts,
         valid_pc,
+        block_costs,
         decode_error_at,
     }
+}
+
+/// Run the pipeline simulator once per basic block; write the
+/// resulting cost into `block_costs[block_start_idx]` for each
+/// gas-block-start. Non-block-start indices remain 0.
+fn compute_block_costs(insts: &[RvPreDecodedInst], mem_cycles: u8) -> Vec<u32> {
+    let mut block_costs = vec![0u32; insts.len()];
+    for i in 0..insts.len() {
+        if insts[i].is_gas_block_start {
+            block_costs[i] = crate::gas_cost::rv_gas_cost_for_block(insts, i, mem_cycles);
+        }
+    }
+    block_costs
 }
 
 /// Return the target byte offset of a statically-resolvable branch or
@@ -170,115 +206,11 @@ fn is_terminator(inst: &RvInst) -> bool {
     )
 }
 
-/// Per-instruction gas cost. Cycle-style costs derived from the PVM
-/// gas model in `~/jar/spec/Jar/JAVM/GasCost.lean` — the matching PVM
-/// op gets the same cost number, so analogous bench workloads bill
-/// roughly the same gas. The formal PVM2 cost table lives in
-/// `~/jar/spec/Jar/JAVM/GasCostPVM2.lean`.
-///
-/// The recompiler sums these per-block and emits a single gas-check at
-/// every `bb_start`. Out-of-gas fires before the block runs, so the
-/// captured pc stays in `bb_starts`.
-pub fn rv_gas_cost(inst: RvInst) -> u32 {
-    use RvInst::*;
-    match inst {
-        // ---- Loads (memCycles = 25) ----
-        Lb { .. } | Lh { .. } | Lw { .. } | Ld { .. } | Lbu { .. } | Lhu { .. }
-        | Lwu { .. } => 25,
-
-        // ---- Stores (memCycles = 25) ----
-        Sb { .. } | Sh { .. } | Sw { .. } | Sd { .. } => 25,
-
-        // ---- Branches (PVM cost = 20; the linker rewrites
-        //      `branch-to-trap` patterns to `trap`, so the 1-cycle
-        //      branch-to-trap PVM optimization isn't reachable here.) ----
-        Beq { .. } | Bne { .. } | Blt { .. } | Bge { .. } | Bltu { .. }
-        | Bgeu { .. } => 20,
-
-        // ---- Static jumps (PVM `jump` = 15) ----
-        Jal { .. } => 15,
-
-        // ---- Custom-0 control flow ----
-        // br_table → PVM `jump_ind` (22) — same indirect-jump shape
-        BrTable { .. } => 22,
-        // fallthrough → PVM `fallthrough` (2)
-        Fallthrough => 2,
-        // ecalli → PVM `ecalli` (100)
-        Ecalli { .. } => 100,
-        // ecall.jar → PVM `ecall` (100)
-        EcallJar => 100,
-        // trap → PVM `trap` (2)
-        Trap => 2,
-
-        // ---- Load-immediate / upper-immediate (PVM `load_imm` = 1) ----
-        Addi { rs1: 0, .. } | Lui { .. } => 1,
-
-        // ---- Move-reg (PVM `move_reg` = 0; handled in frontend) ----
-        // `addi rd, rs, 0` and `add rd, rs, x0` are both moves; we
-        // don't peephole, so bill the underlying ALU op cost (1).
-
-        // ---- 64-bit ALU 3-reg + 2-reg-imm (PVM `add_64`, etc. = 1) ----
-        Add { .. } | Sub { .. } | And { .. } | Or { .. } | Xor { .. }
-        | Sll { .. } | Srl { .. } | Slt { .. } | Sltu { .. }
-        | Addi { .. } | Andi { .. } | Ori { .. } | Xori { .. }
-        | Slli { .. } | Srli { .. } | Slti { .. } | Sltiu { .. } => 1,
-
-        // ---- 32-bit ALU (PVM `add_32` etc. = 2) ----
-        Addw { .. } | Subw { .. } | Sllw { .. } | Srlw { .. }
-        | Addiw { .. } | Slliw { .. } | Srliw { .. } => 2,
-
-        // ---- 64-bit shift-arith / arith-shift (PVM `shar_r_64` = 1) ----
-        Sra { .. } | Srai { .. } => 1,
-        // 32-bit (PVM `shar_r_32` = 2)
-        Sraw { .. } | Sraiw { .. } => 2,
-
-        // ---- Multiply (PVM `mul_64` = 3, `mul_32` = 4) ----
-        Mul { .. } => 3,
-        Mulh { .. } | Mulhu { .. } => 4,
-        Mulhsu { .. } => 6,
-        Mulw { .. } => 4,
-
-        // ---- Divide (PVM = 60 across all variants) ----
-        Div { .. } | Divu { .. } | Rem { .. } | Remu { .. }
-        | Divw { .. } | Divuw { .. } | Remw { .. } | Remuw { .. } => 60,
-
-        // ---- Zbb single-cycle bit ops (PVM `popcount64` etc. = 1) ----
-        Cpop { .. } | Cpopw { .. } | Clz { .. } | Clzw { .. }
-        | SextB { .. } | SextH { .. } | ZextH { .. }
-        | Rev8 { .. } | OrcB { .. } => 1,
-        // Two-cycle (PVM `ctz64`/`ctz32` = 2)
-        Ctz { .. } | Ctzw { .. } => 2,
-
-        // ---- Zbb min/max (PVM `max_s`/`max_u`/`min_s`/`min_u` = 3) ----
-        Min { .. } | Minu { .. } | Max { .. } | Maxu { .. } => 3,
-
-        // ---- Zbb inverted-bitwise (PVM `and_inv`/`or_inv` = 2) ----
-        Andn { .. } | Orn { .. } | Xnor { .. } => 2,
-
-        // ---- Zbb rotates (PVM `rot_*` 64 = 1, 32 = 2) ----
-        Rol { .. } | Ror { .. } | Rori { .. } => 1,
-        Rolw { .. } | Rorw { .. } | Roriw { .. } => 2,
-
-        // ---- Zba shift-add (single-cycle ALU on x86 via LEA / shl+add) ----
-        Sh1add { .. } | Sh2add { .. } | Sh3add { .. }
-        | Sh1adduw { .. } | Sh2adduw { .. } | Sh3adduw { .. }
-        | Adduw { .. } | Slliuw { .. } => 1,
-
-        // ---- Zbs single-bit (single-cycle bit-twiddle) ----
-        Bclr { .. } | Bset { .. } | Binv { .. } | Bext { .. }
-        | Bclri { .. } | Bseti { .. } | Binvi { .. } | Bexti { .. } => 1,
-
-        // ---- Zicond conditional move (PVM `cmov_*` = 2) ----
-        CzeroEqz { .. } | CzeroNez { .. } => 2,
-
-        // ---- Fences (no-op in PVM2) ----
-        Fence | FenceI => 1,
-
-        // ---- Reserved encoding (rejected at deblob; if reached, charge
-        //      trap cost so a pathological program isn't free) ----
-        Reserved { .. } => 2,
-    }
-}
+// `rv_gas_cost` (flat per-instruction sum) replaced by pipeline-aware
+// per-block simulation. See `gas_cost::rv_fast_cost` for the per-op
+// FastCost table and `gas_cost::rv_gas_cost_for_block` for the
+// block-cost wrapper. Costs are precomputed in `predecode_rv` and
+// returned via `RvPredecode::block_costs`.
 
 #[cfg(test)]
 mod tests {

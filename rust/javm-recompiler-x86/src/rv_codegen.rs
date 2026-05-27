@@ -20,7 +20,6 @@
 //! that takes a `usize` slot index works unchanged.
 
 use alloc::vec;
-use alloc::vec::Vec;
 
 use super::asm::{Cc, Label, Reg};
 use super::codegen::{
@@ -84,24 +83,17 @@ impl Compiler {
         self.bitmask_ptr = pd.valid_pc.as_ptr() as *const u8;
         self.bitmask_len = pd.valid_pc.len();
 
-        // Pre-compute per-gas-block costs. We avoid the patch-back trick
-        // the PVM path uses (sub_r64_imm32_patchable + flush) because the
-        // RV predecode already names every block boundary up front.
-        let mut block_cost: Vec<u32> = vec![0; pd.insts.len()];
-        let mut cur_start = 0usize;
-        for (i, ip) in pd.insts.iter().enumerate() {
-            if ip.is_gas_block_start {
-                cur_start = i;
-            }
-            block_cost[cur_start] = block_cost[cur_start].saturating_add(ip.gas_cost);
-        }
+        // Per-block gas costs are pre-computed by the predecoder
+        // (pipeline simulation in `gas_cost::rv_gas_cost_for_block`).
+        // Each meaningful entry is `max(simulation_cycles − 3, 1)`.
+        let block_cost: &[u32] = &pd.block_costs;
 
         self.emit_prologue();
 
-        for (inst, &cost) in pd.insts.iter().zip(block_cost.iter()) {
+        for (i, inst) in pd.insts.iter().enumerate() {
             self.asm.ensure_capacity(512);
             if inst.is_gas_block_start {
-                self.bind_rv_gas_block_start(inst.pc, cost);
+                self.bind_rv_gas_block_start(inst.pc, block_cost[i]);
             }
             self.compile_rv_instruction(inst.inst, inst.pc, inst.next_pc);
         }
