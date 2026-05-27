@@ -24,12 +24,11 @@
 //! the actively executing Instance; it consults lower entries during
 //! yield-marker routing.
 
-use std::sync::Arc;
-
 use javm_cap::{CNodeCap, CapHash, CapHashOrRef, SlotIdx};
-use javm_exec::{GasCounter, Mem, PvmProgram, Regs};
+use javm_exec::{GasCounter, Mem, Regs};
 
 use crate::error::VmError;
+use crate::image_cache::CachedProgram;
 
 /// Per the spec §18 default; the chain spec may override.
 pub const DEFAULT_MAX_DEPTH: usize = 256;
@@ -59,7 +58,8 @@ pub struct InstanceEntry {
     /// Cached for quick read of the bound Image hash.
     pub image_hash: CapHash,
     /// Predecoded bytecode (keyed by `image_hash` in `ImageCache`).
-    pub program: Arc<PvmProgram>,
+    /// Variant determines which interpreter the Vm drives.
+    pub program: CachedProgram,
     /// MainFrame cnode — the active CapTable. Owned by this entry; on
     /// HALT it's commit-merged back into the cache.
     pub root_cnode: CNodeCap,
@@ -326,9 +326,12 @@ fn short_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use javm_exec::PvmProgram;
+    use std::sync::Arc;
 
     fn make_entry(tag: u8) -> InstanceEntry {
-        let prog = Arc::new(PvmProgram::new(vec![0u8], vec![1u8], vec![], 25).unwrap());
+        let prog = CachedProgram::Pvm(Arc::new(
+            PvmProgram::new(vec![0u8], vec![1u8], vec![], 25).unwrap(),
+        ));
         let cnode = CNodeCap::new(8).unwrap();
         InstanceEntry {
             instance_ref: CapHashOrRef::Hash([tag; 32]),

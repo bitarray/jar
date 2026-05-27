@@ -1,5 +1,10 @@
 //! PVM2 (RV+C+Zbb+Zba+Zbs+Zicond+custom-0) interpreter.
 //!
+//! [`RvProgram`] bundles the constituents an interpreter run needs
+//! (code bytes, predecode output, jump table + offsets) so the
+//! integration layer can cache the predecode alongside the bytecode
+//! and pass a single Arc to the executor.
+//!
 //! Mirrors the recompiler's semantics — same per-block gas charging at
 //! `RvPredecode::block_costs`, same RV-spec ALU/branch behaviour, same
 //! `Ecalli`/`BrTable` runtime contracts. Cross-checked against the
@@ -13,18 +18,66 @@
 //! `Memory` trait, `GasCounter`, `EcallHandler` — identical to the PVM
 //! interpreter's contract.
 
+use alloc::vec::Vec;
+
 use crate::ecall::{EcallHandler, EcallKind, EcallResult};
 use crate::exit::ExitReason;
 use crate::gas::GasCounter;
 use crate::mem::Memory;
 use crate::regs::Regs;
 use crate::rv_instruction::RvInst;
-use crate::rv_predecode::{RvPreDecodedInst, RvPredecode};
+use crate::rv_predecode::{RvPreDecodedInst, RvPredecode, predecode_rv};
+
+/// Predecoded PVM2 program: bytecode plus the per-instruction analysis
+/// the interpreter consumes. Cache-friendly — the integration layer
+/// builds one of these per Image and shares it across invocations.
+#[derive(Debug)]
+pub struct RvProgram {
+    pub code: Vec<u8>,
+    pub predecode: RvPredecode,
+    pub jump_table: Vec<u32>,
+    pub jump_table_offsets: Vec<u32>,
+}
+
+impl RvProgram {
+    /// Predecode `code` and wrap it together with the Image's jump
+    /// table. The predecode pass is O(code.len()); cache the result.
+    pub fn new(code: Vec<u8>, jump_table: Vec<u32>, jump_table_offsets: Vec<u32>) -> Self {
+        let predecode = predecode_rv(&code);
+        Self {
+            code,
+            predecode,
+            jump_table,
+            jump_table_offsets,
+        }
+    }
+}
 
 /// PVM2 interpreter namespace.
 pub struct RvInterpreter;
 
 impl RvInterpreter {
+    /// Convenience wrapper for [`RvInterpreter::run`] that accepts a
+    /// cached [`RvProgram`].
+    #[inline]
+    pub fn run_program<M: Memory>(
+        program: &RvProgram,
+        regs: &mut Regs,
+        mem: &mut M,
+        gas: &mut GasCounter,
+        handler: &mut dyn EcallHandler,
+    ) -> ExitReason {
+        Self::run(
+            &program.predecode,
+            &program.jump_table,
+            &program.jump_table_offsets,
+            regs,
+            mem,
+            gas,
+            handler,
+        )
+    }
+
     /// Execute the predecoded PVM2 program starting at `regs.pc`.
     /// `jump_table` and `jump_table_offsets` come from the Image
     /// (see [`javm_cap::image::Image`]).

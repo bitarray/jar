@@ -20,12 +20,14 @@
 //! by their `CapHashOrRef` target).
 
 use javm_cap::{CacheDirectory, Cap, CapHash, CapHashOrRef, SlotIdx};
-use javm_exec::{Access, CopyingMemory, ExitReason, GasCounter, Interpreter, Mem, Regs};
+use javm_exec::{
+    Access, CopyingMemory, ExitReason, GasCounter, Interpreter, Mem, Regs, rv_interp::RvInterpreter,
+};
 
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
 use crate::ecall::{CachedEcallHandler, host_op};
 use crate::error::VmError;
-use crate::image_cache::ImageCache;
+use crate::image_cache::{CachedProgram, ImageCache};
 use crate::kernel_assist::{KernelAssist, KernelImage, kernel_image_hash};
 
 /// Result of a top-level `invoke_cached` / `call_resume`.
@@ -159,13 +161,26 @@ impl<K: KernelAssist> Vm<K> {
         };
 
         // Predecode the image bytecode (cache hit when seen before).
-        let unpacked_bitmask = javm_exec::unpack_bitmask(img.bitmask.as_slice(), img.code.len());
-        let program = self.image_cache.get_or_decode(
-            inst.image_hash,
-            img.code.as_slice().to_vec(),
-            unpacked_bitmask,
-            img.jump_table.as_slice().to_vec(),
-        )?;
+        // PVM2 is signalled by a non-empty `jump_table_offsets`; PVM
+        // legacy leaves it empty. The interpreter dispatches at run
+        // time on the resulting `CachedProgram` variant.
+        let program = if !img.jump_table_offsets.is_empty() {
+            self.image_cache.get_or_decode_pvm2(
+                inst.image_hash,
+                img.code.as_slice().to_vec(),
+                img.jump_table.as_slice().to_vec(),
+                img.jump_table_offsets.as_slice().to_vec(),
+            )?
+        } else {
+            let unpacked_bitmask =
+                javm_exec::unpack_bitmask(img.bitmask.as_slice(), img.code.len());
+            self.image_cache.get_or_decode_pvm(
+                inst.image_hash,
+                img.code.as_slice().to_vec(),
+                unpacked_bitmask,
+                img.jump_table.as_slice().to_vec(),
+            )?
+        };
 
         // Locate the endpoint definition (dense array, sentinel =
         // entry_pc == 0).
@@ -331,13 +346,18 @@ impl<K: KernelAssist> Vm<K> {
                 _ => return Err(VmError::Invariant("cur_pos points at non-Instance")),
             };
             let mut handler = CachedEcallHandler { vm: self, cache };
-            let exit = Interpreter::run(
-                program.as_ref(),
-                &mut regs,
-                &mut mem,
-                &mut gas,
-                &mut handler,
-            );
+            let exit = match &program {
+                CachedProgram::Pvm(p) => {
+                    Interpreter::run(p.as_ref(), &mut regs, &mut mem, &mut gas, &mut handler)
+                }
+                CachedProgram::Pvm2(p) => RvInterpreter::run_program(
+                    p.as_ref(),
+                    &mut regs,
+                    &mut mem,
+                    &mut gas,
+                    &mut handler,
+                ),
+            };
 
             // SET_IMAGE re-entry: the running entry's image+program
             // were swapped by `dispatch_set_image_cached`; re-enter

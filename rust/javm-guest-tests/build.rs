@@ -11,7 +11,7 @@ fn main() {
         return;
     }
 
-    let blob = build_javm::build(".", "javm-guest-tests");
+    let blob = build_javm::build_pvm2(".", "javm-guest-tests");
     println!("cargo:rustc-env=GUEST_TESTS_BLOB={}", blob.display());
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=src/main.rs");
@@ -33,7 +33,7 @@ fn main() {
             "SPAWN_CHILD_S_BLOB",
         ),
     ] {
-        let blob = build_javm::build(path, crate_name);
+        let blob = build_javm::build_pvm2(path, crate_name);
         println!("cargo:rustc-env={env}={}", blob.display());
         println!("cargo:rerun-if-changed={path}/src");
         println!("cargo:rerun-if-changed={path}/Cargo.toml");

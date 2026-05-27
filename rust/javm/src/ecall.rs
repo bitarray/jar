@@ -372,13 +372,23 @@ impl<K: KernelAssist> Vm<K> {
             Cap::Image(i) => i.clone(),
             _ => return Err(VmError::ImageNotFound),
         };
-        let unpacked_bitmask = javm_exec::unpack_bitmask(img.bitmask.as_slice(), img.code.len());
-        let program = self.image_cache.get_or_decode(
-            new_image_hash,
-            img.code.as_slice().to_vec(),
-            unpacked_bitmask,
-            img.jump_table.as_slice().to_vec(),
-        )?;
+        let program = if !img.jump_table_offsets.is_empty() {
+            self.image_cache.get_or_decode_pvm2(
+                new_image_hash,
+                img.code.as_slice().to_vec(),
+                img.jump_table.as_slice().to_vec(),
+                img.jump_table_offsets.as_slice().to_vec(),
+            )?
+        } else {
+            let unpacked_bitmask =
+                javm_exec::unpack_bitmask(img.bitmask.as_slice(), img.code.len());
+            self.image_cache.get_or_decode_pvm(
+                new_image_hash,
+                img.code.as_slice().to_vec(),
+                unpacked_bitmask,
+                img.jump_table.as_slice().to_vec(),
+            )?
+        };
         let pinned_slots: Vec<SlotIdx> = img.pinned.iter().map(|e| e.slot).collect();
 
         let running = self
@@ -1023,6 +1033,7 @@ impl<K: KernelAssist> Vm<K> {
 mod tests {
     use super::*;
     use crate::callstack::{EntryStatus, InstanceEntry};
+    use crate::image_cache::CachedProgram;
     use crate::kernel_assist::InProcessKernelAssist;
     use javm_cap::image::Image;
     use javm_cap::{CNodeCap, NUM_REGS};
@@ -1036,7 +1047,9 @@ mod tests {
         cnode
             .set(SlotIdx(2), Some(CapHashOrRef::Hash([0xAA; 32])))
             .unwrap();
-        let prog = Arc::new(PvmProgram::new(vec![0u8], vec![1u8], vec![], 25).unwrap());
+        let prog = CachedProgram::Pvm(Arc::new(
+            PvmProgram::new(vec![0u8], vec![1u8], vec![], 25).unwrap(),
+        ));
         let entry = InstanceEntry {
             instance_ref: CapHashOrRef::Hash([1u8; 32]),
             image_hash_chain: [1u8; 32],
@@ -1250,7 +1263,10 @@ mod tests {
         );
         let running = vm.stack.running_instance().unwrap();
         assert_eq!(running.image_hash, image_hash);
-        assert_eq!(running.program.code, vec![10u8, 0]);
+        match &running.program {
+            CachedProgram::Pvm(p) => assert_eq!(p.code, vec![10u8, 0]),
+            CachedProgram::Pvm2(_) => panic!("expected PVM legacy program for this test"),
+        }
     }
 
     #[test]

@@ -26,7 +26,7 @@ pub use callstack::{
 };
 pub use error::VmError;
 pub use frame::{BareFrame, MainFrame};
-pub use image_cache::ImageCache;
+pub use image_cache::{CachedProgram, ImageCache};
 pub use kernel_assist::{
     InProcessKernelAssist, KernelAssist, KernelImage, MeterId, QuotaId, kernel_image_hash,
     recognize_kernel_image,
