@@ -23,13 +23,31 @@ use crate::rv_instruction::{RvInst, decode};
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// One decoded instruction with its PC, next-PC, and block-start flag.
+/// Pre-resolved metadata used by the per-block gas accountant. The
+/// fields are computed once at decode time so the gas hot path does
+/// not have to re-match the `RvInst` variant on each invocation.
+///
+/// - `kind` is an index into `gas_cost::RV_GAS_COST_LUT`.
+/// - `src1_slot`/`src2_slot`/`dst_slot` are PVM2 register slots
+///   (0..12, ordered x1, x2, x5..x15) or `0xFF` for "no register"
+///   (x0, x3, x4, or an unused register slot for this opcode).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RvGasMeta {
+    pub kind: u8,
+    pub src1_slot: u8,
+    pub src2_slot: u8,
+    pub dst_slot: u8,
+}
+
+/// One decoded instruction with its PC, next-PC, block-start flag,
+/// and pre-resolved gas metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct RvPreDecodedInst {
     pub inst: RvInst,
     pub pc: u32,
     pub next_pc: u32,
     pub is_gas_block_start: bool,
+    pub gas_meta: RvGasMeta,
 }
 
 /// Output of the predecode pass over an RV+C+custom-0 code section.
@@ -90,11 +108,13 @@ pub fn predecode_rv_with_mem_cycles(code: &[u8], mem_cycles: u8) -> RvPredecode 
         }
         valid_pc[pc] = true;
         let next_pc = (pc + len as usize) as u32;
+        let gas_meta = crate::gas_cost::rv_gas_meta(&inst);
         insts.push(RvPreDecodedInst {
             inst,
             pc: pc as u32,
             next_pc,
             is_gas_block_start: false,
+            gas_meta,
         });
         pc = next_pc as usize;
     }
