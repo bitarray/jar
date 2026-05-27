@@ -124,6 +124,17 @@ impl Compiler {
                 pc += consumed_bytes;
                 continue;
             }
+            // Phase 8 lookahead: Ld followed by Add that consumes the
+            // loaded value. Folds two iterations of the streaming loop
+            // (decode + match + feed_gas) into one; the emitted x86
+            // sequence is byte-identical to the unfused emit.
+            if matches!(inst, RvInst::Ld { .. })
+                && let Some(consumed_bytes) =
+                    self.try_fuse_rv_ld_add_streaming(code, pc, len as usize, inst)
+            {
+                pc += consumed_bytes;
+                continue;
+            }
 
             // Strict single-pass: one match over RvInst dispatches
             // emit + gas-feed + reg_defs tracking + terminator
@@ -2225,6 +2236,103 @@ impl Compiler {
         rv_feed_gas_direct(&m2, &mut self.gas_sim, self.mem_cycles);
 
         Some(cur_len + next_len as usize)
+    }
+
+    /// Phase 8 lookahead: fuse `ld rd1, [rs1+imm]; add rd2, rd1, rs2`
+    /// (and the commutative `add rd2, rs2, rd1`) by emitting both
+    /// instructions back-to-back without re-entering the main streaming
+    /// loop. The emitted x86 is byte-identical to the per-arm path; the
+    /// saving is purely the second iteration's decode + match dispatch
+    /// + feed_gas + CF-clear overhead.
+    ///
+    /// Ld→Add is the largest unfused chained pair in the gap-driving
+    /// guests: 4.81% of ed25519 RV instructions (~1358 occurrences),
+    /// 3.17% of ecrecover. The shape comes from base+offset memory
+    /// reads whose result is immediately combined with another value.
+    ///
+    /// Returns `Some(consumed_bytes)` when both instructions are
+    /// folded; `None` otherwise (the caller falls through to the
+    /// per-arm path).
+    fn try_fuse_rv_ld_add_streaming(
+        &mut self,
+        code: &[u8],
+        pc: usize,
+        cur_len: usize,
+        cur_inst: RvInst,
+    ) -> Option<usize> {
+        use javm_exec::gas_cost::{RV_KIND_ADD, RV_KIND_LOAD};
+
+        let (l_rd, l_rs1, l_imm) = match cur_inst {
+            RvInst::Ld { rd, rs1, imm } => (rd, rs1, imm),
+            _ => return None,
+        };
+        // Loads occur at ~19% of all RV instructions on the gap-driving
+        // guests, so the fast-fail path here has to be cheap or the
+        // check eats more than the fusion saves. Order the cheapest
+        // rejections first and inspect the next instruction's raw
+        // bytes directly — skipping the full `decode()` whenever the
+        // 4-byte word doesn't carry an Add encoding.
+        if l_rd == 0 || rv_is_reserved(l_rd) || rv_is_reserved(l_rs1) {
+            return None;
+        }
+        let next_pc = pc + cur_len;
+        if next_pc + 4 > code.len() {
+            return None;
+        }
+        let w = u32::from_le_bytes([
+            code[next_pc],
+            code[next_pc + 1],
+            code[next_pc + 2],
+            code[next_pc + 3],
+        ]);
+        // RV `add` is OP-OP (opcode 0x33), funct3=0, funct7=0. The mask
+        // `0xFE00_707F` covers opcode + funct3 + funct7; only the
+        // register fields are allowed to vary.
+        if w & 0xFE00_707F != 0x0000_0033 {
+            return None;
+        }
+        let a_rd = ((w >> 7) & 0x1F) as u8;
+        let a_rs1 = ((w >> 15) & 0x1F) as u8;
+        let a_rs2 = ((w >> 20) & 0x1F) as u8;
+        // Add must have a real destination and consume the loaded value
+        // as one of its sources.
+        if a_rd == 0 || rv_is_reserved(a_rd) {
+            return None;
+        }
+        if a_rs1 != l_rd && a_rs2 != l_rd {
+            return None;
+        }
+        // rs1/rs2 reserved-source guard: rv_alu_rr would emit a panic
+        // stub for these, which would break the fusion's gas accounting.
+        // x0 is allowed (rv_alu_rr's Add path has explicit x0 fast
+        // paths for the canonical `mv` form).
+        if a_rs1 != 0 && rv_is_reserved(a_rs1) {
+            return None;
+        }
+        if a_rs2 != 0 && rv_is_reserved(a_rs2) {
+            return None;
+        }
+
+        // Emit Ld + Add exactly as the per-arm path would (same helpers,
+        // same gas-kind constants, same tracking promotion). The x86
+        // output is byte-identical to the unfused two-iteration emit;
+        // the win is purely skipping the second iteration's decode +
+        // match dispatch + feed_gas + CF-clear overhead.
+        self.rv_load(l_rd, l_rs1, l_imm, 8, /*signed=*/ false, pc as u32);
+        self.feed_gas_rv(RV_KIND_LOAD, l_rs1, 0, l_rd);
+
+        self.rv_alu_rr(a_rd, a_rs1, a_rs2, AluOp::Add, next_pc as u32);
+        if a_rd != a_rs1 && a_rd != a_rs2 {
+            self.track_add_scaledadd(a_rd, a_rs1, a_rs2);
+        }
+        self.feed_gas_rv(RV_KIND_ADD, a_rs1, a_rs2, a_rd);
+        // CF bookkeeping: rv_alu_rr's Add path sets `last_add_cf` when
+        // appropriate, and the trailing Add IS an Add (the main loop's
+        // post-emit CF clear would have preserved it anyway), so the
+        // post-fusion state matches what the unfused two-iteration walk
+        // would have left.
+
+        Some(cur_len + 4)
     }
 }
 
