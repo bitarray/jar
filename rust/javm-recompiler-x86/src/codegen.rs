@@ -95,6 +95,7 @@ pub const CTX_PC: u64 = CTX_VA + offset_of!(JitContext, pc) as u64;
 pub const CTX_DISPATCH_TABLE: u64 = CTX_VA + offset_of!(JitContext, dispatch_table) as u64;
 pub const CTX_CODE_BASE: u64 = CTX_VA + offset_of!(JitContext, code_base) as u64;
 pub const CTX_FAST_REENTRY: u64 = CTX_VA + offset_of!(JitContext, fast_reentry) as u64;
+pub const CTX_HOST_RSP_BASE: u64 = CTX_VA + offset_of!(JitContext, host_rsp_base) as u64;
 
 /// Exit reason codes (matching ExitReason enum).
 pub const EXIT_HALT: u32 = 0;
@@ -2902,6 +2903,14 @@ impl Compiler {
         // emit below expects at the call site.
         self.asm.push(SCRATCH); // alignment padding
 
+        // Save the post-callee-saved RSP into the context. The exit
+        // path restores RSP from this slot before popping the 7 entries
+        // above, so any unmatched `call` pushes from the guest's
+        // `callf` / `retf` chain (e.g. an OOG or page-fault redirect
+        // mid-function with stack frames still pending) get discarded
+        // cleanly instead of corrupting the exit pops.
+        self.asm.mov_store64_rip_rel(CTX_HOST_RSP_BASE, Reg::RSP);
+
         // R15 = gas register. Loaded from ctx.gas at prologue, decremented
         // per basic block, flushed back to ctx.gas at exit. Mem accesses
         // are baseless `[rdx]` (PVM addr == native VA); CTX is reached via
@@ -2968,6 +2977,15 @@ impl Compiler {
         for (i, &reg) in REG_MAP.iter().enumerate() {
             self.asm.mov_store64_rip_rel(CTX_REGS + (i as u64) * 8, reg);
         }
+
+        // Restore RSP to the post-prologue baseline. Drops any pending
+        // native-`call` frames the guest pushed via `callf` (PVM2). For
+        // a balanced clean exit (every `callf` already matched by a
+        // `retf`), RSP is already at the baseline and the mov is a
+        // no-op; for OOG / page-fault / mid-function trap paths it
+        // truncates the stack back to where the 7 callee-saved entries
+        // sit on top.
+        self.asm.mov_load64_rip_rel(Reg::RSP, CTX_HOST_RSP_BASE);
 
         // Restore callee-saved (+ alignment padding)
         self.asm.pop(SCRATCH); // alignment padding

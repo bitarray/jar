@@ -67,4 +67,10 @@ pub struct JitContext {
     /// Maximum heap pages — grow_heap refuses beyond this.
     pub max_heap_pages: u32,
     pub _pad3: u32,
+    /// RSP saved at JIT entry (after the prologue's callee-saved pushes
+    /// but before any guest code runs). The exit_label restores RSP
+    /// from this slot before popping the callee-saved registers, so
+    /// any unmatched native `call` pushes from the guest's
+    /// `callf`/`retf` sequence don't corrupt the exit path.
+    pub host_rsp_base: u64,
 }

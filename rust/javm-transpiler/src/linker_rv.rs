@@ -1525,6 +1525,65 @@ mod tests {
     }
 
     #[test]
+    fn custom0_retf_decodes() {
+        let w = encode_custom0_retf();
+        assert_eq!(w & 0x7F, OP_CUSTOM_0);
+        assert_eq!((w >> 12) & 0x7, 0b011);
+    }
+
+    #[test]
+    fn custom0_fallthrough_decodes() {
+        let w = encode_custom0_fallthrough();
+        assert_eq!(w & 0x7F, OP_CUSTOM_0);
+        assert_eq!((w >> 12) & 0x7, 0b100);
+    }
+
+    #[test]
+    fn custom1_callf_round_trips_through_imm_j() {
+        for &imm in &[0, 4, 8, -4, -8, 100, -100, 0x7_FFFE, -0x8_0000] {
+            let w = encode_custom1_callf(imm);
+            assert_eq!(w & 0x7F, OP_CUSTOM_1, "opcode for imm={}", imm);
+            assert_eq!((w >> 7) & 0x1F, 0, "rd field must be 0 for imm={}", imm);
+            let decoded = imm_j(w);
+            assert_eq!(decoded, imm, "round-trip failed for imm={}", imm);
+        }
+    }
+
+    #[test]
+    fn jal_x0_round_trips_through_imm_j() {
+        for &imm in &[0, 4, 8, -4, -8, 100, -100, 0x7_FFFE, -0x8_0000] {
+            let w = encode_jal_x0(imm);
+            assert_eq!(w & 0x7F, OP_JAL);
+            assert_eq!((w >> 7) & 0x1F, 0);
+            assert_eq!(imm_j(w), imm);
+        }
+    }
+
+    #[test]
+    fn cb_imm_round_trips() {
+        // (op=01, f3=110 = beqz, rs1'=8, imm=0 placeholder) — start with a real beqz.
+        // c.beqz x8 (rs1'=0), imm=0: f3=110, op=01, rs1'=0, all imm=0.
+        let base = (0b110u16 << 13) | (0b01u16);
+        for &imm in &[0, 2, -2, 4, -4, 128, -128, 254, -256] {
+            let h = encode_cb_imm(base, imm).expect("in range");
+            assert_eq!(decompress_cb_imm(h), imm, "round-trip failed for imm={}", imm);
+        }
+        assert!(encode_cb_imm(base, 256).is_none());
+        assert!(encode_cb_imm(base, -258).is_none());
+    }
+
+    #[test]
+    fn cj_imm_round_trips() {
+        // c.j with f3=101, op=01.
+        let base = (0b101u16 << 13) | (0b01u16);
+        for &imm in &[0, 2, -2, 4, -4, 512, -512, 2046, -2048] {
+            let h = encode_cj_imm(base, imm).expect("in range");
+            assert_eq!(decompress_cj_imm(h), imm, "round-trip failed for imm={}", imm);
+        }
+        assert!(encode_cj_imm(base, 2048).is_none());
+    }
+
+    #[test]
     fn rewrite_ecall_marker_jar() {
         // CSRRW x0, 0x800, x0 = csr=0x800, rs1=0, funct3=1, rd=0, op=SYSTEM
         let csrrw = (0x800u32 << 20) | (0b001 << 12) | OP_SYSTEM;
