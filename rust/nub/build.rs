@@ -38,10 +38,14 @@ fn main() {
     println!("cargo:rerun-if-changed=../nub-arch-x86/src");
     println!("cargo:rerun-if-changed=../nub-arch-x86/Cargo.toml");
     println!("cargo:rerun-if-changed=../nub-arch-x86/link.x");
-    // nub-arch-x86 embeds javm-recompiler-x86; its build script doesn't
-    // know about path-deps via cargo metadata, so register the recompiler
-    // src tree here explicitly. Without this, changes to the recompiler
-    // don't trigger a guest blob rebuild and the cached blob goes stale.
+    // nub-arch-x86 embeds javm-recompiler-x86 and javm-exec; its build
+    // script doesn't know about path-deps via cargo metadata, so register
+    // their src trees here explicitly. Without this, changes to the
+    // recompiler or exec layer don't trigger a guest blob rebuild and the
+    // cached blob goes stale (e.g. gas-cost tweaks in javm-exec wouldn't
+    // appear in bench numbers).
     println!("cargo:rerun-if-changed=../javm-recompiler-x86/src");
     println!("cargo:rerun-if-changed=../javm-recompiler-x86/Cargo.toml");
+    println!("cargo:rerun-if-changed=../javm-exec/src");
+    println!("cargo:rerun-if-changed=../javm-exec/Cargo.toml");
 }

@@ -313,7 +313,8 @@ Instance {
   status:      Idle
              | Paused {
                  regs:           ...
-                 pc:             u64
+                 pc:             u64           -- MUST be a basic-block start
+                                               --   (see "Paused.pc constraint" below)
                  yield_marker:   Cap::Instance  -- the marker yielded with
                }
              | Faulted { fault_info }
@@ -871,6 +872,32 @@ input → same fault.
 **Pause is opaque.** Verbs are CALL_RESUME (sends caller's slot[0] as
 the new target slot[0]) and DROP_PAUSED.
 
+#### Paused.pc constraint
+
+`Paused.pc` MUST be a basic-block start (a member of `bb_starts(code)`
+as defined by the Instance's `image_id`). Implementations validate
+this on entry to CALL_RESUME — a Paused state whose `pc` is not a
+bb_start is rejected as invalid (treated as a kernel-invariant
+violation, not a soft failure).
+
+This holds naturally for both pause sources:
+
+- **Voluntary yield** (ecalli to a yielding host op) yields on the
+  instruction *following* the ecalli. The PVM2 linker classifies
+  `ecalli` as a terminator, so its successor PC is in `bb_starts`
+  by definition.
+- **OOG** fires from the per-block gas check that the JIT emits at
+  every bb_start *before* any instruction of the block executes.
+  When the meter underflows, the captured pc is the bb_start whose
+  cost would have driven it negative, not a mid-block instruction.
+
+`bb_starts` is not part of the wire format; it is JIT-derived from
+`Image.code` per the PVM2 ISA spec
+([../../docs/pvm-isa/05-pvm2-rv-diff.md](../../docs/pvm-isa/05-pvm2-rv-diff.md)).
+The linker is required to guarantee that every PC at which the
+program can possibly pause is a bb_start; the constraint above is
+the kernel-side check that the guarantee held.
+
 **slot[0] discipline.** Apply must keep slot[0] in a "safe to reflect"
 state at all times: empty, the input scratchpad, or a complete output
 Cap::CNode atomically MGMT_MOVE'd in. Never leave slot[0] mid-mutation,
@@ -919,6 +946,7 @@ host_derive_spawn-time initialization).
 CALL_RESUME(target: SlotPath) → result
   Pre: target Instance is Paused, or target is at the top of a Waiting
        chain on the call stack expecting resumption.
+       If Paused: Paused.pc ∈ bb_starts(target.image.code).
   Effect:
     Caller's slot[0] moves into target's slot[0] (same as CALL).
     Continuation restored; apply resumes from saved pc.

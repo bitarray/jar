@@ -169,11 +169,116 @@ fn is_terminator(inst: &RvInst) -> bool {
     )
 }
 
-/// Per-instruction gas cost. Placeholder — returns 1 for every
-/// instruction. Calibration with a real cost model (mapping to the
-/// PVM gas costs for analogous ops) is a follow-up.
-pub fn rv_gas_cost(_inst: RvInst) -> u32 {
-    1
+/// Per-instruction gas cost. Cycle-style costs derived from the PVM
+/// gas model in `~/jar/spec/Jar/JAVM/GasCost.lean` — the matching PVM
+/// op gets the same cost number, so analogous bench workloads bill
+/// roughly the same gas. The formal PVM2 cost table lives in
+/// `~/jar/spec/Jar/JAVM/GasCostPVM2.lean`.
+///
+/// The recompiler sums these per-block and emits a single gas-check at
+/// every `bb_start`. Out-of-gas fires before the block runs, so the
+/// captured pc stays in `bb_starts`.
+pub fn rv_gas_cost(inst: RvInst) -> u32 {
+    use RvInst::*;
+    match inst {
+        // ---- Loads (memCycles = 25) ----
+        Lb { .. } | Lh { .. } | Lw { .. } | Ld { .. } | Lbu { .. } | Lhu { .. }
+        | Lwu { .. } => 25,
+
+        // ---- Stores (memCycles = 25) ----
+        Sb { .. } | Sh { .. } | Sw { .. } | Sd { .. } => 25,
+
+        // ---- Branches (PVM cost = 20; the linker rewrites
+        //      `branch-to-trap` patterns to `trap`, so the 1-cycle
+        //      branch-to-trap PVM optimization isn't reachable here.) ----
+        Beq { .. } | Bne { .. } | Blt { .. } | Bge { .. } | Bltu { .. }
+        | Bgeu { .. } => 20,
+
+        // ---- Static jumps (PVM `jump` = 15) ----
+        Jal { .. } => 15,
+
+        // ---- Custom-0 / custom-1 control flow ----
+        // callf → PVM `load_imm_jump` (15)
+        Callf { .. } => 15,
+        // retf → PVM `jump_ind` (22) — same indirect-return shape
+        Retf => 22,
+        // fallthrough → PVM `fallthrough` (2)
+        Fallthrough => 2,
+        // ecalli → PVM `ecalli` (100)
+        Ecalli { .. } => 100,
+        // ecall.jar → PVM `ecall` (100)
+        EcallJar => 100,
+        // trap → PVM `trap` (2)
+        Trap => 2,
+
+        // ---- Load-immediate / upper-immediate (PVM `load_imm` = 1) ----
+        Addi { rs1: 0, .. } | Lui { .. } => 1,
+
+        // ---- Move-reg (PVM `move_reg` = 0; handled in frontend) ----
+        // `addi rd, rs, 0` and `add rd, rs, x0` are both moves; we
+        // don't peephole, so bill the underlying ALU op cost (1).
+
+        // ---- 64-bit ALU 3-reg + 2-reg-imm (PVM `add_64`, etc. = 1) ----
+        Add { .. } | Sub { .. } | And { .. } | Or { .. } | Xor { .. }
+        | Sll { .. } | Srl { .. } | Slt { .. } | Sltu { .. }
+        | Addi { .. } | Andi { .. } | Ori { .. } | Xori { .. }
+        | Slli { .. } | Srli { .. } | Slti { .. } | Sltiu { .. } => 1,
+
+        // ---- 32-bit ALU (PVM `add_32` etc. = 2) ----
+        Addw { .. } | Subw { .. } | Sllw { .. } | Srlw { .. }
+        | Addiw { .. } | Slliw { .. } | Srliw { .. } => 2,
+
+        // ---- 64-bit shift-arith / arith-shift (PVM `shar_r_64` = 1) ----
+        Sra { .. } | Srai { .. } => 1,
+        // 32-bit (PVM `shar_r_32` = 2)
+        Sraw { .. } | Sraiw { .. } => 2,
+
+        // ---- Multiply (PVM `mul_64` = 3, `mul_32` = 4) ----
+        Mul { .. } => 3,
+        Mulh { .. } | Mulhu { .. } => 4,
+        Mulhsu { .. } => 6,
+        Mulw { .. } => 4,
+
+        // ---- Divide (PVM = 60 across all variants) ----
+        Div { .. } | Divu { .. } | Rem { .. } | Remu { .. }
+        | Divw { .. } | Divuw { .. } | Remw { .. } | Remuw { .. } => 60,
+
+        // ---- Zbb single-cycle bit ops (PVM `popcount64` etc. = 1) ----
+        Cpop { .. } | Cpopw { .. } | Clz { .. } | Clzw { .. }
+        | SextB { .. } | SextH { .. } | ZextH { .. }
+        | Rev8 { .. } | OrcB { .. } => 1,
+        // Two-cycle (PVM `ctz64`/`ctz32` = 2)
+        Ctz { .. } | Ctzw { .. } => 2,
+
+        // ---- Zbb min/max (PVM `max_s`/`max_u`/`min_s`/`min_u` = 3) ----
+        Min { .. } | Minu { .. } | Max { .. } | Maxu { .. } => 3,
+
+        // ---- Zbb inverted-bitwise (PVM `and_inv`/`or_inv` = 2) ----
+        Andn { .. } | Orn { .. } | Xnor { .. } => 2,
+
+        // ---- Zbb rotates (PVM `rot_*` 64 = 1, 32 = 2) ----
+        Rol { .. } | Ror { .. } | Rori { .. } => 1,
+        Rolw { .. } | Rorw { .. } | Roriw { .. } => 2,
+
+        // ---- Zba shift-add (single-cycle ALU on x86 via LEA / shl+add) ----
+        Sh1add { .. } | Sh2add { .. } | Sh3add { .. }
+        | Sh1adduw { .. } | Sh2adduw { .. } | Sh3adduw { .. }
+        | Adduw { .. } | Slliuw { .. } => 1,
+
+        // ---- Zbs single-bit (single-cycle bit-twiddle) ----
+        Bclr { .. } | Bset { .. } | Binv { .. } | Bext { .. }
+        | Bclri { .. } | Bseti { .. } | Binvi { .. } | Bexti { .. } => 1,
+
+        // ---- Zicond conditional move (PVM `cmov_*` = 2) ----
+        CzeroEqz { .. } | CzeroNez { .. } => 2,
+
+        // ---- Fences (no-op in PVM2) ----
+        Fence | FenceI => 1,
+
+        // ---- Reserved encoding (rejected at deblob; if reached, charge
+        //      trap cost so a pathological program isn't free) ----
+        Reserved { .. } => 2,
+    }
 }
 
 #[cfg(test)]

@@ -9,6 +9,7 @@ import Jar.JAVM.Decode
 import Jar.JAVM.Memory
 import Jar.JAVM.Instructions
 import Jar.JAVM.Interpreter
+import Jar.JAVM.GasCostPVM2
 import Jar.Merkle
 import Jar.Erasure
 import Jar.State
