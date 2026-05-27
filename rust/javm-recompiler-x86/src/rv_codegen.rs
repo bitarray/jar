@@ -24,9 +24,8 @@ use alloc::vec::Vec;
 
 use super::asm::{Cc, Label, Reg};
 use super::codegen::{
-    CTX_BB_LEN, CTX_BB_STARTS, CTX_CODE_BASE, CTX_DISPATCH_TABLE, CTX_EXIT_ARG, CTX_EXIT_REASON,
-    CTX_PC, CompileResult, Compiler, EXIT_ECALL, EXIT_HOST_CALL, EXIT_PANIC, EXIT_TRAP, GAS,
-    REG_MAP, SCRATCH,
+    CTX_EXIT_ARG, CTX_EXIT_REASON, CTX_PC, CompileResult, Compiler, EXIT_ECALL, EXIT_HOST_CALL,
+    EXIT_PANIC, EXIT_TRAP, GAS, REG_MAP, SCRATCH,
 };
 use javm_exec::rv_instruction::RvInst;
 pub use javm_exec::rv_predecode::{RvPredecode, predecode_rv};
@@ -254,7 +253,6 @@ impl Compiler {
 
             // ---- Jumps & branches ----
             Jal { rd, imm } => self.rv_jal(rd, imm, pc, next_pc),
-            Jalr { rd, rs1, imm } => self.rv_jalr(rd, rs1, imm, pc, next_pc),
             Beq { rs1, rs2, imm } => self.rv_branch(rs1, rs2, imm, Cc::E, pc, next_pc),
             Bne { rs1, rs2, imm } => self.rv_branch(rs1, rs2, imm, Cc::NE, pc, next_pc),
             Blt { rs1, rs2, imm } => self.rv_branch(rs1, rs2, imm, Cc::L, pc, next_pc),
@@ -269,6 +267,12 @@ impl Compiler {
             RvInst::Trap => self.rv_trap(pc),
             RvInst::EcallJar => self.rv_ecall_jar(next_pc),
             RvInst::Ecalli { imm } => self.rv_ecalli(imm, next_pc),
+            // PVM2 pure-static-dispatch ops. callf emits a native call;
+            // retf emits a native ret; fallthrough is a no-op (just a
+            // bb_start marker handled by predecode).
+            RvInst::Callf { imm } => self.rv_callf(imm, pc, next_pc),
+            RvInst::Retf => self.rv_retf(),
+            RvInst::Fallthrough => {}
 
             RvInst::Reserved { .. } => self.rv_emit_panic_at(pc),
         }
@@ -1248,62 +1252,31 @@ impl Compiler {
         self.emit_static_branch(target, true, next_pc, pc);
     }
 
-    fn rv_jalr(&mut self, rd: u8, rs1: u8, imm: i32, pc: u32, next_pc: u32) {
-        if rv_is_reserved(rd) || rv_is_reserved(rs1) {
+    /// Emit a PVM2 `callf imm` — a PC-relative static call. Lowers to a
+    /// native `call <label>`, which pushes the native return address on
+    /// the guest stack (set up via RSP swap in the prologue). The host
+    /// CPU's Return Stack Buffer predicts the matching `retf` (native
+    /// `ret`) perfectly.
+    ///
+    /// Target must be a basic-block start; the linker guarantees this
+    /// by inserting a `fallthrough` before any target not naturally
+    /// post-terminator.
+    fn rv_callf(&mut self, imm: i32, pc: u32, _next_pc: u32) {
+        let target = (pc as i64).wrapping_add(imm as i64) as u32;
+        if !self.is_basic_block_start(target) {
+            // Linker bug — target should always be a bb_start.
             self.rv_emit_panic_at(pc);
             return;
         }
-        // target = (rs1 + imm) & 0xFFFFFFFE
-        if rs1 == 0 {
-            self.asm.mov_ri32(SCRATCH, (imm as u32) & 0xFFFFFFFE);
-        } else {
-            let base = REG_MAP[rv_slot(rs1).unwrap()];
-            self.asm.mov_rr(SCRATCH, base);
-            if imm != 0 {
-                self.asm.add_ri(SCRATCH, imm);
-            }
-            self.asm.movzx_32_64(SCRATCH, SCRATCH);
-            self.asm.and_ri(SCRATCH, !1i32);
-        }
-        // Link rd.
-        if rd != 0 {
-            let slot = rv_slot(rd).unwrap();
-            self.asm.mov_ri64(REG_MAP[slot], next_pc as u64);
-            self.invalidate_reg(slot);
-        }
-        // Validate and dispatch.
-        self.emit_rv_jalr_dispatch(pc);
+        let label = self.label_for_pc(target);
+        self.asm.call_label(label);
     }
 
-    /// Emit JALR dispatch: SCRATCH holds the candidate target PC.
-    /// Validates via `bb_starts[target] == 1` and `target < bb_len`,
-    /// then jumps to code_base + dispatch_table[target].
-    fn emit_rv_jalr_dispatch(&mut self, pc: u32) {
-        self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
-        let djump_panic = self.asm.new_label();
-        // target < bb_len?
-        self.asm.cmp_mem32_rip_rel_r(CTX_BB_LEN, SCRATCH);
-        self.asm.jcc_label(Cc::BE, djump_panic);
-        // bb_starts[target] == 1?
-        self.asm.push(Reg::RAX);
-        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_BB_STARTS);
-        self.asm.movzx_load8_sib(Reg::RAX, Reg::RAX, SCRATCH);
-        self.asm.cmp_ri32(Reg::RAX, 1);
-        let djump_panic_pop = self.asm.new_label();
-        self.asm.jcc_label(Cc::NE, djump_panic_pop);
-        // native_addr = code_base + dispatch_table[target]
-        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_DISPATCH_TABLE);
-        self.asm.movsxd_load_sib4(Reg::RAX, Reg::RAX, SCRATCH);
-        self.asm.add_r64_mem_rip_rel(Reg::RAX, CTX_CODE_BASE);
-        self.asm.mov_store32_rip_rel(CTX_PC, SCRATCH);
-        self.asm.mov_rr(SCRATCH, Reg::RAX);
-        self.asm.pop(Reg::RAX);
-        self.asm.jmp_reg(SCRATCH);
-
-        self.asm.bind_label(djump_panic_pop);
-        self.asm.pop(Reg::RAX);
-        self.asm.bind_label(djump_panic);
-        self.asm.jmp_label(self.panic_label);
+    /// Emit a PVM2 `retf` — pop the native return address from the
+    /// guest stack and dispatch. Lowers to a single native `ret`,
+    /// RSB-predicted.
+    fn rv_retf(&mut self) {
+        self.asm.ret();
     }
 
     fn rv_branch(&mut self, rs1: u8, rs2: u8, imm: i32, cc: Cc, pc: u32, next_pc: u32) {

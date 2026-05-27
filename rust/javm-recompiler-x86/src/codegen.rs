@@ -237,11 +237,11 @@ impl Compiler {
 
     /// Look up the pre-created label for a PVM PC. O(1) arithmetic.
     #[inline]
-    fn label_for_pc(&self, pc: u32) -> Label {
+    pub(crate) fn label_for_pc(&self, pc: u32) -> Label {
         Label(self.label_base + pc)
     }
 
-    fn is_basic_block_start(&self, idx: u32) -> bool {
+    pub(crate) fn is_basic_block_start(&self, idx: u32) -> bool {
         let i = idx as usize;
         // SAFETY: bitmask_ptr points to the start of a valid &[u8] slice of length
         // bitmask_len, and i < bitmask_len is checked before the dereference.

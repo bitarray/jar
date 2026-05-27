@@ -1,4 +1,4 @@
-//! Single-pass predecode for PVM2 (RV+C+custom-0) byte streams.
+//! Single-pass predecode for PVM2 (RV+C+custom-0+custom-1) byte streams.
 //!
 //! Walks the code from PC=0, decoding every instruction and recording:
 //!
@@ -6,12 +6,14 @@
 //!   per static instruction, with PC + next-PC pre-computed so the
 //!   codegen loop doesn't redo decoding.
 //! - **Valid-PC set** (`Vec<bool>`, byte-indexed): true at every byte
-//!   offset where an instruction begins. Used at runtime for JALR
-//!   target validation (PVM2-Base divergence (4) — see
-//!   `~/docs/pvm-isa/05-pvm2-rv-diff.md`).
-//! - **Gas-block-start markers**: PC=0, branch/jump targets,
-//!   post-terminator fallthroughs (post-trap, post-ecall, post-jal,
-//!   post-jalr, post-conditional-branch).
+//!   offset where an instruction begins. Used at deblob for branch /
+//!   call target alignment checks (a static-target reaching a non-
+//!   instruction-start byte is a program error).
+//! - **Gas-block-start markers**: PC=0 plus every PC immediately
+//!   following a terminator. PVM2's pure-static-dispatch design lets us
+//!   tighten this to the strict post-terminator set (was: "every
+//!   instruction", a workaround for runtime JALR validation back when
+//!   PVM2 still had JALR).
 //!
 //! Gas cost per instruction is filled in via [`rv_gas_cost`]. For now
 //! this returns 1 for every instruction (placeholder); calibration is
@@ -78,19 +80,30 @@ pub fn predecode_rv(code: &[u8]) -> RvPredecode {
         pc = next_pc as usize;
     }
 
-    // ---- Pass 2: mark gas-block starts -------------------------------
+    // ---- Pass 2: mark gas-block starts (strict post-terminator) ------
     //
-    // PVM2's JALR is dynamic — its target is computed from a register
-    // and validated at runtime against `valid_pc`. Any `valid_pc[i]`
-    // can therefore become an entry point from a JALR, so the
-    // dispatch table needs a non-zero entry at every `i` that's an
-    // instruction boundary. The cheapest way to guarantee that is to
-    // mark every decoded instruction as a gas-block start. This makes
-    // gas checks per-instruction (vs. per-block) — a perf regression
-    // until we add a JALR-target-aware pass, but it's needed for
-    // correctness today.
-    for ip in insts.iter_mut() {
-        ip.is_gas_block_start = true;
+    // PVM2 has no runtime indirect dispatch (no JALR; calls/returns are
+    // `callf`/`retf` lowered to native call/ret on the guest stack).
+    // The set of legal gas-block-starts is therefore:
+    //
+    //     {0} ∪ { pc | pc immediately follows a terminator instruction }
+    //
+    // The linker invariant (analogous to PVM's
+    // `ensure_branch_targets_are_block_starts`) guarantees every
+    // statically-reachable branch / callf target lands in this set —
+    // it injects `Fallthrough` (a terminator no-op) before any target
+    // that isn't naturally post-terminator.
+    //
+    // OOG happens at the per-block gas check at the block start, so
+    // a paused PC is always in this set.
+    if !insts.is_empty() {
+        insts[0].is_gas_block_start = true;
+    }
+    for i in 1..insts.len() {
+        let prev_is_terminator = is_terminator(&insts[i - 1].inst);
+        if prev_is_terminator {
+            insts[i].is_gas_block_start = true;
+        }
     }
 
     RvPredecode {
@@ -112,6 +125,7 @@ fn static_target(ip: &RvPreDecodedInst) -> Option<usize> {
     let pc = ip.pc as i64;
     let off: i64 = match ip.inst {
         RvInst::Jal { imm, .. } => imm as i64,
+        RvInst::Callf { imm, .. } => imm as i64,
         RvInst::Beq { imm, .. }
         | RvInst::Bne { imm, .. }
         | RvInst::Blt { imm, .. }
@@ -131,20 +145,26 @@ fn static_target(ip: &RvPreDecodedInst) -> Option<usize> {
 /// Block-terminating instructions: anything that *can* leave the
 /// fall-through path. Used to mark the next instruction as a
 /// gas-block start.
-#[allow(dead_code)]
 fn is_terminator(inst: &RvInst) -> bool {
     matches!(
         inst,
+        // PC-relative jumps and calls.
         RvInst::Jal { .. }
-            | RvInst::Jalr { .. }
+            | RvInst::Callf { .. }
+            | RvInst::Retf
+            // Static branches.
             | RvInst::Beq { .. }
             | RvInst::Bne { .. }
             | RvInst::Blt { .. }
             | RvInst::Bge { .. }
             | RvInst::Bltu { .. }
             | RvInst::Bgeu { .. }
+            // Custom-0 control transfers.
             | RvInst::Trap
             | RvInst::EcallJar
+            | RvInst::Ecalli { .. }
+            | RvInst::Fallthrough
+            // Reserved encodings panic at runtime.
             | RvInst::Reserved { .. }
     )
 }
@@ -208,30 +228,82 @@ mod tests {
     }
 
     #[test]
-    fn branch_target_marked_block_start() {
-        // 0: beq x0, x0, 8  (skip the next insn)
-        // 4: addi x10, x10, 1  (this is fall-through, branch-not-taken path)
-        // 8: addi x11, x11, 2  (branch target → block start)
-        let beq = {
-            // beq x0, x0, +8: rs1=0, rs2=0, imm=8
-            // B encoding: imm[12|10:5|4:1|11] split
-            // 8 = 0b0000_0000_1000; bits: 12=0, 11=0, 10:5=000000, 4:1=0100, 0=0
-            // word = funct7(7) rs2(5) rs1(5) funct3(3) rd(5) op(7) — but for B the imm fields replace rd & funct7
-            // imm[12|10:5] -> bits[31|30:25]; imm[4:1|11] -> bits[11:8|7]
-            // funct3=000 (beq), opcode=1100011
-            // imm=8: bits set: imm[3]=1, so imm[4:1]=0100 -> bits[11:8] = 0100
-            // = 0x00000463
-            0x00000463u32
-        };
+    fn post_terminator_is_block_start_branch_target_isnt() {
+        // 0: beq x0, x0, 8  (terminator — post-PC=4 is block start)
+        // 4: addi x10, x10, 1  (post-terminator — block start)
+        // 8: addi x11, x11, 2  (branch target — NOT post-terminator,
+        //                       so not a block start in strict mode;
+        //                       the linker would inject `fallthrough`
+        //                       before PC=8 in a real build)
+        let beq = 0x00000463u32; // beq x0, x0, +8
         let code = enc(&[beq, 0x00150513, 0x00158593]);
         let r = predecode_rv(&code);
         assert_eq!(r.insts.len(), 3);
-        // PC=0 always block start
+        // PC=0 always block start.
         assert!(r.insts[0].is_gas_block_start);
-        // Post-terminator (post-beq, since beq is conditional terminator) → PC=4 is block start
+        // Post-beq → PC=4 is block start.
         assert!(r.insts[1].is_gas_block_start);
-        // Branch target PC=8 also block start
-        assert!(r.insts[2].is_gas_block_start);
+        // PC=8 is a branch target but the previous instruction (addi at
+        // PC=4) is not a terminator. The linker is responsible for
+        // injecting `fallthrough` before such targets in real builds;
+        // the predecode pass itself doesn't infer it.
+        assert!(!r.insts[2].is_gas_block_start);
+    }
+
+    #[test]
+    fn fallthrough_creates_block_start() {
+        // 0: addi x10, x10, 1   (not a terminator)
+        // 4: fallthrough         (terminator — post-PC=8 is block start)
+        // 8: addi x11, x11, 2   (post-fallthrough — block start)
+        // custom-0 with funct3=0b100 is the fallthrough encoding.
+        // Major opcode = 0b00_010 (0x2), bits[1:0]=11.
+        // Word = (funct3<<12) | (op_custom_0<<2) | 0b11 = (4<<12) | (2<<2) | 3 = 0x400B
+        let fallthrough_word = 0x0000_400Bu32;
+        let code = enc(&[0x00150513, fallthrough_word, 0x00158593]);
+        let r = predecode_rv(&code);
+        assert_eq!(r.insts.len(), 3);
+        assert!(r.insts[0].is_gas_block_start);   // PC=0
+        assert!(!r.insts[1].is_gas_block_start);  // PC=4 post-addi (not terminator)
+        assert!(r.insts[2].is_gas_block_start);   // PC=8 post-fallthrough
+        assert!(matches!(r.insts[1].inst, RvInst::Fallthrough));
+    }
+
+    #[test]
+    fn callf_is_terminator() {
+        // callf imm=+8 (custom-1, J-type).
+        // J-type word: imm bits + rd + opcode. rd=0 (required for callf).
+        // Major opcode 0b01_010 = 0xA; bits[1:0]=11. Major bits[6:2]=0b01010=10.
+        // word = imm_j_field | (rd<<7) | (major<<2) | 0b11
+        // For imm=+8: J-format imm encoding = 0x00800000 wait, let me compute
+        // J imm bits in instruction word:
+        //   bit 31 = imm[20]
+        //   bits 30:21 = imm[10:1]
+        //   bit 20 = imm[11]
+        //   bits 19:12 = imm[19:12]
+        // imm=8 means imm[3]=1 (bit pos 3 in 21-bit signed).
+        // imm[10:1] = 0000000100 (bit 3 set in 10-bit field = 0x004)
+        // bits 30:21 = 0x004 → contribution = 0x004 << 21 = 0x00800000
+        // word = 0x00800000 | (0 << 7) | (0xA << 2) | 0b11 = 0x0080002Bu32
+        let callf_word = 0x0080_002Bu32;
+        let code = enc(&[callf_word, 0x00150513]);
+        let r = predecode_rv(&code);
+        assert_eq!(r.insts.len(), 2);
+        assert!(matches!(r.insts[0].inst, RvInst::Callf { imm: 8 }));
+        assert!(r.insts[0].is_gas_block_start);   // PC=0
+        assert!(r.insts[1].is_gas_block_start);   // post-callf
+    }
+
+    #[test]
+    fn jalr_is_rejected() {
+        // jalr x0, x1, 0 (= c.ret pattern in uncompressed form)
+        // I-type: rd=0, rs1=1, imm=0, funct3=0, opcode=1100111
+        // word = (0<<20) | (1<<15) | (0<<12) | (0<<7) | 0b1100111 = 0x00008067
+        let jalr = 0x00008067u32;
+        let code = enc(&[jalr]);
+        let r = predecode_rv(&code);
+        assert_eq!(r.insts.len(), 1);
+        assert!(matches!(r.insts[0].inst, RvInst::Reserved { .. }));
+        assert_eq!(r.decode_error_at, Some(0));
     }
 
     #[test]

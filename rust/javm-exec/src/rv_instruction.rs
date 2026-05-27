@@ -154,7 +154,9 @@ pub enum RvInst {
     Jal { rd: u8, imm: i32 },
     /// `jalr rd, rs1, imm` — Harvard semantics + djump validation.
     /// `target = (rs1 + imm) & 0xFFFFFFFE`; trap if not a valid PC.
-    Jalr { rd: u8, rs1: u8, imm: i32 },
+    // JALR removed: forbidden in PVM2. Use Callf (custom-1, PC-relative
+    // call) or Retf (custom-0, return) instead. Both lower to native
+    // call/ret on a dedicated guest stack for RSB-friendly prediction.
     Beq { rs1: u8, rs2: u8, imm: i32 },
     Bne { rs1: u8, rs2: u8, imm: i32 },
     Blt { rs1: u8, rs2: u8, imm: i32 },
@@ -175,6 +177,19 @@ pub enum RvInst {
     EcallJar,
     /// `custom-0` sub-op `10`: host-call with 20-bit signed immediate.
     Ecalli { imm: i32 },
+    /// `custom-0` sub-op `11`: return from function. Native lowering:
+    /// `ret` (pops native return address pushed by an earlier `callf`).
+    Retf,
+    /// `custom-0` sub-op `100`: terminator no-op. Acts as a basic-block
+    /// start at the next byte. Linker injects this before branch / call
+    /// targets that aren't naturally post-terminator.
+    Fallthrough,
+
+    // -------- custom-1: PC-relative call (J-type) --------
+    /// `custom-1` major opcode (J-type, 20-bit signed PC-relative immediate).
+    /// Static call: pushes native return address on the guest stack and
+    /// branches to PC + imm. The target must be in `bb_starts`.
+    Callf { imm: i32 },
 
     // -------- Sentinel for forbidden encodings --------
     /// Decoder accepted the wire bits but the encoding is reserved
@@ -269,17 +284,21 @@ fn decode_32(w: u32) -> RvInst {
             let imm = imm_j(w);
             RvInst::Jal { rd, imm }
         }
-        OP_JALR => {
-            if funct3 != 0 {
-                return RvInst::Reserved { raw: w };
-            }
-            let imm = imm_i(w);
-            RvInst::Jalr { rd, rs1, imm }
-        }
+        OP_JALR => RvInst::Reserved { raw: w }, // forbidden in PVM2 — use callf/retf
         OP_BRANCH => decode_branch(rs1, rs2, funct3, imm_b(w), w),
         OP_MISC_MEM => decode_misc_mem(funct3),
         OP_SYSTEM => RvInst::Reserved { raw: w }, // standard ECALL/EBREAK/CSR reserved
         OP_CUSTOM_0 => decode_custom_0(w, rd, rs1, funct3),
+        OP_CUSTOM_1 => {
+            // custom-1: PC-relative call. J-type encoding (same immediate
+            // layout as JAL). rd field is required to be x0 (no link
+            // register write — the return address goes on the guest stack
+            // via native `call`).
+            if rd != 0 {
+                return RvInst::Reserved { raw: w };
+            }
+            RvInst::Callf { imm: imm_j(w) }
+        }
         _ => RvInst::Reserved { raw: w },
     }
 }
@@ -538,9 +557,11 @@ fn decode_misc_mem(funct3: u8) -> RvInst {
 
 fn decode_custom_0(w: u32, _rd: u8, _rs1: u8, funct3: u8) -> RvInst {
     // Sub-op layout (I-type wire shape; funct3 is the sub-op selector):
-    //   funct3 = 000 -> trap        (other fields ignored)
-    //   funct3 = 001 -> ecall.jar   (other fields ignored)
-    //   funct3 = 010 -> ecalli      (imm12 in bits [31:20], rs1/rd zero)
+    //   funct3 = 000 -> trap         (other fields ignored)
+    //   funct3 = 001 -> ecall.jar    (other fields ignored)
+    //   funct3 = 010 -> ecalli       (imm12 in bits [31:20], rs1/rd zero)
+    //   funct3 = 011 -> retf         (other fields ignored)
+    //   funct3 = 100 -> fallthrough  (other fields ignored)
     //
     // Wire bits [31:20] are the standard I-type signed 12-bit imm, so
     // we reuse `imm_i`. Range: [-2048, +2047], ample for host-function
@@ -549,6 +570,8 @@ fn decode_custom_0(w: u32, _rd: u8, _rs1: u8, funct3: u8) -> RvInst {
         0b000 => RvInst::Trap,
         0b001 => RvInst::EcallJar,
         0b010 => RvInst::Ecalli { imm: imm_i(w) },
+        0b011 => RvInst::Retf,
+        0b100 => RvInst::Fallthrough,
         _ => RvInst::Reserved { raw: w },
     }
 }
@@ -897,24 +920,19 @@ fn decompress_q2(h: u16, f3: u16) -> RvInst {
         }
         0b100 => {
             // c.jr / c.mv / c.ebreak / c.jalr / c.add
+            // c.jr and c.jalr decompress to JALR, which is forbidden in PVM2
+            // (use callf/retf instead). Linker rewrites the return idiom
+            // `c.jr ra` to a `retf` opcode in the custom-0 space.
             let bit12 = (h >> 12) & 1;
             match (bit12, rdrs1, rs2) {
-                (0, r, 0) if r != 0 => RvInst::Jalr {
-                    rd: 0,
-                    rs1: r,
-                    imm: 0,
-                }, // c.jr
+                (0, r, 0) if r != 0 => RvInst::Reserved { raw: h as u32 }, // c.jr → forbidden in PVM2
                 (0, r, s) if r != 0 && s != 0 => RvInst::Add {
                     rd: r,
                     rs1: 0,
                     rs2: s,
                 }, // c.mv
                 (1, 0, 0) => RvInst::Reserved { raw: h as u32 }, // c.ebreak → forbidden in PVM2
-                (1, r, 0) if r != 0 => RvInst::Jalr {
-                    rd: 1,
-                    rs1: r,
-                    imm: 0,
-                }, // c.jalr
+                (1, r, 0) if r != 0 => RvInst::Reserved { raw: h as u32 }, // c.jalr → forbidden in PVM2
                 (1, r, s) if r != 0 && s != 0 => RvInst::Add {
                     rd: r,
                     rs1: r,
