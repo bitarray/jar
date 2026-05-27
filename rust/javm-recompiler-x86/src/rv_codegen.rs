@@ -107,6 +107,14 @@ impl Compiler {
             }
             self.compile_rv_instruction(pdi.inst, pdi.pc, pdi.next_pc);
             self.update_reg_defs_rv(&pdi.inst);
+            // Phase 4: carry-flag fusion bookkeeping. Add sets last_add_cf
+            // from inside rv_alu_rr; Sltu consumes it from inside rv_slt_rr.
+            // Any other instruction (including a *failed* Sltu that fell
+            // through to the general code) clobbers CF; clear so subsequent
+            // unrelated Sltu doesn't read a stale add's flags.
+            if !matches!(pdi.inst, RvInst::Add { .. } | RvInst::Sltu { .. }) {
+                self.last_add_cf = None;
+            }
             i += 1;
         }
 
@@ -494,6 +502,19 @@ impl Compiler {
         if rd != 0 {
             self.invalidate_reg(rv_slot(rd).unwrap());
         }
+        // Phase 4: record carry-flag handoff. Only 64-bit `add` sets CF
+        // in a way that matches a subsequent `sltu rd, rs1, rs2` checking
+        // unsigned overflow of rs1+rs2. Addw operates on the 32-bit view
+        // and sign-extends — CF reflects 32-bit overflow, not 64-bit,
+        // so a 64-bit sltu against the sign-extended sum would be wrong.
+        // Skip x0 source/dest cases: degenerate, not worth tracking.
+        if matches!(op, AluOp::Add) && rd != 0 && rs1 != 0 && rs2 != 0 {
+            if let (Some(d_s), Some(a_s), Some(b_s)) =
+                (rv_slot(rd), rv_slot(rs1), rv_slot(rs2))
+            {
+                self.last_add_cf = Some((d_s, a_s, b_s));
+            }
+        }
     }
 
     fn apply_alu_op(&mut self, op: AluOp, d: Reg, s: Reg) {
@@ -585,6 +606,43 @@ impl Compiler {
             self.rv_emit_panic_at(pc);
             return;
         }
+        // Phase 4: carry-flag fast path for `sltu d, rs1, rs2` immediately
+        // following `add rs1, A, B` (with rs2 ∈ {A, B}). CF already holds
+        // the unsigned-overflow bit, so we skip the cmp and emit just
+        // `setb d` + zero-extension. Mirrors PVM's SetLtU fusion.
+        //
+        // If the conditions don't match, the general path below emits
+        // `mov_ri64(d, 0); cmp; setcc` — the first of which clobbers CF
+        // via xor. last_add_cf is single-shot: cleared on entry to keep
+        // any *subsequent* sltu from reading the (now-stale) add flags.
+        if !signed
+            && let Some((add_d, add_a, add_b)) = self.last_add_cf
+        {
+            let rs1_s = rv_slot(rs1);
+            let rs2_s = rv_slot(rs2);
+            let rd_s = rv_slot(rd);
+            if let (Some(rs1_s), Some(rs2_s), Some(rd_s)) = (rs1_s, rs2_s, rd_s)
+                && rs1_s == add_d
+                && rs2_s != add_d
+                && (rs2_s == add_a || rs2_s == add_b)
+                && rd_s != rs2_s
+            {
+                // CF is valid. Zero d first via mov_ri32 (`mov r32, 0`,
+                // no flag effect), then setb writes the low byte. This
+                // avoids the partial-register dependency that a bare
+                // `setcc; movzx` sequence would create.
+                self.asm.mov_ri32(d, 0);
+                self.asm.setcc(Cc::B, d);
+                self.invalidate_reg(rd_s);
+                // setb/movzx don't touch CF — a *further* consecutive sltu
+                // against the same add still has the live carry available,
+                // so leave last_add_cf intact.
+                return;
+            }
+        }
+        // Fell through: the general path below clobbers CF. Clear the
+        // tracked carry so a subsequent sltu doesn't fuse spuriously.
+        self.last_add_cf = None;
         // Snapshot operands into SCRATCH and/or read original mapped
         // registers BEFORE touching d. Zero d up front; the cmp below
         // sets flags fresh for the setcc.
@@ -1671,6 +1729,9 @@ impl Compiler {
         // Both destinations changed; clear any tracking on them.
         self.invalidate_reg(lo_slot);
         self.invalidate_reg(hi_slot);
+        // mul/imul clobbers CF; a subsequent Sltu must not fuse against
+        // a stale prior-add's flags.
+        self.last_add_cf = None;
 
         Some(2)
     }
