@@ -28,10 +28,10 @@
 //! alongside the PVM path until Phase 2 flips the switch.
 
 use crate::TranspileError;
-use crate::linker::parse_linked_elf;
 use crate::layout::{
     HEAP_CAP_INDEX, PVM_PAGE_SIZE, ProgramLayout, RO_CAP_INDEX, RW_CAP_INDEX, STACK_CAP_INDEX,
 };
+use crate::linker::parse_linked_elf;
 use javm_cap::SlotIdx;
 use javm_cap::abi::{BARE_GAS_SLOT, BARE_QUOTA_SLOT, BARE_YIELD_CATCHER_SLOT};
 use javm_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap};
@@ -110,11 +110,7 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
             return None;
         }
         let o = (v - base_vaddr) as usize;
-        if o >= code_len {
-            None
-        } else {
-            Some(o)
-        }
+        if o >= code_len { None } else { Some(o) }
     };
 
     // ---- 2. AUIPC → LUI rewrite ------------------------------------
@@ -174,12 +170,7 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
                 v
             )));
         }
-        let word = u32::from_le_bytes([
-            code[off],
-            code[off + 1],
-            code[off + 2],
-            code[off + 3],
-        ]);
+        let word = u32::from_le_bytes([code[off], code[off + 1], code[off + 2], code[off + 3]]);
         if word & 0x7F != OP_AUIPC {
             return Err(TranspileError::InvalidSection(format!(
                 "link_elf_rv: reloc at vaddr {:#x} not an AUIPC (opcode {:#x})",
@@ -345,16 +336,15 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
     // Apply the alignment-pass offset_map to the return tables in place.
     for table in tables_new_pcs.iter_mut() {
         for entry in table.iter_mut() {
-            let new_pc =
-                offset_map_align
-                    .get(&(*entry as usize))
-                    .copied()
-                    .ok_or_else(|| {
-                        TranspileError::InvalidSection(format!(
-                            "link_elf_rv: br_table resume pc {:#x} not in align offset_map",
-                            *entry
-                        ))
-                    })?;
+            let new_pc = offset_map_align
+                .get(&(*entry as usize))
+                .copied()
+                .ok_or_else(|| {
+                    TranspileError::InvalidSection(format!(
+                        "link_elf_rv: br_table resume pc {:#x} not in align offset_map",
+                        *entry
+                    ))
+                })?;
             *entry = new_pc as u32;
         }
     }
@@ -427,8 +417,7 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
             let new_val = translate_code_addr(rv_target);
             match size {
                 4 if off + 4 <= ro_data_rewritten.len() => {
-                    ro_data_rewritten[off..off + 4]
-                        .copy_from_slice(&new_val.to_le_bytes());
+                    ro_data_rewritten[off..off + 4].copy_from_slice(&new_val.to_le_bytes());
                 }
                 8 if off + 8 <= ro_data_rewritten.len() => {
                     ro_data_rewritten[off..off + 8]
@@ -441,15 +430,10 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
         // Heuristic: 8-byte values in .rodata that look like code
         // pointers but aren't covered by an explicit reloc.
         let mut off = 0;
-        let already_covered: std::collections::HashSet<u64> = elf
-            .abs_code_ptrs
-            .iter()
-            .map(|&(v, _, _)| v)
-            .collect();
+        let already_covered: std::collections::HashSet<u64> =
+            elf.abs_code_ptrs.iter().map(|&(v, _, _)| v).collect();
         while off + 8 <= ro_data_rewritten.len() {
-            let val = u64::from_le_bytes(
-                ro_data_rewritten[off..off + 8].try_into().unwrap(),
-            );
+            let val = u64::from_le_bytes(ro_data_rewritten[off..off + 8].try_into().unwrap());
             if is_code_addr(val) {
                 let vaddr = ro_base + off as u64;
                 if !already_covered.contains(&vaddr) {
@@ -623,12 +607,7 @@ fn rewrite_ecall_markers(code: &mut [u8]) -> Result<(), TranspileError> {
                 code[i..i + 4].copy_from_slice(&NOP_BYTES);
                 let j = i + 4;
                 if j + 4 <= n {
-                    let nxt = u32::from_le_bytes([
-                        code[j],
-                        code[j + 1],
-                        code[j + 2],
-                        code[j + 3],
-                    ]);
+                    let nxt = u32::from_le_bytes([code[j], code[j + 1], code[j + 2], code[j + 3]]);
                     if is_full_length(nxt) && is_standard_ecall(nxt) {
                         let new_word = if csr == CSR_ECALL_JAR {
                             encode_custom0_ecall_jar()
@@ -967,7 +946,10 @@ fn encode_custom0_ecalli(imm: i32) -> u32 {
 /// 12-bit), rs1 = idx-carrier reg.
 #[inline]
 fn encode_custom0_br_table(table_id: u16, rs1: u8) -> u32 {
-    debug_assert!(table_id < (1 << 12), "br_table table_id must fit in 12 bits");
+    debug_assert!(
+        table_id < (1 << 12),
+        "br_table table_id must fit in 12 bits"
+    );
     debug_assert!(rs1 < 32, "rs1 must be 5-bit");
     let imm12 = (table_id as u32) & 0xFFF;
     (imm12 << 20) | ((rs1 as u32) << 15) | (0b011 << 12) | OP_CUSTOM_0
@@ -1002,8 +984,7 @@ fn encode_jal_x0(imm: i32) -> u32 {
     let b10_1 = (v >> 1) & 0x3FF;
     let b11 = (v >> 11) & 0x1;
     let b19_12 = (v >> 12) & 0xFF;
-    let imm_field =
-        (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12);
+    let imm_field = (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12);
     imm_field | OP_JAL
 }
 
@@ -1128,7 +1109,10 @@ fn analyze_pvm2_cfg(
             // c.jr ra has wire encoding 0x8082:
             //   bits[15:13]=100  bit12=0  bits[11:7]=rdrs1=1  bits[6:2]=0  bits[1:0]=10
             if lo == 0x8082 {
-                returns.push(ReturnSite { pc: pc as u32, len: 2 });
+                returns.push(ReturnSite {
+                    pc: pc as u32,
+                    len: 2,
+                });
             }
             pc += 2;
             continue;
@@ -1180,8 +1164,7 @@ fn analyze_pvm2_cfg(
             // Check AUIPC pairing.
             let jalr_vaddr = base_vaddr + pc as u64;
             let auipc_vaddr = jalr_vaddr.checked_sub(4);
-            let paired_target =
-                auipc_vaddr.and_then(|v| auipc_effective.get(&v).copied());
+            let paired_target = auipc_vaddr.and_then(|v| auipc_effective.get(&v).copied());
 
             if let Some(target_off) = paired_target {
                 if pc < 4 {
@@ -1219,7 +1202,10 @@ fn analyze_pvm2_cfg(
             // Standalone JALR. Only the canonical uncompressed return form
             // (`jalr x0, x1, 0`) is allowed; everything else is reserved.
             if rd == 0 && rs1 == 1 && imm12_signed == 0 {
-                returns.push(ReturnSite { pc: pc as u32, len: 4 });
+                returns.push(ReturnSite {
+                    pc: pc as u32,
+                    len: 4,
+                });
                 pc += 4;
                 continue;
             }
@@ -1291,11 +1277,8 @@ fn build_return_tables(cfg: &Pvm2Cfg) -> Result<ReturnTables, TranspileError> {
     }
 
     // Function-entry PC → dense index 0..n.
-    let entry_idx: BTreeMap<u32, usize> = entries
-        .iter()
-        .enumerate()
-        .map(|(i, &e)| (e, i))
-        .collect();
+    let entry_idx: BTreeMap<u32, usize> =
+        entries.iter().enumerate().map(|(i, &e)| (e, i)).collect();
 
     // Union-find over function indices. Every tail-call edge unions
     // its endpoints — direction doesn't matter for the
@@ -1404,16 +1387,13 @@ fn build_return_tables(cfg: &Pvm2Cfg) -> Result<ReturnTables, TranspileError> {
         })?;
         let table = &tables_old_pcs[table_id as usize];
         let resume = dc.seq_start + dc.seq_len;
-        let idx = table
-            .iter()
-            .position(|&p| p == resume)
-            .ok_or_else(|| {
-                TranspileError::InvalidSection(format!(
-                    "build_return_tables: direct call resume {:#x} missing from \
+        let idx = table.iter().position(|&p| p == resume).ok_or_else(|| {
+            TranspileError::InvalidSection(format!(
+                "build_return_tables: direct call resume {:#x} missing from \
                      callee {:#x} table",
-                    resume, dc.target
-                ))
-            })? as u32;
+                resume, dc.target
+            ))
+        })? as u32;
         idx_of_call.push(idx);
     }
 
@@ -1459,8 +1439,7 @@ fn rewrite_pvm2_calls_returns(
     for tc in &cfg.tail_calls {
         tail_by_seq_start.insert(tc.seq_start, tc);
     }
-    let return_pcs: std::collections::BTreeSet<u32> =
-        cfg.returns.iter().map(|r| r.pc).collect();
+    let return_pcs: std::collections::BTreeSet<u32> = cfg.returns.iter().map(|r| r.pc).collect();
     // Return site PC → enclosing function entry.
     let return_to_function: BTreeMap<u32, u32> = {
         let entries = &cfg.function_entries;
@@ -1635,8 +1614,10 @@ fn rewrite_pvm2_calls_returns(
             // RVC. Patch c.j and c.beqz/c.bnez.
             let op = lo & 0b11;
             let f3 = (lo >> 13) & 0b111;
-            let (is_jump, is_branch) = (op == 0b01 && f3 == 0b101,
-                                         op == 0b01 && (f3 == 0b110 || f3 == 0b111));
+            let (is_jump, is_branch) = (
+                op == 0b01 && f3 == 0b101,
+                op == 0b01 && (f3 == 0b110 || f3 == 0b111),
+            );
             if !is_jump && !is_branch {
                 continue;
             }
@@ -1649,14 +1630,12 @@ fn rewrite_pvm2_calls_returns(
             if old_target < 0 || (old_target as usize) >= code.len() {
                 continue;
             }
-            let new_target = *offset_map_pre
-                .get(&(old_target as usize))
-                .ok_or_else(|| {
-                    TranspileError::InvalidSection(format!(
-                        "rewrite_pvm2_calls_returns: RVC branch target {:#x} not in offset_map",
-                        old_target
-                    ))
-                })?;
+            let new_target = *offset_map_pre.get(&(old_target as usize)).ok_or_else(|| {
+                TranspileError::InvalidSection(format!(
+                    "rewrite_pvm2_calls_returns: RVC branch target {:#x} not in offset_map",
+                    old_target
+                ))
+            })?;
             let new_imm = new_target as i64 - new_pc as i64;
             let new_h = if is_jump {
                 encode_cj_imm(lo, new_imm as i32)
@@ -1690,14 +1669,12 @@ fn rewrite_pvm2_calls_returns(
                 if old_target < 0 || (old_target as usize) >= code.len() {
                     continue;
                 }
-                let new_target = *offset_map_pre
-                    .get(&(old_target as usize))
-                    .ok_or_else(|| {
-                        TranspileError::InvalidSection(format!(
-                            "rewrite_pvm2_calls_returns: B-branch target {:#x} not in offset_map",
-                            old_target
-                        ))
-                    })?;
+                let new_target = *offset_map_pre.get(&(old_target as usize)).ok_or_else(|| {
+                    TranspileError::InvalidSection(format!(
+                        "rewrite_pvm2_calls_returns: B-branch target {:#x} not in offset_map",
+                        old_target
+                    ))
+                })?;
                 let new_imm = new_target as i64 - new_pc as i64;
                 if !(-(1 << 12)..(1 << 12)).contains(&new_imm) {
                     return Err(TranspileError::InvalidSection(format!(
@@ -1718,14 +1695,12 @@ fn rewrite_pvm2_calls_returns(
                 if old_target < 0 || (old_target as usize) >= code.len() {
                     continue;
                 }
-                let new_target = *offset_map_pre
-                    .get(&(old_target as usize))
-                    .ok_or_else(|| {
-                        TranspileError::InvalidSection(format!(
-                            "rewrite_pvm2_calls_returns: JAL target {:#x} not in offset_map",
-                            old_target
-                        ))
-                    })?;
+                let new_target = *offset_map_pre.get(&(old_target as usize)).ok_or_else(|| {
+                    TranspileError::InvalidSection(format!(
+                        "rewrite_pvm2_calls_returns: JAL target {:#x} not in offset_map",
+                        old_target
+                    ))
+                })?;
                 let new_imm = new_target as i64 - new_pc as i64;
                 if !(-(1 << 20)..(1 << 20)).contains(&new_imm) {
                     return Err(TranspileError::InvalidSection(format!(
@@ -1739,8 +1714,7 @@ fn rewrite_pvm2_calls_returns(
                 let b10_1 = (v >> 1) & 0x3FF;
                 let b11 = (v >> 11) & 0x1;
                 let b19_12 = (v >> 12) & 0xFF;
-                let imm_field =
-                    (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12);
+                let imm_field = (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12);
                 let new_w = imm_field | (rd << 7) | OP_JAL;
                 new_code[new_pc..new_pc + 4].copy_from_slice(&new_w.to_le_bytes());
             }
@@ -1753,14 +1727,12 @@ fn rewrite_pvm2_calls_returns(
     for old_table in &tables.tables_old_pcs {
         let mut new_table = Vec::with_capacity(old_table.len());
         for &old_resume in old_table {
-            let new_resume = *offset_map_pre
-                .get(&(old_resume as usize))
-                .ok_or_else(|| {
-                    TranspileError::InvalidSection(format!(
-                        "rewrite_pvm2_calls_returns: resume {:#x} not in offset_map",
-                        old_resume
-                    ))
-                })?;
+            let new_resume = *offset_map_pre.get(&(old_resume as usize)).ok_or_else(|| {
+                TranspileError::InvalidSection(format!(
+                    "rewrite_pvm2_calls_returns: resume {:#x} not in offset_map",
+                    old_resume
+                ))
+            })?;
             new_table.push(new_resume as u32);
         }
         tables_new_pcs.push(new_table);
@@ -2033,8 +2005,7 @@ fn align_branch_targets(
                         let b10_1 = (v >> 1) & 0x3FF;
                         let b11 = (v >> 11) & 0x1;
                         let b19_12 = (v >> 12) & 0xFF;
-                        let imm_field =
-                            (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12);
+                        let imm_field = (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12);
                         let new_w = imm_field | (rd << 7) | OP_JAL;
                         new_code[new_pc..new_pc + 4].copy_from_slice(&new_w.to_le_bytes());
                     }
@@ -2117,8 +2088,7 @@ fn encode_cb_imm(h: u16, imm: i32) -> Option<u16> {
     let b2_1 = (v >> 1) & 0x3;
     // Preserve: bits 15:13 (funct3), bits 9:7 (rs1'), bits 1:0 (opcode).
     let preserved = (h as u32) & 0b1110_0011_1000_0011;
-    let new_imm =
-        (b8 << 12) | (b4_3 << 10) | (b7_6 << 5) | (b2_1 << 3) | (b5 << 2);
+    let new_imm = (b8 << 12) | (b4_3 << 10) | (b7_6 << 5) | (b2_1 << 3) | (b5 << 2);
     Some((preserved | new_imm) as u16)
 }
 
@@ -2238,7 +2208,12 @@ mod tests {
         let base = (0b110u16 << 13) | (0b01u16);
         for &imm in &[0, 2, -2, 4, -4, 128, -128, 254, -256] {
             let h = encode_cb_imm(base, imm).expect("in range");
-            assert_eq!(decompress_cb_imm(h), imm, "round-trip failed for imm={}", imm);
+            assert_eq!(
+                decompress_cb_imm(h),
+                imm,
+                "round-trip failed for imm={}",
+                imm
+            );
         }
         assert!(encode_cb_imm(base, 256).is_none());
         assert!(encode_cb_imm(base, -258).is_none());
@@ -2250,7 +2225,12 @@ mod tests {
         let base = (0b101u16 << 13) | (0b01u16);
         for &imm in &[0, 2, -2, 4, -4, 512, -512, 2046, -2048] {
             let h = encode_cj_imm(base, imm).expect("in range");
-            assert_eq!(decompress_cj_imm(h), imm, "round-trip failed for imm={}", imm);
+            assert_eq!(
+                decompress_cj_imm(h),
+                imm,
+                "round-trip failed for imm={}",
+                imm
+            );
         }
         assert!(encode_cj_imm(base, 2048).is_none());
     }

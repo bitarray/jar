@@ -273,11 +273,7 @@ fn finish(result: &InvocationResult) -> (u64, u64) {
 /// the per-bench measurement loop (~10 s).
 fn nub_hyperlight() -> &'static Mutex<Option<Nub>> {
     static NUB: OnceLock<Mutex<Option<Nub>>> = OnceLock::new();
-    NUB.get_or_init(|| {
-        Mutex::new(Some(
-            Nub::new_hyperlight().expect("Hyperlight sandbox"),
-        ))
-    })
+    NUB.get_or_init(|| Mutex::new(Some(Nub::new_hyperlight().expect("Hyperlight sandbox"))))
 }
 
 /// Drop the cached Hyperlight sandbox and build a fresh one on the

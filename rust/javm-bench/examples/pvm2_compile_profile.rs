@@ -5,8 +5,8 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use javm_cap::image::Image;
-use javm_recompiler_x86::codegen::{Compiler, HelperFns};
 use javm_exec::rv_predecode::predecode_rv;
+use javm_recompiler_x86::codegen::{Compiler, HelperFns};
 use ssz::Decode;
 use std::time::Instant;
 

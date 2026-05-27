@@ -99,8 +99,7 @@ pub fn build_pvm2(manifest_dir: &str, bin_name: &str) -> PathBuf {
     }
 
     let resolved = build_crate::resolve_manifest_dir(manifest_dir);
-    let target_json_path =
-        build_crate::write_target_json("riscv64emc-pvm2.json", TARGET_JSON_PVM2);
+    let target_json_path = build_crate::write_target_json("riscv64emc-pvm2.json", TARGET_JSON_PVM2);
 
     let extra_rustflags = vec!["-Cllvm-args=--inline-threshold=265".to_string()];
     let guest = GuestBuild {

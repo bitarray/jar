@@ -30,123 +30,491 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RvInst {
     // -------- Loads (I-type, major LOAD=0000011) --------
-    Lb { rd: u8, rs1: u8, imm: i32 },
-    Lh { rd: u8, rs1: u8, imm: i32 },
-    Lw { rd: u8, rs1: u8, imm: i32 },
-    Ld { rd: u8, rs1: u8, imm: i32 },
-    Lbu { rd: u8, rs1: u8, imm: i32 },
-    Lhu { rd: u8, rs1: u8, imm: i32 },
-    Lwu { rd: u8, rs1: u8, imm: i32 },
+    Lb {
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
+    Lh {
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
+    Lw {
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
+    Ld {
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
+    Lbu {
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
+    Lhu {
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
+    Lwu {
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
 
     // -------- Stores (S-type, major STORE=0100011) --------
-    Sb { rs1: u8, rs2: u8, imm: i32 },
-    Sh { rs1: u8, rs2: u8, imm: i32 },
-    Sw { rs1: u8, rs2: u8, imm: i32 },
-    Sd { rs1: u8, rs2: u8, imm: i32 },
+    Sb {
+        rs1: u8,
+        rs2: u8,
+        imm: i32,
+    },
+    Sh {
+        rs1: u8,
+        rs2: u8,
+        imm: i32,
+    },
+    Sw {
+        rs1: u8,
+        rs2: u8,
+        imm: i32,
+    },
+    Sd {
+        rs1: u8,
+        rs2: u8,
+        imm: i32,
+    },
 
     // -------- ALU with immediate (I-type) --------
     // 64-bit (major OP-IMM = 0010011)
-    Addi { rd: u8, rs1: u8, imm: i32 },
-    Slti { rd: u8, rs1: u8, imm: i32 },
-    Sltiu { rd: u8, rs1: u8, imm: i32 },
-    Andi { rd: u8, rs1: u8, imm: i32 },
-    Ori { rd: u8, rs1: u8, imm: i32 },
-    Xori { rd: u8, rs1: u8, imm: i32 },
-    Slli { rd: u8, rs1: u8, shamt: u8 },
-    Srli { rd: u8, rs1: u8, shamt: u8 },
-    Srai { rd: u8, rs1: u8, shamt: u8 },
+    Addi {
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
+    Slti {
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
+    Sltiu {
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
+    Andi {
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
+    Ori {
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
+    Xori {
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
+    Slli {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
+    Srli {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
+    Srai {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
     // 32-bit (major OP-IMM-32 = 0011011)
-    Addiw { rd: u8, rs1: u8, imm: i32 },
-    Slliw { rd: u8, rs1: u8, shamt: u8 },
-    Srliw { rd: u8, rs1: u8, shamt: u8 },
-    Sraiw { rd: u8, rs1: u8, shamt: u8 },
+    Addiw {
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
+    Slliw {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
+    Srliw {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
+    Sraiw {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
 
     // -------- ALU register-register (R-type) --------
     // 64-bit (major OP = 0110011)
-    Add { rd: u8, rs1: u8, rs2: u8 },
-    Sub { rd: u8, rs1: u8, rs2: u8 },
-    Sll { rd: u8, rs1: u8, rs2: u8 },
-    Srl { rd: u8, rs1: u8, rs2: u8 },
-    Sra { rd: u8, rs1: u8, rs2: u8 },
-    Slt { rd: u8, rs1: u8, rs2: u8 },
-    Sltu { rd: u8, rs1: u8, rs2: u8 },
-    Xor { rd: u8, rs1: u8, rs2: u8 },
-    Or { rd: u8, rs1: u8, rs2: u8 },
-    And { rd: u8, rs1: u8, rs2: u8 },
+    Add {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sub {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sll {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Srl {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sra {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Slt {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sltu {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Xor {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Or {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    And {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
     // 32-bit (major OP-32 = 0111011)
-    Addw { rd: u8, rs1: u8, rs2: u8 },
-    Subw { rd: u8, rs1: u8, rs2: u8 },
-    Sllw { rd: u8, rs1: u8, rs2: u8 },
-    Srlw { rd: u8, rs1: u8, rs2: u8 },
-    Sraw { rd: u8, rs1: u8, rs2: u8 },
+    Addw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Subw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sllw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Srlw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sraw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
 
     // -------- M extension --------
-    Mul { rd: u8, rs1: u8, rs2: u8 },
-    Mulh { rd: u8, rs1: u8, rs2: u8 },
-    Mulhsu { rd: u8, rs1: u8, rs2: u8 },
-    Mulhu { rd: u8, rs1: u8, rs2: u8 },
-    Div { rd: u8, rs1: u8, rs2: u8 },
-    Divu { rd: u8, rs1: u8, rs2: u8 },
-    Rem { rd: u8, rs1: u8, rs2: u8 },
-    Remu { rd: u8, rs1: u8, rs2: u8 },
-    Mulw { rd: u8, rs1: u8, rs2: u8 },
-    Divw { rd: u8, rs1: u8, rs2: u8 },
-    Divuw { rd: u8, rs1: u8, rs2: u8 },
-    Remw { rd: u8, rs1: u8, rs2: u8 },
-    Remuw { rd: u8, rs1: u8, rs2: u8 },
+    Mul {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Mulh {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Mulhsu {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Mulhu {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Div {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Divu {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Rem {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Remu {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Mulw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Divw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Divuw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Remw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Remuw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
 
     // -------- Zbb (basic bit manipulation) --------
-    Clz { rd: u8, rs1: u8 },
-    Clzw { rd: u8, rs1: u8 },
-    Ctz { rd: u8, rs1: u8 },
-    Ctzw { rd: u8, rs1: u8 },
-    Cpop { rd: u8, rs1: u8 },
-    Cpopw { rd: u8, rs1: u8 },
-    SextB { rd: u8, rs1: u8 },
-    SextH { rd: u8, rs1: u8 },
-    ZextH { rd: u8, rs1: u8 }, // canonical encoding: pack rd, rs1, x0
-    Rev8 { rd: u8, rs1: u8 },
-    OrcB { rd: u8, rs1: u8 },
-    Min { rd: u8, rs1: u8, rs2: u8 },
-    Minu { rd: u8, rs1: u8, rs2: u8 },
-    Max { rd: u8, rs1: u8, rs2: u8 },
-    Maxu { rd: u8, rs1: u8, rs2: u8 },
-    Andn { rd: u8, rs1: u8, rs2: u8 },
-    Orn { rd: u8, rs1: u8, rs2: u8 },
-    Xnor { rd: u8, rs1: u8, rs2: u8 },
-    Rol { rd: u8, rs1: u8, rs2: u8 },
-    Ror { rd: u8, rs1: u8, rs2: u8 },
-    Rolw { rd: u8, rs1: u8, rs2: u8 },
-    Rorw { rd: u8, rs1: u8, rs2: u8 },
-    Rori { rd: u8, rs1: u8, shamt: u8 },
-    Roriw { rd: u8, rs1: u8, shamt: u8 },
+    Clz {
+        rd: u8,
+        rs1: u8,
+    },
+    Clzw {
+        rd: u8,
+        rs1: u8,
+    },
+    Ctz {
+        rd: u8,
+        rs1: u8,
+    },
+    Ctzw {
+        rd: u8,
+        rs1: u8,
+    },
+    Cpop {
+        rd: u8,
+        rs1: u8,
+    },
+    Cpopw {
+        rd: u8,
+        rs1: u8,
+    },
+    SextB {
+        rd: u8,
+        rs1: u8,
+    },
+    SextH {
+        rd: u8,
+        rs1: u8,
+    },
+    ZextH {
+        rd: u8,
+        rs1: u8,
+    }, // canonical encoding: pack rd, rs1, x0
+    Rev8 {
+        rd: u8,
+        rs1: u8,
+    },
+    OrcB {
+        rd: u8,
+        rs1: u8,
+    },
+    Min {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Minu {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Max {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Maxu {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Andn {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Orn {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Xnor {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Rol {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Ror {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Rolw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Rorw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Rori {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
+    Roriw {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
 
     // -------- Zba (shift-add) --------
-    Sh1add { rd: u8, rs1: u8, rs2: u8 },
-    Sh2add { rd: u8, rs1: u8, rs2: u8 },
-    Sh3add { rd: u8, rs1: u8, rs2: u8 },
-    Sh1adduw { rd: u8, rs1: u8, rs2: u8 },
-    Sh2adduw { rd: u8, rs1: u8, rs2: u8 },
-    Sh3adduw { rd: u8, rs1: u8, rs2: u8 },
-    Adduw { rd: u8, rs1: u8, rs2: u8 },
-    Slliuw { rd: u8, rs1: u8, shamt: u8 },
+    Sh1add {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sh2add {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sh3add {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sh1adduw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sh2adduw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sh3adduw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Adduw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Slliuw {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
 
     // -------- Zbs (single-bit) --------
-    Bclr { rd: u8, rs1: u8, rs2: u8 },
-    Bset { rd: u8, rs1: u8, rs2: u8 },
-    Binv { rd: u8, rs1: u8, rs2: u8 },
-    Bext { rd: u8, rs1: u8, rs2: u8 },
-    Bclri { rd: u8, rs1: u8, shamt: u8 },
-    Bseti { rd: u8, rs1: u8, shamt: u8 },
-    Binvi { rd: u8, rs1: u8, shamt: u8 },
-    Bexti { rd: u8, rs1: u8, shamt: u8 },
+    Bclr {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Bset {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Binv {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Bext {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Bclri {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
+    Bseti {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
+    Binvi {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
+    Bexti {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
 
     // -------- Zicond --------
-    CzeroEqz { rd: u8, rs1: u8, rs2: u8 },
-    CzeroNez { rd: u8, rs1: u8, rs2: u8 },
+    CzeroEqz {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    CzeroNez {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
 
     // -------- Upper immediate --------
-    Lui { rd: u8, imm: i32 },
+    Lui {
+        rd: u8,
+        imm: i32,
+    },
 
     // -------- Control flow --------
     /// `jal rd, off` — Harvard semantics per PVM2.
@@ -154,16 +522,43 @@ pub enum RvInst {
     /// jumps (`rd = x0`, = `c.j`) and for function calls after
     /// linker rewrite (caller emits `addi ra, x0, encoded_idx;
     /// jal x0, callee_entry`).
-    Jal { rd: u8, imm: i32 },
+    Jal {
+        rd: u8,
+        imm: i32,
+    },
     // JALR removed: forbidden in PVM2. Function returns lower to
     // `BrTable` (custom-0 funct3=011) dispatching through the
     // callee's per-function entry in `Image.jump_table`.
-    Beq { rs1: u8, rs2: u8, imm: i32 },
-    Bne { rs1: u8, rs2: u8, imm: i32 },
-    Blt { rs1: u8, rs2: u8, imm: i32 },
-    Bge { rs1: u8, rs2: u8, imm: i32 },
-    Bltu { rs1: u8, rs2: u8, imm: i32 },
-    Bgeu { rs1: u8, rs2: u8, imm: i32 },
+    Beq {
+        rs1: u8,
+        rs2: u8,
+        imm: i32,
+    },
+    Bne {
+        rs1: u8,
+        rs2: u8,
+        imm: i32,
+    },
+    Blt {
+        rs1: u8,
+        rs2: u8,
+        imm: i32,
+    },
+    Bge {
+        rs1: u8,
+        rs2: u8,
+        imm: i32,
+    },
+    Bltu {
+        rs1: u8,
+        rs2: u8,
+        imm: i32,
+    },
+    Bgeu {
+        rs1: u8,
+        rs2: u8,
+        imm: i32,
+    },
 
     // -------- System (RV-defined, all no-ops or reserved in PVM2) --------
     /// `fence` — decoded but treated as no-op (PVM2 is single-threaded).
@@ -177,7 +572,9 @@ pub enum RvInst {
     /// `custom-0` funct3=001: jar management op / dynamic CALL.
     EcallJar,
     /// `custom-0` funct3=010: host-call with 20-bit signed immediate.
-    Ecalli { imm: i32 },
+    Ecalli {
+        imm: i32,
+    },
     /// `custom-0` funct3=011 (I-type): indirect-jump terminator
     /// dispatching through a per-table list of PVM2 PCs. The
     /// runtime semantics:
@@ -193,7 +590,10 @@ pub enum RvInst {
     /// `rs1 = 0` and `rs1` with LSB clear both produce a huge idx,
     /// causing fallthrough. The linker validates every table entry
     /// is a basic-block start at deblob.
-    BrTable { table_id: u16, rs1: u8 },
+    BrTable {
+        table_id: u16,
+        rs1: u8,
+    },
     /// `custom-0` funct3=100: terminator no-op. Acts as a basic-block
     /// start at the next byte. Linker injects this before branch / call
     /// targets that aren't naturally post-terminator.
@@ -203,7 +603,9 @@ pub enum RvInst {
     /// Decoder accepted the wire bits but the encoding is reserved
     /// by PVM2 (AUIPC, standard ECALL/EBREAK, CSR, atomics, FP, …).
     /// Programs containing this are rejected at deblob.
-    Reserved { raw: u32 },
+    Reserved {
+        raw: u32,
+    },
 }
 
 /// Major opcode of a 32-bit RV instruction is bits [6:2]; bits [1:0]
@@ -663,7 +1065,7 @@ fn decompress_q0(h: u16, f3: u16) -> RvInst {
             let n = (((h >> 11) & 0x3) << 4) // [12:11] -> [5:4]
                 | (((h >> 7) & 0xF) << 6)    // [10:7]  -> [9:6]
                 | (((h >> 6) & 0x1) << 2)    // [6]     -> [2]
-                | (((h >> 5) & 0x1) << 3);   // [5]     -> [3]
+                | (((h >> 5) & 0x1) << 3); // [5]     -> [3]
             let _ = imm; // sigh
             if n == 0 {
                 RvInst::Reserved { raw: h as u32 } // c.addi4spn nzuimm=0 reserved
@@ -899,9 +1301,7 @@ fn decompress_q2(h: u16, f3: u16) -> RvInst {
             if rdrs1 == 0 {
                 return RvInst::Reserved { raw: h as u32 };
             }
-            let imm = (((h >> 12) & 1) << 5)
-                | (((h >> 4) & 0x7) << 2)
-                | (((h >> 2) & 0x3) << 6);
+            let imm = (((h >> 12) & 1) << 5) | (((h >> 4) & 0x7) << 2) | (((h >> 2) & 0x3) << 6);
             RvInst::Lw {
                 rd: rdrs1,
                 rs1: 2,
@@ -913,9 +1313,7 @@ fn decompress_q2(h: u16, f3: u16) -> RvInst {
             if rdrs1 == 0 {
                 return RvInst::Reserved { raw: h as u32 };
             }
-            let imm = (((h >> 12) & 1) << 5)
-                | (((h >> 5) & 0x3) << 3)
-                | (((h >> 2) & 0x7) << 6);
+            let imm = (((h >> 12) & 1) << 5) | (((h >> 5) & 0x3) << 3) | (((h >> 2) & 0x7) << 6);
             RvInst::Ld {
                 rd: rdrs1,
                 rs1: 2,
@@ -1101,10 +1499,7 @@ mod tests {
     fn decode_jal() {
         // jal x1, 12 = 0x00C000EF
         let bytes = 0x00C000EFu32.to_le_bytes();
-        assert_eq!(
-            decode(&bytes),
-            Some((RvInst::Jal { rd: 1, imm: 12 }, 4))
-        );
+        assert_eq!(decode(&bytes), Some((RvInst::Jal { rd: 1, imm: 12 }, 4)));
     }
 
     #[test]
@@ -1241,15 +1636,21 @@ mod tests {
         let bytes = w.to_le_bytes();
         assert_eq!(
             decode(&bytes),
-            Some((RvInst::BrTable { table_id: 42, rs1: 1 }, 4))
+            Some((
+                RvInst::BrTable {
+                    table_id: 42,
+                    rs1: 1
+                },
+                4
+            ))
         );
     }
 
     #[test]
     fn decode_custom_br_table_rd_nonzero_reserved() {
         // br_table with rd != 0 must decode to Reserved.
-        let w = (1u32 << 20) | (1u32 << 15) | (0b011u32 << 12)
-            | (1u32 << 7) | (0b00010u32 << 2) | 0b11;
+        let w =
+            (1u32 << 20) | (1u32 << 15) | (0b011u32 << 12) | (1u32 << 7) | (0b00010u32 << 2) | 0b11;
         let bytes = w.to_le_bytes();
         let decoded = decode(&bytes).unwrap().0;
         assert!(matches!(decoded, RvInst::Reserved { .. }));
