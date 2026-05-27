@@ -920,12 +920,19 @@ fn decompress_q2(h: u16, f3: u16) -> RvInst {
         }
         0b100 => {
             // c.jr / c.mv / c.ebreak / c.jalr / c.add
-            // c.jr and c.jalr decompress to JALR, which is forbidden in PVM2
-            // (use callf/retf instead). Linker rewrites the return idiom
-            // `c.jr ra` to a `retf` opcode in the custom-0 space.
+            //
+            // PVM2 forbids JALR. The single exception is `c.jr ra` (the
+            // lld-emitted function-return idiom), which we repurpose
+            // structurally as `retf` — same 2-byte encoding, semantics
+            // change from "jump to ra" to "pop guest stack into PC".
+            // This keeps the wire format compact (returns stay 2 bytes)
+            // and avoids a linker rewrite for the common case.
+            //
+            // All other c.jr / c.jalr forms are rejected.
             let bit12 = (h >> 12) & 1;
             match (bit12, rdrs1, rs2) {
-                (0, r, 0) if r != 0 => RvInst::Reserved { raw: h as u32 }, // c.jr → forbidden in PVM2
+                (0, 1, 0) => RvInst::Retf, // c.jr ra → retf (PVM2 divergence)
+                (0, r, 0) if r != 0 => RvInst::Reserved { raw: h as u32 }, // c.jr (other) — forbidden
                 (0, r, s) if r != 0 && s != 0 => RvInst::Add {
                     rd: r,
                     rs1: 0,

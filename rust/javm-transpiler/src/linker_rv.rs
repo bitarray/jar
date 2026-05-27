@@ -52,6 +52,12 @@ const OP_SYSTEM: u32 = 0b111_0011;
 const OP_OP_IMM: u32 = 0b001_0011;
 /// RV opcode major for custom-0 (PVM2 host ops).
 const OP_CUSTOM_0: u32 = 0b000_1011;
+/// RV opcode major for custom-1 (PVM2 `callf`).
+const OP_CUSTOM_1: u32 = 0b010_1011;
+/// RV opcode major for JAL.
+const OP_JAL: u32 = 0b110_1111;
+/// RV opcode major for JALR.
+const OP_JALR: u32 = 0b110_0111;
 
 /// 32-bit canonical NOP: `addi x0, x0, 0`.
 const NOP_BYTES: [u8; 4] = [0x13, 0x00, 0x00, 0x00];
@@ -249,6 +255,62 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
     // through x5 at runtime — matching today's PVM ecalli behaviour).
     rewrite_ecall_markers(&mut code)?;
 
+    // ---- 3b. JAL / JALR → callf / retf / static-jump ---------------
+    //
+    // PVM2 forbids JALR. Rewrite the canonical call / return / tail-call
+    // patterns to the new structured-control-flow ops (callf / retf /
+    // jal-x0). lld emits `c.jr ra` for the return idiom; the decoder
+    // accepts that 2-byte encoding as `Retf` directly without a linker
+    // rewrite.
+    rewrite_calls_and_returns(&mut code, &auipc_effective, base_vaddr)?;
+
+    // ---- 3c. Branch-target alignment (fallthrough injection) -------
+    //
+    // After the call/return rewrites the code has the right control-
+    // flow ops, but branch / callf / jal targets aren't necessarily
+    // post-terminator yet. Inject `fallthrough` (4 bytes, custom-0,
+    // terminator no-op) before each such target so the predecode's
+    // strict bb_start set covers everything reachable.
+    //
+    // Endpoint entries and `.rodata` code-pointer targets are also
+    // required to be bb_starts (the host trampolines / future indirect-
+    // dispatch lowering need them), so we mark those as extra targets.
+    let pre_align_endpoint_offsets: Vec<usize> = {
+        // Read endpoint section now (re-read below for the final
+        // result with remapped PCs). Cheap; the section is tiny.
+        match crate::linker::find_all_section_bytes_for_rv(elf_data, ".subsoil.endpoints") {
+            Ok(sections) => sections
+                .iter()
+                .flat_map(|s| s.chunks(16))
+                .filter_map(|chunk| {
+                    if chunk.len() < 8 {
+                        return None;
+                    }
+                    let fn_ptr = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+                    if fn_ptr < base_vaddr {
+                        return None;
+                    }
+                    Some((fn_ptr - base_vaddr) as usize)
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    };
+    let pre_align_rodata_targets: Vec<usize> = elf
+        .abs_code_ptrs
+        .iter()
+        .filter_map(|&(_, rv_target, _)| {
+            if !is_code_addr(rv_target) {
+                None
+            } else {
+                Some(rv_target.wrapping_sub(base_vaddr) as usize)
+            }
+        })
+        .collect();
+    let mut extra_targets: Vec<usize> = pre_align_endpoint_offsets;
+    extra_targets.extend_from_slice(&pre_align_rodata_targets);
+    let offset_map = align_branch_targets(&mut code, &extra_targets)?;
+
     // ---- 4. Validation pass ----------------------------------------
     //
     // Walk every 2- or 4-byte instruction boundary (RV+C self-describes
@@ -281,6 +343,14 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
         let sub32_data_vaddrs: std::collections::HashSet<u64> =
             elf.sub32_relocs.iter().map(|(v, _)| *v).collect();
 
+        // Translate a code address (RV vaddr) to a post-alignment byte
+        // offset within `code`. Applies offset_map to remap shifts
+        // introduced by fallthrough injection.
+        let translate_code_addr = |rv_target: u64| -> u32 {
+            let pre = rv_target.wrapping_sub(base_vaddr) as usize;
+            offset_map.get(&pre).copied().unwrap_or(pre) as u32
+        };
+
         for &(data_vaddr, rv_target, size) in &elf.abs_code_ptrs {
             if sub32_data_vaddrs.contains(&data_vaddr) {
                 // Relative entry — uniform shift preserves the diff.
@@ -293,15 +363,15 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
                 continue;
             }
             let off = (data_vaddr - ro_base) as usize;
-            let new_val = rv_target.wrapping_sub(base_vaddr);
+            let new_val = translate_code_addr(rv_target);
             match size {
                 4 if off + 4 <= ro_data_rewritten.len() => {
                     ro_data_rewritten[off..off + 4]
-                        .copy_from_slice(&(new_val as u32).to_le_bytes());
+                        .copy_from_slice(&new_val.to_le_bytes());
                 }
                 8 if off + 8 <= ro_data_rewritten.len() => {
                     ro_data_rewritten[off..off + 8]
-                        .copy_from_slice(&new_val.to_le_bytes());
+                        .copy_from_slice(&(new_val as u64).to_le_bytes());
                 }
                 _ => {}
             }
@@ -322,9 +392,9 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
             if is_code_addr(val) {
                 let vaddr = ro_base + off as u64;
                 if !already_covered.contains(&vaddr) {
-                    let new_val = val.wrapping_sub(base_vaddr);
+                    let new_val = translate_code_addr(val);
                     ro_data_rewritten[off..off + 8]
-                        .copy_from_slice(&new_val.to_le_bytes());
+                        .copy_from_slice(&(new_val as u64).to_le_bytes());
                 }
             }
             off += 8;
@@ -336,8 +406,15 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
     // `parse_linked_elf` doesn't read `.subsoil.endpoints` itself —
     // the PVM path's `read_subsoil_endpoints` resolves fn_ptrs via
     // `TranslationContext.address_map`. For the RV path the address
-    // map is identity (rv_vaddr - base == rv_byte_offset == PVM2 PC).
-    let endpoints = read_subsoil_endpoints_rv(elf_data, base_vaddr, code.len())?;
+    // map is `vaddr → vaddr - base_vaddr → offset_map[…]`, where
+    // `offset_map` accounts for any fallthrough injection.
+    let mut endpoints = read_subsoil_endpoints_rv(elf_data, base_vaddr, code.len())?;
+    for def in endpoints.values_mut() {
+        let pre = def.entry_pc as usize;
+        if let Some(&new) = offset_map.get(&pre) {
+            def.entry_pc = new as u64;
+        }
+    }
 
     // ---- 6. Memory layout + Image construction ----------------------
     let ro_data = ro_data_rewritten;
@@ -349,7 +426,6 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
     let layout = ProgramLayout::compute(stack_pages, ro_pages, rw_pages, elf.heap_pages);
     let stack_top = layout.stack_top();
 
-    let mut endpoints = endpoints;
     for def in endpoints.values_mut() {
         def.initial_regs.insert(SP_REG, stack_top);
     }
@@ -535,8 +611,10 @@ fn reg_fields_for(opcode: u32) -> RegFields {
             rs1: true,
             rs2: false,
         },
-        // I-type ALU (OP-IMM, OP-IMM-32) and JALR.
-        0b001_0011 | 0b001_1011 | 0b110_0111 => RegFields {
+        // I-type ALU (OP-IMM, OP-IMM-32). JALR is rejected earlier by
+        // the dedicated OP_JALR arm in `validate_pvm2` so we don't
+        // include it here.
+        0b001_0011 | 0b001_1011 => RegFields {
             rd: true,
             rs1: true,
             rs2: false,
@@ -616,6 +694,13 @@ fn validate_pvm2(code: &[u8]) -> Result<(), TranspileError> {
             OP_AUIPC => {
                 return Err(TranspileError::InvalidSection(format!(
                     "link_elf_rv: AUIPC still present at offset {:#x} (rewrite incomplete)",
+                    i
+                )));
+            }
+            OP_JALR => {
+                return Err(TranspileError::InvalidSection(format!(
+                    "link_elf_rv: JALR still present at offset {:#x} (rewrite incomplete) — \
+                     PVM2 has no JALR; calls/returns must use callf/retf",
                     i
                 )));
             }
@@ -790,6 +875,621 @@ fn encode_custom0_ecall_jar() -> u32 {
 fn encode_custom0_ecalli(imm: i32) -> u32 {
     let imm12 = (imm as u32) & 0xFFF;
     (imm12 << 20) | (0b010 << 12) | OP_CUSTOM_0
+}
+
+/// Encode custom-0 `retf` (funct3 = 011; all other fields zero).
+#[inline]
+fn encode_custom0_retf() -> u32 {
+    (0b011 << 12) | OP_CUSTOM_0
+}
+
+/// Encode custom-0 `fallthrough` (funct3 = 100; all other fields zero).
+/// A 4-byte terminator no-op that creates a bb_start at the next byte.
+#[allow(dead_code)]
+#[inline]
+fn encode_custom0_fallthrough() -> u32 {
+    (0b100 << 12) | OP_CUSTOM_0
+}
+
+/// Encode custom-1 `callf imm` — J-type, 20-bit signed PC-relative imm.
+/// rd field is fixed to x0 (the return address goes on the guest stack
+/// via the native `call` lowering, not into any guest-visible reg).
+#[inline]
+fn encode_custom1_callf(imm: i32) -> u32 {
+    // J-type immediate layout (bit positions in instruction word):
+    //   bit 31     = imm[20]
+    //   bits 30:21 = imm[10:1]
+    //   bit 20     = imm[11]
+    //   bits 19:12 = imm[19:12]
+    let v = imm as u32;
+    let b20 = (v >> 20) & 0x1;
+    let b10_1 = (v >> 1) & 0x3FF;
+    let b11 = (v >> 11) & 0x1;
+    let b19_12 = (v >> 12) & 0xFF;
+    let imm_field =
+        (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12);
+    // rd = 0; opcode = custom-1.
+    imm_field | OP_CUSTOM_1
+}
+
+/// Encode JAL with rd=0 and J-type immediate (= the static-jump form,
+/// same encoding as `c.j` once decompressed).
+#[inline]
+fn encode_jal_x0(imm: i32) -> u32 {
+    let v = imm as u32;
+    let b20 = (v >> 20) & 0x1;
+    let b10_1 = (v >> 1) & 0x3FF;
+    let b11 = (v >> 11) & 0x1;
+    let b19_12 = (v >> 12) & 0xFF;
+    let imm_field =
+        (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12);
+    imm_field | OP_JAL
+}
+
+/// Decode J-type immediate (sign-extended 21-bit).
+fn imm_j(w: u32) -> i32 {
+    let b20 = (w >> 31) & 1;
+    let b10_1 = (w >> 21) & 0x3FF;
+    let b11 = (w >> 20) & 1;
+    let b19_12 = (w >> 12) & 0xFF;
+    let raw = (b20 << 20) | (b19_12 << 12) | (b11 << 11) | (b10_1 << 1);
+    ((raw as i32) << 11) >> 11
+}
+
+/// Decode B-type immediate (sign-extended 13-bit).
+fn imm_b(w: u32) -> i32 {
+    let b12 = (w >> 31) & 1;
+    let b11 = (w >> 7) & 1;
+    let b10_5 = (w >> 25) & 0x3F;
+    let b4_1 = (w >> 8) & 0xF;
+    let raw = (b12 << 12) | (b11 << 11) | (b10_5 << 5) | (b4_1 << 1);
+    ((raw as i32) << 19) >> 19
+}
+
+/// Encode B-type immediate into an existing branch instruction word.
+fn encode_b_imm(opcode_and_regs: u32, imm: i32) -> u32 {
+    let v = imm as u32;
+    let b12 = (v >> 12) & 0x1;
+    let b11 = (v >> 11) & 0x1;
+    let b10_5 = (v >> 5) & 0x3F;
+    let b4_1 = (v >> 1) & 0xF;
+    // Clear the imm-bearing bits, then OR in the new ones.
+    let cleared = opcode_and_regs & 0x01FF_F07F;
+    cleared | (b12 << 31) | (b10_5 << 25) | (b4_1 << 8) | (b11 << 7)
+}
+
+/// Walk the rewritten code and inject a `fallthrough` (4 bytes) before
+/// every JAL / Callf / branch target that isn't already preceded by a
+/// terminator instruction. After injection, all reachable static
+/// targets are guaranteed to be in the strict bb_starts set the
+/// predecode computes.
+///
+/// Mutates `code` in place. Returns `old_pc → new_pc` map so the
+/// caller can remap PC values stored elsewhere (endpoint entries,
+/// `.rodata` code-pointers) consistently.
+///
+/// `extra_targets` lets the caller mark additional PCs (e.g. endpoint
+/// entries, `.rodata` code-pointer targets) as required bb_starts so
+/// they get fallthrough injection too.
+fn align_branch_targets(
+    code: &mut Vec<u8>,
+    extra_targets: &[usize],
+) -> Result<BTreeMap<usize, usize>, TranspileError> {
+    // ---- Pass 1: scan instructions, identify terminators by PC ----
+    // We need to know which PCs follow a terminator (= legitimate
+    // bb_starts) so we can skip injection where it isn't needed.
+
+    // Decode each instruction at its byte offset; record:
+    //  - The set of all instruction-start byte offsets (`inst_starts`).
+    //  - The set of terminator instruction END offsets (their next_pc).
+    //  - The list of (callf_or_branch_pc, target_pc) edges.
+    let n = code.len();
+    let mut inst_starts: Vec<usize> = Vec::with_capacity(n / 4);
+    let mut post_terminator: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    post_terminator.insert(0); // PC=0 is always a bb_start.
+    let mut static_edges: Vec<(usize, usize)> = Vec::new(); // (instruction_pc, target_pc)
+
+    let mut pc: usize = 0;
+    while pc < n {
+        inst_starts.push(pc);
+        let lo = u16::from_le_bytes([code[pc], code[pc + 1]]);
+        let inst_len: usize;
+        let is_terminator: bool;
+        let target: Option<i64>;
+        if lo & 0b11 != 0b11 {
+            // Compressed (2 bytes).
+            inst_len = 2;
+            // RVC encodings that are terminators in PVM2:
+            //   c.j imm    (op=01, f3=101)        — static jump
+            //   c.beqz / c.bnez (op=01, f3=110/111) — conditional branches
+            //   c.jr ra    (op=10, f3=100, rd_rs1=1, rs2=0, bit12=0) — retf
+            //   c.ebreak   — reserved (terminator)
+            //   c.illegal  (= 0x0000)             — reserved (terminator)
+            // Other RVC ops are non-terminators.
+            let op = lo & 0b11;
+            let f3 = (lo >> 13) & 0b111;
+            if lo == 0 {
+                // c.illegal: terminator.
+                is_terminator = true;
+                target = None;
+            } else if op == 0b01 && f3 == 0b101 {
+                // c.j imm — terminator, has a static target.
+                let imm = decompress_cj_imm(lo);
+                is_terminator = true;
+                target = Some(pc as i64 + imm as i64);
+            } else if op == 0b01 && (f3 == 0b110 || f3 == 0b111) {
+                // c.beqz / c.bnez — terminators with static targets.
+                let imm = decompress_cb_imm(lo);
+                is_terminator = true;
+                target = Some(pc as i64 + imm as i64);
+            } else if op == 0b10 && f3 == 0b100 {
+                // (op=10, f3=100) family. Discriminate by bit12 / rdrs1 / rs2:
+                //   (0, r, 0) r!=0  → c.jr     (= retf, terminator)
+                //   (0, r, s) both!=0 → c.mv  (NOT a terminator)
+                //   (1, 0, 0)        → c.ebreak (Reserved, terminator)
+                //   (1, r, 0) r!=0   → c.jalr (Reserved, terminator)
+                //   (1, r, s) both!=0 → c.add (NOT a terminator)
+                let bit12 = (lo >> 12) & 1;
+                let rdrs1 = (lo >> 7) & 0x1F;
+                let rs2 = (lo >> 2) & 0x1F;
+                let is_jr_like = (bit12 == 0 && rdrs1 != 0 && rs2 == 0)   // c.jr
+                    || (bit12 == 1 && rdrs1 == 0 && rs2 == 0)              // c.ebreak
+                    || (bit12 == 1 && rdrs1 != 0 && rs2 == 0); // c.jalr
+                is_terminator = is_jr_like;
+                target = None;
+            } else {
+                is_terminator = false;
+                target = None;
+            }
+        } else {
+            // 4-byte instruction.
+            if pc + 4 > n {
+                break;
+            }
+            inst_len = 4;
+            let w = u32::from_le_bytes([code[pc], code[pc + 1], code[pc + 2], code[pc + 3]]);
+            let opcode = w & 0x7F;
+            let funct3 = (w >> 12) & 0x7;
+            match opcode {
+                OP_JAL => {
+                    let imm = imm_j(w);
+                    is_terminator = true;
+                    target = Some(pc as i64 + imm as i64);
+                }
+                OP_CUSTOM_1 => {
+                    // callf — J-type immediate.
+                    let imm = imm_j(w);
+                    is_terminator = true;
+                    target = Some(pc as i64 + imm as i64);
+                }
+                0b110_0011 => {
+                    // B-type branch (BEQ/BNE/etc.).
+                    let imm = imm_b(w);
+                    is_terminator = true;
+                    target = Some(pc as i64 + imm as i64);
+                }
+                OP_CUSTOM_0 => {
+                    // trap / ecalli / ecall.jar / retf / fallthrough — all terminators.
+                    is_terminator = true;
+                    target = None;
+                    let _ = funct3;
+                }
+                _ => {
+                    is_terminator = false;
+                    target = None;
+                }
+            }
+        }
+        let next_pc = pc + inst_len;
+        if is_terminator && next_pc < n {
+            post_terminator.insert(next_pc);
+        }
+        if let Some(t) = target {
+            if t >= 0 && (t as usize) < n {
+                static_edges.push((pc, t as usize));
+            }
+        }
+        pc = next_pc;
+    }
+
+    // ---- Pass 2: identify targets needing fallthrough injection ----
+    let inst_starts_set: std::collections::HashSet<usize> = inst_starts.iter().copied().collect();
+    let mut needs_inject: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    for &(_, target) in &static_edges {
+        if !post_terminator.contains(&target) && inst_starts_set.contains(&target) {
+            needs_inject.insert(target);
+        }
+    }
+    // Also: endpoint entries / .rodata code-pointer targets — any PC
+    // the host (or future indirect-dispatch lowering) might enter at.
+    // The caller passes these via `extra_targets`.
+    for &t in extra_targets {
+        if t < n && !post_terminator.contains(&t) && inst_starts_set.contains(&t) {
+            needs_inject.insert(t);
+        }
+    }
+
+    if needs_inject.is_empty() {
+        // No injections needed — old offsets are identity.
+        let identity: BTreeMap<usize, usize> = inst_starts.into_iter().map(|p| (p, p)).collect();
+        return Ok(identity);
+    }
+
+    // ---- Pass 3: build new code with fallthrough injected ----
+    let new_len = n + needs_inject.len() * 4;
+    let mut new_code: Vec<u8> = Vec::with_capacity(new_len);
+    // old_pc → new_pc (only for old instruction-start positions; mid-
+    // instruction bytes don't get mapped).
+    let mut offset_map: BTreeMap<usize, usize> = BTreeMap::new();
+    let fallthrough_word = encode_custom0_fallthrough();
+    let fallthrough_bytes = fallthrough_word.to_le_bytes();
+
+    let mut next_inject_iter = needs_inject.iter().peekable();
+    let mut old_idx = 0;
+    while old_idx < inst_starts.len() {
+        let old_pc = inst_starts[old_idx];
+        // If any injection is scheduled at this old_pc, emit fallthrough first.
+        while let Some(&&inject_pc) = next_inject_iter.peek() {
+            if inject_pc == old_pc {
+                new_code.extend_from_slice(&fallthrough_bytes);
+                next_inject_iter.next();
+            } else {
+                break;
+            }
+        }
+        offset_map.insert(old_pc, new_code.len());
+        let next_pc = inst_starts.get(old_idx + 1).copied().unwrap_or(n);
+        let inst_len = next_pc - old_pc;
+        new_code.extend_from_slice(&code[old_pc..old_pc + inst_len]);
+        old_idx += 1;
+    }
+
+    // ---- Pass 4: re-encode branch / jal / callf offsets in new_code ----
+    // Iterate over OLD instruction starts (not new_code) so we never
+    // encounter the injected fallthrough instructions during this pass.
+    for &old_pc in &inst_starts {
+        let new_pc = offset_map[&old_pc];
+        let lo = u16::from_le_bytes([new_code[new_pc], new_code[new_pc + 1]]);
+        if lo & 0b11 != 0b11 {
+            // RVC. c.j and c.beqz/c.bnez have static targets.
+            let op = lo & 0b11;
+            let f3 = (lo >> 13) & 0b111;
+            if op == 0b01 && f3 == 0b101 {
+                let old_imm = decompress_cj_imm(lo);
+                let old_target = (old_pc as i64 + old_imm as i64) as usize;
+                let new_target = *offset_map.get(&old_target).ok_or_else(|| {
+                    TranspileError::InvalidSection(format!(
+                        "align_branch_targets: c.j old target {:#x} not in offset_map",
+                        old_target
+                    ))
+                })?;
+                let new_imm = new_target as i64 - new_pc as i64;
+                if new_imm != old_imm as i64 {
+                    let new_h = encode_cj_imm(lo, new_imm as i32).ok_or_else(|| {
+                        TranspileError::InvalidSection(format!(
+                            "align_branch_targets: c.j at new_pc {:#x} new_imm {} \
+                             out of ±2 KiB range",
+                            new_pc, new_imm
+                        ))
+                    })?;
+                    new_code[new_pc..new_pc + 2].copy_from_slice(&new_h.to_le_bytes());
+                }
+            } else if op == 0b01 && (f3 == 0b110 || f3 == 0b111) {
+                let old_imm = decompress_cb_imm(lo);
+                let old_target = (old_pc as i64 + old_imm as i64) as usize;
+                let new_target = *offset_map.get(&old_target).ok_or_else(|| {
+                    TranspileError::InvalidSection(format!(
+                        "align_branch_targets: c.beqz/c.bnez old target {:#x} not in offset_map",
+                        old_target
+                    ))
+                })?;
+                let new_imm = new_target as i64 - new_pc as i64;
+                if new_imm != old_imm as i64 {
+                    let new_h = encode_cb_imm(lo, new_imm as i32).ok_or_else(|| {
+                        TranspileError::InvalidSection(format!(
+                            "align_branch_targets: c.beqz/c.bnez at new_pc {:#x} new_imm {} \
+                             out of ±256 byte range",
+                            new_pc, new_imm
+                        ))
+                    })?;
+                    new_code[new_pc..new_pc + 2].copy_from_slice(&new_h.to_le_bytes());
+                }
+            }
+        } else {
+            let w = u32::from_le_bytes([
+                new_code[new_pc],
+                new_code[new_pc + 1],
+                new_code[new_pc + 2],
+                new_code[new_pc + 3],
+            ]);
+            let opcode = w & 0x7F;
+            match opcode {
+                OP_JAL | OP_CUSTOM_1 => {
+                    let old_imm = imm_j(w);
+                    let old_target = (old_pc as i64 + old_imm as i64) as usize;
+                    if let Some(&new_target) = offset_map.get(&old_target) {
+                        let new_imm = new_target as i64 - new_pc as i64;
+                        if new_imm < -(1 << 20) || new_imm >= (1 << 20) {
+                            return Err(TranspileError::InvalidSection(format!(
+                                "align_branch_targets: JAL/callf at new_pc {:#x} out of ±1 MiB \
+                                 range after injection (new_imm = {})",
+                                new_pc, new_imm
+                            )));
+                        }
+                        let new_w = if opcode == OP_JAL {
+                            let rd = (w >> 7) & 0x1F;
+                            let v = new_imm as u32;
+                            let b20 = (v >> 20) & 0x1;
+                            let b10_1 = (v >> 1) & 0x3FF;
+                            let b11 = (v >> 11) & 0x1;
+                            let b19_12 = (v >> 12) & 0xFF;
+                            let imm_field =
+                                (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12);
+                            imm_field | (rd << 7) | OP_JAL
+                        } else {
+                            encode_custom1_callf(new_imm as i32)
+                        };
+                        new_code[new_pc..new_pc + 4].copy_from_slice(&new_w.to_le_bytes());
+                    }
+                }
+                0b110_0011 => {
+                    let old_imm = imm_b(w);
+                    let old_target = (old_pc as i64 + old_imm as i64) as usize;
+                    if let Some(&new_target) = offset_map.get(&old_target) {
+                        let new_imm = new_target as i64 - new_pc as i64;
+                        if new_imm < -(1 << 12) || new_imm >= (1 << 12) {
+                            return Err(TranspileError::InvalidSection(format!(
+                                "align_branch_targets: B-type branch at new_pc {:#x} out of ±4 KiB \
+                                 range after injection (new_imm = {})",
+                                new_pc, new_imm
+                            )));
+                        }
+                        let new_w = encode_b_imm(w, new_imm as i32);
+                        new_code[new_pc..new_pc + 4].copy_from_slice(&new_w.to_le_bytes());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    *code = new_code;
+    Ok(offset_map)
+}
+
+/// Decompress a c.j (compressed jump) into a signed byte offset.
+/// CJ-type immediate encoding (RV unprivileged spec).
+fn decompress_cj_imm(h: u16) -> i32 {
+    let h = h as u32;
+    let b11 = (h >> 12) & 0x1;
+    let b4 = (h >> 11) & 0x1;
+    let b9_8 = (h >> 9) & 0x3;
+    let b10 = (h >> 8) & 0x1;
+    let b6 = (h >> 7) & 0x1;
+    let b7 = (h >> 6) & 0x1;
+    let b3_1 = (h >> 3) & 0x7;
+    let b5 = (h >> 2) & 0x1;
+    let raw = (b11 << 11)
+        | (b10 << 10)
+        | (b9_8 << 8)
+        | (b7 << 7)
+        | (b6 << 6)
+        | (b5 << 5)
+        | (b4 << 4)
+        | (b3_1 << 1);
+    ((raw as i32) << 20) >> 20
+}
+
+/// Decompress a c.beqz / c.bnez (compressed branch) into a signed byte offset.
+fn decompress_cb_imm(h: u16) -> i32 {
+    let h = h as u32;
+    let b8 = (h >> 12) & 0x1;
+    let b4_3 = (h >> 10) & 0x3;
+    let b7_6 = (h >> 5) & 0x3;
+    let b2_1 = (h >> 3) & 0x3;
+    let b5 = (h >> 2) & 0x1;
+    let raw = (b8 << 8) | (b7_6 << 6) | (b5 << 5) | (b4_3 << 3) | (b2_1 << 1);
+    ((raw as i32) << 23) >> 23
+}
+
+/// Encode a new imm into a c.beqz / c.bnez instruction, preserving
+/// funct3 / rs1' / opcode fields. `imm` must fit in 9 bits signed
+/// (range ±256 bytes); returns None on overflow.
+fn encode_cb_imm(h: u16, imm: i32) -> Option<u16> {
+    if imm < -(1 << 8) || imm >= (1 << 8) {
+        return None;
+    }
+    if imm & 1 != 0 {
+        return None;
+    }
+    let v = imm as u32;
+    let b8 = (v >> 8) & 0x1;
+    let b7_6 = (v >> 6) & 0x3;
+    let b5 = (v >> 5) & 0x1;
+    let b4_3 = (v >> 3) & 0x3;
+    let b2_1 = (v >> 1) & 0x3;
+    // Preserve: bits 15:13 (funct3), bits 9:7 (rs1'), bits 1:0 (opcode).
+    let preserved = (h as u32) & 0b1110_0011_1000_0011;
+    let new_imm =
+        (b8 << 12) | (b4_3 << 10) | (b7_6 << 5) | (b2_1 << 3) | (b5 << 2);
+    Some((preserved | new_imm) as u16)
+}
+
+/// Encode a new imm into a c.j instruction, preserving funct3 / opcode.
+/// `imm` must fit in 12 bits signed (range ±2 KiB); returns None on overflow.
+fn encode_cj_imm(h: u16, imm: i32) -> Option<u16> {
+    if imm < -(1 << 11) || imm >= (1 << 11) {
+        return None;
+    }
+    if imm & 1 != 0 {
+        return None;
+    }
+    let v = imm as u32;
+    let b11 = (v >> 11) & 0x1;
+    let b10 = (v >> 10) & 0x1;
+    let b9_8 = (v >> 8) & 0x3;
+    let b7 = (v >> 7) & 0x1;
+    let b6 = (v >> 6) & 0x1;
+    let b5 = (v >> 5) & 0x1;
+    let b4 = (v >> 4) & 0x1;
+    let b3_1 = (v >> 1) & 0x7;
+    // Preserve: bits 15:13 (funct3), bits 1:0 (opcode).
+    let preserved = (h as u32) & 0b1110_0000_0000_0011;
+    let new_imm = (b11 << 12)
+        | (b4 << 11)
+        | (b9_8 << 9)
+        | (b10 << 8)
+        | (b6 << 7)
+        | (b7 << 6)
+        | (b3_1 << 3)
+        | (b5 << 2);
+    Some((preserved | new_imm) as u16)
+}
+
+/// Rewrite call / return patterns to the new PVM2 `callf` / `retf` ops.
+///
+/// Patterns recognised:
+///
+/// 1. `JAL rd, imm` with rd ≠ x0  →  `callf imm` (custom-1, same size).
+/// 2. AUIPC+JALR (CALL_PLT shape — caught by `auipc_effective`):
+///    - rd ≠ x0 (call):       AUIPC→NOP (already rewritten to LUI by an
+///                            earlier pass; we overwrite with NOP),
+///                            JALR→`callf imm`.
+///    - rd == x0 (tail call): AUIPC→NOP, JALR→`jal x0, imm`.
+///    In both cases imm is computed relative to the JALR's PC (so the
+///    callf/jal lands at the same target the original AUIPC+JALR
+///    would have reached).
+/// 3. Uncompressed `jalr x0, x1, 0`  →  `retf` (custom-0, same size).
+///    The compressed form (`c.jr ra`) is handled by the decoder
+///    directly — it decodes to `Retf` without any linker rewrite.
+///
+/// All rewrites are in-place same-size, so this pass doesn't shift
+/// offsets. The branch-target alignment pass (separate) handles the
+/// size-changing rewrites (fallthrough injection).
+fn rewrite_calls_and_returns(
+    code: &mut [u8],
+    auipc_effective: &BTreeMap<u64, u32>,
+    base_vaddr: u64,
+) -> Result<(), TranspileError> {
+    let n = code.len();
+    let mut i = 0;
+    while i + 2 <= n {
+        let lo = u16::from_le_bytes([code[i], code[i + 1]]);
+        if lo & 0b11 != 0b11 {
+            // RVC. lld emits `c.jr ra` for returns; that's decoded
+            // directly as `Retf` by rv_instruction, no rewrite needed.
+            // c.j (static jump) is fine as-is. Other RVC ops we don't
+            // touch.
+            i += 2;
+            continue;
+        }
+        if i + 4 > n {
+            break;
+        }
+        let w = u32::from_le_bytes([code[i], code[i + 1], code[i + 2], code[i + 3]]);
+        let opcode = w & 0x7F;
+
+        // (1) JAL rewrite.
+        if opcode == OP_JAL {
+            let rd = (w >> 7) & 0x1F;
+            if rd != 0 {
+                // `jal rd, imm` where rd != x0 = static call. Rewrite to
+                // `callf imm` (which doesn't link to a register; the
+                // return address goes on the guest stack via native
+                // `call`).
+                let imm = imm_j(w);
+                let new_w = encode_custom1_callf(imm);
+                code[i..i + 4].copy_from_slice(&new_w.to_le_bytes());
+            }
+            // rd == 0 case (= c.j-style static jump) stays as JAL.
+            i += 4;
+            continue;
+        }
+
+        // (2) JALR rewrite.
+        if opcode == OP_JALR {
+            let rd = (w >> 7) & 0x1F;
+            let rs1 = (w >> 15) & 0x1F;
+            let funct3 = (w >> 12) & 0x7;
+            let imm12 = ((w as i32) >> 20) & 0xFFF_i32; // sign-extended via shift below
+            let imm12_signed = ((w as i32) << 0) >> 20;
+            // Check if this JALR is paired with an AUIPC (CALL_PLT pattern).
+            // The pairing is: AUIPC at vaddr `v` → JALR at vaddr `v+4`.
+            // The AUIPC has already been rewritten to LUI in step 2. We
+            // recompute the absolute target and emit a callf (or jal)
+            // relative to the JALR's PC.
+            let jalr_vaddr = base_vaddr + i as u64;
+            let auipc_vaddr = jalr_vaddr.checked_sub(4);
+            let paired_target = auipc_vaddr.and_then(|v| auipc_effective.get(&v).copied());
+            if funct3 == 0 {
+                if let Some(target_off) = paired_target {
+                    // AUIPC+JALR pair. Replace AUIPC slot (at i-4) with NOP,
+                    // and replace the JALR slot with callf (rd != x0) or
+                    // jal x0 (rd == x0). The JALR's imm12 contributes the
+                    // low 12 bits of the target — combined with the LUI's
+                    // high 20 it gives `target_off`. We compute the new
+                    // PC-relative immediate from the JALR's position.
+                    let _ = (imm12, imm12_signed); // currently unused (we trust auipc_effective)
+                    if i < 4 {
+                        return Err(TranspileError::InvalidSection(format!(
+                            "link_elf_rv: AUIPC+JALR pair at offset {:#x} has no AUIPC slot",
+                            i
+                        )));
+                    }
+                    // The actual target byte offset within code.
+                    let new_off = target_off as i64;
+                    // The new instruction's PC = i (the JALR slot).
+                    let pc_rel = new_off - (i as i64);
+                    // Verify range fits in J-type 20-bit signed (±1 MiB).
+                    if pc_rel < -(1 << 20) || pc_rel >= (1 << 20) {
+                        return Err(TranspileError::InvalidSection(format!(
+                            "link_elf_rv: CALL_PLT target out of ±1 MiB range at offset {:#x} \
+                             (pc-rel = {})",
+                            i, pc_rel
+                        )));
+                    }
+                    let pc_rel32 = pc_rel as i32;
+                    // Overwrite AUIPC (now LUI) slot with NOP.
+                    code[i - 4..i].copy_from_slice(&NOP_BYTES);
+                    // Overwrite JALR slot with callf or jal-x0.
+                    let new_w = if rd == 0 {
+                        encode_jal_x0(pc_rel32)
+                    } else {
+                        encode_custom1_callf(pc_rel32)
+                    };
+                    code[i..i + 4].copy_from_slice(&new_w.to_le_bytes());
+                    i += 4;
+                    continue;
+                }
+                // Standalone JALR. Only allow the canonical return form:
+                // `jalr x0, x1, 0` (= uncompressed `ret`). Rewrite to retf.
+                if rd == 0 && rs1 == 1 && imm12_signed == 0 {
+                    let new_w = encode_custom0_retf();
+                    code[i..i + 4].copy_from_slice(&new_w.to_le_bytes());
+                    i += 4;
+                    continue;
+                }
+                // Any other JALR pattern is an indirect call / dispatch.
+                // For the initial implementation we reject these — bench
+                // guests don't emit them. A later phase can lower them to
+                // compare chains via points-to analysis.
+                return Err(TranspileError::InvalidSection(format!(
+                    "link_elf_rv: unhandled JALR at offset {:#x} (rd={}, rs1={}, imm={}) — \
+                     PVM2 forbids JALR; rewrite to callf/retf/static-jump or \
+                     refactor source to remove indirect dispatch",
+                    i, rd, rs1, imm12_signed
+                )));
+            }
+            // funct3 != 0 means a malformed JALR (no such encoding in RV).
+            return Err(TranspileError::InvalidSection(format!(
+                "link_elf_rv: JALR with funct3={} at offset {:#x} (reserved encoding)",
+                funct3, i
+            )));
+        }
+
+        i += 4;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
