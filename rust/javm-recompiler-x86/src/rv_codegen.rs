@@ -570,6 +570,22 @@ impl Compiler {
             self.last_add_cf = None;
             return;
         }
+        // PVM-ported peephole: `sub rd, rs1, rs2` where rd_slot == rs2_slot
+        // and rs1 != rs2. Generic path snapshots rs2 to SCRATCH (because d
+        // aliases rs2), then mov d, rs1, then sub d, SCRATCH — 3 ops.
+        // We can compute the same result as `neg d; add d, rs1` in 2 ops
+        // since d already holds rs2's value.
+        if matches!(op, AluOp::Sub) && rs1 != 0 && rs2 != 0 && rs1 != rs2 {
+            let r1_x86 = REG_MAP[rv_slot(rs1).unwrap()];
+            let r2_x86 = REG_MAP[rv_slot(rs2).unwrap()];
+            if d == r2_x86 {
+                self.asm.neg64(d);
+                self.asm.add_rr(d, r1_x86);
+                self.invalidate_reg(rv_slot(rd).unwrap());
+                self.last_add_cf = None;
+                return;
+            }
+        }
         // Aliasing analysis: rv_read(rs1, d) might write d, which can
         // clobber rs2's value if rd's slot equals rs2's slot. Save rs2
         // into SCRATCH first whenever d aliases rs2 (and rs2 != rs1).
