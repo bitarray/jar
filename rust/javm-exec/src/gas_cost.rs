@@ -2633,44 +2633,48 @@ const fn rgc_ov(
 // PVM2 opcode kinds. Used as indices into RV_GAS_COST_LUT.
 // All variants of `RvInst` that share a gas-cost row map to the same
 // kind (e.g. `Lb`/`Lh`/.../`Lwu` all → `RV_KIND_LOAD`).
-const RV_KIND_RESERVED: u8 = 0;
-const RV_KIND_TRAP: u8 = 1;
-const RV_KIND_FALLTHROUGH: u8 = 2;
-const RV_KIND_ECALL_JAR: u8 = 3;
-const RV_KIND_ECALLI: u8 = 4;
-const RV_KIND_BR_TABLE: u8 = 5;
-const RV_KIND_FENCE: u8 = 6;
-const RV_KIND_JAL: u8 = 7;
-const RV_KIND_BRANCH: u8 = 8;
-const RV_KIND_LOAD: u8 = 9;
-const RV_KIND_STORE: u8 = 10;
-const RV_KIND_LUI: u8 = 11;
-const RV_KIND_ADDI: u8 = 12; // 64-bit I-type ALU (Addi/Andi/Ori/Xori/Sltiu/Slli/Srli/Slti/Srai)
-const RV_KIND_ADDIW: u8 = 13; // 32-bit I-type ALU (Addiw/Slliw/Srliw/Sraiw)
-const RV_KIND_ADD: u8 = 14; // 64-bit R-type ALU (Add/Sub/And/Or/Xor)
-const RV_KIND_SLL: u8 = 15; // 64-bit shifts (Sll/Srl/Sra)
-const RV_KIND_SLT: u8 = 16; // 64-bit compare (Slt/Sltu)
-const RV_KIND_ADDW: u8 = 17; // 32-bit R-type ALU (Addw/Subw)
-const RV_KIND_SLLW: u8 = 18; // 32-bit shifts (Sllw/Srlw/Sraw)
-const RV_KIND_MUL: u8 = 19;
-const RV_KIND_MULW: u8 = 20;
-const RV_KIND_MULH: u8 = 21; // Mulh/Mulhu
-const RV_KIND_MULHSU: u8 = 22;
-const RV_KIND_DIV: u8 = 23; // Div/Divu/Rem/Remu + W-variants
-const RV_KIND_ZBB_U1: u8 = 24; // Clz/Clzw/Cpop/Cpopw/SextB/SextH/ZextH/Rev8/OrcB
-const RV_KIND_ZBB_CTZ: u8 = 25; // Ctz/Ctzw
-const RV_KIND_ZBB_MINMAX: u8 = 26; // Min/Minu/Max/Maxu
-const RV_KIND_ZBB_INV: u8 = 27; // Andn/Orn (no overlap rule)
-const RV_KIND_ZBB_XNOR: u8 = 28; // Xnor (overlap rule)
-const RV_KIND_ZBB_ROT: u8 = 29; // Rol/Ror
-const RV_KIND_ZBB_RORI: u8 = 30; // Rori (single-src I-type)
-const RV_KIND_ZBB_ROTW: u8 = 31; // Rolw/Rorw
-const RV_KIND_ZBB_RORIW: u8 = 32; // Roriw
-const RV_KIND_ZBA: u8 = 33; // Sh1add..Sh3adduw, Adduw
-const RV_KIND_ZBA_IMM: u8 = 34; // Slliuw
-const RV_KIND_ZBS: u8 = 35; // Bclr/Bset/Binv/Bext
-const RV_KIND_ZBS_IMM: u8 = 36; // Bclri/Bseti/Binvi/Bexti
-const RV_KIND_ZICOND: u8 = 37; // CzeroEqz/CzeroNez
+//
+// Exposed to the recompiler so each `compile_rv_instruction` arm can
+// supply its kind constant directly to the gas-feed call, removing a
+// separate match over `RvInst` per instruction.
+pub const RV_KIND_RESERVED: u8 = 0;
+pub const RV_KIND_TRAP: u8 = 1;
+pub const RV_KIND_FALLTHROUGH: u8 = 2;
+pub const RV_KIND_ECALL_JAR: u8 = 3;
+pub const RV_KIND_ECALLI: u8 = 4;
+pub const RV_KIND_BR_TABLE: u8 = 5;
+pub const RV_KIND_FENCE: u8 = 6;
+pub const RV_KIND_JAL: u8 = 7;
+pub const RV_KIND_BRANCH: u8 = 8;
+pub const RV_KIND_LOAD: u8 = 9;
+pub const RV_KIND_STORE: u8 = 10;
+pub const RV_KIND_LUI: u8 = 11;
+pub const RV_KIND_ADDI: u8 = 12; // 64-bit I-type ALU (Addi/Andi/Ori/Xori/Sltiu/Slli/Srli/Slti/Srai)
+pub const RV_KIND_ADDIW: u8 = 13; // 32-bit I-type ALU (Addiw/Slliw/Srliw/Sraiw)
+pub const RV_KIND_ADD: u8 = 14; // 64-bit R-type ALU (Add/Sub/And/Or/Xor)
+pub const RV_KIND_SLL: u8 = 15; // 64-bit shifts (Sll/Srl/Sra)
+pub const RV_KIND_SLT: u8 = 16; // 64-bit compare (Slt/Sltu)
+pub const RV_KIND_ADDW: u8 = 17; // 32-bit R-type ALU (Addw/Subw)
+pub const RV_KIND_SLLW: u8 = 18; // 32-bit shifts (Sllw/Srlw/Sraw)
+pub const RV_KIND_MUL: u8 = 19;
+pub const RV_KIND_MULW: u8 = 20;
+pub const RV_KIND_MULH: u8 = 21; // Mulh/Mulhu
+pub const RV_KIND_MULHSU: u8 = 22;
+pub const RV_KIND_DIV: u8 = 23; // Div/Divu/Rem/Remu + W-variants
+pub const RV_KIND_ZBB_U1: u8 = 24; // Clz/Clzw/Cpop/Cpopw/SextB/SextH/ZextH/Rev8/OrcB
+pub const RV_KIND_ZBB_CTZ: u8 = 25; // Ctz/Ctzw
+pub const RV_KIND_ZBB_MINMAX: u8 = 26; // Min/Minu/Max/Maxu
+pub const RV_KIND_ZBB_INV: u8 = 27; // Andn/Orn (no overlap rule)
+pub const RV_KIND_ZBB_XNOR: u8 = 28; // Xnor (overlap rule)
+pub const RV_KIND_ZBB_ROT: u8 = 29; // Rol/Ror
+pub const RV_KIND_ZBB_RORI: u8 = 30; // Rori (single-src I-type)
+pub const RV_KIND_ZBB_ROTW: u8 = 31; // Rolw/Rorw
+pub const RV_KIND_ZBB_RORIW: u8 = 32; // Roriw
+pub const RV_KIND_ZBA: u8 = 33; // Sh1add..Sh3adduw, Adduw
+pub const RV_KIND_ZBA_IMM: u8 = 34; // Slliuw
+pub const RV_KIND_ZBS: u8 = 35; // Bclr/Bset/Binv/Bext
+pub const RV_KIND_ZBS_IMM: u8 = 36; // Bclri/Bseti/Binvi/Bexti
+pub const RV_KIND_ZICOND: u8 = 37; // CzeroEqz/CzeroNez
 
 const RV_LUT_LEN: usize = 64;
 
@@ -2941,23 +2945,27 @@ fn rv_op_metadata(inst: &crate::rv_instruction::RvInst) -> (u8, u8, u8, u8) {
     }
 }
 
-/// Fast-path PVM2 gas accounting using pre-resolved
-/// [`crate::rv_predecode::RvGasMeta`]: look up the cost LUT, compute
-/// the overlap-dependent decode_slots and the mem_cycles override,
-/// then feed the simulator via `feed_direct`. No per-call match on
-/// `RvInst`.
+/// Kind-driven PVM2 gas feed: look up the cost LUT, compute the
+/// overlap-dependent decode_slots and the mem_cycles override, then
+/// feed the simulator via `feed_direct`. Takes raw `(kind, src1,
+/// src2, dst)` so the recompiler's per-arm dispatch can supply them
+/// as compile-time constants + slot lookups without going through
+/// an `RvGasMeta` struct.
 ///
-/// Returns `is_terminator`.
+/// Slots are PVM2 register indices (0..12) or `0xFF` for "no
+/// register" (x0 / x3 / x4 / absent operand).
+///
+/// Returns `is_terminator` (RVF_TERM flag from the LUT entry).
 #[inline(always)]
-pub fn rv_feed_gas_direct(
-    meta: &crate::rv_predecode::RvGasMeta,
+pub fn rv_feed_gas_kind(
+    kind: u8,
+    src1: u8,
+    src2: u8,
+    dst: u8,
     gas_sim: &mut crate::gas_sim::GasSimulator,
     mem_cycles: u8,
 ) -> bool {
-    let entry = &RV_GAS_COST_LUT[meta.kind as usize];
-    let src1 = meta.src1_slot;
-    let src2 = meta.src2_slot;
-    let dst = meta.dst_slot;
+    let entry = &RV_GAS_COST_LUT[kind as usize];
 
     // mem_cycles override for LOAD/STORE rows.
     let cycles = if entry.exec_unit == EU_LOAD || entry.exec_unit == EU_STORE {
@@ -2989,6 +2997,28 @@ pub fn rv_feed_gas_direct(
 
     gas_sim.feed_direct(cycles, decode_slots, src1, src2, dst);
     entry.flags & RVF_TERM != 0
+}
+
+/// Predecode-cached variant: same logic as [`rv_feed_gas_kind`] but
+/// takes a pre-resolved [`crate::rv_predecode::RvGasMeta`]. Used by
+/// the per-block gas-cost helper that consumes the `RvPredecode`
+/// vector built by `predecode_rv`.
+///
+/// Returns `is_terminator`.
+#[inline(always)]
+pub fn rv_feed_gas_direct(
+    meta: &crate::rv_predecode::RvGasMeta,
+    gas_sim: &mut crate::gas_sim::GasSimulator,
+    mem_cycles: u8,
+) -> bool {
+    rv_feed_gas_kind(
+        meta.kind,
+        meta.src1_slot,
+        meta.src2_slot,
+        meta.dst_slot,
+        gas_sim,
+        mem_cycles,
+    )
 }
 
 /// Compute per-block gas cost for a PVM2 basic block. The block runs

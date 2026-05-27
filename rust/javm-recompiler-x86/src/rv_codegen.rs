@@ -29,7 +29,6 @@ use super::codegen::{
     SCRATCH,
 };
 use javm_exec::gas_cost::{rv_feed_gas_direct, rv_gas_meta};
-use javm_exec::gas_sim::GasSimulator;
 use javm_exec::rv_instruction::{RvInst, decode};
 pub use javm_exec::rv_predecode::{RvPredecode, predecode_rv};
 
@@ -101,8 +100,6 @@ impl Compiler {
 
         self.emit_prologue();
 
-        let mem_cycles = self.mem_cycles;
-        let mut gas_sim = GasSimulator::new();
         let mut pending_gas: Option<(Label, u32, usize)> = None;
         let mut next_is_gas_start = true;
         let mut pc: usize = 0;
@@ -125,40 +122,24 @@ impl Compiler {
             let next_pc = (pc + len as usize) as u32;
 
             if next_is_gas_start {
-                self.bind_rv_gas_block_start_streaming(
-                    inst_pc,
-                    &mut pending_gas,
-                    &mut gas_sim,
-                );
+                self.bind_rv_gas_block_start_streaming(inst_pc, &mut pending_gas);
                 next_is_gas_start = false;
             }
 
             // Phase 2 lookahead: peek the next instruction for mul-pair
             // fusion. Only attempt when the current instruction is Mul.
             if matches!(inst, RvInst::Mul { .. })
-                && let Some(consumed_bytes) = self.try_fuse_rv_mul_pair_streaming(
-                    code,
-                    pc,
-                    len as usize,
-                    inst,
-                    &mut gas_sim,
-                    mem_cycles,
-                )
+                && let Some(consumed_bytes) =
+                    self.try_fuse_rv_mul_pair_streaming(code, pc, len as usize, inst)
             {
                 pc += consumed_bytes;
                 continue;
             }
 
-            // Feed gas for this instruction via the LUT fast path.
-            // rv_feed_gas_direct returns is_terminator — reuse it to
-            // avoid a separate is_terminator match downstream.
-            let meta = rv_gas_meta(&inst);
-            let inst_is_terminator =
-                rv_feed_gas_direct(&meta, &mut gas_sim, mem_cycles);
-
-            // Emit.
-            self.compile_rv_instruction(inst, inst_pc, next_pc);
-            self.update_reg_defs_rv(&inst);
+            // Strict single-pass: one match over RvInst dispatches
+            // emit + gas-feed + reg_defs tracking + terminator
+            // detection. Returns is_terminator.
+            let inst_is_terminator = self.compile_rv_instruction(inst, inst_pc, next_pc);
             // Phase 4: carry-flag fusion bookkeeping (mirrors the old
             // two-pass loop). Add sets last_add_cf from inside rv_alu_rr;
             // Sltu consumes it from inside rv_slt_rr. Any other
@@ -178,7 +159,7 @@ impl Compiler {
 
         // Finalize the last gas block — patch its cost in.
         if let Some((stub_label, block_pc, patch_offset)) = pending_gas.take() {
-            let cost = gas_sim.flush_and_get_cost();
+            let cost = self.gas_sim.flush_and_get_cost();
             self.asm.patch_i32(patch_offset, cost as i32);
             self.oog_stubs.push((stub_label, block_pc, cost));
         }
@@ -212,12 +193,13 @@ impl Compiler {
     /// Streaming gas-block-start hook: bind label, flush prior block's
     /// cost into its `sub` patch, emit a fresh `sub r15, 0; js stub`
     /// placeholder and stash the patch offset in `pending`. Mirrors
-    /// `Compiler::emit_gas_block_start` on the PVM path.
+    /// `Compiler::emit_gas_block_start` on the PVM path. Drives
+    /// `self.gas_sim` directly so the per-arm `feed_gas_rv` calls in
+    /// `compile_rv_instruction` see a coherent simulator.
     fn bind_rv_gas_block_start_streaming(
         &mut self,
         pc: u32,
         pending: &mut Option<(Label, u32, usize)>,
-        gas_sim: &mut GasSimulator,
     ) {
         let label = Label(self.label_base + pc);
         self.asm.bind_label(label);
@@ -229,11 +211,11 @@ impl Compiler {
         self.last_add_cf = None;
 
         if let Some((stub_label, block_pc, patch_offset)) = pending.take() {
-            let cost = gas_sim.flush_and_get_cost();
+            let cost = self.gas_sim.flush_and_get_cost();
             self.asm.patch_i32(patch_offset, cost as i32);
             self.oog_stubs.push((stub_label, block_pc, cost));
         }
-        gas_sim.reset();
+        self.gas_sim.reset();
 
         let stub_label = self.asm.new_label();
         self.asm.sub_r64_imm32_patchable(GAS, 0);
@@ -242,153 +224,510 @@ impl Compiler {
         *pending = Some((stub_label, pc, patch_offset));
     }
 
-    /// Dispatch one decoded RV instruction. Each arm is small and reuses
-    /// existing helpers wherever possible.
-    fn compile_rv_instruction(&mut self, inst: RvInst, pc: u32, next_pc: u32) {
+    /// Single match over `RvInst` that emits native code AND feeds gas
+    /// in one pass. Each arm:
+    ///
+    /// 1. Calls its `rv_*` emit helper.
+    /// 2. Calls `self.feed_gas_rv(KIND, rs1, rs2, rd)` — the kind is a
+    ///    compile-time constant matching the (kind, rs1, rs2, rd)
+    ///    tuple produced by `rv_op_metadata` in `gas_cost.rs`. Slot
+    ///    translation (RV reg → 0..12 or 0xFF) is handled inside
+    ///    `feed_gas_rv` via `rv_slot_or_ff`.
+    /// 3. Returns `is_terminator` directly from `feed_gas_rv` (the
+    ///    RVF_TERM flag from the LUT entry).
+    ///
+    /// Pairs/groups of variants that share a gas-kind (e.g. all
+    /// 64-bit I-type ALU ops use RV_KIND_ADDI) collapse via or-
+    /// patterns where the emit op differs only in a helper argument.
+    fn compile_rv_instruction(&mut self, inst: RvInst, pc: u32, next_pc: u32) -> bool {
         use RvInst::*;
+        use javm_exec::gas_cost::*;
         match inst {
-            // ---- RV64I loads ----
-            Lb { rd, rs1, imm } => self.rv_load(rd, rs1, imm, 1, true, pc),
-            Lh { rd, rs1, imm } => self.rv_load(rd, rs1, imm, 2, true, pc),
-            Lw { rd, rs1, imm } => self.rv_load(rd, rs1, imm, 4, true, pc),
-            Ld { rd, rs1, imm } => self.rv_load(rd, rs1, imm, 8, false, pc),
-            Lbu { rd, rs1, imm } => self.rv_load(rd, rs1, imm, 1, false, pc),
-            Lhu { rd, rs1, imm } => self.rv_load(rd, rs1, imm, 2, false, pc),
-            Lwu { rd, rs1, imm } => self.rv_load(rd, rs1, imm, 4, false, pc),
+            // ---- RV64I loads (all RV_KIND_LOAD) ----
+            Lb { rd, rs1, imm } => {
+                self.rv_load(rd, rs1, imm, 1, true, pc);
+                self.feed_gas_rv(RV_KIND_LOAD, rs1, 0, rd)
+            }
+            Lh { rd, rs1, imm } => {
+                self.rv_load(rd, rs1, imm, 2, true, pc);
+                self.feed_gas_rv(RV_KIND_LOAD, rs1, 0, rd)
+            }
+            Lw { rd, rs1, imm } => {
+                self.rv_load(rd, rs1, imm, 4, true, pc);
+                self.feed_gas_rv(RV_KIND_LOAD, rs1, 0, rd)
+            }
+            Ld { rd, rs1, imm } => {
+                self.rv_load(rd, rs1, imm, 8, false, pc);
+                self.feed_gas_rv(RV_KIND_LOAD, rs1, 0, rd)
+            }
+            Lbu { rd, rs1, imm } => {
+                self.rv_load(rd, rs1, imm, 1, false, pc);
+                self.feed_gas_rv(RV_KIND_LOAD, rs1, 0, rd)
+            }
+            Lhu { rd, rs1, imm } => {
+                self.rv_load(rd, rs1, imm, 2, false, pc);
+                self.feed_gas_rv(RV_KIND_LOAD, rs1, 0, rd)
+            }
+            Lwu { rd, rs1, imm } => {
+                self.rv_load(rd, rs1, imm, 4, false, pc);
+                self.feed_gas_rv(RV_KIND_LOAD, rs1, 0, rd)
+            }
 
-            // ---- RV64I stores ----
-            Sb { rs1, rs2, imm } => self.rv_store(rs1, rs2, imm, 1, pc),
-            Sh { rs1, rs2, imm } => self.rv_store(rs1, rs2, imm, 2, pc),
-            Sw { rs1, rs2, imm } => self.rv_store(rs1, rs2, imm, 4, pc),
-            Sd { rs1, rs2, imm } => self.rv_store(rs1, rs2, imm, 8, pc),
+            // ---- RV64I stores (all RV_KIND_STORE) ----
+            Sb { rs1, rs2, imm } => {
+                self.rv_store(rs1, rs2, imm, 1, pc);
+                self.feed_gas_rv(RV_KIND_STORE, rs1, rs2, 0)
+            }
+            Sh { rs1, rs2, imm } => {
+                self.rv_store(rs1, rs2, imm, 2, pc);
+                self.feed_gas_rv(RV_KIND_STORE, rs1, rs2, 0)
+            }
+            Sw { rs1, rs2, imm } => {
+                self.rv_store(rs1, rs2, imm, 4, pc);
+                self.feed_gas_rv(RV_KIND_STORE, rs1, rs2, 0)
+            }
+            Sd { rs1, rs2, imm } => {
+                self.rv_store(rs1, rs2, imm, 8, pc);
+                self.feed_gas_rv(RV_KIND_STORE, rs1, rs2, 0)
+            }
 
-            // ---- RV64I ALU imm (64-bit) ----
-            Addi { rd, rs1, imm } => self.rv_alu_imm(rd, rs1, imm, AluImmOp::Add, pc),
-            Slti { rd, rs1, imm } => self.rv_slt_imm(rd, rs1, imm, true, pc),
-            Sltiu { rd, rs1, imm } => self.rv_slt_imm(rd, rs1, imm, false, pc),
-            Andi { rd, rs1, imm } => self.rv_alu_imm(rd, rs1, imm, AluImmOp::And, pc),
-            Ori { rd, rs1, imm } => self.rv_alu_imm(rd, rs1, imm, AluImmOp::Or, pc),
-            Xori { rd, rs1, imm } => self.rv_alu_imm(rd, rs1, imm, AluImmOp::Xor, pc),
-            Slli { rd, rs1, shamt } => self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Shl64, pc),
-            Srli { rd, rs1, shamt } => self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Shr64, pc),
-            Srai { rd, rs1, shamt } => self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Sar64, pc),
+            // ---- RV64I ALU imm (64-bit) — RV_KIND_ADDI ----
+            Addi { rd, rs1, imm } => {
+                self.rv_alu_imm(rd, rs1, imm, AluImmOp::Add, pc);
+                if rs1 == 0 {
+                    // canonical RV `li rd, imm` — track Const
+                    self.track_const(rd, imm);
+                }
+                self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd)
+            }
+            Slti { rd, rs1, imm } => {
+                self.rv_slt_imm(rd, rs1, imm, true, pc);
+                self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd)
+            }
+            Sltiu { rd, rs1, imm } => {
+                self.rv_slt_imm(rd, rs1, imm, false, pc);
+                self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd)
+            }
+            Andi { rd, rs1, imm } => {
+                self.rv_alu_imm(rd, rs1, imm, AluImmOp::And, pc);
+                self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd)
+            }
+            Ori { rd, rs1, imm } => {
+                self.rv_alu_imm(rd, rs1, imm, AluImmOp::Or, pc);
+                self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd)
+            }
+            Xori { rd, rs1, imm } => {
+                self.rv_alu_imm(rd, rs1, imm, AluImmOp::Xor, pc);
+                self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd)
+            }
+            Slli { rd, rs1, shamt } => {
+                self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Shl64, pc);
+                if (1..=3).contains(&shamt) && rs1 != rd {
+                    self.track_shifted(rd, rs1, shamt);
+                }
+                self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd)
+            }
+            Srli { rd, rs1, shamt } => {
+                self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Shr64, pc);
+                self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd)
+            }
+            Srai { rd, rs1, shamt } => {
+                self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Sar64, pc);
+                self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd)
+            }
 
-            // ---- RV64I ALU imm (32-bit, sign-extended) ----
-            Addiw { rd, rs1, imm } => self.rv_alu_imm(rd, rs1, imm, AluImmOp::Addw, pc),
-            Slliw { rd, rs1, shamt } => self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Shl32, pc),
-            Srliw { rd, rs1, shamt } => self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Shr32, pc),
-            Sraiw { rd, rs1, shamt } => self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Sar32, pc),
+            // ---- RV64I ALU imm (32-bit, sign-extended) — RV_KIND_ADDIW ----
+            Addiw { rd, rs1, imm } => {
+                self.rv_alu_imm(rd, rs1, imm, AluImmOp::Addw, pc);
+                self.feed_gas_rv(RV_KIND_ADDIW, rs1, 0, rd)
+            }
+            Slliw { rd, rs1, shamt } => {
+                self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Shl32, pc);
+                self.feed_gas_rv(RV_KIND_ADDIW, rs1, 0, rd)
+            }
+            Srliw { rd, rs1, shamt } => {
+                self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Shr32, pc);
+                self.feed_gas_rv(RV_KIND_ADDIW, rs1, 0, rd)
+            }
+            Sraiw { rd, rs1, shamt } => {
+                self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Sar32, pc);
+                self.feed_gas_rv(RV_KIND_ADDIW, rs1, 0, rd)
+            }
 
-            // ---- RV64I ALU reg-reg (64-bit) ----
-            Add { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::Add, pc),
-            Sub { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::Sub, pc),
-            Sll { rd, rs1, rs2 } => self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shl64, pc),
-            Srl { rd, rs1, rs2 } => self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shr64, pc),
-            Sra { rd, rs1, rs2 } => self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Sar64, pc),
-            Slt { rd, rs1, rs2 } => self.rv_slt_rr(rd, rs1, rs2, true, pc),
-            Sltu { rd, rs1, rs2 } => self.rv_slt_rr(rd, rs1, rs2, false, pc),
-            Xor { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::Xor, pc),
-            Or { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::Or, pc),
-            And { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::And, pc),
+            // ---- RV64I ALU reg-reg (64-bit) — RV_KIND_ADD ----
+            Add { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Add, pc);
+                if rd != rs1 && rd != rs2 {
+                    // Promote to ScaledAdd if one operand is Shifted.
+                    self.track_add_scaledadd(rd, rs1, rs2);
+                }
+                self.feed_gas_rv(RV_KIND_ADD, rs1, rs2, rd)
+            }
+            Sub { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Sub, pc);
+                self.feed_gas_rv(RV_KIND_ADD, rs1, rs2, rd)
+            }
+            Xor { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Xor, pc);
+                self.feed_gas_rv(RV_KIND_ADD, rs1, rs2, rd)
+            }
+            Or { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Or, pc);
+                self.feed_gas_rv(RV_KIND_ADD, rs1, rs2, rd)
+            }
+            And { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::And, pc);
+                self.feed_gas_rv(RV_KIND_ADD, rs1, rs2, rd)
+            }
+            // 64-bit shifts — RV_KIND_SLL
+            Sll { rd, rs1, rs2 } => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shl64, pc);
+                self.feed_gas_rv(RV_KIND_SLL, rs1, rs2, rd)
+            }
+            Srl { rd, rs1, rs2 } => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shr64, pc);
+                self.feed_gas_rv(RV_KIND_SLL, rs1, rs2, rd)
+            }
+            Sra { rd, rs1, rs2 } => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Sar64, pc);
+                self.feed_gas_rv(RV_KIND_SLL, rs1, rs2, rd)
+            }
+            // 64-bit compare — RV_KIND_SLT
+            Slt { rd, rs1, rs2 } => {
+                self.rv_slt_rr(rd, rs1, rs2, true, pc);
+                self.feed_gas_rv(RV_KIND_SLT, rs1, rs2, rd)
+            }
+            Sltu { rd, rs1, rs2 } => {
+                self.rv_slt_rr(rd, rs1, rs2, false, pc);
+                self.feed_gas_rv(RV_KIND_SLT, rs1, rs2, rd)
+            }
 
-            // ---- RV64I ALU reg-reg (32-bit, sign-extended) ----
-            Addw { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::Addw, pc),
-            Subw { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::Subw, pc),
-            Sllw { rd, rs1, rs2 } => self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shl32, pc),
-            Srlw { rd, rs1, rs2 } => self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shr32, pc),
-            Sraw { rd, rs1, rs2 } => self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Sar32, pc),
+            // ---- RV64I ALU reg-reg (32-bit) — RV_KIND_ADDW ----
+            Addw { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Addw, pc);
+                self.feed_gas_rv(RV_KIND_ADDW, rs1, rs2, rd)
+            }
+            Subw { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Subw, pc);
+                self.feed_gas_rv(RV_KIND_ADDW, rs1, rs2, rd)
+            }
+            // 32-bit shifts — RV_KIND_SLLW
+            Sllw { rd, rs1, rs2 } => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shl32, pc);
+                self.feed_gas_rv(RV_KIND_SLLW, rs1, rs2, rd)
+            }
+            Srlw { rd, rs1, rs2 } => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shr32, pc);
+                self.feed_gas_rv(RV_KIND_SLLW, rs1, rs2, rd)
+            }
+            Sraw { rd, rs1, rs2 } => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Sar32, pc);
+                self.feed_gas_rv(RV_KIND_SLLW, rs1, rs2, rd)
+            }
 
             // ---- M extension ----
-            Mul { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::Mul, pc),
-            Mulh { rd, rs1, rs2 } => self.rv_mulh(rd, rs1, rs2, true, true, pc),
-            Mulhsu { rd, rs1, rs2 } => self.rv_mulh(rd, rs1, rs2, true, false, pc),
-            Mulhu { rd, rs1, rs2 } => self.rv_mulh(rd, rs1, rs2, false, false, pc),
-            Div { rd, rs1, rs2 } => self.rv_div_rem(rd, rs1, rs2, true, false, false, pc),
-            Divu { rd, rs1, rs2 } => self.rv_div_rem(rd, rs1, rs2, false, false, false, pc),
-            Rem { rd, rs1, rs2 } => self.rv_div_rem(rd, rs1, rs2, true, true, false, pc),
-            Remu { rd, rs1, rs2 } => self.rv_div_rem(rd, rs1, rs2, false, true, false, pc),
-            Mulw { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::Mulw, pc),
-            Divw { rd, rs1, rs2 } => self.rv_div_rem(rd, rs1, rs2, true, false, true, pc),
-            Divuw { rd, rs1, rs2 } => self.rv_div_rem(rd, rs1, rs2, false, false, true, pc),
-            Remw { rd, rs1, rs2 } => self.rv_div_rem(rd, rs1, rs2, true, true, true, pc),
-            Remuw { rd, rs1, rs2 } => self.rv_div_rem(rd, rs1, rs2, false, true, true, pc),
+            Mul { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Mul, pc);
+                self.feed_gas_rv(RV_KIND_MUL, rs1, rs2, rd)
+            }
+            Mulw { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Mulw, pc);
+                self.feed_gas_rv(RV_KIND_MULW, rs1, rs2, rd)
+            }
+            Mulh { rd, rs1, rs2 } => {
+                self.rv_mulh(rd, rs1, rs2, true, true, pc);
+                self.feed_gas_rv(RV_KIND_MULH, rs1, rs2, rd)
+            }
+            Mulhu { rd, rs1, rs2 } => {
+                self.rv_mulh(rd, rs1, rs2, false, false, pc);
+                self.feed_gas_rv(RV_KIND_MULH, rs1, rs2, rd)
+            }
+            Mulhsu { rd, rs1, rs2 } => {
+                self.rv_mulh(rd, rs1, rs2, true, false, pc);
+                self.feed_gas_rv(RV_KIND_MULHSU, rs1, rs2, rd)
+            }
+            Div { rd, rs1, rs2 } => {
+                self.rv_div_rem(rd, rs1, rs2, true, false, false, pc);
+                self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd)
+            }
+            Divu { rd, rs1, rs2 } => {
+                self.rv_div_rem(rd, rs1, rs2, false, false, false, pc);
+                self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd)
+            }
+            Rem { rd, rs1, rs2 } => {
+                self.rv_div_rem(rd, rs1, rs2, true, true, false, pc);
+                self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd)
+            }
+            Remu { rd, rs1, rs2 } => {
+                self.rv_div_rem(rd, rs1, rs2, false, true, false, pc);
+                self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd)
+            }
+            Divw { rd, rs1, rs2 } => {
+                self.rv_div_rem(rd, rs1, rs2, true, false, true, pc);
+                self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd)
+            }
+            Divuw { rd, rs1, rs2 } => {
+                self.rv_div_rem(rd, rs1, rs2, false, false, true, pc);
+                self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd)
+            }
+            Remw { rd, rs1, rs2 } => {
+                self.rv_div_rem(rd, rs1, rs2, true, true, true, pc);
+                self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd)
+            }
+            Remuw { rd, rs1, rs2 } => {
+                self.rv_div_rem(rd, rs1, rs2, false, true, true, pc);
+                self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd)
+            }
 
-            // ---- Zbb (basic bit manipulation) ----
-            Clz { rd, rs1 } => self.rv_unary(rd, rs1, UnaryOp::Clz64, pc),
-            Clzw { rd, rs1 } => self.rv_unary(rd, rs1, UnaryOp::Clz32, pc),
-            Ctz { rd, rs1 } => self.rv_unary(rd, rs1, UnaryOp::Ctz64, pc),
-            Ctzw { rd, rs1 } => self.rv_unary(rd, rs1, UnaryOp::Ctz32, pc),
-            Cpop { rd, rs1 } => self.rv_unary(rd, rs1, UnaryOp::Popcnt64, pc),
-            Cpopw { rd, rs1 } => self.rv_unary(rd, rs1, UnaryOp::Popcnt32, pc),
-            SextB { rd, rs1 } => self.rv_unary(rd, rs1, UnaryOp::SextB, pc),
-            SextH { rd, rs1 } => self.rv_unary(rd, rs1, UnaryOp::SextH, pc),
-            ZextH { rd, rs1 } => self.rv_unary(rd, rs1, UnaryOp::ZextH, pc),
-            Rev8 { rd, rs1 } => self.rv_unary(rd, rs1, UnaryOp::Rev8, pc),
-            OrcB { rd, rs1 } => self.rv_unary(rd, rs1, UnaryOp::OrcB, pc),
-            Min { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::Min, pc),
-            Minu { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::Minu, pc),
-            Max { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::Max, pc),
-            Maxu { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::Maxu, pc),
-            Andn { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::Andn, pc),
-            Orn { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::Orn, pc),
-            Xnor { rd, rs1, rs2 } => self.rv_alu_rr(rd, rs1, rs2, AluOp::Xnor, pc),
-            Rol { rd, rs1, rs2 } => self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Rol64, pc),
-            Ror { rd, rs1, rs2 } => self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Ror64, pc),
-            Rolw { rd, rs1, rs2 } => self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Rol32, pc),
-            Rorw { rd, rs1, rs2 } => self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Ror32, pc),
-            Rori { rd, rs1, shamt } => self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Ror64, pc),
-            Roriw { rd, rs1, shamt } => self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Ror32, pc),
+            // ---- Zbb 1-cycle unary — RV_KIND_ZBB_U1 ----
+            Clz { rd, rs1 } => {
+                self.rv_unary(rd, rs1, UnaryOp::Clz64, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_U1, rs1, 0, rd)
+            }
+            Clzw { rd, rs1 } => {
+                self.rv_unary(rd, rs1, UnaryOp::Clz32, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_U1, rs1, 0, rd)
+            }
+            Cpop { rd, rs1 } => {
+                self.rv_unary(rd, rs1, UnaryOp::Popcnt64, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_U1, rs1, 0, rd)
+            }
+            Cpopw { rd, rs1 } => {
+                self.rv_unary(rd, rs1, UnaryOp::Popcnt32, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_U1, rs1, 0, rd)
+            }
+            SextB { rd, rs1 } => {
+                self.rv_unary(rd, rs1, UnaryOp::SextB, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_U1, rs1, 0, rd)
+            }
+            SextH { rd, rs1 } => {
+                self.rv_unary(rd, rs1, UnaryOp::SextH, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_U1, rs1, 0, rd)
+            }
+            ZextH { rd, rs1 } => {
+                self.rv_unary(rd, rs1, UnaryOp::ZextH, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_U1, rs1, 0, rd)
+            }
+            Rev8 { rd, rs1 } => {
+                self.rv_unary(rd, rs1, UnaryOp::Rev8, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_U1, rs1, 0, rd)
+            }
+            OrcB { rd, rs1 } => {
+                self.rv_unary(rd, rs1, UnaryOp::OrcB, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_U1, rs1, 0, rd)
+            }
+            // Zbb 2-cycle (ctz) — RV_KIND_ZBB_CTZ
+            Ctz { rd, rs1 } => {
+                self.rv_unary(rd, rs1, UnaryOp::Ctz64, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_CTZ, rs1, 0, rd)
+            }
+            Ctzw { rd, rs1 } => {
+                self.rv_unary(rd, rs1, UnaryOp::Ctz32, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_CTZ, rs1, 0, rd)
+            }
+            // Zbb min/max — RV_KIND_ZBB_MINMAX
+            Min { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Min, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_MINMAX, rs1, rs2, rd)
+            }
+            Minu { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Minu, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_MINMAX, rs1, rs2, rd)
+            }
+            Max { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Max, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_MINMAX, rs1, rs2, rd)
+            }
+            Maxu { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Maxu, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_MINMAX, rs1, rs2, rd)
+            }
+            // Zbb inv-bitwise — RV_KIND_ZBB_INV
+            Andn { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Andn, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_INV, rs1, rs2, rd)
+            }
+            Orn { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Orn, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_INV, rs1, rs2, rd)
+            }
+            // Zbb xnor — RV_KIND_ZBB_XNOR
+            Xnor { rd, rs1, rs2 } => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Xnor, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_XNOR, rs1, rs2, rd)
+            }
+            // Zbb rotates — RV_KIND_ZBB_ROT / ROTW / RORI / RORIW
+            Rol { rd, rs1, rs2 } => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Rol64, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_ROT, rs1, rs2, rd)
+            }
+            Ror { rd, rs1, rs2 } => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Ror64, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_ROT, rs1, rs2, rd)
+            }
+            Rori { rd, rs1, shamt } => {
+                self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Ror64, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_RORI, rs1, 0, rd)
+            }
+            Rolw { rd, rs1, rs2 } => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Rol32, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_ROTW, rs1, rs2, rd)
+            }
+            Rorw { rd, rs1, rs2 } => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Ror32, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_ROTW, rs1, rs2, rd)
+            }
+            Roriw { rd, rs1, shamt } => {
+                self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Ror32, pc);
+                self.feed_gas_rv(RV_KIND_ZBB_RORIW, rs1, 0, rd)
+            }
 
-            // ---- Zba (shift-add) ----
-            Sh1add { rd, rs1, rs2 } => self.rv_shadd(rd, rs1, rs2, 1, false, pc),
-            Sh2add { rd, rs1, rs2 } => self.rv_shadd(rd, rs1, rs2, 2, false, pc),
-            Sh3add { rd, rs1, rs2 } => self.rv_shadd(rd, rs1, rs2, 3, false, pc),
-            Sh1adduw { rd, rs1, rs2 } => self.rv_shadd(rd, rs1, rs2, 1, true, pc),
-            Sh2adduw { rd, rs1, rs2 } => self.rv_shadd(rd, rs1, rs2, 2, true, pc),
-            Sh3adduw { rd, rs1, rs2 } => self.rv_shadd(rd, rs1, rs2, 3, true, pc),
-            Adduw { rd, rs1, rs2 } => self.rv_adduw(rd, rs1, rs2, pc),
-            Slliuw { rd, rs1, shamt } => self.rv_slliuw(rd, rs1, shamt, pc),
+            // ---- Zba — RV_KIND_ZBA / ZBA_IMM ----
+            Sh1add { rd, rs1, rs2 } => {
+                self.rv_shadd(rd, rs1, rs2, 1, false, pc);
+                self.record_scaledadd(rd, rs1, rs2, 1);
+                self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd)
+            }
+            Sh2add { rd, rs1, rs2 } => {
+                self.rv_shadd(rd, rs1, rs2, 2, false, pc);
+                self.record_scaledadd(rd, rs1, rs2, 2);
+                self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd)
+            }
+            Sh3add { rd, rs1, rs2 } => {
+                self.rv_shadd(rd, rs1, rs2, 3, false, pc);
+                self.record_scaledadd(rd, rs1, rs2, 3);
+                self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd)
+            }
+            Sh1adduw { rd, rs1, rs2 } => {
+                self.rv_shadd(rd, rs1, rs2, 1, true, pc);
+                self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd)
+            }
+            Sh2adduw { rd, rs1, rs2 } => {
+                self.rv_shadd(rd, rs1, rs2, 2, true, pc);
+                self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd)
+            }
+            Sh3adduw { rd, rs1, rs2 } => {
+                self.rv_shadd(rd, rs1, rs2, 3, true, pc);
+                self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd)
+            }
+            Adduw { rd, rs1, rs2 } => {
+                self.rv_adduw(rd, rs1, rs2, pc);
+                self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd)
+            }
+            Slliuw { rd, rs1, shamt } => {
+                self.rv_slliuw(rd, rs1, shamt, pc);
+                self.feed_gas_rv(RV_KIND_ZBA_IMM, rs1, 0, rd)
+            }
 
-            // ---- Zbs (single-bit) ----
-            Bclr { rd, rs1, rs2 } => self.rv_bit_rr(rd, rs1, rs2, BitOp::Clear, pc),
-            Bset { rd, rs1, rs2 } => self.rv_bit_rr(rd, rs1, rs2, BitOp::Set, pc),
-            Binv { rd, rs1, rs2 } => self.rv_bit_rr(rd, rs1, rs2, BitOp::Invert, pc),
-            Bext { rd, rs1, rs2 } => self.rv_bit_rr(rd, rs1, rs2, BitOp::Extract, pc),
-            Bclri { rd, rs1, shamt } => self.rv_bit_imm(rd, rs1, shamt, BitOp::Clear, pc),
-            Bseti { rd, rs1, shamt } => self.rv_bit_imm(rd, rs1, shamt, BitOp::Set, pc),
-            Binvi { rd, rs1, shamt } => self.rv_bit_imm(rd, rs1, shamt, BitOp::Invert, pc),
-            Bexti { rd, rs1, shamt } => self.rv_bit_imm(rd, rs1, shamt, BitOp::Extract, pc),
+            // ---- Zbs — RV_KIND_ZBS / ZBS_IMM ----
+            Bclr { rd, rs1, rs2 } => {
+                self.rv_bit_rr(rd, rs1, rs2, BitOp::Clear, pc);
+                self.feed_gas_rv(RV_KIND_ZBS, rs1, rs2, rd)
+            }
+            Bset { rd, rs1, rs2 } => {
+                self.rv_bit_rr(rd, rs1, rs2, BitOp::Set, pc);
+                self.feed_gas_rv(RV_KIND_ZBS, rs1, rs2, rd)
+            }
+            Binv { rd, rs1, rs2 } => {
+                self.rv_bit_rr(rd, rs1, rs2, BitOp::Invert, pc);
+                self.feed_gas_rv(RV_KIND_ZBS, rs1, rs2, rd)
+            }
+            Bext { rd, rs1, rs2 } => {
+                self.rv_bit_rr(rd, rs1, rs2, BitOp::Extract, pc);
+                self.feed_gas_rv(RV_KIND_ZBS, rs1, rs2, rd)
+            }
+            Bclri { rd, rs1, shamt } => {
+                self.rv_bit_imm(rd, rs1, shamt, BitOp::Clear, pc);
+                self.feed_gas_rv(RV_KIND_ZBS_IMM, rs1, 0, rd)
+            }
+            Bseti { rd, rs1, shamt } => {
+                self.rv_bit_imm(rd, rs1, shamt, BitOp::Set, pc);
+                self.feed_gas_rv(RV_KIND_ZBS_IMM, rs1, 0, rd)
+            }
+            Binvi { rd, rs1, shamt } => {
+                self.rv_bit_imm(rd, rs1, shamt, BitOp::Invert, pc);
+                self.feed_gas_rv(RV_KIND_ZBS_IMM, rs1, 0, rd)
+            }
+            Bexti { rd, rs1, shamt } => {
+                self.rv_bit_imm(rd, rs1, shamt, BitOp::Extract, pc);
+                self.feed_gas_rv(RV_KIND_ZBS_IMM, rs1, 0, rd)
+            }
 
-            // ---- Zicond ----
-            CzeroEqz { rd, rs1, rs2 } => self.rv_czero(rd, rs1, rs2, Cc::E, pc),
-            CzeroNez { rd, rs1, rs2 } => self.rv_czero(rd, rs1, rs2, Cc::NE, pc),
+            // ---- Zicond — RV_KIND_ZICOND ----
+            CzeroEqz { rd, rs1, rs2 } => {
+                self.rv_czero(rd, rs1, rs2, Cc::E, pc);
+                self.feed_gas_rv(RV_KIND_ZICOND, rs1, rs2, rd)
+            }
+            CzeroNez { rd, rs1, rs2 } => {
+                self.rv_czero(rd, rs1, rs2, Cc::NE, pc);
+                self.feed_gas_rv(RV_KIND_ZICOND, rs1, rs2, rd)
+            }
 
-            // ---- LUI ----
-            Lui { rd, imm } => self.rv_lui(rd, imm, pc),
+            // ---- LUI — RV_KIND_LUI ----
+            Lui { rd, imm } => {
+                self.rv_lui(rd, imm, pc);
+                self.track_const(rd, imm);
+                self.feed_gas_rv(RV_KIND_LUI, 0, 0, rd)
+            }
 
-            // ---- Jumps & branches ----
-            Jal { rd, imm } => self.rv_jal(rd, imm, pc, next_pc),
-            Beq { rs1, rs2, imm } => self.rv_branch(rs1, rs2, imm, Cc::E, pc, next_pc),
-            Bne { rs1, rs2, imm } => self.rv_branch(rs1, rs2, imm, Cc::NE, pc, next_pc),
-            Blt { rs1, rs2, imm } => self.rv_branch(rs1, rs2, imm, Cc::L, pc, next_pc),
-            Bge { rs1, rs2, imm } => self.rv_branch(rs1, rs2, imm, Cc::GE, pc, next_pc),
-            Bltu { rs1, rs2, imm } => self.rv_branch(rs1, rs2, imm, Cc::B, pc, next_pc),
-            Bgeu { rs1, rs2, imm } => self.rv_branch(rs1, rs2, imm, Cc::AE, pc, next_pc),
+            // ---- Jumps & branches (terminators) ----
+            Jal { rd, imm } => {
+                self.rv_jal(rd, imm, pc, next_pc);
+                self.feed_gas_rv(RV_KIND_JAL, 0, 0, rd)
+            }
+            Beq { rs1, rs2, imm } => {
+                self.rv_branch(rs1, rs2, imm, Cc::E, pc, next_pc);
+                self.feed_gas_rv(RV_KIND_BRANCH, rs1, rs2, 0)
+            }
+            Bne { rs1, rs2, imm } => {
+                self.rv_branch(rs1, rs2, imm, Cc::NE, pc, next_pc);
+                self.feed_gas_rv(RV_KIND_BRANCH, rs1, rs2, 0)
+            }
+            Blt { rs1, rs2, imm } => {
+                self.rv_branch(rs1, rs2, imm, Cc::L, pc, next_pc);
+                self.feed_gas_rv(RV_KIND_BRANCH, rs1, rs2, 0)
+            }
+            Bge { rs1, rs2, imm } => {
+                self.rv_branch(rs1, rs2, imm, Cc::GE, pc, next_pc);
+                self.feed_gas_rv(RV_KIND_BRANCH, rs1, rs2, 0)
+            }
+            Bltu { rs1, rs2, imm } => {
+                self.rv_branch(rs1, rs2, imm, Cc::B, pc, next_pc);
+                self.feed_gas_rv(RV_KIND_BRANCH, rs1, rs2, 0)
+            }
+            Bgeu { rs1, rs2, imm } => {
+                self.rv_branch(rs1, rs2, imm, Cc::AE, pc, next_pc);
+                self.feed_gas_rv(RV_KIND_BRANCH, rs1, rs2, 0)
+            }
 
-            // ---- Fences (no-op) ----
-            RvInst::Fence | RvInst::FenceI => {}
+            // ---- Fences (no-op emit) — RV_KIND_FENCE (not a terminator) ----
+            Fence | FenceI => self.feed_gas_rv(RV_KIND_FENCE, 0, 0, 0),
 
-            // ---- custom-0 ----
-            RvInst::Trap => self.rv_trap(pc),
-            RvInst::EcallJar => self.rv_ecall_jar(next_pc),
-            RvInst::Ecalli { imm } => self.rv_ecalli(imm, next_pc),
-            // PVM2 control flow. br_table dispatches through a per-
-            // function jump table; fallthrough is a no-op terminator
-            // (just a bb_start marker handled by predecode).
-            RvInst::BrTable { table_id, rs1 } => self.rv_br_table(table_id, rs1, pc, next_pc),
-            RvInst::Fallthrough => {}
+            // ---- custom-0 (terminators) ----
+            Trap => {
+                self.rv_trap(pc);
+                self.feed_gas_rv(RV_KIND_TRAP, 0, 0, 0)
+            }
+            EcallJar => {
+                self.rv_ecall_jar(next_pc);
+                self.feed_gas_rv(RV_KIND_ECALL_JAR, 0, 0, 0)
+            }
+            Ecalli { imm } => {
+                self.rv_ecalli(imm, next_pc);
+                self.feed_gas_rv(RV_KIND_ECALLI, 0, 0, 0)
+            }
+            BrTable { table_id, rs1 } => {
+                self.rv_br_table(table_id, rs1, pc, next_pc);
+                self.feed_gas_rv(RV_KIND_BR_TABLE, rs1, 0, 0)
+            }
+            // Fallthrough is a no-op terminator (emit nothing).
+            Fallthrough => self.feed_gas_rv(RV_KIND_FALLTHROUGH, 0, 0, 0),
 
-            RvInst::Reserved { .. } => self.rv_emit_panic_at(pc),
+            // Reserved encodings panic at runtime (terminator).
+            Reserved { .. } => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0)
+            }
         }
     }
 
@@ -1645,114 +1984,74 @@ impl Compiler {
     }
 
     // ----------------------------------------------------------------
-    // Peephole tracking — RV-side analogue of update_reg_defs.
+    // Peephole tracking helpers — called inline from the tracked arms
+    // of `compile_rv_instruction`. They replace the old separate
+    // `update_reg_defs_rv` match pass (strict single-pass refactor).
     //
-    // Called by the main compile_rv loop after every per-op handler.
-    // For the handful of opcodes that produce trackable patterns we
-    // record the new definition; the per-op handler has already
-    // cleared rd via invalidate_reg, so for non-trackable opcodes we
-    // just need to leave reg_defs alone.
+    // Each helper short-circuits when the destination register can't
+    // produce a useful tracking entry (x0 / x3 / x4) or when the arm-
+    // specific alias guard fires. The per-op emit helper has already
+    // cleared `rd` via `invalidate_reg`, so the helper just installs
+    // the new RegDef when applicable.
     // ----------------------------------------------------------------
-    fn update_reg_defs_rv(&mut self, inst: &RvInst) {
-        use super::codegen::RegDef;
-        // Helper: record def for rd (RV reg index). x0/x3/x4 short-circuit.
-        // Returns true if recorded (so caller can skip the fall-through).
-        let _ = (); // doc anchor
 
-        match *inst {
-            // `addi rd, x0, imm`  — canonical RV "li rd, imm".
-            //
-            // Track as Const so address-formation peepholes (PVM-style
-            // emit_addr_to_scratch fold) can fire. Const stores u32 — the
-            // common addressing case fits, and Addi with x0+imm fits in i32
-            // anyway, so sign-extension into u32 is fine.
-            RvInst::Addi { rd, rs1: 0, imm } => {
-                if let Some(slot) = rv_slot(rd) {
-                    self.reg_defs[slot] = RegDef::Const(imm as u32);
-                    self.reg_defs_active |= 1u16 << slot;
-                    self.invalidate_dependents(slot);
-                }
-            }
-            // `lui rd, imm` — imm field already carries the shifted value
-            // (decode_lui in rv_instruction.rs does `imm = w & 0xFFFF_F000`).
-            RvInst::Lui { rd, imm } => {
-                if let Some(slot) = rv_slot(rd) {
-                    self.reg_defs[slot] = RegDef::Const(imm as u32);
-                    self.reg_defs_active |= 1u16 << slot;
-                    self.invalidate_dependents(slot);
-                }
-            }
-            // `slli rd, rs, sh` with sh ∈ {1,2,3}: track as Shifted so a
-            // following Add can promote to ScaledAdd for SIB-style LEA.
-            // Self-aliasing (rs == rd) overwrites the source value and
-            // would make Shifted{src=rd} self-referential — skip.
-            RvInst::Slli { rd, rs1, shamt } if (1..=3).contains(&shamt) && rs1 != rd => {
-                if let (Some(d), Some(s)) = (rv_slot(rd), rv_slot(rs1)) {
-                    self.reg_defs[d] = RegDef::Shifted {
-                        src: s,
-                        shift: shamt,
-                    };
-                    self.reg_defs_active |= 1u16 << d;
-                    self.invalidate_dependents(d);
-                }
-            }
-            // `add rd, rs1, rs2` — promote to ScaledAdd when one operand
-            // is a tracked Shifted def. Mirrors PVM's update_reg_defs
-            // for Add64. We require rd to not alias either source: an
-            // in-place add overwrites the operand, leaving the tracked
-            // def referring to the post-write value when a consumer
-            // expected the pre-write value.
-            RvInst::Add { rd, rs1, rs2 } if rd != rs1 && rd != rs2 => {
-                let d = match rv_slot(rd) {
-                    Some(s) => s,
-                    None => return,
-                };
-                let s1 = rv_slot(rs1);
-                let s2 = rv_slot(rs2);
-                let def = match (s1, s2) {
-                    (Some(a), Some(b)) => {
-                        if let RegDef::Shifted { src, shift } = self.reg_defs[b] {
-                            Some(RegDef::ScaledAdd {
-                                base: a,
-                                idx: src,
-                                shift,
-                            })
-                        } else if let RegDef::Shifted { src, shift } = self.reg_defs[a] {
-                            Some(RegDef::ScaledAdd {
-                                base: b,
-                                idx: src,
-                                shift,
-                            })
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                };
-                if let Some(def) = def {
-                    self.reg_defs[d] = def;
-                    self.reg_defs_active |= 1u16 << d;
-                    self.invalidate_dependents(d);
-                }
-                // else: per-op handler already invalidated rd; nothing to do.
-            }
-            // Zba shift-add: `rd = rs2 + (rs1 << shift)`. This is exactly
-            // ScaledAdd{base:rs2, idx:rs1, shift}. lld emits these directly
-            // for indexed access, which is the cleanest fusion target.
-            RvInst::Sh1add { rd, rs1, rs2 } => {
-                self.record_scaledadd(rd, rs1, rs2, 1);
-            }
-            RvInst::Sh2add { rd, rs1, rs2 } => {
-                self.record_scaledadd(rd, rs1, rs2, 2);
-            }
-            RvInst::Sh3add { rd, rs1, rs2 } => {
-                self.record_scaledadd(rd, rs1, rs2, 3);
-            }
-            _ => {
-                // Non-trackable. Per-op handler's invalidate_reg has
-                // already cleared rd; nothing to do here.
-            }
+    /// `addi rd, x0, imm` / `lui rd, imm` — canonical constant load.
+    /// Records `RegDef::Const(imm as u32)` so subsequent address
+    /// formations can fold the constant directly.
+    #[inline]
+    fn track_const(&mut self, rd: u8, imm: i32) {
+        use super::codegen::RegDef;
+        if let Some(slot) = rv_slot(rd) {
+            self.reg_defs[slot] = RegDef::Const(imm as u32);
+            self.reg_defs_active |= 1u16 << slot;
+            self.invalidate_dependents(slot);
         }
+    }
+
+    /// `slli rd, rs1, shamt` with `shamt ∈ {1,2,3}` and `rs1 != rd`.
+    /// Records `RegDef::Shifted` so a following Add can promote to
+    /// ScaledAdd for SIB-style LEA. The arm-side guards (range and
+    /// aliasing) live in the caller so this helper just installs.
+    #[inline]
+    fn track_shifted(&mut self, rd: u8, rs1: u8, shamt: u8) {
+        use super::codegen::RegDef;
+        if let (Some(d), Some(s)) = (rv_slot(rd), rv_slot(rs1)) {
+            self.reg_defs[d] = RegDef::Shifted { src: s, shift: shamt };
+            self.reg_defs_active |= 1u16 << d;
+            self.invalidate_dependents(d);
+        }
+    }
+
+    /// `add rd, rs1, rs2` with `rd != rs1 && rd != rs2`. Promotes to
+    /// `RegDef::ScaledAdd` when one operand is already tracked as
+    /// `Shifted`. Mirrors PVM's update_reg_defs for Add64.
+    #[inline]
+    fn track_add_scaledadd(&mut self, rd: u8, rs1: u8, rs2: u8) {
+        use super::codegen::RegDef;
+        let (Some(d), Some(a), Some(b)) = (rv_slot(rd), rv_slot(rs1), rv_slot(rs2)) else {
+            return;
+        };
+        let def = if let RegDef::Shifted { src, shift } = self.reg_defs[b] {
+            Some(RegDef::ScaledAdd {
+                base: a,
+                idx: src,
+                shift,
+            })
+        } else if let RegDef::Shifted { src, shift } = self.reg_defs[a] {
+            Some(RegDef::ScaledAdd {
+                base: b,
+                idx: src,
+                shift,
+            })
+        } else {
+            None
+        };
+        if let Some(def) = def {
+            self.reg_defs[d] = def;
+            self.reg_defs_active |= 1u16 << d;
+            self.invalidate_dependents(d);
+        }
+        // else: per-op handler already invalidated rd.
     }
 
     /// Helper for Sh{1,2,3}add → ScaledAdd tracking.
@@ -1802,8 +2101,6 @@ impl Compiler {
         pc: usize,
         cur_len: usize,
         cur_inst: RvInst,
-        gas_sim: &mut GasSimulator,
-        mem_cycles: u8,
     ) -> Option<usize> {
         let (m_rd, m_rs1, m_rs2) = match cur_inst {
             RvInst::Mul { rd, rs1, rs2 } => (rd, rs1, rs2),
@@ -1898,11 +2195,13 @@ impl Compiler {
         // a stale prior-add's flags.
         self.last_add_cf = None;
 
-        // Feed gas for both consumed instructions.
+        // Feed gas for both consumed instructions via the unified
+        // kind-driven path (same path the per-arm `feed_gas_rv` calls
+        // hit).
         let m1 = rv_gas_meta(&cur_inst);
-        rv_feed_gas_direct(&m1, gas_sim, mem_cycles);
+        rv_feed_gas_direct(&m1, &mut self.gas_sim, self.mem_cycles);
         let m2 = rv_gas_meta(&next_inst);
-        rv_feed_gas_direct(&m2, gas_sim, mem_cycles);
+        rv_feed_gas_direct(&m2, &mut self.gas_sim, self.mem_cycles);
 
         Some(cur_len + next_len as usize)
     }

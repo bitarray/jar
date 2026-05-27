@@ -59,6 +59,20 @@ pub(crate) const REG_MAP: [Reg; 13] = [
 
 /// Scratch register (not mapped to any PVM register).
 pub(crate) const SCRATCH: Reg = Reg::RDX;
+
+/// RV register number → PVM2 slot (0..12), or `0xFF` for "no slot"
+/// (x0, reserved x3/x4, or any out-of-range value). Mirrors the
+/// slot encoding used by `rv_op_metadata` so that gas accounting
+/// agrees bit-for-bit with the predecode-cached path.
+#[inline(always)]
+pub(crate) fn rv_slot_or_ff(x: u8) -> u8 {
+    match x {
+        1 => 0,
+        2 => 1,
+        5..=15 => x - 3,
+        _ => 0xFF,
+    }
+}
 /// R15 = gas meter. Loaded from `ctx.gas` at the prologue, decremented
 /// once per basic block, flushed back to `ctx.gas` at every exit.
 pub(crate) const GAS: Reg = Reg::R15;
@@ -189,6 +203,13 @@ pub struct Compiler {
     pub(crate) trap_entries: Vec<(u32, u32)>,
     /// Memory tier load/store cycles for gas simulation.
     pub(crate) mem_cycles: u8,
+    /// Pipeline simulator for per-block gas costing. The RV streaming
+    /// compile path drives this directly from `compile_rv_instruction`
+    /// arms (so the per-instruction loop performs ONE match over
+    /// `RvInst`); `bind_rv_gas_block_start_streaming` flushes it at
+    /// block boundaries. The PVM `compile()` path uses its own local
+    /// simulator and leaves this one untouched.
+    pub(crate) gas_sim: GasSimulator,
     /// PVM2: per-function `br_table` sub-table CSR offsets. Each
     /// `BrTable { table_id, .. }` instruction dispatches through
     /// entries `jt_ptr[rv_jt_offsets[table_id] ..
@@ -246,8 +267,26 @@ impl Compiler {
             bitmask_len: bitmask.len(),
             trap_entries: Vec::with_capacity(2048),
             mem_cycles,
+            gas_sim: GasSimulator::new(),
             rv_jt_offsets: Vec::new(),
         }
+    }
+
+    /// RV streaming-compile gas feed. Each `compile_rv_instruction`
+    /// arm calls this once with its kind constant + raw RV register
+    /// indices; we slot-translate inline and call
+    /// `rv_feed_gas_kind` against `self.gas_sim`. Returns
+    /// `is_terminator` (RVF_TERM flag from the LUT entry).
+    #[inline(always)]
+    pub(crate) fn feed_gas_rv(&mut self, kind: u8, rs1: u8, rs2: u8, rd: u8) -> bool {
+        javm_exec::gas_cost::rv_feed_gas_kind(
+            kind,
+            rv_slot_or_ff(rs1),
+            rv_slot_or_ff(rs2),
+            rv_slot_or_ff(rd),
+            &mut self.gas_sim,
+            self.mem_cycles,
+        )
     }
 
     /// Look up the pre-created label for a PVM PC. O(1) arithmetic.
