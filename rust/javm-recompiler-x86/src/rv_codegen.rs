@@ -28,9 +28,63 @@ use super::codegen::{
     CompileResult, Compiler, EXIT_ECALL, EXIT_HOST_CALL, EXIT_PANIC, EXIT_TRAP, GAS, REG_MAP,
     SCRATCH,
 };
-use javm_exec::gas_cost::{rv_feed_gas_direct, rv_gas_meta};
-use javm_exec::rv_instruction::{RvInst, decode};
+use javm_exec::rv_instruction::RvInst;
 pub use javm_exec::rv_predecode::{RvPredecode, predecode_rv};
+
+// ----------------------------------------------------------------------
+// RV opcode majors (bits [6:2]). Bits [1:0] are always 0b11 for 4-byte.
+// Mirrors `javm_exec::rv_instruction::OP_*`; redeclared here to keep the
+// recompiler self-contained on the byte-dispatch hot path. Only majors
+// PVM2 accepts are named — AUIPC, JALR, SYSTEM, CUSTOM_1, AMO, FP* etc.
+// are routed through the catch-all default branch in `compile_rv4`.
+// ----------------------------------------------------------------------
+const OP_LOAD: u32 = 0b00_000;
+const OP_MISC_MEM: u32 = 0b00_011;
+const OP_IMM: u32 = 0b00_100;
+const OP_OP_IMM_32: u32 = 0b00_110;
+const OP_STORE: u32 = 0b01_000;
+const OP_OP: u32 = 0b01_100;
+const OP_LUI: u32 = 0b01_101;
+const OP_OP_32: u32 = 0b01_110;
+const OP_BRANCH: u32 = 0b11_000;
+const OP_JAL: u32 = 0b11_011;
+const OP_CUSTOM_0: u32 = 0b00_010;
+
+// Sign-extended immediates straight off a 4-byte RV word. Mirrors the
+// canonical encoders in `javm_exec::rv_instruction`.
+#[inline]
+fn imm_i(w: u32) -> i32 {
+    (w as i32) >> 20
+}
+#[inline]
+fn imm_s(w: u32) -> i32 {
+    let hi = (w >> 25) & 0x7F;
+    let lo = (w >> 7) & 0x1F;
+    let raw = ((hi << 5) | lo) as i32;
+    (raw << 20) >> 20
+}
+#[inline]
+fn imm_b(w: u32) -> i32 {
+    let b12 = (w >> 31) & 1;
+    let b11 = (w >> 7) & 1;
+    let b10_5 = (w >> 25) & 0x3F;
+    let b4_1 = (w >> 8) & 0xF;
+    let raw = (b12 << 12) | (b11 << 11) | (b10_5 << 5) | (b4_1 << 1);
+    ((raw as i32) << 19) >> 19
+}
+#[inline]
+fn imm_j(w: u32) -> i32 {
+    let b20 = (w >> 31) & 1;
+    let b10_1 = (w >> 21) & 0x3FF;
+    let b11 = (w >> 20) & 1;
+    let b19_12 = (w >> 12) & 0xFF;
+    let raw = (b20 << 20) | (b19_12 << 12) | (b11 << 11) | (b10_1 << 1);
+    ((raw as i32) << 11) >> 11
+}
+#[inline]
+fn imm_u(w: u32) -> i32 {
+    (w & 0xFFFFF000) as i32
+}
 
 /// Map an RV register index to its PVM slot (0..=12).
 ///
@@ -99,62 +153,51 @@ impl Compiler {
         while pc < code.len() {
             self.asm.ensure_capacity(512);
 
-            let Some((inst, len)) = decode(&code[pc..]) else {
-                // Decode failure — emit a panic at this PC and stop.
-                // Bytes past this point stay unmarked in valid_pc so
-                // runtime djumps targeting them correctly fail.
+            // Length encoding lives in bits [1:0] of byte 0: `xx11` is
+            // 4-byte, anything else is 2-byte (RVC). Decode no further
+            // than that — the dispatcher inspects raw bits directly.
+            if pc + 2 > code.len() {
                 self.rv_emit_panic_at(pc as u32);
                 break;
-            };
+            }
+            let is_4byte = code[pc] & 0b11 == 0b11;
+            let base_len = if is_4byte { 4 } else { 2 };
+            if pc + base_len > code.len() {
+                self.rv_emit_panic_at(pc as u32);
+                break;
+            }
 
             let inst_pc = pc as u32;
-            let next_pc = (pc + len as usize) as u32;
 
             if next_is_gas_start {
                 self.bind_rv_gas_block_start_streaming(inst_pc, &mut pending_gas);
                 next_is_gas_start = false;
             }
 
-            // Phase 2 lookahead: peek the next instruction for mul-pair
-            // fusion. Only attempt when the current instruction is Mul.
-            if matches!(inst, RvInst::Mul { .. })
-                && let Some(consumed_bytes) =
-                    self.try_fuse_rv_mul_pair_streaming(code, pc, len as usize, inst)
-            {
-                pc += consumed_bytes;
-                continue;
-            }
-            // Phase 8 lookahead: Ld followed by Add that consumes the
-            // loaded value. Folds two iterations of the streaming loop
-            // (decode + match + feed_gas) into one; the emitted x86
-            // sequence is byte-identical to the unfused emit.
-            if matches!(inst, RvInst::Ld { .. })
-                && let Some(consumed_bytes) =
-                    self.try_fuse_rv_ld_add_streaming(code, pc, len as usize, inst)
-            {
-                pc += consumed_bytes;
-                continue;
-            }
+            // Byte-based dispatch. Each path returns
+            // `(is_terminator, preserve_cf, extra_bytes)`. `extra_bytes`
+            // counts the *additional* bytes consumed beyond `base_len`
+            // for lookahead fusion (e.g., Ld→Add fuses an extra 4-byte
+            // Add). `preserve_cf` tells us whether to keep
+            // `last_add_cf` alive for a following Sltu fusion.
+            let rest = &code[pc + base_len..];
+            let (term, preserve_cf, extra) = if is_4byte {
+                let w = u32::from_le_bytes([code[pc], code[pc + 1], code[pc + 2], code[pc + 3]]);
+                self.compile_rv4(w, inst_pc, rest)
+            } else {
+                let h = u16::from_le_bytes([code[pc], code[pc + 1]]);
+                self.compile_rvc(h, inst_pc, rest)
+            };
 
-            // Strict single-pass: one match over RvInst dispatches
-            // emit + gas-feed + reg_defs tracking + terminator
-            // detection. Returns is_terminator.
-            let inst_is_terminator = self.compile_rv_instruction(inst, inst_pc, next_pc);
-            // Phase 4: carry-flag fusion bookkeeping (mirrors the old
-            // two-pass loop). Add sets last_add_cf from inside rv_alu_rr;
-            // Sltu consumes it from inside rv_slt_rr. Any other
-            // instruction (including a *failed* Sltu fall-through)
-            // clobbers CF, so we clear so a subsequent unrelated Sltu
-            // doesn't read a stale add's flags.
-            if !matches!(inst, RvInst::Add { .. } | RvInst::Sltu { .. }) {
+            if !preserve_cf {
                 self.last_add_cf = None;
             }
 
-            if inst_is_terminator {
+            if term {
                 next_is_gas_start = true;
             }
 
-            pc += len as usize;
+            pc += base_len + extra;
         }
 
         // Finalize the last gas block — patch its cost in.
@@ -256,8 +299,919 @@ impl Compiler {
         *pending = Some((stub_label, pc, patch_offset));
     }
 
-    /// Single match over `RvInst` that emits native code AND feeds gas
-    /// in one pass. Each arm:
+    /// 4-byte RV instruction dispatch (byte-based).
+    ///
+    /// Returns `(is_terminator, preserve_cf, extra_bytes)`. `extra_bytes`
+    /// counts the additional bytes (beyond the 4-byte base) consumed by
+    /// lookahead fusion. `preserve_cf` tells the streaming loop whether
+    /// to keep `last_add_cf` alive for a following Sltu fusion.
+    ///
+    /// Hot path: walks the opcode-major tree directly on raw bits, no
+    /// `RvInst` enum constructed. Fusion sites (Ld→Add, Mul-pair) are
+    /// inline at their dispatchers.
+    fn compile_rv4(&mut self, w: u32, pc: u32, rest: &[u8]) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        let opcode = (w >> 2) & 0x1F;
+        let rd = ((w >> 7) & 0x1F) as u8;
+        let rs1 = ((w >> 15) & 0x1F) as u8;
+        let rs2 = ((w >> 20) & 0x1F) as u8;
+        let f3 = ((w >> 12) & 0x07) as u8;
+        let f7 = ((w >> 25) & 0x7F) as u8;
+
+        match opcode {
+            OP_LOAD => self.compile_load(rd, rs1, f3, w, pc, rest),
+            OP_STORE => self.compile_store(rs1, rs2, f3, w, pc),
+            OP_IMM => self.compile_op_imm(rd, rs1, f3, w, pc),
+            OP_OP_IMM_32 => self.compile_op_imm_32(rd, rs1, f3, w, pc),
+            OP_OP => self.compile_op(rd, rs1, rs2, f3, f7, w, pc, rest),
+            OP_OP_32 => self.compile_op_32(rd, rs1, rs2, f3, f7, w, pc),
+            OP_LUI => self.compile_lui(rd, w, pc),
+            OP_JAL => self.compile_jal(rd, w, pc),
+            OP_BRANCH => self.compile_branch(rs1, rs2, f3, w, pc),
+            OP_CUSTOM_0 => self.compile_custom_0(rd, rs1, f3, w, pc),
+            OP_MISC_MEM => {
+                // Fence / FenceI — no-op emit.
+                self.feed_gas_rv(RV_KIND_FENCE, 0, 0, 0);
+                (false, false, 0)
+            }
+            // OP_AUIPC, OP_JALR, OP_SYSTEM, OP_CUSTOM_1 etc. — all
+            // forbidden in PVM2 and rejected by the linker's validator.
+            // Defence in depth: emit a runtime panic if we ever see one.
+            _ => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                (true, false, 0)
+            }
+        }
+    }
+
+    /// 2-byte RVC dispatch. Compressed instructions are rare in the
+    /// gap-driving guests (~99% of code is uncompressed), so for now we
+    /// bridge through `decompress` + `compile_rv_instruction` rather
+    /// than duplicate the bit-shuffling for an RVC-native path. Forward
+    /// `next_pc = pc + 2` to match what the legacy 2-byte fallthrough
+    /// produced.
+    fn compile_rvc(&mut self, h: u16, pc: u32, _rest: &[u8]) -> (bool, bool, usize) {
+        let bytes = h.to_le_bytes();
+        let (inst, _len) = javm_exec::rv_instruction::decode(&bytes)
+            .expect("2-byte RVC decode of a valid prefix should not fail");
+        let preserve_cf = matches!(inst, RvInst::Add { .. } | RvInst::Sltu { .. });
+        let term = self.compile_rv_instruction(inst, pc, pc + 2);
+        (term, preserve_cf, 0)
+    }
+
+    // === Per-opcode dispatchers (4-byte path) =====================
+
+    fn compile_load(
+        &mut self,
+        rd: u8,
+        rs1: u8,
+        f3: u8,
+        w: u32,
+        pc: u32,
+        rest: &[u8],
+    ) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        let imm = imm_i(w);
+        let (width, signed) = match f3 {
+            0b000 => (1u32, true),
+            0b001 => (2, true),
+            0b010 => (4, true),
+            0b011 => (8, false),
+            0b100 => (1, false),
+            0b101 => (2, false),
+            0b110 => (4, false),
+            _ => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                return (true, false, 0);
+            }
+        };
+        // Ld→Add fusion: only triggers on the 64-bit `ld` (f3 == 0b011).
+        // The fast-path mask test on the next word lets us cheaply reject
+        // the common "Ld not followed by Add" case before extracting
+        // fields. See commit `perf(pvm2): Ld→Add lookahead fusion`.
+        if width == 8 && rd != 0 && !rv_is_reserved(rd) && !rv_is_reserved(rs1) && rest.len() >= 4 {
+            let w2 = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+            if w2 & 0xFE00_707F == 0x0000_0033 {
+                let a_rd = ((w2 >> 7) & 0x1F) as u8;
+                let a_rs1 = ((w2 >> 15) & 0x1F) as u8;
+                let a_rs2 = ((w2 >> 20) & 0x1F) as u8;
+                if a_rd != 0
+                    && !rv_is_reserved(a_rd)
+                    && (a_rs1 == rd || a_rs2 == rd)
+                    && (a_rs1 == 0 || !rv_is_reserved(a_rs1))
+                    && (a_rs2 == 0 || !rv_is_reserved(a_rs2))
+                {
+                    self.rv_load(rd, rs1, imm, 8, false, pc);
+                    self.feed_gas_rv(RV_KIND_LOAD, rs1, 0, rd);
+                    let next_pc = pc + 4;
+                    self.rv_alu_rr(a_rd, a_rs1, a_rs2, AluOp::Add, next_pc);
+                    if a_rd != a_rs1 && a_rd != a_rs2 {
+                        self.track_add_scaledadd(a_rd, a_rs1, a_rs2);
+                    }
+                    self.feed_gas_rv(RV_KIND_ADD, a_rs1, a_rs2, a_rd);
+                    // The fused trailing op is an Add → preserve CF for
+                    // a possible subsequent Sltu fusion.
+                    return (false, true, 4);
+                }
+            }
+        }
+        self.rv_load(rd, rs1, imm, width, signed, pc);
+        let term = self.feed_gas_rv(RV_KIND_LOAD, rs1, 0, rd);
+        (term, false, 0)
+    }
+
+    fn compile_store(&mut self, rs1: u8, rs2: u8, f3: u8, w: u32, pc: u32) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        let imm = imm_s(w);
+        let width = match f3 {
+            0b000 => 1u32,
+            0b001 => 2,
+            0b010 => 4,
+            0b011 => 8,
+            _ => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                return (true, false, 0);
+            }
+        };
+        self.rv_store(rs1, rs2, imm, width, pc);
+        let term = self.feed_gas_rv(RV_KIND_STORE, rs1, rs2, 0);
+        (term, false, 0)
+    }
+
+    fn compile_op_imm(&mut self, rd: u8, rs1: u8, f3: u8, w: u32, pc: u32) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        match f3 {
+            0b000 => {
+                // Addi
+                let imm = imm_i(w);
+                self.rv_alu_imm(rd, rs1, imm, AluImmOp::Add, pc);
+                if rs1 == 0 {
+                    self.track_const(rd, imm);
+                }
+                let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                (term, false, 0)
+            }
+            0b010 => {
+                let imm = imm_i(w);
+                self.rv_slt_imm(rd, rs1, imm, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                (term, false, 0)
+            }
+            0b011 => {
+                let imm = imm_i(w);
+                self.rv_slt_imm(rd, rs1, imm, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                (term, false, 0)
+            }
+            0b100 => {
+                let imm = imm_i(w);
+                self.rv_alu_imm(rd, rs1, imm, AluImmOp::Xor, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                (term, false, 0)
+            }
+            0b110 => {
+                let imm = imm_i(w);
+                self.rv_alu_imm(rd, rs1, imm, AluImmOp::Or, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                (term, false, 0)
+            }
+            0b111 => {
+                let imm = imm_i(w);
+                self.rv_alu_imm(rd, rs1, imm, AluImmOp::And, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                (term, false, 0)
+            }
+            0b001 => {
+                // SLLI / Zbs Bclri / Bseti / Binvi / Zbb unary (clz, ctz,
+                // cpop, sext.b, sext.h) — distinguished by funct6 (the
+                // top 6 bits) + rs2 field for Zbb unaries.
+                let shtype = (w >> 26) & 0x3F;
+                let shamt = ((w >> 20) & 0x3F) as u8;
+                let rs2_field = (w >> 20) & 0x1F;
+                match shtype {
+                    0b000000 => {
+                        self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Shl64, pc);
+                        if (1..=3).contains(&shamt) && rs1 != rd {
+                            self.track_shifted(rd, rs1, shamt);
+                        }
+                        let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b010010 => {
+                        self.rv_bit_imm(rd, rs1, shamt, BitOp::Clear, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBS_IMM, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b001010 => {
+                        self.rv_bit_imm(rd, rs1, shamt, BitOp::Set, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBS_IMM, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b011010 => {
+                        self.rv_bit_imm(rd, rs1, shamt, BitOp::Invert, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBS_IMM, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b011000 => {
+                        let (op, kind) = match rs2_field {
+                            0b00000 => (UnaryOp::Clz64, RV_KIND_ZBB_U1),
+                            0b00001 => (UnaryOp::Ctz64, RV_KIND_ZBB_CTZ),
+                            0b00010 => (UnaryOp::Popcnt64, RV_KIND_ZBB_U1),
+                            0b00100 => (UnaryOp::SextB, RV_KIND_ZBB_U1),
+                            0b00101 => (UnaryOp::SextH, RV_KIND_ZBB_U1),
+                            _ => {
+                                self.rv_emit_panic_at(pc);
+                                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                                return (true, false, 0);
+                            }
+                        };
+                        self.rv_unary(rd, rs1, op, pc);
+                        let term = self.feed_gas_rv(kind, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    _ => {
+                        self.rv_emit_panic_at(pc);
+                        self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                        (true, false, 0)
+                    }
+                }
+            }
+            0b101 => {
+                // SRLI / SRAI / Bexti / Rori / OrcB / Rev8.
+                let shtype = (w >> 26) & 0x3F;
+                let shamt = ((w >> 20) & 0x3F) as u8;
+                let rs2_field = (w >> 20) & 0x1F;
+                match shtype {
+                    0b000000 => {
+                        self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Shr64, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b010000 => {
+                        self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Sar64, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b010010 => {
+                        self.rv_bit_imm(rd, rs1, shamt, BitOp::Extract, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBS_IMM, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b011000 => {
+                        self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Ror64, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBB_RORI, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b001010 if rs2_field == 0b00111 => {
+                        self.rv_unary(rd, rs1, UnaryOp::OrcB, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBB_U1, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b011010 if rs2_field == 0b11000 => {
+                        self.rv_unary(rd, rs1, UnaryOp::Rev8, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBB_U1, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    _ => {
+                        self.rv_emit_panic_at(pc);
+                        self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                        (true, false, 0)
+                    }
+                }
+            }
+            _ => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                (true, false, 0)
+            }
+        }
+    }
+
+    fn compile_op_imm_32(
+        &mut self,
+        rd: u8,
+        rs1: u8,
+        f3: u8,
+        w: u32,
+        pc: u32,
+    ) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        match f3 {
+            0b000 => {
+                let imm = imm_i(w);
+                self.rv_alu_imm(rd, rs1, imm, AluImmOp::Addw, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDIW, rs1, 0, rd);
+                (term, false, 0)
+            }
+            0b001 => {
+                let f7 = (w >> 25) & 0x7F;
+                let shamt5 = ((w >> 20) & 0x1F) as u8;
+                match f7 {
+                    0b0000000 => {
+                        self.rv_shift_imm(rd, rs1, shamt5, ShiftOp::Shl32, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ADDIW, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b0000100 => {
+                        // Slli.uw — uses 6-bit shamt (RV64).
+                        let shamt6 = ((w >> 20) & 0x3F) as u8;
+                        self.rv_slliuw(rd, rs1, shamt6, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBA_IMM, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b0110000 => {
+                        let rs2_field = (w >> 20) & 0x1F;
+                        let op = match rs2_field {
+                            0b00000 => UnaryOp::Clz32,
+                            0b00001 => UnaryOp::Ctz32,
+                            0b00010 => UnaryOp::Popcnt32,
+                            _ => {
+                                self.rv_emit_panic_at(pc);
+                                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                                return (true, false, 0);
+                            }
+                        };
+                        let kind = if matches!(op, UnaryOp::Ctz32) {
+                            RV_KIND_ZBB_CTZ
+                        } else {
+                            RV_KIND_ZBB_U1
+                        };
+                        self.rv_unary(rd, rs1, op, pc);
+                        let term = self.feed_gas_rv(kind, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    _ => {
+                        self.rv_emit_panic_at(pc);
+                        self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                        (true, false, 0)
+                    }
+                }
+            }
+            0b101 => {
+                let f7 = (w >> 25) & 0x7F;
+                let shamt5 = ((w >> 20) & 0x1F) as u8;
+                match f7 {
+                    0b0000000 => {
+                        self.rv_shift_imm(rd, rs1, shamt5, ShiftOp::Shr32, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ADDIW, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b0100000 => {
+                        self.rv_shift_imm(rd, rs1, shamt5, ShiftOp::Sar32, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ADDIW, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b0110000 => {
+                        self.rv_shift_imm(rd, rs1, shamt5, ShiftOp::Ror32, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBB_RORIW, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    _ => {
+                        self.rv_emit_panic_at(pc);
+                        self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                        (true, false, 0)
+                    }
+                }
+            }
+            _ => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                (true, false, 0)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_op(
+        &mut self,
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        f3: u8,
+        f7: u8,
+        w: u32,
+        pc: u32,
+        rest: &[u8],
+    ) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        // Mul-pair fusion: a 64-bit `mul` (f7=0000001, f3=000) followed
+        // by `mulh`/`mulhu` on the SAME operand pair folds into a single
+        // x86 imul/mul that produces RDX:RAX (lo:hi). See commit
+        // `perf(pvm2): mul-pair fusion`.
+        if f7 == 0b0000001
+            && f3 == 0b000
+            && let Some(extra) = self.try_fuse_mul_pair_bytes(rd, rs1, rs2, rest, pc)
+        {
+            return (false, false, extra);
+        }
+        match (f7, f3) {
+            (0b0000000, 0b000) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Add, pc);
+                if rd != rs1 && rd != rs2 {
+                    self.track_add_scaledadd(rd, rs1, rs2);
+                }
+                let term = self.feed_gas_rv(RV_KIND_ADD, rs1, rs2, rd);
+                (term, true, 0)
+            }
+            (0b0100000, 0b000) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Sub, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADD, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b001) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shl64, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLL, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b010) => {
+                self.rv_slt_rr(rd, rs1, rs2, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLT, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b011) => {
+                // Sltu — preserve_cf so the next-instruction CF clear
+                // doesn't trample a pending Add's flags before rv_slt_rr
+                // had a chance to consume them. (Note: rv_slt_rr already
+                // handles the case where last_add_cf is stale; we just
+                // skip the post-emit clear here to mirror the legacy
+                // behaviour.)
+                self.rv_slt_rr(rd, rs1, rs2, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLT, rs1, rs2, rd);
+                (term, true, 0)
+            }
+            (0b0000000, 0b100) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Xor, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADD, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b101) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shr64, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLL, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0100000, 0b101) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Sar64, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLL, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b110) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Or, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADD, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b111) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::And, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADD, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            // M extension
+            (0b0000001, 0b000) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Mul, pc);
+                let term = self.feed_gas_rv(RV_KIND_MUL, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b001) => {
+                self.rv_mulh(rd, rs1, rs2, true, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_MULH, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b010) => {
+                self.rv_mulh(rd, rs1, rs2, true, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_MULHSU, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b011) => {
+                self.rv_mulh(rd, rs1, rs2, false, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_MULH, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b100) => {
+                self.rv_div_rem(rd, rs1, rs2, true, false, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b101) => {
+                self.rv_div_rem(rd, rs1, rs2, false, false, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b110) => {
+                self.rv_div_rem(rd, rs1, rs2, true, true, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b111) => {
+                self.rv_div_rem(rd, rs1, rs2, false, true, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            // Zbb inv / xnor / min / max
+            (0b0100000, 0b111) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Andn, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_INV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0100000, 0b110) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Orn, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_INV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0100000, 0b100) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Xnor, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_XNOR, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000101, 0b100) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Min, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_MINMAX, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000101, 0b101) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Minu, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_MINMAX, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000101, 0b110) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Max, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_MINMAX, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000101, 0b111) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Maxu, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_MINMAX, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0110000, 0b001) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Rol64, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_ROT, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0110000, 0b101) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Ror64, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_ROT, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            // Zba shift-add
+            (0b0010000, 0b010) => {
+                self.rv_shadd(rd, rs1, rs2, 1, false, pc);
+                self.record_scaledadd(rd, rs1, rs2, 1);
+                let term = self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0010000, 0b100) => {
+                self.rv_shadd(rd, rs1, rs2, 2, false, pc);
+                self.record_scaledadd(rd, rs1, rs2, 2);
+                let term = self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0010000, 0b110) => {
+                self.rv_shadd(rd, rs1, rs2, 3, false, pc);
+                self.record_scaledadd(rd, rs1, rs2, 3);
+                let term = self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            // Zbs
+            (0b0100100, 0b001) => {
+                self.rv_bit_rr(rd, rs1, rs2, BitOp::Clear, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBS, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0010100, 0b001) => {
+                self.rv_bit_rr(rd, rs1, rs2, BitOp::Set, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBS, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0110100, 0b001) => {
+                self.rv_bit_rr(rd, rs1, rs2, BitOp::Invert, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBS, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0100100, 0b101) => {
+                self.rv_bit_rr(rd, rs1, rs2, BitOp::Extract, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBS, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            // Zicond
+            (0b0000111, 0b101) => {
+                self.rv_czero(rd, rs1, rs2, Cc::E, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZICOND, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000111, 0b111) => {
+                self.rv_czero(rd, rs1, rs2, Cc::NE, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZICOND, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            // Zbb zext.h via pack rd, rs1, x0
+            (0b0000100, 0b100) if rs2 == 0 => {
+                self.rv_unary(rd, rs1, UnaryOp::ZextH, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_U1, rs1, 0, rd);
+                (term, false, 0)
+            }
+            _ => {
+                let _ = w;
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                (true, false, 0)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_op_32(
+        &mut self,
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        f3: u8,
+        f7: u8,
+        w: u32,
+        pc: u32,
+    ) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        match (f7, f3) {
+            (0b0000000, 0b000) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Addw, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0100000, 0b000) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Subw, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b001) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shl32, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLLW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b101) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shr32, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLLW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0100000, 0b101) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Sar32, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLLW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b000) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Mulw, pc);
+                let term = self.feed_gas_rv(RV_KIND_MULW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b100) => {
+                self.rv_div_rem(rd, rs1, rs2, true, false, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b101) => {
+                self.rv_div_rem(rd, rs1, rs2, false, false, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b110) => {
+                self.rv_div_rem(rd, rs1, rs2, true, true, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b111) => {
+                self.rv_div_rem(rd, rs1, rs2, false, true, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0110000, 0b001) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Rol32, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_ROTW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0110000, 0b101) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Ror32, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_ROTW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000100, 0b000) => {
+                self.rv_adduw(rd, rs1, rs2, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0010000, 0b010) => {
+                self.rv_shadd(rd, rs1, rs2, 1, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0010000, 0b100) => {
+                self.rv_shadd(rd, rs1, rs2, 2, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0010000, 0b110) => {
+                self.rv_shadd(rd, rs1, rs2, 3, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            _ => {
+                let _ = w;
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                (true, false, 0)
+            }
+        }
+    }
+
+    fn compile_lui(&mut self, rd: u8, w: u32, pc: u32) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        let imm = imm_u(w);
+        self.rv_lui(rd, imm, pc);
+        self.track_const(rd, imm);
+        let term = self.feed_gas_rv(RV_KIND_LUI, 0, 0, rd);
+        (term, false, 0)
+    }
+
+    fn compile_jal(&mut self, rd: u8, w: u32, pc: u32) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        let imm = imm_j(w);
+        let next_pc = pc + 4;
+        self.rv_jal(rd, imm, pc, next_pc);
+        let term = self.feed_gas_rv(RV_KIND_JAL, 0, 0, rd);
+        (term, false, 0)
+    }
+
+    fn compile_branch(&mut self, rs1: u8, rs2: u8, f3: u8, w: u32, pc: u32) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        let imm = imm_b(w);
+        let next_pc = pc + 4;
+        let cc = match f3 {
+            0b000 => Cc::E,
+            0b001 => Cc::NE,
+            0b100 => Cc::L,
+            0b101 => Cc::GE,
+            0b110 => Cc::B,
+            0b111 => Cc::AE,
+            _ => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                return (true, false, 0);
+            }
+        };
+        self.rv_branch(rs1, rs2, imm, cc, pc, next_pc);
+        let term = self.feed_gas_rv(RV_KIND_BRANCH, rs1, rs2, 0);
+        (term, false, 0)
+    }
+
+    fn compile_custom_0(
+        &mut self,
+        rd: u8,
+        rs1: u8,
+        f3: u8,
+        w: u32,
+        pc: u32,
+    ) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        // PVM2 custom-0 encoding:
+        //   f3=000 → trap     (other fields ignored)
+        //   f3=001 → ecall.jar
+        //   f3=010 → ecalli imm
+        //   f3=011 → br_table table_id, rs1 (rd must be 0)
+        //   f3=100 → fallthrough (terminator no-op)
+        let next_pc = pc + 4;
+        match f3 {
+            0b000 => {
+                self.rv_trap(pc);
+                let term = self.feed_gas_rv(RV_KIND_TRAP, 0, 0, 0);
+                (term, false, 0)
+            }
+            0b001 => {
+                self.rv_ecall_jar(next_pc);
+                let term = self.feed_gas_rv(RV_KIND_ECALL_JAR, 0, 0, 0);
+                (term, false, 0)
+            }
+            0b010 => {
+                let imm = imm_i(w);
+                self.rv_ecalli(imm, next_pc);
+                let term = self.feed_gas_rv(RV_KIND_ECALLI, 0, 0, 0);
+                (term, false, 0)
+            }
+            0b011 => {
+                if rd != 0 {
+                    self.rv_emit_panic_at(pc);
+                    self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                    return (true, false, 0);
+                }
+                let table_id = ((w >> 20) & 0xFFF) as u16;
+                self.rv_br_table(table_id, rs1, pc, next_pc);
+                let term = self.feed_gas_rv(RV_KIND_BR_TABLE, rs1, 0, 0);
+                (term, false, 0)
+            }
+            0b100 => {
+                let term = self.feed_gas_rv(RV_KIND_FALLTHROUGH, 0, 0, 0);
+                (term, false, 0)
+            }
+            _ => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                (true, false, 0)
+            }
+        }
+    }
+
+    /// Byte-based Mul-pair fusion: a 64-bit `mul rd1, rs1, rs2` followed
+    /// by `mulh`/`mulhu rd2, rs1, rs2` (same operand pair, different
+    /// destination) folds into a single x86 mul/imul that produces
+    /// RDX:RAX. Returns `Some(extra_bytes_consumed)` on success.
+    fn try_fuse_mul_pair_bytes(
+        &mut self,
+        m_rd: u8,
+        m_rs1: u8,
+        m_rs2: u8,
+        rest: &[u8],
+        _pc: u32,
+    ) -> Option<usize> {
+        use javm_exec::gas_cost::*;
+        if rest.len() < 4 {
+            return None;
+        }
+        let w2 = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+        // Mulh: f7=0000001 f3=001. Mulhu: f7=0000001 f3=011.
+        // Mask catches both: opcode 0x33 + f7=1 + (f3=001 or f3=011).
+        let signed = match w2 & 0xFE00_707F {
+            0x0200_1033 => true,  // Mulh
+            0x0200_3033 => false, // Mulhu
+            _ => return None,
+        };
+        let u_rd = ((w2 >> 7) & 0x1F) as u8;
+        let u_rs1 = ((w2 >> 15) & 0x1F) as u8;
+        let u_rs2 = ((w2 >> 20) & 0x1F) as u8;
+        if u_rs1 != m_rs1 || u_rs2 != m_rs2 || u_rd == m_rd {
+            return None;
+        }
+        if rv_is_reserved(m_rd) || rv_is_reserved(u_rd) {
+            return None;
+        }
+        if rv_is_reserved(m_rs1) || rv_is_reserved(m_rs2) {
+            return None;
+        }
+        let (rs1_slot, rs2_slot) = (rv_slot(m_rs1)?, rv_slot(m_rs2)?);
+        let (lo_slot, hi_slot) = (rv_slot(m_rd)?, rv_slot(u_rd)?);
+
+        let a = REG_MAP[rs1_slot];
+        let b = REG_MAP[rs2_slot];
+        let rd_lo = REG_MAP[lo_slot];
+        let rd_hi = REG_MAP[hi_slot];
+        let phi11 = REG_MAP[11];
+
+        let need_save_phi11 = rd_lo != phi11 && rd_hi != phi11;
+        if need_save_phi11 {
+            self.asm.push(phi11);
+        }
+        let mul_src = if b == phi11 {
+            if need_save_phi11 {
+                self.asm.mov_load64(SCRATCH, Reg::RSP, 0);
+            } else {
+                self.asm.mov_rr(SCRATCH, b);
+            }
+            SCRATCH
+        } else {
+            b
+        };
+        if a != phi11 {
+            self.asm.mov_rr(phi11, a);
+        }
+        if signed {
+            self.asm.imul_rdx_rax(mul_src);
+        } else {
+            self.asm.mul_rdx_rax(mul_src);
+        }
+        if rd_lo != phi11 {
+            self.asm.mov_rr(rd_lo, phi11);
+        }
+        if rd_hi != Reg::RDX {
+            self.asm.mov_rr(rd_hi, Reg::RDX);
+        }
+        if need_save_phi11 {
+            self.asm.pop(phi11);
+        }
+
+        self.invalidate_reg(lo_slot);
+        self.invalidate_reg(hi_slot);
+        self.last_add_cf = None;
+
+        // Feed gas for both consumed instructions (Mul + Mulh/Mulhu).
+        // Both Mulh and Mulhu use RV_KIND_MULH per the gas table.
+        let _ = signed;
+        self.feed_gas_rv(RV_KIND_MUL, m_rs1, m_rs2, m_rd);
+        self.feed_gas_rv(RV_KIND_MULH, u_rs1, u_rs2, u_rd);
+
+        Some(4)
+    }
+
+    /// Legacy: single match over `RvInst`. Used only by the predecode
+    /// path's smoke testing; the streaming compile loop now dispatches
+    /// directly on raw bytes via [`Compiler::compile_rv4`] /
+    /// [`Compiler::compile_rvc`]. Each arm:
     ///
     /// 1. Calls its `rv_*` emit helper.
     /// 2. Calls `self.feed_gas_rv(KIND, rs1, rs2, rd)` — the kind is a
@@ -2106,233 +3060,6 @@ impl Compiler {
         self.reg_defs[d] = RegDef::ScaledAdd { base, idx, shift };
         self.reg_defs_active |= 1u16 << d;
         self.invalidate_dependents(d);
-    }
-
-    // ----------------------------------------------------------------
-    // Phase 2: multiply-pair fusion (streaming).
-    //
-    // Detect `mul D_lo, A, B` immediately followed by
-    // `mulhu/mulh D_hi, A, B` and emit a single x86 `mul`/`imul`
-    // producing the 128-bit result in rdx:rax.
-    //
-    // `cur_inst` is the already-decoded current Mul; the next inst is
-    // decoded from `code[pc + cur_len..]`. Mul is never a terminator,
-    // so the next inst can never be a gas-block boundary (the previous
-    // terminator would have ended the block before).
-    //
-    // mulhsu (signed×unsigned high) requires correction logic that x86
-    // doesn't fold into one instruction; skip.
-    //
-    // Returns `Some(consumed_bytes)` = cur_len + next_len on success.
-    // None means no fusion; caller proceeds with the normal per-op
-    // dispatch. On success, both insts' gas costs are fed to `gas_sim`.
-    // ----------------------------------------------------------------
-    fn try_fuse_rv_mul_pair_streaming(
-        &mut self,
-        code: &[u8],
-        pc: usize,
-        cur_len: usize,
-        cur_inst: RvInst,
-    ) -> Option<usize> {
-        let (m_rd, m_rs1, m_rs2) = match cur_inst {
-            RvInst::Mul { rd, rs1, rs2 } => (rd, rs1, rs2),
-            _ => return None,
-        };
-        let next_pc = pc + cur_len;
-        if next_pc >= code.len() {
-            return None;
-        }
-        let (next_inst, next_len) = decode(&code[next_pc..])?;
-        let (u_rd, u_rs1, u_rs2, signed) = match next_inst {
-            RvInst::Mulhu { rd, rs1, rs2 } => (rd, rs1, rs2, false),
-            RvInst::Mulh { rd, rs1, rs2 } => (rd, rs1, rs2, true),
-            _ => return None,
-        };
-        // Both must reference the same source pair, and the two destinations
-        // must differ (otherwise only one of {lo, hi} would be observable).
-        if u_rs1 != m_rs1 || u_rs2 != m_rs2 || u_rd == m_rd {
-            return None;
-        }
-        // Reserved-x3/x4 must not appear; x0 destinations are silently
-        // unobservable, but for simplicity require both dests to be real.
-        if rv_is_reserved(m_rd) || rv_is_reserved(u_rd) {
-            return None;
-        }
-        if rv_is_reserved(m_rs1) || rv_is_reserved(m_rs2) {
-            return None;
-        }
-        let (Some(rs1_slot), Some(rs2_slot)) = (rv_slot(m_rs1), rv_slot(m_rs2)) else {
-            // m_rs1 or m_rs2 is x0 — multiplying by 0 is a degenerate case,
-            // not worth fusing (the per-op fallback handles it correctly
-            // anyway).
-            return None;
-        };
-        let (Some(lo_slot), Some(hi_slot)) = (rv_slot(m_rd), rv_slot(u_rd)) else {
-            return None;
-        };
-
-        let a = REG_MAP[rs1_slot];
-        let b = REG_MAP[rs2_slot];
-        let rd_lo = REG_MAP[lo_slot];
-        let rd_hi = REG_MAP[hi_slot];
-        let phi11 = REG_MAP[11]; // RAX
-
-        // Strategy (same as PVM's try_fuse_mul_pair_raw):
-        //   1. Save φ[11] if neither rd_lo nor rd_hi will overwrite RAX.
-        //   2. Move A into RAX, B into a non-RAX/RDX register (= mul_src).
-        //   3. mul/imul mul_src → RDX:RAX.
-        //   4. Move RAX → rd_lo, RDX → rd_hi.
-        //   5. Restore φ[11].
-        let need_save_phi11 = rd_lo != phi11 && rd_hi != phi11;
-        if need_save_phi11 {
-            self.asm.push(phi11);
-        }
-
-        let mul_src = if b == phi11 {
-            if need_save_phi11 {
-                self.asm.mov_load64(SCRATCH, Reg::RSP, 0);
-            } else {
-                self.asm.mov_rr(SCRATCH, b);
-            }
-            SCRATCH
-        } else {
-            b
-        };
-
-        if a != phi11 {
-            self.asm.mov_rr(phi11, a);
-        }
-
-        if signed {
-            self.asm.imul_rdx_rax(mul_src);
-        } else {
-            self.asm.mul_rdx_rax(mul_src);
-        }
-
-        if rd_lo != phi11 {
-            self.asm.mov_rr(rd_lo, phi11);
-        }
-        // rd_hi from RDX (SCRATCH). rd_hi can never equal SCRATCH (SCRATCH
-        // isn't a PVM-mapped register), so the unconditional mov is safe.
-        self.asm.mov_rr(rd_hi, SCRATCH);
-
-        if need_save_phi11 {
-            self.asm.pop(phi11);
-        }
-
-        // Both destinations changed; clear any tracking on them.
-        self.invalidate_reg(lo_slot);
-        self.invalidate_reg(hi_slot);
-        // mul/imul clobbers CF; a subsequent Sltu must not fuse against
-        // a stale prior-add's flags.
-        self.last_add_cf = None;
-
-        // Feed gas for both consumed instructions via the unified
-        // kind-driven path (same path the per-arm `feed_gas_rv` calls
-        // hit).
-        let m1 = rv_gas_meta(&cur_inst);
-        rv_feed_gas_direct(&m1, &mut self.gas_sim, self.mem_cycles);
-        let m2 = rv_gas_meta(&next_inst);
-        rv_feed_gas_direct(&m2, &mut self.gas_sim, self.mem_cycles);
-
-        Some(cur_len + next_len as usize)
-    }
-
-    /// Phase 8 lookahead: fuse `ld rd1, [rs1+imm]; add rd2, rd1, rs2`
-    /// (and the commutative `add rd2, rs2, rd1`) by emitting both
-    /// instructions back-to-back without re-entering the main streaming
-    /// loop. The emitted x86 is byte-identical to the per-arm path; the
-    /// saving is purely the second iteration's decode + match dispatch
-    /// + feed_gas + CF-clear overhead.
-    ///
-    /// Ld→Add is the largest unfused chained pair in the gap-driving
-    /// guests: 4.81% of ed25519 RV instructions (~1358 occurrences),
-    /// 3.17% of ecrecover. The shape comes from base+offset memory
-    /// reads whose result is immediately combined with another value.
-    ///
-    /// Returns `Some(consumed_bytes)` when both instructions are
-    /// folded; `None` otherwise (the caller falls through to the
-    /// per-arm path).
-    fn try_fuse_rv_ld_add_streaming(
-        &mut self,
-        code: &[u8],
-        pc: usize,
-        cur_len: usize,
-        cur_inst: RvInst,
-    ) -> Option<usize> {
-        use javm_exec::gas_cost::{RV_KIND_ADD, RV_KIND_LOAD};
-
-        let (l_rd, l_rs1, l_imm) = match cur_inst {
-            RvInst::Ld { rd, rs1, imm } => (rd, rs1, imm),
-            _ => return None,
-        };
-        // Loads occur at ~19% of all RV instructions on the gap-driving
-        // guests, so the fast-fail path here has to be cheap or the
-        // check eats more than the fusion saves. Order the cheapest
-        // rejections first and inspect the next instruction's raw
-        // bytes directly — skipping the full `decode()` whenever the
-        // 4-byte word doesn't carry an Add encoding.
-        if l_rd == 0 || rv_is_reserved(l_rd) || rv_is_reserved(l_rs1) {
-            return None;
-        }
-        let next_pc = pc + cur_len;
-        if next_pc + 4 > code.len() {
-            return None;
-        }
-        let w = u32::from_le_bytes([
-            code[next_pc],
-            code[next_pc + 1],
-            code[next_pc + 2],
-            code[next_pc + 3],
-        ]);
-        // RV `add` is OP-OP (opcode 0x33), funct3=0, funct7=0. The mask
-        // `0xFE00_707F` covers opcode + funct3 + funct7; only the
-        // register fields are allowed to vary.
-        if w & 0xFE00_707F != 0x0000_0033 {
-            return None;
-        }
-        let a_rd = ((w >> 7) & 0x1F) as u8;
-        let a_rs1 = ((w >> 15) & 0x1F) as u8;
-        let a_rs2 = ((w >> 20) & 0x1F) as u8;
-        // Add must have a real destination and consume the loaded value
-        // as one of its sources.
-        if a_rd == 0 || rv_is_reserved(a_rd) {
-            return None;
-        }
-        if a_rs1 != l_rd && a_rs2 != l_rd {
-            return None;
-        }
-        // rs1/rs2 reserved-source guard: rv_alu_rr would emit a panic
-        // stub for these, which would break the fusion's gas accounting.
-        // x0 is allowed (rv_alu_rr's Add path has explicit x0 fast
-        // paths for the canonical `mv` form).
-        if a_rs1 != 0 && rv_is_reserved(a_rs1) {
-            return None;
-        }
-        if a_rs2 != 0 && rv_is_reserved(a_rs2) {
-            return None;
-        }
-
-        // Emit Ld + Add exactly as the per-arm path would (same helpers,
-        // same gas-kind constants, same tracking promotion). The x86
-        // output is byte-identical to the unfused two-iteration emit;
-        // the win is purely skipping the second iteration's decode +
-        // match dispatch + feed_gas + CF-clear overhead.
-        self.rv_load(l_rd, l_rs1, l_imm, 8, /*signed=*/ false, pc as u32);
-        self.feed_gas_rv(RV_KIND_LOAD, l_rs1, 0, l_rd);
-
-        self.rv_alu_rr(a_rd, a_rs1, a_rs2, AluOp::Add, next_pc as u32);
-        if a_rd != a_rs1 && a_rd != a_rs2 {
-            self.track_add_scaledadd(a_rd, a_rs1, a_rs2);
-        }
-        self.feed_gas_rv(RV_KIND_ADD, a_rs1, a_rs2, a_rd);
-        // CF bookkeeping: rv_alu_rr's Add path sets `last_add_cf` when
-        // appropriate, and the trailing Add IS an Add (the main loop's
-        // post-emit CF clear would have preserved it anyway), so the
-        // post-fusion state matches what the unfused two-iteration walk
-        // would have left.
-
-        Some(cur_len + 4)
     }
 }
 
