@@ -31,7 +31,6 @@ use super::codegen::{
 use javm_exec::gas_cost::{rv_feed_gas_direct, rv_gas_meta};
 use javm_exec::gas_sim::GasSimulator;
 use javm_exec::rv_instruction::{RvInst, decode};
-use javm_exec::rv_predecode::is_terminator;
 pub use javm_exec::rv_predecode::{RvPredecode, predecode_rv};
 
 /// Map an RV register index to its PVM slot (0..=12).
@@ -151,8 +150,11 @@ impl Compiler {
             }
 
             // Feed gas for this instruction via the LUT fast path.
+            // rv_feed_gas_direct returns is_terminator — reuse it to
+            // avoid a separate is_terminator match downstream.
             let meta = rv_gas_meta(&inst);
-            rv_feed_gas_direct(&meta, &mut gas_sim, mem_cycles);
+            let inst_is_terminator =
+                rv_feed_gas_direct(&meta, &mut gas_sim, mem_cycles);
 
             // Emit.
             self.compile_rv_instruction(inst, inst_pc, next_pc);
@@ -167,7 +169,7 @@ impl Compiler {
                 self.last_add_cf = None;
             }
 
-            if is_terminator(&inst) {
+            if inst_is_terminator {
                 next_is_gas_start = true;
             }
 
