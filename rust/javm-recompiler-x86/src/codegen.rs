@@ -130,7 +130,7 @@ pub struct HelperFns {
 
 /// Tracks what a PVM register was last set to, for peephole optimization.
 #[derive(Clone, Copy, Debug)]
-enum RegDef {
+pub(crate) enum RegDef {
     /// Unknown or complex value.
     Unknown,
     /// Known compile-time constant (32-bit address or immediate).
@@ -168,15 +168,15 @@ pub struct Compiler {
     pub(crate) bitmask_ptr: *const u8,
     pub(crate) bitmask_len: usize,
     /// Peephole: tracks how each PVM register was last defined.
-    reg_defs: [RegDef; 13],
+    pub(crate) reg_defs: [RegDef; 13],
     /// Bitmask of registers that have non-Unknown reg_defs (for fast invalidation).
-    reg_defs_active: u16,
+    pub(crate) reg_defs_active: u16,
     /// Carry flag fusion: after an `add64 D, A, B`, CF = overflow(A+B).
     /// Stores (D, A, B) so that a subsequent `setLtU C, D, A` or `setLtU C, D, B`
     /// can use CF directly instead of emitting a redundant `cmp`.
     /// Cleared by any instruction that clobbers flags (i.e., everything except the
     /// immediately following setLtU).
-    last_add_cf: Option<(usize, usize, usize)>,
+    pub(crate) last_add_cf: Option<(usize, usize, usize)>,
     /// Trap table for signal-based bounds checking: (native_offset, pvm_pc).
     pub(crate) trap_entries: Vec<(u32, u32)>,
     /// Memory tier load/store cycles for gas simulation.
@@ -908,7 +908,13 @@ impl Compiler {
     /// Emit memory read with bounds check (cold fault path).
     /// Hot path: cmp + jae + load (2 instructions, no extra stores).
     /// No bounds check — SIGSEGV handler catches OOB.
-    pub(crate) fn emit_mem_read_sized(&mut self, dst: Reg, fn_addr: u64, width_bytes: u32, pvm_pc: u32) {
+    pub(crate) fn emit_mem_read_sized(
+        &mut self,
+        dst: Reg,
+        fn_addr: u64,
+        width_bytes: u32,
+        pvm_pc: u32,
+    ) {
         let w = if width_bytes > 0 {
             width_bytes
         } else if fn_addr == self.helpers.mem_read_u8 {
@@ -946,7 +952,13 @@ impl Compiler {
 
     /// Emit memory write with bounds check (cold fault path).
     /// No bounds check — SIGSEGV handler catches OOB.
-    pub(crate) fn emit_mem_write(&mut self, _addr_in_scratch: bool, val_reg: Reg, fn_addr: u64, pvm_pc: u32) {
+    pub(crate) fn emit_mem_write(
+        &mut self,
+        _addr_in_scratch: bool,
+        val_reg: Reg,
+        fn_addr: u64,
+        pvm_pc: u32,
+    ) {
         let w = if fn_addr == self.helpers.mem_write_u8 {
             1u32
         } else if fn_addr == self.helpers.mem_write_u16 {
@@ -1044,7 +1056,7 @@ impl Compiler {
 
     /// Invalidate any reg_defs that depend on `reg`, but NOT reg itself.
     #[inline]
-    fn invalidate_dependents(&mut self, reg: usize) {
+    pub(crate) fn invalidate_dependents(&mut self, reg: usize) {
         // Only iterate registers that have active (non-Unknown) defs
         let mut active = self.reg_defs_active & !(1u16 << reg);
         while active != 0 {
@@ -1072,7 +1084,7 @@ impl Compiler {
 
     /// Invalidate all register definitions (on block boundaries, calls, etc.)
     #[inline]
-    fn invalidate_all_regs(&mut self) {
+    pub(crate) fn invalidate_all_regs(&mut self) {
         self.reg_defs = [RegDef::Unknown; 13];
         self.reg_defs_active = 0;
     }
@@ -2364,7 +2376,13 @@ impl Compiler {
     // === Helper emission methods ===
 
     /// Emit a static branch (validated at compile time).
-    pub(crate) fn emit_static_branch(&mut self, target: u32, condition: bool, _fallthrough: u32, pc: u32) {
+    pub(crate) fn emit_static_branch(
+        &mut self,
+        target: u32,
+        condition: bool,
+        _fallthrough: u32,
+        pc: u32,
+    ) {
         if !condition {
             return;
         }
@@ -2511,7 +2529,15 @@ impl Compiler {
     }
 
     /// Emit a branch comparing two registers.
-    pub(crate) fn emit_branch_reg(&mut self, a: Reg, b: Reg, cc: Cc, target: u32, _fallthrough: u32, pc: u32) {
+    pub(crate) fn emit_branch_reg(
+        &mut self,
+        a: Reg,
+        b: Reg,
+        cc: Cc,
+        target: u32,
+        _fallthrough: u32,
+        pc: u32,
+    ) {
         if !self.is_basic_block_start(target) {
             self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
             self.asm.cmp_rr(a, b);

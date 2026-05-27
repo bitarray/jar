@@ -2270,28 +2270,30 @@ pub fn rv_fast_cost(inst: &crate::rv_instruction::RvInst, mem_cycles: u8) -> Fas
     let dst_src_overlap = |dst: u8, s: u16| (rv_reg_bit(dst) & s) != 0;
 
     // Helper constructors.
-    let mk = |cycles: u8, decode_slots: u8, exec_unit: u8, src_mask: u16, dst_mask: u16| -> FastCost {
-        FastCost {
-            cycles,
-            decode_slots,
-            exec_unit,
-            src_mask,
-            dst_mask,
-            is_terminator: false,
-            is_move_reg: false,
-        }
-    };
-    let mkt = |cycles: u8, decode_slots: u8, exec_unit: u8, src_mask: u16, dst_mask: u16| -> FastCost {
-        FastCost {
-            cycles,
-            decode_slots,
-            exec_unit,
-            src_mask,
-            dst_mask,
-            is_terminator: true,
-            is_move_reg: false,
-        }
-    };
+    let mk =
+        |cycles: u8, decode_slots: u8, exec_unit: u8, src_mask: u16, dst_mask: u16| -> FastCost {
+            FastCost {
+                cycles,
+                decode_slots,
+                exec_unit,
+                src_mask,
+                dst_mask,
+                is_terminator: false,
+                is_move_reg: false,
+            }
+        };
+    let mkt =
+        |cycles: u8, decode_slots: u8, exec_unit: u8, src_mask: u16, dst_mask: u16| -> FastCost {
+            FastCost {
+                cycles,
+                decode_slots,
+                exec_unit,
+                src_mask,
+                dst_mask,
+                is_terminator: true,
+                is_move_reg: false,
+            }
+        };
 
     match *inst {
         // ---- Loads (mirrors PVM 52..=58 / 124..=130) -----------------
@@ -2301,17 +2303,13 @@ pub fn rv_fast_cost(inst: &crate::rv_instruction::RvInst, mem_cycles: u8) -> Fas
         | RvInst::Ld { rd, rs1, .. }
         | RvInst::Lbu { rd, rs1, .. }
         | RvInst::Lhu { rd, rs1, .. }
-        | RvInst::Lwu { rd, rs1, .. } => {
-            mk(mem_cycles, 1, EU_LOAD, r1(rs1), r1(rd))
-        }
+        | RvInst::Lwu { rd, rs1, .. } => mk(mem_cycles, 1, EU_LOAD, r1(rs1), r1(rd)),
 
         // ---- Stores (mirrors PVM 59..=62 / 120..=123) ----------------
         RvInst::Sb { rs1, rs2, .. }
         | RvInst::Sh { rs1, rs2, .. }
         | RvInst::Sw { rs1, rs2, .. }
-        | RvInst::Sd { rs1, rs2, .. } => {
-            mk(mem_cycles, 1, EU_STORE, r2(rs1, rs2), 0)
-        }
+        | RvInst::Sd { rs1, rs2, .. } => mk(mem_cycles, 1, EU_STORE, r2(rs1, rs2), 0),
 
         // ---- Upper immediate (mirrors PVM load_imm_64 = 1/2/NONE) ----
         RvInst::Lui { rd, .. } => mk(1, 2, EU_NONE, 0, r1(rd)),
@@ -2395,9 +2393,7 @@ pub fn rv_fast_cost(inst: &crate::rv_instruction::RvInst, mem_cycles: u8) -> Fas
         RvInst::Mulh { rd, rs1, rs2 } | RvInst::Mulhu { rd, rs1, rs2 } => {
             mk(4, 4, EU_MUL, r2(rs1, rs2), r1(rd))
         }
-        RvInst::Mulhsu { rd, rs1, rs2 } => {
-            mk(6, 4, EU_MUL, r2(rs1, rs2), r1(rd))
-        }
+        RvInst::Mulhsu { rd, rs1, rs2 } => mk(6, 4, EU_MUL, r2(rs1, rs2), r1(rd)),
 
         // ---- M extension: divide / remainder (mirrors PVM 193-196/203-206 = 60/4/DIV) ----
         RvInst::Div { rd, rs1, rs2 }
@@ -2421,9 +2417,7 @@ pub fn rv_fast_cost(inst: &crate::rv_instruction::RvInst, mem_cycles: u8) -> Fas
         | RvInst::OrcB { rd, rs1 } => mk(1, 1, EU_ALU, r1(rs1), r1(rd)),
 
         // ---- Zbb 2-cycle ctz (mirrors PVM 106/107) ----
-        RvInst::Ctz { rd, rs1 } | RvInst::Ctzw { rd, rs1 } => {
-            mk(2, 1, EU_ALU, r1(rs1), r1(rd))
-        }
+        RvInst::Ctz { rd, rs1 } | RvInst::Ctzw { rd, rs1 } => mk(2, 1, EU_ALU, r1(rs1), r1(rd)),
 
         // ---- Zbb min/max (mirrors PVM 227..=230) ----
         RvInst::Min { rd, rs1, rs2 }
@@ -2774,9 +2768,21 @@ pub fn rv_gas_meta(inst: &crate::rv_instruction::RvInst) -> crate::rv_predecode:
     let entry = &RV_GAS_COST_LUT[kind as usize];
     // Pre-mask the register fields per the LUT's reg patterns so the
     // hot path doesn't have to consult `src_pat` / `dst_pat`.
-    let src1_slot = if entry.src_pat >= 1 { rv_slot_u8(rs1) } else { 0xFF };
-    let src2_slot = if entry.src_pat == 2 { rv_slot_u8(rs2) } else { 0xFF };
-    let dst_slot = if entry.dst_pat == 1 { rv_slot_u8(rd) } else { 0xFF };
+    let src1_slot = if entry.src_pat >= 1 {
+        rv_slot_u8(rs1)
+    } else {
+        0xFF
+    };
+    let src2_slot = if entry.src_pat == 2 {
+        rv_slot_u8(rs2)
+    } else {
+        0xFF
+    };
+    let dst_slot = if entry.dst_pat == 1 {
+        rv_slot_u8(rd)
+    } else {
+        0xFF
+    };
     crate::rv_predecode::RvGasMeta {
         kind,
         src1_slot,
@@ -2824,10 +2830,9 @@ fn rv_op_metadata(inst: &crate::rv_instruction::RvInst) -> (u8, u8, u8, u8) {
         | Lwu { rd, rs1, .. } => (RV_KIND_LOAD, rs1, 0, rd),
 
         // Stores
-        Sb { rs1, rs2, .. }
-        | Sh { rs1, rs2, .. }
-        | Sw { rs1, rs2, .. }
-        | Sd { rs1, rs2, .. } => (RV_KIND_STORE, rs1, rs2, 0),
+        Sb { rs1, rs2, .. } | Sh { rs1, rs2, .. } | Sw { rs1, rs2, .. } | Sd { rs1, rs2, .. } => {
+            (RV_KIND_STORE, rs1, rs2, 0)
+        }
 
         // Upper immediate
         Lui { rd, .. } => (RV_KIND_LUI, 0, 0, rd),
@@ -2932,9 +2937,7 @@ fn rv_op_metadata(inst: &crate::rv_instruction::RvInst) -> (u8, u8, u8, u8) {
         | Bexti { rd, rs1, .. } => (RV_KIND_ZBS_IMM, rs1, 0, rd),
 
         // Zicond
-        CzeroEqz { rd, rs1, rs2 } | CzeroNez { rd, rs1, rs2 } => {
-            (RV_KIND_ZICOND, rs1, rs2, rd)
-        }
+        CzeroEqz { rd, rs1, rs2 } | CzeroNez { rd, rs1, rs2 } => (RV_KIND_ZICOND, rs1, rs2, rd),
     }
 }
 

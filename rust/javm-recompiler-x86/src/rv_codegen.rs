@@ -90,12 +90,24 @@ impl Compiler {
 
         self.emit_prologue();
 
-        for (i, inst) in pd.insts.iter().enumerate() {
+        let mut i = 0usize;
+        while i < pd.insts.len() {
             self.asm.ensure_capacity(512);
-            if inst.is_gas_block_start {
-                self.bind_rv_gas_block_start(inst.pc, block_cost[i]);
+            let pdi = &pd.insts[i];
+            if pdi.is_gas_block_start {
+                self.bind_rv_gas_block_start(pdi.pc, block_cost[i]);
             }
-            self.compile_rv_instruction(inst.inst, inst.pc, inst.next_pc);
+            // Phase 2: try multi-instruction fusions before the per-op
+            // dispatch. On success, advance past the consumed window and
+            // skip the normal compile path; reg_defs is invalidated by
+            // the fusion routine itself.
+            if let Some(advance) = self.try_fuse_rv_mul_pair(&pd.insts, i) {
+                i += advance;
+                continue;
+            }
+            self.compile_rv_instruction(pdi.inst, pdi.pc, pdi.next_pc);
+            self.update_reg_defs_rv(&pdi.inst);
+            i += 1;
         }
 
         self.emit_exit_sequences();
@@ -126,6 +138,13 @@ impl Compiler {
         let label = Label(self.label_base + pc);
         self.asm.bind_label(label);
         self.gas_block_pcs.push(pc);
+
+        // Peephole state must not leak across gas-block boundaries: the
+        // dispatch table can enter this block from any predecessor, so
+        // anything we tracked from the previous instruction stream is
+        // not necessarily true on entry.
+        self.invalidate_all_regs();
+        self.last_add_cf = None;
 
         let stub_label = self.asm.new_label();
         self.asm.sub_r64_imm32_patchable(GAS, cost as i32);
@@ -276,9 +295,7 @@ impl Compiler {
             // PVM2 control flow. br_table dispatches through a per-
             // function jump table; fallthrough is a no-op terminator
             // (just a bb_start marker handled by predecode).
-            RvInst::BrTable { table_id, rs1 } => {
-                self.rv_br_table(table_id, rs1, pc, next_pc)
-            }
+            RvInst::BrTable { table_id, rs1 } => self.rv_br_table(table_id, rs1, pc, next_pc),
             RvInst::Fallthrough => {}
 
             RvInst::Reserved { .. } => self.rv_emit_panic_at(pc),
@@ -1421,6 +1438,241 @@ impl Compiler {
         self.asm
             .mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_PANIC as i32);
         self.asm.jmp_label(self.exit_label);
+    }
+
+    // ----------------------------------------------------------------
+    // Peephole tracking — RV-side analogue of update_reg_defs.
+    //
+    // Called by the main compile_rv loop after every per-op handler.
+    // For the handful of opcodes that produce trackable patterns we
+    // record the new definition; the per-op handler has already
+    // cleared rd via invalidate_reg, so for non-trackable opcodes we
+    // just need to leave reg_defs alone.
+    // ----------------------------------------------------------------
+    fn update_reg_defs_rv(&mut self, inst: &RvInst) {
+        use super::codegen::RegDef;
+        // Helper: record def for rd (RV reg index). x0/x3/x4 short-circuit.
+        // Returns true if recorded (so caller can skip the fall-through).
+        let _ = (); // doc anchor
+
+        match *inst {
+            // `addi rd, x0, imm`  — canonical RV "li rd, imm".
+            //
+            // Track as Const so address-formation peepholes (PVM-style
+            // emit_addr_to_scratch fold) can fire. Const stores u32 — the
+            // common addressing case fits, and Addi with x0+imm fits in i32
+            // anyway, so sign-extension into u32 is fine.
+            RvInst::Addi { rd, rs1: 0, imm } => {
+                if let Some(slot) = rv_slot(rd) {
+                    self.reg_defs[slot] = RegDef::Const(imm as u32);
+                    self.reg_defs_active |= 1u16 << slot;
+                    self.invalidate_dependents(slot);
+                }
+            }
+            // `lui rd, imm` — imm field already carries the shifted value
+            // (decode_lui in rv_instruction.rs does `imm = w & 0xFFFF_F000`).
+            RvInst::Lui { rd, imm } => {
+                if let Some(slot) = rv_slot(rd) {
+                    self.reg_defs[slot] = RegDef::Const(imm as u32);
+                    self.reg_defs_active |= 1u16 << slot;
+                    self.invalidate_dependents(slot);
+                }
+            }
+            // `slli rd, rs, sh` with sh ∈ {1,2,3}: track as Shifted so a
+            // following Add can promote to ScaledAdd for SIB-style LEA.
+            // Self-aliasing (rs == rd) overwrites the source value and
+            // would make Shifted{src=rd} self-referential — skip.
+            RvInst::Slli { rd, rs1, shamt } if (1..=3).contains(&shamt) && rs1 != rd => {
+                if let (Some(d), Some(s)) = (rv_slot(rd), rv_slot(rs1)) {
+                    self.reg_defs[d] = RegDef::Shifted {
+                        src: s,
+                        shift: shamt,
+                    };
+                    self.reg_defs_active |= 1u16 << d;
+                    self.invalidate_dependents(d);
+                }
+            }
+            // `add rd, rs1, rs2` — promote to ScaledAdd when one operand
+            // is a tracked Shifted def. Mirrors PVM's update_reg_defs
+            // for Add64, minus the in-place doubling case (which RV
+            // expresses as `slli rd, rd, 1`).
+            RvInst::Add { rd, rs1, rs2 } => {
+                let d = match rv_slot(rd) {
+                    Some(s) => s,
+                    None => return,
+                };
+                let s1 = rv_slot(rs1);
+                let s2 = rv_slot(rs2);
+                let def = match (s1, s2) {
+                    (Some(a), Some(b)) => {
+                        if let RegDef::Shifted { src, shift } = self.reg_defs[b] {
+                            Some(RegDef::ScaledAdd {
+                                base: a,
+                                idx: src,
+                                shift,
+                            })
+                        } else if let RegDef::Shifted { src, shift } = self.reg_defs[a] {
+                            Some(RegDef::ScaledAdd {
+                                base: b,
+                                idx: src,
+                                shift,
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some(def) = def {
+                    self.reg_defs[d] = def;
+                    self.reg_defs_active |= 1u16 << d;
+                    self.invalidate_dependents(d);
+                }
+                // else: per-op handler already invalidated rd; nothing to do.
+            }
+            // Zba shift-add: `rd = rs2 + (rs1 << shift)`. This is exactly
+            // ScaledAdd{base:rs2, idx:rs1, shift}. lld emits these directly
+            // for indexed access, which is the cleanest fusion target.
+            RvInst::Sh1add { rd, rs1, rs2 } => {
+                self.record_scaledadd(rd, rs1, rs2, 1);
+            }
+            RvInst::Sh2add { rd, rs1, rs2 } => {
+                self.record_scaledadd(rd, rs1, rs2, 2);
+            }
+            RvInst::Sh3add { rd, rs1, rs2 } => {
+                self.record_scaledadd(rd, rs1, rs2, 3);
+            }
+            _ => {
+                // Non-trackable. Per-op handler's invalidate_reg has
+                // already cleared rd; nothing to do here.
+            }
+        }
+    }
+
+    /// Helper for Sh{1,2,3}add → ScaledAdd tracking.
+    #[inline]
+    fn record_scaledadd(&mut self, rd: u8, rs1: u8, rs2: u8, shift: u8) {
+        use super::codegen::RegDef;
+        let (Some(d), Some(idx), Some(base)) = (rv_slot(rd), rv_slot(rs1), rv_slot(rs2)) else {
+            return;
+        };
+        self.reg_defs[d] = RegDef::ScaledAdd { base, idx, shift };
+        self.reg_defs_active |= 1u16 << d;
+        self.invalidate_dependents(d);
+    }
+
+    // ----------------------------------------------------------------
+    // Phase 2: multiply-pair fusion.
+    //
+    // Detect `mul D_lo, A, B` immediately followed by
+    // `mulhu/mulh D_hi, A, B` and emit a single x86 `mul`/`imul`
+    // producing the 128-bit result in rdx:rax.
+    //
+    // mulhsu (signed×unsigned high) requires correction logic that x86
+    // doesn't fold into one instruction; skip.
+    //
+    // Returns Some(advance) on success (the number of pd.insts entries
+    // consumed — always 2). None means no fusion; caller proceeds with
+    // the normal per-op dispatch.
+    // ----------------------------------------------------------------
+    fn try_fuse_rv_mul_pair(
+        &mut self,
+        insts: &[javm_exec::rv_predecode::RvPreDecodedInst],
+        i: usize,
+    ) -> Option<usize> {
+        let cur = &insts[i];
+        let (m_rd, m_rs1, m_rs2) = match cur.inst {
+            RvInst::Mul { rd, rs1, rs2 } => (rd, rs1, rs2),
+            _ => return None,
+        };
+        let next = insts.get(i + 1)?;
+        // Don't cross gas-block boundaries: the next instruction must not
+        // be a fresh entry point (dispatch could land between mul and mulh).
+        if next.is_gas_block_start {
+            return None;
+        }
+        let (u_rd, u_rs1, u_rs2, signed) = match next.inst {
+            RvInst::Mulhu { rd, rs1, rs2 } => (rd, rs1, rs2, false),
+            RvInst::Mulh { rd, rs1, rs2 } => (rd, rs1, rs2, true),
+            _ => return None,
+        };
+        // Both must reference the same source pair, and the two destinations
+        // must differ (otherwise only one of {lo, hi} would be observable).
+        if u_rs1 != m_rs1 || u_rs2 != m_rs2 || u_rd == m_rd {
+            return None;
+        }
+        // Reserved-x3/x4 must not appear; x0 destinations are silently
+        // unobservable, but for simplicity require both dests to be real.
+        if rv_is_reserved(m_rd) || rv_is_reserved(u_rd) {
+            return None;
+        }
+        if rv_is_reserved(m_rs1) || rv_is_reserved(m_rs2) {
+            return None;
+        }
+        let (Some(rs1_slot), Some(rs2_slot)) = (rv_slot(m_rs1), rv_slot(m_rs2)) else {
+            // m_rs1 or m_rs2 is x0 — multiplying by 0 is a degenerate case,
+            // not worth fusing (the per-op fallback handles it correctly
+            // anyway).
+            return None;
+        };
+        let (Some(lo_slot), Some(hi_slot)) = (rv_slot(m_rd), rv_slot(u_rd)) else {
+            return None;
+        };
+
+        let a = REG_MAP[rs1_slot];
+        let b = REG_MAP[rs2_slot];
+        let rd_lo = REG_MAP[lo_slot];
+        let rd_hi = REG_MAP[hi_slot];
+        let phi11 = REG_MAP[11]; // RAX
+
+        // Strategy (same as PVM's try_fuse_mul_pair_raw):
+        //   1. Save φ[11] if neither rd_lo nor rd_hi will overwrite RAX.
+        //   2. Move A into RAX, B into a non-RAX/RDX register (= mul_src).
+        //   3. mul/imul mul_src → RDX:RAX.
+        //   4. Move RAX → rd_lo, RDX → rd_hi.
+        //   5. Restore φ[11].
+        let need_save_phi11 = rd_lo != phi11 && rd_hi != phi11;
+        if need_save_phi11 {
+            self.asm.push(phi11);
+        }
+
+        let mul_src = if b == phi11 {
+            if need_save_phi11 {
+                self.asm.mov_load64(SCRATCH, Reg::RSP, 0);
+            } else {
+                self.asm.mov_rr(SCRATCH, b);
+            }
+            SCRATCH
+        } else {
+            b
+        };
+
+        if a != phi11 {
+            self.asm.mov_rr(phi11, a);
+        }
+
+        if signed {
+            self.asm.imul_rdx_rax(mul_src);
+        } else {
+            self.asm.mul_rdx_rax(mul_src);
+        }
+
+        if rd_lo != phi11 {
+            self.asm.mov_rr(rd_lo, phi11);
+        }
+        // rd_hi from RDX (SCRATCH). rd_hi can never equal SCRATCH (SCRATCH
+        // isn't a PVM-mapped register), so the unconditional mov is safe.
+        self.asm.mov_rr(rd_hi, SCRATCH);
+
+        if need_save_phi11 {
+            self.asm.pop(phi11);
+        }
+
+        // Both destinations changed; clear any tracking on them.
+        self.invalidate_reg(lo_slot);
+        self.invalidate_reg(hi_slot);
+
+        Some(2)
     }
 }
 

@@ -193,11 +193,7 @@ fn static_target(ip: &RvPreDecodedInst) -> Option<usize> {
         _ => return None,
     };
     let t = pc + off;
-    if t < 0 {
-        None
-    } else {
-        Some(t as usize)
-    }
+    if t < 0 { None } else { Some(t as usize) }
 }
 
 /// Block-terminating instructions: anything that *can* leave the
@@ -318,9 +314,9 @@ mod tests {
         let code = enc(&[0x00150513, fallthrough_word, 0x00158593]);
         let r = predecode_rv(&code);
         assert_eq!(r.insts.len(), 3);
-        assert!(r.insts[0].is_gas_block_start);   // PC=0
-        assert!(!r.insts[1].is_gas_block_start);  // PC=4 post-addi (not terminator)
-        assert!(r.insts[2].is_gas_block_start);   // PC=8 post-fallthrough
+        assert!(r.insts[0].is_gas_block_start); // PC=0
+        assert!(!r.insts[1].is_gas_block_start); // PC=4 post-addi (not terminator)
+        assert!(r.insts[2].is_gas_block_start); // PC=8 post-fallthrough
         assert!(matches!(r.insts[1].inst, RvInst::Fallthrough));
     }
 
@@ -332,13 +328,17 @@ mod tests {
         //      = (5 << 20)  | (1 << 15)  | (0b011 << 12) | (0 << 7)
         //        | (0b00010 << 2) | 0b11
         //      = 0x0050_B00B
-        let br_table_word = (5u32 << 20) | (1u32 << 15) | (0b011u32 << 12) | (0b00010u32 << 2) | 0b11;
+        let br_table_word =
+            (5u32 << 20) | (1u32 << 15) | (0b011u32 << 12) | (0b00010u32 << 2) | 0b11;
         let code = enc(&[br_table_word, 0x00150513]);
         let r = predecode_rv(&code);
         assert_eq!(r.insts.len(), 2);
         assert!(matches!(
             r.insts[0].inst,
-            RvInst::BrTable { table_id: 5, rs1: 1 }
+            RvInst::BrTable {
+                table_id: 5,
+                rs1: 1
+            }
         ));
         assert!(r.insts[0].is_gas_block_start); // PC=0
         assert!(r.insts[1].is_gas_block_start); // post-br_table
