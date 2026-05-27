@@ -370,10 +370,13 @@ impl Compiler {
             _ => self.helpers.mem_write_u64,
         };
         if rs2 == 0 {
-            // Materialise 0 into a temp register so SCRATCH can hold the addr.
+            // Materialise 0 into a temp register so SCRATCH can hold the
+            // addr. Compute the address FIRST — rs1 might map to RAX
+            // (x14), in which case clobbering RAX before reading rs1
+            // would feed the address calc the wrong value.
+            self.rv_addr_to_scratch(rs1, imm, pc);
             self.asm.push(Reg::RAX);
             self.asm.mov_ri64(Reg::RAX, 0);
-            self.rv_addr_to_scratch(rs1, imm, pc);
             self.emit_mem_write(true, Reg::RAX, fn_addr, pc);
             self.asm.pop(Reg::RAX);
         } else {
@@ -520,13 +523,27 @@ impl Compiler {
 
     fn rv_slt_imm(&mut self, rd: u8, rs1: u8, imm: i32, signed: bool, pc: u32) {
         let Some(d) = self.rv_dst(rd, pc) else { return };
+        if rv_is_reserved(rs1) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        // Snapshot rs1 into SCRATCH if d aliases its register — zeroing
+        // d below would otherwise clobber rs1 before the cmp.
+        let src = if rs1 == 0 {
+            self.asm.mov_ri64(SCRATCH, 0);
+            SCRATCH
+        } else {
+            let r1 = REG_MAP[rv_slot(rs1).unwrap()];
+            if d == r1 {
+                self.asm.mov_rr(SCRATCH, r1);
+                SCRATCH
+            } else {
+                r1
+            }
+        };
         // Zero d FIRST (mov_ri64 with 0 uses XOR → clobbers flags).
-        // Then cmp, setcc. setcc reads ZF/SF/CF; the XOR ZF/CF would
-        // confuse it if we did mov_ri64 between cmp and setcc.
+        // Then cmp sets flags fresh for setcc.
         self.asm.mov_ri64(d, 0);
-        let src = self.rv_read_into(rs1, SCRATCH, pc);
-        // rv_read_into for rs1 == x0 uses mov_ri64 (XOR) — clobbers flags.
-        // That's fine: we cmp next which sets flags fresh.
         self.asm.cmp_ri(src, imm);
         self.asm.setcc(if signed { Cc::L } else { Cc::B }, d);
         if rd != 0 {
@@ -575,32 +592,33 @@ impl Compiler {
                 }
             }
             (None, Some(rb)) => {
-                // a is x0. We'll use SCRATCH=0 as a. b stays.
+                // a is x0. result = (0 < rb), i.e. (rb > 0) signed or
+                // (rb != 0) unsigned. Cc::G == "ZF=0 && SF=0" after a
+                // test against self (OF=0), so it captures rb > 0
+                // signed; Cc::A == "ZF=0" after the same test, capturing
+                // rb != 0 (= 0 < rb unsigned).
                 if d == rb {
-                    // Snapshot rb into SCRATCH; use d-temp-with-zero... but
-                    // we only have one SCRATCH. Instead: zero d (it becomes
-                    // setcc target), then load b's value into SCRATCH first
-                    // before doing the zero-d step.
-                    // Actually with d == rb, just keep b = rb (we read it
-                    // before zeroing d below).
-                    // We use SCRATCH for a (= 0). Need to ensure b is read
-                    // before d is zeroed.
-                    // Simplest: save b to SCRATCH NOW and use it as b.
-                    // For a, we'd need another spare — push a non-d reg.
-                    self.asm.push(Reg::RAX);
-                    self.asm.mov_ri64(Reg::RAX, 0);
+                    // Snapshot rb (d will be clobbered to receive the
+                    // setcc byte). mov_rr does not clobber flags but we
+                    // haven't set them yet; the test_rr below sets fresh
+                    // flags after mov_ri64 (which uses XOR and clobbers
+                    // flags). Order matters.
                     self.asm.mov_rr(SCRATCH, rb);
                     self.asm.mov_ri64(d, 0);
-                    self.asm.cmp_rr(Reg::RAX, SCRATCH);
-                    self.asm.setcc(if signed { Cc::L } else { Cc::B }, d);
-                    self.asm.pop(Reg::RAX);
+                    self.asm.test_rr(SCRATCH, SCRATCH);
+                    self.asm.setcc(if signed { Cc::G } else { Cc::A }, d);
                     if rd != 0 {
                         self.invalidate_reg(rv_slot(rd).unwrap());
                     }
                     return;
                 } else {
-                    self.asm.mov_ri64(SCRATCH, 0);
-                    (SCRATCH, rb)
+                    self.asm.mov_ri64(d, 0);
+                    self.asm.test_rr(rb, rb);
+                    self.asm.setcc(if signed { Cc::G } else { Cc::A }, d);
+                    if rd != 0 {
+                        self.invalidate_reg(rv_slot(rd).unwrap());
+                    }
+                    return;
                 }
             }
             (Some(ra), None) => {
@@ -717,11 +735,7 @@ impl Compiler {
         };
         let is_32 = matches!(
             op,
-            ShiftOp::Shl32
-                | ShiftOp::Shr32
-                | ShiftOp::Sar32
-                | ShiftOp::Rol32
-                | ShiftOp::Ror32
+            ShiftOp::Shl32 | ShiftOp::Shr32 | ShiftOp::Sar32 | ShiftOp::Rol32 | ShiftOp::Ror32
         );
         if is_32 {
             if matches!(op, ShiftOp::Shr32 | ShiftOp::Ror32) {
@@ -747,7 +761,20 @@ impl Compiler {
         }
         // Spill RAX (if d != RAX) and materialise both operands.
         let save_rax = d != Reg::RAX;
-        // Pick a non-RAX scratch reg for b when needed.
+        let r2_mapped = if rs2 == 0 {
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rs2).unwrap()])
+        };
+        // Snapshot rs2 into SCRATCH up-front if rs2 maps to RAX (x14) —
+        // we're about to clobber RAX. This covers both save_rax=true
+        // (where RAX is also on stack, but reading from stack costs a
+        // load) and save_rax=false (where RAX is the only live copy of
+        // both rs2 and rd; we must capture rs2 before the load of rs1).
+        let snapshot_rs2 = r2_mapped == Some(Reg::RAX);
+        if snapshot_rs2 {
+            self.asm.mov_rr(SCRATCH, Reg::RAX);
+        }
         if save_rax {
             self.asm.push(Reg::RAX);
         }
@@ -768,15 +795,11 @@ impl Compiler {
         let b_reg = if rs2 == 0 {
             self.asm.mov_ri64(SCRATCH, 0);
             SCRATCH
+        } else if snapshot_rs2 {
+            // rs2 already snapshotted into SCRATCH above.
+            SCRATCH
         } else {
-            let r2 = REG_MAP[rv_slot(rs2).unwrap()];
-            if r2 == Reg::RAX && save_rax {
-                // Original rs2 value is on the saved stack slot.
-                self.asm.mov_load64(SCRATCH, Reg::RSP, 0);
-                SCRATCH
-            } else {
-                r2
-            }
+            r2_mapped.unwrap()
         };
         if a_signed && b_signed {
             self.asm.imul_rdx_rax(b_reg);
@@ -852,10 +875,15 @@ impl Compiler {
             self.asm.mov_ri64(Reg::RCX, 0);
             Reg::RCX
         } else if r2 == Some(Reg::RAX) {
-            // rs2 mapped to RAX (x14). Read the original from the
-            // saved stack slot.
-            let off = if save_rax { 8 } else { 0 };
-            self.asm.mov_load64(Reg::RCX, Reg::RSP, off);
+            // rs2 mapped to RAX (x14). Get its value into RCX.
+            if save_rax {
+                // RAX was pushed first, RCX next. RSP+8 holds saved RAX.
+                self.asm.mov_load64(Reg::RCX, Reg::RSP, 8);
+            } else {
+                // RAX wasn't pushed (d == RAX) — rs2's value is still
+                // live in RAX. Snapshot to RCX before we load rs1 below.
+                self.asm.mov_rr(Reg::RCX, Reg::RAX);
+            }
             Reg::RCX
         } else {
             r2.unwrap()
@@ -1173,25 +1201,24 @@ impl Compiler {
             _ => unreachable!("rv_czero only accepts E/NE"),
         };
         let r2 = REG_MAP[rv_slot(rs2).unwrap()];
-        // Test rs2 *before* writing d (d may alias r2). The setcc /
-        // neg / and chain that follows must keep ZF/etc. valid; we
-        // use `mov_ri32(_, 0)` (zero-imm mov, no XOR) so the flags
-        // from `test` survive into `setcc`.
         if d == r2 {
-            // d aliases r2 — read rs2 into a temp first so rv_read can
-            // safely overwrite d.
+            // d aliases r2 — snapshot r2's value into SCRATCH first,
+            // then read rs1 into d while we still can. We reuse SCRATCH
+            // to build the mask afterward (it briefly held rs2's value,
+            // but we don't need that snapshot after the test_rr below).
+            //
+            // We CANNOT use push/pop RAX as scratch here: rs1 may map to
+            // RAX (x14), in which case overwriting RAX before rv_read
+            // would feed rv_read the wrong value.
             self.asm.mov_rr(SCRATCH, r2);
-            self.asm.test_rr(SCRATCH, SCRATCH);
-            // Free up a non-d, non-SCRATCH register for the mask via
-            // push/pop of RAX (cheap; this path is the rare aliasing
-            // case).
-            self.asm.push(Reg::RAX);
-            self.asm.mov_ri32(Reg::RAX, 0);
-            self.asm.setcc(inv_cond, Reg::RAX);
-            self.asm.neg64(Reg::RAX);
             self.rv_read(rs1, d, pc);
-            self.asm.and_rr(d, Reg::RAX);
-            self.asm.pop(Reg::RAX);
+            self.asm.test_rr(SCRATCH, SCRATCH);
+            // `mov rN, imm32` (mov_ri32) is a real mov-imm, NOT XOR —
+            // it preserves the flags from the test above into setcc.
+            self.asm.mov_ri32(SCRATCH, 0);
+            self.asm.setcc(inv_cond, SCRATCH);
+            self.asm.neg64(SCRATCH);
+            self.asm.and_rr(d, SCRATCH);
         } else {
             self.asm.test_rr(r2, r2);
             self.asm.mov_ri32(SCRATCH, 0);
@@ -1306,21 +1333,24 @@ impl Compiler {
 
     fn rv_trap(&mut self, pc: u32) {
         self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
-        self.asm.mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_TRAP as i32);
+        self.asm
+            .mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_TRAP as i32);
         self.asm.mov_store32_rip_rel_imm(CTX_EXIT_ARG, 0);
         self.asm.jmp_label(self.exit_label);
     }
 
     fn rv_ecall_jar(&mut self, next_pc: u32) {
         self.asm.mov_store32_rip_rel_imm(CTX_PC, next_pc as i32);
-        self.asm.mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_ECALL as i32);
+        self.asm
+            .mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_ECALL as i32);
         self.asm.mov_store32_rip_rel_imm(CTX_EXIT_ARG, 0);
         self.asm.jmp_label(self.exit_label);
     }
 
     fn rv_ecalli(&mut self, imm: i32, next_pc: u32) {
         self.asm.mov_store32_rip_rel_imm(CTX_PC, next_pc as i32);
-        self.asm.mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_HOST_CALL as i32);
+        self.asm
+            .mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_HOST_CALL as i32);
         self.asm.mov_store32_rip_rel_imm(CTX_EXIT_ARG, imm);
         self.asm.jmp_label(self.exit_label);
     }
@@ -1328,7 +1358,8 @@ impl Compiler {
     /// Generic "panic at this PC" exit.
     fn rv_emit_panic_at(&mut self, pc: u32) {
         self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
-        self.asm.mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_PANIC as i32);
+        self.asm
+            .mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_PANIC as i32);
         self.asm.jmp_label(self.exit_label);
     }
 }
