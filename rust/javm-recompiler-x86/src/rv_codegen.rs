@@ -504,6 +504,7 @@ impl Compiler {
 
     /// Build `addr = (rs1 + imm) & 0xFFFFFFFF` into SCRATCH.
     fn rv_addr_to_scratch(&mut self, rs1: u8, imm: i32, pc: u32) {
+        use super::codegen::RegDef;
         if rs1 == 0 {
             self.asm.mov_ri32(SCRATCH, imm as u32);
             return;
@@ -512,7 +513,28 @@ impl Compiler {
             self.rv_emit_panic_at(pc);
             return;
         }
-        let base = REG_MAP[rv_slot(rs1).unwrap()];
+        // Ported from PVM's emit_addr_to_scratch peephole: fold a known
+        // constant address (set by `addi rd, x0, imm` / `lui`) directly
+        // into the immediate, skipping the lea/movzx entirely.
+        let slot = rv_slot(rs1).unwrap();
+        if let RegDef::Const(addr) = self.reg_defs[slot] {
+            let effective = addr.wrapping_add(imm as u32);
+            self.asm.mov_ri32(SCRATCH, effective);
+            return;
+        }
+        // Use SIB addressing for scaled-index patterns when imm == 0
+        // (sh{1,2,3}add or slli+add chains tracked via reg_defs).
+        // Tracking guarantees rd didn't alias rs1/rs2 (record_scaledadd
+        // refuses self-referential defs), so base/idx still hold their
+        // pre-emit values at the consumer site.
+        if imm == 0
+            && let RegDef::ScaledAdd { base, idx, shift } = self.reg_defs[slot]
+        {
+            self.asm
+                .lea_sib_scaled_32(SCRATCH, REG_MAP[base], REG_MAP[idx], shift);
+            return;
+        }
+        let base = REG_MAP[slot];
         if imm != 0 {
             self.asm.lea_32(SCRATCH, base, imm);
         } else {
@@ -1674,9 +1696,11 @@ impl Compiler {
             }
             // `add rd, rs1, rs2` — promote to ScaledAdd when one operand
             // is a tracked Shifted def. Mirrors PVM's update_reg_defs
-            // for Add64, minus the in-place doubling case (which RV
-            // expresses as `slli rd, rd, 1`).
-            RvInst::Add { rd, rs1, rs2 } => {
+            // for Add64. We require rd to not alias either source: an
+            // in-place add overwrites the operand, leaving the tracked
+            // def referring to the post-write value when a consumer
+            // expected the pre-write value.
+            RvInst::Add { rd, rs1, rs2 } if rd != rs1 && rd != rs2 => {
                 let d = match rv_slot(rd) {
                     Some(s) => s,
                     None => return,
@@ -1730,9 +1754,19 @@ impl Compiler {
     }
 
     /// Helper for Sh{1,2,3}add → ScaledAdd tracking.
+    ///
+    /// `sh{N}add rd, rs1, rs2` writes `rd = rs2 + (rs1 << N)`. If rd
+    /// aliases either operand, the post-emit value of rd no longer
+    /// equals base+idx<<shift in terms of the *new* register state —
+    /// any subsequent use of the tracked def would substitute the
+    /// already-overwritten value. Skip tracking in those cases
+    /// (mirrors PVM's update_reg_defs guard for Add64).
     #[inline]
     fn record_scaledadd(&mut self, rd: u8, rs1: u8, rs2: u8, shift: u8) {
         use super::codegen::RegDef;
+        if rd == rs1 || rd == rs2 {
+            return;
+        }
         let (Some(d), Some(idx), Some(base)) = (rv_slot(rd), rv_slot(rs1), rv_slot(rs2)) else {
             return;
         };
