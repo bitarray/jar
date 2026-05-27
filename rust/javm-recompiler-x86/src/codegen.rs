@@ -112,6 +112,10 @@ pub struct CompileResult {
     pub dispatch_table: Vec<i32>,
     pub trap_table: Vec<(u32, u32)>,
     pub exit_label_offset: u32,
+    /// Byte-indexed validity map (RV path only): true at every PC where
+    /// an instruction begins. Empty for the PVM path — `compile()`
+    /// consumes its own bitmask argument, no need to surface it.
+    pub valid_pc: Vec<bool>,
 }
 
 /// Helper function pointers passed to compiled code.
@@ -180,7 +184,7 @@ pub struct Compiler {
     /// Trap table for signal-based bounds checking: (native_offset, pvm_pc).
     pub(crate) trap_entries: Vec<(u32, u32)>,
     /// Memory tier load/store cycles for gas simulation.
-    mem_cycles: u8,
+    pub(crate) mem_cycles: u8,
     /// PVM2: per-function `br_table` sub-table CSR offsets. Each
     /// `BrTable { table_id, .. }` instruction dispatches through
     /// entries `jt_ptr[rv_jt_offsets[table_id] ..
@@ -604,6 +608,7 @@ impl Compiler {
             dispatch_table,
             trap_table,
             exit_label_offset,
+            valid_pc: Vec::new(),
         }
     }
 

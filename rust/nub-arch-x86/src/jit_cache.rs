@@ -32,7 +32,6 @@ use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 
 use javm_recompiler_x86::codegen::{CompileResult, Compiler, HelperFns};
-use javm_recompiler_x86::rv_codegen::predecode_rv;
 
 use javm_cap::CapHash;
 
@@ -171,6 +170,7 @@ pub fn get_or_compile(
             dispatch_table,
             trap_table,
             exit_label_offset,
+            valid_pc: _,
         } = compiler.compile(code, bitmask);
 
         let jit_size = page_round_up_min1(native_code.len());
@@ -291,15 +291,9 @@ pub fn get_or_compile_rv(
     // SAFETY: single-threaded guest.
     let map = unsafe { &mut *CACHE.inner.get() };
     if !map.contains_key(image_hash) {
-        // Predecode once: both Compiler::compile_rv and the BB region
-        // need the result. compile_rv consumes the valid_pc slice via a
-        // raw pointer stored inside the Compiler, then drops the ref;
-        // the BB region's contents are independent (we memcpy them into
-        // the arena).
-        let pd = predecode_rv(code);
-
-        // Region sizing.
-        let bb_size = page_round_up_min1(pd.valid_pc.len());
+        // Region sizing. valid_pc is `code.len()` bytes; the streaming
+        // compile produces it inline so we don't allocate it twice.
+        let bb_size = page_round_up_min1(code.len());
         let jt_bytes_used = jump_table.len() * core::mem::size_of::<u32>();
         let jt_size = page_round_up_min1(jt_bytes_used);
         let dispatch_size = page_round_up_min1(code.len() * core::mem::size_of::<i32>());
@@ -316,7 +310,8 @@ pub fn get_or_compile_rv(
             dispatch_table,
             trap_table,
             exit_label_offset,
-        } = compiler.compile_rv(code, &pd, jump_table_offsets);
+            valid_pc,
+        } = compiler.compile_rv(code, jump_table_offsets);
 
         let jit_size = page_round_up_min1(native_code.len());
         let tramp_offset = jit_offset + jit_size;
@@ -328,11 +323,10 @@ pub fn get_or_compile_rv(
 
         // BB region: valid_pc as bytes (Vec<bool> is 0/1 single-byte
         // representation, so a raw-pointer reinterpret is sound).
-        let bb_ptr = pd.valid_pc.as_ptr() as *const u8;
-        // SAFETY: bb_ptr valid for pd.valid_pc.len() bytes.
-        let bb_bytes =
-            unsafe { core::slice::from_raw_parts(bb_ptr, pd.valid_pc.len()) };
-        buf[bb_offset..bb_offset + pd.valid_pc.len()].copy_from_slice(bb_bytes);
+        let bb_ptr = valid_pc.as_ptr() as *const u8;
+        // SAFETY: bb_ptr valid for valid_pc.len() bytes.
+        let bb_bytes = unsafe { core::slice::from_raw_parts(bb_ptr, valid_pc.len()) };
+        buf[bb_offset..bb_offset + valid_pc.len()].copy_from_slice(bb_bytes);
 
         // JT region: copy per-function br_table sub-tables (concatenated
         // PVM2 PCs, sub-table boundaries in `jump_table_offsets`).

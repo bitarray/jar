@@ -20,6 +20,7 @@
 //! that takes a `usize` slot index works unchanged.
 
 use alloc::vec;
+use alloc::vec::Vec;
 
 use super::asm::{Cc, Label, Reg};
 use super::codegen::{
@@ -27,7 +28,10 @@ use super::codegen::{
     CompileResult, Compiler, EXIT_ECALL, EXIT_HOST_CALL, EXIT_PANIC, EXIT_TRAP, GAS, REG_MAP,
     SCRATCH,
 };
-use javm_exec::rv_instruction::RvInst;
+use javm_exec::gas_cost::{rv_feed_gas_direct, rv_gas_meta};
+use javm_exec::gas_sim::GasSimulator;
+use javm_exec::rv_instruction::{RvInst, decode};
+use javm_exec::rv_predecode::is_terminator;
 pub use javm_exec::rv_predecode::{RvPredecode, predecode_rv};
 
 /// Map an RV register index to its PVM slot (0..=12).
@@ -54,68 +58,127 @@ fn rv_is_reserved(x: u8) -> bool {
 }
 
 impl Compiler {
-    /// Compile an RV+C+custom-0 byte stream into x86-64.
+    /// Compile an RV+C+custom-0 byte stream into x86-64 in a single
+    /// streaming pass.
     ///
-    /// The caller produces a [`RvPredecode`] up front (the result is
-    /// also needed to populate the runtime BB / valid-PC region the
-    /// JIT consults).
+    /// Decode + valid-PC + gas-block detection + gas simulation +
+    /// codegen all happen in one walk over `code`. No `RvPredecode`
+    /// intermediary — that was 57% of the old cold-path compile time
+    /// on the large guests (ed25519, ecrecover).
     ///
     /// `jump_table_offsets` is the Image's CSR-style sub-table boundary
     /// array — see [`javm_cap::image::Image::jump_table_offsets`].
-    /// Empty implies no br_table dispatch is used (no function calls in
-    /// the program). Each `BrTable { table_id, .. }` instruction
-    /// dispatches through sub-table `table_id`, whose entries live at
+    /// Empty implies no br_table dispatch is used. Each
+    /// `BrTable { table_id, .. }` instruction dispatches through sub-
+    /// table `table_id`, whose entries live at
     /// `jt_ptr[jump_table_offsets[table_id] ..
     /// jump_table_offsets[table_id+1]]`.
-    pub fn compile_rv(
-        mut self,
-        code: &[u8],
-        pd: &RvPredecode,
-        jump_table_offsets: &[u32],
-    ) -> CompileResult {
+    ///
+    /// The returned `CompileResult.valid_pc` is the byte-indexed
+    /// "instruction starts here" bitmap the runtime BB region needs.
+    pub fn compile_rv(mut self, code: &[u8], jump_table_offsets: &[u32]) -> CompileResult {
         self.rv_jt_offsets = jump_table_offsets.to_vec();
-        // Re-point the "valid target" array used by emit_static_branch /
-        // emit_branch_reg / emit_branch_imm at the RV valid-PC set. The
-        // existing `is_basic_block_start(byte_offset)` reads byte i from
-        // bitmask_ptr and treats `1` as a valid jump target; `Vec<bool>`
-        // is 1 byte/element with 0/1 representation, so reinterpreting
-        // its base pointer as `*const u8` is sound.
-        self.bitmask_ptr = pd.valid_pc.as_ptr() as *const u8;
-        self.bitmask_len = pd.valid_pc.len();
 
-        // Per-block gas costs are pre-computed by the predecoder
-        // (pipeline simulation in `gas_cost::rv_gas_cost_for_block`).
-        // Each meaningful entry is `max(simulation_cycles − 3, 1)`.
-        let block_cost: &[u32] = &pd.block_costs;
+        // Build valid_pc up front via a length-only scan. The full
+        // decode happens inline in the codegen loop, but forward
+        // branches consult `is_basic_block_start(target)` at emit
+        // time to decide between a label-target jcc and a panic stub,
+        // so the target's valid_pc bit must be set before we reach
+        // the branch's emit site. Doing this with the length-only
+        // form (bits [1:0] of byte 0 ⇒ 2 or 4 bytes) is much cheaper
+        // than a full predecode — no enum construction, no register-
+        // slot extraction, no gas metadata.
+        let mut valid_pc: Vec<bool> = vec![false; code.len()];
+        {
+            let mut pc = 0usize;
+            while pc < code.len() {
+                valid_pc[pc] = true;
+                let len = if code[pc] & 0b11 == 0b11 { 4 } else { 2 };
+                pc += len;
+            }
+        }
+        self.bitmask_ptr = valid_pc.as_ptr() as *const u8;
+        self.bitmask_len = valid_pc.len();
 
         self.emit_prologue();
 
-        let mut i = 0usize;
-        while i < pd.insts.len() {
+        let mem_cycles = self.mem_cycles;
+        let mut gas_sim = GasSimulator::new();
+        let mut pending_gas: Option<(Label, u32, usize)> = None;
+        let mut next_is_gas_start = true;
+        let mut pc: usize = 0;
+
+        while pc < code.len() {
             self.asm.ensure_capacity(512);
-            let pdi = &pd.insts[i];
-            if pdi.is_gas_block_start {
-                self.bind_rv_gas_block_start(pdi.pc, block_cost[i]);
+
+            let Some((inst, len)) = decode(&code[pc..]) else {
+                // Decode failure — emit a panic at this PC and stop.
+                // The remaining bytes are unreachable from the runtime
+                // BB region (valid_pc[pc] was set by the length-only
+                // pre-pass but the decoder rejects the encoding; the
+                // panic ensures we exit before executing whatever's
+                // here).
+                self.rv_emit_panic_at(pc as u32);
+                break;
+            };
+
+            let inst_pc = pc as u32;
+            let next_pc = (pc + len as usize) as u32;
+
+            if next_is_gas_start {
+                self.bind_rv_gas_block_start_streaming(
+                    inst_pc,
+                    &mut pending_gas,
+                    &mut gas_sim,
+                );
+                next_is_gas_start = false;
             }
-            // Phase 2: try multi-instruction fusions before the per-op
-            // dispatch. On success, advance past the consumed window and
-            // skip the normal compile path; reg_defs is invalidated by
-            // the fusion routine itself.
-            if let Some(advance) = self.try_fuse_rv_mul_pair(&pd.insts, i) {
-                i += advance;
+
+            // Phase 2 lookahead: peek the next instruction for mul-pair
+            // fusion. Only attempt when the current instruction is Mul.
+            if matches!(inst, RvInst::Mul { .. })
+                && let Some(consumed_bytes) = self.try_fuse_rv_mul_pair_streaming(
+                    code,
+                    pc,
+                    len as usize,
+                    inst,
+                    &mut gas_sim,
+                    mem_cycles,
+                )
+            {
+                pc += consumed_bytes;
                 continue;
             }
-            self.compile_rv_instruction(pdi.inst, pdi.pc, pdi.next_pc);
-            self.update_reg_defs_rv(&pdi.inst);
-            // Phase 4: carry-flag fusion bookkeeping. Add sets last_add_cf
-            // from inside rv_alu_rr; Sltu consumes it from inside rv_slt_rr.
-            // Any other instruction (including a *failed* Sltu that fell
-            // through to the general code) clobbers CF; clear so subsequent
-            // unrelated Sltu doesn't read a stale add's flags.
-            if !matches!(pdi.inst, RvInst::Add { .. } | RvInst::Sltu { .. }) {
+
+            // Feed gas for this instruction via the LUT fast path.
+            let meta = rv_gas_meta(&inst);
+            rv_feed_gas_direct(&meta, &mut gas_sim, mem_cycles);
+
+            // Emit.
+            self.compile_rv_instruction(inst, inst_pc, next_pc);
+            self.update_reg_defs_rv(&inst);
+            // Phase 4: carry-flag fusion bookkeeping (mirrors the old
+            // two-pass loop). Add sets last_add_cf from inside rv_alu_rr;
+            // Sltu consumes it from inside rv_slt_rr. Any other
+            // instruction (including a *failed* Sltu fall-through)
+            // clobbers CF, so we clear so a subsequent unrelated Sltu
+            // doesn't read a stale add's flags.
+            if !matches!(inst, RvInst::Add { .. } | RvInst::Sltu { .. }) {
                 self.last_add_cf = None;
             }
-            i += 1;
+
+            if is_terminator(&inst) {
+                next_is_gas_start = true;
+            }
+
+            pc += len as usize;
+        }
+
+        // Finalize the last gas block — patch its cost in.
+        if let Some((stub_label, block_pc, patch_offset)) = pending_gas.take() {
+            let cost = gas_sim.flush_and_get_cost();
+            self.asm.patch_i32(patch_offset, cost as i32);
+            self.oog_stubs.push((stub_label, block_pc, cost));
         }
 
         self.emit_exit_sequences();
@@ -138,26 +201,41 @@ impl Compiler {
             dispatch_table,
             trap_table,
             exit_label_offset,
+            valid_pc,
         }
     }
 
-    /// Bind the PC label and emit `sub r15, cost; js stub`.
-    fn bind_rv_gas_block_start(&mut self, pc: u32, cost: u32) {
+    /// Streaming gas-block-start hook: bind label, flush prior block's
+    /// cost into its `sub` patch, emit a fresh `sub r15, 0; js stub`
+    /// placeholder and stash the patch offset in `pending`. Mirrors
+    /// `Compiler::emit_gas_block_start` on the PVM path.
+    fn bind_rv_gas_block_start_streaming(
+        &mut self,
+        pc: u32,
+        pending: &mut Option<(Label, u32, usize)>,
+        gas_sim: &mut GasSimulator,
+    ) {
         let label = Label(self.label_base + pc);
         self.asm.bind_label(label);
         self.gas_block_pcs.push(pc);
 
         // Peephole state must not leak across gas-block boundaries: the
-        // dispatch table can enter this block from any predecessor, so
-        // anything we tracked from the previous instruction stream is
-        // not necessarily true on entry.
+        // dispatch table can enter this block from any predecessor.
         self.invalidate_all_regs();
         self.last_add_cf = None;
 
+        if let Some((stub_label, block_pc, patch_offset)) = pending.take() {
+            let cost = gas_sim.flush_and_get_cost();
+            self.asm.patch_i32(patch_offset, cost as i32);
+            self.oog_stubs.push((stub_label, block_pc, cost));
+        }
+        gas_sim.reset();
+
         let stub_label = self.asm.new_label();
-        self.asm.sub_r64_imm32_patchable(GAS, cost as i32);
+        self.asm.sub_r64_imm32_patchable(GAS, 0);
+        let patch_offset = self.asm.offset() - 4;
         self.asm.jcc_label(Cc::S, stub_label);
-        self.oog_stubs.push((stub_label, pc, cost));
+        *pending = Some((stub_label, pc, patch_offset));
     }
 
     /// Dispatch one decoded RV instruction. Each arm is small and reuses
@@ -532,12 +610,14 @@ impl Compiler {
         // and sign-extends — CF reflects 32-bit overflow, not 64-bit,
         // so a 64-bit sltu against the sign-extended sum would be wrong.
         // Skip x0 source/dest cases: degenerate, not worth tracking.
-        if matches!(op, AluOp::Add) && rd != 0 && rs1 != 0 && rs2 != 0 {
-            if let (Some(d_s), Some(a_s), Some(b_s)) =
+        if matches!(op, AluOp::Add)
+            && rd != 0
+            && rs1 != 0
+            && rs2 != 0
+            && let (Some(d_s), Some(a_s), Some(b_s)) =
                 (rv_slot(rd), rv_slot(rs1), rv_slot(rs2))
-            {
-                self.last_add_cf = Some((d_s, a_s, b_s));
-            }
+        {
+            self.last_add_cf = Some((d_s, a_s, b_s));
         }
     }
 
@@ -1644,36 +1724,43 @@ impl Compiler {
     }
 
     // ----------------------------------------------------------------
-    // Phase 2: multiply-pair fusion.
+    // Phase 2: multiply-pair fusion (streaming).
     //
     // Detect `mul D_lo, A, B` immediately followed by
     // `mulhu/mulh D_hi, A, B` and emit a single x86 `mul`/`imul`
     // producing the 128-bit result in rdx:rax.
     //
+    // `cur_inst` is the already-decoded current Mul; the next inst is
+    // decoded from `code[pc + cur_len..]`. Mul is never a terminator,
+    // so the next inst can never be a gas-block boundary (the previous
+    // terminator would have ended the block before).
+    //
     // mulhsu (signed×unsigned high) requires correction logic that x86
     // doesn't fold into one instruction; skip.
     //
-    // Returns Some(advance) on success (the number of pd.insts entries
-    // consumed — always 2). None means no fusion; caller proceeds with
-    // the normal per-op dispatch.
+    // Returns `Some(consumed_bytes)` = cur_len + next_len on success.
+    // None means no fusion; caller proceeds with the normal per-op
+    // dispatch. On success, both insts' gas costs are fed to `gas_sim`.
     // ----------------------------------------------------------------
-    fn try_fuse_rv_mul_pair(
+    fn try_fuse_rv_mul_pair_streaming(
         &mut self,
-        insts: &[javm_exec::rv_predecode::RvPreDecodedInst],
-        i: usize,
+        code: &[u8],
+        pc: usize,
+        cur_len: usize,
+        cur_inst: RvInst,
+        gas_sim: &mut GasSimulator,
+        mem_cycles: u8,
     ) -> Option<usize> {
-        let cur = &insts[i];
-        let (m_rd, m_rs1, m_rs2) = match cur.inst {
+        let (m_rd, m_rs1, m_rs2) = match cur_inst {
             RvInst::Mul { rd, rs1, rs2 } => (rd, rs1, rs2),
             _ => return None,
         };
-        let next = insts.get(i + 1)?;
-        // Don't cross gas-block boundaries: the next instruction must not
-        // be a fresh entry point (dispatch could land between mul and mulh).
-        if next.is_gas_block_start {
+        let next_pc = pc + cur_len;
+        if next_pc >= code.len() {
             return None;
         }
-        let (u_rd, u_rs1, u_rs2, signed) = match next.inst {
+        let (next_inst, next_len) = decode(&code[next_pc..])?;
+        let (u_rd, u_rs1, u_rs2, signed) = match next_inst {
             RvInst::Mulhu { rd, rs1, rs2 } => (rd, rs1, rs2, false),
             RvInst::Mulh { rd, rs1, rs2 } => (rd, rs1, rs2, true),
             _ => return None,
@@ -1757,7 +1844,13 @@ impl Compiler {
         // a stale prior-add's flags.
         self.last_add_cf = None;
 
-        Some(2)
+        // Feed gas for both consumed instructions.
+        let m1 = rv_gas_meta(&cur_inst);
+        rv_feed_gas_direct(&m1, gas_sim, mem_cycles);
+        let m2 = rv_gas_meta(&next_inst);
+        rv_feed_gas_direct(&m2, gas_sim, mem_cycles);
+
+        Some(cur_len + next_len as usize)
     }
 }
 

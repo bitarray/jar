@@ -1160,6 +1160,7 @@ dependencies = [
  "criterion",
  "javm-cap",
  "javm-exec",
+ "javm-recompiler-x86",
  "nub",
  "nub-arch-x86-abi",
  "sha2",

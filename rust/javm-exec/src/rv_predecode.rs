@@ -199,7 +199,7 @@ fn static_target(ip: &RvPreDecodedInst) -> Option<usize> {
 /// Block-terminating instructions: anything that *can* leave the
 /// fall-through path. Used to mark the next instruction as a
 /// gas-block start.
-fn is_terminator(inst: &RvInst) -> bool {
+pub fn is_terminator(inst: &RvInst) -> bool {
     matches!(
         inst,
         // PC-relative jumps.
