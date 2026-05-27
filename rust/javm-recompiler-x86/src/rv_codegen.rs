@@ -444,6 +444,14 @@ impl Compiler {
 
     fn rv_alu_imm(&mut self, rd: u8, rs1: u8, imm: i32, op: AluImmOp, pc: u32) {
         let Some(d) = self.rv_dst(rd, pc) else { return };
+        // Phase 5: `addi rd, x0, imm` is the canonical RV "li" form. The
+        // generic path would emit `xor d, d; add d, imm` (2 ops); we can
+        // do it as a single sign-extended move.
+        if rs1 == 0 && matches!(op, AluImmOp::Add) {
+            self.asm.mov_ri64(d, imm as i64 as u64);
+            self.invalidate_reg(rv_slot(rd).unwrap());
+            return;
+        }
         self.rv_read(rs1, d, pc);
         match op {
             AluImmOp::Add => self.asm.add_ri(d, imm),
@@ -464,6 +472,22 @@ impl Compiler {
         let Some(d) = self.rv_dst(rd, pc) else { return };
         if rv_is_reserved(rs1) || rv_is_reserved(rs2) {
             self.rv_emit_panic_at(pc);
+            return;
+        }
+        // Phase 5: `add rd, rs, x0` / `add rd, x0, rs` — canonical RV `mv`.
+        // Generic path emits `mov SCRATCH, 0; mov d, rs; add d, SCRATCH`
+        // (or `xor d, d; add d, rs`); the single `mov d, rs` (with rs2=x0
+        // src=rs1, or vice versa) is one op. mov_rr doesn't touch CF.
+        //
+        // This path bypasses the Phase 4 last_add_cf set at the bottom,
+        // and the main-loop clearing keeps last_add_cf alive across the
+        // Add instruction. If the mv's rd was the previous add's D/A/B,
+        // the carry handoff is no longer meaningful — clear conservatively.
+        if matches!(op, AluOp::Add) && (rs1 == 0 || rs2 == 0) {
+            let src = if rs1 == 0 { rs2 } else { rs1 };
+            self.rv_read(src, d, pc);
+            self.invalidate_reg(rv_slot(rd).unwrap());
+            self.last_add_cf = None;
             return;
         }
         // Aliasing analysis: rv_read(rs1, d) might write d, which can
