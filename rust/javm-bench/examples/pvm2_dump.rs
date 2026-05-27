@@ -1,58 +1,49 @@
-//! Quick dump of PVM2 Image.code for debugging.
+//! Quick dump of PVM2 Image.code + predecode for debugging.
 
 #![cfg_attr(not(all(target_os = "linux", target_arch = "x86_64")), allow(unused))]
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use javm_cap::image::Image;
+use javm_exec::rv_instruction::RvInst;
+use javm_exec::rv_predecode::predecode_rv;
 use ssz::Decode;
 
-fn main() {
-    let blob = std::fs::read(env!("GOLDILOCKS_MUL_PVM2_BLOB")).unwrap();
-    let img = Image::from_ssz_bytes(&blob).unwrap();
+fn dump(name: &str, blob: &[u8]) {
+    let img = Image::from_ssz_bytes(blob).expect("decode");
+    println!("=== {} ===", name);
     println!("code = {} bytes", img.code.len());
-    for (idx, ep) in &img.endpoints {
-        println!("endpoint {idx}: entry_pc={:#x}", ep.entry_pc);
-    }
-    for m in &img.memory_mappings {
-        println!(
-            "mapping: start={:#x} size={:#x} target={:?}",
-            m.start, m.size, m.source.target()
-        );
-    }
-    println!("\nFirst 128 bytes of code (PC // byte hex // disasm-hint):");
-    let mut i = 0;
-    while i < img.code.len().min(128) {
-        if i + 2 > img.code.len() {
-            break;
-        }
-        let lo = u16::from_le_bytes([img.code[i], img.code[i + 1]]);
-        if lo & 0b11 != 0b11 {
-            println!("  {:04x}: {:04x}        (RVC)", i, lo);
-            i += 2;
-        } else {
-            if i + 4 > img.code.len() {
-                break;
+    let pd = predecode_rv(&img.code);
+    println!(
+        "predecode: {} insts, decode_error_at = {:?}",
+        pd.insts.len(),
+        pd.decode_error_at
+    );
+    let n_reserved = pd
+        .insts
+        .iter()
+        .filter(|i| matches!(i.inst, RvInst::Reserved { .. }))
+        .count();
+    println!("reserved: {}", n_reserved);
+    if n_reserved > 0 && n_reserved < 40 {
+        for i in &pd.insts {
+            if let RvInst::Reserved { raw } = i.inst {
+                println!("  PC {:#x}: Reserved raw={:#x}", i.pc, raw);
             }
-            let w = u32::from_le_bytes([
-                img.code[i], img.code[i + 1], img.code[i + 2], img.code[i + 3],
-            ]);
-            let op = w & 0x7F;
-            let mnem = match op {
-                0x37 => "LUI",
-                0x17 => "AUIPC",
-                0x6F => "JAL",
-                0x67 => "JALR",
-                0x63 => "B*",
-                0x03 => "L*",
-                0x23 => "S*",
-                0x13 => "ALU-imm",
-                0x33 => "ALU-rr",
-                0x73 => "SYSTEM",
-                0x0B => "custom-0",
-                _ => "?",
-            };
-            println!("  {:04x}: {:08x}  {}", i, w, mnem);
-            i += 4;
         }
     }
+}
+
+fn main() {
+    dump(
+        "goldilocks_mul (passes)",
+        include_bytes!(env!("GOLDILOCKS_MUL_PVM2_BLOB")),
+    );
+    dump(
+        "poly_eval (fails)",
+        include_bytes!(env!("POLY_EVAL_PVM2_BLOB")),
+    );
+    dump(
+        "ed25519 (fails)",
+        include_bytes!(env!("ED25519_PVM2_BLOB")),
+    );
 }
