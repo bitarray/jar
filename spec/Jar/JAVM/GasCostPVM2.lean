@@ -20,15 +20,19 @@ JIT-compiled instruction. They mirror PVM's costs 1:1 wherever
 PVM has a direct equivalent — the wire encoding changes, but the
 backend op is the same on the host CPU, so the cost is the same.
 
-PVM2-only ops (`callf`, `retf`, `fallthrough`) inherit the costs
-of their nearest PVM equivalents:
+PVM2-only ops inherit the costs of their nearest PVM equivalents:
 
-- `callf` → cost of PVM `load_imm_jump` (15) — same call-with-link
-  cycle profile.
-- `retf` → cost of PVM `jump_ind` (22) — same indirect-return shape
-  (native `ret` is a predicted indirect, similar pipeline cost).
+- `br_table` → cost of PVM `jump_ind` (22) — same indirect-jump
+  shape, just with a per-function statically-named target set
+  instead of one global jump table.
 - `fallthrough` → cost of PVM `fallthrough` (2) — terminator no-op,
   same gas-block-boundary purpose.
+
+Caller-side function-call costs are billed via the constituent RV
+instructions: the `addi ra, x0, encoded_idx` + `jal x0, callee`
+sequence the linker emits at every call site charges as
+`alu64` + `jump` = 1 + 15 = 16 cycles, very close to PVM's
+`load_imm_jump` cost of 15.
 
 ## Opcode groups (mirrors `RvInst` in `rv_instruction.rs`)
 
@@ -42,10 +46,9 @@ Rust port carrying the calibration burden.
 | load | `lb`/`lh`/`lw`/`ld`/`lbu`/`lhu`/`lwu` (+ RVC) | 25 |
 | store | `sb`/`sh`/`sw`/`sd` (+ RVC) | 25 |
 | branch | `beq`/`bne`/`blt`/`bge`/`bltu`/`bgeu` (+ RVC) | 20 |
-| jump | `jal` (rd=0) (+ `c.j`) | 15 |
-| call | `callf` (custom-1) | 15 |
-| ret | `retf` (custom-0, also `c.jr ra`) | 22 |
-| fallthrough | `fallthrough` (custom-0) | 2 |
+| jump | `jal` (any rd — including `c.j` and the linker-emitted call-site `jal x0, callee`) | 15 |
+| br_table | `br_table table_id, rs1` (custom-0 funct3=011) | 22 |
+| fallthrough | `fallthrough` (custom-0 funct3=100) | 2 |
 | trap | `trap` (custom-0) | 2 |
 | ecalli | `ecalli` (custom-0) | 100 |
 | ecall.jar | `ecall.jar` (custom-0) | 100 |
@@ -111,8 +114,7 @@ inductive Pvm2OpKind where
   | store
   | branch
   | jump
-  | call
-  | ret
+  | brTable
   | fallthrough
   | trap
   | ecalli
@@ -151,8 +153,7 @@ def instructionCostPVM2 : Pvm2OpKind → Nat
   | .store       => 25
   | .branch      => 20
   | .jump        => 15
-  | .call        => 15
-  | .ret         => 22
+  | .brTable     => 22
   | .fallthrough => 2
   | .trap        => 2
   | .ecalli      => 100

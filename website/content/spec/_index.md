@@ -898,6 +898,16 @@ The linker is required to guarantee that every PC at which the
 program can possibly pause is a bb_start; the constraint above is
 the kernel-side check that the guarantee held.
 
+**Pause-state portability.** PVM2's indirect dispatch goes through
+`br_table` (custom-0 funct3=011), which reads a per-function
+sub-table from `Image.jump_table` keyed by an encoded idx in `ra`.
+Crucially, **no PC values are ever stored in guest registers** —
+`ra` carries an opaque idx handle, not a return PC. This makes
+`Paused { pc, regs }` portable across JIT recompilations of the
+same Image: the idx is data-driven from `Image.jump_table`, and
+the same idx resolves to the same PVM2 PC regardless of the
+underlying native code layout.
+
 **slot[0] discipline.** Apply must keep slot[0] in a "safe to reflect"
 state at all times: empty, the input scratchpad, or a complete output
 Cap::CNode atomically MGMT_MOVE'd in. Never leave slot[0] mid-mutation,
