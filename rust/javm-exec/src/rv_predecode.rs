@@ -125,13 +125,15 @@ fn static_target(ip: &RvPreDecodedInst) -> Option<usize> {
     let pc = ip.pc as i64;
     let off: i64 = match ip.inst {
         RvInst::Jal { imm, .. } => imm as i64,
-        RvInst::Callf { imm, .. } => imm as i64,
         RvInst::Beq { imm, .. }
         | RvInst::Bne { imm, .. }
         | RvInst::Blt { imm, .. }
         | RvInst::Bge { imm, .. }
         | RvInst::Bltu { imm, .. }
         | RvInst::Bgeu { imm, .. } => imm as i64,
+        // br_table targets come from the Image's jump_table, not
+        // from an instruction-embedded immediate. They're listed
+        // separately by the linker for branch-target alignment.
         _ => return None,
     };
     let t = pc + off;
@@ -148,10 +150,8 @@ fn static_target(ip: &RvPreDecodedInst) -> Option<usize> {
 fn is_terminator(inst: &RvInst) -> bool {
     matches!(
         inst,
-        // PC-relative jumps and calls.
+        // PC-relative jumps.
         RvInst::Jal { .. }
-            | RvInst::Callf { .. }
-            | RvInst::Retf
             // Static branches.
             | RvInst::Beq { .. }
             | RvInst::Bne { .. }
@@ -163,6 +163,7 @@ fn is_terminator(inst: &RvInst) -> bool {
             | RvInst::Trap
             | RvInst::EcallJar
             | RvInst::Ecalli { .. }
+            | RvInst::BrTable { .. }
             | RvInst::Fallthrough
             // Reserved encodings panic at runtime.
             | RvInst::Reserved { .. }
@@ -197,11 +198,9 @@ pub fn rv_gas_cost(inst: RvInst) -> u32 {
         // ---- Static jumps (PVM `jump` = 15) ----
         Jal { .. } => 15,
 
-        // ---- Custom-0 / custom-1 control flow ----
-        // callf → PVM `load_imm_jump` (15)
-        Callf { .. } => 15,
-        // retf → PVM `jump_ind` (22) — same indirect-return shape
-        Retf => 22,
+        // ---- Custom-0 control flow ----
+        // br_table → PVM `jump_ind` (22) — same indirect-jump shape
+        BrTable { .. } => 22,
         // fallthrough → PVM `fallthrough` (2)
         Fallthrough => 2,
         // ecalli → PVM `ecalli` (100)
@@ -374,28 +373,23 @@ mod tests {
     }
 
     #[test]
-    fn callf_is_terminator() {
-        // callf imm=+8 (custom-1, J-type).
-        // J-type word: imm bits + rd + opcode. rd=0 (required for callf).
-        // Major opcode 0b01_010 = 0xA; bits[1:0]=11. Major bits[6:2]=0b01010=10.
-        // word = imm_j_field | (rd<<7) | (major<<2) | 0b11
-        // For imm=+8: J-format imm encoding = 0x00800000 wait, let me compute
-        // J imm bits in instruction word:
-        //   bit 31 = imm[20]
-        //   bits 30:21 = imm[10:1]
-        //   bit 20 = imm[11]
-        //   bits 19:12 = imm[19:12]
-        // imm=8 means imm[3]=1 (bit pos 3 in 21-bit signed).
-        // imm[10:1] = 0000000100 (bit 3 set in 10-bit field = 0x004)
-        // bits 30:21 = 0x004 → contribution = 0x004 << 21 = 0x00800000
-        // word = 0x00800000 | (0 << 7) | (0xA << 2) | 0b11 = 0x0080002Bu32
-        let callf_word = 0x0080_002Bu32;
-        let code = enc(&[callf_word, 0x00150513]);
+    fn br_table_is_terminator() {
+        // br_table table_id=5, rs1=x1 (custom-0 funct3=011, I-type, rd=0).
+        // Word = (table_id << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7)
+        //        | (custom_0 << 2) | 0b11
+        //      = (5 << 20)  | (1 << 15)  | (0b011 << 12) | (0 << 7)
+        //        | (0b00010 << 2) | 0b11
+        //      = 0x0050_B00B
+        let br_table_word = (5u32 << 20) | (1u32 << 15) | (0b011u32 << 12) | (0b00010u32 << 2) | 0b11;
+        let code = enc(&[br_table_word, 0x00150513]);
         let r = predecode_rv(&code);
         assert_eq!(r.insts.len(), 2);
-        assert!(matches!(r.insts[0].inst, RvInst::Callf { imm: 8 }));
-        assert!(r.insts[0].is_gas_block_start);   // PC=0
-        assert!(r.insts[1].is_gas_block_start);   // post-callf
+        assert!(matches!(
+            r.insts[0].inst,
+            RvInst::BrTable { table_id: 5, rs1: 1 }
+        ));
+        assert!(r.insts[0].is_gas_block_start); // PC=0
+        assert!(r.insts[1].is_gas_block_start); // post-br_table
     }
 
     #[test]

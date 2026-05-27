@@ -23,6 +23,7 @@ fn minimal_chain_image() -> Image {
         code: vec![20u8, 7, 42, 0, 0, 0, 0, 0, 0, 0, 10, 0],
         packed_bitmask: vec![0x01, 0x04],
         jump_table: Vec::new(),
+        jump_table_offsets: Vec::new(),
         endpoints,
         memory_mappings: Vec::new(),
         gas_slots: vec![abi::BARE_GAS_SLOT],

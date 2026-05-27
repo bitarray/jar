@@ -48,9 +48,31 @@ pub struct Image {
     /// continuation byte. Use `javm_exec::unpack_bitmask` to
     /// recover the unpacked form at decode time.
     pub packed_bitmask: Vec<u8>,
-    /// Jump-table entries (PVM PCs into `code`). Indexed by
-    /// `djump` immediates.
+    /// Jump-table entries (PVM PCs into `code`).
+    ///
+    /// **PVM legacy**: single global table indexed by `djump`
+    /// immediates. `jump_table_offsets` is empty (signals
+    /// single-table mode).
+    ///
+    /// **PVM2**: concatenation of multiple variable-length sub-tables
+    /// (per-function return tables, per-vtable dispatch tables,
+    /// per-switch jump tables). Sub-table boundaries live in
+    /// `jump_table_offsets` (CSR-style). Each `br_table table_id, rs1`
+    /// dispatches through sub-table `table_id`.
     pub jump_table: Vec<u32>,
+    /// PVM2: per-table start offsets in `jump_table`, CSR-style.
+    /// Length = `num_tables + 1`. The first entry is always 0;
+    /// the last entry equals `jump_table.len()`. Table `t` lives
+    /// at `jump_table[jump_table_offsets[t]..jump_table_offsets[t+1]]`,
+    /// and its size is `jump_table_offsets[t+1] - jump_table_offsets[t]`
+    /// — every table can have a different length.
+    ///
+    /// Example: 3 tables of sizes [5, 3, 7]:
+    /// - `jump_table` = `[a0..a4, b0..b2, c0..c6]` (15 u32 entries)
+    /// - `jump_table_offsets` = `[0, 5, 8, 15]` (4 entries)
+    ///
+    /// Empty for PVM legacy (signals single-table mode).
+    pub jump_table_offsets: Vec<u32>,
     /// Endpoints addressable by `endpoint_idx` (u8). Sparse — only
     /// declared endpoints are present.
     pub endpoints: BTreeMap<u8, EndpointDef>,
@@ -148,6 +170,7 @@ impl Image {
             code: Vec::new(),
             packed_bitmask: Vec::new(),
             jump_table: Vec::new(),
+            jump_table_offsets: Vec::new(),
             endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: Vec::new(),

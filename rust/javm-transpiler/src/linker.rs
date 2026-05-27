@@ -262,6 +262,9 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
         code: ctx.code.clone(),
         packed_bitmask,
         jump_table: ctx.jump_table.clone(),
+        // PVM legacy: single global table; empty offsets signals
+        // single-table mode (see Image::jump_table_offsets docs).
+        jump_table_offsets: Vec::new(),
         endpoints,
         memory_mappings,
         gas_slots: vec![BARE_GAS_SLOT],

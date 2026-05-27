@@ -10,6 +10,7 @@ fn empty_chain_image() -> Image {
         // 2 bytes of code → 2 instruction-start bits → 0b0000_0011.
         packed_bitmask: vec![0x03],
         jump_table: Vec::new(),
+        jump_table_offsets: Vec::new(),
         endpoints: BTreeMap::new(),
         memory_mappings: Vec::new(),
         gas_slots: vec![abi::BARE_GAS_SLOT],

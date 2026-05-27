@@ -267,11 +267,12 @@ impl Compiler {
             RvInst::Trap => self.rv_trap(pc),
             RvInst::EcallJar => self.rv_ecall_jar(next_pc),
             RvInst::Ecalli { imm } => self.rv_ecalli(imm, next_pc),
-            // PVM2 pure-static-dispatch ops. callf emits a native call;
-            // retf emits a native ret; fallthrough is a no-op (just a
-            // bb_start marker handled by predecode).
-            RvInst::Callf { imm } => self.rv_callf(imm, pc, next_pc),
-            RvInst::Retf => self.rv_retf(),
+            // PVM2 control flow. br_table dispatches through a per-
+            // function jump table; fallthrough is a no-op terminator
+            // (just a bb_start marker handled by predecode).
+            RvInst::BrTable { table_id, rs1 } => {
+                self.rv_br_table(table_id, rs1, pc, next_pc)
+            }
             RvInst::Fallthrough => {}
 
             RvInst::Reserved { .. } => self.rv_emit_panic_at(pc),
@@ -1252,31 +1253,16 @@ impl Compiler {
         self.emit_static_branch(target, true, next_pc, pc);
     }
 
-    /// Emit a PVM2 `callf imm` — a PC-relative static call. Lowers to a
-    /// native `call <label>`, which pushes the native return address on
-    /// the guest stack (set up via RSP swap in the prologue). The host
-    /// CPU's Return Stack Buffer predicts the matching `retf` (native
-    /// `ret`) perfectly.
-    ///
-    /// Target must be a basic-block start; the linker guarantees this
-    /// by inserting a `fallthrough` before any target not naturally
-    /// post-terminator.
-    fn rv_callf(&mut self, imm: i32, pc: u32, _next_pc: u32) {
-        let target = (pc as i64).wrapping_add(imm as i64) as u32;
-        if !self.is_basic_block_start(target) {
-            // Linker bug — target should always be a bb_start.
-            self.rv_emit_panic_at(pc);
-            return;
-        }
-        let label = self.label_for_pc(target);
-        self.asm.call_label(label);
-    }
-
-    /// Emit a PVM2 `retf` — pop the native return address from the
-    /// guest stack and dispatch. Lowers to a single native `ret`,
-    /// RSB-predicted.
-    fn rv_retf(&mut self) {
-        self.asm.ret();
+    /// Emit a PVM2 `br_table table_id, rs1` — indirect-jump terminator
+    /// dispatching through a per-table list of PVM2 PCs in
+    /// `Image.jump_table`. Stub for Phase 2 (just panics); the real
+    /// codegen lands in Phase 4.
+    fn rv_br_table(&mut self, _table_id: u16, _rs1: u8, pc: u32, _next_pc: u32) {
+        // TODO(Phase 4): decode idx = (rs1 - 1) >> 1, bounds check
+        //   against jt_offsets[table_id+1] - jt_offsets[table_id],
+        //   load PVM2 PC from jt[jt_offsets[table_id] + idx], then
+        //   jmp through dispatch_table[pc].
+        self.rv_emit_panic_at(pc);
     }
 
     fn rv_branch(&mut self, rs1: u8, rs2: u8, imm: i32, cc: Cc, pc: u32, next_pc: u32) {

@@ -150,13 +150,14 @@ pub enum RvInst {
 
     // -------- Control flow --------
     /// `jal rd, off` — Harvard semantics per PVM2.
-    /// `rd = pc + sizeof(jal)`; pc = pc + off.
+    /// `rd = pc + sizeof(jal)`; pc = pc + off. Used for static
+    /// jumps (`rd = x0`, = `c.j`) and for function calls after
+    /// linker rewrite (caller emits `addi ra, x0, encoded_idx;
+    /// jal x0, callee_entry`).
     Jal { rd: u8, imm: i32 },
-    /// `jalr rd, rs1, imm` — Harvard semantics + djump validation.
-    /// `target = (rs1 + imm) & 0xFFFFFFFE`; trap if not a valid PC.
-    // JALR removed: forbidden in PVM2. Use Callf (custom-1, PC-relative
-    // call) or Retf (custom-0, return) instead. Both lower to native
-    // call/ret on a dedicated guest stack for RSB-friendly prediction.
+    // JALR removed: forbidden in PVM2. Function returns lower to
+    // `BrTable` (custom-0 funct3=011) dispatching through the
+    // callee's per-function entry in `Image.jump_table`.
     Beq { rs1: u8, rs2: u8, imm: i32 },
     Bne { rs1: u8, rs2: u8, imm: i32 },
     Blt { rs1: u8, rs2: u8, imm: i32 },
@@ -171,25 +172,32 @@ pub enum RvInst {
     FenceI,
 
     // -------- Custom-0 (PVM2-jar host ops) --------
-    /// `custom-0` sub-op `00`: unconditional execution abort.
+    /// `custom-0` funct3=000: unconditional execution abort.
     Trap,
-    /// `custom-0` sub-op `01`: jar management op / dynamic CALL.
+    /// `custom-0` funct3=001: jar management op / dynamic CALL.
     EcallJar,
-    /// `custom-0` sub-op `10`: host-call with 20-bit signed immediate.
+    /// `custom-0` funct3=010: host-call with 20-bit signed immediate.
     Ecalli { imm: i32 },
-    /// `custom-0` sub-op `11`: return from function. Native lowering:
-    /// `ret` (pops native return address pushed by an earlier `callf`).
-    Retf,
-    /// `custom-0` sub-op `100`: terminator no-op. Acts as a basic-block
+    /// `custom-0` funct3=011 (I-type): indirect-jump terminator
+    /// dispatching through a per-table list of PVM2 PCs. The
+    /// runtime semantics:
+    ///
+    /// ```text
+    /// idx = ((rs1 - 1) >> 1) as u32          // decode 2*idx+1
+    /// if idx < table_size[table_id]:
+    ///     PC = jump_table[table_id][idx]    // table entry ∈ bb_starts
+    /// else:
+    ///     PC = next_pc                       // fall through (default arm)
+    /// ```
+    ///
+    /// `rs1 = 0` and `rs1` with LSB clear both produce a huge idx,
+    /// causing fallthrough. The linker validates every table entry
+    /// is a basic-block start at deblob.
+    BrTable { table_id: u16, rs1: u8 },
+    /// `custom-0` funct3=100: terminator no-op. Acts as a basic-block
     /// start at the next byte. Linker injects this before branch / call
     /// targets that aren't naturally post-terminator.
     Fallthrough,
-
-    // -------- custom-1: PC-relative call (J-type) --------
-    /// `custom-1` major opcode (J-type, 20-bit signed PC-relative immediate).
-    /// Static call: pushes native return address on the guest stack and
-    /// branches to PC + imm. The target must be in `bb_starts`.
-    Callf { imm: i32 },
 
     // -------- Sentinel for forbidden encodings --------
     /// Decoder accepted the wire bits but the encoding is reserved
@@ -284,21 +292,12 @@ fn decode_32(w: u32) -> RvInst {
             let imm = imm_j(w);
             RvInst::Jal { rd, imm }
         }
-        OP_JALR => RvInst::Reserved { raw: w }, // forbidden in PVM2 — use callf/retf
+        OP_JALR => RvInst::Reserved { raw: w }, // forbidden in PVM2 — use br_table for returns
         OP_BRANCH => decode_branch(rs1, rs2, funct3, imm_b(w), w),
         OP_MISC_MEM => decode_misc_mem(funct3),
         OP_SYSTEM => RvInst::Reserved { raw: w }, // standard ECALL/EBREAK/CSR reserved
         OP_CUSTOM_0 => decode_custom_0(w, rd, rs1, funct3),
-        OP_CUSTOM_1 => {
-            // custom-1: PC-relative call. J-type encoding (same immediate
-            // layout as JAL). rd field is required to be x0 (no link
-            // register write — the return address goes on the guest stack
-            // via native `call`).
-            if rd != 0 {
-                return RvInst::Reserved { raw: w };
-            }
-            RvInst::Callf { imm: imm_j(w) }
-        }
+        OP_CUSTOM_1 => RvInst::Reserved { raw: w }, // custom-1 reserved (was callf, now removed)
         _ => RvInst::Reserved { raw: w },
     }
 }
@@ -555,22 +554,27 @@ fn decode_misc_mem(funct3: u8) -> RvInst {
     }
 }
 
-fn decode_custom_0(w: u32, _rd: u8, _rs1: u8, funct3: u8) -> RvInst {
+fn decode_custom_0(w: u32, rd: u8, rs1: u8, funct3: u8) -> RvInst {
     // Sub-op layout (I-type wire shape; funct3 is the sub-op selector):
     //   funct3 = 000 -> trap         (other fields ignored)
     //   funct3 = 001 -> ecall.jar    (other fields ignored)
     //   funct3 = 010 -> ecalli       (imm12 in bits [31:20], rs1/rd zero)
-    //   funct3 = 011 -> retf         (other fields ignored)
+    //   funct3 = 011 -> br_table     (I-type: imm[11:0]=table_id (unsigned),
+    //                                  rs1=idx-carrier reg, rd=0)
     //   funct3 = 100 -> fallthrough  (other fields ignored)
-    //
-    // Wire bits [31:20] are the standard I-type signed 12-bit imm, so
-    // we reuse `imm_i`. Range: [-2048, +2047], ample for host-function
-    // selectors (current ABI uses values < 256).
     match funct3 {
         0b000 => RvInst::Trap,
         0b001 => RvInst::EcallJar,
         0b010 => RvInst::Ecalli { imm: imm_i(w) },
-        0b011 => RvInst::Retf,
+        0b011 => {
+            // br_table requires rd=0 (no destination — it's a terminator).
+            if rd != 0 {
+                return RvInst::Reserved { raw: w };
+            }
+            // imm[11:0] is read as unsigned 12-bit (table_id ∈ 0..=4095).
+            let table_id = ((w >> 20) & 0xFFF) as u16;
+            RvInst::BrTable { table_id, rs1 }
+        }
         0b100 => RvInst::Fallthrough,
         _ => RvInst::Reserved { raw: w },
     }
@@ -921,18 +925,14 @@ fn decompress_q2(h: u16, f3: u16) -> RvInst {
         0b100 => {
             // c.jr / c.mv / c.ebreak / c.jalr / c.add
             //
-            // PVM2 forbids JALR. The single exception is `c.jr ra` (the
-            // lld-emitted function-return idiom), which we repurpose
-            // structurally as `retf` — same 2-byte encoding, semantics
-            // change from "jump to ra" to "pop guest stack into PC".
-            // This keeps the wire format compact (returns stay 2 bytes)
-            // and avoids a linker rewrite for the common case.
-            //
-            // All other c.jr / c.jalr forms are rejected.
+            // PVM2 forbids all JALR-style indirect jumps. The earlier
+            // "c.jr ra → retf" repurpose is gone: the linker now
+            // rewrites c.jr ra to a 4-byte `br_table` (custom-0
+            // funct3=011, I-type) before deblob. Any leftover c.jr /
+            // c.jalr form decoded here is therefore Reserved.
             let bit12 = (h >> 12) & 1;
             match (bit12, rdrs1, rs2) {
-                (0, 1, 0) => RvInst::Retf, // c.jr ra → retf (PVM2 divergence)
-                (0, r, 0) if r != 0 => RvInst::Reserved { raw: h as u32 }, // c.jr (other) — forbidden
+                (0, r, 0) if r != 0 => RvInst::Reserved { raw: h as u32 }, // c.jr — forbidden
                 (0, r, s) if r != 0 && s != 0 => RvInst::Add {
                     rd: r,
                     rs1: 0,
@@ -1231,5 +1231,46 @@ mod tests {
         let w = (0xFFFu32 << 20) | (0b010 << 12) | 0x0B;
         let bytes = w.to_le_bytes();
         assert_eq!(decode(&bytes), Some((RvInst::Ecalli { imm: -1 }, 4)));
+    }
+
+    #[test]
+    fn decode_custom_br_table() {
+        // br_table table_id=42, rs1=x1 (ra): custom-0, funct3=011, rd=0
+        // wire: (42<<20) | (1<<15) | (0b011<<12) | (0<<7) | (0b00010<<2) | 0b11
+        let w = (42u32 << 20) | (1u32 << 15) | (0b011u32 << 12) | (0b00010u32 << 2) | 0b11;
+        let bytes = w.to_le_bytes();
+        assert_eq!(
+            decode(&bytes),
+            Some((RvInst::BrTable { table_id: 42, rs1: 1 }, 4))
+        );
+    }
+
+    #[test]
+    fn decode_custom_br_table_rd_nonzero_reserved() {
+        // br_table with rd != 0 must decode to Reserved.
+        let w = (1u32 << 20) | (1u32 << 15) | (0b011u32 << 12)
+            | (1u32 << 7) | (0b00010u32 << 2) | 0b11;
+        let bytes = w.to_le_bytes();
+        let decoded = decode(&bytes).unwrap().0;
+        assert!(matches!(decoded, RvInst::Reserved { .. }));
+    }
+
+    #[test]
+    fn decode_custom1_callf_now_reserved() {
+        // Old callf (custom-1, J-type, rd=0) now decodes to Reserved.
+        // wire: imm=8 J-type field | (rd=0) | (custom-1 major=0b01010) | 0b11
+        let callf_word = 0x0080_002Bu32;
+        let bytes = callf_word.to_le_bytes();
+        let decoded = decode(&bytes).unwrap().0;
+        assert!(matches!(decoded, RvInst::Reserved { .. }));
+    }
+
+    #[test]
+    fn decompress_c_jr_ra_now_reserved() {
+        // `c.jr ra` (= 0x8082) — used to decompress to Retf;
+        // PVM2 now rejects it. Linker rewrites returns to br_table.
+        let bytes = 0x8082u16.to_le_bytes();
+        let decoded = decode(&bytes).unwrap().0;
+        assert!(matches!(decoded, RvInst::Reserved { .. }));
     }
 }

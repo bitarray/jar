@@ -504,7 +504,10 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
     Ok(Image {
         code,
         packed_bitmask: Vec::new(),
+        // PVM2: br_table sub-tables go here once br_table lands;
+        // empty for now.
         jump_table: Vec::new(),
+        jump_table_offsets: Vec::new(),
         endpoints,
         memory_mappings,
         gas_slots: vec![BARE_GAS_SLOT],

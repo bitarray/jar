@@ -66,6 +66,7 @@ fn hello_world_chain_image() -> Image {
         // an all-1s bitmask). Packed: bits 0,1 set → 0b0000_0011.
         packed_bitmask: vec![0x03],
         jump_table: Vec::new(),
+        jump_table_offsets: Vec::new(),
         endpoints,
         memory_mappings: Vec::<MemoryMapping>::new(),
         gas_slots: vec![abi::BARE_GAS_SLOT],
