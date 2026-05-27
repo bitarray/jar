@@ -2697,65 +2697,79 @@ impl Compiler {
     ///   `cond = Cc::E`  → czero.eqz rd, rs1, rs2 = (rs2 == 0) ? 0 : rs1
     ///   `cond = Cc::NE` → czero.nez rd, rs1, rs2 = (rs2 != 0) ? 0 : rs1
     ///
-    /// We build a mask `M = -1` when **rs1 should be kept** (the
-    /// "false" branch of the condition), else `M = 0`, then compute
-    /// `d = rs1 & M`. The mask uses the *inverted* condition because
-    /// the spec zeroes out when the condition holds.
+    /// Emits a three-op CMOV sequence:
+    ///   test r2, r2     ; ZF reflects rs2 == 0
+    ///   mov_ri32 _, 0   ; 5-byte mov-imm (no flag effect)
+    ///   cmov... ...     ; conditionally swap on ZF
+    ///
+    /// The two branches below differ only in which register is the cmov
+    /// destination vs source, dictated by whether `d` aliases `rs1`
+    /// (in which case `d` already holds the "keep" value and we cmov
+    /// 0 in on the spec condition) or not (we initialise `d=0` and
+    /// cmov `r1` in on the opposite condition). Both paths are 3 ops.
     fn rv_czero(&mut self, rd: u8, rs1: u8, rs2: u8, cond: Cc, pc: u32) {
         let Some(d) = self.rv_dst(rd, pc) else { return };
         if rv_is_reserved(rs1) || rv_is_reserved(rs2) {
             self.rv_emit_panic_at(pc);
             return;
         }
+        let slot = rv_slot(rd).unwrap();
+
+        // Static-result short circuits.
         if rs2 == 0 {
-            // rs2 hardwired zero: condition is statically known.
-            //   eqz (Cc::E): rs2 == 0 is always true → d = 0
-            //   nez (Cc::NE): rs2 == 0 is true, rs2 != 0 is false → d = rs1
+            // rs2 hardwired zero: spec condition is statically known.
+            //   eqz: rs2==0 always true → d = 0
+            //   nez: rs2!=0 always false → d = rs1
             if matches!(cond, Cc::E) {
                 self.asm.mov_ri64(d, 0);
             } else {
                 self.rv_read(rs1, d, pc);
             }
-            if rd != 0 {
-                self.invalidate_reg(rv_slot(rd).unwrap());
-            }
+            self.invalidate_reg(slot);
             return;
         }
-        let inv_cond = match cond {
+        if rs1 == 0 {
+            // rs1 hardwired zero: both branches of the conditional yield 0.
+            self.asm.mov_ri64(d, 0);
+            self.invalidate_reg(slot);
+            return;
+        }
+        if rs1 == rs2 {
+            //   eqz: (rs1==0) ? 0 : rs1 == rs1
+            //   nez: (rs1!=0) ? 0 : rs1 == 0
+            if matches!(cond, Cc::E) {
+                self.rv_read(rs1, d, pc);
+            } else {
+                self.asm.mov_ri64(d, 0);
+            }
+            self.invalidate_reg(slot);
+            return;
+        }
+
+        let r1 = REG_MAP[rv_slot(rs1).unwrap()];
+        let r2 = REG_MAP[rv_slot(rs2).unwrap()];
+        let opposite = match cond {
             Cc::E => Cc::NE,
             Cc::NE => Cc::E,
             _ => unreachable!("rv_czero only accepts E/NE"),
         };
-        let r2 = REG_MAP[rv_slot(rs2).unwrap()];
-        if d == r2 {
-            // d aliases r2 — snapshot r2's value into SCRATCH first,
-            // then read rs1 into d while we still can. We reuse SCRATCH
-            // to build the mask afterward (it briefly held rs2's value,
-            // but we don't need that snapshot after the test_rr below).
-            //
-            // We CANNOT use push/pop RAX as scratch here: rs1 may map to
-            // RAX (x14), in which case overwriting RAX before rv_read
-            // would feed rv_read the wrong value.
-            self.asm.mov_rr(SCRATCH, r2);
-            self.rv_read(rs1, d, pc);
-            self.asm.test_rr(SCRATCH, SCRATCH);
-            // `mov rN, imm32` (mov_ri32) is a real mov-imm, NOT XOR —
-            // it preserves the flags from the test above into setcc.
-            self.asm.mov_ri32(SCRATCH, 0);
-            self.asm.setcc(inv_cond, SCRATCH);
-            self.asm.neg64(SCRATCH);
-            self.asm.and_rr(d, SCRATCH);
-        } else {
+
+        if d == r1 {
+            // d already holds rs1's value. Test rs2, then cmov 0 in
+            // when the spec condition holds. We can't cmov from `r1`
+            // here — at execution time `r1 == d`, so the source value
+            // is whatever d *currently* holds, not the original rs1.
             self.asm.test_rr(r2, r2);
             self.asm.mov_ri32(SCRATCH, 0);
-            self.asm.setcc(inv_cond, SCRATCH);
-            self.asm.neg64(SCRATCH);
-            self.rv_read(rs1, d, pc);
-            self.asm.and_rr(d, SCRATCH);
+            self.asm.cmovcc(cond, d, SCRATCH);
+        } else {
+            // d != r1. d may alias r2; that's fine because we test r2
+            // BEFORE the mov writes 0 into d.
+            self.asm.test_rr(r2, r2);
+            self.asm.mov_ri32(d, 0);
+            self.asm.cmovcc(opposite, d, r1);
         }
-        if rd != 0 {
-            self.invalidate_reg(rv_slot(rd).unwrap());
-        }
+        self.invalidate_reg(slot);
     }
 
     // ---- Jumps & branches -------------------------------------------
