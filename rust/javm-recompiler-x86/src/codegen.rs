@@ -21,7 +21,6 @@
 //!
 //! Reserved: R15 = gas meter, RDX = scratch, RSP = native stack.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use super::asm::{Assembler, Cc, Label, Reg};
@@ -109,7 +108,12 @@ pub const EXIT_TRAP: u32 = 7;
 /// Result of compilation.
 pub struct CompileResult {
     pub native_code: Vec<u8>,
-    pub dispatch_table: Vec<i32>,
+    /// Sparse dispatch entries — `(pvm_pc, native_offset)` for every
+    /// gas-block start. The runtime arena's dispatch region is
+    /// page-zero-filled, so callers only need to write these
+    /// non-zero entries instead of materialising a dense
+    /// `code.len() + 1`-sized array.
+    pub dispatch_entries: Vec<(u32, i32)>,
     pub trap_table: Vec<(u32, u32)>,
     pub exit_label_offset: u32,
     /// Byte-indexed validity map (RV path only): true at every PC where
@@ -587,25 +591,25 @@ impl Compiler {
         // Emit epilogue and exit sequences
         self.emit_exit_sequences();
 
-        // Build dispatch table: PVM PC → native code offset.
-        // gas_block_pcs was populated inline during the single-pass loop.
-        let table_len = code_len + 1;
-        let mut dispatch_table = vec![0i32; table_len];
+        // Sparse dispatch entries: one per gas-block start. The arena's
+        // dispatch region is page-zero-filled, so caller writes these
+        // (pvm_pc, offset) pairs without zeroing.
+        let mut dispatch_entries: Vec<(u32, i32)> =
+            Vec::with_capacity(self.gas_block_pcs.len());
         for &pvm_pc in self.gas_block_pcs.iter() {
             let label = Label(self.label_base + pvm_pc);
             if let Some(offset) = self.asm.label_offset(label) {
-                dispatch_table[pvm_pc as usize] = offset as i32;
+                dispatch_entries.push((pvm_pc, offset as i32));
             }
         }
-        // PC=0 must always be valid (program start); if not already set, it'll be
-        // set by the first basic block at PC 0.
+        let _ = code_len;
 
         let exit_label_offset = self.asm.label_offset(self.exit_label).unwrap_or(0) as u32;
         let trap_table = self.trap_entries;
 
         CompileResult {
             native_code: self.asm.finalize(),
-            dispatch_table,
+            dispatch_entries,
             trap_table,
             exit_label_offset,
             valid_pc: Vec::new(),

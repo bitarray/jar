@@ -167,7 +167,7 @@ pub fn get_or_compile(
         let compiler = Compiler::new(bitmask, jump_table, helpers, code.len(), jit_va, mem_cycles);
         let CompileResult {
             native_code,
-            dispatch_table,
+            dispatch_entries,
             trap_table,
             exit_label_offset,
             valid_pc: _,
@@ -194,13 +194,13 @@ pub fn get_or_compile(
         // length × size_of::<u32>).
         let jt_slice = unsafe { core::slice::from_raw_parts(jt_ptr, jt_bytes_len) };
         buf[jt_offset..jt_offset + jt_bytes_len].copy_from_slice(jt_slice);
-        // DISPATCH
-        let dispatch_bytes_len = core::mem::size_of_val(dispatch_table.as_slice());
-        let dispatch_ptr = dispatch_table.as_ptr() as *const u8;
-        // SAFETY: dispatch_ptr is valid for dispatch_bytes_len bytes.
-        let dispatch_slice =
-            unsafe { core::slice::from_raw_parts(dispatch_ptr, dispatch_bytes_len) };
-        buf[dispatch_offset..dispatch_offset + dispatch_bytes_len].copy_from_slice(dispatch_slice);
+        // DISPATCH — write only the populated entries (one i32 per
+        // gas-block start). The arena is page-zero-filled, so the
+        // ~9 in 10 unused PCs need no work.
+        for &(pvm_pc, off) in &dispatch_entries {
+            let slot_off = dispatch_offset + (pvm_pc as usize) * core::mem::size_of::<i32>();
+            buf[slot_off..slot_off + 4].copy_from_slice(&off.to_le_bytes());
+        }
         // JIT
         buf[jit_offset..jit_offset + native_code.len()].copy_from_slice(&native_code);
         // TRAMP — 26 bytes encoding the per-Image entry sequence.
@@ -307,7 +307,7 @@ pub fn get_or_compile_rv(
         let compiler = Compiler::new(&[], &[], helpers, code.len(), jit_va, mem_cycles);
         let CompileResult {
             native_code,
-            dispatch_table,
+            dispatch_entries,
             trap_table,
             exit_label_offset,
             valid_pc,
@@ -337,13 +337,11 @@ pub fn get_or_compile_rv(
             buf[jt_offset..jt_offset + jt_bytes_used].copy_from_slice(jt_slice);
         }
 
-        // DISPATCH region.
-        let dispatch_bytes_len = core::mem::size_of_val(dispatch_table.as_slice());
-        let dispatch_ptr = dispatch_table.as_ptr() as *const u8;
-        // SAFETY: dispatch_ptr valid for dispatch_bytes_len bytes.
-        let dispatch_slice =
-            unsafe { core::slice::from_raw_parts(dispatch_ptr, dispatch_bytes_len) };
-        buf[dispatch_offset..dispatch_offset + dispatch_bytes_len].copy_from_slice(dispatch_slice);
+        // DISPATCH region — sparse write (arena is page-zero).
+        for &(pvm_pc, off) in &dispatch_entries {
+            let slot_off = dispatch_offset + (pvm_pc as usize) * core::mem::size_of::<i32>();
+            buf[slot_off..slot_off + 4].copy_from_slice(&off.to_le_bytes());
+        }
 
         // JIT region.
         buf[jit_offset..jit_offset + native_code.len()].copy_from_slice(&native_code);

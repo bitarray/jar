@@ -183,13 +183,15 @@ impl Compiler {
 
         self.emit_exit_sequences();
 
-        // Dispatch table: PVM PC → native code offset.
-        let table_len = code.len() + 1;
-        let mut dispatch_table = vec![0i32; table_len];
+        // Sparse dispatch entries — caller writes only these into the
+        // (page-zero-filled) arena dispatch region. No code.len() + 1
+        // intermediate Vec.
+        let mut dispatch_entries: Vec<(u32, i32)> =
+            Vec::with_capacity(self.gas_block_pcs.len());
         for &pc in self.gas_block_pcs.iter() {
             let label = Label(self.label_base + pc);
             if let Some(off) = self.asm.label_offset(label) {
-                dispatch_table[pc as usize] = off as i32;
+                dispatch_entries.push((pc, off as i32));
             }
         }
 
@@ -198,7 +200,7 @@ impl Compiler {
 
         CompileResult {
             native_code: self.asm.finalize(),
-            dispatch_table,
+            dispatch_entries,
             trap_table,
             exit_label_offset,
             valid_pc,
