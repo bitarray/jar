@@ -255,29 +255,25 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
     // through x5 at runtime — matching today's PVM ecalli behaviour).
     rewrite_ecall_markers(&mut code)?;
 
-    // ---- 3b. JAL / JALR → callf / retf / static-jump ---------------
+    // ---- 3b. CFG analysis + br_table-based call/return rewrite ------
     //
-    // PVM2 forbids JALR. Rewrite the canonical call / return / tail-call
-    // patterns to the new structured-control-flow ops (callf / retf /
-    // jal-x0). lld emits `c.jr ra` for the return idiom; the decoder
-    // accepts that 2-byte encoding as `Retf` directly without a linker
-    // rewrite.
-    rewrite_calls_and_returns(&mut code, &auipc_effective, base_vaddr)?;
-
-    // ---- 3c. Branch-target alignment (fallthrough injection) -------
+    // PVM2 forbids JALR entirely. We rewrite the canonical call /
+    // return / tail-call patterns to:
+    //   - direct call:   `addi ra, x0, 2*idx+1; jal x0, callee_entry`
+    //   - tail call:     `nop;                  jal x0, callee_entry`
+    //                    (ra is passed through unchanged so the callee's
+    //                     br_table dispatches the upstream caller's idx)
+    //   - function ret:  `br_table table_id, ra` (custom-0 funct3=011)
     //
-    // After the call/return rewrites the code has the right control-
-    // flow ops, but branch / callf / jal targets aren't necessarily
-    // post-terminator yet. Inject `fallthrough` (4 bytes, custom-0,
-    // terminator no-op) before each such target so the predecode's
-    // strict bb_start set covers everything reachable.
+    // Each function gets a per-SCC return table; functions whose
+    // tail-call relationships form a SCC share a table. Tail-call
+    // predecessors transitively inject their callers' resume PCs
+    // into the callee SCC's table so the same ra-idx works at any
+    // br_table reached via a tail-call chain.
     //
-    // Endpoint entries and `.rodata` code-pointer targets are also
-    // required to be bb_starts (the host trampolines / future indirect-
-    // dispatch lowering need them), so we mark those as extra targets.
-    let pre_align_endpoint_offsets: Vec<usize> = {
-        // Read endpoint section now (re-read below for the final
-        // result with remapped PCs). Cheap; the section is tiny.
+    // Read endpoint entries first since they're required function
+    // entries (the host trampoline jumps directly to these PCs).
+    let endpoint_entries_pre: Vec<u32> = {
         match crate::linker::find_all_section_bytes_for_rv(elf_data, ".subsoil.endpoints") {
             Ok(sections) => sections
                 .iter()
@@ -290,12 +286,41 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
                     if fn_ptr < base_vaddr {
                         return None;
                     }
-                    Some((fn_ptr - base_vaddr) as usize)
+                    Some((fn_ptr - base_vaddr) as u32)
                 })
                 .collect(),
             Err(_) => Vec::new(),
         }
     };
+
+    let cfg_pvm2 = analyze_pvm2_cfg(&code, &auipc_effective, base_vaddr, &endpoint_entries_pre)?;
+    let return_tables_pre = build_return_tables(&cfg_pvm2)?;
+    let (new_code, offset_map_pre, mut tables_new_pcs) =
+        rewrite_pvm2_calls_returns(&code, &cfg_pvm2, &return_tables_pre)?;
+    let mut code = new_code;
+
+    // ---- 3c. Branch-target alignment (fallthrough injection) -------
+    //
+    // After the call/return rewrites, branch / jal targets aren't
+    // necessarily post-terminator yet. Inject `fallthrough` (4 bytes,
+    // custom-0, terminator no-op) before each such target so the
+    // predecode's strict bb_start set covers everything reachable.
+    //
+    // Targets that must be bb_starts:
+    //   - branch / jal targets (handled by align_branch_targets internally)
+    //   - endpoint entries (host trampoline entry — must remap via
+    //     offset_map_pre first)
+    //   - .rodata code-pointer targets (also via offset_map_pre)
+    //   - every entry in tables_new_pcs (br_table dispatches into these)
+    let pre_align_endpoint_offsets: Vec<usize> = endpoint_entries_pre
+        .iter()
+        .map(|&e| {
+            offset_map_pre
+                .get(&(e as usize))
+                .copied()
+                .unwrap_or(e as usize)
+        })
+        .collect();
     let pre_align_rodata_targets: Vec<usize> = elf
         .abs_code_ptrs
         .iter()
@@ -303,13 +328,49 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
             if !is_code_addr(rv_target) {
                 None
             } else {
-                Some(rv_target.wrapping_sub(base_vaddr) as usize)
+                let pre = rv_target.wrapping_sub(base_vaddr) as usize;
+                Some(offset_map_pre.get(&pre).copied().unwrap_or(pre))
             }
         })
         .collect();
     let mut extra_targets: Vec<usize> = pre_align_endpoint_offsets;
     extra_targets.extend_from_slice(&pre_align_rodata_targets);
-    let offset_map = align_branch_targets(&mut code, &extra_targets)?;
+    for table in &tables_new_pcs {
+        for &pc in table {
+            extra_targets.push(pc as usize);
+        }
+    }
+    let offset_map_align = align_branch_targets(&mut code, &extra_targets)?;
+
+    // Apply the alignment-pass offset_map to the return tables in place.
+    for table in tables_new_pcs.iter_mut() {
+        for entry in table.iter_mut() {
+            let new_pc =
+                offset_map_align
+                    .get(&(*entry as usize))
+                    .copied()
+                    .ok_or_else(|| {
+                        TranspileError::InvalidSection(format!(
+                            "link_elf_rv: br_table resume pc {:#x} not in align offset_map",
+                            *entry
+                        ))
+                    })?;
+            *entry = new_pc as u32;
+        }
+    }
+
+    // Compose offset_map_pre with offset_map_align so the existing
+    // `.rodata` + endpoint translation logic below (which uses OLD-pre-
+    // rewrite PCs as input) keeps working uniformly.
+    let offset_map: BTreeMap<usize, usize> = offset_map_pre
+        .iter()
+        .filter_map(|(&old_pre, &new_pre)| {
+            offset_map_align
+                .get(&new_pre)
+                .copied()
+                .map(|new_post| (old_pre, new_post))
+        })
+        .collect();
 
     // ---- 4. Validation pass ----------------------------------------
     //
@@ -501,13 +562,26 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
         );
     }
 
+    // Flatten per-table br_table targets into the Image's CSR
+    // layout: a single `jump_table` Vec<u32> with `jump_table_offsets`
+    // recording each sub-table's start. The final offsets entry is
+    // jump_table.len() so consumers can compute the last table's
+    // length uniformly.
+    let mut jump_table: Vec<u32> = Vec::new();
+    let mut jump_table_offsets: Vec<u32> = Vec::with_capacity(tables_new_pcs.len() + 1);
+    if !tables_new_pcs.is_empty() {
+        jump_table_offsets.push(0);
+        for table in &tables_new_pcs {
+            jump_table.extend_from_slice(table);
+            jump_table_offsets.push(jump_table.len() as u32);
+        }
+    }
+
     Ok(Image {
         code,
         packed_bitmask: Vec::new(),
-        // PVM2: br_table sub-tables go here once br_table lands;
-        // empty for now.
-        jump_table: Vec::new(),
-        jump_table_offsets: Vec::new(),
+        jump_table,
+        jump_table_offsets,
         endpoints,
         memory_mappings,
         gas_slots: vec![BARE_GAS_SLOT],
@@ -703,7 +777,15 @@ fn validate_pvm2(code: &[u8]) -> Result<(), TranspileError> {
             OP_JALR => {
                 return Err(TranspileError::InvalidSection(format!(
                     "link_elf_rv: JALR still present at offset {:#x} (rewrite incomplete) — \
-                     PVM2 has no JALR; calls/returns must use callf/retf",
+                     PVM2 has no JALR; calls/tail-calls/returns must use \
+                     addi+jal-x0 / br_table",
+                    i
+                )));
+            }
+            OP_CUSTOM_1 => {
+                return Err(TranspileError::InvalidSection(format!(
+                    "link_elf_rv: custom-1 opcode at offset {:#x} is reserved in PVM2 \
+                     (callf is gone; br_table lives in custom-0)",
                     i
                 )));
             }
@@ -880,39 +962,35 @@ fn encode_custom0_ecalli(imm: i32) -> u32 {
     (imm12 << 20) | (0b010 << 12) | OP_CUSTOM_0
 }
 
-/// Encode custom-0 `retf` (funct3 = 011; all other fields zero).
+/// Encode custom-0 `br_table table_id, rs1` — I-type indirect-jump
+/// terminator. funct3 = 011, rd = 0, imm[11:0] = table_id (unsigned
+/// 12-bit), rs1 = idx-carrier reg.
 #[inline]
-fn encode_custom0_retf() -> u32 {
-    (0b011 << 12) | OP_CUSTOM_0
+fn encode_custom0_br_table(table_id: u16, rs1: u8) -> u32 {
+    debug_assert!(table_id < (1 << 12), "br_table table_id must fit in 12 bits");
+    debug_assert!(rs1 < 32, "rs1 must be 5-bit");
+    let imm12 = (table_id as u32) & 0xFFF;
+    (imm12 << 20) | ((rs1 as u32) << 15) | (0b011 << 12) | OP_CUSTOM_0
 }
 
 /// Encode custom-0 `fallthrough` (funct3 = 100; all other fields zero).
 /// A 4-byte terminator no-op that creates a bb_start at the next byte.
-#[allow(dead_code)]
 #[inline]
 fn encode_custom0_fallthrough() -> u32 {
     (0b100 << 12) | OP_CUSTOM_0
 }
 
-/// Encode custom-1 `callf imm` — J-type, 20-bit signed PC-relative imm.
-/// rd field is fixed to x0 (the return address goes on the guest stack
-/// via the native `call` lowering, not into any guest-visible reg).
+/// Encode I-type `addi rd, rs1, imm` (RV `OP-IMM`, funct3=000).
+/// `imm` is signed 12-bit (range −2048..=2047).
 #[inline]
-fn encode_custom1_callf(imm: i32) -> u32 {
-    // J-type immediate layout (bit positions in instruction word):
-    //   bit 31     = imm[20]
-    //   bits 30:21 = imm[10:1]
-    //   bit 20     = imm[11]
-    //   bits 19:12 = imm[19:12]
-    let v = imm as u32;
-    let b20 = (v >> 20) & 0x1;
-    let b10_1 = (v >> 1) & 0x3FF;
-    let b11 = (v >> 11) & 0x1;
-    let b19_12 = (v >> 12) & 0xFF;
-    let imm_field =
-        (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12);
-    // rd = 0; opcode = custom-1.
-    imm_field | OP_CUSTOM_1
+fn encode_addi(rd: u8, rs1: u8, imm: i32) -> u32 {
+    debug_assert!(rd < 32 && rs1 < 32, "register field must fit 5 bits");
+    debug_assert!(
+        (-2048..=2047).contains(&imm),
+        "addi imm must fit signed 12-bit, got {imm}"
+    );
+    let imm12 = (imm as u32) & 0xFFF;
+    (imm12 << 20) | ((rs1 as u32) << 15) | (0b000 << 12) | ((rd as u32) << 7) | 0b001_0011
 }
 
 /// Encode JAL with rd=0 and J-type immediate (= the static-jump form,
@@ -961,6 +1039,866 @@ fn encode_b_imm(opcode_and_regs: u32, imm: i32) -> u32 {
     cleared | (b12 << 31) | (b10_5 << 25) | (b4_1 << 8) | (b11 << 7)
 }
 
+// ============================================================================
+// PVM2 call / return rewrite (br_table-based static dispatch)
+// ============================================================================
+
+/// Direct call site identified in the OLD (pre-rewrite) code.
+#[derive(Debug, Clone)]
+struct DirectCall {
+    /// Byte offset of the start of the OLD call sequence:
+    ///   - JAL rd != x0:        offset of the JAL (4 bytes long)
+    ///   - AUIPC + JALR rd!=x0: offset of the AUIPC (8 bytes long)
+    seq_start: u32,
+    /// Length of the OLD call sequence in bytes (4 or 8).
+    seq_len: u32,
+    /// Target callee entry PC in OLD code.
+    target: u32,
+}
+
+/// Tail-call site (same shape as DirectCall but represents an
+/// `auipc + jalr x0` pair — no link register written).
+#[derive(Debug, Clone)]
+struct TailCall {
+    seq_start: u32,
+    seq_len: u32,
+    target: u32,
+}
+
+/// Function return site (`c.jr ra` or uncompressed `jalr x0, x1, 0`).
+#[derive(Debug, Clone, Copy)]
+struct ReturnSite {
+    /// Byte offset of the return instruction.
+    pc: u32,
+    /// 2 for `c.jr ra`, 4 for uncompressed `jalr x0, x1, 0`.
+    len: u32,
+}
+
+/// Control-flow graph extracted from OLD code.
+#[derive(Debug)]
+struct Pvm2Cfg {
+    /// Function entry PCs (OLD code coordinates), sorted.
+    function_entries: Vec<u32>,
+    direct_calls: Vec<DirectCall>,
+    tail_calls: Vec<TailCall>,
+    returns: Vec<ReturnSite>,
+}
+
+/// Walk the (pre-rewrite) code and extract call / tail-call / return
+/// sites and the set of function entry PCs.
+///
+/// Patterns recognised (all anchored at instruction boundaries):
+///   - `jal rd != x0, imm`           → DirectCall (4-byte sequence)
+///   - `auipc + jalr rd != x0, imm`  → DirectCall (8-byte sequence)
+///   - `auipc + jalr x0, imm`        → TailCall (8-byte sequence)
+///   - `jalr x0, x1, 0` (uncomp.)    → ReturnSite (4 bytes)
+///   - `c.jr ra` (= 0x8082)          → ReturnSite (2 bytes)
+///   - `c.j imm` / `c.beqz` / etc.   → no edge added (static jump or branch)
+///   - any other JALR pattern        → error (forbidden in PVM2)
+///
+/// Function entries are derived from call/tail-call targets and from
+/// the caller-supplied endpoint entries.
+fn analyze_pvm2_cfg(
+    code: &[u8],
+    auipc_effective: &BTreeMap<u64, u32>,
+    base_vaddr: u64,
+    endpoint_entries: &[u32],
+) -> Result<Pvm2Cfg, TranspileError> {
+    let n = code.len();
+    let mut direct_calls: Vec<DirectCall> = Vec::new();
+    let mut tail_calls: Vec<TailCall> = Vec::new();
+    let mut returns: Vec<ReturnSite> = Vec::new();
+    let mut entries: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+
+    for &e in endpoint_entries {
+        if (e as usize) < n {
+            entries.insert(e);
+        }
+    }
+
+    let mut pc: usize = 0;
+    while pc < n {
+        if pc + 2 > n {
+            break;
+        }
+        let lo = u16::from_le_bytes([code[pc], code[pc + 1]]);
+        if lo & 0b11 != 0b11 {
+            // Compressed (2 bytes).
+            // Only c.jr ra matters here — it's a return site.
+            // c.jr ra has wire encoding 0x8082:
+            //   bits[15:13]=100  bit12=0  bits[11:7]=rdrs1=1  bits[6:2]=0  bits[1:0]=10
+            if lo == 0x8082 {
+                returns.push(ReturnSite { pc: pc as u32, len: 2 });
+            }
+            pc += 2;
+            continue;
+        }
+        if pc + 4 > n {
+            break;
+        }
+        let w = u32::from_le_bytes([code[pc], code[pc + 1], code[pc + 2], code[pc + 3]]);
+        let opcode = w & 0x7F;
+
+        if opcode == OP_JAL {
+            let rd = ((w >> 7) & 0x1F) as u8;
+            let imm = imm_j(w);
+            if rd != 0 {
+                // jal rd, imm — direct call.
+                let target_i = (pc as i64) + (imm as i64);
+                if target_i < 0 || (target_i as usize) >= n {
+                    return Err(TranspileError::InvalidSection(format!(
+                        "analyze_pvm2_cfg: JAL at {:#x} target {} out of code range",
+                        pc, target_i
+                    )));
+                }
+                let target = target_i as u32;
+                direct_calls.push(DirectCall {
+                    seq_start: pc as u32,
+                    seq_len: 4,
+                    target,
+                });
+                entries.insert(target);
+            }
+            // rd == 0 (= static jump / c.j-like): not a call edge.
+            pc += 4;
+            continue;
+        }
+
+        if opcode == OP_JALR {
+            let rd = ((w >> 7) & 0x1F) as u8;
+            let rs1 = ((w >> 15) & 0x1F) as u8;
+            let funct3 = (w >> 12) & 0x7;
+            let imm12_signed = ((w as i32) << 0) >> 20;
+
+            if funct3 != 0 {
+                return Err(TranspileError::InvalidSection(format!(
+                    "analyze_pvm2_cfg: JALR with funct3={} at {:#x} (reserved encoding)",
+                    funct3, pc
+                )));
+            }
+
+            // Check AUIPC pairing.
+            let jalr_vaddr = base_vaddr + pc as u64;
+            let auipc_vaddr = jalr_vaddr.checked_sub(4);
+            let paired_target =
+                auipc_vaddr.and_then(|v| auipc_effective.get(&v).copied());
+
+            if let Some(target_off) = paired_target {
+                if pc < 4 {
+                    return Err(TranspileError::InvalidSection(format!(
+                        "analyze_pvm2_cfg: AUIPC+JALR pair at {:#x} has no AUIPC slot",
+                        pc
+                    )));
+                }
+                let target = target_off;
+                if (target as usize) >= n {
+                    return Err(TranspileError::InvalidSection(format!(
+                        "analyze_pvm2_cfg: AUIPC+JALR target {:#x} out of code range (pc {:#x})",
+                        target, pc
+                    )));
+                }
+                let seq_start = (pc - 4) as u32;
+                if rd == 0 {
+                    tail_calls.push(TailCall {
+                        seq_start,
+                        seq_len: 8,
+                        target,
+                    });
+                } else {
+                    direct_calls.push(DirectCall {
+                        seq_start,
+                        seq_len: 8,
+                        target,
+                    });
+                }
+                entries.insert(target);
+                pc += 4;
+                continue;
+            }
+
+            // Standalone JALR. Only the canonical uncompressed return form
+            // (`jalr x0, x1, 0`) is allowed; everything else is reserved.
+            if rd == 0 && rs1 == 1 && imm12_signed == 0 {
+                returns.push(ReturnSite { pc: pc as u32, len: 4 });
+                pc += 4;
+                continue;
+            }
+            return Err(TranspileError::InvalidSection(format!(
+                "analyze_pvm2_cfg: unhandled JALR at {:#x} (rd={}, rs1={}, imm={}) — \
+                 PVM2 forbids indirect dispatch; rewrite to call/tail/return \
+                 or refactor to remove indirect jumps",
+                pc, rd, rs1, imm12_signed
+            )));
+        }
+
+        pc += 4;
+    }
+
+    let mut function_entries: Vec<u32> = entries.into_iter().collect();
+    function_entries.sort();
+    Ok(Pvm2Cfg {
+        function_entries,
+        direct_calls,
+        tail_calls,
+        returns,
+    })
+}
+
+/// Result of return-table construction.
+#[derive(Debug)]
+struct ReturnTables {
+    /// `function_entry_old_pc → table_id`. Every function in the
+    /// function_entries set has an entry here (table_id may be shared
+    /// among functions in the same tail-call SCC + transitive
+    /// inheritance chain).
+    function_to_table: BTreeMap<u32, u16>,
+    /// `table_id → ordered list of OLD resume PCs`. Each entry is
+    /// `call_site.seq_start + call_site.seq_len`, the byte AFTER the
+    /// caller's call sequence in OLD code. After offset_map is
+    /// applied (in a separate pass) these become the NEW resume PCs
+    /// stored in `Image.jump_table`.
+    tables_old_pcs: Vec<Vec<u32>>,
+    /// Per-direct-call-site index assignment. `idx_of_call[i]` is the
+    /// idx within the callee's table for `cfg.direct_calls[i]`.
+    /// `0..table_size`; the encoded value passed in `ra` is
+    /// `2*idx + 1`.
+    idx_of_call: Vec<u32>,
+}
+
+/// Build per-SCC return tables with tail-call propagation.
+///
+/// Algorithm:
+/// 1. Group functions into tail-call SCCs (Tarjan's). Functions in
+///    the same SCC share a return table.
+/// 2. Compute the SCC DAG and topologically iterate predecessors-
+///    first. For each SCC `S`, its return set is the union of:
+///    - direct callers of any function in `S` (their resume PCs)
+///    - return sets of all upstream SCCs `S'` with `S' →tc S` edges
+///      (transitive — `S` inherits everything `S'` had).
+/// 3. Sort each SCC's resume-PC set ascending; assign idx by
+///    position. Functions in the same SCC share the table_id.
+fn build_return_tables(cfg: &Pvm2Cfg) -> Result<ReturnTables, TranspileError> {
+    let entries = &cfg.function_entries;
+    let n = entries.len();
+    if n == 0 {
+        return Ok(ReturnTables {
+            function_to_table: BTreeMap::new(),
+            tables_old_pcs: Vec::new(),
+            idx_of_call: vec![0; cfg.direct_calls.len()],
+        });
+    }
+
+    // Function-entry PC → dense index 0..n.
+    let entry_idx: BTreeMap<u32, usize> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, &e)| (e, i))
+        .collect();
+
+    // Map each return site to its enclosing function (largest entry
+    // ≤ return_pc).
+    let function_of_return: BTreeMap<u32, u32> = {
+        let mut m = BTreeMap::new();
+        for r in &cfg.returns {
+            let enc = entries
+                .partition_point(|&e| e <= r.pc)
+                .checked_sub(1)
+                .and_then(|i| entries.get(i).copied())
+                .ok_or_else(|| {
+                    TranspileError::InvalidSection(format!(
+                        "build_return_tables: return at {:#x} has no enclosing function",
+                        r.pc
+                    ))
+                })?;
+            m.insert(r.pc, enc);
+        }
+        m
+    };
+    let _ = function_of_return; // computed for validation; consumed later via rewrite pass
+
+    // Build tail-call adjacency (caller_function_entry → callee).
+    // Each tail-call site needs to be attributed to its enclosing
+    // function.
+    let mut tc_adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for tc in &cfg.tail_calls {
+        let caller_entry = entries
+            .partition_point(|&e| e <= tc.seq_start)
+            .checked_sub(1)
+            .and_then(|i| entries.get(i).copied())
+            .ok_or_else(|| {
+                TranspileError::InvalidSection(format!(
+                    "build_return_tables: tail-call at {:#x} has no enclosing function",
+                    tc.seq_start
+                ))
+            })?;
+        let caller_idx = entry_idx[&caller_entry];
+        let callee_idx = entry_idx[&tc.target];
+        tc_adj[caller_idx].push(callee_idx);
+    }
+    for v in &mut tc_adj {
+        v.sort();
+        v.dedup();
+    }
+
+    // Tarjan's SCC on tail-call graph.
+    // Standard iterative implementation.
+    let sccs = tarjan_scc(n, &tc_adj);
+    // `scc_of[function_idx] = scc_id (0..sccs.len())`.
+    let mut scc_of: Vec<u32> = vec![u32::MAX; n];
+    for (sid, members) in sccs.iter().enumerate() {
+        for &m in members {
+            scc_of[m] = sid as u32;
+        }
+    }
+
+    // Build SCC DAG: edges (src_scc → dst_scc) where src_scc != dst_scc.
+    // We need predecessors per SCC to compute returns(S) = ⋃ direct
+    // callers' resume_pcs ∪ ⋃ returns(S') for S' →tc S edges.
+    let mut scc_predecessors: Vec<std::collections::BTreeSet<u32>> =
+        vec![std::collections::BTreeSet::new(); sccs.len()];
+    for (caller_fn_idx, callees) in tc_adj.iter().enumerate() {
+        let src_scc = scc_of[caller_fn_idx];
+        for &callee_fn_idx in callees {
+            let dst_scc = scc_of[callee_fn_idx];
+            if src_scc != dst_scc {
+                scc_predecessors[dst_scc as usize].insert(src_scc);
+            }
+        }
+    }
+
+    // Compute direct-callers per SCC (resume PCs from direct call sites).
+    let mut direct_resumes_by_scc: Vec<std::collections::BTreeSet<u32>> =
+        vec![std::collections::BTreeSet::new(); sccs.len()];
+    for dc in &cfg.direct_calls {
+        let callee_fn_idx = entry_idx[&dc.target];
+        let scc = scc_of[callee_fn_idx];
+        // OLD resume PC: byte after the call sequence in OLD code.
+        // The actual NEW resume PC depends on the post-rewrite layout;
+        // we keep this as OLD pc for now and translate after offset_map.
+        let resume = dc.seq_start + dc.seq_len;
+        direct_resumes_by_scc[scc as usize].insert(resume);
+    }
+
+    // Topologically iterate SCCs predecessors-first. SCCs are returned
+    // by Tarjan in reverse-topological order (callees first); we want
+    // predecessors-first, so iterate in REVERSED order.
+    let mut returns_by_scc: Vec<std::collections::BTreeSet<u32>> =
+        vec![std::collections::BTreeSet::new(); sccs.len()];
+    let topo_order: Vec<usize> = (0..sccs.len()).rev().collect();
+    for &sid in &topo_order {
+        let mut s = direct_resumes_by_scc[sid].clone();
+        for &pred_sid in &scc_predecessors[sid] {
+            for &pc in &returns_by_scc[pred_sid as usize] {
+                s.insert(pc);
+            }
+        }
+        returns_by_scc[sid] = s;
+    }
+
+    // Materialize tables: each non-empty SCC gets a table_id; empty
+    // SCCs (functions that are never called, e.g. orphans?) don't.
+    let mut tables_old_pcs: Vec<Vec<u32>> = Vec::new();
+    let mut scc_to_table: Vec<Option<u16>> = vec![None; sccs.len()];
+    for (sid, set) in returns_by_scc.iter().enumerate() {
+        if set.is_empty() {
+            continue;
+        }
+        let table_id = u16::try_from(tables_old_pcs.len())
+            .map_err(|_| {
+                TranspileError::InvalidSection(
+                    "build_return_tables: too many tables (>= 4096)".to_string(),
+                )
+            })?;
+        if (table_id as u32) >= (1 << 12) {
+            return Err(TranspileError::InvalidSection(format!(
+                "build_return_tables: table_id {} exceeds 12-bit limit",
+                table_id
+            )));
+        }
+        scc_to_table[sid] = Some(table_id);
+        let mut v: Vec<u32> = set.iter().copied().collect();
+        v.sort();
+        tables_old_pcs.push(v);
+    }
+
+    // function_to_table
+    let mut function_to_table: BTreeMap<u32, u16> = BTreeMap::new();
+    for (i, &entry) in entries.iter().enumerate() {
+        if let Some(tid) = scc_to_table[scc_of[i] as usize] {
+            function_to_table.insert(entry, tid);
+        }
+    }
+
+    // idx_of_call: for each direct call, find its resume PC's position
+    // within the callee's table.
+    let mut idx_of_call: Vec<u32> = Vec::with_capacity(cfg.direct_calls.len());
+    for dc in &cfg.direct_calls {
+        let table_id = *function_to_table.get(&dc.target).ok_or_else(|| {
+            TranspileError::InvalidSection(format!(
+                "build_return_tables: direct call to {:#x} has no return table",
+                dc.target
+            ))
+        })?;
+        let table = &tables_old_pcs[table_id as usize];
+        let resume = dc.seq_start + dc.seq_len;
+        let idx = table
+            .iter()
+            .position(|&p| p == resume)
+            .ok_or_else(|| {
+                TranspileError::InvalidSection(format!(
+                    "build_return_tables: direct call resume {:#x} missing from \
+                     callee {:#x} table",
+                    resume, dc.target
+                ))
+            })? as u32;
+        idx_of_call.push(idx);
+    }
+
+    Ok(ReturnTables {
+        function_to_table,
+        tables_old_pcs,
+        idx_of_call,
+    })
+}
+
+/// Iterative Tarjan's strongly-connected components.
+/// Returns SCCs in reverse-topological order (callees before callers).
+fn tarjan_scc(n: usize, adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    #[derive(Clone, Copy)]
+    struct Node {
+        index: i32,
+        low: i32,
+        on_stack: bool,
+    }
+    let mut nodes: Vec<Node> = vec![
+        Node {
+            index: -1,
+            low: -1,
+            on_stack: false,
+        };
+        n
+    ];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut sccs: Vec<Vec<usize>> = Vec::new();
+    let mut index_ctr: i32 = 0;
+
+    // Iterative DFS frame: (node, iter over adj[node]).
+    enum Frame {
+        Enter(usize),
+        Visit(usize, usize), // node, next-child-idx
+    }
+
+    for start in 0..n {
+        if nodes[start].index != -1 {
+            continue;
+        }
+        let mut work: Vec<Frame> = Vec::new();
+        work.push(Frame::Enter(start));
+        while let Some(frame) = work.pop() {
+            match frame {
+                Frame::Enter(v) => {
+                    nodes[v].index = index_ctr;
+                    nodes[v].low = index_ctr;
+                    index_ctr += 1;
+                    stack.push(v);
+                    nodes[v].on_stack = true;
+                    work.push(Frame::Visit(v, 0));
+                }
+                Frame::Visit(v, ci) => {
+                    if ci < adj[v].len() {
+                        let w = adj[v][ci];
+                        work.push(Frame::Visit(v, ci + 1));
+                        if nodes[w].index == -1 {
+                            work.push(Frame::Enter(w));
+                        } else if nodes[w].on_stack {
+                            if nodes[w].index < nodes[v].low {
+                                nodes[v].low = nodes[w].index;
+                            }
+                        }
+                        continue;
+                    }
+                    // Backtrack: propagate low to parent and possibly emit SCC.
+                    // First absorb any post-recursion low from children we
+                    // just returned from. The recursion ordering means each
+                    // Enter(w) for a fresh w was followed by its own
+                    // Visit-frames; on return, we don't have a direct way to
+                    // access those low values here, so update lows via
+                    // the loop body in the Frame::Enter return.
+                    //
+                    // We've already taken min on tree-back edges in the
+                    // ci<adj branch (for already-visited successors). For
+                    // tree edges (Enter), we need to fold the child's low
+                    // back into v's low. Achieve that by performing the
+                    // fold when we POP back from a child Visit-finish:
+                    if let Some(Frame::Visit(parent, _)) = work.last() {
+                        if nodes[v].low < nodes[*parent].low {
+                            nodes[*parent].low = nodes[v].low;
+                        }
+                    }
+                    if nodes[v].low == nodes[v].index {
+                        let mut comp: Vec<usize> = Vec::new();
+                        loop {
+                            let w = stack.pop().unwrap();
+                            nodes[w].on_stack = false;
+                            comp.push(w);
+                            if w == v {
+                                break;
+                            }
+                        }
+                        sccs.push(comp);
+                    }
+                }
+            }
+        }
+    }
+    sccs
+}
+
+/// Rewrite OLD code into the new PVM2 call/return layout:
+///   - JAL rd ≠ x0           →  addi ra, x0, encoded_idx; jal x0, off  (4B→8B grow)
+///   - AUIPC+JALR rd ≠ x0    →  addi ra, x0, encoded_idx; jal x0, off  (8B→8B)
+///   - AUIPC+JALR rd == x0   →  addi x0, x0, 0;          jal x0, off  (8B→8B; ra passed through)
+///   - c.jr ra (2B)          →  br_table table_id, ra                  (2B→4B grow)
+///   - jalr x0, x1, 0 (4B)   →  br_table table_id, ra                  (4B→4B)
+///   - everything else copied verbatim.
+///
+/// Returns:
+///   - new code bytes
+///   - `offset_map_pre`: old_pc → new_pc for every OLD instruction start
+///   - `tables_new_pcs`: per-table list of NEW resume PCs (= offset_map_pre[old_resume_pc]).
+fn rewrite_pvm2_calls_returns(
+    code: &[u8],
+    cfg: &Pvm2Cfg,
+    tables: &ReturnTables,
+) -> Result<(Vec<u8>, BTreeMap<usize, usize>, Vec<Vec<u32>>), TranspileError> {
+    let n = code.len();
+
+    // Index direct/tail calls by their `seq_start` (so we can recognise
+    // them when we visit the AUIPC / JAL position).
+    let mut direct_by_seq_start: BTreeMap<u32, &DirectCall> = BTreeMap::new();
+    for dc in &cfg.direct_calls {
+        direct_by_seq_start.insert(dc.seq_start, dc);
+    }
+    let direct_idx_by_seq_start: BTreeMap<u32, usize> = cfg
+        .direct_calls
+        .iter()
+        .enumerate()
+        .map(|(i, dc)| (dc.seq_start, i))
+        .collect();
+    let mut tail_by_seq_start: BTreeMap<u32, &TailCall> = BTreeMap::new();
+    for tc in &cfg.tail_calls {
+        tail_by_seq_start.insert(tc.seq_start, tc);
+    }
+    let return_pcs: std::collections::BTreeSet<u32> =
+        cfg.returns.iter().map(|r| r.pc).collect();
+    // Return site PC → enclosing function entry.
+    let return_to_function: BTreeMap<u32, u32> = {
+        let entries = &cfg.function_entries;
+        let mut m = BTreeMap::new();
+        for r in &cfg.returns {
+            let enc = entries
+                .partition_point(|&e| e <= r.pc)
+                .checked_sub(1)
+                .and_then(|i| entries.get(i).copied())
+                .ok_or_else(|| {
+                    TranspileError::InvalidSection(format!(
+                        "rewrite_pvm2_calls_returns: return at {:#x} has no enclosing function",
+                        r.pc
+                    ))
+                })?;
+            m.insert(r.pc, enc);
+        }
+        m
+    };
+
+    let mut new_code: Vec<u8> = Vec::with_capacity(n + 1024);
+    let mut offset_map_pre: BTreeMap<usize, usize> = BTreeMap::new();
+
+    // (new_jal_pc, target_old_pc) pairs to patch up after we know
+    // every old_pc → new_pc mapping.
+    let mut jal_fixups: Vec<(usize, u32)> = Vec::new();
+
+    let mut pc: usize = 0;
+    while pc < n {
+        offset_map_pre.insert(pc, new_code.len());
+
+        // Direct call (JAL rd!=0 OR AUIPC+JALR rd!=0): seq_start = pc.
+        if let Some(dc) = direct_by_seq_start.get(&(pc as u32)).copied() {
+            let dc_idx = direct_idx_by_seq_start[&dc.seq_start];
+            let idx = tables.idx_of_call[dc_idx];
+            let encoded_idx: i32 = 2 * (idx as i32) + 1;
+            if !(-2048..=2047).contains(&encoded_idx) {
+                return Err(TranspileError::InvalidSection(format!(
+                    "rewrite_pvm2_calls_returns: encoded idx {} (idx={}) at call \
+                     site {:#x} does not fit signed 12-bit (table size too large)",
+                    encoded_idx, idx, pc
+                )));
+            }
+            // ra = x1. Emit `addi ra, x0, encoded_idx` then a placeholder
+            // `jal x0, 0` whose imm we'll patch in pass 2.
+            let addi_word = encode_addi(/*rd=*/ 1, /*rs1=*/ 0, encoded_idx);
+            new_code.extend_from_slice(&addi_word.to_le_bytes());
+            let jal_pc_new = new_code.len();
+            new_code.extend_from_slice(&encode_jal_x0(0).to_le_bytes());
+            jal_fixups.push((jal_pc_new, dc.target));
+            pc += dc.seq_len as usize;
+            continue;
+        }
+
+        // Tail-call (AUIPC+JALR rd=0): seq_start = pc.
+        if let Some(tc) = tail_by_seq_start.get(&(pc as u32)).copied() {
+            // Emit `addi x0, x0, 0` (4-byte NOP) so the slot the AUIPC
+            // occupied stays a benign instruction. ra is preserved
+            // intact — the callee's br_table dispatches on the
+            // upstream caller's idx.
+            new_code.extend_from_slice(&NOP_BYTES);
+            let jal_pc_new = new_code.len();
+            new_code.extend_from_slice(&encode_jal_x0(0).to_le_bytes());
+            jal_fixups.push((jal_pc_new, tc.target));
+            pc += tc.seq_len as usize;
+            continue;
+        }
+
+        // Return site (c.jr ra: 2 bytes; or jalr x0,x1,0: 4 bytes).
+        if return_pcs.contains(&(pc as u32)) {
+            let func_entry = return_to_function[&(pc as u32)];
+            let table_id = *tables.function_to_table.get(&func_entry).ok_or_else(|| {
+                TranspileError::InvalidSection(format!(
+                    "rewrite_pvm2_calls_returns: function {:#x} has no return table \
+                     (no callers — orphan function?)",
+                    func_entry
+                ))
+            })?;
+            let br_word = encode_custom0_br_table(table_id, /*rs1=ra*/ 1);
+            new_code.extend_from_slice(&br_word.to_le_bytes());
+            // Determine OLD length: c.jr ra is 2 bytes; uncompressed
+            // jalr x0,x1,0 is 4 bytes.
+            let len = cfg
+                .returns
+                .iter()
+                .find(|r| r.pc as usize == pc)
+                .map(|r| r.len)
+                .unwrap_or(2);
+            pc += len as usize;
+            continue;
+        }
+
+        // Default: copy this old instruction verbatim.
+        if pc + 2 > n {
+            break;
+        }
+        let lo = u16::from_le_bytes([code[pc], code[pc + 1]]);
+        let inst_len = if lo & 0b11 == 0b11 { 4 } else { 2 };
+        if pc + inst_len > n {
+            // Truncated trailing bytes — copy what's there.
+            new_code.extend_from_slice(&code[pc..n]);
+            pc = n;
+            continue;
+        }
+        new_code.extend_from_slice(&code[pc..pc + inst_len]);
+        pc += inst_len;
+    }
+    // Sentinel: map end-of-code so we can compute offsets uniformly.
+    offset_map_pre.insert(n, new_code.len());
+
+    // Pass 2: patch jal x0 offsets now that offset_map_pre is final.
+    for (new_jal_pc, target_old) in jal_fixups {
+        let new_target = *offset_map_pre.get(&(target_old as usize)).ok_or_else(|| {
+            TranspileError::InvalidSection(format!(
+                "rewrite_pvm2_calls_returns: jal target {:#x} not in offset_map",
+                target_old
+            ))
+        })?;
+        let off = new_target as i64 - new_jal_pc as i64;
+        if !(-(1 << 20)..(1 << 20)).contains(&off) {
+            return Err(TranspileError::InvalidSection(format!(
+                "rewrite_pvm2_calls_returns: jal at new_pc {:#x} offset {} out of \
+                 ±1 MiB range",
+                new_jal_pc, off
+            )));
+        }
+        let w = encode_jal_x0(off as i32);
+        new_code[new_jal_pc..new_jal_pc + 4].copy_from_slice(&w.to_le_bytes());
+    }
+
+    // Pass 3: re-encode branch / JAL immediates copied verbatim from
+    // OLD code so they point to the correct NEW target after any
+    // growth (JAL rd≠0: 4B→8B, c.jr ra: 2B→4B). We walk the OLD
+    // instruction stream (which we recompute by iterating the
+    // offset_map_pre keys in order) and patch the matching instruction
+    // in new_code. The instructions emitted by this pass itself
+    // (addi+jal, NOP+jal, br_table) already have correct imms.
+    //
+    // Sites we patch here:
+    //   - c.j imm   (RVC: 2B, op=01, f3=101)
+    //   - c.beqz/c.bnez (RVC: 2B, op=01, f3=110/111)
+    //   - B-type branch (4B, opcode=0b110_0011)
+    //   - JAL rd=0 static jump that we DID NOT rewrite (those we did
+    //     rewrite are addi+jal pairs whose jal we already patched).
+    //
+    // We use the fact that offset_map_pre keys are exactly the old
+    // instruction-start byte offsets. For each old_pc whose
+    // instruction was NOT rewritten in pass 1, fix up the imm.
+    let direct_seq_starts: std::collections::BTreeSet<u32> =
+        cfg.direct_calls.iter().map(|d| d.seq_start).collect();
+    let tail_seq_starts: std::collections::BTreeSet<u32> =
+        cfg.tail_calls.iter().map(|t| t.seq_start).collect();
+    let return_pcs_set: std::collections::BTreeSet<u32> =
+        cfg.returns.iter().map(|r| r.pc).collect();
+    for (&old_pc, &new_pc) in &offset_map_pre {
+        if old_pc == n {
+            continue; // end-of-code sentinel
+        }
+        // Skip instructions we ourselves emitted (their imms are
+        // either correct already or patched in pass 2).
+        if direct_seq_starts.contains(&(old_pc as u32))
+            || tail_seq_starts.contains(&(old_pc as u32))
+            || return_pcs_set.contains(&(old_pc as u32))
+        {
+            continue;
+        }
+        if old_pc + 2 > code.len() {
+            continue;
+        }
+        let lo = u16::from_le_bytes([code[old_pc], code[old_pc + 1]]);
+        if lo & 0b11 != 0b11 {
+            // RVC. Patch c.j and c.beqz/c.bnez.
+            let op = lo & 0b11;
+            let f3 = (lo >> 13) & 0b111;
+            let (is_jump, is_branch) = (op == 0b01 && f3 == 0b101,
+                                         op == 0b01 && (f3 == 0b110 || f3 == 0b111));
+            if !is_jump && !is_branch {
+                continue;
+            }
+            let old_imm = if is_jump {
+                decompress_cj_imm(lo)
+            } else {
+                decompress_cb_imm(lo)
+            };
+            let old_target = old_pc as i64 + old_imm as i64;
+            if old_target < 0 || (old_target as usize) >= code.len() {
+                continue;
+            }
+            let new_target = *offset_map_pre
+                .get(&(old_target as usize))
+                .ok_or_else(|| {
+                    TranspileError::InvalidSection(format!(
+                        "rewrite_pvm2_calls_returns: RVC branch target {:#x} not in offset_map",
+                        old_target
+                    ))
+                })?;
+            let new_imm = new_target as i64 - new_pc as i64;
+            let new_h = if is_jump {
+                encode_cj_imm(lo, new_imm as i32)
+            } else {
+                encode_cb_imm(lo, new_imm as i32)
+            };
+            let new_h = new_h.ok_or_else(|| {
+                TranspileError::InvalidSection(format!(
+                    "rewrite_pvm2_calls_returns: RVC branch new_imm {} at {:#x} out of range",
+                    new_imm, new_pc
+                ))
+            })?;
+            new_code[new_pc..new_pc + 2].copy_from_slice(&new_h.to_le_bytes());
+            continue;
+        }
+        if old_pc + 4 > code.len() {
+            continue;
+        }
+        let w = u32::from_le_bytes([
+            code[old_pc],
+            code[old_pc + 1],
+            code[old_pc + 2],
+            code[old_pc + 3],
+        ]);
+        let opcode = w & 0x7F;
+        match opcode {
+            0b110_0011 => {
+                // B-type branch.
+                let old_imm = imm_b(w);
+                let old_target = old_pc as i64 + old_imm as i64;
+                if old_target < 0 || (old_target as usize) >= code.len() {
+                    continue;
+                }
+                let new_target = *offset_map_pre
+                    .get(&(old_target as usize))
+                    .ok_or_else(|| {
+                        TranspileError::InvalidSection(format!(
+                            "rewrite_pvm2_calls_returns: B-branch target {:#x} not in offset_map",
+                            old_target
+                        ))
+                    })?;
+                let new_imm = new_target as i64 - new_pc as i64;
+                if !(-(1 << 12)..(1 << 12)).contains(&new_imm) {
+                    return Err(TranspileError::InvalidSection(format!(
+                        "rewrite_pvm2_calls_returns: B-branch at {:#x} new_imm {} out of \
+                         ±4 KiB range",
+                        new_pc, new_imm
+                    )));
+                }
+                let new_w = encode_b_imm(w, new_imm as i32);
+                new_code[new_pc..new_pc + 4].copy_from_slice(&new_w.to_le_bytes());
+            }
+            OP_JAL => {
+                // JAL with any rd. Direct calls are handled in pass 2;
+                // this path covers `jal x0, imm` (static jump) and any
+                // other JAL we didn't rewrite.
+                let old_imm = imm_j(w);
+                let old_target = old_pc as i64 + old_imm as i64;
+                if old_target < 0 || (old_target as usize) >= code.len() {
+                    continue;
+                }
+                let new_target = *offset_map_pre
+                    .get(&(old_target as usize))
+                    .ok_or_else(|| {
+                        TranspileError::InvalidSection(format!(
+                            "rewrite_pvm2_calls_returns: JAL target {:#x} not in offset_map",
+                            old_target
+                        ))
+                    })?;
+                let new_imm = new_target as i64 - new_pc as i64;
+                if !(-(1 << 20)..(1 << 20)).contains(&new_imm) {
+                    return Err(TranspileError::InvalidSection(format!(
+                        "rewrite_pvm2_calls_returns: JAL at {:#x} new_imm {} out of ±1 MiB",
+                        new_pc, new_imm
+                    )));
+                }
+                let rd = (w >> 7) & 0x1F;
+                let v = new_imm as u32;
+                let b20 = (v >> 20) & 0x1;
+                let b10_1 = (v >> 1) & 0x3FF;
+                let b11 = (v >> 11) & 0x1;
+                let b19_12 = (v >> 12) & 0xFF;
+                let imm_field =
+                    (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12);
+                let new_w = imm_field | (rd << 7) | OP_JAL;
+                new_code[new_pc..new_pc + 4].copy_from_slice(&new_w.to_le_bytes());
+            }
+            _ => {}
+        }
+    }
+
+    // Translate per-table OLD resume PCs to NEW resume PCs.
+    let mut tables_new_pcs: Vec<Vec<u32>> = Vec::with_capacity(tables.tables_old_pcs.len());
+    for old_table in &tables.tables_old_pcs {
+        let mut new_table = Vec::with_capacity(old_table.len());
+        for &old_resume in old_table {
+            let new_resume = *offset_map_pre
+                .get(&(old_resume as usize))
+                .ok_or_else(|| {
+                    TranspileError::InvalidSection(format!(
+                        "rewrite_pvm2_calls_returns: resume {:#x} not in offset_map",
+                        old_resume
+                    ))
+                })?;
+            new_table.push(new_resume as u32);
+        }
+        tables_new_pcs.push(new_table);
+    }
+
+    Ok((new_code, offset_map_pre, tables_new_pcs))
+}
+
 /// Walk the rewritten code and inject a `fallthrough` (4 bytes) before
 /// every JAL / Callf / branch target that isn't already preceded by a
 /// terminator instruction. After injection, all reachable static
@@ -1005,8 +1943,11 @@ fn align_branch_targets(
             // RVC encodings that are terminators in PVM2:
             //   c.j imm    (op=01, f3=101)        — static jump
             //   c.beqz / c.bnez (op=01, f3=110/111) — conditional branches
-            //   c.jr ra    (op=10, f3=100, rd_rs1=1, rs2=0, bit12=0) — retf
-            //   c.ebreak   — reserved (terminator)
+            //   c.jr / c.jalr / c.ebreak (op=10, f3=100) — all Reserved
+            //     in PVM2; treated as terminators because reaching them
+            //     panics. (The linker rewrites the c.jr-ra return idiom
+            //     to a 4-byte br_table before reaching this pass, so any
+            //     leftover c.jr is a true error.)
             //   c.illegal  (= 0x0000)             — reserved (terminator)
             // Other RVC ops are non-terminators.
             let op = lo & 0b11;
@@ -1059,12 +2000,6 @@ fn align_branch_targets(
                     is_terminator = true;
                     target = Some(pc as i64 + imm as i64);
                 }
-                OP_CUSTOM_1 => {
-                    // callf — J-type immediate.
-                    let imm = imm_j(w);
-                    is_terminator = true;
-                    target = Some(pc as i64 + imm as i64);
-                }
                 0b110_0011 => {
                     // B-type branch (BEQ/BNE/etc.).
                     let imm = imm_b(w);
@@ -1072,7 +2007,10 @@ fn align_branch_targets(
                     target = Some(pc as i64 + imm as i64);
                 }
                 OP_CUSTOM_0 => {
-                    // trap / ecalli / ecall.jar / retf / fallthrough — all terminators.
+                    // trap / ecalli / ecall.jar / br_table / fallthrough —
+                    // all terminators. br_table successors come from the
+                    // Image jump_table at runtime, not from an
+                    // instruction-embedded immediate, so no static target.
                     is_terminator = true;
                     target = None;
                     let _ = funct3;
@@ -1207,31 +2145,27 @@ fn align_branch_targets(
             ]);
             let opcode = w & 0x7F;
             match opcode {
-                OP_JAL | OP_CUSTOM_1 => {
+                OP_JAL => {
                     let old_imm = imm_j(w);
                     let old_target = (old_pc as i64 + old_imm as i64) as usize;
                     if let Some(&new_target) = offset_map.get(&old_target) {
                         let new_imm = new_target as i64 - new_pc as i64;
                         if new_imm < -(1 << 20) || new_imm >= (1 << 20) {
                             return Err(TranspileError::InvalidSection(format!(
-                                "align_branch_targets: JAL/callf at new_pc {:#x} out of ±1 MiB \
+                                "align_branch_targets: JAL at new_pc {:#x} out of ±1 MiB \
                                  range after injection (new_imm = {})",
                                 new_pc, new_imm
                             )));
                         }
-                        let new_w = if opcode == OP_JAL {
-                            let rd = (w >> 7) & 0x1F;
-                            let v = new_imm as u32;
-                            let b20 = (v >> 20) & 0x1;
-                            let b10_1 = (v >> 1) & 0x3FF;
-                            let b11 = (v >> 11) & 0x1;
-                            let b19_12 = (v >> 12) & 0xFF;
-                            let imm_field =
-                                (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12);
-                            imm_field | (rd << 7) | OP_JAL
-                        } else {
-                            encode_custom1_callf(new_imm as i32)
-                        };
+                        let rd = (w >> 7) & 0x1F;
+                        let v = new_imm as u32;
+                        let b20 = (v >> 20) & 0x1;
+                        let b10_1 = (v >> 1) & 0x3FF;
+                        let b11 = (v >> 11) & 0x1;
+                        let b19_12 = (v >> 12) & 0xFF;
+                        let imm_field =
+                            (b20 << 31) | (b10_1 << 21) | (b11 << 20) | (b19_12 << 12);
+                        let new_w = imm_field | (rd << 7) | OP_JAL;
                         new_code[new_pc..new_pc + 4].copy_from_slice(&new_w.to_le_bytes());
                     }
                 }
@@ -1349,152 +2283,6 @@ fn encode_cj_imm(h: u16, imm: i32) -> Option<u16> {
     Some((preserved | new_imm) as u16)
 }
 
-/// Rewrite call / return patterns to the new PVM2 `callf` / `retf` ops.
-///
-/// Patterns recognised:
-///
-/// 1. `JAL rd, imm` with rd ≠ x0  →  `callf imm` (custom-1, same size).
-/// 2. AUIPC+JALR (CALL_PLT shape — caught by `auipc_effective`):
-///    - rd ≠ x0 (call):       AUIPC→NOP (already rewritten to LUI by an
-///                            earlier pass; we overwrite with NOP),
-///                            JALR→`callf imm`.
-///    - rd == x0 (tail call): AUIPC→NOP, JALR→`jal x0, imm`.
-///    In both cases imm is computed relative to the JALR's PC (so the
-///    callf/jal lands at the same target the original AUIPC+JALR
-///    would have reached).
-/// 3. Uncompressed `jalr x0, x1, 0`  →  `retf` (custom-0, same size).
-///    The compressed form (`c.jr ra`) is handled by the decoder
-///    directly — it decodes to `Retf` without any linker rewrite.
-///
-/// All rewrites are in-place same-size, so this pass doesn't shift
-/// offsets. The branch-target alignment pass (separate) handles the
-/// size-changing rewrites (fallthrough injection).
-fn rewrite_calls_and_returns(
-    code: &mut [u8],
-    auipc_effective: &BTreeMap<u64, u32>,
-    base_vaddr: u64,
-) -> Result<(), TranspileError> {
-    let n = code.len();
-    let mut i = 0;
-    while i + 2 <= n {
-        let lo = u16::from_le_bytes([code[i], code[i + 1]]);
-        if lo & 0b11 != 0b11 {
-            // RVC. lld emits `c.jr ra` for returns; that's decoded
-            // directly as `Retf` by rv_instruction, no rewrite needed.
-            // c.j (static jump) is fine as-is. Other RVC ops we don't
-            // touch.
-            i += 2;
-            continue;
-        }
-        if i + 4 > n {
-            break;
-        }
-        let w = u32::from_le_bytes([code[i], code[i + 1], code[i + 2], code[i + 3]]);
-        let opcode = w & 0x7F;
-
-        // (1) JAL rewrite.
-        if opcode == OP_JAL {
-            let rd = (w >> 7) & 0x1F;
-            if rd != 0 {
-                // `jal rd, imm` where rd != x0 = static call. Rewrite to
-                // `callf imm` (which doesn't link to a register; the
-                // return address goes on the guest stack via native
-                // `call`).
-                let imm = imm_j(w);
-                let new_w = encode_custom1_callf(imm);
-                code[i..i + 4].copy_from_slice(&new_w.to_le_bytes());
-            }
-            // rd == 0 case (= c.j-style static jump) stays as JAL.
-            i += 4;
-            continue;
-        }
-
-        // (2) JALR rewrite.
-        if opcode == OP_JALR {
-            let rd = (w >> 7) & 0x1F;
-            let rs1 = (w >> 15) & 0x1F;
-            let funct3 = (w >> 12) & 0x7;
-            let imm12 = ((w as i32) >> 20) & 0xFFF_i32; // sign-extended via shift below
-            let imm12_signed = ((w as i32) << 0) >> 20;
-            // Check if this JALR is paired with an AUIPC (CALL_PLT pattern).
-            // The pairing is: AUIPC at vaddr `v` → JALR at vaddr `v+4`.
-            // The AUIPC has already been rewritten to LUI in step 2. We
-            // recompute the absolute target and emit a callf (or jal)
-            // relative to the JALR's PC.
-            let jalr_vaddr = base_vaddr + i as u64;
-            let auipc_vaddr = jalr_vaddr.checked_sub(4);
-            let paired_target = auipc_vaddr.and_then(|v| auipc_effective.get(&v).copied());
-            if funct3 == 0 {
-                if let Some(target_off) = paired_target {
-                    // AUIPC+JALR pair. Replace AUIPC slot (at i-4) with NOP,
-                    // and replace the JALR slot with callf (rd != x0) or
-                    // jal x0 (rd == x0). The JALR's imm12 contributes the
-                    // low 12 bits of the target — combined with the LUI's
-                    // high 20 it gives `target_off`. We compute the new
-                    // PC-relative immediate from the JALR's position.
-                    let _ = (imm12, imm12_signed); // currently unused (we trust auipc_effective)
-                    if i < 4 {
-                        return Err(TranspileError::InvalidSection(format!(
-                            "link_elf_rv: AUIPC+JALR pair at offset {:#x} has no AUIPC slot",
-                            i
-                        )));
-                    }
-                    // The actual target byte offset within code.
-                    let new_off = target_off as i64;
-                    // The new instruction's PC = i (the JALR slot).
-                    let pc_rel = new_off - (i as i64);
-                    // Verify range fits in J-type 20-bit signed (±1 MiB).
-                    if pc_rel < -(1 << 20) || pc_rel >= (1 << 20) {
-                        return Err(TranspileError::InvalidSection(format!(
-                            "link_elf_rv: CALL_PLT target out of ±1 MiB range at offset {:#x} \
-                             (pc-rel = {})",
-                            i, pc_rel
-                        )));
-                    }
-                    let pc_rel32 = pc_rel as i32;
-                    // Overwrite AUIPC (now LUI) slot with NOP.
-                    code[i - 4..i].copy_from_slice(&NOP_BYTES);
-                    // Overwrite JALR slot with callf or jal-x0.
-                    let new_w = if rd == 0 {
-                        encode_jal_x0(pc_rel32)
-                    } else {
-                        encode_custom1_callf(pc_rel32)
-                    };
-                    code[i..i + 4].copy_from_slice(&new_w.to_le_bytes());
-                    i += 4;
-                    continue;
-                }
-                // Standalone JALR. Only allow the canonical return form:
-                // `jalr x0, x1, 0` (= uncompressed `ret`). Rewrite to retf.
-                if rd == 0 && rs1 == 1 && imm12_signed == 0 {
-                    let new_w = encode_custom0_retf();
-                    code[i..i + 4].copy_from_slice(&new_w.to_le_bytes());
-                    i += 4;
-                    continue;
-                }
-                // Any other JALR pattern is an indirect call / dispatch.
-                // For the initial implementation we reject these — bench
-                // guests don't emit them. A later phase can lower them to
-                // compare chains via points-to analysis.
-                return Err(TranspileError::InvalidSection(format!(
-                    "link_elf_rv: unhandled JALR at offset {:#x} (rd={}, rs1={}, imm={}) — \
-                     PVM2 forbids JALR; rewrite to callf/retf/static-jump or \
-                     refactor source to remove indirect dispatch",
-                    i, rd, rs1, imm12_signed
-                )));
-            }
-            // funct3 != 0 means a malformed JALR (no such encoding in RV).
-            return Err(TranspileError::InvalidSection(format!(
-                "link_elf_rv: JALR with funct3={} at offset {:#x} (reserved encoding)",
-                funct3, i
-            )));
-        }
-
-        i += 4;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1528,10 +2316,14 @@ mod tests {
     }
 
     #[test]
-    fn custom0_retf_decodes() {
-        let w = encode_custom0_retf();
+    fn custom0_br_table_decodes() {
+        // br_table table_id=7, rs1=x1 (ra).
+        let w = encode_custom0_br_table(7, 1);
         assert_eq!(w & 0x7F, OP_CUSTOM_0);
-        assert_eq!((w >> 12) & 0x7, 0b011);
+        assert_eq!((w >> 7) & 0x1F, 0, "rd must be zero");
+        assert_eq!((w >> 12) & 0x7, 0b011, "funct3 = 011");
+        assert_eq!((w >> 15) & 0x1F, 1, "rs1 = ra");
+        assert_eq!((w >> 20) & 0xFFF, 7, "imm12 = table_id");
     }
 
     #[test]
@@ -1542,14 +2334,21 @@ mod tests {
     }
 
     #[test]
-    fn custom1_callf_round_trips_through_imm_j() {
-        for &imm in &[0, 4, 8, -4, -8, 100, -100, 0x7_FFFE, -0x8_0000] {
-            let w = encode_custom1_callf(imm);
-            assert_eq!(w & 0x7F, OP_CUSTOM_1, "opcode for imm={}", imm);
-            assert_eq!((w >> 7) & 0x1F, 0, "rd field must be 0 for imm={}", imm);
-            let decoded = imm_j(w);
-            assert_eq!(decoded, imm, "round-trip failed for imm={}", imm);
-        }
+    fn addi_encodes() {
+        // addi ra, x0, 5
+        let w = encode_addi(1, 0, 5);
+        assert_eq!(w & 0x7F, 0b001_0011, "opcode = OP-IMM");
+        assert_eq!((w >> 12) & 0x7, 0b000, "funct3 = addi");
+        assert_eq!((w >> 7) & 0x1F, 1, "rd = ra");
+        assert_eq!((w >> 15) & 0x1F, 0, "rs1 = x0");
+        assert_eq!((w >> 20) & 0xFFF, 5, "imm = 5");
+    }
+
+    #[test]
+    fn addi_negative_encoding() {
+        // addi ra, x0, -1 — imm12 sign-extends to 0xFFF.
+        let w = encode_addi(1, 0, -1);
+        assert_eq!((w >> 20) & 0xFFF, 0xFFF);
     }
 
     #[test]
