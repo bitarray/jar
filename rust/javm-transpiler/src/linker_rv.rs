@@ -1265,18 +1265,20 @@ struct ReturnTables {
     idx_of_call: Vec<u32>,
 }
 
-/// Build per-SCC return tables with tail-call propagation.
+/// Build per-WCC return tables with tail-call propagation.
 ///
 /// Algorithm:
-/// 1. Group functions into tail-call SCCs (Tarjan's). Functions in
-///    the same SCC share a return table.
-/// 2. Compute the SCC DAG and topologically iterate predecessors-
-///    first. For each SCC `S`, its return set is the union of:
-///    - direct callers of any function in `S` (their resume PCs)
-///    - return sets of all upstream SCCs `S'` with `S' →tc S` edges
-///      (transitive — `S` inherits everything `S'` had).
-/// 3. Sort each SCC's resume-PC set ascending; assign idx by
-///    position. Functions in the same SCC share the table_id.
+/// 1. Group functions into tail-call **weakly-connected components**
+///    (union-find over tail-call edges, treated as undirected).
+///    Every pair of functions related by a chain of tail-calls — in
+///    either direction — must share one table so that an `ra` value
+///    set at any caller in the chain decodes to the same resume PC
+///    at any br_table along the chain.
+/// 2. For each WCC, the table is the union of direct-caller resume
+///    PCs of every function in the WCC, sorted.
+/// 3. Each direct call site `C → callee F` gets `idx = position of
+///    (C + len(C)) in WCC(F)'s sorted table`. The encoded value
+///    passed in `ra` is `2*idx + 1`.
 fn build_return_tables(cfg: &Pvm2Cfg) -> Result<ReturnTables, TranspileError> {
     let entries = &cfg.function_entries;
     let n = entries.len();
@@ -1295,31 +1297,24 @@ fn build_return_tables(cfg: &Pvm2Cfg) -> Result<ReturnTables, TranspileError> {
         .map(|(i, &e)| (e, i))
         .collect();
 
-    // Map each return site to its enclosing function (largest entry
-    // ≤ return_pc).
-    let function_of_return: BTreeMap<u32, u32> = {
-        let mut m = BTreeMap::new();
-        for r in &cfg.returns {
-            let enc = entries
-                .partition_point(|&e| e <= r.pc)
-                .checked_sub(1)
-                .and_then(|i| entries.get(i).copied())
-                .ok_or_else(|| {
-                    TranspileError::InvalidSection(format!(
-                        "build_return_tables: return at {:#x} has no enclosing function",
-                        r.pc
-                    ))
-                })?;
-            m.insert(r.pc, enc);
+    // Union-find over function indices. Every tail-call edge unions
+    // its endpoints — direction doesn't matter for the
+    // share-a-table constraint.
+    let mut uf_parent: Vec<usize> = (0..n).collect();
+    fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
         }
-        m
-    };
-    let _ = function_of_return; // computed for validation; consumed later via rewrite pass
-
-    // Build tail-call adjacency (caller_function_entry → callee).
-    // Each tail-call site needs to be attributed to its enclosing
-    // function.
-    let mut tc_adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        x
+    }
+    fn uf_union(parent: &mut [usize], a: usize, b: usize) {
+        let ra = uf_find(parent, a);
+        let rb = uf_find(parent, b);
+        if ra != rb {
+            parent[ra] = rb;
+        }
+    }
     for tc in &cfg.tail_calls {
         let caller_entry = entries
             .partition_point(|&e| e <= tc.seq_start)
@@ -1333,104 +1328,72 @@ fn build_return_tables(cfg: &Pvm2Cfg) -> Result<ReturnTables, TranspileError> {
             })?;
         let caller_idx = entry_idx[&caller_entry];
         let callee_idx = entry_idx[&tc.target];
-        tc_adj[caller_idx].push(callee_idx);
-    }
-    for v in &mut tc_adj {
-        v.sort();
-        v.dedup();
+        uf_union(&mut uf_parent, caller_idx, callee_idx);
     }
 
-    // Tarjan's SCC on tail-call graph.
-    // Standard iterative implementation.
-    let sccs = tarjan_scc(n, &tc_adj);
-    // `scc_of[function_idx] = scc_id (0..sccs.len())`.
-    let mut scc_of: Vec<u32> = vec![u32::MAX; n];
-    for (sid, members) in sccs.iter().enumerate() {
-        for &m in members {
-            scc_of[m] = sid as u32;
-        }
+    // Group functions by WCC root. Resolve every function's root
+    // once and stash a dense WCC id for it.
+    let mut wcc_id: Vec<u32> = vec![u32::MAX; n];
+    let mut next_wcc: u32 = 0;
+    let mut root_to_wcc: BTreeMap<usize, u32> = BTreeMap::new();
+    for i in 0..n {
+        let r = uf_find(&mut uf_parent, i);
+        let id = *root_to_wcc.entry(r).or_insert_with(|| {
+            let id = next_wcc;
+            next_wcc += 1;
+            id
+        });
+        wcc_id[i] = id;
     }
 
-    // Build SCC DAG: edges (src_scc → dst_scc) where src_scc != dst_scc.
-    // We need predecessors per SCC to compute returns(S) = ⋃ direct
-    // callers' resume_pcs ∪ ⋃ returns(S') for S' →tc S edges.
-    let mut scc_predecessors: Vec<std::collections::BTreeSet<u32>> =
-        vec![std::collections::BTreeSet::new(); sccs.len()];
-    for (caller_fn_idx, callees) in tc_adj.iter().enumerate() {
-        let src_scc = scc_of[caller_fn_idx];
-        for &callee_fn_idx in callees {
-            let dst_scc = scc_of[callee_fn_idx];
-            if src_scc != dst_scc {
-                scc_predecessors[dst_scc as usize].insert(src_scc);
-            }
-        }
-    }
-
-    // Compute direct-callers per SCC (resume PCs from direct call sites).
-    let mut direct_resumes_by_scc: Vec<std::collections::BTreeSet<u32>> =
-        vec![std::collections::BTreeSet::new(); sccs.len()];
+    // Per-WCC union of direct-caller resume PCs.
+    let num_wccs = next_wcc as usize;
+    let mut returns_by_wcc: Vec<std::collections::BTreeSet<u32>> =
+        vec![std::collections::BTreeSet::new(); num_wccs];
     for dc in &cfg.direct_calls {
         let callee_fn_idx = entry_idx[&dc.target];
-        let scc = scc_of[callee_fn_idx];
-        // OLD resume PC: byte after the call sequence in OLD code.
-        // The actual NEW resume PC depends on the post-rewrite layout;
-        // we keep this as OLD pc for now and translate after offset_map.
+        let w = wcc_id[callee_fn_idx];
         let resume = dc.seq_start + dc.seq_len;
-        direct_resumes_by_scc[scc as usize].insert(resume);
+        returns_by_wcc[w as usize].insert(resume);
     }
 
-    // Topologically iterate SCCs predecessors-first. SCCs are returned
-    // by Tarjan in reverse-topological order (callees first); we want
-    // predecessors-first, so iterate in REVERSED order.
-    let mut returns_by_scc: Vec<std::collections::BTreeSet<u32>> =
-        vec![std::collections::BTreeSet::new(); sccs.len()];
-    let topo_order: Vec<usize> = (0..sccs.len()).rev().collect();
-    for &sid in &topo_order {
-        let mut s = direct_resumes_by_scc[sid].clone();
-        for &pred_sid in &scc_predecessors[sid] {
-            for &pc in &returns_by_scc[pred_sid as usize] {
-                s.insert(pc);
-            }
-        }
-        returns_by_scc[sid] = s;
-    }
-
-    // Materialize tables: each non-empty SCC gets a table_id; empty
-    // SCCs (functions that are never called, e.g. orphans?) don't.
+    // Materialize tables. Empty WCCs (functions that are never called
+    // and don't tail-call into a called function) don't get a
+    // table_id; their c.jr ra is unreachable in practice.
     let mut tables_old_pcs: Vec<Vec<u32>> = Vec::new();
-    let mut scc_to_table: Vec<Option<u16>> = vec![None; sccs.len()];
-    for (sid, set) in returns_by_scc.iter().enumerate() {
+    let mut wcc_to_table: Vec<Option<u16>> = vec![None; num_wccs];
+    for (wid, set) in returns_by_wcc.iter().enumerate() {
         if set.is_empty() {
             continue;
         }
-        let table_id = u16::try_from(tables_old_pcs.len())
-            .map_err(|_| {
-                TranspileError::InvalidSection(
-                    "build_return_tables: too many tables (>= 4096)".to_string(),
-                )
-            })?;
+        let table_id = u16::try_from(tables_old_pcs.len()).map_err(|_| {
+            TranspileError::InvalidSection(
+                "build_return_tables: too many tables (>= 4096)".to_string(),
+            )
+        })?;
         if (table_id as u32) >= (1 << 12) {
             return Err(TranspileError::InvalidSection(format!(
                 "build_return_tables: table_id {} exceeds 12-bit limit",
                 table_id
             )));
         }
-        scc_to_table[sid] = Some(table_id);
+        wcc_to_table[wid] = Some(table_id);
         let mut v: Vec<u32> = set.iter().copied().collect();
         v.sort();
         tables_old_pcs.push(v);
     }
 
-    // function_to_table
+    // function_to_table: each function's br_table dispatches through
+    // its WCC's shared table.
     let mut function_to_table: BTreeMap<u32, u16> = BTreeMap::new();
     for (i, &entry) in entries.iter().enumerate() {
-        if let Some(tid) = scc_to_table[scc_of[i] as usize] {
+        if let Some(tid) = wcc_to_table[wcc_id[i] as usize] {
             function_to_table.insert(entry, tid);
         }
     }
 
     // idx_of_call: for each direct call, find its resume PC's position
-    // within the callee's table.
+    // within the callee's WCC table.
     let mut idx_of_call: Vec<u32> = Vec::with_capacity(cfg.direct_calls.len());
     for dc in &cfg.direct_calls {
         let table_id = *function_to_table.get(&dc.target).ok_or_else(|| {
@@ -1459,99 +1422,6 @@ fn build_return_tables(cfg: &Pvm2Cfg) -> Result<ReturnTables, TranspileError> {
         tables_old_pcs,
         idx_of_call,
     })
-}
-
-/// Iterative Tarjan's strongly-connected components.
-/// Returns SCCs in reverse-topological order (callees before callers).
-fn tarjan_scc(n: usize, adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
-    #[derive(Clone, Copy)]
-    struct Node {
-        index: i32,
-        low: i32,
-        on_stack: bool,
-    }
-    let mut nodes: Vec<Node> = vec![
-        Node {
-            index: -1,
-            low: -1,
-            on_stack: false,
-        };
-        n
-    ];
-    let mut stack: Vec<usize> = Vec::new();
-    let mut sccs: Vec<Vec<usize>> = Vec::new();
-    let mut index_ctr: i32 = 0;
-
-    // Iterative DFS frame: (node, iter over adj[node]).
-    enum Frame {
-        Enter(usize),
-        Visit(usize, usize), // node, next-child-idx
-    }
-
-    for start in 0..n {
-        if nodes[start].index != -1 {
-            continue;
-        }
-        let mut work: Vec<Frame> = Vec::new();
-        work.push(Frame::Enter(start));
-        while let Some(frame) = work.pop() {
-            match frame {
-                Frame::Enter(v) => {
-                    nodes[v].index = index_ctr;
-                    nodes[v].low = index_ctr;
-                    index_ctr += 1;
-                    stack.push(v);
-                    nodes[v].on_stack = true;
-                    work.push(Frame::Visit(v, 0));
-                }
-                Frame::Visit(v, ci) => {
-                    if ci < adj[v].len() {
-                        let w = adj[v][ci];
-                        work.push(Frame::Visit(v, ci + 1));
-                        if nodes[w].index == -1 {
-                            work.push(Frame::Enter(w));
-                        } else if nodes[w].on_stack {
-                            if nodes[w].index < nodes[v].low {
-                                nodes[v].low = nodes[w].index;
-                            }
-                        }
-                        continue;
-                    }
-                    // Backtrack: propagate low to parent and possibly emit SCC.
-                    // First absorb any post-recursion low from children we
-                    // just returned from. The recursion ordering means each
-                    // Enter(w) for a fresh w was followed by its own
-                    // Visit-frames; on return, we don't have a direct way to
-                    // access those low values here, so update lows via
-                    // the loop body in the Frame::Enter return.
-                    //
-                    // We've already taken min on tree-back edges in the
-                    // ci<adj branch (for already-visited successors). For
-                    // tree edges (Enter), we need to fold the child's low
-                    // back into v's low. Achieve that by performing the
-                    // fold when we POP back from a child Visit-finish:
-                    if let Some(Frame::Visit(parent, _)) = work.last() {
-                        if nodes[v].low < nodes[*parent].low {
-                            nodes[*parent].low = nodes[v].low;
-                        }
-                    }
-                    if nodes[v].low == nodes[v].index {
-                        let mut comp: Vec<usize> = Vec::new();
-                        loop {
-                            let w = stack.pop().unwrap();
-                            nodes[w].on_stack = false;
-                            comp.push(w);
-                            if w == v {
-                                break;
-                            }
-                        }
-                        sccs.push(comp);
-                    }
-                }
-            }
-        }
-    }
-    sccs
 }
 
 /// Rewrite OLD code into the new PVM2 call/return layout:

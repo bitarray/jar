@@ -24,8 +24,9 @@ use alloc::vec::Vec;
 
 use super::asm::{Cc, Label, Reg};
 use super::codegen::{
-    CTX_EXIT_ARG, CTX_EXIT_REASON, CTX_PC, CompileResult, Compiler, EXIT_ECALL, EXIT_HOST_CALL,
-    EXIT_PANIC, EXIT_TRAP, GAS, REG_MAP, SCRATCH,
+    CTX_CODE_BASE, CTX_DISPATCH_TABLE, CTX_EXIT_ARG, CTX_EXIT_REASON, CTX_JT_PTR, CTX_PC,
+    CompileResult, Compiler, EXIT_ECALL, EXIT_HOST_CALL, EXIT_PANIC, EXIT_TRAP, GAS, REG_MAP,
+    SCRATCH,
 };
 use javm_exec::rv_instruction::RvInst;
 pub use javm_exec::rv_predecode::{RvPredecode, predecode_rv};
@@ -58,9 +59,22 @@ impl Compiler {
     ///
     /// The caller produces a [`RvPredecode`] up front (the result is
     /// also needed to populate the runtime BB / valid-PC region the
-    /// JIT consults for JALR validation, so it'd be wasteful to recompute
-    /// internally).
-    pub fn compile_rv(mut self, code: &[u8], pd: &RvPredecode) -> CompileResult {
+    /// JIT consults).
+    ///
+    /// `jump_table_offsets` is the Image's CSR-style sub-table boundary
+    /// array — see [`javm_cap::image::Image::jump_table_offsets`].
+    /// Empty implies no br_table dispatch is used (no function calls in
+    /// the program). Each `BrTable { table_id, .. }` instruction
+    /// dispatches through sub-table `table_id`, whose entries live at
+    /// `jt_ptr[jump_table_offsets[table_id] ..
+    /// jump_table_offsets[table_id+1]]`.
+    pub fn compile_rv(
+        mut self,
+        code: &[u8],
+        pd: &RvPredecode,
+        jump_table_offsets: &[u32],
+    ) -> CompileResult {
+        self.rv_jt_offsets = jump_table_offsets.to_vec();
         // Re-point the "valid target" array used by emit_static_branch /
         // emit_branch_reg / emit_branch_imm at the RV valid-PC set. The
         // existing `is_basic_block_start(byte_offset)` reads byte i from
@@ -1254,15 +1268,110 @@ impl Compiler {
     }
 
     /// Emit a PVM2 `br_table table_id, rs1` — indirect-jump terminator
-    /// dispatching through a per-table list of PVM2 PCs in
-    /// `Image.jump_table`. Stub for Phase 2 (just panics); the real
-    /// codegen lands in Phase 4.
-    fn rv_br_table(&mut self, _table_id: u16, _rs1: u8, pc: u32, _next_pc: u32) {
-        // TODO(Phase 4): decode idx = (rs1 - 1) >> 1, bounds check
-        //   against jt_offsets[table_id+1] - jt_offsets[table_id],
-        //   load PVM2 PC from jt[jt_offsets[table_id] + idx], then
-        //   jmp through dispatch_table[pc].
-        self.rv_emit_panic_at(pc);
+    /// dispatching through `Image.jump_table[table_id]`.
+    ///
+    /// The `rs1` register carries the index encoded as `2*idx + 1`.
+    /// Decode:
+    ///   1. If `rs1 == 0` → fall through (uninitialised register is a
+    ///      sentinel for "no valid target").
+    ///   2. `idx = (rs1 - 1) >> 1`. If the LSB of `rs1` was 0 (raw PC
+    ///      shape), `idx` underflows to a huge value and the bounds
+    ///      check fails → fall through.
+    ///   3. If `idx >= table_len[table_id]` → fall through.
+    ///   4. `target_pc = jt[jt_offsets[table_id] + idx]`.
+    ///   5. `native_addr = code_base + dispatch_table[target_pc]`.
+    ///   6. `jmp native_addr`.
+    ///
+    /// `table_base_byte_offset` and `table_len` are baked in as
+    /// immediates at JIT time; they come from `self.rv_jt_offsets`
+    /// (the Image's `jump_table_offsets`).
+    fn rv_br_table(&mut self, table_id: u16, rs1: u8, pc: u32, next_pc: u32) {
+        use super::asm::Cc;
+
+        // Validate table_id against the compiled jump_table_offsets.
+        // (linker_rv guarantees this; this is defence-in-depth.)
+        let nt = self.rv_jt_offsets.len().saturating_sub(1);
+        if (table_id as usize) >= nt {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        let table_start_entries = self.rv_jt_offsets[table_id as usize];
+        let table_end_entries = self.rv_jt_offsets[(table_id as usize) + 1];
+        if table_end_entries < table_start_entries {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        let table_len = table_end_entries - table_start_entries;
+        let table_byte_offset = (table_start_entries as i32)
+            .checked_mul(4)
+            .unwrap_or(i32::MAX);
+
+        if rv_is_reserved(rs1) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+
+        // OOB / sentinel handling: per spec the default behavior is
+        // to fall through to the next instruction (LLVM-friendly
+        // default-case shape). For PVM2 function returns this should
+        // never fire — caller always passes a valid encoded idx. We
+        // route to panic during bring-up to surface bugs; once stable
+        // this can be relaxed to `let fallthrough = label_for_pc(next_pc);`
+        // and bind a real fallthrough.
+        let oob_target = self.panic_label;
+
+        if rs1 == 0 {
+            // rs1 = x0: never dispatch.
+            self.asm.jmp_label(oob_target);
+            let _ = next_pc;
+            return;
+        }
+        // Load the encoded idx from rs1 into SCRATCH.
+        self.rv_read(rs1, SCRATCH, pc);
+
+        // Check rs1 == 0 → OOB.
+        self.asm.test_rr(SCRATCH, SCRATCH);
+        self.asm.jcc_label(Cc::E, oob_target);
+
+        // idx = (rs1 - 1) >> 1.
+        self.asm.sub_ri(SCRATCH, 1);
+        self.asm.shr_ri64(SCRATCH, 1);
+
+        // Bounds check: idx < table_len.
+        if table_len == 0 {
+            self.asm.jmp_label(oob_target);
+        } else {
+            self.asm.cmp_ri32(SCRATCH, table_len as i32);
+            self.asm.jcc_label(Cc::AE, oob_target);
+        }
+
+        // target_pc = jt_ptr[table_byte_offset + idx*4]
+        //           = *((u32*) (jt_ptr + table_byte_offset + idx*4))
+        self.asm.push(Reg::RAX); // save RAX (= x14)
+        self.asm.shl_ri64(SCRATCH, 2); // idx *= 4
+        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_JT_PTR);
+        if table_byte_offset != 0 {
+            self.asm.add_ri(Reg::RAX, table_byte_offset);
+        }
+        // Load the u32 PVM2 PC from [RAX + SCRATCH].
+        self.asm.add_rr(Reg::RAX, SCRATCH);
+        self.asm.mov_load32(SCRATCH, Reg::RAX, 0); // SCRATCH = target_pc
+
+        // native_addr = code_base + dispatch_table[target_pc]
+        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_DISPATCH_TABLE);
+        self.asm.movsxd_load_sib4(Reg::RAX, Reg::RAX, SCRATCH);
+        self.asm.add_r64_mem_rip_rel(Reg::RAX, CTX_CODE_BASE);
+        // Record the target PC for gas-block tracking / pause attribution.
+        self.asm.mov_store32_rip_rel(CTX_PC, SCRATCH);
+        // RAX holds native addr; restore the saved RAX (= x14) value.
+        // Use SCRATCH as the parking lot for the native addr while we pop.
+        self.asm.mov_rr(SCRATCH, Reg::RAX);
+        self.asm.pop(Reg::RAX);
+        self.asm.jmp_reg(SCRATCH);
+
+        // OOB targets `panic_label` directly (see oob_target above);
+        // no per-instruction bind needed here.
+        let _ = next_pc;
     }
 
     fn rv_branch(&mut self, rs1: u8, rs2: u8, imm: i32, cc: Cc, pc: u32, next_pc: u32) {

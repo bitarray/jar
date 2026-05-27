@@ -523,6 +523,8 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
             jit_run::build_frame_runtime_rv(
                 &frame.image_hash,
                 img.code.as_slice(),
+                img.jump_table.as_slice(),
+                img.jump_table_offsets.as_slice(),
                 frame.pc,
                 mem_size,
                 MemRegion {

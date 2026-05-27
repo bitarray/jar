@@ -181,6 +181,11 @@ pub struct Compiler {
     pub(crate) trap_entries: Vec<(u32, u32)>,
     /// Memory tier load/store cycles for gas simulation.
     mem_cycles: u8,
+    /// PVM2: per-function `br_table` sub-table CSR offsets. Each
+    /// `BrTable { table_id, .. }` instruction dispatches through
+    /// entries `jt_ptr[rv_jt_offsets[table_id] ..
+    /// rv_jt_offsets[table_id + 1]]`. Empty for PVM legacy.
+    pub(crate) rv_jt_offsets: Vec<u32>,
 }
 
 impl Compiler {
@@ -233,6 +238,7 @@ impl Compiler {
             bitmask_len: bitmask.len(),
             trap_entries: Vec::with_capacity(2048),
             mem_cycles,
+            rv_jt_offsets: Vec::new(),
         }
     }
 

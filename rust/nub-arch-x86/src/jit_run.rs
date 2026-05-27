@@ -528,6 +528,8 @@ pub unsafe fn build_frame_runtime(
 pub unsafe fn build_frame_runtime_rv(
     image_hash: &javm_cap::CapHash,
     code: &[u8],
+    jump_table: &[u32],
+    jump_table_offsets: &[u32],
     entry_pc: u32,
     mem_size: u32,
     arg: MemRegion,
@@ -549,6 +551,8 @@ pub unsafe fn build_frame_runtime_rv(
     let cached = jit_cache::get_or_compile_rv(
         image_hash,
         code,
+        jump_table,
+        jump_table_offsets,
         META_BASE_M,
         CTX_VA_M,
         javm_exec::gas_cost::DEFAULT_MEM_CYCLES,

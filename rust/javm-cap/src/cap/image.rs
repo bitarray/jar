@@ -20,8 +20,16 @@ pub struct ImageCap {
     /// Packed bit-per-byte instruction-start bitmask. Same layout
     /// as `crate::image::Image::packed_bitmask`.
     pub bitmask: Vec<u8>,
-    /// Jump-table entries (PVM PCs).
+    /// Jump-table entries (PVM PCs). For PVM legacy, a single global
+    /// table indexed by `djump` immediates. For PVM2, concatenated
+    /// per-function `br_table` sub-tables; sub-table boundaries live
+    /// in `jump_table_offsets` (CSR-style).
     pub jump_table: Vec<u32>,
+    /// PVM2: per-table start offsets in `jump_table`, CSR-style.
+    /// `jump_table_offsets[t]..jump_table_offsets[t+1]` slices the
+    /// entries of table `t`. Length = `num_tables + 1` when
+    /// PVM2-encoded, empty for PVM legacy.
+    pub jump_table_offsets: Vec<u32>,
     /// Endpoint definitions. Stored as a dense array keyed by
     /// endpoint index — `endpoints[i].entry_pc == 0` means the
     /// endpoint at index `i` is not defined.
@@ -262,6 +270,10 @@ pub fn image_cap(
     for &j in &image.jump_table {
         jump_table.push(j);
     }
+    let mut jump_table_offsets = Vec::with_capacity(image.jump_table_offsets.len());
+    for &o in &image.jump_table_offsets {
+        jump_table_offsets.push(o);
+    }
 
     // Endpoints: dense `MAX_ENDPOINTS`-sized array; empty entries have
     // `entry_pc == 0`.
@@ -319,6 +331,7 @@ pub fn image_cap(
         code,
         bitmask,
         jump_table,
+        jump_table_offsets,
         endpoints,
         mappings,
         pinned,

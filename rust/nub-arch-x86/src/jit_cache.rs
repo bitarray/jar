@@ -281,6 +281,8 @@ pub fn get_or_compile(
 pub fn get_or_compile_rv(
     image_hash: &CapHash,
     code: &[u8],
+    jump_table: &[u32],
+    jump_table_offsets: &[u32],
     arena_base_va: u64,
     ctx_va: u64,
     mem_cycles: u8,
@@ -298,7 +300,8 @@ pub fn get_or_compile_rv(
 
         // Region sizing.
         let bb_size = page_round_up_min1(pd.valid_pc.len());
-        let jt_size = page_round_up_min1(0); // empty; just a padding page
+        let jt_bytes_used = jump_table.len() * core::mem::size_of::<u32>();
+        let jt_size = page_round_up_min1(jt_bytes_used);
         let dispatch_size = page_round_up_min1(code.len() * core::mem::size_of::<i32>());
 
         let bb_offset = 0usize;
@@ -313,7 +316,7 @@ pub fn get_or_compile_rv(
             dispatch_table,
             trap_table,
             exit_label_offset,
-        } = compiler.compile_rv(code, &pd);
+        } = compiler.compile_rv(code, &pd, jump_table_offsets);
 
         let jit_size = page_round_up_min1(native_code.len());
         let tramp_offset = jit_offset + jit_size;
@@ -331,7 +334,14 @@ pub fn get_or_compile_rv(
             unsafe { core::slice::from_raw_parts(bb_ptr, pd.valid_pc.len()) };
         buf[bb_offset..bb_offset + pd.valid_pc.len()].copy_from_slice(bb_bytes);
 
-        // JT region: empty (zero bytes used).
+        // JT region: copy per-function br_table sub-tables (concatenated
+        // PVM2 PCs, sub-table boundaries in `jump_table_offsets`).
+        if !jump_table.is_empty() {
+            let jt_ptr = jump_table.as_ptr() as *const u8;
+            // SAFETY: jt_ptr valid for jt_bytes_used bytes.
+            let jt_slice = unsafe { core::slice::from_raw_parts(jt_ptr, jt_bytes_used) };
+            buf[jt_offset..jt_offset + jt_bytes_used].copy_from_slice(jt_slice);
+        }
 
         // DISPATCH region.
         let dispatch_bytes_len = core::mem::size_of_val(dispatch_table.as_slice());
