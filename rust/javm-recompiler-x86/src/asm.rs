@@ -1862,6 +1862,22 @@ impl Assembler {
         }
     }
 
+    /// Current number of pending fixups. Capture this before emitting a
+    /// label-referencing instruction so the caller can later `redirect_fixup`
+    /// the entry that the emission appends. Forward references push exactly
+    /// one fixup; backward references push none (resolved immediately).
+    #[inline]
+    pub fn fixups_len(&self) -> usize {
+        self.fixups.len()
+    }
+
+    /// Rewrite the target label of an existing fixup. Used by RV streaming
+    /// compile to redirect forward branches whose target is determined to
+    /// be invalid only after the streaming pass completes.
+    pub fn redirect_fixup(&mut self, idx: usize, new_label: Label) {
+        self.fixups[idx].label = new_label;
+    }
+
     /// Sync Vec length with the write cursor. Call before accessing `self.code` directly.
     pub fn sync_len(&mut self) {
         let CodeBuf::Vec(code) = &mut self.code_buf;

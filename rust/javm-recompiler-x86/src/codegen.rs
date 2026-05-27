@@ -215,6 +215,21 @@ pub struct Compiler {
     /// entries `jt_ptr[rv_jt_offsets[table_id] ..
     /// rv_jt_offsets[table_id + 1]]`. Empty for PVM legacy.
     pub(crate) rv_jt_offsets: Vec<u32>,
+    /// True during RV streaming compile (`compile_rv`). When set, branch
+    /// emit helpers defer forward-target validation (`target > pc`) to a
+    /// post-pass instead of consulting `bitmask_ptr`. Off for PVM, whose
+    /// caller-supplied bitmask is fully populated at emit time.
+    pub(crate) rv_streaming: bool,
+    /// Forward branches whose target validity could not be determined at
+    /// emit time. Resolved post-pass: each entry is
+    /// `(target_pc, branch_pc, fixup_idx)`. If `valid_pc[target]` is
+    /// false after the streaming pass, the fixup is redirected to a
+    /// per-branch panic stub.
+    pub(crate) rv_pending_fwd_branches: Vec<(u32, u32, usize)>,
+    /// Backing storage for `bitmask_ptr` during RV streaming compile.
+    /// Built incrementally in `bind_rv_gas_block_start_streaming`. Empty
+    /// for the PVM path (uses the caller-supplied bitmask).
+    pub(crate) rv_valid_pc: Vec<bool>,
 }
 
 impl Compiler {
@@ -269,6 +284,9 @@ impl Compiler {
             mem_cycles,
             gas_sim: GasSimulator::new(),
             rv_jt_offsets: Vec::new(),
+            rv_streaming: false,
+            rv_pending_fwd_branches: Vec::new(),
+            rv_valid_pc: Vec::new(),
         }
     }
 
@@ -633,8 +651,7 @@ impl Compiler {
         // Sparse dispatch entries: one per gas-block start. The arena's
         // dispatch region is page-zero-filled, so caller writes these
         // (pvm_pc, offset) pairs without zeroing.
-        let mut dispatch_entries: Vec<(u32, i32)> =
-            Vec::with_capacity(self.gas_block_pcs.len());
+        let mut dispatch_entries: Vec<(u32, i32)> = Vec::with_capacity(self.gas_block_pcs.len());
         for &pvm_pc in self.gas_block_pcs.iter() {
             let label = Label(self.label_base + pvm_pc);
             if let Some(offset) = self.asm.label_offset(label) {
@@ -2424,6 +2441,16 @@ impl Compiler {
     // === Helper emission methods ===
 
     /// Emit a static branch (validated at compile time).
+    ///
+    /// For PVM (non-streaming): the bitmask is fully populated at emit
+    /// time, so target validity is checked inline.
+    ///
+    /// For RV streaming compile: only backward targets (`target <= pc`)
+    /// can be validated now. Forward targets (`target > pc`) get the
+    /// optimistic "valid" form (`jmp label_for_pc(target)`), and the
+    /// fixup is recorded in `rv_pending_fwd_branches` for post-pass
+    /// resolution. If the target turns out to be invalid, the fixup is
+    /// redirected to a per-branch panic stub.
     pub(crate) fn emit_static_branch(
         &mut self,
         target: u32,
@@ -2432,6 +2459,13 @@ impl Compiler {
         pc: u32,
     ) {
         if !condition {
+            return;
+        }
+        if self.rv_streaming && target > pc {
+            let label = self.label_for_pc(target);
+            let fixup_idx = self.asm.fixups_len();
+            self.asm.jmp_label(label);
+            self.rv_pending_fwd_branches.push((target, pc, fixup_idx));
             return;
         }
         if !self.is_basic_block_start(target) {
@@ -2554,6 +2588,9 @@ impl Compiler {
     }
 
     /// Emit a branch comparing register against immediate.
+    ///
+    /// Forward branches under RV streaming compile emit the optimistic
+    /// "valid target" form and defer validation; see `emit_static_branch`.
     fn emit_branch_imm(
         &mut self,
         reg: Reg,
@@ -2563,6 +2600,14 @@ impl Compiler {
         _fallthrough: u32,
         pc: u32,
     ) {
+        if self.rv_streaming && target > pc {
+            self.emit_cmp_imm(reg, imm);
+            let label = self.label_for_pc(target);
+            let fixup_idx = self.asm.fixups_len();
+            self.asm.jcc_label(cc, label);
+            self.rv_pending_fwd_branches.push((target, pc, fixup_idx));
+            return;
+        }
         if !self.is_basic_block_start(target) {
             // Target not valid → store PC and panic if condition true (cold path)
             self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
@@ -2577,6 +2622,9 @@ impl Compiler {
     }
 
     /// Emit a branch comparing two registers.
+    ///
+    /// Forward branches under RV streaming compile emit the optimistic
+    /// "valid target" form and defer validation; see `emit_static_branch`.
     pub(crate) fn emit_branch_reg(
         &mut self,
         a: Reg,
@@ -2586,6 +2634,14 @@ impl Compiler {
         _fallthrough: u32,
         pc: u32,
     ) {
+        if self.rv_streaming && target > pc {
+            self.asm.cmp_rr(a, b);
+            let label = self.label_for_pc(target);
+            let fixup_idx = self.asm.fixups_len();
+            self.asm.jcc_label(cc, label);
+            self.rv_pending_fwd_branches.push((target, pc, fixup_idx));
+            return;
+        }
         if !self.is_basic_block_start(target) {
             self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
             self.asm.cmp_rr(a, b);

@@ -73,30 +73,22 @@ impl Compiler {
     /// jump_table_offsets[table_id+1]]`.
     ///
     /// The returned `CompileResult.valid_pc` is the byte-indexed
-    /// "instruction starts here" bitmap the runtime BB region needs.
+    /// "valid branch target" bitmap the runtime BB region needs. A bit
+    /// is set iff the PC is a gas-block start (= dispatchable entry in
+    /// the gas-block dispatch table). Built incrementally during the
+    /// streaming pass — no separate length-only pre-pass.
     pub fn compile_rv(mut self, code: &[u8], jump_table_offsets: &[u32]) -> CompileResult {
         self.rv_jt_offsets = jump_table_offsets.to_vec();
 
-        // Build valid_pc up front via a length-only scan. The full
-        // decode happens inline in the codegen loop, but forward
-        // branches consult `is_basic_block_start(target)` at emit
-        // time to decide between a label-target jcc and a panic stub,
-        // so the target's valid_pc bit must be set before we reach
-        // the branch's emit site. Doing this with the length-only
-        // form (bits [1:0] of byte 0 ⇒ 2 or 4 bytes) is much cheaper
-        // than a full predecode — no enum construction, no register-
-        // slot extraction, no gas metadata.
-        let mut valid_pc: Vec<bool> = vec![false; code.len()];
-        {
-            let mut pc = 0usize;
-            while pc < code.len() {
-                valid_pc[pc] = true;
-                let len = if code[pc] & 0b11 == 0b11 { 4 } else { 2 };
-                pc += len;
-            }
-        }
-        self.bitmask_ptr = valid_pc.as_ptr() as *const u8;
-        self.bitmask_len = valid_pc.len();
+        // valid_pc is populated incrementally as the streaming pass
+        // binds gas-block starts. The pointer is stable across mutation
+        // (Vec doesn't reallocate from `vec![false; n]` with in-place
+        // index assignment), so `is_basic_block_start` reads through
+        // the raw pointer remain coherent.
+        self.rv_valid_pc = vec![false; code.len()];
+        self.bitmask_ptr = self.rv_valid_pc.as_ptr() as *const u8;
+        self.bitmask_len = self.rv_valid_pc.len();
+        self.rv_streaming = true;
 
         self.emit_prologue();
 
@@ -109,11 +101,8 @@ impl Compiler {
 
             let Some((inst, len)) = decode(&code[pc..]) else {
                 // Decode failure — emit a panic at this PC and stop.
-                // The remaining bytes are unreachable from the runtime
-                // BB region (valid_pc[pc] was set by the length-only
-                // pre-pass but the decoder rejects the encoding; the
-                // panic ensures we exit before executing whatever's
-                // here).
+                // Bytes past this point stay unmarked in valid_pc so
+                // runtime djumps targeting them correctly fail.
                 self.rv_emit_panic_at(pc as u32);
                 break;
             };
@@ -164,13 +153,34 @@ impl Compiler {
             self.oog_stubs.push((stub_label, block_pc, cost));
         }
 
+        // Resolve deferred forward branches now that valid_pc is fully
+        // populated. For each forward branch recorded with target > pc
+        // at emit time:
+        //   - valid target: label_for_pc(target) was bound during the
+        //     streaming pass; the existing fixup resolves naturally.
+        //   - invalid target: append a per-branch panic stub and
+        //     redirect the fixup to it. Keeps the source PC of the
+        //     branch in the exit report.
+        // We disable rv_streaming first so emit_branch_* / panic helpers
+        // called below take their non-deferred path.
+        self.rv_streaming = false;
+        let pending = core::mem::take(&mut self.rv_pending_fwd_branches);
+        for (target, branch_pc, fixup_idx) in pending {
+            if !self.is_basic_block_start(target) {
+                let stub = self.asm.new_label();
+                self.asm.bind_label(stub);
+                self.asm.mov_store32_rip_rel_imm(CTX_PC, branch_pc as i32);
+                self.asm.jmp_label(self.panic_label);
+                self.asm.redirect_fixup(fixup_idx, stub);
+            }
+        }
+
         self.emit_exit_sequences();
 
         // Sparse dispatch entries — caller writes only these into the
         // (page-zero-filled) arena dispatch region. No code.len() + 1
         // intermediate Vec.
-        let mut dispatch_entries: Vec<(u32, i32)> =
-            Vec::with_capacity(self.gas_block_pcs.len());
+        let mut dispatch_entries: Vec<(u32, i32)> = Vec::with_capacity(self.gas_block_pcs.len());
         for &pc in self.gas_block_pcs.iter() {
             let label = Label(self.label_base + pc);
             if let Some(off) = self.asm.label_offset(label) {
@@ -180,6 +190,7 @@ impl Compiler {
 
         let exit_label_offset = self.asm.label_offset(self.exit_label).unwrap_or(0) as u32;
         let trap_table = core::mem::take(&mut self.trap_entries);
+        let valid_pc = core::mem::take(&mut self.rv_valid_pc);
 
         CompileResult {
             native_code: self.asm.finalize(),
@@ -204,6 +215,16 @@ impl Compiler {
         let label = Label(self.label_base + pc);
         self.asm.bind_label(label);
         self.gas_block_pcs.push(pc);
+        // valid_pc is the gas-block-start bitmap consulted by both the
+        // codegen-time `is_basic_block_start` check and the runtime's
+        // djump validation. Set it here so backward branches emit time
+        // see the bit (we walk PCs in order, so any T < cur_pc has
+        // already passed through here if it's a gas-block start).
+        // bitmask_ptr points to rv_valid_pc's heap buffer, so this
+        // mutation is visible to subsequent is_basic_block_start reads.
+        if (pc as usize) < self.rv_valid_pc.len() {
+            self.rv_valid_pc[pc as usize] = true;
+        }
 
         // Peephole state must not leak across gas-block boundaries: the
         // dispatch table can enter this block from any predecessor.
@@ -995,8 +1016,7 @@ impl Compiler {
             && rd != 0
             && rs1 != 0
             && rs2 != 0
-            && let (Some(d_s), Some(a_s), Some(b_s)) =
-                (rv_slot(rd), rv_slot(rs1), rv_slot(rs2))
+            && let (Some(d_s), Some(a_s), Some(b_s)) = (rv_slot(rd), rv_slot(rs1), rv_slot(rs2))
         {
             self.last_add_cf = Some((d_s, a_s, b_s));
         }
@@ -1100,9 +1120,7 @@ impl Compiler {
         // `mov_ri64(d, 0); cmp; setcc` — the first of which clobbers CF
         // via xor. last_add_cf is single-shot: cleared on entry to keep
         // any *subsequent* sltu from reading the (now-stale) add flags.
-        if !signed
-            && let Some((add_d, add_a, add_b)) = self.last_add_cf
-        {
+        if !signed && let Some((add_d, add_a, add_b)) = self.last_add_cf {
             let rs1_s = rv_slot(rs1);
             let rs2_s = rv_slot(rs2);
             let rd_s = rv_slot(rd);
@@ -2016,7 +2034,10 @@ impl Compiler {
     fn track_shifted(&mut self, rd: u8, rs1: u8, shamt: u8) {
         use super::codegen::RegDef;
         if let (Some(d), Some(s)) = (rv_slot(rd), rv_slot(rs1)) {
-            self.reg_defs[d] = RegDef::Shifted { src: s, shift: shamt };
+            self.reg_defs[d] = RegDef::Shifted {
+                src: s,
+                shift: shamt,
+            };
             self.reg_defs_active |= 1u16 << d;
             self.invalidate_dependents(d);
         }
