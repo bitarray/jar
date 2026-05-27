@@ -251,6 +251,13 @@ fn profile_one(name: &str, blob: &[u8]) {
     // LUI+ADDI pairs where the addi consumes the LUI's dst.
     let mut lui_addi = 0usize;
 
+    // Precise fusion-candidate counters (exact patterns the recompiler fuses).
+    let mut lui_add_same_rd = 0usize; // lui rd, _; add rd, {rd,x|x,rd} (a_rd == rd)
+    let mut ld_add_any = 0usize; // ld rd, _(rs1); add a, rs, rd / a, rd, rs
+    let mut ld_xor_any = 0usize;
+    let mut ld_or_any = 0usize;
+    let mut ld_and_any = 0usize;
+
     let mut prev: Option<RvInst> = None;
     let mut pc = 0;
     while pc < code.len() {
@@ -273,6 +280,39 @@ fn profile_one(name: &str, blob: &[u8]) {
                     }
                 }
             }
+            // Precise Lui→Add same-rd pattern (this is what compile_lui actually fuses).
+            if let (RvInst::Lui { rd: l_rd, .. }, RvInst::Add { rd: a_rd, rs1, rs2 }) = (p, inst) {
+                if a_rd != 0 && a_rd == l_rd && (rs1 == l_rd || rs2 == l_rd) {
+                    lui_add_same_rd += 1;
+                }
+            }
+            // Precise Ld→ALU patterns the recompiler fuses (rd != 0; ALU reads ld's rd).
+            if let RvInst::Ld { rd: l_rd, .. } = p {
+                if l_rd != 0 {
+                    let alu_uses_ld = |a_rs1: u8, a_rs2: u8| a_rs1 == l_rd || a_rs2 == l_rd;
+                    match inst {
+                        RvInst::Add { rd: a_rd, rs1, rs2 }
+                            if a_rd != 0 && alu_uses_ld(rs1, rs2) =>
+                        {
+                            ld_add_any += 1
+                        }
+                        RvInst::Xor { rd: a_rd, rs1, rs2 }
+                            if a_rd != 0 && alu_uses_ld(rs1, rs2) =>
+                        {
+                            ld_xor_any += 1
+                        }
+                        RvInst::Or { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
+                            ld_or_any += 1
+                        }
+                        RvInst::And { rd: a_rd, rs1, rs2 }
+                            if a_rd != 0 && alu_uses_ld(rs1, rs2) =>
+                        {
+                            ld_and_any += 1
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
         prev = Some(inst);
         pc += len as usize;
@@ -289,6 +329,20 @@ fn profile_one(name: &str, blob: &[u8]) {
         total,
         lui_addi,
         100.0 * lui_addi as f64 / total as f64
+    );
+    let pct = |c: usize| 100.0 * c as f64 / total as f64;
+    println!(
+        "  fusion-precise: lui+add(same-rd)={:>4} ({:.2}%); ld+add={:>4} ({:.2}%); ld+xor={:>3} ({:.2}%); ld+or={:>3} ({:.2}%); ld+and={:>3} ({:.2}%)",
+        lui_add_same_rd,
+        pct(lui_add_same_rd),
+        ld_add_any,
+        pct(ld_add_any),
+        ld_xor_any,
+        pct(ld_xor_any),
+        ld_or_any,
+        pct(ld_or_any),
+        ld_and_any,
+        pct(ld_and_any),
     );
     println!("  top single variants:");
     for (n, c) in singles.iter().take(10) {

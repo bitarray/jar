@@ -35,6 +35,68 @@ use super::codegen::{
 };
 pub use javm_exec::rv_predecode::{RvPredecode, predecode_rv};
 
+/// Detect a trailing ALU-rr instruction in raw bytes, for streaming-fusion
+/// lookahead. Handles both 4-byte OP_OP forms (Add/Xor/Or/And with funct7=0)
+/// and the 2-byte RVC equivalents (`c.add`, `c.xor`, `c.or`, `c.and`).
+///
+/// Returns `(op, rd, rs1, rs2, consumed_bytes)`. For RVC's two-operand forms
+/// (`rd <- rd ⊕ rs2`), we surface `rs1 == rd` so callers don't need separate
+/// RVC-aware logic.
+///
+/// Roughly half of PVM2 guest code is RVC (49–71% across the gap-driving
+/// guests), so missing the compressed-Add form here would forfeit most of
+/// the win from these fusions.
+#[inline]
+fn peek_alu_rr_trailer(rest: &[u8]) -> Option<(AluOp, u8, u8, u8, usize)> {
+    if rest.len() < 2 {
+        return None;
+    }
+    // 4-byte path: only when `rest[0]`'s low 2 bits == 0b11.
+    if rest[0] & 0b11 == 0b11 {
+        if rest.len() < 4 {
+            return None;
+        }
+        let w = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+        let op = match w & 0xFE00_707F {
+            0x0000_0033 => AluOp::Add,
+            0x0000_4033 => AluOp::Xor,
+            0x0000_6033 => AluOp::Or,
+            0x0000_7033 => AluOp::And,
+            _ => return None,
+        };
+        let rd = ((w >> 7) & 0x1F) as u8;
+        let rs1 = ((w >> 15) & 0x1F) as u8;
+        let rs2 = ((w >> 20) & 0x1F) as u8;
+        return Some((op, rd, rs1, rs2, 4));
+    }
+    // 2-byte RVC path.
+    let h = u16::from_le_bytes([rest[0], rest[1]]);
+    // c.add — q2 (bits[1:0]=10), funct4=1001, bits[12]=1, rd!=0, rs2!=0.
+    // mask 0xF003 == 0x9002.
+    if h & 0xF003 == 0x9002 {
+        let rd = ((h >> 7) & 0x1F) as u8;
+        let rs2 = ((h >> 2) & 0x1F) as u8;
+        if rd != 0 && rs2 != 0 {
+            return Some((AluOp::Add, rd, rd, rs2, 2));
+        }
+        return None;
+    }
+    // c.{and,or,xor,sub} — q1 misc_alu, funct6=100011, bits[1:0]=01.
+    // mask 0xFC03 == 0x8C01. funct2 (bits[6:5]) selects op.
+    if h & 0xFC03 == 0x8C01 {
+        let op = match (h >> 5) & 0x3 {
+            0b01 => AluOp::Xor,
+            0b10 => AluOp::Or,
+            0b11 => AluOp::And,
+            _ => return None, // 0b00 = c.sub, not in fusion set
+        };
+        let rd = ((h >> 7) & 0x7) as u8 + 8; // creg
+        let rs2 = ((h >> 2) & 0x7) as u8 + 8; // creg
+        return Some((op, rd, rd, rs2, 2));
+    }
+    None
+}
+
 // ----------------------------------------------------------------------
 // RV opcode majors (bits [6:2]). Bits [1:0] are always 0b11 for 4-byte.
 // Mirrors `javm_exec::rv_instruction::OP_*`; redeclared here to keep the
@@ -692,7 +754,7 @@ impl Compiler {
             OP_OP_IMM_32 => self.compile_op_imm_32(rd, rs1, f3, w, pc),
             OP_OP => self.compile_op(rd, rs1, rs2, f3, f7, w, pc, rest),
             OP_OP_32 => self.compile_op_32(rd, rs1, rs2, f3, f7, w, pc),
-            OP_LUI => self.compile_lui(rd, w, pc),
+            OP_LUI => self.compile_lui(rd, w, pc, rest),
             OP_JAL => self.compile_jal(rd, w, pc),
             OP_BRANCH => self.compile_branch(rs1, rs2, f3, w, pc),
             OP_CUSTOM_0 => self.compile_custom_0(rd, rs1, f3, w, pc),
@@ -765,35 +827,33 @@ impl Compiler {
                 return (true, false, 0);
             }
         };
-        // Ld→Add fusion: only triggers on the 64-bit `ld` (f3 == 0b011).
-        // The fast-path mask test on the next word lets us cheaply reject
-        // the common "Ld not followed by Add" case before extracting
-        // fields. See commit `perf(pvm2): Ld→Add lookahead fusion`.
-        if width == 8 && rd != 0 && !rv_is_reserved(rd) && !rv_is_reserved(rs1) && rest.len() >= 4 {
-            let w2 = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
-            if w2 & 0xFE00_707F == 0x0000_0033 {
-                let a_rd = ((w2 >> 7) & 0x1F) as u8;
-                let a_rs1 = ((w2 >> 15) & 0x1F) as u8;
-                let a_rs2 = ((w2 >> 20) & 0x1F) as u8;
-                if a_rd != 0
-                    && !rv_is_reserved(a_rd)
-                    && (a_rs1 == rd || a_rs2 == rd)
-                    && (a_rs1 == 0 || !rv_is_reserved(a_rs1))
-                    && (a_rs2 == 0 || !rv_is_reserved(a_rs2))
-                {
-                    self.rv_load(rd, rs1, imm, 8, false, pc);
-                    self.feed_gas_rv(RV_KIND_LOAD, rs1, 0, rd);
-                    let next_pc = pc + 4;
-                    self.rv_alu_rr(a_rd, a_rs1, a_rs2, AluOp::Add, next_pc);
-                    if a_rd != a_rs1 && a_rd != a_rs2 {
-                        self.track_add_scaledadd(a_rd, a_rs1, a_rs2);
-                    }
-                    self.feed_gas_rv(RV_KIND_ADD, a_rs1, a_rs2, a_rd);
-                    // The fused trailing op is an Add → preserve CF for
-                    // a possible subsequent Sltu fusion.
-                    return (false, true, 4);
-                }
+        // Ld→{Add,Xor,Or,And} fusion: only triggers on the 64-bit `ld`
+        // (f3 == 0b011). `peek_alu_rr_trailer` handles both 4-byte OP_OP and
+        // 2-byte RVC trailing forms — half the code in these guests is RVC,
+        // so missing c.add/c.{and,or,xor} would forfeit most of the win.
+        if width == 8
+            && rd != 0
+            && !rv_is_reserved(rd)
+            && !rv_is_reserved(rs1)
+            && let Some((op, a_rd, a_rs1, a_rs2, consumed)) = peek_alu_rr_trailer(rest)
+            && a_rd != 0
+            && !rv_is_reserved(a_rd)
+            && (a_rs1 == rd || a_rs2 == rd)
+            && (a_rs1 == 0 || !rv_is_reserved(a_rs1))
+            && (a_rs2 == 0 || !rv_is_reserved(a_rs2))
+        {
+            self.rv_load(rd, rs1, imm, 8, false, pc);
+            self.feed_gas_rv(RV_KIND_LOAD, rs1, 0, rd);
+            let next_pc = pc + 4;
+            self.rv_alu_rr(a_rd, a_rs1, a_rs2, op, next_pc);
+            // ScaledAdd tracking only meaningful for Add.
+            if matches!(op, AluOp::Add) && a_rd != a_rs1 && a_rd != a_rs2 {
+                self.track_add_scaledadd(a_rd, a_rs1, a_rs2);
             }
+            self.feed_gas_rv(RV_KIND_ADD, a_rs1, a_rs2, a_rd);
+            // preserve_cf only valid for Add (Sltu fusion consumer).
+            let preserve_cf = matches!(op, AluOp::Add);
+            return (false, preserve_cf, consumed);
         }
         self.rv_load(rd, rs1, imm, width, signed, pc);
         let term = self.feed_gas_rv(RV_KIND_LOAD, rs1, 0, rd);
@@ -1400,9 +1460,52 @@ impl Compiler {
         }
     }
 
-    fn compile_lui(&mut self, rd: u8, w: u32, pc: u32) -> (bool, bool, usize) {
+    fn compile_lui(&mut self, rd: u8, w: u32, pc: u32, rest: &[u8]) -> (bool, bool, usize) {
         use javm_exec::gas_cost::*;
         let imm = imm_u(w);
+
+        // Lui→Add fusion: `lui rd, imm; add rd, rd, rs2` (4-byte) or the
+        // RVC equivalent `c.add rd, rs2` collapses into one `lea rd, [rs2 +
+        // imm]`. Only the same-rd Add case is fusable: if the Add writes a
+        // different register, the LUI value is still live and we can't skip
+        // its materialisation.
+        if rd != 0
+            && !rv_is_reserved(rd)
+            && let Some((op, a_rd, a_rs1, a_rs2, consumed)) = peek_alu_rr_trailer(rest)
+            && matches!(op, AluOp::Add)
+            && a_rd == rd
+        {
+            let other = if a_rs1 == rd {
+                Some(a_rs2)
+            } else if a_rs2 == rd {
+                Some(a_rs1)
+            } else {
+                None
+            };
+            if let Some(other) = other
+                && (other == 0 || !rv_is_reserved(other))
+            {
+                if let Some(d) = self.rv_dst(a_rd, pc) {
+                    if other == 0 {
+                        // `add rd, rd, x0` = identity → rd stays as the LUI
+                        // constant. Fall back to mov_ri64 + track_const so
+                        // subsequent addr-folding still works.
+                        self.asm.mov_ri64(d, imm as i64 as u64);
+                        self.track_const(a_rd, imm);
+                    } else {
+                        let base = REG_MAP[rv_slot(other).unwrap()];
+                        self.asm.lea(d, base, imm);
+                        self.invalidate_reg(rv_slot(a_rd).unwrap());
+                    }
+                }
+                self.feed_gas_rv(RV_KIND_LUI, 0, 0, rd);
+                self.feed_gas_rv(RV_KIND_ADD, a_rs1, a_rs2, a_rd);
+                // lea preserves CF in x86, but no RV-semantic Add was emitted
+                // — clear so downstream Sltu can't fuse against stale CF.
+                return (false, false, consumed);
+            }
+        }
+
         self.rv_lui(rd, imm, pc);
         self.track_const(rd, imm);
         let term = self.feed_gas_rv(RV_KIND_LUI, 0, 0, rd);
