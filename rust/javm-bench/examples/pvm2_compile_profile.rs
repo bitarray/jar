@@ -31,11 +31,12 @@ fn profile_one(name: &str, blob: &[u8]) {
     let code = &image.code[..];
     let jt_offsets = &image.jump_table_offsets[..];
 
-    // Warm-up.
-    {
+    // Warm-up + report native_code size.
+    let native_size = {
         let c = Compiler::new(&[], &[], dummy_helpers(), code.len(), 0x4000_0000, 1);
-        let _ = c.compile_rv(code, jt_offsets);
-    }
+        let r = c.compile_rv(code, jt_offsets);
+        r.native_code.len()
+    };
 
     const ITERS: u32 = 64;
     let mut comp_ns: u128 = 0;
@@ -63,9 +64,11 @@ fn profile_one(name: &str, blob: &[u8]) {
     };
 
     println!(
-        "{:<22} code={:>6}B  insts={:>6}  streaming_compile={:>7.1}µs  (predecode_rv_alone={:>7.1}µs)",
+        "{:<22} code={:>6}B  native={:>6}B  ({:.1}x)  insts={:>6}  streaming_compile={:>7.1}µs  (predecode_rv_alone={:>7.1}µs)",
         name,
         code.len(),
+        native_size,
+        native_size as f64 / code.len() as f64,
         n_insts,
         comp_us,
         pre_us,
