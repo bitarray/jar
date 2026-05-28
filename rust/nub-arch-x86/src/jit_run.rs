@@ -347,185 +347,19 @@ pub struct FrameRuntime {
 /// Per-entry mutable state (regs, pc, gas, exit_*) is written by
 /// [`enter_frame`]; this function only touches frame-constant fields.
 ///
-/// # Safety
-/// Caller must keep the returned `FrameRuntime` alive for the lifetime
-/// of the [`KernelFrame`] (the PT references the buf pages by PA).
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn build_frame_runtime(
-    image_hash: &javm_cap::CapHash,
-    code: &[u8],
-    bitmask: &[u8],
-    jump_table: &[u32],
-    entry_pc: u32,
-    mem_size: u32,
-    arg: MemRegion,
-    ro: MemRegion,
-    rw: MemRegion,
-    direct_maps: &[DirectMap],
-) -> Option<FrameRuntime> {
-    assert_eq!(code.len(), bitmask.len());
-
-    // ---- compile (cached by image_hash) into per-Image arena --------------
-    //
-    // The codegen reads the helper-fn addresses to look up the access
-    // width (`if fn_addr == helpers.mem_write_u8 { width = 1 }`).
-    // We never actually *call* the helpers in this in-kernel path
-    // (the recompiler only emits inline SIB loads/stores), but the
-    // helper addresses must be distinct non-zero sentinels so the
-    // width dispatch picks the right size. Using all-zeroes makes
-    // every store collapse to u8 (the first match) — see codegen's
-    // `emit_mem_read_sized` / `emit_mem_write`.
-    let helpers = HelperFns {
-        mem_read_u8: 0x1001,
-        mem_read_u16: 0x1002,
-        mem_read_u32: 0x1003,
-        mem_read_u64: 0x1004,
-        mem_write_u8: 0x1005,
-        mem_write_u16: 0x1006,
-        mem_write_u32: 0x1007,
-        mem_write_u64: 0x1008,
-        sbrk_helper: 0x1009,
-    };
-    let cached = jit_cache::get_or_compile(
-        image_hash,
-        code,
-        bitmask,
-        jump_table,
-        META_BASE_M,
-        CTX_VA_M,
-        javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
-        helpers,
-    );
-    if cached.jit_size == 0 {
-        return None;
-    }
-
-    // ---- per-region VAs derived from the cached arena offsets -------------
-    let bb_va = META_BASE_M + cached.bb_offset as u64;
-    let jt_va = META_BASE_M + cached.jt_offset as u64;
-    let dispatch_va = META_BASE_M + cached.dispatch_offset as u64;
-    let jit_va = META_BASE_M + cached.jit_offset as u64;
-    let tramp_va = META_BASE_M + cached.tramp_offset as u64;
-
-    let mem_bytes = (mem_size as usize).next_multiple_of(PAGE_SIZE);
-
-    // ---- allocate per-frame buffers --------------------------------------
-    // CTX (mutable, written by JIT every instruction) and per-frame MEM /
-    // STACK stay private. The five Image-shared regions live in `cached.arena`.
-    let mem_buf = PageBuf::new(mem_bytes.max(PAGE_SIZE))?;
-    let ctx_buf = PageBuf::new(PAGE_SIZE)?;
-    let stack_buf = PageBuf::new(PAGE_SIZE)?;
-
-    // ---- populate mem regions (once, on build) ---------------------------
-    // (mem_buf is already zeroed by alloc_zeroed.)
-    for region in [arg, ro, rw] {
-        if region.data.is_empty() {
-            continue;
-        }
-        let off = region.start as usize;
-        let end = off.checked_add(region.data.len())?;
-        if end > mem_bytes {
-            return None;
-        }
-        // SAFETY: bounds-checked against mem_bytes.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                region.data.as_ptr(),
-                (mem_buf.kva() + off as u64) as *mut u8,
-                region.data.len(),
-            );
-        }
-    }
-
-    // ---- init frame-constant JitContext fields ----------------------------
-    let ctx_kva = ctx_buf.kva();
-    let ctx = ctx_kva as *mut JitContext;
-    // SAFETY: ctx points to a fresh zeroed ctx page. Pointer fields use
-    // the per-Image VAs computed above. Per-entry fields (regs/pc/gas/
-    // exit_*) are zeroed and will be overwritten by `enter_frame`.
-    unsafe {
-        (*ctx).heap_base = 0;
-        (*ctx).heap_top = 0;
-        (*ctx).jt_ptr = jt_va as *const u32;
-        (*ctx).jt_len = jump_table.len() as u32;
-        (*ctx)._pad0 = 0;
-        (*ctx).bb_starts = bb_va as *const u8;
-        (*ctx).bb_len = bitmask.len() as u32;
-        (*ctx)._pad1 = 0;
-        (*ctx).entry_pc = entry_pc;
-        (*ctx).dispatch_table = dispatch_va as *const i32;
-        (*ctx).code_base = jit_va;
-        (*ctx).flat_buf = MEM_VA_M as *mut u8;
-        (*ctx).fast_reentry = 0;
-        (*ctx)._pad2 = 0;
-        (*ctx).max_heap_pages = 0;
-        (*ctx)._pad3 = 0;
-    }
-
-    // ---- build the page table --------------------------------------------
-    // CTX + MEM + STACK are per-frame: each maps fresh PD/PT pages owned
-    // by this PageTable. The per-Image arena lives under a shared PD
-    // owned by the Image's TemplatePT; install_borrowed_pd writes its
-    // PA into PDPT[1] of the META PML4 slot without per-call alloc.
-    let mut pt = PageTable::new()?;
-    pt.map(CTX_VA_M, ctx_buf.pa(), ctx_buf.size(), Perm::user_rw())?;
-    if mem_bytes > 0 {
-        pt.map(MEM_VA_M, mem_buf.pa(), mem_buf.size(), Perm::user_rw())?;
-    }
-    // Overlay direct-map regions (DataCap pages projected straight
-    // into the PT) on top of the zeroed mem_buf. Each pt.map call
-    // overwrites the existing PTEs at the target VAs with user_ro
-    // pointers into the cap's pages. The bytes the guest reads come
-    // from the shared talc heap — no per-call memcpy.
-    for dm in direct_maps {
-        if dm.size == 0 {
-            continue;
-        }
-        pt.map(
-            MEM_VA_M + dm.start as u64,
-            dm.pa,
-            dm.size as u64,
-            Perm::user_ro(),
-        )?;
-    }
-    pt.install_borrowed_pd(META_BASE_M, cached.template_pd_pa)?;
-    pt.map(
-        STACK_VA_M,
-        stack_buf.pa(),
-        stack_buf.size(),
-        Perm::user_rw(),
-    )?;
-    let new_cr3 = pt.cr3()?;
-
-    Some(FrameRuntime {
-        pt,
-        mem_buf,
-        ctx_buf,
-        stack_buf,
-        jit_va,
-        jit_size: cached.jit_size as u64,
-        exit_label_va: jit_va + cached.exit_label_offset as u64,
-        trap_table_ptr: cached.trap_table.as_ptr(),
-        trap_table_len: cached.trap_table.len() as u64,
-        tramp_va,
-        new_cr3,
-        ctx_kva,
-    })
-}
-
 /// PVM2 variant of [`build_frame_runtime`]. The `code` is raw
 /// RV+C+custom-0 bytes; the JIT cache's RV path predecodes it once
 /// and reuses the result on subsequent calls.
 ///
 /// Signature differs from the PVM path: no `bitmask` (the BB region
 /// holds the valid-PC set, sized to `code.len()`, populated by
-/// `jit_cache::get_or_compile_rv`); no `jump_table` (RV jalr targets
+/// `jit_cache::get_or_compile`); no `jump_table` (RV jalr targets
 /// are raw PCs, validated against valid_pc directly).
 ///
 /// # Safety
 /// Same constraints as [`build_frame_runtime`].
 #[allow(clippy::too_many_arguments)]
-pub unsafe fn build_frame_runtime_rv(
+pub unsafe fn build_frame_runtime(
     image_hash: &javm_cap::CapHash,
     code: &[u8],
     jump_table: &[u32],
@@ -548,7 +382,7 @@ pub unsafe fn build_frame_runtime_rv(
         mem_write_u64: 0x1008,
         sbrk_helper: 0x1009,
     };
-    let cached = jit_cache::get_or_compile_rv(
+    let cached = jit_cache::get_or_compile(
         image_hash,
         code,
         jump_table,

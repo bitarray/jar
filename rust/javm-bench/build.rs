@@ -1,11 +1,9 @@
-//! Cross-compile each bench guest crate for the JAVM target,
+//! Cross-compile each bench guest crate for the PVM2 target,
 //! transpile to a SCALE-encoded `Image`, and expose the blob path
-//! to `benches/pvm_bench.rs` via per-guest environment variables.
+//! to the bench harness + examples via per-guest environment variables.
 //!
-//! Mirrors `rust/jar-kernel/build.rs`, repeated once per guest. The
-//! `BUILD_CRATE_GUEST_BUILD` env-var guard prevents infinite
-//! recursion when `build-crate` re-invokes cargo for the guest
-//! target.
+//! The `BUILD_CRATE_GUEST_BUILD` env-var guard prevents infinite
+//! recursion when `build-crate` re-invokes cargo for the guest target.
 
 fn main() {
     if std::env::var("BUILD_CRATE_GUEST_BUILD").is_ok() {
@@ -15,77 +13,67 @@ fn main() {
         (
             "../../components/benches/prime-sieve",
             "bench-prime-sieve",
-            "PRIME_SIEVE_BLOB",
+            "PRIME_SIEVE_PVM2_BLOB",
         ),
         (
             "../../components/benches/ed25519",
             "bench-ed25519",
-            "ED25519_BLOB",
+            "ED25519_PVM2_BLOB",
         ),
         (
             "../../components/benches/keccak",
             "bench-keccak",
-            "KECCAK_BLOB",
+            "KECCAK_PVM2_BLOB",
         ),
         (
             "../../components/benches/blake2b",
             "bench-blake2b",
-            "BLAKE2B_BLOB",
+            "BLAKE2B_PVM2_BLOB",
         ),
         (
             "../../components/benches/ecrecover",
             "bench-ecrecover",
-            "ECRECOVER_BLOB",
+            "ECRECOVER_PVM2_BLOB",
         ),
         (
             "../../components/benches/goldilocks-mul",
             "bench-goldilocks-mul",
-            "GOLDILOCKS_MUL_BLOB",
+            "GOLDILOCKS_MUL_PVM2_BLOB",
         ),
         (
             "../../components/benches/poseidon2-perm",
             "bench-poseidon2-perm",
-            "POSEIDON2_PERM_BLOB",
+            "POSEIDON2_PERM_PVM2_BLOB",
         ),
         (
             "../../components/benches/mini-verifier",
             "bench-mini-verifier",
-            "MINI_VERIFIER_BLOB",
+            "MINI_VERIFIER_PVM2_BLOB",
         ),
         (
             "../../components/benches/poly-eval",
             "bench-poly-eval",
-            "POLY_EVAL_BLOB",
+            "POLY_EVAL_PVM2_BLOB",
         ),
         (
             "../../components/benches/fri-fold-tree",
             "bench-fri-fold-tree",
-            "FRI_FOLD_TREE_BLOB",
+            "FRI_FOLD_TREE_PVM2_BLOB",
         ),
         (
             "../../components/benches/sub-vm-recurse",
             "bench-sub-vm-recurse",
-            "SUB_VM_RECURSE_BLOB",
+            "SUB_VM_RECURSE_PVM2_BLOB",
         ),
         (
             "../../components/benches/sub-vm-data-recurse",
             "bench-sub-vm-data-recurse",
-            "SUB_VM_DATA_RECURSE_BLOB",
+            "SUB_VM_DATA_RECURSE_PVM2_BLOB",
         ),
     ] {
-        let blob = build_javm::build(path, crate_name);
+        let blob = build_javm::build_pvm2(path, crate_name);
         println!("cargo:rustc-env={env}={}", blob.display());
         println!("cargo:rerun-if-changed={path}/src");
         println!("cargo:rerun-if-changed={path}/Cargo.toml");
-
-        // Also build via PVM2. A failure here means linker_rv hit
-        // something it can't translate yet — surfaces at workspace
-        // build time, not bench-run time.
-        let pvm2_blob = build_javm::build_pvm2(path, crate_name);
-        let pvm2_env = env.trim_end_matches("_BLOB");
-        println!(
-            "cargo:rustc-env={pvm2_env}_PVM2_BLOB={}",
-            pvm2_blob.display()
-        );
     }
 }

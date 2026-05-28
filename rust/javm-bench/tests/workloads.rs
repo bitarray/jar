@@ -1,13 +1,7 @@
-//! CI conformance for the bench workloads.
-//!
-//! Mirrors the per-workload sanity check in `benches/pvm_bench.rs` and
-//! `benches/stark_bench.rs` (which only run under `cargo bench`,
-//! invisible to CI) as plain `#[test]`s, so any regression in the
-//! interpreter, recompiler, or transpiler that changes a workload's
-//! return value or gas cost trips a test failure.
+//! CI conformance for the PVM2 bench workloads.
 //!
 //! For each workload we:
-//!   1. Drive the byte-PVM interpreter through `Nub::new_local()`.
+//!   1. Drive the interpreter through `Nub::new_local()`.
 //!   2. Drive the JIT recompiler through `Nub::new_hyperlight()`.
 //!   3. Assert both backends agree on `(return_value, gas_used)`.
 //!   4. Pin both against a hardcoded `(value, gas)` from the
@@ -51,15 +45,13 @@ fn check_workload(name: &str, blob: &[u8], expected_value: u64, expected_gas: u6
     );
 }
 
-// PVM-shaped workloads (matches `benches/pvm_bench.rs`).
-
 #[test]
 fn prime_sieve() {
     check_workload(
         "prime_sieve",
-        include_bytes!(env!("PRIME_SIEVE_BLOB")),
+        include_bytes!(env!("PRIME_SIEVE_PVM2_BLOB")),
         0x2578,
-        8_773_823,
+        8_966_290,
     );
 }
 
@@ -67,9 +59,9 @@ fn prime_sieve() {
 fn ed25519() {
     check_workload(
         "ed25519",
-        include_bytes!(env!("ED25519_BLOB")),
+        include_bytes!(env!("ED25519_PVM2_BLOB")),
         0x1,
-        826_824,
+        2_362_040,
     );
 }
 
@@ -77,9 +69,9 @@ fn ed25519() {
 fn keccak() {
     check_workload(
         "keccak",
-        include_bytes!(env!("KECCAK_BLOB")),
+        include_bytes!(env!("KECCAK_PVM2_BLOB")),
         0x39e5_0259,
-        102_409,
+        101_642,
     );
 }
 
@@ -87,9 +79,9 @@ fn keccak() {
 fn blake2b() {
     check_workload(
         "blake2b",
-        include_bytes!(env!("BLAKE2B_BLOB")),
+        include_bytes!(env!("BLAKE2B_PVM2_BLOB")),
         0xee1f_55f1,
-        62_999,
+        63_192,
     );
 }
 
@@ -97,21 +89,19 @@ fn blake2b() {
 fn ecrecover() {
     check_workload(
         "ecrecover",
-        include_bytes!(env!("ECRECOVER_BLOB")),
+        include_bytes!(env!("ECRECOVER_PVM2_BLOB")),
         0x1,
-        6_790_808,
+        6_819_891,
     );
 }
-
-// STARK-shaped workloads (matches `benches/stark_bench.rs`).
 
 #[test]
 fn goldilocks_mul() {
     check_workload(
         "goldilocks_mul",
-        include_bytes!(env!("GOLDILOCKS_MUL_BLOB")),
+        include_bytes!(env!("GOLDILOCKS_MUL_PVM2_BLOB")),
         0x2cf7_3e57,
-        2_600_154,
+        2_400_154,
     );
 }
 
@@ -119,9 +109,9 @@ fn goldilocks_mul() {
 fn poseidon2_perm() {
     check_workload(
         "poseidon2_perm",
-        include_bytes!(env!("POSEIDON2_PERM_BLOB")),
+        include_bytes!(env!("POSEIDON2_PERM_PVM2_BLOB")),
         0x3ce3_3156,
-        9_669_150,
+        14_561_189,
     );
 }
 
@@ -129,9 +119,9 @@ fn poseidon2_perm() {
 fn mini_verifier() {
     check_workload(
         "mini_verifier",
-        include_bytes!(env!("MINI_VERIFIER_BLOB")),
+        include_bytes!(env!("MINI_VERIFIER_PVM2_BLOB")),
         0xf98f_c4ab,
-        4_580_325,
+        5_878_907,
     );
 }
 
@@ -139,9 +129,9 @@ fn mini_verifier() {
 fn poly_eval() {
     check_workload(
         "poly_eval",
-        include_bytes!(env!("POLY_EVAL_BLOB")),
+        include_bytes!(env!("POLY_EVAL_PVM2_BLOB")),
         0x01da_34e2,
-        7_129_783,
+        9_003_090,
     );
 }
 
@@ -149,8 +139,8 @@ fn poly_eval() {
 fn fri_fold_tree() {
     check_workload(
         "fri_fold_tree",
-        include_bytes!(env!("FRI_FOLD_TREE_BLOB")),
+        include_bytes!(env!("FRI_FOLD_TREE_PVM2_BLOB")),
         0x37e6_76f4,
-        4_950_708,
+        6_189_475,
     );
 }

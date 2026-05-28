@@ -31,15 +31,7 @@ build-javm = { path = "../build-javm" }
 criterion = "0.5"
 
 [[bench]]
-name = "pvm_bench"
-harness = false
-
-[[bench]]
 name = "pvm2_bench"
-harness = false
-
-[[bench]]
-name = "stark_bench"
 harness = false
 
 [[bench]]
@@ -50,6 +42,3 @@ harness = false
 name = "sub_vm_data_recurse"
 harness = false
 
-[[example]]
-name = "publish_profile"
-path = "examples/publish_profile.rs"

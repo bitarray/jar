@@ -15,6 +15,7 @@ fn make_image_cap() -> ImageCap {
         code,
         bitmask: Vec::new(),
         jump_table: Vec::new(),
+        jump_table_offsets: Vec::new(),
         endpoints: Vec::new(),
         mappings: Vec::new(),
         pinned: Vec::new(),

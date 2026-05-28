@@ -21,7 +21,6 @@ extern crate alloc;
 
 pub mod asm;
 pub mod codegen;
-pub mod predecode;
 pub mod rv_codegen;
 
 /// JIT execution context passed to compiled code via R15.

@@ -1,5 +1,5 @@
 //! End-to-end smoke for the cache-based publish/invoke path. Both
-//! backends publish the same tiny PVM program (`ecalli 42`) via the
+//! backends publish the same tiny PVM2 program (`ecalli 42`) via the
 //! typed API and check that `invoke_cached` returns the expected
 //! `HostCall(42)` result.
 
@@ -8,23 +8,21 @@ use javm_cap::{Cap, NUM_REGS};
 use nub::Nub;
 use std::collections::BTreeMap;
 
-/// Build a minimal Image whose endpoint 0 runs `ecalli 42` at PC 1.
-/// PC=0 is reserved as the "fallback" PC so endpoints start at >= 1;
-/// byte 0 is a NOP and byte 1+ holds the ecalli encoding.
+/// Build a minimal PVM2 Image whose endpoint 0 runs `ecalli 42` at PC 0.
 fn ecalli_42_image() -> Image {
     let mut img = Image::empty();
-    // PC=0 is the spec's reserved "fallback PC" — a real Image always
-    // has *some* instruction there even if the entry_pc points
-    // elsewhere. Trap is a valid 1-byte instruction; we never reach it
-    // because `endpoint.entry_pc = 1` jumps straight to the ecalli.
-    img.code = vec![0u8, 10u8, 42]; // trap, then ecalli (opcode 10), imm = 42
-    img.packed_bitmask = vec![0b011]; // bits 0, 1 are instruction starts (byte 2 is ecalli's imm)
+    // PVM2 `ecalli 42` — custom-0 (opcode bits[6:2] = 0b00010), funct3 =
+    // 0b010, rd = 0, rs1 = 0, imm = 42. As an I-type 32-bit word:
+    //   (42 << 20) | (0b010 << 12) | (0b00010 << 2) | 0b11 = 0x02A0_200B
+    img.code = 0x02A0_200Bu32.to_le_bytes().to_vec();
+    // PVM2 marker: a single empty sub-table.
+    img.jump_table_offsets = vec![0, 0];
 
     let mut endpoints: BTreeMap<u8, EndpointDef> = BTreeMap::new();
     endpoints.insert(
         0,
         EndpointDef {
-            entry_pc: 1,
+            entry_pc: 0,
             arg_registers: 0,
             arg_cnode_size: 0,
             initial_regs: BTreeMap::new(),
