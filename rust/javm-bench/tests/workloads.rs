@@ -61,7 +61,7 @@ fn ed25519() {
         "ed25519",
         include_bytes!(env!("ED25519_BLOB")),
         0x1,
-        2_362_040,
+        2_346_101,
     );
 }
 
@@ -71,7 +71,7 @@ fn keccak() {
         "keccak",
         include_bytes!(env!("KECCAK_BLOB")),
         0x39e5_0259,
-        101_642,
+        100_644,
     );
 }
 
@@ -81,7 +81,7 @@ fn blake2b() {
         "blake2b",
         include_bytes!(env!("BLAKE2B_BLOB")),
         0xee1f_55f1,
-        63_192,
+        62_120,
     );
 }
 
@@ -91,7 +91,7 @@ fn ecrecover() {
         "ecrecover",
         include_bytes!(env!("ECRECOVER_BLOB")),
         0x1,
-        6_819_891,
+        6_783_744,
     );
 }
 
