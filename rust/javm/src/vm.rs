@@ -20,9 +20,7 @@
 //! by their `CapHashOrRef` target).
 
 use javm_cap::{CacheDirectory, Cap, CapHash, CapHashOrRef, SlotIdx};
-use javm_exec::{
-    Access, CopyingMemory, ExitReason, GasCounter, Mem, Regs, rv_interp::RvInterpreter,
-};
+use javm_exec::{Access, CopyingMemory, ExitReason, GasCounter, Mem, Regs, interp::Interpreter};
 
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
 use crate::ecall::{CachedEcallHandler, host_op};
@@ -332,7 +330,7 @@ impl<K: KernelAssist> Vm<K> {
                 _ => return Err(VmError::Invariant("cur_pos points at non-Instance")),
             };
             let mut handler = CachedEcallHandler { vm: self, cache };
-            let exit = RvInterpreter::run_program(
+            let exit = Interpreter::run_program(
                 program.as_ref(),
                 &mut regs,
                 &mut mem,

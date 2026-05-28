@@ -167,7 +167,7 @@ pub fn get_or_compile(
             trap_table,
             exit_label_offset,
             valid_pc,
-        } = compiler.compile_rv(code, jump_table_offsets);
+        } = compiler.compile(code, jump_table_offsets);
 
         let jit_size = page_round_up_min1(native_code.len());
         let tramp_offset = jit_offset + jit_size;

@@ -51,8 +51,8 @@ fn rv_reg_bit(r: u8) -> u16 {
 /// FastCost for one decoded RV instruction. `mem_cycles` is the
 /// load/store cycle count for the active memory tier (mirrors PVM's
 /// `DEFAULT_MEM_CYCLES = 25`).
-pub fn rv_fast_cost(inst: &crate::rv_instruction::RvInst, mem_cycles: u8) -> FastCost {
-    use crate::rv_instruction::RvInst;
+pub fn rv_fast_cost(inst: &crate::instruction::Inst, mem_cycles: u8) -> FastCost {
+    use crate::instruction::Inst;
     let r1 = |r: u8| rv_reg_bit(r);
     let r2 = |a: u8, b: u8| rv_reg_bit(a) | rv_reg_bit(b);
     let dst_src_overlap = |dst: u8, s: u16| (rv_reg_bit(dst) & s) != 0;
@@ -85,154 +85,150 @@ pub fn rv_fast_cost(inst: &crate::rv_instruction::RvInst, mem_cycles: u8) -> Fas
 
     match *inst {
         // ---- Loads (mirrors PVM 52..=58 / 124..=130) -----------------
-        RvInst::Lb { rd, rs1, .. }
-        | RvInst::Lh { rd, rs1, .. }
-        | RvInst::Lw { rd, rs1, .. }
-        | RvInst::Ld { rd, rs1, .. }
-        | RvInst::Lbu { rd, rs1, .. }
-        | RvInst::Lhu { rd, rs1, .. }
-        | RvInst::Lwu { rd, rs1, .. } => mk(mem_cycles, 1, EU_LOAD, r1(rs1), r1(rd)),
+        Inst::Lb { rd, rs1, .. }
+        | Inst::Lh { rd, rs1, .. }
+        | Inst::Lw { rd, rs1, .. }
+        | Inst::Ld { rd, rs1, .. }
+        | Inst::Lbu { rd, rs1, .. }
+        | Inst::Lhu { rd, rs1, .. }
+        | Inst::Lwu { rd, rs1, .. } => mk(mem_cycles, 1, EU_LOAD, r1(rs1), r1(rd)),
 
         // ---- Stores (mirrors PVM 59..=62 / 120..=123) ----------------
-        RvInst::Sb { rs1, rs2, .. }
-        | RvInst::Sh { rs1, rs2, .. }
-        | RvInst::Sw { rs1, rs2, .. }
-        | RvInst::Sd { rs1, rs2, .. } => mk(mem_cycles, 1, EU_STORE, r2(rs1, rs2), 0),
+        Inst::Sb { rs1, rs2, .. }
+        | Inst::Sh { rs1, rs2, .. }
+        | Inst::Sw { rs1, rs2, .. }
+        | Inst::Sd { rs1, rs2, .. } => mk(mem_cycles, 1, EU_STORE, r2(rs1, rs2), 0),
 
         // ---- Upper immediate (mirrors PVM load_imm_64 = 1/2/NONE) ----
-        RvInst::Lui { rd, .. } => mk(1, 2, EU_NONE, 0, r1(rd)),
+        Inst::Lui { rd, .. } => mk(1, 2, EU_NONE, 0, r1(rd)),
 
         // ---- 64-bit I-type ALU (mirrors PVM 132/133/134/149/151/.../110) ----
-        RvInst::Addi { rd, rs1, .. }
-        | RvInst::Andi { rd, rs1, .. }
-        | RvInst::Ori { rd, rs1, .. }
-        | RvInst::Xori { rd, rs1, .. }
-        | RvInst::Sltiu { rd, rs1, .. }
-        | RvInst::Slli { rd, rs1, .. }
-        | RvInst::Srli { rd, rs1, .. } => {
+        Inst::Addi { rd, rs1, .. }
+        | Inst::Andi { rd, rs1, .. }
+        | Inst::Ori { rd, rs1, .. }
+        | Inst::Xori { rd, rs1, .. }
+        | Inst::Sltiu { rd, rs1, .. }
+        | Inst::Slli { rd, rs1, .. }
+        | Inst::Srli { rd, rs1, .. } => {
             let s = r1(rs1);
             let dc = if dst_src_overlap(rd, s) { 1 } else { 2 };
             mk(1, dc, EU_ALU, s, r1(rd))
         }
         // slti / srai are I-type with shift-alt cost shape on PVM (155/156/157)
-        RvInst::Slti { rd, rs1, .. } | RvInst::Srai { rd, rs1, .. } => {
+        Inst::Slti { rd, rs1, .. } | Inst::Srai { rd, rs1, .. } => {
             let s = r1(rs1);
             let dc = if dst_src_overlap(rd, s) { 1 } else { 2 };
             mk(1, dc, EU_ALU, s, r1(rd))
         }
 
         // ---- 32-bit I-type ALU (mirrors PVM 131/138/139/140/160 = 2/dc/ALU) ----
-        RvInst::Addiw { rd, rs1, .. }
-        | RvInst::Slliw { rd, rs1, .. }
-        | RvInst::Srliw { rd, rs1, .. }
-        | RvInst::Sraiw { rd, rs1, .. } => {
+        Inst::Addiw { rd, rs1, .. }
+        | Inst::Slliw { rd, rs1, .. }
+        | Inst::Srliw { rd, rs1, .. }
+        | Inst::Sraiw { rd, rs1, .. } => {
             let s = r1(rs1);
             let dc = if dst_src_overlap(rd, s) { 2 } else { 3 };
             mk(2, dc, EU_ALU, s, r1(rd))
         }
 
         // ---- 64-bit R-type ALU (mirrors PVM 200/201/210/211/212 = 1/dc/ALU) ----
-        RvInst::Add { rd, rs1, rs2 }
-        | RvInst::Sub { rd, rs1, rs2 }
-        | RvInst::And { rd, rs1, rs2 }
-        | RvInst::Or { rd, rs1, rs2 }
-        | RvInst::Xor { rd, rs1, rs2 } => {
+        Inst::Add { rd, rs1, rs2 }
+        | Inst::Sub { rd, rs1, rs2 }
+        | Inst::And { rd, rs1, rs2 }
+        | Inst::Or { rd, rs1, rs2 }
+        | Inst::Xor { rd, rs1, rs2 } => {
             let s = r2(rs1, rs2);
             let dc = if dst_src_overlap(rd, s) { 1 } else { 2 };
             mk(1, dc, EU_ALU, s, r1(rd))
         }
         // 64-bit shifts (mirrors PVM 207/208/209 = 1/dc/ALU, dc rule = rs1==rd)
-        RvInst::Sll { rd, rs1, rs2 }
-        | RvInst::Srl { rd, rs1, rs2 }
-        | RvInst::Sra { rd, rs1, rs2 } => {
+        Inst::Sll { rd, rs1, rs2 } | Inst::Srl { rd, rs1, rs2 } | Inst::Sra { rd, rs1, rs2 } => {
             let dc = if rs1 == rd { 2 } else { 3 };
             mk(1, dc, EU_ALU, r2(rs1, rs2), r1(rd))
         }
         // 64-bit comparisons (mirrors PVM 216/217 = 3/3/ALU)
-        RvInst::Slt { rd, rs1, rs2 } | RvInst::Sltu { rd, rs1, rs2 } => {
+        Inst::Slt { rd, rs1, rs2 } | Inst::Sltu { rd, rs1, rs2 } => {
             mk(3, 3, EU_ALU, r2(rs1, rs2), r1(rd))
         }
 
         // ---- 32-bit R-type ALU (mirrors PVM 190/191 = 2/dc/ALU) ------
-        RvInst::Addw { rd, rs1, rs2 } | RvInst::Subw { rd, rs1, rs2 } => {
+        Inst::Addw { rd, rs1, rs2 } | Inst::Subw { rd, rs1, rs2 } => {
             let s = r2(rs1, rs2);
             let dc = if dst_src_overlap(rd, s) { 2 } else { 3 };
             mk(2, dc, EU_ALU, s, r1(rd))
         }
         // 32-bit shifts (mirrors PVM 197/198/199 = 2/dc/ALU)
-        RvInst::Sllw { rd, rs1, rs2 }
-        | RvInst::Srlw { rd, rs1, rs2 }
-        | RvInst::Sraw { rd, rs1, rs2 } => {
+        Inst::Sllw { rd, rs1, rs2 } | Inst::Srlw { rd, rs1, rs2 } | Inst::Sraw { rd, rs1, rs2 } => {
             let dc = if rs1 == rd { 3 } else { 4 };
             mk(2, dc, EU_ALU, r2(rs1, rs2), r1(rd))
         }
 
         // ---- M extension: multiply (mirrors PVM 202 / 150 / 192 / 135 / 213-215) ----
-        RvInst::Mul { rd, rs1, rs2 } => {
+        Inst::Mul { rd, rs1, rs2 } => {
             let s = r2(rs1, rs2);
             let dc = if dst_src_overlap(rd, s) { 1 } else { 2 };
             mk(3, dc, EU_MUL, s, r1(rd))
         }
-        RvInst::Mulw { rd, rs1, rs2 } => {
+        Inst::Mulw { rd, rs1, rs2 } => {
             let s = r2(rs1, rs2);
             let dc = if dst_src_overlap(rd, s) { 2 } else { 3 };
             mk(4, dc, EU_MUL, s, r1(rd))
         }
-        RvInst::Mulh { rd, rs1, rs2 } | RvInst::Mulhu { rd, rs1, rs2 } => {
+        Inst::Mulh { rd, rs1, rs2 } | Inst::Mulhu { rd, rs1, rs2 } => {
             mk(4, 4, EU_MUL, r2(rs1, rs2), r1(rd))
         }
-        RvInst::Mulhsu { rd, rs1, rs2 } => mk(6, 4, EU_MUL, r2(rs1, rs2), r1(rd)),
+        Inst::Mulhsu { rd, rs1, rs2 } => mk(6, 4, EU_MUL, r2(rs1, rs2), r1(rd)),
 
         // ---- M extension: divide / remainder (mirrors PVM 193-196/203-206 = 60/4/DIV) ----
-        RvInst::Div { rd, rs1, rs2 }
-        | RvInst::Divu { rd, rs1, rs2 }
-        | RvInst::Rem { rd, rs1, rs2 }
-        | RvInst::Remu { rd, rs1, rs2 }
-        | RvInst::Divw { rd, rs1, rs2 }
-        | RvInst::Divuw { rd, rs1, rs2 }
-        | RvInst::Remw { rd, rs1, rs2 }
-        | RvInst::Remuw { rd, rs1, rs2 } => mk(60, 4, EU_DIV, r2(rs1, rs2), r1(rd)),
+        Inst::Div { rd, rs1, rs2 }
+        | Inst::Divu { rd, rs1, rs2 }
+        | Inst::Rem { rd, rs1, rs2 }
+        | Inst::Remu { rd, rs1, rs2 }
+        | Inst::Divw { rd, rs1, rs2 }
+        | Inst::Divuw { rd, rs1, rs2 }
+        | Inst::Remw { rd, rs1, rs2 }
+        | Inst::Remuw { rd, rs1, rs2 } => mk(60, 4, EU_DIV, r2(rs1, rs2), r1(rd)),
 
         // ---- Zbb single-cycle unary (mirrors PVM 102-105/108-109/111) ----
-        RvInst::Clz { rd, rs1 }
-        | RvInst::Clzw { rd, rs1 }
-        | RvInst::Cpop { rd, rs1 }
-        | RvInst::Cpopw { rd, rs1 }
-        | RvInst::SextB { rd, rs1 }
-        | RvInst::SextH { rd, rs1 }
-        | RvInst::ZextH { rd, rs1 }
-        | RvInst::Rev8 { rd, rs1 }
-        | RvInst::OrcB { rd, rs1 } => mk(1, 1, EU_ALU, r1(rs1), r1(rd)),
+        Inst::Clz { rd, rs1 }
+        | Inst::Clzw { rd, rs1 }
+        | Inst::Cpop { rd, rs1 }
+        | Inst::Cpopw { rd, rs1 }
+        | Inst::SextB { rd, rs1 }
+        | Inst::SextH { rd, rs1 }
+        | Inst::ZextH { rd, rs1 }
+        | Inst::Rev8 { rd, rs1 }
+        | Inst::OrcB { rd, rs1 } => mk(1, 1, EU_ALU, r1(rs1), r1(rd)),
 
         // ---- Zbb 2-cycle ctz (mirrors PVM 106/107) ----
-        RvInst::Ctz { rd, rs1 } | RvInst::Ctzw { rd, rs1 } => mk(2, 1, EU_ALU, r1(rs1), r1(rd)),
+        Inst::Ctz { rd, rs1 } | Inst::Ctzw { rd, rs1 } => mk(2, 1, EU_ALU, r1(rs1), r1(rd)),
 
         // ---- Zbb min/max (mirrors PVM 227..=230) ----
-        RvInst::Min { rd, rs1, rs2 }
-        | RvInst::Minu { rd, rs1, rs2 }
-        | RvInst::Max { rd, rs1, rs2 }
-        | RvInst::Maxu { rd, rs1, rs2 } => {
+        Inst::Min { rd, rs1, rs2 }
+        | Inst::Minu { rd, rs1, rs2 }
+        | Inst::Max { rd, rs1, rs2 }
+        | Inst::Maxu { rd, rs1, rs2 } => {
             let s = r2(rs1, rs2);
             let dc = if dst_src_overlap(rd, s) { 2 } else { 3 };
             mk(3, dc, EU_ALU, s, r1(rd))
         }
 
         // ---- Zbb inverted bitwise (mirrors PVM 224/225/226) ----
-        RvInst::Andn { rd, rs1, rs2 } | RvInst::Orn { rd, rs1, rs2 } => {
+        Inst::Andn { rd, rs1, rs2 } | Inst::Orn { rd, rs1, rs2 } => {
             mk(2, 3, EU_ALU, r2(rs1, rs2), r1(rd))
         }
-        RvInst::Xnor { rd, rs1, rs2 } => {
+        Inst::Xnor { rd, rs1, rs2 } => {
             let s = r2(rs1, rs2);
             let dc = if dst_src_overlap(rd, s) { 2 } else { 3 };
             mk(2, dc, EU_ALU, s, r1(rd))
         }
 
         // ---- Zbb rotates (mirrors PVM 220/222 = 1/dc/ALU, rs1==rd rule) ----
-        RvInst::Rol { rd, rs1, rs2 } | RvInst::Ror { rd, rs1, rs2 } => {
+        Inst::Rol { rd, rs1, rs2 } | Inst::Ror { rd, rs1, rs2 } => {
             let dc = if rs1 == rd { 2 } else { 3 };
             mk(1, dc, EU_ALU, r2(rs1, rs2), r1(rd))
         }
-        RvInst::Rori { rd, rs1, .. } => {
+        Inst::Rori { rd, rs1, .. } => {
             // Matches PVM 158 (rot_r_64_imm = 1/dc/ALU with dst_src overlap)
             let s = r1(rs1);
             let dc = if dst_src_overlap(rd, s) { 1 } else { 2 };
@@ -240,54 +236,54 @@ pub fn rv_fast_cost(inst: &crate::rv_instruction::RvInst, mem_cycles: u8) -> Fas
         }
 
         // ---- Zbb 32-bit rotates (mirrors PVM 221/223 = 2/dc/ALU) ----
-        RvInst::Rolw { rd, rs1, rs2 } | RvInst::Rorw { rd, rs1, rs2 } => {
+        Inst::Rolw { rd, rs1, rs2 } | Inst::Rorw { rd, rs1, rs2 } => {
             let dc = if rs1 == rd { 3 } else { 4 };
             mk(2, dc, EU_ALU, r2(rs1, rs2), r1(rd))
         }
-        RvInst::Roriw { rd, rs1, .. } => {
+        Inst::Roriw { rd, rs1, .. } => {
             let s = r1(rs1);
             let dc = if dst_src_overlap(rd, s) { 2 } else { 3 };
             mk(2, dc, EU_ALU, s, r1(rd))
         }
 
         // ---- Zba shift-add (1-cycle ALU, LEA-friendly on x86) --------
-        RvInst::Sh1add { rd, rs1, rs2 }
-        | RvInst::Sh2add { rd, rs1, rs2 }
-        | RvInst::Sh3add { rd, rs1, rs2 }
-        | RvInst::Sh1adduw { rd, rs1, rs2 }
-        | RvInst::Sh2adduw { rd, rs1, rs2 }
-        | RvInst::Sh3adduw { rd, rs1, rs2 }
-        | RvInst::Adduw { rd, rs1, rs2 } => {
+        Inst::Sh1add { rd, rs1, rs2 }
+        | Inst::Sh2add { rd, rs1, rs2 }
+        | Inst::Sh3add { rd, rs1, rs2 }
+        | Inst::Sh1adduw { rd, rs1, rs2 }
+        | Inst::Sh2adduw { rd, rs1, rs2 }
+        | Inst::Sh3adduw { rd, rs1, rs2 }
+        | Inst::Adduw { rd, rs1, rs2 } => {
             let s = r2(rs1, rs2);
             let dc = if dst_src_overlap(rd, s) { 1 } else { 2 };
             mk(1, dc, EU_ALU, s, r1(rd))
         }
-        RvInst::Slliuw { rd, rs1, .. } => {
+        Inst::Slliuw { rd, rs1, .. } => {
             let s = r1(rs1);
             let dc = if dst_src_overlap(rd, s) { 1 } else { 2 };
             mk(1, dc, EU_ALU, s, r1(rd))
         }
 
         // ---- Zbs single-bit (1-cycle ALU) ----------------------------
-        RvInst::Bclr { rd, rs1, rs2 }
-        | RvInst::Bset { rd, rs1, rs2 }
-        | RvInst::Binv { rd, rs1, rs2 }
-        | RvInst::Bext { rd, rs1, rs2 } => {
+        Inst::Bclr { rd, rs1, rs2 }
+        | Inst::Bset { rd, rs1, rs2 }
+        | Inst::Binv { rd, rs1, rs2 }
+        | Inst::Bext { rd, rs1, rs2 } => {
             let s = r2(rs1, rs2);
             let dc = if dst_src_overlap(rd, s) { 1 } else { 2 };
             mk(1, dc, EU_ALU, s, r1(rd))
         }
-        RvInst::Bclri { rd, rs1, .. }
-        | RvInst::Bseti { rd, rs1, .. }
-        | RvInst::Binvi { rd, rs1, .. }
-        | RvInst::Bexti { rd, rs1, .. } => {
+        Inst::Bclri { rd, rs1, .. }
+        | Inst::Bseti { rd, rs1, .. }
+        | Inst::Binvi { rd, rs1, .. }
+        | Inst::Bexti { rd, rs1, .. } => {
             let s = r1(rs1);
             let dc = if dst_src_overlap(rd, s) { 1 } else { 2 };
             mk(1, dc, EU_ALU, s, r1(rd))
         }
 
         // ---- Zicond (mirrors PVM cmov_* 218/219 = 2/2/ALU) -----------
-        RvInst::CzeroEqz { rd, rs1, rs2 } | RvInst::CzeroNez { rd, rs1, rs2 } => {
+        Inst::CzeroEqz { rd, rs1, rs2 } | Inst::CzeroNez { rd, rs1, rs2 } => {
             mk(2, 2, EU_ALU, r2(rs1, rs2), r1(rd))
         }
 
@@ -295,35 +291,35 @@ pub fn rv_fast_cost(inst: &crate::rv_instruction::RvInst, mem_cycles: u8) -> Fas
         // PVM has a 1-cycle fast path when the target is opcode 0/2;
         // the PVM2 linker rewrites those targets, so this fast path
         // rarely fires. We use a flat 20 — same as PVM's default.
-        RvInst::Beq { rs1, rs2, .. }
-        | RvInst::Bne { rs1, rs2, .. }
-        | RvInst::Blt { rs1, rs2, .. }
-        | RvInst::Bge { rs1, rs2, .. }
-        | RvInst::Bltu { rs1, rs2, .. }
-        | RvInst::Bgeu { rs1, rs2, .. } => mkt(20, 1, EU_ALU, r2(rs1, rs2), 0),
+        Inst::Beq { rs1, rs2, .. }
+        | Inst::Bne { rs1, rs2, .. }
+        | Inst::Blt { rs1, rs2, .. }
+        | Inst::Bge { rs1, rs2, .. }
+        | Inst::Bltu { rs1, rs2, .. }
+        | Inst::Bgeu { rs1, rs2, .. } => mkt(20, 1, EU_ALU, r2(rs1, rs2), 0),
 
         // ---- JAL: static jump or linker-emitted call body ------------
         // Mirrors PVM `jump` = 15/1/ALU. `rd != 0` writes ra (the call
         // sequence's `addi ra, x0, idx ; jal x0, callee` emits rd=0
         // jals; explicit `jal ra` from lld goes through the linker
         // rewrite to `addi+jal x0`, so jal-with-link is rare).
-        RvInst::Jal { rd, .. } => mkt(15, 1, EU_ALU, 0, r1(rd)),
+        Inst::Jal { rd, .. } => mkt(15, 1, EU_ALU, 0, r1(rd)),
 
         // ---- Custom-0 PVM2 control / host ops ------------------------
-        RvInst::Trap => mkt(2, 1, EU_NONE, 0, 0),
-        RvInst::Fallthrough => mkt(2, 1, EU_NONE, 0, 0),
-        RvInst::EcallJar => mkt(100, 4, EU_ALU, 0, 0),
-        RvInst::Ecalli { .. } => mkt(100, 4, EU_ALU, 0, 0),
+        Inst::Trap => mkt(2, 1, EU_NONE, 0, 0),
+        Inst::Fallthrough => mkt(2, 1, EU_NONE, 0, 0),
+        Inst::EcallJar => mkt(100, 4, EU_ALU, 0, 0),
+        Inst::Ecalli { .. } => mkt(100, 4, EU_ALU, 0, 0),
         // br_table → mirrors PVM jump_ind = 22/1/ALU. The encoded idx
         // lives in rs1.
-        RvInst::BrTable { rs1, .. } => mkt(22, 1, EU_ALU, r1(rs1), 0),
+        Inst::BrTable { rs1, .. } => mkt(22, 1, EU_ALU, r1(rs1), 0),
 
         // ---- Fences (no-op, minimal cost) ----------------------------
-        RvInst::Fence | RvInst::FenceI => mk(1, 1, EU_NONE, 0, 0),
+        Inst::Fence | Inst::FenceI => mk(1, 1, EU_NONE, 0, 0),
 
         // ---- Reserved (panics at runtime; charge trap cost as a
         //      defensive lower bound) -----------------------------------
-        RvInst::Reserved { .. } => mkt(2, 1, EU_NONE, 0, 0),
+        Inst::Reserved { .. } => mkt(2, 1, EU_NONE, 0, 0),
     }
 }
 
@@ -334,7 +330,7 @@ pub fn rv_fast_cost(inst: &crate::rv_instruction::RvInst, mem_cycles: u8) -> Fas
 // Mirrors PVM's `feed_gas_direct` / `GAS_COST_LUT` optimization for the
 // PVM2 path. The hot per-instruction cost is computed via:
 //   1. `rv_op_metadata(&inst)` → `(kind: u8, rs1, rs2, rd)` — one
-//      match over `RvInst` variants, returning a u32-packed tuple.
+//      match over `Inst` variants, returning a u32-packed tuple.
 //   2. `RV_GAS_COST_LUT[kind]` — static array lookup giving cycles,
 //      decode_slots, exec_unit, reg patterns, and overlap flags.
 //   3. `GasSimulator::feed_direct(cycles, decode_slots, src1, src2, dst)`
@@ -419,12 +415,12 @@ const fn rgc_ov(
 }
 
 // PVM2 opcode kinds. Used as indices into RV_GAS_COST_LUT.
-// All variants of `RvInst` that share a gas-cost row map to the same
+// All variants of `Inst` that share a gas-cost row map to the same
 // kind (e.g. `Lb`/`Lh`/.../`Lwu` all → `RV_KIND_LOAD`).
 //
 // Exposed to the recompiler so each `compile_rv_instruction` arm can
 // supply its kind constant directly to the gas-feed call, removing a
-// separate match over `RvInst` per instruction.
+// separate match over `Inst` per instruction.
 pub const RV_KIND_RESERVED: u8 = 0;
 pub const RV_KIND_TRAP: u8 = 1;
 pub const RV_KIND_FALLTHROUGH: u8 = 2;
@@ -550,12 +546,12 @@ pub fn rv_slot_u8(r: u8) -> u8 {
     }
 }
 
-/// Compute the [`crate::rv_predecode::RvGasMeta`] for an `RvInst`.
+/// Compute the [`crate::predecode::RvGasMeta`] for an `Inst`.
 /// Called once per instruction at decode time; the result is cached
-/// in [`crate::rv_predecode::RvPreDecodedInst::gas_meta`] so the gas
+/// in [`crate::predecode::RvPreDecodedInst::gas_meta`] so the gas
 /// hot path doesn't have to re-match the variant.
 #[inline]
-pub fn rv_gas_meta(inst: &crate::rv_instruction::RvInst) -> crate::rv_predecode::RvGasMeta {
+pub fn rv_gas_meta(inst: &crate::instruction::Inst) -> crate::predecode::RvGasMeta {
     let (kind, rs1, rs2, rd) = rv_op_metadata(inst);
     let entry = &RV_GAS_COST_LUT[kind as usize];
     // Pre-mask the register fields per the LUT's reg patterns so the
@@ -575,7 +571,7 @@ pub fn rv_gas_meta(inst: &crate::rv_instruction::RvInst) -> crate::rv_predecode:
     } else {
         0xFF
     };
-    crate::rv_predecode::RvGasMeta {
+    crate::predecode::RvGasMeta {
         kind,
         src1_slot,
         src2_slot,
@@ -583,12 +579,12 @@ pub fn rv_gas_meta(inst: &crate::rv_instruction::RvInst) -> crate::rv_predecode:
     }
 }
 
-/// Single match over `RvInst` returning `(kind, rs1, rs2, rd)`. Each
+/// Single match over `Inst` returning `(kind, rs1, rs2, rd)`. Each
 /// field is u8; the tuple packs into a u32 register so the call site
 /// is cheap. Variants that share a gas cost share a kind.
 #[inline(always)]
-fn rv_op_metadata(inst: &crate::rv_instruction::RvInst) -> (u8, u8, u8, u8) {
-    use crate::rv_instruction::RvInst::*;
+fn rv_op_metadata(inst: &crate::instruction::Inst) -> (u8, u8, u8, u8) {
+    use crate::instruction::Inst::*;
     match *inst {
         // No-reg / no-arg
         Trap => (RV_KIND_TRAP, 0, 0, 0),
@@ -788,14 +784,14 @@ pub fn rv_feed_gas_kind(
 }
 
 /// Predecode-cached variant: same logic as [`rv_feed_gas_kind`] but
-/// takes a pre-resolved [`crate::rv_predecode::RvGasMeta`]. Used by
-/// the per-block gas-cost helper that consumes the `RvPredecode`
-/// vector built by `predecode_rv`.
+/// takes a pre-resolved [`crate::predecode::RvGasMeta`]. Used by
+/// the per-block gas-cost helper that consumes the `Predecode`
+/// vector built by `predecode`.
 ///
 /// Returns `is_terminator`.
 #[inline(always)]
 pub fn rv_feed_gas_direct(
-    meta: &crate::rv_predecode::RvGasMeta,
+    meta: &crate::predecode::RvGasMeta,
     gas_sim: &mut crate::gas_sim::GasSimulator,
     mem_cycles: u8,
 ) -> bool {
@@ -817,7 +813,7 @@ pub fn rv_feed_gas_direct(
 /// driven by the LUT fast path (`rv_feed_gas_direct`).
 /// Returns `max(max_done − 3, 1)`.
 pub fn rv_gas_cost_for_block(
-    insts: &[crate::rv_predecode::RvPreDecodedInst],
+    insts: &[crate::predecode::RvPreDecodedInst],
     block_start: usize,
     mem_cycles: u8,
 ) -> u32 {

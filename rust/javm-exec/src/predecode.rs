@@ -17,15 +17,15 @@
 //!
 //! Per-block gas costs are computed by running the pipeline simulator
 //! in [`crate::gas_cost::rv_gas_cost_for_block`] once per basic block;
-//! the results are stored in [`RvPredecode::block_costs`].
+//! the results are stored in [`Predecode::block_costs`].
 
-use crate::rv_instruction::{RvInst, decode};
+use crate::instruction::{Inst, decode};
 use alloc::vec;
 use alloc::vec::Vec;
 
 /// Pre-resolved metadata used by the per-block gas accountant. The
 /// fields are computed once at decode time so the gas hot path does
-/// not have to re-match the `RvInst` variant on each invocation.
+/// not have to re-match the `Inst` variant on each invocation.
 ///
 /// - `kind` is an index into `gas_cost::RV_GAS_COST_LUT`.
 /// - `src1_slot`/`src2_slot`/`dst_slot` are PVM2 register slots
@@ -43,7 +43,7 @@ pub struct RvGasMeta {
 /// and pre-resolved gas metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct RvPreDecodedInst {
-    pub inst: RvInst,
+    pub inst: Inst,
     pub pc: u32,
     pub next_pc: u32,
     pub is_gas_block_start: bool,
@@ -52,7 +52,7 @@ pub struct RvPreDecodedInst {
 
 /// Output of the predecode pass over an RV+C+custom-0 code section.
 #[derive(Debug, Clone)]
-pub struct RvPredecode {
+pub struct Predecode {
     /// One entry per static instruction.
     pub insts: Vec<RvPreDecodedInst>,
     /// Byte-indexed: `valid_pc[i]` == true iff byte offset `i` is an
@@ -84,14 +84,14 @@ pub struct RvPredecode {
 /// block. `mem_cycles` is the load/store cycle latency for the
 /// active memory tier (mirrors `DEFAULT_MEM_CYCLES = 25` from the
 /// PVM gas table).
-pub fn predecode_rv(code: &[u8]) -> RvPredecode {
+pub fn predecode(code: &[u8]) -> Predecode {
     predecode_rv_with_mem_cycles(code, crate::gas_cost::DEFAULT_MEM_CYCLES)
 }
 
-/// Like `predecode_rv` but takes an explicit `mem_cycles` parameter.
+/// Like `predecode` but takes an explicit `mem_cycles` parameter.
 /// Used by callers that want to override the default L2-hit latency
 /// (e.g. for tier-specific gas modeling).
-pub fn predecode_rv_with_mem_cycles(code: &[u8], mem_cycles: u8) -> RvPredecode {
+pub fn predecode_rv_with_mem_cycles(code: &[u8], mem_cycles: u8) -> Predecode {
     let mut insts: Vec<RvPreDecodedInst> = Vec::with_capacity(code.len() / 4);
     let mut valid_pc: Vec<bool> = vec![false; code.len()];
     let mut decode_error_at: Option<u32> = None;
@@ -103,7 +103,7 @@ pub fn predecode_rv_with_mem_cycles(code: &[u8], mem_cycles: u8) -> RvPredecode 
             decode_error_at = Some(pc as u32);
             break;
         };
-        if matches!(inst, RvInst::Reserved { .. }) && decode_error_at.is_none() {
+        if matches!(inst, Inst::Reserved { .. }) && decode_error_at.is_none() {
             decode_error_at = Some(pc as u32);
         }
         valid_pc[pc] = true;
@@ -148,7 +148,7 @@ pub fn predecode_rv_with_mem_cycles(code: &[u8], mem_cycles: u8) -> RvPredecode 
     // ---- Pass 3: per-block gas costs via pipeline simulation ---------
     let block_costs = compute_block_costs(&insts, mem_cycles);
 
-    RvPredecode {
+    Predecode {
         insts,
         valid_pc,
         block_costs,
@@ -180,13 +180,13 @@ fn compute_block_costs(insts: &[RvPreDecodedInst], mem_cycles: u8) -> Vec<u32> {
 fn static_target(ip: &RvPreDecodedInst) -> Option<usize> {
     let pc = ip.pc as i64;
     let off: i64 = match ip.inst {
-        RvInst::Jal { imm, .. } => imm as i64,
-        RvInst::Beq { imm, .. }
-        | RvInst::Bne { imm, .. }
-        | RvInst::Blt { imm, .. }
-        | RvInst::Bge { imm, .. }
-        | RvInst::Bltu { imm, .. }
-        | RvInst::Bgeu { imm, .. } => imm as i64,
+        Inst::Jal { imm, .. } => imm as i64,
+        Inst::Beq { imm, .. }
+        | Inst::Bne { imm, .. }
+        | Inst::Blt { imm, .. }
+        | Inst::Bge { imm, .. }
+        | Inst::Bltu { imm, .. }
+        | Inst::Bgeu { imm, .. } => imm as i64,
         // br_table targets come from the Image's jump_table, not
         // from an instruction-embedded immediate. They're listed
         // separately by the linker for branch-target alignment.
@@ -199,34 +199,34 @@ fn static_target(ip: &RvPreDecodedInst) -> Option<usize> {
 /// Block-terminating instructions: anything that *can* leave the
 /// fall-through path. Used to mark the next instruction as a
 /// gas-block start.
-pub fn is_terminator(inst: &RvInst) -> bool {
+pub fn is_terminator(inst: &Inst) -> bool {
     matches!(
         inst,
         // PC-relative jumps.
-        RvInst::Jal { .. }
+        Inst::Jal { .. }
             // Static branches.
-            | RvInst::Beq { .. }
-            | RvInst::Bne { .. }
-            | RvInst::Blt { .. }
-            | RvInst::Bge { .. }
-            | RvInst::Bltu { .. }
-            | RvInst::Bgeu { .. }
+            | Inst::Beq { .. }
+            | Inst::Bne { .. }
+            | Inst::Blt { .. }
+            | Inst::Bge { .. }
+            | Inst::Bltu { .. }
+            | Inst::Bgeu { .. }
             // Custom-0 control transfers.
-            | RvInst::Trap
-            | RvInst::EcallJar
-            | RvInst::Ecalli { .. }
-            | RvInst::BrTable { .. }
-            | RvInst::Fallthrough
+            | Inst::Trap
+            | Inst::EcallJar
+            | Inst::Ecalli { .. }
+            | Inst::BrTable { .. }
+            | Inst::Fallthrough
             // Reserved encodings panic at runtime.
-            | RvInst::Reserved { .. }
+            | Inst::Reserved { .. }
     )
 }
 
 // `rv_gas_cost` (flat per-instruction sum) replaced by pipeline-aware
 // per-block simulation. See `gas_cost::rv_fast_cost` for the per-op
 // FastCost table and `gas_cost::rv_gas_cost_for_block` for the
-// block-cost wrapper. Costs are precomputed in `predecode_rv` and
-// returned via `RvPredecode::block_costs`.
+// block-cost wrapper. Costs are precomputed in `predecode` and
+// returned via `Predecode::block_costs`.
 
 #[cfg(test)]
 mod tests {
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn empty_code_yields_empty() {
-        let r = predecode_rv(&[]);
+        let r = predecode(&[]);
         assert!(r.insts.is_empty());
         assert!(r.valid_pc.is_empty());
         assert!(r.decode_error_at.is_none());
@@ -261,7 +261,7 @@ mod tests {
             // Manually: jal x0, .-8 = 0xFF9FF06F
             0xFF9FF06F,
         ]);
-        let r = predecode_rv(&code);
+        let r = predecode(&code);
         assert_eq!(r.insts.len(), 3);
         assert_eq!(r.insts[0].pc, 0);
         assert_eq!(r.insts[0].next_pc, 4);
@@ -289,7 +289,7 @@ mod tests {
         //                       before PC=8 in a real build)
         let beq = 0x00000463u32; // beq x0, x0, +8
         let code = enc(&[beq, 0x00150513, 0x00158593]);
-        let r = predecode_rv(&code);
+        let r = predecode(&code);
         assert_eq!(r.insts.len(), 3);
         // PC=0 always block start.
         assert!(r.insts[0].is_gas_block_start);
@@ -312,12 +312,12 @@ mod tests {
         // Word = (funct3<<12) | (op_custom_0<<2) | 0b11 = (4<<12) | (2<<2) | 3 = 0x400B
         let fallthrough_word = 0x0000_400Bu32;
         let code = enc(&[0x00150513, fallthrough_word, 0x00158593]);
-        let r = predecode_rv(&code);
+        let r = predecode(&code);
         assert_eq!(r.insts.len(), 3);
         assert!(r.insts[0].is_gas_block_start); // PC=0
         assert!(!r.insts[1].is_gas_block_start); // PC=4 post-addi (not terminator)
         assert!(r.insts[2].is_gas_block_start); // PC=8 post-fallthrough
-        assert!(matches!(r.insts[1].inst, RvInst::Fallthrough));
+        assert!(matches!(r.insts[1].inst, Inst::Fallthrough));
     }
 
     #[test]
@@ -331,11 +331,11 @@ mod tests {
         let br_table_word =
             (5u32 << 20) | (1u32 << 15) | (0b011u32 << 12) | (0b00010u32 << 2) | 0b11;
         let code = enc(&[br_table_word, 0x00150513]);
-        let r = predecode_rv(&code);
+        let r = predecode(&code);
         assert_eq!(r.insts.len(), 2);
         assert!(matches!(
             r.insts[0].inst,
-            RvInst::BrTable {
+            Inst::BrTable {
                 table_id: 5,
                 rs1: 1
             }
@@ -351,9 +351,9 @@ mod tests {
         // word = (0<<20) | (1<<15) | (0<<12) | (0<<7) | 0b1100111 = 0x00008067
         let jalr = 0x00008067u32;
         let code = enc(&[jalr]);
-        let r = predecode_rv(&code);
+        let r = predecode(&code);
         assert_eq!(r.insts.len(), 1);
-        assert!(matches!(r.insts[0].inst, RvInst::Reserved { .. }));
+        assert!(matches!(r.insts[0].inst, Inst::Reserved { .. }));
         assert_eq!(r.decode_error_at, Some(0));
     }
 
@@ -361,10 +361,10 @@ mod tests {
     fn reserved_encoding_recorded() {
         // ecall (standard) = 0x00000073 → Reserved
         let code = enc(&[0x00000073]);
-        let r = predecode_rv(&code);
+        let r = predecode(&code);
         assert_eq!(r.insts.len(), 1);
         assert_eq!(r.decode_error_at, Some(0));
-        assert!(matches!(r.insts[0].inst, RvInst::Reserved { .. }));
+        assert!(matches!(r.insts[0].inst, Inst::Reserved { .. }));
     }
 
     #[test]
@@ -377,7 +377,7 @@ mod tests {
         let cli = 0x4515u16.to_le_bytes();
         let mut code = vec![cli[0], cli[1]];
         code.extend_from_slice(&0x00158593u32.to_le_bytes());
-        let r = predecode_rv(&code);
+        let r = predecode(&code);
         assert_eq!(r.insts.len(), 2);
         assert_eq!(r.insts[0].pc, 0);
         assert_eq!(r.insts[0].next_pc, 2);

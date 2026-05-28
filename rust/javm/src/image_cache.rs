@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use javm_cap::CapHash;
-use javm_exec::rv_interp::RvProgram;
+use javm_exec::interp::Program;
 
 /// Map from `Image::content_hash` to the predecoded body. The body is
 /// wrapped in `Arc` so the same predecoded program can be referenced
@@ -19,7 +19,7 @@ use javm_exec::rv_interp::RvProgram;
 /// concurrent threads.
 #[derive(Default, Debug)]
 pub struct ImageCache {
-    entries: HashMap<CapHash, Arc<RvProgram>>,
+    entries: HashMap<CapHash, Arc<Program>>,
 }
 
 impl ImageCache {
@@ -37,12 +37,12 @@ impl ImageCache {
     }
 
     /// Look up by content hash. `None` if not yet cached.
-    pub fn get(&self, content_hash: &CapHash) -> Option<Arc<RvProgram>> {
+    pub fn get(&self, content_hash: &CapHash) -> Option<Arc<Program>> {
         self.entries.get(content_hash).cloned()
     }
 
     /// Cache a precomputed program under the given content hash.
-    pub fn insert(&mut self, content_hash: CapHash, program: Arc<RvProgram>) {
+    pub fn insert(&mut self, content_hash: CapHash, program: Arc<Program>) {
         self.entries.insert(content_hash, program);
     }
 
@@ -53,11 +53,11 @@ impl ImageCache {
         code: Vec<u8>,
         jump_table: Vec<u32>,
         jump_table_offsets: Vec<u32>,
-    ) -> Arc<RvProgram> {
+    ) -> Arc<Program> {
         if let Some(prog) = self.entries.get(&content_hash) {
             return prog.clone();
         }
-        let prog = Arc::new(RvProgram::new(code, jump_table, jump_table_offsets));
+        let prog = Arc::new(Program::new(code, jump_table, jump_table_offsets));
         self.entries.insert(content_hash, prog.clone());
         prog
     }

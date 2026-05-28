@@ -5,12 +5,12 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use javm_cap::image::Image;
-use javm_exec::rv_instruction::{RvInst, decode};
+use javm_exec::instruction::{Inst, decode};
 use ssz::Decode;
 use std::collections::BTreeMap;
 
-fn variant_name(inst: &RvInst) -> &'static str {
-    use RvInst::*;
+fn variant_name(inst: &Inst) -> &'static str {
+    use Inst::*;
     match inst {
         Lb { .. } => "Lb",
         Lh { .. } => "Lh",
@@ -125,8 +125,8 @@ fn variant_name(inst: &RvInst) -> &'static str {
     }
 }
 
-fn dst_of(inst: &RvInst) -> Option<u8> {
-    use RvInst::*;
+fn dst_of(inst: &Inst) -> Option<u8> {
+    use Inst::*;
     match *inst {
         Lb { rd, .. }
         | Lh { rd, .. }
@@ -189,8 +189,8 @@ fn dst_of(inst: &RvInst) -> Option<u8> {
     }
 }
 
-fn rs1_of(inst: &RvInst) -> Option<u8> {
-    use RvInst::*;
+fn rs1_of(inst: &Inst) -> Option<u8> {
+    use Inst::*;
     match *inst {
         Lb { rs1, .. }
         | Lh { rs1, .. }
@@ -258,7 +258,7 @@ fn profile_one(name: &str, blob: &[u8]) {
     let mut ld_or_any = 0usize;
     let mut ld_and_any = 0usize;
 
-    let mut prev: Option<RvInst> = None;
+    let mut prev: Option<Inst> = None;
     let mut pc = 0;
     while pc < code.len() {
         let Some((inst, len)) = decode(&code[pc..]) else {
@@ -277,12 +277,12 @@ fn profile_one(name: &str, blob: &[u8]) {
                 *chained_pairs
                     .entry((variant_name(&p), variant_name(&inst)))
                     .or_default() += 1;
-                if matches!(p, RvInst::Lui { .. }) && matches!(inst, RvInst::Addi { .. }) {
+                if matches!(p, Inst::Lui { .. }) && matches!(inst, Inst::Addi { .. }) {
                     lui_addi += 1;
                 }
             }
             // Precise Lui→Add same-rd pattern (this is what compile_lui actually fuses).
-            if let (RvInst::Lui { rd: l_rd, .. }, RvInst::Add { rd: a_rd, rs1, rs2 }) = (p, inst)
+            if let (Inst::Lui { rd: l_rd, .. }, Inst::Add { rd: a_rd, rs1, rs2 }) = (p, inst)
                 && a_rd != 0
                 && a_rd == l_rd
                 && (rs1 == l_rd || rs2 == l_rd)
@@ -290,21 +290,21 @@ fn profile_one(name: &str, blob: &[u8]) {
                 lui_add_same_rd += 1;
             }
             // Precise Ld→ALU patterns the recompiler fuses (rd != 0; ALU reads ld's rd).
-            if let RvInst::Ld { rd: l_rd, .. } = p
+            if let Inst::Ld { rd: l_rd, .. } = p
                 && l_rd != 0
             {
                 let alu_uses_ld = |a_rs1: u8, a_rs2: u8| a_rs1 == l_rd || a_rs2 == l_rd;
                 match inst {
-                    RvInst::Add { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
+                    Inst::Add { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
                         ld_add_any += 1
                     }
-                    RvInst::Xor { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
+                    Inst::Xor { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
                         ld_xor_any += 1
                     }
-                    RvInst::Or { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
+                    Inst::Or { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
                         ld_or_any += 1
                     }
-                    RvInst::And { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
+                    Inst::And { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
                         ld_and_any += 1
                     }
                     _ => {}

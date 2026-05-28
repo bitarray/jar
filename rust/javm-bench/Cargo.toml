@@ -31,7 +31,7 @@ build-javm = { path = "../build-javm" }
 criterion = "0.5"
 
 [[bench]]
-name = "pvm2_bench"
+name = "bench"
 harness = false
 
 [[bench]]

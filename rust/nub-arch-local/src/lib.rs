@@ -14,7 +14,7 @@ use javm_cap::cap::image::ImageCap;
 use javm_cap::cap::instance::InstanceCap;
 use javm_exec::{
     Access, CopyingMemory, EcallHandler, EcallKind, EcallResult, ExitReason, GasCounter, PAGE_SIZE,
-    Regs, rv_interp::RvInterpreter, rv_predecode::predecode_rv,
+    Regs, interp::Interpreter, predecode::predecode,
 };
 use nub_arch_x86_abi::InvocationResult;
 use nub_kernel::{Arch, CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
@@ -111,8 +111,8 @@ pub fn run_instance(
     let mut gas = GasCounter::new(initial_gas);
     let mut handler = LocalEcallHandler;
 
-    let predecode = predecode_rv(image.code.as_slice());
-    let exit = RvInterpreter::run(
+    let predecode = predecode(image.code.as_slice());
+    let exit = Interpreter::run(
         &predecode,
         image.jump_table.as_slice(),
         image.jump_table_offsets.as_slice(),

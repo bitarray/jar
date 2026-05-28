@@ -22,11 +22,11 @@ pub mod exit;
 pub mod gas;
 pub mod gas_cost;
 pub mod gas_sim;
+pub mod instruction;
+pub mod interp;
 pub mod mem;
+pub mod predecode;
 pub mod regs;
-pub mod rv_instruction;
-pub mod rv_interp;
-pub mod rv_predecode;
 
 pub use ecall::{EcallHandler, EcallKind, EcallResult, PanickingHandler};
 pub use error::ProgramError;

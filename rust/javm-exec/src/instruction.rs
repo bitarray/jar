@@ -1,9 +1,9 @@
 //! RV64+C+custom-0 instruction decoder for PVM2.
 //!
-//! Decodes a 16-bit-aligned cursor into `(RvInst, byte_length)`.
+//! Decodes a 16-bit-aligned cursor into `(Inst, byte_length)`.
 //! Compressed (RVC) instructions are **decompressed at decode time**
 //! into their 32-bit equivalents so the rest of the pipeline sees
-//! uniform `RvInst` values; the returned `byte_length` (2 or 4) is
+//! uniform `Inst` values; the returned `byte_length` (2 or 4) is
 //! the wire length, used to advance PC.
 //!
 //! ISA coverage matches the PVM2 spec
@@ -28,7 +28,7 @@
 /// RV unprivileged spec. Immediate fields are pre-sign-extended to
 /// `i32`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RvInst {
+pub enum Inst {
     // -------- Loads (I-type, major LOAD=0000011) --------
     Lb {
         rd: u8,
@@ -645,7 +645,7 @@ const OP_OP_32: u32 = 0b01_110;
 /// available or the first 2 bytes are zero (which is `Reserved`
 /// shape — we treat as decode failure to give the caller a clean
 /// signal).
-pub fn decode(bytes: &[u8]) -> Option<(RvInst, u8)> {
+pub fn decode(bytes: &[u8]) -> Option<(Inst, u8)> {
     if bytes.len() < 2 {
         return None;
     }
@@ -667,10 +667,10 @@ pub fn decode(bytes: &[u8]) -> Option<(RvInst, u8)> {
 // 32-bit decode
 // ============================================================================
 
-fn decode_32(w: u32) -> RvInst {
+fn decode_32(w: u32) -> Inst {
     let major = (w >> 2) & 0x1F; // [6:2]
     if w & 0b11 != 0b11 {
-        return RvInst::Reserved { raw: w };
+        return Inst::Reserved { raw: w };
     }
     let rd = ((w >> 7) & 0x1F) as u8;
     let rs1 = ((w >> 15) & 0x1F) as u8;
@@ -685,278 +685,278 @@ fn decode_32(w: u32) -> RvInst {
         OP_OP_IMM_32 => decode_op_imm_32(w, rd, rs1, funct3),
         OP_OP => decode_op(rd, rs1, rs2, funct3, funct7, w),
         OP_OP_32 => decode_op_32(rd, rs1, rs2, funct3, funct7, w),
-        OP_LUI => RvInst::Lui {
+        OP_LUI => Inst::Lui {
             rd,
             imm: (w & 0xFFFFF000) as i32,
         },
-        OP_AUIPC => RvInst::Reserved { raw: w }, // forbidden in PVM2
+        OP_AUIPC => Inst::Reserved { raw: w }, // forbidden in PVM2
         OP_JAL => {
             let imm = imm_j(w);
-            RvInst::Jal { rd, imm }
+            Inst::Jal { rd, imm }
         }
-        OP_JALR => RvInst::Reserved { raw: w }, // forbidden in PVM2 — use br_table for returns
+        OP_JALR => Inst::Reserved { raw: w }, // forbidden in PVM2 — use br_table for returns
         OP_BRANCH => decode_branch(rs1, rs2, funct3, imm_b(w), w),
         OP_MISC_MEM => decode_misc_mem(funct3),
-        OP_SYSTEM => RvInst::Reserved { raw: w }, // standard ECALL/EBREAK/CSR reserved
+        OP_SYSTEM => Inst::Reserved { raw: w }, // standard ECALL/EBREAK/CSR reserved
         OP_CUSTOM_0 => decode_custom_0(w, rd, rs1, funct3),
-        OP_CUSTOM_1 => RvInst::Reserved { raw: w }, // custom-1 reserved (was callf, now removed)
-        _ => RvInst::Reserved { raw: w },
+        OP_CUSTOM_1 => Inst::Reserved { raw: w }, // custom-1 reserved (was callf, now removed)
+        _ => Inst::Reserved { raw: w },
     }
 }
 
-fn decode_load(w: u32, rd: u8, rs1: u8, funct3: u8) -> RvInst {
+fn decode_load(w: u32, rd: u8, rs1: u8, funct3: u8) -> Inst {
     let imm = imm_i(w);
     match funct3 {
-        0b000 => RvInst::Lb { rd, rs1, imm },
-        0b001 => RvInst::Lh { rd, rs1, imm },
-        0b010 => RvInst::Lw { rd, rs1, imm },
-        0b011 => RvInst::Ld { rd, rs1, imm },
-        0b100 => RvInst::Lbu { rd, rs1, imm },
-        0b101 => RvInst::Lhu { rd, rs1, imm },
-        0b110 => RvInst::Lwu { rd, rs1, imm },
-        _ => RvInst::Reserved { raw: w },
+        0b000 => Inst::Lb { rd, rs1, imm },
+        0b001 => Inst::Lh { rd, rs1, imm },
+        0b010 => Inst::Lw { rd, rs1, imm },
+        0b011 => Inst::Ld { rd, rs1, imm },
+        0b100 => Inst::Lbu { rd, rs1, imm },
+        0b101 => Inst::Lhu { rd, rs1, imm },
+        0b110 => Inst::Lwu { rd, rs1, imm },
+        _ => Inst::Reserved { raw: w },
     }
 }
 
-fn decode_store(w: u32, rs1: u8, rs2: u8, funct3: u8) -> RvInst {
+fn decode_store(w: u32, rs1: u8, rs2: u8, funct3: u8) -> Inst {
     let imm = imm_s(w);
     match funct3 {
-        0b000 => RvInst::Sb { rs1, rs2, imm },
-        0b001 => RvInst::Sh { rs1, rs2, imm },
-        0b010 => RvInst::Sw { rs1, rs2, imm },
-        0b011 => RvInst::Sd { rs1, rs2, imm },
-        _ => RvInst::Reserved { raw: w },
+        0b000 => Inst::Sb { rs1, rs2, imm },
+        0b001 => Inst::Sh { rs1, rs2, imm },
+        0b010 => Inst::Sw { rs1, rs2, imm },
+        0b011 => Inst::Sd { rs1, rs2, imm },
+        _ => Inst::Reserved { raw: w },
     }
 }
 
-fn decode_op_imm(w: u32, rd: u8, rs1: u8, funct3: u8) -> RvInst {
+fn decode_op_imm(w: u32, rd: u8, rs1: u8, funct3: u8) -> Inst {
     let imm = imm_i(w);
     let shamt = (w >> 20) & 0x3F; // 6-bit for RV64 shifts
     let shtype = (w >> 26) & 0x3F; // upper 6 bits for shift type
     match funct3 {
-        0b000 => RvInst::Addi { rd, rs1, imm },
-        0b010 => RvInst::Slti { rd, rs1, imm },
-        0b011 => RvInst::Sltiu { rd, rs1, imm },
-        0b100 => RvInst::Xori { rd, rs1, imm },
-        0b110 => RvInst::Ori { rd, rs1, imm },
-        0b111 => RvInst::Andi { rd, rs1, imm },
+        0b000 => Inst::Addi { rd, rs1, imm },
+        0b010 => Inst::Slti { rd, rs1, imm },
+        0b011 => Inst::Sltiu { rd, rs1, imm },
+        0b100 => Inst::Xori { rd, rs1, imm },
+        0b110 => Inst::Ori { rd, rs1, imm },
+        0b111 => Inst::Andi { rd, rs1, imm },
         0b001 => match shtype {
-            0b000000 => RvInst::Slli {
+            0b000000 => Inst::Slli {
                 rd,
                 rs1,
                 shamt: shamt as u8,
             },
             // Zbs: bclri (funct7[6:1]=010010), bseti (001010), binvi (011010)
-            0b010010 => RvInst::Bclri {
+            0b010010 => Inst::Bclri {
                 rd,
                 rs1,
                 shamt: shamt as u8,
             },
-            0b001010 => RvInst::Bseti {
+            0b001010 => Inst::Bseti {
                 rd,
                 rs1,
                 shamt: shamt as u8,
             },
-            0b011010 => RvInst::Binvi {
+            0b011010 => Inst::Binvi {
                 rd,
                 rs1,
                 shamt: shamt as u8,
             },
             // Zbb: clz/ctz/cpop/sext.b/sext.h (funct7=0110000), variant in rs2
             0b011000 => match rs2_field(w) {
-                0b00000 => RvInst::Clz { rd, rs1 },
-                0b00001 => RvInst::Ctz { rd, rs1 },
-                0b00010 => RvInst::Cpop { rd, rs1 },
-                0b00100 => RvInst::SextB { rd, rs1 },
-                0b00101 => RvInst::SextH { rd, rs1 },
-                _ => RvInst::Reserved { raw: w },
+                0b00000 => Inst::Clz { rd, rs1 },
+                0b00001 => Inst::Ctz { rd, rs1 },
+                0b00010 => Inst::Cpop { rd, rs1 },
+                0b00100 => Inst::SextB { rd, rs1 },
+                0b00101 => Inst::SextH { rd, rs1 },
+                _ => Inst::Reserved { raw: w },
             },
-            _ => RvInst::Reserved { raw: w },
+            _ => Inst::Reserved { raw: w },
         },
         0b101 => match shtype {
-            0b000000 => RvInst::Srli {
+            0b000000 => Inst::Srli {
                 rd,
                 rs1,
                 shamt: shamt as u8,
             },
-            0b010000 => RvInst::Srai {
+            0b010000 => Inst::Srai {
                 rd,
                 rs1,
                 shamt: shamt as u8,
             },
             // Zbs: bexti (010010)
-            0b010010 => RvInst::Bexti {
+            0b010010 => Inst::Bexti {
                 rd,
                 rs1,
                 shamt: shamt as u8,
             },
             // Zbb: rori (011000)
-            0b011000 => RvInst::Rori {
+            0b011000 => Inst::Rori {
                 rd,
                 rs1,
                 shamt: shamt as u8,
             },
             // Zbb: orc.b / rev8 — distinguished by rs2 field
             0b001010 => match rs2_field(w) {
-                0b00111 => RvInst::OrcB { rd, rs1 },
-                _ => RvInst::Reserved { raw: w },
+                0b00111 => Inst::OrcB { rd, rs1 },
+                _ => Inst::Reserved { raw: w },
             },
             0b011010 => match rs2_field(w) {
-                0b11000 => RvInst::Rev8 { rd, rs1 },
-                _ => RvInst::Reserved { raw: w },
+                0b11000 => Inst::Rev8 { rd, rs1 },
+                _ => Inst::Reserved { raw: w },
             },
-            _ => RvInst::Reserved { raw: w },
+            _ => Inst::Reserved { raw: w },
         },
-        _ => RvInst::Reserved { raw: w },
+        _ => Inst::Reserved { raw: w },
     }
 }
 
-fn decode_op_imm_32(w: u32, rd: u8, rs1: u8, funct3: u8) -> RvInst {
+fn decode_op_imm_32(w: u32, rd: u8, rs1: u8, funct3: u8) -> Inst {
     let imm = imm_i(w);
     let shamt5 = ((w >> 20) & 0x1F) as u8; // 5-bit for W shifts
     let funct7 = (w >> 25) & 0x7F;
     match funct3 {
-        0b000 => RvInst::Addiw { rd, rs1, imm },
+        0b000 => Inst::Addiw { rd, rs1, imm },
         0b001 => match funct7 {
-            0b0000000 => RvInst::Slliw {
+            0b0000000 => Inst::Slliw {
                 rd,
                 rs1,
                 shamt: shamt5,
             },
             // Zba: slli.uw (funct7=0000100)
-            0b0000100 => RvInst::Slliuw {
+            0b0000100 => Inst::Slliuw {
                 rd,
                 rs1,
                 shamt: ((w >> 20) & 0x3F) as u8,
             },
             // Zbb: clzw/ctzw/cpopw (funct7=0110000, rs2 varies)
             0b0110000 => match rs2_field(w) {
-                0b00000 => RvInst::Clzw { rd, rs1 },
-                0b00001 => RvInst::Ctzw { rd, rs1 },
-                0b00010 => RvInst::Cpopw { rd, rs1 },
-                _ => RvInst::Reserved { raw: w },
+                0b00000 => Inst::Clzw { rd, rs1 },
+                0b00001 => Inst::Ctzw { rd, rs1 },
+                0b00010 => Inst::Cpopw { rd, rs1 },
+                _ => Inst::Reserved { raw: w },
             },
-            _ => RvInst::Reserved { raw: w },
+            _ => Inst::Reserved { raw: w },
         },
         0b101 => match funct7 {
-            0b0000000 => RvInst::Srliw {
+            0b0000000 => Inst::Srliw {
                 rd,
                 rs1,
                 shamt: shamt5,
             },
-            0b0100000 => RvInst::Sraiw {
+            0b0100000 => Inst::Sraiw {
                 rd,
                 rs1,
                 shamt: shamt5,
             },
             // Zbb: roriw (funct7=0110000)
-            0b0110000 => RvInst::Roriw {
+            0b0110000 => Inst::Roriw {
                 rd,
                 rs1,
                 shamt: shamt5,
             },
-            _ => RvInst::Reserved { raw: w },
+            _ => Inst::Reserved { raw: w },
         },
-        _ => RvInst::Reserved { raw: w },
+        _ => Inst::Reserved { raw: w },
     }
 }
 
-fn decode_op(rd: u8, rs1: u8, rs2: u8, funct3: u8, funct7: u8, w: u32) -> RvInst {
+fn decode_op(rd: u8, rs1: u8, rs2: u8, funct3: u8, funct7: u8, w: u32) -> Inst {
     match (funct7, funct3) {
         // Base 64-bit ALU
-        (0b0000000, 0b000) => RvInst::Add { rd, rs1, rs2 },
-        (0b0100000, 0b000) => RvInst::Sub { rd, rs1, rs2 },
-        (0b0000000, 0b001) => RvInst::Sll { rd, rs1, rs2 },
-        (0b0000000, 0b010) => RvInst::Slt { rd, rs1, rs2 },
-        (0b0000000, 0b011) => RvInst::Sltu { rd, rs1, rs2 },
-        (0b0000000, 0b100) => RvInst::Xor { rd, rs1, rs2 },
-        (0b0000000, 0b101) => RvInst::Srl { rd, rs1, rs2 },
-        (0b0100000, 0b101) => RvInst::Sra { rd, rs1, rs2 },
-        (0b0000000, 0b110) => RvInst::Or { rd, rs1, rs2 },
-        (0b0000000, 0b111) => RvInst::And { rd, rs1, rs2 },
+        (0b0000000, 0b000) => Inst::Add { rd, rs1, rs2 },
+        (0b0100000, 0b000) => Inst::Sub { rd, rs1, rs2 },
+        (0b0000000, 0b001) => Inst::Sll { rd, rs1, rs2 },
+        (0b0000000, 0b010) => Inst::Slt { rd, rs1, rs2 },
+        (0b0000000, 0b011) => Inst::Sltu { rd, rs1, rs2 },
+        (0b0000000, 0b100) => Inst::Xor { rd, rs1, rs2 },
+        (0b0000000, 0b101) => Inst::Srl { rd, rs1, rs2 },
+        (0b0100000, 0b101) => Inst::Sra { rd, rs1, rs2 },
+        (0b0000000, 0b110) => Inst::Or { rd, rs1, rs2 },
+        (0b0000000, 0b111) => Inst::And { rd, rs1, rs2 },
         // M extension
-        (0b0000001, 0b000) => RvInst::Mul { rd, rs1, rs2 },
-        (0b0000001, 0b001) => RvInst::Mulh { rd, rs1, rs2 },
-        (0b0000001, 0b010) => RvInst::Mulhsu { rd, rs1, rs2 },
-        (0b0000001, 0b011) => RvInst::Mulhu { rd, rs1, rs2 },
-        (0b0000001, 0b100) => RvInst::Div { rd, rs1, rs2 },
-        (0b0000001, 0b101) => RvInst::Divu { rd, rs1, rs2 },
-        (0b0000001, 0b110) => RvInst::Rem { rd, rs1, rs2 },
-        (0b0000001, 0b111) => RvInst::Remu { rd, rs1, rs2 },
+        (0b0000001, 0b000) => Inst::Mul { rd, rs1, rs2 },
+        (0b0000001, 0b001) => Inst::Mulh { rd, rs1, rs2 },
+        (0b0000001, 0b010) => Inst::Mulhsu { rd, rs1, rs2 },
+        (0b0000001, 0b011) => Inst::Mulhu { rd, rs1, rs2 },
+        (0b0000001, 0b100) => Inst::Div { rd, rs1, rs2 },
+        (0b0000001, 0b101) => Inst::Divu { rd, rs1, rs2 },
+        (0b0000001, 0b110) => Inst::Rem { rd, rs1, rs2 },
+        (0b0000001, 0b111) => Inst::Remu { rd, rs1, rs2 },
         // Zbb
-        (0b0100000, 0b111) => RvInst::Andn { rd, rs1, rs2 },
-        (0b0100000, 0b110) => RvInst::Orn { rd, rs1, rs2 },
-        (0b0100000, 0b100) => RvInst::Xnor { rd, rs1, rs2 },
-        (0b0000101, 0b100) => RvInst::Min { rd, rs1, rs2 },
-        (0b0000101, 0b101) => RvInst::Minu { rd, rs1, rs2 },
-        (0b0000101, 0b110) => RvInst::Max { rd, rs1, rs2 },
-        (0b0000101, 0b111) => RvInst::Maxu { rd, rs1, rs2 },
-        (0b0110000, 0b001) => RvInst::Rol { rd, rs1, rs2 },
-        (0b0110000, 0b101) => RvInst::Ror { rd, rs1, rs2 },
+        (0b0100000, 0b111) => Inst::Andn { rd, rs1, rs2 },
+        (0b0100000, 0b110) => Inst::Orn { rd, rs1, rs2 },
+        (0b0100000, 0b100) => Inst::Xnor { rd, rs1, rs2 },
+        (0b0000101, 0b100) => Inst::Min { rd, rs1, rs2 },
+        (0b0000101, 0b101) => Inst::Minu { rd, rs1, rs2 },
+        (0b0000101, 0b110) => Inst::Max { rd, rs1, rs2 },
+        (0b0000101, 0b111) => Inst::Maxu { rd, rs1, rs2 },
+        (0b0110000, 0b001) => Inst::Rol { rd, rs1, rs2 },
+        (0b0110000, 0b101) => Inst::Ror { rd, rs1, rs2 },
         // Zba
-        (0b0010000, 0b010) => RvInst::Sh1add { rd, rs1, rs2 },
-        (0b0010000, 0b100) => RvInst::Sh2add { rd, rs1, rs2 },
-        (0b0010000, 0b110) => RvInst::Sh3add { rd, rs1, rs2 },
+        (0b0010000, 0b010) => Inst::Sh1add { rd, rs1, rs2 },
+        (0b0010000, 0b100) => Inst::Sh2add { rd, rs1, rs2 },
+        (0b0010000, 0b110) => Inst::Sh3add { rd, rs1, rs2 },
         // Zbs
-        (0b0100100, 0b001) => RvInst::Bclr { rd, rs1, rs2 },
-        (0b0010100, 0b001) => RvInst::Bset { rd, rs1, rs2 },
-        (0b0110100, 0b001) => RvInst::Binv { rd, rs1, rs2 },
-        (0b0100100, 0b101) => RvInst::Bext { rd, rs1, rs2 },
+        (0b0100100, 0b001) => Inst::Bclr { rd, rs1, rs2 },
+        (0b0010100, 0b001) => Inst::Bset { rd, rs1, rs2 },
+        (0b0110100, 0b001) => Inst::Binv { rd, rs1, rs2 },
+        (0b0100100, 0b101) => Inst::Bext { rd, rs1, rs2 },
         // Zicond
-        (0b0000111, 0b101) => RvInst::CzeroEqz { rd, rs1, rs2 },
-        (0b0000111, 0b111) => RvInst::CzeroNez { rd, rs1, rs2 },
+        (0b0000111, 0b101) => Inst::CzeroEqz { rd, rs1, rs2 },
+        (0b0000111, 0b111) => Inst::CzeroNez { rd, rs1, rs2 },
         // Zbb zext.h via pack rd, rs1, x0 (funct7=0000100, funct3=100)
-        (0b0000100, 0b100) if rs2 == 0 => RvInst::ZextH { rd, rs1 },
-        _ => RvInst::Reserved { raw: w },
+        (0b0000100, 0b100) if rs2 == 0 => Inst::ZextH { rd, rs1 },
+        _ => Inst::Reserved { raw: w },
     }
 }
 
-fn decode_op_32(rd: u8, rs1: u8, rs2: u8, funct3: u8, funct7: u8, w: u32) -> RvInst {
+fn decode_op_32(rd: u8, rs1: u8, rs2: u8, funct3: u8, funct7: u8, w: u32) -> Inst {
     match (funct7, funct3) {
-        (0b0000000, 0b000) => RvInst::Addw { rd, rs1, rs2 },
-        (0b0100000, 0b000) => RvInst::Subw { rd, rs1, rs2 },
-        (0b0000000, 0b001) => RvInst::Sllw { rd, rs1, rs2 },
-        (0b0000000, 0b101) => RvInst::Srlw { rd, rs1, rs2 },
-        (0b0100000, 0b101) => RvInst::Sraw { rd, rs1, rs2 },
+        (0b0000000, 0b000) => Inst::Addw { rd, rs1, rs2 },
+        (0b0100000, 0b000) => Inst::Subw { rd, rs1, rs2 },
+        (0b0000000, 0b001) => Inst::Sllw { rd, rs1, rs2 },
+        (0b0000000, 0b101) => Inst::Srlw { rd, rs1, rs2 },
+        (0b0100000, 0b101) => Inst::Sraw { rd, rs1, rs2 },
         // M-W
-        (0b0000001, 0b000) => RvInst::Mulw { rd, rs1, rs2 },
-        (0b0000001, 0b100) => RvInst::Divw { rd, rs1, rs2 },
-        (0b0000001, 0b101) => RvInst::Divuw { rd, rs1, rs2 },
-        (0b0000001, 0b110) => RvInst::Remw { rd, rs1, rs2 },
-        (0b0000001, 0b111) => RvInst::Remuw { rd, rs1, rs2 },
+        (0b0000001, 0b000) => Inst::Mulw { rd, rs1, rs2 },
+        (0b0000001, 0b100) => Inst::Divw { rd, rs1, rs2 },
+        (0b0000001, 0b101) => Inst::Divuw { rd, rs1, rs2 },
+        (0b0000001, 0b110) => Inst::Remw { rd, rs1, rs2 },
+        (0b0000001, 0b111) => Inst::Remuw { rd, rs1, rs2 },
         // Zbb-W
-        (0b0110000, 0b001) => RvInst::Rolw { rd, rs1, rs2 },
-        (0b0110000, 0b101) => RvInst::Rorw { rd, rs1, rs2 },
+        (0b0110000, 0b001) => Inst::Rolw { rd, rs1, rs2 },
+        (0b0110000, 0b101) => Inst::Rorw { rd, rs1, rs2 },
         // Zba-W: add.uw (funct7=0000100, funct3=000), sh1add.uw (010), sh2add.uw (100), sh3add.uw (110)
-        (0b0000100, 0b000) => RvInst::Adduw { rd, rs1, rs2 },
-        (0b0010000, 0b010) => RvInst::Sh1adduw { rd, rs1, rs2 },
-        (0b0010000, 0b100) => RvInst::Sh2adduw { rd, rs1, rs2 },
-        (0b0010000, 0b110) => RvInst::Sh3adduw { rd, rs1, rs2 },
-        _ => RvInst::Reserved { raw: w },
+        (0b0000100, 0b000) => Inst::Adduw { rd, rs1, rs2 },
+        (0b0010000, 0b010) => Inst::Sh1adduw { rd, rs1, rs2 },
+        (0b0010000, 0b100) => Inst::Sh2adduw { rd, rs1, rs2 },
+        (0b0010000, 0b110) => Inst::Sh3adduw { rd, rs1, rs2 },
+        _ => Inst::Reserved { raw: w },
     }
 }
 
-fn decode_branch(rs1: u8, rs2: u8, funct3: u8, imm: i32, w: u32) -> RvInst {
+fn decode_branch(rs1: u8, rs2: u8, funct3: u8, imm: i32, w: u32) -> Inst {
     match funct3 {
-        0b000 => RvInst::Beq { rs1, rs2, imm },
-        0b001 => RvInst::Bne { rs1, rs2, imm },
-        0b100 => RvInst::Blt { rs1, rs2, imm },
-        0b101 => RvInst::Bge { rs1, rs2, imm },
-        0b110 => RvInst::Bltu { rs1, rs2, imm },
-        0b111 => RvInst::Bgeu { rs1, rs2, imm },
-        _ => RvInst::Reserved { raw: w },
+        0b000 => Inst::Beq { rs1, rs2, imm },
+        0b001 => Inst::Bne { rs1, rs2, imm },
+        0b100 => Inst::Blt { rs1, rs2, imm },
+        0b101 => Inst::Bge { rs1, rs2, imm },
+        0b110 => Inst::Bltu { rs1, rs2, imm },
+        0b111 => Inst::Bgeu { rs1, rs2, imm },
+        _ => Inst::Reserved { raw: w },
     }
 }
 
-fn decode_misc_mem(funct3: u8) -> RvInst {
+fn decode_misc_mem(funct3: u8) -> Inst {
     match funct3 {
-        0b000 => RvInst::Fence,
-        0b001 => RvInst::FenceI,
-        _ => RvInst::Reserved { raw: 0 },
+        0b000 => Inst::Fence,
+        0b001 => Inst::FenceI,
+        _ => Inst::Reserved { raw: 0 },
     }
 }
 
-fn decode_custom_0(w: u32, rd: u8, rs1: u8, funct3: u8) -> RvInst {
+fn decode_custom_0(w: u32, rd: u8, rs1: u8, funct3: u8) -> Inst {
     // Sub-op layout (I-type wire shape; funct3 is the sub-op selector):
     //   funct3 = 000 -> trap         (other fields ignored)
     //   funct3 = 001 -> ecall.jar    (other fields ignored)
@@ -965,20 +965,20 @@ fn decode_custom_0(w: u32, rd: u8, rs1: u8, funct3: u8) -> RvInst {
     //                                  rs1=idx-carrier reg, rd=0)
     //   funct3 = 100 -> fallthrough  (other fields ignored)
     match funct3 {
-        0b000 => RvInst::Trap,
-        0b001 => RvInst::EcallJar,
-        0b010 => RvInst::Ecalli { imm: imm_i(w) },
+        0b000 => Inst::Trap,
+        0b001 => Inst::EcallJar,
+        0b010 => Inst::Ecalli { imm: imm_i(w) },
         0b011 => {
             // br_table requires rd=0 (no destination — it's a terminator).
             if rd != 0 {
-                return RvInst::Reserved { raw: w };
+                return Inst::Reserved { raw: w };
             }
             // imm[11:0] is read as unsigned 12-bit (table_id ∈ 0..=4095).
             let table_id = ((w >> 20) & 0xFFF) as u16;
-            RvInst::BrTable { table_id, rs1 }
+            Inst::BrTable { table_id, rs1 }
         }
-        0b100 => RvInst::Fallthrough,
-        _ => RvInst::Reserved { raw: w },
+        0b100 => Inst::Fallthrough,
+        _ => Inst::Reserved { raw: w },
     }
 }
 
@@ -1028,18 +1028,18 @@ fn rs2_field(w: u32) -> u32 {
 // ============================================================================
 
 /// Decompress a 16-bit RVC instruction into its 32-bit equivalent
-/// `RvInst`. Reserved encodings decode to `Reserved { raw: <halfword> }`.
+/// `Inst`. Reserved encodings decode to `Reserved { raw: <halfword> }`.
 ///
 /// References RV unprivileged spec §16 (Compressed). Quadrants are
 /// distinguished by op[1:0]; within each quadrant by funct3 ([15:13]).
-fn decompress(h: u16) -> RvInst {
+fn decompress(h: u16) -> Inst {
     let op = h & 0b11;
     let f3 = (h >> 13) & 0b111;
     match op {
         0b00 => decompress_q0(h, f3),
         0b01 => decompress_q1(h, f3),
         0b10 => decompress_q2(h, f3),
-        _ => RvInst::Reserved { raw: h as u32 }, // op=11 isn't compressed
+        _ => Inst::Reserved { raw: h as u32 }, // op=11 isn't compressed
     }
 }
 
@@ -1048,7 +1048,7 @@ fn creg(r: u16) -> u8 {
     (r + 8) as u8
 }
 
-fn decompress_q0(h: u16, f3: u16) -> RvInst {
+fn decompress_q0(h: u16, f3: u16) -> Inst {
     let rs1c = creg((h >> 7) & 0b111);
     let rdrs2c = creg((h >> 2) & 0b111);
     match f3 {
@@ -1068,9 +1068,9 @@ fn decompress_q0(h: u16, f3: u16) -> RvInst {
                 | (((h >> 5) & 0x1) << 3); // [5]     -> [3]
             let _ = imm; // sigh
             if n == 0 {
-                RvInst::Reserved { raw: h as u32 } // c.addi4spn nzuimm=0 reserved
+                Inst::Reserved { raw: h as u32 } // c.addi4spn nzuimm=0 reserved
             } else {
-                RvInst::Addi {
+                Inst::Addi {
                     rd: rdrs2c,
                     rs1: 2,
                     imm: n as i32,
@@ -1082,7 +1082,7 @@ fn decompress_q0(h: u16, f3: u16) -> RvInst {
             let imm = (((h >> 10) & 0x7) << 3) // [12:10] -> [5:3]
                 | (((h >> 6) & 0x1) << 2)      // [6]     -> [2]
                 | (((h >> 5) & 0x1) << 6); // [5]     -> [6]
-            RvInst::Lw {
+            Inst::Lw {
                 rd: rdrs2c,
                 rs1: rs1c,
                 imm: imm as i32,
@@ -1092,7 +1092,7 @@ fn decompress_q0(h: u16, f3: u16) -> RvInst {
             // c.ld -> ld rd', uimm(rs1')
             let imm = (((h >> 10) & 0x7) << 3) // [12:10] -> [5:3]
                 | (((h >> 5) & 0x3) << 6); // [6:5]   -> [7:6]
-            RvInst::Ld {
+            Inst::Ld {
                 rd: rdrs2c,
                 rs1: rs1c,
                 imm: imm as i32,
@@ -1101,7 +1101,7 @@ fn decompress_q0(h: u16, f3: u16) -> RvInst {
         0b110 => {
             // c.sw
             let imm = (((h >> 10) & 0x7) << 3) | (((h >> 6) & 0x1) << 2) | (((h >> 5) & 0x1) << 6);
-            RvInst::Sw {
+            Inst::Sw {
                 rs1: rs1c,
                 rs2: rdrs2c,
                 imm: imm as i32,
@@ -1110,17 +1110,17 @@ fn decompress_q0(h: u16, f3: u16) -> RvInst {
         0b111 => {
             // c.sd
             let imm = (((h >> 10) & 0x7) << 3) | (((h >> 5) & 0x3) << 6);
-            RvInst::Sd {
+            Inst::Sd {
                 rs1: rs1c,
                 rs2: rdrs2c,
                 imm: imm as i32,
             }
         }
-        _ => RvInst::Reserved { raw: h as u32 },
+        _ => Inst::Reserved { raw: h as u32 },
     }
 }
 
-fn decompress_q1(h: u16, f3: u16) -> RvInst {
+fn decompress_q1(h: u16, f3: u16) -> Inst {
     match f3 {
         0b000 => {
             // c.nop / c.addi
@@ -1128,32 +1128,32 @@ fn decompress_q1(h: u16, f3: u16) -> RvInst {
             let imm = decode_ci_imm6(h);
             if rd == 0 {
                 // c.nop (imm should be 0 but we don't enforce)
-                RvInst::Addi {
+                Inst::Addi {
                     rd: 0,
                     rs1: 0,
                     imm: 0,
                 }
             } else {
-                RvInst::Addi { rd, rs1: rd, imm }
+                Inst::Addi { rd, rs1: rd, imm }
             }
         }
         0b001 => {
             // c.addiw (RV64) — rd != 0
             let rd = ((h >> 7) & 0x1F) as u8;
             if rd == 0 {
-                return RvInst::Reserved { raw: h as u32 };
+                return Inst::Reserved { raw: h as u32 };
             }
             let imm = decode_ci_imm6(h);
-            RvInst::Addiw { rd, rs1: rd, imm }
+            Inst::Addiw { rd, rs1: rd, imm }
         }
         0b010 => {
             // c.li -> addi rd, x0, imm
             let rd = ((h >> 7) & 0x1F) as u8;
             if rd == 0 {
-                return RvInst::Reserved { raw: h as u32 };
+                return Inst::Reserved { raw: h as u32 };
             }
             let imm = decode_ci_imm6(h);
-            RvInst::Addi { rd, rs1: 0, imm }
+            Inst::Addi { rd, rs1: 0, imm }
         }
         0b011 => {
             // c.addi16sp / c.lui
@@ -1167,47 +1167,47 @@ fn decompress_q1(h: u16, f3: u16) -> RvInst {
                     | (((h >> 2) & 1) << 5);
                 let sx = ((imm as i32) << 22) >> 22; // sign-ext 10-bit
                 if sx == 0 {
-                    return RvInst::Reserved { raw: h as u32 };
+                    return Inst::Reserved { raw: h as u32 };
                 }
-                RvInst::Addi {
+                Inst::Addi {
                     rd: 2,
                     rs1: 2,
                     imm: sx,
                 }
             } else if rd == 0 {
-                RvInst::Reserved { raw: h as u32 }
+                Inst::Reserved { raw: h as u32 }
             } else {
                 // c.lui — cast to u32 first because shifts go up to <<17
                 let h = h as u32;
                 let imm = (((h >> 12) & 1) << 17) | (((h >> 2) & 0x1F) << 12);
                 let sx = ((imm as i32) << 14) >> 14; // sign-ext 18-bit
                 if sx == 0 {
-                    return RvInst::Reserved { raw: (h & 0xFFFF) };
+                    return Inst::Reserved { raw: (h & 0xFFFF) };
                 }
-                RvInst::Lui { rd, imm: sx }
+                Inst::Lui { rd, imm: sx }
             }
         }
         0b100 => decompress_q1_misc_alu(h),
         0b101 => {
             // c.j -> jal x0, off
             let imm = decode_cj_imm(h);
-            RvInst::Jal { rd: 0, imm }
+            Inst::Jal { rd: 0, imm }
         }
         0b110 | 0b111 => {
             // c.beqz / c.bnez (rs1 = creg)
             let rs1 = creg((h >> 7) & 0b111);
             let imm = decode_cb_imm(h);
             if f3 == 0b110 {
-                RvInst::Beq { rs1, rs2: 0, imm }
+                Inst::Beq { rs1, rs2: 0, imm }
             } else {
-                RvInst::Bne { rs1, rs2: 0, imm }
+                Inst::Bne { rs1, rs2: 0, imm }
             }
         }
-        _ => RvInst::Reserved { raw: h as u32 },
+        _ => Inst::Reserved { raw: h as u32 },
     }
 }
 
-fn decompress_q1_misc_alu(h: u16) -> RvInst {
+fn decompress_q1_misc_alu(h: u16) -> Inst {
     let f6_10 = (h >> 10) & 0b11; // funct2 selecting shift / andi / sub-op
     let rdrs1c = creg((h >> 7) & 0b111);
     match f6_10 {
@@ -1215,13 +1215,13 @@ fn decompress_q1_misc_alu(h: u16) -> RvInst {
             // c.srli / c.srai (RV64 shamt: bit12||bits6:2)
             let shamt = ((((h >> 12) & 1) << 5) | ((h >> 2) & 0x1F)) as u8;
             if f6_10 == 0b00 {
-                RvInst::Srli {
+                Inst::Srli {
                     rd: rdrs1c,
                     rs1: rdrs1c,
                     shamt,
                 }
             } else {
-                RvInst::Srai {
+                Inst::Srai {
                     rd: rdrs1c,
                     rs1: rdrs1c,
                     shamt,
@@ -1231,7 +1231,7 @@ fn decompress_q1_misc_alu(h: u16) -> RvInst {
         0b10 => {
             // c.andi
             let imm = decode_ci_imm6(h);
-            RvInst::Andi {
+            Inst::Andi {
                 rd: rdrs1c,
                 rs1: rdrs1c,
                 imm,
@@ -1243,54 +1243,54 @@ fn decompress_q1_misc_alu(h: u16) -> RvInst {
             let bit12 = (h >> 12) & 1;
             let f2 = (h >> 5) & 0b11;
             match (bit12, f2) {
-                (0, 0b00) => RvInst::Sub {
+                (0, 0b00) => Inst::Sub {
                     rd: rdrs1c,
                     rs1: rdrs1c,
                     rs2: rs2c,
                 },
-                (0, 0b01) => RvInst::Xor {
+                (0, 0b01) => Inst::Xor {
                     rd: rdrs1c,
                     rs1: rdrs1c,
                     rs2: rs2c,
                 },
-                (0, 0b10) => RvInst::Or {
+                (0, 0b10) => Inst::Or {
                     rd: rdrs1c,
                     rs1: rdrs1c,
                     rs2: rs2c,
                 },
-                (0, 0b11) => RvInst::And {
+                (0, 0b11) => Inst::And {
                     rd: rdrs1c,
                     rs1: rdrs1c,
                     rs2: rs2c,
                 },
-                (1, 0b00) => RvInst::Subw {
+                (1, 0b00) => Inst::Subw {
                     rd: rdrs1c,
                     rs1: rdrs1c,
                     rs2: rs2c,
                 },
-                (1, 0b01) => RvInst::Addw {
+                (1, 0b01) => Inst::Addw {
                     rd: rdrs1c,
                     rs1: rdrs1c,
                     rs2: rs2c,
                 },
-                _ => RvInst::Reserved { raw: h as u32 },
+                _ => Inst::Reserved { raw: h as u32 },
             }
         }
-        _ => RvInst::Reserved { raw: h as u32 },
+        _ => Inst::Reserved { raw: h as u32 },
     }
 }
 
-fn decompress_q2(h: u16, f3: u16) -> RvInst {
+fn decompress_q2(h: u16, f3: u16) -> Inst {
     let rdrs1 = ((h >> 7) & 0x1F) as u8;
     let rs2 = ((h >> 2) & 0x1F) as u8;
     match f3 {
         0b000 => {
             // c.slli (RV64 shamt: bit12||bits6:2)
             if rdrs1 == 0 {
-                return RvInst::Reserved { raw: h as u32 };
+                return Inst::Reserved { raw: h as u32 };
             }
             let shamt = ((((h >> 12) & 1) << 5) | ((h >> 2) & 0x1F)) as u8;
-            RvInst::Slli {
+            Inst::Slli {
                 rd: rdrs1,
                 rs1: rdrs1,
                 shamt,
@@ -1299,10 +1299,10 @@ fn decompress_q2(h: u16, f3: u16) -> RvInst {
         0b010 => {
             // c.lwsp -> lw rd, uimm(x2)
             if rdrs1 == 0 {
-                return RvInst::Reserved { raw: h as u32 };
+                return Inst::Reserved { raw: h as u32 };
             }
             let imm = (((h >> 12) & 1) << 5) | (((h >> 4) & 0x7) << 2) | (((h >> 2) & 0x3) << 6);
-            RvInst::Lw {
+            Inst::Lw {
                 rd: rdrs1,
                 rs1: 2,
                 imm: imm as i32,
@@ -1311,10 +1311,10 @@ fn decompress_q2(h: u16, f3: u16) -> RvInst {
         0b011 => {
             // c.ldsp -> ld rd, uimm(x2)
             if rdrs1 == 0 {
-                return RvInst::Reserved { raw: h as u32 };
+                return Inst::Reserved { raw: h as u32 };
             }
             let imm = (((h >> 12) & 1) << 5) | (((h >> 5) & 0x3) << 3) | (((h >> 2) & 0x7) << 6);
-            RvInst::Ld {
+            Inst::Ld {
                 rd: rdrs1,
                 rs1: 2,
                 imm: imm as i32,
@@ -1330,26 +1330,26 @@ fn decompress_q2(h: u16, f3: u16) -> RvInst {
             // c.jalr form decoded here is therefore Reserved.
             let bit12 = (h >> 12) & 1;
             match (bit12, rdrs1, rs2) {
-                (0, r, 0) if r != 0 => RvInst::Reserved { raw: h as u32 }, // c.jr — forbidden
-                (0, r, s) if r != 0 && s != 0 => RvInst::Add {
+                (0, r, 0) if r != 0 => Inst::Reserved { raw: h as u32 }, // c.jr — forbidden
+                (0, r, s) if r != 0 && s != 0 => Inst::Add {
                     rd: r,
                     rs1: 0,
                     rs2: s,
                 }, // c.mv
-                (1, 0, 0) => RvInst::Reserved { raw: h as u32 }, // c.ebreak → forbidden in PVM2
-                (1, r, 0) if r != 0 => RvInst::Reserved { raw: h as u32 }, // c.jalr → forbidden in PVM2
-                (1, r, s) if r != 0 && s != 0 => RvInst::Add {
+                (1, 0, 0) => Inst::Reserved { raw: h as u32 }, // c.ebreak → forbidden in PVM2
+                (1, r, 0) if r != 0 => Inst::Reserved { raw: h as u32 }, // c.jalr → forbidden in PVM2
+                (1, r, s) if r != 0 && s != 0 => Inst::Add {
                     rd: r,
                     rs1: r,
                     rs2: s,
                 }, // c.add
-                _ => RvInst::Reserved { raw: h as u32 },
+                _ => Inst::Reserved { raw: h as u32 },
             }
         }
         0b110 => {
             // c.swsp -> sw rs2, uimm(x2)
             let imm = (((h >> 9) & 0xF) << 2) | (((h >> 7) & 0x3) << 6);
-            RvInst::Sw {
+            Inst::Sw {
                 rs1: 2,
                 rs2,
                 imm: imm as i32,
@@ -1358,13 +1358,13 @@ fn decompress_q2(h: u16, f3: u16) -> RvInst {
         0b111 => {
             // c.sdsp -> sd rs2, uimm(x2)
             let imm = (((h >> 10) & 0x7) << 3) | (((h >> 7) & 0x7) << 6);
-            RvInst::Sd {
+            Inst::Sd {
                 rs1: 2,
                 rs2,
                 imm: imm as i32,
             }
         }
-        _ => RvInst::Reserved { raw: h as u32 },
+        _ => Inst::Reserved { raw: h as u32 },
     }
 }
 
@@ -1417,7 +1417,7 @@ mod tests {
         assert_eq!(
             decode(&bytes),
             Some((
-                RvInst::Add {
+                Inst::Add {
                     rd: 10,
                     rs1: 11,
                     rs2: 12,
@@ -1434,7 +1434,7 @@ mod tests {
         assert_eq!(
             decode(&bytes),
             Some((
-                RvInst::Ld {
+                Inst::Ld {
                     rd: 5,
                     rs1: 10,
                     imm: 16,
@@ -1451,7 +1451,7 @@ mod tests {
         assert_eq!(
             decode(&bytes),
             Some((
-                RvInst::Sd {
+                Inst::Sd {
                     rs1: 10,
                     rs2: 11,
                     imm: 8,
@@ -1468,7 +1468,7 @@ mod tests {
         assert_eq!(
             decode(&bytes),
             Some((
-                RvInst::Addi {
+                Inst::Addi {
                     rd: 10,
                     rs1: 11,
                     imm: -4,
@@ -1485,7 +1485,7 @@ mod tests {
         assert_eq!(
             decode(&bytes),
             Some((
-                RvInst::Beq {
+                Inst::Beq {
                     rs1: 10,
                     rs2: 11,
                     imm: 8,
@@ -1499,7 +1499,7 @@ mod tests {
     fn decode_jal() {
         // jal x1, 12 = 0x00C000EF
         let bytes = 0x00C000EFu32.to_le_bytes();
-        assert_eq!(decode(&bytes), Some((RvInst::Jal { rd: 1, imm: 12 }, 4)));
+        assert_eq!(decode(&bytes), Some((Inst::Jal { rd: 1, imm: 12 }, 4)));
     }
 
     #[test]
@@ -1509,7 +1509,7 @@ mod tests {
         assert_eq!(
             decode(&bytes),
             Some((
-                RvInst::Lui {
+                Inst::Lui {
                     rd: 5,
                     imm: 0x12345000,
                 },
@@ -1523,7 +1523,7 @@ mod tests {
         // auipc x5, 0x10 = 0x000102B7? actually 0x00010297
         let bytes = 0x00010297u32.to_le_bytes();
         match decode(&bytes) {
-            Some((RvInst::Reserved { .. }, 4)) => {}
+            Some((Inst::Reserved { .. }, 4)) => {}
             other => panic!("auipc should be Reserved, got {:?}", other),
         }
     }
@@ -1533,7 +1533,7 @@ mod tests {
         // ecall = 0x00000073
         let bytes = 0x00000073u32.to_le_bytes();
         match decode(&bytes) {
-            Some((RvInst::Reserved { .. }, 4)) => {}
+            Some((Inst::Reserved { .. }, 4)) => {}
             other => panic!("standard ecall should be Reserved, got {:?}", other),
         }
     }
@@ -1546,7 +1546,7 @@ mod tests {
         assert_eq!(
             decode(&bytes),
             Some((
-                RvInst::Add {
+                Inst::Add {
                     rd: 10,
                     rs1: 0,
                     rs2: 11,
@@ -1563,7 +1563,7 @@ mod tests {
         assert_eq!(
             decode(&bytes),
             Some((
-                RvInst::Addi {
+                Inst::Addi {
                     rd: 10,
                     rs1: 10,
                     imm: 1,
@@ -1580,7 +1580,7 @@ mod tests {
         assert_eq!(
             decode(&bytes),
             Some((
-                RvInst::Addi {
+                Inst::Addi {
                     rd: 10,
                     rs1: 0,
                     imm: -1,
@@ -1594,21 +1594,21 @@ mod tests {
     fn decode_c_j() {
         // c.j 4 = 0xA011 (jumps 4 bytes forward)
         let bytes = 0xA011u16.to_le_bytes();
-        assert_eq!(decode(&bytes), Some((RvInst::Jal { rd: 0, imm: 4 }, 2)));
+        assert_eq!(decode(&bytes), Some((Inst::Jal { rd: 0, imm: 4 }, 2)));
     }
 
     #[test]
     fn decode_custom_trap() {
         // trap: custom-0 (0x0B), funct3=000, rest zero
         let bytes = 0x0000000Bu32.to_le_bytes();
-        assert_eq!(decode(&bytes), Some((RvInst::Trap, 4)));
+        assert_eq!(decode(&bytes), Some((Inst::Trap, 4)));
     }
 
     #[test]
     fn decode_custom_ecall_jar() {
         // ecall.jar: custom-0, funct3=001
         let bytes = 0x0000100Bu32.to_le_bytes();
-        assert_eq!(decode(&bytes), Some((RvInst::EcallJar, 4)));
+        assert_eq!(decode(&bytes), Some((Inst::EcallJar, 4)));
     }
 
     #[test]
@@ -1617,7 +1617,7 @@ mod tests {
         // wire: (5 << 20) | (0b010 << 12) | 0x0B = 0x0050_200B
         let w = (5u32 << 20) | (0b010 << 12) | 0x0B;
         let bytes = w.to_le_bytes();
-        assert_eq!(decode(&bytes), Some((RvInst::Ecalli { imm: 5 }, 4)));
+        assert_eq!(decode(&bytes), Some((Inst::Ecalli { imm: 5 }, 4)));
     }
 
     #[test]
@@ -1625,7 +1625,7 @@ mod tests {
         // ecalli imm=-1: imm12 = 0xFFF, sign-extends to -1
         let w = (0xFFFu32 << 20) | (0b010 << 12) | 0x0B;
         let bytes = w.to_le_bytes();
-        assert_eq!(decode(&bytes), Some((RvInst::Ecalli { imm: -1 }, 4)));
+        assert_eq!(decode(&bytes), Some((Inst::Ecalli { imm: -1 }, 4)));
     }
 
     #[test]
@@ -1637,7 +1637,7 @@ mod tests {
         assert_eq!(
             decode(&bytes),
             Some((
-                RvInst::BrTable {
+                Inst::BrTable {
                     table_id: 42,
                     rs1: 1
                 },
@@ -1653,7 +1653,7 @@ mod tests {
             (1u32 << 20) | (1u32 << 15) | (0b011u32 << 12) | (1u32 << 7) | (0b00010u32 << 2) | 0b11;
         let bytes = w.to_le_bytes();
         let decoded = decode(&bytes).unwrap().0;
-        assert!(matches!(decoded, RvInst::Reserved { .. }));
+        assert!(matches!(decoded, Inst::Reserved { .. }));
     }
 
     #[test]
@@ -1663,7 +1663,7 @@ mod tests {
         let callf_word = 0x0080_002Bu32;
         let bytes = callf_word.to_le_bytes();
         let decoded = decode(&bytes).unwrap().0;
-        assert!(matches!(decoded, RvInst::Reserved { .. }));
+        assert!(matches!(decoded, Inst::Reserved { .. }));
     }
 
     #[test]
@@ -1672,6 +1672,6 @@ mod tests {
         // PVM2 now rejects it. Linker rewrites returns to br_table.
         let bytes = 0x8082u16.to_le_bytes();
         let decoded = decode(&bytes).unwrap().0;
-        assert!(matches!(decoded, RvInst::Reserved { .. }));
+        assert!(matches!(decoded, Inst::Reserved { .. }));
     }
 }

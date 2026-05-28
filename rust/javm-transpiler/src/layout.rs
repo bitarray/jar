@@ -2,7 +2,7 @@
 //!
 //! [`ProgramLayout`] assigns `cap_index`, `base_page`, and `page_count`
 //! to each DATA cap appearing in a transpiler-emitted Image. The
-//! consumer is [`crate::linker_rv::link_elf_rv`], which uses
+//! consumer is [`crate::linker::link_elf`], which uses
 //! [`ProgramLayout::stack_top`] to compute the initial SP value baked
 //! into every endpoint's
 //! [`javm_cap::image::EndpointDef::initial_regs`]. The page-count and

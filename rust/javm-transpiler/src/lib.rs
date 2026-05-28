@@ -6,7 +6,7 @@
 
 pub mod elf;
 pub mod layout;
-pub mod linker_rv;
+pub mod linker;
 
 use thiserror::Error;
 

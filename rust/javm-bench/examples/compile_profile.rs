@@ -5,7 +5,7 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use javm_cap::image::Image;
-use javm_exec::rv_predecode::predecode_rv;
+use javm_exec::predecode::predecode;
 use javm_recompiler_x86::codegen::{Compiler, HelperFns};
 use ssz::Decode;
 use std::time::Instant;
@@ -34,7 +34,7 @@ fn profile_one(name: &str, blob: &[u8]) {
     // Warm-up + report native_code size.
     let native_size = {
         let c = Compiler::new(dummy_helpers(), code.len(), 0x4000_0000, 1);
-        let r = c.compile_rv(code, jt_offsets);
+        let r = c.compile(code, jt_offsets);
         r.native_code.len()
     };
 
@@ -45,13 +45,13 @@ fn profile_one(name: &str, blob: &[u8]) {
     for _ in 0..ITERS {
         let t0 = Instant::now();
         let c = Compiler::new(dummy_helpers(), code.len(), 0x4000_0000, 1);
-        let _ = c.compile_rv(code, jt_offsets);
+        let _ = c.compile(code, jt_offsets);
         let t1 = Instant::now();
         comp_ns += (t1 - t0).as_nanos();
 
-        // Also time predecode_rv on its own for comparison.
+        // Also time predecode on its own for comparison.
         let t2 = Instant::now();
-        let _ = predecode_rv(code);
+        let _ = predecode(code);
         let t3 = Instant::now();
         pre_only_ns += (t3 - t2).as_nanos();
     }
@@ -59,7 +59,7 @@ fn profile_one(name: &str, blob: &[u8]) {
     let comp_us = comp_ns as f64 / ITERS as f64 / 1000.0;
     let pre_us = pre_only_ns as f64 / ITERS as f64 / 1000.0;
     let n_insts = {
-        let pd = predecode_rv(code);
+        let pd = predecode(code);
         pd.insts.len()
     };
 

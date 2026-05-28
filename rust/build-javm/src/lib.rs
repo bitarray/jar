@@ -21,7 +21,7 @@ fn watch_transpiler_sources() {
 
 /// Build a PVM2 blob from a service crate. The guest is built for the
 /// RV+C+Zbb+Zba+Zbs+Zicond target and the ELF is linked via
-/// [`javm_transpiler::linker_rv::link_elf_rv`] — `Image.code` holds raw
+/// [`javm_transpiler::linker::link_elf`] — `Image.code` holds raw
 /// RV+C+custom-0 bytes consumed directly by the recompiler / interpreter.
 pub fn build(manifest_dir: &str, bin_name: &str) -> PathBuf {
     watch_transpiler_sources();
@@ -62,8 +62,8 @@ pub fn build(manifest_dir: &str, bin_name: &str) -> PathBuf {
 
     let elf_path = guest.build();
     let elf_data = std::fs::read(&elf_path).expect("failed to read ELF");
-    let image = javm_transpiler::linker_rv::link_elf_rv(&elf_data)
-        .expect("failed to link ELF to Cap::Image");
+    let image =
+        javm_transpiler::linker::link_elf(&elf_data).expect("failed to link ELF to Cap::Image");
     let encoded = image.as_ssz_bytes();
 
     std::fs::write(&blob_path, &encoded).expect("failed to write Image blob");

@@ -17,7 +17,7 @@
 //!    encodings (see `~/docs/pvm-isa/05-pvm2-rv-diff.md` §"Forbidden
 //!    encodings").
 //! 6. **Emit Image** with `code = raw RV bytes`. The recompiler-side
-//!    `compile_rv` consumes these directly.
+//!    `compile` consumes these directly.
 
 use crate::TranspileError;
 use crate::elf::parse_linked_elf;
@@ -60,7 +60,7 @@ const CSR_ECALLI: u32 = 0x801;
 
 /// Link an RV ELF into a PVM2 [`Image`] whose `code` field is raw
 /// RV+C+custom-0 bytes.
-pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
+pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     let elf = parse_linked_elf(elf_data)?;
 
     // ---- 1. Concatenate code sections ------------------------------
@@ -76,7 +76,7 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
     // — fine because gaps shouldn't be reached during execution.
     if elf.code_sections.is_empty() {
         return Err(TranspileError::InvalidSection(
-            "link_elf_rv: ELF has no code sections".into(),
+            "link_elf: ELF has no code sections".into(),
         ));
     }
     let mut sections_by_vaddr: Vec<&(u64, u64, Vec<u8>)> = elf.code_sections.iter().collect();
@@ -152,20 +152,20 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
     for (&v, &eff) in &auipc_effective {
         let off = vaddr_to_offset(v).ok_or_else(|| {
             TranspileError::InvalidSection(format!(
-                "link_elf_rv: AUIPC reloc at vaddr {:#x} outside code section",
+                "link_elf: AUIPC reloc at vaddr {:#x} outside code section",
                 v
             ))
         })?;
         if off + 4 > code.len() {
             return Err(TranspileError::InvalidSection(format!(
-                "link_elf_rv: AUIPC reloc at vaddr {:#x} truncated by section end",
+                "link_elf: AUIPC reloc at vaddr {:#x} truncated by section end",
                 v
             )));
         }
         let word = u32::from_le_bytes([code[off], code[off + 1], code[off + 2], code[off + 3]]);
         if word & 0x7F != OP_AUIPC {
             return Err(TranspileError::InvalidSection(format!(
-                "link_elf_rv: reloc at vaddr {:#x} not an AUIPC (opcode {:#x})",
+                "link_elf: reloc at vaddr {:#x} not an AUIPC (opcode {:#x})",
                 v,
                 word & 0x7F
             )));
@@ -333,7 +333,7 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
                 .copied()
                 .ok_or_else(|| {
                     TranspileError::InvalidSection(format!(
-                        "link_elf_rv: br_table resume pc {:#x} not in align offset_map",
+                        "link_elf: br_table resume pc {:#x} not in align offset_map",
                         *entry
                     ))
                 })?;
@@ -725,7 +725,7 @@ fn validate_pvm2(code: &[u8]) -> Result<(), TranspileError> {
             // encoding 0x9002 — reject it explicitly.
             if lo16 == 0x9002 {
                 return Err(TranspileError::InvalidSection(format!(
-                    "link_elf_rv: c.ebreak at offset {:#x} (forbidden)",
+                    "link_elf: c.ebreak at offset {:#x} (forbidden)",
                     i
                 )));
             }
@@ -740,13 +740,13 @@ fn validate_pvm2(code: &[u8]) -> Result<(), TranspileError> {
         match opcode {
             OP_AUIPC => {
                 return Err(TranspileError::InvalidSection(format!(
-                    "link_elf_rv: AUIPC still present at offset {:#x} (rewrite incomplete)",
+                    "link_elf: AUIPC still present at offset {:#x} (rewrite incomplete)",
                     i
                 )));
             }
             OP_JALR => {
                 return Err(TranspileError::InvalidSection(format!(
-                    "link_elf_rv: JALR still present at offset {:#x} (rewrite incomplete) — \
+                    "link_elf: JALR still present at offset {:#x} (rewrite incomplete) — \
                      PVM2 has no JALR; calls/tail-calls/returns must use \
                      addi+jal-x0 / br_table",
                     i
@@ -754,7 +754,7 @@ fn validate_pvm2(code: &[u8]) -> Result<(), TranspileError> {
             }
             OP_CUSTOM_1 => {
                 return Err(TranspileError::InvalidSection(format!(
-                    "link_elf_rv: custom-1 opcode at offset {:#x} is reserved in PVM2 \
+                    "link_elf: custom-1 opcode at offset {:#x} is reserved in PVM2 \
                      (callf is gone; br_table lives in custom-0)",
                     i
                 )));
@@ -764,30 +764,30 @@ fn validate_pvm2(code: &[u8]) -> Result<(), TranspileError> {
                 let csr_or_imm = (w >> 20) & 0xFFF;
                 if funct3 == 0 {
                     return Err(TranspileError::InvalidSection(format!(
-                        "link_elf_rv: standard ECALL/EBREAK at offset {:#x} (imm={:#x})",
+                        "link_elf: standard ECALL/EBREAK at offset {:#x} (imm={:#x})",
                         i, csr_or_imm
                     )));
                 }
                 return Err(TranspileError::InvalidSection(format!(
-                    "link_elf_rv: CSR op at offset {:#x} (funct3={})",
+                    "link_elf: CSR op at offset {:#x} (funct3={})",
                     i, funct3
                 )));
             }
             0b010_1111 => {
                 return Err(TranspileError::InvalidSection(format!(
-                    "link_elf_rv: atomic op at offset {:#x}",
+                    "link_elf: atomic op at offset {:#x}",
                     i
                 )));
             }
             0b000_0111 | 0b010_0111 => {
                 return Err(TranspileError::InvalidSection(format!(
-                    "link_elf_rv: FP load/store at offset {:#x}",
+                    "link_elf: FP load/store at offset {:#x}",
                     i
                 )));
             }
             0b101_0011 => {
                 return Err(TranspileError::InvalidSection(format!(
-                    "link_elf_rv: FP arithmetic at offset {:#x}",
+                    "link_elf: FP arithmetic at offset {:#x}",
                     i
                 )));
             }
@@ -801,7 +801,7 @@ fn validate_pvm2(code: &[u8]) -> Result<(), TranspileError> {
         let check = |name: &str, r: u32| -> Result<(), TranspileError> {
             if r == 3 || r == 4 {
                 return Err(TranspileError::InvalidSection(format!(
-                    "link_elf_rv: forbidden register x{} ({}) at offset {:#x}",
+                    "link_elf: forbidden register x{} ({}) at offset {:#x}",
                     r, name, i
                 )));
             }

@@ -1,18 +1,18 @@
 //! PVM2 (RV+C+Zbb+Zba+Zbs+Zicond+custom-0) interpreter.
 //!
-//! [`RvProgram`] bundles the constituents an interpreter run needs
+//! [`Program`] bundles the constituents an interpreter run needs
 //! (code bytes, predecode output, jump table + offsets) so the
 //! integration layer can cache the predecode alongside the bytecode
 //! and pass a single Arc to the executor.
 //!
 //! Mirrors the recompiler's semantics — same per-block gas charging at
-//! `RvPredecode::block_costs`, same RV-spec ALU/branch behaviour, same
+//! `Predecode::block_costs`, same RV-spec ALU/branch behaviour, same
 //! `Ecalli`/`BrTable` runtime contracts. Cross-checked against the
 //! recompiler in `pvm2_smoke`: bit-identical `gas_used` and side-effects
 //! on every workload.
 //!
-//! Dispatch is a `match` over `RvInst` variants. Instructions come from
-//! [`RvPredecode::insts`] (one entry per static instruction); static
+//! Dispatch is a `match` over `Inst` variants. Instructions come from
+//! [`Predecode::insts`] (one entry per static instruction); static
 //! branch / jal targets are resolved to instruction indices via binary
 //! search on the (sorted) `insts` array. Reused infrastructure: `Regs`,
 //! `Memory` trait, `GasCounter`, `EcallHandler` — identical to the PVM
@@ -23,27 +23,27 @@ use alloc::vec::Vec;
 use crate::ecall::{EcallHandler, EcallKind, EcallResult};
 use crate::exit::ExitReason;
 use crate::gas::GasCounter;
+use crate::instruction::Inst;
 use crate::mem::Memory;
+use crate::predecode::{Predecode, RvPreDecodedInst, predecode};
 use crate::regs::Regs;
-use crate::rv_instruction::RvInst;
-use crate::rv_predecode::{RvPreDecodedInst, RvPredecode, predecode_rv};
 
 /// Predecoded PVM2 program: bytecode plus the per-instruction analysis
 /// the interpreter consumes. Cache-friendly — the integration layer
 /// builds one of these per Image and shares it across invocations.
 #[derive(Debug)]
-pub struct RvProgram {
+pub struct Program {
     pub code: Vec<u8>,
-    pub predecode: RvPredecode,
+    pub predecode: Predecode,
     pub jump_table: Vec<u32>,
     pub jump_table_offsets: Vec<u32>,
 }
 
-impl RvProgram {
+impl Program {
     /// Predecode `code` and wrap it together with the Image's jump
     /// table. The predecode pass is O(code.len()); cache the result.
     pub fn new(code: Vec<u8>, jump_table: Vec<u32>, jump_table_offsets: Vec<u32>) -> Self {
-        let predecode = predecode_rv(&code);
+        let predecode = predecode(&code);
         Self {
             code,
             predecode,
@@ -54,14 +54,14 @@ impl RvProgram {
 }
 
 /// PVM2 interpreter namespace.
-pub struct RvInterpreter;
+pub struct Interpreter;
 
-impl RvInterpreter {
-    /// Convenience wrapper for [`RvInterpreter::run`] that accepts a
-    /// cached [`RvProgram`].
+impl Interpreter {
+    /// Convenience wrapper for [`Interpreter::run`] that accepts a
+    /// cached [`Program`].
     #[inline]
     pub fn run_program<M: Memory>(
-        program: &RvProgram,
+        program: &Program,
         regs: &mut Regs,
         mem: &mut M,
         gas: &mut GasCounter,
@@ -82,7 +82,7 @@ impl RvInterpreter {
     /// `jump_table` and `jump_table_offsets` come from the Image
     /// (see [`javm_cap::image::Image`]).
     pub fn run<M: Memory>(
-        predecode: &RvPredecode,
+        predecode: &Predecode,
         jump_table: &[u32],
         jump_table_offsets: &[u32],
         regs: &mut Regs,
@@ -94,7 +94,7 @@ impl RvInterpreter {
         // predecode walk but doesn't preclude execution: programs may
         // contain unreachable padding (e.g. `0x0000` bytes between
         // functions) that the recompiler also tolerates. We panic only
-        // if execution actually *reaches* a `RvInst::Reserved` arm.
+        // if execution actually *reaches* a `Inst::Reserved` arm.
         let insts: &[RvPreDecodedInst] = &predecode.insts;
         if insts.is_empty() {
             return ExitReason::Panic;
@@ -128,49 +128,49 @@ impl RvInterpreter {
 
             match inst.inst {
                 // ---- Loads ---------------------------------------------------
-                RvInst::Lb { rd, rs1, imm } => {
+                Inst::Lb { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
                     match mem.read_u8(addr) {
                         Some(v) => reg_write(regs, rd, v as i8 as i64 as u64),
                         None => return page_fault(regs, pc, addr),
                     }
                 }
-                RvInst::Lh { rd, rs1, imm } => {
+                Inst::Lh { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
                     match mem.read_u16_le(addr) {
                         Some(v) => reg_write(regs, rd, v as i16 as i64 as u64),
                         None => return page_fault(regs, pc, addr),
                     }
                 }
-                RvInst::Lw { rd, rs1, imm } => {
+                Inst::Lw { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
                     match mem.read_u32_le(addr) {
                         Some(v) => reg_write(regs, rd, v as i32 as i64 as u64),
                         None => return page_fault(regs, pc, addr),
                     }
                 }
-                RvInst::Ld { rd, rs1, imm } => {
+                Inst::Ld { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
                     match mem.read_u64_le(addr) {
                         Some(v) => reg_write(regs, rd, v),
                         None => return page_fault(regs, pc, addr),
                     }
                 }
-                RvInst::Lbu { rd, rs1, imm } => {
+                Inst::Lbu { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
                     match mem.read_u8(addr) {
                         Some(v) => reg_write(regs, rd, v as u64),
                         None => return page_fault(regs, pc, addr),
                     }
                 }
-                RvInst::Lhu { rd, rs1, imm } => {
+                Inst::Lhu { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
                     match mem.read_u16_le(addr) {
                         Some(v) => reg_write(regs, rd, v as u64),
                         None => return page_fault(regs, pc, addr),
                     }
                 }
-                RvInst::Lwu { rd, rs1, imm } => {
+                Inst::Lwu { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
                     match mem.read_u32_le(addr) {
                         Some(v) => reg_write(regs, rd, v as u64),
@@ -179,25 +179,25 @@ impl RvInterpreter {
                 }
 
                 // ---- Stores --------------------------------------------------
-                RvInst::Sb { rs1, rs2, imm } => {
+                Inst::Sb { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
                     if !mem.write_u8(addr, reg_read(regs, rs2) as u8) {
                         return page_fault(regs, pc, addr);
                     }
                 }
-                RvInst::Sh { rs1, rs2, imm } => {
+                Inst::Sh { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
                     if !mem.write_u16_le(addr, reg_read(regs, rs2) as u16) {
                         return page_fault(regs, pc, addr);
                     }
                 }
-                RvInst::Sw { rs1, rs2, imm } => {
+                Inst::Sw { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
                     if !mem.write_u32_le(addr, reg_read(regs, rs2) as u32) {
                         return page_fault(regs, pc, addr);
                     }
                 }
-                RvInst::Sd { rs1, rs2, imm } => {
+                Inst::Sd { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
                     if !mem.write_u64_le(addr, reg_read(regs, rs2)) {
                         return page_fault(regs, pc, addr);
@@ -205,85 +205,85 @@ impl RvInterpreter {
                 }
 
                 // ---- ALU immediate (64-bit) ----------------------------------
-                RvInst::Addi { rd, rs1, imm } => {
+                Inst::Addi { rd, rs1, imm } => {
                     let v = reg_read(regs, rs1).wrapping_add(imm as i64 as u64);
                     reg_write(regs, rd, v);
                 }
-                RvInst::Slti { rd, rs1, imm } => {
+                Inst::Slti { rd, rs1, imm } => {
                     let v = ((reg_read(regs, rs1) as i64) < (imm as i64)) as u64;
                     reg_write(regs, rd, v);
                 }
-                RvInst::Sltiu { rd, rs1, imm } => {
+                Inst::Sltiu { rd, rs1, imm } => {
                     let v = (reg_read(regs, rs1) < (imm as i64 as u64)) as u64;
                     reg_write(regs, rd, v);
                 }
-                RvInst::Andi { rd, rs1, imm } => {
+                Inst::Andi { rd, rs1, imm } => {
                     let v = reg_read(regs, rs1) & (imm as i64 as u64);
                     reg_write(regs, rd, v);
                 }
-                RvInst::Ori { rd, rs1, imm } => {
+                Inst::Ori { rd, rs1, imm } => {
                     let v = reg_read(regs, rs1) | (imm as i64 as u64);
                     reg_write(regs, rd, v);
                 }
-                RvInst::Xori { rd, rs1, imm } => {
+                Inst::Xori { rd, rs1, imm } => {
                     let v = reg_read(regs, rs1) ^ (imm as i64 as u64);
                     reg_write(regs, rd, v);
                 }
-                RvInst::Slli { rd, rs1, shamt } => {
+                Inst::Slli { rd, rs1, shamt } => {
                     reg_write(
                         regs,
                         rd,
                         reg_read(regs, rs1).wrapping_shl(shamt as u32 & 63),
                     );
                 }
-                RvInst::Srli { rd, rs1, shamt } => {
+                Inst::Srli { rd, rs1, shamt } => {
                     reg_write(
                         regs,
                         rd,
                         reg_read(regs, rs1).wrapping_shr(shamt as u32 & 63),
                     );
                 }
-                RvInst::Srai { rd, rs1, shamt } => {
+                Inst::Srai { rd, rs1, shamt } => {
                     let v = (reg_read(regs, rs1) as i64).wrapping_shr(shamt as u32 & 63);
                     reg_write(regs, rd, v as u64);
                 }
 
                 // ---- ALU immediate (32-bit, sign-extend to 64) ---------------
-                RvInst::Addiw { rd, rs1, imm } => {
+                Inst::Addiw { rd, rs1, imm } => {
                     let v = (reg_read(regs, rs1) as i32).wrapping_add(imm);
                     reg_write(regs, rd, v as i64 as u64);
                 }
-                RvInst::Slliw { rd, rs1, shamt } => {
+                Inst::Slliw { rd, rs1, shamt } => {
                     let v = (reg_read(regs, rs1) as u32).wrapping_shl(shamt as u32 & 31);
                     reg_write(regs, rd, v as i32 as i64 as u64);
                 }
-                RvInst::Srliw { rd, rs1, shamt } => {
+                Inst::Srliw { rd, rs1, shamt } => {
                     let v = (reg_read(regs, rs1) as u32).wrapping_shr(shamt as u32 & 31);
                     reg_write(regs, rd, v as i32 as i64 as u64);
                 }
-                RvInst::Sraiw { rd, rs1, shamt } => {
+                Inst::Sraiw { rd, rs1, shamt } => {
                     let v = (reg_read(regs, rs1) as i32).wrapping_shr(shamt as u32 & 31);
                     reg_write(regs, rd, v as i64 as u64);
                 }
 
                 // ---- ALU register-register (64-bit) --------------------------
-                RvInst::Add { rd, rs1, rs2 } => {
+                Inst::Add { rd, rs1, rs2 } => {
                     let v = reg_read(regs, rs1).wrapping_add(reg_read(regs, rs2));
                     reg_write(regs, rd, v);
                 }
-                RvInst::Sub { rd, rs1, rs2 } => {
+                Inst::Sub { rd, rs1, rs2 } => {
                     let v = reg_read(regs, rs1).wrapping_sub(reg_read(regs, rs2));
                     reg_write(regs, rd, v);
                 }
-                RvInst::Sll { rd, rs1, rs2 } => {
+                Inst::Sll { rd, rs1, rs2 } => {
                     let s = reg_read(regs, rs2) as u32 & 63;
                     reg_write(regs, rd, reg_read(regs, rs1).wrapping_shl(s));
                 }
-                RvInst::Srl { rd, rs1, rs2 } => {
+                Inst::Srl { rd, rs1, rs2 } => {
                     let s = reg_read(regs, rs2) as u32 & 63;
                     reg_write(regs, rd, reg_read(regs, rs1).wrapping_shr(s));
                 }
-                RvInst::Sra { rd, rs1, rs2 } => {
+                Inst::Sra { rd, rs1, rs2 } => {
                     let s = reg_read(regs, rs2) as u32 & 63;
                     reg_write(
                         regs,
@@ -291,70 +291,70 @@ impl RvInterpreter {
                         (reg_read(regs, rs1) as i64).wrapping_shr(s) as u64,
                     );
                 }
-                RvInst::Slt { rd, rs1, rs2 } => {
+                Inst::Slt { rd, rs1, rs2 } => {
                     let v = ((reg_read(regs, rs1) as i64) < (reg_read(regs, rs2) as i64)) as u64;
                     reg_write(regs, rd, v);
                 }
-                RvInst::Sltu { rd, rs1, rs2 } => {
+                Inst::Sltu { rd, rs1, rs2 } => {
                     let v = (reg_read(regs, rs1) < reg_read(regs, rs2)) as u64;
                     reg_write(regs, rd, v);
                 }
-                RvInst::Xor { rd, rs1, rs2 } => {
+                Inst::Xor { rd, rs1, rs2 } => {
                     reg_write(regs, rd, reg_read(regs, rs1) ^ reg_read(regs, rs2));
                 }
-                RvInst::Or { rd, rs1, rs2 } => {
+                Inst::Or { rd, rs1, rs2 } => {
                     reg_write(regs, rd, reg_read(regs, rs1) | reg_read(regs, rs2));
                 }
-                RvInst::And { rd, rs1, rs2 } => {
+                Inst::And { rd, rs1, rs2 } => {
                     reg_write(regs, rd, reg_read(regs, rs1) & reg_read(regs, rs2));
                 }
 
                 // ---- ALU register-register (32-bit, sign-extend to 64) ------
-                RvInst::Addw { rd, rs1, rs2 } => {
+                Inst::Addw { rd, rs1, rs2 } => {
                     let v = (reg_read(regs, rs1) as i32).wrapping_add(reg_read(regs, rs2) as i32);
                     reg_write(regs, rd, v as i64 as u64);
                 }
-                RvInst::Subw { rd, rs1, rs2 } => {
+                Inst::Subw { rd, rs1, rs2 } => {
                     let v = (reg_read(regs, rs1) as i32).wrapping_sub(reg_read(regs, rs2) as i32);
                     reg_write(regs, rd, v as i64 as u64);
                 }
-                RvInst::Sllw { rd, rs1, rs2 } => {
+                Inst::Sllw { rd, rs1, rs2 } => {
                     let s = reg_read(regs, rs2) as u32 & 31;
                     let v = (reg_read(regs, rs1) as u32).wrapping_shl(s);
                     reg_write(regs, rd, v as i32 as i64 as u64);
                 }
-                RvInst::Srlw { rd, rs1, rs2 } => {
+                Inst::Srlw { rd, rs1, rs2 } => {
                     let s = reg_read(regs, rs2) as u32 & 31;
                     let v = (reg_read(regs, rs1) as u32).wrapping_shr(s);
                     reg_write(regs, rd, v as i32 as i64 as u64);
                 }
-                RvInst::Sraw { rd, rs1, rs2 } => {
+                Inst::Sraw { rd, rs1, rs2 } => {
                     let s = reg_read(regs, rs2) as u32 & 31;
                     let v = (reg_read(regs, rs1) as i32).wrapping_shr(s);
                     reg_write(regs, rd, v as i64 as u64);
                 }
 
                 // ---- M extension --------------------------------------------
-                RvInst::Mul { rd, rs1, rs2 } => {
+                Inst::Mul { rd, rs1, rs2 } => {
                     let v = reg_read(regs, rs1).wrapping_mul(reg_read(regs, rs2));
                     reg_write(regs, rd, v);
                 }
-                RvInst::Mulh { rd, rs1, rs2 } => {
+                Inst::Mulh { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1) as i64 as i128;
                     let b = reg_read(regs, rs2) as i64 as i128;
                     reg_write(regs, rd, ((a * b) >> 64) as u64);
                 }
-                RvInst::Mulhsu { rd, rs1, rs2 } => {
+                Inst::Mulhsu { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1) as i64 as i128;
                     let b = reg_read(regs, rs2) as u128 as i128;
                     reg_write(regs, rd, ((a * b) >> 64) as u64);
                 }
-                RvInst::Mulhu { rd, rs1, rs2 } => {
+                Inst::Mulhu { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1) as u128;
                     let b = reg_read(regs, rs2) as u128;
                     reg_write(regs, rd, ((a * b) >> 64) as u64);
                 }
-                RvInst::Div { rd, rs1, rs2 } => {
+                Inst::Div { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1) as i64;
                     let b = reg_read(regs, rs2) as i64;
                     let v = if b == 0 {
@@ -366,13 +366,13 @@ impl RvInterpreter {
                     };
                     reg_write(regs, rd, v);
                 }
-                RvInst::Divu { rd, rs1, rs2 } => {
+                Inst::Divu { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1);
                     let b = reg_read(regs, rs2);
                     let v = a.checked_div(b).unwrap_or(u64::MAX);
                     reg_write(regs, rd, v);
                 }
-                RvInst::Rem { rd, rs1, rs2 } => {
+                Inst::Rem { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1) as i64;
                     let b = reg_read(regs, rs2) as i64;
                     let v = if b == 0 {
@@ -384,17 +384,17 @@ impl RvInterpreter {
                     };
                     reg_write(regs, rd, v);
                 }
-                RvInst::Remu { rd, rs1, rs2 } => {
+                Inst::Remu { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1);
                     let b = reg_read(regs, rs2);
                     let v = if b == 0 { a } else { a % b };
                     reg_write(regs, rd, v);
                 }
-                RvInst::Mulw { rd, rs1, rs2 } => {
+                Inst::Mulw { rd, rs1, rs2 } => {
                     let v = (reg_read(regs, rs1) as i32).wrapping_mul(reg_read(regs, rs2) as i32);
                     reg_write(regs, rd, v as i64 as u64);
                 }
-                RvInst::Divw { rd, rs1, rs2 } => {
+                Inst::Divw { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1) as i32;
                     let b = reg_read(regs, rs2) as i32;
                     let v = if b == 0 {
@@ -406,13 +406,13 @@ impl RvInterpreter {
                     };
                     reg_write(regs, rd, v as i64 as u64);
                 }
-                RvInst::Divuw { rd, rs1, rs2 } => {
+                Inst::Divuw { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1) as u32;
                     let b = reg_read(regs, rs2) as u32;
                     let v = a.checked_div(b).unwrap_or(u32::MAX);
                     reg_write(regs, rd, v as i32 as i64 as u64);
                 }
-                RvInst::Remw { rd, rs1, rs2 } => {
+                Inst::Remw { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1) as i32;
                     let b = reg_read(regs, rs2) as i32;
                     let v = if b == 0 {
@@ -424,7 +424,7 @@ impl RvInterpreter {
                     };
                     reg_write(regs, rd, v as i64 as u64);
                 }
-                RvInst::Remuw { rd, rs1, rs2 } => {
+                Inst::Remuw { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1) as u32;
                     let b = reg_read(regs, rs2) as u32;
                     let v = if b == 0 { a } else { a % b };
@@ -432,45 +432,45 @@ impl RvInterpreter {
                 }
 
                 // ---- Zbb -----------------------------------------------------
-                RvInst::Clz { rd, rs1 } => {
+                Inst::Clz { rd, rs1 } => {
                     reg_write(regs, rd, reg_read(regs, rs1).leading_zeros() as u64);
                 }
-                RvInst::Clzw { rd, rs1 } => {
+                Inst::Clzw { rd, rs1 } => {
                     reg_write(
                         regs,
                         rd,
                         (reg_read(regs, rs1) as u32).leading_zeros() as u64,
                     );
                 }
-                RvInst::Ctz { rd, rs1 } => {
+                Inst::Ctz { rd, rs1 } => {
                     let v = reg_read(regs, rs1);
                     let n = if v == 0 { 64 } else { v.trailing_zeros() };
                     reg_write(regs, rd, n as u64);
                 }
-                RvInst::Ctzw { rd, rs1 } => {
+                Inst::Ctzw { rd, rs1 } => {
                     let v = reg_read(regs, rs1) as u32;
                     let n = if v == 0 { 32 } else { v.trailing_zeros() };
                     reg_write(regs, rd, n as u64);
                 }
-                RvInst::Cpop { rd, rs1 } => {
+                Inst::Cpop { rd, rs1 } => {
                     reg_write(regs, rd, reg_read(regs, rs1).count_ones() as u64);
                 }
-                RvInst::Cpopw { rd, rs1 } => {
+                Inst::Cpopw { rd, rs1 } => {
                     reg_write(regs, rd, (reg_read(regs, rs1) as u32).count_ones() as u64);
                 }
-                RvInst::SextB { rd, rs1 } => {
+                Inst::SextB { rd, rs1 } => {
                     reg_write(regs, rd, reg_read(regs, rs1) as i8 as i64 as u64);
                 }
-                RvInst::SextH { rd, rs1 } => {
+                Inst::SextH { rd, rs1 } => {
                     reg_write(regs, rd, reg_read(regs, rs1) as i16 as i64 as u64);
                 }
-                RvInst::ZextH { rd, rs1 } => {
+                Inst::ZextH { rd, rs1 } => {
                     reg_write(regs, rd, reg_read(regs, rs1) & 0xFFFF);
                 }
-                RvInst::Rev8 { rd, rs1 } => {
+                Inst::Rev8 { rd, rs1 } => {
                     reg_write(regs, rd, reg_read(regs, rs1).swap_bytes());
                 }
-                RvInst::OrcB { rd, rs1 } => {
+                Inst::OrcB { rd, rs1 } => {
                     let v = reg_read(regs, rs1);
                     // Per-byte: replace each byte by 0xFF if non-zero, else 0.
                     let mut out: u64 = 0;
@@ -482,137 +482,137 @@ impl RvInterpreter {
                     }
                     reg_write(regs, rd, out);
                 }
-                RvInst::Min { rd, rs1, rs2 } => {
+                Inst::Min { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1) as i64;
                     let b = reg_read(regs, rs2) as i64;
                     reg_write(regs, rd, a.min(b) as u64);
                 }
-                RvInst::Minu { rd, rs1, rs2 } => {
+                Inst::Minu { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1);
                     let b = reg_read(regs, rs2);
                     reg_write(regs, rd, a.min(b));
                 }
-                RvInst::Max { rd, rs1, rs2 } => {
+                Inst::Max { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1) as i64;
                     let b = reg_read(regs, rs2) as i64;
                     reg_write(regs, rd, a.max(b) as u64);
                 }
-                RvInst::Maxu { rd, rs1, rs2 } => {
+                Inst::Maxu { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1);
                     let b = reg_read(regs, rs2);
                     reg_write(regs, rd, a.max(b));
                 }
-                RvInst::Andn { rd, rs1, rs2 } => {
+                Inst::Andn { rd, rs1, rs2 } => {
                     reg_write(regs, rd, reg_read(regs, rs1) & !reg_read(regs, rs2));
                 }
-                RvInst::Orn { rd, rs1, rs2 } => {
+                Inst::Orn { rd, rs1, rs2 } => {
                     reg_write(regs, rd, reg_read(regs, rs1) | !reg_read(regs, rs2));
                 }
-                RvInst::Xnor { rd, rs1, rs2 } => {
+                Inst::Xnor { rd, rs1, rs2 } => {
                     reg_write(regs, rd, !(reg_read(regs, rs1) ^ reg_read(regs, rs2)));
                 }
-                RvInst::Rol { rd, rs1, rs2 } => {
+                Inst::Rol { rd, rs1, rs2 } => {
                     let s = reg_read(regs, rs2) as u32 & 63;
                     reg_write(regs, rd, reg_read(regs, rs1).rotate_left(s));
                 }
-                RvInst::Ror { rd, rs1, rs2 } => {
+                Inst::Ror { rd, rs1, rs2 } => {
                     let s = reg_read(regs, rs2) as u32 & 63;
                     reg_write(regs, rd, reg_read(regs, rs1).rotate_right(s));
                 }
-                RvInst::Rolw { rd, rs1, rs2 } => {
+                Inst::Rolw { rd, rs1, rs2 } => {
                     let s = reg_read(regs, rs2) as u32 & 31;
                     let v = (reg_read(regs, rs1) as u32).rotate_left(s);
                     reg_write(regs, rd, v as i32 as i64 as u64);
                 }
-                RvInst::Rorw { rd, rs1, rs2 } => {
+                Inst::Rorw { rd, rs1, rs2 } => {
                     let s = reg_read(regs, rs2) as u32 & 31;
                     let v = (reg_read(regs, rs1) as u32).rotate_right(s);
                     reg_write(regs, rd, v as i32 as i64 as u64);
                 }
-                RvInst::Rori { rd, rs1, shamt } => {
+                Inst::Rori { rd, rs1, shamt } => {
                     reg_write(
                         regs,
                         rd,
                         reg_read(regs, rs1).rotate_right(shamt as u32 & 63),
                     );
                 }
-                RvInst::Roriw { rd, rs1, shamt } => {
+                Inst::Roriw { rd, rs1, shamt } => {
                     let v = (reg_read(regs, rs1) as u32).rotate_right(shamt as u32 & 31);
                     reg_write(regs, rd, v as i32 as i64 as u64);
                 }
 
                 // ---- Zba -----------------------------------------------------
-                RvInst::Sh1add { rd, rs1, rs2 } => {
+                Inst::Sh1add { rd, rs1, rs2 } => {
                     let v = reg_read(regs, rs1)
                         .wrapping_shl(1)
                         .wrapping_add(reg_read(regs, rs2));
                     reg_write(regs, rd, v);
                 }
-                RvInst::Sh2add { rd, rs1, rs2 } => {
+                Inst::Sh2add { rd, rs1, rs2 } => {
                     let v = reg_read(regs, rs1)
                         .wrapping_shl(2)
                         .wrapping_add(reg_read(regs, rs2));
                     reg_write(regs, rd, v);
                 }
-                RvInst::Sh3add { rd, rs1, rs2 } => {
+                Inst::Sh3add { rd, rs1, rs2 } => {
                     let v = reg_read(regs, rs1)
                         .wrapping_shl(3)
                         .wrapping_add(reg_read(regs, rs2));
                     reg_write(regs, rd, v);
                 }
-                RvInst::Sh1adduw { rd, rs1, rs2 } => {
+                Inst::Sh1adduw { rd, rs1, rs2 } => {
                     let a = (reg_read(regs, rs1) as u32 as u64).wrapping_shl(1);
                     reg_write(regs, rd, a.wrapping_add(reg_read(regs, rs2)));
                 }
-                RvInst::Sh2adduw { rd, rs1, rs2 } => {
+                Inst::Sh2adduw { rd, rs1, rs2 } => {
                     let a = (reg_read(regs, rs1) as u32 as u64).wrapping_shl(2);
                     reg_write(regs, rd, a.wrapping_add(reg_read(regs, rs2)));
                 }
-                RvInst::Sh3adduw { rd, rs1, rs2 } => {
+                Inst::Sh3adduw { rd, rs1, rs2 } => {
                     let a = (reg_read(regs, rs1) as u32 as u64).wrapping_shl(3);
                     reg_write(regs, rd, a.wrapping_add(reg_read(regs, rs2)));
                 }
-                RvInst::Adduw { rd, rs1, rs2 } => {
+                Inst::Adduw { rd, rs1, rs2 } => {
                     let a = reg_read(regs, rs1) as u32 as u64;
                     reg_write(regs, rd, a.wrapping_add(reg_read(regs, rs2)));
                 }
-                RvInst::Slliuw { rd, rs1, shamt } => {
+                Inst::Slliuw { rd, rs1, shamt } => {
                     let a = reg_read(regs, rs1) as u32 as u64;
                     reg_write(regs, rd, a.wrapping_shl(shamt as u32 & 63));
                 }
 
                 // ---- Zbs (single-bit) ----------------------------------------
-                RvInst::Bclr { rd, rs1, rs2 } => {
+                Inst::Bclr { rd, rs1, rs2 } => {
                     let bit = reg_read(regs, rs2) & 63;
                     reg_write(regs, rd, reg_read(regs, rs1) & !(1u64 << bit));
                 }
-                RvInst::Bset { rd, rs1, rs2 } => {
+                Inst::Bset { rd, rs1, rs2 } => {
                     let bit = reg_read(regs, rs2) & 63;
                     reg_write(regs, rd, reg_read(regs, rs1) | (1u64 << bit));
                 }
-                RvInst::Binv { rd, rs1, rs2 } => {
+                Inst::Binv { rd, rs1, rs2 } => {
                     let bit = reg_read(regs, rs2) & 63;
                     reg_write(regs, rd, reg_read(regs, rs1) ^ (1u64 << bit));
                 }
-                RvInst::Bext { rd, rs1, rs2 } => {
+                Inst::Bext { rd, rs1, rs2 } => {
                     let bit = reg_read(regs, rs2) & 63;
                     reg_write(regs, rd, (reg_read(regs, rs1) >> bit) & 1);
                 }
-                RvInst::Bclri { rd, rs1, shamt } => {
+                Inst::Bclri { rd, rs1, shamt } => {
                     reg_write(regs, rd, reg_read(regs, rs1) & !(1u64 << (shamt & 63)));
                 }
-                RvInst::Bseti { rd, rs1, shamt } => {
+                Inst::Bseti { rd, rs1, shamt } => {
                     reg_write(regs, rd, reg_read(regs, rs1) | (1u64 << (shamt & 63)));
                 }
-                RvInst::Binvi { rd, rs1, shamt } => {
+                Inst::Binvi { rd, rs1, shamt } => {
                     reg_write(regs, rd, reg_read(regs, rs1) ^ (1u64 << (shamt & 63)));
                 }
-                RvInst::Bexti { rd, rs1, shamt } => {
+                Inst::Bexti { rd, rs1, shamt } => {
                     reg_write(regs, rd, (reg_read(regs, rs1) >> (shamt & 63)) & 1);
                 }
 
                 // ---- Zicond --------------------------------------------------
-                RvInst::CzeroEqz { rd, rs1, rs2 } => {
+                Inst::CzeroEqz { rd, rs1, rs2 } => {
                     // (rs2 == 0) ? 0 : rs1
                     let v = if reg_read(regs, rs2) == 0 {
                         0
@@ -621,7 +621,7 @@ impl RvInterpreter {
                     };
                     reg_write(regs, rd, v);
                 }
-                RvInst::CzeroNez { rd, rs1, rs2 } => {
+                Inst::CzeroNez { rd, rs1, rs2 } => {
                     // (rs2 != 0) ? 0 : rs1
                     let v = if reg_read(regs, rs2) != 0 {
                         0
@@ -632,12 +632,12 @@ impl RvInterpreter {
                 }
 
                 // ---- Upper immediate ----------------------------------------
-                RvInst::Lui { rd, imm } => {
+                Inst::Lui { rd, imm } => {
                     reg_write(regs, rd, imm as i64 as u64);
                 }
 
                 // ---- Control flow -------------------------------------------
-                RvInst::Jal { rd, imm } => {
+                Inst::Jal { rd, imm } => {
                     if rd != 0 {
                         reg_write(regs, rd, next_pc as u64);
                     }
@@ -650,7 +650,7 @@ impl RvInterpreter {
                         }
                     });
                 }
-                RvInst::Beq { rs1, rs2, imm } => {
+                Inst::Beq { rs1, rs2, imm } => {
                     if reg_read(regs, rs1) == reg_read(regs, rs2) {
                         let target = (pc as i64).wrapping_add(imm as i64) as u32;
                         match find_idx_for_pc(insts, target) {
@@ -662,7 +662,7 @@ impl RvInterpreter {
                         }
                     }
                 }
-                RvInst::Bne { rs1, rs2, imm } => {
+                Inst::Bne { rs1, rs2, imm } => {
                     if reg_read(regs, rs1) != reg_read(regs, rs2) {
                         let target = (pc as i64).wrapping_add(imm as i64) as u32;
                         match find_idx_for_pc(insts, target) {
@@ -674,7 +674,7 @@ impl RvInterpreter {
                         }
                     }
                 }
-                RvInst::Blt { rs1, rs2, imm } => {
+                Inst::Blt { rs1, rs2, imm } => {
                     if (reg_read(regs, rs1) as i64) < (reg_read(regs, rs2) as i64) {
                         let target = (pc as i64).wrapping_add(imm as i64) as u32;
                         match find_idx_for_pc(insts, target) {
@@ -686,7 +686,7 @@ impl RvInterpreter {
                         }
                     }
                 }
-                RvInst::Bge { rs1, rs2, imm } => {
+                Inst::Bge { rs1, rs2, imm } => {
                     if (reg_read(regs, rs1) as i64) >= (reg_read(regs, rs2) as i64) {
                         let target = (pc as i64).wrapping_add(imm as i64) as u32;
                         match find_idx_for_pc(insts, target) {
@@ -698,7 +698,7 @@ impl RvInterpreter {
                         }
                     }
                 }
-                RvInst::Bltu { rs1, rs2, imm } => {
+                Inst::Bltu { rs1, rs2, imm } => {
                     if reg_read(regs, rs1) < reg_read(regs, rs2) {
                         let target = (pc as i64).wrapping_add(imm as i64) as u32;
                         match find_idx_for_pc(insts, target) {
@@ -710,7 +710,7 @@ impl RvInterpreter {
                         }
                     }
                 }
-                RvInst::Bgeu { rs1, rs2, imm } => {
+                Inst::Bgeu { rs1, rs2, imm } => {
                     if reg_read(regs, rs1) >= reg_read(regs, rs2) {
                         let target = (pc as i64).wrapping_add(imm as i64) as u32;
                         match find_idx_for_pc(insts, target) {
@@ -724,14 +724,14 @@ impl RvInterpreter {
                 }
 
                 // ---- System (no-op for our single-threaded VM) --------------
-                RvInst::Fence | RvInst::FenceI => {}
+                Inst::Fence | Inst::FenceI => {}
 
                 // ---- Custom-0 -----------------------------------------------
-                RvInst::Trap => {
+                Inst::Trap => {
                     regs.pc = pc as u64;
                     return ExitReason::Trap;
                 }
-                RvInst::EcallJar => {
+                Inst::EcallJar => {
                     regs.pc = next_pc as u64;
                     match handler.handle(EcallKind::Ecall, regs, mem) {
                         EcallResult::Continue => match find_idx_for_pc(insts, next_pc) {
@@ -741,7 +741,7 @@ impl RvInterpreter {
                         EcallResult::Exit(r) => return r,
                     }
                 }
-                RvInst::Ecalli { imm } => {
+                Inst::Ecalli { imm } => {
                     regs.pc = next_pc as u64;
                     match handler.handle(EcallKind::Ecalli(imm as u32), regs, mem) {
                         EcallResult::Continue => match find_idx_for_pc(insts, next_pc) {
@@ -751,7 +751,7 @@ impl RvInterpreter {
                         EcallResult::Exit(r) => return r,
                     }
                 }
-                RvInst::BrTable { table_id, rs1 } => {
+                Inst::BrTable { table_id, rs1 } => {
                     // Spec: idx = (rs1 - 1) >> 1; if rs1 == 0 or idx OOB,
                     // recompiler routes to PANIC (not fallthrough — see
                     // `rv_br_table` comment). Match exactly.
@@ -781,13 +781,13 @@ impl RvInterpreter {
                         }
                     }
                 }
-                RvInst::Fallthrough => {
+                Inst::Fallthrough => {
                     // Terminator no-op: just advance. The next instruction is
                     // already marked as a block start so its cost gets
                     // charged on the next iteration.
                 }
 
-                RvInst::Reserved { .. } => {
+                Inst::Reserved { .. } => {
                     regs.pc = pc as u64;
                     return ExitReason::Panic;
                 }
@@ -868,7 +868,7 @@ mod tests {
     use super::*;
     use crate::ecall::PanickingHandler;
     use crate::mem::CopyingMemory;
-    use crate::rv_predecode::predecode_rv;
+    use crate::predecode::predecode;
     use alloc::vec::Vec;
 
     fn enc4(words: &[u32]) -> Vec<u8> {
@@ -880,12 +880,12 @@ mod tests {
     }
 
     fn run_simple(code: &[u8], initial_gas: u64) -> (Regs, ExitReason, u64) {
-        let pre = predecode_rv(code);
+        let pre = predecode(code);
         let mut regs = Regs::new();
         let mut mem = CopyingMemory::new();
         let mut gas = GasCounter::new(initial_gas);
         let mut h = PanickingHandler;
-        let reason = RvInterpreter::run(&pre, &[], &[], &mut regs, &mut mem, &mut gas, &mut h);
+        let reason = Interpreter::run(&pre, &[], &[], &mut regs, &mut mem, &mut gas, &mut h);
         let used = initial_gas.saturating_sub(gas.remaining());
         (regs, reason, used)
     }
@@ -982,12 +982,12 @@ mod tests {
         let code = enc4(&[br_table]);
         // Provide a jump_table_offsets with one table to pass the
         // table_id bounds check; rs1=0 should panic regardless.
-        let pre = predecode_rv(&code);
+        let pre = predecode(&code);
         let mut regs = Regs::new();
         let mut mem = CopyingMemory::new();
         let mut gas = GasCounter::new(1_000_000);
         let mut h = PanickingHandler;
-        let reason = RvInterpreter::run(&pre, &[], &[0, 0], &mut regs, &mut mem, &mut gas, &mut h);
+        let reason = Interpreter::run(&pre, &[], &[0, 0], &mut regs, &mut mem, &mut gas, &mut h);
         assert_eq!(reason, ExitReason::Panic);
     }
 }

@@ -1025,7 +1025,7 @@ mod tests {
     use crate::kernel_assist::InProcessKernelAssist;
     use javm_cap::image::Image;
     use javm_cap::{CNodeCap, NUM_REGS};
-    use javm_exec::{Access, GasCounter, Mem, PAGE_SIZE, Regs, rv_interp::RvProgram};
+    use javm_exec::{Access, GasCounter, Mem, PAGE_SIZE, Regs, interp::Program};
     use std::sync::Arc;
 
     fn fixture_vm() -> Vm<InProcessKernelAssist> {
@@ -1036,11 +1036,7 @@ mod tests {
             .set(SlotIdx(2), Some(CapHashOrRef::Hash([0xAA; 32])))
             .unwrap();
         // Trivial PVM2 blob: single `trap` (custom-0 funct3=000).
-        let prog = Arc::new(RvProgram::new(
-            vec![0x0B, 0x00, 0x00, 0x00],
-            vec![],
-            vec![0],
-        ));
+        let prog = Arc::new(Program::new(vec![0x0B, 0x00, 0x00, 0x00], vec![], vec![0]));
         let entry = InstanceEntry {
             instance_ref: CapHashOrRef::Hash([1u8; 32]),
             image_hash_chain: [1u8; 32],

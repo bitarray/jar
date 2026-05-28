@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use javm_cap::{CNodeCap, CapHash, CapHashOrRef, SlotIdx};
-use javm_exec::{GasCounter, Mem, Regs, rv_interp::RvProgram};
+use javm_exec::{GasCounter, Mem, Regs, interp::Program};
 
 use crate::error::VmError;
 
@@ -59,7 +59,7 @@ pub struct InstanceEntry {
     /// Cached for quick read of the bound Image hash.
     pub image_hash: CapHash,
     /// Predecoded bytecode (keyed by `image_hash` in `ImageCache`).
-    pub program: Arc<RvProgram>,
+    pub program: Arc<Program>,
     /// MainFrame cnode — the active CapTable. Owned by this entry; on
     /// HALT it's commit-merged back into the cache.
     pub root_cnode: CNodeCap,
@@ -327,11 +327,7 @@ mod tests {
     use super::*;
 
     fn make_entry(tag: u8) -> InstanceEntry {
-        let prog = Arc::new(RvProgram::new(
-            vec![0x0B, 0x00, 0x00, 0x00],
-            vec![],
-            vec![0],
-        ));
+        let prog = Arc::new(Program::new(vec![0x0B, 0x00, 0x00, 0x00], vec![], vec![0]));
         let cnode = CNodeCap::new(8).unwrap();
         InstanceEntry {
             instance_ref: CapHashOrRef::Hash([tag; 32]),

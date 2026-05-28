@@ -513,7 +513,7 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     let rw: (u32, &[u8]) = (overlay_bufs[2].0, overlay_bufs[2].1.as_slice());
 
     // PVM2: `code` is raw RV+C+custom-0 bytes (produced by
-    // `javm_transpiler::linker_rv::link_elf_rv`). The JIT cache
+    // `javm_transpiler::linker::link_elf`). The JIT cache
     // predecodes the bytes once and populates the BB region with
     // the valid-PC set.
     //
