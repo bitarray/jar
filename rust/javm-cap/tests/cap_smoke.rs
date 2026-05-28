@@ -13,8 +13,8 @@ fn make_image_cap() -> ImageCap {
     let code: Vec<u8> = vec![0xAB, 0xCD];
     ImageCap {
         code,
-        bitmask: Vec::new(),
         jump_table: Vec::new(),
+        jump_table_offsets: Vec::new(),
         endpoints: Vec::new(),
         mappings: Vec::new(),
         pinned: Vec::new(),

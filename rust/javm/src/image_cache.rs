@@ -1,32 +1,25 @@
 //! Image bytecode predecode cache.
 //!
-//! Predecoding a `javm_exec::PvmProgram` is expensive (basic-block
-//! analysis, gas cost computation, instruction predecoding); doing it
-//! per CALL would dominate the per-invocation cost. The cache is
-//! keyed by Image content_hash so identical Images share a single
-//! `Predecoded` (the bytecode is content-addressed; identical content
-//! always produces identical decoded state).
-//!
-//! Stage 3 stores predecoded `PvmProgram` directly. A future
-//! optimization can swap in JIT-compiled bytes for the same key and
-//! serve both paths from one cache.
+//! Predecoding an image is expensive (basic-block analysis, gas cost
+//! computation, instruction predecoding); doing it per CALL would
+//! dominate the per-invocation cost. The cache is keyed by Image
+//! content_hash so identical Images share a single predecoded body
+//! (the bytecode is content-addressed; identical content always
+//! produces identical decoded state).
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use javm_cap::CapHash;
-use javm_exec::{PvmProgram, gas_cost::DEFAULT_MEM_CYCLES};
+use javm_exec::interp::Program;
 
-use crate::error::VmError;
-
-/// Map from `Image::content_hash` to a parsed `PvmProgram`. The
-/// `PvmProgram` is wrapped in `Arc` so the same predecoded body can be
-/// referenced from multiple in-flight InstanceEntries (siblings) and
-/// from concurrent threads (the kernel may eventually be
-/// multi-threaded).
+/// Map from `Image::content_hash` to the predecoded body. The body is
+/// wrapped in `Arc` so the same predecoded program can be referenced
+/// from multiple in-flight InstanceEntries (siblings) and from
+/// concurrent threads.
 #[derive(Default, Debug)]
 pub struct ImageCache {
-    entries: HashMap<CapHash, Arc<PvmProgram>>,
+    entries: HashMap<CapHash, Arc<Program>>,
 }
 
 impl ImageCache {
@@ -44,34 +37,29 @@ impl ImageCache {
     }
 
     /// Look up by content hash. `None` if not yet cached.
-    pub fn get(&self, content_hash: &CapHash) -> Option<Arc<PvmProgram>> {
+    pub fn get(&self, content_hash: &CapHash) -> Option<Arc<Program>> {
         self.entries.get(content_hash).cloned()
     }
 
     /// Cache a precomputed program under the given content hash.
-    pub fn insert(&mut self, content_hash: CapHash, program: Arc<PvmProgram>) {
+    pub fn insert(&mut self, content_hash: CapHash, program: Arc<Program>) {
         self.entries.insert(content_hash, program);
     }
 
-    /// Look up or compute: if the image's content_hash is in the
-    /// cache, return the cached program; otherwise parse `code`,
-    /// `bitmask`, `jump_table` into a `PvmProgram`, cache it, and
-    /// return it.
+    /// Look up or compute the predecoded program for an image.
     pub fn get_or_decode(
         &mut self,
         content_hash: CapHash,
         code: Vec<u8>,
-        bitmask: Vec<u8>,
         jump_table: Vec<u32>,
-    ) -> Result<Arc<PvmProgram>, VmError> {
+        jump_table_offsets: Vec<u32>,
+    ) -> Arc<Program> {
         if let Some(prog) = self.entries.get(&content_hash) {
-            return Ok(prog.clone());
+            return prog.clone();
         }
-        let prog = PvmProgram::new(code, bitmask, jump_table, DEFAULT_MEM_CYCLES)
-            .map_err(|e| VmError::InvalidBytecode(format!("{:?}", e)))?;
-        let arc = Arc::new(prog);
-        self.entries.insert(content_hash, arc.clone());
-        Ok(arc)
+        let prog = Arc::new(Program::new(code, jump_table, jump_table_offsets));
+        self.entries.insert(content_hash, prog.clone());
+        prog
     }
 
     /// Drop all cached programs. Used at block boundaries by the
@@ -85,10 +73,9 @@ impl ImageCache {
 mod tests {
     use super::*;
 
-    fn trivial_prog() -> (Vec<u8>, Vec<u8>, Vec<u32>) {
-        // Single trap instruction (opcode 0); bitmask marks it as an
-        // instruction start.
-        (vec![0u8], vec![1u8], vec![])
+    fn trivial_blob() -> (Vec<u8>, Vec<u32>, Vec<u32>) {
+        // Single `trap` instruction (custom-0 funct3=000, opcode 0x0B).
+        (vec![0x0B, 0x00, 0x00, 0x00], vec![], vec![0])
     }
 
     #[test]
@@ -97,8 +84,8 @@ mod tests {
         let h = [1u8; 32];
         assert!(cache.get(&h).is_none());
 
-        let (code, bm, jt) = trivial_prog();
-        let p = cache.get_or_decode(h, code, bm, jt).unwrap();
+        let (code, jt, jto) = trivial_blob();
+        let p = cache.get_or_decode(h, code, jt, jto);
         assert_eq!(cache.len(), 1);
         assert!(Arc::ptr_eq(&p, &cache.get(&h).unwrap()));
     }
@@ -107,12 +94,10 @@ mod tests {
     fn get_or_decode_reuses_existing_entry() {
         let mut cache = ImageCache::new();
         let h = [2u8; 32];
-        let (c1, b1, j1) = trivial_prog();
-        let (c2, b2, j2) = trivial_prog();
-        let p1 = cache.get_or_decode(h, c1, b1, j1).unwrap();
-        let p2 = cache.get_or_decode(h, c2, b2, j2).unwrap();
-        // Same Arc — the cache returned the cached entry, not a
-        // freshly-decoded one.
+        let (c1, jt1, jto1) = trivial_blob();
+        let (c2, jt2, jto2) = trivial_blob();
+        let p1 = cache.get_or_decode(h, c1, jt1, jto1);
+        let p2 = cache.get_or_decode(h, c2, jt2, jto2);
         assert!(Arc::ptr_eq(&p1, &p2));
         assert_eq!(cache.len(), 1);
     }
@@ -120,19 +105,10 @@ mod tests {
     #[test]
     fn clear_drops_entries() {
         let mut cache = ImageCache::new();
-        let (c, b, j) = trivial_prog();
-        cache.get_or_decode([3u8; 32], c, b, j).unwrap();
+        let (code, jt, jto) = trivial_blob();
+        cache.get_or_decode([3u8; 32], code, jt, jto);
         assert_eq!(cache.len(), 1);
         cache.clear();
         assert!(cache.is_empty());
-    }
-
-    #[test]
-    fn invalid_bytecode_returns_err() {
-        let mut cache = ImageCache::new();
-        // bitmask len mismatch with code: PvmProgram::new returns
-        // `ProgramError::BitmaskLenMismatch`.
-        let res = cache.get_or_decode([4u8; 32], vec![0u8, 0u8], vec![1u8], vec![]);
-        assert!(matches!(res, Err(VmError::InvalidBytecode(_))));
     }
 }

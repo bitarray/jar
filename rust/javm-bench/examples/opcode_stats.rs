@@ -1,313 +1,380 @@
-//! Image-size and opcode-frequency statistics for every bench guest.
-//!
-//! For each of the 12 bench workloads (pvm_bench + stark_bench + sub_vm),
-//! report:
-//!
-//!   - Total wire-format Image size (SSZ-encoded blob length).
-//!   - Code / packed-bitmask / jump-table byte breakdown.
-//!   - Static instruction count (number of opcodes in the code stream).
-//!   - Average bytes per static instruction.
-//!   - Per-opcode static frequency (count + % of static insns).
-//!
-//! Both per-workload and aggregated-across-all-workloads outputs are
-//! printed. Used to inform the PVM2 encoding design — confirms which
-//! opcodes earn their slot and which are rarely used.
-//!
-//! Linux x86-64 only (matches the bench harness).
-//!
-//! Run with:
-//! ```
-//! cargo run --release -p javm-bench --example opcode_stats
-//! ```
+//! Frequency profile of RV opcodes (and adjacency-pair patterns) in
+//! PVM2 guest images. Run to identify which RV variants/pairs are
+//! worth fusion peepholes in the recompiler hot loop.
 
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
-fn main() {
-    eprintln!("opcode_stats is Linux x86-64 only");
+use javm_cap::image::Image;
+use javm_exec::instruction::{Inst, decode};
+use ssz::Decode;
+use std::collections::BTreeMap;
+
+fn variant_name(inst: &Inst) -> &'static str {
+    use Inst::*;
+    match inst {
+        Lb { .. } => "Lb",
+        Lh { .. } => "Lh",
+        Lw { .. } => "Lw",
+        Ld { .. } => "Ld",
+        Lbu { .. } => "Lbu",
+        Lhu { .. } => "Lhu",
+        Lwu { .. } => "Lwu",
+        Sb { .. } => "Sb",
+        Sh { .. } => "Sh",
+        Sw { .. } => "Sw",
+        Sd { .. } => "Sd",
+        Addi { .. } => "Addi",
+        Slti { .. } => "Slti",
+        Sltiu { .. } => "Sltiu",
+        Andi { .. } => "Andi",
+        Ori { .. } => "Ori",
+        Xori { .. } => "Xori",
+        Slli { .. } => "Slli",
+        Srli { .. } => "Srli",
+        Srai { .. } => "Srai",
+        Addiw { .. } => "Addiw",
+        Slliw { .. } => "Slliw",
+        Srliw { .. } => "Srliw",
+        Sraiw { .. } => "Sraiw",
+        Add { .. } => "Add",
+        Sub { .. } => "Sub",
+        Sll { .. } => "Sll",
+        Srl { .. } => "Srl",
+        Sra { .. } => "Sra",
+        Slt { .. } => "Slt",
+        Sltu { .. } => "Sltu",
+        Xor { .. } => "Xor",
+        Or { .. } => "Or",
+        And { .. } => "And",
+        Addw { .. } => "Addw",
+        Subw { .. } => "Subw",
+        Sllw { .. } => "Sllw",
+        Srlw { .. } => "Srlw",
+        Sraw { .. } => "Sraw",
+        Mul { .. } => "Mul",
+        Mulh { .. } => "Mulh",
+        Mulhsu { .. } => "Mulhsu",
+        Mulhu { .. } => "Mulhu",
+        Div { .. } => "Div",
+        Divu { .. } => "Divu",
+        Rem { .. } => "Rem",
+        Remu { .. } => "Remu",
+        Mulw { .. } => "Mulw",
+        Divw { .. } => "Divw",
+        Divuw { .. } => "Divuw",
+        Remw { .. } => "Remw",
+        Remuw { .. } => "Remuw",
+        Clz { .. } => "Clz",
+        Clzw { .. } => "Clzw",
+        Ctz { .. } => "Ctz",
+        Ctzw { .. } => "Ctzw",
+        Cpop { .. } => "Cpop",
+        Cpopw { .. } => "Cpopw",
+        SextB { .. } => "SextB",
+        SextH { .. } => "SextH",
+        ZextH { .. } => "ZextH",
+        Rev8 { .. } => "Rev8",
+        OrcB { .. } => "OrcB",
+        Min { .. } => "Min",
+        Minu { .. } => "Minu",
+        Max { .. } => "Max",
+        Maxu { .. } => "Maxu",
+        Andn { .. } => "Andn",
+        Orn { .. } => "Orn",
+        Xnor { .. } => "Xnor",
+        Rol { .. } => "Rol",
+        Ror { .. } => "Ror",
+        Rolw { .. } => "Rolw",
+        Rorw { .. } => "Rorw",
+        Rori { .. } => "Rori",
+        Roriw { .. } => "Roriw",
+        Sh1add { .. } => "Sh1add",
+        Sh2add { .. } => "Sh2add",
+        Sh3add { .. } => "Sh3add",
+        Sh1adduw { .. } => "Sh1adduw",
+        Sh2adduw { .. } => "Sh2adduw",
+        Sh3adduw { .. } => "Sh3adduw",
+        Adduw { .. } => "Adduw",
+        Slliuw { .. } => "Slliuw",
+        Bclr { .. } => "Bclr",
+        Bclri { .. } => "Bclri",
+        Bext { .. } => "Bext",
+        Bexti { .. } => "Bexti",
+        Binv { .. } => "Binv",
+        Binvi { .. } => "Binvi",
+        Bset { .. } => "Bset",
+        Bseti { .. } => "Bseti",
+        Lui { .. } => "Lui",
+        Jal { .. } => "Jal",
+        Beq { .. } => "Beq",
+        Bne { .. } => "Bne",
+        Blt { .. } => "Blt",
+        Bge { .. } => "Bge",
+        Bltu { .. } => "Bltu",
+        Bgeu { .. } => "Bgeu",
+        EcallJar => "EcallJar",
+        Ecalli { .. } => "Ecalli",
+        BrTable { .. } => "BrTable",
+        Fallthrough => "Fallthrough",
+        Trap => "Trap",
+        Reserved { .. } => "Reserved",
+        CzeroEqz { .. } => "CzeroEqz",
+        CzeroNez { .. } => "CzeroNez",
+        Fence => "Fence",
+        FenceI => "FenceI",
+    }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn main() {
-    linux_x86_64::main();
+fn dst_of(inst: &Inst) -> Option<u8> {
+    use Inst::*;
+    match *inst {
+        Lb { rd, .. }
+        | Lh { rd, .. }
+        | Lw { rd, .. }
+        | Ld { rd, .. }
+        | Lbu { rd, .. }
+        | Lhu { rd, .. }
+        | Lwu { rd, .. }
+        | Addi { rd, .. }
+        | Slti { rd, .. }
+        | Sltiu { rd, .. }
+        | Andi { rd, .. }
+        | Ori { rd, .. }
+        | Xori { rd, .. }
+        | Slli { rd, .. }
+        | Srli { rd, .. }
+        | Srai { rd, .. }
+        | Addiw { rd, .. }
+        | Slliw { rd, .. }
+        | Srliw { rd, .. }
+        | Sraiw { rd, .. }
+        | Add { rd, .. }
+        | Sub { rd, .. }
+        | Sll { rd, .. }
+        | Srl { rd, .. }
+        | Sra { rd, .. }
+        | Slt { rd, .. }
+        | Sltu { rd, .. }
+        | Xor { rd, .. }
+        | Or { rd, .. }
+        | And { rd, .. }
+        | Addw { rd, .. }
+        | Subw { rd, .. }
+        | Sllw { rd, .. }
+        | Srlw { rd, .. }
+        | Sraw { rd, .. }
+        | Mul { rd, .. }
+        | Mulh { rd, .. }
+        | Mulhsu { rd, .. }
+        | Mulhu { rd, .. }
+        | Div { rd, .. }
+        | Divu { rd, .. }
+        | Rem { rd, .. }
+        | Remu { rd, .. }
+        | Mulw { rd, .. }
+        | Divw { rd, .. }
+        | Divuw { rd, .. }
+        | Remw { rd, .. }
+        | Remuw { rd, .. }
+        | Lui { rd, .. }
+        | Sh1add { rd, .. }
+        | Sh2add { rd, .. }
+        | Sh3add { rd, .. }
+        | Sh1adduw { rd, .. }
+        | Sh2adduw { rd, .. }
+        | Sh3adduw { rd, .. }
+        | Adduw { rd, .. }
+        | Slliuw { rd, .. } => Some(rd),
+        _ => None,
+    }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-mod linux_x86_64 {
-    use javm_cap::image::Image;
-    use javm_exec::instruction::Opcode;
-    use javm_exec::unpack_bitmask;
-    use ssz::Decode;
-    use std::collections::BTreeMap;
-
-    struct WorkloadStats {
-        name: &'static str,
-        image_bytes: usize,
-        code_bytes: usize,
-        bitmask_bytes_packed: usize,
-        jump_table_bytes: usize,
-        insn_count: usize,
-        insn_bytes_total: usize,
-        /// opcode byte → count
-        opcode_hist: BTreeMap<u8, usize>,
-        /// invalid-opcode byte → count (should be 0 for valid programs)
-        unknown_hist: BTreeMap<u8, usize>,
-        /// category (Debug string) → count
-        category_hist: BTreeMap<String, usize>,
+fn rs1_of(inst: &Inst) -> Option<u8> {
+    use Inst::*;
+    match *inst {
+        Lb { rs1, .. }
+        | Lh { rs1, .. }
+        | Lw { rs1, .. }
+        | Ld { rs1, .. }
+        | Lbu { rs1, .. }
+        | Lhu { rs1, .. }
+        | Lwu { rs1, .. }
+        | Addi { rs1, .. }
+        | Slti { rs1, .. }
+        | Sltiu { rs1, .. }
+        | Andi { rs1, .. }
+        | Ori { rs1, .. }
+        | Xori { rs1, .. }
+        | Slli { rs1, .. }
+        | Srli { rs1, .. }
+        | Srai { rs1, .. }
+        | Addiw { rs1, .. }
+        | Slliw { rs1, .. }
+        | Srliw { rs1, .. }
+        | Sraiw { rs1, .. }
+        | Add { rs1, .. }
+        | Sub { rs1, .. }
+        | Sll { rs1, .. }
+        | Srl { rs1, .. }
+        | Sra { rs1, .. }
+        | Slt { rs1, .. }
+        | Sltu { rs1, .. }
+        | Xor { rs1, .. }
+        | Or { rs1, .. }
+        | And { rs1, .. }
+        | Addw { rs1, .. }
+        | Subw { rs1, .. }
+        | Sllw { rs1, .. }
+        | Srlw { rs1, .. }
+        | Sraw { rs1, .. }
+        | Mul { rs1, .. }
+        | Mulh { rs1, .. }
+        | Mulhsu { rs1, .. }
+        | Mulhu { rs1, .. }
+        | Div { rs1, .. }
+        | Divu { rs1, .. }
+        | Rem { rs1, .. }
+        | Remu { rs1, .. } => Some(rs1),
+        _ => None,
     }
+}
 
-    fn opcode_name(op: u8) -> String {
-        match Opcode::from_byte(op) {
-            Some(o) => format!("{o:?}"),
-            None => format!("UNKNOWN({op})"),
-        }
-    }
+fn profile_one(name: &str, blob: &[u8]) {
+    let image = Image::from_ssz_bytes(blob).expect("decode Image");
+    let code = &image.code[..];
 
-    fn compute_skip(pc: usize, bitmask: &[u8]) -> usize {
-        for j in 0..25 {
-            let idx = pc + 1 + j;
-            let bit = if idx < bitmask.len() { bitmask[idx] } else { 1 };
-            if bit == 1 {
-                return j;
-            }
-        }
-        24
-    }
+    let mut single: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut total = 0usize;
 
-    fn analyze(name: &'static str, blob: &[u8]) -> WorkloadStats {
-        let image = Image::from_ssz_bytes(blob).unwrap_or_else(|e| {
-            panic!("[{name}] decode Image: {e:?}");
-        });
-        let code = image.code.as_slice();
-        let bitmask = unpack_bitmask(&image.packed_bitmask, code.len());
+    // (prev_variant, this_variant) for variants where prev's dst == this's rs1.
+    let mut chained_pairs: BTreeMap<(&'static str, &'static str), usize> = BTreeMap::new();
+    // LUI+ADDI pairs where the addi consumes the LUI's dst.
+    let mut lui_addi = 0usize;
 
-        let mut opcode_hist: BTreeMap<u8, usize> = BTreeMap::new();
-        let mut unknown_hist: BTreeMap<u8, usize> = BTreeMap::new();
-        let mut category_hist: BTreeMap<String, usize> = BTreeMap::new();
-        let mut insn_count = 0usize;
-        let mut insn_bytes_total = 0usize;
+    // Precise fusion-candidate counters (exact patterns the recompiler fuses).
+    let mut lui_add_same_rd = 0usize; // lui rd, _; add rd, {rd,x|x,rd} (a_rd == rd)
+    let mut ld_add_any = 0usize; // ld rd, _(rs1); add a, rs, rd / a, rd, rs
+    let mut ld_xor_any = 0usize;
+    let mut ld_or_any = 0usize;
+    let mut ld_and_any = 0usize;
 
-        let mut pc = 0usize;
-        while pc < code.len() {
-            // Skip non-opcode bytes (continuation bytes within an instruction).
-            if pc < bitmask.len() && bitmask[pc] != 1 {
-                pc += 1;
-                continue;
-            }
-            let byte = code[pc];
-            match Opcode::from_byte(byte) {
-                Some(op) => {
-                    *opcode_hist.entry(byte).or_default() += 1;
-                    *category_hist
-                        .entry(format!("{:?}", op.category()))
-                        .or_default() += 1;
-                }
-                None => {
-                    *unknown_hist.entry(byte).or_default() += 1;
-                }
-            }
-            insn_count += 1;
-
-            let skip = compute_skip(pc, &bitmask);
-            let insn_len = 1 + skip;
-            insn_bytes_total += insn_len;
-            pc += insn_len;
-        }
-
-        WorkloadStats {
-            name,
-            image_bytes: blob.len(),
-            code_bytes: code.len(),
-            bitmask_bytes_packed: image.packed_bitmask.len(),
-            jump_table_bytes: image.jump_table.len() * core::mem::size_of::<u32>(),
-            insn_count,
-            insn_bytes_total,
-            opcode_hist,
-            unknown_hist,
-            category_hist,
-        }
-    }
-
-    fn print_workload_summary(s: &WorkloadStats) {
-        let bytes_per_insn = if s.insn_count > 0 {
-            s.insn_bytes_total as f64 / s.insn_count as f64
-        } else {
-            0.0
+    let mut prev: Option<Inst> = None;
+    let mut pc = 0;
+    while pc < code.len() {
+        let Some((inst, len)) = decode(&code[pc..]) else {
+            break;
         };
+        total += 1;
+        *single.entry(variant_name(&inst)).or_default() += 1;
+
+        if let Some(p) = prev {
+            let p_dst = dst_of(&p);
+            let i_rs1 = rs1_of(&inst);
+            if let (Some(d), Some(s)) = (p_dst, i_rs1)
+                && d != 0
+                && d == s
+            {
+                *chained_pairs
+                    .entry((variant_name(&p), variant_name(&inst)))
+                    .or_default() += 1;
+                if matches!(p, Inst::Lui { .. }) && matches!(inst, Inst::Addi { .. }) {
+                    lui_addi += 1;
+                }
+            }
+            // Precise Lui→Add same-rd pattern (this is what compile_lui actually fuses).
+            if let (Inst::Lui { rd: l_rd, .. }, Inst::Add { rd: a_rd, rs1, rs2 }) = (p, inst)
+                && a_rd != 0
+                && a_rd == l_rd
+                && (rs1 == l_rd || rs2 == l_rd)
+            {
+                lui_add_same_rd += 1;
+            }
+            // Precise Ld→ALU patterns the recompiler fuses (rd != 0; ALU reads ld's rd).
+            if let Inst::Ld { rd: l_rd, .. } = p
+                && l_rd != 0
+            {
+                let alu_uses_ld = |a_rs1: u8, a_rs2: u8| a_rs1 == l_rd || a_rs2 == l_rd;
+                match inst {
+                    Inst::Add { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
+                        ld_add_any += 1
+                    }
+                    Inst::Xor { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
+                        ld_xor_any += 1
+                    }
+                    Inst::Or { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
+                        ld_or_any += 1
+                    }
+                    Inst::And { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
+                        ld_and_any += 1
+                    }
+                    _ => {}
+                }
+            }
+        }
+        prev = Some(inst);
+        pc += len as usize;
+    }
+
+    let mut singles: Vec<(&&'static str, &usize)> = single.iter().collect();
+    singles.sort_by(|a, b| b.1.cmp(a.1));
+    let mut pairs: Vec<(&(&'static str, &'static str), &usize)> = chained_pairs.iter().collect();
+    pairs.sort_by(|a, b| b.1.cmp(a.1));
+
+    println!(
+        "=== {} (total={}, lui+addi chained={}, {:.2}%) ===",
+        name,
+        total,
+        lui_addi,
+        100.0 * lui_addi as f64 / total as f64
+    );
+    let pct = |c: usize| 100.0 * c as f64 / total as f64;
+    println!(
+        "  fusion-precise: lui+add(same-rd)={:>4} ({:.2}%); ld+add={:>4} ({:.2}%); ld+xor={:>3} ({:.2}%); ld+or={:>3} ({:.2}%); ld+and={:>3} ({:.2}%)",
+        lui_add_same_rd,
+        pct(lui_add_same_rd),
+        ld_add_any,
+        pct(ld_add_any),
+        ld_xor_any,
+        pct(ld_xor_any),
+        ld_or_any,
+        pct(ld_or_any),
+        ld_and_any,
+        pct(ld_and_any),
+    );
+    println!("  top single variants:");
+    for (n, c) in singles.iter().take(10) {
         println!(
-            "{:<22} | image={:>7} code={:>7} bitmask={:>6} jt={:>6} | insns={:>6} bytes/insn={:.2}",
-            s.name,
-            s.image_bytes,
-            s.code_bytes,
-            s.bitmask_bytes_packed,
-            s.jump_table_bytes,
-            s.insn_count,
-            bytes_per_insn,
+            "    {:<12} {:>6}  {:>5.2}%",
+            n,
+            c,
+            100.0 * **c as f64 / total as f64
         );
     }
-
-    fn print_opcode_hist(label: &str, hist: &BTreeMap<u8, usize>, total: usize, top_n: usize) {
-        let mut entries: Vec<(u8, usize)> = hist.iter().map(|(&k, &v)| (k, v)).collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-        println!("\n{label} — top {top_n} opcodes (total static insns = {total}):");
-        println!("  {:<5} {:<22} {:>10} {:>8}", "byte", "name", "count", "%");
-        for (op, count) in entries.iter().take(top_n) {
-            let pct = if total > 0 {
-                100.0 * (*count as f64) / (total as f64)
-            } else {
-                0.0
-            };
-            println!(
-                "  {:>5} {:<22} {:>10} {:>7.2}%",
-                op,
-                opcode_name(*op),
-                count,
-                pct,
-            );
-        }
-        if entries.len() > top_n {
-            let tail_count: usize = entries.iter().skip(top_n).map(|(_, c)| c).sum();
-            let pct = if total > 0 {
-                100.0 * (tail_count as f64) / (total as f64)
-            } else {
-                0.0
-            };
-            println!(
-                "  ... {} more opcodes accounting for {} ({:.2}%)",
-                entries.len() - top_n,
-                tail_count,
-                pct,
-            );
-        }
-    }
-
-    fn print_category_hist(hist: &BTreeMap<String, usize>, total: usize) {
-        let mut entries: Vec<(String, usize)> = hist.iter().map(|(k, &v)| (k.clone(), v)).collect();
-        entries.sort_by_key(|e| core::cmp::Reverse(e.1));
-        println!("\nBy instruction category:");
-        for (cat, count) in &entries {
-            let pct = if total > 0 {
-                100.0 * (*count as f64) / (total as f64)
-            } else {
-                0.0
-            };
-            println!("  {:<22} {:>10} {:>7.2}%", cat, count, pct);
-        }
-    }
-
-    fn aggregate(per_wl: &[WorkloadStats]) -> WorkloadStats {
-        let mut agg = WorkloadStats {
-            name: "AGGREGATE",
-            image_bytes: 0,
-            code_bytes: 0,
-            bitmask_bytes_packed: 0,
-            jump_table_bytes: 0,
-            insn_count: 0,
-            insn_bytes_total: 0,
-            opcode_hist: BTreeMap::new(),
-            unknown_hist: BTreeMap::new(),
-            category_hist: BTreeMap::new(),
-        };
-        for s in per_wl {
-            agg.image_bytes += s.image_bytes;
-            agg.code_bytes += s.code_bytes;
-            agg.bitmask_bytes_packed += s.bitmask_bytes_packed;
-            agg.jump_table_bytes += s.jump_table_bytes;
-            agg.insn_count += s.insn_count;
-            agg.insn_bytes_total += s.insn_bytes_total;
-            for (k, v) in &s.opcode_hist {
-                *agg.opcode_hist.entry(*k).or_default() += v;
-            }
-            for (k, v) in &s.unknown_hist {
-                *agg.unknown_hist.entry(*k).or_default() += v;
-            }
-            for (k, v) in &s.category_hist {
-                *agg.category_hist.entry(k.clone()).or_default() += v;
-            }
-        }
-        agg
-    }
-
-    /// Print which valid opcodes have ZERO uses across all measured workloads.
-    /// These are candidates for removal in a PVM2 encoding redesign.
-    fn print_unused_opcodes(agg_hist: &BTreeMap<u8, usize>) {
-        let all_valid_opcodes: &[u8] = &[
-            0, 1, 2, 3, 10, 20, 30, 31, 32, 33, 40, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
-            62, 70, 71, 72, 73, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 100, 101, 102, 103,
-            104, 105, 106, 107, 108, 109, 110, 111, 120, 121, 122, 123, 124, 125, 126, 127, 128,
-            129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145,
-            146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 170,
-            171, 172, 173, 174, 175, 180, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200,
-            201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217,
-            218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230,
-        ];
-        let unused: Vec<u8> = all_valid_opcodes
-            .iter()
-            .copied()
-            .filter(|op| !agg_hist.contains_key(op))
-            .collect();
+    println!("  top chained pairs (prev.dst == this.rs1):");
+    for ((p, q), c) in pairs.iter().take(10) {
         println!(
-            "\nUnused opcodes ({} of {} valid PVM opcodes have zero static uses across all benches):",
-            unused.len(),
-            all_valid_opcodes.len(),
+            "    {:<12} -> {:<12} {:>5}  {:>5.2}%",
+            p,
+            q,
+            c,
+            100.0 * **c as f64 / total as f64
         );
-        for op in &unused {
-            println!("  {:>5}  {}", op, opcode_name(*op));
-        }
     }
+    println!();
+}
 
-    pub fn main() {
-        let workloads: &[(&'static str, &[u8])] = &[
-            ("prime_sieve", include_bytes!(env!("PRIME_SIEVE_BLOB"))),
-            ("ed25519", include_bytes!(env!("ED25519_BLOB"))),
-            ("keccak", include_bytes!(env!("KECCAK_BLOB"))),
-            ("blake2b", include_bytes!(env!("BLAKE2B_BLOB"))),
-            ("ecrecover", include_bytes!(env!("ECRECOVER_BLOB"))),
-            (
-                "goldilocks_mul",
-                include_bytes!(env!("GOLDILOCKS_MUL_BLOB")),
-            ),
-            (
-                "poseidon2_perm",
-                include_bytes!(env!("POSEIDON2_PERM_BLOB")),
-            ),
-            ("mini_verifier", include_bytes!(env!("MINI_VERIFIER_BLOB"))),
-            ("poly_eval", include_bytes!(env!("POLY_EVAL_BLOB"))),
-            ("fri_fold_tree", include_bytes!(env!("FRI_FOLD_TREE_BLOB"))),
-            (
-                "sub_vm_recurse",
-                include_bytes!(env!("SUB_VM_RECURSE_BLOB")),
-            ),
-            (
-                "sub_vm_data_recurse",
-                include_bytes!(env!("SUB_VM_DATA_RECURSE_BLOB")),
-            ),
-        ];
+macro_rules! workload {
+    ($name:literal, $env:literal) => {
+        profile_one($name, include_bytes!(env!($env)));
+    };
+}
 
-        let stats: Vec<WorkloadStats> = workloads.iter().map(|(n, b)| analyze(n, b)).collect();
-
-        println!("=== Per-workload size + instruction count ===\n");
-        println!(
-            "{:<22} | {:>7} {:>7} {:>6} {:>6} | {:>6} {:>9}",
-            "workload", "image", "code", "bitmsk", "jt", "insns", "B/insn"
-        );
-        println!("{}", "-".repeat(96));
-        for s in &stats {
-            print_workload_summary(s);
-        }
-
-        let agg = aggregate(&stats);
-        println!("{}", "-".repeat(96));
-        print_workload_summary(&agg);
-
-        // Aggregate-level histograms (most informative for design decisions).
-        print_category_hist(&agg.category_hist, agg.insn_count);
-        print_opcode_hist("AGGREGATE", &agg.opcode_hist, agg.insn_count, 30);
-        print_unused_opcodes(&agg.opcode_hist);
-
-        if !agg.unknown_hist.is_empty() {
-            println!("\nWARNING: invalid opcode bytes found in code stream:");
-            for (op, count) in &agg.unknown_hist {
-                println!("  byte {op} → {count} occurrences");
-            }
-        }
-    }
+fn main() {
+    println!("PVM2 RV opcode + chained-pair frequency profile");
+    println!();
+    workload!("ed25519", "ED25519_BLOB");
+    workload!("ecrecover", "ECRECOVER_BLOB");
+    workload!("blake2b", "BLAKE2B_BLOB");
+    workload!("keccak", "KECCAK_BLOB");
+    workload!("poseidon2_perm", "POSEIDON2_PERM_BLOB");
+    workload!("mini_verifier", "MINI_VERIFIER_BLOB");
+    workload!("fri_fold_tree", "FRI_FOLD_TREE_BLOB");
 }

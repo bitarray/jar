@@ -372,13 +372,12 @@ impl<K: KernelAssist> Vm<K> {
             Cap::Image(i) => i.clone(),
             _ => return Err(VmError::ImageNotFound),
         };
-        let unpacked_bitmask = javm_exec::unpack_bitmask(img.bitmask.as_slice(), img.code.len());
         let program = self.image_cache.get_or_decode(
             new_image_hash,
             img.code.as_slice().to_vec(),
-            unpacked_bitmask,
             img.jump_table.as_slice().to_vec(),
-        )?;
+            img.jump_table_offsets.as_slice().to_vec(),
+        );
         let pinned_slots: Vec<SlotIdx> = img.pinned.iter().map(|e| e.slot).collect();
 
         let running = self
@@ -1026,7 +1025,7 @@ mod tests {
     use crate::kernel_assist::InProcessKernelAssist;
     use javm_cap::image::Image;
     use javm_cap::{CNodeCap, NUM_REGS};
-    use javm_exec::{Access, GasCounter, Mem, PAGE_SIZE, PvmProgram, Regs};
+    use javm_exec::{Access, GasCounter, Mem, PAGE_SIZE, Regs, interp::Program};
     use std::sync::Arc;
 
     fn fixture_vm() -> Vm<InProcessKernelAssist> {
@@ -1036,7 +1035,8 @@ mod tests {
         cnode
             .set(SlotIdx(2), Some(CapHashOrRef::Hash([0xAA; 32])))
             .unwrap();
-        let prog = Arc::new(PvmProgram::new(vec![0u8], vec![1u8], vec![], 25).unwrap());
+        // Trivial PVM2 blob: single `trap` (custom-0 funct3=000).
+        let prog = Arc::new(Program::new(vec![0x0B, 0x00, 0x00, 0x00], vec![], vec![0]));
         let entry = InstanceEntry {
             instance_ref: CapHashOrRef::Hash([1u8; 32]),
             image_hash_chain: [1u8; 32],
@@ -1229,8 +1229,9 @@ mod tests {
         let mut vm = fixture_vm();
         let mut cache = CacheDirectory::new();
         let mut img = Image::empty();
-        img.code = vec![10u8, 0];
-        img.packed_bitmask = vec![0b01u8];
+        // PVM2 `ecalli 0` — 32-bit custom-0 word at PC 0.
+        img.code = 0x0000_200Bu32.to_le_bytes().to_vec();
+        img.jump_table_offsets = vec![0, 0];
         let image_hash = cache
             .put_cap(&Cap::image_with_slots(&img, &[], &[]).unwrap())
             .unwrap();
@@ -1250,7 +1251,7 @@ mod tests {
         );
         let running = vm.stack.running_instance().unwrap();
         assert_eq!(running.image_hash, image_hash);
-        assert_eq!(running.program.code, vec![10u8, 0]);
+        assert_eq!(running.program.code, 0x0000_200Bu32.to_le_bytes().to_vec());
     }
 
     #[test]
@@ -1553,8 +1554,9 @@ mod tests {
 
         // Publish a tiny child image with no pinned/initial slots.
         let mut child_img = javm_cap::image::Image::empty();
-        child_img.code = vec![10u8, 0]; // ecalli 0
-        child_img.packed_bitmask = vec![0b01u8];
+        // PVM2 `ecalli 0` — 32-bit custom-0 word at PC 0.
+        child_img.code = 0x0000_200Bu32.to_le_bytes().to_vec();
+        child_img.jump_table_offsets = vec![0, 0];
         let image_hash = cache
             .put_cap(&Cap::image_with_slots(&child_img, &[], &[]).unwrap())
             .unwrap();
@@ -1643,8 +1645,8 @@ mod tests {
         // Publish a no-op image (one Halt instruction) + empty cnode
         // + Cap::Instance referencing them.
         let mut child_img = javm_cap::image::Image::empty();
-        child_img.code = vec![10u8, 0];
-        child_img.packed_bitmask = vec![0b01u8];
+        child_img.code = 0x0000_200Bu32.to_le_bytes().to_vec();
+        child_img.jump_table_offsets = vec![0, 0];
         let image_hash = cache
             .put_cap(&Cap::image_with_slots(&child_img, &[], &[]).unwrap())
             .unwrap();

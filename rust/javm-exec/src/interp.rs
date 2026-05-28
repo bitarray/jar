@@ -1,863 +1,993 @@
-//! Byte-PVM interpreter.
+//! PVM2 (RV+C+Zbb+Zba+Zbs+Zicond+custom-0) interpreter.
 //!
-//! Predecodes a [`PvmProgram`] via [`crate::decode::predecode`] and
-//! dispatches over the resulting [`DecodedInst`](crate::DecodedInst) array.
+//! [`Program`] bundles the constituents an interpreter run needs
+//! (code bytes, predecode output, jump table + offsets) so the
+//! integration layer can cache the predecode alongside the bytecode
+//! and pass a single Arc to the executor.
 //!
-//! Cherry-picked from v2 `javm/src/interpreter/mod.rs::run` (~787
-//! LOC). The opcode-dispatch arms are verbatim modulo two adaptations:
+//! Mirrors the recompiler's semantics — same per-block gas charging at
+//! `Predecode::block_costs`, same RV-spec ALU/branch behaviour, same
+//! `Ecalli`/`BrTable` runtime contracts. Cross-checked against the
+//! recompiler in `pvm2_smoke`: bit-identical `gas_used` and side-effects
+//! on every workload.
 //!
-//! 1. **State as parameters.** v2's `Interpreter` owns gas/regs/mem/
-//!    code/etc. v3's `Interpreter::run` is a free function that takes
-//!    `&PvmProgram + &mut Regs + &mut Mem + &mut GasCounter +
-//!    &mut dyn EcallHandler`. The predecoded state is computed on
-//!    entry (matching v2's `Interpreter::new` flow, but inline rather
-//!    than stored).
-//!
-//! 2. **Ecall routing.** v2 returns `ExitReason::Ecall` / `HostCall`
-//!    directly to the kernel. v3 routes both through the
-//!    `EcallHandler` trait: on `Continue` the loop resumes at
-//!    `inst.next_idx`; on `Exit(reason)` the run returns. The
-//!    diagnostic `regs.gpr[7]` "unsupported opcode" recording from
-//!    the MVP is dropped (full coverage means it can't fire).
-//!
-//! Preserved optimizations (vs v2):
-//! - Predecoded `DecodedInst` flat layout (40 bytes; no `Args` enum
-//!   matching in the hot loop).
-//! - `pc_to_idx` hot-loop indexing for dynamic jumps.
-//! - Gas-block charging via `inst.bb_gas_cost` (JAR v0.8.0).
-//! - `do_load!` / `do_store!` macros (zero overhead).
-//! - Fast-path `mem.read_*` / `write_*` helpers (single MOV on x86).
+//! Dispatch is a `match` over `Inst` variants. Instructions come from
+//! [`Predecode::insts`] (one entry per static instruction); static
+//! branch / jal targets are resolved to instruction indices via binary
+//! search on the (sorted) `insts` array. Reused infrastructure: `Regs`,
+//! `Memory` trait, `GasCounter`, `EcallHandler` — identical to the PVM
+//! interpreter's contract.
 
-use crate::decode::predecode;
+use alloc::vec::Vec;
+
 use crate::ecall::{EcallHandler, EcallKind, EcallResult};
 use crate::exit::ExitReason;
 use crate::gas::GasCounter;
-use crate::instruction::Opcode;
+use crate::instruction::Inst;
 use crate::mem::Memory;
-use crate::program::PvmProgram;
+use crate::predecode::{Predecode, RvPreDecodedInst, predecode};
 use crate::regs::Regs;
 
-/// Namespace for byte-PVM execution.
+/// Predecoded PVM2 program: bytecode plus the per-instruction analysis
+/// the interpreter consumes. Cache-friendly — the integration layer
+/// builds one of these per Image and shares it across invocations.
+#[derive(Debug)]
+pub struct Program {
+    pub code: Vec<u8>,
+    pub predecode: Predecode,
+    pub jump_table: Vec<u32>,
+    pub jump_table_offsets: Vec<u32>,
+}
+
+impl Program {
+    /// Predecode `code` and wrap it together with the Image's jump
+    /// table. The predecode pass is O(code.len()); cache the result.
+    pub fn new(code: Vec<u8>, jump_table: Vec<u32>, jump_table_offsets: Vec<u32>) -> Self {
+        let predecode = predecode(&code);
+        Self {
+            code,
+            predecode,
+            jump_table,
+            jump_table_offsets,
+        }
+    }
+}
+
+/// PVM2 interpreter namespace.
 pub struct Interpreter;
 
 impl Interpreter {
-    /// Execute `program` starting at `regs.pc`. Returns the terminal
-    /// [`ExitReason`]. On return, `regs.pc` reflects the PC at exit
-    /// (already advanced past an ecall instruction if exit came from
-    /// the handler; otherwise the PC of the offending instruction).
-    pub fn run<M: Memory>(
-        program: &PvmProgram,
+    /// Convenience wrapper for [`Interpreter::run`] that accepts a
+    /// cached [`Program`].
+    #[inline]
+    pub fn run_program<M: Memory>(
+        program: &Program,
         regs: &mut Regs,
         mem: &mut M,
         gas: &mut GasCounter,
         handler: &mut dyn EcallHandler,
     ) -> ExitReason {
-        // Macros for repetitive load/store dispatch arms. Each macro
-        // expands to the same code as the hand-written variants, so
-        // there is zero runtime overhead.
-        macro_rules! do_store {
-            ($mem:expr, $exit:ident, $addr:expr, $write_fn:ident, $val:expr) => {{
-                let a = $addr;
-                if !$mem.$write_fn(a, $val) {
-                    $exit = Some(ExitReason::PageFault(a & !0xFFF));
-                }
-            }};
-        }
-        macro_rules! do_load {
-            ($mem:expr, $regs:expr, $exit:ident, $dst:expr, $addr:expr, $read_fn:ident, |$v:ident| $conv:expr) => {{
-                let a = $addr;
-                match $mem.$read_fn(a) {
-                    Some($v) => {
-                        $regs.gpr[$dst] = $conv;
-                    }
-                    None => {
-                        $exit = Some(ExitReason::PageFault(a & !0xFFF));
-                    }
-                }
-            }};
-        }
+        Self::run(
+            &program.predecode,
+            &program.jump_table,
+            &program.jump_table_offsets,
+            regs,
+            mem,
+            gas,
+            handler,
+        )
+    }
 
-        let predecoded = predecode(program);
-        let insts = &predecoded.decoded_insts;
-        let pc_to_idx = &predecoded.pc_to_idx;
-        let basic_block_starts = &predecoded.basic_block_starts;
-        let jump_table = &program.jump_table;
-
-        // Resolve starting PC to instruction index.
-        let mut idx = if (regs.pc as usize) < pc_to_idx.len() {
-            pc_to_idx[regs.pc as usize]
-        } else {
-            u32::MAX
-        };
-        if idx == u32::MAX {
+    /// Execute the predecoded PVM2 program starting at `regs.pc`.
+    /// `jump_table` and `jump_table_offsets` come from the Image
+    /// (see `javm_cap::image::Image`).
+    pub fn run<M: Memory>(
+        predecode: &Predecode,
+        jump_table: &[u32],
+        jump_table_offsets: &[u32],
+        regs: &mut Regs,
+        mem: &mut M,
+        gas: &mut GasCounter,
+        handler: &mut dyn EcallHandler,
+    ) -> ExitReason {
+        // `decode_error_at` records a Reserved encoding seen during the
+        // predecode walk but doesn't preclude execution: programs may
+        // contain unreachable padding (e.g. `0x0000` bytes between
+        // functions) that the recompiler also tolerates. We panic only
+        // if execution actually *reaches* a `Inst::Reserved` arm.
+        let insts: &[RvPreDecodedInst] = &predecode.insts;
+        if insts.is_empty() {
             return ExitReason::Panic;
         }
 
-        loop {
-            // SAFETY: idx is maintained within 0..insts.len() by the
-            // predecoder and incremented only via validated next_idx /
-            // target_idx values.
-            let inst = *unsafe { insts.get_unchecked(idx as usize) };
+        // Resolve starting PC → instruction index.
+        let mut idx = match find_idx_for_pc(insts, regs.pc as u32) {
+            Some(i) => i,
+            None => return ExitReason::Panic,
+        };
 
-            // Per-gas-block charging (JAR v0.8.0): only at PC=0 and
-            // post-terminator starts.
-            if inst.bb_gas_cost > 0 && gas.charge(inst.bb_gas_cost as u64).is_err() {
-                regs.pc = inst.pc as u64;
-                return ExitReason::OutOfGas;
+        loop {
+            let inst = unsafe { insts.get_unchecked(idx) };
+
+            // Per-block gas charging.
+            if inst.is_gas_block_start {
+                let cost = predecode.block_costs[idx] as u64;
+                if cost > 0 && gas.charge(cost).is_err() {
+                    regs.pc = inst.pc as u64;
+                    return ExitReason::OutOfGas;
+                }
             }
 
-            let ra = inst.ra as usize;
-            let rb = inst.rb as usize;
-            let rd = inst.rd as usize;
-            let imm1 = inst.imm1;
+            let pc = inst.pc;
+            let next_pc = inst.next_pc;
 
-            // Most instructions advance sequentially. Branches/jumps
-            // set branch_idx to the pre-resolved instruction index.
-            let mut branch_idx: u32 = u32::MAX;
-            let mut exit: Option<ExitReason> = None;
+            // Terminator arms below set `next_idx_override` to the target
+            // instruction index (computed from PC) and `break` out of
+            // the match so the loop loops with that idx.
+            let mut next_idx_override: Option<usize> = None;
 
-            match inst.opcode {
-                // === No arguments ===
-                Opcode::Trap => {
-                    exit = Some(ExitReason::Trap);
+            match inst.inst {
+                // ---- Loads ---------------------------------------------------
+                Inst::Lb { rd, rs1, imm } => {
+                    let addr = compute_addr(regs, rs1, imm);
+                    match mem.read_u8(addr) {
+                        Some(v) => reg_write(regs, rd, v as i8 as i64 as u64),
+                        None => return page_fault(regs, pc, addr),
+                    }
                 }
-                Opcode::Fallthrough | Opcode::Unlikely => {}
-                Opcode::Ecall => {
-                    regs.pc = inst.next_pc as u64;
-                    match handler.handle(EcallKind::Ecall, regs, mem) {
-                        EcallResult::Continue => {
-                            idx = inst.next_idx;
-                            continue;
-                        }
-                        EcallResult::Exit(reason) => return reason,
+                Inst::Lh { rd, rs1, imm } => {
+                    let addr = compute_addr(regs, rs1, imm);
+                    match mem.read_u16_le(addr) {
+                        Some(v) => reg_write(regs, rd, v as i16 as i64 as u64),
+                        None => return page_fault(regs, pc, addr),
+                    }
+                }
+                Inst::Lw { rd, rs1, imm } => {
+                    let addr = compute_addr(regs, rs1, imm);
+                    match mem.read_u32_le(addr) {
+                        Some(v) => reg_write(regs, rd, v as i32 as i64 as u64),
+                        None => return page_fault(regs, pc, addr),
+                    }
+                }
+                Inst::Ld { rd, rs1, imm } => {
+                    let addr = compute_addr(regs, rs1, imm);
+                    match mem.read_u64_le(addr) {
+                        Some(v) => reg_write(regs, rd, v),
+                        None => return page_fault(regs, pc, addr),
+                    }
+                }
+                Inst::Lbu { rd, rs1, imm } => {
+                    let addr = compute_addr(regs, rs1, imm);
+                    match mem.read_u8(addr) {
+                        Some(v) => reg_write(regs, rd, v as u64),
+                        None => return page_fault(regs, pc, addr),
+                    }
+                }
+                Inst::Lhu { rd, rs1, imm } => {
+                    let addr = compute_addr(regs, rs1, imm);
+                    match mem.read_u16_le(addr) {
+                        Some(v) => reg_write(regs, rd, v as u64),
+                        None => return page_fault(regs, pc, addr),
+                    }
+                }
+                Inst::Lwu { rd, rs1, imm } => {
+                    let addr = compute_addr(regs, rs1, imm);
+                    match mem.read_u32_le(addr) {
+                        Some(v) => reg_write(regs, rd, v as u64),
+                        None => return page_fault(regs, pc, addr),
                     }
                 }
 
-                // === One immediate ===
-                Opcode::Ecalli => {
-                    regs.pc = inst.next_pc as u64;
-                    match handler.handle(EcallKind::Ecalli(imm1 as u32), regs, mem) {
-                        EcallResult::Continue => {
-                            idx = inst.next_idx;
-                            continue;
-                        }
-                        EcallResult::Exit(reason) => return reason,
+                // ---- Stores --------------------------------------------------
+                Inst::Sb { rs1, rs2, imm } => {
+                    let addr = compute_addr(regs, rs1, imm);
+                    if !mem.write_u8(addr, reg_read(regs, rs2) as u8) {
+                        return page_fault(regs, pc, addr);
+                    }
+                }
+                Inst::Sh { rs1, rs2, imm } => {
+                    let addr = compute_addr(regs, rs1, imm);
+                    if !mem.write_u16_le(addr, reg_read(regs, rs2) as u16) {
+                        return page_fault(regs, pc, addr);
+                    }
+                }
+                Inst::Sw { rs1, rs2, imm } => {
+                    let addr = compute_addr(regs, rs1, imm);
+                    if !mem.write_u32_le(addr, reg_read(regs, rs2) as u32) {
+                        return page_fault(regs, pc, addr);
+                    }
+                }
+                Inst::Sd { rs1, rs2, imm } => {
+                    let addr = compute_addr(regs, rs1, imm);
+                    if !mem.write_u64_le(addr, reg_read(regs, rs2)) {
+                        return page_fault(regs, pc, addr);
                     }
                 }
 
-                // === One register + extended immediate ===
-                Opcode::LoadImm64 => {
-                    regs.gpr[ra] = imm1;
+                // ---- ALU immediate (64-bit) ----------------------------------
+                Inst::Addi { rd, rs1, imm } => {
+                    let v = reg_read(regs, rs1).wrapping_add(imm as i64 as u64);
+                    reg_write(regs, rd, v);
+                }
+                Inst::Slti { rd, rs1, imm } => {
+                    let v = ((reg_read(regs, rs1) as i64) < (imm as i64)) as u64;
+                    reg_write(regs, rd, v);
+                }
+                Inst::Sltiu { rd, rs1, imm } => {
+                    let v = (reg_read(regs, rs1) < (imm as i64 as u64)) as u64;
+                    reg_write(regs, rd, v);
+                }
+                Inst::Andi { rd, rs1, imm } => {
+                    let v = reg_read(regs, rs1) & (imm as i64 as u64);
+                    reg_write(regs, rd, v);
+                }
+                Inst::Ori { rd, rs1, imm } => {
+                    let v = reg_read(regs, rs1) | (imm as i64 as u64);
+                    reg_write(regs, rd, v);
+                }
+                Inst::Xori { rd, rs1, imm } => {
+                    let v = reg_read(regs, rs1) ^ (imm as i64 as u64);
+                    reg_write(regs, rd, v);
+                }
+                Inst::Slli { rd, rs1, shamt } => {
+                    reg_write(
+                        regs,
+                        rd,
+                        reg_read(regs, rs1).wrapping_shl(shamt as u32 & 63),
+                    );
+                }
+                Inst::Srli { rd, rs1, shamt } => {
+                    reg_write(
+                        regs,
+                        rd,
+                        reg_read(regs, rs1).wrapping_shr(shamt as u32 & 63),
+                    );
+                }
+                Inst::Srai { rd, rs1, shamt } => {
+                    let v = (reg_read(regs, rs1) as i64).wrapping_shr(shamt as u32 & 63);
+                    reg_write(regs, rd, v as u64);
                 }
 
-                // === One offset (jump) ===
-                Opcode::Jump => {
-                    if inst.target_idx != u32::MAX {
-                        branch_idx = inst.target_idx;
-                    } else {
-                        exit = Some(ExitReason::Panic);
-                    }
+                // ---- ALU immediate (32-bit, sign-extend to 64) ---------------
+                Inst::Addiw { rd, rs1, imm } => {
+                    let v = (reg_read(regs, rs1) as i32).wrapping_add(imm);
+                    reg_write(regs, rd, v as i64 as u64);
+                }
+                Inst::Slliw { rd, rs1, shamt } => {
+                    let v = (reg_read(regs, rs1) as u32).wrapping_shl(shamt as u32 & 31);
+                    reg_write(regs, rd, v as i32 as i64 as u64);
+                }
+                Inst::Srliw { rd, rs1, shamt } => {
+                    let v = (reg_read(regs, rs1) as u32).wrapping_shr(shamt as u32 & 31);
+                    reg_write(regs, rd, v as i32 as i64 as u64);
+                }
+                Inst::Sraiw { rd, rs1, shamt } => {
+                    let v = (reg_read(regs, rs1) as i32).wrapping_shr(shamt as u32 & 31);
+                    reg_write(regs, rd, v as i64 as u64);
                 }
 
-                // === One register + one immediate ===
-                Opcode::JumpInd => {
-                    let addr = regs.gpr[ra].wrapping_add(imm1) % (1u64 << 32);
-                    match djump(addr, jump_table, basic_block_starts) {
-                        Ok(target_pc) => {
-                            let t = target_pc as usize;
-                            if t < pc_to_idx.len() {
-                                let tidx = pc_to_idx[t];
-                                if tidx != u32::MAX {
-                                    branch_idx = tidx;
-                                } else {
-                                    exit = Some(ExitReason::Panic);
-                                }
-                            } else {
-                                exit = Some(ExitReason::Panic);
-                            }
-                        }
-                        Err(reason) => exit = Some(reason),
-                    }
+                // ---- ALU register-register (64-bit) --------------------------
+                Inst::Add { rd, rs1, rs2 } => {
+                    let v = reg_read(regs, rs1).wrapping_add(reg_read(regs, rs2));
+                    reg_write(regs, rd, v);
                 }
-                Opcode::LoadImm => {
-                    regs.gpr[ra] = imm1;
+                Inst::Sub { rd, rs1, rs2 } => {
+                    let v = reg_read(regs, rs1).wrapping_sub(reg_read(regs, rs2));
+                    reg_write(regs, rd, v);
+                }
+                Inst::Sll { rd, rs1, rs2 } => {
+                    let s = reg_read(regs, rs2) as u32 & 63;
+                    reg_write(regs, rd, reg_read(regs, rs1).wrapping_shl(s));
+                }
+                Inst::Srl { rd, rs1, rs2 } => {
+                    let s = reg_read(regs, rs2) as u32 & 63;
+                    reg_write(regs, rd, reg_read(regs, rs1).wrapping_shr(s));
+                }
+                Inst::Sra { rd, rs1, rs2 } => {
+                    let s = reg_read(regs, rs2) as u32 & 63;
+                    reg_write(
+                        regs,
+                        rd,
+                        (reg_read(regs, rs1) as i64).wrapping_shr(s) as u64,
+                    );
+                }
+                Inst::Slt { rd, rs1, rs2 } => {
+                    let v = ((reg_read(regs, rs1) as i64) < (reg_read(regs, rs2) as i64)) as u64;
+                    reg_write(regs, rd, v);
+                }
+                Inst::Sltu { rd, rs1, rs2 } => {
+                    let v = (reg_read(regs, rs1) < reg_read(regs, rs2)) as u64;
+                    reg_write(regs, rd, v);
+                }
+                Inst::Xor { rd, rs1, rs2 } => {
+                    reg_write(regs, rd, reg_read(regs, rs1) ^ reg_read(regs, rs2));
+                }
+                Inst::Or { rd, rs1, rs2 } => {
+                    reg_write(regs, rd, reg_read(regs, rs1) | reg_read(regs, rs2));
+                }
+                Inst::And { rd, rs1, rs2 } => {
+                    reg_write(regs, rd, reg_read(regs, rs1) & reg_read(regs, rs2));
                 }
 
-                // === Two registers ===
-                Opcode::MoveReg => {
-                    regs.gpr[rd] = regs.gpr[ra];
+                // ---- ALU register-register (32-bit, sign-extend to 64) ------
+                Inst::Addw { rd, rs1, rs2 } => {
+                    let v = (reg_read(regs, rs1) as i32).wrapping_add(reg_read(regs, rs2) as i32);
+                    reg_write(regs, rd, v as i64 as u64);
                 }
-                Opcode::Sbrk => {
-                    // JAR v0.8.0: sbrk removed.
-                    exit = Some(ExitReason::Panic);
+                Inst::Subw { rd, rs1, rs2 } => {
+                    let v = (reg_read(regs, rs1) as i32).wrapping_sub(reg_read(regs, rs2) as i32);
+                    reg_write(regs, rd, v as i64 as u64);
                 }
-                Opcode::CountSetBits64 => {
-                    regs.gpr[rd] = regs.gpr[ra].count_ones() as u64;
+                Inst::Sllw { rd, rs1, rs2 } => {
+                    let s = reg_read(regs, rs2) as u32 & 31;
+                    let v = (reg_read(regs, rs1) as u32).wrapping_shl(s);
+                    reg_write(regs, rd, v as i32 as i64 as u64);
                 }
-                Opcode::CountSetBits32 => {
-                    regs.gpr[rd] = (regs.gpr[ra] as u32).count_ones() as u64;
+                Inst::Srlw { rd, rs1, rs2 } => {
+                    let s = reg_read(regs, rs2) as u32 & 31;
+                    let v = (reg_read(regs, rs1) as u32).wrapping_shr(s);
+                    reg_write(regs, rd, v as i32 as i64 as u64);
                 }
-                Opcode::LeadingZeroBits64 => {
-                    regs.gpr[rd] = regs.gpr[ra].leading_zeros() as u64;
-                }
-                Opcode::LeadingZeroBits32 => {
-                    regs.gpr[rd] = (regs.gpr[ra] as u32).leading_zeros() as u64;
-                }
-                Opcode::TrailingZeroBits64 => {
-                    regs.gpr[rd] = regs.gpr[ra].trailing_zeros() as u64;
-                }
-                Opcode::TrailingZeroBits32 => {
-                    regs.gpr[rd] = (regs.gpr[ra] as u32).trailing_zeros() as u64;
-                }
-                Opcode::SignExtend8 => {
-                    regs.gpr[rd] = regs.gpr[ra] as u8 as i8 as i64 as u64;
-                }
-                Opcode::SignExtend16 => {
-                    regs.gpr[rd] = regs.gpr[ra] as u16 as i16 as i64 as u64;
-                }
-                Opcode::ZeroExtend16 => {
-                    regs.gpr[rd] = regs.gpr[ra] as u16 as u64;
-                }
-                Opcode::ReverseBytes => {
-                    regs.gpr[rd] = regs.gpr[ra].swap_bytes();
+                Inst::Sraw { rd, rs1, rs2 } => {
+                    let s = reg_read(regs, rs2) as u32 & 31;
+                    let v = (reg_read(regs, rs1) as i32).wrapping_shr(s);
+                    reg_write(regs, rd, v as i64 as u64);
                 }
 
-                // === Two registers + one immediate ===
-                Opcode::AddImm32 => {
-                    regs.gpr[ra] = crate::args::sign_extend_32(regs.gpr[rb].wrapping_add(imm1));
-                }
-                Opcode::AddImm64 => {
-                    regs.gpr[ra] = regs.gpr[rb].wrapping_add(imm1);
-                }
-                Opcode::MulImm32 => {
-                    regs.gpr[ra] = crate::args::sign_extend_32(
-                        (regs.gpr[rb] as u32).wrapping_mul(imm1 as u32) as u64,
-                    );
-                }
-                Opcode::MulImm64 => {
-                    regs.gpr[ra] = regs.gpr[rb].wrapping_mul(imm1);
-                }
-                Opcode::AndImm => {
-                    regs.gpr[ra] = regs.gpr[rb] & imm1;
-                }
-                Opcode::XorImm => {
-                    regs.gpr[ra] = regs.gpr[rb] ^ imm1;
-                }
-                Opcode::OrImm => {
-                    regs.gpr[ra] = regs.gpr[rb] | imm1;
-                }
-                Opcode::SetLtUImm => {
-                    regs.gpr[ra] = if regs.gpr[rb] < imm1 { 1 } else { 0 };
-                }
-                Opcode::SetLtSImm => {
-                    regs.gpr[ra] = if (regs.gpr[rb] as i64) < (imm1 as i64) {
-                        1
-                    } else {
-                        0
-                    };
-                }
-                Opcode::SetGtUImm => {
-                    regs.gpr[ra] = if regs.gpr[rb] > imm1 { 1 } else { 0 };
-                }
-                Opcode::SetGtSImm => {
-                    regs.gpr[ra] = if (regs.gpr[rb] as i64) > (imm1 as i64) {
-                        1
-                    } else {
-                        0
-                    };
-                }
-                Opcode::ShloLImm32 => {
-                    regs.gpr[ra] = crate::args::sign_extend_32(
-                        (regs.gpr[rb] as u32).wrapping_shl((imm1 % 32) as u32) as u64,
-                    );
-                }
-                Opcode::ShloRImm32 => {
-                    regs.gpr[ra] = crate::args::sign_extend_32(
-                        (regs.gpr[rb] as u32).wrapping_shr((imm1 % 32) as u32) as u64,
-                    );
-                }
-                Opcode::SharRImm32 => {
-                    regs.gpr[ra] =
-                        (regs.gpr[rb] as u32 as i32).wrapping_shr((imm1 % 32) as u32) as i64 as u64;
-                }
-                Opcode::ShloLImm64 => {
-                    regs.gpr[ra] = regs.gpr[rb].wrapping_shl((imm1 % 64) as u32);
-                }
-                Opcode::ShloRImm64 => {
-                    regs.gpr[ra] = regs.gpr[rb].wrapping_shr((imm1 % 64) as u32);
-                }
-                Opcode::SharRImm64 => {
-                    regs.gpr[ra] = (regs.gpr[rb] as i64).wrapping_shr((imm1 % 64) as u32) as u64;
-                }
-                Opcode::NegAddImm32 => {
-                    regs.gpr[ra] =
-                        crate::args::sign_extend_32(imm1.wrapping_sub(regs.gpr[rb]) as u32 as u64);
-                }
-                Opcode::NegAddImm64 => {
-                    regs.gpr[ra] = imm1.wrapping_sub(regs.gpr[rb]);
-                }
-                Opcode::CmovIzImm => {
-                    if regs.gpr[rb] == 0 {
-                        regs.gpr[ra] = imm1;
-                    }
-                }
-                Opcode::CmovNzImm => {
-                    if regs.gpr[rb] != 0 {
-                        regs.gpr[ra] = imm1;
-                    }
-                }
-                Opcode::RotR64Imm => {
-                    regs.gpr[ra] = regs.gpr[rb].rotate_right((imm1 % 64) as u32);
-                }
-                Opcode::RotR32Imm => {
-                    regs.gpr[ra] = crate::args::sign_extend_32(
-                        (regs.gpr[rb] as u32).rotate_right((imm1 % 32) as u32) as u64,
-                    );
-                }
-
-                // ImmAlt variants: op ra, imm, rb (imm is the "left" operand).
-                Opcode::ShloLImmAlt32 => {
-                    regs.gpr[ra] = crate::args::sign_extend_32(
-                        (imm1 as u32).wrapping_shl((regs.gpr[rb] % 32) as u32) as u64,
-                    );
-                }
-                Opcode::ShloRImmAlt32 => {
-                    regs.gpr[ra] = crate::args::sign_extend_32(
-                        (imm1 as u32).wrapping_shr((regs.gpr[rb] % 32) as u32) as u64,
-                    );
-                }
-                Opcode::SharRImmAlt32 => {
-                    regs.gpr[ra] = ((imm1 as u32) as i32).wrapping_shr((regs.gpr[rb] % 32) as u32)
-                        as i64 as u64;
-                }
-                Opcode::ShloLImmAlt64 => {
-                    regs.gpr[ra] = imm1.wrapping_shl((regs.gpr[rb] % 64) as u32);
-                }
-                Opcode::ShloRImmAlt64 => {
-                    regs.gpr[ra] = imm1.wrapping_shr((regs.gpr[rb] % 64) as u32);
-                }
-                Opcode::SharRImmAlt64 => {
-                    regs.gpr[ra] = (imm1 as i64).wrapping_shr((regs.gpr[rb] % 64) as u32) as u64;
-                }
-                Opcode::RotR64ImmAlt => {
-                    regs.gpr[ra] = imm1.rotate_right((regs.gpr[rb] % 64) as u32);
-                }
-                Opcode::RotR32ImmAlt => {
-                    regs.gpr[ra] = crate::args::sign_extend_32(
-                        (imm1 as u32).rotate_right((regs.gpr[rb] % 32) as u32) as u64,
-                    );
-                }
-
-                // === Two registers + one offset (branches) ===
-                Opcode::BranchEq
-                | Opcode::BranchNe
-                | Opcode::BranchLtU
-                | Opcode::BranchGeU
-                | Opcode::BranchLtS
-                | Opcode::BranchGeS => {
-                    let (a, b) = (regs.gpr[ra], regs.gpr[rb]);
-                    let cond = match inst.opcode {
-                        Opcode::BranchEq => a == b,
-                        Opcode::BranchNe => a != b,
-                        Opcode::BranchLtU => a < b,
-                        Opcode::BranchGeU => a >= b,
-                        Opcode::BranchLtS => (a as i64) < (b as i64),
-                        Opcode::BranchGeS => (a as i64) >= (b as i64),
-                        _ => unreachable!(),
-                    };
-                    if cond {
-                        if inst.target_idx != u32::MAX {
-                            branch_idx = inst.target_idx;
-                        } else {
-                            exit = Some(ExitReason::Panic);
-                        }
-                    }
-                }
-
-                // === Three register ALU ===
-                Opcode::Add32 => {
-                    regs.gpr[rd] =
-                        crate::args::sign_extend_32(regs.gpr[ra].wrapping_add(regs.gpr[rb]));
-                }
-                Opcode::Sub32 => {
-                    regs.gpr[rd] =
-                        crate::args::sign_extend_32(regs.gpr[ra].wrapping_sub(regs.gpr[rb]));
-                }
-                Opcode::Add64 => {
-                    regs.gpr[rd] = regs.gpr[ra].wrapping_add(regs.gpr[rb]);
-                }
-                Opcode::Sub64 => {
-                    regs.gpr[rd] = regs.gpr[ra].wrapping_sub(regs.gpr[rb]);
-                }
-                Opcode::Mul32 => {
-                    regs.gpr[rd] = crate::args::sign_extend_32(
-                        (regs.gpr[ra] as u32).wrapping_mul(regs.gpr[rb] as u32) as u64,
-                    );
-                }
-                Opcode::Mul64 => {
-                    regs.gpr[rd] = regs.gpr[ra].wrapping_mul(regs.gpr[rb]);
-                }
-                Opcode::And => {
-                    regs.gpr[rd] = regs.gpr[ra] & regs.gpr[rb];
-                }
-                Opcode::Or => {
-                    regs.gpr[rd] = regs.gpr[ra] | regs.gpr[rb];
-                }
-                Opcode::Xor => {
-                    regs.gpr[rd] = regs.gpr[ra] ^ regs.gpr[rb];
-                }
-                Opcode::SetLtU => {
-                    regs.gpr[rd] = if regs.gpr[ra] < regs.gpr[rb] { 1 } else { 0 };
-                }
-                Opcode::SetLtS => {
-                    regs.gpr[rd] = if (regs.gpr[ra] as i64) < (regs.gpr[rb] as i64) {
-                        1
-                    } else {
-                        0
-                    };
-                }
-                Opcode::CmovIz => {
-                    if regs.gpr[rb] == 0 {
-                        regs.gpr[rd] = regs.gpr[ra];
-                    }
-                }
-                Opcode::CmovNz => {
-                    if regs.gpr[rb] != 0 {
-                        regs.gpr[rd] = regs.gpr[ra];
-                    }
-                }
-                Opcode::ShloL32 => {
-                    regs.gpr[rd] = crate::args::sign_extend_32(
-                        (regs.gpr[ra] as u32).wrapping_shl((regs.gpr[rb] % 32) as u32) as u64,
-                    );
-                }
-                Opcode::ShloR32 => {
-                    regs.gpr[rd] = crate::args::sign_extend_32(
-                        (regs.gpr[ra] as u32).wrapping_shr((regs.gpr[rb] % 32) as u32) as u64,
-                    );
-                }
-                Opcode::SharR32 => {
-                    regs.gpr[rd] = (regs.gpr[ra] as u32 as i32)
-                        .wrapping_shr((regs.gpr[rb] % 32) as u32)
-                        as i64 as u64;
-                }
-                Opcode::ShloL64 => {
-                    regs.gpr[rd] = regs.gpr[ra].wrapping_shl((regs.gpr[rb] % 64) as u32);
-                }
-                Opcode::ShloR64 => {
-                    regs.gpr[rd] = regs.gpr[ra].wrapping_shr((regs.gpr[rb] % 64) as u32);
-                }
-                Opcode::SharR64 => {
-                    regs.gpr[rd] =
-                        (regs.gpr[ra] as i64).wrapping_shr((regs.gpr[rb] % 64) as u32) as u64;
-                }
-                Opcode::RotL64 => {
-                    regs.gpr[rd] = regs.gpr[ra].rotate_left((regs.gpr[rb] % 64) as u32);
-                }
-                Opcode::RotR64 => {
-                    regs.gpr[rd] = regs.gpr[ra].rotate_right((regs.gpr[rb] % 64) as u32);
-                }
-                Opcode::RotL32 => {
-                    regs.gpr[rd] = crate::args::sign_extend_32(
-                        (regs.gpr[ra] as u32).rotate_left((regs.gpr[rb] % 32) as u32) as u64,
-                    );
-                }
-                Opcode::RotR32 => {
-                    regs.gpr[rd] = crate::args::sign_extend_32(
-                        (regs.gpr[ra] as u32).rotate_right((regs.gpr[rb] % 32) as u32) as u64,
-                    );
-                }
-                Opcode::AndInv => {
-                    regs.gpr[rd] = regs.gpr[ra] & !regs.gpr[rb];
-                }
-                Opcode::OrInv => {
-                    regs.gpr[rd] = regs.gpr[ra] | !regs.gpr[rb];
-                }
-                Opcode::Xnor => {
-                    regs.gpr[rd] = !(regs.gpr[ra] ^ regs.gpr[rb]);
-                }
-                Opcode::Max => {
-                    regs.gpr[rd] = core::cmp::max(regs.gpr[ra] as i64, regs.gpr[rb] as i64) as u64;
-                }
-                Opcode::MaxU => {
-                    regs.gpr[rd] = core::cmp::max(regs.gpr[ra], regs.gpr[rb]);
-                }
-                Opcode::Min => {
-                    regs.gpr[rd] = core::cmp::min(regs.gpr[ra] as i64, regs.gpr[rb] as i64) as u64;
-                }
-                Opcode::MinU => {
-                    regs.gpr[rd] = core::cmp::min(regs.gpr[ra], regs.gpr[rb]);
-                }
-
-                // === Indirect loads (two reg + imm) ===
-                Opcode::LoadIndU8 => do_load!(
-                    mem,
-                    regs,
-                    exit,
-                    ra,
-                    regs.gpr[rb].wrapping_add(imm1) as u32,
-                    read_u8,
-                    |v| v as u64
-                ),
-                Opcode::LoadIndI8 => do_load!(
-                    mem,
-                    regs,
-                    exit,
-                    ra,
-                    regs.gpr[rb].wrapping_add(imm1) as u32,
-                    read_u8,
-                    |v| v as i8 as i64 as u64
-                ),
-                Opcode::LoadIndU16 => do_load!(
-                    mem,
-                    regs,
-                    exit,
-                    ra,
-                    regs.gpr[rb].wrapping_add(imm1) as u32,
-                    read_u16_le,
-                    |v| v as u64
-                ),
-                Opcode::LoadIndI16 => do_load!(
-                    mem,
-                    regs,
-                    exit,
-                    ra,
-                    regs.gpr[rb].wrapping_add(imm1) as u32,
-                    read_u16_le,
-                    |v| v as i16 as i64 as u64
-                ),
-                Opcode::LoadIndU32 => do_load!(
-                    mem,
-                    regs,
-                    exit,
-                    ra,
-                    regs.gpr[rb].wrapping_add(imm1) as u32,
-                    read_u32_le,
-                    |v| v as u64
-                ),
-                Opcode::LoadIndI32 => do_load!(
-                    mem,
-                    regs,
-                    exit,
-                    ra,
-                    regs.gpr[rb].wrapping_add(imm1) as u32,
-                    read_u32_le,
-                    |v| v as i32 as i64 as u64
-                ),
-                Opcode::LoadIndU64 => do_load!(
-                    mem,
-                    regs,
-                    exit,
-                    ra,
-                    regs.gpr[rb].wrapping_add(imm1) as u32,
-                    read_u64_le,
-                    |v| v
-                ),
-
-                // === Indirect stores (two reg + imm) ===
-                Opcode::StoreIndU8 => do_store!(
-                    mem,
-                    exit,
-                    regs.gpr[rb].wrapping_add(imm1) as u32,
-                    write_u8,
-                    regs.gpr[ra] as u8
-                ),
-                Opcode::StoreIndU16 => do_store!(
-                    mem,
-                    exit,
-                    regs.gpr[rb].wrapping_add(imm1) as u32,
-                    write_u16_le,
-                    regs.gpr[ra] as u16
-                ),
-                Opcode::StoreIndU32 => do_store!(
-                    mem,
-                    exit,
-                    regs.gpr[rb].wrapping_add(imm1) as u32,
-                    write_u32_le,
-                    regs.gpr[ra] as u32
-                ),
-                Opcode::StoreIndU64 => do_store!(
-                    mem,
-                    exit,
-                    regs.gpr[rb].wrapping_add(imm1) as u32,
-                    write_u64_le,
-                    regs.gpr[ra]
-                ),
-
-                // === Div/Rem (three reg, common in crypto) ===
-                Opcode::DivU32 => {
-                    let b = regs.gpr[rb] as u32;
-                    regs.gpr[rd] = (regs.gpr[ra] as u32)
-                        .checked_div(b)
-                        .map(|q| crate::args::sign_extend_32(q as u64))
-                        .unwrap_or(u64::MAX);
-                }
-                Opcode::DivU64 => {
-                    let b = regs.gpr[rb];
-                    regs.gpr[rd] = regs.gpr[ra].checked_div(b).unwrap_or(u64::MAX);
-                }
-                Opcode::DivS32 => {
-                    let a = regs.gpr[ra] as i32;
-                    let b = regs.gpr[rb] as i32;
-                    regs.gpr[rd] = if b == 0 {
-                        u64::MAX
-                    } else if a == i32::MIN && b == -1 {
-                        a as u64
-                    } else {
-                        crate::args::sign_extend_32((a / b) as i64 as u64)
-                    };
-                }
-                Opcode::DivS64 => {
-                    let a = regs.gpr[ra] as i64;
-                    let b = regs.gpr[rb] as i64;
-                    regs.gpr[rd] = if b == 0 {
+                // ---- M extension --------------------------------------------
+                Inst::Mul { rd, rs1, rs2 } => {
+                    let v = reg_read(regs, rs1).wrapping_mul(reg_read(regs, rs2));
+                    reg_write(regs, rd, v);
+                }
+                Inst::Mulh { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1) as i64 as i128;
+                    let b = reg_read(regs, rs2) as i64 as i128;
+                    reg_write(regs, rd, ((a * b) >> 64) as u64);
+                }
+                Inst::Mulhsu { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1) as i64 as i128;
+                    let b = reg_read(regs, rs2) as u128 as i128;
+                    reg_write(regs, rd, ((a * b) >> 64) as u64);
+                }
+                Inst::Mulhu { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1) as u128;
+                    let b = reg_read(regs, rs2) as u128;
+                    reg_write(regs, rd, ((a * b) >> 64) as u64);
+                }
+                Inst::Div { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1) as i64;
+                    let b = reg_read(regs, rs2) as i64;
+                    let v = if b == 0 {
                         u64::MAX
                     } else if a == i64::MIN && b == -1 {
                         a as u64
                     } else {
                         (a / b) as u64
                     };
+                    reg_write(regs, rd, v);
                 }
-                Opcode::RemU32 => {
-                    let b = regs.gpr[rb] as u32;
-                    regs.gpr[rd] = if b == 0 {
-                        crate::args::sign_extend_32(regs.gpr[ra] as u32 as u64)
-                    } else {
-                        crate::args::sign_extend_32((regs.gpr[ra] as u32 % b) as u64)
-                    };
+                Inst::Divu { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1);
+                    let b = reg_read(regs, rs2);
+                    let v = a.checked_div(b).unwrap_or(u64::MAX);
+                    reg_write(regs, rd, v);
                 }
-                Opcode::RemU64 => {
-                    let b = regs.gpr[rb];
-                    regs.gpr[rd] = if b == 0 {
-                        regs.gpr[ra]
-                    } else {
-                        regs.gpr[ra] % b
-                    };
-                }
-                Opcode::RemS32 => {
-                    let a = regs.gpr[ra] as i32;
-                    let b = regs.gpr[rb] as i32;
-                    regs.gpr[rd] = if b == 0 {
-                        a as u64
-                    } else if a == i32::MIN && b == -1 {
-                        0
-                    } else {
-                        crate::args::sign_extend_32((a % b) as i64 as u64)
-                    };
-                }
-                Opcode::RemS64 => {
-                    let a = regs.gpr[ra] as i64;
-                    let b = regs.gpr[rb] as i64;
-                    regs.gpr[rd] = if b == 0 {
+                Inst::Rem { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1) as i64;
+                    let b = reg_read(regs, rs2) as i64;
+                    let v = if b == 0 {
                         a as u64
                     } else if a == i64::MIN && b == -1 {
                         0
                     } else {
                         (a % b) as u64
                     };
+                    reg_write(regs, rd, v);
                 }
-                Opcode::MulUpperSS => {
-                    regs.gpr[rd] = ((regs.gpr[ra] as i64 as i128)
-                        .wrapping_mul(regs.gpr[rb] as i64 as i128)
-                        >> 64) as u64;
+                Inst::Remu { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1);
+                    let b = reg_read(regs, rs2);
+                    let v = if b == 0 { a } else { a % b };
+                    reg_write(regs, rd, v);
                 }
-                Opcode::MulUpperUU => {
-                    regs.gpr[rd] =
-                        ((regs.gpr[ra] as u128).wrapping_mul(regs.gpr[rb] as u128) >> 64) as u64;
+                Inst::Mulw { rd, rs1, rs2 } => {
+                    let v = (reg_read(regs, rs1) as i32).wrapping_mul(reg_read(regs, rs2) as i32);
+                    reg_write(regs, rd, v as i64 as u64);
                 }
-                Opcode::MulUpperSU => {
-                    regs.gpr[rd] = ((regs.gpr[ra] as i64 as i128)
-                        .wrapping_mul(regs.gpr[rb] as u128 as i128)
-                        >> 64) as u64;
-                }
-
-                // === Two immediates (store_imm: addr = imm1, value = imm2) ===
-                Opcode::StoreImmU8 => {
-                    do_store!(mem, exit, imm1 as u32, write_u8, inst.imm2 as u8)
-                }
-                Opcode::StoreImmU16 => {
-                    do_store!(mem, exit, imm1 as u32, write_u16_le, inst.imm2 as u16)
-                }
-                Opcode::StoreImmU32 => {
-                    do_store!(mem, exit, imm1 as u32, write_u32_le, inst.imm2 as u32)
-                }
-                Opcode::StoreImmU64 => {
-                    do_store!(mem, exit, imm1 as u32, write_u64_le, inst.imm2)
-                }
-
-                // === Absolute address loads (addr = imm1) ===
-                Opcode::LoadU8 => {
-                    do_load!(mem, regs, exit, ra, imm1 as u32, read_u8, |v| v as u64)
-                }
-                Opcode::LoadI8 => {
-                    do_load!(
-                        mem,
-                        regs,
-                        exit,
-                        ra,
-                        imm1 as u32,
-                        read_u8,
-                        |v| v as i8 as i64 as u64
-                    )
-                }
-                Opcode::LoadU16 => {
-                    do_load!(mem, regs, exit, ra, imm1 as u32, read_u16_le, |v| v as u64)
-                }
-                Opcode::LoadI16 => do_load!(mem, regs, exit, ra, imm1 as u32, read_u16_le, |v| v
-                    as i16
-                    as i64
-                    as u64),
-                Opcode::LoadU32 => {
-                    do_load!(mem, regs, exit, ra, imm1 as u32, read_u32_le, |v| v as u64)
-                }
-                Opcode::LoadI32 => do_load!(mem, regs, exit, ra, imm1 as u32, read_u32_le, |v| v
-                    as i32
-                    as i64
-                    as u64),
-                Opcode::LoadU64 => {
-                    do_load!(mem, regs, exit, ra, imm1 as u32, read_u64_le, |v| v)
-                }
-
-                // === Absolute address stores (addr = imm1, value = reg[ra]) ===
-                Opcode::StoreU8 => {
-                    do_store!(mem, exit, imm1 as u32, write_u8, regs.gpr[ra] as u8)
-                }
-                Opcode::StoreU16 => {
-                    do_store!(mem, exit, imm1 as u32, write_u16_le, regs.gpr[ra] as u16)
-                }
-                Opcode::StoreU32 => {
-                    do_store!(mem, exit, imm1 as u32, write_u32_le, regs.gpr[ra] as u32)
-                }
-                Opcode::StoreU64 => {
-                    do_store!(mem, exit, imm1 as u32, write_u64_le, regs.gpr[ra])
-                }
-
-                // === Store imm indirect (addr = reg[ra] + imm1, value = imm2) ===
-                Opcode::StoreImmIndU8 => do_store!(
-                    mem,
-                    exit,
-                    regs.gpr[ra].wrapping_add(imm1) as u32,
-                    write_u8,
-                    inst.imm2 as u8
-                ),
-                Opcode::StoreImmIndU16 => do_store!(
-                    mem,
-                    exit,
-                    regs.gpr[ra].wrapping_add(imm1) as u32,
-                    write_u16_le,
-                    inst.imm2 as u16
-                ),
-                Opcode::StoreImmIndU32 => do_store!(
-                    mem,
-                    exit,
-                    regs.gpr[ra].wrapping_add(imm1) as u32,
-                    write_u32_le,
-                    inst.imm2 as u32
-                ),
-                Opcode::StoreImmIndU64 => do_store!(
-                    mem,
-                    exit,
-                    regs.gpr[ra].wrapping_add(imm1) as u32,
-                    write_u64_le,
-                    inst.imm2
-                ),
-
-                // === LoadImmJump (reg[ra] = imm1, branch to target) ===
-                Opcode::LoadImmJump => {
-                    regs.gpr[ra] = imm1;
-                    if inst.target_idx != u32::MAX {
-                        branch_idx = inst.target_idx;
+                Inst::Divw { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1) as i32;
+                    let b = reg_read(regs, rs2) as i32;
+                    let v = if b == 0 {
+                        u32::MAX as i32
+                    } else if a == i32::MIN && b == -1 {
+                        a
                     } else {
-                        exit = Some(ExitReason::Panic);
-                    }
+                        a / b
+                    };
+                    reg_write(regs, rd, v as i64 as u64);
+                }
+                Inst::Divuw { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1) as u32;
+                    let b = reg_read(regs, rs2) as u32;
+                    let v = a.checked_div(b).unwrap_or(u32::MAX);
+                    reg_write(regs, rd, v as i32 as i64 as u64);
+                }
+                Inst::Remw { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1) as i32;
+                    let b = reg_read(regs, rs2) as i32;
+                    let v = if b == 0 {
+                        a
+                    } else if a == i32::MIN && b == -1 {
+                        0
+                    } else {
+                        a % b
+                    };
+                    reg_write(regs, rd, v as i64 as u64);
+                }
+                Inst::Remuw { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1) as u32;
+                    let b = reg_read(regs, rs2) as u32;
+                    let v = if b == 0 { a } else { a % b };
+                    reg_write(regs, rd, v as i32 as i64 as u64);
                 }
 
-                // === BranchImm variants (cond on reg[ra] vs imm1) ===
-                Opcode::BranchEqImm
-                | Opcode::BranchNeImm
-                | Opcode::BranchLtUImm
-                | Opcode::BranchLeUImm
-                | Opcode::BranchGeUImm
-                | Opcode::BranchGtUImm
-                | Opcode::BranchLtSImm
-                | Opcode::BranchLeSImm
-                | Opcode::BranchGeSImm
-                | Opcode::BranchGtSImm => {
-                    let (a, b) = (regs.gpr[ra], imm1);
-                    let cond = match inst.opcode {
-                        Opcode::BranchEqImm => a == b,
-                        Opcode::BranchNeImm => a != b,
-                        Opcode::BranchLtUImm => a < b,
-                        Opcode::BranchLeUImm => a <= b,
-                        Opcode::BranchGeUImm => a >= b,
-                        Opcode::BranchGtUImm => a > b,
-                        Opcode::BranchLtSImm => (a as i64) < (b as i64),
-                        Opcode::BranchLeSImm => (a as i64) <= (b as i64),
-                        Opcode::BranchGeSImm => (a as i64) >= (b as i64),
-                        Opcode::BranchGtSImm => (a as i64) > (b as i64),
-                        _ => unreachable!(),
-                    };
-                    if cond {
-                        if inst.target_idx != u32::MAX {
-                            branch_idx = inst.target_idx;
-                        } else {
-                            exit = Some(ExitReason::Panic);
+                // ---- Zbb -----------------------------------------------------
+                Inst::Clz { rd, rs1 } => {
+                    reg_write(regs, rd, reg_read(regs, rs1).leading_zeros() as u64);
+                }
+                Inst::Clzw { rd, rs1 } => {
+                    reg_write(
+                        regs,
+                        rd,
+                        (reg_read(regs, rs1) as u32).leading_zeros() as u64,
+                    );
+                }
+                Inst::Ctz { rd, rs1 } => {
+                    let v = reg_read(regs, rs1);
+                    let n = if v == 0 { 64 } else { v.trailing_zeros() };
+                    reg_write(regs, rd, n as u64);
+                }
+                Inst::Ctzw { rd, rs1 } => {
+                    let v = reg_read(regs, rs1) as u32;
+                    let n = if v == 0 { 32 } else { v.trailing_zeros() };
+                    reg_write(regs, rd, n as u64);
+                }
+                Inst::Cpop { rd, rs1 } => {
+                    reg_write(regs, rd, reg_read(regs, rs1).count_ones() as u64);
+                }
+                Inst::Cpopw { rd, rs1 } => {
+                    reg_write(regs, rd, (reg_read(regs, rs1) as u32).count_ones() as u64);
+                }
+                Inst::SextB { rd, rs1 } => {
+                    reg_write(regs, rd, reg_read(regs, rs1) as i8 as i64 as u64);
+                }
+                Inst::SextH { rd, rs1 } => {
+                    reg_write(regs, rd, reg_read(regs, rs1) as i16 as i64 as u64);
+                }
+                Inst::ZextH { rd, rs1 } => {
+                    reg_write(regs, rd, reg_read(regs, rs1) & 0xFFFF);
+                }
+                Inst::Rev8 { rd, rs1 } => {
+                    reg_write(regs, rd, reg_read(regs, rs1).swap_bytes());
+                }
+                Inst::OrcB { rd, rs1 } => {
+                    let v = reg_read(regs, rs1);
+                    // Per-byte: replace each byte by 0xFF if non-zero, else 0.
+                    let mut out: u64 = 0;
+                    for i in 0..8 {
+                        let b = (v >> (i * 8)) & 0xFF;
+                        if b != 0 {
+                            out |= 0xFFu64 << (i * 8);
                         }
                     }
+                    reg_write(regs, rd, out);
+                }
+                Inst::Min { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1) as i64;
+                    let b = reg_read(regs, rs2) as i64;
+                    reg_write(regs, rd, a.min(b) as u64);
+                }
+                Inst::Minu { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1);
+                    let b = reg_read(regs, rs2);
+                    reg_write(regs, rd, a.min(b));
+                }
+                Inst::Max { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1) as i64;
+                    let b = reg_read(regs, rs2) as i64;
+                    reg_write(regs, rd, a.max(b) as u64);
+                }
+                Inst::Maxu { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1);
+                    let b = reg_read(regs, rs2);
+                    reg_write(regs, rd, a.max(b));
+                }
+                Inst::Andn { rd, rs1, rs2 } => {
+                    reg_write(regs, rd, reg_read(regs, rs1) & !reg_read(regs, rs2));
+                }
+                Inst::Orn { rd, rs1, rs2 } => {
+                    reg_write(regs, rd, reg_read(regs, rs1) | !reg_read(regs, rs2));
+                }
+                Inst::Xnor { rd, rs1, rs2 } => {
+                    reg_write(regs, rd, !(reg_read(regs, rs1) ^ reg_read(regs, rs2)));
+                }
+                Inst::Rol { rd, rs1, rs2 } => {
+                    let s = reg_read(regs, rs2) as u32 & 63;
+                    reg_write(regs, rd, reg_read(regs, rs1).rotate_left(s));
+                }
+                Inst::Ror { rd, rs1, rs2 } => {
+                    let s = reg_read(regs, rs2) as u32 & 63;
+                    reg_write(regs, rd, reg_read(regs, rs1).rotate_right(s));
+                }
+                Inst::Rolw { rd, rs1, rs2 } => {
+                    let s = reg_read(regs, rs2) as u32 & 31;
+                    let v = (reg_read(regs, rs1) as u32).rotate_left(s);
+                    reg_write(regs, rd, v as i32 as i64 as u64);
+                }
+                Inst::Rorw { rd, rs1, rs2 } => {
+                    let s = reg_read(regs, rs2) as u32 & 31;
+                    let v = (reg_read(regs, rs1) as u32).rotate_right(s);
+                    reg_write(regs, rd, v as i32 as i64 as u64);
+                }
+                Inst::Rori { rd, rs1, shamt } => {
+                    reg_write(
+                        regs,
+                        rd,
+                        reg_read(regs, rs1).rotate_right(shamt as u32 & 63),
+                    );
+                }
+                Inst::Roriw { rd, rs1, shamt } => {
+                    let v = (reg_read(regs, rs1) as u32).rotate_right(shamt as u32 & 31);
+                    reg_write(regs, rd, v as i32 as i64 as u64);
                 }
 
-                // === Two registers + two immediates ===
-                Opcode::LoadImmJumpInd => {
-                    regs.gpr[ra] = imm1;
-                    let addr = regs.gpr[rb].wrapping_add(inst.imm2) % (1u64 << 32);
-                    match djump(addr, jump_table, basic_block_starts) {
-                        Ok(target_pc) => {
-                            let t = target_pc as usize;
-                            if t < pc_to_idx.len() {
-                                let tidx = pc_to_idx[t];
-                                if tidx != u32::MAX {
-                                    branch_idx = tidx;
-                                } else {
-                                    exit = Some(ExitReason::Panic);
-                                }
-                            } else {
-                                exit = Some(ExitReason::Panic);
+                // ---- Zba -----------------------------------------------------
+                Inst::Sh1add { rd, rs1, rs2 } => {
+                    let v = reg_read(regs, rs1)
+                        .wrapping_shl(1)
+                        .wrapping_add(reg_read(regs, rs2));
+                    reg_write(regs, rd, v);
+                }
+                Inst::Sh2add { rd, rs1, rs2 } => {
+                    let v = reg_read(regs, rs1)
+                        .wrapping_shl(2)
+                        .wrapping_add(reg_read(regs, rs2));
+                    reg_write(regs, rd, v);
+                }
+                Inst::Sh3add { rd, rs1, rs2 } => {
+                    let v = reg_read(regs, rs1)
+                        .wrapping_shl(3)
+                        .wrapping_add(reg_read(regs, rs2));
+                    reg_write(regs, rd, v);
+                }
+                Inst::Sh1adduw { rd, rs1, rs2 } => {
+                    let a = (reg_read(regs, rs1) as u32 as u64).wrapping_shl(1);
+                    reg_write(regs, rd, a.wrapping_add(reg_read(regs, rs2)));
+                }
+                Inst::Sh2adduw { rd, rs1, rs2 } => {
+                    let a = (reg_read(regs, rs1) as u32 as u64).wrapping_shl(2);
+                    reg_write(regs, rd, a.wrapping_add(reg_read(regs, rs2)));
+                }
+                Inst::Sh3adduw { rd, rs1, rs2 } => {
+                    let a = (reg_read(regs, rs1) as u32 as u64).wrapping_shl(3);
+                    reg_write(regs, rd, a.wrapping_add(reg_read(regs, rs2)));
+                }
+                Inst::Adduw { rd, rs1, rs2 } => {
+                    let a = reg_read(regs, rs1) as u32 as u64;
+                    reg_write(regs, rd, a.wrapping_add(reg_read(regs, rs2)));
+                }
+                Inst::Slliuw { rd, rs1, shamt } => {
+                    let a = reg_read(regs, rs1) as u32 as u64;
+                    reg_write(regs, rd, a.wrapping_shl(shamt as u32 & 63));
+                }
+
+                // ---- Zbs (single-bit) ----------------------------------------
+                Inst::Bclr { rd, rs1, rs2 } => {
+                    let bit = reg_read(regs, rs2) & 63;
+                    reg_write(regs, rd, reg_read(regs, rs1) & !(1u64 << bit));
+                }
+                Inst::Bset { rd, rs1, rs2 } => {
+                    let bit = reg_read(regs, rs2) & 63;
+                    reg_write(regs, rd, reg_read(regs, rs1) | (1u64 << bit));
+                }
+                Inst::Binv { rd, rs1, rs2 } => {
+                    let bit = reg_read(regs, rs2) & 63;
+                    reg_write(regs, rd, reg_read(regs, rs1) ^ (1u64 << bit));
+                }
+                Inst::Bext { rd, rs1, rs2 } => {
+                    let bit = reg_read(regs, rs2) & 63;
+                    reg_write(regs, rd, (reg_read(regs, rs1) >> bit) & 1);
+                }
+                Inst::Bclri { rd, rs1, shamt } => {
+                    reg_write(regs, rd, reg_read(regs, rs1) & !(1u64 << (shamt & 63)));
+                }
+                Inst::Bseti { rd, rs1, shamt } => {
+                    reg_write(regs, rd, reg_read(regs, rs1) | (1u64 << (shamt & 63)));
+                }
+                Inst::Binvi { rd, rs1, shamt } => {
+                    reg_write(regs, rd, reg_read(regs, rs1) ^ (1u64 << (shamt & 63)));
+                }
+                Inst::Bexti { rd, rs1, shamt } => {
+                    reg_write(regs, rd, (reg_read(regs, rs1) >> (shamt & 63)) & 1);
+                }
+
+                // ---- Zicond --------------------------------------------------
+                Inst::CzeroEqz { rd, rs1, rs2 } => {
+                    // (rs2 == 0) ? 0 : rs1
+                    let v = if reg_read(regs, rs2) == 0 {
+                        0
+                    } else {
+                        reg_read(regs, rs1)
+                    };
+                    reg_write(regs, rd, v);
+                }
+                Inst::CzeroNez { rd, rs1, rs2 } => {
+                    // (rs2 != 0) ? 0 : rs1
+                    let v = if reg_read(regs, rs2) != 0 {
+                        0
+                    } else {
+                        reg_read(regs, rs1)
+                    };
+                    reg_write(regs, rd, v);
+                }
+
+                // ---- Upper immediate ----------------------------------------
+                Inst::Lui { rd, imm } => {
+                    reg_write(regs, rd, imm as i64 as u64);
+                }
+
+                // ---- Control flow -------------------------------------------
+                Inst::Jal { rd, imm } => {
+                    if rd != 0 {
+                        reg_write(regs, rd, next_pc as u64);
+                    }
+                    let target = (pc as i64).wrapping_add(imm as i64) as u32;
+                    next_idx_override = Some(match find_idx_for_pc(insts, target) {
+                        Some(i) => i,
+                        None => {
+                            regs.pc = pc as u64;
+                            return ExitReason::Panic;
+                        }
+                    });
+                }
+                Inst::Beq { rs1, rs2, imm } => {
+                    if reg_read(regs, rs1) == reg_read(regs, rs2) {
+                        let target = (pc as i64).wrapping_add(imm as i64) as u32;
+                        match find_idx_for_pc(insts, target) {
+                            Some(i) => next_idx_override = Some(i),
+                            None => {
+                                regs.pc = pc as u64;
+                                return ExitReason::Panic;
                             }
                         }
-                        Err(reason) => exit = Some(reason),
                     }
+                }
+                Inst::Bne { rs1, rs2, imm } => {
+                    if reg_read(regs, rs1) != reg_read(regs, rs2) {
+                        let target = (pc as i64).wrapping_add(imm as i64) as u32;
+                        match find_idx_for_pc(insts, target) {
+                            Some(i) => next_idx_override = Some(i),
+                            None => {
+                                regs.pc = pc as u64;
+                                return ExitReason::Panic;
+                            }
+                        }
+                    }
+                }
+                Inst::Blt { rs1, rs2, imm } => {
+                    if (reg_read(regs, rs1) as i64) < (reg_read(regs, rs2) as i64) {
+                        let target = (pc as i64).wrapping_add(imm as i64) as u32;
+                        match find_idx_for_pc(insts, target) {
+                            Some(i) => next_idx_override = Some(i),
+                            None => {
+                                regs.pc = pc as u64;
+                                return ExitReason::Panic;
+                            }
+                        }
+                    }
+                }
+                Inst::Bge { rs1, rs2, imm } => {
+                    if (reg_read(regs, rs1) as i64) >= (reg_read(regs, rs2) as i64) {
+                        let target = (pc as i64).wrapping_add(imm as i64) as u32;
+                        match find_idx_for_pc(insts, target) {
+                            Some(i) => next_idx_override = Some(i),
+                            None => {
+                                regs.pc = pc as u64;
+                                return ExitReason::Panic;
+                            }
+                        }
+                    }
+                }
+                Inst::Bltu { rs1, rs2, imm } => {
+                    if reg_read(regs, rs1) < reg_read(regs, rs2) {
+                        let target = (pc as i64).wrapping_add(imm as i64) as u32;
+                        match find_idx_for_pc(insts, target) {
+                            Some(i) => next_idx_override = Some(i),
+                            None => {
+                                regs.pc = pc as u64;
+                                return ExitReason::Panic;
+                            }
+                        }
+                    }
+                }
+                Inst::Bgeu { rs1, rs2, imm } => {
+                    if reg_read(regs, rs1) >= reg_read(regs, rs2) {
+                        let target = (pc as i64).wrapping_add(imm as i64) as u32;
+                        match find_idx_for_pc(insts, target) {
+                            Some(i) => next_idx_override = Some(i),
+                            None => {
+                                regs.pc = pc as u64;
+                                return ExitReason::Panic;
+                            }
+                        }
+                    }
+                }
+
+                // ---- System (no-op for our single-threaded VM) --------------
+                Inst::Fence | Inst::FenceI => {}
+
+                // ---- Custom-0 -----------------------------------------------
+                Inst::Trap => {
+                    regs.pc = pc as u64;
+                    return ExitReason::Trap;
+                }
+                Inst::EcallJar => {
+                    regs.pc = next_pc as u64;
+                    match handler.handle(EcallKind::Ecall, regs, mem) {
+                        EcallResult::Continue => match find_idx_for_pc(insts, next_pc) {
+                            Some(i) => next_idx_override = Some(i),
+                            None => return ExitReason::Panic,
+                        },
+                        EcallResult::Exit(r) => return r,
+                    }
+                }
+                Inst::Ecalli { imm } => {
+                    regs.pc = next_pc as u64;
+                    match handler.handle(EcallKind::Ecalli(imm as u32), regs, mem) {
+                        EcallResult::Continue => match find_idx_for_pc(insts, next_pc) {
+                            Some(i) => next_idx_override = Some(i),
+                            None => return ExitReason::Panic,
+                        },
+                        EcallResult::Exit(r) => return r,
+                    }
+                }
+                Inst::BrTable { table_id, rs1 } => {
+                    // Spec: idx = (rs1 - 1) >> 1; if rs1 == 0 or idx OOB,
+                    // recompiler routes to PANIC (not fallthrough — see
+                    // `rv_br_table` comment). Match exactly.
+                    let rs1_v = reg_read(regs, rs1);
+                    if rs1_v == 0 {
+                        regs.pc = pc as u64;
+                        return ExitReason::Panic;
+                    }
+                    let entry_idx = ((rs1_v - 1) >> 1) as usize;
+                    let nt = jump_table_offsets.len().saturating_sub(1);
+                    if (table_id as usize) >= nt {
+                        regs.pc = pc as u64;
+                        return ExitReason::Panic;
+                    }
+                    let start = jump_table_offsets[table_id as usize] as usize;
+                    let end = jump_table_offsets[(table_id as usize) + 1] as usize;
+                    if entry_idx >= end - start {
+                        regs.pc = pc as u64;
+                        return ExitReason::Panic;
+                    }
+                    let target = jump_table[start + entry_idx];
+                    match find_idx_for_pc(insts, target) {
+                        Some(i) => next_idx_override = Some(i),
+                        None => {
+                            regs.pc = pc as u64;
+                            return ExitReason::Panic;
+                        }
+                    }
+                }
+                Inst::Fallthrough => {
+                    // Terminator no-op: just advance. The next instruction is
+                    // already marked as a block start so its cost gets
+                    // charged on the next iteration.
+                }
+
+                Inst::Reserved { .. } => {
+                    regs.pc = pc as u64;
+                    return ExitReason::Panic;
                 }
             }
 
-            if let Some(reason) = exit {
-                regs.pc = inst.pc as u64;
-                return reason;
+            // Advance to the next instruction. Branches / Jal / BrTable /
+            // post-handler Ecalli set `next_idx_override`; everything else
+            // falls through to the sequential next.
+            match next_idx_override {
+                Some(new_idx) => idx = new_idx,
+                None => {
+                    idx += 1;
+                    if idx >= insts.len() {
+                        // Ran off the end. PVM2 expects every reachable
+                        // program path to end in a terminator.
+                        regs.pc = next_pc as u64;
+                        return ExitReason::Panic;
+                    }
+                }
             }
-
-            idx = if branch_idx == u32::MAX {
-                inst.next_idx
-            } else {
-                branch_idx
-            };
         }
     }
 }
 
-/// Dynamic-jump address resolution (eq A.18).
-///
-/// `a` is the post-imm-add jump value (mod 2^32, but passed as u64
-/// here). The jump table is indexed by `a / 2`, minus 1. Targets
-/// must land on basic-block starts.
-fn djump(a: u64, jump_table: &[u32], basic_block_starts: &[bool]) -> Result<u32, ExitReason> {
-    const ZA: u64 = 2;
-    if a == 0 || a > (jump_table.len() as u64) * ZA || !a.is_multiple_of(ZA) {
-        return Err(ExitReason::Panic);
+// ----------------------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------------------
+
+/// Read PVM2 register `x`. `x0` reads as zero; `x3`/`x4` are reserved
+/// (defence-in-depth zero); `x1..x2, x5..x15` map to slots `0..12`.
+#[inline]
+fn reg_read(regs: &Regs, x: u8) -> u64 {
+    match x {
+        0 => 0,
+        1 => regs.gpr[0],
+        2 => regs.gpr[1],
+        5..=15 => regs.gpr[(x as usize) - 3],
+        _ => 0,
     }
-    let idx = (a / ZA) as usize - 1;
-    let target = jump_table[idx];
-    let t = target as usize;
-    if t >= basic_block_starts.len() || !basic_block_starts[t] {
-        return Err(ExitReason::Panic);
+}
+
+/// Write PVM2 register `x`. Writes to `x0`, `x3`, `x4`, or out-of-range
+/// are no-ops.
+#[inline]
+fn reg_write(regs: &mut Regs, x: u8, v: u64) {
+    match x {
+        0 => {}
+        1 => regs.gpr[0] = v,
+        2 => regs.gpr[1] = v,
+        5..=15 => regs.gpr[(x as usize) - 3] = v,
+        _ => {}
     }
-    Ok(target)
+}
+
+/// `(rs1 + imm) & 0xFFFFFFFF` — PVM2 effective address (sandbox is
+/// 32-bit). Matches `rv_addr_to_scratch` in the recompiler.
+#[inline]
+fn compute_addr(regs: &Regs, rs1: u8, imm: i32) -> u32 {
+    (reg_read(regs, rs1) as u32).wrapping_add(imm as u32)
+}
+
+/// Build a `PageFault` exit and record the failing PC.
+#[inline]
+fn page_fault(regs: &mut Regs, pc: u32, addr: u32) -> ExitReason {
+    regs.pc = pc as u64;
+    ExitReason::PageFault(addr & !0xFFF)
+}
+
+/// Binary-search `insts` (sorted by `pc`) for an entry whose `pc` matches.
+#[inline]
+fn find_idx_for_pc(insts: &[RvPreDecodedInst], pc: u32) -> Option<usize> {
+    insts.binary_search_by_key(&pc, |i| i.pc).ok()
+}
+
+#[cfg(test)]
+#[allow(clippy::identity_op)] // Encoding constants are clearer with explicit zero shifts.
+mod tests {
+    use super::*;
+    use crate::ecall::PanickingHandler;
+    use crate::mem::CopyingMemory;
+    use crate::predecode::predecode;
+    use alloc::vec::Vec;
+
+    fn enc4(words: &[u32]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(words.len() * 4);
+        for w in words {
+            v.extend_from_slice(&w.to_le_bytes());
+        }
+        v
+    }
+
+    fn run_simple(code: &[u8], initial_gas: u64) -> (Regs, ExitReason, u64) {
+        let pre = predecode(code);
+        let mut regs = Regs::new();
+        let mut mem = CopyingMemory::new();
+        let mut gas = GasCounter::new(initial_gas);
+        let mut h = PanickingHandler;
+        let reason = Interpreter::run(&pre, &[], &[], &mut regs, &mut mem, &mut gas, &mut h);
+        let used = initial_gas.saturating_sub(gas.remaining());
+        (regs, reason, used)
+    }
+
+    #[test]
+    fn trap_immediately() {
+        // trap: custom-0 funct3=000 = opcode 0x0B = (0b00010 << 2) | 0b11
+        // word = (0b000 << 12) | 0x0B = 0x0000_000B
+        let code = enc4(&[0x0000_000B]);
+        let (regs, reason, _) = run_simple(&code, 1_000_000);
+        assert_eq!(reason, ExitReason::Trap);
+        assert_eq!(regs.pc, 0);
+    }
+
+    #[test]
+    fn addi_then_trap() {
+        // addi x10, x0, 42 ; trap
+        // addi I-type: imm[11:0]=42, rs1=0, funct3=000, rd=10, opcode=0010011
+        // = (42 << 20) | (0 << 15) | (0 << 12) | (10 << 7) | 0x13
+        // = 0x02A00513
+        let addi = (42u32 << 20) | (10 << 7) | 0x13;
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[addi, trap]);
+        let (regs, reason, _) = run_simple(&code, 1_000_000);
+        assert_eq!(reason, ExitReason::Trap);
+        // x10 → slot 7 (x10 - 3 = 7)
+        assert_eq!(regs.gpr[7], 42);
+    }
+
+    #[test]
+    fn div_by_zero_returns_neg_one() {
+        // addi x5, x0, 7 ; addi x6, x0, 0 ; div x7, x5, x6 ; trap
+        let addi_x5_7 = (7u32 << 20) | (5 << 7) | 0x13;
+        let addi_x6_0 = (0u32 << 20) | (6 << 7) | 0x13;
+        // div = funct7=0000001, rs2, rs1, funct3=100, rd, opcode=0110011
+        let div = (1u32 << 25) | (6 << 20) | (5 << 15) | (0b100 << 12) | (7 << 7) | 0x33;
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[addi_x5_7, addi_x6_0, div, trap]);
+        let (regs, _reason, _) = run_simple(&code, 1_000_000);
+        // x7 → slot 4 (x7 - 3 = 4)
+        assert_eq!(regs.gpr[4], u64::MAX);
+    }
+
+    #[test]
+    fn out_of_gas_at_block_start() {
+        // addi x10, x0, 1 ; trap — needs more gas than supplied.
+        let addi = (1u32 << 20) | (10 << 7) | 0x13;
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[addi, trap]);
+        let (regs, reason, _) = run_simple(&code, 0);
+        assert_eq!(reason, ExitReason::OutOfGas);
+        assert_eq!(regs.pc, 0);
+    }
+
+    #[test]
+    fn sign_extend_addiw() {
+        // addiw x10, x0, -1 → x10 = 0xFFFFFFFF_FFFFFFFF (sign-extended)
+        let addiw = ((-1i32) as u32) << 20 | (0 << 15) | (0 << 12) | (10 << 7) | 0x1B;
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[addiw, trap]);
+        let (regs, _reason, _) = run_simple(&code, 1_000_000);
+        assert_eq!(regs.gpr[7], u64::MAX);
+    }
+
+    #[test]
+    fn czero_eqz_zeroes_when_rs2_is_zero() {
+        // addi x5, x0, 42 ; addi x6, x0, 0 ; czero.eqz x7, x5, x6 ; trap
+        // czero.eqz: funct7=0000111, rs2, rs1, funct3=101, rd, OP=0110011
+        let addi_x5 = (42u32 << 20) | (5 << 7) | 0x13;
+        let addi_x6 = (0u32 << 20) | (6 << 7) | 0x13;
+        let czero = (0b0000111u32 << 25) | (6 << 20) | (5 << 15) | (0b101 << 12) | (7 << 7) | 0x33;
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[addi_x5, addi_x6, czero, trap]);
+        let (regs, _reason, _) = run_simple(&code, 1_000_000);
+        assert_eq!(regs.gpr[4], 0); // x7 = 0 because rs2 (x6) == 0
+    }
+
+    #[test]
+    fn czero_eqz_passes_when_rs2_nonzero() {
+        let addi_x5 = (42u32 << 20) | (5 << 7) | 0x13;
+        let addi_x6 = (3u32 << 20) | (6 << 7) | 0x13;
+        let czero = (0b0000111u32 << 25) | (6 << 20) | (5 << 15) | (0b101 << 12) | (7 << 7) | 0x33;
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[addi_x5, addi_x6, czero, trap]);
+        let (regs, _reason, _) = run_simple(&code, 1_000_000);
+        assert_eq!(regs.gpr[4], 42); // rs2 != 0 → rd = rs1
+    }
+
+    #[test]
+    fn br_table_zero_rs1_panics() {
+        // br_table table_id=0, rs1=5 (x5 = 0 by default)
+        // custom-0 I-type: funct3=011, rd=0
+        let br_table = (0u32 << 20) | (5 << 15) | (0b011 << 12) | (0 << 7) | (0b00010 << 2) | 0b11;
+        let code = enc4(&[br_table]);
+        // Provide a jump_table_offsets with one table to pass the
+        // table_id bounds check; rs1=0 should panic regardless.
+        let pre = predecode(&code);
+        let mut regs = Regs::new();
+        let mut mem = CopyingMemory::new();
+        let mut gas = GasCounter::new(1_000_000);
+        let mut h = PanickingHandler;
+        let reason = Interpreter::run(&pre, &[], &[0, 0], &mut regs, &mut mem, &mut gas, &mut h);
+        assert_eq!(reason, ExitReason::Panic);
+    }
 }

@@ -135,7 +135,6 @@ const ERR_INSTANCE_KIND: u32 = 22;
 const ERR_IMAGE_NOT_FOUND: u32 = 23;
 const ERR_IMAGE_KIND: u32 = 24;
 const ERR_ENDPOINT_OOB: u32 = 25;
-const ERR_ENDPOINT_UNDEFINED: u32 = 26;
 const ERR_DERIVE_SLOT_OOB: u32 = 31;
 // Code 32 was `ERR_DERIVE_PUBLISH`, reserved for a publish-OOM path
 // that no longer exists: `publish_transient_instance` is infallible
@@ -513,14 +512,11 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     let ro: (u32, &[u8]) = (overlay_bufs[1].0, overlay_bufs[1].1.as_slice());
     let rw: (u32, &[u8]) = (overlay_bufs[2].0, overlay_bufs[2].1.as_slice());
 
-    // `img.bitmask` is the packed form (1 bit per code byte);
-    // `build_frame_runtime` / `Compiler::new` expect the unpacked
-    // form (1 byte per code byte). Unpack into a local Vec — the
-    // jit_cache copies the result into the per-Image arena on first
-    // compile and reuses it thereafter, so this allocation only
-    // matters on cache miss.
-    let bitmask = javm_exec::unpack_bitmask(img.bitmask.as_slice(), img.code.len());
-
+    // PVM2: `code` is raw RV+C+custom-0 bytes (produced by
+    // `javm_transpiler::linker::link_elf`). The JIT cache
+    // predecodes the bytes once and populates the BB region with
+    // the valid-PC set.
+    //
     // SAFETY: image and any cap-backed slices live in the heap-
     // resident DIRECTORY/INSTANCES; PAs survive the guard drop per
     // the no-eviction V1 invariant.
@@ -528,8 +524,8 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
         jit_run::build_frame_runtime(
             &frame.image_hash,
             img.code.as_slice(),
-            &bitmask,
             img.jump_table.as_slice(),
+            img.jump_table_offsets.as_slice(),
             frame.pc,
             mem_size,
             MemRegion {
@@ -732,9 +728,6 @@ fn build_frame_inner(
         return Err(ERR_ENDPOINT_OOB);
     }
     let ep = &img.endpoints[endpoint];
-    if ep.entry_pc == 0 {
-        return Err(ERR_ENDPOINT_UNDEFINED);
-    }
 
     let mut regs = ep.initial_regs;
     if let Some(inst_regs) = inst_regs {

@@ -20,33 +20,18 @@ use jar_kernel::{Block, Event, EventOutcome, Kernel, abi};
 use javm_cap::image::{EndpointDef, Image, MemoryMapping};
 use std::collections::BTreeMap;
 
-/// Build a tiny chain image whose endpoint 0 program is:
-///   load_imm_64 φ[7] = 42 ; ecalli 0 (HALT)
+/// Build a tiny chain image whose endpoint 0 program is a single
+/// PVM2 `ecalli 0` instruction — the canonical "HALT via host
+/// call" trampoline shape.
 ///
-/// The chain doesn't do anything interesting — it just demonstrates
-/// the kernel-apply round-trip succeeds (event delivered, program
-/// runs, HALT observed, σ post-apply hash is well-defined).
+/// PVM2 encoding for `ecalli 0`: custom-0 major (opcode bits[6:2] =
+/// 0b00010), funct3 = 0b010, rd = 0, rs1 = 0, imm = 0. As an I-type
+/// 32-bit word: `(imm << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7)
+/// | (custom_0 << 2) | 0b11` = `(0b010 << 12) | (0b00010 << 2) |
+/// 0b11` = `0x0000_200B` (little-endian: `0x0B, 0x20, 0x00, 0x00`).
 fn hello_world_chain_image() -> Image {
-    // Byte-PVM encoding:
-    //   load_imm_64 φ[7] = 42 → opcode 20, reg 7, 8 imm bytes = [42, 0, 0, 0, 0, 0, 0, 0]
-    //     bitmask: [1, 0,0,0,0,0,0,0,0,0]
-    //   ecalli 0 → opcode 10, imm byte 0
-    //     bitmask: [1, 0]
-    // Need to embed the bitmask in the program; the chain Image
-    // doesn't currently carry it (Stage 3 derives a trivial
-    // "every byte is an instruction" bitmask via run_instance's
-    // ImageCache::get_or_decode default). To exercise the real
-    // load_imm_64 path we'd need to wire the kernel to feed
-    // javm-cap's image_canonical_encoding through a parser that
-    // recovers code + bitmask + jump_table.
-    //
-    // For this end-to-end test we use a minimal program that works
-    // under the default bitmask: a single `ecalli 0` (HALT). The
-    // bitmask interpretation "every byte starts a new instruction"
-    // makes the imm byte after opcode-10 invalid as a standalone
-    // instruction, but the interpreter exits on the first ecalli
-    // it hits so this is fine.
-    let code = vec![10u8, 0];
+    // ecalli 0 — 4-byte custom-0 instruction.
+    let code: Vec<u8> = 0x0000_200Bu32.to_le_bytes().to_vec();
 
     let mut endpoints = BTreeMap::new();
     endpoints.insert(
@@ -61,11 +46,8 @@ fn hello_world_chain_image() -> Image {
 
     Image {
         code,
-        // 2 bytes of code → both marked as instruction starts (the
-        // imm byte after opcode-10 is unreachable but harmless under
-        // an all-1s bitmask). Packed: bits 0,1 set → 0b0000_0011.
-        packed_bitmask: vec![0x03],
         jump_table: Vec::new(),
+        jump_table_offsets: vec![0, 0],
         endpoints,
         memory_mappings: Vec::<MemoryMapping>::new(),
         gas_slots: vec![abi::BARE_GAS_SLOT],

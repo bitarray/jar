@@ -6,10 +6,10 @@ use std::collections::BTreeMap;
 
 fn empty_chain_image() -> Image {
     Image {
-        code: vec![10u8, 0],
-        // 2 bytes of code → 2 instruction-start bits → 0b0000_0011.
-        packed_bitmask: vec![0x03],
+        // PVM2 `ecalli 0` (HALT): custom-0 opcode 0b00010_11, funct3 0b010.
+        code: 0x0000_200Bu32.to_le_bytes().to_vec(),
         jump_table: Vec::new(),
+        jump_table_offsets: vec![0, 0],
         endpoints: BTreeMap::new(),
         memory_mappings: Vec::new(),
         gas_slots: vec![abi::BARE_GAS_SLOT],

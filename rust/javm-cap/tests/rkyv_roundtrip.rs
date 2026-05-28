@@ -54,7 +54,6 @@ fn rkyv_archive_roundtrip_data_cap() {
 fn image_cap_roundtrip_preserves_hash() {
     let mut img = Image::empty();
     img.code = vec![0u8, 10u8, 42];
-    img.packed_bitmask = vec![0b011u8];
     let mut endpoints = BTreeMap::new();
     endpoints.insert(
         0u8,

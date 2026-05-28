@@ -137,8 +137,8 @@ pub fn evict_all() {
 pub fn get_or_compile(
     image_hash: &CapHash,
     code: &[u8],
-    bitmask: &[u8],
     jump_table: &[u32],
+    jump_table_offsets: &[u32],
     arena_base_va: u64,
     ctx_va: u64,
     mem_cycles: u8,
@@ -147,67 +147,62 @@ pub fn get_or_compile(
     // SAFETY: single-threaded guest.
     let map = unsafe { &mut *CACHE.inner.get() };
     if !map.contains_key(image_hash) {
-        // ---- compute region sizes and offsets --------------------------
-        let bb_size = page_round_up_min1(bitmask.len());
-        let jt_size = page_round_up_min1(core::mem::size_of_val(jump_table));
-        // Dispatch table sized at worst-case (one i32 per code byte) so
-        // every PC index lands in range; only the prefix produced by
-        // compile is filled, rest stays zero.
+        // Region sizing. valid_pc is `code.len()` bytes; the streaming
+        // compile produces it inline so we don't allocate it twice.
+        let bb_size = page_round_up_min1(code.len());
+        let jt_bytes_used = core::mem::size_of_val(jump_table);
+        let jt_size = page_round_up_min1(jt_bytes_used);
         let dispatch_size = page_round_up_min1(code.len() * core::mem::size_of::<i32>());
 
         let bb_offset = 0usize;
         let jt_offset = bb_offset + bb_size;
         let dispatch_offset = jt_offset + jt_size;
         let jit_offset = dispatch_offset + dispatch_size;
-        // jit_va is the absolute VA where the JIT region will be mapped;
-        // codegen embeds this for its internal jump resolution.
         let jit_va = arena_base_va + jit_offset as u64;
 
-        // ---- run codegen ----------------------------------------------
-        let compiler = Compiler::new(bitmask, jump_table, helpers, code.len(), jit_va, mem_cycles);
+        let compiler = Compiler::new(helpers, code.len(), jit_va, mem_cycles);
         let CompileResult {
             native_code,
-            dispatch_table,
+            dispatch_entries,
             trap_table,
             exit_label_offset,
-        } = compiler.compile(code, bitmask);
+            valid_pc,
+        } = compiler.compile(code, jump_table_offsets);
 
         let jit_size = page_round_up_min1(native_code.len());
         let tramp_offset = jit_offset + jit_size;
-        let tramp_size = PAGE_SIZE; // 26 bytes; one page is plenty.
-
+        let tramp_size = PAGE_SIZE;
         let total = tramp_offset + tramp_size;
 
-        // ---- allocate arena --------------------------------------------
         let mut arena = PageBuf::new(total).expect("PageBuf alloc for Image arena");
-
-        // ---- fill BB / JT / DISPATCH / JIT / TRAMP into arena ----------
         let buf = arena.as_mut_slice();
-        // BB
-        buf[bb_offset..bb_offset + bitmask.len()].copy_from_slice(bitmask);
-        // JT
-        let jt_bytes_len = core::mem::size_of_val(jump_table);
-        // Reinterpret &[u32] as &[u8] for the memcpy.
-        let jt_ptr = jump_table.as_ptr() as *const u8;
-        // SAFETY: jt_ptr is valid for jt_bytes_len bytes (jump_table
-        // length × size_of::<u32>).
-        let jt_slice = unsafe { core::slice::from_raw_parts(jt_ptr, jt_bytes_len) };
-        buf[jt_offset..jt_offset + jt_bytes_len].copy_from_slice(jt_slice);
-        // DISPATCH
-        let dispatch_bytes_len = core::mem::size_of_val(dispatch_table.as_slice());
-        let dispatch_ptr = dispatch_table.as_ptr() as *const u8;
-        // SAFETY: dispatch_ptr is valid for dispatch_bytes_len bytes.
-        let dispatch_slice =
-            unsafe { core::slice::from_raw_parts(dispatch_ptr, dispatch_bytes_len) };
-        buf[dispatch_offset..dispatch_offset + dispatch_bytes_len].copy_from_slice(dispatch_slice);
-        // JIT
+
+        // BB region: valid_pc as bytes (Vec<bool> is 0/1 single-byte
+        // representation, so a raw-pointer reinterpret is sound).
+        let bb_ptr = valid_pc.as_ptr() as *const u8;
+        // SAFETY: bb_ptr valid for valid_pc.len() bytes.
+        let bb_bytes = unsafe { core::slice::from_raw_parts(bb_ptr, valid_pc.len()) };
+        buf[bb_offset..bb_offset + valid_pc.len()].copy_from_slice(bb_bytes);
+
+        // JT region: copy per-function br_table sub-tables (concatenated
+        // PVM2 PCs, sub-table boundaries in `jump_table_offsets`).
+        if !jump_table.is_empty() {
+            let jt_ptr = jump_table.as_ptr() as *const u8;
+            // SAFETY: jt_ptr valid for jt_bytes_used bytes.
+            let jt_slice = unsafe { core::slice::from_raw_parts(jt_ptr, jt_bytes_used) };
+            buf[jt_offset..jt_offset + jt_bytes_used].copy_from_slice(jt_slice);
+        }
+
+        // DISPATCH region — sparse write (arena is page-zero).
+        for &(pvm_pc, off) in &dispatch_entries {
+            let slot_off = dispatch_offset + (pvm_pc as usize) * core::mem::size_of::<i32>();
+            buf[slot_off..slot_off + 4].copy_from_slice(&off.to_le_bytes());
+        }
+
+        // JIT region.
         buf[jit_offset..jit_offset + native_code.len()].copy_from_slice(&native_code);
-        // TRAMP — 26 bytes encoding the per-Image entry sequence.
-        //   mov rdi, ctx_va     ; 48 BF <imm64>  (10)
-        //   mov rax, jit_va     ; 48 B8 <imm64>  (10)
-        //   call rax            ; FF D0          (2)
-        //   int 0x81            ; CD 81          (2)
-        //   ud2                 ; 0F 0B          (2)
+
+        // TRAMP region (same 26-byte sequence as PVM).
         let tramp_start = tramp_offset;
         buf[tramp_start] = 0x48;
         buf[tramp_start + 1] = 0xBF;
@@ -222,16 +217,12 @@ pub fn get_or_compile(
         buf[tramp_start + 24] = 0x0F;
         buf[tramp_start + 25] = 0x0B;
 
-        // ---- build the template PD ------------------------------------
-        // One PD covers 1 GiB of VA starting at `arena_base_va`; leaf
-        // PTEs point at each 4 KiB arena page with the appropriate
-        // permission (RO for BB/JT/DISPATCH, RX for JIT/TRAMP).
+        // Template PD: same RO-then-RX split as the PVM path.
         let arena_pa = arena.pa();
         let mut template = TemplatePT::new().expect("TemplatePT alloc");
-        let ro_end = jit_offset; // bytes covered by RO range (BB+JT+DISPATCH)
-        let arena_total = total;
+        let ro_end = jit_offset;
         let mut off = 0usize;
-        while off < arena_total {
+        while off < total {
             let perm = if off < ro_end {
                 Perm::user_ro()
             } else {
@@ -263,6 +254,5 @@ pub fn get_or_compile(
             },
         );
     }
-    // SAFETY: present; BTreeMap entries don't move once inserted.
     map.get(image_hash).expect("inserted above")
 }

@@ -15,13 +15,15 @@ use super::{CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
     Clone, Debug, ssz_derive::HashTreeRoot, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
 pub struct ImageCap {
-    /// Bytecode bytes.
+    /// Bytecode bytes (raw RV+C+custom-0).
     pub code: Vec<u8>,
-    /// Packed bit-per-byte instruction-start bitmask. Same layout
-    /// as `crate::image::Image::packed_bitmask`.
-    pub bitmask: Vec<u8>,
-    /// Jump-table entries (PVM PCs).
+    /// Concatenated per-function `br_table` sub-tables. Sub-table
+    /// boundaries live in `jump_table_offsets` (CSR-style).
     pub jump_table: Vec<u32>,
+    /// Per-table start offsets in `jump_table`, CSR-style.
+    /// `jump_table_offsets[t]..jump_table_offsets[t+1]` slices the
+    /// entries of table `t`. Length = `num_tables + 1`.
+    pub jump_table_offsets: Vec<u32>,
     /// Endpoint definitions. Stored as a dense array keyed by
     /// endpoint index — `endpoints[i].entry_pc == 0` means the
     /// endpoint at index `i` is not defined.
@@ -255,12 +257,13 @@ pub fn image_cap(
     let mut code = Vec::with_capacity(image.code.len());
     code.extend_from_slice(&image.code);
 
-    let mut bitmask = Vec::with_capacity(image.packed_bitmask.len());
-    bitmask.extend_from_slice(&image.packed_bitmask);
-
     let mut jump_table = Vec::with_capacity(image.jump_table.len());
     for &j in &image.jump_table {
         jump_table.push(j);
+    }
+    let mut jump_table_offsets = Vec::with_capacity(image.jump_table_offsets.len());
+    for &o in &image.jump_table_offsets {
+        jump_table_offsets.push(o);
     }
 
     // Endpoints: dense `MAX_ENDPOINTS`-sized array; empty entries have
@@ -317,8 +320,8 @@ pub fn image_cap(
 
     Ok(ImageCap {
         code,
-        bitmask,
         jump_table,
+        jump_table_offsets,
         endpoints,
         mappings,
         pinned,

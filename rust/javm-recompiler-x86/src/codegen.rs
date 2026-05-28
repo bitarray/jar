@@ -25,24 +25,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::asm::{Assembler, Cc, Label, Reg};
-use javm_exec::args::{self, Args};
 use javm_exec::gas_sim::GasSimulator;
-use javm_exec::instruction::Opcode;
+pub use javm_exec::predecode::{Predecode, predecode};
 
-/// Compute skip(i) — distance to next instruction start.
-fn compute_skip(pc: usize, bitmask: &[u8]) -> usize {
-    for j in 0..25 {
-        let idx = pc + 1 + j;
-        let bit = if idx < bitmask.len() { bitmask[idx] } else { 1 };
-        if bit == 1 {
-            return j;
-        }
-    }
-    24
-}
-/// Map PVM register index (0..12) to x86-64 register.
+/// Map RV register index (0..12) to x86-64 register.
 /// All 13 PVM registers live in x86 registers.
-const REG_MAP: [Reg; 13] = [
+pub(crate) const REG_MAP: [Reg; 13] = [
     Reg::RBP, // φ[0] — RA (rarely used as memory base, so RBP encoding penalty is acceptable)
     Reg::RBX, // φ[1] — SP (frequently used as memory base, RBX avoids RBP disp8 penalty)
     Reg::R12, // φ[2]
@@ -59,10 +47,24 @@ const REG_MAP: [Reg; 13] = [
 ];
 
 /// Scratch register (not mapped to any PVM register).
-const SCRATCH: Reg = Reg::RDX;
+pub(crate) const SCRATCH: Reg = Reg::RDX;
+
+/// RV register number → PVM2 slot (0..12), or `0xFF` for "no slot"
+/// (x0, reserved x3/x4, or any out-of-range value). Mirrors the
+/// slot encoding used by `rv_op_metadata` so that gas accounting
+/// agrees bit-for-bit with the predecode-cached path.
+#[inline(always)]
+pub(crate) fn rv_slot_or_ff(x: u8) -> u8 {
+    match x {
+        1 => 0,
+        2 => 1,
+        5..=15 => x - 3,
+        _ => 0xFF,
+    }
+}
 /// R15 = gas meter. Loaded from `ctx.gas` at the prologue, decremented
 /// once per basic block, flushed back to `ctx.gas` at every exit.
-const GAS: Reg = Reg::R15;
+pub(crate) const GAS: Reg = Reg::R15;
 
 /// JitContext lives above the PVM u32 address space (no bounds check
 /// on guest mem — the full low 4 GiB of native VA belongs to the
@@ -95,6 +97,7 @@ pub const CTX_PC: u64 = CTX_VA + offset_of!(JitContext, pc) as u64;
 pub const CTX_DISPATCH_TABLE: u64 = CTX_VA + offset_of!(JitContext, dispatch_table) as u64;
 pub const CTX_CODE_BASE: u64 = CTX_VA + offset_of!(JitContext, code_base) as u64;
 pub const CTX_FAST_REENTRY: u64 = CTX_VA + offset_of!(JitContext, fast_reentry) as u64;
+pub const CTX_HOST_RSP_BASE: u64 = CTX_VA + offset_of!(JitContext, host_rsp_base) as u64;
 
 /// Exit reason codes (matching ExitReason enum).
 pub const EXIT_HALT: u32 = 0;
@@ -108,9 +111,18 @@ pub const EXIT_TRAP: u32 = 7;
 /// Result of compilation.
 pub struct CompileResult {
     pub native_code: Vec<u8>,
-    pub dispatch_table: Vec<i32>,
+    /// Sparse dispatch entries — `(pvm_pc, native_offset)` for every
+    /// gas-block start. The runtime arena's dispatch region is
+    /// page-zero-filled, so callers only need to write these
+    /// non-zero entries instead of materialising a dense
+    /// `code.len() + 1`-sized array.
+    pub dispatch_entries: Vec<(u32, i32)>,
     pub trap_table: Vec<(u32, u32)>,
     pub exit_label_offset: u32,
+    /// Byte-indexed validity map (RV path only): true at every PC where
+    /// an instruction begins. Empty for the PVM path — `compile()`
+    /// consumes its own bitmask argument, no need to surface it.
+    pub valid_pc: Vec<bool>,
 }
 
 /// Helper function pointers passed to compiled code.
@@ -129,7 +141,7 @@ pub struct HelperFns {
 
 /// Tracks what a PVM register was last set to, for peephole optimization.
 #[derive(Clone, Copy, Debug)]
-enum RegDef {
+pub(crate) enum RegDef {
     /// Unknown or complex value.
     Unknown,
     /// Known compile-time constant (32-bit address or immediate).
@@ -148,49 +160,69 @@ pub struct Compiler {
     pub asm: Assembler,
     /// Base label ID for PC labels. label_for_pc(pc) = Label(label_base + pc).
     /// Labels are bulk-allocated in the assembler with LABEL_UNBOUND=0 (zeroed pages).
-    label_base: u32,
+    pub(crate) label_base: u32,
     /// Gas block start PCs discovered during compilation (for dispatch table).
-    gas_block_pcs: Vec<u32>,
+    pub(crate) gas_block_pcs: Vec<u32>,
     /// Label for the exit sequence.
-    exit_label: Label,
+    pub(crate) exit_label: Label,
     /// Label for the shared out-of-gas exit (sets EXIT_OOG + jumps to exit).
     oog_label: Label,
     /// Label for panic exit.
-    panic_label: Label,
+    pub(crate) panic_label: Label,
     /// Label for OOG handler that reads PC from SCRATCH: stores PC, then falls through to oog_label.
     oog_pc_label: Label,
     /// Per-gas-block OOG stubs: (label, pvm_pc) — emitted as cold code after main body.
-    oog_stubs: Vec<(Label, u32, u32)>, // (label, pvm_pc, block_cost)
+    pub(crate) oog_stubs: Vec<(Label, u32, u32)>, // (label, pvm_pc, block_cost)
     /// Helper function addresses.
-    helpers: HelperFns,
+    pub(crate) helpers: HelperFns,
     /// Bitmask reference (1 = instruction start). Stored as raw pointer for self-referential use.
-    bitmask_ptr: *const u8,
-    bitmask_len: usize,
+    pub(crate) bitmask_ptr: *const u8,
+    pub(crate) bitmask_len: usize,
     /// Peephole: tracks how each PVM register was last defined.
-    reg_defs: [RegDef; 13],
+    pub(crate) reg_defs: [RegDef; 13],
     /// Bitmask of registers that have non-Unknown reg_defs (for fast invalidation).
-    reg_defs_active: u16,
+    pub(crate) reg_defs_active: u16,
     /// Carry flag fusion: after an `add64 D, A, B`, CF = overflow(A+B).
     /// Stores (D, A, B) so that a subsequent `setLtU C, D, A` or `setLtU C, D, B`
     /// can use CF directly instead of emitting a redundant `cmp`.
     /// Cleared by any instruction that clobbers flags (i.e., everything except the
     /// immediately following setLtU).
-    last_add_cf: Option<(usize, usize, usize)>,
+    pub(crate) last_add_cf: Option<(usize, usize, usize)>,
     /// Trap table for signal-based bounds checking: (native_offset, pvm_pc).
-    trap_entries: Vec<(u32, u32)>,
+    pub(crate) trap_entries: Vec<(u32, u32)>,
     /// Memory tier load/store cycles for gas simulation.
-    mem_cycles: u8,
+    pub(crate) mem_cycles: u8,
+    /// Pipeline simulator for per-block gas costing. The RV streaming
+    /// compile path drives this directly from `compile_rv_instruction`
+    /// arms (so the per-instruction loop performs ONE match over
+    /// `Inst`); `bind_rv_gas_block_start_streaming` flushes it at
+    /// block boundaries. The PVM `compile()` path uses its own local
+    /// simulator and leaves this one untouched.
+    pub(crate) gas_sim: GasSimulator,
+    /// PVM2: per-function `br_table` sub-table CSR offsets. Each
+    /// `BrTable { table_id, .. }` instruction dispatches through
+    /// entries `jt_ptr[rv_jt_offsets[table_id] ..
+    /// rv_jt_offsets[table_id + 1]]`. Empty for PVM legacy.
+    pub(crate) rv_jt_offsets: Vec<u32>,
+    /// True during RV streaming compile (`compile`). When set, branch
+    /// emit helpers defer forward-target validation (`target > pc`) to a
+    /// post-pass instead of consulting `bitmask_ptr`. Off for PVM, whose
+    /// caller-supplied bitmask is fully populated at emit time.
+    pub(crate) rv_streaming: bool,
+    /// Forward branches whose target validity could not be determined at
+    /// emit time. Resolved post-pass: each entry is
+    /// `(target_pc, branch_pc, fixup_idx)`. If `valid_pc[target]` is
+    /// false after the streaming pass, the fixup is redirected to a
+    /// per-branch panic stub.
+    pub(crate) rv_pending_fwd_branches: Vec<(u32, u32, usize)>,
+    /// Backing storage for `bitmask_ptr` during RV streaming compile.
+    /// Built incrementally in `bind_rv_gas_block_start_streaming`. Empty
+    /// for the PVM path (uses the caller-supplied bitmask).
+    pub(crate) rv_valid_pc: Vec<bool>,
 }
 
 impl Compiler {
-    pub fn new(
-        bitmask: &[u8],
-        _jump_table: &[u32],
-        helpers: HelperFns,
-        code_len: usize,
-        jit_va_base: u64,
-        mem_cycles: u8,
-    ) -> Self {
+    pub fn new(helpers: HelperFns, code_len: usize, jit_va_base: u64, mem_cycles: u8) -> Self {
         // Estimate native code size: ~3x PVM code provides safety margin for
         // direct-write emission (no per-byte capacity checks in hot loop).
         let estimated_native = code_len * 3 + 8192;
@@ -228,680 +260,58 @@ impl Compiler {
             reg_defs_active: 0,
             last_add_cf: None,
             helpers,
-            bitmask_ptr: bitmask.as_ptr(),
-            bitmask_len: bitmask.len(),
+            bitmask_ptr: core::ptr::null(),
+            bitmask_len: 0,
             trap_entries: Vec::with_capacity(2048),
             mem_cycles,
+            gas_sim: GasSimulator::new(),
+            rv_jt_offsets: Vec::new(),
+            rv_streaming: false,
+            rv_pending_fwd_branches: Vec::new(),
+            rv_valid_pc: Vec::new(),
         }
+    }
+
+    /// RV streaming-compile gas feed. Each `compile_rv_instruction`
+    /// arm calls this once with its kind constant + raw RV register
+    /// indices; we slot-translate inline and call
+    /// `rv_feed_gas_kind` against `self.gas_sim`. Returns
+    /// `is_terminator` (RVF_TERM flag from the LUT entry).
+    #[inline(always)]
+    pub(crate) fn feed_gas_rv(&mut self, kind: u8, rs1: u8, rs2: u8, rd: u8) -> bool {
+        javm_exec::gas_cost::rv_feed_gas_kind(
+            kind,
+            rv_slot_or_ff(rs1),
+            rv_slot_or_ff(rs2),
+            rv_slot_or_ff(rd),
+            &mut self.gas_sim,
+            self.mem_cycles,
+        )
     }
 
     /// Look up the pre-created label for a PVM PC. O(1) arithmetic.
     #[inline]
-    fn label_for_pc(&self, pc: u32) -> Label {
+    pub(crate) fn label_for_pc(&self, pc: u32) -> Label {
         Label(self.label_base + pc)
     }
 
-    fn is_basic_block_start(&self, idx: u32) -> bool {
+    pub(crate) fn is_basic_block_start(&self, idx: u32) -> bool {
         let i = idx as usize;
         // SAFETY: bitmask_ptr points to the start of a valid &[u8] slice of length
         // bitmask_len, and i < bitmask_len is checked before the dereference.
         i < self.bitmask_len && unsafe { *self.bitmask_ptr.add(i) } == 1
     }
 
-    /// Compile directly from raw code+bitmask. Streaming single-pass:
-    /// gas block discovery + decode + gas sim + codegen in one loop.
-    pub fn compile(mut self, code: &[u8], bitmask: &[u8]) -> CompileResult {
-        let code_len = code.len();
-
-        // Emit prologue
-        self.emit_prologue();
-
-        // True single-pass: no pre-scan. Gas block starts (ϖ) are discovered
-        // inline — PC=0 is always a gas block start, and after every terminator
-        // instruction the next PC becomes a gas block start.
-        let mut gas_sim = GasSimulator::new();
-        let mut pending_gas: Option<(Label, u32, usize)> = None;
-        // Tracks whether the next instruction starts a new gas block.
-        // True initially for PC=0.
-        let mut next_is_gas_start = true;
-
-        // Find first instruction start
-        let mut pc: usize = 0;
-        while pc < code.len() && (pc >= bitmask.len() || bitmask[pc] != 1) {
-            pc += 1;
-        }
-
-        let code_ptr = code.as_ptr();
-
-        while pc < code.len() {
-            self.asm.ensure_capacity(512);
-
-            // SAFETY: pc < code_len is guaranteed by the loop condition.
-            let raw_byte = unsafe { *code_ptr.add(pc) };
-            let is_gas_start = next_is_gas_start;
-            next_is_gas_start = false;
-
-            // Fast skip for Fallthrough/Unlikely: these produce zero native code
-            // but ARE terminators, so the next instruction starts a new gas block.
-            if raw_byte == 1 || raw_byte == 2 {
-                // Fallthrough=1, Unlikely=2
-                let skip = javm_exec::gas_cost::skip_distance(bitmask, pc);
-                if is_gas_start {
-                    self.emit_gas_block_start(pc, &mut pending_gas, &mut gas_sim);
-                }
-                gas_sim.feed(&javm_exec::gas_cost::FastCost {
-                    cycles: 2,
-                    decode_slots: 1,
-                    exec_unit: 0,
-                    src_mask: 0,
-                    dst_mask: 0,
-                    is_terminator: true,
-                    is_move_reg: false,
-                });
-                next_is_gas_start = true; // fallthrough IS a terminator
-                pc += 1 + skip;
-                continue;
-            }
-
-            // Combined opcode validation + category lookup in a single array access.
-            let (opcode, category) = match javm_exec::instruction::decode_opcode_fast(raw_byte) {
-                Some(oc) => oc,
-                None => {
-                    self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
-                    self.emit_exit(EXIT_PANIC, 0);
-                    pc += 1;
-                    continue;
-                }
-            };
-            let skip = javm_exec::gas_cost::skip_distance(bitmask, pc);
-            let next_pc = (pc + 1 + skip) as u32;
-
-            // Read register bytes once — used by both arg decoding and gas cost.
-            // SAFETY: pc < code.len(). pc+1/pc+2 may be out of bounds for
-            // instructions at the end, so we bounds-check those.
-            let reg_byte1 = if pc + 1 < code.len() {
-                unsafe { *code_ptr.add(pc + 1) }
-            } else {
-                0
-            };
-            let reg_byte2 = if pc + 2 < code.len() {
-                unsafe { *code_ptr.add(pc + 2) }
-            } else {
-                0
-            };
-            let raw_ra = reg_byte1 & 0x0F;
-            let raw_rb = reg_byte1 >> 4;
-
-            let decoded_args = match category {
-                javm_exec::instruction::InstructionCategory::ThreeReg => Args::ThreeReg {
-                    ra: raw_ra.min(12) as usize,
-                    rb: raw_rb.min(12) as usize,
-                    rd: reg_byte2.min(12) as usize,
-                },
-                javm_exec::instruction::InstructionCategory::TwoReg => Args::TwoReg {
-                    rd: raw_ra.min(12) as usize,
-                    ra: raw_rb.min(12) as usize,
-                },
-                javm_exec::instruction::InstructionCategory::TwoRegOneImm => {
-                    let ra = raw_ra.min(12) as usize;
-                    let rb = raw_rb.min(12) as usize;
-                    let lx = if skip > 1 { (skip - 1).min(4) } else { 0 };
-                    let imm = args::read_signed_imm(code, pc + 2, lx);
-                    Args::TwoRegImm { ra, rb, imm }
-                }
-                javm_exec::instruction::InstructionCategory::NoArgs => Args::None,
-                javm_exec::instruction::InstructionCategory::OneImm => {
-                    let lx = skip.min(4);
-                    Args::Imm {
-                        imm: args::read_signed_imm(code, pc + 1, lx),
-                    }
-                }
-                javm_exec::instruction::InstructionCategory::OneRegOneImm => {
-                    let ra = raw_ra.min(12) as usize;
-                    let lx = if skip > 1 { (skip - 1).min(4) } else { 0 };
-                    Args::RegImm {
-                        ra,
-                        imm: args::read_signed_imm(code, pc + 2, lx),
-                    }
-                }
-                javm_exec::instruction::InstructionCategory::OneRegExtImm => {
-                    let ra = raw_ra.min(12) as usize;
-                    Args::RegExtImm {
-                        ra,
-                        imm: args::read_le_imm(code, pc + 2, 8),
-                    }
-                }
-                javm_exec::instruction::InstructionCategory::TwoImm => {
-                    let lx = (reg_byte1 as usize % 8).min(4);
-                    let ly = if skip > lx + 1 {
-                        (skip - lx - 1).min(4)
-                    } else {
-                        0
-                    };
-                    Args::TwoImm {
-                        imm_x: args::read_signed_imm(code, pc + 2, lx),
-                        imm_y: args::read_signed_imm(code, pc + 2 + lx, ly),
-                    }
-                }
-                javm_exec::instruction::InstructionCategory::OneOffset => {
-                    let lx = skip.min(4);
-                    let signed_off = args::read_signed_imm(code, pc + 1, lx) as i64;
-                    Args::Offset {
-                        offset: (pc as i64).wrapping_add(signed_off) as u64,
-                    }
-                }
-                javm_exec::instruction::InstructionCategory::OneRegTwoImm => {
-                    let ra = raw_ra.min(12) as usize;
-                    let lx = ((reg_byte1 as usize / 16) % 8).min(4);
-                    let ly = if skip > lx + 1 {
-                        (skip - lx - 1).min(4)
-                    } else {
-                        0
-                    };
-                    Args::RegTwoImm {
-                        ra,
-                        imm_x: args::read_signed_imm(code, pc + 2, lx),
-                        imm_y: args::read_signed_imm(code, pc + 2 + lx, ly),
-                    }
-                }
-                javm_exec::instruction::InstructionCategory::OneRegImmOffset => {
-                    let ra = raw_ra.min(12) as usize;
-                    let lx = ((reg_byte1 as usize / 16) % 8).min(4);
-                    let ly = if skip > lx + 1 {
-                        (skip - lx - 1).min(4)
-                    } else {
-                        0
-                    };
-                    let imm = args::read_signed_imm(code, pc + 2, lx);
-                    let signed_off = args::read_signed_imm(code, pc + 2 + lx, ly) as i64;
-                    Args::RegImmOffset {
-                        ra,
-                        imm,
-                        offset: (pc as i64).wrapping_add(signed_off) as u64,
-                    }
-                }
-                javm_exec::instruction::InstructionCategory::TwoRegOneOffset => {
-                    let ra = raw_ra.min(12) as usize;
-                    let rb = raw_rb.min(12) as usize;
-                    let lx = if skip > 1 { (skip - 1).min(4) } else { 0 };
-                    let signed_off = args::read_signed_imm(code, pc + 2, lx) as i64;
-                    Args::TwoRegOffset {
-                        ra,
-                        rb,
-                        offset: (pc as i64).wrapping_add(signed_off) as u64,
-                    }
-                }
-                javm_exec::instruction::InstructionCategory::TwoRegTwoImm => {
-                    let ra = raw_ra.min(12) as usize;
-                    let rb = raw_rb.min(12) as usize;
-                    let lx = (reg_byte2 as usize % 8).min(4);
-                    let ly = if skip > lx + 2 {
-                        (skip - lx - 2).min(4)
-                    } else {
-                        0
-                    };
-                    Args::TwoRegTwoImm {
-                        ra,
-                        rb,
-                        imm_x: args::read_signed_imm(code, pc + 3, lx),
-                        imm_y: args::read_signed_imm(code, pc + 3 + lx, ly),
-                    }
-                }
-            };
-
-            // Gas block boundary: discovered inline via next_is_gas_start flag.
-            if is_gas_start {
-                self.emit_gas_block_start(pc, &mut pending_gas, &mut gas_sim);
-            }
-
-            let is_terminator = {
-                // Fast path: feed gas simulator directly from register bytes,
-                // skipping FastCost struct construction and bitmask iteration.
-                let (term, needs_full) = javm_exec::gas_cost::feed_gas_direct(
-                    opcode as u8,
-                    raw_ra,
-                    raw_rb,
-                    reg_byte2 & 0x0F,
-                    &mut gas_sim,
-                    self.mem_cycles,
-                );
-                if needs_full {
-                    // Slow path for branches/overlap/move: use full FastCost
-                    let fc = javm_exec::gas_cost::fast_cost_lut_regs(
-                        opcode as u8,
-                        &decoded_args,
-                        pc,
-                        code,
-                        bitmask,
-                        raw_ra,
-                        raw_rb,
-                        reg_byte2 & 0x0F,
-                        self.mem_cycles,
-                    );
-                    gas_sim.feed(&fc);
-                    fc.is_terminator
-                } else {
-                    term
-                }
-            };
-
-            // Peephole fusions
-            let fused = match opcode {
-                Opcode::Add64 => {
-                    self.try_fuse_scaled_index_raw(code, bitmask, pc, &decoded_args, &mut gas_sim)
-                }
-                Opcode::Mul64 => {
-                    self.try_fuse_mul_pair_raw(code, bitmask, pc, &decoded_args, &mut gas_sim)
-                }
-                _ => None,
-            };
-
-            if let Some(advance) = fused {
-                self.last_add_cf = None; // fused instruction clobbers flags
-                pc += advance;
-                continue;
-            }
-
-            // Clear carry flag tracking for all opcodes except Add64 (which sets it)
-            // and SetLtU (which consumes it inside compile_instruction).
-            if !matches!(opcode, Opcode::Add64 | Opcode::SetLtU) {
-                self.last_add_cf = None;
-            }
-
-            self.compile_instruction(opcode, &decoded_args, pc as u32, next_pc);
-
-            // Fast reg_defs update: for special-case opcodes that produce
-            // trackable patterns (Add64→Shifted, LoadImm→Const, etc.), call
-            // the full update_reg_defs. For all other opcodes, just invalidate
-            // the destination register directly from the decoded args. This
-            // avoids the opcode match + Args re-destructuring for ~95% of
-            // instructions.
-            match opcode {
-                Opcode::Add64
-                | Opcode::LoadImm
-                | Opcode::LoadImm64
-                | Opcode::ShloLImm64
-                | Opcode::MoveReg => {
-                    self.update_reg_defs(opcode, &decoded_args);
-                }
-                _ => {
-                    // Fast path: invalidate dest register based on category.
-                    // The destination is the first register field for most categories.
-                    match category {
-                        javm_exec::instruction::InstructionCategory::ThreeReg => {
-                            if let Args::ThreeReg { rd, .. } = decoded_args {
-                                self.invalidate_reg(rd);
-                            }
-                        }
-                        javm_exec::instruction::InstructionCategory::TwoReg => {
-                            if let Args::TwoReg { rd, .. } = decoded_args {
-                                self.invalidate_reg(rd);
-                            }
-                        }
-                        javm_exec::instruction::InstructionCategory::TwoRegOneImm
-                        | javm_exec::instruction::InstructionCategory::OneRegOneImm
-                        | javm_exec::instruction::InstructionCategory::OneRegExtImm
-                        | javm_exec::instruction::InstructionCategory::OneRegTwoImm
-                        | javm_exec::instruction::InstructionCategory::OneRegImmOffset => {
-                            // Destination = first register (ra in raw byte low nibble)
-                            self.invalidate_reg(raw_ra.min(12) as usize);
-                        }
-                        _ => {
-                            // NoArgs, OneImm, OneOffset, TwoRegOneOffset, TwoRegTwoImm:
-                            // These either don't write to a register or are terminators
-                            // (which invalidate_all_regs at the next gas block boundary).
-                            if is_terminator {
-                                self.invalidate_all_regs();
-                            }
-                        }
-                    }
-                }
-            }
-
-            // After a terminator, the next instruction starts a new gas block.
-            if is_terminator {
-                next_is_gas_start = true;
-            }
-
-            pc += 1 + skip;
-        }
-
-        // Finalize last gas block
-        if let Some((stub_label, block_pc, patch_offset)) = pending_gas.take() {
-            let cost = gas_sim.flush_and_get_cost();
-            self.asm.patch_i32(patch_offset, cost as i32);
-            self.oog_stubs.push((stub_label, block_pc, cost));
-        }
-
-        // Emit epilogue and exit sequences
-        self.emit_exit_sequences();
-
-        // Build dispatch table: PVM PC → native code offset.
-        // gas_block_pcs was populated inline during the single-pass loop.
-        let table_len = code_len + 1;
-        let mut dispatch_table = vec![0i32; table_len];
-        for &pvm_pc in self.gas_block_pcs.iter() {
-            let label = Label(self.label_base + pvm_pc);
-            if let Some(offset) = self.asm.label_offset(label) {
-                dispatch_table[pvm_pc as usize] = offset as i32;
-            }
-        }
-        // PC=0 must always be valid (program start); if not already set, it'll be
-        // set by the first basic block at PC 0.
-
-        let exit_label_offset = self.asm.label_offset(self.exit_label).unwrap_or(0) as u32;
-        let trap_table = self.trap_entries;
-
-        CompileResult {
-            native_code: self.asm.finalize(),
-            dispatch_table,
-            trap_table,
-            exit_label_offset,
-        }
-    }
-
-    /// Peephole: fuse scaled-index from raw code (no pre-decoded array).
-    /// Pattern: add64 D,A,A / add64 D,D,D / add64 D2,BASE,D / load/store_ind R,D2,0
-    fn try_fuse_scaled_index_raw(
-        &mut self,
-        code: &[u8],
-        bitmask: &[u8],
-        pc: usize,
-        args: &Args,
-        gas_sim: &mut GasSimulator,
-    ) -> Option<usize> {
-        let Args::ThreeReg {
-            ra: a1_ra,
-            rb: a1_rb,
-            rd: a1_rd,
-        } = args
-        else {
-            return None;
-        };
-        if a1_ra != a1_rb {
-            return None;
-        }
-        let idx_reg = *a1_ra;
-        let d1 = *a1_rd;
-
-        // Peek instruction 2
-        let skip1 = compute_skip(pc, bitmask);
-        let pc2 = pc + 1 + skip1;
-        if pc2 >= code.len() || (pc2 < bitmask.len() && bitmask[pc2] != 1) {
-            return None;
-        }
-        let op2 = Opcode::from_byte(code[pc2])?;
-        if op2 != Opcode::Add64 {
-            return None;
-        }
-        let skip2 = compute_skip(pc2, bitmask);
-        let args2 = args::decode_args(code, pc2, skip2, op2.category());
-        let Args::ThreeReg {
-            ra: a2_ra,
-            rb: a2_rb,
-            rd: a2_rd,
-        } = args2
-        else {
-            return None;
-        };
-        if a2_ra != d1 || a2_rb != d1 || a2_rd != d1 {
-            return None;
-        }
-
-        // Peek instruction 3
-        let pc3 = pc2 + 1 + skip2;
-        if pc3 >= code.len() || (pc3 < bitmask.len() && bitmask[pc3] != 1) {
-            return None;
-        }
-        let op3 = Opcode::from_byte(code[pc3])?;
-        if op3 != Opcode::Add64 {
-            return None;
-        }
-        let skip3 = compute_skip(pc3, bitmask);
-        let args3 = args::decode_args(code, pc3, skip3, op3.category());
-        let Args::ThreeReg {
-            ra: a3_ra,
-            rb: a3_rb,
-            rd: a3_rd,
-        } = args3
-        else {
-            return None;
-        };
-        let base_reg;
-        if a3_rb == d1 && a3_ra != d1 {
-            base_reg = a3_ra;
-        } else if a3_ra == d1 && a3_rb != d1 {
-            base_reg = a3_rb;
-        } else {
-            return None;
-        }
-        let addr_reg = a3_rd;
-
-        // Peek instruction 4
-        let pc4 = pc3 + 1 + skip3;
-        if pc4 >= code.len() || (pc4 < bitmask.len() && bitmask[pc4] != 1) {
-            return None;
-        }
-        let op4 = Opcode::from_byte(code[pc4])?;
-        let skip4 = compute_skip(pc4, bitmask);
-        let args4 = args::decode_args(code, pc4, skip4, op4.category());
-
-        // Feed instructions 2-4 to gas sim (using decoded args, no redundant decode)
-        for &(opc, a, p) in &[(op2, &args2, pc2), (op3, &args3, pc3), (op4, &args4, pc4)] {
-            let fc = javm_exec::gas_cost::fast_cost_from_decoded(
-                opc as u8,
-                a,
-                p as u32,
-                code,
-                bitmask,
-                self.mem_cycles,
-            );
-            gas_sim.feed(&fc);
-        }
-
-        // Bind labels for all 4 instructions
-        // With post-terminator-only gas blocks, fused instructions (add, mul,
-        // load, store) are never terminators, so none of these PCs are gas block
-        // starts. No label binding needed.
-
-        match op4 {
-            Opcode::LoadIndU8
-            | Opcode::LoadIndI8
-            | Opcode::LoadIndU16
-            | Opcode::LoadIndI16
-            | Opcode::LoadIndU32
-            | Opcode::LoadIndI32
-            | Opcode::LoadIndU64 => {
-                let Args::TwoRegImm { ra, rb, imm } = args4 else {
-                    return None;
-                };
-                if rb != addr_reg || imm as i32 != 0 {
-                    return None;
-                }
-                self.asm
-                    .lea_sib_scaled_32(SCRATCH, REG_MAP[base_reg], REG_MAP[idx_reg], 2);
-                let fn_addr = self.read_fn_for(op4);
-                let ra_reg = REG_MAP[ra];
-                self.emit_mem_read(ra_reg, SCRATCH, fn_addr, pc4 as u32);
-                self.emit_sign_extend(op4, ra_reg);
-                self.invalidate_all_regs();
-                Some(pc4 + 1 + skip4 - pc)
-            }
-            Opcode::StoreIndU8
-            | Opcode::StoreIndU16
-            | Opcode::StoreIndU32
-            | Opcode::StoreIndU64 => {
-                let Args::TwoRegImm { ra, rb, imm } = args4 else {
-                    return None;
-                };
-                if rb != addr_reg || imm as i32 != 0 {
-                    return None;
-                }
-                self.asm
-                    .lea_sib_scaled_32(SCRATCH, REG_MAP[base_reg], REG_MAP[idx_reg], 2);
-                let fn_addr = self.write_fn_for(op4);
-                let ra_reg = REG_MAP[ra];
-                self.emit_mem_write(true, ra_reg, fn_addr, pc4 as u32);
-                self.invalidate_all_regs();
-                Some(pc4 + 1 + skip4 - pc)
-            }
-            _ => None,
-        }
-    }
-
-    /// Peephole: fuse `mul_64 D_lo, A, B` + `mul_upper_{uu,ss} D_hi, A, B`
-    /// (same A and B) into a single x86 `MUL`/`IMUL` that computes the
-    /// full 128-bit product in one shot (`RDX:RAX = A*B`).
-    ///
-    /// Hot in Goldilocks `mul`: the `(a as u128)*(b as u128)` decomposition
-    /// emits the PVM pair on identical operands; the standalone codegen
-    /// would do two separate full 64-bit multiplies (one for low, one
-    /// for high).
-    ///
-    /// Skipped for `mul_upper_su` (mixed signedness): handled by its
-    /// dedicated emit path, which needs the sign-correction.
-    fn try_fuse_mul_pair_raw(
-        &mut self,
-        code: &[u8],
-        bitmask: &[u8],
-        pc: usize,
-        args: &Args,
-        gas_sim: &mut GasSimulator,
-    ) -> Option<usize> {
-        let Args::ThreeReg {
-            ra: m_ra,
-            rb: m_rb,
-            rd: m_rd,
-        } = args
-        else {
-            return None;
-        };
-
-        let skip1 = compute_skip(pc, bitmask);
-        let pc2 = pc + 1 + skip1;
-        if pc2 >= code.len() || (pc2 < bitmask.len() && bitmask[pc2] != 1) {
-            return None;
-        }
-        let op2 = Opcode::from_byte(code[pc2])?;
-        let signed = match op2 {
-            Opcode::MulUpperSS => true,
-            Opcode::MulUpperUU => false,
-            _ => return None,
-        };
-        let skip2 = compute_skip(pc2, bitmask);
-        let args2 = args::decode_args(code, pc2, skip2, op2.category());
-        let Args::ThreeReg {
-            ra: u_ra,
-            rb: u_rb,
-            rd: u_rd,
-        } = args2
-        else {
-            return None;
-        };
-        if u_ra != *m_ra || u_rb != *m_rb {
-            return None;
-        }
-        // Disallow rd_lo == rd_hi (would only deliver one of the two products).
-        if *m_rd == u_rd {
-            return None;
-        }
-
-        // Feed instruction 2 to gas sim (using decoded args, no redundant decode).
-        // Fused mul-pair instructions are never terminators — no gas block binding.
-        let fc = javm_exec::gas_cost::fast_cost_from_decoded(
-            op2 as u8,
-            &args2,
-            pc2 as u32,
-            code,
-            bitmask,
-            self.mem_cycles,
-        );
-        gas_sim.feed(&fc);
-
-        let (a, b) = (REG_MAP[*m_ra], REG_MAP[*m_rb]);
-        let (rd_lo, rd_hi) = (REG_MAP[*m_rd], REG_MAP[u_rd]);
-        let phi11 = REG_MAP[11]; // RAX
-        debug_assert_eq!(phi11, Reg::RAX);
-
-        // Strategy:
-        //   1. Get A's value into RAX (preserve φ[11] if it's neither rd_lo
-        //      nor rd_hi).
-        //   2. Get B's value into a non-RAX, non-RDX register (mul_src).
-        //   3. MUL/IMUL mul_src → RDX:RAX.
-        //   4. Move RAX → rd_lo (skip if rd_lo is RAX, value already there).
-        //   5. Move RDX → rd_hi (skip if rd_hi is RDX = SCRATCH, but SCRATCH
-        //      isn't a PVM register, so rd_hi is always ≠ RDX).
-        //   6. Restore φ[11] from stack if we saved it.
-        //
-        // Order of moves matters when rd_lo or rd_hi aliases A or B:
-        //   - rd_hi aliases A: writing rd_hi clobbers A's home, but A's
-        //     value was already consumed by mul. OK.
-        //   - rd_lo aliases B: writing rd_lo overwrites B's home. mul has
-        //     already consumed B. OK.
-        //   - rd_lo == RAX: RAX already holds low; skip the mov.
-        //
-        // We preserve φ[11] when neither rd writes to it (the rest of the
-        // program may still expect RAX to hold φ[11]'s value).
-        let need_save_phi11 = rd_lo != phi11 && rd_hi != phi11;
-
-        if need_save_phi11 {
-            self.asm.push(phi11);
-        }
-
-        // If B is RAX, its value is now either in RAX (where mul wants A)
-        // or on the stack (above) if we saved. Load to SCRATCH before
-        // clobbering RAX with A.
-        let mul_src = if b == phi11 {
-            if need_save_phi11 {
-                // φ[11]'s original value is at [RSP], which is B's value.
-                self.asm.mov_load64(SCRATCH, Reg::RSP, 0);
-            } else {
-                // Didn't save; B's value is still in RAX. But we're about
-                // to overwrite RAX with A. Stash B to SCRATCH first.
-                self.asm.mov_rr(SCRATCH, b);
-            }
-            SCRATCH
-        } else {
-            b
-        };
-
-        // Load A into RAX.
-        if a != phi11 {
-            self.asm.mov_rr(phi11, a);
-        }
-
-        if signed {
-            self.asm.imul_rdx_rax(mul_src);
-        } else {
-            self.asm.mul_rdx_rax(mul_src);
-        }
-
-        // Write rd_lo (from RAX) first. If rd_lo == phi11, no-op. If rd_lo
-        // == SCRATCH that's impossible (SCRATCH isn't a PVM reg).
-        if rd_lo != phi11 {
-            self.asm.mov_rr(rd_lo, phi11);
-        }
-        // Write rd_hi (from RDX = SCRATCH).
-        self.asm.mov_rr(rd_hi, SCRATCH);
-
-        if need_save_phi11 {
-            self.asm.pop(phi11);
-        }
-
-        self.invalidate_all_regs();
-        Some(pc2 + 1 + skip2 - pc)
-    }
-
-    /// Emit memory read. Address in SCRATCH (RDX). Result in dst.
-    /// Uses inline flat buffer access with helper fallback for cross-page.
-    fn emit_mem_read(&mut self, dst: Reg, _addr_reg: Reg, fn_addr: u64, pvm_pc: u32) {
-        self.emit_mem_read_sized(dst, fn_addr, 0, pvm_pc);
-    }
-
     /// Emit memory read with bounds check (cold fault path).
     /// Hot path: cmp + jae + load (2 instructions, no extra stores).
     /// No bounds check — SIGSEGV handler catches OOB.
-    fn emit_mem_read_sized(&mut self, dst: Reg, fn_addr: u64, width_bytes: u32, pvm_pc: u32) {
+    pub(crate) fn emit_mem_read_sized(
+        &mut self,
+        dst: Reg,
+        fn_addr: u64,
+        width_bytes: u32,
+        pvm_pc: u32,
+    ) {
         let w = if width_bytes > 0 {
             width_bytes
         } else if fn_addr == self.helpers.mem_read_u8 {
@@ -928,18 +338,13 @@ impl Compiler {
 
     /// Emit sign extension after a memory load, if the opcode is a signed variant.
     /// Handles both direct loads (LoadI8/I16/I32) and indirect loads (LoadIndI8/I16/I32).
-    fn emit_sign_extend(&mut self, opcode: Opcode, reg: Reg) {
-        match opcode {
-            Opcode::LoadI8 | Opcode::LoadIndI8 => self.asm.movsx_8_64(reg, reg),
-            Opcode::LoadI16 | Opcode::LoadIndI16 => self.asm.movsx_16_64(reg, reg),
-            Opcode::LoadI32 | Opcode::LoadIndI32 => self.asm.movsxd(reg, reg),
-            _ => {}
-        }
-    }
-
-    /// Emit memory write with bounds check (cold fault path).
-    /// No bounds check — SIGSEGV handler catches OOB.
-    fn emit_mem_write(&mut self, _addr_in_scratch: bool, val_reg: Reg, fn_addr: u64, pvm_pc: u32) {
+    pub(crate) fn emit_mem_write(
+        &mut self,
+        _addr_in_scratch: bool,
+        val_reg: Reg,
+        fn_addr: u64,
+        pvm_pc: u32,
+    ) {
         let w = if fn_addr == self.helpers.mem_write_u8 {
             1u32
         } else if fn_addr == self.helpers.mem_write_u16 {
@@ -965,79 +370,7 @@ impl Compiler {
     /// Emit store-immediate-indirect: store an immediate value to memory.
     /// Inline SIB store (no function call needed).
     ///
-    fn emit_store_imm_ind(
-        &mut self,
-        opcode: Opcode,
-        ra: usize,
-        imm_x: i32,
-        imm_y: u64,
-        _pvm_pc: u32,
-    ) {
-        // Compute address into SCRATCH
-        self.emit_addr_to_scratch(ra, imm_x);
-
-        let fits_i32 = {
-            let imm_i64 = imm_y as i64;
-            imm_i64 >= i32::MIN as i64 && imm_i64 <= i32::MAX as i64
-        };
-
-        // Record trap entry before the store instruction (for SIGSEGV handler).
-        self.trap_entries.push((self.asm.offset() as u32, _pvm_pc));
-
-        match opcode {
-            Opcode::StoreImmIndU8 => {
-                self.asm.mov_store8_at_index_imm(SCRATCH, imm_y as u8);
-            }
-            Opcode::StoreImmIndU16 => {
-                self.asm.mov_store16_at_index_imm(SCRATCH, imm_y as u16);
-            }
-            Opcode::StoreImmIndU32 => {
-                self.asm.mov_store32_at_index_imm(SCRATCH, imm_y as i32);
-            }
-            Opcode::StoreImmIndU64 if fits_i32 => {
-                // mov qword [SCRATCH], sign-extended imm32
-                self.asm.mov_store64_at_index_imm(SCRATCH, imm_y as i32);
-            }
-            Opcode::StoreImmIndU64 => {
-                // Value doesn't fit in sign-extended i32: use a temp register.
-                self.asm.push(Reg::RCX);
-                self.asm.mov_ri64(Reg::RCX, imm_y);
-                self.asm.mov_store64_at_index(SCRATCH, Reg::RCX);
-                self.asm.pop(Reg::RCX);
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    /// Compute a memory address into SCRATCH, using peephole optimizations when available.
-    fn emit_addr_to_scratch(&mut self, rb: usize, imm: i32) {
-        // Peephole: fold known constant address (no register load needed)
-        if let RegDef::Const(addr) = self.reg_defs[rb] {
-            let effective = addr.wrapping_add(imm as u32);
-            self.asm.mov_ri32(SCRATCH, effective);
-            return;
-        }
-        // Peephole: use SIB addressing for scaled-index patterns
-        if imm == 0
-            && let RegDef::ScaledAdd { base, idx, shift } = self.reg_defs[rb]
-        {
-            self.asm
-                .lea_sib_scaled_32(SCRATCH, REG_MAP[base], REG_MAP[idx], shift);
-            return;
-        }
-        let rb_reg = REG_MAP[rb];
-        if imm != 0 {
-            // lea r32, [base + disp]: combines truncation to 32-bit and offset
-            // addition in one instruction (saves ~2 bytes vs movzx + add).
-            self.asm.lea_32(SCRATCH, rb_reg, imm);
-        } else {
-            self.asm.movzx_32_64(SCRATCH, rb_reg);
-        }
-    }
-
-    /// Invalidate any reg_defs that depend on `reg`, but NOT reg itself.
-    #[inline]
-    fn invalidate_dependents(&mut self, reg: usize) {
+    pub(crate) fn invalidate_dependents(&mut self, reg: usize) {
         // Only iterate registers that have active (non-Unknown) defs
         let mut active = self.reg_defs_active & !(1u16 << reg);
         while active != 0 {
@@ -1057,7 +390,7 @@ impl Compiler {
 
     /// Invalidate a register's tracked definition and any dependents.
     #[inline]
-    fn invalidate_reg(&mut self, reg: usize) {
+    pub(crate) fn invalidate_reg(&mut self, reg: usize) {
         self.reg_defs[reg] = RegDef::Unknown;
         self.reg_defs_active &= !(1u16 << reg);
         self.invalidate_dependents(reg);
@@ -1065,7 +398,7 @@ impl Compiler {
 
     /// Invalidate all register definitions (on block boundaries, calls, etc.)
     #[inline]
-    fn invalidate_all_regs(&mut self) {
+    pub(crate) fn invalidate_all_regs(&mut self) {
         self.reg_defs = [RegDef::Unknown; 13];
         self.reg_defs_active = 0;
     }
@@ -1076,1289 +409,21 @@ impl Compiler {
     /// 1. Bind the PC label for branch resolution
     /// 2. Patch the previous block's gas cost (deferred until block end)
     /// 3. Emit a new `sub [ctx+gas], cost; js oog_stub` sequence
-    fn emit_gas_block_start(
+    pub(crate) fn emit_static_branch(
         &mut self,
-        pc: usize,
-        pending_gas: &mut Option<(Label, u32, usize)>,
-        gas_sim: &mut GasSimulator,
+        target: u32,
+        condition: bool,
+        _fallthrough: u32,
+        pc: u32,
     ) {
-        let label = Label(self.label_base + pc as u32);
-        self.asm.bind_label(label);
-        self.gas_block_pcs.push(pc as u32);
-        self.invalidate_all_regs();
-        self.last_add_cf = None; // gas check clobbers flags
-
-        if let Some((stub_label, block_pc, patch_offset)) = pending_gas.take() {
-            let cost = gas_sim.flush_and_get_cost();
-            self.asm.patch_i32(patch_offset, cost as i32);
-            self.oog_stubs.push((stub_label, block_pc, cost));
-        }
-        gas_sim.reset();
-
-        let stub_label = self.asm.new_label();
-        self.asm.sub_r64_imm32_patchable(GAS, 0);
-        let patch_offset = self.asm.offset() - 4;
-        self.asm.jcc_label(Cc::S, stub_label);
-        *pending_gas = Some((stub_label, pc as u32, patch_offset));
-    }
-
-    /// Update reg_defs after compiling an instruction.
-    /// Opcodes that produce trackable patterns update positively;
-    /// all others invalidate the destination register.
-    fn update_reg_defs(&mut self, opcode: Opcode, args: &Args) {
-        match opcode {
-            Opcode::Add64 => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    if *ra == *rb && *ra == *rd {
-                        // add64 D, D, D — doubles again. Shifted{src,s} → Shifted{src,s+1}.
-                        if let RegDef::Shifted { src, shift } = self.reg_defs[*rd] {
-                            if shift < 3 {
-                                self.reg_defs[*rd] = RegDef::Shifted {
-                                    src,
-                                    shift: shift + 1,
-                                };
-                                self.reg_defs_active |= 1u16 << *rd;
-                            } else {
-                                self.reg_defs[*rd] = RegDef::Unknown;
-                                self.reg_defs_active &= !(1u16 << *rd);
-                            }
-                        } else {
-                            self.reg_defs[*rd] = RegDef::Unknown;
-                            self.reg_defs_active &= !(1u16 << *rd);
-                        }
-                    } else if *ra == *rb {
-                        // add64 D, A, A — D = A * 2 = A << 1
-                        // Only track as Shifted when rd != ra; in-place doubling
-                        // (rd == ra) overwrites the original value, making the
-                        // Shifted{src} self-referential — ScaledAdd would then
-                        // double-shift at emit time.
-                        if *rd != *ra {
-                            self.reg_defs[*rd] = RegDef::Shifted { src: *ra, shift: 1 };
-                            self.reg_defs_active |= 1u16 << *rd;
-                        } else {
-                            self.reg_defs[*rd] = RegDef::Unknown;
-                            self.reg_defs_active &= !(1u16 << *rd);
-                        }
-                    } else {
-                        // add64 D, A, B — check if one operand is Shifted
-                        let def = if let RegDef::Shifted { src, shift } = self.reg_defs[*rb] {
-                            Some((*ra, src, shift))
-                        } else if let RegDef::Shifted { src, shift } = self.reg_defs[*ra] {
-                            Some((*rb, src, shift))
-                        } else {
-                            None
-                        };
-                        if let Some((base, idx, shift)) = def {
-                            self.reg_defs[*rd] = RegDef::ScaledAdd { base, idx, shift };
-                            self.reg_defs_active |= 1u16 << *rd;
-                        } else {
-                            self.reg_defs[*rd] = RegDef::Unknown;
-                            self.reg_defs_active &= !(1u16 << *rd);
-                        }
-                    }
-                    self.invalidate_dependents(*rd);
-                }
-            }
-            Opcode::LoadImm => {
-                if let Args::RegImm { ra, imm } = args {
-                    self.reg_defs[*ra] = RegDef::Const(*imm as u32);
-                    self.reg_defs_active |= 1u16 << *ra;
-                    self.invalidate_dependents(*ra);
-                }
-            }
-            Opcode::LoadImm64 => {
-                if let Args::RegExtImm { ra, imm } = args {
-                    self.reg_defs[*ra] = RegDef::Const(*imm as u32);
-                    self.reg_defs_active |= 1u16 << *ra;
-                    self.invalidate_dependents(*ra);
-                }
-            }
-            // Track shift-left-immediate as Shifted for LEA-based scaled indexing.
-            // sll_imm_64 rd, rb, shift → Shifted{src:rb, shift} if shift ∈ 1..=3.
-            // This enables the peephole: sll + add + load → LEA + load with SIB scaling.
-            Opcode::ShloLImm64 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let shift = (*imm as u32 % 64) as u8;
-                    // Only track as Shifted when ra != rb; in-place shifts
-                    // overwrite the original value, making the Shifted{src}
-                    // self-referential — ScaledAdd would double-shift at emit.
-                    if (1..=3).contains(&shift) && ra != rb {
-                        self.reg_defs[*ra] = RegDef::Shifted { src: *rb, shift };
-                        self.reg_defs_active |= 1u16 << *ra;
-                    } else {
-                        self.reg_defs[*ra] = RegDef::Unknown;
-                        self.reg_defs_active &= !(1u16 << *ra);
-                    }
-                    self.invalidate_dependents(*ra);
-                }
-            }
-            Opcode::MoveReg => {
-                if let Args::TwoReg { rd, ra } = args
-                    && *rd != *ra
-                {
-                    // Propagate the source's definition to the destination.
-                    self.reg_defs[*rd] = self.reg_defs[*ra];
-                    if matches!(self.reg_defs[*rd], RegDef::Unknown) {
-                        self.reg_defs_active &= !(1u16 << *rd);
-                    } else {
-                        self.reg_defs_active |= 1u16 << *rd;
-                    }
-                    self.invalidate_dependents(*rd);
-                }
-            }
-            _ => {
-                match args {
-                    Args::ThreeReg { rd, .. } => self.invalidate_reg(*rd),
-                    Args::TwoReg { rd, .. } => self.invalidate_reg(*rd),
-                    Args::TwoRegImm { ra, .. } => self.invalidate_reg(*ra),
-                    Args::RegImm { ra, .. } => self.invalidate_reg(*ra),
-                    Args::RegExtImm { ra, .. } => self.invalidate_reg(*ra),
-                    _ => {}
-                }
-                if opcode.is_terminator() {
-                    self.invalidate_all_regs();
-                }
-            }
-        }
-    }
-
-    /// Compile a single PVM instruction.
-    /// Caller must ensure the assembler has sufficient capacity (at least 256 bytes).
-    #[inline(always)]
-    fn compile_instruction(&mut self, opcode: Opcode, args: &Args, pc: u32, next_pc: u32) {
-        match opcode {
-            // === A.5.1: No arguments ===
-            Opcode::Trap => {
-                self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
-                self.emit_exit(EXIT_TRAP, 0);
-            }
-            Opcode::Fallthrough | Opcode::Unlikely => {
-                // Just fall through to next instruction.
-                // Note: gas is already charged at basic block start above.
-            }
-
-            // === A.5.1b: Ecall (management ops, no immediate) ===
-            Opcode::Ecall => {
-                self.asm.mov_store32_rip_rel_imm(CTX_PC, next_pc as i32);
-                self.emit_exit(EXIT_ECALL, 0);
-            }
-
-            // === A.5.2: One immediate ===
-            Opcode::Ecalli => {
-                if let Args::Imm { imm } = args {
-                    let cap_slot = *imm as u32;
-                    // v3: every ecalli is the slow-path exit through the
-                    // EcallHandler. The `original_bitmap` GAS fast-path
-                    // present in v2 is stripped — there is no protocol cap
-                    // in v3, and gas-debit will reattach in Stage 3 with
-                    // the kernel-assisted Gas Instance.
-                    self.asm.mov_store32_rip_rel_imm(CTX_PC, next_pc as i32);
-                    self.emit_exit(EXIT_HOST_CALL, cap_slot);
-                }
-            }
-
-            // === A.5.3: One register + extended immediate ===
-            Opcode::LoadImm64 => {
-                if let Args::RegExtImm { ra, imm } = args {
-                    self.asm.mov_ri64(REG_MAP[*ra], *imm);
-                }
-            }
-
-            // === A.5.4: Two immediates (store_imm) ===
-            Opcode::StoreImmU8
-            | Opcode::StoreImmU16
-            | Opcode::StoreImmU32
-            | Opcode::StoreImmU64 => {
-                if let Args::TwoImm { imm_x, imm_y } = args {
-                    // Reuse StoreImmInd logic: treat as register 0 with the address
-                    // replaced by a direct constant load into SCRATCH.
-                    let addr = *imm_x as u32;
-                    self.asm.mov_ri32(SCRATCH, addr);
-                    let imm_val = *imm_y;
-
-                    let fits_i32 = {
-                        let imm_i64 = imm_val as i64;
-                        imm_i64 >= i32::MIN as i64 && imm_i64 <= i32::MAX as i64
-                    };
-
-                    // Record trap entry before the store instruction (for SIGSEGV handler).
-                    self.trap_entries.push((self.asm.offset() as u32, pc));
-                    match opcode {
-                        Opcode::StoreImmU8 => {
-                            self.asm.mov_store8_at_index_imm(SCRATCH, imm_val as u8);
-                        }
-                        Opcode::StoreImmU16 => {
-                            self.asm.mov_store16_at_index_imm(SCRATCH, imm_val as u16);
-                        }
-                        Opcode::StoreImmU32 => {
-                            self.asm.mov_store32_at_index_imm(SCRATCH, imm_val as i32);
-                        }
-                        Opcode::StoreImmU64 if fits_i32 => {
-                            self.asm.mov_store64_at_index_imm(SCRATCH, imm_val as i32);
-                        }
-                        Opcode::StoreImmU64 => {
-                            self.asm.push(Reg::RCX);
-                            self.asm.mov_ri64(Reg::RCX, imm_val);
-                            self.asm.mov_store64_at_index(SCRATCH, Reg::RCX);
-                            self.asm.pop(Reg::RCX);
-                        }
-                        _ => unreachable!(),
-                    }
-                }
-            }
-
-            // === A.5.5: One offset (jump) ===
-            Opcode::Jump => {
-                if let Args::Offset { offset } = args {
-                    self.emit_static_branch(*offset as u32, true, next_pc, pc);
-                }
-            }
-
-            // === A.5.6: One register + one immediate ===
-            Opcode::JumpInd => {
-                if let Args::RegImm { ra, imm } = args {
-                    self.emit_dynamic_jump(*ra, *imm, pc);
-                }
-            }
-            Opcode::LoadImm => {
-                if let Args::RegImm { ra, imm } = args {
-                    self.asm.mov_ri64(REG_MAP[*ra], *imm);
-                }
-            }
-            Opcode::LoadU8
-            | Opcode::LoadI8
-            | Opcode::LoadU16
-            | Opcode::LoadI16
-            | Opcode::LoadU32
-            | Opcode::LoadI32
-            | Opcode::LoadU64 => {
-                if let Args::RegImm { ra, imm } = args {
-                    let addr = *imm as u32;
-                    let fn_addr = self.read_fn_for(opcode);
-                    self.asm.mov_ri32(SCRATCH, addr);
-                    let ra_reg = REG_MAP[*ra];
-                    self.emit_mem_read(ra_reg, SCRATCH, fn_addr, pc);
-                    self.emit_sign_extend(opcode, ra_reg);
-                }
-            }
-            Opcode::StoreU8 | Opcode::StoreU16 | Opcode::StoreU32 | Opcode::StoreU64 => {
-                if let Args::RegImm { ra, imm } = args {
-                    let addr = *imm as u32;
-                    let ra_reg = REG_MAP[*ra];
-                    let fn_addr = self.write_fn_for(opcode);
-                    self.asm.mov_ri32(SCRATCH, addr);
-                    self.emit_mem_write(true, ra_reg, fn_addr, pc);
-                }
-            }
-
-            // === A.5.7: One register + two immediates (store_imm_ind) ===
-            Opcode::StoreImmIndU8
-            | Opcode::StoreImmIndU16
-            | Opcode::StoreImmIndU32
-            | Opcode::StoreImmIndU64 => {
-                if let Args::RegTwoImm { ra, imm_x, imm_y } = args {
-                    self.emit_store_imm_ind(opcode, *ra, *imm_x as i32, *imm_y, pc);
-                }
-            }
-
-            // === A.5.8: One register + immediate + offset ===
-            Opcode::LoadImmJump => {
-                if let Args::RegImmOffset { ra, imm, offset } = args {
-                    self.asm.mov_ri64(REG_MAP[*ra], *imm);
-                    self.emit_static_branch(*offset as u32, true, next_pc, pc);
-                }
-            }
-            Opcode::BranchEqImm => {
-                if let Args::RegImmOffset { ra, imm, offset } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.emit_branch_imm(ra_reg, *imm, Cc::E, *offset as u32, next_pc, pc);
-                }
-            }
-            Opcode::BranchNeImm => {
-                if let Args::RegImmOffset { ra, imm, offset } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.emit_branch_imm(ra_reg, *imm, Cc::NE, *offset as u32, next_pc, pc);
-                }
-            }
-            Opcode::BranchLtUImm => {
-                if let Args::RegImmOffset { ra, imm, offset } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.emit_branch_imm(ra_reg, *imm, Cc::B, *offset as u32, next_pc, pc);
-                }
-            }
-            Opcode::BranchLeUImm => {
-                if let Args::RegImmOffset { ra, imm, offset } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.emit_branch_imm(ra_reg, *imm, Cc::BE, *offset as u32, next_pc, pc);
-                }
-            }
-            Opcode::BranchGeUImm => {
-                if let Args::RegImmOffset { ra, imm, offset } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.emit_branch_imm(ra_reg, *imm, Cc::AE, *offset as u32, next_pc, pc);
-                }
-            }
-            Opcode::BranchGtUImm => {
-                if let Args::RegImmOffset { ra, imm, offset } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.emit_branch_imm(ra_reg, *imm, Cc::A, *offset as u32, next_pc, pc);
-                }
-            }
-            Opcode::BranchLtSImm => {
-                if let Args::RegImmOffset { ra, imm, offset } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.emit_branch_imm(ra_reg, *imm, Cc::L, *offset as u32, next_pc, pc);
-                }
-            }
-            Opcode::BranchLeSImm => {
-                if let Args::RegImmOffset { ra, imm, offset } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.emit_branch_imm(ra_reg, *imm, Cc::LE, *offset as u32, next_pc, pc);
-                }
-            }
-            Opcode::BranchGeSImm => {
-                if let Args::RegImmOffset { ra, imm, offset } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.emit_branch_imm(ra_reg, *imm, Cc::GE, *offset as u32, next_pc, pc);
-                }
-            }
-            Opcode::BranchGtSImm => {
-                if let Args::RegImmOffset { ra, imm, offset } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.emit_branch_imm(ra_reg, *imm, Cc::G, *offset as u32, next_pc, pc);
-                }
-            }
-
-            // === A.5.9: Two registers ===
-            Opcode::MoveReg => {
-                if let Args::TwoReg { rd, ra } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.asm.mov_rr(REG_MAP[*rd], ra_reg);
-                }
-            }
-            Opcode::Sbrk => {
-                // JAR v0.8.0: sbrk removed from ISA, replaced by grow_heap hostcall
-                self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
-                self.emit_exit(EXIT_PANIC, 0);
-            }
-            Opcode::CountSetBits64 => {
-                if let Args::TwoReg { rd, ra } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.asm.popcnt64(REG_MAP[*rd], ra_reg);
-                }
-            }
-            Opcode::CountSetBits32 => {
-                if let Args::TwoReg { rd, ra } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    // popcnt32 counts set bits of 32-bit value, zero-extends result
-                    self.asm.popcnt32(REG_MAP[*rd], ra_reg);
-                }
-            }
-            Opcode::LeadingZeroBits64 => {
-                if let Args::TwoReg { rd, ra } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.asm.lzcnt64(REG_MAP[*rd], ra_reg);
-                }
-            }
-            Opcode::LeadingZeroBits32 => {
-                if let Args::TwoReg { rd, ra } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    // lzcnt32 counts leading zeros of 32-bit value, zero-extends result
-                    self.asm.lzcnt32(REG_MAP[*rd], ra_reg);
-                }
-            }
-            Opcode::TrailingZeroBits64 => {
-                if let Args::TwoReg { rd, ra } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.asm.tzcnt64(REG_MAP[*rd], ra_reg);
-                }
-            }
-            Opcode::TrailingZeroBits32 => {
-                if let Args::TwoReg { rd, ra } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    // tzcnt32 returns 32 for zero input and zero-extends result to 64 bits
-                    self.asm.tzcnt32(REG_MAP[*rd], ra_reg);
-                }
-            }
-            Opcode::SignExtend8 => {
-                if let Args::TwoReg { rd, ra } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.asm.movsx_8_64(REG_MAP[*rd], ra_reg);
-                }
-            }
-            Opcode::SignExtend16 => {
-                if let Args::TwoReg { rd, ra } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.asm.movsx_16_64(REG_MAP[*rd], ra_reg);
-                }
-            }
-            Opcode::ZeroExtend16 => {
-                if let Args::TwoReg { rd, ra } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.asm.movzx_16_64(REG_MAP[*rd], ra_reg);
-                }
-            }
-            Opcode::ReverseBytes => {
-                if let Args::TwoReg { rd, ra } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    if *rd != *ra {
-                        self.asm.mov_rr(REG_MAP[*rd], ra_reg);
-                    }
-                    self.asm.bswap64(REG_MAP[*rd]);
-                }
-            }
-
-            // === A.5.10: Two registers + one immediate ===
-            Opcode::StoreIndU8
-            | Opcode::StoreIndU16
-            | Opcode::StoreIndU32
-            | Opcode::StoreIndU64 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.emit_addr_to_scratch(*rb, *imm as i32);
-                    let fn_addr = self.write_fn_for(opcode);
-                    self.emit_mem_write(true, ra_reg, fn_addr, pc);
-                }
-            }
-            Opcode::LoadIndU8
-            | Opcode::LoadIndI8
-            | Opcode::LoadIndU16
-            | Opcode::LoadIndI16
-            | Opcode::LoadIndU32
-            | Opcode::LoadIndI32
-            | Opcode::LoadIndU64 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let ra_reg = REG_MAP[*ra];
-                    self.emit_addr_to_scratch(*rb, *imm as i32);
-                    let fn_addr = self.read_fn_for(opcode);
-                    self.emit_mem_read(ra_reg, SCRATCH, fn_addr, pc);
-                    self.emit_sign_extend(opcode, ra_reg);
-                }
-            }
-            Opcode::AddImm32 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    if *ra != *rb {
-                        self.asm.mov_rr(REG_MAP[*ra], rb_reg);
-                    }
-                    self.asm.add_ri32(REG_MAP[*ra], *imm as i32);
-                    self.asm.movsxd(REG_MAP[*ra], REG_MAP[*ra]);
-                }
-            }
-            Opcode::AddImm64 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    if *ra != *rb {
-                        self.asm.mov_rr(REG_MAP[*ra], rb_reg);
-                    }
-                    if *imm as i32 == 1 {
-                        self.asm.inc64(REG_MAP[*ra]);
-                    } else if *imm as i32 == -1 {
-                        self.asm.dec64(REG_MAP[*ra]);
-                    } else {
-                        self.asm.add_ri(REG_MAP[*ra], *imm as i32);
-                    }
-                }
-            }
-            Opcode::AndImm => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    if *ra != *rb {
-                        self.asm.mov_rr(REG_MAP[*ra], rb_reg);
-                    }
-                    self.asm.and_ri(REG_MAP[*ra], *imm as i32);
-                }
-            }
-            Opcode::XorImm => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    if *ra != *rb {
-                        self.asm.mov_rr(REG_MAP[*ra], rb_reg);
-                    }
-                    self.asm.xor_ri(REG_MAP[*ra], *imm as i32);
-                }
-            }
-            Opcode::OrImm => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    if *ra != *rb {
-                        self.asm.mov_rr(REG_MAP[*ra], rb_reg);
-                    }
-                    self.asm.or_ri(REG_MAP[*ra], *imm as i32);
-                }
-            }
-            Opcode::MulImm32 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    self.asm.imul_rri32(REG_MAP[*ra], rb_reg, *imm as i32);
-                    self.asm.movsxd(REG_MAP[*ra], REG_MAP[*ra]);
-                }
-            }
-            Opcode::MulImm64 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    self.asm.imul_rri(REG_MAP[*ra], rb_reg, *imm as i32);
-                }
-            }
-            Opcode::SetLtUImm => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    self.emit_setcc_imm(*ra, *rb, *imm, Cc::B);
-                }
-            }
-            Opcode::SetLtSImm => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    self.emit_setcc_imm(*ra, *rb, *imm, Cc::L);
-                }
-            }
-            Opcode::SetGtUImm => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    self.emit_setcc_imm(*ra, *rb, *imm, Cc::A);
-                }
-            }
-            Opcode::SetGtSImm => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    self.emit_setcc_imm(*ra, *rb, *imm, Cc::G);
-                }
-            }
-            Opcode::ShloLImm32 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    if *ra != *rb {
-                        self.asm.mov_rr(REG_MAP[*ra], rb_reg);
-                    }
-                    self.asm.shl_ri32(REG_MAP[*ra], (*imm as u8) & 31);
-                    self.asm.movsxd(REG_MAP[*ra], REG_MAP[*ra]);
-                }
-            }
-            Opcode::ShloRImm32 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    if *ra != *rb {
-                        self.asm.mov_rr(REG_MAP[*ra], rb_reg);
-                    }
-                    self.asm.movzx_32_64(REG_MAP[*ra], REG_MAP[*ra]);
-                    self.asm.shr_ri32(REG_MAP[*ra], (*imm as u8) & 31);
-                    self.asm.movsxd(REG_MAP[*ra], REG_MAP[*ra]);
-                }
-            }
-            Opcode::SharRImm32 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    if *ra != *rb {
-                        self.asm.mov_rr(REG_MAP[*ra], rb_reg);
-                    }
-                    self.asm.sar_ri32(REG_MAP[*ra], (*imm as u8) & 31);
-                    self.asm.movsxd(REG_MAP[*ra], REG_MAP[*ra]);
-                }
-            }
-            Opcode::ShloLImm64 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    if *ra != *rb {
-                        self.asm.mov_rr(REG_MAP[*ra], rb_reg);
-                    }
-                    self.asm.shl_ri64(REG_MAP[*ra], (*imm as u8) & 63);
-                }
-            }
-            Opcode::ShloRImm64 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    if *ra != *rb {
-                        self.asm.mov_rr(REG_MAP[*ra], rb_reg);
-                    }
-                    self.asm.shr_ri64(REG_MAP[*ra], (*imm as u8) & 63);
-                }
-            }
-            Opcode::SharRImm64 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    if *ra != *rb {
-                        self.asm.mov_rr(REG_MAP[*ra], rb_reg);
-                    }
-                    self.asm.sar_ri64(REG_MAP[*ra], (*imm as u8) & 63);
-                }
-            }
-            Opcode::NegAddImm32 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    // rd = imm - rb (32-bit)
-                    if *ra == *rb {
-                        self.asm.mov_rr(SCRATCH, rb_reg);
-                        self.asm.mov_ri64(REG_MAP[*ra], *imm);
-                        self.asm.sub_rr32(REG_MAP[*ra], SCRATCH);
-                    } else {
-                        self.asm.mov_ri64(REG_MAP[*ra], *imm);
-                        self.asm.sub_rr32(REG_MAP[*ra], rb_reg);
-                    }
-                    self.asm.movsxd(REG_MAP[*ra], REG_MAP[*ra]);
-                }
-            }
-            Opcode::NegAddImm64 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    if *ra == *rb {
-                        self.asm.mov_rr(SCRATCH, rb_reg);
-                        self.asm.mov_ri64(REG_MAP[*ra], *imm);
-                        self.asm.sub_rr(REG_MAP[*ra], SCRATCH);
-                    } else {
-                        self.asm.mov_ri64(REG_MAP[*ra], *imm);
-                        self.asm.sub_rr(REG_MAP[*ra], rb_reg);
-                    }
-                }
-            }
-            // Alt shifts: rd = imm OP rb (operands swapped)
-            Opcode::ShloLImmAlt32 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    // rd = imm << (rb & 31)
-                    let rb_reg = REG_MAP[*rb];
-                    let shift_src = if *ra == *rb {
-                        self.asm.mov_rr(SCRATCH, rb_reg);
-                        SCRATCH
-                    } else {
-                        rb_reg
-                    };
-                    self.asm.mov_ri64(REG_MAP[*ra], *imm);
-                    self.emit_shift_by_reg32(REG_MAP[*ra], shift_src, 4); // SHL
-                    self.asm.movsxd(REG_MAP[*ra], REG_MAP[*ra]);
-                }
-            }
-            Opcode::ShloRImmAlt32 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    let shift_src = if *ra == *rb {
-                        self.asm.mov_rr(SCRATCH, rb_reg);
-                        SCRATCH
-                    } else {
-                        rb_reg
-                    };
-                    self.asm.mov_ri64(REG_MAP[*ra], *imm);
-                    self.asm.movzx_32_64(REG_MAP[*ra], REG_MAP[*ra]);
-                    self.emit_shift_by_reg32(REG_MAP[*ra], shift_src, 5); // SHR
-                    self.asm.movsxd(REG_MAP[*ra], REG_MAP[*ra]);
-                }
-            }
-            Opcode::SharRImmAlt32 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    let shift_src = if *ra == *rb {
-                        self.asm.mov_rr(SCRATCH, rb_reg);
-                        SCRATCH
-                    } else {
-                        rb_reg
-                    };
-                    self.asm.mov_ri64(REG_MAP[*ra], *imm);
-                    self.emit_shift_by_reg32(REG_MAP[*ra], shift_src, 7); // SAR
-                    self.asm.movsxd(REG_MAP[*ra], REG_MAP[*ra]);
-                }
-            }
-            Opcode::ShloLImmAlt64 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    let shift_src = if *ra == *rb {
-                        self.asm.mov_rr(SCRATCH, rb_reg);
-                        SCRATCH
-                    } else {
-                        rb_reg
-                    };
-                    self.asm.mov_ri64(REG_MAP[*ra], *imm);
-                    self.emit_shift_by_reg64(REG_MAP[*ra], shift_src, 4);
-                }
-            }
-            Opcode::ShloRImmAlt64 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    let shift_src = if *ra == *rb {
-                        self.asm.mov_rr(SCRATCH, rb_reg);
-                        SCRATCH
-                    } else {
-                        rb_reg
-                    };
-                    self.asm.mov_ri64(REG_MAP[*ra], *imm);
-                    self.emit_shift_by_reg64(REG_MAP[*ra], shift_src, 5);
-                }
-            }
-            Opcode::SharRImmAlt64 => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    let shift_src = if *ra == *rb {
-                        self.asm.mov_rr(SCRATCH, rb_reg);
-                        SCRATCH
-                    } else {
-                        rb_reg
-                    };
-                    self.asm.mov_ri64(REG_MAP[*ra], *imm);
-                    self.emit_shift_by_reg64(REG_MAP[*ra], shift_src, 7);
-                }
-            }
-            Opcode::CmovIzImm => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    // if φ[rb] == 0 then φ[ra] = imm — branchless via cmov.
-                    // Hot in Goldilocks `add` overflow-correction (~10% of
-                    // poseidon2 PVM trace), where the carry is ~50% random
-                    // and the branch was a pipeline drag.
-                    let rb_reg = REG_MAP[*rb];
-                    let ra_reg = REG_MAP[*ra];
-                    self.asm.mov_ri64(SCRATCH, *imm);
-                    self.asm.test_rr(rb_reg, rb_reg);
-                    self.asm.cmovcc(Cc::E, ra_reg, SCRATCH);
-                }
-            }
-            Opcode::CmovNzImm => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    let ra_reg = REG_MAP[*ra];
-                    self.asm.mov_ri64(SCRATCH, *imm);
-                    self.asm.test_rr(rb_reg, rb_reg);
-                    self.asm.cmovcc(Cc::NE, ra_reg, SCRATCH);
-                }
-            }
-            Opcode::RotR64Imm => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    if *ra != *rb {
-                        self.asm.mov_rr(REG_MAP[*ra], rb_reg);
-                    }
-                    self.asm.ror_ri64(REG_MAP[*ra], (*imm as u8) & 63);
-                }
-            }
-            Opcode::RotR64ImmAlt => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    // rd = imm ROR rb
-                    let rb_reg = REG_MAP[*rb];
-                    let shift_src = if *ra == *rb {
-                        self.asm.mov_rr(SCRATCH, rb_reg);
-                        SCRATCH
-                    } else {
-                        rb_reg
-                    };
-                    self.asm.mov_ri64(REG_MAP[*ra], *imm);
-                    self.emit_shift_by_reg64(REG_MAP[*ra], shift_src, 1); // ROR
-                }
-            }
-            Opcode::RotR32Imm => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    if *ra != *rb {
-                        self.asm.mov_rr(REG_MAP[*ra], rb_reg);
-                    }
-                    self.asm.movzx_32_64(REG_MAP[*ra], REG_MAP[*ra]);
-                    self.asm.ror_ri32(REG_MAP[*ra], (*imm as u8) & 31);
-                    self.asm.movsxd(REG_MAP[*ra], REG_MAP[*ra]);
-                }
-            }
-            Opcode::RotR32ImmAlt => {
-                if let Args::TwoRegImm { ra, rb, imm } = args {
-                    let rb_reg = REG_MAP[*rb];
-                    let shift_src = if *ra == *rb {
-                        self.asm.mov_rr(SCRATCH, rb_reg);
-                        SCRATCH
-                    } else {
-                        rb_reg
-                    };
-                    self.asm.mov_ri64(REG_MAP[*ra], *imm);
-                    self.asm.movzx_32_64(REG_MAP[*ra], REG_MAP[*ra]);
-                    self.emit_shift_by_reg32(REG_MAP[*ra], shift_src, 1); // ROR
-                    self.asm.movsxd(REG_MAP[*ra], REG_MAP[*ra]);
-                }
-            }
-
-            // === A.5.11: Two registers + one offset ===
-            Opcode::BranchEq => {
-                if let Args::TwoRegOffset { ra, rb, offset } = args {
-                    // Both ra and rb are READ. If one is 12, we need special handling
-                    // since both map to RCX. Load spilled first, save to SCRATCH if needed.
-                    let (ra_reg, rb_reg) = (REG_MAP[*ra], REG_MAP[*rb]);
-                    self.emit_branch_reg(ra_reg, rb_reg, Cc::E, *offset as u32, next_pc, pc);
-                }
-            }
-            Opcode::BranchNe => {
-                if let Args::TwoRegOffset { ra, rb, offset } = args {
-                    let (ra_reg, rb_reg) = (REG_MAP[*ra], REG_MAP[*rb]);
-                    self.emit_branch_reg(ra_reg, rb_reg, Cc::NE, *offset as u32, next_pc, pc);
-                }
-            }
-            Opcode::BranchLtU => {
-                if let Args::TwoRegOffset { ra, rb, offset } = args {
-                    let (ra_reg, rb_reg) = (REG_MAP[*ra], REG_MAP[*rb]);
-                    self.emit_branch_reg(ra_reg, rb_reg, Cc::B, *offset as u32, next_pc, pc);
-                }
-            }
-            Opcode::BranchLtS => {
-                if let Args::TwoRegOffset { ra, rb, offset } = args {
-                    let (ra_reg, rb_reg) = (REG_MAP[*ra], REG_MAP[*rb]);
-                    self.emit_branch_reg(ra_reg, rb_reg, Cc::L, *offset as u32, next_pc, pc);
-                }
-            }
-            Opcode::BranchGeU => {
-                if let Args::TwoRegOffset { ra, rb, offset } = args {
-                    let (ra_reg, rb_reg) = (REG_MAP[*ra], REG_MAP[*rb]);
-                    self.emit_branch_reg(ra_reg, rb_reg, Cc::AE, *offset as u32, next_pc, pc);
-                }
-            }
-            Opcode::BranchGeS => {
-                if let Args::TwoRegOffset { ra, rb, offset } = args {
-                    let (ra_reg, rb_reg) = (REG_MAP[*ra], REG_MAP[*rb]);
-                    self.emit_branch_reg(ra_reg, rb_reg, Cc::GE, *offset as u32, next_pc, pc);
-                }
-            }
-
-            // === A.5.12: Two registers + two immediates ===
-            Opcode::LoadImmJumpInd => {
-                if let Args::TwoRegTwoImm {
-                    ra,
-                    rb,
-                    imm_x,
-                    imm_y,
-                } = args
-                {
-                    // GP: registers[ra] = imm_x, addr = registers[rb] + imm_y
-                    // Per GP semantics, ra is written first, then jump uses the
-                    // (possibly updated) rb value.
-                    // If ra==rb, the jump target uses imm_x + imm_y.
-                    self.asm.mov_ri64(REG_MAP[*ra], *imm_x);
-                    self.emit_dynamic_jump(*rb, *imm_y, pc);
-                }
-            }
-
-            // === A.5.13: Three registers ===
-            Opcode::Add32 => {
-                self.emit_alu3_32(args, |a, d, s| {
-                    a.add_rr32(d, s);
-                });
-            }
-            Opcode::Sub32 => {
-                self.emit_alu3_32_sub(args);
-            }
-            Opcode::Mul32 => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        self.asm.mov_rr(d, a);
-                        self.asm.imul_rr32(d, SCRATCH);
-                    } else {
-                        if *rd != *ra {
-                            self.asm.mov_rr(d, a);
-                        }
-                        self.asm.imul_rr32(d, b);
-                    }
-                    self.asm.movsxd(d, d);
-                }
-            }
-            Opcode::Add64 => {
-                self.emit_alu3_64_comm(args, true, |a, d, s| {
-                    a.add_rr(d, s);
-                });
-                // Track CF: after add64 D, A, B, CF = overflow(A+B).
-                // A subsequent setLtU C, D, A (or D, B) can use CF directly.
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    self.last_add_cf = Some((*rd, *ra, *rb));
-                }
-                // reg_defs tracking handled by update_reg_defs() in main loop
-            }
-            Opcode::Sub64 => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    if *rd == *rb && *rd != *ra {
-                        // d = a - d: neg d; add d, a (6 bytes vs 9 bytes)
-                        self.asm.neg64(d);
-                        self.asm.add_rr(d, a);
-                    } else {
-                        if *rd != *ra {
-                            self.asm.mov_rr(d, a);
-                        }
-                        self.asm.sub_rr(d, b);
-                    }
-                }
-            }
-            Opcode::Mul64 => {
-                self.emit_alu3_64_comm(args, true, |a, d, s| {
-                    a.imul_rr(d, s);
-                });
-            }
-            Opcode::And => {
-                self.emit_alu3_64_comm(args, true, |a, d, s| {
-                    a.and_rr(d, s);
-                });
-            }
-            Opcode::Or => {
-                self.emit_alu3_64_comm(args, true, |a, d, s| {
-                    a.or_rr(d, s);
-                });
-            }
-            Opcode::Xor => {
-                self.emit_alu3_64_comm(args, true, |a, d, s| {
-                    a.xor_rr(d, s);
-                });
-            }
-
-            // Division (32-bit and 64-bit)
-            Opcode::DivU32 => {
-                self.emit_div(args, false, false, true);
-            }
-            Opcode::DivS32 => {
-                self.emit_div(args, true, false, true);
-            }
-            Opcode::RemU32 => {
-                self.emit_div(args, false, true, true);
-            }
-            Opcode::RemS32 => {
-                self.emit_div(args, true, true, true);
-            }
-            Opcode::DivU64 => {
-                self.emit_div(args, false, false, false);
-            }
-            Opcode::DivS64 => {
-                self.emit_div(args, true, false, false);
-            }
-            Opcode::RemU64 => {
-                self.emit_div(args, false, true, false);
-            }
-            Opcode::RemS64 => {
-                self.emit_div(args, true, true, false);
-            }
-
-            // Shifts (three-register)
-            // Note: when rd==rb, we must save rb to SCRATCH before mov rd, ra.
-            Opcode::ShloL32 => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    let shift_src = if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        SCRATCH
-                    } else {
-                        b
-                    };
-                    if *rd != *ra {
-                        self.asm.mov_rr(d, a);
-                    }
-                    self.emit_shift_by_reg32(d, shift_src, 4);
-                    self.asm.movsxd(d, d);
-                }
-            }
-            Opcode::ShloR32 => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    let shift_src = if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        SCRATCH
-                    } else {
-                        b
-                    };
-                    if *rd != *ra {
-                        self.asm.mov_rr(d, a);
-                    }
-                    self.asm.movzx_32_64(d, d);
-                    self.emit_shift_by_reg32(d, shift_src, 5);
-                    self.asm.movsxd(d, d);
-                }
-            }
-            Opcode::SharR32 => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    let shift_src = if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        SCRATCH
-                    } else {
-                        b
-                    };
-                    if *rd != *ra {
-                        self.asm.mov_rr(d, a);
-                    }
-                    self.emit_shift_by_reg32(d, shift_src, 7);
-                    self.asm.movsxd(d, d);
-                }
-            }
-            Opcode::ShloL64 => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    let shift_src = if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        SCRATCH
-                    } else {
-                        b
-                    };
-                    if *rd != *ra {
-                        self.asm.mov_rr(d, a);
-                    }
-                    self.emit_shift_by_reg64(d, shift_src, 4);
-                }
-            }
-            Opcode::ShloR64 => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    let shift_src = if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        SCRATCH
-                    } else {
-                        b
-                    };
-                    if *rd != *ra {
-                        self.asm.mov_rr(d, a);
-                    }
-                    self.emit_shift_by_reg64(d, shift_src, 5);
-                }
-            }
-            Opcode::SharR64 => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    let shift_src = if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        SCRATCH
-                    } else {
-                        b
-                    };
-                    if *rd != *ra {
-                        self.asm.mov_rr(d, a);
-                    }
-                    self.emit_shift_by_reg64(d, shift_src, 7);
-                }
-            }
-
-            // Multiply upper
-            Opcode::MulUpperSS => {
-                self.emit_mul_upper(args, true, true);
-            }
-            Opcode::MulUpperUU => {
-                self.emit_mul_upper(args, false, false);
-            }
-            Opcode::MulUpperSU => {
-                self.emit_mul_upper(args, true, false);
-            }
-
-            // Set comparisons (three-register)
-            Opcode::SetLtU => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    // Carry flag fusion: if the previous instruction was add64 D, A, B,
-                    // and this is setLtU where rd = (ra < rb), CF already holds the carry.
-                    // Pattern: ra == D (the sum), rb == A or B (one of the addends).
-                    // Result goes to rd (the carry register).
-                    let fused = if let Some((add_d, add_a, add_b)) = self.last_add_cf {
-                        // Carry flag fusion: ra must be the sum register (add_d),
-                        // and rb must be an UNMODIFIED original addend (not add_d,
-                        // which now holds the sum). If rb == add_d, both sides of
-                        // the comparison would be the sum, giving 0 always, but CF
-                        // might be 1.
-                        if *ra == add_d
-                            && *rb != add_d
-                            && (*rb == add_a || *rb == add_b)
-                            && *rd != *rb
-                        {
-                            let d = REG_MAP[*rd];
-                            // CF is valid from the add — use setb directly (no cmp needed).
-                            // Cannot use xor to clear upper bits (it would clobber CF).
-                            // Instead: setb + movzx (2 insns vs xor+cmp+setb = 3 insns).
-                            self.asm.setcc(Cc::B, d);
-                            self.asm.movzx_8_64(d, d);
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-                    if !fused {
-                        self.emit_setcc_3reg(*ra, *rb, *rd, Cc::B);
-                    }
-                }
-            }
-            Opcode::SetLtS => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    self.emit_setcc_3reg(*ra, *rb, *rd, Cc::L);
-                }
-            }
-
-            // Conditional moves
-            Opcode::CmovIz => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    // if φ[rb] == 0 then φ[rd] = φ[ra]
-                    self.asm.test_rr(REG_MAP[*rb], REG_MAP[*rb]);
-                    self.asm.cmovcc(Cc::E, REG_MAP[*rd], REG_MAP[*ra]);
-                }
-            }
-            Opcode::CmovNz => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    self.asm.test_rr(REG_MAP[*rb], REG_MAP[*rb]);
-                    self.asm.cmovcc(Cc::NE, REG_MAP[*rd], REG_MAP[*ra]);
-                }
-            }
-
-            // Rotates (three-register)
-            Opcode::RotL64 => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    let shift_src = if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        SCRATCH
-                    } else {
-                        b
-                    };
-                    if *rd != *ra {
-                        self.asm.mov_rr(d, a);
-                    }
-                    self.emit_shift_by_reg64(d, shift_src, 0); // ROL
-                }
-            }
-            Opcode::RotL32 => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    let shift_src = if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        SCRATCH
-                    } else {
-                        b
-                    };
-                    if *rd != *ra {
-                        self.asm.mov_rr(d, a);
-                    }
-                    self.asm.movzx_32_64(d, d);
-                    self.emit_shift_by_reg32(d, shift_src, 0);
-                    self.asm.movsxd(d, d);
-                }
-            }
-            Opcode::RotR64 => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    let shift_src = if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        SCRATCH
-                    } else {
-                        b
-                    };
-                    if *rd != *ra {
-                        self.asm.mov_rr(d, a);
-                    }
-                    self.emit_shift_by_reg64(d, shift_src, 1); // ROR
-                }
-            }
-            Opcode::RotR32 => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    let shift_src = if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        SCRATCH
-                    } else {
-                        b
-                    };
-                    if *rd != *ra {
-                        self.asm.mov_rr(d, a);
-                    }
-                    self.asm.movzx_32_64(d, d);
-                    self.emit_shift_by_reg32(d, shift_src, 1);
-                    self.asm.movsxd(d, d);
-                }
-            }
-
-            // Logical with invert
-            Opcode::AndInv => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    // rd = ra & ~rb
-                    self.asm.mov_rr(SCRATCH, REG_MAP[*rb]);
-                    self.asm.not64(SCRATCH);
-                    self.asm.mov_rr(REG_MAP[*rd], REG_MAP[*ra]);
-                    self.asm.and_rr(REG_MAP[*rd], SCRATCH);
-                }
-            }
-            Opcode::OrInv => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    // rd = ra | ~rb
-                    self.asm.mov_rr(SCRATCH, REG_MAP[*rb]);
-                    self.asm.not64(SCRATCH);
-                    self.asm.mov_rr(REG_MAP[*rd], REG_MAP[*ra]);
-                    self.asm.or_rr(REG_MAP[*rd], SCRATCH);
-                }
-            }
-            Opcode::Xnor => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    // rd = ~(ra ^ rb)
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        self.asm.mov_rr(d, a);
-                        self.asm.xor_rr(d, SCRATCH);
-                    } else {
-                        if *rd != *ra {
-                            self.asm.mov_rr(d, a);
-                        }
-                        self.asm.xor_rr(d, b);
-                    }
-                    self.asm.not64(REG_MAP[*rd]);
-                }
-            }
-
-            // Min/Max
-            Opcode::Max => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    self.asm.cmp_rr(a, b);
-                    if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        self.asm.mov_rr(d, a);
-                        self.asm.cmovcc(Cc::L, d, SCRATCH);
-                    } else {
-                        if *rd != *ra {
-                            self.asm.mov_rr(d, a);
-                        }
-                        self.asm.cmovcc(Cc::L, d, b);
-                    }
-                }
-            }
-            Opcode::MaxU => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    self.asm.cmp_rr(a, b);
-                    if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        self.asm.mov_rr(d, a);
-                        self.asm.cmovcc(Cc::B, d, SCRATCH);
-                    } else {
-                        if *rd != *ra {
-                            self.asm.mov_rr(d, a);
-                        }
-                        self.asm.cmovcc(Cc::B, d, b);
-                    }
-                }
-            }
-            Opcode::Min => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    self.asm.cmp_rr(a, b);
-                    if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        self.asm.mov_rr(d, a);
-                        self.asm.cmovcc(Cc::G, d, SCRATCH);
-                    } else {
-                        if *rd != *ra {
-                            self.asm.mov_rr(d, a);
-                        }
-                        self.asm.cmovcc(Cc::G, d, b);
-                    }
-                }
-            }
-            Opcode::MinU => {
-                if let Args::ThreeReg { ra, rb, rd } = args {
-                    let (d, a, b) = (REG_MAP[*rd], REG_MAP[*ra], REG_MAP[*rb]);
-                    self.asm.cmp_rr(a, b);
-                    if *rd == *rb && *rd != *ra {
-                        self.asm.mov_rr(SCRATCH, b);
-                        self.asm.mov_rr(d, a);
-                        self.asm.cmovcc(Cc::A, d, SCRATCH);
-                    } else {
-                        if *rd != *ra {
-                            self.asm.mov_rr(d, a);
-                        }
-                        self.asm.cmovcc(Cc::A, d, b);
-                    }
-                }
-            }
-        }
-    }
-
-    // === Helper emission methods ===
-
-    /// Emit a static branch (validated at compile time).
-    fn emit_static_branch(&mut self, target: u32, condition: bool, _fallthrough: u32, pc: u32) {
         if !condition {
+            return;
+        }
+        if self.rv_streaming && target > pc {
+            let label = self.label_for_pc(target);
+            let fixup_idx = self.asm.fixups_len();
+            self.asm.jmp_label(label);
+            self.rv_pending_fwd_branches.push((target, pc, fixup_idx));
             return;
         }
         if !self.is_basic_block_start(target) {
@@ -2371,140 +436,23 @@ impl Compiler {
     }
 
     /// Emit a dynamic jump (through jump table).
-    fn emit_dynamic_jump(&mut self, ra: usize, imm: u64, pc: u32) {
-        // Store PC for any exit path in the dynamic jump sequence
-        self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
-        // addr = (φ[ra] + imm) % 2^32
-        self.asm.mov_rr(SCRATCH, REG_MAP[ra]);
-        if imm as i32 != 0 {
-            self.asm.add_ri(SCRATCH, imm as i32);
-        }
-        self.asm.movzx_32_64(SCRATCH, SCRATCH); // truncate to 32-bit
-
-        // No halt address check — programs terminate via REPLY (ecalli 0xFF).
-
-        // For dynamic jumps, we save state and return to the host to handle
-        // (the host will validate and dispatch). This is simpler than inlining
-        // the full jump table lookup. Exit with a special "dynamic jump" that
-        // stores the target address.
-        // We use EXIT_PANIC as default and let the caller handle djump.
-        // Actually, let's inline it for performance:
-
-        // Check alignment: addr must be even and non-zero
-        // addr == 0 → panic
-        self.asm.test_rr(SCRATCH, SCRATCH);
-        self.asm.jcc_label(Cc::E, self.panic_label);
-
-        // idx = addr/2 - 1 (also checks alignment: bit 0 goes to CF via SHR)
-        self.asm.shr_ri64(SCRATCH, 1); // CF = bit 0 (alignment)
-        self.asm.jcc_label(Cc::B, self.panic_label); // odd addr → panic (B = carry set)
-        self.asm.sub_ri(SCRATCH, 1);
-
-        // Inline djump resolution: idx is in SCRATCH (RDX).
-        // Bounds check: idx < jt_len
-        self.asm.cmp_mem32_rip_rel_r(CTX_JT_LEN, SCRATCH);
-        self.asm.jcc_label(Cc::BE, self.panic_label); // jt_len <= idx → panic
-
-        // target_pc = jt_ptr[idx] (u32 array, need idx*4)
-        self.asm.push(Reg::RAX); // save φ[11]
-        self.asm.shl_ri64(SCRATCH, 2); // idx *= 4
-        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_JT_PTR);
-        self.asm.add_rr(Reg::RAX, SCRATCH);
-        self.asm.mov_load32(SCRATCH, Reg::RAX, 0); // SCRATCH = jt_ptr[idx]
-
-        // Validate: target_pc < bb_len && bb_starts[target_pc] == 1
-        let djump_panic = self.asm.new_label();
-        self.asm.cmp_mem32_rip_rel_r(CTX_BB_LEN, SCRATCH);
-        self.asm.jcc_label(Cc::BE, djump_panic); // bb_len <= target → panic
-        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_BB_STARTS);
-        self.asm.movzx_load8_sib(Reg::RAX, Reg::RAX, SCRATCH);
-        self.asm.cmp_ri32(Reg::RAX, 1);
-        self.asm.jcc_label(Cc::NE, djump_panic);
-
-        // Dispatch: native_addr = code_base + dispatch_table[target_pc]
-        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_DISPATCH_TABLE);
-        self.asm.movsxd_load_sib4(Reg::RAX, Reg::RAX, SCRATCH);
-        self.asm.add_r64_mem_rip_rel(Reg::RAX, CTX_CODE_BASE);
-        // Store target PC for gas block tracking
-        self.asm.mov_store32_rip_rel(CTX_PC, SCRATCH);
-        // RAX = native addr, [rsp] = saved φ[11].
-        // Use SCRATCH (which we no longer need) to swap.
-        self.asm.mov_rr(SCRATCH, Reg::RAX); // SCRATCH = native addr
-        self.asm.pop(Reg::RAX); // restore φ[11]
-        self.asm.jmp_reg(SCRATCH); // jump to native addr
-
-        self.asm.bind_label(djump_panic);
-        self.asm.pop(Reg::RAX); // restore φ[11] before panicking
-        self.asm.jmp_label(self.panic_label);
-    }
-
-    /// Emit setcc for three-register comparisons: rd = (ra CMP rb) ? 1 : 0.
-    /// When rd != ra and rd != rb, uses xor+cmp+setcc (eliminates movzx).
-    fn emit_setcc_3reg(&mut self, ra: usize, rb: usize, rd: usize, cc: Cc) {
-        let (a, b, d) = (REG_MAP[ra], REG_MAP[rb], REG_MAP[rd]);
-        if rd != ra && rd != rb {
-            // xor clears upper bits; setcc writes only the low byte.
-            self.asm.mov_ri64(d, 0); // xor r32,r32 (via mov_ri64 zero optimization)
-            self.asm.cmp_rr(a, b);
-            self.asm.setcc(cc, d);
-        } else {
-            self.asm.cmp_rr(a, b);
-            self.asm.setcc(cc, d);
-            self.asm.movzx_8_64(d, d);
-        }
-    }
-
-    /// Emit setcc for immediate comparisons: ra = (rb CMP imm) ? 1 : 0.
-    /// When ra != rb, uses xor+cmp+setcc (eliminates movzx).
-    fn emit_setcc_imm(&mut self, ra: usize, rb: usize, imm: u64, cc: Cc) {
-        let (a, b) = (REG_MAP[ra], REG_MAP[rb]);
-        if ra != rb {
-            self.asm.mov_ri64(a, 0); // xor r32,r32
-            self.emit_cmp_imm(b, imm);
-            self.asm.setcc(cc, a);
-        } else {
-            self.emit_cmp_imm(b, imm);
-            self.asm.setcc(cc, a);
-            self.asm.movzx_8_64(a, a);
-        }
-    }
-
-    /// Compare register against immediate, using cmp_ri for i32-range values.
-    fn emit_cmp_imm(&mut self, reg: Reg, imm: u64) {
-        let imm_i64 = imm as i64;
-        if imm_i64 >= i32::MIN as i64 && imm_i64 <= i32::MAX as i64 {
-            self.asm.cmp_ri(reg, imm_i64 as i32);
-        } else {
-            self.asm.mov_ri64(SCRATCH, imm);
-            self.asm.cmp_rr(reg, SCRATCH);
-        }
-    }
-
-    /// Emit a branch comparing register against immediate.
-    fn emit_branch_imm(
+    pub(crate) fn emit_branch_reg(
         &mut self,
-        reg: Reg,
-        imm: u64,
+        a: Reg,
+        b: Reg,
         cc: Cc,
         target: u32,
         _fallthrough: u32,
         pc: u32,
     ) {
-        if !self.is_basic_block_start(target) {
-            // Target not valid → store PC and panic if condition true (cold path)
-            self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
-            self.asm.mov_ri64(SCRATCH, imm);
-            self.asm.cmp_rr(reg, SCRATCH);
-            self.asm.jcc_label(cc, self.panic_label);
+        if self.rv_streaming && target > pc {
+            self.asm.cmp_rr(a, b);
+            let label = self.label_for_pc(target);
+            let fixup_idx = self.asm.fixups_len();
+            self.asm.jcc_label(cc, label);
+            self.rv_pending_fwd_branches.push((target, pc, fixup_idx));
             return;
         }
-        self.emit_cmp_imm(reg, imm);
-        let label = self.label_for_pc(target);
-        self.asm.jcc_label(cc, label);
-    }
-
-    /// Emit a branch comparing two registers.
-    fn emit_branch_reg(&mut self, a: Reg, b: Reg, cc: Cc, target: u32, _fallthrough: u32, pc: u32) {
         if !self.is_basic_block_start(target) {
             self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
             self.asm.cmp_rr(a, b);
@@ -2518,7 +466,7 @@ impl Compiler {
 
     /// Emit a shift by register value using CL.
     /// shift_op: 4=SHL, 5=SHR, 7=SAR, 0=ROL, 1=ROR
-    fn emit_shift_by_reg32(&mut self, dst: Reg, shift_reg: Reg, shift_op: u8) {
+    pub(crate) fn emit_shift_by_reg32(&mut self, dst: Reg, shift_reg: Reg, shift_op: u8) {
         // Need shift amount in CL (RCX = φ[12])
         // If shift_reg is already RCX, great. Otherwise save/restore.
         if shift_reg == Reg::RCX {
@@ -2545,7 +493,7 @@ impl Compiler {
         }
     }
 
-    fn emit_shift_by_reg64(&mut self, dst: Reg, shift_reg: Reg, shift_op: u8) {
+    pub(crate) fn emit_shift_by_reg64(&mut self, dst: Reg, shift_reg: Reg, shift_op: u8) {
         if shift_reg == Reg::RCX {
             self.asm.shift_cl64(shift_op, dst);
         } else if dst == Reg::RCX {
@@ -2563,321 +511,8 @@ impl Compiler {
         }
     }
 
-    /// Three-register 64-bit ALU with optional commutativity optimization.
-    /// When `commutative` is true and rd == rb, emit `op(d, a)` directly
-    /// instead of saving/restoring via SCRATCH.
-    fn emit_alu3_64_comm(
-        &mut self,
-        args: &Args,
-        commutative: bool,
-        op: impl FnOnce(&mut Assembler, Reg, Reg),
-    ) {
-        if let Args::ThreeReg { ra, rb, rd } = args {
-            let d = REG_MAP[*rd];
-            let a = REG_MAP[*ra];
-            let b = REG_MAP[*rb];
-            if *rd == *ra {
-                op(&mut self.asm, d, b);
-            } else if *rd == *rb && commutative {
-                // Commutative: rd = rb OP ra = ra OP rb — just op(d, a)
-                op(&mut self.asm, d, a);
-            } else if *rd == *rb {
-                self.asm.mov_rr(SCRATCH, b);
-                self.asm.mov_rr(d, a);
-                op(&mut self.asm, d, SCRATCH);
-            } else {
-                self.asm.mov_rr(d, a);
-                op(&mut self.asm, d, b);
-            }
-        }
-    }
-
-    /// Three-register 32-bit ALU with sign extension: rd = sx32(ra OP rb)
-    fn emit_alu3_32(&mut self, args: &Args, op: impl FnOnce(&mut Assembler, Reg, Reg)) {
-        if let Args::ThreeReg { ra, rb, rd } = args {
-            let d = REG_MAP[*rd];
-            let a = REG_MAP[*ra];
-            let b = REG_MAP[*rb];
-            if *rd == *ra {
-                op(&mut self.asm, d, b);
-            } else if *rd == *rb {
-                self.asm.mov_rr(SCRATCH, b);
-                self.asm.mov_rr(d, a);
-                op(&mut self.asm, d, SCRATCH);
-            } else {
-                self.asm.mov_rr(d, a);
-                op(&mut self.asm, d, b);
-            }
-            self.asm.movsxd(d, d);
-        }
-    }
-
-    fn emit_alu3_32_sub(&mut self, args: &Args) {
-        if let Args::ThreeReg { ra, rb, rd } = args {
-            let d = REG_MAP[*rd];
-            let a = REG_MAP[*ra];
-            let b = REG_MAP[*rb];
-            if *rd == *ra {
-                self.asm.sub_rr32(d, b);
-            } else if *rd == *rb {
-                // d = a - d: neg32 d; add32 d, a (6 bytes vs 9 bytes)
-                self.asm.neg32(d);
-                self.asm.add_rr32(d, a);
-            } else {
-                self.asm.mov_rr(d, a);
-                self.asm.sub_rr32(d, b);
-            }
-            self.asm.movsxd(d, d);
-        }
-    }
-
-    /// Division/remainder.
-    ///
-    /// x86 DIV/IDIV: dividend in RDX:RAX, divisor in any GPR except RAX/RDX.
-    /// Quotient → RAX, remainder → RDX. Only RAX and RDX are clobbered.
-    ///
-    /// Key insight: RDX = SCRATCH (not mapped to any PVM register), so it never
-    /// needs saving/restoring. When b_reg != RAX (~92% of cases), we use b_reg
-    /// directly as the divisor — DIV/IDIV does not clobber the operand register,
-    /// so no save of RCX (φ[12]) is needed either. Only RAX (φ[11]) must be
-    /// preserved (unless d_reg == RAX).
-    fn emit_div(&mut self, args: &Args, signed: bool, remainder: bool, is_32bit: bool) {
-        if let Args::ThreeReg { ra, rb, rd } = args {
-            let a_reg = REG_MAP[*ra];
-            let b_reg = REG_MAP[*rb];
-            let d_reg = REG_MAP[*rd];
-
-            // Check divisor == 0
-            self.asm.test_rr(b_reg, b_reg);
-            let nonzero = self.asm.new_label();
-            let done = self.asm.new_label();
-            self.asm.jcc_label(Cc::NE, nonzero);
-
-            // Division by zero: quotient = 2^64-1, remainder = dividend
-            if remainder {
-                self.asm.mov_rr(d_reg, a_reg);
-            } else {
-                self.asm.mov_ri64(d_reg, u64::MAX);
-                if is_32bit {
-                    self.asm.movsxd(d_reg, d_reg);
-                }
-            }
-            self.asm.jmp_label(done);
-
-            self.asm.bind_label(nonzero);
-
-            if b_reg != Reg::RAX {
-                // Fast path: use b_reg directly as divisor (no extra register needed).
-                // Only save RAX (φ[11]) if the result doesn't go there.
-                self.emit_div_fast(a_reg, b_reg, d_reg, signed, remainder, is_32bit);
-            } else {
-                // b_reg == RAX: divisor is in RAX, but we need RAX for the dividend.
-                // Move divisor to RCX; save both RAX (φ[11]) and RCX (φ[12]).
-                self.emit_div_b_is_rax(a_reg, d_reg, signed, remainder, is_32bit);
-            }
-
-            if is_32bit {
-                self.asm.movsxd(d_reg, d_reg);
-            }
-
-            self.asm.bind_label(done);
-        }
-    }
-
-    /// Division fast path: b_reg is not RAX, so we use it directly as the divisor.
-    /// DIV/IDIV does not clobber the operand register, so only RAX needs saving.
-    fn emit_div_fast(
-        &mut self,
-        a_reg: Reg,
-        b_reg: Reg,
-        d_reg: Reg,
-        signed: bool,
-        remainder: bool,
-        is_32bit: bool,
-    ) {
-        let save_rax = d_reg != Reg::RAX;
-
-        if save_rax {
-            self.asm.push(Reg::RAX);
-        }
-
-        // Load dividend into RAX (push doesn't modify RAX, so a_reg==RAX is fine).
-        if a_reg != Reg::RAX {
-            self.asm.mov_rr(Reg::RAX, a_reg);
-        }
-
-        // Set up RDX and divide.
-        self.emit_div_setup_and_exec(signed, is_32bit, b_reg);
-
-        if save_rax {
-            // d_reg != RAX: move result, then restore φ[11].
-            let result_reg = if remainder { SCRATCH } else { Reg::RAX };
-            self.asm.mov_rr(d_reg, result_reg);
-            self.asm.pop(Reg::RAX);
-        } else {
-            // d_reg == RAX: quotient is already there; for remainder, move RDX → RAX.
-            if remainder {
-                self.asm.mov_rr(Reg::RAX, SCRATCH);
-            }
-        }
-    }
-
-    /// Division slow path: b_reg == RAX (divisor is φ[11]).
-    /// We must move the divisor to RCX before loading the dividend into RAX.
-    fn emit_div_b_is_rax(
-        &mut self,
-        a_reg: Reg,
-        d_reg: Reg,
-        signed: bool,
-        remainder: bool,
-        is_32bit: bool,
-    ) {
-        // Always save RAX and RCX so we can restore both PVM registers.
-        self.asm.push(Reg::RAX); // save φ[11]
-        self.asm.push(Reg::RCX); // save φ[12]
-        // Stack: [RSP+0]=old_RCX, [RSP+8]=old_RAX
-
-        // Move divisor (currently in RAX) to RCX.
-        // (push doesn't modify RAX, so it still holds the divisor.)
-        self.asm.mov_rr(Reg::RCX, Reg::RAX);
-
-        // Load dividend into RAX.
-        if a_reg == Reg::RAX {
-            // Dividend is also φ[11] — RAX still holds it (mov_rr above
-            // copied RAX→RCX but didn't change RAX). Nothing to do.
-        } else if a_reg == Reg::RCX {
-            // We just overwrote RCX with the divisor; load original φ[12] from stack.
-            self.asm.mov_load64(Reg::RAX, Reg::RSP, 0); // old_RCX
-        } else {
-            self.asm.mov_rr(Reg::RAX, a_reg);
-        }
-
-        // Set up RDX and divide.
-        self.emit_div_setup_and_exec(signed, is_32bit, Reg::RCX);
-
-        // Place result and restore saved registers.
-        let result_reg = if remainder { SCRATCH } else { Reg::RAX };
-
-        if d_reg == Reg::RAX {
-            if remainder {
-                self.asm.mov_rr(Reg::RAX, SCRATCH);
-            }
-            self.asm.pop(Reg::RCX); // restore φ[12]
-            self.asm.pop(SCRATCH); // discard saved RAX (d_reg overwrites φ[11])
-        } else if d_reg == Reg::RCX {
-            self.asm.mov_rr(Reg::RCX, result_reg);
-            self.asm.pop(SCRATCH); // discard saved RCX (d_reg overwrites φ[12])
-            self.asm.pop(Reg::RAX); // restore φ[11]
-        } else {
-            self.asm.mov_rr(d_reg, result_reg);
-            self.asm.pop(Reg::RCX); // restore φ[12]
-            self.asm.pop(Reg::RAX); // restore φ[11]
-        }
-    }
-
-    /// Emit RDX setup (sign-extend or zero) and the DIV/IDIV instruction.
-    fn emit_div_setup_and_exec(&mut self, signed: bool, is_32bit: bool, divisor: Reg) {
-        if is_32bit {
-            if signed {
-                self.asm.movsxd(Reg::RAX, Reg::RAX);
-                self.asm.cdq();
-                self.asm.idiv32(divisor);
-            } else {
-                self.asm.movzx_32_64(Reg::RAX, Reg::RAX);
-                self.asm.mov_ri64(SCRATCH, 0);
-                self.asm.div32(divisor);
-            }
-        } else if signed {
-            self.asm.cqo();
-            self.asm.idiv64(divisor);
-        } else {
-            self.asm.mov_ri64(SCRATCH, 0);
-            self.asm.div64(divisor);
-        }
-    }
-
-    /// Multiply upper (128-bit product, take high 64 bits).
-    ///
-    /// MUL/IMUL uses RAX (φ[11]) and RDX (SCRATCH) implicitly.
-    /// RDX = SCRATCH is not a PVM register, so only RAX needs saving.
-    fn emit_mul_upper(&mut self, args: &Args, a_signed: bool, b_signed: bool) {
-        if let Args::ThreeReg { ra, rb, rd } = args {
-            let d_reg = REG_MAP[*rd];
-            let rb_is_rax = REG_MAP[*rb] == Reg::RAX;
-            // We need to preserve φ[11] (RAX) unless d_reg is RAX AND rb != RAX
-            // (if rb == RAX, we always push so we can recover the original value).
-            let save_rax = d_reg != Reg::RAX || rb_is_rax;
-
-            if save_rax {
-                self.asm.push(Reg::RAX); // save φ[11]
-            }
-
-            // Load ra into RAX (push doesn't modify RAX).
-            if REG_MAP[*ra] != Reg::RAX {
-                self.asm.mov_rr(Reg::RAX, REG_MAP[*ra]);
-            }
-
-            // Determine mul_src: the register holding rb's value.
-            let mul_src = if rb_is_rax {
-                // rb is φ[11] = RAX; original value is on stack.
-                self.asm.mov_load64(SCRATCH, Reg::RSP, 0);
-                SCRATCH
-            } else {
-                REG_MAP[*rb]
-            };
-
-            if a_signed && b_signed {
-                self.asm.imul_rdx_rax(mul_src);
-            } else if !a_signed && !b_signed {
-                self.asm.mul_rdx_rax(mul_src);
-            } else {
-                // MulUpperSU: ra is signed, rb is unsigned
-                // result_hi = unsigned_mul_hi(ra, rb) - (ra < 0 ? rb : 0)
-                self.asm.push(mul_src); // save rb
-                self.asm.push(Reg::RAX); // save ra (for sign check)
-                if rb_is_rax {
-                    // mul_src was SCRATCH (loaded from stack); reload after pushes.
-                    // orig_RAX is now at [RSP + 16] (ra push + rb push above it).
-                    self.asm.mov_load64(SCRATCH, Reg::RSP, 16);
-                    self.asm.mul_rdx_rax(SCRATCH);
-                } else {
-                    self.asm.mul_rdx_rax(mul_src);
-                }
-                // RDX = high bits. Check if original ra was negative.
-                self.asm.pop(Reg::RAX); // pop saved ra
-                let skip = self.asm.new_label();
-                self.asm.test_rr(Reg::RAX, Reg::RAX);
-                self.asm.jcc_label(Cc::NS, skip);
-                // ra was negative: subtract rb from high word (RDX)
-                self.asm.pop(Reg::RAX); // pop saved rb
-                self.asm.sub_rr(SCRATCH, Reg::RAX);
-                let done = self.asm.new_label();
-                self.asm.jmp_label(done);
-                self.asm.bind_label(skip);
-                self.asm.add_ri(Reg::RSP, 8); // discard saved rb
-                self.asm.bind_label(done);
-            }
-
-            // High 64 bits are in RDX (SCRATCH).
-            if save_rax {
-                if d_reg == Reg::RAX {
-                    // rb_is_rax case: we saved RAX for rb recovery but d_reg is also RAX.
-                    // Discard the saved value and put result in RAX.
-                    self.asm.add_ri(Reg::RSP, 8);
-                    self.asm.mov_rr(Reg::RAX, SCRATCH);
-                } else {
-                    self.asm.mov_rr(d_reg, SCRATCH);
-                    self.asm.pop(Reg::RAX); // restore φ[11]
-                }
-            } else {
-                // d_reg == RAX and !rb_is_rax → didn't save RAX.
-                self.asm.mov_rr(Reg::RAX, SCRATCH);
-            }
-        }
-    }
-
     /// Emit an exit sequence that sets exit_reason and exit_arg.
-    fn emit_exit(&mut self, reason: u32, arg: u32) {
+    pub(crate) fn emit_exit(&mut self, reason: u32, arg: u32) {
         self.asm
             .mov_store32_rip_rel_imm(CTX_EXIT_REASON, reason as i32);
         self.asm.mov_store32_rip_rel_imm(CTX_EXIT_ARG, arg as i32);
@@ -2886,7 +521,7 @@ impl Compiler {
 
     /// Emit prologue: save callee-saved, load PVM registers from context,
     /// then dispatch to the correct basic block based on entry_pc.
-    fn emit_prologue(&mut self) {
+    pub(crate) fn emit_prologue(&mut self) {
         self.asm.ensure_capacity(512); // prologue needs ~200 bytes
         // Save callee-saved registers
         self.asm.push(Reg::RBX);
@@ -2901,6 +536,14 @@ impl Compiler {
         // RSP mod 16 = 0 — the SysV ABI alignment any helper CALL we
         // emit below expects at the call site.
         self.asm.push(SCRATCH); // alignment padding
+
+        // Save the post-callee-saved RSP into the context. The exit
+        // path restores RSP from this slot before popping the 7 entries
+        // above, so any unmatched `call` pushes from the guest's
+        // `callf` / `retf` chain (e.g. an OOG or page-fault redirect
+        // mid-function with stack frames still pending) get discarded
+        // cleanly instead of corrupting the exit pops.
+        self.asm.mov_store64_rip_rel(CTX_HOST_RSP_BASE, Reg::RSP);
 
         // R15 = gas register. Loaded from ctx.gas at prologue, decremented
         // per basic block, flushed back to ctx.gas at exit. Mem accesses
@@ -2930,7 +573,7 @@ impl Compiler {
     }
 
     /// Emit exit sequences and epilogue.
-    fn emit_exit_sequences(&mut self) {
+    pub(crate) fn emit_exit_sequences(&mut self) {
         // Reserve capacity for exit sequences + all OOG stubs.
         // Each OOG stub is ~12 bytes.
         let needed = 512 + self.oog_stubs.len() * 16;
@@ -2969,6 +612,15 @@ impl Compiler {
             self.asm.mov_store64_rip_rel(CTX_REGS + (i as u64) * 8, reg);
         }
 
+        // Restore RSP to the post-prologue baseline. Drops any pending
+        // native-`call` frames the guest pushed via `callf` (PVM2). For
+        // a balanced clean exit (every `callf` already matched by a
+        // `retf`), RSP is already at the baseline and the mov is a
+        // no-op; for OOG / page-fault / mid-function trap paths it
+        // truncates the stack back to where the 7 callee-saved entries
+        // sit on top.
+        self.asm.mov_load64_rip_rel(Reg::RSP, CTX_HOST_RSP_BASE);
+
         // Restore callee-saved (+ alignment padding)
         self.asm.pop(SCRATCH); // alignment padding
         self.asm.pop(Reg::R15);
@@ -2979,32 +631,3084 @@ impl Compiler {
         self.asm.pop(Reg::RBX);
         self.asm.ret();
     }
+}
 
-    /// Get the memory read helper for a load opcode.
-    fn read_fn_for(&self, opcode: Opcode) -> u64 {
-        match opcode {
-            Opcode::LoadU8 | Opcode::LoadI8 | Opcode::LoadIndU8 | Opcode::LoadIndI8 => {
-                self.helpers.mem_read_u8
+/// Detect a trailing ALU-rr instruction in raw bytes, for streaming-fusion
+/// lookahead. Handles both 4-byte OP_OP forms (Add/Xor/Or/And with funct7=0)
+/// and the 2-byte RVC equivalents (`c.add`, `c.xor`, `c.or`, `c.and`).
+///
+/// Returns `(op, rd, rs1, rs2, consumed_bytes)`. For RVC's two-operand forms
+/// (`rd <- rd ⊕ rs2`), we surface `rs1 == rd` so callers don't need separate
+/// RVC-aware logic.
+///
+/// Roughly half of PVM2 guest code is RVC (49–71% across the gap-driving
+/// guests), so missing the compressed-Add form here would forfeit most of
+/// the win from these fusions.
+#[inline]
+fn peek_alu_rr_trailer(rest: &[u8]) -> Option<(AluOp, u8, u8, u8, usize)> {
+    if rest.len() < 2 {
+        return None;
+    }
+    // 4-byte path: only when `rest[0]`'s low 2 bits == 0b11.
+    if rest[0] & 0b11 == 0b11 {
+        if rest.len() < 4 {
+            return None;
+        }
+        let w = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+        let op = match w & 0xFE00_707F {
+            0x0000_0033 => AluOp::Add,
+            0x0000_4033 => AluOp::Xor,
+            0x0000_6033 => AluOp::Or,
+            0x0000_7033 => AluOp::And,
+            _ => return None,
+        };
+        let rd = ((w >> 7) & 0x1F) as u8;
+        let rs1 = ((w >> 15) & 0x1F) as u8;
+        let rs2 = ((w >> 20) & 0x1F) as u8;
+        return Some((op, rd, rs1, rs2, 4));
+    }
+    // 2-byte RVC path.
+    let h = u16::from_le_bytes([rest[0], rest[1]]);
+    // c.add — q2 (bits[1:0]=10), funct4=1001, bits[12]=1, rd!=0, rs2!=0.
+    // mask 0xF003 == 0x9002.
+    if h & 0xF003 == 0x9002 {
+        let rd = ((h >> 7) & 0x1F) as u8;
+        let rs2 = ((h >> 2) & 0x1F) as u8;
+        if rd != 0 && rs2 != 0 {
+            return Some((AluOp::Add, rd, rd, rs2, 2));
+        }
+        return None;
+    }
+    // c.{and,or,xor,sub} — q1 misc_alu, funct6=100011, bits[1:0]=01.
+    // mask 0xFC03 == 0x8C01. funct2 (bits[6:5]) selects op.
+    if h & 0xFC03 == 0x8C01 {
+        let op = match (h >> 5) & 0x3 {
+            0b01 => AluOp::Xor,
+            0b10 => AluOp::Or,
+            0b11 => AluOp::And,
+            _ => return None, // 0b00 = c.sub, not in fusion set
+        };
+        let rd = ((h >> 7) & 0x7) as u8 + 8; // creg
+        let rs2 = ((h >> 2) & 0x7) as u8 + 8; // creg
+        return Some((op, rd, rd, rs2, 2));
+    }
+    None
+}
+
+// ----------------------------------------------------------------------
+// RV opcode majors (bits [6:2]). Bits [1:0] are always 0b11 for 4-byte.
+// Mirrors `javm_exec::instruction::OP_*`; redeclared here to keep the
+// recompiler self-contained on the byte-dispatch hot path. Only majors
+// PVM2 accepts are named — AUIPC, JALR, SYSTEM, CUSTOM_1, AMO, FP* etc.
+// are routed through the catch-all default branch in `compile_rv4`.
+// ----------------------------------------------------------------------
+const OP_LOAD: u32 = 0b00_000;
+const OP_MISC_MEM: u32 = 0b00_011;
+const OP_IMM: u32 = 0b00_100;
+const OP_OP_IMM_32: u32 = 0b00_110;
+const OP_STORE: u32 = 0b01_000;
+const OP_OP: u32 = 0b01_100;
+const OP_LUI: u32 = 0b01_101;
+const OP_OP_32: u32 = 0b01_110;
+const OP_BRANCH: u32 = 0b11_000;
+const OP_JAL: u32 = 0b11_011;
+const OP_CUSTOM_0: u32 = 0b00_010;
+
+// Sign-extended immediates straight off a 4-byte RV word. Mirrors the
+// canonical encoders in `javm_exec::instruction`.
+#[inline]
+fn imm_i(w: u32) -> i32 {
+    (w as i32) >> 20
+}
+#[inline]
+fn imm_s(w: u32) -> i32 {
+    let hi = (w >> 25) & 0x7F;
+    let lo = (w >> 7) & 0x1F;
+    let raw = ((hi << 5) | lo) as i32;
+    (raw << 20) >> 20
+}
+#[inline]
+fn imm_b(w: u32) -> i32 {
+    let b12 = (w >> 31) & 1;
+    let b11 = (w >> 7) & 1;
+    let b10_5 = (w >> 25) & 0x3F;
+    let b4_1 = (w >> 8) & 0xF;
+    let raw = (b12 << 12) | (b11 << 11) | (b10_5 << 5) | (b4_1 << 1);
+    ((raw as i32) << 19) >> 19
+}
+#[inline]
+fn imm_j(w: u32) -> i32 {
+    let b20 = (w >> 31) & 1;
+    let b10_1 = (w >> 21) & 0x3FF;
+    let b11 = (w >> 20) & 1;
+    let b19_12 = (w >> 12) & 0xFF;
+    let raw = (b20 << 20) | (b19_12 << 12) | (b11 << 11) | (b10_1 << 1);
+    ((raw as i32) << 11) >> 11
+}
+#[inline]
+fn imm_u(w: u32) -> i32 {
+    (w & 0xFFFFF000) as i32
+}
+
+// ----------------------------------------------------------------------
+// Encoders for synthesising a 4-byte RV word from RVC fields. RVC is
+// rare enough (~1% of code on the gap-driving guests) that the natural
+// implementation is: extract the relevant RVC fields, re-encode as the
+// equivalent 4-byte word, and feed it through `compile_rv4`. This lets
+// all the funct3/funct7 dispatch + fusion logic live in one place.
+//
+// The `opcode5` parameter is the 5-bit opcode major (bits [6:2]); we OR
+// in `0b11` for bits [1:0] automatically.
+// ----------------------------------------------------------------------
+#[inline]
+fn enc_i(opcode5: u32, f3: u32, rd: u8, rs1: u8, imm: i32) -> u32 {
+    let imm12 = (imm as u32) & 0xFFF;
+    (imm12 << 20) | ((rs1 as u32) << 15) | (f3 << 12) | ((rd as u32) << 7) | (opcode5 << 2) | 0b11
+}
+#[inline]
+fn enc_s(opcode5: u32, f3: u32, rs1: u8, rs2: u8, imm: i32) -> u32 {
+    let imm12 = (imm as u32) & 0xFFF;
+    ((imm12 >> 5) << 25)
+        | ((rs2 as u32) << 20)
+        | ((rs1 as u32) << 15)
+        | (f3 << 12)
+        | ((imm12 & 0x1F) << 7)
+        | (opcode5 << 2)
+        | 0b11
+}
+#[inline]
+fn enc_b(opcode5: u32, f3: u32, rs1: u8, rs2: u8, imm: i32) -> u32 {
+    let imm13 = (imm as u32) & 0x1FFF;
+    let b12 = (imm13 >> 12) & 1;
+    let b11 = (imm13 >> 11) & 1;
+    let b10_5 = (imm13 >> 5) & 0x3F;
+    let b4_1 = (imm13 >> 1) & 0xF;
+    (b12 << 31)
+        | (b10_5 << 25)
+        | ((rs2 as u32) << 20)
+        | ((rs1 as u32) << 15)
+        | (f3 << 12)
+        | (b4_1 << 8)
+        | (b11 << 7)
+        | (opcode5 << 2)
+        | 0b11
+}
+#[inline]
+fn enc_j(opcode5: u32, rd: u8, imm: i32) -> u32 {
+    let imm21 = (imm as u32) & 0x1FFFFF;
+    let b20 = (imm21 >> 20) & 1;
+    let b10_1 = (imm21 >> 1) & 0x3FF;
+    let b11 = (imm21 >> 11) & 1;
+    let b19_12 = (imm21 >> 12) & 0xFF;
+    (b20 << 31)
+        | (b10_1 << 21)
+        | (b11 << 20)
+        | (b19_12 << 12)
+        | ((rd as u32) << 7)
+        | (opcode5 << 2)
+        | 0b11
+}
+#[inline]
+fn enc_u(opcode5: u32, rd: u8, imm: i32) -> u32 {
+    let imm_u = (imm as u32) & 0xFFFFF000;
+    imm_u | ((rd as u32) << 7) | (opcode5 << 2) | 0b11
+}
+#[inline]
+fn enc_r(opcode5: u32, f3: u32, f7: u32, rd: u8, rs1: u8, rs2: u8) -> u32 {
+    (f7 << 25)
+        | ((rs2 as u32) << 20)
+        | ((rs1 as u32) << 15)
+        | (f3 << 12)
+        | ((rd as u32) << 7)
+        | (opcode5 << 2)
+        | 0b11
+}
+#[inline]
+fn enc_shimm6(opcode5: u32, f3: u32, shtype6: u32, rd: u8, rs1: u8, shamt6: u8) -> u32 {
+    (shtype6 << 26)
+        | ((shamt6 as u32) << 20)
+        | ((rs1 as u32) << 15)
+        | (f3 << 12)
+        | ((rd as u32) << 7)
+        | (opcode5 << 2)
+        | 0b11
+}
+
+// RVC compressed-register field (3 bits) maps to x8..x15.
+#[inline]
+fn creg(r: u16) -> u8 {
+    (r + 8) as u8
+}
+
+// CI-format 6-bit signed immediate.
+#[inline]
+fn decode_ci_imm6(h: u16) -> i32 {
+    let imm = (((h >> 12) & 1) << 5) | ((h >> 2) & 0x1F);
+    ((imm as i32) << 26) >> 26
+}
+
+// CJ-format 12-bit signed immediate (byte offset).
+#[inline]
+fn decode_cj_imm(h: u16) -> i32 {
+    let b11 = (h >> 12) & 1;
+    let b4 = (h >> 11) & 1;
+    let b9_8 = (h >> 9) & 0x3;
+    let b10 = (h >> 8) & 1;
+    let b6 = (h >> 7) & 1;
+    let b7 = (h >> 6) & 1;
+    let b3_1 = (h >> 3) & 0x7;
+    let b5 = (h >> 2) & 1;
+    let imm = (b11 << 11)
+        | (b10 << 10)
+        | (b9_8 << 8)
+        | (b7 << 7)
+        | (b6 << 6)
+        | (b5 << 5)
+        | (b4 << 4)
+        | (b3_1 << 1);
+    ((imm as i32) << 20) >> 20
+}
+
+// CB-format 9-bit signed immediate (byte offset).
+#[inline]
+fn decode_cb_imm(h: u16) -> i32 {
+    let b8 = (h >> 12) & 1;
+    let b4_3 = (h >> 10) & 0x3;
+    let b7_6 = (h >> 5) & 0x3;
+    let b2_1 = (h >> 3) & 0x3;
+    let b5 = (h >> 2) & 1;
+    let imm = (b8 << 8) | (b7_6 << 6) | (b5 << 5) | (b4_3 << 3) | (b2_1 << 1);
+    ((imm as i32) << 23) >> 23
+}
+
+/// Expand a 2-byte RVC encoding to its 4-byte equivalent. Returns
+/// `None` for PVM2-forbidden RVC encodings (c.jr, c.jalr, c.ebreak,
+/// c.illegal) and for malformed encodings (reserved sub-cases).
+///
+/// The caller (`compile_rvc`) feeds the result through `compile_rv4`,
+/// so any shape `compile_rv4` understands is acceptable here. RVC
+/// expansions never set the JAL `rd` to a non-zero value (c.jal is
+/// RV32-only and doesn't exist in our target), so the `next_pc`
+/// hardcoded in `compile_rv4`'s jal/branch sub-dispatchers is unused
+/// — RVC's actual `pc + 2` advance happens in the streaming loop.
+fn expand_rvc(h: u16) -> Option<u32> {
+    // c.illegal is encoding 0x0000.
+    if h == 0 {
+        return None;
+    }
+    let op = h & 0b11;
+    let f3 = (h >> 13) & 0b111;
+    match op {
+        0b00 => expand_rvc_q0(h, f3),
+        0b01 => expand_rvc_q1(h, f3),
+        0b10 => expand_rvc_q2(h, f3),
+        _ => None,
+    }
+}
+
+fn expand_rvc_q0(h: u16, f3: u16) -> Option<u32> {
+    let rs1c = creg((h >> 7) & 0b111);
+    let rdrs2c = creg((h >> 2) & 0b111);
+    match f3 {
+        0b000 => {
+            // c.addi4spn -> addi rd', x2, nzuimm
+            // nzuimm bits: h[12:11] -> [5:4], h[10:7] -> [9:6], h[6] -> [2], h[5] -> [3].
+            let n = (((h >> 11) & 0x3) << 4)
+                | (((h >> 7) & 0xF) << 6)
+                | (((h >> 6) & 0x1) << 2)
+                | (((h >> 5) & 0x1) << 3);
+            if n == 0 {
+                return None;
             }
-            Opcode::LoadU16 | Opcode::LoadI16 | Opcode::LoadIndU16 | Opcode::LoadIndI16 => {
-                self.helpers.mem_read_u16
+            Some(enc_i(OP_IMM, 0b000, rdrs2c, 2, n as i32))
+        }
+        0b010 => {
+            // c.lw -> lw rd', uimm(rs1')
+            let imm = (((h >> 10) & 0x7) << 3) | (((h >> 6) & 0x1) << 2) | (((h >> 5) & 0x1) << 6);
+            Some(enc_i(OP_LOAD, 0b010, rdrs2c, rs1c, imm as i32))
+        }
+        0b011 => {
+            // c.ld -> ld rd', uimm(rs1')
+            let imm = (((h >> 10) & 0x7) << 3) | (((h >> 5) & 0x3) << 6);
+            Some(enc_i(OP_LOAD, 0b011, rdrs2c, rs1c, imm as i32))
+        }
+        0b110 => {
+            // c.sw
+            let imm = (((h >> 10) & 0x7) << 3) | (((h >> 6) & 0x1) << 2) | (((h >> 5) & 0x1) << 6);
+            Some(enc_s(OP_STORE, 0b010, rs1c, rdrs2c, imm as i32))
+        }
+        0b111 => {
+            // c.sd
+            let imm = (((h >> 10) & 0x7) << 3) | (((h >> 5) & 0x3) << 6);
+            Some(enc_s(OP_STORE, 0b011, rs1c, rdrs2c, imm as i32))
+        }
+        _ => None,
+    }
+}
+
+fn expand_rvc_q1(h: u16, f3: u16) -> Option<u32> {
+    match f3 {
+        0b000 => {
+            // c.nop / c.addi
+            let rd = ((h >> 7) & 0x1F) as u8;
+            let imm = decode_ci_imm6(h);
+            if rd == 0 {
+                Some(enc_i(OP_IMM, 0b000, 0, 0, 0)) // c.nop
+            } else {
+                Some(enc_i(OP_IMM, 0b000, rd, rd, imm))
             }
-            Opcode::LoadU32 | Opcode::LoadI32 | Opcode::LoadIndU32 | Opcode::LoadIndI32 => {
-                self.helpers.mem_read_u32
+        }
+        0b001 => {
+            // c.addiw (RV64) — rd != 0
+            let rd = ((h >> 7) & 0x1F) as u8;
+            if rd == 0 {
+                return None;
             }
-            Opcode::LoadU64 | Opcode::LoadIndU64 => self.helpers.mem_read_u64,
-            _ => self.helpers.mem_read_u8,
+            Some(enc_i(OP_OP_IMM_32, 0b000, rd, rd, decode_ci_imm6(h)))
+        }
+        0b010 => {
+            // c.li -> addi rd, x0, imm
+            let rd = ((h >> 7) & 0x1F) as u8;
+            if rd == 0 {
+                return None;
+            }
+            Some(enc_i(OP_IMM, 0b000, rd, 0, decode_ci_imm6(h)))
+        }
+        0b011 => {
+            // c.addi16sp / c.lui
+            let rd = ((h >> 7) & 0x1F) as u8;
+            if rd == 2 {
+                let imm = (((h >> 12) & 1) << 9)
+                    | (((h >> 6) & 1) << 4)
+                    | (((h >> 5) & 1) << 6)
+                    | (((h >> 3) & 0x3) << 7)
+                    | (((h >> 2) & 1) << 5);
+                let sx = ((imm as i32) << 22) >> 22;
+                if sx == 0 {
+                    return None;
+                }
+                Some(enc_i(OP_IMM, 0b000, 2, 2, sx))
+            } else if rd == 0 {
+                None
+            } else {
+                let h_u = h as u32;
+                let imm = (((h_u >> 12) & 1) << 17) | (((h_u >> 2) & 0x1F) << 12);
+                let sx = ((imm as i32) << 14) >> 14;
+                if sx == 0 {
+                    return None;
+                }
+                Some(enc_u(OP_LUI, rd, sx))
+            }
+        }
+        0b100 => expand_rvc_q1_misc_alu(h),
+        0b101 => {
+            // c.j -> jal x0, off
+            Some(enc_j(OP_JAL, 0, decode_cj_imm(h)))
+        }
+        0b110 | 0b111 => {
+            // c.beqz / c.bnez (rs1 = creg)
+            let rs1 = creg((h >> 7) & 0b111);
+            let imm = decode_cb_imm(h);
+            let f3b = if f3 == 0b110 { 0b000 } else { 0b001 };
+            Some(enc_b(OP_BRANCH, f3b, rs1, 0, imm))
+        }
+        _ => None,
+    }
+}
+
+fn expand_rvc_q1_misc_alu(h: u16) -> Option<u32> {
+    let f6_10 = (h >> 10) & 0b11;
+    let rdrs1c = creg((h >> 7) & 0b111);
+    match f6_10 {
+        0b00 | 0b01 => {
+            // c.srli / c.srai (RV64 shamt: bit12||bits6:2)
+            let shamt = ((((h >> 12) & 1) << 5) | ((h >> 2) & 0x1F)) as u8;
+            let shtype = if f6_10 == 0b00 { 0b000000 } else { 0b010000 };
+            Some(enc_shimm6(OP_IMM, 0b101, shtype, rdrs1c, rdrs1c, shamt))
+        }
+        0b10 => {
+            // c.andi
+            Some(enc_i(OP_IMM, 0b111, rdrs1c, rdrs1c, decode_ci_imm6(h)))
+        }
+        0b11 => {
+            // c.sub/xor/or/and (bit12=0) or c.subw/c.addw (bit12=1)
+            let rs2c = creg((h >> 2) & 0b111);
+            let bit12 = (h >> 12) & 1;
+            let f2 = (h >> 5) & 0b11;
+            match (bit12, f2) {
+                // OP family (bit12=0)
+                (0, 0b00) => Some(enc_r(OP_OP, 0b000, 0b0100000, rdrs1c, rdrs1c, rs2c)), // sub
+                (0, 0b01) => Some(enc_r(OP_OP, 0b100, 0b0000000, rdrs1c, rdrs1c, rs2c)), // xor
+                (0, 0b10) => Some(enc_r(OP_OP, 0b110, 0b0000000, rdrs1c, rdrs1c, rs2c)), // or
+                (0, 0b11) => Some(enc_r(OP_OP, 0b111, 0b0000000, rdrs1c, rdrs1c, rs2c)), // and
+                // OP_32 family (bit12=1)
+                (1, 0b00) => Some(enc_r(OP_OP_32, 0b000, 0b0100000, rdrs1c, rdrs1c, rs2c)), // subw
+                (1, 0b01) => Some(enc_r(OP_OP_32, 0b000, 0b0000000, rdrs1c, rdrs1c, rs2c)), // addw
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn expand_rvc_q2(h: u16, f3: u16) -> Option<u32> {
+    let rdrs1 = ((h >> 7) & 0x1F) as u8;
+    let rs2 = ((h >> 2) & 0x1F) as u8;
+    match f3 {
+        0b000 => {
+            // c.slli (RV64 shamt: bit12||bits6:2)
+            if rdrs1 == 0 {
+                return None;
+            }
+            let shamt = ((((h >> 12) & 1) << 5) | ((h >> 2) & 0x1F)) as u8;
+            Some(enc_shimm6(OP_IMM, 0b001, 0b000000, rdrs1, rdrs1, shamt))
+        }
+        0b010 => {
+            // c.lwsp -> lw rd, uimm(x2)
+            if rdrs1 == 0 {
+                return None;
+            }
+            let imm = (((h >> 12) & 1) << 5) | (((h >> 4) & 0x7) << 2) | (((h >> 2) & 0x3) << 6);
+            Some(enc_i(OP_LOAD, 0b010, rdrs1, 2, imm as i32))
+        }
+        0b011 => {
+            // c.ldsp -> ld rd, uimm(x2)
+            if rdrs1 == 0 {
+                return None;
+            }
+            let imm = (((h >> 12) & 1) << 5) | (((h >> 5) & 0x3) << 3) | (((h >> 2) & 0x7) << 6);
+            Some(enc_i(OP_LOAD, 0b011, rdrs1, 2, imm as i32))
+        }
+        0b100 => {
+            // (bit12, rdrs1, rs2):
+            //   (0, r, 0)  r!=0 -> c.jr     (FORBIDDEN in PVM2)
+            //   (0, r, s)  both!=0 -> c.mv  -> add rd, x0, rs2
+            //   (1, 0, 0)         -> c.ebreak (FORBIDDEN)
+            //   (1, r, 0)  r!=0 -> c.jalr   (FORBIDDEN)
+            //   (1, r, s)  both!=0 -> c.add -> add rd, rd, rs2
+            let bit12 = (h >> 12) & 1;
+            if rs2 == 0 {
+                // c.jr / c.jalr / c.ebreak — all forbidden.
+                None
+            } else {
+                // c.mv (bit12=0, rs1=x0) or c.add (bit12=1, rs1=rdrs1)
+                if rdrs1 == 0 {
+                    return None;
+                }
+                let rs1_enc = if bit12 == 0 { 0 } else { rdrs1 };
+                Some(enc_r(OP_OP, 0b000, 0b0000000, rdrs1, rs1_enc, rs2))
+            }
+        }
+        0b110 => {
+            // c.swsp -> sw rs2, uimm(x2)
+            let imm = (((h >> 9) & 0xF) << 2) | (((h >> 7) & 0x3) << 6);
+            Some(enc_s(OP_STORE, 0b010, 2, rs2, imm as i32))
+        }
+        0b111 => {
+            // c.sdsp -> sd rs2, uimm(x2)
+            let imm = (((h >> 10) & 0x7) << 3) | (((h >> 7) & 0x7) << 6);
+            Some(enc_s(OP_STORE, 0b011, 2, rs2, imm as i32))
+        }
+        _ => None,
+    }
+}
+
+/// Map an RV register index to its PVM slot (0..=12).
+///
+/// Returns `None` for x0 (hardwired zero), x3, x4 (reserved). Callers
+/// handle x0 by loading an immediate 0; x3/x4 cause a runtime panic at
+/// the offending PC (the transpiler is expected to reject them at
+/// deblob, so this is just defence-in-depth).
+#[inline]
+fn rv_slot(x: u8) -> Option<usize> {
+    match x {
+        1 => Some(0),
+        2 => Some(1),
+        5..=15 => Some((x as usize) - 3),
+        _ => None,
+    }
+}
+
+/// True for x3 and x4 — registers that PVM2 reserves and the transpiler
+/// must reject. If we ever see them at codegen time, we trap.
+#[inline]
+fn rv_is_reserved(x: u8) -> bool {
+    x == 3 || x == 4
+}
+
+impl Compiler {
+    /// Compile an RV+C+custom-0 byte stream into x86-64 in a single
+    /// streaming pass.
+    ///
+    /// Decode + valid-PC + gas-block detection + gas simulation +
+    /// codegen all happen in one walk over `code`. No `Predecode`
+    /// intermediary — that was 57% of the old cold-path compile time
+    /// on the large guests (ed25519, ecrecover).
+    ///
+    /// `jump_table_offsets` is the Image's CSR-style sub-table boundary
+    /// array — see `javm_cap::image::Image::jump_table_offsets`.
+    /// Empty implies no br_table dispatch is used. Each
+    /// `BrTable { table_id, .. }` instruction dispatches through sub-
+    /// table `table_id`, whose entries live at
+    /// `jt_ptr[jump_table_offsets[table_id] ..
+    /// jump_table_offsets[table_id+1]]`.
+    ///
+    /// The returned `CompileResult.valid_pc` is the byte-indexed
+    /// "valid branch target" bitmap the runtime BB region needs. A bit
+    /// is set iff the PC is a gas-block start (= dispatchable entry in
+    /// the gas-block dispatch table). Built incrementally during the
+    /// streaming pass — no separate length-only pre-pass.
+    pub fn compile(mut self, code: &[u8], jump_table_offsets: &[u32]) -> CompileResult {
+        self.rv_jt_offsets = jump_table_offsets.to_vec();
+
+        // valid_pc is populated incrementally as the streaming pass
+        // binds gas-block starts. The pointer is stable across mutation
+        // (Vec doesn't reallocate from `vec![false; n]` with in-place
+        // index assignment), so `is_basic_block_start` reads through
+        // the raw pointer remain coherent.
+        self.rv_valid_pc = vec![false; code.len()];
+        self.bitmask_ptr = self.rv_valid_pc.as_ptr() as *const u8;
+        self.bitmask_len = self.rv_valid_pc.len();
+        self.rv_streaming = true;
+
+        self.emit_prologue();
+
+        let mut pending_gas: Option<(Label, u32, usize)> = None;
+        let mut next_is_gas_start = true;
+        let mut pc: usize = 0;
+
+        while pc < code.len() {
+            self.asm.ensure_capacity(512);
+
+            // Length encoding lives in bits [1:0] of byte 0: `xx11` is
+            // 4-byte, anything else is 2-byte (RVC). Decode no further
+            // than that — the dispatcher inspects raw bits directly.
+            if pc + 2 > code.len() {
+                self.rv_emit_panic_at(pc as u32);
+                break;
+            }
+            let is_4byte = code[pc] & 0b11 == 0b11;
+            let base_len = if is_4byte { 4 } else { 2 };
+            if pc + base_len > code.len() {
+                self.rv_emit_panic_at(pc as u32);
+                break;
+            }
+
+            let inst_pc = pc as u32;
+
+            if next_is_gas_start {
+                self.bind_rv_gas_block_start_streaming(inst_pc, &mut pending_gas);
+                next_is_gas_start = false;
+            }
+
+            // Byte-based dispatch. Each path returns
+            // `(is_terminator, preserve_cf, extra_bytes)`. `extra_bytes`
+            // counts the *additional* bytes consumed beyond `base_len`
+            // for lookahead fusion (e.g., Ld→Add fuses an extra 4-byte
+            // Add). `preserve_cf` tells us whether to keep
+            // `last_add_cf` alive for a following Sltu fusion.
+            let rest = &code[pc + base_len..];
+            let (term, preserve_cf, extra) = if is_4byte {
+                let w = u32::from_le_bytes([code[pc], code[pc + 1], code[pc + 2], code[pc + 3]]);
+                self.compile_rv4(w, inst_pc, rest)
+            } else {
+                let h = u16::from_le_bytes([code[pc], code[pc + 1]]);
+                self.compile_rvc(h, inst_pc, rest)
+            };
+
+            if !preserve_cf {
+                self.last_add_cf = None;
+            }
+
+            if term {
+                next_is_gas_start = true;
+            }
+
+            pc += base_len + extra;
+        }
+
+        // Finalize the last gas block — patch its cost in.
+        if let Some((stub_label, block_pc, patch_offset)) = pending_gas.take() {
+            let cost = self.gas_sim.flush_and_get_cost();
+            self.asm.patch_i32(patch_offset, cost as i32);
+            self.oog_stubs.push((stub_label, block_pc, cost));
+        }
+
+        // Resolve deferred forward branches now that valid_pc is fully
+        // populated. For each forward branch recorded with target > pc
+        // at emit time:
+        //   - valid target: label_for_pc(target) was bound during the
+        //     streaming pass; the existing fixup resolves naturally.
+        //   - invalid target: append a per-branch panic stub and
+        //     redirect the fixup to it. Keeps the source PC of the
+        //     branch in the exit report.
+        // We disable rv_streaming first so emit_branch_* / panic helpers
+        // called below take their non-deferred path.
+        self.rv_streaming = false;
+        let pending = core::mem::take(&mut self.rv_pending_fwd_branches);
+        for (target, branch_pc, fixup_idx) in pending {
+            if !self.is_basic_block_start(target) {
+                let stub = self.asm.new_label();
+                self.asm.bind_label(stub);
+                self.asm.mov_store32_rip_rel_imm(CTX_PC, branch_pc as i32);
+                self.asm.jmp_label(self.panic_label);
+                self.asm.redirect_fixup(fixup_idx, stub);
+            }
+        }
+
+        self.emit_exit_sequences();
+
+        // Sparse dispatch entries — caller writes only these into the
+        // (page-zero-filled) arena dispatch region. No code.len() + 1
+        // intermediate Vec.
+        let mut dispatch_entries: Vec<(u32, i32)> = Vec::with_capacity(self.gas_block_pcs.len());
+        for &pc in self.gas_block_pcs.iter() {
+            let label = Label(self.label_base + pc);
+            if let Some(off) = self.asm.label_offset(label) {
+                dispatch_entries.push((pc, off as i32));
+            }
+        }
+
+        let exit_label_offset = self.asm.label_offset(self.exit_label).unwrap_or(0) as u32;
+        let trap_table = core::mem::take(&mut self.trap_entries);
+        let valid_pc = core::mem::take(&mut self.rv_valid_pc);
+
+        CompileResult {
+            native_code: self.asm.finalize(),
+            dispatch_entries,
+            trap_table,
+            exit_label_offset,
+            valid_pc,
         }
     }
 
-    /// Get the memory write helper for a store opcode.
-    fn write_fn_for(&self, opcode: Opcode) -> u64 {
+    /// Streaming gas-block-start hook: bind label, flush prior block's
+    /// cost into its `sub` patch, emit a fresh `sub r15, 0; js stub`
+    /// placeholder and stash the patch offset in `pending`. Mirrors
+    /// `Compiler::emit_gas_block_start` on the PVM path. Drives
+    /// `self.gas_sim` directly so the per-arm `feed_gas_rv` calls in
+    /// `compile_rv4` see a coherent simulator.
+    fn bind_rv_gas_block_start_streaming(
+        &mut self,
+        pc: u32,
+        pending: &mut Option<(Label, u32, usize)>,
+    ) {
+        let label = Label(self.label_base + pc);
+        self.asm.bind_label(label);
+        self.gas_block_pcs.push(pc);
+        // valid_pc is the gas-block-start bitmap consulted by both the
+        // codegen-time `is_basic_block_start` check and the runtime's
+        // djump validation. Set it here so backward branches emit time
+        // see the bit (we walk PCs in order, so any T < cur_pc has
+        // already passed through here if it's a gas-block start).
+        // bitmask_ptr points to rv_valid_pc's heap buffer, so this
+        // mutation is visible to subsequent is_basic_block_start reads.
+        if (pc as usize) < self.rv_valid_pc.len() {
+            self.rv_valid_pc[pc as usize] = true;
+        }
+
+        // Peephole state must not leak across gas-block boundaries: the
+        // dispatch table can enter this block from any predecessor.
+        self.invalidate_all_regs();
+        self.last_add_cf = None;
+
+        if let Some((stub_label, block_pc, patch_offset)) = pending.take() {
+            let cost = self.gas_sim.flush_and_get_cost();
+            self.asm.patch_i32(patch_offset, cost as i32);
+            self.oog_stubs.push((stub_label, block_pc, cost));
+        }
+        self.gas_sim.reset();
+
+        let stub_label = self.asm.new_label();
+        self.asm.sub_r64_imm32_patchable(GAS, 0);
+        let patch_offset = self.asm.offset() - 4;
+        self.asm.jcc_label(Cc::S, stub_label);
+        *pending = Some((stub_label, pc, patch_offset));
+    }
+
+    /// 4-byte RV instruction dispatch (byte-based).
+    ///
+    /// Returns `(is_terminator, preserve_cf, extra_bytes)`. `extra_bytes`
+    /// counts the additional bytes (beyond the 4-byte base) consumed by
+    /// lookahead fusion. `preserve_cf` tells the streaming loop whether
+    /// to keep `last_add_cf` alive for a following Sltu fusion.
+    ///
+    /// Hot path: walks the opcode-major tree directly on raw bits, no
+    /// `Inst` enum constructed. Fusion sites (Ld→Add, Mul-pair) are
+    /// inline at their dispatchers.
+    fn compile_rv4(&mut self, w: u32, pc: u32, rest: &[u8]) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        let opcode = (w >> 2) & 0x1F;
+        let rd = ((w >> 7) & 0x1F) as u8;
+        let rs1 = ((w >> 15) & 0x1F) as u8;
+        let rs2 = ((w >> 20) & 0x1F) as u8;
+        let f3 = ((w >> 12) & 0x07) as u8;
+        let f7 = ((w >> 25) & 0x7F) as u8;
+
         match opcode {
-            Opcode::StoreU8 | Opcode::StoreIndU8 => self.helpers.mem_write_u8,
-            Opcode::StoreU16 | Opcode::StoreIndU16 => self.helpers.mem_write_u16,
-            Opcode::StoreU32 | Opcode::StoreIndU32 => self.helpers.mem_write_u32,
-            Opcode::StoreU64 | Opcode::StoreIndU64 => self.helpers.mem_write_u64,
-            _ => self.helpers.mem_write_u8,
+            OP_LOAD => self.compile_load(rd, rs1, f3, w, pc, rest),
+            OP_STORE => self.compile_store(rs1, rs2, f3, w, pc),
+            OP_IMM => self.compile_op_imm(rd, rs1, f3, w, pc),
+            OP_OP_IMM_32 => self.compile_op_imm_32(rd, rs1, f3, w, pc),
+            OP_OP => self.compile_op(rd, rs1, rs2, f3, f7, w, pc, rest),
+            OP_OP_32 => self.compile_op_32(rd, rs1, rs2, f3, f7, w, pc),
+            OP_LUI => self.compile_lui(rd, w, pc, rest),
+            OP_JAL => self.compile_jal(rd, w, pc),
+            OP_BRANCH => self.compile_branch(rs1, rs2, f3, w, pc),
+            OP_CUSTOM_0 => self.compile_custom_0(rd, rs1, f3, w, pc),
+            OP_MISC_MEM => {
+                // Fence / FenceI — no-op emit.
+                self.feed_gas_rv(RV_KIND_FENCE, 0, 0, 0);
+                (false, false, 0)
+            }
+            // OP_AUIPC, OP_JALR, OP_SYSTEM, OP_CUSTOM_1 etc. — all
+            // forbidden in PVM2 and rejected by the linker's validator.
+            // Defence in depth: emit a runtime panic if we ever see one.
+            _ => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                (true, false, 0)
+            }
         }
     }
+
+    /// 2-byte RVC dispatch. Expands the compressed encoding to its
+    /// 4-byte equivalent via `expand_rvc` and reuses `compile_rv4` —
+    /// all the funct3/funct7 dispatch + fusion logic stays in one
+    /// place, and the only RVC-specific code is the bit-shuffling of
+    /// the expansion. Forbidden RVC encodings (c.jr, c.jalr, c.ebreak,
+    /// c.illegal) return `None` from `expand_rvc` and emit a panic.
+    ///
+    /// One contract: RVC expansion never produces a JAL with rd != 0
+    /// (c.jal is RV32-only and doesn't exist in our target), so
+    /// `compile_rv4`'s hardcoded `next_pc = pc + 4` is never consumed
+    /// for return-address writes. Branches don't use next_pc either
+    /// (the `_fallthrough` parameter on emit_branch_* is unused). The
+    /// streaming loop's `pc += base_len + extra` advances by 2 for
+    /// RVC regardless of what `compile_rv4` did internally.
+    fn compile_rvc(&mut self, h: u16, pc: u32, rest: &[u8]) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        match expand_rvc(h) {
+            Some(w) => self.compile_rv4(w, pc, rest),
+            None => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                (true, false, 0)
+            }
+        }
+    }
+
+    // === Per-opcode dispatchers (4-byte path) =====================
+
+    fn compile_load(
+        &mut self,
+        rd: u8,
+        rs1: u8,
+        f3: u8,
+        w: u32,
+        pc: u32,
+        rest: &[u8],
+    ) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        let imm = imm_i(w);
+        let (width, signed) = match f3 {
+            0b000 => (1u32, true),
+            0b001 => (2, true),
+            0b010 => (4, true),
+            0b011 => (8, false),
+            0b100 => (1, false),
+            0b101 => (2, false),
+            0b110 => (4, false),
+            _ => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                return (true, false, 0);
+            }
+        };
+        // Ld→{Add,Xor,Or,And} fusion: only triggers on the 64-bit `ld`
+        // (f3 == 0b011). `peek_alu_rr_trailer` handles both 4-byte OP_OP and
+        // 2-byte RVC trailing forms — half the code in these guests is RVC,
+        // so missing c.add/c.{and,or,xor} would forfeit most of the win.
+        if width == 8
+            && rd != 0
+            && !rv_is_reserved(rd)
+            && !rv_is_reserved(rs1)
+            && let Some((op, a_rd, a_rs1, a_rs2, consumed)) = peek_alu_rr_trailer(rest)
+            && a_rd != 0
+            && !rv_is_reserved(a_rd)
+            && (a_rs1 == rd || a_rs2 == rd)
+            && (a_rs1 == 0 || !rv_is_reserved(a_rs1))
+            && (a_rs2 == 0 || !rv_is_reserved(a_rs2))
+        {
+            self.rv_load(rd, rs1, imm, 8, false, pc);
+            self.feed_gas_rv(RV_KIND_LOAD, rs1, 0, rd);
+            let next_pc = pc + 4;
+            self.rv_alu_rr(a_rd, a_rs1, a_rs2, op, next_pc);
+            // ScaledAdd tracking only meaningful for Add.
+            if matches!(op, AluOp::Add) && a_rd != a_rs1 && a_rd != a_rs2 {
+                self.track_add_scaledadd(a_rd, a_rs1, a_rs2);
+            }
+            self.feed_gas_rv(RV_KIND_ADD, a_rs1, a_rs2, a_rd);
+            // preserve_cf only valid for Add (Sltu fusion consumer).
+            let preserve_cf = matches!(op, AluOp::Add);
+            return (false, preserve_cf, consumed);
+        }
+        self.rv_load(rd, rs1, imm, width, signed, pc);
+        let term = self.feed_gas_rv(RV_KIND_LOAD, rs1, 0, rd);
+        (term, false, 0)
+    }
+
+    fn compile_store(&mut self, rs1: u8, rs2: u8, f3: u8, w: u32, pc: u32) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        let imm = imm_s(w);
+        let width = match f3 {
+            0b000 => 1u32,
+            0b001 => 2,
+            0b010 => 4,
+            0b011 => 8,
+            _ => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                return (true, false, 0);
+            }
+        };
+        self.rv_store(rs1, rs2, imm, width, pc);
+        let term = self.feed_gas_rv(RV_KIND_STORE, rs1, rs2, 0);
+        (term, false, 0)
+    }
+
+    fn compile_op_imm(&mut self, rd: u8, rs1: u8, f3: u8, w: u32, pc: u32) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        match f3 {
+            0b000 => {
+                // Addi
+                let imm = imm_i(w);
+                self.rv_alu_imm(rd, rs1, imm, AluImmOp::Add, pc);
+                if rs1 == 0 {
+                    self.track_const(rd, imm);
+                }
+                let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                (term, false, 0)
+            }
+            0b010 => {
+                let imm = imm_i(w);
+                self.rv_slt_imm(rd, rs1, imm, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                (term, false, 0)
+            }
+            0b011 => {
+                let imm = imm_i(w);
+                self.rv_slt_imm(rd, rs1, imm, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                (term, false, 0)
+            }
+            0b100 => {
+                let imm = imm_i(w);
+                self.rv_alu_imm(rd, rs1, imm, AluImmOp::Xor, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                (term, false, 0)
+            }
+            0b110 => {
+                let imm = imm_i(w);
+                self.rv_alu_imm(rd, rs1, imm, AluImmOp::Or, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                (term, false, 0)
+            }
+            0b111 => {
+                let imm = imm_i(w);
+                self.rv_alu_imm(rd, rs1, imm, AluImmOp::And, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                (term, false, 0)
+            }
+            0b001 => {
+                // SLLI / Zbs Bclri / Bseti / Binvi / Zbb unary (clz, ctz,
+                // cpop, sext.b, sext.h) — distinguished by funct6 (the
+                // top 6 bits) + rs2 field for Zbb unaries.
+                let shtype = (w >> 26) & 0x3F;
+                let shamt = ((w >> 20) & 0x3F) as u8;
+                let rs2_field = (w >> 20) & 0x1F;
+                match shtype {
+                    0b000000 => {
+                        self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Shl64, pc);
+                        if (1..=3).contains(&shamt) && rs1 != rd {
+                            self.track_shifted(rd, rs1, shamt);
+                        }
+                        let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b010010 => {
+                        self.rv_bit_imm(rd, rs1, shamt, BitOp::Clear, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBS_IMM, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b001010 => {
+                        self.rv_bit_imm(rd, rs1, shamt, BitOp::Set, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBS_IMM, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b011010 => {
+                        self.rv_bit_imm(rd, rs1, shamt, BitOp::Invert, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBS_IMM, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b011000 => {
+                        let (op, kind) = match rs2_field {
+                            0b00000 => (UnaryOp::Clz64, RV_KIND_ZBB_U1),
+                            0b00001 => (UnaryOp::Ctz64, RV_KIND_ZBB_CTZ),
+                            0b00010 => (UnaryOp::Popcnt64, RV_KIND_ZBB_U1),
+                            0b00100 => (UnaryOp::SextB, RV_KIND_ZBB_U1),
+                            0b00101 => (UnaryOp::SextH, RV_KIND_ZBB_U1),
+                            _ => {
+                                self.rv_emit_panic_at(pc);
+                                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                                return (true, false, 0);
+                            }
+                        };
+                        self.rv_unary(rd, rs1, op, pc);
+                        let term = self.feed_gas_rv(kind, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    _ => {
+                        self.rv_emit_panic_at(pc);
+                        self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                        (true, false, 0)
+                    }
+                }
+            }
+            0b101 => {
+                // SRLI / SRAI / Bexti / Rori / OrcB / Rev8.
+                let shtype = (w >> 26) & 0x3F;
+                let shamt = ((w >> 20) & 0x3F) as u8;
+                let rs2_field = (w >> 20) & 0x1F;
+                match shtype {
+                    0b000000 => {
+                        self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Shr64, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b010000 => {
+                        self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Sar64, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ADDI, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b010010 => {
+                        self.rv_bit_imm(rd, rs1, shamt, BitOp::Extract, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBS_IMM, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b011000 => {
+                        self.rv_shift_imm(rd, rs1, shamt, ShiftOp::Ror64, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBB_RORI, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b001010 if rs2_field == 0b00111 => {
+                        self.rv_unary(rd, rs1, UnaryOp::OrcB, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBB_U1, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b011010 if rs2_field == 0b11000 => {
+                        self.rv_unary(rd, rs1, UnaryOp::Rev8, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBB_U1, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    _ => {
+                        self.rv_emit_panic_at(pc);
+                        self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                        (true, false, 0)
+                    }
+                }
+            }
+            _ => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                (true, false, 0)
+            }
+        }
+    }
+
+    fn compile_op_imm_32(
+        &mut self,
+        rd: u8,
+        rs1: u8,
+        f3: u8,
+        w: u32,
+        pc: u32,
+    ) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        match f3 {
+            0b000 => {
+                let imm = imm_i(w);
+                self.rv_alu_imm(rd, rs1, imm, AluImmOp::Addw, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDIW, rs1, 0, rd);
+                (term, false, 0)
+            }
+            0b001 => {
+                let f7 = (w >> 25) & 0x7F;
+                let shamt5 = ((w >> 20) & 0x1F) as u8;
+                match f7 {
+                    0b0000000 => {
+                        self.rv_shift_imm(rd, rs1, shamt5, ShiftOp::Shl32, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ADDIW, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b0000100 => {
+                        // Slli.uw — uses 6-bit shamt (RV64).
+                        let shamt6 = ((w >> 20) & 0x3F) as u8;
+                        self.rv_slliuw(rd, rs1, shamt6, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBA_IMM, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b0110000 => {
+                        let rs2_field = (w >> 20) & 0x1F;
+                        let op = match rs2_field {
+                            0b00000 => UnaryOp::Clz32,
+                            0b00001 => UnaryOp::Ctz32,
+                            0b00010 => UnaryOp::Popcnt32,
+                            _ => {
+                                self.rv_emit_panic_at(pc);
+                                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                                return (true, false, 0);
+                            }
+                        };
+                        let kind = if matches!(op, UnaryOp::Ctz32) {
+                            RV_KIND_ZBB_CTZ
+                        } else {
+                            RV_KIND_ZBB_U1
+                        };
+                        self.rv_unary(rd, rs1, op, pc);
+                        let term = self.feed_gas_rv(kind, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    _ => {
+                        self.rv_emit_panic_at(pc);
+                        self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                        (true, false, 0)
+                    }
+                }
+            }
+            0b101 => {
+                let f7 = (w >> 25) & 0x7F;
+                let shamt5 = ((w >> 20) & 0x1F) as u8;
+                match f7 {
+                    0b0000000 => {
+                        self.rv_shift_imm(rd, rs1, shamt5, ShiftOp::Shr32, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ADDIW, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b0100000 => {
+                        self.rv_shift_imm(rd, rs1, shamt5, ShiftOp::Sar32, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ADDIW, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    0b0110000 => {
+                        self.rv_shift_imm(rd, rs1, shamt5, ShiftOp::Ror32, pc);
+                        let term = self.feed_gas_rv(RV_KIND_ZBB_RORIW, rs1, 0, rd);
+                        (term, false, 0)
+                    }
+                    _ => {
+                        self.rv_emit_panic_at(pc);
+                        self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                        (true, false, 0)
+                    }
+                }
+            }
+            _ => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                (true, false, 0)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_op(
+        &mut self,
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        f3: u8,
+        f7: u8,
+        w: u32,
+        pc: u32,
+        rest: &[u8],
+    ) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        // Mul-pair fusion: a 64-bit `mul` (f7=0000001, f3=000) followed
+        // by `mulh`/`mulhu` on the SAME operand pair folds into a single
+        // x86 imul/mul that produces RDX:RAX (lo:hi). See commit
+        // `perf(pvm2): mul-pair fusion`.
+        if f7 == 0b0000001
+            && f3 == 0b000
+            && let Some(extra) = self.try_fuse_mul_pair_bytes(rd, rs1, rs2, rest, pc)
+        {
+            return (false, false, extra);
+        }
+        match (f7, f3) {
+            (0b0000000, 0b000) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Add, pc);
+                if rd != rs1 && rd != rs2 {
+                    self.track_add_scaledadd(rd, rs1, rs2);
+                }
+                let term = self.feed_gas_rv(RV_KIND_ADD, rs1, rs2, rd);
+                (term, true, 0)
+            }
+            (0b0100000, 0b000) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Sub, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADD, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b001) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shl64, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLL, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b010) => {
+                self.rv_slt_rr(rd, rs1, rs2, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLT, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b011) => {
+                // Sltu — preserve_cf so the next-instruction CF clear
+                // doesn't trample a pending Add's flags before rv_slt_rr
+                // had a chance to consume them. (Note: rv_slt_rr already
+                // handles the case where last_add_cf is stale; we just
+                // skip the post-emit clear here to mirror the legacy
+                // behaviour.)
+                self.rv_slt_rr(rd, rs1, rs2, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLT, rs1, rs2, rd);
+                (term, true, 0)
+            }
+            (0b0000000, 0b100) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Xor, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADD, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b101) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shr64, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLL, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0100000, 0b101) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Sar64, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLL, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b110) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Or, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADD, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b111) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::And, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADD, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            // M extension
+            (0b0000001, 0b000) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Mul, pc);
+                let term = self.feed_gas_rv(RV_KIND_MUL, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b001) => {
+                self.rv_mulh(rd, rs1, rs2, true, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_MULH, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b010) => {
+                self.rv_mulh(rd, rs1, rs2, true, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_MULHSU, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b011) => {
+                self.rv_mulh(rd, rs1, rs2, false, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_MULH, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b100) => {
+                self.rv_div_rem(rd, rs1, rs2, true, false, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b101) => {
+                self.rv_div_rem(rd, rs1, rs2, false, false, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b110) => {
+                self.rv_div_rem(rd, rs1, rs2, true, true, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b111) => {
+                self.rv_div_rem(rd, rs1, rs2, false, true, false, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            // Zbb inv / xnor / min / max
+            (0b0100000, 0b111) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Andn, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_INV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0100000, 0b110) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Orn, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_INV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0100000, 0b100) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Xnor, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_XNOR, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000101, 0b100) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Min, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_MINMAX, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000101, 0b101) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Minu, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_MINMAX, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000101, 0b110) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Max, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_MINMAX, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000101, 0b111) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Maxu, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_MINMAX, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0110000, 0b001) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Rol64, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_ROT, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0110000, 0b101) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Ror64, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_ROT, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            // Zba shift-add
+            (0b0010000, 0b010) => {
+                self.rv_shadd(rd, rs1, rs2, 1, false, pc);
+                self.record_scaledadd(rd, rs1, rs2, 1);
+                let term = self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0010000, 0b100) => {
+                self.rv_shadd(rd, rs1, rs2, 2, false, pc);
+                self.record_scaledadd(rd, rs1, rs2, 2);
+                let term = self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0010000, 0b110) => {
+                self.rv_shadd(rd, rs1, rs2, 3, false, pc);
+                self.record_scaledadd(rd, rs1, rs2, 3);
+                let term = self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            // Zbs
+            (0b0100100, 0b001) => {
+                self.rv_bit_rr(rd, rs1, rs2, BitOp::Clear, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBS, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0010100, 0b001) => {
+                self.rv_bit_rr(rd, rs1, rs2, BitOp::Set, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBS, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0110100, 0b001) => {
+                self.rv_bit_rr(rd, rs1, rs2, BitOp::Invert, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBS, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0100100, 0b101) => {
+                self.rv_bit_rr(rd, rs1, rs2, BitOp::Extract, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBS, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            // Zicond
+            (0b0000111, 0b101) => {
+                self.rv_czero(rd, rs1, rs2, Cc::E, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZICOND, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000111, 0b111) => {
+                self.rv_czero(rd, rs1, rs2, Cc::NE, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZICOND, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            // Zbb zext.h via pack rd, rs1, x0
+            (0b0000100, 0b100) if rs2 == 0 => {
+                self.rv_unary(rd, rs1, UnaryOp::ZextH, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_U1, rs1, 0, rd);
+                (term, false, 0)
+            }
+            _ => {
+                let _ = w;
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                (true, false, 0)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_op_32(
+        &mut self,
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        f3: u8,
+        f7: u8,
+        w: u32,
+        pc: u32,
+    ) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        match (f7, f3) {
+            (0b0000000, 0b000) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Addw, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0100000, 0b000) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Subw, pc);
+                let term = self.feed_gas_rv(RV_KIND_ADDW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b001) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shl32, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLLW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000000, 0b101) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Shr32, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLLW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0100000, 0b101) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Sar32, pc);
+                let term = self.feed_gas_rv(RV_KIND_SLLW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b000) => {
+                self.rv_alu_rr(rd, rs1, rs2, AluOp::Mulw, pc);
+                let term = self.feed_gas_rv(RV_KIND_MULW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b100) => {
+                self.rv_div_rem(rd, rs1, rs2, true, false, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b101) => {
+                self.rv_div_rem(rd, rs1, rs2, false, false, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b110) => {
+                self.rv_div_rem(rd, rs1, rs2, true, true, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000001, 0b111) => {
+                self.rv_div_rem(rd, rs1, rs2, false, true, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_DIV, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0110000, 0b001) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Rol32, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_ROTW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0110000, 0b101) => {
+                self.rv_shift_rr(rd, rs1, rs2, ShiftOp::Ror32, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBB_ROTW, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0000100, 0b000) => {
+                self.rv_adduw(rd, rs1, rs2, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0010000, 0b010) => {
+                self.rv_shadd(rd, rs1, rs2, 1, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0010000, 0b100) => {
+                self.rv_shadd(rd, rs1, rs2, 2, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            (0b0010000, 0b110) => {
+                self.rv_shadd(rd, rs1, rs2, 3, true, pc);
+                let term = self.feed_gas_rv(RV_KIND_ZBA, rs1, rs2, rd);
+                (term, false, 0)
+            }
+            _ => {
+                let _ = w;
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                (true, false, 0)
+            }
+        }
+    }
+
+    fn compile_lui(&mut self, rd: u8, w: u32, pc: u32, rest: &[u8]) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        let imm = imm_u(w);
+
+        // Lui→Add fusion: `lui rd, imm; add rd, rd, rs2` (4-byte) or the
+        // RVC equivalent `c.add rd, rs2` collapses into one `lea rd, [rs2 +
+        // imm]`. Only the same-rd Add case is fusable: if the Add writes a
+        // different register, the LUI value is still live and we can't skip
+        // its materialisation.
+        if rd != 0
+            && !rv_is_reserved(rd)
+            && let Some((op, a_rd, a_rs1, a_rs2, consumed)) = peek_alu_rr_trailer(rest)
+            && matches!(op, AluOp::Add)
+            && a_rd == rd
+        {
+            let other = if a_rs1 == rd {
+                Some(a_rs2)
+            } else if a_rs2 == rd {
+                Some(a_rs1)
+            } else {
+                None
+            };
+            if let Some(other) = other
+                && (other == 0 || !rv_is_reserved(other))
+            {
+                if let Some(d) = self.rv_dst(a_rd, pc) {
+                    if other == 0 {
+                        // `add rd, rd, x0` = identity → rd stays as the LUI
+                        // constant. Fall back to mov_ri64 + track_const so
+                        // subsequent addr-folding still works.
+                        self.asm.mov_ri64(d, imm as i64 as u64);
+                        self.track_const(a_rd, imm);
+                    } else {
+                        let base = REG_MAP[rv_slot(other).unwrap()];
+                        self.asm.lea(d, base, imm);
+                        self.invalidate_reg(rv_slot(a_rd).unwrap());
+                    }
+                }
+                self.feed_gas_rv(RV_KIND_LUI, 0, 0, rd);
+                self.feed_gas_rv(RV_KIND_ADD, a_rs1, a_rs2, a_rd);
+                // lea preserves CF in x86, but no RV-semantic Add was emitted
+                // — clear so downstream Sltu can't fuse against stale CF.
+                return (false, false, consumed);
+            }
+        }
+
+        self.rv_lui(rd, imm, pc);
+        self.track_const(rd, imm);
+        let term = self.feed_gas_rv(RV_KIND_LUI, 0, 0, rd);
+        (term, false, 0)
+    }
+
+    fn compile_jal(&mut self, rd: u8, w: u32, pc: u32) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        let imm = imm_j(w);
+        let next_pc = pc + 4;
+        self.rv_jal(rd, imm, pc, next_pc);
+        let term = self.feed_gas_rv(RV_KIND_JAL, 0, 0, rd);
+        (term, false, 0)
+    }
+
+    fn compile_branch(&mut self, rs1: u8, rs2: u8, f3: u8, w: u32, pc: u32) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        let imm = imm_b(w);
+        let next_pc = pc + 4;
+        let cc = match f3 {
+            0b000 => Cc::E,
+            0b001 => Cc::NE,
+            0b100 => Cc::L,
+            0b101 => Cc::GE,
+            0b110 => Cc::B,
+            0b111 => Cc::AE,
+            _ => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                return (true, false, 0);
+            }
+        };
+        self.rv_branch(rs1, rs2, imm, cc, pc, next_pc);
+        let term = self.feed_gas_rv(RV_KIND_BRANCH, rs1, rs2, 0);
+        (term, false, 0)
+    }
+
+    fn compile_custom_0(
+        &mut self,
+        rd: u8,
+        rs1: u8,
+        f3: u8,
+        w: u32,
+        pc: u32,
+    ) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        // PVM2 custom-0 encoding:
+        //   f3=000 → trap     (other fields ignored)
+        //   f3=001 → ecall.jar
+        //   f3=010 → ecalli imm
+        //   f3=011 → br_table table_id, rs1 (rd must be 0)
+        //   f3=100 → fallthrough (terminator no-op)
+        let next_pc = pc + 4;
+        match f3 {
+            0b000 => {
+                self.rv_trap(pc);
+                let term = self.feed_gas_rv(RV_KIND_TRAP, 0, 0, 0);
+                (term, false, 0)
+            }
+            0b001 => {
+                self.rv_ecall_jar(next_pc);
+                let term = self.feed_gas_rv(RV_KIND_ECALL_JAR, 0, 0, 0);
+                (term, false, 0)
+            }
+            0b010 => {
+                let imm = imm_i(w);
+                self.rv_ecalli(imm, next_pc);
+                let term = self.feed_gas_rv(RV_KIND_ECALLI, 0, 0, 0);
+                (term, false, 0)
+            }
+            0b011 => {
+                if rd != 0 {
+                    self.rv_emit_panic_at(pc);
+                    self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                    return (true, false, 0);
+                }
+                let table_id = ((w >> 20) & 0xFFF) as u16;
+                self.rv_br_table(table_id, rs1, pc, next_pc);
+                let term = self.feed_gas_rv(RV_KIND_BR_TABLE, rs1, 0, 0);
+                (term, false, 0)
+            }
+            0b100 => {
+                let term = self.feed_gas_rv(RV_KIND_FALLTHROUGH, 0, 0, 0);
+                (term, false, 0)
+            }
+            _ => {
+                self.rv_emit_panic_at(pc);
+                self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+                (true, false, 0)
+            }
+        }
+    }
+
+    /// Byte-based Mul-pair fusion: a 64-bit `mul rd1, rs1, rs2` followed
+    /// by `mulh`/`mulhu rd2, rs1, rs2` (same operand pair, different
+    /// destination) folds into a single x86 mul/imul that produces
+    /// RDX:RAX. Returns `Some(extra_bytes_consumed)` on success.
+    fn try_fuse_mul_pair_bytes(
+        &mut self,
+        m_rd: u8,
+        m_rs1: u8,
+        m_rs2: u8,
+        rest: &[u8],
+        _pc: u32,
+    ) -> Option<usize> {
+        use javm_exec::gas_cost::*;
+        if rest.len() < 4 {
+            return None;
+        }
+        let w2 = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+        // Mulh: f7=0000001 f3=001. Mulhu: f7=0000001 f3=011.
+        // Mask catches both: opcode 0x33 + f7=1 + (f3=001 or f3=011).
+        let signed = match w2 & 0xFE00_707F {
+            0x0200_1033 => true,  // Mulh
+            0x0200_3033 => false, // Mulhu
+            _ => return None,
+        };
+        let u_rd = ((w2 >> 7) & 0x1F) as u8;
+        let u_rs1 = ((w2 >> 15) & 0x1F) as u8;
+        let u_rs2 = ((w2 >> 20) & 0x1F) as u8;
+        if u_rs1 != m_rs1 || u_rs2 != m_rs2 || u_rd == m_rd {
+            return None;
+        }
+        if rv_is_reserved(m_rd) || rv_is_reserved(u_rd) {
+            return None;
+        }
+        if rv_is_reserved(m_rs1) || rv_is_reserved(m_rs2) {
+            return None;
+        }
+        let (rs1_slot, rs2_slot) = (rv_slot(m_rs1)?, rv_slot(m_rs2)?);
+        let (lo_slot, hi_slot) = (rv_slot(m_rd)?, rv_slot(u_rd)?);
+
+        let a = REG_MAP[rs1_slot];
+        let b = REG_MAP[rs2_slot];
+        let rd_lo = REG_MAP[lo_slot];
+        let rd_hi = REG_MAP[hi_slot];
+        let phi11 = REG_MAP[11];
+
+        let need_save_phi11 = rd_lo != phi11 && rd_hi != phi11;
+        if need_save_phi11 {
+            self.asm.push(phi11);
+        }
+        let mul_src = if b == phi11 {
+            if need_save_phi11 {
+                self.asm.mov_load64(SCRATCH, Reg::RSP, 0);
+            } else {
+                self.asm.mov_rr(SCRATCH, b);
+            }
+            SCRATCH
+        } else {
+            b
+        };
+        if a != phi11 {
+            self.asm.mov_rr(phi11, a);
+        }
+        if signed {
+            self.asm.imul_rdx_rax(mul_src);
+        } else {
+            self.asm.mul_rdx_rax(mul_src);
+        }
+        if rd_lo != phi11 {
+            self.asm.mov_rr(rd_lo, phi11);
+        }
+        if rd_hi != Reg::RDX {
+            self.asm.mov_rr(rd_hi, Reg::RDX);
+        }
+        if need_save_phi11 {
+            self.asm.pop(phi11);
+        }
+
+        self.invalidate_reg(lo_slot);
+        self.invalidate_reg(hi_slot);
+        self.last_add_cf = None;
+
+        // Feed gas for both consumed instructions (Mul + Mulh/Mulhu).
+        // Both Mulh and Mulhu use RV_KIND_MULH per the gas table.
+        let _ = signed;
+        self.feed_gas_rv(RV_KIND_MUL, m_rs1, m_rs2, m_rd);
+        self.feed_gas_rv(RV_KIND_MULH, u_rs1, u_rs2, u_rd);
+
+        Some(4)
+    }
+
+    // ----------------------------------------------------------------
+    // RV-side helpers — resolve x0/x3/x4 aliases and call through asm.
+    // ----------------------------------------------------------------
+
+    /// Read RV source register into `dst_reg`. x0 → load 0; x3/x4 → panic.
+    fn rv_read(&mut self, rs: u8, dst_reg: Reg, pc: u32) {
+        if rs == 0 {
+            self.asm.mov_ri64(dst_reg, 0);
+        } else if rv_is_reserved(rs) {
+            self.rv_emit_panic_at(pc);
+        } else {
+            self.asm.mov_rr(dst_reg, REG_MAP[rv_slot(rs).unwrap()]);
+        }
+    }
+
+    /// Return the x86 register holding rs's value. For x0, materialise 0
+    /// into `scratch` and return `scratch`.
+    fn rv_read_into(&mut self, rs: u8, scratch: Reg, pc: u32) -> Reg {
+        if rs == 0 {
+            self.asm.mov_ri64(scratch, 0);
+            scratch
+        } else if rv_is_reserved(rs) {
+            self.rv_emit_panic_at(pc);
+            scratch
+        } else {
+            REG_MAP[rv_slot(rs).unwrap()]
+        }
+    }
+
+    /// Resolve an RV destination register. None when rd == x0 (discard).
+    /// x3/x4 emit a panic and return None.
+    fn rv_dst(&mut self, rd: u8, pc: u32) -> Option<Reg> {
+        if rd == 0 {
+            None
+        } else if rv_is_reserved(rd) {
+            self.rv_emit_panic_at(pc);
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rd).unwrap()])
+        }
+    }
+
+    // ---- LUI ---------------------------------------------------------
+
+    fn rv_lui(&mut self, rd: u8, imm: i32, pc: u32) {
+        if let Some(d) = self.rv_dst(rd, pc) {
+            // imm has bits in [31:12]; sign-extend to 64.
+            self.asm.mov_ri64(d, imm as i64 as u64);
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    // ---- Loads / stores ---------------------------------------------
+
+    fn rv_load(&mut self, rd: u8, rs1: u8, imm: i32, width: u32, signed: bool, pc: u32) {
+        if rv_is_reserved(rd) || rv_is_reserved(rs1) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        self.rv_addr_to_scratch(rs1, imm, pc);
+        let fn_addr = match width {
+            1 => self.helpers.mem_read_u8,
+            2 => self.helpers.mem_read_u16,
+            4 => self.helpers.mem_read_u32,
+            _ => self.helpers.mem_read_u64,
+        };
+        let dst = match self.rv_dst(rd, pc) {
+            Some(r) => r,
+            None => SCRATCH, // x0: load discarded but trap-on-OOB still fires
+        };
+        self.emit_mem_read_sized(dst, fn_addr, width, pc);
+        if signed && width < 8 && rd != 0 {
+            match width {
+                1 => self.asm.movsx_8_64(dst, dst),
+                2 => self.asm.movsx_16_64(dst, dst),
+                4 => self.asm.movsxd(dst, dst),
+                _ => {}
+            }
+        }
+        if rd != 0 {
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    fn rv_store(&mut self, rs1: u8, rs2: u8, imm: i32, width: u32, pc: u32) {
+        if rv_is_reserved(rs1) || rv_is_reserved(rs2) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        let fn_addr = match width {
+            1 => self.helpers.mem_write_u8,
+            2 => self.helpers.mem_write_u16,
+            4 => self.helpers.mem_write_u32,
+            _ => self.helpers.mem_write_u64,
+        };
+        if rs2 == 0 {
+            // Materialise 0 into a temp register so SCRATCH can hold the
+            // addr. Compute the address FIRST — rs1 might map to RAX
+            // (x14), in which case clobbering RAX before reading rs1
+            // would feed the address calc the wrong value.
+            self.rv_addr_to_scratch(rs1, imm, pc);
+            self.asm.push(Reg::RAX);
+            self.asm.mov_ri64(Reg::RAX, 0);
+            self.emit_mem_write(true, Reg::RAX, fn_addr, pc);
+            self.asm.pop(Reg::RAX);
+        } else {
+            let val = REG_MAP[rv_slot(rs2).unwrap()];
+            self.rv_addr_to_scratch(rs1, imm, pc);
+            self.emit_mem_write(true, val, fn_addr, pc);
+        }
+    }
+
+    /// Build `addr = (rs1 + imm) & 0xFFFFFFFF` into SCRATCH.
+    fn rv_addr_to_scratch(&mut self, rs1: u8, imm: i32, pc: u32) {
+        use super::codegen::RegDef;
+        if rs1 == 0 {
+            self.asm.mov_ri32(SCRATCH, imm as u32);
+            return;
+        }
+        if rv_is_reserved(rs1) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        // Ported from PVM's emit_addr_to_scratch peephole: fold a known
+        // constant address (set by `addi rd, x0, imm` / `lui`) directly
+        // into the immediate, skipping the lea/movzx entirely.
+        let slot = rv_slot(rs1).unwrap();
+        if let RegDef::Const(addr) = self.reg_defs[slot] {
+            let effective = addr.wrapping_add(imm as u32);
+            self.asm.mov_ri32(SCRATCH, effective);
+            return;
+        }
+        // Use SIB addressing for scaled-index patterns when imm == 0
+        // (sh{1,2,3}add or slli+add chains tracked via reg_defs).
+        // Tracking guarantees rd didn't alias rs1/rs2 (record_scaledadd
+        // refuses self-referential defs), so base/idx still hold their
+        // pre-emit values at the consumer site.
+        if imm == 0
+            && let RegDef::ScaledAdd { base, idx, shift } = self.reg_defs[slot]
+        {
+            self.asm
+                .lea_sib_scaled_32(SCRATCH, REG_MAP[base], REG_MAP[idx], shift);
+            return;
+        }
+        let base = REG_MAP[slot];
+        if imm != 0 {
+            self.asm.lea_32(SCRATCH, base, imm);
+        } else {
+            self.asm.movzx_32_64(SCRATCH, base);
+        }
+    }
+
+    // ---- ALU --------------------------------------------------------
+
+    fn rv_alu_imm(&mut self, rd: u8, rs1: u8, imm: i32, op: AluImmOp, pc: u32) {
+        let Some(d) = self.rv_dst(rd, pc) else { return };
+        // Phase 5: `addi rd, x0, imm` is the canonical RV "li" form. The
+        // generic path would emit `xor d, d; add d, imm` (2 ops); we can
+        // do it as a single sign-extended move.
+        if rs1 == 0 && matches!(op, AluImmOp::Add) {
+            self.asm.mov_ri64(d, imm as i64 as u64);
+            self.invalidate_reg(rv_slot(rd).unwrap());
+            return;
+        }
+        self.rv_read(rs1, d, pc);
+        match op {
+            AluImmOp::Add => self.asm.add_ri(d, imm),
+            AluImmOp::And => self.asm.and_ri(d, imm),
+            AluImmOp::Or => self.asm.or_ri(d, imm),
+            AluImmOp::Xor => self.asm.xor_ri(d, imm),
+            AluImmOp::Addw => {
+                self.asm.add_ri32(d, imm);
+                self.asm.movsxd(d, d);
+            }
+        }
+        if rd != 0 {
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    fn rv_alu_rr(&mut self, rd: u8, rs1: u8, rs2: u8, op: AluOp, pc: u32) {
+        let Some(d) = self.rv_dst(rd, pc) else { return };
+        if rv_is_reserved(rs1) || rv_is_reserved(rs2) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        // Phase 5: `add rd, rs, x0` / `add rd, x0, rs` — canonical RV `mv`.
+        // Generic path emits `mov SCRATCH, 0; mov d, rs; add d, SCRATCH`
+        // (or `xor d, d; add d, rs`); the single `mov d, rs` (with rs2=x0
+        // src=rs1, or vice versa) is one op. mov_rr doesn't touch CF.
+        //
+        // This path bypasses the Phase 4 last_add_cf set at the bottom,
+        // and the main-loop clearing keeps last_add_cf alive across the
+        // Add instruction. If the mv's rd was the previous add's D/A/B,
+        // the carry handoff is no longer meaningful — clear conservatively.
+        if matches!(op, AluOp::Add) && (rs1 == 0 || rs2 == 0) {
+            let src = if rs1 == 0 { rs2 } else { rs1 };
+            self.rv_read(src, d, pc);
+            self.invalidate_reg(rv_slot(rd).unwrap());
+            self.last_add_cf = None;
+            return;
+        }
+        // PVM-ported peephole: `sub rd, rs1, rs2` where rd_slot == rs2_slot
+        // and rs1 != rs2. Generic path snapshots rs2 to SCRATCH (because d
+        // aliases rs2), then mov d, rs1, then sub d, SCRATCH — 3 ops.
+        // We can compute the same result as `neg d; add d, rs1` in 2 ops
+        // since d already holds rs2's value.
+        if matches!(op, AluOp::Sub) && rs1 != 0 && rs2 != 0 && rs1 != rs2 {
+            let r1_x86 = REG_MAP[rv_slot(rs1).unwrap()];
+            let r2_x86 = REG_MAP[rv_slot(rs2).unwrap()];
+            if d == r2_x86 {
+                self.asm.neg64(d);
+                self.asm.add_rr(d, r1_x86);
+                self.invalidate_reg(rv_slot(rd).unwrap());
+                self.last_add_cf = None;
+                return;
+            }
+        }
+        // Aliasing analysis: rv_read(rs1, d) might write d, which can
+        // clobber rs2's value if rd's slot equals rs2's slot. Save rs2
+        // into SCRATCH first whenever d aliases rs2 (and rs2 != rs1).
+        // x0 is handled specially since it has no mapped register.
+        let r1_is_x0 = rs1 == 0;
+        let r2_is_x0 = rs2 == 0;
+        let r1 = if r1_is_x0 {
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rs1).unwrap()])
+        };
+        let r2 = if r2_is_x0 {
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rs2).unwrap()])
+        };
+
+        let b_reg = if r2_is_x0 {
+            // rs2 == 0: materialise 0 in SCRATCH. rv_read of rs1 below
+            // won't touch SCRATCH (mov_rr / mov_ri64).
+            self.asm.mov_ri64(SCRATCH, 0);
+            SCRATCH
+        } else if Some(d) == r2 && r1 != r2 {
+            // d aliases r2 and rs1 != rs2 — rv_read(rs1, d) would
+            // clobber rs2. Snapshot rs2 into SCRATCH first.
+            self.asm.mov_rr(SCRATCH, r2.unwrap());
+            SCRATCH
+        } else {
+            r2.unwrap()
+        };
+        // Now safe to load rs1 into d.
+        self.rv_read(rs1, d, pc);
+        self.apply_alu_op(op, d, b_reg);
+        if rd != 0 {
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+        // Phase 4: record carry-flag handoff. Only 64-bit `add` sets CF
+        // in a way that matches a subsequent `sltu rd, rs1, rs2` checking
+        // unsigned overflow of rs1+rs2. Addw operates on the 32-bit view
+        // and sign-extends — CF reflects 32-bit overflow, not 64-bit,
+        // so a 64-bit sltu against the sign-extended sum would be wrong.
+        // Skip x0 source/dest cases: degenerate, not worth tracking.
+        if matches!(op, AluOp::Add)
+            && rd != 0
+            && rs1 != 0
+            && rs2 != 0
+            && let (Some(d_s), Some(a_s), Some(b_s)) = (rv_slot(rd), rv_slot(rs1), rv_slot(rs2))
+        {
+            self.last_add_cf = Some((d_s, a_s, b_s));
+        }
+    }
+
+    fn apply_alu_op(&mut self, op: AluOp, d: Reg, s: Reg) {
+        match op {
+            AluOp::Add => self.asm.add_rr(d, s),
+            AluOp::Sub => self.asm.sub_rr(d, s),
+            AluOp::And => self.asm.and_rr(d, s),
+            AluOp::Or => self.asm.or_rr(d, s),
+            AluOp::Xor => self.asm.xor_rr(d, s),
+            AluOp::Mul => self.asm.imul_rr(d, s),
+            AluOp::Addw => {
+                self.asm.add_rr32(d, s);
+                self.asm.movsxd(d, d);
+            }
+            AluOp::Subw => {
+                self.asm.sub_rr32(d, s);
+                self.asm.movsxd(d, d);
+            }
+            AluOp::Mulw => {
+                self.asm.imul_rr32(d, s);
+                self.asm.movsxd(d, d);
+            }
+            AluOp::Min => {
+                self.asm.cmp_rr(d, s);
+                self.asm.cmovcc(Cc::G, d, s);
+            }
+            AluOp::Max => {
+                self.asm.cmp_rr(d, s);
+                self.asm.cmovcc(Cc::L, d, s);
+            }
+            AluOp::Minu => {
+                self.asm.cmp_rr(d, s);
+                self.asm.cmovcc(Cc::A, d, s);
+            }
+            AluOp::Maxu => {
+                self.asm.cmp_rr(d, s);
+                self.asm.cmovcc(Cc::B, d, s);
+            }
+            AluOp::Andn => {
+                self.asm.mov_rr(SCRATCH, s);
+                self.asm.not64(SCRATCH);
+                self.asm.and_rr(d, SCRATCH);
+            }
+            AluOp::Orn => {
+                self.asm.mov_rr(SCRATCH, s);
+                self.asm.not64(SCRATCH);
+                self.asm.or_rr(d, SCRATCH);
+            }
+            AluOp::Xnor => {
+                self.asm.xor_rr(d, s);
+                self.asm.not64(d);
+            }
+        }
+    }
+
+    fn rv_slt_imm(&mut self, rd: u8, rs1: u8, imm: i32, signed: bool, pc: u32) {
+        let Some(d) = self.rv_dst(rd, pc) else { return };
+        if rv_is_reserved(rs1) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        // Snapshot rs1 into SCRATCH if d aliases its register — zeroing
+        // d below would otherwise clobber rs1 before the cmp.
+        let src = if rs1 == 0 {
+            self.asm.mov_ri64(SCRATCH, 0);
+            SCRATCH
+        } else {
+            let r1 = REG_MAP[rv_slot(rs1).unwrap()];
+            if d == r1 {
+                self.asm.mov_rr(SCRATCH, r1);
+                SCRATCH
+            } else {
+                r1
+            }
+        };
+        // Zero d FIRST (mov_ri64 with 0 uses XOR → clobbers flags).
+        // Then cmp sets flags fresh for setcc.
+        self.asm.mov_ri64(d, 0);
+        self.asm.cmp_ri(src, imm);
+        self.asm.setcc(if signed { Cc::L } else { Cc::B }, d);
+        if rd != 0 {
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    fn rv_slt_rr(&mut self, rd: u8, rs1: u8, rs2: u8, signed: bool, pc: u32) {
+        let Some(d) = self.rv_dst(rd, pc) else { return };
+        if rv_is_reserved(rs1) || rv_is_reserved(rs2) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        // Phase 4: carry-flag fast path for `sltu d, rs1, rs2` immediately
+        // following `add rs1, A, B` (with rs2 ∈ {A, B}). CF already holds
+        // the unsigned-overflow bit, so we skip the cmp and emit just
+        // `setb d` + zero-extension. Mirrors PVM's SetLtU fusion.
+        //
+        // If the conditions don't match, the general path below emits
+        // `mov_ri64(d, 0); cmp; setcc` — the first of which clobbers CF
+        // via xor. last_add_cf is single-shot: cleared on entry to keep
+        // any *subsequent* sltu from reading the (now-stale) add flags.
+        if !signed && let Some((add_d, add_a, add_b)) = self.last_add_cf {
+            let rs1_s = rv_slot(rs1);
+            let rs2_s = rv_slot(rs2);
+            let rd_s = rv_slot(rd);
+            if let (Some(rs1_s), Some(rs2_s), Some(rd_s)) = (rs1_s, rs2_s, rd_s)
+                && rs1_s == add_d
+                && rs2_s != add_d
+                && (rs2_s == add_a || rs2_s == add_b)
+                && rd_s != rs2_s
+            {
+                // CF is valid. Zero d first via mov_ri32 (`mov r32, 0`,
+                // no flag effect), then setb writes the low byte. This
+                // avoids the partial-register dependency that a bare
+                // `setcc; movzx` sequence would create.
+                self.asm.mov_ri32(d, 0);
+                self.asm.setcc(Cc::B, d);
+                self.invalidate_reg(rd_s);
+                // setb/movzx don't touch CF — a *further* consecutive sltu
+                // against the same add still has the live carry available,
+                // so leave last_add_cf intact.
+                return;
+            }
+        }
+        // Fell through: the general path below clobbers CF. Clear the
+        // tracked carry so a subsequent sltu doesn't fuse spuriously.
+        self.last_add_cf = None;
+        // Snapshot operands into SCRATCH and/or read original mapped
+        // registers BEFORE touching d. Zero d up front; the cmp below
+        // sets flags fresh for the setcc.
+        let r1 = if rs1 == 0 {
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rs1).unwrap()])
+        };
+        let r2 = if rs2 == 0 {
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rs2).unwrap()])
+        };
+        // Choose registers for a and b without writing d yet.
+        // Strategy: if d aliases r1 or r2, snapshot one of them to
+        // SCRATCH. We only have one SCRATCH (RDX) so handle carefully.
+        let (a_reg, b_reg) = match (r1, r2) {
+            (Some(ra), Some(rb)) => {
+                if d == ra && d == rb {
+                    // Both r1 and r2 are d. cmp d, d → ZF=1 always; SLT=0.
+                    (ra, rb)
+                } else if d == ra {
+                    // We'll write d = 0 then load a into d. But that
+                    // overwrites b if d == ra... wait, ra is d. Snapshot
+                    // ra into SCRATCH BEFORE zeroing d.
+                    self.asm.mov_rr(SCRATCH, ra);
+                    (SCRATCH, rb)
+                } else if d == rb {
+                    self.asm.mov_rr(SCRATCH, rb);
+                    (ra, SCRATCH)
+                } else {
+                    (ra, rb)
+                }
+            }
+            (None, Some(rb)) => {
+                // a is x0. result = (0 < rb), i.e. (rb > 0) signed or
+                // (rb != 0) unsigned. Cc::G == "ZF=0 && SF=0" after a
+                // test against self (OF=0), so it captures rb > 0
+                // signed; Cc::A == "ZF=0" after the same test, capturing
+                // rb != 0 (= 0 < rb unsigned).
+                if d == rb {
+                    // Snapshot rb (d will be clobbered to receive the
+                    // setcc byte). mov_rr does not clobber flags but we
+                    // haven't set them yet; the test_rr below sets fresh
+                    // flags after mov_ri64 (which uses XOR and clobbers
+                    // flags). Order matters.
+                    self.asm.mov_rr(SCRATCH, rb);
+                    self.asm.mov_ri64(d, 0);
+                    self.asm.test_rr(SCRATCH, SCRATCH);
+                    self.asm.setcc(if signed { Cc::G } else { Cc::A }, d);
+                    if rd != 0 {
+                        self.invalidate_reg(rv_slot(rd).unwrap());
+                    }
+                    return;
+                } else {
+                    self.asm.mov_ri64(d, 0);
+                    self.asm.test_rr(rb, rb);
+                    self.asm.setcc(if signed { Cc::G } else { Cc::A }, d);
+                    if rd != 0 {
+                        self.invalidate_reg(rv_slot(rd).unwrap());
+                    }
+                    return;
+                }
+            }
+            (Some(ra), None) => {
+                // b is x0.
+                if d == ra {
+                    self.asm.mov_rr(SCRATCH, ra);
+                    self.asm.mov_ri64(d, 0);
+                    self.asm.cmp_ri(SCRATCH, 0);
+                    self.asm.setcc(if signed { Cc::L } else { Cc::B }, d);
+                    if rd != 0 {
+                        self.invalidate_reg(rv_slot(rd).unwrap());
+                    }
+                    return;
+                } else {
+                    // cmp ra, 0 — no need for SCRATCH.
+                    self.asm.mov_ri64(d, 0);
+                    self.asm.cmp_ri(ra, 0);
+                    self.asm.setcc(if signed { Cc::L } else { Cc::B }, d);
+                    if rd != 0 {
+                        self.invalidate_reg(rv_slot(rd).unwrap());
+                    }
+                    return;
+                }
+            }
+            (None, None) => {
+                // x0 < x0 — always false; d = 0.
+                self.asm.mov_ri64(d, 0);
+                if rd != 0 {
+                    self.invalidate_reg(rv_slot(rd).unwrap());
+                }
+                return;
+            }
+        };
+        // a_reg and b_reg now point at the actual values.
+        self.asm.mov_ri64(d, 0);
+        self.asm.cmp_rr(a_reg, b_reg);
+        self.asm.setcc(if signed { Cc::L } else { Cc::B }, d);
+        if rd != 0 {
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    // ---- Shifts -----------------------------------------------------
+
+    fn rv_shift_imm(&mut self, rd: u8, rs1: u8, shamt: u8, op: ShiftOp, pc: u32) {
+        let Some(d) = self.rv_dst(rd, pc) else { return };
+        self.rv_read(rs1, d, pc);
+        match op {
+            ShiftOp::Shl64 => self.asm.shl_ri64(d, shamt & 63),
+            ShiftOp::Shr64 => self.asm.shr_ri64(d, shamt & 63),
+            ShiftOp::Sar64 => self.asm.sar_ri64(d, shamt & 63),
+            ShiftOp::Shl32 => {
+                self.asm.shl_ri32(d, shamt & 31);
+                self.asm.movsxd(d, d);
+            }
+            ShiftOp::Shr32 => {
+                self.asm.movzx_32_64(d, d);
+                self.asm.shr_ri32(d, shamt & 31);
+                self.asm.movsxd(d, d);
+            }
+            ShiftOp::Sar32 => {
+                self.asm.sar_ri32(d, shamt & 31);
+                self.asm.movsxd(d, d);
+            }
+            ShiftOp::Ror64 => self.asm.ror_ri64(d, shamt & 63),
+            ShiftOp::Ror32 => {
+                self.asm.movzx_32_64(d, d);
+                self.asm.ror_ri32(d, shamt & 31);
+                self.asm.movsxd(d, d);
+            }
+            ShiftOp::Rol64 | ShiftOp::Rol32 => {
+                // No imm-rol instruction in PVM2 — should not reach.
+                self.rv_emit_panic_at(pc);
+            }
+        }
+        if rd != 0 {
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    fn rv_shift_rr(&mut self, rd: u8, rs1: u8, rs2: u8, op: ShiftOp, pc: u32) {
+        let Some(d) = self.rv_dst(rd, pc) else { return };
+        if rv_is_reserved(rs1) || rv_is_reserved(rs2) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        // Snapshot rs2 to SCRATCH if d would clobber it.
+        let r2 = if rs2 == 0 {
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rs2).unwrap()])
+        };
+        let r1 = if rs1 == 0 {
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rs1).unwrap()])
+        };
+        let shift_src = if rs2 == 0 {
+            self.asm.mov_ri64(SCRATCH, 0);
+            SCRATCH
+        } else if Some(d) == r2 && r1 != r2 {
+            self.asm.mov_rr(SCRATCH, r2.unwrap());
+            SCRATCH
+        } else {
+            r2.unwrap()
+        };
+        self.rv_read(rs1, d, pc);
+        let sub_op: u8 = match op {
+            ShiftOp::Shl64 | ShiftOp::Shl32 => 4,
+            ShiftOp::Shr64 | ShiftOp::Shr32 => 5,
+            ShiftOp::Sar64 | ShiftOp::Sar32 => 7,
+            ShiftOp::Rol64 | ShiftOp::Rol32 => 0,
+            ShiftOp::Ror64 | ShiftOp::Ror32 => 1,
+        };
+        let is_32 = matches!(
+            op,
+            ShiftOp::Shl32 | ShiftOp::Shr32 | ShiftOp::Sar32 | ShiftOp::Rol32 | ShiftOp::Ror32
+        );
+        if is_32 {
+            if matches!(op, ShiftOp::Shr32 | ShiftOp::Ror32) {
+                self.asm.movzx_32_64(d, d);
+            }
+            self.emit_shift_by_reg32(d, shift_src, sub_op);
+            self.asm.movsxd(d, d);
+        } else {
+            self.emit_shift_by_reg64(d, shift_src, sub_op);
+        }
+        if rd != 0 {
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    // ---- Multiply-high ----------------------------------------------
+
+    fn rv_mulh(&mut self, rd: u8, rs1: u8, rs2: u8, a_signed: bool, b_signed: bool, pc: u32) {
+        let Some(d) = self.rv_dst(rd, pc) else { return };
+        if rv_is_reserved(rs1) || rv_is_reserved(rs2) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        // Spill RAX (if d != RAX) and materialise both operands.
+        let save_rax = d != Reg::RAX;
+        let r2_mapped = if rs2 == 0 {
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rs2).unwrap()])
+        };
+        // Snapshot rs2 into SCRATCH up-front if rs2 maps to RAX (x14) —
+        // we're about to clobber RAX. This covers both save_rax=true
+        // (where RAX is also on stack, but reading from stack costs a
+        // load) and save_rax=false (where RAX is the only live copy of
+        // both rs2 and rd; we must capture rs2 before the load of rs1).
+        let snapshot_rs2 = r2_mapped == Some(Reg::RAX);
+        if snapshot_rs2 {
+            self.asm.mov_rr(SCRATCH, Reg::RAX);
+        }
+        if save_rax {
+            self.asm.push(Reg::RAX);
+        }
+        // Load rs1 into RAX.
+        if rs1 == 0 {
+            self.asm.mov_ri64(Reg::RAX, 0);
+        } else {
+            let r1 = REG_MAP[rv_slot(rs1).unwrap()];
+            if r1 != Reg::RAX {
+                self.asm.mov_rr(Reg::RAX, r1);
+            }
+            // If r1 == RAX but we saved RAX, the value is on stack — reload.
+            if r1 == Reg::RAX && save_rax {
+                self.asm.mov_load64(Reg::RAX, Reg::RSP, 0);
+            }
+        }
+        // b is a mapped reg or 0; if 0, materialise into SCRATCH.
+        let b_reg = if rs2 == 0 {
+            self.asm.mov_ri64(SCRATCH, 0);
+            SCRATCH
+        } else if snapshot_rs2 {
+            // rs2 already snapshotted into SCRATCH above.
+            SCRATCH
+        } else {
+            r2_mapped.unwrap()
+        };
+        if a_signed && b_signed {
+            self.asm.imul_rdx_rax(b_reg);
+        } else if !a_signed && !b_signed {
+            self.asm.mul_rdx_rax(b_reg);
+        } else {
+            // mulhsu: hi = unsigned_mul_hi(a, b) - (a < 0 ? b : 0).
+            self.asm.push(b_reg);
+            self.asm.push(Reg::RAX); // save a for sign check
+            self.asm.mul_rdx_rax(b_reg);
+            self.asm.pop(Reg::RAX); // a (signed)
+            let skip = self.asm.new_label();
+            self.asm.test_rr(Reg::RAX, Reg::RAX);
+            self.asm.jcc_label(Cc::NS, skip);
+            self.asm.pop(Reg::RAX); // pop saved b
+            self.asm.sub_rr(SCRATCH, Reg::RAX);
+            let done = self.asm.new_label();
+            self.asm.jmp_label(done);
+            self.asm.bind_label(skip);
+            self.asm.add_ri(Reg::RSP, 8); // discard saved b
+            self.asm.bind_label(done);
+        }
+        // High word in RDX (SCRATCH).
+        if save_rax {
+            self.asm.mov_rr(d, SCRATCH);
+            self.asm.pop(Reg::RAX);
+        } else {
+            self.asm.mov_rr(Reg::RAX, SCRATCH);
+        }
+        if rd != 0 {
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    // ---- Division / remainder ---------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    fn rv_div_rem(
+        &mut self,
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        signed: bool,
+        remainder: bool,
+        is_32bit: bool,
+        pc: u32,
+    ) {
+        let Some(d) = self.rv_dst(rd, pc) else { return };
+        if rv_is_reserved(rs1) || rv_is_reserved(rs2) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        // ---- prologue (push spills once; both branches share a single
+        // cleanup epilogue at `join`) ----
+        let save_rax = d != Reg::RAX;
+        if save_rax {
+            self.asm.push(Reg::RAX);
+        }
+        // RCX is spilled when rs2 maps to nothing (x0) — we materialise
+        // 0 into RCX — or when rs2 maps to RAX (we move the divisor to
+        // RCX before loading the dividend into RAX).
+        let r2 = if rs2 == 0 {
+            None
+        } else {
+            Some(REG_MAP[rv_slot(rs2).unwrap()])
+        };
+        let spilled_rcx = rs2 == 0 || r2 == Some(Reg::RAX);
+        if spilled_rcx {
+            self.asm.push(Reg::RCX);
+        }
+        // Determine the divisor register (b_reg).
+        let b_reg = if rs2 == 0 {
+            self.asm.mov_ri64(Reg::RCX, 0);
+            Reg::RCX
+        } else if r2 == Some(Reg::RAX) {
+            // rs2 mapped to RAX (x14). Get its value into RCX.
+            if save_rax {
+                // RAX was pushed first, RCX next. RSP+8 holds saved RAX.
+                self.asm.mov_load64(Reg::RCX, Reg::RSP, 8);
+            } else {
+                // RAX wasn't pushed (d == RAX) — rs2's value is still
+                // live in RAX. Snapshot to RCX before we load rs1 below.
+                self.asm.mov_rr(Reg::RCX, Reg::RAX);
+            }
+            Reg::RCX
+        } else {
+            r2.unwrap()
+        };
+        // Load dividend (a) into RAX.
+        if rs1 == 0 {
+            self.asm.mov_ri64(Reg::RAX, 0);
+        } else {
+            let r1 = REG_MAP[rv_slot(rs1).unwrap()];
+            if r1 == Reg::RAX {
+                if save_rax {
+                    let off = if spilled_rcx { 8 } else { 0 };
+                    self.asm.mov_load64(Reg::RAX, Reg::RSP, off);
+                }
+                // else: already in RAX.
+            } else {
+                self.asm.mov_rr(Reg::RAX, r1);
+            }
+        }
+        // ---- branch on divisor == 0 ----
+        self.asm.test_rr(b_reg, b_reg);
+        let nonzero = self.asm.new_label();
+        let join = self.asm.new_label();
+        self.asm.jcc_label(Cc::NE, nonzero);
+        // Divisor == 0: div → -1 (all-ones); remainder → dividend.
+        if remainder {
+            if d != Reg::RAX {
+                self.asm.mov_rr(d, Reg::RAX);
+            }
+            if is_32bit {
+                self.asm.movsxd(d, d);
+            }
+        } else {
+            self.asm.mov_ri64(d, u64::MAX);
+            // u64::MAX is sign-extended -1 in both 32/64-bit views.
+        }
+        self.asm.jmp_label(join);
+
+        // ---- nonzero branch: real DIV/IDIV ----
+        self.asm.bind_label(nonzero);
+        if is_32bit {
+            if signed {
+                self.asm.movsxd(Reg::RAX, Reg::RAX);
+                self.asm.cdq();
+                self.asm.idiv32(b_reg);
+            } else {
+                self.asm.movzx_32_64(Reg::RAX, Reg::RAX);
+                self.asm.mov_ri64(SCRATCH, 0);
+                self.asm.div32(b_reg);
+            }
+        } else if signed {
+            self.asm.cqo();
+            self.asm.idiv64(b_reg);
+        } else {
+            self.asm.mov_ri64(SCRATCH, 0);
+            self.asm.div64(b_reg);
+        }
+        let result_reg = if remainder { SCRATCH } else { Reg::RAX };
+        if d != result_reg {
+            self.asm.mov_rr(d, result_reg);
+        }
+        if is_32bit {
+            self.asm.movsxd(d, d);
+        }
+
+        // ---- single epilogue ----
+        self.asm.bind_label(join);
+        if spilled_rcx {
+            self.asm.pop(Reg::RCX);
+        }
+        if save_rax {
+            self.asm.pop(Reg::RAX);
+        }
+        if rd != 0 {
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    // ---- Unary ops (Zbb) --------------------------------------------
+
+    fn rv_unary(&mut self, rd: u8, rs1: u8, op: UnaryOp, pc: u32) {
+        let Some(d) = self.rv_dst(rd, pc) else { return };
+        let src = if rs1 == 0 {
+            self.asm.mov_ri64(SCRATCH, 0);
+            SCRATCH
+        } else if rv_is_reserved(rs1) {
+            self.rv_emit_panic_at(pc);
+            return;
+        } else {
+            REG_MAP[rv_slot(rs1).unwrap()]
+        };
+        match op {
+            UnaryOp::Clz64 => self.asm.lzcnt64(d, src),
+            UnaryOp::Clz32 => self.asm.lzcnt32(d, src),
+            UnaryOp::Ctz64 => self.asm.tzcnt64(d, src),
+            UnaryOp::Ctz32 => self.asm.tzcnt32(d, src),
+            UnaryOp::Popcnt64 => self.asm.popcnt64(d, src),
+            UnaryOp::Popcnt32 => self.asm.popcnt32(d, src),
+            UnaryOp::SextB => self.asm.movsx_8_64(d, src),
+            UnaryOp::SextH => self.asm.movsx_16_64(d, src),
+            UnaryOp::ZextH => self.asm.movzx_16_64(d, src),
+            UnaryOp::Rev8 => {
+                if d != src {
+                    self.asm.mov_rr(d, src);
+                }
+                self.asm.bswap64(d);
+            }
+            UnaryOp::OrcB => {
+                // orc.b: byte-wise OR-combine. Each byte becomes 0xFF if
+                // any bit was set in the source byte, else 0x00. No
+                // single x86 instruction; emulate or panic in Phase 1.
+                self.rv_emit_panic_at(pc);
+            }
+        }
+        if rd != 0 {
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    // ---- Zba shift-add ----------------------------------------------
+
+    fn rv_shadd(&mut self, rd: u8, rs1: u8, rs2: u8, shift: u8, uw: bool, pc: u32) {
+        let Some(d) = self.rv_dst(rd, pc) else { return };
+        if rv_is_reserved(rs1) || rv_is_reserved(rs2) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        // SCRATCH = (zext32 if uw else val)(rs1) << shift
+        if rs1 == 0 {
+            self.asm.mov_ri64(SCRATCH, 0);
+        } else {
+            let r1 = REG_MAP[rv_slot(rs1).unwrap()];
+            if uw {
+                self.asm.movzx_32_64(SCRATCH, r1);
+            } else {
+                self.asm.mov_rr(SCRATCH, r1);
+            }
+        }
+        self.asm.shl_ri64(SCRATCH, shift);
+        // d = rs2; d += SCRATCH
+        if rs2 == 0 {
+            self.asm.mov_ri64(d, 0);
+        } else {
+            let r2 = REG_MAP[rv_slot(rs2).unwrap()];
+            if d != r2 {
+                self.asm.mov_rr(d, r2);
+            }
+        }
+        self.asm.add_rr(d, SCRATCH);
+        if rd != 0 {
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    fn rv_adduw(&mut self, rd: u8, rs1: u8, rs2: u8, pc: u32) {
+        let Some(d) = self.rv_dst(rd, pc) else { return };
+        if rv_is_reserved(rs1) || rv_is_reserved(rs2) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        if rs1 == 0 {
+            self.asm.mov_ri64(SCRATCH, 0);
+        } else {
+            let r1 = REG_MAP[rv_slot(rs1).unwrap()];
+            self.asm.movzx_32_64(SCRATCH, r1);
+        }
+        if rs2 == 0 {
+            self.asm.mov_ri64(d, 0);
+        } else {
+            let r2 = REG_MAP[rv_slot(rs2).unwrap()];
+            if d != r2 {
+                self.asm.mov_rr(d, r2);
+            }
+        }
+        self.asm.add_rr(d, SCRATCH);
+        if rd != 0 {
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    fn rv_slliuw(&mut self, rd: u8, rs1: u8, shamt: u8, pc: u32) {
+        let Some(d) = self.rv_dst(rd, pc) else { return };
+        if rs1 == 0 {
+            self.asm.mov_ri64(d, 0);
+        } else if rv_is_reserved(rs1) {
+            self.rv_emit_panic_at(pc);
+            return;
+        } else {
+            let r1 = REG_MAP[rv_slot(rs1).unwrap()];
+            self.asm.movzx_32_64(d, r1);
+            self.asm.shl_ri64(d, shamt & 63);
+        }
+        if rd != 0 {
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    // ---- Zbs single-bit ---------------------------------------------
+
+    fn rv_bit_rr(&mut self, rd: u8, rs1: u8, rs2: u8, op: BitOp, pc: u32) {
+        let Some(d) = self.rv_dst(rd, pc) else { return };
+        if rv_is_reserved(rs1) || rv_is_reserved(rs2) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        // SCRATCH = 1 << (rs2 & 0x3F).
+        self.asm.mov_ri64(SCRATCH, 1);
+        if rs2 != 0 {
+            let r2 = REG_MAP[rv_slot(rs2).unwrap()];
+            if r2 == Reg::RCX {
+                self.asm.shl_cl64(SCRATCH);
+            } else {
+                self.asm.push(Reg::RCX);
+                self.asm.mov_rr(Reg::RCX, r2);
+                self.asm.shl_cl64(SCRATCH);
+                self.asm.pop(Reg::RCX);
+            }
+        }
+        // Apply.
+        self.rv_read(rs1, d, pc);
+        match op {
+            BitOp::Clear => {
+                self.asm.not64(SCRATCH);
+                self.asm.and_rr(d, SCRATCH);
+            }
+            BitOp::Set => self.asm.or_rr(d, SCRATCH),
+            BitOp::Invert => self.asm.xor_rr(d, SCRATCH),
+            BitOp::Extract => {
+                // test sets ZF; mov_ri32 (not mov_ri64-zero) writes 0
+                // to d WITHOUT clobbering flags so setcc sees ZF.
+                self.asm.test_rr(d, SCRATCH);
+                self.asm.mov_ri32(d, 0);
+                self.asm.setcc(Cc::NE, d);
+            }
+        }
+        if rd != 0 {
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    fn rv_bit_imm(&mut self, rd: u8, rs1: u8, shamt: u8, op: BitOp, pc: u32) {
+        let Some(d) = self.rv_dst(rd, pc) else { return };
+        if rv_is_reserved(rs1) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        let s = shamt & 0x3F;
+        if s < 31 {
+            let mask_lo: i32 = 1i32 << s;
+            self.rv_read(rs1, d, pc);
+            match op {
+                BitOp::Clear => self.asm.and_ri(d, !mask_lo),
+                BitOp::Set => self.asm.or_ri(d, mask_lo),
+                BitOp::Invert => self.asm.xor_ri(d, mask_lo),
+                BitOp::Extract => {
+                    self.asm.shr_ri64(d, s);
+                    self.asm.and_ri(d, 1);
+                }
+            }
+        } else {
+            let mask: u64 = 1u64 << s;
+            self.asm.mov_ri64(SCRATCH, mask);
+            self.rv_read(rs1, d, pc);
+            match op {
+                BitOp::Clear => {
+                    self.asm.not64(SCRATCH);
+                    self.asm.and_rr(d, SCRATCH);
+                }
+                BitOp::Set => self.asm.or_rr(d, SCRATCH),
+                BitOp::Invert => self.asm.xor_rr(d, SCRATCH),
+                BitOp::Extract => {
+                    self.asm.shr_ri64(d, s);
+                    self.asm.and_ri(d, 1);
+                }
+            }
+        }
+        if rd != 0 {
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    // ---- Zicond -----------------------------------------------------
+
+    /// Semantics:
+    ///   `cond = Cc::E`  → czero.eqz rd, rs1, rs2 = (rs2 == 0) ? 0 : rs1
+    ///   `cond = Cc::NE` → czero.nez rd, rs1, rs2 = (rs2 != 0) ? 0 : rs1
+    ///
+    /// Emits a three-op CMOV sequence:
+    ///   test r2, r2     ; ZF reflects rs2 == 0
+    ///   mov_ri32 _, 0   ; 5-byte mov-imm (no flag effect)
+    ///   cmov... ...     ; conditionally swap on ZF
+    ///
+    /// The two branches below differ only in which register is the cmov
+    /// destination vs source, dictated by whether `d` aliases `rs1`
+    /// (in which case `d` already holds the "keep" value and we cmov
+    /// 0 in on the spec condition) or not (we initialise `d=0` and
+    /// cmov `r1` in on the opposite condition). Both paths are 3 ops.
+    fn rv_czero(&mut self, rd: u8, rs1: u8, rs2: u8, cond: Cc, pc: u32) {
+        let Some(d) = self.rv_dst(rd, pc) else { return };
+        if rv_is_reserved(rs1) || rv_is_reserved(rs2) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        let slot = rv_slot(rd).unwrap();
+
+        // Static-result short circuits.
+        if rs2 == 0 {
+            // rs2 hardwired zero: spec condition is statically known.
+            //   eqz: rs2==0 always true → d = 0
+            //   nez: rs2!=0 always false → d = rs1
+            if matches!(cond, Cc::E) {
+                self.asm.mov_ri64(d, 0);
+            } else {
+                self.rv_read(rs1, d, pc);
+            }
+            self.invalidate_reg(slot);
+            return;
+        }
+        if rs1 == 0 {
+            // rs1 hardwired zero: both branches of the conditional yield 0.
+            self.asm.mov_ri64(d, 0);
+            self.invalidate_reg(slot);
+            return;
+        }
+        if rs1 == rs2 {
+            //   eqz: (rs1==0) ? 0 : rs1 == rs1
+            //   nez: (rs1!=0) ? 0 : rs1 == 0
+            if matches!(cond, Cc::E) {
+                self.rv_read(rs1, d, pc);
+            } else {
+                self.asm.mov_ri64(d, 0);
+            }
+            self.invalidate_reg(slot);
+            return;
+        }
+
+        let r1 = REG_MAP[rv_slot(rs1).unwrap()];
+        let r2 = REG_MAP[rv_slot(rs2).unwrap()];
+        let opposite = match cond {
+            Cc::E => Cc::NE,
+            Cc::NE => Cc::E,
+            _ => unreachable!("rv_czero only accepts E/NE"),
+        };
+
+        if d == r1 {
+            // d already holds rs1's value. Test rs2, then cmov 0 in
+            // when the spec condition holds. We can't cmov from `r1`
+            // here — at execution time `r1 == d`, so the source value
+            // is whatever d *currently* holds, not the original rs1.
+            self.asm.test_rr(r2, r2);
+            self.asm.mov_ri32(SCRATCH, 0);
+            self.asm.cmovcc(cond, d, SCRATCH);
+        } else {
+            // d != r1. d may alias r2; that's fine because we test r2
+            // BEFORE the mov writes 0 into d.
+            self.asm.test_rr(r2, r2);
+            self.asm.mov_ri32(d, 0);
+            self.asm.cmovcc(opposite, d, r1);
+        }
+        self.invalidate_reg(slot);
+    }
+
+    // ---- Jumps & branches -------------------------------------------
+
+    fn rv_jal(&mut self, rd: u8, imm: i32, pc: u32, next_pc: u32) {
+        if rv_is_reserved(rd) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        if rd != 0 {
+            let slot = rv_slot(rd).unwrap();
+            self.asm.mov_ri64(REG_MAP[slot], next_pc as u64);
+            self.invalidate_reg(slot);
+        }
+        let target = (pc as i64).wrapping_add(imm as i64) as u32;
+        self.emit_static_branch(target, true, next_pc, pc);
+    }
+
+    /// Emit a PVM2 `br_table table_id, rs1` — indirect-jump terminator
+    /// dispatching through `Image.jump_table[table_id]`.
+    ///
+    /// The `rs1` register carries the index encoded as `2*idx + 1`.
+    /// Decode:
+    ///   1. If `rs1 == 0` → fall through (uninitialised register is a
+    ///      sentinel for "no valid target").
+    ///   2. `idx = (rs1 - 1) >> 1`. If the LSB of `rs1` was 0 (raw PC
+    ///      shape), `idx` underflows to a huge value and the bounds
+    ///      check fails → fall through.
+    ///   3. If `idx >= table_len[table_id]` → fall through.
+    ///   4. `target_pc = jt[jt_offsets[table_id] + idx]`.
+    ///   5. `native_addr = code_base + dispatch_table[target_pc]`.
+    ///   6. `jmp native_addr`.
+    ///
+    /// `table_base_byte_offset` and `table_len` are baked in as
+    /// immediates at JIT time; they come from `self.rv_jt_offsets`
+    /// (the Image's `jump_table_offsets`).
+    fn rv_br_table(&mut self, table_id: u16, rs1: u8, pc: u32, next_pc: u32) {
+        use super::asm::Cc;
+
+        // Validate table_id against the compiled jump_table_offsets.
+        // (linker_rv guarantees this; this is defence-in-depth.)
+        let nt = self.rv_jt_offsets.len().saturating_sub(1);
+        if (table_id as usize) >= nt {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        let table_start_entries = self.rv_jt_offsets[table_id as usize];
+        let table_end_entries = self.rv_jt_offsets[(table_id as usize) + 1];
+        if table_end_entries < table_start_entries {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        let table_len = table_end_entries - table_start_entries;
+        let table_byte_offset = (table_start_entries as i32)
+            .checked_mul(4)
+            .unwrap_or(i32::MAX);
+
+        if rv_is_reserved(rs1) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+
+        // OOB / sentinel handling: per spec the default behavior is
+        // to fall through to the next instruction (LLVM-friendly
+        // default-case shape). For PVM2 function returns this should
+        // never fire — caller always passes a valid encoded idx. We
+        // route to panic during bring-up to surface bugs; once stable
+        // this can be relaxed to `let fallthrough = label_for_pc(next_pc);`
+        // and bind a real fallthrough.
+        let oob_target = self.panic_label;
+
+        if rs1 == 0 {
+            // rs1 = x0: never dispatch.
+            self.asm.jmp_label(oob_target);
+            let _ = next_pc;
+            return;
+        }
+        // Load the encoded idx from rs1 into SCRATCH.
+        self.rv_read(rs1, SCRATCH, pc);
+
+        // Check rs1 == 0 → OOB.
+        self.asm.test_rr(SCRATCH, SCRATCH);
+        self.asm.jcc_label(Cc::E, oob_target);
+
+        // idx = (rs1 - 1) >> 1.
+        self.asm.sub_ri(SCRATCH, 1);
+        self.asm.shr_ri64(SCRATCH, 1);
+
+        // Bounds check: idx < table_len.
+        if table_len == 0 {
+            self.asm.jmp_label(oob_target);
+        } else {
+            self.asm.cmp_ri32(SCRATCH, table_len as i32);
+            self.asm.jcc_label(Cc::AE, oob_target);
+        }
+
+        // target_pc = jt_ptr[table_byte_offset + idx*4]
+        //           = *((u32*) (jt_ptr + table_byte_offset + idx*4))
+        self.asm.push(Reg::RAX); // save RAX (= x14)
+        self.asm.shl_ri64(SCRATCH, 2); // idx *= 4
+        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_JT_PTR);
+        if table_byte_offset != 0 {
+            self.asm.add_ri(Reg::RAX, table_byte_offset);
+        }
+        // Load the u32 PVM2 PC from [RAX + SCRATCH].
+        self.asm.add_rr(Reg::RAX, SCRATCH);
+        self.asm.mov_load32(SCRATCH, Reg::RAX, 0); // SCRATCH = target_pc
+
+        // native_addr = code_base + dispatch_table[target_pc]
+        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_DISPATCH_TABLE);
+        self.asm.movsxd_load_sib4(Reg::RAX, Reg::RAX, SCRATCH);
+        self.asm.add_r64_mem_rip_rel(Reg::RAX, CTX_CODE_BASE);
+        // Record the target PC for gas-block tracking / pause attribution.
+        self.asm.mov_store32_rip_rel(CTX_PC, SCRATCH);
+        // RAX holds native addr; restore the saved RAX (= x14) value.
+        // Use SCRATCH as the parking lot for the native addr while we pop.
+        self.asm.mov_rr(SCRATCH, Reg::RAX);
+        self.asm.pop(Reg::RAX);
+        self.asm.jmp_reg(SCRATCH);
+
+        // OOB targets `panic_label` directly (see oob_target above);
+        // no per-instruction bind needed here.
+        let _ = next_pc;
+    }
+
+    fn rv_branch(&mut self, rs1: u8, rs2: u8, imm: i32, cc: Cc, pc: u32, next_pc: u32) {
+        if rv_is_reserved(rs1) || rv_is_reserved(rs2) {
+            self.rv_emit_panic_at(pc);
+            return;
+        }
+        let target = (pc as i64).wrapping_add(imm as i64) as u32;
+        let a = self.rv_read_into(rs1, SCRATCH, pc);
+        let b = if a == SCRATCH {
+            if rs2 == 0 {
+                // both x0: cmp SCRATCH, SCRATCH (0 vs 0).
+                SCRATCH
+            } else {
+                REG_MAP[rv_slot(rs2).unwrap()]
+            }
+        } else if rs2 == 0 {
+            self.asm.mov_ri64(SCRATCH, 0);
+            SCRATCH
+        } else {
+            REG_MAP[rv_slot(rs2).unwrap()]
+        };
+        self.emit_branch_reg(a, b, cc, target, next_pc, pc);
+    }
+
+    // ---- custom-0 ---------------------------------------------------
+
+    fn rv_trap(&mut self, pc: u32) {
+        self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
+        self.asm
+            .mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_TRAP as i32);
+        self.asm.mov_store32_rip_rel_imm(CTX_EXIT_ARG, 0);
+        self.asm.jmp_label(self.exit_label);
+    }
+
+    fn rv_ecall_jar(&mut self, next_pc: u32) {
+        self.asm.mov_store32_rip_rel_imm(CTX_PC, next_pc as i32);
+        self.asm
+            .mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_ECALL as i32);
+        self.asm.mov_store32_rip_rel_imm(CTX_EXIT_ARG, 0);
+        self.asm.jmp_label(self.exit_label);
+    }
+
+    fn rv_ecalli(&mut self, imm: i32, next_pc: u32) {
+        self.asm.mov_store32_rip_rel_imm(CTX_PC, next_pc as i32);
+        self.asm
+            .mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_HOST_CALL as i32);
+        self.asm.mov_store32_rip_rel_imm(CTX_EXIT_ARG, imm);
+        self.asm.jmp_label(self.exit_label);
+    }
+
+    /// Generic "panic at this PC" exit.
+    fn rv_emit_panic_at(&mut self, pc: u32) {
+        self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
+        self.asm
+            .mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_PANIC as i32);
+        self.asm.jmp_label(self.exit_label);
+    }
+
+    // ----------------------------------------------------------------
+    // Peephole tracking helpers — called inline from the tracked
+    // dispatchers in `compile_rv4`. They replace the old separate
+    // `update_reg_defs_rv` match pass (strict single-pass refactor).
+    //
+    // Each helper short-circuits when the destination register can't
+    // produce a useful tracking entry (x0 / x3 / x4) or when the arm-
+    // specific alias guard fires. The per-op emit helper has already
+    // cleared `rd` via `invalidate_reg`, so the helper just installs
+    // the new RegDef when applicable.
+    // ----------------------------------------------------------------
+
+    /// `addi rd, x0, imm` / `lui rd, imm` — canonical constant load.
+    /// Records `RegDef::Const(imm as u32)` so subsequent address
+    /// formations can fold the constant directly.
+    #[inline]
+    fn track_const(&mut self, rd: u8, imm: i32) {
+        use super::codegen::RegDef;
+        if let Some(slot) = rv_slot(rd) {
+            self.reg_defs[slot] = RegDef::Const(imm as u32);
+            self.reg_defs_active |= 1u16 << slot;
+            self.invalidate_dependents(slot);
+        }
+    }
+
+    /// `slli rd, rs1, shamt` with `shamt ∈ {1,2,3}` and `rs1 != rd`.
+    /// Records `RegDef::Shifted` so a following Add can promote to
+    /// ScaledAdd for SIB-style LEA. The arm-side guards (range and
+    /// aliasing) live in the caller so this helper just installs.
+    #[inline]
+    fn track_shifted(&mut self, rd: u8, rs1: u8, shamt: u8) {
+        use super::codegen::RegDef;
+        if let (Some(d), Some(s)) = (rv_slot(rd), rv_slot(rs1)) {
+            self.reg_defs[d] = RegDef::Shifted {
+                src: s,
+                shift: shamt,
+            };
+            self.reg_defs_active |= 1u16 << d;
+            self.invalidate_dependents(d);
+        }
+    }
+
+    /// `add rd, rs1, rs2` with `rd != rs1 && rd != rs2`. Promotes to
+    /// `RegDef::ScaledAdd` when one operand is already tracked as
+    /// `Shifted`. Mirrors PVM's update_reg_defs for Add64.
+    #[inline]
+    fn track_add_scaledadd(&mut self, rd: u8, rs1: u8, rs2: u8) {
+        use super::codegen::RegDef;
+        let (Some(d), Some(a), Some(b)) = (rv_slot(rd), rv_slot(rs1), rv_slot(rs2)) else {
+            return;
+        };
+        let def = if let RegDef::Shifted { src, shift } = self.reg_defs[b] {
+            Some(RegDef::ScaledAdd {
+                base: a,
+                idx: src,
+                shift,
+            })
+        } else if let RegDef::Shifted { src, shift } = self.reg_defs[a] {
+            Some(RegDef::ScaledAdd {
+                base: b,
+                idx: src,
+                shift,
+            })
+        } else {
+            None
+        };
+        if let Some(def) = def {
+            self.reg_defs[d] = def;
+            self.reg_defs_active |= 1u16 << d;
+            self.invalidate_dependents(d);
+        }
+        // else: per-op handler already invalidated rd.
+    }
+
+    /// Helper for Sh{1,2,3}add → ScaledAdd tracking.
+    ///
+    /// `sh{N}add rd, rs1, rs2` writes `rd = rs2 + (rs1 << N)`. If rd
+    /// aliases either operand, the post-emit value of rd no longer
+    /// equals base+idx<<shift in terms of the *new* register state —
+    /// any subsequent use of the tracked def would substitute the
+    /// already-overwritten value. Skip tracking in those cases
+    /// (mirrors PVM's update_reg_defs guard for Add64).
+    #[inline]
+    fn record_scaledadd(&mut self, rd: u8, rs1: u8, rs2: u8, shift: u8) {
+        use super::codegen::RegDef;
+        if rd == rs1 || rd == rs2 {
+            return;
+        }
+        let (Some(d), Some(idx), Some(base)) = (rv_slot(rd), rv_slot(rs1), rv_slot(rs2)) else {
+            return;
+        };
+        self.reg_defs[d] = RegDef::ScaledAdd { base, idx, shift };
+        self.reg_defs_active |= 1u16 << d;
+        self.invalidate_dependents(d);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AluImmOp {
+    Add,
+    And,
+    Or,
+    Xor,
+    Addw,
+}
+
+#[derive(Clone, Copy)]
+enum AluOp {
+    Add,
+    Sub,
+    And,
+    Or,
+    Xor,
+    Mul,
+    Addw,
+    Subw,
+    Mulw,
+    Min,
+    Max,
+    Minu,
+    Maxu,
+    Andn,
+    Orn,
+    Xnor,
+}
+
+#[derive(Clone, Copy)]
+enum ShiftOp {
+    Shl64,
+    Shr64,
+    Sar64,
+    Shl32,
+    Shr32,
+    Sar32,
+    Rol64,
+    Ror64,
+    Rol32,
+    Ror32,
+}
+
+#[derive(Clone, Copy)]
+enum BitOp {
+    Clear,
+    Set,
+    Invert,
+    Extract,
+}
+
+#[derive(Clone, Copy)]
+enum UnaryOp {
+    Clz64,
+    Clz32,
+    Ctz64,
+    Ctz32,
+    Popcnt64,
+    Popcnt32,
+    SextB,
+    SextH,
+    ZextH,
+    Rev8,
+    OrcB,
 }

@@ -5,7 +5,9 @@ use javm_cap::image::{EndpointDef, Image};
 use std::collections::BTreeMap;
 
 fn minimal_chain_image() -> Image {
-    // Program: load_imm_64 φ[7] = 42; ecalli 0 (HALT).
+    // PVM2 program: `ecalli 0` (HALT) at PC 0.
+    //   custom-0 opcode (0b00010 << 2) | 0b11, funct3 = 0b010, all
+    //   register fields zero: encodes as the 32-bit word 0x0000_200B.
     let mut endpoints = BTreeMap::new();
     endpoints.insert(
         0,
@@ -16,13 +18,10 @@ fn minimal_chain_image() -> Image {
             initial_regs: BTreeMap::new(),
         },
     );
-    // Instruction starts at bytes 0 (load_imm_64) and 10 (ecalli).
-    // Packed bitmask (LSB-first): byte 0 = bit 0 set = 0x01;
-    // byte 1 = bit 2 set = 0x04.
     Image {
-        code: vec![20u8, 7, 42, 0, 0, 0, 0, 0, 0, 0, 10, 0],
-        packed_bitmask: vec![0x01, 0x04],
+        code: 0x0000_200Bu32.to_le_bytes().to_vec(),
         jump_table: Vec::new(),
+        jump_table_offsets: vec![0, 0],
         endpoints,
         memory_mappings: Vec::new(),
         gas_slots: vec![abi::BARE_GAS_SLOT],

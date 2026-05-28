@@ -164,11 +164,34 @@ impl BuiltCaps {
     }
 }
 
+/// RAII guard around the singleton Hyperlight Nub. Derefs to
+/// `&mut Nub`. The inner `Option` is guaranteed `Some` while the
+/// guard is alive (we panic on a `None` lock — `reset_nub_hyperlight`
+/// re-fills before releasing).
+pub struct NubGuard {
+    inner: std::sync::MutexGuard<'static, Option<Nub>>,
+}
+
+impl std::ops::Deref for NubGuard {
+    type Target = Nub;
+    fn deref(&self) -> &Nub {
+        self.inner.as_ref().expect("nub_hyperlight not initialised")
+    }
+}
+
+impl std::ops::DerefMut for NubGuard {
+    fn deref_mut(&mut self) -> &mut Nub {
+        self.inner.as_mut().expect("nub_hyperlight not initialised")
+    }
+}
+
 /// Bench-side accessor for the long-lived Hyperlight Nub. Returned
 /// guard holds the singleton mutex for the duration of one
 /// criterion `iter_batched` step (setup + routine).
-pub fn nub_hyperlight_lock() -> std::sync::MutexGuard<'static, Nub> {
-    nub_hyperlight().lock().expect("nub mutex")
+pub fn nub_hyperlight_lock() -> NubGuard {
+    NubGuard {
+        inner: nub_hyperlight().lock().expect("nub mutex"),
+    }
 }
 
 /// Bench helper: drive one invocation through an already-locked Nub.
@@ -200,7 +223,7 @@ pub fn run_interpreter(built: &BuiltCaps) -> (u64, u64) {
 /// the same Image hit the JIT compile cache. Useful for measuring
 /// steady-state execute throughput in isolation.
 pub fn run_recompiler(built: &BuiltCaps) -> (u64, u64) {
-    let mut nub = nub_hyperlight().lock().expect("nub mutex");
+    let mut nub = nub_hyperlight_lock();
     built.put_into(&mut nub);
     let result = nub
         .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
@@ -213,7 +236,7 @@ pub fn run_recompiler(built: &BuiltCaps) -> (u64, u64) {
 /// alongside execute. Models a PolkaVM-shaped workload where each
 /// guest invocation may face a fresh Image hash.
 pub fn run_recompiler_cold(built: &BuiltCaps) -> (u64, u64) {
-    let mut nub = nub_hyperlight().lock().expect("nub mutex");
+    let mut nub = nub_hyperlight_lock();
     built.put_into(&mut nub);
     nub.evict_jit_all()
         .unwrap_or_else(|e| panic!("recompiler evict_jit_all: {e}"));
@@ -239,9 +262,28 @@ fn finish(result: &InvocationResult) -> (u64, u64) {
 }
 
 /// Long-lived Hyperlight sandbox shared across bench iterations.
-fn nub_hyperlight() -> &'static Mutex<Nub> {
-    static NUB: OnceLock<Mutex<Nub>> = OnceLock::new();
-    NUB.get_or_init(|| Mutex::new(Nub::new_hyperlight().expect("Hyperlight sandbox")))
+///
+/// The inner `Option` lets [`reset_nub_hyperlight`] tear down the
+/// current sandbox and build a fresh one between workloads — the
+/// underlying Hyperlight VM accumulates state across cap publishes
+/// (notably Instance caps with large overlays), and certain
+/// criterion sweeps trigger an indefinite hang after the 13th or so
+/// cap publish on the same sandbox. Rebuilding between bench
+/// functions costs ~300 ms per workload, which is fine relative to
+/// the per-bench measurement loop (~10 s).
+fn nub_hyperlight() -> &'static Mutex<Option<Nub>> {
+    static NUB: OnceLock<Mutex<Option<Nub>>> = OnceLock::new();
+    NUB.get_or_init(|| Mutex::new(Some(Nub::new_hyperlight().expect("Hyperlight sandbox"))))
+}
+
+/// Drop the cached Hyperlight sandbox and build a fresh one on the
+/// next `nub_hyperlight_lock`. Call from each criterion bench
+/// function's setup line so per-workload publishes don't accumulate
+/// state across the full sweep.
+pub fn reset_nub_hyperlight() {
+    let mut g = nub_hyperlight().lock().expect("nub mutex");
+    *g = None;
+    *g = Some(Nub::new_hyperlight().expect("Hyperlight sandbox"));
 }
 
 /// Walk the Image's memory mappings + slot contents and produce

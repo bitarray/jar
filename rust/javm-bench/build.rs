@@ -1,11 +1,9 @@
-//! Cross-compile each bench guest crate for the JAVM target,
+//! Cross-compile each bench guest crate for the PVM2 target,
 //! transpile to a SCALE-encoded `Image`, and expose the blob path
-//! to `benches/pvm_bench.rs` via per-guest environment variables.
+//! to the bench harness + examples via per-guest environment variables.
 //!
-//! Mirrors `rust/jar-kernel/build.rs`, repeated once per guest. The
-//! `BUILD_CRATE_GUEST_BUILD` env-var guard prevents infinite
-//! recursion when `build-crate` re-invokes cargo for the guest
-//! target.
+//! The `BUILD_CRATE_GUEST_BUILD` env-var guard prevents infinite
+//! recursion when `build-crate` re-invokes cargo for the guest target.
 
 fn main() {
     if std::env::var("BUILD_CRATE_GUEST_BUILD").is_ok() {

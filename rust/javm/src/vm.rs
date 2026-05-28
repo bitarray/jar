@@ -20,7 +20,7 @@
 //! by their `CapHashOrRef` target).
 
 use javm_cap::{CacheDirectory, Cap, CapHash, CapHashOrRef, SlotIdx};
-use javm_exec::{Access, CopyingMemory, ExitReason, GasCounter, Interpreter, Mem, Regs};
+use javm_exec::{Access, CopyingMemory, ExitReason, GasCounter, Mem, Regs, interp::Interpreter};
 
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
 use crate::ecall::{CachedEcallHandler, host_op};
@@ -159,13 +159,12 @@ impl<K: KernelAssist> Vm<K> {
         };
 
         // Predecode the image bytecode (cache hit when seen before).
-        let unpacked_bitmask = javm_exec::unpack_bitmask(img.bitmask.as_slice(), img.code.len());
         let program = self.image_cache.get_or_decode(
             inst.image_hash,
             img.code.as_slice().to_vec(),
-            unpacked_bitmask,
             img.jump_table.as_slice().to_vec(),
-        )?;
+            img.jump_table_offsets.as_slice().to_vec(),
+        );
 
         // Locate the endpoint definition (dense array, sentinel =
         // entry_pc == 0).
@@ -331,7 +330,7 @@ impl<K: KernelAssist> Vm<K> {
                 _ => return Err(VmError::Invariant("cur_pos points at non-Instance")),
             };
             let mut handler = CachedEcallHandler { vm: self, cache };
-            let exit = Interpreter::run(
+            let exit = Interpreter::run_program(
                 program.as_ref(),
                 &mut regs,
                 &mut mem,
@@ -673,11 +672,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn empty_image_with_code(code: Vec<u8>) -> Image {
-        let packed_bitmask = vec![0xFFu8; code.len().div_ceil(8)];
         Image {
             code,
-            packed_bitmask,
             jump_table: Vec::new(),
+            jump_table_offsets: vec![0, 0],
             endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: Vec::new(),
@@ -718,8 +716,8 @@ mod tests {
 
     #[test]
     fn invoke_cached_trap_returns_faulted() {
-        // code = [trap (0)]
-        let img = empty_image_with_code(vec![0u8]);
+        // PVM2 `trap` = custom-0 funct3=000, word 0x0000_000B.
+        let img = empty_image_with_code(0x0000_000Bu32.to_le_bytes().to_vec());
         let mut cache = CacheDirectory::new();
         let inst_hash = publish_simple_instance(&mut cache, img);
 
@@ -739,10 +737,8 @@ mod tests {
 
     #[test]
     fn invoke_cached_ecalli_zero_halts() {
-        // ecalli 0 → Halt. Bytecode = [10, 0]; bitmask [1, 0] (op + 1
-        // imm byte).
-        let mut img = empty_image_with_code(vec![10u8, 0]);
-        img.packed_bitmask = vec![0b01u8];
+        // PVM2 `ecalli 0` = custom-0 funct3=010, imm=0, word 0x0000_200B.
+        let img = empty_image_with_code(0x0000_200Bu32.to_le_bytes().to_vec());
         let mut cache = CacheDirectory::new();
         let inst_hash = publish_simple_instance(&mut cache, img);
 
@@ -762,39 +758,15 @@ mod tests {
 
     #[test]
     fn invoke_cached_load_imm_then_reply() {
-        // load_imm_64 φ[7] = 42 (opcode 20, OneRegExtImm: [20, 7, 42, 0..])
-        // ecalli 0 (opcode 10): [10, 0]
-        let mut code = Vec::new();
-        let mut bitmask_unpacked = Vec::new();
-        code.extend_from_slice(&[20u8, 7]);
-        bitmask_unpacked.extend_from_slice(&[1u8, 0]);
-        for i in 0..8 {
-            code.push(if i == 0 { 42 } else { 0 });
-            bitmask_unpacked.push(0);
-        }
-        code.extend_from_slice(&[10u8, 0]);
-        bitmask_unpacked.extend_from_slice(&[1u8, 0]);
-
-        // Pack the bitmask: one bit per code byte, LSB first.
-        let mut packed = vec![0u8; bitmask_unpacked.len().div_ceil(8)];
-        for (i, b) in bitmask_unpacked.iter().enumerate() {
-            if *b != 0 {
-                packed[i / 8] |= 1 << (i % 8);
-            }
-        }
-
-        let img = Image {
-            code,
-            packed_bitmask: packed,
-            jump_table: Vec::new(),
-            endpoints: BTreeMap::new(),
-            memory_mappings: Vec::new(),
-            gas_slots: Vec::new(),
-            quota_slots: Vec::new(),
-            pinned_slots: BTreeMap::new(),
-            initial_slots: BTreeMap::new(),
-            yield_marker_slot: None,
-        };
+        // PVM2 sequence: set the slot-7 register (= RV x10) to 42, then
+        // `ecalli 0` to halt with the value as return-value.
+        //   addi x10, x0, 42 → I-type, imm=42, rs1=0, f3=0, rd=10, op=0x13.
+        //   word = (42 << 20) | (10 << 7) | 0x13 = 0x02A0_0513
+        //   ecalli 0 → 0x0000_200B (as above).
+        let mut code: Vec<u8> = Vec::new();
+        code.extend_from_slice(&0x02A0_0513u32.to_le_bytes());
+        code.extend_from_slice(&0x0000_200Bu32.to_le_bytes());
+        let img = empty_image_with_code(code);
 
         let mut cache = CacheDirectory::new();
         let inst_hash = publish_simple_instance(&mut cache, img);
@@ -816,91 +788,36 @@ mod tests {
         }
     }
 
-    /// End-to-end at the byte-PVM level: M does `host_call(slot=9,
+    /// End-to-end at the PVM2 level: M does `host_call(slot=9,
     /// endpoint=0)` to enter S, S halts, M halts. Verifies the
     /// `drive_and_translate` loop's HOST_CALL push + nested HALT pop
-    /// arms wire up correctly. The return value lands on M's φ[7],
-    /// which M never wrote to — i.e., whatever HOST_CALL set it to
-    /// (the slot index 9). The point of the test is that the chain
-    /// terminates without infinite looping or trapping.
+    /// arms wire up correctly. The test simply requires the chain to
+    /// terminate without trapping or infinite looping.
     #[test]
     fn invoke_cached_host_call_into_child_then_halts() {
-        // S's bytecode: `load_imm φ[7] = 42; ecalli 0` (same shape as
-        // invoke_cached_load_imm_then_reply).
+        // S's bytecode: `addi x10, x0, 42; ecalli 0` (slot 7 ↔ x10).
         let s_img = {
-            let mut code = Vec::new();
-            let mut bm = Vec::new();
-            code.extend_from_slice(&[20u8, 7]);
-            bm.extend_from_slice(&[1u8, 0]);
-            for i in 0..8 {
-                code.push(if i == 0 { 42 } else { 0 });
-                bm.push(0);
-            }
-            code.extend_from_slice(&[10u8, 0]);
-            bm.extend_from_slice(&[1u8, 0]);
-            let mut packed = vec![0u8; bm.len().div_ceil(8)];
-            for (i, b) in bm.iter().enumerate() {
-                if *b != 0 {
-                    packed[i / 8] |= 1 << (i % 8);
-                }
-            }
-            Image {
-                code,
-                packed_bitmask: packed,
-                jump_table: Vec::new(),
-                endpoints: BTreeMap::new(),
-                memory_mappings: Vec::new(),
-                gas_slots: Vec::new(),
-                quota_slots: Vec::new(),
-                pinned_slots: BTreeMap::new(),
-                initial_slots: BTreeMap::new(),
-                yield_marker_slot: None,
-            }
+            let mut code: Vec<u8> = Vec::new();
+            code.extend_from_slice(&0x02A0_0513u32.to_le_bytes()); // addi x10, x0, 42
+            code.extend_from_slice(&0x0000_200Bu32.to_le_bytes()); // ecalli 0
+            empty_image_with_code(code)
         };
 
-        // M's bytecode: `load_imm φ[7] = 9; load_imm φ[8] = 0;
-        // ecalli 26 (HOST_CALL); ecalli 0 (HALT)`.
+        // M's bytecode:
+        //   addi x10, x0, 9     ; slot 7 (= x10) = 9 (target slot for host_call)
+        //   addi x11, x0, 0     ; slot 8 (= x11) = 0 (endpoint)
+        //   ecalli 26           ; HOST_CALL
+        //   ecalli 0            ; HALT
         let m_img = {
-            let mut code = Vec::new();
-            let mut bm = Vec::new();
-            // load_imm φ[7] = 9
-            code.extend_from_slice(&[20u8, 7]);
-            bm.extend_from_slice(&[1u8, 0]);
-            for i in 0..8 {
-                code.push(if i == 0 { 9 } else { 0 });
-                bm.push(0);
-            }
-            // load_imm φ[8] = 0
-            code.extend_from_slice(&[20u8, 8]);
-            bm.extend_from_slice(&[1u8, 0]);
-            for _ in 0..8 {
-                code.push(0);
-                bm.push(0);
-            }
-            // ecalli 26 (HOST_CALL)
-            code.extend_from_slice(&[10u8, 26]);
-            bm.extend_from_slice(&[1u8, 0]);
-            // ecalli 0 (HALT)
-            code.extend_from_slice(&[10u8, 0]);
-            bm.extend_from_slice(&[1u8, 0]);
-            let mut packed = vec![0u8; bm.len().div_ceil(8)];
-            for (i, b) in bm.iter().enumerate() {
-                if *b != 0 {
-                    packed[i / 8] |= 1 << (i % 8);
-                }
-            }
-            Image {
-                code,
-                packed_bitmask: packed,
-                jump_table: Vec::new(),
-                endpoints: BTreeMap::new(),
-                memory_mappings: Vec::new(),
-                gas_slots: Vec::new(),
-                quota_slots: Vec::new(),
-                pinned_slots: BTreeMap::new(),
-                initial_slots: BTreeMap::new(),
-                yield_marker_slot: None,
-            }
+            let mut code: Vec<u8> = Vec::new();
+            code.extend_from_slice(&0x0090_0513u32.to_le_bytes()); // addi x10, x0, 9
+            code.extend_from_slice(&0x0000_0593u32.to_le_bytes()); // addi x11, x0, 0
+            // ecalli 26: imm=26, f3=010, op custom-0.
+            //   word = (26 << 20) | (0b010 << 12) | (0b00010 << 2) | 0b11
+            //        = 0x01A0_200B
+            code.extend_from_slice(&0x01A0_200Bu32.to_le_bytes());
+            code.extend_from_slice(&0x0000_200Bu32.to_le_bytes()); // ecalli 0
+            empty_image_with_code(code)
         };
 
         // Publish S as a complete Cap::Instance.
@@ -944,19 +861,14 @@ mod tests {
 
     #[test]
     fn invoke_cached_oog_returns_faulted() {
-        // Lots of fallthroughs with a tiny budget. Opcode 1 = fallthrough.
-        let code = vec![1u8; 50];
-        let mut packed = vec![0xFFu8; code.len().div_ceil(8)];
-        if !code.len().is_multiple_of(8) {
-            // mask off the last byte's unused high bits
-            let used = code.len() % 8;
-            let last = packed.len() - 1;
-            packed[last] = (1u8 << used) - 1;
-        }
+        // PVM2 `jal x0, 0` — a 4-byte self-jump. Runs forever (each
+        // iteration is a 1-instruction basic block) until the gas
+        // budget runs out.
+        let code = 0x0000_006Fu32.to_le_bytes().to_vec();
         let img = Image {
             code,
-            packed_bitmask: packed,
             jump_table: Vec::new(),
+            jump_table_offsets: vec![0, 0],
             endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: Vec::new(),
