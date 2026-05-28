@@ -2,8 +2,6 @@
 //! PVM2 guest images. Run to identify which RV variants/pairs are
 //! worth fusion peepholes in the recompiler hot loop.
 
-#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
-
 use javm_cap::image::Image;
 use javm_exec::instruction::{Inst, decode};
 use ssz::Decode;

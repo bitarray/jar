@@ -7,7 +7,7 @@
 //! [`javm_cap::cap::instance::InstanceCap`] + its referenced
 //! [`javm_cap::cap::image::ImageCap`] (both `Global`-allocated
 //! locally), wires the bytecode + memory layout to
-//! [`javm_exec::Interpreter::run`], and produces an
+//! [`javm_exec::interp::Interpreter::run`], and produces an
 //! [`InvocationResult`].
 
 use javm_cap::cap::image::ImageCap;

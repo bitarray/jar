@@ -3,138 +3,148 @@
 //! assert exit reason / return value / `gas_used` are bit-identical
 //! between the two — the PVM2 conformance invariant.
 
-#![cfg_attr(not(all(target_os = "linux", target_arch = "x86_64")), allow(unused))]
-#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
-
-use javm_bench::BuiltCaps;
-use javm_cap::image::Image;
-use nub::Nub;
-use ssz::Decode;
-
-struct Workload {
-    name: &'static str,
-    blob: &'static [u8],
-}
-
-const WORKLOADS: &[Workload] = &[
-    Workload {
-        name: "prime_sieve",
-        blob: include_bytes!(env!("PRIME_SIEVE_BLOB")),
-    },
-    Workload {
-        name: "ed25519",
-        blob: include_bytes!(env!("ED25519_BLOB")),
-    },
-    Workload {
-        name: "keccak",
-        blob: include_bytes!(env!("KECCAK_BLOB")),
-    },
-    Workload {
-        name: "blake2b",
-        blob: include_bytes!(env!("BLAKE2B_BLOB")),
-    },
-    Workload {
-        name: "ecrecover",
-        blob: include_bytes!(env!("ECRECOVER_BLOB")),
-    },
-    Workload {
-        name: "goldilocks_mul",
-        blob: include_bytes!(env!("GOLDILOCKS_MUL_BLOB")),
-    },
-    Workload {
-        name: "poseidon2_perm",
-        blob: include_bytes!(env!("POSEIDON2_PERM_BLOB")),
-    },
-    Workload {
-        name: "mini_verifier",
-        blob: include_bytes!(env!("MINI_VERIFIER_BLOB")),
-    },
-    Workload {
-        name: "poly_eval",
-        blob: include_bytes!(env!("POLY_EVAL_BLOB")),
-    },
-    Workload {
-        name: "fri_fold_tree",
-        blob: include_bytes!(env!("FRI_FOLD_TREE_BLOB")),
-    },
-    Workload {
-        name: "sub_vm_recurse",
-        blob: include_bytes!(env!("SUB_VM_RECURSE_BLOB")),
-    },
-    Workload {
-        name: "sub_vm_data_recurse",
-        blob: include_bytes!(env!("SUB_VM_DATA_RECURSE_BLOB")),
-    },
-];
-
-fn run_one(blob: &[u8], nub: &mut Nub) -> (u32, u32, u64, i64) {
-    let image = Image::from_ssz_bytes(blob).expect("decode Image");
-    let built = BuiltCaps::for_image(&image, 0);
-    built.put_into(nub);
-    let r = nub
-        .invoke_cached(built.instance_hash, 0, [0; 4], javm_bench::INITIAL_GAS)
-        .expect("invoke_cached");
-    (
-        r.exit_reason,
-        r.exit_arg,
-        r.return_value,
-        (javm_bench::INITIAL_GAS as i64) - (r.gas_remaining as i64),
-    )
-}
-
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 fn main() {
-    let mut interp = Nub::new_local();
-    let mut passes = 0usize;
-    let mut fails: Vec<(&str, String)> = Vec::new();
+    eprintln!("smoke is Linux x86-64 only");
+}
 
-    for w in WORKLOADS {
-        eprintln!("=== {} ===", w.name);
-        let img = Image::from_ssz_bytes(w.blob).expect("decode Image");
-        eprintln!(
-            "  code={}B jt={}  jt_offsets={}",
-            img.code.len(),
-            img.jump_table.len(),
-            img.jump_table_offsets.len(),
-        );
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn main() {
+    imp::main();
+}
 
-        // Fresh Hyperlight sandbox per workload — pvm2_bench's
-        // `reset_nub_hyperlight()` exists precisely because cap-publish
-        // state from prior workloads can deadlock `put_cap` after
-        // ~13 publishes on one long-lived sandbox.
-        let mut recomp = Nub::new_hyperlight().expect("Nub::new_hyperlight");
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod imp {
+    use javm_bench::BuiltCaps;
+    use javm_cap::image::Image;
+    use nub::Nub;
+    use ssz::Decode;
 
-        let (er_r, ea_r, rv_r, gas_r) = run_one(w.blob, &mut recomp);
-        let (er_i, ea_i, rv_i, gas_i) = run_one(w.blob, &mut interp);
-        eprintln!(
-            "  recomp: exit_reason={} exit_arg={} return_value={:#x} gas_used={}",
-            er_r, ea_r, rv_r, gas_r,
-        );
-        eprintln!(
-            "  interp: exit_reason={} exit_arg={} return_value={:#x} gas_used={}",
-            er_i, ea_i, rv_i, gas_i,
-        );
+    struct Workload {
+        name: &'static str,
+        blob: &'static [u8],
+    }
 
-        if er_r == er_i && ea_r == ea_i && rv_r == rv_i && gas_r == gas_i {
-            passes += 1;
-            eprintln!("  PASS");
-        } else {
-            fails.push((
-                w.name,
-                format!(
-                    "exit {}/{} vs {}/{}, return {:#x} vs {:#x}, gas {} vs {}",
-                    er_r, ea_r, er_i, ea_i, rv_r, rv_i, gas_r, gas_i,
-                ),
-            ));
-            eprintln!("  FAIL");
+    const WORKLOADS: &[Workload] = &[
+        Workload {
+            name: "prime_sieve",
+            blob: include_bytes!(env!("PRIME_SIEVE_BLOB")),
+        },
+        Workload {
+            name: "ed25519",
+            blob: include_bytes!(env!("ED25519_BLOB")),
+        },
+        Workload {
+            name: "keccak",
+            blob: include_bytes!(env!("KECCAK_BLOB")),
+        },
+        Workload {
+            name: "blake2b",
+            blob: include_bytes!(env!("BLAKE2B_BLOB")),
+        },
+        Workload {
+            name: "ecrecover",
+            blob: include_bytes!(env!("ECRECOVER_BLOB")),
+        },
+        Workload {
+            name: "goldilocks_mul",
+            blob: include_bytes!(env!("GOLDILOCKS_MUL_BLOB")),
+        },
+        Workload {
+            name: "poseidon2_perm",
+            blob: include_bytes!(env!("POSEIDON2_PERM_BLOB")),
+        },
+        Workload {
+            name: "mini_verifier",
+            blob: include_bytes!(env!("MINI_VERIFIER_BLOB")),
+        },
+        Workload {
+            name: "poly_eval",
+            blob: include_bytes!(env!("POLY_EVAL_BLOB")),
+        },
+        Workload {
+            name: "fri_fold_tree",
+            blob: include_bytes!(env!("FRI_FOLD_TREE_BLOB")),
+        },
+        Workload {
+            name: "sub_vm_recurse",
+            blob: include_bytes!(env!("SUB_VM_RECURSE_BLOB")),
+        },
+        Workload {
+            name: "sub_vm_data_recurse",
+            blob: include_bytes!(env!("SUB_VM_DATA_RECURSE_BLOB")),
+        },
+    ];
+
+    fn run_one(blob: &[u8], nub: &mut Nub) -> (u32, u32, u64, i64) {
+        let image = Image::from_ssz_bytes(blob).expect("decode Image");
+        let built = BuiltCaps::for_image(&image, 0);
+        built.put_into(nub);
+        let r = nub
+            .invoke_cached(built.instance_hash, 0, [0; 4], javm_bench::INITIAL_GAS)
+            .expect("invoke_cached");
+        (
+            r.exit_reason,
+            r.exit_arg,
+            r.return_value,
+            (javm_bench::INITIAL_GAS as i64) - (r.gas_remaining as i64),
+        )
+    }
+
+    pub fn main() {
+        let mut interp = Nub::new_local();
+        let mut passes = 0usize;
+        let mut fails: Vec<(&str, String)> = Vec::new();
+
+        for w in WORKLOADS {
+            eprintln!("=== {} ===", w.name);
+            let img = Image::from_ssz_bytes(w.blob).expect("decode Image");
+            eprintln!(
+                "  code={}B jt={}  jt_offsets={}",
+                img.code.len(),
+                img.jump_table.len(),
+                img.jump_table_offsets.len(),
+            );
+
+            // Fresh Hyperlight sandbox per workload — pvm2_bench's
+            // `reset_nub_hyperlight()` exists precisely because cap-publish
+            // state from prior workloads can deadlock `put_cap` after
+            // ~13 publishes on one long-lived sandbox.
+            let mut recomp = Nub::new_hyperlight().expect("Nub::new_hyperlight");
+
+            let (er_r, ea_r, rv_r, gas_r) = run_one(w.blob, &mut recomp);
+            let (er_i, ea_i, rv_i, gas_i) = run_one(w.blob, &mut interp);
+            eprintln!(
+                "  recomp: exit_reason={} exit_arg={} return_value={:#x} gas_used={}",
+                er_r, ea_r, rv_r, gas_r,
+            );
+            eprintln!(
+                "  interp: exit_reason={} exit_arg={} return_value={:#x} gas_used={}",
+                er_i, ea_i, rv_i, gas_i,
+            );
+
+            if er_r == er_i && ea_r == ea_i && rv_r == rv_i && gas_r == gas_i {
+                passes += 1;
+                eprintln!("  PASS");
+            } else {
+                fails.push((
+                    w.name,
+                    format!(
+                        "exit {}/{} vs {}/{}, return {:#x} vs {:#x}, gas {} vs {}",
+                        er_r, ea_r, er_i, ea_i, rv_r, rv_i, gas_r, gas_i,
+                    ),
+                ));
+                eprintln!("  FAIL");
+            }
         }
-    }
 
-    println!();
-    println!("Summary: {} pass / {} fail", passes, fails.len());
-    for (n, msg) in &fails {
-        println!("  FAIL {n}: {msg}");
-    }
-    if !fails.is_empty() {
-        std::process::exit(1);
+        println!();
+        println!("Summary: {} pass / {} fail", passes, fails.len());
+        for (n, msg) in &fails {
+            println!("  FAIL {n}: {msg}");
+        }
+        if !fails.is_empty() {
+            std::process::exit(1);
+        }
     }
 }

@@ -80,7 +80,7 @@ impl Interpreter {
 
     /// Execute the predecoded PVM2 program starting at `regs.pc`.
     /// `jump_table` and `jump_table_offsets` come from the Image
-    /// (see [`javm_cap::image::Image`]).
+    /// (see `javm_cap::image::Image`).
     pub fn run<M: Memory>(
         predecode: &Predecode,
         jump_table: &[u32],

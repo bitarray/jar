@@ -1,8 +1,5 @@
 //! Quick dump of PVM2 Image.code + predecode for debugging.
 
-#![cfg_attr(not(all(target_os = "linux", target_arch = "x86_64")), allow(unused))]
-#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
-
 use javm_cap::image::Image;
 use javm_exec::instruction::Inst;
 use javm_exec::predecode::predecode;

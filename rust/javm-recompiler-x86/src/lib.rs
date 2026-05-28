@@ -15,7 +15,7 @@
 //!   driver before entry and read after exit. Layout is mirrored by
 //!   the codegen-side `CTX_*` offset constants in
 //!   `javm-recompiler-x86::codegen`.
-//! - [`asm`], [`codegen`], [`predecode`] — codegen pipeline.
+//! - [`asm`], [`codegen`] — codegen pipeline.
 
 extern crate alloc;
 

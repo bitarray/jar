@@ -1146,7 +1146,7 @@ impl Compiler {
     /// on the large guests (ed25519, ecrecover).
     ///
     /// `jump_table_offsets` is the Image's CSR-style sub-table boundary
-    /// array — see [`javm_cap::image::Image::jump_table_offsets`].
+    /// array — see `javm_cap::image::Image::jump_table_offsets`.
     /// Empty implies no br_table dispatch is used. Each
     /// `BrTable { table_id, .. }` instruction dispatches through sub-
     /// table `table_id`, whose entries live at

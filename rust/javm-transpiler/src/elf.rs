@@ -1,7 +1,7 @@
 //! ELF parsing helpers shared by the PVM2 linker.
 //!
 //! Reads section headers + relocations from a 64-bit rv64em ELF and
-//! returns a [`LinkedElf`] with the data the linker needs to lay out
+//! returns a `LinkedElf` with the data the linker needs to lay out
 //! code/data and resolve relocations.
 
 use crate::TranspileError;

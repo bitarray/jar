@@ -1,7 +1,7 @@
 //! ELF → PVM2 (raw RV+C+custom-0 bytes) linker.
 //!
 //! Pipeline:
-//! 1. **Parse ELF + relocs** via [`crate::elf::parse_linked_elf`].
+//! 1. **Parse ELF + relocs** via `crate::elf::parse_linked_elf`.
 //! 2. **Concatenate code sections**. Require a single contiguous
 //!    code section for now — typical for LLD PIE output.
 //! 3. **Rewrite AUIPC pairs** to LUI with absolute targets. PVM2's

@@ -10,7 +10,7 @@
 //!
 //! Per-opcode pipeline metadata lives in `RV_GAS_COST_LUT`, indexed by
 //! the per-kind constants below (`RV_KIND_*`). The interpreter and
-//! recompiler share this LUT via [`feed_gas_kind`] / [`feed_gas_direct`].
+//! recompiler share this LUT via [`rv_feed_gas_kind`] / [`rv_feed_gas_direct`].
 
 #![allow(dead_code)] // some helpers are used only by the recompiler crate
 
