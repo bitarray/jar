@@ -106,8 +106,8 @@ pub const MAP_SRC_CODE: u8 = 1;
 /// because the `source_path` field is `[SlotIdx; MAX_SOURCE_DEPTH]` —
 /// an array of a local type, which Rust's orphan rules block from
 /// receiving a blanket impl in either `ssz` or `javm-cap`. The encoded
-/// form is field-by-field SSZ: `u64 || u64 || u8 || (MAX_SOURCE_DEPTH
-/// * 4 LE bytes) || u8 || u32`. All fields are fixed-length so the
+/// form is field-by-field SSZ (`u64 || u64 || u8 || MAX_SOURCE_DEPTH×4
+/// LE bytes || u8 || u32`); all fields are fixed-length, so the
 /// container is fixed-length too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct MemoryMapping {
@@ -281,11 +281,11 @@ pub enum ImageConvertError {
 ///   indexed by endpoint id. Empty slots use [`EndpointDef::empty`].
 ///   `stack_top` is extracted from the old `initial_regs[1]` (RISC-V
 ///   SP convention); `arg_cnode_slot` defaults to `SlotIdx(0)`.
-/// - `MappingSource::Slot(SlotPath)` becomes `source_kind = MAP_SRC_SLOT`
-///   + `source_path: [SlotIdx; MAX_SOURCE_DEPTH] + source_path_len`;
-///   paths deeper than 8 error. `MappingSource::Code(idx)` becomes
-///   `source_kind = MAP_SRC_CODE` + `code_index = idx` (validated
-///   against `image.codes`).
+/// - `MappingSource::Slot(SlotPath)` becomes `source_kind =
+///   MAP_SRC_SLOT` + `source_path: [SlotIdx; MAX_SOURCE_DEPTH]` +
+///   `source_path_len`; paths deeper than 8 error.
+/// - `MappingSource::Code(idx)` becomes `source_kind = MAP_SRC_CODE` +
+///   `code_index = idx` (validated against `image.codes`).
 pub fn image_cap(
     image: &crate::image::Image,
     pinned_hashes: &[(SlotIdx, CapHash)],

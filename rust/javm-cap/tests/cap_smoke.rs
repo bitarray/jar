@@ -3,18 +3,17 @@
 //! the source tree free of `_tests.rs` sidecars.
 
 use javm_cap::{
-    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, DataContent, EndpointDef, ImageCap,
-    ImageSlotEntry, InstanceCap, MAX_SOURCE_DEPTH, MemoryMapping, NUM_REGS, PAGE_SIZE, PageBytes,
-    PageRef, PageSlot, RwOverlay, SlotIdx,
+    CNodeCap, CacheDirectory, Cap, CapHashOrRef, CodeRegionCap, DataCap, DataContent, EndpointDef,
+    ImageCap, ImageSlotEntry, InstanceCap, MAP_SRC_SLOT, MAX_SOURCE_DEPTH, MemoryMapping, NUM_REGS,
+    PAGE_SIZE, PageBytes, PageRef, PageSlot, RwOverlay, SlotIdx,
 };
 use std::sync::Arc;
 
 fn make_image_cap() -> ImageCap {
-    let code: Vec<u8> = vec![0xAB, 0xCD];
     ImageCap {
-        code,
-        jump_table: Vec::new(),
-        jump_table_offsets: Vec::new(),
+        codes: vec![CodeRegionCap {
+            code: vec![0xAB, 0xCD],
+        }],
         endpoints: Vec::new(),
         mappings: Vec::new(),
         pinned: Vec::new(),
@@ -35,7 +34,7 @@ fn cap_image_constructor() {
 fn cap_image_payload_preserved() {
     let img: Cap = Cap::Image(make_image_cap());
     match img {
-        Cap::Image(i) => assert_eq!(i.code.as_slice(), &[0xAB, 0xCD]),
+        Cap::Image(i) => assert_eq!(i.codes[0].code.as_slice(), &[0xAB, 0xCD]),
         _ => panic!("expected Image"),
     }
 }
@@ -227,8 +226,10 @@ fn memory_mapping_path_slice() {
     let m = MemoryMapping {
         start: 0x4000,
         size: 0x2000,
+        source_kind: MAP_SRC_SLOT,
         source_path: path,
         source_path_len: 2,
+        code_index: 0,
     };
     assert_eq!(m.path(), &[SlotIdx(3), SlotIdx(7)]);
 }

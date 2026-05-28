@@ -1,6 +1,6 @@
 use javm_cap::{
-    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, DataContent, ImageCap, InstanceCap,
-    NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotIdx, TypeCap,
+    CNodeCap, CacheDirectory, Cap, CapHashOrRef, CodeRegionCap, DataCap, DataContent, ImageCap,
+    InstanceCap, NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotIdx, TypeCap,
 };
 
 #[test]
@@ -79,8 +79,12 @@ fn cnode_with_ref_target_panics() {
 fn image_hash_depends_on_code() {
     let mut img_a = empty_image();
     let mut img_b = empty_image();
-    img_a.code.extend_from_slice(b"foo");
-    img_b.code.extend_from_slice(b"bar");
+    img_a.codes = vec![CodeRegionCap {
+        code: b"foo".to_vec(),
+    }];
+    img_b.codes = vec![CodeRegionCap {
+        code: b"bar".to_vec(),
+    }];
     let a: Cap = Cap::Image(img_a);
     let b: Cap = Cap::Image(img_b);
     assert_ne!(a.cap_hash(), b.cap_hash());
@@ -88,9 +92,7 @@ fn image_hash_depends_on_code() {
 
 fn empty_image() -> ImageCap {
     ImageCap {
-        code: Vec::new(),
-        jump_table: Vec::new(),
-        jump_table_offsets: Vec::new(),
+        codes: Vec::new(),
         endpoints: Vec::new(),
         mappings: Vec::new(),
         pinned: Vec::new(),

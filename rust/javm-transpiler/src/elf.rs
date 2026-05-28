@@ -58,8 +58,13 @@ pub(crate) struct LinkedElf {
     pub(crate) heap_pages: u32,
     /// PCREL_HI20: AUIPC instruction vaddr → resolved data address.
     pub(crate) hi20_targets: HashMap<u64, u64>,
-    /// PCREL_LO12: instruction vaddr → resolved data address (looked up from paired HI20).
+    /// PCREL_LO12: instruction vaddr → resolved target address (looked up from paired HI20).
     pub(crate) lo12_targets: HashMap<u64, u64>,
+    /// PCREL_LO12: instruction vaddr → its anchor AUIPC (HI20) instruction
+    /// vaddr. The LO12's immediate is relative to the *AUIPC's* PC (RISC-V
+    /// ABI), so re-encoding a kept code-relative pair after fallthrough
+    /// injection needs the anchor's post-injection offset, not the LO12's.
+    pub(crate) lo12_to_hi20: HashMap<u64, u64>,
     /// CALL_PLT: AUIPC instruction vaddr → target function RISC-V vaddr.
     pub(crate) call_targets: HashMap<u64, u64>,
     /// Absolute code pointers in data sections: (data_vaddr, target_code_vaddr, entry_size).
@@ -329,6 +334,7 @@ pub(crate) fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError>
 
     let mut hi20_targets: HashMap<u64, u64> = HashMap::new();
     let mut lo12_targets: HashMap<u64, u64> = HashMap::new();
+    let mut lo12_to_hi20: HashMap<u64, u64> = HashMap::new();
     let mut call_targets: HashMap<u64, u64> = HashMap::new();
 
     let mut lo12_entries: Vec<(u64, u64)> = Vec::new();
@@ -410,6 +416,7 @@ pub(crate) fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError>
     for (lo12_addr, hi20_addr) in lo12_entries {
         if let Some(&data_addr) = hi20_targets.get(&hi20_addr) {
             lo12_targets.insert(lo12_addr, data_addr);
+            lo12_to_hi20.insert(lo12_addr, hi20_addr);
         }
     }
 
@@ -424,6 +431,7 @@ pub(crate) fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError>
         heap_pages,
         hi20_targets,
         lo12_targets,
+        lo12_to_hi20,
         call_targets,
         abs_code_ptrs: abs64_relocs,
         sub32_relocs,
