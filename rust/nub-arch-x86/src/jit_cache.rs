@@ -134,17 +134,6 @@ pub fn evict_all() {
 /// Hyperlight serialises host calls; the returned reference is valid
 /// until eviction (V1 never evicts), effectively `'static`.
 #[allow(clippy::too_many_arguments)]
-
-/// RV+C+custom-0 variant of [`get_or_compile`].
-///
-/// Layout differences vs the PVM path:
-/// - **BB region** carries the RV `valid_pc` set (one byte per code
-///   byte; 1 = instruction boundary). JALR's runtime validator reads
-///   it through `CTX_BB_STARTS`, same as the PVM djump table consumer.
-/// - **JT region** is empty (one page padding) — the RV path has no
-///   jump table; jalr targets are raw PCs validated against `valid_pc`.
-/// - Everything else (DISPATCH / JIT / TRAMP) matches the PVM layout.
-#[allow(clippy::too_many_arguments)]
 pub fn get_or_compile(
     image_hash: &CapHash,
     code: &[u8],
@@ -161,7 +150,7 @@ pub fn get_or_compile(
         // Region sizing. valid_pc is `code.len()` bytes; the streaming
         // compile produces it inline so we don't allocate it twice.
         let bb_size = page_round_up_min1(code.len());
-        let jt_bytes_used = jump_table.len() * core::mem::size_of::<u32>();
+        let jt_bytes_used = core::mem::size_of_val(jump_table);
         let jt_size = page_round_up_min1(jt_bytes_used);
         let dispatch_size = page_round_up_min1(code.len() * core::mem::size_of::<i32>());
 
@@ -171,7 +160,7 @@ pub fn get_or_compile(
         let jit_offset = dispatch_offset + dispatch_size;
         let jit_va = arena_base_va + jit_offset as u64;
 
-        let compiler = Compiler::new(&[], &[], helpers, code.len(), jit_va, mem_cycles);
+        let compiler = Compiler::new(helpers, code.len(), jit_va, mem_cycles);
         let CompileResult {
             native_code,
             dispatch_entries,

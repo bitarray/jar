@@ -124,26 +124,20 @@ fn dump(name: &str, blob: &[u8]) {
 }
 
 fn main() {
-    dump("prime_sieve", include_bytes!(env!("PRIME_SIEVE_PVM2_BLOB")));
-    dump("keccak", include_bytes!(env!("KECCAK_PVM2_BLOB")));
-    dump("blake2b", include_bytes!(env!("BLAKE2B_PVM2_BLOB")));
+    dump("prime_sieve", include_bytes!(env!("PRIME_SIEVE_BLOB")));
+    dump("keccak", include_bytes!(env!("KECCAK_BLOB")));
+    dump("blake2b", include_bytes!(env!("BLAKE2B_BLOB")));
     dump(
         "goldilocks_mul",
-        include_bytes!(env!("GOLDILOCKS_MUL_PVM2_BLOB")),
+        include_bytes!(env!("GOLDILOCKS_MUL_BLOB")),
     );
     dump(
         "poseidon2_perm",
-        include_bytes!(env!("POSEIDON2_PERM_PVM2_BLOB")),
+        include_bytes!(env!("POSEIDON2_PERM_BLOB")),
     );
-    dump(
-        "mini_verifier",
-        include_bytes!(env!("MINI_VERIFIER_PVM2_BLOB")),
-    );
-    dump("poly_eval", include_bytes!(env!("POLY_EVAL_PVM2_BLOB")));
-    dump(
-        "fri_fold_tree",
-        include_bytes!(env!("FRI_FOLD_TREE_PVM2_BLOB")),
-    );
-    dump("ed25519", include_bytes!(env!("ED25519_PVM2_BLOB")));
-    dump("ecrecover", include_bytes!(env!("ECRECOVER_PVM2_BLOB")));
+    dump("mini_verifier", include_bytes!(env!("MINI_VERIFIER_BLOB")));
+    dump("poly_eval", include_bytes!(env!("POLY_EVAL_BLOB")));
+    dump("fri_fold_tree", include_bytes!(env!("FRI_FOLD_TREE_BLOB")));
+    dump("ed25519", include_bytes!(env!("ED25519_BLOB")));
+    dump("ecrecover", include_bytes!(env!("ECRECOVER_BLOB")));
 }

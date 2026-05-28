@@ -33,7 +33,7 @@ fn profile_one(name: &str, blob: &[u8]) {
 
     // Warm-up + report native_code size.
     let native_size = {
-        let c = Compiler::new(&[], &[], dummy_helpers(), code.len(), 0x4000_0000, 1);
+        let c = Compiler::new(dummy_helpers(), code.len(), 0x4000_0000, 1);
         let r = c.compile_rv(code, jt_offsets);
         r.native_code.len()
     };
@@ -44,7 +44,7 @@ fn profile_one(name: &str, blob: &[u8]) {
 
     for _ in 0..ITERS {
         let t0 = Instant::now();
-        let c = Compiler::new(&[], &[], dummy_helpers(), code.len(), 0x4000_0000, 1);
+        let c = Compiler::new(dummy_helpers(), code.len(), 0x4000_0000, 1);
         let _ = c.compile_rv(code, jt_offsets);
         let t1 = Instant::now();
         comp_ns += (t1 - t0).as_nanos();
@@ -84,16 +84,16 @@ macro_rules! workload {
 fn main() {
     println!("PVM2 compile-path profile (predecode vs compile)");
     println!();
-    workload!("prime_sieve", "PRIME_SIEVE_PVM2_BLOB");
-    workload!("keccak", "KECCAK_PVM2_BLOB");
-    workload!("blake2b", "BLAKE2B_PVM2_BLOB");
-    workload!("goldilocks_mul", "GOLDILOCKS_MUL_PVM2_BLOB");
-    workload!("sub_vm_recurse", "SUB_VM_RECURSE_PVM2_BLOB");
-    workload!("sub_vm_data_recurse", "SUB_VM_DATA_RECURSE_PVM2_BLOB");
-    workload!("ed25519", "ED25519_PVM2_BLOB");
-    workload!("ecrecover", "ECRECOVER_PVM2_BLOB");
-    workload!("poseidon2_perm", "POSEIDON2_PERM_PVM2_BLOB");
-    workload!("mini_verifier", "MINI_VERIFIER_PVM2_BLOB");
-    workload!("poly_eval", "POLY_EVAL_PVM2_BLOB");
-    workload!("fri_fold_tree", "FRI_FOLD_TREE_PVM2_BLOB");
+    workload!("prime_sieve", "PRIME_SIEVE_BLOB");
+    workload!("keccak", "KECCAK_BLOB");
+    workload!("blake2b", "BLAKE2B_BLOB");
+    workload!("goldilocks_mul", "GOLDILOCKS_MUL_BLOB");
+    workload!("sub_vm_recurse", "SUB_VM_RECURSE_BLOB");
+    workload!("sub_vm_data_recurse", "SUB_VM_DATA_RECURSE_BLOB");
+    workload!("ed25519", "ED25519_BLOB");
+    workload!("ecrecover", "ECRECOVER_BLOB");
+    workload!("poseidon2_perm", "POSEIDON2_PERM_BLOB");
+    workload!("mini_verifier", "MINI_VERIFIER_BLOB");
+    workload!("poly_eval", "POLY_EVAL_BLOB");
+    workload!("fri_fold_tree", "FRI_FOLD_TREE_BLOB");
 }

@@ -46,9 +46,7 @@ fn hello_world_chain_image() -> Image {
 
     Image {
         code,
-        packed_bitmask: Vec::new(),
         jump_table: Vec::new(),
-        // PVM2 marker: a single empty sub-table (offsets [0, 0]).
         jump_table_offsets: vec![0, 0],
         endpoints,
         memory_mappings: Vec::<MemoryMapping>::new(),

@@ -220,14 +220,7 @@ pub struct Compiler {
 }
 
 impl Compiler {
-    pub fn new(
-        bitmask: &[u8],
-        _jump_table: &[u32],
-        helpers: HelperFns,
-        code_len: usize,
-        jit_va_base: u64,
-        mem_cycles: u8,
-    ) -> Self {
+    pub fn new(helpers: HelperFns, code_len: usize, jit_va_base: u64, mem_cycles: u8) -> Self {
         // Estimate native code size: ~3x PVM code provides safety margin for
         // direct-write emission (no per-byte capacity checks in hot loop).
         let estimated_native = code_len * 3 + 8192;
@@ -265,8 +258,8 @@ impl Compiler {
             reg_defs_active: 0,
             last_add_cf: None,
             helpers,
-            bitmask_ptr: bitmask.as_ptr(),
-            bitmask_len: bitmask.len(),
+            bitmask_ptr: core::ptr::null(),
+            bitmask_len: 0,
             trap_entries: Vec::with_capacity(2048),
             mem_cycles,
             gas_sim: GasSimulator::new(),
@@ -515,10 +508,6 @@ impl Compiler {
             self.asm.pop(Reg::RCX);
         }
     }
-
-    /// Three-register 64-bit ALU with optional commutativity optimization.
-    /// When `commutative` is true and rd == rb, emit `op(d, a)` directly
-    /// instead of saving/restoring via SCRATCH.
 
     /// Emit an exit sequence that sets exit_reason and exit_arg.
     pub(crate) fn emit_exit(&mut self, reason: u32, arg: u32) {

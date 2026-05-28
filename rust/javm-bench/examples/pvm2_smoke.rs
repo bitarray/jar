@@ -19,51 +19,51 @@ struct Workload {
 const WORKLOADS: &[Workload] = &[
     Workload {
         name: "prime_sieve",
-        blob: include_bytes!(env!("PRIME_SIEVE_PVM2_BLOB")),
+        blob: include_bytes!(env!("PRIME_SIEVE_BLOB")),
     },
     Workload {
         name: "ed25519",
-        blob: include_bytes!(env!("ED25519_PVM2_BLOB")),
+        blob: include_bytes!(env!("ED25519_BLOB")),
     },
     Workload {
         name: "keccak",
-        blob: include_bytes!(env!("KECCAK_PVM2_BLOB")),
+        blob: include_bytes!(env!("KECCAK_BLOB")),
     },
     Workload {
         name: "blake2b",
-        blob: include_bytes!(env!("BLAKE2B_PVM2_BLOB")),
+        blob: include_bytes!(env!("BLAKE2B_BLOB")),
     },
     Workload {
         name: "ecrecover",
-        blob: include_bytes!(env!("ECRECOVER_PVM2_BLOB")),
+        blob: include_bytes!(env!("ECRECOVER_BLOB")),
     },
     Workload {
         name: "goldilocks_mul",
-        blob: include_bytes!(env!("GOLDILOCKS_MUL_PVM2_BLOB")),
+        blob: include_bytes!(env!("GOLDILOCKS_MUL_BLOB")),
     },
     Workload {
         name: "poseidon2_perm",
-        blob: include_bytes!(env!("POSEIDON2_PERM_PVM2_BLOB")),
+        blob: include_bytes!(env!("POSEIDON2_PERM_BLOB")),
     },
     Workload {
         name: "mini_verifier",
-        blob: include_bytes!(env!("MINI_VERIFIER_PVM2_BLOB")),
+        blob: include_bytes!(env!("MINI_VERIFIER_BLOB")),
     },
     Workload {
         name: "poly_eval",
-        blob: include_bytes!(env!("POLY_EVAL_PVM2_BLOB")),
+        blob: include_bytes!(env!("POLY_EVAL_BLOB")),
     },
     Workload {
         name: "fri_fold_tree",
-        blob: include_bytes!(env!("FRI_FOLD_TREE_PVM2_BLOB")),
+        blob: include_bytes!(env!("FRI_FOLD_TREE_BLOB")),
     },
     Workload {
         name: "sub_vm_recurse",
-        blob: include_bytes!(env!("SUB_VM_RECURSE_PVM2_BLOB")),
+        blob: include_bytes!(env!("SUB_VM_RECURSE_BLOB")),
     },
     Workload {
         name: "sub_vm_data_recurse",
-        blob: include_bytes!(env!("SUB_VM_DATA_RECURSE_PVM2_BLOB")),
+        blob: include_bytes!(env!("SUB_VM_DATA_RECURSE_BLOB")),
     },
 ];
 

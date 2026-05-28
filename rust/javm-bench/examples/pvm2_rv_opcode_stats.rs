@@ -270,47 +270,44 @@ fn profile_one(name: &str, blob: &[u8]) {
         if let Some(p) = prev {
             let p_dst = dst_of(&p);
             let i_rs1 = rs1_of(&inst);
-            if let (Some(d), Some(s)) = (p_dst, i_rs1) {
-                if d != 0 && d == s {
-                    *chained_pairs
-                        .entry((variant_name(&p), variant_name(&inst)))
-                        .or_default() += 1;
-                    if matches!(p, RvInst::Lui { .. }) && matches!(inst, RvInst::Addi { .. }) {
-                        lui_addi += 1;
-                    }
+            if let (Some(d), Some(s)) = (p_dst, i_rs1)
+                && d != 0
+                && d == s
+            {
+                *chained_pairs
+                    .entry((variant_name(&p), variant_name(&inst)))
+                    .or_default() += 1;
+                if matches!(p, RvInst::Lui { .. }) && matches!(inst, RvInst::Addi { .. }) {
+                    lui_addi += 1;
                 }
             }
             // Precise Lui→Add same-rd pattern (this is what compile_lui actually fuses).
-            if let (RvInst::Lui { rd: l_rd, .. }, RvInst::Add { rd: a_rd, rs1, rs2 }) = (p, inst) {
-                if a_rd != 0 && a_rd == l_rd && (rs1 == l_rd || rs2 == l_rd) {
-                    lui_add_same_rd += 1;
-                }
+            if let (RvInst::Lui { rd: l_rd, .. }, RvInst::Add { rd: a_rd, rs1, rs2 }) = (p, inst)
+                && a_rd != 0
+                && a_rd == l_rd
+                && (rs1 == l_rd || rs2 == l_rd)
+            {
+                lui_add_same_rd += 1;
             }
             // Precise Ld→ALU patterns the recompiler fuses (rd != 0; ALU reads ld's rd).
-            if let RvInst::Ld { rd: l_rd, .. } = p {
-                if l_rd != 0 {
-                    let alu_uses_ld = |a_rs1: u8, a_rs2: u8| a_rs1 == l_rd || a_rs2 == l_rd;
-                    match inst {
-                        RvInst::Add { rd: a_rd, rs1, rs2 }
-                            if a_rd != 0 && alu_uses_ld(rs1, rs2) =>
-                        {
-                            ld_add_any += 1
-                        }
-                        RvInst::Xor { rd: a_rd, rs1, rs2 }
-                            if a_rd != 0 && alu_uses_ld(rs1, rs2) =>
-                        {
-                            ld_xor_any += 1
-                        }
-                        RvInst::Or { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
-                            ld_or_any += 1
-                        }
-                        RvInst::And { rd: a_rd, rs1, rs2 }
-                            if a_rd != 0 && alu_uses_ld(rs1, rs2) =>
-                        {
-                            ld_and_any += 1
-                        }
-                        _ => {}
+            if let RvInst::Ld { rd: l_rd, .. } = p
+                && l_rd != 0
+            {
+                let alu_uses_ld = |a_rs1: u8, a_rs2: u8| a_rs1 == l_rd || a_rs2 == l_rd;
+                match inst {
+                    RvInst::Add { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
+                        ld_add_any += 1
                     }
+                    RvInst::Xor { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
+                        ld_xor_any += 1
+                    }
+                    RvInst::Or { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
+                        ld_or_any += 1
+                    }
+                    RvInst::And { rd: a_rd, rs1, rs2 } if a_rd != 0 && alu_uses_ld(rs1, rs2) => {
+                        ld_and_any += 1
+                    }
+                    _ => {}
                 }
             }
         }
@@ -375,11 +372,11 @@ macro_rules! workload {
 fn main() {
     println!("PVM2 RV opcode + chained-pair frequency profile");
     println!();
-    workload!("ed25519", "ED25519_PVM2_BLOB");
-    workload!("ecrecover", "ECRECOVER_PVM2_BLOB");
-    workload!("blake2b", "BLAKE2B_PVM2_BLOB");
-    workload!("keccak", "KECCAK_PVM2_BLOB");
-    workload!("poseidon2_perm", "POSEIDON2_PERM_PVM2_BLOB");
-    workload!("mini_verifier", "MINI_VERIFIER_PVM2_BLOB");
-    workload!("fri_fold_tree", "FRI_FOLD_TREE_PVM2_BLOB");
+    workload!("ed25519", "ED25519_BLOB");
+    workload!("ecrecover", "ECRECOVER_BLOB");
+    workload!("blake2b", "BLAKE2B_BLOB");
+    workload!("keccak", "KECCAK_BLOB");
+    workload!("poseidon2_perm", "POSEIDON2_PERM_BLOB");
+    workload!("mini_verifier", "MINI_VERIFIER_BLOB");
+    workload!("fri_fold_tree", "FRI_FOLD_TREE_BLOB");
 }

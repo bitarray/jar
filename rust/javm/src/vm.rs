@@ -676,9 +676,7 @@ mod tests {
     fn empty_image_with_code(code: Vec<u8>) -> Image {
         Image {
             code,
-            packed_bitmask: Vec::new(),
             jump_table: Vec::new(),
-            // PVM2 marker: a single empty sub-table.
             jump_table_offsets: vec![0, 0],
             endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
@@ -865,20 +863,14 @@ mod tests {
 
     #[test]
     fn invoke_cached_oog_returns_faulted() {
-        // Lots of fallthroughs with a tiny budget. Opcode 1 = fallthrough.
-        let code = vec![1u8; 50];
-        let mut packed = vec![0xFFu8; code.len().div_ceil(8)];
-        if !code.len().is_multiple_of(8) {
-            // mask off the last byte's unused high bits
-            let used = code.len() % 8;
-            let last = packed.len() - 1;
-            packed[last] = (1u8 << used) - 1;
-        }
+        // PVM2 `jal x0, 0` — a 4-byte self-jump. Runs forever (each
+        // iteration is a 1-instruction basic block) until the gas
+        // budget runs out.
+        let code = 0x0000_006Fu32.to_le_bytes().to_vec();
         let img = Image {
             code,
-            packed_bitmask: packed,
             jump_table: Vec::new(),
-            jump_table_offsets: Vec::new(),
+            jump_table_offsets: vec![0, 0],
             endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: Vec::new(),

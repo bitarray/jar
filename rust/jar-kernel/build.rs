@@ -12,7 +12,7 @@ fn main() {
     if std::env::var("BUILD_CRATE_GUEST_BUILD").is_ok() {
         return;
     }
-    let blob = build_javm::build_pvm2("../../components/examples/simple-chain", "simple-chain");
+    let blob = build_javm::build("../../components/examples/simple-chain", "simple-chain");
     println!("cargo:rustc-env=SIMPLE_CHAIN_BLOB={}", blob.display());
     println!("cargo:rerun-if-changed=../../components/examples/simple-chain/src/main.rs");
     println!("cargo:rerun-if-changed=../../components/examples/simple-chain/src/lib.rs");

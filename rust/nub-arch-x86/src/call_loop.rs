@@ -135,7 +135,6 @@ const ERR_INSTANCE_KIND: u32 = 22;
 const ERR_IMAGE_NOT_FOUND: u32 = 23;
 const ERR_IMAGE_KIND: u32 = 24;
 const ERR_ENDPOINT_OOB: u32 = 25;
-const ERR_ENDPOINT_UNDEFINED: u32 = 26;
 const ERR_DERIVE_SLOT_OOB: u32 = 31;
 // Code 32 was `ERR_DERIVE_PUBLISH`, reserved for a publish-OOM path
 // that no longer exists: `publish_transient_instance` is infallible
@@ -729,15 +728,6 @@ fn build_frame_inner(
         return Err(ERR_ENDPOINT_OOB);
     }
     let ep = &img.endpoints[endpoint];
-    // PVM treats entry_pc==0 as "undefined" because PC=0 is reserved
-    // as the JAL-to-entry prologue. The PVM2 path has no such
-    // prologue; the first byte of the code section is a real
-    // instruction, so endpoint 0 with fn_ptr at base_vaddr lands
-    // legitimately at PC=0. Use img.bitmask.is_empty() as the
-    // PVM2-path signal.
-    if ep.entry_pc == 0 && !img.bitmask.is_empty() {
-        return Err(ERR_ENDPOINT_UNDEFINED);
-    }
 
     let mut regs = ep.initial_regs;
     if let Some(inst_regs) = inst_regs {

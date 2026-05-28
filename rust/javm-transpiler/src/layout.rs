@@ -1,21 +1,17 @@
 //! Shared program data-region layout for transpiler-emitted Images.
 //!
-//! [`ProgramLayout`] assigns `cap_index`, `base_page`, `page_count`,
-//! and `access` to each DATA cap appearing in a transpiler-emitted
-//! Image. Today the only consumer is [`crate::linker::link_elf`],
-//! which uses [`ProgramLayout::stack_top`] to compute the initial
-//! SP value baked into every endpoint's
-//! [`javm_cap::image::EndpointDef::initial_regs`]. The page-count
-//! and base-page metadata will also feed declarative
-//! `Image.memory_mappings` once the kernel honors them at instance
-//! init (future work).
+//! [`ProgramLayout`] assigns `cap_index`, `base_page`, and `page_count`
+//! to each DATA cap appearing in a transpiler-emitted Image. The
+//! consumer is [`crate::linker_rv::link_elf_rv`], which uses
+//! [`ProgramLayout::stack_top`] to compute the initial SP value baked
+//! into every endpoint's
+//! [`javm_cap::image::EndpointDef::initial_regs`]. The page-count and
+//! base-page metadata also feed declarative `Image.memory_mappings`.
 //!
 //! Cap-index convention: 64 = CODE, 65 = stack, 66 = ro, 67 = rw,
 //! 68 = heap. Address layout starts at page 0 and stacks linearly:
 //! stack lives at `[0, stack_pages)`, ro at `[stack_pages,
 //! stack_pages + ro_pages)`, etc.
-
-use crate::program::Access;
 
 /// Cap index of the CODE cap in transpiler-emitted blobs. Matches the
 /// JAR `init_cap` field.
@@ -31,14 +27,13 @@ pub const HEAP_CAP_INDEX: u8 = 68;
 /// PVM page size in bytes.
 pub const PVM_PAGE_SIZE: u32 = 4096;
 
-/// One DATA cap's layout: where it lives in the manifest, where it maps
-/// in guest memory, and at what access mode.
+/// One DATA cap's layout: where it lives in the manifest and where it
+/// maps in guest memory.
 #[derive(Debug, Clone, Copy)]
 pub struct DataCapEntry {
     pub cap_index: u8,
     pub base_page: u32,
     pub page_count: u32,
-    pub access: Access,
 }
 
 /// Full DATA-cap layout of a transpiler-emitted blob. `stack` is
@@ -66,7 +61,6 @@ impl ProgramLayout {
             cap_index: STACK_CAP_INDEX,
             base_page: next_page,
             page_count: stack_pages,
-            access: Access::RW,
         };
         next_page += stack_pages;
 
@@ -75,7 +69,6 @@ impl ProgramLayout {
                 cap_index: RO_CAP_INDEX,
                 base_page: next_page,
                 page_count: ro_pages,
-                access: Access::RO,
             };
             next_page += ro_pages;
             Some(e)
@@ -88,7 +81,6 @@ impl ProgramLayout {
                 cap_index: RW_CAP_INDEX,
                 base_page: next_page,
                 page_count: rw_pages,
-                access: Access::RW,
             };
             next_page += rw_pages;
             Some(e)
@@ -101,7 +93,6 @@ impl ProgramLayout {
                 cap_index: HEAP_CAP_INDEX,
                 base_page: next_page,
                 page_count: heap_pages,
-                access: Access::RW,
             };
             Some(e)
         } else {

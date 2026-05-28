@@ -319,7 +319,6 @@ fn placeholder_kernel_image() -> Image {
     use std::collections::BTreeMap;
     Image {
         code: vec![0u8], // single TRAP byte
-        packed_bitmask: vec![0x01],
         jump_table: Vec::new(),
         jump_table_offsets: Vec::new(),
         endpoints: BTreeMap::new(),

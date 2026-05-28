@@ -60,38 +60,23 @@ macro_rules! bench_workload {
     };
 }
 
-bench_workload!(prime_sieve, "PRIME_SIEVE_PVM2_BLOB", 0, "prime_sieve");
-bench_workload!(keccak, "KECCAK_PVM2_BLOB", 0, "keccak");
-bench_workload!(blake2b, "BLAKE2B_PVM2_BLOB", 0, "blake2b");
-bench_workload!(
-    goldilocks_mul,
-    "GOLDILOCKS_MUL_PVM2_BLOB",
-    0,
-    "goldilocks_mul"
-);
-bench_workload!(
-    sub_vm_recurse,
-    "SUB_VM_RECURSE_PVM2_BLOB",
-    0,
-    "sub_vm_recurse"
-);
+bench_workload!(prime_sieve, "PRIME_SIEVE_BLOB", 0, "prime_sieve");
+bench_workload!(keccak, "KECCAK_BLOB", 0, "keccak");
+bench_workload!(blake2b, "BLAKE2B_BLOB", 0, "blake2b");
+bench_workload!(goldilocks_mul, "GOLDILOCKS_MUL_BLOB", 0, "goldilocks_mul");
+bench_workload!(sub_vm_recurse, "SUB_VM_RECURSE_BLOB", 0, "sub_vm_recurse");
 bench_workload!(
     sub_vm_data_recurse,
-    "SUB_VM_DATA_RECURSE_PVM2_BLOB",
+    "SUB_VM_DATA_RECURSE_BLOB",
     0,
     "sub_vm_data_recurse"
 );
-bench_workload!(ed25519, "ED25519_PVM2_BLOB", 0, "ed25519");
-bench_workload!(ecrecover, "ECRECOVER_PVM2_BLOB", 0, "ecrecover");
-bench_workload!(
-    poseidon2_perm,
-    "POSEIDON2_PERM_PVM2_BLOB",
-    0,
-    "poseidon2_perm"
-);
-bench_workload!(mini_verifier, "MINI_VERIFIER_PVM2_BLOB", 0, "mini_verifier");
-bench_workload!(poly_eval, "POLY_EVAL_PVM2_BLOB", 0, "poly_eval");
-bench_workload!(fri_fold_tree, "FRI_FOLD_TREE_PVM2_BLOB", 0, "fri_fold_tree");
+bench_workload!(ed25519, "ED25519_BLOB", 0, "ed25519");
+bench_workload!(ecrecover, "ECRECOVER_BLOB", 0, "ecrecover");
+bench_workload!(poseidon2_perm, "POSEIDON2_PERM_BLOB", 0, "poseidon2_perm");
+bench_workload!(mini_verifier, "MINI_VERIFIER_BLOB", 0, "mini_verifier");
+bench_workload!(poly_eval, "POLY_EVAL_BLOB", 0, "poly_eval");
+bench_workload!(fri_fold_tree, "FRI_FOLD_TREE_BLOB", 0, "fri_fold_tree");
 
 criterion_group!(
     benches,

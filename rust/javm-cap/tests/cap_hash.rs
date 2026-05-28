@@ -89,7 +89,6 @@ fn image_hash_depends_on_code() {
 fn empty_image() -> ImageCap {
     ImageCap {
         code: Vec::new(),
-        bitmask: Vec::new(),
         jump_table: Vec::new(),
         jump_table_offsets: Vec::new(),
         endpoints: Vec::new(),

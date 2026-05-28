@@ -13,65 +13,65 @@ fn main() {
         (
             "../../components/benches/prime-sieve",
             "bench-prime-sieve",
-            "PRIME_SIEVE_PVM2_BLOB",
+            "PRIME_SIEVE_BLOB",
         ),
         (
             "../../components/benches/ed25519",
             "bench-ed25519",
-            "ED25519_PVM2_BLOB",
+            "ED25519_BLOB",
         ),
         (
             "../../components/benches/keccak",
             "bench-keccak",
-            "KECCAK_PVM2_BLOB",
+            "KECCAK_BLOB",
         ),
         (
             "../../components/benches/blake2b",
             "bench-blake2b",
-            "BLAKE2B_PVM2_BLOB",
+            "BLAKE2B_BLOB",
         ),
         (
             "../../components/benches/ecrecover",
             "bench-ecrecover",
-            "ECRECOVER_PVM2_BLOB",
+            "ECRECOVER_BLOB",
         ),
         (
             "../../components/benches/goldilocks-mul",
             "bench-goldilocks-mul",
-            "GOLDILOCKS_MUL_PVM2_BLOB",
+            "GOLDILOCKS_MUL_BLOB",
         ),
         (
             "../../components/benches/poseidon2-perm",
             "bench-poseidon2-perm",
-            "POSEIDON2_PERM_PVM2_BLOB",
+            "POSEIDON2_PERM_BLOB",
         ),
         (
             "../../components/benches/mini-verifier",
             "bench-mini-verifier",
-            "MINI_VERIFIER_PVM2_BLOB",
+            "MINI_VERIFIER_BLOB",
         ),
         (
             "../../components/benches/poly-eval",
             "bench-poly-eval",
-            "POLY_EVAL_PVM2_BLOB",
+            "POLY_EVAL_BLOB",
         ),
         (
             "../../components/benches/fri-fold-tree",
             "bench-fri-fold-tree",
-            "FRI_FOLD_TREE_PVM2_BLOB",
+            "FRI_FOLD_TREE_BLOB",
         ),
         (
             "../../components/benches/sub-vm-recurse",
             "bench-sub-vm-recurse",
-            "SUB_VM_RECURSE_PVM2_BLOB",
+            "SUB_VM_RECURSE_BLOB",
         ),
         (
             "../../components/benches/sub-vm-data-recurse",
             "bench-sub-vm-data-recurse",
-            "SUB_VM_DATA_RECURSE_PVM2_BLOB",
+            "SUB_VM_DATA_RECURSE_BLOB",
         ),
     ] {
-        let blob = build_javm::build_pvm2(path, crate_name);
+        let blob = build_javm::build(path, crate_name);
         println!("cargo:rustc-env={env}={}", blob.display());
         println!("cargo:rerun-if-changed={path}/src");
         println!("cargo:rerun-if-changed={path}/Cargo.toml");

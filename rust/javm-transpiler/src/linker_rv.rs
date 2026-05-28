@@ -1,11 +1,7 @@
 //! ELF → PVM2 (raw RV+C+custom-0 bytes) linker.
 //!
-//! Parallel to [`super::linker::link_elf`] but emits raw RV bytes
-//! instead of PVM-translated bytes. Reuses the ELF parsing + reloc
-//! collection done by [`super::linker::parse_linked_elf`].
-//!
 //! Pipeline:
-//! 1. **Parse ELF + relocs** (shared with the PVM path).
+//! 1. **Parse ELF + relocs** via [`crate::elf::parse_linked_elf`].
 //! 2. **Concatenate code sections**. Require a single contiguous
 //!    code section for now — typical for LLD PIE output.
 //! 3. **Rewrite AUIPC pairs** to LUI with absolute targets. PVM2's
@@ -20,18 +16,14 @@
 //!    standard `ecall` / `ebreak`, no CSR / atomic / FP / privileged
 //!    encodings (see `~/docs/pvm-isa/05-pvm2-rv-diff.md` §"Forbidden
 //!    encodings").
-//! 6. **Emit Image** with `code = raw RV bytes`, empty
-//!    `packed_bitmask`, empty `jump_table`. The recompiler-side
+//! 6. **Emit Image** with `code = raw RV bytes`. The recompiler-side
 //!    `compile_rv` consumes these directly.
-//!
-//! This module is **NOT WIRED INTO build-javm yet**. It lives
-//! alongside the PVM path until Phase 2 flips the switch.
 
 use crate::TranspileError;
+use crate::elf::parse_linked_elf;
 use crate::layout::{
     HEAP_CAP_INDEX, PVM_PAGE_SIZE, ProgramLayout, RO_CAP_INDEX, RW_CAP_INDEX, STACK_CAP_INDEX,
 };
-use crate::linker::parse_linked_elf;
 use javm_cap::SlotIdx;
 use javm_cap::abi::{BARE_GAS_SLOT, BARE_QUOTA_SLOT, BARE_YIELD_CATCHER_SLOT};
 use javm_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap};
@@ -265,7 +257,7 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
     // Read endpoint entries first since they're required function
     // entries (the host trampoline jumps directly to these PCs).
     let endpoint_entries_pre: Vec<u32> = {
-        match crate::linker::find_all_section_bytes_for_rv(elf_data, ".subsoil.endpoints") {
+        match crate::elf::find_all_section_bytes(elf_data, ".subsoil.endpoints") {
             Ok(sections) => sections
                 .iter()
                 .flat_map(|s| s.chunks(16))
@@ -563,7 +555,6 @@ pub fn link_elf_rv(elf_data: &[u8]) -> Result<Image, TranspileError> {
 
     Ok(Image {
         code,
-        packed_bitmask: Vec::new(),
         jump_table,
         jump_table_offsets,
         endpoints,
@@ -839,7 +830,7 @@ fn read_subsoil_endpoints_rv(
     base_vaddr: u64,
     code_len: usize,
 ) -> Result<BTreeMap<u8, EndpointDef>, TranspileError> {
-    let sections = crate::linker::find_all_section_bytes_for_rv(elf_data, ".subsoil.endpoints")?;
+    let sections = crate::elf::find_all_section_bytes(elf_data, ".subsoil.endpoints")?;
     const DESCRIPTOR_SIZE: usize = 16;
     let mut endpoints: BTreeMap<u8, EndpointDef> = BTreeMap::new();
     for section_bytes in &sections {
@@ -972,7 +963,7 @@ fn encode_addi(rd: u8, rs1: u8, imm: i32) -> u32 {
         "addi imm must fit signed 12-bit, got {imm}"
     );
     let imm12 = (imm as u32) & 0xFFF;
-    (imm12 << 20) | ((rs1 as u32) << 15) | (0b000 << 12) | ((rd as u32) << 7) | 0b001_0011
+    ((imm12 << 20) | ((rs1 as u32) << 15)) | ((rd as u32) << 7) | 0b001_0011
 }
 
 /// Encode JAL with rd=0 and J-type immediate (= the static-jump form,
@@ -1152,7 +1143,7 @@ fn analyze_pvm2_cfg(
             let rd = ((w >> 7) & 0x1F) as u8;
             let rs1 = ((w >> 15) & 0x1F) as u8;
             let funct3 = (w >> 12) & 0x7;
-            let imm12_signed = ((w as i32) << 0) >> 20;
+            let imm12_signed = (w as i32) >> 20;
 
             if funct3 != 0 {
                 return Err(TranspileError::InvalidSection(format!(
@@ -1319,14 +1310,14 @@ fn build_return_tables(cfg: &Pvm2Cfg) -> Result<ReturnTables, TranspileError> {
     let mut wcc_id: Vec<u32> = vec![u32::MAX; n];
     let mut next_wcc: u32 = 0;
     let mut root_to_wcc: BTreeMap<usize, u32> = BTreeMap::new();
-    for i in 0..n {
+    for (i, w) in wcc_id.iter_mut().enumerate().take(n) {
         let r = uf_find(&mut uf_parent, i);
         let id = *root_to_wcc.entry(r).or_insert_with(|| {
             let id = next_wcc;
             next_wcc += 1;
             id
         });
-        wcc_id[i] = id;
+        *w = id;
     }
 
     // Per-WCC union of direct-caller resume PCs.
@@ -1416,11 +1407,13 @@ fn build_return_tables(cfg: &Pvm2Cfg) -> Result<ReturnTables, TranspileError> {
 ///   - new code bytes
 ///   - `offset_map_pre`: old_pc → new_pc for every OLD instruction start
 ///   - `tables_new_pcs`: per-table list of NEW resume PCs (= offset_map_pre[old_resume_pc]).
+type RewriteResult = (Vec<u8>, BTreeMap<usize, usize>, Vec<Vec<u32>>);
+
 fn rewrite_pvm2_calls_returns(
     code: &[u8],
     cfg: &Pvm2Cfg,
     tables: &ReturnTables,
-) -> Result<(Vec<u8>, BTreeMap<usize, usize>, Vec<Vec<u32>>), TranspileError> {
+) -> Result<RewriteResult, TranspileError> {
     let n = code.len();
 
     // Index direct/tail calls by their `seq_start` (so we can recognise
@@ -1818,9 +1811,10 @@ fn align_branch_targets(
                 let bit12 = (lo >> 12) & 1;
                 let rdrs1 = (lo >> 7) & 0x1F;
                 let rs2 = (lo >> 2) & 0x1F;
-                let is_jr_like = (bit12 == 0 && rdrs1 != 0 && rs2 == 0)   // c.jr
-                    || (bit12 == 1 && rdrs1 == 0 && rs2 == 0)              // c.ebreak
-                    || (bit12 == 1 && rdrs1 != 0 && rs2 == 0); // c.jalr
+                // c.jr (bit12=0, rdrs1!=0, rs2=0)
+                // c.ebreak (bit12=1, rdrs1=0, rs2=0)
+                // c.jalr (bit12=1, rdrs1!=0, rs2=0)
+                let is_jr_like = rs2 == 0 && (bit12 == 1 || rdrs1 != 0);
                 is_terminator = is_jr_like;
                 target = None;
             } else {
@@ -1867,10 +1861,11 @@ fn align_branch_targets(
         if is_terminator && next_pc < n {
             post_terminator.insert(next_pc);
         }
-        if let Some(t) = target {
-            if t >= 0 && (t as usize) < n {
-                static_edges.push((pc, t as usize));
-            }
+        if let Some(t) = target
+            && t >= 0
+            && (t as usize) < n
+        {
+            static_edges.push((pc, t as usize));
         }
         pc = next_pc;
     }
@@ -1992,7 +1987,7 @@ fn align_branch_targets(
                     let old_target = (old_pc as i64 + old_imm as i64) as usize;
                     if let Some(&new_target) = offset_map.get(&old_target) {
                         let new_imm = new_target as i64 - new_pc as i64;
-                        if new_imm < -(1 << 20) || new_imm >= (1 << 20) {
+                        if !(-(1 << 20)..(1 << 20)).contains(&new_imm) {
                             return Err(TranspileError::InvalidSection(format!(
                                 "align_branch_targets: JAL at new_pc {:#x} out of ±1 MiB \
                                  range after injection (new_imm = {})",
@@ -2015,7 +2010,7 @@ fn align_branch_targets(
                     let old_target = (old_pc as i64 + old_imm as i64) as usize;
                     if let Some(&new_target) = offset_map.get(&old_target) {
                         let new_imm = new_target as i64 - new_pc as i64;
-                        if new_imm < -(1 << 12) || new_imm >= (1 << 12) {
+                        if !(-(1 << 12)..(1 << 12)).contains(&new_imm) {
                             return Err(TranspileError::InvalidSection(format!(
                                 "align_branch_targets: B-type branch at new_pc {:#x} out of ±4 KiB \
                                  range after injection (new_imm = {})",
@@ -2074,7 +2069,7 @@ fn decompress_cb_imm(h: u16) -> i32 {
 /// funct3 / rs1' / opcode fields. `imm` must fit in 9 bits signed
 /// (range ±256 bytes); returns None on overflow.
 fn encode_cb_imm(h: u16, imm: i32) -> Option<u16> {
-    if imm < -(1 << 8) || imm >= (1 << 8) {
+    if !(-(1 << 8)..(1 << 8)).contains(&imm) {
         return None;
     }
     if imm & 1 != 0 {
@@ -2095,7 +2090,7 @@ fn encode_cb_imm(h: u16, imm: i32) -> Option<u16> {
 /// Encode a new imm into a c.j instruction, preserving funct3 / opcode.
 /// `imm` must fit in 12 bits signed (range ±2 KiB); returns None on overflow.
 fn encode_cj_imm(h: u16, imm: i32) -> Option<u16> {
-    if imm < -(1 << 11) || imm >= (1 << 11) {
+    if !(-(1 << 11)..(1 << 11)).contains(&imm) {
         return None;
     }
     if imm & 1 != 0 {
