@@ -101,6 +101,9 @@ pub fn rv_fast_cost(inst: &crate::instruction::Inst, mem_cycles: u8) -> FastCost
 
         // ---- Upper immediate (mirrors PVM load_imm_64 = 1/2/NONE) ----
         Inst::Lui { rd, .. } => mk(1, 2, EU_NONE, 0, r1(rd)),
+        // auipc folds to a compile-time constant materialise — same
+        // shape/cost as lui.
+        Inst::Auipc { rd, .. } => mk(1, 2, EU_NONE, 0, r1(rd)),
 
         // ---- 64-bit I-type ALU (mirrors PVM 132/133/134/149/151/.../110) ----
         Inst::Addi { rd, rs1, .. }
@@ -298,21 +301,20 @@ pub fn rv_fast_cost(inst: &crate::instruction::Inst, mem_cycles: u8) -> FastCost
         | Inst::Bltu { rs1, rs2, .. }
         | Inst::Bgeu { rs1, rs2, .. } => mkt(20, 1, EU_ALU, r2(rs1, rs2), 0),
 
-        // ---- JAL: static jump or linker-emitted call body ------------
-        // Mirrors PVM `jump` = 15/1/ALU. `rd != 0` writes ra (the call
-        // sequence's `addi ra, x0, idx ; jal x0, callee` emits rd=0
-        // jals; explicit `jal ra` from lld goes through the linker
-        // rewrite to `addi+jal x0`, so jal-with-link is rare).
+        // ---- JAL: static jump or call (`jal ra, callee`) -------------
+        // Mirrors PVM `jump` = 15/1/ALU. `rd != 0` writes the return
+        // address (a plain `jal ra, callee` call).
         Inst::Jal { rd, .. } => mkt(15, 1, EU_ALU, 0, r1(rd)),
+        // ---- JALR: indirect jump (return / indirect call) ------------
+        // Mirrors PVM `jump_ind` = 22/1/ALU. Reads rs1 (target),
+        // optionally writes rd (return address).
+        Inst::Jalr { rd, rs1, .. } => mkt(22, 1, EU_ALU, r1(rs1), r1(rd)),
 
         // ---- Custom-0 PVM2 control / host ops ------------------------
         Inst::Trap => mkt(2, 1, EU_NONE, 0, 0),
         Inst::Fallthrough => mkt(2, 1, EU_NONE, 0, 0),
         Inst::EcallJar => mkt(100, 4, EU_ALU, 0, 0),
         Inst::Ecalli { .. } => mkt(100, 4, EU_ALU, 0, 0),
-        // br_table → mirrors PVM jump_ind = 22/1/ALU. The encoded idx
-        // lives in rs1.
-        Inst::BrTable { rs1, .. } => mkt(22, 1, EU_ALU, r1(rs1), 0),
 
         // ---- Fences (no-op, minimal cost) ----------------------------
         Inst::Fence | Inst::FenceI => mk(1, 1, EU_NONE, 0, 0),
@@ -426,7 +428,7 @@ pub const RV_KIND_TRAP: u8 = 1;
 pub const RV_KIND_FALLTHROUGH: u8 = 2;
 pub const RV_KIND_ECALL_JAR: u8 = 3;
 pub const RV_KIND_ECALLI: u8 = 4;
-pub const RV_KIND_BR_TABLE: u8 = 5;
+pub const RV_KIND_JALR: u8 = 5; // indirect jump (return / indirect call); was br_table
 pub const RV_KIND_FENCE: u8 = 6;
 pub const RV_KIND_JAL: u8 = 7;
 pub const RV_KIND_BRANCH: u8 = 8;
@@ -471,8 +473,10 @@ static RV_GAS_COST_LUT: [RvGasCostEntry; RV_LUT_LEN] = {
     t[RV_KIND_FALLTHROUGH as usize] = rgc(2, 1, EU_NONE, 0, 0, RVF_TERM);
     t[RV_KIND_ECALL_JAR as usize] = rgc(100, 4, EU_ALU, 0, 0, RVF_TERM);
     t[RV_KIND_ECALLI as usize] = rgc(100, 4, EU_ALU, 0, 0, RVF_TERM);
-    // br_table: src = rs1, no dst, terminator (mirrors PVM jump_ind = 22/1/ALU)
-    t[RV_KIND_BR_TABLE as usize] = rgc(22, 1, EU_ALU, 1, 0, RVF_TERM);
+    // jalr: src = rs1 (target), no tracked dst (terminator — its rd
+    // write has no in-block successor), terminator. 22/1/ALU mirrors
+    // PVM jump_ind, identical cost to the former br_table.
+    t[RV_KIND_JALR as usize] = rgc(22, 1, EU_ALU, 1, 0, RVF_TERM);
     // Fences: no-op
     t[RV_KIND_FENCE as usize] = rgc(1, 1, EU_NONE, 0, 0, 0);
     // JAL: src=none, dst=rd, terminator (mirrors PVM jump = 15/1/ALU)
@@ -594,11 +598,12 @@ fn rv_op_metadata(inst: &crate::instruction::Inst) -> (u8, u8, u8, u8) {
         Fence | FenceI => (RV_KIND_FENCE, 0, 0, 0),
         Reserved { .. } => (RV_KIND_RESERVED, 0, 0, 0),
 
-        // Custom-0 br_table
-        BrTable { rs1, .. } => (RV_KIND_BR_TABLE, rs1, 0, 0),
-
         // JAL — terminator with link
         Jal { rd, .. } => (RV_KIND_JAL, 0, 0, rd),
+
+        // JALR — indirect-jump terminator. src = rs1 (target); rd
+        // (return addr) isn't tracked (terminator, no in-block successor).
+        Jalr { rs1, .. } => (RV_KIND_JALR, rs1, 0, 0),
 
         // Branches
         Beq { rs1, rs2, .. }
@@ -622,8 +627,9 @@ fn rv_op_metadata(inst: &crate::instruction::Inst) -> (u8, u8, u8, u8) {
             (RV_KIND_STORE, rs1, rs2, 0)
         }
 
-        // Upper immediate
+        // Upper immediate; auipc folds to a constant materialise (== lui cost).
         Lui { rd, .. } => (RV_KIND_LUI, 0, 0, rd),
+        Auipc { rd, .. } => (RV_KIND_LUI, 0, 0, rd),
 
         // 64-bit I-type ALU
         Addi { rd, rs1, .. }

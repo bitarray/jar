@@ -40,32 +40,23 @@ use ssz_derive::{Decode, Encode};
 /// read-only thereafter.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
 pub struct Image {
-    /// Bytecode bytes (raw RV+C+custom-0; validated at construction).
-    pub code: Vec<u8>,
-    /// Concatenation of variable-length sub-tables: per-function
-    /// return tables, per-vtable dispatch tables, per-switch jump
-    /// tables. Sub-table boundaries live in `jump_table_offsets`
-    /// (CSR-style). Each `br_table table_id, rs1` dispatches through
-    /// sub-table `table_id`.
-    pub jump_table: Vec<u32>,
-    /// Per-table start offsets in `jump_table`, CSR-style. Length =
-    /// `num_tables + 1`. The first entry is always 0; the last entry
-    /// equals `jump_table.len()`. Table `t` lives at
-    /// `jump_table[jump_table_offsets[t]..jump_table_offsets[t+1]]`,
-    /// and its size is `jump_table_offsets[t+1] - jump_table_offsets[t]`
-    /// — every table can have a different length.
-    ///
-    /// Example: 3 tables of sizes [5, 3, 7]:
-    /// - `jump_table` = `[a0..a4, b0..b2, c0..c6]` (15 u32 entries)
-    /// - `jump_table_offsets` = `[0, 5, 8, 15]` (4 entries)
-    pub jump_table_offsets: Vec<u32>,
+    /// Code regions (raw RV+C+custom-0 bytes). Each region "takes
+    /// effect" only when referenced by a `MemoryMapping` whose
+    /// `source` is `MappingSource::Code(idx)`; the mapping's `start`
+    /// is the region's load address (CODE_BASE — PC = CODE_BASE +
+    /// byte-offset). Code is mapped RO into the guest address space
+    /// so the guest can read its own bytes (AUIPC+load PIC); the JIT
+    /// executes the native translation.
+    pub codes: Vec<CodeRegion>,
     /// Endpoints addressable by `endpoint_idx` (u8). Sparse — only
     /// declared endpoints are present.
     pub endpoints: BTreeMap<u8, EndpointDef>,
-    /// Memory layout. Each entry maps a `Cap::Data` (resolved
-    /// through `source`) into the address space at `[start, start
-    /// + size)`. Permissions are derived from whether the target
-    /// slot appears in `pinned_slots` (RO) or not (RW).
+    /// Memory layout. Each entry maps either a `Cap::Data` (resolved
+    /// through a `MappingSource::Slot` path) or an inline code region
+    /// (`MappingSource::Code`) into the address space at `[start,
+    /// start + size)`. For slot sources, RO vs RW is derived from
+    /// whether the target slot appears in `pinned_slots`; code
+    /// sources are always RO.
     pub memory_mappings: Vec<MemoryMapping>,
     /// Cnode slots holding `Cap::Instance[Gas{meter_id}]`. Active
     /// gas debit comes from the first slot's meter; the rest are
@@ -103,16 +94,37 @@ pub struct EndpointDef {
     pub initial_regs: BTreeMap<u8, u64>,
 }
 
+/// One recompilable code region. Content lives inline in the Image
+/// (content-hash stable via `hash_tree_root`, exactly like the old
+/// `Image.code`).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
+pub struct CodeRegion {
+    /// Raw RV+C+custom-0 bytes (validated at construction).
+    pub code: Vec<u8>,
+}
+
+/// Source of a [`MemoryMapping`]: either a cnode-resolved cap (Data,
+/// RO or RW) or an inline code region (always RO + recompiled).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
+pub enum MappingSource {
+    #[ssz(selector = 0)]
+    /// Resolve a `Cap::Data` through this cnode path.
+    Slot(crate::slot::SlotPath),
+    #[ssz(selector = 1)]
+    /// Map `Image.codes[idx]` RO at the mapping's `start`.
+    Code(u32),
+}
+
 /// One mapped region. The kernel resolves `source` at instance
-/// start, reads the bytes from the resulting `Cap::Data`, and lays
-/// them at `[start, start + size)` in the address space. Whether
-/// the region is RO or RW is derived from whether `source.target()`
-/// is in `Image.pinned_slots`.
+/// start and lays the bytes at `[start, start + size)` in the
+/// address space. For `Slot` sources, RO vs RW is derived from
+/// whether the target slot is in `Image.pinned_slots`; `Code`
+/// sources are always RO.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
 pub struct MemoryMapping {
     pub start: u64,
     pub size: u64,
-    pub source: crate::slot::SlotPath,
+    pub source: MappingSource,
 }
 
 /// Pinned slot content. Only content-addressed cap kinds can be
@@ -153,9 +165,7 @@ impl Image {
     /// Useful for tests and as a starting point.
     pub fn empty() -> Self {
         Self {
-            code: Vec::new(),
-            jump_table: Vec::new(),
-            jump_table_offsets: Vec::new(),
+            codes: Vec::new(),
             endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: Vec::new(),

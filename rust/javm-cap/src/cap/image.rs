@@ -1,9 +1,9 @@
 //! `ImageCap` — Image cap.
 //!
-//! Stores code, bitmask, jump_table, endpoints, mappings, and slot
-//! references as separate `Vec<T>` allocations. Allocation count
-//! per ImageCap is bounded (seven Vecs, regardless of content size);
-//! we accept that in exchange for direct field accessors.
+//! Stores code regions, endpoints, mappings, and slot references as
+//! separate `Vec<T>` allocations. Allocation count per ImageCap is
+//! bounded regardless of content size; we accept that in exchange for
+//! direct field accessors.
 
 use alloc::vec::Vec;
 
@@ -11,19 +11,30 @@ use crate::slot::SlotIdx;
 
 use super::{CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
 
+/// One recompilable code region (raw RV+C+custom-0 bytes), mapped RO
+/// at its `MemoryMapping.start`. Page-aligned so the kernel can
+/// direct-map it.
+#[derive(
+    Clone,
+    Debug,
+    ssz_derive::Encode,
+    ssz_derive::Decode,
+    ssz_derive::HashTreeRoot,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+pub struct CodeRegionCap {
+    pub code: Vec<u8>,
+}
+
 #[derive(
     Clone, Debug, ssz_derive::HashTreeRoot, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
 pub struct ImageCap {
-    /// Bytecode bytes (raw RV+C+custom-0).
-    pub code: Vec<u8>,
-    /// Concatenated per-function `br_table` sub-tables. Sub-table
-    /// boundaries live in `jump_table_offsets` (CSR-style).
-    pub jump_table: Vec<u32>,
-    /// Per-table start offsets in `jump_table`, CSR-style.
-    /// `jump_table_offsets[t]..jump_table_offsets[t+1]` slices the
-    /// entries of table `t`. Length = `num_tables + 1`.
-    pub jump_table_offsets: Vec<u32>,
+    /// Code regions (raw RV+C+custom-0 bytes). Referenced by
+    /// `MAP_SRC_CODE` mappings.
+    pub codes: Vec<CodeRegionCap>,
     /// Endpoint definitions. Stored as a dense array keyed by
     /// endpoint index — `endpoints[i].entry_pc == 0` means the
     /// endpoint at index `i` is not defined.
@@ -85,24 +96,35 @@ impl EndpointDef {
 /// them at `[start, start + size)`. `source_path` is a fixed-cap
 /// array; `source_path_len` is the actual depth.
 ///
+/// `source_kind` discriminates: `Slot` resolves a `Cap::Data` through
+/// `source_path[..source_path_len]`; `Code` maps `Image.codes[code_index]`
+/// RO at `start`.
+pub const MAP_SRC_SLOT: u8 = 0;
+pub const MAP_SRC_CODE: u8 = 1;
+
 /// **SSZ note**: `Encode`/`Decode`/`HashTreeRoot` are hand-written
 /// because the `source_path` field is `[SlotIdx; MAX_SOURCE_DEPTH]` —
 /// an array of a local type, which Rust's orphan rules block from
 /// receiving a blanket impl in either `ssz` or `javm-cap`. The encoded
-/// form is field-by-field SSZ: `u64 || u64 || (MAX_SOURCE_DEPTH * 4
-/// LE bytes) || u8`. All fields are fixed-length so the container is
-/// fixed-length too.
+/// form is field-by-field SSZ: `u64 || u64 || u8 || (MAX_SOURCE_DEPTH
+/// * 4 LE bytes) || u8 || u32`. All fields are fixed-length so the
+/// container is fixed-length too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct MemoryMapping {
     pub start: u64,
     pub size: u64,
+    /// `MAP_SRC_SLOT` or `MAP_SRC_CODE`.
+    pub source_kind: u8,
+    /// Valid iff `source_kind == MAP_SRC_SLOT`.
     pub source_path: [SlotIdx; MAX_SOURCE_DEPTH],
     pub source_path_len: u8,
+    /// Valid iff `source_kind == MAP_SRC_CODE`: index into `ImageCap.codes`.
+    pub code_index: u32,
 }
 
 impl MemoryMapping {
-    /// SSZ fixed encoded length: 8 + 8 + (MAX_SOURCE_DEPTH * 4) + 1.
-    const SSZ_LEN: usize = 8 + 8 + MAX_SOURCE_DEPTH * 4 + 1;
+    /// SSZ fixed encoded length: 8 + 8 + 1 + (MAX_SOURCE_DEPTH * 4) + 1 + 4.
+    const SSZ_LEN: usize = 8 + 8 + 1 + MAX_SOURCE_DEPTH * 4 + 1 + 4;
 }
 
 impl ssz::Encode for MemoryMapping {
@@ -118,10 +140,12 @@ impl ssz::Encode for MemoryMapping {
     fn ssz_append(&self, buf: &mut alloc::vec::Vec<u8>) {
         buf.extend_from_slice(&self.start.to_le_bytes());
         buf.extend_from_slice(&self.size.to_le_bytes());
+        buf.push(self.source_kind);
         for s in &self.source_path {
             buf.extend_from_slice(&s.get().to_le_bytes());
         }
         buf.push(self.source_path_len);
+        buf.extend_from_slice(&self.code_index.to_le_bytes());
     }
 }
 
@@ -141,18 +165,23 @@ impl ssz::Decode for MemoryMapping {
         }
         let start = u64::from_le_bytes(bytes[0..8].try_into().expect("len checked"));
         let size = u64::from_le_bytes(bytes[8..16].try_into().expect("len checked"));
+        let source_kind = bytes[16];
         let mut source_path = [SlotIdx(0); MAX_SOURCE_DEPTH];
         for (i, slot) in source_path.iter_mut().enumerate() {
-            let s = 16 + i * 4;
+            let s = 17 + i * 4;
             let arr: [u8; 4] = bytes[s..s + 4].try_into().expect("len checked");
             *slot = SlotIdx(u32::from_le_bytes(arr));
         }
-        let source_path_len = bytes[16 + MAX_SOURCE_DEPTH * 4];
+        let source_path_len = bytes[17 + MAX_SOURCE_DEPTH * 4];
+        let ci_off = 17 + MAX_SOURCE_DEPTH * 4 + 1;
+        let code_index = u32::from_le_bytes(bytes[ci_off..ci_off + 4].try_into().expect("len checked"));
         Ok(Self {
             start,
             size,
+            source_kind,
             source_path,
             source_path_len,
+            code_index,
         })
     }
 }
@@ -162,7 +191,7 @@ impl ssz::HashTreeRoot for MemoryMapping {
         &self,
     ) -> [u8; 32] {
         // SSZ container root: merkleize the per-field roots with
-        // limit = number of fields (4). All four are fixed-size leaves.
+        // limit = number of fields (6). All are fixed-size leaves.
         let path_root = {
             // Treat the fixed-length path array as a `Vector<u32,
             // MAX_SOURCE_DEPTH>` for hashing: pack to bytes, merkleize
@@ -178,15 +207,18 @@ impl ssz::HashTreeRoot for MemoryMapping {
         let roots = [
             ssz::HashTreeRoot::hash_tree_root::<D>(&self.start),
             ssz::HashTreeRoot::hash_tree_root::<D>(&self.size),
+            ssz::HashTreeRoot::hash_tree_root::<D>(&self.source_kind),
             path_root,
             ssz::HashTreeRoot::hash_tree_root::<D>(&self.source_path_len),
+            ssz::HashTreeRoot::hash_tree_root::<D>(&self.code_index),
         ];
-        ssz::merkleize::<D>(&roots, 4)
+        ssz::merkleize::<D>(&roots, 6)
     }
 }
 
 impl MemoryMapping {
-    /// Live slot indices (length = `source_path_len`).
+    /// Live slot indices (length = `source_path_len`). Only meaningful
+    /// for `MAP_SRC_SLOT` mappings.
     pub fn path(&self) -> &[SlotIdx] {
         &self.source_path[..self.source_path_len as usize]
     }
@@ -227,6 +259,8 @@ pub enum ImageConvertError {
     EndpointIndexOutOfRange(u8),
     #[error("register index {0} >= NUM_REGS")]
     RegisterIndexOutOfRange(u8),
+    #[error("code mapping index {0} out of range (codes.len()={1})")]
+    CodeIndexOutOfRange(u32, usize),
 }
 
 /// Build an [`ImageCap`] from the SCALE-encoded [`crate::image::Image`]
@@ -247,23 +281,21 @@ pub enum ImageConvertError {
 ///   indexed by endpoint id. Empty slots use [`EndpointDef::empty`].
 ///   `stack_top` is extracted from the old `initial_regs[1]` (RISC-V
 ///   SP convention); `arg_cnode_slot` defaults to `SlotIdx(0)`.
-/// - `MemoryMapping.source: SlotPath` becomes `source_path: [SlotIdx;
-///   MAX_SOURCE_DEPTH] + source_path_len`; paths deeper than 8 error.
+/// - `MappingSource::Slot(SlotPath)` becomes `source_kind = MAP_SRC_SLOT`
+///   + `source_path: [SlotIdx; MAX_SOURCE_DEPTH] + source_path_len`;
+///   paths deeper than 8 error. `MappingSource::Code(idx)` becomes
+///   `source_kind = MAP_SRC_CODE` + `code_index = idx` (validated
+///   against `image.codes`).
 pub fn image_cap(
     image: &crate::image::Image,
     pinned_hashes: &[(SlotIdx, CapHash)],
     initial_hashes: &[(SlotIdx, CapHash)],
 ) -> Result<ImageCap, ImageConvertError> {
-    let mut code = Vec::with_capacity(image.code.len());
-    code.extend_from_slice(&image.code);
-
-    let mut jump_table = Vec::with_capacity(image.jump_table.len());
-    for &j in &image.jump_table {
-        jump_table.push(j);
-    }
-    let mut jump_table_offsets = Vec::with_capacity(image.jump_table_offsets.len());
-    for &o in &image.jump_table_offsets {
-        jump_table_offsets.push(o);
+    let mut codes = Vec::with_capacity(image.codes.len());
+    for region in &image.codes {
+        codes.push(CodeRegionCap {
+            code: alloc_page_aligned_code(&region.code),
+        });
     }
 
     // Endpoints: dense `MAX_ENDPOINTS`-sized array; empty entries have
@@ -296,38 +328,65 @@ pub fn image_cap(
 
     let mut mappings = Vec::with_capacity(image.memory_mappings.len());
     for m in &image.memory_mappings {
-        let steps = &m.source.steps;
-        if steps.is_empty() {
-            return Err(ImageConvertError::SourcePathEmpty);
-        }
-        if steps.len() > MAX_SOURCE_DEPTH {
-            return Err(ImageConvertError::SourcePathTooDeep(steps.len()));
-        }
-        let mut source_path = [SlotIdx(0); MAX_SOURCE_DEPTH];
-        for (i, s) in steps.iter().enumerate() {
-            source_path[i] = *s;
-        }
-        mappings.push(MemoryMapping {
-            start: m.start,
-            size: m.size,
-            source_path,
-            source_path_len: steps.len() as u8,
-        });
+        let mapping = match &m.source {
+            crate::image::MappingSource::Slot(path) => {
+                let steps = &path.steps;
+                if steps.is_empty() {
+                    return Err(ImageConvertError::SourcePathEmpty);
+                }
+                if steps.len() > MAX_SOURCE_DEPTH {
+                    return Err(ImageConvertError::SourcePathTooDeep(steps.len()));
+                }
+                let mut source_path = [SlotIdx(0); MAX_SOURCE_DEPTH];
+                for (i, s) in steps.iter().enumerate() {
+                    source_path[i] = *s;
+                }
+                MemoryMapping {
+                    start: m.start,
+                    size: m.size,
+                    source_kind: MAP_SRC_SLOT,
+                    source_path,
+                    source_path_len: steps.len() as u8,
+                    code_index: 0,
+                }
+            }
+            crate::image::MappingSource::Code(idx) => {
+                if (*idx as usize) >= image.codes.len() {
+                    return Err(ImageConvertError::CodeIndexOutOfRange(*idx, image.codes.len()));
+                }
+                MemoryMapping {
+                    start: m.start,
+                    size: m.size,
+                    source_kind: MAP_SRC_CODE,
+                    source_path: [SlotIdx(0); MAX_SOURCE_DEPTH],
+                    source_path_len: 0,
+                    code_index: *idx,
+                }
+            }
+        };
+        mappings.push(mapping);
     }
 
     let pinned = build_image_slot_vec(pinned_hashes);
     let initial = build_image_slot_vec(initial_hashes);
 
     Ok(ImageCap {
-        code,
-        jump_table,
-        jump_table_offsets,
+        codes,
         endpoints,
         mappings,
         pinned,
         initial,
         yield_marker_slot: image.yield_marker_slot,
     })
+}
+
+/// Copy `bytes` into a page-aligned, page-sized-rounded `Vec<u8>` so
+/// the kernel can `va_to_pa` + direct-map the code region RO. Mirrors
+/// `DataCap`'s page-alignment invariant.
+fn alloc_page_aligned_code(bytes: &[u8]) -> Vec<u8> {
+    let mut v = super::data::alloc_page_aligned_zeroed(bytes.len());
+    v[..bytes.len()].copy_from_slice(bytes);
+    v
 }
 
 fn build_image_slot_vec(pairs: &[(SlotIdx, CapHash)]) -> Vec<ImageSlotEntry> {

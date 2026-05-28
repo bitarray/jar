@@ -7,9 +7,10 @@
 //!
 //! Mirrors the recompiler's semantics — same per-block gas charging at
 //! `Predecode::block_costs`, same RV-spec ALU/branch behaviour, same
-//! `Ecalli`/`BrTable` runtime contracts. Cross-checked against the
-//! recompiler in `pvm2_smoke`: bit-identical `gas_used` and side-effects
-//! on every workload.
+//! `Ecalli`/`Jalr` runtime contracts (jalr targets validated against
+//! the basic-block-start set). Cross-checked against the recompiler in
+//! the `smoke` example: bit-identical `gas_used` and side-effects on
+//! every workload.
 //!
 //! Dispatch is a `match` over `Inst` variants. Instructions come from
 //! [`Predecode::insts`] (one entry per static instruction); static
@@ -35,20 +36,22 @@ use crate::regs::Regs;
 pub struct Program {
     pub code: Vec<u8>,
     pub predecode: Predecode,
-    pub jump_table: Vec<u32>,
-    pub jump_table_offsets: Vec<u32>,
+    /// Guest VA at which this code region is mapped. PC = `code_base`
+    /// + byte-offset. `regs.pc` and `predecode.insts[].pc` are
+    /// offsets; register-held code addresses (return addresses, auipc
+    /// results) are VAs (`code_base + offset`).
+    pub code_base: u32,
 }
 
 impl Program {
-    /// Predecode `code` and wrap it together with the Image's jump
-    /// table. The predecode pass is O(code.len()); cache the result.
-    pub fn new(code: Vec<u8>, jump_table: Vec<u32>, jump_table_offsets: Vec<u32>) -> Self {
+    /// Predecode `code`. The predecode pass is O(code.len()); cache
+    /// the result. `code_base` is the guest VA the region is mapped at.
+    pub fn new(code: Vec<u8>, code_base: u32) -> Self {
         let predecode = predecode(&code);
         Self {
             code,
             predecode,
-            jump_table,
-            jump_table_offsets,
+            code_base,
         }
     }
 }
@@ -69,8 +72,7 @@ impl Interpreter {
     ) -> ExitReason {
         Self::run(
             &program.predecode,
-            &program.jump_table,
-            &program.jump_table_offsets,
+            program.code_base,
             regs,
             mem,
             gas,
@@ -78,13 +80,13 @@ impl Interpreter {
         )
     }
 
-    /// Execute the predecoded PVM2 program starting at `regs.pc`.
-    /// `jump_table` and `jump_table_offsets` come from the Image
-    /// (see `javm_cap::image::Image`).
+    /// Execute the predecoded PVM2 program starting at `regs.pc` (a
+    /// byte-offset into the code region). `code_base` is the guest VA
+    /// the region is mapped at: jal/jalr/auipc produce and consume
+    /// code addresses as `code_base + offset`.
     pub fn run<M: Memory>(
         predecode: &Predecode,
-        jump_table: &[u32],
-        jump_table_offsets: &[u32],
+        code_base: u32,
         regs: &mut Regs,
         mem: &mut M,
         gas: &mut GasCounter,
@@ -635,16 +637,43 @@ impl Interpreter {
                 Inst::Lui { rd, imm } => {
                     reg_write(regs, rd, imm as i64 as u64);
                 }
+                // auipc rd = pc_va + imm, where pc_va = code_base + pc.
+                // Folds to a constant the recompiler bakes in identically.
+                Inst::Auipc { rd, imm } => {
+                    let v = code_base.wrapping_add(pc).wrapping_add(imm as u32);
+                    reg_write(regs, rd, v as i32 as i64 as u64);
+                }
 
                 // ---- Control flow -------------------------------------------
                 Inst::Jal { rd, imm } => {
                     if rd != 0 {
-                        reg_write(regs, rd, next_pc as u64);
+                        // Return address is a guest VA (code_base + offset).
+                        reg_write(regs, rd, code_base.wrapping_add(next_pc) as u64);
                     }
                     let target = (pc as i64).wrapping_add(imm as i64) as u32;
                     next_idx_override = Some(match find_idx_for_pc(insts, target) {
                         Some(i) => i,
                         None => {
+                            regs.pc = pc as u64;
+                            return ExitReason::Panic;
+                        }
+                    });
+                }
+                // jalr rd, rs1, imm — indirect jump. target_va =
+                // (rs1 + imm) & 0xFFFFFFFF; offset = target_va - code_base.
+                // The target must be a basic-block start (gas precharge
+                // happens at block entry) — else Panic (security-critical:
+                // rejects mid-block / mid-instruction targets).
+                Inst::Jalr { rd, rs1, imm } => {
+                    let target_va =
+                        (reg_read(regs, rs1) as u32).wrapping_add(imm as u32);
+                    if rd != 0 {
+                        reg_write(regs, rd, code_base.wrapping_add(next_pc) as u64);
+                    }
+                    let target_off = target_va.wrapping_sub(code_base);
+                    next_idx_override = Some(match find_idx_for_pc(insts, target_off) {
+                        Some(i) if insts[i].is_gas_block_start => i,
+                        _ => {
                             regs.pc = pc as u64;
                             return ExitReason::Panic;
                         }
@@ -751,36 +780,6 @@ impl Interpreter {
                         EcallResult::Exit(r) => return r,
                     }
                 }
-                Inst::BrTable { table_id, rs1 } => {
-                    // Spec: idx = (rs1 - 1) >> 1; if rs1 == 0 or idx OOB,
-                    // recompiler routes to PANIC (not fallthrough — see
-                    // `rv_br_table` comment). Match exactly.
-                    let rs1_v = reg_read(regs, rs1);
-                    if rs1_v == 0 {
-                        regs.pc = pc as u64;
-                        return ExitReason::Panic;
-                    }
-                    let entry_idx = ((rs1_v - 1) >> 1) as usize;
-                    let nt = jump_table_offsets.len().saturating_sub(1);
-                    if (table_id as usize) >= nt {
-                        regs.pc = pc as u64;
-                        return ExitReason::Panic;
-                    }
-                    let start = jump_table_offsets[table_id as usize] as usize;
-                    let end = jump_table_offsets[(table_id as usize) + 1] as usize;
-                    if entry_idx >= end - start {
-                        regs.pc = pc as u64;
-                        return ExitReason::Panic;
-                    }
-                    let target = jump_table[start + entry_idx];
-                    match find_idx_for_pc(insts, target) {
-                        Some(i) => next_idx_override = Some(i),
-                        None => {
-                            regs.pc = pc as u64;
-                            return ExitReason::Panic;
-                        }
-                    }
-                }
                 Inst::Fallthrough => {
                     // Terminator no-op: just advance. The next instruction is
                     // already marked as a block start so its cost gets
@@ -793,7 +792,7 @@ impl Interpreter {
                 }
             }
 
-            // Advance to the next instruction. Branches / Jal / BrTable /
+            // Advance to the next instruction. Branches / Jal / Jalr /
             // post-handler Ecalli set `next_idx_override`; everything else
             // falls through to the sequential next.
             match next_idx_override {

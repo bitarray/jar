@@ -88,8 +88,6 @@ pub const CTX_EXIT_REASON: u64 = CTX_VA + offset_of!(JitContext, exit_reason) as
 pub const CTX_EXIT_ARG: u64 = CTX_VA + offset_of!(JitContext, exit_arg) as u64;
 pub const CTX_HEAP_BASE: u64 = CTX_VA + offset_of!(JitContext, heap_base) as u64;
 pub const CTX_HEAP_TOP: u64 = CTX_VA + offset_of!(JitContext, heap_top) as u64;
-pub const CTX_JT_PTR: u64 = CTX_VA + offset_of!(JitContext, jt_ptr) as u64;
-pub const CTX_JT_LEN: u64 = CTX_VA + offset_of!(JitContext, jt_len) as u64;
 pub const CTX_BB_STARTS: u64 = CTX_VA + offset_of!(JitContext, bb_starts) as u64;
 pub const CTX_BB_LEN: u64 = CTX_VA + offset_of!(JitContext, bb_len) as u64;
 pub const CTX_ENTRY_PC: u64 = CTX_VA + offset_of!(JitContext, entry_pc) as u64;
@@ -199,11 +197,13 @@ pub struct Compiler {
     /// block boundaries. The PVM `compile()` path uses its own local
     /// simulator and leaves this one untouched.
     pub(crate) gas_sim: GasSimulator,
-    /// PVM2: per-function `br_table` sub-table CSR offsets. Each
-    /// `BrTable { table_id, .. }` instruction dispatches through
-    /// entries `jt_ptr[rv_jt_offsets[table_id] ..
-    /// rv_jt_offsets[table_id + 1]]`. Empty for PVM legacy.
-    pub(crate) rv_jt_offsets: Vec<u32>,
+    /// Guest VA the code region is mapped at. `jalr`/`auipc` produce
+    /// and consume code addresses as `code_base + offset`; the
+    /// dispatch/bb tables are offset-indexed (offset = VA - code_base).
+    pub(crate) code_base: u32,
+    /// Code region length in bytes — the upper bound for jalr target
+    /// offsets (== `bb_starts` / dispatch-table length).
+    pub(crate) code_len: u32,
     /// True during RV streaming compile (`compile`). When set, branch
     /// emit helpers defer forward-target validation (`target > pc`) to a
     /// post-pass instead of consulting `bitmask_ptr`. Off for PVM, whose
@@ -222,7 +222,13 @@ pub struct Compiler {
 }
 
 impl Compiler {
-    pub fn new(helpers: HelperFns, code_len: usize, jit_va_base: u64, mem_cycles: u8) -> Self {
+    pub fn new(
+        helpers: HelperFns,
+        code_len: usize,
+        jit_va_base: u64,
+        mem_cycles: u8,
+        code_base: u32,
+    ) -> Self {
         // Estimate native code size: ~3x PVM code provides safety margin for
         // direct-write emission (no per-byte capacity checks in hot loop).
         let estimated_native = code_len * 3 + 8192;
@@ -265,7 +271,8 @@ impl Compiler {
             trap_entries: Vec::with_capacity(2048),
             mem_cycles,
             gas_sim: GasSimulator::new(),
-            rv_jt_offsets: Vec::new(),
+            code_base,
+            code_len: code_len as u32,
             rv_streaming: false,
             rv_pending_fwd_branches: Vec::new(),
             rv_valid_pc: Vec::new(),
@@ -709,9 +716,11 @@ const OP_OP_IMM_32: u32 = 0b00_110;
 const OP_STORE: u32 = 0b01_000;
 const OP_OP: u32 = 0b01_100;
 const OP_LUI: u32 = 0b01_101;
+const OP_AUIPC: u32 = 0b00_101;
 const OP_OP_32: u32 = 0b01_110;
 const OP_BRANCH: u32 = 0b11_000;
 const OP_JAL: u32 = 0b11_011;
+const OP_JALR: u32 = 0b11_001;
 const OP_CUSTOM_0: u32 = 0b00_010;
 
 // Sign-extended immediates straight off a 4-byte RV word. Mirrors the
@@ -1145,22 +1154,12 @@ impl Compiler {
     /// intermediary — that was 57% of the old cold-path compile time
     /// on the large guests (ed25519, ecrecover).
     ///
-    /// `jump_table_offsets` is the Image's CSR-style sub-table boundary
-    /// array — see `javm_cap::image::Image::jump_table_offsets`.
-    /// Empty implies no br_table dispatch is used. Each
-    /// `BrTable { table_id, .. }` instruction dispatches through sub-
-    /// table `table_id`, whose entries live at
-    /// `jt_ptr[jump_table_offsets[table_id] ..
-    /// jump_table_offsets[table_id+1]]`.
-    ///
     /// The returned `CompileResult.valid_pc` is the byte-indexed
     /// "valid branch target" bitmap the runtime BB region needs. A bit
     /// is set iff the PC is a gas-block start (= dispatchable entry in
     /// the gas-block dispatch table). Built incrementally during the
     /// streaming pass — no separate length-only pre-pass.
-    pub fn compile(mut self, code: &[u8], jump_table_offsets: &[u32]) -> CompileResult {
-        self.rv_jt_offsets = jump_table_offsets.to_vec();
-
+    pub fn compile(mut self, code: &[u8]) -> CompileResult {
         // valid_pc is populated incrementally as the streaming pass
         // binds gas-block starts. The pointer is stable across mutation
         // (Vec doesn't reallocate from `vec![false; n]` with in-place
@@ -1353,7 +1352,9 @@ impl Compiler {
             OP_OP => self.compile_op(rd, rs1, rs2, f3, f7, w, pc, rest),
             OP_OP_32 => self.compile_op_32(rd, rs1, rs2, f3, f7, w, pc),
             OP_LUI => self.compile_lui(rd, w, pc, rest),
+            OP_AUIPC => self.compile_auipc(rd, w, pc),
             OP_JAL => self.compile_jal(rd, w, pc),
+            OP_JALR if f3 == 0 => self.compile_jalr(rd, rs1, w, pc),
             OP_BRANCH => self.compile_branch(rs1, rs2, f3, w, pc),
             OP_CUSTOM_0 => self.compile_custom_0(rd, rs1, f3, w, pc),
             OP_MISC_MEM => {
@@ -1361,7 +1362,7 @@ impl Compiler {
                 self.feed_gas_rv(RV_KIND_FENCE, 0, 0, 0);
                 (false, false, 0)
             }
-            // OP_AUIPC, OP_JALR, OP_SYSTEM, OP_CUSTOM_1 etc. — all
+            // OP_SYSTEM, OP_CUSTOM_1, jalr-with-funct3≠0, etc. — all
             // forbidden in PVM2 and rejected by the linker's validator.
             // Defence in depth: emit a runtime panic if we ever see one.
             _ => {
@@ -2119,6 +2120,26 @@ impl Compiler {
         (term, false, 0)
     }
 
+    fn compile_auipc(&mut self, rd: u8, w: u32, pc: u32) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        // auipc result is a compile-time constant: code_base + pc + imm.
+        let imm = imm_u(w);
+        self.rv_auipc(rd, imm, pc);
+        // Gas: same kind/cost as LUI (a constant materialise).
+        let term = self.feed_gas_rv(RV_KIND_LUI, 0, 0, rd);
+        (term, false, 0)
+    }
+
+    fn compile_jalr(&mut self, rd: u8, rs1: u8, w: u32, pc: u32) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::*;
+        let imm = imm_i(w);
+        let next_pc = pc + 4;
+        self.rv_jalr(rd, rs1, imm, pc, next_pc);
+        // src = rs1 (target); rd not tracked (terminator).
+        let term = self.feed_gas_rv(RV_KIND_JALR, rs1, 0, 0);
+        (term, false, 0)
+    }
+
     fn compile_branch(&mut self, rs1: u8, rs2: u8, f3: u8, w: u32, pc: u32) -> (bool, bool, usize) {
         use javm_exec::gas_cost::*;
         let imm = imm_b(w);
@@ -2143,8 +2164,8 @@ impl Compiler {
 
     fn compile_custom_0(
         &mut self,
-        rd: u8,
-        rs1: u8,
+        _rd: u8,
+        _rs1: u8,
         f3: u8,
         w: u32,
         pc: u32,
@@ -2154,8 +2175,8 @@ impl Compiler {
         //   f3=000 → trap     (other fields ignored)
         //   f3=001 → ecall.jar
         //   f3=010 → ecalli imm
-        //   f3=011 → br_table table_id, rs1 (rd must be 0)
         //   f3=100 → fallthrough (terminator no-op)
+        //   f3=011 (was br_table) → reserved; PVM2 uses plain jalr.
         let next_pc = pc + 4;
         match f3 {
             0b000 => {
@@ -2172,17 +2193,6 @@ impl Compiler {
                 let imm = imm_i(w);
                 self.rv_ecalli(imm, next_pc);
                 let term = self.feed_gas_rv(RV_KIND_ECALLI, 0, 0, 0);
-                (term, false, 0)
-            }
-            0b011 => {
-                if rd != 0 {
-                    self.rv_emit_panic_at(pc);
-                    self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
-                    return (true, false, 0);
-                }
-                let table_id = ((w >> 20) & 0xFFF) as u16;
-                self.rv_br_table(table_id, rs1, pc, next_pc);
-                let term = self.feed_gas_rv(RV_KIND_BR_TABLE, rs1, 0, 0);
                 (term, false, 0)
             }
             0b100 => {
@@ -2335,6 +2345,21 @@ impl Compiler {
         if let Some(d) = self.rv_dst(rd, pc) {
             // imm has bits in [31:12]; sign-extend to 64.
             self.asm.mov_ri64(d, imm as i64 as u64);
+            self.invalidate_reg(rv_slot(rd).unwrap());
+        }
+    }
+
+    /// `auipc rd, imm` — `rd = (code_base + pc) + imm`. Both addends
+    /// are compile-time constants, so this materialises a single
+    /// constant (mirrors the interpreter's `Auipc` arm exactly). The
+    /// value is a guest VA, sign-extended 32→64 like `lui`.
+    fn rv_auipc(&mut self, rd: u8, imm: i32, pc: u32) {
+        if let Some(d) = self.rv_dst(rd, pc) {
+            let va = self
+                .code_base
+                .wrapping_add(pc)
+                .wrapping_add(imm as u32);
+            self.asm.mov_ri64(d, va as i32 as i64 as u64);
             self.invalidate_reg(rv_slot(rd).unwrap());
         }
     }
@@ -3386,111 +3411,73 @@ impl Compiler {
         self.emit_static_branch(target, true, next_pc, pc);
     }
 
-    /// Emit a PVM2 `br_table table_id, rs1` — indirect-jump terminator
-    /// dispatching through `Image.jump_table[table_id]`.
-    ///
-    /// The `rs1` register carries the index encoded as `2*idx + 1`.
-    /// Decode:
-    ///   1. If `rs1 == 0` → fall through (uninitialised register is a
-    ///      sentinel for "no valid target").
-    ///   2. `idx = (rs1 - 1) >> 1`. If the LSB of `rs1` was 0 (raw PC
-    ///      shape), `idx` underflows to a huge value and the bounds
-    ///      check fails → fall through.
-    ///   3. If `idx >= table_len[table_id]` → fall through.
-    ///   4. `target_pc = jt[jt_offsets[table_id] + idx]`.
-    ///   5. `native_addr = code_base + dispatch_table[target_pc]`.
-    ///   6. `jmp native_addr`.
-    ///
-    /// `table_base_byte_offset` and `table_len` are baked in as
-    /// immediates at JIT time; they come from `self.rv_jt_offsets`
-    /// (the Image's `jump_table_offsets`).
-    fn rv_br_table(&mut self, table_id: u16, rs1: u8, pc: u32, next_pc: u32) {
+    /// Emit `jalr rd, rs1, imm` — indirect jump (return / indirect
+    /// call). Strictly simpler than the former br_table (no jump-table
+    /// indirection):
+    ///   1. `target_va = (rs1 + imm) & 0xFFFFFFFF`   (2³² wrap)
+    ///   2. write `rd = code_base + next_pc` if `rd != 0` (return addr)
+    ///   3. `offset = target_va - code_base`
+    ///   4. bounds: `offset < code_len`  else PANIC
+    ///   5. `bb_starts[offset] == 1`?     else PANIC  (security-critical:
+    ///      rejects mid-block / mid-instruction targets — gas is
+    ///      precharged at block entry)
+    ///   6. `native = code_base_native + dispatch_table[offset]; jmp`
+    fn rv_jalr(&mut self, rd: u8, rs1: u8, imm: i32, pc: u32, next_pc: u32) {
         use super::asm::Cc;
-
-        // Validate table_id against the compiled jump_table_offsets.
-        // (linker_rv guarantees this; this is defence-in-depth.)
-        let nt = self.rv_jt_offsets.len().saturating_sub(1);
-        if (table_id as usize) >= nt {
-            self.rv_emit_panic_at(pc);
-            return;
-        }
-        let table_start_entries = self.rv_jt_offsets[table_id as usize];
-        let table_end_entries = self.rv_jt_offsets[(table_id as usize) + 1];
-        if table_end_entries < table_start_entries {
-            self.rv_emit_panic_at(pc);
-            return;
-        }
-        let table_len = table_end_entries - table_start_entries;
-        let table_byte_offset = (table_start_entries as i32)
-            .checked_mul(4)
-            .unwrap_or(i32::MAX);
 
         if rv_is_reserved(rs1) {
             self.rv_emit_panic_at(pc);
             return;
         }
 
-        // OOB / sentinel handling: per spec the default behavior is
-        // to fall through to the next instruction (LLVM-friendly
-        // default-case shape). For PVM2 function returns this should
-        // never fire — caller always passes a valid encoded idx. We
-        // route to panic during bring-up to surface bugs; once stable
-        // this can be relaxed to `let fallthrough = label_for_pc(next_pc);`
-        // and bind a real fallthrough.
-        let oob_target = self.panic_label;
-
-        if rs1 == 0 {
-            // rs1 = x0: never dispatch.
-            self.asm.jmp_label(oob_target);
-            let _ = next_pc;
-            return;
-        }
-        // Load the encoded idx from rs1 into SCRATCH.
+        // SCRATCH = rs1 (x0 → 0).
         self.rv_read(rs1, SCRATCH, pc);
+        if imm != 0 {
+            self.asm.add_ri(SCRATCH, imm);
+        }
+        // 2³² wrap: zero-extend the low 32 bits (shl 32 ; shr 32).
+        self.asm.shl_ri64(SCRATCH, 32);
+        self.asm.shr_ri64(SCRATCH, 32);
 
-        // Check rs1 == 0 → OOB.
-        self.asm.test_rr(SCRATCH, SCRATCH);
-        self.asm.jcc_label(Cc::E, oob_target);
-
-        // idx = (rs1 - 1) >> 1.
-        self.asm.sub_ri(SCRATCH, 1);
-        self.asm.shr_ri64(SCRATCH, 1);
-
-        // Bounds check: idx < table_len.
-        if table_len == 0 {
-            self.asm.jmp_label(oob_target);
-        } else {
-            self.asm.cmp_ri32(SCRATCH, table_len as i32);
-            self.asm.jcc_label(Cc::AE, oob_target);
+        // Write the return address (a guest VA) — target already in
+        // SCRATCH, so this can't clobber it (rd never maps to RDX).
+        if rd != 0 {
+            let slot = rv_slot(rd).unwrap();
+            self.asm
+                .mov_ri64(REG_MAP[slot], self.code_base.wrapping_add(next_pc) as u64);
+            self.invalidate_reg(slot);
         }
 
-        // target_pc = jt_ptr[table_byte_offset + idx*4]
-        //           = *((u32*) (jt_ptr + table_byte_offset + idx*4))
-        self.asm.push(Reg::RAX); // save RAX (= x14)
-        self.asm.shl_ri64(SCRATCH, 2); // idx *= 4
-        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_JT_PTR);
-        if table_byte_offset != 0 {
-            self.asm.add_ri(Reg::RAX, table_byte_offset);
+        // offset = target_va - code_base.
+        if self.code_base != 0 {
+            self.asm.sub_ri(SCRATCH, self.code_base as i32);
         }
-        // Load the u32 PVM2 PC from [RAX + SCRATCH].
-        self.asm.add_rr(Reg::RAX, SCRATCH);
-        self.asm.mov_load32(SCRATCH, Reg::RAX, 0); // SCRATCH = target_pc
 
-        // native_addr = code_base + dispatch_table[target_pc]
+        // Record the offset as the paused PC for fault attribution.
+        self.asm.mov_store32_rip_rel(CTX_PC, SCRATCH);
+
+        // Bounds: offset < code_len (unsigned) — underflow from a
+        // target below code_base wraps huge and fails here.
+        self.asm.cmp_ri32(SCRATCH, self.code_len as i32);
+        self.asm.jcc_label(Cc::AE, self.panic_label);
+
+        // Validate bb_starts[offset] == 1 (basic-block start).
+        self.asm.push(Reg::RAX); // save x14
+        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_BB_STARTS);
+        // RAX = byte bb_starts[offset] (zero-extended).
+        self.asm.movzx_load8_sib(Reg::RAX, Reg::RAX, SCRATCH);
+        self.asm.test_rr(Reg::RAX, Reg::RAX);
+        self.asm.pop(Reg::RAX); // restore x14 before the conditional branch
+        self.asm.jcc_label(Cc::E, self.panic_label);
+
+        // native = code_base_native + dispatch_table[offset]; jmp.
+        self.asm.push(Reg::RAX);
         self.asm.mov_load64_rip_rel(Reg::RAX, CTX_DISPATCH_TABLE);
         self.asm.movsxd_load_sib4(Reg::RAX, Reg::RAX, SCRATCH);
         self.asm.add_r64_mem_rip_rel(Reg::RAX, CTX_CODE_BASE);
-        // Record the target PC for gas-block tracking / pause attribution.
-        self.asm.mov_store32_rip_rel(CTX_PC, SCRATCH);
-        // RAX holds native addr; restore the saved RAX (= x14) value.
-        // Use SCRATCH as the parking lot for the native addr while we pop.
         self.asm.mov_rr(SCRATCH, Reg::RAX);
         self.asm.pop(Reg::RAX);
         self.asm.jmp_reg(SCRATCH);
-
-        // OOB targets `panic_label` directly (see oob_target above);
-        // no per-instruction bind needed here.
-        let _ = next_pc;
     }
 
     fn rv_branch(&mut self, rs1: u8, rs2: u8, imm: i32, cc: Cc, pc: u32, next_pc: u32) {

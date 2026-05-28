@@ -10,7 +10,7 @@
 //! [`javm_exec::interp::Interpreter::run`], and produces an
 //! [`InvocationResult`].
 
-use javm_cap::cap::image::ImageCap;
+use javm_cap::cap::image::{ImageCap, MAP_SRC_CODE};
 use javm_cap::cap::instance::InstanceCap;
 use javm_exec::{
     Access, CopyingMemory, EcallHandler, EcallKind, EcallResult, ExitReason, GasCounter, PAGE_SIZE,
@@ -111,11 +111,20 @@ pub fn run_instance(
     let mut gas = GasCounter::new(initial_gas);
     let mut handler = LocalEcallHandler;
 
-    let predecode = predecode(image.code.as_slice());
+    // Locate the executable code region: the first mapping with a
+    // `Code` source. `start` is the region's CODE_BASE (PC = base +
+    // offset); the bytes live in `image.codes[code_index]`.
+    let (code_base, code_bytes) = image
+        .mappings
+        .iter()
+        .find(|m| m.source_kind == MAP_SRC_CODE)
+        .map(|m| (m.start as u32, image.codes[m.code_index as usize].code.as_slice()))
+        .expect("image has no executable code mapping");
+
+    let predecode = predecode(code_bytes);
     let exit = Interpreter::run(
         &predecode,
-        image.jump_table.as_slice(),
-        image.jump_table_offsets.as_slice(),
+        code_base,
         &mut regs,
         &mut mem,
         &mut gas,
