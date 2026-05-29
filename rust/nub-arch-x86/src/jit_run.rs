@@ -343,6 +343,19 @@ pub struct FrameRuntime {
     ctx_kva: u64,
 }
 
+impl FrameRuntime {
+    /// Refresh the cached trap-table view after a lazy page compile grew
+    /// the Image's trap table. [`enter_frame`] republishes these to the
+    /// #PF handler atomics on the next ring-3 entry, so the handler can
+    /// resolve a faulting RIP in the just-compiled page. The backing
+    /// allocation is pre-reserved (never moves), so in practice only the
+    /// length changes — but we refresh both for robustness.
+    pub fn set_trap_table(&mut self, ptr: *const (u32, u32), len: u64) {
+        self.trap_table_ptr = ptr;
+        self.trap_table_len = len;
+    }
+}
+
 /// Build a per-frame runtime: compile the Image (cached), allocate
 /// per-call mem/ctx/stack pages, populate mem from `arg`/`ro`/`rw`,
 /// initialise the frame-constant `JitContext` fields, and build the

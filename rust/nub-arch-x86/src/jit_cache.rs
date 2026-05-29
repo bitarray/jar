@@ -33,7 +33,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 
-use javm_recompiler_x86::codegen::{CompileResult, Compiler, HelperFns};
+use javm_recompiler_x86::codegen::{Compiler, HelperFns, LazyInit};
 
 use javm_cap::CapHash;
 
@@ -72,7 +72,11 @@ pub struct CompiledImage {
     /// — `jit_pf_handler` redirects the saved RIP here on page fault.
     pub exit_label_offset: u32,
     /// (native_offset, pvm_pc) pairs the #PF handler binary-searches
-    /// to recover the PVM PC from a faulting RIP.
+    /// to recover the PVM PC from a faulting RIP. Grows as pages are
+    /// lazily compiled; pre-reserved to its worst case so the backing
+    /// allocation (and hence the pointer the #PF handler caches) never
+    /// moves. Stays sorted by native offset because each newly-compiled
+    /// page occupies the next contiguous native range.
     pub trap_table: Vec<(u32, u32)>,
     /// Template PD subtree mapping the arena pages at per-call VAs.
     /// Per-call PTs install [`template_pd_pa`] into PDPT[1] of the
@@ -83,6 +87,25 @@ pub struct CompiledImage {
     /// Physical address of `template`'s PD page, cached for fast
     /// install on the per-call hot path.
     pub template_pd_pa: u64,
+
+    // === Lazy per-page compilation state ============================
+    /// Persistent compiler: owns the assembler (prologue, shared stubs,
+    /// and every page body compiled so far) plus the whole-blob
+    /// block-start set. `compile_page_into_arena` appends a page body on
+    /// first entry.
+    ///
+    /// Self-referential (`asm.buf` → its own Vec heap; `bitmask_ptr` →
+    /// `rv_valid_pc` heap). Both target heap allocations that survive a
+    /// move of this struct (BTreeMap rebalance), so caching it is sound.
+    pub compiler: Compiler,
+    /// Guest code bytes — `compile_lazy_page` decodes a page from these.
+    pub code: Vec<u8>,
+    /// Per-4 KiB-page "already compiled" flag (len = number of code
+    /// pages). Guards against compiling a page twice.
+    pub compiled: Vec<bool>,
+    /// Byte size of one JIT region (== `tramp_offset - jit_offset`),
+    /// the upper bound a lazily-appended page must not exceed.
+    pub jit_region_size: usize,
 }
 
 /// Process-wide compile cache.
@@ -148,28 +171,43 @@ pub fn get_or_compile(
     // SAFETY: single-threaded guest.
     let map = unsafe { &mut *CACHE.inner.get() };
     if !map.contains_key(image_hash) {
-        // Region sizing. valid_pc is `code.len()` bytes; the streaming
-        // compile produces it inline so we don't allocate it twice.
-        // Layout: BB | DISPATCH | JIT | TRAMP (no jump table — jalr
-        // targets are validated against BB directly).
+        // Region sizing. Layout: BB | DISPATCH | JIT | TRAMP (no jump
+        // table — jalr targets are validated against BB directly).
+        //
+        // BB / DISPATCH scale exactly with code length. The JIT region,
+        // under lazy compilation, must be sized to its *worst case* up
+        // front: pages compile in on first entry (in execution order),
+        // appending to a fixed arena that's mapped RX once and never
+        // moves.
+        //
+        // 32× code length + 16 KiB is the per-byte worst case. The
+        // recompiler runs untrusted code, so the bound must hold for any
+        // input, not just typical guests (~3× expansion): a page of
+        // 0x0000 halfwords — the zero-padding `CodeRegionCap` appends to
+        // round code up to a page — compiles to ~22.5× (each illegal
+        // halfword is a terminating panic stub, so the next halfword is a
+        // fresh gas block too), and a worst-case cross-page conditional
+        // branch is ~27×. `compile_page_into_arena` hard-checks against
+        // the bound, so even an under-estimate fails cleanly (a
+        // pathological guest just won't run) rather than corrupting.
         let bb_size = page_round_up_min1(code.len());
         let dispatch_size = page_round_up_min1(code.len() * core::mem::size_of::<i32>());
+        let jit_region_size = page_round_up_min1(code.len() * 32 + 16384);
 
         let bb_offset = 0usize;
         let dispatch_offset = bb_offset + bb_size;
         let jit_offset = dispatch_offset + dispatch_size;
         let jit_va = arena_base_va + jit_offset as u64;
 
-        let compiler = Compiler::new(helpers, code.len(), jit_va, mem_cycles, code_base);
-        let CompileResult {
-            native_code,
-            dispatch_entries,
-            trap_table,
-            exit_label_offset,
-            valid_pc,
-        } = compiler.compile(code);
+        let mut compiler = Compiler::new(helpers, code.len(), jit_va, mem_cycles, code_base);
+        // Emit prologue + shared stubs only (incl. the compile-page
+        // stub). Page bodies compile lazily on first entry.
+        let init: LazyInit = compiler.compile_lazy_init(code);
 
-        let jit_size = page_round_up_min1(native_code.len());
+        // #PF window covers the whole (worst-case) JIT region: a fault's
+        // RIP is always inside already-compiled code, which lives within
+        // this window.
+        let jit_size = jit_region_size;
         let tramp_offset = jit_offset + jit_size;
         let tramp_size = PAGE_SIZE;
         let total = tramp_offset + tramp_size;
@@ -179,19 +217,27 @@ pub fn get_or_compile(
 
         // BB region: valid_pc as bytes (Vec<bool> is 0/1 single-byte
         // representation, so a raw-pointer reinterpret is sound).
-        let bb_ptr = valid_pc.as_ptr() as *const u8;
+        let bb_ptr = init.valid_pc.as_ptr() as *const u8;
         // SAFETY: bb_ptr valid for valid_pc.len() bytes.
-        let bb_bytes = unsafe { core::slice::from_raw_parts(bb_ptr, valid_pc.len()) };
-        buf[bb_offset..bb_offset + valid_pc.len()].copy_from_slice(bb_bytes);
+        let bb_bytes = unsafe { core::slice::from_raw_parts(bb_ptr, init.valid_pc.len()) };
+        buf[bb_offset..bb_offset + init.valid_pc.len()].copy_from_slice(bb_bytes);
 
-        // DISPATCH region — sparse write (arena is page-zero).
-        for &(pvm_pc, off) in &dispatch_entries {
-            let slot_off = dispatch_offset + (pvm_pc as usize) * core::mem::size_of::<i32>();
-            buf[slot_off..slot_off + 4].copy_from_slice(&off.to_le_bytes());
+        // DISPATCH region — point every block start at the compile-page
+        // stub (sparse write; arena is page-zero, so non-block-start
+        // slots stay 0 and are never used as dispatch targets). As pages
+        // compile, `compile_page_into_arena` patches their block starts
+        // to the real native offsets.
+        let stub_bytes = (init.compile_stub_offset as i32).to_le_bytes();
+        for off in 0..init.valid_pc.len() {
+            if init.valid_pc[off] {
+                let slot_off = dispatch_offset + off * core::mem::size_of::<i32>();
+                buf[slot_off..slot_off + 4].copy_from_slice(&stub_bytes);
+            }
         }
 
-        // JIT region.
-        buf[jit_offset..jit_offset + native_code.len()].copy_from_slice(&native_code);
+        // JIT region — prologue + shared stubs (offsets 0..init.len).
+        let init_bytes = compiler.asm.written();
+        buf[jit_offset..jit_offset + init.len].copy_from_slice(&init_bytes[..init.len]);
 
         // TRAMP region (same 26-byte sequence as PVM).
         let tramp_start = tramp_offset;
@@ -228,6 +274,15 @@ pub fn get_or_compile(
             .pd_pa()
             .expect("template PD must be in kernel half");
 
+        // Trap table: empty after init (prologue + stubs have no memory
+        // ops). Pre-reserve to the worst case — at most one entry per
+        // instruction, and instructions are ≥ 2 bytes — so lazily
+        // appending page trap entries never reallocates, keeping the
+        // backing pointer (cached by the #PF handler) stable.
+        let trap_table: Vec<(u32, u32)> = Vec::with_capacity(code.len() / 2 + 64);
+
+        let n_pages = code.len().div_ceil(PAGE_SIZE);
+
         map.insert(
             *image_hash,
             CompiledImage {
@@ -237,12 +292,103 @@ pub fn get_or_compile(
                 jit_offset,
                 tramp_offset,
                 jit_size,
-                exit_label_offset,
+                exit_label_offset: init.exit_label_offset,
                 trap_table,
                 template,
                 template_pd_pa,
+                compiler,
+                code: code.to_vec(),
+                compiled: alloc::vec![false; n_pages],
+                jit_region_size,
             },
         );
     }
     map.get(image_hash).expect("inserted above")
+}
+
+/// Image not present in the cache (must be inserted by `get_or_compile`
+/// before a page is compiled).
+pub const ERR_LAZY_NO_IMAGE: u32 = 70;
+/// Requested page index is past the end of the code.
+pub const ERR_LAZY_PAGE_OOB: u32 = 71;
+/// Compiled page would overrun the worst-case JIT region — only a
+/// pathological guest can hit this (see the 32× bound in `get_or_compile`).
+pub const ERR_LAZY_ARENA_FULL: u32 = 72;
+
+/// Lazily compile one 4 KiB code page into the cached Image's arena.
+///
+/// Called from the `EXIT_COMPILE_PAGE` runtime path when a dispatch
+/// landed on a block whose page is not compiled yet. Compiles the page
+/// body (appending to the persistent compiler's JIT buffer), copies the
+/// new native bytes into the arena's JIT region, patches the page's
+/// block-start dispatch entries to their real native offsets, and
+/// appends the page's trap entries.
+///
+/// Returns the `(ptr, len)` of the (possibly-grown) trap table so the
+/// caller can refresh the live frame's #PF-handler view before
+/// re-entering ring 3. Idempotent: a page already compiled is a no-op
+/// that returns the current trap view.
+///
+/// `Err(())` on a bad page index or if the worst-case JIT region bound
+/// is exceeded (never expected for real guests — a clean failure rather
+/// than an arena overwrite).
+///
+/// # Safety
+/// Single-threaded guest; the runtime sequences this between ring-3
+/// entries, so no live `&CompiledImage` borrow overlaps the `&mut` here.
+pub fn compile_page_into_arena(
+    image_hash: &CapHash,
+    page: usize,
+) -> Result<(*const (u32, u32), u64), u32> {
+    // SAFETY: single-threaded guest.
+    let map = unsafe { &mut *CACHE.inner.get() };
+    let image = map.get_mut(image_hash).ok_or(ERR_LAZY_NO_IMAGE)?;
+
+    if page >= image.compiled.len() {
+        return Err(ERR_LAZY_PAGE_OOB);
+    }
+    if image.compiled[page] {
+        // Already compiled — dispatch entries already point at real
+        // code; this re-entry just needs the current trap view.
+        return Ok((image.trap_table.as_ptr(), image.trap_table.len() as u64));
+    }
+
+    // Compile the page body (appends to the compiler's JIT buffer).
+    // Disjoint field borrows: `compiler` (&mut) vs `code` (&).
+    let lazy = image.compiler.compile_lazy_page(&image.code, page);
+
+    // Worst-case JIT region bound — refuse to overrun the arena (would
+    // only fire for a pathological/adversarial guest; the 32× sizing
+    // covers every real workload). Clean failure, never a corrupting
+    // write past the arena.
+    if lazy.end > image.jit_region_size {
+        return Err(ERR_LAZY_ARENA_FULL);
+    }
+
+    // Copy the newly-emitted bytes into the arena JIT region. `compiler`
+    // and `arena` are disjoint fields, so the two borrows don't alias.
+    {
+        let src = image.compiler.asm.written();
+        let bytes = &src[lazy.start..lazy.end];
+        let buf = image.arena.as_mut_slice();
+        let dst = image.jit_offset + lazy.start;
+        buf[dst..dst + bytes.len()].copy_from_slice(bytes);
+    }
+
+    // Patch this page's block-start dispatch entries to real offsets.
+    {
+        let dispatch_offset = image.dispatch_offset;
+        let buf = image.arena.as_mut_slice();
+        for &(pc, noff) in &lazy.dispatch_entries {
+            let slot = dispatch_offset + (pc as usize) * core::mem::size_of::<i32>();
+            buf[slot..slot + 4].copy_from_slice(&noff.to_le_bytes());
+        }
+    }
+
+    // Append trap entries — pre-reserved, so no realloc; stays sorted by
+    // native offset because this page occupies the next native range.
+    image.trap_table.extend_from_slice(&lazy.trap_entries);
+    image.compiled[page] = true;
+
+    Ok((image.trap_table.as_ptr(), image.trap_table.len() as u64))
 }
