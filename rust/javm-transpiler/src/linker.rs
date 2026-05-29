@@ -8,7 +8,7 @@
 //!    `lui`+lo12 — data lives at its page-0 layout address, unrelated to
 //!    where code maps. *Code* references (`R_RISCV_CALL_PLT` and
 //!    code-targeting `PCREL_HI20`) stay native `auipc`+`jalr`/`addi`:
-//!    code is mapped at [`CODE_BASE`](crate::layout::CODE_BASE), so the
+//!    code is mapped at [`CODE_BASE`], so the
 //!    PC-relative computation lands on the right code VA. Kept pairs are
 //!    re-encoded after step 4 if fallthrough injection shifts the layout
 //!    (LUI is absolute, so injection-stable, and needs no fixup).
