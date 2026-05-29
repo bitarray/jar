@@ -99,8 +99,6 @@ pub const CTX_EXIT_REASON: u64 = CTX_VA + offset_of!(JitContext, exit_reason) as
 pub const CTX_EXIT_ARG: u64 = CTX_VA + offset_of!(JitContext, exit_arg) as u64;
 pub const CTX_HEAP_BASE: u64 = CTX_VA + offset_of!(JitContext, heap_base) as u64;
 pub const CTX_HEAP_TOP: u64 = CTX_VA + offset_of!(JitContext, heap_top) as u64;
-pub const CTX_BB_STARTS: u64 = CTX_VA + offset_of!(JitContext, bb_starts) as u64;
-pub const CTX_BB_LEN: u64 = CTX_VA + offset_of!(JitContext, bb_len) as u64;
 pub const CTX_ENTRY_PC: u64 = CTX_VA + offset_of!(JitContext, entry_pc) as u64;
 pub const CTX_PC: u64 = CTX_VA + offset_of!(JitContext, pc) as u64;
 pub const CTX_DISPATCH_TABLE: u64 = CTX_VA + offset_of!(JitContext, dispatch_table) as u64;
@@ -128,10 +126,12 @@ pub struct CompileResult {
     pub dispatch_entries: Vec<(u32, i32)>,
     pub trap_table: Vec<(u32, u32)>,
     pub exit_label_offset: u32,
-    /// Byte-indexed validity map (RV path only): true at every PC where
-    /// an instruction begins. Empty for the PVM path — `compile()`
-    /// consumes its own bitmask argument, no need to surface it.
-    pub valid_pc: Vec<bool>,
+    /// Native offset of the panic stub. The runtime dense-fills the
+    /// dispatch table with this so a `jalr` to any non-block-start
+    /// offset lands on the panic stub *via the table* — folding the
+    /// block-start validation into the dispatch lookup (no separate
+    /// `bb_starts` set). 0 for the PVM path.
+    pub panic_offset: u32,
 }
 
 /// Helper function pointers passed to compiled code.
@@ -209,11 +209,11 @@ pub struct Compiler {
     /// simulator and leaves this one untouched.
     pub(crate) gas_sim: GasSimulator,
     /// Guest VA the code region is mapped at. `jalr`/`auipc` produce
-    /// and consume code addresses as `code_base + offset`; the
-    /// dispatch/bb tables are offset-indexed (offset = VA - code_base).
+    /// and consume code addresses as `code_base + offset`; the dispatch
+    /// table is offset-indexed (offset = VA - code_base).
     pub(crate) code_base: u32,
     /// Code region length in bytes — the upper bound for jalr target
-    /// offsets (== `bb_starts` / dispatch-table length).
+    /// offsets (== dispatch-table length in entries).
     pub(crate) code_len: u32,
     /// True during RV streaming compile (`compile`). When set, branch
     /// emit helpers defer forward-target validation (`target > pc`) to a
@@ -1168,11 +1168,12 @@ impl Compiler {
     /// intermediary — that was 57% of the old cold-path compile time
     /// on the large guests (ed25519, ecrecover).
     ///
-    /// The returned `CompileResult.valid_pc` is the byte-indexed
-    /// "valid branch target" bitmap the runtime BB region needs. A bit
-    /// is set iff the PC is a gas-block start (= dispatchable entry in
-    /// the gas-block dispatch table). Built incrementally during the
-    /// streaming pass — no separate length-only pre-pass.
+    /// The internal `rv_valid_pc` bitmap (a bit set iff the PC is a
+    /// gas-block start) drives compile-time forward-branch validation
+    /// via `is_basic_block_start`. It is *not* surfaced: the runtime
+    /// validates `jalr` targets through the dense dispatch table
+    /// instead. Built incrementally during the streaming pass — no
+    /// separate length-only pre-pass.
     pub fn compile(mut self, code: &[u8]) -> CompileResult {
         // valid_pc is populated incrementally as the streaming pass
         // binds gas-block starts. The pointer is stable across mutation
@@ -1283,15 +1284,23 @@ impl Compiler {
         }
 
         let exit_label_offset = self.asm.label_offset(self.exit_label).unwrap_or(0) as u32;
+        // Security-critical: the runtime dense-fills the dispatch table
+        // with this, so it must resolve to the real panic stub (a 0 here
+        // would route bad `jalr` targets to native offset 0 instead of
+        // faulting). The panic stub is always emitted by
+        // `emit_exit_sequences` above.
+        let panic_offset = self
+            .asm
+            .label_offset(self.panic_label)
+            .expect("panic stub label must resolve") as u32;
         let trap_table = core::mem::take(&mut self.trap_entries);
-        let valid_pc = core::mem::take(&mut self.rv_valid_pc);
 
         CompileResult {
             native_code: self.asm.finalize(),
             dispatch_entries,
             trap_table,
             exit_label_offset,
-            valid_pc,
+            panic_offset,
         }
     }
 
@@ -3446,10 +3455,12 @@ impl Compiler {
     ///   2. write `rd = code_base + next_pc` if `rd != 0` (return addr)
     ///   3. `offset = target_va - code_base`
     ///   4. bounds: `offset < code_len`  else PANIC
-    ///   5. `bb_starts[offset] == 1`?     else PANIC  (security-critical:
-    ///      rejects mid-block / mid-instruction targets — gas is
-    ///      precharged at block entry)
-    ///   6. `native = code_base_native + dispatch_table[offset]; jmp`
+    ///   5. `native = code_base_native + dispatch_table[offset]; jmp`
+    ///      — the dispatch table is *dense*: every non-block-start offset
+    ///      holds the panic-stub offset, so a mid-block / mid-instruction
+    ///      target jumps to the panic stub (gas is precharged at block
+    ///      entry). Folds the former `bb_starts` check into the lookup.
+    ///      SECURITY-CRITICAL: the runtime MUST dense-fill the table.
     fn rv_jalr(&mut self, rd: u8, rs1: u8, imm: i32, pc: u32, next_pc: u32) {
         use super::asm::Cc;
 
@@ -3489,16 +3500,12 @@ impl Compiler {
         self.asm.cmp_ri32(SCRATCH, self.code_len as i32);
         self.asm.jcc_label(Cc::AE, self.panic_label);
 
-        // Validate bb_starts[offset] == 1 (basic-block start).
-        self.asm.push(Reg::RAX); // save x14
-        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_BB_STARTS);
-        // RAX = byte bb_starts[offset] (zero-extended).
-        self.asm.movzx_load8_sib(Reg::RAX, Reg::RAX, SCRATCH);
-        self.asm.test_rr(Reg::RAX, Reg::RAX);
-        self.asm.pop(Reg::RAX); // restore x14 before the conditional branch
-        self.asm.jcc_label(Cc::E, self.panic_label);
-
         // native = code_base_native + dispatch_table[offset]; jmp.
+        // The dispatch table is dense: a non-block-start offset holds the
+        // panic-stub offset, so a mid-block / mid-instruction target
+        // lands on the panic stub here instead of valid native code.
+        // This folds the former `bb_starts[offset] == 1` validation into
+        // the lookup (one fewer load + branch per jalr).
         self.asm.push(Reg::RAX);
         self.asm.mov_load64_rip_rel(Reg::RAX, CTX_DISPATCH_TABLE);
         self.asm.movsxd_load_sib4(Reg::RAX, Reg::RAX, SCRATCH);

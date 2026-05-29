@@ -325,8 +325,8 @@ pub struct DirectMap {
 /// first [`enter_frame`]); reused across re-entries on the same frame
 /// — saves N PageTable + 3 PageBuf allocations in a depth-N recursion.
 ///
-/// Frame-constant `JitContext` fields (bb_starts, dispatch_table,
-/// code_base, flat_buf, …) are written once when the runtime is built.
+/// Frame-constant `JitContext` fields (dispatch_table, code_base,
+/// flat_buf, …) are written once when the runtime is built.
 /// [`enter_frame`] only updates regs/pc/gas/exit_*.
 pub struct FrameRuntime {
     pt: PageTable,
@@ -401,7 +401,6 @@ pub unsafe fn build_frame_runtime(
         return None;
     }
 
-    let bb_va = META_BASE_M + cached.bb_offset as u64;
     let dispatch_va = META_BASE_M + cached.dispatch_offset as u64;
     let jit_va = META_BASE_M + cached.jit_offset as u64;
     let tramp_va = META_BASE_M + cached.tramp_offset as u64;
@@ -446,11 +445,9 @@ pub unsafe fn build_frame_runtime(
     unsafe {
         (*ctx).heap_base = 0;
         (*ctx).heap_top = 0;
-        // jalr validation uses the BB (basic-block-start) set directly —
-        // no separate jump table.
-        (*ctx).bb_starts = bb_va as *const u8;
-        (*ctx).bb_len = code.len() as u32;
-        (*ctx)._pad1 = 0;
+        // jalr targets are validated by the dense dispatch table (a
+        // non-block-start offset holds the panic-stub offset) — no
+        // separate bb_starts set.
         (*ctx).entry_pc = entry_pc;
         (*ctx).dispatch_table = dispatch_va as *const i32;
         (*ctx).code_base = jit_va;

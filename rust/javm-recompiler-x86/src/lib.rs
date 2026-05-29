@@ -39,13 +39,7 @@ pub struct JitContext {
     pub heap_base: u32,
     /// Current heap top (offset 124).
     pub heap_top: u32,
-    /// Basic block starts pointer (byte array, 1 = block start).
-    /// jalr validates its target offset against this set.
-    pub bb_starts: *const u8,
-    /// Basic block starts length (== code region length in bytes).
-    pub bb_len: u32,
-    pub _pad1: u32,
-    /// Entry PC for re-entry after host calls (offset 160).
+    /// Entry PC for re-entry after host calls.
     pub entry_pc: u32,
     /// Current PC when execution stopped (offset 164).
     pub pc: u32,
