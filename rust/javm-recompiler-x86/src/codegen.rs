@@ -599,14 +599,14 @@ impl Compiler {
         self.asm.jmp_reg(SCRATCH);
     }
 
-    /// Emit exit sequences and epilogue.
-    pub(crate) fn emit_exit_sequences(&mut self) {
-        // Reserve capacity for exit sequences + all OOG stubs.
-        // Each OOG stub is ~12 bytes.
-        let needed = 512 + self.oog_stubs.len() * 16;
-        self.asm.ensure_capacity(needed);
-        // Shared OOG handler that reads PC from SCRATCH — emitted BEFORE OOG
-        // stubs so backward jumps from stubs can use jmp rel8 (2 bytes).
+    /// Emit the shared exit / OOG / panic handlers (the runtime "stub").
+    /// Emitted once, up front (right after the prologue), so per-page
+    /// bodies — which under lazy compilation are compiled later and in
+    /// arbitrary order — can backward-reference them. The per-block OOG
+    /// stubs are emitted per page by `emit_page_oog_stubs`.
+    pub(crate) fn emit_stub_handlers(&mut self) {
+        self.asm.ensure_capacity(512);
+        // Shared OOG handler: PC already in SCRATCH.
         self.asm.bind_label(self.oog_pc_label);
         self.asm.mov_store32_rip_rel(CTX_PC, SCRATCH);
         // fall through to oog_label:
@@ -614,15 +614,6 @@ impl Compiler {
         self.asm
             .mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_OOG as i32);
         self.asm.jmp_label(self.exit_label);
-
-        // Per-gas-block OOG stubs: compact format — load PC into SCRATCH,
-        // jump to shared handler. Saves ~6 bytes per stub vs inline PC store.
-        let stubs = core::mem::take(&mut self.oog_stubs);
-        for (label, pvm_pc, _cost) in &stubs {
-            self.asm.bind_label(*label);
-            self.asm.mov_ri32(SCRATCH, *pvm_pc);
-            self.asm.jmp_label(self.oog_pc_label);
-        }
 
         // Page faults are handled by the SIGSEGV handler (signal.rs).
 
@@ -657,6 +648,20 @@ impl Compiler {
         self.asm.pop(Reg::RBP);
         self.asm.pop(Reg::RBX);
         self.asm.ret();
+    }
+
+    /// Emit the OOG stubs gathered while compiling the current page:
+    /// `mov SCRATCH, pvm_pc; jmp oog_pc_handler`. Each block's gas check
+    /// (`js stub`) targets one of these. Drains `self.oog_stubs` so the
+    /// next page starts clean.
+    pub(crate) fn emit_page_oog_stubs(&mut self) {
+        let stubs = core::mem::take(&mut self.oog_stubs);
+        self.asm.ensure_capacity(512 + stubs.len() * 16);
+        for (label, pvm_pc, _cost) in &stubs {
+            self.asm.bind_label(*label);
+            self.asm.mov_ri32(SCRATCH, *pvm_pc);
+            self.asm.jmp_label(self.oog_pc_label);
+        }
     }
 }
 
@@ -1207,81 +1212,20 @@ impl Compiler {
         self.bitmask_len = self.rv_valid_pc.len();
 
         self.emit_prologue();
+        // Shared exit/OOG/panic handlers up front, before any page body.
+        self.emit_stub_handlers();
 
-        let mut pending_gas: Option<(Label, u32, usize)> = None;
-        let mut pc: usize = 0;
-
-        while pc < code.len() {
-            self.asm.ensure_capacity(512);
-
-            // Length encoding lives in bits [1:0] of byte 0: `xx11` is
-            // 4-byte, anything else is 2-byte (RVC). Decode no further
-            // than that — the dispatcher inspects raw bits directly.
-            if pc + 2 > code.len() {
-                self.rv_emit_panic_at(pc as u32);
-                break;
-            }
-            let is_4byte = code[pc] & 0b11 == 0b11;
-            let base_len = if is_4byte { 4 } else { 2 };
-            if pc + base_len > code.len() {
-                self.rv_emit_panic_at(pc as u32);
-                break;
-            }
-
-            let inst_pc = pc as u32;
-
-            // Bind a gas block at every block start in the precomputed
-            // set ({0} ∪ post-terminator ∪ page starts). Same partition
-            // as predecode → identical per-block gas.
-            if self.is_basic_block_start(inst_pc) {
-                self.bind_rv_gas_block_start_streaming(inst_pc, &mut pending_gas);
-            }
-
-            // Byte-based dispatch. Each path returns
-            // `(is_terminator, preserve_cf, extra_bytes)`. `extra_bytes`
-            // counts the *additional* bytes consumed beyond `base_len`
-            // for lookahead fusion (e.g., Ld→Add fuses an extra 4-byte
-            // Add). `preserve_cf` tells us whether to keep `last_add_cf`
-            // alive for a following Sltu fusion.
-            //
-            // Suppress fusion across a block boundary: if the trailer
-            // starts a new gas block, fusing it into this block would
-            // diverge the recompiler's partition (and per-block gas) from
-            // predecode's. `rest` is lookahead-only — an empty slice
-            // defers the trailer to its own block next iteration. (Only
-            // page-boundary starts can fall between two fusable
-            // non-terminators; post-terminator starts follow a
-            // non-fusable terminator. Gating on the block-start set covers
-            // both uniformly.)
-            let next_inst_pc = inst_pc + base_len as u32;
-            let rest: &[u8] = if self.is_basic_block_start(next_inst_pc) {
-                &[]
-            } else {
-                &code[pc + base_len..]
-            };
-            let (_term, preserve_cf, extra) = if is_4byte {
-                let w = u32::from_le_bytes([code[pc], code[pc + 1], code[pc + 2], code[pc + 3]]);
-                self.compile_rv4(w, inst_pc, 4, rest)
-            } else {
-                let h = u16::from_le_bytes([code[pc], code[pc + 1]]);
-                self.compile_rvc(h, inst_pc, rest)
-            };
-
-            if !preserve_cf {
-                self.last_add_cf = None;
-            }
-
-            pc += base_len + extra;
+        // Compile each 4 KiB page's body in order. The per-page structure
+        // (with the page-boundary fall-through dispatching through the
+        // table) is exactly what lazy compilation needs; here we drive it
+        // eagerly so every page is compiled up front.
+        let page = javm_exec::PAGE_SIZE as usize;
+        let n_pages = code.len().div_ceil(page);
+        for p in 0..n_pages {
+            let start = p * page;
+            let end = ((p + 1) * page).min(code.len());
+            self.compile_page(code, start, end);
         }
-
-        // Finalize the last gas block — patch its cost in.
-        if let Some((stub_label, block_pc, patch_offset)) = pending_gas.take() {
-            let cost = self.gas_sim.flush_and_get_cost();
-            self.asm.patch_i32(patch_offset, cost as i32);
-            self.oog_stubs.push((stub_label, block_pc, cost));
-        }
-
-        self.emit_exit_sequences();
 
         // Sparse dispatch entries — caller writes only these into the
         // (page-zero-filled) arena dispatch region. No code.len() + 1
@@ -1305,6 +1249,101 @@ impl Compiler {
             exit_label_offset,
             valid_pc,
         }
+    }
+
+    /// Compile the blocks in code byte range `[start, end)` — one 4 KiB
+    /// page — into the JIT buffer at the current cursor, then emit this
+    /// page's OOG stubs. Same-page branch targets resolve to direct
+    /// rel32 jumps (their labels bind within this page); cross-page
+    /// targets, and a fall-through off the page end, dispatch indirectly
+    /// through the table, so the target page need not be compiled yet
+    /// (the foundation for lazy compilation). `bb`/`is_basic_block_start`
+    /// is the whole-blob precomputed set, so targets validate regardless
+    /// of which pages exist.
+    fn compile_page(&mut self, code: &[u8], start: usize, end: usize) {
+        let mut pending_gas: Option<(Label, u32, usize)> = None;
+        let mut pc = start;
+        // Whether the last instruction compiled terminates the block. An
+        // empty range trivially "terminates" (nothing falls through).
+        let mut last_terminates = true;
+
+        while pc < end {
+            self.asm.ensure_capacity(512);
+
+            // Length encoding lives in bits [1:0] of byte 0: `xx11` is
+            // 4-byte, anything else 2-byte (RVC).
+            if pc + 2 > code.len() {
+                self.rv_emit_panic_at(pc as u32);
+                last_terminates = true;
+                break;
+            }
+            let is_4byte = code[pc] & 0b11 == 0b11;
+            let base_len = if is_4byte { 4 } else { 2 };
+            if pc + base_len > code.len() {
+                self.rv_emit_panic_at(pc as u32);
+                last_terminates = true;
+                break;
+            }
+
+            let inst_pc = pc as u32;
+
+            // Bind a gas block at every block start in the precomputed set
+            // ({0} ∪ post-terminator ∪ page starts) — same partition as
+            // predecode, so per-block gas matches.
+            if self.is_basic_block_start(inst_pc) {
+                self.bind_rv_gas_block_start_streaming(inst_pc, &mut pending_gas);
+            }
+
+            // Suppress fusion across a block boundary (incl. the page end,
+            // which is a block start): fusing a trailer that starts a new
+            // block would diverge the recompiler's partition (and per-block
+            // gas) from predecode's. `rest` is lookahead-only — an empty
+            // slice defers the trailer to its own block.
+            let next_inst_pc = inst_pc + base_len as u32;
+            let rest: &[u8] = if self.is_basic_block_start(next_inst_pc) {
+                &[]
+            } else {
+                &code[pc + base_len..]
+            };
+            let (term, preserve_cf, extra) = if is_4byte {
+                let w = u32::from_le_bytes([code[pc], code[pc + 1], code[pc + 2], code[pc + 3]]);
+                self.compile_rv4(w, inst_pc, 4, rest)
+            } else {
+                let h = u16::from_le_bytes([code[pc], code[pc + 1]]);
+                self.compile_rvc(h, inst_pc, rest)
+            };
+
+            if !preserve_cf {
+                self.last_add_cf = None;
+            }
+            last_terminates = term;
+            pc += base_len + extra;
+        }
+
+        // Flush the page's last gas block cost.
+        if let Some((stub_label, block_pc, patch_offset)) = pending_gas.take() {
+            let cost = self.gas_sim.flush_and_get_cost();
+            self.asm.patch_i32(patch_offset, cost as i32);
+            self.oog_stubs.push((stub_label, block_pc, cost));
+        }
+
+        // If the page's last block falls through, dispatch to the next
+        // page start (a block start). Under lazy compilation that page may
+        // not be compiled yet → the dispatch lands on the compile-page
+        // stub. `end` is the next page's start offset (instructions never
+        // straddle a page, invariant 10).
+        if !last_terminates {
+            let next = end as u32;
+            if (next as usize) < code.len() {
+                self.emit_dispatch_static(next);
+            } else {
+                // Fall-through past the end of the blob — malformed.
+                self.rv_emit_panic_at(next.saturating_sub(1));
+            }
+        }
+
+        // Emit this page's OOG stubs (they reference the shared handler).
+        self.emit_page_oog_stubs();
     }
 
     /// Streaming gas-block-start hook: bind label, flush prior block's
