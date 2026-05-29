@@ -75,10 +75,23 @@ pub fn run_instance(
     args: [u64; 4],
     initial_gas: u64,
 ) -> InvocationResult {
+    // Data lives at [DATA_BASE, mem_size); base the flat buffer at
+    // DATA_BASE so [0, DATA_BASE) (null guard + code) faults, matching
+    // the recompiler's page table.
     let mut mem = CopyingMemory::new();
-    let mem_size_pages = page_round_up_u64(instance.mem_size as u64);
-    mem.map_region(0, mem_size_pages, Access::ReadWrite, None)
+    mem.base = javm_cap::layout::DATA_BASE;
+    let data_extent = page_round_up_u64(
+        (instance.mem_size as u64).saturating_sub(javm_cap::layout::DATA_BASE as u64),
+    );
+    if data_extent > 0 {
+        mem.map_region(
+            javm_cap::layout::DATA_BASE as u64,
+            data_extent,
+            Access::ReadWrite,
+            None,
+        )
         .expect("map base RW region");
+    }
     for overlay_entry in instance.rw_overlays.iter() {
         overlay(
             &mut mem,

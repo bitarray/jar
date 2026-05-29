@@ -32,8 +32,8 @@
 use crate::TranspileError;
 use crate::elf::parse_linked_elf;
 use crate::layout::{
-    CODE_BASE, HEAP_CAP_INDEX, PVM_PAGE_SIZE, ProgramLayout, RO_CAP_INDEX, RW_CAP_INDEX,
-    STACK_CAP_INDEX,
+    CODE_BASE, DATA_BASE, HEAP_CAP_INDEX, MAX_CODE_SIZE, PVM_PAGE_SIZE, ProgramLayout,
+    RO_CAP_INDEX, RW_CAP_INDEX, STACK_CAP_INDEX,
 };
 use javm_cap::SlotIdx;
 use javm_cap::abi::{BARE_GAS_SLOT, BARE_QUOTA_SLOT, BARE_YIELD_CATCHER_SLOT};
@@ -179,7 +179,15 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
             expect_auipc(&code, auipc_off, hi20_v)?;
             code_auipc.insert(auipc_off, target_off);
         } else {
-            fold_auipc_to_lui(&mut code, auipc_off, hi20_v, (target & 0xFFFF_FFFF) as u32)?;
+            // Data target: relocate from the ELF's `[0, extent)` data
+            // layout to the runtime `[DATA_BASE, …)` mapping.
+            let data_target = target.wrapping_add(u64::from(DATA_BASE));
+            fold_auipc_to_lui(
+                &mut code,
+                auipc_off,
+                hi20_v,
+                (data_target & 0xFFFF_FFFF) as u32,
+            )?;
         }
     }
 
@@ -200,7 +208,11 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
                 code_lo12.push((lo_off, auipc_off, target_off));
             }
         } else {
-            patch_lo12_abs(&mut code, lo_off, (target & 0xFFFF_FFFF) as u32);
+            // Data target: relocate to the runtime `[DATA_BASE, …)`
+            // mapping (DATA_BASE is page-aligned, so the low 12 bits the
+            // LO12 carries are unchanged — kept explicit for clarity).
+            let data_target = target.wrapping_add(u64::from(DATA_BASE));
+            patch_lo12_abs(&mut code, lo_off, (data_target & 0xFFFF_FFFF) as u32);
         }
     }
 
@@ -360,6 +372,42 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
         }
     }
 
+    // ---- 5c. Relocate absolute data pointers ------------------------
+    //
+    // Pointers stored in data that point *into data* (e.g. `&'static`
+    // constants in `.data.rel.ro`) hold ELF data vaddrs (the `[0,
+    // extent)` layout). The runtime maps data at `[DATA_BASE, …)`, so
+    // shift each by `+DATA_BASE`. Data-targeting abs relocs the parser
+    // captured but the code-pointer pass above ignored. A pointer that
+    // lands in neither the RO nor RW blob is unrelocatable — error
+    // loudly rather than emit a silently-wrong pointer.
+    let mut rw_data_rewritten = elf.rw_data.clone();
+    {
+        let ro_base = elf.stack_size as u64;
+        let rw_base = elf.rw_base;
+        for &(data_vaddr, target, size) in &elf.abs_data_ptrs {
+            let new_val = target.wrapping_add(u64::from(DATA_BASE));
+            let n = size as usize;
+            let bytes = new_val.to_le_bytes();
+            if data_vaddr >= ro_base
+                && (data_vaddr - ro_base) as usize + n <= ro_data_rewritten.len()
+            {
+                let off = (data_vaddr - ro_base) as usize;
+                ro_data_rewritten[off..off + n].copy_from_slice(&bytes[..n]);
+            } else if data_vaddr >= rw_base
+                && (data_vaddr - rw_base) as usize + n <= rw_data_rewritten.len()
+            {
+                let off = (data_vaddr - rw_base) as usize;
+                rw_data_rewritten[off..off + n].copy_from_slice(&bytes[..n]);
+            } else {
+                return Err(TranspileError::InvalidSection(format!(
+                    "link_elf: absolute data pointer at vaddr {data_vaddr:#x} (→ {target:#x}) \
+                     falls outside the RO/RW data blobs; cannot relocate to DATA_BASE"
+                )));
+            }
+        }
+    }
+
     // ---- 6. Endpoints -----------------------------------------------
     //
     // `entry_pc` stays a code-region byte offset; the runtime adds
@@ -375,7 +423,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
 
     // ---- 7. Memory layout + Image construction ----------------------
     let ro_data = ro_data_rewritten;
-    let rw_data = elf.rw_data.clone();
+    let rw_data = rw_data_rewritten;
 
     let stack_pages = elf.stack_size / PVM_PAGE_SIZE;
     let ro_pages = (ro_data.len() as u32).div_ceil(PVM_PAGE_SIZE);
@@ -458,19 +506,22 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
         );
     }
 
-    // Code region: mapped read-only at CODE_BASE, clear of the page-0
-    // data layout and within the 4 GiB guest range (CTX sits at 4 GiB).
-    let data_end = u64::from(layout.total_data_pages()) * page_bytes;
+    // Layout geometry: code occupies `[CODE_BASE, CODE_BASE +
+    // code_size)` and must stay below DATA_BASE (i.e. `code_size ≤
+    // MAX_CODE_SIZE`); data occupies `[DATA_BASE, DATA_BASE +
+    // data_extent)` and must stay within the 4 GiB guest range.
     let code_base = u64::from(CODE_BASE);
-    if code_base < data_end {
+    let code_size = (code.len() as u64).div_ceil(page_bytes) * page_bytes;
+    if code_base + code_size > u64::from(DATA_BASE) {
         return Err(TranspileError::InvalidSection(format!(
-            "link_elf: CODE_BASE {code_base:#x} overlaps data end {data_end:#x}"
+            "link_elf: code size {code_size:#x} exceeds MAX_CODE_SIZE {:#x} (would overlap DATA_BASE {:#x})",
+            MAX_CODE_SIZE, DATA_BASE,
         )));
     }
-    let code_size = (code.len() as u64).div_ceil(page_bytes) * page_bytes;
-    if code_base + code_size > (1u64 << 32) {
+    let data_end = u64::from(DATA_BASE) + u64::from(layout.total_data_pages()) * page_bytes;
+    if data_end > (1u64 << 32) {
         return Err(TranspileError::InvalidSection(format!(
-            "link_elf: code at {code_base:#x}+{code_size:#x} exceeds the 4 GiB guest range"
+            "link_elf: data end {data_end:#x} exceeds the 4 GiB guest range"
         )));
     }
     // Code is mapped RO at the fixed `CODE_BASE` by the runtime — not

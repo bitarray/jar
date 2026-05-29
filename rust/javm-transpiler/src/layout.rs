@@ -9,9 +9,10 @@
 //! base-page metadata also feed declarative `Image.memory_mappings`.
 //!
 //! Cap-index convention: 64 = CODE, 65 = stack, 66 = ro, 67 = rw,
-//! 68 = heap. Address layout starts at page 0 and stacks linearly:
-//! stack lives at `[0, stack_pages)`, ro at `[stack_pages,
-//! stack_pages + ro_pages)`, etc.
+//! 68 = heap. Data is laid out from [`javm_cap::layout::DATA_BASE`]
+//! (256 MiB) upward and stacks linearly: stack lives at `[DATA_BASE,
+//! DATA_BASE + stack_pages)`, ro at `[DATA_BASE + stack_pages, …)`,
+//! etc. Code maps separately at [`CODE_BASE`].
 
 /// Cap index of the CODE cap in transpiler-emitted blobs. Matches the
 /// JAR `init_cap` field.
@@ -31,11 +32,13 @@ pub const PVM_PAGE_SIZE: u32 = 4096;
 ///
 /// The canonical definition is the PVM2 ABI constant
 /// [`javm_cap::layout::CODE_BASE`] (re-exported here for transpiler
-/// call sites). Data regions (stack/ro/rw/heap) occupy the low address
-/// space from page 0 upward (see [`ProgramLayout`]); the linker asserts
-/// the data layout stays below `CODE_BASE` and `CODE_BASE + code_len`
-/// stays within the 4 GiB guest range.
+/// call sites). Code occupies `[CODE_BASE, DATA_BASE)`; data regions
+/// (stack/ro/rw/heap) occupy `[DATA_BASE, 4 GiB)` (see [`ProgramLayout`]).
+/// The linker asserts code stays below [`DATA_BASE`] and the data
+/// layout stays within the 4 GiB guest range.
 pub use javm_cap::layout::CODE_BASE;
+/// Re-exported PVM2 ABI layout constants (see [`javm_cap::layout`]).
+pub use javm_cap::layout::{DATA_BASE, MAX_CODE_SIZE};
 
 /// One DATA cap's layout: where it lives in the manifest and where it
 /// maps in guest memory.
@@ -65,7 +68,8 @@ impl ProgramLayout {
     /// that. `ro_pages`, `rw_pages`, `heap_pages` of zero omit those
     /// caps entirely.
     pub fn compute(stack_pages: u32, ro_pages: u32, rw_pages: u32, heap_pages: u32) -> Self {
-        let mut next_page = 0u32;
+        // Data starts at DATA_BASE (256 MiB), above the code region.
+        let mut next_page = javm_cap::layout::DATA_BASE / PVM_PAGE_SIZE;
 
         let stack = DataCapEntry {
             cap_index: STACK_CAP_INDEX,

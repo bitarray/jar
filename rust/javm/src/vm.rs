@@ -173,13 +173,24 @@ impl<K: KernelAssist> Vm<K> {
             .get(endpoint_idx as usize)
             .ok_or(VmError::Invariant("endpoint index out of range"))?;
 
-        // Memory layout: base RW region sized to instance.mem_size,
-        // plus per-overlay regions.
+        // Memory layout: the data region lives at [DATA_BASE, mem_size);
+        // the flat buffer is based at DATA_BASE so [0, DATA_BASE) (null
+        // guard + code) is out of range and faults — matching the
+        // recompiler's page table. `inst.mem_size` is the absolute max
+        // data VA; the RW extent above DATA_BASE is what we map.
         let mut mem = CopyingMemory::new();
-        let mem_size_pages = page_round_up_u64(inst.mem_size as u64);
-        if mem_size_pages > 0 {
-            mem.map_region(0, mem_size_pages, Access::ReadWrite, None)
-                .map_err(VmError::MapRegion)?;
+        mem.base = javm_cap::layout::DATA_BASE;
+        let data_extent = page_round_up_u64(
+            (inst.mem_size as u64).saturating_sub(javm_cap::layout::DATA_BASE as u64),
+        );
+        if data_extent > 0 {
+            mem.map_region(
+                javm_cap::layout::DATA_BASE as u64,
+                data_extent,
+                Access::ReadWrite,
+                None,
+            )
+            .map_err(VmError::MapRegion)?;
         }
         for overlay_entry in inst.rw_overlays.iter() {
             overlay_into(

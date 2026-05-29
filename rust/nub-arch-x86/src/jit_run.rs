@@ -261,12 +261,14 @@ pub struct ExitInfo {
 //
 // Lives in PML4 slot 0 (low VA 0..512 GiB) — now empty after the
 // Stage F kernel relocation moved the kernel to PML4 slot 511. User
-// VA `[0, mem_size)` mirrors PVM's u32 address space directly so
-// mem accesses can use `[rdx]` baseless. CTX sits at exactly 4 GiB
-// — the first page above the PVM u32 range. The recompiler does no
-// bounds-checking on guest mem (the PT does, via faults outside
-// `[0, mem_size)`) so PVM addresses can reach anywhere in the low
-// 4 GiB; CTX must be outside that range to avoid spoofing.
+// VA mirrors PVM's u32 address space directly (native VA == guest
+// addr) so mem accesses can use `[rdx]` baseless. The PVM layout is
+// `[0, CODE_BASE)` unmapped (null guard), `[CODE_BASE, …)` code (RO
+// direct-map), `[DATA_BASE, mem_size)` the flat RW data buffer; the
+// recompiler does no bounds-checking on guest mem (the PT does, via
+// faults outside the mapped ranges) so PVM addresses can reach
+// anywhere in the low 4 GiB. CTX sits in PML4 slot 1 (512 GiB),
+// outside the PVM u32 range, so guest addresses can't spoof it.
 
 const MEM_VA_M: u64 = 0;
 /// PML4 slot 1 (base 512 GiB) hosts CTX + the per-Image arena + STACK.
@@ -404,7 +406,14 @@ pub unsafe fn build_frame_runtime(
     let jit_va = META_BASE_M + cached.jit_offset as u64;
     let tramp_va = META_BASE_M + cached.tramp_offset as u64;
 
-    let mem_bytes = (mem_size as usize).next_multiple_of(PAGE_SIZE);
+    // Data lives at [DATA_BASE, mem_size). The flat RW buffer covers
+    // only that extent and is mapped at native VA DATA_BASE, leaving
+    // [0, DATA_BASE) unmapped — a null guard, save for the code
+    // direct-map at CODE_BASE. `mem_size` is the absolute max data VA.
+    let data_base = javm_cap::layout::DATA_BASE as usize;
+    let mem_bytes = (mem_size as usize)
+        .saturating_sub(data_base)
+        .next_multiple_of(PAGE_SIZE);
 
     let mem_buf = PageBuf::new(mem_bytes.max(PAGE_SIZE))?;
     let ctx_buf = PageBuf::new(PAGE_SIZE)?;
@@ -414,7 +423,9 @@ pub unsafe fn build_frame_runtime(
         if region.data.is_empty() {
             continue;
         }
-        let off = region.start as usize;
+        // Overlay starts are absolute guest VAs (≥ DATA_BASE); rebase
+        // into the buffer.
+        let off = (region.start as usize).checked_sub(data_base)?;
         let end = off.checked_add(region.data.len())?;
         if end > mem_bytes {
             return None;
@@ -443,7 +454,9 @@ pub unsafe fn build_frame_runtime(
         (*ctx).entry_pc = entry_pc;
         (*ctx).dispatch_table = dispatch_va as *const i32;
         (*ctx).code_base = jit_va;
-        (*ctx).flat_buf = MEM_VA_M as *mut u8;
+        // Vestigial (codegen addresses mem baseless as `[reg]`); set to
+        // the data buffer's native base for documentation.
+        (*ctx).flat_buf = (MEM_VA_M + data_base as u64) as *mut u8;
         (*ctx).fast_reentry = 0;
         (*ctx)._pad2 = 0;
         (*ctx).max_heap_pages = 0;
@@ -453,7 +466,12 @@ pub unsafe fn build_frame_runtime(
     let mut pt = PageTable::new()?;
     pt.map(CTX_VA_M, ctx_buf.pa(), ctx_buf.size(), Perm::user_rw())?;
     if mem_bytes > 0 {
-        pt.map(MEM_VA_M, mem_buf.pa(), mem_buf.size(), Perm::user_rw())?;
+        pt.map(
+            MEM_VA_M + data_base as u64,
+            mem_buf.pa(),
+            mem_buf.size(),
+            Perm::user_rw(),
+        )?;
     }
     for dm in direct_maps {
         if dm.size == 0 {
