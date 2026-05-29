@@ -49,18 +49,29 @@ pub(crate) const REG_MAP: [Reg; 13] = [
 /// Scratch register (not mapped to any PVM register).
 pub(crate) const SCRATCH: Reg = Reg::RDX;
 
-/// RV register number → PVM2 slot (0..12), or `0xFF` for "no slot"
-/// (x0, reserved x3/x4, or any out-of-range value). Mirrors the
-/// slot encoding used by `rv_op_metadata` so that gas accounting
-/// agrees bit-for-bit with the predecode-cached path.
+/// RV register (5-bit, 0..31) → PVM2 slot (0..12), or `0xFF` for "no
+/// slot" (x0, reserved x3/x4, x16..x31). A 32-byte const lookup table:
+/// one load replaces the range-match, which the profiler showed at
+/// ~8.8% of compile (called ~6×/instruction across codegen + gas feed).
+/// Values mirror the original match exactly, so gas stays bit-identical.
+pub(crate) const RV_SLOT_LUT: [u8; 32] = {
+    let mut t = [0xFFu8; 32];
+    t[1] = 0;
+    t[2] = 1;
+    let mut x = 5usize;
+    while x <= 15 {
+        t[x] = (x - 3) as u8;
+        x += 1;
+    }
+    t
+};
+
+/// RV register number → PVM2 slot (0..12), or `0xFF` for "no slot".
+/// Mirrors the slot encoding used by `rv_op_metadata` so that gas
+/// accounting agrees bit-for-bit with the predecode-cached path.
 #[inline(always)]
 pub(crate) fn rv_slot_or_ff(x: u8) -> u8 {
-    match x {
-        1 => 0,
-        2 => 1,
-        5..=15 => x - 3,
-        _ => 0xFF,
-    }
+    RV_SLOT_LUT[(x & 31) as usize]
 }
 /// R15 = gas meter. Loaded from `ctx.gas` at the prologue, decremented
 /// once per basic block, flushed back to `ctx.gas` at every exit.
@@ -1135,11 +1146,9 @@ fn expand_rvc_q2(h: u16, f3: u16) -> Option<u32> {
 /// deblob, so this is just defence-in-depth).
 #[inline]
 fn rv_slot(x: u8) -> Option<usize> {
-    match x {
-        1 => Some(0),
-        2 => Some(1),
-        5..=15 => Some((x as usize) - 3),
-        _ => None,
+    match RV_SLOT_LUT[(x & 31) as usize] {
+        0xFF => None,
+        s => Some(s as usize),
     }
 }
 
