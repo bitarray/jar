@@ -350,12 +350,24 @@ pub fn image_cap(
     })
 }
 
-/// Copy `bytes` into a page-aligned, page-sized-rounded `Vec<u8>` so
-/// the kernel can `va_to_pa` + direct-map the code region RO. Mirrors
-/// `DataCap`'s page-alignment invariant.
+/// Copy `bytes` into a `Vec<u8>` whose backing allocation is
+/// page-aligned and page-size-rounded (so the kernel can `va_to_pa` +
+/// direct-map the code region RO), but whose **length is the real code
+/// length** — not the padded capacity.
+///
+/// The length must stay exact: the recompiler iterates `code.len()`
+/// bytes, so a page-padded length would make it compile thousands of
+/// trailing zero bytes as bogus instructions (a ~page-sized fixed cost
+/// per recompile that dominates small guests). The runtime rounds the
+/// mapping size up to a page separately; the trailing capacity bytes
+/// stay zeroed and mapped but are never executed.
 fn alloc_page_aligned_code(bytes: &[u8]) -> Vec<u8> {
     let mut v = super::data::alloc_page_aligned_zeroed(bytes.len());
     v[..bytes.len()].copy_from_slice(bytes);
+    // Keep the page-aligned allocation + zeroed tail (capacity), but
+    // expose only the real code length. `truncate` never reallocates,
+    // so the base pointer stays page-aligned for `va_to_pa`.
+    v.truncate(bytes.len());
     v
 }
 

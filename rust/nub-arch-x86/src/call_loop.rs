@@ -434,10 +434,15 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     let (code_base, code_bytes) = img.code_mapping().ok_or(ERR_IMAGE_KIND)?;
     {
         let pa = paging::va_to_pa(code_bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?;
+        // `code_bytes.len()` is the real code length; the backing
+        // allocation is page-aligned and page-size-rounded (zeroed
+        // tail). Map the page-rounded extent so the PT mapping covers
+        // whole pages — the trailing zero bytes are RO and unreachable.
+        let map_size = (code_bytes.len() as u32).next_multiple_of(paging::PAGE_SIZE as u32);
         direct_maps.push(DirectMap {
             start: code_base,
             pa,
-            size: code_bytes.len() as u32,
+            size: map_size,
         });
     }
 
