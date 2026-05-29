@@ -423,12 +423,36 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
         }
     }
 
-    let mut direct_maps: Vec<DirectMap> = Vec::with_capacity(img.mappings.len());
+    let mut direct_maps: Vec<DirectMap> = Vec::with_capacity(img.mappings.len() + 1);
     let mut mem_size: u32 = 0;
+
+    // Executable code region: RO direct-map at the fixed CODE_BASE. The
+    // code lives in the Image's page-aligned `ImageCap.code`, so it maps
+    // straight in like a pinned data cap — and is *excluded* from
+    // mem_size (the flat RW buffer): code sits at CODE_BASE, clear of
+    // the data layout, and must not inflate the per-call alloc.
+    let (code_base, code_bytes) = img.code_mapping().ok_or(ERR_IMAGE_KIND)?;
+    {
+        let pa = paging::va_to_pa(code_bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?;
+        // `code_bytes.len()` is the real code length; the backing
+        // allocation is page-aligned and page-size-rounded (zeroed
+        // tail). Map the page-rounded extent so the PT mapping covers
+        // whole pages — the trailing zero bytes are RO and unreachable.
+        let map_size = (code_bytes.len() as u32).next_multiple_of(paging::PAGE_SIZE as u32);
+        direct_maps.push(DirectMap {
+            start: code_base,
+            pa,
+            size: map_size,
+        });
+    }
+
     // Keep Arcs alive for the data-cap lookups so the slice references
     // we feed to direct_maps stay valid until function return.
     let mut data_arcs: Vec<alloc::sync::Arc<Cap>> = Vec::new();
     for m in img.mappings.iter() {
+        // `img.mappings` describes data/slot regions only; code is
+        // direct-mapped above at CODE_BASE and never extends the flat
+        // RW buffer.
         let end = (m.start + m.size) as u32;
         if end > mem_size {
             mem_size = end;
@@ -523,9 +547,8 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     unsafe {
         jit_run::build_frame_runtime(
             &frame.image_hash,
-            img.code.as_slice(),
-            img.jump_table.as_slice(),
-            img.jump_table_offsets.as_slice(),
+            code_bytes,
+            code_base,
             frame.pc,
             mem_size,
             MemRegion {

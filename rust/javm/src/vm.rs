@@ -159,12 +159,12 @@ impl<K: KernelAssist> Vm<K> {
         };
 
         // Predecode the image bytecode (cache hit when seen before).
-        let program = self.image_cache.get_or_decode(
-            inst.image_hash,
-            img.code.as_slice().to_vec(),
-            img.jump_table.as_slice().to_vec(),
-            img.jump_table_offsets.as_slice().to_vec(),
-        );
+        let (code_base, code_bytes) = img
+            .code_mapping()
+            .ok_or(VmError::Invariant("image has no executable code mapping"))?;
+        let program =
+            self.image_cache
+                .get_or_decode(inst.image_hash, code_bytes.to_vec(), code_base);
 
         // Locate the endpoint definition (dense array, sentinel =
         // entry_pc == 0).
@@ -173,13 +173,24 @@ impl<K: KernelAssist> Vm<K> {
             .get(endpoint_idx as usize)
             .ok_or(VmError::Invariant("endpoint index out of range"))?;
 
-        // Memory layout: base RW region sized to instance.mem_size,
-        // plus per-overlay regions.
+        // Memory layout: the data region lives at [DATA_BASE, mem_size);
+        // the flat buffer is based at DATA_BASE so [0, DATA_BASE) (null
+        // guard + code) is out of range and faults — matching the
+        // recompiler's page table. `inst.mem_size` is the absolute max
+        // data VA; the RW extent above DATA_BASE is what we map.
         let mut mem = CopyingMemory::new();
-        let mem_size_pages = page_round_up_u64(inst.mem_size as u64);
-        if mem_size_pages > 0 {
-            mem.map_region(0, mem_size_pages, Access::ReadWrite, None)
-                .map_err(VmError::MapRegion)?;
+        mem.base = javm_cap::layout::DATA_BASE;
+        let data_extent = page_round_up_u64(
+            (inst.mem_size as u64).saturating_sub(javm_cap::layout::DATA_BASE as u64),
+        );
+        if data_extent > 0 {
+            mem.map_region(
+                javm_cap::layout::DATA_BASE as u64,
+                data_extent,
+                Access::ReadWrite,
+                None,
+            )
+            .map_err(VmError::MapRegion)?;
         }
         for overlay_entry in inst.rw_overlays.iter() {
             overlay_into(
@@ -674,9 +685,8 @@ mod tests {
     fn empty_image_with_code(code: Vec<u8>) -> Image {
         Image {
             code,
-            jump_table: Vec::new(),
-            jump_table_offsets: vec![0, 0],
             endpoints: BTreeMap::new(),
+            // Code is mapped at the fixed CODE_BASE; no data mappings.
             memory_mappings: Vec::new(),
             gas_slots: Vec::new(),
             quota_slots: Vec::new(),
@@ -865,18 +875,7 @@ mod tests {
         // iteration is a 1-instruction basic block) until the gas
         // budget runs out.
         let code = 0x0000_006Fu32.to_le_bytes().to_vec();
-        let img = Image {
-            code,
-            jump_table: Vec::new(),
-            jump_table_offsets: vec![0, 0],
-            endpoints: BTreeMap::new(),
-            memory_mappings: Vec::new(),
-            gas_slots: Vec::new(),
-            quota_slots: Vec::new(),
-            pinned_slots: BTreeMap::new(),
-            initial_slots: BTreeMap::new(),
-            yield_marker_slot: None,
-        };
+        let img = empty_image_with_code(code);
         let mut cache = CacheDirectory::new();
         let inst_hash = publish_simple_instance(&mut cache, img);
         let mut vm = Vm::new(InProcessKernelAssist::new());

@@ -15,8 +15,7 @@ fn ecalli_42_image() -> Image {
     // 0b010, rd = 0, rs1 = 0, imm = 42. As an I-type 32-bit word:
     //   (42 << 20) | (0b010 << 12) | (0b00010 << 2) | 0b11 = 0x02A0_200B
     img.code = 0x02A0_200Bu32.to_le_bytes().to_vec();
-    // PVM2 marker: a single empty sub-table.
-    img.jump_table_offsets = vec![0, 0];
+    // Code is mapped at the fixed CODE_BASE; no data mappings.
 
     let mut endpoints: BTreeMap<u8, EndpointDef> = BTreeMap::new();
     endpoints.insert(

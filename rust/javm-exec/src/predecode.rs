@@ -204,6 +204,8 @@ pub fn is_terminator(inst: &Inst) -> bool {
         inst,
         // PC-relative jumps.
         Inst::Jal { .. }
+            // Indirect jumps (returns, indirect calls).
+            | Inst::Jalr { .. }
             // Static branches.
             | Inst::Beq { .. }
             | Inst::Bne { .. }
@@ -215,7 +217,6 @@ pub fn is_terminator(inst: &Inst) -> bool {
             | Inst::Trap
             | Inst::EcallJar
             | Inst::Ecalli { .. }
-            | Inst::BrTable { .. }
             | Inst::Fallthrough
             // Reserved encodings panic at runtime.
             | Inst::Reserved { .. }
@@ -321,40 +322,43 @@ mod tests {
     }
 
     #[test]
-    fn br_table_is_terminator() {
-        // br_table table_id=5, rs1=x1 (custom-0 funct3=011, I-type, rd=0).
-        // Word = (table_id << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7)
-        //        | (custom_0 << 2) | 0b11
-        //      = (5 << 20)  | (1 << 15)  | (0b011 << 12) | (0 << 7)
-        //        | (0b00010 << 2) | 0b11
-        //      = 0x0050_B00B
-        let br_table_word =
-            (5u32 << 20) | (1u32 << 15) | (0b011u32 << 12) | (0b00010u32 << 2) | 0b11;
-        let code = enc(&[br_table_word, 0x00150513]);
+    fn jalr_is_terminator() {
+        // jalr x0, x1, 0 (= the `ret` idiom). I-type: rd=0, rs1=1,
+        // imm=0, funct3=0, opcode=1100111 → 0x00008067.
+        let jalr = 0x00008067u32;
+        let code = enc(&[jalr, 0x00150513]);
         let r = predecode(&code);
         assert_eq!(r.insts.len(), 2);
         assert!(matches!(
             r.insts[0].inst,
-            Inst::BrTable {
-                table_id: 5,
-                rs1: 1
+            Inst::Jalr {
+                rd: 0,
+                rs1: 1,
+                imm: 0
             }
         ));
         assert!(r.insts[0].is_gas_block_start); // PC=0
-        assert!(r.insts[1].is_gas_block_start); // post-br_table
+        assert!(r.insts[1].is_gas_block_start); // post-jalr (terminator)
+        assert_eq!(r.decode_error_at, None);
     }
 
     #[test]
-    fn jalr_is_rejected() {
-        // jalr x0, x1, 0 (= c.ret pattern in uncompressed form)
-        // I-type: rd=0, rs1=1, imm=0, funct3=0, opcode=1100111
-        // word = (0<<20) | (1<<15) | (0<<12) | (0<<7) | 0b1100111 = 0x00008067
-        let jalr = 0x00008067u32;
-        let code = enc(&[jalr]);
+    fn auipc_decodes() {
+        // auipc x10, 0x12 → rd=10, imm=(0x12<<12). opcode=0010111.
+        // word = (0x12 << 12) | (10 << 7) | 0b0010111 = 0x00012517
+        let auipc = 0x00012517u32;
+        let code = enc(&[auipc]);
         let r = predecode(&code);
         assert_eq!(r.insts.len(), 1);
-        assert!(matches!(r.insts[0].inst, Inst::Reserved { .. }));
-        assert_eq!(r.decode_error_at, Some(0));
+        assert!(matches!(
+            r.insts[0].inst,
+            Inst::Auipc {
+                rd: 10,
+                imm: 0x12000
+            }
+        ));
+        // auipc is a plain ALU op, NOT a terminator.
+        assert_eq!(r.decode_error_at, None);
     }
 
     #[test]

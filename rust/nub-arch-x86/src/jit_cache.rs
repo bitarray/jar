@@ -1,16 +1,20 @@
 //! Per-Image JIT code cache + page-aligned arena.
 //!
-//! Each Image gets one [`PageBuf`] arena containing five regions
+//! Each Image gets one [`PageBuf`] arena containing four regions
 //! laid out contiguously, each starting on a page boundary:
 //!
 //! ```text
 //!   arena base (page-aligned)
-//!     + bb_offset       : BB (bitmask)      RO
-//!     + jt_offset       : JT (jump table)   RO
 //!     + dispatch_offset : DISPATCH table    RO
 //!     + jit_offset      : JIT native code   RX
 //!     + tramp_offset    : trampoline (26B)  RX
 //! ```
+//!
+//! `jalr` targets are validated by the dispatch table itself: it is
+//! *dense* (one `i32` native offset per code byte), and every
+//! non-block-start offset holds the panic-stub offset, so an invalid
+//! target jumps to the panic stub. There is no separate basic-block-
+//! start set or jump table.
 //!
 //! The arena lives for the cache entry's lifetime and is mapped into
 //! every Instance's page table that runs this Image — so we only pay
@@ -40,8 +44,8 @@ use crate::paging::{PAGE_SIZE, Perm, TemplatePT};
 
 /// One cached Image's worth of compiled artifacts.
 ///
-/// The arena holds BB / JT / DISPATCH / JIT / TRAMP regions
-/// contiguously, page-aligned. The `template` is a pre-built PD
+/// The arena holds DISPATCH / JIT / TRAMP regions contiguously,
+/// page-aligned. The `template` is a pre-built PD
 /// subtree (one PD + up to a handful of PT pages) whose leaf PTEs
 /// already point at the arena's pages with the right permissions —
 /// per-call page tables install the PD via
@@ -51,15 +55,14 @@ use crate::paging::{PAGE_SIZE, Perm, TemplatePT};
 /// The `trap_table` is kept outside the arena — `jit_pf_handler` reads
 /// it via static atomics and never needs it mapped into ring-3.
 pub struct CompiledImage {
-    /// Page-aligned buffer holding the five regions.
+    /// Page-aligned buffer holding the three regions
+    /// (DISPATCH | JIT | TRAMP).
     ///
     /// Kept solely to own the backing pages — referenced by the
     /// template's leaf PTEs and freed when the cache entry is evicted.
     #[allow(dead_code)]
     pub arena: PageBuf,
     /// Offsets into `arena` for each region (in bytes from arena base).
-    pub bb_offset: usize,
-    pub jt_offset: usize,
     pub dispatch_offset: usize,
     pub jit_offset: usize,
     pub tramp_offset: usize,
@@ -137,8 +140,7 @@ pub fn evict_all() {
 pub fn get_or_compile(
     image_hash: &CapHash,
     code: &[u8],
-    jump_table: &[u32],
-    jump_table_offsets: &[u32],
+    code_base: u32,
     arena_base_va: u64,
     ctx_va: u64,
     mem_cycles: u8,
@@ -147,27 +149,23 @@ pub fn get_or_compile(
     // SAFETY: single-threaded guest.
     let map = unsafe { &mut *CACHE.inner.get() };
     if !map.contains_key(image_hash) {
-        // Region sizing. valid_pc is `code.len()` bytes; the streaming
-        // compile produces it inline so we don't allocate it twice.
-        let bb_size = page_round_up_min1(code.len());
-        let jt_bytes_used = core::mem::size_of_val(jump_table);
-        let jt_size = page_round_up_min1(jt_bytes_used);
+        // Region sizing. Layout: DISPATCH | JIT | TRAMP. The dispatch
+        // table is dense — one i32 native offset per code byte — and
+        // doubles as the jalr-target validator (no separate BB set).
         let dispatch_size = page_round_up_min1(code.len() * core::mem::size_of::<i32>());
 
-        let bb_offset = 0usize;
-        let jt_offset = bb_offset + bb_size;
-        let dispatch_offset = jt_offset + jt_size;
+        let dispatch_offset = 0usize;
         let jit_offset = dispatch_offset + dispatch_size;
         let jit_va = arena_base_va + jit_offset as u64;
 
-        let compiler = Compiler::new(helpers, code.len(), jit_va, mem_cycles);
+        let compiler = Compiler::new(helpers, code.len(), jit_va, mem_cycles, code_base);
         let CompileResult {
             native_code,
             dispatch_entries,
             trap_table,
             exit_label_offset,
-            valid_pc,
-        } = compiler.compile(code, jump_table_offsets);
+            panic_offset,
+        } = compiler.compile(code);
 
         let jit_size = page_round_up_min1(native_code.len());
         let tramp_offset = jit_offset + jit_size;
@@ -177,26 +175,37 @@ pub fn get_or_compile(
         let mut arena = PageBuf::new(total).expect("PageBuf alloc for Image arena");
         let buf = arena.as_mut_slice();
 
-        // BB region: valid_pc as bytes (Vec<bool> is 0/1 single-byte
-        // representation, so a raw-pointer reinterpret is sound).
-        let bb_ptr = valid_pc.as_ptr() as *const u8;
-        // SAFETY: bb_ptr valid for valid_pc.len() bytes.
-        let bb_bytes = unsafe { core::slice::from_raw_parts(bb_ptr, valid_pc.len()) };
-        buf[bb_offset..bb_offset + valid_pc.len()].copy_from_slice(bb_bytes);
-
-        // JT region: copy per-function br_table sub-tables (concatenated
-        // PVM2 PCs, sub-table boundaries in `jump_table_offsets`).
-        if !jump_table.is_empty() {
-            let jt_ptr = jump_table.as_ptr() as *const u8;
-            // SAFETY: jt_ptr valid for jt_bytes_used bytes.
-            let jt_slice = unsafe { core::slice::from_raw_parts(jt_ptr, jt_bytes_used) };
-            buf[jt_offset..jt_offset + jt_bytes_used].copy_from_slice(jt_slice);
-        }
-
-        // DISPATCH region — sparse write (arena is page-zero).
+        // DISPATCH region — dense fill. First set *every* code-byte slot
+        // to the panic-stub offset, so a jalr to any non-block-start
+        // offset lands on the panic stub; then overwrite the block-start
+        // offsets with their real native targets. This folds the
+        // block-start validation into the dispatch lookup.
+        //
+        // SECURITY-CRITICAL: the panic-fill must cover all `code.len()`
+        // slots — a slot left zero (the arena is page-zeroed) would route
+        // a bad jalr target to native offset 0 instead of faulting.
+        //
+        // The panic-fill is the per-recompile (cold-path) cost of the
+        // dense table, so do it at memset speed via a u32 view rather
+        // than a per-slot byte copy. `dispatch_offset` is 0 in the
+        // page-aligned arena, so the region is 4-aligned and holds
+        // exactly `code.len()` i32 slots. The host is little-endian
+        // (x86-64), so a native u32 store matches the LE bytes the JIT
+        // reads back as i32.
+        let dispatch_slots = code.len();
+        debug_assert_eq!(dispatch_offset, 0);
+        // SAFETY: 4-aligned (page-aligned arena base), in-bounds
+        // (dispatch_size ≥ dispatch_slots * 4), no aliasing (exclusive
+        // `buf`).
+        let dispatch_u32: &mut [u32] = unsafe {
+            core::slice::from_raw_parts_mut(
+                buf.as_mut_ptr().add(dispatch_offset) as *mut u32,
+                dispatch_slots,
+            )
+        };
+        dispatch_u32.fill(panic_offset);
         for &(pvm_pc, off) in &dispatch_entries {
-            let slot_off = dispatch_offset + (pvm_pc as usize) * core::mem::size_of::<i32>();
-            buf[slot_off..slot_off + 4].copy_from_slice(&off.to_le_bytes());
+            dispatch_u32[pvm_pc as usize] = off as u32;
         }
 
         // JIT region.
@@ -241,8 +250,6 @@ pub fn get_or_compile(
             *image_hash,
             CompiledImage {
                 arena,
-                bb_offset,
-                jt_offset,
                 dispatch_offset,
                 jit_offset,
                 tramp_offset,

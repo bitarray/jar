@@ -1,6 +1,6 @@
 //! In-kernel JIT execution at ring 3.
 //!
-//! Takes a PVM program (code + bitmask + jump_table) and runs it
+//! Takes a PVM program (code + basic-block-start set) and runs it
 //! inside a per-invocation page table at ring 3. The PVM exits
 //! through `int 0x81` (a hand-rolled trampoline placed after the
 //! JIT'd code at a user-RX VA); the kernel handler longjmps back to
@@ -27,12 +27,16 @@
 //!   CTX_VA   = 4 GiB              4 KiB JitContext                (user-RW)
 //!
 //!   META_BASE= 4 GiB + 16 MiB     per-Image arena base
-//!                                 (BB | JT | DISPATCH | JIT | TRAMP)
-//!     BB / JT / DISPATCH                                          (user-RO)
+//!                                 (BB | DISPATCH | JIT | TRAMP)
+//!     BB / DISPATCH                                               (user-RO)
 //!     JIT / TRAMP                                                 (user-RX)
 //!
 //!   STACK    = META + 1 GiB       ring-3 x86 stack, 4 KiB         (user-RW)
 //! ```
+//!
+//! Guest code is mapped read-only into the low-4 GiB guest range at its
+//! `CODE_BASE` (a `DirectMap`, like a pinned data cap), so PVM PCs are
+//! real VAs and the guest can read its own bytes (PIC AUIPC+load).
 //!
 //! The Image arena lives in [`jit_cache::CompiledImage`] (one per
 //! Image, allocated once and mapped read-only into every Instance's
@@ -257,12 +261,14 @@ pub struct ExitInfo {
 //
 // Lives in PML4 slot 0 (low VA 0..512 GiB) — now empty after the
 // Stage F kernel relocation moved the kernel to PML4 slot 511. User
-// VA `[0, mem_size)` mirrors PVM's u32 address space directly so
-// mem accesses can use `[rdx]` baseless. CTX sits at exactly 4 GiB
-// — the first page above the PVM u32 range. The recompiler does no
-// bounds-checking on guest mem (the PT does, via faults outside
-// `[0, mem_size)`) so PVM addresses can reach anywhere in the low
-// 4 GiB; CTX must be outside that range to avoid spoofing.
+// VA mirrors PVM's u32 address space directly (native VA == guest
+// addr) so mem accesses can use `[rdx]` baseless. The PVM layout is
+// `[0, CODE_BASE)` unmapped (null guard), `[CODE_BASE, …)` code (RO
+// direct-map), `[DATA_BASE, mem_size)` the flat RW data buffer; the
+// recompiler does no bounds-checking on guest mem (the PT does, via
+// faults outside the mapped ranges) so PVM addresses can reach
+// anywhere in the low 4 GiB. CTX sits in PML4 slot 1 (512 GiB),
+// outside the PVM u32 range, so guest addresses can't spoof it.
 
 const MEM_VA_M: u64 = 0;
 /// PML4 slot 1 (base 512 GiB) hosts CTX + the per-Image arena + STACK.
@@ -284,7 +290,7 @@ const META_PML4_BASE: u64 = 1u64 << 39; // 512 GiB
 /// CTX sits at the slot base. CTX_VA_M must match
 /// `javm_recompiler_x86::codegen::CTX_VA`.
 const CTX_VA_M: u64 = META_PML4_BASE;
-/// Base of the per-Image arena (BB | JT | DISPATCH | JIT | TRAMP).
+/// Base of the per-Image arena (BB | DISPATCH | JIT | TRAMP).
 /// 1 GiB past CTX so the arena occupies its own PDPT slot, enabling
 /// template-PT sharing of the entire PD subtree.
 const META_BASE_M: u64 = META_PML4_BASE + (1u64 << 30);
@@ -319,9 +325,9 @@ pub struct DirectMap {
 /// first [`enter_frame`]); reused across re-entries on the same frame
 /// — saves N PageTable + 3 PageBuf allocations in a depth-N recursion.
 ///
-/// Frame-constant `JitContext` fields (jt_ptr, bb_starts,
-/// dispatch_table, code_base, flat_buf, …) are written once when the
-/// runtime is built. [`enter_frame`] only updates regs/pc/gas/exit_*.
+/// Frame-constant `JitContext` fields (dispatch_table, code_base,
+/// flat_buf, …) are written once when the runtime is built.
+/// [`enter_frame`] only updates regs/pc/gas/exit_*.
 pub struct FrameRuntime {
     pt: PageTable,
     #[allow(dead_code)] // kept solely to own the backing page (referenced by `pt`).
@@ -347,14 +353,15 @@ pub struct FrameRuntime {
 /// Per-entry mutable state (regs, pc, gas, exit_*) is written by
 /// [`enter_frame`]; this function only touches frame-constant fields.
 ///
-/// PVM2 variant of [`build_frame_runtime`]. The `code` is raw
-/// RV+C+custom-0 bytes; the JIT cache's RV path predecodes it once
-/// and reuses the result on subsequent calls.
+/// The `code` is raw RV+C+custom-0 bytes; the JIT cache predecodes it
+/// once and reuses the result on subsequent calls. `code_base` is the
+/// guest VA the region maps at — it's threaded into the compiler (so
+/// `auipc`/`jalr` resolve correctly) and into the cache key.
 ///
-/// Signature differs from the PVM path: no `bitmask` (the BB region
-/// holds the valid-PC set, sized to `code.len()`, populated by
-/// `jit_cache::get_or_compile`); no `jump_table` (RV jalr targets
-/// are raw PCs, validated against valid_pc directly).
+/// The BB region holds the basic-block-start set (sized to `code.len()`,
+/// populated by `jit_cache::get_or_compile`); `jalr` targets are
+/// validated against it directly (no jump table). The code itself is
+/// RO-mapped into the guest range at `code_base` via `direct_maps`.
 ///
 /// # Safety
 /// Same constraints as [`build_frame_runtime`].
@@ -362,8 +369,7 @@ pub struct FrameRuntime {
 pub unsafe fn build_frame_runtime(
     image_hash: &javm_cap::CapHash,
     code: &[u8],
-    jump_table: &[u32],
-    jump_table_offsets: &[u32],
+    code_base: u32,
     entry_pc: u32,
     mem_size: u32,
     arg: MemRegion,
@@ -385,8 +391,7 @@ pub unsafe fn build_frame_runtime(
     let cached = jit_cache::get_or_compile(
         image_hash,
         code,
-        jump_table,
-        jump_table_offsets,
+        code_base,
         META_BASE_M,
         CTX_VA_M,
         javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
@@ -396,13 +401,18 @@ pub unsafe fn build_frame_runtime(
         return None;
     }
 
-    let bb_va = META_BASE_M + cached.bb_offset as u64;
-    let jt_va = META_BASE_M + cached.jt_offset as u64;
     let dispatch_va = META_BASE_M + cached.dispatch_offset as u64;
     let jit_va = META_BASE_M + cached.jit_offset as u64;
     let tramp_va = META_BASE_M + cached.tramp_offset as u64;
 
-    let mem_bytes = (mem_size as usize).next_multiple_of(PAGE_SIZE);
+    // Data lives at [DATA_BASE, mem_size). The flat RW buffer covers
+    // only that extent and is mapped at native VA DATA_BASE, leaving
+    // [0, DATA_BASE) unmapped — a null guard, save for the code
+    // direct-map at CODE_BASE. `mem_size` is the absolute max data VA.
+    let data_base = javm_cap::layout::DATA_BASE as usize;
+    let mem_bytes = (mem_size as usize)
+        .saturating_sub(data_base)
+        .next_multiple_of(PAGE_SIZE);
 
     let mem_buf = PageBuf::new(mem_bytes.max(PAGE_SIZE))?;
     let ctx_buf = PageBuf::new(PAGE_SIZE)?;
@@ -412,7 +422,9 @@ pub unsafe fn build_frame_runtime(
         if region.data.is_empty() {
             continue;
         }
-        let off = region.start as usize;
+        // Overlay starts are absolute guest VAs (≥ DATA_BASE); rebase
+        // into the buffer.
+        let off = (region.start as usize).checked_sub(data_base)?;
         let end = off.checked_add(region.data.len())?;
         if end > mem_bytes {
             return None;
@@ -433,17 +445,15 @@ pub unsafe fn build_frame_runtime(
     unsafe {
         (*ctx).heap_base = 0;
         (*ctx).heap_top = 0;
-        // RV path: no jump table; jalr validation uses BB (valid_pc).
-        (*ctx).jt_ptr = jt_va as *const u32;
-        (*ctx).jt_len = 0;
-        (*ctx)._pad0 = 0;
-        (*ctx).bb_starts = bb_va as *const u8;
-        (*ctx).bb_len = code.len() as u32;
-        (*ctx)._pad1 = 0;
+        // jalr targets are validated by the dense dispatch table (a
+        // non-block-start offset holds the panic-stub offset) — no
+        // separate bb_starts set.
         (*ctx).entry_pc = entry_pc;
         (*ctx).dispatch_table = dispatch_va as *const i32;
         (*ctx).code_base = jit_va;
-        (*ctx).flat_buf = MEM_VA_M as *mut u8;
+        // Vestigial (codegen addresses mem baseless as `[reg]`); set to
+        // the data buffer's native base for documentation.
+        (*ctx).flat_buf = (MEM_VA_M + data_base as u64) as *mut u8;
         (*ctx).fast_reentry = 0;
         (*ctx)._pad2 = 0;
         (*ctx).max_heap_pages = 0;
@@ -453,7 +463,12 @@ pub unsafe fn build_frame_runtime(
     let mut pt = PageTable::new()?;
     pt.map(CTX_VA_M, ctx_buf.pa(), ctx_buf.size(), Perm::user_rw())?;
     if mem_bytes > 0 {
-        pt.map(MEM_VA_M, mem_buf.pa(), mem_buf.size(), Perm::user_rw())?;
+        pt.map(
+            MEM_VA_M + data_base as u64,
+            mem_buf.pa(),
+            mem_buf.size(),
+            Perm::user_rw(),
+        )?;
     }
     for dm in direct_maps {
         if dm.size == 0 {

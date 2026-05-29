@@ -125,10 +125,19 @@ pub trait Memory {
 /// concrete callers don't need to import the trait.
 #[derive(Clone, Debug)]
 pub struct CopyingMemory {
-    /// Contiguous byte buffer covering `0..flat_mem.len()`.
+    /// Base guest address `flat_mem[0]` corresponds to. Guest address
+    /// `addr` indexes `flat_mem[addr - base]`; accesses below `base` (or
+    /// past the buffer) fault. Lets the buffer cover only the high data
+    /// region `[DATA_BASE, …)` without allocating the `[0, DATA_BASE)`
+    /// null-guard hole — matching the recompiler's page table, which
+    /// leaves that range unmapped. `0` for the addr-0-based memories used
+    /// in unit tests.
+    pub base: u32,
+    /// Contiguous byte buffer covering `[base, base + flat_mem.len())`.
     pub flat_mem: Vec<u8>,
     /// One permission byte per `PAGE_SIZE`-page in `flat_mem`.
-    /// `perms.len() == flat_mem.len() / PAGE_SIZE` (rounded up).
+    /// `perms.len() == flat_mem.len() / PAGE_SIZE` (rounded up). Indexed
+    /// by page *relative to `base`*.
     pub perms: Vec<u8>,
     /// Heap base address (for sbrk).
     pub heap_base: u32,
@@ -150,9 +159,10 @@ impl Default for CopyingMemory {
 pub type Mem = CopyingMemory;
 
 impl CopyingMemory {
-    /// Empty memory; no pages allocated.
+    /// Empty memory; no pages allocated. `base = 0` (addr-0-based).
     pub fn new() -> Self {
         Self {
+            base: 0,
             flat_mem: Vec::new(),
             perms: Vec::new(),
             heap_base: 0,
@@ -161,11 +171,21 @@ impl CopyingMemory {
         }
     }
 
+    /// Byte offset into `flat_mem` for guest address `addr`. Wraps for
+    /// `addr < base` so the subsequent `… < flat_mem.len()` bounds check
+    /// rejects sub-`base` accesses (the null-guard / code region) as a
+    /// fault — no separate check needed.
+    #[inline(always)]
+    fn off(&self, addr: u32) -> usize {
+        addr.wrapping_sub(self.base) as usize
+    }
+
     /// Construct with a pre-sized flat buffer (zero-initialized).
-    /// `n_pages` is the number of `PAGE_SIZE`-pages.
+    /// `n_pages` is the number of `PAGE_SIZE`-pages. `base = 0`.
     pub fn with_pages(n_pages: u32, default_perm: u8) -> Self {
         let bytes = (n_pages as usize) * (PAGE_SIZE as usize);
         Self {
+            base: 0,
             flat_mem: vec![0u8; bytes],
             perms: vec![default_perm; n_pages as usize],
             heap_base: 0,
@@ -177,13 +197,13 @@ impl CopyingMemory {
     /// Returns true iff `addr` is within `flat_mem`.
     #[inline(always)]
     pub fn is_in_bounds(&self, addr: u32) -> bool {
-        (addr as usize) < self.flat_mem.len()
+        self.off(addr) < self.flat_mem.len()
     }
 
     /// Per-page permission for the page containing `addr`. Returns
-    /// `perm::NONE` if the address is out of range.
+    /// `perm::NONE` if the address is out of range (incl. below `base`).
     pub fn perm_of(&self, addr: u32) -> u8 {
-        let page = (addr / PAGE_SIZE) as usize;
+        let page = self.off(addr) / (PAGE_SIZE as usize);
         self.perms.get(page).copied().unwrap_or(perm::NONE)
     }
 
@@ -191,7 +211,7 @@ impl CopyingMemory {
 
     #[inline(always)]
     pub fn read_u8(&self, addr: u32) -> Option<u8> {
-        let a = addr as usize;
+        let a = self.off(addr);
         if a < self.flat_mem.len() {
             // SAFETY: bounds-checked.
             Some(unsafe { *self.flat_mem.get_unchecked(a) })
@@ -202,7 +222,7 @@ impl CopyingMemory {
 
     #[inline(always)]
     pub fn read_u16_le(&self, addr: u32) -> Option<u16> {
-        let a = addr as usize;
+        let a = self.off(addr);
         if a + 2 <= self.flat_mem.len() {
             Some(unsafe { self.flat_mem.as_ptr().add(a).cast::<u16>().read_unaligned() })
         } else {
@@ -212,7 +232,7 @@ impl CopyingMemory {
 
     #[inline(always)]
     pub fn read_u32_le(&self, addr: u32) -> Option<u32> {
-        let a = addr as usize;
+        let a = self.off(addr);
         if a + 4 <= self.flat_mem.len() {
             Some(unsafe { self.flat_mem.as_ptr().add(a).cast::<u32>().read_unaligned() })
         } else {
@@ -222,7 +242,7 @@ impl CopyingMemory {
 
     #[inline(always)]
     pub fn read_u64_le(&self, addr: u32) -> Option<u64> {
-        let a = addr as usize;
+        let a = self.off(addr);
         if a + 8 <= self.flat_mem.len() {
             Some(unsafe { self.flat_mem.as_ptr().add(a).cast::<u64>().read_unaligned() })
         } else {
@@ -234,7 +254,7 @@ impl CopyingMemory {
 
     #[inline(always)]
     pub fn write_u8(&mut self, addr: u32, val: u8) -> bool {
-        let a = addr as usize;
+        let a = self.off(addr);
         if a < self.flat_mem.len() {
             unsafe {
                 *self.flat_mem.get_unchecked_mut(a) = val;
@@ -247,7 +267,7 @@ impl CopyingMemory {
 
     #[inline(always)]
     pub fn write_u16_le(&mut self, addr: u32, val: u16) -> bool {
-        let a = addr as usize;
+        let a = self.off(addr);
         if a + 2 <= self.flat_mem.len() {
             unsafe {
                 self.flat_mem
@@ -264,7 +284,7 @@ impl CopyingMemory {
 
     #[inline(always)]
     pub fn write_u32_le(&mut self, addr: u32, val: u32) -> bool {
-        let a = addr as usize;
+        let a = self.off(addr);
         if a + 4 <= self.flat_mem.len() {
             unsafe {
                 self.flat_mem
@@ -281,7 +301,7 @@ impl CopyingMemory {
 
     #[inline(always)]
     pub fn write_u64_le(&mut self, addr: u32, val: u64) -> bool {
-        let a = addr as usize;
+        let a = self.off(addr);
         if a + 8 <= self.flat_mem.len() {
             unsafe {
                 self.flat_mem
@@ -324,13 +344,19 @@ impl CopyingMemory {
         if !size.is_multiple_of(page) {
             return Err(MapError::UnalignedSize(size));
         }
-        let end = start.checked_add(size).ok_or(MapError::Overflow)?;
-        let end_usize: usize = end.try_into().map_err(|_| MapError::Overflow)?;
+        if start < u64::from(self.base) {
+            return Err(MapError::UnalignedStart(start));
+        }
+        // Work in offsets relative to `base` (the buffer covers
+        // `[base, base + flat_mem.len())`).
+        let rel_start = start - u64::from(self.base);
+        let rel_end = rel_start.checked_add(size).ok_or(MapError::Overflow)?;
+        let rel_end_usize: usize = rel_end.try_into().map_err(|_| MapError::Overflow)?;
 
-        // Grow flat_mem + perms to cover [0, end).
-        if end_usize > self.flat_mem.len() {
-            self.flat_mem.resize(end_usize, 0);
-            let needed_pages = end_usize.div_ceil(PAGE_SIZE as usize);
+        // Grow flat_mem + perms to cover [0, rel_end) (relative to base).
+        if rel_end_usize > self.flat_mem.len() {
+            self.flat_mem.resize(rel_end_usize, 0);
+            let needed_pages = rel_end_usize.div_ceil(PAGE_SIZE as usize);
             if self.perms.len() < needed_pages {
                 self.perms.resize(needed_pages, perm::NONE);
             }
@@ -341,8 +367,8 @@ impl CopyingMemory {
             Access::ReadOnly => perm::RO,
             Access::ReadWrite => perm::RW,
         };
-        let first_page = (start / page) as usize;
-        let last_page = ((end / page) as usize).saturating_sub(1);
+        let first_page = (rel_start / page) as usize;
+        let last_page = ((rel_end / page) as usize).saturating_sub(1);
         if size > 0 {
             for p in first_page..=last_page {
                 self.perms[p] = perm_byte;
@@ -354,7 +380,7 @@ impl CopyingMemory {
         // trailing region beyond `init` is implicitly zero.
         if let Some(bytes) = init {
             let n = bytes.len().min(size as usize);
-            let s = start as usize;
+            let s = rel_start as usize;
             self.flat_mem[s..s + n].copy_from_slice(&bytes[..n]);
         }
 
@@ -365,7 +391,7 @@ impl CopyingMemory {
 
     /// Read `len` bytes from `addr`. Returns `Err` on out-of-range.
     pub fn read(&self, addr: u32, len: usize) -> Result<Vec<u8>, MemAccess> {
-        let a = addr as usize;
+        let a = self.off(addr);
         let end = a
             .checked_add(len)
             .ok_or(MemAccess::PageFault(addr & !(PAGE_SIZE - 1)))?;
@@ -379,7 +405,7 @@ impl CopyingMemory {
     /// or write-protected page. Writes are NOT rolled back on partial
     /// failure (test-only API).
     pub fn write(&mut self, addr: u32, data: &[u8]) -> Result<(), MemAccess> {
-        let a = addr as usize;
+        let a = self.off(addr);
         let end = a
             .checked_add(data.len())
             .ok_or(MemAccess::PageFault(addr & !(PAGE_SIZE - 1)))?;

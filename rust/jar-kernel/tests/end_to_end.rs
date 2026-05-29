@@ -17,7 +17,7 @@
 //! accumulates per-block event-payload entries.
 
 use jar_kernel::{Block, Event, EventOutcome, Kernel, abi};
-use javm_cap::image::{EndpointDef, Image, MemoryMapping};
+use javm_cap::image::{EndpointDef, Image};
 use std::collections::BTreeMap;
 
 /// Build a tiny chain image whose endpoint 0 program is a single
@@ -46,10 +46,9 @@ fn hello_world_chain_image() -> Image {
 
     Image {
         code,
-        jump_table: Vec::new(),
-        jump_table_offsets: vec![0, 0],
         endpoints,
-        memory_mappings: Vec::<MemoryMapping>::new(),
+        // Code is mapped at the fixed CODE_BASE; no data mappings.
+        memory_mappings: Vec::new(),
         gas_slots: vec![abi::BARE_GAS_SLOT],
         quota_slots: vec![abi::BARE_QUOTA_SLOT],
         pinned_slots: BTreeMap::new(),

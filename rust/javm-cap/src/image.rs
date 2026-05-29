@@ -40,32 +40,22 @@ use ssz_derive::{Decode, Encode};
 /// read-only thereafter.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
 pub struct Image {
-    /// Bytecode bytes (raw RV+C+custom-0; validated at construction).
+    /// The (single) code region: raw RV+C+custom-0 bytes. Mapped RO at
+    /// the fixed protocol constant [`crate::layout::CODE_BASE`] (PC =
+    /// `CODE_BASE + byte_offset`) — the load address is *not* chosen by
+    /// the Image, so an untrusted Image cannot place code arbitrarily.
+    /// Code is mapped RO into the guest address space so the guest can
+    /// read its own bytes (AUIPC+load PIC); the JIT executes the native
+    /// translation. Empty for codeless images (kernel placeholders).
     pub code: Vec<u8>,
-    /// Concatenation of variable-length sub-tables: per-function
-    /// return tables, per-vtable dispatch tables, per-switch jump
-    /// tables. Sub-table boundaries live in `jump_table_offsets`
-    /// (CSR-style). Each `br_table table_id, rs1` dispatches through
-    /// sub-table `table_id`.
-    pub jump_table: Vec<u32>,
-    /// Per-table start offsets in `jump_table`, CSR-style. Length =
-    /// `num_tables + 1`. The first entry is always 0; the last entry
-    /// equals `jump_table.len()`. Table `t` lives at
-    /// `jump_table[jump_table_offsets[t]..jump_table_offsets[t+1]]`,
-    /// and its size is `jump_table_offsets[t+1] - jump_table_offsets[t]`
-    /// — every table can have a different length.
-    ///
-    /// Example: 3 tables of sizes [5, 3, 7]:
-    /// - `jump_table` = `[a0..a4, b0..b2, c0..c6]` (15 u32 entries)
-    /// - `jump_table_offsets` = `[0, 5, 8, 15]` (4 entries)
-    pub jump_table_offsets: Vec<u32>,
     /// Endpoints addressable by `endpoint_idx` (u8). Sparse — only
     /// declared endpoints are present.
     pub endpoints: BTreeMap<u8, EndpointDef>,
-    /// Memory layout. Each entry maps a `Cap::Data` (resolved
-    /// through `source`) into the address space at `[start, start
-    /// + size)`. Permissions are derived from whether the target
-    /// slot appears in `pinned_slots` (RO) or not (RW).
+    /// Memory layout. Each entry maps a `Cap::Data` (resolved through
+    /// the `source` slot path) into the address space at `[start, start
+    /// + size)`. RO vs RW is derived from whether the target slot
+    /// appears in `pinned_slots`. Code is mapped separately at
+    /// [`crate::layout::CODE_BASE`] and is not described here.
     pub memory_mappings: Vec<MemoryMapping>,
     /// Cnode slots holding `Cap::Instance[Gas{meter_id}]`. Active
     /// gas debit comes from the first slot's meter; the rest are
@@ -103,15 +93,16 @@ pub struct EndpointDef {
     pub initial_regs: BTreeMap<u8, u64>,
 }
 
-/// One mapped region. The kernel resolves `source` at instance
-/// start, reads the bytes from the resulting `Cap::Data`, and lays
-/// them at `[start, start + size)` in the address space. Whether
-/// the region is RO or RW is derived from whether `source.target()`
-/// is in `Image.pinned_slots`.
+/// One mapped region. The kernel resolves `source` (a cnode slot path
+/// to a `Cap::Data`) at instance start and lays the bytes at `[start,
+/// start + size)` in the address space. RO vs RW is derived from
+/// whether the target slot is in `Image.pinned_slots`.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
 pub struct MemoryMapping {
     pub start: u64,
     pub size: u64,
+    /// Cnode path resolving to the `Cap::Data` whose bytes back this
+    /// region.
     pub source: crate::slot::SlotPath,
 }
 
@@ -154,8 +145,6 @@ impl Image {
     pub fn empty() -> Self {
         Self {
             code: Vec::new(),
-            jump_table: Vec::new(),
-            jump_table_offsets: Vec::new(),
             endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: Vec::new(),

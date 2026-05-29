@@ -46,18 +46,19 @@ impl ImageCache {
         self.entries.insert(content_hash, program);
     }
 
-    /// Look up or compute the predecoded program for an image.
+    /// Look up or compute the predecoded program for an image. `code` is
+    /// the executable region's raw bytes; `code_base` is the guest VA it
+    /// maps at (PC = `code_base` + byte offset).
     pub fn get_or_decode(
         &mut self,
         content_hash: CapHash,
         code: Vec<u8>,
-        jump_table: Vec<u32>,
-        jump_table_offsets: Vec<u32>,
+        code_base: u32,
     ) -> Arc<Program> {
         if let Some(prog) = self.entries.get(&content_hash) {
             return prog.clone();
         }
-        let prog = Arc::new(Program::new(code, jump_table, jump_table_offsets));
+        let prog = Arc::new(Program::new(code, code_base));
         self.entries.insert(content_hash, prog.clone());
         prog
     }
@@ -73,9 +74,9 @@ impl ImageCache {
 mod tests {
     use super::*;
 
-    fn trivial_blob() -> (Vec<u8>, Vec<u32>, Vec<u32>) {
+    fn trivial_blob() -> Vec<u8> {
         // Single `trap` instruction (custom-0 funct3=000, opcode 0x0B).
-        (vec![0x0B, 0x00, 0x00, 0x00], vec![], vec![0])
+        vec![0x0B, 0x00, 0x00, 0x00]
     }
 
     #[test]
@@ -84,8 +85,7 @@ mod tests {
         let h = [1u8; 32];
         assert!(cache.get(&h).is_none());
 
-        let (code, jt, jto) = trivial_blob();
-        let p = cache.get_or_decode(h, code, jt, jto);
+        let p = cache.get_or_decode(h, trivial_blob(), 0);
         assert_eq!(cache.len(), 1);
         assert!(Arc::ptr_eq(&p, &cache.get(&h).unwrap()));
     }
@@ -94,10 +94,8 @@ mod tests {
     fn get_or_decode_reuses_existing_entry() {
         let mut cache = ImageCache::new();
         let h = [2u8; 32];
-        let (c1, jt1, jto1) = trivial_blob();
-        let (c2, jt2, jto2) = trivial_blob();
-        let p1 = cache.get_or_decode(h, c1, jt1, jto1);
-        let p2 = cache.get_or_decode(h, c2, jt2, jto2);
+        let p1 = cache.get_or_decode(h, trivial_blob(), 0);
+        let p2 = cache.get_or_decode(h, trivial_blob(), 0);
         assert!(Arc::ptr_eq(&p1, &p2));
         assert_eq!(cache.len(), 1);
     }
@@ -105,8 +103,7 @@ mod tests {
     #[test]
     fn clear_drops_entries() {
         let mut cache = ImageCache::new();
-        let (code, jt, jto) = trivial_blob();
-        cache.get_or_decode([3u8; 32], code, jt, jto);
+        cache.get_or_decode([3u8; 32], trivial_blob(), 0);
         assert_eq!(cache.len(), 1);
         cache.clear();
         assert!(cache.is_empty());

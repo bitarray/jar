@@ -291,13 +291,17 @@ pub(crate) fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
     let mut mem_size: u32 = 0;
     let mut overlays: Vec<(u32, Vec<u8>)> = Vec::new();
 
+    // `memory_mappings` describes data/slot regions only; code is
+    // RO-mapped separately by the runtime (a direct-map at CODE_BASE),
+    // so it neither contributes an overlay nor extends mem_size.
     for mapping in &image.memory_mappings {
+        let target = mapping.source.target();
+
         let end = (mapping.start + mapping.size) as u32;
         if end > mem_size {
             mem_size = end;
         }
 
-        let target = mapping.source.target();
         if let Some(PinnedCap::Data { content, .. }) = image.pinned_slots.get(&target) {
             if !content.is_empty() {
                 overlays.push((mapping.start as u32, content.clone()));
@@ -318,9 +322,9 @@ pub(crate) fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
 fn placeholder_kernel_image() -> Image {
     use std::collections::BTreeMap;
     Image {
-        code: vec![0u8], // single TRAP byte
-        jump_table: Vec::new(),
-        jump_table_offsets: Vec::new(),
+        // Single TRAP byte. Never actually invoked: kernel caps
+        // short-circuit at the host-call layer.
+        code: vec![0u8],
         endpoints: BTreeMap::new(),
         memory_mappings: Vec::new(),
         gas_slots: Vec::new(),

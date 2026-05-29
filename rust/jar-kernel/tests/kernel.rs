@@ -20,9 +20,8 @@ fn minimal_chain_image() -> Image {
     );
     Image {
         code: 0x0000_200Bu32.to_le_bytes().to_vec(),
-        jump_table: Vec::new(),
-        jump_table_offsets: vec![0, 0],
         endpoints,
+        // Code is mapped at the fixed CODE_BASE; no data mappings.
         memory_mappings: Vec::new(),
         gas_slots: vec![abi::BARE_GAS_SLOT],
         quota_slots: vec![abi::BARE_QUOTA_SLOT],

@@ -20,8 +20,6 @@ fn empty_image_hashes_deterministically() {
 fn image_ssz_roundtrip() {
     let mut img = Image::empty();
     img.code = b"sample code".to_vec();
-    img.jump_table = vec![0u32, 4, 8];
-    img.jump_table_offsets = vec![0, 3];
     img.endpoints.insert(
         0,
         EndpointDef {

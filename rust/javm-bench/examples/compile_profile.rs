@@ -38,13 +38,14 @@ mod imp {
 
     fn profile_one(name: &str, blob: &[u8]) {
         let image = Image::from_ssz_bytes(blob).expect("decode Image");
-        let code = &image.code[..];
-        let jt_offsets = &image.jump_table_offsets[..];
+        let code = image.code.as_slice();
+        // Guest CODE_BASE (where the linker maps the code region).
+        let code_base = 0x4000_0000u32;
 
         // Warm-up + report native_code size.
         let native_size = {
-            let c = Compiler::new(dummy_helpers(), code.len(), 0x4000_0000, 1);
-            let r = c.compile(code, jt_offsets);
+            let c = Compiler::new(dummy_helpers(), code.len(), 0x4000_0000, 1, code_base);
+            let r = c.compile(code);
             r.native_code.len()
         };
 
@@ -54,8 +55,8 @@ mod imp {
 
         for _ in 0..ITERS {
             let t0 = Instant::now();
-            let c = Compiler::new(dummy_helpers(), code.len(), 0x4000_0000, 1);
-            let _ = c.compile(code, jt_offsets);
+            let c = Compiler::new(dummy_helpers(), code.len(), 0x4000_0000, 1, code_base);
+            let _ = c.compile(code);
             let t1 = Instant::now();
             comp_ns += (t1 - t0).as_nanos();
 

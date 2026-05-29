@@ -10,11 +10,8 @@ use javm_cap::{
 use std::sync::Arc;
 
 fn make_image_cap() -> ImageCap {
-    let code: Vec<u8> = vec![0xAB, 0xCD];
     ImageCap {
-        code,
-        jump_table: Vec::new(),
-        jump_table_offsets: Vec::new(),
+        code: vec![0xAB, 0xCD],
         endpoints: Vec::new(),
         mappings: Vec::new(),
         pinned: Vec::new(),

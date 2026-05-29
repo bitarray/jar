@@ -176,12 +176,14 @@ fn collect_initial_hashes(
 fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
     let mut mem_size: u32 = 0;
     let mut overlays = Vec::new();
+    // Code is RO direct-mapped at CODE_BASE by the runtime, not a
+    // flat-buffer overlay; `memory_mappings` lists data/slot regions only.
     for mapping in &image.memory_mappings {
+        let target = mapping.source.target();
         let end = (mapping.start + mapping.size) as u32;
         if end > mem_size {
             mem_size = end;
         }
-        let target = mapping.source.target();
         if let Some(PinnedCap::Data { content, .. }) = image.pinned_slots.get(&target) {
             if !content.is_empty() {
                 overlays.push((mapping.start as u32, content.clone()));

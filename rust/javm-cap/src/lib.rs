@@ -31,6 +31,7 @@ pub mod cap;
 pub mod error;
 pub mod hash;
 pub mod image;
+pub mod layout;
 pub mod slot;
 
 pub use cache::{CacheDirectory, CacheError, CapHasRefError, CapHashOrRef, CapRef};

@@ -58,14 +58,27 @@ pub(crate) struct LinkedElf {
     pub(crate) heap_pages: u32,
     /// PCREL_HI20: AUIPC instruction vaddr → resolved data address.
     pub(crate) hi20_targets: HashMap<u64, u64>,
-    /// PCREL_LO12: instruction vaddr → resolved data address (looked up from paired HI20).
+    /// PCREL_LO12: instruction vaddr → resolved target address (looked up from paired HI20).
     pub(crate) lo12_targets: HashMap<u64, u64>,
+    /// PCREL_LO12: instruction vaddr → its anchor AUIPC (HI20) instruction
+    /// vaddr. The LO12's immediate is relative to the *AUIPC's* PC (RISC-V
+    /// ABI), so re-encoding a kept code-relative pair after fallthrough
+    /// injection needs the anchor's post-injection offset, not the LO12's.
+    pub(crate) lo12_to_hi20: HashMap<u64, u64>,
     /// CALL_PLT: AUIPC instruction vaddr → target function RISC-V vaddr.
     pub(crate) call_targets: HashMap<u64, u64>,
     /// Absolute code pointers in data sections: (data_vaddr, target_code_vaddr, entry_size).
     pub(crate) abs_code_ptrs: Vec<(u64, u64, u8)>,
+    /// Absolute *data* pointers in data sections: (data_vaddr,
+    /// target_data_vaddr, entry_size). The stored value is an ELF data
+    /// vaddr (the `[0, extent)` layout); the linker shifts it to the
+    /// runtime `[DATA_BASE, …)` mapping.
+    pub(crate) abs_data_ptrs: Vec<(u64, u64, u8)>,
     /// SUB32 relocations: (data_vaddr, subtracted_addr).
     pub(crate) sub32_relocs: Vec<(u64, u64)>,
+    /// Base RV vaddr that `rw_data[0]` maps to (for relocating absolute
+    /// data pointers stored in `.data`).
+    pub(crate) rw_base: u64,
     /// Code section address ranges for detecting code pointers.
     pub(crate) code_ranges: Vec<(u64, u64)>,
 }
@@ -308,6 +321,9 @@ pub(crate) fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError>
     let ro_pages = ro_data.len().div_ceil(page_size as usize);
     let rw_pvm_base = stack_size + (ro_pages as u64 * page_size);
     let mut rw_data = Vec::new();
+    // Base RV vaddr that `rw_data[0]` corresponds to (for relocating
+    // absolute data pointers stored in `.data`).
+    let mut rw_base = rw_pvm_base;
     if !rw_sections.is_empty() {
         let rw_min = rw_sections.iter().map(|(a, _, _)| *a).min().unwrap();
         let rw_max = rw_sections
@@ -315,10 +331,11 @@ pub(crate) fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError>
             .map(|(a, sz, _)| *a + *sz as u64)
             .max()
             .unwrap();
-        let rw_blob_size = (rw_max - rw_pvm_base.min(rw_min)) as usize;
+        rw_base = rw_pvm_base.min(rw_min);
+        let rw_blob_size = (rw_max - rw_base) as usize;
         rw_data = vec![0u8; rw_blob_size];
         for (addr, sz, d) in &rw_sections {
-            let off = (*addr - rw_pvm_base.min(rw_min)) as usize;
+            let off = (*addr - rw_base) as usize;
             if let Some(d) = d
                 && off + sz <= rw_data.len()
             {
@@ -329,10 +346,12 @@ pub(crate) fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError>
 
     let mut hi20_targets: HashMap<u64, u64> = HashMap::new();
     let mut lo12_targets: HashMap<u64, u64> = HashMap::new();
+    let mut lo12_to_hi20: HashMap<u64, u64> = HashMap::new();
     let mut call_targets: HashMap<u64, u64> = HashMap::new();
 
     let mut lo12_entries: Vec<(u64, u64)> = Vec::new();
     let mut abs64_relocs: Vec<(u64, u64, u8)> = Vec::new();
+    let mut abs_data_relocs: Vec<(u64, u64, u8)> = Vec::new();
     let mut sub32_relocs: Vec<(u64, u64)> = Vec::new();
     let code_ranges: Vec<(u64, u64)> = code_sections
         .iter()
@@ -373,6 +392,8 @@ pub(crate) fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError>
                         .any(|(lo, hi)| target_addr >= *lo && target_addr < *hi);
                     if is_code_ptr {
                         abs64_relocs.push((r_offset, target_addr, 4));
+                    } else {
+                        abs_data_relocs.push((r_offset, target_addr, 4));
                     }
                 }
                 RelocType::Abs64 => {
@@ -381,6 +402,8 @@ pub(crate) fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError>
                         .any(|(lo, hi)| target_addr >= *lo && target_addr < *hi);
                     if is_code_ptr {
                         abs64_relocs.push((r_offset, target_addr, 8));
+                    } else {
+                        abs_data_relocs.push((r_offset, target_addr, 8));
                     }
                 }
                 RelocType::Add32 => {
@@ -410,11 +433,11 @@ pub(crate) fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError>
     for (lo12_addr, hi20_addr) in lo12_entries {
         if let Some(&data_addr) = hi20_targets.get(&hi20_addr) {
             lo12_targets.insert(lo12_addr, data_addr);
+            lo12_to_hi20.insert(lo12_addr, hi20_addr);
         }
     }
 
     let heap_pages = 16u32; // 64KB heap
-    let _ = rw_pvm_base;
 
     Ok(LinkedElf {
         code_sections,
@@ -424,9 +447,12 @@ pub(crate) fn parse_linked_elf(data: &[u8]) -> Result<LinkedElf, TranspileError>
         heap_pages,
         hi20_targets,
         lo12_targets,
+        lo12_to_hi20,
         call_targets,
         abs_code_ptrs: abs64_relocs,
+        abs_data_ptrs: abs_data_relocs,
         sub32_relocs,
+        rw_base,
         code_ranges,
     })
 }

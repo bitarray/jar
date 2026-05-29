@@ -372,12 +372,12 @@ impl<K: KernelAssist> Vm<K> {
             Cap::Image(i) => i.clone(),
             _ => return Err(VmError::ImageNotFound),
         };
-        let program = self.image_cache.get_or_decode(
-            new_image_hash,
-            img.code.as_slice().to_vec(),
-            img.jump_table.as_slice().to_vec(),
-            img.jump_table_offsets.as_slice().to_vec(),
-        );
+        let (code_base, code_bytes) = img
+            .code_mapping()
+            .ok_or(VmError::Invariant("image has no executable code mapping"))?;
+        let program =
+            self.image_cache
+                .get_or_decode(new_image_hash, code_bytes.to_vec(), code_base);
         let pinned_slots: Vec<SlotIdx> = img.pinned.iter().map(|e| e.slot).collect();
 
         let running = self
@@ -1028,6 +1028,15 @@ mod tests {
     use javm_exec::{Access, GasCounter, Mem, PAGE_SIZE, Regs, interp::Program};
     use std::sync::Arc;
 
+    /// Minimal PVM2 test image: code bytes (mapped read-only at the
+    /// fixed `CODE_BASE` by the runtime), no slots. Mirrors what the
+    /// linker emits so `ImageCap::code_mapping` resolves it.
+    fn pvm2_image(code: Vec<u8>) -> Image {
+        let mut img = Image::empty();
+        img.code = code;
+        img
+    }
+
     fn fixture_vm() -> Vm<InProcessKernelAssist> {
         let mut vm = Vm::new(InProcessKernelAssist::new());
         let mut cnode = CNodeCap::new(4).unwrap();
@@ -1036,7 +1045,7 @@ mod tests {
             .set(SlotIdx(2), Some(CapHashOrRef::Hash([0xAA; 32])))
             .unwrap();
         // Trivial PVM2 blob: single `trap` (custom-0 funct3=000).
-        let prog = Arc::new(Program::new(vec![0x0B, 0x00, 0x00, 0x00], vec![], vec![0]));
+        let prog = Arc::new(Program::new(vec![0x0B, 0x00, 0x00, 0x00], 0));
         let entry = InstanceEntry {
             instance_ref: CapHashOrRef::Hash([1u8; 32]),
             image_hash_chain: [1u8; 32],
@@ -1228,10 +1237,8 @@ mod tests {
     fn set_image_reloads_program_from_cache() {
         let mut vm = fixture_vm();
         let mut cache = CacheDirectory::new();
-        let mut img = Image::empty();
         // PVM2 `ecalli 0` — 32-bit custom-0 word at PC 0.
-        img.code = 0x0000_200Bu32.to_le_bytes().to_vec();
-        img.jump_table_offsets = vec![0, 0];
+        let img = pvm2_image(0x0000_200Bu32.to_le_bytes().to_vec());
         let image_hash = cache
             .put_cap(&Cap::image_with_slots(&img, &[], &[]).unwrap())
             .unwrap();
@@ -1251,7 +1258,9 @@ mod tests {
         );
         let running = vm.stack.running_instance().unwrap();
         assert_eq!(running.image_hash, image_hash);
-        assert_eq!(running.program.code, 0x0000_200Bu32.to_le_bytes().to_vec());
+        // The code region is page-aligned (zero-padded) by `image_cap`
+        // so it can be direct-mapped; only the prefix is the real code.
+        assert_eq!(&running.program.code[..4], &0x0000_200Bu32.to_le_bytes());
     }
 
     #[test]
@@ -1553,10 +1562,8 @@ mod tests {
         let mut cache = CacheDirectory::new();
 
         // Publish a tiny child image with no pinned/initial slots.
-        let mut child_img = javm_cap::image::Image::empty();
         // PVM2 `ecalli 0` — 32-bit custom-0 word at PC 0.
-        child_img.code = 0x0000_200Bu32.to_le_bytes().to_vec();
-        child_img.jump_table_offsets = vec![0, 0];
+        let child_img = pvm2_image(0x0000_200Bu32.to_le_bytes().to_vec());
         let image_hash = cache
             .put_cap(&Cap::image_with_slots(&child_img, &[], &[]).unwrap())
             .unwrap();
@@ -1644,9 +1651,7 @@ mod tests {
 
         // Publish a no-op image (one Halt instruction) + empty cnode
         // + Cap::Instance referencing them.
-        let mut child_img = javm_cap::image::Image::empty();
-        child_img.code = 0x0000_200Bu32.to_le_bytes().to_vec();
-        child_img.jump_table_offsets = vec![0, 0];
+        let child_img = pvm2_image(0x0000_200Bu32.to_le_bytes().to_vec());
         let image_hash = cache
             .put_cap(&Cap::image_with_slots(&child_img, &[], &[]).unwrap())
             .unwrap();

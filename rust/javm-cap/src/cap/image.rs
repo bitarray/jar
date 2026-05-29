@@ -1,9 +1,9 @@
 //! `ImageCap` — Image cap.
 //!
-//! Stores code, bitmask, jump_table, endpoints, mappings, and slot
-//! references as separate `Vec<T>` allocations. Allocation count
-//! per ImageCap is bounded (seven Vecs, regardless of content size);
-//! we accept that in exchange for direct field accessors.
+//! Stores code regions, endpoints, mappings, and slot references as
+//! separate `Vec<T>` allocations. Allocation count per ImageCap is
+//! bounded regardless of content size; we accept that in exchange for
+//! direct field accessors.
 
 use alloc::vec::Vec;
 
@@ -11,19 +11,13 @@ use crate::slot::SlotIdx;
 
 use super::{CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
 
-#[derive(
-    Clone, Debug, ssz_derive::HashTreeRoot, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
-)]
+#[derive(Debug, ssz_derive::HashTreeRoot, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ImageCap {
-    /// Bytecode bytes (raw RV+C+custom-0).
+    /// The (single) code region: raw RV+C+custom-0 bytes, page-aligned
+    /// so the kernel can direct-map it RO at the fixed protocol
+    /// constant [`crate::layout::CODE_BASE`]. Empty for codeless
+    /// images. See [`ImageCap::code_mapping`].
     pub code: Vec<u8>,
-    /// Concatenated per-function `br_table` sub-tables. Sub-table
-    /// boundaries live in `jump_table_offsets` (CSR-style).
-    pub jump_table: Vec<u32>,
-    /// Per-table start offsets in `jump_table`, CSR-style.
-    /// `jump_table_offsets[t]..jump_table_offsets[t+1]` slices the
-    /// entries of table `t`. Length = `num_tables + 1`.
-    pub jump_table_offsets: Vec<u32>,
     /// Endpoint definitions. Stored as a dense array keyed by
     /// endpoint index — `endpoints[i].entry_pc == 0` means the
     /// endpoint at index `i` is not defined.
@@ -38,6 +32,39 @@ pub struct ImageCap {
     pub initial: Vec<ImageSlotEntry>,
     /// Slot holding `Cap::Instance[YieldCatcher]`, if any.
     pub yield_marker_slot: Option<SlotIdx>,
+}
+
+// Manual Clone: the derived impl would `Vec::clone` the `code` bytes,
+// which goes through `Global::alloc` at the default 1-byte alignment
+// for `[u8]`. The kernel direct-maps the code region into a ring-3 PT
+// and asserts `phys.is_multiple_of(PAGE_SIZE)`, so a cloned buffer on
+// an unaligned page would panic. Re-allocate `code` through
+// `alloc_page_aligned_code` to preserve the invariant across clones
+// (mirrors `DataContent`'s manual Clone). Other fields clone normally.
+impl Clone for ImageCap {
+    fn clone(&self) -> Self {
+        Self {
+            code: alloc_page_aligned_code(&self.code),
+            endpoints: self.endpoints.clone(),
+            mappings: self.mappings.clone(),
+            pinned: self.pinned.clone(),
+            initial: self.initial.clone(),
+            yield_marker_slot: self.yield_marker_slot,
+        }
+    }
+}
+
+impl ImageCap {
+    /// The executable code region as `(code_base, bytes)`. `code_base`
+    /// is the fixed protocol constant [`crate::layout::CODE_BASE`], so a
+    /// PVM PC is `code_base + byte_offset`. `None` if the image declares
+    /// no code (empty region) — such an image cannot execute.
+    pub fn code_mapping(&self) -> Option<(u32, &[u8])> {
+        if self.code.is_empty() {
+            return None;
+        }
+        Some((crate::layout::CODE_BASE, self.code.as_slice()))
+    }
 }
 
 /// Endpoint definition. Dense `initial_regs` array; index `i`
@@ -83,14 +110,15 @@ impl EndpointDef {
 /// One mapped region. The kernel resolves `source_path` at instance
 /// start, reads the bytes from the resulting `Cap::Data`, and lays
 /// them at `[start, start + size)`. `source_path` is a fixed-cap
-/// array; `source_path_len` is the actual depth.
+/// array (`source_path[..source_path_len]` is the live path);
+/// `source_path_len` is the actual depth.
 ///
 /// **SSZ note**: `Encode`/`Decode`/`HashTreeRoot` are hand-written
 /// because the `source_path` field is `[SlotIdx; MAX_SOURCE_DEPTH]` —
 /// an array of a local type, which Rust's orphan rules block from
 /// receiving a blanket impl in either `ssz` or `javm-cap`. The encoded
-/// form is field-by-field SSZ: `u64 || u64 || (MAX_SOURCE_DEPTH * 4
-/// LE bytes) || u8`. All fields are fixed-length so the container is
+/// form is field-by-field SSZ (`u64 || u64 || MAX_SOURCE_DEPTH×4 LE
+/// bytes || u8`); all fields are fixed-length, so the container is
 /// fixed-length too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct MemoryMapping {
@@ -162,7 +190,7 @@ impl ssz::HashTreeRoot for MemoryMapping {
         &self,
     ) -> [u8; 32] {
         // SSZ container root: merkleize the per-field roots with
-        // limit = number of fields (4). All four are fixed-size leaves.
+        // limit = number of fields (6). All are fixed-size leaves.
         let path_root = {
             // Treat the fixed-length path array as a `Vector<u32,
             // MAX_SOURCE_DEPTH>` for hashing: pack to bytes, merkleize
@@ -186,7 +214,8 @@ impl ssz::HashTreeRoot for MemoryMapping {
 }
 
 impl MemoryMapping {
-    /// Live slot indices (length = `source_path_len`).
+    /// Live slot indices (length = `source_path_len`) — the cnode path
+    /// to the `Cap::Data` backing this mapping.
     pub fn path(&self) -> &[SlotIdx] {
         &self.source_path[..self.source_path_len as usize]
     }
@@ -247,24 +276,17 @@ pub enum ImageConvertError {
 ///   indexed by endpoint id. Empty slots use [`EndpointDef::empty`].
 ///   `stack_top` is extracted from the old `initial_regs[1]` (RISC-V
 ///   SP convention); `arg_cnode_slot` defaults to `SlotIdx(0)`.
-/// - `MemoryMapping.source: SlotPath` becomes `source_path: [SlotIdx;
-///   MAX_SOURCE_DEPTH] + source_path_len`; paths deeper than 8 error.
+/// - `MemoryMapping.source` (a `SlotPath`) becomes `source_path:
+///   [SlotIdx; MAX_SOURCE_DEPTH]` + `source_path_len`; paths deeper
+///   than `MAX_SOURCE_DEPTH` error.
 pub fn image_cap(
     image: &crate::image::Image,
     pinned_hashes: &[(SlotIdx, CapHash)],
     initial_hashes: &[(SlotIdx, CapHash)],
 ) -> Result<ImageCap, ImageConvertError> {
-    let mut code = Vec::with_capacity(image.code.len());
-    code.extend_from_slice(&image.code);
-
-    let mut jump_table = Vec::with_capacity(image.jump_table.len());
-    for &j in &image.jump_table {
-        jump_table.push(j);
-    }
-    let mut jump_table_offsets = Vec::with_capacity(image.jump_table_offsets.len());
-    for &o in &image.jump_table_offsets {
-        jump_table_offsets.push(o);
-    }
+    // Code: page-aligned copy so the kernel can direct-map it RO at
+    // `layout::CODE_BASE`.
+    let code = alloc_page_aligned_code(&image.code);
 
     // Endpoints: dense `MAX_ENDPOINTS`-sized array; empty entries have
     // `entry_pc == 0`.
@@ -320,14 +342,33 @@ pub fn image_cap(
 
     Ok(ImageCap {
         code,
-        jump_table,
-        jump_table_offsets,
         endpoints,
         mappings,
         pinned,
         initial,
         yield_marker_slot: image.yield_marker_slot,
     })
+}
+
+/// Copy `bytes` into a `Vec<u8>` whose backing allocation is
+/// page-aligned and page-size-rounded (so the kernel can `va_to_pa` +
+/// direct-map the code region RO), but whose **length is the real code
+/// length** — not the padded capacity.
+///
+/// The length must stay exact: the recompiler iterates `code.len()`
+/// bytes, so a page-padded length would make it compile thousands of
+/// trailing zero bytes as bogus instructions (a ~page-sized fixed cost
+/// per recompile that dominates small guests). The runtime rounds the
+/// mapping size up to a page separately; the trailing capacity bytes
+/// stay zeroed and mapped but are never executed.
+fn alloc_page_aligned_code(bytes: &[u8]) -> Vec<u8> {
+    let mut v = super::data::alloc_page_aligned_zeroed(bytes.len());
+    v[..bytes.len()].copy_from_slice(bytes);
+    // Keep the page-aligned allocation + zeroed tail (capacity), but
+    // expose only the real code length. `truncate` never reallocates,
+    // so the base pointer stays page-aligned for `va_to_pa`.
+    v.truncate(bytes.len());
+    v
 }
 
 fn build_image_slot_vec(pairs: &[(SlotIdx, CapHash)]) -> Vec<ImageSlotEntry> {

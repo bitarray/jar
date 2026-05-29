@@ -8,9 +8,8 @@ fn empty_chain_image() -> Image {
     Image {
         // PVM2 `ecalli 0` (HALT): custom-0 opcode 0b00010_11, funct3 0b010.
         code: 0x0000_200Bu32.to_le_bytes().to_vec(),
-        jump_table: Vec::new(),
-        jump_table_offsets: vec![0, 0],
         endpoints: BTreeMap::new(),
+        // Code is mapped at the fixed CODE_BASE; no data mappings.
         memory_mappings: Vec::new(),
         gas_slots: vec![abi::BARE_GAS_SLOT],
         quota_slots: vec![abi::BARE_QUOTA_SLOT],
