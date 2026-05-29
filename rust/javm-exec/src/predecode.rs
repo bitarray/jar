@@ -93,6 +93,52 @@ pub fn predecode(code: &[u8]) -> Predecode {
 /// Used by callers that want to override the default L2-hit latency
 /// (e.g. for tier-specific gas modeling).
 pub fn predecode_rv_with_mem_cycles(code: &[u8], mem_cycles: u8) -> Predecode {
+    let (insts, valid_pc, decode_error_at) = decode_blocks(code);
+    // ---- Pass 3: per-block gas costs via pipeline simulation ---------
+    let block_costs = compute_block_costs(&insts, mem_cycles);
+    Predecode {
+        insts,
+        valid_pc,
+        block_costs,
+        decode_error_at,
+    }
+}
+
+/// Lightweight whole-blob gas-block-start scan for the lazy recompiler.
+///
+/// Returns the byte-indexed block-start bitmap (`bb[off] == 1` iff an
+/// instruction begins at `off` and that instruction starts a gas block)
+/// plus the first decode/layout error offset, if any. Same partition as
+/// [`predecode`] (both share [`decode_blocks`]) but skips the per-block
+/// gas-cost simulation — the recompiler recomputes per-block gas as it
+/// compiles each page.
+///
+/// Lazy per-page compilation needs the *whole-blob* block-start set up
+/// front: a `jalr`/branch in one page can target a block in a
+/// not-yet-compiled page, and that target must validate against the
+/// complete set (`bb[off] == 1`) before its page exists.
+pub fn bb_start_bitmap(code: &[u8]) -> (Vec<u8>, Option<u32>) {
+    let (insts, _valid_pc, decode_error_at) = decode_blocks(code);
+    let mut bb = vec![0u8; code.len()];
+    for ip in &insts {
+        if ip.is_gas_block_start {
+            bb[ip.pc as usize] = 1;
+        }
+    }
+    (bb, decode_error_at)
+}
+
+/// Shared front half of the predecode pipeline: decode every
+/// instruction, enforce invariant 10 (no instruction crosses a 4 KiB
+/// page boundary), and mark gas-block starts (invariant 11). Returns
+/// the decoded instruction array (with `is_gas_block_start` set), the
+/// byte-indexed instruction-start map, and the first decode/layout
+/// error offset, if any.
+///
+/// [`predecode`] (interp) and [`bb_start_bitmap`] (lazy recompiler)
+/// both build on this, so the two engines partition gas blocks
+/// identically by construction.
+fn decode_blocks(code: &[u8]) -> (Vec<RvPreDecodedInst>, Vec<bool>, Option<u32>) {
     let mut insts: Vec<RvPreDecodedInst> = Vec::with_capacity(code.len() / 4);
     let mut valid_pc: Vec<bool> = vec![false; code.len()];
     let mut decode_error_at: Option<u32> = None;
@@ -164,15 +210,7 @@ pub fn predecode_rv_with_mem_cycles(code: &[u8], mem_cycles: u8) -> Predecode {
         }
     }
 
-    // ---- Pass 3: per-block gas costs via pipeline simulation ---------
-    let block_costs = compute_block_costs(&insts, mem_cycles);
-
-    Predecode {
-        insts,
-        valid_pc,
-        block_costs,
-        decode_error_at,
-    }
+    (insts, valid_pc, decode_error_at)
 }
 
 /// Run the pipeline simulator once per basic block; write the

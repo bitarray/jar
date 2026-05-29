@@ -21,7 +21,6 @@
 //!
 //! Reserved: R15 = gas meter, RDX = scratch, RSP = native stack.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use super::asm::{Assembler, Cc, Label, Reg};
@@ -204,20 +203,11 @@ pub struct Compiler {
     /// Code region length in bytes — the upper bound for jalr target
     /// offsets (== `bb_starts` / dispatch-table length).
     pub(crate) code_len: u32,
-    /// True during RV streaming compile (`compile`). When set, branch
-    /// emit helpers defer forward-target validation (`target > pc`) to a
-    /// post-pass instead of consulting `bitmask_ptr`. Off for PVM, whose
-    /// caller-supplied bitmask is fully populated at emit time.
-    pub(crate) rv_streaming: bool,
-    /// Forward branches whose target validity could not be determined at
-    /// emit time. Resolved post-pass: each entry is
-    /// `(target_pc, branch_pc, fixup_idx)`. If `valid_pc[target]` is
-    /// false after the streaming pass, the fixup is redirected to a
-    /// per-branch panic stub.
-    pub(crate) rv_pending_fwd_branches: Vec<(u32, u32, usize)>,
-    /// Backing storage for `bitmask_ptr` during RV streaming compile.
-    /// Built incrementally in `bind_rv_gas_block_start_streaming`. Empty
-    /// for the PVM path (uses the caller-supplied bitmask).
+    /// Backing storage for `bitmask_ptr`: the whole-blob gas-block-start
+    /// set, computed up front by `predecode::bb_start_bitmap` (shared
+    /// with the interp). Every branch / jalr target is validated against
+    /// it, and it is returned as `CompileResult::valid_pc` for the
+    /// runtime's `jalr` bb-check.
     pub(crate) rv_valid_pc: Vec<bool>,
 }
 
@@ -273,8 +263,6 @@ impl Compiler {
             gas_sim: GasSimulator::new(),
             code_base,
             code_len: code_len as u32,
-            rv_streaming: false,
-            rv_pending_fwd_branches: Vec::new(),
             rv_valid_pc: Vec::new(),
         }
     }
@@ -426,13 +414,9 @@ impl Compiler {
         if !condition {
             return;
         }
-        if self.rv_streaming && target > pc {
-            let label = self.label_for_pc(target);
-            let fixup_idx = self.asm.fixups_len();
-            self.asm.jmp_label(label);
-            self.rv_pending_fwd_branches.push((target, pc, fixup_idx));
-            return;
-        }
+        // Target validity is known up front (whole-blob bb set). A
+        // forward target's label binds later in this pass; `jmp_label`
+        // records a fixup the assembler resolves at finalize.
         if !self.is_basic_block_start(target) {
             self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
             self.emit_exit(EXIT_PANIC, 0);
@@ -452,14 +436,6 @@ impl Compiler {
         _fallthrough: u32,
         pc: u32,
     ) {
-        if self.rv_streaming && target > pc {
-            self.asm.cmp_rr(a, b);
-            let label = self.label_for_pc(target);
-            let fixup_idx = self.asm.fixups_len();
-            self.asm.jcc_label(cc, label);
-            self.rv_pending_fwd_branches.push((target, pc, fixup_idx));
-            return;
-        }
         if !self.is_basic_block_start(target) {
             self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
             self.asm.cmp_rr(a, b);
@@ -1165,20 +1141,21 @@ impl Compiler {
     /// the gas-block dispatch table). Built incrementally during the
     /// streaming pass — no separate length-only pre-pass.
     pub fn compile(mut self, code: &[u8]) -> CompileResult {
-        // valid_pc is populated incrementally as the streaming pass
-        // binds gas-block starts. The pointer is stable across mutation
-        // (Vec doesn't reallocate from `vec![false; n]` with in-place
-        // index assignment), so `is_basic_block_start` reads through
-        // the raw pointer remain coherent.
-        self.rv_valid_pc = vec![false; code.len()];
+        // Whole-blob gas-block-start set, computed up front and shared
+        // with the interp (`predecode::bb_start_bitmap`) so both engines
+        // partition gas blocks identically. The compile loop binds a gas
+        // block at each set member and validates every branch / jalr
+        // target against it. The buffer is stable for the pass (no
+        // reallocation), so `is_basic_block_start` reads through
+        // `bitmask_ptr` stay coherent.
+        let (bb, _decode_err) = javm_exec::predecode::bb_start_bitmap(code);
+        self.rv_valid_pc = bb.into_iter().map(|b| b == 1).collect();
         self.bitmask_ptr = self.rv_valid_pc.as_ptr() as *const u8;
         self.bitmask_len = self.rv_valid_pc.len();
-        self.rv_streaming = true;
 
         self.emit_prologue();
 
         let mut pending_gas: Option<(Label, u32, usize)> = None;
-        let mut next_is_gas_start = true;
         let mut pc: usize = 0;
 
         while pc < code.len() {
@@ -1200,41 +1177,36 @@ impl Compiler {
 
             let inst_pc = pc as u32;
 
-            // Page starts are gas-block starts (PVM2 invariant 11),
-            // mirroring `predecode` so the interp and recompiler agree on
-            // the block partition and so lazy per-page compilation can
-            // enter each page at a dispatchable block. Trustless: derived
-            // from PC, not linker metadata.
-            if inst_pc.is_multiple_of(javm_exec::PAGE_SIZE) {
-                next_is_gas_start = true;
-            }
-
-            if next_is_gas_start {
+            // Bind a gas block at every block start in the precomputed
+            // set ({0} ∪ post-terminator ∪ page starts). Same partition
+            // as predecode → identical per-block gas.
+            if self.is_basic_block_start(inst_pc) {
                 self.bind_rv_gas_block_start_streaming(inst_pc, &mut pending_gas);
-                next_is_gas_start = false;
             }
 
             // Byte-based dispatch. Each path returns
             // `(is_terminator, preserve_cf, extra_bytes)`. `extra_bytes`
             // counts the *additional* bytes consumed beyond `base_len`
             // for lookahead fusion (e.g., Ld→Add fuses an extra 4-byte
-            // Add). `preserve_cf` tells us whether to keep
-            // `last_add_cf` alive for a following Sltu fusion.
-            // Suppress instruction fusion across a page boundary: the
-            // next instruction starts a 4 KiB page, which is a gas-block
-            // start (invariant 11) that predecode always splits on.
-            // Fusing the trailer into this block would diverge the
-            // recompiler's block partition (and thus its per-block gas)
-            // from the interp's. `rest` is lookahead-only — an empty
-            // slice forces the trailer to compile as its own
-            // page-starting block next iteration.
+            // Add). `preserve_cf` tells us whether to keep `last_add_cf`
+            // alive for a following Sltu fusion.
+            //
+            // Suppress fusion across a block boundary: if the trailer
+            // starts a new gas block, fusing it into this block would
+            // diverge the recompiler's partition (and per-block gas) from
+            // predecode's. `rest` is lookahead-only — an empty slice
+            // defers the trailer to its own block next iteration. (Only
+            // page-boundary starts can fall between two fusable
+            // non-terminators; post-terminator starts follow a
+            // non-fusable terminator. Gating on the block-start set covers
+            // both uniformly.)
             let next_inst_pc = inst_pc + base_len as u32;
-            let rest: &[u8] = if next_inst_pc.is_multiple_of(javm_exec::PAGE_SIZE) {
+            let rest: &[u8] = if self.is_basic_block_start(next_inst_pc) {
                 &[]
             } else {
                 &code[pc + base_len..]
             };
-            let (term, preserve_cf, extra) = if is_4byte {
+            let (_term, preserve_cf, extra) = if is_4byte {
                 let w = u32::from_le_bytes([code[pc], code[pc + 1], code[pc + 2], code[pc + 3]]);
                 self.compile_rv4(w, inst_pc, 4, rest)
             } else {
@@ -1246,10 +1218,6 @@ impl Compiler {
                 self.last_add_cf = None;
             }
 
-            if term {
-                next_is_gas_start = true;
-            }
-
             pc += base_len + extra;
         }
 
@@ -1258,28 +1226,6 @@ impl Compiler {
             let cost = self.gas_sim.flush_and_get_cost();
             self.asm.patch_i32(patch_offset, cost as i32);
             self.oog_stubs.push((stub_label, block_pc, cost));
-        }
-
-        // Resolve deferred forward branches now that valid_pc is fully
-        // populated. For each forward branch recorded with target > pc
-        // at emit time:
-        //   - valid target: label_for_pc(target) was bound during the
-        //     streaming pass; the existing fixup resolves naturally.
-        //   - invalid target: append a per-branch panic stub and
-        //     redirect the fixup to it. Keeps the source PC of the
-        //     branch in the exit report.
-        // We disable rv_streaming first so emit_branch_* / panic helpers
-        // called below take their non-deferred path.
-        self.rv_streaming = false;
-        let pending = core::mem::take(&mut self.rv_pending_fwd_branches);
-        for (target, branch_pc, fixup_idx) in pending {
-            if !self.is_basic_block_start(target) {
-                let stub = self.asm.new_label();
-                self.asm.bind_label(stub);
-                self.asm.mov_store32_rip_rel_imm(CTX_PC, branch_pc as i32);
-                self.asm.jmp_label(self.panic_label);
-                self.asm.redirect_fixup(fixup_idx, stub);
-            }
         }
 
         self.emit_exit_sequences();
@@ -1322,16 +1268,9 @@ impl Compiler {
         let label = Label(self.label_base + pc);
         self.asm.bind_label(label);
         self.gas_block_pcs.push(pc);
-        // valid_pc is the gas-block-start bitmap consulted by both the
-        // codegen-time `is_basic_block_start` check and the runtime's
-        // djump validation. Set it here so backward branches emit time
-        // see the bit (we walk PCs in order, so any T < cur_pc has
-        // already passed through here if it's a gas-block start).
-        // bitmask_ptr points to rv_valid_pc's heap buffer, so this
-        // mutation is visible to subsequent is_basic_block_start reads.
-        if (pc as usize) < self.rv_valid_pc.len() {
-            self.rv_valid_pc[pc as usize] = true;
-        }
+        // `rv_valid_pc` (the gas-block-start bitmap) is precomputed in
+        // `compile`, so there's nothing to mark here — the loop already
+        // gated this call on `is_basic_block_start(pc)`.
 
         // Peephole state must not leak across gas-block boundaries: the
         // dispatch table can enter this block from any predecessor.
