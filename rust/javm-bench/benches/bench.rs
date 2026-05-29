@@ -27,7 +27,7 @@ macro_rules! bench_workload {
                 $label,
                 val,
                 gas,
-                image.code.len(),
+                image.codes[0].code.len(),
             );
 
             let mut g = c.benchmark_group($label);

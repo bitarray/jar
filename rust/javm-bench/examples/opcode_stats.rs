@@ -112,7 +112,8 @@ fn variant_name(inst: &Inst) -> &'static str {
         Bgeu { .. } => "Bgeu",
         EcallJar => "EcallJar",
         Ecalli { .. } => "Ecalli",
-        BrTable { .. } => "BrTable",
+        Auipc { .. } => "Auipc",
+        Jalr { .. } => "Jalr",
         Fallthrough => "Fallthrough",
         Trap => "Trap",
         Reserved { .. } => "Reserved",
@@ -239,7 +240,7 @@ fn rs1_of(inst: &Inst) -> Option<u8> {
 
 fn profile_one(name: &str, blob: &[u8]) {
     let image = Image::from_ssz_bytes(blob).expect("decode Image");
-    let code = &image.code[..];
+    let code = &image.codes[0].code[..];
 
     let mut single: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut total = 0usize;

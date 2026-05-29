@@ -15,7 +15,6 @@ use super::{CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
 /// at its `MemoryMapping.start`. Page-aligned so the kernel can
 /// direct-map it.
 #[derive(
-    Clone,
     Debug,
     ssz_derive::Encode,
     ssz_derive::Decode,
@@ -26,6 +25,20 @@ use super::{CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
 )]
 pub struct CodeRegionCap {
     pub code: Vec<u8>,
+}
+
+// Manual Clone: the derived impl uses `Vec::clone` (default 1-byte
+// alignment for `[u8]`). The kernel direct-maps the code region into a
+// ring-3 PT and asserts `phys.is_multiple_of(PAGE_SIZE)`, so a cloned
+// buffer on an unaligned page would panic. Re-allocate through
+// `alloc_page_aligned_zeroed` to preserve the invariant across clones
+// (mirrors `DataContent`'s manual Clone).
+impl Clone for CodeRegionCap {
+    fn clone(&self) -> Self {
+        let mut code = super::data::alloc_page_aligned_zeroed(self.code.len());
+        code[..self.code.len()].copy_from_slice(&self.code);
+        Self { code }
+    }
 }
 
 #[derive(
@@ -190,7 +203,8 @@ impl ssz::Decode for MemoryMapping {
         }
         let source_path_len = bytes[17 + MAX_SOURCE_DEPTH * 4];
         let ci_off = 17 + MAX_SOURCE_DEPTH * 4 + 1;
-        let code_index = u32::from_le_bytes(bytes[ci_off..ci_off + 4].try_into().expect("len checked"));
+        let code_index =
+            u32::from_le_bytes(bytes[ci_off..ci_off + 4].try_into().expect("len checked"));
         Ok(Self {
             start,
             size,
@@ -368,7 +382,10 @@ pub fn image_cap(
             }
             crate::image::MappingSource::Code(idx) => {
                 if (*idx as usize) >= image.codes.len() {
-                    return Err(ImageConvertError::CodeIndexOutOfRange(*idx, image.codes.len()));
+                    return Err(ImageConvertError::CodeIndexOutOfRange(
+                        *idx,
+                        image.codes.len(),
+                    ));
                 }
                 MemoryMapping {
                     start: m.start,

@@ -19,7 +19,7 @@
 
 use javm::kernel_assist::{InProcessKernelAssist, KernelAssist};
 use javm::{CallResult, Vm};
-use javm_cap::image::{Image, PinnedCap};
+use javm_cap::image::{Image, MappingSource, PinnedCap};
 use javm_cap::{CacheDirectory, Cap, CapHashOrRef, SlotIdx, NUM_REGS};
 use ssz::Decode;
 
@@ -177,11 +177,16 @@ fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
     let mut mem_size: u32 = 0;
     let mut overlays = Vec::new();
     for mapping in &image.memory_mappings {
+        // Code regions are RO direct-mapped at CODE_BASE by the runtime,
+        // not flat-buffer overlays — skip them here.
+        let target = match &mapping.source {
+            MappingSource::Slot(path) => path.target(),
+            MappingSource::Code(_) => continue,
+        };
         let end = (mapping.start + mapping.size) as u32;
         if end > mem_size {
             mem_size = end;
         }
-        let target = mapping.source.target();
         if let Some(PinnedCap::Data { content, .. }) = image.pinned_slots.get(&target) {
             if !content.is_empty() {
                 overlays.push((mapping.start as u32, content.clone()));

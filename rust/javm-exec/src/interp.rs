@@ -1,9 +1,9 @@
 //! PVM2 (RV+C+Zbb+Zba+Zbs+Zicond+custom-0) interpreter.
 //!
 //! [`Program`] bundles the constituents an interpreter run needs
-//! (code bytes, predecode output, jump table + offsets) so the
-//! integration layer can cache the predecode alongside the bytecode
-//! and pass a single Arc to the executor.
+//! (code bytes, predecode output, code base) so the integration layer
+//! can cache the predecode alongside the bytecode and pass a single Arc
+//! to the executor.
 //!
 //! Mirrors the recompiler's semantics — same per-block gas charging at
 //! `Predecode::block_costs`, same RV-spec ALU/branch behaviour, same
@@ -665,8 +665,7 @@ impl Interpreter {
                 // happens at block entry) — else Panic (security-critical:
                 // rejects mid-block / mid-instruction targets).
                 Inst::Jalr { rd, rs1, imm } => {
-                    let target_va =
-                        (reg_read(regs, rs1) as u32).wrapping_add(imm as u32);
+                    let target_va = (reg_read(regs, rs1) as u32).wrapping_add(imm as u32);
                     if rd != 0 {
                         reg_write(regs, rd, code_base.wrapping_add(next_pc) as u64);
                     }

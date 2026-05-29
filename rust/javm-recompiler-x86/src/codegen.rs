@@ -1090,15 +1090,20 @@ fn expand_rvc_q2(h: u16, f3: u16) -> Option<u32> {
         }
         0b100 => {
             // (bit12, rdrs1, rs2):
-            //   (0, r, 0)  r!=0 -> c.jr     (FORBIDDEN in PVM2)
+            //   (0, r, 0)  r!=0 -> c.jr     -> jalr x0, r, 0  (return)
             //   (0, r, s)  both!=0 -> c.mv  -> add rd, x0, rs2
             //   (1, 0, 0)         -> c.ebreak (FORBIDDEN)
-            //   (1, r, 0)  r!=0 -> c.jalr   (FORBIDDEN)
+            //   (1, r, 0)  r!=0 -> c.jalr   -> jalr x1, r, 0  (indirect call)
             //   (1, r, s)  both!=0 -> c.add -> add rd, rd, rs2
             let bit12 = (h >> 12) & 1;
             if rs2 == 0 {
-                // c.jr / c.jalr / c.ebreak — all forbidden.
-                None
+                // c.jr (bit12=0) / c.jalr (bit12=1): native jalr. rdrs1=0
+                // is c.ebreak (bit12=1) or reserved (bit12=0) — forbidden.
+                if rdrs1 == 0 {
+                    return None;
+                }
+                let rd = if bit12 == 0 { 0 } else { 1 };
+                Some(enc_i(OP_JALR, 0b000, rd, rdrs1, 0))
             } else {
                 // c.mv (bit12=0, rs1=x0) or c.add (bit12=1, rs1=rdrs1)
                 if rdrs1 == 0 {
@@ -1209,7 +1214,7 @@ impl Compiler {
             let rest = &code[pc + base_len..];
             let (term, preserve_cf, extra) = if is_4byte {
                 let w = u32::from_le_bytes([code[pc], code[pc + 1], code[pc + 2], code[pc + 3]]);
-                self.compile_rv4(w, inst_pc, rest)
+                self.compile_rv4(w, inst_pc, 4, rest)
             } else {
                 let h = u16::from_le_bytes([code[pc], code[pc + 1]]);
                 self.compile_rvc(h, inst_pc, rest)
@@ -1335,7 +1340,12 @@ impl Compiler {
     /// Hot path: walks the opcode-major tree directly on raw bits, no
     /// `Inst` enum constructed. Fusion sites (Ld→Add, Mul-pair) are
     /// inline at their dispatchers.
-    fn compile_rv4(&mut self, w: u32, pc: u32, rest: &[u8]) -> (bool, bool, usize) {
+    /// `inst_len` is the encoded length of the instruction being
+    /// compiled (4 for the 4-byte path, 2 for an RVC instruction
+    /// expanded by [`compile_rvc`]). It is what jal/jalr use to compute
+    /// the return-address `next_pc = pc + inst_len`; a hardcoded `pc + 4`
+    /// would mis-set `ra` for `c.jalr` (a 2-byte indirect call).
+    fn compile_rv4(&mut self, w: u32, pc: u32, inst_len: u32, rest: &[u8]) -> (bool, bool, usize) {
         use javm_exec::gas_cost::*;
         let opcode = (w >> 2) & 0x1F;
         let rd = ((w >> 7) & 0x1F) as u8;
@@ -1353,8 +1363,8 @@ impl Compiler {
             OP_OP_32 => self.compile_op_32(rd, rs1, rs2, f3, f7, w, pc),
             OP_LUI => self.compile_lui(rd, w, pc, rest),
             OP_AUIPC => self.compile_auipc(rd, w, pc),
-            OP_JAL => self.compile_jal(rd, w, pc),
-            OP_JALR if f3 == 0 => self.compile_jalr(rd, rs1, w, pc),
+            OP_JAL => self.compile_jal(rd, w, pc, inst_len),
+            OP_JALR if f3 == 0 => self.compile_jalr(rd, rs1, w, pc, inst_len),
             OP_BRANCH => self.compile_branch(rs1, rs2, f3, w, pc),
             OP_CUSTOM_0 => self.compile_custom_0(rd, rs1, f3, w, pc),
             OP_MISC_MEM => {
@@ -1390,7 +1400,9 @@ impl Compiler {
     fn compile_rvc(&mut self, h: u16, pc: u32, rest: &[u8]) -> (bool, bool, usize) {
         use javm_exec::gas_cost::*;
         match expand_rvc(h) {
-            Some(w) => self.compile_rv4(w, pc, rest),
+            // RVC instructions are 2 bytes — pass inst_len = 2 so a
+            // `c.jalr` writes the correct return address (`pc + 2`).
+            Some(w) => self.compile_rv4(w, pc, 2, rest),
             None => {
                 self.rv_emit_panic_at(pc);
                 self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
@@ -2111,10 +2123,10 @@ impl Compiler {
         (term, false, 0)
     }
 
-    fn compile_jal(&mut self, rd: u8, w: u32, pc: u32) -> (bool, bool, usize) {
+    fn compile_jal(&mut self, rd: u8, w: u32, pc: u32, inst_len: u32) -> (bool, bool, usize) {
         use javm_exec::gas_cost::*;
         let imm = imm_j(w);
-        let next_pc = pc + 4;
+        let next_pc = pc + inst_len;
         self.rv_jal(rd, imm, pc, next_pc);
         let term = self.feed_gas_rv(RV_KIND_JAL, 0, 0, rd);
         (term, false, 0)
@@ -2130,10 +2142,17 @@ impl Compiler {
         (term, false, 0)
     }
 
-    fn compile_jalr(&mut self, rd: u8, rs1: u8, w: u32, pc: u32) -> (bool, bool, usize) {
+    fn compile_jalr(
+        &mut self,
+        rd: u8,
+        rs1: u8,
+        w: u32,
+        pc: u32,
+        inst_len: u32,
+    ) -> (bool, bool, usize) {
         use javm_exec::gas_cost::*;
         let imm = imm_i(w);
-        let next_pc = pc + 4;
+        let next_pc = pc + inst_len;
         self.rv_jalr(rd, rs1, imm, pc, next_pc);
         // src = rs1 (target); rd not tracked (terminator).
         let term = self.feed_gas_rv(RV_KIND_JALR, rs1, 0, 0);
@@ -2355,10 +2374,7 @@ impl Compiler {
     /// value is a guest VA, sign-extended 32→64 like `lui`.
     fn rv_auipc(&mut self, rd: u8, imm: i32, pc: u32) {
         if let Some(d) = self.rv_dst(rd, pc) {
-            let va = self
-                .code_base
-                .wrapping_add(pc)
-                .wrapping_add(imm as u32);
+            let va = self.code_base.wrapping_add(pc).wrapping_add(imm as u32);
             self.asm.mov_ri64(d, va as i32 as i64 as u64);
             self.invalidate_reg(rv_slot(rd).unwrap());
         }
@@ -3403,8 +3419,11 @@ impl Compiler {
             return;
         }
         if rd != 0 {
+            // The link register holds a guest VA (code_base + offset),
+            // matching jalr's return-address contract and the interp.
             let slot = rv_slot(rd).unwrap();
-            self.asm.mov_ri64(REG_MAP[slot], next_pc as u64);
+            self.asm
+                .mov_ri64(REG_MAP[slot], self.code_base.wrapping_add(next_pc) as u64);
             self.invalidate_reg(slot);
         }
         let target = (pc as i64).wrapping_add(imm as i64) as u32;

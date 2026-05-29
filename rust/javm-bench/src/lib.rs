@@ -25,7 +25,7 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use javm_cap::NUM_REGS;
-use javm_cap::image::{Image, PinnedCap};
+use javm_cap::image::{Image, MappingSource, PinnedCap};
 use javm_cap::slot::SlotIdx;
 use javm_cap::{Cap, CapHash};
 use nub::{InvocationResult, Nub};
@@ -295,12 +295,18 @@ fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
     let mut overlays: Vec<(u32, Vec<u8>)> = Vec::new();
 
     for mapping in &image.memory_mappings {
+        // Code regions are RO direct-mapped at CODE_BASE by the runtime,
+        // not copied into the flat RW buffer — skip them here.
+        let target = match &mapping.source {
+            MappingSource::Slot(path) => path.target(),
+            MappingSource::Code(_) => continue,
+        };
+
         let end = (mapping.start + mapping.size) as u32;
         if end > mem_size {
             mem_size = end;
         }
 
-        let target = mapping.source.target();
         if let Some(PinnedCap::Data { content, .. }) = image.pinned_slots.get(&target) {
             if !content.is_empty() {
                 overlays.push((mapping.start as u32, content.clone()));

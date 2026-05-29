@@ -1,17 +1,21 @@
 use jar_kernel::abi;
 use jar_kernel::genesis::genesis;
-use javm_cap::image::Image;
+use javm_cap::image::{CodeRegion, Image, MappingSource, MemoryMapping};
 use javm_cap::{Cap, CapHashOrRef};
 use std::collections::BTreeMap;
 
 fn empty_chain_image() -> Image {
     Image {
         // PVM2 `ecalli 0` (HALT): custom-0 opcode 0b00010_11, funct3 0b010.
-        code: 0x0000_200Bu32.to_le_bytes().to_vec(),
-        jump_table: Vec::new(),
-        jump_table_offsets: vec![0, 0],
+        codes: vec![CodeRegion {
+            code: 0x0000_200Bu32.to_le_bytes().to_vec(),
+        }],
         endpoints: BTreeMap::new(),
-        memory_mappings: Vec::new(),
+        memory_mappings: vec![MemoryMapping {
+            start: 0x4000_0000,
+            size: 4096,
+            source: MappingSource::Code(0),
+        }],
         gas_slots: vec![abi::BARE_GAS_SLOT],
         quota_slots: vec![abi::BARE_QUOTA_SLOT],
         pinned_slots: BTreeMap::new(),

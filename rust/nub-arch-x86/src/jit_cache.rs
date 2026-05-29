@@ -1,16 +1,18 @@
 //! Per-Image JIT code cache + page-aligned arena.
 //!
-//! Each Image gets one [`PageBuf`] arena containing five regions
+//! Each Image gets one [`PageBuf`] arena containing four regions
 //! laid out contiguously, each starting on a page boundary:
 //!
 //! ```text
 //!   arena base (page-aligned)
 //!     + bb_offset       : BB (bitmask)      RO
-//!     + jt_offset       : JT (jump table)   RO
 //!     + dispatch_offset : DISPATCH table    RO
 //!     + jit_offset      : JIT native code   RX
 //!     + tramp_offset    : trampoline (26B)  RX
 //! ```
+//!
+//! `jalr` targets are validated against the BB (basic-block-start) set
+//! directly — there is no separate jump table.
 //!
 //! The arena lives for the cache entry's lifetime and is mapped into
 //! every Instance's page table that runs this Image — so we only pay
@@ -51,7 +53,8 @@ use crate::paging::{PAGE_SIZE, Perm, TemplatePT};
 /// The `trap_table` is kept outside the arena — `jit_pf_handler` reads
 /// it via static atomics and never needs it mapped into ring-3.
 pub struct CompiledImage {
-    /// Page-aligned buffer holding the five regions.
+    /// Page-aligned buffer holding the four regions
+    /// (BB | DISPATCH | JIT | TRAMP).
     ///
     /// Kept solely to own the backing pages — referenced by the
     /// template's leaf PTEs and freed when the cache entry is evicted.
@@ -59,7 +62,6 @@ pub struct CompiledImage {
     pub arena: PageBuf,
     /// Offsets into `arena` for each region (in bytes from arena base).
     pub bb_offset: usize,
-    pub jt_offset: usize,
     pub dispatch_offset: usize,
     pub jit_offset: usize,
     pub tramp_offset: usize,
@@ -137,8 +139,7 @@ pub fn evict_all() {
 pub fn get_or_compile(
     image_hash: &CapHash,
     code: &[u8],
-    jump_table: &[u32],
-    jump_table_offsets: &[u32],
+    code_base: u32,
     arena_base_va: u64,
     ctx_va: u64,
     mem_cycles: u8,
@@ -149,25 +150,24 @@ pub fn get_or_compile(
     if !map.contains_key(image_hash) {
         // Region sizing. valid_pc is `code.len()` bytes; the streaming
         // compile produces it inline so we don't allocate it twice.
+        // Layout: BB | DISPATCH | JIT | TRAMP (no jump table — jalr
+        // targets are validated against BB directly).
         let bb_size = page_round_up_min1(code.len());
-        let jt_bytes_used = core::mem::size_of_val(jump_table);
-        let jt_size = page_round_up_min1(jt_bytes_used);
         let dispatch_size = page_round_up_min1(code.len() * core::mem::size_of::<i32>());
 
         let bb_offset = 0usize;
-        let jt_offset = bb_offset + bb_size;
-        let dispatch_offset = jt_offset + jt_size;
+        let dispatch_offset = bb_offset + bb_size;
         let jit_offset = dispatch_offset + dispatch_size;
         let jit_va = arena_base_va + jit_offset as u64;
 
-        let compiler = Compiler::new(helpers, code.len(), jit_va, mem_cycles);
+        let compiler = Compiler::new(helpers, code.len(), jit_va, mem_cycles, code_base);
         let CompileResult {
             native_code,
             dispatch_entries,
             trap_table,
             exit_label_offset,
             valid_pc,
-        } = compiler.compile(code, jump_table_offsets);
+        } = compiler.compile(code);
 
         let jit_size = page_round_up_min1(native_code.len());
         let tramp_offset = jit_offset + jit_size;
@@ -183,15 +183,6 @@ pub fn get_or_compile(
         // SAFETY: bb_ptr valid for valid_pc.len() bytes.
         let bb_bytes = unsafe { core::slice::from_raw_parts(bb_ptr, valid_pc.len()) };
         buf[bb_offset..bb_offset + valid_pc.len()].copy_from_slice(bb_bytes);
-
-        // JT region: copy per-function br_table sub-tables (concatenated
-        // PVM2 PCs, sub-table boundaries in `jump_table_offsets`).
-        if !jump_table.is_empty() {
-            let jt_ptr = jump_table.as_ptr() as *const u8;
-            // SAFETY: jt_ptr valid for jt_bytes_used bytes.
-            let jt_slice = unsafe { core::slice::from_raw_parts(jt_ptr, jt_bytes_used) };
-            buf[jt_offset..jt_offset + jt_bytes_used].copy_from_slice(jt_slice);
-        }
 
         // DISPATCH region — sparse write (arena is page-zero).
         for &(pvm_pc, off) in &dispatch_entries {
@@ -242,7 +233,6 @@ pub fn get_or_compile(
             CompiledImage {
                 arena,
                 bb_offset,
-                jt_offset,
                 dispatch_offset,
                 jit_offset,
                 tramp_offset,

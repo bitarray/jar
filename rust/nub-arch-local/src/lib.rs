@@ -118,7 +118,12 @@ pub fn run_instance(
         .mappings
         .iter()
         .find(|m| m.source_kind == MAP_SRC_CODE)
-        .map(|m| (m.start as u32, image.codes[m.code_index as usize].code.as_slice()))
+        .map(|m| {
+            (
+                m.start as u32,
+                image.codes[m.code_index as usize].code.as_slice(),
+            )
+        })
         .expect("image has no executable code mapping");
 
     let predecode = predecode(code_bytes);

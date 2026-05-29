@@ -1695,7 +1695,14 @@ mod tests {
         let bytes = 0x8082u16.to_le_bytes();
         assert_eq!(
             decode(&bytes),
-            Some((Inst::Jalr { rd: 0, rs1: 1, imm: 0 }, 2))
+            Some((
+                Inst::Jalr {
+                    rd: 0,
+                    rs1: 1,
+                    imm: 0
+                },
+                2
+            ))
         );
     }
 
@@ -1706,7 +1713,14 @@ mod tests {
         // rs1=0) stays Reserved.
         assert_eq!(
             decode(&0x9082u16.to_le_bytes()),
-            Some((Inst::Jalr { rd: 1, rs1: 1, imm: 0 }, 2))
+            Some((
+                Inst::Jalr {
+                    rd: 1,
+                    rs1: 1,
+                    imm: 0
+                },
+                2
+            ))
         );
         assert!(matches!(
             decode(&0x9002u16.to_le_bytes()).unwrap().0,

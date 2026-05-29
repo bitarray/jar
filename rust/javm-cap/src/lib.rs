@@ -46,8 +46,8 @@ pub use cap::{Cap, CapHash, CapKind, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS, 
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash};
 pub use image::{
-    CodeRegion, EndpointDef as ImageEndpointDef, Image, InitialDataCap,
-    MappingSource, MemoryMapping as ImageMemoryMapping, PinnedCap, chain_extend, chain_genesis,
+    CodeRegion, EndpointDef as ImageEndpointDef, Image, InitialDataCap, MappingSource,
+    MemoryMapping as ImageMemoryMapping, PinnedCap, chain_extend, chain_genesis,
     image_content_hash,
 };
 pub use slot::{SlotIdx, SlotPath};

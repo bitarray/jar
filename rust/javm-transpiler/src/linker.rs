@@ -514,12 +514,7 @@ fn expect_auipc(code: &[u8], off: usize, v: u64) -> Result<(), TranspileError> {
 /// Fold a *data* `auipc rd, hi20` at `off` into `lui rd, hi` loading the
 /// absolute 4 KiB-aligned base of `eff` (the paired lo12 supplies the
 /// rest). The +0x800 carry compensates the lo12's sign extension.
-fn fold_auipc_to_lui(
-    code: &mut [u8],
-    off: usize,
-    v: u64,
-    eff: u32,
-) -> Result<(), TranspileError> {
+fn fold_auipc_to_lui(code: &mut [u8], off: usize, v: u64, eff: u32) -> Result<(), TranspileError> {
     if off + 4 > code.len() {
         return Err(TranspileError::InvalidSection(format!(
             "link_elf: AUIPC reloc at vaddr {v:#x} truncated by section end"
