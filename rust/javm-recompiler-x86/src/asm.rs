@@ -127,6 +127,33 @@ pub enum Cc {
     G = 15,  // Greater (signed >)
 }
 
+impl Cc {
+    /// The inverse condition — taken exactly when `self` is not. (x86
+    /// encodes this as flipping the low bit of the condition code.) Used
+    /// to lower a conditional branch to a fall-through-on-not-taken
+    /// shape: `jcc.invert() skip; <taken body>; skip:`.
+    pub fn invert(self) -> Cc {
+        match self {
+            Cc::O => Cc::NO,
+            Cc::NO => Cc::O,
+            Cc::B => Cc::AE,
+            Cc::AE => Cc::B,
+            Cc::E => Cc::NE,
+            Cc::NE => Cc::E,
+            Cc::BE => Cc::A,
+            Cc::A => Cc::BE,
+            Cc::S => Cc::NS,
+            Cc::NS => Cc::S,
+            Cc::P => Cc::NP,
+            Cc::NP => Cc::P,
+            Cc::L => Cc::GE,
+            Cc::GE => Cc::L,
+            Cc::LE => Cc::G,
+            Cc::G => Cc::LE,
+        }
+    }
+}
+
 /// Label identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Label(pub u32);

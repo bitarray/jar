@@ -422,11 +422,21 @@ impl Compiler {
             self.emit_exit(EXIT_PANIC, 0);
             return;
         }
+        // Cross-page target → indirect dispatch through the table: its
+        // native code lives in a different page-window, and under lazy
+        // compilation the page may not be compiled yet. Same-page →
+        // direct rel32 jump to the bound label.
+        if !same_page(target, pc) {
+            self.emit_dispatch_static(target);
+            return;
+        }
         let label = self.label_for_pc(target);
         self.asm.jmp_label(label);
     }
 
-    /// Emit a dynamic jump (through jump table).
+    /// Emit a conditional branch. Same-page target → direct `jcc` to the
+    /// bound label. Cross-page target → indirect dispatch on the taken
+    /// path (lowered as `jcc.invert() skip; <dispatch>; skip:`).
     pub(crate) fn emit_branch_reg(
         &mut self,
         a: Reg,
@@ -443,8 +453,42 @@ impl Compiler {
             return;
         }
         self.asm.cmp_rr(a, b);
+        if !same_page(target, pc) {
+            // Not taken → skip the dispatch; taken → fall into it.
+            let skip = self.asm.new_label();
+            self.asm.jcc_label(cc.invert(), skip);
+            self.emit_dispatch_static(target);
+            self.asm.bind_label(skip);
+            return;
+        }
         let label = self.label_for_pc(target);
         self.asm.jcc_label(cc, label);
+    }
+
+    /// Indirect-dispatch tail: with `SCRATCH` holding a validated
+    /// code-region byte offset (a gas-block start), jump to its native
+    /// code at `ctx.code_base + dispatch_table[offset]`. Shared by `jalr`
+    /// and the static cross-page dispatch.
+    pub(crate) fn emit_dispatch_indirect_tail(&mut self) {
+        self.asm.push(Reg::RAX);
+        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_DISPATCH_TABLE);
+        self.asm.movsxd_load_sib4(Reg::RAX, Reg::RAX, SCRATCH);
+        self.asm.add_r64_mem_rip_rel(Reg::RAX, CTX_CODE_BASE);
+        self.asm.mov_rr(SCRATCH, Reg::RAX);
+        self.asm.pop(Reg::RAX);
+        self.asm.jmp_reg(SCRATCH);
+    }
+
+    /// Dispatch to a compile-time-known, already-validated block-start
+    /// `offset` (a cross-page branch / jal target, or a page-boundary
+    /// fall-through). Needs no bounds or bb-start check — unlike `jalr`,
+    /// the target is a static block start by construction. Records the
+    /// offset as the paused PC (fault attribution + the lazy compile-page
+    /// stub reads it to know which page to compile), then dispatches.
+    pub(crate) fn emit_dispatch_static(&mut self, offset: u32) {
+        self.asm.mov_store32_rip_rel_imm(CTX_PC, offset as i32);
+        self.asm.mov_ri32(SCRATCH, offset);
+        self.emit_dispatch_indirect_tail();
     }
 
     /// Emit a shift by register value using CL.
@@ -1117,6 +1161,15 @@ fn rv_slot(x: u8) -> Option<usize> {
         5..=15 => Some((x as usize) - 3),
         _ => None,
     }
+}
+
+/// Two code-region byte offsets lie in the same 4 KiB page. A
+/// cross-page control transfer can't use a direct rel32 to a label in
+/// another page-window (under lazy compilation that page may not be
+/// compiled yet) — it dispatches indirectly through the table instead.
+#[inline]
+fn same_page(a: u32, b: u32) -> bool {
+    a / javm_exec::PAGE_SIZE == b / javm_exec::PAGE_SIZE
 }
 
 /// True for x3 and x4 — registers that PVM2 reserves and the transpiler
@@ -3451,13 +3504,7 @@ impl Compiler {
         self.asm.jcc_label(Cc::E, self.panic_label);
 
         // native = code_base_native + dispatch_table[offset]; jmp.
-        self.asm.push(Reg::RAX);
-        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_DISPATCH_TABLE);
-        self.asm.movsxd_load_sib4(Reg::RAX, Reg::RAX, SCRATCH);
-        self.asm.add_r64_mem_rip_rel(Reg::RAX, CTX_CODE_BASE);
-        self.asm.mov_rr(SCRATCH, Reg::RAX);
-        self.asm.pop(Reg::RAX);
-        self.asm.jmp_reg(SCRATCH);
+        self.emit_dispatch_indirect_tail();
     }
 
     fn rv_branch(&mut self, rs1: u8, rs2: u8, imm: i32, cc: Cc, pc: u32, next_pc: u32) {
