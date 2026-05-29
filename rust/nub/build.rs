@@ -43,7 +43,7 @@ fn main() {
     // so register their src trees here explicitly. Without this, changes
     // to those layers don't trigger a guest blob rebuild and the cached
     // blob goes stale (e.g. gas-cost tweaks in javm-exec, or the
-    // page-aligned `CodeRegionCap`/`DataContent` clone in javm-cap that
+    // page-aligned `ImageCap.code`/`DataContent` clone in javm-cap that
     // the kernel direct-maps, wouldn't appear in the blob).
     println!("cargo:rerun-if-changed=../javm-recompiler-x86/src");
     println!("cargo:rerun-if-changed=../javm-recompiler-x86/Cargo.toml");

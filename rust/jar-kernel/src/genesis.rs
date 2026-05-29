@@ -287,18 +287,15 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
 /// Returns `(mem_size, overlays)` where `mem_size = max(start+size)`
 /// over all mappings.
 pub(crate) fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
-    use javm_cap::image::{MappingSource, PinnedCap};
+    use javm_cap::image::PinnedCap;
     let mut mem_size: u32 = 0;
     let mut overlays: Vec<(u32, Vec<u8>)> = Vec::new();
 
+    // `memory_mappings` describes data/slot regions only; code is
+    // RO-mapped separately by the runtime (a direct-map at CODE_BASE),
+    // so it neither contributes an overlay nor extends mem_size.
     for mapping in &image.memory_mappings {
-        // Code regions are RO-mapped separately by the runtime (a
-        // direct-map at CODE_BASE), not copied into the flat RW buffer —
-        // so they neither contribute an overlay nor extend mem_size.
-        let target = match &mapping.source {
-            MappingSource::Slot(path) => path.target(),
-            MappingSource::Code(_) => continue,
-        };
+        let target = mapping.source.target();
 
         let end = (mapping.start + mapping.size) as u32;
         if end > mem_size {
@@ -323,12 +320,11 @@ pub(crate) fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
 /// issued unit caps. The image is never actually invoked — kernel
 /// caps short-circuit at the host-call layer.
 fn placeholder_kernel_image() -> Image {
-    use javm_cap::image::CodeRegion;
     use std::collections::BTreeMap;
     Image {
-        // Single TRAP byte. No code mapping: kernel caps short-circuit
-        // at the host-call layer and this image is never invoked.
-        codes: vec![CodeRegion { code: vec![0u8] }],
+        // Single TRAP byte. Never actually invoked: kernel caps
+        // short-circuit at the host-call layer.
+        code: vec![0u8],
         endpoints: BTreeMap::new(),
         memory_mappings: Vec::new(),
         gas_slots: Vec::new(),

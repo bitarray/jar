@@ -240,7 +240,7 @@ fn rs1_of(inst: &Inst) -> Option<u8> {
 
 fn profile_one(name: &str, blob: &[u8]) {
     let image = Image::from_ssz_bytes(blob).expect("decode Image");
-    let code = &image.codes[0].code[..];
+    let code = &image.code[..];
 
     let mut single: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut total = 0usize;

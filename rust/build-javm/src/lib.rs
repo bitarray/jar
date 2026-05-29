@@ -21,7 +21,7 @@ fn watch_transpiler_sources() {
 
 /// Build a PVM2 blob from a service crate. The guest is built for the
 /// RV+C+Zbb+Zba+Zbs+Zicond target and the ELF is linked via
-/// [`javm_transpiler::linker::link_elf`] — `Image.codes[0]` holds raw
+/// [`javm_transpiler::linker::link_elf`] — `Image::code` holds raw
 /// RV+C+custom-0 bytes consumed directly by the recompiler / interpreter.
 pub fn build(manifest_dir: &str, bin_name: &str) -> PathBuf {
     watch_transpiler_sources();

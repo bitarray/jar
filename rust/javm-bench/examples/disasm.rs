@@ -22,6 +22,6 @@ fn main() {
     let out = std::env::args()
         .nth(2)
         .unwrap_or_else(|| format!("/tmp/pvm2_{}.bin", which));
-    std::fs::write(&out, &img.codes[0].code).unwrap();
-    println!("wrote {} bytes to {}", img.codes[0].code.len(), out);
+    std::fs::write(&out, &img.code).unwrap();
+    println!("wrote {} bytes to {}", img.code.len(), out);
 }

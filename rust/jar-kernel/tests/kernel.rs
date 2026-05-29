@@ -1,7 +1,7 @@
 use jar_kernel::abi;
 use jar_kernel::apply::{Block, Event};
 use jar_kernel::kernel::Kernel;
-use javm_cap::image::{CodeRegion, EndpointDef, Image, MappingSource, MemoryMapping};
+use javm_cap::image::{EndpointDef, Image};
 use std::collections::BTreeMap;
 
 fn minimal_chain_image() -> Image {
@@ -19,15 +19,10 @@ fn minimal_chain_image() -> Image {
         },
     );
     Image {
-        codes: vec![CodeRegion {
-            code: 0x0000_200Bu32.to_le_bytes().to_vec(),
-        }],
+        code: 0x0000_200Bu32.to_le_bytes().to_vec(),
         endpoints,
-        memory_mappings: vec![MemoryMapping {
-            start: 0x4000_0000,
-            size: 4096,
-            source: MappingSource::Code(0),
-        }],
+        // Code is mapped at the fixed CODE_BASE; no data mappings.
+        memory_mappings: Vec::new(),
         gas_slots: vec![abi::BARE_GAS_SLOT],
         quota_slots: vec![abi::BARE_QUOTA_SLOT],
         pinned_slots: BTreeMap::new(),

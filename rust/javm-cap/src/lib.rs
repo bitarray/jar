@@ -31,14 +31,14 @@ pub mod cap;
 pub mod error;
 pub mod hash;
 pub mod image;
+pub mod layout;
 pub mod slot;
 
 pub use cache::{CacheDirectory, CacheError, CapHasRefError, CapHashOrRef, CapRef};
 pub use cap::cnode::{CNodeCap, CNodeSlotEntry};
 pub use cap::data::{DataCap, DataContent, PAGE_SIZE};
 pub use cap::image::{
-    CodeRegionCap, EndpointDef, ImageCap, ImageConvertError, ImageSlotEntry, MAP_SRC_CODE,
-    MAP_SRC_SLOT, MemoryMapping, image_cap,
+    EndpointDef, ImageCap, ImageConvertError, ImageSlotEntry, MemoryMapping, image_cap,
 };
 pub use cap::instance::{InstanceCap, RwOverlay};
 pub use cap::page::{PageBytes, PageRef, PageSlot};
@@ -46,8 +46,7 @@ pub use cap::{Cap, CapHash, CapKind, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS, 
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash};
 pub use image::{
-    CodeRegion, EndpointDef as ImageEndpointDef, Image, InitialDataCap, MappingSource,
-    MemoryMapping as ImageMemoryMapping, PinnedCap, chain_extend, chain_genesis,
-    image_content_hash,
+    EndpointDef as ImageEndpointDef, Image, InitialDataCap, MemoryMapping as ImageMemoryMapping,
+    PinnedCap, chain_extend, chain_genesis, image_content_hash,
 };
 pub use slot::{SlotIdx, SlotPath};

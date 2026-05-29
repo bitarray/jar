@@ -1,4 +1,4 @@
-use javm_cap::image::{CodeRegion, EndpointDef, MappingSource, MemoryMapping};
+use javm_cap::image::{EndpointDef, MemoryMapping};
 use javm_cap::{
     Blake2b256, Image, InitialDataCap, PinnedCap, SlotIdx, SlotPath, chain_extend, chain_genesis,
     image_content_hash,
@@ -19,9 +19,7 @@ fn empty_image_hashes_deterministically() {
 #[test]
 fn image_ssz_roundtrip() {
     let mut img = Image::empty();
-    img.codes = vec![CodeRegion {
-        code: b"sample code".to_vec(),
-    }];
+    img.code = b"sample code".to_vec();
     img.endpoints.insert(
         0,
         EndpointDef {
@@ -45,12 +43,12 @@ fn image_ssz_roundtrip() {
     img.memory_mappings.push(MemoryMapping {
         start: 0x1000,
         size: 0x4000,
-        source: MappingSource::Slot(SlotPath::root(SlotIdx(65))),
+        source: SlotPath::root(SlotIdx(65)),
     });
     img.memory_mappings.push(MemoryMapping {
         start: 0x5000,
         size: 0x2000,
-        source: MappingSource::Slot(SlotPath::root(SlotIdx(3))),
+        source: SlotPath::root(SlotIdx(3)),
     });
     img.gas_slots = vec![SlotIdx(7)];
     img.quota_slots = vec![SlotIdx(8)];
@@ -78,13 +76,9 @@ fn image_ssz_roundtrip() {
 #[test]
 fn different_code_different_hash() {
     let mut a = Image::empty();
-    a.codes = vec![CodeRegion {
-        code: b"AAAA".to_vec(),
-    }];
+    a.code = b"AAAA".to_vec();
     let mut b = Image::empty();
-    b.codes = vec![CodeRegion {
-        code: b"BBBB".to_vec(),
-    }];
+    b.code = b"BBBB".to_vec();
     assert_ne!(image_content_hash(&a), image_content_hash(&b));
 }
 
@@ -154,15 +148,11 @@ fn chain_genesis_equals_content_hash() {
 fn chain_extend_changes_with_new_image() {
     let img_a = Image::empty();
     let mut img_b = Image::empty();
-    img_b.codes = vec![CodeRegion {
-        code: b"B".to_vec(),
-    }];
+    img_b.code = b"B".to_vec();
     let prev = chain_genesis::<H>(&img_a);
     let extended_b = chain_extend::<H>(&prev, &img_b);
     let mut img_c = Image::empty();
-    img_c.codes = vec![CodeRegion {
-        code: b"C".to_vec(),
-    }];
+    img_c.code = b"C".to_vec();
     let extended_c = chain_extend::<H>(&prev, &img_c);
     assert_ne!(extended_b, extended_c);
 }
@@ -174,13 +164,9 @@ fn chain_extend_is_associative_under_sequence() {
     // gives different chains (as expected — chain order matters).
     let img_a = Image::empty();
     let mut img_b = Image::empty();
-    img_b.codes = vec![CodeRegion {
-        code: b"B".to_vec(),
-    }];
+    img_b.code = b"B".to_vec();
     let mut img_c = Image::empty();
-    img_c.codes = vec![CodeRegion {
-        code: b"C".to_vec(),
-    }];
+    img_c.code = b"C".to_vec();
 
     let chain_abc = {
         let g = chain_genesis::<H>(&img_a);

@@ -29,17 +29,13 @@ pub const PVM_PAGE_SIZE: u32 = 4096;
 
 /// Guest virtual address where the code region is mapped read-only.
 ///
-/// Data regions (stack/ro/rw/heap) occupy the low address space from
-/// page 0 upward (see [`ProgramLayout`]). Code lives at a separate,
-/// high base so that `PC = CODE_BASE + byte_offset` is a real low-4 GiB
-/// virtual address — `auipc`/`jalr` resolve natively against it, and a
-/// guest can read its own bytes (PIC AUIPC+load). 1 GiB sits far above
-/// any plausible data extent (keeping the high bit clear so a 32-bit
-/// `ra` spill round-trips identically under `lw`/`lwu`) while leaving
-/// 3 GiB of headroom below CTX (mapped at 4 GiB). The linker asserts
+/// The canonical definition is the PVM2 ABI constant
+/// [`javm_cap::layout::CODE_BASE`] (re-exported here for transpiler
+/// call sites). Data regions (stack/ro/rw/heap) occupy the low address
+/// space from page 0 upward (see [`ProgramLayout`]); the linker asserts
 /// the data layout stays below `CODE_BASE` and `CODE_BASE + code_len`
 /// stays within the 4 GiB guest range.
-pub const CODE_BASE: u32 = 0x4000_0000;
+pub use javm_cap::layout::CODE_BASE;
 
 /// One DATA cap's layout: where it lives in the manifest and where it
 /// maps in guest memory.

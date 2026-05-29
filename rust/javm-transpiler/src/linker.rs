@@ -25,8 +25,8 @@
 //!    `ebreak`, no CSR / atomic / FP / custom-1 / privileged encodings
 //!    (see `~/docs/pvm-isa/05-pvm2-rv-diff.md`). `auipc`/`jalr` are
 //!    standard PVM2 instructions and are accepted.
-//! 6. **Emit Image** with one [`CodeRegion`] mapped read-only at
-//!    `CODE_BASE` via a [`MappingSource::Code`] mapping. The recompiler
+//! 6. **Emit Image** with the raw code bytes in [`Image::code`], mapped
+//!    read-only at the fixed `CODE_BASE` by the runtime. The recompiler
 //!    consumes the raw bytes directly.
 
 use crate::TranspileError;
@@ -37,9 +37,7 @@ use crate::layout::{
 };
 use javm_cap::SlotIdx;
 use javm_cap::abi::{BARE_GAS_SLOT, BARE_QUOTA_SLOT, BARE_YIELD_CATCHER_SLOT};
-use javm_cap::image::{
-    CodeRegion, EndpointDef, Image, InitialDataCap, MappingSource, MemoryMapping, PinnedCap,
-};
+use javm_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap};
 use javm_cap::slot::SlotPath;
 use std::collections::BTreeMap;
 
@@ -71,8 +69,8 @@ const NOP_BYTES: [u8; 4] = [0x13, 0x00, 0x00, 0x00];
 const CSR_ECALL_JAR: u32 = 0x800;
 const CSR_ECALLI: u32 = 0x801;
 
-/// Link an RV ELF into a PVM2 [`Image`]. The single [`CodeRegion`] holds
-/// raw RV+C+custom-0 bytes, mapped read-only at [`CODE_BASE`].
+/// Link an RV ELF into a PVM2 [`Image`]. [`Image::code`] holds the raw
+/// RV+C+custom-0 bytes, mapped read-only at [`CODE_BASE`] by the runtime.
 pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     let elf = parse_linked_elf(elf_data)?;
 
@@ -399,7 +397,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     memory_mappings.push(MemoryMapping {
         start: u64::from(layout.stack.base_page) * page_bytes,
         size: stack_size,
-        source: MappingSource::Slot(SlotPath::root(stack_slot)),
+        source: SlotPath::root(stack_slot),
     });
     initial_slots.insert(
         stack_slot,
@@ -415,7 +413,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
         memory_mappings.push(MemoryMapping {
             start: u64::from(ro.base_page) * page_bytes,
             size,
-            source: MappingSource::Slot(SlotPath::root(ro_slot)),
+            source: SlotPath::root(ro_slot),
         });
         pinned_slots.insert(
             ro_slot,
@@ -432,7 +430,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
         memory_mappings.push(MemoryMapping {
             start: u64::from(rw.base_page) * page_bytes,
             size,
-            source: MappingSource::Slot(SlotPath::root(rw_slot)),
+            source: SlotPath::root(rw_slot),
         });
         initial_slots.insert(
             rw_slot,
@@ -449,7 +447,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
         memory_mappings.push(MemoryMapping {
             start: u64::from(heap.base_page) * page_bytes,
             size,
-            source: MappingSource::Slot(SlotPath::root(heap_slot)),
+            source: SlotPath::root(heap_slot),
         });
         initial_slots.insert(
             heap_slot,
@@ -475,14 +473,12 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
             "link_elf: code at {code_base:#x}+{code_size:#x} exceeds the 4 GiB guest range"
         )));
     }
-    memory_mappings.push(MemoryMapping {
-        start: code_base,
-        size: code_size,
-        source: MappingSource::Code(0),
-    });
+    // Code is mapped RO at the fixed `CODE_BASE` by the runtime — not
+    // via a declarative mapping, so an untrusted Image cannot relocate
+    // it. `memory_mappings` describes data/slot regions only.
 
     Ok(Image {
-        codes: vec![CodeRegion { code }],
+        code,
         endpoints,
         memory_mappings,
         gas_slots: vec![BARE_GAS_SLOT],

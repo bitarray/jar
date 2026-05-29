@@ -11,7 +11,7 @@
 use javm_cap::cache::CapHashOrRef;
 use javm_cap::cap::data::{DataCap, DataContent};
 use javm_cap::cap::page::{PageBytes, PageSlot};
-use javm_cap::image::{CodeRegion, EndpointDef};
+use javm_cap::image::EndpointDef;
 use javm_cap::{CNodeCap, Cap, NUM_REGS, TypeCap, image::Image};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -53,9 +53,7 @@ fn rkyv_archive_roundtrip_data_cap() {
 #[test]
 fn image_cap_roundtrip_preserves_hash() {
     let mut img = Image::empty();
-    img.codes = vec![CodeRegion {
-        code: vec![0u8, 10u8, 42],
-    }];
+    img.code = vec![0u8, 10u8, 42];
     let mut endpoints = BTreeMap::new();
     endpoints.insert(
         0u8,

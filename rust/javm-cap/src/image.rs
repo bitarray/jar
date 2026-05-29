@@ -40,23 +40,22 @@ use ssz_derive::{Decode, Encode};
 /// read-only thereafter.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
 pub struct Image {
-    /// Code regions (raw RV+C+custom-0 bytes). Each region "takes
-    /// effect" only when referenced by a `MemoryMapping` whose
-    /// `source` is `MappingSource::Code(idx)`; the mapping's `start`
-    /// is the region's load address (CODE_BASE — PC = CODE_BASE +
-    /// byte-offset). Code is mapped RO into the guest address space
-    /// so the guest can read its own bytes (AUIPC+load PIC); the JIT
-    /// executes the native translation.
-    pub codes: Vec<CodeRegion>,
+    /// The (single) code region: raw RV+C+custom-0 bytes. Mapped RO at
+    /// the fixed protocol constant [`crate::layout::CODE_BASE`] (PC =
+    /// `CODE_BASE + byte_offset`) — the load address is *not* chosen by
+    /// the Image, so an untrusted Image cannot place code arbitrarily.
+    /// Code is mapped RO into the guest address space so the guest can
+    /// read its own bytes (AUIPC+load PIC); the JIT executes the native
+    /// translation. Empty for codeless images (kernel placeholders).
+    pub code: Vec<u8>,
     /// Endpoints addressable by `endpoint_idx` (u8). Sparse — only
     /// declared endpoints are present.
     pub endpoints: BTreeMap<u8, EndpointDef>,
-    /// Memory layout. Each entry maps either a `Cap::Data` (resolved
-    /// through a `MappingSource::Slot` path) or an inline code region
-    /// (`MappingSource::Code`) into the address space at `[start,
-    /// start + size)`. For slot sources, RO vs RW is derived from
-    /// whether the target slot appears in `pinned_slots`; code
-    /// sources are always RO.
+    /// Memory layout. Each entry maps a `Cap::Data` (resolved through
+    /// the `source` slot path) into the address space at `[start, start
+    /// + size)`. RO vs RW is derived from whether the target slot
+    /// appears in `pinned_slots`. Code is mapped separately at
+    /// [`crate::layout::CODE_BASE`] and is not described here.
     pub memory_mappings: Vec<MemoryMapping>,
     /// Cnode slots holding `Cap::Instance[Gas{meter_id}]`. Active
     /// gas debit comes from the first slot's meter; the rest are
@@ -94,37 +93,17 @@ pub struct EndpointDef {
     pub initial_regs: BTreeMap<u8, u64>,
 }
 
-/// One recompilable code region. Content lives inline in the Image
-/// (content-hash stable via `hash_tree_root`, exactly like the old
-/// `Image.code`).
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
-pub struct CodeRegion {
-    /// Raw RV+C+custom-0 bytes (validated at construction).
-    pub code: Vec<u8>,
-}
-
-/// Source of a [`MemoryMapping`]: either a cnode-resolved cap (Data,
-/// RO or RW) or an inline code region (always RO + recompiled).
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
-pub enum MappingSource {
-    #[ssz(selector = 0)]
-    /// Resolve a `Cap::Data` through this cnode path.
-    Slot(crate::slot::SlotPath),
-    #[ssz(selector = 1)]
-    /// Map `Image.codes[idx]` RO at the mapping's `start`.
-    Code(u32),
-}
-
-/// One mapped region. The kernel resolves `source` at instance
-/// start and lays the bytes at `[start, start + size)` in the
-/// address space. For `Slot` sources, RO vs RW is derived from
-/// whether the target slot is in `Image.pinned_slots`; `Code`
-/// sources are always RO.
+/// One mapped region. The kernel resolves `source` (a cnode slot path
+/// to a `Cap::Data`) at instance start and lays the bytes at `[start,
+/// start + size)` in the address space. RO vs RW is derived from
+/// whether the target slot is in `Image.pinned_slots`.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
 pub struct MemoryMapping {
     pub start: u64,
     pub size: u64,
-    pub source: MappingSource,
+    /// Cnode path resolving to the `Cap::Data` whose bytes back this
+    /// region.
+    pub source: crate::slot::SlotPath,
 }
 
 /// Pinned slot content. Only content-addressed cap kinds can be
@@ -165,7 +144,7 @@ impl Image {
     /// Useful for tests and as a starting point.
     pub fn empty() -> Self {
         Self {
-            codes: Vec::new(),
+            code: Vec::new(),
             endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
             gas_slots: Vec::new(),

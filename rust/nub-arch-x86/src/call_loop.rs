@@ -96,7 +96,6 @@ use alloc::vec::Vec;
 
 use javm_cap::cache::CapHashOrRef;
 use javm_cap::cap::Cap;
-use javm_cap::cap::image::MAP_SRC_CODE;
 use javm_cap::hash::{Blake2b256, Hash};
 use javm_cap::slot::SlotIdx;
 use javm_cap::{CapHash, NUM_REGS};
@@ -427,11 +426,11 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     let mut direct_maps: Vec<DirectMap> = Vec::with_capacity(img.mappings.len() + 1);
     let mut mem_size: u32 = 0;
 
-    // Executable code region: RO direct-map at its code base. The code
-    // lives in the Image's page-aligned `CodeRegionCap`, so it maps
+    // Executable code region: RO direct-map at the fixed CODE_BASE. The
+    // code lives in the Image's page-aligned `ImageCap.code`, so it maps
     // straight in like a pinned data cap — and is *excluded* from
-    // mem_size (the flat RW buffer): code sits high (CODE_BASE), well
-    // above the data layout, and must not inflate the per-call alloc.
+    // mem_size (the flat RW buffer): code sits at CODE_BASE, clear of
+    // the data layout, and must not inflate the per-call alloc.
     let (code_base, code_bytes) = img.code_mapping().ok_or(ERR_IMAGE_KIND)?;
     {
         let pa = paging::va_to_pa(code_bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?;
@@ -446,11 +445,9 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     // we feed to direct_maps stay valid until function return.
     let mut data_arcs: Vec<alloc::sync::Arc<Cap>> = Vec::new();
     for m in img.mappings.iter() {
-        // Code mappings are handled above and never extend the flat
+        // `img.mappings` describes data/slot regions only; code is
+        // direct-mapped above at CODE_BASE and never extends the flat
         // RW buffer.
-        if m.source_kind == MAP_SRC_CODE {
-            continue;
-        }
         let end = (m.start + m.size) as u32;
         if end > mem_size {
             mem_size = end;

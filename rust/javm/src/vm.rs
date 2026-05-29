@@ -667,20 +667,16 @@ impl<K: KernelAssist + std::fmt::Debug> std::fmt::Debug for Vm<K> {
 mod tests {
     use super::*;
     use crate::kernel_assist::InProcessKernelAssist;
-    use javm_cap::image::{CodeRegion, Image, MappingSource, MemoryMapping};
+    use javm_cap::image::Image;
     use javm_cap::{CacheDirectory, Cap, NUM_REGS};
     use std::collections::BTreeMap;
 
     fn empty_image_with_code(code: Vec<u8>) -> Image {
-        let size = (code.len() as u64).next_multiple_of(4096).max(4096);
         Image {
-            codes: vec![CodeRegion { code }],
+            code,
             endpoints: BTreeMap::new(),
-            memory_mappings: vec![MemoryMapping {
-                start: 0x4000_0000,
-                size,
-                source: MappingSource::Code(0),
-            }],
+            // Code is mapped at the fixed CODE_BASE; no data mappings.
+            memory_mappings: Vec::new(),
             gas_slots: Vec::new(),
             quota_slots: Vec::new(),
             pinned_slots: BTreeMap::new(),

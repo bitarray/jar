@@ -3,7 +3,7 @@
 //! typed API and check that `invoke_cached` returns the expected
 //! `HostCall(42)` result.
 
-use javm_cap::image::{CodeRegion, EndpointDef, Image, MappingSource, MemoryMapping};
+use javm_cap::image::{EndpointDef, Image};
 use javm_cap::{Cap, NUM_REGS};
 use nub::Nub;
 use std::collections::BTreeMap;
@@ -14,14 +14,8 @@ fn ecalli_42_image() -> Image {
     // PVM2 `ecalli 42` — custom-0 (opcode bits[6:2] = 0b00010), funct3 =
     // 0b010, rd = 0, rs1 = 0, imm = 42. As an I-type 32-bit word:
     //   (42 << 20) | (0b010 << 12) | (0b00010 << 2) | 0b11 = 0x02A0_200B
-    img.codes = vec![CodeRegion {
-        code: 0x02A0_200Bu32.to_le_bytes().to_vec(),
-    }];
-    img.memory_mappings.push(MemoryMapping {
-        start: 0x4000_0000,
-        size: 4096,
-        source: MappingSource::Code(0),
-    });
+    img.code = 0x02A0_200Bu32.to_le_bytes().to_vec();
+    // Code is mapped at the fixed CODE_BASE; no data mappings.
 
     let mut endpoints: BTreeMap<u8, EndpointDef> = BTreeMap::new();
     endpoints.insert(

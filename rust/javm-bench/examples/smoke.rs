@@ -99,7 +99,7 @@ mod imp {
         for w in WORKLOADS {
             eprintln!("=== {} ===", w.name);
             let img = Image::from_ssz_bytes(w.blob).expect("decode Image");
-            eprintln!("  code={}B", img.codes.first().map_or(0, |c| c.code.len()));
+            eprintln!("  code={}B", img.code.len());
 
             // Fresh Hyperlight sandbox per workload — pvm2_bench's
             // `reset_nub_hyperlight()` exists precisely because cap-publish

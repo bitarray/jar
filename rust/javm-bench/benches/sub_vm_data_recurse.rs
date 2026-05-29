@@ -26,7 +26,7 @@
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use javm_cap::image::{Image, MappingSource, PinnedCap};
+use javm_cap::image::{Image, PinnedCap};
 use javm_cap::slot::SlotIdx;
 use javm_cap::{CNodeCap, Cap, CapHash, CapHashOrRef, NUM_REGS};
 use nub::Nub;
@@ -100,12 +100,10 @@ fn build_and_publish(nub: &mut Nub) -> Built {
 
     let mut mem_size: u32 = 0;
     let mut overlays: Vec<(u32, Vec<u8>)> = Vec::new();
+    // Code is RO direct-mapped at CODE_BASE, not a flat-buffer overlay;
+    // `memory_mappings` lists data/slot regions only.
     for mapping in &image.memory_mappings {
-        // Code: RO direct-map at CODE_BASE, not a flat-buffer overlay.
-        let target = match &mapping.source {
-            MappingSource::Slot(path) => path.target(),
-            MappingSource::Code(_) => continue,
-        };
+        let target = mapping.source.target();
         let end = (mapping.start + mapping.size) as u32;
         if end > mem_size {
             mem_size = end;

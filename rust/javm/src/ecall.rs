@@ -1023,24 +1023,17 @@ mod tests {
     use super::*;
     use crate::callstack::{EntryStatus, InstanceEntry};
     use crate::kernel_assist::InProcessKernelAssist;
-    use javm_cap::image::{CodeRegion, Image, MappingSource, MemoryMapping};
+    use javm_cap::image::Image;
     use javm_cap::{CNodeCap, NUM_REGS};
     use javm_exec::{Access, GasCounter, Mem, PAGE_SIZE, Regs, interp::Program};
     use std::sync::Arc;
 
-    /// Minimal PVM2 test image: one code region mapped read-only at a
-    /// code base, no slots. Mirrors what the linker emits (a
-    /// `MappingSource::Code` mapping) so `ImageCap::code_mapping`
-    /// resolves it.
+    /// Minimal PVM2 test image: code bytes (mapped read-only at the
+    /// fixed `CODE_BASE` by the runtime), no slots. Mirrors what the
+    /// linker emits so `ImageCap::code_mapping` resolves it.
     fn pvm2_image(code: Vec<u8>) -> Image {
-        let size = (code.len() as u64).next_multiple_of(4096).max(4096);
         let mut img = Image::empty();
-        img.codes = vec![CodeRegion { code }];
-        img.memory_mappings.push(MemoryMapping {
-            start: 0x4000_0000,
-            size,
-            source: MappingSource::Code(0),
-        });
+        img.code = code;
         img
     }
 
