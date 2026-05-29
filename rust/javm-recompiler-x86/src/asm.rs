@@ -127,33 +127,6 @@ pub enum Cc {
     G = 15,  // Greater (signed >)
 }
 
-impl Cc {
-    /// The inverse condition — taken exactly when `self` is not. (x86
-    /// encodes this as flipping the low bit of the condition code.) Used
-    /// to lower a conditional branch to a fall-through-on-not-taken
-    /// shape: `jcc.invert() skip; <taken body>; skip:`.
-    pub fn invert(self) -> Cc {
-        match self {
-            Cc::O => Cc::NO,
-            Cc::NO => Cc::O,
-            Cc::B => Cc::AE,
-            Cc::AE => Cc::B,
-            Cc::E => Cc::NE,
-            Cc::NE => Cc::E,
-            Cc::BE => Cc::A,
-            Cc::A => Cc::BE,
-            Cc::S => Cc::NS,
-            Cc::NS => Cc::S,
-            Cc::P => Cc::NP,
-            Cc::NP => Cc::P,
-            Cc::L => Cc::GE,
-            Cc::GE => Cc::L,
-            Cc::LE => Cc::G,
-            Cc::G => Cc::LE,
-        }
-    }
-}
-
 /// Label identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Label(pub u32);
@@ -1915,15 +1888,7 @@ impl Assembler {
     }
 
     /// Resolve all label fixups in-place (works for both Vec and mmap buffers).
-    ///
-    /// Public so the lazy per-page compile path can resolve a page's
-    /// intra-page forward branches as soon as that page is emitted
-    /// (without consuming the buffer via [`finalize`](Self::finalize)).
-    /// Idempotent: re-resolving an already-resolved fixup recomputes the
-    /// same rel32, so repeated calls across pages are harmless. Every
-    /// referenced label must be bound by call time (cross-page targets go
-    /// through the dispatch table, never a label, so this always holds).
-    pub fn resolve_fixups(&mut self) {
+    fn resolve_fixups(&mut self) {
         for fixup in &self.fixups {
             let stored = self.labels[fixup.label.0 as usize];
             // All labels must be bound by finalization time.
@@ -1953,21 +1918,12 @@ impl Assembler {
         core::mem::take(code)
     }
 
-    /// All code bytes written so far (offsets `0..offset()`). Syncs the
-    /// Vec length to the write cursor first. Used by the lazy per-page
-    /// compile path to copy a freshly-emitted page's bytes into the
-    /// runtime arena (`&written()[start..end]`) without consuming the
-    /// buffer — the assembler keeps growing for the next page.
-    pub fn written(&mut self) -> &[u8] {
-        self.sync_len();
-        let CodeBuf::Vec(v) = &self.code_buf;
-        v.as_slice()
-    }
-
     /// Get a slice of the written code bytes (for tests). Syncs Vec len first.
     #[cfg(test)]
     pub fn code_bytes(&mut self) -> &[u8] {
-        self.written()
+        self.sync_len();
+        let CodeBuf::Vec(v) = &self.code_buf;
+        v.as_slice()
     }
 }
 

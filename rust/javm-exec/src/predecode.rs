@@ -9,18 +9,17 @@
 //!   offset where an instruction begins. Used at deblob for branch /
 //!   call target alignment checks (a static-target reaching a non-
 //!   instruction-start byte is a program error).
-//! - **Gas-block-start markers**: `{0} ∪ post-terminator PCs ∪ 4 KiB
-//!   page starts` (see Pass 2). All three are derived from the
-//!   instruction stream / PC — never trusted from linker metadata,
-//!   since the recompiler runs untrusted code. `jalr` targets are
-//!   validated against this set at runtime.
+//! - **Gas-block-start markers**: PC=0 plus every PC immediately
+//!   following a terminator. PVM2's pure-static-dispatch design lets us
+//!   tighten this to the strict post-terminator set (was: "every
+//!   instruction", a workaround for runtime JALR validation back when
+//!   PVM2 still had JALR).
 //!
 //! Per-block gas costs are computed by running the pipeline simulator
 //! in [`crate::gas_cost::rv_gas_cost_for_block`] once per basic block;
 //! the results are stored in [`Predecode::block_costs`].
 
 use crate::instruction::{Inst, decode};
-use crate::mem::PAGE_SIZE;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -93,52 +92,6 @@ pub fn predecode(code: &[u8]) -> Predecode {
 /// Used by callers that want to override the default L2-hit latency
 /// (e.g. for tier-specific gas modeling).
 pub fn predecode_rv_with_mem_cycles(code: &[u8], mem_cycles: u8) -> Predecode {
-    let (insts, valid_pc, decode_error_at) = decode_blocks(code);
-    // ---- Pass 3: per-block gas costs via pipeline simulation ---------
-    let block_costs = compute_block_costs(&insts, mem_cycles);
-    Predecode {
-        insts,
-        valid_pc,
-        block_costs,
-        decode_error_at,
-    }
-}
-
-/// Lightweight whole-blob gas-block-start scan for the lazy recompiler.
-///
-/// Returns the byte-indexed block-start bitmap (`bb[off] == 1` iff an
-/// instruction begins at `off` and that instruction starts a gas block)
-/// plus the first decode/layout error offset, if any. Same partition as
-/// [`predecode`] (both share [`decode_blocks`]) but skips the per-block
-/// gas-cost simulation — the recompiler recomputes per-block gas as it
-/// compiles each page.
-///
-/// Lazy per-page compilation needs the *whole-blob* block-start set up
-/// front: a `jalr`/branch in one page can target a block in a
-/// not-yet-compiled page, and that target must validate against the
-/// complete set (`bb[off] == 1`) before its page exists.
-pub fn bb_start_bitmap(code: &[u8]) -> (Vec<u8>, Option<u32>) {
-    let (insts, _valid_pc, decode_error_at) = decode_blocks(code);
-    let mut bb = vec![0u8; code.len()];
-    for ip in &insts {
-        if ip.is_gas_block_start {
-            bb[ip.pc as usize] = 1;
-        }
-    }
-    (bb, decode_error_at)
-}
-
-/// Shared front half of the predecode pipeline: decode every
-/// instruction, enforce invariant 10 (no instruction crosses a 4 KiB
-/// page boundary), and mark gas-block starts (invariant 11). Returns
-/// the decoded instruction array (with `is_gas_block_start` set), the
-/// byte-indexed instruction-start map, and the first decode/layout
-/// error offset, if any.
-///
-/// [`predecode`] (interp) and [`bb_start_bitmap`] (lazy recompiler)
-/// both build on this, so the two engines partition gas blocks
-/// identically by construction.
-fn decode_blocks(code: &[u8]) -> (Vec<RvPreDecodedInst>, Vec<bool>, Option<u32>) {
     let mut insts: Vec<RvPreDecodedInst> = Vec::with_capacity(code.len() / 4);
     let mut valid_pc: Vec<bool> = vec![false; code.len()];
     let mut decode_error_at: Option<u32> = None;
@@ -166,51 +119,41 @@ fn decode_blocks(code: &[u8]) -> (Vec<RvPreDecodedInst>, Vec<bool>, Option<u32>)
         pc = next_pc as usize;
     }
 
-    // ---- Invariant 10: no instruction crosses a 4 KiB page boundary --
+    // ---- Pass 2: mark gas-block starts (strict post-terminator) ------
     //
-    // A straddling instruction would let lazy per-page compilation split
-    // it across a compile boundary. The linker pads with `c.nop` to
-    // prevent this; reject a blob that violates it (defense — both
-    // engines trust the instruction stream, not an external layout
-    // guarantee). Only 4-byte instructions can straddle (RV+C is 2-byte
-    // aligned, pages are even).
-    if decode_error_at.is_none() {
-        for ip in &insts {
-            if ip.pc / PAGE_SIZE != (ip.next_pc - 1) / PAGE_SIZE {
-                decode_error_at = Some(ip.pc);
-                break;
-            }
-        }
+    // PVM2 has no runtime indirect dispatch (no JALR; calls go via
+    // `addi ra, x0, idx ; jal x0, callee`, returns via
+    // `br_table table_id, ra`). The set of legal gas-block-starts is:
+    //
+    //     {0} ∪ { pc | pc immediately follows a terminator instruction }
+    //
+    // The linker invariant (analogous to PVM's
+    // `ensure_branch_targets_are_block_starts`) guarantees every
+    // statically-reachable branch / br_table target lands in this set —
+    // it injects `Fallthrough` (a terminator no-op) before any target
+    // that isn't naturally post-terminator.
+    //
+    // OOG happens at the per-block gas check at the block start, so
+    // a paused PC is always in this set.
+    if !insts.is_empty() {
+        insts[0].is_gas_block_start = true;
     }
-
-    // ---- Pass 2: mark gas-block starts -------------------------------
-    //
-    // The set of legal gas-block-starts is
-    //
-    //     {0} ∪ { pc | pc follows a terminator } ∪ { pc | pc % 4 KiB == 0 }
-    //
-    // all derived purely from the instruction stream / PC, never trusted
-    // from linker metadata (the recompiler runs untrusted code). `jalr`
-    // targets are validated against this set at runtime.
-    //
-    //  - Post-terminator: the linker injects `Fallthrough` (a terminator
-    //    no-op) before any branch / jump / endpoint / code-pointer target
-    //    that isn't naturally post-terminator, so every reachable static
-    //    target is covered.
-    //  - Page starts: every 4 KiB page boundary partitions a gas block so
-    //    lazy per-page compilation enters each page at a dispatchable
-    //    block and both engines agree on the partition (invariant 11).
-    //
-    // OOG happens at the per-block gas check at the block start, so a
-    // paused PC is always in this set.
-    for i in 0..insts.len() {
-        let post_terminator = i > 0 && is_terminator(&insts[i - 1].inst);
-        if insts[i].pc.is_multiple_of(PAGE_SIZE) || post_terminator {
+    for i in 1..insts.len() {
+        let prev_is_terminator = is_terminator(&insts[i - 1].inst);
+        if prev_is_terminator {
             insts[i].is_gas_block_start = true;
         }
     }
 
-    (insts, valid_pc, decode_error_at)
+    // ---- Pass 3: per-block gas costs via pipeline simulation ---------
+    let block_costs = compute_block_costs(&insts, mem_cycles);
+
+    Predecode {
+        insts,
+        valid_pc,
+        block_costs,
+        decode_error_at,
+    }
 }
 
 /// Run the pipeline simulator once per basic block; write the
@@ -224,6 +167,33 @@ fn compute_block_costs(insts: &[RvPreDecodedInst], mem_cycles: u8) -> Vec<u32> {
         }
     }
     block_costs
+}
+
+/// Return the target byte offset of a statically-resolvable branch or
+/// jump. `None` for indirect jumps (`jalr`), non-control-flow ops, and
+/// other shapes.
+///
+/// Targets are computed as `pc + imm` (signed). For RV B-type and
+/// J-type, `imm` is in bytes. For RV+C, decompression has already
+/// converted to byte offsets so the same `pc + imm` rule applies.
+#[allow(dead_code)]
+fn static_target(ip: &RvPreDecodedInst) -> Option<usize> {
+    let pc = ip.pc as i64;
+    let off: i64 = match ip.inst {
+        Inst::Jal { imm, .. } => imm as i64,
+        Inst::Beq { imm, .. }
+        | Inst::Bne { imm, .. }
+        | Inst::Blt { imm, .. }
+        | Inst::Bge { imm, .. }
+        | Inst::Bltu { imm, .. }
+        | Inst::Bgeu { imm, .. } => imm as i64,
+        // br_table targets come from the Image's jump_table, not
+        // from an instruction-embedded immediate. They're listed
+        // separately by the linker for branch-target alignment.
+        _ => return None,
+    };
+    let t = pc + off;
+    if t < 0 { None } else { Some(t as usize) }
 }
 
 /// Block-terminating instructions: anything that *can* leave the

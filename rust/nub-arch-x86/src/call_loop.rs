@@ -109,9 +109,6 @@ use crate::state_cache::{CACHE, publish_transient_instance};
 const EXIT_HALT: u32 = 0;
 const EXIT_HOST_CALL: u32 = 4;
 const EXIT_ECALL: u32 = 6;
-/// Lazy compilation: a dispatch hit a block whose 4 KiB page isn't
-/// compiled yet (see `javm_recompiler_x86::codegen::EXIT_COMPILE_PAGE`).
-const EXIT_COMPILE_PAGE: u32 = 8;
 
 const OP_REPLY: u32 = 0;
 const OP_DERIVE_SPAWN: u32 = 18;
@@ -343,24 +340,6 @@ pub fn run_top(
                             gas_remaining: gas,
                         };
                     }
-                }
-            }
-            EXIT_COMPILE_PAGE => {
-                // A dispatch hit an uncompiled page. `info.pc` (already
-                // mirrored into `frame.pc` above) is the target code
-                // offset; compile its 4 KiB page, refresh the #PF trap
-                // view, and re-enter the SAME frame — no pop. The next
-                // loop iteration runs `run_one_entry` at `frame.pc`,
-                // whose prologue now dispatches to real compiled code.
-                // Gas + regs were flushed to ctx by the stub's exit and
-                // are restored verbatim on re-entry, so the bounce is
-                // transparent to the guest.
-                let frame = stack.last_mut().expect("non-empty");
-                let page = frame.pc as usize / paging::PAGE_SIZE;
-                let (tt_ptr, tt_len) =
-                    crate::jit_cache::compile_page_into_arena(&frame.image_hash, page)?;
-                if let Some(rt) = frame.runtime.as_mut() {
-                    rt.set_trap_table(tt_ptr, tt_len);
                 }
             }
             _ => {

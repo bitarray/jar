@@ -61,7 +61,7 @@ fn ed25519() {
         "ed25519",
         include_bytes!(env!("ED25519_BLOB")),
         0x1,
-        2_362_770,
+        2_360_437,
     );
 }
 
@@ -81,7 +81,7 @@ fn blake2b() {
         "blake2b",
         include_bytes!(env!("BLAKE2B_BLOB")),
         0xee1f_55f1,
-        62_504,
+        62_136,
     );
 }
 
@@ -91,7 +91,7 @@ fn ecrecover() {
         "ecrecover",
         include_bytes!(env!("ECRECOVER_BLOB")),
         0x1,
-        6_937_095,
+        6_810_020,
     );
 }
 
@@ -121,7 +121,7 @@ fn mini_verifier() {
         "mini_verifier",
         include_bytes!(env!("MINI_VERIFIER_BLOB")),
         0xf98f_c4ab,
-        5_960_515,
+        5_878_915,
     );
 }
 

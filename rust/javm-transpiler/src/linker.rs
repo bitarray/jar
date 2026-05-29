@@ -955,31 +955,6 @@ fn encode_custom0_fallthrough() -> u32 {
     (0b100 << 12) | OP_CUSTOM_0
 }
 
-/// Pad `new_code` with `c.nop` (2 bytes) so emitting the next `len`-byte
-/// instruction won't straddle a 4 KiB page boundary (PVM2 invariant 10:
-/// no instruction crosses a page boundary, so lazy per-page compilation
-/// can split the blob at page boundaries without splitting an
-/// instruction).
-///
-/// Only 4-byte instructions can straddle: RV+C is 2-byte aligned and a
-/// page is even, so a 2-byte instruction always fits within its page,
-/// and the only straddling offset for a 4-byte instruction is
-/// `PAGE - 2` — fixed by a single `c.nop` that pushes the instruction
-/// onto the boundary. Padding only ever lands an instruction *on* a
-/// page boundary, so it never demotes a branch target out of the
-/// block-start set (page starts are block starts; see the predecode
-/// pass).
-#[inline]
-fn pad_page_straddle(new_code: &mut Vec<u8>, len: usize) {
-    let page = PVM_PAGE_SIZE as usize;
-    if len == 4 && new_code.len() % page + len > page {
-        // c.nop = addi x0, x0, 0 = 0x0001.
-        while !new_code.len().is_multiple_of(page) {
-            new_code.extend_from_slice(&0x0001u16.to_le_bytes());
-        }
-    }
-}
-
 /// Decode J-type immediate (sign-extended 21-bit).
 fn imm_j(w: u32) -> i32 {
     let b20 = (w >> 31) & 1;
@@ -1016,11 +991,6 @@ fn encode_b_imm(opcode_and_regs: u32, imm: i32) -> u32 {
 /// JAL / branch target that isn't already preceded by a terminator
 /// instruction. After injection, all reachable static targets are
 /// guaranteed to be in the strict bb_starts set the predecode computes.
-///
-/// Also pads with `c.nop` so no instruction straddles a 4 KiB page
-/// boundary (PVM2 invariant 10), a precondition for lazy per-page
-/// compilation. Injection and padding both shift offsets; both are
-/// captured in the returned map.
 ///
 /// Mutates `code` in place. Returns `old_pc → new_pc` map so the
 /// caller can remap PC values stored elsewhere (endpoint entries,
@@ -1172,15 +1142,14 @@ fn align_branch_targets(
         }
     }
 
-    // ---- Pass 3: build new code with fallthrough injected + page pad ----
-    //
-    // We always rebuild (rather than fast-pathing the no-injection case
-    // to identity) because page-straddle padding may shift offsets even
-    // when no fallthrough injection is required. Both shifts compose
-    // into the single `offset_map`, which Pass 4 (immediate re-encode)
-    // and `fixup_code_pcrel` (kept AUIPC pairs) consume downstream.
-    // Over-reserve for injections + one straddle pad per page.
-    let new_len = n + needs_inject.len() * 4 + (n / PVM_PAGE_SIZE as usize + 1) * 2;
+    if needs_inject.is_empty() {
+        // No injections needed — old offsets are identity.
+        let identity: BTreeMap<usize, usize> = inst_starts.into_iter().map(|p| (p, p)).collect();
+        return Ok(identity);
+    }
+
+    // ---- Pass 3: build new code with fallthrough injected ----
+    let new_len = n + needs_inject.len() * 4;
     let mut new_code: Vec<u8> = Vec::with_capacity(new_len);
     // old_pc → new_pc (only for old instruction-start positions; mid-
     // instruction bytes don't get mapped).
@@ -1195,17 +1164,15 @@ fn align_branch_targets(
         // If any injection is scheduled at this old_pc, emit fallthrough first.
         while let Some(&&inject_pc) = next_inject_iter.peek() {
             if inject_pc == old_pc {
-                pad_page_straddle(&mut new_code, 4); // fallthrough is 4 bytes
                 new_code.extend_from_slice(&fallthrough_bytes);
                 next_inject_iter.next();
             } else {
                 break;
             }
         }
+        offset_map.insert(old_pc, new_code.len());
         let next_pc = inst_starts.get(old_idx + 1).copied().unwrap_or(n);
         let inst_len = next_pc - old_pc;
-        pad_page_straddle(&mut new_code, inst_len);
-        offset_map.insert(old_pc, new_code.len());
         new_code.extend_from_slice(&code[old_pc..old_pc + inst_len]);
         old_idx += 1;
     }

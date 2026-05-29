@@ -21,6 +21,7 @@
 //!
 //! Reserved: R15 = gas meter, RDX = scratch, RSP = native stack.
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use super::asm::{Assembler, Cc, Label, Reg};
@@ -104,12 +105,6 @@ pub const EXIT_PAGE_FAULT: u32 = 3;
 pub const EXIT_HOST_CALL: u32 = 4;
 pub const EXIT_ECALL: u32 = 6;
 pub const EXIT_TRAP: u32 = 7;
-/// Lazy compilation: a dispatch landed on a block whose 4 KiB page is
-/// not compiled yet. The compile-page stub sets this reason and exits;
-/// the runtime reads `ctx.pc` (the target offset, set by whichever
-/// dispatcher jumped here), compiles that page, patches its dispatch
-/// entries, and re-enters the same frame.
-pub const EXIT_COMPILE_PAGE: u32 = 8;
 
 /// Result of compilation.
 pub struct CompileResult {
@@ -122,11 +117,6 @@ pub struct CompileResult {
     pub dispatch_entries: Vec<(u32, i32)>,
     pub trap_table: Vec<(u32, u32)>,
     pub exit_label_offset: u32,
-    /// Native offset of the compile-page stub (lazy path). Uncompiled
-    /// blocks' dispatch entries point here until their page is compiled.
-    /// On the eager path nothing references it, but it's emitted anyway
-    /// (one tiny stub) so eager and lazy share `emit_stub_handlers`.
-    pub compile_stub_offset: u32,
     /// Byte-indexed validity map (RV path only): true at every PC where
     /// an instruction begins. Empty for the PVM path — `compile()`
     /// consumes its own bitmask argument, no need to surface it.
@@ -179,9 +169,6 @@ pub struct Compiler {
     pub(crate) panic_label: Label,
     /// Label for OOG handler that reads PC from SCRATCH: stores PC, then falls through to oog_label.
     oog_pc_label: Label,
-    /// Label for the lazy compile-page stub (sets EXIT_COMPILE_PAGE,
-    /// jumps to the exit sequence). Emitted once in `emit_stub_handlers`.
-    compile_stub_label: Label,
     /// Per-gas-block OOG stubs: (label, pvm_pc) — emitted as cold code after main body.
     pub(crate) oog_stubs: Vec<(Label, u32, u32)>, // (label, pvm_pc, block_cost)
     /// Helper function addresses.
@@ -217,11 +204,20 @@ pub struct Compiler {
     /// Code region length in bytes — the upper bound for jalr target
     /// offsets (== `bb_starts` / dispatch-table length).
     pub(crate) code_len: u32,
-    /// Backing storage for `bitmask_ptr`: the whole-blob gas-block-start
-    /// set, computed up front by `predecode::bb_start_bitmap` (shared
-    /// with the interp). Every branch / jalr target is validated against
-    /// it, and it is returned as `CompileResult::valid_pc` for the
-    /// runtime's `jalr` bb-check.
+    /// True during RV streaming compile (`compile`). When set, branch
+    /// emit helpers defer forward-target validation (`target > pc`) to a
+    /// post-pass instead of consulting `bitmask_ptr`. Off for PVM, whose
+    /// caller-supplied bitmask is fully populated at emit time.
+    pub(crate) rv_streaming: bool,
+    /// Forward branches whose target validity could not be determined at
+    /// emit time. Resolved post-pass: each entry is
+    /// `(target_pc, branch_pc, fixup_idx)`. If `valid_pc[target]` is
+    /// false after the streaming pass, the fixup is redirected to a
+    /// per-branch panic stub.
+    pub(crate) rv_pending_fwd_branches: Vec<(u32, u32, usize)>,
+    /// Backing storage for `bitmask_ptr` during RV streaming compile.
+    /// Built incrementally in `bind_rv_gas_block_start_streaming`. Empty
+    /// for the PVM path (uses the caller-supplied bitmask).
     pub(crate) rv_valid_pc: Vec<bool>,
 }
 
@@ -251,7 +247,6 @@ impl Compiler {
         let oog_label = asm.new_label();
         let panic_label = asm.new_label();
         let oog_pc_label = asm.new_label();
-        let compile_stub_label = asm.new_label();
         // Pre-create one label per PC for O(1) lookup in label_for_pc.
         // With LABEL_UNBOUND=0, bulk allocation uses zeroed pages (calloc/COW).
         // Only the ~640 labels that get bound trigger page faults — the other
@@ -266,7 +261,6 @@ impl Compiler {
             oog_label,
             panic_label,
             oog_pc_label,
-            compile_stub_label,
             oog_stubs: Vec::with_capacity(1024),
             reg_defs: [RegDef::Unknown; 13],
             reg_defs_active: 0,
@@ -279,6 +273,8 @@ impl Compiler {
             gas_sim: GasSimulator::new(),
             code_base,
             code_len: code_len as u32,
+            rv_streaming: false,
+            rv_pending_fwd_branches: Vec::new(),
             rv_valid_pc: Vec::new(),
         }
     }
@@ -430,29 +426,23 @@ impl Compiler {
         if !condition {
             return;
         }
-        // Target validity is known up front (whole-blob bb set). A
-        // forward target's label binds later in this pass; `jmp_label`
-        // records a fixup the assembler resolves at finalize.
+        if self.rv_streaming && target > pc {
+            let label = self.label_for_pc(target);
+            let fixup_idx = self.asm.fixups_len();
+            self.asm.jmp_label(label);
+            self.rv_pending_fwd_branches.push((target, pc, fixup_idx));
+            return;
+        }
         if !self.is_basic_block_start(target) {
             self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
             self.emit_exit(EXIT_PANIC, 0);
-            return;
-        }
-        // Cross-page target → indirect dispatch through the table: its
-        // native code lives in a different page-window, and under lazy
-        // compilation the page may not be compiled yet. Same-page →
-        // direct rel32 jump to the bound label.
-        if !same_page(target, pc) {
-            self.emit_dispatch_static(target);
             return;
         }
         let label = self.label_for_pc(target);
         self.asm.jmp_label(label);
     }
 
-    /// Emit a conditional branch. Same-page target → direct `jcc` to the
-    /// bound label. Cross-page target → indirect dispatch on the taken
-    /// path (lowered as `jcc.invert() skip; <dispatch>; skip:`).
+    /// Emit a dynamic jump (through jump table).
     pub(crate) fn emit_branch_reg(
         &mut self,
         a: Reg,
@@ -462,6 +452,14 @@ impl Compiler {
         _fallthrough: u32,
         pc: u32,
     ) {
+        if self.rv_streaming && target > pc {
+            self.asm.cmp_rr(a, b);
+            let label = self.label_for_pc(target);
+            let fixup_idx = self.asm.fixups_len();
+            self.asm.jcc_label(cc, label);
+            self.rv_pending_fwd_branches.push((target, pc, fixup_idx));
+            return;
+        }
         if !self.is_basic_block_start(target) {
             self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
             self.asm.cmp_rr(a, b);
@@ -469,42 +467,8 @@ impl Compiler {
             return;
         }
         self.asm.cmp_rr(a, b);
-        if !same_page(target, pc) {
-            // Not taken → skip the dispatch; taken → fall into it.
-            let skip = self.asm.new_label();
-            self.asm.jcc_label(cc.invert(), skip);
-            self.emit_dispatch_static(target);
-            self.asm.bind_label(skip);
-            return;
-        }
         let label = self.label_for_pc(target);
         self.asm.jcc_label(cc, label);
-    }
-
-    /// Indirect-dispatch tail: with `SCRATCH` holding a validated
-    /// code-region byte offset (a gas-block start), jump to its native
-    /// code at `ctx.code_base + dispatch_table[offset]`. Shared by `jalr`
-    /// and the static cross-page dispatch.
-    pub(crate) fn emit_dispatch_indirect_tail(&mut self) {
-        self.asm.push(Reg::RAX);
-        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_DISPATCH_TABLE);
-        self.asm.movsxd_load_sib4(Reg::RAX, Reg::RAX, SCRATCH);
-        self.asm.add_r64_mem_rip_rel(Reg::RAX, CTX_CODE_BASE);
-        self.asm.mov_rr(SCRATCH, Reg::RAX);
-        self.asm.pop(Reg::RAX);
-        self.asm.jmp_reg(SCRATCH);
-    }
-
-    /// Dispatch to a compile-time-known, already-validated block-start
-    /// `offset` (a cross-page branch / jal target, or a page-boundary
-    /// fall-through). Needs no bounds or bb-start check — unlike `jalr`,
-    /// the target is a static block start by construction. Records the
-    /// offset as the paused PC (fault attribution + the lazy compile-page
-    /// stub reads it to know which page to compile), then dispatches.
-    pub(crate) fn emit_dispatch_static(&mut self, offset: u32) {
-        self.asm.mov_store32_rip_rel_imm(CTX_PC, offset as i32);
-        self.asm.mov_ri32(SCRATCH, offset);
-        self.emit_dispatch_indirect_tail();
     }
 
     /// Emit a shift by register value using CL.
@@ -615,14 +579,14 @@ impl Compiler {
         self.asm.jmp_reg(SCRATCH);
     }
 
-    /// Emit the shared exit / OOG / panic handlers (the runtime "stub").
-    /// Emitted once, up front (right after the prologue), so per-page
-    /// bodies — which under lazy compilation are compiled later and in
-    /// arbitrary order — can backward-reference them. The per-block OOG
-    /// stubs are emitted per page by `emit_page_oog_stubs`.
-    pub(crate) fn emit_stub_handlers(&mut self) {
-        self.asm.ensure_capacity(512);
-        // Shared OOG handler: PC already in SCRATCH.
+    /// Emit exit sequences and epilogue.
+    pub(crate) fn emit_exit_sequences(&mut self) {
+        // Reserve capacity for exit sequences + all OOG stubs.
+        // Each OOG stub is ~12 bytes.
+        let needed = 512 + self.oog_stubs.len() * 16;
+        self.asm.ensure_capacity(needed);
+        // Shared OOG handler that reads PC from SCRATCH — emitted BEFORE OOG
+        // stubs so backward jumps from stubs can use jmp rel8 (2 bytes).
         self.asm.bind_label(self.oog_pc_label);
         self.asm.mov_store32_rip_rel(CTX_PC, SCRATCH);
         // fall through to oog_label:
@@ -631,20 +595,16 @@ impl Compiler {
             .mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_OOG as i32);
         self.asm.jmp_label(self.exit_label);
 
-        // Page faults are handled by the SIGSEGV handler (signal.rs).
+        // Per-gas-block OOG stubs: compact format — load PC into SCRATCH,
+        // jump to shared handler. Saves ~6 bytes per stub vs inline PC store.
+        let stubs = core::mem::take(&mut self.oog_stubs);
+        for (label, pvm_pc, _cost) in &stubs {
+            self.asm.bind_label(*label);
+            self.asm.mov_ri32(SCRATCH, *pvm_pc);
+            self.asm.jmp_label(self.oog_pc_label);
+        }
 
-        // Lazy compile-page stub. A dispatch (prologue / jalr /
-        // cross-page branch / page-boundary fall-through) lands here
-        // when the target block's page is not compiled yet. `ctx.pc`
-        // already holds the target offset (set by the dispatcher); we
-        // just signal the runtime, which compiles that page, patches
-        // its dispatch entries, and re-enters. Reuses the exit sequence
-        // so gas (R15) and the live regs are flushed to ctx and
-        // restored verbatim on re-entry — the bounce is gas-neutral.
-        self.asm.bind_label(self.compile_stub_label);
-        self.asm
-            .mov_store32_rip_rel_imm(CTX_EXIT_REASON, EXIT_COMPILE_PAGE as i32);
-        self.asm.jmp_label(self.exit_label);
+        // Page faults are handled by the SIGSEGV handler (signal.rs).
 
         // Panic exit
         self.asm.bind_label(self.panic_label);
@@ -677,20 +637,6 @@ impl Compiler {
         self.asm.pop(Reg::RBP);
         self.asm.pop(Reg::RBX);
         self.asm.ret();
-    }
-
-    /// Emit the OOG stubs gathered while compiling the current page:
-    /// `mov SCRATCH, pvm_pc; jmp oog_pc_handler`. Each block's gas check
-    /// (`js stub`) targets one of these. Drains `self.oog_stubs` so the
-    /// next page starts clean.
-    pub(crate) fn emit_page_oog_stubs(&mut self) {
-        let stubs = core::mem::take(&mut self.oog_stubs);
-        self.asm.ensure_capacity(512 + stubs.len() * 16);
-        for (label, pvm_pc, _cost) in &stubs {
-            self.asm.bind_label(*label);
-            self.asm.mov_ri32(SCRATCH, *pvm_pc);
-            self.asm.jmp_label(self.oog_pc_label);
-        }
     }
 }
 
@@ -1197,15 +1143,6 @@ fn rv_slot(x: u8) -> Option<usize> {
     }
 }
 
-/// Two code-region byte offsets lie in the same 4 KiB page. A
-/// cross-page control transfer can't use a direct rel32 to a label in
-/// another page-window (under lazy compilation that page may not be
-/// compiled yet) — it dispatches indirectly through the table instead.
-#[inline]
-fn same_page(a: u32, b: u32) -> bool {
-    a / javm_exec::PAGE_SIZE == b / javm_exec::PAGE_SIZE
-}
-
 /// True for x3 and x4 — registers that PVM2 reserves and the transpiler
 /// must reject. If we ever see them at codegen time, we trap.
 #[inline]
@@ -1213,108 +1150,7 @@ fn rv_is_reserved(x: u8) -> bool {
     x == 3 || x == 4
 }
 
-/// Initial artifacts of a lazy compile: the prologue + shared stub
-/// handlers (incl. the compile-page stub), emitted once up front. Page
-/// bodies are compiled on demand by [`Compiler::compile_lazy_page`].
-pub struct LazyInit {
-    /// Whole-blob basic-block-start set (one byte per code offset). The
-    /// runtime copies this into the arena BB region (for `jalr`
-    /// validation) and uses it to point every block start's dispatch
-    /// entry at the compile-page stub.
-    pub valid_pc: Vec<bool>,
-    /// Native offset of the shared exit label (#PF redirect target).
-    pub exit_label_offset: u32,
-    /// Native offset of the compile-page stub.
-    pub compile_stub_offset: u32,
-    /// Bytes emitted so far (prologue + stubs): the caller copies
-    /// `asm.written()[0..len]` into the arena JIT region.
-    pub len: usize,
-}
-
-/// One page's lazily-emitted native code plus its dispatch / trap
-/// deltas. The newly-emitted bytes are `asm.written()[start..end]`.
-pub struct LazyPage {
-    pub start: usize,
-    pub end: usize,
-    /// `(code_offset, native_offset)` for each block start in this page.
-    pub dispatch_entries: Vec<(u32, i32)>,
-    /// `(native_offset, pvm_pc)` trap entries for this page, ascending by
-    /// native offset (the page occupies the next contiguous native range,
-    /// so appending these to the image's trap table keeps it sorted).
-    pub trap_entries: Vec<(u32, u32)>,
-}
-
 impl Compiler {
-    /// Compute the whole-blob gas-block-start set and publish it through
-    /// `bitmask_ptr`/`bitmask_len` for `is_basic_block_start`. Shared by
-    /// the eager `compile` and lazy `compile_lazy_init` entry points. The
-    /// backing `rv_valid_pc` is never mutated again, so `bitmask_ptr`
-    /// stays valid across Compiler moves (into the JIT cache) and grows.
-    fn prepare_bb(&mut self, code: &[u8]) {
-        let (bb, _decode_err) = javm_exec::predecode::bb_start_bitmap(code);
-        self.rv_valid_pc = bb.into_iter().map(|b| b == 1).collect();
-        self.bitmask_ptr = self.rv_valid_pc.as_ptr() as *const u8;
-        self.bitmask_len = self.rv_valid_pc.len();
-    }
-
-    /// Begin a lazy compile: compute the block-start set and emit the
-    /// prologue + shared stub handlers. No page bodies — every block
-    /// dispatches through the table, which the runtime initialises to the
-    /// compile-page stub, so the first entry to any page bounces out via
-    /// `EXIT_COMPILE_PAGE`. Takes `&mut self` (not `self`): the Compiler
-    /// persists in the JIT cache for later `compile_lazy_page` calls.
-    pub fn compile_lazy_init(&mut self, code: &[u8]) -> LazyInit {
-        self.prepare_bb(code);
-        self.emit_prologue();
-        self.emit_stub_handlers();
-        // Resolve the stubs' internal forward refs (panic/compile → exit).
-        self.asm.resolve_fixups();
-        LazyInit {
-            valid_pc: self.rv_valid_pc.clone(),
-            exit_label_offset: self.asm.label_offset(self.exit_label).unwrap_or(0) as u32,
-            compile_stub_offset: self.asm.label_offset(self.compile_stub_label).unwrap_or(0) as u32,
-            len: self.asm.offset(),
-        }
-    }
-
-    /// Compile one 4 KiB page's body, appended to the growing JIT buffer.
-    /// Returns the newly-emitted byte range plus this page's dispatch and
-    /// trap deltas. The caller must not compile the same page twice (the
-    /// JIT cache guards this with a per-page "compiled" bitmap).
-    ///
-    /// Produces byte-for-byte the same per-block gas accounting as the
-    /// eager path's `compile_page` for this page: `compile_page` is
-    /// self-contained (its gas/reg/CF state resets at the page-start
-    /// block), so compile *order* across pages doesn't change any page's
-    /// gas. Every branch fixup is intra-page (cross-page targets go via
-    /// the dispatch table), so `resolve_fixups` fully resolves the page.
-    pub fn compile_lazy_page(&mut self, code: &[u8], page: usize) -> LazyPage {
-        let page_bytes = javm_exec::PAGE_SIZE as usize;
-        let start_off = page * page_bytes;
-        let end_off = ((page + 1) * page_bytes).min(code.len());
-
-        let gas_old = self.gas_block_pcs.len();
-        self.trap_entries.clear();
-        let start = self.asm.offset();
-        self.compile_page(code, start_off, end_off);
-        self.asm.resolve_fixups();
-        let end = self.asm.offset();
-
-        let mut dispatch_entries = Vec::with_capacity(self.gas_block_pcs.len() - gas_old);
-        for &pc in &self.gas_block_pcs[gas_old..] {
-            if let Some(off) = self.asm.label_offset(Label(self.label_base + pc)) {
-                dispatch_entries.push((pc, off as i32));
-            }
-        }
-        let trap_entries = core::mem::take(&mut self.trap_entries);
-        LazyPage {
-            start,
-            end,
-            dispatch_entries,
-            trap_entries,
-        }
-    }
-
     /// Compile an RV+C+custom-0 byte stream into x86-64 in a single
     /// streaming pass.
     ///
@@ -1329,30 +1165,102 @@ impl Compiler {
     /// the gas-block dispatch table). Built incrementally during the
     /// streaming pass — no separate length-only pre-pass.
     pub fn compile(mut self, code: &[u8]) -> CompileResult {
-        // Whole-blob gas-block-start set, computed up front and shared
-        // with the interp (`predecode::bb_start_bitmap`) so both engines
-        // partition gas blocks identically. The compile loop binds a gas
-        // block at each set member and validates every branch / jalr
-        // target against it. The buffer is stable for the pass (no
-        // reallocation), so `is_basic_block_start` reads through
-        // `bitmask_ptr` stay coherent.
-        self.prepare_bb(code);
+        // valid_pc is populated incrementally as the streaming pass
+        // binds gas-block starts. The pointer is stable across mutation
+        // (Vec doesn't reallocate from `vec![false; n]` with in-place
+        // index assignment), so `is_basic_block_start` reads through
+        // the raw pointer remain coherent.
+        self.rv_valid_pc = vec![false; code.len()];
+        self.bitmask_ptr = self.rv_valid_pc.as_ptr() as *const u8;
+        self.bitmask_len = self.rv_valid_pc.len();
+        self.rv_streaming = true;
 
         self.emit_prologue();
-        // Shared exit/OOG/panic handlers up front, before any page body.
-        self.emit_stub_handlers();
 
-        // Compile each 4 KiB page's body in order. The per-page structure
-        // (with the page-boundary fall-through dispatching through the
-        // table) is exactly what lazy compilation needs; here we drive it
-        // eagerly so every page is compiled up front.
-        let page = javm_exec::PAGE_SIZE as usize;
-        let n_pages = code.len().div_ceil(page);
-        for p in 0..n_pages {
-            let start = p * page;
-            let end = ((p + 1) * page).min(code.len());
-            self.compile_page(code, start, end);
+        let mut pending_gas: Option<(Label, u32, usize)> = None;
+        let mut next_is_gas_start = true;
+        let mut pc: usize = 0;
+
+        while pc < code.len() {
+            self.asm.ensure_capacity(512);
+
+            // Length encoding lives in bits [1:0] of byte 0: `xx11` is
+            // 4-byte, anything else is 2-byte (RVC). Decode no further
+            // than that — the dispatcher inspects raw bits directly.
+            if pc + 2 > code.len() {
+                self.rv_emit_panic_at(pc as u32);
+                break;
+            }
+            let is_4byte = code[pc] & 0b11 == 0b11;
+            let base_len = if is_4byte { 4 } else { 2 };
+            if pc + base_len > code.len() {
+                self.rv_emit_panic_at(pc as u32);
+                break;
+            }
+
+            let inst_pc = pc as u32;
+
+            if next_is_gas_start {
+                self.bind_rv_gas_block_start_streaming(inst_pc, &mut pending_gas);
+                next_is_gas_start = false;
+            }
+
+            // Byte-based dispatch. Each path returns
+            // `(is_terminator, preserve_cf, extra_bytes)`. `extra_bytes`
+            // counts the *additional* bytes consumed beyond `base_len`
+            // for lookahead fusion (e.g., Ld→Add fuses an extra 4-byte
+            // Add). `preserve_cf` tells us whether to keep
+            // `last_add_cf` alive for a following Sltu fusion.
+            let rest = &code[pc + base_len..];
+            let (term, preserve_cf, extra) = if is_4byte {
+                let w = u32::from_le_bytes([code[pc], code[pc + 1], code[pc + 2], code[pc + 3]]);
+                self.compile_rv4(w, inst_pc, 4, rest)
+            } else {
+                let h = u16::from_le_bytes([code[pc], code[pc + 1]]);
+                self.compile_rvc(h, inst_pc, rest)
+            };
+
+            if !preserve_cf {
+                self.last_add_cf = None;
+            }
+
+            if term {
+                next_is_gas_start = true;
+            }
+
+            pc += base_len + extra;
         }
+
+        // Finalize the last gas block — patch its cost in.
+        if let Some((stub_label, block_pc, patch_offset)) = pending_gas.take() {
+            let cost = self.gas_sim.flush_and_get_cost();
+            self.asm.patch_i32(patch_offset, cost as i32);
+            self.oog_stubs.push((stub_label, block_pc, cost));
+        }
+
+        // Resolve deferred forward branches now that valid_pc is fully
+        // populated. For each forward branch recorded with target > pc
+        // at emit time:
+        //   - valid target: label_for_pc(target) was bound during the
+        //     streaming pass; the existing fixup resolves naturally.
+        //   - invalid target: append a per-branch panic stub and
+        //     redirect the fixup to it. Keeps the source PC of the
+        //     branch in the exit report.
+        // We disable rv_streaming first so emit_branch_* / panic helpers
+        // called below take their non-deferred path.
+        self.rv_streaming = false;
+        let pending = core::mem::take(&mut self.rv_pending_fwd_branches);
+        for (target, branch_pc, fixup_idx) in pending {
+            if !self.is_basic_block_start(target) {
+                let stub = self.asm.new_label();
+                self.asm.bind_label(stub);
+                self.asm.mov_store32_rip_rel_imm(CTX_PC, branch_pc as i32);
+                self.asm.jmp_label(self.panic_label);
+                self.asm.redirect_fixup(fixup_idx, stub);
+            }
+        }
+
+        self.emit_exit_sequences();
 
         // Sparse dispatch entries — caller writes only these into the
         // (page-zero-filled) arena dispatch region. No code.len() + 1
@@ -1366,8 +1274,6 @@ impl Compiler {
         }
 
         let exit_label_offset = self.asm.label_offset(self.exit_label).unwrap_or(0) as u32;
-        let compile_stub_offset =
-            self.asm.label_offset(self.compile_stub_label).unwrap_or(0) as u32;
         let trap_table = core::mem::take(&mut self.trap_entries);
         let valid_pc = core::mem::take(&mut self.rv_valid_pc);
 
@@ -1376,104 +1282,8 @@ impl Compiler {
             dispatch_entries,
             trap_table,
             exit_label_offset,
-            compile_stub_offset,
             valid_pc,
         }
-    }
-
-    /// Compile the blocks in code byte range `[start, end)` — one 4 KiB
-    /// page — into the JIT buffer at the current cursor, then emit this
-    /// page's OOG stubs. Same-page branch targets resolve to direct
-    /// rel32 jumps (their labels bind within this page); cross-page
-    /// targets, and a fall-through off the page end, dispatch indirectly
-    /// through the table, so the target page need not be compiled yet
-    /// (the foundation for lazy compilation). `bb`/`is_basic_block_start`
-    /// is the whole-blob precomputed set, so targets validate regardless
-    /// of which pages exist.
-    fn compile_page(&mut self, code: &[u8], start: usize, end: usize) {
-        let mut pending_gas: Option<(Label, u32, usize)> = None;
-        let mut pc = start;
-        // Whether the last instruction compiled terminates the block. An
-        // empty range trivially "terminates" (nothing falls through).
-        let mut last_terminates = true;
-
-        while pc < end {
-            self.asm.ensure_capacity(512);
-
-            // Length encoding lives in bits [1:0] of byte 0: `xx11` is
-            // 4-byte, anything else 2-byte (RVC).
-            if pc + 2 > code.len() {
-                self.rv_emit_panic_at(pc as u32);
-                last_terminates = true;
-                break;
-            }
-            let is_4byte = code[pc] & 0b11 == 0b11;
-            let base_len = if is_4byte { 4 } else { 2 };
-            if pc + base_len > code.len() {
-                self.rv_emit_panic_at(pc as u32);
-                last_terminates = true;
-                break;
-            }
-
-            let inst_pc = pc as u32;
-
-            // Bind a gas block at every block start in the precomputed set
-            // ({0} ∪ post-terminator ∪ page starts) — same partition as
-            // predecode, so per-block gas matches.
-            if self.is_basic_block_start(inst_pc) {
-                self.bind_rv_gas_block_start_streaming(inst_pc, &mut pending_gas);
-            }
-
-            // Suppress fusion across a block boundary (incl. the page end,
-            // which is a block start): fusing a trailer that starts a new
-            // block would diverge the recompiler's partition (and per-block
-            // gas) from predecode's. `rest` is lookahead-only — an empty
-            // slice defers the trailer to its own block.
-            let next_inst_pc = inst_pc + base_len as u32;
-            let rest: &[u8] = if self.is_basic_block_start(next_inst_pc) {
-                &[]
-            } else {
-                &code[pc + base_len..]
-            };
-            let (term, preserve_cf, extra) = if is_4byte {
-                let w = u32::from_le_bytes([code[pc], code[pc + 1], code[pc + 2], code[pc + 3]]);
-                self.compile_rv4(w, inst_pc, 4, rest)
-            } else {
-                let h = u16::from_le_bytes([code[pc], code[pc + 1]]);
-                self.compile_rvc(h, inst_pc, rest)
-            };
-
-            if !preserve_cf {
-                self.last_add_cf = None;
-            }
-            last_terminates = term;
-            pc += base_len + extra;
-        }
-
-        // Flush the page's last gas block cost.
-        if let Some((stub_label, block_pc, patch_offset)) = pending_gas.take() {
-            let cost = self.gas_sim.flush_and_get_cost();
-            self.asm.patch_i32(patch_offset, cost as i32);
-            self.oog_stubs.push((stub_label, block_pc, cost));
-        }
-
-        // If the page's last block falls through, dispatch to the next
-        // page start (a block start). Under lazy compilation that page may
-        // not be compiled yet → the dispatch lands on the compile-page
-        // stub. `end` is the next page's start offset (instructions never
-        // straddle a page, invariant 10).
-        if !last_terminates {
-            let next = end as u32;
-            if (next as usize) < code.len() {
-                self.emit_dispatch_static(next);
-            } else {
-                // Fall-through past the end of the blob — malformed.
-                self.rv_emit_panic_at(next.saturating_sub(1));
-            }
-        }
-
-        // Emit this page's OOG stubs (they reference the shared handler).
-        self.emit_page_oog_stubs();
     }
 
     /// Streaming gas-block-start hook: bind label, flush prior block's
@@ -1490,9 +1300,16 @@ impl Compiler {
         let label = Label(self.label_base + pc);
         self.asm.bind_label(label);
         self.gas_block_pcs.push(pc);
-        // `rv_valid_pc` (the gas-block-start bitmap) is precomputed in
-        // `compile`, so there's nothing to mark here — the loop already
-        // gated this call on `is_basic_block_start(pc)`.
+        // valid_pc is the gas-block-start bitmap consulted by both the
+        // codegen-time `is_basic_block_start` check and the runtime's
+        // djump validation. Set it here so backward branches emit time
+        // see the bit (we walk PCs in order, so any T < cur_pc has
+        // already passed through here if it's a gas-block start).
+        // bitmask_ptr points to rv_valid_pc's heap buffer, so this
+        // mutation is visible to subsequent is_basic_block_start reads.
+        if (pc as usize) < self.rv_valid_pc.len() {
+            self.rv_valid_pc[pc as usize] = true;
+        }
 
         // Peephole state must not leak across gas-block boundaries: the
         // dispatch table can enter this block from any predecessor.
@@ -3673,7 +3490,13 @@ impl Compiler {
         self.asm.jcc_label(Cc::E, self.panic_label);
 
         // native = code_base_native + dispatch_table[offset]; jmp.
-        self.emit_dispatch_indirect_tail();
+        self.asm.push(Reg::RAX);
+        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_DISPATCH_TABLE);
+        self.asm.movsxd_load_sib4(Reg::RAX, Reg::RAX, SCRATCH);
+        self.asm.add_r64_mem_rip_rel(Reg::RAX, CTX_CODE_BASE);
+        self.asm.mov_rr(SCRATCH, Reg::RAX);
+        self.asm.pop(Reg::RAX);
+        self.asm.jmp_reg(SCRATCH);
     }
 
     fn rv_branch(&mut self, rs1: u8, rs2: u8, imm: i32, cc: Cc, pc: u32, next_pc: u32) {
