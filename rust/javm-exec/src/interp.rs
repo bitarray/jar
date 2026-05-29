@@ -36,10 +36,10 @@ use crate::regs::Regs;
 pub struct Program {
     pub code: Vec<u8>,
     pub predecode: Predecode,
-    /// Guest VA at which this code region is mapped. PC = `code_base`
-    /// + byte-offset. `regs.pc` and `predecode.insts[].pc` are
-    /// offsets; register-held code addresses (return addresses, auipc
-    /// results) are VAs (`code_base + offset`).
+    /// Guest VA at which this code region is mapped, so that
+    /// `PC = code_base + byte_offset`. `regs.pc` and
+    /// `predecode.insts[].pc` are offsets; register-held code addresses
+    /// (return addresses, auipc results) are VAs (`code_base + offset`).
     pub code_base: u32,
 }
 
@@ -884,7 +884,7 @@ mod tests {
         let mut mem = CopyingMemory::new();
         let mut gas = GasCounter::new(initial_gas);
         let mut h = PanickingHandler;
-        let reason = Interpreter::run(&pre, &[], &[], &mut regs, &mut mem, &mut gas, &mut h);
+        let reason = Interpreter::run(&pre, 0, &mut regs, &mut mem, &mut gas, &mut h);
         let used = initial_gas.saturating_sub(gas.remaining());
         (regs, reason, used)
     }
@@ -986,7 +986,7 @@ mod tests {
         let mut mem = CopyingMemory::new();
         let mut gas = GasCounter::new(1_000_000);
         let mut h = PanickingHandler;
-        let reason = Interpreter::run(&pre, &[], &[0, 0], &mut regs, &mut mem, &mut gas, &mut h);
+        let reason = Interpreter::run(&pre, 0, &mut regs, &mut mem, &mut gas, &mut h);
         assert_eq!(reason, ExitReason::Panic);
     }
 }

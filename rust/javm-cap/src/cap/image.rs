@@ -51,6 +51,22 @@ pub struct ImageCap {
     pub yield_marker_slot: Option<SlotIdx>,
 }
 
+impl ImageCap {
+    /// The executable code region as `(code_base, bytes)`: the first
+    /// mapping whose source is `Code`, resolved to its [`CodeRegionCap`]
+    /// bytes. `code_base` is the guest VA the region maps at, so a PVM
+    /// PC is `code_base + byte_offset`. `None` if the image declares no
+    /// code mapping.
+    pub fn code_mapping(&self) -> Option<(u32, &[u8])> {
+        let m = self
+            .mappings
+            .iter()
+            .find(|m| m.source_kind == MAP_SRC_CODE)?;
+        let region = self.codes.get(m.code_index as usize)?;
+        Some((m.start as u32, region.code.as_slice()))
+    }
+}
+
 /// Endpoint definition. Dense `initial_regs` array; index `i`
 /// corresponds to PVM register `φ[i]`. `0` is "use default" (same
 /// semantics as the spec's old `BTreeMap<u8, u64>` when the key is

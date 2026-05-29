@@ -159,12 +159,12 @@ impl<K: KernelAssist> Vm<K> {
         };
 
         // Predecode the image bytecode (cache hit when seen before).
-        let program = self.image_cache.get_or_decode(
-            inst.image_hash,
-            img.code.as_slice().to_vec(),
-            img.jump_table.as_slice().to_vec(),
-            img.jump_table_offsets.as_slice().to_vec(),
-        );
+        let (code_base, code_bytes) = img
+            .code_mapping()
+            .ok_or(VmError::Invariant("image has no executable code mapping"))?;
+        let program =
+            self.image_cache
+                .get_or_decode(inst.image_hash, code_bytes.to_vec(), code_base);
 
         // Locate the endpoint definition (dense array, sentinel =
         // entry_pc == 0).
@@ -667,17 +667,20 @@ impl<K: KernelAssist + std::fmt::Debug> std::fmt::Debug for Vm<K> {
 mod tests {
     use super::*;
     use crate::kernel_assist::InProcessKernelAssist;
-    use javm_cap::image::Image;
+    use javm_cap::image::{CodeRegion, Image, MappingSource, MemoryMapping};
     use javm_cap::{CacheDirectory, Cap, NUM_REGS};
     use std::collections::BTreeMap;
 
     fn empty_image_with_code(code: Vec<u8>) -> Image {
+        let size = (code.len() as u64).next_multiple_of(4096).max(4096);
         Image {
-            code,
-            jump_table: Vec::new(),
-            jump_table_offsets: vec![0, 0],
+            codes: vec![CodeRegion { code }],
             endpoints: BTreeMap::new(),
-            memory_mappings: Vec::new(),
+            memory_mappings: vec![MemoryMapping {
+                start: 0x4000_0000,
+                size,
+                source: MappingSource::Code(0),
+            }],
             gas_slots: Vec::new(),
             quota_slots: Vec::new(),
             pinned_slots: BTreeMap::new(),
@@ -865,18 +868,7 @@ mod tests {
         // iteration is a 1-instruction basic block) until the gas
         // budget runs out.
         let code = 0x0000_006Fu32.to_le_bytes().to_vec();
-        let img = Image {
-            code,
-            jump_table: Vec::new(),
-            jump_table_offsets: vec![0, 0],
-            endpoints: BTreeMap::new(),
-            memory_mappings: Vec::new(),
-            gas_slots: Vec::new(),
-            quota_slots: Vec::new(),
-            pinned_slots: BTreeMap::new(),
-            initial_slots: BTreeMap::new(),
-            yield_marker_slot: None,
-        };
+        let img = empty_image_with_code(code);
         let mut cache = CacheDirectory::new();
         let inst_hash = publish_simple_instance(&mut cache, img);
         let mut vm = Vm::new(InProcessKernelAssist::new());

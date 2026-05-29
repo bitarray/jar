@@ -1518,13 +1518,19 @@ mod tests {
     }
 
     #[test]
-    fn decode_auipc_reserved() {
-        // auipc x5, 0x10 = 0x000102B7? actually 0x00010297
+    fn decode_auipc_native() {
+        // auipc x5, 0x10 (= 0x00010297) — PVM2 decodes it natively now.
         let bytes = 0x00010297u32.to_le_bytes();
-        match decode(&bytes) {
-            Some((Inst::Reserved { .. }, 4)) => {}
-            other => panic!("auipc should be Reserved, got {:?}", other),
-        }
+        assert_eq!(
+            decode(&bytes),
+            Some((
+                Inst::Auipc {
+                    rd: 5,
+                    imm: 0x0001_0000,
+                },
+                4,
+            ))
+        );
     }
 
     #[test]
@@ -1628,31 +1634,47 @@ mod tests {
     }
 
     #[test]
-    fn decode_custom_br_table() {
-        // br_table table_id=42, rs1=x1 (ra): custom-0, funct3=011, rd=0
-        // wire: (42<<20) | (1<<15) | (0b011<<12) | (0<<7) | (0b00010<<2) | 0b11
+    fn decode_custom0_funct3_011_reserved() {
+        // custom-0 funct3=011 used to be br_table; PVM2 reverted to
+        // native control flow and no longer defines it — reserved.
         let w = (42u32 << 20) | (1u32 << 15) | (0b011u32 << 12) | (0b00010u32 << 2) | 0b11;
+        let bytes = w.to_le_bytes();
+        assert!(matches!(decode(&bytes).unwrap().0, Inst::Reserved { .. }));
+    }
+
+    #[test]
+    fn decode_auipc() {
+        // auipc x5, 0x12345 — U-type, opcode 0b0010111.
+        let w = (0x12345u32 << 12) | (5 << 7) | 0b001_0111;
         let bytes = w.to_le_bytes();
         assert_eq!(
             decode(&bytes),
             Some((
-                Inst::BrTable {
-                    table_id: 42,
-                    rs1: 1
+                Inst::Auipc {
+                    rd: 5,
+                    imm: 0x1234_5000,
                 },
-                4
+                4,
             ))
         );
     }
 
     #[test]
-    fn decode_custom_br_table_rd_nonzero_reserved() {
-        // br_table with rd != 0 must decode to Reserved.
-        let w =
-            (1u32 << 20) | (1u32 << 15) | (0b011u32 << 12) | (1u32 << 7) | (0b00010u32 << 2) | 0b11;
+    fn decode_jalr() {
+        // jalr x1, x6, 16 — I-type, opcode 0b1100111, funct3=0.
+        let w = (16u32 << 20) | (6 << 15) | (1 << 7) | 0b110_0111;
         let bytes = w.to_le_bytes();
-        let decoded = decode(&bytes).unwrap().0;
-        assert!(matches!(decoded, Inst::Reserved { .. }));
+        assert_eq!(
+            decode(&bytes),
+            Some((
+                Inst::Jalr {
+                    rd: 1,
+                    rs1: 6,
+                    imm: 16,
+                },
+                4,
+            ))
+        );
     }
 
     #[test]
@@ -1666,11 +1688,29 @@ mod tests {
     }
 
     #[test]
-    fn decompress_c_jr_ra_now_reserved() {
-        // `c.jr ra` (= 0x8082) — used to decompress to Retf;
-        // PVM2 now rejects it. Linker rewrites returns to br_table.
+    fn decompress_c_jr_ra_is_jalr() {
+        // `c.jr ra` (= 0x8082) decompresses to `jalr x0, x1, 0` — the
+        // canonical return. A terminator validated against bb_starts at
+        // runtime.
         let bytes = 0x8082u16.to_le_bytes();
-        let decoded = decode(&bytes).unwrap().0;
-        assert!(matches!(decoded, Inst::Reserved { .. }));
+        assert_eq!(
+            decode(&bytes),
+            Some((Inst::Jalr { rd: 0, rs1: 1, imm: 0 }, 2))
+        );
+    }
+
+    #[test]
+    fn decompress_c_jalr_ra_is_jalr_link() {
+        // `c.jalr ra` (= 0x9082) decompresses to `jalr x1, x1, 0` — an
+        // indirect call (writes the link register). c.ebreak (0x9002,
+        // rs1=0) stays Reserved.
+        assert_eq!(
+            decode(&0x9082u16.to_le_bytes()),
+            Some((Inst::Jalr { rd: 1, rs1: 1, imm: 0 }, 2))
+        );
+        assert!(matches!(
+            decode(&0x9002u16.to_le_bytes()).unwrap().0,
+            Inst::Reserved { .. }
+        ));
     }
 }

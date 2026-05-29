@@ -327,7 +327,7 @@ mod tests {
     use super::*;
 
     fn make_entry(tag: u8) -> InstanceEntry {
-        let prog = Arc::new(Program::new(vec![0x0B, 0x00, 0x00, 0x00], vec![], vec![0]));
+        let prog = Arc::new(Program::new(vec![0x0B, 0x00, 0x00, 0x00], 0));
         let cnode = CNodeCap::new(8).unwrap();
         InstanceEntry {
             instance_ref: CapHashOrRef::Hash([tag; 32]),
