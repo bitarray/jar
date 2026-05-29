@@ -1200,6 +1200,15 @@ impl Compiler {
 
             let inst_pc = pc as u32;
 
+            // Page starts are gas-block starts (PVM2 invariant 11),
+            // mirroring `predecode` so the interp and recompiler agree on
+            // the block partition and so lazy per-page compilation can
+            // enter each page at a dispatchable block. Trustless: derived
+            // from PC, not linker metadata.
+            if inst_pc.is_multiple_of(javm_exec::PAGE_SIZE) {
+                next_is_gas_start = true;
+            }
+
             if next_is_gas_start {
                 self.bind_rv_gas_block_start_streaming(inst_pc, &mut pending_gas);
                 next_is_gas_start = false;
@@ -1211,7 +1220,20 @@ impl Compiler {
             // for lookahead fusion (e.g., Ld→Add fuses an extra 4-byte
             // Add). `preserve_cf` tells us whether to keep
             // `last_add_cf` alive for a following Sltu fusion.
-            let rest = &code[pc + base_len..];
+            // Suppress instruction fusion across a page boundary: the
+            // next instruction starts a 4 KiB page, which is a gas-block
+            // start (invariant 11) that predecode always splits on.
+            // Fusing the trailer into this block would diverge the
+            // recompiler's block partition (and thus its per-block gas)
+            // from the interp's. `rest` is lookahead-only — an empty
+            // slice forces the trailer to compile as its own
+            // page-starting block next iteration.
+            let next_inst_pc = inst_pc + base_len as u32;
+            let rest: &[u8] = if next_inst_pc.is_multiple_of(javm_exec::PAGE_SIZE) {
+                &[]
+            } else {
+                &code[pc + base_len..]
+            };
             let (term, preserve_cf, extra) = if is_4byte {
                 let w = u32::from_le_bytes([code[pc], code[pc + 1], code[pc + 2], code[pc + 3]]);
                 self.compile_rv4(w, inst_pc, 4, rest)
