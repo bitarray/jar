@@ -112,7 +112,7 @@ impl BuiltCaps {
         let cnode_hash = ssz::hash_tree_root(&cnode_cap);
 
         // 4. Build the Instance with the bench's flat overlay layout.
-        let (mem_size, overlays) = build_overlays(image);
+        let (mem_size, overlays) = image.data_overlays();
         let overlay_slices: Vec<(u32, &[u8])> = overlays
             .iter()
             .map(|(start, bytes)| (*start, bytes.as_slice()))
@@ -272,35 +272,6 @@ pub fn reset_nub_hyperlight() {
     *g = Some(Nub::new_hyperlight().expect("Hyperlight sandbox"));
 }
 
-/// Walk the Image's memory mappings + slot contents and produce
-/// `(mem_size, overlays)` for the InstanceCap. Each non-empty content
-/// becomes one `(start, bytes)` overlay; stack/heap are empty inside
-/// `mem_size` as zero-init RW pages.
-fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
-    let mut mem_size: u32 = 0;
-    let mut overlays: Vec<(u32, Vec<u8>)> = Vec::new();
-
-    // `memory_mappings` describes data/slot regions only; code is RO
-    // direct-mapped at CODE_BASE by the runtime, not copied into the
-    // flat RW buffer.
-    for mapping in &image.memory_mappings {
-        let target = mapping.source.target();
-
-        let end = (mapping.start + mapping.size) as u32;
-        if end > mem_size {
-            mem_size = end;
-        }
-
-        if let Some(PinnedCap::Data { content, .. }) = image.pinned_slots.get(&target) {
-            if !content.is_empty() {
-                overlays.push((mapping.start as u32, content.clone()));
-            }
-        } else if let Some(init) = image.initial_slots.get(&target)
-            && !init.content.is_empty()
-        {
-            overlays.push((mapping.start as u32, init.content.clone()));
-        }
-    }
-
-    (mem_size, overlays)
-}
+// Instance memory overlays are derived by `Image::data_overlays()` in
+// javm-cap (the single source of truth shared with the kernel +
+// conformance paths).

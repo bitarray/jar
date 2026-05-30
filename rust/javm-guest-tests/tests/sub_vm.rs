@@ -86,7 +86,7 @@ fn m_calls_s_round_trip() {
     let m_cnode_hash = cache.put_cap(&Cap::CNode(m_cnode)).expect("put cnode");
 
     // Build M's runtime memory layout from its image mappings.
-    let (mem_size, overlays) = build_overlays(&m_image);
+    let (mem_size, overlays) = m_image.data_overlays();
     let overlay_slices: Vec<(u32, &[u8])> =
         overlays.iter().map(|(s, b)| (*s, b.as_slice())).collect();
 
@@ -173,26 +173,4 @@ fn collect_initial_hashes(
     out
 }
 
-fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
-    let mut mem_size: u32 = 0;
-    let mut overlays = Vec::new();
-    // Code is RO direct-mapped at CODE_BASE by the runtime, not a
-    // flat-buffer overlay; `memory_mappings` lists data/slot regions only.
-    for mapping in &image.memory_mappings {
-        let target = mapping.source.target();
-        let end = (mapping.start + mapping.size) as u32;
-        if end > mem_size {
-            mem_size = end;
-        }
-        if let Some(PinnedCap::Data { content, .. }) = image.pinned_slots.get(&target) {
-            if !content.is_empty() {
-                overlays.push((mapping.start as u32, content.clone()));
-            }
-        } else if let Some(init) = image.initial_slots.get(&target) {
-            if !init.content.is_empty() {
-                overlays.push((mapping.start as u32, init.content.clone()));
-            }
-        }
-    }
-    (mem_size, overlays)
-}
+// Instance memory overlays come from `Image::data_overlays()` (javm-cap).

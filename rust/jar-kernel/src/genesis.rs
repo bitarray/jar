@@ -244,10 +244,10 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     };
 
     // 8. Compute the chain Instance's memory layout from the image's
-    //    memory mappings. Mirrors the recomp path's build_overlays:
+    //    memory mappings via the canonical `Image::data_overlays()`:
     //    mem_size = max(start + size); rw_overlays come from the
     //    image's pinned/initial slot contents for each mapping.
-    let (mem_size, overlays) = build_overlays(&chain_image);
+    let (mem_size, overlays) = chain_image.data_overlays();
     let overlay_slices: Vec<(u32, &[u8])> = overlays
         .iter()
         .map(|(start, bytes)| (*start, bytes.as_slice()))
@@ -276,43 +276,9 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     })
 }
 
-/// Build memory overlays from the chain image's memory_mappings.
-/// Mirrors `javm-guest-tests::conformance::build_overlays`: for each
-/// mapping, look up the pinned or initial slot content at the
-/// mapping's target slot; record an overlay tuple if content is
-/// non-empty.
-///
-/// Returns `(mem_size, overlays)` where `mem_size = max(start+size)`
-/// over all mappings.
-pub(crate) fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
-    use javm_cap::image::PinnedCap;
-    let mut mem_size: u32 = 0;
-    let mut overlays: Vec<(u32, Vec<u8>)> = Vec::new();
-
-    // `memory_mappings` describes data/slot regions only; code is
-    // RO-mapped separately by the runtime (a direct-map at CODE_BASE),
-    // so it neither contributes an overlay nor extends mem_size.
-    for mapping in &image.memory_mappings {
-        let target = mapping.source.target();
-
-        let end = (mapping.start + mapping.size) as u32;
-        if end > mem_size {
-            mem_size = end;
-        }
-
-        if let Some(PinnedCap::Data { content, .. }) = image.pinned_slots.get(&target) {
-            if !content.is_empty() {
-                overlays.push((mapping.start as u32, content.clone()));
-            }
-        } else if let Some(init) = image.initial_slots.get(&target)
-            && !init.content.is_empty()
-        {
-            overlays.push((mapping.start as u32, init.content.clone()));
-        }
-    }
-
-    (mem_size, overlays)
-}
+// Instance memory overlays are derived by `Image::data_overlays()` in
+// javm-cap — the single source of truth shared with the recompiler
+// bench harness and the conformance oracle.
 
 /// A minimal well-formed Image used as a placeholder for kernel-
 /// issued unit caps. The image is never actually invoked — kernel
