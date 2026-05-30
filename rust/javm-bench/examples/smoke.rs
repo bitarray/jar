@@ -101,7 +101,8 @@ mod imp {
             let img = Image::from_ssz_bytes(w.blob).expect("decode Image");
             eprintln!("  code={}B", img.code.len());
 
-            // Fresh Hyperlight sandbox per workload — pvm2_bench's
+            // Fresh Hyperlight sandbox per workload — the bench harness
+            // (`benches/bench.rs`)
             // `reset_nub_hyperlight()` exists precisely because cap-publish
             // state from prior workloads can deadlock `put_cap` after
             // ~13 publishes on one long-lived sandbox.

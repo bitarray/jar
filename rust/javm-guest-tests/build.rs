@@ -1,5 +1,5 @@
 //! Cross-compile this crate's `main.rs` for the JAVM target, transpile
-//! to a SCALE-encoded `Image`, and expose the blob path to the
+//! to a SSZ-encoded `Image`, and expose the blob path to the
 //! integration test via the `GUEST_TESTS_BLOB` environment variable.
 //!
 //! Mirrors `rust/jar-kernel/build.rs`. The `BUILD_CRATE_GUEST_BUILD`

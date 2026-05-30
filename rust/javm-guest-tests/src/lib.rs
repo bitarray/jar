@@ -9,7 +9,8 @@
 //!
 //! The conformance harness (`tests/conformance.rs`) calls every
 //! suite three ways — host native, byte-PVM interpreter (via
-//! `jar-kernel`), JIT recompiler (via `javm-exec`) — and asserts
+//! `jar-kernel`), JIT recompiler (via `nub::Nub` Hyperlight JIT,
+//! x86 codegen in `javm-recompiler-x86`) — and asserts
 //! the fingerprints agree, plus that the two PVM backends consume
 //! identical gas.
 //!

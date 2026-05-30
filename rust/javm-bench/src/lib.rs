@@ -1,4 +1,6 @@
-//! Shared runners for `benches/pvm_bench.rs` and `benches/stark_bench.rs`.
+//! Shared runners for the bench harness (`benches/bench.rs`) and the
+//! sub-VM benches (`benches/sub_vm_recurse.rs`,
+//! `benches/sub_vm_data_recurse.rs`).
 //!
 //! The bench measures the full per-invocation lifecycle:
 //!   * `Nub::put_cap_with_hash` for each cap the invocation requires
@@ -21,7 +23,6 @@
 //! Linux x86-64 only — `nub` pulls the Hyperlight host stack
 //! unconditionally.
 
-#![cfg_attr(not(all(target_os = "linux", target_arch = "x86_64")), allow(unused))]
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
 use javm_cap::NUM_REGS;
@@ -225,21 +226,6 @@ pub fn run_interpreter(built: &BuiltCaps) -> (u64, u64) {
 pub fn run_recompiler(built: &BuiltCaps) -> (u64, u64) {
     let mut nub = nub_hyperlight_lock();
     built.put_into(&mut nub);
-    let result = nub
-        .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
-        .unwrap_or_else(|e| panic!("recompiler invoke_cached: {e}"));
-    finish(&result)
-}
-
-/// Cold-cache variant: clear the JIT compile cache before each
-/// invocation so the call pays the full predecode + recompile cost
-/// alongside execute. Models a PolkaVM-shaped workload where each
-/// guest invocation may face a fresh Image hash.
-pub fn run_recompiler_cold(built: &BuiltCaps) -> (u64, u64) {
-    let mut nub = nub_hyperlight_lock();
-    built.put_into(&mut nub);
-    nub.evict_jit_all()
-        .unwrap_or_else(|e| panic!("recompiler evict_jit_all: {e}"));
     let result = nub
         .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
         .unwrap_or_else(|e| panic!("recompiler invoke_cached: {e}"));

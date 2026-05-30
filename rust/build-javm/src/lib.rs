@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use build_crate::{BuildKind, GuestBuild};
 use ssz::Encode;
 
-/// PVM2 target spec: RV64EM+C+Zba+Zbs+Zicond. Used by [`build`].
+/// PVM2 target spec: RV64EMC + Zbb/Zba/Zbs/Zicond/Zicclsm. Used by [`build`].
 const TARGET_JSON: &str = include_str!("riscv64emc-pvm2.json");
 const TARGET_NAME: &str = "riscv64emc-pvm2";
 
@@ -20,7 +20,7 @@ fn watch_transpiler_sources() {
 }
 
 /// Build a PVM2 blob from a service crate. The guest is built for the
-/// RV+C+Zbb+Zba+Zbs+Zicond target and the ELF is linked via
+/// RV64EMC + Zbb/Zba/Zbs/Zicond/Zicclsm target and the ELF is linked via
 /// [`javm_transpiler::linker::link_elf`] — `Image::code` holds raw
 /// RV+C+custom-0 bytes consumed directly by the recompiler / interpreter.
 pub fn build(manifest_dir: &str, bin_name: &str) -> PathBuf {
@@ -62,8 +62,7 @@ pub fn build(manifest_dir: &str, bin_name: &str) -> PathBuf {
 
     let elf_path = guest.build();
     let elf_data = std::fs::read(&elf_path).expect("failed to read ELF");
-    let image =
-        javm_transpiler::linker::link_elf(&elf_data).expect("failed to link ELF to Cap::Image");
+    let image = javm_transpiler::linker::link_elf(&elf_data).expect("failed to link ELF to Image");
     let encoded = image.as_ssz_bytes();
 
     std::fs::write(&blob_path, &encoded).expect("failed to write Image blob");

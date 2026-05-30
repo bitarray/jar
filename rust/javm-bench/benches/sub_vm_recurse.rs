@@ -115,8 +115,8 @@ fn build_and_publish(nub: &mut Nub, depth_seed: u64) -> Built {
         }
     }
     // Materialise rw_overlays so the top frame sees the actual
-    // .rodata / .data bytes. Same layout used by `javm-bench`'s
-    // existing pvm_bench harness — pinned `Data` content and
+    // .rodata / .data bytes. Same layout used by the
+    // existing javm-bench harness (`BuiltCaps::for_image`) — pinned `Data` content and
     // non-empty initial-slot content map onto `(start, bytes)`
     // overlays at the mapping's start.
     let mut mem_size: u32 = 0;
