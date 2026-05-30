@@ -18,29 +18,15 @@ use std::any::type_name;
 use std::ffi::c_void;
 use std::io::Error;
 use std::mem::{align_of, size_of};
-#[cfg(target_os = "linux")]
 use std::ptr::null_mut;
 use std::sync::{Arc, RwLock};
 
 use nub_host_common::mem::PAGE_SIZE_USIZE;
 use tracing::{Span, instrument};
-#[cfg(target_os = "windows")]
-use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-#[cfg(target_os = "windows")]
-use windows::Win32::System::Memory::PAGE_READWRITE;
-#[cfg(target_os = "windows")]
-use windows::Win32::System::Memory::{
-    CreateFileMappingA, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
-    PAGE_NOACCESS, PAGE_PROTECTION_FLAGS, UnmapViewOfFile, VirtualProtect,
-};
-#[cfg(target_os = "windows")]
-use windows::core::PCSTR;
 
 use super::memory_region::{
     HostGuestMemoryRegion, MemoryRegion, MemoryRegionFlags, MemoryRegionKind, MemoryRegionType,
 };
-#[cfg(target_os = "windows")]
-use crate::HyperlightError::WindowsAPIError;
 use crate::{HyperlightError, Result, log_then_return, new_error};
 
 /// Makes sure that the given `offset` and `size` are within the bounds of the memory with size `mem_size`.
@@ -95,34 +81,14 @@ macro_rules! generate_writer {
 pub struct HostMapping {
     ptr: *mut u8,
     size: usize,
-    #[cfg(target_os = "windows")]
-    handle: HANDLE,
 }
 
 impl Drop for HostMapping {
-    #[cfg(target_os = "linux")]
     fn drop(&mut self) {
         use libc::munmap;
 
         unsafe {
             munmap(self.ptr as *mut c_void, self.size);
-        }
-    }
-    #[cfg(target_os = "windows")]
-    fn drop(&mut self) {
-        let mem_mapped_address = MEMORY_MAPPED_VIEW_ADDRESS {
-            Value: self.ptr as *mut c_void,
-        };
-        if let Err(e) = unsafe { UnmapViewOfFile(mem_mapped_address) } {
-            tracing::error!(
-                "Failed to drop HostMapping (UnmapViewOfFile failed): {:?}",
-                e
-            );
-        }
-
-        let file_handle: HANDLE = self.handle;
-        if let Err(e) = unsafe { CloseHandle(file_handle) } {
-            tracing::error!("Failed to  drop HostMapping (CloseHandle failed): {:?}", e);
         }
     }
 }
@@ -299,24 +265,6 @@ unsafe impl Send for GuestSharedMemory {}
 /// \[4\] P1152R0: Deprecating `volatile`. JF Bastien. <https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p1152r0.html>
 /// \[5\] P1382R1: `volatile_load<T>` and `volatile_store<T>`. JF Bastien, Paul McKenney, Jeffrey Yasskin, and the indefatigable TBD. <https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1382r1.pdf>
 /// \[6\] Documentation for std::sync::atomic::fence. <https://doc.rust-lang.org/std/sync/atomic/fn.fence.html>
-///
-/// # Note \[Keeping mappings in sync between userspace and the guest\]
-///
-/// When using this structure with mshv on Linux, it is necessary to
-/// be a little bit careful: since the hypervisor is not directly
-/// integrated with the host kernel virtual memory subsystem, it is
-/// easy for the memory region in userspace to get out of sync with
-/// the memory region mapped into the guest.  Generally speaking, when
-/// the [`SharedMemory`] is mapped into a partition, the MSHV kernel
-/// module will call `pin_user_pages(FOLL_PIN|FOLL_WRITE)` on it,
-/// which will eagerly do any CoW, etc needing to obtain backing pages
-/// pinned in memory, and then map precisely those backing pages into
-/// the virtual machine. After that, the backing pages mapped into the
-/// VM will not change until the region is unmapped or remapped.  This
-/// means that code in this module needs to be very careful to avoid
-/// changing the backing pages of the region in the host userspace,
-/// since that would result in hyperlight-host's view of the memory
-/// becoming completely divorced from the view of the VM.
 #[derive(Clone, Debug)]
 pub struct HostSharedMemory {
     region: Arc<HostMapping>,
@@ -329,7 +277,6 @@ impl ExclusiveSharedMemory {
     /// size in bytes. The region will be surrounded by guard pages.
     ///
     /// Return `Err` if shared memory could not be allocated.
-    #[cfg(target_os = "linux")]
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn new(min_size_bytes: usize) -> Result<Self> {
         use libc::{
@@ -421,124 +368,6 @@ impl ExclusiveSharedMemory {
             region: Arc::new(HostMapping {
                 ptr: addr as *mut u8,
                 size: total_size,
-            }),
-        })
-    }
-
-    /// Create a new region of shared memory with the given minimum
-    /// size in bytes. The region will be surrounded by guard pages.
-    ///
-    /// Return `Err` if shared memory could not be allocated.
-    #[cfg(target_os = "windows")]
-    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub fn new(min_size_bytes: usize) -> Result<Self> {
-        if min_size_bytes == 0 {
-            return Err(new_error!("Cannot create shared memory with size 0"));
-        }
-
-        let total_size = min_size_bytes
-            .checked_add(2 * PAGE_SIZE_USIZE)
-            .ok_or_else(|| new_error!("Memory required for sandbox exceeded {}", usize::MAX))?;
-
-        if total_size % PAGE_SIZE_USIZE != 0 {
-            return Err(new_error!(
-                "shared memory must be a multiple of {}",
-                PAGE_SIZE_USIZE
-            ));
-        }
-
-        // usize and isize are guaranteed to be the same size, and
-        // isize::MAX should be positive, so this cast should be safe.
-        if total_size > isize::MAX as usize {
-            return Err(HyperlightError::MemoryRequestTooBig(
-                total_size,
-                isize::MAX as usize,
-            ));
-        }
-
-        let mut dwmaximumsizehigh = 0;
-        let mut dwmaximumsizelow = 0;
-
-        if std::mem::size_of::<usize>() == 8 {
-            dwmaximumsizehigh = (total_size >> 32) as u32;
-            dwmaximumsizelow = (total_size & 0xFFFFFFFF) as u32;
-        }
-
-        // Allocate the memory use CreateFileMapping instead of VirtualAlloc
-        // This allows us to map the memory into the surrogate process using MapViewOfFile2
-
-        let flags = PAGE_READWRITE;
-
-        let handle = unsafe {
-            CreateFileMappingA(
-                INVALID_HANDLE_VALUE,
-                None,
-                flags,
-                dwmaximumsizehigh,
-                dwmaximumsizelow,
-                PCSTR::null(),
-            )?
-        };
-
-        if handle.is_invalid() {
-            log_then_return!(HyperlightError::MemoryAllocationFailed(
-                Error::last_os_error().raw_os_error()
-            ));
-        }
-
-        let file_map = FILE_MAP_ALL_ACCESS;
-        let addr = unsafe { MapViewOfFile(handle, file_map, 0, 0, 0) };
-
-        if addr.Value.is_null() {
-            log_then_return!(HyperlightError::MemoryAllocationFailed(
-                Error::last_os_error().raw_os_error()
-            ));
-        }
-
-        // Set the first and last pages to be guard pages
-
-        let mut unused_out_old_prot_flags = PAGE_PROTECTION_FLAGS(0);
-
-        // If the following calls to VirtualProtect are changed make sure to update the calls to VirtualProtectEx in surrogate_process_manager.rs
-
-        let first_guard_page_start = addr.Value;
-        if let Err(e) = unsafe {
-            VirtualProtect(
-                first_guard_page_start,
-                PAGE_SIZE_USIZE,
-                PAGE_NOACCESS,
-                &mut unused_out_old_prot_flags,
-            )
-        } {
-            log_then_return!(WindowsAPIError(e.clone()));
-        }
-
-        let last_guard_page_start = unsafe { addr.Value.add(total_size - PAGE_SIZE_USIZE) };
-        if let Err(e) = unsafe {
-            VirtualProtect(
-                last_guard_page_start,
-                PAGE_SIZE_USIZE,
-                PAGE_NOACCESS,
-                &mut unused_out_old_prot_flags,
-            )
-        } {
-            log_then_return!(WindowsAPIError(e.clone()));
-        }
-
-        Ok(Self {
-            // HostMapping is only non-Send/Sync because raw pointers
-            // are not ("as a lint", as the Rust docs say). We don't
-            // want to mark HostMapping Send/Sync immediately, because
-            // that could socially imply that it's "safe" to use
-            // unsafe accesses from multiple threads at once. Instead, we
-            // directly impl Send and Sync on this type. Since this
-            // type does have Send and Sync manually impl'd, the Arc
-            // is not pointless as the lint suggests.
-            #[allow(clippy::arc_with_non_send_sync)]
-            region: Arc::new(HostMapping {
-                ptr: addr.Value as *mut u8,
-                size: total_size,
-                handle,
             }),
         })
     }
@@ -650,24 +479,6 @@ impl ExclusiveSharedMemory {
             },
         )
     }
-
-    /// Gets the file handle of the shared memory region for this Sandbox
-    #[cfg(target_os = "windows")]
-    pub fn get_mmap_file_handle(&self) -> HANDLE {
-        self.region.handle
-    }
-
-    /// Create a [`HostSharedMemory`] view of this region without
-    /// consuming `self`. Used in tests where the full `build()` /
-    /// `evolve()` pipeline is not available.
-    #[cfg(all(test, feature = "guest-counter"))]
-    pub(crate) fn as_host_shared_memory(&self) -> HostSharedMemory {
-        let lock = Arc::new(RwLock::new(()));
-        HostSharedMemory {
-            region: self.region.clone(),
-            lock,
-        }
-    }
 }
 
 fn mapping_at(
@@ -700,19 +511,13 @@ impl GuestSharedMemory {
             MemoryRegionType::Scratch => {
                 MemoryRegionFlags::READ | MemoryRegionFlags::WRITE | MemoryRegionFlags::EXECUTE
             }
-            #[cfg(unshared_snapshot_mem)]
-            MemoryRegionType::Snapshot => {
-                MemoryRegionFlags::READ | MemoryRegionFlags::WRITE | MemoryRegionFlags::EXECUTE
-            }
             #[allow(clippy::panic)]
             // This will not ever actually panic: the only places this
             // is called are HyperlightVm::update_snapshot_mapping and
             // HyperlightVm::update_scratch_mapping. The latter
             // statically uses the Scratch region type, and the former
-            // does not use this at all when the unshared_snapshot_mem
-            // feature is not set, since in that case the scratch
-            // mapping type is ReadonlySharedMemory, not
-            // GuestSharedMemory.
+            // does not use this at all — the snapshot scratch mapping is
+            // a ReadonlySharedMemory, not a GuestSharedMemory.
             _ => panic!(
                 "GuestSharedMemory::mapping_at should only be used for Scratch or Snapshot regions"
             ),
@@ -767,23 +572,9 @@ pub trait SharedMemory {
     /// Extract a base address that can be mapped into a VM for this
     /// SharedMemory.
     ///
-    /// On Linux this returns a raw `usize` pointer. On Windows it
-    /// returns a `HostRegionBase` (see `super::memory_region`)
-    /// that carries the file-mapping handle metadata needed by WHP.
+    /// Returns the host base address as a raw `usize` pointer.
     fn host_region_base(&self) -> <HostGuestMemoryRegion as MemoryRegionKind>::HostBaseType {
-        #[cfg(not(windows))]
-        {
-            self.base_addr()
-        }
-        #[cfg(windows)]
-        {
-            super::memory_region::HostRegionBase {
-                from_handle: self.region().handle.into(),
-                handle_base: self.region().ptr as usize,
-                handle_size: self.region().size,
-                offset: PAGE_SIZE_USIZE,
-            }
-        }
+        self.base_addr()
     }
 
     /// Return the end address of the host region (base + usable size).
@@ -816,9 +607,7 @@ pub trait SharedMemory {
             #[allow(unused_mut)] // unused on some platforms, although not others
             let mut do_copy = true;
             // TODO: Compare & add heuristic thresholds: mmap, MADV_DONTNEED, MADV_REMOVE, MADV_FREE (?)
-            // TODO: Find a similar lazy zeroing approach that works on MSHV.
-            //       (See Note [Keeping mappings in sync between userspace and the guest])
-            #[cfg(all(target_os = "linux", feature = "kvm", not(any(feature = "mshv3"))))]
+            #[cfg(feature = "kvm")]
             unsafe {
                 let ret = libc::madvise(
                     e.region.ptr as *mut libc::c_void,
@@ -1287,7 +1076,6 @@ pub struct ReadonlySharedMemory {
     region: Arc<HostMapping>,
     /// If `Some`, only this many bytes are mapped into guest PA space
     /// by `mapping_at`. If `None`, the full `mem_size()` is mapped.
-    #[cfg_attr(unshared_snapshot_mem, allow(dead_code))]
     guest_mapped_size: Option<usize>,
 }
 // Safety: HostMapping is only non-Send/Sync (causing
@@ -1315,7 +1103,6 @@ impl ReadonlySharedMemory {
 
     /// The number of bytes that should be mapped into guest PA space.
     /// Returns `guest_mapped_size` if set, otherwise `mem_size()`.
-    #[cfg(not(unshared_snapshot_mem))]
     pub(crate) fn guest_mapped_size(&self) -> usize {
         self.guest_mapped_size.unwrap_or_else(|| self.mem_size())
     }
@@ -1324,19 +1111,10 @@ impl ReadonlySharedMemory {
         unsafe { std::slice::from_raw_parts(self.base_ptr(), self.mem_size()) }
     }
 
-    #[cfg(unshared_snapshot_mem)]
-    pub(crate) fn copy_to_writable(&self) -> Result<ExclusiveSharedMemory> {
-        let mut writable = ExclusiveSharedMemory::new(self.mem_size())?;
-        writable.copy_from_slice(self.as_slice(), 0)?;
-        Ok(writable)
-    }
-
-    #[cfg(not(unshared_snapshot_mem))]
     pub(crate) fn build(self) -> (Self, Self) {
         (self.clone(), self)
     }
 
-    #[cfg(not(unshared_snapshot_mem))]
     pub(crate) fn mapping_at(
         &self,
         guest_base: u64,

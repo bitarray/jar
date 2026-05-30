@@ -13,13 +13,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
  */
-#[cfg(feature = "nanvix-unstable")]
-use std::mem::offset_of;
-
 use hyperlight_common::flatbuffer_wrappers::guest_log_data::GuestLogData;
 use nub_host_common::vmem::{self, PAGE_TABLE_SIZE};
-#[cfg(all(feature = "crashdump", not(feature = "i686-guest")))]
-use nub_host_common::vmem::{BasicMapping, MappingKind};
 use tracing::{Span, instrument};
 
 use super::layout::SandboxMemoryLayout;
@@ -27,80 +22,14 @@ use super::shared_mem::{
     ExclusiveSharedMemory, GuestSharedMemory, HostSharedMemory, ReadonlySharedMemory, SharedMemory,
 };
 use crate::Result;
-#[cfg(crashdump)]
-use crate::mem::memory_region::{CrashDumpRegion, MemoryRegionFlags, MemoryRegionType};
-#[allow(unused_imports)]
-use crate::new_error;
 use crate::sandbox::snapshot::{NextAction, Snapshot};
 
-#[cfg(all(feature = "crashdump", not(feature = "i686-guest")))]
-fn mapping_kind_to_flags(kind: &MappingKind) -> (MemoryRegionFlags, MemoryRegionType) {
-    match kind {
-        MappingKind::Basic(BasicMapping {
-            readable,
-            writable,
-            executable,
-        }) => {
-            let mut flags = MemoryRegionFlags::empty();
-            if *readable {
-                flags |= MemoryRegionFlags::READ;
-            }
-            if *writable {
-                flags |= MemoryRegionFlags::WRITE;
-            }
-            if *executable {
-                flags |= MemoryRegionFlags::EXECUTE;
-            }
-            (flags, MemoryRegionType::Snapshot)
-        }
-        MappingKind::Cow(cow) => {
-            let mut flags = MemoryRegionFlags::empty();
-            if cow.readable {
-                flags |= MemoryRegionFlags::READ;
-            }
-            if cow.executable {
-                flags |= MemoryRegionFlags::EXECUTE;
-            }
-            (flags, MemoryRegionType::Scratch)
-        }
-        MappingKind::Unmapped => (MemoryRegionFlags::empty(), MemoryRegionType::Snapshot),
-    }
-}
-
-/// Try to extend the last region in `regions` if the new page is contiguous
-/// in both guest and host address space and has the same flags.
-///
-/// Returns `true` if the region was coalesced, `false` if a new region is needed.
-#[cfg(all(feature = "crashdump", not(feature = "i686-guest")))]
-fn try_coalesce_region(
-    regions: &mut [CrashDumpRegion],
-    virt_base: usize,
-    virt_end: usize,
-    host_base: usize,
-    flags: MemoryRegionFlags,
-) -> bool {
-    if let Some(last) = regions.last_mut()
-        && last.guest_region.end == virt_base
-        && last.host_region.end == host_base
-        && last.flags == flags
-    {
-        last.guest_region.end = virt_end;
-        last.host_region.end = host_base + (virt_end - virt_base);
-        return true;
-    }
-    false
-}
-
-// It would be nice to have a simple type alias
-// `SnapshotSharedMemory<S: SharedMemory>` that abstracts over the
-// fact that the snapshot shared memory is `ReadonlySharedMemory`
-// normally, but there is (temporary) support for writable
-// `GuestSharedMemory` with `#[cfg(feature =
-// "i686-guest")]`. Unfortunately, rustc gets annoyed about an
-// unused type parameter, unless one goes to a little bit of effort to
-// trick it...
+// `SnapshotSharedMemory<S: SharedMemory>` is unconditionally
+// `ReadonlySharedMemory`, but it is expressed through an associated
+// type with an unused type parameter `S`. rustc rejects an unused type
+// parameter on a plain type alias, so this module wraps it in a trait
+// to placate the compiler.
 mod unused_hack {
-    #[cfg(not(unshared_snapshot_mem))]
     use crate::mem::shared_mem::ReadonlySharedMemory;
     use crate::mem::shared_mem::SharedMemory;
     pub trait SnapshotSharedMemoryT {
@@ -108,10 +37,7 @@ mod unused_hack {
     }
     pub struct SnapshotSharedMemory_;
     impl SnapshotSharedMemoryT for SnapshotSharedMemory_ {
-        #[cfg(not(unshared_snapshot_mem))]
         type T<S: SharedMemory> = ReadonlySharedMemory;
-        #[cfg(unshared_snapshot_mem)]
-        type T<S: SharedMemory> = S;
     }
     pub type SnapshotSharedMemory<S> = <SnapshotSharedMemory_ as SnapshotSharedMemoryT>::T<S>;
 }
@@ -119,10 +45,7 @@ impl ReadonlySharedMemory {
     pub(crate) fn to_mgr_snapshot_mem(
         &self,
     ) -> Result<SnapshotSharedMemory<ExclusiveSharedMemory>> {
-        #[cfg(not(unshared_snapshot_mem))]
         let ret = self.clone();
-        #[cfg(unshared_snapshot_mem)]
-        let ret = self.copy_to_writable()?;
         Ok(ret)
     }
 }
@@ -327,67 +250,6 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
 }
 
 impl SandboxMemoryManager<HostSharedMemory> {
-    /// Write a [`FileMappingInfo`] entry into the PEB's preallocated array.
-    ///
-    /// Reads the current entry count from the PEB, validates that the
-    /// array isn't full ([`MAX_FILE_MAPPINGS`]), writes the entry at the
-    /// next available slot, and increments the count.
-    ///
-    /// This is the **only** place that writes to the PEB file mappings
-    /// array — both `MultiUseSandbox::map_file_cow` and the evolve loop
-    /// call through here so the logic is not duplicated.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if [`MAX_FILE_MAPPINGS`] has been reached.
-    ///
-    /// [`FileMappingInfo`]: nub_host_common::mem::FileMappingInfo
-    /// [`MAX_FILE_MAPPINGS`]: nub_host_common::mem::MAX_FILE_MAPPINGS
-    #[cfg(feature = "nanvix-unstable")]
-    pub(crate) fn write_file_mapping_entry(
-        &mut self,
-        guest_addr: u64,
-        size: u64,
-        label: &[u8; nub_host_common::mem::FILE_MAPPING_LABEL_MAX_LEN + 1],
-    ) -> Result<()> {
-        use nub_host_common::mem::{FileMappingInfo, MAX_FILE_MAPPINGS};
-
-        // Read the current entry count from the PEB. This is the source
-        // of truth — it survives snapshot/restore because the PEB is
-        // part of shared memory that gets snapshotted.
-        let current_count =
-            self.shared_mem
-                .read::<u64>(self.layout.get_file_mappings_size_offset())? as usize;
-
-        if current_count >= MAX_FILE_MAPPINGS {
-            return Err(crate::new_error!(
-                "file mapping limit reached ({} of {})",
-                current_count,
-                MAX_FILE_MAPPINGS,
-            ));
-        }
-
-        // Write the entry into the next available slot.
-        let entry_offset = self.layout.get_file_mappings_array_offset()
-            + current_count * std::mem::size_of::<FileMappingInfo>();
-        let guest_addr_offset = offset_of!(FileMappingInfo, guest_addr);
-        let size_offset = offset_of!(FileMappingInfo, size);
-        let label_offset = offset_of!(FileMappingInfo, label);
-        self.shared_mem
-            .write::<u64>(entry_offset + guest_addr_offset, guest_addr)?;
-        self.shared_mem
-            .write::<u64>(entry_offset + size_offset, size)?;
-        self.shared_mem
-            .copy_from_slice(label, entry_offset + label_offset)?;
-
-        // Increment the entry count.
-        let new_count = (current_count + 1) as u64;
-        self.shared_mem
-            .write::<u64>(self.layout.get_file_mappings_size_offset(), new_count)?;
-
-        Ok(())
-    }
-
     /// Push raw bytes (e.g. a rkyv-archived `Request` envelope) onto
     /// the guest's input data ring.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
@@ -513,238 +375,11 @@ impl SandboxMemoryManager<HostSharedMemory> {
         let snapshot_pt_size = self.layout.get_pt_size();
         let snapshot_pt_start = snapshot_pt_end - snapshot_pt_size;
         self.scratch_mem.with_exclusivity(|scratch| {
-            #[cfg(not(unshared_snapshot_mem))]
             let bytes = &self.shared_mem.as_slice()[snapshot_pt_start..snapshot_pt_end];
-            #[cfg(unshared_snapshot_mem)]
-            let bytes = {
-                let mut bytes = vec![0u8; snapshot_pt_size];
-                self.shared_mem
-                    .copy_to_slice(&mut bytes, snapshot_pt_start)?;
-                bytes
-            };
             #[allow(clippy::needless_borrow)]
             scratch.copy_from_slice(&bytes, self.layout.get_pt_base_scratch_offset())
         })??;
 
         Ok(())
-    }
-
-    /// Build the list of guest memory regions for a crash dump.
-    ///
-    /// By default, walks the guest page tables to discover
-    /// GVA→GPA mappings and translates them to host-backed regions.
-    #[cfg(all(feature = "crashdump", not(feature = "i686-guest")))]
-    pub(crate) fn get_guest_memory_regions(
-        &mut self,
-        root_pt: u64,
-        mmap_regions: &[MemoryRegion],
-    ) -> Result<Vec<CrashDumpRegion>> {
-        use crate::sandbox::snapshot::SharedMemoryPageTableBuffer;
-
-        let len = nub_host_common::layout::MAX_GVA;
-
-        let regions = self.shared_mem.with_contents(|snapshot| {
-            self.scratch_mem.with_contents(|scratch| {
-                let pt_buf =
-                    SharedMemoryPageTableBuffer::new(snapshot, scratch, self.layout, root_pt);
-
-                let mappings: Vec<_> =
-                    unsafe { nub_host_common::vmem::virt_to_phys(&pt_buf, 0, len as u64) }
-                        .collect();
-
-                if mappings.is_empty() {
-                    return Err(new_error!("No page table mappings found (len {len})",));
-                }
-
-                let mut regions: Vec<CrashDumpRegion> = Vec::new();
-                for mapping in &mappings {
-                    let virt_base = mapping.virt_base as usize;
-                    let virt_end = (mapping.virt_base + mapping.len) as usize;
-
-                    if let Some(resolved) = self.layout.resolve_gpa(mapping.phys_base, mmap_regions)
-                    {
-                        let (flags, region_type) = mapping_kind_to_flags(&mapping.kind);
-                        let resolved = resolved.with_memories(snapshot, scratch);
-                        let contents = resolved.as_ref();
-                        let host_base = contents.as_ptr() as usize;
-                        let host_len = (mapping.len as usize).min(contents.len());
-
-                        if try_coalesce_region(&mut regions, virt_base, virt_end, host_base, flags)
-                        {
-                            continue;
-                        }
-
-                        regions.push(CrashDumpRegion {
-                            guest_region: virt_base..virt_end,
-                            host_region: host_base..host_base + host_len,
-                            flags,
-                            region_type,
-                        });
-                    }
-                }
-
-                Ok(regions)
-            })
-        })???;
-
-        Ok(regions)
-    }
-
-    /// Build the list of guest memory regions for a crash dump (non-paging).
-    ///
-    /// Without paging, GVA == GPA (identity mapped), so we return the
-    /// snapshot and scratch regions directly at their known addresses
-    /// alongside any dynamic mmap regions.
-    #[cfg(all(feature = "crashdump", feature = "i686-guest"))]
-    pub(crate) fn get_guest_memory_regions(
-        &mut self,
-        _root_pt: u64,
-        mmap_regions: &[MemoryRegion],
-    ) -> Result<Vec<CrashDumpRegion>> {
-        use crate::mem::memory_region::HostGuestMemoryRegion;
-
-        let snapshot_base = SandboxMemoryLayout::BASE_ADDRESS;
-        let snapshot_size = self.shared_mem.mem_size();
-        let snapshot_host = self.shared_mem.base_addr();
-
-        let scratch_size = self.scratch_mem.mem_size();
-        let scratch_gva = nub_host_common::layout::scratch_base_gva(scratch_size) as usize;
-        let scratch_host = self.scratch_mem.base_addr();
-
-        let mut regions = vec![
-            CrashDumpRegion {
-                guest_region: snapshot_base..snapshot_base + snapshot_size,
-                host_region: snapshot_host..snapshot_host + snapshot_size,
-                flags: MemoryRegionFlags::READ | MemoryRegionFlags::EXECUTE,
-                region_type: MemoryRegionType::Snapshot,
-            },
-            CrashDumpRegion {
-                guest_region: scratch_gva..scratch_gva + scratch_size,
-                host_region: scratch_host..scratch_host + scratch_size,
-                flags: MemoryRegionFlags::READ
-                    | MemoryRegionFlags::WRITE
-                    | MemoryRegionFlags::EXECUTE,
-                region_type: MemoryRegionType::Scratch,
-            },
-        ];
-        for rgn in mmap_regions {
-            regions.push(CrashDumpRegion {
-                guest_region: rgn.guest_region.clone(),
-                host_region: HostGuestMemoryRegion::to_addr(rgn.host_region.start)
-                    ..HostGuestMemoryRegion::to_addr(rgn.host_region.end),
-                flags: rgn.flags,
-                region_type: rgn.region_type,
-            });
-        }
-
-        Ok(regions)
-    }
-
-    /// Read guest memory at a Guest Virtual Address (GVA) by walking the
-    /// page tables to translate GVA → GPA, then reading from the correct
-    /// backing memory (shared_mem or scratch_mem).
-    ///
-    /// This is necessary because with Copy-on-Write (CoW) the guest's
-    /// virtual pages are backed by physical pages in the scratch
-    /// region rather than being identity-mapped.
-    ///
-    /// # Arguments
-    /// * `gva` - The Guest Virtual Address to read from
-    /// * `len` - The number of bytes to read
-    /// * `root_pt` - The root page table physical address (CR3)
-    #[cfg(feature = "trace_guest")]
-    pub(crate) fn read_guest_memory_by_gva(
-        &mut self,
-        gva: u64,
-        len: usize,
-        root_pt: u64,
-    ) -> Result<Vec<u8>> {
-        use nub_host_common::vmem::PAGE_SIZE;
-
-        use crate::sandbox::snapshot::{SharedMemoryPageTableBuffer, access_gpa};
-
-        self.shared_mem.with_contents(|snap| {
-            self.scratch_mem.with_contents(|scratch| {
-                let pt_buf = SharedMemoryPageTableBuffer::new(snap, scratch, self.layout, root_pt);
-
-                // Walk page tables to get all mappings that cover the GVA range
-                let mappings: Vec<_> = unsafe {
-                    nub_host_common::vmem::virt_to_phys(&pt_buf, gva, len as u64)
-                }
-                .collect();
-
-                if mappings.is_empty() {
-                    return Err(new_error!(
-                        "No page table mappings found for GVA {:#x} (len {})",
-                        gva,
-                        len,
-                    ));
-                }
-
-                // Resulting vector of bytes to return
-                let mut result = Vec::with_capacity(len);
-                let mut current_gva = gva;
-
-                for mapping in &mappings {
-                    // The page table walker should only return valid mappings
-                    // that cover our current read position.
-                    if mapping.virt_base > current_gva {
-                        return Err(new_error!(
-                            "Page table walker returned mapping with virt_base {:#x} > current read position {:#x}",
-                            mapping.virt_base,
-                            current_gva,
-                        ));
-                    }
-
-                    // Calculate the offset within this page where to start copying
-                    let page_offset = (current_gva - mapping.virt_base) as usize;
-
-                    let bytes_remaining = len - result.len();
-                    let available_in_page = PAGE_SIZE - page_offset;
-                    let bytes_to_copy = bytes_remaining.min(available_in_page);
-
-                    // Translate the GPA to host memory
-                    let gpa = mapping.phys_base + page_offset as u64;
-                    let (mem, offset) = access_gpa(snap, scratch, self.layout, gpa)
-                        .ok_or_else(|| {
-                            new_error!(
-                                "Failed to resolve GPA {:#x} to host memory (GVA {:#x})",
-                                gpa,
-                                gva
-                            )
-                        })?;
-
-                    let slice = mem
-                        .get(offset..offset + bytes_to_copy)
-                        .ok_or_else(|| {
-                            new_error!(
-                                "GPA {:#x} resolved to out-of-bounds host offset {} (need {} bytes)",
-                                gpa,
-                                offset,
-                                bytes_to_copy
-                            )
-                        })?;
-
-                    result.extend_from_slice(slice);
-                    current_gva += bytes_to_copy as u64;
-                }
-
-                if result.len() != len {
-                    tracing::error!(
-                        "Page table walker returned mappings that don't cover the full requested length: got {}, expected {}",
-                        result.len(),
-                        len,
-                    );
-                    return Err(new_error!(
-                        "Could not read full GVA range: got {} of {} bytes {:?}",
-                        result.len(),
-                        len,
-                        mappings
-                    ));
-                }
-
-                Ok(result)
-            })
-        })??
     }
 }

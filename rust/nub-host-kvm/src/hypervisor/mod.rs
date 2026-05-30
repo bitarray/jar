@@ -50,10 +50,6 @@ pub(crate) trait InterruptHandleImpl: InterruptHandle {
 
     /// Check if debug interrupt was requested (always returns false when gdb feature is disabled)
     fn is_debug_interrupted(&self) -> bool;
-
-    // Clear the debug interrupt request flag
-    #[cfg(gdb)]
-    fn clear_debug_interrupt(&self);
 }
 
 /// A trait for handling interrupts to a sandbox's vcpu
@@ -66,18 +62,6 @@ pub trait InterruptHandle: Send + Sync + Debug {
     /// # Note
     /// This function will block for the duration of the time it takes for the vcpu thread to be interrupted.
     fn kill(&self) -> bool;
-
-    /// Used by a debugger to interrupt the corresponding sandbox from running.
-    ///
-    /// - If this is called while the vcpu is running, then it will interrupt the vcpu and return `true`.
-    /// - If this is called while the vcpu is not running, (for example during a host call), the
-    ///   vcpu will not immediately be interrupted, but will prevent the vcpu from running **the next time**
-    ///   it's scheduled, and returns `false`.
-    ///
-    /// # Note
-    /// This function will block for the duration of the time it takes for the vcpu thread to be interrupted.
-    #[cfg(gdb)]
-    fn kill_from_debugger(&self) -> bool;
 
     /// Returns true if the corresponding sandbox has been dropped
     fn dropped(&self) -> bool;
@@ -117,8 +101,6 @@ pub(super) struct LinuxInterruptHandle {
 impl LinuxInterruptHandle {
     const RUNNING_BIT: u8 = 1 << 1;
     const CANCEL_BIT: u8 = 1 << 0;
-    #[cfg(gdb)]
-    const DEBUG_INTERRUPT_BIT: u8 = 1 << 2;
 
     /// Get the running, cancel and debug flags atomically.
     ///
@@ -129,9 +111,6 @@ impl LinuxInterruptHandle {
         let state = self.state.load(Ordering::Acquire);
         let running = state & Self::RUNNING_BIT != 0;
         let cancel = state & Self::CANCEL_BIT != 0;
-        #[cfg(gdb)]
-        let debug = state & Self::DEBUG_INTERRUPT_BIT != 0;
-        #[cfg(not(gdb))]
         let debug = false;
         (running, cancel, debug)
     }
@@ -201,20 +180,7 @@ impl InterruptHandleImpl for LinuxInterruptHandle {
     }
 
     fn is_debug_interrupted(&self) -> bool {
-        #[cfg(gdb)]
-        {
-            self.state.load(Ordering::Acquire) & Self::DEBUG_INTERRUPT_BIT != 0
-        }
-        #[cfg(not(gdb))]
-        {
-            false
-        }
-    }
-
-    #[cfg(gdb)]
-    fn clear_debug_interrupt(&self) {
-        self.state
-            .fetch_and(!Self::DEBUG_INTERRUPT_BIT, Ordering::Release);
+        false
     }
 
     fn set_dropped(&self) {
@@ -235,12 +201,6 @@ impl InterruptHandle for LinuxInterruptHandle {
         self.send_signal()
     }
 
-    #[cfg(gdb)]
-    fn kill_from_debugger(&self) -> bool {
-        self.state
-            .fetch_or(Self::DEBUG_INTERRUPT_BIT, Ordering::Release);
-        self.send_signal()
-    }
     fn dropped(&self) -> bool {
         // Acquire ordering to synchronize with the Release in set_dropped()
         // This ensures we see all VM cleanup operations that happened before drop

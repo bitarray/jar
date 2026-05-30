@@ -34,11 +34,9 @@ pub(crate) fn setup_signal_handlers(config: &SandboxConfiguration) -> crate::Res
     // the user of the library could have their own signal handlers that we don't want to
     // overwrite. The common practice there is to provide signal handling chaining, which
     // means that the signal is handled by all registered handlers from the last registered
-    // to the first. **Hyperlight does not provide signal chaining**. For SIGSYS, this is because,
-    // currently, Hyperlight handles SIGSYS signals by directly altering the instruction pointer at
-    // the time the syscall occurred to call a function that will panic the host function execution.
-    // For SIGRTMIN, this is because Hyperlight issues potentially 200 signals back-to-back and its
-    // likely that the embedder will not want to handle this.
+    // to the first. **Hyperlight does not provide signal chaining**. For SIGRTMIN, this is
+    // because Hyperlight issues potentially 200 signals back-to-back and its likely that the
+    // embedder will not want to handle this.
 
     Ok(())
 }

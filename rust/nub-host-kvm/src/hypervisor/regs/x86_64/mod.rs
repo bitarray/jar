@@ -23,6 +23,3 @@ pub(crate) use debug_regs::*;
 pub(crate) use fpu::*;
 pub(crate) use special_regs::*;
 pub(crate) use standard_regs::*;
-
-#[cfg(target_os = "windows")]
-pub(crate) use super::FromWhpRegisterError;

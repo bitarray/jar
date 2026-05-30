@@ -25,12 +25,8 @@ use tracing::{Span, instrument};
 use tracing_log::format_trace;
 
 use super::host_funcs::FunctionRegistry;
-#[cfg(feature = "mem_profile")]
-use crate::hypervisor::regs::CommonRegisters;
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::shared_mem::HostSharedMemory;
-#[cfg(feature = "mem_profile")]
-use crate::sandbox::trace::MemTraceInfo;
 
 /// Errors that can occur when handling an outb operation from the guest.
 #[derive(Debug, thiserror::Error)]
@@ -56,9 +52,6 @@ pub enum HandleOutbError {
     WriteHostFunctionResponse(String),
     #[error("Invalid character for debug print: {0}")]
     InvalidDebugPrintChar(u32),
-    #[cfg(feature = "mem_profile")]
-    #[error("Memory profiling error: {0}")]
-    MemProfile(String),
 }
 
 #[instrument(err(Debug), skip_all, parent = Span::current(), level="Trace")]
@@ -187,8 +180,6 @@ pub(crate) fn handle_outb(
     host_funcs: &Arc<Mutex<FunctionRegistry>>,
     port: u16,
     data: u32,
-    #[cfg(feature = "mem_profile")] regs: &CommonRegisters,
-    #[cfg(feature = "mem_profile")] trace_info: &mut MemTraceInfo,
 ) -> Result<(), HandleOutbError> {
     match port
         .try_into()
@@ -245,11 +236,5 @@ pub(crate) fn handle_outb(
             eprint!("{}", ch);
             Ok(())
         }
-        #[cfg(feature = "trace_guest")]
-        OutBAction::TraceBatch => Ok(()),
-        #[cfg(feature = "mem_profile")]
-        OutBAction::TraceMemoryAlloc => trace_info.handle_trace_mem_alloc(regs, mem_mgr),
-        #[cfg(feature = "mem_profile")]
-        OutBAction::TraceMemoryFree => trace_info.handle_trace_mem_free(regs, mem_mgr),
     }
 }

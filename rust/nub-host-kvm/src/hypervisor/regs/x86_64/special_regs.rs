@@ -14,18 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#[cfg(target_os = "windows")]
-use std::collections::HashSet;
-
 #[cfg(kvm)]
 use kvm_bindings::{kvm_dtable, kvm_segment, kvm_sregs};
-#[cfg(mshv3)]
-use mshv_bindings::{SegmentRegister, SpecialRegisters, TableRegister};
-#[cfg(target_os = "windows")]
-use windows::Win32::System::Hypervisor::*;
-
-#[cfg(target_os = "windows")]
-use super::FromWhpRegisterError;
 
 // CR0 bits used by both 32-bit and 64-bit guest
 const CR0_PE: u64 = 1;
@@ -33,7 +23,6 @@ const CR0_ET: u64 = 1 << 4;
 const CR0_WP: u64 = 1 << 16;
 const CR0_PG: u64 = 1 << 31;
 
-#[cfg(not(feature = "i686-guest"))]
 mod amd64_consts {
     pub(crate) const CR4_PAE: u64 = 1 << 5;
     pub(crate) const CR4_OSFXSR: u64 = 1 << 9;
@@ -46,7 +35,6 @@ mod amd64_consts {
     pub(crate) const EFER_SCE: u64 = 1;
     pub(crate) const EFER_NX: u64 = 1 << 11;
 }
-#[cfg(not(feature = "i686-guest"))]
 use amd64_consts::*;
 
 #[derive(Debug, Default, Copy, Clone, PartialEq)]
@@ -72,7 +60,6 @@ pub(crate) struct CommonSpecialRegisters {
 }
 
 impl CommonSpecialRegisters {
-    #[cfg(not(feature = "i686-guest"))]
     pub(crate) fn standard_64bit_defaults(root_pt_addr: u64) -> Self {
         CommonSpecialRegisters {
             cs: CommonSegmentRegister {
@@ -104,110 +91,6 @@ impl CommonSpecialRegisters {
             cr8: 0,
             apic_base: 0,
             interrupt_bitmap: [0; 4],
-        }
-    }
-
-    /// Returns special registers for 32-bit protected mode with paging enabled.
-    /// Used for i686 guests that need CoW page tables from boot.
-    #[cfg(feature = "i686-guest")]
-    pub(crate) fn standard_32bit_paging_defaults(root_pt_addr: u64) -> Self {
-        // Flat 32-bit code segment: base=0, limit=4GB, 32-bit, executable
-        let code_seg = CommonSegmentRegister {
-            base: 0,
-            selector: 0x08,
-            limit: 0xFFFFFFFF,
-            type_: 11, // Execute/Read, Accessed
-            present: 1,
-            s: 1,
-            db: 1, // 32-bit
-            g: 1,  // 4KB granularity
-            ..Default::default()
-        };
-        // Flat 32-bit data segment: base=0, limit=4GB, 32-bit, writable
-        let data_seg = CommonSegmentRegister {
-            base: 0,
-            selector: 0x10,
-            limit: 0xFFFFFFFF,
-            type_: 3, // Read/Write, Accessed
-            present: 1,
-            s: 1,
-            db: 1, // 32-bit
-            g: 1,  // 4KB granularity
-            ..Default::default()
-        };
-        let tr_seg = CommonSegmentRegister {
-            base: 0,
-            selector: 0,
-            limit: 0xFFFF,
-            type_: 11,
-            present: 1,
-            s: 0,
-            ..Default::default()
-        };
-        CommonSpecialRegisters {
-            cs: code_seg,
-            ds: data_seg,
-            es: data_seg,
-            ss: data_seg,
-            fs: data_seg,
-            gs: data_seg,
-            tr: tr_seg,
-            cr0: CR0_PE | CR0_ET | CR0_WP | CR0_PG,
-            cr3: root_pt_addr,
-            cr4: 0, // No PAE, no PSE
-            ..Default::default()
-        }
-    }
-}
-
-#[cfg(mshv3)]
-impl From<&SpecialRegisters> for CommonSpecialRegisters {
-    fn from(value: &SpecialRegisters) -> Self {
-        CommonSpecialRegisters {
-            cs: value.cs.into(),
-            ds: value.ds.into(),
-            es: value.es.into(),
-            fs: value.fs.into(),
-            gs: value.gs.into(),
-            ss: value.ss.into(),
-            tr: value.tr.into(),
-            ldt: value.ldt.into(),
-            gdt: value.gdt.into(),
-            idt: value.idt.into(),
-            cr0: value.cr0,
-            cr2: value.cr2,
-            cr3: value.cr3,
-            cr4: value.cr4,
-            cr8: value.cr8,
-            efer: value.efer,
-            apic_base: value.apic_base,
-            interrupt_bitmap: value.interrupt_bitmap,
-        }
-    }
-}
-
-#[cfg(mshv3)]
-impl From<&CommonSpecialRegisters> for SpecialRegisters {
-    fn from(other: &CommonSpecialRegisters) -> Self {
-        SpecialRegisters {
-            cs: other.cs.into(),
-            ds: other.ds.into(),
-            es: other.es.into(),
-            fs: other.fs.into(),
-            gs: other.gs.into(),
-            ss: other.ss.into(),
-            tr: other.tr.into(),
-            ldt: other.ldt.into(),
-            gdt: other.gdt.into(),
-            idt: other.idt.into(),
-            cr0: other.cr0,
-            cr2: other.cr2,
-            cr3: other.cr3,
-            cr4: other.cr4,
-            cr8: other.cr8,
-            efer: other.efer,
-            apic_base: other.apic_base,
-            interrupt_bitmap: other.interrupt_bitmap,
         }
     }
 }
@@ -264,168 +147,6 @@ impl From<&CommonSpecialRegisters> for kvm_sregs {
     }
 }
 
-/// WHV_REGISTER_VALUE must be 16-byte aligned, but the rust struct is incorrectly generated
-/// as 8-byte aligned. This is a workaround to ensure that the struct is 16-byte aligned.
-#[cfg(target_os = "windows")]
-#[repr(C, align(16))]
-#[derive(Debug, Default, Copy, Clone, PartialEq)]
-pub(crate) struct Align16<T>(pub(crate) T);
-
-#[cfg(target_os = "windows")]
-const _: () = {
-    assert!(
-        std::mem::size_of::<Align16<WHV_REGISTER_VALUE>>()
-            == std::mem::size_of::<WHV_REGISTER_VALUE>()
-    );
-};
-
-#[cfg(target_os = "windows")]
-pub(crate) const WHP_SREGS_NAMES_LEN: usize = 17;
-#[cfg(target_os = "windows")]
-pub(crate) static WHP_SREGS_NAMES: [WHV_REGISTER_NAME; WHP_SREGS_NAMES_LEN] = [
-    WHvX64RegisterCs,
-    WHvX64RegisterDs,
-    WHvX64RegisterEs,
-    WHvX64RegisterFs,
-    WHvX64RegisterGs,
-    WHvX64RegisterSs,
-    WHvX64RegisterTr,
-    WHvX64RegisterLdtr,
-    WHvX64RegisterGdtr,
-    WHvX64RegisterIdtr,
-    WHvX64RegisterCr0,
-    WHvX64RegisterCr2,
-    WHvX64RegisterCr3,
-    WHvX64RegisterCr4,
-    WHvX64RegisterCr8,
-    WHvX64RegisterEfer,
-    WHvX64RegisterApicBase,
-];
-
-#[cfg(target_os = "windows")]
-impl From<&CommonSpecialRegisters>
-    for [(WHV_REGISTER_NAME, Align16<WHV_REGISTER_VALUE>); WHP_SREGS_NAMES_LEN]
-{
-    fn from(other: &CommonSpecialRegisters) -> Self {
-        [
-            (WHvX64RegisterCs, Align16(other.cs.into())),
-            (WHvX64RegisterDs, Align16(other.ds.into())),
-            (WHvX64RegisterEs, Align16(other.es.into())),
-            (WHvX64RegisterFs, Align16(other.fs.into())),
-            (WHvX64RegisterGs, Align16(other.gs.into())),
-            (WHvX64RegisterSs, Align16(other.ss.into())),
-            (WHvX64RegisterTr, Align16(other.tr.into())),
-            (WHvX64RegisterLdtr, Align16(other.ldt.into())),
-            (WHvX64RegisterGdtr, Align16(other.gdt.into())),
-            (WHvX64RegisterIdtr, Align16(other.idt.into())),
-            (
-                WHvX64RegisterCr0,
-                Align16(WHV_REGISTER_VALUE { Reg64: other.cr0 }),
-            ),
-            (
-                WHvX64RegisterCr2,
-                Align16(WHV_REGISTER_VALUE { Reg64: other.cr2 }),
-            ),
-            (
-                WHvX64RegisterCr3,
-                Align16(WHV_REGISTER_VALUE { Reg64: other.cr3 }),
-            ),
-            (
-                WHvX64RegisterCr4,
-                Align16(WHV_REGISTER_VALUE { Reg64: other.cr4 }),
-            ),
-            (
-                WHvX64RegisterCr8,
-                Align16(WHV_REGISTER_VALUE { Reg64: other.cr8 }),
-            ),
-            (
-                WHvX64RegisterEfer,
-                Align16(WHV_REGISTER_VALUE { Reg64: other.efer }),
-            ),
-            (
-                WHvX64RegisterApicBase,
-                Align16(WHV_REGISTER_VALUE {
-                    Reg64: other.apic_base,
-                }),
-            ),
-        ]
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl TryFrom<&[(WHV_REGISTER_NAME, Align16<WHV_REGISTER_VALUE>)]> for CommonSpecialRegisters {
-    type Error = FromWhpRegisterError;
-
-    #[expect(
-        non_upper_case_globals,
-        reason = "Windows API has lowercase register names"
-    )]
-    fn try_from(
-        regs: &[(WHV_REGISTER_NAME, Align16<WHV_REGISTER_VALUE>)],
-    ) -> Result<Self, Self::Error> {
-        if regs.len() != WHP_SREGS_NAMES_LEN {
-            return Err(FromWhpRegisterError::InvalidLength(regs.len()));
-        }
-        let mut registers = CommonSpecialRegisters::default();
-        let mut seen_registers = HashSet::new();
-
-        for &(name, ref value) in regs {
-            let name_id = name.0;
-
-            // Check for duplicates
-            if !seen_registers.insert(name_id) {
-                return Err(FromWhpRegisterError::DuplicateRegister(name_id));
-            }
-
-            unsafe {
-                match name {
-                    WHvX64RegisterCs => registers.cs = value.0.into(),
-                    WHvX64RegisterDs => registers.ds = value.0.into(),
-                    WHvX64RegisterEs => registers.es = value.0.into(),
-                    WHvX64RegisterFs => registers.fs = value.0.into(),
-                    WHvX64RegisterGs => registers.gs = value.0.into(),
-                    WHvX64RegisterSs => registers.ss = value.0.into(),
-                    WHvX64RegisterTr => registers.tr = value.0.into(),
-                    WHvX64RegisterLdtr => registers.ldt = value.0.into(),
-                    WHvX64RegisterGdtr => registers.gdt = value.0.into(),
-                    WHvX64RegisterIdtr => registers.idt = value.0.into(),
-                    WHvX64RegisterCr0 => registers.cr0 = value.0.Reg64,
-                    WHvX64RegisterCr2 => registers.cr2 = value.0.Reg64,
-                    WHvX64RegisterCr3 => registers.cr3 = value.0.Reg64,
-                    WHvX64RegisterCr4 => registers.cr4 = value.0.Reg64,
-                    WHvX64RegisterCr8 => registers.cr8 = value.0.Reg64,
-                    WHvX64RegisterEfer => registers.efer = value.0.Reg64,
-                    WHvX64RegisterApicBase => registers.apic_base = value.0.Reg64,
-                    _ => {
-                        // Given unexpected register
-                        return Err(FromWhpRegisterError::InvalidRegister(name_id));
-                    }
-                }
-            }
-        }
-
-        // TODO: I'm not sure how to get this from WHP at the moment
-        registers.interrupt_bitmap = Default::default();
-
-        // Set of all expected register names
-        let expected_registers: HashSet<i32> =
-            WHP_SREGS_NAMES.map(|name| name.0).into_iter().collect();
-
-        // Technically it should not be possible to have any missing registers at this point
-        // since we are guaranteed to have WHP_SREGS_NAMES_LEN (17) non-duplicate registers that have passed the match-arm above, but leaving this here for safety anyway
-        let missing: HashSet<_> = expected_registers
-            .difference(&seen_registers)
-            .cloned()
-            .collect();
-
-        if !missing.is_empty() {
-            return Err(FromWhpRegisterError::MissingRegister(missing));
-        }
-
-        Ok(registers)
-    }
-}
-
 // --- Segment Register ---
 
 #[derive(Debug, Default, Copy, Clone, PartialEq)]
@@ -443,48 +164,6 @@ pub(crate) struct CommonSegmentRegister {
     pub avl: u8,
     pub unusable: u8,
     pub padding: u8,
-}
-
-#[cfg(mshv3)]
-impl From<SegmentRegister> for CommonSegmentRegister {
-    fn from(other: SegmentRegister) -> Self {
-        CommonSegmentRegister {
-            base: other.base,
-            limit: other.limit,
-            selector: other.selector,
-            type_: other.type_,
-            present: other.present,
-            dpl: other.dpl,
-            db: other.db,
-            s: other.s,
-            l: other.l,
-            g: other.g,
-            avl: other.avl,
-            unusable: other.unusable,
-            padding: other.padding,
-        }
-    }
-}
-
-#[cfg(mshv3)]
-impl From<CommonSegmentRegister> for SegmentRegister {
-    fn from(other: CommonSegmentRegister) -> Self {
-        SegmentRegister {
-            base: other.base,
-            limit: other.limit,
-            selector: other.selector,
-            type_: other.type_,
-            present: other.present,
-            dpl: other.dpl,
-            db: other.db,
-            s: other.s,
-            l: other.l,
-            g: other.g,
-            avl: other.avl,
-            unusable: other.unusable,
-            padding: other.padding,
-        }
-    }
 }
 
 #[cfg(kvm)]
@@ -529,93 +208,12 @@ impl From<CommonSegmentRegister> for kvm_segment {
     }
 }
 
-#[cfg(target_os = "windows")]
-impl From<WHV_REGISTER_VALUE> for CommonSegmentRegister {
-    fn from(other: WHV_REGISTER_VALUE) -> Self {
-        unsafe {
-            let segment = other.Segment;
-            let bits = segment.Anonymous.Attributes;
-
-            // Source of bit layout: https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/whvvirtualprocessordatatypes
-            CommonSegmentRegister {
-                base: segment.Base,
-                limit: segment.Limit,
-                selector: segment.Selector,
-                type_: (bits & 0b1111) as u8,    // bits 0–3: SegmentType
-                s: ((bits >> 4) & 0b1) as u8,    // bit 4: NonSystemSegment
-                dpl: ((bits >> 5) & 0b11) as u8, // bits 5–6: DPL
-                present: ((bits >> 7) & 0b1) as u8, // bit 7: Present
-                // bits 8–11: Reserved
-                avl: ((bits >> 12) & 0b1) as u8, // bit 12: Available
-                l: ((bits >> 13) & 0b1) as u8,   // bit 13: Long mode
-                db: ((bits >> 14) & 0b1) as u8,  // bit 14: Default
-                g: ((bits >> 15) & 0b1) as u8,   // bit 15: Granularity
-                unusable: 0,
-                padding: 0,
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl From<CommonSegmentRegister> for WHV_REGISTER_VALUE {
-    fn from(other: CommonSegmentRegister) -> Self {
-        // Truncate each field to its valid bit width before composing `Attributes`.
-        let type_ = other.type_ & 0xF; // 4 bits
-        let s = other.s & 0x1; // 1 bit
-        let dpl = other.dpl & 0x3; // 2 bits
-        let present = other.present & 0x1; // 1 bit
-        let avl = other.avl & 0x1; // 1 bit
-        let l = other.l & 0x1; // 1 bit
-        let db = other.db & 0x1; // 1 bit
-        let g = other.g & 0x1; // 1 bit
-
-        WHV_REGISTER_VALUE {
-            Segment: WHV_X64_SEGMENT_REGISTER {
-                Base: other.base,
-                Limit: other.limit,
-                Selector: other.selector,
-                Anonymous: WHV_X64_SEGMENT_REGISTER_0 {
-                    Attributes: (type_ as u16) // bit 0-3
-                        | ((s as u16) << 4) // bit 4
-                        | ((dpl as u16) << 5) // bit 5-6
-                        | ((present as u16) << 7) // bit 7
-                        | ((avl as u16) << 12) // bit 12
-                        | ((l as u16) << 13) // bit 13
-                        | ((db as u16) << 14) // bit 14
-                        | ((g as u16) << 15), // bit 15
-                },
-            },
-        }
-    }
-}
-
 // --- Table Register ---
 
 #[derive(Debug, Default, Copy, Clone, PartialEq)]
 pub(crate) struct CommonTableRegister {
     pub base: u64,
     pub limit: u16,
-}
-
-#[cfg(mshv3)]
-impl From<TableRegister> for CommonTableRegister {
-    fn from(other: TableRegister) -> Self {
-        CommonTableRegister {
-            base: other.base,
-            limit: other.limit,
-        }
-    }
-}
-
-#[cfg(mshv3)]
-impl From<CommonTableRegister> for TableRegister {
-    fn from(other: CommonTableRegister) -> Self {
-        TableRegister {
-            base: other.base,
-            limit: other.limit,
-        }
-    }
 }
 
 #[cfg(kvm)]
@@ -635,32 +233,6 @@ impl From<CommonTableRegister> for kvm_dtable {
             base: common_dtable.base,
             limit: common_dtable.limit,
             padding: Default::default(),
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl From<WHV_REGISTER_VALUE> for CommonTableRegister {
-    fn from(other: WHV_REGISTER_VALUE) -> Self {
-        unsafe {
-            let table = other.Table;
-            CommonTableRegister {
-                base: table.Base,
-                limit: table.Limit,
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl From<CommonTableRegister> for WHV_REGISTER_VALUE {
-    fn from(other: CommonTableRegister) -> Self {
-        WHV_REGISTER_VALUE {
-            Table: WHV_X64_TABLE_REGISTER {
-                Base: other.base,
-                Limit: other.limit,
-                Pad: Default::default(),
-            },
         }
     }
 }
@@ -721,47 +293,5 @@ mod tests {
         let roundtrip = CommonSpecialRegisters::from(&kvm_sregs);
 
         assert_eq!(original, roundtrip);
-    }
-
-    #[cfg(mshv3)]
-    #[test]
-    fn round_trip_mshv_sregs() {
-        let original = sample_common_special_registers();
-        let mshv_sregs: SpecialRegisters = (&original).into();
-        let roundtrip = CommonSpecialRegisters::from(&mshv_sregs);
-
-        assert_eq!(original, roundtrip);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn round_trip_whp_sregs() {
-        let original = sample_common_special_registers();
-        let whp_sregs: [(WHV_REGISTER_NAME, Align16<WHV_REGISTER_VALUE>); WHP_SREGS_NAMES_LEN] =
-            (&original).into();
-        let roundtrip = CommonSpecialRegisters::try_from(whp_sregs.as_ref()).unwrap();
-        assert_eq!(original, roundtrip);
-
-        // Test duplicate register error
-        let original = sample_common_special_registers();
-        let mut whp_sregs: [(WHV_REGISTER_NAME, Align16<WHV_REGISTER_VALUE>); WHP_SREGS_NAMES_LEN] =
-            (&original).into();
-        whp_sregs[0].0 = WHvX64RegisterDs;
-        let err = CommonSpecialRegisters::try_from(whp_sregs.as_ref()).unwrap_err();
-        assert_eq!(
-            err,
-            FromWhpRegisterError::DuplicateRegister(WHvX64RegisterDs.0)
-        );
-
-        // Test passing non-sregs register (e.g. RIP)
-        let original = sample_common_special_registers();
-        let mut whp_sregs: [(WHV_REGISTER_NAME, Align16<WHV_REGISTER_VALUE>); WHP_SREGS_NAMES_LEN] =
-            (&original).into();
-        whp_sregs[0].0 = WHvX64RegisterRip;
-        let err = CommonSpecialRegisters::try_from(whp_sregs.as_ref()).unwrap_err();
-        assert_eq!(
-            err,
-            FromWhpRegisterError::InvalidRegister(WHvX64RegisterRip.0)
-        );
     }
 }

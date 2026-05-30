@@ -29,120 +29,9 @@ use crate::func::HostFn;
 use crate::func::host_functions::register_host_function;
 use crate::mem::memory_region::{DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegionFlags};
 use crate::mem::mgr::SandboxMemoryManager;
-#[cfg(feature = "guest-counter")]
-use crate::mem::shared_mem::HostSharedMemory;
 use crate::mem::shared_mem::{ExclusiveSharedMemory, SharedMemory};
 use crate::sandbox::SandboxConfiguration;
 use crate::{MultiUseSandbox, Result, new_error};
-
-#[cfg(any(crashdump, gdb))]
-#[derive(Clone, Debug, Default)]
-pub(crate) struct SandboxRuntimeConfig {
-    #[cfg(crashdump)]
-    pub(crate) binary_path: Option<String>,
-    #[cfg(gdb)]
-    pub(crate) debug_info: Option<super::config::DebugInfo>,
-    #[cfg(crashdump)]
-    pub(crate) guest_core_dump: bool,
-    /// The original entry point address of the loaded guest binary
-    /// (load_addr + ELF entry offset). Used for AT_ENTRY in core dumps
-    /// so GDB can compute the correct load offset for PIE binaries.
-    ///
-    /// `None` until resolved from the snapshot's `NextAction::Initialise`
-    /// in `set_up_hypervisor_partition`.
-    #[cfg(crashdump)]
-    pub(crate) entry_point: Option<u64>,
-}
-
-/// A host-authoritative shared counter exposed to the guest via a `u64`
-/// in guest scratch memory.
-///
-/// Created via [`UninitializedSandbox::guest_counter()`]. The host owns
-/// the counter value and is the only writer: [`increment()`](Self::increment)
-/// and [`decrement()`](Self::decrement) update the cached value and write
-/// to shared memory via [`HostSharedMemory::write()`]. [`value()`](Self::value)
-/// returns the cached value — the host never reads back from guest memory,
-/// so a malicious guest cannot influence the host's view of the counter.
-///
-/// Thread safety is provided by an internal `Mutex`, so `increment()` and
-/// `decrement()` take `&self` rather than `&mut self`.
-///
-/// The counter holds an `Arc<Mutex<Option<HostSharedMemory>>>` that is
-/// shared with [`UninitializedSandbox`]. The `Option` is `None` until
-/// [`evolve()`](UninitializedSandbox::evolve) populates it, at which point
-/// the counter can issue volatile writes via the proper protocol.
-///
-/// Only one `GuestCounter` may be created per sandbox; a second call to
-/// [`UninitializedSandbox::guest_counter()`] returns an error.
-#[cfg(feature = "guest-counter")]
-pub struct GuestCounter {
-    inner: Mutex<GuestCounterInner>,
-}
-
-#[cfg(feature = "guest-counter")]
-struct GuestCounterInner {
-    deferred_hshm: Arc<Mutex<Option<HostSharedMemory>>>,
-    offset: usize,
-    value: u64,
-}
-
-#[cfg(feature = "guest-counter")]
-impl core::fmt::Debug for GuestCounter {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("GuestCounter").finish_non_exhaustive()
-    }
-}
-
-#[cfg(feature = "guest-counter")]
-impl GuestCounter {
-    /// Increments the counter by one and writes it to guest memory.
-    pub fn increment(&self) -> Result<()> {
-        let mut inner = self.inner.lock().map_err(|e| new_error!("{e}"))?;
-        let shm = {
-            let guard = inner.deferred_hshm.lock().map_err(|e| new_error!("{e}"))?;
-            guard
-                .as_ref()
-                .ok_or_else(|| {
-                    new_error!("GuestCounter cannot be used before shared memory is built")
-                })?
-                .clone()
-        };
-        let new_value = inner
-            .value
-            .checked_add(1)
-            .ok_or_else(|| new_error!("GuestCounter overflow"))?;
-        shm.write::<u64>(inner.offset, new_value)?;
-        inner.value = new_value;
-        Ok(())
-    }
-
-    /// Decrements the counter by one and writes it to guest memory.
-    pub fn decrement(&self) -> Result<()> {
-        let mut inner = self.inner.lock().map_err(|e| new_error!("{e}"))?;
-        let shm = {
-            let guard = inner.deferred_hshm.lock().map_err(|e| new_error!("{e}"))?;
-            guard
-                .as_ref()
-                .ok_or_else(|| {
-                    new_error!("GuestCounter cannot be used before shared memory is built")
-                })?
-                .clone()
-        };
-        let new_value = inner
-            .value
-            .checked_sub(1)
-            .ok_or_else(|| new_error!("GuestCounter underflow"))?;
-        shm.write::<u64>(inner.offset, new_value)?;
-        inner.value = new_value;
-        Ok(())
-    }
-
-    /// Returns the current host-side value of the counter.
-    pub fn value(&self) -> Result<u64> {
-        let inner = self.inner.lock().map_err(|e| new_error!("{e}"))?;
-        Ok(inner.value)
-    }
-}
 
 /// A preliminary sandbox that represents allocated memory and registered host functions,
 /// but has not yet created the underlying virtual machine.
@@ -162,23 +51,10 @@ pub struct UninitializedSandbox {
     pub(crate) mgr: SandboxMemoryManager<ExclusiveSharedMemory>,
     pub(crate) max_guest_log_level: Option<LevelFilter>,
     pub(crate) config: SandboxConfiguration,
-    #[cfg(any(crashdump, gdb))]
-    pub(crate) rt_cfg: SandboxRuntimeConfig,
     pub(crate) load_info: crate::mem::exe::LoadInfo,
     // This is needed to convey the stack pointer between the snapshot
     // and the HyperlightVm creation
     pub(crate) stack_top_gva: u64,
-    /// Populated by [`evolve()`](Self::evolve) with a [`HostSharedMemory`]
-    /// view of scratch memory. Code that needs host-style volatile access
-    /// before `evolve()` (e.g. `GuestCounter`) can clone this `Arc` and
-    /// will see `Some` once `evolve()` completes.
-    #[cfg(feature = "guest-counter")]
-    pub(crate) deferred_hshm: Arc<Mutex<Option<HostSharedMemory>>>,
-    /// Set to `true` once a [`GuestCounter`] has been handed out via
-    /// [`guest_counter()`](Self::guest_counter). Prevents creating
-    /// multiple counters that would have divergent cached values.
-    #[cfg(feature = "guest-counter")]
-    counter_taken: std::sync::atomic::AtomicBool,
 }
 
 impl Debug for UninitializedSandbox {
@@ -270,89 +146,14 @@ impl<'a> From<GuestBinary<'a>> for GuestEnvironment<'a, '_> {
 }
 
 impl UninitializedSandbox {
-    /// Creates a [`GuestCounter`] at a fixed offset in scratch memory.
-    ///
-    /// The counter lives at `SCRATCH_TOP_GUEST_COUNTER_OFFSET` bytes from
-    /// the top of scratch memory, so both host and guest can locate it
-    /// without an explicit GPA parameter.
-    ///
-    /// The returned counter holds an `Arc` clone of the sandbox's
-    /// `deferred_hshm`, so it will automatically gain access to the
-    /// [`HostSharedMemory`] once [`evolve()`](Self::evolve) completes.
-    ///
-    /// This method can only be called once; a second call returns an error
-    /// because multiple counters would have divergent cached values.
-    #[cfg(feature = "guest-counter")]
-    pub fn guest_counter(&mut self) -> Result<GuestCounter> {
-        use std::sync::atomic::Ordering;
-
-        use nub_host_common::layout::SCRATCH_TOP_GUEST_COUNTER_OFFSET;
-
-        if self.counter_taken.swap(true, Ordering::Relaxed) {
-            return Err(new_error!(
-                "GuestCounter has already been created for this sandbox"
-            ));
-        }
-
-        let scratch_size = self.mgr.scratch_mem.mem_size();
-        if (SCRATCH_TOP_GUEST_COUNTER_OFFSET as usize) > scratch_size {
-            return Err(new_error!(
-                "scratch memory too small for guest counter (size {:#x}, need offset {:#x})",
-                scratch_size,
-                SCRATCH_TOP_GUEST_COUNTER_OFFSET,
-            ));
-        }
-
-        let offset = scratch_size - SCRATCH_TOP_GUEST_COUNTER_OFFSET as usize;
-        let deferred_hshm = self.deferred_hshm.clone();
-
-        Ok(GuestCounter {
-            inner: Mutex::new(GuestCounterInner {
-                deferred_hshm,
-                offset,
-                value: 0,
-            }),
-        })
-    }
-
     // Creates a new uninitialized sandbox from a pre-built snapshot.
     // Note that since memory configuration is part of the snapshot the only configuration
-    // that can be changed (from the original snapshot) is the configuration defines the behaviour of
-    // `InterruptHandler` on Linux.
+    // that can be changed (from the original snapshot) is that defines the behaviour of
+    // `InterruptHandle` on Linux.
     //
     // This is ok for now as this is not a public function
-    fn from_snapshot(
-        snapshot: Arc<Snapshot>,
-        cfg: Option<SandboxConfiguration>,
-        #[cfg(crashdump)] binary_path: Option<String>,
-    ) -> Result<Self> {
-        // hyperlight is only supported on Windows 11 and Windows Server 2022 and later
-        #[cfg(target_os = "windows")]
-        check_windows_version()?;
-
+    fn from_snapshot(snapshot: Arc<Snapshot>, cfg: Option<SandboxConfiguration>) -> Result<Self> {
         let sandbox_cfg = cfg.unwrap_or_default();
-
-        #[cfg(any(crashdump, gdb))]
-        let rt_cfg = {
-            #[cfg(crashdump)]
-            let guest_core_dump = sandbox_cfg.get_guest_core_dump();
-
-            #[cfg(gdb)]
-            let debug_info = sandbox_cfg.get_guest_debug_info();
-
-            SandboxRuntimeConfig {
-                #[cfg(crashdump)]
-                binary_path,
-                #[cfg(gdb)]
-                debug_info,
-                #[cfg(crashdump)]
-                guest_core_dump,
-                // entry_point is set later in set_up_hypervisor_partition
-                // once the entrypoint is resolved from the snapshot
-                #[cfg(crashdump)]
-                entry_point: None,
-            }
-        };
 
         let mem_mgr_wrapper =
             SandboxMemoryManager::<ExclusiveSharedMemory>::from_snapshot(snapshot.as_ref())?;
@@ -364,14 +165,8 @@ impl UninitializedSandbox {
             mgr: mem_mgr_wrapper,
             max_guest_log_level: None,
             config: sandbox_cfg,
-            #[cfg(any(crashdump, gdb))]
-            rt_cfg,
             load_info: snapshot.load_info(),
             stack_top_gva: snapshot.stack_top_gva(),
-            #[cfg(feature = "guest-counter")]
-            deferred_hshm: Arc::new(Mutex::new(None)),
-            #[cfg(feature = "guest-counter")]
-            counter_taken: std::sync::atomic::AtomicBool::new(false),
         };
 
         // Upstream registered a default "HostPrint" handler here.
@@ -402,18 +197,8 @@ impl UninitializedSandbox {
     ) -> Result<Self> {
         let cfg = cfg.unwrap_or_default();
         let env = env.into();
-        #[cfg(crashdump)]
-        let binary_path = match &env.guest_binary {
-            GuestBinary::FilePath(path) => Some(path.clone()),
-            GuestBinary::Buffer(_) => None,
-        };
         let snapshot = Snapshot::from_env(env, cfg)?;
-        Self::from_snapshot(
-            Arc::new(snapshot),
-            Some(cfg),
-            #[cfg(crashdump)]
-            binary_path,
-        )
+        Self::from_snapshot(Arc::new(snapshot), Some(cfg))
     }
 
     /// Creates and initializes the virtual machine, transforming this into a ready-to-use sandbox.
@@ -449,40 +234,4 @@ impl UninitializedSandbox {
     pub fn register(&mut self, fn_id: u32, host_func: HostFn) -> Result<()> {
         register_host_function(self, fn_id, host_func)
     }
-
-    /// Populate the deferred `HostSharedMemory` slot without running
-    /// the full `evolve()` pipeline. Used in tests where guest boot
-    /// is not available.
-    #[cfg(all(test, feature = "guest-counter"))]
-    fn simulate_build(&self) {
-        let hshm = self.mgr.scratch_mem.as_host_shared_memory();
-        #[allow(clippy::unwrap_used)]
-        {
-            *self.deferred_hshm.lock().unwrap() = Some(hshm);
-        }
-    }
-}
-// Check to see if the current version of Windows is supported
-// Hyperlight is only supported on Windows 11 and Windows Server 2022 and later
-#[cfg(target_os = "windows")]
-fn check_windows_version() -> Result<()> {
-    use windows_version::{OsVersion, is_server};
-    const WINDOWS_MAJOR: u32 = 10;
-    const WINDOWS_MINOR: u32 = 0;
-    const WINDOWS_PACK: u32 = 0;
-
-    // Windows Server 2022 has version numbers 10.0.20348 or greater
-    if is_server() {
-        if OsVersion::current() < OsVersion::new(WINDOWS_MAJOR, WINDOWS_MINOR, WINDOWS_PACK, 20348)
-        {
-            return Err(new_error!(
-                "Hyperlight Requires Windows Server 2022 or newer"
-            ));
-        }
-    } else if OsVersion::current()
-        < OsVersion::new(WINDOWS_MAJOR, WINDOWS_MINOR, WINDOWS_PACK, 22000)
-    {
-        return Err(new_error!("Hyperlight Requires Windows 11 or newer"));
-    }
-    Ok(())
 }

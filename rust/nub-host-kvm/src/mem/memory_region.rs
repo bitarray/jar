@@ -19,22 +19,7 @@ use std::ops::Range;
 use bitflags::bitflags;
 #[cfg(kvm)]
 use kvm_bindings::{KVM_MEM_READONLY, kvm_userspace_memory_region};
-#[cfg(mshv3)]
-use mshv_bindings::{
-    MSHV_SET_MEM_BIT_EXECUTABLE, MSHV_SET_MEM_BIT_UNMAP, MSHV_SET_MEM_BIT_WRITABLE,
-};
-#[cfg(all(mshv3, target_arch = "aarch64"))]
-use mshv_bindings::{hv_arm64_memory_intercept_message, mshv_user_mem_region};
-#[cfg(all(mshv3, target_arch = "x86_64"))]
-use mshv_bindings::{hv_x64_memory_intercept_message, mshv_user_mem_region};
-#[cfg(mshv3)]
-use nub_host_common::mem::PAGE_SHIFT;
 use nub_host_common::mem::PAGE_SIZE_USIZE;
-#[cfg(target_os = "windows")]
-use windows::Win32::System::Hypervisor::{self, WHV_MEMORY_ACCESS_TYPE};
-
-#[cfg(target_os = "windows")]
-use crate::hypervisor::wrappers::HandleWrapper;
 
 pub(crate) const DEFAULT_GUEST_BLOB_MEM_FLAGS: MemoryRegionFlags = MemoryRegionFlags::READ;
 
@@ -81,52 +66,10 @@ impl std::fmt::Display for MemoryRegionFlags {
     }
 }
 
-#[cfg(target_os = "windows")]
-impl TryFrom<WHV_MEMORY_ACCESS_TYPE> for MemoryRegionFlags {
-    type Error = crate::HyperlightError;
-
-    fn try_from(flags: WHV_MEMORY_ACCESS_TYPE) -> crate::Result<Self> {
-        match flags {
-            Hypervisor::WHvMemoryAccessRead => Ok(MemoryRegionFlags::READ),
-            Hypervisor::WHvMemoryAccessWrite => Ok(MemoryRegionFlags::WRITE),
-            Hypervisor::WHvMemoryAccessExecute => Ok(MemoryRegionFlags::EXECUTE),
-            _ => Err(crate::HyperlightError::Error(
-                "unknown memory access type".to_string(),
-            )),
-        }
-    }
-}
-
-#[cfg(all(mshv3, target_arch = "x86_64"))]
-impl TryFrom<hv_x64_memory_intercept_message> for MemoryRegionFlags {
-    type Error = crate::HyperlightError;
-
-    fn try_from(msg: hv_x64_memory_intercept_message) -> crate::Result<Self> {
-        let access_type = msg.header.intercept_access_type;
-        match access_type {
-            0 => Ok(MemoryRegionFlags::READ),
-            1 => Ok(MemoryRegionFlags::WRITE),
-            2 => Ok(MemoryRegionFlags::EXECUTE),
-            _ => Err(crate::HyperlightError::Error(
-                "unknown memory access type".to_string(),
-            )),
-        }
-    }
-}
-
-#[cfg(all(mshv3, target_arch = "aarch64"))]
-impl TryFrom<hv_arm64_memory_intercept_message> for MemoryRegionFlags {
-    type Error = crate::HyperlightError;
-
-    fn try_from(_msg: hv_arm64_memory_intercept_message) -> crate::Result<Self> {
-        unimplemented!("try_from")
-    }
-}
-
 // NOTE: In the future, all host-side knowledge about memory region types
-// should collapse down to Snapshot vs Scratch (see shared_mem.rs).
-// Until then, these variants help distinguish regions for diagnostics
-// and crash dumps. Not part of the public API.
+// should collapse down to Snapshot vs Scratch (see shared_mem.rs). Today
+// only Scratch, Snapshot, and MappedFile are actually constructed; the
+// remaining variants are vestigial. Not part of the public API.
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
 /// The type of memory region
 pub enum MemoryRegionType {
@@ -138,7 +81,7 @@ pub enum MemoryRegionType {
     Peb,
     /// The region contains the Heap
     Heap,
-    /// The region contains the Guard Page
+    /// The region contains scratch (RWX) memory
     Scratch,
     /// The snapshot region
     Snapshot,
@@ -147,21 +90,6 @@ pub enum MemoryRegionType {
     /// (Linux) and are read-only + executable. They are cleaned up
     /// during restore/drop — not part of the guest's own allocator.
     MappedFile,
-}
-
-#[cfg(target_os = "windows")]
-impl MemoryRegionType {
-    /// Derives the [`SurrogateMapping`] from this region type.
-    ///
-    /// `MappedFile` regions use read-only file-backed mappings with no
-    /// guard pages; all other region types use the standard sandbox
-    /// shared memory mapping with guard pages.
-    pub fn surrogate_mapping(&self) -> SurrogateMapping {
-        match self {
-            MemoryRegionType::MappedFile => SurrogateMapping::ReadOnlyFile,
-            _ => SurrogateMapping::SandboxMemory,
-        }
-    }
 }
 
 /// A trait that distinguishes between different kinds of memory region representations.
@@ -188,13 +116,12 @@ pub trait MemoryRegionKind {
 /// When one of these is created, it always ends up in a sandbox
 /// quickly. It's an invariant of this type that as long as one of
 /// these is associated with a sandbox, it's always acceptable to read
-/// from it, since a lot of the debug/crashdump/snapshot code
+/// from it, since a lot of the snapshot code
 /// does. (Note: this means that _writable_ HostGuestMemoryRegions are
 /// not possible to support at the moment).
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
 pub struct HostGuestMemoryRegion {}
 
-#[cfg(not(target_os = "windows"))]
 impl MemoryRegionKind for HostGuestMemoryRegion {
     type HostBaseType = usize;
 
@@ -202,81 +129,9 @@ impl MemoryRegionKind for HostGuestMemoryRegion {
         base + size
     }
 }
-/// Describes how a memory region should be mapped through the surrogate process
-/// pipeline on Windows (WHP).
-///
-/// Different mapping types require different page protections and guard page
-/// behaviour when projected into the surrogate process via `MapViewOfFileNuma2`.
-#[cfg(target_os = "windows")]
-#[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
-pub enum SurrogateMapping {
-    /// Standard sandbox shared memory: mapped with `PAGE_READWRITE` protection
-    /// and guard pages (`PAGE_NOACCESS`) set on the first and last pages.
-    SandboxMemory,
-    /// File-backed read-only mapping: mapped with `PAGE_READONLY` protection
-    /// and **no** guard pages.
-    ReadOnlyFile,
-}
-
-/// A [`HostRegionBase`] keeps track of not just a pointer, but also a
-/// file mapping into which it is pointing.  This is used on WHP,
-/// where mapping the actual pointer into the VM actually involves
-/// first mapping the file into a surrogate process.
-#[cfg(target_os = "windows")]
-#[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub struct HostRegionBase {
-    /// The file handle from which the file mapping was created
-    pub from_handle: HandleWrapper,
-    /// The base of the file mapping
-    pub handle_base: usize,
-    /// The size of the file mapping
-    pub handle_size: usize,
-    /// The offset into file mapping region where this
-    /// [`HostRegionBase`] is pointing.
-    pub offset: usize,
-}
-#[cfg(target_os = "windows")]
-impl std::hash::Hash for HostRegionBase {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // it's safe not to hash the handle (which is not hashable)
-        // since, for any of these in use at the same time, the handle
-        // should be uniquely determined by the
-        // handle_base/handle_size combination.
-        self.handle_base.hash(state);
-        self.handle_size.hash(state);
-        self.offset.hash(state);
-    }
-}
-#[cfg(target_os = "windows")]
-impl From<HostRegionBase> for usize {
-    fn from(x: HostRegionBase) -> usize {
-        x.handle_base + x.offset
-    }
-}
-#[cfg(target_os = "windows")]
-impl TryFrom<HostRegionBase> for isize {
-    type Error = <isize as TryFrom<usize>>::Error;
-    fn try_from(x: HostRegionBase) -> Result<isize, Self::Error> {
-        <isize as TryFrom<usize>>::try_from(x.into())
-    }
-}
-#[cfg(target_os = "windows")]
-impl MemoryRegionKind for HostGuestMemoryRegion {
-    type HostBaseType = HostRegionBase;
-
-    fn add(base: Self::HostBaseType, size: usize) -> Self::HostBaseType {
-        HostRegionBase {
-            from_handle: base.from_handle,
-            handle_base: base.handle_base,
-            handle_size: base.handle_size,
-            offset: base.offset + size,
-        }
-    }
-}
 
 /// Type for memory regions that only track guest addresses.
 ///
-#[cfg_attr(feature = "i686-guest", allow(dead_code))]
 #[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
 pub(crate) struct GuestMemoryRegion {}
 
@@ -305,51 +160,6 @@ pub struct MemoryRegion_<K: MemoryRegionKind> {
 /// A memory region that tracks both host and guest addresses.
 pub type MemoryRegion = MemoryRegion_<HostGuestMemoryRegion>;
 
-/// A [`MemoryRegionKind`] for crash dump regions that always uses raw
-/// `usize` host addresses.  The crash dump path only reads host memory
-/// through raw pointers, so it never needs the file-mapping metadata
-/// stored in [`HostRegionBase`] on Windows.
-#[cfg(crashdump)]
-#[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
-pub(crate) struct CrashDumpMemoryRegion;
-
-#[cfg(crashdump)]
-impl MemoryRegionKind for CrashDumpMemoryRegion {
-    type HostBaseType = usize;
-
-    fn add(base: Self::HostBaseType, size: usize) -> Self::HostBaseType {
-        base + size
-    }
-}
-
-/// A memory region used exclusively by the crash dump path.
-///
-/// Host addresses are always raw `usize` pointers, avoiding the need
-/// to construct platform-specific wrappers like [`HostRegionBase`].
-#[cfg(crashdump)]
-pub(crate) type CrashDumpRegion = MemoryRegion_<CrashDumpMemoryRegion>;
-
-#[cfg(all(crashdump, feature = "i686-guest"))]
-impl HostGuestMemoryRegion {
-    /// Extract the raw `usize` host address from the platform-specific
-    /// host base type.
-    ///
-    /// On Linux this is identity (`HostBaseType` = `usize`).
-    /// On Windows it computes `handle_base + offset` via the existing
-    /// `From<HostRegionBase> for usize` impl.
-    pub(crate) fn to_addr(val: <Self as MemoryRegionKind>::HostBaseType) -> usize {
-        #[cfg(not(target_os = "windows"))]
-        {
-            val
-        }
-        #[cfg(target_os = "windows")]
-        {
-            val.into()
-        }
-    }
-}
-
-#[cfg_attr(feature = "i686-guest", allow(unused))]
 pub(crate) struct MemoryRegionVecBuilder<K: MemoryRegionKind> {
     guest_base_phys_addr: usize,
     host_base_virt_addr: K::HostBaseType,
@@ -416,34 +226,6 @@ impl<K: MemoryRegionKind> MemoryRegionVecBuilder<K> {
     /// of memory, in other words, there will be any memory gaps between them.
     pub(crate) fn build(self) -> Vec<MemoryRegion_<K>> {
         self.regions
-    }
-}
-
-#[cfg(mshv3)]
-impl From<&MemoryRegion> for mshv_user_mem_region {
-    fn from(region: &MemoryRegion) -> Self {
-        let size = (region.guest_region.end - region.guest_region.start) as u64;
-        let guest_pfn = region.guest_region.start as u64 >> PAGE_SHIFT;
-        let userspace_addr = region.host_region.start as u64;
-
-        let flags: u8 = region.flags.iter().fold(0, |acc, flag| {
-            let flag_value = match flag {
-                MemoryRegionFlags::NONE => 1 << MSHV_SET_MEM_BIT_UNMAP,
-                MemoryRegionFlags::READ => 0,
-                MemoryRegionFlags::WRITE => 1 << MSHV_SET_MEM_BIT_WRITABLE,
-                MemoryRegionFlags::EXECUTE => 1 << MSHV_SET_MEM_BIT_EXECUTABLE,
-                _ => 0, // ignore any unknown flags
-            };
-            acc | flag_value
-        });
-
-        mshv_user_mem_region {
-            guest_pfn,
-            size,
-            userspace_addr,
-            flags,
-            ..Default::default()
-        }
     }
 }
 

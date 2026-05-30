@@ -14,24 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
  */
 
-#[cfg_attr(target_arch = "x86", path = "arch/i686/layout.rs")]
-#[cfg_attr(
-    all(target_arch = "x86_64", not(feature = "i686-guest")),
-    path = "arch/amd64/layout.rs"
-)]
-#[cfg_attr(
-    all(target_arch = "x86_64", feature = "i686-guest"),
-    path = "arch/i686/layout.rs"
-)]
-#[cfg_attr(target_arch = "aarch64", path = "arch/aarch64/layout.rs")]
+#[path = "arch/amd64/layout.rs"]
 mod arch;
 
 pub use arch::{MAX_GPA, MAX_GVA};
-#[cfg(any(
-    all(target_arch = "x86_64", not(feature = "i686-guest")),
-    target_arch = "aarch64"
-))]
-pub use arch::{SNAPSHOT_PT_GVA_MAX, SNAPSHOT_PT_GVA_MIN};
 
 /// Base VA at which the guest's entire memory range is mapped.
 /// Both the host (via mmap of snapshot/scratch regions) and the

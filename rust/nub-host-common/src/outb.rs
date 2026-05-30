@@ -91,20 +91,11 @@ impl TryFrom<u8> for Exception {
 /// - CallFunction: makes a call to a host function,
 /// - Abort: aborts the execution of the guest,
 /// - DebugPrint: prints a message to the host
-/// - TraceBatch: reports a batch of spans and events from the guest
-/// - TraceMemoryAlloc: records memory allocation events
-/// - TraceMemoryFree: records memory deallocation events
 pub enum OutBAction {
     Log = 99,
     CallFunction = 101,
     Abort = 102,
     DebugPrint = 103,
-    #[cfg(feature = "trace_guest")]
-    TraceBatch = 104,
-    #[cfg(feature = "mem_profile")]
-    TraceMemoryAlloc = 105,
-    #[cfg(feature = "mem_profile")]
-    TraceMemoryFree = 106,
 }
 
 /// IO-port actions intercepted at the hypervisor level (in `run_vcpu`)
@@ -131,12 +122,6 @@ impl TryFrom<u16> for OutBAction {
             101 => Ok(OutBAction::CallFunction),
             102 => Ok(OutBAction::Abort),
             103 => Ok(OutBAction::DebugPrint),
-            #[cfg(feature = "trace_guest")]
-            104 => Ok(OutBAction::TraceBatch),
-            #[cfg(feature = "mem_profile")]
-            105 => Ok(OutBAction::TraceMemoryAlloc),
-            #[cfg(feature = "mem_profile")]
-            106 => Ok(OutBAction::TraceMemoryFree),
             _ => Err(anyhow::anyhow!("Invalid OutBAction value: {}", val)),
         }
     }

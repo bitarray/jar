@@ -16,8 +16,6 @@ limitations under the License.
 
 use std::fs::File;
 use std::io::Read;
-#[cfg(feature = "mem_profile")]
-use std::sync::Arc;
 use std::vec::Vec;
 
 use super::elf::ElfInfo;
@@ -28,41 +26,8 @@ pub enum ExeInfo {
     Elf(ElfInfo),
 }
 
-#[cfg(feature = "mem_profile")]
-pub(crate) trait UnwindInfo: Send + Sync {
-    fn as_module(&self) -> framehop::Module<Vec<u8>>;
-    fn hash(&self) -> blake3::Hash;
-}
-
-#[cfg(feature = "mem_profile")]
-pub(crate) struct DummyUnwindInfo {}
-#[cfg(feature = "mem_profile")]
-impl UnwindInfo for DummyUnwindInfo {
-    fn as_module(&self) -> framehop::Module<Vec<u8>> {
-        framehop::Module::new("unsupported".to_string(), 0..0, 0, self)
-    }
-    fn hash(&self) -> blake3::Hash {
-        blake3::Hash::from_bytes([0; 32])
-    }
-}
-#[cfg(feature = "mem_profile")]
-impl<A> framehop::ModuleSectionInfo<A> for &DummyUnwindInfo {
-    fn base_svma(&self) -> u64 {
-        0
-    }
-    fn section_svma_range(&mut self, _name: &[u8]) -> Option<std::ops::Range<u64>> {
-        None
-    }
-    fn section_data(&mut self, _name: &[u8]) -> Option<A> {
-        None
-    }
-}
-
 #[derive(Clone)]
-pub(crate) struct LoadInfo {
-    #[cfg(feature = "mem_profile")]
-    pub(crate) info: Arc<dyn UnwindInfo>,
-}
+pub(crate) struct LoadInfo {}
 
 impl ExeInfo {
     pub fn from_file(path: &str) -> Result<Self> {
@@ -99,10 +64,8 @@ impl ExeInfo {
             ExeInfo::Elf(elf) => elf.guest_bin_version(),
         }
     }
-    // todo: this doesn't morally need to be &mut self, since we're
-    // copying into target, but the PE loader chooses to apply
-    // relocations in its owned representation of the PE contents,
-    // which requires it to be &mut.
+    // Takes `self` by value: the ELF loader copies PT_LOAD segments
+    // into `target` and applies relocations against `runtime_base_va`.
     /// Load the executable into `target`. `runtime_base_va` is the
     /// GVA at which the guest will see the loaded image — applied as
     /// the base for `R_X86_64_RELATIVE` / `R_AARCH64_RELATIVE`
