@@ -19,9 +19,7 @@ use std::sync::OnceLock;
 
 use tracing::{Span, instrument};
 
-use crate::hypervisor::regs::{
-    CommonDebugRegs, CommonFpu, CommonRegisters, CommonSpecialRegisters,
-};
+use crate::hypervisor::regs::{CommonFpu, CommonRegisters, CommonSpecialRegisters};
 use crate::mem::memory_region::MemoryRegion;
 
 /// KVM (Kernel-based Virtual Machine) functionality (linux)
@@ -136,31 +134,10 @@ pub enum RegisterError {
     GetRegs(HypervisorError),
     #[error("Failed to set registers: {0}")]
     SetRegs(HypervisorError),
-    #[error("Failed to get FPU registers: {0}")]
-    GetFpu(HypervisorError),
     #[error("Failed to set FPU registers: {0}")]
     SetFpu(HypervisorError),
-    #[error("Failed to get special registers: {0}")]
-    GetSregs(HypervisorError),
     #[error("Failed to set special registers: {0}")]
     SetSregs(HypervisorError),
-    #[error("Failed to get debug registers: {0}")]
-    GetDebugRegs(HypervisorError),
-    #[error("Failed to set debug registers: {0}")]
-    SetDebugRegs(HypervisorError),
-    #[error("Failed to get xsave: {0}")]
-    GetXsave(HypervisorError),
-    #[error("Failed to set xsave: {0}")]
-    SetXsave(HypervisorError),
-    #[error("Xsave size mismatch: expected {expected} bytes, got {actual}")]
-    XsaveSizeMismatch {
-        /// Expected size in bytes
-        expected: u32,
-        /// Actual size in bytes
-        actual: u32,
-    },
-    #[error("Invalid xsave alignment")]
-    InvalidXsaveAlignment,
 }
 
 /// Map memory error
@@ -210,23 +187,10 @@ pub(crate) trait VirtualMachine: Debug + Send {
     fn regs(&self) -> std::result::Result<CommonRegisters, RegisterError>;
     /// Set regs
     fn set_regs(&self, regs: &CommonRegisters) -> std::result::Result<(), RegisterError>;
-    /// Get fpu regs
-    #[allow(dead_code)]
-    fn fpu(&self) -> std::result::Result<CommonFpu, RegisterError>;
     /// Set fpu regs
     fn set_fpu(&self, fpu: &CommonFpu) -> std::result::Result<(), RegisterError>;
-    /// Get special regs
-    #[allow(dead_code)]
-    fn sregs(&self) -> std::result::Result<CommonSpecialRegisters, RegisterError>;
     /// Set special regs
     fn set_sregs(&self, sregs: &CommonSpecialRegisters) -> std::result::Result<(), RegisterError>;
-    /// Get the debug registers of the vCPU
-    #[allow(dead_code)]
-    fn debug_regs(&self) -> std::result::Result<CommonDebugRegs, RegisterError>;
-
-    /// Get xsave
-    #[allow(dead_code)]
-    fn xsave(&self) -> std::result::Result<Vec<u8>, RegisterError>;
 }
 
 #[cfg(test)]

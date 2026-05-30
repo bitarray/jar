@@ -22,9 +22,7 @@ use kvm_ioctls::{Kvm, VcpuExit, VcpuFd, VmFd};
 use nub_host_common::outb::VmAction;
 use tracing::{Span, instrument};
 
-use crate::hypervisor::regs::{
-    CommonDebugRegs, CommonFpu, CommonRegisters, CommonSpecialRegisters,
-};
+use crate::hypervisor::regs::{CommonFpu, CommonRegisters, CommonSpecialRegisters};
 use crate::hypervisor::virtual_machine::{
     CreateVmError, MapMemoryError, RegisterError, RunVcpuError, VirtualMachine, VmExit,
 };
@@ -168,16 +166,6 @@ impl VirtualMachine for KvmVm {
         Ok(())
     }
 
-    fn fpu(&self) -> std::result::Result<CommonFpu, RegisterError> {
-        // Note: On KVM this ignores MXCSR.
-        // See https://github.com/torvalds/linux/blob/d358e5254674b70f34c847715ca509e46eb81e6f/arch/x86/kvm/x86.c#L12554-L12599
-        let kvm_fpu = self
-            .vcpu_fd
-            .get_fpu()
-            .map_err(|e| RegisterError::GetFpu(e.into()))?;
-        Ok((&kvm_fpu).into())
-    }
-
     fn set_fpu(&self, fpu: &CommonFpu) -> std::result::Result<(), RegisterError> {
         let kvm_fpu: kvm_fpu = fpu.into();
         // Note: On KVM this ignores MXCSR.
@@ -188,40 +176,11 @@ impl VirtualMachine for KvmVm {
         Ok(())
     }
 
-    fn sregs(&self) -> std::result::Result<CommonSpecialRegisters, RegisterError> {
-        let kvm_sregs = self
-            .vcpu_fd
-            .get_sregs()
-            .map_err(|e| RegisterError::GetSregs(e.into()))?;
-        Ok((&kvm_sregs).into())
-    }
-
     fn set_sregs(&self, sregs: &CommonSpecialRegisters) -> std::result::Result<(), RegisterError> {
         let kvm_sregs: kvm_sregs = sregs.into();
         self.vcpu_fd
             .set_sregs(&kvm_sregs)
             .map_err(|e| RegisterError::SetSregs(e.into()))?;
         Ok(())
-    }
-
-    fn debug_regs(&self) -> std::result::Result<CommonDebugRegs, RegisterError> {
-        let kvm_debug_regs = self
-            .vcpu_fd
-            .get_debug_regs()
-            .map_err(|e| RegisterError::GetDebugRegs(e.into()))?;
-        Ok(kvm_debug_regs.into())
-    }
-
-    #[allow(dead_code)]
-    fn xsave(&self) -> std::result::Result<Vec<u8>, RegisterError> {
-        let xsave = self
-            .vcpu_fd
-            .get_xsave()
-            .map_err(|e| RegisterError::GetXsave(e.into()))?;
-        Ok(xsave
-            .region
-            .into_iter()
-            .flat_map(u32::to_le_bytes)
-            .collect())
     }
 }
