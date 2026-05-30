@@ -25,6 +25,7 @@
 
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
+use criterion::{BenchmarkId, Criterion, Throughput};
 use javm_cap::NUM_REGS;
 use javm_cap::image::{Image, PinnedCap};
 use javm_cap::slot::SlotIdx;
@@ -206,8 +207,8 @@ pub fn invoke(nub: &mut Nub, built: &BuiltCaps) -> (u64, u64) {
     finish(&result)
 }
 
-/// Drive `built[endpoint_idx]` through the byte-PVM interpreter via a
-/// fresh `Nub::new_local()` (the Local backend has no per-invocation
+/// Drive `built[endpoint_idx]` through the PVM2 (RISC-V) interpreter via
+/// a fresh `Nub::new_local()` (the Local backend has no per-invocation
 /// state, so a fresh Nub each call is fine — and matches the chain's
 /// per-event allocation model).
 pub fn run_interpreter(built: &BuiltCaps) -> (u64, u64) {
@@ -272,6 +273,169 @@ pub fn reset_nub_hyperlight() {
     *g = Some(Nub::new_hyperlight().expect("Hyperlight sandbox"));
 }
 
-// Instance memory overlays are derived by `Image::data_overlays()` in
-// javm-cap (the single source of truth shared with the kernel +
-// conformance paths).
+// ============================================================================
+// Sub-VM recurse benches (shared driver)
+// ============================================================================
+//
+// `benches/sub_vm_recurse.rs` and `benches/sub_vm_data_recurse.rs` differ
+// only in which guest blob they ship and their label, so the whole build +
+// invoke + criterion driver lives here and each bench file is a one-liner.
+
+/// cnode slot holding the recurse Image (each level inherits it from its
+/// parent — see `dispatch_host_call` in `nub-arch-x86::call_loop`).
+const SLOT_IMAGE_RECURSE: u32 = 3;
+
+/// Top-of-recursion `Cap::Instance` published for a sub-VM bench.
+pub struct SubVmTop {
+    pub top_instance: CapHash,
+    pub image_hash: CapHash,
+}
+
+/// Build + publish (once) the recurse Image, its cnode, and the top
+/// Instance into `nub` from the SSZ-encoded Image `blob`. Returns the
+/// top instance hash so the bench loop can invoke it directly.
+pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
+    use javm_cap::{CNodeCap, CapHashOrRef};
+    use ssz::Decode;
+
+    const ENDPOINT_IDX: u8 = 0;
+
+    let image = Image::from_ssz_bytes(blob).expect("decode sub-vm image");
+
+    // The bench guest ships .rodata + a small stack (and, for the data
+    // variant, a 64 KiB pinned blob) via its image mappings. Publish a
+    // Cap::Data per pinned/initial slot and reference them from the
+    // Cap::Image; the in-kernel call_loop reads those bytes from the
+    // shared cache when building a child frame's mem image.
+    let mut data_caps: Vec<(CapHash, Cap)> = Vec::new();
+    let mut pinned_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
+    let mut initial_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
+    for (slot, pinned) in &image.pinned_slots {
+        let (h, maybe_cap) = match pinned {
+            PinnedCap::Data { content, size } => {
+                let cap = Cap::data_inline_with_size(content, *size);
+                let h = ssz::hash_tree_root(&cap);
+                (h, Some(cap))
+            }
+            PinnedCap::Image { content_hash } => (*content_hash, None),
+        };
+        pinned_hashes.push((*slot, h));
+        if let Some(cap) = maybe_cap {
+            data_caps.push((h, cap));
+        }
+    }
+    for (slot, init) in &image.initial_slots {
+        let cap = Cap::data_inline_with_size(&init.content, init.size);
+        let h = ssz::hash_tree_root(&cap);
+        initial_hashes.push((*slot, h));
+        data_caps.push((h, cap));
+    }
+    for (h, cap) in &data_caps {
+        nub.put_cap_with_hash(*h, cap).expect("put data");
+    }
+    let image_cap =
+        Cap::image_with_slots(&image, &pinned_hashes, &initial_hashes).expect("image_with_slots");
+    let image_hash = ssz::hash_tree_root(&image_cap);
+    nub.put_cap_with_hash(image_hash, &image_cap)
+        .expect("put image");
+
+    let mut cn = CNodeCap::new(8).expect("cnode");
+    cn.set(
+        SlotIdx(SLOT_IMAGE_RECURSE),
+        Some(CapHashOrRef::Hash(image_hash)),
+    )
+    .expect("set image slot");
+    let cnode_cap = Cap::CNode(cn);
+    let cnode_hash = ssz::hash_tree_root(&cnode_cap);
+    nub.put_cap_with_hash(cnode_hash, &cnode_cap)
+        .expect("put cnode");
+
+    let endpoint = image.endpoints.get(&ENDPOINT_IDX).expect("endpoint 0");
+    let mut regs = [0u64; NUM_REGS];
+    for (&i, &v) in &endpoint.initial_regs {
+        if let Some(slot) = regs.get_mut(i as usize) {
+            *slot = v;
+        }
+    }
+
+    let (mem_size, overlays) = image.data_overlays();
+    let overlay_slices: Vec<(u32, &[u8])> =
+        overlays.iter().map(|(s, b)| (*s, b.as_slice())).collect();
+    let inst_cap = Cap::instance_with_overlays(
+        [0u8; 32],
+        image_hash,
+        cnode_hash,
+        &overlay_slices,
+        mem_size,
+        regs,
+        0,
+        0,
+    );
+    let inst_hash = ssz::hash_tree_root(&inst_cap);
+    nub.put_cap_with_hash(inst_hash, &inst_cap)
+        .expect("put instance");
+
+    SubVmTop {
+        top_instance: inst_hash,
+        image_hash,
+    }
+}
+
+/// One sub-VM bench iteration: invoke the top instance with `depth` and
+/// panic unless it halted cleanly on the trampoline HostCall(0).
+pub fn invoke_sub_vm(nub: &mut Nub, top: &SubVmTop, depth: u64) {
+    let result = nub
+        .invoke_cached(top.top_instance, 0, [depth, 0, 0, 0], INITIAL_GAS)
+        .expect("invoke_cached");
+    assert!(
+        result.exit_reason == EXIT_HOSTCALL && result.exit_arg == 0,
+        "sub-VM exited non-cleanly: reason={} arg={} ret={} gas={}",
+        result.exit_reason,
+        result.exit_arg,
+        result.return_value,
+        result.gas_remaining,
+    );
+}
+
+/// First 8 bytes of a `CapHash` as lowercase hex (bench logging).
+pub fn hex_short(h: &CapHash) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(16);
+    for b in &h[..8] {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// Run the full sub-VM recurse criterion bench for `blob`, labelled
+/// `label`. Publishes the top instance once (the kernel stays warm: the
+/// JIT cache holds the compiled image, the cap cache holds the
+/// Image/Top-Instance/CNode), runs a depth-0/1 sanity check, then sweeps
+/// depths {10, 100, 1000}.
+pub fn run_recurse_bench(c: &mut Criterion, blob: &[u8], label: &str) {
+    let top = build_sub_vm_top(&mut nub_hyperlight_lock(), blob);
+    eprintln!(
+        "[{label}] image_hash={} top_instance={}",
+        hex_short(&top.image_hash),
+        hex_short(&top.top_instance),
+    );
+
+    // depth 0 (single CALL/HALT) + depth 1 sanity before the loop —
+    // catches top-frame / direct-mapping setup bugs early.
+    {
+        let mut nub = nub_hyperlight_lock();
+        invoke_sub_vm(&mut nub, &top, 0);
+        invoke_sub_vm(&mut nub, &top, 1);
+    }
+    eprintln!("[{label}] depth 0/1 ok");
+
+    let mut g = c.benchmark_group(label);
+    g.sample_size(20);
+    for &depth in &[10u64, 100, 1_000] {
+        g.throughput(Throughput::Elements(depth));
+        g.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &d| {
+            b.iter(|| invoke_sub_vm(&mut nub_hyperlight_lock(), &top, d))
+        });
+    }
+    g.finish();
+}

@@ -3,7 +3,7 @@ name = "javm-bench"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "JAVM v3 benchmarks: byte-PVM interpreter vs JIT recompiler."
+description = "JAVM v3 benchmarks: PVM2 (RISC-V) interpreter vs JIT recompiler."
 
 [features]
 default = []
@@ -23,12 +23,13 @@ nub = { path = "../nub" }
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
 javm-recompiler-x86 = { path = "../javm-recompiler-x86" }
 blake3 = "1"
+# `javm-bench` is a benchmark crate: criterion is a normal (not dev)
+# dependency so the shared criterion drivers can live in `src/lib.rs`.
+# Scoped to the target the bench harness actually compiles on.
+criterion = "0.5"
 
 [build-dependencies]
 build-javm = { path = "../build-javm" }
-
-[dev-dependencies]
-criterion = "0.5"
 
 [[bench]]
 name = "bench"
