@@ -87,8 +87,8 @@ impl nub_host_common::vmem::TableReadOps for Snapshot {
         let Some(pte_bytes) = self.memory.as_slice().get(addr..addr + PTE_SIZE) else {
             // Attacker-controlled data pointed out-of-bounds. We'll
             // default to returning 0 in this case, which, for most
-            // architectures (including x86-64 and arm64, the ones we
-            // care about presently) will be a not-present entry.
+            // architectures (x86-64, the only one we support) will be a
+            // not-present entry.
             return 0;
         };
         // The `get()` above ensures exactly PTE_SIZE bytes.
@@ -189,7 +189,6 @@ impl Snapshot {
         let guest_blob_size = blob.as_ref().map(|b| b.data.len()).unwrap_or(0);
         let guest_blob_mem_flags = blob.as_ref().map(|b| b.permissions);
 
-        #[cfg_attr(feature = "i686-guest", allow(unused_mut))]
         let mut layout = crate::mem::layout::SandboxMemoryLayout::new(
             cfg,
             exe_info.loaded_size(),

@@ -16,7 +16,7 @@ limitations under the License.
 
 /// A simple ELF loader
 pub(crate) mod elf;
-/// A generic wrapper for executable files (PE, ELF, etc)
+/// A wrapper for executable files (ELF).
 pub(crate) mod exe;
 /// Functionality to establish a sandbox's memory layout.
 pub mod layout;

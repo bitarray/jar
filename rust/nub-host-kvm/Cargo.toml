@@ -17,8 +17,6 @@ path = "src/lib.rs"
 [features]
 default = ["kvm"]
 executable_heap = []
-function_call_metrics = []
-hw-interrupts = []
 kvm = [
     "dep:kvm-bindings",
     "dep:kvm-ioctls",
@@ -66,16 +64,6 @@ cfg_aliases = "0.2.1"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
-# Residual cfg gates left after F2.1 (mshv3) and F2.2 (gdb, crashdump,
-# trace_guest, mem_profile, i686-guest, nanvix-unstable, fuzzing). The
-# alias / feature is gone so the gates are always-false. They'll get
-# stripped opportunistically as later stages touch each file.
-unexpected_cfgs = { level = "allow", check-cfg = [
-    'cfg(mshv3)',
-    'cfg(gdb)',
-    'cfg(crashdump)',
-    'cfg(unshared_snapshot_mem)',
-] }
 
 # Allow upstream-style code patterns that newer clippy flags but we
 # don't want to diverge from upstream over. Re-evaluate periodically.

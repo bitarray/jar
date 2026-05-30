@@ -10,13 +10,11 @@
 //! Per-page permissions are tracked separately in `flat_perms` (one
 //! byte per page) so the JIT signal handler can detect ro-write
 //! faults without involving the interpreter. The interpreter itself
-//! relies on the page-protected mmap mapping (Stage 3 / kernel
-//! integration) for read-only enforcement; this layer just bounds-
-//! checks.
+//! relies on the page-protected hardware mapping for read-only
+//! enforcement; this layer just bounds-checks.
 //!
 //! The fast-path read/write helpers use `read_unaligned` /
-//! `write_unaligned` via raw pointers — single MOV on x86. Same
-//! shape as v2 `javm/src/interpreter/mod.rs:198-309`.
+//! `write_unaligned` via raw pointers — single MOV on x86.
 
 use alloc::vec::Vec;
 
@@ -192,12 +190,6 @@ impl CopyingMemory {
             heap_top: 0,
             max_heap_pages: 0,
         }
-    }
-
-    /// Returns true iff `addr` is within `flat_mem`.
-    #[inline(always)]
-    pub fn is_in_bounds(&self, addr: u32) -> bool {
-        self.off(addr) < self.flat_mem.len()
     }
 
     /// Per-page permission for the page containing `addr`. Returns

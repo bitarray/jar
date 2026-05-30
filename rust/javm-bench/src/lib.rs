@@ -1,4 +1,6 @@
-//! Shared runners for `benches/pvm_bench.rs` and `benches/stark_bench.rs`.
+//! Shared runners for the bench harness (`benches/bench.rs`) and the
+//! sub-VM benches (`benches/sub_vm_recurse.rs`,
+//! `benches/sub_vm_data_recurse.rs`).
 //!
 //! The bench measures the full per-invocation lifecycle:
 //!   * `Nub::put_cap_with_hash` for each cap the invocation requires
@@ -21,9 +23,9 @@
 //! Linux x86-64 only — `nub` pulls the Hyperlight host stack
 //! unconditionally.
 
-#![cfg_attr(not(all(target_os = "linux", target_arch = "x86_64")), allow(unused))]
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
+use criterion::{BenchmarkId, Criterion, Throughput};
 use javm_cap::NUM_REGS;
 use javm_cap::image::{Image, PinnedCap};
 use javm_cap::slot::SlotIdx;
@@ -111,7 +113,7 @@ impl BuiltCaps {
         let cnode_hash = ssz::hash_tree_root(&cnode_cap);
 
         // 4. Build the Instance with the bench's flat overlay layout.
-        let (mem_size, overlays) = build_overlays(image);
+        let (mem_size, overlays) = image.data_overlays();
         let overlay_slices: Vec<(u32, &[u8])> = overlays
             .iter()
             .map(|(start, bytes)| (*start, bytes.as_slice()))
@@ -205,8 +207,8 @@ pub fn invoke(nub: &mut Nub, built: &BuiltCaps) -> (u64, u64) {
     finish(&result)
 }
 
-/// Drive `built[endpoint_idx]` through the byte-PVM interpreter via a
-/// fresh `Nub::new_local()` (the Local backend has no per-invocation
+/// Drive `built[endpoint_idx]` through the PVM2 (RISC-V) interpreter via
+/// a fresh `Nub::new_local()` (the Local backend has no per-invocation
 /// state, so a fresh Nub each call is fine — and matches the chain's
 /// per-event allocation model).
 pub fn run_interpreter(built: &BuiltCaps) -> (u64, u64) {
@@ -225,21 +227,6 @@ pub fn run_interpreter(built: &BuiltCaps) -> (u64, u64) {
 pub fn run_recompiler(built: &BuiltCaps) -> (u64, u64) {
     let mut nub = nub_hyperlight_lock();
     built.put_into(&mut nub);
-    let result = nub
-        .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
-        .unwrap_or_else(|e| panic!("recompiler invoke_cached: {e}"));
-    finish(&result)
-}
-
-/// Cold-cache variant: clear the JIT compile cache before each
-/// invocation so the call pays the full predecode + recompile cost
-/// alongside execute. Models a PolkaVM-shaped workload where each
-/// guest invocation may face a fresh Image hash.
-pub fn run_recompiler_cold(built: &BuiltCaps) -> (u64, u64) {
-    let mut nub = nub_hyperlight_lock();
-    built.put_into(&mut nub);
-    nub.evict_jit_all()
-        .unwrap_or_else(|e| panic!("recompiler evict_jit_all: {e}"));
     let result = nub
         .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
         .unwrap_or_else(|e| panic!("recompiler invoke_cached: {e}"));
@@ -286,35 +273,169 @@ pub fn reset_nub_hyperlight() {
     *g = Some(Nub::new_hyperlight().expect("Hyperlight sandbox"));
 }
 
-/// Walk the Image's memory mappings + slot contents and produce
-/// `(mem_size, overlays)` for the InstanceCap. Each non-empty content
-/// becomes one `(start, bytes)` overlay; stack/heap are empty inside
-/// `mem_size` as zero-init RW pages.
-fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
-    let mut mem_size: u32 = 0;
-    let mut overlays: Vec<(u32, Vec<u8>)> = Vec::new();
+// ============================================================================
+// Sub-VM recurse benches (shared driver)
+// ============================================================================
+//
+// `benches/sub_vm_recurse.rs` and `benches/sub_vm_data_recurse.rs` differ
+// only in which guest blob they ship and their label, so the whole build +
+// invoke + criterion driver lives here and each bench file is a one-liner.
 
-    // `memory_mappings` describes data/slot regions only; code is RO
-    // direct-mapped at CODE_BASE by the runtime, not copied into the
-    // flat RW buffer.
-    for mapping in &image.memory_mappings {
-        let target = mapping.source.target();
+/// cnode slot holding the recurse Image (each level inherits it from its
+/// parent — see `dispatch_host_call` in `nub-arch-x86::call_loop`).
+const SLOT_IMAGE_RECURSE: u32 = 3;
 
-        let end = (mapping.start + mapping.size) as u32;
-        if end > mem_size {
-            mem_size = end;
-        }
+/// Top-of-recursion `Cap::Instance` published for a sub-VM bench.
+pub struct SubVmTop {
+    pub top_instance: CapHash,
+    pub image_hash: CapHash,
+}
 
-        if let Some(PinnedCap::Data { content, .. }) = image.pinned_slots.get(&target) {
-            if !content.is_empty() {
-                overlays.push((mapping.start as u32, content.clone()));
+/// Build + publish (once) the recurse Image, its cnode, and the top
+/// Instance into `nub` from the SSZ-encoded Image `blob`. Returns the
+/// top instance hash so the bench loop can invoke it directly.
+pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
+    use javm_cap::{CNodeCap, CapHashOrRef};
+    use ssz::Decode;
+
+    const ENDPOINT_IDX: u8 = 0;
+
+    let image = Image::from_ssz_bytes(blob).expect("decode sub-vm image");
+
+    // The bench guest ships .rodata + a small stack (and, for the data
+    // variant, a 64 KiB pinned blob) via its image mappings. Publish a
+    // Cap::Data per pinned/initial slot and reference them from the
+    // Cap::Image; the in-kernel call_loop reads those bytes from the
+    // shared cache when building a child frame's mem image.
+    let mut data_caps: Vec<(CapHash, Cap)> = Vec::new();
+    let mut pinned_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
+    let mut initial_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
+    for (slot, pinned) in &image.pinned_slots {
+        let (h, maybe_cap) = match pinned {
+            PinnedCap::Data { content, size } => {
+                let cap = Cap::data_inline_with_size(content, *size);
+                let h = ssz::hash_tree_root(&cap);
+                (h, Some(cap))
             }
-        } else if let Some(init) = image.initial_slots.get(&target)
-            && !init.content.is_empty()
-        {
-            overlays.push((mapping.start as u32, init.content.clone()));
+            PinnedCap::Image { content_hash } => (*content_hash, None),
+        };
+        pinned_hashes.push((*slot, h));
+        if let Some(cap) = maybe_cap {
+            data_caps.push((h, cap));
+        }
+    }
+    for (slot, init) in &image.initial_slots {
+        let cap = Cap::data_inline_with_size(&init.content, init.size);
+        let h = ssz::hash_tree_root(&cap);
+        initial_hashes.push((*slot, h));
+        data_caps.push((h, cap));
+    }
+    for (h, cap) in &data_caps {
+        nub.put_cap_with_hash(*h, cap).expect("put data");
+    }
+    let image_cap =
+        Cap::image_with_slots(&image, &pinned_hashes, &initial_hashes).expect("image_with_slots");
+    let image_hash = ssz::hash_tree_root(&image_cap);
+    nub.put_cap_with_hash(image_hash, &image_cap)
+        .expect("put image");
+
+    let mut cn = CNodeCap::new(8).expect("cnode");
+    cn.set(
+        SlotIdx(SLOT_IMAGE_RECURSE),
+        Some(CapHashOrRef::Hash(image_hash)),
+    )
+    .expect("set image slot");
+    let cnode_cap = Cap::CNode(cn);
+    let cnode_hash = ssz::hash_tree_root(&cnode_cap);
+    nub.put_cap_with_hash(cnode_hash, &cnode_cap)
+        .expect("put cnode");
+
+    let endpoint = image.endpoints.get(&ENDPOINT_IDX).expect("endpoint 0");
+    let mut regs = [0u64; NUM_REGS];
+    for (&i, &v) in &endpoint.initial_regs {
+        if let Some(slot) = regs.get_mut(i as usize) {
+            *slot = v;
         }
     }
 
-    (mem_size, overlays)
+    let (mem_size, overlays) = image.data_overlays();
+    let overlay_slices: Vec<(u32, &[u8])> =
+        overlays.iter().map(|(s, b)| (*s, b.as_slice())).collect();
+    let inst_cap = Cap::instance_with_overlays(
+        [0u8; 32],
+        image_hash,
+        cnode_hash,
+        &overlay_slices,
+        mem_size,
+        regs,
+        0,
+        0,
+    );
+    let inst_hash = ssz::hash_tree_root(&inst_cap);
+    nub.put_cap_with_hash(inst_hash, &inst_cap)
+        .expect("put instance");
+
+    SubVmTop {
+        top_instance: inst_hash,
+        image_hash,
+    }
+}
+
+/// One sub-VM bench iteration: invoke the top instance with `depth` and
+/// panic unless it halted cleanly on the trampoline HostCall(0).
+pub fn invoke_sub_vm(nub: &mut Nub, top: &SubVmTop, depth: u64) {
+    let result = nub
+        .invoke_cached(top.top_instance, 0, [depth, 0, 0, 0], INITIAL_GAS)
+        .expect("invoke_cached");
+    assert!(
+        result.exit_reason == EXIT_HOSTCALL && result.exit_arg == 0,
+        "sub-VM exited non-cleanly: reason={} arg={} ret={} gas={}",
+        result.exit_reason,
+        result.exit_arg,
+        result.return_value,
+        result.gas_remaining,
+    );
+}
+
+/// First 8 bytes of a `CapHash` as lowercase hex (bench logging).
+pub fn hex_short(h: &CapHash) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(16);
+    for b in &h[..8] {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// Run the full sub-VM recurse criterion bench for `blob`, labelled
+/// `label`. Publishes the top instance once (the kernel stays warm: the
+/// JIT cache holds the compiled image, the cap cache holds the
+/// Image/Top-Instance/CNode), runs a depth-0/1 sanity check, then sweeps
+/// depths {10, 100, 1000}.
+pub fn run_recurse_bench(c: &mut Criterion, blob: &[u8], label: &str) {
+    let top = build_sub_vm_top(&mut nub_hyperlight_lock(), blob);
+    eprintln!(
+        "[{label}] image_hash={} top_instance={}",
+        hex_short(&top.image_hash),
+        hex_short(&top.top_instance),
+    );
+
+    // depth 0 (single CALL/HALT) + depth 1 sanity before the loop —
+    // catches top-frame / direct-mapping setup bugs early.
+    {
+        let mut nub = nub_hyperlight_lock();
+        invoke_sub_vm(&mut nub, &top, 0);
+        invoke_sub_vm(&mut nub, &top, 1);
+    }
+    eprintln!("[{label}] depth 0/1 ok");
+
+    let mut g = c.benchmark_group(label);
+    g.sample_size(20);
+    for &depth in &[10u64, 100, 1_000] {
+        g.throughput(Throughput::Elements(depth));
+        g.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &d| {
+            b.iter(|| invoke_sub_vm(&mut nub_hyperlight_lock(), &top, d))
+        });
+    }
+    g.finish();
 }

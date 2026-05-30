@@ -36,10 +36,6 @@ use ssz_derive::{Decode, Encode};
 pub struct SlotIdx(#[ssz(transparent)] pub u32);
 
 impl SlotIdx {
-    pub const fn new(idx: u32) -> Self {
-        Self(idx)
-    }
-
     pub const fn get(self) -> u32 {
         self.0
     }

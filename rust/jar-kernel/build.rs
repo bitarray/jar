@@ -1,5 +1,5 @@
 //! Cross-compile the simple-chain example for the JAVM target,
-//! transpile it to a SCALE-encoded `Image`, and expose the blob
+//! transpile it to a SSZ-encoded `Image`, and expose the blob
 //! path to the integration test via the `SIMPLE_CHAIN_BLOB`
 //! environment variable.
 //!

@@ -14,102 +14,22 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#[cfg(feature = "mem_profile")]
-use std::sync::Arc;
-
-#[cfg(target_arch = "aarch64")]
-use goblin::elf::reloc::{R_AARCH64_NONE, R_AARCH64_RELATIVE};
 #[cfg(target_arch = "x86_64")]
 use goblin::elf::reloc::{R_X86_64_NONE, R_X86_64_RELATIVE};
 use goblin::elf::{Elf, ProgramHeaders, Reloc};
-#[cfg(feature = "nanvix-unstable")]
-use goblin::elf32::program_header::PT_LOAD;
-#[cfg(not(feature = "nanvix-unstable"))]
 use goblin::elf64::program_header::PT_LOAD;
 
 use super::exe::LoadInfo;
 use crate::{Result, log_then_return, new_error};
 
-#[cfg(feature = "mem_profile")]
-struct ResolvedSectionHeader {
-    name: String,
-    addr: u64,
-    offset: u64,
-    size: u64,
-}
-
 pub(crate) struct ElfInfo {
     payload: Vec<u8>,
     phdrs: ProgramHeaders,
-    #[cfg(feature = "mem_profile")]
-    shdrs: Vec<ResolvedSectionHeader>,
     entry: u64,
     relocs: Vec<Reloc>,
     /// The hyperlight version string embedded by `hyperlight-guest-bin`, if
     /// present. Used to detect version/ABI mismatches between guest and host.
     guest_bin_version: Option<String>,
-}
-
-#[cfg(feature = "mem_profile")]
-struct UnwindInfo {
-    payload: Vec<u8>,
-    load_addr: u64,
-    va_size: u64,
-    base_svma: u64,
-    shdrs: Vec<ResolvedSectionHeader>,
-}
-
-#[cfg(feature = "mem_profile")]
-impl super::exe::UnwindInfo for UnwindInfo {
-    fn as_module(&self) -> framehop::Module<Vec<u8>> {
-        framehop::Module::new(
-            // TODO: plumb through a name from from_file if this
-            // came from a file
-            "guest".to_string(),
-            self.load_addr..self.load_addr + self.va_size,
-            self.load_addr,
-            self,
-        )
-    }
-    fn hash(&self) -> blake3::Hash {
-        blake3::hash(&self.payload)
-    }
-}
-
-#[cfg(feature = "mem_profile")]
-impl UnwindInfo {
-    fn resolved_section_header(&self, name: &[u8]) -> Option<&ResolvedSectionHeader> {
-        self.shdrs
-            .iter()
-            .find(|&sh| sh.name.as_bytes()[0..core::cmp::min(name.len(), sh.name.len())] == *name)
-    }
-}
-
-#[cfg(feature = "mem_profile")]
-impl framehop::ModuleSectionInfo<Vec<u8>> for &UnwindInfo {
-    fn base_svma(&self) -> u64 {
-        self.base_svma
-    }
-    fn section_svma_range(&mut self, name: &[u8]) -> Option<std::ops::Range<u64>> {
-        let shdr = self.resolved_section_header(name)?;
-        Some(shdr.addr..shdr.addr + shdr.size)
-    }
-    fn section_data(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        if name == b".eh_frame" && self.resolved_section_header(b".debug_frame").is_some() {
-            /* Rustc does not always emit enough information for stack
-             * unwinding in .eh_frame, presumably because we use panic =
-             * abort in the guest. Framehop defaults to ignoring
-             * .debug_frame if .eh_frame exists, but we want the opposite
-             * behaviour here, since .debug_frame will actually contain
-             * frame information whereas .eh_frame often doesn't because
-             * of the aforementioned behaviour.  Consequently, we hack
-             * around this by pretending that .eh_frame doesn't exist if
-             * .debug_frame does. */
-            return None;
-        }
-        let shdr = self.resolved_section_header(name)?;
-        Some(self.payload[shdr.offset as usize..(shdr.offset + shdr.size) as usize].to_vec())
-    }
 }
 
 impl ElfInfo {
@@ -131,19 +51,6 @@ impl ElfInfo {
         Ok(ElfInfo {
             payload: bytes.to_vec(),
             phdrs: elf.program_headers,
-            #[cfg(feature = "mem_profile")]
-            shdrs: elf
-                .section_headers
-                .iter()
-                .filter_map(|sh| {
-                    Some(ResolvedSectionHeader {
-                        name: elf.shdr_strtab.get_at(sh.sh_name)?.to_string(),
-                        addr: sh.sh_addr,
-                        offset: sh.sh_offset,
-                        size: sh.sh_size,
-                    })
-                })
-                .collect(),
             entry: elf.entry,
             relocs,
             guest_bin_version,
@@ -219,18 +126,6 @@ impl ElfInfo {
                 .ok_or_else(|| new_error!("{} missing addend", name))
         };
         for r in self.relocs.iter() {
-            #[cfg(target_arch = "aarch64")]
-            match r.r_type {
-                R_AARCH64_RELATIVE => {
-                    let addend = get_addend("R_AARCH64_RELATIVE", r)?;
-                    target[r.r_offset as usize..r.r_offset as usize + 8]
-                        .copy_from_slice(&(runtime_base_va as i64 + addend).to_le_bytes());
-                }
-                R_AARCH64_NONE => {}
-                _ => {
-                    log_then_return!("unsupported aarch64 relocation {}", r.r_type);
-                }
-            }
             #[cfg(target_arch = "x86_64")]
             match r.r_type {
                 R_X86_64_RELATIVE => {
@@ -244,22 +139,6 @@ impl ElfInfo {
                 }
             }
         }
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "mem_profile")] {
-                let va_size = self.get_va_size() as u64;
-                let base_svma = self.get_base_va();
-                Ok(LoadInfo {
-                    info: Arc::new(UnwindInfo {
-                        payload: self.payload,
-                        load_addr: load_addr as u64,
-                        va_size,
-                        base_svma,
-                        shdrs: self.shdrs,
-                    })
-                })
-            } else {
-                Ok(LoadInfo {})
-            }
-        }
+        Ok(LoadInfo {})
     }
 }

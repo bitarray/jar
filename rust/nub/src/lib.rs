@@ -4,7 +4,7 @@
 //! `jar-apply`) link against. It hides the choice of substrate behind
 //! a single invoke surface, dispatching to one of two backends:
 //!
-//! - **Local**: runs the byte-PVM interpreter directly in-process via
+//! - **Local**: runs the PVM2 (RISC-V) interpreter directly in-process via
 //!   `nub_arch_local::run_instance`. Used for tests, deterministic
 //!   replay, and any host that doesn't need real ring-0 isolation.
 //! - **Hyperlight**: ships the invocation as an RPC into a
@@ -59,7 +59,7 @@ pub struct Nub {
 }
 
 enum Backend {
-    /// In-process backend: the byte-PVM interpreter plus its own
+    /// In-process backend: the PVM2 (RISC-V) interpreter plus its own
     /// cap directory. `cache` is the source of truth for caps published
     /// via `Nub::put_cap*` and resolved by `Nub::invoke_cached`.
     Local {
@@ -144,7 +144,7 @@ impl Nub {
     #[cfg(feature = "heap-diag")]
     pub fn heap_stats(&mut self) -> Result<HeapStats> {
         match &mut self.backend {
-            Backend::Local(_) => Err(anyhow::anyhow!(
+            Backend::Local { .. } => Err(anyhow::anyhow!(
                 "heap_stats: Local backend has no guest heap"
             )),
             Backend::Hyperlight(h) => {
@@ -221,7 +221,7 @@ impl Nub {
         match &mut self.backend {
             Backend::Local { cache, .. } => {
                 // Resolve the instance + image from the in-process
-                // cache and drive the byte-PVM interpreter.
+                // cache and drive the PVM2 (RISC-V) interpreter.
                 let instance_cap = cache
                     .get(CapHashOrRef::Hash(instance_hash))
                     .ok_or_else(|| anyhow::anyhow!("invoke_cached: instance not published"))?;

@@ -55,7 +55,6 @@ fn run_interpreter(image: &Image, ep: u8) -> (u64, u64) {
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod recomp {
     use super::*;
-    use javm_cap::image::PinnedCap;
     use javm_cap::NUM_REGS;
     use nub::Nub;
     use std::sync::{Mutex, OnceLock};
@@ -89,7 +88,7 @@ mod recomp {
             }
         }
 
-        let (mem_size, overlays) = build_overlays(image);
+        let (mem_size, overlays) = image.data_overlays();
         let overlay_slices: Vec<(u32, &[u8])> = overlays
             .iter()
             .map(|(start, bytes)| (*start, bytes.as_slice()))
@@ -146,46 +145,9 @@ mod recomp {
         (result.return_value, gas_used)
     }
 
-    /// Walk the Image's memory mappings + slot contents and project
-    /// them onto the recompiler's flat `(arg, ro, rw)` shape.
-    ///
-    /// - `ro`: the unique pinned mapping (typically `.rodata`).
-    /// - `rw`: the unique non-pinned mapping whose initial slot has
-    ///   non-empty content (typically `.data`). Stack and heap
-    ///   regions have empty `content` — they live within `mem_size`
-    ///   as zero-initialised RW pages and don't need an explicit
-    ///   `rw_data` entry.
-    /// - `arg`: empty (no payload delivery; the suite bakes its
-    ///   inputs into the guest).
-    /// - `mem_size`: `max(mapping.start + mapping.size)` over all
-    ///   mappings — covers stack, ro, rw, and heap.
-    fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
-        let mut mem_size: u32 = 0;
-        let mut overlays: Vec<(u32, Vec<u8>)> = Vec::new();
-
-        // Code is RO direct-mapped at CODE_BASE by the runtime, not a
-        // flat-buffer overlay; `memory_mappings` lists data/slot regions.
-        for mapping in &image.memory_mappings {
-            let target = mapping.source.target();
-
-            let end = (mapping.start + mapping.size) as u32;
-            if end > mem_size {
-                mem_size = end;
-            }
-
-            if let Some(PinnedCap::Data { content, .. }) = image.pinned_slots.get(&target) {
-                if !content.is_empty() {
-                    overlays.push((mapping.start as u32, content.clone()));
-                }
-            } else if let Some(init) = image.initial_slots.get(&target) {
-                if !init.content.is_empty() {
-                    overlays.push((mapping.start as u32, init.content.clone()));
-                }
-            }
-        }
-
-        (mem_size, overlays)
-    }
+    // Instance memory overlays come from `Image::data_overlays()`
+    // (javm-cap) — the single source of truth the kernel + bench paths
+    // share, so the conformance oracle can't silently diverge from them.
 }
 
 fn conform(ep: u8, name: &str, host_fn: fn() -> u64) {

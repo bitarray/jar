@@ -14,25 +14,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #![warn(dead_code, missing_docs, unused_mut)]
-//! Hyperlight host runtime for executing guest code in lightweight virtual machines.
+//! KVM host runtime for executing guest code in lightweight virtual machines.
 //!
-//! This crate provides the host-side runtime for Hyperlight, enabling safe execution
-//! of untrusted guest code within micro virtual machines with minimal overhead.
-//! The runtime manages sandbox creation, guest function calls, memory isolation,
-//! and host-guest communication.
+//! This crate provides the host-side runtime for the nub KVM sandbox, enabling
+//! safe execution of untrusted guest code within micro virtual machines with
+//! minimal overhead. The runtime manages sandbox creation, guest function calls,
+//! memory isolation, and host-guest communication over rkyv-encoded RPC.
 //!
 //! The primary entry points are [`UninitializedSandbox`] for initial setup and
 //! [`MultiUseSandbox`] for executing guest functions.
 //!
 //! ## Guest Requirements
 //!
-//! Hyperlight requires specially compiled guest binaries and cannot run regular
-//! container images or executables. Guests must be built using either the Rust
-//! API ([`hyperlight_guest`] with optional use of [`hyperlight_guest_bin`]),
-//! or with the C API (`hyperlight_guest_capi`).
-//!
-//! [`hyperlight_guest`]: https://docs.rs/hyperlight_guest
-//! [`hyperlight_guest_bin`]: https://docs.rs/hyperlight_guest_bin
+//! This runtime requires a specially compiled guest binary (the
+//! `nub-arch-guestbin` `x86_64-unknown-none` image) and cannot run regular
+//! container images or executables.
 //!
 
 #![cfg_attr(not(any(test, debug_assertions)), warn(clippy::panic))]
@@ -56,8 +52,7 @@ pub mod hypervisor;
 /// 0x0000    PML4
 /// 0x1000    PDPT
 /// 0x2000    PD
-/// 0x3000    The guest PE code (When the code has been loaded using LoadLibrary to debug the guest this will not be
-/// present and code length will be zero;
+/// 0x3000    The guest ELF image (loaded into the sandbox's memory).
 ///
 /// - The pointer passed to the Entrypoint in the Guest application is the size of page table + size of code,
 ///   at this address structs below are laid out in this order
@@ -84,9 +79,6 @@ pub use sandbox::MultiUseSandbox;
 pub use sandbox::UninitializedSandbox;
 /// The re-export for the `GuestBinary` type
 pub use sandbox::uninitialized::GuestBinary;
-/// The re-export for the `GuestCounter` type
-#[cfg(feature = "guest-counter")]
-pub use sandbox::uninitialized::GuestCounter;
 
 /// The universal `Result` type used throughout the Hyperlight codebase.
 pub type Result<T> = core::result::Result<T, error::HyperlightError>;

@@ -57,8 +57,6 @@ pub struct MultiUseSandbox {
     /// then reused. Lets the host short-circuit idempotent re-puts
     /// without a roundtrip + merkle walk through the guest.
     guest_cache_reader: Option<GuestCacheReader>,
-    #[cfg(gdb)]
-    dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
 }
 
 impl MultiUseSandbox {
@@ -72,7 +70,6 @@ impl MultiUseSandbox {
         host_funcs: Arc<Mutex<FunctionRegistry>>,
         mgr: SandboxMemoryManager<HostSharedMemory>,
         vm: HyperlightVm,
-        #[cfg(gdb)] dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
     ) -> MultiUseSandbox {
         Self {
             id: super::snapshot::SANDBOX_CONFIGURATION_COUNTER.fetch_add(1, Ordering::Relaxed),
@@ -80,8 +77,6 @@ impl MultiUseSandbox {
             mem_mgr: mgr,
             vm,
             guest_cache_reader: None,
-            #[cfg(gdb)]
-            dbg_mem_access_fn,
         }
     }
 
@@ -125,12 +120,9 @@ impl MultiUseSandbox {
             self.mem_mgr
                 .write_guest_function_call_raw(req_bytes.as_slice())?;
 
-            let dispatch_res = self.vm.dispatch_call_from_host(
-                &mut self.mem_mgr,
-                &self.host_funcs,
-                #[cfg(gdb)]
-                self.dbg_mem_access_fn.clone(),
-            );
+            let dispatch_res = self
+                .vm
+                .dispatch_call_from_host(&mut self.mem_mgr, &self.host_funcs);
 
             if let Err(e) = dispatch_res {
                 let (error, _should_poison) = e.promote();
@@ -282,24 +274,6 @@ impl MultiUseSandbox {
     /// Returns a handle for interrupting guest execution.
     pub fn interrupt_handle(&self) -> Arc<dyn InterruptHandle> {
         self.vm.interrupt_handle()
-    }
-
-    /// Generate a crash dump of the current state of the VM underlying this sandbox.
-    #[cfg(crashdump)]
-    #[instrument(err(Debug), skip_all, parent = Span::current())]
-    pub fn generate_crashdump(&mut self) -> Result<()> {
-        crate::hypervisor::crashdump::generate_crashdump(&self.vm, &mut self.mem_mgr, None)
-    }
-
-    /// Generate a crash dump of the current state of the VM, writing to `dir`.
-    #[cfg(crashdump)]
-    #[instrument(err(Debug), skip_all, parent = Span::current())]
-    pub fn generate_crashdump_to_dir(&mut self, dir: impl Into<String>) -> Result<()> {
-        crate::hypervisor::crashdump::generate_crashdump(
-            &self.vm,
-            &mut self.mem_mgr,
-            Some(dir.into()),
-        )
     }
 }
 

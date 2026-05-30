@@ -16,9 +16,9 @@ blake2 = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
 ssz = { workspace = true, features = ["sha2", "derive"] }
 ssz-derive = { workspace = true }
-# Wire-form rkyv derives live in `wire.rs`. The cap types proper still
-# move through SSZ for hash-tree-root computation; rkyv is only used
-# for the host→guest `put_cap` RPC payload.
+# The cap types derive rkyv inline (`Cap` is itself the wire form);
+# rkyv is only used for the host→guest `put_cap` RPC payload. The types
+# still move through SSZ for hash-tree-root computation.
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
 # Interior-mutable directory lock. spin (vs std::sync::Mutex) so the
 # guest build (`target_os = "none"`) keeps working without std.

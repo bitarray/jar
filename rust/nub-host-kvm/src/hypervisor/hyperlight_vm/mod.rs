@@ -14,33 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-#[cfg(target_arch = "x86_64")]
 mod x86_64;
 
-#[cfg(target_arch = "aarch64")]
-mod aarch64;
-#[cfg(gdb)]
-use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-#[cfg(target_arch = "aarch64")]
-pub(crate) use aarch64::*;
 use nub_host_common::log_level::GuestLogFilter;
 use tracing_core::LevelFilter;
 
 use crate::HyperlightError;
-#[cfg(gdb)]
-use crate::hypervisor::gdb::DebuggableVm;
-#[cfg(gdb)]
-use crate::hypervisor::gdb::arch::VcpuStopReasonError;
-#[cfg(gdb)]
-use crate::hypervisor::gdb::{
-    DebugCommChannel, DebugError, DebugMsg, DebugResponse, GdbTargetError, VcpuStopReason,
-};
-#[cfg(gdb)]
-use crate::hypervisor::hyperlight_vm::x86_64::debug::ProcessDebugRequestError;
-#[cfg(not(gdb))]
 use crate::hypervisor::virtual_machine::VirtualMachine;
 use crate::hypervisor::virtual_machine::{
     MapMemoryError, RegisterError, RunVcpuError, UnmapMemoryError, VmError, VmExit,
@@ -53,10 +35,6 @@ use crate::metrics::{METRIC_ERRONEOUS_VCPU_KICKS, METRIC_GUEST_CANCELLATION};
 use crate::sandbox::host_funcs::FunctionRegistry;
 use crate::sandbox::outb::{HandleOutbError, handle_outb};
 use crate::sandbox::snapshot::NextAction;
-#[cfg(feature = "mem_profile")]
-use crate::sandbox::trace::MemTraceInfo;
-#[cfg(crashdump)]
-use crate::sandbox::uninitialized::SandboxRuntimeConfig;
 
 /// Get the logging level filter to pass to the guest entrypoint
 ///
@@ -188,19 +166,10 @@ pub enum InitializeError {
 /// Errors that can occur during VM execution in the run loop
 #[derive(Debug, thiserror::Error)]
 pub enum RunVmError {
-    #[cfg(crashdump)]
-    #[error("Crashdump generation error: {0}")]
-    CrashdumpGeneration(Box<HyperlightError>),
-    #[cfg(gdb)]
-    #[error("Debug handler error: {0}")]
-    DebugHandler(#[from] HandleDebugError),
     #[error("Execution was cancelled by the host")]
     ExecutionCancelledByHost,
     #[error("Failed to access page: {0}")]
     PageTableAccess(AccessPageTableError),
-    #[cfg(feature = "trace_guest")]
-    #[error("Failed to get registers: {0}")]
-    GetRegs(RegisterError),
     #[error("IO handling error: {0}")]
     HandleIo(#[from] HandleIoError),
     #[error(
@@ -219,17 +188,11 @@ pub enum RunVmError {
     RunVcpu(#[from] RunVcpuError),
     #[error("Unexpected VM exit: {0}")]
     UnexpectedVmExit(String),
-    #[cfg(gdb)]
-    #[error("vCPU stop reason error: {0}")]
-    VcpuStopReason(#[from] VcpuStopReasonError),
 }
 
 /// Errors that can occur during IO (outb) handling
 #[derive(Debug, thiserror::Error)]
 pub enum HandleIoError {
-    #[cfg(feature = "mem_profile")]
-    #[error("Failed to get registers: {0}")]
-    GetRegs(RegisterError),
     #[error("No data was given in IO interrupt")]
     NoData,
     #[error("{0}")]
@@ -351,66 +314,15 @@ pub enum AccessPageTableError {
     AccessRegs(#[from] RegisterError),
 }
 
-#[cfg(crashdump)]
-#[derive(Debug, thiserror::Error)]
-pub enum CrashDumpError {
-    #[error("Failed to generate crashdump because of a register error: {0}")]
-    GetRegs(#[from] RegisterError),
-    #[error("Failed to get root PT during crashdump generation: {0}")]
-    GetRootPt(#[from] AccessPageTableError),
-    #[error("Failed to get guest memory mapping during crashdump generation: {0}")]
-    AccessPageTable(Box<HyperlightError>),
-}
-
 /// Errors that can occur during HyperlightVm creation
 #[derive(Debug, thiserror::Error)]
 pub enum CreateHyperlightVmError {
-    #[cfg(gdb)]
-    #[error("Failed to add hardware breakpoint: {0}")]
-    AddHwBreakpoint(DebugError),
     #[error("No hypervisor was found")]
     NoHypervisorFound,
-    #[cfg(gdb)]
-    #[error("Failed to send debug message: {0}")]
-    SendDbgMsg(#[from] SendDbgMsgError),
     #[error("VM operation error: {0}")]
     Vm(#[from] VmError),
     #[error("Set scratch error: {0}")]
     UpdateRegion(#[from] UpdateRegionError),
-}
-
-/// Errors that can occur during debug exit handling
-#[cfg(gdb)]
-#[derive(Debug, thiserror::Error)]
-pub enum HandleDebugError {
-    #[error("Debug is not enabled")]
-    DebugNotEnabled,
-    #[error("Error processing debug request: {0}")]
-    ProcessRequest(#[from] ProcessDebugRequestError),
-    #[error("Failed to receive message from GDB thread: {0}")]
-    ReceiveMessage(#[from] RecvDbgMsgError),
-    #[error("Failed to send message to GDB thread: {0}")]
-    SendMessage(#[from] SendDbgMsgError),
-}
-
-/// Errors that can occur when sending a debug message
-#[cfg(gdb)]
-#[derive(Debug, thiserror::Error)]
-pub enum SendDbgMsgError {
-    #[error("Debug is not enabled")]
-    DebugNotEnabled,
-    #[error("Failed to send message: {0}")]
-    SendFailed(#[from] GdbTargetError),
-}
-
-/// Errors that can occur when receiving a debug message
-#[cfg(gdb)]
-#[derive(Debug, thiserror::Error)]
-pub enum RecvDbgMsgError {
-    #[error("Debug is not enabled")]
-    DebugNotEnabled,
-    #[error("Failed to receive message: {0}")]
-    RecvFailed(#[from] GdbTargetError),
 }
 
 /// Unified error type for all HyperlightVm operations
@@ -437,13 +349,10 @@ pub enum HyperlightVmError {
 /// Represents a Hyperlight Virtual Machine instance.
 ///
 /// This struct manages the lifecycle of the VM, including:
-/// - The underlying hypervisor implementation (e.g., KVM, MSHV, WHP).
+/// - The underlying hypervisor implementation (KVM).
 /// - Memory management, including initial sandbox regions and dynamic mappings.
 /// - The vCPU execution loop and handling of VM exits (I/O, MMIO, interrupts).
 pub(crate) struct HyperlightVm {
-    #[cfg(gdb)]
-    pub(super) vm: Box<dyn DebuggableVm>,
-    #[cfg(not(gdb))]
     pub(super) vm: Box<dyn VirtualMachine>,
     pub(super) entrypoint: NextAction, // only present if this vm has not yet been initialised
     pub(super) rsp_gva: u64,
@@ -466,15 +375,6 @@ pub(crate) struct HyperlightVm {
     pub(super) mmap_regions: Vec<(u32, MemoryRegion)>, // Later mapped regions (slot number, region)
 
     pub(super) pending_tlb_flush: bool,
-
-    #[cfg(gdb)]
-    pub(super) gdb_conn: Option<DebugCommChannel<DebugResponse, DebugMsg>>,
-    #[cfg(gdb)]
-    pub(super) sw_breakpoints: HashMap<u64, u8>, // addr -> original instruction
-    #[cfg(feature = "mem_profile")]
-    pub(super) trace_info: MemTraceInfo,
-    #[cfg(crashdump)]
-    pub(super) rt_cfg: SandboxRuntimeConfig,
 }
 
 impl HyperlightVm {
@@ -557,18 +457,12 @@ impl HyperlightVm {
         &mut self,
         mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
         host_funcs: &Arc<Mutex<FunctionRegistry>>,
-        #[cfg(gdb)] dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
     ) -> std::result::Result<(), RunVmError> {
-        // Keeps the trace context and open spans
-        #[cfg(feature = "trace_guest")]
-        let mut tc = crate::sandbox::trace::TraceContext::new();
-
         let result = loop {
             // ===== KILL() TIMING POINT 2: Before set_tid() =====
             // If kill() is called and ran to completion BEFORE this line executes:
             //    - CANCEL_BIT will be set and we will return an early VmExit::Cancelled()
             //      without sending any signals/WHV api calls
-            #[cfg(any(kvm, mshv3))]
             self.interrupt_handle.set_tid();
             self.interrupt_handle.set_running();
             // NOTE: `set_running()`` must be called before checking `is_cancelled()`
@@ -582,33 +476,7 @@ impl HyperlightVm {
                 // ==== KILL() TIMING POINT 3: Before calling run() ====
                 // If kill() is called and ran to completion BEFORE this line executes:
                 //    - Will still do a VM entry, but signals will be sent until VM exits
-                let result = self.vm.run_vcpu(
-                    #[cfg(feature = "trace_guest")]
-                    &mut tc,
-                );
-
-                // End current host trace by closing the current span that captures traces
-                // happening when a guest exits and re-enters.
-                #[cfg(feature = "trace_guest")]
-                {
-                    tc.end_host_trace();
-                    // Handle the guest trace data if any
-                    let regs = self.vm.regs().map_err(RunVmError::GetRegs)?;
-
-                    // Only parse the trace if it has reported
-                    if tc.has_trace_data(&regs) {
-                        let root_pt = self.get_root_pt().map_err(RunVmError::PageTableAccess)?;
-
-                        // If something goes wrong with parsing the trace data, we log the error and
-                        // continue execution instead of returning an error since this is not critical
-                        // to correct execution of the guest
-                        tc.handle_trace(&regs, mem_mgr, root_pt)
-                            .unwrap_or_else(|e| {
-                                tracing::error!("Cannot handle trace data: {}", e);
-                            });
-                    }
-                }
-                result
+                self.vm.run_vcpu()
             };
 
             // ===== KILL() TIMING POINT 4: Before clear_running() =====
@@ -629,24 +497,6 @@ impl HyperlightVm {
             //    - CANCEL_BIT will be set. Cancellation is deferred to the next iteration.
             //    - Signals will not be sent
             match exit_reason {
-                #[cfg(gdb)]
-                Ok(VmExit::Debug { dr6, exception }) => {
-                    let initialise = match self.entrypoint {
-                        NextAction::Initialise(initialise) => initialise,
-                        _ => 0,
-                    };
-                    // Handle debug event (breakpoints)
-                    let stop_reason = crate::hypervisor::gdb::arch::vcpu_stop_reason(
-                        self.vm.as_mut(),
-                        dr6,
-                        initialise,
-                        exception,
-                    )?;
-                    if let Err(e) = self.handle_debug(dbg_mem_access_fn.clone(), stop_reason) {
-                        break Err(e.into());
-                    }
-                }
-
                 Ok(VmExit::Halt()) => {
                     break Ok(());
                 }
@@ -693,25 +543,13 @@ impl HyperlightVm {
                 }
                 Ok(VmExit::Cancelled()) => {
                     // If cancellation was not requested for this specific guest function call,
-                    // the vcpu was interrupted by a stale cancellation. This can occur when:
-                    // - Linux: A signal from a previous call arrives late
-                    // - Windows: WHvCancelRunVirtualProcessor called right after vcpu exits but RUNNING_BIT is still true
+                    // the vcpu was interrupted by a stale cancellation. This can occur when a
+                    // signal from a previous call arrives late on Linux.
                     if !cancel_requested && !debug_interrupted {
                         // Track that an erroneous vCPU kick occurred
                         metrics::counter!(METRIC_ERRONEOUS_VCPU_KICKS).increment(1);
                         // treat this the same as a VmExit::Retry, the cancel was not meant for this call
                         continue;
-                    }
-
-                    // If the vcpu was interrupted by a debugger, we need to handle it
-                    #[cfg(gdb)]
-                    {
-                        self.interrupt_handle.clear_debug_interrupt();
-                        if let Err(e) =
-                            self.handle_debug(dbg_mem_access_fn.clone(), VcpuStopReason::Interrupt)
-                        {
-                            break Err(e.into());
-                        }
                     }
 
                     metrics::counter!(METRIC_GUEST_CANCELLATION).increment(1);
@@ -733,21 +571,7 @@ impl HyperlightVm {
                 // no need to crashdump this
                 Err(RunVmError::ExecutionCancelledByHost)
             }
-            Err(e) => {
-                #[cfg(crashdump)]
-                if self.rt_cfg.guest_core_dump {
-                    crate::hypervisor::crashdump::generate_crashdump(self, mem_mgr, None)
-                        .map_err(|e| RunVmError::CrashdumpGeneration(Box::new(e)))?;
-                }
-
-                // If GDB is enabled, we handle the debug memory access
-                // Disregard return value as we want to return the error
-                #[cfg(gdb)]
-                if self.gdb_conn.is_some() {
-                    self.handle_debug(dbg_mem_access_fn.clone(), VcpuStopReason::Crash)?
-                }
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 
@@ -771,16 +595,7 @@ impl HyperlightVm {
             data.get(3).copied().unwrap_or(0),
         ]);
 
-        #[cfg(feature = "mem_profile")]
-        {
-            let regs = self.vm.regs().map_err(HandleIoError::GetRegs)?;
-            handle_outb(mem_mgr, host_funcs, port, val, &regs, &mut self.trace_info)?;
-        }
-
-        #[cfg(not(feature = "mem_profile"))]
-        {
-            handle_outb(mem_mgr, host_funcs, port, val)?;
-        }
+        handle_outb(mem_mgr, host_funcs, port, val)?;
 
         Ok(())
     }

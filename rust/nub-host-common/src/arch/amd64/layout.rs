@@ -14,16 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
  */
 
-// The addresses in this file should be coordinated with
-// src/hyperlight_guest/src/arch/amd64/layout.rs and
-// src/hyperlight_guest_bin/src/arch/amd64/layout.rs
+// The addresses in this file should be coordinated with the guest
+// layout in `nub-arch-guestbin` / `nub-arch-x86`.
 
 /// We have this the top of the page below the top of memory in order
 /// to make working with start/end ptrs in a few places more
 /// convenient (not needing to worry about overflow)
 pub const MAX_GVA: usize = 0xffff_ffff_ffff_efff;
-pub const SNAPSHOT_PT_GVA_MIN: usize = 0xffff_8000_0000_0000;
-pub const SNAPSHOT_PT_GVA_MAX: usize = 0xffff_80ff_ffff_ffff;
 
 /// We assume 36-bit IPAs for now, since every amd64 processor
 /// supports at least 36 bits.  Almost all of them support at least 40

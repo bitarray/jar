@@ -1,10 +1,10 @@
 //! Ecall dispatch.
 //!
 //! The `Vm` impls `javm_exec::EcallHandler`. The interpreter / JIT
-//! invokes `handle` for every PVM `ecall` (opcode 3, no immediate)
-//! and `ecalli imm` (opcode 10, u32 immediate). The handler decodes
-//! the operation from the immediate and routes to the appropriate
-//! sub-dispatcher.
+//! invokes `handle` for every custom-0 `ecall.jar` (funct3=001, no
+//! immediate) and `ecalli imm` (funct3=010, sign-extended imm12
+//! carried as u32). The handler decodes the operation from the
+//! immediate and routes to the appropriate sub-dispatcher.
 //!
 //! ## ecalli opcode encoding (Stage 3 baseline)
 //!
@@ -887,10 +887,9 @@ fn data_cap_prefix(data: &DataCap, len: usize) -> Vec<u8> {
 }
 
 impl<K: KernelAssist> Vm<K> {
-    /// Plain `ecall` (opcode 3, no immediate). Spec §4 reads φ[11]
-    /// (mgmt_op) and φ[12] (subject|object) for the management
-    /// dispatch. Stage 3 routes the same way as `ecalli imm`, treating
-    /// φ[11] as the op.
+    /// Plain `ecall.jar` (custom-0 funct3=001). Reads φ[11] as the
+    /// mgmt/host op and routes identically to `ecalli imm`; operands
+    /// come from φ[7]/φ[8].
     fn dispatch_ecall(
         &mut self,
         regs: &mut Regs,

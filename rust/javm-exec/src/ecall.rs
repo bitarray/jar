@@ -2,11 +2,11 @@
 //! to the integration layer.
 //!
 //! Per architecture: the engine knows there are ecalls and that each
-//! carries a kind (PVM `ecall` opcode 3 with no immediate, vs PVM
-//! `ecalli` opcode 10 with a u32 immediate). It doesn't know what the
-//! kind *means*. The caller supplies an `EcallHandler` that
-//! interprets ecalls as MGMT operations, host-call selectors, CALL /
-//! HALT / yield transfers, etc.
+//! carries a kind (custom-0 `ecall.jar`, funct3=001, no immediate, vs
+//! custom-0 `ecalli`, funct3=010, with a sign-extended imm12 carried
+//! as a u32). It doesn't know what the kind *means*. The caller
+//! supplies an `EcallHandler` that interprets ecalls as MGMT
+//! operations, host-call selectors, CALL / HALT / yield transfers, etc.
 //!
 //! The handler may either:
 //!
@@ -23,14 +23,14 @@ use crate::exit::ExitReason;
 use crate::mem::Memory;
 use crate::regs::Regs;
 
-/// Which PVM ecall opcode triggered this invocation.
+/// Which custom-0 ecall encoding triggered this invocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EcallKind {
-    /// PVM `ecall` (opcode 3). No immediate; the handler reads
-    /// `regs[11]` (mgmt op) and `regs[12]` (subject|object) per the
-    /// v3 ABI convention.
+    /// `ecall.jar` (custom-0 funct3=001). No immediate; the handler
+    /// reads the operand registers per the ABI convention it defines.
     Ecall,
-    /// PVM `ecalli` (opcode 10). Carries a u32 immediate payload.
+    /// `ecalli imm` (custom-0 funct3=010). Carries the sign-extended
+    /// imm12 as a u32 payload.
     Ecalli(u32),
 }
 

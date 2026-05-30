@@ -3,9 +3,7 @@
 //! PVM recompiler — compiles PVM bytecode to native x86-64 machine code.
 //!
 //! This crate is the no_std bytes-producer: it emits x86-64 machine
-//! code into a `Vec<u8>` (or directly into an mmap region when run
-//! under the std-gated paths in `asm.rs` / `codegen.rs` that are
-//! currently dormant). The runtime substrate that loads + executes
+//! code into a `Vec<u8>`. The runtime substrate that loads + executes
 //! the emitted code lives in `nub-arch-x86`, which compiles this
 //! crate with `default-features = false` and supplies its own
 //! per-invocation page table.
@@ -57,8 +55,8 @@ pub struct JitContext {
     pub _pad3: u32,
     /// RSP saved at JIT entry (after the prologue's callee-saved pushes
     /// but before any guest code runs). The exit_label restores RSP
-    /// from this slot before popping the callee-saved registers, so
-    /// any unmatched native `call` pushes from the guest's
-    /// `callf`/`retf` sequence don't corrupt the exit path.
+    /// from this slot before popping the callee-saved registers, so an
+    /// OOG / page-fault redirect taken mid-sequence leaves the exit
+    /// path with a clean stack.
     pub host_rsp_base: u64,
 }

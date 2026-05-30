@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use anyhow::{Result, anyhow};
 use nub_host_common::outb::OutBAction;
-use nub_host_common::rpc::{ArchivedResponse, Request, Response};
+use nub_host_common::rpc::{ArchivedResponse, Request};
 use rkyv::util::AlignedVec;
 
 use crate::GUEST_HANDLE;
@@ -84,12 +84,4 @@ pub fn call_host_raw(fn_id: u32, payload: &[u8]) -> Result<Vec<u8>> {
     }
 
     Ok(resp.payload.as_slice().to_vec())
-}
-
-/// Cast a `Response` into raw bytes (allocation helper for callers
-/// that want to build their own error responses).
-pub fn encode_response(resp: &Response) -> Result<Vec<u8>> {
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(resp)
-        .map_err(|e| anyhow!("rkyv-serialize Response: {e}"))?;
-    Ok(bytes.into_vec())
 }

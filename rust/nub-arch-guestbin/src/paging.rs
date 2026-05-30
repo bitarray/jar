@@ -77,12 +77,6 @@ impl GuestMappingOperations {
             .expect("phys_to_virt encountered snapshot non-PT page")
     }
 }
-// for virt_to_phys
-impl core::convert::AsRef<GuestMappingOperations> for GuestMappingOperations {
-    fn as_ref(&self) -> &Self {
-        self
-    }
-}
 impl vmem::TableReadOps for GuestMappingOperations {
     type TableAddr = u64;
     fn entry_addr(addr: u64, offset: u64) -> u64 {
@@ -162,14 +156,6 @@ pub unsafe fn map_region(phys_base: u64, virt_base: *mut u8, len: u64, kind: vme
             },
         );
     }
-}
-
-pub fn virt_to_phys(gva: vmem::VirtAddr) -> impl Iterator<Item = vmem::Mapping> {
-    unsafe { vmem::virt_to_phys::<_>(GuestMappingOperations::new(), gva, 1) }
-}
-
-pub fn phys_to_virt(gpa: vmem::PhysAddr) -> Option<*mut u8> {
-    GuestMappingOperations::new().try_phys_to_virt(gpa)
 }
 
 /// Barriers that other code may need to use when updating page tables

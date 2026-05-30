@@ -38,7 +38,6 @@ pub mod guest_function {
     pub mod register;
 }
 
-pub mod error;
 pub mod host_comm;
 pub mod paging;
 pub mod ring;
@@ -85,9 +84,6 @@ static HYPERLIGHT_VERSION_NOTE: nub_host_common::version_note::ElfNote<
     VERSION_STR,
     nub_host_common::version_note::HYPERLIGHT_NOTE_TYPE,
 );
-
-/// The size of one page in the host OS.
-pub static mut OS_PAGE_SIZE: u32 = 0;
 
 // === Panic Handler ===
 // The cfg_attr attribute is used to avoid clippy failures as test pulls in std which pulls in a panic handler
@@ -150,7 +146,7 @@ core::arch::global_asm!(
 pub(crate) extern "C" fn generic_init(
     peb_address: u64,
     _seed: u64,
-    ops: u64,
+    _ops: u64,
     _max_log_level: u64,
 ) -> u64 {
     unsafe {
@@ -170,10 +166,6 @@ pub(crate) extern "C" fn generic_init(
             .expect("talc heap claim");
         peb_ptr
     };
-
-    unsafe {
-        OS_PAGE_SIZE = ops as u32;
-    }
 
     unsafe {
         hyperlight_main();

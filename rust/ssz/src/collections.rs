@@ -14,9 +14,7 @@ use digest::typenum::U32;
 
 use crate::merkle::{merkleize, mix_in_length};
 use crate::vector::decode_var_collection;
-use crate::{
-    BYTES_PER_LENGTH_OFFSET, Decode, DecodeError, Encode, HashTreeRoot, read_offset, read_slice,
-};
+use crate::{BYTES_PER_LENGTH_OFFSET, Decode, DecodeError, Encode, HashTreeRoot, read_offset};
 
 /// Implicit cap on `BTreeMap` length, in elements. Chosen as `1 << 32`
 /// (matches the SCALE `u32` count-prefix cap).
@@ -237,9 +235,6 @@ fn decode_container_pair<A: Decode, B: Decode>(bytes: &[u8]) -> Result<(A, B), D
         B::from_ssz_bytes(&bytes[start..end])?
     };
 
-    // Reject trailing bytes in the variable region.
-    let _ = read_slice;
-
     Ok((a_val, b_val))
 }
 
@@ -279,8 +274,6 @@ impl<K: Encode + Ord, V: Encode> Encode for BTreeMap<K, V> {
         if elem_fixed {
             // List<(K, V)> with fixed element → simple concatenation.
             for (k, v) in self {
-                let pair: (&K, &V) = (k, v);
-                let _ = pair;
                 k.ssz_append(buf);
                 v.ssz_append(buf);
             }

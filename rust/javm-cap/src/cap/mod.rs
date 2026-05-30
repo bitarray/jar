@@ -100,28 +100,7 @@ pub struct TypeCap {
     pub image_hash_chain: CapHash,
 }
 
-/// Discriminant for `Cap`. Useful for matching, error messages, and
-/// places where the payload is irrelevant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum CapKind {
-    Instance,
-    Image,
-    Data,
-    CNode,
-    Type,
-}
-
 impl Cap {
-    pub fn kind(&self) -> CapKind {
-        match self {
-            Cap::Instance(_) => CapKind::Instance,
-            Cap::Image(_) => CapKind::Image,
-            Cap::Data(_) => CapKind::Data,
-            Cap::CNode(_) => CapKind::CNode,
-            Cap::Type(_) => CapKind::Type,
-        }
-    }
-
     /// 32-byte content hash. Walks the cap tree via SSZ `HashTreeRoot`
     /// with SHA-256 as the digest; the five variants get their domain
     /// separation from the SSZ Union selector.
@@ -145,7 +124,7 @@ impl Cap {
     ///
     /// **Image hash distinction**: `Cap::Image(_).cap_hash()` and
     /// `crate::image::image_content_hash` hash different types — the
-    /// cap-resident `ImageCap` has a flatter layout than the SCALE
+    /// cap-resident `ImageCap` has a flatter layout than the SSZ
     /// `Image`. The cache publishes by `cap_hash`; the image-hash
     /// chain protocol uses `image_content_hash`.
     pub fn cap_hash(&self) -> CapHash {
@@ -182,19 +161,13 @@ impl Cap {
         })
     }
 
-    /// Build a heap `Cap::Image` from a SCALE `Image` value. Pinned
-    /// and initial slot references are left empty.
-    pub fn image_from(image: &crate::image::Image) -> Result<Self, image::ImageConvertError> {
-        Ok(Cap::Image(image::image_cap(image, &[], &[])?))
-    }
-
     /// Build an empty heap `Cap::CNode` of `2^size_log` slots. Rejects
     /// `size_log > 16`.
     pub fn empty_cnode(size_log: u8) -> Result<Self, crate::error::CapError> {
         Ok(Cap::CNode(CNodeCap::new(size_log)?))
     }
 
-    /// Build a heap `Cap::Image` from a SCALE `Image` plus the
+    /// Build a heap `Cap::Image` from an SSZ `Image` plus the
     /// caller-resolved pinned/initial slot `CapHash` pairs.
     pub fn image_with_slots(
         image: &crate::image::Image,

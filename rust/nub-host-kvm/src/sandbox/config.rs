@@ -21,29 +21,10 @@ use std::time::Duration;
 use libc::c_int;
 use tracing::{Span, instrument};
 
-/// Used for passing debug configuration to a sandbox
-#[cfg(gdb)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct DebugInfo {
-    /// Guest debug port
-    pub port: u16,
-}
-
 /// The complete set of configuration needed to create a Sandbox
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct SandboxConfiguration {
-    /// Guest core dump output directory
-    /// This field is by default set to true which means the value core dumps will be placed in:
-    /// - HYPERLIGHT_CORE_DUMP_DIR environment variable if it is set
-    /// - default value of the temporary directory
-    ///
-    /// The core dump files generation can be disabled by setting this field to false.
-    #[cfg(crashdump)]
-    guest_core_dump: bool,
-    /// Guest gdb debug port
-    #[cfg(gdb)]
-    guest_debug_info: Option<DebugInfo>,
     /// The size of the memory buffer that is made available for input to the
     /// Guest Binary
     input_data_size: usize,
@@ -104,8 +85,6 @@ impl SandboxConfiguration {
         scratch_size: usize,
         interrupt_retry_delay: Duration,
         interrupt_vcpu_sigrtmin_offset: u8,
-        #[cfg(gdb)] guest_debug_info: Option<DebugInfo>,
-        #[cfg(crashdump)] guest_core_dump: bool,
     ) -> Self {
         Self {
             input_data_size: max(input_data_size, Self::MIN_INPUT_SIZE),
@@ -114,10 +93,6 @@ impl SandboxConfiguration {
             scratch_size,
             interrupt_retry_delay,
             interrupt_vcpu_sigrtmin_offset,
-            #[cfg(gdb)]
-            guest_debug_info,
-            #[cfg(crashdump)]
-            guest_core_dump,
         }
     }
 
@@ -178,22 +153,6 @@ impl SandboxConfiguration {
         Ok(())
     }
 
-    /// Toggles the guest core dump generation for a sandbox
-    /// Setting this to false disables the core dump generation
-    /// This is only used when the `crashdump` feature is enabled
-    #[cfg(crashdump)]
-    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub fn set_guest_core_dump(&mut self, enable: bool) {
-        self.guest_core_dump = enable;
-    }
-
-    /// Sets the configuration for the guest debug
-    #[cfg(gdb)]
-    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub fn set_guest_debug_info(&mut self, debug_info: DebugInfo) {
-        self.guest_debug_info = Some(debug_info);
-    }
-
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_input_data_size(&self) -> usize {
         self.input_data_size
@@ -213,18 +172,6 @@ impl SandboxConfiguration {
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn set_scratch_size(&mut self, scratch_size: usize) {
         self.scratch_size = scratch_size;
-    }
-
-    #[cfg(crashdump)]
-    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn get_guest_core_dump(&self) -> bool {
-        self.guest_core_dump
-    }
-
-    #[cfg(gdb)]
-    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn get_guest_debug_info(&self) -> Option<DebugInfo> {
-        self.guest_debug_info
     }
 
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
@@ -251,10 +198,6 @@ impl Default for SandboxConfiguration {
             Self::DEFAULT_SCRATCH_SIZE,
             Self::DEFAULT_INTERRUPT_RETRY_DELAY,
             Self::INTERRUPT_VCPU_SIGRTMIN_OFFSET,
-            #[cfg(gdb)]
-            None,
-            #[cfg(crashdump)]
-            true,
         )
     }
 }

@@ -16,7 +16,6 @@
 //! (userspace never invokes them via PVM), so `regs[0]` is stable.
 
 use javm::{KernelImage, kernel_image_hash};
-use javm_cap::abi as cap_abi;
 use javm_cap::image::Image;
 use javm_cap::{CNodeCap, CacheDirectory, Cap, CapHash, CapHashOrRef, NUM_REGS, SlotIdx};
 
@@ -112,9 +111,10 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
 
     // 3. A shared placeholder Image cap referenced by all kernel-issued
     //    Instance caps. Using a tiny but well-formed Image (1 byte of
-    //    code, single instruction-start bit set) sidesteps the image-cap
-    //    validation while keeping kernel caps content-hashable in a
-    //    stable way. The same hash is reused for every kernel unit.
+    //    code) sidesteps the image-cap validation (which only requires a
+    //    non-empty code region) while keeping kernel caps content-
+    //    hashable in a stable way. The same hash is reused for every
+    //    kernel unit.
     let placeholder_image_hash = state.caps.put_cap(&Cap::image_with_slots(
         &placeholder_kernel_image(),
         &[],
@@ -126,7 +126,7 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     //    them well-formed.
     let empty_cnode_hash = state.caps.put_cap(&Cap::empty_cnode(0)?)?;
 
-    // 4. Publish each kernel-issued unit cap.
+    // 5. Publish each kernel-issued unit cap.
     let gas_hash = publish_kernel_unit_cap(
         &mut state.caps,
         KernelImage::Gas,
@@ -190,7 +190,7 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
         empty_cnode_hash,
     )?;
 
-    // 5. Build the chain's root cnode entries. Kernel caps go at the
+    // 6. Build the chain's root cnode entries. Kernel caps go at the
     //    well-known abi::BARE_* slots; pinned/initial slot data caps
     //    are republished alongside (they were also republished by
     //    chain image step above, but the cnode references them by hash
@@ -232,7 +232,7 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
         entries.push((*slot, CapHashOrRef::Hash(*h)));
     }
 
-    // 6. Publish the root cnode (256 slots, size_log = 8).
+    // 7. Publish the root cnode (256 slots, size_log = 8).
     let root_cnode_hash = {
         let mut cnode = CNodeCap::new(8).map_err(KernelError::from)?;
         for (slot, target) in &entries {
@@ -243,17 +243,17 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
         state.caps.put_cap(&Cap::CNode(cnode))?
     };
 
-    // 7. Compute the chain Instance's memory layout from the image's
-    //    memory mappings. Mirrors the recomp path's build_overlays:
+    // 8. Compute the chain Instance's memory layout from the image's
+    //    memory mappings via the canonical `Image::data_overlays()`:
     //    mem_size = max(start + size); rw_overlays come from the
     //    image's pinned/initial slot contents for each mapping.
-    let (mem_size, overlays) = build_overlays(&chain_image);
+    let (mem_size, overlays) = chain_image.data_overlays();
     let overlay_slices: Vec<(u32, &[u8])> = overlays
         .iter()
         .map(|(start, bytes)| (*start, bytes.as_slice()))
         .collect();
 
-    // 8. Publish the chain Instance. `image_hash_chain` mirrors the
+    // 9. Publish the chain Instance. `image_hash_chain` mirrors the
     //    image's content hash directly at genesis (no prior chain).
     //    `regs` start at zeros (chain doesn't have a unit-id; events
     //    drive it via cnode slot[0]).
@@ -268,8 +268,6 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
         0,
     ))?;
 
-    let _ = cap_abi::BARE_GAS_SLOT; // keep the abi re-export pinned
-
     Ok(Genesis {
         state,
         chain_instance_hash,
@@ -278,43 +276,9 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     })
 }
 
-/// Build memory overlays from the chain image's memory_mappings.
-/// Mirrors `javm-guest-tests::conformance::build_overlays`: for each
-/// mapping, look up the pinned or initial slot content at the
-/// mapping's target slot; record an overlay tuple if content is
-/// non-empty.
-///
-/// Returns `(mem_size, overlays)` where `mem_size = max(start+size)`
-/// over all mappings.
-pub(crate) fn build_overlays(image: &Image) -> (u32, Vec<(u32, Vec<u8>)>) {
-    use javm_cap::image::PinnedCap;
-    let mut mem_size: u32 = 0;
-    let mut overlays: Vec<(u32, Vec<u8>)> = Vec::new();
-
-    // `memory_mappings` describes data/slot regions only; code is
-    // RO-mapped separately by the runtime (a direct-map at CODE_BASE),
-    // so it neither contributes an overlay nor extends mem_size.
-    for mapping in &image.memory_mappings {
-        let target = mapping.source.target();
-
-        let end = (mapping.start + mapping.size) as u32;
-        if end > mem_size {
-            mem_size = end;
-        }
-
-        if let Some(PinnedCap::Data { content, .. }) = image.pinned_slots.get(&target) {
-            if !content.is_empty() {
-                overlays.push((mapping.start as u32, content.clone()));
-            }
-        } else if let Some(init) = image.initial_slots.get(&target)
-            && !init.content.is_empty()
-        {
-            overlays.push((mapping.start as u32, init.content.clone()));
-        }
-    }
-
-    (mem_size, overlays)
-}
+// Instance memory overlays are derived by `Image::data_overlays()` in
+// javm-cap — the single source of truth shared with the recompiler
+// bench harness and the conformance oracle.
 
 /// A minimal well-formed Image used as a placeholder for kernel-
 /// issued unit caps. The image is never actually invoked — kernel

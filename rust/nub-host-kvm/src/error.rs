@@ -23,15 +23,11 @@ use std::string::FromUtf8Error;
 use std::sync::{MutexGuard, PoisonError};
 use std::time::SystemTimeError;
 
-#[cfg(target_os = "windows")]
-use crossbeam_channel::{RecvError, SendError};
 use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnValue};
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use thiserror::Error;
 
 use crate::hypervisor::hyperlight_vm::HyperlightVmError;
-#[cfg(target_os = "windows")]
-use crate::hypervisor::wrappers::HandleWrapper;
 use crate::mem::memory_region::MemoryRegionFlags;
 use crate::mem::ptr::RawPtr;
 
@@ -48,16 +44,6 @@ pub enum HyperlightError {
     /// Checked Add Overflow
     #[error("Couldn't add offset to base address. Offset: {0}, Base Address: {1}")]
     CheckedAddOverflow(u64, u64),
-
-    /// Cross beam channel receive error
-    #[error("{0:?}")]
-    #[cfg(target_os = "windows")]
-    CrossBeamReceiveError(#[from] RecvError),
-
-    /// Cross beam channel send error
-    #[error("{0:?}")]
-    #[cfg(target_os = "windows")]
-    CrossBeamSendError(#[from] SendError<HandleWrapper>),
 
     /// CString conversion error
     #[error("Error converting CString {0:?}")]
@@ -103,9 +89,8 @@ pub enum HyperlightError {
     #[error("Unsupported type: {0}")]
     GuestInterfaceUnsupportedType(String),
 
-    /// The guest binary was built with a different hyperlight-guest-bin version than the host expects.
-    /// Hyperlight currently provides no backwards compatibility guarantees for guest binaries,
-    /// so the guest and host versions must match exactly. This might change in the future.
+    /// The guest binary was built against a different guest-bin version than the host expects.
+    /// Guest and host versions must match exactly.
     #[error(
         "Guest binary was built with hyperlight-guest-bin {guest_bin_version}, \
          but the host is running hyperlight {host_version}"
@@ -186,10 +171,6 @@ pub enum HyperlightError {
     #[error("No Hypervisor was found for Sandbox")]
     NoHypervisorFound(),
 
-    /// Restore_state called with no valid snapshot
-    #[error("Restore_state called with no valid snapshot")]
-    NoMemorySnapshot,
-
     /// Failed to get value from parameter value
     #[error("Failed To Convert Parameter Value {0:?} to {1:?}")]
     ParameterValueConversionFailure(ParameterValue, &'static str),
@@ -235,10 +216,6 @@ pub enum HyperlightError {
     #[error("Failed To Convert Return Value {0:?} to {1:?}")]
     ReturnValueConversionFailure(ReturnValue, &'static str),
 
-    /// Tried to restore snapshot to a sandbox that is not the same as the one the snapshot was taken from
-    #[error("Snapshot was taken from a different sandbox")]
-    SnapshotSandboxMismatch,
-
     /// SystemTimeError
     #[error("SystemTimeError {0:?}")]
     SystemTimeError(#[from] SystemTimeError),
@@ -273,11 +250,6 @@ pub enum HyperlightError {
     #[error("vmm sys Error {0:?}")]
     #[cfg(target_os = "linux")]
     VmmSysError(vmm_sys_util::errno::Error),
-
-    /// Windows Error
-    #[cfg(target_os = "windows")]
-    #[error("Windows API Error Result {0:?}")]
-    WindowsAPIError(#[from] windows_result::Error),
 }
 
 impl From<Infallible> for HyperlightError {
@@ -302,104 +274,6 @@ impl<T> From<PoisonError<MutexGuard<'_, T>>> for HyperlightError {
             None => String::from(""),
         };
         HyperlightError::LockAttemptFailed(source)
-    }
-}
-
-impl HyperlightError {
-    /// Internal helper to determines if the given error has potential to poison the sandbox.
-    ///
-    /// Errors that poison the sandbox are those that can leave the sandbox in an inconsistent
-    /// state where memory, resources, or data structures may be corrupted or leaked. Usually
-    /// due to the guest not running to completion.
-    ///
-    /// Post-Stage-F: poison-tracking on `MultiUseSandbox` was removed along
-    /// with `snapshot()` / `restore()`. This method is unused by the host
-    /// driver — callers drop the sandbox and rebuild on error. It is kept
-    /// (and `dead_code`-allowed) only so the inner
-    /// `DispatchGuestCallError::is_poison_error` chain still type-checks.
-    #[allow(dead_code)]
-    pub(crate) fn is_poison_error(&self) -> bool {
-        // wildcard _ or matches! not used here purposefully to ensure that new error variants
-        // are explicitly considered for poisoning behavior.
-        match self {
-            // These errors poison the sandbox because they can leave it in an inconsistent state due
-            // to the guest not running to completion.
-            HyperlightError::GuestAborted(_, _)
-            | HyperlightError::ExecutionCanceledByHost()
-            | HyperlightError::PoisonedSandbox
-            | HyperlightError::ExecutionAccessViolation(_)
-            | HyperlightError::MemoryAccessViolation(_, _, _)
-            | HyperlightError::MemoryRegionSizeMismatch(_, _, _)
-            // HyperlightVmError::Restore is already handled manually in restore(), but we mark it
-            // as poisoning here too for defense in depth.
-            | HyperlightError::HyperlightVmError(HyperlightVmError::Restore(_)) => true,
-
-            // These errors poison the sandbox because they can leave
-            // it in an inconsistent state due to snapshot restore
-            // failing partway through
-            HyperlightError::HyperlightVmError(HyperlightVmError::UpdateRegion(_))
-            | HyperlightError::HyperlightVmError(HyperlightVmError::AccessPageTable(_)) => true,
-
-            // HyperlightVmError::DispatchGuestCall may poison the sandbox
-            HyperlightError::HyperlightVmError(HyperlightVmError::DispatchGuestCall(e)) => {
-                e.is_poison_error()
-            }
-
-            // All other errors do not poison the sandbox.
-            HyperlightError::AnyhowError(_)
-            | HyperlightError::BoundsCheckFailed(_, _)
-            | HyperlightError::CheckedAddOverflow(_, _)
-            | HyperlightError::CStringConversionError(_)
-            | HyperlightError::Error(_)
-            | HyperlightError::FailedToGetValueFromParameter()
-            | HyperlightError::FieldIsMissingInGuestLogData(_)
-            | HyperlightError::GuestBinVersionMismatch { .. }
-            | HyperlightError::GuestError(_, _)
-            | HyperlightError::GuestExecutionHungOnHostFunctionCall()
-            | HyperlightError::GuestFunctionCallAlreadyInProgress()
-            | HyperlightError::GuestInterfaceUnsupportedType(_)
-            | HyperlightError::HostFunctionNotFound(_)
-            | HyperlightError::HyperlightVmError(HyperlightVmError::Create(_))
-            | HyperlightError::HyperlightVmError(HyperlightVmError::Initialize(_))
-            | HyperlightError::HyperlightVmError(HyperlightVmError::MapRegion(_))
-            | HyperlightError::HyperlightVmError(HyperlightVmError::UnmapRegion(_))
-            | HyperlightError::IOError(_)
-            | HyperlightError::IntConversionFailure(_)
-            | HyperlightError::JsonConversionFailure(_)
-            | HyperlightError::LockAttemptFailed(_)
-            | HyperlightError::MemoryAllocationFailed(_)
-            | HyperlightError::MemoryProtectionFailed(_)
-            | HyperlightError::MemoryRequestTooBig(_, _)
-            | HyperlightError::MemoryRequestTooSmall(_, _)
-            | HyperlightError::MetricNotFound(_)
-            | HyperlightError::MmapFailed(_)
-            | HyperlightError::MprotectFailed(_)
-            | HyperlightError::NoHypervisorFound()
-            | HyperlightError::NoMemorySnapshot
-            | HyperlightError::ParameterValueConversionFailure(_, _)
-            | HyperlightError::PEFileProcessingFailure(_)
-            | HyperlightError::RawPointerLessThanBaseAddress(_, _)
-            | HyperlightError::RefCellBorrowFailed(_)
-            | HyperlightError::RefCellMutBorrowFailed(_)
-            | HyperlightError::ReturnValueConversionFailure(_, _)
-            | HyperlightError::SnapshotSandboxMismatch
-            | HyperlightError::SystemTimeError(_)
-            | HyperlightError::TryFromSliceError(_)
-            | HyperlightError::UnexpectedNoOfArguments(_, _)
-            | HyperlightError::UnexpectedParameterValueType(_, _)
-            | HyperlightError::UnexpectedReturnValueType(_, _)
-            | HyperlightError::UTF8StringConversionFailure(_)
-            | HyperlightError::VectorCapacityIncorrect(_, _, _) => false,
-
-            #[cfg(target_os = "windows")]
-            HyperlightError::CrossBeamReceiveError(_) => false,
-            #[cfg(target_os = "windows")]
-            HyperlightError::CrossBeamSendError(_) => false,
-            #[cfg(target_os = "windows")]
-            HyperlightError::WindowsAPIError(_) => false,
-            #[cfg(target_os = "linux")]
-            HyperlightError::VmmSysError(_) => false,
-        }
     }
 }
 

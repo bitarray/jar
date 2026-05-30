@@ -7,8 +7,9 @@
 //!
 //! Mirrors the recompiler's semantics — same per-block gas charging at
 //! `Predecode::block_costs`, same RV-spec ALU/branch behaviour, same
-//! `Ecalli`/`Jalr` runtime contracts (jalr targets validated against
-//! the basic-block-start set). Cross-checked against the recompiler in
+//! `Ecalli`/`Jalr` runtime contracts (jalr targets validated to be
+//! basic-block starts via the per-instruction block-start flag).
+//! Cross-checked against the recompiler in
 //! the `smoke` example: bit-identical `gas_used` and side-effects on
 //! every workload.
 //!
@@ -973,13 +974,11 @@ mod tests {
     }
 
     #[test]
-    fn br_table_zero_rs1_panics() {
-        // br_table table_id=0, rs1=5 (x5 = 0 by default)
-        // custom-0 I-type: funct3=011, rd=0
-        let br_table = (0u32 << 20) | (5 << 15) | (0b011 << 12) | (0 << 7) | (0b00010 << 2) | 0b11;
-        let code = enc4(&[br_table]);
-        // Provide a jump_table_offsets with one table to pass the
-        // table_id bounds check; rs1=0 should panic regardless.
+    fn reserved_custom0_011_panics() {
+        // custom-0 funct3=011 is reserved (was br_table); PVM2 uses
+        // native jalr. Executing a Reserved encoding panics.
+        let word = (0u32 << 20) | (5 << 15) | (0b011 << 12) | (0 << 7) | (0b00010 << 2) | 0b11;
+        let code = enc4(&[word]);
         let pre = predecode(&code);
         let mut regs = Regs::new();
         let mut mem = CopyingMemory::new();

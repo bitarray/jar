@@ -5,8 +5,10 @@
 //!    LLD PIE output places each function in its own `.text.<sym>`).
 //! 2. **Resolve AUIPC pairs.** *Data* references (an `auipc` paired with
 //!    a load/store/addi of a low-memory address) fold to absolute
-//!    `lui`+lo12 — data lives at its page-0 layout address, unrelated to
-//!    where code maps. *Code* references (`R_RISCV_CALL_PLT` and
+//!    `lui`+lo12 — data is relocated to its runtime address in
+//!    `[DATA_BASE, …)` (the ELF's `[0, extent)` data layout shifted up
+//!    by `DATA_BASE`), unrelated to where code maps. *Code* references
+//!    (`R_RISCV_CALL_PLT` and
 //!    code-targeting `PCREL_HI20`) stay native `auipc`+`jalr`/`addi`:
 //!    code is mapped at [`CODE_BASE`], so the
 //!    PC-relative computation lands on the right code VA. Kept pairs are
@@ -129,10 +131,11 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     // sits within ±2 KiB of the symbol; the paired LO12 instruction
     // (load/store/addi/jalr) carries `lo12 = target - anchor`.
     //
-    // *Data* references address the page-0 layout absolutely, so we
-    // fold them to `lui rd, hi; <op> rd, lo12` (the +0x800 carry
-    // compensates lo12's sign extension). LUI is absolute — unaffected
-    // by later fallthrough injection.
+    // *Data* references address the runtime `[DATA_BASE, …)` mapping
+    // absolutely, so we fold them to `lui rd, hi; <op> rd, lo12`
+    // (loading `target + DATA_BASE`; the +0x800 carry compensates
+    // lo12's sign extension). LUI is absolute — unaffected by later
+    // fallthrough injection.
     //
     // *Code* references stay native `auipc`/`jalr`/`addi`: code maps at
     // `CODE_BASE`, so `auipc`'s PC-relative result is already the right

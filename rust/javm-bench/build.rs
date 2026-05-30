@@ -1,5 +1,5 @@
 //! Cross-compile each bench guest crate for the PVM2 target,
-//! transpile to a SCALE-encoded `Image`, and expose the blob path
+//! transpile to a SSZ-encoded `Image`, and expose the blob path
 //! to the bench harness + examples via per-guest environment variables.
 //!
 //! The `BUILD_CRATE_GUEST_BUILD` env-var guard prevents infinite

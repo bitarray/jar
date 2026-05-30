@@ -19,22 +19,12 @@ use std::sync::OnceLock;
 
 use tracing::{Span, instrument};
 
-#[cfg(gdb)]
-use crate::hypervisor::gdb::DebugError;
-use crate::hypervisor::regs::{
-    CommonDebugRegs, CommonFpu, CommonRegisters, CommonSpecialRegisters,
-};
+use crate::hypervisor::regs::{CommonFpu, CommonRegisters, CommonSpecialRegisters};
 use crate::mem::memory_region::MemoryRegion;
-#[cfg(feature = "trace_guest")]
-use crate::sandbox::trace::TraceContext as SandboxTraceContext;
 
 /// KVM (Kernel-based Virtual Machine) functionality (linux)
 #[cfg(kvm)]
 pub(crate) mod kvm;
-
-/// Shared x86-64 helpers for hardware interrupt support (MSHV and WHP)
-#[cfg(feature = "hw-interrupts")]
-pub(crate) mod x86_64;
 
 static AVAILABLE_HYPERVISOR: OnceLock<Option<HypervisorType>> = OnceLock::new();
 
@@ -70,22 +60,14 @@ pub(crate) enum HypervisorType {
     Kvm,
 }
 
-// Compiler error if no hypervisor type is available (not applicable on aarch64 yet)
-#[cfg(not(any(kvm, target_arch = "aarch64")))]
+// Compiler error if the kvm feature is disabled — there is no other hypervisor backend.
+#[cfg(not(kvm))]
 compile_error!(
     "No hypervisor type is available for the current platform. Please enable the `kvm` cargo feature."
 );
 
 /// The various reasons a VM's vCPU can exit
 pub(crate) enum VmExit {
-    /// The vCPU has exited due to a debug event (usually breakpoint)
-    #[cfg(gdb)]
-    Debug {
-        #[cfg(target_arch = "x86_64")]
-        dr6: u64,
-        #[cfg(target_arch = "x86_64")]
-        exception: u32,
-    },
     /// The vCPU has halted
     Halt(),
     /// The vCPU has issued a write to the given port with the given value
@@ -99,13 +81,6 @@ pub(crate) enum VmExit {
     /// The vCPU has exited for a reason that is not handled by Hyperlight
     Unknown(String),
     /// The operation should be retried, for example this can happen on Linux where a call to run the CPU can return EAGAIN
-    #[cfg_attr(
-        any(target_os = "windows", feature = "hw-interrupts"),
-        expect(
-            dead_code,
-            reason = "Retry() is never constructed on Windows or with hw-interrupts (EAGAIN causes continue instead)"
-        )
-    )]
     Retry(),
 }
 
@@ -114,9 +89,6 @@ pub(crate) enum VmExit {
 pub enum VmError {
     #[error("Failed to create vm: {0}")]
     CreateVm(#[from] CreateVmError),
-    #[cfg(gdb)]
-    #[error("Debug operation failed: {0}")]
-    Debug(#[from] DebugError),
     #[error("Map memory operation failed: {0}")]
     MapMemory(#[from] MapMemoryError),
     #[error("Register operation failed: {0}")]
@@ -140,9 +112,6 @@ pub enum CreateVmError {
     InitializeVm(HypervisorError),
     #[error("Set Partition Property failed: {0}")]
     SetPartitionProperty(HypervisorError),
-    #[cfg(target_os = "windows")]
-    #[error("Surrogate process creation failed: {0}")]
-    SurrogateProcess(String),
 }
 
 /// RunVCPU error
@@ -150,9 +119,6 @@ pub enum CreateVmError {
 pub enum RunVcpuError {
     #[error("Failed to decode message type: {0}")]
     DecodeIOMessage(u32),
-    #[cfg(gdb)]
-    #[error("Failed to get DR6 debug register: {0}")]
-    GetDr6(HypervisorError),
     #[error("Increment RIP failed: {0}")]
     IncrementRip(HypervisorError),
     #[error("Parse GPA access info failed")]
@@ -168,62 +134,17 @@ pub enum RegisterError {
     GetRegs(HypervisorError),
     #[error("Failed to set registers: {0}")]
     SetRegs(HypervisorError),
-    #[error("Failed to get FPU registers: {0}")]
-    GetFpu(HypervisorError),
     #[error("Failed to set FPU registers: {0}")]
     SetFpu(HypervisorError),
-    #[error("Failed to get special registers: {0}")]
-    GetSregs(HypervisorError),
     #[error("Failed to set special registers: {0}")]
     SetSregs(HypervisorError),
-    #[error("Failed to get debug registers: {0}")]
-    GetDebugRegs(HypervisorError),
-    #[error("Failed to set debug registers: {0}")]
-    SetDebugRegs(HypervisorError),
-    #[error("Failed to get xsave: {0}")]
-    GetXsave(HypervisorError),
-    #[error("Failed to set xsave: {0}")]
-    SetXsave(HypervisorError),
-    #[error("Xsave size mismatch: expected {expected} bytes, got {actual}")]
-    XsaveSizeMismatch {
-        /// Expected size in bytes
-        expected: u32,
-        /// Actual size in bytes
-        actual: u32,
-    },
-    #[error("Invalid xsave alignment")]
-    InvalidXsaveAlignment,
-    #[cfg(target_os = "windows")]
-    #[error("Failed to get xsave size: {0}")]
-    GetXsaveSize(#[from] HypervisorError),
-    #[cfg(target_os = "windows")]
-    #[error("Failed to convert WHP registers: {0}")]
-    ConversionFailed(String),
 }
 
 /// Map memory error
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum MapMemoryError {
-    #[cfg(target_os = "windows")]
-    #[error("Address conversion failed: {0}")]
-    AddressConversion(std::num::TryFromIntError),
     #[error("Hypervisor error: {0}")]
     Hypervisor(HypervisorError),
-    #[cfg(target_os = "windows")]
-    #[error("Invalid memory region flags: {0}")]
-    InvalidFlags(String),
-    #[cfg(target_os = "windows")]
-    #[error("Failed to load API '{api_name}': {source}")]
-    LoadApi {
-        api_name: &'static str,
-        source: windows_result::Error,
-    },
-    #[cfg(target_os = "windows")]
-    #[error("Operation not supported: {0}")]
-    NotSupported(String),
-    #[cfg(target_os = "windows")]
-    #[error("Surrogate process creation failed: {0}")]
-    SurrogateProcess(String),
 }
 
 /// Unmap memory error
@@ -242,7 +163,7 @@ pub enum HypervisorError {
 }
 
 /// Trait for single-vCPU VMs. Provides a common interface for basic VM operations.
-/// Abstracts over differences between KVM, MSHV and WHP implementations.
+/// Common interface for the single-vCPU KVM VM.
 pub(crate) trait VirtualMachine: Debug + Send {
     /// Map memory region into this VM
     ///
@@ -258,39 +179,18 @@ pub(crate) trait VirtualMachine: Debug + Send {
     ) -> std::result::Result<(), MapMemoryError>;
 
     /// Runs the vCPU until it exits.
-    /// Note: this function emits traces spans for guests
-    /// and the span setup is called right before the run virtual processor call of each hypervisor
-    fn run_vcpu(
-        &mut self,
-        #[cfg(feature = "trace_guest")] tc: &mut SandboxTraceContext,
-    ) -> std::result::Result<VmExit, RunVcpuError>;
+    /// Note: this function emits traces spans for guests;
+    /// the span setup is called right before the KVM run-vcpu ioctl.
+    fn run_vcpu(&mut self) -> std::result::Result<VmExit, RunVcpuError>;
 
     /// Get regs
-    #[allow(dead_code)]
     fn regs(&self) -> std::result::Result<CommonRegisters, RegisterError>;
     /// Set regs
     fn set_regs(&self, regs: &CommonRegisters) -> std::result::Result<(), RegisterError>;
-    /// Get fpu regs
-    #[allow(dead_code)]
-    fn fpu(&self) -> std::result::Result<CommonFpu, RegisterError>;
     /// Set fpu regs
     fn set_fpu(&self, fpu: &CommonFpu) -> std::result::Result<(), RegisterError>;
-    /// Get special regs
-    #[allow(dead_code)]
-    fn sregs(&self) -> std::result::Result<CommonSpecialRegisters, RegisterError>;
     /// Set special regs
     fn set_sregs(&self, sregs: &CommonSpecialRegisters) -> std::result::Result<(), RegisterError>;
-    /// Get the debug registers of the vCPU
-    #[allow(dead_code)]
-    fn debug_regs(&self) -> std::result::Result<CommonDebugRegs, RegisterError>;
-
-    /// Get xsave
-    #[allow(dead_code)]
-    fn xsave(&self) -> std::result::Result<Vec<u8>, RegisterError>;
-
-    /// Get partition handle
-    #[cfg(target_os = "windows")]
-    fn partition_handle(&self) -> windows::Win32::System::Hypervisor::WHV_PARTITION_HANDLE;
 }
 
 #[cfg(test)]

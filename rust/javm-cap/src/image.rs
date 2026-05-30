@@ -154,6 +154,39 @@ impl Image {
             yield_marker_slot: None,
         }
     }
+
+    /// Project this Image's data/slot mappings into the flat RW-memory
+    /// overlays for an Instance: returns `(mem_size, overlays)` where
+    /// `mem_size` is the highest mapped data VA and each overlay is a
+    /// `(start, bytes)` pair. Code is RO direct-mapped at `CODE_BASE` by
+    /// the runtime, so it contributes neither an overlay nor to
+    /// `mem_size`.
+    ///
+    /// This is the single source of truth for Instance memory layout:
+    /// the recompiler runtime and the interpreter conformance path MUST
+    /// agree on it, so both derive overlays here rather than re-deriving
+    /// it independently.
+    pub fn data_overlays(&self) -> (u32, Vec<(u32, Vec<u8>)>) {
+        let mut mem_size: u32 = 0;
+        let mut overlays: Vec<(u32, Vec<u8>)> = Vec::new();
+        for mapping in &self.memory_mappings {
+            let target = mapping.source.target();
+            let end = (mapping.start + mapping.size) as u32;
+            if end > mem_size {
+                mem_size = end;
+            }
+            if let Some(PinnedCap::Data { content, .. }) = self.pinned_slots.get(&target) {
+                if !content.is_empty() {
+                    overlays.push((mapping.start as u32, content.clone()));
+                }
+            } else if let Some(init) = self.initial_slots.get(&target)
+                && !init.content.is_empty()
+            {
+                overlays.push((mapping.start as u32, init.content.clone()));
+            }
+        }
+        (mem_size, overlays)
+    }
 }
 
 /// Content hash of an Image: SSZ `hash_tree_root` (SHA-256 merkleization

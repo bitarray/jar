@@ -16,7 +16,6 @@
 pub mod callstack;
 pub mod ecall;
 pub mod error;
-pub mod frame;
 pub mod image_cache;
 pub mod kernel_assist;
 pub mod vm;
@@ -25,7 +24,6 @@ pub use callstack::{
     CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry, ReferenceEntry,
 };
 pub use error::VmError;
-pub use frame::{BareFrame, MainFrame};
 pub use image_cache::ImageCache;
 pub use kernel_assist::{
     InProcessKernelAssist, KernelAssist, KernelImage, MeterId, QuotaId, kernel_image_hash,

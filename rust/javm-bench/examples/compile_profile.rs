@@ -32,7 +32,6 @@ mod imp {
             mem_write_u16: 0x1000,
             mem_write_u32: 0x1000,
             mem_write_u64: 0x1000,
-            sbrk_helper: 0x1000,
         }
     }
 
@@ -40,7 +39,7 @@ mod imp {
         let image = Image::from_ssz_bytes(blob).expect("decode Image");
         let code = image.code.as_slice();
         // Guest CODE_BASE (where the linker maps the code region).
-        let code_base = 0x4000_0000u32;
+        let code_base = javm_cap::layout::CODE_BASE;
 
         // Warm-up + report native_code size.
         let native_size = {

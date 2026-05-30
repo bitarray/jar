@@ -41,11 +41,6 @@ impl ImageCache {
         self.entries.get(content_hash).cloned()
     }
 
-    /// Cache a precomputed program under the given content hash.
-    pub fn insert(&mut self, content_hash: CapHash, program: Arc<Program>) {
-        self.entries.insert(content_hash, program);
-    }
-
     /// Look up or compute the predecoded program for an image. `code` is
     /// the executable region's raw bytes; `code_base` is the guest VA it
     /// maps at (PC = `code_base` + byte offset).
