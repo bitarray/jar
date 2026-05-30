@@ -7,7 +7,7 @@
 //!
 //! The assembler writes to a raw `*mut u8` buffer (`self.buf`) for performance.
 //! The key invariant: `self.buf` points to a valid allocation of at least
-//! `self.capacity` bytes (either a Vec's backing store or an mmap region).
+//! `self.capacity` bytes (the `code_buf` Vec's backing store).
 //! All emission functions have `debug_assert!(self.write_pos + N <= self.capacity)`
 //! guards. Callers must ensure capacity via `ensure_capacity()` before emitting.
 //! Vec length is synced via `set_len(write_pos)` only at finalization boundaries.
@@ -140,19 +140,12 @@ struct Fixup {
     label: Label,
 }
 
-/// Code buffer mode. Today only a heap-allocated Vec is supported; the
-/// host-targeted `mmap`-direct path was retired with the
-/// `RecompiledPvm` sweep.
-enum CodeBuf {
-    Vec(Vec<u8>),
-}
-
 /// x86-64 assembler with label support.
 ///
 /// Uses direct pointer writes to the pre-allocated buffer for emission,
 /// avoiding per-byte Vec::push overhead (capacity check + len update).
 pub struct Assembler {
-    code_buf: CodeBuf,
+    code_buf: Vec<u8>,
     /// Raw pointer to the start of the code buffer.
     buf: *mut u8,
     write_pos: usize,
@@ -189,7 +182,7 @@ impl Assembler {
         let buf = code.as_mut_ptr();
         let capacity = code.capacity();
         Self {
-            code_buf: CodeBuf::Vec(code),
+            code_buf: code,
             buf,
             write_pos: 0,
             capacity,
@@ -206,7 +199,7 @@ impl Assembler {
         let buf = code.as_mut_ptr();
         let capacity = code.capacity();
         Self {
-            code_buf: CodeBuf::Vec(code),
+            code_buf: code,
             buf,
             write_pos: 0,
             capacity,
@@ -229,7 +222,7 @@ impl Assembler {
     /// need at most ~32 bytes, so this is rarely needed mid-compilation.
     #[cold]
     fn grow(&mut self, additional: usize) {
-        let CodeBuf::Vec(code) = &mut self.code_buf;
+        let code = &mut self.code_buf;
         // SAFETY: write_pos <= code.capacity() is maintained by ensure_capacity().
         // set_len(write_pos) exposes the bytes we've written so reserve() copies them.
         unsafe {
@@ -1383,7 +1376,7 @@ impl Assembler {
     /// Sync Vec length with the write cursor. Call before accessing `self.code` directly.
     #[cfg(test)]
     pub fn sync_len(&mut self) {
-        let CodeBuf::Vec(code) = &mut self.code_buf;
+        let code = &mut self.code_buf;
         // SAFETY: write_pos <= code.capacity() (maintained by emission guards).
         unsafe {
             code.set_len(self.write_pos);
@@ -1413,7 +1406,7 @@ impl Assembler {
     /// Resolve fixups and return the code as a `Vec<u8>`.
     pub fn finalize(&mut self) -> Vec<u8> {
         self.resolve_fixups();
-        let CodeBuf::Vec(code) = &mut self.code_buf;
+        let code = &mut self.code_buf;
         // SAFETY: write_pos <= code.capacity().
         unsafe {
             code.set_len(self.write_pos);
@@ -1425,7 +1418,7 @@ impl Assembler {
     #[cfg(test)]
     pub fn code_bytes(&mut self) -> &[u8] {
         self.sync_len();
-        let CodeBuf::Vec(v) = &self.code_buf;
+        let v = &self.code_buf;
         v.as_slice()
     }
 }
