@@ -510,6 +510,18 @@ impl<K: KernelAssist> Vm<K> {
             },
             ExitReason::Trap
             | ExitReason::Panic
+            // TODO(oog-as-pause): uncaught OOG is treated as a hard
+            // (terminal) fault here, but unlike Trap/Panic/PageFault it is
+            // NOT semantically terminal. OOG can only fire at a per-block
+            // gas check — i.e. at a `bb_start` — so it is a *sound* resume
+            // point (see docs/pvm-isa/discussions/pause-and-bb-start.md).
+            // It should eventually become a resumable pause
+            // (Paused-persistent) so a chain can supply more gas and resume
+            // at the OOG bb_start instead of discarding the instance's
+            // work. (A *caught* OOG already yields via
+            // reconcile_and_route_oog; this arm is the uncaught case.)
+            // Open design question: data-flow "OOG-as-fault vs
+            // Paused-persistent".
             | ExitReason::OutOfGas
             | ExitReason::PageFault(_) => CallResult::Faulted {
                 reason: exit,
