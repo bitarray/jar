@@ -18,53 +18,43 @@ use alloc::vec::Vec;
 /// Instruction buffer: accumulates x86 bytes in a u128 register, then flushes
 /// with a single bulk write. Avoids per-byte memory stores.
 #[derive(Clone, Copy)]
-pub struct InstBuf {
+struct InstBuf {
     out: u128,
     length: u32, // in bits
 }
 
-impl Default for InstBuf {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl InstBuf {
     #[inline(always)]
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self { out: 0, length: 0 }
     }
 
     #[inline(always)]
-    pub fn push(&mut self, byte: u8) {
+    fn push(&mut self, byte: u8) {
         self.out |= (byte as u128) << self.length;
         self.length += 8;
     }
 
     #[inline(always)]
-    pub fn push_u32(&mut self, v: u32) {
+    fn push_u32(&mut self, v: u32) {
         self.out |= (v as u128) << self.length;
         self.length += 32;
     }
 
     #[inline(always)]
-    pub fn push_u64(&mut self, v: u64) {
+    fn push_u64(&mut self, v: u64) {
         self.out |= (v as u128) << self.length;
         self.length += 64;
     }
 
     #[inline(always)]
-    pub fn push_i32(&mut self, v: i32) {
+    fn push_i32(&mut self, v: i32) {
         self.push_u32(v as u32);
     }
 
     #[inline(always)]
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         (self.length >> 3) as usize
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.length == 0
     }
 }
 
