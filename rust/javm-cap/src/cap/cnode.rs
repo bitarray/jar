@@ -13,8 +13,6 @@
 //!
 //! `size_log` is permitted in `0..=16` (the spec's hard ceiling).
 
-use alloc::vec::Vec;
-
 use ssz::{MissingOr, SparseList};
 
 use crate::cache::CapHashOrRef;
@@ -106,33 +104,4 @@ impl CNodeCap {
     pub fn take(&mut self, slot: SlotIdx) -> Result<Option<CapHashOrRef>, CapError> {
         self.set(slot, None)
     }
-
-    /// Alias of `set(slot, None)`.
-    pub fn remove(&mut self, slot: SlotIdx) -> Result<Option<CapHashOrRef>, CapError> {
-        self.set(slot, None)
-    }
-
-    /// Iterator over materialized `(slot, &target)` pairs in slot order.
-    /// `Missing(_)` placeholders are skipped.
-    pub fn iter_materialized(&self) -> impl Iterator<Item = (u32, &CapHashOrRef)> + '_ {
-        self.slots.iter().filter_map(|(idx, entry)| match entry {
-            MissingOr::Materialized(t) => Some((idx as u32, t)),
-            MissingOr::Missing(_) => None,
-        })
-    }
-
-    /// Collect the materialized entries into a `Vec<(u32, CapHashOrRef)>`.
-    pub fn materialized_entries(&self) -> Vec<(u32, CapHashOrRef)> {
-        self.iter_materialized()
-            .map(|(idx, t)| (idx, t.clone()))
-            .collect()
-    }
-}
-
-/// One populated slot — retained as a serialisation helper for callers
-/// that need a flat `(slot, target)` pair.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CNodeSlotEntry {
-    pub slot: SlotIdx,
-    pub target: CapHashOrRef,
 }

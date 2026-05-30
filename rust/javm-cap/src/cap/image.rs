@@ -1,6 +1,6 @@
 //! `ImageCap` — Image cap.
 //!
-//! Stores code regions, endpoints, mappings, and slot references as
+//! Stores a single code region, endpoints, mappings, and slot references as
 //! separate `Vec<T>` allocations. Allocation count per ImageCap is
 //! bounded regardless of content size; we accept that in exchange for
 //! direct field accessors.
@@ -241,7 +241,7 @@ pub struct ImageSlotEntry {
     pub cap_hash: CapHash,
 }
 
-/// Failure modes when converting a SCALE-encoded [`crate::image::Image`]
+/// Failure modes when converting an SSZ-encoded [`crate::image::Image`]
 /// into an [`ImageCap`]. The conversion is lossy in fields the v3 cap
 /// shape no longer carries (`gas_slots`, `quota_slots`, per-endpoint
 /// `arg_registers`) and constrained in others — these errors flag the
@@ -258,7 +258,7 @@ pub enum ImageConvertError {
     RegisterIndexOutOfRange(u8),
 }
 
-/// Build an [`ImageCap`] from the SCALE-encoded [`crate::image::Image`]
+/// Build an [`ImageCap`] from the SSZ-encoded [`crate::image::Image`]
 /// shape. The Data content referenced by pinned and initial slots must
 /// already be published — pass the resolved `(SlotIdx, CapHash)` pairs
 /// in `pinned_hashes` and `initial_hashes`. The builder sorts both lists
