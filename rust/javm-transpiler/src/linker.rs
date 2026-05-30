@@ -864,8 +864,13 @@ fn validate_pvm2(code: &[u8]) -> Result<(), TranspileError> {
         let rd = (w >> 7) & 0x1F;
         let rs1 = (w >> 15) & 0x1F;
         let rs2 = (w >> 20) & 0x1F;
+        // Reserved registers: x3/x4 (PVM2-specific) and x16..x31 (do not
+        // exist in RV64E — a 16-register base — so they are illegal). This
+        // producer-side check mirrors the consensus source of truth,
+        // `javm_exec::regs::reg_is_reserved`; kept local so the transpiler
+        // need not depend on the executor crate.
         let check = |name: &str, r: u32| -> Result<(), TranspileError> {
-            if r == 3 || r == 4 {
+            if r == 3 || r == 4 || r >= 16 {
                 return Err(TranspileError::InvalidSection(format!(
                     "link_elf: forbidden register x{} ({}) at offset {:#x}",
                     r, name, i

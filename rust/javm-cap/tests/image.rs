@@ -1,7 +1,7 @@
 use javm_cap::image::{EndpointDef, MemoryMapping};
 use javm_cap::{
     Blake2b256, Image, InitialDataCap, PinnedCap, SlotIdx, SlotPath, chain_extend, chain_genesis,
-    image_content_hash,
+    image_cap, image_content_hash,
 };
 use ssz::Decode as _;
 use std::collections::BTreeMap;
@@ -188,6 +188,47 @@ fn chain_extend_is_associative_under_sequence() {
         chain_extend::<H>(&g_b, &img_c)
     };
     assert_eq!(chain_abc, chain_abc_2);
+}
+
+#[test]
+fn mapping_is_pinned_classifies_by_source_slot() {
+    // A mapping whose source slot is pinned is read-only (a guest store
+    // faults); one sourced from an initial (mutable) slot is RW. This is
+    // the shared classifier the interpreter drivers (`javm` `build_entry`,
+    // `nub-arch-local`) use so they agree with the recompiler's
+    // pinned-vs-initial slot classification.
+    let mut img = Image::empty();
+    img.memory_mappings.push(MemoryMapping {
+        start: 0x1000_0000,
+        size: 0x1000,
+        source: SlotPath::root(SlotIdx(5)),
+    });
+    img.memory_mappings.push(MemoryMapping {
+        start: 0x1000_1000,
+        size: 0x1000,
+        source: SlotPath::root(SlotIdx(6)),
+    });
+    img.pinned_slots.insert(
+        SlotIdx(5),
+        PinnedCap::Data {
+            content: vec![1, 2, 3],
+            size: 0x1000,
+        },
+    );
+    img.initial_slots.insert(
+        SlotIdx(6),
+        InitialDataCap {
+            content: vec![4, 5, 6],
+            size: 0x1000,
+        },
+    );
+
+    let dummy = [0u8; 32];
+    let cap = image_cap(&img, &[(SlotIdx(5), dummy)], &[(SlotIdx(6), dummy)]).unwrap();
+
+    assert!(cap.mapping_is_pinned(0x1000_0000)); // slot 5 pinned → RO
+    assert!(!cap.mapping_is_pinned(0x1000_1000)); // slot 6 initial → RW
+    assert!(!cap.mapping_is_pinned(0x9999_9999)); // no mapping at this VA
 }
 
 #[test]

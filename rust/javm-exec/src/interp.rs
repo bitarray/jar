@@ -26,7 +26,7 @@ use crate::ecall::{EcallHandler, EcallKind, EcallResult};
 use crate::exit::ExitReason;
 use crate::gas::GasCounter;
 use crate::instruction::Inst;
-use crate::mem::Memory;
+use crate::mem::{Memory, perm};
 use crate::predecode::{Predecode, RvPreDecodedInst, predecode};
 use crate::regs::Regs;
 
@@ -73,6 +73,7 @@ impl Interpreter {
     ) -> ExitReason {
         Self::run(
             &program.predecode,
+            &program.code,
             program.code_base,
             regs,
             mem,
@@ -87,6 +88,7 @@ impl Interpreter {
     /// code addresses as `code_base + offset`.
     pub fn run<M: Memory>(
         predecode: &Predecode,
+        code: &[u8],
         code_base: u32,
         regs: &mut Regs,
         mem: &mut M,
@@ -103,10 +105,18 @@ impl Interpreter {
             return ExitReason::Panic;
         }
 
-        // Resolve starting PC → instruction index.
+        // Resolve starting PC → instruction index. The entry must be a
+        // basic-block start: a fresh invocation enters at an endpoint's
+        // `entry_pc` (untrusted Image metadata) and every resume lands on
+        // a post-terminator `bb_start` (the pause invariant). A
+        // non-block-start entry would run a partial block having charged
+        // zero gas — so we Panic, exactly as the recompiler's prologue
+        // does (its dense dispatch table holds the panic stub at every
+        // non-block-start offset). Lazy: this fires at invocation, never
+        // at Image admission.
         let mut idx = match find_idx_for_pc(insts, regs.pc as u32) {
-            Some(i) => i,
-            None => return ExitReason::Panic,
+            Some(i) if insts[i].is_gas_block_start => i,
+            _ => return ExitReason::Panic,
         };
 
         loop {
@@ -133,49 +143,49 @@ impl Interpreter {
                 // ---- Loads ---------------------------------------------------
                 Inst::Lb { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    match mem.read_u8(addr) {
+                    match load_u8(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as i8 as i64 as u64),
                         None => return page_fault(regs, pc, addr),
                     }
                 }
                 Inst::Lh { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    match mem.read_u16_le(addr) {
+                    match load_u16(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as i16 as i64 as u64),
                         None => return page_fault(regs, pc, addr),
                     }
                 }
                 Inst::Lw { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    match mem.read_u32_le(addr) {
+                    match load_u32(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as i32 as i64 as u64),
                         None => return page_fault(regs, pc, addr),
                     }
                 }
                 Inst::Ld { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    match mem.read_u64_le(addr) {
+                    match load_u64(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v),
                         None => return page_fault(regs, pc, addr),
                     }
                 }
                 Inst::Lbu { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    match mem.read_u8(addr) {
+                    match load_u8(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as u64),
                         None => return page_fault(regs, pc, addr),
                     }
                 }
                 Inst::Lhu { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    match mem.read_u16_le(addr) {
+                    match load_u16(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as u64),
                         None => return page_fault(regs, pc, addr),
                     }
                 }
                 Inst::Lwu { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    match mem.read_u32_le(addr) {
+                    match load_u32(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as u64),
                         None => return page_fault(regs, pc, addr),
                     }
@@ -184,25 +194,32 @@ impl Interpreter {
                 // ---- Stores --------------------------------------------------
                 Inst::Sb { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    if !mem.write_u8(addr, reg_read(regs, rs2) as u8) {
+                    if !store_writable(mem, addr, 1)
+                        || !mem.write_u8(addr, reg_read(regs, rs2) as u8)
+                    {
                         return page_fault(regs, pc, addr);
                     }
                 }
                 Inst::Sh { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    if !mem.write_u16_le(addr, reg_read(regs, rs2) as u16) {
+                    if !store_writable(mem, addr, 2)
+                        || !mem.write_u16_le(addr, reg_read(regs, rs2) as u16)
+                    {
                         return page_fault(regs, pc, addr);
                     }
                 }
                 Inst::Sw { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    if !mem.write_u32_le(addr, reg_read(regs, rs2) as u32) {
+                    if !store_writable(mem, addr, 4)
+                        || !mem.write_u32_le(addr, reg_read(regs, rs2) as u32)
+                    {
                         return page_fault(regs, pc, addr);
                     }
                 }
                 Inst::Sd { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    if !mem.write_u64_le(addr, reg_read(regs, rs2)) {
+                    if !store_writable(mem, addr, 8) || !mem.write_u64_le(addr, reg_read(regs, rs2))
+                    {
                         return page_fault(regs, pc, addr);
                     }
                 }
@@ -652,9 +669,14 @@ impl Interpreter {
                         reg_write(regs, rd, code_base.wrapping_add(next_pc) as u64);
                     }
                     let target = (pc as i64).wrapping_add(imm as i64) as u32;
+                    // The target must be a basic-block start (gas precharge
+                    // happens at block entry) — else Panic, matching the
+                    // recompiler's `emit_static_branch` panic stub and the
+                    // `Jalr` arm below. Accepting a mid-block target would
+                    // execute a partial block having charged zero gas.
                     next_idx_override = Some(match find_idx_for_pc(insts, target) {
-                        Some(i) => i,
-                        None => {
+                        Some(i) if insts[i].is_gas_block_start => i,
+                        _ => {
                             regs.pc = pc as u64;
                             return ExitReason::Panic;
                         }
@@ -683,8 +705,8 @@ impl Interpreter {
                     if reg_read(regs, rs1) == reg_read(regs, rs2) {
                         let target = (pc as i64).wrapping_add(imm as i64) as u32;
                         match find_idx_for_pc(insts, target) {
-                            Some(i) => next_idx_override = Some(i),
-                            None => {
+                            Some(i) if insts[i].is_gas_block_start => next_idx_override = Some(i),
+                            _ => {
                                 regs.pc = pc as u64;
                                 return ExitReason::Panic;
                             }
@@ -695,8 +717,8 @@ impl Interpreter {
                     if reg_read(regs, rs1) != reg_read(regs, rs2) {
                         let target = (pc as i64).wrapping_add(imm as i64) as u32;
                         match find_idx_for_pc(insts, target) {
-                            Some(i) => next_idx_override = Some(i),
-                            None => {
+                            Some(i) if insts[i].is_gas_block_start => next_idx_override = Some(i),
+                            _ => {
                                 regs.pc = pc as u64;
                                 return ExitReason::Panic;
                             }
@@ -707,8 +729,8 @@ impl Interpreter {
                     if (reg_read(regs, rs1) as i64) < (reg_read(regs, rs2) as i64) {
                         let target = (pc as i64).wrapping_add(imm as i64) as u32;
                         match find_idx_for_pc(insts, target) {
-                            Some(i) => next_idx_override = Some(i),
-                            None => {
+                            Some(i) if insts[i].is_gas_block_start => next_idx_override = Some(i),
+                            _ => {
                                 regs.pc = pc as u64;
                                 return ExitReason::Panic;
                             }
@@ -719,8 +741,8 @@ impl Interpreter {
                     if (reg_read(regs, rs1) as i64) >= (reg_read(regs, rs2) as i64) {
                         let target = (pc as i64).wrapping_add(imm as i64) as u32;
                         match find_idx_for_pc(insts, target) {
-                            Some(i) => next_idx_override = Some(i),
-                            None => {
+                            Some(i) if insts[i].is_gas_block_start => next_idx_override = Some(i),
+                            _ => {
                                 regs.pc = pc as u64;
                                 return ExitReason::Panic;
                             }
@@ -731,8 +753,8 @@ impl Interpreter {
                     if reg_read(regs, rs1) < reg_read(regs, rs2) {
                         let target = (pc as i64).wrapping_add(imm as i64) as u32;
                         match find_idx_for_pc(insts, target) {
-                            Some(i) => next_idx_override = Some(i),
-                            None => {
+                            Some(i) if insts[i].is_gas_block_start => next_idx_override = Some(i),
+                            _ => {
                                 regs.pc = pc as u64;
                                 return ExitReason::Panic;
                             }
@@ -743,8 +765,8 @@ impl Interpreter {
                     if reg_read(regs, rs1) >= reg_read(regs, rs2) {
                         let target = (pc as i64).wrapping_add(imm as i64) as u32;
                         match find_idx_for_pc(insts, target) {
-                            Some(i) => next_idx_override = Some(i),
-                            None => {
+                            Some(i) if insts[i].is_gas_block_start => next_idx_override = Some(i),
+                            _ => {
                                 regs.pc = pc as u64;
                                 return ExitReason::Panic;
                             }
@@ -815,29 +837,25 @@ impl Interpreter {
 // Helpers
 // ----------------------------------------------------------------------------
 
-/// Read PVM2 register `x`. `x0` reads as zero; `x3`/`x4` are reserved
-/// (defence-in-depth zero); `x1..x2, x5..x15` map to slots `0..12`.
+/// Read PVM2 register `x`, via the shared slot map ([`crate::regs`]).
+/// `x0` (and any reserved register, which never reaches here once decode
+/// maps it to `Reserved`) reads as zero; `x1, x2, x5..x15` map to slots
+/// `0..12`.
 #[inline]
 fn reg_read(regs: &Regs, x: u8) -> u64 {
-    match x {
-        0 => 0,
-        1 => regs.gpr[0],
-        2 => regs.gpr[1],
-        5..=15 => regs.gpr[(x as usize) - 3],
-        _ => 0,
+    match crate::regs::REG_SLOT_LUT[(x & 31) as usize] {
+        0xFF => 0,
+        s => regs.gpr[s as usize],
     }
 }
 
-/// Write PVM2 register `x`. Writes to `x0`, `x3`, `x4`, or out-of-range
-/// are no-ops.
+/// Write PVM2 register `x`, via the shared slot map. Writes to `x0` (and
+/// any reserved register) are no-ops.
 #[inline]
 fn reg_write(regs: &mut Regs, x: u8, v: u64) {
-    match x {
-        0 => {}
-        1 => regs.gpr[0] = v,
-        2 => regs.gpr[1] = v,
-        5..=15 => regs.gpr[(x as usize) - 3] = v,
-        _ => {}
+    let s = crate::regs::REG_SLOT_LUT[(x & 31) as usize];
+    if s != 0xFF {
+        regs.gpr[s as usize] = v;
     }
 }
 
@@ -846,6 +864,62 @@ fn reg_write(regs: &mut Regs, x: u8, v: u64) {
 #[inline]
 fn compute_addr(regs: &Regs, rs1: u8, imm: i32) -> u32 {
     (reg_read(regs, rs1) as u32).wrapping_add(imm as u32)
+}
+
+/// Read a `width`-byte little-endian value (`width ≤ 8`, zero-extended
+/// into the `u64`) from the read-only code region if `addr` falls
+/// wholly within `[code_base, code_base + code.len())`. Returns `None`
+/// otherwise. Serves the PIC idiom (`auipc` + load) the spec blesses
+/// and the recompiler allows via its RO code direct-map: the
+/// interpreter's data buffer is based at `DATA_BASE`, so a code-region
+/// address never hits it and must be served from the code bytes here.
+#[inline]
+fn read_code(code: &[u8], code_base: u32, addr: u32, width: usize) -> Option<u64> {
+    let off = addr.checked_sub(code_base)? as usize;
+    let end = off.checked_add(width)?;
+    if end > code.len() {
+        return None;
+    }
+    let mut buf = [0u8; 8];
+    buf[..width].copy_from_slice(&code[off..end]);
+    Some(u64::from_le_bytes(buf))
+}
+
+/// Width-typed loads that fall back to the read-only code region when
+/// the data buffer misses, so `auipc`+load of the guest's own code
+/// succeeds (B2 parity with the recompiler's RO code mapping).
+#[inline]
+fn load_u8<M: Memory>(mem: &M, code: &[u8], code_base: u32, addr: u32) -> Option<u8> {
+    mem.read_u8(addr)
+        .or_else(|| read_code(code, code_base, addr, 1).map(|v| v as u8))
+}
+#[inline]
+fn load_u16<M: Memory>(mem: &M, code: &[u8], code_base: u32, addr: u32) -> Option<u16> {
+    mem.read_u16_le(addr)
+        .or_else(|| read_code(code, code_base, addr, 2).map(|v| v as u16))
+}
+#[inline]
+fn load_u32<M: Memory>(mem: &M, code: &[u8], code_base: u32, addr: u32) -> Option<u32> {
+    mem.read_u32_le(addr)
+        .or_else(|| read_code(code, code_base, addr, 4).map(|v| v as u32))
+}
+#[inline]
+fn load_u64<M: Memory>(mem: &M, code: &[u8], code_base: u32, addr: u32) -> Option<u64> {
+    mem.read_u64_le(addr)
+        .or_else(|| read_code(code, code_base, addr, 8))
+}
+
+/// True iff every page a `width`-byte guest store at `addr` touches is
+/// writable (`perm::RW`). A `width`-byte store (`width ≤ 8`) spans at
+/// most two consecutive pages, so checking the first and last byte's
+/// page covers it. Enforced only for *guest* stores so the interpreter
+/// (the in-process consensus oracle) faults a write to a read-only /
+/// pinned page exactly as the recompiler's hardware page tables do —
+/// trusted kernel/host-call writes use `mem.write_*` directly and
+/// intentionally bypass this.
+#[inline]
+fn store_writable<M: Memory>(mem: &M, addr: u32, width: u32) -> bool {
+    mem.perm_of(addr) == perm::RW && mem.perm_of(addr.wrapping_add(width - 1)) == perm::RW
 }
 
 /// Build a `PageFault` exit and record the failing PC.
@@ -884,7 +958,7 @@ mod tests {
         let mut mem = CopyingMemory::new();
         let mut gas = GasCounter::new(initial_gas);
         let mut h = PanickingHandler;
-        let reason = Interpreter::run(&pre, 0, &mut regs, &mut mem, &mut gas, &mut h);
+        let reason = Interpreter::run(&pre, code, 0, &mut regs, &mut mem, &mut gas, &mut h);
         let used = initial_gas.saturating_sub(gas.remaining());
         (regs, reason, used)
     }
@@ -984,7 +1058,213 @@ mod tests {
         let mut mem = CopyingMemory::new();
         let mut gas = GasCounter::new(1_000_000);
         let mut h = PanickingHandler;
-        let reason = Interpreter::run(&pre, 0, &mut regs, &mut mem, &mut gas, &mut h);
+        let reason = Interpreter::run(&pre, &code, 0, &mut regs, &mut mem, &mut gas, &mut h);
         assert_eq!(reason, ExitReason::Panic);
+    }
+
+    // ---- B1: static jal/branch to a non-block-start must Panic ----------
+    //
+    // The block-start set is {0} ∪ {pc after a terminator}. A static
+    // branch/jal whose target is a valid instruction boundary that is NOT
+    // a block start would, unguarded, run a partial block having charged
+    // zero gas. The interpreter must Panic there, matching the
+    // recompiler's `emit_static_branch` panic stub. An honest linker never
+    // emits such a target (it injects `fallthrough`), so this only bites a
+    // crafted blob.
+
+    #[test]
+    fn branch_to_non_block_start_panics() {
+        // 0:  beq x0,x0,+8   (taken; terminator → PC=4 is a block start)
+        // 4:  addi x10,x0,1  (not a terminator → PC=8 is NOT a block start)
+        // 8:  addi x11,x0,2  (the branch target — mid-block)
+        // 12: trap
+        let beq = 0x0000_0463u32; // beq x0,x0,+8
+        let addi1 = (1u32 << 20) | (10 << 7) | 0x13;
+        let addi2 = (2u32 << 20) | (11 << 7) | 0x13;
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[beq, addi1, addi2, trap]);
+        let (regs, reason, _) = run_simple(&code, 1_000_000);
+        assert_eq!(reason, ExitReason::Panic);
+        assert_eq!(regs.pc, 0); // the faulting branch's PC
+    }
+
+    #[test]
+    fn jal_to_non_block_start_panics() {
+        // 0:  jal x0,+8      (terminator → PC=4 is a block start)
+        // 4:  addi x10,x0,1  (not a terminator → PC=8 is NOT a block start)
+        // 8:  addi x11,x0,2  (the jal target — mid-block)
+        // 12: trap
+        let jal = 0x0080_006Fu32; // jal x0,+8
+        let addi1 = (1u32 << 20) | (10 << 7) | 0x13;
+        let addi2 = (2u32 << 20) | (11 << 7) | 0x13;
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[jal, addi1, addi2, trap]);
+        let (regs, reason, _) = run_simple(&code, 1_000_000);
+        assert_eq!(reason, ExitReason::Panic);
+        assert_eq!(regs.pc, 0);
+    }
+
+    #[test]
+    fn branch_to_real_block_start_is_allowed() {
+        // Regression guard: a branch to a genuine block start still works.
+        // 0:  beq x0,x0,+8   (terminator → PC=4 block start)
+        // 4:  trap           (terminator → PC=8 IS a block start; unreached)
+        // 8:  addi x10,x0,7  (the branch target — a valid block start)
+        // 12: trap
+        let beq = 0x0000_0463u32; // beq x0,x0,+8
+        let trap = 0x0000_000Bu32;
+        let addi = (7u32 << 20) | (10 << 7) | 0x13;
+        let code = enc4(&[beq, trap, addi, trap]);
+        let (regs, reason, _) = run_simple(&code, 1_000_000);
+        assert_eq!(reason, ExitReason::Trap);
+        assert_eq!(regs.gpr[7], 7); // x10 → slot 7: the branch was taken
+    }
+
+    // ---- B2: a guest can read (but not write) its own code bytes --------
+
+    #[test]
+    fn auipc_load_reads_own_code_region() {
+        // auipc x10,0 ; lw x11,0(x10) ; trap. With the data buffer based
+        // away from the code region, the load address lands in the code
+        // region and must be served from the code bytes (the PIC idiom),
+        // not page-fault — matching the recompiler's RO code direct-map.
+        let auipc = (0u32 << 12) | (10 << 7) | 0x17; // auipc x10,0
+        let lw = (0u32 << 20) | (10 << 15) | (0b010 << 12) | (11 << 7) | 0x03; // lw x11,0(x10)
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[auipc, lw, trap]);
+        let pre = predecode(&code);
+        let mut regs = Regs::new();
+        let mut mem = CopyingMemory::new();
+        mem.base = 0x1000_0000; // data buffer elsewhere; code region unmapped here
+        let mut gas = GasCounter::new(1_000_000);
+        let mut h = PanickingHandler;
+        let code_base = 0x0040_0000u32;
+        let reason = Interpreter::run(
+            &pre, &code, code_base, &mut regs, &mut mem, &mut gas, &mut h,
+        );
+        assert_eq!(reason, ExitReason::Trap);
+        assert_eq!(regs.gpr[7], code_base as u64); // x10 = code_base + 0
+        assert_eq!(regs.gpr[8] as u32, auipc); // x11 = the first code word
+    }
+
+    #[test]
+    fn store_into_code_region_faults() {
+        // auipc x10,0 ; sw x0,0(x10) ; trap. Code is read-only: a store
+        // into the code region must PageFault in both engines.
+        let auipc = (0u32 << 12) | (10 << 7) | 0x17; // auipc x10,0
+        let sw = (0u32 << 25) | (0 << 20) | (10 << 15) | (0b010 << 12) | (0 << 7) | 0x23; // sw x0,0(x10)
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[auipc, sw, trap]);
+        let pre = predecode(&code);
+        let mut regs = Regs::new();
+        let mut mem = CopyingMemory::new();
+        mem.base = 0x1000_0000;
+        let mut gas = GasCounter::new(1_000_000);
+        let mut h = PanickingHandler;
+        let code_base = 0x0040_0000u32;
+        let reason = Interpreter::run(
+            &pre, &code, code_base, &mut regs, &mut mem, &mut gas, &mut h,
+        );
+        assert_eq!(reason, ExitReason::PageFault(code_base));
+    }
+
+    // ---- B3: a guest store to a read-only page faults -------------------
+
+    #[test]
+    fn store_writable_respects_per_page_perms() {
+        // Two RW pages, then mark the second read-only. A store wholly in
+        // an RW page passes; one touching the RO page (incl. a straddle)
+        // fails.
+        let page = crate::mem::PAGE_SIZE;
+        let mut mem = CopyingMemory::with_pages(2, perm::RW);
+        mem.perms[1] = perm::RO;
+        assert!(store_writable(&mem, 0, 4)); // wholly in RW page
+        assert!(!store_writable(&mem, page, 4)); // wholly in RO page
+        assert!(!store_writable(&mem, page - 2, 4)); // straddles RW→RO
+    }
+
+    #[test]
+    fn guest_store_to_ro_page_faults() {
+        // lui x5,1 (x5 = 0x1000) ; sw x0,0(x5) ; trap. Page 1 is RO, so
+        // the store faults; the recompiler's hardware RO mapping faults
+        // identically.
+        let lui = (1u32 << 12) | (5 << 7) | 0x37; // lui x5,1
+        let sw = (0u32 << 25) | (0 << 20) | (5 << 15) | (0b010 << 12) | (0 << 7) | 0x23; // sw x0,0(x5)
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[lui, sw, trap]);
+        let pre = predecode(&code);
+        let mut regs = Regs::new();
+        let mut mem = CopyingMemory::with_pages(2, perm::RW);
+        mem.perms[1] = perm::RO;
+        let mut gas = GasCounter::new(1_000_000);
+        let mut h = PanickingHandler;
+        let reason = Interpreter::run(&pre, &code, 0, &mut regs, &mut mem, &mut gas, &mut h);
+        assert_eq!(reason, ExitReason::PageFault(crate::mem::PAGE_SIZE));
+        // The RO page was not mutated.
+        assert_eq!(mem.read_u32_le(crate::mem::PAGE_SIZE), Some(0));
+    }
+
+    // ---- B6: entry PC must be a basic-block start ----------------------
+
+    #[test]
+    fn entry_at_non_block_start_panics() {
+        // Enter at PC=4, which is mid-block: the addi at PC=0 is not a
+        // terminator, so PC=4 is not a block start. Must Panic at
+        // invocation, matching the recompiler's dispatch-table prologue
+        // (a non-block-start offset holds the panic stub).
+        let addi1 = (1u32 << 20) | (10 << 7) | 0x13;
+        let addi2 = (2u32 << 20) | (11 << 7) | 0x13;
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[addi1, addi2, trap]);
+        let pre = predecode(&code);
+        let mut regs = Regs::new();
+        regs.pc = 4; // non-block-start entry
+        let mut mem = CopyingMemory::new();
+        let mut gas = GasCounter::new(1_000_000);
+        let mut h = PanickingHandler;
+        let reason = Interpreter::run(&pre, &code, 0, &mut regs, &mut mem, &mut gas, &mut h);
+        assert_eq!(reason, ExitReason::Panic);
+    }
+
+    #[test]
+    fn entry_at_real_block_start_is_allowed() {
+        // 0: trap (terminator → PC=4 is a block start)
+        // 4: addi x10,x0,7 ; 8: trap. Entering at the PC=4 block start runs.
+        let trap = 0x0000_000Bu32;
+        let addi = (7u32 << 20) | (10 << 7) | 0x13;
+        let code = enc4(&[trap, addi, trap]);
+        let pre = predecode(&code);
+        let mut regs = Regs::new();
+        regs.pc = 4; // post-terminator block start
+        let mut mem = CopyingMemory::new();
+        let mut gas = GasCounter::new(1_000_000);
+        let mut h = PanickingHandler;
+        let reason = Interpreter::run(&pre, &code, 0, &mut regs, &mut mem, &mut gas, &mut h);
+        assert_eq!(reason, ExitReason::Trap);
+        assert_eq!(regs.gpr[7], 7); // x10 → slot 7: PC=4 block executed
+    }
+
+    // ---- B7: an x3/x4 register field panics (was: executed as zero) ----
+
+    #[test]
+    fn x3_source_register_panics() {
+        // add x5, x3, x6 ; trap. x3 is reserved, so the instruction is a
+        // reserved encoding → Panic, matching the recompiler (which used
+        // to panic here while the interp executed `0 + x6`).
+        let add_x3 = 0x0061_82B3u32; // add x5, x3, x6
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[add_x3, trap]);
+        let (_regs, reason, _) = run_simple(&code, 1_000_000);
+        assert_eq!(reason, ExitReason::Panic);
+    }
+
+    #[test]
+    fn x3_free_arithmetic_still_runs() {
+        // add x5, x6, x7 ; trap — no reserved register, executes normally.
+        let add_ok = 0x0073_02B3u32; // add x5, x6, x7
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[add_ok, trap]);
+        let (_regs, reason, _) = run_simple(&code, 1_000_000);
+        assert_eq!(reason, ExitReason::Trap);
     }
 }

@@ -121,6 +121,16 @@ pub fn build(manifest_dir: &str, bin_name: &str, features: &[&str]) -> PathBuf {
         .arg(TARGET_TRIPLE)
         .arg("--bin")
         .arg(bin_name)
+        // NOTE: enabling LTO here (`--config profile.release.lto=…`) fails:
+        // the guest forces `-Ccode-model=large` (it loads at a low-half GVA,
+        // too far above 2 GiB for the default `kernel` model), but the
+        // *precompiled* `core`/`alloc` use the target-default `kernel`
+        // model, and LTO (fat *and* thin) refuses to merge modules with
+        // conflicting `Code Model` flags (`i32 4` vs `i32 2`). Making LTO
+        // work would require rebuilding std with the matching code model via
+        // `-Zbuild-std`, i.e. a nightly toolchain (or `RUSTC_BOOTSTRAP=1`) —
+        // a departure from this crate's deliberate stable / no-build-std
+        // design. Left disabled pending that decision.
         .env("CARGO_TARGET_DIR", &target_dir)
         .env("BUILD_CRATE_GUEST_BUILD", "1")
         .env("CARGO_ENCODED_RUSTFLAGS", rustflags);

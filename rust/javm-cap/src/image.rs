@@ -38,6 +38,14 @@ use ssz_derive::{Decode, Encode};
 /// kernel installs declared pinned content into the Instance's cnode
 /// at `set_image` / `host_derive_spawn` time and treats them as
 /// read-only thereafter.
+///
+/// **Validation model.** This is the untrusted SSZ wire form; converting
+/// it to a [`crate::cap::image::ImageCap`] via
+/// [`crate::cap::image::image_cap`] is the "deblob" that validates the
+/// Image's *structure* eagerly (sizes, bounds, slot indices, path depth).
+/// The `code` *bytes* are never screened — instruction *semantics* are
+/// validated lazily, at execution. See [`crate::cap::image::ImageCap`] for
+/// the full structure-eager / semantics-lazy rationale.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, ssz_derive::HashTreeRoot)]
 pub struct Image {
     /// The (single) code region: raw RV+C+custom-0 bytes. Mapped RO at

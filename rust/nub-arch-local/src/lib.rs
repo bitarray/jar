@@ -92,12 +92,21 @@ pub fn run_instance(
         )
         .expect("map base RW region");
     }
+    // A mapping sourced from a pinned slot is read-only: lay it RO so a
+    // guest store faults, matching the recompiler (which RO direct-maps
+    // pinned slots and does not CoW-arm them). Mirrors `javm` `Vm::
+    // build_entry` via the shared `ImageCap::mapping_is_pinned`.
     for overlay_entry in instance.rw_overlays.iter() {
+        let access = if image.mapping_is_pinned(overlay_entry.start) {
+            Access::ReadOnly
+        } else {
+            Access::ReadWrite
+        };
         overlay(
             &mut mem,
             overlay_entry.start,
             overlay_entry.bytes.as_slice(),
-            Access::ReadWrite,
+            access,
         );
     }
 
@@ -133,6 +142,7 @@ pub fn run_instance(
     let predecode = predecode(code_bytes);
     let exit = Interpreter::run(
         &predecode,
+        code_bytes,
         code_base,
         &mut regs,
         &mut mem,
