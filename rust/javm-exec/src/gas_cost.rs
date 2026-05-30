@@ -253,15 +253,11 @@ static RV_GAS_COST_LUT: [RvGasCostEntry; RV_LUT_LEN] = {
 
 /// PVM2 register → simulator slot (u8). 0xFF means "no register" — the
 /// simulator's `feed_direct` interprets that as "skip dep / no write".
-/// Maps x1→0, x2→1, x5..x15→2..12; x0/x3/x4 → 0xFF.
+/// Single source: [`crate::regs::reg_slot_or_ff`] (the recompiler reads
+/// the same classification via `REG_SLOT_LUT`, so gas agrees bit-for-bit).
 #[inline(always)]
 pub fn rv_slot_u8(r: u8) -> u8 {
-    match r {
-        1 => 0,
-        2 => 1,
-        5..=15 => r - 3,
-        _ => 0xFF,
-    }
+    crate::regs::reg_slot_or_ff(r)
 }
 
 /// Compute the [`crate::predecode::RvGasMeta`] for an `Inst`.

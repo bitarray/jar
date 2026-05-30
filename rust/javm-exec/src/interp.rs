@@ -105,10 +105,18 @@ impl Interpreter {
             return ExitReason::Panic;
         }
 
-        // Resolve starting PC → instruction index.
+        // Resolve starting PC → instruction index. The entry must be a
+        // basic-block start: a fresh invocation enters at an endpoint's
+        // `entry_pc` (untrusted Image metadata) and every resume lands on
+        // a post-terminator `bb_start` (the pause invariant). A
+        // non-block-start entry would run a partial block having charged
+        // zero gas — so we Panic, exactly as the recompiler's prologue
+        // does (its dense dispatch table holds the panic stub at every
+        // non-block-start offset). Lazy: this fires at invocation, never
+        // at Image admission.
         let mut idx = match find_idx_for_pc(insts, regs.pc as u32) {
-            Some(i) => i,
-            None => return ExitReason::Panic,
+            Some(i) if insts[i].is_gas_block_start => i,
+            _ => return ExitReason::Panic,
         };
 
         loop {
@@ -829,29 +837,25 @@ impl Interpreter {
 // Helpers
 // ----------------------------------------------------------------------------
 
-/// Read PVM2 register `x`. `x0` reads as zero; `x3`/`x4` are reserved
-/// (defence-in-depth zero); `x1..x2, x5..x15` map to slots `0..12`.
+/// Read PVM2 register `x`, via the shared slot map ([`crate::regs`]).
+/// `x0` (and any reserved register, which never reaches here once decode
+/// maps it to `Reserved`) reads as zero; `x1, x2, x5..x15` map to slots
+/// `0..12`.
 #[inline]
 fn reg_read(regs: &Regs, x: u8) -> u64 {
-    match x {
-        0 => 0,
-        1 => regs.gpr[0],
-        2 => regs.gpr[1],
-        5..=15 => regs.gpr[(x as usize) - 3],
-        _ => 0,
+    match crate::regs::REG_SLOT_LUT[(x & 31) as usize] {
+        0xFF => 0,
+        s => regs.gpr[s as usize],
     }
 }
 
-/// Write PVM2 register `x`. Writes to `x0`, `x3`, `x4`, or out-of-range
-/// are no-ops.
+/// Write PVM2 register `x`, via the shared slot map. Writes to `x0` (and
+/// any reserved register) are no-ops.
 #[inline]
 fn reg_write(regs: &mut Regs, x: u8, v: u64) {
-    match x {
-        0 => {}
-        1 => regs.gpr[0] = v,
-        2 => regs.gpr[1] = v,
-        5..=15 => regs.gpr[(x as usize) - 3] = v,
-        _ => {}
+    let s = crate::regs::REG_SLOT_LUT[(x & 31) as usize];
+    if s != 0xFF {
+        regs.gpr[s as usize] = v;
     }
 }
 
@@ -1198,5 +1202,69 @@ mod tests {
         assert_eq!(reason, ExitReason::PageFault(crate::mem::PAGE_SIZE));
         // The RO page was not mutated.
         assert_eq!(mem.read_u32_le(crate::mem::PAGE_SIZE), Some(0));
+    }
+
+    // ---- B6: entry PC must be a basic-block start ----------------------
+
+    #[test]
+    fn entry_at_non_block_start_panics() {
+        // Enter at PC=4, which is mid-block: the addi at PC=0 is not a
+        // terminator, so PC=4 is not a block start. Must Panic at
+        // invocation, matching the recompiler's dispatch-table prologue
+        // (a non-block-start offset holds the panic stub).
+        let addi1 = (1u32 << 20) | (10 << 7) | 0x13;
+        let addi2 = (2u32 << 20) | (11 << 7) | 0x13;
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[addi1, addi2, trap]);
+        let pre = predecode(&code);
+        let mut regs = Regs::new();
+        regs.pc = 4; // non-block-start entry
+        let mut mem = CopyingMemory::new();
+        let mut gas = GasCounter::new(1_000_000);
+        let mut h = PanickingHandler;
+        let reason = Interpreter::run(&pre, &code, 0, &mut regs, &mut mem, &mut gas, &mut h);
+        assert_eq!(reason, ExitReason::Panic);
+    }
+
+    #[test]
+    fn entry_at_real_block_start_is_allowed() {
+        // 0: trap (terminator → PC=4 is a block start)
+        // 4: addi x10,x0,7 ; 8: trap. Entering at the PC=4 block start runs.
+        let trap = 0x0000_000Bu32;
+        let addi = (7u32 << 20) | (10 << 7) | 0x13;
+        let code = enc4(&[trap, addi, trap]);
+        let pre = predecode(&code);
+        let mut regs = Regs::new();
+        regs.pc = 4; // post-terminator block start
+        let mut mem = CopyingMemory::new();
+        let mut gas = GasCounter::new(1_000_000);
+        let mut h = PanickingHandler;
+        let reason = Interpreter::run(&pre, &code, 0, &mut regs, &mut mem, &mut gas, &mut h);
+        assert_eq!(reason, ExitReason::Trap);
+        assert_eq!(regs.gpr[7], 7); // x10 → slot 7: PC=4 block executed
+    }
+
+    // ---- B7: an x3/x4 register field panics (was: executed as zero) ----
+
+    #[test]
+    fn x3_source_register_panics() {
+        // add x5, x3, x6 ; trap. x3 is reserved, so the instruction is a
+        // reserved encoding → Panic, matching the recompiler (which used
+        // to panic here while the interp executed `0 + x6`).
+        let add_x3 = 0x0061_82B3u32; // add x5, x3, x6
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[add_x3, trap]);
+        let (_regs, reason, _) = run_simple(&code, 1_000_000);
+        assert_eq!(reason, ExitReason::Panic);
+    }
+
+    #[test]
+    fn x3_free_arithmetic_still_runs() {
+        // add x5, x6, x7 ; trap — no reserved register, executes normally.
+        let add_ok = 0x0073_02B3u32; // add x5, x6, x7
+        let trap = 0x0000_000Bu32;
+        let code = enc4(&[add_ok, trap]);
+        let (_regs, reason, _) = run_simple(&code, 1_000_000);
+        assert_eq!(reason, ExitReason::Trap);
     }
 }

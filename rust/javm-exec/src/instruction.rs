@@ -601,6 +601,184 @@ pub enum Inst {
     },
 }
 
+impl Inst {
+    /// True iff this instruction names a reserved register in any of its
+    /// register fields. The valid PVM2 registers are `x0, x1, x2, x5..x15`;
+    /// reserved are `x3`/`x4` (PVM2-specific, Category 1 #4) and `x16..x31`
+    /// (they do not exist in RV64E — a 16-register base — so they are
+    /// illegal, standard RV). Either way such an instruction is a reserved
+    /// encoding: it decodes as `Reserved` and panics if executed (lazy).
+    /// Immediate bits that happen to alias a reserved register are **not**
+    /// registers and are ignored — each variant binds exactly its real
+    /// register fields. This match is the single source of truth both
+    /// consensus engines route through (the interpreter via [`decode`], the
+    /// recompiler via [`word_uses_reserved_reg`]); the lack of a wildcard
+    /// arm means a future `Inst` variant won't compile until classified.
+    pub fn uses_reserved_reg(&self) -> bool {
+        use crate::regs::reg_is_reserved as r;
+        use Inst::*;
+        match *self {
+            // Register-register (rd, rs1, rs2).
+            Add { rd, rs1, rs2 }
+            | Sub { rd, rs1, rs2 }
+            | Sll { rd, rs1, rs2 }
+            | Srl { rd, rs1, rs2 }
+            | Sra { rd, rs1, rs2 }
+            | Slt { rd, rs1, rs2 }
+            | Sltu { rd, rs1, rs2 }
+            | Xor { rd, rs1, rs2 }
+            | Or { rd, rs1, rs2 }
+            | And { rd, rs1, rs2 }
+            | Addw { rd, rs1, rs2 }
+            | Subw { rd, rs1, rs2 }
+            | Sllw { rd, rs1, rs2 }
+            | Srlw { rd, rs1, rs2 }
+            | Sraw { rd, rs1, rs2 }
+            | Mul { rd, rs1, rs2 }
+            | Mulh { rd, rs1, rs2 }
+            | Mulhsu { rd, rs1, rs2 }
+            | Mulhu { rd, rs1, rs2 }
+            | Div { rd, rs1, rs2 }
+            | Divu { rd, rs1, rs2 }
+            | Rem { rd, rs1, rs2 }
+            | Remu { rd, rs1, rs2 }
+            | Mulw { rd, rs1, rs2 }
+            | Divw { rd, rs1, rs2 }
+            | Divuw { rd, rs1, rs2 }
+            | Remw { rd, rs1, rs2 }
+            | Remuw { rd, rs1, rs2 }
+            | Min { rd, rs1, rs2 }
+            | Minu { rd, rs1, rs2 }
+            | Max { rd, rs1, rs2 }
+            | Maxu { rd, rs1, rs2 }
+            | Andn { rd, rs1, rs2 }
+            | Orn { rd, rs1, rs2 }
+            | Xnor { rd, rs1, rs2 }
+            | Rol { rd, rs1, rs2 }
+            | Ror { rd, rs1, rs2 }
+            | Rolw { rd, rs1, rs2 }
+            | Rorw { rd, rs1, rs2 }
+            | Sh1add { rd, rs1, rs2 }
+            | Sh2add { rd, rs1, rs2 }
+            | Sh3add { rd, rs1, rs2 }
+            | Sh1adduw { rd, rs1, rs2 }
+            | Sh2adduw { rd, rs1, rs2 }
+            | Sh3adduw { rd, rs1, rs2 }
+            | Adduw { rd, rs1, rs2 }
+            | Bclr { rd, rs1, rs2 }
+            | Bset { rd, rs1, rs2 }
+            | Binv { rd, rs1, rs2 }
+            | Bext { rd, rs1, rs2 }
+            | CzeroEqz { rd, rs1, rs2 }
+            | CzeroNez { rd, rs1, rs2 } => r(rd) || r(rs1) || r(rs2),
+
+            // rd + rs1 (loads, I-type ALU, shifts, unary Zbb, jalr).
+            Lb { rd, rs1, .. }
+            | Lh { rd, rs1, .. }
+            | Lw { rd, rs1, .. }
+            | Ld { rd, rs1, .. }
+            | Lbu { rd, rs1, .. }
+            | Lhu { rd, rs1, .. }
+            | Lwu { rd, rs1, .. }
+            | Addi { rd, rs1, .. }
+            | Slti { rd, rs1, .. }
+            | Sltiu { rd, rs1, .. }
+            | Andi { rd, rs1, .. }
+            | Ori { rd, rs1, .. }
+            | Xori { rd, rs1, .. }
+            | Slli { rd, rs1, .. }
+            | Srli { rd, rs1, .. }
+            | Srai { rd, rs1, .. }
+            | Addiw { rd, rs1, .. }
+            | Slliw { rd, rs1, .. }
+            | Srliw { rd, rs1, .. }
+            | Sraiw { rd, rs1, .. }
+            | Clz { rd, rs1 }
+            | Clzw { rd, rs1 }
+            | Ctz { rd, rs1 }
+            | Ctzw { rd, rs1 }
+            | Cpop { rd, rs1 }
+            | Cpopw { rd, rs1 }
+            | SextB { rd, rs1 }
+            | SextH { rd, rs1 }
+            | ZextH { rd, rs1 }
+            | Rev8 { rd, rs1 }
+            | OrcB { rd, rs1 }
+            | Rori { rd, rs1, .. }
+            | Roriw { rd, rs1, .. }
+            | Slliuw { rd, rs1, .. }
+            | Bclri { rd, rs1, .. }
+            | Bseti { rd, rs1, .. }
+            | Binvi { rd, rs1, .. }
+            | Bexti { rd, rs1, .. }
+            | Jalr { rd, rs1, .. } => r(rd) || r(rs1),
+
+            // rs1 + rs2 (stores, branches).
+            Sb { rs1, rs2, .. }
+            | Sh { rs1, rs2, .. }
+            | Sw { rs1, rs2, .. }
+            | Sd { rs1, rs2, .. }
+            | Beq { rs1, rs2, .. }
+            | Bne { rs1, rs2, .. }
+            | Blt { rs1, rs2, .. }
+            | Bge { rs1, rs2, .. }
+            | Bltu { rs1, rs2, .. }
+            | Bgeu { rs1, rs2, .. } => r(rs1) || r(rs2),
+
+            // rd only (upper-immediate, jal).
+            Lui { rd, .. } | Auipc { rd, .. } | Jal { rd, .. } => r(rd),
+
+            // No register fields.
+            Fence | FenceI | Trap | EcallJar | Ecalli { .. } | Fallthrough | Reserved { .. } => {
+                false
+            }
+        }
+    }
+}
+
+/// Reserved-register predicate on a raw 4-byte word, for the recompiler
+/// (which dispatches on raw words rather than building an [`Inst`], and
+/// runs on the cold-compile hot path — so this must not re-decode).
+///
+/// Checks `x3`/`x4` only in the positions the instruction's *format* uses
+/// as registers; immediate bits in those positions are ignored. For every
+/// **non-reserved** word this equals [`Inst::uses_reserved_reg`] (pinned by
+/// `word_predicate_matches_inst_predicate`), so the interpreter and
+/// recompiler agree on which `x3`/`x4` instructions panic. For a
+/// reserved-decoding word the two may differ, but such a word panics via
+/// the normal reserved path in both engines anyway, so the *outcome* still
+/// matches.
+///
+/// `#[inline]` so it folds into the recompiler's `compile_rv4` across the
+/// crate boundary (the field extractions then CSE against the ones
+/// `compile_rv4` already does). The residual per-instruction opcode match
+/// is a small fixed cold-compile cost (≈1–4% on the heaviest workloads,
+/// none on warm) — accepted as the price of one verifiable check that
+/// keeps the two engines from drifting; the alternative (a check spread
+/// across every register-access helper) is what made B7 possible.
+#[inline]
+pub fn word_uses_reserved_reg(w: u32) -> bool {
+    fn r(x: u32) -> bool {
+        crate::regs::reg_is_reserved(x as u8)
+    }
+    let rd = (w >> 7) & 0x1F;
+    let rs1 = (w >> 15) & 0x1F;
+    let rs2 = (w >> 20) & 0x1F;
+    match w & 0x7F {
+        // R-type (OP, OP-32): rd, rs1, rs2.
+        0b011_0011 | 0b011_1011 => r(rd) || r(rs1) || r(rs2),
+        // I-type (LOAD, OP-IMM, OP-IMM-32, JALR): rd, rs1.
+        0b000_0011 | 0b001_0011 | 0b001_1011 | 0b110_0111 => r(rd) || r(rs1),
+        // S-type (STORE), B-type (BRANCH): rs1, rs2.
+        0b010_0011 | 0b110_0011 => r(rs1) || r(rs2),
+        // U-type (LUI, AUIPC), J-type (JAL): rd.
+        0b011_0111 | 0b001_0111 | 0b110_1111 => r(rd),
+        // SYSTEM, MISC-MEM, custom-0/1, atomics, FP, … — no PVM2 register
+        // field (reserved or no-reg); they panic via the normal path.
+        _ => false,
+    }
+}
+
 /// Major opcode of a 32-bit RV instruction is bits [6:2]; bits [1:0]
 /// are always `11` for non-compressed.
 const OP_LOAD: u32 = 0b00_000;
@@ -647,13 +825,30 @@ pub fn decode(bytes: &[u8]) -> Option<(Inst, u8)> {
     //   xx11  -> 32-bit (or longer; we don't support >32)
     //   else  -> 16-bit compressed
     if lo16 & 0b11 != 0b11 {
-        return Some((decompress(lo16), 2));
+        // An instruction naming a reserved register (x3/x4, or x16..x31
+        // which don't exist in RV64E) is a reserved encoding → `Reserved`,
+        // so it panics if executed (lazy), matching the recompiler.
+        let inst = decompress(lo16);
+        let inst = reserve_if_reserved_reg(inst, lo16 as u32);
+        return Some((inst, 2));
     }
     if bytes.len() < 4 {
         return None;
     }
     let w = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    Some((decode_32(w), 4))
+    Some((reserve_if_reserved_reg(decode_32(w), w), 4))
+}
+
+/// Map an instruction that names a reserved register (`x3`/`x4` or the
+/// nonexistent `x16..x31`) to `Reserved` so it is refused lazily, like any
+/// other reserved encoding.
+#[inline]
+fn reserve_if_reserved_reg(inst: Inst, raw: u32) -> Inst {
+    if inst.uses_reserved_reg() {
+        Inst::Reserved { raw }
+    } else {
+        inst
+    }
 }
 
 // ============================================================================
@@ -1724,5 +1919,98 @@ mod tests {
             decode(&0x9002u16.to_le_bytes()).unwrap().0,
             Inst::Reserved { .. }
         ));
+    }
+
+    // ---- B7: x3/x4 in a register field decodes as Reserved -------------
+
+    #[test]
+    fn reserved_register_field_is_reserved() {
+        // add x5, x3, x6 (rs1 = x3) → Reserved (was decoded as a live Add,
+        // which the interp executed as `0 + x6` while the recomp panicked).
+        let add_x3 = 0x0061_82B3u32; // add x5, x3, x6
+        assert!(matches!(
+            decode(&add_x3.to_le_bytes()).unwrap().0,
+            Inst::Reserved { .. }
+        ));
+        assert!(word_uses_reserved_reg(add_x3));
+
+        // addi x3, x0, 1 (rd = x3) → Reserved.
+        let addi_x3 = 0x0010_0193u32;
+        assert!(matches!(
+            decode(&addi_x3.to_le_bytes()).unwrap().0,
+            Inst::Reserved { .. }
+        ));
+
+        // add x16, x5, x6 (rd = x16) → Reserved: x16..x31 don't exist in
+        // RV64E (standard RV), so the encoding is illegal.
+        let add_x16 = 0x0062_8833u32; // add x16, x5, x6
+        assert!(matches!(
+            decode(&add_x16.to_le_bytes()).unwrap().0,
+            Inst::Reserved { .. }
+        ));
+        assert!(word_uses_reserved_reg(add_x16));
+    }
+
+    #[test]
+    fn x3_x4_free_instruction_is_unaffected() {
+        // add x5, x6, x7 — no reserved register → decodes normally.
+        let add_ok = 0x0073_02B3u32;
+        assert!(matches!(
+            decode(&add_ok.to_le_bytes()).unwrap().0,
+            Inst::Add { .. }
+        ));
+        assert!(!word_uses_reserved_reg(add_ok));
+    }
+
+    #[test]
+    fn immediate_bits_aliasing_x3_are_not_a_register() {
+        // lui x5, 0x18000 — bits [19:15] of the word are 0b00011 (= 3),
+        // but for U-type that field is *immediate*, not rs1, so the
+        // instruction is a normal Lui, never Reserved.
+        let lui = 0x0001_82B7u32;
+        assert!(matches!(
+            decode(&lui.to_le_bytes()).unwrap().0,
+            Inst::Lui { rd: 5, .. }
+        ));
+        assert!(!word_uses_reserved_reg(lui));
+    }
+
+    #[test]
+    fn word_predicate_matches_inst_predicate() {
+        // The recompiler's fast `word_uses_reserved_reg` (opcode-mask, no
+        // decode) must equal the interpreter's `Inst::uses_reserved_reg`
+        // for every *non-reserved* word — that is what makes the two
+        // engines agree on which x3/x4 instructions panic. (A
+        // reserved-decoding word panics either way, so its predicate value
+        // is unconstrained here.) Sweep every 7-bit opcode × funct3 ×
+        // representative funct7, with each register field ranging over
+        // {x0, x3, x4, x5} so both reserved and free positions are hit.
+        for major in 0u32..0x20 {
+            let opcode7 = (major << 2) | 0b11; // 7-bit opcode, 4-byte marker
+            for &rd in &[0u32, 3, 4, 5, 16, 31] {
+                for &rs1 in &[0u32, 3, 4, 5, 16, 31] {
+                    for &rs2 in &[0u32, 3, 4, 5, 16, 31] {
+                        for funct3 in 0u32..8 {
+                            for &funct7 in &[0u32, 0b000_0001, 0b010_0000, 0b000_0111] {
+                                let w = (funct7 << 25)
+                                    | (rs2 << 20)
+                                    | (rs1 << 15)
+                                    | (funct3 << 12)
+                                    | (rd << 7)
+                                    | opcode7;
+                                let inst = decode_32(w);
+                                if !matches!(inst, Inst::Reserved { .. }) {
+                                    assert_eq!(
+                                        word_uses_reserved_reg(w),
+                                        inst.uses_reserved_reg(),
+                                        "word {w:#010x} -> {inst:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

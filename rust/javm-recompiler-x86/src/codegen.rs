@@ -49,25 +49,14 @@ pub(crate) const REG_MAP: [Reg; 13] = [
 pub(crate) const SCRATCH: Reg = Reg::RDX;
 
 /// RV register (5-bit, 0..31) → PVM2 slot (0..12), or `0xFF` for "no
-/// slot" (x0, reserved x3/x4, x16..x31). A 32-byte const lookup table:
-/// one load replaces the range-match, which the profiler showed at
-/// ~8.8% of compile (called ~6×/instruction across codegen + gas feed).
-/// Values mirror the original match exactly, so gas stays bit-identical.
-pub(crate) const RV_SLOT_LUT: [u8; 32] = {
-    let mut t = [0xFFu8; 32];
-    t[1] = 0;
-    t[2] = 1;
-    let mut x = 5usize;
-    while x <= 15 {
-        t[x] = (x - 3) as u8;
-        x += 1;
-    }
-    t
-};
+/// slot" (x0, or a reserved register x3/x4/x16..x31). A 32-byte const LUT:
+/// one load replaces the range-match (~8.8% of compile, called
+/// ~6×/instruction across codegen + gas feed). The classification is the
+/// single source [`javm_exec::regs`]; this is its const-folded copy, so
+/// gas stays bit-identical with the interpreter's predecode-cached path.
+pub(crate) use javm_exec::regs::REG_SLOT_LUT as RV_SLOT_LUT;
 
 /// RV register number → PVM2 slot (0..12), or `0xFF` for "no slot".
-/// Mirrors the slot encoding used by `rv_op_metadata` so that gas
-/// accounting agrees bit-for-bit with the predecode-cached path.
 #[inline(always)]
 pub(crate) fn rv_slot_or_ff(x: u8) -> u8 {
     RV_SLOT_LUT[(x & 31) as usize]
@@ -1126,10 +1115,11 @@ fn expand_rvc_q2(h: u16, f3: u16) -> Option<u32> {
 
 /// Map an RV register index to its PVM slot (0..=12).
 ///
-/// Returns `None` for x0 (hardwired zero), x3, x4 (reserved). Callers
-/// handle x0 by loading an immediate 0; x3/x4 cause a runtime panic at
-/// the offending PC (the transpiler is expected to reject them at
-/// deblob, so this is just defence-in-depth).
+/// Returns `None` for x0 (hardwired zero) and for any reserved register
+/// (x3/x4/x16..x31). Callers handle x0 by loading an immediate 0; a
+/// reserved register causes a runtime panic at the offending PC — but it
+/// is rejected up front by `compile_rv4`'s `word_uses_reserved_reg` guard,
+/// so reaching `rv_slot(reserved)` is now unreachable defence-in-depth.
 #[inline]
 fn rv_slot(x: u8) -> Option<usize> {
     match RV_SLOT_LUT[(x & 31) as usize] {
@@ -1138,12 +1128,10 @@ fn rv_slot(x: u8) -> Option<usize> {
     }
 }
 
-/// True for x3 and x4 — registers that PVM2 reserves and the transpiler
-/// must reject. If we ever see them at codegen time, we trap.
-#[inline]
-fn rv_is_reserved(x: u8) -> bool {
-    x == 3 || x == 4
-}
+/// True for a reserved register (x3/x4/x16..x31). Single source:
+/// [`javm_exec::regs::reg_is_reserved`] (previously a local `x == 3 ||
+/// x == 4` that drifted to miss `x16..x31`).
+use javm_exec::regs::reg_is_reserved as rv_is_reserved;
 
 impl Compiler {
     /// Compile an RV+C+custom-0 byte stream into x86-64 in a single
@@ -1356,6 +1344,16 @@ impl Compiler {
         let rs2 = ((w >> 20) & 0x1F) as u8;
         let f3 = ((w >> 12) & 0x07) as u8;
         let f7 = ((w >> 25) & 0x7F) as u8;
+
+        // x3/x4 in any register field is reserved (Category 1 #4): panic,
+        // uniformly, matching the interpreter (which decodes such an
+        // instruction as `Reserved`). Shared predicate so the two engines
+        // can't drift; covers expanded RVC, which routes through here.
+        if javm_exec::instruction::word_uses_reserved_reg(w) {
+            self.rv_emit_panic_at(pc);
+            self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
+            return (true, false, 0);
+        }
 
         match opcode {
             OP_LOAD => self.compile_load(rd, rs1, f3, w, pc, rest),
