@@ -40,12 +40,6 @@ pub fn pack_bytes(bytes: &[u8]) -> Vec<[u8; 32]> {
     out
 }
 
-/// Number of leaves in a balanced tree of `depth` levels.
-#[inline]
-pub fn leaves_at_depth(depth: usize) -> u64 {
-    1u64 << depth
-}
-
 /// Returns `ceil(log2(max(1, n)))`.
 #[inline]
 pub fn ceil_log2(n: u64) -> usize {
@@ -138,8 +132,9 @@ pub fn mix_in_selector<D: Digest<OutputSize = U32>>(root: [u8; 32], selector: u8
     hash_pair::<D>(&root, &buf)
 }
 
-/// Cached zero-hash table: `zero_hash(d) = hash(zero_hash(d-1), zero_hash(d-1))`,
-/// with `zero_hash(0) == [0u8; 32]`.
+/// Compute `zero_hash(depth)`, where
+/// `zero_hash(d) = hash(zero_hash(d-1), zero_hash(d-1))` and
+/// `zero_hash(0) == [0u8; 32]`. Recomputed per call (not memoized).
 pub fn zero_hash<D: Digest<OutputSize = U32>>(depth: usize) -> [u8; 32] {
     // We rebuild the table per call. This is sufficient for jar's tree
     // depths (≤ 64 in practice); a future optimisation could memoize a

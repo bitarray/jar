@@ -3,8 +3,9 @@
 //!
 //! The hash tree root is byte-identical to a fully-materialised
 //! `List<T, N>` with the same effective contents. The algorithm walks the
-//! implicit balanced binary tree of depth `ceil_log2(N)` iteratively,
-//! using a fixed-size stack — never materialising the full `N` leaves.
+//! implicit balanced binary tree of depth `ceil_log2(N)` recursively, with
+//! recursion depth bounded by `ceil_log2(N)` — never materialising the full
+//! `N` leaves.
 //!
 //! ## Storage
 //!
@@ -77,12 +78,6 @@ impl<T, const N: u64> SparseList<T, N> {
     /// in place (e.g., resolving `Ref` targets to `Hash` after settle).
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (u64, &mut MissingOr<T>)> {
         self.entries.iter_mut().map(|(k, v)| (*k, v))
-    }
-
-    /// Number of materialized entries. Distinct from [`len`](Self::len),
-    /// which is the logical length (max index + 1).
-    pub fn entries_count(&self) -> usize {
-        self.entries.len()
     }
 
     /// Look up a single entry by leaf index. O(log n).
@@ -554,8 +549,8 @@ impl<T: HashTreeRoot, const N: u64> SparseList<T, N> {
     /// `(node_depth, node_index_at_depth)` within a balanced binary chunk
     /// tree of total depth `total_depth` (i.e., `2^total_depth` leaves).
     ///
-    /// Uses iterative DFS with an explicit stack. Stack depth is bounded
-    /// by `total_depth` (≤ 64 for any u64 cap), so the stack is tiny.
+    /// Uses recursive DFS; recursion depth is bounded by `total_depth`
+    /// (≤ 64 for any u64 cap), so it never overflows.
     fn compute_subtree_root<D: Digest<OutputSize = U32>>(
         &self,
         node_depth: usize,
