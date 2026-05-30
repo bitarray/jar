@@ -1,6 +1,6 @@
 //! RISC-V ELF to PVM2 transpiler.
 //!
-//! Converts RISC-V rv64em+C+Zbb+Zba+Zbs+Zicond+custom-0 ELF binaries
+//! Converts RISC-V rv64em+C+Zbb+Zba+Zbs+Zicond+Zicclsm+custom-0 ELF binaries
 //! into PVM2 program blobs suitable for execution by the JAR PVM2
 //! engine (interpreter / x86 recompiler).
 

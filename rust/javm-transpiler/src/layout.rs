@@ -8,15 +8,13 @@
 //! [`javm_cap::image::EndpointDef::initial_regs`]. The page-count and
 //! base-page metadata also feed declarative `Image.memory_mappings`.
 //!
-//! Cap-index convention: 64 = CODE, 65 = stack, 66 = ro, 67 = rw,
-//! 68 = heap. Data is laid out from [`javm_cap::layout::DATA_BASE`]
-//! (256 MiB) upward and stacks linearly: stack lives at `[DATA_BASE,
-//! DATA_BASE + stack_pages)`, ro at `[DATA_BASE + stack_pages, …)`,
-//! etc. Code maps separately at [`CODE_BASE`].
+//! Cap-index convention: 65 = stack, 66 = ro, 67 = rw, 68 = heap.
+//! Code is not a cap — it is the Image's dedicated `code` field mapped
+//! read-only at [`CODE_BASE`]. Data is laid out from
+//! [`javm_cap::layout::DATA_BASE`] (256 MiB) upward and stacks linearly:
+//! stack lives at `[DATA_BASE, DATA_BASE + stack_pages)`, ro at
+//! `[DATA_BASE + stack_pages, …)`, etc.
 
-/// Cap index of the CODE cap in transpiler-emitted blobs. Matches the
-/// JAR `init_cap` field.
-pub const CODE_CAP_INDEX: u8 = 64;
 /// Cap index of the stack DATA cap.
 pub const STACK_CAP_INDEX: u8 = 65;
 /// Cap index of the read-only DATA cap (`.rodata`).
