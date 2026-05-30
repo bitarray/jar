@@ -12,7 +12,8 @@
 //!   regs are shared (the ReferenceEntry is just a "this position
 //!   also depends on entry N" pointer for yield-resume routing).
 //!
-//! Invariants (enforced via `enforce_invariants` in debug builds):
+//! Invariants (checkable via `enforce_invariants`, used by the
+//! construction-primitive tests):
 //! - Exactly one entry is `Running` — the top of the stack.
 //! - All others are `Waiting`.
 //! - A `ReferenceEntry` at position `i` has
@@ -35,8 +36,8 @@ use crate::error::VmError;
 pub const DEFAULT_MAX_DEPTH: usize = 256;
 
 /// Status of a stack entry. Exactly one entry is `Running` (the top);
-/// all others are `Waiting`. Block-end faults any remaining `Waiting`
-/// entries per spec §3.
+/// all others are `Waiting`. (Per spec §3, block-end would fault any
+/// remaining `Waiting` entries — not handled at this layer.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryStatus {
     Running,
@@ -133,20 +134,6 @@ impl Entry {
     pub fn is_instance(&self) -> bool {
         matches!(self, Entry::Instance(_))
     }
-
-    pub fn as_instance(&self) -> Option<&InstanceEntry> {
-        match self {
-            Entry::Instance(e) => Some(e.as_ref()),
-            _ => None,
-        }
-    }
-
-    pub fn as_instance_mut(&mut self) -> Option<&mut InstanceEntry> {
-        match self {
-            Entry::Instance(e) => Some(e.as_mut()),
-            _ => None,
-        }
-    }
 }
 
 /// The kernel-internal call stack.
@@ -242,10 +229,6 @@ impl CallStack {
     /// The currently-Running top of the stack.
     pub fn running(&self) -> Option<&Entry> {
         self.entries.last()
-    }
-
-    pub fn running_mut(&mut self) -> Option<&mut Entry> {
-        self.entries.last_mut()
     }
 
     /// Resolve a ReferenceEntry's effective `InstanceEntry`.
