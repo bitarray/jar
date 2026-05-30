@@ -3,7 +3,7 @@
 //! and assert the endpoint's return value.
 //!
 //! This is the first test that drives the full pipeline (Rust →
-//! ELF → transpile → SCALE-decode → kernel bootstrap → memory
+//! ELF → transpile → SSZ-decode → kernel bootstrap → memory
 //! mappings → interpreter → HALT). Hand-authored byte-PVM tests
 //! in `end_to_end.rs` cover the smaller surface (kernel state
 //! root evolution, replay determinism).
