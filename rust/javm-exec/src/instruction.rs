@@ -9,12 +9,11 @@
 //! ISA coverage matches the PVM2 spec
 //! (`~/docs/pvm-isa/05-pvm2-rv-diff.md` and `06-pvm2-pvm-diff.md`):
 //!
-//!   RV64I base  +  M  +  C  +  Zbb  +  Zba  +  Zbs  +  Zicond
+//!   RV64I base  +  M  +  C  +  Zbb  +  Zba  +  Zbs  +  Zicond  +  Zicclsm
 //!   + custom-0 ops:  trap  /  ecall.jar  /  ecalli
 //!
 //! Forbidden encodings (per PVM2-Base divergences):
 //!
-//! - AUIPC (RV major `0010111`) — decoder returns `Reserved`.
 //! - Standard ECALL / EBREAK (RV `SYSTEM` major) — decoder returns
 //!   `Reserved`. PVM2's ecall lives in custom-0 instead.
 //! - CSR ops, atomics, FP, vector — `Reserved`.
@@ -525,19 +524,18 @@ pub enum Inst {
     },
 
     // -------- Control flow --------
-    /// `jal rd, off` — Harvard semantics per PVM2.
-    /// `rd = pc + sizeof(jal)`; pc = pc + off. Used for static
-    /// jumps (`rd = x0`, = `c.j`) and for function calls after
-    /// linker rewrite (caller emits `addi ra, x0, encoded_idx;
-    /// jal x0, callee_entry`).
+    /// `jal rd, off` — `rd = pc + sizeof(jal)`; `pc = pc + off`. Used
+    /// for static jumps (`rd = x0`, = `c.j`) and direct calls
+    /// (`rd = ra`, saving the return address natively).
     Jal {
         rd: u8,
         imm: i32,
     },
-    /// `jalr rd, rs1, imm` — `rd = pc + sizeof; pc = (rs1 + imm) & !1`.
-    /// The runtime computes the target guest VA, validates it against
-    /// the basic-block-start set (`bb_starts`), and dispatches. Used
-    /// for returns (`jalr x0, ra, 0`) and indirect calls.
+    /// `jalr rd, rs1, imm` — `rd = pc + sizeof`;
+    /// `target_va = (rs1 + imm) & 0xFFFF_FFFF` (32-bit wrap). The
+    /// runtime validates the target is a basic-block start (else Panic)
+    /// and dispatches. Used for returns (`jalr x0, ra, 0`) and
+    /// indirect calls.
     Jalr {
         rd: u8,
         rs1: u8,
@@ -1690,8 +1688,8 @@ mod tests {
     #[test]
     fn decompress_c_jr_ra_is_jalr() {
         // `c.jr ra` (= 0x8082) decompresses to `jalr x0, x1, 0` — the
-        // canonical return. A terminator validated against bb_starts at
-        // runtime.
+        // canonical return. A terminator whose target is validated to be
+        // a basic-block start at runtime.
         let bytes = 0x8082u16.to_le_bytes();
         assert_eq!(
             decode(&bytes),

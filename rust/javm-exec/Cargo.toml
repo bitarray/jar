@@ -8,10 +8,9 @@ description = "JAR v3 execution engine: PVM interpreter, memory, gas. No cap awa
 
 [features]
 default = ["std"]
-std = ["thiserror/std"]
+std = []
 
 [dependencies]
-thiserror = { version = "2", default-features = false }
 
 [dev-dependencies]
 proptest = { workspace = true }

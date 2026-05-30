@@ -1,8 +1,9 @@
 //! Register state: 13 general-purpose 64-bit registers + PC.
 //!
 //! Per JAM Gray Paper Appendix A / PVM spec: the PVM has 13 GPRs
-//! (φ₀..φ₁₂) plus an instruction pointer. v3 keeps the same layout
-//! since v3 doesn't change the PVM instruction set.
+//! (φ₀..φ₁₂) plus an instruction pointer. PVM2 replaces the legacy PVM
+//! ISA with RISC-V (RV64EMC + Zbb/Zba/Zbs/Zicond/Zicclsm) but keeps the
+//! same 13-GPR + PC register file.
 
 /// Number of general-purpose registers.
 pub const REG_COUNT: usize = 13;
@@ -12,7 +13,9 @@ pub const REG_COUNT: usize = 13;
 pub struct Regs {
     /// General-purpose registers φ₀..φ₁₂.
     pub gpr: [u64; REG_COUNT],
-    /// Program counter (bytecode offset, not memory address).
+    /// Program counter — a code byte-offset, not a memory address.
+    /// (Register-held code addresses, e.g. a saved return address or an
+    /// `auipc` result, are guest VAs `code_base + offset`.)
     pub pc: u64,
 }
 

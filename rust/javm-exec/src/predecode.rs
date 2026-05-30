@@ -1,19 +1,15 @@
-//! Single-pass predecode for PVM2 (RV+C+custom-0+custom-1) byte streams.
+//! Single-pass predecode for PVM2 (RV+C+custom-0) byte streams.
 //!
 //! Walks the code from PC=0, decoding every instruction and recording:
 //!
 //! - **Decoded instruction array** (`Vec<RvPreDecodedInst>`): one entry
 //!   per static instruction, with PC + next-PC pre-computed so the
 //!   codegen loop doesn't redo decoding.
-//! - **Valid-PC set** (`Vec<bool>`, byte-indexed): true at every byte
-//!   offset where an instruction begins. Used at deblob for branch /
-//!   call target alignment checks (a static-target reaching a non-
-//!   instruction-start byte is a program error).
 //! - **Gas-block-start markers**: PC=0 plus every PC immediately
-//!   following a terminator. PVM2's pure-static-dispatch design lets us
-//!   tighten this to the strict post-terminator set (was: "every
-//!   instruction", a workaround for runtime JALR validation back when
-//!   PVM2 still had JALR).
+//!   following a terminator. The strict post-terminator set is sound
+//!   because runtime `jalr` targets are validated to be block starts
+//!   (the linker injects a `Fallthrough` terminator before any branch
+//!   target that isn't naturally post-terminator).
 //!
 //! Per-block gas costs are computed by running the pipeline simulator
 //! in [`crate::gas_cost::rv_gas_cost_for_block`] once per basic block;
@@ -55,11 +51,6 @@ pub struct RvPreDecodedInst {
 pub struct Predecode {
     /// One entry per static instruction.
     pub insts: Vec<RvPreDecodedInst>,
-    /// Byte-indexed: `valid_pc[i]` == true iff byte offset `i` is an
-    /// instruction start. Length = `code.len()`. Used at deblob for
-    /// branch / call target alignment checks (a static-target reaching
-    /// a non-instruction-start byte is a program error).
-    pub valid_pc: Vec<bool>,
     /// Pre-computed per-basic-block gas cost. Aligned with `insts`:
     /// `block_costs[i]` is meaningful only when
     /// `insts[i].is_gas_block_start == true`; entries at non-
@@ -93,7 +84,6 @@ pub fn predecode(code: &[u8]) -> Predecode {
 /// (e.g. for tier-specific gas modeling).
 pub fn predecode_rv_with_mem_cycles(code: &[u8], mem_cycles: u8) -> Predecode {
     let mut insts: Vec<RvPreDecodedInst> = Vec::with_capacity(code.len() / 4);
-    let mut valid_pc: Vec<bool> = vec![false; code.len()];
     let mut decode_error_at: Option<u32> = None;
 
     // ---- Pass 1: decode every instruction ----------------------------
@@ -106,7 +96,6 @@ pub fn predecode_rv_with_mem_cycles(code: &[u8], mem_cycles: u8) -> Predecode {
         if matches!(inst, Inst::Reserved { .. }) && decode_error_at.is_none() {
             decode_error_at = Some(pc as u32);
         }
-        valid_pc[pc] = true;
         let next_pc = (pc + len as usize) as u32;
         let gas_meta = crate::gas_cost::rv_gas_meta(&inst);
         insts.push(RvPreDecodedInst {
@@ -121,17 +110,15 @@ pub fn predecode_rv_with_mem_cycles(code: &[u8], mem_cycles: u8) -> Predecode {
 
     // ---- Pass 2: mark gas-block starts (strict post-terminator) ------
     //
-    // PVM2 has no runtime indirect dispatch (no JALR; calls go via
-    // `addi ra, x0, idx ; jal x0, callee`, returns via
-    // `br_table table_id, ra`). The set of legal gas-block-starts is:
+    // The set of legal gas-block-starts is:
     //
     //     {0} ∪ { pc | pc immediately follows a terminator instruction }
     //
-    // The linker invariant (analogous to PVM's
-    // `ensure_branch_targets_are_block_starts`) guarantees every
-    // statically-reachable branch / br_table target lands in this set —
-    // it injects `Fallthrough` (a terminator no-op) before any target
-    // that isn't naturally post-terminator.
+    // This strict set is sound because indirect control flow (`jalr`)
+    // is validated at runtime to land on a block start, and the linker
+    // injects `Fallthrough` (a terminator no-op) before any branch
+    // target that isn't naturally post-terminator. So every
+    // statically- or dynamically-reachable target lands in this set.
     //
     // OOG happens at the per-block gas check at the block start, so
     // a paused PC is always in this set.
@@ -150,7 +137,6 @@ pub fn predecode_rv_with_mem_cycles(code: &[u8], mem_cycles: u8) -> Predecode {
 
     Predecode {
         insts,
-        valid_pc,
         block_costs,
         decode_error_at,
     }
@@ -167,33 +153,6 @@ fn compute_block_costs(insts: &[RvPreDecodedInst], mem_cycles: u8) -> Vec<u32> {
         }
     }
     block_costs
-}
-
-/// Return the target byte offset of a statically-resolvable branch or
-/// jump. `None` for indirect jumps (`jalr`), non-control-flow ops, and
-/// other shapes.
-///
-/// Targets are computed as `pc + imm` (signed). For RV B-type and
-/// J-type, `imm` is in bytes. For RV+C, decompression has already
-/// converted to byte offsets so the same `pc + imm` rule applies.
-#[allow(dead_code)]
-fn static_target(ip: &RvPreDecodedInst) -> Option<usize> {
-    let pc = ip.pc as i64;
-    let off: i64 = match ip.inst {
-        Inst::Jal { imm, .. } => imm as i64,
-        Inst::Beq { imm, .. }
-        | Inst::Bne { imm, .. }
-        | Inst::Blt { imm, .. }
-        | Inst::Bge { imm, .. }
-        | Inst::Bltu { imm, .. }
-        | Inst::Bgeu { imm, .. } => imm as i64,
-        // br_table targets come from the Image's jump_table, not
-        // from an instruction-embedded immediate. They're listed
-        // separately by the linker for branch-target alignment.
-        _ => return None,
-    };
-    let t = pc + off;
-    if t < 0 { None } else { Some(t as usize) }
 }
 
 /// Block-terminating instructions: anything that *can* leave the
@@ -223,11 +182,11 @@ pub fn is_terminator(inst: &Inst) -> bool {
     )
 }
 
-// `rv_gas_cost` (flat per-instruction sum) replaced by pipeline-aware
-// per-block simulation. See `gas_cost::rv_fast_cost` for the per-op
-// FastCost table and `gas_cost::rv_gas_cost_for_block` for the
-// block-cost wrapper. Costs are precomputed in `predecode` and
-// returned via `Predecode::block_costs`.
+// Per-instruction gas is computed by pipeline-aware per-block
+// simulation, not a flat per-op sum. See
+// `gas_cost::rv_gas_cost_for_block` for the block-cost computation.
+// Costs are precomputed in `predecode` and returned via
+// `Predecode::block_costs`.
 
 #[cfg(test)]
 mod tests {
@@ -246,7 +205,6 @@ mod tests {
     fn empty_code_yields_empty() {
         let r = predecode(&[]);
         assert!(r.insts.is_empty());
-        assert!(r.valid_pc.is_empty());
         assert!(r.decode_error_at.is_none());
     }
 
@@ -272,10 +230,6 @@ mod tests {
         assert_eq!(r.insts[2].next_pc, 12);
         // PC=0 always a block start; target of the jal (at PC=0) marks insts[0]; no others
         assert!(r.insts[0].is_gas_block_start);
-        // Post-terminator: nothing after the jal (last insn).
-        assert!(r.valid_pc[0]);
-        assert!(r.valid_pc[4]);
-        assert!(r.valid_pc[8]);
         // No reserved encodings.
         assert!(r.decode_error_at.is_none());
     }
@@ -387,9 +341,5 @@ mod tests {
         assert_eq!(r.insts[0].next_pc, 2);
         assert_eq!(r.insts[1].pc, 2);
         assert_eq!(r.insts[1].next_pc, 6);
-        assert!(r.valid_pc[0]);
-        assert!(r.valid_pc[2]);
-        assert!(!r.valid_pc[1]); // mid-instruction byte
-        assert!(!r.valid_pc[3]); // mid-instruction byte
     }
 }
