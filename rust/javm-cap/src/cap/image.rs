@@ -11,6 +11,35 @@ use crate::slot::SlotIdx;
 
 use super::{CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
 
+/// # Validation model: structure is eager, semantics are lazy
+///
+/// An `ImageCap` is admitted from untrusted input under a two-layer
+/// discipline:
+///
+/// - **Structure — validated eagerly** (here / in [`image_cap`], the
+///   "deblob"). The metadata that frames execution: `code` *length*
+///   (`≤ MAX_CODE_SIZE`), memory-mapping bounds, slot indices, source-path
+///   depth, endpoint indices. A malformed structural field has no clean
+///   execution point to fault on — it would diverge between engines or
+///   panic the host — so it is rejected at construction. This is cheap
+///   (`O(#endpoints + #mappings + #slots)`, it never scans the code) and
+///   therefore compatible with lazy compilation.
+///
+/// - **Semantics — validated lazily** (at execution, by both engines
+///   identically). The instruction stream itself: illegal/forbidden
+///   encodings, and `jal`/branch/`jalr`/`entry_pc` targets. These are
+///   **not** rejected at admission — any `code` bytes are accepted. A
+///   forbidden encoding decodes as illegal and an off-`bb_start` target is
+///   refused only *when reached*, as `ε = panic`. Lazy (not eager
+///   deblob) because, without an instruction bitmask, a linear validator
+///   can't tell code from data — eager rejection would reject legitimate
+///   code-as-data; lazy also keeps admission version-independent (a future
+///   ISA extension forks only at execution, never the cap set at
+///   admission) and preserves lazy compilation. The consensus requirement
+///   is that the two engines *agree* on what panics, not that the bytes
+///   are pre-screened. The producer toolchain still rejects forbidden
+///   encodings at build time as a diagnostic — that is UX, not a
+///   consensus rule.
 #[derive(Debug, ssz_derive::HashTreeRoot, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ImageCap {
     /// The (single) code region: raw RV+C+custom-0 bytes, page-aligned
@@ -192,6 +221,16 @@ impl ssz::Decode for MemoryMapping {
             *slot = SlotIdx(u32::from_le_bytes(arr));
         }
         let source_path_len = bytes[16 + MAX_SOURCE_DEPTH * 4];
+        // Structural invariant (eager): the live path is
+        // `source_path[..source_path_len]`, so `source_path_len` must not
+        // exceed the fixed array. Reject at the decode boundary rather
+        // than letting `path()` index out of bounds later.
+        if source_path_len as usize > MAX_SOURCE_DEPTH {
+            return Err(ssz::DecodeError::BoundExceeded {
+                len: source_path_len as u64,
+                bound: MAX_SOURCE_DEPTH as u64,
+            });
+        }
         Ok(Self {
             start,
             size,
@@ -231,9 +270,12 @@ impl ssz::HashTreeRoot for MemoryMapping {
 
 impl MemoryMapping {
     /// Live slot indices (length = `source_path_len`) — the cnode path
-    /// to the `Cap::Data` backing this mapping.
+    /// to the `Cap::Data` backing this mapping. Total: the index is
+    /// clamped to the fixed array so a malformed `source_path_len` (one
+    /// that bypassed the decode/`image_cap` checks, e.g. a hand-built
+    /// value) can never panic the host.
     pub fn path(&self) -> &[SlotIdx] {
-        &self.source_path[..self.source_path_len as usize]
+        &self.source_path[..(self.source_path_len as usize).min(MAX_SOURCE_DEPTH)]
     }
 }
 
@@ -264,6 +306,8 @@ pub struct ImageSlotEntry {
 /// constraint violations.
 #[derive(Debug, thiserror::Error)]
 pub enum ImageConvertError {
+    #[error("code region {0} bytes exceeds MAX_CODE_SIZE ({1})")]
+    CodeTooLarge(usize, u32),
     #[error("memory mapping source path empty")]
     SourcePathEmpty,
     #[error("memory mapping source path too deep (steps={0} > MAX_SOURCE_DEPTH)")]
@@ -300,6 +344,19 @@ pub fn image_cap(
     pinned_hashes: &[(SlotIdx, CapHash)],
     initial_hashes: &[(SlotIdx, CapHash)],
 ) -> Result<ImageCap, ImageConvertError> {
+    // Structural invariant (eager): the code region maps RO at
+    // `[CODE_BASE, DATA_BASE)`, so it must fit under `MAX_CODE_SIZE` —
+    // otherwise a high code offset would alias the data region. The
+    // *contents* of `code` are not validated here (instruction legality
+    // is checked lazily, at execution); only its size is a structural
+    // bound. Checked before the page-aligned copy so an oversized blob
+    // is rejected without allocating it.
+    if image.code.len() > crate::layout::MAX_CODE_SIZE as usize {
+        return Err(ImageConvertError::CodeTooLarge(
+            image.code.len(),
+            crate::layout::MAX_CODE_SIZE,
+        ));
+    }
     // Code: page-aligned copy so the kernel can direct-map it RO at
     // `layout::CODE_BASE`.
     let code = alloc_page_aligned_code(&image.code);
