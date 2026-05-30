@@ -201,7 +201,6 @@ impl Assembler {
     }
 
     /// Create with pre-allocated capacity for code and labels.
-    /// Uses Vec-backed buffer (for tests or when mmap is not needed).
     pub fn with_capacity(code_capacity: usize, label_capacity: usize) -> Self {
         let mut code = Vec::with_capacity(code_capacity);
         let buf = code.as_mut_ptr();
@@ -258,7 +257,7 @@ impl Assembler {
     pub fn new_label(&mut self) -> Label {
         let id = self.labels_len as u32;
         self.labels_len += 1;
-        // Grow if needed (rare — labels Vec is pre-sized in with_capacity/with_mmap)
+        // Grow if needed (rare — labels Vec is pre-sized in with_capacity)
         if self.labels_len > self.labels.len() {
             self.labels.push(LABEL_UNBOUND);
         }
@@ -309,7 +308,7 @@ impl Assembler {
     fn emit(&mut self, b: u8) {
         debug_assert!(self.write_pos < self.capacity);
         // SAFETY: write_pos < capacity is asserted above; buf points to a valid
-        // allocation of at least `capacity` bytes (Vec or mmap).
+        // allocation of at least `capacity` bytes (Vec backing store).
         unsafe {
             *self.buf.add(self.write_pos) = b;
         }
@@ -394,11 +393,6 @@ impl Assembler {
 
     // === REX prefix helpers ===
 
-    /// REX.W prefix for single-register operations.
-    fn rex_w_b(&mut self, rm: Reg) {
-        self.emit(0x48 | rm.hi());
-    }
-
     fn rex_opt_b(&mut self, rm: Reg) {
         if rm.needs_rex() {
             self.emit(0x40 | rm.hi());
@@ -436,34 +430,6 @@ impl Assembler {
             }
             ib.push_i32(disp);
         }
-    }
-
-    /// ModR/M + SIB for [base + index] addressing, into InstBuf.
-    #[inline(always)]
-    fn modrm_sib_base_index_ib(ib: &mut InstBuf, reg: u8, base: Reg, index: Reg) {
-        if base.lo() == 5 {
-            ib.push(0x44 | (reg << 3));
-            ib.push((index.lo() << 3) | base.lo());
-            ib.push(0);
-        } else {
-            ib.push((reg << 3) | 4);
-            ib.push((index.lo() << 3) | base.lo());
-        }
-    }
-
-    /// Emit ModR/M + displacement for [base + disp] with always-disp32 encoding.
-    /// Used when the immediate after the displacement must be at a fixed offset
-    /// (e.g., for patch-based gas metering where the imm32 is written later).
-    fn modrm_disp32(&mut self, reg: u8, base: Reg, disp: i32) {
-        let mut ib = InstBuf::new();
-        if base.lo() == 4 {
-            ib.push(0x80 | (reg << 3) | 4);
-            ib.push(0x24);
-        } else {
-            ib.push(0x80 | (reg << 3) | base.lo());
-        }
-        ib.push_i32(disp);
-        self.flush_instbuf(ib);
     }
 
     // === Instruction emission ===
@@ -529,20 +495,6 @@ impl Assembler {
         self.flush_instbuf(ib);
     }
 
-    /// mov r32, [base + disp] — zero-extending 32-bit load
-    #[inline(always)]
-    pub fn mov_load32(&mut self, dst: Reg, base: Reg, disp: i32) {
-        let mut ib = InstBuf::new();
-        let r = dst.hi();
-        let b = base.hi();
-        if r != 0 || b != 0 {
-            ib.push(0x40 | (r << 2) | b);
-        }
-        ib.push(0x8B);
-        Self::modrm_disp_ib(&mut ib, dst.lo(), base, disp);
-        self.flush_instbuf(ib);
-    }
-
     /// mov r64, [base + disp]
     #[inline(always)]
     pub fn mov_load64(&mut self, dst: Reg, base: Reg, disp: i32) {
@@ -584,228 +536,6 @@ impl Assembler {
         ib.push(0x48 | (src.hi() << 2) | base.hi());
         ib.push(0x89);
         Self::modrm_disp_ib(&mut ib, src.lo(), base, disp);
-        self.flush_instbuf(ib);
-    }
-
-    /// mov dword [base + disp], imm32
-    #[inline(always)]
-    pub fn mov_store32_imm(&mut self, base: Reg, disp: i32, imm: i32) {
-        let mut ib = InstBuf::new();
-        if base.needs_rex() {
-            ib.push(0x40 | base.hi());
-        }
-        ib.push(0xC7);
-        Self::modrm_disp_ib(&mut ib, 0, base, disp);
-        ib.push_i32(imm);
-        self.flush_instbuf(ib);
-    }
-
-    /// mov qword [base + disp], sign-extended imm32
-    pub fn mov_store64_imm(&mut self, base: Reg, disp: i32, imm: i32) {
-        let mut ib = InstBuf::new();
-        ib.push(0x48 | base.hi());
-        ib.push(0xC7);
-        Self::modrm_disp_ib(&mut ib, 0, base, disp);
-        ib.push_i32(imm);
-        self.flush_instbuf(ib);
-    }
-
-    // -- SIB-based memory access [base + index] --
-
-    /// movzx r64, byte [base + index] — zero-extending u8 load
-    pub fn movzx_load8_sib(&mut self, dst: Reg, base: Reg, index: Reg) {
-        let mut ib = InstBuf::new();
-        ib.push(0x48 | (dst.hi() << 2) | (index.hi() << 1) | base.hi());
-        ib.push(0x0F);
-        ib.push(0xB6);
-        Self::modrm_sib_base_index_ib(&mut ib, dst.lo(), base, index);
-        self.flush_instbuf(ib);
-    }
-
-    /// movzx r32, word [base + index] — zero-extending u16 load
-    pub fn movzx_load16_sib(&mut self, dst: Reg, base: Reg, index: Reg) {
-        let mut ib = InstBuf::new();
-        let rex = 0x40 | (dst.hi() << 2) | (index.hi() << 1) | base.hi();
-        if rex != 0x40 {
-            ib.push(rex);
-        }
-        ib.push(0x0F);
-        ib.push(0xB7);
-        Self::modrm_sib_base_index_ib(&mut ib, dst.lo(), base, index);
-        self.flush_instbuf(ib);
-    }
-
-    /// mov r32, dword [base + index] — zero-extending u32 load
-    pub fn mov_load32_sib(&mut self, dst: Reg, base: Reg, index: Reg) {
-        let mut ib = InstBuf::new();
-        let rex = 0x40 | (dst.hi() << 2) | (index.hi() << 1) | base.hi();
-        if rex != 0x40 {
-            ib.push(rex);
-        }
-        ib.push(0x8B);
-        Self::modrm_sib_base_index_ib(&mut ib, dst.lo(), base, index);
-        self.flush_instbuf(ib);
-    }
-
-    /// mov r64, qword [base + index]
-    pub fn mov_load64_sib(&mut self, dst: Reg, base: Reg, index: Reg) {
-        let mut ib = InstBuf::new();
-        ib.push(0x48 | (dst.hi() << 2) | (index.hi() << 1) | base.hi());
-        ib.push(0x8B);
-        Self::modrm_sib_base_index_ib(&mut ib, dst.lo(), base, index);
-        self.flush_instbuf(ib);
-    }
-
-    /// mov byte [base + index], r8
-    pub fn mov_store8_sib(&mut self, base: Reg, index: Reg, src: Reg) {
-        let mut ib = InstBuf::new();
-        ib.push(0x40 | (src.hi() << 2) | (index.hi() << 1) | base.hi());
-        ib.push(0x88);
-        Self::modrm_sib_base_index_ib(&mut ib, src.lo(), base, index);
-        self.flush_instbuf(ib);
-    }
-
-    /// mov word [base + index], r16
-    pub fn mov_store16_sib(&mut self, base: Reg, index: Reg, src: Reg) {
-        let mut ib = InstBuf::new();
-        ib.push(0x66);
-        let rex = 0x40 | (src.hi() << 2) | (index.hi() << 1) | base.hi();
-        if rex != 0x40 {
-            ib.push(rex);
-        }
-        ib.push(0x89);
-        Self::modrm_sib_base_index_ib(&mut ib, src.lo(), base, index);
-        self.flush_instbuf(ib);
-    }
-
-    /// mov dword [base + index], r32
-    pub fn mov_store32_sib(&mut self, base: Reg, index: Reg, src: Reg) {
-        let mut ib = InstBuf::new();
-        let rex = 0x40 | (src.hi() << 2) | (index.hi() << 1) | base.hi();
-        if rex != 0x40 {
-            ib.push(rex);
-        }
-        ib.push(0x89);
-        Self::modrm_sib_base_index_ib(&mut ib, src.lo(), base, index);
-        self.flush_instbuf(ib);
-    }
-
-    /// mov qword [base + index], r64
-    pub fn mov_store64_sib(&mut self, base: Reg, index: Reg, src: Reg) {
-        let mut ib = InstBuf::new();
-        ib.push(0x48 | (src.hi() << 2) | (index.hi() << 1) | base.hi());
-        ib.push(0x89);
-        Self::modrm_sib_base_index_ib(&mut ib, src.lo(), base, index);
-        self.flush_instbuf(ib);
-    }
-
-    /// mov dword [base + index], imm32
-    pub fn mov_store32_sib_imm(&mut self, base: Reg, index: Reg, imm: i32) {
-        let mut ib = InstBuf::new();
-        let rex = 0x40 | (index.hi() << 1) | base.hi();
-        if rex != 0x40 {
-            ib.push(rex);
-        }
-        ib.push(0xC7);
-        Self::modrm_sib_base_index_ib(&mut ib, 0, base, index);
-        ib.push_i32(imm);
-        self.flush_instbuf(ib);
-    }
-
-    /// mov qword [base + index], sign-extended imm32
-    pub fn mov_store64_sib_imm(&mut self, base: Reg, index: Reg, imm: i32) {
-        let mut ib = InstBuf::new();
-        ib.push(0x48 | (index.hi() << 1) | base.hi());
-        ib.push(0xC7);
-        Self::modrm_sib_base_index_ib(&mut ib, 0, base, index);
-        ib.push_i32(imm);
-        self.flush_instbuf(ib);
-    }
-
-    /// mov byte [base + index], imm8
-    pub fn mov_store8_sib_imm(&mut self, base: Reg, index: Reg, imm: u8) {
-        let mut ib = InstBuf::new();
-        ib.push(0x40 | (index.hi() << 1) | base.hi());
-        ib.push(0xC6);
-        Self::modrm_sib_base_index_ib(&mut ib, 0, base, index);
-        ib.push(imm);
-        self.flush_instbuf(ib);
-    }
-
-    /// mov word [base + index], imm16
-    pub fn mov_store16_sib_imm(&mut self, base: Reg, index: Reg, imm: u16) {
-        let mut ib = InstBuf::new();
-        ib.push(0x66);
-        let rex = 0x40 | (index.hi() << 1) | base.hi();
-        if rex != 0x40 {
-            ib.push(rex);
-        }
-        ib.push(0xC7);
-        Self::modrm_sib_base_index_ib(&mut ib, 0, base, index);
-        ib.push(imm as u8);
-        ib.push((imm >> 8) as u8);
-        self.flush_instbuf(ib);
-    }
-
-    /// add r64, qword [base + disp32]
-    pub fn add_r64_mem(&mut self, dst: Reg, base: Reg, disp: i32) {
-        let mut ib = InstBuf::new();
-        ib.push(0x48 | (dst.hi() << 2) | base.hi());
-        ib.push(0x03);
-        Self::modrm_disp_ib(&mut ib, dst.lo(), base, disp);
-        self.flush_instbuf(ib);
-    }
-
-    /// movzx r64, byte `[rax]` (simple deref, no SIB needed) — for perm table lookup
-    pub fn movzx_load8_deref(&mut self, dst: Reg, base: Reg) {
-        let mut ib = InstBuf::new();
-        ib.push(0x48 | (dst.hi() << 2) | base.hi());
-        ib.push(0x0F);
-        ib.push(0xB6);
-        if base.lo() == 5 {
-            ib.push((dst.lo() << 3) | base.lo() | 0x40);
-            ib.push(0);
-        } else if base.lo() == 4 {
-            ib.push((dst.lo() << 3) | 4);
-            ib.push(0x24);
-        } else {
-            ib.push((dst.lo() << 3) | base.lo());
-        }
-        self.flush_instbuf(ib);
-    }
-
-    /// cmp byte [base + index + disp32], imm8 — compare memory byte with SIB+displacement
-    pub fn cmp_byte_sib_disp32(&mut self, base: Reg, index: Reg, disp: i32, imm: u8) {
-        let mut ib = InstBuf::new();
-        let rex = 0x40 | (index.hi() << 1) | base.hi();
-        if rex != 0x40 {
-            ib.push(rex);
-        }
-        ib.push(0x80);
-        ib.push(0xBC); // mod=10, reg=/7(CMP), rm=100(SIB)
-        ib.push((index.lo() << 3) | base.lo());
-        ib.push_i32(disp);
-        ib.push(imm);
-        self.flush_instbuf(ib);
-    }
-
-    /// cmp byte `[reg]`, imm8 — compare memory byte with immediate
-    pub fn cmp_byte_deref_imm(&mut self, base: Reg, imm: u8) {
-        let mut ib = InstBuf::new();
-        if base.needs_rex() {
-            ib.push(0x41 | base.hi());
-        }
-        ib.push(0x80);
-        if base.lo() == 5 {
-            ib.push(0x78 | base.lo());
-            ib.push(0);
-        } else if base.lo() == 4 {
-            ib.push(0x38 | 4);
-            ib.push(0x24);
-        } else {
-            ib.push(0x38 | base.lo());
-        }
-        ib.push(imm);
         self.flush_instbuf(ib);
     }
 
@@ -863,21 +593,6 @@ impl Assembler {
     #[inline(always)]
     pub fn test_rr(&mut self, a: Reg, b: Reg) {
         self.alu_rr64(0x85, a, b);
-    }
-
-    /// `test byte [base + disp32], imm8` — test memory byte against immediate bitmask.
-    #[inline(always)]
-    pub fn test_byte_mem_disp32(&mut self, base: Reg, disp: i32, imm: u8) {
-        let mut ib = InstBuf::new();
-        if base.needs_rex() {
-            ib.push(0x41 | base.hi());
-        }
-        ib.push(0xF6); // TEST r/m8, imm8
-        // ModRM: mod=10 (disp32), reg=000 (/0 = TEST), rm=base.lo()
-        ib.push(0x80 | base.lo());
-        ib.push_i32(disp);
-        ib.push(imm);
-        self.flush_instbuf(ib);
     }
 
     #[inline(always)]
@@ -962,49 +677,6 @@ impl Assembler {
     #[inline(always)]
     pub fn cmp_ri32(&mut self, a: Reg, imm: i32) {
         self.alu_ri32(7, a, imm);
-    }
-
-    /// cmp dword [base + disp], imm32
-    pub fn cmp_mem32_imm(&mut self, base: Reg, disp: i32, imm: i32) {
-        let mut ib = InstBuf::new();
-        if base.hi() != 0 {
-            ib.push(0x41);
-        }
-        ib.push(0x81);
-        Self::modrm_disp_ib(&mut ib, 7, base, disp);
-        ib.push_i32(imm);
-        self.flush_instbuf(ib);
-    }
-
-    /// cmp dword [base + disp], reg32  (sets flags: mem vs reg)
-    pub fn cmp_mem32_r(&mut self, base: Reg, disp: i32, src: Reg) {
-        let mut ib = InstBuf::new();
-        if base.hi() != 0 || src.hi() != 0 {
-            ib.push(0x40 | src.hi() << 2 | base.hi());
-        }
-        ib.push(0x39);
-        Self::modrm_disp_ib(&mut ib, src.lo(), base, disp);
-        self.flush_instbuf(ib);
-    }
-
-    /// sub qword [base + disp32], sign-extended imm32.
-    /// Always uses disp32 encoding (the imm32 is patched after emission for gas metering).
-    pub fn sub_mem64_imm32(&mut self, base: Reg, disp: i32, imm: i32) {
-        // NOTE: Cannot use InstBuf here — caller reads offset() for gas patching.
-        // The offset must be at the exact position of the imm32 field.
-        self.rex_w_b(base);
-        self.emit(0x81);
-        self.modrm_disp32(5, base, disp);
-        self.emit_i32(imm);
-    }
-
-    /// add qword [base + disp32], imm32
-    pub fn add_mem64_imm32(&mut self, base: Reg, disp: i32, imm: i32) {
-        // Same as sub_mem64_imm32 — offset() must be accurate for patching.
-        self.rex_w_b(base);
-        self.emit(0x81);
-        self.modrm_disp32(0, base, disp);
-        self.emit_i32(imm);
     }
 
     // -- Baseless memory access [idx] (mod=00 r/m=idx, no SIB) --
@@ -1116,60 +788,20 @@ impl Assembler {
         self.modrm_baseless(src.lo(), idx);
     }
 
-    /// mov byte \[idx\], imm8
-    pub fn mov_store8_at_index_imm(&mut self, idx: Reg, imm: u8) {
-        if idx.hi() != 0 {
-            self.emit(0x40 | idx.hi());
-        }
-        self.emit(0xC6);
-        self.modrm_baseless(0, idx);
-        self.emit(imm);
-    }
-
-    /// mov word \[idx\], imm16
-    pub fn mov_store16_at_index_imm(&mut self, idx: Reg, imm: u16) {
-        self.emit(0x66);
-        if idx.hi() != 0 {
-            self.emit(0x40 | idx.hi());
-        }
-        self.emit(0xC7);
-        self.modrm_baseless(0, idx);
-        self.emit(imm as u8);
-        self.emit((imm >> 8) as u8);
-    }
-
-    /// mov dword \[idx\], imm32
-    pub fn mov_store32_at_index_imm(&mut self, idx: Reg, imm: i32) {
-        if idx.hi() != 0 {
-            self.emit(0x40 | idx.hi());
-        }
-        self.emit(0xC7);
-        self.modrm_baseless(0, idx);
-        self.emit_i32(imm);
-    }
-
-    /// mov qword \[idx\], sign-extended imm32
-    pub fn mov_store64_at_index_imm(&mut self, idx: Reg, imm: i32) {
-        self.emit(0x48 | idx.hi());
-        self.emit(0xC7);
-        self.modrm_baseless(0, idx);
-        self.emit_i32(imm);
-    }
-
     // -- RIP-relative addressing `[rip + disp32]` --
     //
     // 64-bit mode's mod=00 r/m=101 form is RIP-relative: the effective
     // address is `RIP_after_instruction + sign_extend(disp32)`. Used to
-    // reach CTX, which lives above 4 GiB (outside the PVM u32 range)
-    // and is therefore beyond absolute-SIB disp32 reach. The
-    // `jit_va_base` field of the assembler holds the eventual load VA;
+    // reach CTX, which lives at 512 GiB (PML4 slot 1, adjacent to the
+    // JIT arena), outside the guest u32 address space and therefore
+    // beyond absolute-SIB disp32 reach. The `jit_va_base` field of the
+    // assembler holds the eventual load VA;
     // `target_va - (jit_va_base + write_pos + 4)` is the disp32 we
     // emit.
     //
     // 1 byte shorter per access than the absolute-SIB form (no SIB
     // byte). Range: target must be within ±2 GiB of post-instruction
-    // RIP, which holds for any CTX page placed in or near the META
-    // region above PVM mem.
+    // RIP, which holds because CTX sits adjacent to the JIT arena.
     /// Emit a 4-byte RIP-relative disp32 targeting `target_va`. The CPU
     /// resolves the effective address against RIP-at-next-instruction,
     /// so we add 4 (for the disp32 itself) plus `trailing_bytes` (any
@@ -1242,16 +874,6 @@ impl Assembler {
         self.emit_i32(imm);
     }
 
-    /// cmp dword [rip+disp32], reg32 (sets flags: mem vs reg)
-    pub fn cmp_mem32_rip_rel_r(&mut self, target_va: u64, src: Reg) {
-        if src.hi() != 0 {
-            self.emit(0x40 | (src.hi() << 2));
-        }
-        self.emit(0x39);
-        self.modrm_rip_rel(src.lo());
-        self.emit_rip_rel_disp32(target_va, 0);
-    }
-
     /// add r64, qword [rip+disp32]
     pub fn add_r64_mem_rip_rel(&mut self, dst: Reg, target_va: u64) {
         self.emit(0x48 | (dst.hi() << 2));
@@ -1297,30 +919,6 @@ impl Assembler {
         ib.push(0x0F);
         ib.push(0xAF);
         ib.push(0xC0 | (dst.lo() << 3) | src.lo());
-        self.flush_instbuf(ib);
-    }
-
-    /// imul r64, r64, imm32
-    pub fn imul_rri(&mut self, dst: Reg, src: Reg, imm: i32) {
-        let mut ib = InstBuf::new();
-        ib.push(0x48 | (dst.hi() << 2) | src.hi());
-        ib.push(0x69);
-        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
-        ib.push_i32(imm);
-        self.flush_instbuf(ib);
-    }
-
-    /// imul r32, r32, imm32
-    pub fn imul_rri32(&mut self, dst: Reg, src: Reg, imm: i32) {
-        let mut ib = InstBuf::new();
-        let r = dst.hi();
-        let b = src.hi();
-        if r != 0 || b != 0 {
-            ib.push(0x40 | (r << 2) | b);
-        }
-        ib.push(0x69);
-        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
-        ib.push_i32(imm);
         self.flush_instbuf(ib);
     }
 
@@ -1383,34 +981,11 @@ impl Assembler {
         self.emit(0x99);
     }
 
-    // -- INC/DEC --
-
-    /// inc r64
-    pub fn inc64(&mut self, dst: Reg) {
-        self.emit3(0x48 | dst.hi(), 0xFF, 0xC0 | dst.lo());
-    }
-
-    /// dec r64
-    pub fn dec64(&mut self, dst: Reg) {
-        self.emit3(0x48 | dst.hi(), 0xFF, 0xC8 | dst.lo());
-    }
-
     // -- NEG/NOT --
 
     /// neg r64
     pub fn neg64(&mut self, dst: Reg) {
         self.emit3(0x48 | dst.hi(), 0xF7, 0xD8 | dst.lo());
-    }
-
-    pub fn neg32(&mut self, dst: Reg) {
-        if dst.needs_rex() {
-            self.emit3(0x41, 0xF7, 0xD8 | dst.lo());
-        } else {
-            let mut ib = InstBuf::new();
-            ib.push(0xF7);
-            ib.push(0xD8 | dst.lo());
-            self.flush_instbuf(ib);
-        }
     }
 
     /// not r64
@@ -1470,21 +1045,6 @@ impl Assembler {
     pub fn shl_cl64(&mut self, dst: Reg) {
         self.shift_cl64(4, dst);
     }
-    pub fn shr_cl64(&mut self, dst: Reg) {
-        self.shift_cl64(5, dst);
-    }
-    pub fn sar_cl64(&mut self, dst: Reg) {
-        self.shift_cl64(7, dst);
-    }
-    pub fn rol_cl64(&mut self, dst: Reg) {
-        self.shift_cl64(0, dst);
-    }
-    pub fn ror_cl64(&mut self, dst: Reg) {
-        self.shift_cl64(1, dst);
-    }
-    pub fn rol_ri64(&mut self, dst: Reg, imm: u8) {
-        self.shift_ri64(0, dst, imm);
-    }
     pub fn ror_ri64(&mut self, dst: Reg, imm: u8) {
         self.shift_ri64(1, dst, imm);
     }
@@ -1497,24 +1057,6 @@ impl Assembler {
     }
     pub fn sar_ri32(&mut self, dst: Reg, imm: u8) {
         self.shift_ri32(7, dst, imm);
-    }
-    pub fn shl_cl32(&mut self, dst: Reg) {
-        self.shift_cl32(4, dst);
-    }
-    pub fn shr_cl32(&mut self, dst: Reg) {
-        self.shift_cl32(5, dst);
-    }
-    pub fn sar_cl32(&mut self, dst: Reg) {
-        self.shift_cl32(7, dst);
-    }
-    pub fn rol_cl32(&mut self, dst: Reg) {
-        self.shift_cl32(0, dst);
-    }
-    pub fn ror_cl32(&mut self, dst: Reg) {
-        self.shift_cl32(1, dst);
-    }
-    pub fn rol_ri32(&mut self, dst: Reg, imm: u8) {
-        self.shift_ri32(0, dst, imm);
     }
     pub fn ror_ri32(&mut self, dst: Reg, imm: u8) {
         self.shift_ri32(1, dst, imm);
@@ -1548,16 +1090,6 @@ impl Assembler {
         ib.push(0x48 | (dst.hi() << 2) | src.hi());
         ib.push(0x0F);
         ib.push(0xBF);
-        ib.push(0xC0 | (dst.lo() << 3) | src.lo());
-        self.flush_instbuf(ib);
-    }
-
-    /// movzx r64, r8 (zero-extend 8→64)
-    pub fn movzx_8_64(&mut self, dst: Reg, src: Reg) {
-        let mut ib = InstBuf::new();
-        ib.push(0x48 | (dst.hi() << 2) | src.hi());
-        ib.push(0x0F);
-        ib.push(0xB6);
         ib.push(0xC0 | (dst.lo() << 3) | src.lo());
         self.flush_instbuf(ib);
     }
@@ -1712,12 +1244,6 @@ impl Assembler {
         self.emit(0x58 + reg.lo());
     }
 
-    /// push sign-extended imm32 (5 bytes: 0x68 + imm32).
-    pub fn push_imm32(&mut self, imm: i32) {
-        self.emit(0x68);
-        self.emit_i32(imm);
-    }
-
     // -- Branches and jumps --
 
     /// jmp to label — uses rel8 for backward jumps within ±127 bytes.
@@ -1764,19 +1290,6 @@ impl Assembler {
         self.rex_opt_b(reg);
         self.emit(0xFF);
         self.emit(0xE0 | reg.lo()); // /4
-    }
-
-    /// call r64 (indirect)
-    pub fn call_reg(&mut self, reg: Reg) {
-        self.rex_opt_b(reg);
-        self.emit(0xFF);
-        self.emit(0xD0 | reg.lo()); // /2
-    }
-
-    /// call label
-    pub fn call_label(&mut self, label: Label) {
-        self.emit(0xE8);
-        self.emit_label_fixup(label);
     }
 
     /// ret
@@ -1834,20 +1347,9 @@ impl Assembler {
 
     // -- Misc --
 
-    /// ud2 (undefined instruction, for traps)
-    pub fn ud2(&mut self) {
-        self.emit(0x0F);
-        self.emit(0x0B);
-    }
-
     /// nop
     pub fn nop(&mut self) {
         self.emit(0x90);
-    }
-
-    /// int3 (debug breakpoint)
-    pub fn int3(&mut self) {
-        self.emit(0xCC);
     }
 
     // === Finalization ===
@@ -1879,6 +1381,7 @@ impl Assembler {
     }
 
     /// Sync Vec length with the write cursor. Call before accessing `self.code` directly.
+    #[cfg(test)]
     pub fn sync_len(&mut self) {
         let CodeBuf::Vec(code) = &mut self.code_buf;
         // SAFETY: write_pos <= code.capacity() (maintained by emission guards).
@@ -1887,7 +1390,7 @@ impl Assembler {
         }
     }
 
-    /// Resolve all label fixups in-place (works for both Vec and mmap buffers).
+    /// Resolve all label fixups in-place.
     fn resolve_fixups(&mut self) {
         for fixup in &self.fixups {
             let stored = self.labels[fixup.label.0 as usize];

@@ -153,15 +153,6 @@ impl Perm {
             executable: false,
         }
     }
-    #[allow(dead_code)] // available for kernel-only mappings
-    pub const fn kernel_rw() -> Self {
-        Self {
-            writable: true,
-            user: false,
-            executable: false,
-        }
-    }
-
     /// Encode as the low-bit + high-bit flags of a leaf PTE.
     fn pte_flags(&self) -> u64 {
         let mut bits = flag::P;

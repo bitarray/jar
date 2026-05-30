@@ -1,42 +1,38 @@
 //! In-kernel JIT execution at ring 3.
 //!
-//! Takes a PVM program (code + basic-block-start set) and runs it
-//! inside a per-invocation page table at ring 3. The PVM exits
-//! through `int 0x81` (a hand-rolled trampoline placed after the
-//! JIT'd code at a user-RX VA); the kernel handler longjmps back to
-//! the caller of [`run_pvm_with_mem`] and we read the JitContext
-//! that the JIT wrote during execution.
+//! Takes a PVM program (raw RISC-V code) and runs it inside a
+//! per-invocation page table at ring 3. The PVM exits through
+//! `int 0x81` (a hand-rolled trampoline placed after the JIT'd code at
+//! a user-RX VA); the kernel handler longjmps back to the caller of
+//! [`enter_frame`] and we read the JitContext that the JIT wrote
+//! during execution.
 //!
 //! ## Memory layout (per invocation, in the new page table)
 //!
-//! Everything lives in PML4 slot 0 (low VA, kernel relocated to slot
-//! 511 in Stage F kernel-high). PVM addr == native VA: guest memory
-//! starts at VA 0 so mem accesses can use `[rdx]` baseless. The
-//! NULL-deref guard the old layout provided at VA 0 is moot here —
-//! the JIT page table is per-invocation and only the guest's own
-//! mem region is mapped low.
+//! Guest memory lives high: `PML4[0]` (low VA, kernel relocated to
+//! slot 511 in Stage F kernel-high) holds the guest's own ranges with
+//! PVM addr == native VA, so mem accesses can use `[rdx]` baseless.
+//! Code is RO at `CODE_BASE` (4 MiB) and data is RW at `DATA_BASE`
+//! (256 MiB); `[0, CODE_BASE)` stays unmapped as a real null guard.
 //!
-//! CTX sits at VA 4 GiB — the first page above the PVM u32 address
-//! range. The recompiler doesn't bounds-check guest mem (the PT does)
-//! so the full low 4 GiB belongs to the program; CTX must be outside.
-//! CTX is reached via RIP-relative addressing from the JIT code in
-//! META, which is within ±2 GiB.
+//! CTX + the per-Image arena + STACK live in `PML4[1]` at 512 GiB,
+//! outside the PVM u32 address range so guest addresses can't spoof
+//! them. CTX is reached via RIP-relative addressing from the JIT code
+//! in the arena, which the slot keeps within ±2 GiB.
 //!
 //! ```text
-//!   MEM_VA   = 0                  mem_size bytes guest memory     (user-RW)
-//!   CTX_VA   = 4 GiB              4 KiB JitContext                (user-RW)
-//!
-//!   META_BASE= 4 GiB + 16 MiB     per-Image arena base
-//!                                 (BB | DISPATCH | JIT | TRAMP)
-//!     BB / DISPATCH                                               (user-RO)
-//!     JIT / TRAMP                                                 (user-RX)
-//!
-//!   STACK    = META + 1 GiB       ring-3 x86 stack, 4 KiB         (user-RW)
+//!   PML4[1] (512..1024 GiB)
+//!     PDPT[0] (512..513 GiB)  ← CTX, 4 KiB JitContext          (user-RW)
+//!     PDPT[1] (513..514 GiB)  ← META arena, template-owned
+//!                               (DISPATCH | JIT | TRAMP)
+//!         DISPATCH                                              (user-RO)
+//!         JIT / TRAMP                                           (user-RX)
+//!     PDPT[2] (514..515 GiB)  ← STACK, ring-3 x86 stack, 4 KiB (user-RW)
 //! ```
 //!
-//! Guest code is mapped read-only into the low-4 GiB guest range at its
-//! `CODE_BASE` (a `DirectMap`, like a pinned data cap), so PVM PCs are
-//! real VAs and the guest can read its own bytes (PIC AUIPC+load).
+//! Guest code is mapped read-only at its `CODE_BASE` (a `DirectMap`,
+//! like a pinned data cap), so PVM PCs are real VAs and the guest can
+//! read its own bytes (PIC AUIPC+load).
 //!
 //! The Image arena lives in [`jit_cache::CompiledImage`] (one per
 //! Image, allocated once and mapped read-only into every Instance's
@@ -63,7 +59,7 @@ use javm_recompiler_x86::codegen::HelperFns;
 
 // === Per-invocation context for the #PF handler ===========================
 //
-// Set by `run_pvm_with_mem` immediately before `enter_ring3`, read by
+// Set by `enter_frame` immediately before `enter_ring3`, read by
 // `jit_pf_handler` if a #PF fires from inside the JIT'd code window.
 // Single-threaded (Hyperlight serialises calls), so unsynchronised
 // statics are safe — we use atomics for `&'static mut` avoidance only.
@@ -80,7 +76,9 @@ static CTX_KVA: AtomicU64 = AtomicU64::new(0);
 // Set by `enter_frame` so `jit_pf_handler` can recognise legitimate
 // guest writes to mapped DataCap pages, allocate a fresh page, and
 // remap the PTE writable + new PA. The handler appends the dirty
-// page to a per-frame sink for downstream auto-mint (Commit 5).
+// page to a per-frame sink — frame-local bookkeeping dropped at frame
+// pop, retained as scaffolding for a possible future scratchpad
+// mechanism (the auto-mint consumer was reverted, see `call_loop`).
 
 static COW_RANGES_PTR: AtomicPtr<crate::call_loop::CowRange> =
     AtomicPtr::new(core::ptr::null_mut());
@@ -129,7 +127,7 @@ fn jit_pf_handler(
     let mut pvm_pc = 0u32;
     if !tt_ptr.is_null() && tt_len > 0 {
         // SAFETY: tt_ptr + tt_len describes a contiguous slice in
-        // kernel memory, valid for the duration of `run_pvm_with_mem`
+        // kernel memory, valid for the duration of `enter_frame`
         // (which is the only function that publishes / clears the
         // statics that point at it).
         let tt = unsafe { core::slice::from_raw_parts(tt_ptr, tt_len) };
@@ -290,7 +288,7 @@ const META_PML4_BASE: u64 = 1u64 << 39; // 512 GiB
 /// CTX sits at the slot base. CTX_VA_M must match
 /// `javm_recompiler_x86::codegen::CTX_VA`.
 const CTX_VA_M: u64 = META_PML4_BASE;
-/// Base of the per-Image arena (BB | DISPATCH | JIT | TRAMP).
+/// Base of the per-Image arena (DISPATCH | JIT | TRAMP).
 /// 1 GiB past CTX so the arena occupies its own PDPT slot, enabling
 /// template-PT sharing of the entire PD subtree.
 const META_BASE_M: u64 = META_PML4_BASE + (1u64 << 30);
@@ -358,13 +356,16 @@ pub struct FrameRuntime {
 /// guest VA the region maps at — it's threaded into the compiler (so
 /// `auipc`/`jalr` resolve correctly) and into the cache key.
 ///
-/// The BB region holds the basic-block-start set (sized to `code.len()`,
-/// populated by `jit_cache::get_or_compile`); `jalr` targets are
-/// validated against it directly (no jump table). The code itself is
-/// RO-mapped into the guest range at `code_base` via `direct_maps`.
+/// The dense dispatch table (one `i32` per code byte, built by
+/// `jit_cache::get_or_compile`; non-block-start slots hold the
+/// panic-stub offset) doubles as the `jalr`-target validator — there
+/// is no BB region or jump table. The code itself is RO-mapped into
+/// the guest range at `code_base` via `direct_maps`.
 ///
 /// # Safety
-/// Same constraints as [`build_frame_runtime`].
+/// The guest runs single-threaded (Hyperlight serialises calls); the
+/// `code` / overlay slices and `direct_maps` PAs must outlive the
+/// returned [`FrameRuntime`], which owns the per-call page table.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn build_frame_runtime(
     image_hash: &javm_cap::CapHash,
@@ -386,7 +387,6 @@ pub unsafe fn build_frame_runtime(
         mem_write_u16: 0x1006,
         mem_write_u32: 0x1007,
         mem_write_u64: 0x1008,
-        sbrk_helper: 0x1009,
     };
     let cached = jit_cache::get_or_compile(
         image_hash,

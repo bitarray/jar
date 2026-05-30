@@ -1,7 +1,7 @@
 //! Page-aligned allocations from talc.
 //!
 //! Used by both [`jit_cache`](crate::jit_cache) (per-Image arenas
-//! holding the BB/JT/DISPATCH/JIT/TRAMP regions) and
+//! holding the DISPATCH/JIT/TRAMP regions) and
 //! [`jit_run`](crate::jit_run) (per-call CTX, MEM, STACK pages).
 //!
 //! All allocations come from the global heap (talc); the page-aligned

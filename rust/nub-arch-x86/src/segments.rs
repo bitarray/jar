@@ -5,8 +5,6 @@
 //! 5-entry GDT containing only null + kernel CS + kernel DS + TSS.
 //! For the nub kernel we need a few things on top of this:
 //!
-//! * Vector `0x80` (the PVM ecall trampoline) to be invocable from
-//!   ring 3 — requires `DPL=3` on the IDT entry (A2).
 //! * Vector `0x81` (ring-3 exit) to be invocable from ring 3 — and
 //!   it must use IST=1 so the handler runs on the exception stack
 //!   that Hyperlight already maintains for #PF / #GP / etc., rather

@@ -1,6 +1,6 @@
 //! Per-Image JIT code cache + page-aligned arena.
 //!
-//! Each Image gets one [`PageBuf`] arena containing four regions
+//! Each Image gets one [`PageBuf`] arena containing three regions
 //! laid out contiguously, each starting on a page boundary:
 //!
 //! ```text

@@ -26,7 +26,6 @@ use alloc::vec::Vec;
 
 use super::asm::{Assembler, Cc, Label, Reg};
 use javm_exec::gas_sim::GasSimulator;
-pub use javm_exec::predecode::{Predecode, predecode};
 
 /// Map RV register index (0..12) to x86-64 register.
 /// All 13 PVM registers live in x86 registers.
@@ -97,13 +96,10 @@ pub const CTX_REGS: u64 = CTX_VA + offset_of!(JitContext, regs) as u64;
 pub const CTX_GAS: u64 = CTX_VA + offset_of!(JitContext, gas) as u64;
 pub const CTX_EXIT_REASON: u64 = CTX_VA + offset_of!(JitContext, exit_reason) as u64;
 pub const CTX_EXIT_ARG: u64 = CTX_VA + offset_of!(JitContext, exit_arg) as u64;
-pub const CTX_HEAP_BASE: u64 = CTX_VA + offset_of!(JitContext, heap_base) as u64;
-pub const CTX_HEAP_TOP: u64 = CTX_VA + offset_of!(JitContext, heap_top) as u64;
 pub const CTX_ENTRY_PC: u64 = CTX_VA + offset_of!(JitContext, entry_pc) as u64;
 pub const CTX_PC: u64 = CTX_VA + offset_of!(JitContext, pc) as u64;
 pub const CTX_DISPATCH_TABLE: u64 = CTX_VA + offset_of!(JitContext, dispatch_table) as u64;
 pub const CTX_CODE_BASE: u64 = CTX_VA + offset_of!(JitContext, code_base) as u64;
-pub const CTX_FAST_REENTRY: u64 = CTX_VA + offset_of!(JitContext, fast_reentry) as u64;
 pub const CTX_HOST_RSP_BASE: u64 = CTX_VA + offset_of!(JitContext, host_rsp_base) as u64;
 
 /// Exit reason codes (matching ExitReason enum).
@@ -130,7 +126,7 @@ pub struct CompileResult {
     /// dispatch table with this so a `jalr` to any non-block-start
     /// offset lands on the panic stub *via the table* — folding the
     /// block-start validation into the dispatch lookup (no separate
-    /// `bb_starts` set). 0 for the PVM path.
+    /// `bb_starts` set). The RV path always populates this.
     pub panic_offset: u32,
 }
 
@@ -145,7 +141,6 @@ pub struct HelperFns {
     pub mem_write_u16: u64,
     pub mem_write_u32: u64,
     pub mem_write_u64: u64,
-    pub sbrk_helper: u64,
 }
 
 /// Tracks what a PVM register was last set to, for peephole optimization.
@@ -201,12 +196,11 @@ pub struct Compiler {
     pub(crate) trap_entries: Vec<(u32, u32)>,
     /// Memory tier load/store cycles for gas simulation.
     pub(crate) mem_cycles: u8,
-    /// Pipeline simulator for per-block gas costing. The RV streaming
+    /// Pipeline simulator for per-block gas costing. The streaming
     /// compile path drives this directly from `compile_rv_instruction`
     /// arms (so the per-instruction loop performs ONE match over
     /// `Inst`); `bind_rv_gas_block_start_streaming` flushes it at
-    /// block boundaries. The PVM `compile()` path uses its own local
-    /// simulator and leaves this one untouched.
+    /// block boundaries.
     pub(crate) gas_sim: GasSimulator,
     /// Guest VA the code region is mapped at. `jalr`/`auipc` produce
     /// and consume code addresses as `code_base + offset`; the dispatch
@@ -215,10 +209,10 @@ pub struct Compiler {
     /// Code region length in bytes — the upper bound for jalr target
     /// offsets (== dispatch-table length in entries).
     pub(crate) code_len: u32,
-    /// True during RV streaming compile (`compile`). When set, branch
-    /// emit helpers defer forward-target validation (`target > pc`) to a
-    /// post-pass instead of consulting `bitmask_ptr`. Off for PVM, whose
-    /// caller-supplied bitmask is fully populated at emit time.
+    /// True during the streaming compile walk (`compile`). When set,
+    /// branch emit helpers defer forward-target validation (`target > pc`)
+    /// to a post-pass instead of consulting `bitmask_ptr`; the post-pass
+    /// clears it so those helpers consult the now-populated `rv_valid_pc`.
     pub(crate) rv_streaming: bool,
     /// Forward branches whose target validity could not be determined at
     /// emit time. Resolved post-pass: each entry is
@@ -226,9 +220,8 @@ pub struct Compiler {
     /// false after the streaming pass, the fixup is redirected to a
     /// per-branch panic stub.
     pub(crate) rv_pending_fwd_branches: Vec<(u32, u32, usize)>,
-    /// Backing storage for `bitmask_ptr` during RV streaming compile.
-    /// Built incrementally in `bind_rv_gas_block_start_streaming`. Empty
-    /// for the PVM path (uses the caller-supplied bitmask).
+    /// Backing storage for `bitmask_ptr` during the streaming compile.
+    /// Built incrementally in `bind_rv_gas_block_start_streaming`.
     pub(crate) rv_valid_pc: Vec<bool>,
 }
 
@@ -421,12 +414,9 @@ impl Compiler {
         self.reg_defs_active = 0;
     }
 
-    /// Emit gas block boundary: bind label, flush previous block cost, emit new gas check.
-    ///
-    /// Called at every gas block start (PC=0 and post-terminator PCs) to:
-    /// 1. Bind the PC label for branch resolution
-    /// 2. Patch the previous block's gas cost (deferred until block end)
-    /// 3. Emit a new `sub [ctx+gas], cost; js oog_stub` sequence
+    /// Emit an unconditional static branch to `target`. In streaming mode
+    /// a forward target is deferred to the post-pass; otherwise a
+    /// non-block-start target redirects to the panic stub.
     pub(crate) fn emit_static_branch(
         &mut self,
         target: u32,
@@ -557,10 +547,9 @@ impl Compiler {
 
         // Save the post-callee-saved RSP into the context. The exit
         // path restores RSP from this slot before popping the 7 entries
-        // above, so any unmatched `call` pushes from the guest's
-        // `callf` / `retf` chain (e.g. an OOG or page-fault redirect
-        // mid-function with stack frames still pending) get discarded
-        // cleanly instead of corrupting the exit pops.
+        // above, so an OOG / page-fault / mid-sequence trap redirect
+        // leaves the exit path with a clean stack instead of corrupting
+        // the exit pops.
         self.asm.mov_store64_rip_rel(CTX_HOST_RSP_BASE, Reg::RSP);
 
         // R15 = gas register. Loaded from ctx.gas at prologue, decremented
@@ -630,13 +619,10 @@ impl Compiler {
             self.asm.mov_store64_rip_rel(CTX_REGS + (i as u64) * 8, reg);
         }
 
-        // Restore RSP to the post-prologue baseline. Drops any pending
-        // native-`call` frames the guest pushed via `callf` (PVM2). For
-        // a balanced clean exit (every `callf` already matched by a
-        // `retf`), RSP is already at the baseline and the mov is a
-        // no-op; for OOG / page-fault / mid-function trap paths it
-        // truncates the stack back to where the 7 callee-saved entries
-        // sit on top.
+        // Restore RSP to the post-prologue baseline. For a clean exit
+        // RSP is already there and the mov is a no-op; for OOG /
+        // page-fault / mid-sequence trap redirects it truncates the
+        // stack back to where the 7 callee-saved entries sit on top.
         self.asm.mov_load64_rip_rel(Reg::RSP, CTX_HOST_RSP_BASE);
 
         // Restore callee-saved (+ alignment padding)
@@ -1306,8 +1292,7 @@ impl Compiler {
 
     /// Streaming gas-block-start hook: bind label, flush prior block's
     /// cost into its `sub` patch, emit a fresh `sub r15, 0; js stub`
-    /// placeholder and stash the patch offset in `pending`. Mirrors
-    /// `Compiler::emit_gas_block_start` on the PVM path. Drives
+    /// placeholder and stash the patch offset in `pending`. Drives
     /// `self.gas_sim` directly so the per-arm `feed_gas_rv` calls in
     /// `compile_rv4` see a coherent simulator.
     fn bind_rv_gas_block_start_streaming(

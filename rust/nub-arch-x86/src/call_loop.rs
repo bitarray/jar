@@ -5,7 +5,7 @@
 //! the published cap state, push it on an in-memory `Vec` stack, then
 //! iterate:
 //!
-//!   1. Run one ring-3 cycle via [`crate::jit_run::run_pvm_with_mem`].
+//!   1. Run one ring-3 cycle via [`crate::jit_run::enter_frame`].
 //!   2. On `EXIT_HALT` (or `EXIT_HOST_CALL` with `exit_arg == 0` —
 //!      `subsoil`'s endpoint trampoline issues `li t0, 0; ecall`,
 //!      which the transpiler emits as PVM `ecalli 0`): pop. If the
@@ -28,11 +28,12 @@
 //!
 //! - **Sub-VM instances live in `cache.instances`.** `derive_spawn`
 //!   publishes a fresh `Cap::Instance` via
-//!   [`state_cache::publish_instance`]; the returned `CapRef` goes
-//!   into the parent's cnode slot. `host_call` then resolves
-//!   `cnode[slot]: CapHashOrRef` via [`state_cache::lookup_handle`],
+//!   [`crate::state_cache::publish_transient_instance`]; the returned
+//!   `CapRef` goes into the parent's cnode slot. `host_call` then
+//!   resolves `cnode[slot]: CapHashOrRef` via
+//!   `CACHE.get(CapHashOrRef::…)` on the heap-resident directory,
 //!   yielding either a host-pre-published blob or a kernel-derived
-//!   instance. Refcount on each entry is bumped by the lookup and
+//!   instance. Refcount on each entry is bumped by the resolution and
 //!   decremented when the [`KernelFrame`] drops, so the cache slot
 //!   stays pinned for the frame's lifetime.
 //!
@@ -207,8 +208,9 @@ pub struct CowRange {
 }
 
 /// One CoW-allocated dirty page. Owned by `KernelFrame.dirty_pages`
-/// until auto-mint consumes it (next commit). For now fields stay
-/// dead-code-allowed; the next commit reads them.
+/// and dropped at frame pop. The metadata fields are dead-code-allowed
+/// today: they're retained scaffolding for a possible future explicit
+/// scratchpad-cnode mechanism, not the reverted auto-mint step.
 #[allow(dead_code)]
 pub struct DirtyPage {
     pub guest_va: u32,
@@ -353,9 +355,12 @@ pub fn run_top(
         }
     };
 
-    // Drop the stack BEFORE we hand the outcome back. Frames hold no
-    // refcounted handles into the heap-resident directory (V0: no
-    // scratch sweep, no eviction), so this is just a Vec drop.
+    // Drop the stack BEFORE we hand the outcome back. Dropping each
+    // frame releases its `CapHashOrRef::Ref(CapRef)` clones,
+    // decrementing the inner Arc strong counts; the actual reclaim of
+    // any orphaned transient instances happens via
+    // `CACHE.sweep_instances()` in `nub_invoke_cached` after this
+    // returns.
     drop(stack);
     Ok(outcome)
 }
@@ -538,8 +543,8 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
 
     // PVM2: `code` is raw RV+C+custom-0 bytes (produced by
     // `javm_transpiler::linker::link_elf`). The JIT cache
-    // predecodes the bytes once and populates the BB region with
-    // the valid-PC set.
+    // predecodes the bytes once and builds the dense dispatch table
+    // (block-start validation folded in).
     //
     // SAFETY: image and any cap-backed slices live in the heap-
     // resident DIRECTORY/INSTANCES; PAs survive the guard drop per
@@ -573,9 +578,10 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
 /// `return_value` into the parent's φ[7]. Returns `true` when the
 /// stack has been drained — the RPC caller uses this to know it's
 /// time to hand a result back to the host. The dropped frame's
-/// `CapHandle`s decrement their refcounts automatically; the per-
-/// RPC scratch sweep at end of `run_top` reclaims any orphaned
-/// `cache.instances` slots.
+/// `CapHashOrRef::Ref(CapRef)` clones decrement their strong counts
+/// automatically; the per-RPC scratch sweep in `nub_invoke_cached`
+/// (after `run_top` returns) reclaims any orphaned `cache.instances`
+/// slots.
 fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
     let _popped = stack.pop().expect("non-empty");
     if stack.is_empty() {
