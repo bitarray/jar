@@ -3,7 +3,7 @@
 //! sandbox, no cross-compilation.
 //!
 //! [`run_instance`] is the in-process counterpart to nub-arch-x86's
-//! JIT-driven `run_pvm_with_mem`: takes a published
+//! JIT-driven `enter_frame` / `build_frame_runtime`: takes a published
 //! [`javm_cap::cap::instance::InstanceCap`] + its referenced
 //! [`javm_cap::cap::image::ImageCap`] (both `Global`-allocated
 //! locally), wires the bytecode + memory layout to
@@ -57,7 +57,7 @@ impl Arch for LocalArch {
     }
 }
 
-/// Run an Instance through the byte-PVM interpreter, returning the
+/// Run an Instance through the PVM2 (RISC-V) interpreter, returning the
 /// same `InvocationResult` shape `nub-arch-x86`'s JIT path produces.
 /// The exit-reason mapping matches the JIT exit codes (HostCall=4,
 /// Trap=7, etc.) so the two backends agree on a well-formed program.

@@ -99,7 +99,7 @@ pub trait Arch {
     type Error;
 
     /// Invoke `endpoint` on the `Cap::Instance` identified by
-    /// `target`, passing `args` (SCALE-encoded, by convention). The
+    /// `target`, passing `args` (opaque caller-defined bytes). The
     /// Arch impl is responsible for executing the underlying JAVM
     /// program to termination (HALT / yield / fault / gas-exhausted)
     /// and reporting the outcome.

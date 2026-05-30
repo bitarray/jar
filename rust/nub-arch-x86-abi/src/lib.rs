@@ -28,10 +28,10 @@ pub const FN_ID_NUB_INVOKE_CACHED: u32 = 3;
 ///
 /// Payload: rkyv-archived `javm_cap::Cap`. Guest validates and
 /// materialises via [`rkyv::access`] + [`rkyv::deserialize`], computes
-/// the cap's content hash, inserts into the guest-resident
-/// `DIRECTORY` (a `Mutex<HashMap<CapHash, Box<Cap>>>` living in talc
-/// heap), and replies with the rkyv-archived [`CapHash`] (raw 32
-/// bytes). The host's `MultiUseSandbox::put_cap` propagates a
+/// the cap's content hash, inserts into the guest-resident `CACHE`
+/// (a `CacheDirectory<FixedState>` holding `HashMap<CapHash, Arc<Cap>>`
+/// in talc heap), and replies with the rkyv-archived [`CapHash`] (raw
+/// 32 bytes). The host's `MultiUseSandbox::put_cap` propagates a
 /// `CapHasRefError` from `javm_cap` if any slot still holds a Ref.
 pub const FN_ID_NUB_PUT_CAP: u32 = 4;
 
@@ -49,10 +49,6 @@ pub const FN_ID_NUB_GET_BOOT_INFO: u32 = 5;
 /// what we want to measure for PolkaVM-shaped workloads).
 pub const FN_ID_NUB_EVICT_JIT_ALL: u32 = 6;
 
-/// Number of guest-function slots reserved in the dispatch table.
-/// Must be at least `max(FN_ID_*) + 1`.
-pub const GUEST_FN_TABLE_SIZE: usize = 8;
-
 /// Boot-time info published by the guest at a known location (linker
 /// section `.boot_info`). The host reads it after the sandbox boots
 /// to learn the VA of the guest's cap directory, then dereferences
@@ -63,12 +59,12 @@ pub const GUEST_FN_TABLE_SIZE: usize = 8;
 ///
 /// `magic` is checked first as a sanity guard against reading a
 /// stale or wrong-binary boot region. `directory_va` is the address
-/// of the inner `HashMap` (not the wrapping `Mutex`), so the host
-/// reader can take the directory lock and then index by `CapHash`.
+/// of the guest's `CacheDirectory<FixedState>`, which the host reader
+/// (`GuestCacheReader`) dereferences and indexes by `CapHash`.
 /// `directory_type_id` lets future protocol upgrades reject a
-/// mismatched layout (today: hash of the type signature `Mutex<
-/// HashMap<CapHash, Box<Cap>, FixedState, Global>>` — bumped when
-/// any field is added or its type changes).
+/// mismatched layout (today: opaque sentinel matching
+/// `CacheDirectory<FixedState>` — bumped when any field is added or
+/// its type changes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct BootInfo {
