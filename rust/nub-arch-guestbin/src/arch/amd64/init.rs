@@ -127,7 +127,7 @@ unsafe fn init_stack() -> u64 {
 }
 
 /// Machine-specific initialisation; calls [`crate::generic_init`]
-/// once stack, CoW, etc have been set up.
+/// once the GDT/TSS/IDT and main stack have been set up.
 #[unsafe(no_mangle)]
 pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_level: u64) {
     unsafe {
