@@ -65,6 +65,22 @@ impl ImageCap {
         }
         Some((crate::layout::CODE_BASE, self.code.as_slice()))
     }
+
+    /// True iff the memory mapping starting at guest VA `start` draws
+    /// from a pinned (read-only) slot, so it must be laid read-only — a
+    /// guest store to it faults. Mirrors the recompiler's pinned-vs-
+    /// initial slot classification (`nub-arch-x86` `build_runtime`).
+    /// Derived from [`Self::pinned`] at lay time so the per-instance
+    /// [`super::instance::RwOverlay`] wire form needs no perm field; the
+    /// interpreter drivers (`javm` `build_entry`, `nub-arch-local`) call
+    /// this so they classify identically to the recompiler.
+    pub fn mapping_is_pinned(&self, start: u32) -> bool {
+        self.mappings.iter().any(|m| {
+            m.start as u32 == start
+                && m.source_path_len > 0
+                && self.pinned.iter().any(|p| p.slot == m.source_path[0])
+        })
+    }
 }
 
 /// Endpoint definition. Dense `initial_regs` array; index `i`

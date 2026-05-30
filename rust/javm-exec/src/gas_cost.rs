@@ -547,3 +547,69 @@ pub fn rv_gas_cost_for_block(
     }
     sim.flush_and_get_cost()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instruction::decode;
+    use crate::predecode::is_terminator;
+
+    /// Terminator flag as the recompiler sees it: the gas-LUT `RVF_TERM`
+    /// bit for the instruction's kind (this is the classifier
+    /// `Compiler::feed_gas_rv` consumes to mark gas-block starts).
+    fn lut_term(inst: &crate::instruction::Inst) -> bool {
+        RV_GAS_COST_LUT[rv_gas_meta(inst).kind as usize].flags & RVF_TERM != 0
+    }
+
+    /// B5: "what is a terminator" is hand-coded twice in this crate —
+    /// `predecode::is_terminator` (a `match` on `Inst`, which the
+    /// interpreter uses to mark gas-block starts) and the gas-LUT
+    /// `RVF_TERM` bit (which the recompiler uses for the same purpose).
+    /// They are independent and must classify every decodable
+    /// instruction identically, or the interpreter and recompiler would
+    /// disagree on basic-block boundaries (a consensus fork). Sweep the
+    /// whole RVC halfword space and a 4-byte opcode × funct matrix and
+    /// assert the two classifiers agree on every encoding that decodes.
+    #[test]
+    fn predecode_and_gas_lut_terminator_agree() {
+        // RVC: every 2-byte halfword whose low bits aren't the 4-byte
+        // marker.
+        for h in 0u16..=0xFFFF {
+            if h & 0b11 == 0b11 {
+                continue;
+            }
+            if let Some((inst, _len)) = decode(&h.to_le_bytes()) {
+                assert_eq!(
+                    is_terminator(&inst),
+                    lut_term(&inst),
+                    "RVC halfword {h:#06x} -> {inst:?}"
+                );
+            }
+        }
+        // 4-byte: sweep every 7-bit opcode (low bits = 0b11) across
+        // funct3 and a representative set of funct7 values, with fixed
+        // register fields. This reaches every terminator opcode (jal
+        // 0x6F, jalr 0x67, branch 0x63, custom-0 0x0B across all funct3)
+        // and every non-terminator class.
+        for major in 0u32..0x20 {
+            let opcode7 = (major << 2) | 0b11;
+            for funct3 in 0u32..8 {
+                for &funct7 in &[0u32, 0b000_0001, 0b010_0000, 0b000_0111, 0b011_0000] {
+                    let w = (funct7 << 25)
+                        | (11 << 20)
+                        | (10 << 15)
+                        | (funct3 << 12)
+                        | (10 << 7)
+                        | opcode7;
+                    if let Some((inst, _len)) = decode(&w.to_le_bytes()) {
+                        assert_eq!(
+                            is_terminator(&inst),
+                            lut_term(&inst),
+                            "word {w:#010x} -> {inst:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

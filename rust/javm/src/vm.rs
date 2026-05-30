@@ -192,12 +192,22 @@ impl<K: KernelAssist> Vm<K> {
             )
             .map_err(VmError::MapRegion)?;
         }
+        // A mapping sourced from a pinned slot is read-only: lay it RO so
+        // a guest store faults, matching the recompiler, which RO direct-
+        // maps pinned slots and does not CoW-arm them (nub-arch-x86
+        // `build_runtime` pinned-vs-initial classification). Non-pinned
+        // (initial) overlays stay RW.
         for overlay_entry in inst.rw_overlays.iter() {
+            let access = if img.mapping_is_pinned(overlay_entry.start) {
+                Access::ReadOnly
+            } else {
+                Access::ReadWrite
+            };
             overlay_into(
                 &mut mem,
                 overlay_entry.start,
                 overlay_entry.bytes.as_slice(),
-                Access::ReadWrite,
+                access,
             )?;
         }
 
