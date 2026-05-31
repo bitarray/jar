@@ -19,7 +19,7 @@
 //! into it) and in-flight resolution (host calls read referenced caps
 //! by their `CapHashOrRef` target).
 
-use javm_cap::{CacheDirectory, Cap, CapHash, CapHashOrRef, SlotIdx};
+use javm_cap::{CacheDirectory, Cap, CapHash, CapHashOrRef, NUM_REGS, SlotIdx};
 use javm_exec::{Access, CopyingMemory, ExitReason, GasCounter, Mem, Regs, interp::Interpreter};
 
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
@@ -215,7 +215,10 @@ impl<K: KernelAssist> Vm<K> {
         // wins) → caller args at φ[7..=10].
         let mut regs = Regs::new();
         regs.pc = endpoint.entry_pc;
-        regs.gpr = endpoint.initial_regs;
+        // The persisted register file is the 13 host-mapped slots; x3/x4
+        // (slots 13/14) are invocation-local and start at 0 (Regs::new zeros
+        // them), matching the recompiler.
+        regs.gpr[..NUM_REGS].copy_from_slice(&endpoint.initial_regs);
         for (i, v) in inst.regs.iter().enumerate() {
             if *v != 0 {
                 regs.gpr[i] = *v;
@@ -602,7 +605,10 @@ impl<K: KernelAssist> Vm<K> {
             cnode_hash,
             &overlays_borrowed,
             mem_size,
-            entry.regs.gpr,
+            // Persist the 13 host-mapped slots; x3/x4 are invocation-local.
+            entry.regs.gpr[..NUM_REGS]
+                .try_into()
+                .expect("13 persisted regs"),
             entry.regs.pc,
             entry.gas.remaining(),
         ))?;

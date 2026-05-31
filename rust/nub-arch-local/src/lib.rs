@@ -120,7 +120,9 @@ pub fn run_instance(
     // Endpoint baseline first, then layer the InstanceCap's persisted
     // regs on top (publish_instance writes them; subsequent invokes
     // observe them). Args overlay φ[7..=10] last.
-    regs.gpr = endpoint.initial_regs;
+    // Persisted file is the 13 host-mapped slots; x3/x4 (slots 13/14) start
+    // at 0 (Regs::new zeros them), matching the recompiler.
+    regs.gpr[..javm_cap::NUM_REGS].copy_from_slice(&endpoint.initial_regs);
     for (i, v) in instance.regs.iter().enumerate() {
         if *v != 0 {
             regs.gpr[i] = *v;

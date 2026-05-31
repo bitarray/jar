@@ -175,7 +175,7 @@ cap awareness.
 
 ### Responsibilities
 
-- **Interpreter.** PVM instruction set; register state (13 GPRs +
+- **Interpreter.** PVM2 instruction set; register state (15 GPRs +
   internal); memory pages; gas counter; trap handling.
 
 - **Recompiler.** JIT to native (Linux x86-64 only initially).

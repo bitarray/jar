@@ -838,9 +838,9 @@ impl Interpreter {
 // ----------------------------------------------------------------------------
 
 /// Read PVM2 register `x`, via the shared slot map ([`crate::regs`]).
-/// `x0` (and any reserved register, which never reaches here once decode
-/// maps it to `Reserved`) reads as zero; `x1, x2, x5..x15` map to slots
-/// `0..12`.
+/// `x0` (and any reserved register `x16..x31`, which never reaches here once
+/// decode maps it to `Reserved`) reads as zero; `x1, x2, x5..x15` map to
+/// slots `0..12` and `x3`/`x4` to the spilled slots `13`/`14`.
 #[inline]
 fn reg_read(regs: &Regs, x: u8) -> u64 {
     match crate::regs::REG_SLOT_LUT[(x & 31) as usize] {
@@ -850,7 +850,8 @@ fn reg_read(regs: &Regs, x: u8) -> u64 {
 }
 
 /// Write PVM2 register `x`, via the shared slot map. Writes to `x0` (and
-/// any reserved register) are no-ops.
+/// any reserved register `x16..x31`) are no-ops; `x3`/`x4` write slots
+/// `13`/`14`.
 #[inline]
 fn reg_write(regs: &mut Regs, x: u8, v: u64) {
     let s = crate::regs::REG_SLOT_LUT[(x & 31) as usize];
@@ -1244,23 +1245,29 @@ mod tests {
         assert_eq!(regs.gpr[7], 7); // x10 → slot 7: PC=4 block executed
     }
 
-    // ---- B7: an x3/x4 register field panics (was: executed as zero) ----
+    // ---- x3/x4 are real (spilled) registers the interpreter executes ----
 
     #[test]
-    fn x3_source_register_panics() {
-        // add x5, x3, x6 ; trap. x3 is reserved, so the instruction is a
-        // reserved encoding → Panic, matching the recompiler (which used
-        // to panic here while the interp executed `0 + x6`).
-        let add_x3 = 0x0061_82B3u32; // add x5, x3, x6
+    fn x3_x4_execute_as_real_registers() {
+        // addi x3, x0, 7 ; addi x4, x0, 5 ; add x5, x3, x4 ; trap.
+        // x3/x4 are RV64E GPRs (high slots 13/14); the interpreter executes
+        // them, so x5 = 7 + 5 = 12.
+        let addi_x3_7 = (7u32 << 20) | (3 << 7) | 0x13; // addi x3, x0, 7
+        let addi_x4_5 = (5u32 << 20) | (4 << 7) | 0x13; // addi x4, x0, 5
+        let add_x5 = (4u32 << 20) | (3 << 15) | (5 << 7) | 0x33; // add x5, x3, x4
         let trap = 0x0000_000Bu32;
-        let code = enc4(&[add_x3, trap]);
-        let (_regs, reason, _) = run_simple(&code, 1_000_000);
-        assert_eq!(reason, ExitReason::Panic);
+        let code = enc4(&[addi_x3_7, addi_x4_5, add_x5, trap]);
+        let (regs, reason, _) = run_simple(&code, 1_000_000);
+        assert_eq!(reason, ExitReason::Trap);
+        // x5 → slot 2 (x5 - 3); x3 → slot 13; x4 → slot 14.
+        assert_eq!(regs.gpr[2], 12);
+        assert_eq!(regs.gpr[13], 7);
+        assert_eq!(regs.gpr[14], 5);
     }
 
     #[test]
     fn x3_free_arithmetic_still_runs() {
-        // add x5, x6, x7 ; trap — no reserved register, executes normally.
+        // add x5, x6, x7 ; trap — no x3/x4, executes normally.
         let add_ok = 0x0073_02B3u32; // add x5, x6, x7
         let trap = 0x0000_000Bu32;
         let code = enc4(&[add_ok, trap]);

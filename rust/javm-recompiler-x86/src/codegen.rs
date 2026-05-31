@@ -191,6 +191,13 @@ pub struct Compiler {
     /// `Inst`); `bind_rv_gas_block_start_streaming` flushes it at
     /// block boundaries.
     pub(crate) gas_sim: GasSimulator,
+    /// When set, [`feed_gas_rv`](Compiler::feed_gas_rv) does **not** feed the
+    /// real `gas_sim`. Used by `compile_rv_spilled`: an x3/x4 instruction is
+    /// re-dispatched through the fast path with rewritten (donor) registers,
+    /// but its gas is fed once with the *original* x3/x4 slots (so the spill
+    /// cost is charged and the interpreter is matched bit-for-bit). The
+    /// throwaway path still returns the correct terminator flag.
+    pub(crate) suppress_gas: bool,
     /// Guest VA the code region is mapped at. `jalr`/`auipc` produce
     /// and consume code addresses as `code_base + offset`; the dispatch
     /// table is offset-indexed (offset = VA - code_base).
@@ -264,6 +271,7 @@ impl Compiler {
             trap_entries: Vec::with_capacity(2048),
             mem_cycles,
             gas_sim: GasSimulator::new(),
+            suppress_gas: false,
             code_base,
             code_len: code_len as u32,
             rv_streaming: false,
@@ -279,6 +287,20 @@ impl Compiler {
     /// `is_terminator` (RVF_TERM flag from the LUT entry).
     #[inline(always)]
     pub(crate) fn feed_gas_rv(&mut self, kind: u8, rs1: u8, rs2: u8, rd: u8) -> bool {
+        // During a spilled re-dispatch, gas is fed once by `compile_rv_spilled`
+        // with the original x3/x4 slots; don't perturb the real sim here. Feed
+        // a throwaway sim only to recover the terminator flag.
+        if self.suppress_gas {
+            let mut throwaway = GasSimulator::new();
+            return javm_exec::gas_cost::rv_feed_gas_kind(
+                kind,
+                rv_slot_or_ff(rs1),
+                rv_slot_or_ff(rs2),
+                rv_slot_or_ff(rd),
+                &mut throwaway,
+                self.mem_cycles,
+            );
+        }
         javm_exec::gas_cost::rv_feed_gas_kind(
             kind,
             rv_slot_or_ff(rs1),
@@ -1113,25 +1135,37 @@ fn expand_rvc_q2(h: u16, f3: u16) -> Option<u32> {
     }
 }
 
-/// Map an RV register index to its PVM slot (0..=12).
+/// Map an RV register index to its **host-mapped** PVM slot (0..=12).
 ///
-/// Returns `None` for x0 (hardwired zero) and for any reserved register
-/// (x3/x4/x16..x31). Callers handle x0 by loading an immediate 0; a
-/// reserved register causes a runtime panic at the offending PC — but it
-/// is rejected up front by `compile_rv4`'s `word_uses_reserved_reg` guard,
-/// so reaching `rv_slot(reserved)` is now unreachable defence-in-depth.
+/// Returns `None` for x0 (hardwired zero), for the host-spilled `x3`/`x4`
+/// (slots 13/14 — no [`REG_MAP`] entry), and for any reserved register
+/// (x16..x31). Callers on the fast path never see x3/x4 (the
+/// `word_uses_spilled_reg` fork in `compile_rv4` routes them to
+/// `compile_rv_spilled` first); a reserved register is unreachable
+/// defence-in-depth (the `word_uses_reserved_reg` fork panics earlier).
 #[inline]
 fn rv_slot(x: u8) -> Option<usize> {
     match RV_SLOT_LUT[(x & 31) as usize] {
-        0xFF => None,
-        s => Some(s as usize),
+        s if s <= 12 => Some(s as usize),
+        _ => None, // 0xFF (x0 / x16..x31) or 13/14 (spilled x3/x4)
     }
 }
 
-/// True for a reserved register (x3/x4/x16..x31). Single source:
-/// [`javm_exec::regs::reg_is_reserved`] (previously a local `x == 3 ||
-/// x == 4` that drifted to miss `x16..x31`).
+/// Guest VA of a host-spilled register's home in `JitContext.regs`.
+/// Only valid for `x3`/`x4` (slots 13/14); the recompiler addresses it
+/// RIP-relatively, exactly as the prologue/epilogue address the 13
+/// host-mapped slots.
+#[inline]
+fn spill_va(x: u8) -> u64 {
+    CTX_REGS + (RV_SLOT_LUT[(x & 31) as usize] as u64) * 8
+}
+
+/// True for a reserved register (`x16..x31`, which do not exist in RV64E).
+/// Single source: [`javm_exec::regs::reg_is_reserved`].
 use javm_exec::regs::reg_is_reserved as rv_is_reserved;
+/// True for a host-spilled register (`x3`/`x4`). Single source:
+/// [`javm_exec::regs::reg_is_spilled`].
+use javm_exec::regs::reg_is_spilled;
 
 impl Compiler {
     /// Compile an RV+C+custom-0 byte stream into x86-64 in a single
@@ -1345,14 +1379,24 @@ impl Compiler {
         let f3 = ((w >> 12) & 0x07) as u8;
         let f7 = ((w >> 25) & 0x7F) as u8;
 
-        // x3/x4 in any register field is reserved (Category 1 #4): panic,
-        // uniformly, matching the interpreter (which decodes such an
+        // x16..x31 in any register field is an illegal RV64E encoding:
+        // panic, uniformly, matching the interpreter (which decodes such an
         // instruction as `Reserved`). Shared predicate so the two engines
         // can't drift; covers expanded RVC, which routes through here.
         if javm_exec::instruction::word_uses_reserved_reg(w) {
             self.rv_emit_panic_at(pc);
             self.feed_gas_rv(RV_KIND_RESERVED, 0, 0, 0);
             return (true, false, 0);
+        }
+
+        // x3/x4 in any register field: route to the cold spill path. These
+        // are valid RV64E registers the runtime must execute, but the host
+        // register file is full, so they live in `JitContext.regs[13|14]`
+        // and are materialised per access. Conformant code never names them
+        // (the toolchain rejects x3/x4), so this fork is never taken for the
+        // 12 bench guests — the fast-path dispatch below stays byte-identical.
+        if javm_exec::instruction::word_uses_spilled_reg(w) {
+            return self.compile_rv_spilled(w, pc, inst_len);
         }
 
         match opcode {
@@ -1410,6 +1454,292 @@ impl Compiler {
                 (true, false, 0)
             }
         }
+    }
+
+    // === x3/x4 spill path (cold) ==================================
+    //
+    // `x3`/`x4` are valid RV64E registers but have no host register (the
+    // file is exhausted by the 13 commonly-used slots), so they live in
+    // `JitContext.regs[13|14]` and are materialised per access. Conformant
+    // code never names them — the toolchain rejects x3/x4 — so this whole
+    // path is cold; it exists only so an untrusted RV64E blob executes
+    // bit-for-bit with the interpreter.
+    //
+    // Gas is fed once here with the *original* x3/x4 slots (so the
+    // memory-spill cost is charged, exactly as the interpreter charges it).
+    // The actual emit is then done with `suppress_gas` set so the reused
+    // fast-path helpers don't double-feed.
+
+    fn compile_rv_spilled(&mut self, w: u32, pc: u32, inst_len: u32) -> (bool, bool, usize) {
+        use javm_exec::gas_cost::{rv_feed_gas_direct, rv_gas_meta};
+        // Gas: original registers → memory-spill cost + the terminator flag,
+        // matching the interpreter's per-instruction feed exactly.
+        let inst = javm_exec::instruction::decode(&w.to_le_bytes())
+            .expect("4-byte spilled word decodes")
+            .0;
+        let term = rv_feed_gas_direct(&rv_gas_meta(&inst), &mut self.gas_sim, self.mem_cycles);
+
+        let opcode = (w >> 2) & 0x1F;
+        let f3 = (w >> 12) & 0x07;
+        let rd = ((w >> 7) & 0x1F) as u8;
+        let rs1 = ((w >> 15) & 0x1F) as u8;
+        let rs2 = ((w >> 20) & 0x1F) as u8;
+
+        self.suppress_gas = true;
+        match opcode {
+            // Terminators: sources go through the spill-aware `rv_read` /
+            // `rv_read_into` (into the clobberable SCRATCH, which the jump
+            // discards), and spilled `rd` / `rs2` are handled inline.
+            OP_JAL => self.rv_jal_spilled(rd, imm_j(w), pc, pc + inst_len),
+            OP_JALR if f3 == 0 => self.rv_jalr_spilled(rd, rs1, imm_i(w), pc, pc + inst_len),
+            OP_BRANCH => self.rv_branch_spilled(rs1, rs2, f3 as u8, imm_b(w), pc),
+            // Non-terminators: load spilled sources into collision-free donor
+            // host registers, rewrite the word, re-dispatch through the fast
+            // path, store the spilled dest back, restore donors.
+            OP_LOAD | OP_STORE | OP_IMM | OP_OP_IMM_32 | OP_OP | OP_OP_32 | OP_LUI | OP_AUIPC => {
+                self.emit_spilled_via_donors(w, pc, inst_len)
+            }
+            // No other opcode names x3/x4 in a register field
+            // (`word_uses_spilled_reg` only fires for R/I/S/B/U/J formats).
+            _ => self.rv_emit_panic_at(pc),
+        }
+        self.suppress_gas = false;
+        (term, false, 0)
+    }
+
+    /// Non-terminator spill: borrow donor host registers for x3/x4, rewrite
+    /// the instruction to name the donors, re-dispatch through the fast path
+    /// (gas suppressed, no fusion), then store a spilled dest back. Bounded:
+    /// ≤2 donor push/pops + ≤2 loads + ≤1 store around one fast-path emit.
+    fn emit_spilled_via_donors(&mut self, w: u32, pc: u32, inst_len: u32) {
+        let opcode = (w >> 2) & 0x1F;
+        let rd = ((w >> 7) & 0x1F) as u8;
+        let rs1 = ((w >> 15) & 0x1F) as u8;
+        let rs2 = ((w >> 20) & 0x1F) as u8;
+
+        // Which register fields this format actually uses, and their role.
+        let (has_rd, has_rs1, has_rs2) = match opcode {
+            OP_LOAD | OP_IMM | OP_OP_IMM_32 => (true, true, false),
+            OP_OP | OP_OP_32 => (true, true, true),
+            OP_STORE => (false, true, true),
+            OP_LUI | OP_AUIPC => (true, false, false),
+            _ => {
+                self.rv_emit_panic_at(pc);
+                return;
+            }
+        };
+
+        // Mark non-spilled, host-mapped operand regs so a donor never aliases
+        // a real operand (x0 has no host reg; x3/x4 are the ones we replace).
+        let mut blocked = [false; 16];
+        let mut block = |x: u8| {
+            if x != 0 && !reg_is_spilled(x) && !rv_is_reserved(x) {
+                blocked[x as usize] = true;
+            }
+        };
+        if has_rd {
+            block(rd);
+        }
+        if has_rs1 {
+            block(rs1);
+        }
+        if has_rs2 {
+            block(rs2);
+        }
+
+        // Does x3 / x4 appear in any used register field?
+        let appears = |x: u8| (has_rd && rd == x) || (has_rs1 && rs1 == x) || (has_rs2 && rs2 == x);
+        let need3 = appears(3);
+        let need4 = appears(4);
+
+        // Pick donor RV regs from the host-mapped set, avoiding real operands.
+        const CANDIDATES: [u8; 13] = [1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        let pick = |blocked: &mut [bool; 16]| -> u8 {
+            for &c in &CANDIDATES {
+                if !blocked[c as usize] {
+                    blocked[c as usize] = true;
+                    return c;
+                }
+            }
+            unreachable!("≤2 operands block ≤2 of 13 candidates")
+        };
+        let donor3 = if need3 { pick(&mut blocked) } else { 0 };
+        let donor4 = if need4 { pick(&mut blocked) } else { 0 };
+
+        // Save the donor host registers (restored after the emit).
+        let mut donors = [0u8; 2];
+        let mut n = 0;
+        if need3 {
+            donors[n] = donor3;
+            n += 1;
+        }
+        if need4 {
+            donors[n] = donor4;
+            n += 1;
+        }
+        for d in &donors[..n] {
+            self.asm.push(REG_MAP[rv_slot(*d).unwrap()]);
+        }
+
+        // Load spilled *sources* into their donor host regs.
+        let src3 = (has_rs1 && rs1 == 3) || (has_rs2 && rs2 == 3);
+        let src4 = (has_rs1 && rs1 == 4) || (has_rs2 && rs2 == 4);
+        if need3 && src3 {
+            self.asm
+                .mov_load64_rip_rel(REG_MAP[rv_slot(donor3).unwrap()], spill_va(3));
+        }
+        if need4 && src4 {
+            self.asm
+                .mov_load64_rip_rel(REG_MAP[rv_slot(donor4).unwrap()], spill_va(4));
+        }
+
+        // Donor reg_defs must not carry stale const/scaled-add tracking into
+        // the fast-path emit (we restore the donor's value afterwards).
+        for d in &donors[..n] {
+            self.invalidate_reg(rv_slot(*d).unwrap());
+        }
+
+        // Rewrite the word: x3 → donor3, x4 → donor4 in the used fields.
+        let repl = |r: u8| -> u8 {
+            if r == 3 {
+                donor3
+            } else if r == 4 {
+                donor4
+            } else {
+                r
+            }
+        };
+        let mut wr = w;
+        if has_rd {
+            wr = (wr & !(0x1F << 7)) | ((repl(rd) as u32) << 7);
+        }
+        if has_rs1 {
+            wr = (wr & !(0x1F << 15)) | ((repl(rs1) as u32) << 15);
+        }
+        if has_rs2 {
+            wr = (wr & !(0x1F << 20)) | ((repl(rs2) as u32) << 20);
+        }
+
+        // Re-dispatch with no lookahead (empty `rest` → no fusion). Gas is
+        // already suppressed by the caller.
+        let _ = self.compile_rv4(wr, pc, inst_len, &[]);
+
+        // Store a spilled destination back to its home.
+        if has_rd && reg_is_spilled(rd) {
+            let donor = if rd == 3 { donor3 } else { donor4 };
+            self.asm
+                .mov_store64_rip_rel(spill_va(rd), REG_MAP[rv_slot(donor).unwrap()]);
+        }
+
+        // Restore donors (value + reg_defs).
+        for d in &donors[..n] {
+            self.invalidate_reg(rv_slot(*d).unwrap());
+        }
+        for d in donors[..n].iter().rev() {
+            self.asm.pop(REG_MAP[rv_slot(*d).unwrap()]);
+        }
+    }
+
+    /// `jal rd, imm` where `rd ∈ {x3, x4}` (the only register field of a
+    /// J-type). Writes the return-address VA (a constant `< 4 GiB`, so the
+    /// high word is 0) straight to the spilled home, then jumps.
+    fn rv_jal_spilled(&mut self, rd: u8, imm: i32, pc: u32, next_pc: u32) {
+        let ret = self.code_base.wrapping_add(next_pc);
+        self.asm.mov_store32_rip_rel_imm(spill_va(rd), ret as i32);
+        self.asm.mov_store32_rip_rel_imm(spill_va(rd) + 4, 0);
+        let target = (pc as i64).wrapping_add(imm as i64) as u32;
+        self.emit_static_branch(target, true, next_pc, pc);
+    }
+
+    /// `jalr rd, rs1, imm` with `x3`/`x4` in `rd` and/or `rs1`. Mirrors
+    /// [`rv_jalr`] but reads `rs1` via the spill-aware [`rv_read`] (into
+    /// SCRATCH) and writes a spilled `rd` to its home as two 32-bit stores
+    /// (low = return VA, high = 0), leaving SCRATCH holding the target.
+    fn rv_jalr_spilled(&mut self, rd: u8, rs1: u8, imm: i32, pc: u32, next_pc: u32) {
+        use super::asm::Cc;
+        // SCRATCH = (rs1 + imm) & 0xFFFFFFFF.
+        self.rv_read(rs1, SCRATCH, pc);
+        if imm != 0 {
+            self.asm.add_ri(SCRATCH, imm);
+        }
+        self.asm.shl_ri64(SCRATCH, 32);
+        self.asm.shr_ri64(SCRATCH, 32);
+        // Return address (a guest VA) into rd — after the SCRATCH read, so a
+        // spilled rd == rs1 doesn't perturb the target already in SCRATCH.
+        if rd != 0 {
+            let ret = self.code_base.wrapping_add(next_pc);
+            if reg_is_spilled(rd) {
+                self.asm.mov_store32_rip_rel_imm(spill_va(rd), ret as i32);
+                self.asm.mov_store32_rip_rel_imm(spill_va(rd) + 4, 0);
+            } else {
+                let slot = rv_slot(rd).unwrap();
+                self.asm.mov_ri64(REG_MAP[slot], ret as u64);
+                self.invalidate_reg(slot);
+            }
+        }
+        if self.code_base != 0 {
+            self.asm.sub_ri(SCRATCH, self.code_base as i32);
+        }
+        self.asm.mov_store32_rip_rel(CTX_PC, SCRATCH);
+        self.asm.cmp_ri32(SCRATCH, self.code_len as i32);
+        self.asm.jcc_label(Cc::AE, self.panic_label);
+        self.asm.push(Reg::RAX);
+        self.asm.mov_load64_rip_rel(Reg::RAX, CTX_DISPATCH_TABLE);
+        self.asm.movsxd_load_sib4(Reg::RAX, Reg::RAX, SCRATCH);
+        self.asm.add_r64_mem_rip_rel(Reg::RAX, CTX_CODE_BASE);
+        self.asm.mov_rr(SCRATCH, Reg::RAX);
+        self.asm.pop(Reg::RAX);
+        self.asm.jmp_reg(SCRATCH);
+    }
+
+    /// Conditional branch with `x3`/`x4` in `rs1` and/or `rs2`. `rs1` loads
+    /// via the spill-aware [`rv_read_into`]; `rs2` is compared as a register,
+    /// the immediate 0, or directly from its spilled memory home (so the
+    /// both-spilled case needs no second scratch).
+    fn rv_branch_spilled(&mut self, rs1: u8, rs2: u8, f3: u8, imm: i32, pc: u32) {
+        let cc = match f3 {
+            0b000 => Cc::E,
+            0b001 => Cc::NE,
+            0b100 => Cc::L,
+            0b101 => Cc::GE,
+            0b110 => Cc::B,
+            0b111 => Cc::AE,
+            _ => {
+                self.rv_emit_panic_at(pc);
+                return;
+            }
+        };
+        let target = (pc as i64).wrapping_add(imm as i64) as u32;
+        let a = self.rv_read_into(rs1, SCRATCH, pc);
+        if reg_is_spilled(rs2) {
+            self.asm.cmp_r64_mem_rip_rel(a, spill_va(rs2));
+        } else if rs2 == 0 {
+            self.asm.cmp_ri32(a, 0);
+        } else {
+            self.asm.cmp_rr(a, REG_MAP[rv_slot(rs2).unwrap()]);
+        }
+        self.emit_cond_branch_to(cc, target, pc);
+    }
+
+    /// Emit a conditional jump to `target` assuming flags are already set
+    /// (the spilled-branch path emits its own `cmp`). Mirrors the streaming
+    /// deferral / non-block-start-panic logic of [`emit_branch_reg`]; byte
+    /// layout differs (cold path), but the control-flow outcome is identical.
+    fn emit_cond_branch_to(&mut self, cc: Cc, target: u32, pc: u32) {
+        if self.rv_streaming && target > pc {
+            let label = self.label_for_pc(target);
+            let fixup_idx = self.asm.fixups_len();
+            self.asm.jcc_label(cc, label);
+            self.rv_pending_fwd_branches.push((target, pc, fixup_idx));
+            return;
+        }
+        if !self.is_basic_block_start(target) {
+            self.asm.mov_store32_rip_rel_imm(CTX_PC, pc as i32);
+            self.asm.jcc_label(cc, self.panic_label);
+            return;
+        }
+        let label = self.label_for_pc(target);
+        self.asm.jcc_label(cc, label);
     }
 
     // === Per-opcode dispatchers (4-byte path) =====================
@@ -2321,10 +2651,13 @@ impl Compiler {
     // RV-side helpers — resolve x0/x3/x4 aliases and call through asm.
     // ----------------------------------------------------------------
 
-    /// Read RV source register into `dst_reg`. x0 → load 0; x3/x4 → panic.
+    /// Read RV source register into `dst_reg`. x0 → load 0; `x3`/`x4`
+    /// (host-spilled) → load from `JitContext.regs[13|14]`; x16..x31 → panic.
     fn rv_read(&mut self, rs: u8, dst_reg: Reg, pc: u32) {
         if rs == 0 {
             self.asm.mov_ri64(dst_reg, 0);
+        } else if reg_is_spilled(rs) {
+            self.asm.mov_load64_rip_rel(dst_reg, spill_va(rs));
         } else if rv_is_reserved(rs) {
             self.rv_emit_panic_at(pc);
         } else {
@@ -2333,10 +2666,14 @@ impl Compiler {
     }
 
     /// Return the x86 register holding rs's value. For x0, materialise 0
-    /// into `scratch` and return `scratch`.
+    /// into `scratch` and return `scratch`. For a host-spilled `x3`/`x4`,
+    /// load from `JitContext.regs[13|14]` into `scratch` and return it.
     fn rv_read_into(&mut self, rs: u8, scratch: Reg, pc: u32) -> Reg {
         if rs == 0 {
             self.asm.mov_ri64(scratch, 0);
+            scratch
+        } else if reg_is_spilled(rs) {
+            self.asm.mov_load64_rip_rel(scratch, spill_va(rs));
             scratch
         } else if rv_is_reserved(rs) {
             self.rv_emit_panic_at(pc);
