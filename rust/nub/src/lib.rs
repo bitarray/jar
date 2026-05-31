@@ -68,8 +68,10 @@ enum Backend {
     },
     /// Hyperlight backend: the cap directory lives guest-side as a
     /// `static CacheDirectory<FixedState>` in `nub-arch-x86`; the host
-    /// reads it through `GuestCacheReader` (e.g. the `put_cap_with_hash`
-    /// short-circuit) and writes via the `FN_ID_NUB_PUT_CAP` RPC.
+    /// writes via the `FN_ID_NUB_PUT_CAP` RPC and tracks published blob
+    /// hashes host-side to short-circuit idempotent re-puts (it does
+    /// *not* dereference the guest's hashbrown — see
+    /// `MultiUseSandbox::published_blobs` for why that is unsound).
     Hyperlight(Box<HyperlightDriver>),
 }
 
@@ -189,13 +191,15 @@ impl Nub {
     /// Debug-asserts the claimed hash matches the cap; release trusts
     /// the caller.
     ///
-    /// Hyperlight backend: short-circuits to a host-side
-    /// `GuestCacheReader::contains(hash)` check against the guest's
-    /// heap-resident `CacheDirectory` (mapped at the host's matching
-    /// VA via the snapshot mapping). On a hit, no RPC roundtrip and
-    /// no guest-side merkle walk — the typical bench / replay
-    /// workload re-publishes the same cap graph every iteration and
-    /// pays only one host-side `HashMap::contains_key`.
+    /// Hyperlight backend: short-circuits on a host-side set of blob
+    /// hashes this sandbox has already published. On a hit, no RPC
+    /// roundtrip and no guest-side merkle walk — the typical bench /
+    /// replay workload re-publishes the same cap graph every iteration
+    /// and pays only one host-side `HashSet::contains`. (The host does
+    /// not read the guest's `CacheDirectory` directly: it is a hashbrown
+    /// table built with a different SIMD `Group` width than the host's,
+    /// so a cross-binary deref is unsound — see
+    /// `nub-host-kvm::MultiUseSandbox::published_blobs`.)
     pub fn put_cap_with_hash(&mut self, hash: AbiCapHash, cap: &javm_cap::Cap) -> Result<()> {
         match &mut self.backend {
             Backend::Local { cache, .. } => cache
