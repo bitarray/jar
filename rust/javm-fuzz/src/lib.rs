@@ -29,6 +29,7 @@ use std::collections::BTreeMap;
 pub mod encode;
 pub mod generate;
 pub mod oracle;
+pub mod shrink;
 
 // The dual-engine replay needs the Hyperlight recompiler host stack, gated to
 // linux/x86_64 (via `javm-bench`). The generator, encoders, and vector types
