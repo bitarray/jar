@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 
 pub mod encode;
 pub mod generate;
+pub mod oracle;
 
 // The dual-engine replay needs the Hyperlight recompiler host stack, gated to
 // linux/x86_64 (via `javm-bench`). The generator, encoders, and vector types
@@ -86,6 +87,13 @@ impl Program {
 pub struct VectorFile {
     pub meta: VectorMeta,
     pub vectors: Vec<Vector>,
+}
+
+impl VectorFile {
+    /// Parse a committed vector file from JSON.
+    pub fn from_json(s: &str) -> serde_json::Result<Self> {
+        serde_json::from_str(s)
+    }
 }
 
 /// Provenance for a vector batch — enough to reproduce and to detect staleness.
