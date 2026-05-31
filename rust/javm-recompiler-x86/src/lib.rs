@@ -25,17 +25,20 @@ pub mod codegen;
 /// `CTX_*` offset constants in [`codegen`].
 #[repr(C)]
 pub struct JitContext {
-    /// PVM registers (offset 0, 13 × 8 = 104 bytes).
-    pub regs: [u64; 13],
-    /// Gas counter (offset 104). Signed to detect underflow.
+    /// PVM2 registers (offset 0, 15 × 8 = 120 bytes). Slots 0..12 are the
+    /// host-mapped GPRs (flushed to/from x86 registers at the prologue /
+    /// epilogue); slots 13/14 are the spilled `x3`/`x4`, which live here in
+    /// memory for the whole block and are materialised per access.
+    pub regs: [u64; 15],
+    /// Gas counter. Signed to detect underflow.
     pub gas: i64,
-    /// Exit reason code (offset 112).
+    /// Exit reason code.
     pub exit_reason: u32,
-    /// Exit argument (offset 116) — host call ID, page fault addr, etc.
+    /// Exit argument — host call ID, page fault addr, etc.
     pub exit_arg: u32,
-    /// Heap base address (offset 120).
+    /// Heap base address.
     pub heap_base: u32,
-    /// Current heap top (offset 124).
+    /// Current heap top.
     pub heap_top: u32,
     /// Entry PC for re-entry after host calls.
     pub entry_pc: u32,

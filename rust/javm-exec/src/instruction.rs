@@ -603,17 +603,17 @@ pub enum Inst {
 
 impl Inst {
     /// True iff this instruction names a reserved register in any of its
-    /// register fields. The valid PVM2 registers are `x0, x1, x2, x5..x15`;
-    /// reserved are `x3`/`x4` (PVM2-specific, Category 1 #4) and `x16..x31`
-    /// (they do not exist in RV64E — a 16-register base — so they are
-    /// illegal, standard RV). Either way such an instruction is a reserved
-    /// encoding: it decodes as `Reserved` and panics if executed (lazy).
-    /// Immediate bits that happen to alias a reserved register are **not**
-    /// registers and are ignored — each variant binds exactly its real
-    /// register fields. This match is the single source of truth both
-    /// consensus engines route through (the interpreter via [`decode`], the
-    /// recompiler via [`word_uses_reserved_reg`]); the lack of a wildcard
-    /// arm means a future `Inst` variant won't compile until classified.
+    /// register fields. The valid PVM2 registers are `x0, x1..x15` (RV64E's
+    /// full file, including `x3`/`x4`); reserved are only `x16..x31`, which
+    /// do not exist in RV64E — a 16-register base — so naming one is an
+    /// illegal, standard-RV encoding. Such an instruction decodes as
+    /// `Reserved` and panics if executed (lazy). Immediate bits that happen
+    /// to alias a reserved register are **not** registers and are ignored —
+    /// each variant binds exactly its real register fields. This match is
+    /// the single source of truth both consensus engines route through (the
+    /// interpreter via [`decode`], the recompiler via
+    /// [`word_uses_reserved_reg`]); the lack of a wildcard arm means a
+    /// future `Inst` variant won't compile until classified.
     pub fn uses_reserved_reg(&self) -> bool {
         use crate::regs::reg_is_reserved as r;
         use Inst::*;
@@ -736,31 +736,19 @@ impl Inst {
     }
 }
 
-/// Reserved-register predicate on a raw 4-byte word, for the recompiler
-/// (which dispatches on raw words rather than building an [`Inst`], and
-/// runs on the cold-compile hot path — so this must not re-decode).
-///
-/// Checks `x3`/`x4` only in the positions the instruction's *format* uses
-/// as registers; immediate bits in those positions are ignored. For every
-/// **non-reserved** word this equals [`Inst::uses_reserved_reg`] (pinned by
-/// `word_predicate_matches_inst_predicate`), so the interpreter and
-/// recompiler agree on which `x3`/`x4` instructions panic. For a
-/// reserved-decoding word the two may differ, but such a word panics via
-/// the normal reserved path in both engines anyway, so the *outcome* still
-/// matches.
+/// Apply a per-register-index predicate `pred` to every field a raw 4-byte
+/// word uses *as a register* (per its format), ignoring immediate bits that
+/// happen to alias a register field. The shared core behind
+/// [`word_uses_reserved_reg`] and [`word_uses_spilled_reg`] — keeping the
+/// format → register-field mapping in **one** place so the two predicates
+/// can't disagree on which positions are registers.
 ///
 /// `#[inline]` so it folds into the recompiler's `compile_rv4` across the
 /// crate boundary (the field extractions then CSE against the ones
-/// `compile_rv4` already does). The residual per-instruction opcode match
-/// is a small fixed cold-compile cost (≈1–4% on the heaviest workloads,
-/// none on warm) — accepted as the price of one verifiable check that
-/// keeps the two engines from drifting; the alternative (a check spread
-/// across every register-access helper) is what made B7 possible.
+/// `compile_rv4` already does).
 #[inline]
-pub fn word_uses_reserved_reg(w: u32) -> bool {
-    fn r(x: u32) -> bool {
-        crate::regs::reg_is_reserved(x as u8)
-    }
+fn word_reg_class_hits(w: u32, pred: fn(u8) -> bool) -> bool {
+    let r = |x: u32| pred(x as u8);
     let rd = (w >> 7) & 0x1F;
     let rs1 = (w >> 15) & 0x1F;
     let rs2 = (w >> 20) & 0x1F;
@@ -777,6 +765,33 @@ pub fn word_uses_reserved_reg(w: u32) -> bool {
         // field (reserved or no-reg); they panic via the normal path.
         _ => false,
     }
+}
+
+/// Reserved-register predicate on a raw 4-byte word, for the recompiler
+/// (which dispatches on raw words rather than building an [`Inst`], and
+/// runs on the cold-compile hot path — so this must not re-decode).
+///
+/// True iff the word names `x16..x31` (which do not exist in RV64E) in a
+/// real register field. For every word this equals
+/// [`Inst::uses_reserved_reg`] (pinned by
+/// `word_predicate_matches_inst_predicate`), so the interpreter and
+/// recompiler agree on which encodings are illegal and panic.
+#[inline]
+pub fn word_uses_reserved_reg(w: u32) -> bool {
+    word_reg_class_hits(w, crate::regs::reg_is_reserved)
+}
+
+/// Spilled-register predicate on a raw 4-byte word, for the recompiler.
+///
+/// True iff the word names `x3` or `x4` (the two host-spilled GPRs) in a
+/// real register field. The recompiler tests this *after*
+/// [`word_uses_reserved_reg`] to route an `x3`/`x4` instruction to its cold
+/// spill path; the interpreter needs no equivalent (it executes `x3`/`x4`
+/// as ordinary slot-13/14 GPRs). For every conformant word the toolchain
+/// emits this is `false`, so the recompiler's fast path is untouched.
+#[inline]
+pub fn word_uses_spilled_reg(w: u32) -> bool {
+    word_reg_class_hits(w, crate::regs::reg_is_spilled)
 }
 
 /// Major opcode of a 32-bit RV instruction is bits [6:2]; bits [1:0]
@@ -1921,58 +1936,75 @@ mod tests {
         ));
     }
 
-    // ---- B7: x3/x4 in a register field decodes as Reserved -------------
+    // ---- x3/x4 are real (spilled) registers; only x16..x31 reserved ----
 
     #[test]
-    fn reserved_register_field_is_reserved() {
-        // add x5, x3, x6 (rs1 = x3) → Reserved (was decoded as a live Add,
-        // which the interp executed as `0 + x6` while the recomp panicked).
+    fn x3_x4_decode_as_live_spilled_registers() {
+        // add x5, x3, x6 (rs1 = x3) → a live Add the interpreter executes
+        // (slot 13); the recompiler routes it to the spill path. It is NOT
+        // reserved, but IS spilled.
         let add_x3 = 0x0061_82B3u32; // add x5, x3, x6
         assert!(matches!(
             decode(&add_x3.to_le_bytes()).unwrap().0,
-            Inst::Reserved { .. }
+            Inst::Add {
+                rd: 5,
+                rs1: 3,
+                rs2: 6
+            }
         ));
-        assert!(word_uses_reserved_reg(add_x3));
+        assert!(!word_uses_reserved_reg(add_x3));
+        assert!(word_uses_spilled_reg(add_x3));
 
-        // addi x3, x0, 1 (rd = x3) → Reserved.
+        // addi x3, x0, 1 (rd = x3) → live Addi writing x3 (slot 13).
         let addi_x3 = 0x0010_0193u32;
         assert!(matches!(
             decode(&addi_x3.to_le_bytes()).unwrap().0,
-            Inst::Reserved { .. }
+            Inst::Addi {
+                rd: 3,
+                rs1: 0,
+                imm: 1
+            }
         ));
+        assert!(!word_uses_reserved_reg(addi_x3));
+        assert!(word_uses_spilled_reg(addi_x3));
 
         // add x16, x5, x6 (rd = x16) → Reserved: x16..x31 don't exist in
-        // RV64E (standard RV), so the encoding is illegal.
+        // RV64E (standard RV), so the encoding is illegal — still reserved,
+        // never spilled.
         let add_x16 = 0x0062_8833u32; // add x16, x5, x6
         assert!(matches!(
             decode(&add_x16.to_le_bytes()).unwrap().0,
             Inst::Reserved { .. }
         ));
         assert!(word_uses_reserved_reg(add_x16));
+        assert!(!word_uses_spilled_reg(add_x16));
     }
 
     #[test]
     fn x3_x4_free_instruction_is_unaffected() {
-        // add x5, x6, x7 — no reserved register → decodes normally.
+        // add x5, x6, x7 — neither reserved nor spilled → decodes normally,
+        // stays on the recompiler fast path.
         let add_ok = 0x0073_02B3u32;
         assert!(matches!(
             decode(&add_ok.to_le_bytes()).unwrap().0,
             Inst::Add { .. }
         ));
         assert!(!word_uses_reserved_reg(add_ok));
+        assert!(!word_uses_spilled_reg(add_ok));
     }
 
     #[test]
     fn immediate_bits_aliasing_x3_are_not_a_register() {
         // lui x5, 0x18000 — bits [19:15] of the word are 0b00011 (= 3),
         // but for U-type that field is *immediate*, not rs1, so the
-        // instruction is a normal Lui, never Reserved.
+        // instruction is a normal Lui — neither reserved nor spilled.
         let lui = 0x0001_82B7u32;
         assert!(matches!(
             decode(&lui.to_le_bytes()).unwrap().0,
             Inst::Lui { rd: 5, .. }
         ));
         assert!(!word_uses_reserved_reg(lui));
+        assert!(!word_uses_spilled_reg(lui));
     }
 
     #[test]
@@ -1980,9 +2012,10 @@ mod tests {
         // The recompiler's fast `word_uses_reserved_reg` (opcode-mask, no
         // decode) must equal the interpreter's `Inst::uses_reserved_reg`
         // for every *non-reserved* word — that is what makes the two
-        // engines agree on which x3/x4 instructions panic. (A
-        // reserved-decoding word panics either way, so its predicate value
-        // is unconstrained here.) Sweep every 7-bit opcode × funct3 ×
+        // engines agree on which encodings are illegal and panic (x16..x31
+        // only; x3/x4 are valid). (A reserved-decoding word panics either
+        // way, so its predicate value is unconstrained here.) Sweep every
+        // 7-bit opcode × funct3 ×
         // representative funct7, with each register field ranging over
         // {x0, x3, x4, x5} so both reserved and free positions are hit.
         for major in 0u32..0x20 {

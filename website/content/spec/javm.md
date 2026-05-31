@@ -1,382 +1,254 @@
-# JAVM (PVM2) differential spec
+# JAVM (PVM2) — RV64E + Xjar + EEI
 
-JAVM is the virtual machine for JAR's guest execution. This
-document specifies **PVM2**, the ISA that is used by JAVM, *as a delta from RV64E + standard extensions*.
+JAVM is the virtual machine for JAR's guest execution. Its ISA, **PVM2**,
+is **fully conformant RISC-V**: the **RV64E** base, a fixed set of standard
+extensions, **one custom extension `Xjar`** (in the RV-reserved custom-0
+space), and a specific **execution-environment interface (EEI)**. Nothing
+in PVM2 contradicts the behavior the RISC-V unprivileged spec defines for a
+base-or-standard instruction.
+
+```
+PVM2  ::=  RV64E  +  {M, C, Zbb, Zba, Zbs, Zicond, Zicclsm}  +  Xjar  +  EEI
+```
 
 ## Rationale
 
-The predecessor design of JAVM is based on PVM ISA. Our benchmarks show that the custom PVM ISA is not necessary. With a mostly-standard-compliant RISC-V, we still manage to get a recompiler that is as fast as the old design.
+The predecessor design of JAVM is based on the custom PVM ISA. Our
+benchmarks show that the custom ISA is not necessary: with a
+standard-compliant RISC-V we still get a recompiler as fast as the old
+design. We therefore moved to standard RISC-V — a battle-tested ISA is less
+likely to harbor design issues, and adopting new RISC-V extensions becomes
+much easier.
 
-We therefore decide to get closer to standard RISC-V. This has enourmous advantage for JAVM. An already battle-tested ISA is less likely to have unexpected design issues. We'll also have a much easier time to adopt new RISC-V extensions.
+An earlier draft of this spec framed PVM2 as RV64E with "four hard
+divergences." Each has since been resolved into one of the three conformant
+buckets below — the `Xjar` extension or the EEI — with no behavior change.
 
-We call the new ISA "PVM2". The specification is defined as a small set of differential from RV64E.
+## How PVM2 relates to RV64E
 
-## Components
+Every part of PVM2 is one of three things, none a contradiction of the base
+ISA:
 
-```
-PVM2  ::=  PVM2-Base  +  RV-extensions  +  custom-0 ops
-```
+- **Standard RV64E + standard extensions**, used unchanged — including
+  **plain RISC-V control flow** (`jal`, `jalr`, `auipc`, branches, and the
+  compressed `c.j`/`c.jr`/`c.jalr` forms all behave as the RV spec
+  defines). An earlier draft routed calls through a custom `br_table`; that
+  static-dispatch model has been removed.
+- **The `Xjar` custom extension** (custom-0 opcode), which adds behavior in
+  the blessed mold of RISC-V's own security extensions: **landing-pad
+  control-flow integrity** on indirect jumps (cf. Zicfilp) and the
+  **custom-0 host / control ops** (`trap`, `ecall.jar`, `ecalli`,
+  `fallthrough`).
+- **EEI configuration**: choices the RISC-V spec delegates to the execution
+  environment — the aliased memory map, the `ecall`/`ebreak` handler,
+  guaranteed misaligned support, `fence` retirement, and the absence of
+  CSRs / privilege / atomics / FP.
 
-(Custom-1 was used in an earlier draft for `callf`; PVM2 no longer
-uses it — the entire custom-1 major opcode is reserved.)
+The register model — RV64E's 15 GPRs — is plain base ISA.
 
-PVM2 uses **plain RISC-V control flow**: `jal`, `jalr`, `auipc`,
-branches, and the compressed `c.j`/`c.jr`/`c.jalr` forms all behave as
-the RV spec defines. An earlier draft forbade `jalr`/`auipc` and routed
-every call/return through a custom `br_table` backed by Image-side jump
-tables; that static-dispatch model has been removed. The single
-control-flow divergence that remains is a *runtime* one: an indirect
-jump (`jalr`) must land on a basic-block start (Category 1 #2) —
-validated when it executes, never trusted from metadata.
+## The Xjar extension
 
-## Two kinds of divergence
+`Xjar` occupies the RV-reserved `custom-0` major opcode (`opcode =
+0001011`) and adds one architectural rule beyond its custom instructions:
 
-PVM2's deltas split into two cleanly separated buckets. Keeping them
-apart matters: Category 1 is where PVM2 is *not* RV64E; Category 2 is
-where PVM2 is a *particular* RV64E.
+**Xjar CFI — every indirect-jump (`jalr`) target must be a basic-block
+start.** A `jalr` (and `c.jr`/`c.jalr`) whose target lands mid-block or
+mid-instruction takes a **fatal trap** (ε = panic). The valid-target set is
+`bb_starts(code)` (see [Basic-block boundaries](#basic-block-boundaries-bb_starts));
+a block start is an implicit landing pad.
 
-- **Category 1 — hard spec divergences.** The RISC-V unprivileged spec
-  defines a behavior and PVM2 produces a different one — either changing
-  the architectural result of an instruction both ISAs accept, or
-  removing/constraining a base-ISA instruction in a way the spec does
-  not grant an EEI. A stock RV64E core and PVM2 disagree exactly here.
-- **Category 2 — platform / EEI configuration.** The spec explicitly
-  delegates the choice to the execution-environment interface (EEI),
-  the platform memory map, or the extension profile, and PVM2 selects
-  one allowed point. A conforming RV64E implementation could legally be
-  configured the same way — these are not divergences, just choices.
+This is the shape of the ratified RISC-V CFI extension **Zicfilp** (the
+Control-Flow Integrity chapter), which constrains standard-`jalr` targets
+to landing-pad instructions and faults otherwise. `Xjar`'s variant is
+coarser and stricter: the landing pads are *structurally derived* from the
+instruction stream (no explicit `lpad` marker, no label), **every** `jalr`
+target must be one (no exemptions), and the fault is terminal. Native
+`jalr` is retained.
 
-Anything in neither bucket behaves exactly as the RISC-V unprivileged
-spec defines it.
+*Why:* per-block gas is precharged at block entry, so entering a block
+anywhere but its start would bypass the charge. The check is a runtime one,
+derived from the instruction stream — the recompiler runs untrusted code
+and never trusts a linker-supplied target table. In the x86 recompiler it
+is folded into the dispatch table: a dense `offset → native` table whose
+every non-block-start slot holds the panic stub, so `jalr` is a bounds
+check plus the dispatch jump. `jal`/branch targets are immediates,
+validated at recompile time against the same set; the linker injects
+`fallthrough` markers so every reachable target is a block start.
 
-## Category 1 — hard spec divergences
+The custom-0 host / control ops are in [Custom-0 opcodes](#custom-0-opcodes).
 
-These are the only points where PVM2 contradicts RV64E.
+## Register model
 
-1. **Memory address space wraps at 2³² — data *and* code, uniformly.**
+PVM2 uses **RV64E's 15 GPRs** — `x1`, `x2`, `x5`–`x15` plus `x3`, `x4`,
+with `x0` hardwired to zero. `x16`–`x31` do not exist in the E base
+(naming one is an illegal encoding). This is plain RV64E.
 
-   Every effective address is masked to 32 bits before use; the high
-   32 bits are discarded regardless of what the source register holds.
-   The mask is applied identically to data and to code targets, so
-   there is no addressing path that escapes the 4 GiB window:
+`x3`/`x4` carry special meaning only by RISC-V psABI convention; the
+unprivileged ISA defines them as ordinary GPRs and PVM2 executes them as
+such. **The jar toolchain does not emit `x3`/`x4`** (the transpiler rejects
+them at build; jar's guests use the other 13 registers), but the *runtime*
+executes them so any valid RV64E blob runs — this is what keeps PVM2
+conformant rather than "RV64E minus two registers."
 
-   - **Loads / stores:** `addr = (rs1 + sext(imm)) & 0xFFFFFFFF`.
-     Affects `lb`, `lh`, `lw`, `ld`, `lbu`, `lhu`, `lwu`, `sb`, `sh`,
-     `sw`, `sd` and all RVC equivalents.
-   - **`jalr` targets:** `target = (rs1 + sext(imm)) & 0xFFFFFFFF`
-     (then `offset = target − CODE_BASE`; see #2). A register value
-     ≥ 2³² is truncated to its low 32 bits before the bounds/dispatch
-     check, exactly as a data pointer is — *not* rejected for being
-     large.
+**Host spill and gas.** An implementation must provide at least 13 host
+registers; the 13 commonly-used slots (`x1`, `x2`, `x5`–`x15`) are
+register-resident on every host. `x3`/`x4` are not guaranteed resident — a
+host with exactly 13 registers (today's x86-64 JIT) holds them in memory
+and spills on each access. Because the worst-case host spills, `x3`/`x4`
+accesses are **gas-charged at memory-spill cost unconditionally** on every
+host. A host with spare registers may keep them resident and run faster
+than charged (permitted; gas is an upper bound, the charge is spec-fixed,
+consensus unaffected). See [08-pvm2-gas-cost.md] and [09-portability.md].
 
-   RV64E computes a full 64-bit effective address; PVM2 does not. This
-   is the one divergence that changes the result of an instruction both
-   ISAs accept (a load through `rs1 = 0x1_0000_1000` reads `0x1000`,
-   not `0x1_0000_1000`).
+## EEI configuration
 
-   The wrap is free on x86/ARM (a 4 GiB host reservation makes the
-   guest's u32 space a native VA window) and ~1 op on RISC-V. It does
-   real isolation work: it keeps a guest pointer from reaching the
-   execution context the runtime maps above 4 GiB.
+Each is a knob the RISC-V spec hands to the EEI/platform/profile; a
+conforming RV64E implementation could be built the same way.
 
-   The 4 GiB ceiling on the combined code+data map (Category 2 #1) is a
-   *consequence* of this wrap, not a separate divergence.
+1. **Memory map: a 2³²-fold alias of one 4 GiB main-memory region.**
+   Address computation is **stock RV64E** (full 64-bit, circular mod 2⁶⁴,
+   §1.4). The EEI maps main memory so the whole 2⁶⁴ space is tiled with 2³²
+   aliased copies of one 4 GiB region: address `A` is backed by byte
+   `A mod 2³²`. This is ordinary incomplete address decoding (a core that
+   decodes only bits [31:0] aliases its RAM). The guest can't distinguish
+   it from a 32-bit mask — `load(0x1000) == load(0x1_0000_1000)` under both
+   — but the instruction itself is unchanged; the *map* aliases. Isolation
+   is then a host-VA fact: the runtime's execution context lives in host
+   VA above 4 GiB, outside the guest's address space entirely.
 
-2. **Every indirect-jump (`jalr`) target must be a basic-block start.**
+   Within one alias period the 4 GiB region is partitioned:
+   - `[0, CODE_BASE)` — **unmapped null guard** (`CODE_BASE = 0x0040_0000`).
+   - `[CODE_BASE, DATA_BASE)` — **code**, read-only, `PC = CODE_BASE +
+     byte_offset`, capped at `MAX_CODE_SIZE` (252 MiB).
+   - `[DATA_BASE, 4 GiB)` — **data** (`DATA_BASE = 0x1000_0000`, 256 MiB).
 
-   After the 2³² mask (#1), `jalr` computes `offset = target −
-   CODE_BASE` and requires `offset ∈ bb_starts(code)` (see
-   [Basic-block boundaries](#basic-block-boundaries-bb_starts)). A
-   target that lands mid-block or mid-instruction faults (ε = panic).
-   RV64E has no such precondition — any instruction-aligned target is a
-   legal jump. PVM2 adds the trap so per-block gas is sound: gas is
-   precharged at block entry, so entering a block anywhere but its
-   start would bypass the charge.
+   `auipc`, `jal`, `jalr`, branches compute real PC values as RV defines.
+   Code is position-independent (maps at `CODE_BASE`); the transpiler
+   relocates absolute data references by `+DATA_BASE`. A guest can read its
+   own code (PIC idiom) but not write it (read-only).
 
-   This is a *runtime* check, derived from the instruction stream — the
-   recompiler runs untrusted code and never trusts a linker-supplied
-   target table. In the x86 recompiler the check is *folded into the
-   dispatch table*: a dense `offset → native` table whose every
-   non-block-start slot holds the panic stub, so `jalr` is a bounds
-   check plus the dispatch jump (no separate `bb_starts` lookup) and a
-   bad target jumps to the panic stub. `jal` and branch targets are
-   immediates and are validated at recompile time against the same set;
-   the linker injects `fallthrough` markers (below) so every reachable
-   target is a block start.
+2. **Standard `ecall`/`ebreak` → unconditional fatal trap.** They decode
+   and execute as ordinary instructions; the EEI's defined handler
+   terminates (ε = panic). The spec delegates exactly this — the EEI
+   handles "environment calls" (§1.2), and `ebreak` returns control to the
+   environment (§2.9), which here terminates. PVM2's host functionality
+   lives in custom-0 (`ecalli` carries the 20-bit selector standard `ecall`
+   lacks), so standard `ecall`/`ebreak` are simply "always panic." This is
+   a fatal trap (instance discarded).
 
-3. **Standard `ecall` and `ebreak` opcodes are reserved.**
+3. **Misaligned loads/stores fully supported** (RV §2.1.6's EEI option;
+   also stated as the **Zicclsm** extension). x86 handles misaligned at
+   near-native speed; single-threaded, so atomicity is moot.
 
-   PVM2 has its own `ecall` and `trap` operations in custom-0 space
-   (Category 2 #5). The standard RV `ecall` / `ebreak` encodings are
-   reserved (decoded as illegal) so a future RV CPU running PVM2 by
-   mistake doesn't accidentally do something.
+4. **`fence`/`fence.i` are no-ops** — single-threaded, no I/O bus, code
+   mapped read-only, so nothing to order. Conforming, encoding unchanged.
 
-   *Why Category 1:* the base ISA defines `ecall`/`ebreak` as legal
-   SYSTEM instructions (`ecall` makes an environment request); making
-   the standard encodings illegal — and relocating the function into
-   custom-0 — is the divergence. (Reservation-flavoured: it narrows the
-   decode rather than changing an accepted instruction's result.)
-
-4. **`x3` and `x4` are reserved.**
-
-   In RV64E, `x3` (`gp`) and `x4` (`tp`) are general-purpose registers
-   populated by the OS/loader. PVM2 has no OS and no thread-local
-   storage; these two registers are reserved and must not be read or
-   written. Programs that do so are rejected at deblob.
-
-   Result: 13 usable architectural registers (`x1`, `x2`, `x5`–`x15`),
-   matching today's PVM register count. The encoding doesn't change —
-   the 5-bit reg field still uses RV's standard layout; `x3`/`x4` are
-   just statically forbidden.
-
-   *Why Category 1 (borderline):* `gp`/`tp` are reserved by the RISC-V
-   psABI *by convention*, so one could argue an EEI reserving them is a
-   platform choice (Category 2). It is filed here because the
-   *unprivileged ISA* defines all 15 non-zero E-registers as
-   general-purpose and has no notion of a platform forbidding a GPR —
-   PVM2 narrows what the base ISA permits.
-
-## Category 2 — platform / EEI configuration choices
-
-Each of these is a knob the RISC-V spec hands to the EEI, the platform,
-or the extension profile. A conforming RV64E implementation could be
-built the same way; PVM2 just fixes the setting.
-
-1. **Memory map: code low (read-only), data high, null guard below.**
-   PC is a real low-4 GiB virtual address.
-
-   The EEI determines the mapping of resources into the address space
-   and each region's permissions. PVM2 partitions it as:
-
-   - `[0, CODE_BASE)` — **unmapped null guard**. `CODE_BASE` is
-     `0x0040_0000` (4 MiB), so a `PC = 0` fetch or a null data deref
-     faults instead of hitting valid memory.
-   - `[CODE_BASE, DATA_BASE)` — **code**, read-only, so `PC =
-     CODE_BASE + byte_offset`. Capped at `MAX_CODE_SIZE` (252 MiB =
-     `DATA_BASE − CODE_BASE`).
-   - `[DATA_BASE, 4 GiB)` — **data** (stack/ro/rw/heap), with
-     `DATA_BASE = 0x1000_0000` (256 MiB).
-
-   `auipc`, `jal`, `jalr`, and branches compute over real PC values
-   exactly as RV defines. A guest can read its own code bytes (`auipc`
-   + load, the PIC idiom); it cannot write them (read-only mapping).
-
-   Code is position-independent (PC-relative internal control flow), so
-   it maps at `CODE_BASE` regardless of the linked address. Data is
-   addressed absolutely, so the transpiler **relocates** data
-   references: it folds data-referencing `auipc` pairs to absolute
-   `lui`+lo12 and shifts every data address — the folds *and* any
-   initialised absolute data pointers — by `+DATA_BASE`, from the
-   linker's `[0, extent)` layout to the runtime `[DATA_BASE, …)`
-   mapping. Code-referencing `auipc` pairs stay native (PC-relative
-   against `CODE_BASE`). Code low gives the null guard; data high keeps
-   the whole data region contiguous above code rather than wrapping it.
-
-2. **Misaligned loads and stores are fully supported.**
-
-   As permitted by RV §2.1.6 ("Load and Store Instructions"), PVM2 is
-   an EEI that **guarantees full support for misaligned loads and
-   stores** — no address-misaligned exception is ever raised. This is
-   one of the two options §2.1.6 explicitly offers EEIs ("An EEI may
-   guarantee that misaligned loads and stores are fully supported");
-   PVM2 selects it. We additionally implement the **Zicclsm** extension
-   (§4.13) as the standard extension-level statement of the same
-   guarantee. Matches today's PVM.
-
-   The RV-spec caveats about "might run extremely slowly" and "not
-   guaranteed atomic" don't apply: PVM2 is software-recompiled (x86
-   handles misaligned at near-native speed) and single-threaded
-   (atomicity is moot).
-
-3. **`fence` and `fence.i` are no-ops.**
-
-   `fence` orders accesses as seen by *other harts and devices*;
-   `fence.i` orders instruction fetch against prior writes
-   (self-modifying code). PVM2 is single-threaded, has no I/O bus, and
-   maps code read-only — so neither has anything to order. Retiring
-   them as no-ops is *conforming* under this configuration, not a
-   semantic change. (Encoding unchanged.)
-
-4. **No CSRs, no privilege levels, no atomics, no FP/vector.**
-
-   These are *optional* — none are part of the RV64E base. PVM2 does
-   not implement Zicsr (`csrr*`), the A extension (atomics), privileged
-   modes (`mret`/`sret`/`uret`, WFI, SFENCE.VMA), or F/D/Q/V (FP,
-   vector), Zfh, Zfa, Zifencei, supervisor/hypervisor. Their encodings
-   therefore decode as illegal — which is the standard reserved-encoding
-   behaviour for an unimplemented extension, not a redefinition. The EEI
-   presents a single flat privilege environment.
-
-5. **Extension profile and custom-0 ops.**
-
-   - **Standard extensions included:** M, C, Zbb, Zba, Zbs, Zicond,
-     Zicclsm — all unchanged from their specs (see
-     [Extensions included](#extensions-included)). Selecting an
-     extension set is a profile choice.
-   - **Custom ops in custom-0:** RISC-V reserves the `custom-0` major
-     opcode for non-standard extensions; PVM2 defines four ops there —
-     `trap`, `ecall.jar`, `ecalli`, `fallthrough` (see
-     [Custom-0 opcodes](#custom-0-opcodes)). Using the spec's
-     designated custom space is configuration, not divergence.
+5. **No CSRs, privilege levels, atomics, or FP/vector** — all optional, not
+   in the RV64E base; their encodings decode as illegal (standard
+   reserved-encoding behavior for an unimplemented extension). A single
+   flat privilege environment.
 
 ## Extensions included
 
-*(Category 2 #5.)* The following RV extensions apply to PVM2 unchanged
-from their standard specifications. None of them touch memory
-addressing beyond the base ISA's load/store ops (which carry the
-Category 1 #1 mask).
+Applied unchanged from their standard specs:
 
 | ext | name | notes |
 |---|---|---|
-| M | multiplication / division | `mul`, `mulh`, `mulhu`, `mulhsu`, `mulw`, `div`, `divu`, `rem`, `remu`, `divw`, `divuw`, `remw`, `remuw` |
-| C | compressed | 16-bit forms; compressed loads/stores inherit PVM2-Base's address mask. `c.jr`/`c.jalr`/`c.j` are standard control flow |
-| Zbb | basic bit manipulation | `clz`, `ctz`, `cpop` + W-variants, `sext.b`, `sext.h`, `zext.h`, `min`, `max`, `minu`, `maxu`, `andn`, `orn`, `xnor`, `rol`, `ror`, `rolw`, `rorw`, `rori`, `roriw`, `rev8`, `orc.b` |
-| Zba | shift-add | `sh1add`, `sh2add`, `sh3add` + UW-variants, `add.uw`, `slli.uw` |
+| M | mul / div | `mul`, `mulh*`, `mulw`, `div*`, `rem*`, `*w` |
+| C | compressed | 16-bit forms; `c.jr`/`c.jalr`/`c.j` are standard control flow (the `jalr` forms carry the Xjar CFI precondition) |
+| Zbb | bit manipulation | `clz`, `ctz`, `cpop`, `sext.*`, `zext.h`, `min/max[u]`, `andn`, `orn`, `xnor`, `rol/ror[i][w]`, `rev8`, `orc.b` |
+| Zba | shift-add | `sh{1,2,3}add[.uw]`, `add.uw`, `slli.uw` |
 | Zbs | single-bit | `bset`, `bclr`, `binv`, `bext` + imm forms |
-| Zicond | integer conditional | `czero.eqz`, `czero.nez` |
-| Zicclsm | misaligned-access support | per §4.13: implementation guarantees misaligned loads/stores to main memory work. Adds no new instructions; documents the EEI choice in Category 2 #2 as a standard extension |
+| Zicond | int conditional | `czero.eqz`, `czero.nez` |
+| Zicclsm | misaligned support | per §4.13; documents the EEI misaligned guarantee as a standard extension |
 
-Not included (explicitly): A (atomics), F/D/Q/V (FP, vector), Zfh,
-Zfa, Zicsr, Zifencei, supervisor/hypervisor. (Category 2 #4.)
+Not included: A (atomics), F/D/Q/V, Zfh, Zfa, Zicsr, Zifencei,
+supervisor/hypervisor.
 
 ## Custom-0 opcodes
 
-*(Category 2 #5 — the `custom-0` major opcode is RV-reserved for
-custom extensions.)* Four host / control operations occupy the RV
-`custom-0` opcode slot (`opcode = 0001011`). They are discriminated by
-`funct3` (I-type bits [14:12]); other fields are described per-op.
+The host / control ops of `Xjar`, in the RV-reserved `custom-0` slot
+(`opcode = 0001011`), discriminated by `funct3` (I-type bits [14:12]):
 
 | funct3 | mnemonic | wire pattern | semantics |
 |---:|---|---|---|
 | 000 | `trap` | `(funct3=000) (rest=0)` | unconditional execution abort. ε = panic |
-| 001 | `ecall.jar` | `(funct3=001) (rest=0)` | jar management op. φ[11] = op-code, φ[12] = subject\|object. Same semantics as PVM opcode 3 today |
-| 010 | `ecalli imm` | `(funct3=010) (imm[19:0])` | host-call with 20-bit signed immediate selector. Same semantics as PVM opcode 10 today, with `imm = sext20(imm[19:0])` |
-| 100 | `fallthrough` | `(funct3=100) (rest=0)` | structured no-op terminator. Decodes and retires with no effect on architectural state, but acts as a basic-block boundary: the *following* instruction is a `bb_start`. Used by the linker to widen the bb_start set before branch targets that aren't naturally post-terminator |
+| 001 | `ecall.jar` | `(funct3=001) (rest=0)` | jar management op. φ[11] = op-code, φ[12] = subject\|object. Same as PVM opcode 3 |
+| 010 | `ecalli imm` | `(funct3=010) (imm[19:0])` | host-call with 20-bit signed selector. Same as PVM opcode 10, `imm = sext20(imm[19:0])` |
+| 100 | `fallthrough` | `(funct3=100) (rest=0)` | structured no-op terminator; the *following* instruction is a `bb_start`. Used by the linker to widen the bb_start set |
 
-(Naming `ecall.jar` to distinguish from RV's standard `ecall`, which
-remains reserved/illegal — Category 1 #3.)
+(`ecall.jar` is named to distinguish it from standard `ecall`, which decodes
+normally but is handled by the EEI's fatal trap — so host functionality
+lives here in custom-0.)
 
-`funct3 = 011` was `br_table` in the static-dispatch draft; it is now
-**reserved** (PVM2 uses plain `jalr`). There is no Image-side jump
-table: control flow lives entirely in the instruction stream.
-
-No `sbrk` opcode. Bench guests don't use sbrk (zero static
-occurrences across all 12 bench programs). Real services that
-need dynamic heap growth call a host function via `ecalli` —
-no architectural opcode required.
-
-No `cmov_*` opcode either. The four PVM cmov variants are
-unused in benches except for `cmov_iz_imm` (0.69%); we let
-that fall back to a Zicond + or sequence (~4 RV insns).
-
-## Custom-1 opcode
-
-The entire `custom-1` major opcode (`0101011`) is reserved in
-PVM2 and traps at decode. (An earlier draft used it for `callf`;
-the structured-call design has since been replaced with plain
-RISC-V `jal`/`jalr`.) Trapping an unused custom slot is default
-behaviour, not a divergence.
+`funct3 = 011` (the removed `br_table`) is reserved. The entire `custom-1`
+major opcode (`0101011`) is reserved and traps at decode. No `sbrk` /
+`cmov_*` opcodes (heap growth via `ecalli`; `cmov` falls back to Zicond).
 
 ## Basic-block boundaries (`bb_starts`)
 
-*(The mechanism behind Category 1 #2.)* PVM2 defines a static set
-`bb_starts ⊆ valid_pc` that the recompiler and interpreter treat as
-basic-block boundaries (gas-check sites, label-emission sites, valid
-resume PCs, valid `jalr` targets):
+*(The mechanism behind Xjar CFI.)* PVM2 defines a static set `bb_starts ⊆
+valid_pc` that both engines treat as basic-block boundaries (gas-check
+sites, label sites, valid resume PCs, valid `jalr` targets / Xjar landing
+pads):
 
 ```
 bb_starts(code) = {0} ∪ { pc | pc immediately follows a terminator }
 ```
 
-The set is **derived from the instruction stream**, never from
-external metadata — both engines compute it identically by walking
-`code` and flagging the byte after each terminator. This is what lets
-the recompiler validate untrusted `jalr` targets safely.
+The set is **derived from the instruction stream**, never from external
+metadata — both engines compute it identically by walking `code` and
+flagging the byte after each terminator. This is what lets the recompiler
+validate untrusted `jalr` targets safely.
 
-**Terminator instructions** (kinds whose successor PC is either
-undefined or supplied by a register/branch rather than fallthrough):
+**Terminators:** `trap`, `fallthrough`, `ecalli`, `ecall.jar`; all static
+branches (`beq`/`bne`/`blt`/`bge`/`bltu`/`bgeu`/`c.beqz`/`c.bnez`); `jal`
+and `jalr` (any `rd`, including `c.j`/`c.jr`/`c.jalr`); any reserved
+encoding (defensive).
 
-- `trap`, `fallthrough`, `ecalli`, `ecall.jar` (custom-0)
-- All static branches: `beq`, `bne`, `blt`, `bge`, `bltu`,
-  `bgeu`, `c.beqz`, `c.bnez`
-- `jal` (any `rd`) and `jalr` (any `rd`), including the compressed
-  `c.j` / `c.jr` / `c.jalr` forms
-- Any reserved encoding (defensive — a decoder that reaches a
-  reserved instruction will trap, so the next instruction must be a
-  fresh block start if reached at all)
+**Linker invariant.** Every reachable branch/`jal` target and every
+statically-known `jalr` target must be in `bb_starts`; if not naturally
+post-terminator, the linker injects a `fallthrough` before it and re-encodes
+upstream offsets. Return sites are free (a call's `jalr`/`jal` is a
+terminator).
 
-**Linker invariant.** Every reachable target of a branch or `jal`
-(immediates), and every statically-known `jalr` target (call-site
-function entries, endpoint entries, `.rodata` code pointers), must be
-in `bb_starts`. If a target is not naturally post-terminator, the
-linker injects a `fallthrough` immediately before it and re-encodes
-upstream branch/`jal`/`auipc` offsets through an offset-map pass.
-Return sites are covered for free: a call's `jalr`/`jal` is a
-terminator, so the instruction after it is already a block start.
+**Pause-point constraint.** A `Paused { pc, regs }` state must have `pc ∈
+bb_starts`; out-of-gas can only fire at the per-block gas check, which sits
+at a `bb_start`. Faults stay terminal (panic/trap/page-fault discard the
+instance, never resume mid-block). `bb_starts` is derived from `code`; it
+is not part of the wire format.
 
-**Pause-point constraint.** A `Paused { pc, regs }` execution state
-must have `pc ∈ bb_starts`. Out-of-gas can only fire at the per-block
-gas check, which sits at the start of a `bb_start`. `bb_starts` is
-derived from `code`; it is not part of the wire format.
+## Reserved / EEI-trapped encodings
 
-## Forbidden encodings (explicit list)
+These standard RV encodings **panic when reached** — each for a base/EEI or
+unimplemented-extension reason, not a contradiction of the base ISA:
 
-The following standard RV encodings are reserved and must trap at
-decode time. The right column marks which divergence category each
-falls under.
-
-| encoding | category |
+| encoding | reason |
 |---|---|
-| ECALL, EBREAK (standard RV) and `c.ebreak` | 1 #3 — base instructions reserved |
-| Any instruction with rs1, rs2, or rd ∈ {x3, x4} | 1 #4 — reserved registers |
-| All CSR ops (Zicsr): CSRRW/S/C, CSRRWI/SI/CI | 2 #4 — unimplemented extension |
-| All atomics (A): LR.W/D, SC.W/D, AMO* | 2 #4 — unimplemented extension |
-| All privileged ops: MRET, SRET, URET, WFI, SFENCE.VMA | 2 #4 — no privilege levels |
-| Any FP/vector encoding (F, D, Q, V) | 2 #4 — unimplemented extensions |
-| The entire custom-1 major opcode (`0101011`) | 2 — unused custom slot |
-| custom-0 `funct3 = 011` (the removed `br_table`) | 2 — unused custom encoding |
+| ECALL, EBREAK, `c.ebreak` | EEI fatal-trap handler (§EEI #2) — decode/execute as standard; environment terminates |
+| rs1/rs2/rd ∈ {x16..x31} | RV64E base — register does not exist |
+| CSR ops (Zicsr) | unimplemented extension |
+| atomics (A) | unimplemented extension |
+| privileged ops (MRET/SRET/URET/WFI/SFENCE.VMA) | no privilege levels |
+| FP/vector (F/D/Q/V) | unimplemented extensions |
+| custom-1 major opcode (`0101011`) | unused custom slot |
+| custom-0 `funct3 = 011` | unused custom encoding |
 
-`auipc`, `jal`, `jalr` (and `c.jr`/`c.jalr`) are **not** forbidden —
-they are standard PVM2 control flow. Programs containing any of the
-reserved encodings above are rejected at deblob with a diagnostic
-naming the first offending instruction.
+`x3`/`x4` are **not** reserved — they are valid GPRs the runtime executes;
+only the jar toolchain declines to emit them. Refusal is **lazy** (decode
+as illegal / trap *if executed*); the toolchain also rejects them at build
+as a convenience, not the consensus rule.
 
-## Spec-version-independent invariants
+## Invariants
 
-These hold for every PVM2 conformant implementation:
-
-- An RV decoder + disassembler can render *and correctly interpret*
-  PVM2 bytes — the control flow is standard RV. The only places PVM2
-  and a stock RV64E core actually disagree are the **Category 1**
-  divergences: the 2³² address wrap (data + code), the `jalr` →
-  `bb_start` precondition, and the reserved `ecall`/`ebreak` and
-  `x3`/`x4` encodings. Category 2 settings are legal RV64E
-  configurations.
-- The aggregate execution result is deterministic for a given
-  program + initial state + gas budget. (Same as PVM today.)
-- Gas accounting is implementation-independent; the gas-cost
-  table is published separately ([08-pvm2-gas-cost.md](08-pvm2-gas-cost.md)).
-  PVM2 uses the single-pass pipeline model from
-  `spec/Jar/JAVM/GasCostSinglePass.lean`: per basic block, walk
-  the instructions tracking `reg_done[13]` + decode throughput;
-  block cost = `max(max_done − 3, 1)`. (Gas is an EEI execution-control
-  policy, outside the RV ISA proper; it is what *motivates* Category 1
-  #2.)
-
-## What this gets you vs RV64E
-
-- Same encoding format **and** same control-flow semantics: any RV
-  tool reads *and* runs PVM2 bytes (modulo the Category 1 address
-  wrap).
-- A short, closed list of Category 1 divergences — four items, each
-  forced by jar's consensus / single-thread / 32-bit-memory
-  constraints, not by bikeshed choice — and a Category 2 list that is
-  all legal RV64E configuration.
-- Standard RV extension story: M, C, Zbb, Zba, Zbs, Zicond, Zicclsm
-  apply unchanged. New extensions audit cleanly against the Category 1
-  list.
-- 4 custom ops only, all in custom-0: `trap`, `ecall.jar`, `ecalli`,
-  `fallthrough`. Everything else is RV.
-- Native control flow unlocks the standard `Zcmp`/`Zcmt` push/pop and
-  table-jump extensions, and friction-free interop with RV
-  disassemblers, debuggers, and analysers.
+- **PVM2 is RV64E + Xjar + EEI, no raw instruction contradictions.** Any RV
+  decoder/disassembler renders *and correctly interprets* PVM2 bytes. Every
+  departure from a stock RV64E core is an `Xjar` behavior (landing-pad CFI;
+  custom-0 host ops) or an EEI choice (aliased map; `ecall`/`ebreak` fatal
+  trap; misaligned support; `fence` retirement) — all legal RISC-V.
+- Aggregate execution is deterministic for a given program + initial state
+  + gas budget.
+- Gas accounting is implementation-independent (single-pass pipeline model,
+  `reg_done[15]` + decode throughput, block cost `max(max_done − 3, 1)`;
+  `x3`/`x4` operands additionally charge memory-spill cost). See
+  [08-pvm2-gas-cost.md].

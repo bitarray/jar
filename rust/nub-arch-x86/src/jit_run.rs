@@ -531,7 +531,12 @@ pub unsafe fn enter_frame(
     let ctx = rt.ctx_kva as *mut JitContext;
     // SAFETY: ctx_kva owned by `rt.ctx_buf`, alive across this call.
     unsafe {
-        (*ctx).regs = initial_regs;
+        // The persisted register file is the 13 host-mapped slots; the two
+        // spilled slots (x3/x4) are invocation-local and start at 0, matching
+        // the interpreter (which rebuilds from the same 13-register cap).
+        let mut all_regs = [0u64; 15];
+        all_regs[..13].copy_from_slice(&initial_regs);
+        (*ctx).regs = all_regs;
         (*ctx).gas = initial_gas;
         (*ctx).exit_reason = 0;
         (*ctx).exit_arg = 0;
@@ -578,11 +583,16 @@ pub unsafe fn enter_frame(
 
     // SAFETY: ctx_kva still points to the same page (ctx_buf alive).
     unsafe {
+        // Copy the 15-register file out first (avoids autoref on the raw
+        // pointer deref), then persist only the 13 host-mapped slots — x3/x4
+        // (slots 13/14) are invocation-local and dropped at exit (matching
+        // the interpreter).
+        let all_regs = (*ctx).regs;
         ExitInfo {
             exit_reason: (*ctx).exit_reason,
             exit_arg: (*ctx).exit_arg,
             gas_remaining: (*ctx).gas,
-            regs: (*ctx).regs,
+            regs: all_regs[..13].try_into().expect("13 persisted regs"),
             pc: (*ctx).pc,
         }
     }

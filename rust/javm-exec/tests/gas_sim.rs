@@ -245,3 +245,37 @@ proptest! {
         prop_assert!(sim_more.flush_and_get_cost() >= base_cost);
     }
 }
+
+// ---- x3/x4 host-spill gas cost ----------------------------------------
+
+#[test]
+fn spilled_operands_charge_memory_cost() {
+    use javm_exec::gas_cost::{DEFAULT_MEM_CYCLES, RV_KIND_ADD, rv_feed_gas_kind, rv_slot_u8};
+    use javm_exec::gas_sim::GasSimulator;
+
+    // Block cost of a single `add rd, rs1, rs2`, parameterised by the RV regs.
+    let cost = |rd: u8, rs1: u8, rs2: u8| -> u32 {
+        let mut sim = GasSimulator::new();
+        rv_feed_gas_kind(
+            RV_KIND_ADD,
+            rv_slot_u8(rs1),
+            rv_slot_u8(rs2),
+            rv_slot_u8(rd),
+            &mut sim,
+            DEFAULT_MEM_CYCLES,
+        );
+        sim.flush_and_get_cost()
+    };
+
+    let mem = DEFAULT_MEM_CYCLES as u32;
+    // Baseline: all host-mapped registers (no spill) — the cheapest block.
+    let base = cost(10, 5, 6);
+    // A spilled operand raises the cost above the no-spill baseline.
+    assert!(cost(10, 3, 6) > base, "spill must cost more than no-spill");
+    // Each *additional* spilled operand position adds exactly `mem_cycles`
+    // (the block-cost `-3` normalisation cancels between adjacent counts).
+    assert_eq!(cost(10, 3, 4) - cost(10, 3, 6), mem, "2nd spilled operand");
+    assert_eq!(cost(3, 3, 4) - cost(10, 3, 4), mem, "3rd spilled operand");
+    // Conformant code (no x3/x4) is charged exactly the baseline.
+    assert_eq!(cost(15, 14, 13), base);
+}

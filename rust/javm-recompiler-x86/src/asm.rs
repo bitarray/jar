@@ -865,6 +865,16 @@ impl Assembler {
         self.emit_rip_rel_disp32(target_va, 0);
     }
 
+    /// cmp r64, qword [rip+disp32] — compare a register against a memory
+    /// operand (used by the x3/x4 spill path's branch, where a spilled
+    /// source lives in `JitContext.regs[13|14]`).
+    pub fn cmp_r64_mem_rip_rel(&mut self, dst: Reg, target_va: u64) {
+        self.emit(0x48 | (dst.hi() << 2));
+        self.emit(0x3B);
+        self.modrm_rip_rel(dst.lo());
+        self.emit_rip_rel_disp32(target_va, 0);
+    }
+
     // -- In-register gas decrement (patchable) --
 
     /// sub r64, imm32 in the always-imm32 (7-byte) encoding.

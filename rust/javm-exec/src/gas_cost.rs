@@ -260,6 +260,14 @@ pub fn rv_slot_u8(r: u8) -> u8 {
     crate::regs::reg_slot_or_ff(r)
 }
 
+/// True iff a simulator slot is a *spilled* register (`x3`/`x4` → slots
+/// 13/14). Used to charge the memory-spill gas cost. `0xFF` ("no register")
+/// is `255`, so it is correctly excluded.
+#[inline(always)]
+fn is_spilled_slot(slot: u8) -> bool {
+    slot == 13 || slot == 14
+}
+
 /// Compute the [`crate::predecode::RvGasMeta`] for an `Inst`.
 /// Called once per instruction at decode time; the result is cached
 /// in [`crate::predecode::RvPreDecodedInst::gas_meta`] so the gas
@@ -452,8 +460,9 @@ fn rv_op_metadata(inst: &crate::instruction::Inst) -> (u8, u8, u8, u8) {
 /// as compile-time constants + slot lookups without going through
 /// an `RvGasMeta` struct.
 ///
-/// Slots are PVM2 register indices (0..12) or `0xFF` for "no
-/// register" (x0 / x3 / x4 / absent operand).
+/// Slots are PVM2 register indices (0..14) or `0xFF` for "no
+/// register" (x0 / absent operand). Slots 13/14 are `x3`/`x4`, which are
+/// host-spilled — see the spill-cost charge below.
 ///
 /// Returns `is_terminator` (RVF_TERM flag from the LUT entry).
 #[inline(always)]
@@ -473,6 +482,16 @@ pub fn rv_feed_gas_kind(
     } else {
         entry.cycles
     };
+
+    // x3/x4 (slots 13/14) are host-spilled: a host with exactly 13 registers
+    // materialises them from memory on each access. Charge the memory-spill
+    // cost (`mem_cycles`) per spilled operand position, on top of the base
+    // cycles — matching the load/op/store the recompiler's spill path emits,
+    // and bounding the worst-case conforming host. Conformant code never
+    // names x3/x4 (every slot is < 13), so this adds exactly nothing there.
+    let spill_ops =
+        is_spilled_slot(src1) as u8 + is_spilled_slot(src2) as u8 + is_spilled_slot(dst) as u8;
+    let cycles = cycles.saturating_add(mem_cycles.saturating_mul(spill_ops));
 
     // Overlap-dependent decode_slots.
     let decode_slots = if entry.flags & RVF_OVERLAP_DST_SRC != 0 {
