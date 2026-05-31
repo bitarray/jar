@@ -3405,7 +3405,15 @@ impl Compiler {
             }
         }
         // ---- branch on divisor == 0 ----
-        self.asm.test_rr(b_reg, b_reg);
+        // `idivl`/`divl` consume only the divisor's low 32 bits, so the W-ops
+        // must test *those* bits for zero — a divisor like `0x8000_0000_0000_0000`
+        // has a nonzero 64-bit value but a zero low half, and dividing by it
+        // raises #DE. (The 64-bit ops correctly test the full register.)
+        if is_32bit {
+            self.asm.test_rr32(b_reg, b_reg);
+        } else {
+            self.asm.test_rr(b_reg, b_reg);
+        }
         let nonzero = self.asm.new_label();
         let join = self.asm.new_label();
         self.asm.jcc_label(Cc::NE, nonzero);

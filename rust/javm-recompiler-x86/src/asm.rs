@@ -578,6 +578,14 @@ impl Assembler {
         self.alu_rr64(0x85, a, b);
     }
 
+    /// `test r32, r32` — sets ZF iff the low 32 bits are zero (ignores the
+    /// high 32 bits). Used by the 32-bit `divw`/`remw` zero-divisor guard,
+    /// which must test only the bits `idivl`/`divl` actually consume.
+    #[inline(always)]
+    pub fn test_rr32(&mut self, a: Reg, b: Reg) {
+        self.alu_rr32(0x85, a, b);
+    }
+
     #[inline(always)]
     pub fn add_rr32(&mut self, dst: Reg, src: Reg) {
         self.alu_rr32(0x01, dst, src);

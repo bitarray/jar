@@ -68,21 +68,31 @@ fn acceptance_div_intmin_neg1() {
 }
 
 /// Full boundary enumeration through both engines — the biggest edge-case
-/// sweep. `#[ignore]` (slow + currently surfaces open bugs). Run with
-/// `--ignored`.
+/// sweep. `#[ignore]`-d: it publishes ~thousands of distinct images into a
+/// single long-lived sandbox, and the guest cap directory never evicts blobs,
+/// so the guest talc heap eventually OOMs (B13 in implementation-bugs.md — a
+/// directory-lifecycle gap, *not* a consensus divergence). Run with `--ignored`
+/// to hunt for ISA divergences up to the OOM point.
 #[test]
-#[ignore = "hunting tool: slow, and currently surfaces open recompiler bugs"]
+#[ignore = "hunting tool: exhausts the guest heap (B13: directory never evicts blobs)"]
 fn boundary_sweep() {
     let progs = enumerate_boundary();
     let diverged = diff_batch(&progs);
     assert!(diverged.is_empty(), "{}", report(&diverged, progs.len()));
 }
 
-/// Random-sequence sweep. `#[ignore]` (currently surfaces open bugs). Run with
-/// `--ignored`.
+/// Random-sequence sweep — 256 distinct multi-op programs through both engines.
+/// **Green** and part of the default `--ignored`-free run: this is the
+/// regression for two bugs this fuzzer surfaced and we fixed:
+/// - **B11**: the host read the guest's cap-directory hashbrown table directly,
+///   but the host (SSE2, 16-byte `Group`) and guest (`x86_64-unknown-none`, no
+///   SSE2, generic 8-byte `Group`) disagree on the control-array layout; once
+///   the directory grew past one group the host walked off the end. Publishing
+///   256 distinct images forces that growth — pre-fix this panicked at the 6th.
+/// - **B12**: the 32-bit `divw`/`remw` zero-divisor guard tested the full
+///   64-bit register, so a divisor with a zero low half (e.g. i64::MIN)
+///   #DE-faulted the recompiler.
 #[test]
-#[ignore = "hunting tool: surfaces a pre-existing recompiler memory-corruption \
-            bug on random multi-op programs (see implementation-bugs.md)"]
 fn random_sweep() {
     let progs = Gen::new(0xC0FFEE).random_batch(256, 6);
     let diverged = diff_batch(&progs);

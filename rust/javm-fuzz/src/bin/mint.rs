@@ -62,6 +62,45 @@ fn repros() -> Vec<(&'static str, &'static str, Program)> {
         ));
     }
 
+    // B12 — the 32-bit signed div/rem zero-divisor guard tested the *full*
+    // 64-bit divisor register (`test r64,r64`), but `idivl`/`divl` divide by
+    // the low 32 bits only. A divisor like 0x8000_0000_0000_0000 (low half
+    // zero, high half set) slipped past the guard and #DE-faulted the
+    // recompiler. RISC-V treats low32==0 as division by zero: `divw` → -1,
+    // `remw` → the (sign-extended low-32) dividend. rs1=x8, rs2=x9 are seedable.
+    {
+        let mut init = BTreeMap::new();
+        seed(&mut init, 8, 100); // dividend
+        seed(&mut init, 9, 0x8000_0000_0000_0000); // divisor: low32 == 0, high set
+        let mut code = vec![encode::encode_op(spec("divw"), 14, 8, 9, 0)];
+        code.extend(encode::fold_epilogue(None));
+        out.push((
+            "divw_low32_zero",
+            "live/divw_low32_zero_divisor",
+            Program {
+                code,
+                init_regs: init,
+                init_mem: None,
+            },
+        ));
+    }
+    {
+        let mut init = BTreeMap::new();
+        seed(&mut init, 8, 100); // dividend
+        seed(&mut init, 9, 0x8000_0000_0000_0000); // divisor: low32 == 0, high set
+        let mut code = vec![encode::encode_op(spec("remw"), 15, 8, 9, 0)];
+        code.extend(encode::fold_epilogue(None));
+        out.push((
+            "remw_low32_zero",
+            "live/remw_low32_zero_divisor",
+            Program {
+                code,
+                init_regs: init,
+                init_mem: None,
+            },
+        ));
+    }
+
     // B10 — `orc.b` was an unimplemented panic stub in the recompiler. A value
     // with a mix of zero, nonzero, and high-bit-only bytes exercises the SWAR
     // implementation (each byte → 0xFF iff nonzero).
