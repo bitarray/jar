@@ -1,37 +1,28 @@
-//! Offline golden-vector minting: generate RV64E-subset programs, run each on
-//! the **Spike** oracle to obtain its golden `x10` (the fold signature), and
-//! write a committed `VectorFile` JSON. **Never** run in CI — CI replays the
-//! committed vectors (see `tests/vectors.rs`); only this tool needs Spike.
+//! Offline regression-vector minting: construct the minimal reproducer of each
+//! known recompiler bug, run it on the **Spike** oracle for its golden `x10`,
+//! and write `res/vectors/<name>.json`. Run after fixing a bug to capture a
+//! permanent guard. **Never** in CI — CI replays the committed vectors
+//! (`tests/vectors.rs`); only this tool needs Spike.
 //!
-//! This run mints the **division family** (`div`/`rem` and their unsigned/word
-//! variants) over a curated set of corner `(dividend, divisor)` pairs: the
-//! highest-value external-truth gate, validating the INT_MIN/-1 fix (B8),
-//! divide-by-zero, and sign handling against the formal model. The set is kept
-//! small so the committed replay test stays fast and under the recompiler's
-//! sandbox-accumulation threshold; the full cross-product can be re-minted on
-//! demand (`javm_fuzz::generate::OPERANDS`).
+//! (The other recompiler bug, INT_MIN/-1 div = B8, was captured live by
+//! `live.rs` as `intmin_div.json`; these are the two whose reproducers are
+//! known, parked here so a re-mint is deterministic.)
 //!
-//! Usage: `cargo run -p javm-fuzz --bin mint -- <out.json>`
+//! Usage: `cargo run -p javm-fuzz --bin mint -- res/vectors`
 
 use javm_fuzz::{FOLD_VERSION, Gold, ISA, Program, Vector, VectorFile, VectorMeta, encode, oracle};
 use std::collections::BTreeMap;
 use std::process::Command;
 
-/// Curated `(dividend, divisor)` corners — covers i64 and i32 INT_MIN/-1
-/// overflow, divide-by-zero, -1/-1, and a normal case.
-const PAIRS: &[(u64, u64)] = &[
-    (0x8000_0000_0000_0000, 0xFFFF_FFFF_FFFF_FFFF), // i64::MIN / -1  (64-bit overflow)
-    (0xFFFF_FFFF_8000_0000, 0xFFFF_FFFF_FFFF_FFFF), // i32::MIN / -1  (W overflow)
-    (0x7FFF_FFFF_FFFF_FFFF, 0x0000_0000_0000_0000), // i64::MAX / 0   (divide-by-zero)
-    (0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF), // -1 / -1
-    (0x0000_0000_0000_0007, 0x0000_0000_0000_0003), // 7 / 3         (normal)
-];
+fn spec(name: &str) -> &'static encode::OpSpec {
+    encode::OPS
+        .iter()
+        .find(|o| o.name == name)
+        .unwrap_or_else(|| panic!("no op named {name}"))
+}
 
 fn seed(init: &mut BTreeMap<u8, u64>, xreg: u8, val: u64) {
-    let slot = javm_exec::regs::reg_slot_or_ff(xreg);
-    if slot != 0xFF {
-        init.insert(slot, val);
-    }
+    init.insert(javm_exec::regs::reg_slot_or_ff(xreg), val);
 }
 
 fn git_sha() -> String {
@@ -44,39 +35,75 @@ fn git_sha() -> String {
         .unwrap_or_else(|| "unknown".into())
 }
 
-fn main() {
-    let out = match std::env::args().nth(1) {
-        Some(p) => p,
-        None => {
-            eprintln!("usage: mint <out.json>");
-            std::process::exit(2);
-        }
-    };
+/// (file stem, vector id, program). Each is the minimal reproducer of a bug.
+fn repros() -> Vec<(&'static str, &'static str, Program)> {
+    let mut out = Vec::new();
 
-    let mut vectors = Vec::new();
-    for spec in encode::OPS {
-        // Division family only: `div`, `divu`, `rem`, `remu`, and the W variants.
-        if !(spec.name.starts_with("div") || spec.name.starts_with("rem")) {
-            continue;
-        }
-        for &(a, b) in PAIRS {
-            let mut init = BTreeMap::new();
-            seed(&mut init, 8, a); // x8 = dividend
-            seed(&mut init, 9, b); // x9 = divisor
-            let mut code = vec![encode::encode_op(spec, 10, 8, 9, 0)];
-            code.extend(encode::fold_epilogue(None));
-            let prog = Program {
+    // B9 — `sllw` high-bits divergence. The destination x15 maps to the host
+    // RCX (= the CL shift-count register), and `emit_shift_by_reg32`'s
+    // dst==RCX path read the operand *after* clobbering RCX, shifting the
+    // count instead of the value. rs1=x8=0x12345678, shift x9=4 → the buggy
+    // and correct results differ sharply (0x40 vs 0x23456780). (rs1/rs2 are
+    // x8/x9, seedable registers — x10–x13 are the arg registers and start 0.)
+    {
+        let mut init = BTreeMap::new();
+        seed(&mut init, 8, 0x1234_5678); // rs1
+        seed(&mut init, 9, 4); // rs2 (shift amount)
+        let mut code = vec![encode::encode_op(spec("sllw"), 15, 8, 9, 0)];
+        code.extend(encode::fold_epilogue(None));
+        out.push((
+            "sllw_x15",
+            "live/sllw_dst_rcx",
+            Program {
                 code,
                 init_regs: init,
                 init_mem: None,
-            };
-            let x10 = oracle::spike_x10(&prog).unwrap_or_else(|e| {
-                eprintln!("spike failed for {}: {e}", spec.name);
-                std::process::exit(1);
-            });
-            let id = format!("{}/a={a:#018x}_b={b:#018x}", spec.name);
-            // Every program is total → the engine halts cleanly on HostCall(0).
-            vectors.push(Vector::from_program(
+            },
+        ));
+    }
+
+    // B10 — `orc.b` was an unimplemented panic stub in the recompiler. A value
+    // with a mix of zero, nonzero, and high-bit-only bytes exercises the SWAR
+    // implementation (each byte → 0xFF iff nonzero).
+    {
+        let mut init = BTreeMap::new();
+        seed(&mut init, 8, 0xFF00_FF00_0012_8000); // rs1 (mixed bytes)
+        let mut code = vec![encode::encode_op(spec("orc.b"), 14, 8, 0, 0)];
+        code.extend(encode::fold_epilogue(None));
+        out.push((
+            "orcb",
+            "live/orcb_swar",
+            Program {
+                code,
+                init_regs: init,
+                init_mem: None,
+            },
+        ));
+    }
+
+    out
+}
+
+fn main() {
+    let dir = std::env::args().nth(1).unwrap_or_else(|| {
+        eprintln!("usage: mint <res/vectors dir>");
+        std::process::exit(2);
+    });
+    let sha = git_sha();
+    for (stem, id, prog) in repros() {
+        let x10 = oracle::spike_x10(&prog).unwrap_or_else(|e| {
+            eprintln!("spike failed for {stem}: {e}");
+            std::process::exit(1);
+        });
+        let file = VectorFile {
+            meta: VectorMeta {
+                gen_sha: sha.clone(),
+                seed: 0,
+                oracle: "spike-1.1.1-dev".into(),
+                isa: ISA.into(),
+                fold_version: FOLD_VERSION,
+            },
+            vectors: vec![Vector::from_program(
                 id,
                 &prog,
                 Gold {
@@ -84,22 +111,14 @@ fn main() {
                     exit: 4,
                     exit_arg: 0,
                 },
-            ));
-        }
+            )],
+        };
+        let path = format!("{dir}/{stem}.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&file).expect("serialize"),
+        )
+        .expect("write vector");
+        eprintln!("wrote {path} (gold x10={x10:#018x})");
     }
-
-    let file = VectorFile {
-        meta: VectorMeta {
-            gen_sha: git_sha(),
-            seed: 0, // deterministic enumeration, no PRNG
-            oracle: "spike-1.1.1-dev".into(),
-            isa: ISA.into(),
-            fold_version: FOLD_VERSION,
-        },
-        vectors,
-    };
-
-    let json = serde_json::to_string_pretty(&file).expect("serialize vectors");
-    std::fs::write(&out, json).expect("write vectors file");
-    eprintln!("wrote {} vectors to {out}", file.vectors.len());
 }

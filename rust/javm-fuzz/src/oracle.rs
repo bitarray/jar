@@ -124,8 +124,16 @@ const FOLD_RELEVANT: [u8; 11] = [1, 2, 5, 8, 9, 10, 11, 12, 13, 14, 15];
 pub fn spike_x10(prog: &Program) -> std::io::Result<u64> {
     let mut words: Vec<u32> = Vec::new();
     for &xreg in &FOLD_RELEVANT {
-        let slot = javm_exec::regs::reg_slot_or_ff(xreg);
-        let val = prog.init_regs.get(&slot).copied().unwrap_or(0);
+        // x10–x13 (a0–a3) are the invocation argument registers: the engines
+        // load the call args ([0;4]) over any cap seed (nub-arch-local:131),
+        // so they always start at 0. Match that here — otherwise the oracle's
+        // initial state diverges from both engines for any seed in x10–x13.
+        let val = if (10..=13).contains(&xreg) {
+            0
+        } else {
+            let slot = javm_exec::regs::reg_slot_or_ff(xreg);
+            prog.init_regs.get(&slot).copied().unwrap_or(0)
+        };
         words.extend(crate::encode::li64(xreg, val));
     }
     words.extend_from_slice(&prog.code);

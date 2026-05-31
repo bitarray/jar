@@ -97,7 +97,18 @@ fn main() {
         }
 
         eprintln!("[{count}] DIVERGENCE: {}", disasm(&prog, fold_len));
-        let minimal = shrink(&prog, fold_len, |p| diverges(p).unwrap_or(false));
+        // A recompiler abort (e.g. a `#DE` from a div-overflow bug) poisons the
+        // sandbox, so every later recomp call returns the abort sentinel —
+        // which makes shrinking unreliable (it would "minimize" anything).
+        // Generated programs are already small, so report the aborting one
+        // as-is; shrink only the clean (value/panic) divergences.
+        let aborted = replay_recomp(&prog).exit_reason == javm_bench::ABORT_SENTINEL;
+        let minimal = if aborted {
+            eprintln!("    (recompiler aborted — poisoned sandbox; skipping shrink)");
+            prog.clone()
+        } else {
+            shrink(&prog, fold_len, |p| diverges(p).unwrap_or(false))
+        };
         eprintln!("    minimal: {}", disasm(&minimal, fold_len));
 
         let gold = spike_x10(&minimal).expect("spike on minimal");

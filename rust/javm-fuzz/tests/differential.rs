@@ -81,7 +81,8 @@ fn boundary_sweep() {
 /// Random-sequence sweep. `#[ignore]` (currently surfaces open bugs). Run with
 /// `--ignored`.
 #[test]
-#[ignore = "hunting tool: currently surfaces open recompiler bugs"]
+#[ignore = "hunting tool: surfaces a pre-existing recompiler memory-corruption \
+            bug on random multi-op programs (see implementation-bugs.md)"]
 fn random_sweep() {
     let progs = Gen::new(0xC0FFEE).random_batch(256, 6);
     let diverged = diff_batch(&progs);
