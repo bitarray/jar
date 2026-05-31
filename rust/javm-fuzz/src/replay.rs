@@ -82,27 +82,13 @@ pub fn diff(prog: &Program) -> Diff {
     Diff { interp, recomp }
 }
 
-/// Rebuild the recompiler's singleton Hyperlight sandbox.
-///
-/// The sandbox accumulates state across **distinct** Instance-cap publishes and
-/// starts to misbehave after ~13 (the bench harness documents this and resets
-/// between workloads). A fuzz sweep publishes a fresh cap per program, so it
-/// MUST rebuild periodically — otherwise late programs return corrupt results
-/// (spurious panics / host heap corruption), not real divergences.
-pub fn reset_sandbox() {
-    javm_bench::reset_nub_hyperlight();
-}
-
-/// Run a batch through [`diff`], rebuilding the sandbox every `reset_every`
-/// programs to stay under the accumulation threshold. Returns `(index, Diff)`
-/// for each diverging program. `reset_every` should be ≤ ~10.
-pub fn diff_batch(progs: &[Program], reset_every: usize) -> Vec<(usize, Diff)> {
-    let reset_every = reset_every.max(1);
+/// Run a batch through [`diff`], returning `(index, Diff)` for each diverging
+/// program. One long-lived sandbox handles the whole batch — no rebuilds (those
+/// were the source of host-heap corruption; a single sandbox runs thousands of
+/// distinct programs cleanly).
+pub fn diff_batch(progs: &[Program]) -> Vec<(usize, Diff)> {
     let mut diverged = Vec::new();
     for (i, prog) in progs.iter().enumerate() {
-        if i % reset_every == 0 {
-            reset_sandbox();
-        }
         let d = diff(prog);
         if d.diverges() {
             diverged.push((i, d));

@@ -9,13 +9,10 @@ use ssz::Decode;
 macro_rules! bench_workload {
     ($name:ident, $env:literal, $endpoint:literal, $label:literal) => {
         fn $name(c: &mut Criterion) {
-            // Rebuild the Hyperlight sandbox before each workload so
-            // cap-publish state from prior bench functions doesn't
-            // accumulate across the sweep — Instance caps with large
-            // overlays trigger an indefinite hang in put_cap after
-            // ~13 publishes on a single long-lived sandbox.
-            javm_bench::reset_nub_hyperlight();
-
+            // One long-lived sandbox handles every workload — no rebuilds.
+            // (Rebuilding re-mmap'd the snapshot at the same fixed guest VA
+            // and corrupted host heap; a single sandbox publishes thousands
+            // of distinct caps cleanly.)
             let blob: &[u8] = include_bytes!(env!($env));
             let image = Image::from_ssz_bytes(blob).expect("decode Image");
             let ep: u8 = $endpoint;

@@ -11,7 +11,7 @@
 //! Gated to linux/x86_64 (the recompiler half needs the Hyperlight sandbox).
 #![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use javm_fuzz::replay::{diff, reset_sandbox};
+use javm_fuzz::replay::diff;
 use javm_fuzz::{FOLD_VERSION, VectorFile};
 use std::path::Path;
 
@@ -43,10 +43,7 @@ fn committed_regression_vectors_pass() {
     }
 
     let mut failures = Vec::new();
-    for (i, v) in all.iter().enumerate() {
-        if i % 8 == 0 {
-            reset_sandbox();
-        }
+    for v in &all {
         let d = diff(&v.to_program());
         let matches_gold =
             d.interp.return_value == v.gold.x10 && d.interp.exit_reason == v.gold.exit;

@@ -166,24 +166,28 @@ impl BuiltCaps {
     }
 }
 
-/// RAII guard around the singleton Hyperlight Nub. Derefs to
-/// `&mut Nub`. The inner `Option` is guaranteed `Some` while the
-/// guard is alive (we panic on a `None` lock — `reset_nub_hyperlight`
-/// re-fills before releasing).
+/// RAII guard around the singleton Hyperlight Nub. Derefs to `&mut Nub`.
+///
+/// The sandbox is **never** torn down and rebuilt — doing so (the former
+/// `reset_nub_hyperlight`) re-`mmap`'d the snapshot at the same fixed guest VA
+/// while the prior KVM memslot/mapping could still alias it, which trampled
+/// host heap (the "went past end of probe sequence" corruption). One long-lived
+/// sandbox runs thousands of distinct invocations cleanly, so the guard simply
+/// holds the singleton.
 pub struct NubGuard {
-    inner: std::sync::MutexGuard<'static, Option<Nub>>,
+    inner: std::sync::MutexGuard<'static, Nub>,
 }
 
 impl std::ops::Deref for NubGuard {
     type Target = Nub;
     fn deref(&self) -> &Nub {
-        self.inner.as_ref().expect("nub_hyperlight not initialised")
+        &self.inner
     }
 }
 
 impl std::ops::DerefMut for NubGuard {
     fn deref_mut(&mut self) -> &mut Nub {
-        self.inner.as_mut().expect("nub_hyperlight not initialised")
+        &mut self.inner
     }
 }
 
@@ -312,50 +316,27 @@ pub fn run_interpreter_raw(built: &BuiltCaps) -> RawRun {
 }
 
 /// Recompiler run with no clean-halt assertion (cf. [`run_recompiler`]).
-/// On a guest abort (e.g. `#DE`), `invoke_cached` returns `Err` AND
-/// poisons the singleton sandbox — so we drop the lock, rebuild via
-/// [`reset_nub_hyperlight`], and report [`ABORT_SENTINEL`], leaving the
-/// sandbox usable for the next vector.
+///
+/// On a guest abort (e.g. `#DE`), `invoke_cached` returns `Err` and the
+/// sandbox is poisoned; we report [`ABORT_SENTINEL`] and do **not** rebuild it
+/// (rebuilding was the source of the host-heap corruption). A caller that hits
+/// an abort should stop — every subsequent invoke on the poisoned sandbox also
+/// returns `Err` → `ABORT_SENTINEL`. (For valid PVM2 code no abort occurs, so
+/// long differential sweeps run uninterrupted.)
 pub fn run_recompiler_raw(built: &BuiltCaps) -> RawRun {
-    // Scope the guard so the singleton lock is released *before*
-    // `reset_nub_hyperlight` re-acquires it (else deadlock).
-    let outcome = {
-        let mut nub = nub_hyperlight_lock();
-        built.put_into(&mut nub);
-        nub.invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
-    };
-    match outcome {
+    let mut nub = nub_hyperlight_lock();
+    built.put_into(&mut nub);
+    match nub.invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS) {
         Ok(r) => RawRun::from_result(&r),
-        Err(_) => {
-            reset_nub_hyperlight();
-            RawRun::aborted()
-        }
+        Err(_) => RawRun::aborted(),
     }
 }
 
-/// Long-lived Hyperlight sandbox shared across bench iterations.
-///
-/// The inner `Option` lets [`reset_nub_hyperlight`] tear down the
-/// current sandbox and build a fresh one between workloads — the
-/// underlying Hyperlight VM accumulates state across cap publishes
-/// (notably Instance caps with large overlays), and certain
-/// criterion sweeps trigger an indefinite hang after the 13th or so
-/// cap publish on the same sandbox. Rebuilding between bench
-/// functions costs ~300 ms per workload, which is fine relative to
-/// the per-bench measurement loop (~10 s).
-fn nub_hyperlight() -> &'static Mutex<Option<Nub>> {
-    static NUB: OnceLock<Mutex<Option<Nub>>> = OnceLock::new();
-    NUB.get_or_init(|| Mutex::new(Some(Nub::new_hyperlight().expect("Hyperlight sandbox"))))
-}
-
-/// Drop the cached Hyperlight sandbox and build a fresh one on the
-/// next `nub_hyperlight_lock`. Call from each criterion bench
-/// function's setup line so per-workload publishes don't accumulate
-/// state across the full sweep.
-pub fn reset_nub_hyperlight() {
-    let mut g = nub_hyperlight().lock().expect("nub mutex");
-    *g = None;
-    *g = Some(Nub::new_hyperlight().expect("Hyperlight sandbox"));
+/// The long-lived Hyperlight sandbox, shared across every invocation. Built
+/// once and never torn down (see [`NubGuard`] for why a rebuild corrupts).
+fn nub_hyperlight() -> &'static Mutex<Nub> {
+    static NUB: OnceLock<Mutex<Nub>> = OnceLock::new();
+    NUB.get_or_init(|| Mutex::new(Nub::new_hyperlight().expect("Hyperlight sandbox")))
 }
 
 // ============================================================================
