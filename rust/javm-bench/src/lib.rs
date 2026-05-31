@@ -248,6 +248,91 @@ fn finish(result: &InvocationResult) -> (u64, u64) {
     (result.return_value, gas_used)
 }
 
+/// `exit_reason` reported when a recompiler run aborts the VM — a guest
+/// CPU fault delivered as an unhandled IDT vector (e.g. `#DE` from `idiv`
+/// on INT_MIN/-1) surfaces as a host `Err(GuestAborted)`, not an
+/// [`InvocationResult`]. Distinct from every real PVM2 exit reason (0..=7).
+pub const ABORT_SENTINEL: u32 = u32::MAX;
+
+/// Raw invocation outcome for differential testing — the four
+/// [`InvocationResult`] fields with **no clean-halt assertion**.
+///
+/// `run_interpreter`/`run_recompiler` assert a clean `HostCall(0)` halt
+/// (via `finish`) and panic otherwise — correct for benches, wrong for a
+/// differential harness that must *observe* a divergent exit. These raw
+/// variants surface whatever happened, with `exit_reason = ABORT_SENTINEL`
+/// for the recompiler's guest-abort path.
+///
+/// `gas_used` is `INITIAL_GAS - gas_remaining`; on an abort it is 0 (no
+/// `InvocationResult` was produced).
+//
+// TODO(javm-fuzz-state-readback): these runners only surface x10
+// (`return_value`) + exit + gas. The lossless, model-conformant DataCap
+// memory-signature readback is deferred — see
+// ~/docs/plans/javm-fuzz-state-readback.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawRun {
+    pub exit_reason: u32,
+    pub exit_arg: u32,
+    pub return_value: u64,
+    pub gas_used: u64,
+}
+
+impl RawRun {
+    fn from_result(r: &InvocationResult) -> Self {
+        RawRun {
+            exit_reason: r.exit_reason,
+            exit_arg: r.exit_arg,
+            return_value: r.return_value,
+            gas_used: INITIAL_GAS.saturating_sub(r.gas_remaining),
+        }
+    }
+
+    fn aborted() -> Self {
+        RawRun {
+            exit_reason: ABORT_SENTINEL,
+            exit_arg: 0,
+            return_value: 0,
+            gas_used: 0,
+        }
+    }
+}
+
+/// Interpreter run with no clean-halt assertion (cf. [`run_interpreter`]).
+/// The Local backend never aborts the host, so `invoke_cached` returns
+/// `Ok` in practice; an `Err` is still mapped to the abort sentinel for
+/// symmetry with the recompiler.
+pub fn run_interpreter_raw(built: &BuiltCaps) -> RawRun {
+    let mut nub = Nub::new_local();
+    built.put_into(&mut nub);
+    match nub.invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS) {
+        Ok(r) => RawRun::from_result(&r),
+        Err(_) => RawRun::aborted(),
+    }
+}
+
+/// Recompiler run with no clean-halt assertion (cf. [`run_recompiler`]).
+/// On a guest abort (e.g. `#DE`), `invoke_cached` returns `Err` AND
+/// poisons the singleton sandbox — so we drop the lock, rebuild via
+/// [`reset_nub_hyperlight`], and report [`ABORT_SENTINEL`], leaving the
+/// sandbox usable for the next vector.
+pub fn run_recompiler_raw(built: &BuiltCaps) -> RawRun {
+    // Scope the guard so the singleton lock is released *before*
+    // `reset_nub_hyperlight` re-acquires it (else deadlock).
+    let outcome = {
+        let mut nub = nub_hyperlight_lock();
+        built.put_into(&mut nub);
+        nub.invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
+    };
+    match outcome {
+        Ok(r) => RawRun::from_result(&r),
+        Err(_) => {
+            reset_nub_hyperlight();
+            RawRun::aborted()
+        }
+    }
+}
+
 /// Long-lived Hyperlight sandbox shared across bench iterations.
 ///
 /// The inner `Option` lets [`reset_nub_hyperlight`] tear down the
