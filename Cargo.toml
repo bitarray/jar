@@ -24,6 +24,7 @@ members = [
     "rust/javm-exec",
     "rust/javm-recompiler-x86",
     "rust/javm-bench",
+    "rust/javm-fuzz",
     "rust/jar-kernel",
     "rust/jar-test-services/halt",
     "components/benches/blake2b",
