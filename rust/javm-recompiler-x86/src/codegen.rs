@@ -491,13 +491,11 @@ impl Compiler {
         if shift_reg == Reg::RCX {
             self.asm.shift_cl32(shift_op, dst);
         } else if dst == Reg::RCX {
-            // dst is CL — need to swap
-            self.asm.push(shift_reg);
-            self.asm.mov_rr(Reg::RCX, shift_reg);
-            // But we also need dst's value which was in RCX
-            // We pushed shift_reg, not dst. Let me handle this differently.
-            // Move dst to SCRATCH, put shift in CL, shift SCRATCH, move back.
-            self.asm.pop(shift_reg); // undo push
+            // dst *is* RCX (φ[12] = x15), which we also need as the CL shift
+            // count register. Snapshot dst's value into SCRATCH FIRST (before
+            // RCX is overwritten), shift the snapshot, then write it back.
+            // (Mirrors `emit_shift_by_reg64`; the earlier version read `dst`
+            // *after* clobbering RCX, shifting the count instead of the value.)
             self.asm.mov_rr(SCRATCH, dst);
             self.asm.push(Reg::RCX);
             self.asm.mov_rr(Reg::RCX, shift_reg);
@@ -3526,10 +3524,34 @@ impl Compiler {
                 self.asm.bswap64(d);
             }
             UnaryOp::OrcB => {
-                // orc.b: byte-wise OR-combine. Each byte becomes 0xFF if
-                // any bit was set in the source byte, else 0x00. No
-                // single x86 instruction; emulate or panic in Phase 1.
-                self.rv_emit_panic_at(pc);
+                // orc.b: each byte → 0xFF if any bit was set, else 0x00. No
+                // single x86 op, so emulate via SWAR:
+                //   t = (((x & LO7) + LO7) | x) & HI   — bit7 of byte i set iff
+                //       byte i != 0 (the carry trick; per-byte, no cross-byte
+                //       carry since (b&0x7F)+0x7F ≤ 0xFE).
+                //   result = t | (t - (t >> 7))        — spread that flag to the
+                //       whole byte (0x80 → 0xFF; per-byte, no cross-byte borrow).
+                // The 13-slot host register file leaves only SCRATCH free, so
+                // the two values each needed twice (`x`, then `t`) are parked on
+                // the stack and read back with `pop` (balanced push/pop pairs).
+                const LO7: u64 = 0x7F7F_7F7F_7F7F_7F7F;
+                const HI: u64 = 0x8080_8080_8080_8080;
+                self.asm.mov_rr(SCRATCH, src); // SCRATCH = x (safe if d == src)
+                self.asm.push(SCRATCH); // save x
+                self.asm.mov_ri64(d, LO7);
+                self.asm.and_rr(d, SCRATCH); // d = x & LO7
+                self.asm.mov_ri64(SCRATCH, LO7);
+                self.asm.add_rr(d, SCRATCH); // d = (x & LO7) + LO7
+                self.asm.pop(SCRATCH); // SCRATCH = x (rsp restored)
+                self.asm.or_rr(d, SCRATCH); // d = ((x&LO7)+LO7) | x
+                self.asm.mov_ri64(SCRATCH, HI);
+                self.asm.and_rr(d, SCRATCH); // d = t (bit7/byte = byte != 0)
+                self.asm.push(d); // save t
+                self.asm.mov_rr(SCRATCH, d);
+                self.asm.shr_ri64(SCRATCH, 7); // SCRATCH = t >> 7
+                self.asm.sub_rr(d, SCRATCH); // d = t - (t >> 7)
+                self.asm.pop(SCRATCH); // SCRATCH = t (rsp restored)
+                self.asm.or_rr(d, SCRATCH); // d = t | (t - (t>>7))
             }
         }
         if rd != 0 {
