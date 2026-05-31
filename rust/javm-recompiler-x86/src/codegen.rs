@@ -3427,6 +3427,37 @@ impl Compiler {
 
         // ---- nonzero branch: real DIV/IDIV ----
         self.asm.bind_label(nonzero);
+        // Signed overflow guard. `idiv` on INT_MIN / -1 raises #DE on x86, but
+        // RISC-V *defines* it (quotient = INT_MIN, remainder = 0). More
+        // generally, for divisor == -1 the quotient is -dividend (which wraps
+        // INT_MIN → INT_MIN) and the remainder is always 0 — so we special-case
+        // divisor == -1, skip the `idiv`, and avoid the fault. This matches the
+        // interpreter (`javm-exec/src/interp.rs`, Div/Rem). Unsigned division
+        // cannot overflow, so the guard is signed-only.
+        if signed {
+            let not_neg_one = self.asm.new_label();
+            if is_32bit {
+                self.asm.cmp_ri32(b_reg, -1);
+            } else {
+                self.asm.cmp_ri(b_reg, -1);
+            }
+            self.asm.jcc_label(Cc::NE, not_neg_one);
+            if remainder {
+                self.asm.mov_ri64(d, 0); // a % -1 == 0 for all a
+            } else {
+                if d != Reg::RAX {
+                    self.asm.mov_rr(d, Reg::RAX);
+                }
+                self.asm.neg64(d); // d = -dividend (wraps INT_MIN → INT_MIN)
+                if is_32bit {
+                    // Low 32 bits of a 64-bit negation == 32-bit negation of the
+                    // low 32 bits, so re-narrow to the signed 32-bit view.
+                    self.asm.movsxd(d, d);
+                }
+            }
+            self.asm.jmp_label(join);
+            self.asm.bind_label(not_neg_one);
+        }
         if is_32bit {
             if signed {
                 self.asm.movsxd(Reg::RAX, Reg::RAX);
