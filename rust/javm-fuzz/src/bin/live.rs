@@ -15,19 +15,33 @@
 //!
 //! Usage: `cargo run -p javm-fuzz --bin live -- [out.json] [--seed N] [--max N]`
 
-#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
+// The recompiler differential needs the Hyperlight host stack (`javm-bench`),
+// which only builds on linux/x86_64. On other targets this bin is a stub so
+// the workspace still compiles (e.g. the macOS interpreter-only CI job).
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn main() {
+    eprintln!("live differential fuzz requires linux/x86_64 (Hyperlight recompiler)");
+    std::process::exit(1);
+}
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_exec::instruction::decode;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_fuzz::generate::{Gen, enumerate_boundary};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_fuzz::oracle::spike_x10;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_fuzz::replay::{replay_interp, replay_recomp};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_fuzz::shrink::shrink;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_fuzz::{FOLD_VERSION, Gold, ISA, Program, Vector, VectorFile, VectorMeta, encode};
 
 /// Do Spike, the interpreter, and the recompiler disagree on `prog`? `None` if
 /// Spike couldn't run it (skip). A divergence is any of: either engine's `x10`
 /// ≠ the oracle gold, either engine not halting cleanly (`exit` ≠ 4), or the
 /// two engines disagreeing on gas (the oracle has no gas).
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn diverges(prog: &Program) -> Option<bool> {
     let gold = spike_x10(prog).ok()?;
     let i = replay_interp(prog);
@@ -41,6 +55,7 @@ fn diverges(prog: &Program) -> Option<bool> {
     )
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn disasm(prog: &Program, fold_len: usize) -> String {
     let body_end = prog.code.len().saturating_sub(fold_len);
     let ops: Vec<String> = prog.code[..body_end]
@@ -50,6 +65,7 @@ fn disasm(prog: &Program, fold_len: usize) -> String {
     format!("[{}] seeds={:?}", ops.join("; "), prog.init_regs)
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn vector_id(prog: &Program, fold_len: usize) -> String {
     let body_end = prog.code.len().saturating_sub(fold_len);
     let op = prog
@@ -61,6 +77,7 @@ fn vector_id(prog: &Program, fold_len: usize) -> String {
     format!("live/{op}_{body_end}op")
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn main() {
     let mut out: Option<String> = None;
     let mut seed = 0xC0FFEEu64; // default: the seed that surfaced the sllw/orc.b bugs

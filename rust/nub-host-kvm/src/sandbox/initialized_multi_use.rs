@@ -227,7 +227,7 @@ impl MultiUseSandbox {
     ///
     /// Behaviour:
     ///
-    /// - If `hash` is in the host-side [`Self::published_blobs`] set,
+    /// - If `hash` is in the host-side `published_blobs` set,
     ///   return immediately — we already shipped this cap and the blobs
     ///   tier never evicts, so the guest still holds it. We skip the
     ///   rkyv encode + VMEXIT + guest decode + merkle walk + directory
@@ -239,7 +239,7 @@ impl MultiUseSandbox {
     /// We deliberately do **not** check the guest's directory directly:
     /// the guest's `CacheDirectory` is a hashbrown table built with a
     /// different SIMD `Group` width than the host's hashbrown (see
-    /// [`Self::published_blobs`]), so a host-side deref of it is unsound.
+    /// `published_blobs`), so a host-side deref of it is unsound.
     pub fn put_cap_with_hash(&mut self, hash: AbiCapHash, cap: &Cap) -> Result<()> {
         if self.published_blobs.contains(&hash) {
             return Ok(());
