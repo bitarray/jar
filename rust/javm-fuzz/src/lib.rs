@@ -7,7 +7,7 @@
 //! shift-amount masking, W-op sign-extension, `mulhsu`, Zbb corner inputs.
 //! Those are exactly where a future ARM JIT lowering could silently diverge.
 //!
-//! This crate **generates** RV64E-subset programs ([`gen`]), runs each through
+//! This crate **generates** RV64E-subset programs ([`generate`]), runs each through
 //! the interpreter and the recompiler ([`replay`], linux/x86_64 only), and —
 //! offline — through a Sail/Spike oracle to mint static golden vectors. CI
 //! replays committed vectors and compares to the baked-in gold; the oracle
