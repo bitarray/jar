@@ -491,9 +491,7 @@ impl CopyingMemory {
         Ok(())
     }
 
-    /// Category-#3 first-touch for a `width`-byte **read**. See [`touch`].
-    ///
-    /// [`touch`]: CopyingMemory::touch
+    /// Category-#3 first-touch for a `width`-byte **read**. See `touch`.
     #[inline]
     pub fn touch_read(
         &mut self,
@@ -504,9 +502,7 @@ impl CopyingMemory {
         self.touch(addr, width, false, gas)
     }
 
-    /// Category-#3 first-touch for a `width`-byte **write**. See [`touch`].
-    ///
-    /// [`touch`]: CopyingMemory::touch
+    /// Category-#3 first-touch for a `width`-byte **write**. See `touch`.
     #[inline]
     pub fn touch_write(
         &mut self,

@@ -297,7 +297,8 @@ fn mem_ro_two_caps_one_cluster() {
     body.push(encode::ld(9, 8, 0)); // read cap A → unit A page_in
     body.extend(encode::li64(10, (DATA_BASE + B_OFF) as u64));
     body.push(encode::ld(11, 10, 0)); // read cap B → unit B page_in (distinct cap)
-    let img = javm_fuzz::replay::image_with_ro_caps(&body, &[(DATA_BASE, &a), (DATA_BASE + B_OFF, &b)]);
+    let img =
+        javm_fuzz::replay::image_with_ro_caps(&body, &[(DATA_BASE, &a), (DATA_BASE + B_OFF, &b)]);
     let d = javm_fuzz::replay::diff_image(&img);
     assert!(
         !d.diverges(),
