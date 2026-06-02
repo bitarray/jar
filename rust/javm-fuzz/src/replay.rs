@@ -50,6 +50,43 @@ pub fn image_with_ro(words: &[u32], ro_start: u32, ro_bytes: &[u8]) -> Image {
     img
 }
 
+/// Build an `Image` from raw `words` with **several** pinned read-only data
+/// caps, each `(start, bytes)` — for multi-cap read-only-cluster differential
+/// tests (e.g. two distinct caps sharing one 2 MiB cluster). Each cap takes its
+/// own cnode slot, so the recompiler resolves each as a separate `PinnedCapRo`
+/// `MatRange` with its own source PA, exactly as production does.
+pub fn image_with_ro_caps(words: &[u32], caps: &[(u32, &[u8])]) -> Image {
+    let mut code = encode::enc(words);
+    code.extend_from_slice(&encode::enc(&[encode::HALT]));
+    let mut img = Image::empty();
+    img.code = code;
+    img.endpoints.insert(
+        0,
+        EndpointDef {
+            entry_pc: 0,
+            arg_registers: 0,
+            arg_cnode_size: 0,
+            initial_regs: BTreeMap::new(),
+        },
+    );
+    for (i, (start, bytes)) in caps.iter().enumerate() {
+        let slot = SlotIdx(WINDOW_SLOT + 1 + i as u32);
+        img.memory_mappings.push(MemoryMapping {
+            start: *start as u64,
+            size: bytes.len() as u64,
+            source: SlotPath::root(slot),
+        });
+        img.pinned_slots.insert(
+            slot,
+            PinnedCap::Data {
+                content: bytes.to_vec(),
+                size: bytes.len() as u64,
+            },
+        );
+    }
+    img
+}
+
 /// Run a pre-built `Image` through both engines and compare.
 pub fn diff_image(img: &Image) -> Diff {
     let built = BuiltCaps::for_image(img, 0);

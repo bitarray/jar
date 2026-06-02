@@ -277,6 +277,67 @@ fn mem_ro_cluster_multipage() {
 }
 
 #[test]
+fn mem_ro_two_caps_one_cluster() {
+    // TWO distinct pinned RO caps mapped into the SAME 2 MiB cluster (cap A at
+    // DATA_BASE, cap B 1 MiB higher). Per-cap materialization keys on the UNIT
+    // (cap ∩ cluster) = unit_base, not the bare cluster, so each cap is its own
+    // unit and pays its own page_in — a page-in event touches one DataCap. The
+    // recompiler takes a second fault for cap B (A's fault-around mapped only
+    // A's range); that fault now CHARGES (different unit), and the interpreter
+    // charges the same. The engines must agree.
+    const B_OFF: u32 = 0x10_0000; // 1 MiB → same 2 MiB cluster as DATA_BASE
+    assert_eq!(
+        javm_exec::mat::cluster_of(DATA_BASE),
+        javm_exec::mat::cluster_of(DATA_BASE + B_OFF),
+        "test setup: both caps must share one cluster",
+    );
+    let a = vec![0xA1u8; 4096];
+    let b = vec![0xB2u8; 4096];
+    let mut body = encode::li64(8, DATA_BASE as u64);
+    body.push(encode::ld(9, 8, 0)); // read cap A → unit A page_in
+    body.extend(encode::li64(10, (DATA_BASE + B_OFF) as u64));
+    body.push(encode::ld(11, 10, 0)); // read cap B → unit B page_in (distinct cap)
+    let img = javm_fuzz::replay::image_with_ro_caps(&body, &[(DATA_BASE, &a), (DATA_BASE + B_OFF, &b)]);
+    let d = javm_fuzz::replay::diff_image(&img);
+    assert!(
+        !d.diverges(),
+        "two RO caps in one cluster diverge: {}",
+        d.describe(),
+    );
+}
+
+#[test]
+fn mem_ro_per_cap_independent_of_cluster() {
+    // Per-cap materialization isolates caps: reading two RO caps costs the same
+    // whether or not they share a 2 MiB cluster — each cap is its own unit and
+    // pays one page_in regardless of placement (no cross-cap dedup, no cross-cap
+    // penalty). Both engines agree in both layouts.
+    let a = vec![0xA1u8; 4096];
+    let b = vec![0xB2u8; 4096];
+    let read_two = |b_addr: u32| {
+        let mut body = encode::li64(8, DATA_BASE as u64);
+        body.push(encode::ld(9, 8, 0)); // cap A (DATA_BASE)
+        body.extend(encode::li64(10, b_addr as u64));
+        body.push(encode::ld(11, 10, 0)); // cap B (b_addr)
+        javm_fuzz::replay::image_with_ro_caps(&body, &[(DATA_BASE, &a), (b_addr, &b)])
+    };
+    // B at +1 MiB → same cluster as A; B at +2 MiB → the next cluster.
+    let same = javm_fuzz::replay::diff_image(&read_two(DATA_BASE + 0x10_0000));
+    let diff = javm_fuzz::replay::diff_image(&read_two(DATA_BASE + 0x20_0000));
+    assert!(
+        !same.diverges() && !diff.diverges(),
+        "divergence: same_cluster={} diff_cluster={}",
+        same.describe(),
+        diff.describe(),
+    );
+    // Cluster placement is irrelevant: two caps = two page_ins either way.
+    assert_eq!(
+        same.interp.gas_used, diff.interp.gas_used,
+        "per-cap: sharing a cluster must not change cost (each cap its own unit)",
+    );
+}
+
+#[test]
 fn mem_code_and_data_in_one_block() {
     // A single basic block doing BOTH a code load and a data load — proves
     // the per-region state arrays (code vs data) don't cross-contaminate and

@@ -200,13 +200,17 @@ pub struct CopyingMemory {
     /// `code_base + round_up(code_len)`. The last code page's zero-padded
     /// tail is readable (matching the recompiler, which maps whole pages).
     pub code_top: u32,
-    /// Per-2 MiB-cluster materialization flag for **read-only** pages (code
-    /// and pinned data caps), indexed by absolute cluster
-    /// ([`crate::mat::cluster_of`]). The first read anywhere in a cluster
-    /// pays one `page_in`; subsequent reads of the cluster are free. Grown
-    /// on demand. The recompiler tracks the same per-cluster state, so both
-    /// charge a read-only cluster exactly once.
-    pub ro_cluster_mat: Vec<u8>,
+    /// Materialized read-only **units** — sorted set of [`crate::mat::unit_base`]
+    /// values (one per `cap ∩ 2 MiB cluster` paged in). The first read in a
+    /// unit pays one `page_in`; later reads of the same unit are free. The
+    /// recompiler tracks the same unit set, so both charge a read-only unit
+    /// exactly once and a single fault touches at most one DataCap.
+    pub ro_units: Vec<u32>,
+    /// Read-only DataCap ranges `[start, end)` (page-aligned), recorded as
+    /// RO mappings are declared. Resolves an RO data page to its cap's start
+    /// (the `cap_start` half of [`crate::mat::unit_base`]); the CODE region
+    /// uses `code_base` directly. Disjoint, so a page lies in at most one.
+    pub ro_cap_ranges: Vec<(u32, u32)>,
     /// Heap base address (for sbrk).
     pub heap_base: u32,
     /// Current heap top.
@@ -236,7 +240,8 @@ impl CopyingMemory {
             mat_state: Vec::new(),
             code_base: 0,
             code_top: 0,
-            ro_cluster_mat: Vec::new(),
+            ro_units: Vec::new(),
+            ro_cap_ranges: Vec::new(),
             heap_base: 0,
             heap_top: 0,
             max_heap_pages: 0,
@@ -256,6 +261,14 @@ impl CopyingMemory {
     /// `n_pages` is the number of `PAGE_SIZE`-pages. `base = 0`.
     pub fn with_pages(n_pages: u32, default_perm: u8) -> Self {
         let bytes = (n_pages as usize) * (PAGE_SIZE as usize);
+        // A whole-buffer RO region (base = 0) is one DataCap for #3 unit
+        // accounting: record its range so RO touches resolve `cap_start = 0`,
+        // matching how a real pinned cap is recorded by `map_region`.
+        let ro_cap_ranges = if default_perm == perm::RO && n_pages > 0 {
+            vec![(0u32, bytes as u32)]
+        } else {
+            Vec::new()
+        };
         Self {
             base: 0,
             flat_mem: vec![0u8; bytes],
@@ -263,28 +276,39 @@ impl CopyingMemory {
             mat_state: vec![crate::mat::PageState::NotPresent.as_u8(); n_pages as usize],
             code_base: 0,
             code_top: 0,
-            ro_cluster_mat: Vec::new(),
+            ro_units: Vec::new(),
+            ro_cap_ranges,
             heap_base: 0,
             heap_top: 0,
             max_heap_pages: 0,
         }
     }
 
-    /// Charge for a **read-only** page in the 2 MiB cluster containing
-    /// `addr`: returns [`crate::gas_const::PAGE_IN_COST`] on the first read
-    /// anywhere in the cluster (marking it materialized), `0` thereafter.
-    /// The `ro_cluster_mat` flag vector grows on demand.
-    fn ro_cluster_charge(&mut self, addr: u32) -> u64 {
-        let c = crate::mat::cluster_of(addr) as usize;
-        if c >= self.ro_cluster_mat.len() {
-            self.ro_cluster_mat.resize(c + 1, 0);
+    /// Charge for a **read-only** access to `addr` in a cap starting at
+    /// `cap_start`: returns [`crate::gas_const::PAGE_IN_COST`] on the first
+    /// read of the unit ([`crate::mat::unit_base`] = `cap ∩ 2 MiB cluster`),
+    /// marking it materialized, `0` thereafter. The recompiler keys on the
+    /// same `unit_base`, so a unit pays page-in exactly once on each engine.
+    fn ro_unit_charge(&mut self, addr: u32, cap_start: u32) -> u64 {
+        let ub = crate::mat::unit_base(addr, cap_start);
+        match self.ro_units.binary_search(&ub) {
+            Ok(_) => 0,
+            Err(pos) => {
+                self.ro_units.insert(pos, ub);
+                crate::gas_const::PAGE_IN_COST
+            }
         }
-        if self.ro_cluster_mat[c] == 0 {
-            self.ro_cluster_mat[c] = 1;
-            crate::gas_const::PAGE_IN_COST
-        } else {
-            0
-        }
+    }
+
+    /// Start of the read-only DataCap containing the page-aligned `page`, or
+    /// `None` if `page` is in no recorded RO cap range. Used to derive the
+    /// `cap_start` for [`Self::ro_unit_charge`] of RO **data** pages (the
+    /// CODE region passes `code_base` directly).
+    fn ro_cap_start_of(&self, page: u32) -> Option<u32> {
+        self.ro_cap_ranges
+            .iter()
+            .find(|&&(s, e)| page >= s && page < e)
+            .map(|&(s, _)| s)
     }
 
     /// Declare the read-only CODE region for category-#3 accounting:
@@ -405,16 +429,19 @@ impl CopyingMemory {
             }
         }
 
-        // Materialize-all. Read-only (pinned-cap) pages materialize at 2 MiB
-        // cluster granularity — one `page_in` per cluster (the recompiler
-        // fault-arounds the cluster); copy-on-write (writable) pages stay
+        // Materialize-all. Read-only (pinned-cap) pages materialize per
+        // unit — one `page_in` per `cap ∩ 2 MiB cluster` (the recompiler
+        // fault-arounds the unit); copy-on-write (writable) pages stay
         // per-page. A write to a read-only page was excluded by the perm
         // gate above, so RO pages here are reads.
         let mut total: u64 = 0;
         for &p in pages {
             let i = self.page_index(p).expect("checked accessible above");
             if self.perms[i] == perm::RO {
-                total += self.ro_cluster_charge(p);
+                let cap_start = self
+                    .ro_cap_start_of(p)
+                    .expect("RO data page lies outside every recorded cap range");
+                total += self.ro_unit_charge(p, cap_start);
             } else {
                 let state = crate::mat::PageState::from_u8(self.mat_state[i]);
                 let (charge, next) =
@@ -430,10 +457,12 @@ impl CopyingMemory {
     }
 
     /// `#3` for a CODE-region access: `PinnedCapRo`, read-only and
-    /// 2 MiB-cluster-materialized — a read pays one `page_in` per cluster
-    /// (deduped across the access's page set), a write hard-faults, and a
-    /// read straddling out of the region faults charging nothing
-    /// (all-or-nothing). Mirrors the recompiler's lazy code materialization.
+    /// unit-materialized — a read pays one `page_in` per unit
+    /// (`code ∩ 2 MiB cluster`, deduped across the access's page set), a
+    /// write hard-faults, and a read straddling out of the region faults
+    /// charging nothing (all-or-nothing). The code region is one cap, so its
+    /// `cap_start` is `code_base`. Mirrors the recompiler's lazy code
+    /// materialization.
     fn touch_code(
         &mut self,
         pages: &[u32],
@@ -450,10 +479,12 @@ impl CopyingMemory {
                 return Err(TouchFault);
             }
         }
-        // Materialize-all: one `page_in` per touched read-only cluster.
+        // Materialize-all: one `page_in` per touched read-only unit
+        // (`code ∩ cluster`); the code region is a single cap at `code_base`.
+        let code_base = self.code_base;
         let mut total: u64 = 0;
         for &p in pages {
-            total += self.ro_cluster_charge(p);
+            total += self.ro_unit_charge(p, code_base);
         }
         gas.charge(total)
             .expect("#3 materialization charge within block reserve");
@@ -657,6 +688,14 @@ impl CopyingMemory {
         if size > 0 {
             for p in first_page..=last_page {
                 self.perms[p] = perm_byte;
+            }
+            // Record a read-only cap range so #3 unit accounting can resolve
+            // this page's `cap_start` ([`Self::ro_cap_start_of`]). `start`/
+            // `end` are absolute guest addresses (page-aligned, validated
+            // above); the recompiler keys on the matching `MatRange.start`.
+            if access == Access::ReadOnly {
+                self.ro_cap_ranges
+                    .push((start as u32, (start + size) as u32));
             }
         }
 

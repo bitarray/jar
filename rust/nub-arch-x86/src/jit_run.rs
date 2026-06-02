@@ -114,8 +114,14 @@ static MAT_CODE_PA: AtomicU64 = AtomicU64::new(0);
 /// ([`javm_exec::mat::cluster_of`]). The first RO fault in a cluster pays
 /// one `page_in` and fault-arounds the cluster's RO pages; the interpreter
 /// tracks the same per-cluster flag, so both charge a cluster exactly once.
-static MAT_RO_CLUSTER_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
-static MAT_RO_CLUSTER_LEN: AtomicU64 = AtomicU64::new(0);
+/// Materialized read-only **units** — pointer to the running frame's sorted
+/// `Vec<u32>` of [`javm_exec::mat::unit_base`] values (one per `cap ∩ 2 MiB
+/// cluster` paged in). The handler binary-searches/inserts here so each RO
+/// unit is charged one `page_in` exactly once, matching the interpreter. A
+/// `Vec` (not a fixed bitmap) because the unit set is keyed by `unit_base`,
+/// not a dense cluster index, and it grows in the handler (realloc-safe via
+/// the `&mut Vec` indirection, like `DIRTY_PAGE_SINK`).
+static MAT_RO_UNITS_SINK: AtomicPtr<alloc::vec::Vec<u32>> = AtomicPtr::new(core::ptr::null_mut());
 static DIRTY_PAGE_SINK: AtomicPtr<alloc::vec::Vec<crate::call_loop::DirtyPage>> =
     AtomicPtr::new(core::ptr::null_mut());
 static ACTIVE_PT_PML4_KVA: AtomicU64 = AtomicU64::new(0);
@@ -299,25 +305,25 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
     // which case no page of `set` lies in it (guarded by in_code/in_data).
     let dstate_ptr = MAT_STATE_PTR.load(Ordering::SeqCst);
     let dstate_len = MAT_STATE_LEN.load(Ordering::SeqCst) as usize;
-    let roc_ptr = MAT_RO_CLUSTER_PTR.load(Ordering::SeqCst);
-    let roc_len = MAT_RO_CLUSTER_LEN.load(Ordering::SeqCst) as usize;
-    // SAFETY: each ptr/len describes the running FrameRuntime's state Vec
-    // (single-threaded → exclusive); empty slice if undeclared.
+    let ro_units_ptr = MAT_RO_UNITS_SINK.load(Ordering::SeqCst);
+    // SAFETY: each ptr describes the running FrameRuntime's state
+    // (single-threaded → exclusive); empty slice / scratch Vec if undeclared.
     let dstate: &mut [u8] = if dstate_ptr.is_null() {
         &mut []
     } else {
         unsafe { core::slice::from_raw_parts_mut(dstate_ptr, dstate_len) }
     };
-    let ro_cluster: &mut [u8] = if roc_ptr.is_null() {
-        &mut []
+    let mut ro_units_scratch = alloc::vec::Vec::new();
+    let ro_units: &mut alloc::vec::Vec<u32> = if ro_units_ptr.is_null() {
+        &mut ro_units_scratch
     } else {
-        unsafe { core::slice::from_raw_parts_mut(roc_ptr, roc_len) }
+        unsafe { &mut *ro_units_ptr }
     };
 
     // Materialize-all (low→high), accumulating the charge. Read-only pages
-    // (code + PinnedCapRo data caps) materialize per 2 MiB cluster (one
-    // page_in, fault-around the cluster's RO pages); writable (CoW /
-    // ephemeral) pages stay per-page.
+    // (code + PinnedCapRo data caps) materialize per unit (one page_in per
+    // `cap ∩ 2 MiB cluster`, fault-around the unit's RO pages); writable
+    // (CoW / ephemeral) pages stay per-page.
     let mut total: u64 = 0;
     for &p in set.as_slice() {
         let pv = p as u64;
@@ -334,7 +340,7 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
             }
         };
         if let Some((r_start, r_end, r_pa)) = ro_range {
-            match materialize_ro_cluster(pv, r_start, r_end, r_pa, ro_cluster, pml4, owned_vec) {
+            match materialize_ro_unit(pv, r_start, r_end, r_pa, ro_units, pml4, owned_vec) {
                 Some(c) => total = total.saturating_add(c),
                 None => return false,
             }
@@ -377,32 +383,51 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
                     {
                         return false;
                     }
-                    crate::paging::invlpg(pv);
+                    // No invlpg: NotPresent → present is not TLB-cached (the
+                    // page had no prior translation), so the faulting retry
+                    // walks the fresh entry. invlpg is needed only when an
+                    // existing present mapping changes (the CoW remap below).
                 }
             }
             javm_exec::mat::PageState::PresentRw => {
-                if kind == javm_exec::mat::PageKind::EphemeralZero {
-                    // Frame-private buffer: map it writable (builds path).
-                    // SAFETY: as above.
-                    if unsafe {
-                        crate::paging::pt_map_leaf(
-                            pml4,
-                            pv,
-                            src_pa,
-                            crate::paging::Perm::user_rw(),
-                            owned_vec,
-                        )
-                    }
-                    .is_none()
-                    {
+                // Map only when *transitioning into* PresentRw (cur != PresentRw).
+                // An already-PresentRw page is mapped writable at its final PA, so
+                // re-mapping it is wrong: for a CoW cap page it would re-allocate
+                // and re-copy the cap bytes over the guest's writes at a *new* PA.
+                // This case is reached when a straddle access faults on its other
+                // (not-present) page and the loop re-visits this present partner;
+                // charge_for already returned 0, so skipping the map is gas-neutral.
+                if cur != javm_exec::mat::PageState::PresentRw {
+                    // Flush only when an *existing* present (RO) mapping is being
+                    // changed to RW (read-then-write CoW): that stale RO entry may
+                    // be TLB-cached. A first-touch write (cur == NotPresent) maps a
+                    // page that was never present, so it needs no invlpg.
+                    let flush = cur == javm_exec::mat::PageState::PresentRo;
+                    if kind == javm_exec::mat::PageKind::EphemeralZero {
+                        // Frame-private buffer: map it writable (builds path).
+                        // SAFETY: as above.
+                        if unsafe {
+                            crate::paging::pt_map_leaf(
+                                pml4,
+                                pv,
+                                src_pa,
+                                crate::paging::Perm::user_rw(),
+                                owned_vec,
+                            )
+                        }
+                        .is_none()
+                        {
+                            return false;
+                        }
+                        if flush {
+                            crate::paging::invlpg(pv);
+                        }
+                    } else if !cow_into_fresh(pv, src_pa, pml4, owned_vec, range, flush) {
+                        // Allocation / remap failure → fault (nothing charged
+                        // yet for THIS page, but earlier pages of a straddle
+                        // were already advanced; an OOM here is fatal anyway).
                         return false;
                     }
-                    crate::paging::invlpg(pv);
-                } else if !cow_into_fresh(pv, src_pa, pml4, owned_vec, range) {
-                    // Allocation / remap failure → fault (nothing charged
-                    // yet for THIS page, but earlier pages of a straddle
-                    // were already advanced; an OOM here is fatal anyway).
-                    return false;
                 }
             }
             javm_exec::mat::PageState::NotPresent => {}
@@ -423,15 +448,21 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
 }
 
 /// Copy-on-write a cap-backed page: allocate a fresh page, copy the
-/// cap's bytes from `src_pa`, remap the leaf writable at the new PA,
-/// invlpg, and append a [`crate::call_loop::DirtyPage`] to the per-frame
-/// sink. Returns `false` on allocation / remap failure.
+/// cap's bytes from `src_pa`, remap the leaf writable at the new PA, and
+/// append a [`crate::call_loop::DirtyPage`] to the per-frame sink. Returns
+/// `false` on allocation / remap failure.
+///
+/// `flush` invalidates the TLB for `page_va` after the remap: pass `true`
+/// only when an *existing* present mapping is being changed (read-then-write
+/// CoW, where the page was mapped RO and may be cached); a first-touch write
+/// (the page was `NotPresent`) needs no flush.
 fn cow_into_fresh(
     page_va: u64,
     src_pa: u64,
     pml4: u64,
     owned_vec: u64,
     range: Option<crate::call_loop::MatRange>,
+    flush: bool,
 ) -> bool {
     let Some(src_kva) = crate::paging::pa_to_va(src_pa) else {
         return false;
@@ -461,7 +492,9 @@ fn cow_into_fresh(
     {
         return false;
     }
-    crate::paging::invlpg(page_va);
+    if flush {
+        crate::paging::invlpg(page_va);
+    }
 
     let sink_ptr = DIRTY_PAGE_SINK.load(Ordering::SeqCst);
     if !sink_ptr.is_null() {
@@ -482,46 +515,38 @@ fn cow_into_fresh(
     true
 }
 
-/// Materialize the read-only source range `[r_start, r_end)` (physical
-/// base `r_pa`) within the 2 MiB cluster containing `pv`. Charges one
-/// `page_in` the first time *any* read-only page in that cluster faults
-/// (per `ro_cluster`, indexed by absolute cluster), `0` thereafter — so a
-/// large read-only input materializes for one fault, not one per page. The
-/// cluster's RO pages are **fault-arounded**: mapped present read-only
-/// straight from the cap so the retry (and later reads anywhere in the
-/// cluster) hit no further faults. Returns the charge, or `None` on a
-/// page-table allocation failure. Mirrors the interpreter's per-cluster RO
-/// charge ([`javm_exec::mat::cluster_of`]) so the two agree.
-fn materialize_ro_cluster(
+/// Materialize the read-only **unit** containing `pv`: the intersection of
+/// the cap `[r_start, r_end)` (physical base `r_pa`) with the 2 MiB cluster
+/// containing `pv`, named by [`javm_exec::mat::unit_base`]. Charges one
+/// `page_in` the first time the unit faults (a fresh `unit_base` inserted
+/// into the sorted `ro_units` set), `0` thereafter — so a large read-only
+/// input materializes for one fault per 2 MiB, not one per page, and two
+/// caps sharing a cluster each pay their own page-in (the fault-around is
+/// clamped to one cap, so a page-in touches at most one DataCap). The unit's
+/// RO pages are **fault-arounded**: mapped present read-only straight from
+/// the cap so the retry (and later reads in the unit) hit no further faults.
+///
+/// No `invlpg`: every page mapped here goes `NotPresent → present`, which is
+/// not TLB-cached, so the faulting retry walks the fresh entries. Returns
+/// the charge, or `None` on a page-table allocation failure. Mirrors the
+/// interpreter's `ro_unit_charge` so the two agree bit-for-bit.
+fn materialize_ro_unit(
     pv: u64,
     r_start: u64,
     r_end: u64,
     r_pa: u64,
-    ro_cluster: &mut [u8],
+    ro_units: &mut alloc::vec::Vec<u32>,
     pml4: u64,
     owned_vec: u64,
 ) -> Option<u64> {
-    let c = (pv >> javm_exec::mat::CLUSTER_SHIFT) as usize;
-    // The bitmap is sized to cover every RO cluster the #PF handler can ever
-    // accept: max(code_top, mem_top) >> CLUSTER_SHIFT + 1 (see
-    // build_frame_runtime), and the handler rejects any page >= mem_top / outside
-    // a region before reaching here, so c < ro_cluster.len() is an invariant. The
-    // interpreter's ro_cluster_charge grows on demand and would charge PAGE_IN for
-    // an out-of-range cluster, so an out-of-bounds c here would be a *silent* gas
-    // fork — trip loudly in debug instead (fail-early per the repo convention).
-    debug_assert!(
-        c < ro_cluster.len(),
-        "RO cluster {c} beyond bitmap (len {}): sizing regression would fork gas",
-        ro_cluster.len(),
-    );
-    // A fresh cluster charges one page_in.
-    let charge = if c < ro_cluster.len() && ro_cluster[c] == 0 {
-        ro_cluster[c] = 1;
-        javm_exec::gas_const::PAGE_IN_COST
-    } else {
-        0
-    };
-    // Fault-around: map the range's pages within this cluster, read-only.
+    let ub = javm_exec::mat::unit_base(pv as u32, r_start as u32);
+    match ro_units.binary_search(&ub) {
+        // Unit already materialized (its pages are present): no charge, and
+        // no re-map — the fault that brought us here was a different unit's.
+        Ok(_) => return Some(0),
+        Err(pos) => ro_units.insert(pos, ub),
+    }
+    // Fault-around: map the cap's pages within this cluster, read-only.
     let cluster_lo = (pv >> javm_exec::mat::CLUSTER_SHIFT) << javm_exec::mat::CLUSTER_SHIFT;
     let cluster_hi = cluster_lo + (1u64 << javm_exec::mat::CLUSTER_SHIFT);
     let lo = r_start.max(cluster_lo);
@@ -538,10 +563,10 @@ fn materialize_ro_cluster(
                 owned_vec,
             )
         }?;
-        crate::paging::invlpg(q);
+        // No invlpg: NotPresent → present is not TLB-cached.
         q += PAGE_SIZE as u64;
     }
-    Some(charge)
+    Some(javm_exec::gas_const::PAGE_IN_COST)
 }
 
 /// Result of an in-kernel PVM run.
@@ -650,14 +675,14 @@ pub struct FrameRuntime {
     mem_buf_pa: u64,
     /// Read-only CODE region (page-rounded): `[code_base, code_top)`,
     /// source PA `code_pa`. Lazily materialized `PinnedCapRo` like a
-    /// pinned data cap, per 2 MiB cluster (see `ro_cluster`).
+    /// pinned data cap, per unit (`code ∩ cluster`, see `ro_units`).
     code_base: u32,
     code_top: u32,
     code_pa: u64,
-    /// Per-2 MiB-cluster materialization flag for all read-only regions
-    /// (code + pinned data caps), indexed by absolute cluster
-    /// ([`javm_exec::mat::cluster_of`]). Sized to cover every RO cluster.
-    ro_cluster: alloc::vec::Vec<u8>,
+    /// Materialized read-only **units** — sorted set of
+    /// [`javm_exec::mat::unit_base`] values (one per `cap ∩ 2 MiB cluster`).
+    /// Grows in the #PF handler; the interpreter keeps the identical set.
+    ro_units: alloc::vec::Vec<u32>,
 }
 
 /// Build a per-frame runtime: compile the Image (cached), allocate
@@ -806,17 +831,14 @@ pub unsafe fn build_frame_runtime(
     let mem_buf_pa = mem_buf.pa();
     let mem_top = (data_base + mem_bytes) as u32;
     // Code region: page-rounded `[code_base, code_top)`, lazily paged in
-    // RO (PinnedCapRo) per 2 MiB cluster on guest PIC reads. The code
-    // buffer is page-aligned with a zeroed tail, so paging in the last
-    // (partial) page is safe.
+    // RO (PinnedCapRo) per unit on guest PIC reads. The code buffer is
+    // page-aligned with a zeroed tail, so paging in the last (partial) page
+    // is safe.
     let code_bytes_rounded = code.len().next_multiple_of(PAGE_SIZE);
     let code_top = code_base.saturating_add(code_bytes_rounded as u32);
-    // Per-2 MiB-cluster RO materialization bitmap, sized to cover every
-    // read-only cluster: code is at [code_base, code_top) and pinned data
-    // caps live below mem_top, so the highest RO cluster is bounded by
-    // max(code_top, mem_top) >> CLUSTER_SHIFT.
-    let max_ro_cluster = (code_top.max(mem_top) >> javm_exec::mat::CLUSTER_SHIFT) as usize;
-    let ro_cluster = alloc::vec![0u8; max_ro_cluster + 1];
+    // Materialized RO units, keyed by unit_base (cap ∩ 2 MiB cluster) — a
+    // sorted set, grown on demand in the #PF handler.
+    let ro_units = alloc::vec::Vec::new();
     pt.install_borrowed_pd(META_BASE_M, cached.template_pd_pa)?;
     pt.map(
         STACK_VA_M,
@@ -847,7 +869,7 @@ pub unsafe fn build_frame_runtime(
         code_base,
         code_top,
         code_pa,
-        ro_cluster,
+        ro_units,
     })
 }
 
@@ -911,8 +933,7 @@ pub unsafe fn enter_frame(
     MAT_CODE_BASE.store(rt.code_base as u64, Ordering::SeqCst);
     MAT_CODE_TOP.store(rt.code_top as u64, Ordering::SeqCst);
     MAT_CODE_PA.store(rt.code_pa, Ordering::SeqCst);
-    MAT_RO_CLUSTER_PTR.store(rt.ro_cluster.as_mut_ptr(), Ordering::SeqCst);
-    MAT_RO_CLUSTER_LEN.store(rt.ro_cluster.len() as u64, Ordering::SeqCst);
+    MAT_RO_UNITS_SINK.store(&mut rt.ro_units as *mut _, Ordering::SeqCst);
     DIRTY_PAGE_SINK.store(dirty_sink, Ordering::SeqCst);
     ACTIVE_PT_PML4_KVA.store(rt.pt.pml4_kva(), Ordering::SeqCst);
     OWNED_VEC_PTR.store(rt.pt.owned_vec_ptr(), Ordering::SeqCst);
@@ -933,8 +954,7 @@ pub unsafe fn enter_frame(
     MAT_STATE_LEN.store(0, Ordering::SeqCst);
     MAT_MEM_TOP.store(0, Ordering::SeqCst);
     MAT_CODE_TOP.store(0, Ordering::SeqCst);
-    MAT_RO_CLUSTER_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
-    MAT_RO_CLUSTER_LEN.store(0, Ordering::SeqCst);
+    MAT_RO_UNITS_SINK.store(core::ptr::null_mut(), Ordering::SeqCst);
     DIRTY_PAGE_SINK.store(core::ptr::null_mut(), Ordering::SeqCst);
     ACTIVE_PT_PML4_KVA.store(0, Ordering::SeqCst);
     OWNED_VEC_PTR.store(0, Ordering::SeqCst);

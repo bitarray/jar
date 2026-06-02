@@ -13,22 +13,24 @@
 //! only re-page-in is a `MGMT_MOVE`/`MGMT_DROP` slot eviction, which is a
 //! block terminator.
 //!
-//! ## Read-only clusters
+//! ## Read-only units (per-cap × 2 MiB cluster)
 //!
 //! Read-only ([`PageKind::PinnedCapRo`]) regions — the program's code and
-//! pinned data caps — are materialized at **2 MiB cluster** granularity
-//! ([`CLUSTER_SHIFT`], [`cluster_of`]): the first read anywhere in a
-//! cluster pays a single [`PAGE_IN_COST`] and brings the whole cluster's
-//! RO pages into the working set (the recompiler fault-arounds them — a
-//! single 2 MiB large page where aligned + fully cap-backed, else the
-//! cluster's 4 KiB pages; the interpreter just accounts the cluster). This
-//! frames `page_in` as the O(1) *map* event (one fault, one mapping) — the
-//! per-access data-movement latency is category #2 — so a large aligned RO
-//! input materializes for one fault instead of 512, and the per-block
-//! reserve is unchanged (a load still spans ≤ 2 clusters = ≤ 2 events).
+//! pinned data caps — are materialized in **units**, where a unit is the
+//! intersection of one DataCap with one 2 MiB cluster ([`CLUSTER_SHIFT`],
+//! [`unit_base`]): the first read anywhere in a unit pays a single
+//! [`PAGE_IN_COST`] and brings the unit's RO pages into the working set
+//! (the recompiler fault-arounds them; the interpreter just accounts the
+//! unit). This frames `page_in` as the O(1) *map* event — one fault, one
+//! mapping, touching exactly one DataCap — so a large RO input materializes
+//! for one fault per 2 MiB instead of one per page, while the per-block
+//! reserve is unchanged (a single access spans ≤ 2 pages ⇒ ≤ 2 units ⇒ ≤ 2
+//! events: see [`crate::gas_const::MAX_PAGES_PER_ACCESS`]). Clamping the
+//! unit to one cap means two distinct caps sharing a 2 MiB cluster each pay
+//! their own page-in (no cross-cap dedup, no cross-cap under-charge).
 //! Copy-on-write (RW) regions stay 4 KiB-granular (a write copies one
-//! page). Both engines key on the same absolute cluster index, so they
-//! charge identically.
+//! page). Both engines key on the same [`unit_base`], so they charge
+//! identically.
 
 use crate::gas_const::{COW_COST, PAGE_IN_COST};
 use crate::mem::PAGE_SIZE;
@@ -39,12 +41,32 @@ use crate::mem::PAGE_SIZE;
 /// TODO(gas-calibration): cluster size is subject to change.
 pub const CLUSTER_SHIFT: u32 = 21;
 
-/// Absolute 2 MiB cluster index of `addr` (`addr >> CLUSTER_SHIFT`). Both
-/// engines key read-only cluster materialization on this, so a read-only
-/// page pays `page_in` at most once per cluster, identically on each.
+/// Absolute 2 MiB cluster index of `addr` (`addr >> CLUSTER_SHIFT`).
 #[inline]
 pub fn cluster_of(addr: u32) -> u32 {
     addr >> CLUSTER_SHIFT
+}
+
+/// Identity of the read-only materialization **unit** containing `addr`: the
+/// `cap ∩ cluster` region, named by its base address `max(cluster_lo,
+/// cap_start)`. Both engines charge one [`PAGE_IN_COST`] per distinct unit
+/// (and the recompiler fault-arounds exactly the unit's pages), so a unit
+/// pays page-in at most once on each engine.
+///
+/// A unit is keyed by **both** the cap (`cap_start`) and the 2 MiB cluster,
+/// so two distinct caps sharing a cluster are two units (each pays its own
+/// page-in) — a single fault/map event touches at most one DataCap. Because
+/// caps are disjoint, at most one cap per cluster starts at/below the cluster
+/// boundary (yielding `unit_base == cluster_lo`); every other cap in that
+/// cluster starts strictly later with a distinct `cap_start`, so this single
+/// `max(cluster_lo, cap_start)` value uniquely names one `(cap, cluster)`
+/// pair. For a cap spanning a cluster boundary the per-cluster split still
+/// holds (≤ 2 units per straddling access), so the worst-case #3 reserve
+/// ([`crate::gas_const::MAX_PAGES_PER_ACCESS`]) is unchanged.
+#[inline]
+pub fn unit_base(addr: u32, cap_start: u32) -> u32 {
+    let cluster_lo = cluster_of(addr) << CLUSTER_SHIFT;
+    cluster_lo.max(cap_start)
 }
 
 /// Static per-page source kind, derived once from the Image's declared
