@@ -31,6 +31,7 @@ pub mod list;
 pub mod merkle;
 pub mod missing;
 pub mod primitives;
+pub mod radix;
 pub mod sparse;
 pub mod union;
 pub mod vector;
@@ -51,6 +52,7 @@ pub use list::List;
 pub use merkle::{merkleize, mix_in_length, mix_in_selector, pack_bytes, zero_hash};
 pub use missing::MissingOr;
 pub use primitives::U256;
+pub use radix::RadixMap;
 pub use sparse::SparseList;
 pub use vector::FixedVector;
 
