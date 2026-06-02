@@ -32,5 +32,7 @@ pub mod regs;
 pub use ecall::{EcallHandler, EcallKind, EcallResult, PanickingHandler};
 pub use exit::ExitReason;
 pub use gas::{Gas, GasCounter, OutOfGas};
-pub use mem::{Access, CopyingMemory, MapError, Mem, MemAccess, Memory, PAGE_SIZE, perm};
+pub use mem::{
+    Access, CopyingMemory, MapError, Mem, MemAccess, Memory, PAGE_SIZE, TouchFault, perm,
+};
 pub use regs::{REG_COUNT, Regs};

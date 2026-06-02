@@ -67,22 +67,35 @@ use javm_recompiler_x86::codegen::HelperFns;
 static JIT_CODE_BASE: AtomicU64 = AtomicU64::new(0);
 static JIT_CODE_LEN: AtomicU64 = AtomicU64::new(0);
 static EXIT_LABEL_VA: AtomicU64 = AtomicU64::new(0);
-static TRAP_TABLE_PTR: AtomicPtr<(u32, u32)> = AtomicPtr::new(core::ptr::null_mut());
+static TRAP_TABLE_PTR: AtomicPtr<(u32, u32, u32)> = AtomicPtr::new(core::ptr::null_mut());
 static TRAP_TABLE_LEN: AtomicU64 = AtomicU64::new(0);
 static CTX_KVA: AtomicU64 = AtomicU64::new(0);
 
-// === Per-invocation CoW state =============================================
+// === Per-invocation category-#3 materialization state =====================
 //
-// Set by `enter_frame` so `jit_pf_handler` can recognise legitimate
-// guest writes to mapped DataCap pages, allocate a fresh page, and
-// remap the PTE writable + new PA. The handler appends the dirty
-// page to a per-frame sink — frame-local bookkeeping dropped at frame
-// pop, retained as scaffolding for a possible future scratchpad
-// mechanism (the auto-mint consumer was reverted, see `call_loop`).
+// Set by `enter_frame` so `jit_pf_handler` can lazily materialize the
+// guest data region: the whole `[DATA_BASE, mem_top)` extent starts
+// **not-present**, so the first guest read/write of each page faults
+// here. The handler pages it in (read → map RO), copies-it-on-write
+// (write → map RW, with a fresh page for cap-backed initial slots), and
+// charges category-#3 gas against the saved gas register (R15). Pages in
+// a `MAT_RANGES` entry are cap-backed (pinned RO / initial CoW); all
+// other pages in the extent are ephemeral, backed by the frame's private
+// `mem_buf`. CoW'd cap pages are appended to the per-frame dirty sink
+// (frame-local scaffolding, see `call_loop`).
 
-static COW_RANGES_PTR: AtomicPtr<crate::call_loop::CowRange> =
+static MAT_RANGES_PTR: AtomicPtr<crate::call_loop::MatRange> =
     AtomicPtr::new(core::ptr::null_mut());
-static COW_RANGES_LEN: AtomicU64 = AtomicU64::new(0);
+static MAT_RANGES_LEN: AtomicU64 = AtomicU64::new(0);
+/// Per-page [`javm_exec::mat::PageState`] (one byte/page), len =
+/// `(mem_top - data_base) / PAGE_SIZE`. Mutated in place by the handler.
+static MAT_STATE_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+static MAT_STATE_LEN: AtomicU64 = AtomicU64::new(0);
+/// Guest VA bounds of the lazily-materialized data extent.
+static MAT_DATA_BASE: AtomicU64 = AtomicU64::new(0);
+static MAT_MEM_TOP: AtomicU64 = AtomicU64::new(0);
+/// Physical address of the ephemeral `mem_buf` page 0 (== `DATA_BASE`).
+static MAT_MEM_BUF_PA: AtomicU64 = AtomicU64::new(0);
 static DIRTY_PAGE_SINK: AtomicPtr<alloc::vec::Vec<crate::call_loop::DirtyPage>> =
     AtomicPtr::new(core::ptr::null_mut());
 static ACTIVE_PT_PML4_KVA: AtomicU64 = AtomicU64::new(0);
@@ -103,7 +116,7 @@ static ACTIVE_PT_PML4_KVA: AtomicU64 = AtomicU64::new(0);
 fn jit_pf_handler(
     _exception_number: u64,
     info: *mut ExceptionInfo,
-    _ctx: *mut Context,
+    ctx: *mut Context,
     gva: u64,
 ) -> bool {
     // SAFETY: Hyperlight passes a valid pointer to the iretq frame.
@@ -114,38 +127,31 @@ fn jit_pf_handler(
         return false;
     }
 
-    // CoW: if the faulting GVA falls inside a CoW-armed range, copy
-    // the cap page onto a fresh kernel-allocated page, rewrite the
-    // PTE writable + new PA, invlpg, retry the faulting instruction.
-    if try_handle_cow(gva) {
+    // Resolve the faulting PVM PC + access width from the trap table.
+    let offset = (saved_rip - code_base) as u32;
+    let (pvm_pc, width) = trap_lookup(offset);
+
+    // Category #3: try lazy materialization (page-in / CoW) of the
+    // faulting access's page set, charging gas. The error code's write
+    // bit (bit 1) picks page-in-RO vs CoW-RW. On success, retry the
+    // faulting instruction (RIP untouched).
+    // SAFETY: `info` is the valid iretq frame Hyperlight passed.
+    let error_code = unsafe { (&raw const (*info).error_code).read_volatile() };
+    let is_write = (error_code & 0x2) != 0;
+    if width != 0 && try_materialize(gva, width, is_write, ctx) {
         return true;
     }
 
-    let offset = (saved_rip - code_base) as u32;
-    let tt_ptr = TRAP_TABLE_PTR.load(Ordering::SeqCst);
-    let tt_len = TRAP_TABLE_LEN.load(Ordering::SeqCst) as usize;
-    let mut pvm_pc = 0u32;
-    if !tt_ptr.is_null() && tt_len > 0 {
-        // SAFETY: tt_ptr + tt_len describes a contiguous slice in
-        // kernel memory, valid for the duration of `enter_frame`
-        // (which is the only function that publishes / clears the
-        // statics that point at it).
-        let tt = unsafe { core::slice::from_raw_parts(tt_ptr, tt_len) };
-        match tt.binary_search_by_key(&offset, |&(no, _)| no) {
-            Ok(idx) => pvm_pc = tt[idx].1,
-            Err(0) => {}
-            Err(idx) => pvm_pc = tt[idx - 1].1,
-        }
-    }
-
+    // Not materializable (outside the declared region, or a write to a
+    // pinned read-only page) → a PVM-level PageFault, charging nothing.
     let ctx_kva = CTX_KVA.load(Ordering::SeqCst);
     // SAFETY: ctx_kva is the kernel VA of the JitContext page for the
     // current invocation; valid while the handler runs.
     unsafe {
-        let ctx = ctx_kva as *mut JitContext;
-        (*ctx).exit_reason = 3; // PageFault
-        (*ctx).exit_arg = gva as u32;
-        (*ctx).pc = pvm_pc;
+        let jc = ctx_kva as *mut JitContext;
+        (*jc).exit_reason = 3; // PageFault
+        (*jc).exit_arg = gva as u32;
+        (*jc).pc = pvm_pc;
     }
 
     let exit_va = EXIT_LABEL_VA.load(Ordering::SeqCst);
@@ -156,41 +162,176 @@ fn jit_pf_handler(
     true
 }
 
-/// If `gva` falls inside one of the per-frame CoW-armed ranges
-/// published at `enter_frame` time, allocate a fresh page, copy from
-/// the read-only cap page currently mapped there, rewrite the PTE
-/// writable, invlpg, and append a [`crate::call_loop::DirtyPage`] to
-/// the per-frame sink. Returns `true` on success — the caller should
-/// retry the faulting instruction by leaving RIP untouched.
-fn try_handle_cow(gva: u64) -> bool {
-    let cow_ptr = COW_RANGES_PTR.load(Ordering::SeqCst);
-    let cow_len = COW_RANGES_LEN.load(Ordering::SeqCst) as usize;
-    if cow_ptr.is_null() || cow_len == 0 {
-        return false;
+/// Resolve a faulting native offset to its `(pvm_pc, access_width)` via
+/// the trap table. Returns `(0, 0)` when no entry covers the offset
+/// (not a guest memory op → width 0 → caller treats as a PageFault).
+fn trap_lookup(offset: u32) -> (u32, u32) {
+    let tt_ptr = TRAP_TABLE_PTR.load(Ordering::SeqCst);
+    let tt_len = TRAP_TABLE_LEN.load(Ordering::SeqCst) as usize;
+    if tt_ptr.is_null() || tt_len == 0 {
+        return (0, 0);
     }
-    // SAFETY: cow_ptr/cow_len describe a contiguous slice owned by
-    // the running KernelFrame's `cow_ranges` Vec, valid until
-    // enter_frame returns and clears these statics.
-    let cows = unsafe { core::slice::from_raw_parts(cow_ptr, cow_len) };
-    let cow = cows
-        .iter()
-        .find(|c| (c.start as u64) <= gva && gva < (c.end as u64));
-    let Some(cow) = cow else {
-        return false;
-    };
+    // SAFETY: tt_ptr + tt_len describes a contiguous slice in kernel
+    // memory, valid for the duration of `enter_frame` (the only function
+    // that publishes / clears the statics that point at it).
+    let tt = unsafe { core::slice::from_raw_parts(tt_ptr, tt_len) };
+    match tt.binary_search_by_key(&offset, |&(no, _, _)| no) {
+        Ok(idx) => (tt[idx].1, tt[idx].2),
+        Err(0) => (0, 0),
+        Err(idx) => (tt[idx - 1].1, tt[idx - 1].2),
+    }
+}
 
-    let page_va = gva & !(PAGE_SIZE as u64 - 1);
-    let pml4_kva = ACTIVE_PT_PML4_KVA.load(Ordering::SeqCst);
-    if pml4_kva == 0 {
+/// Find the cap-backed [`crate::call_loop::MatRange`] covering page
+/// `page_va` (page-aligned), or `None` for an ephemeral page.
+fn mat_range_for(page_va: u32) -> Option<crate::call_loop::MatRange> {
+    let ptr = MAT_RANGES_PTR.load(Ordering::SeqCst);
+    let len = MAT_RANGES_LEN.load(Ordering::SeqCst) as usize;
+    if ptr.is_null() || len == 0 {
+        return None;
+    }
+    // SAFETY: ptr/len describe the running FrameRuntime's `mat_ranges`
+    // Vec, valid until enter_frame clears these statics.
+    let ranges = unsafe { core::slice::from_raw_parts(ptr, len) };
+    ranges
+        .iter()
+        .copied()
+        .find(|r| r.start <= page_va && page_va < r.end)
+}
+
+/// The static [`javm_exec::mat::PageKind`] of guest page `page_va`:
+/// cap-backed pages take their kind from the matching `MatRange`; every
+/// other page in the declared extent is ephemeral.
+fn page_kind(page_va: u32) -> javm_exec::mat::PageKind {
+    match mat_range_for(page_va) {
+        Some(r) => javm_exec::mat::PageKind::from_u8(r.kind)
+            .unwrap_or(javm_exec::mat::PageKind::PinnedCapRo),
+        None => javm_exec::mat::PageKind::EphemeralZero,
+    }
+}
+
+/// Lazily materialize the page set of a `width`-byte access at `gva`,
+/// charging category-#3 gas against the saved gas register. Returns
+/// `false` (charging nothing, mutating nothing) if any page is outside
+/// the declared extent or a write targets a pinned read-only page — the
+/// caller then raises a PVM PageFault. Uses the *same*
+/// [`javm_exec::mat`] state machine + page-set rule as the interpreter,
+/// so both engines charge bit-identically (gas-cost.md §3).
+fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> bool {
+    let data_base = MAT_DATA_BASE.load(Ordering::SeqCst);
+    let mem_top = MAT_MEM_TOP.load(Ordering::SeqCst);
+    let mem_buf_pa = MAT_MEM_BUF_PA.load(Ordering::SeqCst);
+    let pml4 = ACTIVE_PT_PML4_KVA.load(Ordering::SeqCst);
+    let state_ptr = MAT_STATE_PTR.load(Ordering::SeqCst);
+    let state_len = MAT_STATE_LEN.load(Ordering::SeqCst) as usize;
+    if pml4 == 0 || state_ptr.is_null() || mem_top <= data_base {
         return false;
     }
-    // SAFETY: pml4_kva was set by enter_frame to the kernel VA of
-    // the live per-call page table; valid while the handler runs.
-    let current_pa = match unsafe { crate::paging::pt_lookup_leaf(pml4_kva, page_va) } {
-        Some(pa) => pa,
-        None => return false,
-    };
-    let Some(src_kva) = crate::paging::pa_to_va(current_pa) else {
+
+    let set = javm_exec::mat::access_pages(gva as u32, width);
+
+    // Accessibility-all (before any charge): every page must be inside
+    // the declared extent, and a write must not target a pinned page.
+    for &p in set.as_slice() {
+        let pv = p as u64;
+        if pv < data_base || pv >= mem_top {
+            return false;
+        }
+        if is_write && page_kind(p) == javm_exec::mat::PageKind::PinnedCapRo {
+            return false;
+        }
+    }
+
+    // SAFETY: state_ptr/state_len describe the running FrameRuntime's
+    // `mat_state` Vec; single-threaded guest, so the &mut is exclusive.
+    let state = unsafe { core::slice::from_raw_parts_mut(state_ptr, state_len) };
+
+    // Materialize-all: page-in / CoW each page (low→high), advancing
+    // per-page state and accumulating the charge.
+    let mut total: u64 = 0;
+    for &p in set.as_slice() {
+        let idx = ((p as u64 - data_base) / PAGE_SIZE as u64) as usize;
+        let cur = javm_exec::mat::PageState::from_u8(state[idx]);
+        let range = mat_range_for(p);
+        let (kind, src_pa) = match range {
+            Some(r) => (
+                javm_exec::mat::PageKind::from_u8(r.kind)
+                    .unwrap_or(javm_exec::mat::PageKind::PinnedCapRo),
+                r.pa + (p - r.start) as u64,
+            ),
+            None => (
+                javm_exec::mat::PageKind::EphemeralZero,
+                mem_buf_pa + (p as u64 - data_base),
+            ),
+        };
+        let (charge, next) = match javm_exec::mat::charge_for(cur, kind, is_write) {
+            Ok(v) => v,
+            Err(_) => return false, // pinned write (already excluded; defensive)
+        };
+        match next {
+            javm_exec::mat::PageState::PresentRo => {
+                if cur == javm_exec::mat::PageState::NotPresent {
+                    // SAFETY: live PT, single writer; the not-present map
+                    // installed the leaf so the walk terminates.
+                    unsafe {
+                        crate::paging::pt_remap_leaf(
+                            pml4,
+                            p as u64,
+                            src_pa,
+                            crate::paging::Perm::user_ro(),
+                        );
+                    }
+                    crate::paging::invlpg(p as u64);
+                }
+            }
+            javm_exec::mat::PageState::PresentRw => {
+                if kind == javm_exec::mat::PageKind::EphemeralZero {
+                    // Frame-private buffer: just map it writable in place.
+                    // SAFETY: as above.
+                    unsafe {
+                        crate::paging::pt_remap_leaf(
+                            pml4,
+                            p as u64,
+                            src_pa,
+                            crate::paging::Perm::user_rw(),
+                        );
+                    }
+                    crate::paging::invlpg(p as u64);
+                } else if !cow_into_fresh(p as u64, src_pa, pml4, range) {
+                    // Allocation / remap failure → fault (nothing charged
+                    // yet for THIS page, but earlier pages of a straddle
+                    // were already advanced; an OOM here is fatal anyway).
+                    return false;
+                }
+            }
+            javm_exec::mat::PageState::NotPresent => {}
+        }
+        total = total.saturating_add(charge);
+        state[idx] = next.as_u8();
+    }
+
+    // Charge: decrement the saved gas register (R15 == gprs[0]). The
+    // block reserve guarantees R15 covers the worst case, so no OOG
+    // check is needed (mirrors the interpreter's reserved charge).
+    // SAFETY: ctx is the valid saved register Context Hyperlight passed.
+    unsafe {
+        let r15 = (&raw const (*ctx).gprs[0]).read_volatile();
+        (&raw mut (*ctx).gprs[0]).write_volatile(r15.wrapping_sub(total));
+    }
+    true
+}
+
+/// Copy-on-write a cap-backed page: allocate a fresh page, copy the
+/// cap's bytes from `src_pa`, remap the leaf writable at the new PA,
+/// invlpg, and append a [`crate::call_loop::DirtyPage`] to the per-frame
+/// sink. Returns `false` on allocation / remap failure.
+fn cow_into_fresh(
+    page_va: u64,
+    src_pa: u64,
+    pml4: u64,
+    range: Option<crate::call_loop::MatRange>,
+) -> bool {
+    let Some(src_kva) = crate::paging::pa_to_va(src_pa) else {
         return false;
     };
     let Some(new_page) = crate::page_alloc::PageBuf::new(PAGE_SIZE) else {
@@ -198,18 +339,14 @@ fn try_handle_cow(gva: u64) -> bool {
     };
     let new_pa = new_page.pa();
     let new_kva = new_page.kva();
-    // SAFETY: src_kva points at a 4 KiB page in talc-heap memory
-    // (refcount-pinned by the frame); new_page is a fresh, owned 4
-    // KiB page. Both pointers are 4 KiB-aligned.
+    // SAFETY: src_kva is a live 4 KiB cap page (pinned by the frame);
+    // new_page is a fresh owned 4 KiB page. Both are page-aligned.
     unsafe {
         core::ptr::copy_nonoverlapping(src_kva as *const u8, new_kva as *mut u8, PAGE_SIZE);
     }
-
-    // SAFETY: pml4_kva is the live PT; we're the only writer
-    // (single-threaded guest). page_va was just looked up so the
-    // walk is guaranteed to terminate at a present leaf PTE.
+    // SAFETY: live PT, single writer; the leaf exists (not-present map).
     if unsafe {
-        crate::paging::pt_remap_leaf(pml4_kva, page_va, new_pa, crate::paging::Perm::user_rw())
+        crate::paging::pt_remap_leaf(pml4, page_va, new_pa, crate::paging::Perm::user_rw())
     }
     .is_none()
     {
@@ -218,22 +355,21 @@ fn try_handle_cow(gva: u64) -> bool {
     crate::paging::invlpg(page_va);
 
     let sink_ptr = DIRTY_PAGE_SINK.load(Ordering::SeqCst);
-    if sink_ptr.is_null() {
-        // No sink; the write still succeeded but we lose the
-        // ability to auto-mint at frame pop. Should not happen
-        // in normal flow (enter_frame always publishes a sink).
-        return true;
+    if !sink_ptr.is_null() {
+        // SAFETY: sink_ptr is the running frame's `dirty_pages` Vec,
+        // re-published each enter_frame; stable for the handler's life.
+        let sink = unsafe { &mut *sink_ptr };
+        let (source_hash, source_slot) = match range {
+            Some(r) => (r.source_hash, r.source_slot),
+            None => ([0u8; 32], javm_cap::slot::SlotIdx(0)),
+        };
+        sink.push(crate::call_loop::DirtyPage {
+            guest_va: page_va as u32,
+            source_hash,
+            source_slot,
+            page: new_page,
+        });
     }
-    // SAFETY: sink_ptr was set by enter_frame to a *mut Vec<…>
-    // pointing into a KernelFrame field; the Vec struct's address
-    // is stable across pushes (only the underlying buffer moves).
-    let sink = unsafe { &mut *sink_ptr };
-    sink.push(crate::call_loop::DirtyPage {
-        guest_va: page_va as u32,
-        source_hash: cow.source_hash,
-        source_slot: cow.source_slot,
-        page: new_page,
-    });
     true
 }
 
@@ -336,11 +472,24 @@ pub struct FrameRuntime {
     jit_va: u64,
     jit_size: u64,
     exit_label_va: u64,
-    trap_table_ptr: *const (u32, u32),
+    trap_table_ptr: *const (u32, u32, u32),
     trap_table_len: u64,
     tramp_va: u64,
     new_cr3: u64,
     ctx_kva: u64,
+    // ---- Category-#3 lazy-materialization state (persists across
+    // re-entries on this frame; published to the #PF handler each entry). ----
+    /// Cap-backed data mappings (pinned RO / initial CoW), with resolved
+    /// source PAs. Pages not covered here are ephemeral (`mem_buf`).
+    mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
+    /// Per-page [`javm_exec::mat::PageState`], one byte/page over
+    /// `[data_base, mem_top)`. Advances NotPresent → PresentRo → PresentRw.
+    mat_state: alloc::vec::Vec<u8>,
+    /// Guest VA bounds of the lazily-materialized data extent.
+    data_base: u32,
+    mem_top: u32,
+    /// Physical address of `mem_buf` page 0 (the `DATA_BASE` page).
+    mem_buf_pa: u64,
 }
 
 /// Build a per-frame runtime: compile the Image (cached), allocate
@@ -377,6 +526,7 @@ pub unsafe fn build_frame_runtime(
     ro: MemRegion,
     rw: MemRegion,
     direct_maps: &[DirectMap],
+    mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
 ) -> Option<FrameRuntime> {
     let helpers = HelperFns {
         mem_read_u8: 0x1001,
@@ -471,14 +621,16 @@ pub unsafe fn build_frame_runtime(
 
     let mut pt = PageTable::new()?;
     pt.map(CTX_VA_M, ctx_buf.pa(), ctx_buf.size(), Perm::user_rw())?;
+    // Category #3: the whole data extent starts **not-present** so the
+    // first guest touch of each page faults into `jit_pf_handler`, which
+    // materializes it (page-in / CoW) and charges. `mem_buf` stays
+    // eagerly *allocated* (and seeded with overlays above) — only the
+    // mapping is lazy. Pages covered by `mat_ranges` are cap-backed; the
+    // rest are ephemeral, backed by `mem_buf`.
     if mem_bytes > 0 {
-        pt.map(
-            MEM_VA_M + data_base as u64,
-            mem_buf.pa(),
-            mem_buf.size(),
-            Perm::user_rw(),
-        )?;
+        pt.map_not_present(MEM_VA_M + data_base as u64, mem_bytes as u64)?;
     }
+    // Code stays eagerly RO-mapped (read-only, never #3-metered).
     for dm in direct_maps {
         if dm.size == 0 {
             continue;
@@ -490,6 +642,9 @@ pub unsafe fn build_frame_runtime(
             Perm::user_ro(),
         )?;
     }
+    let mat_state = alloc::vec![0u8; mem_bytes / PAGE_SIZE];
+    let mem_buf_pa = mem_buf.pa();
+    let mem_top = (data_base + mem_bytes) as u32;
     pt.install_borrowed_pd(META_BASE_M, cached.template_pd_pa)?;
     pt.map(
         STACK_VA_M,
@@ -512,29 +667,33 @@ pub unsafe fn build_frame_runtime(
         tramp_va,
         new_cr3,
         ctx_kva,
+        mat_ranges,
+        mat_state,
+        data_base: data_base as u32,
+        mem_top,
+        mem_buf_pa,
     })
 }
 
 /// Enter ring 3 on `rt`. Updates per-entry `JitContext` fields (regs,
-/// pc, gas, exit_*), publishes the #PF handler atomics (including
-/// CoW state), drops to ring 3, then reads back the post-exit state.
+/// pc, gas, exit_*), publishes the #PF handler atomics (including the
+/// category-#3 materialization state from `rt`), drops to ring 3, then
+/// reads back the post-exit state.
 ///
-/// `cow_ranges` describes which guest VAs the #PF handler should
-/// CoW on a write fault. `dirty_sink` is the per-frame `Vec` the
-/// handler appends to on each successful CoW (may be null to
-/// disable bookkeeping).
+/// `dirty_sink` is the per-frame `Vec` the handler appends a
+/// [`crate::call_loop::DirtyPage`] to on each cap-page CoW (may be null
+/// to disable bookkeeping). The lazily-materialized data ranges + per-
+/// page state live in `rt` and are republished here each entry.
 ///
 /// # Safety
 /// Mutates CR3 + GDT + IDT during the call. Single-threaded by
-/// Hyperlight construction. `cow_ranges` + `dirty_sink` must outlive
-/// the call.
+/// Hyperlight construction. `dirty_sink` must outlive the call.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn enter_frame(
     rt: &mut FrameRuntime,
     initial_gas: i64,
     entry_pc: u32,
     initial_regs: [u64; 13],
-    cow_ranges: &[crate::call_loop::CowRange],
     dirty_sink: *mut alloc::vec::Vec<crate::call_loop::DirtyPage>,
 ) -> ExitInfo {
     let ctx = rt.ctx_kva as *mut JitContext;
@@ -560,14 +719,19 @@ pub unsafe fn enter_frame(
     JIT_CODE_BASE.store(rt.jit_va, Ordering::SeqCst);
     JIT_CODE_LEN.store(rt.jit_size, Ordering::SeqCst);
     EXIT_LABEL_VA.store(rt.exit_label_va, Ordering::SeqCst);
-    TRAP_TABLE_PTR.store(rt.trap_table_ptr as *mut (u32, u32), Ordering::SeqCst);
+    TRAP_TABLE_PTR.store(rt.trap_table_ptr as *mut (u32, u32, u32), Ordering::SeqCst);
     TRAP_TABLE_LEN.store(rt.trap_table_len, Ordering::SeqCst);
     CTX_KVA.store(rt.ctx_kva, Ordering::SeqCst);
-    COW_RANGES_PTR.store(
-        cow_ranges.as_ptr() as *mut crate::call_loop::CowRange,
+    MAT_RANGES_PTR.store(
+        rt.mat_ranges.as_ptr() as *mut crate::call_loop::MatRange,
         Ordering::SeqCst,
     );
-    COW_RANGES_LEN.store(cow_ranges.len() as u64, Ordering::SeqCst);
+    MAT_RANGES_LEN.store(rt.mat_ranges.len() as u64, Ordering::SeqCst);
+    MAT_STATE_PTR.store(rt.mat_state.as_mut_ptr(), Ordering::SeqCst);
+    MAT_STATE_LEN.store(rt.mat_state.len() as u64, Ordering::SeqCst);
+    MAT_DATA_BASE.store(rt.data_base as u64, Ordering::SeqCst);
+    MAT_MEM_TOP.store(rt.mem_top as u64, Ordering::SeqCst);
+    MAT_MEM_BUF_PA.store(rt.mem_buf_pa, Ordering::SeqCst);
     DIRTY_PAGE_SINK.store(dirty_sink, Ordering::SeqCst);
     ACTIVE_PT_PML4_KVA.store(rt.pt.pml4_kva(), Ordering::SeqCst);
     HANDLERS[14].store(jit_pf_handler as *const () as u64, Ordering::Release);
@@ -581,8 +745,11 @@ pub unsafe fn enter_frame(
     TRAP_TABLE_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
     TRAP_TABLE_LEN.store(0, Ordering::SeqCst);
     JIT_CODE_LEN.store(0, Ordering::SeqCst);
-    COW_RANGES_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
-    COW_RANGES_LEN.store(0, Ordering::SeqCst);
+    MAT_RANGES_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
+    MAT_RANGES_LEN.store(0, Ordering::SeqCst);
+    MAT_STATE_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
+    MAT_STATE_LEN.store(0, Ordering::SeqCst);
+    MAT_MEM_TOP.store(0, Ordering::SeqCst);
     DIRTY_PAGE_SINK.store(core::ptr::null_mut(), Ordering::SeqCst);
     ACTIVE_PT_PML4_KVA.store(0, Ordering::SeqCst);
 

@@ -18,6 +18,8 @@
 
 use alloc::vec::Vec;
 
+use crate::gas::GasCounter;
+
 /// PVM page size: 4 KiB.
 pub const PAGE_SIZE: u32 = 1 << 12;
 
@@ -49,6 +51,16 @@ pub enum MemAccess {
     /// Page is read-only and the access is a write.
     WriteProtected(u32),
 }
+
+/// A category-#3 first-touch (`touch_read`/`touch_write`) that cannot be
+/// satisfied: a write to a read-only (pinned) page, or a data access
+/// straddling outside the declared region. The caller must `PageFault`,
+/// charging nothing — the touch is all-or-nothing. (Accesses whose base
+/// page is *not* a declared data page — a code-region PIC load or a
+/// fully-unmapped address — are skipped, not faulted: they return `Ok`
+/// so the caller's normal load/store path resolves them.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TouchFault;
 
 /// Setup-time error for [`Memory::map_region`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +125,38 @@ pub trait Memory {
     /// Write `data.len()` bytes starting at `addr`. Per-page perm
     /// checks apply; out-of-range or RO-page writes return `Err`.
     fn write(&mut self, addr: u32, data: &[u8]) -> Result<(), MemAccess>;
+
+    // ---- Category-#3 lazy-materialization accounting. ----
+
+    /// Charge category-#3 first-touch gas for a `width`-byte **read** at
+    /// `addr` (page-in on the first read of a page), advancing the
+    /// per-page materialization state. See [`CopyingMemory::touch_read`]
+    /// for the canonical semantics. The default is a no-op (`Ok`) for
+    /// backends that don't model lazy materialization.
+    fn touch_read(
+        &mut self,
+        addr: u32,
+        width: u32,
+        gas: &mut GasCounter,
+    ) -> Result<(), TouchFault> {
+        let _ = (addr, width, gas);
+        Ok(())
+    }
+
+    /// Charge category-#3 first-touch gas for a `width`-byte **write** at
+    /// `addr` (page-in + copy-on-write on the first write of a page),
+    /// advancing the per-page materialization state. See
+    /// [`CopyingMemory::touch_write`] for the canonical semantics. The
+    /// default is a no-op (`Ok`).
+    fn touch_write(
+        &mut self,
+        addr: u32,
+        width: u32,
+        gas: &mut GasCounter,
+    ) -> Result<(), TouchFault> {
+        let _ = (addr, width, gas);
+        Ok(())
+    }
 }
 
 /// Address-space mapping for one execution context.
@@ -137,6 +181,15 @@ pub struct CopyingMemory {
     /// `perms.len() == flat_mem.len() / PAGE_SIZE` (rounded up). Indexed
     /// by page *relative to `base`*.
     pub perms: Vec<u8>,
+    /// Category-#3 per-page materialization state ([`crate::mat::PageState`]
+    /// as a `u8`), one byte per page, kept the same length as `perms`.
+    /// Software first-touch accounting: a never-touched page is
+    /// `NotPresent`; the first read pages it in, the first write CoWs it.
+    /// The interpreter's #3 charge is kind-independent (the only
+    /// kind-sensitive case — a write to a pinned page — is already gated
+    /// by the `perm::RW` write check), so no per-page `PageKind` is kept;
+    /// the recompiler tracks kinds itself for page sourcing.
+    pub mat_state: Vec<u8>,
     /// Heap base address (for sbrk).
     pub heap_base: u32,
     /// Current heap top.
@@ -163,6 +216,7 @@ impl CopyingMemory {
             base: 0,
             flat_mem: Vec::new(),
             perms: Vec::new(),
+            mat_state: Vec::new(),
             heap_base: 0,
             heap_top: 0,
             max_heap_pages: 0,
@@ -186,6 +240,7 @@ impl CopyingMemory {
             base: 0,
             flat_mem: vec![0u8; bytes],
             perms: vec![default_perm; n_pages as usize],
+            mat_state: vec![crate::mat::PageState::NotPresent.as_u8(); n_pages as usize],
             heap_base: 0,
             heap_top: 0,
             max_heap_pages: 0,
@@ -197,6 +252,124 @@ impl CopyingMemory {
     pub fn perm_of(&self, addr: u32) -> u8 {
         let page = self.off(addr) / (PAGE_SIZE as usize);
         self.perms.get(page).copied().unwrap_or(perm::NONE)
+    }
+
+    /// Page index into `perms` / `mat_state` for the page-aligned address
+    /// `page_addr`, or `None` if it lies outside the flat buffer (below
+    /// `base` or past its end). `perms`/`mat_state` always cover every
+    /// page of `flat_mem`, so a `Some(i)` is always a valid index.
+    #[inline]
+    fn page_index(&self, page_addr: u32) -> Option<usize> {
+        let o = self.off(page_addr);
+        if o < self.flat_mem.len() {
+            Some(o / PAGE_SIZE as usize)
+        } else {
+            None
+        }
+    }
+
+    /// Category-#3 first-touch accounting for a `width`-byte access at
+    /// `addr` (`width` in `1..=8`).
+    ///
+    /// Charges page-in / copy-on-write for each declared data page the
+    /// access touches, advancing its [`crate::mat::PageState`]. The set
+    /// of touched pages (≤ 2, the base page plus a straddle page) is
+    /// [`crate::mat::access_pages`] — the *same* rule the recompiler's
+    /// fault handler uses, so the charged page set and total match
+    /// bit-for-bit.
+    ///
+    /// **All-or-nothing.** Accessibility is checked over the whole page
+    /// set *before* any charge: a write to a read-only (pinned) page, or
+    /// a straddle leaving the declared region, charges nothing and
+    /// returns [`TouchFault`] (the caller `PageFault`s).
+    ///
+    /// **Code / unmapped accesses are skipped** (`Ok`, no charge): if the
+    /// base page is not a declared data page (a code-region PIC load, the
+    /// null guard, or a fully-unmapped address), `#3` does not apply and
+    /// the caller's normal load/store path resolves it — the code-region
+    /// fallback succeeds; a truly unmapped address `PageFault`s there.
+    ///
+    /// The charge is kind-independent: the only kind-sensitive rule (a
+    /// write to a pinned page) is excluded by the `perm::RW` gate below,
+    /// so [`crate::mat::charge_for`] is driven with a fixed CoW kind. The
+    /// block reserve guarantees `gas` covers the worst case, so the final
+    /// charge cannot underflow — mirroring the recompiler, which
+    /// decrements its gas register in the fault handler without an OOG
+    /// check.
+    fn touch(
+        &mut self,
+        addr: u32,
+        width: u32,
+        is_write: bool,
+        gas: &mut GasCounter,
+    ) -> Result<(), TouchFault> {
+        let set = crate::mat::access_pages(addr, width);
+        let pages = set.as_slice();
+
+        // Decide code-vs-data by the base page. If it is not a declared
+        // data page, `#3` does not apply (skip without charging).
+        match self.page_index(pages[0]) {
+            Some(i) if self.perms[i] != perm::NONE => {}
+            _ => return Ok(()),
+        }
+
+        // Accessibility-all (before any charge): every page must be a
+        // declared data page; a write additionally needs it writable.
+        for &p in pages {
+            match self.page_index(p) {
+                Some(i) => {
+                    let pm = self.perms[i];
+                    if pm == perm::NONE || (is_write && pm != perm::RW) {
+                        return Err(TouchFault);
+                    }
+                }
+                None => return Err(TouchFault),
+            }
+        }
+
+        // Materialize-all: accumulate the charge and advance per-page
+        // state. `charge_for` cannot hard-fault here (writes to pinned
+        // pages were excluded by the perm gate; reads never fault), so
+        // the kind passed is the charge-irrelevant CoW kind.
+        let mut total: u64 = 0;
+        for &p in pages {
+            let i = self.page_index(p).expect("checked accessible above");
+            let state = crate::mat::PageState::from_u8(self.mat_state[i]);
+            let (charge, next) =
+                crate::mat::charge_for(state, crate::mat::PageKind::UnpinnedCapCow, is_write)
+                    .expect("non-pinned access pre-checked accessible");
+            total += charge;
+            self.mat_state[i] = next.as_u8();
+        }
+        gas.charge(total)
+            .expect("#3 materialization charge within block reserve");
+        Ok(())
+    }
+
+    /// Category-#3 first-touch for a `width`-byte **read**. See [`touch`].
+    ///
+    /// [`touch`]: CopyingMemory::touch
+    #[inline]
+    pub fn touch_read(
+        &mut self,
+        addr: u32,
+        width: u32,
+        gas: &mut GasCounter,
+    ) -> Result<(), TouchFault> {
+        self.touch(addr, width, false, gas)
+    }
+
+    /// Category-#3 first-touch for a `width`-byte **write**. See [`touch`].
+    ///
+    /// [`touch`]: CopyingMemory::touch
+    #[inline]
+    pub fn touch_write(
+        &mut self,
+        addr: u32,
+        width: u32,
+        gas: &mut GasCounter,
+    ) -> Result<(), TouchFault> {
+        self.touch(addr, width, true, gas)
     }
 
     // ---- Fast-path read helpers (inline; single bounds check + raw pointer load). ----
@@ -345,12 +518,18 @@ impl CopyingMemory {
         let rel_end = rel_start.checked_add(size).ok_or(MapError::Overflow)?;
         let rel_end_usize: usize = rel_end.try_into().map_err(|_| MapError::Overflow)?;
 
-        // Grow flat_mem + perms to cover [0, rel_end) (relative to base).
+        // Grow flat_mem + perms (+ mat_state) to cover [0, rel_end)
+        // (relative to base). New pages default to NONE perm and the
+        // `NotPresent` materialization state (tag 0).
         if rel_end_usize > self.flat_mem.len() {
             self.flat_mem.resize(rel_end_usize, 0);
             let needed_pages = rel_end_usize.div_ceil(PAGE_SIZE as usize);
             if self.perms.len() < needed_pages {
                 self.perms.resize(needed_pages, perm::NONE);
+            }
+            if self.mat_state.len() < needed_pages {
+                self.mat_state
+                    .resize(needed_pages, crate::mat::PageState::NotPresent.as_u8());
             }
         }
 
@@ -474,5 +653,23 @@ impl Memory for CopyingMemory {
     #[inline]
     fn write(&mut self, addr: u32, data: &[u8]) -> Result<(), MemAccess> {
         CopyingMemory::write(self, addr, data)
+    }
+    #[inline]
+    fn touch_read(
+        &mut self,
+        addr: u32,
+        width: u32,
+        gas: &mut GasCounter,
+    ) -> Result<(), TouchFault> {
+        CopyingMemory::touch_read(self, addr, width, gas)
+    }
+    #[inline]
+    fn touch_write(
+        &mut self,
+        addr: u32,
+        width: u32,
+        gas: &mut GasCounter,
+    ) -> Result<(), TouchFault> {
+        CopyingMemory::touch_write(self, addr, width, gas)
     }
 }

@@ -316,6 +316,45 @@ impl PageTable {
         Some(())
     }
 
+    /// Map `len` bytes at `virt` as **not-present** leaf PTEs, allocating
+    /// all intermediate tables (so a later [`pt_remap_leaf`] can flip a
+    /// leaf present without re-walking missing intermediates). Used for
+    /// category-#3 lazy materialization: the data region starts
+    /// not-present so the first guest touch faults into the
+    /// materialization handler, which maps the page present and charges.
+    /// `virt` and `len` must each be 4 KiB-aligned.
+    pub fn map_not_present(&mut self, virt: u64, len: u64) -> Option<()> {
+        assert!(virt.is_multiple_of(PAGE_SIZE as u64));
+        assert!(len.is_multiple_of(PAGE_SIZE as u64));
+        let mut va = virt;
+        let end = virt + len;
+        while va < end {
+            self.map_one_not_present(va)?;
+            va += PAGE_SIZE as u64;
+        }
+        Some(())
+    }
+
+    /// Install intermediate tables for `va` and write a not-present (P=0)
+    /// leaf PTE.
+    fn map_one_not_present(&self, va: u64) -> Option<()> {
+        let idx4 = ((va >> 39) & 0x1FF) as usize;
+        let idx3 = ((va >> 30) & 0x1FF) as usize;
+        let idx2 = ((va >> 21) & 0x1FF) as usize;
+        let idx1 = ((va >> 12) & 0x1FF) as usize;
+        let inner_flags = flag::P | flag::RW | flag::US;
+        // SAFETY: self.pml4 is a valid 4 KiB-aligned table this PT owns.
+        let pml4 = unsafe { &mut *self.pml4.as_ptr() };
+        let pdpt = self.ensure_inner(&mut pml4[idx4], inner_flags)?;
+        let pdpt = unsafe { &mut *pdpt };
+        let pd = self.ensure_inner(&mut pdpt[idx3], inner_flags)?;
+        let pd = unsafe { &mut *pd };
+        let pt = self.ensure_inner(&mut pd[idx2], inner_flags)?;
+        let pt = unsafe { &mut *pt };
+        pt[idx1] = 0; // not present
+        Some(())
+    }
+
     /// Map a single 4 KiB page.
     fn map_one(&self, va: u64, pa: u64, perm: Perm) -> Option<()> {
         let idx4 = ((va >> 39) & 0x1FF) as usize;

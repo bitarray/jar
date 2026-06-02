@@ -72,9 +72,11 @@ pub struct CompiledImage {
     /// Native-code offset (within the JIT region) of the exit label
     /// — `jit_pf_handler` redirects the saved RIP here on page fault.
     pub exit_label_offset: u32,
-    /// (native_offset, pvm_pc) pairs the #PF handler binary-searches
-    /// to recover the PVM PC from a faulting RIP.
-    pub trap_table: Vec<(u32, u32)>,
+    /// `(native_offset, pvm_pc, access_width)` triples the #PF handler
+    /// binary-searches to recover the PVM PC (PageFault exit / OOG
+    /// resume) and the access width (category-#3 straddle page-set) from
+    /// a faulting RIP.
+    pub trap_table: Vec<(u32, u32, u32)>,
     /// Template PD subtree mapping the arena pages at per-call VAs.
     /// Per-call PTs install [`template_pd_pa`] into PDPT[1] of the
     /// META PML4 slot; this `template` owns the backing PD + PT pages

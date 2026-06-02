@@ -109,7 +109,13 @@ pub struct CompileResult {
     /// non-zero entries instead of materialising a dense
     /// `code.len() + 1`-sized array.
     pub dispatch_entries: Vec<(u32, i32)>,
-    pub trap_table: Vec<(u32, u32)>,
+    /// Per-mem-op trap entries `(native_offset, pvm_pc, access_width)`,
+    /// sorted by `native_offset`. The #PF handler binary-searches this by
+    /// the faulting RIP's native offset to recover the PVM PC (for the
+    /// PageFault exit / OOG resume) and the access width (for the
+    /// category-#3 straddle page-set, so both engines materialize the
+    /// same pages via `mat::access_pages`).
+    pub trap_table: Vec<(u32, u32, u32)>,
     pub exit_label_offset: u32,
     /// Native offset of the panic stub. The runtime dense-fills the
     /// dispatch table with this so a `jalr` to any non-block-start
@@ -193,8 +199,11 @@ pub struct Compiler {
     /// Cleared by any instruction that clobbers flags (i.e., everything except the
     /// immediately following setLtU).
     pub(crate) last_add_cf: Option<(usize, usize, usize)>,
-    /// Trap table for signal-based bounds checking: (native_offset, pvm_pc).
-    pub(crate) trap_entries: Vec<(u32, u32)>,
+    /// Trap table for signal-based bounds checking + category-#3 fault
+    /// resolution: `(native_offset, pvm_pc, access_width)`. One entry per
+    /// guest load/store, recorded at the native offset of the faulting
+    /// MOV.
+    pub(crate) trap_entries: Vec<(u32, u32, u32)>,
     /// Memory tier load/store cycles for gas simulation.
     pub(crate) mem_cycles: u8,
     /// Pipeline simulator for per-block gas costing. The streaming
@@ -372,8 +381,10 @@ impl Compiler {
             8
         };
 
-        // Record trap entry before the load instruction (for SIGSEGV handler).
-        self.trap_entries.push((self.asm.offset() as u32, pvm_pc));
+        // Record trap entry before the load instruction (for SIGSEGV
+        // handler + #3 materialization). `w` is the access width.
+        self.trap_entries
+            .push((self.asm.offset() as u32, pvm_pc, w));
 
         match w {
             1 => self.asm.movzx_load8_at_index(dst, SCRATCH),
@@ -403,8 +414,10 @@ impl Compiler {
             8
         };
 
-        // Record trap entry before the store instruction (for SIGSEGV handler).
-        self.trap_entries.push((self.asm.offset() as u32, pvm_pc));
+        // Record trap entry before the store instruction (for SIGSEGV
+        // handler + #3 materialization). `w` is the access width.
+        self.trap_entries
+            .push((self.asm.offset() as u32, pvm_pc, w));
 
         match w {
             1 => self.asm.mov_store8_at_index(SCRATCH, val_reg),

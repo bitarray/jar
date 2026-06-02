@@ -178,16 +178,13 @@ pub struct KernelFrame {
     /// (blob hash for image pinned/initial entries; instance ref
     /// for kernel-derived transient instances) or `None`.
     cnode: Vec<Option<CapHashOrRef>>,
-    /// CoW-armed guest VA ranges — the initial-slot mappings whose
-    /// pages can be copy-on-write'd on guest writes. Published to
-    /// the #PF handler at `enter_frame` time so it can recognise
-    /// legitimate write faults and remap.
-    cow_ranges: Vec<CowRange>,
     /// CoW-allocated fresh pages, populated by `jit_pf_handler` on
-    /// the first write to each page of a CoW range. Per the data-
-    /// flow principle (see module doc), these are frame-local
+    /// the first write to each page of a copy-on-write `MatRange`. Per
+    /// the data-flow principle (see module doc), these are frame-local
     /// working memory and are dropped at frame pop without
-    /// propagation.
+    /// propagation. (The cap-backed `MatRange` list itself lives in the
+    /// frame's [`FrameRuntime`], built with resolved PAs in
+    /// [`build_runtime`].)
     dirty_pages: Vec<DirtyPage>,
     /// Per-frame ring-3 resources (PT + mem/ctx/stack buffers).
     /// Lazily built on the first [`run_one_entry`] for this frame
@@ -196,14 +193,23 @@ pub struct KernelFrame {
     runtime: Option<FrameRuntime>,
 }
 
-/// One CoW-armed VA range. The #PF handler scans this list when a
-/// guest write faults inside ring 3; a hit triggers the CoW protocol
-/// (allocate a fresh page, memcpy from the cap, rewrite the PTE
-/// writable, record the dirty page).
+/// One cap-backed data mapping projected into the guest address space,
+/// lazily materialized (category #3). The #PF handler scans this list
+/// when a guest access faults inside ring 3; a hit identifies the page's
+/// source PA + kind (pinned read-only vs unpinned copy-on-write), so the
+/// handler can page it in (read) or copy-on-write it (write) and charge.
+/// Pages NOT covered by any `MatRange` are ephemeral (backed directly by
+/// the frame's private `mem_buf`).
 #[derive(Clone, Copy, Debug)]
-pub struct CowRange {
+pub struct MatRange {
     pub start: u32,
     pub end: u32,
+    /// Source physical address of the cap's first byte (`start` maps here).
+    pub pa: u64,
+    /// [`javm_exec::mat::PageKind`] as a `u8`: pinned slots are
+    /// `PinnedCapRo` (a write hard-faults), initial slots are
+    /// `UnpinnedCapCow` (a write copies-on-write).
+    pub kind: u8,
     pub source_hash: CapHash,
     pub source_slot: SlotIdx,
 }
@@ -397,10 +403,9 @@ fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
     }
     let pc = frame.pc;
     let regs = frame.regs;
-    let cow_ranges: &[CowRange] = frame.cow_ranges.as_slice();
     let dirty_sink: *mut Vec<DirtyPage> = &mut frame.dirty_pages;
     let rt = frame.runtime.as_mut().expect("just built");
-    let info = unsafe { jit_run::enter_frame(rt, gas, pc, regs, cow_ranges, dirty_sink) };
+    let info = unsafe { jit_run::enter_frame(rt, gas, pc, regs, dirty_sink) };
     Ok(info)
 }
 
@@ -448,7 +453,10 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
         }
     }
 
-    let mut direct_maps: Vec<DirectMap> = Vec::with_capacity(img.mappings.len() + 1);
+    // `direct_maps` holds only the always-present RO code mapping; data
+    // cap pages go into `mat_ranges` (lazily materialized, category #3).
+    let mut direct_maps: Vec<DirectMap> = Vec::with_capacity(1);
+    let mut mat_ranges: Vec<MatRange> = Vec::with_capacity(img.mappings.len());
     let mut mem_size: u32 = 0;
 
     // Executable code region: RO direct-map at the fixed CODE_BASE. The
@@ -520,10 +528,23 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
         if size == 0 {
             continue;
         }
-        direct_maps.push(DirectMap {
+        // Lazily-materialized cap mapping: pinned → read-only (a write
+        // hard-faults), initial → copy-on-write. The page set is
+        // page-rounded (the cap's backing allocation has a zeroed,
+        // page-aligned tail, so paging in a partial last page is safe).
+        let kind = if pinned_slot[src_slot] {
+            javm_exec::mat::PageKind::PinnedCapRo.as_u8()
+        } else {
+            javm_exec::mat::PageKind::UnpinnedCapCow.as_u8()
+        };
+        let span = size.next_multiple_of(paging::PAGE_SIZE as u32);
+        mat_ranges.push(MatRange {
             start: m.start as u32,
+            end: (m.start as u32).saturating_add(span),
             pa,
-            size,
+            kind,
+            source_hash: target_hash,
+            source_slot: SlotIdx(m.source_path[0].get()),
         });
     }
 
@@ -589,6 +610,7 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
                 data: rw.1,
             },
             &direct_maps,
+            mat_ranges,
         )
     }
     .ok_or(ERR_JIT_FAILED)
@@ -805,44 +827,9 @@ fn build_frame_inner(
         }
     }
 
-    // Compute cow_ranges: every mapping whose source slot is an
-    // initial slot (not pinned) gets armed for CoW.
-    let mut pinned_slot = [false; CNODE_SLOTS];
-    let mut initial_slot = [false; CNODE_SLOTS];
-    for e in img.pinned.iter() {
-        let s = e.slot.get() as usize;
-        if s < CNODE_SLOTS {
-            pinned_slot[s] = true;
-        }
-    }
-    for e in img.initial.iter() {
-        let s = e.slot.get() as usize;
-        if s < CNODE_SLOTS && !pinned_slot[s] {
-            initial_slot[s] = true;
-        }
-    }
-    let mut cow_ranges = Vec::new();
-    for m in img.mappings.iter() {
-        if m.source_path_len == 0 {
-            continue;
-        }
-        let src_slot_raw = m.source_path[0].get();
-        let src_slot = src_slot_raw as usize;
-        if src_slot >= CNODE_SLOTS || !initial_slot[src_slot] {
-            continue;
-        }
-        let target_hash = match cnode.get(src_slot) {
-            Some(Some(CapHashOrRef::Hash(h))) => *h,
-            _ => continue,
-        };
-        cow_ranges.push(CowRange {
-            start: m.start as u32,
-            end: (m.start + m.size) as u32,
-            source_hash: target_hash,
-            source_slot: SlotIdx(src_slot_raw),
-        });
-    }
-
+    // The cap-backed mappings (their PAs + pinned/initial kind) are
+    // resolved in `build_runtime` when the per-frame runtime is built;
+    // nothing mapping-related is needed on the frame itself.
     Ok(KernelFrame {
         image_hash,
         image_hash_chain,
@@ -850,7 +837,6 @@ fn build_frame_inner(
         regs,
         pc,
         cnode,
-        cow_ranges,
         dirty_pages: Vec::new(),
         runtime: None,
     })

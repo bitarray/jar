@@ -153,6 +153,9 @@ impl Interpreter {
                 // ---- Loads ---------------------------------------------------
                 Inst::Lb { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
+                    if mem.touch_read(addr, 1, gas).is_err() {
+                        return page_fault(regs, pc, addr);
+                    }
                     match load_u8(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as i8 as i64 as u64),
                         None => return page_fault(regs, pc, addr),
@@ -160,6 +163,9 @@ impl Interpreter {
                 }
                 Inst::Lh { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
+                    if mem.touch_read(addr, 2, gas).is_err() {
+                        return page_fault(regs, pc, addr);
+                    }
                     match load_u16(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as i16 as i64 as u64),
                         None => return page_fault(regs, pc, addr),
@@ -167,6 +173,9 @@ impl Interpreter {
                 }
                 Inst::Lw { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
+                    if mem.touch_read(addr, 4, gas).is_err() {
+                        return page_fault(regs, pc, addr);
+                    }
                     match load_u32(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as i32 as i64 as u64),
                         None => return page_fault(regs, pc, addr),
@@ -174,6 +183,9 @@ impl Interpreter {
                 }
                 Inst::Ld { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
+                    if mem.touch_read(addr, 8, gas).is_err() {
+                        return page_fault(regs, pc, addr);
+                    }
                     match load_u64(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v),
                         None => return page_fault(regs, pc, addr),
@@ -181,6 +193,9 @@ impl Interpreter {
                 }
                 Inst::Lbu { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
+                    if mem.touch_read(addr, 1, gas).is_err() {
+                        return page_fault(regs, pc, addr);
+                    }
                     match load_u8(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as u64),
                         None => return page_fault(regs, pc, addr),
@@ -188,6 +203,9 @@ impl Interpreter {
                 }
                 Inst::Lhu { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
+                    if mem.touch_read(addr, 2, gas).is_err() {
+                        return page_fault(regs, pc, addr);
+                    }
                     match load_u16(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as u64),
                         None => return page_fault(regs, pc, addr),
@@ -195,6 +213,9 @@ impl Interpreter {
                 }
                 Inst::Lwu { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
+                    if mem.touch_read(addr, 4, gas).is_err() {
+                        return page_fault(regs, pc, addr);
+                    }
                     match load_u32(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as u64),
                         None => return page_fault(regs, pc, addr),
@@ -204,7 +225,8 @@ impl Interpreter {
                 // ---- Stores --------------------------------------------------
                 Inst::Sb { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    if !store_writable(mem, addr, 1)
+                    if mem.touch_write(addr, 1, gas).is_err()
+                        || !store_writable(mem, addr, 1)
                         || !mem.write_u8(addr, reg_read(regs, rs2) as u8)
                     {
                         return page_fault(regs, pc, addr);
@@ -212,7 +234,8 @@ impl Interpreter {
                 }
                 Inst::Sh { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    if !store_writable(mem, addr, 2)
+                    if mem.touch_write(addr, 2, gas).is_err()
+                        || !store_writable(mem, addr, 2)
                         || !mem.write_u16_le(addr, reg_read(regs, rs2) as u16)
                     {
                         return page_fault(regs, pc, addr);
@@ -220,7 +243,8 @@ impl Interpreter {
                 }
                 Inst::Sw { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    if !store_writable(mem, addr, 4)
+                    if mem.touch_write(addr, 4, gas).is_err()
+                        || !store_writable(mem, addr, 4)
                         || !mem.write_u32_le(addr, reg_read(regs, rs2) as u32)
                     {
                         return page_fault(regs, pc, addr);
@@ -228,7 +252,9 @@ impl Interpreter {
                 }
                 Inst::Sd { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    if !store_writable(mem, addr, 8) || !mem.write_u64_le(addr, reg_read(regs, rs2))
+                    if mem.touch_write(addr, 8, gas).is_err()
+                        || !store_writable(mem, addr, 8)
+                        || !mem.write_u64_le(addr, reg_read(regs, rs2))
                     {
                         return page_fault(regs, pc, addr);
                     }
