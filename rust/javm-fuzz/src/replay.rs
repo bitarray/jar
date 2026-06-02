@@ -8,12 +8,24 @@
 
 use crate::{Program, encode};
 use javm_bench::{BuiltCaps, RawRun, run_interpreter_raw, run_recompiler_raw};
-use javm_cap::image::{EndpointDef, Image};
+use javm_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping};
+use javm_cap::slot::{SlotIdx, SlotPath};
 use std::collections::BTreeMap;
+
+/// Cnode slot the fuzz memory window's backing data cap occupies.
+const WINDOW_SLOT: u32 = 1;
 
 /// Build the `Image` for a program: its code (body + fold) plus the appended
 /// `ecalli 0` terminator, entered at pc 0 with the program's initial register
-/// seed. (v1 programs declare no memory window.)
+/// seed.
+///
+/// When the program declares an `init_mem` window, the Image declares a
+/// matching RW data mapping so **both** engines size their data extent to
+/// cover it and lazily materialize (category #3) the same pages. The window is
+/// backed by an *empty* initial slot (zero-filled, page-aligned `mem_buf`), so
+/// both engines treat it as ephemeral — the lazy-materialization charge is
+/// identical regardless, and this keeps the differential off the cap-PA
+/// page-in path (whose alignment is a separate concern).
 pub fn image_for(prog: &Program) -> Image {
     let mut code = prog.code_bytes();
     code.extend_from_slice(&encode::enc(&[encode::HALT]));
@@ -29,6 +41,23 @@ pub fn image_for(prog: &Program) -> Image {
             initial_regs: prog.init_regs.clone(),
         },
     );
+    if let Some(mem) = &prog.init_mem {
+        let slot = SlotIdx(WINDOW_SLOT);
+        img.memory_mappings.push(MemoryMapping {
+            start: mem.start as u64,
+            size: mem.bytes.len() as u64,
+            source: SlotPath::root(slot),
+        });
+        // Empty content → no overlay; the mapping only sizes the data extent,
+        // and the window materializes as ephemeral zero pages on both engines.
+        img.initial_slots.insert(
+            slot,
+            InitialDataCap {
+                content: Vec::new(),
+                size: mem.bytes.len() as u64,
+            },
+        );
+    }
     img
 }
 

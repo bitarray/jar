@@ -25,7 +25,7 @@
 
 use javm_fuzz::generate::{Gen, enumerate_boundary};
 use javm_fuzz::replay::{Diff, diff, diff_batch};
-use javm_fuzz::{Program, encode};
+use javm_fuzz::{MemWindow, Program, encode};
 use std::collections::BTreeMap;
 
 fn report(diverged: &[(usize, Diff)], total: usize) -> String {
@@ -97,4 +97,90 @@ fn random_sweep() {
     let progs = Gen::new(0xC0FFEE).random_batch(256, 6);
     let diverged = diff_batch(&progs);
     assert!(diverged.is_empty(), "{}", report(&diverged, progs.len()));
+}
+
+// ---- Category-#3 memory materialization acceptance (D-1..D-3) -------------
+//
+// Each program runs through BOTH engines; the assertion is they agree on
+// {exit, x10, gas}. The **gas** equality is the #3 consensus check: the
+// interpreter's software first-touch accounting and the recompiler's
+// hardware-fault materialization must charge bit-identically. Each program
+// declares a zero-filled RW window at DATA_BASE (see `replay::image_for`),
+// which both engines lazily materialize.
+
+/// Protocol data base ([`javm_cap::layout::DATA_BASE`]).
+const DATA_BASE: u32 = 0x1000_0000;
+
+/// A no-fold memory program: `body` leaves its result in x10, backed by a
+/// zero-filled RW window of `window_bytes` at DATA_BASE.
+fn mem_prog(body: Vec<u32>, window_bytes: usize) -> Program {
+    Program {
+        code: body,
+        init_regs: BTreeMap::new(),
+        init_mem: Some(MemWindow {
+            start: DATA_BASE,
+            bytes: vec![0u8; window_bytes],
+        }),
+    }
+}
+
+fn assert_agree(prog: &Program, what: &str) {
+    let d = diff(prog);
+    assert!(
+        !d.diverges(),
+        "interp/recomp diverge on {what}: {}",
+        d.describe(),
+    );
+}
+
+#[test]
+fn mem_page_in_on_read() {
+    // First read of a fresh page → page-in charge on both engines; reads 0.
+    let mut body = encode::li64(8, DATA_BASE as u64);
+    body.push(encode::ld(10, 8, 0)); // x10 = mem[DATA_BASE]
+    assert_agree(&mem_prog(body, 8192), "page-in on read");
+}
+
+#[test]
+fn mem_cow_on_write() {
+    // First write → page-in + CoW; the readback is free (page present).
+    let mut body = encode::li64(8, DATA_BASE as u64);
+    body.extend(encode::li64(9, 0xCAFE));
+    body.push(encode::sd(8, 9, 0)); // mem[DATA_BASE] = 0xCAFE
+    body.push(encode::ld(10, 8, 0)); // x10 = 0xCAFE
+    assert_agree(&mem_prog(body, 8192), "CoW on write");
+}
+
+#[test]
+fn mem_read_then_write_single_cow() {
+    // D-2: a read pages-in (RO); a later write to the *same* page CoWs ONCE —
+    // no second page-in. Both engines must charge identically.
+    let mut body = encode::li64(8, DATA_BASE as u64);
+    body.push(encode::ld(10, 8, 0)); // page-in (read)
+    body.extend(encode::li64(9, 0x1234));
+    body.push(encode::sd(8, 9, 8)); // same page → CoW only
+    body.push(encode::ld(10, 8, 8)); // x10 = 0x1234
+    assert_agree(&mem_prog(body, 8192), "read-then-write single CoW (D-2)");
+}
+
+#[test]
+fn mem_straddle_two_pages() {
+    // D-1: an 8-byte store straddling the page boundary materializes BOTH
+    // pages; the page set + total must match across engines.
+    let straddle = DATA_BASE + 4096 - 4;
+    let mut body = encode::li64(8, straddle as u64);
+    body.extend(encode::li64(9, 0xA1B2_C3D4_E5F6_0718));
+    body.push(encode::sd(8, 9, 0)); // 8-byte store across the boundary
+    body.push(encode::ld(10, 8, 0)); // read it back
+    assert_agree(&mem_prog(body, 8192), "straddle two pages (D-1)");
+}
+
+#[test]
+fn mem_straddle_out_of_region_faults() {
+    // D-3: an 8-byte load straddling out of a 1-page window faults wholesale
+    // on both engines — same PageFault, gas unchanged (nothing #3-charged).
+    let straddle = DATA_BASE + 4096 - 4;
+    let mut body = encode::li64(8, straddle as u64);
+    body.push(encode::ld(10, 8, 0)); // straddles into the unmapped page
+    assert_agree(&mem_prog(body, 4096), "straddle out of region (D-3)");
 }
