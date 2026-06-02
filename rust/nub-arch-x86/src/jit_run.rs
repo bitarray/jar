@@ -9,11 +9,14 @@
 //!
 //! ## Memory layout (per invocation, in the new page table)
 //!
-//! Guest memory lives high: `PML4[0]` (low VA, kernel relocated to
-//! slot 511 in Stage F kernel-high) holds the guest's own ranges with
-//! PVM addr == native VA, so mem accesses can use `[rdx]` baseless.
-//! Code is RO at `CODE_BASE` (4 MiB) and data is RW at `DATA_BASE`
-//! (256 MiB); `[0, CODE_BASE)` stays unmapped as a real null guard.
+//! Guest memory lives in `PML4[0]` (low VA, kernel relocated to slot 511
+//! in Stage F kernel-high) with PVM addr == native VA, so mem accesses
+//! can use `[rdx]` baseless. **True zero-setup demand paging:** the whole
+//! `PML4[0]` (covering CODE at `CODE_BASE` = 4 MiB and DATA at
+//! `DATA_BASE` = 256 MiB) starts with NO page-table entries; the #PF
+//! handler builds the PML4→PT path and materializes each page (code RO,
+//! data RO/CoW) on first touch, charging category-#3. `[0, CODE_BASE)`
+//! and the inter-region gap are never declared, so they fault (null guard).
 //!
 //! CTX + the per-Image arena + STACK live in `PML4[1]` at 512 GiB,
 //! outside the PVM u32 address range so guest addresses can't spoof
@@ -30,9 +33,10 @@
 //!     PDPT[2] (514..515 GiB)  ← STACK, ring-3 x86 stack, 4 KiB (user-RW)
 //! ```
 //!
-//! Guest code is mapped read-only at its `CODE_BASE` (a `DirectMap`,
-//! like a pinned data cap), so PVM PCs are real VAs and the guest can
-//! read its own bytes (PIC AUIPC+load).
+//! Guest code is lazily materialized read-only at its `CODE_BASE` (a
+//! `PinnedCapRo` region, like a pinned data cap), so PVM PCs are real VAs
+//! and a guest PIC `auipc`+load pages in the touched code page on first
+//! read (charging category-#3, identical to the interpreter).
 //!
 //! The Image arena lives in [`jit_cache::CompiledImage`] (one per
 //! Image, allocated once and mapped read-only into every Instance's
@@ -74,15 +78,17 @@ static CTX_KVA: AtomicU64 = AtomicU64::new(0);
 // === Per-invocation category-#3 materialization state =====================
 //
 // Set by `enter_frame` so `jit_pf_handler` can lazily materialize the
-// guest data region: the whole `[DATA_BASE, mem_top)` extent starts
-// **not-present**, so the first guest read/write of each page faults
-// here. The handler pages it in (read → map RO), copies-it-on-write
-// (write → map RW, with a fresh page for cap-backed initial slots), and
-// charges category-#3 gas against the saved gas register (R15). Pages in
-// a `MAT_RANGES` entry are cap-backed (pinned RO / initial CoW); all
-// other pages in the extent are ephemeral, backed by the frame's private
-// `mem_buf`. CoW'd cap pages are appended to the per-frame dirty sink
-// (frame-local scaffolding, see `call_loop`).
+// guest address space under true zero-setup demand paging: PML4[0] starts
+// with NO entries, so the first guest read/write of each page faults here.
+// The handler builds the page-table path (via `pt_map_leaf`, recording new
+// tables in `OWNED_VEC_PTR`) and materializes the page: a read maps it RO
+// (page-in), a write maps it RW (CoW, with a fresh page for cap-backed
+// initial slots), charging category-#3 gas against the saved gas register
+// (R15). The CODE region (`MAT_CODE_*`) is `PinnedCapRo` (page-in RO,
+// write-faults). In the DATA region, pages in a `MAT_RANGES` entry are
+// cap-backed (pinned RO / initial CoW); the rest are ephemeral, backed by
+// the frame's private `mem_buf`. CoW'd cap pages are appended to the
+// per-frame dirty sink (frame-local scaffolding, see `call_loop`).
 
 static MAT_RANGES_PTR: AtomicPtr<crate::call_loop::MatRange> =
     AtomicPtr::new(core::ptr::null_mut());
@@ -96,9 +102,24 @@ static MAT_DATA_BASE: AtomicU64 = AtomicU64::new(0);
 static MAT_MEM_TOP: AtomicU64 = AtomicU64::new(0);
 /// Physical address of the ephemeral `mem_buf` page 0 (== `DATA_BASE`).
 static MAT_MEM_BUF_PA: AtomicU64 = AtomicU64::new(0);
+/// Read-only CODE region `[code_base, code_top)` (page-rounded). A
+/// `PinnedCapRo` region: guest PIC data reads page each touched code page
+/// in RO on first read (charging #3 page-in, identical to the interp),
+/// writes hard-fault. `MAT_CODE_PA` is the source PA of code page 0.
+static MAT_CODE_BASE: AtomicU64 = AtomicU64::new(0);
+static MAT_CODE_TOP: AtomicU64 = AtomicU64::new(0);
+static MAT_CODE_PA: AtomicU64 = AtomicU64::new(0);
+/// Per-page [`javm_exec::mat::PageState`] for the code region.
+static MAT_CODE_STATE_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+static MAT_CODE_STATE_LEN: AtomicU64 = AtomicU64::new(0);
 static DIRTY_PAGE_SINK: AtomicPtr<alloc::vec::Vec<crate::call_loop::DirtyPage>> =
     AtomicPtr::new(core::ptr::null_mut());
 static ACTIVE_PT_PML4_KVA: AtomicU64 = AtomicU64::new(0);
+/// Type-erased pointer ([`crate::paging::PageTable::owned_vec_ptr`]) to
+/// the active PT's `owned` table list — the handler's `pt_map_leaf`
+/// records fault-allocated intermediate tables here (freed at `Drop`),
+/// enabling true zero-setup demand paging (PML4[0] empty at entry).
+static OWNED_VEC_PTR: AtomicU64 = AtomicU64::new(0);
 
 /// Hyperlight-chained #PF handler. Fires AFTER Hyperlight's own
 /// stack-growth handler has declined to handle the fault.
@@ -211,47 +232,127 @@ fn page_kind(page_va: u32) -> javm_exec::mat::PageKind {
 }
 
 /// Lazily materialize the page set of a `width`-byte access at `gva`,
-/// charging category-#3 gas against the saved gas register. Returns
-/// `false` (charging nothing, mutating nothing) if any page is outside
-/// the declared extent or a write targets a pinned read-only page — the
-/// caller then raises a PVM PageFault. Uses the *same*
+/// charging category-#3 gas against the saved gas register. Handles BOTH
+/// the read-only CODE region (`PinnedCapRo`: page-in RO on read, write
+/// hard-faults) and the DATA region (ephemeral / cap-backed, with CoW).
+/// True zero-setup demand paging: the guest's PML4[0] starts empty, so
+/// the handler builds the page-table path on the first fault to each page
+/// via [`crate::paging::pt_map_leaf`].
+///
+/// Returns `false` (charging nothing, mutating nothing) if any page is
+/// outside the declared code/data regions or a write targets a read-only
+/// page — the caller then raises a PVM PageFault. Uses the *same*
 /// [`javm_exec::mat`] state machine + page-set rule as the interpreter,
 /// so both engines charge bit-identically (gas-cost.md §3).
 fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> bool {
     let data_base = MAT_DATA_BASE.load(Ordering::SeqCst);
     let mem_top = MAT_MEM_TOP.load(Ordering::SeqCst);
     let mem_buf_pa = MAT_MEM_BUF_PA.load(Ordering::SeqCst);
+    let code_base = MAT_CODE_BASE.load(Ordering::SeqCst);
+    let code_top = MAT_CODE_TOP.load(Ordering::SeqCst);
+    let code_pa = MAT_CODE_PA.load(Ordering::SeqCst);
     let pml4 = ACTIVE_PT_PML4_KVA.load(Ordering::SeqCst);
-    let state_ptr = MAT_STATE_PTR.load(Ordering::SeqCst);
-    let state_len = MAT_STATE_LEN.load(Ordering::SeqCst) as usize;
-    if pml4 == 0 || state_ptr.is_null() || mem_top <= data_base {
+    let owned_vec = OWNED_VEC_PTR.load(Ordering::SeqCst);
+    if pml4 == 0 || owned_vec == 0 {
         return false;
     }
 
+    let in_code = |pv: u64| code_top > code_base && pv >= code_base && pv < code_top;
+    let in_data = |pv: u64| mem_top > data_base && pv >= data_base && pv < mem_top;
+
     let set = javm_exec::mat::access_pages(gva as u32, width);
 
-    // Accessibility-all (before any charge): every page must be inside
-    // the declared extent, and a write must not target a pinned page.
+    // Region dispatch by the BASE page, then accessibility-all *within* that
+    // one region — mirroring the interpreter's `touch` (base-page dispatch to
+    // `touch_code`/`touch_data`, each all-or-nothing). The whole access
+    // belongs to the base page's region; any other page leaving it faults
+    // charging nothing. This crucially includes a code↔data straddle when a
+    // maximal code region abuts `DATA_BASE` (`code_top == DATA_BASE`): both
+    // engines then fault it, rather than the recompiler materializing across
+    // the boundary while the interpreter faults. Writes to code (read-only)
+    // and to pinned data caps fault too.
+    let base = set.as_slice()[0] as u64;
+    let base_in_code = in_code(base);
+    if !base_in_code && !in_data(base) {
+        return false; // base page undeclared (null guard / gap / out of range)
+    }
     for &p in set.as_slice() {
         let pv = p as u64;
-        if pv < data_base || pv >= mem_top {
-            return false;
-        }
-        if is_write && page_kind(p) == javm_exec::mat::PageKind::PinnedCapRo {
-            return false;
+        if base_in_code {
+            // CODE region: read-only; every page must be a code page.
+            if is_write || !in_code(pv) {
+                return false;
+            }
+        } else {
+            // DATA region: every page must be a data page; pinned write faults.
+            if !in_data(pv) || (is_write && page_kind(p) == javm_exec::mat::PageKind::PinnedCapRo) {
+                return false;
+            }
         }
     }
 
-    // SAFETY: state_ptr/state_len describe the running FrameRuntime's
-    // `mat_state` Vec; single-threaded guest, so the &mut is exclusive.
-    let state = unsafe { core::slice::from_raw_parts_mut(state_ptr, state_len) };
+    // Per-region state arrays. Null only when a region is undeclared, in
+    // which case no page of `set` lies in it (guarded by in_code/in_data).
+    let dstate_ptr = MAT_STATE_PTR.load(Ordering::SeqCst);
+    let dstate_len = MAT_STATE_LEN.load(Ordering::SeqCst) as usize;
+    let cstate_ptr = MAT_CODE_STATE_PTR.load(Ordering::SeqCst);
+    let cstate_len = MAT_CODE_STATE_LEN.load(Ordering::SeqCst) as usize;
+    // SAFETY: each ptr/len describes the running FrameRuntime's per-page
+    // state Vec (single-threaded → exclusive); empty slice if undeclared.
+    let dstate: &mut [u8] = if dstate_ptr.is_null() {
+        &mut []
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(dstate_ptr, dstate_len) }
+    };
+    let cstate: &mut [u8] = if cstate_ptr.is_null() {
+        &mut []
+    } else {
+        unsafe { core::slice::from_raw_parts_mut(cstate_ptr, cstate_len) }
+    };
 
     // Materialize-all: page-in / CoW each page (low→high), advancing
     // per-page state and accumulating the charge.
     let mut total: u64 = 0;
     for &p in set.as_slice() {
-        let idx = ((p as u64 - data_base) / PAGE_SIZE as u64) as usize;
-        let cur = javm_exec::mat::PageState::from_u8(state[idx]);
+        let pv = p as u64;
+        if in_code(pv) {
+            // CODE: PinnedCapRo — read pages in RO (write was excluded).
+            let idx = ((pv - code_base) / PAGE_SIZE as u64) as usize;
+            let cur = javm_exec::mat::PageState::from_u8(cstate[idx]);
+            let (charge, next) =
+                match javm_exec::mat::charge_for(cur, javm_exec::mat::PageKind::PinnedCapRo, false)
+                {
+                    Ok(v) => v,
+                    Err(_) => return false,
+                };
+            if next == javm_exec::mat::PageState::PresentRo
+                && cur == javm_exec::mat::PageState::NotPresent
+            {
+                let src_pa = code_pa + (pv - code_base);
+                // SAFETY: live PT, single writer; builds the path (zero-setup).
+                if unsafe {
+                    crate::paging::pt_map_leaf(
+                        pml4,
+                        pv,
+                        src_pa,
+                        crate::paging::Perm::user_ro(),
+                        owned_vec,
+                    )
+                }
+                .is_none()
+                {
+                    return false;
+                }
+                crate::paging::invlpg(pv);
+            }
+            total = total.saturating_add(charge);
+            cstate[idx] = next.as_u8();
+            continue;
+        }
+
+        // DATA: ephemeral / cap-backed with CoW.
+        let idx = ((pv - data_base) / PAGE_SIZE as u64) as usize;
+        let cur = javm_exec::mat::PageState::from_u8(dstate[idx]);
         let range = mat_range_for(p);
         let (kind, src_pa) = match range {
             Some(r) => (
@@ -261,7 +362,7 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
             ),
             None => (
                 javm_exec::mat::PageKind::EphemeralZero,
-                mem_buf_pa + (p as u64 - data_base),
+                mem_buf_pa + (pv - data_base),
             ),
         };
         let (charge, next) = match javm_exec::mat::charge_for(cur, kind, is_write) {
@@ -271,33 +372,42 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
         match next {
             javm_exec::mat::PageState::PresentRo => {
                 if cur == javm_exec::mat::PageState::NotPresent {
-                    // SAFETY: live PT, single writer; the not-present map
-                    // installed the leaf so the walk terminates.
-                    unsafe {
-                        crate::paging::pt_remap_leaf(
+                    // SAFETY: live PT, single writer; builds the path.
+                    if unsafe {
+                        crate::paging::pt_map_leaf(
                             pml4,
-                            p as u64,
+                            pv,
                             src_pa,
                             crate::paging::Perm::user_ro(),
-                        );
+                            owned_vec,
+                        )
                     }
-                    crate::paging::invlpg(p as u64);
+                    .is_none()
+                    {
+                        return false;
+                    }
+                    crate::paging::invlpg(pv);
                 }
             }
             javm_exec::mat::PageState::PresentRw => {
                 if kind == javm_exec::mat::PageKind::EphemeralZero {
-                    // Frame-private buffer: just map it writable in place.
+                    // Frame-private buffer: map it writable (builds path).
                     // SAFETY: as above.
-                    unsafe {
-                        crate::paging::pt_remap_leaf(
+                    if unsafe {
+                        crate::paging::pt_map_leaf(
                             pml4,
-                            p as u64,
+                            pv,
                             src_pa,
                             crate::paging::Perm::user_rw(),
-                        );
+                            owned_vec,
+                        )
                     }
-                    crate::paging::invlpg(p as u64);
-                } else if !cow_into_fresh(p as u64, src_pa, pml4, range) {
+                    .is_none()
+                    {
+                        return false;
+                    }
+                    crate::paging::invlpg(pv);
+                } else if !cow_into_fresh(pv, src_pa, pml4, owned_vec, range) {
                     // Allocation / remap failure → fault (nothing charged
                     // yet for THIS page, but earlier pages of a straddle
                     // were already advanced; an OOM here is fatal anyway).
@@ -307,7 +417,7 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
             javm_exec::mat::PageState::NotPresent => {}
         }
         total = total.saturating_add(charge);
-        state[idx] = next.as_u8();
+        dstate[idx] = next.as_u8();
     }
 
     // Charge: decrement the saved gas register (R15 == gprs[0]). The
@@ -329,6 +439,7 @@ fn cow_into_fresh(
     page_va: u64,
     src_pa: u64,
     pml4: u64,
+    owned_vec: u64,
     range: Option<crate::call_loop::MatRange>,
 ) -> bool {
     let Some(src_kva) = crate::paging::pa_to_va(src_pa) else {
@@ -344,9 +455,16 @@ fn cow_into_fresh(
     unsafe {
         core::ptr::copy_nonoverlapping(src_kva as *const u8, new_kva as *mut u8, PAGE_SIZE);
     }
-    // SAFETY: live PT, single writer; the leaf exists (not-present map).
+    // SAFETY: live PT, single writer; builds the path if needed (the page
+    // may be NotPresent under zero-setup) or reuses it (read-then-write).
     if unsafe {
-        crate::paging::pt_remap_leaf(pml4, page_va, new_pa, crate::paging::Perm::user_rw())
+        crate::paging::pt_map_leaf(
+            pml4,
+            page_va,
+            new_pa,
+            crate::paging::Perm::user_rw(),
+            owned_vec,
+        )
     }
     .is_none()
     {
@@ -438,19 +556,6 @@ pub struct MemRegion<'a> {
     pub data: &'a [u8],
 }
 
-/// One direct mem mapping projected straight into the per-call PT.
-/// `start` is the guest VA (4 KiB-aligned), `pa` the source physical
-/// address (in the talc-heap PA range under [`crate::paging::va_to_pa`]),
-/// `size` the length to map (4 KiB-aligned). Mapped read-only over
-/// the per-frame mem_buf so guest reads pull straight from the shared
-/// cap pages — no per-call memcpy.
-#[derive(Clone, Copy)]
-pub struct DirectMap {
-    pub start: u32,
-    pub pa: u64,
-    pub size: u32,
-}
-
 /// Per-frame ring-3 resources retained across re-entries.
 ///
 /// Holds the per-call page table + private mem/ctx/stack pages, plus
@@ -490,6 +595,13 @@ pub struct FrameRuntime {
     mem_top: u32,
     /// Physical address of `mem_buf` page 0 (the `DATA_BASE` page).
     mem_buf_pa: u64,
+    /// Read-only CODE region (page-rounded): `[code_base, code_top)`,
+    /// source PA `code_pa`. Lazily materialized `PinnedCapRo` like a
+    /// pinned data cap; per-page state in `code_mat`.
+    code_base: u32,
+    code_top: u32,
+    code_pa: u64,
+    code_mat: alloc::vec::Vec<u8>,
 }
 
 /// Build a per-frame runtime: compile the Image (cached), allocate
@@ -508,24 +620,30 @@ pub struct FrameRuntime {
 /// The dense dispatch table (one `i32` per code byte, built by
 /// `jit_cache::get_or_compile`; non-block-start slots hold the
 /// panic-stub offset) doubles as the `jalr`-target validator — there
-/// is no BB region or jump table. The code itself is RO-mapped into
-/// the guest range at `code_base` via `direct_maps`.
+/// is no BB region or jump table.
+///
+/// **True zero-setup demand paging:** the guest's whole low VA range
+/// (PML4[0], covering CODE and DATA) is left with NO page-table entries
+/// at build time; the #PF handler builds the path + materializes each
+/// page on first touch. `code_pa` is the physical address of the Image's
+/// code bytes (page-rounded, zero-padded tail); the code region is a
+/// `PinnedCapRo` region lazily paged in RO on guest PIC reads.
 ///
 /// # Safety
 /// The guest runs single-threaded (Hyperlight serialises calls); the
-/// `code` / overlay slices and `direct_maps` PAs must outlive the
+/// `code` / overlay slices and `code_pa` / cap PAs must outlive the
 /// returned [`FrameRuntime`], which owns the per-call page table.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn build_frame_runtime(
     image_hash: &javm_cap::CapHash,
     code: &[u8],
     code_base: u32,
+    code_pa: u64,
     entry_pc: u32,
     mem_size: u32,
     arg: MemRegion,
     ro: MemRegion,
     rw: MemRegion,
-    direct_maps: &[DirectMap],
     mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
 ) -> Option<FrameRuntime> {
     let helpers = HelperFns {
@@ -621,30 +739,22 @@ pub unsafe fn build_frame_runtime(
 
     let mut pt = PageTable::new()?;
     pt.map(CTX_VA_M, ctx_buf.pa(), ctx_buf.size(), Perm::user_rw())?;
-    // Category #3: the whole data extent starts **not-present** so the
-    // first guest touch of each page faults into `jit_pf_handler`, which
-    // materializes it (page-in / CoW) and charges. `mem_buf` stays
-    // eagerly *allocated* (and seeded with overlays above) — only the
-    // mapping is lazy. Pages covered by `mat_ranges` are cap-backed; the
-    // rest are ephemeral, backed by `mem_buf`.
-    if mem_bytes > 0 {
-        pt.map_not_present(MEM_VA_M + data_base as u64, mem_bytes as u64)?;
-    }
-    // Code stays eagerly RO-mapped (read-only, never #3-metered).
-    for dm in direct_maps {
-        if dm.size == 0 {
-            continue;
-        }
-        pt.map(
-            MEM_VA_M + dm.start as u64,
-            dm.pa,
-            dm.size as u64,
-            Perm::user_ro(),
-        )?;
-    }
+    // True zero-setup demand paging: the WHOLE guest low VA range (PML4[0]
+    // — both CODE at CODE_BASE and DATA at DATA_BASE) is left with NO
+    // page-table entries here. The first guest touch of each page faults
+    // into `jit_pf_handler`, which builds the PML4→PT path (recording the
+    // new tables in `pt.owned`) and materializes the page (page-in / CoW),
+    // charging #3. `mem_buf` stays eagerly *allocated* (and seeded with
+    // overlays above) — only the mapping is lazy.
     let mat_state = alloc::vec![0u8; mem_bytes / PAGE_SIZE];
     let mem_buf_pa = mem_buf.pa();
     let mem_top = (data_base + mem_bytes) as u32;
+    // Code region: page-rounded `[code_base, code_top)`, lazily paged in
+    // RO (PinnedCapRo) on guest PIC reads. The code buffer is page-aligned
+    // with a zeroed tail, so paging in the last (partial) page is safe.
+    let code_bytes_rounded = code.len().next_multiple_of(PAGE_SIZE);
+    let code_mat = alloc::vec![0u8; code_bytes_rounded / PAGE_SIZE];
+    let code_top = code_base.saturating_add(code_bytes_rounded as u32);
     pt.install_borrowed_pd(META_BASE_M, cached.template_pd_pa)?;
     pt.map(
         STACK_VA_M,
@@ -672,6 +782,10 @@ pub unsafe fn build_frame_runtime(
         data_base: data_base as u32,
         mem_top,
         mem_buf_pa,
+        code_base,
+        code_top,
+        code_pa,
+        code_mat,
     })
 }
 
@@ -732,8 +846,14 @@ pub unsafe fn enter_frame(
     MAT_DATA_BASE.store(rt.data_base as u64, Ordering::SeqCst);
     MAT_MEM_TOP.store(rt.mem_top as u64, Ordering::SeqCst);
     MAT_MEM_BUF_PA.store(rt.mem_buf_pa, Ordering::SeqCst);
+    MAT_CODE_BASE.store(rt.code_base as u64, Ordering::SeqCst);
+    MAT_CODE_TOP.store(rt.code_top as u64, Ordering::SeqCst);
+    MAT_CODE_PA.store(rt.code_pa, Ordering::SeqCst);
+    MAT_CODE_STATE_PTR.store(rt.code_mat.as_mut_ptr(), Ordering::SeqCst);
+    MAT_CODE_STATE_LEN.store(rt.code_mat.len() as u64, Ordering::SeqCst);
     DIRTY_PAGE_SINK.store(dirty_sink, Ordering::SeqCst);
     ACTIVE_PT_PML4_KVA.store(rt.pt.pml4_kva(), Ordering::SeqCst);
+    OWNED_VEC_PTR.store(rt.pt.owned_vec_ptr(), Ordering::SeqCst);
     HANDLERS[14].store(jit_pf_handler as *const () as u64, Ordering::Release);
 
     let user_stack_top = STACK_VA_M + rt.stack_buf.size();
@@ -750,8 +870,12 @@ pub unsafe fn enter_frame(
     MAT_STATE_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
     MAT_STATE_LEN.store(0, Ordering::SeqCst);
     MAT_MEM_TOP.store(0, Ordering::SeqCst);
+    MAT_CODE_TOP.store(0, Ordering::SeqCst);
+    MAT_CODE_STATE_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
+    MAT_CODE_STATE_LEN.store(0, Ordering::SeqCst);
     DIRTY_PAGE_SINK.store(core::ptr::null_mut(), Ordering::SeqCst);
     ACTIVE_PT_PML4_KVA.store(0, Ordering::SeqCst);
+    OWNED_VEC_PTR.store(0, Ordering::SeqCst);
 
     // Suppress unused-field warning: `pt` is referenced indirectly via
     // `new_cr3` (the PML4's PA) and kept alive by owning the page tables.

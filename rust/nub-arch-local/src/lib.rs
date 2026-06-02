@@ -141,6 +141,11 @@ pub fn run_instance(
         .code_mapping()
         .expect("image has no executable code mapping");
 
+    // Category #3: guest PIC data loads of the program's own bytecode
+    // page-in the touched code page(s) on first read (read-only forever),
+    // identical to the recompiler's lazy code materialization.
+    mem.set_code_region(code_base, code_bytes.len() as u32);
+
     // Category #2: the load/store base latency (mem_cycles) is scaled
     // ×1..4 by the Instance's declared memory footprint. `mem_size`
     // (high-water-mark over the Image's memory_mappings) is the same

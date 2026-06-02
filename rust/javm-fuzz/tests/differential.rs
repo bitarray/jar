@@ -184,3 +184,86 @@ fn mem_straddle_out_of_region_faults() {
     body.push(encode::ld(10, 8, 0)); // straddles into the unmapped page
     assert_agree(&mem_prog(body, 4096), "straddle out of region (D-3)");
 }
+
+// ---- Category-#3 CODE region (PinnedCapRo, lazily materialized) -----------
+//
+// The guest can read (but not write) its own bytecode via PIC (`auipc`+load).
+// Under zero-setup demand paging the code region is materialized read-only on
+// first touch and charges #3 page-in identically on both engines.
+
+/// `auipc x8, 0` → x8 = code_base + pc (here pc 0, so x8 = CODE_BASE).
+const AUIPC_X8_0: u32 = (8 << 7) | 0x17;
+
+#[test]
+fn mem_code_pic_load() {
+    // PIC self-read: x8 = code_base; ld x10, 0(x8) reads the program's own
+    // first code bytes → charges code-region #3 page-in on BOTH engines,
+    // which must agree on {exit, x10, gas}.
+    let prog = Program {
+        code: vec![AUIPC_X8_0, encode::ld(10, 8, 0)],
+        init_regs: BTreeMap::new(),
+        init_mem: None,
+    };
+    assert_agree(&prog, "PIC code load (code #3)");
+}
+
+#[test]
+fn mem_code_pic_tail_zeros() {
+    // A PIC load past the exact code length but within the last (rounded)
+    // code page reads the zero-padded tail — both engines serve zeros and
+    // charge one page-in (the code page is already in the set). Guards the
+    // page-rounded code-region consistency between the engines.
+    let prog = Program {
+        code: vec![AUIPC_X8_0, encode::ld(10, 8, 256)], // CODE_BASE+256: tail zeros
+        init_regs: BTreeMap::new(),
+        init_mem: None,
+    };
+    assert_agree(&prog, "PIC code tail (zero-padded)");
+}
+
+#[test]
+fn mem_code_store_faults() {
+    // A store to the read-only code region faults on both engines (PinnedCapRo
+    // write), charging nothing.
+    let prog = Program {
+        code: vec![AUIPC_X8_0, encode::sd(8, 8, 0)], // sd x8, 0(x8) → write code
+        init_regs: BTreeMap::new(),
+        init_mem: None,
+    };
+    assert_agree(&prog, "store to code faults");
+}
+
+#[test]
+fn mem_code_second_page() {
+    // A PIC load landing on the SECOND code page (code > 4 KiB) exercises the
+    // code_mat per-page indexing for page index > 0 on both engines.
+    let mut body = vec![
+        AUIPC_X8_0,           // x8 = code_base
+        encode::lui(9, 1),    // x9 = 0x1000 (4096)
+        encode::add(8, 8, 9), // x8 = code_base + 4096 (second code page)
+        encode::ld(10, 8, 0), // read the second code page
+    ];
+    while body.len() * 4 < 4100 {
+        body.push(encode::addi(8, 0, 0)); // pad so a second code page exists
+    }
+    let prog = Program {
+        code: body,
+        init_regs: BTreeMap::new(),
+        init_mem: None,
+    };
+    assert_agree(&prog, "PIC load of second code page");
+}
+
+#[test]
+fn mem_code_and_data_in_one_block() {
+    // A single basic block doing BOTH a code load and a data load — proves
+    // the per-region state arrays (code vs data) don't cross-contaminate and
+    // the block reserve covers both page-ins. Both engines must agree on gas.
+    let body = vec![
+        AUIPC_X8_0,                // x8 = code_base
+        encode::ld(9, 8, 0),       // code load → page-in code page
+        encode::lui(10, 0x1_0000), // x10 = 0x1000_0000 = DATA_BASE
+        encode::ld(10, 10, 0),     // data load → page-in data page
+    ];
+    assert_agree(&mem_prog(body, 4096), "code+data load in one block");
+}

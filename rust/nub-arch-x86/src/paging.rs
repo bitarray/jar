@@ -283,6 +283,18 @@ impl PageTable {
         unsafe {
             core::ptr::copy_nonoverlapping(src_pml4, pml4_ptr.as_ptr(), 1);
         }
+        // The guest's whole low VA range (PML4 slot 0) MUST be exclusively
+        // the per-invocation guest's — the kernel lives at slot 511 after
+        // Stage-F relocation. Zero-setup demand paging depends on this: the
+        // #PF handler builds fresh frame-private intermediates under slot 0,
+        // and would corrupt kernel-shared tables if the source PML4[0] were
+        // present. Make that invariant loud.
+        // SAFETY: pml4_ptr is a valid 4 KiB table we just populated.
+        debug_assert_eq!(
+            unsafe { (*pml4_ptr.as_ptr())[0] } & flag::P,
+            0,
+            "PML4[0] must be empty (guest-exclusive) for zero-setup demand paging",
+        );
         let mut owned = Vec::with_capacity(8);
         owned.push(pml4_ptr);
         Some(Self {
@@ -313,45 +325,6 @@ impl PageTable {
             va += PAGE_SIZE as u64;
             pa += PAGE_SIZE as u64;
         }
-        Some(())
-    }
-
-    /// Map `len` bytes at `virt` as **not-present** leaf PTEs, allocating
-    /// all intermediate tables (so a later [`pt_remap_leaf`] can flip a
-    /// leaf present without re-walking missing intermediates). Used for
-    /// category-#3 lazy materialization: the data region starts
-    /// not-present so the first guest touch faults into the
-    /// materialization handler, which maps the page present and charges.
-    /// `virt` and `len` must each be 4 KiB-aligned.
-    pub fn map_not_present(&mut self, virt: u64, len: u64) -> Option<()> {
-        assert!(virt.is_multiple_of(PAGE_SIZE as u64));
-        assert!(len.is_multiple_of(PAGE_SIZE as u64));
-        let mut va = virt;
-        let end = virt + len;
-        while va < end {
-            self.map_one_not_present(va)?;
-            va += PAGE_SIZE as u64;
-        }
-        Some(())
-    }
-
-    /// Install intermediate tables for `va` and write a not-present (P=0)
-    /// leaf PTE.
-    fn map_one_not_present(&self, va: u64) -> Option<()> {
-        let idx4 = ((va >> 39) & 0x1FF) as usize;
-        let idx3 = ((va >> 30) & 0x1FF) as usize;
-        let idx2 = ((va >> 21) & 0x1FF) as usize;
-        let idx1 = ((va >> 12) & 0x1FF) as usize;
-        let inner_flags = flag::P | flag::RW | flag::US;
-        // SAFETY: self.pml4 is a valid 4 KiB-aligned table this PT owns.
-        let pml4 = unsafe { &mut *self.pml4.as_ptr() };
-        let pdpt = self.ensure_inner(&mut pml4[idx4], inner_flags)?;
-        let pdpt = unsafe { &mut *pdpt };
-        let pd = self.ensure_inner(&mut pdpt[idx3], inner_flags)?;
-        let pd = unsafe { &mut *pd };
-        let pt = self.ensure_inner(&mut pd[idx2], inner_flags)?;
-        let pt = unsafe { &mut *pt };
-        pt[idx1] = 0; // not present
         Some(())
     }
 
@@ -455,77 +428,91 @@ impl PageTable {
     pub fn pml4_kva(&self) -> u64 {
         self.pml4.as_ptr() as u64
     }
+
+    /// Raw pointer (type-erased as `u64`) to this PT's `owned` table list,
+    /// for the #PF handler to record fault-allocated intermediate tables
+    /// into via [`pt_map_leaf`] (so they are freed at `Drop`). The guest
+    /// is single-threaded (the main thread is suspended in ring 3 while
+    /// the handler runs), so there is no concurrent borrow of `owned`.
+    pub fn owned_vec_ptr(&self) -> u64 {
+        self.owned.as_ptr() as u64
+    }
 }
 
-/// Look up the physical address of the 4 KiB page covering `virt`
-/// in the page table rooted at `pml4_va`. Returns `None` if any
-/// table on the walk is non-present or marks a large-page leaf.
+/// Build the PML4→PDPT→PD→PT path for `virt` (allocating any missing
+/// intermediate tables and recording them in the `owned` list pointed at
+/// by `owned_vec`, so they are freed at the [`PageTable`]'s `Drop`), then
+/// install a **present** leaf PTE mapping `virt → phys` with `perm`.
+///
+/// This powers true zero-setup demand paging: the guest's low VA range
+/// starts with NO page-table entries, and the #PF handler calls this on
+/// the first fault to each page. It is idempotent over the path: a page
+/// whose intermediates already exist (e.g. a CoW remap of a page paged in
+/// earlier) reuses them and just rewrites the leaf. Does not invalidate
+/// the TLB; the caller must [`invlpg`]. Returns `None` if an ancestor is a
+/// large-page leaf or a table allocation fails.
 ///
 /// # Safety
-///
-/// `pml4_va` must be the kernel VA of a live 4-level page table
-/// (whose intermediate tables are reachable via [`pa_to_va`]).
-pub unsafe fn pt_lookup_leaf(pml4_va: u64, virt: u64) -> Option<u64> {
-    const PS: u64 = 1 << 7;
+/// `pml4_va` must be the kernel VA of a live 4-level page table (this
+/// `PageTable`'s); `owned_vec` must be [`PageTable::owned_vec_ptr`] of the
+/// same table. The caller must be the only writer (single-threaded guest).
+pub unsafe fn pt_map_leaf(
+    pml4_va: u64,
+    virt: u64,
+    phys: u64,
+    perm: Perm,
+    owned_vec: u64,
+) -> Option<()> {
+    let owned = owned_vec as *mut Vec<NonNull<Table>>;
     let idx4 = ((virt >> 39) & 0x1FF) as usize;
     let idx3 = ((virt >> 30) & 0x1FF) as usize;
     let idx2 = ((virt >> 21) & 0x1FF) as usize;
     let idx1 = ((virt >> 12) & 0x1FF) as usize;
+    let inner_flags = flag::P | flag::RW | flag::US;
 
-    // SAFETY: pml4_va owned by caller, page-aligned, kernel-readable.
-    let pml4 = unsafe { &*(pml4_va as *const Table) };
-    if pml4[idx4] & flag::P == 0 {
-        return None;
-    }
-    let pdpt = unsafe { &*(pa_to_va(pml4[idx4] & PA_MASK)? as *const Table) };
-    if pdpt[idx3] & flag::P == 0 || pdpt[idx3] & PS != 0 {
-        return None;
-    }
-    let pd = unsafe { &*(pa_to_va(pdpt[idx3] & PA_MASK)? as *const Table) };
-    if pd[idx2] & flag::P == 0 || pd[idx2] & PS != 0 {
-        return None;
-    }
-    let pt = unsafe { &*(pa_to_va(pd[idx2] & PA_MASK)? as *const Table) };
-    if pt[idx1] & flag::P == 0 {
-        return None;
-    }
-    Some(pt[idx1] & PA_MASK)
-}
-
-/// Overwrite an existing leaf PTE in the page table rooted at
-/// `pml4_va` so the 4 KiB page covering `virt` now maps to `phys`
-/// with `perm`. Returns `None` if any intermediate is missing —
-/// i.e., the page wasn't previously mapped. Does not invalidate the
-/// TLB; the caller must [`invlpg`].
-///
-/// # Safety
-///
-/// Same as [`pt_lookup_leaf`], plus the caller must hold the only
-/// reference to the table during the rewrite (we currently have a
-/// single-threaded guest).
-pub unsafe fn pt_remap_leaf(pml4_va: u64, virt: u64, phys: u64, perm: Perm) -> Option<()> {
-    const PS: u64 = 1 << 7;
-    let idx4 = ((virt >> 39) & 0x1FF) as usize;
-    let idx3 = ((virt >> 30) & 0x1FF) as usize;
-    let idx2 = ((virt >> 21) & 0x1FF) as usize;
-    let idx1 = ((virt >> 12) & 0x1FF) as usize;
-
-    // SAFETY: as above.
+    // SAFETY: pml4_va is a live 4 KiB-aligned table owned by the caller.
     let pml4 = unsafe { &mut *(pml4_va as *mut Table) };
-    if pml4[idx4] & flag::P == 0 {
-        return None;
-    }
-    let pdpt = unsafe { &mut *(pa_to_va(pml4[idx4] & PA_MASK)? as *mut Table) };
-    if pdpt[idx3] & flag::P == 0 || pdpt[idx3] & PS != 0 {
-        return None;
-    }
-    let pd = unsafe { &mut *(pa_to_va(pdpt[idx3] & PA_MASK)? as *mut Table) };
-    if pd[idx2] & flag::P == 0 || pd[idx2] & PS != 0 {
-        return None;
-    }
-    let pt = unsafe { &mut *(pa_to_va(pd[idx2] & PA_MASK)? as *mut Table) };
+    let pdpt = unsafe { ensure_inner_recorded(&mut pml4[idx4], inner_flags, owned)? };
+    let pdpt = unsafe { &mut *pdpt };
+    let pd = unsafe { ensure_inner_recorded(&mut pdpt[idx3], inner_flags, owned)? };
+    let pd = unsafe { &mut *pd };
+    let pt = unsafe { ensure_inner_recorded(&mut pd[idx2], inner_flags, owned)? };
+    let pt = unsafe { &mut *pt };
     pt[idx1] = (phys & PA_MASK) | perm.pte_flags();
     Some(())
+}
+
+/// Like [`PageTable::ensure_inner`] but records a freshly-allocated table
+/// into the raw `owned` Vec pointer (for the #PF handler, which has no
+/// `&PageTable`). Returns the inner table's KVA, or `None` on large-page
+/// ancestor / allocation failure.
+///
+/// # Safety
+/// `owned` must point at a live `Vec<NonNull<Table>>` (the PageTable's
+/// `owned`); single-threaded access.
+unsafe fn ensure_inner_recorded(
+    entry: &mut u64,
+    inner_flags: u64,
+    owned: *mut Vec<NonNull<Table>>,
+) -> Option<*mut Table> {
+    const PS: u64 = 1 << 7;
+    if *entry & flag::P != 0 {
+        if *entry & PS != 0 {
+            return None; // large-page leaf — cannot descend
+        }
+        let pa = *entry & PA_MASK;
+        *entry |= inner_flags;
+        return Some(pa_to_va(pa)? as *mut Table);
+    }
+    let new_table = alloc_table()?;
+    let va = new_table.as_ptr() as u64;
+    let pa = va_to_pa(va)?;
+    // SAFETY: owned is the live PageTable.owned Vec; single writer.
+    unsafe {
+        (*owned).push(new_table);
+    }
+    *entry = (pa & PA_MASK) | inner_flags;
+    Some(new_table.as_ptr())
 }
 
 /// Flush the TLB entry for `virt` on the current CPU. No-op when the

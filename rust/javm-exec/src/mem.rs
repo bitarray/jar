@@ -190,6 +190,20 @@ pub struct CopyingMemory {
     /// by the `perm::RW` write check), so no per-page `PageKind` is kept;
     /// the recompiler tracks kinds itself for page sourcing.
     pub mat_state: Vec<u8>,
+    /// Guest VA base of the read-only CODE region (`PinnedCapRo`). Guest
+    /// data loads (PIC `auipc`+load) of the program's own bytecode page it
+    /// in on first read and charge category-#3 page-in, identical to the
+    /// recompiler. `code_top == code_base` (the default) means no code
+    /// region is declared — code reads then skip #3 (unit tests).
+    pub code_base: u32,
+    /// Exclusive top of the code region, **page-rounded**:
+    /// `code_base + round_up(code_len)`. The last code page's zero-padded
+    /// tail is readable (matching the recompiler, which maps whole pages).
+    pub code_top: u32,
+    /// Category-#3 per-page state for the code region (one byte/page over
+    /// `[code_base, code_top)`). Code is `PinnedCapRo`: a read pages it in
+    /// once (then free); a write hard-faults.
+    pub code_mat: Vec<u8>,
     /// Heap base address (for sbrk).
     pub heap_base: u32,
     /// Current heap top.
@@ -217,6 +231,9 @@ impl CopyingMemory {
             flat_mem: Vec::new(),
             perms: Vec::new(),
             mat_state: Vec::new(),
+            code_base: 0,
+            code_top: 0,
+            code_mat: Vec::new(),
             heap_base: 0,
             heap_top: 0,
             max_heap_pages: 0,
@@ -241,9 +258,40 @@ impl CopyingMemory {
             flat_mem: vec![0u8; bytes],
             perms: vec![default_perm; n_pages as usize],
             mat_state: vec![crate::mat::PageState::NotPresent.as_u8(); n_pages as usize],
+            code_base: 0,
+            code_top: 0,
+            code_mat: Vec::new(),
             heap_base: 0,
             heap_top: 0,
             max_heap_pages: 0,
+        }
+    }
+
+    /// Declare the read-only CODE region for category-#3 accounting:
+    /// `[code_base, code_base + round_up(code_len))`. Guest data loads of
+    /// the program's own bytecode (PIC) then page each touched code page in
+    /// on first read (charging `PAGE_IN`) and hard-fault on any write —
+    /// matching the recompiler, which lazily materializes code pages too.
+    /// `code_len` is the exact byte length; the region is page-rounded.
+    pub fn set_code_region(&mut self, code_base: u32, code_len: u32) {
+        let rounded = code_len.next_multiple_of(PAGE_SIZE);
+        self.code_base = code_base;
+        self.code_top = code_base.saturating_add(rounded);
+        self.code_mat =
+            vec![crate::mat::PageState::NotPresent.as_u8(); (rounded / PAGE_SIZE) as usize];
+    }
+
+    /// Index into `code_mat` for the page-aligned address `page_addr`, or
+    /// `None` if it lies outside the declared code region.
+    #[inline]
+    fn code_page_index(&self, page_addr: u32) -> Option<usize> {
+        if self.code_top > self.code_base
+            && page_addr >= self.code_base
+            && page_addr < self.code_top
+        {
+            Some(((page_addr - self.code_base) / PAGE_SIZE) as usize)
+        } else {
+            None
         }
     }
 
@@ -306,13 +354,32 @@ impl CopyingMemory {
         let set = crate::mat::access_pages(addr, width);
         let pages = set.as_slice();
 
-        // Decide code-vs-data by the base page. If it is not a declared
-        // data page, `#3` does not apply (skip without charging).
-        match self.page_index(pages[0]) {
-            Some(i) if self.perms[i] != perm::NONE => {}
-            _ => return Ok(()),
+        // Region dispatch by the base page. CODE and DATA are far apart
+        // (CODE_BASE=4 MiB, DATA_BASE=256 MiB), so a single ≤8-byte access
+        // lies wholly in one region — the base page decides which.
+        if self
+            .page_index(pages[0])
+            .is_some_and(|i| self.perms[i] != perm::NONE)
+        {
+            self.touch_data(pages, is_write, gas)
+        } else if self.code_page_index(pages[0]).is_some() {
+            self.touch_code(pages, is_write, gas)
+        } else {
+            // Null guard / inter-region gap / fully-unmapped: `#3` does not
+            // apply — the caller's normal load/store path resolves it (the
+            // code fallback or a `PageFault`).
+            Ok(())
         }
+    }
 
+    /// `#3` for a DATA-region access (ephemeral / CoW). Accessibility-all
+    /// then materialize-all; see [`touch`](CopyingMemory::touch).
+    fn touch_data(
+        &mut self,
+        pages: &[u32],
+        is_write: bool,
+        gas: &mut GasCounter,
+    ) -> Result<(), TouchFault> {
         // Accessibility-all (before any charge): every page must be a
         // declared data page; a write additionally needs it writable.
         for &p in pages {
@@ -340,6 +407,42 @@ impl CopyingMemory {
                     .expect("non-pinned access pre-checked accessible");
             total += charge;
             self.mat_state[i] = next.as_u8();
+        }
+        gas.charge(total)
+            .expect("#3 materialization charge within block reserve");
+        Ok(())
+    }
+
+    /// `#3` for a CODE-region access: `PinnedCapRo` — a read pages each
+    /// touched code page in once (charging `PAGE_IN`), a write hard-faults,
+    /// and a read straddling out of the region faults charging nothing
+    /// (all-or-nothing). Mirrors the recompiler's lazy code materialization.
+    fn touch_code(
+        &mut self,
+        pages: &[u32],
+        is_write: bool,
+        gas: &mut GasCounter,
+    ) -> Result<(), TouchFault> {
+        // Code is read-only: any write hard-faults (charging nothing).
+        if is_write {
+            return Err(TouchFault);
+        }
+        // Accessibility-all: every page in the set must be a code page.
+        for &p in pages {
+            if self.code_page_index(p).is_none() {
+                return Err(TouchFault);
+            }
+        }
+        // Materialize-all: page-in each first-read code page.
+        let mut total: u64 = 0;
+        for &p in pages {
+            let i = self.code_page_index(p).expect("checked accessible above");
+            let state = crate::mat::PageState::from_u8(self.code_mat[i]);
+            let (charge, next) =
+                crate::mat::charge_for(state, crate::mat::PageKind::PinnedCapRo, false)
+                    .expect("code read never hard-faults");
+            total += charge;
+            self.code_mat[i] = next.as_u8();
         }
         gas.charge(total)
             .expect("#3 materialization charge within block reserve");

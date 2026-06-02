@@ -241,3 +241,50 @@ fn unmapped_base_page_is_skipped_not_charged() {
     assert_eq!(m.touch_read(8 * PAGE_SIZE, 4, &mut g), Ok(()));
     assert_eq!(g.remaining(), 10_000);
 }
+
+// ---- CODE region (PinnedCapRo) #3 -----------------------------------------
+
+#[test]
+fn code_first_read_pages_in_then_free() {
+    // A read of the declared code region pages it in once (PAGE_IN), then is
+    // free; a write hard-faults (code is read-only), charging nothing.
+    let mut m = Mem::new();
+    m.set_code_region(0x40_0000, PAGE_SIZE); // one code page
+    assert_eq!(
+        spent(10_000, |g| m.touch_read(0x40_0000, 8, g).unwrap()),
+        PAGE_IN_COST
+    );
+    assert_eq!(spent(10_000, |g| m.touch_read(0x40_0040, 8, g).unwrap()), 0);
+    // A write to code hard-faults, charging nothing.
+    let mut g = GasCounter::new(10_000);
+    assert_eq!(m.touch_write(0x40_0000, 4, &mut g), Err(TouchFault));
+    assert_eq!(g.remaining(), 10_000);
+}
+
+#[test]
+fn code_data_adjacency_straddle_faults() {
+    // The consensus-critical boundary: a code region whose top abuts the
+    // data region (`code_top == data_base`, reachable with a maximal 252 MiB
+    // code image). An 8-byte read straddling the last code page into the
+    // first data page must fault WHOLESALE — charging nothing — on both
+    // engines (base-page region dispatch is all-or-nothing), not materialize
+    // across the boundary. Here code = [0x1000, 0x2000) abuts data at 0x2000.
+    let mut m = Mem::new();
+    m.base = 0x2000;
+    m.map_region(0x2000, PAGE_SIZE as u64, Access::ReadWrite, None)
+        .unwrap();
+    m.set_code_region(0x1000, PAGE_SIZE); // code_top == 0x2000 == data base
+    let mut g = GasCounter::new(10_000);
+    // 8-byte read at 0x1FFC straddles code page 0x1000 → data page 0x2000.
+    assert_eq!(m.touch_read(0x2000 - 4, 8, &mut g), Err(TouchFault));
+    assert_eq!(g.remaining(), 10_000); // all-or-nothing: charged nothing
+    // Sanity: a read wholly inside each region still charges its own page-in.
+    assert_eq!(
+        spent(10_000, |g| m.touch_read(0x1000, 8, g).unwrap()),
+        PAGE_IN_COST
+    );
+    assert_eq!(
+        spent(10_000, |g| m.touch_read(0x2000, 8, g).unwrap()),
+        PAGE_IN_COST
+    );
+}

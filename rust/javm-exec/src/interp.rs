@@ -930,11 +930,21 @@ fn compute_addr(regs: &Regs, rs1: u8, imm: i32) -> u32 {
 fn read_code(code: &[u8], code_base: u32, addr: u32, width: usize) -> Option<u64> {
     let off = addr.checked_sub(code_base)? as usize;
     let end = off.checked_add(width)?;
-    if end > code.len() {
+    // The code region is page-rounded with a zero-padded tail — the
+    // recompiler maps whole pages, so it serves the last page's tail bytes
+    // as zero. Match that: serve real code bytes within `[0, code.len())`
+    // and zeros up to the page-rounded end; reject only accesses past it.
+    let rounded = (code.len() as u32).next_multiple_of(crate::mem::PAGE_SIZE) as usize;
+    if end > rounded {
         return None;
     }
     let mut buf = [0u8; 8];
-    buf[..width].copy_from_slice(&code[off..end]);
+    for (k, b) in buf.iter_mut().enumerate().take(width) {
+        let o = off + k;
+        if o < code.len() {
+            *b = code[o];
+        }
+    }
     Some(u64::from_le_bytes(buf))
 }
 
