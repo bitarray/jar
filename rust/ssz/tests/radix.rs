@@ -7,7 +7,10 @@
 
 use proptest::prelude::*;
 use sha2::Sha256;
-use ssz::radix::{BRANCH_TAG, EMPTY, LEAF_TAG, bit, branch_hash, leaf_hash};
+use ssz::radix::{
+    BRANCH_TAG, EMPTY, LEAF_TAG, RadixProof, RadixTerminal, RadixVerdict, bit, branch_hash,
+    leaf_hash, verify,
+};
 use ssz::{HashTreeRoot, MissingOr, RadixMap};
 
 type V = [u8; 32];
@@ -57,7 +60,10 @@ fn single_entry_is_a_leaf() {
     let mut m: RadixMap<V, 8> = RadixMap::new();
     m.insert(key, mat(val));
     // A lone key is a single leaf (shallow), regardless of key bits.
-    assert_eq!(m.hash_tree_root::<Sha256>(), leaf_hash::<Sha256>(&key, &val));
+    assert_eq!(
+        m.hash_tree_root::<Sha256>(),
+        leaf_hash::<Sha256>(&key, &val)
+    );
 }
 
 #[test]
@@ -70,7 +76,10 @@ fn two_entries_diverging_at_bit_0() {
     let mut m: RadixMap<V, 8> = RadixMap::new();
     m.insert(k1, mat(v1)); // insert out of order; sorted storage normalizes
     m.insert(k0, mat(v0));
-    let expect = branch_hash::<Sha256>(&leaf_hash::<Sha256>(&k0, &v0), &leaf_hash::<Sha256>(&k1, &v1));
+    let expect = branch_hash::<Sha256>(
+        &leaf_hash::<Sha256>(&k0, &v0),
+        &leaf_hash::<Sha256>(&k1, &v1),
+    );
     assert_eq!(m.hash_tree_root::<Sha256>(), expect);
 }
 
@@ -89,12 +98,18 @@ fn two_entries_diverging_at_last_bit() {
 
     // Build the expected root bottom-up: 7 one-sided branches (left child
     // populated, right EMPTY) above a final 2-leaf branch.
-    let mut acc = branch_hash::<Sha256>(&leaf_hash::<Sha256>(&k0, &v0), &leaf_hash::<Sha256>(&k1, &v1));
+    let mut acc = branch_hash::<Sha256>(
+        &leaf_hash::<Sha256>(&k0, &v0),
+        &leaf_hash::<Sha256>(&k1, &v1),
+    );
     for _ in 0..7 {
         acc = branch_hash::<Sha256>(&acc, &EMPTY);
     }
     assert_eq!(m.hash_tree_root::<Sha256>(), acc);
-    assert_eq!(m.hash_tree_root::<Sha256>(), ref_root::<1>(&[(k0, v0), (k1, v1)], 0));
+    assert_eq!(
+        m.hash_tree_root::<Sha256>(),
+        ref_root::<1>(&[(k0, v0), (k1, v1)], 0)
+    );
 }
 
 #[test]
@@ -163,7 +178,10 @@ fn radix_root_differs_from_list_root() {
     m.insert([0u8; 8], mat([1u8; 32]));
     m.insert([1u8; 8], mat([2u8; 32]));
     let list: ssz::List<V, 1024> = ssz::List::from_slice(&[[1u8; 32], [2u8; 32]]).unwrap();
-    assert_ne!(m.hash_tree_root::<Sha256>(), list.hash_tree_root::<Sha256>());
+    assert_ne!(
+        m.hash_tree_root::<Sha256>(),
+        list.hash_tree_root::<Sha256>()
+    );
 }
 
 #[test]
@@ -185,8 +203,14 @@ fn order_independent_root() {
     for (k, v) in entries.iter().rev() {
         reverse.insert(*k, mat(*v));
     }
-    assert_eq!(forward.hash_tree_root::<Sha256>(), reverse.hash_tree_root::<Sha256>());
-    assert_eq!(forward.hash_tree_root::<Sha256>(), ref_root::<4>(&entries, 0));
+    assert_eq!(
+        forward.hash_tree_root::<Sha256>(),
+        reverse.hash_tree_root::<Sha256>()
+    );
+    assert_eq!(
+        forward.hash_tree_root::<Sha256>(),
+        ref_root::<4>(&entries, 0)
+    );
 }
 
 #[test]
@@ -223,7 +247,10 @@ fn encode_decode_roundtrip() {
     let decoded = <RadixMap<V, 8> as ssz::Decode>::from_ssz_bytes(&bytes).expect("decode");
     assert_eq!(m, decoded);
     // Hash survives the roundtrip.
-    assert_eq!(m.hash_tree_root::<Sha256>(), decoded.hash_tree_root::<Sha256>());
+    assert_eq!(
+        m.hash_tree_root::<Sha256>(),
+        decoded.hash_tree_root::<Sha256>()
+    );
 }
 
 #[test]
@@ -284,10 +311,208 @@ fn rkyv_roundtrip_and_canonicalizes() {
     let archived =
         rkyv::access::<rkyv::Archived<RadixMap<V, 8>>, rkyv::rancor::Error>(aligned.as_slice())
             .expect("rkyv access");
-    let back: RadixMap<V, 8> =
-        rkyv::deserialize::<RadixMap<V, 8>, rkyv::rancor::Error>(archived).expect("rkyv deserialize");
+    let back: RadixMap<V, 8> = rkyv::deserialize::<RadixMap<V, 8>, rkyv::rancor::Error>(archived)
+        .expect("rkyv deserialize");
     assert_eq!(m, back);
-    assert_eq!(m.hash_tree_root::<Sha256>(), back.hash_tree_root::<Sha256>());
+    assert_eq!(
+        m.hash_tree_root::<Sha256>(),
+        back.hash_tree_root::<Sha256>()
+    );
+}
+
+// --------------------------------------------------------------------------
+// Proofs
+// --------------------------------------------------------------------------
+
+/// A small KB=2 map exercising membership, Empty non-membership, and
+/// DivergingLeaf non-membership terminals.
+fn proof_fixture() -> RadixMap<V, 2> {
+    let mut m: RadixMap<V, 2> = RadixMap::new();
+    m.insert([0x00, 0x00], mat([0xA0u8; 32]));
+    m.insert([0x00, 0x01], mat([0xA1u8; 32]));
+    m.insert([0x80, 0x00], mat([0xB0u8; 32]));
+    m
+}
+
+#[test]
+fn membership_proof_verifies() {
+    let m = proof_fixture();
+    let root = m.hash_tree_root::<Sha256>();
+    for key in [[0x00u8, 0x00], [0x00, 0x01], [0x80, 0x00]] {
+        let p = m.prove::<Sha256>(&key);
+        assert!(matches!(p.terminal, RadixTerminal::Leaf { .. }));
+        assert_eq!(
+            verify::<Sha256, V, 2>(&root, &key, &p),
+            Some(RadixVerdict::Present)
+        );
+    }
+}
+
+#[test]
+fn non_membership_empty_terminal() {
+    let m = proof_fixture();
+    let root = m.hash_tree_root::<Sha256>();
+    // 0x4000: bit0=0 routes into the {0x0000,0x0001} cluster, then diverges
+    // into an EMPTY sibling.
+    let key = [0x40u8, 0x00];
+    let p = m.prove::<Sha256>(&key);
+    assert!(matches!(p.terminal, RadixTerminal::Empty));
+    assert_eq!(
+        verify::<Sha256, V, 2>(&root, &key, &p),
+        Some(RadixVerdict::Absent)
+    );
+}
+
+#[test]
+fn non_membership_diverging_leaf() {
+    let m = proof_fixture();
+    let root = m.hash_tree_root::<Sha256>();
+    // 0x8001: bit0=1 routes to the lone {0x8000} leaf — a diverging leaf.
+    let key = [0x80u8, 0x01];
+    let p = m.prove::<Sha256>(&key);
+    assert!(matches!(p.terminal, RadixTerminal::DivergingLeaf { .. }));
+    assert_eq!(
+        verify::<Sha256, V, 2>(&root, &key, &p),
+        Some(RadixVerdict::Absent)
+    );
+}
+
+#[test]
+fn non_membership_against_empty_and_single_maps() {
+    // Empty map: any key is absent (Empty terminal at depth 0).
+    let empty: RadixMap<V, 2> = RadixMap::new();
+    let er = empty.hash_tree_root::<Sha256>();
+    let p = empty.prove::<Sha256>(&[0x12, 0x34]);
+    assert!(matches!(p.terminal, RadixTerminal::Empty));
+    assert_eq!(
+        verify::<Sha256, V, 2>(&er, &[0x12, 0x34], &p),
+        Some(RadixVerdict::Absent)
+    );
+
+    // Single-key map: a different key is a DivergingLeaf at depth 0.
+    let mut single: RadixMap<V, 2> = RadixMap::new();
+    single.insert([0xAA, 0xBB], mat([7u8; 32]));
+    let sr = single.hash_tree_root::<Sha256>();
+    let p = single.prove::<Sha256>(&[0xAA, 0xBC]);
+    assert!(matches!(p.terminal, RadixTerminal::DivergingLeaf { .. }));
+    assert_eq!(
+        verify::<Sha256, V, 2>(&sr, &[0xAA, 0xBC], &p),
+        Some(RadixVerdict::Absent)
+    );
+    // ...and membership of the present key.
+    let pm = single.prove::<Sha256>(&[0xAA, 0xBB]);
+    assert_eq!(
+        verify::<Sha256, V, 2>(&sr, &[0xAA, 0xBB], &pm),
+        Some(RadixVerdict::Present)
+    );
+}
+
+#[test]
+fn verify_rejects_tampered_and_malformed_proofs() {
+    let m = proof_fixture();
+    let root = m.hash_tree_root::<Sha256>();
+    let key = [0x00u8, 0x00];
+    let good = m.prove::<Sha256>(&key);
+
+    // Tamper a sibling hash.
+    if !good.siblings.is_empty() {
+        let mut bad = good.clone();
+        bad.siblings[0].1[0] ^= 0xFF;
+        assert_eq!(verify::<Sha256, V, 2>(&root, &key, &bad), None);
+    }
+
+    // term_depth beyond KEY_BITS.
+    let mut bad = good.clone();
+    bad.term_depth = 17;
+    assert_eq!(verify::<Sha256, V, 2>(&root, &key, &bad), None);
+
+    // Sibling level >= term_depth.
+    let mut bad = good.clone();
+    bad.siblings.push((bad.term_depth, [9u8; 32]));
+    assert_eq!(verify::<Sha256, V, 2>(&root, &key, &bad), None);
+
+    // Wrong root.
+    let mut wrong = root;
+    wrong[0] ^= 0xFF;
+    assert_eq!(verify::<Sha256, V, 2>(&wrong, &key, &good), None);
+
+    // DivergingLeaf whose other_key == queried key is rejected.
+    let bad = RadixProof::<V, 2> {
+        term_depth: 0,
+        siblings: Vec::new(),
+        terminal: RadixTerminal::DivergingLeaf {
+            other_key: key,
+            other_value_root: [0u8; 32],
+        },
+    };
+    assert_eq!(verify::<Sha256, V, 2>(&root, &key, &bad), None);
+}
+
+#[test]
+fn verify_rejects_binding_break_forgery() {
+    // The Attack-2 forgery, at the proof layer: forge a membership proof for
+    // key = H_L (a leaf hash) claiming value Missing(H_R), against the honest
+    // two-key map root = branch(H_L, H_R). The tag mismatch must reject it.
+    let k0 = [0x00u8; 32];
+    let mut k1 = [0x00u8; 32];
+    k1[0] = 0x80;
+    let v0 = [0x11u8; 32];
+    let v1 = [0x22u8; 32];
+    let mut honest: RadixMap<V, 32> = RadixMap::new();
+    honest.insert(k0, mat(v0));
+    honest.insert(k1, mat(v1));
+    let root = honest.hash_tree_root::<Sha256>();
+
+    let h_l = leaf_hash::<Sha256>(&k0, &v0);
+    let h_r = leaf_hash::<Sha256>(&k1, &v1);
+    let forged = RadixProof::<V, 32> {
+        term_depth: 0,
+        siblings: Vec::new(),
+        terminal: RadixTerminal::Leaf {
+            value: MissingOr::Missing(h_r),
+        },
+    };
+    // verify recomputes leaf_hash(H_L, H_R) = D(0x00||H_L||H_R) != root.
+    assert_eq!(verify::<Sha256, V, 32>(&root, &h_l, &forged), None);
+}
+
+proptest! {
+    /// For a random map and random queries, prove+verify always returns the
+    /// correct verdict (Present iff the key is in the map), and a present
+    /// key's proof does not verify against a different (absent) key.
+    #[test]
+    fn proofs_sound_and_complete(
+        raw in proptest::collection::vec(
+            (proptest::array::uniform2(any::<u8>()), proptest::array::uniform32(any::<u8>())),
+            1..40usize,
+        ),
+        queries in proptest::collection::vec(proptest::array::uniform2(any::<u8>()), 1..20usize),
+    ) {
+        let mut m: RadixMap<V, 2> = RadixMap::new();
+        for (k, v) in &raw {
+            m.insert(*k, mat(*v));
+        }
+        let root = m.hash_tree_root::<Sha256>();
+
+        for q in &queries {
+            let present = m.get(q).is_some();
+            let p = m.prove::<Sha256>(q);
+            let want = if present { RadixVerdict::Present } else { RadixVerdict::Absent };
+            prop_assert_eq!(verify::<Sha256, V, 2>(&root, q, &p), Some(want));
+        }
+
+        // A member's proof must not verify for any different key.
+        let member_key = raw[0].0;
+        let mp = m.prove::<Sha256>(&member_key);
+        for q in &queries {
+            if q.as_slice() != member_key.as_slice() {
+                prop_assert_ne!(
+                    verify::<Sha256, V, 2>(&root, q, &mp),
+                    Some(RadixVerdict::Present)
+                );
+            }
+        }
+    }
 }
 
 proptest! {

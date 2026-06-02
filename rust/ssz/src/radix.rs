@@ -169,10 +169,7 @@ pub fn branch_hash<D: Digest<OutputSize = U32>>(left: &[u8; 32], right: &[u8; 32
 /// Compute the radix root of the (sorted, distinct-key) entry slice `s`,
 /// whose keys all share the first `depth` bits. Recursion depth is bounded
 /// by `KEY_BITS = 8 * KEY_BYTES`.
-fn radix_node<D, V, const KEY_BYTES: usize>(
-    s: &[Entry<V, KEY_BYTES>],
-    depth: usize,
-) -> [u8; 32]
+fn radix_node<D, V, const KEY_BYTES: usize>(s: &[Entry<V, KEY_BYTES>], depth: usize) -> [u8; 32]
 where
     D: Digest<OutputSize = U32>,
     V: HashTreeRoot,
@@ -240,7 +237,10 @@ impl<V, const KEY_BYTES: usize> RadixMap<V, KEY_BYTES> {
 
     /// Look up an entry by key. O(log n).
     pub fn get(&self, key: &[u8; KEY_BYTES]) -> Option<&MissingOr<V>> {
-        match self.entries.binary_search_by(|(k, _)| k.as_slice().cmp(key.as_slice())) {
+        match self
+            .entries
+            .binary_search_by(|(k, _)| k.as_slice().cmp(key.as_slice()))
+        {
             Ok(pos) => Some(&self.entries[pos].1),
             Err(_) => None,
         }
@@ -326,6 +326,200 @@ impl<V: HashTreeRoot, const KEY_BYTES: usize> HashTreeRoot for RadixMap<V, KEY_B
     fn hash_tree_root<D: Digest<OutputSize = U32>>(&self) -> [u8; 32] {
         radix_node::<D, V, KEY_BYTES>(&self.entries, 0)
     }
+}
+
+// --------------------------------------------------------------------------
+// Compact membership / non-membership proofs.
+//
+// A proof is for a single queried key `q`. The verifier folds `q`'s path
+// from the terminal up to the root using the (RLE-compressed) co-path
+// siblings; EMPTY siblings are omitted and spliced back as the public
+// constant. Both membership and non-membership are supported and complete:
+// every absent key reaches either an EMPTY terminal or a diverging leaf at a
+// well-defined depth (no unary-skip gap). Proofs are NOT unique — for some
+// absent keys both an EMPTY and a diverging-leaf terminal can be produced —
+// but every accepted proof is sound under collision resistance.
+// --------------------------------------------------------------------------
+
+/// The node `q`'s walk terminates on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RadixTerminal<V, const KEY_BYTES: usize> {
+    /// Membership: a leaf whose key is the queried key, carrying its value.
+    Leaf { value: MissingOr<V> },
+    /// Non-membership: `q`'s path reaches an empty subtree.
+    Empty,
+    /// Non-membership: `q`'s path reaches a leaf for a *different* key that
+    /// shares `q`'s consumed prefix.
+    DivergingLeaf {
+        other_key: [u8; KEY_BYTES],
+        other_value_root: [u8; 32],
+    },
+}
+
+/// A compact proof of (non-)membership of a single key in a [`RadixMap`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RadixProof<V, const KEY_BYTES: usize> {
+    /// Depth of the terminal node = number of branch levels on `q`'s path.
+    pub term_depth: u32,
+    /// Non-empty co-path siblings, `(level, hash)`, strictly ascending by
+    /// `level`, all `< term_depth`. Absent levels are the EMPTY constant.
+    pub siblings: Vec<(u32, [u8; 32])>,
+    /// The node `q`'s walk terminates on.
+    pub terminal: RadixTerminal<V, KEY_BYTES>,
+}
+
+/// Outcome of a verified proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadixVerdict {
+    /// The queried key is present (its value is in the proof's terminal).
+    Present,
+    /// The queried key is absent.
+    Absent,
+}
+
+/// Count of leading equal bits (MSB-first) shared by `a` and `b`.
+fn shared_prefix_bits(a: &[u8], b: &[u8]) -> usize {
+    let mut n = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let d = x ^ y;
+        if d == 0 {
+            n += 8;
+        } else {
+            n += d.leading_zeros() as usize;
+            break;
+        }
+    }
+    n
+}
+
+impl<V: HashTreeRoot + Clone, const KEY_BYTES: usize> RadixMap<V, KEY_BYTES> {
+    /// Produce a compact (non-)membership proof for `key`.
+    pub fn prove<D: Digest<OutputSize = U32>>(
+        &self,
+        key: &[u8; KEY_BYTES],
+    ) -> RadixProof<V, KEY_BYTES> {
+        let mut siblings = Vec::new();
+        let (terminal, term_depth) =
+            prove_walk::<D, V, KEY_BYTES>(&self.entries, key, 0, &mut siblings);
+        RadixProof {
+            term_depth: term_depth as u32,
+            siblings,
+            terminal,
+        }
+    }
+}
+
+/// Walk `q`'s path through the (sorted) entry slice, collecting non-empty
+/// co-path siblings; returns the terminal and its depth.
+fn prove_walk<D, V, const KEY_BYTES: usize>(
+    s: &[Entry<V, KEY_BYTES>],
+    q: &[u8; KEY_BYTES],
+    depth: usize,
+    siblings: &mut Vec<(u32, [u8; 32])>,
+) -> (RadixTerminal<V, KEY_BYTES>, usize)
+where
+    D: Digest<OutputSize = U32>,
+    V: HashTreeRoot + Clone,
+{
+    if s.is_empty() {
+        return (RadixTerminal::Empty, depth);
+    }
+    if s.len() == 1 || depth >= KEY_BYTES * 8 {
+        let (k, v) = &s[0];
+        return if k.as_slice() == q.as_slice() {
+            (RadixTerminal::Leaf { value: v.clone() }, depth)
+        } else {
+            (
+                RadixTerminal::DivergingLeaf {
+                    other_key: *k,
+                    other_value_root: v.hash_tree_root::<D>(),
+                },
+                depth,
+            )
+        };
+    }
+    let mid = s.partition_point(|(k, _)| bit(k, depth) == 0);
+    let (left, right) = s.split_at(mid);
+    let (chosen, sibling_slice) = if bit(q, depth) == 0 {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    let sib_root = radix_node::<D, V, KEY_BYTES>(sibling_slice, depth + 1);
+    if sib_root != EMPTY {
+        siblings.push((depth as u32, sib_root));
+    }
+    prove_walk::<D, V, KEY_BYTES>(chosen, q, depth + 1, siblings)
+}
+
+/// Verify a [`RadixProof`] for `key` against `root`. Returns the verdict, or
+/// `None` if the proof is malformed or does not reconstruct `root`.
+///
+/// Hardening (all enforced before accepting): `term_depth ≤ KEY_BITS`;
+/// sibling levels strictly ascending, distinct, and all `< term_depth`; a
+/// `DivergingLeaf` must carry `other_key ≠ key` sharing `key`'s
+/// `term_depth`-bit prefix. The terminal depth is soft-authenticated by the
+/// fold (a wrong depth cannot reconstruct `root` without a collision).
+pub fn verify<D: Digest<OutputSize = U32>, V: HashTreeRoot, const KEY_BYTES: usize>(
+    root: &[u8; 32],
+    key: &[u8; KEY_BYTES],
+    proof: &RadixProof<V, KEY_BYTES>,
+) -> Option<RadixVerdict> {
+    let td = proof.term_depth as usize;
+    if td > KEY_BYTES * 8 {
+        return None;
+    }
+    // Sibling levels: strictly ascending, distinct, all < term_depth.
+    let mut prev: Option<u32> = None;
+    for (lvl, _) in &proof.siblings {
+        if (*lvl as usize) >= td {
+            return None;
+        }
+        if let Some(p) = prev
+            && *lvl <= p
+        {
+            return None;
+        }
+        prev = Some(*lvl);
+    }
+    // Terminal node hash + verdict.
+    let (mut cur, verdict) = match &proof.terminal {
+        RadixTerminal::Leaf { value } => (
+            leaf_hash::<D>(key, &value.hash_tree_root::<D>()),
+            RadixVerdict::Present,
+        ),
+        RadixTerminal::Empty => (EMPTY, RadixVerdict::Absent),
+        RadixTerminal::DivergingLeaf {
+            other_key,
+            other_value_root,
+        } => {
+            if other_key.as_slice() == key.as_slice() {
+                return None;
+            }
+            if shared_prefix_bits(other_key, key) < td {
+                return None;
+            }
+            (
+                leaf_hash::<D>(other_key, other_value_root),
+                RadixVerdict::Absent,
+            )
+        }
+    };
+    // Fold leaf-ward → root-ward, splicing EMPTY for absent sibling levels.
+    for level in (0..td).rev() {
+        let sib = proof
+            .siblings
+            .iter()
+            .find(|(l, _)| *l as usize == level)
+            .map(|(_, h)| *h)
+            .unwrap_or(EMPTY);
+        cur = if bit(key, level) == 0 {
+            branch_hash::<D>(&cur, &sib)
+        } else {
+            branch_hash::<D>(&sib, &cur)
+        };
+    }
+    if &cur == root { Some(verdict) } else { None }
 }
 
 // --------------------------------------------------------------------------
