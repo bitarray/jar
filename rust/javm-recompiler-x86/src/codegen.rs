@@ -148,6 +148,18 @@ pub(crate) enum RegDef {
     ScaledAdd { base: usize, idx: usize, shift: u8 },
 }
 
+/// In-flight per-block gas-gate patch state. The block's `cmp r15,
+/// cost+reserve` gate and `sub r15, cost` charge are emitted with
+/// placeholder imm32s at the block start; their offsets are stashed here
+/// and patched once the block's cost + #3 reserve are known (at the next
+/// block start, or the final flush).
+struct PendingGas {
+    stub_label: Label,
+    block_pc: u32,
+    cmp_offset: usize,
+    sub_offset: usize,
+}
+
 /// PVM-to-x86-64 compiler.
 pub struct Compiler {
     pub asm: Assembler,
@@ -191,6 +203,13 @@ pub struct Compiler {
     /// `Inst`); `bind_rv_gas_block_start_streaming` flushes it at
     /// block boundaries.
     pub(crate) gas_sim: GasSimulator,
+    /// Accumulated worst-case category-#3 reserve for the block being
+    /// streamed (sum of `gas_cost::rv_kind_reserve` over its loads /
+    /// stores). Reset at each gas-block start; folded into the block's
+    /// `cmp r15, cost+reserve` gate. Mirrors the interpreter's
+    /// `predecode.block_reserves`, accumulated at the same per-instruction
+    /// feed points so the two engines gate identically.
+    pub(crate) gas_reserve_accum: u32,
     /// When set, [`feed_gas_rv`](Compiler::feed_gas_rv) does **not** feed the
     /// real `gas_sim`. Used by `compile_rv_spilled`: an x3/x4 instruction is
     /// re-dispatched through the fast path with rewritten (donor) registers,
@@ -271,6 +290,7 @@ impl Compiler {
             trap_entries: Vec::with_capacity(2048),
             mem_cycles,
             gas_sim: GasSimulator::new(),
+            gas_reserve_accum: 0,
             suppress_gas: false,
             code_base,
             code_len: code_len as u32,
@@ -301,6 +321,12 @@ impl Compiler {
                 self.mem_cycles,
             );
         }
+        // Accumulate the per-instruction #3 reserve at the same point we
+        // feed the real gas sim, so the block's `cost+reserve` gate
+        // matches the interpreter's `block_reserves` bit-for-bit.
+        self.gas_reserve_accum = self
+            .gas_reserve_accum
+            .saturating_add(javm_exec::gas_cost::rv_kind_reserve(kind));
         javm_exec::gas_cost::rv_feed_gas_kind(
             kind,
             rv_slot_or_ff(rs1),
@@ -728,6 +754,18 @@ const OP_BRANCH: u32 = 0b11_000;
 const OP_JAL: u32 = 0b11_011;
 const OP_JALR: u32 = 0b11_001;
 const OP_CUSTOM_0: u32 = 0b00_010;
+
+/// True if `w` is a custom-0 `ecall.jar` (f3=001) or `ecalli` (f3=010) —
+/// the two instructions that form their own gas block (charged
+/// dynamically at dispatch, no static preamble). Custom-0 is always
+/// 4-byte. Mirrors `predecode::is_ecall_block` so the recompiler splits
+/// blocks identically to the interpreter.
+#[inline]
+fn is_custom0_ecall(w: u32) -> bool {
+    let opcode5 = (w >> 2) & 0x1F;
+    let f3 = (w >> 12) & 0x7;
+    opcode5 == OP_CUSTOM_0 && (f3 == 0b001 || f3 == 0b010)
+}
 
 // Sign-extended immediates straight off a 4-byte RV word. Mirrors the
 // canonical encoders in `javm_exec::instruction`.
@@ -1193,7 +1231,7 @@ impl Compiler {
 
         self.emit_prologue();
 
-        let mut pending_gas: Option<(Label, u32, usize)> = None;
+        let mut pending_gas: Option<PendingGas> = None;
         let mut next_is_gas_start = true;
         let mut pc: usize = 0;
 
@@ -1216,8 +1254,25 @@ impl Compiler {
 
             let inst_pc = pc as u32;
 
+            // `ecall.jar` / `ecalli` are *forced* gas-block starts — each
+            // is its own singleton block, charged dynamically by the
+            // kernel at dispatch (no static preamble). Detect it from the
+            // raw 4-byte word (custom-0 is never compressed) BEFORE the
+            // bind so the recompiler splits identically to predecode, even
+            // mid-straight-line (`addi; ecall`).
+            let ecall_block = is_4byte
+                && is_custom0_ecall(u32::from_le_bytes([
+                    code[pc],
+                    code[pc + 1],
+                    code[pc + 2],
+                    code[pc + 3],
+                ]));
+            if ecall_block {
+                next_is_gas_start = true;
+            }
+
             if next_is_gas_start {
-                self.bind_rv_gas_block_start_streaming(inst_pc, &mut pending_gas);
+                self.bind_rv_gas_block_start_streaming(inst_pc, ecall_block, &mut pending_gas);
                 next_is_gas_start = false;
             }
 
@@ -1247,12 +1302,8 @@ impl Compiler {
             pc += base_len + extra;
         }
 
-        // Finalize the last gas block — patch its cost in.
-        if let Some((stub_label, block_pc, patch_offset)) = pending_gas.take() {
-            let cost = self.gas_sim.flush_and_get_cost();
-            self.asm.patch_i32(patch_offset, cost as i32);
-            self.oog_stubs.push((stub_label, block_pc, cost));
-        }
+        // Finalize the last gas block — patch its gate + charge in.
+        self.flush_pending_gas(&mut pending_gas);
 
         // Resolve deferred forward branches now that valid_pc is fully
         // populated. For each forward branch recorded with target > pc
@@ -1318,7 +1369,8 @@ impl Compiler {
     fn bind_rv_gas_block_start_streaming(
         &mut self,
         pc: u32,
-        pending: &mut Option<(Label, u32, usize)>,
+        is_ecall: bool,
+        pending: &mut Option<PendingGas>,
     ) {
         let label = Label(self.label_base + pc);
         self.asm.bind_label(label);
@@ -1339,18 +1391,52 @@ impl Compiler {
         self.invalidate_all_regs();
         self.last_add_cf = None;
 
-        if let Some((stub_label, block_pc, patch_offset)) = pending.take() {
-            let cost = self.gas_sim.flush_and_get_cost();
-            self.asm.patch_i32(patch_offset, cost as i32);
-            self.oog_stubs.push((stub_label, block_pc, cost));
-        }
+        self.flush_pending_gas(pending);
         self.gas_sim.reset();
+        self.gas_reserve_accum = 0;
 
+        // ecall/ecalli block: emit NO static gate (cost == 0). It is
+        // charged dynamically by the kernel at dispatch, and an OOG there
+        // re-attempts at the ecall's own pc. `pending` stays `None`, so
+        // there is no imm to patch and no in-code OOG stub for this block.
+        // (The ecall's own gas feed below is discarded at the next reset.)
+        if is_ecall {
+            return;
+        }
+
+        // Check-before-charge gate: `cmp r15, cost+reserve; jl stub; sub
+        // r15, cost`. The `cmp` does NOT mutate gas, so on out-of-gas
+        // (gas < cost+reserve) the block is not entered and gas is
+        // unchanged — never negative, and the un-entered block charges
+        // nothing. Both imm32s are patched once the block's cost and
+        // reserve are known (at the next block start / final flush).
+        // `Cc::L` (signed) is sound because gas (R15) is provably ≥ 0.
         let stub_label = self.asm.new_label();
+        self.asm.cmp_r64_imm32_patchable(GAS, 0);
+        let cmp_offset = self.asm.offset() - 4;
+        self.asm.jcc_label(Cc::L, stub_label);
         self.asm.sub_r64_imm32_patchable(GAS, 0);
-        let patch_offset = self.asm.offset() - 4;
-        self.asm.jcc_label(Cc::S, stub_label);
-        *pending = Some((stub_label, pc, patch_offset));
+        let sub_offset = self.asm.offset() - 4;
+        *pending = Some(PendingGas {
+            stub_label,
+            block_pc: pc,
+            cmp_offset,
+            sub_offset,
+        });
+    }
+
+    /// Patch the pending block's gate (`cmp` ← cost+reserve) and charge
+    /// (`sub` ← cost) immediates now that its cost and #3 reserve are
+    /// known, and record its per-block OOG stub. Shared by the
+    /// per-block-start flush and the final flush.
+    fn flush_pending_gas(&mut self, pending: &mut Option<PendingGas>) {
+        if let Some(p) = pending.take() {
+            let cost = self.gas_sim.flush_and_get_cost();
+            let gate = cost.saturating_add(self.gas_reserve_accum);
+            self.asm.patch_i32(p.cmp_offset, gate as i32);
+            self.asm.patch_i32(p.sub_offset, cost as i32);
+            self.oog_stubs.push((p.stub_label, p.block_pc, cost));
+        }
     }
 
     /// 4-byte RV instruction dispatch (byte-based).
@@ -1475,7 +1561,13 @@ impl Compiler {
         let inst = javm_exec::instruction::decode(&w.to_le_bytes())
             .expect("4-byte spilled word decodes")
             .0;
-        let term = rv_feed_gas_direct(&rv_gas_meta(&inst), &mut self.gas_sim, self.mem_cycles);
+        let meta = rv_gas_meta(&inst);
+        // Accumulate the #3 reserve here (the real feed for a spilled
+        // instruction); the suppress_gas re-dispatch below must not.
+        self.gas_reserve_accum = self
+            .gas_reserve_accum
+            .saturating_add(javm_exec::gas_cost::rv_kind_reserve(meta.kind));
+        let term = rv_feed_gas_direct(&meta, &mut self.gas_sim, self.mem_cycles);
 
         let opcode = (w >> 2) & 0x1F;
         let f3 = (w >> 12) & 0x07;

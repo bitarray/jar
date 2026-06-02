@@ -388,13 +388,22 @@ pub unsafe fn build_frame_runtime(
         mem_write_u32: 0x1007,
         mem_write_u64: 0x1008,
     };
+    // Category #2: scale the load/store base latency (mem_cycles) ×1..4
+    // by the Instance's declared footprint. `mem_size` is the same
+    // high-water-mark the interpreter derives, so both pick the same
+    // tier (and it is per-Image, so the jit_cache keying by image_hash
+    // stays sound under v3 static memory).
+    let mem_cycles = javm_exec::gas_const::mem_cycles_for(javm_exec::gas_const::accessible_pages(
+        mem_size,
+        javm_cap::layout::DATA_BASE,
+    ));
     let cached = jit_cache::get_or_compile(
         image_hash,
         code,
         code_base,
         META_BASE_M,
         CTX_VA_M,
-        javm_exec::gas_cost::DEFAULT_MEM_CYCLES,
+        mem_cycles,
         helpers,
     );
     if cached.jit_size == 0 {

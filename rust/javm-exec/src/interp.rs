@@ -122,12 +122,22 @@ impl Interpreter {
         loop {
             let inst = unsafe { insts.get_unchecked(idx) };
 
-            // Per-block gas charging.
+            // Per-block gas gate: **check before charge** (pre-reserve),
+            // so gas never goes negative and OOG never charges the
+            // un-entered block (see ~/docs/spec-staging/gas-cost.md §1).
+            // A block enters only if gas covers its instruction cost
+            // *plus* its worst-case #3 reserve; only the instruction cost
+            // is debited (the reserve is a gate). `cost == 0` marks an
+            // ecall/ecalli block — no static gate; charged dynamically.
             if inst.is_gas_block_start {
                 let cost = predecode.block_costs[idx] as u64;
-                if cost > 0 && gas.charge(cost).is_err() {
-                    regs.pc = inst.pc as u64;
-                    return ExitReason::OutOfGas;
+                if cost != 0 {
+                    let reserve = predecode.block_reserves[idx] as u64;
+                    if gas.remaining() < cost + reserve {
+                        regs.pc = inst.pc as u64;
+                        return ExitReason::OutOfGas;
+                    }
+                    gas.charge(cost).expect("gas pre-reserved at block entry");
                 }
             }
 
@@ -783,6 +793,16 @@ impl Interpreter {
                     return ExitReason::Trap;
                 }
                 Inst::EcallJar => {
+                    // ecall block: charge its dynamic cost (check-before-
+                    // charge). On OOG, gas is unchanged and the resume PC
+                    // is the ecall's OWN pc, so a top-up re-attempts the
+                    // whole op (gas-cost.md §3 "ecall/ecalli blocks").
+                    let cost = crate::gas_const::ecall_dynamic_cost(false);
+                    if gas.remaining() < cost {
+                        regs.pc = pc as u64;
+                        return ExitReason::OutOfGas;
+                    }
+                    gas.charge(cost).expect("ecall cost checked");
                     regs.pc = next_pc as u64;
                     match handler.handle(EcallKind::Ecall, regs, mem) {
                         EcallResult::Continue => match find_idx_for_pc(insts, next_pc) {
@@ -793,6 +813,12 @@ impl Interpreter {
                     }
                 }
                 Inst::Ecalli { imm } => {
+                    let cost = crate::gas_const::ecall_dynamic_cost(true);
+                    if gas.remaining() < cost {
+                        regs.pc = pc as u64;
+                        return ExitReason::OutOfGas;
+                    }
+                    gas.charge(cost).expect("ecall cost checked");
                     regs.pc = next_pc as u64;
                     match handler.handle(EcallKind::Ecalli(imm as u32), regs, mem) {
                         EcallResult::Continue => match find_idx_for_pc(insts, next_pc) {

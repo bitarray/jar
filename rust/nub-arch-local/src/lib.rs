@@ -14,7 +14,7 @@ use javm_cap::cap::image::ImageCap;
 use javm_cap::cap::instance::InstanceCap;
 use javm_exec::{
     Access, CopyingMemory, EcallHandler, EcallKind, EcallResult, ExitReason, GasCounter, PAGE_SIZE,
-    Regs, interp::Interpreter, predecode::predecode,
+    Regs, gas_const, interp::Interpreter, predecode::predecode_rv_with_mem_cycles,
 };
 use nub_arch_x86_abi::InvocationResult;
 use nub_kernel::{Arch, CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
@@ -141,7 +141,15 @@ pub fn run_instance(
         .code_mapping()
         .expect("image has no executable code mapping");
 
-    let predecode = predecode(code_bytes);
+    // Category #2: the load/store base latency (mem_cycles) is scaled
+    // ×1..4 by the Instance's declared memory footprint. `mem_size`
+    // (high-water-mark over the Image's memory_mappings) is the same
+    // value the recompiler derives, so both engines pick the same tier.
+    let mem_cycles = gas_const::mem_cycles_for(gas_const::accessible_pages(
+        instance.mem_size,
+        javm_cap::layout::DATA_BASE,
+    ));
+    let predecode = predecode_rv_with_mem_cycles(code_bytes, mem_cycles);
     let exit = Interpreter::run(
         &predecode,
         code_bytes,

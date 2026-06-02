@@ -897,6 +897,18 @@ impl Assembler {
         self.emit_i32(imm);
     }
 
+    /// cmp r64, imm32 in the always-imm32 (7-byte) encoding — a
+    /// non-mutating gate (sets flags, leaves `dst` unchanged). Mirrors
+    /// [`Self::sub_r64_imm32_patchable`] but with reg-field = 7 (CMP).
+    /// `offset() - 4` after this call points at the imm32 field; callers
+    /// patch it for the per-block check-before-charge gas gate.
+    pub fn cmp_r64_imm32_patchable(&mut self, dst: Reg, imm: i32) {
+        self.emit(0x48 | dst.hi());
+        self.emit(0x81);
+        self.emit(0xF8 | dst.lo()); // mod=11 (register), reg=7 (cmp), r/m=dst.lo()
+        self.emit_i32(imm);
+    }
+
     // -- IMUL --
 
     /// imul r64, r64

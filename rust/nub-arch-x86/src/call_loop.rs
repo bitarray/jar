@@ -107,6 +107,7 @@ use crate::paging;
 use crate::state_cache::{CACHE, publish_transient_instance};
 
 const EXIT_HALT: u32 = 0;
+const EXIT_OOG: u32 = 2;
 const EXIT_HOST_CALL: u32 = 4;
 const EXIT_ECALL: u32 = 6;
 
@@ -279,6 +280,25 @@ pub fn run_top(
                 }
             }
             EXIT_HOST_CALL | EXIT_ECALL => {
+                // ecall block: charge its dynamic cost (check-before-
+                // charge) BEFORE doing the work, matching the interpreter's
+                // per-ecall charge. On OOG the block is not done and gas is
+                // unchanged; the resume point is the ecall's OWN pc
+                // (info.pc is the next instruction; custom-0 is 4-byte) —
+                // surfacing that pc rides on the deferred recoverable-yield
+                // layer, like the in-code block OOG (gas-cost.md §3).
+                let is_ecalli = info.exit_reason == EXIT_HOST_CALL;
+                let ecall_cost = javm_exec::gas_const::ecall_dynamic_cost(is_ecalli) as i64;
+                if gas < ecall_cost {
+                    break LoopOutcome {
+                        exit_reason: EXIT_OOG,
+                        exit_arg: 0,
+                        return_value: info.regs[7],
+                        gas_remaining: gas,
+                    };
+                }
+                gas -= ecall_cost;
+
                 let op = if info.exit_reason == EXIT_HOST_CALL {
                     info.exit_arg
                 } else {
