@@ -491,13 +491,11 @@ impl Compiler {
         if shift_reg == Reg::RCX {
             self.asm.shift_cl32(shift_op, dst);
         } else if dst == Reg::RCX {
-            // dst is CL — need to swap
-            self.asm.push(shift_reg);
-            self.asm.mov_rr(Reg::RCX, shift_reg);
-            // But we also need dst's value which was in RCX
-            // We pushed shift_reg, not dst. Let me handle this differently.
-            // Move dst to SCRATCH, put shift in CL, shift SCRATCH, move back.
-            self.asm.pop(shift_reg); // undo push
+            // dst *is* RCX (φ[12] = x15), which we also need as the CL shift
+            // count register. Snapshot dst's value into SCRATCH FIRST (before
+            // RCX is overwritten), shift the snapshot, then write it back.
+            // (Mirrors `emit_shift_by_reg64`; the earlier version read `dst`
+            // *after* clobbering RCX, shifting the count instead of the value.)
             self.asm.mov_rr(SCRATCH, dst);
             self.asm.push(Reg::RCX);
             self.asm.mov_rr(Reg::RCX, shift_reg);
@@ -3407,7 +3405,15 @@ impl Compiler {
             }
         }
         // ---- branch on divisor == 0 ----
-        self.asm.test_rr(b_reg, b_reg);
+        // `idivl`/`divl` consume only the divisor's low 32 bits, so the W-ops
+        // must test *those* bits for zero — a divisor like `0x8000_0000_0000_0000`
+        // has a nonzero 64-bit value but a zero low half, and dividing by it
+        // raises #DE. (The 64-bit ops correctly test the full register.)
+        if is_32bit {
+            self.asm.test_rr32(b_reg, b_reg);
+        } else {
+            self.asm.test_rr(b_reg, b_reg);
+        }
         let nonzero = self.asm.new_label();
         let join = self.asm.new_label();
         self.asm.jcc_label(Cc::NE, nonzero);
@@ -3427,6 +3433,37 @@ impl Compiler {
 
         // ---- nonzero branch: real DIV/IDIV ----
         self.asm.bind_label(nonzero);
+        // Signed overflow guard. `idiv` on INT_MIN / -1 raises #DE on x86, but
+        // RISC-V *defines* it (quotient = INT_MIN, remainder = 0). More
+        // generally, for divisor == -1 the quotient is -dividend (which wraps
+        // INT_MIN → INT_MIN) and the remainder is always 0 — so we special-case
+        // divisor == -1, skip the `idiv`, and avoid the fault. This matches the
+        // interpreter (`javm-exec/src/interp.rs`, Div/Rem). Unsigned division
+        // cannot overflow, so the guard is signed-only.
+        if signed {
+            let not_neg_one = self.asm.new_label();
+            if is_32bit {
+                self.asm.cmp_ri32(b_reg, -1);
+            } else {
+                self.asm.cmp_ri(b_reg, -1);
+            }
+            self.asm.jcc_label(Cc::NE, not_neg_one);
+            if remainder {
+                self.asm.mov_ri64(d, 0); // a % -1 == 0 for all a
+            } else {
+                if d != Reg::RAX {
+                    self.asm.mov_rr(d, Reg::RAX);
+                }
+                self.asm.neg64(d); // d = -dividend (wraps INT_MIN → INT_MIN)
+                if is_32bit {
+                    // Low 32 bits of a 64-bit negation == 32-bit negation of the
+                    // low 32 bits, so re-narrow to the signed 32-bit view.
+                    self.asm.movsxd(d, d);
+                }
+            }
+            self.asm.jmp_label(join);
+            self.asm.bind_label(not_neg_one);
+        }
         if is_32bit {
             if signed {
                 self.asm.movsxd(Reg::RAX, Reg::RAX);
@@ -3495,10 +3532,34 @@ impl Compiler {
                 self.asm.bswap64(d);
             }
             UnaryOp::OrcB => {
-                // orc.b: byte-wise OR-combine. Each byte becomes 0xFF if
-                // any bit was set in the source byte, else 0x00. No
-                // single x86 instruction; emulate or panic in Phase 1.
-                self.rv_emit_panic_at(pc);
+                // orc.b: each byte → 0xFF if any bit was set, else 0x00. No
+                // single x86 op, so emulate via SWAR:
+                //   t = (((x & LO7) + LO7) | x) & HI   — bit7 of byte i set iff
+                //       byte i != 0 (the carry trick; per-byte, no cross-byte
+                //       carry since (b&0x7F)+0x7F ≤ 0xFE).
+                //   result = t | (t - (t >> 7))        — spread that flag to the
+                //       whole byte (0x80 → 0xFF; per-byte, no cross-byte borrow).
+                // The 13-slot host register file leaves only SCRATCH free, so
+                // the two values each needed twice (`x`, then `t`) are parked on
+                // the stack and read back with `pop` (balanced push/pop pairs).
+                const LO7: u64 = 0x7F7F_7F7F_7F7F_7F7F;
+                const HI: u64 = 0x8080_8080_8080_8080;
+                self.asm.mov_rr(SCRATCH, src); // SCRATCH = x (safe if d == src)
+                self.asm.push(SCRATCH); // save x
+                self.asm.mov_ri64(d, LO7);
+                self.asm.and_rr(d, SCRATCH); // d = x & LO7
+                self.asm.mov_ri64(SCRATCH, LO7);
+                self.asm.add_rr(d, SCRATCH); // d = (x & LO7) + LO7
+                self.asm.pop(SCRATCH); // SCRATCH = x (rsp restored)
+                self.asm.or_rr(d, SCRATCH); // d = ((x&LO7)+LO7) | x
+                self.asm.mov_ri64(SCRATCH, HI);
+                self.asm.and_rr(d, SCRATCH); // d = t (bit7/byte = byte != 0)
+                self.asm.push(d); // save t
+                self.asm.mov_rr(SCRATCH, d);
+                self.asm.shr_ri64(SCRATCH, 7); // SCRATCH = t >> 7
+                self.asm.sub_rr(d, SCRATCH); // d = t - (t >> 7)
+                self.asm.pop(SCRATCH); // SCRATCH = t (rsp restored)
+                self.asm.or_rr(d, SCRATCH); // d = t | (t - (t>>7))
             }
         }
         if rd != 0 {

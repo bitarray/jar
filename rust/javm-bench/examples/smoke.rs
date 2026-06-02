@@ -93,6 +93,10 @@ mod imp {
 
     pub fn main() {
         let mut interp = Nub::new_local();
+        // One long-lived Hyperlight sandbox for every workload — never torn
+        // down and rebuilt (that re-mmap'd the snapshot at the same fixed guest
+        // VA and corrupted host heap). It publishes all workloads' caps cleanly.
+        let mut recomp = Nub::new_hyperlight().expect("Nub::new_hyperlight");
         let mut passes = 0usize;
         let mut fails: Vec<(&str, String)> = Vec::new();
 
@@ -100,13 +104,6 @@ mod imp {
             eprintln!("=== {} ===", w.name);
             let img = Image::from_ssz_bytes(w.blob).expect("decode Image");
             eprintln!("  code={}B", img.code.len());
-
-            // Fresh Hyperlight sandbox per workload — the bench harness
-            // (`benches/bench.rs`)
-            // `reset_nub_hyperlight()` exists precisely because cap-publish
-            // state from prior workloads can deadlock `put_cap` after
-            // ~13 publishes on one long-lived sandbox.
-            let mut recomp = Nub::new_hyperlight().expect("Nub::new_hyperlight");
 
             let (er_r, ea_r, rv_r, gas_r) = run_one(w.blob, &mut recomp);
             let (er_i, ea_i, rv_i, gas_i) = run_one(w.blob, &mut interp);

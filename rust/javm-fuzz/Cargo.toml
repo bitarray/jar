@@ -1,0 +1,21 @@
+[package]
+name = "javm-fuzz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Differential fuzzer for the JAVM PVM2 ISA — generates RV64E-subset programs and compares the interpreter, the x86 recompiler, and (offline) a Sail/Spike oracle."
+
+[dependencies]
+javm-cap = { workspace = true }
+javm-exec = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+# The recompiler differential needs the Hyperlight host stack, which only
+# builds on linux/x86_64 (the whole `javm-bench` crate is gated to it). The
+# generator, encoders, and serde vector types are all portable; only the
+# dual-engine replay (`replay.rs`, `tests/vectors.rs`) is gated.
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+javm-bench = { path = "../javm-bench" }

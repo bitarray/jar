@@ -1188,6 +1188,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "javm-fuzz"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "javm-bench",
+ "javm-cap",
+ "javm-exec",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "javm-guest-tests"
 version = "0.1.0"
 dependencies = [

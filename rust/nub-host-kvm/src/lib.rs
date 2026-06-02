@@ -39,9 +39,6 @@ limitations under the License.
 pub mod error;
 /// Wrappers for host and guest functions.
 pub mod func;
-/// Host-side read-only view of the guest's heap-resident cap
-/// directory (see [`guest_cache_reader::GuestCacheReader`]).
-pub mod guest_cache_reader;
 /// Wrappers for hypervisor implementations
 pub mod hypervisor;
 /// Functionality to establish and manage an individual sandbox's
