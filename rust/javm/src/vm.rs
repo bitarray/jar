@@ -210,6 +210,10 @@ impl<K: KernelAssist> Vm<K> {
                 access,
             )?;
         }
+        // Category #3: guest PIC data loads of the program's own bytecode
+        // page-in the touched code page(s) on first read (read-only), just
+        // like the recompiler's lazy code materialization.
+        mem.set_code_region(code_base, code_bytes.len() as u32);
 
         // Regs: endpoint baseline → instance persisted regs (non-zero
         // wins) → caller args at φ[7..=10].

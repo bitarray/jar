@@ -122,12 +122,22 @@ impl Interpreter {
         loop {
             let inst = unsafe { insts.get_unchecked(idx) };
 
-            // Per-block gas charging.
+            // Per-block gas gate: **check before charge** (pre-reserve),
+            // so gas never goes negative and OOG never charges the
+            // un-entered block (see ~/docs/spec-staging/gas-cost.md §1).
+            // A block enters only if gas covers its instruction cost
+            // *plus* its worst-case #3 reserve; only the instruction cost
+            // is debited (the reserve is a gate). `cost == 0` marks an
+            // ecall/ecalli block — no static gate; charged dynamically.
             if inst.is_gas_block_start {
                 let cost = predecode.block_costs[idx] as u64;
-                if cost > 0 && gas.charge(cost).is_err() {
-                    regs.pc = inst.pc as u64;
-                    return ExitReason::OutOfGas;
+                if cost != 0 {
+                    let reserve = predecode.block_reserves[idx] as u64;
+                    if gas.remaining() < cost + reserve {
+                        regs.pc = inst.pc as u64;
+                        return ExitReason::OutOfGas;
+                    }
+                    gas.charge(cost).expect("gas pre-reserved at block entry");
                 }
             }
 
@@ -143,6 +153,9 @@ impl Interpreter {
                 // ---- Loads ---------------------------------------------------
                 Inst::Lb { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
+                    if mem.touch_read(addr, 1, gas).is_err() {
+                        return page_fault(regs, pc, addr);
+                    }
                     match load_u8(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as i8 as i64 as u64),
                         None => return page_fault(regs, pc, addr),
@@ -150,6 +163,9 @@ impl Interpreter {
                 }
                 Inst::Lh { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
+                    if mem.touch_read(addr, 2, gas).is_err() {
+                        return page_fault(regs, pc, addr);
+                    }
                     match load_u16(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as i16 as i64 as u64),
                         None => return page_fault(regs, pc, addr),
@@ -157,6 +173,9 @@ impl Interpreter {
                 }
                 Inst::Lw { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
+                    if mem.touch_read(addr, 4, gas).is_err() {
+                        return page_fault(regs, pc, addr);
+                    }
                     match load_u32(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as i32 as i64 as u64),
                         None => return page_fault(regs, pc, addr),
@@ -164,6 +183,9 @@ impl Interpreter {
                 }
                 Inst::Ld { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
+                    if mem.touch_read(addr, 8, gas).is_err() {
+                        return page_fault(regs, pc, addr);
+                    }
                     match load_u64(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v),
                         None => return page_fault(regs, pc, addr),
@@ -171,6 +193,9 @@ impl Interpreter {
                 }
                 Inst::Lbu { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
+                    if mem.touch_read(addr, 1, gas).is_err() {
+                        return page_fault(regs, pc, addr);
+                    }
                     match load_u8(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as u64),
                         None => return page_fault(regs, pc, addr),
@@ -178,6 +203,9 @@ impl Interpreter {
                 }
                 Inst::Lhu { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
+                    if mem.touch_read(addr, 2, gas).is_err() {
+                        return page_fault(regs, pc, addr);
+                    }
                     match load_u16(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as u64),
                         None => return page_fault(regs, pc, addr),
@@ -185,6 +213,9 @@ impl Interpreter {
                 }
                 Inst::Lwu { rd, rs1, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
+                    if mem.touch_read(addr, 4, gas).is_err() {
+                        return page_fault(regs, pc, addr);
+                    }
                     match load_u32(mem, code, code_base, addr) {
                         Some(v) => reg_write(regs, rd, v as u64),
                         None => return page_fault(regs, pc, addr),
@@ -194,7 +225,8 @@ impl Interpreter {
                 // ---- Stores --------------------------------------------------
                 Inst::Sb { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    if !store_writable(mem, addr, 1)
+                    if mem.touch_write(addr, 1, gas).is_err()
+                        || !store_writable(mem, addr, 1)
                         || !mem.write_u8(addr, reg_read(regs, rs2) as u8)
                     {
                         return page_fault(regs, pc, addr);
@@ -202,7 +234,8 @@ impl Interpreter {
                 }
                 Inst::Sh { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    if !store_writable(mem, addr, 2)
+                    if mem.touch_write(addr, 2, gas).is_err()
+                        || !store_writable(mem, addr, 2)
                         || !mem.write_u16_le(addr, reg_read(regs, rs2) as u16)
                     {
                         return page_fault(regs, pc, addr);
@@ -210,7 +243,8 @@ impl Interpreter {
                 }
                 Inst::Sw { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    if !store_writable(mem, addr, 4)
+                    if mem.touch_write(addr, 4, gas).is_err()
+                        || !store_writable(mem, addr, 4)
                         || !mem.write_u32_le(addr, reg_read(regs, rs2) as u32)
                     {
                         return page_fault(regs, pc, addr);
@@ -218,7 +252,9 @@ impl Interpreter {
                 }
                 Inst::Sd { rs1, rs2, imm } => {
                     let addr = compute_addr(regs, rs1, imm);
-                    if !store_writable(mem, addr, 8) || !mem.write_u64_le(addr, reg_read(regs, rs2))
+                    if mem.touch_write(addr, 8, gas).is_err()
+                        || !store_writable(mem, addr, 8)
+                        || !mem.write_u64_le(addr, reg_read(regs, rs2))
                     {
                         return page_fault(regs, pc, addr);
                     }
@@ -783,6 +819,16 @@ impl Interpreter {
                     return ExitReason::Trap;
                 }
                 Inst::EcallJar => {
+                    // ecall block: charge its dynamic cost (check-before-
+                    // charge). On OOG, gas is unchanged and the resume PC
+                    // is the ecall's OWN pc, so a top-up re-attempts the
+                    // whole op (gas-cost.md §3 "ecall/ecalli blocks").
+                    let cost = crate::gas_const::ecall_dynamic_cost(false);
+                    if gas.remaining() < cost {
+                        regs.pc = pc as u64;
+                        return ExitReason::OutOfGas;
+                    }
+                    gas.charge(cost).expect("ecall cost checked");
                     regs.pc = next_pc as u64;
                     match handler.handle(EcallKind::Ecall, regs, mem) {
                         EcallResult::Continue => match find_idx_for_pc(insts, next_pc) {
@@ -793,6 +839,12 @@ impl Interpreter {
                     }
                 }
                 Inst::Ecalli { imm } => {
+                    let cost = crate::gas_const::ecall_dynamic_cost(true);
+                    if gas.remaining() < cost {
+                        regs.pc = pc as u64;
+                        return ExitReason::OutOfGas;
+                    }
+                    gas.charge(cost).expect("ecall cost checked");
                     regs.pc = next_pc as u64;
                     match handler.handle(EcallKind::Ecalli(imm as u32), regs, mem) {
                         EcallResult::Continue => match find_idx_for_pc(insts, next_pc) {
@@ -878,11 +930,21 @@ fn compute_addr(regs: &Regs, rs1: u8, imm: i32) -> u32 {
 fn read_code(code: &[u8], code_base: u32, addr: u32, width: usize) -> Option<u64> {
     let off = addr.checked_sub(code_base)? as usize;
     let end = off.checked_add(width)?;
-    if end > code.len() {
+    // The code region is page-rounded with a zero-padded tail — the
+    // recompiler maps whole pages, so it serves the last page's tail bytes
+    // as zero. Match that: serve real code bytes within `[0, code.len())`
+    // and zeros up to the page-rounded end; reject only accesses past it.
+    let rounded = (code.len() as u32).next_multiple_of(crate::mem::PAGE_SIZE) as usize;
+    if end > rounded {
         return None;
     }
     let mut buf = [0u8; 8];
-    buf[..width].copy_from_slice(&code[off..end]);
+    for (k, b) in buf.iter_mut().enumerate().take(width) {
+        let o = off + k;
+        if o < code.len() {
+            *b = code[o];
+        }
+    }
     Some(u64::from_le_bytes(buf))
 }
 

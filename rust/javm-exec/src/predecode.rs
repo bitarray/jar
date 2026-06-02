@@ -59,6 +59,13 @@ pub struct Predecode {
     /// that instruction, computed by the pipeline simulator in
     /// `gas_cost::rv_gas_cost_for_block`.
     pub block_costs: Vec<u32>,
+    /// Pre-computed per-basic-block worst-case category-#3 reserve.
+    /// Aligned with `insts` exactly like `block_costs`: meaningful only
+    /// at block-start indices, 0 elsewhere. The block-entry gate checks
+    /// `gas ≥ block_costs[i] + block_reserves[i]` but charges only
+    /// `block_costs[i]` — the reserve is a gate, not a charge (see
+    /// `gas_cost::rv_block_reserve_for_block`).
+    pub block_reserves: Vec<u32>,
     /// If decode hit a reserved/illegal encoding, the byte offset of
     /// the first one. `None` on success.
     pub decode_error_at: Option<u32>,
@@ -125,34 +132,64 @@ pub fn predecode_rv_with_mem_cycles(code: &[u8], mem_cycles: u8) -> Predecode {
     if !insts.is_empty() {
         insts[0].is_gas_block_start = true;
     }
-    for i in 1..insts.len() {
-        let prev_is_terminator = is_terminator(&insts[i - 1].inst);
-        if prev_is_terminator {
+    for i in 0..insts.len() {
+        // Post-terminator instructions start a block (the usual rule).
+        if i > 0 && is_terminator(&insts[i - 1].inst) {
+            insts[i].is_gas_block_start = true;
+        }
+        // `ecall.jar` / `ecalli` are *forced* block starts — each is its
+        // own singleton gas block with no static preamble, charged
+        // dynamically at dispatch. This makes the ecall's own PC a
+        // bb_start so an OOG on its dynamic charge can re-attempt there
+        // (see ~/docs/spec-staging/gas-cost.md §3 "ecall/ecalli blocks").
+        // It is a terminator too, so the instruction after it is already
+        // a block start — the ecall block is a boundary on both sides.
+        if is_ecall_block(&insts[i].inst) {
             insts[i].is_gas_block_start = true;
         }
     }
 
-    // ---- Pass 3: per-block gas costs via pipeline simulation ---------
-    let block_costs = compute_block_costs(&insts, mem_cycles);
+    // ---- Pass 3: per-block gas costs + #3 reserves ------------------
+    let (block_costs, block_reserves) = compute_block_costs(&insts, mem_cycles);
 
     Predecode {
         insts,
         block_costs,
+        block_reserves,
         decode_error_at,
     }
 }
 
-/// Run the pipeline simulator once per basic block; write the
-/// resulting cost into `block_costs[block_start_idx]` for each
-/// gas-block-start. Non-block-start indices remain 0.
-fn compute_block_costs(insts: &[RvPreDecodedInst], mem_cycles: u8) -> Vec<u32> {
+/// Run the pipeline simulator once per basic block and compute the
+/// worst-case #3 reserve; write both into the block-start index for
+/// each gas-block-start. Non-block-start indices remain 0.
+fn compute_block_costs(insts: &[RvPreDecodedInst], mem_cycles: u8) -> (Vec<u32>, Vec<u32>) {
     let mut block_costs = vec![0u32; insts.len()];
+    let mut block_reserves = vec![0u32; insts.len()];
     for i in 0..insts.len() {
         if insts[i].is_gas_block_start {
-            block_costs[i] = crate::gas_cost::rv_gas_cost_for_block(insts, i, mem_cycles);
+            if is_ecall_block(&insts[i].inst) {
+                // ecall/ecalli block: cost == 0 is the sentinel both
+                // engines use to skip the static gate; the kernel charges
+                // it dynamically at dispatch (its #3 is the call-frame /
+                // host cost, not a static load/store reserve).
+                block_costs[i] = 0;
+                block_reserves[i] = 0;
+            } else {
+                block_costs[i] = crate::gas_cost::rv_gas_cost_for_block(insts, i, mem_cycles);
+                block_reserves[i] = crate::gas_cost::rv_block_reserve_for_block(insts, i);
+            }
         }
     }
-    block_costs
+    (block_costs, block_reserves)
+}
+
+/// `ecall.jar` / `ecalli` — the instructions that form their own
+/// (singleton) gas block, charged dynamically at dispatch rather than by
+/// a static block preamble. A `cost == 0` block start marks one.
+#[inline]
+pub fn is_ecall_block(inst: &Inst) -> bool {
+    matches!(inst, Inst::EcallJar | Inst::Ecalli { .. })
 }
 
 /// Block-terminating instructions: anything that *can* leave the

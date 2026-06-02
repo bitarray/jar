@@ -51,7 +51,7 @@ fn prime_sieve() {
         "prime_sieve",
         include_bytes!(env!("PRIME_SIEVE_BLOB")),
         0x2578,
-        8_966_299,
+        8_974_623,
     );
 }
 
@@ -61,7 +61,7 @@ fn ed25519() {
         "ed25519",
         include_bytes!(env!("ED25519_BLOB")),
         0x1,
-        2_360_437,
+        2_361_145,
     );
 }
 
@@ -71,7 +71,7 @@ fn keccak() {
         "keccak",
         include_bytes!(env!("KECCAK_BLOB")),
         0x39e5_0259,
-        100_674,
+        101_062,
     );
 }
 
@@ -81,7 +81,7 @@ fn blake2b() {
         "blake2b",
         include_bytes!(env!("BLAKE2B_BLOB")),
         0xee1f_55f1,
-        62_136,
+        62_524,
     );
 }
 
@@ -91,7 +91,7 @@ fn ecrecover() {
         "ecrecover",
         include_bytes!(env!("ECRECOVER_BLOB")),
         0x1,
-        6_810_020,
+        6_812_008,
     );
 }
 
@@ -101,7 +101,7 @@ fn goldilocks_mul() {
         "goldilocks_mul",
         include_bytes!(env!("GOLDILOCKS_MUL_BLOB")),
         0x2cf7_3e57,
-        2_400_162,
+        2_400_230,
     );
 }
 
@@ -111,7 +111,7 @@ fn poseidon2_perm() {
         "poseidon2_perm",
         include_bytes!(env!("POSEIDON2_PERM_BLOB")),
         0x3ce3_3156,
-        14_561_197,
+        14_561_585,
     );
 }
 
@@ -121,7 +121,7 @@ fn mini_verifier() {
         "mini_verifier",
         include_bytes!(env!("MINI_VERIFIER_BLOB")),
         0xf98f_c4ab,
-        5_878_915,
+        5_879_303,
     );
 }
 
@@ -131,7 +131,7 @@ fn poly_eval() {
         "poly_eval",
         include_bytes!(env!("POLY_EVAL_BLOB")),
         0x01da_34e2,
-        9_003_105,
+        9_006_693,
     );
 }
 
@@ -141,6 +141,6 @@ fn fri_fold_tree() {
         "fri_fold_tree",
         include_bytes!(env!("FRI_FOLD_TREE_BLOB")),
         0x37e6_76f4,
-        6_189_504,
+        6_195_652,
     );
 }

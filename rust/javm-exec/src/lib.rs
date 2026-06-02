@@ -19,10 +19,12 @@ extern crate alloc;
 pub mod ecall;
 pub mod exit;
 pub mod gas;
+pub mod gas_const;
 pub mod gas_cost;
 pub mod gas_sim;
 pub mod instruction;
 pub mod interp;
+pub mod mat;
 pub mod mem;
 pub mod predecode;
 pub mod regs;
@@ -30,5 +32,7 @@ pub mod regs;
 pub use ecall::{EcallHandler, EcallKind, EcallResult, PanickingHandler};
 pub use exit::ExitReason;
 pub use gas::{Gas, GasCounter, OutOfGas};
-pub use mem::{Access, CopyingMemory, MapError, Mem, MemAccess, Memory, PAGE_SIZE, perm};
+pub use mem::{
+    Access, CopyingMemory, MapError, Mem, MemAccess, Memory, PAGE_SIZE, TouchFault, perm,
+};
 pub use regs::{REG_COUNT, Regs};

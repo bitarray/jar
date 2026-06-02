@@ -563,6 +563,67 @@ pub fn rv_gas_cost_for_block(
     sim.flush_and_get_cost()
 }
 
+/// Memory class of a gas `kind` for category-#3 reserve accounting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemClass {
+    None,
+    Load,
+    Store,
+}
+
+/// Classify a gas `kind` as a category-#3 memory op. Uses the **same**
+/// `exec_unit == EU_LOAD/EU_STORE` predicate `rv_feed_gas_kind` uses for
+/// the #2 `mem_cycles` override (gas_cost.rs), so "memory op for #3" and
+/// "memory op for #2" provably agree across both engines.
+#[inline]
+pub fn rv_kind_mem_class(kind: u8) -> MemClass {
+    match RV_GAS_COST_LUT[kind as usize].exec_unit {
+        EU_LOAD => MemClass::Load,
+        EU_STORE => MemClass::Store,
+        _ => MemClass::None,
+    }
+}
+
+/// Per-instruction worst-case category-#3 reserve contribution for a
+/// gas `kind`: `load → PAGE_IN×2`, `store → (PAGE_IN+COW)×2` (×2 =
+/// `MAX_PAGES_PER_ACCESS`), else 0. **Both engines** accumulate this at
+/// every real gas feed, so the block reserve matches bit-for-bit.
+#[inline]
+pub fn rv_kind_reserve(kind: u8) -> u32 {
+    use crate::gas_const::{COW_COST, MAX_PAGES_PER_ACCESS, PAGE_IN_COST};
+    let r = match rv_kind_mem_class(kind) {
+        MemClass::Load => PAGE_IN_COST.saturating_mul(MAX_PAGES_PER_ACCESS),
+        MemClass::Store => (PAGE_IN_COST + COW_COST).saturating_mul(MAX_PAGES_PER_ACCESS),
+        MemClass::None => 0,
+    };
+    r.min(u32::MAX as u64) as u32
+}
+
+/// Worst-case category-#3 reserve (in gas) for the basic block starting
+/// at `block_start`: the maximum materialization cost the block can
+/// debit at faults. The block-entry gate reserves this (a gate, not a
+/// charge — see `~/docs/spec-staging/gas-cost.md` §1/§3) so #3 can never
+/// drive gas negative mid-block.
+///
+/// Sums [`rv_kind_reserve`] over the block. An `ecall`/`ecalli` block
+/// contributes 0 — it has no load/store, and its #3 (the dynamic
+/// call-frame / host cost) is charged separately at dispatch. Saturates
+/// to `u32::MAX` (blocks are bounded by code size, so this never binds).
+pub fn rv_block_reserve_for_block(
+    insts: &[crate::predecode::RvPreDecodedInst],
+    block_start: usize,
+) -> u32 {
+    let mut end = block_start + 1;
+    while end < insts.len() && !insts[end].is_gas_block_start {
+        end += 1;
+    }
+    let mut reserve: u64 = 0;
+    for i in &insts[block_start..end] {
+        reserve = reserve.saturating_add(rv_kind_reserve(i.gas_meta.kind) as u64);
+    }
+    reserve.min(u32::MAX as u64) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
