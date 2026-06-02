@@ -235,8 +235,9 @@ fn mem_code_store_faults() {
 
 #[test]
 fn mem_code_second_page() {
-    // A PIC load landing on the SECOND code page (code > 4 KiB) exercises the
-    // code_mat per-page indexing for page index > 0 on both engines.
+    // A PIC load landing on the SECOND code page (code > 4 KiB), still within the
+    // first 2 MiB RO cluster: both engines charge it under the same cluster as the
+    // first page (cluster-granular RO materialization, page_in charged once).
     let mut body = vec![
         AUIPC_X8_0,           // x8 = code_base
         encode::lui(9, 1),    // x9 = 0x1000 (4096)
@@ -252,6 +253,27 @@ fn mem_code_second_page() {
         init_mem: None,
     };
     assert_agree(&prog, "PIC load of second code page");
+}
+
+#[test]
+fn mem_ro_cluster_multipage() {
+    // A pinned read-only 8 KiB cap (2 pages) at DATA_BASE, both pages in one
+    // 2 MiB cluster. Reading BOTH pages charges a single page_in (cluster
+    // materialization) on both engines: the recompiler fault-arounds the
+    // cluster on the first fault, then page 1 hits no fault; the interpreter
+    // accounts the cluster once. Locks recomp==interp on RO clustering.
+    let ro = vec![0xABu8; 8192]; // 2 pages, one cluster
+    let mut body = encode::li64(8, DATA_BASE as u64);
+    body.push(encode::ld(9, 8, 0)); // RO page 0
+    body.extend(encode::li64(10, (DATA_BASE + 4096) as u64));
+    body.push(encode::ld(11, 10, 0)); // RO page 1 (same cluster → free)
+    let img = javm_fuzz::replay::image_with_ro(&body, DATA_BASE, &ro);
+    let d = javm_fuzz::replay::diff_image(&img);
+    assert!(
+        !d.diverges(),
+        "interp/recomp diverge on RO cluster (multi-page): {}",
+        d.describe(),
+    );
 }
 
 #[test]

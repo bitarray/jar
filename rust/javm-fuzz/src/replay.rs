@@ -8,12 +8,55 @@
 
 use crate::{Program, encode};
 use javm_bench::{BuiltCaps, RawRun, run_interpreter_raw, run_recompiler_raw};
-use javm_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping};
+use javm_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap};
 use javm_cap::slot::{SlotIdx, SlotPath};
 use std::collections::BTreeMap;
 
 /// Cnode slot the fuzz memory window's backing data cap occupies.
 const WINDOW_SLOT: u32 = 1;
+
+/// Build an `Image` from raw instruction `words` (+ `ecalli 0` terminator)
+/// with a **pinned read-only** data cap of `ro_bytes` mapped at `ro_start`
+/// — for category-#3 read-only-cluster differential tests. Both engines
+/// materialize it `PinnedCapRo` (interp perm-RO, recompiler MatRange) and
+/// charge it per 2 MiB cluster.
+pub fn image_with_ro(words: &[u32], ro_start: u32, ro_bytes: &[u8]) -> Image {
+    let mut code = encode::enc(words);
+    code.extend_from_slice(&encode::enc(&[encode::HALT]));
+    let mut img = Image::empty();
+    img.code = code;
+    img.endpoints.insert(
+        0,
+        EndpointDef {
+            entry_pc: 0,
+            arg_registers: 0,
+            arg_cnode_size: 0,
+            initial_regs: BTreeMap::new(),
+        },
+    );
+    let slot = SlotIdx(WINDOW_SLOT + 1);
+    img.memory_mappings.push(MemoryMapping {
+        start: ro_start as u64,
+        size: ro_bytes.len() as u64,
+        source: SlotPath::root(slot),
+    });
+    img.pinned_slots.insert(
+        slot,
+        PinnedCap::Data {
+            content: ro_bytes.to_vec(),
+            size: ro_bytes.len() as u64,
+        },
+    );
+    img
+}
+
+/// Run a pre-built `Image` through both engines and compare.
+pub fn diff_image(img: &Image) -> Diff {
+    let built = BuiltCaps::for_image(img, 0);
+    let interp = run_interpreter_raw(&built);
+    let recomp = run_recompiler_raw(&built);
+    Diff { interp, recomp }
+}
 
 /// Build the `Image` for a program: its code (body + fold) plus the appended
 /// `ecalli 0` terminator, entered at pc 0 with the program's initial register

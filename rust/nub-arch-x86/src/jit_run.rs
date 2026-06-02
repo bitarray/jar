@@ -109,9 +109,13 @@ static MAT_MEM_BUF_PA: AtomicU64 = AtomicU64::new(0);
 static MAT_CODE_BASE: AtomicU64 = AtomicU64::new(0);
 static MAT_CODE_TOP: AtomicU64 = AtomicU64::new(0);
 static MAT_CODE_PA: AtomicU64 = AtomicU64::new(0);
-/// Per-page [`javm_exec::mat::PageState`] for the code region.
-static MAT_CODE_STATE_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
-static MAT_CODE_STATE_LEN: AtomicU64 = AtomicU64::new(0);
+/// Per-2 MiB-cluster materialization flag for **read-only** regions, namely
+/// code and `PinnedCapRo` data caps, indexed by absolute cluster
+/// ([`javm_exec::mat::cluster_of`]). The first RO fault in a cluster pays
+/// one `page_in` and fault-arounds the cluster's RO pages; the interpreter
+/// tracks the same per-cluster flag, so both charge a cluster exactly once.
+static MAT_RO_CLUSTER_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+static MAT_RO_CLUSTER_LEN: AtomicU64 = AtomicU64::new(0);
 static DIRTY_PAGE_SINK: AtomicPtr<alloc::vec::Vec<crate::call_loop::DirtyPage>> =
     AtomicPtr::new(core::ptr::null_mut());
 static ACTIVE_PT_PML4_KVA: AtomicU64 = AtomicU64::new(0);
@@ -295,62 +299,49 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
     // which case no page of `set` lies in it (guarded by in_code/in_data).
     let dstate_ptr = MAT_STATE_PTR.load(Ordering::SeqCst);
     let dstate_len = MAT_STATE_LEN.load(Ordering::SeqCst) as usize;
-    let cstate_ptr = MAT_CODE_STATE_PTR.load(Ordering::SeqCst);
-    let cstate_len = MAT_CODE_STATE_LEN.load(Ordering::SeqCst) as usize;
-    // SAFETY: each ptr/len describes the running FrameRuntime's per-page
-    // state Vec (single-threaded → exclusive); empty slice if undeclared.
+    let roc_ptr = MAT_RO_CLUSTER_PTR.load(Ordering::SeqCst);
+    let roc_len = MAT_RO_CLUSTER_LEN.load(Ordering::SeqCst) as usize;
+    // SAFETY: each ptr/len describes the running FrameRuntime's state Vec
+    // (single-threaded → exclusive); empty slice if undeclared.
     let dstate: &mut [u8] = if dstate_ptr.is_null() {
         &mut []
     } else {
         unsafe { core::slice::from_raw_parts_mut(dstate_ptr, dstate_len) }
     };
-    let cstate: &mut [u8] = if cstate_ptr.is_null() {
+    let ro_cluster: &mut [u8] = if roc_ptr.is_null() {
         &mut []
     } else {
-        unsafe { core::slice::from_raw_parts_mut(cstate_ptr, cstate_len) }
+        unsafe { core::slice::from_raw_parts_mut(roc_ptr, roc_len) }
     };
 
-    // Materialize-all: page-in / CoW each page (low→high), advancing
-    // per-page state and accumulating the charge.
+    // Materialize-all (low→high), accumulating the charge. Read-only pages
+    // (code + PinnedCapRo data caps) materialize per 2 MiB cluster (one
+    // page_in, fault-around the cluster's RO pages); writable (CoW /
+    // ephemeral) pages stay per-page.
     let mut total: u64 = 0;
     for &p in set.as_slice() {
         let pv = p as u64;
-        if in_code(pv) {
-            // CODE: PinnedCapRo — read pages in RO (write was excluded).
-            let idx = ((pv - code_base) / PAGE_SIZE as u64) as usize;
-            let cur = javm_exec::mat::PageState::from_u8(cstate[idx]);
-            let (charge, next) =
-                match javm_exec::mat::charge_for(cur, javm_exec::mat::PageKind::PinnedCapRo, false)
-                {
-                    Ok(v) => v,
-                    Err(_) => return false,
-                };
-            if next == javm_exec::mat::PageState::PresentRo
-                && cur == javm_exec::mat::PageState::NotPresent
-            {
-                let src_pa = code_pa + (pv - code_base);
-                // SAFETY: live PT, single writer; builds the path (zero-setup).
-                if unsafe {
-                    crate::paging::pt_map_leaf(
-                        pml4,
-                        pv,
-                        src_pa,
-                        crate::paging::Perm::user_ro(),
-                        owned_vec,
-                    )
+        // Classify the read-only source range (if any): code, or a pinned
+        // data cap. Writes to RO pages were already excluded above.
+        let ro_range: Option<(u64, u64, u64)> = if in_code(pv) {
+            Some((code_base, code_top, code_pa))
+        } else {
+            match mat_range_for(p) {
+                Some(r) if r.kind == javm_exec::mat::PageKind::PinnedCapRo.as_u8() => {
+                    Some((r.start as u64, r.end as u64, r.pa))
                 }
-                .is_none()
-                {
-                    return false;
-                }
-                crate::paging::invlpg(pv);
+                _ => None,
             }
-            total = total.saturating_add(charge);
-            cstate[idx] = next.as_u8();
+        };
+        if let Some((r_start, r_end, r_pa)) = ro_range {
+            match materialize_ro_cluster(pv, r_start, r_end, r_pa, ro_cluster, pml4, owned_vec) {
+                Some(c) => total = total.saturating_add(c),
+                None => return false,
+            }
             continue;
         }
 
-        // DATA: ephemeral / cap-backed with CoW.
+        // WRITABLE DATA: ephemeral / cap-backed (UnpinnedCapCow) with CoW.
         let idx = ((pv - data_base) / PAGE_SIZE as u64) as usize;
         let cur = javm_exec::mat::PageState::from_u8(dstate[idx]);
         let range = mat_range_for(p);
@@ -491,6 +482,68 @@ fn cow_into_fresh(
     true
 }
 
+/// Materialize the read-only source range `[r_start, r_end)` (physical
+/// base `r_pa`) within the 2 MiB cluster containing `pv`. Charges one
+/// `page_in` the first time *any* read-only page in that cluster faults
+/// (per `ro_cluster`, indexed by absolute cluster), `0` thereafter — so a
+/// large read-only input materializes for one fault, not one per page. The
+/// cluster's RO pages are **fault-arounded**: mapped present read-only
+/// straight from the cap so the retry (and later reads anywhere in the
+/// cluster) hit no further faults. Returns the charge, or `None` on a
+/// page-table allocation failure. Mirrors the interpreter's per-cluster RO
+/// charge ([`javm_exec::mat::cluster_of`]) so the two agree.
+fn materialize_ro_cluster(
+    pv: u64,
+    r_start: u64,
+    r_end: u64,
+    r_pa: u64,
+    ro_cluster: &mut [u8],
+    pml4: u64,
+    owned_vec: u64,
+) -> Option<u64> {
+    let c = (pv >> javm_exec::mat::CLUSTER_SHIFT) as usize;
+    // The bitmap is sized to cover every RO cluster the #PF handler can ever
+    // accept: max(code_top, mem_top) >> CLUSTER_SHIFT + 1 (see
+    // build_frame_runtime), and the handler rejects any page >= mem_top / outside
+    // a region before reaching here, so c < ro_cluster.len() is an invariant. The
+    // interpreter's ro_cluster_charge grows on demand and would charge PAGE_IN for
+    // an out-of-range cluster, so an out-of-bounds c here would be a *silent* gas
+    // fork — trip loudly in debug instead (fail-early per the repo convention).
+    debug_assert!(
+        c < ro_cluster.len(),
+        "RO cluster {c} beyond bitmap (len {}): sizing regression would fork gas",
+        ro_cluster.len(),
+    );
+    // A fresh cluster charges one page_in.
+    let charge = if c < ro_cluster.len() && ro_cluster[c] == 0 {
+        ro_cluster[c] = 1;
+        javm_exec::gas_const::PAGE_IN_COST
+    } else {
+        0
+    };
+    // Fault-around: map the range's pages within this cluster, read-only.
+    let cluster_lo = (pv >> javm_exec::mat::CLUSTER_SHIFT) << javm_exec::mat::CLUSTER_SHIFT;
+    let cluster_hi = cluster_lo + (1u64 << javm_exec::mat::CLUSTER_SHIFT);
+    let lo = r_start.max(cluster_lo);
+    let hi = r_end.min(cluster_hi);
+    let mut q = lo;
+    while q < hi {
+        // SAFETY: live PT, single writer; builds the path (zero-setup).
+        unsafe {
+            crate::paging::pt_map_leaf(
+                pml4,
+                q,
+                r_pa + (q - r_start),
+                crate::paging::Perm::user_ro(),
+                owned_vec,
+            )
+        }?;
+        crate::paging::invlpg(q);
+        q += PAGE_SIZE as u64;
+    }
+    Some(charge)
+}
+
 /// Result of an in-kernel PVM run.
 #[derive(Debug, Clone, Copy)]
 pub struct ExitInfo {
@@ -597,11 +650,14 @@ pub struct FrameRuntime {
     mem_buf_pa: u64,
     /// Read-only CODE region (page-rounded): `[code_base, code_top)`,
     /// source PA `code_pa`. Lazily materialized `PinnedCapRo` like a
-    /// pinned data cap; per-page state in `code_mat`.
+    /// pinned data cap, per 2 MiB cluster (see `ro_cluster`).
     code_base: u32,
     code_top: u32,
     code_pa: u64,
-    code_mat: alloc::vec::Vec<u8>,
+    /// Per-2 MiB-cluster materialization flag for all read-only regions
+    /// (code + pinned data caps), indexed by absolute cluster
+    /// ([`javm_exec::mat::cluster_of`]). Sized to cover every RO cluster.
+    ro_cluster: alloc::vec::Vec<u8>,
 }
 
 /// Build a per-frame runtime: compile the Image (cached), allocate
@@ -750,11 +806,17 @@ pub unsafe fn build_frame_runtime(
     let mem_buf_pa = mem_buf.pa();
     let mem_top = (data_base + mem_bytes) as u32;
     // Code region: page-rounded `[code_base, code_top)`, lazily paged in
-    // RO (PinnedCapRo) on guest PIC reads. The code buffer is page-aligned
-    // with a zeroed tail, so paging in the last (partial) page is safe.
+    // RO (PinnedCapRo) per 2 MiB cluster on guest PIC reads. The code
+    // buffer is page-aligned with a zeroed tail, so paging in the last
+    // (partial) page is safe.
     let code_bytes_rounded = code.len().next_multiple_of(PAGE_SIZE);
-    let code_mat = alloc::vec![0u8; code_bytes_rounded / PAGE_SIZE];
     let code_top = code_base.saturating_add(code_bytes_rounded as u32);
+    // Per-2 MiB-cluster RO materialization bitmap, sized to cover every
+    // read-only cluster: code is at [code_base, code_top) and pinned data
+    // caps live below mem_top, so the highest RO cluster is bounded by
+    // max(code_top, mem_top) >> CLUSTER_SHIFT.
+    let max_ro_cluster = (code_top.max(mem_top) >> javm_exec::mat::CLUSTER_SHIFT) as usize;
+    let ro_cluster = alloc::vec![0u8; max_ro_cluster + 1];
     pt.install_borrowed_pd(META_BASE_M, cached.template_pd_pa)?;
     pt.map(
         STACK_VA_M,
@@ -785,7 +847,7 @@ pub unsafe fn build_frame_runtime(
         code_base,
         code_top,
         code_pa,
-        code_mat,
+        ro_cluster,
     })
 }
 
@@ -849,8 +911,8 @@ pub unsafe fn enter_frame(
     MAT_CODE_BASE.store(rt.code_base as u64, Ordering::SeqCst);
     MAT_CODE_TOP.store(rt.code_top as u64, Ordering::SeqCst);
     MAT_CODE_PA.store(rt.code_pa, Ordering::SeqCst);
-    MAT_CODE_STATE_PTR.store(rt.code_mat.as_mut_ptr(), Ordering::SeqCst);
-    MAT_CODE_STATE_LEN.store(rt.code_mat.len() as u64, Ordering::SeqCst);
+    MAT_RO_CLUSTER_PTR.store(rt.ro_cluster.as_mut_ptr(), Ordering::SeqCst);
+    MAT_RO_CLUSTER_LEN.store(rt.ro_cluster.len() as u64, Ordering::SeqCst);
     DIRTY_PAGE_SINK.store(dirty_sink, Ordering::SeqCst);
     ACTIVE_PT_PML4_KVA.store(rt.pt.pml4_kva(), Ordering::SeqCst);
     OWNED_VEC_PTR.store(rt.pt.owned_vec_ptr(), Ordering::SeqCst);
@@ -871,8 +933,8 @@ pub unsafe fn enter_frame(
     MAT_STATE_LEN.store(0, Ordering::SeqCst);
     MAT_MEM_TOP.store(0, Ordering::SeqCst);
     MAT_CODE_TOP.store(0, Ordering::SeqCst);
-    MAT_CODE_STATE_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
-    MAT_CODE_STATE_LEN.store(0, Ordering::SeqCst);
+    MAT_RO_CLUSTER_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
+    MAT_RO_CLUSTER_LEN.store(0, Ordering::SeqCst);
     DIRTY_PAGE_SINK.store(core::ptr::null_mut(), Ordering::SeqCst);
     ACTIVE_PT_PML4_KVA.store(0, Ordering::SeqCst);
     OWNED_VEC_PTR.store(0, Ordering::SeqCst);

@@ -262,6 +262,56 @@ fn code_first_read_pages_in_then_free() {
 }
 
 #[test]
+fn ro_cluster_charges_page_in_once_for_whole_cluster() {
+    // 16 read-only pages in one 2 MiB cluster: reading every page charges a
+    // SINGLE page_in (cluster materialization), not 16 — mirroring the
+    // recompiler's fault-around of the whole cluster on the first fault.
+    let mut m = Mem::with_pages(16, perm::RO);
+    let mut total = 0u64;
+    for pg in 0..16u32 {
+        total += spent(10_000, |g| m.touch_read(pg * PAGE_SIZE, 8, g).unwrap());
+    }
+    assert_eq!(total, PAGE_IN_COST);
+}
+
+#[test]
+fn ro_cluster_straddle_charges_each_cluster() {
+    // An RO read straddling a 2 MiB cluster boundary pays one page_in per
+    // cluster (two here); re-reads are then free.
+    const TWO_MIB: u32 = 1 << 21;
+    let mut m = Mem::new();
+    m.base = TWO_MIB - PAGE_SIZE;
+    m.map_region(
+        (TWO_MIB - PAGE_SIZE) as u64,
+        (2 * PAGE_SIZE) as u64,
+        Access::ReadOnly,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        spent(10_000, |g| m.touch_read(TWO_MIB - 4, 8, g).unwrap()),
+        2 * PAGE_IN_COST
+    );
+    assert_eq!(
+        spent(10_000, |g| m.touch_read(TWO_MIB - PAGE_SIZE, 8, g).unwrap()),
+        0
+    );
+    assert_eq!(spent(10_000, |g| m.touch_read(TWO_MIB, 8, g).unwrap()), 0);
+}
+
+#[test]
+fn rw_pages_stay_per_page_not_clustered() {
+    // Writable (CoW) pages are NOT clustered: each page pays its own
+    // page_in+cow, unchanged from the per-page model.
+    let mut m = Mem::with_pages(4, perm::RW);
+    let mut total = 0u64;
+    for pg in 0..4u32 {
+        total += spent(10_000, |g| m.touch_write(pg * PAGE_SIZE, 8, g).unwrap());
+    }
+    assert_eq!(total, 4 * (PAGE_IN_COST + COW_COST));
+}
+
+#[test]
 fn code_data_adjacency_straddle_faults() {
     // The consensus-critical boundary: a code region whose top abuts the
     // data region (`code_top == data_base`, reachable with a maximal 252 MiB

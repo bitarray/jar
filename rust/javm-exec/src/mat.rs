@@ -12,9 +12,40 @@
 //! charged at most once and `cow` at most once per page (per frame); the
 //! only re-page-in is a `MGMT_MOVE`/`MGMT_DROP` slot eviction, which is a
 //! block terminator.
+//!
+//! ## Read-only clusters
+//!
+//! Read-only ([`PageKind::PinnedCapRo`]) regions — the program's code and
+//! pinned data caps — are materialized at **2 MiB cluster** granularity
+//! ([`CLUSTER_SHIFT`], [`cluster_of`]): the first read anywhere in a
+//! cluster pays a single [`PAGE_IN_COST`] and brings the whole cluster's
+//! RO pages into the working set (the recompiler fault-arounds them — a
+//! single 2 MiB large page where aligned + fully cap-backed, else the
+//! cluster's 4 KiB pages; the interpreter just accounts the cluster). This
+//! frames `page_in` as the O(1) *map* event (one fault, one mapping) — the
+//! per-access data-movement latency is category #2 — so a large aligned RO
+//! input materializes for one fault instead of 512, and the per-block
+//! reserve is unchanged (a load still spans ≤ 2 clusters = ≤ 2 events).
+//! Copy-on-write (RW) regions stay 4 KiB-granular (a write copies one
+//! page). Both engines key on the same absolute cluster index, so they
+//! charge identically.
 
 use crate::gas_const::{COW_COST, PAGE_IN_COST};
 use crate::mem::PAGE_SIZE;
+
+/// log2 of the read-only materialization cluster size. `21` → 2 MiB, the
+/// common large-page size on x86 (PDE), AArch64 (L2 block), and RISC-V
+/// (megapage), so the clustered charge model is arch-portable.
+/// TODO(gas-calibration): cluster size is subject to change.
+pub const CLUSTER_SHIFT: u32 = 21;
+
+/// Absolute 2 MiB cluster index of `addr` (`addr >> CLUSTER_SHIFT`). Both
+/// engines key read-only cluster materialization on this, so a read-only
+/// page pays `page_in` at most once per cluster, identically on each.
+#[inline]
+pub fn cluster_of(addr: u32) -> u32 {
+    addr >> CLUSTER_SHIFT
+}
 
 /// Static per-page source kind, derived once from the Image's declared
 /// memory mappings (pinned slot vs initial slot vs ephemeral / zero tail).

@@ -99,8 +99,37 @@ mod recomp {
         // InstanceCap binding both. Build each as a Cap<Global>;
         // the cache deep-clones into talc on first put and just
         // bumps refcounts on re-puts of identical content.
+        use javm_cap::image::PinnedCap;
         use javm_cap::Cap;
-        let image_cap = Cap::image_with_slots(image, &[], &[])
+        // Publish a Cap::Data per pinned/initial slot and bind the Image to
+        // them — matching production (the jar-kernel + bench `BuiltCaps`
+        // path) and the interpreter. Without populated slots, the recompiler's
+        // build_runtime can't resolve the pinned `.rodata` mappings, so it
+        // serves them as ephemeral RW `mem_buf` memory. That charges the same
+        // as a pinned read-only cap *only* when both are per-page; once
+        // read-only regions are materialized per 2 MiB cluster (vs ephemeral
+        // RW per-page), the simplified setup diverges from the interpreter.
+        let mut pinned_hashes = Vec::new();
+        let mut initial_hashes = Vec::new();
+        for (slot, pinned) in &image.pinned_slots {
+            let h = match pinned {
+                PinnedCap::Data { content, size } => {
+                    let cap = Cap::data_inline_with_size(content, *size);
+                    nub.put_cap(&cap)
+                        .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap pinned data: {e}"))
+                }
+                PinnedCap::Image { content_hash } => *content_hash,
+            };
+            pinned_hashes.push((*slot, h));
+        }
+        for (slot, init) in &image.initial_slots {
+            let cap = Cap::data_inline_with_size(&init.content, init.size);
+            let h = nub
+                .put_cap(&cap)
+                .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap initial data: {e}"));
+            initial_hashes.push((*slot, h));
+        }
+        let image_cap = Cap::image_with_slots(image, &pinned_hashes, &initial_hashes)
             .unwrap_or_else(|e| panic!("endpoint {ep}: image_with_slots: {e}"));
         let image_h = nub
             .put_cap(&image_cap)
