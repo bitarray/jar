@@ -65,9 +65,9 @@ impl Arch for LocalArch {
 /// Endpoint dispatch: `endpoint_idx` selects
 /// `image.endpoints[endpoint_idx]`; the endpoint's `entry_pc` is used
 /// as the start PC. Caller-supplied `args` overlay φ[7..=10] on top
-/// of the endpoint's `initial_regs`. Memory is sized from
-/// `instance.mem_size` and seeded with each entry in
-/// `instance.rw_overlays` laid at its declared `start`.
+/// of the endpoint's `initial_regs`. Memory is seeded from the
+/// Instance's `mem` DataCap (the whole RW extent), with pinned mappings
+/// re-laid read-only.
 pub fn run_instance(
     instance: &InstanceCap,
     image: &ImageCap,

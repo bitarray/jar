@@ -210,7 +210,7 @@ impl Image {
             if content.is_empty() {
                 continue;
             }
-            let base_off = (mapping.start as u64).saturating_sub(data_base);
+            let base_off = mapping.start.saturating_sub(data_base);
             for (i, chunk) in content.chunks(PAGE_SIZE).enumerate() {
                 backing.put_page(base_off + (i * PAGE_SIZE) as u64, chunk);
             }

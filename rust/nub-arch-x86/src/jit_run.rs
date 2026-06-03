@@ -85,9 +85,10 @@ static CTX_KVA: AtomicU64 = AtomicU64::new(0);
 // (page-in), a write maps it RW (CoW, with a fresh page for cap-backed
 // initial slots), charging category-#3 gas against the saved gas register
 // (R15). The CODE region (`MAT_CODE_*`) is `PinnedCapRo` (page-in RO,
-// write-faults). In the DATA region, pages in a `MAT_RANGES` entry are
-// cap-backed (pinned RO / initial CoW); the rest are ephemeral, backed by
-// the frame's private `mem_buf`. CoW'd cap pages are appended to the
+// write-faults). The DATA region is fully covered by `MAT_RANGES` entries
+// sourced from the Instance's `mem` DataCap: pinned VAs are `PinnedCapRo`, the
+// rest `UnpinnedCapCow` (initial slabs or — for ephemeral/zero pages — the
+// shared zero page, CoW-from-zero on write). CoW'd pages are appended to the
 // per-frame dirty sink (frame-local scaffolding, see `call_loop`).
 
 static MAT_RANGES_PTR: AtomicPtr<crate::call_loop::MatRange> =
@@ -105,8 +106,6 @@ static MAT_STATE_LEN: AtomicU64 = AtomicU64::new(0);
 /// Guest VA bounds of the lazily-materialized data extent.
 static MAT_DATA_BASE: AtomicU64 = AtomicU64::new(0);
 static MAT_MEM_TOP: AtomicU64 = AtomicU64::new(0);
-/// Physical address of the ephemeral `mem_buf` page 0 (== `DATA_BASE`).
-static MAT_MEM_BUF_PA: AtomicU64 = AtomicU64::new(0);
 /// Read-only CODE region `[code_base, code_top)` (page-rounded). A
 /// `PinnedCapRo` region: guest PIC data reads page each touched code page
 /// in RO on first read (charging #3 page-in, identical to the interp),
@@ -287,7 +286,6 @@ fn page_kind(page_va: u32) -> javm_exec::mat::PageKind {
 fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> bool {
     let data_base = MAT_DATA_BASE.load(Ordering::SeqCst);
     let mem_top = MAT_MEM_TOP.load(Ordering::SeqCst);
-    let mem_buf_pa = MAT_MEM_BUF_PA.load(Ordering::SeqCst);
     let code_base = MAT_CODE_BASE.load(Ordering::SeqCst);
     let code_top = MAT_CODE_TOP.load(Ordering::SeqCst);
     let code_pa = MAT_CODE_PA.load(Ordering::SeqCst);
@@ -378,7 +376,11 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
             continue;
         }
 
-        // WRITABLE DATA: ephemeral / cap-backed (UnpinnedCapCow) with CoW.
+        // WRITABLE DATA: cap-backed (UnpinnedCapCow) with CoW. Every in-data
+        // page is covered by a `MatRange` (the catch-all RW range spans the
+        // whole extent, sourced per-page from `inst.mem`; an `Empty`/ephemeral
+        // page resolves to the shared zero page). A page with no range can't be
+        // in-data, so it faults.
         let idx = ((pv - data_base) / PAGE_SIZE as u64) as usize;
         let cur = javm_exec::mat::PageState::from_u8(dstate[idx]);
         let range = mat_range_for(p);
@@ -389,10 +391,7 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
                 // Per-page source PA (dense cap slabs are non-contiguous).
                 mat_pa_at(&r, pv),
             ),
-            None => (
-                javm_exec::mat::PageKind::EphemeralZero,
-                mem_buf_pa + (pv - data_base),
-            ),
+            None => return false,
         };
         let (charge, next) = match javm_exec::mat::charge_for(cur, kind, is_write) {
             Ok(v) => v,
@@ -435,26 +434,12 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
                     // be TLB-cached. A first-touch write (cur == NotPresent) maps a
                     // page that was never present, so it needs no invlpg.
                     let flush = cur == javm_exec::mat::PageState::PresentRo;
-                    if kind == javm_exec::mat::PageKind::EphemeralZero {
-                        // Frame-private buffer: map it writable (builds path).
-                        // SAFETY: as above.
-                        if unsafe {
-                            crate::paging::pt_map_leaf(
-                                pml4,
-                                pv,
-                                src_pa,
-                                crate::paging::Perm::user_rw(),
-                                owned_vec,
-                            )
-                        }
-                        .is_none()
-                        {
-                            return false;
-                        }
-                        if flush {
-                            crate::paging::invlpg(pv);
-                        }
-                    } else if !cow_into_fresh(pv, src_pa, pml4, owned_vec, range, flush) {
+                    // Every writable page (initial cap or ephemeral-from-zero)
+                    // CoWs a fresh private page from `src_pa` — for an ephemeral
+                    // page `src_pa` is the shared zero page, so the CoW yields a
+                    // fresh zeroed page. (Unifies the former EphemeralZero
+                    // map-writable special case into the CoW path.)
+                    if !cow_into_fresh(pv, src_pa, pml4, owned_vec, range, flush) {
                         // Allocation / remap failure → fault (nothing charged
                         // yet for THIS page, but earlier pages of a straddle
                         // were already advanced; an OOM here is fatal anyway).
@@ -680,8 +665,6 @@ pub struct MemRegion<'a> {
 pub struct FrameRuntime {
     pt: PageTable,
     #[allow(dead_code)] // kept solely to own the backing page (referenced by `pt`).
-    mem_buf: PageBuf,
-    #[allow(dead_code)] // kept solely to own the backing page (referenced by `pt`).
     ctx_buf: PageBuf,
     stack_buf: PageBuf,
     jit_va: u64,
@@ -694,8 +677,8 @@ pub struct FrameRuntime {
     ctx_kva: u64,
     // ---- Category-#3 lazy-materialization state (persists across
     // re-entries on this frame; published to the #PF handler each entry). ----
-    /// Cap-backed data mappings (pinned RO / initial CoW), each indexing a
-    /// window into `mat_pas`. Pages not covered here are ephemeral (`mem_buf`).
+    /// Cap-backed data mappings (pinned RO / initial CoW) covering the whole
+    /// data extent, each indexing a window into `mat_pas`.
     mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
     /// Per-page source PA arena for `mat_ranges` (see `MAT_PAS_PTR`).
     mat_pas: alloc::vec::Vec<u64>,
@@ -709,8 +692,6 @@ pub struct FrameRuntime {
     /// Guest VA bounds of the lazily-materialized data extent.
     data_base: u32,
     mem_top: u32,
-    /// Physical address of `mem_buf` page 0 (the `DATA_BASE` page).
-    mem_buf_pa: u64,
     /// Read-only CODE region (page-rounded): `[code_base, code_top)`,
     /// source PA `code_pa`. Lazily materialized `PinnedCapRo` like a
     /// pinned data cap, per unit (`code ∩ cluster`, see `ro_units`).
@@ -810,11 +791,9 @@ pub unsafe fn build_frame_runtime(
         .next_multiple_of(PAGE_SIZE);
 
     // Memory is sourced lazily from the Instance's `mem` DataCap (via
-    // `mat_ranges`/`mat_pas`): every data page is covered by a `MatRange`, so
-    // there is no eager flat buffer to seed. `mem_buf` is retained only as a
-    // zeroed fallback PA for the (now-unreachable) ephemeral arm; the dedicated
-    // mem_buf removal is a follow-up.
-    let mem_buf = PageBuf::new(mem_bytes.max(PAGE_SIZE))?;
+    // `mat_ranges`/`mat_pas`): every data page is covered by a `MatRange`
+    // (initial/pinned slabs or the shared zero page), so there is NO eager flat
+    // buffer — `mem_buf` is gone. Only CTX + STACK are allocated per call.
     let ctx_buf = PageBuf::new(PAGE_SIZE)?;
     let stack_buf = PageBuf::new(PAGE_SIZE)?;
 
@@ -846,10 +825,9 @@ pub unsafe fn build_frame_runtime(
     // page-table entries here. The first guest touch of each page faults
     // into `jit_pf_handler`, which builds the PML4→PT path (recording the
     // new tables in `pt.owned`) and materializes the page (page-in / CoW),
-    // charging #3. `mem_buf` stays eagerly *allocated* (and seeded with
-    // overlays above) — only the mapping is lazy.
+    // charging #3. There is no eager data buffer: every page is materialized
+    // from `mat_pas` (cap slabs or the shared zero page).
     let mat_state = alloc::vec![0u8; mem_bytes / PAGE_SIZE];
-    let mem_buf_pa = mem_buf.pa();
     let mem_top = (data_base + mem_bytes) as u32;
     // Code region: page-rounded `[code_base, code_top)`, lazily paged in
     // RO (PinnedCapRo) per unit on guest PIC reads. The code buffer is
@@ -871,7 +849,6 @@ pub unsafe fn build_frame_runtime(
 
     Some(FrameRuntime {
         pt,
-        mem_buf,
         ctx_buf,
         stack_buf,
         jit_va,
@@ -888,7 +865,6 @@ pub unsafe fn build_frame_runtime(
         mat_state,
         data_base: data_base as u32,
         mem_top,
-        mem_buf_pa,
         code_base,
         code_top,
         code_pa,
@@ -954,7 +930,6 @@ pub unsafe fn enter_frame(
     MAT_STATE_LEN.store(rt.mat_state.len() as u64, Ordering::SeqCst);
     MAT_DATA_BASE.store(rt.data_base as u64, Ordering::SeqCst);
     MAT_MEM_TOP.store(rt.mem_top as u64, Ordering::SeqCst);
-    MAT_MEM_BUF_PA.store(rt.mem_buf_pa, Ordering::SeqCst);
     MAT_CODE_BASE.store(rt.code_base as u64, Ordering::SeqCst);
     MAT_CODE_TOP.store(rt.code_top as u64, Ordering::SeqCst);
     MAT_CODE_PA.store(rt.code_pa, Ordering::SeqCst);
