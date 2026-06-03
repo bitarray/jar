@@ -1,48 +1,80 @@
 //! Integration tests for `javm_cap::cap::image` — the cap-level
-//! `ImageCap` / `MemoryMapping` (distinct from the SSZ wire-form
-//! `javm_cap::image::MemoryMapping` exercised in `tests/image.rs`).
+//! `ImageCap` / `MemoryMapping`.
 //!
-//! Focus: the eager *structural* invariants the deblob must enforce so a
-//! malformed Image can neither panic the host nor diverge between engines.
+//! `MemoryMapping.source` is now a variable-length [`SlotPath`] with a fully
+//! derived SSZ codec (was a fixed `[SlotIdx; MAX_SOURCE_DEPTH]` + length with
+//! a hand-rolled codec). The eager structural bound on path depth
+//! (`≤ MAX_SOURCE_DEPTH`) moved from the `MemoryMapping` wire decode to the
+//! `image_cap` deblob — so these tests exercise it there.
 
-use javm_cap::{MAX_SOURCE_DEPTH, MemoryMapping, SlotIdx};
-use ssz::Decode as _;
-
-/// SSZ fixed form of a cap-level `MemoryMapping`:
-/// `u64 start || u64 size || MAX_SOURCE_DEPTH×u32 || u8 source_path_len`.
-fn mapping_bytes(source_path_len: u8) -> Vec<u8> {
-    let mut bytes = vec![0u8; 8 + 8 + MAX_SOURCE_DEPTH * 4 + 1];
-    *bytes.last_mut().unwrap() = source_path_len;
-    bytes
-}
+use javm_cap::image::{Image, MemoryMapping as WireMapping};
+use javm_cap::{ImageConvertError, MAX_SOURCE_DEPTH, MemoryMapping, SlotKey, SlotPath};
+use ssz::{Decode as _, Encode as _};
+use std::collections::BTreeMap;
 
 #[test]
-fn decode_rejects_oversized_source_path_len() {
-    // `source_path_len > MAX_SOURCE_DEPTH` would make `path()` index past
-    // the fixed array — reject it at the decode boundary instead.
-    let bytes = mapping_bytes((MAX_SOURCE_DEPTH + 1) as u8);
-    let err = MemoryMapping::from_ssz_bytes(&bytes).unwrap_err();
-    assert!(matches!(err, ssz::DecodeError::BoundExceeded { .. }));
-
-    // The extreme (255) is rejected too, not silently truncated.
-    assert!(MemoryMapping::from_ssz_bytes(&mapping_bytes(255)).is_err());
-}
-
-#[test]
-fn decode_accepts_len_at_the_bound() {
-    let m = MemoryMapping::from_ssz_bytes(&mapping_bytes(MAX_SOURCE_DEPTH as u8)).unwrap();
-    assert_eq!(m.path().len(), MAX_SOURCE_DEPTH);
-}
-
-#[test]
-fn path_is_total_for_a_malformed_len() {
-    // A hand-built mapping (bypassing decode / `image_cap`) with a bogus
-    // length must clamp, never panic the host.
+fn mapping_ssz_roundtrips() {
     let m = MemoryMapping {
-        start: 0,
-        size: 0,
-        source_path: [SlotIdx(0); MAX_SOURCE_DEPTH],
-        source_path_len: 250,
+        start: 0x1000,
+        size: 0x2000,
+        source: SlotPath::new([SlotKey::from(7u8), SlotKey::from(&[3u8, 9][..])]).unwrap(),
     };
-    assert_eq!(m.path().len(), MAX_SOURCE_DEPTH);
+    let bytes = m.as_ssz_bytes();
+    let back = MemoryMapping::from_ssz_bytes(&bytes).unwrap();
+    assert_eq!(m, back);
+    assert_eq!(back.path().len(), 2);
+    assert_eq!(back.path()[0], SlotKey::from(7u8));
+}
+
+/// Build a minimal host `Image` with a single mapping whose `source` path has
+/// `depth` steps (each a distinct 1-byte key).
+fn image_with_source_depth(depth: usize) -> Image {
+    let steps: Vec<SlotKey> = (0..depth).map(|i| SlotKey::from(i as u8)).collect();
+    let source = SlotPath(steps.into_iter().collect());
+    let mut img = Image::empty();
+    img.memory_mappings.push(WireMapping {
+        start: javm_cap::layout::DATA_BASE as u64,
+        size: 0x1000,
+        source,
+    });
+    img
+}
+
+#[test]
+fn image_cap_rejects_empty_source_path() {
+    let mut img = Image::empty();
+    img.memory_mappings.push(WireMapping {
+        start: javm_cap::layout::DATA_BASE as u64,
+        size: 0x1000,
+        // Directly construct an empty path (bypassing `SlotPath::new`, which
+        // forbids it) to exercise the deblob guard.
+        source: SlotPath(Default::default()),
+    });
+    let err = javm_cap::image_cap(&img, &[], &[]).unwrap_err();
+    assert!(matches!(err, ImageConvertError::SourcePathEmpty));
+}
+
+#[test]
+fn image_cap_rejects_too_deep_source_path() {
+    let img = image_with_source_depth(MAX_SOURCE_DEPTH + 1);
+    let err = javm_cap::image_cap(&img, &[], &[]).unwrap_err();
+    assert!(matches!(err, ImageConvertError::SourcePathTooDeep(d) if d == MAX_SOURCE_DEPTH + 1));
+}
+
+#[test]
+fn image_cap_accepts_source_path_at_bound() {
+    let img = image_with_source_depth(MAX_SOURCE_DEPTH);
+    let cap = javm_cap::image_cap(&img, &[], &[]).expect("path at the bound is accepted");
+    assert_eq!(cap.mappings.len(), 1);
+    assert_eq!(cap.mappings[0].path().len(), MAX_SOURCE_DEPTH);
+}
+
+#[test]
+fn image_cap_empty_image_has_no_mappings() {
+    let img = Image {
+        endpoints: BTreeMap::new(),
+        ..Image::empty()
+    };
+    let cap = javm_cap::image_cap(&img, &[], &[]).unwrap();
+    assert!(cap.mappings.is_empty());
 }

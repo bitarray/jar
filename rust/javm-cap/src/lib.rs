@@ -22,7 +22,6 @@
 //! See `~/jar/website/content/spec/implementation/architecture.md` for
 //! the crate's role in the overall layering.
 
-#[macro_use]
 extern crate alloc;
 
 pub mod abi;
@@ -49,4 +48,4 @@ pub use hash::{Blake2b256, Hash, Hasher};
 pub use image::{
     Image, InitialDataCap, PinnedCap, chain_extend, chain_genesis, image_content_hash,
 };
-pub use slot::{SlotIdx, SlotPath};
+pub use slot::{MAX_SLOT_KEY_LEN, SlotKey, SlotPath};

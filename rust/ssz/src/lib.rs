@@ -32,6 +32,7 @@ pub mod merkle;
 pub mod missing;
 pub mod primitives;
 pub mod radix;
+mod smallvec_impl;
 pub mod sparse;
 pub mod union;
 pub mod vector;

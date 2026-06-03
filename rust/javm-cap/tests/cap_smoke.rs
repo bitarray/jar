@@ -4,8 +4,8 @@
 
 use javm_cap::{
     CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, EndpointDef, ImageCap, ImageSlotEntry,
-    InstanceCap, MAX_SOURCE_DEPTH, MemoryMapping, NUM_REGS, PAGE_SIZE, PageBytes, PageRef,
-    PageSlot, SlotIdx,
+    InstanceCap, MemoryMapping, NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotKey,
+    SlotPath,
 };
 use std::sync::Arc;
 
@@ -66,34 +66,43 @@ fn empty_cnode_constructor() {
 #[test]
 fn cnode_set_get_take_semantics() {
     let mut cnode: CNodeCap = CNodeCap::new();
-    assert_eq!(cnode.get(SlotIdx(0)), None);
+    assert_eq!(cnode.get(&SlotKey::from(0u8)), None);
 
     // First insert reports no prior binding.
     let prior = cnode
-        .set(SlotIdx(7), Some(CapHashOrRef::Hash([0x77; 32])))
+        .set(&SlotKey::from(7u8), Some(CapHashOrRef::Hash([0x77; 32])))
         .unwrap();
     assert_eq!(prior, None);
     cnode
-        .set(SlotIdx(2), Some(CapHashOrRef::Hash([0x22; 32])))
+        .set(&SlotKey::from(2u8), Some(CapHashOrRef::Hash([0x22; 32])))
         .unwrap();
     cnode
-        .set(SlotIdx(11), Some(CapHashOrRef::Hash([0xBB; 32])))
+        .set(&SlotKey::from(11u8), Some(CapHashOrRef::Hash([0xBB; 32])))
         .unwrap();
     assert_eq!(cnode.slots.len(), 3);
-    assert_eq!(cnode.get(SlotIdx(2)), Some(CapHashOrRef::Hash([0x22; 32])));
-    assert_eq!(cnode.get(SlotIdx(11)), Some(CapHashOrRef::Hash([0xBB; 32])));
+    assert_eq!(
+        cnode.get(&SlotKey::from(2u8)),
+        Some(CapHashOrRef::Hash([0x22; 32]))
+    );
+    assert_eq!(
+        cnode.get(&SlotKey::from(11u8)),
+        Some(CapHashOrRef::Hash([0xBB; 32]))
+    );
 
     // Overwrite returns prior target.
     let prior = cnode
-        .set(SlotIdx(7), Some(CapHashOrRef::Hash([0xFF; 32])))
+        .set(&SlotKey::from(7u8), Some(CapHashOrRef::Hash([0xFF; 32])))
         .unwrap();
     assert_eq!(prior, Some(CapHashOrRef::Hash([0x77; 32])));
-    assert_eq!(cnode.get(SlotIdx(7)), Some(CapHashOrRef::Hash([0xFF; 32])));
+    assert_eq!(
+        cnode.get(&SlotKey::from(7u8)),
+        Some(CapHashOrRef::Hash([0xFF; 32]))
+    );
 
     // Take removes and returns the prior target.
-    let taken = cnode.take(SlotIdx(2)).unwrap();
+    let taken = cnode.take(&SlotKey::from(2u8)).unwrap();
     assert_eq!(taken, Some(CapHashOrRef::Hash([0x22; 32])));
-    assert_eq!(cnode.get(SlotIdx(2)), None);
+    assert_eq!(cnode.get(&SlotKey::from(2u8)), None);
     assert_eq!(cnode.slots.len(), 2);
 }
 
@@ -101,19 +110,22 @@ fn cnode_set_get_take_semantics() {
 fn cnode_lookup_after_set() {
     let mut cnode: CNodeCap = CNodeCap::new();
     cnode
-        .set(SlotIdx(7), Some(CapHashOrRef::Hash([0x11; 32])))
+        .set(&SlotKey::from(7u8), Some(CapHashOrRef::Hash([0x11; 32])))
         .unwrap();
     // Mint a real CapRef via the cache so the bookkeeping test
     // doesn't depend on the crate-internal `CapRef::new`.
     let cache = CacheDirectory::new();
     let r = cache.put_instance(Cap::CNode(CNodeCap::new()));
     cnode
-        .set(SlotIdx(42), Some(CapHashOrRef::Ref(r.clone())))
+        .set(&SlotKey::from(42u8), Some(CapHashOrRef::Ref(r.clone())))
         .unwrap();
 
-    assert_eq!(cnode.get(SlotIdx(7)), Some(CapHashOrRef::Hash([0x11; 32])));
-    assert_eq!(cnode.get(SlotIdx(42)), Some(CapHashOrRef::Ref(r)));
-    assert_eq!(cnode.get(SlotIdx(100)), None);
+    assert_eq!(
+        cnode.get(&SlotKey::from(7u8)),
+        Some(CapHashOrRef::Hash([0x11; 32]))
+    );
+    assert_eq!(cnode.get(&SlotKey::from(42u8)), Some(CapHashOrRef::Ref(r)));
+    assert_eq!(cnode.get(&SlotKey::from(100u8)), None);
 }
 
 #[test]
@@ -179,25 +191,21 @@ fn endpoint_def_empty_sentinel() {
 
 #[test]
 fn memory_mapping_path_slice() {
-    let mut path = [SlotIdx(0); MAX_SOURCE_DEPTH];
-    path[0] = SlotIdx(3);
-    path[1] = SlotIdx(7);
     let m = MemoryMapping {
         start: 0x4000,
         size: 0x2000,
-        source_path: path,
-        source_path_len: 2,
+        source: SlotPath::new([SlotKey::from(3u8), SlotKey::from(7u8)]).unwrap(),
     };
-    assert_eq!(m.path(), &[SlotIdx(3), SlotIdx(7)]);
+    assert_eq!(m.path(), &[SlotKey::from(3u8), SlotKey::from(7u8)]);
 }
 
 #[test]
 fn image_slot_entry_compact() {
     let e = ImageSlotEntry {
-        slot: SlotIdx(5),
+        slot: SlotKey::from(5u8),
         cap_hash: [0xEE; 32],
     };
-    assert_eq!(e.slot, SlotIdx(5));
+    assert_eq!(e.slot, SlotKey::from(5u8));
     assert_eq!(e.cap_hash, [0xEE; 32]);
 }
 
@@ -231,7 +239,7 @@ fn cache_round_trips_full_publish_chain() {
     // 2. Publish a CNode referencing the Data blob by hash.
     let cnode_h = {
         let mut cn: CNodeCap = CNodeCap::new();
-        cn.set(SlotIdx(0), Some(CapHashOrRef::Hash(data_h)))
+        cn.set(&SlotKey::from(0u8), Some(CapHashOrRef::Hash(data_h)))
             .unwrap();
         cache.put_cap(&Cap::CNode(cn)).expect("put cnode")
     };
@@ -241,7 +249,7 @@ fn cache_round_trips_full_publish_chain() {
     //    pinned slot.
     let mut img = make_image_cap();
     img.pinned.push(ImageSlotEntry {
-        slot: SlotIdx(7),
+        slot: SlotKey::from(7u8),
         cap_hash: data_h,
     });
     let image_h = cache.put_cap(&Cap::Image(img)).expect("put image");
@@ -306,7 +314,7 @@ fn capref_sweep_cascades_through_cnode_ref_chain() {
     // leaf's strong count when we clone the CNodeCap into the cap.
     let mut parent_cn: CNodeCap = CNodeCap::new();
     parent_cn
-        .set(SlotIdx(0), Some(CapHashOrRef::Ref(leaf.clone())))
+        .set(&SlotKey::from(0u8), Some(CapHashOrRef::Ref(leaf.clone())))
         .unwrap();
     let parent = cache.put_instance(Cap::CNode(parent_cn));
 

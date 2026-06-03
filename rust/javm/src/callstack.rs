@@ -27,7 +27,7 @@
 
 use std::sync::Arc;
 
-use javm_cap::{CNodeCap, CapHash, CapHashOrRef, SlotIdx};
+use javm_cap::{CNodeCap, CapHash, CapHashOrRef, SlotKey};
 use javm_exec::{GasCounter, Mem, Regs, interp::Program};
 
 use crate::error::VmError;
@@ -65,10 +65,10 @@ pub struct InstanceEntry {
     /// HALT it's commit-merged back into the cache.
     pub root_cnode: CNodeCap,
     /// `Image.yield_marker_slot`, cached for yield routing.
-    pub yield_marker_slot: Option<SlotIdx>,
+    pub yield_marker_slot: Option<SlotKey>,
     /// Sorted slot indices declared pinned by this Image. Cached for
     /// fast `is_pinned` checks.
-    pub pinned_slots: Vec<SlotIdx>,
+    pub pinned_slots: Vec<SlotKey>,
     /// Working registers.
     pub regs: Regs,
     /// Working memory (mapped RW overlays + ephemeral).

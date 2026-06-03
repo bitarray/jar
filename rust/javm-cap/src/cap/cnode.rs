@@ -8,10 +8,12 @@
 //! capacity bound** — a CNode is bounded by storage quota, not a
 //! compile-time slot count, and a single-entry CNode is one leaf at depth 1.
 //!
-//! The current ABI keys CNodes by a single byte (the [`SlotIdx`] low byte;
-//! the root cnode has 256 logical slots), so [`CNodeCap::get`] /
-//! [`CNodeCap::set`] / [`CNodeCap::take`] take a [`SlotIdx`] and hash its
-//! low byte. Arbitrary-length keys are a future ABI extension exposed via
+//! A slot is named by a [`SlotKey`] (a short byte string); [`CNodeCap::get`]
+//! / [`CNodeCap::set`] / [`CNodeCap::take`] hash the key to its physical
+//! radix key. The V1 ABI uses single-byte keys (`SlotKey::from(b)`), but the
+//! map admits arbitrary-length keys natively (the same `get`/`set`/`take`
+//! surface), so a future ABI can key e.g. `address -> Cap::Instance` with no
+//! structural change. The raw `&[u8]` form is exposed via
 //! [`CNodeCap::get_key`] / [`CNodeCap::set_key`] / [`CNodeCap::take_key`].
 //!
 //! The leaf value is **always a cap** ([`CapHashOrRef`]), never raw data —
@@ -25,7 +27,7 @@ use ssz::{MissingOr, RadixMap};
 use crate::cache::CapHashOrRef;
 use crate::error::CapError;
 use crate::hash::{Hash, Hasher};
-use crate::slot::SlotIdx;
+use crate::slot::SlotKey;
 
 /// Physical radix-key width: a 32-byte digest of the logical key.
 pub const CNODE_KEY_BYTES: usize = 32;
@@ -64,21 +66,7 @@ impl CNodeCap {
         <Hasher as Hash>::hash(k)
     }
 
-    /// The single-byte logical key a [`SlotIdx`] denotes under the current
-    /// ABI. The handler layer masks indices to a byte (`gpr & 0xFF`); be
-    /// loud (debug) if a wider index slips through rather than silently
-    /// aliasing two slots onto the same byte.
-    #[inline]
-    fn slot_byte(slot: SlotIdx) -> [u8; 1] {
-        debug_assert!(
-            slot.get() <= 0xFF,
-            "CNode SlotIdx {} exceeds the single-byte ABI",
-            slot.get()
-        );
-        [(slot.get() & 0xFF) as u8]
-    }
-
-    // ---- logical byte-string key API (extension point) ----
+    // ---- logical byte-string key API ----
 
     /// Look up the cap bound to logical key `k`. Returns `None` for an
     /// absent key or a `Missing(_)` placeholder (callers needing to tell
@@ -115,29 +103,29 @@ impl CNodeCap {
         self.set_key(k, None)
     }
 
-    // ---- SlotIdx ABI (current single-byte form) ----
+    // ---- SlotKey API ----
 
-    /// Look up a slot by index (hashes the index's low byte). See
-    /// [`CNodeCap::get_key`] for the placeholder semantics.
-    pub fn get(&self, slot: SlotIdx) -> Option<CapHashOrRef> {
-        self.get_key(&Self::slot_byte(slot))
+    /// Look up the slot named by `key`. See [`CNodeCap::get_key`] for the
+    /// placeholder semantics.
+    pub fn get(&self, key: &SlotKey) -> Option<CapHashOrRef> {
+        self.get_key(key.as_slice())
     }
 
-    /// Bind `slot` to `target`, or clear it if `None`. Returns the prior
+    /// Bind `key` to `target`, or clear it if `None`. Returns the prior
     /// materialized target, if any. The radix map is unbounded, so this is
     /// infallible; the `Result` is retained for ABI compatibility with the
     /// pervasive `?`-using call sites.
     pub fn set(
         &mut self,
-        slot: SlotIdx,
+        key: &SlotKey,
         target: Option<CapHashOrRef>,
     ) -> Result<Option<CapHashOrRef>, CapError> {
-        Ok(self.set_key(&Self::slot_byte(slot), target))
+        Ok(self.set_key(key.as_slice(), target))
     }
 
-    /// Take the binding at `slot`, leaving it empty. Returns the prior
+    /// Take the binding at `key`, leaving it empty. Returns the prior
     /// materialized target (or `None`).
-    pub fn take(&mut self, slot: SlotIdx) -> Result<Option<CapHashOrRef>, CapError> {
-        self.set(slot, None)
+    pub fn take(&mut self, key: &SlotKey) -> Result<Option<CapHashOrRef>, CapError> {
+        self.set(key, None)
     }
 }

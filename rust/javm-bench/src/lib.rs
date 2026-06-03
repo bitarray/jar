@@ -28,7 +28,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput};
 use javm_cap::NUM_REGS;
 use javm_cap::image::{Image, PinnedCap};
-use javm_cap::slot::SlotIdx;
+use javm_cap::slot::SlotKey;
 use javm_cap::{Cap, CapHash};
 use nub::{InvocationResult, Nub};
 use std::sync::{Mutex, OnceLock};
@@ -75,8 +75,8 @@ impl BuiltCaps {
         // 1. Build a Cap::Data per non-empty pinned/initial slot. Track
         //    each slot's resolved CapHash so the Image can reference them.
         let mut data_caps: Vec<(CapHash, Cap)> = Vec::new();
-        let mut pinned_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
-        let mut initial_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
+        let mut pinned_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
+        let mut initial_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
 
         for (slot, pinned) in &image.pinned_slots {
             let (h, cap) = match pinned {
@@ -91,7 +91,7 @@ impl BuiltCaps {
                     (*content_hash, None)
                 }
             };
-            pinned_hashes.push((*slot, h));
+            pinned_hashes.push((slot.clone(), h));
             if let Some(c) = cap {
                 data_caps.push((h, c));
             }
@@ -99,7 +99,7 @@ impl BuiltCaps {
         for (slot, init) in &image.initial_slots {
             let cap = Cap::data_inline_with_size(&init.content, init.size);
             let h = ssz::hash_tree_root(&cap);
-            initial_hashes.push((*slot, h));
+            initial_hashes.push((slot.clone(), h));
             data_caps.push((h, cap));
         }
 
@@ -362,8 +362,8 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
     // Cap::Image; the in-kernel call_loop reads those bytes from the
     // shared cache when building a child frame's mem image.
     let mut data_caps: Vec<(CapHash, Cap)> = Vec::new();
-    let mut pinned_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
-    let mut initial_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
+    let mut pinned_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
+    let mut initial_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
     for (slot, pinned) in &image.pinned_slots {
         let (h, maybe_cap) = match pinned {
             PinnedCap::Data { content, size } => {
@@ -373,7 +373,7 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
             }
             PinnedCap::Image { content_hash } => (*content_hash, None),
         };
-        pinned_hashes.push((*slot, h));
+        pinned_hashes.push((slot.clone(), h));
         if let Some(cap) = maybe_cap {
             data_caps.push((h, cap));
         }
@@ -381,7 +381,7 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
     for (slot, init) in &image.initial_slots {
         let cap = Cap::data_inline_with_size(&init.content, init.size);
         let h = ssz::hash_tree_root(&cap);
-        initial_hashes.push((*slot, h));
+        initial_hashes.push((slot.clone(), h));
         data_caps.push((h, cap));
     }
     for (h, cap) in &data_caps {
@@ -395,7 +395,7 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
 
     let mut cn = CNodeCap::new();
     cn.set(
-        SlotIdx(SLOT_IMAGE_RECURSE),
+        &SlotKey::from(SLOT_IMAGE_RECURSE as u8),
         Some(CapHashOrRef::Hash(image_hash)),
     )
     .expect("set image slot");

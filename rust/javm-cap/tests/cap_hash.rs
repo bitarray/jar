@@ -1,6 +1,6 @@
 use javm_cap::{
     CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, DataGroup, DataGroups, ImageCap,
-    InstanceCap, NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotIdx, TypeCap,
+    InstanceCap, NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotKey, TypeCap,
 };
 use ssz::MissingOr;
 
@@ -60,7 +60,7 @@ fn cnode_empty_vs_one_populated_differ() {
     let empty: CNodeCap = CNodeCap::new();
     let mut populated: CNodeCap = CNodeCap::new();
     populated
-        .set(SlotIdx(0), Some(CapHashOrRef::Hash([0xEE; 32])))
+        .set(&SlotKey::from(0u8), Some(CapHashOrRef::Hash([0xEE; 32])))
         .unwrap();
     let a: Cap = Cap::CNode(empty);
     let b: Cap = Cap::CNode(populated);
@@ -72,7 +72,8 @@ fn cnode_with_ref_target_panics() {
     let cache = CacheDirectory::new();
     let r = cache.put_instance(Cap::CNode(CNodeCap::new()));
     let mut cn: CNodeCap = CNodeCap::new();
-    cn.set(SlotIdx(0), Some(CapHashOrRef::Ref(r))).unwrap();
+    cn.set(&SlotKey::from(0u8), Some(CapHashOrRef::Ref(r)))
+        .unwrap();
     let cap: Cap = Cap::CNode(cn);
     let result = std::panic::catch_unwind(|| cap.cap_hash());
     assert!(result.is_err());

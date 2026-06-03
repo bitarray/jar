@@ -19,7 +19,7 @@
 //! into it) and in-flight resolution (host calls read referenced caps
 //! by their `CapHashOrRef` target).
 
-use javm_cap::{CacheDirectory, Cap, CapHash, CapHashOrRef, NUM_REGS, SlotIdx};
+use javm_cap::{CacheDirectory, Cap, CapHash, CapHashOrRef, NUM_REGS, SlotKey};
 use javm_exec::{Access, CopyingMemory, ExitReason, GasCounter, Mem, Regs, interp::Interpreter};
 
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
@@ -198,7 +198,7 @@ impl<K: KernelAssist> Vm<K> {
         // direct map. No cache lookup needed: the content is already in mem.
         let data_base = javm_cap::layout::DATA_BASE as u64;
         for m in img.mappings.iter() {
-            if m.source_path_len == 0 || !img.mapping_is_pinned(m.start as u32) {
+            if m.path().is_empty() || !img.mapping_is_pinned(m.start as u32) {
                 continue;
             }
             let off = (m.start.saturating_sub(data_base)) as usize;
@@ -243,7 +243,7 @@ impl<K: KernelAssist> Vm<K> {
 
         // CacheDirectory image-side metadata on the entry for fast host-call
         // lookups (pinned check, yield routing).
-        let pinned_slots: Vec<SlotIdx> = img.pinned.iter().map(|e| e.slot).collect();
+        let pinned_slots: Vec<SlotKey> = img.pinned.iter().map(|e| e.slot.clone()).collect();
 
         let entry = InstanceEntry {
             instance_ref: inst_ref,
@@ -251,7 +251,7 @@ impl<K: KernelAssist> Vm<K> {
             image_hash: inst.image_hash,
             program,
             root_cnode,
-            yield_marker_slot: img.yield_marker_slot,
+            yield_marker_slot: img.yield_marker_slot.clone(),
             pinned_slots,
             regs: Regs::new(),       // placeholder; live regs are in `regs`
             mem: Mem::new(),         // placeholder
@@ -298,7 +298,7 @@ impl<K: KernelAssist> Vm<K> {
                 .stack
                 .running_instance_mut()
                 .ok_or(VmError::Invariant("call_resume: no instance after pop"))?;
-            inst.root_cnode.set(SlotIdx(0), Some(target))?;
+            inst.root_cnode.set(&SlotKey::from(0u8), Some(target))?;
         }
 
         // 3. Take the resumed Instance's saved regs/mem/gas out into
@@ -411,7 +411,7 @@ impl<K: KernelAssist> Vm<K> {
                     .running_instance_mut()
                     .ok_or(VmError::Invariant("no child to halt"))?
                     .root_cnode
-                    .take(SlotIdx(0))
+                    .take(&SlotKey::from(0u8))
                     .ok()
                     .flatten();
                 self.stack.pop();
@@ -423,7 +423,7 @@ impl<K: KernelAssist> Vm<K> {
                 regs = core::mem::replace(&mut parent.regs, Regs::new());
                 mem = core::mem::replace(&mut parent.mem, Mem::new());
                 if let Some(s0) = child_slot0 {
-                    parent.root_cnode.set(SlotIdx(0), Some(s0))?;
+                    parent.root_cnode.set(&SlotKey::from(0u8), Some(s0))?;
                 }
                 continue;
             }
@@ -457,12 +457,12 @@ impl<K: KernelAssist> Vm<K> {
             let marker_payload = if let Some(p) = oog_marker_payload {
                 Some(p)
             } else {
-                let marker_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+                let marker_slot = SlotKey::from((regs.gpr[7] & 0xFF) as u8);
                 let yielder = match &self.stack.entries()[pushed_pos] {
                     Entry::Instance(e) => e.as_ref(),
                     _ => return Err(VmError::Invariant("yielder is not an Instance")),
                 };
-                yielder.root_cnode.get(marker_slot)
+                yielder.root_cnode.get(&marker_slot)
             };
 
             // Save live state back into the yielder InstanceEntry.
@@ -498,7 +498,7 @@ impl<K: KernelAssist> Vm<K> {
         let (entry, slot0_target) = match popped {
             Entry::Instance(e) => {
                 let mut e = *e;
-                let slot0 = e.root_cnode.take(SlotIdx(0)).ok().flatten();
+                let slot0 = e.root_cnode.take(&SlotKey::from(0u8)).ok().flatten();
                 (e, slot0)
             }
             _ => return Err(VmError::Invariant("popped a non-Instance entry")),
@@ -603,7 +603,7 @@ impl<K: KernelAssist> Vm<K> {
         let extent = page_round_up_u64(mem_top.saturating_sub(data_base));
         let mut buf = vec![0u8; extent as usize];
         for m in img.mappings.iter() {
-            if m.source_path_len == 0 {
+            if m.path().is_empty() {
                 continue;
             }
             let len = m.size as usize;
@@ -654,14 +654,14 @@ impl<K: KernelAssist> Vm<K> {
                 Entry::Instance(ie) => ie.as_ref(),
                 Entry::Reference(_) => continue,
             };
-            let Some(catcher_slot) = ie.yield_marker_slot else {
+            let Some(catcher_slot) = ie.yield_marker_slot.clone() else {
                 continue;
             };
             // Catcher hash is the image_hash_chain at the catcher
             // slot. Per the legacy model we looked up Cap::Instance;
             // here we just key on the slot target's hash form
             // (CapHashOrRef::Hash) — that's the marker template hash.
-            let catcher_hash = match ie.root_cnode.get(catcher_slot) {
+            let catcher_hash = match ie.root_cnode.get(&catcher_slot) {
                 Some(CapHashOrRef::Hash(h)) => h,
                 _ => continue,
             };
@@ -731,8 +731,6 @@ mod tests {
             endpoints: BTreeMap::new(),
             // Code is mapped at the fixed CODE_BASE; no data mappings.
             memory_mappings: Vec::new(),
-            gas_slots: Vec::new(),
-            quota_slots: Vec::new(),
             pinned_slots: BTreeMap::new(),
             initial_slots: BTreeMap::new(),
             yield_marker_slot: None,
@@ -882,7 +880,7 @@ mod tests {
             .unwrap();
         let m_cnode_hash = {
             let mut cn = javm_cap::CNodeCap::new();
-            cn.set(SlotIdx(9), Some(CapHashOrRef::Hash(s_inst_hash)))
+            cn.set(&SlotKey::from(9u8), Some(CapHashOrRef::Hash(s_inst_hash)))
                 .unwrap();
             cache.put_cap(&Cap::CNode(cn)).unwrap()
         };

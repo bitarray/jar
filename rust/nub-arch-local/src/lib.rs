@@ -98,7 +98,7 @@ pub fn run_instance(
     // guest store faults, matching the recompiler's PinnedCapRo direct map.
     let data_base = javm_cap::layout::DATA_BASE as u64;
     for m in image.mappings.iter() {
-        if m.source_path_len == 0 || !image.mapping_is_pinned(m.start as u32) {
+        if m.path().is_empty() || !image.mapping_is_pinned(m.start as u32) {
             continue;
         }
         let off = (m.start.saturating_sub(data_base)) as usize;

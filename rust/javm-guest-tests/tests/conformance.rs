@@ -113,14 +113,14 @@ mod recomp {
                 }
                 PinnedCap::Image { content_hash } => *content_hash,
             };
-            pinned_hashes.push((*slot, h));
+            pinned_hashes.push((slot.clone(), h));
         }
         for (slot, init) in &image.initial_slots {
             let cap = Cap::data_inline_with_size(&init.content, init.size);
             let h = nub
                 .put_cap(&cap)
                 .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap initial data: {e}"));
-            initial_hashes.push((*slot, h));
+            initial_hashes.push((slot.clone(), h));
         }
         let image_cap = Cap::image_with_slots(image, &pinned_hashes, &initial_hashes)
             .unwrap_or_else(|e| panic!("endpoint {ep}: image_with_slots: {e}"));

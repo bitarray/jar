@@ -520,7 +520,7 @@ fn cow_into_fresh(
         let sink = unsafe { &mut *sink_ptr };
         let (source_hash, source_slot) = match range {
             Some(r) => (r.source_hash, r.source_slot),
-            None => ([0u8; 32], javm_cap::slot::SlotIdx(0)),
+            None => ([0u8; 32], 0u8),
         };
         sink.push(crate::call_loop::DirtyPage {
             guest_va: page_va as u32,

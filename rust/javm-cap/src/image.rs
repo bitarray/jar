@@ -26,7 +26,7 @@
 //! has one canonical form.
 
 use crate::hash::Hash;
-use crate::slot::SlotIdx;
+use crate::slot::SlotKey;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use ssz_derive::{Decode, Encode};
@@ -65,23 +65,16 @@ pub struct Image {
     /// appears in `pinned_slots`. Code is mapped separately at
     /// [`crate::layout::CODE_BASE`] and is not described here.
     pub memory_mappings: Vec<MemoryMapping>,
-    /// Cnode slots holding `Cap::Instance[Gas{meter_id}]`. Active
-    /// gas debit comes from the first slot's meter; the rest are
-    /// fallback reserves (chain-spec policy).
-    pub gas_slots: Vec<SlotIdx>,
-    /// Cnode slots holding `Cap::Instance[Quota{quota_id}]`.
-    /// Symmetric with `gas_slots`.
-    pub quota_slots: Vec<SlotIdx>,
     /// Pinned read-only caps (Cap::Data or Cap::Image) baked into
     /// the spec. The kernel rejects mutations to these slots.
-    pub pinned_slots: BTreeMap<SlotIdx, PinnedCap>,
+    pub pinned_slots: BTreeMap<SlotKey, PinnedCap>,
     /// Initial cnode state for non-pinned mutable slots. Only
     /// honored at standalone (root) Instance bootstrap — a
     /// parented Instance receives its cnode from the spawner.
-    pub initial_slots: BTreeMap<SlotIdx, InitialDataCap>,
+    pub initial_slots: BTreeMap<SlotKey, InitialDataCap>,
     /// Slot holding `Cap::Instance[YieldCatcher]`, if this Instance
     /// catches yields. None = no catcher.
-    pub yield_marker_slot: Option<SlotIdx>,
+    pub yield_marker_slot: Option<SlotKey>,
 }
 
 /// Endpoint definition: entry PC + register conventions.
@@ -155,8 +148,6 @@ impl Image {
             code: Vec::new(),
             endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
-            gas_slots: Vec::new(),
-            quota_slots: Vec::new(),
             pinned_slots: BTreeMap::new(),
             initial_slots: BTreeMap::new(),
             yield_marker_slot: None,
@@ -198,11 +189,13 @@ impl Image {
         let mut backing = DataCap::from_bytes_sized(&[], size);
         let data_base = crate::layout::DATA_BASE as u64;
         for mapping in &self.memory_mappings {
-            let target = mapping.source.target();
+            let Some(target) = mapping.source.target() else {
+                continue;
+            };
             let content: &[u8] =
-                if let Some(PinnedCap::Data { content, .. }) = self.pinned_slots.get(&target) {
+                if let Some(PinnedCap::Data { content, .. }) = self.pinned_slots.get(target) {
                     content
-                } else if let Some(init) = self.initial_slots.get(&target) {
+                } else if let Some(init) = self.initial_slots.get(target) {
                     &init.content
                 } else {
                     continue;

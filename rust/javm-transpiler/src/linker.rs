@@ -37,8 +37,8 @@ use crate::layout::{
     CODE_BASE, DATA_BASE, HEAP_CAP_INDEX, MAX_CODE_SIZE, PVM_PAGE_SIZE, ProgramLayout,
     RO_CAP_INDEX, RW_CAP_INDEX, STACK_CAP_INDEX,
 };
-use javm_cap::SlotIdx;
-use javm_cap::abi::{BARE_GAS_SLOT, BARE_QUOTA_SLOT, BARE_YIELD_CATCHER_SLOT};
+use javm_cap::SlotKey;
+use javm_cap::abi::BARE_YIELD_CATCHER_SLOT;
 use javm_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap};
 use javm_cap::slot::SlotPath;
 use std::collections::BTreeMap;
@@ -439,16 +439,16 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     }
 
     let mut memory_mappings: Vec<MemoryMapping> = Vec::new();
-    let mut pinned_slots: BTreeMap<SlotIdx, PinnedCap> = BTreeMap::new();
-    let mut initial_slots: BTreeMap<SlotIdx, InitialDataCap> = BTreeMap::new();
+    let mut pinned_slots: BTreeMap<SlotKey, PinnedCap> = BTreeMap::new();
+    let mut initial_slots: BTreeMap<SlotKey, InitialDataCap> = BTreeMap::new();
     let page_bytes = u64::from(PVM_PAGE_SIZE);
 
-    let stack_slot = SlotIdx(u32::from(STACK_CAP_INDEX));
+    let stack_slot = SlotKey::from(STACK_CAP_INDEX);
     let stack_size = u64::from(layout.stack.page_count) * page_bytes;
     memory_mappings.push(MemoryMapping {
         start: u64::from(layout.stack.base_page) * page_bytes,
         size: stack_size,
-        source: SlotPath::root(stack_slot),
+        source: SlotPath::root(stack_slot.clone()),
     });
     initial_slots.insert(
         stack_slot,
@@ -459,12 +459,12 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     );
 
     if let Some(ro) = &layout.ro {
-        let ro_slot = SlotIdx(u32::from(RO_CAP_INDEX));
+        let ro_slot = SlotKey::from(RO_CAP_INDEX);
         let size = u64::from(ro.page_count) * page_bytes;
         memory_mappings.push(MemoryMapping {
             start: u64::from(ro.base_page) * page_bytes,
             size,
-            source: SlotPath::root(ro_slot),
+            source: SlotPath::root(ro_slot.clone()),
         });
         pinned_slots.insert(
             ro_slot,
@@ -476,12 +476,12 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     }
 
     if let Some(rw) = &layout.rw {
-        let rw_slot = SlotIdx(u32::from(RW_CAP_INDEX));
+        let rw_slot = SlotKey::from(RW_CAP_INDEX);
         let size = u64::from(rw.page_count) * page_bytes;
         memory_mappings.push(MemoryMapping {
             start: u64::from(rw.base_page) * page_bytes,
             size,
-            source: SlotPath::root(rw_slot),
+            source: SlotPath::root(rw_slot.clone()),
         });
         initial_slots.insert(
             rw_slot,
@@ -493,12 +493,12 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     }
 
     if let Some(heap) = &layout.heap {
-        let heap_slot = SlotIdx(u32::from(HEAP_CAP_INDEX));
+        let heap_slot = SlotKey::from(HEAP_CAP_INDEX);
         let size = u64::from(heap.page_count) * page_bytes;
         memory_mappings.push(MemoryMapping {
             start: u64::from(heap.base_page) * page_bytes,
             size,
-            source: SlotPath::root(heap_slot),
+            source: SlotPath::root(heap_slot.clone()),
         });
         initial_slots.insert(
             heap_slot,
@@ -535,11 +535,9 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
         code,
         endpoints,
         memory_mappings,
-        gas_slots: vec![BARE_GAS_SLOT],
-        quota_slots: vec![BARE_QUOTA_SLOT],
         pinned_slots,
         initial_slots,
-        yield_marker_slot: Some(BARE_YIELD_CATCHER_SLOT),
+        yield_marker_slot: Some(SlotKey::from(BARE_YIELD_CATCHER_SLOT)),
     })
 }
 

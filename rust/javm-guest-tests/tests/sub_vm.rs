@@ -20,7 +20,7 @@
 use javm::kernel_assist::{InProcessKernelAssist, KernelAssist};
 use javm::{CallResult, Vm};
 use javm_cap::image::{Image, PinnedCap};
-use javm_cap::{CacheDirectory, Cap, CapHashOrRef, SlotIdx, NUM_REGS};
+use javm_cap::{CacheDirectory, Cap, CapHashOrRef, SlotKey, NUM_REGS};
 use ssz::Decode;
 
 const M_BLOB: &[u8] = include_bytes!(env!("SPAWN_PARENT_M_BLOB"));
@@ -60,26 +60,26 @@ fn m_calls_s_round_trip() {
     let mut m_cnode = javm_cap::CNodeCap::new();
     m_cnode
         .set(
-            SlotIdx(SLOT_IMAGE_S as u32),
+            &SlotKey::from(SLOT_IMAGE_S),
             Some(CapHashOrRef::Hash(s_image_hash)),
         )
         .expect("set image_s slot");
     m_cnode
         .set(
-            SlotIdx(SLOT_INPUT_DATA as u32),
+            &SlotKey::from(SLOT_INPUT_DATA),
             Some(CapHashOrRef::Hash(input_hash)),
         )
         .expect("set input slot");
     // Overlay M's pinned + initial slot hashes (stack/ro/rw/heap).
     for (slot, h) in &m_pinned {
         m_cnode
-            .set(*slot, Some(CapHashOrRef::Hash(*h)))
+            .set(slot, Some(CapHashOrRef::Hash(*h)))
             .expect("set pinned");
     }
     for (slot, h) in &m_initial {
-        if m_cnode.get(*slot).is_none() {
+        if m_cnode.get(slot).is_none() {
             m_cnode
-                .set(*slot, Some(CapHashOrRef::Hash(*h)))
+                .set(slot, Some(CapHashOrRef::Hash(*h)))
                 .expect("set initial");
         }
     }
@@ -142,7 +142,7 @@ fn publish_image(cache: &mut CacheDirectory, image: &Image) -> javm_cap::CapHash
 fn collect_pinned_hashes(
     cache: &mut CacheDirectory,
     image: &Image,
-) -> Vec<(SlotIdx, javm_cap::CapHash)> {
+) -> Vec<(SlotKey, javm_cap::CapHash)> {
     let mut out = Vec::new();
     for (slot, pinned) in &image.pinned_slots {
         let h = match pinned {
@@ -151,7 +151,7 @@ fn collect_pinned_hashes(
                 .expect("put pinned data"),
             PinnedCap::Image { content_hash } => *content_hash,
         };
-        out.push((*slot, h));
+        out.push((slot.clone(), h));
     }
     out
 }
@@ -159,13 +159,13 @@ fn collect_pinned_hashes(
 fn collect_initial_hashes(
     cache: &mut CacheDirectory,
     image: &Image,
-) -> Vec<(SlotIdx, javm_cap::CapHash)> {
+) -> Vec<(SlotKey, javm_cap::CapHash)> {
     let mut out = Vec::new();
     for (slot, init) in &image.initial_slots {
         let h = cache
             .put_cap(&Cap::data_inline_with_size(&init.content, init.size))
             .expect("put initial data");
-        out.push((*slot, h));
+        out.push((slot.clone(), h));
     }
     out
 }

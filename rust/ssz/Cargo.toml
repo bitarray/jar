@@ -23,6 +23,11 @@ sha2 = { version = "0.10", default-features = false, optional = true }
 thiserror = { version = "2", default-features = false }
 ssz-derive = { workspace = true, optional = true }
 rkyv = { version = "0.8", default-features = false, features = ["alloc", "bytecheck"] }
+# `SmallVec<A>` gets the same SSZ wire/hash form as `Vec<A::Item>` (see
+# `smallvec_impl.rs`). `const_generics` decouples the supported inline
+# sizes from smallvec's hand-written `impl_array!` list, so callers can
+# pick any `[T; N]` (e.g. `javm-cap`'s `SlotKey`/`SlotPath`).
+smallvec = { version = "1", default-features = false, features = ["const_generics"] }
 
 [dev-dependencies]
 proptest = { workspace = true }
