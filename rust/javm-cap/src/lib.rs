@@ -42,6 +42,7 @@ pub use cap::image::{
 };
 pub use cap::instance::{InstanceCap, RwOverlay};
 pub use cap::page::{PageBytes, PageRef, PageSlot};
+pub use cap::view::{DataViewCap, ViewOverlay};
 pub use cap::{Cap, CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS, TypeCap};
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash, Hasher};

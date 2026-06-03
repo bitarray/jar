@@ -109,6 +109,18 @@ impl DataGroup {
     }
 }
 
+/// A `DataGroup`'s value root is its depth-9 page subtree (see
+/// [`DataGroup::subtree_root`]). This is **not** used by [`DataCap`]'s own merkle
+/// (which is the flat size-scaled page tree over `page_slot`), only by a
+/// `RadixMap<DataGroup, _>` root — e.g. the `DataViewCap` overlay's
+/// `overlay_root`, where the group key + this subtree root bind the overlaid
+/// page set.
+impl HashTreeRoot for DataGroup {
+    fn hash_tree_root<D: Digest<OutputSize = U32>>(&self) -> [u8; 32] {
+        self.subtree_root::<D>()
+    }
+}
+
 /// Data cap: a logical byte `size` plus the sparse group storage. The cap
 /// identity is the flat size-scaled page merkle (see the module docs).
 #[derive(Clone, Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -251,7 +263,7 @@ impl DataCap {
     /// unique canonical layout — identical to what [`Self::from_bytes`] yields.
     ///
     /// This is the copy-on-write fold primitive a `DataViewCap` overlay write
-    /// goes through.
+    /// goes through (see [`put_page_into`], shared with `DataViewCap::write_page`).
     ///
     /// Panics (debug) if `off >= self.size`.
     pub fn put_page(&mut self, off: u64, content: &[u8]) {
@@ -259,33 +271,7 @@ impl DataCap {
             off < self.size,
             "DataCap::put_page: offset past logical size"
         );
-        let g = (off / GROUP_SIZE as u64) as u32;
-        let p = ((off / PAGE_SIZE as u64) % GROUP_PAGES as u64) as usize;
-        let key = Self::group_key(g);
-        let mut pages = match self.groups.get(&key) {
-            Some(MissingOr::Materialized(grp)) => grp.pages.clone(),
-            Some(MissingOr::Missing(_)) => {
-                unreachable!("DataCap::put_page into a Missing group")
-            }
-            None => Vec::new(),
-        };
-        if pages.len() <= p {
-            pages.resize(p + 1, PageSlot::Empty);
-        }
-        pages[p] = if content.iter().all(|&b| b == 0) {
-            PageSlot::Empty
-        } else {
-            PageSlot::Loaded(Arc::new(PageBytes::from_content(content)))
-        };
-        while matches!(pages.last(), Some(PageSlot::Empty)) {
-            pages.pop();
-        }
-        if pages.is_empty() {
-            self.groups.remove(&key);
-        } else {
-            self.groups
-                .insert(key, MissingOr::Materialized(DataGroup { pages }));
-        }
+        put_page_into(&mut self.groups, off, content);
     }
 
     /// Build a `DataCap` from contiguous `content`, sized to the next page
@@ -334,6 +320,45 @@ impl DataCap {
             }
         }
         DataCap { size, groups }
+    }
+}
+
+/// Canonical copy-on-write page fold into group-chunked storage: write up to
+/// [`PAGE_SIZE`] `content` bytes at absolute byte offset `off`, storing the
+/// [`PageSlot::Empty`] sentinel for all-zero content (no allocation) or a fresh
+/// `PAGE_SIZE`-aligned [`PageSlot::Loaded`] slab otherwise. Grows the group's
+/// page vector as needed, then trims trailing `Empty` pages / removes an emptied
+/// group so the result is the unique canonical layout (identical to what
+/// [`DataCap::from_bytes`] yields for the same effective content).
+///
+/// Shared by [`DataCap::put_page`] and `DataViewCap::write_page` so a backing
+/// cap and a view overlay fold pages identically.
+pub fn put_page_into(groups: &mut DataGroups, off: u64, content: &[u8]) {
+    let g = (off / GROUP_SIZE as u64) as u32;
+    let p = ((off / PAGE_SIZE as u64) % GROUP_PAGES as u64) as usize;
+    let key = DataCap::group_key(g);
+    let mut pages = match groups.get(&key) {
+        Some(MissingOr::Materialized(grp)) => grp.pages.clone(),
+        Some(MissingOr::Missing(_)) => {
+            unreachable!("put_page_into a Missing group")
+        }
+        None => Vec::new(),
+    };
+    if pages.len() <= p {
+        pages.resize(p + 1, PageSlot::Empty);
+    }
+    pages[p] = if content.iter().all(|&b| b == 0) {
+        PageSlot::Empty
+    } else {
+        PageSlot::Loaded(Arc::new(PageBytes::from_content(content)))
+    };
+    while matches!(pages.last(), Some(PageSlot::Empty)) {
+        pages.pop();
+    }
+    if pages.is_empty() {
+        groups.remove(&key);
+    } else {
+        groups.insert(key, MissingOr::Materialized(DataGroup { pages }));
     }
 }
 
