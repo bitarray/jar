@@ -9,7 +9,7 @@
 use crate::{Program, encode};
 use javm_bench::{BuiltCaps, RawRun, run_interpreter_raw, run_recompiler_raw};
 use javm_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap};
-use javm_cap::slot::{SlotKey, SlotPath};
+use javm_cap::slot::{Key, SlotPath};
 use std::collections::BTreeMap;
 
 /// Cnode slot the fuzz memory window's backing data cap occupies.
@@ -34,7 +34,7 @@ pub fn image_with_ro(words: &[u32], ro_start: u32, ro_bytes: &[u8]) -> Image {
             initial_regs: BTreeMap::new(),
         },
     );
-    let slot = SlotKey::from((WINDOW_SLOT + 1) as u8);
+    let slot = Key::from((WINDOW_SLOT + 1) as u8);
     img.memory_mappings.push(MemoryMapping {
         start: ro_start as u64,
         size: ro_bytes.len() as u64,
@@ -70,7 +70,7 @@ pub fn image_with_ro_caps(words: &[u32], caps: &[(u32, &[u8])]) -> Image {
         },
     );
     for (i, (start, bytes)) in caps.iter().enumerate() {
-        let slot = SlotKey::from((WINDOW_SLOT + 1 + i as u32) as u8);
+        let slot = Key::from((WINDOW_SLOT + 1 + i as u32) as u8);
         img.memory_mappings.push(MemoryMapping {
             start: *start as u64,
             size: bytes.len() as u64,
@@ -122,7 +122,7 @@ pub fn image_for(prog: &Program) -> Image {
         },
     );
     if let Some(mem) = &prog.init_mem {
-        let slot = SlotKey::from((WINDOW_SLOT) as u8);
+        let slot = Key::from((WINDOW_SLOT) as u8);
         img.memory_mappings.push(MemoryMapping {
             start: mem.start as u64,
             size: mem.bytes.len() as u64,

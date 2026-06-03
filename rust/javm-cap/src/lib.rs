@@ -48,4 +48,4 @@ pub use hash::{Blake2b256, Hash, Hasher};
 pub use image::{
     Image, InitialDataCap, PinnedCap, chain_extend, chain_genesis, image_content_hash,
 };
-pub use slot::{MAX_SLOT_KEY_LEN, SlotKey, SlotPath};
+pub use slot::{Key, MAX_KEY_LEN, SlotPath};

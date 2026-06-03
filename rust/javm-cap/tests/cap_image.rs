@@ -8,7 +8,7 @@
 //! `image_cap` deblob — so these tests exercise it there.
 
 use javm_cap::image::{Image, MemoryMapping as WireMapping};
-use javm_cap::{ImageConvertError, MAX_SOURCE_DEPTH, MemoryMapping, SlotKey, SlotPath};
+use javm_cap::{ImageConvertError, Key, MAX_SOURCE_DEPTH, MemoryMapping, SlotPath};
 use ssz::{Decode as _, Encode as _};
 use std::collections::BTreeMap;
 
@@ -17,19 +17,19 @@ fn mapping_ssz_roundtrips() {
     let m = MemoryMapping {
         start: 0x1000,
         size: 0x2000,
-        source: SlotPath::new([SlotKey::from(7u8), SlotKey::from(&[3u8, 9][..])]).unwrap(),
+        source: SlotPath::new([Key::from(7u8), Key::from(&[3u8, 9][..])]).unwrap(),
     };
     let bytes = m.as_ssz_bytes();
     let back = MemoryMapping::from_ssz_bytes(&bytes).unwrap();
     assert_eq!(m, back);
     assert_eq!(back.path().len(), 2);
-    assert_eq!(back.path()[0], SlotKey::from(7u8));
+    assert_eq!(back.path()[0], Key::from(7u8));
 }
 
 /// Build a minimal host `Image` with a single mapping whose `source` path has
 /// `depth` steps (each a distinct 1-byte key).
 fn image_with_source_depth(depth: usize) -> Image {
-    let steps: Vec<SlotKey> = (0..depth).map(|i| SlotKey::from(i as u8)).collect();
+    let steps: Vec<Key> = (0..depth).map(|i| Key::from(i as u8)).collect();
     let source = SlotPath(steps.into_iter().collect());
     let mut img = Image::empty();
     img.memory_mappings.push(WireMapping {

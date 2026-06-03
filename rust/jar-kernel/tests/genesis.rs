@@ -13,7 +13,7 @@ fn empty_chain_image() -> Image {
         memory_mappings: Vec::new(),
         pinned_slots: BTreeMap::new(),
         initial_slots: BTreeMap::new(),
-        yield_marker_slot: Some(javm_cap::SlotKey::from(abi::BARE_YIELD_CATCHER_SLOT)),
+        yield_marker_slot: Some(javm_cap::Key::from(abi::BARE_YIELD_CATCHER_SLOT)),
     }
 }
 
@@ -40,24 +40,18 @@ fn genesis_populates_root_cnode_with_kernel_caps() {
         Cap::CNode(cn) => cn.clone(),
         _ => panic!("root cnode is not Cap::CNode"),
     };
+    assert!(cn.get(&javm_cap::Key::from(abi::BARE_GAS_SLOT)).is_some());
+    assert!(cn.get(&javm_cap::Key::from(abi::BARE_QUOTA_SLOT)).is_some());
     assert!(
-        cn.get(&javm_cap::SlotKey::from(abi::BARE_GAS_SLOT))
+        cn.get(&javm_cap::Key::from(abi::BARE_YIELD_CATCHER_SLOT))
             .is_some()
     );
     assert!(
-        cn.get(&javm_cap::SlotKey::from(abi::BARE_QUOTA_SLOT))
+        cn.get(&javm_cap::Key::from(abi::BARE_HOST_OPEN_SLOT))
             .is_some()
     );
     assert!(
-        cn.get(&javm_cap::SlotKey::from(abi::BARE_YIELD_CATCHER_SLOT))
-            .is_some()
-    );
-    assert!(
-        cn.get(&javm_cap::SlotKey::from(abi::BARE_HOST_OPEN_SLOT))
-            .is_some()
-    );
-    assert!(
-        cn.get(&javm_cap::SlotKey::from(abi::BARE_HOST_SAVE_SLOT))
+        cn.get(&javm_cap::Key::from(abi::BARE_HOST_SAVE_SLOT))
             .is_some()
     );
 }

@@ -12,8 +12,8 @@ use javm_cap::cache::CapHashOrRef;
 use javm_cap::cap::page::{PageBytes, PageSlot};
 use javm_cap::image::EndpointDef;
 use javm_cap::{
-    CNodeCap, Cap, DataCap, DataGroup, DataGroups, DataViewCap, GROUP_SIZE, NUM_REGS, PAGE_SIZE,
-    SlotKey, TypeCap, image::Image,
+    CNodeCap, Cap, DataCap, DataGroup, DataGroups, DataViewCap, GROUP_SIZE, Key, NUM_REGS,
+    PAGE_SIZE, TypeCap, image::Image,
 };
 use ssz::MissingOr;
 use std::collections::BTreeMap;
@@ -120,9 +120,9 @@ fn data_view_roundtrip_preserves_hash() {
 #[test]
 fn cnode_with_populated_slot_roundtrips() {
     let mut cn = CNodeCap::new();
-    cn.set(&SlotKey::from(2u8), Some(CapHashOrRef::Hash([0xEE; 32])))
+    cn.set(&Key::from(2u8), Some(CapHashOrRef::Hash([0xEE; 32])))
         .expect("set slot 2");
-    cn.set(&SlotKey::from(7u8), Some(CapHashOrRef::Hash([0xFF; 32])))
+    cn.set(&Key::from(7u8), Some(CapHashOrRef::Hash([0xFF; 32])))
         .expect("set slot 7");
     round_trip(Cap::CNode(cn));
 }
@@ -137,7 +137,7 @@ fn ref_in_cap_errors_on_encode() {
     let h = cache.put_cap(&blob).expect("put_cap");
     let capref = cache.promote_blob_to_instance(&h).expect("promote");
     let mut cn = CNodeCap::new();
-    cn.set(&SlotKey::from(0u8), Some(CapHashOrRef::Ref(capref)))
+    cn.set(&Key::from(0u8), Some(CapHashOrRef::Ref(capref)))
         .expect("set ref");
     let cap = Cap::CNode(cn);
     let err = rkyv::to_bytes::<rkyv::rancor::Error>(&cap).expect_err("must reject Ref");

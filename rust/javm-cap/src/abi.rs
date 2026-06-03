@@ -4,9 +4,9 @@
 //! referencing them).
 //!
 //! Under the V1 single-byte ABI a slot is named by a one-byte
-//! [`crate::SlotKey`]; these constants are the byte values. Wrap with
-//! `SlotKey::from(BARE_*_SLOT)` at the call site — the same `u8 → SlotKey`
-//! boundary the ecall handlers use (`SlotKey::from((gpr & 0xFF) as u8)`).
+//! [`crate::Key`]; these constants are the byte values. Wrap with
+//! `Key::from(BARE_*_SLOT)` at the call site — the same `u8 → Key`
+//! boundary the ecall handlers use (`Key::from((gpr & 0xFF) as u8)`).
 
 // ---- BareFrame slot keys (kernel-issued caps at chain init) ----
 

@@ -28,7 +28,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput};
 use javm_cap::NUM_REGS;
 use javm_cap::image::{Image, PinnedCap};
-use javm_cap::slot::SlotKey;
+use javm_cap::slot::Key;
 use javm_cap::{Cap, CapHash};
 use nub::{InvocationResult, Nub};
 use std::sync::{Mutex, OnceLock};
@@ -75,8 +75,8 @@ impl BuiltCaps {
         // 1. Build a Cap::Data per non-empty pinned/initial slot. Track
         //    each slot's resolved CapHash so the Image can reference them.
         let mut data_caps: Vec<(CapHash, Cap)> = Vec::new();
-        let mut pinned_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
-        let mut initial_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
+        let mut pinned_hashes: Vec<(Key, CapHash)> = Vec::new();
+        let mut initial_hashes: Vec<(Key, CapHash)> = Vec::new();
 
         for (slot, pinned) in &image.pinned_slots {
             let (h, cap) = match pinned {
@@ -362,8 +362,8 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
     // Cap::Image; the in-kernel call_loop reads those bytes from the
     // shared cache when building a child frame's mem image.
     let mut data_caps: Vec<(CapHash, Cap)> = Vec::new();
-    let mut pinned_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
-    let mut initial_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
+    let mut pinned_hashes: Vec<(Key, CapHash)> = Vec::new();
+    let mut initial_hashes: Vec<(Key, CapHash)> = Vec::new();
     for (slot, pinned) in &image.pinned_slots {
         let (h, maybe_cap) = match pinned {
             PinnedCap::Data { content, size } => {
@@ -395,7 +395,7 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
 
     let mut cn = CNodeCap::new();
     cn.set(
-        &SlotKey::from(SLOT_IMAGE_RECURSE as u8),
+        &Key::from(SLOT_IMAGE_RECURSE as u8),
         Some(CapHashOrRef::Hash(image_hash)),
     )
     .expect("set image slot");

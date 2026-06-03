@@ -51,7 +51,7 @@ fn hello_world_chain_image() -> Image {
         memory_mappings: Vec::new(),
         pinned_slots: BTreeMap::new(),
         initial_slots: BTreeMap::new(),
-        yield_marker_slot: Some(javm_cap::SlotKey::from(abi::BARE_YIELD_CATCHER_SLOT)),
+        yield_marker_slot: Some(javm_cap::Key::from(abi::BARE_YIELD_CATCHER_SLOT)),
     }
 }
 

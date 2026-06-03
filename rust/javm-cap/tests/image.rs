@@ -1,6 +1,6 @@
 use javm_cap::image::{EndpointDef, MemoryMapping};
 use javm_cap::{
-    Blake2b256, Image, InitialDataCap, PinnedCap, SlotKey, SlotPath, chain_extend, chain_genesis,
+    Blake2b256, Image, InitialDataCap, Key, PinnedCap, SlotPath, chain_extend, chain_genesis,
     image_cap, image_content_hash,
 };
 use ssz::Decode as _;
@@ -43,28 +43,28 @@ fn image_ssz_roundtrip() {
     img.memory_mappings.push(MemoryMapping {
         start: 0x1000,
         size: 0x4000,
-        source: SlotPath::root(SlotKey::from(65u8)),
+        source: SlotPath::root(Key::from(65u8)),
     });
     img.memory_mappings.push(MemoryMapping {
         start: 0x5000,
         size: 0x2000,
-        source: SlotPath::root(SlotKey::from(3u8)),
+        source: SlotPath::root(Key::from(3u8)),
     });
     img.pinned_slots.insert(
-        SlotKey::from(11u8),
+        Key::from(11u8),
         PinnedCap::Data {
             content: vec![0xAB; 1024],
             size: 4096,
         },
     );
     img.initial_slots.insert(
-        SlotKey::from(65u8),
+        Key::from(65u8),
         InitialDataCap {
             content: Vec::new(),
             size: 0x4000,
         },
     );
-    img.yield_marker_slot = Some(SlotKey::from(9u8));
+    img.yield_marker_slot = Some(Key::from(9u8));
 
     let bytes = ssz::Encode::as_ssz_bytes(&img);
     let decoded = Image::from_ssz_bytes(&bytes).expect("decode");
@@ -102,14 +102,14 @@ fn pinned_slots_order_independent() {
     // shouldn't matter for the resulting hash.
     let mut a = Image::empty();
     a.pinned_slots.insert(
-        SlotKey::from(3u8),
+        Key::from(3u8),
         PinnedCap::Data {
             content: vec![0xAA; 100],
             size: 100,
         },
     );
     a.pinned_slots.insert(
-        SlotKey::from(7u8),
+        Key::from(7u8),
         PinnedCap::Data {
             content: vec![0xBB; 200],
             size: 200,
@@ -119,14 +119,14 @@ fn pinned_slots_order_independent() {
     let mut b = Image::empty();
     // Different insertion order.
     b.pinned_slots.insert(
-        SlotKey::from(7u8),
+        Key::from(7u8),
         PinnedCap::Data {
             content: vec![0xBB; 200],
             size: 200,
         },
     );
     b.pinned_slots.insert(
-        SlotKey::from(3u8),
+        Key::from(3u8),
         PinnedCap::Data {
             content: vec![0xAA; 100],
             size: 100,
@@ -199,22 +199,22 @@ fn mapping_is_pinned_classifies_by_source_slot() {
     img.memory_mappings.push(MemoryMapping {
         start: 0x1000_0000,
         size: 0x1000,
-        source: SlotPath::root(SlotKey::from(5u8)),
+        source: SlotPath::root(Key::from(5u8)),
     });
     img.memory_mappings.push(MemoryMapping {
         start: 0x1000_1000,
         size: 0x1000,
-        source: SlotPath::root(SlotKey::from(6u8)),
+        source: SlotPath::root(Key::from(6u8)),
     });
     img.pinned_slots.insert(
-        SlotKey::from(5u8),
+        Key::from(5u8),
         PinnedCap::Data {
             content: vec![1, 2, 3],
             size: 0x1000,
         },
     );
     img.initial_slots.insert(
-        SlotKey::from(6u8),
+        Key::from(6u8),
         InitialDataCap {
             content: vec![4, 5, 6],
             size: 0x1000,
@@ -222,12 +222,7 @@ fn mapping_is_pinned_classifies_by_source_slot() {
     );
 
     let dummy = [0u8; 32];
-    let cap = image_cap(
-        &img,
-        &[(SlotKey::from(5u8), dummy)],
-        &[(SlotKey::from(6u8), dummy)],
-    )
-    .unwrap();
+    let cap = image_cap(&img, &[(Key::from(5u8), dummy)], &[(Key::from(6u8), dummy)]).unwrap();
 
     assert!(cap.mapping_is_pinned(0x1000_0000)); // slot 5 pinned → RO
     assert!(!cap.mapping_is_pinned(0x1000_1000)); // slot 6 initial → RW

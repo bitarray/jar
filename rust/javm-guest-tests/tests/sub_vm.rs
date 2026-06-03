@@ -20,7 +20,7 @@
 use javm::kernel_assist::{InProcessKernelAssist, KernelAssist};
 use javm::{CallResult, Vm};
 use javm_cap::image::{Image, PinnedCap};
-use javm_cap::{CacheDirectory, Cap, CapHashOrRef, SlotKey, NUM_REGS};
+use javm_cap::{CacheDirectory, Cap, CapHashOrRef, Key, NUM_REGS};
 use ssz::Decode;
 
 const M_BLOB: &[u8] = include_bytes!(env!("SPAWN_PARENT_M_BLOB"));
@@ -60,13 +60,13 @@ fn m_calls_s_round_trip() {
     let mut m_cnode = javm_cap::CNodeCap::new();
     m_cnode
         .set(
-            &SlotKey::from(SLOT_IMAGE_S),
+            &Key::from(SLOT_IMAGE_S),
             Some(CapHashOrRef::Hash(s_image_hash)),
         )
         .expect("set image_s slot");
     m_cnode
         .set(
-            &SlotKey::from(SLOT_INPUT_DATA),
+            &Key::from(SLOT_INPUT_DATA),
             Some(CapHashOrRef::Hash(input_hash)),
         )
         .expect("set input slot");
@@ -142,7 +142,7 @@ fn publish_image(cache: &mut CacheDirectory, image: &Image) -> javm_cap::CapHash
 fn collect_pinned_hashes(
     cache: &mut CacheDirectory,
     image: &Image,
-) -> Vec<(SlotKey, javm_cap::CapHash)> {
+) -> Vec<(Key, javm_cap::CapHash)> {
     let mut out = Vec::new();
     for (slot, pinned) in &image.pinned_slots {
         let h = match pinned {
@@ -159,7 +159,7 @@ fn collect_pinned_hashes(
 fn collect_initial_hashes(
     cache: &mut CacheDirectory,
     image: &Image,
-) -> Vec<(SlotKey, javm_cap::CapHash)> {
+) -> Vec<(Key, javm_cap::CapHash)> {
     let mut out = Vec::new();
     for (slot, init) in &image.initial_slots {
         let h = cache

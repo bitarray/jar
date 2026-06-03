@@ -97,7 +97,7 @@ use alloc::vec::Vec;
 use javm_cap::cache::CapHashOrRef;
 use javm_cap::cap::Cap;
 use javm_cap::hash::{Blake2b256, Hash};
-use javm_cap::slot::SlotKey;
+use javm_cap::slot::Key;
 use javm_cap::{CNodeCap, CapHash, NUM_REGS};
 
 use crate::jit_run::{self, ExitInfo, FrameRuntime};
@@ -175,7 +175,7 @@ pub struct KernelFrame {
     regs: [u64; NUM_REGS],
     /// Current PVM PC. Same lifecycle as `regs`.
     pc: u32,
-    /// Per-frame cnode snapshot: the radix kv-map (`Hasher(SlotKey) ->
+    /// Per-frame cnode snapshot: the radix kv-map (`Hasher(Key) ->
     /// CapHashOrRef`) seeded from the running `Cap::Instance`'s image
     /// (pinned/initial) and grown by `derive_spawn`. No fixed slot count —
     /// a normal `CNodeCap`. CNode ops run only in the call-loop dispatch
@@ -188,7 +188,7 @@ pub struct KernelFrame {
     /// `derive_spawn` dst) must trap, matching the interpreter's
     /// `OpError::SlotPinned`. Sorted (image pinned slots are emitted sorted),
     /// so membership is a `binary_search`.
-    pinned: Vec<SlotKey>,
+    pinned: Vec<Key>,
     /// CoW-allocated fresh pages, populated by `jit_pf_handler` on
     /// the first write to each page of a copy-on-write `MatRange`. Per
     /// the data-flow principle (see module doc), these are frame-local
@@ -229,7 +229,7 @@ pub struct MatRange {
     /// `UnpinnedCapCow` (a write copies-on-write).
     pub kind: u8,
     pub source_hash: CapHash,
-    /// The V1 single-byte source slot (diagnostics only). `u8` not `SlotKey`
+    /// The V1 single-byte source slot (diagnostics only). `u8` not `Key`
     /// so `MatRange` stays `Copy` (it is published to the #PF handler by
     /// pointer).
     pub source_slot: u8,
@@ -618,9 +618,9 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
 /// `OpError::SlotPinned → ExitReason::Trap`. `Ok(false)` on a normal spawn.
 fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
     // V1 single-byte ABI: each slot is the 1-byte key `gpr & 0xFF`.
-    let image_slot = SlotKey::from((frame.regs[7] & 0xFF) as u8);
+    let image_slot = Key::from((frame.regs[7] & 0xFF) as u8);
     let _cnode_slot = (frame.regs[8] & 0xFF) as u8;
-    let dst_slot = SlotKey::from((frame.regs[9] & 0xFF) as u8);
+    let dst_slot = Key::from((frame.regs[9] & 0xFF) as u8);
 
     // Reject a write to a pinned (read-only) slot — the interpreter rejects
     // this and traps (javm/src/ecall.rs); the recompiler must agree or the
@@ -660,7 +660,7 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
 /// φ[7..=10] (arg-passing convention — used by the recursive-spawn
 /// bench to thread the remaining depth count).
 fn dispatch_host_call(parent: &KernelFrame) -> Result<KernelFrame, u32> {
-    let instance_slot = SlotKey::from((parent.regs[7] & 0xFF) as u8);
+    let instance_slot = Key::from((parent.regs[7] & 0xFF) as u8);
     let endpoint_idx = (parent.regs[8] & 0xFF) as u32;
     let target = parent
         .cnode
@@ -685,7 +685,7 @@ fn dispatch_host_call(parent: &KernelFrame) -> Result<KernelFrame, u32> {
     // `cache.clone_instance` so each frame's cnode owns its own
     // CapRef and mutations don't accidentally cross-share.
     //
-    // The cnode is a radix map keyed by `Hasher(SlotKey)`; iterate the
+    // The cnode is a radix map keyed by `Hasher(Key)`; iterate the
     // parent's physical (key, value) entries and copy each one the child
     // doesn't already hold. Operating at the physical-key level is exact —
     // each logical slot maps to one physical key — and needs no logical-key
@@ -813,7 +813,7 @@ fn build_frame_inner(
     }
     // Pinned-slot set for write rejection (sorted: `img.pinned` is emitted
     // sorted by `image_cap`). Mirrors `javm` `build_entry`.
-    let pinned: Vec<SlotKey> = img.pinned.iter().map(|e| e.slot.clone()).collect();
+    let pinned: Vec<Key> = img.pinned.iter().map(|e| e.slot.clone()).collect();
 
     // The cap-backed mappings (their PAs + pinned/initial kind) are
     // resolved in `build_runtime` when the per-frame runtime is built;

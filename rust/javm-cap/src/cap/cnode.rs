@@ -8,9 +8,9 @@
 //! capacity bound** — a CNode is bounded by storage quota, not a
 //! compile-time slot count, and a single-entry CNode is one leaf at depth 1.
 //!
-//! A slot is named by a [`SlotKey`] (a short byte string); [`CNodeCap::get`]
+//! A slot is named by a [`Key`] (a short byte string); [`CNodeCap::get`]
 //! / [`CNodeCap::set`] / [`CNodeCap::take`] hash the key to its physical
-//! radix key. The V1 ABI uses single-byte keys (`SlotKey::from(b)`), but the
+//! radix key. The V1 ABI uses single-byte keys (`Key::from(b)`), but the
 //! map admits arbitrary-length keys natively (the same `get`/`set`/`take`
 //! surface), so a future ABI can key e.g. `address -> Cap::Instance` with no
 //! structural change. The raw `&[u8]` form is exposed via
@@ -27,7 +27,7 @@ use ssz::{MissingOr, RadixMap};
 use crate::cache::CapHashOrRef;
 use crate::error::CapError;
 use crate::hash::{Hash, Hasher};
-use crate::slot::SlotKey;
+use crate::slot::Key;
 
 /// Physical radix-key width: a 32-byte digest of the logical key.
 pub const CNODE_KEY_BYTES: usize = 32;
@@ -103,11 +103,11 @@ impl CNodeCap {
         self.set_key(k, None)
     }
 
-    // ---- SlotKey API ----
+    // ---- Key API ----
 
     /// Look up the slot named by `key`. See [`CNodeCap::get_key`] for the
     /// placeholder semantics.
-    pub fn get(&self, key: &SlotKey) -> Option<CapHashOrRef> {
+    pub fn get(&self, key: &Key) -> Option<CapHashOrRef> {
         self.get_key(key.as_slice())
     }
 
@@ -117,7 +117,7 @@ impl CNodeCap {
     /// pervasive `?`-using call sites.
     pub fn set(
         &mut self,
-        key: &SlotKey,
+        key: &Key,
         target: Option<CapHashOrRef>,
     ) -> Result<Option<CapHashOrRef>, CapError> {
         Ok(self.set_key(key.as_slice(), target))
@@ -125,7 +125,7 @@ impl CNodeCap {
 
     /// Take the binding at `key`, leaving it empty. Returns the prior
     /// materialized target (or `None`).
-    pub fn take(&mut self, key: &SlotKey) -> Result<Option<CapHashOrRef>, CapError> {
+    pub fn take(&mut self, key: &Key) -> Result<Option<CapHashOrRef>, CapError> {
         self.set(key, None)
     }
 }

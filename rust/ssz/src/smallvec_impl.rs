@@ -8,8 +8,8 @@
 //! field-for-field. Keep the two in sync — a divergence would silently fork
 //! the hash of any cap embedding a `SmallVec`-backed field.
 //!
-//! `javm-cap`'s `SlotKey` (`SmallVec<[u8; N]>`) and `SlotPath`
-//! (`SmallVec<[SlotKey; M]>`) are `#[ssz(transparent)]` newtypes that forward
+//! `javm-cap`'s `Key` (`SmallVec<[u8; N]>`) and `SlotPath`
+//! (`SmallVec<[Key; M]>`) are `#[ssz(transparent)]` newtypes that forward
 //! to these impls — one generic impl covers both the basic-element (byte key)
 //! and composite-element (key path) cases.
 

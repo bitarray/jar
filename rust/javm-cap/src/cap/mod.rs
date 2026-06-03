@@ -166,8 +166,8 @@ impl Cap {
     /// caller-resolved pinned/initial slot `CapHash` pairs.
     pub fn image_with_slots(
         image: &crate::image::Image,
-        pinned_hashes: &[(crate::slot::SlotKey, CapHash)],
-        initial_hashes: &[(crate::slot::SlotKey, CapHash)],
+        pinned_hashes: &[(crate::slot::Key, CapHash)],
+        initial_hashes: &[(crate::slot::Key, CapHash)],
     ) -> Result<Self, image::ImageConvertError> {
         Ok(Cap::Image(image::image_cap(
             image,

@@ -26,7 +26,7 @@
 //! has one canonical form.
 
 use crate::hash::Hash;
-use crate::slot::SlotKey;
+use crate::slot::Key;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use ssz_derive::{Decode, Encode};
@@ -67,14 +67,14 @@ pub struct Image {
     pub memory_mappings: Vec<MemoryMapping>,
     /// Pinned read-only caps (Cap::Data or Cap::Image) baked into
     /// the spec. The kernel rejects mutations to these slots.
-    pub pinned_slots: BTreeMap<SlotKey, PinnedCap>,
+    pub pinned_slots: BTreeMap<Key, PinnedCap>,
     /// Initial cnode state for non-pinned mutable slots. Only
     /// honored at standalone (root) Instance bootstrap — a
     /// parented Instance receives its cnode from the spawner.
-    pub initial_slots: BTreeMap<SlotKey, InitialDataCap>,
+    pub initial_slots: BTreeMap<Key, InitialDataCap>,
     /// Slot holding `Cap::Instance[YieldCatcher]`, if this Instance
     /// catches yields. None = no catcher.
-    pub yield_marker_slot: Option<SlotKey>,
+    pub yield_marker_slot: Option<Key>,
 }
 
 /// Endpoint definition: entry PC + register conventions.
