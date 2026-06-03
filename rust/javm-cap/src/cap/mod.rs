@@ -178,34 +178,24 @@ impl Cap {
 
     /// Build a heap `Cap::Instance` directly from field values.
     ///
-    /// `rw_overlays` is the list of `(start_va, bytes)` overlays the
-    /// Instance carries — each becomes one `RwOverlay` entry.
+    /// `mem` is the Instance's read-write memory image (a dense [`DataCap`]
+    /// covering the data extent; pinned read-only mappings are not part of it —
+    /// see [`instance::InstanceCap::mem`]).
     #[allow(clippy::too_many_arguments)]
-    pub fn instance_with_overlays(
+    pub fn instance_with_mem(
         image_hash_chain: CapHash,
         image_hash: CapHash,
         root_cnode: CapHash,
-        rw_overlays: &[(u32, &[u8])],
-        mem_size: u32,
+        mem: DataCap,
         regs: [u64; NUM_REGS],
         pc: u64,
         gas_remaining: u64,
     ) -> Self {
-        let mut overlays: alloc::vec::Vec<instance::RwOverlay> = alloc::vec::Vec::new();
-        for (start, bytes) in rw_overlays {
-            let mut buf = alloc::vec::Vec::with_capacity(bytes.len());
-            buf.extend_from_slice(bytes);
-            overlays.push(instance::RwOverlay {
-                start: *start,
-                bytes: buf,
-            });
-        }
         Cap::Instance(instance::InstanceCap {
             image_hash_chain,
             image_hash,
             root_cnode: crate::cache::CapHashOrRef::Hash(root_cnode),
-            rw_overlays: overlays,
-            mem_size,
+            mem,
             regs,
             pc,
             gas_remaining,

@@ -80,34 +80,37 @@ pub fn run_instance(
     // the recompiler's page table.
     let mut mem = CopyingMemory::new();
     mem.base = javm_cap::layout::DATA_BASE;
-    let data_extent = page_round_up_u64(
-        (instance.mem_size as u64).saturating_sub(javm_cap::layout::DATA_BASE as u64),
-    );
+    let data_extent = instance.mem.content_len();
+    let mut mem_image = vec![0u8; data_extent as usize];
     if data_extent > 0 {
+        // Seed the whole extent from the Instance's memory image (the immutable
+        // backing — both initial and pinned content). No cache lookup needed.
+        instance.mem.copy_into(0, &mut mem_image);
         mem.map_region(
             javm_cap::layout::DATA_BASE as u64,
             data_extent,
             Access::ReadWrite,
-            None,
+            Some(&mem_image),
         )
         .expect("map base RW region");
     }
-    // A mapping sourced from a pinned slot is read-only: lay it RO so a
-    // guest store faults, matching the recompiler (which RO direct-maps
-    // pinned slots and does not CoW-arm them). Mirrors `javm` `Vm::
-    // build_entry` via the shared `ImageCap::mapping_is_pinned`.
-    for overlay_entry in instance.rw_overlays.iter() {
-        let access = if image.mapping_is_pinned(overlay_entry.start) {
-            Access::ReadOnly
-        } else {
-            Access::ReadWrite
-        };
-        overlay(
-            &mut mem,
-            overlay_entry.start,
-            overlay_entry.bytes.as_slice(),
-            access,
-        );
+    // Re-lay pinned mappings read-only (same bytes, from the seeded image) so a
+    // guest store faults, matching the recompiler's PinnedCapRo direct map.
+    let data_base = javm_cap::layout::DATA_BASE as u64;
+    for m in image.mappings.iter() {
+        if m.source_path_len == 0 || !image.mapping_is_pinned(m.start as u32) {
+            continue;
+        }
+        let off = (m.start.saturating_sub(data_base)) as usize;
+        let len = (m.size as usize).min(mem_image.len().saturating_sub(off));
+        if len > 0 {
+            overlay(
+                &mut mem,
+                m.start as u32,
+                &mem_image[off..off + len],
+                Access::ReadOnly,
+            );
+        }
     }
 
     let endpoint = image
@@ -151,7 +154,7 @@ pub fn run_instance(
     // (high-water-mark over the Image's memory_mappings) is the same
     // value the recompiler derives, so both engines pick the same tier.
     let mem_cycles = gas_const::mem_cycles_for(gas_const::accessible_pages(
-        instance.mem_size,
+        instance.mem_size(),
         javm_cap::layout::DATA_BASE,
     ));
     let predecode = predecode_rv_with_mem_cycles(code_bytes, mem_cycles);

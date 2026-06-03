@@ -101,7 +101,7 @@ use javm_cap::hash::{Blake2b256, Hash};
 use javm_cap::slot::SlotIdx;
 use javm_cap::{CapHash, NUM_REGS};
 
-use crate::jit_run::{self, ExitInfo, FrameRuntime, MemRegion};
+use crate::jit_run::{self, ExitInfo, FrameRuntime};
 use crate::page_alloc::PageBuf;
 use crate::paging;
 use crate::state_cache::{CACHE, publish_transient_instance};
@@ -440,159 +440,99 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
         _ => return Err(ERR_IMAGE_KIND),
     };
 
-    // Classify slots: pinned (RO, direct-map) vs initial (RW with
-    // CoW arming). Pinned slot indices are recorded so the initial
-    // walk can skip them — initial entries that collide with a
-    // pinned slot are ignored.
+    // Classify pinned slots (RO, direct-map). Their VA ranges become
+    // `PinnedCapRo` `MatRange`s pushed first, so they take precedence over the
+    // catch-all RW range in `mat_range_for`.
     let mut pinned_slot = [false; CNODE_SLOTS];
-    let mut initial_slot = [false; CNODE_SLOTS];
     for e in img.pinned.iter() {
         let s = e.slot.get() as usize;
         if s < CNODE_SLOTS {
             pinned_slot[s] = true;
         }
     }
-    for e in img.initial.iter() {
-        let s = e.slot.get() as usize;
-        if s < CNODE_SLOTS && !pinned_slot[s] {
-            initial_slot[s] = true;
-        }
-    }
 
-    // Data cap pages go into `mat_ranges` (lazily materialized, #3); the
-    // code region is materialized lazily too (zero-setup demand paging),
-    // sourced from its physical address `code_pa`.
-    let mut mat_ranges: Vec<MatRange> = Vec::with_capacity(img.mappings.len());
+    let mut mat_ranges: Vec<MatRange> = Vec::new();
     // Per-page source PAs for the cap-backed ranges (a dense DataCap's pages are
     // non-contiguous slabs); each `MatRange` indexes a window into this arena.
     let mut mat_pas: Vec<u64> = Vec::new();
-    // Shared per-frame zero page: the source for `Empty` (absent / zero) cap
+    // Shared per-frame zero page: the source for `Empty` (absent / zero) memory
     // pages, mapped RO or CoW'd-from-zero on write. Owned by the `FrameRuntime`
     // so its PA stays valid for the frame's life; never written through (RO maps;
     // a write CoWs a fresh private page), so aliasing it across pages is safe.
     let zero_page = PageBuf::new(paging::PAGE_SIZE).ok_or(ERR_JIT_FAILED)?;
     let zero_pa = zero_page.pa();
-    let mut mem_size: u32 = 0;
 
-    // Executable code region: a `PinnedCapRo` lazily-materialized region
-    // at the fixed CODE_BASE. The code lives in the Image's page-aligned,
-    // page-rounded (zeroed-tail) `ImageCap.code`, so a guest PIC read of
-    // it pages the touched page(s) in RO from `code_pa`. Code is *excluded*
-    // from mem_size (the flat RW buffer): it sits at CODE_BASE, clear of
-    // the data layout, and must not inflate the per-call alloc.
+    // Executable code region: a `PinnedCapRo` lazily-materialized region at the
+    // fixed CODE_BASE, sourced from its physical address `code_pa`. Code is
+    // excluded from `mem_size` (the data extent).
     let (code_base, code_bytes) = img.code_mapping().ok_or(ERR_IMAGE_KIND)?;
     let code_pa = paging::va_to_pa(code_bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?;
 
-    // Keep Arcs alive for the data-cap lookups so the slice references
-    // we feed to mat_ranges stay valid until function return.
-    let mut data_arcs: Vec<alloc::sync::Arc<Cap>> = Vec::new();
-    for m in img.mappings.iter() {
-        // `img.mappings` describes data/slot regions only; code is
-        // direct-mapped above at CODE_BASE and never extends the flat
-        // RW buffer.
-        let end = (m.start + m.size) as u32;
-        if end > mem_size {
-            mem_size = end;
-        }
-        if m.source_path_len == 0 {
-            continue;
-        }
-        let src_slot = m.source_path[0].get() as usize;
-        if src_slot >= CNODE_SLOTS || !(pinned_slot[src_slot] || initial_slot[src_slot]) {
-            continue;
-        }
-        let target_hash = match frame.cnode.get(src_slot) {
-            Some(Some(CapHashOrRef::Hash(h))) => *h,
-            _ => continue,
-        };
-        let data_arc = CACHE
-            .get(CapHashOrRef::Hash(target_hash))
-            .ok_or(ERR_HOST_CALL_SLOT_EMPTY)?;
-        // Only a dense `Cap::Data` is mappable as a memory region.
-        match &*data_arc {
-            Cap::Data(_) => {}
-            _ => return Err(ERR_MAP_BAD_KIND),
-        }
-        data_arcs.push(data_arc);
-        // SAFETY-ish: data_arcs[last] is the Arc we just pushed; its dense page
-        // slabs are page-aligned and have stable addresses (pinned for the
-        // frame's life by the no-eviction V1 invariant).
-        let d = match data_arcs.last().unwrap().as_ref() {
-            Cap::Data(d) => d,
-            _ => unreachable!("validated above"),
-        };
-        let size = (m.size as u32).min(d.content_len() as u32);
-        if size == 0 {
-            continue;
-        }
-        // Lazily-materialized cap mapping: pinned → read-only (a write
-        // hard-faults), initial → copy-on-write. The page set is
-        // page-rounded (a partial last page reads its zeroed slab tail).
-        let kind = if pinned_slot[src_slot] {
-            javm_exec::mat::PageKind::PinnedCapRo.as_u8()
-        } else {
-            javm_exec::mat::PageKind::UnpinnedCapCow.as_u8()
-        };
-        let span = size.next_multiple_of(paging::PAGE_SIZE as u32);
-        let num_pages = (span / paging::PAGE_SIZE as u32) as usize;
-        // Resolve one source PA per page: a present slab maps directly, an
-        // `Empty` (absent / zero) page maps to the shared zero page. (V1 never
-        // mints `Missing`.)
-        let pas_off = mat_pas.len() as u32;
-        for i in 0..num_pages {
-            let pa = match d.page_slot(i) {
-                javm_cap::PageSlot::Loaded(pr) => {
-                    paging::va_to_pa(pr.bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?
-                }
-                javm_cap::PageSlot::Empty => zero_pa,
-                javm_cap::PageSlot::Missing(_) => return Err(ERR_MAP_BAD_KIND),
-            };
-            mat_pas.push(pa);
-        }
-        mat_ranges.push(MatRange {
-            start: m.start as u32,
-            end: (m.start as u32).saturating_add(span),
-            pas_off,
-            pas_len: num_pages as u32,
-            kind,
-            source_hash: target_hash,
-            source_slot: SlotIdx(m.source_path[0].get()),
-        });
-    }
-
-    // Instance rw_overlays: per-instance evolved state. Both top-level
-    // (Hash) and kernel-derived (Ref) instances live in the same
-    // CacheDirectory; `CACHE.get(CapHashOrRef)` does the dispatch.
-    //
-    // Up to three overlays are propagated to the JIT (its arg / ro
-    // / rw mem regions). Anything beyond that is ignored — matches
-    // pre-rewrite behaviour.
-    let mut overlay_bufs: [(u32, Vec<u8>); 3] = [(0, Vec::new()), (0, Vec::new()), (0, Vec::new())];
-    let mut n = 0usize;
+    // The Instance's RW memory is a dense `DataCap` (`inst.mem`) covering the
+    // whole data extent, holding both initial and pinned content at their VAs
+    // with page-aligned slabs (kept alive in CACHE for the frame's life by the
+    // no-eviction V1 invariant). Source every data page from it: pinned VA
+    // ranges as `PinnedCapRo`, everything else (initial + ephemeral, the latter
+    // backed by `Empty` → zero page) as one catch-all `UnpinnedCapCow` range.
+    let data_base = javm_cap::layout::DATA_BASE as u32;
+    let mut mem_size = data_base;
     let inst_arc = CACHE.get(frame.instance.clone());
-    if let Some(arc) = inst_arc.as_ref()
-        && let Cap::Instance(inst) = &**arc
+    if let Some(arc) = inst_arc.as_deref()
+        && let Cap::Instance(inst) = arc
     {
-        for ov in inst.rw_overlays.iter() {
-            let end = ov.start.saturating_add(ov.bytes.len() as u32);
-            if end > mem_size {
-                mem_size = end;
+        let mem = &inst.mem;
+        let extent = mem.content_len() as u32;
+        mem_size = data_base.saturating_add(extent);
+        let pages = (extent / paging::PAGE_SIZE as u32) as usize;
+
+        // Pinned mappings → PinnedCapRo ranges (pushed first → precedence).
+        for m in img.mappings.iter() {
+            if m.source_path_len == 0 {
+                continue;
             }
-            if n < overlay_bufs.len() && !ov.bytes.is_empty() {
-                overlay_bufs[n].0 = ov.start;
-                overlay_bufs[n].1.clear();
-                overlay_bufs[n].1.extend_from_slice(ov.bytes.as_slice());
-                n += 1;
+            let src_slot = m.source_path[0].get() as usize;
+            if src_slot >= CNODE_SLOTS || !pinned_slot[src_slot] {
+                continue;
             }
+            let span = (m.size as u32).next_multiple_of(paging::PAGE_SIZE as u32);
+            let n = (span / paging::PAGE_SIZE as u32) as usize;
+            if n == 0 {
+                continue;
+            }
+            let base_page =
+                ((m.start as u32).saturating_sub(data_base) / paging::PAGE_SIZE as u32) as usize;
+            let pas_off = mat_pas.len() as u32;
+            for k in 0..n {
+                mat_pas.push(mem_page_pa(mem, base_page + k, zero_pa)?);
+            }
+            mat_ranges.push(MatRange {
+                start: m.start as u32,
+                end: (m.start as u32).saturating_add(span),
+                pas_off,
+                pas_len: n as u32,
+                kind: javm_exec::mat::PageKind::PinnedCapRo.as_u8(),
+                source_hash: [0u8; 32],
+                source_slot: SlotIdx(m.source_path[0].get()),
+            });
         }
-        if inst.mem_size > mem_size {
-            mem_size = inst.mem_size;
+
+        // Catch-all RW range over the whole extent (initial + ephemeral).
+        if pages > 0 {
+            let pas_off = mat_pas.len() as u32;
+            for i in 0..pages {
+                mat_pas.push(mem_page_pa(mem, i, zero_pa)?);
+            }
+            mat_ranges.push(MatRange {
+                start: data_base,
+                end: mem_size,
+                pas_off,
+                pas_len: pages as u32,
+                kind: javm_exec::mat::PageKind::UnpinnedCapCow.as_u8(),
+                source_hash: [0u8; 32],
+                source_slot: SlotIdx(0),
+            });
         }
     }
-
-    let arg: (u32, &[u8]) = (overlay_bufs[0].0, overlay_bufs[0].1.as_slice());
-    let ro: (u32, &[u8]) = (overlay_bufs[1].0, overlay_bufs[1].1.as_slice());
-    let rw: (u32, &[u8]) = (overlay_bufs[2].0, overlay_bufs[2].1.as_slice());
 
     // PVM2: `code` is raw RV+C+custom-0 bytes (produced by
     // `javm_transpiler::linker::link_elf`). The JIT cache
@@ -610,24 +550,25 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
             code_pa,
             frame.pc,
             mem_size,
-            MemRegion {
-                start: arg.0,
-                data: arg.1,
-            },
-            MemRegion {
-                start: ro.0,
-                data: ro.1,
-            },
-            MemRegion {
-                start: rw.0,
-                data: rw.1,
-            },
             mat_ranges,
             mat_pas,
             zero_page,
         )
     }
     .ok_or(ERR_JIT_FAILED)
+}
+
+/// Source physical address of page `i` of `mem` (a dense `DataCap`): a present
+/// slab's PA, or the shared `zero_pa` for an `Empty` (absent / zero) page. V1
+/// never mints `Missing`.
+fn mem_page_pa(mem: &javm_cap::DataCap, i: usize, zero_pa: u64) -> Result<u64, u32> {
+    match mem.page_slot(i) {
+        javm_cap::PageSlot::Loaded(pr) => {
+            paging::va_to_pa(pr.bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)
+        }
+        javm_cap::PageSlot::Empty => Ok(zero_pa),
+        javm_cap::PageSlot::Missing(_) => Err(ERR_MAP_BAD_KIND),
+    }
 }
 
 /// Pop the top frame; if a parent exists, reflect the popped child's
@@ -674,8 +615,7 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<(), u32> {
         image_hash_chain: child_chain,
         image_hash,
         root_cnode: CapHashOrRef::Hash([0u8; 32]),
-        rw_overlays: Vec::new(),
-        mem_size: 0,
+        mem: javm_cap::DataCap::empty(),
         regs: [0u64; NUM_REGS],
         pc: 0,
         gas_remaining: 0,

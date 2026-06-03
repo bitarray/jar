@@ -40,7 +40,7 @@ pub use cap::data::{DataCap, DataGroup, DataGroups, GROUP_SIZE, PAGE_SIZE, PageR
 pub use cap::image::{
     EndpointDef, ImageCap, ImageConvertError, ImageSlotEntry, MemoryMapping, image_cap,
 };
-pub use cap::instance::{InstanceCap, RwOverlay};
+pub use cap::instance::InstanceCap;
 pub use cap::page::{PageBytes, PageRef, PageSlot};
 pub use cap::view::{DataViewCap, ViewOverlay};
 pub use cap::{Cap, CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS, TypeCap};

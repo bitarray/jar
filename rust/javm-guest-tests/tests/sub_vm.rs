@@ -85,10 +85,8 @@ fn m_calls_s_round_trip() {
     }
     let m_cnode_hash = cache.put_cap(&Cap::CNode(m_cnode)).expect("put cnode");
 
-    // Build M's runtime memory layout from its image mappings.
-    let (mem_size, overlays) = m_image.data_overlays();
-    let overlay_slices: Vec<(u32, &[u8])> =
-        overlays.iter().map(|(s, b)| (*s, b.as_slice())).collect();
+    // Build M's runtime memory image from its image mappings.
+    let m_mem = m_image.instance_mem_backing();
 
     // Seed φ from the endpoint's initial_regs (sp = stack_top, etc.).
     let endpoint = m_image.endpoints.get(&0).expect("M endpoint 0");
@@ -100,12 +98,11 @@ fn m_calls_s_round_trip() {
     }
 
     let m_instance_hash = cache
-        .put_cap(&Cap::instance_with_overlays(
+        .put_cap(&Cap::instance_with_mem(
             [0u8; 32],
             m_image_hash,
             m_cnode_hash,
-            &overlay_slices,
-            mem_size,
+            m_mem,
             regs,
             0,
             0,

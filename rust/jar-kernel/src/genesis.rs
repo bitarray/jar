@@ -46,12 +46,11 @@ fn publish_kernel_unit_cap(
 ) -> Result<CapHash, KernelError> {
     let mut regs = [0u64; NUM_REGS];
     regs[0] = id;
-    let cap = Cap::instance_with_overlays(
+    let cap = Cap::instance_with_mem(
         kernel_image_hash(image),
         placeholder_image_hash,
         empty_cnode_hash,
-        &[],
-        0,
+        javm_cap::DataCap::empty(),
         regs,
         0,
         0,
@@ -243,26 +242,20 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
         state.caps.put_cap(&Cap::CNode(cnode))?
     };
 
-    // 8. Compute the chain Instance's memory layout from the image's
-    //    memory mappings via the canonical `Image::data_overlays()`:
-    //    mem_size = max(start + size); rw_overlays come from the
-    //    image's pinned/initial slot contents for each mapping.
-    let (mem_size, overlays) = chain_image.data_overlays();
-    let overlay_slices: Vec<(u32, &[u8])> = overlays
-        .iter()
-        .map(|(start, bytes)| (*start, bytes.as_slice()))
-        .collect();
+    // 8. Build the chain Instance's memory image from the image's memory
+    //    mappings via the canonical `Image::instance_mem_backing()` (every
+    //    mapping's source content folded at its offset above DATA_BASE).
+    let chain_mem = chain_image.instance_mem_backing();
 
     // 9. Publish the chain Instance. `image_hash_chain` mirrors the
     //    image's content hash directly at genesis (no prior chain).
     //    `regs` start at zeros (chain doesn't have a unit-id; events
     //    drive it via cnode slot[0]).
-    let chain_instance_hash = state.caps.put_cap(&Cap::instance_with_overlays(
+    let chain_instance_hash = state.caps.put_cap(&Cap::instance_with_mem(
         chain_image_hash,
         chain_image_hash,
         root_cnode_hash,
-        &overlay_slices,
-        mem_size,
+        chain_mem,
         [0u64; NUM_REGS],
         0,
         0,

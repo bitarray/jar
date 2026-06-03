@@ -173,42 +173,44 @@ impl<K: KernelAssist> Vm<K> {
             .get(endpoint_idx as usize)
             .ok_or(VmError::Invariant("endpoint index out of range"))?;
 
-        // Memory layout: the data region lives at [DATA_BASE, mem_size);
-        // the flat buffer is based at DATA_BASE so [0, DATA_BASE) (null
-        // guard + code) is out of range and faults — matching the
-        // recompiler's page table. `inst.mem_size` is the absolute max
-        // data VA; the RW extent above DATA_BASE is what we map.
+        // Memory layout: the data region lives at [DATA_BASE, DATA_BASE +
+        // mem.size); the flat buffer is based at DATA_BASE so [0, DATA_BASE)
+        // (null guard + code) is out of range and faults — matching the
+        // recompiler's page table.
         let mut mem = CopyingMemory::new();
         mem.base = javm_cap::layout::DATA_BASE;
-        let data_extent = page_round_up_u64(
-            (inst.mem_size as u64).saturating_sub(javm_cap::layout::DATA_BASE as u64),
-        );
+        let data_extent = inst.mem.content_len();
+        let mut mem_image = vec![0u8; data_extent as usize];
         if data_extent > 0 {
+            // Seed the whole extent from the Instance's memory image (the
+            // immutable backing, holding both initial and pinned content).
+            inst.mem.copy_into(0, &mut mem_image);
             mem.map_region(
                 javm_cap::layout::DATA_BASE as u64,
                 data_extent,
                 Access::ReadWrite,
-                None,
+                Some(&mem_image),
             )
             .map_err(VmError::MapRegion)?;
         }
-        // A mapping sourced from a pinned slot is read-only: lay it RO so
-        // a guest store faults, matching the recompiler, which RO direct-
-        // maps pinned slots and does not CoW-arm them (nub-arch-x86
-        // `build_runtime` pinned-vs-initial classification). Non-pinned
-        // (initial) overlays stay RW.
-        for overlay_entry in inst.rw_overlays.iter() {
-            let access = if img.mapping_is_pinned(overlay_entry.start) {
-                Access::ReadOnly
-            } else {
-                Access::ReadWrite
-            };
-            overlay_into(
-                &mut mem,
-                overlay_entry.start,
-                overlay_entry.bytes.as_slice(),
-                access,
-            )?;
+        // Re-lay pinned mappings read-only (same bytes, from the seeded image)
+        // so a guest store faults — matching the recompiler's PinnedCapRo
+        // direct map. No cache lookup needed: the content is already in mem.
+        let data_base = javm_cap::layout::DATA_BASE as u64;
+        for m in img.mappings.iter() {
+            if m.source_path_len == 0 || !img.mapping_is_pinned(m.start as u32) {
+                continue;
+            }
+            let off = (m.start.saturating_sub(data_base)) as usize;
+            let len = (m.size as usize).min(mem_image.len().saturating_sub(off));
+            if len > 0 {
+                overlay_into(
+                    &mut mem,
+                    m.start as u32,
+                    &mem_image[off..off + len],
+                    Access::ReadOnly,
+                )?;
+            }
         }
         // Category #3: guest PIC data loads of the program's own bytecode
         // page-in the touched code page(s) on first read (read-only), just
@@ -586,33 +588,38 @@ impl<K: KernelAssist> Vm<K> {
             Cap::Image(i) => i.clone(),
             _ => return Err(VmError::ImageNotFound),
         };
-        let mut overlay_bufs: Vec<(u32, Vec<u8>)> = Vec::new();
+        // Settle the evolved memory into a fresh `DataCap` (= the View folded
+        // into a new immutable backing). Snapshot each mapping's live
+        // `[start, start+size)` into the extent-sized buffer at its offset above
+        // DATA_BASE. Pinned mappings are read-only, so they snapshot back
+        // unchanged (idempotent); initial mappings carry the guest's writes.
+        let data_base = javm_cap::layout::DATA_BASE as u64;
+        let mem_top = img
+            .mappings
+            .iter()
+            .map(|m| m.start + m.size)
+            .max()
+            .unwrap_or(data_base);
+        let extent = page_round_up_u64(mem_top.saturating_sub(data_base));
+        let mut buf = vec![0u8; extent as usize];
         for m in img.mappings.iter() {
-            // V1: snapshot the live mem [start, start + size) into an
-            // overlay buffer if the read succeeds.
-            let start = m.start as u32;
+            if m.source_path_len == 0 {
+                continue;
+            }
             let len = m.size as usize;
-            if let Ok(bytes) = entry.mem.read(start, len) {
-                overlay_bufs.push((start, bytes));
+            if let Ok(bytes) = entry.mem.read(m.start as u32, len) {
+                let off = (m.start - data_base) as usize;
+                let n = bytes.len().min(buf.len().saturating_sub(off));
+                buf[off..off + n].copy_from_slice(&bytes[..n]);
             }
         }
-        let overlays_borrowed: Vec<(u32, &[u8])> = overlay_bufs
-            .iter()
-            .map(|(s, b)| (*s, b.as_slice()))
-            .collect();
+        let mem_dc = javm_cap::DataCap::from_bytes_sized(&buf, extent);
 
-        let mem_size = if let Some(last) = img.mappings.last() {
-            (last.start + last.size) as u32
-        } else {
-            0
-        };
-
-        let hash = cache.put_cap(&Cap::instance_with_overlays(
+        let hash = cache.put_cap(&Cap::instance_with_mem(
             entry.image_hash_chain,
             entry.image_hash,
             cnode_hash,
-            &overlays_borrowed,
-            mem_size,
+            mem_dc,
             // Persist the 13 host-mapped slots; x3/x4 are invocation-local.
             entry.regs.gpr[..NUM_REGS]
                 .try_into()
@@ -740,12 +747,11 @@ mod tests {
             .unwrap();
         let cnode_hash = cache.put_cap(&Cap::empty_cnode()).unwrap();
         cache
-            .put_cap(&Cap::instance_with_overlays(
+            .put_cap(&Cap::instance_with_mem(
                 [0xAA; 32],
                 image_hash,
                 cnode_hash,
-                &[],
-                0,
+                javm_cap::DataCap::empty(),
                 [0u64; NUM_REGS],
                 0,
                 0,
@@ -881,12 +887,11 @@ mod tests {
             cache.put_cap(&Cap::CNode(cn)).unwrap()
         };
         let m_inst_hash = cache
-            .put_cap(&Cap::instance_with_overlays(
+            .put_cap(&Cap::instance_with_mem(
                 [0xAA; 32],
                 m_image_hash,
                 m_cnode_hash,
-                &[],
-                0,
+                javm_cap::DataCap::empty(),
                 [0u64; NUM_REGS],
                 0,
                 0,

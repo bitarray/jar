@@ -88,11 +88,7 @@ mod recomp {
             }
         }
 
-        let (mem_size, overlays) = image.data_overlays();
-        let overlay_slices: Vec<(u32, &[u8])> = overlays
-            .iter()
-            .map(|(start, bytes)| (*start, bytes.as_slice()))
-            .collect();
+        let mem = image.instance_mem_backing();
 
         let mut nub = nub_hyperlight().lock().expect("nub mutex");
         // Publish the canonical Image + an empty root CNode + an
@@ -138,16 +134,7 @@ mod recomp {
         let cnode_h = nub
             .put_cap(&cnode_cap)
             .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap cnode: {e}"));
-        let instance_cap = Cap::instance_with_overlays(
-            [0u8; 32],
-            image_h,
-            cnode_h,
-            &overlay_slices,
-            mem_size,
-            regs,
-            0,
-            0,
-        );
+        let instance_cap = Cap::instance_with_mem([0u8; 32], image_h, cnode_h, mem, regs, 0, 0);
         let instance_hash = nub
             .put_cap(&instance_cap)
             .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap instance: {e}"));

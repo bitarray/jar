@@ -173,6 +173,15 @@ pub enum PageResolution<'a> {
 }
 
 impl DataCap {
+    /// An empty `DataCap`: logical size 0, no pages. Used for an Instance with
+    /// no data memory.
+    pub fn empty() -> Self {
+        DataCap {
+            size: 0,
+            groups: RadixMap::new(),
+        }
+    }
+
     /// Total logical content size in bytes (always a [`PAGE_SIZE`] multiple).
     pub fn content_len(&self) -> u64 {
         self.size

@@ -760,9 +760,6 @@ pub unsafe fn build_frame_runtime(
     code_pa: u64,
     entry_pc: u32,
     mem_size: u32,
-    arg: MemRegion,
-    ro: MemRegion,
-    rw: MemRegion,
     mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
     mat_pas: alloc::vec::Vec<u64>,
     zero_page: PageBuf,
@@ -812,30 +809,14 @@ pub unsafe fn build_frame_runtime(
         .saturating_sub(data_base)
         .next_multiple_of(PAGE_SIZE);
 
+    // Memory is sourced lazily from the Instance's `mem` DataCap (via
+    // `mat_ranges`/`mat_pas`): every data page is covered by a `MatRange`, so
+    // there is no eager flat buffer to seed. `mem_buf` is retained only as a
+    // zeroed fallback PA for the (now-unreachable) ephemeral arm; the dedicated
+    // mem_buf removal is a follow-up.
     let mem_buf = PageBuf::new(mem_bytes.max(PAGE_SIZE))?;
     let ctx_buf = PageBuf::new(PAGE_SIZE)?;
     let stack_buf = PageBuf::new(PAGE_SIZE)?;
-
-    for region in [arg, ro, rw] {
-        if region.data.is_empty() {
-            continue;
-        }
-        // Overlay starts are absolute guest VAs (≥ DATA_BASE); rebase
-        // into the buffer.
-        let off = (region.start as usize).checked_sub(data_base)?;
-        let end = off.checked_add(region.data.len())?;
-        if end > mem_bytes {
-            return None;
-        }
-        // SAFETY: bounds-checked.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                region.data.as_ptr(),
-                (mem_buf.kva() + off as u64) as *mut u8,
-                region.data.len(),
-            );
-        }
-    }
 
     let ctx_kva = ctx_buf.kva();
     let ctx = ctx_kva as *mut JitContext;

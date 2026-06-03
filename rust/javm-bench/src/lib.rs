@@ -112,12 +112,8 @@ impl BuiltCaps {
         let cnode_cap = Cap::empty_cnode();
         let cnode_hash = ssz::hash_tree_root(&cnode_cap);
 
-        // 4. Build the Instance with the bench's flat overlay layout.
-        let (mem_size, overlays) = image.data_overlays();
-        let overlay_slices: Vec<(u32, &[u8])> = overlays
-            .iter()
-            .map(|(start, bytes)| (*start, bytes.as_slice()))
-            .collect();
+        // 4. Build the Instance with the bench's memory image.
+        let mem = image.instance_mem_backing();
 
         let mut regs = [0u64; NUM_REGS];
         for (&i, &v) in &endpoint.initial_regs {
@@ -126,16 +122,8 @@ impl BuiltCaps {
             }
         }
 
-        let instance_cap = Cap::instance_with_overlays(
-            [0u8; 32],
-            image_hash,
-            cnode_hash,
-            &overlay_slices,
-            mem_size,
-            regs,
-            0,
-            0,
-        );
+        let instance_cap =
+            Cap::instance_with_mem([0u8; 32], image_hash, cnode_hash, mem, regs, 0, 0);
         let instance_hash = ssz::hash_tree_root(&instance_cap);
 
         BuiltCaps {
@@ -424,19 +412,8 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
         }
     }
 
-    let (mem_size, overlays) = image.data_overlays();
-    let overlay_slices: Vec<(u32, &[u8])> =
-        overlays.iter().map(|(s, b)| (*s, b.as_slice())).collect();
-    let inst_cap = Cap::instance_with_overlays(
-        [0u8; 32],
-        image_hash,
-        cnode_hash,
-        &overlay_slices,
-        mem_size,
-        regs,
-        0,
-        0,
-    );
+    let mem = image.instance_mem_backing();
+    let inst_cap = Cap::instance_with_mem([0u8; 32], image_hash, cnode_hash, mem, regs, 0, 0);
     let inst_hash = ssz::hash_tree_root(&inst_cap);
     nub.put_cap_with_hash(inst_hash, &inst_cap)
         .expect("put instance");

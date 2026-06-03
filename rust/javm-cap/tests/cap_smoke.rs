@@ -5,7 +5,7 @@
 use javm_cap::{
     CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, EndpointDef, ImageCap, ImageSlotEntry,
     InstanceCap, MAX_SOURCE_DEPTH, MemoryMapping, NUM_REGS, PAGE_SIZE, PageBytes, PageRef,
-    PageSlot, RwOverlay, SlotIdx,
+    PageSlot, SlotIdx,
 };
 use std::sync::Arc;
 
@@ -144,27 +144,28 @@ fn page_ref_shares_then_releases() {
 }
 
 #[test]
-fn instance_with_rw_overlay() {
-    let overlay_bytes: Vec<u8> = vec![0xDE, 0xAD];
-
-    let overlays = vec![RwOverlay {
-        start: 0x1000,
-        bytes: overlay_bytes,
-    }];
+fn instance_with_mem_image() {
+    // The Instance's RW memory is a dense DataCap; write 0xDEAD into the page
+    // at offset 0x1000 of a 64 KiB image.
+    let mut mem = DataCap::from_bytes_sized(&[], 0x10000);
+    let mut page = vec![0u8; PAGE_SIZE];
+    page[..2].copy_from_slice(&[0xDE, 0xAD]);
+    mem.put_page(0x1000, &page);
 
     let inst: InstanceCap = InstanceCap {
         image_hash_chain: [0xAA; 32],
         image_hash: [0xBB; 32],
         root_cnode: CapHashOrRef::Hash([0xCC; 32]),
-        rw_overlays: overlays,
-        mem_size: 0x10000,
+        mem,
         regs: [0u64; NUM_REGS],
         pc: 0,
         gas_remaining: 1_000_000,
     };
     assert_eq!(inst.image_hash, [0xBB; 32]);
-    assert_eq!(inst.rw_overlays[0].start, 0x1000);
-    assert_eq!(inst.rw_overlays[0].bytes.as_slice(), &[0xDE, 0xAD]);
+    assert_eq!(inst.mem_extent(), 0x10000);
+    let mut out = vec![0u8; PAGE_SIZE];
+    inst.mem.copy_into(0x1000, &mut out);
+    assert_eq!(&out[..2], &[0xDE, 0xAD]);
 }
 
 #[test]
@@ -249,12 +250,11 @@ fn cache_round_trips_full_publish_chain() {
     // 4. Publish an Instance binding image + cnode.
     let regs = [0u64; NUM_REGS];
     let inst_h = cache
-        .put_cap(&Cap::instance_with_overlays(
+        .put_cap(&Cap::instance_with_mem(
             [0u8; 32],
             image_h,
             cnode_h,
-            &[],
-            4096,
+            DataCap::from_bytes_sized(&[], 4096),
             regs,
             0x1000,
             1_000_000,

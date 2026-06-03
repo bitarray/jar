@@ -73,12 +73,11 @@ fn image_cap_roundtrip_preserves_hash() {
 
 #[test]
 fn instance_cap_roundtrip_preserves_hash() {
-    round_trip(Cap::instance_with_overlays(
+    round_trip(Cap::instance_with_mem(
         [0u8; 32],
         [0xAA; 32],
         [0xBB; 32],
-        &[],
-        4096,
+        DataCap::from_bytes_sized(&[], 4096),
         [0u64; NUM_REGS],
         0,
         0,

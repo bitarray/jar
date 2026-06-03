@@ -536,46 +536,45 @@ impl<K: KernelAssist> Vm<K> {
             Cap::CNode(c) => c.clone(),
             _ => return Err(VmError::Invariant("derive_spawn: cnode hash misroutes")),
         };
-        let mut overlay_bufs: Vec<(u32, Vec<u8>)> = Vec::new();
-        let mut mem_size: u32 = 0;
+        let data_base = javm_cap::layout::DATA_BASE as u64;
+        let mem_top = img_cap
+            .mappings
+            .iter()
+            .map(|m| m.start + m.size)
+            .max()
+            .unwrap_or(data_base);
+        let mut mem_dc = DataCap::from_bytes_sized(&[], mem_top.saturating_sub(data_base));
+        let extent = mem_dc.content_len();
+        let page = javm_cap::PAGE_SIZE as u64;
         for m in img_cap.mappings.iter() {
-            let end = (m.start + m.size) as u32;
-            if end > mem_size {
-                mem_size = end;
-            }
+            // Fold every mapping's source content (pinned and initial) into the
+            // backing; the engines mark pinned VAs read-only at seed time.
             if m.source_path_len == 0 {
                 continue;
             }
-            // V1: only single-step source paths are exercised.
             let src_slot = m.source_path[0];
             let target = match new_cnode.get(src_slot) {
                 Some(t) => t,
                 None => continue,
             };
-            let data_arc = cache.get(target);
-            let bytes_vec = match data_arc.as_deref() {
-                Some(Cap::Data(d)) => {
-                    let mut buf = vec![0u8; d.content_len() as usize];
-                    d.copy_into(0, &mut buf);
-                    buf
+            if let Some(Cap::Data(d)) = cache.get(target).as_deref() {
+                let mut content = vec![0u8; d.content_len() as usize];
+                d.copy_into(0, &mut content);
+                let base_off = m.start.saturating_sub(data_base);
+                for (i, chunk) in content.chunks(page as usize).enumerate() {
+                    let off = base_off + i as u64 * page;
+                    if off < extent {
+                        mem_dc.put_page(off, chunk);
+                    }
                 }
-                _ => continue,
-            };
-            if !bytes_vec.is_empty() {
-                overlay_bufs.push((m.start as u32, bytes_vec));
             }
         }
-        let overlay_slices: Vec<(u32, &[u8])> = overlay_bufs
-            .iter()
-            .map(|(s, b)| (*s, b.as_slice()))
-            .collect();
 
-        let inst_cap = Cap::instance_with_overlays(
+        let inst_cap = Cap::instance_with_mem(
             child_chain,
             image_hash,
             new_cnode_hash,
-            &overlay_slices,
-            mem_size,
+            mem_dc,
             [0u64; javm_cap::NUM_REGS],
             0,
             0,
@@ -1313,12 +1312,11 @@ mod tests {
             .unwrap();
         let cnode_hash = cache.put_cap(&Cap::empty_cnode()).unwrap();
         let inst_hash = cache
-            .put_cap(&Cap::instance_with_overlays(
+            .put_cap(&Cap::instance_with_mem(
                 [0x42; 32],
                 image_hash,
                 cnode_hash,
-                &[],
-                0,
+                javm_cap::DataCap::empty(),
                 [0u64; NUM_REGS],
                 0,
                 0,
@@ -1635,12 +1633,11 @@ mod tests {
             .unwrap();
         let cnode_hash = cache.put_cap(&Cap::empty_cnode()).unwrap();
         let child_instance_hash = cache
-            .put_cap(&Cap::instance_with_overlays(
+            .put_cap(&Cap::instance_with_mem(
                 [0xCC; 32],
                 image_hash,
                 cnode_hash,
-                &[],
-                0,
+                javm_cap::DataCap::empty(),
                 [0u64; javm_cap::NUM_REGS],
                 0,
                 0,
