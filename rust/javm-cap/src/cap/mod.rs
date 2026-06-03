@@ -151,10 +151,11 @@ impl Cap {
         Cap::Data(DataCap::from_bytes_sized(bytes, target_size))
     }
 
-    /// Build an empty heap `Cap::CNode` of `2^size_log` slots. Rejects
-    /// `size_log > 16`.
-    pub fn empty_cnode(size_log: u8) -> Result<Self, crate::error::CapError> {
-        Ok(Cap::CNode(CNodeCap::new(size_log)?))
+    /// Build an empty heap `Cap::CNode`. A CNode is an unbounded
+    /// hash-keyed map (bounded by storage quota), so there is no
+    /// `size_log` to declare.
+    pub fn empty_cnode() -> Self {
+        Cap::CNode(CNodeCap::new())
     }
 
     /// Build a heap `Cap::Image` from an SSZ `Image` plus the

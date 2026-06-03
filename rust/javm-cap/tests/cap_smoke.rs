@@ -23,9 +23,8 @@ fn make_image_cap() -> ImageCap {
 #[test]
 fn cap_image_constructor() {
     let _img: Cap = Cap::Image(make_image_cap());
-    let cnode: CNodeCap = CNodeCap::new(8).unwrap();
-    assert_eq!(cnode.size_log, 8);
-    assert_eq!(cnode.capacity(), 256);
+    let cnode: CNodeCap = CNodeCap::new();
+    assert!(cnode.slots.is_empty());
 }
 
 #[test]
@@ -55,11 +54,9 @@ fn data_inline_constructor() {
 
 #[test]
 fn empty_cnode_constructor() {
-    let cap = Cap::empty_cnode(4).unwrap();
+    let cap = Cap::empty_cnode();
     match cap {
         Cap::CNode(c) => {
-            assert_eq!(c.size_log, 4);
-            assert_eq!(c.capacity(), 16);
             assert!(c.slots.is_empty());
         }
         _ => panic!("expected Cap::CNode"),
@@ -67,17 +64,11 @@ fn empty_cnode_constructor() {
 }
 
 #[test]
-fn empty_cnode_size_log_too_large_rejected() {
-    assert!(Cap::empty_cnode(17).is_err());
-    assert!(CNodeCap::new(17).is_err());
-}
-
-#[test]
-fn cnode_set_takes_and_keeps_slots_sorted() {
-    let mut cnode: CNodeCap = CNodeCap::new(4).unwrap();
+fn cnode_set_get_take_semantics() {
+    let mut cnode: CNodeCap = CNodeCap::new();
     assert_eq!(cnode.get(SlotIdx(0)), None);
 
-    // Inserting out-of-order still leaves slots sorted.
+    // First insert reports no prior binding.
     let prior = cnode
         .set(SlotIdx(7), Some(CapHashOrRef::Hash([0x77; 32])))
         .unwrap();
@@ -88,14 +79,9 @@ fn cnode_set_takes_and_keeps_slots_sorted() {
     cnode
         .set(SlotIdx(11), Some(CapHashOrRef::Hash([0xBB; 32])))
         .unwrap();
-    assert_eq!(
-        cnode
-            .slots
-            .iter()
-            .map(|(idx, _)| idx as u32)
-            .collect::<Vec<u32>>(),
-        vec![2u32, 7, 11]
-    );
+    assert_eq!(cnode.slots.len(), 3);
+    assert_eq!(cnode.get(SlotIdx(2)), Some(CapHashOrRef::Hash([0x22; 32])));
+    assert_eq!(cnode.get(SlotIdx(11)), Some(CapHashOrRef::Hash([0xBB; 32])));
 
     // Overwrite returns prior target.
     let prior = cnode
@@ -108,34 +94,19 @@ fn cnode_set_takes_and_keeps_slots_sorted() {
     let taken = cnode.take(SlotIdx(2)).unwrap();
     assert_eq!(taken, Some(CapHashOrRef::Hash([0x22; 32])));
     assert_eq!(cnode.get(SlotIdx(2)), None);
-    // Remaining slots stay sorted.
-    assert_eq!(
-        cnode
-            .slots
-            .iter()
-            .map(|(idx, _)| idx as u32)
-            .collect::<Vec<u32>>(),
-        vec![7u32, 11]
-    );
-
-    // Out-of-range slot rejected.
-    assert!(
-        cnode
-            .set(SlotIdx(16), Some(CapHashOrRef::Hash([0; 32])))
-            .is_err()
-    );
+    assert_eq!(cnode.slots.len(), 2);
 }
 
 #[test]
 fn cnode_lookup_after_set() {
-    let mut cnode: CNodeCap = CNodeCap::new(8).unwrap();
+    let mut cnode: CNodeCap = CNodeCap::new();
     cnode
         .set(SlotIdx(7), Some(CapHashOrRef::Hash([0x11; 32])))
         .unwrap();
     // Mint a real CapRef via the cache so the bookkeeping test
     // doesn't depend on the crate-internal `CapRef::new`.
     let cache = CacheDirectory::new();
-    let r = cache.put_instance(Cap::CNode(CNodeCap::new(0).unwrap()));
+    let r = cache.put_instance(Cap::CNode(CNodeCap::new()));
     cnode
         .set(SlotIdx(42), Some(CapHashOrRef::Ref(r.clone())))
         .unwrap();
@@ -234,7 +205,7 @@ fn capref_strong_count_tracks_holders() {
     let cache = CacheDirectory::new();
     // put_instance returns the caller's CapRef; the directory holds
     // its own clone as the entry's self-ref, so strong_count starts at 2.
-    let r = cache.put_instance(Cap::CNode(CNodeCap::new(0).unwrap()));
+    let r = cache.put_instance(Cap::CNode(CNodeCap::new()));
     assert_eq!(r.strong_count(), 2);
     let r2 = r.clone();
     assert_eq!(r.strong_count(), 3);
@@ -258,7 +229,7 @@ fn cache_round_trips_full_publish_chain() {
 
     // 2. Publish a CNode referencing the Data blob by hash.
     let cnode_h = {
-        let mut cn: CNodeCap = CNodeCap::new(4).unwrap();
+        let mut cn: CNodeCap = CNodeCap::new();
         cn.set(SlotIdx(0), Some(CapHashOrRef::Hash(data_h)))
             .unwrap();
         cache.put_cap(&Cap::CNode(cn)).expect("put cnode")
@@ -309,7 +280,7 @@ fn cache_round_trips_full_publish_chain() {
 fn capref_sweep_reclaims_orphaned_instance() {
     let cache = CacheDirectory::new();
 
-    let r = cache.put_instance(Cap::CNode(CNodeCap::new(4).unwrap()));
+    let r = cache.put_instance(Cap::CNode(CNodeCap::new()));
     assert_eq!(cache.instance_count(), 1);
     // Two holders: caller's CapRef + directory's self-ref.
     assert_eq!(r.strong_count(), 2);
@@ -329,11 +300,11 @@ fn capref_sweep_cascades_through_cnode_ref_chain() {
     let cache = CacheDirectory::new();
 
     // Leaf instance with no nested Refs.
-    let leaf = cache.put_instance(Cap::CNode(CNodeCap::new(4).unwrap()));
+    let leaf = cache.put_instance(Cap::CNode(CNodeCap::new()));
 
     // Parent cnode holding the leaf via Ref. Cap::Clone bumps the
     // leaf's strong count when we clone the CNodeCap into the cap.
-    let mut parent_cn: CNodeCap = CNodeCap::new(4).unwrap();
+    let mut parent_cn: CNodeCap = CNodeCap::new();
     parent_cn
         .set(SlotIdx(0), Some(CapHashOrRef::Ref(leaf.clone())))
         .unwrap();

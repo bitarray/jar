@@ -42,7 +42,7 @@ fn cap_variants_have_distinct_hashes() {
     let t: Cap = Cap::Type(TypeCap {
         image_hash_chain: [0; 32],
     });
-    let cn: Cap = Cap::CNode(CNodeCap::new(0).unwrap());
+    let cn: Cap = Cap::CNode(CNodeCap::new());
     assert_ne!(t.cap_hash(), cn.cap_hash());
 }
 
@@ -57,8 +57,8 @@ fn data_inline_hash_includes_size() {
 
 #[test]
 fn cnode_empty_vs_one_populated_differ() {
-    let empty: CNodeCap = CNodeCap::new(2).unwrap();
-    let mut populated: CNodeCap = CNodeCap::new(2).unwrap();
+    let empty: CNodeCap = CNodeCap::new();
+    let mut populated: CNodeCap = CNodeCap::new();
     populated
         .set(SlotIdx(0), Some(CapHashOrRef::Hash([0xEE; 32])))
         .unwrap();
@@ -70,8 +70,8 @@ fn cnode_empty_vs_one_populated_differ() {
 #[test]
 fn cnode_with_ref_target_panics() {
     let cache = CacheDirectory::new();
-    let r = cache.put_instance(Cap::CNode(CNodeCap::new(0).unwrap()));
-    let mut cn: CNodeCap = CNodeCap::new(2).unwrap();
+    let r = cache.put_instance(Cap::CNode(CNodeCap::new()));
+    let mut cn: CNodeCap = CNodeCap::new();
     cn.set(SlotIdx(0), Some(CapHashOrRef::Ref(r))).unwrap();
     let cap: Cap = Cap::CNode(cn);
     let result = std::panic::catch_unwind(|| cap.cap_hash());

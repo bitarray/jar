@@ -38,7 +38,7 @@ fn type_cap_roundtrip_preserves_hash() {
 
 #[test]
 fn empty_cnode_roundtrip_preserves_hash() {
-    round_trip(Cap::CNode(CNodeCap::new(0).expect("cnode")));
+    round_trip(Cap::CNode(CNodeCap::new()));
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn paged_data_roundtrip_preserves_hash() {
 
 #[test]
 fn cnode_with_populated_slot_roundtrips() {
-    let mut cn = CNodeCap::new(4).expect("cnode");
+    let mut cn = CNodeCap::new();
     cn.set(2u16.into(), Some(CapHashOrRef::Hash([0xEE; 32])))
         .expect("set slot 2");
     cn.set(7u16.into(), Some(CapHashOrRef::Hash([0xFF; 32])))
@@ -124,7 +124,7 @@ fn ref_in_cap_errors_on_encode() {
     });
     let h = cache.put_cap(&blob).expect("put_cap");
     let capref = cache.promote_blob_to_instance(&h).expect("promote");
-    let mut cn = CNodeCap::new(0).expect("cnode");
+    let mut cn = CNodeCap::new();
     cn.set(0u16.into(), Some(CapHashOrRef::Ref(capref)))
         .expect("set ref");
     let cap = Cap::CNode(cn);
