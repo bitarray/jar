@@ -6,14 +6,39 @@
 //! `invoke_cached` path, so they receive byte-identical caps/initial-state —
 //! any divergence is a real engine disagreement, never a setup skew.
 
-use crate::{Program, encode};
+use crate::{Program, SIG_BASE, encode};
 use javm_bench::{BuiltCaps, RawRun, run_interpreter_raw, run_recompiler_raw};
+use javm_cap::abi::SCRATCHPAD_SLOT;
 use javm_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap};
 use javm_cap::slot::{Key, SlotPath};
 use std::collections::BTreeMap;
 
 /// Cnode slot the fuzz memory window's backing data cap occupies.
 const WINDOW_SLOT: u32 = 1;
+
+/// One page — the scratchpad (slot[0]) signature region size (the program's
+/// signature epilogue stores the `SIG_BYTES`-byte register file into its head).
+const SIG_REGION_BYTES: u64 = 4096;
+
+/// Map the scratchpad (slot[0]) signature region at [`SIG_BASE`] into `img`: an
+/// empty-content `InitialDataCap` of one page. The guest's signature epilogue
+/// CoWs this region during the run; both engines surface its effective bytes as
+/// the run's register signature.
+fn add_signature_region(img: &mut Image) {
+    let slot = Key::from(SCRATCHPAD_SLOT);
+    img.memory_mappings.push(MemoryMapping {
+        start: SIG_BASE as u64,
+        size: SIG_REGION_BYTES,
+        source: SlotPath::root(slot.clone()),
+    });
+    img.initial_slots.insert(
+        slot,
+        InitialDataCap {
+            content: Vec::new(),
+            size: SIG_REGION_BYTES,
+        },
+    );
+}
 
 /// Build an `Image` from raw instruction `words` (+ `ecalli 0` terminator)
 /// with a **pinned read-only** data cap of `ro_bytes` mapped at `ro_start`
@@ -95,9 +120,14 @@ pub fn diff_image(img: &Image) -> Diff {
     Diff { interp, recomp }
 }
 
-/// Build the `Image` for a program: its code (body + fold) plus the appended
-/// `ecalli 0` terminator, entered at pc 0 with the program's initial register
-/// seed.
+/// Build the `Image` for a program: its code (body + signature epilogue) plus
+/// the appended `ecalli 0` terminator, entered at pc 0 with the program's
+/// initial register seed.
+///
+/// The Image always maps the scratchpad (slot[0]) signature region at
+/// [`SIG_BASE`] (via [`add_signature_region`]); the program's signature epilogue
+/// stores its register file there, and both engines surface the region's
+/// effective bytes for the lossless differential.
 ///
 /// When the program declares an `init_mem` window, the Image declares a
 /// matching RW data mapping so **both** engines size their data extent to
@@ -121,6 +151,7 @@ pub fn image_for(prog: &Program) -> Image {
             initial_regs: prog.init_regs.clone(),
         },
     );
+    add_signature_region(&mut img);
     if let Some(mem) = &prog.init_mem {
         let slot = Key::from((WINDOW_SLOT) as u8);
         img.memory_mappings.push(MemoryMapping {
@@ -159,18 +190,34 @@ pub struct Diff {
 }
 
 impl Diff {
-    /// True iff the engines disagree on the exit reason, the returned `x10`
-    /// fold, or gas — any of which is a consensus divergence.
+    /// True iff the engines disagree on the exit reason, the full scratchpad
+    /// register signature, `x10`, or gas — any of which is a consensus
+    /// divergence. The signature comparison is the lossless upgrade over the old
+    /// x10 fold: a divergence in *any* captured register is caught, even one
+    /// that a fold would have cancelled.
     pub fn diverges(&self) -> bool {
         self.interp.exit_reason != self.recomp.exit_reason
             || self.interp.return_value != self.recomp.return_value
             || self.interp.gas_used != self.recomp.gas_used
+            || self.interp.scratchpad_head != self.recomp.scratchpad_head
     }
 
-    /// One-line human description of the disagreement (for triage logs).
+    /// One-line human description of the disagreement (for triage logs). Names
+    /// the first divergent signature slot (→ register) when the registers
+    /// disagree, else reports the exit/gas mismatch.
     pub fn describe(&self) -> String {
+        let slot = self.first_divergent_slot();
+        let sig = match slot {
+            Some(s) => format!(
+                " sig@slot{s}(x{}): {:#018x} vs {:#018x}",
+                crate::oracle::slot_to_xreg(s as u8),
+                self.sig_reg(&self.interp, s),
+                self.sig_reg(&self.recomp, s),
+            ),
+            None => String::new(),
+        };
         format!(
-            "interp{{exit={} x10={:#018x} gas={}}} vs recomp{{exit={} x10={:#018x} gas={}}}",
+            "interp{{exit={} x10={:#018x} gas={}}} vs recomp{{exit={} x10={:#018x} gas={}}}{sig}",
             self.interp.exit_reason,
             self.interp.return_value,
             self.interp.gas_used,
@@ -178,6 +225,20 @@ impl Diff {
             self.recomp.return_value,
             self.recomp.gas_used,
         )
+    }
+
+    /// Index of the first signature slot (0..`SIG_REGS`) whose register bytes
+    /// differ between the engines, if any.
+    fn first_divergent_slot(&self) -> Option<usize> {
+        (0..encode::SIG_REGS).find(|&s| {
+            self.interp.scratchpad_head[s * 8..s * 8 + 8]
+                != self.recomp.scratchpad_head[s * 8..s * 8 + 8]
+        })
+    }
+
+    /// The LE `u64` at signature slot `s` of `run`'s scratchpad head.
+    fn sig_reg(&self, run: &RawRun, s: usize) -> u64 {
+        u64::from_le_bytes(run.scratchpad_head[s * 8..s * 8 + 8].try_into().unwrap())
     }
 }
 

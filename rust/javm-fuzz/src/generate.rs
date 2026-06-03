@@ -8,9 +8,10 @@
 //!   cross-state breadth, seeded for reproducibility.
 //!
 //! Every generated program is **total** by construction: register-only,
-//! straight-line, x0–x15 minus the spilled (x3/x4) and fold-scratch (x6/x7)
-//! registers, ending in [`encode::fold_epilogue`]. So it always halts cleanly
-//! on a conformant engine — and on the oracle — with a defined `x10`. (The div
+//! straight-line, over x0–x15 minus the spilled (x3/x4) and x6/x7 (left at 0 so
+//! their signature slots are deterministic), ending in
+//! [`encode::signature_epilogue`]. So it always halts cleanly on a conformant
+//! engine — and on the oracle — with a defined register signature. (The div
 //! corners are *included*: RISC-V defines INT_MIN/-1 as a value, so the oracle
 //! and interpreter produce one; only a buggy recompiler diverges.)
 //!
@@ -51,8 +52,9 @@ pub const SHAMTS: &[i32] = &[0, 1, 7, 8, 31, 32, 63, 64, 65];
 /// Boundary 20-bit upper immediates (for `lui`/`auipc`).
 pub const IMM20S: &[i32] = &[0, 1, 0xF_FFFF, 0x8_0000, 0x7_FFFF, 0xA_5A5A];
 
-/// Writable / foldable registers — x1, x2, x5, x8–x15. Excludes x0 (zero),
-/// x3/x4 (spilled, never named), x6/x7 (fold scratch), x16–31 (reserved).
+/// Writable destination registers — x1, x2, x5, x8–x15. Excludes x0 (zero),
+/// x3/x4 (spilled, never named), x6/x7 (kept at 0 for deterministic signature
+/// slots), x16–31 (reserved).
 const DEST: &[u8] = &[1, 2, 5, 8, 9, 10, 11, 12, 13, 14, 15];
 /// Source registers — `DEST` plus x0.
 const SRC: &[u8] = &[0, 1, 2, 5, 8, 9, 10, 11, 12, 13, 14, 15];
@@ -66,10 +68,10 @@ fn seed(init: &mut BTreeMap<u8, u64>, xreg: u8, val: u64) {
     }
 }
 
-/// Wrap a body in the (no-memory) fold epilogue → a complete program.
+/// Wrap a body in the signature epilogue → a complete program.
 fn finish(body: Vec<u32>, init_regs: BTreeMap<u8, u64>) -> Program {
     let mut code = body;
-    code.extend(encode::fold_epilogue(None));
+    code.extend(encode::signature_epilogue(crate::SIG_BASE));
     Program {
         code,
         init_regs,

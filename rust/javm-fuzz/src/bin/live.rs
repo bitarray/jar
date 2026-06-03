@@ -29,26 +29,28 @@ use javm_exec::instruction::decode;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_fuzz::generate::{Gen, enumerate_boundary};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use javm_fuzz::oracle::spike_x10;
+use javm_fuzz::oracle::spike_signature;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_fuzz::replay::{replay_interp, replay_recomp};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use javm_fuzz::shrink::shrink;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use javm_fuzz::{FOLD_VERSION, Gold, ISA, Program, Vector, VectorFile, VectorMeta, encode};
+use javm_fuzz::{
+    Gold, ISA, Program, SIG_BASE, SIG_VERSION, Vector, VectorFile, VectorMeta, encode,
+};
 
 /// Do Spike, the interpreter, and the recompiler disagree on `prog`? `None` if
-/// Spike couldn't run it (skip). A divergence is any of: either engine's `x10`
-/// ≠ the oracle gold, either engine not halting cleanly (`exit` ≠ 4), or the
-/// two engines disagreeing on gas (the oracle has no gas).
+/// Spike couldn't run it (skip). A divergence is any of: either engine's
+/// register signature ≠ the oracle gold, either engine not halting cleanly
+/// (`exit` ≠ 4), or the two engines disagreeing on gas (the oracle has no gas).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn diverges(prog: &Program) -> Option<bool> {
-    let gold = spike_x10(prog).ok()?;
+    let gold = spike_signature(prog).ok()?;
     let i = replay_interp(prog);
     let r = replay_recomp(prog);
     Some(
-        i.return_value != gold
-            || r.return_value != gold
+        i.scratchpad_head[..gold.len()] != gold[..]
+            || r.scratchpad_head[..gold.len()] != gold[..]
             || i.exit_reason != 4
             || r.exit_reason != 4
             || i.gas_used != r.gas_used,
@@ -56,8 +58,8 @@ fn diverges(prog: &Program) -> Option<bool> {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn disasm(prog: &Program, fold_len: usize) -> String {
-    let body_end = prog.code.len().saturating_sub(fold_len);
+fn disasm(prog: &Program, sig_len: usize) -> String {
+    let body_end = prog.code.len().saturating_sub(sig_len);
     let ops: Vec<String> = prog.code[..body_end]
         .iter()
         .map(|&w| format!("{:?}", decode(&w.to_le_bytes()).unwrap().0))
@@ -66,8 +68,8 @@ fn disasm(prog: &Program, fold_len: usize) -> String {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn vector_id(prog: &Program, fold_len: usize) -> String {
-    let body_end = prog.code.len().saturating_sub(fold_len);
+fn vector_id(prog: &Program, sig_len: usize) -> String {
+    let body_end = prog.code.len().saturating_sub(sig_len);
     let op = prog
         .code
         .first()
@@ -91,7 +93,7 @@ fn main() {
         }
     }
 
-    let fold_len = encode::fold_epilogue(None).len();
+    let sig_len = encode::signature_epilogue(SIG_BASE).len();
     let mut rng = Gen::new(seed);
     let mut count = 0usize;
 
@@ -113,7 +115,7 @@ fn main() {
             continue;
         }
 
-        eprintln!("[{count}] DIVERGENCE: {}", disasm(&prog, fold_len));
+        eprintln!("[{count}] DIVERGENCE: {}", disasm(&prog, sig_len));
         // A recompiler abort (e.g. a `#DE` from a div-overflow bug) poisons the
         // sandbox, so every later recomp call returns the abort sentinel —
         // which makes shrinking unreliable (it would "minimize" anything).
@@ -124,24 +126,30 @@ fn main() {
             eprintln!("    (recompiler aborted — poisoned sandbox; skipping shrink)");
             prog.clone()
         } else {
-            shrink(&prog, fold_len, |p| diverges(p).unwrap_or(false))
+            shrink(&prog, sig_len, |p| diverges(p).unwrap_or(false))
         };
-        eprintln!("    minimal: {}", disasm(&minimal, fold_len));
+        eprintln!("    minimal: {}", disasm(&minimal, sig_len));
 
-        let gold = spike_x10(&minimal).expect("spike on minimal");
+        let gold = spike_signature(&minimal).expect("spike on minimal");
         let i = replay_interp(&minimal);
         let r = replay_recomp(&minimal);
         eprintln!(
-            "    gold x10={gold:#018x} | interp{{x10={:#018x} exit={}}} | recomp{{x10={:#018x} exit={}}} | gas i={} r={}",
-            i.return_value, i.exit_reason, r.return_value, r.exit_reason, i.gas_used, r.gas_used,
+            "    gold sig={} | interp{{x10={:#018x} exit={}}} | recomp{{x10={:#018x} exit={}}} | gas i={} r={}",
+            hex::encode(gold),
+            i.return_value,
+            i.exit_reason,
+            r.return_value,
+            r.exit_reason,
+            i.gas_used,
+            r.gas_used,
         );
 
-        let id = vector_id(&minimal, fold_len);
+        let id = vector_id(&minimal, sig_len);
         let vector = Vector::from_program(
             id,
             &minimal,
             Gold {
-                x10: gold,
+                signature_hex: hex::encode(gold),
                 exit: 4,
                 exit_arg: 0,
             },
@@ -152,7 +160,7 @@ fn main() {
                 seed,
                 oracle: "spike-1.1.1-dev".into(),
                 isa: ISA.into(),
-                fold_version: FOLD_VERSION,
+                sig_version: SIG_VERSION,
             },
             vectors: vec![vector],
         };

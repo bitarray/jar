@@ -37,7 +37,7 @@ use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
 use nub_arch_x86_abi::{
     ArchivedInvocationResult, FN_ID_NUB_EVICT_JIT_ALL, FN_ID_NUB_INVOKE_CACHED, InvokePacket,
 };
-pub use nub_arch_x86_abi::{CapHash as AbiCapHash, InvocationResult};
+pub use nub_arch_x86_abi::{CapHash as AbiCapHash, InvocationResult, SCRATCHPAD_HEAD_LEN};
 pub use nub_kernel::{CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
 
 use rkyv::util::AlignedVec;

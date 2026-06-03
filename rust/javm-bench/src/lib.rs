@@ -30,7 +30,7 @@ use javm_cap::NUM_REGS;
 use javm_cap::image::{Image, PinnedCap};
 use javm_cap::slot::Key;
 use javm_cap::{Cap, CapHash};
-use nub::{InvocationResult, Nub};
+use nub::{InvocationResult, Nub, SCRATCHPAD_HEAD_LEN};
 use std::sync::{Mutex, OnceLock};
 
 /// HostCall(0) — the trampoline halt all bench programs end on
@@ -257,17 +257,18 @@ pub const ABORT_SENTINEL: u32 = u32::MAX;
 ///
 /// `gas_used` is `INITIAL_GAS - gas_remaining`; on an abort it is 0 (no
 /// `InvocationResult` was produced).
-//
-// TODO(javm-fuzz-state-readback): these runners only surface x10
-// (`return_value`) + exit + gas. The lossless, model-conformant DataCap
-// memory-signature readback is deferred — see
-// ~/docs/plans/javm-fuzz-state-readback.md.
+///
+/// `scratchpad_head` is the running Instance's scratchpad (slot[0]) region head
+/// — the lossless, model-conformant result readback that supersedes the former
+/// x10 fold. The fuzz differential compares it across engines and against the
+/// oracle gold (see `javm_fuzz::replay`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawRun {
     pub exit_reason: u32,
     pub exit_arg: u32,
     pub return_value: u64,
     pub gas_used: u64,
+    pub scratchpad_head: [u8; SCRATCHPAD_HEAD_LEN],
 }
 
 impl RawRun {
@@ -277,6 +278,7 @@ impl RawRun {
             exit_arg: r.exit_arg,
             return_value: r.return_value,
             gas_used: INITIAL_GAS.saturating_sub(r.gas_remaining),
+            scratchpad_head: r.scratchpad_head,
         }
     }
 
@@ -286,6 +288,7 @@ impl RawRun {
             exit_arg: 0,
             return_value: 0,
             gas_used: 0,
+            scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
         }
     }
 }

@@ -324,47 +324,41 @@ pub fn li64(rd: u8, value: u64) -> Vec<u32> {
     out
 }
 
-// ---- Fold epilogue (interim state readout — see lib docs) ----
+// ---- Signature epilogue (lossless state readout — see lib docs) ----
 
-/// Registers the fold captures: x1, x2, x8–x15 (plus x5 implicitly, as the
-/// accumulator seed). x6/x7 are fold scratch; x3/x4 (spilled) and x16–31 are
-/// never named — so the generator's writable set is exactly these plus x5.
-pub const FOLD_REGS: &[u8] = &[1, 2, 8, 9, 10, 11, 12, 13, 14, 15];
-/// x5 — running fold accumulator (its own body value seeds the fold).
-pub const ACC: u8 = 5;
-/// x6 — fold scratch: memory-window base pointer.
-pub const MEM_BASE: u8 = 6;
-/// x7 — fold scratch: loaded memory word.
-pub const MEM_TMP: u8 = 7;
-/// x10 — escape register; the fold result lands here and becomes `return_value`.
-pub const OUT: u8 = 10;
+/// Number of host-mapped register slots captured by the signature (slots
+/// 0..=12 → x1, x2, x5, x6, x7, x8–x15; see [`crate::oracle::slot_to_xreg`]).
+pub const SIG_REGS: usize = 13;
 
-/// Emit the fold epilogue (no terminator). Mixes the captured registers — and,
-/// if `window = Some((base_va, len_bytes))`, each aligned 8-byte word of the
-/// memory window — into a signature in x10. The per-step `rori` stir makes
-/// absorption order matter (so swapping two registers' values changes x10);
-/// `xor` + `add` together defeat linear cancellation.
-//
-// TODO(javm-fuzz-state-readback): this in-guest fold is the interim, lossy
-// state readout. Replace with DataCap-window stores once the lossless,
-// model-conformant readback lands — see ~/docs/plans/javm-fuzz-state-readback.md.
-pub fn fold_epilogue(window: Option<(u32, u32)>) -> Vec<u32> {
-    let mut out = Vec::new();
-    if let Some((base, len)) = window {
-        out.extend(li64(MEM_BASE, base as u64));
-        for j in 0..(len / 8) {
-            out.push(ld(MEM_TMP, MEM_BASE, (j * 8) as i32));
-            out.push(rori(ACC, ACC, 5));
-            out.push(xor(ACC, ACC, MEM_TMP));
-            out.push(add(ACC, ACC, MEM_TMP));
-        }
+/// Byte length of the register signature: one little-endian `u64` per captured
+/// slot. Fits in a single page and in `SCRATCHPAD_HEAD_LEN` (128).
+pub const SIG_BYTES: usize = SIG_REGS * 8;
+
+/// The x-register stored at signature slot `i` (the inverse of
+/// `javm_exec::regs::reg_slot_or_ff`, matching [`crate::oracle::slot_to_xreg`]).
+/// Slot 7 = x10 (the former fold `return_value`). The epilogue stores each at
+/// byte offset `8*i` of the signature region.
+pub const SIG_XREGS: [u8; SIG_REGS] = [1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+
+/// Scratch base register for the signature stores. x3 is spilled — it is not in
+/// the captured set (slots 0..=12) and is invocation-local (dropped at exit), so
+/// clobbering it is invisible to the differential, and both engines agree on
+/// x3/x4 spill semantics (the `x3_x4_differential` net). Using it as the store
+/// base leaves every captured register untouched, so the stored values are the
+/// program's exact post-body register file.
+pub const SIG_BASE_REG: u8 = 3;
+
+/// Emit the signature epilogue (no terminator): materialize `sig_base` into the
+/// scratch base register, then `sd` each captured register to `sig_base + 8*i`.
+/// `sig_base` is the guest VA the scratchpad (slot[0]) DataCap maps at; the
+/// guest's stores CoW the region's pages, and the host reads the effective
+/// bytes back as the run's lossless register signature (vs the old lossy x10
+/// fold).
+pub fn signature_epilogue(sig_base: u32) -> Vec<u32> {
+    let mut out = li64(SIG_BASE_REG, sig_base as u64);
+    for (i, &xr) in SIG_XREGS.iter().enumerate() {
+        out.push(sd(SIG_BASE_REG, xr, (i * 8) as i32));
     }
-    for &xr in FOLD_REGS {
-        out.push(rori(ACC, ACC, 5));
-        out.push(xor(ACC, ACC, xr));
-        out.push(add(ACC, ACC, xr));
-    }
-    out.push(add(OUT, ACC, 0)); // mv x10, x5
     out
 }
 
@@ -563,12 +557,19 @@ mod tests {
     }
 
     #[test]
-    fn fold_epilogue_is_all_valid() {
-        for w in fold_epilogue(Some((0x1000_0000, 32))) {
+    fn signature_epilogue_is_all_valid() {
+        let ep = signature_epilogue(0x1000_0000);
+        for w in &ep {
             assert!(
-                !matches!(decode1(w), (Inst::Reserved { .. }, _)),
-                "fold produced Reserved word {w:#010x}",
+                !matches!(decode1(*w), (Inst::Reserved { .. }, _)),
+                "signature epilogue produced Reserved word {w:#010x}",
             );
         }
+        // li64 (the base address) + one `sd` per captured register.
+        assert_eq!(
+            ep.len(),
+            li64(SIG_BASE_REG, 0).len() + SIG_REGS,
+            "epilogue length"
+        );
     }
 }

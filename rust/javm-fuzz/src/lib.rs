@@ -13,15 +13,16 @@
 //! replays committed vectors and compares to the baked-in gold; the oracle
 //! never enters the build graph.
 //!
-//! ## State readout (interim): fold-into-x10
+//! ## State readout: scratchpad signature region
 //!
-//! Neither engine exposes the full final register file to the host today — only
-//! `x10` (`return_value`), gas, and the exit reason escape. So a generated
-//! program ends with a deterministic **fold epilogue**
-//! ([`encode::fold_epilogue`]) that mixes its live registers (and any written
-//! memory window) into `x10`. Comparing `x10` + exit + gas catches value and
-//! trap divergences. The lossless, model-conformant DataCap readback is
-//! deferred — see `~/docs/plans/javm-fuzz-state-readback.md`.
+//! A generated program ends with a deterministic **signature epilogue**
+//! ([`encode::signature_epilogue`]) that `sd`s its full final register file
+//! into a memory region mapped from the scratchpad (slot[0]) DataCap at
+//! [`SIG_BASE`]. Each engine surfaces that region's effective bytes back to the
+//! host (`InvocationResult::scratchpad_head`), so the differential compares the
+//! **complete, uncompressed** register signature — not the old lossy x10 fold —
+//! plus exit and gas. This exercises the v3 scratchpad + DataCap CoW return path
+//! end to end (kernel maps slot[0], guest writes it, host reads it back).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -37,21 +38,29 @@ pub mod shrink;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod replay;
 
-/// Bump when [`encode::fold_epilogue`] or the encoders change in a way that
-/// alters the golden `x10` of an unchanged program. Committed vectors record
+/// Bump when [`encode::signature_epilogue`] or the encoders change in a way that
+/// alters the golden signature of an unchanged program. Committed vectors record
 /// the version they were minted against; the replay test refuses a mismatch.
-pub const FOLD_VERSION: u32 = 1;
+pub const SIG_VERSION: u32 = 2;
+
+/// Guest VA the scratchpad (slot[0]) signature region maps at — the base of the
+/// instance data extent (`javm_cap::layout::DATA_BASE`). The signature epilogue
+/// stores the register file here; both engines surface its effective bytes.
+pub const SIG_BASE: u32 = javm_cap::layout::DATA_BASE;
+
+pub use encode::SIG_BYTES;
 
 /// The frozen ISA string PVM2's compute core conforms to (RV64E run as the
 /// RV64I superset for the oracle, never naming x16–x31).
 pub const ISA: &str = "rv64imc_zba_zbb_zbs_zicond";
 
-/// A generated test program: instruction words (body + fold, **no
+/// A generated test program: instruction words (body + signature epilogue, **no
 /// terminator**), the initial register seed, and an optional initial RW memory
 /// window. The replay harness appends the `ecalli 0` terminator.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Program {
-    /// Instruction words, body followed by the fold epilogue. No terminator.
+    /// Instruction words, body followed by the signature epilogue. No
+    /// terminator.
     pub code: Vec<u32>,
     /// Initial registers **by slot index 0..=12** (slot 0 = x1, 1 = x2,
     /// s ≥ 2 = x(s+3); so x10 = slot 7). Matches `EndpointDef.initial_regs`
@@ -110,19 +119,19 @@ pub struct VectorMeta {
     pub oracle: String,
     /// Frozen ISA string ([`ISA`]).
     pub isa: String,
-    /// [`FOLD_VERSION`] these golds were minted against.
-    pub fold_version: u32,
+    /// [`SIG_VERSION`] these golds were minted against.
+    pub sig_version: u32,
 }
 
 /// One golden vector: program + initial state + the oracle's projected
-/// post-state (`x10` fold + exit).
+/// post-state (register signature + exit).
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Vector {
     /// Stable, human-readable id, e.g. `"div_signed/intmin_div_neg1"`.
     pub id: String,
     #[serde(default)]
     pub init: Init,
-    /// Hex of the program body + fold bytes (no terminator).
+    /// Hex of the program body + signature-epilogue bytes (no terminator).
     pub code_hex: String,
     pub gold: Gold,
 }
@@ -149,12 +158,23 @@ pub struct MemInit {
 /// The oracle-computed expected post-state projection.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Gold {
-    /// Golden `return_value` — the fold result in x10.
-    pub x10: u64,
+    /// Golden register signature — hex of the `SIG_REGS` post-body registers
+    /// (one LE `u64` per captured slot; [`SIG_BYTES`] bytes). This is the
+    /// effective bytes the engines' scratchpad region holds after the signature
+    /// epilogue stores the register file.
+    pub signature_hex: String,
     /// Golden exit reason (4 = HostCall(0) for every total program).
     pub exit: u32,
     #[serde(default)]
     pub exit_arg: u32,
+}
+
+impl Gold {
+    /// Decode `signature_hex` into the `SIG_BYTES`-byte signature.
+    pub fn signature(&self) -> Vec<u8> {
+        hex::decode(self.signature_hex.trim_start_matches("0x"))
+            .expect("gold signature_hex is valid hex")
+    }
 }
 
 impl Vector {
