@@ -3,9 +3,9 @@
 //! the source tree free of `_tests.rs` sidecars.
 
 use javm_cap::{
-    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, DataContent, EndpointDef, ImageCap,
-    ImageSlotEntry, InstanceCap, MAX_SOURCE_DEPTH, MemoryMapping, NUM_REGS, PAGE_SIZE, PageBytes,
-    PageRef, PageSlot, RwOverlay, SlotIdx,
+    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, EndpointDef, ImageCap, ImageSlotEntry,
+    InstanceCap, MAX_SOURCE_DEPTH, MemoryMapping, NUM_REGS, PAGE_SIZE, PageBytes, PageRef,
+    PageSlot, RwOverlay, SlotIdx,
 };
 use std::sync::Arc;
 
@@ -42,16 +42,12 @@ fn data_inline_constructor() {
     let cap = Cap::data_inline(b"hello");
     match cap {
         Cap::Data(d) => {
-            // DataCap content is page-padded to next 4 KiB boundary.
+            // DataCap is page-padded to the next 4 KiB boundary.
             assert_eq!(d.content_len(), PAGE_SIZE as u64);
-            match d.content {
-                DataContent::Inline(bytes) => {
-                    assert_eq!(bytes.len(), PAGE_SIZE);
-                    assert_eq!(&bytes[..5], b"hello");
-                    assert!(bytes[5..].iter().all(|b| *b == 0));
-                }
-                _ => panic!("expected Inline content"),
-            }
+            let mut out = vec![0u8; PAGE_SIZE];
+            d.copy_into(0, &mut out);
+            assert_eq!(&out[..5], b"hello");
+            assert!(out[5..].iter().all(|b| *b == 0));
         }
         _ => panic!("expected Cap::Data"),
     }
@@ -151,18 +147,11 @@ fn cnode_lookup_after_set() {
 
 #[test]
 fn data_inline_round_trip() {
-    let mut bytes: Vec<u8> = vec![0u8; PAGE_SIZE];
-    bytes[..5].copy_from_slice(b"hello");
-    let data: DataCap = DataCap {
-        content: DataContent::Inline(bytes),
-    };
-    match data.content {
-        DataContent::Inline(b) => {
-            assert_eq!(b.len(), PAGE_SIZE);
-            assert_eq!(&b[..5], b"hello");
-        }
-        _ => panic!("expected Inline"),
-    }
+    let data = DataCap::from_bytes_sized(b"hello", PAGE_SIZE as u64);
+    assert_eq!(data.content_len(), PAGE_SIZE as u64);
+    let mut out = vec![0u8; PAGE_SIZE];
+    data.copy_into(0, &mut out);
+    assert_eq!(&out[..5], b"hello");
 }
 
 #[test]

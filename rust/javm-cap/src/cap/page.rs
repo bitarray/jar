@@ -37,6 +37,22 @@ pub struct PageBytes {
     pub bytes: Vec<u8>,
 }
 
+impl PageBytes {
+    /// Build a `PageBytes` from up to `PAGE_SIZE` content bytes: a
+    /// `PAGE_SIZE`-aligned slab (zero-padded tail) plus the precomputed
+    /// content hash ([`super::data::page_content_hash`]). The slab alignment is
+    /// load-bearing — the recompiler maps the page's slab directly into a
+    /// ring-3 page table.
+    pub fn from_content(content: &[u8]) -> Self {
+        use super::data::{PAGE_SIZE, alloc_page_aligned_zeroed, page_content_hash};
+        let hash = page_content_hash(content);
+        let mut bytes = alloc_page_aligned_zeroed(PAGE_SIZE);
+        let n = content.len().min(PAGE_SIZE);
+        bytes[..n].copy_from_slice(&content[..n]);
+        Self { hash, bytes }
+    }
+}
+
 // --------------------------------------------------------------------------
 // Hand-written SSZ impls for `PageSlot` and `PageBytes`.
 //

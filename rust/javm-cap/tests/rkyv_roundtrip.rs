@@ -9,10 +9,11 @@
 //! that `Ref`-bearing caps surface a typed encode error (no panic).
 
 use javm_cap::cache::CapHashOrRef;
-use javm_cap::cap::data::{DataCap, DataContent};
+use javm_cap::cap::data::DataCap;
 use javm_cap::cap::page::{PageBytes, PageSlot};
 use javm_cap::image::EndpointDef;
-use javm_cap::{CNodeCap, Cap, NUM_REGS, TypeCap, image::Image};
+use javm_cap::{CNodeCap, Cap, DataGroup, DataGroups, GROUP_SIZE, NUM_REGS, TypeCap, image::Image};
+use ssz::MissingOr;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -93,11 +94,14 @@ fn paged_data_roundtrip_preserves_hash() {
         PageSlot::Loaded(Arc::new(page)),
         PageSlot::Missing([0xDD; 32]),
     ];
+    let mut groups: DataGroups = DataGroups::new();
+    groups.insert(
+        DataCap::group_key(0),
+        MissingOr::Materialized(DataGroup { pages }),
+    );
     round_trip(Cap::Data(DataCap {
-        content: DataContent::Paged {
-            page_size: 4096,
-            pages,
-        },
+        size: GROUP_SIZE as u64,
+        groups,
     }));
 }
 

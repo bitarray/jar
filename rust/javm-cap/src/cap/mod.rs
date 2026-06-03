@@ -141,24 +141,14 @@ impl Cap {
     /// callers needing a shorter logical payload (e.g. variable-length
     /// args) interpret the meaningful prefix themselves.
     pub fn data_inline(bytes: &[u8]) -> Self {
-        let mut buf = data::alloc_page_aligned_zeroed(bytes.len());
-        buf[..bytes.len()].copy_from_slice(bytes);
-        Cap::Data(DataCap {
-            content: data::DataContent::Inline(buf),
-        })
+        Cap::Data(DataCap::from_bytes(bytes))
     }
 
-    /// Build a heap `Cap::Data` whose backing buffer is at least
-    /// `target_size` bytes (rounded up to the next page boundary).
-    /// `bytes` is copied to the start of the buffer; the remainder is
-    /// zero-padded.
+    /// Build a heap `Cap::Data` whose logical size is at least `target_size`
+    /// bytes (rounded up to the next page boundary). `bytes` fills the low
+    /// bytes; the remainder is zero (sparse).
     pub fn data_inline_with_size(bytes: &[u8], target_size: u64) -> Self {
-        let target = (target_size as usize).max(bytes.len());
-        let mut buf = data::alloc_page_aligned_zeroed(target);
-        buf[..bytes.len()].copy_from_slice(bytes);
-        Cap::Data(DataCap {
-            content: data::DataContent::Inline(buf),
-        })
+        Cap::Data(DataCap::from_bytes_sized(bytes, target_size))
     }
 
     /// Build an empty heap `Cap::CNode` of `2^size_log` slots. Rejects
