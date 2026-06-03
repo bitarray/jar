@@ -28,13 +28,11 @@ pub mod data;
 pub mod image;
 pub mod instance;
 pub mod page;
-pub mod view;
 
 use cnode::CNodeCap;
 use data::DataCap;
 use image::ImageCap;
 use instance::InstanceCap;
-use view::DataViewCap;
 
 /// 32-byte digest used for all v3 cap identity / content hashes.
 pub type CapHash = [u8; 32];
@@ -81,8 +79,6 @@ pub enum Cap {
     CNode(CNodeCap),
     #[ssz(selector = 4)]
     Type(TypeCap),
-    #[ssz(selector = 5)]
-    DataView(DataViewCap),
 }
 
 /// `Cap::Type` payload. Pure identifier; no slot references.

@@ -626,11 +626,6 @@ fn collect_ref_targets(cap: &Cap) -> Vec<CapRef> {
                 out.push(r.clone());
             }
         }
-        Cap::DataView(view) => {
-            if let CapHashOrRef::Ref(r) = &view.backing {
-                out.push(r.clone());
-            }
-        }
         Cap::Data(_) | Cap::Image(_) | Cap::Type(_) => {}
     }
     out
@@ -662,13 +657,6 @@ fn rewrite_ref_targets(cap: &mut Cap, resolved: &[(CapRef, CapHash)]) {
                 && let Some(h) = lookup(r)
             {
                 inst.root_cnode = CapHashOrRef::Hash(h);
-            }
-        }
-        Cap::DataView(view) => {
-            if let CapHashOrRef::Ref(r) = &view.backing
-                && let Some(h) = lookup(r)
-            {
-                view.backing = CapHashOrRef::Hash(h);
             }
         }
         Cap::Data(_) | Cap::Image(_) | Cap::Type(_) => {}

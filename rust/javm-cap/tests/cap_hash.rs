@@ -1,19 +1,19 @@
 use javm_cap::{
-    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, DataGroup, DataGroups, ImageCap,
-    InstanceCap, Key, NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, TypeCap,
+    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, ImageCap, InstanceCap, Key, NUM_REGS,
+    PAGE_SIZE, PageBytes, PageRef, PageSlab, PageSlot, TypeCap,
 };
-use ssz::MissingOr;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
-/// A single-group `Cap::Data` holding `pages` at group 0, sized to 2 MiB.
+/// A `Cap::Data` whose dense backing holds `pages` at absolute pages `0..`,
+/// sized to 2 MiB (clean — empty overlay).
 fn data_cap_with_pages(pages: Vec<PageSlot>) -> Cap {
-    let mut groups: DataGroups = DataGroups::new();
-    groups.insert(
-        DataCap::group_key(0),
-        MissingOr::Materialized(DataGroup { pages }),
-    );
     Cap::Data(DataCap {
-        size: javm_cap::GROUP_SIZE as u64,
-        groups,
+        backing: Arc::new(PageSlab {
+            size: javm_cap::GROUP_SIZE as u64,
+            pages,
+        }),
+        overlay: BTreeMap::new(),
     })
 }
 
