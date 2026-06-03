@@ -92,16 +92,15 @@
 
 extern crate alloc;
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use javm_cap::cache::CapHashOrRef;
 use javm_cap::cap::Cap;
 use javm_cap::hash::{Blake2b256, Hash};
-use javm_cap::slot::SlotIdx;
-use javm_cap::{CapHash, NUM_REGS};
+use javm_cap::slot::SlotKey;
+use javm_cap::{CNodeCap, CapHash, NUM_REGS};
 
-use crate::jit_run::{self, ExitInfo, FrameRuntime, MemRegion};
+use crate::jit_run::{self, ExitInfo, FrameRuntime};
 use crate::page_alloc::PageBuf;
 use crate::paging;
 use crate::state_cache::{CACHE, publish_transient_instance};
@@ -110,12 +109,15 @@ const EXIT_HALT: u32 = 0;
 const EXIT_OOG: u32 = 2;
 const EXIT_HOST_CALL: u32 = 4;
 const EXIT_ECALL: u32 = 6;
+/// Guest trap (deliberate or host-rejected op). Matches the interpreter's
+/// `ExitReason::Trap` and the JIT codegen's `EXIT_TRAP` ABI value, so a
+/// host-side rejection (e.g. a pinned-slot write) surfaces identically.
+const EXIT_TRAP: u32 = 7;
 
 const OP_REPLY: u32 = 0;
 const OP_DERIVE_SPAWN: u32 = 18;
 const OP_HOST_CALL: u32 = 26;
 
-const CNODE_SLOTS: usize = 256;
 const MAX_DEPTH: usize = 32_768;
 /// Maximum number of concurrently-resident [`FrameRuntime`]s. Each
 /// runtime keeps ~48 KiB of pages alive (page table + mem/ctx/stack
@@ -146,7 +148,6 @@ const ERR_HOST_CALL_SLOT_EMPTY: u32 = 40;
 const ERR_JIT_FAILED: u32 = 50;
 const ERR_DEPTH_LIMIT: u32 = 51;
 const ERR_MAP_BAD_KIND: u32 = 60;
-const ERR_MAP_PAGED_UNSUPPORTED: u32 = 61;
 
 /// One stack frame on the in-kernel call stack. Holds the
 /// identifiers for the Image and Instance caps the frame runs
@@ -174,10 +175,20 @@ pub struct KernelFrame {
     regs: [u64; NUM_REGS],
     /// Current PVM PC. Same lifecycle as `regs`.
     pc: u32,
-    /// Per-frame cnode snapshot. Each slot holds a `CapHashOrRef`
-    /// (blob hash for image pinned/initial entries; instance ref
-    /// for kernel-derived transient instances) or `None`.
-    cnode: Vec<Option<CapHashOrRef>>,
+    /// Per-frame cnode snapshot: the radix kv-map (`Hasher(SlotKey) ->
+    /// CapHashOrRef`) seeded from the running `Cap::Instance`'s image
+    /// (pinned/initial) and grown by `derive_spawn`. No fixed slot count —
+    /// a normal `CNodeCap`. CNode ops run only in the call-loop dispatch
+    /// (ring 0 after the JIT context switch), so the kernel-heap `RadixMap`
+    /// is live; the JIT-compiled guest code never touches this directly.
+    cnode: CNodeCap,
+    /// Slot keys this frame's image declares pinned (read-only), sorted —
+    /// the recompiler's mirror of the interpreter's
+    /// `InstanceEntry.pinned_slots`. A write to one of these (e.g. a
+    /// `derive_spawn` dst) must trap, matching the interpreter's
+    /// `OpError::SlotPinned`. Sorted (image pinned slots are emitted sorted),
+    /// so membership is a `binary_search`.
+    pinned: Vec<SlotKey>,
     /// CoW-allocated fresh pages, populated by `jit_pf_handler` on
     /// the first write to each page of a copy-on-write `MatRange`. Per
     /// the data-flow principle (see module doc), these are frame-local
@@ -204,14 +215,24 @@ pub struct KernelFrame {
 pub struct MatRange {
     pub start: u32,
     pub end: u32,
-    /// Source physical address of the cap's first byte (`start` maps here).
-    pub pa: u64,
+    /// Window `[pas_off, pas_off + pas_len)` into the frame's `mat_pas` arena:
+    /// one source physical address per page in `[start, end)`. A dense DataCap's
+    /// pages are independent page-aligned slabs (not one contiguous buffer), so
+    /// each page resolves its own PA; an absent / zero (`Empty`) page maps to the
+    /// frame's shared zero page. `MatRange` stays `Copy` (it is published to the
+    /// #PF handler by pointer), so the PAs live in the frame-owned arena rather
+    /// than inline.
+    pub pas_off: u32,
+    pub pas_len: u32,
     /// [`javm_exec::mat::PageKind`] as a `u8`: pinned slots are
     /// `PinnedCapRo` (a write hard-faults), initial slots are
     /// `UnpinnedCapCow` (a write copies-on-write).
     pub kind: u8,
     pub source_hash: CapHash,
-    pub source_slot: SlotIdx,
+    /// The V1 single-byte source slot (diagnostics only). `u8` not `SlotKey`
+    /// so `MatRange` stays `Copy` (it is published to the #PF handler by
+    /// pointer).
+    pub source_slot: u8,
 }
 
 /// One CoW-allocated dirty page. Owned by `KernelFrame.dirty_pages`
@@ -222,7 +243,7 @@ pub struct MatRange {
 pub struct DirtyPage {
     pub guest_va: u32,
     pub source_hash: CapHash,
-    pub source_slot: SlotIdx,
+    pub source_slot: u8,
     /// 4 KiB page holding the dirtied contents. Page's PA is what
     /// the PTE currently points at; on auto-mint we read these bytes
     /// to build the fresh `Cap::Data`.
@@ -327,8 +348,19 @@ pub fn run_top(
                         // the next iter with the child's φ[7] reflected.
                     }
                     OP_DERIVE_SPAWN => {
-                        let frame = stack.last_mut().expect("non-empty");
-                        dispatch_derive_spawn(frame)?;
+                        let trapped = {
+                            let frame = stack.last_mut().expect("non-empty");
+                            dispatch_derive_spawn(frame)?
+                        };
+                        if trapped {
+                            // Pinned dst → guest trap, mirroring the interpreter.
+                            break LoopOutcome {
+                                exit_reason: EXIT_TRAP,
+                                exit_arg: 0,
+                                return_value: info.regs[7],
+                                gas_remaining: gas,
+                            };
+                        }
                     }
                     OP_HOST_CALL => {
                         if stack.len() >= MAX_DEPTH {
@@ -434,142 +466,89 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
         _ => return Err(ERR_IMAGE_KIND),
     };
 
-    // Classify slots: pinned (RO, direct-map) vs initial (RW with
-    // CoW arming). Pinned slot indices are recorded so the initial
-    // walk can skip them — initial entries that collide with a
-    // pinned slot are ignored.
-    let mut pinned_slot = [false; CNODE_SLOTS];
-    let mut initial_slot = [false; CNODE_SLOTS];
-    for e in img.pinned.iter() {
-        let s = e.slot.get() as usize;
-        if s < CNODE_SLOTS {
-            pinned_slot[s] = true;
-        }
-    }
-    for e in img.initial.iter() {
-        let s = e.slot.get() as usize;
-        if s < CNODE_SLOTS && !pinned_slot[s] {
-            initial_slot[s] = true;
-        }
-    }
+    // Pinned mappings (RO, direct-map) become `PinnedCapRo` `MatRange`s pushed
+    // first, so they take precedence over the catch-all RW range in
+    // `mat_range_for`. Classification uses `ImageCap::mapping_is_pinned` —
+    // identical to the interpreter drivers (`javm`, `nub-arch-local`), so the
+    // engines agree on which VAs are read-only.
+    let mut mat_ranges: Vec<MatRange> = Vec::new();
+    // Per-page source PAs for the cap-backed ranges (a dense DataCap's pages are
+    // non-contiguous slabs); each `MatRange` indexes a window into this arena.
+    let mut mat_pas: Vec<u64> = Vec::new();
+    // Shared per-frame zero page: the source for `Empty` (absent / zero) memory
+    // pages, mapped RO or CoW'd-from-zero on write. Owned by the `FrameRuntime`
+    // so its PA stays valid for the frame's life; never written through (RO maps;
+    // a write CoWs a fresh private page), so aliasing it across pages is safe.
+    let zero_page = PageBuf::new(paging::PAGE_SIZE).ok_or(ERR_JIT_FAILED)?;
+    let zero_pa = zero_page.pa();
 
-    // Data cap pages go into `mat_ranges` (lazily materialized, #3); the
-    // code region is materialized lazily too (zero-setup demand paging),
-    // sourced from its physical address `code_pa`.
-    let mut mat_ranges: Vec<MatRange> = Vec::with_capacity(img.mappings.len());
-    let mut mem_size: u32 = 0;
-
-    // Executable code region: a `PinnedCapRo` lazily-materialized region
-    // at the fixed CODE_BASE. The code lives in the Image's page-aligned,
-    // page-rounded (zeroed-tail) `ImageCap.code`, so a guest PIC read of
-    // it pages the touched page(s) in RO from `code_pa`. Code is *excluded*
-    // from mem_size (the flat RW buffer): it sits at CODE_BASE, clear of
-    // the data layout, and must not inflate the per-call alloc.
+    // Executable code region: a `PinnedCapRo` lazily-materialized region at the
+    // fixed CODE_BASE, sourced from its physical address `code_pa`. Code is
+    // excluded from `mem_size` (the data extent).
     let (code_base, code_bytes) = img.code_mapping().ok_or(ERR_IMAGE_KIND)?;
     let code_pa = paging::va_to_pa(code_bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?;
 
-    // Keep Arcs alive for the data-cap lookups so the slice references
-    // we feed to mat_ranges stay valid until function return.
-    let mut data_arcs: Vec<alloc::sync::Arc<Cap>> = Vec::new();
-    for m in img.mappings.iter() {
-        // `img.mappings` describes data/slot regions only; code is
-        // direct-mapped above at CODE_BASE and never extends the flat
-        // RW buffer.
-        let end = (m.start + m.size) as u32;
-        if end > mem_size {
-            mem_size = end;
-        }
-        if m.source_path_len == 0 {
-            continue;
-        }
-        let src_slot = m.source_path[0].get() as usize;
-        if src_slot >= CNODE_SLOTS || !(pinned_slot[src_slot] || initial_slot[src_slot]) {
-            continue;
-        }
-        let target_hash = match frame.cnode.get(src_slot) {
-            Some(Some(CapHashOrRef::Hash(h))) => *h,
-            _ => continue,
-        };
-        let data_arc = CACHE
-            .get(CapHashOrRef::Hash(target_hash))
-            .ok_or(ERR_HOST_CALL_SLOT_EMPTY)?;
-        // Validate kind + DataContent variant before stashing the Arc.
-        match &*data_arc {
-            Cap::Data(d) => match &d.content {
-                javm_cap::DataContent::Inline(_) => {}
-                javm_cap::DataContent::Paged { .. } => return Err(ERR_MAP_PAGED_UNSUPPORTED),
-            },
-            _ => return Err(ERR_MAP_BAD_KIND),
-        }
-        data_arcs.push(data_arc);
-        // SAFETY-ish: data_arcs[last] is the Arc we just pushed; its
-        // Cap::Data::Inline bytes have a stable address. Resolve PA
-        // from the bytes' VA.
-        let bytes = match data_arcs.last().unwrap().as_ref() {
-            Cap::Data(d) => match &d.content {
-                javm_cap::DataContent::Inline(bs) => bs.as_slice(),
-                _ => unreachable!("validated above"),
-            },
-            _ => unreachable!("validated above"),
-        };
-        let pa = paging::va_to_pa(bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?;
-        let size = (m.size as u32).min(bytes.len() as u32);
-        if size == 0 {
-            continue;
-        }
-        // Lazily-materialized cap mapping: pinned → read-only (a write
-        // hard-faults), initial → copy-on-write. The page set is
-        // page-rounded (the cap's backing allocation has a zeroed,
-        // page-aligned tail, so paging in a partial last page is safe).
-        let kind = if pinned_slot[src_slot] {
-            javm_exec::mat::PageKind::PinnedCapRo.as_u8()
-        } else {
-            javm_exec::mat::PageKind::UnpinnedCapCow.as_u8()
-        };
-        let span = size.next_multiple_of(paging::PAGE_SIZE as u32);
-        mat_ranges.push(MatRange {
-            start: m.start as u32,
-            end: (m.start as u32).saturating_add(span),
-            pa,
-            kind,
-            source_hash: target_hash,
-            source_slot: SlotIdx(m.source_path[0].get()),
-        });
-    }
-
-    // Instance rw_overlays: per-instance evolved state. Both top-level
-    // (Hash) and kernel-derived (Ref) instances live in the same
-    // CacheDirectory; `CACHE.get(CapHashOrRef)` does the dispatch.
-    //
-    // Up to three overlays are propagated to the JIT (its arg / ro
-    // / rw mem regions). Anything beyond that is ignored — matches
-    // pre-rewrite behaviour.
-    let mut overlay_bufs: [(u32, Vec<u8>); 3] = [(0, Vec::new()), (0, Vec::new()), (0, Vec::new())];
-    let mut n = 0usize;
+    // The Instance's RW memory is a dense `DataCap` (`inst.mem`) covering the
+    // whole data extent, holding both initial and pinned content at their VAs
+    // with page-aligned slabs (kept alive in CACHE for the frame's life by the
+    // no-eviction V1 invariant). Source every data page from it: pinned VA
+    // ranges as `PinnedCapRo`, everything else (initial + ephemeral, the latter
+    // backed by `Empty` → zero page) as one catch-all `UnpinnedCapCow` range.
+    let data_base = javm_cap::layout::DATA_BASE;
+    let mut mem_size = data_base;
     let inst_arc = CACHE.get(frame.instance.clone());
-    if let Some(arc) = inst_arc.as_ref()
-        && let Cap::Instance(inst) = &**arc
+    if let Some(arc) = inst_arc.as_deref()
+        && let Cap::Instance(inst) = arc
     {
-        for ov in inst.rw_overlays.iter() {
-            let end = ov.start.saturating_add(ov.bytes.len() as u32);
-            if end > mem_size {
-                mem_size = end;
+        let mem = &inst.mem;
+        let extent = mem.content_len() as u32;
+        mem_size = data_base.saturating_add(extent);
+        let pages = (extent / paging::PAGE_SIZE as u32) as usize;
+
+        // Pinned mappings → PinnedCapRo ranges (pushed first → precedence).
+        for m in img.mappings.iter() {
+            if m.path().is_empty() || !img.mapping_is_pinned(m.start as u32) {
+                continue;
             }
-            if n < overlay_bufs.len() && !ov.bytes.is_empty() {
-                overlay_bufs[n].0 = ov.start;
-                overlay_bufs[n].1.clear();
-                overlay_bufs[n].1.extend_from_slice(ov.bytes.as_slice());
-                n += 1;
+            let span = (m.size as u32).next_multiple_of(paging::PAGE_SIZE as u32);
+            let n = (span / paging::PAGE_SIZE as u32) as usize;
+            if n == 0 {
+                continue;
             }
+            let base_page =
+                ((m.start as u32).saturating_sub(data_base) / paging::PAGE_SIZE as u32) as usize;
+            let pas_off = mat_pas.len() as u32;
+            for k in 0..n {
+                mat_pas.push(mem_page_pa(mem, base_page + k, zero_pa)?);
+            }
+            mat_ranges.push(MatRange {
+                start: m.start as u32,
+                end: (m.start as u32).saturating_add(span),
+                pas_off,
+                pas_len: n as u32,
+                kind: javm_exec::mat::PageKind::PinnedCapRo.as_u8(),
+                source_hash: [0u8; 32],
+                source_slot: m.path().first().map_or(0, |k| k.diag_id() as u8),
+            });
         }
-        if inst.mem_size > mem_size {
-            mem_size = inst.mem_size;
+
+        // Catch-all RW range over the whole extent (initial + ephemeral).
+        if pages > 0 {
+            let pas_off = mat_pas.len() as u32;
+            for i in 0..pages {
+                mat_pas.push(mem_page_pa(mem, i, zero_pa)?);
+            }
+            mat_ranges.push(MatRange {
+                start: data_base,
+                end: mem_size,
+                pas_off,
+                pas_len: pages as u32,
+                kind: javm_exec::mat::PageKind::UnpinnedCapCow.as_u8(),
+                source_hash: [0u8; 32],
+                source_slot: 0,
+            });
         }
     }
-
-    let arg: (u32, &[u8]) = (overlay_bufs[0].0, overlay_bufs[0].1.as_slice());
-    let ro: (u32, &[u8]) = (overlay_bufs[1].0, overlay_bufs[1].1.as_slice());
-    let rw: (u32, &[u8]) = (overlay_bufs[2].0, overlay_bufs[2].1.as_slice());
 
     // PVM2: `code` is raw RV+C+custom-0 bytes (produced by
     // `javm_transpiler::linker::link_elf`). The JIT cache
@@ -587,22 +566,25 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
             code_pa,
             frame.pc,
             mem_size,
-            MemRegion {
-                start: arg.0,
-                data: arg.1,
-            },
-            MemRegion {
-                start: ro.0,
-                data: ro.1,
-            },
-            MemRegion {
-                start: rw.0,
-                data: rw.1,
-            },
             mat_ranges,
+            mat_pas,
+            zero_page,
         )
     }
     .ok_or(ERR_JIT_FAILED)
+}
+
+/// Source physical address of page `i` of `mem` (a dense `DataCap`): a present
+/// slab's PA, or the shared `zero_pa` for an `Empty` (absent / zero) page. V1
+/// never mints `Missing`.
+fn mem_page_pa(mem: &javm_cap::DataCap, i: usize, zero_pa: u64) -> Result<u64, u32> {
+    match mem.page_slot(i) {
+        javm_cap::PageSlot::Loaded(pr) => {
+            paging::va_to_pa(pr.bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)
+        }
+        javm_cap::PageSlot::Empty => Ok(zero_pa),
+        javm_cap::PageSlot::Missing(_) => Err(ERR_MAP_BAD_KIND),
+    }
 }
 
 /// Pop the top frame; if a parent exists, reflect the popped child's
@@ -631,15 +613,23 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
 /// [`CACHE`]'s instances tier via
 /// [`crate::state_cache::publish_transient_instance`], and writes
 /// the resulting `CapRef` into the parent's `dst_slot`.
-fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<(), u32> {
-    let image_slot = (frame.regs[7] & 0xFF) as usize;
-    let _cnode_slot = (frame.regs[8] & 0xFF) as usize;
-    let dst_slot = (frame.regs[9] & 0xFF) as usize;
+/// Returns `Ok(true)` if the spawn must trap the guest (the `dst_slot` is
+/// pinned — a write to a read-only slot), matching the interpreter's
+/// `OpError::SlotPinned → ExitReason::Trap`. `Ok(false)` on a normal spawn.
+fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
+    // V1 single-byte ABI: each slot is the 1-byte key `gpr & 0xFF`.
+    let image_slot = SlotKey::from((frame.regs[7] & 0xFF) as u8);
+    let _cnode_slot = (frame.regs[8] & 0xFF) as u8;
+    let dst_slot = SlotKey::from((frame.regs[9] & 0xFF) as u8);
 
-    if image_slot >= CNODE_SLOTS || dst_slot >= CNODE_SLOTS {
-        return Err(ERR_DERIVE_SLOT_OOB);
+    // Reject a write to a pinned (read-only) slot — the interpreter rejects
+    // this and traps (javm/src/ecall.rs); the recompiler must agree or the
+    // engines fork on `derive_spawn(dst=<pinned>)`.
+    if frame.pinned.binary_search(&dst_slot).is_ok() {
+        return Ok(true);
     }
-    let image_hash = match frame.cnode[image_slot] {
+
+    let image_hash = match frame.cnode.get(&image_slot) {
         Some(CapHashOrRef::Hash(h)) => h,
         Some(CapHashOrRef::Ref(_)) | None => frame.image_hash,
     };
@@ -649,15 +639,19 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<(), u32> {
         image_hash_chain: child_chain,
         image_hash,
         root_cnode: CapHashOrRef::Hash([0u8; 32]),
-        rw_overlays: Vec::new(),
-        mem_size: 0,
+        mem: javm_cap::DataCap::empty(),
         regs: [0u64; NUM_REGS],
         pc: 0,
         gas_remaining: 0,
     });
     let child_ref = publish_transient_instance(cap);
-    frame.cnode[dst_slot] = Some(CapHashOrRef::Ref(child_ref));
-    Ok(())
+    // CNode ops run in ring-0 dispatch (kernel heap live); `set` on the
+    // unbounded radix map is infallible here.
+    frame
+        .cnode
+        .set(&dst_slot, Some(CapHashOrRef::Ref(child_ref)))
+        .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
+    Ok(false)
 }
 
 /// `host_call(instance_slot=φ[7], endpoint_idx=φ[8])`. Reads the
@@ -666,13 +660,11 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<(), u32> {
 /// φ[7..=10] (arg-passing convention — used by the recursive-spawn
 /// bench to thread the remaining depth count).
 fn dispatch_host_call(parent: &KernelFrame) -> Result<KernelFrame, u32> {
-    let instance_slot = (parent.regs[7] & 0xFF) as usize;
+    let instance_slot = SlotKey::from((parent.regs[7] & 0xFF) as u8);
     let endpoint_idx = (parent.regs[8] & 0xFF) as u32;
-    if instance_slot >= CNODE_SLOTS {
-        return Err(ERR_HOST_CALL_SLOT_EMPTY);
-    }
-    let target = parent.cnode[instance_slot]
-        .clone()
+    let target = parent
+        .cnode
+        .get(&instance_slot)
         .ok_or(ERR_HOST_CALL_SLOT_EMPTY)?;
 
     // Arg-passing convention: parent's φ[9..=10] → child's φ[7..=8].
@@ -692,12 +684,16 @@ fn dispatch_host_call(parent: &KernelFrame) -> Result<KernelFrame, u32> {
     // return mechanism lands, inherited Ref slots should go through
     // `cache.clone_instance` so each frame's cnode owns its own
     // CapRef and mutations don't accidentally cross-share.
-    for (i, slot) in parent.cnode.iter().enumerate() {
-        if child.cnode[i].is_none() {
-            // Clone the CapHashOrRef. For Ref(CapRef) slots this
-            // bumps the inner Arc strong count — the child's
-            // cnode keeps the instance alive while the child runs.
-            child.cnode[i] = slot.clone();
+    //
+    // The cnode is a radix map keyed by `Hasher(SlotKey)`; iterate the
+    // parent's physical (key, value) entries and copy each one the child
+    // doesn't already hold. Operating at the physical-key level is exact —
+    // each logical slot maps to one physical key — and needs no logical-key
+    // reverse map. For Ref(CapRef) slots the clone bumps the inner Arc so the
+    // child's cnode keeps the instance alive while it runs.
+    for (phys_key, val) in parent.cnode.slots.iter() {
+        if child.cnode.slots.get(phys_key).is_none() {
+            child.cnode.slots.insert(*phys_key, val.clone());
         }
     }
     Ok(child)
@@ -802,19 +798,22 @@ fn build_frame_inner(
     }
     let pc = ep.entry_pc as u32;
 
-    let mut cnode: Vec<Option<CapHashOrRef>> = vec![None; CNODE_SLOTS];
+    let mut cnode = CNodeCap::new();
     for e in img.pinned.iter() {
-        let s = e.slot.get() as usize;
-        if s < CNODE_SLOTS {
-            cnode[s] = Some(CapHashOrRef::Hash(e.cap_hash));
-        }
+        cnode
+            .set(&e.slot, Some(CapHashOrRef::Hash(e.cap_hash)))
+            .map_err(|_| ERR_JIT_FAILED)?;
     }
     for e in img.initial.iter() {
-        let s = e.slot.get() as usize;
-        if s < CNODE_SLOTS && cnode[s].is_none() {
-            cnode[s] = Some(CapHashOrRef::Hash(e.cap_hash));
+        if cnode.get(&e.slot).is_none() {
+            cnode
+                .set(&e.slot, Some(CapHashOrRef::Hash(e.cap_hash)))
+                .map_err(|_| ERR_JIT_FAILED)?;
         }
     }
+    // Pinned-slot set for write rejection (sorted: `img.pinned` is emitted
+    // sorted by `image_cap`). Mirrors `javm` `build_entry`.
+    let pinned: Vec<SlotKey> = img.pinned.iter().map(|e| e.slot.clone()).collect();
 
     // The cap-backed mappings (their PAs + pinned/initial kind) are
     // resolved in `build_runtime` when the per-frame runtime is built;
@@ -826,6 +825,7 @@ fn build_frame_inner(
         regs,
         pc,
         cnode,
+        pinned,
         dirty_pages: Vec::new(),
         runtime: None,
     })

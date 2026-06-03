@@ -1,7 +1,21 @@
 use javm_cap::{
-    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, DataContent, ImageCap, InstanceCap,
-    NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotIdx, TypeCap,
+    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, DataGroup, DataGroups, ImageCap,
+    InstanceCap, NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotKey, TypeCap,
 };
+use ssz::MissingOr;
+
+/// A single-group `Cap::Data` holding `pages` at group 0, sized to 2 MiB.
+fn data_cap_with_pages(pages: Vec<PageSlot>) -> Cap {
+    let mut groups: DataGroups = DataGroups::new();
+    groups.insert(
+        DataCap::group_key(0),
+        MissingOr::Materialized(DataGroup { pages }),
+    );
+    Cap::Data(DataCap {
+        size: javm_cap::GROUP_SIZE as u64,
+        groups,
+    })
+}
 
 #[test]
 fn type_cap_hash_deterministic() {
@@ -28,36 +42,25 @@ fn cap_variants_have_distinct_hashes() {
     let t: Cap = Cap::Type(TypeCap {
         image_hash_chain: [0; 32],
     });
-    let cn: Cap = Cap::CNode(CNodeCap::new(0).unwrap());
+    let cn: Cap = Cap::CNode(CNodeCap::new());
     assert_ne!(t.cap_hash(), cn.cap_hash());
 }
 
 #[test]
 fn data_inline_hash_includes_size() {
-    let bytes_a: Vec<u8> = b"abc".to_vec();
-    let bytes_b: Vec<u8> = b"abc".to_vec();
-    // Two caps with different inline byte lengths (same prefix)
-    // hash differently because content storage IS the identifier.
-    // Pad to distinct page-multiple sizes.
-    let mut bytes_a_padded: Vec<u8> = vec![0u8; PAGE_SIZE];
-    bytes_a_padded[..bytes_a.len()].copy_from_slice(bytes_a.as_slice());
-    let mut bytes_b_padded: Vec<u8> = vec![0u8; PAGE_SIZE * 2];
-    bytes_b_padded[..bytes_b.len()].copy_from_slice(bytes_b.as_slice());
-    let a: Cap = Cap::Data(DataCap {
-        content: DataContent::Inline(bytes_a_padded),
-    });
-    let b: Cap = Cap::Data(DataCap {
-        content: DataContent::Inline(bytes_b_padded),
-    });
+    // Two caps with the same prefix but different logical sizes hash
+    // differently — `size` is committed in the cap hash.
+    let a: Cap = Cap::Data(DataCap::from_bytes_sized(b"abc", PAGE_SIZE as u64));
+    let b: Cap = Cap::Data(DataCap::from_bytes_sized(b"abc", (PAGE_SIZE * 2) as u64));
     assert_ne!(a.cap_hash(), b.cap_hash());
 }
 
 #[test]
 fn cnode_empty_vs_one_populated_differ() {
-    let empty: CNodeCap = CNodeCap::new(2).unwrap();
-    let mut populated: CNodeCap = CNodeCap::new(2).unwrap();
+    let empty: CNodeCap = CNodeCap::new();
+    let mut populated: CNodeCap = CNodeCap::new();
     populated
-        .set(SlotIdx(0), Some(CapHashOrRef::Hash([0xEE; 32])))
+        .set(&SlotKey::from(0u8), Some(CapHashOrRef::Hash([0xEE; 32])))
         .unwrap();
     let a: Cap = Cap::CNode(empty);
     let b: Cap = Cap::CNode(populated);
@@ -67,9 +70,10 @@ fn cnode_empty_vs_one_populated_differ() {
 #[test]
 fn cnode_with_ref_target_panics() {
     let cache = CacheDirectory::new();
-    let r = cache.put_instance(Cap::CNode(CNodeCap::new(0).unwrap()));
-    let mut cn: CNodeCap = CNodeCap::new(2).unwrap();
-    cn.set(SlotIdx(0), Some(CapHashOrRef::Ref(r))).unwrap();
+    let r = cache.put_instance(Cap::CNode(CNodeCap::new()));
+    let mut cn: CNodeCap = CNodeCap::new();
+    cn.set(&SlotKey::from(0u8), Some(CapHashOrRef::Ref(r)))
+        .unwrap();
     let cap: Cap = Cap::CNode(cn);
     let result = std::panic::catch_unwind(|| cap.cap_hash());
     assert!(result.is_err());
@@ -113,8 +117,7 @@ fn empty_instance() -> InstanceCap {
         image_hash_chain: [0; 32],
         image_hash: [0; 32],
         root_cnode: CapHashOrRef::Hash([0; 32]),
-        rw_overlays: Vec::new(),
-        mem_size: 0,
+        mem: DataCap::empty(),
         regs: [0; NUM_REGS],
         pc: 0,
         gas_remaining: 0,
@@ -123,36 +126,18 @@ fn empty_instance() -> InstanceCap {
 
 #[test]
 fn data_paged_hash_uses_loaded_page_hashes() {
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&[1, 2, 3]);
-    let pb_hash = [0xA1; 32];
     let pb = PageBytes {
-        hash: pb_hash,
-        bytes,
+        hash: [0xA1; 32],
+        bytes: vec![1, 2, 3],
     };
-    let pr: PageRef = PageRef::new(pb);
-    let pages: Vec<PageSlot> = vec![PageSlot::Loaded(pr)];
-    let cap: Cap = Cap::Data(DataCap {
-        content: DataContent::Paged {
-            page_size: 4096,
-            pages,
-        },
-    });
+    let cap = data_cap_with_pages(vec![PageSlot::Loaded(PageRef::new(pb))]);
     let h = cap.cap_hash();
-    // Sanity: identical Cap shape with a different page hash differs.
-    let bytes2: Vec<u8> = vec![1, 2, 3];
+    // Sanity: identical shape with a different page hash differs.
     let pb2 = PageBytes {
         hash: [0xB2; 32],
-        bytes: bytes2,
+        bytes: vec![1, 2, 3],
     };
-    let pr2: PageRef = PageRef::new(pb2);
-    let pages2: Vec<PageSlot> = vec![PageSlot::Loaded(pr2)];
-    let cap2: Cap = Cap::Data(DataCap {
-        content: DataContent::Paged {
-            page_size: 4096,
-            pages: pages2,
-        },
-    });
+    let cap2 = data_cap_with_pages(vec![PageSlot::Loaded(PageRef::new(pb2))]);
     assert_ne!(h, cap2.cap_hash());
 }
 
@@ -161,28 +146,11 @@ fn loaded_page_substitutes_for_missing_with_same_hash() {
     // Substitution invariant: Loaded(p) and Missing(p.hash) must
     // produce the same enclosing-cap hash.
     let page_hash = [0xCD; 32];
-    let bytes: Vec<u8> = vec![0xAA; 16];
     let pb = PageBytes {
         hash: page_hash,
-        bytes,
+        bytes: vec![0xAA; 16],
     };
-    let pr: PageRef = PageRef::new(pb);
-
-    let pages_loaded: Vec<PageSlot> = vec![PageSlot::Loaded(pr)];
-    let cap_loaded: Cap = Cap::Data(DataCap {
-        content: DataContent::Paged {
-            page_size: 16,
-            pages: pages_loaded,
-        },
-    });
-
-    let pages_missing: Vec<PageSlot> = vec![PageSlot::Missing(page_hash)];
-    let cap_missing: Cap = Cap::Data(DataCap {
-        content: DataContent::Paged {
-            page_size: 16,
-            pages: pages_missing,
-        },
-    });
-
+    let cap_loaded = data_cap_with_pages(vec![PageSlot::Loaded(PageRef::new(pb))]);
+    let cap_missing = data_cap_with_pages(vec![PageSlot::Missing(page_hash)]);
     assert_eq!(cap_loaded.cap_hash(), cap_missing.cap_hash());
 }

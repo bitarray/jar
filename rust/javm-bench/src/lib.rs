@@ -28,7 +28,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput};
 use javm_cap::NUM_REGS;
 use javm_cap::image::{Image, PinnedCap};
-use javm_cap::slot::SlotIdx;
+use javm_cap::slot::SlotKey;
 use javm_cap::{Cap, CapHash};
 use nub::{InvocationResult, Nub};
 use std::sync::{Mutex, OnceLock};
@@ -75,8 +75,8 @@ impl BuiltCaps {
         // 1. Build a Cap::Data per non-empty pinned/initial slot. Track
         //    each slot's resolved CapHash so the Image can reference them.
         let mut data_caps: Vec<(CapHash, Cap)> = Vec::new();
-        let mut pinned_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
-        let mut initial_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
+        let mut pinned_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
+        let mut initial_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
 
         for (slot, pinned) in &image.pinned_slots {
             let (h, cap) = match pinned {
@@ -91,7 +91,7 @@ impl BuiltCaps {
                     (*content_hash, None)
                 }
             };
-            pinned_hashes.push((*slot, h));
+            pinned_hashes.push((slot.clone(), h));
             if let Some(c) = cap {
                 data_caps.push((h, c));
             }
@@ -99,7 +99,7 @@ impl BuiltCaps {
         for (slot, init) in &image.initial_slots {
             let cap = Cap::data_inline_with_size(&init.content, init.size);
             let h = ssz::hash_tree_root(&cap);
-            initial_hashes.push((*slot, h));
+            initial_hashes.push((slot.clone(), h));
             data_caps.push((h, cap));
         }
 
@@ -109,15 +109,11 @@ impl BuiltCaps {
         let image_hash = ssz::hash_tree_root(&image_cap);
 
         // 3. Empty root CNode (V1: no per-instance slot bindings).
-        let cnode_cap = Cap::empty_cnode(0).expect("empty_cnode");
+        let cnode_cap = Cap::empty_cnode();
         let cnode_hash = ssz::hash_tree_root(&cnode_cap);
 
-        // 4. Build the Instance with the bench's flat overlay layout.
-        let (mem_size, overlays) = image.data_overlays();
-        let overlay_slices: Vec<(u32, &[u8])> = overlays
-            .iter()
-            .map(|(start, bytes)| (*start, bytes.as_slice()))
-            .collect();
+        // 4. Build the Instance with the bench's memory image.
+        let mem = image.instance_mem_backing();
 
         let mut regs = [0u64; NUM_REGS];
         for (&i, &v) in &endpoint.initial_regs {
@@ -126,16 +122,8 @@ impl BuiltCaps {
             }
         }
 
-        let instance_cap = Cap::instance_with_overlays(
-            [0u8; 32],
-            image_hash,
-            cnode_hash,
-            &overlay_slices,
-            mem_size,
-            regs,
-            0,
-            0,
-        );
+        let instance_cap =
+            Cap::instance_with_mem([0u8; 32], image_hash, cnode_hash, mem, regs, 0, 0);
         let instance_hash = ssz::hash_tree_root(&instance_cap);
 
         BuiltCaps {
@@ -374,8 +362,8 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
     // Cap::Image; the in-kernel call_loop reads those bytes from the
     // shared cache when building a child frame's mem image.
     let mut data_caps: Vec<(CapHash, Cap)> = Vec::new();
-    let mut pinned_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
-    let mut initial_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
+    let mut pinned_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
+    let mut initial_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
     for (slot, pinned) in &image.pinned_slots {
         let (h, maybe_cap) = match pinned {
             PinnedCap::Data { content, size } => {
@@ -385,7 +373,7 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
             }
             PinnedCap::Image { content_hash } => (*content_hash, None),
         };
-        pinned_hashes.push((*slot, h));
+        pinned_hashes.push((slot.clone(), h));
         if let Some(cap) = maybe_cap {
             data_caps.push((h, cap));
         }
@@ -393,7 +381,7 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
     for (slot, init) in &image.initial_slots {
         let cap = Cap::data_inline_with_size(&init.content, init.size);
         let h = ssz::hash_tree_root(&cap);
-        initial_hashes.push((*slot, h));
+        initial_hashes.push((slot.clone(), h));
         data_caps.push((h, cap));
     }
     for (h, cap) in &data_caps {
@@ -405,9 +393,9 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
     nub.put_cap_with_hash(image_hash, &image_cap)
         .expect("put image");
 
-    let mut cn = CNodeCap::new(8).expect("cnode");
+    let mut cn = CNodeCap::new();
     cn.set(
-        SlotIdx(SLOT_IMAGE_RECURSE),
+        &SlotKey::from(SLOT_IMAGE_RECURSE as u8),
         Some(CapHashOrRef::Hash(image_hash)),
     )
     .expect("set image slot");
@@ -424,19 +412,8 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
         }
     }
 
-    let (mem_size, overlays) = image.data_overlays();
-    let overlay_slices: Vec<(u32, &[u8])> =
-        overlays.iter().map(|(s, b)| (*s, b.as_slice())).collect();
-    let inst_cap = Cap::instance_with_overlays(
-        [0u8; 32],
-        image_hash,
-        cnode_hash,
-        &overlay_slices,
-        mem_size,
-        regs,
-        0,
-        0,
-    );
+    let mem = image.instance_mem_backing();
+    let inst_cap = Cap::instance_with_mem([0u8; 32], image_hash, cnode_hash, mem, regs, 0, 0);
     let inst_hash = ssz::hash_tree_root(&inst_cap);
     nub.put_cap_with_hash(inst_hash, &inst_cap)
         .expect("put instance");

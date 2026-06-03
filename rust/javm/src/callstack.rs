@@ -27,7 +27,7 @@
 
 use std::sync::Arc;
 
-use javm_cap::{CNodeCap, CapHash, CapHashOrRef, SlotIdx};
+use javm_cap::{CNodeCap, CapHash, CapHashOrRef, SlotKey};
 use javm_exec::{GasCounter, Mem, Regs, interp::Program};
 
 use crate::error::VmError;
@@ -65,10 +65,10 @@ pub struct InstanceEntry {
     /// HALT it's commit-merged back into the cache.
     pub root_cnode: CNodeCap,
     /// `Image.yield_marker_slot`, cached for yield routing.
-    pub yield_marker_slot: Option<SlotIdx>,
+    pub yield_marker_slot: Option<SlotKey>,
     /// Sorted slot indices declared pinned by this Image. Cached for
     /// fast `is_pinned` checks.
-    pub pinned_slots: Vec<SlotIdx>,
+    pub pinned_slots: Vec<SlotKey>,
     /// Working registers.
     pub regs: Regs,
     /// Working memory (mapped RW overlays + ephemeral).
@@ -87,7 +87,7 @@ impl std::fmt::Debug for InstanceEntry {
             .field("image_hash", &short_hex(&self.image_hash))
             .field("pc", &self.regs.pc)
             .field("status", &self.status)
-            .field("cnode.size_log", &self.root_cnode.size_log)
+            .field("cnode.slots", &self.root_cnode.slots.len())
             .finish_non_exhaustive()
     }
 }
@@ -311,7 +311,7 @@ mod tests {
 
     fn make_entry(tag: u8) -> InstanceEntry {
         let prog = Arc::new(Program::new(vec![0x0B, 0x00, 0x00, 0x00], 0));
-        let cnode = CNodeCap::new(8).unwrap();
+        let cnode = CNodeCap::new();
         InstanceEntry {
             instance_ref: CapHashOrRef::Hash([tag; 32]),
             image_hash_chain: [tag; 32],

@@ -28,11 +28,13 @@ pub mod data;
 pub mod image;
 pub mod instance;
 pub mod page;
+pub mod view;
 
 use cnode::CNodeCap;
 use data::DataCap;
 use image::ImageCap;
 use instance::InstanceCap;
+use view::DataViewCap;
 
 /// 32-byte digest used for all v3 cap identity / content hashes.
 pub type CapHash = [u8; 32];
@@ -79,6 +81,8 @@ pub enum Cap {
     CNode(CNodeCap),
     #[ssz(selector = 4)]
     Type(TypeCap),
+    #[ssz(selector = 5)]
+    DataView(DataViewCap),
 }
 
 /// `Cap::Type` payload. Pure identifier; no slot references.
@@ -141,38 +145,29 @@ impl Cap {
     /// callers needing a shorter logical payload (e.g. variable-length
     /// args) interpret the meaningful prefix themselves.
     pub fn data_inline(bytes: &[u8]) -> Self {
-        let mut buf = data::alloc_page_aligned_zeroed(bytes.len());
-        buf[..bytes.len()].copy_from_slice(bytes);
-        Cap::Data(DataCap {
-            content: data::DataContent::Inline(buf),
-        })
+        Cap::Data(DataCap::from_bytes(bytes))
     }
 
-    /// Build a heap `Cap::Data` whose backing buffer is at least
-    /// `target_size` bytes (rounded up to the next page boundary).
-    /// `bytes` is copied to the start of the buffer; the remainder is
-    /// zero-padded.
+    /// Build a heap `Cap::Data` whose logical size is at least `target_size`
+    /// bytes (rounded up to the next page boundary). `bytes` fills the low
+    /// bytes; the remainder is zero (sparse).
     pub fn data_inline_with_size(bytes: &[u8], target_size: u64) -> Self {
-        let target = (target_size as usize).max(bytes.len());
-        let mut buf = data::alloc_page_aligned_zeroed(target);
-        buf[..bytes.len()].copy_from_slice(bytes);
-        Cap::Data(DataCap {
-            content: data::DataContent::Inline(buf),
-        })
+        Cap::Data(DataCap::from_bytes_sized(bytes, target_size))
     }
 
-    /// Build an empty heap `Cap::CNode` of `2^size_log` slots. Rejects
-    /// `size_log > 16`.
-    pub fn empty_cnode(size_log: u8) -> Result<Self, crate::error::CapError> {
-        Ok(Cap::CNode(CNodeCap::new(size_log)?))
+    /// Build an empty heap `Cap::CNode`. A CNode is an unbounded
+    /// hash-keyed map (bounded by storage quota), so there is no
+    /// `size_log` to declare.
+    pub fn empty_cnode() -> Self {
+        Cap::CNode(CNodeCap::new())
     }
 
     /// Build a heap `Cap::Image` from an SSZ `Image` plus the
     /// caller-resolved pinned/initial slot `CapHash` pairs.
     pub fn image_with_slots(
         image: &crate::image::Image,
-        pinned_hashes: &[(crate::slot::SlotIdx, CapHash)],
-        initial_hashes: &[(crate::slot::SlotIdx, CapHash)],
+        pinned_hashes: &[(crate::slot::SlotKey, CapHash)],
+        initial_hashes: &[(crate::slot::SlotKey, CapHash)],
     ) -> Result<Self, image::ImageConvertError> {
         Ok(Cap::Image(image::image_cap(
             image,
@@ -183,34 +178,24 @@ impl Cap {
 
     /// Build a heap `Cap::Instance` directly from field values.
     ///
-    /// `rw_overlays` is the list of `(start_va, bytes)` overlays the
-    /// Instance carries — each becomes one `RwOverlay` entry.
+    /// `mem` is the Instance's read-write memory image (a dense [`DataCap`]
+    /// covering the data extent; pinned read-only mappings are not part of it —
+    /// see [`instance::InstanceCap::mem`]).
     #[allow(clippy::too_many_arguments)]
-    pub fn instance_with_overlays(
+    pub fn instance_with_mem(
         image_hash_chain: CapHash,
         image_hash: CapHash,
         root_cnode: CapHash,
-        rw_overlays: &[(u32, &[u8])],
-        mem_size: u32,
+        mem: DataCap,
         regs: [u64; NUM_REGS],
         pc: u64,
         gas_remaining: u64,
     ) -> Self {
-        let mut overlays: alloc::vec::Vec<instance::RwOverlay> = alloc::vec::Vec::new();
-        for (start, bytes) in rw_overlays {
-            let mut buf = alloc::vec::Vec::with_capacity(bytes.len());
-            buf.extend_from_slice(bytes);
-            overlays.push(instance::RwOverlay {
-                start: *start,
-                bytes: buf,
-            });
-        }
         Cap::Instance(instance::InstanceCap {
             image_hash_chain,
             image_hash,
             root_cnode: crate::cache::CapHashOrRef::Hash(root_cnode),
-            rw_overlays: overlays,
-            mem_size,
+            mem,
             regs,
             pc,
             gas_remaining,

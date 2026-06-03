@@ -1174,6 +1174,7 @@ dependencies = [
  "blake2",
  "hashbrown 0.17.1",
  "rkyv",
+ "smallvec",
  "spin",
  "ssz",
  "ssz-derive",
@@ -2029,6 +2030,7 @@ dependencies = [
  "rancor",
  "rend",
  "rkyv_derive",
+ "smallvec",
  "tinyvec",
  "uuid",
 ]
@@ -2328,6 +2330,7 @@ dependencies = [
  "proptest",
  "rkyv",
  "sha2",
+ "smallvec",
  "ssz-derive",
  "thiserror",
  "tree_hash",

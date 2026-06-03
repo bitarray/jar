@@ -9,10 +9,13 @@
 //! that `Ref`-bearing caps surface a typed encode error (no panic).
 
 use javm_cap::cache::CapHashOrRef;
-use javm_cap::cap::data::{DataCap, DataContent};
 use javm_cap::cap::page::{PageBytes, PageSlot};
 use javm_cap::image::EndpointDef;
-use javm_cap::{CNodeCap, Cap, NUM_REGS, TypeCap, image::Image};
+use javm_cap::{
+    CNodeCap, Cap, DataCap, DataGroup, DataGroups, DataViewCap, GROUP_SIZE, NUM_REGS, PAGE_SIZE,
+    SlotKey, TypeCap, image::Image,
+};
+use ssz::MissingOr;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -37,7 +40,7 @@ fn type_cap_roundtrip_preserves_hash() {
 
 #[test]
 fn empty_cnode_roundtrip_preserves_hash() {
-    round_trip(Cap::CNode(CNodeCap::new(0).expect("cnode")));
+    round_trip(Cap::CNode(CNodeCap::new()));
 }
 
 #[test]
@@ -70,12 +73,11 @@ fn image_cap_roundtrip_preserves_hash() {
 
 #[test]
 fn instance_cap_roundtrip_preserves_hash() {
-    round_trip(Cap::instance_with_overlays(
+    round_trip(Cap::instance_with_mem(
         [0u8; 32],
         [0xAA; 32],
         [0xBB; 32],
-        &[],
-        4096,
+        DataCap::from_bytes_sized(&[], 4096),
         [0u64; NUM_REGS],
         0,
         0,
@@ -93,20 +95,34 @@ fn paged_data_roundtrip_preserves_hash() {
         PageSlot::Loaded(Arc::new(page)),
         PageSlot::Missing([0xDD; 32]),
     ];
+    let mut groups: DataGroups = DataGroups::new();
+    groups.insert(
+        DataCap::group_key(0),
+        MissingOr::Materialized(DataGroup { pages }),
+    );
     round_trip(Cap::Data(DataCap {
-        content: DataContent::Paged {
-            page_size: 4096,
-            pages,
-        },
+        size: GROUP_SIZE as u64,
+        groups,
     }));
 }
 
 #[test]
+fn data_view_roundtrip_preserves_hash() {
+    let backing = DataCap::from_bytes_sized(b"backing", 2 * PAGE_SIZE as u64);
+    let backing_hash = Cap::Data(backing).cap_hash();
+    let mut view = DataViewCap::new(CapHashOrRef::Hash(backing_hash), 2 * PAGE_SIZE as u64);
+    let mut content = vec![0u8; PAGE_SIZE];
+    content[..3].copy_from_slice(b"ovl");
+    view.write_page(0, &content);
+    round_trip(Cap::DataView(view));
+}
+
+#[test]
 fn cnode_with_populated_slot_roundtrips() {
-    let mut cn = CNodeCap::new(4).expect("cnode");
-    cn.set(2u16.into(), Some(CapHashOrRef::Hash([0xEE; 32])))
+    let mut cn = CNodeCap::new();
+    cn.set(&SlotKey::from(2u8), Some(CapHashOrRef::Hash([0xEE; 32])))
         .expect("set slot 2");
-    cn.set(7u16.into(), Some(CapHashOrRef::Hash([0xFF; 32])))
+    cn.set(&SlotKey::from(7u8), Some(CapHashOrRef::Hash([0xFF; 32])))
         .expect("set slot 7");
     round_trip(Cap::CNode(cn));
 }
@@ -120,8 +136,8 @@ fn ref_in_cap_errors_on_encode() {
     });
     let h = cache.put_cap(&blob).expect("put_cap");
     let capref = cache.promote_blob_to_instance(&h).expect("promote");
-    let mut cn = CNodeCap::new(0).expect("cnode");
-    cn.set(0u16.into(), Some(CapHashOrRef::Ref(capref)))
+    let mut cn = CNodeCap::new();
+    cn.set(&SlotKey::from(0u8), Some(CapHashOrRef::Ref(capref)))
         .expect("set ref");
     let cap = Cap::CNode(cn);
     let err = rkyv::to_bytes::<rkyv::rancor::Error>(&cap).expect_err("must reject Ref");

@@ -9,7 +9,7 @@
 use crate::{Program, encode};
 use javm_bench::{BuiltCaps, RawRun, run_interpreter_raw, run_recompiler_raw};
 use javm_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap};
-use javm_cap::slot::{SlotIdx, SlotPath};
+use javm_cap::slot::{SlotKey, SlotPath};
 use std::collections::BTreeMap;
 
 /// Cnode slot the fuzz memory window's backing data cap occupies.
@@ -34,11 +34,11 @@ pub fn image_with_ro(words: &[u32], ro_start: u32, ro_bytes: &[u8]) -> Image {
             initial_regs: BTreeMap::new(),
         },
     );
-    let slot = SlotIdx(WINDOW_SLOT + 1);
+    let slot = SlotKey::from((WINDOW_SLOT + 1) as u8);
     img.memory_mappings.push(MemoryMapping {
         start: ro_start as u64,
         size: ro_bytes.len() as u64,
-        source: SlotPath::root(slot),
+        source: SlotPath::root(slot.clone()),
     });
     img.pinned_slots.insert(
         slot,
@@ -70,11 +70,11 @@ pub fn image_with_ro_caps(words: &[u32], caps: &[(u32, &[u8])]) -> Image {
         },
     );
     for (i, (start, bytes)) in caps.iter().enumerate() {
-        let slot = SlotIdx(WINDOW_SLOT + 1 + i as u32);
+        let slot = SlotKey::from((WINDOW_SLOT + 1 + i as u32) as u8);
         img.memory_mappings.push(MemoryMapping {
             start: *start as u64,
             size: bytes.len() as u64,
-            source: SlotPath::root(slot),
+            source: SlotPath::root(slot.clone()),
         });
         img.pinned_slots.insert(
             slot,
@@ -122,11 +122,11 @@ pub fn image_for(prog: &Program) -> Image {
         },
     );
     if let Some(mem) = &prog.init_mem {
-        let slot = SlotIdx(WINDOW_SLOT);
+        let slot = SlotKey::from((WINDOW_SLOT) as u8);
         img.memory_mappings.push(MemoryMapping {
             start: mem.start as u64,
             size: mem.bytes.len() as u64,
-            source: SlotPath::root(slot),
+            source: SlotPath::root(slot.clone()),
         });
         // Empty content → no overlay; the mapping only sizes the data extent,
         // and the window materializes as ephemeral zero pages on both engines.

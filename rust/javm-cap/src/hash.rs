@@ -54,3 +54,15 @@ impl Hash for Blake2b256 {
         out
     }
 }
+
+/// Central alias for the content-addressing / key-derivation hash.
+///
+/// Used to derive fixed-width physical keys from program-supplied bytes —
+/// e.g. a `Cap::CNode` slot key `<Hasher as Hash>::hash(k)` (`[u8; 32]`).
+///
+/// TODO(hash-unify): this is Blake2b-256, but the SSZ merkle digest used by
+/// [`crate::cap::Cap::cap_hash`] (`ssz::hash_tree_root`, the `ssz` `sha2`
+/// feature) is Sha256. The two hashes should eventually be unified —
+/// probably switch everything to Sha256. Centralised here so the swap is a
+/// one-line change.
+pub type Hasher = Blake2b256;

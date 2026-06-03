@@ -17,7 +17,7 @@
 
 use javm::{KernelImage, kernel_image_hash};
 use javm_cap::image::Image;
-use javm_cap::{CNodeCap, CacheDirectory, Cap, CapHash, CapHashOrRef, NUM_REGS, SlotIdx};
+use javm_cap::{CNodeCap, CacheDirectory, Cap, CapHash, CapHashOrRef, NUM_REGS, SlotKey};
 
 use crate::abi;
 use crate::error::KernelError;
@@ -46,12 +46,11 @@ fn publish_kernel_unit_cap(
 ) -> Result<CapHash, KernelError> {
     let mut regs = [0u64; NUM_REGS];
     regs[0] = id;
-    let cap = Cap::instance_with_overlays(
+    let cap = Cap::instance_with_mem(
         kernel_image_hash(image),
         placeholder_image_hash,
         empty_cnode_hash,
-        &[],
-        0,
+        javm_cap::DataCap::empty(),
         regs,
         0,
         0,
@@ -74,9 +73,10 @@ fn publish_kernel_stateless_cap(
 /// Construct chain genesis from a chain Image.
 ///
 /// Publishes the chain image, the kernel-issued unit caps, the root
-/// cnode (256 slots, populated with kernel caps at `abi::BARE_*` slots
-/// plus pinned/initial slot data caps from the image), and the chain
-/// Instance into σ. Returns hashes for downstream callers.
+/// cnode (a variable-capacity `CNodeCap`, bounded by storage quota —
+/// populated with kernel caps at `abi::BARE_*` slots plus pinned/initial
+/// slot data caps from the image), and the chain Instance into σ. Returns
+/// hashes for downstream callers.
 pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     let mut state = State::new();
 
@@ -84,8 +84,8 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     //    image; remember each slot's content hash so the Image can
     //    reference them, and so the root cnode can bind to them later.
     use javm_cap::image::PinnedCap;
-    let mut chain_pinned_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
-    let mut chain_initial_hashes: Vec<(SlotIdx, CapHash)> = Vec::new();
+    let mut chain_pinned_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
+    let mut chain_initial_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
     for (slot, pinned) in &chain_image.pinned_slots {
         let h = match pinned {
             PinnedCap::Data { content, size } => state
@@ -93,13 +93,13 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
                 .put_cap(&Cap::data_inline_with_size(content, *size))?,
             PinnedCap::Image { content_hash } => *content_hash,
         };
-        chain_pinned_hashes.push((*slot, h));
+        chain_pinned_hashes.push((slot.clone(), h));
     }
     for (slot, init) in &chain_image.initial_slots {
         let h = state
             .caps
             .put_cap(&Cap::data_inline_with_size(&init.content, init.size))?;
-        chain_initial_hashes.push((*slot, h));
+        chain_initial_hashes.push((slot.clone(), h));
     }
 
     // 2. Publish the chain Image referencing the slot data by hash.
@@ -124,7 +124,7 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     // 4. A shared empty cnode for kernel-issued Instance caps. They
     //    never invoke any of their own slots; the empty cnode keeps
     //    them well-formed.
-    let empty_cnode_hash = state.caps.put_cap(&Cap::empty_cnode(0)?)?;
+    let empty_cnode_hash = state.caps.put_cap(&Cap::empty_cnode())?;
 
     // 5. Publish each kernel-issued unit cap.
     let gas_hash = publish_kernel_unit_cap(
@@ -195,74 +195,83 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     //    are republished alongside (they were also republished by
     //    chain image step above, but the cnode references them by hash
     //    so we just locate the hashes).
-    let mut entries: Vec<(SlotIdx, CapHashOrRef)> = vec![
-        (abi::BARE_GAS_SLOT, CapHashOrRef::Hash(gas_hash)),
-        (abi::BARE_QUOTA_SLOT, CapHashOrRef::Hash(quota_hash)),
+    let mut entries: Vec<(SlotKey, CapHashOrRef)> = vec![
         (
-            abi::BARE_YIELD_CATCHER_SLOT,
+            SlotKey::from(abi::BARE_GAS_SLOT),
+            CapHashOrRef::Hash(gas_hash),
+        ),
+        (
+            SlotKey::from(abi::BARE_QUOTA_SLOT),
+            CapHashOrRef::Hash(quota_hash),
+        ),
+        (
+            SlotKey::from(abi::BARE_YIELD_CATCHER_SLOT),
             CapHashOrRef::Hash(yield_catcher_hash),
         ),
         (
-            abi::BARE_SET_GAS_METER_SLOT,
+            SlotKey::from(abi::BARE_SET_GAS_METER_SLOT),
             CapHashOrRef::Hash(set_gas_meter_hash),
         ),
         (
-            abi::BARE_SET_STORAGE_QUOTA_SLOT,
+            SlotKey::from(abi::BARE_SET_STORAGE_QUOTA_SLOT),
             CapHashOrRef::Hash(set_storage_quota_hash),
         ),
-        (abi::BARE_MINT_GAS_SLOT, CapHashOrRef::Hash(mint_gas_hash)),
         (
-            abi::BARE_MINT_QUOTA_SLOT,
+            SlotKey::from(abi::BARE_MINT_GAS_SLOT),
+            CapHashOrRef::Hash(mint_gas_hash),
+        ),
+        (
+            SlotKey::from(abi::BARE_MINT_QUOTA_SLOT),
             CapHashOrRef::Hash(mint_quota_hash),
         ),
         (
-            abi::BARE_CREATE_YIELD_CATCHER_SLOT,
+            SlotKey::from(abi::BARE_CREATE_YIELD_CATCHER_SLOT),
             CapHashOrRef::Hash(create_yc_hash),
         ),
-        (abi::BARE_HOST_OPEN_SLOT, CapHashOrRef::Hash(host_open_hash)),
-        (abi::BARE_HOST_SAVE_SLOT, CapHashOrRef::Hash(host_save_hash)),
+        (
+            SlotKey::from(abi::BARE_HOST_OPEN_SLOT),
+            CapHashOrRef::Hash(host_open_hash),
+        ),
+        (
+            SlotKey::from(abi::BARE_HOST_SAVE_SLOT),
+            CapHashOrRef::Hash(host_save_hash),
+        ),
     ];
 
     // Pinned + initial slots: the hashes were already recorded above
     // (step 1) when we built the Cap::Data blobs. Reuse them directly.
     for (slot, h) in &chain_pinned_hashes {
-        entries.push((*slot, CapHashOrRef::Hash(*h)));
+        entries.push((slot.clone(), CapHashOrRef::Hash(*h)));
     }
     for (slot, h) in &chain_initial_hashes {
-        entries.push((*slot, CapHashOrRef::Hash(*h)));
+        entries.push((slot.clone(), CapHashOrRef::Hash(*h)));
     }
 
-    // 7. Publish the root cnode (256 slots, size_log = 8).
+    // 7. Publish the root cnode.
     let root_cnode_hash = {
-        let mut cnode = CNodeCap::new(8).map_err(KernelError::from)?;
+        let mut cnode = CNodeCap::new();
         for (slot, target) in &entries {
             cnode
-                .set(*slot, Some(target.clone()))
+                .set(slot, Some(target.clone()))
                 .map_err(KernelError::from)?;
         }
         state.caps.put_cap(&Cap::CNode(cnode))?
     };
 
-    // 8. Compute the chain Instance's memory layout from the image's
-    //    memory mappings via the canonical `Image::data_overlays()`:
-    //    mem_size = max(start + size); rw_overlays come from the
-    //    image's pinned/initial slot contents for each mapping.
-    let (mem_size, overlays) = chain_image.data_overlays();
-    let overlay_slices: Vec<(u32, &[u8])> = overlays
-        .iter()
-        .map(|(start, bytes)| (*start, bytes.as_slice()))
-        .collect();
+    // 8. Build the chain Instance's memory image from the image's memory
+    //    mappings via the canonical `Image::instance_mem_backing()` (every
+    //    mapping's source content folded at its offset above DATA_BASE).
+    let chain_mem = chain_image.instance_mem_backing();
 
     // 9. Publish the chain Instance. `image_hash_chain` mirrors the
     //    image's content hash directly at genesis (no prior chain).
     //    `regs` start at zeros (chain doesn't have a unit-id; events
     //    drive it via cnode slot[0]).
-    let chain_instance_hash = state.caps.put_cap(&Cap::instance_with_overlays(
+    let chain_instance_hash = state.caps.put_cap(&Cap::instance_with_mem(
         chain_image_hash,
         chain_image_hash,
         root_cnode_hash,
-        &overlay_slices,
-        mem_size,
+        chain_mem,
         [0u64; NUM_REGS],
         0,
         0,
@@ -291,8 +300,6 @@ fn placeholder_kernel_image() -> Image {
         code: vec![0u8],
         endpoints: BTreeMap::new(),
         memory_mappings: Vec::new(),
-        gas_slots: Vec::new(),
-        quota_slots: Vec::new(),
         pinned_slots: BTreeMap::new(),
         initial_slots: BTreeMap::new(),
         yield_marker_slot: None,

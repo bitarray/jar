@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use javm::{InProcessKernelAssist, Vm};
-use javm_cap::{Cap, CapHash, CapHashOrRef, SlotIdx};
+use javm_cap::{Cap, CapHash, CapHashOrRef, SlotKey};
 use javm_exec::ExitReason;
 
 use crate::error::KernelError;
@@ -62,10 +62,10 @@ pub fn apply_event(
     let payload_hash = state.caps.put_cap(&Cap::data_inline(&event.payload))?;
 
     // 2. Snapshot the chain instance's identifying fields (image hash
-    //    chain, image hash, current cnode hash) plus its memory layout
-    //    (mem_size, rw_overlays). We rebuild a new instance below
-    //    referencing the new cnode hash + the same memory layout.
-    let (image_hash_chain, image_hash, root_cnode_hash, mem_size, overlay_bufs, regs, pc) = {
+    //    chain, image hash, current cnode hash) plus its memory image
+    //    (`mem`). We rebuild a new instance below referencing the new
+    //    cnode hash + the same memory image.
+    let (image_hash_chain, image_hash, root_cnode_hash, mem, regs, pc) = {
         let inst_cap = state
             .caps
             .get(CapHashOrRef::Hash(*chain_instance_hash))
@@ -82,17 +82,11 @@ pub fn apply_event(
                         ));
                     }
                 };
-                let overlays: Vec<(u32, Vec<u8>)> = inst
-                    .rw_overlays
-                    .iter()
-                    .map(|o| (o.start, o.bytes.to_vec()))
-                    .collect();
                 (
                     inst.image_hash_chain,
                     inst.image_hash,
                     cnode_hash,
-                    inst.mem_size,
-                    overlays,
+                    inst.mem.clone(),
                     inst.regs,
                     inst.pc,
                 )
@@ -130,7 +124,7 @@ pub fn apply_event(
                 ));
             }
         };
-        cnode_mut.set(SlotIdx(0), Some(CapHashOrRef::Hash(payload_hash)))?;
+        cnode_mut.set(&SlotKey::from(0u8), Some(CapHashOrRef::Hash(payload_hash)))?;
     }
     state.caps.set_instance(&working_cnode_ref, cnode_arc)?;
 
@@ -139,17 +133,12 @@ pub fn apply_event(
     let new_root_cnode_hash = state.caps.settle(CapHashOrRef::Ref(working_cnode_ref))?;
 
     // 3. Republish the chain Instance referencing the new cnode and
-    //    the preserved memory layout / regs / PC.
-    let overlay_slices: Vec<(u32, &[u8])> = overlay_bufs
-        .iter()
-        .map(|(s, b)| (*s, b.as_slice()))
-        .collect();
-    let new_chain_instance_hash = state.caps.put_cap(&Cap::instance_with_overlays(
+    //    the preserved memory image / regs / PC.
+    let new_chain_instance_hash = state.caps.put_cap(&Cap::instance_with_mem(
         image_hash_chain,
         image_hash,
         new_root_cnode_hash,
-        &overlay_slices,
-        mem_size,
+        mem,
         regs,
         pc,
         0,

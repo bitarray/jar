@@ -19,7 +19,7 @@
 //! into it) and in-flight resolution (host calls read referenced caps
 //! by their `CapHashOrRef` target).
 
-use javm_cap::{CacheDirectory, Cap, CapHash, CapHashOrRef, NUM_REGS, SlotIdx};
+use javm_cap::{CacheDirectory, Cap, CapHash, CapHashOrRef, NUM_REGS, SlotKey};
 use javm_exec::{Access, CopyingMemory, ExitReason, GasCounter, Mem, Regs, interp::Interpreter};
 
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
@@ -173,42 +173,44 @@ impl<K: KernelAssist> Vm<K> {
             .get(endpoint_idx as usize)
             .ok_or(VmError::Invariant("endpoint index out of range"))?;
 
-        // Memory layout: the data region lives at [DATA_BASE, mem_size);
-        // the flat buffer is based at DATA_BASE so [0, DATA_BASE) (null
-        // guard + code) is out of range and faults — matching the
-        // recompiler's page table. `inst.mem_size` is the absolute max
-        // data VA; the RW extent above DATA_BASE is what we map.
+        // Memory layout: the data region lives at [DATA_BASE, DATA_BASE +
+        // mem.size); the flat buffer is based at DATA_BASE so [0, DATA_BASE)
+        // (null guard + code) is out of range and faults — matching the
+        // recompiler's page table.
         let mut mem = CopyingMemory::new();
         mem.base = javm_cap::layout::DATA_BASE;
-        let data_extent = page_round_up_u64(
-            (inst.mem_size as u64).saturating_sub(javm_cap::layout::DATA_BASE as u64),
-        );
+        let data_extent = inst.mem.content_len();
+        let mut mem_image = vec![0u8; data_extent as usize];
         if data_extent > 0 {
+            // Seed the whole extent from the Instance's memory image (the
+            // immutable backing, holding both initial and pinned content).
+            inst.mem.copy_into(0, &mut mem_image);
             mem.map_region(
                 javm_cap::layout::DATA_BASE as u64,
                 data_extent,
                 Access::ReadWrite,
-                None,
+                Some(&mem_image),
             )
             .map_err(VmError::MapRegion)?;
         }
-        // A mapping sourced from a pinned slot is read-only: lay it RO so
-        // a guest store faults, matching the recompiler, which RO direct-
-        // maps pinned slots and does not CoW-arm them (nub-arch-x86
-        // `build_runtime` pinned-vs-initial classification). Non-pinned
-        // (initial) overlays stay RW.
-        for overlay_entry in inst.rw_overlays.iter() {
-            let access = if img.mapping_is_pinned(overlay_entry.start) {
-                Access::ReadOnly
-            } else {
-                Access::ReadWrite
-            };
-            overlay_into(
-                &mut mem,
-                overlay_entry.start,
-                overlay_entry.bytes.as_slice(),
-                access,
-            )?;
+        // Re-lay pinned mappings read-only (same bytes, from the seeded image)
+        // so a guest store faults — matching the recompiler's PinnedCapRo
+        // direct map. No cache lookup needed: the content is already in mem.
+        let data_base = javm_cap::layout::DATA_BASE as u64;
+        for m in img.mappings.iter() {
+            if m.path().is_empty() || !img.mapping_is_pinned(m.start as u32) {
+                continue;
+            }
+            let off = (m.start.saturating_sub(data_base)) as usize;
+            let len = (m.size as usize).min(mem_image.len().saturating_sub(off));
+            if len > 0 {
+                overlay_into(
+                    &mut mem,
+                    m.start as u32,
+                    &mem_image[off..off + len],
+                    Access::ReadOnly,
+                )?;
+            }
         }
         // Category #3: guest PIC data loads of the program's own bytecode
         // page-in the touched code page(s) on first read (read-only), just
@@ -241,7 +243,7 @@ impl<K: KernelAssist> Vm<K> {
 
         // CacheDirectory image-side metadata on the entry for fast host-call
         // lookups (pinned check, yield routing).
-        let pinned_slots: Vec<SlotIdx> = img.pinned.iter().map(|e| e.slot).collect();
+        let pinned_slots: Vec<SlotKey> = img.pinned.iter().map(|e| e.slot.clone()).collect();
 
         let entry = InstanceEntry {
             instance_ref: inst_ref,
@@ -249,7 +251,7 @@ impl<K: KernelAssist> Vm<K> {
             image_hash: inst.image_hash,
             program,
             root_cnode,
-            yield_marker_slot: img.yield_marker_slot,
+            yield_marker_slot: img.yield_marker_slot.clone(),
             pinned_slots,
             regs: Regs::new(),       // placeholder; live regs are in `regs`
             mem: Mem::new(),         // placeholder
@@ -296,7 +298,7 @@ impl<K: KernelAssist> Vm<K> {
                 .stack
                 .running_instance_mut()
                 .ok_or(VmError::Invariant("call_resume: no instance after pop"))?;
-            inst.root_cnode.set(SlotIdx(0), Some(target))?;
+            inst.root_cnode.set(&SlotKey::from(0u8), Some(target))?;
         }
 
         // 3. Take the resumed Instance's saved regs/mem/gas out into
@@ -409,7 +411,7 @@ impl<K: KernelAssist> Vm<K> {
                     .running_instance_mut()
                     .ok_or(VmError::Invariant("no child to halt"))?
                     .root_cnode
-                    .take(SlotIdx(0))
+                    .take(&SlotKey::from(0u8))
                     .ok()
                     .flatten();
                 self.stack.pop();
@@ -421,7 +423,7 @@ impl<K: KernelAssist> Vm<K> {
                 regs = core::mem::replace(&mut parent.regs, Regs::new());
                 mem = core::mem::replace(&mut parent.mem, Mem::new());
                 if let Some(s0) = child_slot0 {
-                    parent.root_cnode.set(SlotIdx(0), Some(s0))?;
+                    parent.root_cnode.set(&SlotKey::from(0u8), Some(s0))?;
                 }
                 continue;
             }
@@ -455,12 +457,12 @@ impl<K: KernelAssist> Vm<K> {
             let marker_payload = if let Some(p) = oog_marker_payload {
                 Some(p)
             } else {
-                let marker_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+                let marker_slot = SlotKey::from((regs.gpr[7] & 0xFF) as u8);
                 let yielder = match &self.stack.entries()[pushed_pos] {
                     Entry::Instance(e) => e.as_ref(),
                     _ => return Err(VmError::Invariant("yielder is not an Instance")),
                 };
-                yielder.root_cnode.get(marker_slot)
+                yielder.root_cnode.get(&marker_slot)
             };
 
             // Save live state back into the yielder InstanceEntry.
@@ -496,7 +498,7 @@ impl<K: KernelAssist> Vm<K> {
         let (entry, slot0_target) = match popped {
             Entry::Instance(e) => {
                 let mut e = *e;
-                let slot0 = e.root_cnode.take(SlotIdx(0)).ok().flatten();
+                let slot0 = e.root_cnode.take(&SlotKey::from(0u8)).ok().flatten();
                 (e, slot0)
             }
             _ => return Err(VmError::Invariant("popped a non-Instance entry")),
@@ -560,11 +562,15 @@ impl<K: KernelAssist> Vm<K> {
         // Build the working cnode as a Cap<Global> and put it. We only
         // flatten the materialized entries; unmaterialized (`Missing`)
         // slots aren't valid mid-execution and shouldn't appear here.
+        // The radix keys are physical (`Hasher(k)`), so we copy them
+        // verbatim rather than re-deriving from a logical slot index.
         let cnode_hash = {
-            let mut cnode = javm_cap::CNodeCap::new(entry.root_cnode.size_log)?;
-            for (idx, mo) in entry.root_cnode.slots.iter() {
+            let mut cnode = javm_cap::CNodeCap::new();
+            for (key, mo) in entry.root_cnode.slots.iter() {
                 if let ssz::MissingOr::Materialized(t) = mo {
-                    cnode.set(SlotIdx(idx as u32), Some(t.clone()))?;
+                    cnode
+                        .slots
+                        .insert(*key, ssz::MissingOr::Materialized(t.clone()));
                 }
             }
             cache.put_cap(&Cap::CNode(cnode))?
@@ -582,33 +588,38 @@ impl<K: KernelAssist> Vm<K> {
             Cap::Image(i) => i.clone(),
             _ => return Err(VmError::ImageNotFound),
         };
-        let mut overlay_bufs: Vec<(u32, Vec<u8>)> = Vec::new();
+        // Settle the evolved memory into a fresh `DataCap` (= the View folded
+        // into a new immutable backing). Snapshot each mapping's live
+        // `[start, start+size)` into the extent-sized buffer at its offset above
+        // DATA_BASE. Pinned mappings are read-only, so they snapshot back
+        // unchanged (idempotent); initial mappings carry the guest's writes.
+        let data_base = javm_cap::layout::DATA_BASE as u64;
+        let mem_top = img
+            .mappings
+            .iter()
+            .map(|m| m.start + m.size)
+            .max()
+            .unwrap_or(data_base);
+        let extent = page_round_up_u64(mem_top.saturating_sub(data_base));
+        let mut buf = vec![0u8; extent as usize];
         for m in img.mappings.iter() {
-            // V1: snapshot the live mem [start, start + size) into an
-            // overlay buffer if the read succeeds.
-            let start = m.start as u32;
+            if m.path().is_empty() {
+                continue;
+            }
             let len = m.size as usize;
-            if let Ok(bytes) = entry.mem.read(start, len) {
-                overlay_bufs.push((start, bytes));
+            if let Ok(bytes) = entry.mem.read(m.start as u32, len) {
+                let off = (m.start - data_base) as usize;
+                let n = bytes.len().min(buf.len().saturating_sub(off));
+                buf[off..off + n].copy_from_slice(&bytes[..n]);
             }
         }
-        let overlays_borrowed: Vec<(u32, &[u8])> = overlay_bufs
-            .iter()
-            .map(|(s, b)| (*s, b.as_slice()))
-            .collect();
+        let mem_dc = javm_cap::DataCap::from_bytes_sized(&buf, extent);
 
-        let mem_size = if let Some(last) = img.mappings.last() {
-            (last.start + last.size) as u32
-        } else {
-            0
-        };
-
-        let hash = cache.put_cap(&Cap::instance_with_overlays(
+        let hash = cache.put_cap(&Cap::instance_with_mem(
             entry.image_hash_chain,
             entry.image_hash,
             cnode_hash,
-            &overlays_borrowed,
-            mem_size,
+            mem_dc,
             // Persist the 13 host-mapped slots; x3/x4 are invocation-local.
             entry.regs.gpr[..NUM_REGS]
                 .try_into()
@@ -643,14 +654,14 @@ impl<K: KernelAssist> Vm<K> {
                 Entry::Instance(ie) => ie.as_ref(),
                 Entry::Reference(_) => continue,
             };
-            let Some(catcher_slot) = ie.yield_marker_slot else {
+            let Some(catcher_slot) = ie.yield_marker_slot.clone() else {
                 continue;
             };
             // Catcher hash is the image_hash_chain at the catcher
             // slot. Per the legacy model we looked up Cap::Instance;
             // here we just key on the slot target's hash form
             // (CapHashOrRef::Hash) — that's the marker template hash.
-            let catcher_hash = match ie.root_cnode.get(catcher_slot) {
+            let catcher_hash = match ie.root_cnode.get(&catcher_slot) {
                 Some(CapHashOrRef::Hash(h)) => h,
                 _ => continue,
             };
@@ -720,8 +731,6 @@ mod tests {
             endpoints: BTreeMap::new(),
             // Code is mapped at the fixed CODE_BASE; no data mappings.
             memory_mappings: Vec::new(),
-            gas_slots: Vec::new(),
-            quota_slots: Vec::new(),
             pinned_slots: BTreeMap::new(),
             initial_slots: BTreeMap::new(),
             yield_marker_slot: None,
@@ -734,14 +743,13 @@ mod tests {
         let image_hash = cache
             .put_cap(&Cap::image_with_slots(&image, &[], &[]).unwrap())
             .unwrap();
-        let cnode_hash = cache.put_cap(&Cap::empty_cnode(8).unwrap()).unwrap();
+        let cnode_hash = cache.put_cap(&Cap::empty_cnode()).unwrap();
         cache
-            .put_cap(&Cap::instance_with_overlays(
+            .put_cap(&Cap::instance_with_mem(
                 [0xAA; 32],
                 image_hash,
                 cnode_hash,
-                &[],
-                0,
+                javm_cap::DataCap::empty(),
                 [0u64; NUM_REGS],
                 0,
                 0,
@@ -871,18 +879,17 @@ mod tests {
             .put_cap(&Cap::image_with_slots(&m_img, &[], &[]).unwrap())
             .unwrap();
         let m_cnode_hash = {
-            let mut cn = javm_cap::CNodeCap::new(8).unwrap();
-            cn.set(SlotIdx(9), Some(CapHashOrRef::Hash(s_inst_hash)))
+            let mut cn = javm_cap::CNodeCap::new();
+            cn.set(&SlotKey::from(9u8), Some(CapHashOrRef::Hash(s_inst_hash)))
                 .unwrap();
             cache.put_cap(&Cap::CNode(cn)).unwrap()
         };
         let m_inst_hash = cache
-            .put_cap(&Cap::instance_with_overlays(
+            .put_cap(&Cap::instance_with_mem(
                 [0xAA; 32],
                 m_image_hash,
                 m_cnode_hash,
-                &[],
-                0,
+                javm_cap::DataCap::empty(),
                 [0u64; NUM_REGS],
                 0,
                 0,

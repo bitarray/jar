@@ -26,7 +26,7 @@
 //! has one canonical form.
 
 use crate::hash::Hash;
-use crate::slot::SlotIdx;
+use crate::slot::SlotKey;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use ssz_derive::{Decode, Encode};
@@ -65,23 +65,16 @@ pub struct Image {
     /// appears in `pinned_slots`. Code is mapped separately at
     /// [`crate::layout::CODE_BASE`] and is not described here.
     pub memory_mappings: Vec<MemoryMapping>,
-    /// Cnode slots holding `Cap::Instance[Gas{meter_id}]`. Active
-    /// gas debit comes from the first slot's meter; the rest are
-    /// fallback reserves (chain-spec policy).
-    pub gas_slots: Vec<SlotIdx>,
-    /// Cnode slots holding `Cap::Instance[Quota{quota_id}]`.
-    /// Symmetric with `gas_slots`.
-    pub quota_slots: Vec<SlotIdx>,
     /// Pinned read-only caps (Cap::Data or Cap::Image) baked into
     /// the spec. The kernel rejects mutations to these slots.
-    pub pinned_slots: BTreeMap<SlotIdx, PinnedCap>,
+    pub pinned_slots: BTreeMap<SlotKey, PinnedCap>,
     /// Initial cnode state for non-pinned mutable slots. Only
     /// honored at standalone (root) Instance bootstrap — a
     /// parented Instance receives its cnode from the spawner.
-    pub initial_slots: BTreeMap<SlotIdx, InitialDataCap>,
+    pub initial_slots: BTreeMap<SlotKey, InitialDataCap>,
     /// Slot holding `Cap::Instance[YieldCatcher]`, if this Instance
     /// catches yields. None = no catcher.
-    pub yield_marker_slot: Option<SlotIdx>,
+    pub yield_marker_slot: Option<SlotKey>,
 }
 
 /// Endpoint definition: entry PC + register conventions.
@@ -155,45 +148,67 @@ impl Image {
             code: Vec::new(),
             endpoints: BTreeMap::new(),
             memory_mappings: Vec::new(),
-            gas_slots: Vec::new(),
-            quota_slots: Vec::new(),
             pinned_slots: BTreeMap::new(),
             initial_slots: BTreeMap::new(),
             yield_marker_slot: None,
         }
     }
 
-    /// Project this Image's data/slot mappings into the flat RW-memory
-    /// overlays for an Instance: returns `(mem_size, overlays)` where
-    /// `mem_size` is the highest mapped data VA and each overlay is a
-    /// `(start, bytes)` pair. Code is RO direct-mapped at `CODE_BASE` by
-    /// the runtime, so it contributes neither an overlay nor to
-    /// `mem_size`.
-    ///
-    /// This is the single source of truth for Instance memory layout:
-    /// the recompiler runtime and the interpreter conformance path MUST
-    /// agree on it, so both derive overlays here rather than re-deriving
-    /// it independently.
-    pub fn data_overlays(&self) -> (u32, Vec<(u32, Vec<u8>)>) {
-        let mut mem_size: u32 = 0;
-        let mut overlays: Vec<(u32, Vec<u8>)> = Vec::new();
+    /// The Instance data extent in bytes: `mem_top − DATA_BASE`, page-rounded
+    /// (the size of the RW memory `DataCap`). Code is RO direct-mapped at
+    /// `CODE_BASE`, so it contributes nothing here.
+    pub fn mem_extent(&self) -> u64 {
+        let mut mem_top: u32 = 0;
         for mapping in &self.memory_mappings {
-            let target = mapping.source.target();
             let end = (mapping.start + mapping.size) as u32;
-            if end > mem_size {
-                mem_size = end;
-            }
-            if let Some(PinnedCap::Data { content, .. }) = self.pinned_slots.get(&target) {
-                if !content.is_empty() {
-                    overlays.push((mapping.start as u32, content.clone()));
-                }
-            } else if let Some(init) = self.initial_slots.get(&target)
-                && !init.content.is_empty()
-            {
-                overlays.push((mapping.start as u32, init.content.clone()));
+            if end > mem_top {
+                mem_top = end;
             }
         }
-        (mem_size, overlays)
+        (mem_top as u64)
+            .saturating_sub(crate::layout::DATA_BASE as u64)
+            .next_multiple_of(crate::cap::data::PAGE_SIZE as u64)
+    }
+
+    /// Build the Instance's memory backing [`crate::DataCap`]: every mapping's source
+    /// content (pinned **and** initial) folded at the mapping's offset above
+    /// `DATA_BASE`. This is the same byte layout the legacy `data_overlays`
+    /// produced, collapsed into one dense `DataCap`.
+    ///
+    /// Pinned content is included here (not kept separate) so the cache-free
+    /// `nub-arch-local` engine can seed memory without resolving caps; both
+    /// engines still mark the pinned VAs read-only at seed time, and the
+    /// recompiler maps them as `PinnedCapRo` directly from these slabs, so the
+    /// pinned-RO gas tier is preserved.
+    ///
+    /// Single source of truth for Instance memory layout: both engines seed
+    /// from this backing, so they materialize byte-identical memory.
+    pub fn instance_mem_backing(&self) -> crate::cap::data::DataCap {
+        use crate::cap::data::{DataCap, PAGE_SIZE};
+        let size = self.mem_extent().max(PAGE_SIZE as u64);
+        let mut backing = DataCap::from_bytes_sized(&[], size);
+        let data_base = crate::layout::DATA_BASE as u64;
+        for mapping in &self.memory_mappings {
+            let Some(target) = mapping.source.target() else {
+                continue;
+            };
+            let content: &[u8] =
+                if let Some(PinnedCap::Data { content, .. }) = self.pinned_slots.get(target) {
+                    content
+                } else if let Some(init) = self.initial_slots.get(target) {
+                    &init.content
+                } else {
+                    continue;
+                };
+            if content.is_empty() {
+                continue;
+            }
+            let base_off = mapping.start.saturating_sub(data_base);
+            for (i, chunk) in content.chunks(PAGE_SIZE).enumerate() {
+                backing.put_page(base_off + (i * PAGE_SIZE) as u64, chunk);
+            }
+        }
+        backing
     }
 }
 

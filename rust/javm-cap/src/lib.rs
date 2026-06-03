@@ -22,7 +22,6 @@
 //! See `~/jar/website/content/spec/implementation/architecture.md` for
 //! the crate's role in the overall layering.
 
-#[macro_use]
 extern crate alloc;
 
 pub mod abi;
@@ -36,16 +35,17 @@ pub mod slot;
 
 pub use cache::{CacheDirectory, CacheError, CapHasRefError, CapHashOrRef, CapRef};
 pub use cap::cnode::CNodeCap;
-pub use cap::data::{DataCap, DataContent, PAGE_SIZE};
+pub use cap::data::{DataCap, DataGroup, DataGroups, GROUP_SIZE, PAGE_SIZE, PageResolution};
 pub use cap::image::{
     EndpointDef, ImageCap, ImageConvertError, ImageSlotEntry, MemoryMapping, image_cap,
 };
-pub use cap::instance::{InstanceCap, RwOverlay};
+pub use cap::instance::InstanceCap;
 pub use cap::page::{PageBytes, PageRef, PageSlot};
+pub use cap::view::{DataViewCap, ViewOverlay};
 pub use cap::{Cap, CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS, TypeCap};
 pub use error::{CapError, OpError};
-pub use hash::{Blake2b256, Hash};
+pub use hash::{Blake2b256, Hash, Hasher};
 pub use image::{
     Image, InitialDataCap, PinnedCap, chain_extend, chain_genesis, image_content_hash,
 };
-pub use slot::{SlotIdx, SlotPath};
+pub use slot::{MAX_SLOT_KEY_LEN, SlotKey, SlotPath};

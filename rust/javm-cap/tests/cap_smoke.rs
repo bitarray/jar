@@ -3,9 +3,9 @@
 //! the source tree free of `_tests.rs` sidecars.
 
 use javm_cap::{
-    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, DataContent, EndpointDef, ImageCap,
-    ImageSlotEntry, InstanceCap, MAX_SOURCE_DEPTH, MemoryMapping, NUM_REGS, PAGE_SIZE, PageBytes,
-    PageRef, PageSlot, RwOverlay, SlotIdx,
+    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, EndpointDef, ImageCap, ImageSlotEntry,
+    InstanceCap, MemoryMapping, NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotKey,
+    SlotPath,
 };
 use std::sync::Arc;
 
@@ -23,9 +23,8 @@ fn make_image_cap() -> ImageCap {
 #[test]
 fn cap_image_constructor() {
     let _img: Cap = Cap::Image(make_image_cap());
-    let cnode: CNodeCap = CNodeCap::new(8).unwrap();
-    assert_eq!(cnode.size_log, 8);
-    assert_eq!(cnode.capacity(), 256);
+    let cnode: CNodeCap = CNodeCap::new();
+    assert!(cnode.slots.is_empty());
 }
 
 #[test]
@@ -42,16 +41,12 @@ fn data_inline_constructor() {
     let cap = Cap::data_inline(b"hello");
     match cap {
         Cap::Data(d) => {
-            // DataCap content is page-padded to next 4 KiB boundary.
+            // DataCap is page-padded to the next 4 KiB boundary.
             assert_eq!(d.content_len(), PAGE_SIZE as u64);
-            match d.content {
-                DataContent::Inline(bytes) => {
-                    assert_eq!(bytes.len(), PAGE_SIZE);
-                    assert_eq!(&bytes[..5], b"hello");
-                    assert!(bytes[5..].iter().all(|b| *b == 0));
-                }
-                _ => panic!("expected Inline content"),
-            }
+            let mut out = vec![0u8; PAGE_SIZE];
+            d.copy_into(0, &mut out);
+            assert_eq!(&out[..5], b"hello");
+            assert!(out[5..].iter().all(|b| *b == 0));
         }
         _ => panic!("expected Cap::Data"),
     }
@@ -59,11 +54,9 @@ fn data_inline_constructor() {
 
 #[test]
 fn empty_cnode_constructor() {
-    let cap = Cap::empty_cnode(4).unwrap();
+    let cap = Cap::empty_cnode();
     match cap {
         Cap::CNode(c) => {
-            assert_eq!(c.size_log, 4);
-            assert_eq!(c.capacity(), 16);
             assert!(c.slots.is_empty());
         }
         _ => panic!("expected Cap::CNode"),
@@ -71,98 +64,77 @@ fn empty_cnode_constructor() {
 }
 
 #[test]
-fn empty_cnode_size_log_too_large_rejected() {
-    assert!(Cap::empty_cnode(17).is_err());
-    assert!(CNodeCap::new(17).is_err());
-}
+fn cnode_set_get_take_semantics() {
+    let mut cnode: CNodeCap = CNodeCap::new();
+    assert_eq!(cnode.get(&SlotKey::from(0u8)), None);
 
-#[test]
-fn cnode_set_takes_and_keeps_slots_sorted() {
-    let mut cnode: CNodeCap = CNodeCap::new(4).unwrap();
-    assert_eq!(cnode.get(SlotIdx(0)), None);
-
-    // Inserting out-of-order still leaves slots sorted.
+    // First insert reports no prior binding.
     let prior = cnode
-        .set(SlotIdx(7), Some(CapHashOrRef::Hash([0x77; 32])))
+        .set(&SlotKey::from(7u8), Some(CapHashOrRef::Hash([0x77; 32])))
         .unwrap();
     assert_eq!(prior, None);
     cnode
-        .set(SlotIdx(2), Some(CapHashOrRef::Hash([0x22; 32])))
+        .set(&SlotKey::from(2u8), Some(CapHashOrRef::Hash([0x22; 32])))
         .unwrap();
     cnode
-        .set(SlotIdx(11), Some(CapHashOrRef::Hash([0xBB; 32])))
+        .set(&SlotKey::from(11u8), Some(CapHashOrRef::Hash([0xBB; 32])))
         .unwrap();
+    assert_eq!(cnode.slots.len(), 3);
     assert_eq!(
-        cnode
-            .slots
-            .iter()
-            .map(|(idx, _)| idx as u32)
-            .collect::<Vec<u32>>(),
-        vec![2u32, 7, 11]
+        cnode.get(&SlotKey::from(2u8)),
+        Some(CapHashOrRef::Hash([0x22; 32]))
+    );
+    assert_eq!(
+        cnode.get(&SlotKey::from(11u8)),
+        Some(CapHashOrRef::Hash([0xBB; 32]))
     );
 
     // Overwrite returns prior target.
     let prior = cnode
-        .set(SlotIdx(7), Some(CapHashOrRef::Hash([0xFF; 32])))
+        .set(&SlotKey::from(7u8), Some(CapHashOrRef::Hash([0xFF; 32])))
         .unwrap();
     assert_eq!(prior, Some(CapHashOrRef::Hash([0x77; 32])));
-    assert_eq!(cnode.get(SlotIdx(7)), Some(CapHashOrRef::Hash([0xFF; 32])));
+    assert_eq!(
+        cnode.get(&SlotKey::from(7u8)),
+        Some(CapHashOrRef::Hash([0xFF; 32]))
+    );
 
     // Take removes and returns the prior target.
-    let taken = cnode.take(SlotIdx(2)).unwrap();
+    let taken = cnode.take(&SlotKey::from(2u8)).unwrap();
     assert_eq!(taken, Some(CapHashOrRef::Hash([0x22; 32])));
-    assert_eq!(cnode.get(SlotIdx(2)), None);
-    // Remaining slots stay sorted.
-    assert_eq!(
-        cnode
-            .slots
-            .iter()
-            .map(|(idx, _)| idx as u32)
-            .collect::<Vec<u32>>(),
-        vec![7u32, 11]
-    );
-
-    // Out-of-range slot rejected.
-    assert!(
-        cnode
-            .set(SlotIdx(16), Some(CapHashOrRef::Hash([0; 32])))
-            .is_err()
-    );
+    assert_eq!(cnode.get(&SlotKey::from(2u8)), None);
+    assert_eq!(cnode.slots.len(), 2);
 }
 
 #[test]
 fn cnode_lookup_after_set() {
-    let mut cnode: CNodeCap = CNodeCap::new(8).unwrap();
+    let mut cnode: CNodeCap = CNodeCap::new();
     cnode
-        .set(SlotIdx(7), Some(CapHashOrRef::Hash([0x11; 32])))
+        .set(&SlotKey::from(7u8), Some(CapHashOrRef::Hash([0x11; 32])))
         .unwrap();
     // Mint a real CapRef via the cache so the bookkeeping test
     // doesn't depend on the crate-internal `CapRef::new`.
     let cache = CacheDirectory::new();
-    let r = cache.put_instance(Cap::CNode(CNodeCap::new(0).unwrap()));
+    let r = cache.put_instance(Cap::CNode(CNodeCap::new()));
     cnode
-        .set(SlotIdx(42), Some(CapHashOrRef::Ref(r.clone())))
+        .set(&SlotKey::from(42u8), Some(CapHashOrRef::Ref(r.clone())))
         .unwrap();
 
-    assert_eq!(cnode.get(SlotIdx(7)), Some(CapHashOrRef::Hash([0x11; 32])));
-    assert_eq!(cnode.get(SlotIdx(42)), Some(CapHashOrRef::Ref(r)));
-    assert_eq!(cnode.get(SlotIdx(100)), None);
+    assert_eq!(
+        cnode.get(&SlotKey::from(7u8)),
+        Some(CapHashOrRef::Hash([0x11; 32]))
+    );
+    assert_eq!(cnode.get(&SlotKey::from(42u8)), Some(CapHashOrRef::Ref(r)));
+    assert_eq!(cnode.get(&SlotKey::from(100u8)), None);
 }
 
 #[test]
 fn data_inline_round_trip() {
-    let mut bytes: Vec<u8> = vec![0u8; PAGE_SIZE];
-    bytes[..5].copy_from_slice(b"hello");
-    let data: DataCap = DataCap {
-        content: DataContent::Inline(bytes),
-    };
-    match data.content {
-        DataContent::Inline(b) => {
-            assert_eq!(b.len(), PAGE_SIZE);
-            assert_eq!(&b[..5], b"hello");
-        }
-        _ => panic!("expected Inline"),
-    }
+    let data = DataCap::from_bytes_sized(b"hello", PAGE_SIZE as u64);
+    assert_eq!(data.content_len(), PAGE_SIZE as u64);
+    let mut out = vec![0u8; PAGE_SIZE];
+    data.copy_into(0, &mut out);
+    assert_eq!(&out[..5], b"hello");
 }
 
 #[test]
@@ -184,27 +156,28 @@ fn page_ref_shares_then_releases() {
 }
 
 #[test]
-fn instance_with_rw_overlay() {
-    let overlay_bytes: Vec<u8> = vec![0xDE, 0xAD];
-
-    let overlays = vec![RwOverlay {
-        start: 0x1000,
-        bytes: overlay_bytes,
-    }];
+fn instance_with_mem_image() {
+    // The Instance's RW memory is a dense DataCap; write 0xDEAD into the page
+    // at offset 0x1000 of a 64 KiB image.
+    let mut mem = DataCap::from_bytes_sized(&[], 0x10000);
+    let mut page = vec![0u8; PAGE_SIZE];
+    page[..2].copy_from_slice(&[0xDE, 0xAD]);
+    mem.put_page(0x1000, &page);
 
     let inst: InstanceCap = InstanceCap {
         image_hash_chain: [0xAA; 32],
         image_hash: [0xBB; 32],
         root_cnode: CapHashOrRef::Hash([0xCC; 32]),
-        rw_overlays: overlays,
-        mem_size: 0x10000,
+        mem,
         regs: [0u64; NUM_REGS],
         pc: 0,
         gas_remaining: 1_000_000,
     };
     assert_eq!(inst.image_hash, [0xBB; 32]);
-    assert_eq!(inst.rw_overlays[0].start, 0x1000);
-    assert_eq!(inst.rw_overlays[0].bytes.as_slice(), &[0xDE, 0xAD]);
+    assert_eq!(inst.mem_extent(), 0x10000);
+    let mut out = vec![0u8; PAGE_SIZE];
+    inst.mem.copy_into(0x1000, &mut out);
+    assert_eq!(&out[..2], &[0xDE, 0xAD]);
 }
 
 #[test]
@@ -218,25 +191,21 @@ fn endpoint_def_empty_sentinel() {
 
 #[test]
 fn memory_mapping_path_slice() {
-    let mut path = [SlotIdx(0); MAX_SOURCE_DEPTH];
-    path[0] = SlotIdx(3);
-    path[1] = SlotIdx(7);
     let m = MemoryMapping {
         start: 0x4000,
         size: 0x2000,
-        source_path: path,
-        source_path_len: 2,
+        source: SlotPath::new([SlotKey::from(3u8), SlotKey::from(7u8)]).unwrap(),
     };
-    assert_eq!(m.path(), &[SlotIdx(3), SlotIdx(7)]);
+    assert_eq!(m.path(), &[SlotKey::from(3u8), SlotKey::from(7u8)]);
 }
 
 #[test]
 fn image_slot_entry_compact() {
     let e = ImageSlotEntry {
-        slot: SlotIdx(5),
+        slot: SlotKey::from(5u8),
         cap_hash: [0xEE; 32],
     };
-    assert_eq!(e.slot, SlotIdx(5));
+    assert_eq!(e.slot, SlotKey::from(5u8));
     assert_eq!(e.cap_hash, [0xEE; 32]);
 }
 
@@ -245,7 +214,7 @@ fn capref_strong_count_tracks_holders() {
     let cache = CacheDirectory::new();
     // put_instance returns the caller's CapRef; the directory holds
     // its own clone as the entry's self-ref, so strong_count starts at 2.
-    let r = cache.put_instance(Cap::CNode(CNodeCap::new(0).unwrap()));
+    let r = cache.put_instance(Cap::CNode(CNodeCap::new()));
     assert_eq!(r.strong_count(), 2);
     let r2 = r.clone();
     assert_eq!(r.strong_count(), 3);
@@ -269,8 +238,8 @@ fn cache_round_trips_full_publish_chain() {
 
     // 2. Publish a CNode referencing the Data blob by hash.
     let cnode_h = {
-        let mut cn: CNodeCap = CNodeCap::new(4).unwrap();
-        cn.set(SlotIdx(0), Some(CapHashOrRef::Hash(data_h)))
+        let mut cn: CNodeCap = CNodeCap::new();
+        cn.set(&SlotKey::from(0u8), Some(CapHashOrRef::Hash(data_h)))
             .unwrap();
         cache.put_cap(&Cap::CNode(cn)).expect("put cnode")
     };
@@ -280,7 +249,7 @@ fn cache_round_trips_full_publish_chain() {
     //    pinned slot.
     let mut img = make_image_cap();
     img.pinned.push(ImageSlotEntry {
-        slot: SlotIdx(7),
+        slot: SlotKey::from(7u8),
         cap_hash: data_h,
     });
     let image_h = cache.put_cap(&Cap::Image(img)).expect("put image");
@@ -289,12 +258,11 @@ fn cache_round_trips_full_publish_chain() {
     // 4. Publish an Instance binding image + cnode.
     let regs = [0u64; NUM_REGS];
     let inst_h = cache
-        .put_cap(&Cap::instance_with_overlays(
+        .put_cap(&Cap::instance_with_mem(
             [0u8; 32],
             image_h,
             cnode_h,
-            &[],
-            4096,
+            DataCap::from_bytes_sized(&[], 4096),
             regs,
             0x1000,
             1_000_000,
@@ -320,7 +288,7 @@ fn cache_round_trips_full_publish_chain() {
 fn capref_sweep_reclaims_orphaned_instance() {
     let cache = CacheDirectory::new();
 
-    let r = cache.put_instance(Cap::CNode(CNodeCap::new(4).unwrap()));
+    let r = cache.put_instance(Cap::CNode(CNodeCap::new()));
     assert_eq!(cache.instance_count(), 1);
     // Two holders: caller's CapRef + directory's self-ref.
     assert_eq!(r.strong_count(), 2);
@@ -340,13 +308,13 @@ fn capref_sweep_cascades_through_cnode_ref_chain() {
     let cache = CacheDirectory::new();
 
     // Leaf instance with no nested Refs.
-    let leaf = cache.put_instance(Cap::CNode(CNodeCap::new(4).unwrap()));
+    let leaf = cache.put_instance(Cap::CNode(CNodeCap::new()));
 
     // Parent cnode holding the leaf via Ref. Cap::Clone bumps the
     // leaf's strong count when we clone the CNodeCap into the cap.
-    let mut parent_cn: CNodeCap = CNodeCap::new(4).unwrap();
+    let mut parent_cn: CNodeCap = CNodeCap::new();
     parent_cn
-        .set(SlotIdx(0), Some(CapHashOrRef::Ref(leaf.clone())))
+        .set(&SlotKey::from(0u8), Some(CapHashOrRef::Ref(leaf.clone())))
         .unwrap();
     let parent = cache.put_instance(Cap::CNode(parent_cn));
 

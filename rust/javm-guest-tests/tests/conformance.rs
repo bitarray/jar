@@ -88,11 +88,7 @@ mod recomp {
             }
         }
 
-        let (mem_size, overlays) = image.data_overlays();
-        let overlay_slices: Vec<(u32, &[u8])> = overlays
-            .iter()
-            .map(|(start, bytes)| (*start, bytes.as_slice()))
-            .collect();
+        let mem = image.instance_mem_backing();
 
         let mut nub = nub_hyperlight().lock().expect("nub mutex");
         // Publish the canonical Image + an empty root CNode + an
@@ -103,12 +99,9 @@ mod recomp {
         use javm_cap::Cap;
         // Publish a Cap::Data per pinned/initial slot and bind the Image to
         // them — matching production (the jar-kernel + bench `BuiltCaps`
-        // path) and the interpreter. Without populated slots, the recompiler's
-        // build_runtime can't resolve the pinned `.rodata` mappings, so it
-        // serves them as ephemeral RW `mem_buf` memory. That charges the same
-        // as a pinned read-only cap *only* when both are per-page; once
-        // read-only regions are materialized per 2 MiB cluster (vs ephemeral
-        // RW per-page), the simplified setup diverges from the interpreter.
+        // path) and the interpreter. The Instance's `mem` backing
+        // (`instance_mem_backing`) folds these same slot contents in, so both
+        // engines materialize byte-identical memory with matching gas tiers.
         let mut pinned_hashes = Vec::new();
         let mut initial_hashes = Vec::new();
         for (slot, pinned) in &image.pinned_slots {
@@ -120,35 +113,25 @@ mod recomp {
                 }
                 PinnedCap::Image { content_hash } => *content_hash,
             };
-            pinned_hashes.push((*slot, h));
+            pinned_hashes.push((slot.clone(), h));
         }
         for (slot, init) in &image.initial_slots {
             let cap = Cap::data_inline_with_size(&init.content, init.size);
             let h = nub
                 .put_cap(&cap)
                 .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap initial data: {e}"));
-            initial_hashes.push((*slot, h));
+            initial_hashes.push((slot.clone(), h));
         }
         let image_cap = Cap::image_with_slots(image, &pinned_hashes, &initial_hashes)
             .unwrap_or_else(|e| panic!("endpoint {ep}: image_with_slots: {e}"));
         let image_h = nub
             .put_cap(&image_cap)
             .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap image: {e}"));
-        let cnode_cap =
-            Cap::empty_cnode(0).unwrap_or_else(|e| panic!("endpoint {ep}: empty_cnode: {e}"));
+        let cnode_cap = Cap::empty_cnode();
         let cnode_h = nub
             .put_cap(&cnode_cap)
             .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap cnode: {e}"));
-        let instance_cap = Cap::instance_with_overlays(
-            [0u8; 32],
-            image_h,
-            cnode_h,
-            &overlay_slices,
-            mem_size,
-            regs,
-            0,
-            0,
-        );
+        let instance_cap = Cap::instance_with_mem([0u8; 32], image_h, cnode_h, mem, regs, 0, 0);
         let instance_hash = nub
             .put_cap(&instance_cap)
             .unwrap_or_else(|e| panic!("endpoint {ep}: put_cap instance: {e}"));
@@ -174,9 +157,9 @@ mod recomp {
         (result.return_value, gas_used)
     }
 
-    // Instance memory overlays come from `Image::data_overlays()`
-    // (javm-cap) — the single source of truth the kernel + bench paths
-    // share, so the conformance oracle can't silently diverge from them.
+    // Instance memory comes from `Image::instance_mem_backing()` (javm-cap)
+    // — the single source of truth the kernel + bench paths share, so the
+    // conformance oracle can't silently diverge from them.
 }
 
 fn conform(ep: u8, name: &str, host_fn: fn() -> u64) {

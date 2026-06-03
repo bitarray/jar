@@ -28,7 +28,7 @@
 //!   MGMT_MOVE        (op=2)   src→dst
 //!   MGMT_DROP        (op=3)   src
 //!   MGMT_CNODE_SWAP  (op=4)   a=φ[7], b=φ[8]
-//!   MGMT_CNODE_MINT  (op=5)   dst=φ[7], size_log=φ[8] (u8)
+//!   MGMT_CNODE_MINT  (op=5)   dst=φ[7]  (φ[8] vestigial, ignored)
 //! ```
 //!
 //! Host call operand encoding (Stage 3.8+):
@@ -45,9 +45,7 @@
 //! calls can read/write cap content without storing the cache borrow
 //! in the long-lived `Vm`.
 
-use javm_cap::{
-    Blake2b256, CacheDirectory, Cap, CapHashOrRef, DataCap, DataContent, Hash, SlotIdx, TypeCap,
-};
+use javm_cap::{Blake2b256, CacheDirectory, Cap, CapHashOrRef, DataCap, Hash, SlotKey, TypeCap};
 use javm_exec::{EcallHandler, EcallKind, EcallResult, ExitReason, Memory, Regs};
 
 use crate::callstack::Entry;
@@ -241,7 +239,7 @@ impl<K: KernelAssist> Vm<K> {
 
     /// `host_yield(marker_slot=φ[7])`.
     fn dispatch_host_yield(&mut self, regs: &mut Regs) -> Result<EcallResult, VmError> {
-        let marker_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let marker_slot = SlotKey::from((regs.gpr[7] & 0xFF) as u8);
 
         // 1. Read marker's hash from the running Instance's cnode.
         //    In the new model the slot stores a `CapHashOrRef`; we
@@ -252,12 +250,12 @@ impl<K: KernelAssist> Vm<K> {
                 .stack
                 .running_instance()
                 .ok_or(VmError::CallStackEmpty)?;
-            match running.root_cnode.get(marker_slot) {
+            match running.root_cnode.get(&marker_slot) {
                 Some(CapHashOrRef::Hash(h)) => h,
                 Some(CapHashOrRef::Ref(_)) => {
-                    return Err(VmError::SlotKindMismatch(marker_slot.get()));
+                    return Err(VmError::SlotKindMismatch(marker_slot.diag_id()));
                 }
-                None => return Err(VmError::SlotEmpty(marker_slot.get())),
+                None => return Err(VmError::SlotEmpty(marker_slot.diag_id())),
             }
         };
 
@@ -272,10 +270,10 @@ impl<K: KernelAssist> Vm<K> {
                 Entry::Instance(ie) => ie.as_ref(),
                 Entry::Reference(_) => continue,
             };
-            let Some(catcher_slot) = ie.yield_marker_slot else {
+            let Some(catcher_slot) = ie.yield_marker_slot.clone() else {
                 continue;
             };
-            let catcher_hash = match ie.root_cnode.get(catcher_slot) {
+            let catcher_hash = match ie.root_cnode.get(&catcher_slot) {
                 Some(CapHashOrRef::Hash(h)) => h,
                 _ => continue,
             };
@@ -304,7 +302,7 @@ impl<K: KernelAssist> Vm<K> {
     /// reachable from inside `Interpreter::run` in V1, set_image
     /// updates only the chain hash; bytecode swap is deferred.
     fn dispatch_set_image(&mut self, regs: &mut Regs) -> Result<(), VmError> {
-        let image_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let image_slot = SlotKey::from((regs.gpr[7] & 0xFF) as u8);
 
         // 1. Resolve the Cap::Image hash from the slot.
         let new_image_hash = {
@@ -312,12 +310,12 @@ impl<K: KernelAssist> Vm<K> {
                 .stack
                 .running_instance()
                 .ok_or(VmError::CallStackEmpty)?;
-            match running.root_cnode.get(image_slot) {
+            match running.root_cnode.get(&image_slot) {
                 Some(CapHashOrRef::Hash(h)) => h,
                 Some(CapHashOrRef::Ref(_)) => {
-                    return Err(VmError::SlotKindMismatch(image_slot.get()));
+                    return Err(VmError::SlotKindMismatch(image_slot.diag_id()));
                 }
-                None => return Err(VmError::SlotEmpty(image_slot.get())),
+                None => return Err(VmError::SlotEmpty(image_slot.diag_id())),
             }
         };
 
@@ -346,18 +344,18 @@ impl<K: KernelAssist> Vm<K> {
         regs: &mut Regs,
         cache: &CacheDirectory,
     ) -> Result<(), VmError> {
-        let image_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let image_slot = SlotKey::from((regs.gpr[7] & 0xFF) as u8);
         let (new_image_hash, extended_chain) = {
             let running = self
                 .stack
                 .running_instance()
                 .ok_or(VmError::CallStackEmpty)?;
-            let new_image_hash = match running.root_cnode.get(image_slot) {
+            let new_image_hash = match running.root_cnode.get(&image_slot) {
                 Some(CapHashOrRef::Hash(h)) => h,
                 Some(CapHashOrRef::Ref(_)) => {
-                    return Err(VmError::SlotKindMismatch(image_slot.get()));
+                    return Err(VmError::SlotKindMismatch(image_slot.diag_id()));
                 }
-                None => return Err(VmError::SlotEmpty(image_slot.get())),
+                None => return Err(VmError::SlotEmpty(image_slot.diag_id())),
             };
             (
                 new_image_hash,
@@ -378,7 +376,7 @@ impl<K: KernelAssist> Vm<K> {
         let program =
             self.image_cache
                 .get_or_decode(new_image_hash, code_bytes.to_vec(), code_base);
-        let pinned_slots: Vec<SlotIdx> = img.pinned.iter().map(|e| e.slot).collect();
+        let pinned_slots: Vec<SlotKey> = img.pinned.iter().map(|e| e.slot.clone()).collect();
 
         let running = self
             .stack
@@ -398,8 +396,8 @@ impl<K: KernelAssist> Vm<K> {
     /// real `Cap::Instance`, so this writes the chain-hash placeholder
     /// for back-compat with pre-Stage-4 fixtures.
     fn dispatch_derive_spawn(&mut self, regs: &mut Regs) -> Result<(), VmError> {
-        let image_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
-        let dst_slot = SlotIdx((regs.gpr[8] & 0xFF) as u32);
+        let image_slot = SlotKey::from((regs.gpr[7] & 0xFF) as u8);
+        let dst_slot = SlotKey::from((regs.gpr[8] & 0xFF) as u8);
 
         // 1. Read Image hash at image_slot.
         let new_image_hash = {
@@ -407,12 +405,12 @@ impl<K: KernelAssist> Vm<K> {
                 .stack
                 .running_instance()
                 .ok_or(VmError::CallStackEmpty)?;
-            match running.root_cnode.get(image_slot) {
+            match running.root_cnode.get(&image_slot) {
                 Some(CapHashOrRef::Hash(h)) => h,
                 Some(CapHashOrRef::Ref(_)) => {
-                    return Err(VmError::SlotKindMismatch(image_slot.get()));
+                    return Err(VmError::SlotKindMismatch(image_slot.diag_id()));
                 }
-                None => return Err(VmError::SlotEmpty(image_slot.get())),
+                None => return Err(VmError::SlotEmpty(image_slot.diag_id())),
             }
         };
 
@@ -431,11 +429,11 @@ impl<K: KernelAssist> Vm<K> {
             .running_instance_mut()
             .ok_or(VmError::CallStackEmpty)?;
         if running.pinned_slots.binary_search(&dst_slot).is_ok() {
-            return Err(javm_cap::OpError::SlotPinned(dst_slot.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(dst_slot.diag_id()).into());
         }
         running
             .root_cnode
-            .set(dst_slot, Some(CapHashOrRef::Hash(extended)))?;
+            .set(&dst_slot, Some(CapHashOrRef::Hash(extended)))?;
         Ok(())
     }
 
@@ -460,9 +458,9 @@ impl<K: KernelAssist> Vm<K> {
         regs: &mut Regs,
         cache: &mut CacheDirectory,
     ) -> Result<(), VmError> {
-        let image_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
-        let cnode_slot = SlotIdx((regs.gpr[8] & 0xFF) as u32);
-        let dst_slot = SlotIdx((regs.gpr[9] & 0xFF) as u32);
+        let image_slot = SlotKey::from((regs.gpr[7] & 0xFF) as u8);
+        let cnode_slot = SlotKey::from((regs.gpr[8] & 0xFF) as u8);
+        let dst_slot = SlotKey::from((regs.gpr[9] & 0xFF) as u8);
 
         // 1. Resolve image_hash, cnode_hash, parent chain.
         let (image_hash, cnode_hash, parent_chain) = {
@@ -470,19 +468,19 @@ impl<K: KernelAssist> Vm<K> {
                 .stack
                 .running_instance()
                 .ok_or(VmError::CallStackEmpty)?;
-            let img_h = match running.root_cnode.get(image_slot) {
+            let img_h = match running.root_cnode.get(&image_slot) {
                 Some(CapHashOrRef::Hash(h)) => h,
                 Some(CapHashOrRef::Ref(_)) => {
-                    return Err(VmError::SlotKindMismatch(image_slot.get()));
+                    return Err(VmError::SlotKindMismatch(image_slot.diag_id()));
                 }
-                None => return Err(VmError::SlotEmpty(image_slot.get())),
+                None => return Err(VmError::SlotEmpty(image_slot.diag_id())),
             };
-            let cn_h = match running.root_cnode.get(cnode_slot) {
+            let cn_h = match running.root_cnode.get(&cnode_slot) {
                 Some(CapHashOrRef::Hash(h)) => h,
                 Some(CapHashOrRef::Ref(_)) => {
-                    return Err(VmError::SlotKindMismatch(cnode_slot.get()));
+                    return Err(VmError::SlotKindMismatch(cnode_slot.diag_id()));
                 }
-                None => return Err(VmError::SlotEmpty(cnode_slot.get())),
+                None => return Err(VmError::SlotEmpty(cnode_slot.diag_id())),
             };
             (img_h, cn_h, running.image_hash_chain)
         };
@@ -516,11 +514,11 @@ impl<K: KernelAssist> Vm<K> {
             }
         };
         for e in img_cap.pinned.iter() {
-            child_cn.set(e.slot, Some(CapHashOrRef::Hash(e.cap_hash)))?;
+            child_cn.set(&e.slot, Some(CapHashOrRef::Hash(e.cap_hash)))?;
         }
         for e in img_cap.initial.iter() {
-            if child_cn.get(e.slot).is_none() {
-                child_cn.set(e.slot, Some(CapHashOrRef::Hash(e.cap_hash)))?;
+            if child_cn.get(&e.slot).is_none() {
+                child_cn.set(&e.slot, Some(CapHashOrRef::Hash(e.cap_hash)))?;
             }
         }
         let new_cnode_hash = cache.put_cap(&Cap::CNode(child_cn))?;
@@ -538,45 +536,45 @@ impl<K: KernelAssist> Vm<K> {
             Cap::CNode(c) => c.clone(),
             _ => return Err(VmError::Invariant("derive_spawn: cnode hash misroutes")),
         };
-        let mut overlay_bufs: Vec<(u32, Vec<u8>)> = Vec::new();
-        let mut mem_size: u32 = 0;
+        let data_base = javm_cap::layout::DATA_BASE as u64;
+        let mem_top = img_cap
+            .mappings
+            .iter()
+            .map(|m| m.start + m.size)
+            .max()
+            .unwrap_or(data_base);
+        let mut mem_dc = DataCap::from_bytes_sized(&[], mem_top.saturating_sub(data_base));
+        let extent = mem_dc.content_len();
+        let page = javm_cap::PAGE_SIZE as u64;
         for m in img_cap.mappings.iter() {
-            let end = (m.start + m.size) as u32;
-            if end > mem_size {
-                mem_size = end;
-            }
-            if m.source_path_len == 0 {
+            // Fold every mapping's source content (pinned and initial) into the
+            // backing; the engines mark pinned VAs read-only at seed time.
+            if m.path().is_empty() {
                 continue;
             }
-            // V1: only single-step source paths are exercised.
-            let src_slot = m.source_path[0];
-            let target = match new_cnode.get(src_slot) {
+            let src_slot = m.path()[0].clone();
+            let target = match new_cnode.get(&src_slot) {
                 Some(t) => t,
                 None => continue,
             };
-            let data_arc = cache.get(target);
-            let bytes_vec = match data_arc.as_deref() {
-                Some(Cap::Data(d)) => match &d.content {
-                    javm_cap::DataContent::Inline(v) => v.as_slice().to_vec(),
-                    javm_cap::DataContent::Paged { .. } => continue,
-                },
-                _ => continue,
-            };
-            if !bytes_vec.is_empty() {
-                overlay_bufs.push((m.start as u32, bytes_vec));
+            if let Some(Cap::Data(d)) = cache.get(target).as_deref() {
+                let mut content = vec![0u8; d.content_len() as usize];
+                d.copy_into(0, &mut content);
+                let base_off = m.start.saturating_sub(data_base);
+                for (i, chunk) in content.chunks(page as usize).enumerate() {
+                    let off = base_off + i as u64 * page;
+                    if off < extent {
+                        mem_dc.put_page(off, chunk);
+                    }
+                }
             }
         }
-        let overlay_slices: Vec<(u32, &[u8])> = overlay_bufs
-            .iter()
-            .map(|(s, b)| (*s, b.as_slice()))
-            .collect();
 
-        let inst_cap = Cap::instance_with_overlays(
+        let inst_cap = Cap::instance_with_mem(
             child_chain,
             image_hash,
             new_cnode_hash,
-            &overlay_slices,
-            mem_size,
+            mem_dc,
             [0u64; javm_cap::NUM_REGS],
             0,
             0,
@@ -590,12 +588,12 @@ impl<K: KernelAssist> Vm<K> {
             .running_instance_mut()
             .ok_or(VmError::CallStackEmpty)?;
         if running.pinned_slots.binary_search(&dst_slot).is_ok() {
-            return Err(javm_cap::OpError::SlotPinned(dst_slot.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(dst_slot.diag_id()).into());
         }
-        running.root_cnode.take(cnode_slot)?;
+        running.root_cnode.take(&cnode_slot)?;
         running
             .root_cnode
-            .set(dst_slot, Some(CapHashOrRef::Hash(new_instance_hash)))?;
+            .set(&dst_slot, Some(CapHashOrRef::Hash(new_instance_hash)))?;
         Ok(())
     }
 
@@ -605,19 +603,19 @@ impl<K: KernelAssist> Vm<K> {
     /// image_hash_chain identity in V1). Result 1 if same, 0
     /// otherwise, into φ[7].
     fn dispatch_host_same_type(&mut self, regs: &mut Regs) -> Result<(), VmError> {
-        let a = SlotIdx((regs.gpr[7] & 0xFF) as u32);
-        let b = SlotIdx((regs.gpr[8] & 0xFF) as u32);
+        let a = SlotKey::from((regs.gpr[7] & 0xFF) as u8);
+        let b = SlotKey::from((regs.gpr[8] & 0xFF) as u8);
         let running = self
             .stack
             .running_instance()
             .ok_or(VmError::CallStackEmpty)?;
-        let ha = match running.root_cnode.get(a) {
+        let ha = match running.root_cnode.get(&a) {
             Some(CapHashOrRef::Hash(h)) => h,
-            _ => return Err(VmError::SlotEmpty(a.get())),
+            _ => return Err(VmError::SlotEmpty(a.diag_id())),
         };
-        let hb = match running.root_cnode.get(b) {
+        let hb = match running.root_cnode.get(&b) {
             Some(CapHashOrRef::Hash(h)) => h,
-            _ => return Err(VmError::SlotEmpty(b.get())),
+            _ => return Err(VmError::SlotEmpty(b.diag_id())),
         };
         regs.gpr[7] = if ha == hb { 1 } else { 0 };
         Ok(())
@@ -628,15 +626,15 @@ impl<K: KernelAssist> Vm<K> {
         regs: &mut Regs,
         cache: &mut CacheDirectory,
     ) -> Result<(), VmError> {
-        let src = SlotIdx((regs.gpr[7] & 0xFF) as u32);
-        let dst = SlotIdx((regs.gpr[8] & 0xFF) as u32);
+        let src = SlotKey::from((regs.gpr[7] & 0xFF) as u8);
+        let dst = SlotKey::from((regs.gpr[8] & 0xFF) as u8);
         let target = self
             .stack
             .running_instance()
             .ok_or(VmError::CallStackEmpty)?
             .root_cnode
-            .get(src)
-            .ok_or(VmError::SlotEmpty(src.get()))?;
+            .get(&src)
+            .ok_or(VmError::SlotEmpty(src.diag_id()))?;
         let image_hash_chain = match &*cache.get(target).ok_or(VmError::InstanceNotFound)? {
             Cap::Instance(i) => i.image_hash_chain,
             _ => return Err(VmError::InstanceNotFound),
@@ -650,9 +648,9 @@ impl<K: KernelAssist> Vm<K> {
             .running_instance_mut()
             .ok_or(VmError::CallStackEmpty)?;
         if running.pinned_slots.binary_search(&dst).is_ok() {
-            return Err(javm_cap::OpError::SlotPinned(dst.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(dst.diag_id()).into());
         }
-        running.root_cnode.set(dst, Some(CapHashOrRef::Hash(h)))?;
+        running.root_cnode.set(&dst, Some(CapHashOrRef::Hash(h)))?;
         Ok(())
     }
 
@@ -662,7 +660,7 @@ impl<K: KernelAssist> Vm<K> {
         mem: &mut dyn Memory,
         cache: &CacheDirectory,
     ) -> Result<(), VmError> {
-        let src = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let src = SlotKey::from((regs.gpr[7] & 0xFF) as u8);
         let dst_offset = regs.gpr[8] as u32;
         let len = regs.gpr[9] as usize;
         let target = self
@@ -670,8 +668,8 @@ impl<K: KernelAssist> Vm<K> {
             .running_instance()
             .ok_or(VmError::CallStackEmpty)?
             .root_cnode
-            .get(src)
-            .ok_or(VmError::SlotEmpty(src.get()))?;
+            .get(&src)
+            .ok_or(VmError::SlotEmpty(src.diag_id()))?;
         let data_arc = cache
             .get(target)
             .ok_or(VmError::Invariant("data cap missing"))?;
@@ -695,7 +693,7 @@ impl<K: KernelAssist> Vm<K> {
         let src_offset = regs.gpr[7] as u32;
         let len = regs.gpr[8] as usize;
         let quota_id = regs.gpr[9];
-        let dst = SlotIdx((regs.gpr[10] & 0xFF) as u32);
+        let dst = SlotKey::from((regs.gpr[10] & 0xFF) as u8);
         let bytes = mem
             .read(src_offset, len)
             .map_err(|_| VmError::Invariant("host_mint_data_cap memory read failed"))?;
@@ -713,9 +711,7 @@ impl<K: KernelAssist> Vm<K> {
         }
         self.kernel_assist
             .storage_quota_set(quota_id, quota - debit);
-        let cap = Cap::Data(DataCap {
-            content: DataContent::Inline(inline),
-        });
+        let cap = Cap::Data(DataCap::from_bytes(&inline));
         let h = cap.cap_hash();
         cache.put_cap_with_hash(h, &cap)?;
 
@@ -724,9 +720,9 @@ impl<K: KernelAssist> Vm<K> {
             .running_instance_mut()
             .ok_or(VmError::CallStackEmpty)?;
         if running.pinned_slots.binary_search(&dst).is_ok() {
-            return Err(javm_cap::OpError::SlotPinned(dst.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(dst.diag_id()).into());
         }
-        running.root_cnode.set(dst, Some(CapHashOrRef::Hash(h)))?;
+        running.root_cnode.set(&dst, Some(CapHashOrRef::Hash(h)))?;
         Ok(())
     }
 
@@ -736,7 +732,7 @@ impl<K: KernelAssist> Vm<K> {
         cache: &mut CacheDirectory,
     ) -> Result<(), VmError> {
         let file_id = regs.gpr[7];
-        let dst = SlotIdx((regs.gpr[8] & 0xFF) as u32);
+        let dst = SlotKey::from((regs.gpr[8] & 0xFF) as u8);
         let data_ref = self
             .kernel_assist
             .host_open(file_id)
@@ -755,9 +751,9 @@ impl<K: KernelAssist> Vm<K> {
             .running_instance_mut()
             .ok_or(VmError::CallStackEmpty)?;
         if running.pinned_slots.binary_search(&dst).is_ok() {
-            return Err(javm_cap::OpError::SlotPinned(dst.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(dst.diag_id()).into());
         }
-        running.root_cnode.set(dst, Some(CapHashOrRef::Hash(h)))?;
+        running.root_cnode.set(&dst, Some(CapHashOrRef::Hash(h)))?;
         Ok(())
     }
 
@@ -766,15 +762,15 @@ impl<K: KernelAssist> Vm<K> {
         regs: &mut Regs,
         cache: &CacheDirectory,
     ) -> Result<(), VmError> {
-        let src = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let src = SlotKey::from((regs.gpr[7] & 0xFF) as u8);
         let quota_id = regs.gpr[8];
         let target = self
             .stack
             .running_instance()
             .ok_or(VmError::CallStackEmpty)?
             .root_cnode
-            .get(src)
-            .ok_or(VmError::SlotEmpty(src.get()))?;
+            .get(&src)
+            .ok_or(VmError::SlotEmpty(src.diag_id()))?;
         let size = match &*cache
             .get(target.clone())
             .ok_or(VmError::Invariant("host_save data missing"))?
@@ -810,7 +806,7 @@ impl<K: KernelAssist> Vm<K> {
         regs: &mut Regs,
         cache: &mut CacheDirectory,
     ) -> Result<(), VmError> {
-        let inst_slot = SlotIdx((regs.gpr[7] & 0xFF) as u32);
+        let inst_slot = SlotKey::from((regs.gpr[7] & 0xFF) as u8);
         let endpoint_idx = (regs.gpr[8] & 0xFF) as u8;
 
         // 1. Resolve target Cap::Instance from caller's cnode.
@@ -819,8 +815,8 @@ impl<K: KernelAssist> Vm<K> {
             .running_instance()
             .ok_or(VmError::CallStackEmpty)?
             .root_cnode
-            .get(inst_slot)
-            .ok_or(VmError::SlotEmpty(inst_slot.get()))?;
+            .get(&inst_slot)
+            .ok_or(VmError::SlotEmpty(inst_slot.diag_id()))?;
         let target_arc = cache.get(target_ref.clone());
         match target_arc.as_deref() {
             Some(Cap::Instance(_)) => {}
@@ -833,7 +829,7 @@ impl<K: KernelAssist> Vm<K> {
             .running_instance_mut()
             .ok_or(VmError::CallStackEmpty)?
             .root_cnode
-            .take(SlotIdx(0))?;
+            .take(&SlotKey::from(0u8))?;
 
         // 3. Build the child entry + its initial regs/mem. Gas budget
         //    is irrelevant — V1 shares the parent's live counter, so
@@ -843,7 +839,7 @@ impl<K: KernelAssist> Vm<K> {
 
         // 4. Plant slot[0] in the child's cnode.
         if let Some(cap) = scratch {
-            child.root_cnode.set(SlotIdx(0), Some(cap))?;
+            child.root_cnode.set(&SlotKey::from(0u8), Some(cap))?;
         }
 
         // 5. Stash child's initial regs/mem in the entry so the
@@ -863,26 +859,9 @@ impl<K: KernelAssist> Vm<K> {
 fn data_cap_prefix(data: &DataCap, len: usize) -> Vec<u8> {
     let actual_len = len.min(data.content_len() as usize);
     let mut out = vec![0u8; actual_len];
-    match &data.content {
-        DataContent::Inline(bytes) => {
-            let copy_len = actual_len.min(bytes.len());
-            out[..copy_len].copy_from_slice(&bytes[..copy_len]);
-        }
-        DataContent::Paged { page_size, pages } => {
-            let page_size = *page_size as usize;
-            for (page_idx, page) in pages.iter().enumerate() {
-                let start = page_idx * page_size;
-                if start >= actual_len {
-                    break;
-                }
-                let end = (start + page_size).min(actual_len);
-                if let javm_cap::cap::page::PageSlot::Loaded(page_ref) = page {
-                    let page_bytes = &page_ref.bytes;
-                    out[start..end].copy_from_slice(&page_bytes[..end - start]);
-                }
-            }
-        }
-    }
+    // The dense DataCap fully defines every logical byte: `copy_into`
+    // materializes present pages and zero-fills `Empty`/`Zero` pages.
+    data.copy_into(0, &mut out);
     out
 }
 
@@ -906,97 +885,96 @@ impl<K: KernelAssist> Vm<K> {
         regs: &mut Regs,
         cache: Option<&mut CacheDirectory>,
     ) -> Result<(), VmError> {
-        let a = SlotIdx((regs.gpr[7] & 0xFF) as u32);
-        let b = SlotIdx((regs.gpr[8] & 0xFF) as u32);
+        let a = SlotKey::from((regs.gpr[7] & 0xFF) as u8);
+        let b = SlotKey::from((regs.gpr[8] & 0xFF) as u8);
         match op {
             mgmt_op::COPY => self.mgmt_copy(a, b),
             mgmt_op::MOVE => self.mgmt_move(a, b),
             mgmt_op::DROP => self.mgmt_drop(a),
             mgmt_op::CNODE_SWAP => self.mgmt_cnode_swap(a, b),
-            mgmt_op::CNODE_MINT => {
-                let size_log = (regs.gpr[8] & 0xFF) as u8;
-                self.mgmt_cnode_mint(a, size_log, cache)
-            }
+            // φ[8] (formerly `size_log`) is vestigial: a CNode is an
+            // unbounded, quota-bounded hash-keyed map with no declared
+            // capacity. The arg is ignored for ABI compatibility.
+            mgmt_op::CNODE_MINT => self.mgmt_cnode_mint(a, cache),
             _ => Err(VmError::Invariant("unknown MGMT op")),
         }
     }
 
-    fn mgmt_copy(&mut self, a: SlotIdx, b: SlotIdx) -> Result<(), VmError> {
+    fn mgmt_copy(&mut self, a: SlotKey, b: SlotKey) -> Result<(), VmError> {
         let running = self
             .stack
             .running_instance_mut()
             .ok_or(VmError::CallStackEmpty)?;
         if running.pinned_slots.binary_search(&b).is_ok() {
-            return Err(javm_cap::OpError::SlotPinned(b.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(b.diag_id()).into());
         }
         let src = running
             .root_cnode
-            .get(a)
+            .get(&a)
             .ok_or(javm_cap::OpError::SourceEmpty)?;
-        running.root_cnode.set(b, Some(src))?;
+        running.root_cnode.set(&b, Some(src))?;
         Ok(())
     }
 
-    fn mgmt_move(&mut self, a: SlotIdx, b: SlotIdx) -> Result<(), VmError> {
+    fn mgmt_move(&mut self, a: SlotKey, b: SlotKey) -> Result<(), VmError> {
         let running = self
             .stack
             .running_instance_mut()
             .ok_or(VmError::CallStackEmpty)?;
         if running.pinned_slots.binary_search(&a).is_ok() {
-            return Err(javm_cap::OpError::SlotPinned(a.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(a.diag_id()).into());
         }
         if running.pinned_slots.binary_search(&b).is_ok() {
-            return Err(javm_cap::OpError::SlotPinned(b.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(b.diag_id()).into());
         }
         let src = running
             .root_cnode
-            .take(a)?
+            .take(&a)?
             .ok_or(javm_cap::OpError::SourceEmpty)?;
-        running.root_cnode.set(b, Some(src))?;
+        running.root_cnode.set(&b, Some(src))?;
         Ok(())
     }
 
-    fn mgmt_drop(&mut self, a: SlotIdx) -> Result<(), VmError> {
+    fn mgmt_drop(&mut self, a: SlotKey) -> Result<(), VmError> {
         let running = self
             .stack
             .running_instance_mut()
             .ok_or(VmError::CallStackEmpty)?;
         if running.pinned_slots.binary_search(&a).is_ok() {
-            return Err(javm_cap::OpError::SlotPinned(a.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(a.diag_id()).into());
         }
-        running.root_cnode.take(a)?;
+        running.root_cnode.take(&a)?;
         Ok(())
     }
 
-    fn mgmt_cnode_swap(&mut self, a: SlotIdx, b: SlotIdx) -> Result<(), VmError> {
+    fn mgmt_cnode_swap(&mut self, a: SlotKey, b: SlotKey) -> Result<(), VmError> {
         let running = self
             .stack
             .running_instance_mut()
             .ok_or(VmError::CallStackEmpty)?;
         if running.pinned_slots.binary_search(&a).is_ok() {
-            return Err(javm_cap::OpError::SlotPinned(a.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(a.diag_id()).into());
         }
         if running.pinned_slots.binary_search(&b).is_ok() {
-            return Err(javm_cap::OpError::SlotPinned(b.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(b.diag_id()).into());
         }
-        let av = running.root_cnode.take(a)?;
-        let bv = running.root_cnode.take(b)?;
+        let av = running.root_cnode.take(&a)?;
+        let bv = running.root_cnode.take(&b)?;
         if let Some(t) = bv {
-            running.root_cnode.set(a, Some(t))?;
+            running.root_cnode.set(&a, Some(t))?;
         }
         if let Some(t) = av {
-            running.root_cnode.set(b, Some(t))?;
+            running.root_cnode.set(&b, Some(t))?;
         }
         Ok(())
     }
 
     fn mgmt_cnode_mint(
         &mut self,
-        dst: SlotIdx,
-        size_log: u8,
+        dst: SlotKey,
         cache: Option<&mut CacheDirectory>,
     ) -> Result<(), VmError> {
-        let cap = Cap::CNode(javm_cap::CNodeCap::new(size_log)?);
+        let cap = Cap::CNode(javm_cap::CNodeCap::new());
         let cap_hash = cap.cap_hash();
         let h = match cache {
             Some(cache) => {
@@ -1010,9 +988,9 @@ impl<K: KernelAssist> Vm<K> {
             .running_instance_mut()
             .ok_or(VmError::CallStackEmpty)?;
         if running.pinned_slots.binary_search(&dst).is_ok() {
-            return Err(javm_cap::OpError::SlotPinned(dst.get()).into());
+            return Err(javm_cap::OpError::SlotPinned(dst.diag_id()).into());
         }
-        running.root_cnode.set(dst, Some(CapHashOrRef::Hash(h)))?;
+        running.root_cnode.set(&dst, Some(CapHashOrRef::Hash(h)))?;
         Ok(())
     }
 }
@@ -1038,10 +1016,10 @@ mod tests {
 
     fn fixture_vm() -> Vm<InProcessKernelAssist> {
         let mut vm = Vm::new(InProcessKernelAssist::new());
-        let mut cnode = CNodeCap::new(4).unwrap();
+        let mut cnode = CNodeCap::new();
         // Seed slot 2 with a Hash-form target (treated as an Image hash).
         cnode
-            .set(SlotIdx(2), Some(CapHashOrRef::Hash([0xAA; 32])))
+            .set(&SlotKey::from(2u8), Some(CapHashOrRef::Hash([0xAA; 32])))
             .unwrap();
         // Trivial PVM2 blob: single `trap` (custom-0 funct3=000).
         let prog = Arc::new(Program::new(vec![0x0B, 0x00, 0x00, 0x00], 0));
@@ -1087,8 +1065,8 @@ mod tests {
         let r = vm.handle(EcallKind::Ecalli(mgmt_op::COPY), &mut regs, &mut mem);
         assert!(matches!(r, EcallResult::Continue));
         let cnode = &vm.stack.running_instance().unwrap().root_cnode;
-        assert!(cnode.get(SlotIdx(2)).is_some());
-        assert!(cnode.get(SlotIdx(7)).is_some());
+        assert!(cnode.get(&SlotKey::from(2u8)).is_some());
+        assert!(cnode.get(&SlotKey::from(7u8)).is_some());
     }
 
     #[test]
@@ -1101,8 +1079,8 @@ mod tests {
         let r = vm.handle(EcallKind::Ecalli(mgmt_op::MOVE), &mut regs, &mut mem);
         assert!(matches!(r, EcallResult::Continue));
         let cnode = &vm.stack.running_instance().unwrap().root_cnode;
-        assert!(cnode.get(SlotIdx(2)).is_none()); // source moved out
-        assert!(cnode.get(SlotIdx(9)).is_some()); // dst now holds it
+        assert!(cnode.get(&SlotKey::from(2u8)).is_none()); // source moved out
+        assert!(cnode.get(&SlotKey::from(9u8)).is_some()); // dst now holds it
     }
 
     #[test]
@@ -1114,7 +1092,7 @@ mod tests {
         let r = vm.handle(EcallKind::Ecalli(mgmt_op::DROP), &mut regs, &mut mem);
         assert!(matches!(r, EcallResult::Continue));
         let cnode = &vm.stack.running_instance().unwrap().root_cnode;
-        assert!(cnode.get(SlotIdx(2)).is_none());
+        assert!(cnode.get(&SlotKey::from(2u8)).is_none());
     }
 
     #[test]
@@ -1127,7 +1105,10 @@ mod tests {
         let r = vm.handle(EcallKind::Ecalli(mgmt_op::CNODE_MINT), &mut regs, &mut mem);
         assert!(matches!(r, EcallResult::Continue));
         let cnode = &vm.stack.running_instance().unwrap().root_cnode;
-        assert!(matches!(cnode.get(SlotIdx(5)), Some(CapHashOrRef::Hash(_))));
+        assert!(matches!(
+            cnode.get(&SlotKey::from(5u8)),
+            Some(CapHashOrRef::Hash(_))
+        ));
     }
 
     #[test]
@@ -1147,7 +1128,7 @@ mod tests {
         );
         assert!(matches!(r, EcallResult::Continue));
         let cnode = &vm.stack.running_instance().unwrap().root_cnode;
-        let target = cnode.get(SlotIdx(5)).unwrap();
+        let target = cnode.get(&SlotKey::from(5u8)).unwrap();
         assert!(matches!(cache.get(target).as_deref(), Some(Cap::CNode(_))));
     }
 
@@ -1158,7 +1139,7 @@ mod tests {
             .running_instance_mut()
             .unwrap()
             .root_cnode
-            .set(SlotIdx(3), Some(CapHashOrRef::Hash([0xBB; 32])))
+            .set(&SlotKey::from(3u8), Some(CapHashOrRef::Hash([0xBB; 32])))
             .unwrap();
         let mut regs = Regs::new();
         regs.gpr[7] = 2;
@@ -1167,8 +1148,8 @@ mod tests {
         let r = vm.handle(EcallKind::Ecalli(mgmt_op::CNODE_SWAP), &mut regs, &mut mem);
         assert!(matches!(r, EcallResult::Continue));
         let cnode = &vm.stack.running_instance().unwrap().root_cnode;
-        let s2 = cnode.get(SlotIdx(2)).unwrap();
-        let s3 = cnode.get(SlotIdx(3)).unwrap();
+        let s2 = cnode.get(&SlotKey::from(2u8)).unwrap();
+        let s3 = cnode.get(&SlotKey::from(3u8)).unwrap();
         assert_eq!(s2, CapHashOrRef::Hash([0xBB; 32]));
         assert_eq!(s3, CapHashOrRef::Hash([0xAA; 32]));
     }
@@ -1205,7 +1186,7 @@ mod tests {
                 .running_instance()
                 .unwrap()
                 .root_cnode
-                .get(SlotIdx(2))
+                .get(&SlotKey::from(2u8))
                 .is_none()
         );
     }
@@ -1245,7 +1226,7 @@ mod tests {
             .running_instance_mut()
             .unwrap()
             .root_cnode
-            .set(SlotIdx(3), Some(CapHashOrRef::Hash(image_hash)))
+            .set(&SlotKey::from(3u8), Some(CapHashOrRef::Hash(image_hash)))
             .unwrap();
 
         let mut regs = Regs::new();
@@ -1277,7 +1258,7 @@ mod tests {
         );
         assert!(matches!(r, EcallResult::Continue));
         let cnode = &vm.stack.running_instance().unwrap().root_cnode;
-        let child = cnode.get(SlotIdx(5)).unwrap();
+        let child = cnode.get(&SlotKey::from(5u8)).unwrap();
         match child {
             CapHashOrRef::Hash(h) => assert_ne!(h, parent_chain),
             _ => panic!("expected Hash form at dst"),
@@ -1291,13 +1272,13 @@ mod tests {
             .running_instance_mut()
             .unwrap()
             .root_cnode
-            .set(SlotIdx(3), Some(CapHashOrRef::Hash([0xAA; 32])))
+            .set(&SlotKey::from(3u8), Some(CapHashOrRef::Hash([0xAA; 32])))
             .unwrap();
         vm.stack
             .running_instance_mut()
             .unwrap()
             .root_cnode
-            .set(SlotIdx(4), Some(CapHashOrRef::Hash([0x99; 32])))
+            .set(&SlotKey::from(4u8), Some(CapHashOrRef::Hash([0x99; 32])))
             .unwrap();
         // slot 2 already has [0xAA;32].
         let mut regs = Regs::new();
@@ -1332,14 +1313,13 @@ mod tests {
         let image_hash = cache
             .put_cap(&Cap::image_with_slots(&Image::empty(), &[], &[]).unwrap())
             .unwrap();
-        let cnode_hash = cache.put_cap(&Cap::empty_cnode(0).unwrap()).unwrap();
+        let cnode_hash = cache.put_cap(&Cap::empty_cnode()).unwrap();
         let inst_hash = cache
-            .put_cap(&Cap::instance_with_overlays(
+            .put_cap(&Cap::instance_with_mem(
                 [0x42; 32],
                 image_hash,
                 cnode_hash,
-                &[],
-                0,
+                javm_cap::DataCap::empty(),
                 [0u64; NUM_REGS],
                 0,
                 0,
@@ -1349,7 +1329,7 @@ mod tests {
             .running_instance_mut()
             .unwrap()
             .root_cnode
-            .set(SlotIdx(3), Some(CapHashOrRef::Hash(inst_hash)))
+            .set(&SlotKey::from(3u8), Some(CapHashOrRef::Hash(inst_hash)))
             .unwrap();
 
         let mut regs = Regs::new();
@@ -1369,7 +1349,7 @@ mod tests {
             .running_instance()
             .unwrap()
             .root_cnode
-            .get(SlotIdx(6))
+            .get(&SlotKey::from(6u8))
             .unwrap();
         assert!(matches!(
             cache.get(target).as_deref(),
@@ -1393,7 +1373,7 @@ mod tests {
             .running_instance_mut()
             .unwrap()
             .root_cnode
-            .set(SlotIdx(3), Some(CapHashOrRef::Hash(data_hash)))
+            .set(&SlotKey::from(3u8), Some(CapHashOrRef::Hash(data_hash)))
             .unwrap();
         let mut mem = Mem::new();
         mem.map_region(0, PAGE_SIZE as u64, Access::ReadWrite, None)
@@ -1450,7 +1430,7 @@ mod tests {
             .running_instance()
             .unwrap()
             .root_cnode
-            .get(SlotIdx(6))
+            .get(&SlotKey::from(6u8))
             .unwrap();
         let target_arc = cache.get(target).unwrap();
         match &*target_arc {
@@ -1482,7 +1462,7 @@ mod tests {
             .running_instance()
             .unwrap()
             .root_cnode
-            .get(SlotIdx(6))
+            .get(&SlotKey::from(6u8))
             .unwrap();
         assert!(matches!(cache.get(target).as_deref(), Some(Cap::Data(_))));
     }
@@ -1500,7 +1480,7 @@ mod tests {
             .running_instance_mut()
             .unwrap()
             .root_cnode
-            .set(SlotIdx(3), Some(CapHashOrRef::Hash(data_hash)))
+            .set(&SlotKey::from(3u8), Some(CapHashOrRef::Hash(data_hash)))
             .unwrap();
         let mut regs = Regs::new();
         regs.gpr[7] = 3;
@@ -1568,7 +1548,7 @@ mod tests {
             .unwrap();
 
         // Publish an empty prepared cnode.
-        let prep_cnode_hash = cache.put_cap(&Cap::empty_cnode(4).unwrap()).unwrap();
+        let prep_cnode_hash = cache.put_cap(&Cap::empty_cnode()).unwrap();
 
         // Put both into the running instance's cnode at known slots.
         let parent_chain = [0xC1; 32];
@@ -1577,11 +1557,14 @@ mod tests {
             running.image_hash_chain = parent_chain;
             running
                 .root_cnode
-                .set(SlotIdx(3), Some(CapHashOrRef::Hash(image_hash)))
+                .set(&SlotKey::from(3u8), Some(CapHashOrRef::Hash(image_hash)))
                 .unwrap();
             running
                 .root_cnode
-                .set(SlotIdx(4), Some(CapHashOrRef::Hash(prep_cnode_hash)))
+                .set(
+                    &SlotKey::from(4u8),
+                    Some(CapHashOrRef::Hash(prep_cnode_hash)),
+                )
                 .unwrap();
         }
 
@@ -1607,7 +1590,7 @@ mod tests {
             .running_instance()
             .unwrap()
             .root_cnode
-            .get(SlotIdx(7))
+            .get(&SlotKey::from(7u8))
             .expect("dst slot populated");
         let new_instance_hash = match new_target {
             CapHashOrRef::Hash(h) => h,
@@ -1631,7 +1614,7 @@ mod tests {
                 .running_instance()
                 .unwrap()
                 .root_cnode
-                .get(SlotIdx(4))
+                .get(&SlotKey::from(4u8))
                 .is_none()
         );
 
@@ -1654,14 +1637,13 @@ mod tests {
         let image_hash = cache
             .put_cap(&Cap::image_with_slots(&child_img, &[], &[]).unwrap())
             .unwrap();
-        let cnode_hash = cache.put_cap(&Cap::empty_cnode(4).unwrap()).unwrap();
+        let cnode_hash = cache.put_cap(&Cap::empty_cnode()).unwrap();
         let child_instance_hash = cache
-            .put_cap(&Cap::instance_with_overlays(
+            .put_cap(&Cap::instance_with_mem(
                 [0xCC; 32],
                 image_hash,
                 cnode_hash,
-                &[],
-                0,
+                javm_cap::DataCap::empty(),
                 [0u64; javm_cap::NUM_REGS],
                 0,
                 0,
@@ -1675,11 +1657,14 @@ mod tests {
             let running = vm.stack.running_instance_mut().unwrap();
             running
                 .root_cnode
-                .set(SlotIdx(9), Some(CapHashOrRef::Hash(child_instance_hash)))
+                .set(
+                    &SlotKey::from(9u8),
+                    Some(CapHashOrRef::Hash(child_instance_hash)),
+                )
                 .unwrap();
             running
                 .root_cnode
-                .set(SlotIdx(0), Some(CapHashOrRef::Hash(marker_hash)))
+                .set(&SlotKey::from(0u8), Some(CapHashOrRef::Hash(marker_hash)))
                 .unwrap();
         }
 
@@ -1707,7 +1692,7 @@ mod tests {
         assert_eq!(child.image_hash, image_hash);
         // The scratchpad moved into child's slot[0].
         assert_eq!(
-            child.root_cnode.get(SlotIdx(0)),
+            child.root_cnode.get(&SlotKey::from(0u8)),
             Some(CapHashOrRef::Hash(marker_hash))
         );
         // Parent's slot[0] was emptied (MOVE).
@@ -1715,6 +1700,6 @@ mod tests {
             Entry::Instance(e) => e.as_ref(),
             _ => panic!("entry 0 not Instance"),
         };
-        assert!(parent.root_cnode.get(SlotIdx(0)).is_none());
+        assert!(parent.root_cnode.get(&SlotKey::from(0u8)).is_none());
     }
 }

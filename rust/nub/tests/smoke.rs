@@ -35,14 +35,13 @@ fn publish_and_invoke(nub: &mut Nub) -> nub::InvocationResult {
     let img = ecalli_42_image();
     let image_cap = Cap::image_with_slots(&img, &[], &[]).expect("image_with_slots");
     let image_h = nub.put_cap(&image_cap).expect("put_cap image");
-    let cnode_cap = Cap::empty_cnode(0).expect("empty_cnode");
+    let cnode_cap = Cap::empty_cnode();
     let cnode_h = nub.put_cap(&cnode_cap).expect("put_cap cnode");
-    let instance_cap = Cap::instance_with_overlays(
+    let instance_cap = Cap::instance_with_mem(
         [0u8; 32],
         image_h,
         cnode_h,
-        &[],
-        4096,
+        javm_cap::DataCap::from_bytes_sized(&[], 4096),
         [0u64; NUM_REGS],
         0,
         0,
