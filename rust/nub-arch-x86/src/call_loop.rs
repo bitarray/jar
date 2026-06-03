@@ -109,6 +109,10 @@ const EXIT_HALT: u32 = 0;
 const EXIT_OOG: u32 = 2;
 const EXIT_HOST_CALL: u32 = 4;
 const EXIT_ECALL: u32 = 6;
+/// Guest trap (deliberate or host-rejected op). Matches the interpreter's
+/// `ExitReason::Trap` and the JIT codegen's `EXIT_TRAP` ABI value, so a
+/// host-side rejection (e.g. a pinned-slot write) surfaces identically.
+const EXIT_TRAP: u32 = 7;
 
 const OP_REPLY: u32 = 0;
 const OP_DERIVE_SPAWN: u32 = 18;
@@ -178,6 +182,13 @@ pub struct KernelFrame {
     /// (ring 0 after the JIT context switch), so the kernel-heap `RadixMap`
     /// is live; the JIT-compiled guest code never touches this directly.
     cnode: CNodeCap,
+    /// Slot keys this frame's image declares pinned (read-only), sorted —
+    /// the recompiler's mirror of the interpreter's
+    /// `InstanceEntry.pinned_slots`. A write to one of these (e.g. a
+    /// `derive_spawn` dst) must trap, matching the interpreter's
+    /// `OpError::SlotPinned`. Sorted (image pinned slots are emitted sorted),
+    /// so membership is a `binary_search`.
+    pinned: Vec<SlotKey>,
     /// CoW-allocated fresh pages, populated by `jit_pf_handler` on
     /// the first write to each page of a copy-on-write `MatRange`. Per
     /// the data-flow principle (see module doc), these are frame-local
@@ -337,8 +348,19 @@ pub fn run_top(
                         // the next iter with the child's φ[7] reflected.
                     }
                     OP_DERIVE_SPAWN => {
-                        let frame = stack.last_mut().expect("non-empty");
-                        dispatch_derive_spawn(frame)?;
+                        let trapped = {
+                            let frame = stack.last_mut().expect("non-empty");
+                            dispatch_derive_spawn(frame)?
+                        };
+                        if trapped {
+                            // Pinned dst → guest trap, mirroring the interpreter.
+                            break LoopOutcome {
+                                exit_reason: EXIT_TRAP,
+                                exit_arg: 0,
+                                return_value: info.regs[7],
+                                gas_remaining: gas,
+                            };
+                        }
                     }
                     OP_HOST_CALL => {
                         if stack.len() >= MAX_DEPTH {
@@ -591,11 +613,21 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
 /// [`CACHE`]'s instances tier via
 /// [`crate::state_cache::publish_transient_instance`], and writes
 /// the resulting `CapRef` into the parent's `dst_slot`.
-fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<(), u32> {
+/// Returns `Ok(true)` if the spawn must trap the guest (the `dst_slot` is
+/// pinned — a write to a read-only slot), matching the interpreter's
+/// `OpError::SlotPinned → ExitReason::Trap`. `Ok(false)` on a normal spawn.
+fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
     // V1 single-byte ABI: each slot is the 1-byte key `gpr & 0xFF`.
     let image_slot = SlotKey::from((frame.regs[7] & 0xFF) as u8);
     let _cnode_slot = (frame.regs[8] & 0xFF) as u8;
     let dst_slot = SlotKey::from((frame.regs[9] & 0xFF) as u8);
+
+    // Reject a write to a pinned (read-only) slot — the interpreter rejects
+    // this and traps (javm/src/ecall.rs); the recompiler must agree or the
+    // engines fork on `derive_spawn(dst=<pinned>)`.
+    if frame.pinned.binary_search(&dst_slot).is_ok() {
+        return Ok(true);
+    }
 
     let image_hash = match frame.cnode.get(&image_slot) {
         Some(CapHashOrRef::Hash(h)) => h,
@@ -619,7 +651,7 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<(), u32> {
         .cnode
         .set(&dst_slot, Some(CapHashOrRef::Ref(child_ref)))
         .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
-    Ok(())
+    Ok(false)
 }
 
 /// `host_call(instance_slot=φ[7], endpoint_idx=φ[8])`. Reads the
@@ -779,6 +811,9 @@ fn build_frame_inner(
                 .map_err(|_| ERR_JIT_FAILED)?;
         }
     }
+    // Pinned-slot set for write rejection (sorted: `img.pinned` is emitted
+    // sorted by `image_cap`). Mirrors `javm` `build_entry`.
+    let pinned: Vec<SlotKey> = img.pinned.iter().map(|e| e.slot.clone()).collect();
 
     // The cap-backed mappings (their PAs + pinned/initial kind) are
     // resolved in `build_runtime` when the per-frame runtime is built;
@@ -790,6 +825,7 @@ fn build_frame_inner(
         regs,
         pc,
         cnode,
+        pinned,
         dirty_pages: Vec::new(),
         runtime: None,
     })
