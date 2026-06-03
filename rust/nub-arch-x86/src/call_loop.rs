@@ -366,10 +366,24 @@ pub fn run_top(
                         if stack.len() >= MAX_DEPTH {
                             return Err(ERR_DEPTH_LIMIT);
                         }
-                        let child = {
+                        let mut child = {
                             let parent = stack.last().expect("non-empty");
                             dispatch_host_call(parent)?
                         };
+                        // Scratchpad: MOVE the caller's slot[0] into the
+                        // callee. `take_key` empties the parent (one owner);
+                        // the callee's image-default slot[0], if any, is
+                        // overwritten by the caller-provided scratchpad.
+                        {
+                            let parent = stack.last_mut().expect("non-empty");
+                            if let Some(cap) =
+                                parent.cnode.take_key(&[javm_cap::abi::SCRATCHPAD_SLOT])
+                            {
+                                child
+                                    .cnode
+                                    .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
+                            }
+                        }
                         // Bound the resident-runtime set to the top
                         // RUNTIME_CACHE_CAP frames. After the new child
                         // is pushed, the frame at depth (len -
@@ -596,12 +610,23 @@ fn mem_page_pa(mem: &javm_cap::DataCap, i: usize, zero_pa: u64) -> Result<u64, u
 /// (after `run_top` returns) reclaims any orphaned `cache.instances`
 /// slots.
 fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
-    let _popped = stack.pop().expect("non-empty");
+    let mut popped = stack.pop().expect("non-empty");
     if stack.is_empty() {
+        // Top-level HALT: the scratchpad stays on the popped frame; the host
+        // return path (Part 6) surfaces slot[0] as the invocation result. Here
+        // the frame is dropped at scope end.
         return true;
     }
+    // Reflect the callee's scratchpad (slot[0]) back to the caller — the now-
+    // running frame becomes the owner again.
+    let scratch = popped.cnode.take_key(&[javm_cap::abi::SCRATCHPAD_SLOT]);
     let parent = stack.last_mut().unwrap();
     parent.regs[7] = return_value;
+    if let Some(cap) = scratch {
+        parent
+            .cnode
+            .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
+    }
     false
 }
 
@@ -691,7 +716,17 @@ fn dispatch_host_call(parent: &KernelFrame) -> Result<KernelFrame, u32> {
     // each logical slot maps to one physical key — and needs no logical-key
     // reverse map. For Ref(CapRef) slots the clone bumps the inner Arc so the
     // child's cnode keeps the instance alive while it runs.
+    //
+    // The scratchpad slot (slot[0]) is EXCLUDED here: it is not inherited by
+    // copy but *moved* by the caller (so the running Instance is the unique
+    // owner — see the data-flow principle). Copying it too would create two
+    // owners; the explicit move in the `OP_HOST_CALL` arm takes it from the
+    // parent and plants it here.
+    let scratch_phys = CNodeCap::key_of(&[javm_cap::abi::SCRATCHPAD_SLOT]);
     for (phys_key, val) in parent.cnode.slots.iter() {
+        if *phys_key == scratch_phys {
+            continue;
+        }
         if child.cnode.slots.get(phys_key).is_none() {
             child.cnode.slots.insert(*phys_key, val.clone());
         }
