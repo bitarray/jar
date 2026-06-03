@@ -139,6 +139,20 @@ impl InvokePacket {
     }
 }
 
+/// Bytes of the running Instance's scratchpad (slot[0]) region surfaced at the
+/// top-level HALT — a fixed-size **head** of the returned DataCap's effective
+/// content. The guest writes its result into the scratchpad-mapped memory
+/// region during the run (CoW into the cap); at top HALT the engine reads the
+/// region's effective bytes back out here, so the host observes the full,
+/// uncompressed result without a separate data-flow event.
+///
+/// V1 surfaces a fixed-size window (enough for the fuzz differential's 13-slot
+/// register signature: 13 × 8 = 104 ≤ 128). The full variable-length DataCap
+/// return is deferred to the YieldMarker/YieldCatcher kernel design — see
+/// `kernel-assisted-instances.md`. Zero-filled when the Instance maps no
+/// scratchpad region (every non-fuzz path today).
+pub const SCRATCHPAD_HEAD_LEN: usize = 128;
+
 /// Invocation result. Both backends produce this shape on completion;
 /// rkyv-archived on the wire from the cached path's response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize)]
@@ -148,4 +162,8 @@ pub struct InvocationResult {
     pub exit_arg: u32,
     pub return_value: u64,
     pub gas_remaining: u64,
+    /// Effective bytes of the running Instance's scratchpad (slot[0]) region
+    /// head at top HALT (see [`SCRATCHPAD_HEAD_LEN`]). Zero when no scratchpad
+    /// region is mapped.
+    pub scratchpad_head: [u8; SCRATCHPAD_HEAD_LEN],
 }

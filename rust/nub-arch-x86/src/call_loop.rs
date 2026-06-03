@@ -99,6 +99,7 @@ use javm_cap::cap::Cap;
 use javm_cap::hash::{Blake2b256, Hash};
 use javm_cap::slot::Key;
 use javm_cap::{CNodeCap, CapHash, NUM_REGS};
+use nub_arch_x86_abi::SCRATCHPAD_HEAD_LEN;
 
 use crate::jit_run::{self, ExitInfo, FrameRuntime};
 use crate::page_alloc::PageBuf;
@@ -258,6 +259,50 @@ pub struct LoopOutcome {
     pub exit_arg: u32,
     pub return_value: u64,
     pub gas_remaining: i64,
+    /// Effective bytes of the running Instance's scratchpad (slot[0]) region
+    /// head at top HALT (see [`SCRATCHPAD_HEAD_LEN`]). Read from the top frame's
+    /// CoW dirty pages overlaid on the Instance's `mem` backing; zero on a
+    /// non-clean exit. The host surfaces this as the uncompressed run result.
+    pub scratchpad_head: [u8; SCRATCHPAD_HEAD_LEN],
+}
+
+/// Read the running Instance's scratchpad (slot[0]) region head — the effective
+/// bytes of `[DATA_BASE, DATA_BASE + SCRATCHPAD_HEAD_LEN)`, the V1 scratchpad
+/// convention (the scratchpad DataCap maps at the data extent's base). Overlays
+/// the frame's CoW dirty pages on the Instance's immutable `mem` backing: a
+/// guest write to the region CoW'd a fresh page (recorded in `dirty_pages`), so
+/// the dirty page holds the post-run bytes; an unwritten region reads the
+/// backing (Empty → zero). The region fits in one page, so a single page lookup
+/// suffices.
+fn read_scratchpad_head(frame: &KernelFrame) -> [u8; SCRATCHPAD_HEAD_LEN] {
+    let mut out = [0u8; SCRATCHPAD_HEAD_LEN];
+    let page_va = javm_cap::layout::DATA_BASE; // page-aligned base of the data extent
+    // CoW dirty page for the region's page, if the guest wrote it (latest wins).
+    if let Some(dp) = frame
+        .dirty_pages
+        .iter()
+        .rev()
+        .find(|d| d.guest_va == page_va)
+    {
+        // SAFETY: `dp.page` is a live PAGE_SIZE buffer; HEAD ≤ PAGE_SIZE, so the
+        // copy stays in bounds.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                dp.page.kva() as *const u8,
+                out.as_mut_ptr(),
+                SCRATCHPAD_HEAD_LEN,
+            );
+        }
+        return out;
+    }
+    // Unwritten: fall back to the Instance's `mem` backing (Empty → zero).
+    if let Some(arc) = CACHE.get(frame.instance.clone()).as_deref()
+        && let Cap::Instance(inst) = arc
+        && inst.mem.content_len() as usize >= SCRATCHPAD_HEAD_LEN
+    {
+        inst.mem.copy_into(0, &mut out);
+    }
+    out
 }
 
 /// Drive the CALL/HALT loop until either the top frame HALTs (clean
@@ -297,12 +342,20 @@ pub fn run_top(
         // we can mutate `stack` (push/pop) inside each arm.
         match info.exit_reason {
             EXIT_HALT => {
+                // Read the scratchpad head from the top frame BEFORE it is
+                // popped (and dropped) — only meaningful at the top-level HALT.
+                let head = if stack.len() == 1 {
+                    read_scratchpad_head(stack.last().expect("stack non-empty"))
+                } else {
+                    [0u8; SCRATCHPAD_HEAD_LEN]
+                };
                 if pop_and_reflect(&mut stack, info.regs[7]) {
                     break LoopOutcome {
                         exit_reason: info.exit_reason,
                         exit_arg: info.exit_arg,
                         return_value: info.regs[7],
                         gas_remaining: gas,
+                        scratchpad_head: head,
                     };
                 }
             }
@@ -322,6 +375,7 @@ pub fn run_top(
                         exit_arg: 0,
                         return_value: info.regs[7],
                         gas_remaining: gas,
+                        scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                     };
                 }
                 gas -= ecall_cost;
@@ -332,20 +386,28 @@ pub fn run_top(
                     info.regs[11] as u32
                 };
                 match op {
-                    OP_REPLY if pop_and_reflect(&mut stack, info.regs[7]) => {
-                        // Preserve the JIT exit shape so the host bench
-                        // harness, which asserts `(reason=4, arg=0)` for
-                        // the subsoil trampoline halt, doesn't trip.
-                        break LoopOutcome {
-                            exit_reason: info.exit_reason,
-                            exit_arg: info.exit_arg,
-                            return_value: info.regs[7],
-                            gas_remaining: gas,
-                        };
-                    }
                     OP_REPLY => {
-                        // Stack still has frames; the parent picks up at
-                        // the next iter with the child's φ[7] reflected.
+                        // Read the scratchpad head from the top frame before the
+                        // pop (only meaningful at the top-level trampoline HALT).
+                        let head = if stack.len() == 1 {
+                            read_scratchpad_head(stack.last().expect("stack non-empty"))
+                        } else {
+                            [0u8; SCRATCHPAD_HEAD_LEN]
+                        };
+                        if pop_and_reflect(&mut stack, info.regs[7]) {
+                            // Preserve the JIT exit shape so the host bench
+                            // harness (which asserts `(reason=4, arg=0)` for the
+                            // subsoil trampoline halt) doesn't trip.
+                            break LoopOutcome {
+                                exit_reason: info.exit_reason,
+                                exit_arg: info.exit_arg,
+                                return_value: info.regs[7],
+                                gas_remaining: gas,
+                                scratchpad_head: head,
+                            };
+                        }
+                        // Stack still has frames; the parent picks up at the next
+                        // iter with the child's φ[7] reflected.
                     }
                     OP_DERIVE_SPAWN => {
                         let trapped = {
@@ -359,6 +421,7 @@ pub fn run_top(
                                 exit_arg: 0,
                                 return_value: info.regs[7],
                                 gas_remaining: gas,
+                                scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                             };
                         }
                     }
@@ -411,6 +474,7 @@ pub fn run_top(
                             exit_arg: info.exit_arg,
                             return_value: info.regs[7],
                             gas_remaining: gas,
+                            scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                         };
                     }
                 }
@@ -422,6 +486,7 @@ pub fn run_top(
                     exit_arg: info.exit_arg,
                     return_value: info.regs[7],
                     gas_remaining: gas,
+                    scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                 };
             }
         }

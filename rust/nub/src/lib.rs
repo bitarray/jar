@@ -379,6 +379,8 @@ impl Nub {
                     exit_arg: archived.exit_arg.to_native(),
                     return_value: archived.return_value.to_native(),
                     gas_remaining: archived.gas_remaining.to_native(),
+                    // `[u8; N]` archives byte-identically (u8 has no endianness).
+                    scratchpad_head: archived.scratchpad_head,
                 })
             }
         }

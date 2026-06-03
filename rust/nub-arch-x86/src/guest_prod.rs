@@ -10,7 +10,7 @@ use javm_cap::cap::Cap;
 use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
 use nub_arch_x86_abi::{
     BootInfo, FN_ID_NUB_EVICT_JIT_ALL, FN_ID_NUB_GET_BOOT_INFO, FN_ID_NUB_INVOKE_CACHED,
-    FN_ID_NUB_PUT_CAP, InvocationResult, InvokePacket,
+    FN_ID_NUB_PUT_CAP, InvocationResult, InvokePacket, SCRATCHPAD_HEAD_LEN,
 };
 
 fn encode_result_error(exit_arg: u32) -> Vec<u8> {
@@ -19,6 +19,7 @@ fn encode_result_error(exit_arg: u32) -> Vec<u8> {
         exit_arg,
         return_value: 0,
         gas_remaining: 0,
+        scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
     };
     rkyv::to_bytes::<rkyv::rancor::Error>(&result)
         .expect("rkyv-encode InvocationResult error")
@@ -66,12 +67,14 @@ pub fn nub_invoke_cached(packet_bytes: &[u8]) -> Vec<u8> {
             exit_arg: o.exit_arg,
             return_value: o.return_value,
             gas_remaining: o.gas_remaining.max(0) as u64,
+            scratchpad_head: o.scratchpad_head,
         },
         Err(code) => InvocationResult {
             exit_reason: u32::MAX,
             exit_arg: code,
             return_value: 0,
             gas_remaining: 0,
+            scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
         },
     };
 
