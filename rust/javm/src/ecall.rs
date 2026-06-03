@@ -28,7 +28,7 @@
 //!   MGMT_MOVE        (op=2)   src→dst
 //!   MGMT_DROP        (op=3)   src
 //!   MGMT_CNODE_SWAP  (op=4)   a=φ[7], b=φ[8]
-//!   MGMT_CNODE_MINT  (op=5)   dst=φ[7], size_log=φ[8] (u8)
+//!   MGMT_CNODE_MINT  (op=5)   dst=φ[7]  (φ[8] vestigial, ignored)
 //! ```
 //!
 //! Host call operand encoding (Stage 3.8+):
@@ -45,9 +45,7 @@
 //! calls can read/write cap content without storing the cache borrow
 //! in the long-lived `Vm`.
 
-use javm_cap::{
-    Blake2b256, CacheDirectory, Cap, CapHashOrRef, DataCap, DataContent, Hash, SlotIdx, TypeCap,
-};
+use javm_cap::{Blake2b256, CacheDirectory, Cap, CapHashOrRef, DataCap, Hash, SlotIdx, TypeCap};
 use javm_exec::{EcallHandler, EcallKind, EcallResult, ExitReason, Memory, Regs};
 
 use crate::callstack::Entry;
@@ -556,10 +554,11 @@ impl<K: KernelAssist> Vm<K> {
             };
             let data_arc = cache.get(target);
             let bytes_vec = match data_arc.as_deref() {
-                Some(Cap::Data(d)) => match &d.content {
-                    javm_cap::DataContent::Inline(v) => v.as_slice().to_vec(),
-                    javm_cap::DataContent::Paged { .. } => continue,
-                },
+                Some(Cap::Data(d)) => {
+                    let mut buf = vec![0u8; d.content_len() as usize];
+                    d.copy_into(0, &mut buf);
+                    buf
+                }
                 _ => continue,
             };
             if !bytes_vec.is_empty() {
@@ -713,9 +712,7 @@ impl<K: KernelAssist> Vm<K> {
         }
         self.kernel_assist
             .storage_quota_set(quota_id, quota - debit);
-        let cap = Cap::Data(DataCap {
-            content: DataContent::Inline(inline),
-        });
+        let cap = Cap::Data(DataCap::from_bytes(&inline));
         let h = cap.cap_hash();
         cache.put_cap_with_hash(h, &cap)?;
 
@@ -863,26 +860,9 @@ impl<K: KernelAssist> Vm<K> {
 fn data_cap_prefix(data: &DataCap, len: usize) -> Vec<u8> {
     let actual_len = len.min(data.content_len() as usize);
     let mut out = vec![0u8; actual_len];
-    match &data.content {
-        DataContent::Inline(bytes) => {
-            let copy_len = actual_len.min(bytes.len());
-            out[..copy_len].copy_from_slice(&bytes[..copy_len]);
-        }
-        DataContent::Paged { page_size, pages } => {
-            let page_size = *page_size as usize;
-            for (page_idx, page) in pages.iter().enumerate() {
-                let start = page_idx * page_size;
-                if start >= actual_len {
-                    break;
-                }
-                let end = (start + page_size).min(actual_len);
-                if let javm_cap::cap::page::PageSlot::Loaded(page_ref) = page {
-                    let page_bytes = &page_ref.bytes;
-                    out[start..end].copy_from_slice(&page_bytes[..end - start]);
-                }
-            }
-        }
-    }
+    // The dense DataCap fully defines every logical byte: `copy_into`
+    // materializes present pages and zero-fills `Empty`/`Zero` pages.
+    data.copy_into(0, &mut out);
     out
 }
 
@@ -913,10 +893,10 @@ impl<K: KernelAssist> Vm<K> {
             mgmt_op::MOVE => self.mgmt_move(a, b),
             mgmt_op::DROP => self.mgmt_drop(a),
             mgmt_op::CNODE_SWAP => self.mgmt_cnode_swap(a, b),
-            mgmt_op::CNODE_MINT => {
-                let size_log = (regs.gpr[8] & 0xFF) as u8;
-                self.mgmt_cnode_mint(a, size_log, cache)
-            }
+            // φ[8] (formerly `size_log`) is vestigial: a CNode is an
+            // unbounded, quota-bounded hash-keyed map with no declared
+            // capacity. The arg is ignored for ABI compatibility.
+            mgmt_op::CNODE_MINT => self.mgmt_cnode_mint(a, cache),
             _ => Err(VmError::Invariant("unknown MGMT op")),
         }
     }
@@ -993,10 +973,9 @@ impl<K: KernelAssist> Vm<K> {
     fn mgmt_cnode_mint(
         &mut self,
         dst: SlotIdx,
-        size_log: u8,
         cache: Option<&mut CacheDirectory>,
     ) -> Result<(), VmError> {
-        let cap = Cap::CNode(javm_cap::CNodeCap::new(size_log)?);
+        let cap = Cap::CNode(javm_cap::CNodeCap::new());
         let cap_hash = cap.cap_hash();
         let h = match cache {
             Some(cache) => {
@@ -1038,7 +1017,7 @@ mod tests {
 
     fn fixture_vm() -> Vm<InProcessKernelAssist> {
         let mut vm = Vm::new(InProcessKernelAssist::new());
-        let mut cnode = CNodeCap::new(4).unwrap();
+        let mut cnode = CNodeCap::new();
         // Seed slot 2 with a Hash-form target (treated as an Image hash).
         cnode
             .set(SlotIdx(2), Some(CapHashOrRef::Hash([0xAA; 32])))
@@ -1332,7 +1311,7 @@ mod tests {
         let image_hash = cache
             .put_cap(&Cap::image_with_slots(&Image::empty(), &[], &[]).unwrap())
             .unwrap();
-        let cnode_hash = cache.put_cap(&Cap::empty_cnode(0).unwrap()).unwrap();
+        let cnode_hash = cache.put_cap(&Cap::empty_cnode()).unwrap();
         let inst_hash = cache
             .put_cap(&Cap::instance_with_overlays(
                 [0x42; 32],
@@ -1568,7 +1547,7 @@ mod tests {
             .unwrap();
 
         // Publish an empty prepared cnode.
-        let prep_cnode_hash = cache.put_cap(&Cap::empty_cnode(4).unwrap()).unwrap();
+        let prep_cnode_hash = cache.put_cap(&Cap::empty_cnode()).unwrap();
 
         // Put both into the running instance's cnode at known slots.
         let parent_chain = [0xC1; 32];
@@ -1654,7 +1633,7 @@ mod tests {
         let image_hash = cache
             .put_cap(&Cap::image_with_slots(&child_img, &[], &[]).unwrap())
             .unwrap();
-        let cnode_hash = cache.put_cap(&Cap::empty_cnode(4).unwrap()).unwrap();
+        let cnode_hash = cache.put_cap(&Cap::empty_cnode()).unwrap();
         let child_instance_hash = cache
             .put_cap(&Cap::instance_with_overlays(
                 [0xCC; 32],

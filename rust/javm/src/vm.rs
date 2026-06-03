@@ -560,11 +560,15 @@ impl<K: KernelAssist> Vm<K> {
         // Build the working cnode as a Cap<Global> and put it. We only
         // flatten the materialized entries; unmaterialized (`Missing`)
         // slots aren't valid mid-execution and shouldn't appear here.
+        // The radix keys are physical (`Hasher(k)`), so we copy them
+        // verbatim rather than re-deriving from a logical slot index.
         let cnode_hash = {
-            let mut cnode = javm_cap::CNodeCap::new(entry.root_cnode.size_log)?;
-            for (idx, mo) in entry.root_cnode.slots.iter() {
+            let mut cnode = javm_cap::CNodeCap::new();
+            for (key, mo) in entry.root_cnode.slots.iter() {
                 if let ssz::MissingOr::Materialized(t) = mo {
-                    cnode.set(SlotIdx(idx as u32), Some(t.clone()))?;
+                    cnode
+                        .slots
+                        .insert(*key, ssz::MissingOr::Materialized(t.clone()));
                 }
             }
             cache.put_cap(&Cap::CNode(cnode))?
@@ -734,7 +738,7 @@ mod tests {
         let image_hash = cache
             .put_cap(&Cap::image_with_slots(&image, &[], &[]).unwrap())
             .unwrap();
-        let cnode_hash = cache.put_cap(&Cap::empty_cnode(8).unwrap()).unwrap();
+        let cnode_hash = cache.put_cap(&Cap::empty_cnode()).unwrap();
         cache
             .put_cap(&Cap::instance_with_overlays(
                 [0xAA; 32],
@@ -871,7 +875,7 @@ mod tests {
             .put_cap(&Cap::image_with_slots(&m_img, &[], &[]).unwrap())
             .unwrap();
         let m_cnode_hash = {
-            let mut cn = javm_cap::CNodeCap::new(8).unwrap();
+            let mut cn = javm_cap::CNodeCap::new();
             cn.set(SlotIdx(9), Some(CapHashOrRef::Hash(s_inst_hash)))
                 .unwrap();
             cache.put_cap(&Cap::CNode(cn)).unwrap()
