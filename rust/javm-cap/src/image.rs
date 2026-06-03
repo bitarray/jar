@@ -170,7 +170,7 @@ impl Image {
             .next_multiple_of(crate::cap::data::PAGE_SIZE as u64)
     }
 
-    /// Build the Instance's memory backing [`DataCap`]: every mapping's source
+    /// Build the Instance's memory backing [`crate::DataCap`]: every mapping's source
     /// content (pinned **and** initial) folded at the mapping's offset above
     /// `DATA_BASE`. This is the same byte layout the legacy `data_overlays`
     /// produced, collapsed into one dense `DataCap`.

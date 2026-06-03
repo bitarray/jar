@@ -99,10 +99,10 @@ impl ImageCap {
     /// from a pinned (read-only) slot, so it must be laid read-only — a
     /// guest store to it faults. Mirrors the recompiler's pinned-vs-
     /// initial slot classification (`nub-arch-x86` `build_runtime`).
-    /// Derived from [`Self::pinned`] at lay time so the per-instance
-    /// [`super::instance::RwOverlay`] wire form needs no perm field; the
-    /// interpreter drivers (`javm` `build_entry`, `nub-arch-local`) call
-    /// this so they classify identically to the recompiler.
+    /// Derived from [`Self::pinned`] at lay time, so a mapping carries no
+    /// per-mapping permission field; the interpreter drivers (`javm`
+    /// `build_entry`, `nub-arch-local`) call this so they classify
+    /// identically to the recompiler.
     pub fn mapping_is_pinned(&self, start: u32) -> bool {
         self.mappings.iter().any(|m| {
             m.start as u32 == start

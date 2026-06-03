@@ -105,7 +105,7 @@
 //!
 //! # Wire format
 //!
-//! Like [`SparseList`] minus the `len` field (a map has no logical length,
+//! Like [`crate::SparseList`] minus the `len` field (a map has no logical length,
 //! only a key set): a single variable field holding a sorted SSZ list of
 //! `(key: ByteVector[KEY_BYTES], value: MissingOr<V>)` containers. Decode is
 //! strict (loud on any non-canonical encoding): top-level offset must be 4,
