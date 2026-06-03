@@ -31,10 +31,46 @@ pub type PageRef = Arc<PageBytes>;
 /// Sharing across DataCap CoW clones is via [`PageRef`] (= `Arc`),
 /// which carries its own refcount — `PageBytes` itself is not
 /// refcounted.
-#[derive(Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+///
+/// `Clone` and rkyv `Deserialize` are **hand-written** to preserve the
+/// `PAGE_SIZE`-alignment invariant of `bytes`: the recompiler resolves a
+/// page's physical address from its slab pointer and direct-maps it into a
+/// ring-3 page table (`pt_map_leaf` requires a page-aligned PA). The derived
+/// `Clone` / `Deserialize` would `Vec`-allocate `bytes` at alignment 1, so a
+/// cloned or wire-decoded page would land mid-page and the recompiler would map
+/// the wrong physical frame. Both re-allocate through
+/// [`super::data::alloc_page_aligned_zeroed`]. (Mirrors the page-alignment
+/// discipline the legacy `DataContent::Inline` kept in its manual `Clone`.)
+#[derive(Debug, rkyv::Archive, rkyv::Serialize)]
 pub struct PageBytes {
     pub hash: CapHash,
     pub bytes: Vec<u8>,
+}
+
+impl Clone for PageBytes {
+    fn clone(&self) -> Self {
+        Self::realigned(self.hash, &self.bytes)
+    }
+}
+
+impl PageBytes {
+    /// Build a `PageBytes` with `bytes` re-allocated into a `PAGE_SIZE`-aligned
+    /// slab (zero-padded tail). Used by the page-aligning `Clone` / rkyv
+    /// `Deserialize`.
+    fn realigned(hash: CapHash, src: &[u8]) -> Self {
+        use super::data::{PAGE_SIZE, alloc_page_aligned_zeroed};
+        let mut bytes = alloc_page_aligned_zeroed(src.len().max(PAGE_SIZE));
+        bytes[..src.len()].copy_from_slice(src);
+        Self { hash, bytes }
+    }
+}
+
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<PageBytes, D> for ArchivedPageBytes {
+    fn deserialize(&self, _deserializer: &mut D) -> Result<PageBytes, D::Error> {
+        // Re-align into a `PAGE_SIZE` slab (load-bearing for the recompiler
+        // direct-map — see the `PageBytes` docs).
+        Ok(PageBytes::realigned(self.hash, self.bytes.as_slice()))
+    }
 }
 
 impl PageBytes {

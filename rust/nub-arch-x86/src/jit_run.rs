@@ -93,6 +93,11 @@ static CTX_KVA: AtomicU64 = AtomicU64::new(0);
 static MAT_RANGES_PTR: AtomicPtr<crate::call_loop::MatRange> =
     AtomicPtr::new(core::ptr::null_mut());
 static MAT_RANGES_LEN: AtomicU64 = AtomicU64::new(0);
+/// Per-page source PA arena indexed by `MatRange.pas_off + page_within_range`
+/// (a dense DataCap's pages are non-contiguous slabs). `Empty` cap pages point
+/// at the frame's shared zero page.
+static MAT_PAS_PTR: AtomicPtr<u64> = AtomicPtr::new(core::ptr::null_mut());
+static MAT_PAS_LEN: AtomicU64 = AtomicU64::new(0);
 /// Per-page [`javm_exec::mat::PageState`] (one byte/page), len =
 /// `(mem_top - data_base) / PAGE_SIZE`. Mutated in place by the handler.
 static MAT_STATE_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
@@ -230,6 +235,31 @@ fn mat_range_for(page_va: u32) -> Option<crate::call_loop::MatRange> {
         .find(|r| r.start <= page_va && page_va < r.end)
 }
 
+/// Source PA of page `page_va` (page-aligned) within cap-backed range `r`,
+/// read from the published per-page `MAT_PAS` arena. Every page in
+/// `[r.start, r.end)` has an arena entry (`pas_len == range page count`), so the
+/// index is in bounds by construction.
+fn mat_pa_at(r: &crate::call_loop::MatRange, page_va: u64) -> u64 {
+    let ptr = MAT_PAS_PTR.load(Ordering::SeqCst);
+    let len = MAT_PAS_LEN.load(Ordering::SeqCst) as usize;
+    let idx = r.pas_off as usize + ((page_va as u32 - r.start) / PAGE_SIZE as u32) as usize;
+    debug_assert!(idx < len && !ptr.is_null(), "mat_pa_at: index out of arena");
+    if ptr.is_null() || idx >= len {
+        return 0;
+    }
+    // SAFETY: ptr/len describe the running FrameRuntime's `mat_pas` Vec, valid
+    // until enter_frame clears these statics; `idx < len` checked above.
+    unsafe { *ptr.add(idx) }
+}
+
+/// Read-only materialization source for a 2 MiB unit: either a contiguous slab
+/// (code — page PA = `base_pa + offset`) or a cap-backed range whose pages have
+/// per-page PAs in the `MAT_PAS` arena.
+enum RoSrc {
+    Contig { base_pa: u64 },
+    Cap(crate::call_loop::MatRange),
+}
+
 /// The static [`javm_exec::mat::PageKind`] of guest page `page_va`:
 /// cap-backed pages take their kind from the matching `MatRange`; every
 /// other page in the declared extent is ephemeral.
@@ -329,18 +359,19 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
         let pv = p as u64;
         // Classify the read-only source range (if any): code, or a pinned
         // data cap. Writes to RO pages were already excluded above.
-        let ro_range: Option<(u64, u64, u64)> = if in_code(pv) {
-            Some((code_base, code_top, code_pa))
+        let ro_range: Option<(u64, u64, RoSrc)> = if in_code(pv) {
+            // Code is a single contiguous slab: page PA = code_pa + offset.
+            Some((code_base, code_top, RoSrc::Contig { base_pa: code_pa }))
         } else {
             match mat_range_for(p) {
                 Some(r) if r.kind == javm_exec::mat::PageKind::PinnedCapRo.as_u8() => {
-                    Some((r.start as u64, r.end as u64, r.pa))
+                    Some((r.start as u64, r.end as u64, RoSrc::Cap(r)))
                 }
                 _ => None,
             }
         };
-        if let Some((r_start, r_end, r_pa)) = ro_range {
-            match materialize_ro_unit(pv, r_start, r_end, r_pa, ro_units, pml4, owned_vec) {
+        if let Some((r_start, r_end, src)) = ro_range {
+            match materialize_ro_unit(pv, r_start, r_end, src, ro_units, pml4, owned_vec) {
                 Some(c) => total = total.saturating_add(c),
                 None => return false,
             }
@@ -355,7 +386,8 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
             Some(r) => (
                 javm_exec::mat::PageKind::from_u8(r.kind)
                     .unwrap_or(javm_exec::mat::PageKind::PinnedCapRo),
-                r.pa + (p - r.start) as u64,
+                // Per-page source PA (dense cap slabs are non-contiguous).
+                mat_pa_at(&r, pv),
             ),
             None => (
                 javm_exec::mat::PageKind::EphemeralZero,
@@ -534,7 +566,7 @@ fn materialize_ro_unit(
     pv: u64,
     r_start: u64,
     r_end: u64,
-    r_pa: u64,
+    src: RoSrc,
     ro_units: &mut alloc::vec::Vec<u32>,
     pml4: u64,
     owned_vec: u64,
@@ -553,15 +585,15 @@ fn materialize_ro_unit(
     let hi = r_end.min(cluster_hi);
     let mut q = lo;
     while q < hi {
+        // Per-page source PA: contiguous code maps `base_pa + offset`; a dense
+        // cap's pages each resolve their own slab PA from the arena.
+        let page_pa = match &src {
+            RoSrc::Contig { base_pa } => base_pa + (q - r_start),
+            RoSrc::Cap(r) => mat_pa_at(r, q),
+        };
         // SAFETY: live PT, single writer; builds the path (zero-setup).
         unsafe {
-            crate::paging::pt_map_leaf(
-                pml4,
-                q,
-                r_pa + (q - r_start),
-                crate::paging::Perm::user_ro(),
-                owned_vec,
-            )
+            crate::paging::pt_map_leaf(pml4, q, page_pa, crate::paging::Perm::user_ro(), owned_vec)
         }?;
         // No invlpg: NotPresent → present is not TLB-cached.
         q += PAGE_SIZE as u64;
@@ -662,9 +694,15 @@ pub struct FrameRuntime {
     ctx_kva: u64,
     // ---- Category-#3 lazy-materialization state (persists across
     // re-entries on this frame; published to the #PF handler each entry). ----
-    /// Cap-backed data mappings (pinned RO / initial CoW), with resolved
-    /// source PAs. Pages not covered here are ephemeral (`mem_buf`).
+    /// Cap-backed data mappings (pinned RO / initial CoW), each indexing a
+    /// window into `mat_pas`. Pages not covered here are ephemeral (`mem_buf`).
     mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
+    /// Per-page source PA arena for `mat_ranges` (see `MAT_PAS_PTR`).
+    mat_pas: alloc::vec::Vec<u64>,
+    /// Shared zero page sourcing `Empty` cap pages (RO) / CoW-from-zero writes.
+    /// Owned here to keep its PA (recorded in `mat_pas`) valid for the frame.
+    #[allow(dead_code)]
+    zero_page: PageBuf,
     /// Per-page [`javm_exec::mat::PageState`], one byte/page over
     /// `[data_base, mem_top)`. Advances NotPresent → PresentRo → PresentRw.
     mat_state: alloc::vec::Vec<u8>,
@@ -726,6 +764,8 @@ pub unsafe fn build_frame_runtime(
     ro: MemRegion,
     rw: MemRegion,
     mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
+    mat_pas: alloc::vec::Vec<u64>,
+    zero_page: PageBuf,
 ) -> Option<FrameRuntime> {
     let helpers = HelperFns {
         mem_read_u8: 0x1001,
@@ -862,6 +902,8 @@ pub unsafe fn build_frame_runtime(
         new_cr3,
         ctx_kva,
         mat_ranges,
+        mat_pas,
+        zero_page,
         mat_state,
         data_base: data_base as u32,
         mem_top,
@@ -925,6 +967,8 @@ pub unsafe fn enter_frame(
         Ordering::SeqCst,
     );
     MAT_RANGES_LEN.store(rt.mat_ranges.len() as u64, Ordering::SeqCst);
+    MAT_PAS_PTR.store(rt.mat_pas.as_ptr() as *mut u64, Ordering::SeqCst);
+    MAT_PAS_LEN.store(rt.mat_pas.len() as u64, Ordering::SeqCst);
     MAT_STATE_PTR.store(rt.mat_state.as_mut_ptr(), Ordering::SeqCst);
     MAT_STATE_LEN.store(rt.mat_state.len() as u64, Ordering::SeqCst);
     MAT_DATA_BASE.store(rt.data_base as u64, Ordering::SeqCst);
@@ -950,6 +994,8 @@ pub unsafe fn enter_frame(
     JIT_CODE_LEN.store(0, Ordering::SeqCst);
     MAT_RANGES_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
     MAT_RANGES_LEN.store(0, Ordering::SeqCst);
+    MAT_PAS_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
+    MAT_PAS_LEN.store(0, Ordering::SeqCst);
     MAT_STATE_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
     MAT_STATE_LEN.store(0, Ordering::SeqCst);
     MAT_MEM_TOP.store(0, Ordering::SeqCst);

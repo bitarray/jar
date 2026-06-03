@@ -57,7 +57,7 @@ fn m_calls_s_round_trip() {
     let m_pinned = collect_pinned_hashes(&mut cache, &m_image);
     let m_initial = collect_initial_hashes(&mut cache, &m_image);
 
-    let mut m_cnode = javm_cap::CNodeCap::new(8).expect("cnode");
+    let mut m_cnode = javm_cap::CNodeCap::new();
     m_cnode
         .set(
             SlotIdx(SLOT_IMAGE_S as u32),

@@ -109,7 +109,7 @@ impl BuiltCaps {
         let image_hash = ssz::hash_tree_root(&image_cap);
 
         // 3. Empty root CNode (V1: no per-instance slot bindings).
-        let cnode_cap = Cap::empty_cnode(0).expect("empty_cnode");
+        let cnode_cap = Cap::empty_cnode();
         let cnode_hash = ssz::hash_tree_root(&cnode_cap);
 
         // 4. Build the Instance with the bench's flat overlay layout.
@@ -405,7 +405,7 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
     nub.put_cap_with_hash(image_hash, &image_cap)
         .expect("put image");
 
-    let mut cn = CNodeCap::new(8).expect("cnode");
+    let mut cn = CNodeCap::new();
     cn.set(
         SlotIdx(SLOT_IMAGE_RECURSE),
         Some(CapHashOrRef::Hash(image_hash)),

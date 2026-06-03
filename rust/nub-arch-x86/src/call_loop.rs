@@ -146,7 +146,6 @@ const ERR_HOST_CALL_SLOT_EMPTY: u32 = 40;
 const ERR_JIT_FAILED: u32 = 50;
 const ERR_DEPTH_LIMIT: u32 = 51;
 const ERR_MAP_BAD_KIND: u32 = 60;
-const ERR_MAP_PAGED_UNSUPPORTED: u32 = 61;
 
 /// One stack frame on the in-kernel call stack. Holds the
 /// identifiers for the Image and Instance caps the frame runs
@@ -204,8 +203,15 @@ pub struct KernelFrame {
 pub struct MatRange {
     pub start: u32,
     pub end: u32,
-    /// Source physical address of the cap's first byte (`start` maps here).
-    pub pa: u64,
+    /// Window `[pas_off, pas_off + pas_len)` into the frame's `mat_pas` arena:
+    /// one source physical address per page in `[start, end)`. A dense DataCap's
+    /// pages are independent page-aligned slabs (not one contiguous buffer), so
+    /// each page resolves its own PA; an absent / zero (`Empty`) page maps to the
+    /// frame's shared zero page. `MatRange` stays `Copy` (it is published to the
+    /// #PF handler by pointer), so the PAs live in the frame-owned arena rather
+    /// than inline.
+    pub pas_off: u32,
+    pub pas_len: u32,
     /// [`javm_exec::mat::PageKind`] as a `u8`: pinned slots are
     /// `PinnedCapRo` (a write hard-faults), initial slots are
     /// `UnpinnedCapCow` (a write copies-on-write).
@@ -457,6 +463,15 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     // code region is materialized lazily too (zero-setup demand paging),
     // sourced from its physical address `code_pa`.
     let mut mat_ranges: Vec<MatRange> = Vec::with_capacity(img.mappings.len());
+    // Per-page source PAs for the cap-backed ranges (a dense DataCap's pages are
+    // non-contiguous slabs); each `MatRange` indexes a window into this arena.
+    let mut mat_pas: Vec<u64> = Vec::new();
+    // Shared per-frame zero page: the source for `Empty` (absent / zero) cap
+    // pages, mapped RO or CoW'd-from-zero on write. Owned by the `FrameRuntime`
+    // so its PA stays valid for the frame's life; never written through (RO maps;
+    // a write CoWs a fresh private page), so aliasing it across pages is safe.
+    let zero_page = PageBuf::new(paging::PAGE_SIZE).ok_or(ERR_JIT_FAILED)?;
+    let zero_pa = zero_page.pa();
     let mut mem_size: u32 = 0;
 
     // Executable code region: a `PinnedCapRo` lazily-materialized region
@@ -493,44 +508,52 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
         let data_arc = CACHE
             .get(CapHashOrRef::Hash(target_hash))
             .ok_or(ERR_HOST_CALL_SLOT_EMPTY)?;
-        // Validate kind + DataContent variant before stashing the Arc.
+        // Only a dense `Cap::Data` is mappable as a memory region.
         match &*data_arc {
-            Cap::Data(d) => match &d.content {
-                javm_cap::DataContent::Inline(_) => {}
-                javm_cap::DataContent::Paged { .. } => return Err(ERR_MAP_PAGED_UNSUPPORTED),
-            },
+            Cap::Data(_) => {}
             _ => return Err(ERR_MAP_BAD_KIND),
         }
         data_arcs.push(data_arc);
-        // SAFETY-ish: data_arcs[last] is the Arc we just pushed; its
-        // Cap::Data::Inline bytes have a stable address. Resolve PA
-        // from the bytes' VA.
-        let bytes = match data_arcs.last().unwrap().as_ref() {
-            Cap::Data(d) => match &d.content {
-                javm_cap::DataContent::Inline(bs) => bs.as_slice(),
-                _ => unreachable!("validated above"),
-            },
+        // SAFETY-ish: data_arcs[last] is the Arc we just pushed; its dense page
+        // slabs are page-aligned and have stable addresses (pinned for the
+        // frame's life by the no-eviction V1 invariant).
+        let d = match data_arcs.last().unwrap().as_ref() {
+            Cap::Data(d) => d,
             _ => unreachable!("validated above"),
         };
-        let pa = paging::va_to_pa(bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?;
-        let size = (m.size as u32).min(bytes.len() as u32);
+        let size = (m.size as u32).min(d.content_len() as u32);
         if size == 0 {
             continue;
         }
         // Lazily-materialized cap mapping: pinned → read-only (a write
         // hard-faults), initial → copy-on-write. The page set is
-        // page-rounded (the cap's backing allocation has a zeroed,
-        // page-aligned tail, so paging in a partial last page is safe).
+        // page-rounded (a partial last page reads its zeroed slab tail).
         let kind = if pinned_slot[src_slot] {
             javm_exec::mat::PageKind::PinnedCapRo.as_u8()
         } else {
             javm_exec::mat::PageKind::UnpinnedCapCow.as_u8()
         };
         let span = size.next_multiple_of(paging::PAGE_SIZE as u32);
+        let num_pages = (span / paging::PAGE_SIZE as u32) as usize;
+        // Resolve one source PA per page: a present slab maps directly, an
+        // `Empty` (absent / zero) page maps to the shared zero page. (V1 never
+        // mints `Missing`.)
+        let pas_off = mat_pas.len() as u32;
+        for i in 0..num_pages {
+            let pa = match d.page_slot(i) {
+                javm_cap::PageSlot::Loaded(pr) => {
+                    paging::va_to_pa(pr.bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?
+                }
+                javm_cap::PageSlot::Empty => zero_pa,
+                javm_cap::PageSlot::Missing(_) => return Err(ERR_MAP_BAD_KIND),
+            };
+            mat_pas.push(pa);
+        }
         mat_ranges.push(MatRange {
             start: m.start as u32,
             end: (m.start as u32).saturating_add(span),
-            pa,
+            pas_off,
+            pas_len: num_pages as u32,
             kind,
             source_hash: target_hash,
             source_slot: SlotIdx(m.source_path[0].get()),
@@ -600,6 +623,8 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
                 data: rw.1,
             },
             mat_ranges,
+            mat_pas,
+            zero_page,
         )
     }
     .ok_or(ERR_JIT_FAILED)

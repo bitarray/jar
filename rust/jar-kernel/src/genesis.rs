@@ -124,7 +124,7 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     // 4. A shared empty cnode for kernel-issued Instance caps. They
     //    never invoke any of their own slots; the empty cnode keeps
     //    them well-formed.
-    let empty_cnode_hash = state.caps.put_cap(&Cap::empty_cnode(0)?)?;
+    let empty_cnode_hash = state.caps.put_cap(&Cap::empty_cnode())?;
 
     // 5. Publish each kernel-issued unit cap.
     let gas_hash = publish_kernel_unit_cap(
@@ -234,7 +234,7 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
 
     // 7. Publish the root cnode (256 slots, size_log = 8).
     let root_cnode_hash = {
-        let mut cnode = CNodeCap::new(8).map_err(KernelError::from)?;
+        let mut cnode = CNodeCap::new();
         for (slot, target) in &entries {
             cnode
                 .set(*slot, Some(target.clone()))
