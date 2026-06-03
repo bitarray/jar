@@ -97,6 +97,8 @@ fn empty_image() -> ImageCap {
         pinned: Vec::new(),
         initial: Vec::new(),
         yield_marker_slot: None,
+        gas_slots: Vec::new(),
+        quota_slots: Vec::new(),
     }
 }
 

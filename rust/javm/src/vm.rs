@@ -734,6 +734,8 @@ mod tests {
             pinned_slots: BTreeMap::new(),
             initial_slots: BTreeMap::new(),
             yield_marker_slot: None,
+            gas_slots: Vec::new(),
+            quota_slots: Vec::new(),
         }
     }
 

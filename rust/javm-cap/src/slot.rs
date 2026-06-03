@@ -92,6 +92,35 @@ impl core::ops::Deref for Key {
     }
 }
 
+/// Pack a [`Key`] (≤ [`MAX_KEY_LEN`] bytes) into two registers for storage in a
+/// kernel-assisted unit handle (`Gas{meter_key}` / `Quota{quota_key}`): the key
+/// bytes little-endian-packed into the first register, the byte length into the
+/// second. Inverse of [`key_from_regs`].
+///
+/// # Panics
+///
+/// Panics if the key is longer than [`MAX_KEY_LEN`] (8) bytes — the register
+/// packing has no room, and silently truncating would alias two distinct keys.
+pub fn key_to_regs(key: &Key) -> (u64, u64) {
+    let bytes = key.as_slice();
+    assert!(
+        bytes.len() <= MAX_KEY_LEN,
+        "key_to_regs: key length {} exceeds MAX_KEY_LEN {MAX_KEY_LEN}",
+        bytes.len()
+    );
+    let mut packed = [0u8; 8];
+    packed[..bytes.len()].copy_from_slice(bytes);
+    (u64::from_le_bytes(packed), bytes.len() as u64)
+}
+
+/// Reconstruct a [`Key`] from the `(packed, len)` register pair produced by
+/// [`key_to_regs`]. A `len > 8` is clamped to 8 (defensive; `key_to_regs`
+/// never emits one).
+pub fn key_from_regs(packed: u64, len: u64) -> Key {
+    let n = (len as usize).min(MAX_KEY_LEN);
+    Key::from(&packed.to_le_bytes()[..n])
+}
+
 /// Path from the root cnode through nested cnodes to a slot.
 ///
 /// The sequence of [`Key`]s walked through nested `Cap::CNode` slots; the

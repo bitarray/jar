@@ -538,6 +538,8 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
         pinned_slots,
         initial_slots,
         yield_marker_slot: Some(Key::from(BARE_YIELD_CATCHER_SLOT)),
+        gas_slots: Vec::new(),
+        quota_slots: Vec::new(),
     })
 }
 

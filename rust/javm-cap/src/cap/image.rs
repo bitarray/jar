@@ -61,6 +61,12 @@ pub struct ImageCap {
     pub initial: Vec<ImageSlotEntry>,
     /// Slot holding `Cap::Instance[YieldCatcher]`, if any.
     pub yield_marker_slot: Option<Key>,
+    /// Cnode slots holding the `Cap::Instance[Gas{meter_key}]` unit handles;
+    /// `gas_slots[0]` is the active meter the kernel reads at frame entry.
+    /// See [`crate::image::Image::gas_slots`].
+    pub gas_slots: Vec<Key>,
+    /// Cnode slots holding the `Cap::Instance[Quota{quota_key}]` unit handles.
+    pub quota_slots: Vec<Key>,
 }
 
 // Manual Clone: the derived impl would `Vec::clone` the `code` bytes,
@@ -79,6 +85,8 @@ impl Clone for ImageCap {
             pinned: self.pinned.clone(),
             initial: self.initial.clone(),
             yield_marker_slot: self.yield_marker_slot.clone(),
+            gas_slots: self.gas_slots.clone(),
+            quota_slots: self.quota_slots.clone(),
         }
     }
 }
@@ -329,6 +337,8 @@ pub fn image_cap(
         pinned,
         initial,
         yield_marker_slot: image.yield_marker_slot.clone(),
+        gas_slots: image.gas_slots.clone(),
+        quota_slots: image.quota_slots.clone(),
     })
 }
 

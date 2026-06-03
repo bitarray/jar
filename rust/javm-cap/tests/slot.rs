@@ -1,4 +1,27 @@
-use javm_cap::{Key, SlotPath};
+use javm_cap::{Key, SlotPath, key_from_regs, key_to_regs};
+
+#[test]
+fn key_regs_round_trip() {
+    // Pack/unpack a meter_key / quota_key through the unit handle's registers.
+    for bytes in [
+        vec![],
+        vec![0u8],
+        vec![7u8],
+        vec![1u8, 2, 3, 4, 5, 6, 7, 8], // full MAX_KEY_LEN
+        vec![0xFF, 0x00, 0xFF],
+    ] {
+        let key = Key::from(&bytes[..]);
+        let (packed, len) = key_to_regs(&key);
+        assert_eq!(key_from_regs(packed, len), key, "round trip for {bytes:?}");
+    }
+}
+
+#[test]
+fn key_to_regs_rejects_oversized_key() {
+    let too_long = Key::from(&[1u8; 9][..]); // 9 > MAX_KEY_LEN (8)
+    let r = std::panic::catch_unwind(|| key_to_regs(&too_long));
+    assert!(r.is_err(), "a >8-byte key must not pack into one register");
+}
 
 #[test]
 fn slot_key_from_byte_is_single_byte() {

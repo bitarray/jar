@@ -52,6 +52,8 @@ fn hello_world_chain_image() -> Image {
         pinned_slots: BTreeMap::new(),
         initial_slots: BTreeMap::new(),
         yield_marker_slot: Some(javm_cap::Key::from(abi::BARE_YIELD_CATCHER_SLOT)),
+        gas_slots: Vec::new(),
+        quota_slots: Vec::new(),
     }
 }
 

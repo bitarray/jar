@@ -300,5 +300,7 @@ fn placeholder_kernel_image() -> Image {
         pinned_slots: BTreeMap::new(),
         initial_slots: BTreeMap::new(),
         yield_marker_slot: None,
+        gas_slots: Vec::new(),
+        quota_slots: Vec::new(),
     }
 }

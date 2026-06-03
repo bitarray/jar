@@ -75,6 +75,16 @@ pub struct Image {
     /// Slot holding `Cap::Instance[YieldCatcher]`, if this Instance
     /// catches yields. None = no catcher.
     pub yield_marker_slot: Option<Key>,
+    /// Cnode slots holding the `Cap::Instance[Gas{meter_key}]` unit handles
+    /// the kernel debits while this Instance runs. `gas_slots[0]` is the
+    /// **active** meter (the kernel reads its `meter_key` at frame entry to
+    /// seed/settle gas against the kernel-maintained meter mapping); later
+    /// entries are fallback reserves (chain-spec policy). Empty = no
+    /// Image-declared meter (the kernel uses the call-supplied budget).
+    pub gas_slots: Vec<Key>,
+    /// Cnode slots holding the `Cap::Instance[Quota{quota_key}]` unit handles.
+    /// Same convention as [`Self::gas_slots`].
+    pub quota_slots: Vec<Key>,
 }
 
 /// Endpoint definition: entry PC + register conventions.
@@ -151,6 +161,8 @@ impl Image {
             pinned_slots: BTreeMap::new(),
             initial_slots: BTreeMap::new(),
             yield_marker_slot: None,
+            gas_slots: Vec::new(),
+            quota_slots: Vec::new(),
         }
     }
 
