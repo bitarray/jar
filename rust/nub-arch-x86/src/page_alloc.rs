@@ -90,6 +90,12 @@ pub struct GlobalPage {
     kva: AtomicU64,
 }
 
+impl Default for GlobalPage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GlobalPage {
     pub const fn new() -> Self {
         Self {

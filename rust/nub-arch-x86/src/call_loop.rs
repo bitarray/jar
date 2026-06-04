@@ -204,10 +204,26 @@ pub struct KernelFrame {
     /// `OpError::SlotPinned`. Sorted (image pinned slots are emitted sorted),
     /// so membership is a `binary_search`.
     pinned: Vec<Key>,
+    /// Per-page category-#3 [`javm_exec::mat::PageState`] (one byte/page) over
+    /// the frame's data extent `[DATA_BASE, DATA_BASE + mem.content_len())`,
+    /// advancing NotPresent → PresentRo → PresentRw as the #PF handler
+    /// materializes pages. Lives on the **frame** (not the evictable
+    /// [`FrameRuntime`]) so it survives runtime eviction: a frame resumed past
+    /// the runtime cache window must not re-charge category-#3 gas for pages it
+    /// already paid for (which would fork the never-evicting interpreter). On a
+    /// runtime rebuild, [`jit_run::reestablish_after_rebuild`] re-creates the
+    /// PT mappings these states imply (charging nothing).
+    mat_state: Vec<u8>,
+    /// Materialized read-only **units** — sorted set of
+    /// [`javm_exec::mat::unit_base`] values (one per `cap ∩ 2 MiB cluster`, code
+    /// + pinned caps). Same eviction-survival rationale as [`Self::mat_state`].
+    ro_units: Vec<u32>,
     /// Per-frame ring-3 resources (PT + mem/ctx/stack buffers).
     /// Lazily built on the first [`run_one_entry`] for this frame
     /// and reused across every subsequent re-entry. Cuts N
-    /// PageTable + 3 PageBuf allocations for a depth-N recursion.
+    /// PageTable + 3 PageBuf allocations for a depth-N recursion. The
+    /// **evictable** half of a frame: dropped under deep recursion and rebuilt
+    /// on resume (the materialization bookkeeping above survives that).
     runtime: Option<FrameRuntime>,
 }
 
@@ -463,15 +479,43 @@ fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
     if frame.runtime.is_none() {
         let rt = build_runtime(frame)?;
         frame.runtime = Some(rt);
+        // The runtime was (re)built with a fresh, empty page table. If this
+        // frame ran before and was then evicted, its persisted `mat_state` /
+        // `ro_units` record pages already materialized + charged — re-create
+        // their mappings in the new PT, charging nothing, so the handler's
+        // "Present ⟺ PT-mapped" invariant holds and we don't re-charge #3 gas.
+        // A no-op on a frame's genuinely-first build (all-NotPresent, empty).
+        jit_run::reestablish_after_rebuild(
+            frame.runtime.as_ref().expect("just built"),
+            &frame.mat_state,
+            &frame.ro_units,
+            &frame.mem,
+        );
     }
     let pc = frame.pc;
     let regs = frame.regs;
-    // Split borrow of two disjoint fields: the #PF handler CoWs guest writes
-    // into `frame.mem`'s overlay while the JIT runs against `frame.runtime`'s
-    // PT. The raw-pointer cast ends the `&mut frame.mem` borrow immediately.
+    // Split borrow of disjoint fields: while the JIT runs against
+    // `frame.runtime`'s PT, the #PF handler CoWs guest writes into `frame.mem`'s
+    // overlay and advances `frame.mat_state` / `frame.ro_units` in place. The
+    // raw-pointer casts end those `&mut` borrows immediately, so the subsequent
+    // `frame.runtime` borrow does not conflict.
     let overlay_sink: *mut DataCap = &mut frame.mem;
+    let mat_state_ptr = frame.mat_state.as_mut_ptr();
+    let mat_state_len = frame.mat_state.len() as u64;
+    let ro_units: *mut Vec<u32> = &mut frame.ro_units;
     let rt = frame.runtime.as_mut().expect("just built");
-    let info = unsafe { jit_run::enter_frame(rt, gas, pc, regs, overlay_sink) };
+    let info = unsafe {
+        jit_run::enter_frame(
+            rt,
+            gas,
+            pc,
+            regs,
+            overlay_sink,
+            mat_state_ptr,
+            mat_state_len,
+            ro_units,
+        )
+    };
     Ok(info)
 }
 
@@ -982,6 +1026,14 @@ fn build_frame_inner(
     // sorted by `image_cap`). Mirrors `javm` `build_entry`.
     let pinned: Vec<Key> = img.pinned.iter().map(|e| e.slot.clone()).collect();
 
+    // Category-#3 bookkeeping over the data extent: one `PageState` byte per
+    // page (all `NotPresent` initially), and an empty RO-unit set. Sized from
+    // the frame's `mem` (`content_len` is a page multiple and never resizes
+    // mid-frame — CoW only adds overlay pages), so its length matches the
+    // `FrameRuntime`'s `mem_top - data_base` extent. Lives here, not on the
+    // evictable runtime, so it survives eviction (see the field doc).
+    let mat_state_pages = (mem.content_len() / paging::PAGE_SIZE as u64) as usize;
+
     // The cap-backed mappings (their PAs + pinned/initial kind) are
     // resolved in `build_runtime` when the per-frame runtime is built;
     // nothing mapping-related is needed on the frame itself.
@@ -994,6 +1046,8 @@ fn build_frame_inner(
         pc,
         cnode,
         pinned,
+        mat_state: alloc::vec![0u8; mat_state_pages],
+        ro_units: Vec::new(),
         runtime: None,
     })
 }

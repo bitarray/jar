@@ -443,6 +443,29 @@ pub fn invoke_sub_vm(nub: &mut Nub, top: &SubVmTop, depth: u64) {
     );
 }
 
+/// Like [`invoke_sub_vm`] but returns `(return_value, gas_used)` after asserting
+/// a clean trampoline halt. Used by the sub-VM gas-parity conformance test to
+/// compare the recompiler's category-#3 charge against the interpreter across
+/// the recursion (including past `RUNTIME_CACHE_CAP`, where deep frames evict +
+/// rebuild — the interpreter never evicts, so it is the consensus reference).
+pub fn invoke_sub_vm_gas(nub: &mut Nub, top: &SubVmTop, depth: u64) -> (u64, u64) {
+    let result = nub
+        .invoke_cached(top.top_instance, 0, [depth, 0, 0, 0], INITIAL_GAS)
+        .expect("invoke_cached");
+    assert!(
+        result.exit_reason == EXIT_HOSTCALL && result.exit_arg == 0,
+        "sub-VM exited non-cleanly: reason={} arg={} ret={} gas={}",
+        result.exit_reason,
+        result.exit_arg,
+        result.return_value,
+        result.gas_remaining,
+    );
+    (
+        result.return_value,
+        INITIAL_GAS.saturating_sub(result.gas_remaining),
+    )
+}
+
 /// Like [`invoke_sub_vm`] but also asserts the top-level return value. Used by
 /// the data-recurse correctness check to confirm each level reads its pinned
 /// RO data + writes its initial RW data correctly (not just that it halts).
