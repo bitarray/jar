@@ -10,9 +10,9 @@
 //! violated: **the gas a run charges must not depend on whether its frames were
 //! evicted.**
 //!
-//! Eviction (`call_loop::RUNTIME_CACHE_CAP`, 256) drops a paused deep frame's
-//! `FrameRuntime` and rebuilds it on resume; it exists only to bound memory and
-//! must be invisible to gas. The guest here
+//! Eviction (`call_loop::RUNTIME_CACHE_CAP`, currently **512**) drops a paused
+//! deep frame's `FrameRuntime` and rebuilds it on resume; it exists only to
+//! bound memory and must be invisible to gas. The guest here
 //! (`components/tests/sub-vm-reread-recurse`) **re-reads its RO + RW memory
 //! after `host_call` returns** — unlike the bench guests, which return a
 //! register value and touch no memory on the way up. That post-resume re-read
@@ -20,20 +20,22 @@
 //! pages were materialized + charged on the way down). Every level does
 //! identical work, so the recompiler's gas is exactly **affine** in depth: any
 //! window of N spawning levels charges the same total, whether or not those
-//! levels straddle the cap. We measure two equal 100-level windows —
+//! levels were evicted. We measure two equal 200-level windows that bracket the
+//! cap —
 //!
-//!   * `100 → 200` — entirely below the cap: no eviction.
-//!   * `200 → 300` — crosses the cap: the deepest ~44 frames are evicted while
-//!     paused and rebuilt on resume.
+//!   * `200 → 400` — entirely below the cap: no frame is ever evicted.
+//!   * `600 → 800` — entirely above the cap: every level evicts + rebuilds on
+//!     resume.
 //!
-//! — and assert the two increments are equal. The interpreter never evicts, so
-//! a gas-transparent recompiler is exactly the one that agrees with it. Before
-//! the fix the recompiler reset its `mat_state` / `ro_units` on eviction and
+//! — and assert the two increments are equal. (The windows must sit on opposite
+//! sides of `RUNTIME_CACHE_CAP`; if that constant is raised past ~600 or dropped
+//! below ~400, move these depths.) The interpreter never evicts, so a
+//! gas-transparent recompiler is exactly the one that agrees with it. Before the
+//! fix the recompiler reset its `mat_state` / `ro_units` on eviction and
 //! re-charged page-in / CoW for the resumed frame's re-read pages, so the
-//! across-cap window cost strictly more — a hard fork at depth > 256, invisible
-//! to the value-only gates. This test pins the fix (verified to fail without
-//! it: the across-cap window is ~one RO-unit page-in + one CoW page-in per
-//! evicted frame heavier).
+//! all-evicting window cost ~one RO-unit page-in + one RW page-in per level more
+//! — a hard fork at depth > cap, invisible to the value-only gates. This test
+//! pins the fix (verified to fail without it).
 //!
 //! Linux x86_64 only: the recompiler path needs Hyperlight + KVM.
 
@@ -65,29 +67,37 @@ fn recomp_run(depth: u64) -> (u64, u64) {
 
 #[test]
 fn eviction_is_gas_transparent() {
-    let (v100, g100) = recomp_run(100);
-    let (v200, g200) = recomp_run(200);
-    let (v300, g300) = recomp_run(300);
-
+    // Two equal 200-level windows bracketing RUNTIME_CACHE_CAP (512): the lower
+    // entirely below it (no eviction), the upper entirely above it (every level
+    // evicts + rebuilds on resume).
+    let runs: Vec<(u64, (u64, u64))> = [200u64, 400, 600, 800]
+        .iter()
+        .map(|&d| (d, recomp_run(d)))
+        .collect();
     // Guard against a silently broken run masquerading as gas agreement.
-    assert_eq!(v100, expected_return(100), "depth 100 return value");
-    assert_eq!(v200, expected_return(200), "depth 200 return value");
-    assert_eq!(v300, expected_return(300), "depth 300 return value");
+    for &(d, (v, _)) in &runs {
+        assert_eq!(v, expected_return(d), "depth {d} return value");
+    }
+    let gas = |d: u64| runs.iter().find(|(rd, _)| *rd == d).unwrap().1.1;
 
-    let step_below = g200 - g100; // 100 spawning levels, no eviction
-    let step_across = g300 - g200; // 100 spawning levels, crosses the cap (256)
+    let step_below = gas(400) - gas(200); // 200 levels, none evicted
+    let step_across = gas(800) - gas(600); // 200 levels, all evicted + rebuilt
 
     eprintln!(
-        "[sub_vm_gas_parity] gas: d100={g100} d200={g200} d300={g300}; \
-         step_below(100→200)={step_below} step_across(200→300)={step_across}",
+        "[sub_vm_gas_parity] gas: d200={} d400={} d600={} d800={}; \
+         step_below(200→400)={step_below} step_across(600→800)={step_across}",
+        gas(200),
+        gas(400),
+        gas(600),
+        gas(800),
     );
 
     assert_eq!(
         step_across,
         step_below,
         "runtime eviction leaked into gas: an evicted+resumed frame re-charged \
-         category-#3 (page-in/CoW) for its post-resume re-reads. across-cap \
-         100-level window cost {step_across}, below-cap {step_below} (delta {})",
+         category-#3 (page-in/CoW) for its post-resume re-reads. all-evicting \
+         200-level window cost {step_across}, no-eviction {step_below} (delta {})",
         step_across as i64 - step_below as i64,
     );
 }

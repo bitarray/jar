@@ -123,17 +123,23 @@ const OP_DERIVE_SPAWN: u32 = 18;
 const OP_HOST_CALL: u32 = 26;
 
 const MAX_DEPTH: usize = 32_768;
-/// Maximum number of concurrently-resident [`FrameRuntime`]s. Each
-/// runtime keeps ~48 KiB of pages alive (page table + mem/ctx/stack
-/// buffers); bounding this at 256 caps the in-kernel footprint at
-/// ~12 MiB even for pathologically deep recursion.
+/// Maximum number of concurrently-resident [`FrameRuntime`]s. A runtime now
+/// keeps alive only its page table — the PML4 + the PML4[0] demand-paging
+/// intermediates (~6 tables ≈ 24 KiB for a typical small guest; more for one
+/// touching many 2 MiB regions). The CTX / STACK / zero scratch pages are
+/// process-global, and the whole PML4[1] subtree is a borrowed per-Image PDPT
+/// template — none of it is per-frame. So 512 resident runtimes cap the
+/// evictable in-kernel footprint at roughly the same ~12 MiB the old 256 ×
+/// ~48 KiB did, while halving how often deep recursion evicts + rebuilds.
 ///
 /// On each push, the frame at depth `stack.len() - RUNTIME_CACHE_CAP`
 /// is evicted: that frame is about to fall outside the cached window
-/// and will rebuild its runtime on resume. For depth ≤ cap, no
-/// eviction — every frame keeps its cached PT + bufs across the
-/// inevitable child-HALT → parent-resume cycle.
-const RUNTIME_CACHE_CAP: usize = 256;
+/// and will rebuild its runtime on resume (re-establishing its already-charged
+/// mappings via [`jit_run::reestablish_after_rebuild`], charging no gas — the
+/// category-#3 state lives on the surviving [`KernelFrame`]). For depth ≤ cap,
+/// no eviction — every frame keeps its cached PT across the inevitable
+/// child-HALT → parent-resume cycle.
+const RUNTIME_CACHE_CAP: usize = 512;
 
 // Error codes returned to the host as InvocationResult.exit_arg when
 // the call loop bails out. The byte stays small so a hex dump in the
@@ -422,9 +428,10 @@ pub fn run_top(
                         // is pushed, the frame at depth (len -
                         // RUNTIME_CACHE_CAP) is the one just falling
                         // outside the window — evict its runtime so
-                        // talc reclaims the ~48 KiB of pages it held.
-                        // That frame will rebuild its runtime when it
-                        // eventually resumes.
+                        // talc reclaims the page-table pages it held.
+                        // That frame will rebuild its runtime (and
+                        // re-establish its mappings, no gas charged) when
+                        // it eventually resumes.
                         if stack.len() >= RUNTIME_CACHE_CAP {
                             let evict_idx = stack.len() - RUNTIME_CACHE_CAP;
                             stack[evict_idx].runtime = None;
