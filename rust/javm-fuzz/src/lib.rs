@@ -17,12 +17,12 @@
 //!
 //! A generated program ends with a deterministic **signature epilogue**
 //! ([`encode::signature_epilogue`]) that `sd`s its full final register file
-//! into a memory region mapped from the scratchpad (slot[0]) DataCap at
+//! into a memory region mapped from the scratchpad (`slot[0]`) DataCap at
 //! [`SIG_BASE`]. Each engine surfaces that region's effective bytes back to the
 //! host (`InvocationResult::scratchpad_head`), so the differential compares the
 //! **complete, uncompressed** register signature — not the old lossy x10 fold —
 //! plus exit and gas. This exercises the v3 scratchpad + DataCap CoW return path
-//! end to end (kernel maps slot[0], guest writes it, host reads it back).
+//! end to end (kernel maps `slot[0]`, guest writes it, host reads it back).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -43,7 +43,7 @@ pub mod replay;
 /// the version they were minted against; the replay test refuses a mismatch.
 pub const SIG_VERSION: u32 = 2;
 
-/// Guest VA the scratchpad (slot[0]) signature region maps at — the base of the
+/// Guest VA the scratchpad (`slot[0]`) signature region maps at — the base of the
 /// instance data extent (`javm_cap::layout::DATA_BASE`). The signature epilogue
 /// stores the register file here; both engines surface its effective bytes.
 pub const SIG_BASE: u32 = javm_cap::layout::DATA_BASE;

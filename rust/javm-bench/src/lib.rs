@@ -258,7 +258,7 @@ pub const ABORT_SENTINEL: u32 = u32::MAX;
 /// `gas_used` is `INITIAL_GAS - gas_remaining`; on an abort it is 0 (no
 /// `InvocationResult` was produced).
 ///
-/// `scratchpad_head` is the running Instance's scratchpad (slot[0]) region head
+/// `scratchpad_head` is the running Instance's scratchpad (`slot[0]`) region head
 /// — the lossless, model-conformant result readback that supersedes the former
 /// x10 fold. The fuzz differential compares it across engines and against the
 /// oracle gold (see `javm_fuzz::replay`).

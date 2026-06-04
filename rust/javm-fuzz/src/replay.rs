@@ -16,11 +16,11 @@ use std::collections::BTreeMap;
 /// Cnode slot the fuzz memory window's backing data cap occupies.
 const WINDOW_SLOT: u32 = 1;
 
-/// One page — the scratchpad (slot[0]) signature region size (the program's
+/// One page — the scratchpad (`slot[0]`) signature region size (the program's
 /// signature epilogue stores the `SIG_BYTES`-byte register file into its head).
 const SIG_REGION_BYTES: u64 = 4096;
 
-/// Map the scratchpad (slot[0]) signature region at [`SIG_BASE`] into `img`: an
+/// Map the scratchpad (`slot[0]`) signature region at [`SIG_BASE`] into `img`: an
 /// empty-content `InitialDataCap` of one page. The guest's signature epilogue
 /// CoWs this region during the run; both engines surface its effective bytes as
 /// the run's register signature.
@@ -124,8 +124,8 @@ pub fn diff_image(img: &Image) -> Diff {
 /// the appended `ecalli 0` terminator, entered at pc 0 with the program's
 /// initial register seed.
 ///
-/// The Image always maps the scratchpad (slot[0]) signature region at
-/// [`SIG_BASE`] (via [`add_signature_region`]); the program's signature epilogue
+/// The Image always maps the scratchpad (`slot[0]`) signature region at
+/// [`SIG_BASE`] (via `add_signature_region`); the program's signature epilogue
 /// stores its register file there, and both engines surface the region's
 /// effective bytes for the lossless differential.
 ///

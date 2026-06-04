@@ -139,7 +139,7 @@ impl InvokePacket {
     }
 }
 
-/// Bytes of the running Instance's scratchpad (slot[0]) region surfaced at the
+/// Bytes of the running Instance's scratchpad (`slot[0]`) region surfaced at the
 /// top-level HALT — a fixed-size **head** of the returned DataCap's effective
 /// content. The guest writes its result into the scratchpad-mapped memory
 /// region during the run (CoW into the cap); at top HALT the engine reads the
@@ -162,7 +162,7 @@ pub struct InvocationResult {
     pub exit_arg: u32,
     pub return_value: u64,
     pub gas_remaining: u64,
-    /// Effective bytes of the running Instance's scratchpad (slot[0]) region
+    /// Effective bytes of the running Instance's scratchpad (`slot[0]`) region
     /// head at top HALT (see [`SCRATCHPAD_HEAD_LEN`]). Zero when no scratchpad
     /// region is mapped.
     pub scratchpad_head: [u8; SCRATCHPAD_HEAD_LEN],

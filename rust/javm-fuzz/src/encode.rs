@@ -350,7 +350,7 @@ pub const SIG_BASE_REG: u8 = 3;
 
 /// Emit the signature epilogue (no terminator): materialize `sig_base` into the
 /// scratch base register, then `sd` each captured register to `sig_base + 8*i`.
-/// `sig_base` is the guest VA the scratchpad (slot[0]) DataCap maps at; the
+/// `sig_base` is the guest VA the scratchpad (`slot[0]`) DataCap maps at; the
 /// guest's stores CoW the region's pages, and the host reads the effective
 /// bytes back as the run's lossless register signature (vs the old lossy x10
 /// fold).

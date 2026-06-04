@@ -13,9 +13,9 @@
 /// but the slot itself is "mutably pinned" — `MGMT_MOVE`/`MGMT_SWAP` of this
 /// slot trap. On CALL the caller's scratchpad moves to the callee; on HALT/reply
 /// the callee's moves back to the caller; so the **running** Instance always
-/// holds the scratchpad here, and every other frame's slot[0] is empty (one
+/// holds the scratchpad here, and every other frame's `slot[0]` is empty (one
 /// owner — see the data-flow principle). The fuzz / kernel return path hands the
-/// top-level Instance's slot[0] `Cap::Data` back as the invocation result.
+/// top-level Instance's `slot[0]` `Cap::Data` back as the invocation result.
 pub const SCRATCHPAD_SLOT: u8 = 0;
 
 // ---- BareFrame slot keys (kernel-issued caps at chain init) ----
