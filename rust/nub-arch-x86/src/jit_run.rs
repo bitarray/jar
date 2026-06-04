@@ -95,11 +95,12 @@ static CTX_KVA: AtomicU64 = AtomicU64::new(0);
 static MAT_RANGES_PTR: AtomicPtr<crate::call_loop::MatRange> =
     AtomicPtr::new(core::ptr::null_mut());
 static MAT_RANGES_LEN: AtomicU64 = AtomicU64::new(0);
-/// Per-page source PA arena indexed by `MatRange.pas_off + page_within_range`
-/// (a dense DataCap's pages are non-contiguous slabs). `Empty` cap pages point
-/// at the frame's shared zero page.
-static MAT_PAS_PTR: AtomicPtr<u64> = AtomicPtr::new(core::ptr::null_mut());
-static MAT_PAS_LEN: AtomicU64 = AtomicU64::new(0);
+/// Physical address of the running frame's shared zero page — the source an
+/// `Empty` (absent / zero) data page resolves to (mapped RO on read,
+/// CoW-from-zero on write). Per-page cap source PAs are resolved **lazily** on
+/// fault from the frame's `mem` DataCap (see [`mem_source_pa`]); there is no
+/// eager per-page PA arena, so demand paging materializes only touched pages.
+static MAT_ZERO_PA: AtomicU64 = AtomicU64::new(0);
 /// Per-page [`javm_exec::mat::PageState`] (one byte/page), len =
 /// `(mem_top - data_base) / PAGE_SIZE`. Mutated in place by the handler.
 static MAT_STATE_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
@@ -243,29 +244,43 @@ fn mat_range_for(page_va: u32) -> Option<crate::call_loop::MatRange> {
         .find(|r| r.start <= page_va && page_va < r.end)
 }
 
-/// Source PA of page `page_va` (page-aligned) within cap-backed range `r`,
-/// read from the published per-page `MAT_PAS` arena. Every page in
-/// `[r.start, r.end)` has an arena entry (`pas_len == range page count`), so the
-/// index is in bounds by construction.
-fn mat_pa_at(r: &crate::call_loop::MatRange, page_va: u64) -> u64 {
-    let ptr = MAT_PAS_PTR.load(Ordering::SeqCst);
-    let len = MAT_PAS_LEN.load(Ordering::SeqCst) as usize;
-    let idx = r.pas_off as usize + ((page_va as u32 - r.start) / PAGE_SIZE as u32) as usize;
-    debug_assert!(idx < len && !ptr.is_null(), "mat_pa_at: index out of arena");
-    if ptr.is_null() || idx >= len {
-        return 0;
+/// Resolve the **source physical address** of guest data page `page_va`
+/// (page-aligned) on demand from the running frame's `mem` DataCap — the lazy
+/// replacement for the former eager per-page `MAT_PAS` arena. A `Loaded` slab
+/// resolves to its own PA (dense cap pages are non-contiguous); an `Empty`
+/// (absent / zero) page resolves to the shared zero page; a `Missing` page
+/// (elided — V1 never mints one) yields `None`, so the caller raises a PVM
+/// fault.
+///
+/// Reading `mem` through `OVERLAY_SINK` is sound: the guest is single-threaded,
+/// and this shared read returns a `u64` (the borrow ends) before any `&mut`
+/// write to the same cap in [`cow_into_fresh`].
+fn mem_source_pa(page_va: u64) -> Option<u64> {
+    let data_base = MAT_DATA_BASE.load(Ordering::SeqCst);
+    let sink = OVERLAY_SINK.load(Ordering::SeqCst);
+    if sink.is_null() {
+        return None;
     }
-    // SAFETY: ptr/len describe the running FrameRuntime's `mat_pas` Vec, valid
-    // until enter_frame clears these statics; `idx < len` checked above.
-    unsafe { *ptr.add(idx) }
+    // SAFETY: OVERLAY_SINK is the running frame's `mem` DataCap, exclusively
+    // ours under Hyperlight serialisation; borrowed read-only here.
+    let mem = unsafe { &*sink };
+    let i = ((page_va - data_base) / PAGE_SIZE as u64) as usize;
+    match mem.page_slot(i) {
+        javm_cap::PageSlot::Loaded(pr) => crate::paging::va_to_pa(pr.bytes.as_ptr() as u64),
+        javm_cap::PageSlot::Empty => {
+            let z = MAT_ZERO_PA.load(Ordering::SeqCst);
+            (z != 0).then_some(z)
+        }
+        javm_cap::PageSlot::Missing(_) => None,
+    }
 }
 
-/// Read-only materialization source for a 2 MiB unit: either a contiguous slab
-/// (code — page PA = `base_pa + offset`) or a cap-backed range whose pages have
-/// per-page PAs in the `MAT_PAS` arena.
+/// Read-only materialization source for a 2 MiB unit: a contiguous slab (code —
+/// page PA = `base_pa + offset`) or a cap-backed range whose page PAs are
+/// resolved lazily from the frame's `mem` (see [`mem_source_pa`]).
 enum RoSrc {
     Contig { base_pa: u64 },
-    Cap(crate::call_loop::MatRange),
+    Mem,
 }
 
 /// The static [`javm_exec::mat::PageKind`] of guest page `page_va`:
@@ -372,7 +387,7 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
         } else {
             match mat_range_for(p) {
                 Some(r) if r.kind == javm_exec::mat::PageKind::PinnedCapRo.as_u8() => {
-                    Some((r.start as u64, r.end as u64, RoSrc::Cap(r)))
+                    Some((r.start as u64, r.end as u64, RoSrc::Mem))
                 }
                 _ => None,
             }
@@ -392,14 +407,9 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
         // in-data, so it faults.
         let idx = ((pv - data_base) / PAGE_SIZE as u64) as usize;
         let cur = javm_exec::mat::PageState::from_u8(dstate[idx]);
-        let range = mat_range_for(p);
-        let (kind, src_pa) = match range {
-            Some(r) => (
-                javm_exec::mat::PageKind::from_u8(r.kind)
-                    .unwrap_or(javm_exec::mat::PageKind::PinnedCapRo),
-                // Per-page source PA (dense cap slabs are non-contiguous).
-                mat_pa_at(&r, pv),
-            ),
+        let kind = match mat_range_for(p) {
+            Some(r) => javm_exec::mat::PageKind::from_u8(r.kind)
+                .unwrap_or(javm_exec::mat::PageKind::PinnedCapRo),
             None => return false,
         };
         let (charge, next) = match javm_exec::mat::charge_for(cur, kind, is_write) {
@@ -409,6 +419,11 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
         match next {
             javm_exec::mat::PageState::PresentRo => {
                 if cur == javm_exec::mat::PageState::NotPresent {
+                    // Page-in: map the page RO at its source PA (resolved lazily
+                    // from the frame's `mem`; `None`/`Missing` → fault).
+                    let Some(src_pa) = mem_source_pa(pv) else {
+                        return false;
+                    };
                     // SAFETY: live PT, single writer; builds the path.
                     if unsafe {
                         crate::paging::pt_map_leaf(
@@ -443,11 +458,13 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
                     // be TLB-cached. A first-touch write (cur == NotPresent) maps a
                     // page that was never present, so it needs no invlpg.
                     let flush = cur == javm_exec::mat::PageState::PresentRo;
-                    // Every writable page (initial cap or ephemeral-from-zero)
-                    // CoWs a fresh private page from `src_pa` — for an ephemeral
-                    // page `src_pa` is the shared zero page, so the CoW yields a
-                    // fresh zeroed page. (Unifies the former EphemeralZero
-                    // map-writable special case into the CoW path.)
+                    // Resolve the source PA lazily (from the frame's `mem`): a
+                    // `Loaded` cap slab, or the shared zero page for an ephemeral
+                    // page (so the CoW yields a fresh zeroed page). `None`
+                    // (a `Missing` page) → fault.
+                    let Some(src_pa) = mem_source_pa(pv) else {
+                        return false;
+                    };
                     if !cow_into_fresh(pv, src_pa, pml4, owned_vec, data_base, flush) {
                         // Allocation / remap failure → fault (nothing charged
                         // yet for THIS page, but earlier pages of a straddle
@@ -583,10 +600,10 @@ fn materialize_ro_unit(
     let mut q = lo;
     while q < hi {
         // Per-page source PA: contiguous code maps `base_pa + offset`; a dense
-        // cap's pages each resolve their own slab PA from the arena.
+        // cap's pages each resolve their own slab PA lazily from the frame mem.
         let page_pa = match &src {
             RoSrc::Contig { base_pa } => base_pa + (q - r_start),
-            RoSrc::Cap(r) => mat_pa_at(r, q),
+            RoSrc::Mem => mem_source_pa(q)?,
         };
         // SAFETY: live PT, single writer; builds the path (zero-setup).
         unsafe {
@@ -689,13 +706,12 @@ pub struct FrameRuntime {
     ctx_kva: u64,
     // ---- Category-#3 lazy-materialization state (persists across
     // re-entries on this frame; published to the #PF handler each entry). ----
-    /// Cap-backed data mappings (pinned RO / initial CoW) covering the whole
-    /// data extent, each indexing a window into `mat_pas`.
+    /// Cap-backed data mappings (pinned RO / initial CoW) covering the data
+    /// extent — region bounds + kind only. Per-page source PAs are resolved
+    /// lazily on fault ([`mem_source_pa`]); there is no per-page PA arena.
     mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
-    /// Per-page source PA arena for `mat_ranges` (see `MAT_PAS_PTR`).
-    mat_pas: alloc::vec::Vec<u64>,
-    /// Shared zero page sourcing `Empty` cap pages (RO) / CoW-from-zero writes.
-    /// Owned here to keep its PA (recorded in `mat_pas`) valid for the frame.
+    /// Shared zero page sourcing `Empty` data pages (RO) / CoW-from-zero writes.
+    /// Owned here so its PA (published to `MAT_ZERO_PA`) stays valid for the frame.
     #[allow(dead_code)]
     zero_page: PageBuf,
     /// Per-page [`javm_exec::mat::PageState`], one byte/page over
@@ -754,7 +770,6 @@ pub unsafe fn build_frame_runtime(
     entry_pc: u32,
     mem_size: u32,
     mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
-    mat_pas: alloc::vec::Vec<u64>,
     zero_page: PageBuf,
 ) -> Option<FrameRuntime> {
     let helpers = HelperFns {
@@ -872,7 +887,6 @@ pub unsafe fn build_frame_runtime(
         new_cr3,
         ctx_kva,
         mat_ranges,
-        mat_pas,
         zero_page,
         mat_state,
         data_base: data_base as u32,
@@ -936,8 +950,7 @@ pub unsafe fn enter_frame(
         Ordering::SeqCst,
     );
     MAT_RANGES_LEN.store(rt.mat_ranges.len() as u64, Ordering::SeqCst);
-    MAT_PAS_PTR.store(rt.mat_pas.as_ptr() as *mut u64, Ordering::SeqCst);
-    MAT_PAS_LEN.store(rt.mat_pas.len() as u64, Ordering::SeqCst);
+    MAT_ZERO_PA.store(rt.zero_page.pa(), Ordering::SeqCst);
     MAT_STATE_PTR.store(rt.mat_state.as_mut_ptr(), Ordering::SeqCst);
     MAT_STATE_LEN.store(rt.mat_state.len() as u64, Ordering::SeqCst);
     MAT_DATA_BASE.store(rt.data_base as u64, Ordering::SeqCst);
@@ -962,8 +975,7 @@ pub unsafe fn enter_frame(
     JIT_CODE_LEN.store(0, Ordering::SeqCst);
     MAT_RANGES_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
     MAT_RANGES_LEN.store(0, Ordering::SeqCst);
-    MAT_PAS_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
-    MAT_PAS_LEN.store(0, Ordering::SeqCst);
+    MAT_ZERO_PA.store(0, Ordering::SeqCst);
     MAT_STATE_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
     MAT_STATE_LEN.store(0, Ordering::SeqCst);
     MAT_MEM_TOP.store(0, Ordering::SeqCst);

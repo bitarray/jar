@@ -213,34 +213,21 @@ pub struct KernelFrame {
 }
 
 /// One cap-backed data mapping projected into the guest address space,
-/// lazily materialized (category #3). The #PF handler scans this list
-/// when a guest access faults inside ring 3; a hit identifies the page's
-/// source PA + kind (pinned read-only vs unpinned copy-on-write), so the
-/// handler can page it in (read) or copy-on-write it (write) and charge.
-/// Pages NOT covered by any `MatRange` are ephemeral (backed directly by
-/// the frame's private `mem_buf`).
+/// lazily materialized (category #3). The #PF handler scans this list when a
+/// guest access faults inside ring 3; a hit identifies the page's **kind**
+/// (pinned read-only vs unpinned copy-on-write), so the handler knows whether a
+/// write faults or CoWs. The page's **source PA** is resolved lazily on fault
+/// from the frame's `mem` DataCap (`jit_run::mem_source_pa`), so this is just a
+/// region/kind map — `O(mappings)`, with no per-page PA arena. Pages NOT
+/// covered by any `MatRange` are outside the declared data extent and fault.
 #[derive(Clone, Copy, Debug)]
 pub struct MatRange {
     pub start: u32,
     pub end: u32,
-    /// Window `[pas_off, pas_off + pas_len)` into the frame's `mat_pas` arena:
-    /// one source physical address per page in `[start, end)`. A dense DataCap's
-    /// pages are independent page-aligned slabs (not one contiguous buffer), so
-    /// each page resolves its own PA; an absent / zero (`Empty`) page maps to the
-    /// frame's shared zero page. `MatRange` stays `Copy` (it is published to the
-    /// #PF handler by pointer), so the PAs live in the frame-owned arena rather
-    /// than inline.
-    pub pas_off: u32,
-    pub pas_len: u32,
     /// [`javm_exec::mat::PageKind`] as a `u8`: pinned slots are
     /// `PinnedCapRo` (a write hard-faults), initial slots are
     /// `UnpinnedCapCow` (a write copies-on-write).
     pub kind: u8,
-    pub source_hash: CapHash,
-    /// The V1 single-byte source slot (diagnostics only). `u8` not `Key`
-    /// so `MatRange` stays `Copy` (it is published to the #PF handler by
-    /// pointer).
-    pub source_slot: u8,
 }
 
 /// Successful loop result — what the host RPC returns to the bench
@@ -520,15 +507,12 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     // identical to the interpreter drivers (`javm`, `nub-arch-local`), so the
     // engines agree on which VAs are read-only.
     let mut mat_ranges: Vec<MatRange> = Vec::new();
-    // Per-page source PAs for the cap-backed ranges (a dense DataCap's pages are
-    // non-contiguous slabs); each `MatRange` indexes a window into this arena.
-    let mut mat_pas: Vec<u64> = Vec::new();
     // Shared per-frame zero page: the source for `Empty` (absent / zero) memory
     // pages, mapped RO or CoW'd-from-zero on write. Owned by the `FrameRuntime`
-    // so its PA stays valid for the frame's life; never written through (RO maps;
-    // a write CoWs a fresh private page), so aliasing it across pages is safe.
+    // so its PA (published to `MAT_ZERO_PA`) stays valid for the frame's life;
+    // never written through (RO maps; a write CoWs a fresh private page), so
+    // aliasing it across pages is safe.
     let zero_page = PageBuf::new(paging::PAGE_SIZE).ok_or(ERR_JIT_FAILED)?;
-    let zero_pa = zero_page.pa();
 
     // Executable code region: a `PinnedCapRo` lazily-materialized region at the
     // fixed CODE_BASE, sourced from its physical address `code_pa`. Code is
@@ -550,47 +534,30 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     let mem_size = data_base.saturating_add(extent);
     let pages = (extent / paging::PAGE_SIZE as u32) as usize;
 
-    // Pinned mappings → PinnedCapRo ranges (pushed first → precedence).
+    // Pinned mappings → PinnedCapRo ranges (pushed first → precedence). Bounds +
+    // kind only; the #PF handler resolves each page's source PA lazily from
+    // `frame.mem` (`jit_run::mem_source_pa`).
     for m in img.mappings.iter() {
         if m.path().is_empty() || !img.mapping_is_pinned(m.start as u32) {
             continue;
         }
         let span = (m.size as u32).next_multiple_of(paging::PAGE_SIZE as u32);
-        let n = (span / paging::PAGE_SIZE as u32) as usize;
-        if n == 0 {
+        if span == 0 {
             continue;
-        }
-        let base_page =
-            ((m.start as u32).saturating_sub(data_base) / paging::PAGE_SIZE as u32) as usize;
-        let pas_off = mat_pas.len() as u32;
-        for k in 0..n {
-            mat_pas.push(mem_page_pa(mem, base_page + k, zero_pa)?);
         }
         mat_ranges.push(MatRange {
             start: m.start as u32,
             end: (m.start as u32).saturating_add(span),
-            pas_off,
-            pas_len: n as u32,
             kind: javm_exec::mat::PageKind::PinnedCapRo.as_u8(),
-            source_hash: [0u8; 32],
-            source_slot: m.path().first().map_or(0, |k| k.diag_id() as u8),
         });
     }
 
     // Catch-all RW range over the whole extent (initial + ephemeral).
     if pages > 0 {
-        let pas_off = mat_pas.len() as u32;
-        for i in 0..pages {
-            mat_pas.push(mem_page_pa(mem, i, zero_pa)?);
-        }
         mat_ranges.push(MatRange {
             start: data_base,
             end: mem_size,
-            pas_off,
-            pas_len: pages as u32,
             kind: javm_exec::mat::PageKind::UnpinnedCapCow.as_u8(),
-            source_hash: [0u8; 32],
-            source_slot: 0,
         });
     }
 
@@ -611,24 +578,10 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
             frame.pc,
             mem_size,
             mat_ranges,
-            mat_pas,
             zero_page,
         )
     }
     .ok_or(ERR_JIT_FAILED)
-}
-
-/// Source physical address of page `i` of `mem` (a dense `DataCap`): a present
-/// slab's PA, or the shared `zero_pa` for an `Empty` (absent / zero) page. V1
-/// never mints `Missing`.
-fn mem_page_pa(mem: &javm_cap::DataCap, i: usize, zero_pa: u64) -> Result<u64, u32> {
-    match mem.page_slot(i) {
-        javm_cap::PageSlot::Loaded(pr) => {
-            paging::va_to_pa(pr.bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)
-        }
-        javm_cap::PageSlot::Empty => Ok(zero_pa),
-        javm_cap::PageSlot::Missing(_) => Err(ERR_MAP_BAD_KIND),
-    }
 }
 
 /// Pop the top frame; if a parent exists, reflect the popped child's
