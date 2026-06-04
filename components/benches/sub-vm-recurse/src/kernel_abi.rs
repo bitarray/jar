@@ -1,9 +1,8 @@
 //! Inline-asm wrappers around the kernel's `ecall` interface for
-//! the recursive-spawn bench guest. Mirrors `spawn-parent-m`'s ABI
-//! module but trimmed to just the two operations the bench uses:
-//! `host_derive_spawn` (op 18) and a depth-passing form of
-//! `host_call` (op 26) that lands the caller's `arg` in `a2` so the
-//! kernel can forward it as the child's φ[7].
+//! the recursive-spawn bench guest. Trimmed to just the two
+//! operations the bench uses: `host_derive_spawn` (op 18) and a
+//! depth-passing form of `host_call` (op 26) that lands the caller's
+//! `arg` in `a2` so the kernel can forward it as the child's φ[7].
 
 #![allow(dead_code, unsafe_op_in_unsafe_fn)]
 

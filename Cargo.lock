@@ -2291,20 +2291,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "spawn-child-s"
-version = "0.1.0"
-dependencies = [
- "subsoil",
-]
-
-[[package]]
-name = "spawn-parent-m"
-version = "0.1.0"
-dependencies = [
- "subsoil",
-]
-
-[[package]]
 name = "spin"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
