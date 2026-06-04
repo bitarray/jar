@@ -41,18 +41,18 @@ fn report(diverged: &[(usize, Diff)], total: usize) -> String {
     )
 }
 
-/// The acceptance case: `div x10, INT_MIN, -1`, folded. An ordinary boundary
-/// program the enumerator also produces — nothing here knows the recompiler
-/// lacked an INT_MIN/-1 guard; the differential *discovered* it (the recompiler
-/// `#DE`-aborted where the interpreter returns INT_MIN). With the guard in
-/// place, the two now agree. **This is the green, committed proof.**
+/// The acceptance case: `div x10, INT_MIN, -1`, with the signature epilogue. An
+/// ordinary boundary program the enumerator also produces — nothing here knows
+/// the recompiler lacked an INT_MIN/-1 guard; the differential *discovered* it
+/// (the recompiler `#DE`-aborted where the interpreter returns INT_MIN). With
+/// the guard in place, the two now agree. **This is the green, committed proof.**
 #[test]
 fn acceptance_div_intmin_neg1() {
     let mut init = BTreeMap::new();
     init.insert(javm_exec::regs::reg_slot_or_ff(8), 0x8000_0000_0000_0000); // x8 = i64::MIN
     init.insert(javm_exec::regs::reg_slot_or_ff(9), 0xFFFF_FFFF_FFFF_FFFF); // x9 = -1
     let mut code = vec![encode::div(10, 8, 9)];
-    code.extend(encode::fold_epilogue(None));
+    code.extend(encode::signature_epilogue(javm_fuzz::SIG_BASE));
     let prog = Program {
         code,
         init_regs: init,

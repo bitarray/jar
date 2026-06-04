@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use javm::{InProcessKernelAssist, Vm};
-use javm_cap::{Cap, CapHash, CapHashOrRef, SlotKey};
+use javm_cap::{Cap, CapHash, CapHashOrRef, Key};
 use javm_exec::ExitReason;
 
 use crate::error::KernelError;
@@ -76,7 +76,7 @@ pub fn apply_event(
             Cap::Instance(inst) => {
                 let cnode_hash = match &inst.root_cnode {
                     CapHashOrRef::Hash(h) => *h,
-                    CapHashOrRef::Ref(_) => {
+                    CapHashOrRef::Ref(_) | CapHashOrRef::Owned(_) => {
                         return Err(KernelError::Invariant(
                             "apply_event: chain instance root_cnode unsettled",
                         ));
@@ -124,7 +124,7 @@ pub fn apply_event(
                 ));
             }
         };
-        cnode_mut.set(&SlotKey::from(0u8), Some(CapHashOrRef::Hash(payload_hash)))?;
+        cnode_mut.set(&Key::from(0u8), Some(CapHashOrRef::Hash(payload_hash)))?;
     }
     state.caps.set_instance(&working_cnode_ref, cnode_arc)?;
 

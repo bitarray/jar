@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 fn rebuild(body: &[u32], regs: &BTreeMap<u8, u64>) -> Program {
     let mut code = body.to_vec();
-    code.extend(encode::fold_epilogue(None));
+    code.extend(encode::signature_epilogue(crate::SIG_BASE));
     Program {
         code,
         init_regs: regs.clone(),
@@ -18,13 +18,13 @@ fn rebuild(body: &[u32], regs: &BTreeMap<u8, u64>) -> Program {
     }
 }
 
-/// Minimize `prog` while `fails` keeps returning `true`. The trailing fold
-/// epilogue (length `fold_len`) is treated as fixed and regenerated each trial;
+/// Minimize `prog` while `fails` keeps returning `true`. The trailing signature
+/// epilogue (length `sig_len`) is treated as fixed and regenerated each trial;
 /// the body (everything before it) is shrunk by greedily removing instructions,
 /// then unneeded seed registers are dropped. `fails` re-runs the comparison and
 /// returns `true` iff the divergence still reproduces.
-pub fn shrink(prog: &Program, fold_len: usize, mut fails: impl FnMut(&Program) -> bool) -> Program {
-    let body_end = prog.code.len().saturating_sub(fold_len);
+pub fn shrink(prog: &Program, sig_len: usize, mut fails: impl FnMut(&Program) -> bool) -> Program {
+    let body_end = prog.code.len().saturating_sub(sig_len);
     let mut body: Vec<u32> = prog.code[..body_end].to_vec();
     let mut regs = prog.init_regs.clone();
 

@@ -2448,6 +2448,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-sub-vm-reread-recurse"
+version = "0.1.0"
+dependencies = [
+ "subsoil",
+]
+
+[[package]]
 name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"

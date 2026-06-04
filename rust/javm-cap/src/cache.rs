@@ -60,6 +60,7 @@
 //! `get_blob` returning `None` is treated as a hard failure by the
 //! caller.
 
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::hash::BuildHasher;
@@ -127,23 +128,78 @@ impl core::hash::Hash for CapRef {
     }
 }
 
-/// Slot/field reference: either a content-addressed blob in
-/// `cache.blobs` or a mutable working entry in `cache.instances`.
+/// Slot/field reference: a content-addressed blob in `cache.blobs`
+/// (`Hash`), a mutable working entry in `cache.instances` (`Ref`), or a
+/// single-owner cap held **inline** by the running kernel frame
+/// (`Owned`).
+///
+/// **`Owned(Box<Cap>)`** is the zero-copy ownership form: a cap the
+/// kernel frame owns outright and moves between cnode slots (and between
+/// frames, at HALT) with no cache round-trip and no data copy — the move
+/// is a `Box` pointer swap. Like `Ref` it is **runtime-only**: it never
+/// crosses the wire and is never hashed. The recompiler mints it on
+/// `derive_spawn` and moves it through `host_call`; it never `settle`s
+/// one (the host-side `settle` arm folds it into a blob for the deferred
+/// persist path).
 ///
 /// **SSZ note**: `CapHashOrRef`'s `HashTreeRoot` impl is hand-rolled,
 /// not derived. The pass-through semantics — `Hash(h)` hashes to `h` —
 /// let a freshly-published cap substitute for a `Ref` reference without
-/// changing the hash of any cap that holds it. The `Ref` arm panics:
-/// callers must `settle` a cap graph before hashing it. `Encode`
-/// mirrors `HashTreeRoot` (panic on Ref); `Decode` rejects the Ref
-/// selector (no directory context).
+/// changing the hash of any cap that holds it. The `Ref` and `Owned`
+/// arms panic: callers must `settle` a cap graph before hashing it.
+/// `Encode` mirrors `HashTreeRoot` (panic on the runtime-only arms);
+/// `Decode` only ever produces `Hash` (the wire carries selector 0).
 ///
-/// **Not `Copy`**: the `Ref(CapRef)` arm carries a refcounted handle,
-/// so the enum is `Clone`-only.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+/// **Not `Copy`**: the `Ref(CapRef)` arm carries a refcounted handle and
+/// the `Owned(Box<Cap>)` arm carries a heap allocation, so the enum is
+/// `Clone`-only.
+///
+/// **`PartialEq`/`Eq`/`Hash` are hand-written**: `Box<Cap>` blocks the
+/// derive (`Cap` is not `Eq`/`Hash`). `Hash`/`Ref` arms compare/hash by
+/// value as before; the `Owned` arm uses pointer identity (sound — the
+/// only holder, `CNodeSlots = RadixMap<_, KEY_BYTES>`, keys by the
+/// 32-byte physical key, never by value).
+#[derive(Clone, Debug)]
 pub enum CapHashOrRef {
     Hash(CapHash),
     Ref(CapRef),
+    Owned(Box<Cap>),
+}
+
+impl PartialEq for CapHashOrRef {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (CapHashOrRef::Hash(a), CapHashOrRef::Hash(b)) => a == b,
+            (CapHashOrRef::Ref(a), CapHashOrRef::Ref(b)) => a == b,
+            // Owned is single-owner and never content-compared; pointer
+            // identity is reflexive (Eq-sound) and consistent with the
+            // pointer-keyed `Hash` impl below.
+            (CapHashOrRef::Owned(a), CapHashOrRef::Owned(b)) => {
+                core::ptr::eq(a.as_ref(), b.as_ref())
+            }
+            _ => false,
+        }
+    }
+}
+impl Eq for CapHashOrRef {}
+
+impl core::hash::Hash for CapHashOrRef {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            CapHashOrRef::Hash(h) => {
+                0u8.hash(state);
+                h.hash(state);
+            }
+            CapHashOrRef::Ref(r) => {
+                1u8.hash(state);
+                r.hash(state);
+            }
+            CapHashOrRef::Owned(b) => {
+                2u8.hash(state);
+                (b.as_ref() as *const Cap).hash(state);
+            }
+        }
+    }
 }
 
 impl ssz::HashTreeRoot for CapHashOrRef {
@@ -154,6 +210,9 @@ impl ssz::HashTreeRoot for CapHashOrRef {
             CapHashOrRef::Hash(h) => *h,
             CapHashOrRef::Ref(_) => {
                 panic!("cap_hash: unresolved CapRef in cap graph; settle first")
+            }
+            CapHashOrRef::Owned(_) => {
+                panic!("cap_hash: in-flight Owned cap in cap graph; settle first")
             }
         }
     }
@@ -169,10 +228,14 @@ impl ssz::Encode for CapHashOrRef {
     fn ssz_bytes_len(&self) -> usize {
         match self {
             CapHashOrRef::Hash(_) => 1 + 32,
-            // Ref must be settled before serialisation; matches the
-            // `HashTreeRoot` contract above. Reached only by buggy code.
+            // Ref / Owned must be settled before serialisation; matches
+            // the `HashTreeRoot` contract above. Reached only by buggy
+            // code.
             CapHashOrRef::Ref(_) => {
                 panic!("ssz_bytes_len: unresolved CapRef in cap graph; settle first")
+            }
+            CapHashOrRef::Owned(_) => {
+                panic!("ssz_bytes_len: in-flight Owned cap in cap graph; settle first")
             }
         }
     }
@@ -184,6 +247,9 @@ impl ssz::Encode for CapHashOrRef {
             }
             CapHashOrRef::Ref(_) => {
                 panic!("ssz_append: unresolved CapRef in cap graph; settle first")
+            }
+            CapHashOrRef::Owned(_) => {
+                panic!("ssz_append: in-flight Owned cap in cap graph; settle first")
             }
         }
     }
@@ -236,15 +302,18 @@ impl ssz::Decode for CapHashOrRef {
 // archived form structurally can't carry a `Ref`.
 
 /// Error returned by `<CapHashOrRef as rkyv::Serialize<_>>::serialize`
-/// when the cap graph still holds a [`CapHashOrRef::Ref`] target.
-/// Callers must `settle` (or otherwise rewrite refs to hashes) before
+/// when the cap graph still holds a runtime-only target — a
+/// [`CapHashOrRef::Ref`] or [`CapHashOrRef::Owned`]. Callers must
+/// `settle` (or otherwise rewrite the target to a hash) before
 /// rkyv-encoding the cap.
 #[derive(Debug)]
 pub struct CapHasRefError;
 
 impl core::fmt::Display for CapHasRefError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("cap holds a CapHashOrRef::Ref target; settle before rkyv encode")
+        f.write_str(
+            "cap holds a runtime-only CapHashOrRef target (Ref/Owned); settle before rkyv encode",
+        )
     }
 }
 
@@ -257,10 +326,16 @@ impl rkyv::Archive for CapHashOrRef {
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         match self {
             CapHashOrRef::Hash(h) => <CapHash as rkyv::Archive>::resolve(h, resolver, out),
-            // Unreachable if Serialize was called first (it errors on Ref).
-            // Defensive panic for the "hand-built resolver" path.
+            // Unreachable if Serialize was called first (it errors on the
+            // runtime-only arms). Defensive panic for the "hand-built
+            // resolver" path.
             CapHashOrRef::Ref(_) => {
                 panic!("CapHashOrRef::Ref in archive resolve; Serialize should have rejected first")
+            }
+            CapHashOrRef::Owned(_) => {
+                panic!(
+                    "CapHashOrRef::Owned in archive resolve; Serialize should have rejected first"
+                )
             }
         }
     }
@@ -278,7 +353,9 @@ where
     ) -> Result<Self::Resolver, <S as rkyv::rancor::Fallible>::Error> {
         match self {
             CapHashOrRef::Hash(h) => <CapHash as rkyv::Serialize<S>>::serialize(h, serializer),
-            CapHashOrRef::Ref(_) => Err(rkyv::rancor::Source::new(CapHasRefError)),
+            CapHashOrRef::Ref(_) | CapHashOrRef::Owned(_) => {
+                Err(rkyv::rancor::Source::new(CapHasRefError))
+            }
         }
     }
 }
@@ -421,6 +498,9 @@ impl<S: BuildHasher> CacheDirectory<S> {
         match key {
             CapHashOrRef::Hash(h) => self.get_blob(&h),
             CapHashOrRef::Ref(r) => self.get_instance(&r),
+            // `Owned` lives inline on the kernel frame, not in the
+            // directory; the holder dereferences the `Box` directly.
+            CapHashOrRef::Owned(_) => None,
         }
     }
 
@@ -544,6 +624,70 @@ impl<S: BuildHasher> CacheDirectory<S> {
         match key {
             CapHashOrRef::Hash(h) => Ok(h),
             CapHashOrRef::Ref(r) => self.settle_ref(&r),
+            CapHashOrRef::Owned(b) => self.settle_owned(*b),
+        }
+    }
+
+    /// Settle an inline `Owned` cap: recursively rewrite its nested slot
+    /// targets (`Ref`/`Owned`) to `Hash`, flush a `Data` cap's CoW
+    /// overlay so it is hashable, then content-address it into `blobs`
+    /// and return the hash.
+    ///
+    /// The recompiler never calls this — it *moves* `Owned` caps and
+    /// drops them at frame pop. It exists for the host-side deferred
+    /// persist path (turn a finished frame's owned cap into a blob).
+    fn settle_owned(&self, mut cap: Cap) -> Result<CapHash, CacheError> {
+        // 1. Settle every nested slot target to a Hash, in place.
+        self.settle_targets_in(&mut cap)?;
+        // 2. Hashing requires an empty overlay; fold a dirty Data cap.
+        if let Cap::Data(d) = &cap
+            && !d.overlay.is_empty()
+        {
+            cap = Cap::Data(d.flush());
+        }
+        // 3. Content-address into blobs.
+        let hash = cap.cap_hash();
+        self.put_cap_with_hash(hash, &cap)?;
+        Ok(hash)
+    }
+
+    /// Rewrite every direct slot target of `cap` (CNode slots, Instance
+    /// `root_cnode`) from a runtime-only `Ref`/`Owned` to its settled
+    /// `Hash`, recursing into nested `Owned` caps.
+    fn settle_targets_in(&self, cap: &mut Cap) -> Result<(), CacheError> {
+        match cap {
+            Cap::CNode(cn) => {
+                for (_, mo) in cn.slots.iter_mut() {
+                    if let ssz::MissingOr::Materialized(t) = mo {
+                        self.settle_target(t)?;
+                    }
+                }
+            }
+            Cap::Instance(inst) => self.settle_target(&mut inst.root_cnode)?,
+            Cap::Data(_) | Cap::Image(_) | Cap::Type(_) => {}
+        }
+        Ok(())
+    }
+
+    /// Settle one slot target in place: `Hash` unchanged, `Ref` via
+    /// [`Self::settle_ref`], `Owned` recursively via [`Self::settle_owned`].
+    fn settle_target(&self, t: &mut CapHashOrRef) -> Result<(), CacheError> {
+        match t {
+            CapHashOrRef::Hash(_) => Ok(()),
+            CapHashOrRef::Ref(r) => {
+                let h = self.settle_ref(r)?;
+                *t = CapHashOrRef::Hash(h);
+                Ok(())
+            }
+            CapHashOrRef::Owned(_) => {
+                let CapHashOrRef::Owned(b) = core::mem::replace(t, CapHashOrRef::Hash([0u8; 32]))
+                else {
+                    unreachable!("matched Owned above")
+                };
+                let h = self.settle_owned(*b)?;
+                *t = CapHashOrRef::Hash(h);
+                Ok(())
+            }
         }
     }
 
@@ -626,11 +770,6 @@ fn collect_ref_targets(cap: &Cap) -> Vec<CapRef> {
                 out.push(r.clone());
             }
         }
-        Cap::DataView(view) => {
-            if let CapHashOrRef::Ref(r) = &view.backing {
-                out.push(r.clone());
-            }
-        }
         Cap::Data(_) | Cap::Image(_) | Cap::Type(_) => {}
     }
     out
@@ -662,13 +801,6 @@ fn rewrite_ref_targets(cap: &mut Cap, resolved: &[(CapRef, CapHash)]) {
                 && let Some(h) = lookup(r)
             {
                 inst.root_cnode = CapHashOrRef::Hash(h);
-            }
-        }
-        Cap::DataView(view) => {
-            if let CapHashOrRef::Ref(r) = &view.backing
-                && let Some(h) = lookup(r)
-            {
-                view.backing = CapHashOrRef::Hash(h);
             }
         }
         Cap::Data(_) | Cap::Image(_) | Cap::Type(_) => {}

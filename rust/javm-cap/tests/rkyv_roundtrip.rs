@@ -12,10 +12,8 @@ use javm_cap::cache::CapHashOrRef;
 use javm_cap::cap::page::{PageBytes, PageSlot};
 use javm_cap::image::EndpointDef;
 use javm_cap::{
-    CNodeCap, Cap, DataCap, DataGroup, DataGroups, DataViewCap, GROUP_SIZE, NUM_REGS, PAGE_SIZE,
-    SlotKey, TypeCap, image::Image,
+    CNodeCap, Cap, DataCap, GROUP_SIZE, Key, NUM_REGS, PAGE_SIZE, PageSlab, TypeCap, image::Image,
 };
-use ssz::MissingOr;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -95,34 +93,53 @@ fn paged_data_roundtrip_preserves_hash() {
         PageSlot::Loaded(Arc::new(page)),
         PageSlot::Missing([0xDD; 32]),
     ];
-    let mut groups: DataGroups = DataGroups::new();
-    groups.insert(
-        DataCap::group_key(0),
-        MissingOr::Materialized(DataGroup { pages }),
-    );
     round_trip(Cap::Data(DataCap {
-        size: GROUP_SIZE as u64,
-        groups,
+        backing: Arc::new(PageSlab {
+            size: GROUP_SIZE as u64,
+            pages,
+        }),
+        overlay: BTreeMap::new(),
     }));
 }
 
 #[test]
-fn data_view_roundtrip_preserves_hash() {
-    let backing = DataCap::from_bytes_sized(b"backing", 2 * PAGE_SIZE as u64);
-    let backing_hash = Cap::Data(backing).cap_hash();
-    let mut view = DataViewCap::new(CapHashOrRef::Hash(backing_hash), 2 * PAGE_SIZE as u64);
+fn data_overlay_roundtrip_preserves_effective_bytes() {
+    // A cap with a live CoW overlay is *not* hashable (it must be flushed
+    // first), but the rkyv wire form must still survive the round trip — this
+    // is the path the zero-copy slot return rides. Compare effective bytes.
+    let mut cap = DataCap::from_bytes_sized(b"backing-page-0", 2 * PAGE_SIZE as u64);
     let mut content = vec![0u8; PAGE_SIZE];
     content[..3].copy_from_slice(b"ovl");
-    view.write_page(0, &content);
-    round_trip(Cap::DataView(view));
+    cap.write_page(0, &content);
+    assert!(cap.is_dirty(0));
+
+    let bytes =
+        rkyv::to_bytes::<rkyv::rancor::Error>(&Cap::Data(cap.clone())).expect("rkyv encode");
+    let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
+    aligned.extend_from_slice(&bytes);
+    let archived = rkyv::access::<rkyv::Archived<Cap>, rkyv::rancor::Error>(aligned.as_slice())
+        .expect("rkyv access");
+    let recovered: Cap =
+        rkyv::deserialize::<Cap, rkyv::rancor::Error>(archived).expect("rkyv deserialize");
+    let Cap::Data(rec) = recovered else {
+        panic!("expected Cap::Data")
+    };
+    assert!(rec.is_dirty(0), "overlay page survives the round trip");
+    let (mut a, mut b) = (vec![0u8; 2 * PAGE_SIZE], vec![0u8; 2 * PAGE_SIZE]);
+    cap.copy_into(0, &mut a);
+    rec.copy_into(0, &mut b);
+    assert_eq!(
+        a, b,
+        "effective (overlay+backing) bytes preserved across rkyv"
+    );
 }
 
 #[test]
 fn cnode_with_populated_slot_roundtrips() {
     let mut cn = CNodeCap::new();
-    cn.set(&SlotKey::from(2u8), Some(CapHashOrRef::Hash([0xEE; 32])))
+    cn.set(&Key::from(2u8), Some(CapHashOrRef::Hash([0xEE; 32])))
         .expect("set slot 2");
-    cn.set(&SlotKey::from(7u8), Some(CapHashOrRef::Hash([0xFF; 32])))
+    cn.set(&Key::from(7u8), Some(CapHashOrRef::Hash([0xFF; 32])))
         .expect("set slot 7");
     round_trip(Cap::CNode(cn));
 }
@@ -137,7 +154,7 @@ fn ref_in_cap_errors_on_encode() {
     let h = cache.put_cap(&blob).expect("put_cap");
     let capref = cache.promote_blob_to_instance(&h).expect("promote");
     let mut cn = CNodeCap::new();
-    cn.set(&SlotKey::from(0u8), Some(CapHashOrRef::Ref(capref)))
+    cn.set(&Key::from(0u8), Some(CapHashOrRef::Ref(capref)))
         .expect("set ref");
     let cap = Cap::CNode(cn);
     let err = rkyv::to_bytes::<rkyv::rancor::Error>(&cap).expect_err("must reject Ref");
@@ -148,6 +165,27 @@ fn ref_in_cap_errors_on_encode() {
         let msg = format!("{err}");
         assert!(
             msg.contains("CapHashOrRef::Ref") || msg.contains("CapRef") || msg.contains("settle"),
+            "expected CapHasRefError in chain, got: {msg}"
+        );
+    }
+}
+
+#[test]
+fn owned_in_cap_errors_on_encode() {
+    // An in-flight `Owned(Box<Cap>)` slot is runtime-only — like `Ref`, it
+    // has no wire form and rkyv encode must surface a typed error (no panic).
+    let mut cn = CNodeCap::new();
+    cn.set(
+        &Key::from(0u8),
+        Some(CapHashOrRef::Owned(Box::new(Cap::data_inline(b"payload")))),
+    )
+    .expect("set owned");
+    let cap = Cap::CNode(cn);
+    let err = rkyv::to_bytes::<rkyv::rancor::Error>(&cap).expect_err("must reject Owned");
+    if cfg!(debug_assertions) {
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Owned") || msg.contains("settle"),
             "expected CapHasRefError in chain, got: {msg}"
         );
     }

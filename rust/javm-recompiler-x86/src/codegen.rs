@@ -530,17 +530,7 @@ impl Compiler {
         if shift_reg == Reg::RCX {
             self.asm.shift_cl32(shift_op, dst);
         } else if dst == Reg::RCX {
-            // dst *is* RCX (φ[12] = x15), which we also need as the CL shift
-            // count register. Snapshot dst's value into SCRATCH FIRST (before
-            // RCX is overwritten), shift the snapshot, then write it back.
-            // (Mirrors `emit_shift_by_reg64`; the earlier version read `dst`
-            // *after* clobbering RCX, shifting the count instead of the value.)
-            self.asm.mov_rr(SCRATCH, dst);
-            self.asm.push(Reg::RCX);
-            self.asm.mov_rr(Reg::RCX, shift_reg);
-            self.asm.shift_cl32(shift_op, SCRATCH);
-            self.asm.pop(Reg::RCX);
-            self.asm.mov_rr(dst, SCRATCH);
+            self.emit_shift_dst_is_rcx(shift_reg, shift_op, false);
         } else {
             self.asm.push(Reg::RCX);
             self.asm.mov_rr(Reg::RCX, shift_reg);
@@ -553,18 +543,36 @@ impl Compiler {
         if shift_reg == Reg::RCX {
             self.asm.shift_cl64(shift_op, dst);
         } else if dst == Reg::RCX {
-            self.asm.mov_rr(SCRATCH, dst);
-            self.asm.push(Reg::RCX);
-            self.asm.mov_rr(Reg::RCX, shift_reg);
-            self.asm.shift_cl64(shift_op, SCRATCH);
-            self.asm.pop(Reg::RCX);
-            self.asm.mov_rr(dst, SCRATCH);
+            self.emit_shift_dst_is_rcx(shift_reg, shift_op, true);
         } else {
             self.asm.push(Reg::RCX);
             self.asm.mov_rr(Reg::RCX, shift_reg);
             self.asm.shift_cl64(shift_op, dst);
             self.asm.pop(Reg::RCX);
         }
+    }
+
+    /// Shift when `dst` is RCX (φ[12] = x15), which is also the CL count
+    /// register. The value to shift currently lives in RCX and the count in
+    /// `shift_reg` (≠ RCX). The caller may have routed `shift_reg` through
+    /// `SCRATCH` (it does when `dst == rs2`, e.g. `sra x15, x2, x15`), so we
+    /// must read the count BEFORE touching `SCRATCH`: stash the value on the
+    /// stack, load the count into RCX, then pop the value into `SCRATCH` and
+    /// shift it. Correct whether `shift_reg` is `SCRATCH` or any other register.
+    ///
+    /// (The earlier `mov SCRATCH, dst` snapshot clobbered the count when the
+    /// caller had stashed it in `SCRATCH` — the `dst == rs2 == RCX` shift bug
+    /// the lossless fuzz signature surfaced.)
+    fn emit_shift_dst_is_rcx(&mut self, shift_reg: Reg, shift_op: u8, is_64: bool) {
+        self.asm.push(Reg::RCX); // save dst's value (currently in RCX)
+        self.asm.mov_rr(Reg::RCX, shift_reg); // RCX = count
+        self.asm.pop(SCRATCH); // SCRATCH = value (count no longer aliased here)
+        if is_64 {
+            self.asm.shift_cl64(shift_op, SCRATCH);
+        } else {
+            self.asm.shift_cl32(shift_op, SCRATCH);
+        }
+        self.asm.mov_rr(Reg::RCX, SCRATCH); // dst (RCX) = result
     }
 
     /// Emit an exit sequence that sets exit_reason and exit_arg.

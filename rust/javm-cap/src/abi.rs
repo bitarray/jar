@@ -4,9 +4,19 @@
 //! referencing them).
 //!
 //! Under the V1 single-byte ABI a slot is named by a one-byte
-//! [`crate::SlotKey`]; these constants are the byte values. Wrap with
-//! `SlotKey::from(BARE_*_SLOT)` at the call site — the same `u8 → SlotKey`
-//! boundary the ecall handlers use (`SlotKey::from((gpr & 0xFF) as u8)`).
+//! [`crate::Key`]; these constants are the byte values. Wrap with
+//! `Key::from(BARE_*_SLOT)` at the call site — the same `u8 → Key`
+//! boundary the ecall handlers use (`Key::from((gpr & 0xFF) as u8)`).
+
+/// The **scratchpad slot**: the single cap-shaped data-flow channel between a
+/// caller and callee. Its *contents* may be freely mutated and reset to empty,
+/// but the slot itself is "mutably pinned" — `MGMT_MOVE`/`MGMT_SWAP` of this
+/// slot trap. On CALL the caller's scratchpad moves to the callee; on HALT/reply
+/// the callee's moves back to the caller; so the **running** Instance always
+/// holds the scratchpad here, and every other frame's `slot[0]` is empty (one
+/// owner — see the data-flow principle). The fuzz / kernel return path hands the
+/// top-level Instance's `slot[0]` `Cap::Data` back as the invocation result.
+pub const SCRATCHPAD_SLOT: u8 = 0;
 
 // ---- BareFrame slot keys (kernel-issued caps at chain init) ----
 

@@ -40,17 +40,19 @@ use javm_recompiler_x86::codegen::{CompileResult, Compiler, HelperFns};
 use javm_cap::CapHash;
 
 use crate::page_alloc::PageBuf;
-use crate::paging::{PAGE_SIZE, Perm, TemplatePT};
+use crate::paging::{PAGE_SIZE, Perm, Pml4SlotTemplate, TemplatePT};
 
 /// One cached Image's worth of compiled artifacts.
 ///
 /// The arena holds DISPATCH / JIT / TRAMP regions contiguously,
-/// page-aligned. The `template` is a pre-built PD
-/// subtree (one PD + up to a handful of PT pages) whose leaf PTEs
-/// already point at the arena's pages with the right permissions —
-/// per-call page tables install the PD via
-/// [`PageTable::install_borrowed_pd`](crate::paging::PageTable::install_borrowed_pd)
-/// instead of running `pt.map` over the arena.
+/// page-aligned. The `template` is a pre-built PD subtree (one PD + up to a
+/// handful of PT pages) whose leaf PTEs already point at the arena's pages
+/// with the right permissions. It is borrowed as the META entry of
+/// `pml4_slot_template` (the whole PML4 slot-1 PDPT, which also points
+/// CTX/STACK at the global shared pages); per-call page tables install that
+/// whole subtree with one
+/// [`PageTable::install_borrowed_pdpt`](crate::paging::PageTable::install_borrowed_pdpt)
+/// instead of running `pt.map` over the arena + CTX + STACK.
 ///
 /// The `trap_table` is kept outside the arena — `jit_pf_handler` reads
 /// it via static atomics and never needs it mapped into ring-3.
@@ -77,15 +79,21 @@ pub struct CompiledImage {
     /// resume) and the access width (category-#3 straddle page-set) from
     /// a faulting RIP.
     pub trap_table: Vec<(u32, u32, u32)>,
-    /// Template PD subtree mapping the arena pages at per-call VAs.
-    /// Per-call PTs install [`template_pd_pa`] into PDPT[1] of the
-    /// META PML4 slot; this `template` owns the backing PD + PT pages
-    /// and frees them on eviction (V1: effectively never).
+    /// Template PD subtree mapping the arena pages at per-call VAs. Owns the
+    /// backing PD + PT pages (freed on image eviction — V1: effectively never);
+    /// its PD is borrowed as PDPT[META] by [`pml4_slot_template`] below.
     #[allow(dead_code)]
     pub template: TemplatePT,
-    /// Physical address of `template`'s PD page, cached for fast
+    /// Template for the whole PML4 slot-1 subtree (PDPT covering CTX | META |
+    /// STACK). Per-call PTs install [`template_pdpt_pa`] into the PML4 with one
+    /// borrowed write ([`PageTable::install_borrowed_pdpt`](crate::paging::PageTable::install_borrowed_pdpt)),
+    /// avoiding per-frame CTX/STACK PDPT/PD/PT allocation. Owns the PDPT + the
+    /// CTX/STACK PD/PT pages (the META PD is owned by `template`).
+    #[allow(dead_code)]
+    pub pml4_slot_template: Pml4SlotTemplate,
+    /// Physical address of `pml4_slot_template`'s PDPT page, cached for fast
     /// install on the per-call hot path.
-    pub template_pd_pa: u64,
+    pub template_pdpt_pa: u64,
 }
 
 /// Process-wide compile cache.
@@ -145,6 +153,9 @@ pub fn get_or_compile(
     code_base: u32,
     arena_base_va: u64,
     ctx_va: u64,
+    stack_va: u64,
+    ctx_pd_pa: u64,
+    stack_pd_pa: u64,
     mem_cycles: u8,
     helpers: HelperFns,
 ) -> &'static CompiledImage {
@@ -248,6 +259,23 @@ pub fn get_or_compile(
             .pd_pa()
             .expect("template PD must be in kernel half");
 
+        // Build this Image's PML4 slot-1 PDPT once: CTX/STACK borrow the
+        // process-global CTX/STACK PD subtrees, META this Image's arena PD. The
+        // PDPT is the only table owned per Image; per-call PTs install it with a
+        // single borrowed PML4 write.
+        let pml4_slot_template = Pml4SlotTemplate::new(
+            ctx_va,
+            ctx_pd_pa,
+            arena_base_va,
+            template_pd_pa,
+            stack_va,
+            stack_pd_pa,
+        )
+        .expect("Pml4SlotTemplate alloc");
+        let template_pdpt_pa = pml4_slot_template
+            .pdpt_pa()
+            .expect("template PDPT must be in kernel half");
+
         map.insert(
             *image_hash,
             CompiledImage {
@@ -259,7 +287,8 @@ pub fn get_or_compile(
                 exit_label_offset,
                 trap_table,
                 template,
-                template_pd_pa,
+                pml4_slot_template,
+                template_pdpt_pa,
             },
         );
     }

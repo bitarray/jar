@@ -17,7 +17,7 @@
 
 use javm::{KernelImage, kernel_image_hash};
 use javm_cap::image::Image;
-use javm_cap::{CNodeCap, CacheDirectory, Cap, CapHash, CapHashOrRef, NUM_REGS, SlotKey};
+use javm_cap::{CNodeCap, CacheDirectory, Cap, CapHash, CapHashOrRef, Key, NUM_REGS};
 
 use crate::abi;
 use crate::error::KernelError;
@@ -84,8 +84,8 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     //    image; remember each slot's content hash so the Image can
     //    reference them, and so the root cnode can bind to them later.
     use javm_cap::image::PinnedCap;
-    let mut chain_pinned_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
-    let mut chain_initial_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
+    let mut chain_pinned_hashes: Vec<(Key, CapHash)> = Vec::new();
+    let mut chain_initial_hashes: Vec<(Key, CapHash)> = Vec::new();
     for (slot, pinned) in &chain_image.pinned_slots {
         let h = match pinned {
             PinnedCap::Data { content, size } => state
@@ -195,45 +195,42 @@ pub fn genesis(chain_image: Image) -> Result<Genesis, KernelError> {
     //    are republished alongside (they were also republished by
     //    chain image step above, but the cnode references them by hash
     //    so we just locate the hashes).
-    let mut entries: Vec<(SlotKey, CapHashOrRef)> = vec![
+    let mut entries: Vec<(Key, CapHashOrRef)> = vec![
+        (Key::from(abi::BARE_GAS_SLOT), CapHashOrRef::Hash(gas_hash)),
         (
-            SlotKey::from(abi::BARE_GAS_SLOT),
-            CapHashOrRef::Hash(gas_hash),
-        ),
-        (
-            SlotKey::from(abi::BARE_QUOTA_SLOT),
+            Key::from(abi::BARE_QUOTA_SLOT),
             CapHashOrRef::Hash(quota_hash),
         ),
         (
-            SlotKey::from(abi::BARE_YIELD_CATCHER_SLOT),
+            Key::from(abi::BARE_YIELD_CATCHER_SLOT),
             CapHashOrRef::Hash(yield_catcher_hash),
         ),
         (
-            SlotKey::from(abi::BARE_SET_GAS_METER_SLOT),
+            Key::from(abi::BARE_SET_GAS_METER_SLOT),
             CapHashOrRef::Hash(set_gas_meter_hash),
         ),
         (
-            SlotKey::from(abi::BARE_SET_STORAGE_QUOTA_SLOT),
+            Key::from(abi::BARE_SET_STORAGE_QUOTA_SLOT),
             CapHashOrRef::Hash(set_storage_quota_hash),
         ),
         (
-            SlotKey::from(abi::BARE_MINT_GAS_SLOT),
+            Key::from(abi::BARE_MINT_GAS_SLOT),
             CapHashOrRef::Hash(mint_gas_hash),
         ),
         (
-            SlotKey::from(abi::BARE_MINT_QUOTA_SLOT),
+            Key::from(abi::BARE_MINT_QUOTA_SLOT),
             CapHashOrRef::Hash(mint_quota_hash),
         ),
         (
-            SlotKey::from(abi::BARE_CREATE_YIELD_CATCHER_SLOT),
+            Key::from(abi::BARE_CREATE_YIELD_CATCHER_SLOT),
             CapHashOrRef::Hash(create_yc_hash),
         ),
         (
-            SlotKey::from(abi::BARE_HOST_OPEN_SLOT),
+            Key::from(abi::BARE_HOST_OPEN_SLOT),
             CapHashOrRef::Hash(host_open_hash),
         ),
         (
-            SlotKey::from(abi::BARE_HOST_SAVE_SLOT),
+            Key::from(abi::BARE_HOST_SAVE_SLOT),
             CapHashOrRef::Hash(host_save_hash),
         ),
     ];
@@ -303,5 +300,7 @@ fn placeholder_kernel_image() -> Image {
         pinned_slots: BTreeMap::new(),
         initial_slots: BTreeMap::new(),
         yield_marker_slot: None,
+        gas_slots: Vec::new(),
+        quota_slots: Vec::new(),
     }
 }

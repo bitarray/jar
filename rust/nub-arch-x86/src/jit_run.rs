@@ -53,8 +53,8 @@
 extern crate alloc;
 
 use crate::jit_cache;
-use crate::page_alloc::PageBuf;
-use crate::paging::{PAGE_SIZE, PageTable, Perm};
+use crate::page_alloc::GlobalPage;
+use crate::paging::{PAGE_SIZE, PageTable};
 use crate::ring3;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use hyperlight_guest_bin::exception::arch::{Context, ExceptionInfo, HANDLERS};
@@ -88,17 +88,60 @@ static CTX_KVA: AtomicU64 = AtomicU64::new(0);
 // write-faults). The DATA region is fully covered by `MAT_RANGES` entries
 // sourced from the Instance's `mem` DataCap: pinned VAs are `PinnedCapRo`, the
 // rest `UnpinnedCapCow` (initial slabs or — for ephemeral/zero pages — the
-// shared zero page, CoW-from-zero on write). CoW'd pages are appended to the
-// per-frame dirty sink (frame-local scaffolding, see `call_loop`).
+// shared zero page, CoW-from-zero on write). CoW'd pages are inserted into the
+// running frame's `mem` DataCap overlay (the cap is the source of truth — see
+// `OVERLAY_SINK` and `call_loop`).
+
+/// Process-global, leak-once read-only zero page — the shared CoW/page-in source
+/// for every `Empty` (absent / zero) guest data page across all frames. It is
+/// only ever a materialization *source* (a write CoWs a fresh private page), so
+/// one immutable physical page backs every frame without aliasing hazard.
+static ZERO_PAGE: GlobalPage = GlobalPage::new();
+
+/// Process-global, leak-once ring-3 [`JitContext`] scratch page (mapped at the
+/// fixed [`CTX_VA_M`] in every frame's PT) and ring-3 native x86 stack page
+/// (at [`STACK_VA_M`]). Shared across frames because only **one** frame runs in
+/// ring 3 at a time (cooperative nesting — each `host_call` fully exits to ring
+/// 0), and no ctx/stack state must survive a `host_call` exit: everything the
+/// driver needs persists through [`ExitInfo`] → `KernelFrame` and is re-stamped
+/// by [`enter_frame`] on resume (regs/gas/pc + the frame-constant
+/// `dispatch_table`/`code_base`); the ring-3 stack is reset to its top every
+/// entry; `host_rsp_base` and the spilled x3/x4 are per-execution scratch the
+/// guest re-initialises. This removes the per-frame CTX + STACK `PageBuf`s.
+static CTX_PAGE: GlobalPage = GlobalPage::new();
+static STACK_PAGE: GlobalPage = GlobalPage::new();
+
+/// PD physical addresses of the process-global CTX / STACK 1 GiB PD subtrees
+/// (PD → PT → the shared CTX/STACK page above), built + leaked once and
+/// borrowed as the CTX/STACK entries of *every* Image's `Pml4SlotTemplate`, so
+/// those identical tables are not duplicated per Image. Lazily resolved on
+/// first compile (single-threaded guest → a plain load/store suffices).
+static CTX_PD_PA: AtomicU64 = AtomicU64::new(0);
+static STACK_PD_PA: AtomicU64 = AtomicU64::new(0);
+
+/// Resolve a global CTX/STACK PD PA, building + leaking the PD subtree mapping
+/// `page_pa` at `va` on first call.
+fn global_pd_pa(slot: &AtomicU64, va: u64, page_pa: u64) -> u64 {
+    let cur = slot.load(Ordering::Acquire);
+    if cur != 0 {
+        return cur;
+    }
+    let pa = crate::paging::Pml4SlotTemplate::leak_global_pd(va, page_pa)
+        .expect("global CTX/STACK PD alloc");
+    slot.store(pa, Ordering::Release);
+    pa
+}
 
 static MAT_RANGES_PTR: AtomicPtr<crate::call_loop::MatRange> =
     AtomicPtr::new(core::ptr::null_mut());
 static MAT_RANGES_LEN: AtomicU64 = AtomicU64::new(0);
-/// Per-page source PA arena indexed by `MatRange.pas_off + page_within_range`
-/// (a dense DataCap's pages are non-contiguous slabs). `Empty` cap pages point
-/// at the frame's shared zero page.
-static MAT_PAS_PTR: AtomicPtr<u64> = AtomicPtr::new(core::ptr::null_mut());
-static MAT_PAS_LEN: AtomicU64 = AtomicU64::new(0);
+/// Physical address of the process-global shared zero page ([`ZERO_PAGE`]) — the
+/// source an `Empty` (absent / zero) data page resolves to (mapped RO on read,
+/// CoW-from-zero on write). Republished each `enter_frame` so the #PF handler
+/// reads it with one atomic load. Per-page cap source PAs are resolved **lazily**
+/// on fault from the frame's `mem` DataCap (see [`mem_source_pa`]); there is no
+/// eager per-page PA arena, so demand paging materializes only touched pages.
+static MAT_ZERO_PA: AtomicU64 = AtomicU64::new(0);
 /// Per-page [`javm_exec::mat::PageState`] (one byte/page), len =
 /// `(mem_top - data_base) / PAGE_SIZE`. Mutated in place by the handler.
 static MAT_STATE_PTR: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
@@ -124,10 +167,19 @@ static MAT_CODE_PA: AtomicU64 = AtomicU64::new(0);
 /// unit is charged one `page_in` exactly once, matching the interpreter. A
 /// `Vec` (not a fixed bitmap) because the unit set is keyed by `unit_base`,
 /// not a dense cluster index, and it grows in the handler (realloc-safe via
-/// the `&mut Vec` indirection, like `DIRTY_PAGE_SINK`).
+/// the `&mut Vec` indirection, like `OVERLAY_SINK`'s `&mut DataCap`).
 static MAT_RO_UNITS_SINK: AtomicPtr<alloc::vec::Vec<u32>> = AtomicPtr::new(core::ptr::null_mut());
-static DIRTY_PAGE_SINK: AtomicPtr<alloc::vec::Vec<crate::call_loop::DirtyPage>> =
-    AtomicPtr::new(core::ptr::null_mut());
+/// Pointer to the running frame's `mem` DataCap (`KernelFrame.mem`). The #PF
+/// handler copy-on-writes each guest write into a fresh page and inserts it
+/// into this cap's `overlay` (keyed by data-extent page index) — so the cap
+/// carries the frame's writes across any future runtime reclamation (host-backed
+/// swap: a rebuilt runtime sources the overlay page, not the immutable backing)
+/// and, in Phase 3, a frame-to-frame move at HALT. Re-published every
+/// `enter_frame`. The Arc
+/// pointee of each inserted page is address-stable across `BTreeMap` realloc,
+/// so the PA mapped into the guest PT stays valid (same guarantee the old
+/// per-frame dirty-page `Vec` relied on).
+static OVERLAY_SINK: AtomicPtr<javm_cap::DataCap> = AtomicPtr::new(core::ptr::null_mut());
 static ACTIVE_PT_PML4_KVA: AtomicU64 = AtomicU64::new(0);
 /// Type-erased pointer ([`crate::paging::PageTable::owned_vec_ptr`]) to
 /// the active PT's `owned` table list — the handler's `pt_map_leaf`
@@ -217,8 +269,23 @@ fn trap_lookup(offset: u32) -> (u32, u32) {
     }
 }
 
+/// Find the [`crate::call_loop::MatRange`] covering page `page_va` in `ranges`,
+/// or `None` for an ephemeral page. Pinned ranges are pushed first, so the
+/// first hit is the read-only one when a VA is covered by both a pinned range
+/// and the catch-all RW range.
+fn mat_range_for_in(
+    ranges: &[crate::call_loop::MatRange],
+    page_va: u32,
+) -> Option<crate::call_loop::MatRange> {
+    ranges
+        .iter()
+        .copied()
+        .find(|r| r.start <= page_va && page_va < r.end)
+}
+
 /// Find the cap-backed [`crate::call_loop::MatRange`] covering page
-/// `page_va` (page-aligned), or `None` for an ephemeral page.
+/// `page_va` (page-aligned) in the running frame's published `mat_ranges`, or
+/// `None` for an ephemeral page.
 fn mat_range_for(page_va: u32) -> Option<crate::call_loop::MatRange> {
     let ptr = MAT_RANGES_PTR.load(Ordering::SeqCst);
     let len = MAT_RANGES_LEN.load(Ordering::SeqCst) as usize;
@@ -228,35 +295,56 @@ fn mat_range_for(page_va: u32) -> Option<crate::call_loop::MatRange> {
     // SAFETY: ptr/len describe the running FrameRuntime's `mat_ranges`
     // Vec, valid until enter_frame clears these statics.
     let ranges = unsafe { core::slice::from_raw_parts(ptr, len) };
-    ranges
-        .iter()
-        .copied()
-        .find(|r| r.start <= page_va && page_va < r.end)
+    mat_range_for_in(ranges, page_va)
 }
 
-/// Source PA of page `page_va` (page-aligned) within cap-backed range `r`,
-/// read from the published per-page `MAT_PAS` arena. Every page in
-/// `[r.start, r.end)` has an arena entry (`pas_len == range page count`), so the
-/// index is in bounds by construction.
-fn mat_pa_at(r: &crate::call_loop::MatRange, page_va: u64) -> u64 {
-    let ptr = MAT_PAS_PTR.load(Ordering::SeqCst);
-    let len = MAT_PAS_LEN.load(Ordering::SeqCst) as usize;
-    let idx = r.pas_off as usize + ((page_va as u32 - r.start) / PAGE_SIZE as u32) as usize;
-    debug_assert!(idx < len && !ptr.is_null(), "mat_pa_at: index out of arena");
-    if ptr.is_null() || idx >= len {
-        return 0;
+/// Resolve the **source physical address** of guest data page `page_va`
+/// (page-aligned) on demand from the running frame's `mem` DataCap — the lazy
+/// replacement for the former eager per-page `MAT_PAS` arena. A `Loaded` slab
+/// resolves to its own PA (dense cap pages are non-contiguous); an `Empty`
+/// (absent / zero) page resolves to the shared zero page; a `Missing` page
+/// (elided — V1 never mints one) yields `None`, so the caller raises a PVM
+/// fault.
+///
+/// Reading `mem` through `OVERLAY_SINK` is sound: the guest is single-threaded,
+/// and this shared read returns a `u64` (the borrow ends) before any `&mut`
+/// write to the same cap in [`cow_into_fresh`].
+fn mem_source_pa(page_va: u64) -> Option<u64> {
+    let data_base = MAT_DATA_BASE.load(Ordering::SeqCst);
+    let sink = OVERLAY_SINK.load(Ordering::SeqCst);
+    if sink.is_null() {
+        return None;
     }
-    // SAFETY: ptr/len describe the running FrameRuntime's `mat_pas` Vec, valid
-    // until enter_frame clears these statics; `idx < len` checked above.
-    unsafe { *ptr.add(idx) }
+    // SAFETY: OVERLAY_SINK is the running frame's `mem` DataCap, exclusively
+    // ours under Hyperlight serialisation; borrowed read-only here.
+    let mem = unsafe { &*sink };
+    mem_source_pa_in(mem, data_base, page_va, MAT_ZERO_PA.load(Ordering::SeqCst))
 }
 
-/// Read-only materialization source for a 2 MiB unit: either a contiguous slab
-/// (code — page PA = `base_pa + offset`) or a cap-backed range whose pages have
-/// per-page PAs in the `MAT_PAS` arena.
+/// Core of [`mem_source_pa`] over an explicit `mem` / `data_base` / `zero_pa`.
+/// `zero_pa` is the shared zero page's PA ([`ZERO_PAGE`]); a `Loaded` slab
+/// resolves to its own PA, an `Empty` page to `zero_pa`, a `Missing` page to
+/// `None` (→ PVM fault).
+fn mem_source_pa_in(
+    mem: &javm_cap::DataCap,
+    data_base: u64,
+    page_va: u64,
+    zero_pa: u64,
+) -> Option<u64> {
+    let i = ((page_va - data_base) / PAGE_SIZE as u64) as usize;
+    match mem.page_slot(i) {
+        javm_cap::PageSlot::Loaded(pr) => crate::paging::va_to_pa(pr.bytes.as_ptr() as u64),
+        javm_cap::PageSlot::Empty => (zero_pa != 0).then_some(zero_pa),
+        javm_cap::PageSlot::Missing(_) => None,
+    }
+}
+
+/// Read-only materialization source for a 2 MiB unit: a contiguous slab (code —
+/// page PA = `base_pa + offset`) or a cap-backed range whose page PAs are
+/// resolved lazily from the frame's `mem` (see [`mem_source_pa`]).
 enum RoSrc {
     Contig { base_pa: u64 },
-    Cap(crate::call_loop::MatRange),
+    Mem,
 }
 
 /// The static [`javm_exec::mat::PageKind`] of guest page `page_va`:
@@ -363,7 +451,7 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
         } else {
             match mat_range_for(p) {
                 Some(r) if r.kind == javm_exec::mat::PageKind::PinnedCapRo.as_u8() => {
-                    Some((r.start as u64, r.end as u64, RoSrc::Cap(r)))
+                    Some((r.start as u64, r.end as u64, RoSrc::Mem))
                 }
                 _ => None,
             }
@@ -383,14 +471,9 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
         // in-data, so it faults.
         let idx = ((pv - data_base) / PAGE_SIZE as u64) as usize;
         let cur = javm_exec::mat::PageState::from_u8(dstate[idx]);
-        let range = mat_range_for(p);
-        let (kind, src_pa) = match range {
-            Some(r) => (
-                javm_exec::mat::PageKind::from_u8(r.kind)
-                    .unwrap_or(javm_exec::mat::PageKind::PinnedCapRo),
-                // Per-page source PA (dense cap slabs are non-contiguous).
-                mat_pa_at(&r, pv),
-            ),
+        let kind = match mat_range_for(p) {
+            Some(r) => javm_exec::mat::PageKind::from_u8(r.kind)
+                .unwrap_or(javm_exec::mat::PageKind::PinnedCapRo),
             None => return false,
         };
         let (charge, next) = match javm_exec::mat::charge_for(cur, kind, is_write) {
@@ -400,6 +483,11 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
         match next {
             javm_exec::mat::PageState::PresentRo => {
                 if cur == javm_exec::mat::PageState::NotPresent {
+                    // Page-in: map the page RO at its source PA (resolved lazily
+                    // from the frame's `mem`; `None`/`Missing` → fault).
+                    let Some(src_pa) = mem_source_pa(pv) else {
+                        return false;
+                    };
                     // SAFETY: live PT, single writer; builds the path.
                     if unsafe {
                         crate::paging::pt_map_leaf(
@@ -434,12 +522,14 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
                     // be TLB-cached. A first-touch write (cur == NotPresent) maps a
                     // page that was never present, so it needs no invlpg.
                     let flush = cur == javm_exec::mat::PageState::PresentRo;
-                    // Every writable page (initial cap or ephemeral-from-zero)
-                    // CoWs a fresh private page from `src_pa` — for an ephemeral
-                    // page `src_pa` is the shared zero page, so the CoW yields a
-                    // fresh zeroed page. (Unifies the former EphemeralZero
-                    // map-writable special case into the CoW path.)
-                    if !cow_into_fresh(pv, src_pa, pml4, owned_vec, range, flush) {
+                    // Resolve the source PA lazily (from the frame's `mem`): a
+                    // `Loaded` cap slab, or the shared zero page for an ephemeral
+                    // page (so the CoW yields a fresh zeroed page). `None`
+                    // (a `Missing` page) → fault.
+                    let Some(src_pa) = mem_source_pa(pv) else {
+                        return false;
+                    };
+                    if !cow_into_fresh(pv, src_pa, pml4, owned_vec, data_base, flush) {
                         // Allocation / remap failure → fault (nothing charged
                         // yet for THIS page, but earlier pages of a straddle
                         // were already advanced; an OOM here is fatal anyway).
@@ -464,10 +554,19 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
     true
 }
 
-/// Copy-on-write a cap-backed page: allocate a fresh page, copy the
-/// cap's bytes from `src_pa`, remap the leaf writable at the new PA, and
-/// append a [`crate::call_loop::DirtyPage`] to the per-frame sink. Returns
-/// `false` on allocation / remap failure.
+/// Copy-on-write a guest page into the running frame's `mem` DataCap overlay:
+/// allocate a fresh page-aligned slab, copy the source bytes from `src_pa`,
+/// remap the leaf writable at the new PA, and insert the page into the cap's
+/// `overlay` (keyed by data-extent page index, `(page_va - data_base) / PAGE`).
+/// Returns `false` on allocation / remap failure.
+///
+/// The overlay carries the write past the runtime's lifetime: a runtime rebuilt
+/// after a future reclamation (host-backed swap), or a Phase-3 frame move,
+/// sources the overlay page rather than the immutable backing, so the frame's
+/// writes are never lost.
+/// The slab is `unhashed` (a `[0;32]` sentinel) — overlay pages are hashed
+/// only at [`javm_cap::DataCap::flush`], which recomputes; keeping SHA-256 out
+/// of the fault path preserves interp==recomp gas parity.
 ///
 /// `flush` invalidates the TLB for `page_va` after the remap: pass `true`
 /// only when an *existing* present mapping is being changed (read-then-write
@@ -478,22 +577,22 @@ fn cow_into_fresh(
     src_pa: u64,
     pml4: u64,
     owned_vec: u64,
-    range: Option<crate::call_loop::MatRange>,
+    data_base: u64,
     flush: bool,
 ) -> bool {
     let Some(src_kva) = crate::paging::pa_to_va(src_pa) else {
         return false;
     };
-    let Some(new_page) = crate::page_alloc::PageBuf::new(PAGE_SIZE) else {
+    // SAFETY: src_kva is a live 4 KiB page (cap slab or shared zero page,
+    // pinned by the frame), page-aligned.
+    let src = unsafe { core::slice::from_raw_parts(src_kva as *const u8, PAGE_SIZE) };
+    // Fresh page-aligned overlay slab, copied from the source. Held via `Arc`
+    // in the cap overlay; the `PageBytes` pointee (and its `bytes` slab) is
+    // address-stable across later `BTreeMap` inserts, so `new_pa` stays valid.
+    let page = alloc::sync::Arc::new(javm_cap::PageBytes::from_page_copy_unhashed(src));
+    let Some(new_pa) = crate::paging::va_to_pa(page.bytes.as_ptr() as u64) else {
         return false;
     };
-    let new_pa = new_page.pa();
-    let new_kva = new_page.kva();
-    // SAFETY: src_kva is a live 4 KiB cap page (pinned by the frame);
-    // new_page is a fresh owned 4 KiB page. Both are page-aligned.
-    unsafe {
-        core::ptr::copy_nonoverlapping(src_kva as *const u8, new_kva as *mut u8, PAGE_SIZE);
-    }
     // SAFETY: live PT, single writer; builds the path if needed (the page
     // may be NotPresent under zero-setup) or reuses it (read-then-write).
     if unsafe {
@@ -513,21 +612,18 @@ fn cow_into_fresh(
         crate::paging::invlpg(page_va);
     }
 
-    let sink_ptr = DIRTY_PAGE_SINK.load(Ordering::SeqCst);
+    let sink_ptr = OVERLAY_SINK.load(Ordering::SeqCst);
     if !sink_ptr.is_null() {
-        // SAFETY: sink_ptr is the running frame's `dirty_pages` Vec,
-        // re-published each enter_frame; stable for the handler's life.
-        let sink = unsafe { &mut *sink_ptr };
-        let (source_hash, source_slot) = match range {
-            Some(r) => (r.source_hash, r.source_slot),
-            None => ([0u8; 32], 0u8),
-        };
-        sink.push(crate::call_loop::DirtyPage {
-            guest_va: page_va as u32,
-            source_hash,
-            source_slot,
-            page: new_page,
-        });
+        // SAFETY: sink_ptr is the running frame's `mem` DataCap, re-published
+        // each enter_frame; exclusively ours (single-threaded) for the
+        // handler's life.
+        let mem = unsafe { &mut *sink_ptr };
+        let page_idx = ((page_va - data_base) / PAGE_SIZE as u64) as u32;
+        // Insert drops any prior overlay page at this index: always empty on the
+        // first CoW today (a frame CoWs each page at most once per run). The
+        // drop-prior logic stays correct for a future swap-reclaim re-CoW, where
+        // the old page would already be unmapped.
+        mem.insert_overlay_page(page_idx, javm_cap::PageSlot::Loaded(page));
     }
     true
 }
@@ -571,10 +667,10 @@ fn materialize_ro_unit(
     let mut q = lo;
     while q < hi {
         // Per-page source PA: contiguous code maps `base_pa + offset`; a dense
-        // cap's pages each resolve their own slab PA from the arena.
+        // cap's pages each resolve their own slab PA lazily from the frame mem.
         let page_pa = match &src {
             RoSrc::Contig { base_pa } => base_pa + (q - r_start),
-            RoSrc::Cap(r) => mat_pa_at(r, q),
+            RoSrc::Mem => mem_source_pa(q)?,
         };
         // SAFETY: live PT, single writer; builds the path (zero-setup).
         unsafe {
@@ -617,7 +713,6 @@ pub struct ExitInfo {
 // anywhere in the low 4 GiB. CTX sits in PML4 slot 1 (512 GiB),
 // outside the PVM u32 range, so guest addresses can't spoof it.
 
-const MEM_VA_M: u64 = 0;
 /// PML4 slot 1 (base 512 GiB) hosts CTX + the per-Image arena + STACK.
 /// MEM stays in `PML4[0]` at VA 0 so PVM addresses are still native VAs.
 /// Placing CTX in this slot too keeps it within ±2 GiB of the JIT
@@ -625,13 +720,17 @@ const MEM_VA_M: u64 = 0;
 ///
 /// The three sub-regions occupy distinct 1 GiB PDPT slots within the
 /// PML4 slot so the per-Image template PT can own the META PD without
-/// colliding with the per-call CTX/STACK PDs.
+/// colliding with the CTX/STACK PDs.
+///
+/// CTX and STACK are process-global shared pages ([`CTX_PAGE`] /
+/// [`STACK_PAGE`]) mapped at the fixed VAs below in every frame's PT — only
+/// one frame runs in ring 3 at a time, so they need no per-call copy.
 ///
 /// ```text
 ///   PML4[1] (512..1024 GiB)
-///     PDPT[0] (512..513 GiB)  ← CTX, per-call alloc
+///     PDPT[0] (512..513 GiB)  ← CTX, global shared page
 ///     PDPT[1] (513..514 GiB)  ← META arena, template-owned
-///     PDPT[2] (514..515 GiB)  ← STACK, per-call alloc
+///     PDPT[2] (514..515 GiB)  ← STACK, global shared page
 /// ```
 const META_PML4_BASE: u64 = 1u64 << 39; // 512 GiB
 /// CTX sits at the slot base. CTX_VA_M must match
@@ -643,6 +742,9 @@ const CTX_VA_M: u64 = META_PML4_BASE;
 const META_BASE_M: u64 = META_PML4_BASE + (1u64 << 30);
 /// STACK_VA — 2 GiB past the PML4 base, in its own PDPT slot.
 const STACK_VA_M: u64 = META_PML4_BASE + (2u64 << 30);
+/// Ring-3 native x86 stack size (one page) — the SP starts at
+/// `STACK_VA_M + STACK_SIZE` every entry.
+const STACK_SIZE: u64 = PAGE_SIZE as u64;
 
 /// One PVM region (arg / ro / rw) to populate before entry.
 #[derive(Clone, Copy)]
@@ -653,64 +755,63 @@ pub struct MemRegion<'a> {
 
 /// Per-frame ring-3 resources retained across re-entries.
 ///
-/// Holds the per-call page table + private mem/ctx/stack pages, plus
-/// the cached `CompiledImage` fields needed to publish #PF-handler
-/// atomics on every entry. Built once per `KernelFrame` (lazily on
-/// first [`enter_frame`]); reused across re-entries on the same frame
-/// — saves N PageTable + 3 PageBuf allocations in a depth-N recursion.
+/// Holds the per-call page table plus the cached `CompiledImage` fields needed
+/// to publish #PF-handler atomics on every entry. Built once per `KernelFrame`
+/// (lazily on first [`enter_frame`]) and reused across every re-entry on the
+/// same frame — it is **not** evicted (the synchronous call stack is bounded
+/// structurally, so all live page tables stay resident). The CTX, STACK, and
+/// zero scratch pages are process-global ([`CTX_PAGE`] / [`STACK_PAGE`] /
+/// [`ZERO_PAGE`]), shared by every frame (only one runs in ring 3 at a time),
+/// so the page table is the bulk of a frame's footprint.
 ///
-/// Frame-constant `JitContext` fields (dispatch_table, code_base,
-/// flat_buf, …) are written once when the runtime is built.
-/// [`enter_frame`] only updates regs/pc/gas/exit_*.
+/// The category-#3 materialization *bookkeeping* (`mat_state` / `ro_units`)
+/// lives on the [`KernelFrame`](crate::call_loop), not here — it is gas history
+/// that must outlive any future reclamation of this runtime (host-backed swap),
+/// so that a resumed frame never re-charges gas for pages it already paid for
+/// (which would fork the never-reclaiming interpreter).
+///
+/// The frame-constant `JitContext` fields the JIT reads — `dispatch_table`
+/// (= [`Self::dispatch_va`]) and `code_base` (= [`Self::jit_va`]) — are
+/// re-stamped by [`enter_frame`] each entry (they differ per image, and the
+/// ctx page is shared), alongside the per-entry regs/pc/gas/exit_*.
 pub struct FrameRuntime {
     pt: PageTable,
-    #[allow(dead_code)] // kept solely to own the backing page (referenced by `pt`).
-    ctx_buf: PageBuf,
-    stack_buf: PageBuf,
     jit_va: u64,
     jit_size: u64,
+    /// Dispatch-table VA (`META_BASE_M + dispatch_offset`) — re-stamped into
+    /// the shared ctx page's `dispatch_table` each entry.
+    dispatch_va: u64,
     exit_label_va: u64,
     trap_table_ptr: *const (u32, u32, u32),
     trap_table_len: u64,
     tramp_va: u64,
     new_cr3: u64,
-    ctx_kva: u64,
-    // ---- Category-#3 lazy-materialization state (persists across
-    // re-entries on this frame; published to the #PF handler each entry). ----
-    /// Cap-backed data mappings (pinned RO / initial CoW) covering the whole
-    /// data extent, each indexing a window into `mat_pas`.
+    // ---- Category-#3 lazy-materialization map (region bounds + kind;
+    // published to the #PF handler each entry). The mutable per-page *state*
+    // lives on the `KernelFrame` so it survives any future reclamation of this
+    // runtime (host-backed swap). ----
+    /// Cap-backed data mappings (pinned RO / initial CoW) covering the data
+    /// extent — region bounds + kind only. Per-page source PAs are resolved
+    /// lazily on fault ([`mem_source_pa`]); there is no per-page PA arena.
     mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
-    /// Per-page source PA arena for `mat_ranges` (see `MAT_PAS_PTR`).
-    mat_pas: alloc::vec::Vec<u64>,
-    /// Shared zero page sourcing `Empty` cap pages (RO) / CoW-from-zero writes.
-    /// Owned here to keep its PA (recorded in `mat_pas`) valid for the frame.
-    #[allow(dead_code)]
-    zero_page: PageBuf,
-    /// Per-page [`javm_exec::mat::PageState`], one byte/page over
-    /// `[data_base, mem_top)`. Advances NotPresent → PresentRo → PresentRw.
-    mat_state: alloc::vec::Vec<u8>,
     /// Guest VA bounds of the lazily-materialized data extent.
     data_base: u32,
     mem_top: u32,
     /// Read-only CODE region (page-rounded): `[code_base, code_top)`,
     /// source PA `code_pa`. Lazily materialized `PinnedCapRo` like a
-    /// pinned data cap, per unit (`code ∩ cluster`, see `ro_units`).
+    /// pinned data cap, per unit (`code ∩ cluster`).
     code_base: u32,
     code_top: u32,
     code_pa: u64,
-    /// Materialized read-only **units** — sorted set of
-    /// [`javm_exec::mat::unit_base`] values (one per `cap ∩ 2 MiB cluster`).
-    /// Grows in the #PF handler; the interpreter keeps the identical set.
-    ro_units: alloc::vec::Vec<u32>,
 }
 
-/// Build a per-frame runtime: compile the Image (cached), allocate
-/// per-call mem/ctx/stack pages, populate mem from `arg`/`ro`/`rw`,
-/// initialise the frame-constant `JitContext` fields, and build the
-/// per-call page table.
+/// Build a per-frame runtime: compile the Image (cached) and build the
+/// per-call page table, mapping the global CTX/STACK pages + the borrowed
+/// per-Image arena PD into it.
 ///
-/// Per-entry mutable state (regs, pc, gas, exit_*) is written by
-/// [`enter_frame`]; this function only touches frame-constant fields.
+/// All `JitContext` fields are written by [`enter_frame`] (the ctx page is
+/// shared, so even the frame-constant `dispatch_table`/`code_base` are
+/// re-stamped per entry); this function writes none.
 ///
 /// The `code` is raw RV+C+custom-0 bytes; the JIT cache predecodes it
 /// once and reuses the result on subsequent calls. `code_base` is the
@@ -739,11 +840,8 @@ pub unsafe fn build_frame_runtime(
     code: &[u8],
     code_base: u32,
     code_pa: u64,
-    entry_pc: u32,
     mem_size: u32,
     mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
-    mat_pas: alloc::vec::Vec<u64>,
-    zero_page: PageBuf,
 ) -> Option<FrameRuntime> {
     let helpers = HelperFns {
         mem_read_u8: 0x1001,
@@ -770,6 +868,9 @@ pub unsafe fn build_frame_runtime(
         code_base,
         META_BASE_M,
         CTX_VA_M,
+        STACK_VA_M,
+        global_pd_pa(&CTX_PD_PA, CTX_VA_M, CTX_PAGE.pa()),
+        global_pd_pa(&STACK_PD_PA, STACK_VA_M, STACK_PAGE.pa()),
         mem_cycles,
         helpers,
     );
@@ -790,44 +891,26 @@ pub unsafe fn build_frame_runtime(
         .saturating_sub(data_base)
         .next_multiple_of(PAGE_SIZE);
 
-    // Memory is sourced lazily from the Instance's `mem` DataCap (via
-    // `mat_ranges`/`mat_pas`): every data page is covered by a `MatRange`
-    // (initial/pinned slabs or the shared zero page), so there is NO eager flat
-    // buffer — `mem_buf` is gone. Only CTX + STACK are allocated per call.
-    let ctx_buf = PageBuf::new(PAGE_SIZE)?;
-    let stack_buf = PageBuf::new(PAGE_SIZE)?;
-
-    let ctx_kva = ctx_buf.kva();
-    let ctx = ctx_kva as *mut JitContext;
-    // SAFETY: ctx points to a fresh zeroed page.
-    unsafe {
-        (*ctx).heap_base = 0;
-        (*ctx).heap_top = 0;
-        // jalr targets are validated by the dense dispatch table (a
-        // non-block-start offset holds the panic-stub offset) — no
-        // separate bb_starts set.
-        (*ctx).entry_pc = entry_pc;
-        (*ctx).dispatch_table = dispatch_va as *const i32;
-        (*ctx).code_base = jit_va;
-        // Vestigial (codegen addresses mem baseless as `[reg]`); set to
-        // the data buffer's native base for documentation.
-        (*ctx).flat_buf = (MEM_VA_M + data_base as u64) as *mut u8;
-        (*ctx).fast_reentry = 0;
-        (*ctx)._pad2 = 0;
-        (*ctx).max_heap_pages = 0;
-        (*ctx)._pad3 = 0;
-    }
+    // Memory is sourced lazily from the Instance's `mem` DataCap via
+    // `mat_ranges`: every data page is covered by a `MatRange` (initial/pinned
+    // slabs or the shared zero page), so there is NO eager flat buffer. CTX and
+    // STACK are process-global shared pages ([`CTX_PAGE`] / [`STACK_PAGE`]) —
+    // nothing is allocated per call but the page table itself. The shared ctx's
+    // frame-constant fields (`dispatch_table` / `code_base`) are re-stamped by
+    // [`enter_frame`] each entry (the page is shared, the image differs).
 
     let mut pt = PageTable::new()?;
-    pt.map(CTX_VA_M, ctx_buf.pa(), ctx_buf.size(), Perm::user_rw())?;
     // True zero-setup demand paging: the WHOLE guest low VA range (PML4[0]
     // — both CODE at CODE_BASE and DATA at DATA_BASE) is left with NO
     // page-table entries here. The first guest touch of each page faults
     // into `jit_pf_handler`, which builds the PML4→PT path (recording the
     // new tables in `pt.owned`) and materializes the page (page-in / CoW),
     // charging #3. There is no eager data buffer: every page is materialized
-    // from `mat_pas` (cap slabs or the shared zero page).
-    let mat_state = alloc::vec![0u8; mem_bytes / PAGE_SIZE];
+    // from the frame's `mem` DataCap (cap slabs or the shared zero page).
+    //
+    // The per-page #3 *state* (`mat_state`) and the RO-unit set (`ro_units`)
+    // live on the owning `KernelFrame`, NOT here — they are gas history that
+    // must outlive any future reclamation of this runtime (host-backed swap).
     let mem_top = (data_base + mem_bytes) as u32;
     // Code region: page-rounded `[code_base, code_top)`, lazily paged in
     // RO (PinnedCapRo) per unit on guest PIC reads. The code buffer is
@@ -835,40 +918,29 @@ pub unsafe fn build_frame_runtime(
     // is safe.
     let code_bytes_rounded = code.len().next_multiple_of(PAGE_SIZE);
     let code_top = code_base.saturating_add(code_bytes_rounded as u32);
-    // Materialized RO units, keyed by unit_base (cap ∩ 2 MiB cluster) — a
-    // sorted set, grown on demand in the #PF handler.
-    let ro_units = alloc::vec::Vec::new();
-    pt.install_borrowed_pd(META_BASE_M, cached.template_pd_pa)?;
-    pt.map(
-        STACK_VA_M,
-        stack_buf.pa(),
-        stack_buf.size(),
-        Perm::user_rw(),
-    )?;
+    // Install the entire PML4 slot-1 subtree (CTX | META arena | STACK) with a
+    // single borrowed PML4 write. CTX/STACK are the global shared pages and the
+    // arena PD is per-Image, so the whole PDPT is an Image constant built once
+    // in `get_or_compile` — no per-frame CTX/STACK PDPT/PD/PT allocation.
+    pt.install_borrowed_pdpt(META_PML4_BASE, cached.template_pdpt_pa)?;
     let new_cr3 = pt.cr3()?;
 
     Some(FrameRuntime {
         pt,
-        ctx_buf,
-        stack_buf,
         jit_va,
         jit_size: cached.jit_size as u64,
+        dispatch_va,
         exit_label_va: jit_va + cached.exit_label_offset as u64,
         trap_table_ptr: cached.trap_table.as_ptr(),
         trap_table_len: cached.trap_table.len() as u64,
         tramp_va,
         new_cr3,
-        ctx_kva,
         mat_ranges,
-        mat_pas,
-        zero_page,
-        mat_state,
         data_base: data_base as u32,
         mem_top,
         code_base,
         code_top,
         code_pa,
-        ro_units,
     })
 }
 
@@ -877,24 +949,35 @@ pub unsafe fn build_frame_runtime(
 /// category-#3 materialization state from `rt`), drops to ring 3, then
 /// reads back the post-exit state.
 ///
-/// `dirty_sink` is the per-frame `Vec` the handler appends a
-/// [`crate::call_loop::DirtyPage`] to on each cap-page CoW (may be null
-/// to disable bookkeeping). The lazily-materialized data ranges + per-
-/// page state live in `rt` and are republished here each entry.
+/// `overlay_sink` is the running frame's `mem` DataCap; the handler inserts
+/// each CoW'd page into its `overlay` (may be null to disable bookkeeping).
+/// `mat_state` (per-page `PageState`, len = data-extent pages) and `ro_units`
+/// (sorted RO-unit set) are the category-#3 bookkeeping — they live on the
+/// owning [`KernelFrame`](crate::call_loop) (gas history that outlives any
+/// future reclamation of this runtime), and the caller passes raw pointers so
+/// the #PF handler can mutate them in place
+/// while the JIT runs. The lazily-materialized data *ranges* live in `rt` and
+/// are republished here each entry.
 ///
 /// # Safety
 /// Mutates CR3 + GDT + IDT during the call. Single-threaded by
-/// Hyperlight construction. `dirty_sink` must outlive the call.
+/// Hyperlight construction. `overlay_sink`, `mat_state_ptr` (valid for
+/// `mat_state_len` bytes), and `ro_units` must outlive the call.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn enter_frame(
     rt: &mut FrameRuntime,
     initial_gas: i64,
     entry_pc: u32,
     initial_regs: [u64; 13],
-    dirty_sink: *mut alloc::vec::Vec<crate::call_loop::DirtyPage>,
+    overlay_sink: *mut javm_cap::DataCap,
+    mat_state_ptr: *mut u8,
+    mat_state_len: u64,
+    ro_units: *mut alloc::vec::Vec<u32>,
 ) -> ExitInfo {
-    let ctx = rt.ctx_kva as *mut JitContext;
-    // SAFETY: ctx_kva owned by `rt.ctx_buf`, alive across this call.
+    let ctx_kva = CTX_PAGE.kva();
+    let ctx = ctx_kva as *mut JitContext;
+    // SAFETY: CTX_PAGE is the process-global ring-3 ctx page, leaked for the
+    // kernel's lifetime; mapped at CTX_VA_M in this frame's PT.
     unsafe {
         // The persisted register file is the 13 host-mapped slots; the two
         // spilled slots (x3/x4) are invocation-local and start at 0, matching
@@ -907,6 +990,14 @@ pub unsafe fn enter_frame(
         (*ctx).exit_arg = 0;
         (*ctx).entry_pc = entry_pc;
         (*ctx).pc = entry_pc;
+        // Frame-constant fields the JIT reads. Re-stamped every entry because
+        // the ctx page is shared across frames running different images
+        // (build-time init is gone). `host_rsp_base` + the spilled x3/x4 are
+        // per-execution scratch the prologue re-initialises; the vestigial
+        // heap_*/flat_buf/fast_reentry/max_heap_pages are never read by codegen
+        // and stay zero (the page's leak-once init).
+        (*ctx).dispatch_table = rt.dispatch_va as *const i32;
+        (*ctx).code_base = rt.jit_va;
     }
 
     // ---- install ring-3 GDT/IDT + JIT #PF handler ------------------------
@@ -918,28 +1009,27 @@ pub unsafe fn enter_frame(
     EXIT_LABEL_VA.store(rt.exit_label_va, Ordering::SeqCst);
     TRAP_TABLE_PTR.store(rt.trap_table_ptr as *mut (u32, u32, u32), Ordering::SeqCst);
     TRAP_TABLE_LEN.store(rt.trap_table_len, Ordering::SeqCst);
-    CTX_KVA.store(rt.ctx_kva, Ordering::SeqCst);
+    CTX_KVA.store(ctx_kva, Ordering::SeqCst);
     MAT_RANGES_PTR.store(
         rt.mat_ranges.as_ptr() as *mut crate::call_loop::MatRange,
         Ordering::SeqCst,
     );
     MAT_RANGES_LEN.store(rt.mat_ranges.len() as u64, Ordering::SeqCst);
-    MAT_PAS_PTR.store(rt.mat_pas.as_ptr() as *mut u64, Ordering::SeqCst);
-    MAT_PAS_LEN.store(rt.mat_pas.len() as u64, Ordering::SeqCst);
-    MAT_STATE_PTR.store(rt.mat_state.as_mut_ptr(), Ordering::SeqCst);
-    MAT_STATE_LEN.store(rt.mat_state.len() as u64, Ordering::SeqCst);
+    MAT_ZERO_PA.store(ZERO_PAGE.pa(), Ordering::SeqCst);
+    MAT_STATE_PTR.store(mat_state_ptr, Ordering::SeqCst);
+    MAT_STATE_LEN.store(mat_state_len, Ordering::SeqCst);
     MAT_DATA_BASE.store(rt.data_base as u64, Ordering::SeqCst);
     MAT_MEM_TOP.store(rt.mem_top as u64, Ordering::SeqCst);
     MAT_CODE_BASE.store(rt.code_base as u64, Ordering::SeqCst);
     MAT_CODE_TOP.store(rt.code_top as u64, Ordering::SeqCst);
     MAT_CODE_PA.store(rt.code_pa, Ordering::SeqCst);
-    MAT_RO_UNITS_SINK.store(&mut rt.ro_units as *mut _, Ordering::SeqCst);
-    DIRTY_PAGE_SINK.store(dirty_sink, Ordering::SeqCst);
+    MAT_RO_UNITS_SINK.store(ro_units, Ordering::SeqCst);
+    OVERLAY_SINK.store(overlay_sink, Ordering::SeqCst);
     ACTIVE_PT_PML4_KVA.store(rt.pt.pml4_kva(), Ordering::SeqCst);
     OWNED_VEC_PTR.store(rt.pt.owned_vec_ptr(), Ordering::SeqCst);
     HANDLERS[14].store(jit_pf_handler as *const () as u64, Ordering::Release);
 
-    let user_stack_top = STACK_VA_M + rt.stack_buf.size();
+    let user_stack_top = STACK_VA_M + STACK_SIZE;
     // SAFETY: trampoline (inside the Image arena) + stack mapped above;
     // new_cr3 carries kernel half.
     let _user_rax = unsafe { ring3::nub_enter_ring3(rt.tramp_va, user_stack_top, rt.new_cr3) };
@@ -950,14 +1040,13 @@ pub unsafe fn enter_frame(
     JIT_CODE_LEN.store(0, Ordering::SeqCst);
     MAT_RANGES_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
     MAT_RANGES_LEN.store(0, Ordering::SeqCst);
-    MAT_PAS_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
-    MAT_PAS_LEN.store(0, Ordering::SeqCst);
+    MAT_ZERO_PA.store(0, Ordering::SeqCst);
     MAT_STATE_PTR.store(core::ptr::null_mut(), Ordering::SeqCst);
     MAT_STATE_LEN.store(0, Ordering::SeqCst);
     MAT_MEM_TOP.store(0, Ordering::SeqCst);
     MAT_CODE_TOP.store(0, Ordering::SeqCst);
     MAT_RO_UNITS_SINK.store(core::ptr::null_mut(), Ordering::SeqCst);
-    DIRTY_PAGE_SINK.store(core::ptr::null_mut(), Ordering::SeqCst);
+    OVERLAY_SINK.store(core::ptr::null_mut(), Ordering::SeqCst);
     ACTIVE_PT_PML4_KVA.store(0, Ordering::SeqCst);
     OWNED_VEC_PTR.store(0, Ordering::SeqCst);
 
@@ -965,7 +1054,7 @@ pub unsafe fn enter_frame(
     // `new_cr3` (the PML4's PA) and kept alive by owning the page tables.
     let _ = &rt.pt;
 
-    // SAFETY: ctx_kva still points to the same page (ctx_buf alive).
+    // SAFETY: ctx still points to the shared global ctx page (leaked, alive).
     unsafe {
         // Copy the 15-register file out first (avoids autoref on the raw
         // pointer deref), then persist only the 13 host-mapped slots — x3/x4

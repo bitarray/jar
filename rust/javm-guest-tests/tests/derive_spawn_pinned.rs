@@ -16,7 +16,7 @@
 use javm::kernel_assist::InProcessKernelAssist;
 use javm::{CallResult, Vm};
 use javm_cap::image::{EndpointDef, Image, PinnedCap};
-use javm_cap::{CacheDirectory, Cap, CapHash, CapHashOrRef, SlotKey, NUM_REGS};
+use javm_cap::{CacheDirectory, Cap, CapHash, CapHashOrRef, Key, NUM_REGS};
 use javm_exec::ExitReason;
 use std::collections::BTreeMap;
 
@@ -57,13 +57,13 @@ fn parent_image(child_hash: CapHash) -> Image {
     );
     let mut pinned_slots = BTreeMap::new();
     pinned_slots.insert(
-        SlotKey::from(IMAGE_SLOT),
+        Key::from(IMAGE_SLOT),
         PinnedCap::Image {
             content_hash: child_hash,
         },
     );
     pinned_slots.insert(
-        SlotKey::from(PINNED_DST),
+        Key::from(PINNED_DST),
         PinnedCap::Data {
             content: vec![0xAB; 16],
             size: 4096,
@@ -76,6 +76,8 @@ fn parent_image(child_hash: CapHash) -> Image {
         pinned_slots,
         initial_slots: BTreeMap::new(),
         yield_marker_slot: None,
+        gas_slots: Vec::new(),
+        quota_slots: Vec::new(),
     }
 }
 
@@ -95,8 +97,8 @@ fn interp_traps_on_derive_spawn_into_pinned() {
 
     let parent = parent_image(child_hash);
     let pinned_hashes = [
-        (SlotKey::from(IMAGE_SLOT), child_hash),
-        (SlotKey::from(PINNED_DST), data_hash),
+        (Key::from(IMAGE_SLOT), child_hash),
+        (Key::from(PINNED_DST), data_hash),
     ];
     let parent_cap = Cap::image_with_slots(&parent, &pinned_hashes, &[]).expect("parent image");
     let parent_hash = cache.put_cap(&parent_cap).expect("put parent image");
@@ -104,16 +106,10 @@ fn interp_traps_on_derive_spawn_into_pinned() {
     // Root cnode binds the two slots so the interpreter resolves image_slot
     // and reaches the pinned-dst check.
     let mut cn = javm_cap::CNodeCap::new();
-    cn.set(
-        &SlotKey::from(IMAGE_SLOT),
-        Some(CapHashOrRef::Hash(child_hash)),
-    )
-    .unwrap();
-    cn.set(
-        &SlotKey::from(PINNED_DST),
-        Some(CapHashOrRef::Hash(data_hash)),
-    )
-    .unwrap();
+    cn.set(&Key::from(IMAGE_SLOT), Some(CapHashOrRef::Hash(child_hash)))
+        .unwrap();
+    cn.set(&Key::from(PINNED_DST), Some(CapHashOrRef::Hash(data_hash)))
+        .unwrap();
     let cnode_hash = cache.put_cap(&Cap::CNode(cn)).expect("put cnode");
 
     let mem = parent.instance_mem_backing();
@@ -161,8 +157,8 @@ fn recomp_traps_on_derive_spawn_into_pinned() {
 
     let parent = parent_image(child_hash);
     let pinned_hashes = [
-        (SlotKey::from(IMAGE_SLOT), child_hash),
-        (SlotKey::from(PINNED_DST), data_hash),
+        (Key::from(IMAGE_SLOT), child_hash),
+        (Key::from(PINNED_DST), data_hash),
     ];
     let parent_cap = Cap::image_with_slots(&parent, &pinned_hashes, &[]).expect("parent image");
     let image_h = nub.put_cap(&parent_cap).expect("put parent image");

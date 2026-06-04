@@ -184,11 +184,11 @@ fn alloc_table() -> Option<NonNull<Table>> {
 /// covering 1 GiB of VA space and all PT pages it references, with
 /// leaf PTEs prefilled to point at the Image's arena pages.
 ///
-/// Multiple per-call [`PageTable`]s install this template via
-/// [`PageTable::install_borrowed_pd`], which writes the template's PD
-/// physical address into one PDPT entry of the per-call PT. The
-/// per-call PT does NOT own the template's pages — they live for as
-/// long as the parent `CompiledImage` (effectively `'static` in V1).
+/// This PD is borrowed as the META entry (PDPT[1]) of the Image's
+/// [`Pml4SlotTemplate`], which a per-call [`PageTable`] installs whole via
+/// [`PageTable::install_borrowed_pdpt`]. The per-call PT does NOT own the
+/// template's pages — they live for as long as the parent `CompiledImage`
+/// (effectively `'static` in V1).
 ///
 /// The PD covers a 1 GiB-aligned VA range; leaf PTEs are addressed by
 /// the offset within that range (`0..1 GiB`).
@@ -250,6 +250,80 @@ impl Drop for TemplatePT {
             unsafe {
                 dealloc(table.as_ptr() as *mut u8, TABLE_LAYOUT);
             }
+        }
+    }
+}
+
+/// Per-Image template for the entire PML4 slot-1 subtree — the PDPT covering
+/// one 512 GiB PML4 slot, prefilled with its three 1 GiB-PDPT-slot entries:
+/// CTX, META (the Image arena PD), and STACK. All three are **borrowed** PDs:
+/// CTX/STACK point at the *process-global* CTX/STACK PD subtrees (the identical
+/// PD→PT→global-page chain, built once for all Images — one frame runs in ring
+/// 3 at a time, so they need no per-call copy); META at the Image's own arena
+/// PD (a separate [`TemplatePT`] owned by the same `CompiledImage`).
+///
+/// So this template owns only the PDPT page itself — one table per Image — and
+/// per-call [`PageTable`]s install the whole subtree with one borrowed PML4
+/// write ([`PageTable::install_borrowed_pdpt`]) instead of allocating per-frame
+/// PDPT + CTX/STACK PD/PT tables (≈5 tables / 20 KiB saved per frame). The
+/// per-call PT does NOT own any of it — the PDPT lives as long as the parent
+/// `CompiledImage` (effectively `'static` in V1), the CTX/STACK PDs forever.
+pub struct Pml4SlotTemplate {
+    /// The PDPT page (512 entries, indexed by `va[38:30]`). Freed in `Drop`;
+    /// the borrowed PDs it points at are owned elsewhere.
+    pdpt: NonNull<Table>,
+}
+
+impl Pml4SlotTemplate {
+    /// Build the PDPT, planting three borrowed PD PAs at the PDPT slots of
+    /// `ctx_va` / `meta_va` / `stack_va` (distinct, same-PML4-slot VAs):
+    /// `ctx_pd_pa` / `stack_pd_pa` are the global CTX/STACK PD subtrees,
+    /// `meta_pd_pa` the Image arena PD. Returns `None` on allocation failure.
+    pub fn new(
+        ctx_va: u64,
+        ctx_pd_pa: u64,
+        meta_va: u64,
+        meta_pd_pa: u64,
+        stack_va: u64,
+        stack_pd_pa: u64,
+    ) -> Option<Self> {
+        let pdpt = alloc_table()?;
+        let inner_flags = flag::P | flag::RW | flag::US;
+        // SAFETY: `pdpt` is a fresh 512-entry table we just allocated and own.
+        let entries = unsafe { &mut *pdpt.as_ptr() };
+        entries[((ctx_va >> 30) & 0x1FF) as usize] = (ctx_pd_pa & PA_MASK) | inner_flags;
+        entries[((meta_va >> 30) & 0x1FF) as usize] = (meta_pd_pa & PA_MASK) | inner_flags;
+        entries[((stack_va >> 30) & 0x1FF) as usize] = (stack_pd_pa & PA_MASK) | inner_flags;
+
+        Some(Self { pdpt })
+    }
+
+    /// Build a global, leak-once CTX/STACK PD subtree (PD + PT) mapping a single
+    /// page `page_pa` read-write at offset 0 of its 1 GiB slot (`va`), and
+    /// return its PD physical address. The subtree is intentionally **leaked**
+    /// (it lives for the kernel's lifetime), so its PD can be borrowed as a
+    /// PDPT entry by every Image's `Pml4SlotTemplate` without per-Image
+    /// duplication. Returns `None` on allocation failure.
+    pub fn leak_global_pd(va: u64, page_pa: u64) -> Option<u64> {
+        let mut pd = TemplatePT::new()?;
+        pd.map_leaf(va & ((1u64 << 30) - 1), page_pa, Perm::user_rw())?;
+        let pd_pa = pd.pd_pa()?;
+        core::mem::forget(pd); // leak: lives for the kernel's lifetime
+        Some(pd_pa)
+    }
+
+    /// Physical address of the PDPT page — what per-call PTs install into PML4.
+    pub fn pdpt_pa(&self) -> Option<u64> {
+        va_to_pa(self.pdpt.as_ptr() as u64)
+    }
+}
+
+impl Drop for Pml4SlotTemplate {
+    fn drop(&mut self) {
+        // SAFETY: `pdpt` came from `alloc_table` with TABLE_LAYOUT. The borrowed
+        // CTX/STACK/META PDs are owned elsewhere (globals / the Image template).
+        unsafe {
+            dealloc(self.pdpt.as_ptr() as *mut u8, TABLE_LAYOUT);
         }
     }
 }
@@ -356,27 +430,32 @@ impl PageTable {
         Some(())
     }
 
-    /// Install a borrowed PD pointer (from a [`TemplatePT`]) at the
-    /// PDPT entry covering `va`. The PDPT is auto-allocated and owned
-    /// by this `PageTable` (freed on Drop); the PD (and the PT pages
-    /// it references) belong to the template and survive `Drop`.
+    /// Install a borrowed PDPT pointer (from a [`Pml4SlotTemplate`]) at the
+    /// PML4 entry covering `va` — the whole-PML4-slot analogue of how that
+    /// template borrows the Image arena PD as its META entry.
+    /// The PML4 entry is overwritten with `pdpt_pa`; the entire subtree beneath
+    /// it (the PDPT, the CTX/STACK PD/PT, and the borrowed META PD) belongs to
+    /// the template and survives this `PageTable`'s `Drop`.
     ///
-    /// `va` must be 1 GiB-aligned — it identifies which PDPT entry
-    /// receives the template's PD. Any existing entry at that PDPT
-    /// slot is overwritten (intended: caller has not mapped anything
-    /// in this 1 GiB range yet).
-    pub fn install_borrowed_pd(&mut self, va: u64, pd_pa: u64) -> Option<()> {
-        assert!(va.is_multiple_of(1u64 << 30));
+    /// `va` must be 512 GiB-aligned — it identifies which PML4 slot receives the
+    /// template's PDPT. The target slot must be empty (it is in a fresh PT: the
+    /// kernel lives in slot 511, the guest mem in slot 0, and slot 1 — the
+    /// CTX/META/STACK region — is built only here).
+    pub fn install_borrowed_pdpt(&mut self, va: u64, pdpt_pa: u64) -> Option<()> {
+        assert!(va.is_multiple_of(1u64 << 39));
         let idx4 = ((va >> 39) & 0x1FF) as usize;
-        let idx3 = ((va >> 30) & 0x1FF) as usize;
         let inner_flags = flag::P | flag::RW | flag::US;
         // SAFETY: self.pml4 is owned by this PT.
         let pml4 = unsafe { &mut *self.pml4.as_ptr() };
-        let pdpt = self.ensure_inner(&mut pml4[idx4], inner_flags)?;
-        // SAFETY: pdpt is a table this PT owns (just allocated or
-        // shallow-copied from the active CR3).
-        let pdpt = unsafe { &mut *pdpt };
-        pdpt[idx3] = (pd_pa & PA_MASK) | inner_flags;
+        // The target PML4 slot must be empty before we plant a borrowed PDPT —
+        // overwriting a present entry would orphan (leak) the subtree under it
+        // and, for the guest slot, corrupt kernel-shared tables.
+        debug_assert_eq!(
+            pml4[idx4] & flag::P,
+            0,
+            "PML4 slot must be empty before installing a borrowed PDPT",
+        );
+        pml4[idx4] = (pdpt_pa & PA_MASK) | inner_flags;
         Some(())
     }
 

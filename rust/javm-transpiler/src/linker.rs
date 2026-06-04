@@ -37,7 +37,7 @@ use crate::layout::{
     CODE_BASE, DATA_BASE, HEAP_CAP_INDEX, MAX_CODE_SIZE, PVM_PAGE_SIZE, ProgramLayout,
     RO_CAP_INDEX, RW_CAP_INDEX, STACK_CAP_INDEX,
 };
-use javm_cap::SlotKey;
+use javm_cap::Key;
 use javm_cap::abi::BARE_YIELD_CATCHER_SLOT;
 use javm_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap};
 use javm_cap::slot::SlotPath;
@@ -439,11 +439,11 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     }
 
     let mut memory_mappings: Vec<MemoryMapping> = Vec::new();
-    let mut pinned_slots: BTreeMap<SlotKey, PinnedCap> = BTreeMap::new();
-    let mut initial_slots: BTreeMap<SlotKey, InitialDataCap> = BTreeMap::new();
+    let mut pinned_slots: BTreeMap<Key, PinnedCap> = BTreeMap::new();
+    let mut initial_slots: BTreeMap<Key, InitialDataCap> = BTreeMap::new();
     let page_bytes = u64::from(PVM_PAGE_SIZE);
 
-    let stack_slot = SlotKey::from(STACK_CAP_INDEX);
+    let stack_slot = Key::from(STACK_CAP_INDEX);
     let stack_size = u64::from(layout.stack.page_count) * page_bytes;
     memory_mappings.push(MemoryMapping {
         start: u64::from(layout.stack.base_page) * page_bytes,
@@ -459,7 +459,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     );
 
     if let Some(ro) = &layout.ro {
-        let ro_slot = SlotKey::from(RO_CAP_INDEX);
+        let ro_slot = Key::from(RO_CAP_INDEX);
         let size = u64::from(ro.page_count) * page_bytes;
         memory_mappings.push(MemoryMapping {
             start: u64::from(ro.base_page) * page_bytes,
@@ -476,7 +476,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     }
 
     if let Some(rw) = &layout.rw {
-        let rw_slot = SlotKey::from(RW_CAP_INDEX);
+        let rw_slot = Key::from(RW_CAP_INDEX);
         let size = u64::from(rw.page_count) * page_bytes;
         memory_mappings.push(MemoryMapping {
             start: u64::from(rw.base_page) * page_bytes,
@@ -493,7 +493,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
     }
 
     if let Some(heap) = &layout.heap {
-        let heap_slot = SlotKey::from(HEAP_CAP_INDEX);
+        let heap_slot = Key::from(HEAP_CAP_INDEX);
         let size = u64::from(heap.page_count) * page_bytes;
         memory_mappings.push(MemoryMapping {
             start: u64::from(heap.base_page) * page_bytes,
@@ -537,7 +537,9 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
         memory_mappings,
         pinned_slots,
         initial_slots,
-        yield_marker_slot: Some(SlotKey::from(BARE_YIELD_CATCHER_SLOT)),
+        yield_marker_slot: Some(Key::from(BARE_YIELD_CATCHER_SLOT)),
+        gas_slots: Vec::new(),
+        quota_slots: Vec::new(),
     })
 }
 

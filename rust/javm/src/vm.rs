@@ -19,7 +19,7 @@
 //! into it) and in-flight resolution (host calls read referenced caps
 //! by their `CapHashOrRef` target).
 
-use javm_cap::{CacheDirectory, Cap, CapHash, CapHashOrRef, NUM_REGS, SlotKey};
+use javm_cap::{CacheDirectory, Cap, CapHash, CapHashOrRef, Key, NUM_REGS};
 use javm_exec::{Access, CopyingMemory, ExitReason, GasCounter, Mem, Regs, interp::Interpreter};
 
 use crate::callstack::{CallStack, DEFAULT_MAX_DEPTH, Entry, EntryStatus, InstanceEntry};
@@ -243,7 +243,7 @@ impl<K: KernelAssist> Vm<K> {
 
         // CacheDirectory image-side metadata on the entry for fast host-call
         // lookups (pinned check, yield routing).
-        let pinned_slots: Vec<SlotKey> = img.pinned.iter().map(|e| e.slot.clone()).collect();
+        let pinned_slots: Vec<Key> = img.pinned.iter().map(|e| e.slot.clone()).collect();
 
         let entry = InstanceEntry {
             instance_ref: inst_ref,
@@ -298,7 +298,7 @@ impl<K: KernelAssist> Vm<K> {
                 .stack
                 .running_instance_mut()
                 .ok_or(VmError::Invariant("call_resume: no instance after pop"))?;
-            inst.root_cnode.set(&SlotKey::from(0u8), Some(target))?;
+            inst.root_cnode.set(&Key::from(0u8), Some(target))?;
         }
 
         // 3. Take the resumed Instance's saved regs/mem/gas out into
@@ -411,7 +411,7 @@ impl<K: KernelAssist> Vm<K> {
                     .running_instance_mut()
                     .ok_or(VmError::Invariant("no child to halt"))?
                     .root_cnode
-                    .take(&SlotKey::from(0u8))
+                    .take(&Key::from(0u8))
                     .ok()
                     .flatten();
                 self.stack.pop();
@@ -423,7 +423,7 @@ impl<K: KernelAssist> Vm<K> {
                 regs = core::mem::replace(&mut parent.regs, Regs::new());
                 mem = core::mem::replace(&mut parent.mem, Mem::new());
                 if let Some(s0) = child_slot0 {
-                    parent.root_cnode.set(&SlotKey::from(0u8), Some(s0))?;
+                    parent.root_cnode.set(&Key::from(0u8), Some(s0))?;
                 }
                 continue;
             }
@@ -457,7 +457,7 @@ impl<K: KernelAssist> Vm<K> {
             let marker_payload = if let Some(p) = oog_marker_payload {
                 Some(p)
             } else {
-                let marker_slot = SlotKey::from((regs.gpr[7] & 0xFF) as u8);
+                let marker_slot = Key::from((regs.gpr[7] & 0xFF) as u8);
                 let yielder = match &self.stack.entries()[pushed_pos] {
                     Entry::Instance(e) => e.as_ref(),
                     _ => return Err(VmError::Invariant("yielder is not an Instance")),
@@ -498,7 +498,7 @@ impl<K: KernelAssist> Vm<K> {
         let (entry, slot0_target) = match popped {
             Entry::Instance(e) => {
                 let mut e = *e;
-                let slot0 = e.root_cnode.take(&SlotKey::from(0u8)).ok().flatten();
+                let slot0 = e.root_cnode.take(&Key::from(0u8)).ok().flatten();
                 (e, slot0)
             }
             _ => return Err(VmError::Invariant("popped a non-Instance entry")),
@@ -512,7 +512,7 @@ impl<K: KernelAssist> Vm<K> {
             // hash-resolved (else zero).
             match entry.instance_ref {
                 CapHashOrRef::Hash(h) => h,
-                CapHashOrRef::Ref(_) => [0u8; 32],
+                CapHashOrRef::Ref(_) | CapHashOrRef::Owned(_) => [0u8; 32],
             }
         };
 
@@ -734,6 +734,8 @@ mod tests {
             pinned_slots: BTreeMap::new(),
             initial_slots: BTreeMap::new(),
             yield_marker_slot: None,
+            gas_slots: Vec::new(),
+            quota_slots: Vec::new(),
         }
     }
 
@@ -880,7 +882,7 @@ mod tests {
             .unwrap();
         let m_cnode_hash = {
             let mut cn = javm_cap::CNodeCap::new();
-            cn.set(&SlotKey::from(9u8), Some(CapHashOrRef::Hash(s_inst_hash)))
+            cn.set(&Key::from(9u8), Some(CapHashOrRef::Hash(s_inst_hash)))
                 .unwrap();
             cache.put_cap(&Cap::CNode(cn)).unwrap()
         };

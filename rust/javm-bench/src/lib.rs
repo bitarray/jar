@@ -28,9 +28,9 @@
 use criterion::{BenchmarkId, Criterion, Throughput};
 use javm_cap::NUM_REGS;
 use javm_cap::image::{Image, PinnedCap};
-use javm_cap::slot::SlotKey;
+use javm_cap::slot::Key;
 use javm_cap::{Cap, CapHash};
-use nub::{InvocationResult, Nub};
+use nub::{InvocationResult, Nub, SCRATCHPAD_HEAD_LEN};
 use std::sync::{Mutex, OnceLock};
 
 /// HostCall(0) — the trampoline halt all bench programs end on
@@ -75,8 +75,8 @@ impl BuiltCaps {
         // 1. Build a Cap::Data per non-empty pinned/initial slot. Track
         //    each slot's resolved CapHash so the Image can reference them.
         let mut data_caps: Vec<(CapHash, Cap)> = Vec::new();
-        let mut pinned_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
-        let mut initial_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
+        let mut pinned_hashes: Vec<(Key, CapHash)> = Vec::new();
+        let mut initial_hashes: Vec<(Key, CapHash)> = Vec::new();
 
         for (slot, pinned) in &image.pinned_slots {
             let (h, cap) = match pinned {
@@ -191,7 +191,7 @@ pub fn nub_hyperlight_lock() -> NubGuard {
 /// Bench helper: drive one invocation through an already-locked Nub.
 /// Used inside `iter_batched`'s routine closure so the timed body is
 /// just the host-call round-trip + JIT path (no mutex acquire, no
-/// cap publish, no eviction).
+/// cap publish, no sandbox rebuild).
 pub fn invoke(nub: &mut Nub, built: &BuiltCaps) -> (u64, u64) {
     let result = nub
         .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
@@ -257,17 +257,18 @@ pub const ABORT_SENTINEL: u32 = u32::MAX;
 ///
 /// `gas_used` is `INITIAL_GAS - gas_remaining`; on an abort it is 0 (no
 /// `InvocationResult` was produced).
-//
-// TODO(javm-fuzz-state-readback): these runners only surface x10
-// (`return_value`) + exit + gas. The lossless, model-conformant DataCap
-// memory-signature readback is deferred — see
-// ~/docs/plans/javm-fuzz-state-readback.md.
+///
+/// `scratchpad_head` is the running Instance's scratchpad (`slot[0]`) region head
+/// — the lossless, model-conformant result readback that supersedes the former
+/// x10 fold. The fuzz differential compares it across engines and against the
+/// oracle gold (see `javm_fuzz::replay`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawRun {
     pub exit_reason: u32,
     pub exit_arg: u32,
     pub return_value: u64,
     pub gas_used: u64,
+    pub scratchpad_head: [u8; SCRATCHPAD_HEAD_LEN],
 }
 
 impl RawRun {
@@ -277,6 +278,7 @@ impl RawRun {
             exit_arg: r.exit_arg,
             return_value: r.return_value,
             gas_used: INITIAL_GAS.saturating_sub(r.gas_remaining),
+            scratchpad_head: r.scratchpad_head,
         }
     }
 
@@ -286,6 +288,7 @@ impl RawRun {
             exit_arg: 0,
             return_value: 0,
             gas_used: 0,
+            scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
         }
     }
 }
@@ -362,8 +365,8 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
     // Cap::Image; the in-kernel call_loop reads those bytes from the
     // shared cache when building a child frame's mem image.
     let mut data_caps: Vec<(CapHash, Cap)> = Vec::new();
-    let mut pinned_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
-    let mut initial_hashes: Vec<(SlotKey, CapHash)> = Vec::new();
+    let mut pinned_hashes: Vec<(Key, CapHash)> = Vec::new();
+    let mut initial_hashes: Vec<(Key, CapHash)> = Vec::new();
     for (slot, pinned) in &image.pinned_slots {
         let (h, maybe_cap) = match pinned {
             PinnedCap::Data { content, size } => {
@@ -395,7 +398,7 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
 
     let mut cn = CNodeCap::new();
     cn.set(
-        &SlotKey::from(SLOT_IMAGE_RECURSE as u8),
+        &Key::from(SLOT_IMAGE_RECURSE as u8),
         Some(CapHashOrRef::Hash(image_hash)),
     )
     .expect("set image slot");
@@ -437,6 +440,50 @@ pub fn invoke_sub_vm(nub: &mut Nub, top: &SubVmTop, depth: u64) {
         result.exit_arg,
         result.return_value,
         result.gas_remaining,
+    );
+}
+
+/// Like [`invoke_sub_vm`] but returns `(return_value, gas_used)` after asserting
+/// a clean trampoline halt. Used by the `sub_vm_gas_parity` test to check the
+/// recompiler's category-#3 charge is identical per recursion level (gas affine
+/// in depth — a multi-frame determinism guard).
+pub fn invoke_sub_vm_gas(nub: &mut Nub, top: &SubVmTop, depth: u64) -> (u64, u64) {
+    let result = nub
+        .invoke_cached(top.top_instance, 0, [depth, 0, 0, 0], INITIAL_GAS)
+        .expect("invoke_cached");
+    assert!(
+        result.exit_reason == EXIT_HOSTCALL && result.exit_arg == 0,
+        "sub-VM exited non-cleanly: reason={} arg={} ret={} gas={}",
+        result.exit_reason,
+        result.exit_arg,
+        result.return_value,
+        result.gas_remaining,
+    );
+    (
+        result.return_value,
+        INITIAL_GAS.saturating_sub(result.gas_remaining),
+    )
+}
+
+/// Like [`invoke_sub_vm`] but also asserts the top-level return value. Used by
+/// the data-recurse correctness check to confirm each level reads its pinned
+/// RO data + writes its initial RW data correctly (not just that it halts).
+pub fn invoke_sub_vm_expect(nub: &mut Nub, top: &SubVmTop, depth: u64, expected_return: u64) {
+    let result = nub
+        .invoke_cached(top.top_instance, 0, [depth, 0, 0, 0], INITIAL_GAS)
+        .expect("invoke_cached");
+    assert!(
+        result.exit_reason == EXIT_HOSTCALL && result.exit_arg == 0,
+        "sub-VM exited non-cleanly: reason={} arg={} ret={} gas={}",
+        result.exit_reason,
+        result.exit_arg,
+        result.return_value,
+        result.gas_remaining,
+    );
+    assert_eq!(
+        result.return_value, expected_return,
+        "sub-VM depth {depth} returned {} (expected {expected_return})",
+        result.return_value,
     );
 }
 

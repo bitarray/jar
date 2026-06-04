@@ -1,19 +1,19 @@
 use javm_cap::{
-    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, DataGroup, DataGroups, ImageCap,
-    InstanceCap, NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotKey, TypeCap,
+    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, ImageCap, InstanceCap, Key, NUM_REGS,
+    PAGE_SIZE, PageBytes, PageRef, PageSlab, PageSlot, TypeCap,
 };
-use ssz::MissingOr;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
-/// A single-group `Cap::Data` holding `pages` at group 0, sized to 2 MiB.
+/// A `Cap::Data` whose dense backing holds `pages` at absolute pages `0..`,
+/// sized to 2 MiB (clean — empty overlay).
 fn data_cap_with_pages(pages: Vec<PageSlot>) -> Cap {
-    let mut groups: DataGroups = DataGroups::new();
-    groups.insert(
-        DataCap::group_key(0),
-        MissingOr::Materialized(DataGroup { pages }),
-    );
     Cap::Data(DataCap {
-        size: javm_cap::GROUP_SIZE as u64,
-        groups,
+        backing: Arc::new(PageSlab {
+            size: javm_cap::GROUP_SIZE as u64,
+            pages,
+        }),
+        overlay: BTreeMap::new(),
     })
 }
 
@@ -60,7 +60,7 @@ fn cnode_empty_vs_one_populated_differ() {
     let empty: CNodeCap = CNodeCap::new();
     let mut populated: CNodeCap = CNodeCap::new();
     populated
-        .set(&SlotKey::from(0u8), Some(CapHashOrRef::Hash([0xEE; 32])))
+        .set(&Key::from(0u8), Some(CapHashOrRef::Hash([0xEE; 32])))
         .unwrap();
     let a: Cap = Cap::CNode(empty);
     let b: Cap = Cap::CNode(populated);
@@ -72,8 +72,22 @@ fn cnode_with_ref_target_panics() {
     let cache = CacheDirectory::new();
     let r = cache.put_instance(Cap::CNode(CNodeCap::new()));
     let mut cn: CNodeCap = CNodeCap::new();
-    cn.set(&SlotKey::from(0u8), Some(CapHashOrRef::Ref(r)))
-        .unwrap();
+    cn.set(&Key::from(0u8), Some(CapHashOrRef::Ref(r))).unwrap();
+    let cap: Cap = Cap::CNode(cn);
+    let result = std::panic::catch_unwind(|| cap.cap_hash());
+    assert!(result.is_err());
+}
+
+#[test]
+fn cnode_with_owned_target_panics() {
+    // Like an unsettled `Ref`, an in-flight `Owned` slot has no wire/hash
+    // form — hashing a graph that still holds one panics (callers settle first).
+    let mut cn: CNodeCap = CNodeCap::new();
+    cn.set(
+        &Key::from(0u8),
+        Some(CapHashOrRef::Owned(Box::new(Cap::data_inline(b"x")))),
+    )
+    .unwrap();
     let cap: Cap = Cap::CNode(cn);
     let result = std::panic::catch_unwind(|| cap.cap_hash());
     assert!(result.is_err());
@@ -98,6 +112,8 @@ fn empty_image() -> ImageCap {
         pinned: Vec::new(),
         initial: Vec::new(),
         yield_marker_slot: None,
+        gas_slots: Vec::new(),
+        quota_slots: Vec::new(),
     }
 }
 

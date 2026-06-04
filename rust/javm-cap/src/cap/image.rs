@@ -7,7 +7,7 @@
 
 use alloc::vec::Vec;
 
-use crate::slot::{SlotKey, SlotPath};
+use crate::slot::{Key, SlotPath};
 
 use super::{CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
 
@@ -60,7 +60,13 @@ pub struct ImageCap {
     /// Initial mutable slot state for non-pinned slots.
     pub initial: Vec<ImageSlotEntry>,
     /// Slot holding `Cap::Instance[YieldCatcher]`, if any.
-    pub yield_marker_slot: Option<SlotKey>,
+    pub yield_marker_slot: Option<Key>,
+    /// Cnode slots holding the `Cap::Instance[Gas{meter_key}]` unit handles;
+    /// `gas_slots[0]` is the active meter the kernel reads at frame entry.
+    /// See [`crate::image::Image::gas_slots`].
+    pub gas_slots: Vec<Key>,
+    /// Cnode slots holding the `Cap::Instance[Quota{quota_key}]` unit handles.
+    pub quota_slots: Vec<Key>,
 }
 
 // Manual Clone: the derived impl would `Vec::clone` the `code` bytes,
@@ -79,6 +85,8 @@ impl Clone for ImageCap {
             pinned: self.pinned.clone(),
             initial: self.initial.clone(),
             yield_marker_slot: self.yield_marker_slot.clone(),
+            gas_slots: self.gas_slots.clone(),
+            quota_slots: self.quota_slots.clone(),
         }
     }
 }
@@ -118,9 +126,9 @@ impl ImageCap {
 /// corresponds to PVM register `φ[i]`. `0` is "use default" (same
 /// semantics as the spec's old `BTreeMap<u8, u64>` when the key is
 /// absent).
-// `SlotKey` is heap-spillable (`SmallVec`), so `EndpointDef` is no longer
+// `Key` is heap-spillable (`SmallVec`), so `EndpointDef` is no longer
 // `Copy`; it threads through the cap layer by value/clone like the other
-// `SlotKey`-bearing structs.
+// `Key`-bearing structs.
 #[derive(
     Clone,
     Debug,
@@ -136,7 +144,7 @@ impl ImageCap {
 pub struct EndpointDef {
     pub entry_pc: u64,
     pub stack_top: u64,
-    pub arg_cnode_slot: SlotKey,
+    pub arg_cnode_slot: Key,
     pub arg_cnode_size: u8,
     pub initial_regs: [u64; NUM_REGS],
 }
@@ -145,12 +153,12 @@ impl EndpointDef {
     /// Empty endpoint — `entry_pc == 0` is the canonical sentinel
     /// for "not defined" (since a real entry PC is never zero — PC 0
     /// is reserved as the fallback PC in our convention). Not `const`:
-    /// `SlotKey`'s `SmallVec` storage has no const constructor.
+    /// `Key`'s `SmallVec` storage has no const constructor.
     pub fn empty() -> Self {
         Self {
             entry_pc: 0,
             stack_top: 0,
-            arg_cnode_slot: SlotKey::from(0u8),
+            arg_cnode_slot: Key::from(0u8),
             arg_cnode_size: 0,
             initial_regs: [0; NUM_REGS],
         }
@@ -188,7 +196,7 @@ pub struct MemoryMapping {
 impl MemoryMapping {
     /// The cnode path steps — the keys to walk to the `Cap::Data` backing
     /// this mapping. Non-empty for a well-formed mapping.
-    pub fn path(&self) -> &[SlotKey] {
+    pub fn path(&self) -> &[Key] {
         self.source.steps()
     }
 }
@@ -196,7 +204,7 @@ impl MemoryMapping {
 /// `(slot_key, cap_hash)` pair used by Image's `pinned` and
 /// `initial` arrays. References content-addressed caps only.
 ///
-/// `SlotKey` is heap-spillable, so this is no longer `Copy`.
+/// `Key` is heap-spillable, so this is no longer `Copy`.
 #[derive(
     Clone,
     Debug,
@@ -210,7 +218,7 @@ impl MemoryMapping {
     rkyv::Deserialize,
 )]
 pub struct ImageSlotEntry {
-    pub slot: SlotKey,
+    pub slot: Key,
     pub cap_hash: CapHash,
 }
 
@@ -250,13 +258,13 @@ pub enum ImageConvertError {
 /// - Endpoints are stored in a dense `MAX_ENDPOINTS`-sized array,
 ///   indexed by endpoint id. Empty slots use [`EndpointDef::empty`].
 ///   `stack_top` is extracted from the old `initial_regs[1]` (RISC-V
-///   SP convention); `arg_cnode_slot` defaults to `SlotKey::from(0)`.
+///   SP convention); `arg_cnode_slot` defaults to `Key::from(0)`.
 /// - `MemoryMapping.source` (a [`SlotPath`]) is carried through verbatim;
 ///   paths that are empty or deeper than `MAX_SOURCE_DEPTH` error.
 pub fn image_cap(
     image: &crate::image::Image,
-    pinned_hashes: &[(SlotKey, CapHash)],
-    initial_hashes: &[(SlotKey, CapHash)],
+    pinned_hashes: &[(Key, CapHash)],
+    initial_hashes: &[(Key, CapHash)],
 ) -> Result<ImageCap, ImageConvertError> {
     // Structural invariant (eager): the code region maps RO at
     // `[CODE_BASE, DATA_BASE)`, so it must fit under `MAX_CODE_SIZE` —
@@ -297,7 +305,7 @@ pub fn image_cap(
         endpoints[idx as usize] = EndpointDef {
             entry_pc: ep.entry_pc,
             stack_top,
-            arg_cnode_slot: SlotKey::from(0u8),
+            arg_cnode_slot: Key::from(0u8),
             arg_cnode_size: ep.arg_cnode_size,
             initial_regs,
         };
@@ -329,6 +337,8 @@ pub fn image_cap(
         pinned,
         initial,
         yield_marker_slot: image.yield_marker_slot.clone(),
+        gas_slots: image.gas_slots.clone(),
+        quota_slots: image.quota_slots.clone(),
     })
 }
 
@@ -353,9 +363,9 @@ fn alloc_page_aligned_code(bytes: &[u8]) -> Vec<u8> {
     v
 }
 
-fn build_image_slot_vec(pairs: &[(SlotKey, CapHash)]) -> Vec<ImageSlotEntry> {
-    let mut sorted: Vec<(SlotKey, CapHash)> = pairs.to_vec();
-    // `SlotKey: Ord` is lexicographic-by-byte; canonical ordering keeps the
+fn build_image_slot_vec(pairs: &[(Key, CapHash)]) -> Vec<ImageSlotEntry> {
+    let mut sorted: Vec<(Key, CapHash)> = pairs.to_vec();
+    // `Key: Ord` is lexicographic-by-byte; canonical ordering keeps the
     // `ImageCap` hash insertion-order independent.
     sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
     let mut out = Vec::with_capacity(sorted.len());

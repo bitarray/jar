@@ -16,7 +16,7 @@ use javm_exec::{
     Access, CopyingMemory, EcallHandler, EcallKind, EcallResult, ExitReason, GasCounter, PAGE_SIZE,
     Regs, gas_const, interp::Interpreter, predecode::predecode_rv_with_mem_cycles,
 };
-use nub_arch_x86_abi::InvocationResult;
+use nub_arch_x86_abi::{InvocationResult, SCRATCHPAD_HEAD_LEN};
 use nub_kernel::{Arch, CapHash, InstanceRef, InvokeOptions, InvokeOutcome};
 
 /// In-process Arch backend.
@@ -177,11 +177,24 @@ pub fn run_instance(
         ExitReason::Ecall => (6, 0),
         ExitReason::Trap => (7, 0),
     };
+
+    // Surface the running Instance's scratchpad (slot[0]) region head — the
+    // effective bytes of `[DATA_BASE, DATA_BASE + SCRATCHPAD_HEAD_LEN)` from the
+    // final flat memory (the guest's writes landed here during the run). The
+    // recompiler reads the identical window from its post-run CoW pages, so the
+    // two engines surface byte-identical result data.
+    let mut scratchpad_head = [0u8; SCRATCHPAD_HEAD_LEN];
+    let sig_base = javm_cap::layout::DATA_BASE;
+    for (i, byte) in scratchpad_head.iter_mut().enumerate() {
+        *byte = mem.read_u8(sig_base + i as u32).unwrap_or(0);
+    }
+
     InvocationResult {
         exit_reason,
         exit_arg,
         return_value: regs.gpr[7],
         gas_remaining: gas.remaining(),
+        scratchpad_head,
     }
 }
 

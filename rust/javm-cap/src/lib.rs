@@ -30,22 +30,27 @@ pub mod cap;
 pub mod error;
 pub mod hash;
 pub mod image;
+pub mod kernel_image;
 pub mod layout;
 pub mod slot;
 
 pub use cache::{CacheDirectory, CacheError, CapHasRefError, CapHashOrRef, CapRef};
 pub use cap::cnode::CNodeCap;
-pub use cap::data::{DataCap, DataGroup, DataGroups, GROUP_SIZE, PAGE_SIZE, PageResolution};
+pub use cap::data::{DataCap, GROUP_SIZE, PAGE_SIZE, PageResolution, PageSlab};
 pub use cap::image::{
     EndpointDef, ImageCap, ImageConvertError, ImageSlotEntry, MemoryMapping, image_cap,
 };
 pub use cap::instance::InstanceCap;
 pub use cap::page::{PageBytes, PageRef, PageSlot};
-pub use cap::view::{DataViewCap, ViewOverlay};
 pub use cap::{Cap, CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS, TypeCap};
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash, Hasher};
 pub use image::{
     Image, InitialDataCap, PinnedCap, chain_extend, chain_genesis, image_content_hash,
 };
-pub use slot::{MAX_SLOT_KEY_LEN, SlotKey, SlotPath};
+pub use kernel_image::{ALL_KERNEL_IMAGES, KernelImage, kernel_image_hash, recognize_kernel_image};
+pub use slot::{Key, MAX_KEY_LEN, SlotPath, key_from_regs, key_to_regs};
+// `CNodeCap::slots` (`CNodeSlots = RadixMap<CapHashOrRef, _>`) exposes
+// `MissingOr` through `iter()`; re-export it so cnode-slot walkers (e.g. the
+// recompiler's cnode-inherit loop) don't need a direct `ssz` dependency.
+pub use ssz::MissingOr;

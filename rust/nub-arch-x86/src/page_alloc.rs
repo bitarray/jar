@@ -15,6 +15,7 @@ extern crate alloc;
 use alloc::alloc::{alloc_zeroed, dealloc};
 use core::alloc::Layout;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::paging::PAGE_SIZE;
 
@@ -68,5 +69,57 @@ impl Drop for PageBuf {
         unsafe {
             dealloc(self.ptr.as_ptr(), self.layout);
         }
+    }
+}
+
+/// A process-global, leak-once page-aligned 4 KiB page. Allocated from talc on
+/// first access and **never freed** (lives for the kernel's lifetime).
+///
+/// Used for ring-3 scratch that is per-*execution*, not per-*frame*, and so is
+/// safe to share across every frame: the shared read-only zero page (a pure
+/// CoW/page-in source) and — once the ctx/stack are shared — the ring-3 CTX and
+/// STACK pages. Only ever one frame runs in ring 3 at a time (cooperative
+/// nesting; each `host_call` fully exits to ring 0), so a single physical page
+/// backs them all without any per-frame state leaking between frames.
+///
+/// The guest is single-threaded (Hyperlight serialises calls), so the
+/// lazy-init load/store needs no compare-exchange; the [`AtomicU64`] is only to
+/// avoid `&'static mut`.
+pub struct GlobalPage {
+    /// Kernel VA of the leaked page, or 0 before first init.
+    kva: AtomicU64,
+}
+
+impl Default for GlobalPage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GlobalPage {
+    pub const fn new() -> Self {
+        Self {
+            kva: AtomicU64::new(0),
+        }
+    }
+
+    /// Kernel VA of the page, allocating + leaking it on first call.
+    pub fn kva(&self) -> u64 {
+        let cur = self.kva.load(Ordering::Acquire);
+        if cur != 0 {
+            return cur;
+        }
+        // First touch: allocate a zeroed page and leak it (never freed).
+        // Single-threaded guest → no race on the store.
+        let buf = PageBuf::new(PAGE_SIZE).expect("global page alloc");
+        let kva = buf.kva();
+        core::mem::forget(buf);
+        self.kva.store(kva, Ordering::Release);
+        kva
+    }
+
+    /// Physical address of the page (allocating it on first call).
+    pub fn pa(&self) -> u64 {
+        crate::paging::va_to_pa(self.kva()).expect("global page kva must lie in kernel half")
     }
 }

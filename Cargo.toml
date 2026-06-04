@@ -43,6 +43,7 @@ members = [
     "components/examples/simple-chain",
     "components/tests/spawn-child-s",
     "components/tests/spawn-parent-m",
+    "components/tests/sub-vm-reread-recurse",
 ]
 exclude = [
     "spec/crypto-ffi",

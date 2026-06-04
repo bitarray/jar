@@ -10,7 +10,7 @@ use javm_cap::cap::Cap;
 use nub_arch_x86_abi::FN_ID_NUB_HEAP_STATS;
 use nub_arch_x86_abi::{
     BootInfo, FN_ID_NUB_EVICT_JIT_ALL, FN_ID_NUB_GET_BOOT_INFO, FN_ID_NUB_INVOKE_CACHED,
-    FN_ID_NUB_PUT_CAP, InvocationResult, InvokePacket,
+    FN_ID_NUB_PUT_CAP, InvocationResult, InvokePacket, SCRATCHPAD_HEAD_LEN,
 };
 
 fn encode_result_error(exit_arg: u32) -> Vec<u8> {
@@ -19,6 +19,7 @@ fn encode_result_error(exit_arg: u32) -> Vec<u8> {
         exit_arg,
         return_value: 0,
         gas_remaining: 0,
+        scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
     };
     rkyv::to_bytes::<rkyv::rancor::Error>(&result)
         .expect("rkyv-encode InvocationResult error")
@@ -49,15 +50,12 @@ pub fn nub_invoke_cached(packet_bytes: &[u8]) -> Vec<u8> {
         packet.initial_gas as i64,
     );
 
-    // GC the transient instance entries that `derive_spawn`
-    // created during this RPC. By now `run_top` has dropped the
-    // call stack, so every frame's `CapHashOrRef::Ref(CapRef)`
-    // clone is gone — the only holder of each transient instance
-    // is the directory's own self-ref. `sweep_instances` walks
-    // the instances tier and removes entries where
-    // `Arc::strong_count(self_ref) == 1`, looping until stable.
-    // Without this, the bench's `sub_vm_data_recurse` OOMs the
-    // guest's talc heap within seconds.
+    // Defensive: reclaim any `cache.instances` entries. The recompiler no
+    // longer mints `CapHashOrRef::Ref` (sub-VMs are inline `Owned` caps that
+    // drop with their frame), so this is a no-op in the current call path —
+    // kept as a cheap safety net in case a host-published instance ever lands
+    // in the tier. The talc-OOM that originally required it is gone: `Owned`
+    // sub-VMs are freed directly at frame pop, not parked in the directory.
     crate::state_cache::CACHE.sweep_instances();
 
     let result = match outcome {
@@ -66,12 +64,14 @@ pub fn nub_invoke_cached(packet_bytes: &[u8]) -> Vec<u8> {
             exit_arg: o.exit_arg,
             return_value: o.return_value,
             gas_remaining: o.gas_remaining.max(0) as u64,
+            scratchpad_head: o.scratchpad_head,
         },
         Err(code) => InvocationResult {
             exit_reason: u32::MAX,
             exit_arg: code,
             return_value: 0,
             gas_remaining: 0,
+            scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
         },
     };
 
@@ -125,6 +125,9 @@ pub fn nub_put_cap(payload: &[u8]) -> Vec<u8> {
 #[guest_function(fn_id = FN_ID_NUB_EVICT_JIT_ALL)]
 pub fn nub_evict_jit_all(_input: &[u8]) -> Vec<u8> {
     crate::jit_cache::evict_all();
+    // Drop the per-image clean-mem memo too, so a "cold" bench re-composes the
+    // instance backing rather than cloning a warm one.
+    crate::call_loop::evict_mem_cache();
     Vec::new()
 }
 
