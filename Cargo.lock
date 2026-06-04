@@ -531,15 +531,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam-channel"
-version = "0.5.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82b8f8f868b36967f9606790d1903570de9ceaf870a7bf9fbbd3016d636a2cb2"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
 name = "crossbeam-deque"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1412,7 +1403,6 @@ name = "nub"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytecheck",
  "criterion",
  "javm-cap",
  "nub",
@@ -1499,10 +1489,7 @@ dependencies = [
  "anyhow",
  "bitflags 2.11.1",
  "blake3",
- "bytecheck",
- "cfg-if",
  "cfg_aliases",
- "crossbeam-channel",
  "foldhash 0.2.0",
  "goblin",
  "hyperlight-common",
@@ -1518,13 +1505,10 @@ dependencies = [
  "rand 0.10.1",
  "rkyv",
  "serde_json",
- "smallvec",
- "termcolor",
  "thiserror",
  "tracing",
  "tracing-core",
  "tracing-log",
- "uuid",
  "vmm-sys-util",
 ]
 
@@ -2392,15 +2376,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "termcolor"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
-dependencies = [
- "winapi-util",
-]
-
-[[package]]
 name = "test-sub-vm-reread-recurse"
 version = "0.1.0"
 dependencies = [
@@ -2687,7 +2662,6 @@ version = "1.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 dependencies = [
- "getrandom 0.4.2",
  "js-sys",
  "wasm-bindgen",
 ]
