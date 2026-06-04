@@ -7,10 +7,10 @@
 //! [`FN_ID_NUB_PUT_CAP`](nub_arch_x86_abi::FN_ID_NUB_PUT_CAP) RPC:
 //! ship a rkyv-archived `Cap` payload, the guest validates via
 //! [`rkyv::access`], materialises via [`rkyv::deserialize`], and
-//! inserts via [`CacheDirectory::put_cap`]. Kernel-derived
-//! sub-VM instances are published via
-//! [`CacheDirectory::put_instance`], which returns a `CapRef` handle
-//! whose `Arc::strong_count` tracks the holders.
+//! inserts via [`CacheDirectory::put_cap`]. Kernel-derived sub-VM
+//! instances are NOT published here — they live inline in their
+//! parent frame's cnode as `CapHashOrRef::Owned` and move zero-copy
+//! (see `call_loop`).
 //!
 //! `CacheDirectory` is interior-mutable (its inner `spin::Mutex`
 //! serialises all public methods), so the static holds it directly
@@ -35,8 +35,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use foldhash::fast::FixedState;
-use javm_cap::cache::{CacheDirectory, CapRef};
-use javm_cap::cap::Cap;
+use javm_cap::cache::CacheDirectory;
 use nub_arch_x86_abi::BootInfo;
 
 /// Per-cache hasher seed. Pinned at a constant so the host's
@@ -45,9 +44,11 @@ use nub_arch_x86_abi::BootInfo;
 /// with BootInfo makes diagnostics easier.
 const DIRECTORY_HASHER_SEED: u64 = 0x4A41_525F_4449_5230; // "JAR_DIR0"
 
-/// Heap-resident cap directory + transient instance store. Populated by
-/// the host via the `put_cap` RPC and by the kernel call loop via
-/// `put_instance` for `derive_spawn`-created sub-VMs.
+/// Heap-resident cap directory. Populated by the host via the `put_cap` RPC
+/// (content-addressed blobs). The kernel call loop no longer uses the
+/// instances tier: `derive_spawn`'d sub-VMs live **inline** in their parent's
+/// cnode as [`javm_cap::cache::CapHashOrRef::Owned`] and move zero-copy,
+/// rather than being published as `CapRef`-keyed instances.
 ///
 /// `CacheDirectory::new_const` is `const fn`, so the static initialiser
 /// runs at link time — the cache is ready before `hyperlight_main`.
@@ -55,15 +56,6 @@ pub static CACHE: CacheDirectory<FixedState> = CacheDirectory::new_const(
     FixedState::with_seed(DIRECTORY_HASHER_SEED),
     FixedState::with_seed(DIRECTORY_HASHER_SEED),
 );
-
-/// Allocate a fresh `CapRef` handle, insert `cap` into [`CACHE`]'s
-/// instances tier, and return the handle. The directory keeps its own
-/// clone of the handle internally as the entry's self-reference; when
-/// all external clones drop, the next `sweep_instances` call removes
-/// the entry.
-pub fn publish_transient_instance(cap: Cap) -> CapRef {
-    CACHE.put_instance(cap)
-}
 
 /// `BootInfo` placed in the `.boot_info` linker section. Initialised
 /// at link time with the magic and reserved fields; the

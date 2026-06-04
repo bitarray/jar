@@ -50,3 +50,7 @@ pub use image::{
 };
 pub use kernel_image::{ALL_KERNEL_IMAGES, KernelImage, kernel_image_hash, recognize_kernel_image};
 pub use slot::{Key, MAX_KEY_LEN, SlotPath, key_from_regs, key_to_regs};
+// `CNodeCap::slots` (`CNodeSlots = RadixMap<CapHashOrRef, _>`) exposes
+// `MissingOr` through `iter()`; re-export it so cnode-slot walkers (e.g. the
+// recompiler's cnode-inherit loop) don't need a direct `ssz` dependency.
+pub use ssz::MissingOr;

@@ -29,16 +29,16 @@
 //!   frame's writes survive. The cap is dropped at frame pop (Phase 2
 //!   does not yet propagate it upward — see the data-flow section).
 //!
-//! - **Sub-VM instances live in `cache.instances`.** `derive_spawn`
-//!   publishes a fresh `Cap::Instance` via
-//!   [`crate::state_cache::publish_transient_instance`]; the returned
-//!   `CapRef` goes into the parent's cnode slot. `host_call` then
-//!   resolves `cnode[slot]: CapHashOrRef` via
-//!   `CACHE.get(CapHashOrRef::…)` on the heap-resident directory,
-//!   yielding either a host-pre-published blob or a kernel-derived
-//!   instance. Refcount on each entry is bumped by the resolution and
-//!   decremented when the [`KernelFrame`] drops, so the cache slot
-//!   stays pinned for the frame's lifetime.
+//! - **Sub-VM instances are inline `Owned` caps.** `derive_spawn`
+//!   builds a fresh `Cap::Instance` and stores it directly in the
+//!   parent's cnode slot as [`CapHashOrRef::Owned`] — no cache publish,
+//!   no `CapRef`. `host_call` then **moves** that instance out of the
+//!   slot (`take_key`, zero copy) into the child frame; at HALT the
+//!   frame's final mem/regs/pc fold back into the instance and it moves
+//!   back into the parent's slot. The instance has exactly one owner at
+//!   every instant (parent slot → child frame → parent slot). A
+//!   host-published `Hash` instance is the only `host_call` target that
+//!   is *not* consumed (the hash is reinserted; the blob is read-only).
 //!
 //! - **Per-frame cnode snapshot.** Top frame's cnode is seeded from
 //!   the running `Cap::Instance`'s `root_cnode` (now walkable from
@@ -93,17 +93,20 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use alloc::boxed::Box;
+
 use javm_cap::cache::CapHashOrRef;
 use javm_cap::cap::Cap;
+use javm_cap::cap::instance::InstanceCap;
 use javm_cap::hash::{Blake2b256, Hash};
 use javm_cap::slot::Key;
-use javm_cap::{CNodeCap, CapHash, DataCap, NUM_REGS};
+use javm_cap::{CNodeCap, CapHash, DataCap, MissingOr, NUM_REGS};
 use nub_arch_x86_abi::SCRATCHPAD_HEAD_LEN;
 
 use crate::jit_run::{self, ExitInfo, FrameRuntime};
 use crate::page_alloc::PageBuf;
 use crate::paging;
-use crate::state_cache::{CACHE, publish_transient_instance};
+use crate::state_cache::CACHE;
 
 const EXIT_HALT: u32 = 0;
 const EXIT_OOG: u32 = 2;
@@ -149,14 +152,12 @@ const ERR_JIT_FAILED: u32 = 50;
 const ERR_DEPTH_LIMIT: u32 = 51;
 const ERR_MAP_BAD_KIND: u32 = 60;
 
-/// One stack frame on the in-kernel call stack. Holds the
-/// identifiers for the Image and Instance caps the frame runs
-/// against (plus per-frame mutable PVM state and the ring-3
-/// resources cache). The caps themselves live in the heap-resident
-/// [`CACHE`] (`CacheDirectory<FixedState>`); the frame re-looks
-/// them up under the cache lock on access. V1 invariant: nothing
-/// evicts directory entries mid-RPC, so a hash that resolved at
-/// frame build resolves the same way for the frame's lifetime.
+/// One stack frame on the in-kernel call stack. Holds the running Image's
+/// identity hashes, the frame's **owned** `mem` DataCap + PVM register/PC
+/// state, its cnode snapshot, and the ring-3 resource cache. The Image cap
+/// is resolved from the heap-resident [`CACHE`] on access (blobs never evict
+/// mid-RPC); the running Instance's memory is owned outright (`mem`), not
+/// re-resolved from the cache.
 pub struct KernelFrame {
     /// Content hash of the Image cap this frame runs. Resolved via
     /// `CACHE.lock().get(CapHashOrRef::Hash(image_hash))` at each access.
@@ -165,13 +166,15 @@ pub struct KernelFrame {
     /// child's chain. Cached locally to avoid a cap deref per
     /// derive.
     image_hash_chain: CapHash,
-    /// Resolution key for the running Instance — either a content-
-    /// addressed blob (Hash) for host-published top-level instances,
-    /// or an identity-addressed slot (Ref) for kernel-derived
-    /// sub-VMs. Identity/diagnostics only: the frame runs against its
-    /// own `mem` (below), not a re-resolved cache instance.
-    #[allow(dead_code)]
-    instance: CapHashOrRef,
+    /// Set when this frame was built by moving an `Owned` instance out of a
+    /// parent cnode slot (`host_call` of a `derive_spawn`'d sub-VM): the
+    /// `(parent slot, parked InstanceCap)`. The instance's `mem` was moved
+    /// into [`Self::mem`]; the rest (image, chain, root_cnode, regs, pc, gas)
+    /// is parked here. At HALT, [`pop_and_reflect`] folds this frame's final
+    /// mem/regs/pc back into the `InstanceCap`, boxes it `Owned`, and moves it
+    /// back into the parent's slot — the single-owner round trip. `None` for a
+    /// top-level (Hash) frame.
+    owned_origin: Option<(Key, InstanceCap)>,
     /// The frame's **owned** read-write memory: a [`DataCap`] cloned from the
     /// running Instance at frame build (Arc-backing bump + empty overlay). The
     /// #PF handler copy-on-writes guest writes straight into its `overlay`
@@ -393,7 +396,7 @@ pub fn run_top(
                             return Err(ERR_DEPTH_LIMIT);
                         }
                         let mut child = {
-                            let parent = stack.last().expect("non-empty");
+                            let parent = stack.last_mut().expect("non-empty");
                             dispatch_host_call(parent)?
                         };
                         // Scratchpad: MOVE the caller's slot[0] into the
@@ -455,12 +458,10 @@ pub fn run_top(
         }
     };
 
-    // Drop the stack BEFORE we hand the outcome back. Dropping each
-    // frame releases its `CapHashOrRef::Ref(CapRef)` clones,
-    // decrementing the inner Arc strong counts; the actual reclaim of
-    // any orphaned transient instances happens via
-    // `CACHE.sweep_instances()` in `nub_invoke_cached` after this
-    // returns.
+    // Drop the stack BEFORE we hand the outcome back. Each frame owns its
+    // `mem` DataCap and any inline `Owned` cnode caps outright, so the drop
+    // frees them directly — there are no `cache.instances` entries to reclaim
+    // (the recompiler no longer mints `Ref`).
     drop(stack);
     Ok(outcome)
 }
@@ -629,24 +630,44 @@ fn mem_page_pa(mem: &javm_cap::DataCap, i: usize, zero_pa: u64) -> Result<u64, u
 }
 
 /// Pop the top frame; if a parent exists, reflect the popped child's
-/// `return_value` into the parent's φ[7]. Returns `true` when the
-/// stack has been drained — the RPC caller uses this to know it's
-/// time to hand a result back to the host. The dropped frame's
-/// `CapHashOrRef::Ref(CapRef)` clones decrement their strong counts
-/// automatically; the per-RPC scratch sweep in `nub_invoke_cached`
-/// (after `run_top` returns) reclaims any orphaned `cache.instances`
-/// slots.
+/// `return_value` into the parent's φ[7], move its scratchpad (slot[0]) back,
+/// and — when the child was a moved-in `Owned` sub-VM — fold the child's final
+/// mem/regs/pc back into its `InstanceCap` and move it back into the parent's
+/// origin slot (the single-owner round trip). Returns `true` when the stack
+/// has been drained (the RPC caller hands a result back to the host).
 fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
     let mut popped = stack.pop().expect("non-empty");
+
+    // REQUIRED ordering: drop the child's ring-3 runtime (its page table)
+    // FIRST, so the cap's overlay pages are unmapped before the cap moves
+    // anywhere. Single-threaded Hyperlight + stack discipline then guarantee no
+    // live PT references the cap once its own PT is gone; a later host_call of
+    // the returned instance builds a fresh PT.
+    popped.runtime = None;
+
     if stack.is_empty() {
-        // Top-level HALT: the scratchpad stays on the popped frame; the host
-        // return path (Part 6) surfaces slot[0] as the invocation result. Here
-        // the frame is dropped at scope end.
+        // Top-level HALT: the scratchpad + mem stay on the popped frame; the
+        // host return path surfaces slot[0] / `scratchpad_head` as the result.
+        // The frame is dropped at scope end (top-level mem persistence deferred).
         return true;
     }
-    // Reflect the callee's scratchpad (slot[0]) back to the caller — the now-
-    // running frame becomes the owner again.
+
+    // Move the callee's scratchpad (slot[0]) back to the caller.
     let scratch = popped.cnode.take_key(&[javm_cap::abi::SCRATCHPAD_SLOT]);
+
+    // If the child was a moved-in `Owned` instance, fold its final state back
+    // into the parked `InstanceCap` (mem moved, regs/pc copied) so the parent's
+    // slot gets the *updated* instance — sub-VM state persists across calls.
+    let owned_back = match popped.owned_origin.take() {
+        Some((slot, mut inst)) => {
+            inst.regs = popped.regs;
+            inst.pc = popped.pc as u64;
+            inst.mem = popped.mem; // move the (overlaid) mem back into the cap
+            Some((slot, inst))
+        }
+        None => None,
+    };
+
     let parent = stack.last_mut().unwrap();
     parent.regs[7] = return_value;
     if let Some(cap) = scratch {
@@ -654,17 +675,23 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
             .cnode
             .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
     }
+    if let Some((slot, inst)) = owned_back {
+        parent.cnode.set_key(
+            slot.as_slice(),
+            Some(CapHashOrRef::Owned(Box::new(Cap::Instance(inst)))),
+        );
+    }
     false
 }
 
 /// `host_derive_spawn(image_slot=φ[7], cnode_slot=φ[8],
 /// dst_slot=φ[9])`. V1: ignores `cnode_slot` (no prepared cnode
 /// support — the child inherits the parent's cnode at CALL time).
-/// Computes `child_chain = blake2b(running.chain, image_hash)`,
-/// publishes a fresh `Cap::Instance` into the heap-resident
-/// [`CACHE`]'s instances tier via
-/// [`crate::state_cache::publish_transient_instance`], and writes
-/// the resulting `CapRef` into the parent's `dst_slot`.
+/// Computes `child_chain = blake2b(running.chain, image_hash)`, builds a
+/// fresh `Cap::Instance`, and stores it **inline** as
+/// [`CapHashOrRef::Owned`] in the parent's `dst_slot` — no cache publish,
+/// no `CapRef`. The instance is single-owner: `host_call` later *moves* it
+/// into the child frame and HALT moves it back (zero copy).
 /// Returns `Ok(true)` if the spawn must trap the guest (the `dst_slot` is
 /// pinned — a write to a read-only slot), matching the interpreter's
 /// `OpError::SlotPinned → ExitReason::Trap`. `Ok(false)` on a normal spawn.
@@ -687,71 +714,81 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
     };
     let child_chain = Blake2b256::hash_pair(&frame.image_hash_chain, &image_hash);
 
-    let cap = Cap::Instance(javm_cap::cap::instance::InstanceCap {
+    let cap = Cap::Instance(InstanceCap {
         image_hash_chain: child_chain,
         image_hash,
         root_cnode: CapHashOrRef::Hash([0u8; 32]),
-        mem: javm_cap::DataCap::empty(),
+        mem: DataCap::empty(),
         regs: [0u64; NUM_REGS],
         pc: 0,
         gas_remaining: 0,
     });
-    let child_ref = publish_transient_instance(cap);
     // CNode ops run in ring-0 dispatch (kernel heap live); `set` on the
-    // unbounded radix map is infallible here.
+    // unbounded radix map is infallible here. The child lives inline in the
+    // parent's slot as `Owned` — the unique owner until host_call moves it.
     frame
         .cnode
-        .set(&dst_slot, Some(CapHashOrRef::Ref(child_ref)))
+        .set(&dst_slot, Some(CapHashOrRef::Owned(Box::new(cap))))
         .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
     Ok(false)
 }
 
-/// `host_call(instance_slot=φ[7], endpoint_idx=φ[8])`. Reads the
-/// target instance ref from the parent's cnode, builds a fresh
-/// [`KernelFrame`] for the child. Parent's φ[9..=12] become child's
-/// φ[7..=10] (arg-passing convention — used by the recursive-spawn
-/// bench to thread the remaining depth count).
-fn dispatch_host_call(parent: &KernelFrame) -> Result<KernelFrame, u32> {
+/// `host_call(instance_slot=φ[7], endpoint_idx=φ[8])`. **Moves** the target
+/// instance out of the parent's cnode slot (`take_key`) and builds a fresh
+/// child [`KernelFrame`]. Parent's φ[9..=10] become child's φ[7..=8]
+/// (arg-passing convention — the recursive-spawn bench threads the remaining
+/// depth through φ[9]).
+///
+/// - `Owned` (a `derive_spawn`'d sub-VM): moved into the child frame with
+///   zero copy; the parent's slot is left empty and HALT moves the updated
+///   instance back ([`KernelFrame::owned_origin`] → [`pop_and_reflect`]).
+/// - `Hash` (a host-published instance): NOT consumed — the hash is
+///   reinserted and the frame built read-only from the blob.
+/// - `Ref`: the recompiler no longer mints `Ref`; a stray one is a bug.
+fn dispatch_host_call(parent: &mut KernelFrame) -> Result<KernelFrame, u32> {
     let instance_slot = Key::from((parent.regs[7] & 0xFF) as u8);
     let endpoint_idx = (parent.regs[8] & 0xFF) as u32;
-    let target = parent
-        .cnode
-        .get(&instance_slot)
-        .ok_or(ERR_HOST_CALL_SLOT_EMPTY)?;
-
-    // Arg-passing convention: parent's φ[9..=10] → child's φ[7..=8].
-    // φ[11] holds the ecall op-code on a kernel-mode ecall exit (not
-    // a usable arg), and φ[12] is reserved; both default to 0 for
-    // the child. The bench guest threads `depth` through φ[9] alone.
     let args = [parent.regs[9], parent.regs[10], 0, 0];
 
-    let mut child = build_frame_from_cap(target, endpoint_idx, args)?;
+    // MOVE the target out of the parent cnode (zero-copy for `Owned`).
+    let target = parent
+        .cnode
+        .take_key(instance_slot.as_slice())
+        .ok_or(ERR_HOST_CALL_SLOT_EMPTY)?;
 
-    // Child inherits the parent's cnode entries that the child's
-    // image didn't pre-populate. Per the data-flow principle every
-    // copy is a real copy: Hash entries copy the hash directly
-    // (cheap), Ref entries are NOT cloned in V1 — they propagate
-    // the parent's ref into the child without bumping the cache.
-    // This matches today's bench semantics; once the scratchpad-cnode
-    // return mechanism lands, inherited Ref slots should go through
-    // `cache.clone_instance` so each frame's cnode owns its own
-    // CapRef and mutations don't accidentally cross-share.
-    //
-    // The cnode is a radix map keyed by `Hasher(Key)`; iterate the
-    // parent's physical (key, value) entries and copy each one the child
-    // doesn't already hold. Operating at the physical-key level is exact —
-    // each logical slot maps to one physical key — and needs no logical-key
-    // reverse map. For Ref(CapRef) slots the clone bumps the inner Arc so the
-    // child's cnode keeps the instance alive while it runs.
+    let mut child = match target {
+        // Single-owner instance: move it into the child frame; record the
+        // origin slot so HALT folds the updated instance back.
+        CapHashOrRef::Owned(boxed) => {
+            build_frame_from_owned(*boxed, instance_slot.clone(), endpoint_idx, args)?
+        }
+        // Host-published instance: not consumed by host_call — put the hash
+        // back and build read-only from the blob.
+        CapHashOrRef::Hash(h) => {
+            parent
+                .cnode
+                .set_key(instance_slot.as_slice(), Some(CapHashOrRef::Hash(h)));
+            build_frame_from_published(&h, endpoint_idx, args)?
+        }
+        CapHashOrRef::Ref(_) => return Err(ERR_INSTANCE_KIND),
+    };
+
+    // The child inherits the parent's cnode entries its image didn't
+    // pre-populate. Per the data-flow principle every inherited entry is a
+    // real copy: `Hash` entries copy the hash directly (cheap). `Owned`
+    // entries are **skipped** — they are single-owner and move-only, so
+    // copying one would create two owners (same rule as the scratchpad
+    // slot[0] below). The moved-out `instance_slot` is already gone from the
+    // parent (for `Owned`) so it is naturally not inherited.
     //
     // The scratchpad slot (slot[0]) is EXCLUDED here: it is not inherited by
-    // copy but *moved* by the caller (so the running Instance is the unique
-    // owner — see the data-flow principle). Copying it too would create two
-    // owners; the explicit move in the `OP_HOST_CALL` arm takes it from the
-    // parent and plants it here.
+    // copy but *moved* by the caller (the `OP_HOST_CALL` arm).
     let scratch_phys = CNodeCap::key_of(&[javm_cap::abi::SCRATCHPAD_SLOT]);
     for (phys_key, val) in parent.cnode.slots.iter() {
         if *phys_key == scratch_phys {
+            continue;
+        }
+        if let MissingOr::Materialized(CapHashOrRef::Owned(_)) = val {
             continue;
         }
         if child.cnode.slots.get(phys_key).is_none() {
@@ -780,7 +817,7 @@ fn build_frame_from_published(
     build_frame_inner(
         image_hash,
         image_hash_chain,
-        CapHashOrRef::Hash(*instance_hash),
+        None,
         endpoint_idx,
         args,
         Some(&inst_regs),
@@ -788,53 +825,50 @@ fn build_frame_from_published(
     )
 }
 
-/// Build a frame from a `Cap::Instance` resident in the kernel-
-/// derived (`Ref`-keyed) tier of [`CACHE`].
-fn build_frame_from_instance_ref(
-    ref_id: javm_cap::CapRef,
+/// Build a frame by **moving** an `Owned` `Cap::Instance` into it: the
+/// instance's `mem` becomes the frame's owned memory, and the rest of the
+/// instance (image, chain, root_cnode, regs, pc, gas) is parked in
+/// [`KernelFrame::owned_origin`] alongside `origin_slot` so HALT can fold the
+/// frame's final state back and return the instance to the parent's slot.
+fn build_frame_from_owned(
+    cap: Cap,
+    origin_slot: Key,
     endpoint_idx: u32,
     args: [u64; 4],
 ) -> Result<KernelFrame, u32> {
-    let arc = CACHE
-        .get(CapHashOrRef::Ref(ref_id.clone()))
-        .ok_or(ERR_INSTANCE_NOT_FOUND)?;
-    let (image_hash, image_hash_chain, mem) = match &*arc {
-        Cap::Instance(i) => (i.image_hash, i.image_hash_chain, i.mem.clone()),
-        _ => return Err(ERR_INSTANCE_KIND),
+    let Cap::Instance(mut inst) = cap else {
+        return Err(ERR_INSTANCE_KIND);
     };
+    // Move the instance's mem into the frame; the parked instance keeps an
+    // empty mem until HALT folds the frame's (overlaid) mem back.
+    let mem = core::mem::replace(&mut inst.mem, DataCap::empty());
+    let image_hash = inst.image_hash;
+    let image_hash_chain = inst.image_hash_chain;
+    let inst_regs = inst.regs;
     build_frame_inner(
         image_hash,
         image_hash_chain,
-        CapHashOrRef::Ref(ref_id),
+        Some((origin_slot, inst)),
         endpoint_idx,
         args,
-        None,
+        Some(&inst_regs),
         mem,
     )
 }
 
-/// Dispatch on `CapHashOrRef` — used by `dispatch_host_call`.
-fn build_frame_from_cap(
-    target: CapHashOrRef,
-    endpoint_idx: u32,
-    args: [u64; 4],
-) -> Result<KernelFrame, u32> {
-    match target {
-        CapHashOrRef::Hash(h) => build_frame_from_published(&h, endpoint_idx, args),
-        CapHashOrRef::Ref(r) => build_frame_from_instance_ref(r, endpoint_idx, args),
-        // Phase 1 placeholder: nothing mints `Owned` into a recompiler cnode
-        // yet. Phase 3 replaces this arm with a move-in `build_frame_from_owned`.
-        CapHashOrRef::Owned(_) => Err(ERR_INSTANCE_KIND),
-    }
-}
+// `build_frame_from_instance_ref` / `build_frame_from_cap` were removed: the
+// recompiler no longer mints `CapHashOrRef::Ref`, so `dispatch_host_call`
+// dispatches `Owned`/`Hash` inline (and rejects a stray `Ref`).
 
 /// Core frame builder: reads the image cap to seed regs/pc/cnode +
 /// CoW ranges, stores only IDs on the frame (no `CapHandle` pins).
+/// `owned_origin` is the parent slot + parked `InstanceCap` for a moved-in
+/// `Owned` sub-VM (`None` for a top-level / `Hash` frame).
 #[allow(clippy::too_many_arguments)]
 fn build_frame_inner(
     image_hash: CapHash,
     image_hash_chain: CapHash,
-    instance: CapHashOrRef,
+    owned_origin: Option<(Key, InstanceCap)>,
     endpoint_idx: u32,
     args: [u64; 4],
     inst_regs: Option<&[u64; NUM_REGS]>,
@@ -890,7 +924,7 @@ fn build_frame_inner(
     Ok(KernelFrame {
         image_hash,
         image_hash_chain,
-        instance,
+        owned_origin,
         mem,
         regs,
         pc,

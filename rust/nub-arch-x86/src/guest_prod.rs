@@ -50,15 +50,12 @@ pub fn nub_invoke_cached(packet_bytes: &[u8]) -> Vec<u8> {
         packet.initial_gas as i64,
     );
 
-    // GC the transient instance entries that `derive_spawn`
-    // created during this RPC. By now `run_top` has dropped the
-    // call stack, so every frame's `CapHashOrRef::Ref(CapRef)`
-    // clone is gone — the only holder of each transient instance
-    // is the directory's own self-ref. `sweep_instances` walks
-    // the instances tier and removes entries where
-    // `Arc::strong_count(self_ref) == 1`, looping until stable.
-    // Without this, the bench's `sub_vm_data_recurse` OOMs the
-    // guest's talc heap within seconds.
+    // Defensive: reclaim any `cache.instances` entries. The recompiler no
+    // longer mints `CapHashOrRef::Ref` (sub-VMs are inline `Owned` caps that
+    // drop with their frame), so this is a no-op in the current call path —
+    // kept as a cheap safety net in case a host-published instance ever lands
+    // in the tier. The talc-OOM that originally required it is gone: `Owned`
+    // sub-VMs are freed directly at frame pop, not parked in the directory.
     crate::state_cache::CACHE.sweep_instances();
 
     let result = match outcome {
