@@ -1124,10 +1124,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jar-test-halt"
-version = "0.1.0"
-
-[[package]]
 name = "javm-bench"
 version = "0.1.0"
 dependencies = [
