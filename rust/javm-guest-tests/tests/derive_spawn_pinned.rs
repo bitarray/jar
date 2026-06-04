@@ -1,23 +1,27 @@
 //! Regression: `host_derive_spawn` into a **pinned** dst slot must TRAP in
-//! BOTH engines.
+//! the x86 recompiler.
 //!
-//! Pre-fix the interpreter rejected a write to a pinned (read-only) slot
-//! (`OpError::SlotPinned` → `ExitReason::Trap`) but the x86 recompiler wrote
-//! the child instance ref into the pinned slot and continued — a silent
-//! interp≠recomp consensus fork that no existing differential exercised
-//! (`derive_spawn` is only fuzzed with non-pinned dsts). The recompiler now
-//! carries a per-frame pinned-key set and traps on a pinned dst, matching the
-//! interpreter; this test pins that agreement.
+//! Pre-fix the recompiler wrote the child instance ref into the pinned
+//! (read-only) slot and continued, while the interpreter rejected the write
+//! (`OpError::SlotPinned` → `ExitReason::Trap`) — a silent interp≠recomp
+//! consensus fork that no existing differential exercised (`derive_spawn` is
+//! only fuzzed with non-pinned dsts). The recompiler now carries a per-frame
+//! pinned-key set and traps on a pinned dst, matching the interpreter; this
+//! test pins that agreement.
+//!
+//! Only the recompiler half survives (the interpreter half ran through the
+//! retired `javm::Vm`); the interpreter's pinned-slot enforcement is exercised
+//! at the `javm-cap` `OpError::SlotPinned` level. The whole file is gated to
+//! the nub Hyperlight host (linux-x86_64).
 //!
 //! The guest program is a single `ecalli OP_DERIVE_SPAWN`; the slot operands
 //! are passed as invocation args (φ[7]=image_slot, φ[9]=dst), so no
 //! register-setup code is needed.
+#![cfg(all(target_os = "linux", target_arch = "x86_64"))]
 
-use javm::kernel_assist::InProcessKernelAssist;
-use javm::{CallResult, Vm};
 use javm_cap::image::{EndpointDef, Image, PinnedCap};
-use javm_cap::{CacheDirectory, Cap, CapHash, CapHashOrRef, Key, NUM_REGS};
-use javm_exec::ExitReason;
+use javm_cap::{Cap, CapHash, Key, NUM_REGS};
+use nub::Nub;
 use std::collections::BTreeMap;
 
 const OP_DERIVE_SPAWN: u32 = 18;
@@ -82,68 +86,11 @@ fn parent_image(child_hash: CapHash) -> Image {
 }
 
 /// φ[7]=image_slot, φ[8]=cnode_slot(unused), φ[9]=dst — matching the 3-arg
-/// cached `derive_spawn` ABI both engines use under `invoke_cached`.
+/// cached `derive_spawn` ABI the recompiler uses under `invoke_cached`.
 const INVOKE_ARGS: [u64; 4] = [IMAGE_SLOT as u64, 0, PINNED_DST as u64, 0];
 
 #[test]
-fn interp_traps_on_derive_spawn_into_pinned() {
-    let mut cache = CacheDirectory::new();
-
-    let child_cap = Cap::image_with_slots(&child_image(), &[], &[]).expect("child image");
-    let child_hash = cache.put_cap(&child_cap).expect("put child image");
-    let data_hash = cache
-        .put_cap(&Cap::data_inline_with_size(&[0xAB; 16], 4096))
-        .expect("put pinned data");
-
-    let parent = parent_image(child_hash);
-    let pinned_hashes = [
-        (Key::from(IMAGE_SLOT), child_hash),
-        (Key::from(PINNED_DST), data_hash),
-    ];
-    let parent_cap = Cap::image_with_slots(&parent, &pinned_hashes, &[]).expect("parent image");
-    let parent_hash = cache.put_cap(&parent_cap).expect("put parent image");
-
-    // Root cnode binds the two slots so the interpreter resolves image_slot
-    // and reaches the pinned-dst check.
-    let mut cn = javm_cap::CNodeCap::new();
-    cn.set(&Key::from(IMAGE_SLOT), Some(CapHashOrRef::Hash(child_hash)))
-        .unwrap();
-    cn.set(&Key::from(PINNED_DST), Some(CapHashOrRef::Hash(data_hash)))
-        .unwrap();
-    let cnode_hash = cache.put_cap(&Cap::CNode(cn)).expect("put cnode");
-
-    let mem = parent.instance_mem_backing();
-    let inst_hash = cache
-        .put_cap(&Cap::instance_with_mem(
-            [0u8; 32],
-            parent_hash,
-            cnode_hash,
-            mem,
-            [0u64; NUM_REGS],
-            0,
-            0,
-        ))
-        .expect("put instance");
-
-    let mut vm = Vm::new(InProcessKernelAssist::new());
-    let result = vm
-        .invoke_cached(&mut cache, inst_hash, 0, INVOKE_ARGS, GAS_BUDGET)
-        .expect("invoke_cached");
-    match result {
-        CallResult::Faulted { reason, .. } => assert_eq!(
-            reason,
-            ExitReason::Trap,
-            "interpreter must Trap on derive_spawn into a pinned slot",
-        ),
-        other => panic!("expected Faulted(Trap), got {other:?}"),
-    }
-}
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[test]
 fn recomp_traps_on_derive_spawn_into_pinned() {
-    use nub::Nub;
-
     // JIT codegen ABI: `ExitReason::Trap` surfaces as exit_reason 7.
     const EXIT_TRAP: u32 = 7;
 
