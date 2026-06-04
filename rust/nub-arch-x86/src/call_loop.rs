@@ -20,11 +20,14 @@
 //!
 //! ## V1 simplifications
 //!
-//! - **No mem snapshotting across CALL/HALT.** Each frame entry
-//!   allocates fresh per-invocation memory from the image's overlays;
-//!   on resume after a child HALT, the parent's mem is rebuilt the
-//!   same way it was on first entry. Bench guests that don't write
-//!   memory (the recursive-spawn bench) see no observable change.
+//! - **The frame owns its mem.** Each [`KernelFrame`] holds its
+//!   read-write memory as an owned [`DataCap`] (`frame.mem`), cloned
+//!   from the running Instance at build. The CoW #PF handler writes
+//!   dirtied pages straight into the cap's `overlay`, so the cap is
+//!   the source of truth: a runtime rebuilt on resume (after eviction)
+//!   sources the overlay page, not the immutable backing, and the
+//!   frame's writes survive. The cap is dropped at frame pop (Phase 2
+//!   does not yet propagate it upward — see the data-flow section).
 //!
 //! - **Sub-VM instances live in `cache.instances`.** `derive_spawn`
 //!   publishes a fresh `Cap::Instance` via
@@ -56,27 +59,23 @@
 //! another except through a deliberate data-flow event (a return
 //! value, an explicit cnode-slot move, etc.).
 //!
-//! What this means for [`KernelFrame::dirty_pages`]:
+//! What this means for [`KernelFrame::mem`]:
 //!
 //! - The CoW #PF handler ([`crate::jit_run::jit_pf_handler`])
 //!   allocates a fresh page on every guest write to a CoW-armed
-//!   mapping and records the page on the running frame's
-//!   `dirty_pages` vector. That page is the frame's own working
-//!   memory — it lets the frame read its own writes within ring 3.
+//!   mapping and inserts it into the running frame's `mem` DataCap
+//!   `overlay`. That page is the frame's own working memory — it lets
+//!   the frame read its own writes within ring 3, and (unlike the old
+//!   throwaway dirty-page `Vec`) survives a runtime rebuild.
 //!
-//! - On frame pop the dirty pages are **dropped**, not propagated.
-//!   F1's modifications to its mem region do not appear in F0's
-//!   cnode or memory automatically; F1 must hand them up through
-//!   an explicit data-flow channel. Today that channel is `φ[7]`
-//!   (the return value reflected by [`pop_and_reflect`]). The spec
-//!   intent for cap-shaped returns is a designated
-//!   scratchpad-cnode slot the child writes and the parent
-//!   explicitly moves into its own cnode; not yet implemented.
-//!
-//! - The `source_hash` / `source_slot` fields on [`DirtyPage`] and
-//!   [`CowRange`] are populated by the #PF handler but currently
-//!   unused — they're the metadata the future scratchpad mechanism
-//!   will need.
+//! - On frame pop the cap is **dropped**, not propagated. F1's
+//!   modifications to its mem region do not appear in F0's cnode or
+//!   memory automatically; F1 must hand them up through an explicit
+//!   data-flow channel. Today that channel is `φ[7]` (the return
+//!   value reflected by [`pop_and_reflect`]) plus the scratchpad
+//!   slot[0] cap moved at CALL/HALT. The running Instance's own `mem`
+//!   is not yet moved or persisted (deferred); a cap-shaped result
+//!   travels through the scratchpad slot, not `mem`.
 //!
 //! Early drafts of this codepath included an "auto-mint" step that
 //! published the dirty pages as a fresh `Cap::Data` and rewrote
@@ -98,7 +97,7 @@ use javm_cap::cache::CapHashOrRef;
 use javm_cap::cap::Cap;
 use javm_cap::hash::{Blake2b256, Hash};
 use javm_cap::slot::Key;
-use javm_cap::{CNodeCap, CapHash, NUM_REGS};
+use javm_cap::{CNodeCap, CapHash, DataCap, NUM_REGS};
 use nub_arch_x86_abi::SCRATCHPAD_HEAD_LEN;
 
 use crate::jit_run::{self, ExitInfo, FrameRuntime};
@@ -169,8 +168,19 @@ pub struct KernelFrame {
     /// Resolution key for the running Instance — either a content-
     /// addressed blob (Hash) for host-published top-level instances,
     /// or an identity-addressed slot (Ref) for kernel-derived
-    /// sub-VMs.
+    /// sub-VMs. Identity/diagnostics only: the frame runs against its
+    /// own `mem` (below), not a re-resolved cache instance.
+    #[allow(dead_code)]
     instance: CapHashOrRef,
+    /// The frame's **owned** read-write memory: a [`DataCap`] cloned from the
+    /// running Instance at frame build (Arc-backing bump + empty overlay). The
+    /// #PF handler copy-on-writes guest writes straight into its `overlay`
+    /// (via `jit_run::OVERLAY_SINK`), so the cap is the source of truth — a
+    /// rebuilt runtime (after eviction) sources the overlay page, not the
+    /// immutable backing, and writes are never lost. Persists across this
+    /// frame's runtime re-builds; dropped at frame pop (Phase 2 does not yet
+    /// propagate it to the parent or persist it — see the module doc).
+    mem: DataCap,
     /// Live PVM register file. Written by the JIT on every entry/
     /// exit.
     regs: [u64; NUM_REGS],
@@ -190,14 +200,6 @@ pub struct KernelFrame {
     /// `OpError::SlotPinned`. Sorted (image pinned slots are emitted sorted),
     /// so membership is a `binary_search`.
     pinned: Vec<Key>,
-    /// CoW-allocated fresh pages, populated by `jit_pf_handler` on
-    /// the first write to each page of a copy-on-write `MatRange`. Per
-    /// the data-flow principle (see module doc), these are frame-local
-    /// working memory and are dropped at frame pop without
-    /// propagation. (The cap-backed `MatRange` list itself lives in the
-    /// frame's [`FrameRuntime`], built with resolved PAs in
-    /// [`build_runtime`].)
-    dirty_pages: Vec<DirtyPage>,
     /// Per-frame ring-3 resources (PT + mem/ctx/stack buffers).
     /// Lazily built on the first [`run_one_entry`] for this frame
     /// and reused across every subsequent re-entry. Cuts N
@@ -236,21 +238,6 @@ pub struct MatRange {
     pub source_slot: u8,
 }
 
-/// One CoW-allocated dirty page. Owned by `KernelFrame.dirty_pages`
-/// and dropped at frame pop. The metadata fields are dead-code-allowed
-/// today: they're retained scaffolding for a possible future explicit
-/// scratchpad-cnode mechanism, not the reverted auto-mint step.
-#[allow(dead_code)]
-pub struct DirtyPage {
-    pub guest_va: u32,
-    pub source_hash: CapHash,
-    pub source_slot: u8,
-    /// 4 KiB page holding the dirtied contents. Page's PA is what
-    /// the PTE currently points at; on auto-mint we read these bytes
-    /// to build the fresh `Cap::Data`.
-    pub page: PageBuf,
-}
-
 /// Successful loop result — what the host RPC returns to the bench
 /// driver. On guest-side panic the loop returns `Err(code)` instead
 /// and `nub_invoke_cached` packs the code into `exit_arg`.
@@ -261,46 +248,22 @@ pub struct LoopOutcome {
     pub gas_remaining: i64,
     /// Effective bytes of the running Instance's scratchpad (slot[0]) region
     /// head at top HALT (see [`SCRATCHPAD_HEAD_LEN`]). Read from the top frame's
-    /// CoW dirty pages overlaid on the Instance's `mem` backing; zero on a
-    /// non-clean exit. The host surfaces this as the uncompressed run result.
+    /// owned `mem` DataCap (overlay-then-backing); zero on a non-clean exit. The
+    /// host surfaces this as the uncompressed run result.
     pub scratchpad_head: [u8; SCRATCHPAD_HEAD_LEN],
 }
 
 /// Read the running Instance's scratchpad (slot[0]) region head — the effective
 /// bytes of `[DATA_BASE, DATA_BASE + SCRATCHPAD_HEAD_LEN)`, the V1 scratchpad
-/// convention (the scratchpad DataCap maps at the data extent's base). Overlays
-/// the frame's CoW dirty pages on the Instance's immutable `mem` backing: a
-/// guest write to the region CoW'd a fresh page (recorded in `dirty_pages`), so
-/// the dirty page holds the post-run bytes; an unwritten region reads the
-/// backing (Empty → zero). The region fits in one page, so a single page lookup
-/// suffices.
+/// convention (the scratchpad DataCap maps at the data extent's base). The
+/// frame owns its `mem` DataCap; `copy_into` reads effective bytes
+/// (overlay-then-backing) directly — a guest write to the region CoW'd a fresh
+/// overlay page (the post-run bytes), an unwritten region reads the backing
+/// (`Empty` → zero). Byte offset 0 of `mem` is guest VA `DATA_BASE`.
 fn read_scratchpad_head(frame: &KernelFrame) -> [u8; SCRATCHPAD_HEAD_LEN] {
     let mut out = [0u8; SCRATCHPAD_HEAD_LEN];
-    let page_va = javm_cap::layout::DATA_BASE; // page-aligned base of the data extent
-    // CoW dirty page for the region's page, if the guest wrote it (latest wins).
-    if let Some(dp) = frame
-        .dirty_pages
-        .iter()
-        .rev()
-        .find(|d| d.guest_va == page_va)
-    {
-        // SAFETY: `dp.page` is a live PAGE_SIZE buffer; HEAD ≤ PAGE_SIZE, so the
-        // copy stays in bounds.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                dp.page.kva() as *const u8,
-                out.as_mut_ptr(),
-                SCRATCHPAD_HEAD_LEN,
-            );
-        }
-        return out;
-    }
-    // Unwritten: fall back to the Instance's `mem` backing (Empty → zero).
-    if let Some(arc) = CACHE.get(frame.instance.clone()).as_deref()
-        && let Cap::Instance(inst) = arc
-        && inst.mem.content_len() as usize >= SCRATCHPAD_HEAD_LEN
-    {
-        inst.mem.copy_into(0, &mut out);
+    if frame.mem.content_len() as usize >= SCRATCHPAD_HEAD_LEN {
+        frame.mem.copy_into(0, &mut out);
     }
     out
 }
@@ -514,9 +477,12 @@ fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
     }
     let pc = frame.pc;
     let regs = frame.regs;
-    let dirty_sink: *mut Vec<DirtyPage> = &mut frame.dirty_pages;
+    // Split borrow of two disjoint fields: the #PF handler CoWs guest writes
+    // into `frame.mem`'s overlay while the JIT runs against `frame.runtime`'s
+    // PT. The raw-pointer cast ends the `&mut frame.mem` borrow immediately.
+    let overlay_sink: *mut DataCap = &mut frame.mem;
     let rt = frame.runtime.as_mut().expect("just built");
-    let info = unsafe { jit_run::enter_frame(rt, gas, pc, regs, dirty_sink) };
+    let info = unsafe { jit_run::enter_frame(rt, gas, pc, regs, overlay_sink) };
     Ok(info)
 }
 
@@ -567,66 +533,62 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     let (code_base, code_bytes) = img.code_mapping().ok_or(ERR_IMAGE_KIND)?;
     let code_pa = paging::va_to_pa(code_bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?;
 
-    // The Instance's RW memory is a dense `DataCap` (`inst.mem`) covering the
-    // whole data extent, holding both initial and pinned content at their VAs
-    // with page-aligned slabs (kept alive in CACHE for the frame's life by the
-    // no-eviction V1 invariant). Source every data page from it: pinned VA
-    // ranges as `PinnedCapRo`, everything else (initial + ephemeral, the latter
-    // backed by `Empty` → zero page) as one catch-all `UnpinnedCapCow` range.
+    // The frame's RW memory is its **owned** dense `DataCap` (`frame.mem`)
+    // covering the whole data extent, holding both initial and pinned content
+    // at their VAs with page-aligned slabs. Source every data page from it
+    // (overlay-then-backing, so a rebuilt runtime picks up prior CoW writes):
+    // pinned VA ranges as `PinnedCapRo`, everything else (initial + ephemeral,
+    // the latter backed by `Empty` → zero page) as one catch-all
+    // `UnpinnedCapCow` range. The slabs are owned by the frame, so their PAs
+    // stay valid for the frame's life past this function's return.
     let data_base = javm_cap::layout::DATA_BASE;
-    let mut mem_size = data_base;
-    let inst_arc = CACHE.get(frame.instance.clone());
-    if let Some(arc) = inst_arc.as_deref()
-        && let Cap::Instance(inst) = arc
-    {
-        let mem = &inst.mem;
-        let extent = mem.content_len() as u32;
-        mem_size = data_base.saturating_add(extent);
-        let pages = (extent / paging::PAGE_SIZE as u32) as usize;
+    let mem = &frame.mem;
+    let extent = mem.content_len() as u32;
+    let mem_size = data_base.saturating_add(extent);
+    let pages = (extent / paging::PAGE_SIZE as u32) as usize;
 
-        // Pinned mappings → PinnedCapRo ranges (pushed first → precedence).
-        for m in img.mappings.iter() {
-            if m.path().is_empty() || !img.mapping_is_pinned(m.start as u32) {
-                continue;
-            }
-            let span = (m.size as u32).next_multiple_of(paging::PAGE_SIZE as u32);
-            let n = (span / paging::PAGE_SIZE as u32) as usize;
-            if n == 0 {
-                continue;
-            }
-            let base_page =
-                ((m.start as u32).saturating_sub(data_base) / paging::PAGE_SIZE as u32) as usize;
-            let pas_off = mat_pas.len() as u32;
-            for k in 0..n {
-                mat_pas.push(mem_page_pa(mem, base_page + k, zero_pa)?);
-            }
-            mat_ranges.push(MatRange {
-                start: m.start as u32,
-                end: (m.start as u32).saturating_add(span),
-                pas_off,
-                pas_len: n as u32,
-                kind: javm_exec::mat::PageKind::PinnedCapRo.as_u8(),
-                source_hash: [0u8; 32],
-                source_slot: m.path().first().map_or(0, |k| k.diag_id() as u8),
-            });
+    // Pinned mappings → PinnedCapRo ranges (pushed first → precedence).
+    for m in img.mappings.iter() {
+        if m.path().is_empty() || !img.mapping_is_pinned(m.start as u32) {
+            continue;
         }
+        let span = (m.size as u32).next_multiple_of(paging::PAGE_SIZE as u32);
+        let n = (span / paging::PAGE_SIZE as u32) as usize;
+        if n == 0 {
+            continue;
+        }
+        let base_page =
+            ((m.start as u32).saturating_sub(data_base) / paging::PAGE_SIZE as u32) as usize;
+        let pas_off = mat_pas.len() as u32;
+        for k in 0..n {
+            mat_pas.push(mem_page_pa(mem, base_page + k, zero_pa)?);
+        }
+        mat_ranges.push(MatRange {
+            start: m.start as u32,
+            end: (m.start as u32).saturating_add(span),
+            pas_off,
+            pas_len: n as u32,
+            kind: javm_exec::mat::PageKind::PinnedCapRo.as_u8(),
+            source_hash: [0u8; 32],
+            source_slot: m.path().first().map_or(0, |k| k.diag_id() as u8),
+        });
+    }
 
-        // Catch-all RW range over the whole extent (initial + ephemeral).
-        if pages > 0 {
-            let pas_off = mat_pas.len() as u32;
-            for i in 0..pages {
-                mat_pas.push(mem_page_pa(mem, i, zero_pa)?);
-            }
-            mat_ranges.push(MatRange {
-                start: data_base,
-                end: mem_size,
-                pas_off,
-                pas_len: pages as u32,
-                kind: javm_exec::mat::PageKind::UnpinnedCapCow.as_u8(),
-                source_hash: [0u8; 32],
-                source_slot: 0,
-            });
+    // Catch-all RW range over the whole extent (initial + ephemeral).
+    if pages > 0 {
+        let pas_off = mat_pas.len() as u32;
+        for i in 0..pages {
+            mat_pas.push(mem_page_pa(mem, i, zero_pa)?);
         }
+        mat_ranges.push(MatRange {
+            start: data_base,
+            end: mem_size,
+            pas_off,
+            pas_len: pages as u32,
+            kind: javm_exec::mat::PageKind::UnpinnedCapCow.as_u8(),
+            source_hash: [0u8; 32],
+            source_slot: 0,
+        });
     }
 
     // PVM2: `code` is raw RV+C+custom-0 bytes (produced by
@@ -811,8 +773,8 @@ fn build_frame_from_published(
     let arc = CACHE
         .get(CapHashOrRef::Hash(*instance_hash))
         .ok_or(ERR_INSTANCE_NOT_FOUND)?;
-    let (image_hash, image_hash_chain, inst_regs) = match &*arc {
-        Cap::Instance(i) => (i.image_hash, i.image_hash_chain, i.regs),
+    let (image_hash, image_hash_chain, inst_regs, mem) = match &*arc {
+        Cap::Instance(i) => (i.image_hash, i.image_hash_chain, i.regs, i.mem.clone()),
         _ => return Err(ERR_INSTANCE_KIND),
     };
     build_frame_inner(
@@ -822,6 +784,7 @@ fn build_frame_from_published(
         endpoint_idx,
         args,
         Some(&inst_regs),
+        mem,
     )
 }
 
@@ -835,8 +798,8 @@ fn build_frame_from_instance_ref(
     let arc = CACHE
         .get(CapHashOrRef::Ref(ref_id.clone()))
         .ok_or(ERR_INSTANCE_NOT_FOUND)?;
-    let (image_hash, image_hash_chain) = match &*arc {
-        Cap::Instance(i) => (i.image_hash, i.image_hash_chain),
+    let (image_hash, image_hash_chain, mem) = match &*arc {
+        Cap::Instance(i) => (i.image_hash, i.image_hash_chain, i.mem.clone()),
         _ => return Err(ERR_INSTANCE_KIND),
     };
     build_frame_inner(
@@ -846,6 +809,7 @@ fn build_frame_from_instance_ref(
         endpoint_idx,
         args,
         None,
+        mem,
     )
 }
 
@@ -866,6 +830,7 @@ fn build_frame_from_cap(
 
 /// Core frame builder: reads the image cap to seed regs/pc/cnode +
 /// CoW ranges, stores only IDs on the frame (no `CapHandle` pins).
+#[allow(clippy::too_many_arguments)]
 fn build_frame_inner(
     image_hash: CapHash,
     image_hash_chain: CapHash,
@@ -873,6 +838,7 @@ fn build_frame_inner(
     endpoint_idx: u32,
     args: [u64; 4],
     inst_regs: Option<&[u64; NUM_REGS]>,
+    mem: DataCap,
 ) -> Result<KernelFrame, u32> {
     let img_arc = CACHE
         .get(CapHashOrRef::Hash(image_hash))
@@ -925,11 +891,11 @@ fn build_frame_inner(
         image_hash,
         image_hash_chain,
         instance,
+        mem,
         regs,
         pc,
         cnode,
         pinned,
-        dirty_pages: Vec::new(),
         runtime: None,
     })
 }

@@ -88,8 +88,9 @@ static CTX_KVA: AtomicU64 = AtomicU64::new(0);
 // write-faults). The DATA region is fully covered by `MAT_RANGES` entries
 // sourced from the Instance's `mem` DataCap: pinned VAs are `PinnedCapRo`, the
 // rest `UnpinnedCapCow` (initial slabs or — for ephemeral/zero pages — the
-// shared zero page, CoW-from-zero on write). CoW'd pages are appended to the
-// per-frame dirty sink (frame-local scaffolding, see `call_loop`).
+// shared zero page, CoW-from-zero on write). CoW'd pages are inserted into the
+// running frame's `mem` DataCap overlay (the cap is the source of truth — see
+// `OVERLAY_SINK` and `call_loop`).
 
 static MAT_RANGES_PTR: AtomicPtr<crate::call_loop::MatRange> =
     AtomicPtr::new(core::ptr::null_mut());
@@ -124,10 +125,18 @@ static MAT_CODE_PA: AtomicU64 = AtomicU64::new(0);
 /// unit is charged one `page_in` exactly once, matching the interpreter. A
 /// `Vec` (not a fixed bitmap) because the unit set is keyed by `unit_base`,
 /// not a dense cluster index, and it grows in the handler (realloc-safe via
-/// the `&mut Vec` indirection, like `DIRTY_PAGE_SINK`).
+/// the `&mut Vec` indirection, like `OVERLAY_SINK`'s `&mut DataCap`).
 static MAT_RO_UNITS_SINK: AtomicPtr<alloc::vec::Vec<u32>> = AtomicPtr::new(core::ptr::null_mut());
-static DIRTY_PAGE_SINK: AtomicPtr<alloc::vec::Vec<crate::call_loop::DirtyPage>> =
-    AtomicPtr::new(core::ptr::null_mut());
+/// Pointer to the running frame's `mem` DataCap (`KernelFrame.mem`). The #PF
+/// handler copy-on-writes each guest write into a fresh page and inserts it
+/// into this cap's `overlay` (keyed by data-extent page index) — so the cap
+/// carries the frame's writes across runtime eviction (the rebuilt runtime
+/// sources the overlay page, not the immutable backing) and, in Phase 3, a
+/// frame-to-frame move at HALT. Re-published every `enter_frame`. The Arc
+/// pointee of each inserted page is address-stable across `BTreeMap` realloc,
+/// so the PA mapped into the guest PT stays valid (same guarantee the old
+/// per-frame dirty-page `Vec` relied on).
+static OVERLAY_SINK: AtomicPtr<javm_cap::DataCap> = AtomicPtr::new(core::ptr::null_mut());
 static ACTIVE_PT_PML4_KVA: AtomicU64 = AtomicU64::new(0);
 /// Type-erased pointer ([`crate::paging::PageTable::owned_vec_ptr`]) to
 /// the active PT's `owned` table list — the handler's `pt_map_leaf`
@@ -439,7 +448,7 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
                     // page `src_pa` is the shared zero page, so the CoW yields a
                     // fresh zeroed page. (Unifies the former EphemeralZero
                     // map-writable special case into the CoW path.)
-                    if !cow_into_fresh(pv, src_pa, pml4, owned_vec, range, flush) {
+                    if !cow_into_fresh(pv, src_pa, pml4, owned_vec, data_base, flush) {
                         // Allocation / remap failure → fault (nothing charged
                         // yet for THIS page, but earlier pages of a straddle
                         // were already advanced; an OOM here is fatal anyway).
@@ -464,10 +473,18 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
     true
 }
 
-/// Copy-on-write a cap-backed page: allocate a fresh page, copy the
-/// cap's bytes from `src_pa`, remap the leaf writable at the new PA, and
-/// append a [`crate::call_loop::DirtyPage`] to the per-frame sink. Returns
-/// `false` on allocation / remap failure.
+/// Copy-on-write a guest page into the running frame's `mem` DataCap overlay:
+/// allocate a fresh page-aligned slab, copy the source bytes from `src_pa`,
+/// remap the leaf writable at the new PA, and insert the page into the cap's
+/// `overlay` (keyed by data-extent page index, `(page_va - data_base) / PAGE`).
+/// Returns `false` on allocation / remap failure.
+///
+/// The overlay carries the write past the runtime's lifetime: a rebuilt
+/// runtime (after eviction, or a Phase-3 frame move) sources the overlay page
+/// rather than the immutable backing, so the frame's writes are never lost.
+/// The slab is `unhashed` (a `[0;32]` sentinel) — overlay pages are hashed
+/// only at [`javm_cap::DataCap::flush`], which recomputes; keeping SHA-256 out
+/// of the fault path preserves interp==recomp gas parity.
 ///
 /// `flush` invalidates the TLB for `page_va` after the remap: pass `true`
 /// only when an *existing* present mapping is being changed (read-then-write
@@ -478,22 +495,22 @@ fn cow_into_fresh(
     src_pa: u64,
     pml4: u64,
     owned_vec: u64,
-    range: Option<crate::call_loop::MatRange>,
+    data_base: u64,
     flush: bool,
 ) -> bool {
     let Some(src_kva) = crate::paging::pa_to_va(src_pa) else {
         return false;
     };
-    let Some(new_page) = crate::page_alloc::PageBuf::new(PAGE_SIZE) else {
+    // SAFETY: src_kva is a live 4 KiB page (cap slab or shared zero page,
+    // pinned by the frame), page-aligned.
+    let src = unsafe { core::slice::from_raw_parts(src_kva as *const u8, PAGE_SIZE) };
+    // Fresh page-aligned overlay slab, copied from the source. Held via `Arc`
+    // in the cap overlay; the `PageBytes` pointee (and its `bytes` slab) is
+    // address-stable across later `BTreeMap` inserts, so `new_pa` stays valid.
+    let page = alloc::sync::Arc::new(javm_cap::PageBytes::from_page_copy_unhashed(src));
+    let Some(new_pa) = crate::paging::va_to_pa(page.bytes.as_ptr() as u64) else {
         return false;
     };
-    let new_pa = new_page.pa();
-    let new_kva = new_page.kva();
-    // SAFETY: src_kva is a live 4 KiB cap page (pinned by the frame);
-    // new_page is a fresh owned 4 KiB page. Both are page-aligned.
-    unsafe {
-        core::ptr::copy_nonoverlapping(src_kva as *const u8, new_kva as *mut u8, PAGE_SIZE);
-    }
     // SAFETY: live PT, single writer; builds the path if needed (the page
     // may be NotPresent under zero-setup) or reuses it (read-then-write).
     if unsafe {
@@ -513,21 +530,16 @@ fn cow_into_fresh(
         crate::paging::invlpg(page_va);
     }
 
-    let sink_ptr = DIRTY_PAGE_SINK.load(Ordering::SeqCst);
+    let sink_ptr = OVERLAY_SINK.load(Ordering::SeqCst);
     if !sink_ptr.is_null() {
-        // SAFETY: sink_ptr is the running frame's `dirty_pages` Vec,
-        // re-published each enter_frame; stable for the handler's life.
-        let sink = unsafe { &mut *sink_ptr };
-        let (source_hash, source_slot) = match range {
-            Some(r) => (r.source_hash, r.source_slot),
-            None => ([0u8; 32], 0u8),
-        };
-        sink.push(crate::call_loop::DirtyPage {
-            guest_va: page_va as u32,
-            source_hash,
-            source_slot,
-            page: new_page,
-        });
+        // SAFETY: sink_ptr is the running frame's `mem` DataCap, re-published
+        // each enter_frame; exclusively ours (single-threaded) for the
+        // handler's life.
+        let mem = unsafe { &mut *sink_ptr };
+        let page_idx = ((page_va - data_base) / PAGE_SIZE as u64) as u32;
+        // Insert drops any prior overlay page at this index: empty on the first
+        // CoW; on a post-eviction re-CoW the old page is already unmapped.
+        mem.insert_overlay_page(page_idx, javm_cap::PageSlot::Loaded(page));
     }
     true
 }
@@ -877,21 +889,21 @@ pub unsafe fn build_frame_runtime(
 /// category-#3 materialization state from `rt`), drops to ring 3, then
 /// reads back the post-exit state.
 ///
-/// `dirty_sink` is the per-frame `Vec` the handler appends a
-/// [`crate::call_loop::DirtyPage`] to on each cap-page CoW (may be null
-/// to disable bookkeeping). The lazily-materialized data ranges + per-
-/// page state live in `rt` and are republished here each entry.
+/// `overlay_sink` is the running frame's `mem` DataCap; the handler inserts
+/// each CoW'd page into its `overlay` (may be null to disable bookkeeping).
+/// The lazily-materialized data ranges + per-page state live in `rt` and are
+/// republished here each entry.
 ///
 /// # Safety
 /// Mutates CR3 + GDT + IDT during the call. Single-threaded by
-/// Hyperlight construction. `dirty_sink` must outlive the call.
+/// Hyperlight construction. `overlay_sink` must outlive the call.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn enter_frame(
     rt: &mut FrameRuntime,
     initial_gas: i64,
     entry_pc: u32,
     initial_regs: [u64; 13],
-    dirty_sink: *mut alloc::vec::Vec<crate::call_loop::DirtyPage>,
+    overlay_sink: *mut javm_cap::DataCap,
 ) -> ExitInfo {
     let ctx = rt.ctx_kva as *mut JitContext;
     // SAFETY: ctx_kva owned by `rt.ctx_buf`, alive across this call.
@@ -934,7 +946,7 @@ pub unsafe fn enter_frame(
     MAT_CODE_TOP.store(rt.code_top as u64, Ordering::SeqCst);
     MAT_CODE_PA.store(rt.code_pa, Ordering::SeqCst);
     MAT_RO_UNITS_SINK.store(&mut rt.ro_units as *mut _, Ordering::SeqCst);
-    DIRTY_PAGE_SINK.store(dirty_sink, Ordering::SeqCst);
+    OVERLAY_SINK.store(overlay_sink, Ordering::SeqCst);
     ACTIVE_PT_PML4_KVA.store(rt.pt.pml4_kva(), Ordering::SeqCst);
     OWNED_VEC_PTR.store(rt.pt.owned_vec_ptr(), Ordering::SeqCst);
     HANDLERS[14].store(jit_pf_handler as *const () as u64, Ordering::Release);
@@ -957,7 +969,7 @@ pub unsafe fn enter_frame(
     MAT_MEM_TOP.store(0, Ordering::SeqCst);
     MAT_CODE_TOP.store(0, Ordering::SeqCst);
     MAT_RO_UNITS_SINK.store(core::ptr::null_mut(), Ordering::SeqCst);
-    DIRTY_PAGE_SINK.store(core::ptr::null_mut(), Ordering::SeqCst);
+    OVERLAY_SINK.store(core::ptr::null_mut(), Ordering::SeqCst);
     ACTIVE_PT_PML4_KVA.store(0, Ordering::SeqCst);
     OWNED_VEC_PTR.store(0, Ordering::SeqCst);
 
