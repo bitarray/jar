@@ -9,11 +9,6 @@ description = "Common types shared between the nub host (nub-host-kvm) and the i
 default = ["tracing"]
 std = ["thiserror/std", "log/std", "tracing/std"]
 tracing = ["dep:tracing"]
-trace_guest = []
-guest-counter = []
-mem_profile = []
-i686-guest = []
-nanvix-unstable = ["i686-guest"]
 
 [dependencies]
 anyhow = { version = "1", default-features = false }
