@@ -54,7 +54,7 @@ extern crate alloc;
 
 use crate::jit_cache;
 use crate::page_alloc::GlobalPage;
-use crate::paging::{PAGE_SIZE, PageTable, Perm};
+use crate::paging::{PAGE_SIZE, PageTable};
 use crate::ring3;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use hyperlight_guest_bin::exception::arch::{Context, ExceptionInfo, HANDLERS};
@@ -110,6 +110,27 @@ static ZERO_PAGE: GlobalPage = GlobalPage::new();
 /// guest re-initialises. This removes the per-frame CTX + STACK `PageBuf`s.
 static CTX_PAGE: GlobalPage = GlobalPage::new();
 static STACK_PAGE: GlobalPage = GlobalPage::new();
+
+/// PD physical addresses of the process-global CTX / STACK 1 GiB PD subtrees
+/// (PD → PT → the shared CTX/STACK page above), built + leaked once and
+/// borrowed as the CTX/STACK entries of *every* Image's `Pml4SlotTemplate`, so
+/// those identical tables are not duplicated per Image. Lazily resolved on
+/// first compile (single-threaded guest → a plain load/store suffices).
+static CTX_PD_PA: AtomicU64 = AtomicU64::new(0);
+static STACK_PD_PA: AtomicU64 = AtomicU64::new(0);
+
+/// Resolve a global CTX/STACK PD PA, building + leaking the PD subtree mapping
+/// `page_pa` at `va` on first call.
+fn global_pd_pa(slot: &AtomicU64, va: u64, page_pa: u64) -> u64 {
+    let cur = slot.load(Ordering::Acquire);
+    if cur != 0 {
+        return cur;
+    }
+    let pa = crate::paging::Pml4SlotTemplate::leak_global_pd(va, page_pa)
+        .expect("global CTX/STACK PD alloc");
+    slot.store(pa, Ordering::Release);
+    pa
+}
 
 static MAT_RANGES_PTR: AtomicPtr<crate::call_loop::MatRange> =
     AtomicPtr::new(core::ptr::null_mut());
@@ -965,6 +986,9 @@ pub unsafe fn build_frame_runtime(
         code_base,
         META_BASE_M,
         CTX_VA_M,
+        STACK_VA_M,
+        global_pd_pa(&CTX_PD_PA, CTX_VA_M, CTX_PAGE.pa()),
+        global_pd_pa(&STACK_PD_PA, STACK_VA_M, STACK_PAGE.pa()),
         mem_cycles,
         helpers,
     );
@@ -994,7 +1018,6 @@ pub unsafe fn build_frame_runtime(
     // [`enter_frame`] each entry (the page is shared, the image differs).
 
     let mut pt = PageTable::new()?;
-    pt.map(CTX_VA_M, CTX_PAGE.pa(), PAGE_SIZE as u64, Perm::user_rw())?;
     // True zero-setup demand paging: the WHOLE guest low VA range (PML4[0]
     // — both CODE at CODE_BASE and DATA at DATA_BASE) is left with NO
     // page-table entries here. The first guest touch of each page faults
@@ -1015,8 +1038,11 @@ pub unsafe fn build_frame_runtime(
     // is safe.
     let code_bytes_rounded = code.len().next_multiple_of(PAGE_SIZE);
     let code_top = code_base.saturating_add(code_bytes_rounded as u32);
-    pt.install_borrowed_pd(META_BASE_M, cached.template_pd_pa)?;
-    pt.map(STACK_VA_M, STACK_PAGE.pa(), STACK_SIZE, Perm::user_rw())?;
+    // Install the entire PML4 slot-1 subtree (CTX | META arena | STACK) with a
+    // single borrowed PML4 write. CTX/STACK are the global shared pages and the
+    // arena PD is per-Image, so the whole PDPT is an Image constant built once
+    // in `get_or_compile` — no per-frame CTX/STACK PDPT/PD/PT allocation.
+    pt.install_borrowed_pdpt(META_PML4_BASE, cached.template_pdpt_pa)?;
     let new_cr3 = pt.cr3()?;
 
     Some(FrameRuntime {
