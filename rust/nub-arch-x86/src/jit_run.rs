@@ -53,7 +53,7 @@
 extern crate alloc;
 
 use crate::jit_cache;
-use crate::page_alloc::{GlobalPage, PageBuf};
+use crate::page_alloc::GlobalPage;
 use crate::paging::{PAGE_SIZE, PageTable, Perm};
 use crate::ring3;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
@@ -97,6 +97,19 @@ static CTX_KVA: AtomicU64 = AtomicU64::new(0);
 /// only ever a materialization *source* (a write CoWs a fresh private page), so
 /// one immutable physical page backs every frame without aliasing hazard.
 static ZERO_PAGE: GlobalPage = GlobalPage::new();
+
+/// Process-global, leak-once ring-3 [`JitContext`] scratch page (mapped at the
+/// fixed [`CTX_VA_M`] in every frame's PT) and ring-3 native x86 stack page
+/// (at [`STACK_VA_M`]). Shared across frames because only **one** frame runs in
+/// ring 3 at a time (cooperative nesting — each `host_call` fully exits to ring
+/// 0), and no ctx/stack state must survive a `host_call` exit: everything the
+/// driver needs persists through [`ExitInfo`] → `KernelFrame` and is re-stamped
+/// by [`enter_frame`] on resume (regs/gas/pc + the frame-constant
+/// `dispatch_table`/`code_base`); the ring-3 stack is reset to its top every
+/// entry; `host_rsp_base` and the spilled x3/x4 are per-execution scratch the
+/// guest re-initialises. This removes the per-frame CTX + STACK `PageBuf`s.
+static CTX_PAGE: GlobalPage = GlobalPage::new();
+static STACK_PAGE: GlobalPage = GlobalPage::new();
 
 static MAT_RANGES_PTR: AtomicPtr<crate::call_loop::MatRange> =
     AtomicPtr::new(core::ptr::null_mut());
@@ -796,7 +809,6 @@ pub struct ExitInfo {
 // anywhere in the low 4 GiB. CTX sits in PML4 slot 1 (512 GiB),
 // outside the PVM u32 range, so guest addresses can't spoof it.
 
-const MEM_VA_M: u64 = 0;
 /// PML4 slot 1 (base 512 GiB) hosts CTX + the per-Image arena + STACK.
 /// MEM stays in `PML4[0]` at VA 0 so PVM addresses are still native VAs.
 /// Placing CTX in this slot too keeps it within ±2 GiB of the JIT
@@ -804,13 +816,17 @@ const MEM_VA_M: u64 = 0;
 ///
 /// The three sub-regions occupy distinct 1 GiB PDPT slots within the
 /// PML4 slot so the per-Image template PT can own the META PD without
-/// colliding with the per-call CTX/STACK PDs.
+/// colliding with the CTX/STACK PDs.
+///
+/// CTX and STACK are process-global shared pages ([`CTX_PAGE`] /
+/// [`STACK_PAGE`]) mapped at the fixed VAs below in every frame's PT — only
+/// one frame runs in ring 3 at a time, so they need no per-call copy.
 ///
 /// ```text
 ///   PML4[1] (512..1024 GiB)
-///     PDPT[0] (512..513 GiB)  ← CTX, per-call alloc
+///     PDPT[0] (512..513 GiB)  ← CTX, global shared page
 ///     PDPT[1] (513..514 GiB)  ← META arena, template-owned
-///     PDPT[2] (514..515 GiB)  ← STACK, per-call alloc
+///     PDPT[2] (514..515 GiB)  ← STACK, global shared page
 /// ```
 const META_PML4_BASE: u64 = 1u64 << 39; // 512 GiB
 /// CTX sits at the slot base. CTX_VA_M must match
@@ -822,6 +838,9 @@ const CTX_VA_M: u64 = META_PML4_BASE;
 const META_BASE_M: u64 = META_PML4_BASE + (1u64 << 30);
 /// STACK_VA — 2 GiB past the PML4 base, in its own PDPT slot.
 const STACK_VA_M: u64 = META_PML4_BASE + (2u64 << 30);
+/// Ring-3 native x86 stack size (one page) — the SP starts at
+/// `STACK_VA_M + STACK_SIZE` every entry.
+const STACK_SIZE: u64 = PAGE_SIZE as u64;
 
 /// One PVM region (arg / ro / rw) to populate before entry.
 #[derive(Clone, Copy)]
@@ -832,38 +851,39 @@ pub struct MemRegion<'a> {
 
 /// Per-frame ring-3 resources retained across re-entries.
 ///
-/// Holds the per-call page table + private mem/ctx/stack pages, plus
-/// the cached `CompiledImage` fields needed to publish #PF-handler
-/// atomics on every entry. Built once per `KernelFrame` (lazily on
-/// first [`enter_frame`]); reused across re-entries on the same frame
-/// — saves N PageTable + 3 PageBuf allocations in a depth-N recursion.
+/// Holds the per-call page table plus the cached `CompiledImage` fields needed
+/// to publish #PF-handler atomics on every entry. Built once per `KernelFrame`
+/// (lazily on first [`enter_frame`]); reused across re-entries on the same
+/// frame — saves a `PageTable` allocation in a depth-N recursion. The CTX,
+/// STACK, and zero scratch pages are process-global ([`CTX_PAGE`] /
+/// [`STACK_PAGE`] / [`ZERO_PAGE`]), shared by every frame (only one runs in
+/// ring 3 at a time), so the page table is now the bulk of a frame's footprint.
 ///
 /// This is the **evictable** half of a frame's state: a deep recursion
-/// drops a paused frame's `FrameRuntime` (its page table + scratch pages)
-/// once it falls outside the runtime cache window, rebuilding it on resume.
-/// The category-#3 materialization *bookkeeping* (`mat_state` / `ro_units`)
-/// therefore lives on the [`KernelFrame`](crate::call_loop) instead — it
-/// must survive eviction so a resumed frame does not re-charge gas for pages
-/// it already paid for (which would fork the never-evicting interpreter).
-/// [`reestablish_after_rebuild`] re-creates the PT mappings those records
-/// imply when the runtime is rebuilt.
+/// drops a paused frame's `FrameRuntime` (its page table) once it falls
+/// outside the runtime cache window, rebuilding it on resume. The category-#3
+/// materialization *bookkeeping* (`mat_state` / `ro_units`) therefore lives on
+/// the [`KernelFrame`](crate::call_loop) instead — it must survive eviction so
+/// a resumed frame does not re-charge gas for pages it already paid for (which
+/// would fork the never-evicting interpreter). [`reestablish_after_rebuild`]
+/// re-creates the PT mappings those records imply when the runtime is rebuilt.
 ///
-/// Frame-constant `JitContext` fields (dispatch_table, code_base,
-/// flat_buf, …) are written once when the runtime is built.
-/// [`enter_frame`] only updates regs/pc/gas/exit_*.
+/// The frame-constant `JitContext` fields the JIT reads — `dispatch_table`
+/// (= [`Self::dispatch_va`]) and `code_base` (= [`Self::jit_va`]) — are
+/// re-stamped by [`enter_frame`] each entry (they differ per image, and the
+/// ctx page is shared), alongside the per-entry regs/pc/gas/exit_*.
 pub struct FrameRuntime {
     pt: PageTable,
-    #[allow(dead_code)] // kept solely to own the backing page (referenced by `pt`).
-    ctx_buf: PageBuf,
-    stack_buf: PageBuf,
     jit_va: u64,
     jit_size: u64,
+    /// Dispatch-table VA (`META_BASE_M + dispatch_offset`) — re-stamped into
+    /// the shared ctx page's `dispatch_table` each entry.
+    dispatch_va: u64,
     exit_label_va: u64,
     trap_table_ptr: *const (u32, u32, u32),
     trap_table_len: u64,
     tramp_va: u64,
     new_cr3: u64,
-    ctx_kva: u64,
     // ---- Category-#3 lazy-materialization map (region bounds + kind;
     // published to the #PF handler each entry). The mutable per-page *state*
     // lives on the `KernelFrame` so it survives this runtime's eviction. ----
@@ -882,13 +902,13 @@ pub struct FrameRuntime {
     code_pa: u64,
 }
 
-/// Build a per-frame runtime: compile the Image (cached), allocate
-/// per-call mem/ctx/stack pages, populate mem from `arg`/`ro`/`rw`,
-/// initialise the frame-constant `JitContext` fields, and build the
-/// per-call page table.
+/// Build a per-frame runtime: compile the Image (cached) and build the
+/// per-call page table, mapping the global CTX/STACK pages + the borrowed
+/// per-Image arena PD into it.
 ///
-/// Per-entry mutable state (regs, pc, gas, exit_*) is written by
-/// [`enter_frame`]; this function only touches frame-constant fields.
+/// All `JitContext` fields are written by [`enter_frame`] (the ctx page is
+/// shared, so even the frame-constant `dispatch_table`/`code_base` are
+/// re-stamped per entry); this function writes none.
 ///
 /// The `code` is raw RV+C+custom-0 bytes; the JIT cache predecodes it
 /// once and reuses the result on subsequent calls. `code_base` is the
@@ -917,7 +937,6 @@ pub unsafe fn build_frame_runtime(
     code: &[u8],
     code_base: u32,
     code_pa: u64,
-    entry_pc: u32,
     mem_size: u32,
     mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
 ) -> Option<FrameRuntime> {
@@ -966,36 +985,16 @@ pub unsafe fn build_frame_runtime(
         .saturating_sub(data_base)
         .next_multiple_of(PAGE_SIZE);
 
-    // Memory is sourced lazily from the Instance's `mem` DataCap (via
-    // `mat_ranges`/`mat_pas`): every data page is covered by a `MatRange`
-    // (initial/pinned slabs or the shared zero page), so there is NO eager flat
-    // buffer — `mem_buf` is gone. Only CTX + STACK are allocated per call.
-    let ctx_buf = PageBuf::new(PAGE_SIZE)?;
-    let stack_buf = PageBuf::new(PAGE_SIZE)?;
-
-    let ctx_kva = ctx_buf.kva();
-    let ctx = ctx_kva as *mut JitContext;
-    // SAFETY: ctx points to a fresh zeroed page.
-    unsafe {
-        (*ctx).heap_base = 0;
-        (*ctx).heap_top = 0;
-        // jalr targets are validated by the dense dispatch table (a
-        // non-block-start offset holds the panic-stub offset) — no
-        // separate bb_starts set.
-        (*ctx).entry_pc = entry_pc;
-        (*ctx).dispatch_table = dispatch_va as *const i32;
-        (*ctx).code_base = jit_va;
-        // Vestigial (codegen addresses mem baseless as `[reg]`); set to
-        // the data buffer's native base for documentation.
-        (*ctx).flat_buf = (MEM_VA_M + data_base as u64) as *mut u8;
-        (*ctx).fast_reentry = 0;
-        (*ctx)._pad2 = 0;
-        (*ctx).max_heap_pages = 0;
-        (*ctx)._pad3 = 0;
-    }
+    // Memory is sourced lazily from the Instance's `mem` DataCap via
+    // `mat_ranges`: every data page is covered by a `MatRange` (initial/pinned
+    // slabs or the shared zero page), so there is NO eager flat buffer. CTX and
+    // STACK are process-global shared pages ([`CTX_PAGE`] / [`STACK_PAGE`]) —
+    // nothing is allocated per call but the page table itself. The shared ctx's
+    // frame-constant fields (`dispatch_table` / `code_base`) are re-stamped by
+    // [`enter_frame`] each entry (the page is shared, the image differs).
 
     let mut pt = PageTable::new()?;
-    pt.map(CTX_VA_M, ctx_buf.pa(), ctx_buf.size(), Perm::user_rw())?;
+    pt.map(CTX_VA_M, CTX_PAGE.pa(), PAGE_SIZE as u64, Perm::user_rw())?;
     // True zero-setup demand paging: the WHOLE guest low VA range (PML4[0]
     // — both CODE at CODE_BASE and DATA at DATA_BASE) is left with NO
     // page-table entries here. The first guest touch of each page faults
@@ -1017,26 +1016,19 @@ pub unsafe fn build_frame_runtime(
     let code_bytes_rounded = code.len().next_multiple_of(PAGE_SIZE);
     let code_top = code_base.saturating_add(code_bytes_rounded as u32);
     pt.install_borrowed_pd(META_BASE_M, cached.template_pd_pa)?;
-    pt.map(
-        STACK_VA_M,
-        stack_buf.pa(),
-        stack_buf.size(),
-        Perm::user_rw(),
-    )?;
+    pt.map(STACK_VA_M, STACK_PAGE.pa(), STACK_SIZE, Perm::user_rw())?;
     let new_cr3 = pt.cr3()?;
 
     Some(FrameRuntime {
         pt,
-        ctx_buf,
-        stack_buf,
         jit_va,
         jit_size: cached.jit_size as u64,
+        dispatch_va,
         exit_label_va: jit_va + cached.exit_label_offset as u64,
         trap_table_ptr: cached.trap_table.as_ptr(),
         trap_table_len: cached.trap_table.len() as u64,
         tramp_va,
         new_cr3,
-        ctx_kva,
         mat_ranges,
         data_base: data_base as u32,
         mem_top,
@@ -1075,8 +1067,10 @@ pub unsafe fn enter_frame(
     mat_state_len: u64,
     ro_units: *mut alloc::vec::Vec<u32>,
 ) -> ExitInfo {
-    let ctx = rt.ctx_kva as *mut JitContext;
-    // SAFETY: ctx_kva owned by `rt.ctx_buf`, alive across this call.
+    let ctx_kva = CTX_PAGE.kva();
+    let ctx = ctx_kva as *mut JitContext;
+    // SAFETY: CTX_PAGE is the process-global ring-3 ctx page, leaked for the
+    // kernel's lifetime; mapped at CTX_VA_M in this frame's PT.
     unsafe {
         // The persisted register file is the 13 host-mapped slots; the two
         // spilled slots (x3/x4) are invocation-local and start at 0, matching
@@ -1089,6 +1083,14 @@ pub unsafe fn enter_frame(
         (*ctx).exit_arg = 0;
         (*ctx).entry_pc = entry_pc;
         (*ctx).pc = entry_pc;
+        // Frame-constant fields the JIT reads. Re-stamped every entry because
+        // the ctx page is shared across frames running different images
+        // (build-time init is gone). `host_rsp_base` + the spilled x3/x4 are
+        // per-execution scratch the prologue re-initialises; the vestigial
+        // heap_*/flat_buf/fast_reentry/max_heap_pages are never read by codegen
+        // and stay zero (the page's leak-once init).
+        (*ctx).dispatch_table = rt.dispatch_va as *const i32;
+        (*ctx).code_base = rt.jit_va;
     }
 
     // ---- install ring-3 GDT/IDT + JIT #PF handler ------------------------
@@ -1100,7 +1102,7 @@ pub unsafe fn enter_frame(
     EXIT_LABEL_VA.store(rt.exit_label_va, Ordering::SeqCst);
     TRAP_TABLE_PTR.store(rt.trap_table_ptr as *mut (u32, u32, u32), Ordering::SeqCst);
     TRAP_TABLE_LEN.store(rt.trap_table_len, Ordering::SeqCst);
-    CTX_KVA.store(rt.ctx_kva, Ordering::SeqCst);
+    CTX_KVA.store(ctx_kva, Ordering::SeqCst);
     MAT_RANGES_PTR.store(
         rt.mat_ranges.as_ptr() as *mut crate::call_loop::MatRange,
         Ordering::SeqCst,
@@ -1120,7 +1122,7 @@ pub unsafe fn enter_frame(
     OWNED_VEC_PTR.store(rt.pt.owned_vec_ptr(), Ordering::SeqCst);
     HANDLERS[14].store(jit_pf_handler as *const () as u64, Ordering::Release);
 
-    let user_stack_top = STACK_VA_M + rt.stack_buf.size();
+    let user_stack_top = STACK_VA_M + STACK_SIZE;
     // SAFETY: trampoline (inside the Image arena) + stack mapped above;
     // new_cr3 carries kernel half.
     let _user_rax = unsafe { ring3::nub_enter_ring3(rt.tramp_va, user_stack_top, rt.new_cr3) };
@@ -1145,7 +1147,7 @@ pub unsafe fn enter_frame(
     // `new_cr3` (the PML4's PA) and kept alive by owning the page tables.
     let _ = &rt.pt;
 
-    // SAFETY: ctx_kva still points to the same page (ctx_buf alive).
+    // SAFETY: ctx still points to the shared global ctx page (leaked, alive).
     unsafe {
         // Copy the 15-register file out first (avoids autoref on the raw
         // pointer deref), then persist only the 13 host-mapped slots — x3/x4

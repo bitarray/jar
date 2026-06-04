@@ -612,7 +612,6 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
             code_bytes,
             code_base,
             code_pa,
-            frame.pc,
             mem_size,
             mat_ranges,
         )
