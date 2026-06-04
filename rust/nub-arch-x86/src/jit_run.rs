@@ -53,7 +53,7 @@
 extern crate alloc;
 
 use crate::jit_cache;
-use crate::page_alloc::PageBuf;
+use crate::page_alloc::{GlobalPage, PageBuf};
 use crate::paging::{PAGE_SIZE, PageTable, Perm};
 use crate::ring3;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
@@ -92,13 +92,20 @@ static CTX_KVA: AtomicU64 = AtomicU64::new(0);
 // running frame's `mem` DataCap overlay (the cap is the source of truth — see
 // `OVERLAY_SINK` and `call_loop`).
 
+/// Process-global, leak-once read-only zero page — the shared CoW/page-in source
+/// for every `Empty` (absent / zero) guest data page across all frames. It is
+/// only ever a materialization *source* (a write CoWs a fresh private page), so
+/// one immutable physical page backs every frame without aliasing hazard.
+static ZERO_PAGE: GlobalPage = GlobalPage::new();
+
 static MAT_RANGES_PTR: AtomicPtr<crate::call_loop::MatRange> =
     AtomicPtr::new(core::ptr::null_mut());
 static MAT_RANGES_LEN: AtomicU64 = AtomicU64::new(0);
-/// Physical address of the running frame's shared zero page — the source an
-/// `Empty` (absent / zero) data page resolves to (mapped RO on read,
-/// CoW-from-zero on write). Per-page cap source PAs are resolved **lazily** on
-/// fault from the frame's `mem` DataCap (see [`mem_source_pa`]); there is no
+/// Physical address of the process-global shared zero page ([`ZERO_PAGE`]) — the
+/// source an `Empty` (absent / zero) data page resolves to (mapped RO on read,
+/// CoW-from-zero on write). Republished each `enter_frame` so the #PF handler
+/// reads it with one atomic load. Per-page cap source PAs are resolved **lazily**
+/// on fault from the frame's `mem` DataCap (see [`mem_source_pa`]); there is no
 /// eager per-page PA arena, so demand paging materializes only touched pages.
 static MAT_ZERO_PA: AtomicU64 = AtomicU64::new(0);
 /// Per-page [`javm_exec::mat::PageState`] (one byte/page), len =
@@ -710,10 +717,6 @@ pub struct FrameRuntime {
     /// extent — region bounds + kind only. Per-page source PAs are resolved
     /// lazily on fault ([`mem_source_pa`]); there is no per-page PA arena.
     mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
-    /// Shared zero page sourcing `Empty` data pages (RO) / CoW-from-zero writes.
-    /// Owned here so its PA (published to `MAT_ZERO_PA`) stays valid for the frame.
-    #[allow(dead_code)]
-    zero_page: PageBuf,
     /// Per-page [`javm_exec::mat::PageState`], one byte/page over
     /// `[data_base, mem_top)`. Advances NotPresent → PresentRo → PresentRw.
     mat_state: alloc::vec::Vec<u8>,
@@ -770,7 +773,6 @@ pub unsafe fn build_frame_runtime(
     entry_pc: u32,
     mem_size: u32,
     mat_ranges: alloc::vec::Vec<crate::call_loop::MatRange>,
-    zero_page: PageBuf,
 ) -> Option<FrameRuntime> {
     let helpers = HelperFns {
         mem_read_u8: 0x1001,
@@ -887,7 +889,6 @@ pub unsafe fn build_frame_runtime(
         new_cr3,
         ctx_kva,
         mat_ranges,
-        zero_page,
         mat_state,
         data_base: data_base as u32,
         mem_top,
@@ -950,7 +951,7 @@ pub unsafe fn enter_frame(
         Ordering::SeqCst,
     );
     MAT_RANGES_LEN.store(rt.mat_ranges.len() as u64, Ordering::SeqCst);
-    MAT_ZERO_PA.store(rt.zero_page.pa(), Ordering::SeqCst);
+    MAT_ZERO_PA.store(ZERO_PAGE.pa(), Ordering::SeqCst);
     MAT_STATE_PTR.store(rt.mat_state.as_mut_ptr(), Ordering::SeqCst);
     MAT_STATE_LEN.store(rt.mat_state.len() as u64, Ordering::SeqCst);
     MAT_DATA_BASE.store(rt.data_base as u64, Ordering::SeqCst);

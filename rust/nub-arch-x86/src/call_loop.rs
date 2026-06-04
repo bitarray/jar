@@ -106,7 +106,6 @@ use javm_cap::{CNodeCap, CapHash, DataCap, MissingOr, NUM_REGS};
 use nub_arch_x86_abi::SCRATCHPAD_HEAD_LEN;
 
 use crate::jit_run::{self, ExitInfo, FrameRuntime};
-use crate::page_alloc::PageBuf;
 use crate::paging;
 use crate::state_cache::CACHE;
 
@@ -507,12 +506,6 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     // identical to the interpreter drivers (`javm`, `nub-arch-local`), so the
     // engines agree on which VAs are read-only.
     let mut mat_ranges: Vec<MatRange> = Vec::new();
-    // Shared per-frame zero page: the source for `Empty` (absent / zero) memory
-    // pages, mapped RO or CoW'd-from-zero on write. Owned by the `FrameRuntime`
-    // so its PA (published to `MAT_ZERO_PA`) stays valid for the frame's life;
-    // never written through (RO maps; a write CoWs a fresh private page), so
-    // aliasing it across pages is safe.
-    let zero_page = PageBuf::new(paging::PAGE_SIZE).ok_or(ERR_JIT_FAILED)?;
 
     // Executable code region: a `PinnedCapRo` lazily-materialized region at the
     // fixed CODE_BASE, sourced from its physical address `code_pa`. Code is
@@ -578,7 +571,6 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
             frame.pc,
             mem_size,
             mat_ranges,
-            zero_page,
         )
     }
     .ok_or(ERR_JIT_FAILED)
