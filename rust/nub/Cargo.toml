@@ -38,7 +38,6 @@ nub-arch-x86 = { path = "../nub-arch-x86" }
 # `nub_invoke` entry (D1+).
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
 rkyv = { version = "0.8", features = ["std"] }
-bytecheck = "0.8"
 
 [build-dependencies]
 nub-build = { path = "../nub-build" }

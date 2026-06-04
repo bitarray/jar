@@ -148,8 +148,4 @@ impl<A: Arch> Kernel<A> {
     pub fn arch(&self) -> &A {
         &self.arch
     }
-
-    pub fn arch_mut(&mut self) -> &mut A {
-        &mut self.arch
-    }
 }

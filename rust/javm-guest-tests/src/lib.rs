@@ -8,11 +8,11 @@
 //! u64 fingerprint.
 //!
 //! The conformance harness (`tests/conformance.rs`) calls every
-//! suite three ways — host native, byte-PVM interpreter (via
-//! `jar-kernel`), JIT recompiler (via `nub::Nub` Hyperlight JIT,
-//! x86 codegen in `javm-recompiler-x86`) — and asserts
-//! the fingerprints agree, plus that the two PVM backends consume
-//! identical gas.
+//! suite three ways — host native, the PVM2 interpreter (via
+//! `nub::Nub` local `nub-arch-local`), and the JIT recompiler (via
+//! `nub::Nub` Hyperlight, x86 codegen in `javm-recompiler-x86`) —
+//! and asserts the fingerprints agree, plus that the two PVM backends
+//! consume identical gas.
 //!
 //! Baking the corpus into the guest sidesteps the args-delivery
 //! problem: the kernel can pass `event.payload` into the

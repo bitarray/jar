@@ -15,16 +15,11 @@ sha3 = { version = "0.10", default-features = false }
 build-javm = { path = "../build-javm" }
 
 [dev-dependencies]
-javm = { path = "../javm" }
 javm-cap = { workspace = true }
-jar-kernel = { workspace = true }
-javm-exec = { workspace = true }
 ssz = { workspace = true, features = ["std", "sha2", "derive"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dev-dependencies]
 nub = { path = "../nub" }
-nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
-blake3 = "1"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_env, values("javm"))', 'cfg(target_os, values("none"))'] }

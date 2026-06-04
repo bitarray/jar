@@ -746,13 +746,6 @@ const STACK_VA_M: u64 = META_PML4_BASE + (2u64 << 30);
 /// `STACK_VA_M + STACK_SIZE` every entry.
 const STACK_SIZE: u64 = PAGE_SIZE as u64;
 
-/// One PVM region (arg / ro / rw) to populate before entry.
-#[derive(Clone, Copy)]
-pub struct MemRegion<'a> {
-    pub start: u32,
-    pub data: &'a [u8],
-}
-
 /// Per-frame ring-3 resources retained across re-entries.
 ///
 /// Holds the per-call page table plus the cached `CompiledImage` fields needed

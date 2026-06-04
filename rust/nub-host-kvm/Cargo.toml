@@ -27,9 +27,6 @@ print_debug = []
 anyhow = "1.0"
 bitflags = "2.11.1"
 blake3 = "1.8.5"
-cfg-if = "1.0.4"
-crossbeam-channel = "0.5.15"
-bytecheck = "0.8"
 # Pinned to match the guest's `state_cache::DIRECTORY` hasher seed
 # — host and guest must compute identical bucket indices.
 foldhash = "0.2"
@@ -39,19 +36,16 @@ javm-cap = { path = "../javm-cap" }
 nub-arch-x86-abi = { path = "../nub-arch-x86-abi" }
 nub-host-common = { path = "../nub-host-common", features = ["std"] }
 rkyv = { version = "0.8", features = ["std"] }
-smallvec = "1"
 libc = "0.2.186"
 log = "0.4.29"
 metrics = "0.24.5"
 page_size = "0.6.0"
 rand = "0.10"
 serde_json = "1.0"
-termcolor = "1.2.0"
 thiserror = { workspace = true, features = ["std"] }
 tracing = { version = "0.1.44", features = ["log"] }
 tracing-core = "0.1.36"
 tracing-log = "0.2.0"
-uuid = { version = "1.23.1", features = ["v4"] }
 vmm-sys-util = "0.15.0"
 
 [target."cfg(unix)".dependencies]
