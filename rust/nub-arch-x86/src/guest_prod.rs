@@ -125,6 +125,9 @@ pub fn nub_put_cap(payload: &[u8]) -> Vec<u8> {
 #[guest_function(fn_id = FN_ID_NUB_EVICT_JIT_ALL)]
 pub fn nub_evict_jit_all(_input: &[u8]) -> Vec<u8> {
     crate::jit_cache::evict_all();
+    // Drop the per-image clean-mem memo too, so a "cold" bench re-composes the
+    // instance backing rather than cloning a warm one.
+    crate::call_loop::evict_mem_cache();
     Vec::new()
 }
 

@@ -91,9 +91,10 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 
 use javm_cap::cache::CapHashOrRef;
 use javm_cap::cap::Cap;
@@ -685,8 +686,62 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
     false
 }
 
-/// Build a derived sub-VM's initial `mem` DataCap from its Image: a dense
-/// backing covering `[DATA_BASE, max(mapping.start + size))`, with each
+/// Per-`image_hash` cache of the **clean** composed instance-memory backing.
+///
+/// The composed RW backing for an Image is identical for every sub-VM spawned
+/// from it and is never mutated during execution — guest writes CoW into the
+/// *per-instance* overlay, never the backing. So we compose it once per
+/// `image_hash` (content-addressed ⇒ never stale) and hand each
+/// `derive_spawn` a [`DataCap::clone`] — an `Arc`-bump of the shared backing +
+/// an empty overlay — instead of re-running the full compose (a `CACHE.get`
+/// per mapping + a `place_shared` pass + a fresh slab alloc) every spawn. All
+/// spawns sharing one backing direct-map the same read-only physical frames
+/// and each CoWs only the pages it writes, so sharing is sound (single
+/// mutator: each instance's overlay).
+///
+/// `UnsafeCell<BTreeMap>` mirrors [`crate::jit_cache`]'s compile cache: the
+/// Hyperlight guest is single-threaded, so the `unsafe` is sound and local.
+struct MemCache {
+    inner: UnsafeCell<BTreeMap<CapHash, DataCap>>,
+}
+/// SAFETY: single-threaded guest (Hyperlight serialisation).
+unsafe impl Sync for MemCache {}
+static MEM_CACHE: MemCache = MemCache {
+    inner: UnsafeCell::new(BTreeMap::new()),
+};
+
+/// Drop every cached clean instance-mem backing. Bench-only (paired with
+/// [`crate::jit_cache::evict_all`]) so a "cold" measurement re-composes;
+/// correctness never needs it (the cache is content-addressed by `image_hash`).
+pub fn evict_mem_cache() {
+    // SAFETY: single-threaded guest; no in-flight call when this RPC fires.
+    let map = unsafe { &mut *MEM_CACHE.inner.get() };
+    map.clear();
+}
+
+/// Build a derived sub-VM's initial `mem` DataCap from its Image. The composed
+/// backing is memoized per `image_hash` (see [`MemCache`]): on a hit each spawn
+/// gets a cheap clone (shared backing `Arc` + empty overlay); on a miss
+/// [`compose_instance_mem`] builds it once.
+fn build_instance_mem(image_hash: &CapHash, img: &ImageCap) -> DataCap {
+    // Fast path: clone the cached clean backing (Arc-bump + empty overlay).
+    // SAFETY: single-threaded guest (Hyperlight serialisation); the returned
+    // borrow is cloned before any mutation of the map.
+    if let Some(clean) = unsafe { (*MEM_CACHE.inner.get()).get(image_hash) } {
+        return clean.clone();
+    }
+    // Miss: compose once (no MEM_CACHE borrow held across the compose), cache,
+    // hand out a clone.
+    let mem = compose_instance_mem(img);
+    // SAFETY: single-threaded guest.
+    unsafe {
+        (*MEM_CACHE.inner.get()).insert(*image_hash, mem.clone());
+    }
+    mem
+}
+
+/// Compose the clean instance-mem backing from the image's data mappings: a
+/// dense backing covering `[DATA_BASE, max(mapping.start + size))`, with each
 /// mapping's source `Cap::Data` (resolved from [`CACHE`] via the image's
 /// pinned/initial slot `cap_hash`) **Arc-shared** at the mapping's offset.
 ///
@@ -702,7 +757,7 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
 /// mapping's source resolves to the image's own pinned/initial default
 /// (`pinned` first — the same precedence `build_frame_inner` seeds the cnode
 /// with).
-fn build_instance_mem(img: &ImageCap) -> DataCap {
+fn compose_instance_mem(img: &ImageCap) -> DataCap {
     let data_base = javm_cap::layout::DATA_BASE as u64;
     let mem_top = img
         .mappings
@@ -773,7 +828,7 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
             .get(CapHashOrRef::Hash(image_hash))
             .ok_or(ERR_IMAGE_NOT_FOUND)?;
         match &*img_arc {
-            Cap::Image(img) => build_instance_mem(img),
+            Cap::Image(img) => build_instance_mem(&image_hash, img),
             _ => return Err(ERR_IMAGE_KIND),
         }
     };
