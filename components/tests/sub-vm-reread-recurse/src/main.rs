@@ -87,10 +87,9 @@ fn rw_write(v: u8) {
 ///
 /// Down: read the RO blob + CoW-write & read the RW page (materializes this
 /// level's RO unit and CoW page). After `host_call` returns and this level
-/// resumes: re-read both. If this level's `FrameRuntime` was evicted while it
-/// was paused, the resume rebuilds a fresh page table and the re-reads land on
-/// pages that were already materialized + charged on the way down — they must
-/// not be charged again.
+/// resumes: re-read both, exercising the category-#3 path on the way up too.
+/// Each level's charge is therefore identical, so total gas is affine in depth
+/// (the property `tests/sub_vm_gas_parity.rs` pins).
 ///
 /// Returns a deterministic fold so the harness can value-check the run:
 ///   * depth 0    → `RO_SUM + (depth & 0xFF)`
@@ -111,7 +110,7 @@ fn javm_main(depth: u64) -> u64 {
     unsafe { host_derive_spawn(SLOT_IMAGE_RECURSE, 0, SLOT_CHILD) };
     unsafe { host_call_with_arg(SLOT_CHILD, CHILD_ENDPOINT, depth - 1) };
 
-    // Post-resume re-read: the eviction-recharge case.
+    // Post-resume re-read: exercises category-#3 on the way up.
     acc = acc.wrapping_add(ro_sum());
     acc = acc.wrapping_add(rw_read());
     acc

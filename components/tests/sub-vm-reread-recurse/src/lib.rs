@@ -8,12 +8,16 @@
 //! a child. After the child HALTs and the level **resumes**, it re-reads both
 //! the RO and the RW data and folds them into its return value.
 //!
-//! That post-resume re-read is the whole point: a deep frame whose
-//! `FrameRuntime` was evicted while it was paused rebuilds a fresh, empty page
-//! table on resume. The category-#3 charge for those already-materialized pages
-//! must NOT be paid again — eviction is a memory-management optimization and is
-//! gas-transparent. `tests/sub_vm_gas_parity.rs` drives this guest across the
-//! eviction boundary and asserts the recursion's gas stays affine in depth.
+//! The post-resume re-read makes each level exercise the full category-#3 path
+//! (RO-unit page-in + CoW) on both the way down and the way up.
+//! `tests/sub_vm_gas_parity.rs` drives this guest and asserts the recursion's
+//! gas is affine in depth (identical per-level charge — a multi-frame
+//! determinism guard). It was originally the regression test for the runtime
+//! eviction-recharge fork: a frame whose page table was evicted while paused and
+//! rebuilt on resume must not re-charge category-#3 for pages it already paid
+//! for. Eviction has since been removed (the call stack is bounded
+//! structurally), so the gas state lives on the `KernelFrame` purely to survive
+//! any future runtime reclamation (host-backed swap).
 
 #![cfg_attr(target_os = "none", no_std)]
 

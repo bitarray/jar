@@ -191,7 +191,7 @@ pub fn nub_hyperlight_lock() -> NubGuard {
 /// Bench helper: drive one invocation through an already-locked Nub.
 /// Used inside `iter_batched`'s routine closure so the timed body is
 /// just the host-call round-trip + JIT path (no mutex acquire, no
-/// cap publish, no eviction).
+/// cap publish, no sandbox rebuild).
 pub fn invoke(nub: &mut Nub, built: &BuiltCaps) -> (u64, u64) {
     let result = nub
         .invoke_cached(built.instance_hash, built.endpoint_idx, [0; 4], INITIAL_GAS)
@@ -444,10 +444,9 @@ pub fn invoke_sub_vm(nub: &mut Nub, top: &SubVmTop, depth: u64) {
 }
 
 /// Like [`invoke_sub_vm`] but returns `(return_value, gas_used)` after asserting
-/// a clean trampoline halt. Used by the sub-VM gas-parity conformance test to
-/// compare the recompiler's category-#3 charge against the interpreter across
-/// the recursion (including past `RUNTIME_CACHE_CAP`, where deep frames evict +
-/// rebuild — the interpreter never evicts, so it is the consensus reference).
+/// a clean trampoline halt. Used by the `sub_vm_gas_parity` test to check the
+/// recompiler's category-#3 charge is identical per recursion level (gas affine
+/// in depth — a multi-frame determinism guard).
 pub fn invoke_sub_vm_gas(nub: &mut Nub, top: &SubVmTop, depth: u64) -> (u64, u64) {
     let result = nub
         .invoke_cached(top.top_instance, 0, [depth, 0, 0, 0], INITIAL_GAS)

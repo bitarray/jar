@@ -24,10 +24,11 @@
 //!   read-write memory as an owned [`DataCap`] (`frame.mem`), cloned
 //!   from the running Instance at build. The CoW #PF handler writes
 //!   dirtied pages straight into the cap's `overlay`, so the cap is
-//!   the source of truth: a runtime rebuilt on resume (after eviction)
-//!   sources the overlay page, not the immutable backing, and the
-//!   frame's writes survive. The cap is dropped at frame pop (Phase 2
-//!   does not yet propagate it upward — see the data-flow section).
+//!   the source of truth: a runtime rebuilt after a future reclamation
+//!   (host-backed swap) would source the overlay page, not the immutable
+//!   backing, so the frame's writes survive. The cap is dropped at frame
+//!   pop (Phase 2 does not yet propagate it upward — see the data-flow
+//!   section).
 //!
 //! - **Sub-VM instances are inline `Owned` caps.** `derive_spawn`
 //!   builds a fresh `Cap::Instance` and stores it directly in the
@@ -122,24 +123,18 @@ const OP_REPLY: u32 = 0;
 const OP_DERIVE_SPAWN: u32 = 18;
 const OP_HOST_CALL: u32 = 26;
 
+/// Hard ceiling on the in-kernel call-stack depth. NOTE: with runtime eviction
+/// removed, every live frame keeps its ~24 KiB page table resident, so
+/// `32768 × 24 KiB ≈ 768 MiB` exceeds the 256 MiB guest heap — a deep recursion
+/// exhausts talc inside `build_runtime` and **OOM-panics (a guest-wide abort)
+/// at ~9000 deep, before this `MAX_DEPTH` check ever fires.** So this is not a
+/// graceful cap; it is a far-above-any-real-workload backstop (no workload
+/// approaches even depth 1000). The real synchronous-depth bound is the
+/// **cnode nesting depth limit, enforced at move-time** (faults are permanent →
+/// reject at construction, not at use), which supersedes this constant once
+/// `derive_spawn` becomes a nesting move — see
+/// `docs/spec-staging/implementation/call-depth-and-cap-nesting.md`.
 const MAX_DEPTH: usize = 32_768;
-/// Maximum number of concurrently-resident [`FrameRuntime`]s. A runtime now
-/// keeps alive only its page table — the PML4 + the PML4[0] demand-paging
-/// intermediates (~6 tables ≈ 24 KiB for a typical small guest; more for one
-/// touching many 2 MiB regions). The CTX / STACK / zero scratch pages are
-/// process-global, and the whole PML4[1] subtree is a borrowed per-Image PDPT
-/// template — none of it is per-frame. So 512 resident runtimes cap the
-/// evictable in-kernel footprint at roughly the same ~12 MiB the old 256 ×
-/// ~48 KiB did, while halving how often deep recursion evicts + rebuilds.
-///
-/// On each push, the frame at depth `stack.len() - RUNTIME_CACHE_CAP`
-/// is evicted: that frame is about to fall outside the cached window
-/// and will rebuild its runtime on resume (re-establishing its already-charged
-/// mappings via [`jit_run::reestablish_after_rebuild`], charging no gas — the
-/// category-#3 state lives on the surviving [`KernelFrame`]). For depth ≤ cap,
-/// no eviction — every frame keeps its cached PT across the inevitable
-/// child-HALT → parent-resume cycle.
-const RUNTIME_CACHE_CAP: usize = 512;
 
 // Error codes returned to the host as InvocationResult.exit_arg when
 // the call loop bails out. The byte stays small so a hex dump in the
@@ -186,10 +181,10 @@ pub struct KernelFrame {
     /// running Instance at frame build (Arc-backing bump + empty overlay). The
     /// #PF handler copy-on-writes guest writes straight into its `overlay`
     /// (via `jit_run::OVERLAY_SINK`), so the cap is the source of truth — a
-    /// rebuilt runtime (after eviction) sources the overlay page, not the
-    /// immutable backing, and writes are never lost. Persists across this
-    /// frame's runtime re-builds; dropped at frame pop (Phase 2 does not yet
-    /// propagate it to the parent or persist it — see the module doc).
+    /// runtime rebuilt after a future reclamation (host-backed swap) sources the
+    /// overlay page, not the immutable backing, so writes are never lost.
+    /// Dropped at frame pop (Phase 2 does not yet propagate it to the parent or
+    /// persist it — see the module doc).
     mem: DataCap,
     /// Live PVM register file. Written by the JIT on every entry/
     /// exit.
@@ -213,23 +208,26 @@ pub struct KernelFrame {
     /// Per-page category-#3 [`javm_exec::mat::PageState`] (one byte/page) over
     /// the frame's data extent `[DATA_BASE, DATA_BASE + mem.content_len())`,
     /// advancing NotPresent → PresentRo → PresentRw as the #PF handler
-    /// materializes pages. Lives on the **frame** (not the evictable
-    /// [`FrameRuntime`]) so it survives runtime eviction: a frame resumed past
-    /// the runtime cache window must not re-charge category-#3 gas for pages it
-    /// already paid for (which would fork the never-evicting interpreter). On a
-    /// runtime rebuild, [`jit_run::reestablish_after_rebuild`] re-creates the
-    /// PT mappings these states imply (charging nothing).
+    /// materializes pages. This is the category-#3 gas *history* — path
+    /// dependent and not reconstructable. It lives on the `KernelFrame` (not the
+    /// [`FrameRuntime`]) deliberately: it must outlive any future reclamation of
+    /// the runtime (host-backed swap — see
+    /// `docs/spec-staging/implementation/call-depth-and-cap-nesting.md`), so that
+    /// a frame resumed after its runtime was reclaimed never re-charges
+    /// category-#3 for pages it already paid for (which would fork the
+    /// never-reclaiming interpreter).
     mat_state: Vec<u8>,
     /// Materialized read-only **units** — sorted set of
-    /// [`javm_exec::mat::unit_base`] values (one per `cap ∩ 2 MiB cluster`, code
-    /// + pinned caps). Same eviction-survival rationale as [`Self::mat_state`].
+    /// [`javm_exec::mat::unit_base`] values (one per `cap ∩ 2 MiB cluster`, for
+    /// code and pinned caps). Same gas-history / reclamation-survival rationale
+    /// as `mat_state` above.
     ro_units: Vec<u32>,
-    /// Per-frame ring-3 resources (PT + mem/ctx/stack buffers).
-    /// Lazily built on the first [`run_one_entry`] for this frame
-    /// and reused across every subsequent re-entry. Cuts N
-    /// PageTable + 3 PageBuf allocations for a depth-N recursion. The
-    /// **evictable** half of a frame: dropped under deep recursion and rebuilt
-    /// on resume (the materialization bookkeeping above survives that).
+    /// Per-frame ring-3 resources (the page table). Lazily built on the first
+    /// [`run_one_entry`] for this frame and reused across every subsequent
+    /// re-entry (parent resume after a child HALT) — so a depth-N recursion
+    /// pays N page-table builds, not one per re-entry. It is *not* evicted:
+    /// the synchronous call stack is bounded structurally (cnode nesting depth;
+    /// see the doc above), so all live page tables stay resident.
     runtime: Option<FrameRuntime>,
 }
 
@@ -423,19 +421,11 @@ pub fn run_top(
                                     .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
                             }
                         }
-                        // Bound the resident-runtime set to the top
-                        // RUNTIME_CACHE_CAP frames. After the new child
-                        // is pushed, the frame at depth (len -
-                        // RUNTIME_CACHE_CAP) is the one just falling
-                        // outside the window — evict its runtime so
-                        // talc reclaims the page-table pages it held.
-                        // That frame will rebuild its runtime (and
-                        // re-establish its mappings, no gas charged) when
-                        // it eventually resumes.
-                        if stack.len() >= RUNTIME_CACHE_CAP {
-                            let evict_idx = stack.len() - RUNTIME_CACHE_CAP;
-                            stack[evict_idx].runtime = None;
-                        }
+                        // No runtime eviction: every live frame keeps its page
+                        // table resident. The call stack is depth-bounded by
+                        // `MAX_DEPTH` (interim) / the cnode nesting limit
+                        // (target), so the resident page-table set is bounded
+                        // structurally rather than by an LRU cap.
                         stack.push(child);
                     }
                     // Anything else (MGMT ops, SET_IMAGE, HOST_YIELD,
@@ -478,26 +468,15 @@ pub fn run_top(
 }
 
 /// Run exactly one ring-3 cycle for `frame`. The first call on a
-/// frame builds [`FrameRuntime`] (PT + mem/ctx/stack pages, mem
-/// populated from overlays); subsequent calls (parent resumes after
-/// a child HALT) reuse the cached runtime. Frame mem persists across
-/// re-entries — the parent's writes survive the child's execution.
+/// frame builds [`FrameRuntime`] (the page table); subsequent calls
+/// (parent resumes after a child HALT) reuse it — the runtime is never
+/// evicted, so it is built exactly once per frame. Frame mem + `mat_state`
+/// persist across re-entries — the parent's writes and gas history survive
+/// the child's execution.
 fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
     if frame.runtime.is_none() {
         let rt = build_runtime(frame)?;
         frame.runtime = Some(rt);
-        // The runtime was (re)built with a fresh, empty page table. If this
-        // frame ran before and was then evicted, its persisted `mat_state` /
-        // `ro_units` record pages already materialized + charged — re-create
-        // their mappings in the new PT, charging nothing, so the handler's
-        // "Present ⟺ PT-mapped" invariant holds and we don't re-charge #3 gas.
-        // A no-op on a frame's genuinely-first build (all-NotPresent, empty).
-        jit_run::reestablish_after_rebuild(
-            frame.runtime.as_ref().expect("just built"),
-            &frame.mat_state,
-            &frame.ro_units,
-            &frame.mem,
-        );
     }
     let pc = frame.pc;
     let regs = frame.regs;
@@ -1036,8 +1015,9 @@ fn build_frame_inner(
     // page (all `NotPresent` initially), and an empty RO-unit set. Sized from
     // the frame's `mem` (`content_len` is a page multiple and never resizes
     // mid-frame — CoW only adds overlay pages), so its length matches the
-    // `FrameRuntime`'s `mem_top - data_base` extent. Lives here, not on the
-    // evictable runtime, so it survives eviction (see the field doc).
+    // `FrameRuntime`'s `mem_top - data_base` extent. Lives here, on the
+    // `KernelFrame`, not the runtime, so it survives any future runtime
+    // reclamation (host-backed swap) — see the field doc.
     let mat_state_pages = (mem.content_len() / paging::PAGE_SIZE as u64) as usize;
 
     // The cap-backed mappings (their PAs + pinned/initial kind) are

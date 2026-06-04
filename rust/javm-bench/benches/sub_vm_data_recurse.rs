@@ -40,9 +40,9 @@ fn sub_vm_data_recurse(c: &mut Criterion) {
     // own level's sum. Before the child-mem fix a derived child ran against an
     // empty extent and faulted on its RW write; now each child shares its
     // Image's pages, so depth ≥ 1 (sub-VMs) completes with the right value.
-    // depth 300 also exceeds `RUNTIME_CACHE_CAP` (256), so the deep frames are
-    // evicted and rebuilt on resume — a value-checked pass confirms a frame's
-    // owned `mem`/regs survive the eviction+rebuild round trip.
+    // depth 300 keeps 301 frames (each with its page table) resident — a
+    // value-checked pass confirms deep recursion holds the right per-frame
+    // `mem`/regs.
     {
         let mut nub = javm_bench::nub_hyperlight_lock();
         let top = javm_bench::build_sub_vm_top(&mut nub, BLOB);

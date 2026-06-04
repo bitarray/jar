@@ -172,9 +172,10 @@ static MAT_RO_UNITS_SINK: AtomicPtr<alloc::vec::Vec<u32>> = AtomicPtr::new(core:
 /// Pointer to the running frame's `mem` DataCap (`KernelFrame.mem`). The #PF
 /// handler copy-on-writes each guest write into a fresh page and inserts it
 /// into this cap's `overlay` (keyed by data-extent page index) — so the cap
-/// carries the frame's writes across runtime eviction (the rebuilt runtime
-/// sources the overlay page, not the immutable backing) and, in Phase 3, a
-/// frame-to-frame move at HALT. Re-published every `enter_frame`. The Arc
+/// carries the frame's writes across any future runtime reclamation (host-backed
+/// swap: a rebuilt runtime sources the overlay page, not the immutable backing)
+/// and, in Phase 3, a frame-to-frame move at HALT. Re-published every
+/// `enter_frame`. The Arc
 /// pointee of each inserted page is address-stable across `BTreeMap` realloc,
 /// so the PA mapped into the guest PT stays valid (same guarantee the old
 /// per-frame dirty-page `Vec` relied on).
@@ -320,10 +321,10 @@ fn mem_source_pa(page_va: u64) -> Option<u64> {
     mem_source_pa_in(mem, data_base, page_va, MAT_ZERO_PA.load(Ordering::SeqCst))
 }
 
-/// Core of [`mem_source_pa`] over an explicit `mem` / `data_base` / `zero_pa`,
-/// so [`reestablish_after_rebuild`] can resolve source PAs *before* the
-/// per-entry statics are published (it runs at runtime-rebuild time, between
-/// frames). `zero_pa` is the shared zero page's PA ([`ZERO_PAGE`]).
+/// Core of [`mem_source_pa`] over an explicit `mem` / `data_base` / `zero_pa`.
+/// `zero_pa` is the shared zero page's PA ([`ZERO_PAGE`]); a `Loaded` slab
+/// resolves to its own PA, an `Empty` page to `zero_pa`, a `Missing` page to
+/// `None` (→ PVM fault).
 fn mem_source_pa_in(
     mem: &javm_cap::DataCap,
     data_base: u64,
@@ -559,9 +560,10 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
 /// `overlay` (keyed by data-extent page index, `(page_va - data_base) / PAGE`).
 /// Returns `false` on allocation / remap failure.
 ///
-/// The overlay carries the write past the runtime's lifetime: a rebuilt
-/// runtime (after eviction, or a Phase-3 frame move) sources the overlay page
-/// rather than the immutable backing, so the frame's writes are never lost.
+/// The overlay carries the write past the runtime's lifetime: a runtime rebuilt
+/// after a future reclamation (host-backed swap), or a Phase-3 frame move,
+/// sources the overlay page rather than the immutable backing, so the frame's
+/// writes are never lost.
 /// The slab is `unhashed` (a `[0;32]` sentinel) — overlay pages are hashed
 /// only at [`javm_cap::DataCap::flush`], which recomputes; keeping SHA-256 out
 /// of the fault path preserves interp==recomp gas parity.
@@ -617,8 +619,10 @@ fn cow_into_fresh(
         // handler's life.
         let mem = unsafe { &mut *sink_ptr };
         let page_idx = ((page_va - data_base) / PAGE_SIZE as u64) as u32;
-        // Insert drops any prior overlay page at this index: empty on the first
-        // CoW; on a post-eviction re-CoW the old page is already unmapped.
+        // Insert drops any prior overlay page at this index: always empty on the
+        // first CoW today (a frame CoWs each page at most once per run). The
+        // drop-prior logic stays correct for a future swap-reclaim re-CoW, where
+        // the old page would already be unmapped.
         mem.insert_overlay_page(page_idx, javm_cap::PageSlot::Loaded(page));
     }
     true
@@ -676,127 +680,6 @@ fn materialize_ro_unit(
         q += PAGE_SIZE as u64;
     }
     Some(javm_exec::gas_const::PAGE_IN_COST)
-}
-
-/// Re-create the guest mappings a rebuilt [`FrameRuntime`] is missing, charging
-/// **no** gas. Called by [`crate::call_loop`] right after a frame's runtime is
-/// rebuilt (its predecessor was evicted under deep recursion). The new page
-/// table is empty (PML4[0] has no entries), but the frame's persisted
-/// `mat_state` / `ro_units` (held on the `KernelFrame`, surviving eviction)
-/// record pages already materialized — and already *charged* — on an earlier
-/// run of this same frame. Re-map exactly those pages so the #PF handler's
-/// "Present ⟺ PT-mapped" invariant holds again; without it, the first re-touch
-/// of an already-present page would fault, find `charge_for` returns 0 (correct,
-/// no double charge) but the handler's transition-guard skips the map → an
-/// infinite #PF.
-///
-/// Charging nothing here is the whole point: a frame that resumes after
-/// eviction must not re-pay category-#3 for pages it already paid for — that is
-/// exactly the divergence from the never-evicting interpreter this fixes.
-///
-/// A no-op on a frame's genuinely-first build (all-`NotPresent` `mat_state`,
-/// empty `ro_units`).
-///
-/// No `invlpg`: the rebuilt PT was just allocated and never loaded into CR3, so
-/// it has no stale TLB entries; the next [`enter_frame`] reloads CR3 (flushing
-/// the non-global TLB) before the guest runs.
-pub fn reestablish_after_rebuild(
-    rt: &FrameRuntime,
-    mat_state: &[u8],
-    ro_units: &[u32],
-    mem: &javm_cap::DataCap,
-) {
-    let pml4 = rt.pt.pml4_kva();
-    let owned_vec = rt.pt.owned_vec_ptr();
-    let data_base = rt.data_base as u64;
-    let zero_pa = ZERO_PAGE.pa();
-    debug_assert_eq!(
-        mat_state.len(),
-        ((rt.mem_top - rt.data_base) / PAGE_SIZE as u32) as usize,
-        "reestablish: mat_state length must match the frame's data extent",
-    );
-
-    // Writable data pages (the UnpinnedCapCow / ephemeral catch-all): re-map
-    // each present page at its *effective* source PA — RO for a read-only
-    // page-in (`PresentRo`), RW for a CoW'd page (`PresentRw`). For a CoW'd page
-    // the effective slot IS the overlay page (the cap shadows the backing), so
-    // this maps the EXISTING overlay page writable, never a fresh copy that
-    // would lose the guest's writes. RO source pages come from the backing or
-    // the shared zero page. (RO *cap* pages — `PinnedCapRo` — are not tracked
-    // here; they are part of `ro_units` below.)
-    for (i, &st) in mat_state.iter().enumerate() {
-        let pv = data_base + (i as u64) * PAGE_SIZE as u64;
-        let perm = match javm_exec::mat::PageState::from_u8(st) {
-            javm_exec::mat::PageState::PresentRo => crate::paging::Perm::user_ro(),
-            javm_exec::mat::PageState::PresentRw => crate::paging::Perm::user_rw(),
-            javm_exec::mat::PageState::NotPresent => continue,
-        };
-        let Some(src_pa) = mem_source_pa_in(mem, data_base, pv, zero_pa) else {
-            continue;
-        };
-        // SAFETY: live rebuilt PT, single writer; builds the path.
-        let _ = unsafe { crate::paging::pt_map_leaf(pml4, pv, src_pa, perm, owned_vec) };
-    }
-
-    // Read-only units (code + pinned data caps): re-map each already-charged
-    // unit's cluster pages RO.
-    for &ub in ro_units {
-        let _ = reestablish_ro_unit(rt, ub, mem, zero_pa, pml4, owned_vec);
-    }
-}
-
-/// Re-map (no charge) the read-only unit named by `ub` into a freshly rebuilt
-/// PT — the rebuild counterpart of [`materialize_ro_unit`]'s fault-around. The
-/// unit's cap range + source are recovered from `rt`: a `ub` inside the code
-/// region is a contiguous code unit (page PA `code_pa + offset`); otherwise it
-/// is a pinned data cap unit, its range found in `rt.mat_ranges` and its page
-/// PAs resolved from `mem`. Maps exactly the unit's clamped cluster pages
-/// (`materialize_ro_unit`'s `[max(r_start, cluster_lo), min(r_end, cluster_hi))`),
-/// so it never maps a sibling unit's not-yet-charged pages.
-fn reestablish_ro_unit(
-    rt: &FrameRuntime,
-    ub: u32,
-    mem: &javm_cap::DataCap,
-    zero_pa: u64,
-    pml4: u64,
-    owned_vec: u64,
-) -> Option<()> {
-    let code_base = rt.code_base as u64;
-    let code_top = rt.code_top as u64;
-    let ub = ub as u64;
-    let (r_start, r_end, src) = if code_top > code_base && ub >= code_base && ub < code_top {
-        (
-            code_base,
-            code_top,
-            RoSrc::Contig {
-                base_pa: rt.code_pa,
-            },
-        )
-    } else {
-        let r = mat_range_for_in(&rt.mat_ranges, ub as u32)?;
-        if r.kind != javm_exec::mat::PageKind::PinnedCapRo.as_u8() {
-            return None;
-        }
-        (r.start as u64, r.end as u64, RoSrc::Mem)
-    };
-    let cluster_lo = (ub >> javm_exec::mat::CLUSTER_SHIFT) << javm_exec::mat::CLUSTER_SHIFT;
-    let cluster_hi = cluster_lo + (1u64 << javm_exec::mat::CLUSTER_SHIFT);
-    let lo = r_start.max(cluster_lo);
-    let hi = r_end.min(cluster_hi);
-    let data_base = rt.data_base as u64;
-    let mut q = lo;
-    while q < hi {
-        let page_pa = match &src {
-            RoSrc::Contig { base_pa } => base_pa + (q - r_start),
-            RoSrc::Mem => mem_source_pa_in(mem, data_base, q, zero_pa)?,
-        };
-        // SAFETY: live rebuilt PT, single writer; builds the path.
-        unsafe {
-            crate::paging::pt_map_leaf(pml4, q, page_pa, crate::paging::Perm::user_ro(), owned_vec)
-        }?;
-        q += PAGE_SIZE as u64;
-    }
-    Some(())
 }
 
 /// Result of an in-kernel PVM run.
@@ -874,20 +757,18 @@ pub struct MemRegion<'a> {
 ///
 /// Holds the per-call page table plus the cached `CompiledImage` fields needed
 /// to publish #PF-handler atomics on every entry. Built once per `KernelFrame`
-/// (lazily on first [`enter_frame`]); reused across re-entries on the same
-/// frame — saves a `PageTable` allocation in a depth-N recursion. The CTX,
-/// STACK, and zero scratch pages are process-global ([`CTX_PAGE`] /
-/// [`STACK_PAGE`] / [`ZERO_PAGE`]), shared by every frame (only one runs in
-/// ring 3 at a time), so the page table is now the bulk of a frame's footprint.
+/// (lazily on first [`enter_frame`]) and reused across every re-entry on the
+/// same frame — it is **not** evicted (the synchronous call stack is bounded
+/// structurally, so all live page tables stay resident). The CTX, STACK, and
+/// zero scratch pages are process-global ([`CTX_PAGE`] / [`STACK_PAGE`] /
+/// [`ZERO_PAGE`]), shared by every frame (only one runs in ring 3 at a time),
+/// so the page table is the bulk of a frame's footprint.
 ///
-/// This is the **evictable** half of a frame's state: a deep recursion
-/// drops a paused frame's `FrameRuntime` (its page table) once it falls
-/// outside the runtime cache window, rebuilding it on resume. The category-#3
-/// materialization *bookkeeping* (`mat_state` / `ro_units`) therefore lives on
-/// the [`KernelFrame`](crate::call_loop) instead — it must survive eviction so
-/// a resumed frame does not re-charge gas for pages it already paid for (which
-/// would fork the never-evicting interpreter). [`reestablish_after_rebuild`]
-/// re-creates the PT mappings those records imply when the runtime is rebuilt.
+/// The category-#3 materialization *bookkeeping* (`mat_state` / `ro_units`)
+/// lives on the [`KernelFrame`](crate::call_loop), not here — it is gas history
+/// that must outlive any future reclamation of this runtime (host-backed swap),
+/// so that a resumed frame never re-charges gas for pages it already paid for
+/// (which would fork the never-reclaiming interpreter).
 ///
 /// The frame-constant `JitContext` fields the JIT reads — `dispatch_table`
 /// (= [`Self::dispatch_va`]) and `code_base` (= [`Self::jit_va`]) — are
@@ -907,7 +788,8 @@ pub struct FrameRuntime {
     new_cr3: u64,
     // ---- Category-#3 lazy-materialization map (region bounds + kind;
     // published to the #PF handler each entry). The mutable per-page *state*
-    // lives on the `KernelFrame` so it survives this runtime's eviction. ----
+    // lives on the `KernelFrame` so it survives any future reclamation of this
+    // runtime (host-backed swap). ----
     /// Cap-backed data mappings (pinned RO / initial CoW) covering the data
     /// extent — region bounds + kind only. Per-page source PAs are resolved
     /// lazily on fault ([`mem_source_pa`]); there is no per-page PA arena.
@@ -1027,10 +909,8 @@ pub unsafe fn build_frame_runtime(
     // from the frame's `mem` DataCap (cap slabs or the shared zero page).
     //
     // The per-page #3 *state* (`mat_state`) and the RO-unit set (`ro_units`)
-    // live on the owning `KernelFrame`, NOT here — they must outlive this
-    // runtime's eviction. On a rebuild after eviction, those records say pages
-    // are present that this fresh (empty) PT does not yet map;
-    // [`reestablish_after_rebuild`] re-creates their mappings (no charge).
+    // live on the owning `KernelFrame`, NOT here — they are gas history that
+    // must outlive any future reclamation of this runtime (host-backed swap).
     let mem_top = (data_base + mem_bytes) as u32;
     // Code region: page-rounded `[code_base, code_top)`, lazily paged in
     // RO (PinnedCapRo) per unit on guest PIC reads. The code buffer is
@@ -1073,8 +953,9 @@ pub unsafe fn build_frame_runtime(
 /// each CoW'd page into its `overlay` (may be null to disable bookkeeping).
 /// `mat_state` (per-page `PageState`, len = data-extent pages) and `ro_units`
 /// (sorted RO-unit set) are the category-#3 bookkeeping — they live on the
-/// owning [`KernelFrame`](crate::call_loop) (surviving runtime eviction), and
-/// the caller passes raw pointers so the #PF handler can mutate them in place
+/// owning [`KernelFrame`](crate::call_loop) (gas history that outlives any
+/// future reclamation of this runtime), and the caller passes raw pointers so
+/// the #PF handler can mutate them in place
 /// while the JIT runs. The lazily-materialized data *ranges* live in `rt` and
 /// are republished here each entry.
 ///
