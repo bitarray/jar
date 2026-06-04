@@ -20,8 +20,6 @@
 //! Hyperlight reserves after its 5-entry GDT (the `PADDING_BEFORE_TSS`
 //! region) and re-loads GDTR with a larger limit.
 
-#![cfg(target_os = "none")]
-
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::mem::size_of;

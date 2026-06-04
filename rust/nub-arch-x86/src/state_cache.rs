@@ -30,8 +30,6 @@
 //! section from the kernel ELF after sandbox startup to learn where
 //! to find the cap directory.
 
-#![cfg(target_os = "none")]
-
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use foldhash::fast::FixedState;

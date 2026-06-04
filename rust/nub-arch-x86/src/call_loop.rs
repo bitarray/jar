@@ -88,8 +88,6 @@
 //!
 //! [df]: ../../../../website/content/spec/discussions/data-flow-principle.md
 
-#![cfg(target_os = "none")]
-
 extern crate alloc;
 
 use alloc::boxed::Box;

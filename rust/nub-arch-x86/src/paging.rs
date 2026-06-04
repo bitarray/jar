@@ -44,8 +44,6 @@
 //!   PT we build for ring-3 PVM programs; ring-0 paging helpers below
 //!   return `None` for these addresses.
 
-#![cfg(target_os = "none")]
-
 extern crate alloc;
 
 use alloc::alloc::{alloc_zeroed, dealloc};
@@ -89,6 +87,9 @@ pub mod flag {
     pub const RW: u64 = 1 << 1;
     /// User/Supervisor. Set → ring 3 can access; clear → ring 0 only.
     pub const US: u64 = 1 << 2;
+    /// Global TLB entry. When CR4.PGE is set, CR3 reloads do not flush
+    /// leaf entries carrying this bit.
+    pub const G: u64 = 1 << 8;
     /// No-Execute (bit 63). Set → instruction fetch faults.
     pub const NX: u64 = 1 << 63;
 }
@@ -129,6 +130,7 @@ pub struct Perm {
     pub writable: bool,
     pub user: bool,
     pub executable: bool,
+    pub global: bool,
 }
 
 impl Perm {
@@ -137,6 +139,7 @@ impl Perm {
             writable: true,
             user: true,
             executable: false,
+            global: false,
         }
     }
     pub const fn user_rx() -> Self {
@@ -144,6 +147,7 @@ impl Perm {
             writable: false,
             user: true,
             executable: true,
+            global: false,
         }
     }
     pub const fn user_ro() -> Self {
@@ -151,6 +155,23 @@ impl Perm {
             writable: false,
             user: true,
             executable: false,
+            global: false,
+        }
+    }
+    pub const fn user_rx_global() -> Self {
+        Self {
+            writable: false,
+            user: true,
+            executable: true,
+            global: true,
+        }
+    }
+    pub const fn user_ro_global() -> Self {
+        Self {
+            writable: false,
+            user: true,
+            executable: false,
+            global: true,
         }
     }
     /// Encode as the low-bit + high-bit flags of a leaf PTE.
@@ -161,6 +182,9 @@ impl Perm {
         }
         if self.user {
             bits |= flag::US;
+        }
+        if self.global {
+            bits |= flag::G;
         }
         if !self.executable {
             bits |= flag::NX;
@@ -614,4 +638,22 @@ pub fn read_cr3() -> u64 {
         core::arch::asm!("mov {0}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
     }
     cr3
+}
+
+/// Enable CR4.PGE so leaf PTEs with [`flag::G`] survive CR3 reloads.
+///
+/// Idempotent: callers can run this on the hot path before ring-3 entry.
+pub fn enable_global_pages() {
+    const CR4_PGE: u64 = 1 << 7;
+    let mut cr4: u64;
+    // SAFETY: reading/writing CR4 is privileged and valid in the guest kernel.
+    // We only set PGE, preserving all other control bits installed by
+    // Hyperlight/boot code.
+    unsafe {
+        core::arch::asm!("mov {0}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags));
+        if cr4 & CR4_PGE == 0 {
+            cr4 |= CR4_PGE;
+            core::arch::asm!("mov cr4, {0}", in(reg) cr4, options(nomem, nostack, preserves_flags));
+        }
+    }
 }

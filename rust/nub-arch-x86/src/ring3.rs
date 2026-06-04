@@ -45,8 +45,6 @@
 //!   invocations we'll need to thread these through a per-call
 //!   context.
 
-#![cfg(target_os = "none")]
-
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Vector for the ring-3 exit gate.
