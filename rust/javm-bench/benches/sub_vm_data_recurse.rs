@@ -33,6 +33,25 @@ use criterion::{Criterion, criterion_group, criterion_main};
 const BLOB: &[u8] = include_bytes!(env!("SUB_VM_DATA_RECURSE_BLOB"));
 
 fn sub_vm_data_recurse(c: &mut Criterion) {
+    // Correctness gate (before the throughput loop): every recursion level
+    // reads its pinned 64 KiB RO pattern — `RO_DATA[i] = i & 0xFF`, summed
+    // every 64th byte = 256 cycles × (0+64+128+192) = 98304 — and writes+reads
+    // its 4 KiB initial-slot RW byte (`+= depth & 0xFF`). The guest returns its
+    // own level's sum. Before the child-mem fix a derived child ran against an
+    // empty extent and faulted on its RW write; now each child shares its
+    // Image's pages, so depth ≥ 1 (sub-VMs) completes with the right value.
+    // depth 300 also exceeds `RUNTIME_CACHE_CAP` (256), so the deep frames are
+    // evicted and rebuilt on resume — a value-checked pass confirms a frame's
+    // owned `mem`/regs survive the eviction+rebuild round trip.
+    {
+        let mut nub = javm_bench::nub_hyperlight_lock();
+        let top = javm_bench::build_sub_vm_top(&mut nub, BLOB);
+        const RO_SUM: u64 = 98_304;
+        for depth in [0u64, 1, 2, 5, 300] {
+            javm_bench::invoke_sub_vm_expect(&mut nub, &top, depth, RO_SUM + (depth & 0xFF));
+        }
+    }
+
     javm_bench::run_recurse_bench(c, BLOB, "sub_vm_data_recurse");
 }
 

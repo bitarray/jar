@@ -97,6 +97,7 @@ use alloc::boxed::Box;
 
 use javm_cap::cache::CapHashOrRef;
 use javm_cap::cap::Cap;
+use javm_cap::cap::image::ImageCap;
 use javm_cap::cap::instance::InstanceCap;
 use javm_cap::hash::{Blake2b256, Hash};
 use javm_cap::slot::Key;
@@ -684,6 +685,55 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
     false
 }
 
+/// Build a derived sub-VM's initial `mem` DataCap from its Image: a dense
+/// backing covering `[DATA_BASE, max(mapping.start + size))`, with each
+/// mapping's source `Cap::Data` (resolved from [`CACHE`] via the image's
+/// pinned/initial slot `cap_hash`) **Arc-shared** at the mapping's offset.
+///
+/// Mirrors the *content* of the host's [`javm_cap::image::Image::instance_mem_backing`]
+/// (top-level instances) and the interpreter's `dispatch_derive_spawn_cached`
+/// fold (`javm/src/ecall.rs`), so a derived child sees its pinned read-only +
+/// initial read-write data instead of an empty extent. Unlike the copying
+/// `put_page` fold, the source pages are shared by `Arc` (the recompiler maps
+/// them by PA, so the child direct-maps the same read-only frames as every
+/// sibling and CoWs — into its own overlay — only the pages it writes).
+///
+/// The recompiler has no prepared cnode (it ignores `cnode_slot`), so a
+/// mapping's source resolves to the image's own pinned/initial default
+/// (`pinned` first — the same precedence `build_frame_inner` seeds the cnode
+/// with).
+fn build_instance_mem(img: &ImageCap) -> DataCap {
+    let data_base = javm_cap::layout::DATA_BASE as u64;
+    let mem_top = img
+        .mappings
+        .iter()
+        .map(|m| m.start + m.size)
+        .max()
+        .unwrap_or(data_base);
+    let mut mem = DataCap::from_bytes_sized(&[], mem_top.saturating_sub(data_base));
+    for m in img.mappings.iter() {
+        let Some(src_slot) = m.path().first() else {
+            continue;
+        };
+        let Some(src_hash) = img
+            .pinned
+            .iter()
+            .chain(img.initial.iter())
+            .find(|e| e.slot == *src_slot)
+            .map(|e| e.cap_hash)
+        else {
+            continue;
+        };
+        let Some(src_arc) = CACHE.get(CapHashOrRef::Hash(src_hash)) else {
+            continue;
+        };
+        if let Cap::Data(d) = &*src_arc {
+            mem.place_shared(m.start.saturating_sub(data_base), d);
+        }
+    }
+    mem
+}
+
 /// `host_derive_spawn(image_slot=φ[7], cnode_slot=φ[8],
 /// dst_slot=φ[9])`. V1: ignores `cnode_slot` (no prepared cnode
 /// support — the child inherits the parent's cnode at CALL time).
@@ -714,11 +764,25 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
     };
     let child_chain = Blake2b256::hash_pair(&frame.image_hash_chain, &image_hash);
 
+    // Build the child's initial memory from its Image (pinned RO + initial RW
+    // sources folded at their VAs, source pages Arc-shared) — like the top-
+    // level instance's `instance_mem_backing`. Without this the child runs
+    // against an empty extent and faults on its own initial-slot writes.
+    let child_mem = {
+        let img_arc = CACHE
+            .get(CapHashOrRef::Hash(image_hash))
+            .ok_or(ERR_IMAGE_NOT_FOUND)?;
+        match &*img_arc {
+            Cap::Image(img) => build_instance_mem(img),
+            _ => return Err(ERR_IMAGE_KIND),
+        }
+    };
+
     let cap = Cap::Instance(InstanceCap {
         image_hash_chain: child_chain,
         image_hash,
         root_cnode: CapHashOrRef::Hash([0u8; 32]),
-        mem: DataCap::empty(),
+        mem: child_mem,
         regs: [0u64; NUM_REGS],
         pc: 0,
         gas_remaining: 0,

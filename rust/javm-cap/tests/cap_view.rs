@@ -145,3 +145,43 @@ fn overlay_bearing_cap_is_not_hashable() {
     let r = std::panic::catch_unwind(|| Cap::Data(c).cap_hash());
     assert!(r.is_err(), "overlay-bearing cap must not be hashable");
 }
+
+#[test]
+fn place_shared_composes_and_shares_pages() {
+    use std::sync::Arc;
+    // A 4-page destination; place a 1-page RO source at page 0 and a 1-page RW
+    // source at page 2 (byte offset 2*PAGE).
+    let ro = DataCap::from_bytes_sized(b"read-only-data", PAGE_SIZE as u64);
+    let rw = DataCap::from_bytes_sized(b"writable-data", PAGE_SIZE as u64);
+    let mut mem = DataCap::from_bytes_sized(&[], 4 * PAGE_SIZE as u64);
+    mem.place_shared(0, &ro);
+    mem.place_shared(2 * PAGE_SIZE as u64, &rw);
+
+    // Effective bytes match the sources at their offsets; the gap reads zero.
+    assert_eq!(&page_at(&mem, 0)[..14], b"read-only-data");
+    assert!(page_at(&mem, 1).iter().all(|&b| b == 0));
+    assert_eq!(&page_at(&mem, 2)[..13], b"writable-data");
+
+    // Page-sharing: `mem`'s placed page is the SAME Arc allocation as the
+    // source's — a clone bumped the refcount rather than copying bytes.
+    let (javm_cap::PageSlot::Loaded(ro_pg), javm_cap::PageSlot::Loaded(mem_pg)) =
+        (ro.page_slot(0), mem.page_slot(0))
+    else {
+        panic!("expected Loaded pages");
+    };
+    assert!(
+        Arc::ptr_eq(ro_pg, mem_pg),
+        "place_shared must Arc-share the source page, not copy it",
+    );
+}
+
+#[test]
+fn place_shared_clamps_to_extent() {
+    // A source larger than the destination's remaining extent is clamped.
+    let src = DataCap::from_bytes_sized(&[0x55u8; 3 * PAGE_SIZE], 3 * PAGE_SIZE as u64);
+    let mut mem = DataCap::from_bytes_sized(&[], 2 * PAGE_SIZE as u64);
+    mem.place_shared(PAGE_SIZE as u64, &src); // base page 1; only page 1 fits
+    assert_eq!(page_at(&mem, 0)[0], 0); // page 0 untouched
+    assert_eq!(page_at(&mem, 1)[0], 0x55); // page 1 placed
+    assert_eq!(mem.page_count(), 2); // extent unchanged
+}

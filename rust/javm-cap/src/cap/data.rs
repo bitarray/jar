@@ -362,6 +362,42 @@ impl DataCap {
         self.overlay.insert(p, slot);
     }
 
+    /// Place every effective page of `src` into this cap's **backing** starting
+    /// at absolute byte offset `dst_off` (page-aligned): backing page
+    /// `dst_off/PAGE_SIZE + i` becomes a clone of `src.page_slot(i)` — an `Arc`
+    /// refcount bump, **not** a byte copy. Pages beyond this cap's extent are
+    /// dropped (clamped, mirroring the interpreter's `off < extent` fold guard).
+    ///
+    /// This is the **page-sharing** instance-memory composer: a fresh Instance
+    /// `mem` built by placing an Image's mapped `Cap::Data` sources shares those
+    /// sources' physical pages, so N sub-VMs spawned from one Image all map the
+    /// same read-only frames and each CoWs (into its overlay) only the pages it
+    /// writes — the shared backing is never mutated. Effective bytes are
+    /// identical to the copying `put_page` fold; only the allocation is shared.
+    pub fn place_shared(&mut self, dst_off: u64, src: &DataCap) {
+        debug_assert!(
+            dst_off.is_multiple_of(PAGE_SIZE as u64),
+            "place_shared: dst_off must be page-aligned"
+        );
+        let base = (dst_off / PAGE_SIZE as u64) as usize;
+        let total_pages = self.backing.page_count();
+        let slab = Arc::make_mut(&mut self.backing);
+        for i in 0..src.page_count() {
+            let dst = base + i;
+            if dst >= total_pages {
+                break; // clamp to this cap's logical extent
+            }
+            if slab.pages.len() <= dst {
+                slab.pages.resize(dst + 1, PageSlot::Empty);
+            }
+            slab.pages[dst] = src.page_slot(i).clone();
+        }
+        // Re-canonicalize: trim trailing `Empty` so the layout stays unique.
+        while matches!(slab.pages.last(), Some(PageSlot::Empty)) {
+            slab.pages.pop();
+        }
+    }
+
     /// Fold the overlay into a fresh, clean (overlay-empty) `DataCap` whose
     /// `hash_tree_root` is defined. Clones the backing and folds every overlaid
     /// page in via the canonical backing CoW. This is the settle / content-

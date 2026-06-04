@@ -443,6 +443,28 @@ pub fn invoke_sub_vm(nub: &mut Nub, top: &SubVmTop, depth: u64) {
     );
 }
 
+/// Like [`invoke_sub_vm`] but also asserts the top-level return value. Used by
+/// the data-recurse correctness check to confirm each level reads its pinned
+/// RO data + writes its initial RW data correctly (not just that it halts).
+pub fn invoke_sub_vm_expect(nub: &mut Nub, top: &SubVmTop, depth: u64, expected_return: u64) {
+    let result = nub
+        .invoke_cached(top.top_instance, 0, [depth, 0, 0, 0], INITIAL_GAS)
+        .expect("invoke_cached");
+    assert!(
+        result.exit_reason == EXIT_HOSTCALL && result.exit_arg == 0,
+        "sub-VM exited non-cleanly: reason={} arg={} ret={} gas={}",
+        result.exit_reason,
+        result.exit_arg,
+        result.return_value,
+        result.gas_remaining,
+    );
+    assert_eq!(
+        result.return_value, expected_return,
+        "sub-VM depth {depth} returned {} (expected {expected_return})",
+        result.return_value,
+    );
+}
+
 /// First 8 bytes of a `CapHash` as lowercase hex (bench logging).
 pub fn hex_short(h: &CapHash) -> String {
     use std::fmt::Write as _;
