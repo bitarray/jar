@@ -1124,32 +1124,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "jar-kernel"
-version = "0.1.0"
-dependencies = [
- "build-javm",
- "javm",
- "javm-cap",
- "javm-exec",
- "proptest",
- "ssz",
- "thiserror",
-]
-
-[[package]]
 name = "jar-test-halt"
 version = "0.1.0"
-
-[[package]]
-name = "javm"
-version = "0.1.0"
-dependencies = [
- "javm-cap",
- "javm-exec",
- "proptest",
- "ssz",
- "thiserror",
-]
 
 [[package]]
 name = "javm-bench"
@@ -1205,14 +1181,9 @@ name = "javm-guest-tests"
 version = "0.1.0"
 dependencies = [
  "blake2",
- "blake3",
  "build-javm",
- "jar-kernel",
- "javm",
  "javm-cap",
- "javm-exec",
  "nub",
- "nub-arch-x86-abi",
  "sha3",
  "ssz",
  "subsoil",
