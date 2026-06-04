@@ -108,6 +108,44 @@ fn cnode_set_get_take_semantics() {
 }
 
 #[test]
+fn cnode_owned_move_is_zero_copy() {
+    // `Owned(Box<Cap>)` must move through `set`/`take` with no deep clone of
+    // the boxed cap — the zero-copy DataCap hand-off. We assert the heap
+    // address of the boxed `Cap` survives the round trip unchanged.
+    let mut cnode: CNodeCap = CNodeCap::new();
+    let boxed = Box::new(Cap::data_inline(b"payload"));
+    let ptr_before = boxed.as_ref() as *const Cap;
+
+    let prior = cnode
+        .set(&Key::from(5u8), Some(CapHashOrRef::Owned(boxed)))
+        .unwrap();
+    assert_eq!(prior, None);
+
+    let taken = cnode.take(&Key::from(5u8)).unwrap();
+    match taken {
+        Some(CapHashOrRef::Owned(b)) => {
+            assert_eq!(
+                b.as_ref() as *const Cap,
+                ptr_before,
+                "Owned slot must move, not clone, through the cnode",
+            );
+        }
+        other => panic!("expected moved Owned, got {other:?}"),
+    }
+    assert_eq!(cnode.get(&Key::from(5u8)), None);
+    assert!(cnode.slots.is_empty());
+}
+
+#[test]
+fn cache_get_owned_is_none() {
+    // `Owned` lives inline on the kernel frame, never in the directory; the
+    // polymorphic `get` reports it absent (the holder derefs the Box directly).
+    let cache = CacheDirectory::new();
+    let owned = CapHashOrRef::Owned(Box::new(Cap::data_inline(b"x")));
+    assert!(cache.get(owned).is_none());
+}
+
+#[test]
 fn cnode_lookup_after_set() {
     let mut cnode: CNodeCap = CNodeCap::new();
     cnode

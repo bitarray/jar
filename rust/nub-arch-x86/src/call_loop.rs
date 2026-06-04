@@ -721,7 +721,7 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
 
     let image_hash = match frame.cnode.get(&image_slot) {
         Some(CapHashOrRef::Hash(h)) => h,
-        Some(CapHashOrRef::Ref(_)) | None => frame.image_hash,
+        Some(CapHashOrRef::Ref(_) | CapHashOrRef::Owned(_)) | None => frame.image_hash,
     };
     let child_chain = Blake2b256::hash_pair(&frame.image_hash_chain, &image_hash);
 
@@ -858,6 +858,9 @@ fn build_frame_from_cap(
     match target {
         CapHashOrRef::Hash(h) => build_frame_from_published(&h, endpoint_idx, args),
         CapHashOrRef::Ref(r) => build_frame_from_instance_ref(r, endpoint_idx, args),
+        // Phase 1 placeholder: nothing mints `Owned` into a recompiler cnode
+        // yet. Phase 3 replaces this arm with a move-in `build_frame_from_owned`.
+        CapHashOrRef::Owned(_) => Err(ERR_INSTANCE_KIND),
     }
 }
 

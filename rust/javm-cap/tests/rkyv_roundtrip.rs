@@ -169,3 +169,24 @@ fn ref_in_cap_errors_on_encode() {
         );
     }
 }
+
+#[test]
+fn owned_in_cap_errors_on_encode() {
+    // An in-flight `Owned(Box<Cap>)` slot is runtime-only — like `Ref`, it
+    // has no wire form and rkyv encode must surface a typed error (no panic).
+    let mut cn = CNodeCap::new();
+    cn.set(
+        &Key::from(0u8),
+        Some(CapHashOrRef::Owned(Box::new(Cap::data_inline(b"payload")))),
+    )
+    .expect("set owned");
+    let cap = Cap::CNode(cn);
+    let err = rkyv::to_bytes::<rkyv::rancor::Error>(&cap).expect_err("must reject Owned");
+    if cfg!(debug_assertions) {
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Owned") || msg.contains("settle"),
+            "expected CapHasRefError in chain, got: {msg}"
+        );
+    }
+}

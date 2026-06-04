@@ -87,6 +87,35 @@ impl PageBytes {
         bytes[..n].copy_from_slice(&content[..n]);
         Self { hash, bytes }
     }
+
+    /// Build a `PageBytes` from up to `PAGE_SIZE` source bytes **without**
+    /// computing the content hash: a `PAGE_SIZE`-aligned slab (zero-padded
+    /// tail) carrying a `[0u8; 32]` sentinel `hash`.
+    ///
+    /// Used by the x86 recompiler's ring-0 copy-on-write page-fault handler,
+    /// which inserts the fresh page straight into a [`super::data::DataCap`]
+    /// overlay. Overlay pages are never hashed before
+    /// [`super::data::DataCap::flush`] (which rebuilds each page via
+    /// [`Self::from_content`], recomputing the real hash and re-asserting the
+    /// substitution invariant), so keeping SHA-256 out of the #PF path keeps
+    /// the per-page CoW gas charge identical between the interpreter and the
+    /// recompiler. The slab is still `PAGE_SIZE`-aligned — load-bearing for
+    /// the direct ring-3 PT map.
+    pub fn from_page_copy_unhashed(src: &[u8]) -> Self {
+        use super::data::{PAGE_SIZE, alloc_page_aligned_zeroed};
+        let mut bytes = alloc_page_aligned_zeroed(PAGE_SIZE);
+        let n = src.len().min(PAGE_SIZE);
+        bytes[..n].copy_from_slice(&src[..n]);
+        debug_assert_eq!(
+            bytes.as_ptr() as usize % PAGE_SIZE,
+            0,
+            "from_page_copy_unhashed: slab must be PAGE_SIZE-aligned",
+        );
+        Self {
+            hash: [0u8; 32],
+            bytes,
+        }
+    }
 }
 
 // --------------------------------------------------------------------------

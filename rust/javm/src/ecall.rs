@@ -252,7 +252,7 @@ impl<K: KernelAssist> Vm<K> {
                 .ok_or(VmError::CallStackEmpty)?;
             match running.root_cnode.get(&marker_slot) {
                 Some(CapHashOrRef::Hash(h)) => h,
-                Some(CapHashOrRef::Ref(_)) => {
+                Some(CapHashOrRef::Ref(_) | CapHashOrRef::Owned(_)) => {
                     return Err(VmError::SlotKindMismatch(marker_slot.diag_id()));
                 }
                 None => return Err(VmError::SlotEmpty(marker_slot.diag_id())),
@@ -312,7 +312,7 @@ impl<K: KernelAssist> Vm<K> {
                 .ok_or(VmError::CallStackEmpty)?;
             match running.root_cnode.get(&image_slot) {
                 Some(CapHashOrRef::Hash(h)) => h,
-                Some(CapHashOrRef::Ref(_)) => {
+                Some(CapHashOrRef::Ref(_) | CapHashOrRef::Owned(_)) => {
                     return Err(VmError::SlotKindMismatch(image_slot.diag_id()));
                 }
                 None => return Err(VmError::SlotEmpty(image_slot.diag_id())),
@@ -352,7 +352,7 @@ impl<K: KernelAssist> Vm<K> {
                 .ok_or(VmError::CallStackEmpty)?;
             let new_image_hash = match running.root_cnode.get(&image_slot) {
                 Some(CapHashOrRef::Hash(h)) => h,
-                Some(CapHashOrRef::Ref(_)) => {
+                Some(CapHashOrRef::Ref(_) | CapHashOrRef::Owned(_)) => {
                     return Err(VmError::SlotKindMismatch(image_slot.diag_id()));
                 }
                 None => return Err(VmError::SlotEmpty(image_slot.diag_id())),
@@ -407,7 +407,7 @@ impl<K: KernelAssist> Vm<K> {
                 .ok_or(VmError::CallStackEmpty)?;
             match running.root_cnode.get(&image_slot) {
                 Some(CapHashOrRef::Hash(h)) => h,
-                Some(CapHashOrRef::Ref(_)) => {
+                Some(CapHashOrRef::Ref(_) | CapHashOrRef::Owned(_)) => {
                     return Err(VmError::SlotKindMismatch(image_slot.diag_id()));
                 }
                 None => return Err(VmError::SlotEmpty(image_slot.diag_id())),
@@ -470,14 +470,14 @@ impl<K: KernelAssist> Vm<K> {
                 .ok_or(VmError::CallStackEmpty)?;
             let img_h = match running.root_cnode.get(&image_slot) {
                 Some(CapHashOrRef::Hash(h)) => h,
-                Some(CapHashOrRef::Ref(_)) => {
+                Some(CapHashOrRef::Ref(_) | CapHashOrRef::Owned(_)) => {
                     return Err(VmError::SlotKindMismatch(image_slot.diag_id()));
                 }
                 None => return Err(VmError::SlotEmpty(image_slot.diag_id())),
             };
             let cn_h = match running.root_cnode.get(&cnode_slot) {
                 Some(CapHashOrRef::Hash(h)) => h,
-                Some(CapHashOrRef::Ref(_)) => {
+                Some(CapHashOrRef::Ref(_) | CapHashOrRef::Owned(_)) => {
                     return Err(VmError::SlotKindMismatch(cnode_slot.diag_id()));
                 }
                 None => return Err(VmError::SlotEmpty(cnode_slot.diag_id())),

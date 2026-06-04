@@ -76,7 +76,7 @@ pub fn apply_event(
             Cap::Instance(inst) => {
                 let cnode_hash = match &inst.root_cnode {
                     CapHashOrRef::Hash(h) => *h,
-                    CapHashOrRef::Ref(_) => {
+                    CapHashOrRef::Ref(_) | CapHashOrRef::Owned(_) => {
                         return Err(KernelError::Invariant(
                             "apply_event: chain instance root_cnode unsettled",
                         ));

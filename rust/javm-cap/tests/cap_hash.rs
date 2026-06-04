@@ -79,6 +79,21 @@ fn cnode_with_ref_target_panics() {
 }
 
 #[test]
+fn cnode_with_owned_target_panics() {
+    // Like an unsettled `Ref`, an in-flight `Owned` slot has no wire/hash
+    // form — hashing a graph that still holds one panics (callers settle first).
+    let mut cn: CNodeCap = CNodeCap::new();
+    cn.set(
+        &Key::from(0u8),
+        Some(CapHashOrRef::Owned(Box::new(Cap::data_inline(b"x")))),
+    )
+    .unwrap();
+    let cap: Cap = Cap::CNode(cn);
+    let result = std::panic::catch_unwind(|| cap.cap_hash());
+    assert!(result.is_err());
+}
+
+#[test]
 fn image_hash_depends_on_code() {
     let mut img_a = empty_image();
     let mut img_b = empty_image();

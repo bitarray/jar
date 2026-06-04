@@ -512,7 +512,7 @@ impl<K: KernelAssist> Vm<K> {
             // hash-resolved (else zero).
             match entry.instance_ref {
                 CapHashOrRef::Hash(h) => h,
-                CapHashOrRef::Ref(_) => [0u8; 32],
+                CapHashOrRef::Ref(_) | CapHashOrRef::Owned(_) => [0u8; 32],
             }
         };
 

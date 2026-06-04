@@ -79,26 +79,27 @@ impl CNodeCap {
     }
 
     /// Bind logical key `k` to `target`, or clear the binding if `target`
-    /// is `None`. Returns the prior materialized target, if any.
+    /// is `None`. Returns the prior materialized target, if any —
+    /// **moved out**, not cloned, so a `CapHashOrRef::Owned(Box<Cap>)`
+    /// transfers with no deep copy (the zero-copy cnode move).
     pub fn set_key(&mut self, k: &[u8], target: Option<CapHashOrRef>) -> Option<CapHashOrRef> {
         let key = Self::key_of(k);
-        let prior = match self.slots.get(&key) {
-            Some(MissingOr::Materialized(t)) => Some(t.clone()),
-            Some(MissingOr::Missing(_)) | None => None,
+        // `insert` / `remove` hand back the displaced entry by value — no
+        // clone of the prior `CapHashOrRef`.
+        let old = match target {
+            Some(t) => self.slots.insert(key, MissingOr::Materialized(t)),
+            None => self.slots.remove(&key),
         };
-        match target {
-            Some(t) => {
-                self.slots.insert(key, MissingOr::Materialized(t));
-            }
-            None => {
-                self.slots.remove(&key);
-            }
+        match old {
+            Some(MissingOr::Materialized(t)) => Some(t),
+            Some(MissingOr::Missing(_)) | None => None,
         }
-        prior
     }
 
     /// Take the binding at logical key `k`, leaving it empty. Returns the
-    /// prior materialized target (or `None`).
+    /// prior materialized target (or `None`), **moved out** — the
+    /// zero-copy half of an `Owned` cnode-to-cnode (or frame-to-frame)
+    /// move.
     pub fn take_key(&mut self, k: &[u8]) -> Option<CapHashOrRef> {
         self.set_key(k, None)
     }
