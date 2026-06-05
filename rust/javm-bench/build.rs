@@ -71,6 +71,11 @@ fn main() {
             "SUB_VM_DATA_RECURSE_BLOB",
         ),
         (
+            "../../components/benches/pt-cache",
+            "bench-pt-cache",
+            "PT_CACHE_BLOB",
+        ),
+        (
             "../../components/tests/sub-vm-reread-recurse",
             "test-sub-vm-reread-recurse",
             "SUB_VM_REREAD_RECURSE_BLOB",

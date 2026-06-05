@@ -43,3 +43,7 @@ harness = false
 name = "sub_vm_data_recurse"
 harness = false
 
+[[bench]]
+name = "pt_cache_call"
+harness = false
+
