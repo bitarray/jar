@@ -27,13 +27,12 @@
 //! `code_base` (a `JitContext` field) to land on absolute native
 //! addresses.
 
-#![cfg(target_os = "none")]
-
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use javm_recompiler_x86::codegen::{CompileResult, Compiler, HelperFns};
 
@@ -68,6 +67,12 @@ pub struct CompiledImage {
     pub dispatch_offset: usize,
     pub jit_offset: usize,
     pub tramp_offset: usize,
+    /// Page-rounded arena byte size. All arena leaf PTEs are global, so
+    /// switching away from this Image must invalidate this VA range.
+    pub arena_size: usize,
+    /// Monotonic identity for this compiled Image's arena mappings. Physical
+    /// page reuse after `evict_all` cannot alias this token.
+    pub global_arena_token: u64,
     /// Byte size of the JIT region (page-rounded). Read by the #PF
     /// handler to bound the JIT-window check.
     pub jit_size: usize,
@@ -111,6 +116,8 @@ unsafe impl Sync for CompileCache {}
 static CACHE: CompileCache = CompileCache {
     inner: UnsafeCell::new(BTreeMap::new()),
 };
+
+static NEXT_GLOBAL_ARENA_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 /// Round a byte count up to the next [`PAGE_SIZE`] boundary, with a
 /// minimum of one page (so even empty regions occupy a single page
@@ -184,6 +191,7 @@ pub fn get_or_compile(
         let tramp_offset = jit_offset + jit_size;
         let tramp_size = PAGE_SIZE;
         let total = tramp_offset + tramp_size;
+        let global_arena_token = NEXT_GLOBAL_ARENA_TOKEN.fetch_add(1, Ordering::Relaxed);
 
         let mut arena = PageBuf::new(total).expect("PageBuf alloc for Image arena");
         let buf = arena.as_mut_slice();
@@ -246,9 +254,9 @@ pub fn get_or_compile(
         let mut off = 0usize;
         while off < total {
             let perm = if off < ro_end {
-                Perm::user_ro()
+                Perm::user_ro_global()
             } else {
-                Perm::user_rx()
+                Perm::user_rx_global()
             };
             template
                 .map_leaf(off as u64, arena_pa + off as u64, perm)
@@ -283,6 +291,8 @@ pub fn get_or_compile(
                 dispatch_offset,
                 jit_offset,
                 tramp_offset,
+                arena_size: total,
+                global_arena_token,
                 jit_size,
                 exit_label_offset,
                 trap_table,

@@ -48,8 +48,6 @@
 //! faults outside `[MEM_VA, MEM_VA + mem_size)` route via
 //! `jit_pf_handler`.
 
-#![cfg(target_os = "none")]
-
 extern crate alloc;
 
 use crate::jit_cache;
@@ -74,6 +72,8 @@ static EXIT_LABEL_VA: AtomicU64 = AtomicU64::new(0);
 static TRAP_TABLE_PTR: AtomicPtr<(u32, u32, u32)> = AtomicPtr::new(core::ptr::null_mut());
 static TRAP_TABLE_LEN: AtomicU64 = AtomicU64::new(0);
 static CTX_KVA: AtomicU64 = AtomicU64::new(0);
+static LAST_GLOBAL_ARENA_TOKEN: AtomicU64 = AtomicU64::new(0);
+static LAST_GLOBAL_ARENA_PAGES: AtomicU64 = AtomicU64::new(0);
 
 // === Per-invocation category-#3 materialization state =====================
 //
@@ -812,6 +812,11 @@ pub struct FrameRuntime {
     trap_table_len: u64,
     tramp_va: u64,
     new_cr3: u64,
+    /// Identity + page count for the per-Image META arena whose template leaf
+    /// PTEs are marked global. Used to invalidate stale global translations
+    /// only when switching Images.
+    global_arena_token: u64,
+    global_arena_pages: u64,
     // ---- Category-#3 lazy-materialization map (region bounds + kind;
     // published to the #PF handler each entry). The mutable per-page *state*
     // lives on the `KernelFrame` so it survives any future reclamation of this
@@ -995,6 +1000,8 @@ pub unsafe fn build_frame_runtime(
         trap_table_len: cached.trap_table.len() as u64,
         tramp_va,
         new_cr3,
+        global_arena_token: cached.global_arena_token,
+        global_arena_pages: (cached.arena_size / PAGE_SIZE) as u64,
         mat_ranges,
         data_base: data_base as u32,
         mem_top,
@@ -1089,6 +1096,9 @@ pub unsafe fn enter_frame(
     OWNED_VEC_PTR.store(rt.pt.owned_vec_ptr(), Ordering::SeqCst);
     HANDLERS[14].store(jit_pf_handler as *const () as u64, Ordering::Release);
 
+    crate::paging::enable_global_pages();
+    flush_global_arena_on_image_switch(rt.global_arena_token, rt.global_arena_pages);
+
     let user_stack_top = STACK_VA_M + STACK_SIZE;
     // SAFETY: trampoline (inside the Image arena) + stack mapped above;
     // new_cr3 carries kernel half.
@@ -1129,4 +1139,16 @@ pub unsafe fn enter_frame(
             pc: (*ctx).pc,
         }
     }
+}
+
+fn flush_global_arena_on_image_switch(next_token: u64, next_pages: u64) {
+    let prev_token = LAST_GLOBAL_ARENA_TOKEN.load(Ordering::SeqCst);
+    if prev_token != 0 && prev_token != next_token {
+        let prev_pages = LAST_GLOBAL_ARENA_PAGES.load(Ordering::SeqCst);
+        for page in 0..prev_pages {
+            crate::paging::invlpg(META_BASE_M + page * PAGE_SIZE as u64);
+        }
+    }
+    LAST_GLOBAL_ARENA_PAGES.store(next_pages, Ordering::SeqCst);
+    LAST_GLOBAL_ARENA_TOKEN.store(next_token, Ordering::SeqCst);
 }

@@ -8,8 +8,6 @@
 //! [`Layout`] guarantees physical pages we can plug into a ring-3
 //! page table directly.
 
-#![cfg(target_os = "none")]
-
 extern crate alloc;
 
 use alloc::alloc::{alloc_zeroed, dealloc};
