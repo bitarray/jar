@@ -106,6 +106,7 @@ use javm_cap::slot::Key;
 use javm_cap::{CNodeCap, CapHash, DataCap, MissingOr, NUM_REGS};
 use nub_arch_x86_abi::SCRATCHPAD_HEAD_LEN;
 
+use crate::cached_cap::{CacheSlot, CachedCap};
 use crate::jit_run::{self, ExitInfo, FrameRuntime};
 use crate::paging;
 use crate::state_cache::CACHE;
@@ -192,12 +193,17 @@ pub struct KernelFrame {
     /// Current PVM PC. Same lifecycle as `regs`.
     pc: u32,
     /// Per-frame cnode snapshot: the radix kv-map (`Hasher(Key) ->
-    /// CapHashOrRef`) seeded from the running `Cap::Instance`'s image
-    /// (pinned/initial) and grown by `derive_spawn`. No fixed slot count —
-    /// a normal `CNodeCap`. CNode ops run only in the call-loop dispatch
-    /// (ring 0 after the JIT context switch), so the kernel-heap `RadixMap`
-    /// is live; the JIT-compiled guest code never touches this directly.
-    cnode: CNodeCap,
+    /// CapHashOrRef<Box<CachedCap>>`) seeded from the running `Cap::Instance`'s
+    /// image (pinned/initial, as `Hash` entries) and grown by `derive_spawn`
+    /// (as inline `Owned(CachedCap)`). No fixed slot count — a normal
+    /// `CNodeCap`. The payload is [`CachedCap`] — a cap plus its engine-private
+    /// page-table cache — so a resident sub-VM's runtime rides *with* the cap
+    /// in its slot (no parent-side side-table). CNode ops run only in the
+    /// call-loop dispatch (ring 0 after the JIT context switch), so the
+    /// kernel-heap `RadixMap` is live; the JIT-compiled guest code never
+    /// touches this directly. The `CachedCap` payload is deliberately
+    /// non-wire-serialisable, so this cnode cannot be hashed or shipped.
+    cnode: CNodeCap<Box<CachedCap>>,
     /// Slot keys this frame's image declares pinned (read-only), sorted —
     /// the recompiler's mirror of the interpreter's
     /// `InstanceEntry.pinned_slots`. A write to one of these (e.g. a
@@ -231,23 +237,14 @@ pub struct KernelFrame {
     ///
     /// On a child HALT this runtime is **not** dropped if the child was a
     /// resident `Owned` sub-VM — instead [`pop_and_reflect`] re-arms it (clears
-    /// W on each CoW'd leaf) and parks it in the parent's [`Self::child_runtimes`]
-    /// so the next CALL of that same instance reuses the whole page table.
+    /// W on each CoW'd leaf) and re-attaches it to the returning instance's
+    /// [`CachedCap`] cache slot, so the next CALL of that same instance reuses
+    /// the whole page table. The cache rides *with* the cap in the parent's
+    /// cnode slot — no parent-side side-table — and is freed automatically when
+    /// the slot is overwritten (`derive_spawn`) or the frame pops, so peak live
+    /// page tables match the no-cache case (one per stack frame, plus the
+    /// just-popped child).
     runtime: Option<FrameRuntime>,
-    /// Parked page tables of this frame's resident `Owned` child instances,
-    /// keyed by the cnode slot the child lives in. A `host_call` of an `Owned`
-    /// instance whose runtime is parked here moves it into the child frame
-    /// (reuse — no page-table rebuild); the child's HALT re-arms and parks it
-    /// back. Invalidated when a slot is overwritten (`derive_spawn`), and
-    /// dropped wholesale when this frame pops — so peak live page tables match
-    /// the no-cache case (one per stack frame, plus the just-popped child).
-    ///
-    /// The value is an `Option` so the map node survives the round trip: it
-    /// holds `None` while the runtime is borrowed into the running child and is
-    /// refilled at the child's HALT. Re-CALLs of a resident instance therefore
-    /// add **no** allocation churn for the parking itself — only the small
-    /// `KernelFrame` is (re)built.
-    child_runtimes: BTreeMap<Key, Option<FrameRuntime>>,
 }
 
 /// One cap-backed data mapping projected into the guest address space,
@@ -707,16 +704,21 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
             .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
     }
     if let Some((slot, inst, runtime)) = owned_back {
-        // Park the page table keyed by the slot the instance returns to, so the
-        // next `host_call` of that slot reuses it (paired with the cap below).
-        // Reuse the existing map node (left as `None` when the runtime was
-        // borrowed out) so a steady-state re-CALL allocates nothing here.
-        if let Some(rt) = runtime {
-            *parent.child_runtimes.entry(slot.clone()).or_insert(None) = Some(rt);
-        }
+        // Re-attach the (re-armed) page table to the returning instance's
+        // `CachedCap` cache slot, so the next `host_call` of this instance
+        // reuses it. The cache rides *with* the cap in the parent's cnode slot
+        // — no side-table, freed automatically when the slot is overwritten or
+        // the parent frame pops.
+        let cache = match runtime {
+            Some(rt) => CacheSlot::Instance(rt),
+            None => CacheSlot::None,
+        };
         parent.cnode.set_key(
             slot.as_slice(),
-            Some(CapHashOrRef::Owned(Box::new(Cap::Instance(inst)))),
+            Some(CapHashOrRef::Owned(Box::new(CachedCap {
+                cap: Cap::Instance(inst),
+                cache,
+            }))),
         );
     }
     false
@@ -851,7 +853,7 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
 
     let image_hash = match frame.cnode.get(&image_slot) {
         Some(CapHashOrRef::Hash(h)) => h,
-        Some(CapHashOrRef::Ref(_) | CapHashOrRef::Owned(_)) | None => frame.image_hash,
+        Some(CapHashOrRef::Owned(_)) | None => frame.image_hash,
     };
     let child_chain = Blake2b256::hash_pair(&frame.image_hash_chain, &image_hash);
 
@@ -878,15 +880,15 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
         pc: 0,
         gas_remaining: 0,
     });
-    // A fresh instance takes this slot, so any page table parked for the slot's
-    // previous occupant is stale — drop it (its mem/overlay is a different cap).
-    frame.child_runtimes.remove(&dst_slot);
     // CNode ops run in ring-0 dispatch (kernel heap live); `set` on the
     // unbounded radix map is infallible here. The child lives inline in the
-    // parent's slot as `Owned` — the unique owner until host_call moves it.
+    // parent's slot as `Owned(CachedCap)` — the unique owner until host_call
+    // moves it. Overwriting the slot drops any previous occupant's `CachedCap`
+    // (and its parked page table), so a stale cache for that slot is
+    // invalidated automatically — no separate side-table to maintain.
     frame
         .cnode
-        .set(&dst_slot, Some(CapHashOrRef::Owned(Box::new(cap))))
+        .set(&dst_slot, Some(CapHashOrRef::Owned(CachedCap::boxed(cap))))
         .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
     Ok(false)
 }
@@ -902,7 +904,6 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
 ///   instance back ([`KernelFrame::owned_origin`] → [`pop_and_reflect`]).
 /// - `Hash` (a host-published instance): NOT consumed — the hash is
 ///   reinserted and the frame built read-only from the blob.
-/// - `Ref`: the recompiler no longer mints `Ref`; a stray one is a bug.
 fn dispatch_host_call(parent: &mut KernelFrame) -> Result<KernelFrame, u32> {
     let instance_slot = Key::from((parent.regs[7] & 0xFF) as u8);
     let endpoint_idx = (parent.regs[8] & 0xFF) as u32;
@@ -915,21 +916,17 @@ fn dispatch_host_call(parent: &mut KernelFrame) -> Result<KernelFrame, u32> {
         .ok_or(ERR_HOST_CALL_SLOT_EMPTY)?;
 
     let mut child = match target {
-        // Single-owner instance: move it into the child frame; record the
-        // origin slot so HALT folds the updated instance back.
+        // Single-owner instance: move it (and its parked page table) into the
+        // child frame; record the origin slot so HALT folds the updated
+        // instance back.
         CapHashOrRef::Owned(boxed) => {
-            let mut child =
-                build_frame_from_owned(*boxed, instance_slot.clone(), endpoint_idx, args)?;
-            // Page-table reuse: if this resident instance's runtime is parked
-            // from a previous CALL (re-armed at its last HALT), move it into the
-            // child frame instead of rebuilding the page table. Leaves the map
-            // node behind holding `None` (refilled at HALT). The data extent is
-            // fixed per image (immutable), so the parked extent must match.
-            if let Some(rt) = parent
-                .child_runtimes
-                .get_mut(&instance_slot)
-                .and_then(Option::take)
-            {
+            let CachedCap { cap, cache } = *boxed;
+            let mut child = build_frame_from_owned(cap, instance_slot.clone(), endpoint_idx, args)?;
+            // Page-table reuse: if this resident instance carries a parked
+            // runtime (re-armed at its last HALT), move it into the child frame
+            // instead of rebuilding the page table. The data extent is fixed
+            // per image (immutable), so the parked extent must match.
+            if let CacheSlot::Instance(rt) = cache {
                 debug_assert_eq!(
                     rt.data_extent(),
                     child.mem.content_len(),
@@ -947,7 +944,6 @@ fn dispatch_host_call(parent: &mut KernelFrame) -> Result<KernelFrame, u32> {
                 .set_key(instance_slot.as_slice(), Some(CapHashOrRef::Hash(h)));
             build_frame_from_published(&h, endpoint_idx, args)?
         }
-        CapHashOrRef::Ref(_) => return Err(ERR_INSTANCE_KIND),
     };
 
     // The child inherits the parent's cnode entries its image didn't
@@ -960,7 +956,9 @@ fn dispatch_host_call(parent: &mut KernelFrame) -> Result<KernelFrame, u32> {
     //
     // The scratchpad slot (slot[0]) is EXCLUDED here: it is not inherited by
     // copy but *moved* by the caller (the `OP_HOST_CALL` arm).
-    let scratch_phys = CNodeCap::key_of(&[javm_cap::abi::SCRATCHPAD_SLOT]);
+    // `key_of` is payload-independent (it hashes the logical key); annotate
+    // the generic so it resolves, matching the parent frame's cnode payload.
+    let scratch_phys = CNodeCap::<Box<CachedCap>>::key_of(&[javm_cap::abi::SCRATCHPAD_SLOT]);
     for (phys_key, val) in parent.cnode.slots.iter() {
         if *phys_key == scratch_phys {
             continue;
@@ -1019,7 +1017,7 @@ fn call_frame_cost_for(image_hash: &CapHash) -> Result<i64, u32> {
 fn host_call_frame_cost(parent: &KernelFrame) -> Result<i64, u32> {
     let instance_slot = Key::from((parent.regs[7] & 0xFF) as u8);
     let image_hash = match parent.cnode.peek_key(instance_slot.as_slice()) {
-        Some(CapHashOrRef::Owned(boxed)) => match &**boxed {
+        Some(CapHashOrRef::Owned(boxed)) => match &boxed.cap {
             Cap::Instance(i) => i.image_hash,
             _ => return Err(ERR_INSTANCE_KIND),
         },
@@ -1032,7 +1030,6 @@ fn host_call_frame_cost(parent: &KernelFrame) -> Result<i64, u32> {
                 _ => return Err(ERR_INSTANCE_KIND),
             }
         }
-        Some(CapHashOrRef::Ref(_)) => return Err(ERR_INSTANCE_KIND),
         None => return Err(ERR_HOST_CALL_SLOT_EMPTY),
     };
     call_frame_cost_for(&image_hash)
@@ -1096,9 +1093,9 @@ fn build_frame_from_owned(
     )
 }
 
-// `build_frame_from_instance_ref` / `build_frame_from_cap` were removed: the
-// recompiler no longer mints `CapHashOrRef::Ref`, so `dispatch_host_call`
-// dispatches `Owned`/`Hash` inline (and rejects a stray `Ref`).
+// `build_frame_from_instance_ref` / `build_frame_from_cap` were removed: a
+// cnode slot is a `Hash` or an inline `Owned` cap, so `dispatch_host_call`
+// dispatches both inline.
 
 /// Core frame builder: reads the image cap to seed regs/pc/cnode +
 /// CoW ranges, stores only IDs on the frame (no `CapHandle` pins).
@@ -1182,6 +1179,5 @@ fn build_frame_inner(
         mat_state: alloc::vec![0u8; mat_state_pages],
         ro_units: Vec::new(),
         runtime: None,
-        child_runtimes: BTreeMap::new(),
     })
 }

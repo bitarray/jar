@@ -27,6 +27,8 @@ extern crate hyperlight_guest_bin;
 
 // Kernel modules — guest-only.
 #[cfg(target_os = "none")]
+pub mod cached_cap;
+#[cfg(target_os = "none")]
 pub mod call_loop;
 #[cfg(target_os = "none")]
 pub mod jit_cache;

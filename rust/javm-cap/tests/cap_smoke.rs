@@ -151,19 +151,23 @@ fn cnode_lookup_after_set() {
     cnode
         .set(&Key::from(7u8), Some(CapHashOrRef::Hash([0x11; 32])))
         .unwrap();
-    // Mint a real CapRef via the cache so the bookkeeping test
-    // doesn't depend on the crate-internal `CapRef::new`.
-    let cache = CacheDirectory::new();
-    let r = cache.put_instance(Cap::CNode(CNodeCap::new()));
     cnode
-        .set(&Key::from(42u8), Some(CapHashOrRef::Ref(r.clone())))
+        .set(
+            &Key::from(42u8),
+            Some(CapHashOrRef::Owned(Box::new(Cap::data_inline(b"x")))),
+        )
         .unwrap();
 
     assert_eq!(
         cnode.get(&Key::from(7u8)),
         Some(CapHashOrRef::Hash([0x11; 32]))
     );
-    assert_eq!(cnode.get(&Key::from(42u8)), Some(CapHashOrRef::Ref(r)));
+    // `Owned` clones out by value (a fresh Box), so `get` reports presence;
+    // pointer identity makes value equality unsuitable here.
+    assert!(matches!(
+        cnode.get(&Key::from(42u8)),
+        Some(CapHashOrRef::Owned(_))
+    ));
     assert_eq!(cnode.get(&Key::from(100u8)), None);
 }
 
@@ -309,17 +313,16 @@ fn cache_round_trips_full_publish_chain() {
         .expect("put instance");
     assert!(cache.contains_blob(&inst_h));
 
-    // 5. Promote the cnode to a mutable instance via Arc::clone +
-    //    settle. With Arc storage the blob entry stays put; the
-    //    instances tier shares the same Arc until mutation.
-    let new_ref = cache
-        .promote_blob_to_instance(&cnode_h)
-        .expect("promote cnode");
+    // 5. Settle an inline `Owned` cnode (the deferred-persist path): a
+    //    freshly-built CNode referencing the same Data blob by hash settles
+    //    to the same content hash as the published cnode blob.
+    let mut owned_cn: CNodeCap = CNodeCap::new();
+    owned_cn
+        .set(&Key::from(0u8), Some(CapHashOrRef::Hash(data_h)))
+        .unwrap();
     let settled_h = cache
-        .settle(CapHashOrRef::Ref(new_ref))
-        .expect("settle resolves the ref");
-    // Settling an unchanged cnode-clone produces the same content
-    // hash as the original blob.
+        .settle(CapHashOrRef::Owned(Box::new(Cap::CNode(owned_cn))))
+        .expect("settle owned cnode");
     assert_eq!(settled_h, cnode_h);
 }
 
@@ -338,37 +341,6 @@ fn capref_sweep_reclaims_orphaned_instance() {
 
     // Drop the external holder; sweep reclaims.
     drop(r);
-    cache.sweep_instances();
-    assert_eq!(cache.instance_count(), 0);
-}
-
-#[test]
-fn capref_sweep_cascades_through_cnode_ref_chain() {
-    let cache = CacheDirectory::new();
-
-    // Leaf instance with no nested Refs.
-    let leaf = cache.put_instance(Cap::CNode(CNodeCap::new()));
-
-    // Parent cnode holding the leaf via Ref. Cap::Clone bumps the
-    // leaf's strong count when we clone the CNodeCap into the cap.
-    let mut parent_cn: CNodeCap = CNodeCap::new();
-    parent_cn
-        .set(&Key::from(0u8), Some(CapHashOrRef::Ref(leaf.clone())))
-        .unwrap();
-    let parent = cache.put_instance(Cap::CNode(parent_cn));
-
-    // Counts: leaf has 3 strong refs (our local + parent's cnode slot
-    // + directory's self-ref); parent has 2 (our local + directory).
-    assert_eq!(leaf.strong_count(), 3);
-    assert_eq!(parent.strong_count(), 2);
-
-    drop(leaf);
-    drop(parent);
-    // Leaf still alive in parent's cnode; parent still alive in
-    // directory's self-ref. Sweep reclaims parent first (its
-    // self-ref count is 1 after we dropped our local). Reclaiming
-    // parent drops its Cap which drops its `Ref(leaf)` slot which
-    // drops leaf's last external clone — next pass reclaims leaf.
     cache.sweep_instances();
     assert_eq!(cache.instance_count(), 0);
 }

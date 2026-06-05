@@ -50,9 +50,9 @@ pub fn nub_invoke_cached(packet_bytes: &[u8]) -> Vec<u8> {
         packet.initial_gas as i64,
     );
 
-    // Defensive: reclaim any `cache.instances` entries. The recompiler no
-    // longer mints `CapHashOrRef::Ref` (sub-VMs are inline `Owned` caps that
-    // drop with their frame), so this is a no-op in the current call path —
+    // Defensive: reclaim any `cache.instances` entries. The recompiler keeps
+    // sub-VMs as inline `Owned` caps that drop with their frame (there is no
+    // `Ref` cnode-slot variant), so this is a no-op in the current call path —
     // kept as a cheap safety net in case a host-published instance ever lands
     // in the tier. The talc-OOM that originally required it is gone: `Owned`
     // sub-VMs are freed directly at frame pop, not parked in the directory.

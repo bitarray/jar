@@ -145,35 +145,9 @@ fn cnode_with_populated_slot_roundtrips() {
 }
 
 #[test]
-fn ref_in_cap_errors_on_encode() {
-    use javm_cap::CacheDirectory;
-    let cache = CacheDirectory::new();
-    let blob = Cap::Type(TypeCap {
-        image_hash_chain: [0x11; 32],
-    });
-    let h = cache.put_cap(&blob).expect("put_cap");
-    let capref = cache.promote_blob_to_instance(&h).expect("promote");
-    let mut cn = CNodeCap::new();
-    cn.set(&Key::from(0u8), Some(CapHashOrRef::Ref(capref)))
-        .expect("set ref");
-    let cap = Cap::CNode(cn);
-    let err = rkyv::to_bytes::<rkyv::rancor::Error>(&cap).expect_err("must reject Ref");
-    // Release builds strip rancor's source-chain detail (it requires
-    // both debug assertions and rancor's `alloc` feature), so we only
-    // assert on the message contents when debug assertions are on.
-    if cfg!(debug_assertions) {
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("CapHashOrRef::Ref") || msg.contains("CapRef") || msg.contains("settle"),
-            "expected CapHasRefError in chain, got: {msg}"
-        );
-    }
-}
-
-#[test]
 fn owned_in_cap_errors_on_encode() {
-    // An in-flight `Owned(Box<Cap>)` slot is runtime-only — like `Ref`, it
-    // has no wire form and rkyv encode must surface a typed error (no panic).
+    // An in-flight `Owned(Box<Cap>)` slot is runtime-only — it has no wire
+    // form and rkyv encode must surface a typed error (no panic).
     let mut cn = CNodeCap::new();
     cn.set(
         &Key::from(0u8),
