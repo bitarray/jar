@@ -2,8 +2,9 @@
 //!
 //! Holds the mutable working state of a running Cap::Instance:
 //! image reference (by hash, since Images are immutable), root
-//! cnode reference (by hash when clean / by ref while mutating),
-//! the read-write memory image, register file, PC, gas counter.
+//! cnode reference (by hash when clean / inline `Owned` while the kernel
+//! frame mutates it), the read-write memory image, register file, PC,
+//! gas counter.
 
 use crate::cache::CapHashOrRef;
 
@@ -21,8 +22,8 @@ pub struct InstanceCap {
     /// addressed (Images are immutable).
     pub image_hash: CapHash,
     /// Reference to the root cnode. `Hash` when clean / not yet
-    /// promoted for mutation; `Ref` while the running Instance is
-    /// mutating it via CoW.
+    /// promoted for mutation; an inline `Owned` cnode cap while the
+    /// running kernel frame is mutating it.
     pub root_cnode: CapHashOrRef,
     /// The Instance's read-write memory image: a dense `DataCap` covering the
     /// data extent `[DATA_BASE, DATA_BASE + mem.size)`. Holds the initial

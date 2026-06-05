@@ -348,22 +348,15 @@ pub struct SubVmTop {
     pub image_hash: CapHash,
 }
 
-/// Build + publish (once) the recurse Image, its cnode, and the top
-/// Instance into `nub` from the SSZ-encoded Image `blob`. Returns the
-/// top instance hash so the bench loop can invoke it directly.
-pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
-    use javm_cap::{CNodeCap, CapHashOrRef};
-    use ssz::Decode;
-
-    const ENDPOINT_IDX: u8 = 0;
-
-    let image = Image::from_ssz_bytes(blob).expect("decode sub-vm image");
-
-    // The bench guest ships .rodata + a small stack (and, for the data
-    // variant, a 64 KiB pinned blob) via its image mappings. Publish a
-    // Cap::Data per pinned/initial slot and reference them from the
-    // Cap::Image; the in-kernel call_loop reads those bytes from the
-    // shared cache when building a child frame's mem image.
+/// Publish an Image's data slots (`Cap::Data` per pinned/initial
+/// slot) and the `Cap::Image` that references them into `nub`, and
+/// return the image hash.
+///
+/// The bench guests ship `.rodata` + a small stack (and, for the data
+/// variants, a pinned blob) via their image mappings; the in-kernel
+/// call_loop reads those bytes from the shared cache when building a
+/// frame's mem image.
+fn publish_image(nub: &mut Nub, image: &Image) -> CapHash {
     let mut data_caps: Vec<(CapHash, Cap)> = Vec::new();
     let mut pinned_hashes: Vec<(Key, CapHash)> = Vec::new();
     let mut initial_hashes: Vec<(Key, CapHash)> = Vec::new();
@@ -391,18 +384,26 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
         nub.put_cap_with_hash(*h, cap).expect("put data");
     }
     let image_cap =
-        Cap::image_with_slots(&image, &pinned_hashes, &initial_hashes).expect("image_with_slots");
+        Cap::image_with_slots(image, &pinned_hashes, &initial_hashes).expect("image_with_slots");
     let image_hash = ssz::hash_tree_root(&image_cap);
     nub.put_cap_with_hash(image_hash, &image_cap)
         .expect("put image");
+    image_hash
+}
 
-    let mut cn = CNodeCap::new();
-    cn.set(
-        &Key::from(SLOT_IMAGE_RECURSE as u8),
-        Some(CapHashOrRef::Hash(image_hash)),
-    )
-    .expect("set image slot");
-    let cnode_cap = Cap::CNode(cn);
+/// Publish `cnode` and an endpoint-0 `Cap::Instance` (backed by
+/// `image`'s memory) into `nub`, and return the instance hash. The
+/// `image_hash` must be the hash returned by [`publish_image`] for the
+/// same `image`.
+fn publish_instance(
+    nub: &mut Nub,
+    image: &Image,
+    image_hash: CapHash,
+    cnode: javm_cap::CNodeCap,
+) -> CapHash {
+    const ENDPOINT_IDX: u8 = 0;
+
+    let cnode_cap = Cap::CNode(cnode);
     let cnode_hash = ssz::hash_tree_root(&cnode_cap);
     nub.put_cap_with_hash(cnode_hash, &cnode_cap)
         .expect("put cnode");
@@ -420,7 +421,30 @@ pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
     let inst_hash = ssz::hash_tree_root(&inst_cap);
     nub.put_cap_with_hash(inst_hash, &inst_cap)
         .expect("put instance");
+    inst_hash
+}
 
+/// Build + publish (once) the recurse Image, its cnode, and the top
+/// Instance into `nub` from the SSZ-encoded Image `blob`. Returns the
+/// top instance hash so the bench loop can invoke it directly.
+pub fn build_sub_vm_top(nub: &mut Nub, blob: &[u8]) -> SubVmTop {
+    use javm_cap::{CNodeCap, CapHashOrRef};
+    use ssz::Decode;
+
+    let image = Image::from_ssz_bytes(blob).expect("decode sub-vm image");
+    let image_hash = publish_image(nub, &image);
+
+    // The top instance's cnode holds the recurse image at
+    // SLOT_IMAGE_RECURSE; every spawned child inherits it, so each
+    // level finds the same image to derive_spawn again.
+    let mut cn = CNodeCap::new();
+    cn.set(
+        &Key::from(SLOT_IMAGE_RECURSE as u8),
+        Some(CapHashOrRef::Hash(image_hash)),
+    )
+    .expect("set image slot");
+
+    let inst_hash = publish_instance(nub, &image, image_hash, cn);
     SubVmTop {
         top_instance: inst_hash,
         image_hash,
@@ -525,6 +549,106 @@ pub fn run_recurse_bench(c: &mut Criterion, blob: &[u8], label: &str) {
         g.throughput(Throughput::Elements(depth));
         g.bench_with_input(BenchmarkId::from_parameter(depth), &depth, |b, &d| {
             b.iter(|| invoke_sub_vm(&mut nub_hyperlight_lock(), &top, d))
+        });
+    }
+    g.finish();
+}
+
+// ---- page-table-cache bench (A repeatedly CALLs a resident B) ----
+
+/// Top instance of the page-table-cache bench: a single image whose
+/// endpoint 0 (`A`) `derive_spawn`s a child of the same image once and
+/// repeatedly `host_call`s its echo endpoint (`B`).
+pub struct PtCacheTop {
+    /// Caller `A`'s instance hash — the one the bench invokes.
+    pub top_instance: CapHash,
+    /// The shared image hash (kept warm in the JIT cache).
+    pub image_hash: CapHash,
+}
+
+/// Build + publish (once) the page-table-cache image and its top
+/// Instance into `nub` from the SSZ-encoded Image `blob`. Returns the
+/// top instance hash so the bench loop can invoke endpoint 0 directly.
+pub fn build_pt_cache_top(nub: &mut Nub, blob: &[u8]) -> PtCacheTop {
+    use javm_cap::CNodeCap;
+    use ssz::Decode;
+
+    let image = Image::from_ssz_bytes(blob).expect("decode pt-cache image");
+    let image_hash = publish_image(nub, &image);
+    // Empty cnode: the guest's `derive_spawn` reads an empty image
+    // slot and falls back to its own image to mint the resident child.
+    let top_instance = publish_instance(nub, &image, image_hash, CNodeCap::new());
+    PtCacheTop {
+        top_instance,
+        image_hash,
+    }
+}
+
+/// `A` returns `Σ_{i<n} i = n·(n−1)/2` (each echo returns its index).
+/// `wrapping`-safe to mirror the guest's `wrapping_add` accumulator.
+fn pt_cache_expected_return(n: u64) -> u64 {
+    let mut acc = 0u64;
+    for i in 0..n {
+        acc = acc.wrapping_add(i);
+    }
+    acc
+}
+
+/// One page-table-cache bench iteration: invoke endpoint 0, which
+/// `host_call`s the resident `B` `n` times. Asserts a clean trampoline
+/// halt and that the summed echoes match. Returns
+/// `(return_value, gas_used)`.
+pub fn invoke_pt_cache(nub: &mut Nub, top: &PtCacheTop, n: u64) -> (u64, u64) {
+    let result = nub
+        .invoke_cached(top.top_instance, 0, [n, 0, 0, 0], INITIAL_GAS)
+        .expect("invoke_cached");
+    assert!(
+        result.exit_reason == EXIT_HOSTCALL && result.exit_arg == 0,
+        "pt-cache exited non-cleanly: reason={} arg={} ret={} gas={}",
+        result.exit_reason,
+        result.exit_arg,
+        result.return_value,
+        result.gas_remaining,
+    );
+    assert_eq!(
+        result.return_value,
+        pt_cache_expected_return(n),
+        "pt-cache n={n} summed echoes {} (expected {})",
+        result.return_value,
+        pt_cache_expected_return(n),
+    );
+    (
+        result.return_value,
+        INITIAL_GAS.saturating_sub(result.gas_remaining),
+    )
+}
+
+/// Run the page-table-cache criterion bench: endpoint 0 `host_call`s
+/// the resident `B` a swept number of times. Publishes the top once
+/// (the kernel stays warm), runs an n=1/2 sanity check, then sweeps
+/// `{10, 100, 1000}` CALLs with `Throughput::Elements(n)` so the
+/// reported figure is per-CALL.
+pub fn run_pt_cache_bench(c: &mut Criterion, blob: &[u8], label: &str) {
+    let top = build_pt_cache_top(&mut nub_hyperlight_lock(), blob);
+    eprintln!(
+        "[{label}] image={} top={}",
+        hex_short(&top.image_hash),
+        hex_short(&top.top_instance),
+    );
+
+    {
+        let mut nub = nub_hyperlight_lock();
+        invoke_pt_cache(&mut nub, &top, 1);
+        invoke_pt_cache(&mut nub, &top, 2);
+    }
+    eprintln!("[{label}] n 1/2 ok");
+
+    let mut g = c.benchmark_group(label);
+    g.sample_size(20);
+    for &n in &[10u64, 100, 1_000] {
+        g.throughput(Throughput::Elements(n));
+        g.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
+            b.iter(|| invoke_pt_cache(&mut nub_hyperlight_lock(), &top, n))
         });
     }
     g.finish();

@@ -50,9 +50,9 @@ pub fn nub_invoke_cached(packet_bytes: &[u8]) -> Vec<u8> {
         packet.initial_gas as i64,
     );
 
-    // Defensive: reclaim any `cache.instances` entries. The recompiler no
-    // longer mints `CapHashOrRef::Ref` (sub-VMs are inline `Owned` caps that
-    // drop with their frame), so this is a no-op in the current call path —
+    // Defensive: reclaim any `cache.instances` entries. The recompiler keeps
+    // sub-VMs as inline `Owned` caps that drop with their frame (there is no
+    // `Ref` cnode-slot variant), so this is a no-op in the current call path —
     // kept as a cheap safety net in case a host-published instance ever lands
     // in the tier. The talc-OOM that originally required it is gone: `Owned`
     // sub-VMs are freed directly at frame pop, not parked in the directory.
@@ -165,26 +165,30 @@ fn error_hash_sentinel() -> Vec<u8> {
     alloc::vec![0xFFu8; 32]
 }
 
-/// Diagnostic: report talc's current allocation state as 32 LE
-/// bytes packing `[allocated_bytes, allocation_count,
-/// fragment_count, available_bytes]` (four u64s). Used to detect
-/// per-iter heap leaks — `allocated_bytes` growing monotonically
-/// indicates a real leak; `allocated_bytes` oscillating with
-/// `fragment_count` climbing indicates fragmentation.
+/// Diagnostic: report talc's current allocation state as 40 LE
+/// bytes packing `[allocation_count, total_allocation_count,
+/// allocated_bytes, fragment_count, available_bytes]` (five u64s).
+/// Used to detect per-iter heap leaks and per-CALL allocation churn:
+/// - `allocation_count` is the *live* count (alloc − free) — a
+///   non-zero per-invoke drift is a leak.
+/// - `total_allocation_count` is *cumulative* (monotonic) — its
+///   per-invoke delta is the allocation churn, which catches transient
+///   allocations (e.g. a rebuilt page table) that are freed again
+///   before the next snapshot and so leave `allocation_count` flat.
+/// - `allocated_bytes` oscillating with `fragment_count` climbing
+///   indicates fragmentation.
 ///
 /// Gated on `heap-diag` because reading the counters requires
 /// talc's `counters` feature, which adds a small per-alloc cost.
 #[cfg(feature = "heap-diag")]
 #[guest_function(fn_id = FN_ID_NUB_HEAP_STATS)]
 pub fn nub_heap_stats(_input: &[u8]) -> Vec<u8> {
-    let counters = hyperlight_guest_bin::HEAP_ALLOCATOR
-        .lock()
-        .counters()
-        .clone();
-    let mut buf = alloc::vec![0u8; 32];
-    buf[0..8].copy_from_slice(&(counters.allocated_bytes as u64).to_le_bytes());
-    buf[8..16].copy_from_slice(&(counters.allocation_count as u64).to_le_bytes());
-    buf[16..24].copy_from_slice(&(counters.fragment_count as u64).to_le_bytes());
-    buf[24..32].copy_from_slice(&(counters.available_bytes as u64).to_le_bytes());
+    let counters = *hyperlight_guest_bin::HEAP_ALLOCATOR.lock().counters();
+    let mut buf = alloc::vec![0u8; 40];
+    buf[0..8].copy_from_slice(&(counters.allocation_count as u64).to_le_bytes());
+    buf[8..16].copy_from_slice(&counters.total_allocation_count.to_le_bytes());
+    buf[16..24].copy_from_slice(&(counters.allocated_bytes as u64).to_le_bytes());
+    buf[24..32].copy_from_slice(&(counters.fragment_count as u64).to_le_bytes());
+    buf[32..40].copy_from_slice(&(counters.available_bytes as u64).to_le_bytes());
     buf
 }

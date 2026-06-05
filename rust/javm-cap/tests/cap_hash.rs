@@ -1,6 +1,6 @@
 use javm_cap::{
-    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, ImageCap, InstanceCap, Key, NUM_REGS,
-    PAGE_SIZE, PageBytes, PageRef, PageSlab, PageSlot, TypeCap,
+    CNodeCap, Cap, CapHashOrRef, DataCap, ImageCap, InstanceCap, Key, NUM_REGS, PAGE_SIZE,
+    PageBytes, PageRef, PageSlab, PageSlot, TypeCap,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -68,20 +68,9 @@ fn cnode_empty_vs_one_populated_differ() {
 }
 
 #[test]
-fn cnode_with_ref_target_panics() {
-    let cache = CacheDirectory::new();
-    let r = cache.put_instance(Cap::CNode(CNodeCap::new()));
-    let mut cn: CNodeCap = CNodeCap::new();
-    cn.set(&Key::from(0u8), Some(CapHashOrRef::Ref(r))).unwrap();
-    let cap: Cap = Cap::CNode(cn);
-    let result = std::panic::catch_unwind(|| cap.cap_hash());
-    assert!(result.is_err());
-}
-
-#[test]
 fn cnode_with_owned_target_panics() {
-    // Like an unsettled `Ref`, an in-flight `Owned` slot has no wire/hash
-    // form — hashing a graph that still holds one panics (callers settle first).
+    // An in-flight `Owned` slot has no wire/hash form — hashing a graph that
+    // still holds one panics (callers settle first).
     let mut cn: CNodeCap = CNodeCap::new();
     cn.set(
         &Key::from(0u8),

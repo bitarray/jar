@@ -14,14 +14,13 @@
 //! `rkyv::to_bytes(&cap)?` directly. The slot-target
 //! [`super::cache::CapHashOrRef`] has a hand-rolled rkyv impl whose
 //! `Serialize` returns an error ([`super::cache::CapHasRefError`]) if
-//! the cap graph still contains a `Ref`. The
-//! archived form for both `Hash` and `Ref` arms is `[u8; 32]` (= the
-//! `CapHash` archived form), so settled cap graphs serialise to the
-//! same bytes regardless of provenance, and `Ref`-bearing graphs
-//! surface as a typed `Result::Err` at encode time (no panic).
+//! the cap graph still contains an inline `Owned` cap. The archived form
+//! of the `Hash` arm is `[u8; 32]` (= the `CapHash` archived form), so a
+//! settled cap graph serialises to a stable byte form and an
+//! `Owned`-bearing graph surfaces as a typed `Result::Err` at encode
+//! time (no panic).
 //!
-//! See [`super::cache::CapRef`] for the cache-handle lifecycle and
-//! `Cap`-cloning semantics.
+//! See [`super::cache::CapRef`] for the (dormant) cache-handle lifecycle.
 
 pub mod cnode;
 pub mod data;
@@ -59,12 +58,12 @@ pub const MAX_ENDPOINTS: usize = 64;
 ///
 /// **rkyv note**: the `Archive`/`Serialize`/`Deserialize` derives
 /// provide the I/O-boundary wire form. Serialization errors out (no
-/// panic) if any slot target is a `CapHashOrRef::Ref` — see the
-/// module docs.
+/// panic) if any slot target is an inline `CapHashOrRef::Owned` cap —
+/// see the module docs.
 ///
-/// **Clone**: the derived `Clone` recursively clones field-by-field.
-/// `Ref(CapRef)` arms `Arc::clone` the handle, deep-bumping every
-/// nested instance reference. Drop is symmetric.
+/// **Clone**: the derived `Clone` recursively clones field-by-field. An
+/// inline `Owned(Box<Cap>)` slot deep-clones the boxed cap. Drop is
+/// symmetric.
 #[derive(
     Clone, Debug, ssz_derive::HashTreeRoot, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
@@ -113,14 +112,14 @@ impl Cap {
     ///   substitutes for a missing page without changing the
     ///   enclosing cap's hash.
     /// - `CapHashOrRef::Hash(h)` hashes to `h` exactly — a freshly-
-    ///   published cap blob substitutes for a `CapRef` reference
+    ///   published cap blob substitutes for a content reference
     ///   without changing the enclosing cap's hash.
     ///
-    /// **Unresolved refs panic**: hashing a `Cap` whose graph still
-    /// contains `CapHashOrRef::Ref(_)` targets will panic in the SSZ
-    /// path. Callers must `settle` the cap graph first. (The rkyv
-    /// serialise path is fallible for the same case — see the module
-    /// docs.)
+    /// **In-flight `Owned` caps panic**: hashing a `Cap` whose graph
+    /// still contains an inline `CapHashOrRef::Owned(_)` target will
+    /// panic in the SSZ path. Callers must `settle` the cap graph first.
+    /// (The rkyv serialise path is fallible for the same case — see the
+    /// module docs.)
     ///
     /// **Image hash distinction**: `Cap::Image(_).cap_hash()` and
     /// `crate::image::image_content_hash` hash different types — the

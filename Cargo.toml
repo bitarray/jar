@@ -37,6 +37,7 @@ members = [
     "components/benches/prime-sieve",
     "components/benches/sub-vm-recurse",
     "components/benches/sub-vm-data-recurse",
+    "components/benches/pt-cache",
     "components/examples/simple-chain",
     "components/tests/sub-vm-reread-recurse",
 ]

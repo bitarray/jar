@@ -47,8 +47,16 @@ use rkyv::util::AlignedVec;
 #[cfg(feature = "heap-diag")]
 #[derive(Debug, Clone, Copy)]
 pub struct HeapStats {
-    pub allocated_bytes: u64,
+    /// Live allocation count (incremented on alloc, decremented on
+    /// free) — a non-zero per-invoke drift here is a leak.
     pub allocation_count: u64,
+    /// Cumulative allocations ever performed (monotonic, never
+    /// decremented) — its per-invoke delta is the allocation *churn*,
+    /// the right yardstick for "this CALL allocated nothing but a
+    /// `KernelFrame`" even when the transient allocations are freed
+    /// again before the next snapshot.
+    pub total_allocation_count: u64,
+    pub allocated_bytes: u64,
     pub fragment_count: u64,
     pub available_bytes: u64,
 }
@@ -178,18 +186,19 @@ impl Nub {
             )),
             Backend::Hyperlight(h) => {
                 let raw: Vec<u8> = h.sandbox.call_raw(FN_ID_NUB_HEAP_STATS, &[])?;
-                if raw.len() != 32 {
+                if raw.len() != 40 {
                     return Err(anyhow::anyhow!(
-                        "heap_stats: expected 32 bytes, got {}",
+                        "heap_stats: expected 40 bytes, got {}",
                         raw.len()
                     ));
                 }
                 let parse = |off: usize| u64::from_le_bytes(raw[off..off + 8].try_into().unwrap());
                 Ok(HeapStats {
-                    allocated_bytes: parse(0),
-                    allocation_count: parse(8),
-                    fragment_count: parse(16),
-                    available_bytes: parse(24),
+                    allocation_count: parse(0),
+                    total_allocation_count: parse(8),
+                    allocated_bytes: parse(16),
+                    fragment_count: parse(24),
+                    available_bytes: parse(32),
                 })
             }
         }

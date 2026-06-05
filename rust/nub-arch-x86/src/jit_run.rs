@@ -339,6 +339,23 @@ fn mem_source_pa_in(
     }
 }
 
+/// Whether guest data page `page_va` is **privately CoW'd** — present in the
+/// running frame's `mem` overlay (rather than sourced read-only from the
+/// shared backing). The page-table reuse path keys off this: a write fault
+/// on an already-private page (its leaf re-armed read-only at the previous
+/// HALT) only needs its leaf W bit flipped back, whereas a write to a shared
+/// backing page must CoW a fresh private copy.
+fn overlay_has_page(page_va: u64, data_base: u64) -> bool {
+    let sink = OVERLAY_SINK.load(Ordering::SeqCst);
+    if sink.is_null() {
+        return false;
+    }
+    let idx = ((page_va - data_base) / PAGE_SIZE as u64) as u32;
+    // SAFETY: OVERLAY_SINK is the running frame's `mem` DataCap, exclusively
+    // ours under Hyperlight serialisation; borrowed read-only here.
+    unsafe { (*sink).overlay.contains_key(&idx) }
+}
+
 /// Read-only materialization source for a 2 MiB unit: a contiguous slab (code —
 /// page PA = `base_pa + offset`) or a cap-backed range whose page PAs are
 /// resolved lazily from the frame's `mem` (see [`mem_source_pa`]).
@@ -436,10 +453,10 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
         unsafe { &mut *ro_units_ptr }
     };
 
-    // Materialize-all (low→high), accumulating the charge. Read-only pages
-    // (code + PinnedCapRo data caps) materialize per unit (one page_in per
-    // `cap ∩ 2 MiB cluster`, fault-around the unit's RO pages); writable
-    // (CoW / ephemeral) pages stay per-page.
+    // Materialize-all (low→high), accumulating the CoW charge. Read-only
+    // pages (code + PinnedCapRo data caps) are fault-arounded per unit
+    // (`cap ∩ 2 MiB cluster`) with **no gas** — read-only page-in is charged
+    // at the CALL; only writable (CoW / ephemeral) pages charge per page here.
     let mut total: u64 = 0;
     for &p in set.as_slice() {
         let pv = p as u64;
@@ -517,23 +534,38 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
                 // (not-present) page and the loop re-visits this present partner;
                 // charge_for already returned 0, so skipping the map is gas-neutral.
                 if cur != javm_exec::mat::PageState::PresentRw {
-                    // Flush only when an *existing* present (RO) mapping is being
-                    // changed to RW (read-then-write CoW): that stale RO entry may
-                    // be TLB-cached. A first-touch write (cur == NotPresent) maps a
-                    // page that was never present, so it needs no invlpg.
-                    let flush = cur == javm_exec::mat::PageState::PresentRo;
-                    // Resolve the source PA lazily (from the frame's `mem`): a
-                    // `Loaded` cap slab, or the shared zero page for an ephemeral
-                    // page (so the CoW yields a fresh zeroed page). `None`
-                    // (a `Missing` page) → fault.
-                    let Some(src_pa) = mem_source_pa(pv) else {
-                        return false;
-                    };
-                    if !cow_into_fresh(pv, src_pa, pml4, owned_vec, data_base, flush) {
-                        // Allocation / remap failure → fault (nothing charged
-                        // yet for THIS page, but earlier pages of a straddle
-                        // were already advanced; an OOM here is fatal anyway).
-                        return false;
+                    // Page-table reuse fast path: if this page is already a
+                    // private (overlay) page whose leaf was re-armed read-only at
+                    // the previous HALT, just flip the leaf's W bit back and reuse
+                    // the existing private page — no fresh allocation, no re-copy.
+                    // (A present-RO leaf mapping the *shared backing* is NOT in the
+                    // overlay, so it correctly falls through to a real CoW.) The
+                    // RO translation may be TLB-cached by the faulting write, so
+                    // invlpg after the flip.
+                    let flipped = overlay_has_page(pv, data_base)
+                        && unsafe { crate::paging::pt_set_leaf_w(pml4, pv, true) };
+                    if flipped {
+                        crate::paging::invlpg(pv);
+                    } else {
+                        // Flush only when an *existing* present (RO) mapping is
+                        // being changed to RW (read-then-write CoW): that stale RO
+                        // entry may be TLB-cached. A first-touch write (cur ==
+                        // NotPresent) maps a page that was never present, so it
+                        // needs no invlpg.
+                        let flush = cur == javm_exec::mat::PageState::PresentRo;
+                        // Resolve the source PA lazily (from the frame's `mem`): a
+                        // `Loaded` cap slab, or the shared zero page for an
+                        // ephemeral page (so the CoW yields a fresh zeroed page).
+                        // `None` (a `Missing` page) → fault.
+                        let Some(src_pa) = mem_source_pa(pv) else {
+                            return false;
+                        };
+                        if !cow_into_fresh(pv, src_pa, pml4, owned_vec, data_base, flush) {
+                            // Allocation / remap failure → fault (nothing charged
+                            // yet for THIS page, but earlier pages of a straddle
+                            // were already advanced; an OOM here is fatal anyway).
+                            return false;
+                        }
                     }
                 }
             }
@@ -629,20 +661,20 @@ fn cow_into_fresh(
 }
 
 /// Materialize the read-only **unit** containing `pv`: the intersection of
-/// the cap `[r_start, r_end)` (physical base `r_pa`) with the 2 MiB cluster
-/// containing `pv`, named by [`javm_exec::mat::unit_base`]. Charges one
-/// `page_in` the first time the unit faults (a fresh `unit_base` inserted
-/// into the sorted `ro_units` set), `0` thereafter — so a large read-only
-/// input materializes for one fault per 2 MiB, not one per page, and two
-/// caps sharing a cluster each pay their own page-in (the fault-around is
-/// clamped to one cap, so a page-in touches at most one DataCap). The unit's
-/// RO pages are **fault-arounded**: mapped present read-only straight from
-/// the cap so the retry (and later reads in the unit) hit no further faults.
+/// the cap `[r_start, r_end)` with the 2 MiB cluster containing `pv`, named
+/// by [`javm_exec::mat::unit_base`]. The first time the unit faults (a fresh
+/// `unit_base` inserted into the sorted `ro_units` set) its RO pages are
+/// **fault-arounded** — mapped present read-only straight from the cap so
+/// the retry (and later reads in the unit) hit no further faults — and a
+/// later fault on the same unit is a no-op. This **charges no gas**:
+/// read-only page-in is accounted eagerly at the CALL
+/// ([`javm_exec::gas_const::call_frame_cost`]); the `ro_units` set here is
+/// purely a fault-reduction / mapping optimization. Clamping the fault-around
+/// to one cap means a single map event touches at most one DataCap.
 ///
 /// No `invlpg`: every page mapped here goes `NotPresent → present`, which is
 /// not TLB-cached, so the faulting retry walks the fresh entries. Returns
-/// the charge, or `None` on a page-table allocation failure. Mirrors the
-/// interpreter's `ro_unit_charge` so the two agree bit-for-bit.
+/// `Some(0)` on success, or `None` on a page-table allocation failure.
 fn materialize_ro_unit(
     pv: u64,
     r_start: u64,
@@ -679,7 +711,8 @@ fn materialize_ro_unit(
         // No invlpg: NotPresent → present is not TLB-cached.
         q += PAGE_SIZE as u64;
     }
-    Some(javm_exec::gas_const::PAGE_IN_COST)
+    // Read-only page-in is charged at the CALL, not here: mapping is free.
+    Some(0)
 }
 
 /// Result of an in-kernel PVM run.
@@ -796,6 +829,40 @@ pub struct FrameRuntime {
     code_base: u32,
     code_top: u32,
     code_pa: u64,
+}
+
+impl FrameRuntime {
+    /// Page-aligned byte size of the lazily-materialized data extent
+    /// (`mem_top − data_base`). For a reused runtime this must equal the
+    /// instance's `mem.content_len()` — images are immutable, so the extent
+    /// is fixed per image (asserted on reuse).
+    pub fn data_extent(&self) -> u64 {
+        (self.mem_top as u64).saturating_sub(self.data_base as u64)
+    }
+
+    /// HALT re-arm for a runtime that is about to be **parked** for reuse by
+    /// the next CALL of its resident instance: clear the Writable bit on the
+    /// leaf of every privately-CoW'd page (the keys of the instance's
+    /// `overlay`), so the next CALL re-faults on first write and re-charges
+    /// its CoW — exactly the per-frame CoW charge a fresh frame would pay, so
+    /// gas stays identical whether or not the page table was cached. The page
+    /// itself is reused: only the W bit toggles, no allocation.
+    ///
+    /// No `invlpg`: every `enter_frame` reloads CR3, which flushes every
+    /// non-global TLB entry, so the cleared-W leaves are re-walked next CALL.
+    pub fn rearm_cow<I: Iterator<Item = u32>>(&self, overlay_page_indices: I) {
+        let pml4 = self.pt.pml4_kva();
+        let data_base = self.data_base as u64;
+        for idx in overlay_page_indices {
+            let va = data_base + (idx as u64) * PAGE_SIZE as u64;
+            // SAFETY: `pml4` is this runtime's live page table; single-threaded
+            // (the guest is suspended). A leaf that is absent (never faulted in)
+            // simply returns `false` — nothing to re-arm.
+            unsafe {
+                crate::paging::pt_set_leaf_w(pml4, va, false);
+            }
+        }
+    }
 }
 
 /// Build a per-frame runtime: compile the Image (cached) and build the

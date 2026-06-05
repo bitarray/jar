@@ -561,6 +561,71 @@ pub unsafe fn pt_map_leaf(
     Some(())
 }
 
+/// Set (`writable = true`) or clear (`writable = false`) the Writable bit
+/// on an **existing** leaf PTE for `virt`, without allocating any
+/// intermediate tables. Walks PML4→PDPT→PD→PT and returns `false` if any
+/// level — or the leaf itself — is not present (nothing to toggle), so the
+/// caller can fall back to a full map.
+///
+/// This powers page-table **reuse** across CALLs of a resident instance:
+/// - the HALT re-arm clears W on every privately-CoW'd leaf, so the next
+///   CALL re-faults on first write and re-charges its CoW (the page itself
+///   is reused — only the W bit toggles, gas-neutral);
+/// - the #PF handler sets W back when an already-private (overlay) page is
+///   written again, flipping the bit instead of re-allocating + re-copying.
+///
+/// Does **not** invalidate the TLB. The handler must [`invlpg`] after a
+/// clear→RW flip (the RO translation may be cached by the faulting write);
+/// the re-arm needs none (a CR3 reload at the next `enter_frame` flushes
+/// every non-global entry).
+///
+/// # Safety
+/// `pml4_va` must be the kernel VA of a live 4-level page table; the caller
+/// must be the only writer (single-threaded guest).
+pub unsafe fn pt_set_leaf_w(pml4_va: u64, virt: u64, writable: bool) -> bool {
+    const PS: u64 = 1 << 7;
+    let idx4 = ((virt >> 39) & 0x1FF) as usize;
+    let idx3 = ((virt >> 30) & 0x1FF) as usize;
+    let idx2 = ((virt >> 21) & 0x1FF) as usize;
+    let idx1 = ((virt >> 12) & 0x1FF) as usize;
+
+    // Descend one present, non-large-page level at a time; bail to `false`
+    // the moment the path is absent (the caller then does a full map).
+    let descend = |table_va: u64, idx: usize| -> Option<u64> {
+        // SAFETY: table_va is a live 4 KiB-aligned table (the PML4 or a
+        // recovered inner table); 512 entries are readable.
+        let entry = unsafe { (*(table_va as *const Table)).get(idx).copied()? };
+        if entry & flag::P == 0 || entry & PS != 0 {
+            return None;
+        }
+        pa_to_va(entry & PA_MASK)
+    };
+
+    let pdpt_va = match descend(pml4_va, idx4) {
+        Some(v) => v,
+        None => return false,
+    };
+    let pd_va = match descend(pdpt_va, idx3) {
+        Some(v) => v,
+        None => return false,
+    };
+    let pt_va = match descend(pd_va, idx2) {
+        Some(v) => v,
+        None => return false,
+    };
+    // SAFETY: pt_va is a live PT this caller owns; idx1 < 512.
+    let leaf = unsafe { &mut (*(pt_va as *mut Table))[idx1] };
+    if *leaf & flag::P == 0 {
+        return false;
+    }
+    if writable {
+        *leaf |= flag::RW;
+    } else {
+        *leaf &= !flag::RW;
+    }
+    true
+}
+
 /// Like [`PageTable::ensure_inner`] but records a freshly-allocated table
 /// into the raw `owned` Vec pointer (for the #PF handler, which has no
 /// `&PageTable`). Returns the inner table's KVA, or `None` on large-page
