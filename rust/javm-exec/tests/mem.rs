@@ -1,4 +1,4 @@
-use javm_exec::gas_const::{COW_COST, PAGE_IN_COST};
+use javm_exec::gas_const::COW_COST;
 use javm_exec::{Access, GasCounter, MapError, Mem, MemAccess, PAGE_SIZE, TouchFault, perm};
 
 #[test]
@@ -142,42 +142,32 @@ fn spent(initial: u64, f: impl FnOnce(&mut GasCounter)) -> u64 {
 }
 
 #[test]
-fn first_read_charges_page_in_once() {
+fn first_read_is_free() {
     let mut m = Mem::with_pages(2, perm::RW);
-    // First read of page 0 pays page-in.
-    assert_eq!(
-        spent(10_000, |g| m.touch_read(0, 8, g).unwrap()),
-        PAGE_IN_COST
-    );
-    // A second read of the same page is free (already present).
+    // Reads no longer charge #3: read-only page-in is accounted at the CALL.
+    assert_eq!(spent(10_000, |g| m.touch_read(0, 8, g).unwrap()), 0);
     assert_eq!(spent(10_000, |g| m.touch_read(0x40, 8, g).unwrap()), 0);
-    // A read of a different page pays its own page-in.
-    assert_eq!(
-        spent(10_000, |g| m.touch_read(PAGE_SIZE, 4, g).unwrap()),
-        PAGE_IN_COST
-    );
+    assert_eq!(spent(10_000, |g| m.touch_read(PAGE_SIZE, 4, g).unwrap()), 0);
 }
 
 #[test]
-fn first_write_charges_page_in_plus_cow() {
+fn first_write_charges_cow_only() {
     let mut m = Mem::with_pages(1, perm::RW);
+    // First write charges CoW only (the page-in half is free).
     assert_eq!(
         spent(10_000, |g| m.touch_write(0x10, 8, g).unwrap()),
-        PAGE_IN_COST + COW_COST
+        COW_COST
     );
     // Subsequent writes to the now-present-RW page are free.
     assert_eq!(spent(10_000, |g| m.touch_write(0x20, 8, g).unwrap()), 0);
 }
 
 #[test]
-fn read_then_write_same_page_pays_page_in_then_cow_only() {
-    // D-2: read-then-write must not double-charge page-in.
+fn read_then_write_same_page_pays_cow_only() {
+    // D-2: read-then-write charges only the CoW (the read is free).
     let mut m = Mem::with_pages(1, perm::RW);
-    assert_eq!(
-        spent(10_000, |g| m.touch_read(0, 8, g).unwrap()),
-        PAGE_IN_COST
-    );
-    // The page is PresentRo; a write CoWs it — COW only, no second page-in.
+    assert_eq!(spent(10_000, |g| m.touch_read(0, 8, g).unwrap()), 0);
+    // The page is PresentRo; a write CoWs it — COW only.
     assert_eq!(spent(10_000, |g| m.touch_write(0, 8, g).unwrap()), COW_COST);
     // And it is now PresentRw: further reads/writes are free.
     assert_eq!(spent(10_000, |g| m.touch_read(0, 8, g).unwrap()), 0);
@@ -185,12 +175,12 @@ fn read_then_write_same_page_pays_page_in_then_cow_only() {
 }
 
 #[test]
-fn aligned_straddle_charges_both_pages() {
-    // An 8-byte read crossing the page boundary pays page-in for both pages.
+fn aligned_straddle_charges_cow_on_both_pages() {
+    // An 8-byte read crossing the page boundary is free (reads charge nothing).
     let mut m = Mem::with_pages(2, perm::RW);
     assert_eq!(
         spent(10_000, |g| m.touch_read(PAGE_SIZE - 4, 8, g).unwrap()),
-        2 * PAGE_IN_COST
+        0
     );
     // Both pages are now PresentRo; a straddling write CoWs both.
     assert_eq!(
@@ -207,27 +197,20 @@ fn write_to_pinned_page_hard_faults_charging_nothing() {
     let mut g = GasCounter::new(10_000);
     assert_eq!(m.touch_write(0, 8, &mut g), Err(TouchFault));
     assert_eq!(g.remaining(), 10_000);
-    // A read of the same pinned page is fine and pays page-in once.
-    assert_eq!(
-        spent(10_000, |g| m.touch_read(0, 8, g).unwrap()),
-        PAGE_IN_COST
-    );
+    // A read of the same pinned page is fine and charges nothing.
+    assert_eq!(spent(10_000, |g| m.touch_read(0, 8, g).unwrap()), 0);
 }
 
 #[test]
 fn straddle_into_unmapped_hard_faults_all_or_nothing() {
     // D-3: an access whose base page is mapped but straddles into an
-    // unmapped page faults wholesale — nothing is charged, and the mapped
-    // page is NOT paged in (so a later in-range read still pays page-in).
+    // unmapped page faults wholesale — nothing is charged.
     let mut m = Mem::with_pages(1, perm::RW); // only page 0 exists
     let mut g = GasCounter::new(10_000);
     assert_eq!(m.touch_read(PAGE_SIZE - 4, 8, &mut g), Err(TouchFault));
     assert_eq!(g.remaining(), 10_000);
-    // Page 0 was not materialized by the failed straddle.
-    assert_eq!(
-        spent(10_000, |g| m.touch_read(0, 8, g).unwrap()),
-        PAGE_IN_COST
-    );
+    // A later in-range read succeeds, charging nothing.
+    assert_eq!(spent(10_000, |g| m.touch_read(0, 8, g).unwrap()), 0);
 }
 
 #[test]
@@ -245,15 +228,13 @@ fn unmapped_base_page_is_skipped_not_charged() {
 // ---- CODE region (PinnedCapRo) #3 -----------------------------------------
 
 #[test]
-fn code_first_read_pages_in_then_free() {
-    // A read of the declared code region pages it in once (PAGE_IN), then is
-    // free; a write hard-faults (code is read-only), charging nothing.
+fn code_reads_are_free() {
+    // A read of the declared code region charges nothing (read-only page-in
+    // is accounted at the CALL); a write hard-faults (code is read-only),
+    // charging nothing.
     let mut m = Mem::new();
     m.set_code_region(0x40_0000, PAGE_SIZE); // one code page
-    assert_eq!(
-        spent(10_000, |g| m.touch_read(0x40_0000, 8, g).unwrap()),
-        PAGE_IN_COST
-    );
+    assert_eq!(spent(10_000, |g| m.touch_read(0x40_0000, 8, g).unwrap()), 0);
     assert_eq!(spent(10_000, |g| m.touch_read(0x40_0040, 8, g).unwrap()), 0);
     // A write to code hard-faults, charging nothing.
     let mut g = GasCounter::new(10_000);
@@ -262,22 +243,20 @@ fn code_first_read_pages_in_then_free() {
 }
 
 #[test]
-fn ro_cluster_charges_page_in_once_for_whole_cluster() {
-    // 16 read-only pages in one 2 MiB cluster: reading every page charges a
-    // SINGLE page_in (cluster materialization), not 16 — mirroring the
-    // recompiler's fault-around of the whole cluster on the first fault.
+fn ro_reads_are_free() {
+    // Read-only pages charge no per-fault #3 (page-in is accounted at the
+    // CALL): reading every page of a 2 MiB-spanning RO region charges nothing.
     let mut m = Mem::with_pages(16, perm::RO);
     let mut total = 0u64;
     for pg in 0..16u32 {
         total += spent(10_000, |g| m.touch_read(pg * PAGE_SIZE, 8, g).unwrap());
     }
-    assert_eq!(total, PAGE_IN_COST);
+    assert_eq!(total, 0);
 }
 
 #[test]
-fn ro_cluster_straddle_charges_each_cluster() {
-    // An RO read straddling a 2 MiB cluster boundary pays one page_in per
-    // cluster (two here); re-reads are then free.
+fn ro_straddle_reads_are_free() {
+    // An RO read straddling a 2 MiB cluster boundary still charges nothing.
     const TWO_MIB: u32 = 1 << 21;
     let mut m = Mem::new();
     m.base = TWO_MIB - PAGE_SIZE;
@@ -290,7 +269,7 @@ fn ro_cluster_straddle_charges_each_cluster() {
     .unwrap();
     assert_eq!(
         spent(10_000, |g| m.touch_read(TWO_MIB - 4, 8, g).unwrap()),
-        2 * PAGE_IN_COST
+        0
     );
     assert_eq!(
         spent(10_000, |g| m.touch_read(TWO_MIB - PAGE_SIZE, 8, g).unwrap()),
@@ -301,14 +280,14 @@ fn ro_cluster_straddle_charges_each_cluster() {
 
 #[test]
 fn rw_pages_stay_per_page_not_clustered() {
-    // Writable (CoW) pages are NOT clustered: each page pays its own
-    // page_in+cow, unchanged from the per-page model.
+    // Writable (CoW) pages are per-page: each first write charges its own
+    // COW (the page-in half is free), never clustered.
     let mut m = Mem::with_pages(4, perm::RW);
     let mut total = 0u64;
     for pg in 0..4u32 {
         total += spent(10_000, |g| m.touch_write(pg * PAGE_SIZE, 8, g).unwrap());
     }
-    assert_eq!(total, 4 * (PAGE_IN_COST + COW_COST));
+    assert_eq!(total, 4 * COW_COST);
 }
 
 #[test]
@@ -328,13 +307,7 @@ fn code_data_adjacency_straddle_faults() {
     // 8-byte read at 0x1FFC straddles code page 0x1000 → data page 0x2000.
     assert_eq!(m.touch_read(0x2000 - 4, 8, &mut g), Err(TouchFault));
     assert_eq!(g.remaining(), 10_000); // all-or-nothing: charged nothing
-    // Sanity: a read wholly inside each region still charges its own page-in.
-    assert_eq!(
-        spent(10_000, |g| m.touch_read(0x1000, 8, g).unwrap()),
-        PAGE_IN_COST
-    );
-    assert_eq!(
-        spent(10_000, |g| m.touch_read(0x2000, 8, g).unwrap()),
-        PAGE_IN_COST
-    );
+    // Sanity: a read wholly inside each region succeeds, charging nothing.
+    assert_eq!(spent(10_000, |g| m.touch_read(0x1000, 8, g).unwrap()), 0);
+    assert_eq!(spent(10_000, |g| m.touch_read(0x2000, 8, g).unwrap()), 0);
 }

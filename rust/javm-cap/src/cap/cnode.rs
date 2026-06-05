@@ -78,6 +78,19 @@ impl CNodeCap {
         }
     }
 
+    /// Borrow the cap bound to logical key `k` **without cloning** — the
+    /// read-only peek used to inspect an `Owned` cap (e.g. read a callee's
+    /// `image_hash` to price a CALL) before deciding whether to
+    /// [`take_key`](Self::take_key) it. Same placeholder semantics as
+    /// [`get_key`](Self::get_key): `None` for an absent key or a `Missing(_)`
+    /// placeholder.
+    pub fn peek_key(&self, k: &[u8]) -> Option<&CapHashOrRef> {
+        match self.slots.get(&Self::key_of(k))? {
+            MissingOr::Materialized(t) => Some(t),
+            MissingOr::Missing(_) => None,
+        }
+    }
+
     /// Bind logical key `k` to `target`, or clear the binding if `target`
     /// is `None`. Returns the prior materialized target, if any —
     /// **moved out**, not cloned, so a `CapHashOrRef::Owned(Box<Cap>)`

@@ -585,15 +585,18 @@ pub fn rv_kind_mem_class(kind: u8) -> MemClass {
 }
 
 /// Per-instruction worst-case category-#3 reserve contribution for a
-/// gas `kind`: `load → PAGE_IN×2`, `store → (PAGE_IN+COW)×2` (×2 =
-/// `MAX_PAGES_PER_ACCESS`), else 0. **Both engines** accumulate this at
-/// every real gas feed, so the block reserve matches bit-for-bit.
+/// gas `kind`: `store → COW×2` (×2 = `MAX_PAGES_PER_ACCESS`), else 0.
+/// **Loads no longer reserve** — read-only page-in is charged eagerly at
+/// the CALL (`gas_const::call_frame_cost`), not at a fault, so the only
+/// #3 a block can debit mid-flight is a store's copy-on-write. **Both
+/// engines** accumulate this at every real gas feed, so the block reserve
+/// matches bit-for-bit.
 #[inline]
 pub fn rv_kind_reserve(kind: u8) -> u32 {
-    use crate::gas_const::{COW_COST, MAX_PAGES_PER_ACCESS, PAGE_IN_COST};
+    use crate::gas_const::{COW_COST, MAX_PAGES_PER_ACCESS};
     let r = match rv_kind_mem_class(kind) {
-        MemClass::Load => PAGE_IN_COST.saturating_mul(MAX_PAGES_PER_ACCESS),
-        MemClass::Store => (PAGE_IN_COST + COW_COST).saturating_mul(MAX_PAGES_PER_ACCESS),
+        MemClass::Load => 0,
+        MemClass::Store => COW_COST.saturating_mul(MAX_PAGES_PER_ACCESS),
         MemClass::None => 0,
     };
     r.min(u32::MAX as u64) as u32

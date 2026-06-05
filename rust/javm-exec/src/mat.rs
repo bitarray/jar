@@ -8,31 +8,33 @@
 //!
 //! The charge rules key strictly on the per-page [`PageState`] and the
 //! static [`PageKind`] — never on the instruction — so a load-then-store
-//! to one page charges identically regardless of engine. `page_in` is
-//! charged at most once and `cow` at most once per page (per frame); the
-//! only re-page-in is a `MGMT_MOVE`/`MGMT_DROP` slot eviction, which is a
-//! block terminator.
+//! to one page charges identically regardless of engine. The **sole
+//! fault-driven #3 charge is copy-on-write** (the first write to a writable
+//! page), charged at most once per page (per frame). **Read-only page-in is
+//! not charged at the fault**: bringing a read-only region into the working
+//! set is accounted eagerly at the CALL that maps it
+//! ([`crate::gas_const::call_frame_cost`], computed statically from the
+//! callee Image), so a read — first or not — debits nothing here. A read
+//! only records the residency [`PageState`] transition. The one re-touch
+//! event is a `MGMT_MOVE`/`MGMT_DROP` slot eviction, a block terminator.
 //!
-//! ## Read-only units (per-cap × 2 MiB cluster)
+//! ## Read-only materialization is a mapping event, not a charge
 //!
 //! Read-only ([`PageKind::PinnedCapRo`]) regions — the program's code and
-//! pinned data caps — are materialized in **units**, where a unit is the
-//! intersection of one DataCap with one 2 MiB cluster ([`CLUSTER_SHIFT`],
-//! [`unit_base`]): the first read anywhere in a unit pays a single
-//! [`PAGE_IN_COST`] and brings the unit's RO pages into the working set
-//! (the recompiler fault-arounds them; the interpreter just accounts the
-//! unit). This frames `page_in` as the O(1) *map* event — one fault, one
-//! mapping, touching exactly one DataCap — so a large RO input materializes
-//! for one fault per 2 MiB instead of one per page, while the per-block
-//! reserve is unchanged (a single access spans ≤ 2 pages ⇒ ≤ 2 units ⇒ ≤ 2
-//! events: see [`crate::gas_const::MAX_PAGES_PER_ACCESS`]). Clamping the
-//! unit to one cap means two distinct caps sharing a 2 MiB cluster each pay
-//! their own page-in (no cross-cap dedup, no cross-cap under-charge).
-//! Copy-on-write (RW) regions stay 4 KiB-granular (a write copies one
-//! page). Both engines key on the same [`unit_base`], so they charge
-//! identically.
+//! pinned data caps — are still materialized in **units**, where a unit is
+//! the intersection of one DataCap with one 2 MiB cluster
+//! ([`CLUSTER_SHIFT`], [`unit_base`]): the recompiler fault-arounds a whole
+//! unit's RO pages on first touch so later reads in the unit hit no further
+//! faults, and both engines record the same unit set. That clustering is
+//! now purely a **mapping / fault-reduction** optimization with **zero
+//! gas** — the read-only page-in cost is charged once, eagerly, at the CALL
+//! (one [`crate::gas_const::PAGE_IN_COST`] per declared 2 MiB unit), not
+//! lazily per touched unit at the fault. Copy-on-write (RW) regions stay
+//! 4 KiB-granular: a write copies one page and charges [`COW_COST`]. Both
+//! engines key on the same [`unit_base`], so the (gas-free) unit set and the
+//! per-page CoW charge match bit-for-bit.
 
-use crate::gas_const::{COW_COST, PAGE_IN_COST};
+use crate::gas_const::COW_COST;
 use crate::mem::PAGE_SIZE;
 
 /// log2 of the read-only materialization cluster size. `21` → 2 MiB, the
@@ -49,20 +51,20 @@ pub fn cluster_of(addr: u32) -> u32 {
 
 /// Identity of the read-only materialization **unit** containing `addr`: the
 /// `cap ∩ cluster` region, named by its base address `max(cluster_lo,
-/// cap_start)`. Both engines charge one [`PAGE_IN_COST`] per distinct unit
-/// (and the recompiler fault-arounds exactly the unit's pages), so a unit
-/// pays page-in at most once on each engine.
+/// cap_start)`. The recompiler fault-arounds exactly the unit's pages on its
+/// first touch (mapping them all read-only in one go), so a unit is mapped
+/// at most once — a pure fault-reduction key. It carries **no gas**:
+/// read-only page-in is charged eagerly at the CALL
+/// ([`crate::gas_const::call_frame_cost`]), not per touched unit.
 ///
 /// A unit is keyed by **both** the cap (`cap_start`) and the 2 MiB cluster,
-/// so two distinct caps sharing a cluster are two units (each pays its own
-/// page-in) — a single fault/map event touches at most one DataCap. Because
-/// caps are disjoint, at most one cap per cluster starts at/below the cluster
-/// boundary (yielding `unit_base == cluster_lo`); every other cap in that
-/// cluster starts strictly later with a distinct `cap_start`, so this single
+/// so two distinct caps sharing a cluster are two units — a single
+/// fault/map event touches at most one DataCap. Because caps are disjoint,
+/// at most one cap per cluster starts at/below the cluster boundary
+/// (yielding `unit_base == cluster_lo`); every other cap in that cluster
+/// starts strictly later with a distinct `cap_start`, so this single
 /// `max(cluster_lo, cap_start)` value uniquely names one `(cap, cluster)`
-/// pair. For a cap spanning a cluster boundary the per-cluster split still
-/// holds (≤ 2 units per straddling access), so the worst-case #3 reserve
-/// ([`crate::gas_const::MAX_PAGES_PER_ACCESS`]) is unchanged.
+/// pair.
 #[inline]
 pub fn unit_base(addr: u32, cap_start: u32) -> u32 {
     let cluster_lo = cluster_of(addr) << CLUSTER_SHIFT;
@@ -148,9 +150,14 @@ pub struct HardFault;
 
 /// The category-#3 charge and resulting state for one page touch.
 ///
-/// - first read (`NotPresent`)  → `PAGE_IN_COST`,            → `PresentRo`
-/// - first write (`NotPresent`) → `PAGE_IN_COST + COW_COST`, → `PresentRw`
-/// - write after read (`PresentRo`) → `COW_COST`,            → `PresentRw`
+/// Read-only page-in is **free at the fault** — the cost of bringing a
+/// region into the working set is charged eagerly at the CALL that maps it
+/// ([`crate::gas_const::call_frame_cost`]). Copy-on-write (the first write
+/// to a writable page) is the only fault-driven #3 charge:
+///
+/// - first read (`NotPresent`)  → `0`,         → `PresentRo`
+/// - first write (`NotPresent`) → `COW_COST`,  → `PresentRw`
+/// - write after read (`PresentRo`) → `COW_COST`,  → `PresentRw`
 /// - already present for this access kind → `0`
 /// - write to `PinnedCapRo` → [`HardFault`]
 #[inline]
@@ -163,8 +170,13 @@ pub fn charge_for(
         return Err(HardFault);
     }
     Ok(match (state, is_write) {
-        (PageState::NotPresent, false) => (PAGE_IN_COST, PageState::PresentRo),
-        (PageState::NotPresent, true) => (PAGE_IN_COST + COW_COST, PageState::PresentRw),
+        // First read pages the page in read-only and records residency —
+        // but read-only page-in no longer charges at the fault (it is
+        // accounted eagerly at the CALL).
+        (PageState::NotPresent, false) => (0, PageState::PresentRo),
+        // First write copies-on-write: the sole remaining fault-driven #3
+        // charge (the page-in half is free, as above).
+        (PageState::NotPresent, true) => (COW_COST, PageState::PresentRw),
         (PageState::PresentRo, true) => (COW_COST, PageState::PresentRw),
         (PageState::PresentRo, false) => (0, PageState::PresentRo),
         (PageState::PresentRw, _) => (0, PageState::PresentRw),
@@ -228,16 +240,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn first_read_pays_page_in() {
+    fn first_read_is_free() {
+        // Read-only page-in is charged eagerly at the CALL, not here.
         let (c, s) = charge_for(PageState::NotPresent, PageKind::UnpinnedCapCow, false).unwrap();
-        assert_eq!(c, PAGE_IN_COST);
+        assert_eq!(c, 0);
         assert_eq!(s, PageState::PresentRo);
     }
 
     #[test]
-    fn first_write_pays_page_in_plus_cow() {
+    fn first_write_pays_cow_only() {
+        // The page-in half is free; only the CoW copy is charged.
         let (c, s) = charge_for(PageState::NotPresent, PageKind::EphemeralZero, true).unwrap();
-        assert_eq!(c, PAGE_IN_COST + COW_COST);
+        assert_eq!(c, COW_COST);
         assert_eq!(s, PageState::PresentRw);
     }
 
@@ -261,14 +275,15 @@ mod tests {
     }
 
     #[test]
-    fn pinned_store_hard_faults_and_reads_are_free_after_first() {
+    fn pinned_store_hard_faults_and_reads_are_always_free() {
         assert_eq!(
             charge_for(PageState::PresentRo, PageKind::PinnedCapRo, true),
             Err(HardFault)
         );
-        // A read of a pinned page still pays page-in once, then is free.
+        // A read of a pinned page is free (RO page-in is charged at CALL),
+        // and only records residency.
         let (c, s) = charge_for(PageState::NotPresent, PageKind::PinnedCapRo, false).unwrap();
-        assert_eq!((c, s), (PAGE_IN_COST, PageState::PresentRo));
+        assert_eq!((c, s), (0, PageState::PresentRo));
     }
 
     #[test]

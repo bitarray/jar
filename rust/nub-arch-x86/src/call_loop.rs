@@ -403,6 +403,32 @@ pub fn run_top(
                         if stack.len() >= MAX_DEPTH {
                             return Err(ERR_DEPTH_LIMIT);
                         }
+                        // Charge the call-frame materialization — JIT compile
+                        // (O(code)) + eager read-only page-in (per declared
+                        // 2 MiB unit) + frame-setup base — computed statically
+                        // from the callee Image and billed to the CALLER (on
+                        // top of the ecall floor above). Check-before-charge,
+                        // gated **before** `dispatch_host_call` moves the
+                        // instance, so an OOG here leaves the parent slot
+                        // untouched and the re-attempt is clean (gas-cost.md
+                        // §3). Charged in full on every CALL — the compiled
+                        // image + page table are memoized for *work* only,
+                        // never a gas discount — so gas is independent of the
+                        // node-local compile/PT cache (gas_const::call_frame_cost).
+                        let frame_cost = {
+                            let parent = stack.last().expect("non-empty");
+                            host_call_frame_cost(parent)?
+                        };
+                        if gas < frame_cost {
+                            break LoopOutcome {
+                                exit_reason: EXIT_OOG,
+                                exit_arg: 0,
+                                return_value: info.regs[7],
+                                gas_remaining: gas,
+                                scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
+                            };
+                        }
+                        gas -= frame_cost;
                         let mut child = {
                             let parent = stack.last_mut().expect("non-empty");
                             dispatch_host_call(parent)?
@@ -889,6 +915,69 @@ fn dispatch_host_call(parent: &mut KernelFrame) -> Result<KernelFrame, u32> {
         }
     }
     Ok(child)
+}
+
+/// Category-#3 call-frame cost for materializing the callee `image_hash`,
+/// computed **statically** from its Image so both engines agree (see
+/// [`javm_exec::gas_const::call_frame_cost`]): the JIT compile (`O(code)`),
+/// the eager read-only page-in (one page-in per declared 2 MiB read-only
+/// unit — the code region plus every pinned mapping, each clustered per
+/// 2 MiB), and the fixed frame-setup base. Charged to the caller at an
+/// in-kernel CALL, in full on every CALL (compile/PT memoization is a
+/// node-local performance optimization, never a gas discount), so gas is
+/// independent of the cache.
+fn call_frame_cost_for(image_hash: &CapHash) -> Result<i64, u32> {
+    let img_arc = CACHE
+        .get(CapHashOrRef::Hash(*image_hash))
+        .ok_or(ERR_IMAGE_NOT_FOUND)?;
+    let img = match &*img_arc {
+        Cap::Image(i) => i,
+        _ => return Err(ERR_IMAGE_KIND),
+    };
+    // Declared read-only 2 MiB units: the code region (one cap) plus each
+    // pinned (read-only) mapping, clustered per 2 MiB.
+    let cluster = 1u64 << javm_exec::mat::CLUSTER_SHIFT;
+    let mut ro_units = (img.code.len() as u64).div_ceil(cluster);
+    for m in img.mappings.iter() {
+        if img.mapping_is_pinned(m.start as u32) {
+            ro_units = ro_units.saturating_add(m.size.div_ceil(cluster));
+        }
+    }
+    let cost = javm_exec::gas_const::call_frame_cost(
+        img.code.len().min(u32::MAX as usize) as u32,
+        ro_units.min(u32::MAX as u64) as u32,
+    );
+    Ok(cost.min(i64::MAX as u64) as i64)
+}
+
+/// The CALL frame cost for the instance in `parent`'s host_call slot,
+/// resolved by **peeking** the slot (no move) so the gas gate can run
+/// **before** [`dispatch_host_call`] mutates the parent. This keeps an OOG
+/// at a CALL a clean, no-work re-attempt (gas-cost.md §3): the parent slot
+/// is untouched, so a top-up `CALL_RESUME` re-runs the CALL from a
+/// pristine state. Resolves the callee `image_hash` exactly as
+/// `dispatch_host_call` will (same slot, same `Owned`/`Hash` handling), so
+/// the cost gated here equals the cost the built child would have.
+fn host_call_frame_cost(parent: &KernelFrame) -> Result<i64, u32> {
+    let instance_slot = Key::from((parent.regs[7] & 0xFF) as u8);
+    let image_hash = match parent.cnode.peek_key(instance_slot.as_slice()) {
+        Some(CapHashOrRef::Owned(boxed)) => match &**boxed {
+            Cap::Instance(i) => i.image_hash,
+            _ => return Err(ERR_INSTANCE_KIND),
+        },
+        Some(CapHashOrRef::Hash(h)) => {
+            let arc = CACHE
+                .get(CapHashOrRef::Hash(*h))
+                .ok_or(ERR_INSTANCE_NOT_FOUND)?;
+            match &*arc {
+                Cap::Instance(i) => i.image_hash,
+                _ => return Err(ERR_INSTANCE_KIND),
+            }
+        }
+        Some(CapHashOrRef::Ref(_)) => return Err(ERR_INSTANCE_KIND),
+        None => return Err(ERR_HOST_CALL_SLOT_EMPTY),
+    };
+    call_frame_cost_for(&image_hash)
 }
 
 /// Build a frame from a `Cap::Instance` published in the heap-

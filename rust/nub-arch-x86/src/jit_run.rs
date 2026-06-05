@@ -436,10 +436,10 @@ fn try_materialize(gva: u64, width: u32, is_write: bool, ctx: *mut Context) -> b
         unsafe { &mut *ro_units_ptr }
     };
 
-    // Materialize-all (low→high), accumulating the charge. Read-only pages
-    // (code + PinnedCapRo data caps) materialize per unit (one page_in per
-    // `cap ∩ 2 MiB cluster`, fault-around the unit's RO pages); writable
-    // (CoW / ephemeral) pages stay per-page.
+    // Materialize-all (low→high), accumulating the CoW charge. Read-only
+    // pages (code + PinnedCapRo data caps) are fault-arounded per unit
+    // (`cap ∩ 2 MiB cluster`) with **no gas** — read-only page-in is charged
+    // at the CALL; only writable (CoW / ephemeral) pages charge per page here.
     let mut total: u64 = 0;
     for &p in set.as_slice() {
         let pv = p as u64;
@@ -629,20 +629,20 @@ fn cow_into_fresh(
 }
 
 /// Materialize the read-only **unit** containing `pv`: the intersection of
-/// the cap `[r_start, r_end)` (physical base `r_pa`) with the 2 MiB cluster
-/// containing `pv`, named by [`javm_exec::mat::unit_base`]. Charges one
-/// `page_in` the first time the unit faults (a fresh `unit_base` inserted
-/// into the sorted `ro_units` set), `0` thereafter — so a large read-only
-/// input materializes for one fault per 2 MiB, not one per page, and two
-/// caps sharing a cluster each pay their own page-in (the fault-around is
-/// clamped to one cap, so a page-in touches at most one DataCap). The unit's
-/// RO pages are **fault-arounded**: mapped present read-only straight from
-/// the cap so the retry (and later reads in the unit) hit no further faults.
+/// the cap `[r_start, r_end)` with the 2 MiB cluster containing `pv`, named
+/// by [`javm_exec::mat::unit_base`]. The first time the unit faults (a fresh
+/// `unit_base` inserted into the sorted `ro_units` set) its RO pages are
+/// **fault-arounded** — mapped present read-only straight from the cap so
+/// the retry (and later reads in the unit) hit no further faults — and a
+/// later fault on the same unit is a no-op. This **charges no gas**:
+/// read-only page-in is accounted eagerly at the CALL
+/// ([`javm_exec::gas_const::call_frame_cost`]); the `ro_units` set here is
+/// purely a fault-reduction / mapping optimization. Clamping the fault-around
+/// to one cap means a single map event touches at most one DataCap.
 ///
 /// No `invlpg`: every page mapped here goes `NotPresent → present`, which is
 /// not TLB-cached, so the faulting retry walks the fresh entries. Returns
-/// the charge, or `None` on a page-table allocation failure. Mirrors the
-/// interpreter's `ro_unit_charge` so the two agree bit-for-bit.
+/// `Some(0)` on success, or `None` on a page-table allocation failure.
 fn materialize_ro_unit(
     pv: u64,
     r_start: u64,
@@ -679,7 +679,8 @@ fn materialize_ro_unit(
         // No invlpg: NotPresent → present is not TLB-cached.
         q += PAGE_SIZE as u64;
     }
-    Some(javm_exec::gas_const::PAGE_IN_COST)
+    // Read-only page-in is charged at the CALL, not here: mapping is free.
+    Some(0)
 }
 
 /// Result of an in-kernel PVM run.
