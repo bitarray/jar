@@ -228,7 +228,26 @@ pub struct KernelFrame {
     /// pays N page-table builds, not one per re-entry. It is *not* evicted:
     /// the synchronous call stack is bounded structurally (cnode nesting depth;
     /// see the doc above), so all live page tables stay resident.
+    ///
+    /// On a child HALT this runtime is **not** dropped if the child was a
+    /// resident `Owned` sub-VM — instead [`pop_and_reflect`] re-arms it (clears
+    /// W on each CoW'd leaf) and parks it in the parent's [`Self::child_runtimes`]
+    /// so the next CALL of that same instance reuses the whole page table.
     runtime: Option<FrameRuntime>,
+    /// Parked page tables of this frame's resident `Owned` child instances,
+    /// keyed by the cnode slot the child lives in. A `host_call` of an `Owned`
+    /// instance whose runtime is parked here moves it into the child frame
+    /// (reuse — no page-table rebuild); the child's HALT re-arms and parks it
+    /// back. Invalidated when a slot is overwritten (`derive_spawn`), and
+    /// dropped wholesale when this frame pops — so peak live page tables match
+    /// the no-cache case (one per stack frame, plus the just-popped child).
+    ///
+    /// The value is an `Option` so the map node survives the round trip: it
+    /// holds `None` while the runtime is borrowed into the running child and is
+    /// refilled at the child's HALT. Re-CALLs of a resident instance therefore
+    /// add **no** allocation churn for the parking itself — only the small
+    /// `KernelFrame` is (re)built.
+    child_runtimes: BTreeMap<Key, Option<FrameRuntime>>,
 }
 
 /// One cap-backed data mapping projected into the guest address space,
@@ -640,17 +659,12 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
 fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
     let mut popped = stack.pop().expect("non-empty");
 
-    // REQUIRED ordering: drop the child's ring-3 runtime (its page table)
-    // FIRST, so the cap's overlay pages are unmapped before the cap moves
-    // anywhere. Single-threaded Hyperlight + stack discipline then guarantee no
-    // live PT references the cap once its own PT is gone; a later host_call of
-    // the returned instance builds a fresh PT.
-    popped.runtime = None;
-
     if stack.is_empty() {
-        // Top-level HALT: the scratchpad + mem stay on the popped frame; the
-        // host return path surfaces slot[0] / `scratchpad_head` as the result.
-        // The frame is dropped at scope end (top-level mem persistence deferred).
+        // Top-level HALT: no parent to park the runtime in, so drop it (its
+        // page table). The scratchpad + mem stay on the popped frame; the host
+        // return path surfaces slot[0] / `scratchpad_head` as the result. The
+        // frame is dropped at scope end (top-level mem persistence deferred).
+        popped.runtime = None;
         return true;
     }
 
@@ -659,15 +673,30 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
 
     // If the child was a moved-in `Owned` instance, fold its final state back
     // into the parked `InstanceCap` (mem moved, regs/pc copied) so the parent's
-    // slot gets the *updated* instance — sub-VM state persists across calls.
+    // slot gets the *updated* instance — sub-VM state persists across calls —
+    // AND carry its re-armed page table back so the parent can park it for the
+    // next CALL. The page table travels **paired** with the cap (their overlay
+    // pages stay mapped): no PT references a cap whose PT it doesn't own. A
+    // non-`Owned` (host-published `Hash`) child is not resident, so its runtime
+    // is dropped (the next CALL rebuilds it from the blob).
     let owned_back = match popped.owned_origin.take() {
         Some((slot, mut inst)) => {
+            // Re-arm BEFORE the overlay moves into the cap: clear W on every
+            // CoW'd leaf so the next CALL re-faults on first write and re-charges
+            // its CoW (gas-neutral — the page is reused, only the W bit toggles).
+            let runtime = popped.runtime.take();
+            if let Some(rt) = &runtime {
+                rt.rearm_cow(popped.mem.overlay.keys().copied());
+            }
             inst.regs = popped.regs;
             inst.pc = popped.pc as u64;
             inst.mem = popped.mem; // move the (overlaid) mem back into the cap
-            Some((slot, inst))
+            Some((slot, inst, runtime))
         }
-        None => None,
+        None => {
+            popped.runtime = None;
+            None
+        }
     };
 
     let parent = stack.last_mut().unwrap();
@@ -677,7 +706,14 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
             .cnode
             .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
     }
-    if let Some((slot, inst)) = owned_back {
+    if let Some((slot, inst, runtime)) = owned_back {
+        // Park the page table keyed by the slot the instance returns to, so the
+        // next `host_call` of that slot reuses it (paired with the cap below).
+        // Reuse the existing map node (left as `None` when the runtime was
+        // borrowed out) so a steady-state re-CALL allocates nothing here.
+        if let Some(rt) = runtime {
+            *parent.child_runtimes.entry(slot.clone()).or_insert(None) = Some(rt);
+        }
         parent.cnode.set_key(
             slot.as_slice(),
             Some(CapHashOrRef::Owned(Box::new(Cap::Instance(inst)))),
@@ -842,6 +878,9 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
         pc: 0,
         gas_remaining: 0,
     });
+    // A fresh instance takes this slot, so any page table parked for the slot's
+    // previous occupant is stale — drop it (its mem/overlay is a different cap).
+    frame.child_runtimes.remove(&dst_slot);
     // CNode ops run in ring-0 dispatch (kernel heap live); `set` on the
     // unbounded radix map is infallible here. The child lives inline in the
     // parent's slot as `Owned` — the unique owner until host_call moves it.
@@ -879,7 +918,26 @@ fn dispatch_host_call(parent: &mut KernelFrame) -> Result<KernelFrame, u32> {
         // Single-owner instance: move it into the child frame; record the
         // origin slot so HALT folds the updated instance back.
         CapHashOrRef::Owned(boxed) => {
-            build_frame_from_owned(*boxed, instance_slot.clone(), endpoint_idx, args)?
+            let mut child =
+                build_frame_from_owned(*boxed, instance_slot.clone(), endpoint_idx, args)?;
+            // Page-table reuse: if this resident instance's runtime is parked
+            // from a previous CALL (re-armed at its last HALT), move it into the
+            // child frame instead of rebuilding the page table. Leaves the map
+            // node behind holding `None` (refilled at HALT). The data extent is
+            // fixed per image (immutable), so the parked extent must match.
+            if let Some(rt) = parent
+                .child_runtimes
+                .get_mut(&instance_slot)
+                .and_then(Option::take)
+            {
+                debug_assert_eq!(
+                    rt.data_extent(),
+                    child.mem.content_len(),
+                    "parked runtime extent must match the resident instance's mem",
+                );
+                child.runtime = Some(rt);
+            }
+            child
         }
         // Host-published instance: not consumed by host_call — put the hash
         // back and build read-only from the blob.
@@ -1124,5 +1182,6 @@ fn build_frame_inner(
         mat_state: alloc::vec![0u8; mat_state_pages],
         ro_units: Vec::new(),
         runtime: None,
+        child_runtimes: BTreeMap::new(),
     })
 }
