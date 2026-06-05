@@ -169,15 +169,16 @@ pub struct KernelFrame {
     /// child's chain. Cached locally to avoid a cap deref per
     /// derive.
     image_hash_chain: CapHash,
-    /// Set when this frame was built by moving an `Owned` instance out of a
-    /// parent cnode slot (`host_call` of a `derive_spawn`'d sub-VM): the
-    /// `(parent slot, parked InstanceCap)`. The instance's `mem` was moved
-    /// into [`Self::mem`]; the rest (image, chain, root_cnode, regs, pc, gas)
-    /// is parked here. At HALT, [`pop_and_reflect`] folds this frame's final
-    /// mem/regs/pc back into the `InstanceCap`, boxes it `Owned`, and moves it
-    /// back into the parent's slot — the single-owner round trip. `None` for a
-    /// top-level (Hash) frame.
-    owned_origin: Option<(Key, InstanceCap)>,
+    /// The parent cnode slot to return this instance to, set when the frame was
+    /// built by moving an `Owned` sub-VM out of that slot (`host_call` of a
+    /// `derive_spawn`'d instance). The instance is fully **decomposed** into
+    /// this frame's own fields — `image_hash` / `image_hash_chain` (identity),
+    /// [`Self::mem`], [`Self::regs`], [`Self::pc`] — so only the return slot
+    /// needs remembering; at HALT [`pop_and_reflect`] reconstructs the
+    /// `InstanceCap` from those fields, boxes it `Owned`, and moves it back into
+    /// the slot — the single-owner round trip. `None` for a top-level /
+    /// host-published (`Hash`) frame (nothing to return).
+    owned_origin: Option<Key>,
     /// The frame's **owned** read-write memory: a [`DataCap`] cloned from the
     /// running Instance at frame build (Arc-backing bump + empty overlay). The
     /// #PF handler copy-on-writes guest writes straight into its `overlay`
@@ -649,10 +650,11 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
 
 /// Pop the top frame; if a parent exists, reflect the popped child's
 /// `return_value` into the parent's φ[7], move its scratchpad (slot[0]) back,
-/// and — when the child was a moved-in `Owned` sub-VM — fold the child's final
-/// mem/regs/pc back into its `InstanceCap` and move it back into the parent's
-/// origin slot (the single-owner round trip). Returns `true` when the stack
-/// has been drained (the RPC caller hands a result back to the host).
+/// and — when the child was a moved-in `Owned` sub-VM — reconstruct its
+/// `InstanceCap` from the frame's final mem/regs/pc (+ carried identity) and
+/// move it back into the parent's origin slot (the single-owner round trip).
+/// Returns `true` when the stack has been drained (the RPC caller hands a
+/// result back to the host).
 fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
     let mut popped = stack.pop().expect("non-empty");
 
@@ -668,26 +670,38 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
     // Move the callee's scratchpad (slot[0]) back to the caller.
     let scratch = popped.cnode.take_key(&[javm_cap::abi::SCRATCHPAD_SLOT]);
 
-    // If the child was a moved-in `Owned` instance, fold its final state back
-    // into the parked `InstanceCap` (mem moved, regs/pc copied) so the parent's
-    // slot gets the *updated* instance — sub-VM state persists across calls —
-    // AND carry its re-armed page table back so the parent can park it for the
-    // next CALL. The page table travels **paired** with the cap (their overlay
-    // pages stay mapped): no PT references a cap whose PT it doesn't own. A
-    // non-`Owned` (host-published `Hash`) child is not resident, so its runtime
-    // is dropped (the next CALL rebuilds it from the blob).
+    // If the child was a moved-in `Owned` instance, reconstruct its
+    // `InstanceCap` from this frame's final state so the parent's slot gets the
+    // *updated* instance — sub-VM state persists across calls — AND carry its
+    // re-armed page table back so the parent can park it for the next CALL. The
+    // page table travels **paired** with the cap (their overlay pages stay
+    // mapped): no PT references a cap whose PT it doesn't own. A non-`Owned`
+    // (host-published `Hash`) child is not resident, so its runtime is dropped
+    // (the next CALL rebuilds it from the blob).
     let owned_back = match popped.owned_origin.take() {
-        Some((slot, mut inst)) => {
-            // Re-arm BEFORE the overlay moves into the cap: clear W on every
-            // CoW'd leaf so the next CALL re-faults on first write and re-charges
-            // its CoW (gas-neutral — the page is reused, only the W bit toggles).
+        Some(slot) => {
+            // Re-arm BEFORE the mem moves into the cap: clear W on every CoW'd
+            // leaf so the next CALL re-faults on first write and re-charges its
+            // CoW (gas-neutral — the page is reused, only the W bit toggles).
             let runtime = popped.runtime.take();
             if let Some(rt) = &runtime {
                 rt.rearm_cow(popped.mem.overlay.keys().copied());
             }
-            inst.regs = popped.regs;
-            inst.pc = popped.pc as u64;
-            inst.mem = popped.mem; // move the (overlaid) mem back into the cap
+            // Reconstruct from the frame's authoritative running state: identity
+            // (`image_hash` / `image_hash_chain`) is carried on the frame, and
+            // the final `mem` / `regs` / `pc` are the frame's. `root_cnode` and
+            // `gas_remaining` stay spawn-time placeholders — V1 persists neither
+            // the running cnode nor residual gas into the cap (the exact values
+            // the parked shell used to carry).
+            let inst = InstanceCap {
+                image_hash_chain: popped.image_hash_chain,
+                image_hash: popped.image_hash,
+                root_cnode: CapHashOrRef::Hash([0u8; 32]),
+                mem: popped.mem, // the (overlaid) mem
+                regs: popped.regs,
+                pc: popped.pc as u64,
+                gas_remaining: 0,
+            };
             Some((slot, inst, runtime))
         }
         None => {
@@ -1063,32 +1077,35 @@ fn build_frame_from_published(
 }
 
 /// Build a frame by **moving** an `Owned` `Cap::Instance` into it: the
-/// instance's `mem` becomes the frame's owned memory, and the rest of the
-/// instance (image, chain, root_cnode, regs, pc, gas) is parked in
-/// [`KernelFrame::owned_origin`] alongside `origin_slot` so HALT can fold the
-/// frame's final state back and return the instance to the parent's slot.
+/// instance is fully decomposed — its `mem` becomes the frame's owned memory
+/// and its identity (`image_hash` / `image_hash_chain`) + `regs` seed the
+/// frame. `root_cnode`, `pc`, and `gas_remaining` are not needed at build (the
+/// frame starts at the endpoint's entry-pc with a freshly-seeded cnode). Only
+/// `origin_slot` is remembered in [`KernelFrame::owned_origin`] so HALT can
+/// reconstruct the instance from the frame's final state and return it.
 fn build_frame_from_owned(
     cap: Cap,
     origin_slot: Key,
     endpoint_idx: u32,
     args: [u64; 4],
 ) -> Result<KernelFrame, u32> {
-    let Cap::Instance(mut inst) = cap else {
+    let Cap::Instance(inst) = cap else {
         return Err(ERR_INSTANCE_KIND);
     };
-    // Move the instance's mem into the frame; the parked instance keeps an
-    // empty mem until HALT folds the frame's (overlaid) mem back.
-    let mem = core::mem::replace(&mut inst.mem, DataCap::empty());
-    let image_hash = inst.image_hash;
-    let image_hash_chain = inst.image_hash_chain;
-    let inst_regs = inst.regs;
+    let InstanceCap {
+        image_hash,
+        image_hash_chain,
+        regs,
+        mem,
+        ..
+    } = inst;
     build_frame_inner(
         image_hash,
         image_hash_chain,
-        Some((origin_slot, inst)),
+        Some(origin_slot),
         endpoint_idx,
         args,
-        Some(&inst_regs),
+        Some(&regs),
         mem,
     )
 }
@@ -1099,13 +1116,13 @@ fn build_frame_from_owned(
 
 /// Core frame builder: reads the image cap to seed regs/pc/cnode +
 /// CoW ranges, stores only IDs on the frame (no `CapHandle` pins).
-/// `owned_origin` is the parent slot + parked `InstanceCap` for a moved-in
-/// `Owned` sub-VM (`None` for a top-level / `Hash` frame).
+/// `owned_origin` is the parent return slot for a moved-in `Owned` sub-VM
+/// (`None` for a top-level / `Hash` frame).
 #[allow(clippy::too_many_arguments)]
 fn build_frame_inner(
     image_hash: CapHash,
     image_hash_chain: CapHash,
-    owned_origin: Option<(Key, InstanceCap)>,
+    owned_origin: Option<Key>,
     endpoint_idx: u32,
     args: [u64; 4],
     inst_regs: Option<&[u64; NUM_REGS]>,
