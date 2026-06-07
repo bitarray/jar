@@ -27,7 +27,7 @@ const OP_REPLY: u32 = 0;
 const OP_HOST_YIELD: u32 = 16;
 const OP_HOST_CALL: u32 = 26;
 const OP_CALL_RESUME: u32 = 27;
-const OP_DROP_PAUSED: u32 = 28;
+const OP_DROP_RESUME: u32 = 28;
 
 /// A's root-cnode slots.
 const B_SLOT: u8 = 6; // the sub-VM B (a published `Cap::Instance`)
@@ -73,7 +73,7 @@ fn image(code: Vec<u8>, yield_receiver_slot: Option<Key>) -> Image {
 /// A: `host_call(φ7=B slot, φ8=endpoint); [mid_op;] reply`. The slot/endpoint
 /// operands arrive via the invoke args (φ7..φ10). When B's yield routes to A, A
 /// resumes at the instruction after its `host_call`: `mid_op` is the handler's
-/// action — `Some(OP_CALL_RESUME)` resumes B, `Some(OP_DROP_PAUSED)` discards B,
+/// action — `Some(OP_CALL_RESUME)` resumes B, `Some(OP_DROP_RESUME)` discards B,
 /// `None` runs straight to REPLY (the handler-halt unwind path).
 fn a_image(mid_op: Option<u32>) -> Image {
     let mut code = Vec::new();
@@ -166,7 +166,7 @@ fn run(nub: &mut Nub, receiver_key: u8, mid_op: Option<u32>) -> (u32, u32) {
 }
 
 /// A top-level instance that does `op; reply` with no outstanding yield —
-/// exercises the CALL_RESUME / DROP_PAUSED guards (the top is an InstanceEntry,
+/// exercises the CALL_RESUME / DROP_RESUME guards (the top is an InstanceEntry,
 /// not a handler activation). Returns `(exit_reason, exit_arg)`.
 fn run_bare(nub: &mut Nub, op: u32) -> (u32, u32) {
     let mut code = Vec::new();
@@ -216,13 +216,13 @@ fn user_key_yield_routes_to_ancestor_and_resumes() {
         "a user-key yield no ancestor catches must fault the emitter (7), got reason={reason}",
     );
 
-    // DROP_PAUSED: A catches B's yield, discards B with `drop_paused`, then
+    // DROP_RESUME: A catches B's yield, discards B with `drop_resume`, then
     // continues to REPLY — the handler keeps running after dropping its yielder,
     // so the run halts cleanly (reason 4).
-    let (reason, _) = run(&mut nub, YIELD_KEY, Some(OP_DROP_PAUSED));
+    let (reason, _) = run(&mut nub, YIELD_KEY, Some(OP_DROP_RESUME));
     assert_eq!(
         reason, 4,
-        "drop_paused must discard the yielder and let the handler continue to a clean halt (4), got reason={reason}",
+        "drop_resume must discard the yielder and let the handler continue to a clean halt (4), got reason={reason}",
     );
 
     // Handler-halt unwind: A catches B's yield but REPLYs without resuming or
@@ -235,7 +235,7 @@ fn user_key_yield_routes_to_ancestor_and_resumes() {
         "a handler that halts without resuming must discard its yielder and halt cleanly (4), got reason={reason}",
     );
 
-    // CALL_RESUME / DROP_PAUSED guards: at top level (no outstanding yield) both
+    // CALL_RESUME / DROP_RESUME guards: at top level (no outstanding yield) both
     // fault — the top is an InstanceEntry, not a handler activation.
     assert_eq!(
         run_bare(&mut nub, OP_CALL_RESUME).0,
@@ -243,8 +243,8 @@ fn user_key_yield_routes_to_ancestor_and_resumes() {
         "call_resume with no outstanding yield must fault (7)",
     );
     assert_eq!(
-        run_bare(&mut nub, OP_DROP_PAUSED).0,
+        run_bare(&mut nub, OP_DROP_RESUME).0,
         7,
-        "drop_paused with no outstanding yield must fault (7)",
+        "drop_resume with no outstanding yield must fault (7)",
     );
 }

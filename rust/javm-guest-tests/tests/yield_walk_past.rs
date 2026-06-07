@@ -6,7 +6,7 @@
 //!   B); C completes, returns up through B to A → clean halt (reason 4). This
 //!   exercises the routing walk's skip-and-continue + the correct multi-frame
 //!   resume (the depth-2 tests can't reach a walked-past frame).
-//! - DROP_PAUSED then CALL_RESUME: drop_paused must discard the WHOLE caught
+//! - DROP_RESUME then CALL_RESUME: drop_resume must discard the WHOLE caught
 //!   subtree (B and C), leaving A a plain InstanceEntry — so the following
 //!   call_resume faults (reason 7). With the buggy single-entry remove, B stays
 //!   wedged and the call_resume would resume B instead (reason 4).
@@ -25,7 +25,7 @@ const OP_REPLY: u32 = 0;
 const OP_HOST_YIELD: u32 = 16;
 const OP_HOST_CALL: u32 = 26;
 const OP_CALL_RESUME: u32 = 27;
-const OP_DROP_PAUSED: u32 = 28;
+const OP_DROP_RESUME: u32 = 28;
 
 const B_SLOT: u8 = 6; // B in A's cnode
 const C_SLOT: u8 = 4; // C in A's cnode (inherited by B)
@@ -158,13 +158,13 @@ fn walk_past_intermediate_routing() {
         "a yield routed past a non-catching intermediate must resume the actual yielder and halt cleanly",
     );
 
-    // DROP_PAUSED then CALL_RESUME: drop_paused discards the whole caught subtree
+    // DROP_RESUME then CALL_RESUME: drop_resume discards the whole caught subtree
     // (B and C), leaving A a plain InstanceEntry, so the trailing call_resume has
     // no outstanding yield and faults (reason 7). A single-entry remove would
     // leave B wedged and resume it here → reason 4.
     assert_eq!(
-        run(&mut nub, &[OP_DROP_PAUSED, OP_CALL_RESUME]),
+        run(&mut nub, &[OP_DROP_RESUME, OP_CALL_RESUME]),
         7,
-        "drop_paused must discard the routed-past subtree so a following call_resume faults",
+        "drop_resume must discard the routed-past subtree so a following call_resume faults",
     );
 }

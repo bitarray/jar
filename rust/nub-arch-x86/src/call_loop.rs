@@ -149,11 +149,11 @@ const OP_HOST_CALL: u32 = 26;
 /// guest-kernel op number — needs no recompiler change (the recompiler surfaces
 /// `ecalli imm` → EXIT_HOST_CALL(imm) generically; dispatched here).
 const OP_CALL_RESUME: u32 = 27;
-/// `drop_paused()` — a yield handler gives up on its Waiting yielder (spec §4
-/// DROP_PAUSED): discard the entry directly below this handler's ReferenceEntry
-/// (its frame + state) WITHOUT resuming it; the handler keeps running. Faults if
-/// the top is not a handler activation. New guest-kernel op number.
-const OP_DROP_PAUSED: u32 = 28;
+/// `drop_resume()` — a yield handler gives up on its Waiting yielder (spec §4
+/// DROP_RESUME). V1 discards the caught in-flight subtree WITHOUT resuming it;
+/// materializing a sigma-resident Paused cap is a later stage. The handler keeps
+/// running. Faults if the top is not a handler activation.
+const OP_DROP_RESUME: u32 = 28;
 
 /// φ[8] status the kernel writes into the caller on apply termination (spec §4
 /// calling convention): `Ok` on a normal HALT/REPLY return and on a CALL_RESUME
@@ -863,13 +863,15 @@ pub fn run_top(
                         // response status) — its host_yield "returns" here.
                         yielder.regs[8] = STATUS_OK;
                     }
-                    OP_DROP_PAUSED => {
+                    OP_DROP_RESUME => {
                         // Give up on the Waiting yielder: discard the WHOLE caught
                         // subtree (the yielder + any intermediates a descendant
                         // routed past — same scope as a handler HALT, §10), but
-                        // keep the handler running. The top must be a handler
-                        // ReferenceEntry — an InstanceEntry top has no outstanding
-                        // yield → trap.
+                        // keep the handler running. Full DROP_RESUME will detach
+                        // the yielder as sigma-resident Paused; this V1 path only
+                        // implements the discard behavior. The top must be a
+                        // handler ReferenceEntry — an InstanceEntry top has no
+                        // outstanding yield → trap.
                         if stack[top_idx].target == top_idx {
                             break LoopOutcome {
                                 exit_reason: EXIT_TRAP,
@@ -892,7 +894,7 @@ pub fn run_top(
                         // route_yield, so the meter table stays consistent — gas is
                         // STM-exempt: a dropped subtree's spend is NOT refunded.)
                         // Using `target+1` (not `top_idx-1`) keeps subsequent
-                        // CALL_RESUME/DROP_PAUSED sound — there is no longer a stale
+                        // CALL_RESUME/DROP_RESUME sound — there is no longer a stale
                         // handler with a wedged intermediate below it.
                         let handler_inst = stack[top_idx].target;
                         stack.truncate(handler_inst + 1);
