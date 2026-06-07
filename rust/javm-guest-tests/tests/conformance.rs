@@ -24,7 +24,7 @@
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod backend {
     use javm_cap::image::{Image, PinnedCap};
-    use javm_cap::{Cap, NUM_REGS};
+    use javm_cap::{Cap, Key, NUM_REGS};
     use nub::Nub;
     use ssz::Decode;
     use std::sync::{Mutex, OnceLock};
@@ -66,7 +66,7 @@ mod backend {
     fn run(nub: &mut Nub, image: &Image, ep: u8) -> (u64, u64) {
         let endpoint = image
             .endpoints
-            .get(&ep)
+            .get(&Key::from(ep))
             .unwrap_or_else(|| panic!("endpoint {ep} not declared in Image"));
 
         // Endpoint invocation = process spawn; `initial_regs` is the

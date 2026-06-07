@@ -3,8 +3,8 @@
 //! the source tree free of `_tests.rs` sidecars.
 
 use javm_cap::{
-    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, EndpointDef, ImageCap, ImageSlotEntry,
-    InstanceCap, Key, MemoryMapping, NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotPath,
+    CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, ImageCap, ImageSlotEntry, InstanceCap,
+    Key, MemoryMapping, NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotPath,
 };
 use std::sync::Arc;
 
@@ -221,15 +221,6 @@ fn instance_with_mem_image() {
     let mut out = vec![0u8; PAGE_SIZE];
     inst.mem.copy_into(0x1000, &mut out);
     assert_eq!(&out[..2], &[0xDE, 0xAD]);
-}
-
-#[test]
-fn endpoint_def_empty_sentinel() {
-    let e = EndpointDef::empty();
-    assert_eq!(e.entry_pc, 0);
-    for r in &e.initial_regs {
-        assert_eq!(*r, 0);
-    }
 }
 
 #[test]

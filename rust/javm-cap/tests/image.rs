@@ -21,7 +21,7 @@ fn image_ssz_roundtrip() {
     let mut img = Image::empty();
     img.code = b"sample code".to_vec();
     img.endpoints.insert(
-        0,
+        Key::from(0u8),
         EndpointDef {
             entry_pc: 0x100,
             arg_registers: 1,
@@ -32,7 +32,7 @@ fn image_ssz_roundtrip() {
     let mut initial_regs = BTreeMap::new();
     initial_regs.insert(1u8, 0x4000);
     img.endpoints.insert(
-        255,
+        Key::from(255u8),
         EndpointDef {
             entry_pc: 0xDEADBEEF,
             arg_registers: 4,
@@ -85,7 +85,7 @@ fn endpoints_affect_hash() {
     let a = Image::empty();
     let mut b = Image::empty();
     b.endpoints.insert(
-        7,
+        Key::from(7u8),
         EndpointDef {
             entry_pc: 0x1000,
             arg_registers: 2,

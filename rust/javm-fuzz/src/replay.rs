@@ -51,7 +51,7 @@ pub fn image_with_ro(words: &[u32], ro_start: u32, ro_bytes: &[u8]) -> Image {
     let mut img = Image::empty();
     img.code = code;
     img.endpoints.insert(
-        0,
+        Key::from(0u8),
         EndpointDef {
             entry_pc: 0,
             arg_registers: 0,
@@ -86,7 +86,7 @@ pub fn image_with_ro_caps(words: &[u32], caps: &[(u32, &[u8])]) -> Image {
     let mut img = Image::empty();
     img.code = code;
     img.endpoints.insert(
-        0,
+        Key::from(0u8),
         EndpointDef {
             entry_pc: 0,
             arg_registers: 0,
@@ -143,7 +143,7 @@ pub fn image_for(prog: &Program) -> Image {
     let mut img = Image::empty();
     img.code = code;
     img.endpoints.insert(
-        0,
+        Key::from(0u8),
         EndpointDef {
             entry_pc: 0,
             arg_registers: 0,

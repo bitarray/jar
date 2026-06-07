@@ -4,7 +4,7 @@
 //! `HostCall(42)` result.
 
 use javm_cap::image::{EndpointDef, Image};
-use javm_cap::{Cap, NUM_REGS};
+use javm_cap::{Cap, Key, NUM_REGS};
 use nub::Nub;
 use std::collections::BTreeMap;
 
@@ -17,9 +17,9 @@ fn ecalli_42_image() -> Image {
     img.code = 0x02A0_200Bu32.to_le_bytes().to_vec();
     // Code is mapped at the fixed CODE_BASE; no data mappings.
 
-    let mut endpoints: BTreeMap<u8, EndpointDef> = BTreeMap::new();
+    let mut endpoints: BTreeMap<Key, EndpointDef> = BTreeMap::new();
     endpoints.insert(
-        0,
+        Key::from(0u8),
         EndpointDef {
             entry_pc: 0,
             arg_registers: 0,

@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use crate::slot::{Key, SlotPath};
 
-use super::{CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
+use super::{CapHash, MAX_SOURCE_DEPTH, NUM_REGS};
 
 /// # Validation model: structure is eager, semantics are lazy
 ///
@@ -47,10 +47,13 @@ pub struct ImageCap {
     /// constant [`crate::layout::CODE_BASE`]. Empty for codeless
     /// images. See [`ImageCap::code_mapping`].
     pub code: Vec<u8>,
-    /// Endpoint definitions. Stored as a dense array keyed by
-    /// endpoint index — `endpoints[i].entry_pc == 0` means the
-    /// endpoint at index `i` is not defined.
-    pub endpoints: Vec<EndpointDef>,
+    /// Endpoint definitions, keyed by a [`Key`] selector. A sparse, sorted
+    /// association list (`Dict`-style — kept sorted by key, no fixed capacity);
+    /// an absent key is an undefined endpoint. There is no dense array and no
+    /// `entry_pc == 0` sentinel, so an endpoint may legitimately start at code
+    /// offset 0. (`Vec<(Key, _)>` rather than `BTreeMap` because the rkyv wire
+    /// form has no `Ord` on the archived key.)
+    pub endpoints: Vec<(Key, EndpointDef)>,
     /// Memory mappings.
     pub mappings: Vec<MemoryMapping>,
     /// Pinned read-only slots (Cap::Data / Cap::Image). Images only
@@ -149,22 +152,6 @@ pub struct EndpointDef {
     pub initial_regs: [u64; NUM_REGS],
 }
 
-impl EndpointDef {
-    /// Empty endpoint — `entry_pc == 0` is the canonical sentinel
-    /// for "not defined" (since a real entry PC is never zero — PC 0
-    /// is reserved as the fallback PC in our convention). Not `const`:
-    /// `Key`'s `SmallVec` storage has no const constructor.
-    pub fn empty() -> Self {
-        Self {
-            entry_pc: 0,
-            stack_top: 0,
-            arg_cnode_slot: Key::from(0u8),
-            arg_cnode_size: 0,
-            initial_regs: [0; NUM_REGS],
-        }
-    }
-}
-
 /// One mapped region. The kernel resolves `source` (a [`SlotPath`] to a
 /// `Cap::Data`) at instance start, reads the bytes, and lays them at
 /// `[start, start + size)`.
@@ -235,8 +222,6 @@ pub enum ImageConvertError {
     SourcePathEmpty,
     #[error("memory mapping source path too deep (steps={0} > MAX_SOURCE_DEPTH)")]
     SourcePathTooDeep(usize),
-    #[error("endpoint index {0} >= MAX_ENDPOINTS")]
-    EndpointIndexOutOfRange(u8),
     #[error("register index {0} >= NUM_REGS")]
     RegisterIndexOutOfRange(u8),
 }
@@ -255,10 +240,9 @@ pub enum ImageConvertError {
 ///   in the new shape.
 ///
 /// **Field mappings:**
-/// - Endpoints are stored in a dense `MAX_ENDPOINTS`-sized array,
-///   indexed by endpoint id. Empty slots use [`EndpointDef::empty`].
-///   `stack_top` is extracted from the old `initial_regs[1]` (RISC-V
-///   SP convention); `arg_cnode_slot` defaults to `Key::from(0)`.
+/// - Endpoints are stored in a sparse `Key -> EndpointDef` map (no fixed
+///   capacity). `stack_top` is extracted from the old `initial_regs[1]`
+///   (RISC-V SP convention); `arg_cnode_slot` defaults to `Key::from(0)`.
 /// - `MemoryMapping.source` (a [`SlotPath`]) is carried through verbatim;
 ///   paths that are empty or deeper than `MAX_SOURCE_DEPTH` error.
 pub fn image_cap(
@@ -283,16 +267,12 @@ pub fn image_cap(
     // `layout::CODE_BASE`.
     let code = alloc_page_aligned_code(&image.code);
 
-    // Endpoints: dense `MAX_ENDPOINTS`-sized array; empty entries have
-    // `entry_pc == 0`.
-    let mut endpoints = Vec::with_capacity(MAX_ENDPOINTS);
-    for _ in 0..MAX_ENDPOINTS {
-        endpoints.push(EndpointDef::empty());
-    }
-    for (&idx, ep) in &image.endpoints {
-        if (idx as usize) >= MAX_ENDPOINTS {
-            return Err(ImageConvertError::EndpointIndexOutOfRange(idx));
-        }
+    // Endpoints: a sparse, sorted `Key -> EndpointDef` association list (no
+    // fixed capacity, no dense `entry_pc == 0` sentinel — presence is what
+    // defines an endpoint). `image.endpoints` is a BTreeMap, so iterating it
+    // yields keys in sorted order and the resulting Vec stays sorted by Key.
+    let mut endpoints = Vec::with_capacity(image.endpoints.len());
+    for (key, ep) in &image.endpoints {
         let mut initial_regs = [0u64; NUM_REGS];
         for (&reg_idx, &val) in &ep.initial_regs {
             if (reg_idx as usize) >= NUM_REGS {
@@ -302,13 +282,16 @@ pub fn image_cap(
         }
         // RISC-V SP convention: φ[1] = stack pointer.
         let stack_top = ep.initial_regs.get(&1).copied().unwrap_or(0);
-        endpoints[idx as usize] = EndpointDef {
-            entry_pc: ep.entry_pc,
-            stack_top,
-            arg_cnode_slot: Key::from(0u8),
-            arg_cnode_size: ep.arg_cnode_size,
-            initial_regs,
-        };
+        endpoints.push((
+            key.clone(),
+            EndpointDef {
+                entry_pc: ep.entry_pc,
+                stack_top,
+                arg_cnode_slot: Key::from(0u8),
+                arg_cnode_size: ep.arg_cnode_size,
+                initial_regs,
+            },
+        ));
     }
 
     let mut mappings = Vec::with_capacity(image.memory_mappings.len());

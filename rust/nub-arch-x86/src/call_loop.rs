@@ -1214,11 +1214,16 @@ fn build_frame_inner(
         _ => return Err(ERR_IMAGE_KIND),
     };
 
-    let endpoint = endpoint_idx as usize;
-    if endpoint >= img.endpoints.len() {
-        return Err(ERR_ENDPOINT_OOB);
-    }
-    let ep = &img.endpoints[endpoint];
+    // V1 single-byte ABI: the endpoint selector is the low byte of
+    // `endpoint_idx`, looked up as a Key in the sparse endpoint list. An absent
+    // key is an undefined endpoint.
+    let target = Key::from((endpoint_idx & 0xFF) as u8);
+    let ep = img
+        .endpoints
+        .iter()
+        .find(|(k, _)| *k == target)
+        .map(|(_, ep)| ep)
+        .ok_or(ERR_ENDPOINT_OOB)?;
 
     let mut regs = ep.initial_regs;
     if let Some(inst_regs) = inst_regs {

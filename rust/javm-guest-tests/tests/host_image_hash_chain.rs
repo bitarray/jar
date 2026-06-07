@@ -47,7 +47,7 @@ fn child_image() -> Image {
 fn parent_image(child_hash: CapHash) -> Image {
     let mut endpoints = BTreeMap::new();
     endpoints.insert(
-        0u8,
+        Key::from(0u8),
         EndpointDef {
             entry_pc: 0,
             arg_registers: 0,

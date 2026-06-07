@@ -17,9 +17,9 @@ const GAS_SLOT: u8 = 5;
 fn ecalli_42_image(with_gas_slot: bool) -> Image {
     let mut img = Image::empty();
     img.code = 0x02A0_200Bu32.to_le_bytes().to_vec();
-    let mut endpoints: BTreeMap<u8, EndpointDef> = BTreeMap::new();
+    let mut endpoints: BTreeMap<Key, EndpointDef> = BTreeMap::new();
     endpoints.insert(
-        0,
+        Key::from(0u8),
         EndpointDef {
             entry_pc: 0,
             arg_registers: 0,

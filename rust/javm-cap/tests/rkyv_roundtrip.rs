@@ -50,7 +50,7 @@ fn image_cap_roundtrip_preserves_hash() {
     img.code = vec![0u8, 10u8, 42];
     let mut endpoints = BTreeMap::new();
     endpoints.insert(
-        0u8,
+        Key::from(0u8),
         EndpointDef {
             entry_pc: 1,
             arg_registers: 0,

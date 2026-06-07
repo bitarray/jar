@@ -900,10 +900,12 @@ fn read_subsoil_endpoints_rv(
     elf_data: &[u8],
     base_vaddr: u64,
     code_len: usize,
-) -> Result<BTreeMap<u8, EndpointDef>, TranspileError> {
+) -> Result<BTreeMap<Key, EndpointDef>, TranspileError> {
     let sections = crate::elf::find_all_section_bytes(elf_data, ".subsoil.endpoints")?;
     const DESCRIPTOR_SIZE: usize = 16;
-    let mut endpoints: BTreeMap<u8, EndpointDef> = BTreeMap::new();
+    // Endpoints are keyed by a Key selector (the V1 single-byte ABI maps the
+    // descriptor's u8 index to the one-byte key `[index]`).
+    let mut endpoints: BTreeMap<Key, EndpointDef> = BTreeMap::new();
     for section_bytes in &sections {
         if section_bytes.len() % DESCRIPTOR_SIZE != 0 {
             return Err(TranspileError::InvalidSection(format!(
@@ -926,7 +928,7 @@ fn read_subsoil_endpoints_rv(
             let rv_pc = fn_ptr - base_vaddr;
             if endpoints
                 .insert(
-                    index,
+                    Key::from(index),
                     EndpointDef {
                         entry_pc: rv_pc,
                         arg_registers,

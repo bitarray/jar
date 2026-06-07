@@ -42,7 +42,7 @@ pub use cap::image::{
 };
 pub use cap::instance::InstanceCap;
 pub use cap::page::{PageBytes, PageRef, PageSlot};
-pub use cap::{Cap, CapHash, MAX_ENDPOINTS, MAX_SOURCE_DEPTH, NUM_REGS};
+pub use cap::{Cap, CapHash, MAX_SOURCE_DEPTH, NUM_REGS};
 pub use error::{CapError, OpError};
 pub use hash::{Blake2b256, Hash, Hasher};
 pub use image::{

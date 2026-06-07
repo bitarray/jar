@@ -56,9 +56,11 @@ pub struct Image {
     /// read its own bytes (AUIPC+load PIC); the JIT executes the native
     /// translation. Empty for codeless images (kernel placeholders).
     pub code: Vec<u8>,
-    /// Endpoints addressable by `endpoint_idx` (u8). Sparse — only
-    /// declared endpoints are present.
-    pub endpoints: BTreeMap<u8, EndpointDef>,
+    /// Endpoints addressable by a [`Key`] selector (the same byte-string key
+    /// type as a cnode slot; in the V1 single-byte ABI the selector is one
+    /// byte). Sparse — only declared endpoints are present, with no fixed
+    /// capacity. An absent key is an undefined endpoint.
+    pub endpoints: BTreeMap<Key, EndpointDef>,
     /// Memory layout. Each entry maps a `Cap::Data` (resolved through
     /// the `source` slot path) into the address space at `[start, start
     /// + size)`. RO vs RW is derived from whether the target slot
