@@ -407,6 +407,27 @@ fn reconcile_active(
     };
 }
 
+/// The RPC's ROOT-scope remaining gas — what a break surfaces to the host (which
+/// harvests it into the top-level meter). The live `gas` when the root scope is
+/// the running frame's active meter, else the root scope's banked balance:
+/// `meters[root]` for a metered root, or `host_budget` for a host-budgeted top.
+fn root_remaining(
+    root: &Option<Key>,
+    current: &Option<Key>,
+    gas: i64,
+    host_budget: i64,
+    meters: &BTreeMap<Key, i64>,
+) -> i64 {
+    if current == root {
+        gas
+    } else {
+        match root {
+            Some(k) => meters.get(k).copied().unwrap_or(0),
+            None => host_budget,
+        }
+    }
+}
+
 /// `&mut` to the [`KernelFrame`] the entry at `idx` runs, following a
 /// ReferenceEntry to its referent InstanceEntry. The referent is always an
 /// `Instance` (a Reference's `target` only ever names an InstanceEntry).
@@ -525,18 +546,28 @@ pub fn run_top(
     next_iid += 1;
     // GAS MODEL (single reconciliation point). The threaded `gas` always holds
     // the LIVE balance of the running frame's ACTIVE meter — `active_meter(top)`,
-    // the nearest metered frame at-or-below the top. `meters[k]` is authoritative
-    // for every non-active meter; `host_budget` holds the banked host scope (the
-    // host-budgeted top + its loaned descendants, active == None). At the top of
-    // each iteration we reconcile: if the top's active meter changed since last
+    // the frame's stored `active` (its own meter, or its caller/catcher's).
+    // `meters[k]` is authoritative for every non-active meter. At the top of each
+    // iteration we reconcile: if the top's active meter changed since last
     // iteration, bank the old scope + load the new. Every CALL/HALT/yield/resume/
     // drop changes the top, so this one point catches them all — no per-transition
     // gas bookkeeping. The guest meter table is per-RPC (a block-spanning table is
     // the deferred lazy-load piece).
+    let mut meters: BTreeMap<Key, i64> = BTreeMap::new();
+    // The TOP frame's own meter (its `gas_slots[0]` → `Gas{root_meter_key}`, if
+    // any) is the RPC's ROOT scope: stamp it like any frame and seed the table
+    // from the host-supplied budget, so `set_gas_meter` on the root meter (a chain
+    // self-harvesting, or a child aliasing the root) goes through the SAME table as
+    // sub-meters. A top with NO gas slot is host-budgeted (`root_active == None`,
+    // tracked in `host_budget`).
+    let root_active = resolve_frame_meter(frame_at(&stack, 0));
+    stack[0].active = root_active.clone();
+    if let Some(k) = &root_active {
+        meters.insert(k.clone(), initial_gas);
+    }
     let mut gas = initial_gas;
     let mut host_budget = initial_gas;
-    let mut meters: BTreeMap<Key, i64> = BTreeMap::new();
-    let mut current_active: Option<Key> = active_meter(&stack, 0);
+    let mut current_active: Option<Key> = root_active.clone();
 
     let outcome = loop {
         let top_idx = stack.len() - 1;
@@ -592,11 +623,13 @@ pub fn run_top(
                         exit_reason: info.exit_reason,
                         exit_arg: info.exit_arg,
                         return_value: info.regs[7],
-                        gas_remaining: if current_active.is_none() {
-                            gas
-                        } else {
-                            host_budget
-                        },
+                        gas_remaining: root_remaining(
+                            &root_active,
+                            &current_active,
+                            gas,
+                            host_budget,
+                            &meters,
+                        ),
                         scratchpad_head: head,
                     };
                 }
@@ -642,11 +675,13 @@ pub fn run_top(
                         exit_reason: EXIT_OOG,
                         exit_arg: 0,
                         return_value: info.regs[7],
-                        gas_remaining: if current_active.is_none() {
-                            gas
-                        } else {
-                            host_budget
-                        },
+                        gas_remaining: root_remaining(
+                            &root_active,
+                            &current_active,
+                            gas,
+                            host_budget,
+                            &meters,
+                        ),
                         scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                     };
                 }
@@ -676,11 +711,13 @@ pub fn run_top(
                                 exit_reason: info.exit_reason,
                                 exit_arg: info.exit_arg,
                                 return_value: info.regs[7],
-                                gas_remaining: if current_active.is_none() {
-                                    gas
-                                } else {
-                                    host_budget
-                                },
+                                gas_remaining: root_remaining(
+                                    &root_active,
+                                    &current_active,
+                                    gas,
+                                    host_budget,
+                                    &meters,
+                                ),
                                 scratchpad_head: head,
                             };
                         }
@@ -698,11 +735,13 @@ pub fn run_top(
                                 exit_reason: EXIT_TRAP,
                                 exit_arg: 0,
                                 return_value: info.regs[7],
-                                gas_remaining: if current_active.is_none() {
-                                    gas
-                                } else {
-                                    host_budget
-                                },
+                                gas_remaining: root_remaining(
+                                    &root_active,
+                                    &current_active,
+                                    gas,
+                                    host_budget,
+                                    &meters,
+                                ),
                                 scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                             };
                         }
@@ -718,11 +757,13 @@ pub fn run_top(
                                 exit_reason: EXIT_TRAP,
                                 exit_arg: 0,
                                 return_value: info.regs[7],
-                                gas_remaining: if current_active.is_none() {
-                                    gas
-                                } else {
-                                    host_budget
-                                },
+                                gas_remaining: root_remaining(
+                                    &root_active,
+                                    &current_active,
+                                    gas,
+                                    host_budget,
+                                    &meters,
+                                ),
                                 scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                             };
                         }
@@ -743,11 +784,13 @@ pub fn run_top(
                                     exit_reason: EXIT_TRAP,
                                     exit_arg: 0,
                                     return_value: info.regs[7],
-                                    gas_remaining: if current_active.is_none() {
-                                        gas
-                                    } else {
-                                        host_budget
-                                    },
+                                    gas_remaining: root_remaining(
+                                        &root_active,
+                                        &current_active,
+                                        gas,
+                                        host_budget,
+                                        &meters,
+                                    ),
                                     scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                                 };
                             }
@@ -762,11 +805,13 @@ pub fn run_top(
                                         exit_reason: EXIT_TRAP,
                                         exit_arg: ERR_YIELD_UNHANDLED,
                                         return_value: info.regs[7],
-                                        gas_remaining: if current_active.is_none() {
-                                            gas
-                                        } else {
-                                            host_budget
-                                        },
+                                        gas_remaining: root_remaining(
+                                            &root_active,
+                                            &current_active,
+                                            gas,
+                                            host_budget,
+                                            &meters,
+                                        ),
                                         scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                                     };
                                 }
@@ -783,11 +828,13 @@ pub fn run_top(
                                 exit_reason: EXIT_TRAP,
                                 exit_arg: 0,
                                 return_value: info.regs[7],
-                                gas_remaining: if current_active.is_none() {
-                                    gas
-                                } else {
-                                    host_budget
-                                },
+                                gas_remaining: root_remaining(
+                                    &root_active,
+                                    &current_active,
+                                    gas,
+                                    host_budget,
+                                    &meters,
+                                ),
                                 scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                             };
                         }
@@ -822,11 +869,13 @@ pub fn run_top(
                                 exit_reason: EXIT_TRAP,
                                 exit_arg: 0,
                                 return_value: info.regs[7],
-                                gas_remaining: if current_active.is_none() {
-                                    gas
-                                } else {
-                                    host_budget
-                                },
+                                gas_remaining: root_remaining(
+                                    &root_active,
+                                    &current_active,
+                                    gas,
+                                    host_budget,
+                                    &meters,
+                                ),
                                 scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                             };
                         }
@@ -910,11 +959,13 @@ pub fn run_top(
                             exit_reason: info.exit_reason,
                             exit_arg: info.exit_arg,
                             return_value: info.regs[7],
-                            gas_remaining: if current_active.is_none() {
-                                gas
-                            } else {
-                                host_budget
-                            },
+                            gas_remaining: root_remaining(
+                                &root_active,
+                                &current_active,
+                                gas,
+                                host_budget,
+                                &meters,
+                            ),
                             scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                         };
                     }
@@ -935,11 +986,13 @@ pub fn run_top(
                     exit_reason: info.exit_reason,
                     exit_arg: info.exit_arg,
                     return_value: info.regs[7],
-                    gas_remaining: if current_active.is_none() {
-                        gas
-                    } else {
-                        host_budget
-                    },
+                    gas_remaining: root_remaining(
+                        &root_active,
+                        &current_active,
+                        gas,
+                        host_budget,
+                        &meters,
+                    ),
                     scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                 };
             }
