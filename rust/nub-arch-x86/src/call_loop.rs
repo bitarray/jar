@@ -155,9 +155,12 @@ const OP_CALL_RESUME: u32 = 27;
 /// the top is not a handler activation. New guest-kernel op number.
 const OP_DROP_PAUSED: u32 = 28;
 
-/// φ[8] status a catcher sees when it resumes as a yield handler (vs. a normal
-/// CALL return). Forward-looking — a straight-line handler that unconditionally
-/// `call_resume`s ignores it; a discriminating handler branches on it.
+/// φ[8] status the kernel writes into the caller on apply termination (spec §4
+/// calling convention): `Ok` on a normal HALT/REPLY return and on a CALL_RESUME
+/// response, `YIELDED` when a routed yield hands control to a catcher. A
+/// discriminating handler branches on φ[8] to tell a yield from a plain return;
+/// a straight-line one ignores it.
+const STATUS_OK: u64 = 0;
 const STATUS_YIELDED: u64 = 1;
 
 /// Hard ceiling on the in-kernel call-stack depth. NOTE: with runtime eviction
@@ -856,6 +859,9 @@ pub fn run_top(
                                 .cnode
                                 .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
                         }
+                        // Spec §4: a resumed yielder sees φ[8] = Ok (the handler's
+                        // response status) — its host_yield "returns" here.
+                        yielder.regs[8] = STATUS_OK;
                     }
                     OP_DROP_PAUSED => {
                         // Give up on the Waiting yielder: discard the WHOLE caught
@@ -1322,6 +1328,9 @@ fn pop_and_reflect(stack: &mut Vec<StackEntry>, return_value: u64) -> bool {
     let parent_idx = stack.len() - 1;
     let parent = frame_at_mut(stack, parent_idx);
     parent.regs[7] = return_value;
+    // Spec §4: the caller's φ[8] reflects the termination status — Ok for a normal
+    // HALT/REPLY return (resetting any stale YIELDED a prior catch left there).
+    parent.regs[8] = STATUS_OK;
     if let Some(cap) = scratch {
         parent
             .cnode
