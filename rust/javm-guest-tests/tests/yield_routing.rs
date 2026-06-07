@@ -27,6 +27,7 @@ const OP_REPLY: u32 = 0;
 const OP_HOST_YIELD: u32 = 16;
 const OP_HOST_CALL: u32 = 26;
 const OP_CALL_RESUME: u32 = 27;
+const OP_DROP_PAUSED: u32 = 28;
 
 /// A's root-cnode slots.
 const B_SLOT: u8 = 6; // the sub-VM B (a published `Cap::Instance`)
@@ -69,15 +70,16 @@ fn image(code: Vec<u8>, yield_receiver_slot: Option<Key>) -> Image {
     }
 }
 
-/// A: `host_call(φ7=B slot, φ8=endpoint); [call_resume();] reply`. The slot/
-/// endpoint operands arrive via the invoke args (φ7..φ10). When `resume` is
-/// false A omits the `call_resume` — so when B's yield routes to A, A's handler
-/// continuation runs straight to REPLY, exercising the handler-halt guard.
-fn a_image(resume: bool) -> Image {
+/// A: `host_call(φ7=B slot, φ8=endpoint); [mid_op;] reply`. The slot/endpoint
+/// operands arrive via the invoke args (φ7..φ10). When B's yield routes to A, A
+/// resumes at the instruction after its `host_call`: `mid_op` is the handler's
+/// action — `Some(OP_CALL_RESUME)` resumes B, `Some(OP_DROP_PAUSED)` discards B,
+/// `None` runs straight to REPLY (the handler-halt unwind path).
+fn a_image(mid_op: Option<u32>) -> Image {
     let mut code = Vec::new();
     code.extend_from_slice(&ecalli(OP_HOST_CALL).to_le_bytes());
-    if resume {
-        code.extend_from_slice(&ecalli(OP_CALL_RESUME).to_le_bytes());
+    if let Some(op) = mid_op {
+        code.extend_from_slice(&ecalli(op).to_le_bytes());
     }
     code.extend_from_slice(&ecalli(OP_REPLY).to_le_bytes());
     image(code, Some(Key::from(RECEIVER_SLOT)))
@@ -92,9 +94,9 @@ fn b_image() -> Image {
     image(code, None)
 }
 
-/// Run the routing scenario with A's receiver registering `receiver_key` and A
-/// resuming B iff `resume`. Returns A's `(exit_reason, exit_arg)`.
-fn run(nub: &mut Nub, receiver_key: u8, resume: bool) -> (u32, u32) {
+/// Run the routing scenario with A's receiver registering `receiver_key` and A's
+/// handler action `mid_op`. Returns A's `(exit_reason, exit_arg)`.
+fn run(nub: &mut Nub, receiver_key: u8, mid_op: Option<u32>) -> (u32, u32) {
     // The user-key YieldSender B will emit, and A's YieldReceiver.
     let sender = Cap::Instance(yield_sender(&Key::from(YIELD_KEY)));
     let sender_h = nub.put_cap(&sender).expect("put sender");
@@ -137,7 +139,7 @@ fn run(nub: &mut Nub, receiver_key: u8, resume: bool) -> (u32, u32) {
         .expect("set receiver");
     let a_cnode_h = nub.put_cap(&Cap::CNode(a_cnode)).expect("put A cnode");
 
-    let a_img = a_image(resume);
+    let a_img = a_image(mid_op);
     let a_image_h = nub
         .put_cap(&Cap::image_with_slots(&a_img, &[], &[]).expect("a image"))
         .expect("put a image");
@@ -163,12 +165,12 @@ fn run(nub: &mut Nub, receiver_key: u8, resume: bool) -> (u32, u32) {
     (result.exit_reason, result.exit_arg)
 }
 
-/// A top-level instance that does `call_resume; reply` with no outstanding
-/// yield — exercises the CALL_RESUME guard (the top is an InstanceEntry, not a
-/// handler activation). Returns `(exit_reason, exit_arg)`.
-fn run_bare_call_resume(nub: &mut Nub) -> (u32, u32) {
+/// A top-level instance that does `op; reply` with no outstanding yield —
+/// exercises the CALL_RESUME / DROP_PAUSED guards (the top is an InstanceEntry,
+/// not a handler activation). Returns `(exit_reason, exit_arg)`.
+fn run_bare(nub: &mut Nub, op: u32) -> (u32, u32) {
     let mut code = Vec::new();
-    code.extend_from_slice(&ecalli(OP_CALL_RESUME).to_le_bytes());
+    code.extend_from_slice(&ecalli(op).to_le_bytes());
     code.extend_from_slice(&ecalli(OP_REPLY).to_le_bytes());
     let img = image(code, None);
     let image_h = nub
@@ -192,10 +194,6 @@ fn run_bare_call_resume(nub: &mut Nub) -> (u32, u32) {
     (result.exit_reason, result.exit_arg)
 }
 
-/// Error code the call loop packs into `exit_arg` when a handler activation
-/// HALTs/REPLYs without resuming its yielder (the deferred multi-frame unwind).
-const ERR_HANDLER_HALT: u32 = 72;
-
 #[test]
 fn user_key_yield_routes_to_ancestor_and_resumes() {
     let mut nub = Nub::new_hyperlight().expect("Hyperlight sandbox");
@@ -203,7 +201,7 @@ fn user_key_yield_routes_to_ancestor_and_resumes() {
     // Positive: A's receiver registers YIELD_KEY, so B's yield routes to A
     // (skipping B's frames), A resumes B, B halts, A halts cleanly (reason 4 —
     // the trailing REPLY). A trap/unhandled here would change the reason.
-    let (reason, _) = run(&mut nub, YIELD_KEY, true);
+    let (reason, _) = run(&mut nub, YIELD_KEY, Some(OP_CALL_RESUME));
     assert_eq!(
         reason, 4,
         "a user-key yield caught by an ancestor must route, resume, and halt cleanly, got reason={reason}",
@@ -212,27 +210,41 @@ fn user_key_yield_routes_to_ancestor_and_resumes() {
     // Negative: A's receiver registers a DIFFERENT key, so no ancestor catches
     // B's yield → the emitter faults (reason 7). Confirms routing consults the
     // snapshotted catch-set, so the positive isn't a false pass.
-    let (reason, _) = run(&mut nub, YIELD_KEY.wrapping_add(1), true);
+    let (reason, _) = run(&mut nub, YIELD_KEY.wrapping_add(1), Some(OP_CALL_RESUME));
     assert_eq!(
         reason, 7,
         "a user-key yield no ancestor catches must fault the emitter (7), got reason={reason}",
     );
 
-    // Handler-halt guard: A catches B's yield but REPLYs without `call_resume`.
-    // Folding A's HALT up while B waits is the deferred multi-frame unwind → a
-    // clean trap (reason 7, exit_arg = ERR_HANDLER_HALT) rather than a panic.
-    let (reason, arg) = run(&mut nub, YIELD_KEY, false);
+    // DROP_PAUSED: A catches B's yield, discards B with `drop_paused`, then
+    // continues to REPLY — the handler keeps running after dropping its yielder,
+    // so the run halts cleanly (reason 4).
+    let (reason, _) = run(&mut nub, YIELD_KEY, Some(OP_DROP_PAUSED));
     assert_eq!(
-        (reason, arg),
-        (7, ERR_HANDLER_HALT),
-        "a handler that halts without resuming must trap with ERR_HANDLER_HALT, got reason={reason} arg={arg}",
+        reason, 4,
+        "drop_paused must discard the yielder and let the handler continue to a clean halt (4), got reason={reason}",
     );
 
-    // CALL_RESUME guard: a top-level instance with no outstanding yield faults
-    // (the top is an InstanceEntry, not a handler activation).
-    let (reason, _) = run_bare_call_resume(&mut nub);
+    // Handler-halt unwind: A catches B's yield but REPLYs without resuming or
+    // dropping. Per sub-tree atomicity A's HALT discards the abandoned yielder B
+    // and folds A's own HALT up to its caller — A is top-level, so the run drains
+    // to a clean halt (reason 4), NOT a fault.
+    let (reason, _) = run(&mut nub, YIELD_KEY, None);
     assert_eq!(
-        reason, 7,
-        "call_resume with no outstanding yield must fault (7), got reason={reason}",
+        reason, 4,
+        "a handler that halts without resuming must discard its yielder and halt cleanly (4), got reason={reason}",
+    );
+
+    // CALL_RESUME / DROP_PAUSED guards: at top level (no outstanding yield) both
+    // fault — the top is an InstanceEntry, not a handler activation.
+    assert_eq!(
+        run_bare(&mut nub, OP_CALL_RESUME).0,
+        7,
+        "call_resume with no outstanding yield must fault (7)",
+    );
+    assert_eq!(
+        run_bare(&mut nub, OP_DROP_PAUSED).0,
+        7,
+        "drop_paused with no outstanding yield must fault (7)",
     );
 }

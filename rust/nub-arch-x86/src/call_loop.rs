@@ -149,6 +149,11 @@ const OP_HOST_CALL: u32 = 26;
 /// guest-kernel op number — needs no recompiler change (the recompiler surfaces
 /// `ecalli imm` → EXIT_HOST_CALL(imm) generically; dispatched here).
 const OP_CALL_RESUME: u32 = 27;
+/// `drop_paused()` — a yield handler gives up on its Waiting yielder (spec §4
+/// DROP_PAUSED): discard the entry directly below this handler's ReferenceEntry
+/// (its frame + state) WITHOUT resuming it; the handler keeps running. Faults if
+/// the top is not a handler activation. New guest-kernel op number.
+const OP_DROP_PAUSED: u32 = 28;
 
 /// φ[8] status a catcher sees when it resumes as a yield handler (vs. a normal
 /// CALL return). Forward-looking — a straight-line handler that unconditionally
@@ -192,12 +197,6 @@ const ERR_YIELD_UNHANDLED: u32 = 70;
 /// A `host_yield` operand slot did not hold the expected kernel-assisted
 /// Instance (YieldSender / YieldReceiver).
 const ERR_YIELD_BAD_SENDER: u32 = 71;
-/// A yield **handler** (a ReferenceEntry activation) ran to HALT/REPLY without
-/// `CALL_RESUME`-ing its Waiting yielder. Per sub-tree atomicity this should
-/// discard the abandoned yielder and fold the handler's HALT up to the
-/// referent's caller — a multi-frame unwind deferred to the DROP_PAUSED/Paused
-/// step. Until then it is a clean trap rather than a panic.
-const ERR_HANDLER_HALT: u32 = 72;
 
 /// One stack frame on the in-kernel call stack. Holds the running Image's
 /// identity hashes, the frame's **owned** `mem` DataCap + PVM register/PC
@@ -525,26 +524,25 @@ pub fn run_top(
         // we can mutate `stack` (push/pop) inside each arm.
         match info.exit_reason {
             EXIT_HALT => {
-                // A handler activation (ReferenceEntry) that HALTs without
-                // resuming its yielder needs the deferred multi-frame unwind →
-                // clean trap for now (never reflected by pop_and_reflect).
-                if stack[top_idx].target != top_idx {
-                    break LoopOutcome {
-                        exit_reason: EXIT_TRAP,
-                        exit_arg: ERR_HANDLER_HALT,
-                        return_value: info.regs[7],
-                        gas_remaining: gas,
-                        scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
-                    };
-                }
-                // Read the scratchpad head from the top frame BEFORE it is
-                // popped (and dropped) — only meaningful at the top-level HALT.
-                let head = if stack.len() == 1 {
+                // Read the scratchpad head from the InstanceEntry that will drain
+                // (its `target` reaches stack[0]) BEFORE it is popped — meaningful
+                // only at the top-level HALT. `frame_at(top_idx)` resolves the
+                // running frame whether the top is an InstanceEntry or a handler
+                // ReferenceEntry.
+                let head = if stack[top_idx].target == 0 {
                     read_scratchpad_head(frame_at(&stack, top_idx))
                 } else {
                     [0u8; SCRATCHPAD_HEAD_LEN]
                 };
-                if pop_and_reflect(&mut stack, info.regs[7], &mut gas, &mut meters) {
+                // A handler activation (ReferenceEntry) that HALTs without
+                // resuming/dropping its yielder triggers the sub-tree-atomic
+                // unwind; an ordinary InstanceEntry pops and reflects.
+                let drained = if stack[top_idx].target != top_idx {
+                    unwind_to_handler(&mut stack, top_idx, info.regs[7], &mut gas, &mut meters)
+                } else {
+                    pop_and_reflect(&mut stack, info.regs[7], &mut gas, &mut meters)
+                };
+                if drained {
                     break LoopOutcome {
                         exit_reason: info.exit_reason,
                         exit_arg: info.exit_arg,
@@ -595,26 +593,27 @@ pub fn run_top(
                 };
                 match op {
                     OP_REPLY => {
-                        // A handler activation (ReferenceEntry) that REPLYs
-                        // without resuming its yielder → deferred unwind, clean
-                        // trap (see EXIT_HALT).
-                        if stack[top_idx].target != top_idx {
-                            break LoopOutcome {
-                                exit_reason: EXIT_TRAP,
-                                exit_arg: ERR_HANDLER_HALT,
-                                return_value: info.regs[7],
-                                gas_remaining: gas,
-                                scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
-                            };
-                        }
-                        // Read the scratchpad head from the top frame before the
-                        // pop (only meaningful at the top-level trampoline HALT).
-                        let head = if stack.len() == 1 {
+                        // Read the scratchpad head from the InstanceEntry that
+                        // will drain before the pop (see EXIT_HALT).
+                        let head = if stack[top_idx].target == 0 {
                             read_scratchpad_head(frame_at(&stack, top_idx))
                         } else {
                             [0u8; SCRATCHPAD_HEAD_LEN]
                         };
-                        if pop_and_reflect(&mut stack, info.regs[7], &mut gas, &mut meters) {
+                        // A handler REPLYing without resuming/dropping → sub-tree
+                        // unwind; an ordinary InstanceEntry pops and reflects.
+                        let drained = if stack[top_idx].target != top_idx {
+                            unwind_to_handler(
+                                &mut stack,
+                                top_idx,
+                                info.regs[7],
+                                &mut gas,
+                                &mut meters,
+                            )
+                        } else {
+                            pop_and_reflect(&mut stack, info.regs[7], &mut gas, &mut meters)
+                        };
+                        if drained {
                             // Preserve the JIT exit shape so the host bench
                             // harness (which asserts `(reason=4, arg=0)` for the
                             // subsoil trampoline halt) doesn't trip.
@@ -747,6 +746,27 @@ pub fn run_top(
                             stack[yielder_idx].saved_gas = Some(gas);
                             gas = *meters.get(&k).unwrap_or(&0);
                         }
+                    }
+                    OP_DROP_PAUSED => {
+                        // Give up on the Waiting yielder directly below this
+                        // handler activation: discard its entry (frame + state);
+                        // the handler keeps running (it does NOT resume the
+                        // yielder). The top must be a handler ReferenceEntry — an
+                        // InstanceEntry top has no outstanding yield → trap.
+                        if stack[top_idx].target == top_idx {
+                            break LoopOutcome {
+                                exit_reason: EXIT_TRAP,
+                                exit_arg: 0,
+                                return_value: info.regs[7],
+                                gas_remaining: gas,
+                                scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
+                            };
+                        }
+                        // Remove the yielder (top_idx - 1); the handler
+                        // ReferenceEntry shifts down to become the running top and
+                        // continues at its post-drop PC. Its `target` (a lower
+                        // index) is unaffected by the removal.
+                        stack.remove(top_idx - 1);
                     }
                     OP_HOST_CALL => {
                         if stack.len() >= MAX_DEPTH {
@@ -1117,6 +1137,28 @@ fn try_oog_yield(
     let oog_key = Key::from(&javm_cap::yield_cap::YK_OOG[..]);
     let payload = Some(javm_cap::gas_handle(&meter));
     route_yield(stack, top_idx, &oog_key, payload, gas, meters)
+}
+
+/// A yield handler (a ReferenceEntry activation) HALTed/REPLYed without resuming
+/// or dropping its yielder. Per sub-tree atomicity (spec §10) the handler
+/// Instance's HALT commits/discards its WHOLE caught subtree — the abandoned
+/// yielder plus any intermediate frames a descendant's yield routed past — and
+/// reflects to the handler Instance's own caller. Discards every entry above the
+/// handler's InstanceEntry (their frames, banked meters kept), then reflects that
+/// InstanceEntry's HALT exactly as a normal pop. Returns `true` when the stack
+/// drains.
+fn unwind_to_handler(
+    stack: &mut Vec<StackEntry>,
+    top_idx: usize,
+    return_value: u64,
+    gas: &mut i64,
+    meters: &mut BTreeMap<Key, i64>,
+) -> bool {
+    let h_inst = stack[top_idx].target;
+    // Drop the handler activation + the abandoned subtree above the handler's
+    // own frame; the handler's InstanceEntry becomes the top.
+    stack.truncate(h_inst + 1);
+    pop_and_reflect(stack, return_value, gas, meters)
 }
 
 /// Pop the top frame; if a parent exists, reflect the popped child's
