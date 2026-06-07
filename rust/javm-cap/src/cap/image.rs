@@ -64,9 +64,8 @@ pub struct ImageCap {
     pub initial: Vec<ImageSlotEntry>,
     /// Slot holding `Cap::Instance[YieldReceiver]` (the catch-set), if any.
     pub yield_receiver_slot: Option<Key>,
-    /// Cnode slots holding the `Cap::Instance[Gas{meter_key}]` unit handles;
-    /// `gas_slots[0]` is the active meter the kernel reads at frame entry.
-    /// See [`crate::image::Image::gas_slots`].
+    /// Cnode slots holding the `Cap::Instance[Gas{meter_key}]` unit handles,
+    /// consulted in order. See [`crate::image::Image::gas_slots`].
     pub gas_slots: Vec<Key>,
     /// Cnode slots holding the `Cap::Instance[Quota{quota_key}]` unit handles.
     pub quota_slots: Vec<Key>,

@@ -79,11 +79,11 @@ pub struct Image {
     /// consults the snapshot when routing a yield. None = catches no yields.
     pub yield_receiver_slot: Option<Key>,
     /// Cnode slots holding the `Cap::Instance[Gas{meter_key}]` unit handles
-    /// the kernel debits while this Instance runs. `gas_slots[0]` is the
-    /// **active** meter (the kernel reads its `meter_key` at frame entry to
-    /// seed/settle gas against the kernel-maintained meter mapping); later
-    /// entries are fallback reserves (chain-spec policy). Empty = no
-    /// Image-declared meter (the kernel uses the call-supplied budget).
+    /// the kernel debits while this Instance runs. Slots are consulted in order:
+    /// empty declared slots are skipped, the first valid non-empty slot is the
+    /// primary meter used in OOG payloads, and later valid slots are fallback
+    /// reserves. Empty list = no Image-declared meter (the frame loans its
+    /// caller's gas scope, or the host budget at root).
     pub gas_slots: Vec<Key>,
     /// Cnode slots holding the `Cap::Instance[Quota{quota_key}]` unit handles.
     /// Same convention as [`Self::gas_slots`].

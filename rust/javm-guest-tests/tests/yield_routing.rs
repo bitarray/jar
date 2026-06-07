@@ -1,8 +1,8 @@
 //! User-key `host_yield` routing + `CALL_RESUME` — the in-flight suspension
 //! core. A (top-level) CALLs B (a sub-VM); B `host_yield`s a user-key
-//! `YieldSender`; the kernel walks the call stack, skips B's own frames
-//! (emitter-exclusion), and routes the yield to the nearest ancestor whose
-//! per-CALL snapshotted `YieldReceiver` contains the key — here A. A resumes at
+//! `YieldSender`; the kernel follows B's owner edge and routes the yield to the
+//! nearest owner whose per-CALL snapshotted `YieldReceiver` contains the key —
+//! here A. A resumes at
 //! its post-CALL continuation, `CALL_RESUME`s B, B halts, and A halts cleanly.
 //!
 //! A is deliberately STRAIGHT-LINE — `host_call; call_resume; reply` — which is

@@ -136,8 +136,8 @@ pub fn merge_yield_receivers(a: &InstanceCap, b: &InstanceCap) -> Option<Instanc
 
 /// Build a `Gas{meter_key}` unit handle: a `Cap::Instance` with the well-known
 /// Gas image-hash chain and the `meter_key` packed into `regs[0..1]` (same
-/// packing as [`yield_sender`]). The kernel reads it from an Instance's
-/// `gas_slots[0]` to index the gas-meter mapping; minted by the
+/// packing as [`yield_sender`]). The kernel reads these handles from an
+/// Instance's ordered `gas_slots` to index the gas-meter mapping; minted by the
 /// `kernel:mint_gas` syscall.
 pub fn gas_handle(meter_key: &Key) -> InstanceCap {
     unit_handle(KernelImage::Gas, meter_key)

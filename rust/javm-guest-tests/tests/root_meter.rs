@@ -1,4 +1,4 @@
-//! The TOP-level frame's own gas meter (its `gas_slots[0]` → `Gas{root_meter}`)
+//! The TOP-level frame's own primary gas meter (`gas_slots` → `Gas{root_meter}`)
 //! is a first-class meter: `kernel:set_gas_meter` on it reads/writes the LIVE
 //! balance, so a chain can self-harvest its root meter (`set_gas_meter(root, 0)`
 //! returns the remaining and zeroes it), exactly like a child meter.
@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 const OP_REPLY: u32 = 0;
 const OP_HOST_YIELD: u32 = 16;
 const SENDER_SLOT: u8 = 5; // kernel:set_gas_meter YieldSender
-const GAS_SLOT: u8 = 8; // the top's gas_slots[0] → Gas{ROOT_METER}
+const GAS_SLOT: u8 = 8; // the top's primary gas slot → Gas{ROOT_METER}
 const ROOT_METER: u8 = 3; // the top's meter_key
 const BUDGET: u64 = 1_000_000;
 
@@ -50,7 +50,7 @@ fn root_meter_self_harvest_via_set_gas_meter() {
         .unwrap();
     let cnode_h = nub.put_cap(&Cap::CNode(cnode)).expect("put cnode");
 
-    // Top image: gas_slots[0] = GAS_SLOT; code = `set_gas_meter(ROOT_METER, 0);
+    // Top image: primary gas slot = GAS_SLOT; code = `set_gas_meter(ROOT_METER, 0);
     // reply` — harvest-and-zero, returning the previous balance in φ7.
     let mut endpoints = BTreeMap::new();
     endpoints.insert(

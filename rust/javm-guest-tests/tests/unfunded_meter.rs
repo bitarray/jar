@@ -1,4 +1,4 @@
-//! A child that DECLARES a gas meter (`gas_slots[0]` → `Gas{k}`) but whose meter
+//! A child that DECLARES a primary gas meter (`gas_slots` → `Gas{k}`) but whose meter
 //! `k` was never funded (no `set_gas_meter`) runs metered on an EFFECTIVE-ZERO
 //! balance and OOGs immediately — it must NOT silently loan and spend the
 //! caller's pool. (Spec: an absent meter entry == balance 0; only an instance
@@ -54,7 +54,7 @@ fn image(code: Vec<u8>, gas_slots: Vec<Key>) -> Image {
 }
 
 /// Run a chain (top frame, host-budgeted) that CALLs a `reply` child. If
-/// `declare_meter` the child declares `gas_slots[0]` → an UNFUNDED `Gas{0}`;
+/// `declare_meter` the child declares a primary gas slot → an UNFUNDED `Gas{0}`;
 /// otherwise it declares no gas slot. Returns the top-level `exit_reason`.
 fn run(nub: &mut Nub, declare_meter: bool) -> u32 {
     let gas_slots = if declare_meter {

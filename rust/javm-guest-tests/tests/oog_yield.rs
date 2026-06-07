@@ -32,7 +32,7 @@ const OP_CALL_RESUME: u32 = 27;
 
 const SENDER_SLOT: u8 = 5; // kernel:set_gas_meter YieldSender
 const CHILD_SLOT: u8 = 6; // the metered child
-const CHILD_GAS_SLOT: u8 = 8; // Gas{meter_key=0} — child's gas_slots[0]
+const CHILD_GAS_SLOT: u8 = 8; // Gas{meter_key=0} — child's primary gas slot
 const RECEIVER_SLOT: u8 = 9; // chain's YieldReceiver (catches kernel:oog)
 const METER_KEY: u8 = 0; // child meter_key == child endpoint == 0
 const GAS_BUDGET: u64 = 10_000_000_000;
@@ -90,7 +90,7 @@ fn run(nub: &mut Nub, catch_oog: bool) -> u32 {
     let receiver = Cap::Instance(yield_receiver(&[recv_key]));
     let receiver_h = nub.put_cap(&receiver).expect("put receiver");
 
-    // The metered child: a bare `reply`, gas_slots[0] = CHILD_GAS_SLOT.
+    // The metered child: a bare `reply`, primary gas slot = CHILD_GAS_SLOT.
     let child_img = image(
         ecalli(OP_REPLY).to_le_bytes().to_vec(),
         vec![Key::from(CHILD_GAS_SLOT)],

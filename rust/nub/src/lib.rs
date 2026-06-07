@@ -70,11 +70,10 @@ pub struct Nub {
     backend: Backend,
     /// The kernel-maintained gas meter mapping (`meter_key -> remaining gas`).
     /// The interim "static meter mapping" of the kernel-assisted GasMeter
-    /// design — a later spec change moves it behind a YieldCatcher. At frame
-    /// entry the kernel resolves the running Instance's `gas_slots[0]` →
-    /// `Gas{meter_key}` handle → `meter_key`, seeds the run from this map (a
-    /// missing/zero entry falls back to the call-supplied budget), and writes
-    /// the remaining gas back here at frame exit.
+    /// design — a later spec change moves it behind a YieldCatcher. At top-level
+    /// invoke the host resolves the running Instance's primary usable gas slot
+    /// (first non-empty valid `Gas{meter_key}`), seeds the run from this map
+    /// when non-zero, and writes the remaining primary balance back here.
     meters: HashMap<Key, u64>,
     /// The kernel-maintained storage quota mapping (`quota_key -> remaining`).
     /// Symmetric to [`Self::meters`]; quota *charging* is not yet wired (V1),
@@ -106,7 +105,7 @@ struct HyperlightDriver {
     sandbox: MultiUseSandbox,
     state_root_cache: CapHash,
     /// Host-side mirror of the published cap graph, used **only** to resolve an
-    /// Instance's `gas_slots[0]` → `Gas{meter_key}` handle host-side (the
+    /// Instance's primary usable gas slot → `Gas{meter_key}` handle host-side (the
     /// authoritative cap directory lives guest-side). This is the host's own
     /// `CacheDirectory` — not a deref of the guest's hashbrown (which is
     /// unsound across the SIMD-width boundary; see `MultiUseSandbox`).
@@ -278,11 +277,11 @@ impl Nub {
         self.quotas.get(quota_key).copied().unwrap_or(0)
     }
 
-    /// Resolve the running Instance's active gas `meter_key` from its Image's
-    /// `gas_slots[0]` → `Gas{meter_key}` handle, via the appropriate host-side
-    /// cache (the Local cache, or the Hyperlight host mirror). `None` if the
-    /// Image declares no gas slot, the slot is empty, or the cap there is not a
-    /// kernel `Gas` handle.
+    /// Resolve the running Instance's primary usable gas `meter_key` from its
+    /// Image gas slots, via the appropriate host-side cache (the Local cache, or
+    /// the Hyperlight host mirror). Empty slots are skipped. This host-side path
+    /// is only for budget seeding; guest-side execution still performs the strict
+    /// invalid-slot checks.
     fn resolve_gas_meter_key(&self, instance_hash: AbiCapHash) -> Option<Key> {
         let cache = match &self.backend {
             Backend::Local { cache, .. } => cache,
@@ -295,9 +294,9 @@ impl Nub {
     /// are 4 u64s laid into φ[7..=10] on top of the published
     /// endpoint's `initial_regs` baseline.
     ///
-    /// Meter-driven gas: if the Instance's `gas_slots[0]` names a `Gas` handle
-    /// whose `meter_key` has a non-zero entry in the kernel meter mapping, the
-    /// run is seeded from that meter and the remaining gas is written back at
+    /// Meter-driven gas: if the Instance's primary usable gas slot names a `Gas`
+    /// handle whose `meter_key` has a non-zero entry in the kernel meter mapping,
+    /// the run is seeded from that meter and the remaining gas is written back at
     /// exit. Otherwise the call-supplied `initial_gas` is used (and the meter is
     /// left untouched), preserving the bare-budget path.
     pub fn invoke_cached(
@@ -396,10 +395,10 @@ impl Nub {
     }
 }
 
-/// Walk `instance_hash → image.gas_slots[0] → cnode slot → Gas{meter_key}` in
-/// `cache`, returning the `meter_key`. `None` if any hop is missing or the slot
-/// does not hold a kernel `Gas` handle. The cnode resolution uses the
-/// Instance's `root_cnode` (a content hash for a settled top-level instance).
+/// Walk `instance_hash → image.gas_slots[*] → cnode slot → Gas{meter_key}` in
+/// `cache`, returning the first valid non-empty `meter_key`. `None` if the
+/// Image declares no usable gas slot. This helper is intentionally soft: the
+/// guest-side kernel loop performs the strict invalid-slot hard faults.
 fn resolve_meter_key_from(cache: &CacheDirectory, instance_hash: AbiCapHash) -> Option<Key> {
     let inst_cap = cache.get(CapHashOrRef::Hash(instance_hash))?;
     let Cap::Instance(inst) = &*inst_cap else {
@@ -409,18 +408,22 @@ fn resolve_meter_key_from(cache: &CacheDirectory, instance_hash: AbiCapHash) -> 
     let Cap::Image(img) = &*img_cap else {
         return None;
     };
-    let slot = img.gas_slots.first()?;
     let cnode_cap = cache.get(inst.root_cnode.clone())?;
     let Cap::CNode(cnode) = &*cnode_cap else {
         return None;
     };
-    let gas_ref = cnode.get(slot)?;
-    let gas_cap = cache.get(gas_ref)?;
-    let Cap::Instance(g) = &*gas_cap else {
-        return None;
-    };
-    if recognize_kernel_image(g.image_hash_chain) != Some(KernelImage::Gas) {
-        return None;
+    for slot in &img.gas_slots {
+        let Some(gas_ref) = cnode.get(slot) else {
+            continue;
+        };
+        let gas_cap = cache.get(gas_ref)?;
+        let Cap::Instance(g) = &*gas_cap else {
+            return None;
+        };
+        if recognize_kernel_image(g.image_hash_chain) != Some(KernelImage::Gas) {
+            return None;
+        }
+        return Some(key_from_regs(g.regs[0], g.regs[1]));
     }
-    Some(key_from_regs(g.regs[0], g.regs[1]))
+    None
 }

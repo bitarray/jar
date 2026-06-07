@@ -1,6 +1,6 @@
 //! `kernel:set_gas_meter` + per-frame metering: a chain funds a guest meter via
-//! the `set_gas_meter` syscall, then CALLs a child whose `gas_slots[0]` names
-//! that meter — the child runs on the FUNDED balance, not the chain's pool.
+//! the `set_gas_meter` syscall, then CALLs a child whose primary usable gas slot
+//! names that meter — the child runs on the FUNDED balance, not the chain's pool.
 //!
 //! This is the observable proof of per-frame metering: with the child's meter
 //! set to 0 the child OOGs (reason 2) even though the chain's pool is large; if
@@ -28,7 +28,7 @@ const OP_HOST_CALL: u32 = 26;
 /// Chain root-cnode slots.
 const SENDER_SLOT: u8 = 5; // the kernel:set_gas_meter YieldSender
 const CHILD_SLOT: u8 = 6; // the metered child (a published Cap::Instance)
-const CHILD_GAS_SLOT: u8 = 8; // Gas{meter_key=0} — the child's gas_slots[0]
+const CHILD_GAS_SLOT: u8 = 8; // Gas{meter_key=0} — the child's primary gas slot
 /// The meter_key (= 0) the child's Gas handle names. Also the child endpoint and
 /// the set_gas_meter meter_key operand, so chain φ8 = 0 serves all three.
 const METER_KEY: u8 = 0;
@@ -102,12 +102,12 @@ fn run_metered(nub: &mut Nub, meter_value: u64) -> u32 {
     let sender = Cap::Instance(yield_sender(&Key::from(&YK_SET_GAS_METER[..])));
     let sender_h = nub.put_cap(&sender).expect("put set_gas_meter sender");
 
-    // The Gas{meter_key=0} handle the child's gas_slots[0] resolves to (the child
-    // inherits it from the chain's cnode at CALL).
+    // The Gas{meter_key=0} handle the child's primary gas slot resolves to (the
+    // child inherits it from the chain's cnode at CALL).
     let gas = Cap::Instance(gas_handle(&Key::from(METER_KEY)));
     let gas_h = nub.put_cap(&gas).expect("put gas handle");
 
-    // The metered child: a bare `reply`, with gas_slots[0] = CHILD_GAS_SLOT.
+    // The metered child: a bare `reply`, with primary gas slot = CHILD_GAS_SLOT.
     let child_img = image(
         ecalli(OP_REPLY).to_le_bytes().to_vec(),
         vec![Key::from(CHILD_GAS_SLOT)],

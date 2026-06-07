@@ -125,12 +125,10 @@ const OP_REPLY: u32 = 0;
 /// kernel as the implicit ROOT receiver and handled INLINE — the guest resumes
 /// at the next instruction (the "syscalls conceptually push a kernel frame but
 /// we don't actually push" model). Everything else — a user key, or a
-/// `kernel:*` key not wired inline — is ROUTED: the loop walks the call stack
-/// from the emitter toward the root (skipping the emitter instance's own
-/// frames) and the nearest ancestor whose per-CALL snapshotted YieldReceiver
+/// `kernel:*` key not wired inline — is ROUTED: the loop follows logical owner
+/// edges, and the nearest owner edge whose per-CALL snapshotted YieldReceiver
 /// contains the key catches it (push a ReferenceEntry, suspend the yielder;
-/// resumed by [`OP_CALL_RESUME`]). Gas/quota `kernel:*` syscalls (need the meter
-/// table) remain a later stage.
+/// resumed by [`OP_CALL_RESUME`]).
 const OP_HOST_YIELD: u32 = 16;
 const OP_DERIVE_SPAWN: u32 = 18;
 /// `host_image_hash_chain(src_slot=φ[7], dst_slot=φ[8])` — read the cap's
@@ -193,13 +191,18 @@ const ERR_HOST_CALL_SLOT_EMPTY: u32 = 40;
 const ERR_JIT_FAILED: u32 = 50;
 const ERR_DEPTH_LIMIT: u32 = 51;
 const ERR_MAP_BAD_KIND: u32 = 60;
-/// `host_yield` carried a yield_key the kernel does not (yet) handle as root
-/// receiver — a non-`kernel:*` user key (ancestor routing is a later stage) or
-/// a `kernel:*` syscall not yet wired (gas/quota/oog).
+/// `host_yield` carried a yield_key no owner receiver caught, or a `kernel:*`
+/// syscall not yet wired inline.
 const ERR_YIELD_UNHANDLED: u32 = 70;
 /// A `host_yield` operand slot did not hold the expected kernel-assisted
 /// Instance (YieldSender / YieldReceiver).
 const ERR_YIELD_BAD_SENDER: u32 = 71;
+/// An Image declared gas slots, but every declared slot was empty. Empty slots
+/// are skipped individually; an all-empty declaration is a malformed funding
+/// interface.
+const ERR_GAS_SLOT_EMPTY: u32 = 72;
+/// A declared gas slot was present but did not resolve to a Gas handle.
+const ERR_GAS_SLOT_INVALID: u32 = 73;
 
 /// One stack frame on the in-kernel call stack. Holds the running Image's
 /// identity hashes, the frame's **owned** `mem` DataCap + PVM register/PC
@@ -325,60 +328,145 @@ struct StackEntry {
     /// for a ReferenceEntry. Lower-or-equal to the entry's own index and stable
     /// (entries below the top never move while the top exists).
     target: usize,
-    /// Canonical Instance identity for **emitter-exclusion**: an InstanceEntry
-    /// gets a fresh id at CALL; a ReferenceEntry copies its referent's id, so
-    /// every stack entry of one Instance compares equal. Yield routing skips all
-    /// entries whose `instance_id` matches the emitter's (spec §3 "skip ALL
-    /// frames belonging to the emitting instance").
+    /// Canonical Instance identity: an InstanceEntry gets a fresh id at CALL; a
+    /// ReferenceEntry copies its referent's id, so every stack entry of one
+    /// Instance compares equal. Kept for status/debug accounting; yield routing
+    /// follows owner edges, not instance-id skipping.
     instance_id: u64,
-    /// The catch-list this entry offers to the subtree currently below it: a
-    /// **snapshot** of its Instance's `yield_receiver_slot` YieldReceiver taken
-    /// at this entry's most recent DOWNWARD CALL (a sorted, deduped key set;
-    /// empty until/unless this entry has called down). Static for the in-flight
-    /// sub-call — a frame cannot shrink its catch-set mid-flight to dodge a
-    /// descendant's yield (spec §3 "frozen for the sub-call").
-    catch_set: Vec<Key>,
-    /// The gas meter that funds this entry's frame — computed ONCE at push time
-    /// as `own_meter.or(parent_or_catcher.active)`: the frame's own
-    /// `gas_slots[0]` → `Gas{meter_key}` if it declares one, else (loaned) it
-    /// inherits its caller's active meter; a handler `ReferenceEntry` inherits the
-    /// CATCHER's active meter. `None` = host-budgeted (the top frame and its
-    /// loaned descendants). The loop reconciles `gas` to this on each iteration
-    /// (see [`reconcile_active`]). Storing it (vs. a stack walk) is unambiguous in
-    /// the presence of yields, where the entries between a handler Reference and
-    /// its referent are a *suspended* subtree, NOT the running frame's ancestry.
-    /// Aliasing falls out: a child naming the same meter as a live ancestor gets
-    /// the SAME `active`, so no reconcile/swap — it shares the one balance.
-    active: Option<Key>,
+    /// Logical data-flow owner of this InstanceEntry. For a normal CALL from a
+    /// handler ReferenceEntry this points to the handler's referent InstanceEntry
+    /// (so `A -> B -> ref[A] -> C` records `owner(C)=A`). Root has no owner.
+    /// ReferenceEntries carry this only for diagnostics; routing starts at
+    /// `target`, the logical frame being run.
+    owner: Option<usize>,
+    /// Snapshot of the owner's YieldReceiver at the CALL that created this
+    /// entry: the catch-list on the owner edge `owner -> this`. Yield routing
+    /// consults this edge snapshot, then walks to the owner and repeats. Static
+    /// for the in-flight sub-call.
+    owner_catch_set: Vec<Key>,
+    /// Gas sources funding this entry's frame. A frame with declared gas slots
+    /// owns an ordered list of usable Gas handles; OOG consults each before
+    /// routing `kernel:oog`. A frame with no declaration loans its caller's gas
+    /// scope. A handler ReferenceEntry inherits the catcher's gas scope.
+    gas: FrameGas,
 }
 
 impl StackEntry {
     /// A fresh InstanceEntry at stack position `index` carrying a new
-    /// `instance_id`. `target` is its own index (it runs its own frame); the
-    /// catch-set is empty until its first downward CALL; `active` is stamped by
-    /// the CALL site (`own_meter.or(parent.active)`).
+    /// `instance_id`. `target` is its own index (it runs its own frame); owner
+    /// and gas scope are stamped by the CALL site.
     fn instance(frame: KernelFrame, index: usize, instance_id: u64) -> Self {
         StackEntry {
             kind: EntryKind::Instance(Box::new(frame)),
             target: index,
             instance_id,
-            catch_set: Vec::new(),
-            active: None,
+            owner: None,
+            owner_catch_set: Vec::new(),
+            gas: FrameGas::host_budgeted(),
         }
     }
 }
 
-/// Resolve a frame's own gas meter: read its Image's `gas_slots[0]`, look that
-/// slot up in the frame's cnode, and decode the `Gas{meter_key}` handle there.
-/// `None` if the Image declares no gas slot, the slot is empty, or it doesn't
-/// hold a `Gas` handle (the frame then loans its caller's active meter).
-fn resolve_frame_meter(frame: &KernelFrame) -> Option<Key> {
-    let img_arc = CACHE.get(CapHashOrRef::Hash(frame.image_hash))?;
-    let slot = match &*img_arc {
-        Cap::Image(i) => i.gas_slots.first()?.clone(),
-        _ => return None,
+#[derive(Clone, Debug, Default)]
+struct FrameGas {
+    meters: Vec<Key>,
+    active: Option<usize>,
+}
+
+impl FrameGas {
+    fn host_budgeted() -> Self {
+        Self {
+            meters: Vec::new(),
+            active: None,
+        }
+    }
+
+    fn declared(meters: Vec<Key>) -> Self {
+        debug_assert!(!meters.is_empty());
+        Self {
+            meters,
+            active: Some(0),
+        }
+    }
+
+    fn active_key(&self) -> Option<Key> {
+        self.active.and_then(|idx| self.meters.get(idx).cloned())
+    }
+
+    fn primary_key(&self) -> Option<Key> {
+        self.meters.first().cloned()
+    }
+
+    fn advance(&mut self) -> bool {
+        let Some(idx) = self.active else {
+            return false;
+        };
+        let next = idx + 1;
+        if next < self.meters.len() {
+            self.active = Some(next);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn reset_to_primary(&mut self) {
+        if !self.meters.is_empty() {
+            self.active = Some(0);
+        }
+    }
+}
+
+/// Resolve a frame's declared gas sources. No declaration means the frame loans
+/// its caller's gas scope. Individual empty slots are skipped. A present slot
+/// that is not a Gas handle is a hard kernel error, and an all-empty declaration
+/// is also invalid: there is no primary Gas cap to carry in an OOG payload.
+fn resolve_frame_gas(frame: &KernelFrame) -> Result<Option<FrameGas>, u32> {
+    let img_arc = CACHE
+        .get(CapHashOrRef::Hash(frame.image_hash))
+        .ok_or(ERR_IMAGE_NOT_FOUND)?;
+    let slots = match &*img_arc {
+        Cap::Image(i) => i.gas_slots.clone(),
+        _ => return Err(ERR_IMAGE_KIND),
     };
-    javm_cap::gas_meter_key(&read_instance_cap(frame, &slot)?)
+    if slots.is_empty() {
+        return Ok(None);
+    }
+
+    let mut meters = Vec::new();
+    for slot in slots {
+        let Some(cap_ref) = frame.cnode.peek_key(slot.as_slice()) else {
+            continue;
+        };
+        let meter = gas_meter_key_from_ref(cap_ref)?;
+        if !meters.contains(&meter) {
+            meters.push(meter);
+        }
+    }
+    if meters.is_empty() {
+        Err(ERR_GAS_SLOT_EMPTY)
+    } else {
+        Ok(Some(FrameGas::declared(meters)))
+    }
+}
+
+fn gas_meter_key_from_ref(cap_ref: &CapHashOrRef<Box<CachedCap>>) -> Result<Key, u32> {
+    let inst = match cap_ref {
+        CapHashOrRef::Hash(h) => {
+            let arc = CACHE
+                .get(CapHashOrRef::Hash(*h))
+                .ok_or(ERR_GAS_SLOT_INVALID)?;
+            match &*arc {
+                Cap::Instance(i) => i.clone(),
+                _ => return Err(ERR_GAS_SLOT_INVALID),
+            }
+        }
+        CapHashOrRef::Owned(cc) => match &cc.cap {
+            Cap::Instance(i) => i.clone(),
+            _ => return Err(ERR_GAS_SLOT_INVALID),
+        },
+    };
+    javm_cap::gas_meter_key(&inst).ok_or(ERR_GAS_SLOT_INVALID)
 }
 
 /// Reconcile the threaded `gas` (the live balance of the running frame's active
@@ -542,14 +630,15 @@ pub fn run_top(
 ) -> Result<LoopOutcome, u32> {
     let top = build_frame_from_published(instance_hash, endpoint_idx, args)?;
     let mut stack: Vec<StackEntry> = Vec::with_capacity(8);
-    // Monotonic Instance identity for emitter-exclusion (§3). The top-level
-    // invocation is instance 0; every CALL mints the next id.
+    // Monotonic Instance identity. The top-level invocation is instance 0; every
+    // CALL mints the next id.
     let mut next_iid: u64 = 0;
     stack.push(StackEntry::instance(top, 0, next_iid));
     next_iid += 1;
     // GAS MODEL (single reconciliation point). The threaded `gas` always holds
     // the LIVE balance of the running frame's ACTIVE meter — `active_meter(top)`,
-    // the frame's stored `active` (its own meter, or its caller/catcher's).
+    // the frame's stored gas scope (its own declared meter list, or its
+    // caller/catcher's loaned scope).
     // `meters[k]` is authoritative for every non-active meter. At the top of each
     // iteration we reconcile: if the top's active meter changed since last
     // iteration, bank the old scope + load the new. Every CALL/HALT/yield/resume/
@@ -557,14 +646,15 @@ pub fn run_top(
     // gas bookkeeping. The guest meter table is per-RPC (a block-spanning table is
     // the deferred lazy-load piece).
     let mut meters: BTreeMap<Key, i64> = BTreeMap::new();
-    // The TOP frame's own meter (its `gas_slots[0]` → `Gas{root_meter_key}`, if
-    // any) is the RPC's ROOT scope: stamp it like any frame and seed the table
-    // from the host-supplied budget, so `set_gas_meter` on the root meter (a chain
-    // self-harvesting, or a child aliasing the root) goes through the SAME table as
-    // sub-meters. A top with NO gas slot is host-budgeted (`root_active == None`,
-    // tracked in `host_budget`).
-    let root_active = resolve_frame_meter(frame_at(&stack, 0));
-    stack[0].active = root_active.clone();
+    // The TOP frame's primary usable meter, if declared, is the RPC's ROOT
+    // scope: stamp it like any frame and seed the table from the host-supplied
+    // budget, so `set_gas_meter` on the root meter goes through the SAME table
+    // as sub-meters. A top with NO gas slot is host-budgeted
+    // (`root_active == None`, tracked in `host_budget`). The host ABI still
+    // supplies one budget; secondary root gas slots are usable if a guest-side
+    // syscall funds them during the run.
+    stack[0].gas = resolve_frame_gas(frame_at(&stack, 0))?.unwrap_or_else(FrameGas::host_budgeted);
+    let root_active = stack[0].gas.active_key();
     if let Some(k) = &root_active {
         meters.insert(k.clone(), initial_gas);
     }
@@ -797,9 +887,9 @@ pub fn run_top(
                                     scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                                 };
                             }
-                            // Route `key` to an ancestor YieldReceiver (the
-                            // payload is a copy of the emitted YieldSender). No
-                            // catcher → the emitter faults ("unhandled yield_key").
+                            // Route `key` to an owner YieldReceiver (the payload
+                            // is a copy of the emitted YieldSender). No catcher
+                            // → the emitter faults ("unhandled yield_key").
                             YieldOutcome::Route { key, sender_slot } => {
                                 let payload =
                                     read_instance_cap(frame_at(&stack, top_idx), &sender_slot);
@@ -907,11 +997,10 @@ pub fn run_top(
                         // every CALL — compile/PT memoization is for *work*, never
                         // a gas discount — so gas is independent of the cache.
                         //
-                        // Snapshot the caller's catch-set at this downward CALL
-                        // (§3): the keys it will catch from the callee's whole
-                        // subtree. Captured from the caller's CURRENT
-                        // `yield_receiver_slot`, stored on the caller entry, and
-                        // frozen for the sub-call — yield routing consults it.
+                        // Snapshot the logical owner's catch-set at this CALL:
+                        // the keys on the owner edge `owner -> child`. When A is
+                        // running via `ref[A]`, the physical caller is the
+                        // ReferenceEntry but the logical owner is A itself.
                         let catch_set = {
                             let parent = frame_at(&stack, top_idx);
                             snapshot_catch_set(parent)
@@ -939,21 +1028,18 @@ pub fn run_top(
                         // `MAX_DEPTH` (interim) / the cnode nesting limit
                         // (target), so the resident page-table set is bounded
                         // structurally rather than by an LRU cap.
-                        stack[top_idx].catch_set = catch_set;
                         let child_idx = stack.len();
                         stack.push(StackEntry::instance(child, child_idx, next_iid));
                         next_iid += 1;
-                        // Stamp the child's active (funding) meter: its own
-                        // `gas_slots[0]` meter, else (loaned) the caller's active
-                        // meter. The loop-top reconcile then swaps `gas` only when
-                        // the active meter actually changes — a child naming a NEW
-                        // meter becomes the active scope (gas := meters[k],
-                        // effective-0 if unfunded → OOG-routes on first debit); a
-                        // child naming the SAME meter as a live ancestor keeps the
-                        // shared scope (no swap, no double-spend).
-                        let parent_active = stack[top_idx].active.clone();
-                        stack[child_idx].active =
-                            resolve_frame_meter(frame_at(&stack, child_idx)).or(parent_active);
+                        // Stamp owner-edge routing and funding. The child owns
+                        // its declared gas scope if it has one; otherwise it
+                        // loans the caller/catcher's current gas scope.
+                        let logical_owner = stack[top_idx].target;
+                        stack[child_idx].owner = Some(logical_owner);
+                        stack[child_idx].owner_catch_set = catch_set;
+                        let inherited_gas = stack[top_idx].gas.clone();
+                        stack[child_idx].gas = resolve_frame_gas(frame_at(&stack, child_idx))?
+                            .unwrap_or(inherited_gas);
                     }
                     // Anything else (MGMT ops, SET_IMAGE, HOST_YIELD,
                     // arbitrary `ecalli imm`, …) is not in-kernel-
@@ -1153,44 +1239,42 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     .ok_or(ERR_JIT_FAILED)
 }
 
-/// Walk the kernel stack for a catcher of `key` (emitter-exclusion: skip every
-/// frame whose instance matches the top emitter's) and, if one is found, suspend
-/// the emitter and transfer control to the catcher as a yield handler: reflect
+/// Walk owner edges for a catcher of `key` and, if one is found, suspend the
+/// emitter and transfer control to the owner as a yield handler: reflect
 /// `payload` (a YieldSender / `Gas` cap copy) into the catcher's scratchpad
 /// slot[0], flag φ[8] = YIELDED, and push a ReferenceEntry to the catcher (the
 /// yielder stays Waiting below, resumed later by `CALL_RESUME`). Gas is NOT
 /// handled here — the loop-top [`reconcile_active`] banks the emitter's active
 /// meter and loads the catcher's on the next iteration.
 ///
-/// Returns `true` if routed, `false` if no ancestor catches `key` — the caller
-/// decides (fault the emitter for a user key, or bubble EXIT_OOG for kernel:oog).
+/// Returns `true` if routed, `false` if no owner ancestor catches `key` — the
+/// caller decides (fault the emitter for a user key, or bubble EXIT_OOG for
+/// kernel:oog).
 fn route_yield(
     stack: &mut Vec<StackEntry>,
     top_idx: usize,
     key: &Key,
     payload: Option<InstanceCap>,
 ) -> bool {
-    let emitter_iid = stack[top_idx].instance_id;
+    let mut node = stack[top_idx].target;
     let mut catcher = None;
-    for j in (0..top_idx).rev() {
-        if stack[j].instance_id == emitter_iid {
-            continue;
-        }
-        if stack[j].catch_set.binary_search(key).is_ok() {
-            catcher = Some(j);
+    while let Some(owner) = stack[node].owner {
+        if stack[node].owner_catch_set.binary_search(key).is_ok() {
+            catcher = Some(owner);
             break;
         }
+        node = owner;
     }
-    let Some(j) = catcher else {
+    let Some(owner) = catcher else {
         return false;
     };
-    let target = stack[j].target;
-    let recv_iid = stack[j].instance_id;
+    let target = owner;
+    let recv_iid = stack[owner].instance_id;
     // The handler runs the catcher's frame, so it is funded by the catcher's
-    // active meter (NOT the emitter's).
-    let recv_active = stack[j].active.clone();
+    // gas scope (NOT the emitter's).
+    let recv_gas = stack[owner].gas.clone();
     {
-        let catcher_frame = frame_at_mut(stack, j);
+        let catcher_frame = frame_at_mut(stack, owner);
         if let Some(inst) = payload {
             catcher_frame.cnode.set_key(
                 &[javm_cap::abi::SCRATCHPAD_SLOT],
@@ -1203,34 +1287,38 @@ fn route_yield(
         kind: EntryKind::Reference,
         target,
         instance_id: recv_iid,
-        catch_set: Vec::new(),
-        active: recv_active,
+        owner: stack[target].owner,
+        owner_catch_set: Vec::new(),
+        gas: recv_gas,
     });
     true
 }
 
 /// The gas meter funding the frame run by the entry at `idx` — the precomputed
-/// [`StackEntry::active`] (own meter, or inherited from the caller/catcher at
-/// push). O(1), unambiguous under yields.
+/// active key from its gas scope (own declared meter list, or inherited from the
+/// caller/catcher at push). O(1), unambiguous under yields.
 fn active_meter(stack: &[StackEntry], idx: usize) -> Option<Key> {
-    stack[idx].active.clone()
+    stack[idx].gas.active_key()
 }
 
-/// On gas exhaustion, inject a routed `kernel:oog` yield (payload =
-/// `Gas{meter_key}` of the meter funding the depleted pool) so a registered
-/// receiver (the chain) can top up the meter and `CALL_RESUME` — the frame then
-/// re-runs from `reattempt_pc` (a bb_start: the failing block's start, or the
-/// ecall's own pc). The depleted pool belongs to the ACTIVE meter (nearest
-/// metered ancestor), which may live below a loaned frame or on a handler
-/// ReferenceEntry's referent — not necessarily on the top entry. Returns `true`
-/// if routed; `false` if the pool is host-budgeted (no metered frame) or no
-/// receiver caught `kernel:oog` (the caller bubbles EXIT_OOG — host-stub root
-/// catch).
+/// On gas exhaustion, first consult the frame's remaining declared gas slots by
+/// advancing to the next usable meter and re-attempting `reattempt_pc`. Only
+/// after all usable meters are exhausted do we inject a routed `kernel:oog`
+/// yield. The OOG payload is the primary usable Gas handle so the receiver can
+/// top up that meter and `CALL_RESUME`; before routing, the frame resets to the
+/// primary so resume deterministically re-reads the top-up.
 fn try_oog_yield(stack: &mut Vec<StackEntry>, top_idx: usize, reattempt_pc: u32) -> bool {
-    let Some(meter) = active_meter(stack, top_idx) else {
+    if active_meter(stack, top_idx).is_none() {
+        return false;
+    }
+    frame_at_mut(stack, top_idx).pc = reattempt_pc;
+    if stack[top_idx].gas.advance() {
+        return true;
+    }
+    let Some(meter) = stack[top_idx].gas.primary_key() else {
         return false;
     };
-    frame_at_mut(stack, top_idx).pc = reattempt_pc;
+    stack[top_idx].gas.reset_to_primary();
     let oog_key = Key::from(&javm_cap::yield_cap::YK_OOG[..]);
     let payload = Some(javm_cap::gas_handle(&meter));
     route_yield(stack, top_idx, &oog_key, payload)
@@ -1615,7 +1703,7 @@ enum YieldOutcome {
     /// The operand was malformed (bad/empty sender, pinned dst, wrong cap kind)
     /// → trap the emitter.
     Trap,
-    /// Not handled inline → route `key` to an ancestor YieldReceiver. `key` is
+    /// Not handled inline → route `key` to an owner YieldReceiver. `key` is
     /// the YieldSender's yield_key; `sender_slot` names the YieldSender so the
     /// loop can reflect a copy of it to the catcher as the yield payload.
     Route { key: Key, sender_slot: Key },
@@ -1626,7 +1714,7 @@ enum YieldOutcome {
 /// merge_yield_receiver, mint_gas, mint_quota) is performed INLINE as the
 /// implicit root receiver ([`YieldOutcome::Inline`]); a malformed operand traps
 /// ([`YieldOutcome::Trap`]); anything else — a user key, or a `kernel:*` key not
-/// handled inline — is routed to an ancestor YieldReceiver by the call loop
+/// handled inline — is routed to an owner YieldReceiver by the call loop
 /// ([`YieldOutcome::Route`]). `Err(code)` is reserved for an internal cnode
 /// failure (loud, not a guest-visible trap).
 ///
@@ -1652,8 +1740,8 @@ fn dispatch_host_yield(
         None => return Ok(YieldOutcome::Trap), // empty / non-Instance sender → trap
     };
 
-    // User keys (and any kernel:* key not wired inline below) route to an
-    // ancestor YieldReceiver; the loop walks the stack and suspends the emitter.
+    // User keys (and any kernel:* key not wired inline below) route to an owner
+    // YieldReceiver; the loop suspends the emitter.
     if !javm_cap::is_kernel_yield_key(&yield_key) {
         return Ok(YieldOutcome::Route {
             key: yield_key,
