@@ -1337,8 +1337,8 @@ enum YieldOutcome {
 
 /// `host_yield(sender_slot=φ[7], …)`. Reads the `YieldSender` at `sender_slot`
 /// and classifies the yield: a `kernel:*` pure-cap syscall (mint_yield,
-/// merge_yield_receiver) is performed INLINE as the implicit root receiver
-/// ([`YieldOutcome::Inline`]); a malformed operand traps
+/// merge_yield_receiver, mint_gas, mint_quota) is performed INLINE as the
+/// implicit root receiver ([`YieldOutcome::Inline`]); a malformed operand traps
 /// ([`YieldOutcome::Trap`]); anything else — a user key, or a `kernel:*` key not
 /// handled inline — is routed to an ancestor YieldReceiver by the call loop
 /// ([`YieldOutcome::Route`]). `Err(code)` is reserved for an internal cnode
@@ -1347,7 +1347,8 @@ enum YieldOutcome {
 /// V1 single-byte ABI: all slot operands are the low byte of their φ register.
 /// `kernel:mint_yield`: φ[8] = new yield_key byte, φ[9] = YieldSender dst,
 /// φ[10] = YieldReceiver dst. `kernel:merge_yield_receiver`: φ[8] = receiver A
-/// slot, φ[9] = receiver B slot, φ[10] = dst slot.
+/// slot, φ[9] = receiver B slot, φ[10] = dst slot. `kernel:mint_gas` /
+/// `kernel:mint_quota`: φ[8] = meter_key / quota_key byte, φ[9] = handle dst.
 fn dispatch_host_yield(frame: &mut KernelFrame) -> Result<YieldOutcome, u32> {
     let sender_slot = Key::from((frame.regs[7] & 0xFF) as u8);
     let yield_key = match read_instance_cap(frame, &sender_slot) {
@@ -1415,16 +1416,49 @@ fn dispatch_host_yield(frame: &mut KernelFrame) -> Result<YieldOutcome, u32> {
             )
             .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
         Ok(YieldOutcome::Inline)
+    } else if k == javm_cap::yield_cap::YK_MINT_GAS {
+        // kernel:mint_gas(φ8=meter_key byte, φ9=dst): mint a Gas{meter_key}
+        // handle (pure-cap, like mint_yield). The meter mapping it indexes is
+        // managed separately (set_gas_meter / the host meter table).
+        mint_unit_handle(
+            frame,
+            javm_cap::gas_handle(&Key::from((frame.regs[8] & 0xFF) as u8)),
+        )
+    } else if k == javm_cap::yield_cap::YK_MINT_QUOTA {
+        // kernel:mint_quota(φ8=quota_key byte, φ9=dst): the storage-quota
+        // analogue of mint_gas.
+        mint_unit_handle(
+            frame,
+            javm_cap::quota_handle(&Key::from((frame.regs[8] & 0xFF) as u8)),
+        )
     } else {
-        // A kernel:* key not wired inline (set_gas_meter / mint_gas / oog / …):
-        // route it. The kernel root catches kernel:* keys the chain registered
-        // in its YieldReceiver (e.g. kernel:oog); an unregistered key finds no
-        // catcher and the emitter faults.
+        // A kernel:* key not wired inline (set_gas_meter / oog / …): route it.
+        // The kernel root catches kernel:* keys the chain registered in its
+        // YieldReceiver (e.g. kernel:oog); an unregistered key finds no catcher
+        // and the emitter faults.
         Ok(YieldOutcome::Route {
             key: yield_key,
             sender_slot,
         })
     }
+}
+
+/// Place a freshly-minted kernel unit handle (`Gas` / `Quota`) into the dst slot
+/// named by φ[9] (V1 single-byte ABI). Traps on a pinned dst. Shared by
+/// `kernel:mint_gas` / `kernel:mint_quota`.
+fn mint_unit_handle(frame: &mut KernelFrame, handle: InstanceCap) -> Result<YieldOutcome, u32> {
+    let dst = Key::from((frame.regs[9] & 0xFF) as u8);
+    if frame.pinned.binary_search(&dst).is_ok() {
+        return Ok(YieldOutcome::Trap);
+    }
+    frame
+        .cnode
+        .set(
+            &dst,
+            Some(CapHashOrRef::Owned(CachedCap::boxed(Cap::Instance(handle)))),
+        )
+        .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
+    Ok(YieldOutcome::Inline)
 }
 
 /// `host_call(instance_slot=φ[7], endpoint_idx=φ[8])`. **Moves** the target

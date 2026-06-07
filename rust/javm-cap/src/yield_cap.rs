@@ -60,28 +60,13 @@ pub fn is_kernel_yield_key(key: &Key) -> bool {
 /// well-known YieldSender image-hash chain and the yield_key packed into
 /// `regs[0..1]`.
 pub fn yield_sender(yield_key: &Key) -> InstanceCap {
-    let (packed, len) = key_to_regs(yield_key);
-    let mut regs = [0u64; NUM_REGS];
-    regs[0] = packed;
-    regs[1] = len;
-    InstanceCap {
-        image_hash_chain: kernel_image_hash(KernelImage::YieldSender),
-        image_hash: [0u8; 32],
-        root_cnode: CapHashOrRef::Hash([0u8; 32]),
-        mem: DataCap::empty(),
-        regs,
-        pc: 0,
-        gas_remaining: 0,
-    }
+    unit_handle(KernelImage::YieldSender, yield_key)
 }
 
 /// Read the `yield_key` from a `YieldSender` handle. `None` if `inst` is not a
 /// YieldSender.
 pub fn yield_sender_key(inst: &InstanceCap) -> Option<Key> {
-    if recognize_kernel_image(inst.image_hash_chain) != Some(KernelImage::YieldSender) {
-        return None;
-    }
-    Some(key_from_regs(inst.regs[0], inst.regs[1]))
+    unit_handle_key(KernelImage::YieldSender, inst)
 }
 
 /// Build a `YieldReceiver{keys}` unit handle: a `Cap::Instance` with the
@@ -147,4 +132,59 @@ pub fn merge_yield_receivers(a: &InstanceCap, b: &InstanceCap) -> Option<Instanc
     let mut keys = yield_receiver_keys(a)?;
     keys.extend(yield_receiver_keys(b)?);
     Some(yield_receiver(&keys))
+}
+
+/// Build a `Gas{meter_key}` unit handle: a `Cap::Instance` with the well-known
+/// Gas image-hash chain and the `meter_key` packed into `regs[0..1]` (same
+/// packing as [`yield_sender`]). The kernel reads it from an Instance's
+/// `gas_slots[0]` to index the gas-meter mapping; minted by the
+/// `kernel:mint_gas` syscall.
+pub fn gas_handle(meter_key: &Key) -> InstanceCap {
+    unit_handle(KernelImage::Gas, meter_key)
+}
+
+/// Read the `meter_key` from a `Gas` handle. `None` if `inst` is not a Gas
+/// handle.
+pub fn gas_meter_key(inst: &InstanceCap) -> Option<Key> {
+    unit_handle_key(KernelImage::Gas, inst)
+}
+
+/// Build a `Quota{quota_key}` unit handle (storage-quota analogue of
+/// [`gas_handle`]); minted by the `kernel:mint_quota` syscall.
+pub fn quota_handle(quota_key: &Key) -> InstanceCap {
+    unit_handle(KernelImage::Quota, quota_key)
+}
+
+/// Read the `quota_key` from a `Quota` handle. `None` if `inst` is not a Quota
+/// handle.
+pub fn quota_key(inst: &InstanceCap) -> Option<Key> {
+    unit_handle_key(KernelImage::Quota, inst)
+}
+
+/// A kernel unit handle naming a single `Key` (`Gas{meter_key}` /
+/// `Quota{quota_key}` / `YieldSender{yield_key}`): a `Cap::Instance` carrying
+/// `image`'s well-known image-hash chain with the key packed into `regs[0..1]`.
+fn unit_handle(image: KernelImage, key: &Key) -> InstanceCap {
+    let (packed, len) = key_to_regs(key);
+    let mut regs = [0u64; NUM_REGS];
+    regs[0] = packed;
+    regs[1] = len;
+    InstanceCap {
+        image_hash_chain: kernel_image_hash(image),
+        image_hash: [0u8; 32],
+        root_cnode: CapHashOrRef::Hash([0u8; 32]),
+        mem: DataCap::empty(),
+        regs,
+        pc: 0,
+        gas_remaining: 0,
+    }
+}
+
+/// Read the packed key from a unit handle, requiring it to carry `image`'s
+/// image-hash chain.
+fn unit_handle_key(image: KernelImage, inst: &InstanceCap) -> Option<Key> {
+    if recognize_kernel_image(inst.image_hash_chain) != Some(image) {
+        return None;
+    }
+    Some(key_from_regs(inst.regs[0], inst.regs[1]))
 }

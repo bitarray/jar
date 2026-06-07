@@ -52,8 +52,8 @@ pub use image::{
 pub use kernel_image::{ALL_KERNEL_IMAGES, KernelImage, kernel_image_hash, recognize_kernel_image};
 pub use slot::{Key, MAX_KEY_LEN, SlotPath, key_from_regs, key_to_regs};
 pub use yield_cap::{
-    is_kernel_yield_key, merge_yield_receivers, yield_receiver, yield_receiver_keys, yield_sender,
-    yield_sender_key,
+    gas_handle, gas_meter_key, is_kernel_yield_key, merge_yield_receivers, quota_handle, quota_key,
+    yield_receiver, yield_receiver_keys, yield_sender, yield_sender_key,
 };
 // `CNodeCap::slots` (`CNodeSlots = RadixMap<CapHashOrRef, _>`) exposes
 // `MissingOr` through `iter()`; re-export it so cnode-slot walkers (e.g. the

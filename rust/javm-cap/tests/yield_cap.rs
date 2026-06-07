@@ -2,10 +2,11 @@
 //! construction/round-trip. Black-box against the public API.
 
 use javm_cap::yield_cap::{
-    KERNEL_YIELD_NS, YK_MINT_YIELD, YK_OOG, is_kernel_yield_key, merge_yield_receivers,
-    yield_receiver, yield_receiver_keys, yield_sender, yield_sender_key,
+    KERNEL_YIELD_NS, YK_MINT_YIELD, YK_OOG, gas_handle, gas_meter_key, is_kernel_yield_key,
+    merge_yield_receivers, quota_handle, quota_key, yield_receiver, yield_receiver_keys,
+    yield_sender, yield_sender_key,
 };
-use javm_cap::{Key, kernel_image_hash};
+use javm_cap::{KernelImage, Key, kernel_image_hash};
 
 #[test]
 fn kernel_keys_are_namespaced() {
@@ -87,4 +88,35 @@ fn merge_unions_catch_sets() {
         got,
         vec![Key::from(1u8), Key::from(2u8), Key::from(&YK_OOG[..])]
     );
+}
+
+#[test]
+fn gas_handle_round_trips_its_meter_key() {
+    let key = Key::from(&[0xAB, 0xCD, 0xEF][..]);
+    let gas = gas_handle(&key);
+    // Identity is the well-known Gas image-hash chain.
+    assert_eq!(gas.image_hash_chain, kernel_image_hash(KernelImage::Gas));
+    assert_eq!(gas_meter_key(&gas), Some(key));
+}
+
+#[test]
+fn quota_handle_round_trips_its_quota_key() {
+    let key = Key::from(7u8);
+    let quota = quota_handle(&key);
+    assert_eq!(
+        quota.image_hash_chain,
+        kernel_image_hash(KernelImage::Quota)
+    );
+    assert_eq!(quota_key(&quota), Some(key));
+}
+
+#[test]
+fn unit_handle_kinds_do_not_cross_decode() {
+    // A Gas handle is not a Quota / YieldSender, and vice versa — each reader
+    // requires its own image-hash chain.
+    let gas = gas_handle(&Key::from(1u8));
+    assert_eq!(quota_key(&gas), None);
+    assert_eq!(yield_sender_key(&gas), None);
+    let quota = quota_handle(&Key::from(1u8));
+    assert_eq!(gas_meter_key(&quota), None);
 }
