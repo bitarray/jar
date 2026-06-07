@@ -1,10 +1,10 @@
 //! `CacheDirectory<S>` — two-tier cap store.
 //!
-//! - **`blobs: HashMap<CapHash, Arc<Cap>>`** — content-addressed
-//!   immutable caps. Pure cache: the host populates it; the kernel
-//!   reads. If a lookup misses, the host hasn't published the cap yet.
+//! - **`blobs: HashMap<CapHash, Arc<C>>`** — content-addressed
+//!   immutable resident caps. Pure cache: the host populates it; the
+//!   kernel reads. If a lookup misses, the host hasn't published the cap yet.
 //!
-//! - **`instances: HashMap<u64, (CapRef, Arc<Cap>)>`** — identity-keyed
+//! - **`instances: HashMap<u64, (CapRef, Arc<C>)>`** — identity-keyed
 //!   mutable working state. The stored `CapRef` is the directory's
 //!   self-reference; its `Arc::strong_count` is the number of live
 //!   external holders + 1.
@@ -44,7 +44,7 @@
 //!
 //! `sweep_instances` reclaims entries whose stored `CapRef.strong_count`
 //! is 1 (i.e., the directory is the sole holder). Removal drops the
-//! entry's `Arc<Cap>`; if that was the last strong ref to the Cap, the
+//! entry's `Arc<C>`; if that was the last strong ref to the resident cap, the
 //! Cap drops. Caps no longer hold `Ref(CapRef)` slot targets (a cnode
 //! slot is a `Hash` or an inline `Owned` cap), so a drop never cascades
 //! into other instance entries — the sweep is a single self-contained
@@ -406,17 +406,44 @@ pub enum CacheError {
     SlotOutOfRange,
 }
 
-pub struct CacheDirectory<S = DefaultHashBuilder> {
-    inner: Mutex<DirectoryInner<S>>,
+/// Payload stored by a [`CacheDirectory`]. The public/wire directory stores
+/// plain [`Cap`]; engines may store a resident wrapper that carries derived
+/// runtime caches while still exposing the underlying wire cap for hashing and
+/// inspection.
+pub trait ResidentCap {
+    /// Wrap a public wire cap for resident storage.
+    fn from_cap(cap: Cap) -> Self;
+    /// Borrow the public wire cap.
+    fn as_cap(&self) -> &Cap;
+    /// Consume the resident payload back into its wire cap.
+    fn into_cap(self) -> Cap;
 }
 
-struct DirectoryInner<S> {
-    blobs: HashMap<CapHash, Arc<Cap>, S>,
-    instances: HashMap<u64, (CapRef, Arc<Cap>), S>,
+impl ResidentCap for Cap {
+    fn from_cap(cap: Cap) -> Self {
+        cap
+    }
+
+    fn as_cap(&self) -> &Cap {
+        self
+    }
+
+    fn into_cap(self) -> Cap {
+        self
+    }
+}
+
+pub struct CacheDirectory<S = DefaultHashBuilder, C = Cap> {
+    inner: Mutex<DirectoryInner<S, C>>,
+}
+
+struct DirectoryInner<S, C> {
+    blobs: HashMap<CapHash, Arc<C>, S>,
+    instances: HashMap<u64, (CapRef, Arc<C>), S>,
     next_ref: u64,
 }
 
-impl CacheDirectory<DefaultHashBuilder> {
+impl CacheDirectory<DefaultHashBuilder, Cap> {
     /// Construct an empty cache using the default per-process-randomized
     /// hasher.
     pub fn new() -> Self {
@@ -424,13 +451,13 @@ impl CacheDirectory<DefaultHashBuilder> {
     }
 }
 
-impl Default for CacheDirectory<DefaultHashBuilder> {
+impl Default for CacheDirectory<DefaultHashBuilder, Cap> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S: BuildHasher> CacheDirectory<S> {
+impl<S: BuildHasher, C> CacheDirectory<S, C> {
     /// Construct an empty cache with an explicit hasher.
     pub fn with_hasher(hasher: S) -> Self
     where
@@ -447,7 +474,7 @@ impl<S: BuildHasher> CacheDirectory<S> {
     }
 }
 
-impl<S> CacheDirectory<S> {
+impl<S, C> CacheDirectory<S, C> {
     /// `const fn` constructor for static initialisation. Used by the
     /// guest's `state_cache::CACHE` static. Takes both hashers
     /// separately because `const fn` can't call `S::clone()` and not
@@ -465,7 +492,7 @@ impl<S> CacheDirectory<S> {
     }
 }
 
-impl<S: BuildHasher> CacheDirectory<S> {
+impl<S: BuildHasher, C> CacheDirectory<S, C> {
     /// Number of blob entries.
     pub fn blob_count(&self) -> usize {
         self.inner.lock().blobs.len()
@@ -482,13 +509,13 @@ impl<S: BuildHasher> CacheDirectory<S> {
 
     /// Get an `Arc::clone` of the blob cap at `hash`, or `None` if
     /// absent.
-    pub fn get_blob(&self, hash: &CapHash) -> Option<Arc<Cap>> {
+    pub fn get_blob(&self, hash: &CapHash) -> Option<Arc<C>> {
         self.inner.lock().blobs.get(hash).cloned()
     }
 
     /// Get an `Arc::clone` of the instance cap at `capref`, or `None`
     /// if absent.
-    pub fn get_instance(&self, capref: &CapRef) -> Option<Arc<Cap>> {
+    pub fn get_instance(&self, capref: &CapRef) -> Option<Arc<C>> {
         self.inner
             .lock()
             .instances
@@ -496,10 +523,10 @@ impl<S: BuildHasher> CacheDirectory<S> {
             .map(|(_, arc)| arc.clone())
     }
 
-    /// Snapshot the blob tier into a `Vec<(CapHash, Arc<Cap>)>`. Order
+    /// Snapshot the blob tier into a `Vec<(CapHash, Arc<C>)>`. Order
     /// is unspecified (HashMap iteration); callers that need
     /// deterministic order (state-root computations) sort by hash.
-    pub fn iter_blobs(&self) -> Vec<(CapHash, Arc<Cap>)> {
+    pub fn iter_blobs(&self) -> Vec<(CapHash, Arc<C>)> {
         self.inner
             .lock()
             .blobs
@@ -510,7 +537,7 @@ impl<S: BuildHasher> CacheDirectory<S> {
 
     /// Polymorphic lookup that dispatches on the `CapHashOrRef` arm.
     /// Returns an `Arc::clone` of the matching cap.
-    pub fn get(&self, key: CapHashOrRef) -> Option<Arc<Cap>> {
+    pub fn get(&self, key: CapHashOrRef) -> Option<Arc<C>> {
         match key {
             CapHashOrRef::Hash(h) => self.get_blob(&h),
             // `Owned` lives inline on the kernel frame, not in the
@@ -519,11 +546,11 @@ impl<S: BuildHasher> CacheDirectory<S> {
         }
     }
 
-    /// Replace the instance at `capref` with a fresh `Arc<Cap>`. The
-    /// old `Arc<Cap>` drops outside the lock (so any cascading
+    /// Replace the instance at `capref` with a fresh `Arc<C>`. The
+    /// old `Arc<C>` drops outside the lock (so any cascading
     /// `Cap::drop → CapRef::drop` chain doesn't try to re-enter the
     /// directory while we hold the guard).
-    pub fn set_instance(&self, capref: &CapRef, new_arc: Arc<Cap>) -> Result<(), CacheError> {
+    pub fn set_instance(&self, capref: &CapRef, new_arc: Arc<C>) -> Result<(), CacheError> {
         let _old = {
             let mut g = self.inner.lock();
             let entry = g
@@ -531,7 +558,7 @@ impl<S: BuildHasher> CacheDirectory<S> {
                 .get_mut(&capref.id())
                 .ok_or_else(|| CacheError::InstanceMissing(capref.id()))?;
             // Swap in the new Arc, keeping the existing self-ref CapRef.
-            // The old Arc<Cap> is returned and dropped after the lock guard.
+            // The old Arc<C> is returned and dropped after the lock guard.
             core::mem::replace(&mut entry.1, new_arc)
         };
         Ok(())
@@ -539,7 +566,10 @@ impl<S: BuildHasher> CacheDirectory<S> {
 
     /// Hash + insert into blobs. Idempotent: re-puts of identical
     /// content are a no-op. Returns the content hash.
-    pub fn put_cap(&self, cap: &Cap) -> Result<CapHash, CacheError> {
+    pub fn put_cap(&self, cap: &Cap) -> Result<CapHash, CacheError>
+    where
+        C: ResidentCap,
+    {
         let hash = cap.cap_hash();
         self.put_cap_with_hash(hash, cap)?;
         Ok(hash)
@@ -548,14 +578,19 @@ impl<S: BuildHasher> CacheDirectory<S> {
     /// Pre-hashed insert. Debug-asserts the claimed hash matches the
     /// cap; release trusts the caller (the SSZ merkleize is the hot
     /// cost on the publish path).
-    pub fn put_cap_with_hash(&self, hash: CapHash, cap: &Cap) -> Result<(), CacheError> {
+    pub fn put_cap_with_hash(&self, hash: CapHash, cap: &Cap) -> Result<(), CacheError>
+    where
+        C: ResidentCap,
+    {
         debug_assert_eq!(
             cap.cap_hash(),
             hash,
             "put_cap_with_hash: claimed hash does not match cap content",
         );
         let mut g = self.inner.lock();
-        g.blobs.entry(hash).or_insert_with(|| Arc::new(cap.clone()));
+        g.blobs
+            .entry(hash)
+            .or_insert_with(|| Arc::new(C::from_cap(cap.clone())));
         Ok(())
     }
 
@@ -564,14 +599,17 @@ impl<S: BuildHasher> CacheDirectory<S> {
     /// returned handle internally as the entry's self-reference; when
     /// all external clones drop, `sweep_instances` will reclaim the
     /// entry.
-    pub fn put_instance(&self, cap: Cap) -> CapRef {
-        self.put_instance_arc(Arc::new(cap))
+    pub fn put_instance(&self, cap: Cap) -> CapRef
+    where
+        C: ResidentCap,
+    {
+        self.put_instance_arc(Arc::new(C::from_cap(cap)))
     }
 
-    /// `put_instance` variant that takes a pre-built `Arc<Cap>`. Used
+    /// `put_instance` variant that takes a pre-built `Arc<C>`. Used
     /// internally by [`Self::promote_blob_to_instance`] to share the
     /// blob's Arc rather than deep-copying.
-    fn put_instance_arc(&self, arc: Arc<Cap>) -> CapRef {
+    fn put_instance_arc(&self, arc: Arc<C>) -> CapRef {
         let mut g = self.inner.lock();
         let id = g.next_ref;
         g.next_ref = g.next_ref.checked_add(1).expect("CapRef space exhausted");
@@ -581,7 +619,7 @@ impl<S: BuildHasher> CacheDirectory<S> {
     }
 
     /// Lazily promote a blob to a fresh instance entry. The blob and
-    /// the new instance entry share the same `Arc<Cap>` (no Cap
+    /// the new instance entry share the same `Arc<C>` (no resident cap
     /// data deep-copy); the next `Arc::make_mut` call on either side
     /// clones-on-write if both still hold the Arc.
     ///
@@ -619,7 +657,7 @@ impl<S: BuildHasher> CacheDirectory<S> {
                     g.instances.remove(&id)
                 };
                 // _removed drops here, outside the lock. If its
-                // Arc<Cap> was the last strong ref, Cap::drop runs and
+                // Arc<C> was the last strong ref, Cap::drop runs and
                 // cascades: nested CapRef::drop calls decrement other
                 // entries' refcounts. Those entries get reclaimed on
                 // the next pass.
@@ -632,7 +670,10 @@ impl<S: BuildHasher> CacheDirectory<S> {
     /// CoW overlay, content-address it into `blobs`, and return the hash.
     ///
     /// For `Hash`-keyed input, returns it unchanged.
-    pub fn settle(&self, key: CapHashOrRef) -> Result<CapHash, CacheError> {
+    pub fn settle(&self, key: CapHashOrRef) -> Result<CapHash, CacheError>
+    where
+        C: ResidentCap,
+    {
         match key {
             CapHashOrRef::Hash(h) => Ok(h),
             CapHashOrRef::Owned(b) => self.settle_owned(*b),
@@ -647,7 +688,10 @@ impl<S: BuildHasher> CacheDirectory<S> {
     /// The recompiler never calls this — it *moves* `Owned` caps and
     /// drops them at frame pop. It exists for the host-side deferred
     /// persist path (turn a finished frame's owned cap into a blob).
-    fn settle_owned(&self, mut cap: Cap) -> Result<CapHash, CacheError> {
+    fn settle_owned(&self, mut cap: Cap) -> Result<CapHash, CacheError>
+    where
+        C: ResidentCap,
+    {
         // 1. Settle every nested slot target to a Hash, in place.
         self.settle_targets_in(&mut cap)?;
         // 2. Hashing requires an empty overlay; fold a dirty Data cap.
@@ -665,7 +709,10 @@ impl<S: BuildHasher> CacheDirectory<S> {
     /// Rewrite every direct slot target of `cap` (CNode slots, Instance
     /// `root_cnode`) from a runtime-only `Owned` to its settled `Hash`,
     /// recursing into nested `Owned` caps.
-    fn settle_targets_in(&self, cap: &mut Cap) -> Result<(), CacheError> {
+    fn settle_targets_in(&self, cap: &mut Cap) -> Result<(), CacheError>
+    where
+        C: ResidentCap,
+    {
         match cap {
             Cap::CNode(cn) => {
                 for (_, mo) in cn.slots.iter_mut() {
@@ -682,7 +729,10 @@ impl<S: BuildHasher> CacheDirectory<S> {
 
     /// Settle one slot target in place: `Hash` unchanged, `Owned`
     /// recursively via [`Self::settle_owned`].
-    fn settle_target(&self, t: &mut CapHashOrRef) -> Result<(), CacheError> {
+    fn settle_target(&self, t: &mut CapHashOrRef) -> Result<(), CacheError>
+    where
+        C: ResidentCap,
+    {
         match t {
             CapHashOrRef::Hash(_) => Ok(()),
             CapHashOrRef::Owned(_) => {

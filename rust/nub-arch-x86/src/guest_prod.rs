@@ -42,7 +42,7 @@ pub fn nub_invoke_cached(packet_bytes: &[u8]) -> Vec<u8> {
     };
 
     // Caps are resolved via the heap-resident `CACHE`
-    // (`CacheDirectory<FixedState>`) — see `crate::state_cache`.
+    // (`CacheDirectory<FixedState, CachedCap>`) — see `crate::state_cache`.
     let outcome = crate::call_loop::run_top(
         &packet.instance_hash,
         packet.endpoint_idx,

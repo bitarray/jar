@@ -6,7 +6,7 @@
 //! cache belongs **with the cap**: `cache lifetime == cap lifetime`. A running
 //! frame's cnode is a [`CNodeCap<Box<CachedCap>>`](javm_cap::CNodeCap), and a
 //! `derive_spawn`'d instance lives in it as `CapHashOrRef::Owned(Box<CachedCap>)`
-//! — its parked page table riding in [`CacheSlot`], dropped automatically when
+//! — its parked page table riding in [`CapCache`], dropped automatically when
 //! the slot is overwritten or the frame pops. This replaces the parent-side
 //! `child_runtimes` side-table: no slot-keying, no manual `derive_spawn`
 //! invalidation, no per-frame `BTreeMap` allocation, and the cache follows the
@@ -22,8 +22,15 @@
 use alloc::boxed::Box;
 
 use javm_cap::cap::Cap;
+use javm_cap::cap::instance::InstanceCap;
+use javm_cap::{CNodeCap, ResidentCap};
+use spin::Mutex as SpinMutex;
 
+use crate::jit_cache::CompiledImage;
 use crate::jit_run::FrameRuntime;
+
+pub type ResidentCNode = CNodeCap<Box<CachedCap>>;
+pub type ResidentInstance = InstanceCap<Box<CachedCap>>;
 
 /// A cap paired with the derived runtime cache that rides with it inside a
 /// running frame's cnode (`CapHashOrRef::Owned(Box<CachedCap>)`).
@@ -40,16 +47,29 @@ pub struct CachedCap {
     /// moved scratchpad slot).
     pub cap: Cap,
     /// The engine-private derived cache attached to this cap.
-    pub cache: CacheSlot,
+    pub cache: SpinMutex<CapCache>,
 }
+
+/// SAFETY: Hyperlight serialises guest execution and RPCs; these resident
+/// caches never move across concurrently-running threads. The impl only lets
+/// them live behind the static directory mutex.
+unsafe impl Send for CachedCap {}
+/// SAFETY: same single-threaded guest invariant as the `Send` impl above.
+unsafe impl Sync for CachedCap {}
 
 /// The derived runtime cache attached to a resident cap. `None` for a cap with
 /// no cached runtime (freshly spawned, or a non-instance scratchpad cap).
 #[derive(Default)]
-pub enum CacheSlot {
+pub enum CapCache {
     /// No cached runtime.
     #[default]
     None,
+    /// A resident CNode's cache-carrying sparse slot map. The `cap` field keeps
+    /// the public wire shape; this variant is authoritative while the CNode is
+    /// resident in the guest.
+    CNode(Box<ResidentCNode>),
+    /// A published Image's compiled code arena and page-table template.
+    Image(Box<CompiledImage>),
     /// A resident sub-VM instance's ring-3 page table, parked (re-armed for
     /// CoW) between CALLs so the next CALL of this same instance reuses the
     /// whole page table instead of rebuilding it.
@@ -62,7 +82,15 @@ impl CachedCap {
     pub fn new(cap: Cap) -> Self {
         Self {
             cap,
-            cache: CacheSlot::None,
+            cache: SpinMutex::new(CapCache::None),
+        }
+    }
+
+    /// Wrap a CNode with a resident cache-carrying slot map.
+    pub fn cnode(cnode: ResidentCNode) -> Self {
+        Self {
+            cap: Cap::empty_cnode(),
+            cache: SpinMutex::new(CapCache::CNode(Box::new(cnode))),
         }
     }
 
@@ -71,6 +99,11 @@ impl CachedCap {
     pub fn boxed(cap: Cap) -> Box<Self> {
         Box::new(Self::new(cap))
     }
+
+    /// Box a resident CNode, ready for an Instance's live `root_cnode`.
+    pub fn boxed_cnode(cnode: ResidentCNode) -> Box<Self> {
+        Box::new(Self::cnode(cnode))
+    }
 }
 
 impl Clone for CachedCap {
@@ -78,18 +111,38 @@ impl Clone for CachedCap {
         // A clone is a distinct instance → fresh, empty cache.
         Self {
             cap: self.cap.clone(),
-            cache: CacheSlot::None,
+            cache: SpinMutex::new(CapCache::None),
         }
+    }
+}
+
+impl ResidentCap for CachedCap {
+    fn from_cap(cap: Cap) -> Self {
+        Self::new(cap)
+    }
+
+    fn as_cap(&self) -> &Cap {
+        &self.cap
+    }
+
+    fn into_cap(self) -> Cap {
+        self.cap
     }
 }
 
 impl core::fmt::Debug for CachedCap {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // `FrameRuntime` is not `Debug`; report only cache presence.
-        let cached = !matches!(self.cache, CacheSlot::None);
+        // `FrameRuntime` / `CompiledImage` are not `Debug`; report only the
+        // cache variant.
+        let cache = match &*self.cache.lock() {
+            CapCache::None => "None",
+            CapCache::CNode(_) => "CNode",
+            CapCache::Image(_) => "Image",
+            CapCache::Instance(_) => "Instance",
+        };
         f.debug_struct("CachedCap")
             .field("cap", &self.cap)
-            .field("cached_runtime", &cached)
+            .field("cache", &cache)
             .finish()
     }
 }

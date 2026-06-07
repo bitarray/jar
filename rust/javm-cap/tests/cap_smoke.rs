@@ -4,7 +4,7 @@
 
 use javm_cap::{
     CNodeCap, CacheDirectory, Cap, CapHashOrRef, DataCap, ImageCap, ImageSlotEntry, InstanceCap,
-    Key, MemoryMapping, NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, SlotPath,
+    Key, MemoryMapping, NUM_REGS, PAGE_SIZE, PageBytes, PageRef, PageSlot, ResidentCap, SlotPath,
 };
 use std::sync::Arc;
 
@@ -143,6 +143,46 @@ fn cache_get_owned_is_none() {
     let cache = CacheDirectory::new();
     let owned = CapHashOrRef::Owned(Box::new(Cap::data_inline(b"x")));
     assert!(cache.get(owned).is_none());
+}
+
+#[derive(Clone)]
+struct TestResidentCap {
+    cap: Cap,
+    resident_wrapped: bool,
+}
+
+impl ResidentCap for TestResidentCap {
+    fn from_cap(cap: Cap) -> Self {
+        Self {
+            cap,
+            resident_wrapped: true,
+        }
+    }
+
+    fn as_cap(&self) -> &Cap {
+        &self.cap
+    }
+
+    fn into_cap(self) -> Cap {
+        self.cap
+    }
+}
+
+#[test]
+fn cache_directory_can_store_resident_payload() {
+    let cache: CacheDirectory<_, TestResidentCap> =
+        CacheDirectory::with_hasher(hashbrown::DefaultHashBuilder::default());
+    let cap = Cap::data_inline(b"resident");
+    let h = cache.put_cap(&cap).expect("put resident cap");
+
+    let blob = cache.get_blob(&h).expect("resident blob");
+    assert!(blob.resident_wrapped);
+    assert!(matches!(blob.as_cap(), Cap::Data(_)));
+
+    let r = cache.put_instance(Cap::empty_cnode());
+    let inst = cache.get_instance(&r).expect("resident instance entry");
+    assert!(inst.resident_wrapped);
+    assert!(matches!(inst.as_cap(), Cap::CNode(_)));
 }
 
 #[test]

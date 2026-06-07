@@ -35,7 +35,7 @@ pub mod layout;
 pub mod slot;
 pub mod yield_cap;
 
-pub use cache::{CacheDirectory, CacheError, CapHasRefError, CapHashOrRef, CapRef};
+pub use cache::{CacheDirectory, CacheError, CapHasRefError, CapHashOrRef, CapRef, ResidentCap};
 pub use cap::cnode::CNodeCap;
 pub use cap::data::{DataCap, GROUP_SIZE, PAGE_SIZE, PageResolution, PageSlab};
 pub use cap::image::{

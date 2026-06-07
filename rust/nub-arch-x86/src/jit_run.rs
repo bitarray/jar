@@ -50,6 +50,7 @@
 
 extern crate alloc;
 
+use crate::cached_cap::CachedCap;
 use crate::jit_cache;
 use crate::page_alloc::GlobalPage;
 use crate::paging::{PAGE_SIZE, PageTable};
@@ -884,7 +885,7 @@ impl FrameRuntime {
 /// `auipc`/`jalr` resolve correctly) and into the cache key.
 ///
 /// The dense dispatch table (one `i32` per code byte, built by
-/// `jit_cache::get_or_compile`; non-block-start slots hold the
+/// `jit_cache::with_compiled_image`; non-block-start slots hold the
 /// panic-stub offset) doubles as the `jalr`-target validator — there
 /// is no BB region or jump table.
 ///
@@ -901,6 +902,7 @@ impl FrameRuntime {
 /// returned [`FrameRuntime`], which owns the per-call page table.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn build_frame_runtime(
+    image_cap: &CachedCap,
     image_hash: &javm_cap::CapHash,
     code: &[u8],
     code_base: u32,
@@ -927,7 +929,8 @@ pub unsafe fn build_frame_runtime(
         mem_size,
         javm_cap::layout::DATA_BASE,
     ));
-    let cached = jit_cache::get_or_compile(
+    jit_cache::with_compiled_image(
+        image_cap,
         image_hash,
         code,
         code_base,
@@ -938,77 +941,79 @@ pub unsafe fn build_frame_runtime(
         global_pd_pa(&STACK_PD_PA, STACK_VA_M, STACK_PAGE.pa()),
         mem_cycles,
         helpers,
-    );
-    if cached.jit_size == 0 {
-        return None;
-    }
+        |cached| {
+            if cached.jit_size == 0 {
+                return None;
+            }
 
-    let dispatch_va = META_BASE_M + cached.dispatch_offset as u64;
-    let jit_va = META_BASE_M + cached.jit_offset as u64;
-    let tramp_va = META_BASE_M + cached.tramp_offset as u64;
+            let dispatch_va = META_BASE_M + cached.dispatch_offset as u64;
+            let jit_va = META_BASE_M + cached.jit_offset as u64;
+            let tramp_va = META_BASE_M + cached.tramp_offset as u64;
 
-    // Data lives at [DATA_BASE, mem_size). The flat RW buffer covers
-    // only that extent and is mapped at native VA DATA_BASE, leaving
-    // [0, DATA_BASE) unmapped — a null guard, save for the code
-    // direct-map at CODE_BASE. `mem_size` is the absolute max data VA.
-    let data_base = javm_cap::layout::DATA_BASE as usize;
-    let mem_bytes = (mem_size as usize)
-        .saturating_sub(data_base)
-        .next_multiple_of(PAGE_SIZE);
+            // Data lives at [DATA_BASE, mem_size). The flat RW buffer covers
+            // only that extent and is mapped at native VA DATA_BASE, leaving
+            // [0, DATA_BASE) unmapped — a null guard, save for the code
+            // direct-map at CODE_BASE. `mem_size` is the absolute max data VA.
+            let data_base = javm_cap::layout::DATA_BASE as usize;
+            let mem_bytes = (mem_size as usize)
+                .saturating_sub(data_base)
+                .next_multiple_of(PAGE_SIZE);
 
-    // Memory is sourced lazily from the Instance's `mem` DataCap via
-    // `mat_ranges`: every data page is covered by a `MatRange` (initial/pinned
-    // slabs or the shared zero page), so there is NO eager flat buffer. CTX and
-    // STACK are process-global shared pages ([`CTX_PAGE`] / [`STACK_PAGE`]) —
-    // nothing is allocated per call but the page table itself. The shared ctx's
-    // frame-constant fields (`dispatch_table` / `code_base`) are re-stamped by
-    // [`enter_frame`] each entry (the page is shared, the image differs).
+            // Memory is sourced lazily from the Instance's `mem` DataCap via
+            // `mat_ranges`: every data page is covered by a `MatRange` (initial/pinned
+            // slabs or the shared zero page), so there is NO eager flat buffer. CTX and
+            // STACK are process-global shared pages ([`CTX_PAGE`] / [`STACK_PAGE`]) —
+            // nothing is allocated per call but the page table itself. The shared ctx's
+            // frame-constant fields (`dispatch_table` / `code_base`) are re-stamped by
+            // [`enter_frame`] each entry (the page is shared, the image differs).
 
-    let mut pt = PageTable::new()?;
-    // True zero-setup demand paging: the WHOLE guest low VA range (PML4[0]
-    // — both CODE at CODE_BASE and DATA at DATA_BASE) is left with NO
-    // page-table entries here. The first guest touch of each page faults
-    // into `jit_pf_handler`, which builds the PML4→PT path (recording the
-    // new tables in `pt.owned`) and materializes the page (page-in / CoW),
-    // charging #3. There is no eager data buffer: every page is materialized
-    // from the frame's `mem` DataCap (cap slabs or the shared zero page).
-    //
-    // The per-page #3 *state* (`mat_state`) and the RO-unit set (`ro_units`)
-    // live on the owning `KernelFrame`, NOT here — they are gas history that
-    // must outlive any future reclamation of this runtime (host-backed swap).
-    let mem_top = (data_base + mem_bytes) as u32;
-    // Code region: page-rounded `[code_base, code_top)`, lazily paged in
-    // RO (PinnedCapRo) per unit on guest PIC reads. The code buffer is
-    // page-aligned with a zeroed tail, so paging in the last (partial) page
-    // is safe.
-    let code_bytes_rounded = code.len().next_multiple_of(PAGE_SIZE);
-    let code_top = code_base.saturating_add(code_bytes_rounded as u32);
-    // Install the entire PML4 slot-1 subtree (CTX | META arena | STACK) with a
-    // single borrowed PML4 write. CTX/STACK are the global shared pages and the
-    // arena PD is per-Image, so the whole PDPT is an Image constant built once
-    // in `get_or_compile` — no per-frame CTX/STACK PDPT/PD/PT allocation.
-    pt.install_borrowed_pdpt(META_PML4_BASE, cached.template_pdpt_pa)?;
-    let new_cr3 = pt.cr3()?;
+            let mut pt = PageTable::new()?;
+            // True zero-setup demand paging: the WHOLE guest low VA range (PML4[0]
+            // — both CODE at CODE_BASE and DATA at DATA_BASE) is left with NO
+            // page-table entries here. The first guest touch of each page faults
+            // into `jit_pf_handler`, which builds the PML4→PT path (recording the
+            // new tables in `pt.owned`) and materializes the page (page-in / CoW),
+            // charging #3. There is no eager data buffer: every page is materialized
+            // from the frame's `mem` DataCap (cap slabs or the shared zero page).
+            //
+            // The per-page #3 *state* (`mat_state`) and the RO-unit set (`ro_units`)
+            // live on the owning `KernelFrame`, NOT here — they are gas history that
+            // must outlive any future reclamation of this runtime (host-backed swap).
+            let mem_top = (data_base + mem_bytes) as u32;
+            // Code region: page-rounded `[code_base, code_top)`, lazily paged in
+            // RO (PinnedCapRo) per unit on guest PIC reads. The code buffer is
+            // page-aligned with a zeroed tail, so paging in the last (partial) page
+            // is safe.
+            let code_bytes_rounded = code.len().next_multiple_of(PAGE_SIZE);
+            let code_top = code_base.saturating_add(code_bytes_rounded as u32);
+            // Install the entire PML4 slot-1 subtree (CTX | META arena | STACK) with a
+            // single borrowed PML4 write. CTX/STACK are the global shared pages and the
+            // arena PD is per-Image, so the whole PDPT is an Image constant built once
+            // in `with_compiled_image` — no per-frame CTX/STACK PDPT/PD/PT allocation.
+            pt.install_borrowed_pdpt(META_PML4_BASE, cached.template_pdpt_pa)?;
+            let new_cr3 = pt.cr3()?;
 
-    Some(FrameRuntime {
-        pt,
-        jit_va,
-        jit_size: cached.jit_size as u64,
-        dispatch_va,
-        exit_label_va: jit_va + cached.exit_label_offset as u64,
-        trap_table_ptr: cached.trap_table.as_ptr(),
-        trap_table_len: cached.trap_table.len() as u64,
-        tramp_va,
-        new_cr3,
-        global_arena_token: cached.global_arena_token,
-        global_arena_pages: (cached.arena_size / PAGE_SIZE) as u64,
-        mat_ranges,
-        data_base: data_base as u32,
-        mem_top,
-        code_base,
-        code_top,
-        code_pa,
-    })
+            Some(FrameRuntime {
+                pt,
+                jit_va,
+                jit_size: cached.jit_size as u64,
+                dispatch_va,
+                exit_label_va: jit_va + cached.exit_label_offset as u64,
+                trap_table_ptr: cached.trap_table.as_ptr(),
+                trap_table_len: cached.trap_table.len() as u64,
+                tramp_va,
+                new_cr3,
+                global_arena_token: cached.global_arena_token,
+                global_arena_pages: (cached.arena_size / PAGE_SIZE) as u64,
+                mat_ranges,
+                data_base: data_base as u32,
+                mem_top,
+                code_base,
+                code_top,
+                code_pa,
+            })
+        },
+    )
 }
 
 /// Enter ring 3 on `rt`. Updates per-entry `JitContext` fields (regs,

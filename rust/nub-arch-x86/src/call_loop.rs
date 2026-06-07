@@ -21,7 +21,7 @@
 //! ## V1 simplifications
 //!
 //! - **The frame owns its mem.** Each [`KernelFrame`] holds its
-//!   read-write memory as an owned [`DataCap`] (`frame.instance.cap.mem`), cloned
+//!   read-write memory as an owned [`DataCap`] (`frame.instance.mem`), cloned
 //!   from the running Instance at build. The CoW #PF handler writes
 //!   dirtied pages straight into the cap's `overlay`, so the cap is
 //!   the source of truth: a runtime rebuilt after a future reclamation
@@ -103,7 +103,7 @@ use javm_cap::slot::Key;
 use javm_cap::{CNodeCap, CapHash, DataCap, MissingOr, NUM_REGS};
 use nub_arch_x86_abi::SCRATCHPAD_HEAD_LEN;
 
-use crate::cached_cap::{CacheSlot, CachedCap};
+use crate::cached_cap::{CachedCap, CapCache, ResidentCNode, ResidentInstance};
 use crate::jit_run::{self, ExitInfo, FrameRuntime};
 use crate::paging;
 use crate::state_cache::CACHE;
@@ -207,15 +207,16 @@ const ERR_GAS_SLOT_INVALID: u32 = 73;
 /// bookkeeping invariant, not a guest-visible trap.
 const ERR_PENDING_ORIGIN_INVARIANT: u32 = 74;
 
+type ResidentSlotTarget = CapHashOrRef<Box<CachedCap>>;
+type ResidentSlotEntry = ([u8; 32], MissingOr<ResidentSlotTarget>);
+
 /// One stack frame on the in-kernel call stack. Holds the running Instance
 /// value, the origin reservation metadata for the owner slot it came from, and
 /// the ring-3 resource cache. The Image cap is resolved from the heap-resident
 /// [`CACHE`] on access (blobs never evict mid-RPC); the running Instance's
-/// memory is owned outright by [`RunningInstance::cap`], not re-resolved from
-/// the cache.
 pub struct KernelFrame {
     /// Runtime form of the Instance this frame owns.
-    instance: RunningInstance,
+    instance: ResidentInstance,
     /// The owner frame + cnode slot this running Instance was moved out of.
     /// While this frame is on the kernel stack that origin slot is physically
     /// empty and recorded in the owner's [`Self::pending_origins`], so ordinary
@@ -269,20 +270,6 @@ pub struct KernelFrame {
     /// page tables match the no-cache case (one per stack frame, plus the
     /// just-popped child).
     runtime: Option<FrameRuntime>,
-}
-
-struct RunningInstance {
-    /// The public Instance payload, kept whole while the frame runs. Its
-    /// `root_cnode` field is a placeholder while live because the actual
-    /// runtime cnode needs `CachedCap` entries and is carried in [`Self::cnode`].
-    cap: InstanceCap,
-    /// Runtime root cnode: the radix kv-map (`Hasher(Key) ->
-    /// CapHashOrRef<Box<CachedCap>>`) seeded from `cap.root_cnode` and grown by
-    /// cnode operations. The payload is [`CachedCap`] — a cap plus its
-    /// engine-private page-table cache — so a resident sub-VM's runtime rides
-    /// with the cap in its slot. This cnode is deliberately non-wire-
-    /// serialisable and is folded back into `cap.root_cnode` on frame return.
-    cnode: CNodeCap<Box<CachedCap>>,
 }
 
 #[derive(Clone, Debug)]
@@ -417,9 +404,9 @@ impl FrameGas {
 /// is also invalid: there is no primary Gas cap to carry in an OOG payload.
 fn resolve_frame_gas(frame: &KernelFrame) -> Result<Option<FrameGas>, u32> {
     let img_arc = CACHE
-        .get(CapHashOrRef::Hash(frame.instance.cap.image_hash))
+        .get(CapHashOrRef::Hash(frame.instance.image_hash))
         .ok_or(ERR_IMAGE_NOT_FOUND)?;
-    let slots = match &*img_arc {
+    let slots = match &img_arc.cap {
         Cap::Image(i) => i.gas_slots.clone(),
         _ => return Err(ERR_IMAGE_KIND),
     };
@@ -432,10 +419,13 @@ fn resolve_frame_gas(frame: &KernelFrame) -> Result<Option<FrameGas>, u32> {
         if slot_is_pending(frame, &slot) {
             return Err(ERR_GAS_SLOT_INVALID);
         }
-        let Some(cap_ref) = frame.instance.cnode.peek_key(slot.as_slice()) else {
+        let meter = with_cnode_peek(frame, &slot, |cap_ref| match cap_ref {
+            Some(cap_ref) => gas_meter_key_from_ref(cap_ref).map(Some),
+            None => Ok(None),
+        })?;
+        let Some(meter) = meter else {
             continue;
         };
-        let meter = gas_meter_key_from_ref(cap_ref)?;
         if !meters.contains(&meter) {
             meters.push(meter);
         }
@@ -453,7 +443,7 @@ fn gas_meter_key_from_ref(cap_ref: &CapHashOrRef<Box<CachedCap>>) -> Result<Key,
             let arc = CACHE
                 .get(CapHashOrRef::Hash(*h))
                 .ok_or(ERR_GAS_SLOT_INVALID)?;
-            match &*arc {
+            match &arc.cap {
                 Cap::Instance(i) => i.clone(),
                 _ => return Err(ERR_GAS_SLOT_INVALID),
             }
@@ -546,14 +536,68 @@ fn slot_write_blocked(frame: &KernelFrame, slot: &Key) -> bool {
     frame.pinned.binary_search(slot).is_ok() || slot_is_pending(frame, slot)
 }
 
-fn cnode_peek_guest<'a>(
-    frame: &'a KernelFrame,
+fn with_root_cnode<R>(frame: &KernelFrame, f: impl FnOnce(&ResidentCNode) -> R) -> R {
+    let CapHashOrRef::Owned(root) = &frame.instance.root_cnode else {
+        panic!("running frame root_cnode must be resident-owned")
+    };
+    let cache = root.cache.lock();
+    let CapCache::CNode(cnode) = &*cache else {
+        panic!("running frame root_cnode cache must hold a CNode")
+    };
+    f(cnode)
+}
+
+fn with_root_cnode_mut<R>(frame: &mut KernelFrame, f: impl FnOnce(&mut ResidentCNode) -> R) -> R {
+    let CapHashOrRef::Owned(root) = &mut frame.instance.root_cnode else {
+        panic!("running frame root_cnode must be resident-owned")
+    };
+    let mut cache = root.cache.lock();
+    let CapCache::CNode(cnode) = &mut *cache else {
+        panic!("running frame root_cnode cache must hold a CNode")
+    };
+    f(cnode)
+}
+
+fn frame_cnode_set(
+    frame: &mut KernelFrame,
     slot: &Key,
-) -> Result<Option<&'a CapHashOrRef<Box<CachedCap>>>, u32> {
+    target: Option<CapHashOrRef<Box<CachedCap>>>,
+) -> Result<Option<CapHashOrRef<Box<CachedCap>>>, javm_cap::error::CapError> {
+    with_root_cnode_mut(frame, |cnode| cnode.set(slot, target))
+}
+
+fn frame_cnode_set_key(
+    frame: &mut KernelFrame,
+    key: &[u8],
+    target: Option<CapHashOrRef<Box<CachedCap>>>,
+) -> Option<CapHashOrRef<Box<CachedCap>>> {
+    with_root_cnode_mut(frame, |cnode| cnode.set_key(key, target))
+}
+
+fn frame_cnode_take_key(
+    frame: &mut KernelFrame,
+    key: &[u8],
+) -> Option<CapHashOrRef<Box<CachedCap>>> {
+    with_root_cnode_mut(frame, |cnode| cnode.take_key(key))
+}
+
+fn with_cnode_peek<R>(
+    frame: &KernelFrame,
+    slot: &Key,
+    f: impl FnOnce(Option<&CapHashOrRef<Box<CachedCap>>>) -> R,
+) -> R {
+    with_root_cnode(frame, |cnode| f(cnode.peek_key(slot.as_slice())))
+}
+
+fn with_cnode_peek_guest<R>(
+    frame: &KernelFrame,
+    slot: &Key,
+    f: impl FnOnce(Option<&CapHashOrRef<Box<CachedCap>>>) -> R,
+) -> Result<R, u32> {
     if slot_is_pending(frame, slot) {
         return Err(EXIT_TRAP);
     }
-    Ok(frame.instance.cnode.peek_key(slot.as_slice()))
+    Ok(with_cnode_peek(frame, slot, f))
 }
 
 /// Snapshot a frame's Instance `yield_receiver_slot` YieldReceiver as a sorted,
@@ -562,10 +606,10 @@ fn cnode_peek_guest<'a>(
 /// receiver slot, the slot is empty, or it doesn't hold a YieldReceiver
 /// (catches nothing). Reads only; never mutates.
 fn snapshot_catch_set(frame: &KernelFrame) -> Result<Vec<Key>, u32> {
-    let Some(img_arc) = CACHE.get(CapHashOrRef::Hash(frame.instance.cap.image_hash)) else {
+    let Some(img_arc) = CACHE.get(CapHashOrRef::Hash(frame.instance.image_hash)) else {
         return Ok(Vec::new());
     };
-    let slot = match &*img_arc {
+    let slot = match &img_arc.cap {
         Cap::Image(i) => match &i.yield_receiver_slot {
             Some(s) => s.clone(),
             None => return Ok(Vec::new()),
@@ -626,8 +670,8 @@ pub struct LoopOutcome {
 /// (`Empty` → zero). Byte offset 0 of `mem` is guest VA `DATA_BASE`.
 fn read_scratchpad_head(frame: &KernelFrame) -> [u8; SCRATCHPAD_HEAD_LEN] {
     let mut out = [0u8; SCRATCHPAD_HEAD_LEN];
-    if frame.instance.cap.mem.content_len() as usize >= SCRATCHPAD_HEAD_LEN {
-        frame.instance.cap.mem.copy_into(0, &mut out);
+    if frame.instance.mem.content_len() as usize >= SCRATCHPAD_HEAD_LEN {
+        frame.instance.mem.copy_into(0, &mut out);
     }
     out
 }
@@ -703,8 +747,8 @@ pub fn run_top(
         // Mirror the JIT's post-exit state back into the running frame.
         {
             let frame = frame_at_mut(&mut stack, top_idx);
-            frame.instance.cap.regs = info.regs;
-            frame.instance.cap.pc = info.pc as u64;
+            frame.instance.regs = info.regs;
+            frame.instance.pc = info.pc as u64;
         }
 
         // Phase 2: classify the exit. Borrow scopes are kept tight so
@@ -964,23 +1008,21 @@ pub fn run_top(
                         // yielder's loads (picking up a kernel:oog topup).
                         let response = {
                             let handler = frame_at_mut(&mut stack, top_idx);
-                            handler
-                                .instance
-                                .cnode
-                                .take_key(&[javm_cap::abi::SCRATCHPAD_SLOT])
+                            frame_cnode_take_key(handler, &[javm_cap::abi::SCRATCHPAD_SLOT])
                         };
                         stack.pop();
                         let yielder_idx = stack.len() - 1;
                         let yielder = frame_at_mut(&mut stack, yielder_idx);
                         if let Some(cap) = response {
-                            yielder
-                                .instance
-                                .cnode
-                                .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
+                            frame_cnode_set_key(
+                                yielder,
+                                &[javm_cap::abi::SCRATCHPAD_SLOT],
+                                Some(cap),
+                            );
                         }
                         // Spec §4: a resumed yielder sees φ[8] = Ok (the handler's
                         // response status) — its host_yield "returns" here.
-                        yielder.instance.cap.regs[8] = STATUS_OK;
+                        yielder.instance.regs[8] = STATUS_OK;
                     }
                     OP_DROP_RESUME => {
                         // Give up on the Waiting yielder: discard the WHOLE caught
@@ -1095,15 +1137,14 @@ pub fn run_top(
                         // overwritten by the caller-provided scratchpad.
                         {
                             let parent = frame_at_mut(&mut stack, top_idx);
-                            if let Some(cap) = parent
-                                .instance
-                                .cnode
-                                .take_key(&[javm_cap::abi::SCRATCHPAD_SLOT])
+                            if let Some(cap) =
+                                frame_cnode_take_key(parent, &[javm_cap::abi::SCRATCHPAD_SLOT])
                             {
-                                child
-                                    .instance
-                                    .cnode
-                                    .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
+                                frame_cnode_set_key(
+                                    &mut child,
+                                    &[javm_cap::abi::SCRATCHPAD_SLOT],
+                                    Some(cap),
+                                );
                             }
                         }
                         // No runtime eviction: every live frame keeps its page
@@ -1194,14 +1235,14 @@ fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
         let rt = build_runtime(frame)?;
         frame.runtime = Some(rt);
     }
-    let pc = frame.instance.cap.pc as u32;
-    let regs = frame.instance.cap.regs;
+    let pc = frame.instance.pc as u32;
+    let regs = frame.instance.regs;
     // Split borrow of disjoint fields: while the JIT runs against
-    // `frame.runtime`'s PT, the #PF handler CoWs guest writes into `frame.instance.cap.mem`'s
+    // `frame.runtime`'s PT, the #PF handler CoWs guest writes into `frame.instance.mem`'s
     // overlay and advances `frame.mat_state` / `frame.ro_units` in place. The
     // raw-pointer casts end those `&mut` borrows immediately, so the subsequent
     // `frame.runtime` borrow does not conflict.
-    let overlay_sink: *mut DataCap = &mut frame.instance.cap.mem;
+    let overlay_sink: *mut DataCap = &mut frame.instance.mem;
     let mat_state_ptr = frame.mat_state.as_mut_ptr();
     let mat_state_len = frame.mat_state.len() as u64;
     let ro_units: *mut Vec<u32> = &mut frame.ro_units;
@@ -1233,15 +1274,15 @@ fn run_one_entry(frame: &mut KernelFrame, gas: i64) -> Result<ExitInfo, u32> {
 /// RPC) even after this function returns and the guard is dropped.
 fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     // CacheDirectory is interior-mutable; each `get` takes the inner
-    // spin::Mutex briefly and returns an `Arc<Cap>`. We keep the Arc
+    // spin::Mutex briefly and returns an `Arc<CachedCap>`. We keep the Arc
     // locals alive for the duration of the function so any borrowed
     // slices (used to compute PAs for direct PT mapping) stay valid.
     // Blobs are never evicted in V0, so the PAs remain valid for the
     // frame's lifetime past return.
     let img_arc = CACHE
-        .get(CapHashOrRef::Hash(frame.instance.cap.image_hash))
+        .get(CapHashOrRef::Hash(frame.instance.image_hash))
         .ok_or(ERR_IMAGE_NOT_FOUND)?;
-    let img = match &*img_arc {
+    let img = match &img_arc.cap {
         Cap::Image(i) => i,
         _ => return Err(ERR_IMAGE_KIND),
     };
@@ -1259,7 +1300,7 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     let (code_base, code_bytes) = img.code_mapping().ok_or(ERR_IMAGE_KIND)?;
     let code_pa = paging::va_to_pa(code_bytes.as_ptr() as u64).ok_or(ERR_MAP_BAD_KIND)?;
 
-    // The frame's RW memory is its **owned** dense `DataCap` (`frame.instance.cap.mem`)
+    // The frame's RW memory is its **owned** dense `DataCap` (`frame.instance.mem`)
     // covering the whole data extent, holding both initial and pinned content
     // at their VAs with page-aligned slabs. Source every data page from it
     // (overlay-then-backing, so a rebuilt runtime picks up prior CoW writes):
@@ -1268,14 +1309,14 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     // `UnpinnedCapCow` range. The slabs are owned by the frame, so their PAs
     // stay valid for the frame's life past this function's return.
     let data_base = javm_cap::layout::DATA_BASE;
-    let mem = &frame.instance.cap.mem;
+    let mem = &frame.instance.mem;
     let extent = mem.content_len() as u32;
     let mem_size = data_base.saturating_add(extent);
     let pages = (extent / paging::PAGE_SIZE as u32) as usize;
 
     // Pinned mappings → PinnedCapRo ranges (pushed first → precedence). Bounds +
     // kind only; the #PF handler resolves each page's source PA lazily from
-    // `frame.instance.cap.mem` (`jit_run::mem_source_pa`).
+    // `frame.instance.mem` (`jit_run::mem_source_pa`).
     for m in img.mappings.iter() {
         if m.path().is_empty() || !img.mapping_is_pinned(m.start as u32) {
             continue;
@@ -1310,7 +1351,8 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
     // the no-eviction V1 invariant.
     unsafe {
         jit_run::build_frame_runtime(
-            &frame.instance.cap.image_hash,
+            &img_arc,
+            &frame.instance.image_hash,
             code_bytes,
             code_base,
             code_pa,
@@ -1358,12 +1400,13 @@ fn route_yield(
     {
         let catcher_frame = frame_at_mut(stack, owner);
         if let Some(inst) = payload {
-            catcher_frame.instance.cnode.set_key(
+            frame_cnode_set_key(
+                catcher_frame,
                 &[javm_cap::abi::SCRATCHPAD_SLOT],
                 Some(CapHashOrRef::Owned(CachedCap::boxed(Cap::Instance(inst)))),
             );
         }
-        catcher_frame.instance.cap.regs[8] = STATUS_YIELDED;
+        catcher_frame.instance.regs[8] = STATUS_YIELDED;
     }
     stack.push(StackEntry {
         kind: EntryKind::Reference,
@@ -1393,7 +1436,7 @@ fn try_oog_yield(stack: &mut Vec<StackEntry>, top_idx: usize, reattempt_pc: u32)
     if active_meter(stack, top_idx).is_none() {
         return false;
     }
-    frame_at_mut(stack, top_idx).instance.cap.pc = reattempt_pc as u64;
+    frame_at_mut(stack, top_idx).instance.pc = reattempt_pc as u64;
     if stack[top_idx].gas.advance() {
         return true;
     }
@@ -1435,14 +1478,15 @@ fn restore_instance_to_origin(
         return Err(ERR_PENDING_ORIGIN_INVARIANT);
     }
     let cache = match runtime {
-        Some(rt) => CacheSlot::Instance(rt),
-        None => CacheSlot::None,
+        Some(rt) => CapCache::Instance(rt),
+        None => CapCache::None,
     };
-    owner.instance.cnode.set_key(
+    frame_cnode_set_key(
+        owner,
         origin.slot.as_slice(),
         Some(CapHashOrRef::Owned(Box::new(CachedCap {
             cap: Cap::Instance(inst),
-            cache,
+            cache: spin::Mutex::new(cache),
         }))),
     );
     Ok(())
@@ -1502,10 +1546,7 @@ fn pop_and_reflect(stack: &mut Vec<StackEntry>, return_value: u64) -> Result<boo
     }
 
     // Move the callee's scratchpad (slot[0]) back to the caller.
-    let scratch = popped
-        .instance
-        .cnode
-        .take_key(&[javm_cap::abi::SCRATCHPAD_SLOT]);
+    let scratch = frame_cnode_take_key(&mut popped, &[javm_cap::abi::SCRATCHPAD_SLOT]);
 
     // If the child was a moved-in instance, reconstruct its
     // `InstanceCap` from this frame's final state so the parent's slot gets the
@@ -1520,13 +1561,10 @@ fn pop_and_reflect(stack: &mut Vec<StackEntry>, return_value: u64) -> Result<boo
             // CoW (gas-neutral — the page is reused, only the W bit toggles).
             let runtime = popped.runtime.take();
             if let Some(rt) = &runtime {
-                rt.rearm_cow(popped.instance.cap.mem.overlay.keys().copied());
+                rt.rearm_cow(popped.instance.mem.overlay.keys().copied());
             }
-            let RunningInstance { mut cap, cnode } = popped.instance;
-            cap.root_cnode =
-                CapHashOrRef::Owned(Box::new(Cap::CNode(fold_frame_cnode_to_wire(cnode))));
-            cap.gas_remaining = 0;
-            let inst = cap;
+            popped.instance.gas_remaining = 0;
+            let inst = resident_instance_to_wire(popped.instance)?;
             Some((origin, inst, runtime))
         }
         None => {
@@ -1541,15 +1579,12 @@ fn pop_and_reflect(stack: &mut Vec<StackEntry>, return_value: u64) -> Result<boo
     let parent_idx = stack.len() - 1;
     {
         let parent = frame_at_mut(stack, parent_idx);
-        parent.instance.cap.regs[7] = return_value;
+        parent.instance.regs[7] = return_value;
         // Spec §4: the caller's φ[8] reflects the termination status — Ok for a normal
         // HALT/REPLY return (resetting any stale YIELDED a prior catch left there).
-        parent.instance.cap.regs[8] = STATUS_OK;
+        parent.instance.regs[8] = STATUS_OK;
         if let Some(cap) = scratch {
-            parent
-                .instance
-                .cnode
-                .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
+            frame_cnode_set_key(parent, &[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
         }
     }
     if let Some((origin, inst, runtime)) = owned_back {
@@ -1654,7 +1689,7 @@ fn compose_instance_mem(img: &ImageCap) -> DataCap {
         let Some(src_arc) = CACHE.get(CapHashOrRef::Hash(src_hash)) else {
             continue;
         };
-        if let Cap::Data(d) = &*src_arc {
+        if let Cap::Data(d) = &src_arc.cap {
             mem.place_shared(m.start.saturating_sub(data_base), d);
         }
     }
@@ -1674,9 +1709,9 @@ fn compose_instance_mem(img: &ImageCap) -> DataCap {
 /// `OpError::SlotPinned → ExitReason::Trap`. `Ok(false)` on a normal spawn.
 fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
     // V1 single-byte ABI: each slot is the 1-byte key `gpr & 0xFF`.
-    let image_slot = Key::from((frame.instance.cap.regs[7] & 0xFF) as u8);
-    let _cnode_slot = (frame.instance.cap.regs[8] & 0xFF) as u8;
-    let dst_slot = Key::from((frame.instance.cap.regs[9] & 0xFF) as u8);
+    let image_slot = Key::from((frame.instance.regs[7] & 0xFF) as u8);
+    let _cnode_slot = (frame.instance.regs[8] & 0xFF) as u8;
+    let dst_slot = Key::from((frame.instance.regs[9] & 0xFF) as u8);
 
     // Reject a write to a pinned (read-only) slot — the interpreter rejects
     // this and traps (javm/src/ecall.rs); the recompiler must agree or the
@@ -1685,12 +1720,14 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
         return Ok(true);
     }
 
-    let image_hash = match cnode_peek_guest(frame, &image_slot) {
+    let image_hash = match with_cnode_peek_guest(frame, &image_slot, |cap_ref| match cap_ref {
+        Some(CapHashOrRef::Hash(h)) => *h,
+        Some(CapHashOrRef::Owned(_)) | None => frame.instance.image_hash,
+    }) {
         Err(_) => return Ok(true),
-        Ok(Some(CapHashOrRef::Hash(h))) => *h,
-        Ok(Some(CapHashOrRef::Owned(_))) | Ok(None) => frame.instance.cap.image_hash,
+        Ok(h) => h,
     };
-    let child_chain = Blake2b256::hash_pair(&frame.instance.cap.image_hash_chain, &image_hash);
+    let child_chain = Blake2b256::hash_pair(&frame.instance.image_hash_chain, &image_hash);
 
     // Build the child's initial memory from its Image (pinned RO + initial RW
     // sources folded at their VAs, source pages Arc-shared) — like the top-
@@ -1700,7 +1737,7 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
         let img_arc = CACHE
             .get(CapHashOrRef::Hash(image_hash))
             .ok_or(ERR_IMAGE_NOT_FOUND)?;
-        match &*img_arc {
+        match &img_arc.cap {
             Cap::Image(img) => build_instance_mem(&image_hash, img),
             _ => return Err(ERR_IMAGE_KIND),
         }
@@ -1721,11 +1758,12 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
     // moves it. Overwriting the slot drops any previous occupant's `CachedCap`
     // (and its parked page table), so a stale cache for that slot is
     // invalidated automatically — no separate side-table to maintain.
-    frame
-        .instance
-        .cnode
-        .set(&dst_slot, Some(CapHashOrRef::Owned(CachedCap::boxed(cap))))
-        .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
+    frame_cnode_set(
+        frame,
+        &dst_slot,
+        Some(CapHashOrRef::Owned(CachedCap::boxed(cap))),
+    )
+    .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
     Ok(false)
 }
 
@@ -1741,8 +1779,8 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
 /// Instance nor an Image), mirroring `dispatch_derive_spawn`'s trap discipline.
 fn dispatch_image_hash_chain(frame: &mut KernelFrame) -> Result<bool, u32> {
     // V1 single-byte ABI: φ[7] = src slot, φ[8] = dst slot.
-    let src_slot = Key::from((frame.instance.cap.regs[7] & 0xFF) as u8);
-    let dst_slot = Key::from((frame.instance.cap.regs[8] & 0xFF) as u8);
+    let src_slot = Key::from((frame.instance.regs[7] & 0xFF) as u8);
+    let dst_slot = Key::from((frame.instance.regs[8] & 0xFF) as u8);
 
     // Writing into a pinned (read-only) slot traps, mirroring the
     // derive_spawn pinned-dst rejection.
@@ -1754,37 +1792,46 @@ fn dispatch_image_hash_chain(frame: &mut KernelFrame) -> Result<bool, u32> {
     // an Owned instance's parked page-table cache is untouched). Hash targets
     // resolve through the blob cache; an inline Owned instance reads its field
     // directly (no hash needed).
-    let chain: CapHash = match cnode_peek_guest(frame, &src_slot) {
-        Err(_) => return Ok(true),
-        Ok(Some(CapHashOrRef::Hash(h))) => {
-            let h = *h;
-            let arc = CACHE
-                .get(CapHashOrRef::Hash(h))
-                .ok_or(ERR_INSTANCE_NOT_FOUND)?;
-            match &*arc {
-                Cap::Instance(i) => i.image_hash_chain,
-                // An Image is content-addressed: its hash IS its identity.
-                Cap::Image(_) => h,
-                _ => return Ok(true),
+    let chain: CapHash = match with_cnode_peek_guest(frame, &src_slot, |cap_ref| {
+        let chain = match cap_ref {
+            Some(CapHashOrRef::Hash(h)) => {
+                let h = *h;
+                let arc = match CACHE.get(CapHashOrRef::Hash(h)) {
+                    Some(arc) => arc,
+                    None => return Err(ERR_INSTANCE_NOT_FOUND),
+                };
+                match &arc.cap {
+                    Cap::Instance(i) => i.image_hash_chain,
+                    // An Image is content-addressed: its hash IS its identity.
+                    Cap::Image(_) => h,
+                    _ => return Ok(None),
+                }
             }
-        }
-        Ok(Some(CapHashOrRef::Owned(cc))) => match &cc.cap {
-            Cap::Instance(i) => i.image_hash_chain,
-            Cap::Image(_) => cc.cap.cap_hash(),
-            _ => return Ok(true),
-        },
-        Ok(None) => return Ok(true),
+            Some(CapHashOrRef::Owned(cc)) => match &cc.cap {
+                Cap::Instance(i) => i.image_hash_chain,
+                Cap::Image(_) => cc.cap.cap_hash(),
+                _ => return Ok(None),
+            },
+            None => return Ok(None),
+        };
+        Ok(Some(chain))
+    }) {
+        Err(_) => return Ok(true),
+        Ok(Err(e)) => return Err(e),
+        Ok(Ok(Some(chain))) => chain,
+        Ok(Ok(None)) => return Ok(true),
     };
 
     // Mint a Cap::Data of the 32 identity bytes (padded to a page) and place
     // it at dst as an inline Owned cap, settled at termination — same
     // placement convention as derive_spawn's child instance.
     let cap = Cap::data_inline(&chain);
-    frame
-        .instance
-        .cnode
-        .set(&dst_slot, Some(CapHashOrRef::Owned(CachedCap::boxed(cap))))
-        .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
+    frame_cnode_set(
+        frame,
+        &dst_slot,
+        Some(CapHashOrRef::Owned(CachedCap::boxed(cap))),
+    )
+    .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
     Ok(false)
 }
 
@@ -1794,10 +1841,10 @@ fn dispatch_image_hash_chain(frame: &mut KernelFrame) -> Result<bool, u32> {
 /// kernel-assisted handles this is used for (YieldSender / YieldReceiver) are
 /// tiny (a few registers + a small mem).
 fn read_instance_cap(frame: &KernelFrame, slot: &Key) -> Option<InstanceCap> {
-    match frame.instance.cnode.peek_key(slot.as_slice())? {
+    with_cnode_peek(frame, slot, |cap_ref| match cap_ref? {
         CapHashOrRef::Hash(h) => {
             let arc = CACHE.get(CapHashOrRef::Hash(*h))?;
-            match &*arc {
+            match &arc.cap {
                 Cap::Instance(i) => Some(i.clone()),
                 _ => None,
             }
@@ -1806,7 +1853,7 @@ fn read_instance_cap(frame: &KernelFrame, slot: &Key) -> Option<InstanceCap> {
             Cap::Instance(i) => Some(i.clone()),
             _ => None,
         },
-    }
+    })
 }
 
 fn read_instance_cap_guest(frame: &KernelFrame, slot: &Key) -> Result<Option<InstanceCap>, u32> {
@@ -1853,7 +1900,7 @@ fn dispatch_host_yield(
     gas: &mut i64,
     active: &Option<Key>,
 ) -> Result<YieldOutcome, u32> {
-    let sender_slot = Key::from((frame.instance.cap.regs[7] & 0xFF) as u8);
+    let sender_slot = Key::from((frame.instance.regs[7] & 0xFF) as u8);
     let yield_key = match read_instance_cap_guest(frame, &sender_slot) {
         Err(_) => return Ok(YieldOutcome::Trap),
         Ok(Some(inst)) => match javm_cap::yield_sender_key(&inst) {
@@ -1874,35 +1921,31 @@ fn dispatch_host_yield(
     let k = yield_key.as_slice();
 
     if k == javm_cap::yield_cap::YK_MINT_YIELD {
-        let new_key = Key::from((frame.instance.cap.regs[8] & 0xFF) as u8);
-        let sender_dst = Key::from((frame.instance.cap.regs[9] & 0xFF) as u8);
-        let receiver_dst = Key::from((frame.instance.cap.regs[10] & 0xFF) as u8);
+        let new_key = Key::from((frame.instance.regs[8] & 0xFF) as u8);
+        let sender_dst = Key::from((frame.instance.regs[9] & 0xFF) as u8);
+        let receiver_dst = Key::from((frame.instance.regs[10] & 0xFF) as u8);
         if slot_write_blocked(frame, &sender_dst) || slot_write_blocked(frame, &receiver_dst) {
             return Ok(YieldOutcome::Trap);
         }
         let sender = Cap::Instance(javm_cap::yield_sender(&new_key));
         let receiver = Cap::Instance(javm_cap::yield_receiver(&[new_key]));
-        frame
-            .instance
-            .cnode
-            .set(
-                &sender_dst,
-                Some(CapHashOrRef::Owned(CachedCap::boxed(sender))),
-            )
-            .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
-        frame
-            .instance
-            .cnode
-            .set(
-                &receiver_dst,
-                Some(CapHashOrRef::Owned(CachedCap::boxed(receiver))),
-            )
-            .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
+        frame_cnode_set(
+            frame,
+            &sender_dst,
+            Some(CapHashOrRef::Owned(CachedCap::boxed(sender))),
+        )
+        .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
+        frame_cnode_set(
+            frame,
+            &receiver_dst,
+            Some(CapHashOrRef::Owned(CachedCap::boxed(receiver))),
+        )
+        .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
         Ok(YieldOutcome::Inline)
     } else if k == javm_cap::yield_cap::YK_MERGE_YIELD_RECEIVER {
-        let a_slot = Key::from((frame.instance.cap.regs[8] & 0xFF) as u8);
-        let b_slot = Key::from((frame.instance.cap.regs[9] & 0xFF) as u8);
-        let dst = Key::from((frame.instance.cap.regs[10] & 0xFF) as u8);
+        let a_slot = Key::from((frame.instance.regs[8] & 0xFF) as u8);
+        let b_slot = Key::from((frame.instance.regs[9] & 0xFF) as u8);
+        let dst = Key::from((frame.instance.regs[10] & 0xFF) as u8);
         if slot_write_blocked(frame, &dst) {
             return Ok(YieldOutcome::Trap);
         }
@@ -1920,14 +1963,12 @@ fn dispatch_host_yield(
             Some(m) => m,
             None => return Ok(YieldOutcome::Trap), // operands not both receivers
         };
-        frame
-            .instance
-            .cnode
-            .set(
-                &dst,
-                Some(CapHashOrRef::Owned(CachedCap::boxed(Cap::Instance(merged)))),
-            )
-            .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
+        frame_cnode_set(
+            frame,
+            &dst,
+            Some(CapHashOrRef::Owned(CachedCap::boxed(Cap::Instance(merged)))),
+        )
+        .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
         Ok(YieldOutcome::Inline)
     } else if k == javm_cap::yield_cap::YK_MINT_GAS {
         // kernel:mint_gas(φ8=meter_key byte, φ9=dst): mint a Gas{meter_key}
@@ -1935,14 +1976,14 @@ fn dispatch_host_yield(
         // managed separately (set_gas_meter / the host meter table).
         mint_unit_handle(
             frame,
-            javm_cap::gas_handle(&Key::from((frame.instance.cap.regs[8] & 0xFF) as u8)),
+            javm_cap::gas_handle(&Key::from((frame.instance.regs[8] & 0xFF) as u8)),
         )
     } else if k == javm_cap::yield_cap::YK_MINT_QUOTA {
         // kernel:mint_quota(φ8=quota_key byte, φ9=dst): the storage-quota
         // analogue of mint_gas.
         mint_unit_handle(
             frame,
-            javm_cap::quota_handle(&Key::from((frame.instance.cap.regs[8] & 0xFF) as u8)),
+            javm_cap::quota_handle(&Key::from((frame.instance.regs[8] & 0xFF) as u8)),
         )
     } else if k == javm_cap::yield_cap::YK_SET_GAS_METER {
         // kernel:set_gas_meter(φ8=meter_key byte, φ9=value) -> previous (φ7).
@@ -1951,8 +1992,8 @@ fn dispatch_host_yield(
         // (e.g. a frame topping up the pool it itself loans from), the live `gas`
         // is authoritative, so set it directly and return its value; otherwise the
         // table entry is authoritative.
-        let meter_key = Key::from((frame.instance.cap.regs[8] & 0xFF) as u8);
-        let value = frame.instance.cap.regs[9] as i64;
+        let meter_key = Key::from((frame.instance.regs[8] & 0xFF) as u8);
+        let value = frame.instance.regs[9] as i64;
         let previous = if active.as_ref() == Some(&meter_key) {
             let p = *gas;
             *gas = value;
@@ -1960,7 +2001,7 @@ fn dispatch_host_yield(
         } else {
             meters.insert(meter_key, value).unwrap_or(0)
         };
-        frame.instance.cap.regs[7] = previous as u64;
+        frame.instance.regs[7] = previous as u64;
         Ok(YieldOutcome::Inline)
     } else {
         // A kernel:* key not wired inline (oog / storage_exhausted / …): route it.
@@ -1978,18 +2019,16 @@ fn dispatch_host_yield(
 /// named by φ[9] (V1 single-byte ABI). Traps on a pinned dst. Shared by
 /// `kernel:mint_gas` / `kernel:mint_quota`.
 fn mint_unit_handle(frame: &mut KernelFrame, handle: InstanceCap) -> Result<YieldOutcome, u32> {
-    let dst = Key::from((frame.instance.cap.regs[9] & 0xFF) as u8);
+    let dst = Key::from((frame.instance.regs[9] & 0xFF) as u8);
     if slot_write_blocked(frame, &dst) {
         return Ok(YieldOutcome::Trap);
     }
-    frame
-        .instance
-        .cnode
-        .set(
-            &dst,
-            Some(CapHashOrRef::Owned(CachedCap::boxed(Cap::Instance(handle)))),
-        )
-        .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
+    frame_cnode_set(
+        frame,
+        &dst,
+        Some(CapHashOrRef::Owned(CachedCap::boxed(Cap::Instance(handle)))),
+    )
+    .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
     Ok(YieldOutcome::Inline)
 }
 
@@ -2009,24 +2048,16 @@ fn dispatch_host_call(
     parent: &mut KernelFrame,
     logical_owner: usize,
 ) -> Result<Option<KernelFrame>, u32> {
-    let instance_slot = Key::from((parent.instance.cap.regs[7] & 0xFF) as u8);
-    let endpoint_idx = (parent.instance.cap.regs[8] & 0xFF) as u32;
-    let args = [
-        parent.instance.cap.regs[9],
-        parent.instance.cap.regs[10],
-        0,
-        0,
-    ];
+    let instance_slot = Key::from((parent.instance.regs[7] & 0xFF) as u8);
+    let endpoint_idx = (parent.instance.regs[8] & 0xFF) as u32;
+    let args = [parent.instance.regs[9], parent.instance.regs[10], 0, 0];
     if slot_is_pending(parent, &instance_slot) {
         return Ok(None);
     }
 
     // MOVE the target out of the parent cnode (zero-copy for `Owned`).
-    let target = parent
-        .instance
-        .cnode
-        .take_key(instance_slot.as_slice())
-        .ok_or(ERR_HOST_CALL_SLOT_EMPTY)?;
+    let target =
+        frame_cnode_take_key(parent, instance_slot.as_slice()).ok_or(ERR_HOST_CALL_SLOT_EMPTY)?;
     let origin = FrameOrigin {
         owner: logical_owner,
         slot: instance_slot.clone(),
@@ -2038,15 +2069,16 @@ fn dispatch_host_call(
         // instance back.
         CapHashOrRef::Owned(boxed) => {
             let CachedCap { cap, cache } = *boxed;
+            let cache = cache.into_inner();
             let mut child = build_frame_from_owned(cap, origin, endpoint_idx, args)?;
             // Page-table reuse: if this resident instance carries a parked
             // runtime (re-armed at its last HALT), move it into the child frame
             // instead of rebuilding the page table. The data extent is fixed
             // per image (immutable), so the parked extent must match.
-            if let CacheSlot::Instance(rt) = cache {
+            if let CapCache::Instance(rt) = cache {
                 debug_assert_eq!(
                     rt.data_extent(),
-                    child.instance.cap.mem.content_len(),
+                    child.instance.mem.content_len(),
                     "parked runtime extent must match the resident instance's mem",
                 );
                 child.runtime = Some(rt);
@@ -2060,7 +2092,7 @@ fn dispatch_host_call(
             let arc = CACHE
                 .get(CapHashOrRef::Hash(h))
                 .ok_or(ERR_INSTANCE_NOT_FOUND)?;
-            let inst = match &*arc {
+            let inst = match &arc.cap {
                 Cap::Instance(i) => i.clone(),
                 _ => return Err(ERR_INSTANCE_KIND),
             };
@@ -2082,17 +2114,28 @@ fn dispatch_host_call(
     // `key_of` is payload-independent (it hashes the logical key); annotate
     // the generic so it resolves, matching the parent frame's cnode payload.
     let scratch_phys = CNodeCap::<Box<CachedCap>>::key_of(&[javm_cap::abi::SCRATCHPAD_SLOT]);
-    for (phys_key, val) in parent.instance.cnode.slots.iter() {
-        if *phys_key == scratch_phys {
-            continue;
+    let inherited: Vec<ResidentSlotEntry> = with_root_cnode(parent, |parent_cnode| {
+        parent_cnode
+            .slots
+            .iter()
+            .filter_map(|(phys_key, val)| {
+                if *phys_key == scratch_phys {
+                    return None;
+                }
+                if let MissingOr::Materialized(CapHashOrRef::Owned(_)) = val {
+                    return None;
+                }
+                Some((*phys_key, val.clone()))
+            })
+            .collect()
+    });
+    with_root_cnode_mut(&mut child, |child_cnode| {
+        for (phys_key, val) in inherited {
+            if child_cnode.slots.get(&phys_key).is_none() {
+                child_cnode.slots.insert(phys_key, val);
+            }
         }
-        if let MissingOr::Materialized(CapHashOrRef::Owned(_)) = val {
-            continue;
-        }
-        if child.instance.cnode.slots.get(phys_key).is_none() {
-            child.instance.cnode.slots.insert(*phys_key, val.clone());
-        }
-    }
+    });
     Ok(Some(child))
 }
 
@@ -2109,7 +2152,7 @@ fn call_frame_cost_for(image_hash: &CapHash) -> Result<i64, u32> {
     let img_arc = CACHE
         .get(CapHashOrRef::Hash(*image_hash))
         .ok_or(ERR_IMAGE_NOT_FOUND)?;
-    let img = match &*img_arc {
+    let img = match &img_arc.cap {
         Cap::Image(i) => i,
         _ => return Err(ERR_IMAGE_KIND),
     };
@@ -2138,26 +2181,26 @@ fn call_frame_cost_for(image_hash: &CapHash) -> Result<i64, u32> {
 /// `dispatch_host_call` will (same slot, same `Owned`/`Hash` handling), so
 /// the cost gated here equals the cost the built child would have.
 fn host_call_frame_cost(parent: &KernelFrame) -> Result<Option<i64>, u32> {
-    let instance_slot = Key::from((parent.instance.cap.regs[7] & 0xFF) as u8);
+    let instance_slot = Key::from((parent.instance.regs[7] & 0xFF) as u8);
     if slot_is_pending(parent, &instance_slot) {
         return Ok(None);
     }
-    let image_hash = match parent.instance.cnode.peek_key(instance_slot.as_slice()) {
+    let image_hash = with_cnode_peek(parent, &instance_slot, |cap_ref| match cap_ref {
         Some(CapHashOrRef::Owned(boxed)) => match &boxed.cap {
-            Cap::Instance(i) => i.image_hash,
-            _ => return Err(ERR_INSTANCE_KIND),
+            Cap::Instance(i) => Ok(i.image_hash),
+            _ => Err(ERR_INSTANCE_KIND),
         },
         Some(CapHashOrRef::Hash(h)) => {
             let arc = CACHE
                 .get(CapHashOrRef::Hash(*h))
                 .ok_or(ERR_INSTANCE_NOT_FOUND)?;
-            match &*arc {
-                Cap::Instance(i) => i.image_hash,
-                _ => return Err(ERR_INSTANCE_KIND),
+            match &arc.cap {
+                Cap::Instance(i) => Ok(i.image_hash),
+                _ => Err(ERR_INSTANCE_KIND),
             }
         }
-        None => return Err(ERR_HOST_CALL_SLOT_EMPTY),
-    };
+        None => Err(ERR_HOST_CALL_SLOT_EMPTY),
+    })?;
     call_frame_cost_for(&image_hash).map(Some)
 }
 
@@ -2173,7 +2216,7 @@ fn build_frame_from_published(
     let arc = CACHE
         .get(CapHashOrRef::Hash(*instance_hash))
         .ok_or(ERR_INSTANCE_NOT_FOUND)?;
-    let inst = match &*arc {
+    let inst = match &arc.cap {
         Cap::Instance(i) => i.clone(),
         _ => return Err(ERR_INSTANCE_KIND),
     };
@@ -2208,28 +2251,26 @@ fn build_frame_from_instance(
     build_frame_inner(inst, origin, endpoint_idx, args)
 }
 
-fn seed_cnode_from_root(
-    root_cnode: &CapHashOrRef,
-    cnode: &mut CNodeCap<Box<CachedCap>>,
-) -> Result<(), u32> {
+fn materialize_root_cnode(root_cnode: &CapHashOrRef) -> Result<ResidentCNode, u32> {
+    let mut cnode = ResidentCNode::new();
     match root_cnode {
-        CapHashOrRef::Hash(h) if *h == [0u8; 32] => Ok(()),
+        CapHashOrRef::Hash(h) if *h == [0u8; 32] => Ok(cnode),
         CapHashOrRef::Hash(h) => {
             let rc_arc = CACHE
                 .get(CapHashOrRef::Hash(*h))
                 .ok_or(ERR_INSTANCE_NOT_FOUND)?;
-            let Cap::CNode(cn) = &*rc_arc else {
+            let Cap::CNode(cn) = &rc_arc.cap else {
                 return Err(ERR_INSTANCE_KIND);
             };
-            copy_wire_cnode_into_cached(cn, cnode);
-            Ok(())
+            copy_wire_cnode_into_cached(cn, &mut cnode);
+            Ok(cnode)
         }
         CapHashOrRef::Owned(boxed) => {
             let Cap::CNode(cn) = &**boxed else {
                 return Err(ERR_INSTANCE_KIND);
             };
-            copy_wire_cnode_into_cached(cn, cnode);
-            Ok(())
+            copy_wire_cnode_into_cached(cn, &mut cnode);
+            Ok(cnode)
         }
     }
 }
@@ -2247,27 +2288,64 @@ fn copy_wire_cnode_into_cached(src: &CNodeCap<Box<Cap>>, dst: &mut CNodeCap<Box<
 fn wire_target_to_cached(target: &CapHashOrRef<Box<Cap>>) -> CapHashOrRef<Box<CachedCap>> {
     match target {
         CapHashOrRef::Hash(h) => CapHashOrRef::Hash(*h),
-        CapHashOrRef::Owned(b) => CapHashOrRef::Owned(CachedCap::boxed((**b).clone())),
+        CapHashOrRef::Owned(b) => match &**b {
+            Cap::CNode(cn) => {
+                let mut cnode = ResidentCNode::new();
+                copy_wire_cnode_into_cached(cn, &mut cnode);
+                CapHashOrRef::Owned(CachedCap::boxed_cnode(cnode))
+            }
+            other => CapHashOrRef::Owned(CachedCap::boxed(other.clone())),
+        },
     }
 }
 
-fn cached_target_to_wire(target: &CapHashOrRef<Box<CachedCap>>) -> CapHashOrRef<Box<Cap>> {
+fn cached_target_to_wire_ref(target: &CapHashOrRef<Box<CachedCap>>) -> CapHashOrRef<Box<Cap>> {
     match target {
         CapHashOrRef::Hash(h) => CapHashOrRef::Hash(*h),
-        CapHashOrRef::Owned(boxed) => CapHashOrRef::Owned(Box::new(boxed.cap.clone())),
+        CapHashOrRef::Owned(boxed) => CapHashOrRef::Owned(Box::new(cached_cap_to_wire_ref(boxed))),
     }
 }
 
-fn fold_frame_cnode_to_wire(cnode: CNodeCap<Box<CachedCap>>) -> CNodeCap<Box<Cap>> {
+fn cached_cap_to_wire_ref(cap: &CachedCap) -> Cap {
+    let cache = cap.cache.lock();
+    match &*cache {
+        CapCache::CNode(cnode) => Cap::CNode(fold_frame_cnode_to_wire_ref(cnode)),
+        CapCache::None | CapCache::Image(_) | CapCache::Instance(_) => cap.cap.clone(),
+    }
+}
+
+fn fold_frame_cnode_to_wire_ref(cnode: &ResidentCNode) -> CNodeCap<Box<Cap>> {
     let mut out = CNodeCap::new();
     for (k, mo) in cnode.slots.iter() {
         let conv = match mo {
-            MissingOr::Materialized(t) => MissingOr::Materialized(cached_target_to_wire(t)),
+            MissingOr::Materialized(t) => MissingOr::Materialized(cached_target_to_wire_ref(t)),
             MissingOr::Missing(h) => MissingOr::Missing(*h),
         };
         out.slots.insert(*k, conv);
     }
     out
+}
+
+fn resident_instance_to_wire(inst: ResidentInstance) -> Result<InstanceCap, u32> {
+    let root_cnode = match &inst.root_cnode {
+        CapHashOrRef::Owned(root) => {
+            let cache = root.cache.lock();
+            let CapCache::CNode(cnode) = &*cache else {
+                return Err(ERR_INSTANCE_KIND);
+            };
+            CapHashOrRef::Owned(Box::new(Cap::CNode(fold_frame_cnode_to_wire_ref(cnode))))
+        }
+        CapHashOrRef::Hash(h) => CapHashOrRef::Hash(*h),
+    };
+    Ok(InstanceCap {
+        image_hash_chain: inst.image_hash_chain,
+        image_hash: inst.image_hash,
+        root_cnode,
+        mem: inst.mem,
+        regs: inst.regs,
+        pc: inst.pc,
+        gas_remaining: inst.gas_remaining,
+    })
 }
 
 // `build_frame_from_instance_ref` / `build_frame_from_cap` were removed: a
@@ -2290,7 +2368,7 @@ fn build_frame_inner(
     let img_arc = CACHE
         .get(CapHashOrRef::Hash(image_hash))
         .ok_or(ERR_IMAGE_NOT_FOUND)?;
-    let img = match &*img_arc {
+    let img = match &img_arc.cap {
         Cap::Image(i) => i,
         _ => return Err(ERR_IMAGE_KIND),
     };
@@ -2320,15 +2398,10 @@ fn build_frame_inner(
     cap.pc = ep.entry_pc;
     cap.gas_remaining = 0;
 
-    let mut cnode: CNodeCap<Box<CachedCap>> = CNodeCap::new();
-    // Seed the persistent state from the instance's root cnode first. This is
-    // how arbitrary caps — `Cap::Instance` (YieldSenders, sub-VM handles) that
-    // can't be pinned, plus carried-over mutable slots — flow to the guest. A
-    // published root cnode holds only `Hash` entries; an inline `Owned` (in
-    // principle) deep-clones into the frame's `CachedCap` form. Entries are
-    // copied by raw radix key (the cnode is keyed by `Hasher(Key)`, so the
-    // logical key isn't recoverable to re-`set`).
-    seed_cnode_from_root(&root_cnode, &mut cnode)?;
+    let mut cnode = materialize_root_cnode(&root_cnode)?;
+    // The persistent root cnode is now resident in `cap.root_cnode` itself:
+    // arbitrary caps flow through this cache-carrying CNode, while image pinned
+    // and initial slots overlay/fill it below.
     // Image pinned slots overlay the root-cnode state (image-authoritative:
     // pinned content is swapped as a unit at set_image), then initial slots
     // fill only still-empty slots (bootstrap-only).
@@ -2360,8 +2433,17 @@ fn build_frame_inner(
     // The cap-backed mappings (their PAs + pinned/initial kind) are
     // resolved in `build_runtime` when the per-frame runtime is built;
     // nothing mapping-related is needed on the frame itself.
+    let instance = ResidentInstance {
+        image_hash_chain: cap.image_hash_chain,
+        image_hash: cap.image_hash,
+        root_cnode: CapHashOrRef::Owned(CachedCap::boxed_cnode(cnode)),
+        mem: cap.mem,
+        regs: cap.regs,
+        pc: cap.pc,
+        gas_remaining: cap.gas_remaining,
+    };
     Ok(KernelFrame {
-        instance: RunningInstance { cap, cnode },
+        instance,
         origin,
         pending_origins: BTreeSet::new(),
         pinned,
