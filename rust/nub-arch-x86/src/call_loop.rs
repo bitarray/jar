@@ -335,40 +335,40 @@ struct StackEntry {
     /// sub-call — a frame cannot shrink its catch-set mid-flight to dodge a
     /// descendant's yield (spec §3 "frozen for the sub-call").
     catch_set: Vec<Key>,
-    /// This frame's gas meter, when it runs on its OWN balance drawn from the
-    /// guest meter table (its `gas_slots[0]` → `Gas{meter_key}` had a funded
-    /// entry at CALL). `None` = the frame *loans* the caller's pool — it debits
-    /// the threaded `gas` directly and returns the remainder to the caller at
-    /// HALT (the one-pool subtree model, the default for non-metered sub-VMs and
-    /// the host-budgeted top frame). `Some(k)` = metered: the live `gas` was
-    /// swapped to `meters[k]` at CALL and is written back to `meters[k]` at HALT.
-    meter: Option<Key>,
-    /// The caller's pool, saved when this frame swapped the live `gas` to its own
-    /// meter balance at CALL; restored into `gas` when this frame pops. `Some`
-    /// iff [`Self::meter`] is `Some`.
-    saved_gas: Option<i64>,
+    /// The gas meter that funds this entry's frame — computed ONCE at push time
+    /// as `own_meter.or(parent_or_catcher.active)`: the frame's own
+    /// `gas_slots[0]` → `Gas{meter_key}` if it declares one, else (loaned) it
+    /// inherits its caller's active meter; a handler `ReferenceEntry` inherits the
+    /// CATCHER's active meter. `None` = host-budgeted (the top frame and its
+    /// loaned descendants). The loop reconciles `gas` to this on each iteration
+    /// (see [`reconcile_active`]). Storing it (vs. a stack walk) is unambiguous in
+    /// the presence of yields, where the entries between a handler Reference and
+    /// its referent are a *suspended* subtree, NOT the running frame's ancestry.
+    /// Aliasing falls out: a child naming the same meter as a live ancestor gets
+    /// the SAME `active`, so no reconcile/swap — it shares the one balance.
+    active: Option<Key>,
 }
 
 impl StackEntry {
     /// A fresh InstanceEntry at stack position `index` carrying a new
     /// `instance_id`. `target` is its own index (it runs its own frame); the
-    /// catch-set is empty until its first downward CALL.
+    /// catch-set is empty until its first downward CALL; `active` is stamped by
+    /// the CALL site (`own_meter.or(parent.active)`).
     fn instance(frame: KernelFrame, index: usize, instance_id: u64) -> Self {
         StackEntry {
             kind: EntryKind::Instance(Box::new(frame)),
             target: index,
             instance_id,
             catch_set: Vec::new(),
-            meter: None,
-            saved_gas: None,
+            active: None,
         }
     }
 }
 
-/// Resolve a frame's active gas meter: read its Image's `gas_slots[0]`, look that
+/// Resolve a frame's own gas meter: read its Image's `gas_slots[0]`, look that
 /// slot up in the frame's cnode, and decode the `Gas{meter_key}` handle there.
 /// `None` if the Image declares no gas slot, the slot is empty, or it doesn't
-/// hold a `Gas` handle (the frame then loans its caller's pool).
+/// hold a `Gas` handle (the frame then loans its caller's active meter).
 fn resolve_frame_meter(frame: &KernelFrame) -> Option<Key> {
     let img_arc = CACHE.get(CapHashOrRef::Hash(frame.image_hash))?;
     let slot = match &*img_arc {
@@ -376,6 +376,35 @@ fn resolve_frame_meter(frame: &KernelFrame) -> Option<Key> {
         _ => return None,
     };
     javm_cap::gas_meter_key(&read_instance_cap(frame, &slot)?)
+}
+
+/// Reconcile the threaded `gas` (the live balance of the running frame's active
+/// meter) when the active meter changes between loop iterations: bank the OLD
+/// active scope's balance, load the NEW scope's. `meters[k]` is authoritative for
+/// every non-active meter; `host_budget` holds the banked host scope (the
+/// host-budgeted top + its loaned descendants, active == `None`). Aliasing falls
+/// out for free: a descendant naming the same meter has the SAME active meter, so
+/// no swap happens and it shares the live balance — no double-spend.
+fn reconcile_active(
+    old: &Option<Key>,
+    new: &Option<Key>,
+    gas: &mut i64,
+    host_budget: &mut i64,
+    meters: &mut BTreeMap<Key, i64>,
+) {
+    if old == new {
+        return;
+    }
+    match old {
+        Some(k) => {
+            meters.insert(k.clone(), *gas);
+        }
+        None => *host_budget = *gas,
+    }
+    *gas = match new {
+        Some(k) => meters.get(k).copied().unwrap_or(0),
+        None => *host_budget,
+    };
 }
 
 /// `&mut` to the [`KernelFrame`] the entry at `idx` runs, following a
@@ -494,17 +523,33 @@ pub fn run_top(
     let mut next_iid: u64 = 0;
     stack.push(StackEntry::instance(top, 0, next_iid));
     next_iid += 1;
-    // The threaded `gas` is the RUNNING frame's live balance: the host-budgeted
-    // top pool, a loaned caller pool, or a metered frame's own balance. The guest
-    // meter table holds balances NAMED by `Gas{meter_key}` and funded via
-    // `kernel:set_gas_meter`; a metered frame draws its balance here at CALL and
-    // writes the remainder back at HALT. Per-RPC (a block-spanning table is the
-    // deferred lazy-load piece); the top frame's meter stays host-owned.
+    // GAS MODEL (single reconciliation point). The threaded `gas` always holds
+    // the LIVE balance of the running frame's ACTIVE meter — `active_meter(top)`,
+    // the nearest metered frame at-or-below the top. `meters[k]` is authoritative
+    // for every non-active meter; `host_budget` holds the banked host scope (the
+    // host-budgeted top + its loaned descendants, active == None). At the top of
+    // each iteration we reconcile: if the top's active meter changed since last
+    // iteration, bank the old scope + load the new. Every CALL/HALT/yield/resume/
+    // drop changes the top, so this one point catches them all — no per-transition
+    // gas bookkeeping. The guest meter table is per-RPC (a block-spanning table is
+    // the deferred lazy-load piece).
     let mut gas = initial_gas;
+    let mut host_budget = initial_gas;
     let mut meters: BTreeMap<Key, i64> = BTreeMap::new();
+    let mut current_active: Option<Key> = active_meter(&stack, 0);
 
     let outcome = loop {
         let top_idx = stack.len() - 1;
+        // Reconcile the active meter for the (possibly new) top frame.
+        let new_active = active_meter(&stack, top_idx);
+        reconcile_active(
+            &current_active,
+            &new_active,
+            &mut gas,
+            &mut host_budget,
+            &mut meters,
+        );
+        current_active = new_active;
         // Phase 1: run one ring-3 entry on the top entry's frame (an
         // InstanceEntry runs its own frame; a ReferenceEntry runs its
         // referent's — the same Instance, sharing one PC/regs/mem).
@@ -538,16 +583,20 @@ pub fn run_top(
                 // resuming/dropping its yielder triggers the sub-tree-atomic
                 // unwind; an ordinary InstanceEntry pops and reflects.
                 let drained = if stack[top_idx].target != top_idx {
-                    unwind_to_handler(&mut stack, top_idx, info.regs[7], &mut gas, &mut meters)
+                    unwind_to_handler(&mut stack, top_idx, info.regs[7])
                 } else {
-                    pop_and_reflect(&mut stack, info.regs[7], &mut gas, &mut meters)
+                    pop_and_reflect(&mut stack, info.regs[7])
                 };
                 if drained {
                     break LoopOutcome {
                         exit_reason: info.exit_reason,
                         exit_arg: info.exit_arg,
                         return_value: info.regs[7],
-                        gas_remaining: gas,
+                        gas_remaining: if current_active.is_none() {
+                            gas
+                        } else {
+                            host_budget
+                        },
                         scratchpad_head: head,
                     };
                 }
@@ -586,20 +635,18 @@ pub fn run_top(
                 if gas < total_cost {
                     // A metered frame re-attempts THIS ecall after a kernel:oog
                     // topup; unmetered / uncaught → bubble EXIT_OOG.
-                    if try_oog_yield(
-                        &mut stack,
-                        top_idx,
-                        &mut gas,
-                        &mut meters,
-                        info.pc.saturating_sub(4),
-                    ) {
+                    if try_oog_yield(&mut stack, top_idx, info.pc.saturating_sub(4)) {
                         continue;
                     }
                     break LoopOutcome {
                         exit_reason: EXIT_OOG,
                         exit_arg: 0,
                         return_value: info.regs[7],
-                        gas_remaining: gas,
+                        gas_remaining: if current_active.is_none() {
+                            gas
+                        } else {
+                            host_budget
+                        },
                         scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                     };
                 }
@@ -617,15 +664,9 @@ pub fn run_top(
                         // A handler REPLYing without resuming/dropping → sub-tree
                         // unwind; an ordinary InstanceEntry pops and reflects.
                         let drained = if stack[top_idx].target != top_idx {
-                            unwind_to_handler(
-                                &mut stack,
-                                top_idx,
-                                info.regs[7],
-                                &mut gas,
-                                &mut meters,
-                            )
+                            unwind_to_handler(&mut stack, top_idx, info.regs[7])
                         } else {
-                            pop_and_reflect(&mut stack, info.regs[7], &mut gas, &mut meters)
+                            pop_and_reflect(&mut stack, info.regs[7])
                         };
                         if drained {
                             // Preserve the JIT exit shape so the host bench
@@ -635,7 +676,11 @@ pub fn run_top(
                                 exit_reason: info.exit_reason,
                                 exit_arg: info.exit_arg,
                                 return_value: info.regs[7],
-                                gas_remaining: gas,
+                                gas_remaining: if current_active.is_none() {
+                                    gas
+                                } else {
+                                    host_budget
+                                },
                                 scratchpad_head: head,
                             };
                         }
@@ -653,7 +698,11 @@ pub fn run_top(
                                 exit_reason: EXIT_TRAP,
                                 exit_arg: 0,
                                 return_value: info.regs[7],
-                                gas_remaining: gas,
+                                gas_remaining: if current_active.is_none() {
+                                    gas
+                                } else {
+                                    host_budget
+                                },
                                 scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                             };
                         }
@@ -669,7 +718,11 @@ pub fn run_top(
                                 exit_reason: EXIT_TRAP,
                                 exit_arg: 0,
                                 return_value: info.regs[7],
-                                gas_remaining: gas,
+                                gas_remaining: if current_active.is_none() {
+                                    gas
+                                } else {
+                                    host_budget
+                                },
                                 scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                             };
                         }
@@ -677,7 +730,7 @@ pub fn run_top(
                     OP_HOST_YIELD => {
                         let outcome = {
                             let frame = frame_at_mut(&mut stack, top_idx);
-                            dispatch_host_yield(frame, &mut meters)?
+                            dispatch_host_yield(frame, &mut meters, &mut gas, &current_active)?
                         };
                         match outcome {
                             // A kernel-root pure-cap syscall handled inline; the
@@ -690,7 +743,11 @@ pub fn run_top(
                                     exit_reason: EXIT_TRAP,
                                     exit_arg: 0,
                                     return_value: info.regs[7],
-                                    gas_remaining: gas,
+                                    gas_remaining: if current_active.is_none() {
+                                        gas
+                                    } else {
+                                        host_budget
+                                    },
                                     scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                                 };
                             }
@@ -700,19 +757,16 @@ pub fn run_top(
                             YieldOutcome::Route { key, sender_slot } => {
                                 let payload =
                                     read_instance_cap(frame_at(&stack, top_idx), &sender_slot);
-                                if !route_yield(
-                                    &mut stack,
-                                    top_idx,
-                                    &key,
-                                    payload,
-                                    &mut gas,
-                                    &mut meters,
-                                ) {
+                                if !route_yield(&mut stack, top_idx, &key, payload) {
                                     break LoopOutcome {
                                         exit_reason: EXIT_TRAP,
                                         exit_arg: ERR_YIELD_UNHANDLED,
                                         return_value: info.regs[7],
-                                        gas_remaining: gas,
+                                        gas_remaining: if current_active.is_none() {
+                                            gas
+                                        } else {
+                                            host_budget
+                                        },
                                         scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                                     };
                                 }
@@ -729,52 +783,31 @@ pub fn run_top(
                                 exit_reason: EXIT_TRAP,
                                 exit_arg: 0,
                                 return_value: info.regs[7],
-                                gas_remaining: gas,
+                                gas_remaining: if current_active.is_none() {
+                                    gas
+                                } else {
+                                    host_budget
+                                },
                                 scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                             };
                         }
                         // Reflect the handler's scratchpad slot[0] (its response)
                         // to the yielder, pop the ReferenceEntry, and let the
                         // yielder become the running top (it continues at its
-                        // post-yield PC next iteration).
-                        let catcher_idx = stack[top_idx].target;
+                        // post-yield PC next iteration). Gas is reconciled at the
+                        // next loop top: the handler's active meter banks and the
+                        // yielder's loads (picking up a kernel:oog topup).
                         let response = {
                             let handler = frame_at_mut(&mut stack, top_idx);
                             handler.cnode.take_key(&[javm_cap::abi::SCRATCHPAD_SLOT])
                         };
                         stack.pop();
                         let yielder_idx = stack.len() - 1;
-                        {
-                            let yielder = frame_at_mut(&mut stack, yielder_idx);
-                            if let Some(cap) = response {
-                                yielder
-                                    .cnode
-                                    .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
-                            }
-                        }
-                        // Gas across the routed-past subtree (catcher_idx+1 ..=
-                        // yielder_idx), which may mix metered and loaned frames:
-                        //
-                        // (a) The handler's post-spend pool returns to the catcher
-                        //     via the subtree HALTing up. The frame whose
-                        //     `saved_gas` restores the catcher's pool is the FIRST
-                        //     metered frame from the catcher (a loaned prefix just
-                        //     threads gas through). Stash the handler pool there.
-                        //     If the whole subtree is loaned, gas threads up
-                        //     unchanged (no stash) — the catcher's shared pool.
-                        let subtree = catcher_idx + 1..=yielder_idx;
-                        if let Some(i) = subtree.clone().find(|&i| stack[i].meter.is_some()) {
-                            stack[i].saved_gas = Some(gas);
-                        }
-                        // (b) The yielder resumes on its ACTIVE meter's CURRENT
-                        //     balance (a kernel:oog handler may have topped it up):
-                        //     the nearest metered frame from the yielder toward the
-                        //     catcher (itself if metered, else its metered ancestor
-                        //     it loans from). If none in the subtree (all loaned to
-                        //     the catcher), it keeps the threaded handler pool.
-                        if let Some(i) = subtree.rev().find(|&i| stack[i].meter.is_some()) {
-                            let k = stack[i].meter.clone().expect("metered");
-                            gas = *meters.get(&k).unwrap_or(&0);
+                        let yielder = frame_at_mut(&mut stack, yielder_idx);
+                        if let Some(cap) = response {
+                            yielder
+                                .cnode
+                                .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
                         }
                     }
                     OP_DROP_PAUSED => {
@@ -789,7 +822,11 @@ pub fn run_top(
                                 exit_reason: EXIT_TRAP,
                                 exit_arg: 0,
                                 return_value: info.regs[7],
-                                gas_remaining: gas,
+                                gas_remaining: if current_active.is_none() {
+                                    gas
+                                } else {
+                                    host_budget
+                                },
                                 scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                             };
                         }
@@ -849,22 +886,17 @@ pub fn run_top(
                         let child_idx = stack.len();
                         stack.push(StackEntry::instance(child, child_idx, next_iid));
                         next_iid += 1;
-                        // Per-frame metering: if the child NAMES a gas meter
-                        // (`gas_slots[0]` → `Gas{meter_key}`) it runs on that
-                        // meter's balance — save the caller's pool to restore at
-                        // the child's HALT, swap the live `gas` to the balance. An
-                        // ABSENT table entry is effective balance 0 (spec:
-                        // kernel-assisted-instances.md §"lazy-load" — unset meters
-                        // are 0), so an unfunded metered child runs on 0 and
-                        // OOG-routes on first debit rather than loaning the
-                        // caller's pool. Only a child with NO gas slot loans the
-                        // caller's pool (the one-pool subtree model).
-                        if let Some(k) = resolve_frame_meter(frame_at(&stack, child_idx)) {
-                            let balance = meters.get(&k).copied().unwrap_or(0);
-                            stack[child_idx].meter = Some(k);
-                            stack[child_idx].saved_gas = Some(gas);
-                            gas = balance;
-                        }
+                        // Stamp the child's active (funding) meter: its own
+                        // `gas_slots[0]` meter, else (loaned) the caller's active
+                        // meter. The loop-top reconcile then swaps `gas` only when
+                        // the active meter actually changes — a child naming a NEW
+                        // meter becomes the active scope (gas := meters[k],
+                        // effective-0 if unfunded → OOG-routes on first debit); a
+                        // child naming the SAME meter as a live ancestor keeps the
+                        // shared scope (no swap, no double-spend).
+                        let parent_active = stack[top_idx].active.clone();
+                        stack[child_idx].active =
+                            resolve_frame_meter(frame_at(&stack, child_idx)).or(parent_active);
                     }
                     // Anything else (MGMT ops, SET_IMAGE, HOST_YIELD,
                     // arbitrary `ecalli imm`, …) is not in-kernel-
@@ -878,7 +910,11 @@ pub fn run_top(
                             exit_reason: info.exit_reason,
                             exit_arg: info.exit_arg,
                             return_value: info.regs[7],
-                            gas_remaining: gas,
+                            gas_remaining: if current_active.is_none() {
+                                gas
+                            } else {
+                                host_budget
+                            },
                             scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                         };
                     }
@@ -892,16 +928,18 @@ pub fn run_top(
                 // the block was not entered and no gas was charged). Unmetered /
                 // uncaught OOG, and every other exit (fault/panic/trap), bubble
                 // verbatim.
-                if info.exit_reason == EXIT_OOG
-                    && try_oog_yield(&mut stack, top_idx, &mut gas, &mut meters, info.pc)
-                {
+                if info.exit_reason == EXIT_OOG && try_oog_yield(&mut stack, top_idx, info.pc) {
                     continue;
                 }
                 break LoopOutcome {
                     exit_reason: info.exit_reason,
                     exit_arg: info.exit_arg,
                     return_value: info.regs[7],
-                    gas_remaining: gas,
+                    gas_remaining: if current_active.is_none() {
+                        gas
+                    } else {
+                        host_budget
+                    },
                     scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                 };
             }
@@ -1056,14 +1094,12 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
 
 /// Walk the kernel stack for a catcher of `key` (emitter-exclusion: skip every
 /// frame whose instance matches the top emitter's) and, if one is found, suspend
-/// the emitter and transfer control to the catcher as a yield handler:
-/// - a metered emitter banks its remaining balance to its meter and the catcher
-///   resumes on the emitter's saved caller-pool (a non-metered emitter loans its
-///   pool, which threads to the catcher unchanged);
-/// - `payload` (a YieldSender / `Gas` cap copy) reflects into the catcher's
-///   scratchpad slot[0] and φ[8] is flagged YIELDED;
-/// - a ReferenceEntry to the catcher is pushed (the yielder stays Waiting below,
-///   resumed later by `CALL_RESUME`).
+/// the emitter and transfer control to the catcher as a yield handler: reflect
+/// `payload` (a YieldSender / `Gas` cap copy) into the catcher's scratchpad
+/// slot[0], flag φ[8] = YIELDED, and push a ReferenceEntry to the catcher (the
+/// yielder stays Waiting below, resumed later by `CALL_RESUME`). Gas is NOT
+/// handled here — the loop-top [`reconcile_active`] banks the emitter's active
+/// meter and loads the catcher's on the next iteration.
 ///
 /// Returns `true` if routed, `false` if no ancestor catches `key` — the caller
 /// decides (fault the emitter for a user key, or bubble EXIT_OOG for kernel:oog).
@@ -1072,8 +1108,6 @@ fn route_yield(
     top_idx: usize,
     key: &Key,
     payload: Option<InstanceCap>,
-    gas: &mut i64,
-    meters: &mut BTreeMap<Key, i64>,
 ) -> bool {
     let emitter_iid = stack[top_idx].instance_id;
     let mut catcher = None;
@@ -1089,24 +1123,11 @@ fn route_yield(
     let Some(j) = catcher else {
         return false;
     };
-    // Suspend the whole subtree between the catcher and the emitter, unwinding the
-    // live `gas` back to the catcher's pool. Walk from the emitter down to just
-    // above the catcher: each METERED frame banks its current balance to its meter
-    // (the threaded `gas` is its live balance) and hands its caller-pool up; a
-    // loaned frame passes the pool through unchanged. After the walk `gas` is the
-    // catcher's own pool, and every metered frame in the routed-past subtree has a
-    // consistent meter balance — so a later discard (handler HALT / DROP_PAUSED)
-    // never over-refunds, and a resume re-reads the right balance.
-    for i in (j + 1..=top_idx).rev() {
-        if let Some(k) = stack[i].meter.clone() {
-            meters.insert(k, *gas);
-            if let Some(saved) = stack[i].saved_gas {
-                *gas = saved;
-            }
-        }
-    }
     let target = stack[j].target;
     let recv_iid = stack[j].instance_id;
+    // The handler runs the catcher's frame, so it is funded by the catcher's
+    // active meter (NOT the emitter's).
+    let recv_active = stack[j].active.clone();
     {
         let catcher_frame = frame_at_mut(stack, j);
         if let Some(inst) = payload {
@@ -1122,21 +1143,16 @@ fn route_yield(
         target,
         instance_id: recv_iid,
         catch_set: Vec::new(),
-        meter: None,
-        saved_gas: None,
+        active: recv_active,
     });
     true
 }
 
-/// The gas meter funding the running pool: the nearest metered frame at-or-below
-/// `idx`, following each entry's `target` to its InstanceEntry (a loaned frame
-/// spends its metered ancestor's pool; a handler ReferenceEntry's meter lives on
-/// its referent). `None` when the pool is host-budgeted (no metered frame).
+/// The gas meter funding the frame run by the entry at `idx` — the precomputed
+/// [`StackEntry::active`] (own meter, or inherited from the caller/catcher at
+/// push). O(1), unambiguous under yields.
 fn active_meter(stack: &[StackEntry], idx: usize) -> Option<Key> {
-    (0..=idx).rev().find_map(|i| {
-        let inst = stack[i].target;
-        stack[inst].meter.clone()
-    })
+    stack[idx].active.clone()
 }
 
 /// On gas exhaustion, inject a routed `kernel:oog` yield (payload =
@@ -1149,20 +1165,14 @@ fn active_meter(stack: &[StackEntry], idx: usize) -> Option<Key> {
 /// if routed; `false` if the pool is host-budgeted (no metered frame) or no
 /// receiver caught `kernel:oog` (the caller bubbles EXIT_OOG — host-stub root
 /// catch).
-fn try_oog_yield(
-    stack: &mut Vec<StackEntry>,
-    top_idx: usize,
-    gas: &mut i64,
-    meters: &mut BTreeMap<Key, i64>,
-    reattempt_pc: u32,
-) -> bool {
+fn try_oog_yield(stack: &mut Vec<StackEntry>, top_idx: usize, reattempt_pc: u32) -> bool {
     let Some(meter) = active_meter(stack, top_idx) else {
         return false;
     };
     frame_at_mut(stack, top_idx).pc = reattempt_pc;
     let oog_key = Key::from(&javm_cap::yield_cap::YK_OOG[..]);
     let payload = Some(javm_cap::gas_handle(&meter));
-    route_yield(stack, top_idx, &oog_key, payload, gas, meters)
+    route_yield(stack, top_idx, &oog_key, payload)
 }
 
 /// A yield handler (a ReferenceEntry activation) HALTed/REPLYed without resuming
@@ -1173,18 +1183,14 @@ fn try_oog_yield(
 /// handler's InstanceEntry (their frames, banked meters kept), then reflects that
 /// InstanceEntry's HALT exactly as a normal pop. Returns `true` when the stack
 /// drains.
-fn unwind_to_handler(
-    stack: &mut Vec<StackEntry>,
-    top_idx: usize,
-    return_value: u64,
-    gas: &mut i64,
-    meters: &mut BTreeMap<Key, i64>,
-) -> bool {
+fn unwind_to_handler(stack: &mut Vec<StackEntry>, top_idx: usize, return_value: u64) -> bool {
     let h_inst = stack[top_idx].target;
     // Drop the handler activation + the abandoned subtree above the handler's
-    // own frame; the handler's InstanceEntry becomes the top.
+    // own frame; the handler's InstanceEntry becomes the top. Gas is reconciled
+    // at the next loop top (the discarded metered frames bank naturally as the
+    // active meter changes back to the handler's).
     stack.truncate(h_inst + 1);
-    pop_and_reflect(stack, return_value, gas, meters)
+    pop_and_reflect(stack, return_value)
 }
 
 /// Pop the top frame; if a parent exists, reflect the popped child's
@@ -1193,31 +1199,14 @@ fn unwind_to_handler(
 /// `InstanceCap` from the frame's final mem/regs/pc (+ carried identity) and
 /// move it back into the parent's origin slot (the single-owner round trip).
 /// Returns `true` when the stack has been drained (the RPC caller hands a
-/// result back to the host).
-///
-/// Gas: when the popped frame was metered ([`StackEntry::meter`] = `Some(k)`),
-/// its remaining `gas` is written back to `meters[k]` and the caller's pool is
-/// restored from `saved_gas`. A loaned frame (`meter` = `None`) leaves `gas`
-/// threaded as-is (its remainder flows to the caller — the one-pool model).
-fn pop_and_reflect(
-    stack: &mut Vec<StackEntry>,
-    return_value: u64,
-    gas: &mut i64,
-    meters: &mut BTreeMap<Key, i64>,
-) -> bool {
+/// result back to the host). Gas is NOT touched here — the loop-top
+/// [`reconcile_active`] banks the popped frame's meter and loads the parent's on
+/// the next iteration.
+fn pop_and_reflect(stack: &mut Vec<StackEntry>, return_value: u64) -> bool {
     // A HALT/REPLY only pops an InstanceEntry — a ReferenceEntry (handler
     // activation) is removed by CALL_RESUME, and a handler that HALTs without
     // resuming is caught by the EXIT_HALT/OP_REPLY guards before this point.
-    let popped_entry = stack.pop().expect("non-empty");
-    // Metered frame: write the remaining balance back to its meter and restore
-    // the caller's pool (done before reflection — independent of the cap moves).
-    if let Some(k) = &popped_entry.meter {
-        meters.insert(k.clone(), *gas);
-        if let Some(saved) = popped_entry.saved_gas {
-            *gas = saved;
-        }
-    }
-    let mut popped = match popped_entry.kind {
+    let mut popped = match stack.pop().expect("non-empty").kind {
         EntryKind::Instance(boxed) => *boxed,
         EntryKind::Reference => unreachable!("pop_and_reflect on a ReferenceEntry"),
     };
@@ -1587,6 +1576,8 @@ enum YieldOutcome {
 fn dispatch_host_yield(
     frame: &mut KernelFrame,
     meters: &mut BTreeMap<Key, i64>,
+    gas: &mut i64,
+    active: &Option<Key>,
 ) -> Result<YieldOutcome, u32> {
     let sender_slot = Key::from((frame.regs[7] & 0xFF) as u8);
     let yield_key = match read_instance_cap(frame, &sender_slot) {
@@ -1671,14 +1662,20 @@ fn dispatch_host_yield(
         )
     } else if k == javm_cap::yield_cap::YK_SET_GAS_METER {
         // kernel:set_gas_meter(φ8=meter_key byte, φ9=value) -> previous (φ7).
-        // Atomically set the guest meter balance and return the previous (0 if
-        // absent) — the chain's topup / harvest primitive. The new balance takes
-        // effect when a frame next READS this meter (a CALL or CALL_RESUME of an
-        // instance whose gas_slots[0] names it), per the frame-entry metering
-        // model — it does not retroactively change a live pool.
+        // Atomically set the meter's balance, returning the previous — the chain's
+        // topup/harvest primitive. If `meter_key` is the CURRENTLY ACTIVE meter
+        // (e.g. a frame topping up the pool it itself loans from), the live `gas`
+        // is authoritative, so set it directly and return its value; otherwise the
+        // table entry is authoritative.
         let meter_key = Key::from((frame.regs[8] & 0xFF) as u8);
         let value = frame.regs[9] as i64;
-        let previous = meters.insert(meter_key, value).unwrap_or(0);
+        let previous = if active.as_ref() == Some(&meter_key) {
+            let p = *gas;
+            *gas = value;
+            p
+        } else {
+            meters.insert(meter_key, value).unwrap_or(0)
+        };
         frame.regs[7] = previous as u64;
         Ok(YieldOutcome::Inline)
     } else {
