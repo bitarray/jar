@@ -34,7 +34,7 @@ use ssz_derive::{Decode, Encode};
 /// Image: the program spec (code, endpoints, memory layout, slot
 /// declarations, pinned ro caps).
 ///
-/// `pinned_slots` and `yield_marker_slot` reference cnode slots; the
+/// `pinned_slots` and `yield_receiver_slot` reference cnode slots; the
 /// kernel installs declared pinned content into the Instance's cnode
 /// at `set_image` / `host_derive_spawn` time and treats them as
 /// read-only thereafter.
@@ -74,9 +74,10 @@ pub struct Image {
     /// honored at standalone (root) Instance bootstrap — a
     /// parented Instance receives its cnode from the spawner.
     pub initial_slots: BTreeMap<Key, InitialDataCap>,
-    /// Slot holding `Cap::Instance[YieldCatcher]`, if this Instance
-    /// catches yields. None = no catcher.
-    pub yield_marker_slot: Option<Key>,
+    /// Slot holding `Cap::Instance[YieldReceiver]` — the set of yield_keys this
+    /// Instance catches. The kernel snapshots it at each downward CALL and
+    /// consults the snapshot when routing a yield. None = catches no yields.
+    pub yield_receiver_slot: Option<Key>,
     /// Cnode slots holding the `Cap::Instance[Gas{meter_key}]` unit handles
     /// the kernel debits while this Instance runs. `gas_slots[0]` is the
     /// **active** meter (the kernel reads its `meter_key` at frame entry to
@@ -162,7 +163,7 @@ impl Image {
             memory_mappings: Vec::new(),
             pinned_slots: BTreeMap::new(),
             initial_slots: BTreeMap::new(),
-            yield_marker_slot: None,
+            yield_receiver_slot: None,
             gas_slots: Vec::new(),
             quota_slots: Vec::new(),
         }

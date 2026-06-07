@@ -79,7 +79,7 @@ fn parent_image(child_hash: CapHash) -> Image {
         memory_mappings: Vec::new(),
         pinned_slots,
         initial_slots: BTreeMap::new(),
-        yield_marker_slot: None,
+        yield_receiver_slot: None,
         gas_slots: Vec::new(),
         quota_slots: Vec::new(),
     }

@@ -38,7 +38,7 @@ use crate::layout::{
     RO_CAP_INDEX, RW_CAP_INDEX, STACK_CAP_INDEX,
 };
 use javm_cap::Key;
-use javm_cap::abi::BARE_YIELD_CATCHER_SLOT;
+use javm_cap::abi::BARE_YIELD_RECEIVER_SLOT;
 use javm_cap::image::{EndpointDef, Image, InitialDataCap, MemoryMapping, PinnedCap};
 use javm_cap::slot::SlotPath;
 use std::collections::BTreeMap;
@@ -537,7 +537,7 @@ pub fn link_elf(elf_data: &[u8]) -> Result<Image, TranspileError> {
         memory_mappings,
         pinned_slots,
         initial_slots,
-        yield_marker_slot: Some(Key::from(BARE_YIELD_CATCHER_SLOT)),
+        yield_receiver_slot: Some(Key::from(BARE_YIELD_RECEIVER_SLOT)),
         gas_slots: Vec::new(),
         quota_slots: Vec::new(),
     })

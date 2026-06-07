@@ -64,7 +64,7 @@ fn image_ssz_roundtrip() {
             size: 0x4000,
         },
     );
-    img.yield_marker_slot = Some(Key::from(9u8));
+    img.yield_receiver_slot = Some(Key::from(9u8));
 
     let bytes = ssz::Encode::as_ssz_bytes(&img);
     let decoded = Image::from_ssz_bytes(&bytes).expect("decode");
