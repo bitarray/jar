@@ -565,6 +565,19 @@ pub fn run_top(
                 let is_ecalli = info.exit_reason == EXIT_HOST_CALL;
                 let ecall_cost = javm_exec::gas_const::ecall_dynamic_cost(is_ecalli) as i64;
                 if gas < ecall_cost {
+                    // A metered frame re-attempts THIS ecall after a kernel:oog
+                    // topup (the ecall is a forced bb_start; `info.pc` is the
+                    // next instruction and custom-0 is 4 bytes). Unmetered /
+                    // uncaught → bubble EXIT_OOG.
+                    if try_oog_yield(
+                        &mut stack,
+                        top_idx,
+                        &mut gas,
+                        &mut meters,
+                        info.pc.saturating_sub(4),
+                    ) {
+                        continue;
+                    }
                     break LoopOutcome {
                         exit_reason: EXIT_OOG,
                         exit_arg: 0,
@@ -668,28 +681,20 @@ pub fn run_top(
                                     scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                                 };
                             }
-                            // Route `key` to an ancestor YieldReceiver: walk from
-                            // just below the emitter toward the root, SKIPPING all
-                            // frames of the emitting instance (§3
-                            // emitter-exclusion via `instance_id`); the nearest
-                            // entry whose SNAPSHOTTED catch-set contains `key`
-                            // catches it (single-resumer).
+                            // Route `key` to an ancestor YieldReceiver (the
+                            // payload is a copy of the emitted YieldSender). No
+                            // catcher → the emitter faults ("unhandled yield_key").
                             YieldOutcome::Route { key, sender_slot } => {
-                                let emitter_iid = stack[top_idx].instance_id;
-                                let mut catcher = None;
-                                for j in (0..top_idx).rev() {
-                                    if stack[j].instance_id == emitter_iid {
-                                        continue;
-                                    }
-                                    if stack[j].catch_set.binary_search(&key).is_ok() {
-                                        catcher = Some(j);
-                                        break;
-                                    }
-                                }
-                                let Some(j) = catcher else {
-                                    // No ancestor catches and the kernel root has
-                                    // no handler for this key → the emitter faults
-                                    // ("unhandled yield_key").
+                                let payload =
+                                    read_instance_cap(frame_at(&stack, top_idx), &sender_slot);
+                                if !route_yield(
+                                    &mut stack,
+                                    top_idx,
+                                    &key,
+                                    payload,
+                                    &mut gas,
+                                    &mut meters,
+                                ) {
                                     break LoopOutcome {
                                         exit_reason: EXIT_TRAP,
                                         exit_arg: ERR_YIELD_UNHANDLED,
@@ -697,40 +702,7 @@ pub fn run_top(
                                         gas_remaining: gas,
                                         scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                                     };
-                                };
-                                // Reflect a copy of the YieldSender into the
-                                // catcher's scratchpad slot[0] as the payload, and
-                                // flag φ[8] = YIELDED so a discriminating handler
-                                // can tell a yield from a plain CALL return.
-                                let payload = {
-                                    let emitter = frame_at(&stack, top_idx);
-                                    read_instance_cap(emitter, &sender_slot)
-                                };
-                                let target = stack[j].target;
-                                let recv_iid = stack[j].instance_id;
-                                {
-                                    let catcher_frame = frame_at_mut(&mut stack, j);
-                                    if let Some(inst) = payload {
-                                        catcher_frame.cnode.set_key(
-                                            &[javm_cap::abi::SCRATCHPAD_SLOT],
-                                            Some(CapHashOrRef::Owned(CachedCap::boxed(
-                                                Cap::Instance(inst),
-                                            ))),
-                                        );
-                                    }
-                                    catcher_frame.regs[8] = STATUS_YIELDED;
                                 }
-                                // Push the handler activation (a ReferenceEntry to
-                                // the catcher); the yielder stays on the stack
-                                // below as Waiting until the handler CALL_RESUMEs.
-                                stack.push(StackEntry {
-                                    kind: EntryKind::Reference,
-                                    target,
-                                    instance_id: recv_iid,
-                                    catch_set: Vec::new(),
-                                    meter: None,
-                                    saved_gas: None,
-                                });
                             }
                         }
                     }
@@ -758,11 +730,22 @@ pub fn run_top(
                         };
                         stack.pop();
                         let yielder_idx = stack.len() - 1;
-                        let yielder = frame_at_mut(&mut stack, yielder_idx);
-                        if let Some(cap) = response {
-                            yielder
-                                .cnode
-                                .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
+                        {
+                            let yielder = frame_at_mut(&mut stack, yielder_idx);
+                            if let Some(cap) = response {
+                                yielder
+                                    .cnode
+                                    .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
+                            }
+                        }
+                        // A metered yielder resumes on its meter's CURRENT balance
+                        // (a kernel:oog handler may have topped it up via
+                        // set_gas_meter); the handler's pool is saved to restore at
+                        // the yielder's HALT. A non-metered yielder keeps the
+                        // threaded pool (the loaned-pool / shared-subtree case).
+                        if let Some(k) = stack[yielder_idx].meter.clone() {
+                            stack[yielder_idx].saved_gas = Some(gas);
+                            gas = *meters.get(&k).unwrap_or(&0);
                         }
                     }
                     OP_HOST_CALL => {
@@ -786,6 +769,19 @@ pub fn run_top(
                             host_call_frame_cost(parent)?
                         };
                         if gas < frame_cost {
+                            // Metered caller re-attempts THIS host_call after a
+                            // kernel:oog topup (gated before any instance move, so
+                            // the re-attempt is clean). Unmetered / uncaught →
+                            // bubble EXIT_OOG.
+                            if try_oog_yield(
+                                &mut stack,
+                                top_idx,
+                                &mut gas,
+                                &mut meters,
+                                info.pc.saturating_sub(4),
+                            ) {
+                                continue;
+                            }
                             break LoopOutcome {
                                 exit_reason: EXIT_OOG,
                                 exit_arg: 0,
@@ -866,6 +862,17 @@ pub fn run_top(
             }
             _ => {
                 // PageFault (3), Panic (1), OOG (2), Trap (7), …
+                // An in-block OOG (the JIT's per-block gas gate) on a metered
+                // frame re-attempts the SAME block after a kernel:oog topup —
+                // `info.pc` is that block's bb_start (the gate is a pre-charge:
+                // the block was not entered and no gas was charged). Unmetered /
+                // uncaught OOG, and every other exit (fault/panic/trap), bubble
+                // verbatim.
+                if info.exit_reason == EXIT_OOG
+                    && try_oog_yield(&mut stack, top_idx, &mut gas, &mut meters, info.pc)
+                {
+                    continue;
+                }
                 break LoopOutcome {
                     exit_reason: info.exit_reason,
                     exit_arg: info.exit_arg,
@@ -1021,6 +1028,95 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
         )
     }
     .ok_or(ERR_JIT_FAILED)
+}
+
+/// Walk the kernel stack for a catcher of `key` (emitter-exclusion: skip every
+/// frame whose instance matches the top emitter's) and, if one is found, suspend
+/// the emitter and transfer control to the catcher as a yield handler:
+/// - a metered emitter banks its remaining balance to its meter and the catcher
+///   resumes on the emitter's saved caller-pool (a non-metered emitter loans its
+///   pool, which threads to the catcher unchanged);
+/// - `payload` (a YieldSender / `Gas` cap copy) reflects into the catcher's
+///   scratchpad slot[0] and φ[8] is flagged YIELDED;
+/// - a ReferenceEntry to the catcher is pushed (the yielder stays Waiting below,
+///   resumed later by `CALL_RESUME`).
+///
+/// Returns `true` if routed, `false` if no ancestor catches `key` — the caller
+/// decides (fault the emitter for a user key, or bubble EXIT_OOG for kernel:oog).
+fn route_yield(
+    stack: &mut Vec<StackEntry>,
+    top_idx: usize,
+    key: &Key,
+    payload: Option<InstanceCap>,
+    gas: &mut i64,
+    meters: &mut BTreeMap<Key, i64>,
+) -> bool {
+    let emitter_iid = stack[top_idx].instance_id;
+    let mut catcher = None;
+    for j in (0..top_idx).rev() {
+        if stack[j].instance_id == emitter_iid {
+            continue;
+        }
+        if stack[j].catch_set.binary_search(key).is_ok() {
+            catcher = Some(j);
+            break;
+        }
+    }
+    let Some(j) = catcher else {
+        return false;
+    };
+    // Suspend the emitter: a metered emitter banks its remaining balance, and the
+    // catcher resumes on the pool the emitter saved at its own CALL.
+    if let Some(k) = stack[top_idx].meter.clone() {
+        meters.insert(k, *gas);
+        if let Some(saved) = stack[top_idx].saved_gas {
+            *gas = saved;
+        }
+    }
+    let target = stack[j].target;
+    let recv_iid = stack[j].instance_id;
+    {
+        let catcher_frame = frame_at_mut(stack, j);
+        if let Some(inst) = payload {
+            catcher_frame.cnode.set_key(
+                &[javm_cap::abi::SCRATCHPAD_SLOT],
+                Some(CapHashOrRef::Owned(CachedCap::boxed(Cap::Instance(inst)))),
+            );
+        }
+        catcher_frame.regs[8] = STATUS_YIELDED;
+    }
+    stack.push(StackEntry {
+        kind: EntryKind::Reference,
+        target,
+        instance_id: recv_iid,
+        catch_set: Vec::new(),
+        meter: None,
+        saved_gas: None,
+    });
+    true
+}
+
+/// On gas exhaustion of a **metered** top frame, inject a routed `kernel:oog`
+/// yield (payload = its `Gas{meter_key}`) so a registered receiver (the chain)
+/// can top up the meter and `CALL_RESUME` — the frame then re-runs from
+/// `reattempt_pc` (a bb_start: the failing block's start, or the ecall's own
+/// pc). Returns `true` if routed (the catcher runs next iteration); `false` if
+/// the frame is unmetered or no receiver caught `kernel:oog` (the caller bubbles
+/// EXIT_OOG — the host-stub root catch).
+fn try_oog_yield(
+    stack: &mut Vec<StackEntry>,
+    top_idx: usize,
+    gas: &mut i64,
+    meters: &mut BTreeMap<Key, i64>,
+    reattempt_pc: u32,
+) -> bool {
+    let Some(meter) = stack[top_idx].meter.clone() else {
+        return false;
+    };
+    frame_at_mut(stack, top_idx).pc = reattempt_pc;
+    let oog_key = Key::from(&javm_cap::yield_cap::YK_OOG[..]);
+    let payload = Some(javm_cap::gas_handle(&meter));
+    route_yield(stack, top_idx, &oog_key, payload, gas, meters)
 }
 
 /// Pop the top frame; if a parent exists, reflect the popped child's
