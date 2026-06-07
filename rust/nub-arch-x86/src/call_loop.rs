@@ -120,13 +120,17 @@ const EXIT_TRAP: u32 = 7;
 
 const OP_REPLY: u32 = 0;
 /// `host_yield(sender_slot=φ[7], …)` — emit the yield_key carried by the
-/// YieldSender at `sender_slot`. `kernel:*` keys are caught by the kernel as
-/// the implicit ROOT receiver and handled INLINE (the guest resumes at the next
-/// instruction, like a hostcall — the "syscalls conceptually push a kernel
-/// frame but we don't actually push" model). Wired today: the pure-cap syscalls
-/// `kernel:mint_yield` / `kernel:merge_yield_receiver`. Gas/quota syscalls (need
-/// the meter table) and user-key routing to an ancestor YieldReceiver (needs
-/// suspension) are later stages.
+/// YieldSender at `sender_slot`. Pure-cap `kernel:*` syscalls
+/// (`kernel:mint_yield` / `kernel:merge_yield_receiver`) are caught by the
+/// kernel as the implicit ROOT receiver and handled INLINE — the guest resumes
+/// at the next instruction (the "syscalls conceptually push a kernel frame but
+/// we don't actually push" model). Everything else — a user key, or a
+/// `kernel:*` key not wired inline — is ROUTED: the loop walks the call stack
+/// from the emitter toward the root (skipping the emitter instance's own
+/// frames) and the nearest ancestor whose per-CALL snapshotted YieldReceiver
+/// contains the key catches it (push a ReferenceEntry, suspend the yielder;
+/// resumed by [`OP_CALL_RESUME`]). Gas/quota `kernel:*` syscalls (need the meter
+/// table) remain a later stage.
 const OP_HOST_YIELD: u32 = 16;
 const OP_DERIVE_SPAWN: u32 = 18;
 /// `host_image_hash_chain(src_slot=φ[7], dst_slot=φ[8])` — read the cap's
@@ -137,6 +141,19 @@ const OP_DERIVE_SPAWN: u32 = 18;
 /// (memcmp), so there is no separate `Cap::Type` kind or same-type host op.
 const OP_IMAGE_HASH_CHAIN: u32 = 20;
 const OP_HOST_CALL: u32 = 26;
+/// `call_resume()` — resume the Waiting yielder directly below this handler's
+/// ReferenceEntry (spec §4 CALL_RESUME). The handler's scratchpad (`slot[0]`)
+/// reflects to the yielder as its response; the ReferenceEntry pops; the yielder
+/// becomes the running top and continues at its post-yield PC. Faults if the top
+/// is not a handler activation (no outstanding yield to resume). New
+/// guest-kernel op number — needs no recompiler change (the recompiler surfaces
+/// `ecalli imm` → EXIT_HOST_CALL(imm) generically; dispatched here).
+const OP_CALL_RESUME: u32 = 27;
+
+/// φ[8] status a catcher sees when it resumes as a yield handler (vs. a normal
+/// CALL return). Forward-looking — a straight-line handler that unconditionally
+/// `call_resume`s ignores it; a discriminating handler branches on it.
+const STATUS_YIELDED: u64 = 1;
 
 /// Hard ceiling on the in-kernel call-stack depth. NOTE: with runtime eviction
 /// removed, every live frame keeps its ~24 KiB page table resident, so
@@ -175,6 +192,12 @@ const ERR_YIELD_UNHANDLED: u32 = 70;
 /// A `host_yield` operand slot did not hold the expected kernel-assisted
 /// Instance (YieldSender / YieldReceiver).
 const ERR_YIELD_BAD_SENDER: u32 = 71;
+/// A yield **handler** (a ReferenceEntry activation) ran to HALT/REPLY without
+/// `CALL_RESUME`-ing its Waiting yielder. Per sub-tree atomicity this should
+/// discard the abandoned yielder and fold the handler's HALT up to the
+/// referent's caller — a multi-frame unwind deferred to the DROP_PAUSED/Paused
+/// step. Until then it is a clean trap rather than a panic.
+const ERR_HANDLER_HALT: u32 = 72;
 
 /// One stack frame on the in-kernel call stack. Holds the running Image's
 /// identity hashes, the frame's **owned** `mem` DataCap + PVM register/PC
@@ -269,6 +292,113 @@ pub struct KernelFrame {
     runtime: Option<FrameRuntime>,
 }
 
+/// What a kernel call-stack entry runs.
+enum EntryKind {
+    /// A fresh invocation of an Instance — owns the running [`KernelFrame`].
+    /// Pushed by CALL; popped (and reflected) by HALT. Boxed so the stack `Vec`
+    /// element stays pointer-sized: a [`KernelFrame`] is large (~500 B) and a
+    /// `Reference` carries no frame, so an inline variant would bloat every
+    /// stack slot. One alloc per CALL is negligible beside the per-frame page
+    /// table build.
+    Instance(Box<KernelFrame>),
+    /// A **yield activation**: re-runs an earlier [`EntryKind::Instance`] (the
+    /// one at [`StackEntry::target`]) at its post-CALL continuation, with the
+    /// yield payload reflected into its scratchpad. It carries no frame of its
+    /// own — running the top of the stack runs the *referent's* frame — so one
+    /// Instance shares a single PC/regs/mem across its InstanceEntry and every
+    /// ReferenceEntry (spec §3 "same-instance entries share PC"). Pushed by a
+    /// routed `host_yield`; popped by `CALL_RESUME`.
+    Reference,
+}
+
+/// One entry on the in-kernel call stack. The stack drives control transfer:
+/// CALL pushes an [`EntryKind::Instance`], a routed `host_yield` pushes an
+/// [`EntryKind::Reference`], and HALT / `CALL_RESUME` pop. Exactly one entry —
+/// the top — is *Running*; every entry below it is *Waiting* (kernel-internal
+/// accounting, not a σ-visible Instance state).
+struct StackEntry {
+    kind: EntryKind,
+    /// Index of the [`EntryKind::Instance`] whose [`KernelFrame`] this entry
+    /// runs: its **own** index for an InstanceEntry, the **referent's** index
+    /// for a ReferenceEntry. Lower-or-equal to the entry's own index and stable
+    /// (entries below the top never move while the top exists).
+    target: usize,
+    /// Canonical Instance identity for **emitter-exclusion**: an InstanceEntry
+    /// gets a fresh id at CALL; a ReferenceEntry copies its referent's id, so
+    /// every stack entry of one Instance compares equal. Yield routing skips all
+    /// entries whose `instance_id` matches the emitter's (spec §3 "skip ALL
+    /// frames belonging to the emitting instance").
+    instance_id: u64,
+    /// The catch-list this entry offers to the subtree currently below it: a
+    /// **snapshot** of its Instance's `yield_receiver_slot` YieldReceiver taken
+    /// at this entry's most recent DOWNWARD CALL (a sorted, deduped key set;
+    /// empty until/unless this entry has called down). Static for the in-flight
+    /// sub-call — a frame cannot shrink its catch-set mid-flight to dodge a
+    /// descendant's yield (spec §3 "frozen for the sub-call").
+    catch_set: Vec<Key>,
+}
+
+impl StackEntry {
+    /// A fresh InstanceEntry at stack position `index` carrying a new
+    /// `instance_id`. `target` is its own index (it runs its own frame); the
+    /// catch-set is empty until its first downward CALL.
+    fn instance(frame: KernelFrame, index: usize, instance_id: u64) -> Self {
+        StackEntry {
+            kind: EntryKind::Instance(Box::new(frame)),
+            target: index,
+            instance_id,
+            catch_set: Vec::new(),
+        }
+    }
+}
+
+/// `&mut` to the [`KernelFrame`] the entry at `idx` runs, following a
+/// ReferenceEntry to its referent InstanceEntry. The referent is always an
+/// `Instance` (a Reference's `target` only ever names an InstanceEntry).
+fn frame_at_mut(stack: &mut [StackEntry], idx: usize) -> &mut KernelFrame {
+    let target = stack[idx].target;
+    match &mut stack[target].kind {
+        EntryKind::Instance(f) => f,
+        EntryKind::Reference => unreachable!("ReferenceEntry.target must be an InstanceEntry"),
+    }
+}
+
+/// Shared-borrow companion of [`frame_at_mut`].
+fn frame_at(stack: &[StackEntry], idx: usize) -> &KernelFrame {
+    let target = stack[idx].target;
+    match &stack[target].kind {
+        EntryKind::Instance(f) => f,
+        EntryKind::Reference => unreachable!("ReferenceEntry.target must be an InstanceEntry"),
+    }
+}
+
+/// Snapshot a frame's Instance `yield_receiver_slot` YieldReceiver as a sorted,
+/// deduped catch-set — the keys it will catch from the subtree of its *next*
+/// downward CALL (spec §3 per-CALL snapshot). Empty when the Image declares no
+/// receiver slot, the slot is empty, or it doesn't hold a YieldReceiver
+/// (catches nothing). Reads only; never mutates.
+fn snapshot_catch_set(frame: &KernelFrame) -> Vec<Key> {
+    let Some(img_arc) = CACHE.get(CapHashOrRef::Hash(frame.image_hash)) else {
+        return Vec::new();
+    };
+    let slot = match &*img_arc {
+        Cap::Image(i) => match &i.yield_receiver_slot {
+            Some(s) => s.clone(),
+            None => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+    match read_instance_cap(frame, &slot) {
+        Some(inst) => {
+            let mut keys = javm_cap::yield_receiver_keys(&inst).unwrap_or_default();
+            keys.sort();
+            keys.dedup();
+            keys
+        }
+        None => Vec::new(),
+    }
+}
+
 /// One cap-backed data mapping projected into the guest address space,
 /// lazily materialized (category #3). The #PF handler scans this list when a
 /// guest access faults inside ring 3; a hit identifies the page's **kind**
@@ -332,20 +462,27 @@ pub fn run_top(
     initial_gas: i64,
 ) -> Result<LoopOutcome, u32> {
     let top = build_frame_from_published(instance_hash, endpoint_idx, args)?;
-    let mut stack: Vec<KernelFrame> = Vec::with_capacity(8);
-    stack.push(top);
+    let mut stack: Vec<StackEntry> = Vec::with_capacity(8);
+    // Monotonic Instance identity for emitter-exclusion (§3). The top-level
+    // invocation is instance 0; every CALL mints the next id.
+    let mut next_iid: u64 = 0;
+    stack.push(StackEntry::instance(top, 0, next_iid));
+    next_iid += 1;
     let mut gas = initial_gas;
 
     let outcome = loop {
-        // Phase 1: run one ring-3 entry on the top frame.
+        let top_idx = stack.len() - 1;
+        // Phase 1: run one ring-3 entry on the top entry's frame (an
+        // InstanceEntry runs its own frame; a ReferenceEntry runs its
+        // referent's — the same Instance, sharing one PC/regs/mem).
         let info = {
-            let frame = stack.last_mut().expect("stack non-empty");
+            let frame = frame_at_mut(&mut stack, top_idx);
             run_one_entry(frame, gas)?
         };
         gas = info.gas_remaining;
-        // Mirror the JIT's post-exit state back into the top frame.
+        // Mirror the JIT's post-exit state back into the running frame.
         {
-            let frame = stack.last_mut().expect("stack non-empty");
+            let frame = frame_at_mut(&mut stack, top_idx);
             frame.regs = info.regs;
             frame.pc = info.pc;
         }
@@ -354,10 +491,22 @@ pub fn run_top(
         // we can mutate `stack` (push/pop) inside each arm.
         match info.exit_reason {
             EXIT_HALT => {
+                // A handler activation (ReferenceEntry) that HALTs without
+                // resuming its yielder needs the deferred multi-frame unwind →
+                // clean trap for now (never reflected by pop_and_reflect).
+                if stack[top_idx].target != top_idx {
+                    break LoopOutcome {
+                        exit_reason: EXIT_TRAP,
+                        exit_arg: ERR_HANDLER_HALT,
+                        return_value: info.regs[7],
+                        gas_remaining: gas,
+                        scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
+                    };
+                }
                 // Read the scratchpad head from the top frame BEFORE it is
                 // popped (and dropped) — only meaningful at the top-level HALT.
                 let head = if stack.len() == 1 {
-                    read_scratchpad_head(stack.last().expect("stack non-empty"))
+                    read_scratchpad_head(frame_at(&stack, top_idx))
                 } else {
                     [0u8; SCRATCHPAD_HEAD_LEN]
                 };
@@ -399,10 +548,22 @@ pub fn run_top(
                 };
                 match op {
                     OP_REPLY => {
+                        // A handler activation (ReferenceEntry) that REPLYs
+                        // without resuming its yielder → deferred unwind, clean
+                        // trap (see EXIT_HALT).
+                        if stack[top_idx].target != top_idx {
+                            break LoopOutcome {
+                                exit_reason: EXIT_TRAP,
+                                exit_arg: ERR_HANDLER_HALT,
+                                return_value: info.regs[7],
+                                gas_remaining: gas,
+                                scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
+                            };
+                        }
                         // Read the scratchpad head from the top frame before the
                         // pop (only meaningful at the top-level trampoline HALT).
                         let head = if stack.len() == 1 {
-                            read_scratchpad_head(stack.last().expect("stack non-empty"))
+                            read_scratchpad_head(frame_at(&stack, top_idx))
                         } else {
                             [0u8; SCRATCHPAD_HEAD_LEN]
                         };
@@ -423,7 +584,7 @@ pub fn run_top(
                     }
                     OP_DERIVE_SPAWN => {
                         let trapped = {
-                            let frame = stack.last_mut().expect("non-empty");
+                            let frame = frame_at_mut(&mut stack, top_idx);
                             dispatch_derive_spawn(frame)?
                         };
                         if trapped {
@@ -439,7 +600,7 @@ pub fn run_top(
                     }
                     OP_IMAGE_HASH_CHAIN => {
                         let trapped = {
-                            let frame = stack.last_mut().expect("non-empty");
+                            let frame = frame_at_mut(&mut stack, top_idx);
                             dispatch_image_hash_chain(frame)?
                         };
                         if trapped {
@@ -454,12 +615,95 @@ pub fn run_top(
                         }
                     }
                     OP_HOST_YIELD => {
-                        let trapped = {
-                            let frame = stack.last_mut().expect("non-empty");
+                        let outcome = {
+                            let frame = frame_at_mut(&mut stack, top_idx);
                             dispatch_host_yield(frame)?
                         };
-                        if trapped {
+                        match outcome {
+                            // A kernel-root pure-cap syscall handled inline; the
+                            // guest resumes at the next instruction (the
+                            // "conceptually push a kernel frame but don't" path).
+                            YieldOutcome::Inline => {}
                             // Bad/empty sender slot or pinned dst → guest trap.
+                            YieldOutcome::Trap => {
+                                break LoopOutcome {
+                                    exit_reason: EXIT_TRAP,
+                                    exit_arg: 0,
+                                    return_value: info.regs[7],
+                                    gas_remaining: gas,
+                                    scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
+                                };
+                            }
+                            // Route `key` to an ancestor YieldReceiver: walk from
+                            // just below the emitter toward the root, SKIPPING all
+                            // frames of the emitting instance (§3
+                            // emitter-exclusion via `instance_id`); the nearest
+                            // entry whose SNAPSHOTTED catch-set contains `key`
+                            // catches it (single-resumer).
+                            YieldOutcome::Route { key, sender_slot } => {
+                                let emitter_iid = stack[top_idx].instance_id;
+                                let mut catcher = None;
+                                for j in (0..top_idx).rev() {
+                                    if stack[j].instance_id == emitter_iid {
+                                        continue;
+                                    }
+                                    if stack[j].catch_set.binary_search(&key).is_ok() {
+                                        catcher = Some(j);
+                                        break;
+                                    }
+                                }
+                                let Some(j) = catcher else {
+                                    // No ancestor catches and the kernel root has
+                                    // no handler for this key → the emitter faults
+                                    // ("unhandled yield_key").
+                                    break LoopOutcome {
+                                        exit_reason: EXIT_TRAP,
+                                        exit_arg: ERR_YIELD_UNHANDLED,
+                                        return_value: info.regs[7],
+                                        gas_remaining: gas,
+                                        scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
+                                    };
+                                };
+                                // Reflect a copy of the YieldSender into the
+                                // catcher's scratchpad slot[0] as the payload, and
+                                // flag φ[8] = YIELDED so a discriminating handler
+                                // can tell a yield from a plain CALL return.
+                                let payload = {
+                                    let emitter = frame_at(&stack, top_idx);
+                                    read_instance_cap(emitter, &sender_slot)
+                                };
+                                let target = stack[j].target;
+                                let recv_iid = stack[j].instance_id;
+                                {
+                                    let catcher_frame = frame_at_mut(&mut stack, j);
+                                    if let Some(inst) = payload {
+                                        catcher_frame.cnode.set_key(
+                                            &[javm_cap::abi::SCRATCHPAD_SLOT],
+                                            Some(CapHashOrRef::Owned(CachedCap::boxed(
+                                                Cap::Instance(inst),
+                                            ))),
+                                        );
+                                    }
+                                    catcher_frame.regs[8] = STATUS_YIELDED;
+                                }
+                                // Push the handler activation (a ReferenceEntry to
+                                // the catcher); the yielder stays on the stack
+                                // below as Waiting until the handler CALL_RESUMEs.
+                                stack.push(StackEntry {
+                                    kind: EntryKind::Reference,
+                                    target,
+                                    instance_id: recv_iid,
+                                    catch_set: Vec::new(),
+                                });
+                            }
+                        }
+                    }
+                    OP_CALL_RESUME => {
+                        // Resume the Waiting yielder directly below this handler
+                        // activation. The top MUST be a ReferenceEntry (we are
+                        // running as a yield handler); an InstanceEntry top has no
+                        // outstanding yield to resume → trap.
+                        if stack[top_idx].target == top_idx {
                             break LoopOutcome {
                                 exit_reason: EXIT_TRAP,
                                 exit_arg: 0,
@@ -467,6 +711,22 @@ pub fn run_top(
                                 gas_remaining: gas,
                                 scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                             };
+                        }
+                        // Reflect the handler's scratchpad slot[0] (its response)
+                        // to the yielder, pop the ReferenceEntry, and let the
+                        // yielder become the running top (it continues at its
+                        // post-yield PC next iteration).
+                        let response = {
+                            let handler = frame_at_mut(&mut stack, top_idx);
+                            handler.cnode.take_key(&[javm_cap::abi::SCRATCHPAD_SLOT])
+                        };
+                        stack.pop();
+                        let yielder_idx = stack.len() - 1;
+                        let yielder = frame_at_mut(&mut stack, yielder_idx);
+                        if let Some(cap) = response {
+                            yielder
+                                .cnode
+                                .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
                         }
                     }
                     OP_HOST_CALL => {
@@ -486,7 +746,7 @@ pub fn run_top(
                         // never a gas discount — so gas is independent of the
                         // node-local compile/PT cache (gas_const::call_frame_cost).
                         let frame_cost = {
-                            let parent = stack.last().expect("non-empty");
+                            let parent = frame_at(&stack, top_idx);
                             host_call_frame_cost(parent)?
                         };
                         if gas < frame_cost {
@@ -499,8 +759,17 @@ pub fn run_top(
                             };
                         }
                         gas -= frame_cost;
+                        // Snapshot the caller's catch-set at this downward CALL
+                        // (§3): the keys it will catch from the callee's whole
+                        // subtree. Captured from the caller's CURRENT
+                        // `yield_receiver_slot`, stored on the caller entry, and
+                        // frozen for the sub-call — yield routing consults it.
+                        let catch_set = {
+                            let parent = frame_at(&stack, top_idx);
+                            snapshot_catch_set(parent)
+                        };
                         let mut child = {
-                            let parent = stack.last_mut().expect("non-empty");
+                            let parent = frame_at_mut(&mut stack, top_idx);
                             dispatch_host_call(parent)?
                         };
                         // Scratchpad: MOVE the caller's slot[0] into the
@@ -508,7 +777,7 @@ pub fn run_top(
                         // the callee's image-default slot[0], if any, is
                         // overwritten by the caller-provided scratchpad.
                         {
-                            let parent = stack.last_mut().expect("non-empty");
+                            let parent = frame_at_mut(&mut stack, top_idx);
                             if let Some(cap) =
                                 parent.cnode.take_key(&[javm_cap::abi::SCRATCHPAD_SLOT])
                             {
@@ -522,7 +791,10 @@ pub fn run_top(
                         // `MAX_DEPTH` (interim) / the cnode nesting limit
                         // (target), so the resident page-table set is bounded
                         // structurally rather than by an LRU cap.
-                        stack.push(child);
+                        stack[top_idx].catch_set = catch_set;
+                        let child_idx = stack.len();
+                        stack.push(StackEntry::instance(child, child_idx, next_iid));
+                        next_iid += 1;
                     }
                     // Anything else (MGMT ops, SET_IMAGE, HOST_YIELD,
                     // arbitrary `ecalli imm`, …) is not in-kernel-
@@ -708,8 +980,14 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
 /// move it back into the parent's origin slot (the single-owner round trip).
 /// Returns `true` when the stack has been drained (the RPC caller hands a
 /// result back to the host).
-fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
-    let mut popped = stack.pop().expect("non-empty");
+fn pop_and_reflect(stack: &mut Vec<StackEntry>, return_value: u64) -> bool {
+    // A HALT/REPLY only pops an InstanceEntry — a ReferenceEntry (handler
+    // activation) is removed by CALL_RESUME, and a handler that HALTs without
+    // resuming is caught by the EXIT_HALT/OP_REPLY guards before this point.
+    let mut popped = match stack.pop().expect("non-empty").kind {
+        EntryKind::Instance(boxed) => *boxed,
+        EntryKind::Reference => unreachable!("pop_and_reflect on a ReferenceEntry"),
+    };
 
     if stack.is_empty() {
         // Top-level HALT: no parent to park the runtime in, so drop it (its
@@ -763,7 +1041,11 @@ fn pop_and_reflect(stack: &mut Vec<KernelFrame>, return_value: u64) -> bool {
         }
     };
 
-    let parent = stack.last_mut().unwrap();
+    // The parent is the entry directly below; follow a ReferenceEntry to the
+    // referent frame so a child of a handler activation reflects into the
+    // handler's Instance (which spawned/called it).
+    let parent_idx = stack.len() - 1;
+    let parent = frame_at_mut(stack, parent_idx);
     parent.regs[7] = return_value;
     if let Some(cap) = scratch {
         parent
@@ -1038,32 +1320,51 @@ fn read_instance_cap(frame: &KernelFrame, slot: &Key) -> Option<InstanceCap> {
     }
 }
 
-/// `host_yield(sender_slot=φ[7], …)`. Reads the `YieldSender` at `sender_slot`,
-/// extracts its yield_key, and — for a `kernel:*` key the kernel handles as the
-/// implicit root receiver — performs the syscall INLINE and resumes the guest
-/// (`Ok(false)`, like derive_spawn). Returns `Ok(true)` to TRAP (bad/empty
-/// sender, pinned dst, malformed operand); `Err(code)` for a yield_key not yet
-/// handled here (user keys, or kernel:* syscalls deferred to later stages).
+/// Outcome of a `host_yield`, classified by [`dispatch_host_yield`] for the
+/// call loop to act on.
+enum YieldOutcome {
+    /// A `kernel:*` pure-cap syscall the kernel handled inline as the implicit
+    /// root receiver (no stack push); the guest resumes at the next instruction.
+    Inline,
+    /// The operand was malformed (bad/empty sender, pinned dst, wrong cap kind)
+    /// → trap the emitter.
+    Trap,
+    /// Not handled inline → route `key` to an ancestor YieldReceiver. `key` is
+    /// the YieldSender's yield_key; `sender_slot` names the YieldSender so the
+    /// loop can reflect a copy of it to the catcher as the yield payload.
+    Route { key: Key, sender_slot: Key },
+}
+
+/// `host_yield(sender_slot=φ[7], …)`. Reads the `YieldSender` at `sender_slot`
+/// and classifies the yield: a `kernel:*` pure-cap syscall (mint_yield,
+/// merge_yield_receiver) is performed INLINE as the implicit root receiver
+/// ([`YieldOutcome::Inline`]); a malformed operand traps
+/// ([`YieldOutcome::Trap`]); anything else — a user key, or a `kernel:*` key not
+/// handled inline — is routed to an ancestor YieldReceiver by the call loop
+/// ([`YieldOutcome::Route`]). `Err(code)` is reserved for an internal cnode
+/// failure (loud, not a guest-visible trap).
 ///
 /// V1 single-byte ABI: all slot operands are the low byte of their φ register.
 /// `kernel:mint_yield`: φ[8] = new yield_key byte, φ[9] = YieldSender dst,
 /// φ[10] = YieldReceiver dst. `kernel:merge_yield_receiver`: φ[8] = receiver A
 /// slot, φ[9] = receiver B slot, φ[10] = dst slot.
-fn dispatch_host_yield(frame: &mut KernelFrame) -> Result<bool, u32> {
+fn dispatch_host_yield(frame: &mut KernelFrame) -> Result<YieldOutcome, u32> {
     let sender_slot = Key::from((frame.regs[7] & 0xFF) as u8);
     let yield_key = match read_instance_cap(frame, &sender_slot) {
         Some(inst) => match javm_cap::yield_sender_key(&inst) {
             Some(k) => k,
-            None => return Ok(true), // not a YieldSender → trap
+            None => return Ok(YieldOutcome::Trap), // not a YieldSender → trap
         },
-        None => return Ok(true), // empty / non-Instance sender slot → trap
+        None => return Ok(YieldOutcome::Trap), // empty / non-Instance sender → trap
     };
 
-    // Only kernel:* keys are caught here (kernel = implicit root receiver).
-    // Routing a user key to an ancestor YieldReceiver needs the suspension
-    // mechanism — a later stage.
+    // User keys (and any kernel:* key not wired inline below) route to an
+    // ancestor YieldReceiver; the loop walks the stack and suspends the emitter.
     if !javm_cap::is_kernel_yield_key(&yield_key) {
-        return Err(ERR_YIELD_UNHANDLED);
+        return Ok(YieldOutcome::Route {
+            key: yield_key,
+            sender_slot,
+        });
     }
     let k = yield_key.as_slice();
 
@@ -1074,7 +1375,7 @@ fn dispatch_host_yield(frame: &mut KernelFrame) -> Result<bool, u32> {
         if frame.pinned.binary_search(&sender_dst).is_ok()
             || frame.pinned.binary_search(&receiver_dst).is_ok()
         {
-            return Ok(true);
+            return Ok(YieldOutcome::Trap);
         }
         let sender = Cap::Instance(javm_cap::yield_sender(&new_key));
         let receiver = Cap::Instance(javm_cap::yield_receiver(&[new_key]));
@@ -1092,19 +1393,19 @@ fn dispatch_host_yield(frame: &mut KernelFrame) -> Result<bool, u32> {
                 Some(CapHashOrRef::Owned(CachedCap::boxed(receiver))),
             )
             .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
-        Ok(false)
+        Ok(YieldOutcome::Inline)
     } else if k == javm_cap::yield_cap::YK_MERGE_YIELD_RECEIVER {
         let a_slot = Key::from((frame.regs[8] & 0xFF) as u8);
         let b_slot = Key::from((frame.regs[9] & 0xFF) as u8);
         let dst = Key::from((frame.regs[10] & 0xFF) as u8);
         if frame.pinned.binary_search(&dst).is_ok() {
-            return Ok(true);
+            return Ok(YieldOutcome::Trap);
         }
         let a = read_instance_cap(frame, &a_slot).ok_or(ERR_YIELD_BAD_SENDER)?;
         let b = read_instance_cap(frame, &b_slot).ok_or(ERR_YIELD_BAD_SENDER)?;
         let merged = match javm_cap::merge_yield_receivers(&a, &b) {
             Some(m) => m,
-            None => return Ok(true), // operands not both YieldReceivers → trap
+            None => return Ok(YieldOutcome::Trap), // operands not both receivers
         };
         frame
             .cnode
@@ -1113,11 +1414,16 @@ fn dispatch_host_yield(frame: &mut KernelFrame) -> Result<bool, u32> {
                 Some(CapHashOrRef::Owned(CachedCap::boxed(Cap::Instance(merged)))),
             )
             .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
-        Ok(false)
+        Ok(YieldOutcome::Inline)
     } else {
-        // kernel:set_gas_meter / mint_gas / oog / … need the (guest-side) meter
-        // table or the suspension mechanism — later stages.
-        Err(ERR_YIELD_UNHANDLED)
+        // A kernel:* key not wired inline (set_gas_meter / mint_gas / oog / …):
+        // route it. The kernel root catches kernel:* keys the chain registered
+        // in its YieldReceiver (e.g. kernel:oog); an unregistered key finds no
+        // catcher and the emitter faults.
+        Ok(YieldOutcome::Route {
+            key: yield_key,
+            sender_slot,
+        })
     }
 }
 
