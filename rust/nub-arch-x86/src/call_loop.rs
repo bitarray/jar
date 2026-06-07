@@ -1862,11 +1862,10 @@ fn build_frame_from_published(
     let arc = CACHE
         .get(CapHashOrRef::Hash(*instance_hash))
         .ok_or(ERR_INSTANCE_NOT_FOUND)?;
-    let (image_hash, image_hash_chain, inst_regs, mem, root_cnode) = match &*arc {
+    let (image_hash, image_hash_chain, mem, root_cnode) = match &*arc {
         Cap::Instance(i) => (
             i.image_hash,
             i.image_hash_chain,
-            i.regs,
             i.mem.clone(),
             root_cnode_hash(&i.root_cnode),
         ),
@@ -1878,7 +1877,6 @@ fn build_frame_from_published(
         None,
         endpoint_idx,
         args,
-        Some(&inst_regs),
         mem,
         root_cnode,
     )
@@ -1914,7 +1912,6 @@ fn build_frame_from_owned(
     let InstanceCap {
         image_hash,
         image_hash_chain,
-        regs,
         mem,
         root_cnode,
         ..
@@ -1925,7 +1922,6 @@ fn build_frame_from_owned(
         Some(origin_slot),
         endpoint_idx,
         args,
-        Some(&regs),
         mem,
         root_cnode_hash(&root_cnode),
     )
@@ -1946,7 +1942,6 @@ fn build_frame_inner(
     owned_origin: Option<Key>,
     endpoint_idx: u32,
     args: [u64; 4],
-    inst_regs: Option<&[u64; NUM_REGS]>,
     mem: DataCap,
     root_cnode: Option<CapHash>,
 ) -> Result<KernelFrame, u32> {
@@ -1969,14 +1964,13 @@ fn build_frame_inner(
         .map(|(_, ep)| ep)
         .ok_or(ERR_ENDPOINT_OOB)?;
 
+    // Spec CALL convention (_index.md §4): φ = endpoint.initial_regs, then
+    // φ[7..11] = args, all other φ = 0. A CALL is a fresh per-invocation register
+    // file — the Instance's SAVED regs do NOT seed it (a sub-VM persists across
+    // CALLs via its memory/CoW overlay, not its registers). CALL_RESUME, which
+    // does restore saved regs, runs the live Waiting frame in place and never
+    // reaches this builder.
     let mut regs = ep.initial_regs;
-    if let Some(inst_regs) = inst_regs {
-        for (i, v) in inst_regs.iter().enumerate() {
-            if *v != 0 {
-                regs[i] = *v;
-            }
-        }
-    }
     for (i, v) in args.iter().enumerate() {
         regs[7 + i] = *v;
     }
