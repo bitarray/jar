@@ -752,20 +752,28 @@ pub fn run_top(
                                     .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
                             }
                         }
-                        // Gas: the handler's pool must be restored when control
-                        // eventually returns to the catcher — i.e. when the
-                        // catcher's DIRECT child (the bottom of the routed-past
-                        // subtree, == the yielder in the common single-level case)
-                        // HALTs back up. Stash the handler's pool on that child if
-                        // it is metered (its `saved_gas` is what its HALT restores).
-                        let catcher_child = catcher_idx + 1;
-                        if stack[catcher_child].meter.is_some() {
-                            stack[catcher_child].saved_gas = Some(gas);
+                        // Gas across the routed-past subtree (catcher_idx+1 ..=
+                        // yielder_idx), which may mix metered and loaned frames:
+                        //
+                        // (a) The handler's post-spend pool returns to the catcher
+                        //     via the subtree HALTing up. The frame whose
+                        //     `saved_gas` restores the catcher's pool is the FIRST
+                        //     metered frame from the catcher (a loaned prefix just
+                        //     threads gas through). Stash the handler pool there.
+                        //     If the whole subtree is loaned, gas threads up
+                        //     unchanged (no stash) — the catcher's shared pool.
+                        let subtree = catcher_idx + 1..=yielder_idx;
+                        if let Some(i) = subtree.clone().find(|&i| stack[i].meter.is_some()) {
+                            stack[i].saved_gas = Some(gas);
                         }
-                        // The yielder resumes on its meter's CURRENT balance (a
-                        // kernel:oog handler may have topped it up). A non-metered
-                        // yielder keeps the threaded pool (loaned / shared subtree).
-                        if let Some(k) = stack[yielder_idx].meter.clone() {
+                        // (b) The yielder resumes on its ACTIVE meter's CURRENT
+                        //     balance (a kernel:oog handler may have topped it up):
+                        //     the nearest metered frame from the yielder toward the
+                        //     catcher (itself if metered, else its metered ancestor
+                        //     it loans from). If none in the subtree (all loaned to
+                        //     the catcher), it keeps the threaded handler pool.
+                        if let Some(i) = subtree.rev().find(|&i| stack[i].meter.is_some()) {
+                            let k = stack[i].meter.clone().expect("metered");
                             gas = *meters.get(&k).unwrap_or(&0);
                         }
                     }
@@ -1120,13 +1128,27 @@ fn route_yield(
     true
 }
 
-/// On gas exhaustion of a **metered** top frame, inject a routed `kernel:oog`
-/// yield (payload = its `Gas{meter_key}`) so a registered receiver (the chain)
-/// can top up the meter and `CALL_RESUME` — the frame then re-runs from
-/// `reattempt_pc` (a bb_start: the failing block's start, or the ecall's own
-/// pc). Returns `true` if routed (the catcher runs next iteration); `false` if
-/// the frame is unmetered or no receiver caught `kernel:oog` (the caller bubbles
-/// EXIT_OOG — the host-stub root catch).
+/// The gas meter funding the running pool: the nearest metered frame at-or-below
+/// `idx`, following each entry's `target` to its InstanceEntry (a loaned frame
+/// spends its metered ancestor's pool; a handler ReferenceEntry's meter lives on
+/// its referent). `None` when the pool is host-budgeted (no metered frame).
+fn active_meter(stack: &[StackEntry], idx: usize) -> Option<Key> {
+    (0..=idx).rev().find_map(|i| {
+        let inst = stack[i].target;
+        stack[inst].meter.clone()
+    })
+}
+
+/// On gas exhaustion, inject a routed `kernel:oog` yield (payload =
+/// `Gas{meter_key}` of the meter funding the depleted pool) so a registered
+/// receiver (the chain) can top up the meter and `CALL_RESUME` — the frame then
+/// re-runs from `reattempt_pc` (a bb_start: the failing block's start, or the
+/// ecall's own pc). The depleted pool belongs to the ACTIVE meter (nearest
+/// metered ancestor), which may live below a loaned frame or on a handler
+/// ReferenceEntry's referent — not necessarily on the top entry. Returns `true`
+/// if routed; `false` if the pool is host-budgeted (no metered frame) or no
+/// receiver caught `kernel:oog` (the caller bubbles EXIT_OOG — host-stub root
+/// catch).
 fn try_oog_yield(
     stack: &mut Vec<StackEntry>,
     top_idx: usize,
@@ -1134,7 +1156,7 @@ fn try_oog_yield(
     meters: &mut BTreeMap<Key, i64>,
     reattempt_pc: u32,
 ) -> bool {
-    let Some(meter) = stack[top_idx].meter.clone() else {
+    let Some(meter) = active_meter(stack, top_idx) else {
         return false;
     };
     frame_at_mut(stack, top_idx).pc = reattempt_pc;
