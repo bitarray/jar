@@ -1139,8 +1139,14 @@ fn build_frame_from_published(
     let arc = CACHE
         .get(CapHashOrRef::Hash(*instance_hash))
         .ok_or(ERR_INSTANCE_NOT_FOUND)?;
-    let (image_hash, image_hash_chain, inst_regs, mem) = match &*arc {
-        Cap::Instance(i) => (i.image_hash, i.image_hash_chain, i.regs, i.mem.clone()),
+    let (image_hash, image_hash_chain, inst_regs, mem, root_cnode) = match &*arc {
+        Cap::Instance(i) => (
+            i.image_hash,
+            i.image_hash_chain,
+            i.regs,
+            i.mem.clone(),
+            root_cnode_hash(&i.root_cnode),
+        ),
         _ => return Err(ERR_INSTANCE_KIND),
     };
     build_frame_inner(
@@ -1151,7 +1157,19 @@ fn build_frame_from_published(
         args,
         Some(&inst_regs),
         mem,
+        root_cnode,
     )
+}
+
+/// The root-cnode content hash to seed a frame from, or `None` when there is no
+/// persistent cnode to load: an inline `Owned` root cnode (mid-mutation — not a
+/// published instance) or the all-zero spawn-time placeholder a `derive_spawn`'d
+/// sub-VM carries (see [`dispatch_derive_spawn`] / [`pop_and_reflect`]).
+fn root_cnode_hash(root_cnode: &CapHashOrRef) -> Option<CapHash> {
+    match root_cnode {
+        CapHashOrRef::Hash(h) if *h != [0u8; 32] => Some(*h),
+        _ => None,
+    }
 }
 
 /// Build a frame by **moving** an `Owned` `Cap::Instance` into it: the
@@ -1175,6 +1193,7 @@ fn build_frame_from_owned(
         image_hash_chain,
         regs,
         mem,
+        root_cnode,
         ..
     } = inst;
     build_frame_inner(
@@ -1185,6 +1204,7 @@ fn build_frame_from_owned(
         args,
         Some(&regs),
         mem,
+        root_cnode_hash(&root_cnode),
     )
 }
 
@@ -1205,6 +1225,7 @@ fn build_frame_inner(
     args: [u64; 4],
     inst_regs: Option<&[u64; NUM_REGS]>,
     mem: DataCap,
+    root_cnode: Option<CapHash>,
 ) -> Result<KernelFrame, u32> {
     let img_arc = CACHE
         .get(CapHashOrRef::Hash(image_hash))
@@ -1238,7 +1259,34 @@ fn build_frame_inner(
     }
     let pc = ep.entry_pc as u32;
 
-    let mut cnode = CNodeCap::new();
+    let mut cnode: CNodeCap<Box<CachedCap>> = CNodeCap::new();
+    // Seed the persistent state from the instance's root cnode first. This is
+    // how arbitrary caps — `Cap::Instance` (YieldSenders, sub-VM handles) that
+    // can't be pinned, plus carried-over mutable slots — flow to the guest. A
+    // published root cnode holds only `Hash` entries; an inline `Owned` (in
+    // principle) deep-clones into the frame's `CachedCap` form. Entries are
+    // copied by raw radix key (the cnode is keyed by `Hasher(Key)`, so the
+    // logical key isn't recoverable to re-`set`).
+    if let Some(rc) = root_cnode {
+        let rc_arc = CACHE
+            .get(CapHashOrRef::Hash(rc))
+            .ok_or(ERR_INSTANCE_NOT_FOUND)?;
+        let Cap::CNode(cn) = &*rc_arc else {
+            return Err(ERR_INSTANCE_KIND);
+        };
+        for (k, mo) in cn.slots.iter() {
+            if let MissingOr::Materialized(t) = mo {
+                let conv = match t {
+                    CapHashOrRef::Hash(h) => CapHashOrRef::Hash(*h),
+                    CapHashOrRef::Owned(b) => CapHashOrRef::Owned(CachedCap::boxed((**b).clone())),
+                };
+                cnode.slots.insert(*k, MissingOr::Materialized(conv));
+            }
+        }
+    }
+    // Image pinned slots overlay the root-cnode state (image-authoritative:
+    // pinned content is swapped as a unit at set_image), then initial slots
+    // fill only still-empty slots (bootstrap-only).
     for e in img.pinned.iter() {
         cnode
             .set(&e.slot, Some(CapHashOrRef::Hash(e.cap_hash)))
