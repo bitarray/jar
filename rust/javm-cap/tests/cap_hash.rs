@@ -1,6 +1,6 @@
 use javm_cap::{
     CNodeCap, Cap, CapHashOrRef, DataCap, ImageCap, InstanceCap, Key, NUM_REGS, PAGE_SIZE,
-    PageBytes, PageRef, PageSlab, PageSlot, TypeCap,
+    PageBytes, PageRef, PageSlab, PageSlot,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -18,32 +18,13 @@ fn data_cap_with_pages(pages: Vec<PageSlot>) -> Cap {
 }
 
 #[test]
-fn type_cap_hash_deterministic() {
-    let chain = [0xAA; 32];
-    let a: Cap = Cap::Type(TypeCap {
-        image_hash_chain: chain,
-    });
-    let b: Cap = Cap::Type(TypeCap {
-        image_hash_chain: chain,
-    });
-    assert_eq!(a.cap_hash(), b.cap_hash());
-    // Different chain → different hash.
-    let c: Cap = Cap::Type(TypeCap {
-        image_hash_chain: [0xBB; 32],
-    });
-    assert_ne!(a.cap_hash(), c.cap_hash());
-}
-
-#[test]
 fn cap_variants_have_distinct_hashes() {
     // The Union mix_in_selector ensures two caps whose payloads
     // happen to merkleize to the same root still differ at the
     // outer hash. Use the simplest distinguishable payloads.
-    let t: Cap = Cap::Type(TypeCap {
-        image_hash_chain: [0; 32],
-    });
+    let d: Cap = Cap::Data(DataCap::empty());
     let cn: Cap = Cap::CNode(CNodeCap::new());
-    assert_ne!(t.cap_hash(), cn.cap_hash());
+    assert_ne!(d.cap_hash(), cn.cap_hash());
 }
 
 #[test]

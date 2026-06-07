@@ -1,7 +1,7 @@
 //! `Cap` — cap enum + shared constants.
 //!
-//! The five Cap variants live one-per-submodule under this directory:
-//! [`cnode`], [`data`], [`image`], [`instance`], [`page`] (a `data`
+//! The four Cap variants live one-per-submodule under this directory:
+//! [`cnode`], [`data`], [`image`], [`instance`] (plus [`page`], a `data`
 //! detail). The root [`Cap`] enum dispatches to those structs.
 //!
 //! Cap types and their inner storage use the default `Global` allocator
@@ -46,10 +46,10 @@ pub const MAX_SOURCE_DEPTH: usize = 8;
 /// Maximum number of endpoints per Image.
 pub const MAX_ENDPOINTS: usize = 64;
 
-/// One of the five v3 cap kinds.
+/// One of the four v3 cap kinds.
 ///
 /// **SSZ note**: the `HashTreeRoot` derive treats `Cap` as an SSZ
-/// Union over the five variants. Each variant's selector provides the
+/// Union over the four variants. Each variant's selector provides the
 /// domain separation that the legacy byte-protocol kind tags
 /// (`0x10..0x50`) provided; the per-variant root is computed by that
 /// variant's own `HashTreeRoot` impl. We do not derive `Encode +
@@ -76,27 +76,6 @@ pub enum Cap {
     Data(DataCap),
     #[ssz(selector = 3)]
     CNode(CNodeCap),
-    #[ssz(selector = 4)]
-    Type(TypeCap),
-}
-
-/// `Cap::Type` payload. Pure identifier; no slot references.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-    Hash,
-    ssz_derive::Encode,
-    ssz_derive::Decode,
-    ssz_derive::HashTreeRoot,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
-pub struct TypeCap {
-    pub image_hash_chain: CapHash,
 }
 
 impl Cap {

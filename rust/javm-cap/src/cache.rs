@@ -675,7 +675,7 @@ impl<S: BuildHasher> CacheDirectory<S> {
                 }
             }
             Cap::Instance(inst) => self.settle_target(&mut inst.root_cnode)?,
-            Cap::Data(_) | Cap::Image(_) | Cap::Type(_) => {}
+            Cap::Data(_) | Cap::Image(_) => {}
         }
         Ok(())
     }

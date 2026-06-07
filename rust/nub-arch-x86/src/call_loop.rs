@@ -120,6 +120,13 @@ const EXIT_TRAP: u32 = 7;
 
 const OP_REPLY: u32 = 0;
 const OP_DERIVE_SPAWN: u32 = 18;
+/// `host_image_hash_chain(src_slot=φ[7], dst_slot=φ[8])` — read the cap's
+/// kernel-attested type identity (an Instance's cumulative `image_hash_chain`,
+/// or an Image's content hash) and place a `Cap::Data` of its 32 raw bytes at
+/// `dst`. Reclaims the old `HOST_TYPE_OF`/`HOST_SAME_TYPE` ABI slots (20/21):
+/// type identity is now read as plain bytes and compared in userspace
+/// (memcmp), so there is no separate `Cap::Type` kind or same-type host op.
+const OP_IMAGE_HASH_CHAIN: u32 = 20;
 const OP_HOST_CALL: u32 = 26;
 
 /// Hard ceiling on the in-kernel call-stack depth. NOTE: with runtime eviction
@@ -405,6 +412,22 @@ pub fn run_top(
                         };
                         if trapped {
                             // Pinned dst → guest trap, mirroring the interpreter.
+                            break LoopOutcome {
+                                exit_reason: EXIT_TRAP,
+                                exit_arg: 0,
+                                return_value: info.regs[7],
+                                gas_remaining: gas,
+                                scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
+                            };
+                        }
+                    }
+                    OP_IMAGE_HASH_CHAIN => {
+                        let trapped = {
+                            let frame = stack.last_mut().expect("non-empty");
+                            dispatch_image_hash_chain(frame)?
+                        };
+                        if trapped {
+                            // Pinned/empty dst or wrong src kind → guest trap.
                             break LoopOutcome {
                                 exit_reason: EXIT_TRAP,
                                 exit_arg: 0,
@@ -898,6 +921,63 @@ fn dispatch_derive_spawn(frame: &mut KernelFrame) -> Result<bool, u32> {
     // moves it. Overwriting the slot drops any previous occupant's `CachedCap`
     // (and its parked page table), so a stale cache for that slot is
     // invalidated automatically — no separate side-table to maintain.
+    frame
+        .cnode
+        .set(&dst_slot, Some(CapHashOrRef::Owned(CachedCap::boxed(cap))))
+        .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
+    Ok(false)
+}
+
+/// `host_image_hash_chain(src_slot=φ[7], dst_slot=φ[8])`. Reads the type
+/// identity of the cap at `src_slot` — an `Cap::Instance`'s cumulative
+/// `image_hash_chain`, or a `Cap::Image`'s content hash (which *is* its
+/// identity) — and places a `Cap::Data` holding those 32 raw bytes
+/// (page-padded) at `dst_slot`. The result is freely readable/comparable:
+/// same-type is a userspace `memcmp` of two such DataCaps; there is no
+/// `Cap::Type` kind and no same-type host op (see [`OP_IMAGE_HASH_CHAIN`]).
+///
+/// Returns `Ok(true)` to TRAP (pinned/empty dst, or a src that is neither an
+/// Instance nor an Image), mirroring `dispatch_derive_spawn`'s trap discipline.
+fn dispatch_image_hash_chain(frame: &mut KernelFrame) -> Result<bool, u32> {
+    // V1 single-byte ABI: φ[7] = src slot, φ[8] = dst slot.
+    let src_slot = Key::from((frame.regs[7] & 0xFF) as u8);
+    let dst_slot = Key::from((frame.regs[8] & 0xFF) as u8);
+
+    // Writing into a pinned (read-only) slot traps, mirroring the
+    // derive_spawn pinned-dst rejection.
+    if frame.pinned.binary_search(&dst_slot).is_ok() {
+        return Ok(true);
+    }
+
+    // Read the source cap's type identity. `peek_key` borrows (no clone, so
+    // an Owned instance's parked page-table cache is untouched). Hash targets
+    // resolve through the blob cache; an inline Owned instance reads its field
+    // directly (no hash needed).
+    let chain: CapHash = match frame.cnode.peek_key(src_slot.as_slice()) {
+        Some(CapHashOrRef::Hash(h)) => {
+            let h = *h;
+            let arc = CACHE
+                .get(CapHashOrRef::Hash(h))
+                .ok_or(ERR_INSTANCE_NOT_FOUND)?;
+            match &*arc {
+                Cap::Instance(i) => i.image_hash_chain,
+                // An Image is content-addressed: its hash IS its identity.
+                Cap::Image(_) => h,
+                _ => return Ok(true),
+            }
+        }
+        Some(CapHashOrRef::Owned(cc)) => match &cc.cap {
+            Cap::Instance(i) => i.image_hash_chain,
+            Cap::Image(_) => cc.cap.cap_hash(),
+            _ => return Ok(true),
+        },
+        None => return Ok(true),
+    };
+
+    // Mint a Cap::Data of the 32 identity bytes (padded to a page) and place
+    // it at dst as an inline Owned cap, settled at termination — same
+    // placement convention as derive_spawn's child instance.
+    let cap = Cap::data_inline(&chain);
     frame
         .cnode
         .set(&dst_slot, Some(CapHashOrRef::Owned(CachedCap::boxed(cap))))
