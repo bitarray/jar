@@ -119,6 +119,15 @@ const EXIT_ECALL: u32 = 6;
 const EXIT_TRAP: u32 = 7;
 
 const OP_REPLY: u32 = 0;
+/// `host_yield(sender_slot=φ[7], …)` — emit the yield_key carried by the
+/// YieldSender at `sender_slot`. `kernel:*` keys are caught by the kernel as
+/// the implicit ROOT receiver and handled INLINE (the guest resumes at the next
+/// instruction, like a hostcall — the "syscalls conceptually push a kernel
+/// frame but we don't actually push" model). Wired today: the pure-cap syscalls
+/// `kernel:mint_yield` / `kernel:merge_yield_receiver`. Gas/quota syscalls (need
+/// the meter table) and user-key routing to an ancestor YieldReceiver (needs
+/// suspension) are later stages.
+const OP_HOST_YIELD: u32 = 16;
 const OP_DERIVE_SPAWN: u32 = 18;
 /// `host_image_hash_chain(src_slot=φ[7], dst_slot=φ[8])` — read the cap's
 /// kernel-attested type identity (an Instance's cumulative `image_hash_chain`,
@@ -159,6 +168,13 @@ const ERR_HOST_CALL_SLOT_EMPTY: u32 = 40;
 const ERR_JIT_FAILED: u32 = 50;
 const ERR_DEPTH_LIMIT: u32 = 51;
 const ERR_MAP_BAD_KIND: u32 = 60;
+/// `host_yield` carried a yield_key the kernel does not (yet) handle as root
+/// receiver — a non-`kernel:*` user key (ancestor routing is a later stage) or
+/// a `kernel:*` syscall not yet wired (gas/quota/oog).
+const ERR_YIELD_UNHANDLED: u32 = 70;
+/// A `host_yield` operand slot did not hold the expected kernel-assisted
+/// Instance (YieldSender / YieldReceiver).
+const ERR_YIELD_BAD_SENDER: u32 = 71;
 
 /// One stack frame on the in-kernel call stack. Holds the running Image's
 /// identity hashes, the frame's **owned** `mem` DataCap + PVM register/PC
@@ -428,6 +444,22 @@ pub fn run_top(
                         };
                         if trapped {
                             // Pinned/empty dst or wrong src kind → guest trap.
+                            break LoopOutcome {
+                                exit_reason: EXIT_TRAP,
+                                exit_arg: 0,
+                                return_value: info.regs[7],
+                                gas_remaining: gas,
+                                scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
+                            };
+                        }
+                    }
+                    OP_HOST_YIELD => {
+                        let trapped = {
+                            let frame = stack.last_mut().expect("non-empty");
+                            dispatch_host_yield(frame)?
+                        };
+                        if trapped {
+                            // Bad/empty sender slot or pinned dst → guest trap.
                             break LoopOutcome {
                                 exit_reason: EXIT_TRAP,
                                 exit_arg: 0,
@@ -983,6 +1015,110 @@ fn dispatch_image_hash_chain(frame: &mut KernelFrame) -> Result<bool, u32> {
         .set(&dst_slot, Some(CapHashOrRef::Owned(CachedCap::boxed(cap))))
         .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
     Ok(false)
+}
+
+/// Read an owned `InstanceCap` from a frame cnode slot — a `Hash` resolves
+/// through the blob cache, an inline `Owned` reads its boxed cap. `None` if the
+/// slot is empty or doesn't hold a `Cap::Instance`. Clones, but the
+/// kernel-assisted handles this is used for (YieldSender / YieldReceiver) are
+/// tiny (a few registers + a small mem).
+fn read_instance_cap(frame: &KernelFrame, slot: &Key) -> Option<InstanceCap> {
+    match frame.cnode.peek_key(slot.as_slice())? {
+        CapHashOrRef::Hash(h) => {
+            let arc = CACHE.get(CapHashOrRef::Hash(*h))?;
+            match &*arc {
+                Cap::Instance(i) => Some(i.clone()),
+                _ => None,
+            }
+        }
+        CapHashOrRef::Owned(cc) => match &cc.cap {
+            Cap::Instance(i) => Some(i.clone()),
+            _ => None,
+        },
+    }
+}
+
+/// `host_yield(sender_slot=φ[7], …)`. Reads the `YieldSender` at `sender_slot`,
+/// extracts its yield_key, and — for a `kernel:*` key the kernel handles as the
+/// implicit root receiver — performs the syscall INLINE and resumes the guest
+/// (`Ok(false)`, like derive_spawn). Returns `Ok(true)` to TRAP (bad/empty
+/// sender, pinned dst, malformed operand); `Err(code)` for a yield_key not yet
+/// handled here (user keys, or kernel:* syscalls deferred to later stages).
+///
+/// V1 single-byte ABI: all slot operands are the low byte of their φ register.
+/// `kernel:mint_yield`: φ[8] = new yield_key byte, φ[9] = YieldSender dst,
+/// φ[10] = YieldReceiver dst. `kernel:merge_yield_receiver`: φ[8] = receiver A
+/// slot, φ[9] = receiver B slot, φ[10] = dst slot.
+fn dispatch_host_yield(frame: &mut KernelFrame) -> Result<bool, u32> {
+    let sender_slot = Key::from((frame.regs[7] & 0xFF) as u8);
+    let yield_key = match read_instance_cap(frame, &sender_slot) {
+        Some(inst) => match javm_cap::yield_sender_key(&inst) {
+            Some(k) => k,
+            None => return Ok(true), // not a YieldSender → trap
+        },
+        None => return Ok(true), // empty / non-Instance sender slot → trap
+    };
+
+    // Only kernel:* keys are caught here (kernel = implicit root receiver).
+    // Routing a user key to an ancestor YieldReceiver needs the suspension
+    // mechanism — a later stage.
+    if !javm_cap::is_kernel_yield_key(&yield_key) {
+        return Err(ERR_YIELD_UNHANDLED);
+    }
+    let k = yield_key.as_slice();
+
+    if k == javm_cap::yield_cap::YK_MINT_YIELD {
+        let new_key = Key::from((frame.regs[8] & 0xFF) as u8);
+        let sender_dst = Key::from((frame.regs[9] & 0xFF) as u8);
+        let receiver_dst = Key::from((frame.regs[10] & 0xFF) as u8);
+        if frame.pinned.binary_search(&sender_dst).is_ok()
+            || frame.pinned.binary_search(&receiver_dst).is_ok()
+        {
+            return Ok(true);
+        }
+        let sender = Cap::Instance(javm_cap::yield_sender(&new_key));
+        let receiver = Cap::Instance(javm_cap::yield_receiver(&[new_key]));
+        frame
+            .cnode
+            .set(
+                &sender_dst,
+                Some(CapHashOrRef::Owned(CachedCap::boxed(sender))),
+            )
+            .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
+        frame
+            .cnode
+            .set(
+                &receiver_dst,
+                Some(CapHashOrRef::Owned(CachedCap::boxed(receiver))),
+            )
+            .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
+        Ok(false)
+    } else if k == javm_cap::yield_cap::YK_MERGE_YIELD_RECEIVER {
+        let a_slot = Key::from((frame.regs[8] & 0xFF) as u8);
+        let b_slot = Key::from((frame.regs[9] & 0xFF) as u8);
+        let dst = Key::from((frame.regs[10] & 0xFF) as u8);
+        if frame.pinned.binary_search(&dst).is_ok() {
+            return Ok(true);
+        }
+        let a = read_instance_cap(frame, &a_slot).ok_or(ERR_YIELD_BAD_SENDER)?;
+        let b = read_instance_cap(frame, &b_slot).ok_or(ERR_YIELD_BAD_SENDER)?;
+        let merged = match javm_cap::merge_yield_receivers(&a, &b) {
+            Some(m) => m,
+            None => return Ok(true), // operands not both YieldReceivers → trap
+        };
+        frame
+            .cnode
+            .set(
+                &dst,
+                Some(CapHashOrRef::Owned(CachedCap::boxed(Cap::Instance(merged)))),
+            )
+            .map_err(|_| ERR_DERIVE_SLOT_OOB)?;
+        Ok(false)
+    } else {
+        // kernel:set_gas_meter / mint_gas / oog / … need the (guest-side) meter
+        // table or the suspension mechanism — later stages.
+        Err(ERR_YIELD_UNHANDLED)
+    }
 }
 
 /// `host_call(instance_slot=φ[7], endpoint_idx=φ[8])`. **Moves** the target
