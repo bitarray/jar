@@ -336,6 +336,18 @@ struct StackEntry {
     /// sub-call — a frame cannot shrink its catch-set mid-flight to dodge a
     /// descendant's yield (spec §3 "frozen for the sub-call").
     catch_set: Vec<Key>,
+    /// This frame's gas meter, when it runs on its OWN balance drawn from the
+    /// guest meter table (its `gas_slots[0]` → `Gas{meter_key}` had a funded
+    /// entry at CALL). `None` = the frame *loans* the caller's pool — it debits
+    /// the threaded `gas` directly and returns the remainder to the caller at
+    /// HALT (the one-pool subtree model, the default for non-metered sub-VMs and
+    /// the host-budgeted top frame). `Some(k)` = metered: the live `gas` was
+    /// swapped to `meters[k]` at CALL and is written back to `meters[k]` at HALT.
+    meter: Option<Key>,
+    /// The caller's pool, saved when this frame swapped the live `gas` to its own
+    /// meter balance at CALL; restored into `gas` when this frame pops. `Some`
+    /// iff [`Self::meter`] is `Some`.
+    saved_gas: Option<i64>,
 }
 
 impl StackEntry {
@@ -348,8 +360,23 @@ impl StackEntry {
             target: index,
             instance_id,
             catch_set: Vec::new(),
+            meter: None,
+            saved_gas: None,
         }
     }
+}
+
+/// Resolve a frame's active gas meter: read its Image's `gas_slots[0]`, look that
+/// slot up in the frame's cnode, and decode the `Gas{meter_key}` handle there.
+/// `None` if the Image declares no gas slot, the slot is empty, or it doesn't
+/// hold a `Gas` handle (the frame then loans its caller's pool).
+fn resolve_frame_meter(frame: &KernelFrame) -> Option<Key> {
+    let img_arc = CACHE.get(CapHashOrRef::Hash(frame.image_hash))?;
+    let slot = match &*img_arc {
+        Cap::Image(i) => i.gas_slots.first()?.clone(),
+        _ => return None,
+    };
+    javm_cap::gas_meter_key(&read_instance_cap(frame, &slot)?)
 }
 
 /// `&mut` to the [`KernelFrame`] the entry at `idx` runs, following a
@@ -468,7 +495,14 @@ pub fn run_top(
     let mut next_iid: u64 = 0;
     stack.push(StackEntry::instance(top, 0, next_iid));
     next_iid += 1;
+    // The threaded `gas` is the RUNNING frame's live balance: the host-budgeted
+    // top pool, a loaned caller pool, or a metered frame's own balance. The guest
+    // meter table holds balances NAMED by `Gas{meter_key}` and funded via
+    // `kernel:set_gas_meter`; a metered frame draws its balance here at CALL and
+    // writes the remainder back at HALT. Per-RPC (a block-spanning table is the
+    // deferred lazy-load piece); the top frame's meter stays host-owned.
     let mut gas = initial_gas;
+    let mut meters: BTreeMap<Key, i64> = BTreeMap::new();
 
     let outcome = loop {
         let top_idx = stack.len() - 1;
@@ -510,7 +544,7 @@ pub fn run_top(
                 } else {
                     [0u8; SCRATCHPAD_HEAD_LEN]
                 };
-                if pop_and_reflect(&mut stack, info.regs[7]) {
+                if pop_and_reflect(&mut stack, info.regs[7], &mut gas, &mut meters) {
                     break LoopOutcome {
                         exit_reason: info.exit_reason,
                         exit_arg: info.exit_arg,
@@ -567,7 +601,7 @@ pub fn run_top(
                         } else {
                             [0u8; SCRATCHPAD_HEAD_LEN]
                         };
-                        if pop_and_reflect(&mut stack, info.regs[7]) {
+                        if pop_and_reflect(&mut stack, info.regs[7], &mut gas, &mut meters) {
                             // Preserve the JIT exit shape so the host bench
                             // harness (which asserts `(reason=4, arg=0)` for the
                             // subsoil trampoline halt) doesn't trip.
@@ -617,7 +651,7 @@ pub fn run_top(
                     OP_HOST_YIELD => {
                         let outcome = {
                             let frame = frame_at_mut(&mut stack, top_idx);
-                            dispatch_host_yield(frame)?
+                            dispatch_host_yield(frame, &mut meters)?
                         };
                         match outcome {
                             // A kernel-root pure-cap syscall handled inline; the
@@ -694,6 +728,8 @@ pub fn run_top(
                                     target,
                                     instance_id: recv_iid,
                                     catch_set: Vec::new(),
+                                    meter: None,
+                                    saved_gas: None,
                                 });
                             }
                         }
@@ -795,6 +831,20 @@ pub fn run_top(
                         let child_idx = stack.len();
                         stack.push(StackEntry::instance(child, child_idx, next_iid));
                         next_iid += 1;
+                        // Per-frame metering: if the child names a gas meter
+                        // (`gas_slots[0]` → `Gas{meter_key}`) that the guest table
+                        // funds, it runs on THAT balance — save the caller's pool
+                        // to restore at the child's HALT, swap the live `gas` to
+                        // the meter balance. Otherwise the child loans the caller's
+                        // pool (the live `gas` threads in unchanged), preserving
+                        // the one-pool subtree model for non-metered sub-VMs.
+                        if let Some(k) = resolve_frame_meter(frame_at(&stack, child_idx))
+                            && let Some(&balance) = meters.get(&k)
+                        {
+                            stack[child_idx].meter = Some(k);
+                            stack[child_idx].saved_gas = Some(gas);
+                            gas = balance;
+                        }
                     }
                     // Anything else (MGMT ops, SET_IMAGE, HOST_YIELD,
                     // arbitrary `ecalli imm`, …) is not in-kernel-
@@ -980,11 +1030,30 @@ fn build_runtime(frame: &KernelFrame) -> Result<FrameRuntime, u32> {
 /// move it back into the parent's origin slot (the single-owner round trip).
 /// Returns `true` when the stack has been drained (the RPC caller hands a
 /// result back to the host).
-fn pop_and_reflect(stack: &mut Vec<StackEntry>, return_value: u64) -> bool {
+///
+/// Gas: when the popped frame was metered ([`StackEntry::meter`] = `Some(k)`),
+/// its remaining `gas` is written back to `meters[k]` and the caller's pool is
+/// restored from `saved_gas`. A loaned frame (`meter` = `None`) leaves `gas`
+/// threaded as-is (its remainder flows to the caller — the one-pool model).
+fn pop_and_reflect(
+    stack: &mut Vec<StackEntry>,
+    return_value: u64,
+    gas: &mut i64,
+    meters: &mut BTreeMap<Key, i64>,
+) -> bool {
     // A HALT/REPLY only pops an InstanceEntry — a ReferenceEntry (handler
     // activation) is removed by CALL_RESUME, and a handler that HALTs without
     // resuming is caught by the EXIT_HALT/OP_REPLY guards before this point.
-    let mut popped = match stack.pop().expect("non-empty").kind {
+    let popped_entry = stack.pop().expect("non-empty");
+    // Metered frame: write the remaining balance back to its meter and restore
+    // the caller's pool (done before reflection — independent of the cap moves).
+    if let Some(k) = &popped_entry.meter {
+        meters.insert(k.clone(), *gas);
+        if let Some(saved) = popped_entry.saved_gas {
+            *gas = saved;
+        }
+    }
+    let mut popped = match popped_entry.kind {
         EntryKind::Instance(boxed) => *boxed,
         EntryKind::Reference => unreachable!("pop_and_reflect on a ReferenceEntry"),
     };
@@ -1349,7 +1418,12 @@ enum YieldOutcome {
 /// φ[10] = YieldReceiver dst. `kernel:merge_yield_receiver`: φ[8] = receiver A
 /// slot, φ[9] = receiver B slot, φ[10] = dst slot. `kernel:mint_gas` /
 /// `kernel:mint_quota`: φ[8] = meter_key / quota_key byte, φ[9] = handle dst.
-fn dispatch_host_yield(frame: &mut KernelFrame) -> Result<YieldOutcome, u32> {
+/// `kernel:set_gas_meter`: φ[8] = meter_key byte, φ[9] = value; returns the
+/// previous balance in φ[7].
+fn dispatch_host_yield(
+    frame: &mut KernelFrame,
+    meters: &mut BTreeMap<Key, i64>,
+) -> Result<YieldOutcome, u32> {
     let sender_slot = Key::from((frame.regs[7] & 0xFF) as u8);
     let yield_key = match read_instance_cap(frame, &sender_slot) {
         Some(inst) => match javm_cap::yield_sender_key(&inst) {
@@ -1431,8 +1505,20 @@ fn dispatch_host_yield(frame: &mut KernelFrame) -> Result<YieldOutcome, u32> {
             frame,
             javm_cap::quota_handle(&Key::from((frame.regs[8] & 0xFF) as u8)),
         )
+    } else if k == javm_cap::yield_cap::YK_SET_GAS_METER {
+        // kernel:set_gas_meter(φ8=meter_key byte, φ9=value) -> previous (φ7).
+        // Atomically set the guest meter balance and return the previous (0 if
+        // absent) — the chain's topup / harvest primitive. The new balance takes
+        // effect when a frame next READS this meter (a CALL or CALL_RESUME of an
+        // instance whose gas_slots[0] names it), per the frame-entry metering
+        // model — it does not retroactively change a live pool.
+        let meter_key = Key::from((frame.regs[8] & 0xFF) as u8);
+        let value = frame.regs[9] as i64;
+        let previous = meters.insert(meter_key, value).unwrap_or(0);
+        frame.regs[7] = previous as u64;
+        Ok(YieldOutcome::Inline)
     } else {
-        // A kernel:* key not wired inline (set_gas_meter / oog / …): route it.
+        // A kernel:* key not wired inline (oog / storage_exhausted / …): route it.
         // The kernel root catches kernel:* keys the chain registered in its
         // YieldReceiver (e.g. kernel:oog); an unregistered key finds no catcher
         // and the emitter faults.
