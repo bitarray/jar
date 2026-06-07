@@ -553,20 +553,39 @@ pub fn run_top(
                 }
             }
             EXIT_HOST_CALL | EXIT_ECALL => {
-                // ecall block: charge its dynamic cost (check-before-
-                // charge) BEFORE doing the work, matching the interpreter's
-                // per-ecall charge. On OOG the block is not done and gas is
-                // unchanged; the resume point is the ecall's OWN pc
-                // (info.pc is the next instruction; custom-0 is 4-byte) —
-                // surfacing that pc rides on the deferred recoverable-yield
-                // layer, like the in-code block OOG (gas-cost.md §3).
+                // ecall block: charge its dynamic cost (check-before-charge)
+                // BEFORE doing the work. The cost is the ecall floor PLUS, for an
+                // in-kernel CALL (OP_HOST_CALL), the callee's call_frame_cost —
+                // and these are charged ATOMICALLY as one `actual` (gas-cost.md
+                // §3): a single gate, so an OOG leaves gas UNCHANGED and the
+                // re-attempt from the ecall's OWN pc (info.pc is the next
+                // instruction; custom-0 is 4 bytes) is clean. Splitting the gate
+                // would double-charge the floor across an OOG+resume.
                 let is_ecalli = info.exit_reason == EXIT_HOST_CALL;
                 let ecall_cost = javm_exec::gas_const::ecall_dynamic_cost(is_ecalli) as i64;
-                if gas < ecall_cost {
+                let op = if info.exit_reason == EXIT_HOST_CALL {
+                    info.exit_arg
+                } else {
+                    info.regs[11] as u32
+                };
+                // The CALL frame-materialization cost (JIT compile + eager RO
+                // page-in + setup base), computed statically from the callee
+                // Image and billed to the caller; resolved BEFORE charging so it
+                // joins the floor in one atomic gate. Depth-limit is a hard Err,
+                // not an OOG.
+                let frame_cost = if op == OP_HOST_CALL {
+                    if stack.len() >= MAX_DEPTH {
+                        return Err(ERR_DEPTH_LIMIT);
+                    }
+                    let parent = frame_at(&stack, top_idx);
+                    host_call_frame_cost(parent)?
+                } else {
+                    0
+                };
+                let total_cost = ecall_cost + frame_cost;
+                if gas < total_cost {
                     // A metered frame re-attempts THIS ecall after a kernel:oog
-                    // topup (the ecall is a forced bb_start; `info.pc` is the
-                    // next instruction and custom-0 is 4 bytes). Unmetered /
-                    // uncaught → bubble EXIT_OOG.
+                    // topup; unmetered / uncaught → bubble EXIT_OOG.
                     if try_oog_yield(
                         &mut stack,
                         top_idx,
@@ -584,13 +603,8 @@ pub fn run_top(
                         scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                     };
                 }
-                gas -= ecall_cost;
+                gas -= total_cost;
 
-                let op = if info.exit_reason == EXIT_HOST_CALL {
-                    info.exit_arg
-                } else {
-                    info.regs[11] as u32
-                };
                 match op {
                     OP_REPLY => {
                         // Read the scratchpad head from the InstanceEntry that
@@ -723,6 +737,7 @@ pub fn run_top(
                         // to the yielder, pop the ReferenceEntry, and let the
                         // yielder become the running top (it continues at its
                         // post-yield PC next iteration).
+                        let catcher_idx = stack[top_idx].target;
                         let response = {
                             let handler = frame_at_mut(&mut stack, top_idx);
                             handler.cnode.take_key(&[javm_cap::abi::SCRATCHPAD_SLOT])
@@ -737,22 +752,30 @@ pub fn run_top(
                                     .set_key(&[javm_cap::abi::SCRATCHPAD_SLOT], Some(cap));
                             }
                         }
-                        // A metered yielder resumes on its meter's CURRENT balance
-                        // (a kernel:oog handler may have topped it up via
-                        // set_gas_meter); the handler's pool is saved to restore at
-                        // the yielder's HALT. A non-metered yielder keeps the
-                        // threaded pool (the loaned-pool / shared-subtree case).
+                        // Gas: the handler's pool must be restored when control
+                        // eventually returns to the catcher — i.e. when the
+                        // catcher's DIRECT child (the bottom of the routed-past
+                        // subtree, == the yielder in the common single-level case)
+                        // HALTs back up. Stash the handler's pool on that child if
+                        // it is metered (its `saved_gas` is what its HALT restores).
+                        let catcher_child = catcher_idx + 1;
+                        if stack[catcher_child].meter.is_some() {
+                            stack[catcher_child].saved_gas = Some(gas);
+                        }
+                        // The yielder resumes on its meter's CURRENT balance (a
+                        // kernel:oog handler may have topped it up). A non-metered
+                        // yielder keeps the threaded pool (loaned / shared subtree).
                         if let Some(k) = stack[yielder_idx].meter.clone() {
-                            stack[yielder_idx].saved_gas = Some(gas);
                             gas = *meters.get(&k).unwrap_or(&0);
                         }
                     }
                     OP_DROP_PAUSED => {
-                        // Give up on the Waiting yielder directly below this
-                        // handler activation: discard its entry (frame + state);
-                        // the handler keeps running (it does NOT resume the
-                        // yielder). The top must be a handler ReferenceEntry — an
-                        // InstanceEntry top has no outstanding yield → trap.
+                        // Give up on the Waiting yielder: discard the WHOLE caught
+                        // subtree (the yielder + any intermediates a descendant
+                        // routed past — same scope as a handler HALT, §10), but
+                        // keep the handler running. The top must be a handler
+                        // ReferenceEntry — an InstanceEntry top has no outstanding
+                        // yield → trap.
                         if stack[top_idx].target == top_idx {
                             break LoopOutcome {
                                 exit_reason: EXIT_TRAP,
@@ -762,55 +785,26 @@ pub fn run_top(
                                 scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
                             };
                         }
-                        // Remove the yielder (top_idx - 1); the handler
-                        // ReferenceEntry shifts down to become the running top and
-                        // continues at its post-drop PC. Its `target` (a lower
-                        // index) is unaffected by the removal.
-                        stack.remove(top_idx - 1);
+                        // Truncate everything above the handler's InstanceEntry
+                        // (the ReferenceEntry + the discarded subtree); the handler
+                        // becomes a plain InstanceEntry again and continues at its
+                        // post-drop pc. (Discarded metered frames were banked at
+                        // route_yield, so the meter table stays consistent — gas is
+                        // STM-exempt: a dropped subtree's spend is NOT refunded.)
+                        // Using `target+1` (not `top_idx-1`) keeps subsequent
+                        // CALL_RESUME/DROP_PAUSED sound — there is no longer a stale
+                        // handler with a wedged intermediate below it.
+                        let handler_inst = stack[top_idx].target;
+                        stack.truncate(handler_inst + 1);
                     }
                     OP_HOST_CALL => {
-                        if stack.len() >= MAX_DEPTH {
-                            return Err(ERR_DEPTH_LIMIT);
-                        }
-                        // Charge the call-frame materialization — JIT compile
-                        // (O(code)) + eager read-only page-in (per declared
-                        // 2 MiB unit) + frame-setup base — computed statically
-                        // from the callee Image and billed to the CALLER (on
-                        // top of the ecall floor above). Check-before-charge,
-                        // gated **before** `dispatch_host_call` moves the
-                        // instance, so an OOG here leaves the parent slot
-                        // untouched and the re-attempt is clean (gas-cost.md
-                        // §3). Charged in full on every CALL — the compiled
-                        // image + page table are memoized for *work* only,
-                        // never a gas discount — so gas is independent of the
-                        // node-local compile/PT cache (gas_const::call_frame_cost).
-                        let frame_cost = {
-                            let parent = frame_at(&stack, top_idx);
-                            host_call_frame_cost(parent)?
-                        };
-                        if gas < frame_cost {
-                            // Metered caller re-attempts THIS host_call after a
-                            // kernel:oog topup (gated before any instance move, so
-                            // the re-attempt is clean). Unmetered / uncaught →
-                            // bubble EXIT_OOG.
-                            if try_oog_yield(
-                                &mut stack,
-                                top_idx,
-                                &mut gas,
-                                &mut meters,
-                                info.pc.saturating_sub(4),
-                            ) {
-                                continue;
-                            }
-                            break LoopOutcome {
-                                exit_reason: EXIT_OOG,
-                                exit_arg: 0,
-                                return_value: info.regs[7],
-                                gas_remaining: gas,
-                                scratchpad_head: [0u8; SCRATCHPAD_HEAD_LEN],
-                            };
-                        }
-                        gas -= frame_cost;
+                        // The ecall floor + this CALL's frame_cost were charged
+                        // atomically at the top of the arm (check-before-charge,
+                        // before `dispatch_host_call` moves any instance, so an
+                        // OOG left the parent slot pristine). Charged in full on
+                        // every CALL — compile/PT memoization is for *work*, never
+                        // a gas discount — so gas is independent of the cache.
+                        //
                         // Snapshot the caller's catch-set at this downward CALL
                         // (§3): the keys it will catch from the callee's whole
                         // subtree. Captured from the caller's CURRENT
@@ -847,16 +841,18 @@ pub fn run_top(
                         let child_idx = stack.len();
                         stack.push(StackEntry::instance(child, child_idx, next_iid));
                         next_iid += 1;
-                        // Per-frame metering: if the child names a gas meter
-                        // (`gas_slots[0]` → `Gas{meter_key}`) that the guest table
-                        // funds, it runs on THAT balance — save the caller's pool
-                        // to restore at the child's HALT, swap the live `gas` to
-                        // the meter balance. Otherwise the child loans the caller's
-                        // pool (the live `gas` threads in unchanged), preserving
-                        // the one-pool subtree model for non-metered sub-VMs.
-                        if let Some(k) = resolve_frame_meter(frame_at(&stack, child_idx))
-                            && let Some(&balance) = meters.get(&k)
-                        {
+                        // Per-frame metering: if the child NAMES a gas meter
+                        // (`gas_slots[0]` → `Gas{meter_key}`) it runs on that
+                        // meter's balance — save the caller's pool to restore at
+                        // the child's HALT, swap the live `gas` to the balance. An
+                        // ABSENT table entry is effective balance 0 (spec:
+                        // kernel-assisted-instances.md §"lazy-load" — unset meters
+                        // are 0), so an unfunded metered child runs on 0 and
+                        // OOG-routes on first debit rather than loaning the
+                        // caller's pool. Only a child with NO gas slot loans the
+                        // caller's pool (the one-pool subtree model).
+                        if let Some(k) = resolve_frame_meter(frame_at(&stack, child_idx)) {
+                            let balance = meters.get(&k).copied().unwrap_or(0);
                             stack[child_idx].meter = Some(k);
                             stack[child_idx].saved_gas = Some(gas);
                             gas = balance;
@@ -1085,12 +1081,20 @@ fn route_yield(
     let Some(j) = catcher else {
         return false;
     };
-    // Suspend the emitter: a metered emitter banks its remaining balance, and the
-    // catcher resumes on the pool the emitter saved at its own CALL.
-    if let Some(k) = stack[top_idx].meter.clone() {
-        meters.insert(k, *gas);
-        if let Some(saved) = stack[top_idx].saved_gas {
-            *gas = saved;
+    // Suspend the whole subtree between the catcher and the emitter, unwinding the
+    // live `gas` back to the catcher's pool. Walk from the emitter down to just
+    // above the catcher: each METERED frame banks its current balance to its meter
+    // (the threaded `gas` is its live balance) and hands its caller-pool up; a
+    // loaned frame passes the pool through unchanged. After the walk `gas` is the
+    // catcher's own pool, and every metered frame in the routed-past subtree has a
+    // consistent meter balance — so a later discard (handler HALT / DROP_PAUSED)
+    // never over-refunds, and a resume re-reads the right balance.
+    for i in (j + 1..=top_idx).rev() {
+        if let Some(k) = stack[i].meter.clone() {
+            meters.insert(k, *gas);
+            if let Some(saved) = stack[i].saved_gas {
+                *gas = saved;
+            }
         }
     }
     let target = stack[j].target;
