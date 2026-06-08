@@ -123,10 +123,10 @@ struct MeterReservation {
 impl MeterReservation {
     fn reserve(inner: Arc<NubInner>, key: Key) -> Result<Self> {
         {
-            let mut in_flight = inner
-                .in_flight_meters
-                .lock()
-                .expect("Nub meter reservation mutex poisoned");
+            let mut in_flight = match inner.in_flight_meters.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
             if !in_flight.insert(key.clone()) {
                 return Err(anyhow::anyhow!(
                     "invoke_cached: gas meter is already in flight"
@@ -139,11 +139,11 @@ impl MeterReservation {
 
 impl Drop for MeterReservation {
     fn drop(&mut self) {
-        self.inner
-            .in_flight_meters
-            .lock()
-            .expect("Nub meter reservation mutex poisoned")
-            .remove(&self.key);
+        let mut in_flight = match self.inner.in_flight_meters.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        in_flight.remove(&self.key);
     }
 }
 
@@ -818,6 +818,28 @@ mod tests {
         drop(first);
         let second = MeterReservation::reserve(nub.inner.clone(), key)
             .expect("reservation should be released on drop");
+        drop(second);
+    }
+
+    #[test]
+    fn meter_reservation_drop_tolerates_poisoned_mutex() {
+        let nub = Nub::new_local();
+        let key = Key::from(&[0xBA, 0xAD][..]);
+        let reservation =
+            MeterReservation::reserve(nub.inner.clone(), key.clone()).expect("reservation");
+
+        let inner = nub.inner.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = inner
+                .in_flight_meters
+                .lock()
+                .expect("lock before intentional panic");
+            panic!("poison meter reservation mutex");
+        });
+
+        drop(reservation);
+        let second = MeterReservation::reserve(nub.inner.clone(), key)
+            .expect("drop should release even after poison");
         drop(second);
     }
 }
