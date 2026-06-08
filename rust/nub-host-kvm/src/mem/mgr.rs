@@ -250,6 +250,17 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
 }
 
 impl SandboxMemoryManager<HostSharedMemory> {
+    #[allow(dead_code)]
+    pub(crate) fn parallel_invoke_slots_gva(&self) -> u64 {
+        self.layout.get_parallel_invoke_slots_gva()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn parallel_invoke_slot_scratch_host_offset(&self, lane: usize) -> usize {
+        self.layout
+            .get_parallel_invoke_slot_scratch_host_offset(lane)
+    }
+
     /// Push raw bytes (e.g. a rkyv-archived `Request` envelope) onto
     /// the guest's input data ring.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
@@ -364,6 +375,12 @@ impl SandboxMemoryManager<HostSharedMemory> {
             self.layout.get_output_data_buffer_scratch_host_offset(),
             SandboxMemoryLayout::STACK_POINTER_SIZE_BYTES,
         )?;
+
+        let slot_start = self.layout.get_parallel_invoke_slots_scratch_host_offset();
+        let slot_end = slot_start + self.layout.get_parallel_invoke_slots_size();
+        self.scratch_mem.with_exclusivity(|scratch| {
+            scratch.as_mut_slice()[slot_start..slot_end].fill(0);
+        })?;
 
         // Copy page tables from `shared_mem` into scratch. PT bytes
         // are appended to the snapshot blob at build time and live
