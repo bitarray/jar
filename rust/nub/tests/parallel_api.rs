@@ -79,3 +79,25 @@ fn invoke_job_wait_returns_result() {
     assert_eq!(result.exit_reason, 4);
     assert_eq!(result.exit_arg, 43);
 }
+
+#[test]
+fn cloned_local_nub_handles_can_idempotently_publish_from_many_threads() {
+    let nub = Nub::new_local();
+    let cap = Cap::empty_cnode();
+    let hash = nub.put_cap(&cap).expect("initial put");
+
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let nub = nub.clone();
+            let cap = cap.clone();
+            thread::spawn(move || {
+                nub.put_cap_with_hash(hash, &cap)
+                    .expect("idempotent put_cap_with_hash")
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("put thread");
+    }
+}
